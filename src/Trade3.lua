@@ -71,6 +71,53 @@
 --     LeafGreen) -- which is exactly what the carts do.
 --   * Mail (easy-chat word ids, sender, species) is one format on all three.
 --
+-- ------- the party the peer saw is the party that trades
+--
+-- The party message is packed once, at opening(), and it is the only picture
+-- of this side the far one ever gets: their picker, their "Trade for X?" and
+-- the mon they file on "done" are all that snapshot.  But a Gen 3 player is
+-- not held in the trade screen the way a cable club holds them -- the picker
+-- and the confirm wait for the cart's own menus to close (Ui.occupied), and
+-- in that time START > POKéMON can reorder the party, the BAG can take a held
+-- item off, a PC can swap a mon out.  Picking and applying by slot number then
+-- sends the snapshot mon to the peer while removing whatever is at that slot
+-- now: one mon (or one held item) in two saves.
+--
+-- So every packed mon is remembered by what makes it that mon (identityOf:
+-- species, personality, trainer id, egg flag, held item -- the item because a
+-- mon that lost its item after the snapshot would still deliver it) and the
+-- live party is only ever read *through* that identity: the picker's row is
+-- mapped to the snapshot index the peer knows (pick), checked again before a
+-- yes goes out (confirm) and found again by identity when the swap is made
+-- (apply).  A mon that is no longer in the party as it was shown cancels the
+-- trade rather than trading something else.  Sessions keeps a layer of its
+-- own up from the pick until the trade is done, which freezes the field and
+-- START for the exchange -- the cart's own trade screen owns the screen the
+-- same way -- so the checks after the pick are the belt, not the braces.
+--
+-- ------- the other side's messages, in order and once
+--
+-- A pick is taken only while this side is picking or waiting for one, only
+-- after their party is in, and only once: a second pick would swap the mon
+-- under a "Trade for X?" the player is already reading.  Each yes carries
+-- both picks as the sender understood them (`mine` / `yours`), and a yes
+-- that does not name the two mons this side agreed to is no yes.  Anything
+-- out of turn cancels.  Once both yeses are in ("done") a late bye changes
+-- nothing: the peer is applying, and so must this side.
+--
+-- ------- names the cart can print
+--
+-- A received nickname, OT name or mail signature holding one of
+-- { } [ ] # * @ ~ | ^ ` \ refuses the trade.  src/ui/game3/frlg_font.lua
+-- reads "{...}" as a control tag (and throws on an unknown one in a
+-- --developer run) and draws the rest blank, in every screen the engine owns
+-- -- the party menu, the summary, the PC -- where this mod cannot map them the
+-- way Gen3Ui.Font does its own text.  None of them is on the cart's naming
+-- grid, so a name holding one was never typed on a cart.  Refused rather than
+-- rewritten: the OT name is half of what makes a mon "traded" (obedience, the
+-- boosted exp), and a quietly edited one is a different mon from the one the
+-- player agreed to take.
+--
 -- Capability-tested: Sessions only opens this path when Protocol.packMon3 and
 -- unpackMon3 both exist.  Every engine module is reached through
 -- src/Gen3.lua's guarded lazy require, so nothing here loads -- or can be
@@ -125,6 +172,15 @@ local PEER_REFUSAL_FALLBACK = "The other TRAINER's\nPOKéMON can't be\ntraded no
 -- wording for GetGameProgressForLinkTrade.
 local NOT_READY_MINE = "You can't trade\nwith that game yet."
 local NOT_READY_THEIRS = "The other game\ncan't trade with\nyou yet."
+-- This side's own reasons for calling a trade off (see the header), each read
+-- after Sessions' "The trade stopped:".
+local PARTY_CHANGED = "your party changed\nafter it was shown."
+local OFFER_CHANGED = "the other game's\noffer changed."
+local OUT_OF_TURN = "the other game\nanswered out of turn."
+local BAD_NAME = "the other game sent\na name this game\ncan't print."
+local NO_CART = "the other game did\nnot say which game\nit is."
+M.PARTY_CHANGED, M.OFFER_CHANGED, M.OUT_OF_TURN = PARTY_CHANGED, OFFER_CHANGED, OUT_OF_TURN
+M.BAD_NAME, M.NO_CART = BAD_NAME, NO_CART
 
 M.CART = CART
 
@@ -214,6 +270,33 @@ local function isMailItem(itemId)
   end
   local n = tonumber(itemId)
   return n ~= nil and n >= FIRST_MAIL and n <= LAST_MAIL
+end
+
+-- What makes a party mon the one the peer was shown (see the header): its
+-- species, personality and full trainer id, whether it is still an egg, and
+-- the item in its hand.  Level, HP, status, exp and friendship are left out
+-- -- they move while the player walks and none of them is anything a swap
+-- could hand out twice.  nil for a slot with no mon in it.
+local function identityOf(mon)
+  if type(mon) ~= "table" then return nil end
+  return ("%d:%d:%d:%d:%d:%d"):format(
+    speciesOf(mon),
+    math.floor(tonumber(mon.personality) or 0),
+    math.floor(tonumber(mon.otId) or 0),
+    math.floor(tonumber(mon.otSecretId) or 0),
+    isEgg(mon) and 1 or 0,
+    heldItemOf(mon))
+end
+M.identityOf = identityOf
+
+-- True when the cart's font can print `name` as it stands (see the header):
+-- none of the characters frlg_font reads as markup or draws blank.  A
+-- missing name is printable (the codec fills an empty one in).
+local UNPRINTABLE = "[{}%[%]#%*@~|%^`\\]"
+function M.printableName(name)
+  if name == nil then return true end
+  if type(name) ~= "string" then return false end
+  return name:find(UNPRINTABLE) == nil
 end
 
 -- What the player calls a mon: its nickname, else its species, "EGG" for an
@@ -371,26 +454,28 @@ function M.localInfo(session, version)
   }
 end
 
--- What the other side said about itself, re-derived.  nil when it said
--- nothing (an older build of this mod): every rule that reads the partner
--- then treats it the way the cart treats a Ruby / Sapphire partner -- no
--- partner-side restriction -- and the far side's own rules still apply there.
-function M.sanitizeInfo(raw)
-  if type(raw) ~= "table" then return nil end
-  local cart = whole(raw.version, 0, 255)
-  if not cart then return nil end
-  return {
-    version = cart,
-    progressFlags = whole(raw.progressFlags, 0, 255) or 0,
-    game = type(raw.game) == "string" and CART[raw.game] and raw.game or nil,
-  }
-end
-
 local function familyForCart(cart)
   local Family = family()
   local fam = Family and try(Family.familyForCart, cart)
   if fam then return fam end
   return CART_FAMILY[tonumber(cart) or -1]
+end
+
+-- What the other side said about itself, re-derived.  nil when it said
+-- nothing, or named a cart no Gen 3 family owns (family.lua familyForCart:
+-- the cable club's VERSION_* codes for Ruby / Sapphire / Emerald and FireRed
+-- / LeafGreen): handle cancels on nil.  Every Gen 3 build of this mod sends
+-- it, and it is what versionGate and theirRefusal read the partner through --
+-- a cart code nobody owns would skip both, so it is no answer at all.
+function M.sanitizeInfo(raw)
+  if type(raw) ~= "table" then return nil end
+  local cart = whole(raw.version, 0, 255)
+  if not (cart and familyForCart(cart)) then return nil end
+  return {
+    version = cart,
+    progressFlags = whole(raw.progressFlags, 0, 255) or 0,
+    game = type(raw.game) == "string" and CART[raw.game] and raw.game or nil,
+  }
 end
 
 local function versionForCart(cart)
@@ -501,10 +586,14 @@ function TradeSession.new(game, opts)
     theirParty = nil,
     theirMail = nil,
     theirInfo = nil,
-    myPick = nil,
+    myPick = nil,       -- snapshot (wire) index of the mon offered
+    myLiveSlot = nil,   -- the party slot the picker showed it in
     theirPick = nil,
     myConfirm = nil,
     theirConfirm = nil,
+    sentPacked = nil,   -- the packed party the peer was shown ...
+    sentKeys = nil,     -- ... and each mon's identityOf, index for index
+    appliedSlot = nil,  -- where the received mon landed
   }, TradeSession)
   local all = {}
   for i = 1, #self.party do all[i] = i end
@@ -529,19 +618,56 @@ function TradeSession:opening()
   return self:partyMessage()
 end
 
+-- The party as the peer will see it -- and, kept beside it, the snapshot:
+-- the packed mons themselves (sentPacked) and each one's identity
+-- (sentKeys), index for index, which is what pick / confirm / apply read the
+-- live party through (see the header).
 function TradeSession:partyMessage()
   local P = protocol()
   local party = self:partyNow()
   local indices = {}
   for i = 1, math.min(#party, PARTY_SIZE) do indices[i] = i end
   self.sendIndices = indices
+  local mons = P.packParty3(party, indices)
+  local keys = {}
+  for pos, slot in ipairs(indices) do keys[pos] = identityOf(party[slot]) end
+  self.sentPacked, self.sentKeys = mons, keys
   local me = self.me or {}
   return {
     type = "party",
-    mons = P.packParty3(party, indices),
+    mons = mons,
     mail = M.packMail(self.session, indices),
     gen3 = { version = me.version, progressFlags = me.progressFlags, game = me.game },
   }
+end
+
+-- The live party slot holding the mon that went out as snapshot index
+-- `wire`, or nil when no mon in the party is that mon any more.  The slot it
+-- was picked from is asked first (`hint`), so two mons that happen to share
+-- an identity still resolve to the one the player chose.
+function TradeSession:liveSlotOf(wire, hint)
+  local key = self.sentKeys and self.sentKeys[wire]
+  if key == nil then return nil end
+  local party = self:partyNow()
+  if hint and identityOf(party[hint]) == key then return hint end
+  for i, mon in ipairs(party) do
+    if identityOf(mon) == key then return i end
+  end
+  return nil
+end
+
+-- The snapshot index the peer knows the mon in live slot `index` by, or nil
+-- when the picker's row is a mon the peer was never shown.
+function TradeSession:wireSlotOf(index)
+  local keys = self.sentKeys
+  if not keys then return nil end
+  local key = identityOf(self:partyNow()[index])
+  if key == nil then return nil end
+  if keys[index] == key then return index end
+  for wire, sent in ipairs(keys) do
+    if sent == key then return wire end
+  end
+  return nil
 end
 
 function TradeSession:cancel(why)
@@ -589,27 +715,52 @@ function TradeSession:handle(msg)
       if not mon then
         return self:cancel(why or "the other game sent an unknown POKéMON")
       end
+      -- names the engine's own screens will print (see the header)
+      if not (M.printableName(mon.nickname) and M.printableName(mon.otName)
+          and M.printableName(mailList[i] and mailList[i].playerName)) then
+        return self:cancel(BAD_NAME)
+      end
       party[i] = mon
       mails[i] = mailList[i]
     end
+    local info = M.sanitizeInfo(msg.gen3)
+    if not info then return self:cancel(NO_CART) end
     self.theirParty, self.theirMail = party, mails
-    self.theirInfo = M.sanitizeInfo(msg.gen3)
+    self.theirInfo = info
     local gate = self:versionGate()
     if gate then return self:cancel(gate) end
     self.reasons = {}
     if self.stage == "waitParty" then self.stage = "picking" end
   elseif msg.type == "pick" then
+    if self.stage == "done" or self.stage == "cancelled" then return nil end
+    -- Once, in turn, and only of a party this side has seen (see the header).
+    if not self.theirParty or self.theirPick ~= nil
+        or (self.stage ~= "picking" and self.stage ~= "waitPick") then
+      return self:cancel(OUT_OF_TURN)
+    end
     local index = whole(msg.index, 1, PARTY_SIZE)
-    if not index or (self.theirParty and not self.theirParty[index]) then
+    if not index or not self.theirParty[index] then
       return self:cancel("the other game picked a POKéMON it never showed")
     end
     self.theirPick = index
     self:advance()
   elseif msg.type == "confirm" then
-    self.theirConfirm = msg.ok == true
+    if self.stage == "done" or self.stage == "cancelled" then return nil end
+    if self.stage ~= "confirming" or self.theirConfirm ~= nil then
+      return self:cancel(OUT_OF_TURN)
+    end
+    local yes = msg.ok == true
+    -- A yes names the two mons it agrees to; a yes to any other pair is no.
+    if yes and (whole(msg.mine, 1, PARTY_SIZE) ~= self.theirPick
+        or whole(msg.yours, 1, PARTY_SIZE) ~= self.myPick) then
+      return self:cancel(OFFER_CHANGED)
+    end
+    self.theirConfirm = yes
     self:advance()
   elseif msg.type == "bye" then
-    self.stage = "cancelled"
+    -- Both yeses in: the peer is applying, and a goodbye after it does not
+    -- take this side's half back (that would leave its mon in two saves).
+    if self.stage ~= "done" then self.stage = "cancelled" end
   end
   return nil
 end
@@ -717,17 +868,32 @@ function TradeSession:wireIndex(index)
   return index
 end
 
+-- `index` is the live party slot the picker showed.  What goes on the wire
+-- is the snapshot index the peer knows that mon by (see the header), and a
+-- mon the peer was never shown -- the party changed under the picker --
+-- cancels: the answer is then a bye, so the peer is let go too.
 function TradeSession:pick(index)
-  self.myPick = index
+  local wire = self:wireSlotOf(index)
+  if not wire then
+    self:cancel(PARTY_CHANGED)
+    return { type = "bye" }
+  end
+  self.myPick = wire
+  self.myLiveSlot = index
   self:advance()
-  return { type = "pick", index = index }
+  return { type = "pick", index = wire }
 end
 
--- A yes is only a yes this cart can honour: an offer theirRefusal names is
--- answered no on the player's behalf, with the cart's reason kept on
--- `error` for whoever tears the session down.
+-- A yes is only a yes this cart can honour: the mon picked must still be in
+-- the party as it was shown, and an offer theirRefusal names is answered no
+-- on the player's behalf -- the reason kept on `error` for whoever tears the
+-- session down.  The yes names both picks (`mine` / `yours`, see the header).
 function TradeSession:confirm(ok)
   ok = ok == true
+  if ok and not self:liveSlotOf(self.myPick, self.myLiveSlot) then
+    ok = false
+    self.error = PARTY_CHANGED
+  end
   if ok then
     local why = self:theirRefusal()
     if why then
@@ -737,7 +903,7 @@ function TradeSession:confirm(ok)
   end
   self.myConfirm = ok
   self:advance()
-  return { type = "confirm", ok = ok }
+  return { type = "confirm", ok = ok, mine = self.myPick, yours = self.theirPick }
 end
 
 function TradeSession:advance()
@@ -784,24 +950,41 @@ end
 -- Trade2 fills with its evolution row -- Sessions' Gen 3 arm needs only the
 -- species, and the held item a trade-item row demands has already been
 -- taken off the mon by tradeTarget, as the cart takes it.
+--
+-- The mon sent is found by identity, never by slot number (see the header):
+-- the peer is filing the snapshot of it, so what leaves this party is that
+-- mon wherever it now stands -- and when it is nowhere, nothing leaves and
+-- the answer is nil, which Sessions reports as a trade that did not complete.
+-- `appliedSlot` is where the received mon landed.
 function TradeSession:apply(game)
   if self.stage ~= "done" then
     mod.log:warn("Gen 3 trade apply called before both sides confirmed "
       .. "(stage=%s) -- leave the session and ask again", tostring(self.stage))
     return nil
   end
-  local session = self.session or sessionOf(game or self.game)
+  -- The session running now, not the one the trade opened on: a soft reset
+  -- and CONTINUE mid-trade replaces the whole table, and the old one is a
+  -- party nobody will ever save again -- swapping there would hand the peer
+  -- a mon this player still has on disk.
+  local session = sessionOf(game or self.game) or self.session
+  if type(session) == "table" then self.session = session end
   local received = self.theirParty and self.theirParty[self.theirPick]
   local party = type(session) == "table" and session.party
-  local slot = self.myPick
-  local sent = type(party) == "table" and party[slot] or nil
-  if not (received and sent) then
-    mod.log:warn("Gen 3 trade apply has no %s at slot %s -- check the party "
-      .. "from START > POKéMON before trading again",
-      received and "POKéMON to send" or "received POKéMON",
-      tostring(received and slot or self.theirPick))
+  local slot = type(party) == "table" and self:liveSlotOf(self.myPick, self.myLiveSlot) or nil
+  local sent = slot and party[slot] or nil
+  if not received then
+    mod.log:warn("Gen 3 trade apply has no received POKéMON at their slot %s "
+      .. "-- check the party from START > POKéMON before trading again",
+      tostring(self.theirPick))
     return nil
   end
+  if not sent then
+    mod.log:warn("the POKéMON offered as party slot %s is no longer in the "
+      .. "party as it was shown, so nothing left it -- check the party from "
+      .. "START > POKéMON before trading again", tostring(self.myPick))
+    return nil
+  end
+  self.appliedSlot = slot
 
   -- pokefirered/src/trade_scene.c:2488: the partner's mail goes in
   -- gLinkPartnerMail[0] and the received mon points at it, exactly as the

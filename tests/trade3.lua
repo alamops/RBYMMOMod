@@ -381,7 +381,10 @@ local function deliver(from, to)
 end
 
 -- A player at the controls: picks `plan.pick`, answers every confirm with
--- `plan.confirm`, dismisses every box.
+-- `plan.confirm`, dismisses every box (not with `plan.keepBoxes`).
+-- `plan.beforePick(trade)` runs as the picker is answered and
+-- `plan.afterConfirm(trade)` right after the confirm is -- the moments a
+-- player could have the party open.
 local function answer(p, plan)
   local pick = table.remove(p.ui.picks, 1)
   if pick then
@@ -389,7 +392,11 @@ local function answer(p, plan)
     pick.onPick(plan.pick)
   end
   local box = table.remove(p.ui.confirms, 1)
-  if box then box.onChoose(plan.confirm ~= false) end
+  if box then
+    box.onChoose(plan.confirm ~= false)
+    if plan.afterConfirm then plan.afterConfirm() end
+  end
+  if plan.keepBoxes then return end
   local done = table.remove(p.ui.sayDone, 1)
   if done then done() end
 end
@@ -653,6 +660,353 @@ do
   eq(sd.dex.seen[16], true, "PIDGEY in Emerald's")
 end
 
+-- ------- the party the peer saw is the party that trades
+--
+-- The party message is packed at opening(); the picker and the confirm wait
+-- for the cart's menus (Ui.occupied), where START > POKéMON can reorder the
+-- party and the BAG can take a held item.  Trading by slot number then sent
+-- the peer the snapshot mon while removing whatever stood at that slot now.
+
+local function count(list, species)
+  local n = 0
+  for _, m in ipairs(list) do if m.species == species then n = n + 1 end end
+  return n
+end
+
+do
+  -- Reordered while the picker waited: the row the player picks is mapped
+  -- to the index the peer was shown, and that very mon is the one that goes.
+  local sa = newSession({ name = "ANN", national = true,
+    party = { mon(64, 20, { nickname = "KADABRA" }), mon(16, 5, { nickname = "PIDGEY" }) } })
+  local sb = newSession({ name = "BOB", national = true, party = { mon(25, 12), mon(19, 4) } })
+  local a, b = players(sa, sb)
+  local sentWire
+  trade(a, b, { pick = 1, beforePick = function(t)
+      -- START > POKéMON > SWITCH: PIDGEY to the front
+      sa.party[1], sa.party[2] = sa.party[2], sa.party[1]
+    end }, { pick = 1 })
+  for _, entry in ipairs(a.transport.sent) do
+    local payload = entry.body and entry.body.payload
+    if type(payload) == "table" and payload.type == "pick" then sentWire = payload.index end
+  end
+  eq(sentWire, 2, "a pick of PIDGEY (now first) names it by the index BOB was shown")
+  eq(sb.party[1].species, 16, "BOB received the PIDGEY ANN picked")
+  eq(count(sa.party, 64), 1, "ANN still has her KADABRA")
+  eq(count(sa.party, 16), 0, "and the PIDGEY left her party")
+  eq(count(sb.party, 64), 0, "no KADABRA was copied into BOB's party")
+  eq(sa.party[1].species, 25, "BOB's PIKACHU landed where the PIDGEY stood")
+end
+
+do
+  -- A mon the peer was never shown (withdrawn from the PC while the picker
+  -- waited) cancels the trade on both sides; nothing moves.
+  local sa = newSession({ name = "ANN", national = true, party = { mon(64, 20), mon(16, 5) } })
+  local sb = newSession({ name = "BOB", national = true, party = { mon(25, 12), mon(19, 4) } })
+  local annBefore, bobBefore = sa.party[2], sb.party[1]
+  local a, b = players(sa, sb)
+  trade(a, b, { pick = 1, beforePick = function()
+      sa.party[1] = mon(150, 70)   -- the PC swap: KADABRA out, MEWTWO in
+    end }, { pick = 1 })
+  check(contains(a.ui.said, "The trade stopped:\n" .. tostring(Trade3.PARTY_CHANGED)),
+    "ANN is told her party changed")
+  eq(sa.party[1].species, 150, "ANN keeps the MEWTWO")
+  eq(sa.party[2], annBefore, "and the rest of her party")
+  eq(sb.party[1], bobBefore, "BOB's party is untouched")
+  eq(count(sb.party, 150) + count(sb.party, 64), 0, "BOB received nothing")
+  eq(a.game.saves + b.game.saves, 0, "nothing was saved on either side")
+  eq(a.sessions.active, nil, "ANN's session ended")
+  eq(b.sessions.active, nil, "and BOB's")
+end
+
+do
+  -- A held item taken off after the snapshot: the mon BOB was shown holds a
+  -- NUGGET (110) that is back in ANN's BAG -- trading it would copy the item.
+  local sa = newSession({ name = "ANN", national = true,
+    party = { mon(64, 20, { item = 110, heldItem = 110 }), mon(16, 5) } })
+  local sb = newSession({ name = "BOB", national = true, party = { mon(25, 12), mon(19, 4) } })
+  local a, b = players(sa, sb)
+  trade(a, b, { pick = 1, beforePick = function()
+      sa.party[1].item, sa.party[1].heldItem = 0, 0
+    end }, { pick = 1 })
+  check(contains(a.ui.said, "The trade stopped:\n" .. tostring(Trade3.PARTY_CHANGED)),
+    "a mon that lost its held item since BOB saw it is not traded")
+  eq(count(sb.party, 64), 0, "BOB did not receive the KADABRA (nor the NUGGET it no longer holds)")
+  eq(sa.party[1].species, 64, "ANN keeps it")
+end
+
+do
+  -- Changed after the pick (the belt under Sessions' hold): moved, it is
+  -- found by identity -- the yes stands and the right mon goes; gone, the
+  -- yes becomes a no.
+  local sa = newSession({ national = true, party = { mon(64, 20), mon(16, 5), mon(19, 4) } })
+  local sb = newSession({ national = true, party = { mon(25, 12), mon(20, 22) } })
+  local ta = Trade3.TradeSession.new({ generation = 3, session = sa, data = {} }, {})
+  local tb = Trade3.TradeSession.new({ generation = 3, session = sb, data = {} }, {})
+  local wire = function(m) return Json.decode(Json.encode(m)) end
+  tb:handle(wire(ta:opening()))
+  ta:handle(wire(tb:opening()))
+  local kadabra = sa.party[1]
+  tb:handle(wire(ta:pick(1)))
+  ta:handle(wire(tb:pick(1)))
+  eq(ta.stage, "confirming", "both picked")
+  sa.party[1], sa.party[3] = sa.party[3], sa.party[1]
+  local yes = ta:confirm(true)
+  eq(yes.ok, true, "a picked mon that only moved keeps the yes")
+  eq(yes.mine, 1, "the yes names ANN's pick as BOB knows it")
+  eq(yes.yours, 1, "and BOB's pick as ANN understood it")
+  tb:handle(wire(yes))
+  ta:handle(wire(tb:confirm(true)))
+  eq(ta.stage, "done", "both said yes")
+  local got = ta:apply({ generation = 3, session = sa })
+  eq(got and got.species, 25, "ANN received the PIKACHU")
+  eq(ta.appliedSlot, 3, "into the slot the KADABRA had moved to")
+  eq(sa.party[3].species, 25, "which now holds it")
+  eq(count(sa.party, 64), 0, "and the KADABRA -- the mon BOB was shown -- is what left")
+  check(sa.party[1] ~= kadabra, "slot 1 (the RATTATA) was not touched")
+  eq(sa.party[1].species, 19, "slot 1 still holds the RATTATA")
+
+  local sc = newSession({ national = true, party = { mon(64, 20), mon(16, 5) } })
+  local tc = Trade3.TradeSession.new({ generation = 3, session = sc, data = {} }, {})
+  local td = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+    party = { mon(25, 12), mon(20, 22) } }), data = {} }, {})
+  td:handle(wire(tc:opening()))
+  tc:handle(wire(td:opening()))
+  td:handle(wire(tc:pick(1)))
+  tc:handle(wire(td:pick(1)))
+  table.remove(sc.party, 1)                 -- deposited after the pick
+  local no = tc:confirm(true)
+  eq(no.ok, false, "a picked mon no longer in the party turns the yes into a no")
+  eq(tc.error, Trade3.PARTY_CHANGED, "saying why")
+
+  -- ...and an apply that cannot find the mon it sent sends nothing.
+  local se = newSession({ national = true, party = { mon(64, 20), mon(16, 5) } })
+  local te = Trade3.TradeSession.new({ generation = 3, session = se, data = {} }, {})
+  local tf = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+    party = { mon(25, 12), mon(20, 22) } }), data = {} }, {})
+  tf:handle(wire(te:opening()))
+  te:handle(wire(tf:opening()))
+  tf:handle(wire(te:pick(1)))
+  te:handle(wire(tf:pick(1)))
+  te:handle(wire(tf:confirm(true)))
+  tf:handle(wire(te:confirm(true)))
+  eq(te.stage, "done", "done")
+  se.party[1] = mon(150, 70)
+  local before = #warns
+  eq(te:apply({ generation = 3, session = se }), nil, "apply finds no KADABRA and applies nothing")
+  eq(se.party[1].species, 150, "the MEWTWO standing in its slot is not traded away")
+  check(#warns > before and contains({ warns[#warns] }, "no longer in the party"), "and says so")
+end
+
+do
+  -- The failed apply reads as a failure: "The trade failed to complete.",
+  -- never "a POKéMON was traded over!" about a mon that never arrived.
+  local sa = newSession({ name = "ANN", national = true, party = { mon(64, 20), mon(16, 5) } })
+  local sb = newSession({ name = "BOB", national = true, party = { mon(25, 12), mon(19, 4) } })
+  local a, b = players(sa, sb)
+  trade(a, b, { pick = 1, afterConfirm = function()
+      -- the whole party replaced between ANN's yes and BOB's (a harness can;
+      -- the hold stops a player)
+      sa.party = { mon(150, 70) }
+    end }, { pick = 1 })
+  check(contains(a.ui.said, "The trade failed\nto complete."), "ANN is told the trade failed")
+  check(not contains(a.ui.said, "traded over!"), "and not that something was traded over")
+  eq(a.game.saves, 0, "nothing was saved for a swap that never happened")
+end
+
+-- ------- the other side's messages, in order and once
+
+do
+  local wire = function(m) return Json.decode(Json.encode(m)) end
+  local function pair()
+    local ta = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+      party = { mon(64, 20), mon(16, 5) } }), data = {} }, {})
+    local tb = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+      party = { mon(25, 12), mon(19, 4) } }), data = {} }, {})
+    tb:handle(wire(ta:opening()))
+    ta:handle(wire(tb:opening()))
+    return ta, tb
+  end
+
+  -- a second pick would swap the mon under the "Trade for X?" being read
+  local ta = pair()
+  ta:handle({ type = "pick", index = 1 })
+  eq(ta.stage, "picking", "their first pick is taken")
+  ta:handle({ type = "pick", index = 2 })
+  eq(ta.stage, "cancelled", "a second pick cancels")
+  eq(ta.error, Trade3.OUT_OF_TURN, "as out of turn")
+  eq(ta.theirPick, 1, "and never replaces the first")
+
+  local early = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+    party = { mon(64, 20), mon(16, 5) } }), data = {} }, {})
+  early:handle({ type = "pick", index = 1 })
+  eq(early.stage, "cancelled", "a pick before their party cancels")
+
+  local tc = pair()
+  tc:pick(1)
+  tc:handle({ type = "pick", index = 1 })
+  eq(tc.stage, "confirming", "both picks in")
+  tc:handle({ type = "pick", index = 2 })
+  eq(tc.stage, "cancelled", "a pick while confirming cancels")
+
+  -- a yes to another pair is no yes
+  local td, te = pair()
+  te:handle(wire(td:pick(1)))
+  td:handle(wire(te:pick(2)))
+  td:handle({ type = "confirm", ok = true, mine = 1, yours = 1 })
+  eq(td.stage, "cancelled", "a yes naming a mon they did not pick cancels")
+  eq(td.error, Trade3.OFFER_CHANGED, "the offer changed")
+  local tf, tg = pair()
+  tg:handle(wire(tf:pick(1)))
+  tf:handle(wire(tg:pick(2)))
+  tf:handle({ type = "confirm", ok = true, mine = 2, yours = 2 })
+  eq(tf.stage, "cancelled", "a yes to a different mon of ours cancels")
+  local th, ti = pair()
+  ti:handle(wire(th:pick(1)))
+  th:handle(wire(ti:pick(2)))
+  th:handle({ type = "confirm", ok = true })
+  eq(th.stage, "cancelled", "a yes that names nothing is no yes")
+  local tj, tk = pair()
+  tk:handle(wire(tj:pick(2)))
+  tj:handle(wire(tk:pick(1)))
+  tj:handle(wire(tk:confirm(true)))
+  eq(tj.theirConfirm, true, "a yes naming the agreed pair stands")
+  local reply = tj:confirm(true)
+  eq(reply.mine, 2, "and ours names our pick")
+  eq(reply.yours, 1, "and theirs")
+  eq(tj.stage, "done", "done")
+  tj:handle({ type = "bye" })
+  eq(tj.stage, "done", "a goodbye after both yeses does not take this side's half back")
+  tj:handle({ type = "confirm", ok = false })
+  eq(tj.stage, "done", "nor does a late no")
+
+  local tl = pair()
+  tl:handle({ type = "confirm", ok = true, mine = 1, yours = 1 })
+  eq(tl.stage, "cancelled", "a confirm before the picks cancels")
+  local tm, tn = pair()
+  tn:handle(wire(tm:pick(1)))
+  tm:handle(wire(tn:pick(1)))
+  tm:handle({ type = "confirm", ok = false })
+  eq(tm.theirConfirm, false, "their no")
+  tm:handle({ type = "confirm", ok = true, mine = 1, yours = 1 })
+  eq(tm.stage, "cancelled", "a second confirm cancels")
+end
+
+-- ------- names the cart can print; a cart the cable club knows
+
+do
+  local wire = function(m) return Json.decode(Json.encode(m)) end
+  local function offer(party, tamper)
+    local them = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+      party = party }), data = {} }, {})
+    local me = Trade3.TradeSession.new({ generation = 3, session = newSession({ national = true,
+      party = { mon(16, 5), mon(19, 4) } }), data = {} }, {})
+    local msg = wire(them:opening())
+    if tamper then tamper(msg) end
+    me:handle(msg)
+    return me
+  end
+  eq(offer({ mon(25, 12, { nickname = "SPARKY" }), mon(19, 4) }).stage, "picking",
+    "a plain nickname is taken")
+  eq(offer({ mon(25, 12, { nickname = "PIKA♂é" }), mon(19, 4) }).stage, "picking",
+    "so are the cart's own symbols")
+  for _, bad in ipairs({ "{PLAYER}", "A[B", "B}", "#1", "*", "@", "~", "|", "^", "`", "A\\B" }) do
+    local me = offer({ mon(25, 12, { nickname = bad }), mon(19, 4) })
+    eq(me.stage, "cancelled", ("a nickname holding %q refuses the trade"):format(bad))
+  end
+  local me = offer({ mon(25, 12), mon(19, 4) }, function(msg) msg.mons[2].otName = "{COLOR RED}" end)
+  eq(me.stage, "cancelled", "an OT name holding markup refuses the trade")
+  eq(me.error, Trade3.BAD_NAME, "saying the name cannot be printed")
+  eq(me.theirParty, nil, "and nothing of theirs is kept")
+  local mailed = offer({ mon(25, 12, { item = 121, heldItem = 121 }), mon(19, 4) }, function(msg)
+    msg.mail = { { itemId = 121, words = { 1 }, playerName = "B{O}B", trainerId = 1, species = 25 }, false }
+  end)
+  eq(mailed.stage, "cancelled", "a mail signed with markup refuses the trade")
+  eq(Trade3.printableName and Trade3.printableName("RED"), true, "printableName: a cart name")
+  eq(Trade3.printableName and Trade3.printableName(nil), true, "printableName: no name")
+  eq(Trade3.printableName and Trade3.printableName("{"), false, "printableName: a brace")
+
+  eq((Trade3.sanitizeInfo({ version = 4, progressFlags = 1 }) or {}).version, 4, "FireRed is a cart")
+  eq((Trade3.sanitizeInfo({ version = 3 }) or {}).version, 3, "and Emerald")
+  eq((Trade3.sanitizeInfo({ version = 5 }) or {}).version, 5, "and LeafGreen")
+  eq(Trade3.sanitizeInfo({ version = 99 }), nil, "a cart code no family owns is no answer")
+  eq(Trade3.sanitizeInfo({ version = 0 }), nil, "nor is 0")
+  local odd = offer({ mon(25, 12), mon(19, 4) }, function(msg) msg.gen3.version = 7 end)
+  eq(odd.stage, "cancelled", "a party from a cart no family owns cancels")
+  eq(odd.error, Trade3.NO_CART, "saying the other game did not say which it is")
+  local silent = offer({ mon(25, 12), mon(19, 4) }, function(msg) msg.gen3 = nil end)
+  eq(silent.stage, "cancelled", "and so does one that says nothing about its cart")
+end
+
+-- ------- Sessions holds the screen from the pick until the trade is done
+
+do
+  local sa = newSession({ name = "ANN", national = true, party = { mon(64, 20), mon(16, 5) } })
+  local sb = newSession({ name = "BOB", national = true, party = { mon(25, 12), mon(19, 4) } })
+  local a, b = players(sa, sb)
+  local log, holds = {}, {}
+  function a.ui:holdScreen(_, text)
+    local box = { hold = true, text = text }
+    holds[#holds + 1] = box
+    log[#log + 1] = "hold"
+    return box
+  end
+  a.ui.pop = function(_, target)
+    if target and target.hold then log[#log + 1] = "release" end
+    return true
+  end
+  local baseSay = a.ui.say
+  function a.ui:say(text, onDone)
+    log[#log + 1] = "say:" .. text
+    return baseSay(self, text, onDone)
+  end
+  trade(a, b, { pick = 1 }, { pick = 1 })
+  eq(#holds, 1, "the pick puts one hold up")
+  eq(holds[1] and holds[1].text, "Waiting for\nBOB...", "naming who is being waited on")
+  eq(table.concat(log, ","), "hold,release,say:SPECIES25 was\ntraded over!",
+    "it stays until the swap is saved, and the line goes up in its place")
+
+  -- a trade called off after the pick takes the hold down with the session
+  local sc = newSession({ name = "ANN", national = true, party = { mon(64, 20), mon(16, 5) } })
+  local sd = newSession({ name = "BOB", national = true, party = { mon(25, 12), mon(19, 4) } })
+  local c, d = players(sc, sd)
+  local released = 0
+  function c.ui:holdScreen() return { hold = true } end
+  c.ui.pop = function(_, target) if target and target.hold then released = released + 1 end return true end
+  trade(c, d, { pick = 1 }, { pick = 1, confirm = false })
+  eq(released, 1, "a no after the pick takes the hold down")
+  eq(c.sessions.active, nil, "with the session")
+
+  -- off Gen 3 (a ui with no holdScreen) nothing is held
+  local se = newSession({ national = true, party = { mon(64, 20), mon(16, 5) } })
+  local sf = newSession({ national = true, party = { mon(25, 12), mon(19, 4) } })
+  local e, f = players(se, sf)
+  trade(e, f, { pick = 1 }, { pick = 1 })
+  eq(se.party[1].species, 25, "a ui without holdScreen still trades")
+end
+
+-- ------- the evolution belongs to the save the trade was made in
+
+do
+  scenes = {}
+  local sa = newSession({ name = "ANN", national = true, party = { mon(16, 5), mon(19, 4) } })
+  local sb = newSession({ name = "BOB", national = true, party = { mon(64, 20), mon(20, 22) } })
+  local a, b = players(sa, sb)
+  trade(a, b, { pick = 1, keepBoxes = true }, { pick = 1 })
+  eq(sa.party[1].species, 64, "ANN received the KADABRA")
+  eq(a.game.saves, 1, "and it was saved")
+  local owed = table.remove(a.ui.sayDone, 1)
+  check(owed ~= nil, "the \"traded over!\" line is still up")
+  -- a reset to the title and CONTINUE of another file, before it is read
+  local other = newSession({ name = "CAL", national = true, party = { mon(16, 5) } })
+  a.game.session = other
+  local before = #warns
+  if owed then owed() end
+  eq(#scenes, 0, "the evolution does not play under another save")
+  eq(a.game.saves, 1, "and nothing writes that save")
+  check(#warns > before and contains({ warns[#warns] }, "different save"), "the log says why")
+  eq(other.party[1].species, 16, "the other save's party is untouched")
+end
+
 -- ------- the Gen 3 screen stack (no game.stack)
 
 do
@@ -761,23 +1115,40 @@ do
 end
 
 -- ------- moves a fight banked, on Gen 3
+--
+-- Through src/LearnMove.lua's Gen 3 arm (LearnMove.open): the cart's own
+-- LearnMove.begin, handed *this mod's* boxes -- the Sessions ui's say and
+-- confirm -- and the summary screen's move picker, in the field's wording.
+-- Never the engine's Message / Choice singletons: an evolution scene drives
+-- those too, and the two running at once lost callbacks and dropped learns.
 
 do
-  local begun, shown, yesno, forgets = {}, {}, {}, {}
+  local begun, forgets = {}, {}
+  local messageShown, choiceAsked = 0, 0
   stub("src.core.game3.battle.learn_move", {
     begin = function(opts) begun[#begun + 1] = opts end,
   })
   stub("src.ui.game3.message", {
-    show = function(text, opts) shown[#shown + 1] = { text = text, opts = opts } end,
+    show = function() messageShown = messageShown + 1 end,
     isOpen = function() return false end,
   })
-  stub("src.ui.game3.choice", { yesNo = function(cb) yesno[#yesno + 1] = cb end })
+  stub("src.ui.game3.choice", { yesNo = function() choiceAsked = choiceAsked + 1 end })
   stub("src.ui.game3.summary_menu", {
     openMenu = function(party, index, opts) forgets[#forgets + 1] = { party = party, index = index, opts = opts } end,
   })
   local needL = newNeed()
   local SessionsL = needL("Sessions")
-  local s = SessionsL.new({}, {})
+  local said, asked = {}, {}
+  local ui = { ctx = {} }
+  function ui:say(text, cb)
+    said[#said + 1] = { text = text, cb = cb }
+    return { text = text }
+  end
+  function ui:confirm(_, text, cb)
+    asked[#asked + 1] = { text = text, cb = cb }
+    return { text = text }
+  end
+  local s = SessionsL.new({ send = function() return true end }, ui)
   local g3 = { generation = 3, phase = "field", session = {} }
   local m1, m2 = mon(16, 10), mon(19, 10)
   check(s:offerForgets(g3, { { mon = m1, move = 17 }, { mon = m2, move = 98 } }),
@@ -785,26 +1156,63 @@ do
   eq(#begun, 1, "one prompt at a time")
   eq(begun[1].mon, m1, "for the first mon")
   eq(begun[1].moveId, 17, "and its move number")
-  eq(begun[1].headless, false, "with the field prompts wired")
-  begun[1].pushMsg("hello", function() end)
-  eq(shown[1] and shown[1].text, "hello", "messages go to the field message box")
+  eq(begun[1].headless, false, "with the prompts wired")
+  eq(begun[1].battleText, false, "in the field's wording: the fight is already over")
+  local msgDone = false
+  begun[1].pushMsg("hello", function() msgDone = true end)
+  eq(said[1] and said[1].text, "hello", "messages are this mod's own box (the ui's say)")
+  eq(messageShown, 0, "never the engine's Message singleton")
+  if said[1] and said[1].cb then said[1].cb() end
+  eq(msgDone, true, "and dismissing it answers LearnMove")
   local answered
   begun[1].askYesNo("Delete a move?", function(yes) answered = yes end)
-  eq(shown[2] and shown[2].opts.stay, true, "the question stays up under the yes / no")
-  yesno[1](true)
+  eq(asked[1] and asked[1].text, "Delete a move?", "the question is this mod's yes / no")
+  eq(choiceAsked, 0, "never the engine's Choice singleton")
+  if asked[1] then asked[1].cb(true) end
   eq(answered, true, "and the yes / no answers it")
   local picked
   begun[1].askForget({ "TACKLE" }, function(slot) picked = slot end, { moveId = 17 })
   eq(forgets[1] and forgets[1].opts.mode, "select_move", "the summary move picker opens")
   eq(forgets[1] and forgets[1].opts.moveToLearn, 17, "showing the move to learn")
-  forgets[1].opts.onSelectMove(2)
+  if forgets[1] then forgets[1].opts.onSelectMove(2) end
   eq(picked, 2, "and its choice goes back to LearnMove")
   begun[1].onDone(true)
   eq(#begun, 2, "the next banked move follows once the first is answered")
-  eq(begun[2].mon, m2, "for the second mon")
-  begun[2].onDone(false)
+  eq(begun[2] and begun[2].mon, m2, "for the second mon")
+  if begun[2] then begun[2].onDone(false) end
   begun[1].onDone(true)
   eq(#begun, 2, "a stray second callback does not reopen anything")
+
+  -- endMediated: the evolutions a fight earned wait for the last learn.  Both
+  -- are the cart's own exchanges (EvolutionScene runs LearnMove.begin again
+  -- for the evolved species), so starting the scene under an open learn ran
+  -- one engine module twice at once.
+  local EvolveFxL = needL("EvolveFx")
+  local realOffer = EvolveFxL.offerEvolutions
+  local offered = {}
+  EvolveFxL.offerEvolutions = function(_, leveledUp) offered[#offered + 1] = leveledUp return true end
+  begun = {}
+  s.fight = { game = g3, leveledUp = { m1 }, result = "win" }
+  s:endMediated(g3, { { mon = m1, move = 17 }, { mon = m2, move = 98 } })
+  eq(#begun, 1, "endMediated: the first learn is up")
+  eq(#offered, 0, "endMediated: and the evolutions wait for it")
+  if begun[1] then begun[1].onDone(true) end
+  eq(#offered, 0, "endMediated: and for the second learn")
+  if begun[2] then begun[2].onDone(false) end
+  eq(#offered, 1, "endMediated: then run, once the last learn is answered")
+  if begun[2] then begun[2].onDone(false) end
+  eq(#offered, 1, "endMediated: exactly once")
+  s.fight = { game = g3, leveledUp = { m2 }, result = "win" }
+  s:endMediated(g3, {})
+  eq(#offered, 2, "endMediated: with nothing to learn the evolutions run at once")
+  -- Gen 1 keeps its order: both offers at once, the screens stack there.
+  s.fight = { game = { generation = 1, data = {} }, leveledUp = { m1 }, result = "win" }
+  begun = {}
+  s:endMediated(s.fight.game, { { mon = mon(16, 10), move = "TACKLE" } })
+  eq(#begun, 0, "endMediated on Gen 1: never the Gen 3 exchange")
+  eq(#offered, 3, "endMediated on Gen 1: the evolutions are offered at once, as before")
+  EvolveFxL.offerEvolutions = realOffer
+
   for _, name in ipairs({ "src.core.game3.battle.learn_move", "src.ui.game3.message",
       "src.ui.game3.choice", "src.ui.game3.summary_menu" }) do
     package.loaded[name] = saved[name] or nil
@@ -922,31 +1330,30 @@ do
   eq(boxed, 0, "and leaves it to the box when one did")
 end
 
--- The moves a fight banked are the cart's own exchange (its message box, its
--- yes / no): learnOn3 runs whether or not the screen reads as occupied --
--- it is what occupies it -- and chains through its callbacks as before.
+-- The moves a fight banked are the cart's own exchange: LearnMove.open runs
+-- whether or not the screen reads as occupied -- it is what occupies it --
+-- and chains through its callbacks as before.  With no say / confirm on the
+-- ui (a harness stub), LearnMove's own Gen3Ui boxes stand in.
 do
   local begun = {}
   stub("src.core.game3.battle.learn_move", { begin = function(opts) begun[#begun + 1] = opts end })
-  stub("src.ui.game3.message", { show = function() end, isOpen = function() return true end })
-  stub("src.ui.game3.choice", { yesNo = function() end })
   local needL = newNeed()
   local SessionsL = needL("Sessions")
   local s = SessionsL.new({}, { occupied = function() return true end, ctx = {} })
   local g3 = { generation = 3, phase = "field", session = {} }
   check(s:offerForgets(g3, { { mon = mon(16, 10), move = 17 }, { mon = mon(19, 10), move = 98 } }),
-    "a Gen 3 queue is taken while the cart's message box is up")
+    "a Gen 3 queue is taken while the cart's menus are up")
   eq(#begun, 1, "the first learn-move exchange starts at once")
   begun[1].onDone(false)
   eq(#begun, 2, "and the second follows the first's answer")
-  begun[2].onDone(true)
-  begun[2].onDone(true)
-  eq(#begun, 2, "a stray callback reopens nothing")
-  for _, name in ipairs({ "src.core.game3.battle.learn_move", "src.ui.game3.message",
-      "src.ui.game3.choice" }) do
-    package.loaded[name] = saved[name] or nil
-    saved[name] = nil
+  if begun[2] then
+    begun[2].onDone(true)
+    begun[2].onDone(true)
   end
+  eq(#begun, 2, "a stray callback reopens nothing")
+  package.loaded["src.core.game3.battle.learn_move"] = saved["src.core.game3.battle.learn_move"] or nil
+  saved["src.core.game3.battle.learn_move"] = nil
+  Stack.clear()
 end
 
 -- ------- a Gen 3 build without the codec refuses rather than falling to Gen 1

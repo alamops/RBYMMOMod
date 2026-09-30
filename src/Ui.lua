@@ -43,8 +43,10 @@
 --
 -- and the instance methods say / confirm / choose / pushState / pickPartyMon /
 -- askNickname, which already went through the doors and work on all three,
--- plus whenFree / pumpDeferred / dropDeferred, the queue a prompt waits in
--- while Ui.occupied says so.
+-- plus whenFree / pumpDeferred / dropDeferred / dropStale, the queue a prompt
+-- waits in while Ui.occupied says so (pumped by Ui's own input.step link on
+-- Gen 3, see M:install), and holdScreen, the undismissable line a Gen 3 trade
+-- holds the screen with.
 
 local need, mod = ...
 local Config = need("Config")
@@ -273,6 +275,9 @@ local SCREEN = {
   RANK     = "RbyMmoRank",
   CHOOSE   = "RbyMmoChoose",
   MENU_CHOOSE = "RbyMmoChooseMenu",
+  -- Gen 3 only (registered there alone): the line a trade holds the screen
+  -- with from the pick until it is done -- see Ui:holdScreen
+  HOLD     = "RbyMmoHold",
 }
 M.SCREEN = SCREEN
 
@@ -1021,6 +1026,34 @@ function Ranks:handleInput(input)
   end
 end
 
+-- What every row of the board prints, measured and cut once per answer from
+-- the hub rather than every frame: src/Client.lua replaces the ranking table
+-- wholesale when one lands, so the table itself (and its length) is the key.
+-- One line per place -- the place, the name as rankLabel3 fits it (the
+-- duplicate-name tags need the whole board, M.nameCollisions), the score --
+-- and the sprite options table each row reuses.
+function Ranks:board3(rows)
+  local cached = self._board3
+  if cached and cached.rows == rows and cached.n == #rows then return cached.lines end
+  local Font = Gen3Ui.Font
+  local collide = M.nameCollisions(rows)
+  local lines = {}
+  for place, row in ipairs(rows) do
+    local points = tostring(row.points or 0)
+    local placeText = tostring(place)
+    lines[place] = {
+      place = placeText,
+      placeW = Font.width(placeText),
+      label = M.rankLabel3(row.name, row.id, collide[row.name], points),
+      points = points,
+      pointsW = Font.width(points),
+      art = { clipTop = RANK3.artTop, clipH = RANK3.artH },
+    }
+  end
+  self._board3 = { rows = rows, n = #rows, lines = lines }
+  return lines
+end
+
 function Ranks:draw3()
   local Font = Gen3Ui.Font
   local rows = self:entries()
@@ -1043,19 +1076,18 @@ function Ranks:draw3()
     return
   end
   local last = math.min(self.offset + RANK3.rows, #rows)
-  local collide = M.nameCollisions(rows)
+  local board = self:board3(rows)
   for slot = 1, last - self.offset do
     local place = self.offset + slot
     local row = rows[place]
+    local line = board[place]
     local y = RANK3.top + (slot - 1) * RANK3.rowH
     local ty = y + RANK3.textDY
-    Font.drawRight(tostring(place), RANK3.posRight, ty)
-    Gen3Ui.drawSprite(row.sprite, RANK3.artX, y, {
-      version = row.version, gender = row.gender, clipTop = RANK3.artTop, clipH = RANK3.artH,
-    })
-    local points = tostring(row.points or 0)
-    Font.draw(M.rankLabel3(row.name, row.id, collide[row.name], points), RANK3.nameX, ty)
-    Font.drawRight(points, RANK3.right, ty)
+    Font.draw(line.place, RANK3.posRight - line.placeW, ty)
+    line.art.version, line.art.gender = row.version, row.gender
+    Gen3Ui.drawSprite(row.sprite, RANK3.artX, y, line.art)
+    Font.draw(line.label, RANK3.nameX, ty)
+    Font.draw(line.points, RANK3.right - line.pointsW, ty)
   end
   if #rows > RANK3.rows then
     Font.drawRight(("%d-%d OF %d"):format(self.offset + 1, last, #rows), 228, 9)
@@ -1450,6 +1482,19 @@ function M:pickPartyMon(game, trade, onPick)
   M.push(game, SCREEN.PICK, { trade = trade, onPick = onPick })
 end
 
+-- A line that holds the screen until whoever put it up takes it down
+-- (Ui.pop): it prints like any box but no button dismisses it.  Gen 3 only --
+-- a Gen 3 trade stands behind one from the pick until the swap is saved,
+-- which keeps the cart's field and START frozen for the exchange the way the
+-- cart's own trade screen does (src/Sessions.lua M:holdTrade).  nil off Gen 3,
+-- where nothing asks for it.
+function M:holdScreen(game, text)
+  if not onGen3() then return nil end
+  game = game or self.ctx.game
+  if not game then return nil end
+  return M.push(game, SCREEN.HOLD, { text = text })
+end
+
 -- ------- prompts that wait for the player
 --
 -- Ui.occupied(game): **is the cart using the screen**, so that a prompt this
@@ -1492,6 +1537,11 @@ end
 -- each once the one before it has been dismissed: a pile pushed in one tick
 -- would put the newest on top, to be read first.
 --
+-- A queued prompt with no owner belongs to the save that was running when it
+-- was queued (`session`): one still waiting when the player resets to the
+-- title and loads another is dropped unseen, never shown under the new one
+-- (see M:dropStale).
+--
 -- Off Gen 3 Ui.occupied is false and the queue is never used, so this is
 -- `return show()`.
 function M:whenFree(game, show, opts)
@@ -1506,21 +1556,57 @@ function M:whenFree(game, show, opts)
     queue = {}
     self.deferred = queue
   end
-  local entry = { show = show, alive = opts.alive, owner = opts.owner, deferred = true }
+  local entry = { show = show, alive = opts.alive, owner = opts.owner, deferred = true,
+                  session = onGen3() and Gen3.session() or nil }
   queue[#queue + 1] = entry
   self:pumpDeferred(game)
   return entry
 end
 
+-- Take back every owner-less queued prompt that belongs to a save other than
+-- the one running now (a reset to the title, a CONTINUE of another file).
+-- Returns how many went.  Run on every pump and on save.loaded / save.created.
+--
+-- Owner-less is the line with a continuation behind it -- Sessions:tell's
+-- "X was traded over!", with the trade evolution and its save hung on the
+-- dismissal (src/Sessions.lua files only those without an owner) -- and that
+-- continuation is about a party that is no longer loaded: run under the new
+-- save it would evolve a mon that is not there and then write that save.
+-- An owned prompt is about the hub connection, which a save change does not
+-- end -- an invite, a friend ask -- and its module holds state that waits on
+-- it (Party.incoming, Friends.asking), so it stays; its owner takes it back
+-- when the ask is over (dropDeferred / alive).
+function M:dropStale()
+  local queue = self.deferred
+  if not (queue and queue[1]) or not onGen3() then return 0 end
+  local now = Gen3.session()
+  local dropped = 0
+  for i = #queue, 1, -1 do
+    local entry = queue[i]
+    if entry.owner == nil and entry.session ~= nil and entry.session ~= now then
+      table.remove(queue, i)
+      dropped = dropped + 1
+    end
+  end
+  if dropped > 0 then
+    mod.log:info("dropped %d waiting message(s) from before the save was "
+      .. "loaded", dropped)
+  end
+  return dropped
+end
+
 -- The per-tick half of whenFree: put the next waiting prompt up if the player
--- is free and the last one it put up has been dismissed.  Ui has no tick of
--- its own, so this is called from one that has -- Sessions:update, which
--- runs every step the hub connection is up (every queued prompt is about a
--- hub message, so that is exactly as long as they can matter).
+-- is free and the last one it put up has been dismissed.  Ui has a tick of
+-- its own on Gen 3 -- the input.step link M:install wraps there, which runs
+-- every fixed step whether or not a hub is connected, so a line a finished
+-- trade still owes (and the evolution behind it) is shown after the hub
+-- drops too.  Sessions:update pumps it as well while the hub is up.
 function M:pumpDeferred(game)
   local queue = self.deferred
   if not (queue and queue[1]) then return false end
   game = game or (self.ctx and self.ctx.game)
+  self:dropStale()
+  if not queue[1] then return false end
   local last = self.deferredBox
   if last ~= nil then
     if M.holds(game, last) then return false end
@@ -1566,12 +1652,49 @@ end
 
 -- ------- registration
 
+-- Ui's own tick on Gen 3 (M:install): the outermost input.step link, so it
+-- wraps src/Client.lua's (priority 0) and everything that runs inside it.
+local INPUT_STEP_PRIORITY = 10
+
+local function afterStep(ui, game, ...)
+  local ok, err = pcall(ui.pumpDeferred, ui, game)
+  if not ok and not ui.pumpWarned then
+    ui.pumpWarned = true
+    mod.log:warn("a message waiting for the player could not be shown (%s) "
+      .. "-- report this with the line above", tostring(err))
+  end
+  return ...
+end
+
 function M:install()
   local ctx = self.ctx
   local gen3 = onGen3()
   -- Gen 3 gates the screens registry (a write is dropped, with a warning in
   -- loader.errors), so every screen below goes to Gen3Ui's own there.
   local screens = gen3 and Gen3Ui.screens or mod.content.screens
+
+  -- Gen 3: a tick of Ui's own, because two things here cannot wait for a hub.
+  --
+  --   * The prompt queue (whenFree / pumpDeferred) is pumped every fixed
+  --     step, connected or not: the line a finished trade owes -- and the
+  --     evolution behind it, the item already spent -- has to reach the
+  --     player after the hub drops as well.  Save changes are swept too, on
+  --     the pump and on save.loaded / save.created (M:dropStale).
+  --   * Gen3Ui.beforeStep marks the window this link opens -- everything in
+  --     it, Client's network tick included, runs *before* Input:step makes
+  --     this step's presses -- so a layer pushed there does not take the
+  --     press that step delivers (Gen3Ui.stamped).
+  --
+  -- Gen 1 / Gen 2 keep exactly the hooks they had: their prompts never wait.
+  if gen3 then
+    local ui = self
+    mod.hooks:wrap("input.step", function(next, game, dt)
+      Gen3Ui.beforeStep(game)
+      return afterStep(ui, game, next(game, dt))
+    end, INPUT_STEP_PRIORITY)
+    mod.events:on("save.loaded", function() ui:dropStale() end)
+    mod.events:on("save.created", function() ui:dropStale() end)
+  end
 
   -- Give this mod's naming screens a digits page.  Scoped by title: any
   -- screen the mod did not open -- naming your rival, nicknaming a mon --
@@ -1984,6 +2107,16 @@ function M:install()
       defaultNo = opts.defaultNo == true,
     }))
   end })
+
+  -- M:holdScreen's line: a box no button dismisses.  Registered on Gen 3
+  -- alone, the one boot that asks for it -- Gen 1 / Gen 2's registry is left
+  -- exactly as it was.
+  if gen3 then
+    screens:register(SCREEN.HOLD, { new = function(game, opts)
+      opts = opts or {}
+      return Gen3Ui.TextBox.new(game, opts.text or "", nil, { hold = true })
+    end })
+  end
 
   -- On Gen 3 the state is marked as one (Gen3Ui.asState), so a push of this
   -- id puts it up the way M:pushState does: fullscreen, field frozen.

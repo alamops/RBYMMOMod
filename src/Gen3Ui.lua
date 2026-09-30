@@ -31,12 +31,14 @@
 --                            screen id; nil pops the top *mod* layer
 --   top() topLayer() has(t) states() unwindTo(game, t, alsoPop)
 --   drawWidescreen(viewport) the window-space pass render.hud calls
---   TextBox.new(game, text, onDone, opts)   opts.choice / opts.defaultNo
+--   TextBox.new(game, text, onDone, opts)   opts.choice / opts.defaultNo / opts.hold
 --   Menu.new(game, items, opts)             tx/ty/tw/maxVisible/onCancel/...
 --   ListMenu.new(game, title, items, opts)  onChoose/onCancel/pageJump/wrap
 --   NamingScreen.new(game, opts)            title/maxLen/default/onDone/pages
 --   Font  Theme  insertBefore  insertAfter  removeLabel
 --   frame  dialogueFrame  drawSprite  drawIcon  drawQr  stamped
+--   beforeStep(game)                        the input.step hook's first call
+--                                           (see "how the engine calls a layer")
 --   printable(text) / GLYPHS                the cart's charset (every Font path)
 --   spriteSize  standIn  drawSpriteIn       a figure placed by its real frame
 --   drawHoldIcon(kind, iconX, iconY)        the party menu's item / mail marker
@@ -79,6 +81,18 @@
 -- makes a new one each fixed step), and ignores input while that table is
 -- still the current one -- a box that goes up because of an A press does not
 -- also take that A press.
+--
+-- That covers a push made after Input:step -- from a handleInput, an update,
+-- an engine event.  It does not cover the input.step hook, which Game3 runs
+-- *before* Input:step: src/Client.lua's network tick lives there (a request,
+-- a trade's picker or confirm, a line from the hub), and so does the prompt
+-- queue's pump -- and a layer pushed there is stamped with the step that
+-- just ended, then handed the new step's presses, which were all made before
+-- it was on screen.  So src/Ui.lua's input.step link, the outermost one,
+-- calls M.beforeStep first, which records the `pressed` table the step
+-- started with; a layer pushed while that table is still current is marked
+-- pre-step, and ignores the whole of the first step it is handed as well
+-- (M.stamped).  A build or a harness without that link keeps the plain stamp.
 --
 -- ------- while the cart's own battle runs
 --
@@ -494,7 +508,13 @@ local function gfxIdFor(sprite, opts)
   if tonumber(id) then return tonumber(id) end
   id = Gen3.viewerGfxFor(sprite, opts.version, opts.gender)
   if tonumber(id) then return tonumber(id) end
-  return Gen3.gfxId(sprite)
+  -- A name nothing above mapped is drawn only when it is a look a player may
+  -- wear (Gen3.lookAllowed: the curated wardrobe, the player trainers).
+  -- `sprite` can come off the wire -- a peer's look, a rank row -- and the
+  -- cart's graphics include things that are not a person to be (a Cut tree,
+  -- a boulder, a boat), so any other name draws nothing.
+  if Gen3.lookAllowed(sprite) then return Gen3.gfxId(sprite) end
+  return nil
 end
 M.gfxIdFor = gfxIdFor
 
@@ -851,17 +871,51 @@ local function bind(screen)
   return screen
 end
 
--- True while `input` is still the step this screen was pushed in.
+-- The `pressed` table the current fixed step started with, recorded by
+-- src/Ui.lua's input.step link (M.beforeStep) before anything inside that
+-- hook runs -- see "how the engine calls a layer" in the header.
+local preStepPressed = nil
+
+-- Called first thing in the input.step hook, which runs before Input:step:
+-- until Input:step replaces `pressed`, a layer pushed is being pushed ahead
+-- of the step whose presses are about to be made (Client's network tick, the
+-- prompt queue), not by one of them.
+function M.beforeStep(game)
+  local input = type(game) == "table" and game.input or nil
+  local pressed = type(input) == "table" and input.pressed or nil
+  preStepPressed = type(pressed) == "table" and pressed or nil
+end
+
+-- True while `input` is still the step this screen was pushed in -- and, for
+-- a screen pushed ahead of a step (stamp, below), for the whole of the first
+-- step it is handed, whose presses were all made before it went up.
 function M.stamped(screen, input)
   if type(screen) ~= "table" or type(input) ~= "table" then return false end
   local stamp = rawget(screen, "_g3Stamp")
+  if rawget(screen, "_g3PreStep") then
+    if input.pressed ~= stamp then
+      -- the step it went up ahead of: that step's presses are not its own
+      rawset(screen, "_g3PreStep", nil)
+      rawset(screen, "_g3Stamp", input.pressed)
+    end
+    return true
+  end
   return stamp ~= nil and input.pressed == stamp
 end
 
+-- A layer ignores input while the step that pushed it is still the current
+-- one.  Pushed while `pressed` is the table the input.step hook started with
+-- (Input:step has not run yet), it is marked pre-step as well, and ignores
+-- the first step it is handed too.
 local function stamp(screen, game)
   local input = type(game) == "table" and game.input or nil
   local pressed = type(input) == "table" and input.pressed or nil
   rawset(screen, "_g3Stamp", pressed)
+  if pressed ~= nil and pressed == preStepPressed then
+    rawset(screen, "_g3PreStep", true)
+  else
+    rawset(screen, "_g3PreStep", nil)
+  end
 end
 
 function M.pushScreen(game, id, screen, opts)
@@ -1245,11 +1299,42 @@ function Menu:clampScroll()
   end
 end
 
--- Content rect in tiles: { left, top, w, h }.
+-- ------- measured once, not every frame
+--
+-- Every row of a Menu / ListMenu is drawn every frame, and measuring a label
+-- in the cart's glyphs walks frlg_font's token scanner per character -- a
+-- ListMenu's cut-to-fit binary search does it a dozen times a row.  So what
+-- a row measures is kept on the widget, in a weak table keyed on the row's
+-- own item table, with the texts it was measured for: a row whose label,
+-- prefix or right column is rewritten in place (a toggle, a count) is
+-- measured again, and a list rebuilt with new items starts clean.
+local function rowCache(self)
+  local cache = rawget(self, "_rowCache")
+  if not cache then
+    cache = setmetatable({}, { __mode = "k" })
+    rawset(self, "_rowCache", cache)
+  end
+  return cache
+end
+
+-- A Menu row's width (prefix + label), in px.
+local function menuRowWidth(self, item)
+  local cache = rowCache(self)
+  local label, prefix = item.label or "", item.prefix or ""
+  local c = cache[item]
+  if not (c and c.label == label and c.prefix == prefix) then
+    c = { label = label, prefix = prefix, w = Font.width(prefix) + Font.width(label) }
+    cache[item] = c
+  end
+  return c.w
+end
+
+-- Content rect in tiles: { left, top, w, h }.  The same table while nothing
+-- it depends on changed -- read it, do not keep it.
 function Menu:geometry()
   local widest = 0
   for _, item in ipairs(self.items) do
-    local w = Font.width(item.prefix or "") + Font.width(item.label or "")
+    local w = menuRowWidth(self, item)
     if w > widest then widest = w end
   end
   local w = math.max(self.minW, math.ceil((8 + widest + 6) / TILE))
@@ -1257,7 +1342,12 @@ function Menu:geometry()
   local h = math.max(2, math.ceil((self:visibleCount() * MENU_PITCH) / TILE))
   local left = 29 - w
   local top = self.anchor3 == "bottom" and (19 - h) or 1
-  return { left = left, top = top, w = w, h = h }
+  local geo = rawget(self, "_geo")
+  if not (geo and geo.left == left and geo.top == top and geo.w == w and geo.h == h) then
+    geo = { left = left, top = top, w = w, h = h }
+    rawset(self, "_geo", geo)
+  end
+  return geo
 end
 
 function Menu:update() end
@@ -1301,16 +1391,21 @@ function Menu:draw()
   M.frame(geo.left, geo.top, geo.w, geo.h)
   local leftPx, topPx = geo.left * TILE, geo.top * TILE
   local vis = self:visibleCount()
+  -- one options table for every row, every frame (Font.draw keeps none)
+  local opts = rawget(self, "_drawOpts")
+  if not opts then
+    opts = {}
+    rawset(self, "_drawOpts", opts)
+  end
   for row = 1, vis do
     local item = self.items[self.scroll + row]
     if not item then break end
     local y = topPx + (row - 1) * MENU_PITCH
     local x = leftPx + 8
     if item.prefix then x = x + Font.draw(item.prefix, x, y) end
-    Font.draw(item.label or "", x, y, {
-      color = (item.muted or item.blocked) and "MUTED" or "NORMAL",
-      maxWidth = geo.w * TILE - (x - leftPx),
-    })
+    opts.color = (item.muted or item.blocked) and "MUTED" or "NORMAL"
+    opts.maxWidth = geo.w * TILE - (x - leftPx)
+    Font.draw(item.label or "", x, y, opts)
   end
   local cursorRow = self.index - self.scroll
   if cursorRow >= 1 and cursorRow <= vis then
@@ -1498,9 +1593,19 @@ function ListMenu:draw()
     local ok, text, color = pcall(self.caption, self)
     if ok and type(text) == "string" and text ~= "" then caption, captionColor = text, color end
   end
+  -- one options table for the whole draw (Font.draw keeps none)
+  local opts = rawget(self, "_drawOpts")
+  if not opts then
+    opts = {}
+    rawset(self, "_drawOpts", opts)
+  end
   if caption then
-    Font.draw(Font.fit(caption, L.titleW * TILE - 8), L.titleLeft * TILE + 4,
-      L.titleTop * TILE + 1, { color = captionColor or "NORMAL" })
+    if rawget(self, "_captionText") ~= caption then
+      rawset(self, "_captionText", caption)
+      rawset(self, "_captionFit", Font.fit(caption, L.titleW * TILE - 8))
+    end
+    opts.color = captionColor or "NORMAL"
+    Font.draw(rawget(self, "_captionFit"), L.titleLeft * TILE + 4, L.titleTop * TILE + 1, opts)
   else
     Font.draw(tostring(self.title or ""), L.titleLeft * TILE + 4, L.titleTop * TILE + 1)
     if type(self.titleRight) == "string" then
@@ -1514,6 +1619,7 @@ function ListMenu:draw()
     Font.draw("Nothing here.", labelX, topPx + 17)
   end
   local pad = math.max(0, math.floor((self.rowH - Font.HEIGHT) / 2))
+  local cache = rowCache(self)
   for row = 1, self.rows do
     local i = self.scroll + row
     local item = self.items[i]
@@ -1521,11 +1627,23 @@ function ListMenu:draw()
     local y = topPx + (row - 1) * self.rowH + pad
     local x = labelX
     if item.prefix then x = x + Font.draw(item.prefix, x, y) end
+    -- the right column's width and the label cut to what it leaves, kept for
+    -- as long as the row's texts and the room they share do not change
+    local label, right = item.label or "", item.right
+    local c = cache[item]
+    if not (c and c.label == label and c.right == right) then
+      c = { label = label, right = right, rightW = right and Font.width(right) or 0 }
+      cache[item] = c
+    end
     local budget = rightX - x
-    if item.right then budget = budget - Font.width(item.right) - L.gap end
-    local color = (item.muted or item.blocked) and "MUTED" or "NORMAL"
-    Font.draw(Font.fit(item.label or "", math.max(0, budget)), x, y, { color = color })
-    if item.right then Font.drawRight(item.right, rightX, y, { color = color }) end
+    if right then budget = budget - c.rightW - L.gap end
+    budget = math.max(0, budget)
+    if c.budget ~= budget then
+      c.budget, c.fitted = budget, Font.fit(label, budget)
+    end
+    opts.color = (item.muted or item.blocked) and "MUTED" or "NORMAL"
+    Font.draw(c.fitted, x, y, opts)
+    if right then Font.draw(right, rightX - c.rightW, y, opts) end
     if self.decorate then pcall(self.decorate, item, labelX, y, i == self.index, self) end
     if i == self.index then M.cursor(L.left * TILE + L.cursorDX, y) end
   end
@@ -1552,7 +1670,10 @@ end
 --
 -- opts.choice(yes) opens the cart's YES / NO box over the still-visible text
 -- once the last page has printed (B answers NO), in place of onDone;
--- opts.defaultNo puts the cursor on NO.
+-- opts.defaultNo puts the cursor on NO.  opts.hold makes a box no button
+-- dismisses (and no prompt arrow invites one): it prints, then stays until
+-- whoever pushed it pops it -- Ui:holdScreen, the line a Gen 3 trade stands
+-- behind while the other side answers.
 
 local TextBox = class({})
 M.TextBox = TextBox
@@ -1591,6 +1712,10 @@ function TextBox.new(game, text, onDone, opts)
   self.onDone = onDone
   self.choice = opts.choice
   self.defaultNo = opts.defaultNo == true
+  if opts.hold then
+    self.hold = true
+    self.kind = "hold"
+  end
   local _, _, dw = M.dialogueWindow()
   self.pages = M.paginate(self.text, (tonumber(dw) or 26) * TILE)
   self.page = 1
@@ -1666,6 +1791,8 @@ end
 
 function TextBox:handleInput(input)
   if M.stamped(self, input) then return end
+  -- a held line owns the screen: every press is swallowed, none is its own
+  if self.hold then return end
   if self.choosing then
     if pressed(input, "up") or pressed(input, "down") then
       self.index = self.index == 1 and 2 or 1
@@ -1714,7 +1841,7 @@ function TextBox:draw()
     left = left - n - 1
     if left < 0 then break end
   end
-  if self.waiting and not self.choosing and F then
+  if self.waiting and not self.choosing and not self.hold and F then
     local C = Chrome()
     if C and type(C.promptArrow) == "function" then
       local frame = ({ 0, 1, 2, 3, 2, 1 })[1 + (math.floor(self.arrowTicks / 8) % 6)] or 0

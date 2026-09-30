@@ -391,7 +391,18 @@ local function run3(version)
   local st = {}
   local ctx = newCtx(game, st)
   local ui = Ui.new(ctx)
+  -- what this Ui instance's install adds to input.step / the save events (the
+  -- loaded mod's own Ui installed its links already)
+  local stepBefore, loadedBefore, createdBefore = {}, 0, 0
+  for _, e in ipairs(run.loader.hooks.chains["input.step"] or {}) do stepBefore[e.callback] = true end
+  loadedBefore = #(run.loader.events.listeners["save.loaded"] or {})
+  createdBefore = #(run.loader.events.listeners["save.created"] or {})
   check(pcall(function() ui:install() end), L .. "Ui:install on Gen 3")
+  local uiStep, uiStepAt, clientStepAt
+  for i, e in ipairs(run.loader.hooks.chains["input.step"] or {}) do
+    if not stepBefore[e.callback] then uiStep, uiStepAt = e.callback, i end
+    if (e.priority or 0) == 0 and not clientStepAt then clientStepAt = i end
+  end
   check(Gen3Ui.registered(Ui.SCREEN.MAIN) ~= nil, L .. "MAIN registered with Gen3Ui")
 
   check(Ui.isGen3(), L .. "Ui knows it is on Gen 3")
@@ -1257,6 +1268,204 @@ local function run3(version)
   ui:pumpDeferred(game)
   eq(Stack.depth(), 0, L .. "a reset takes back the party's waiting lines")
 
+  -- ------- Ui's own tick: the queue is pumped with no hub at all
+  --
+  -- Sessions:update (the hub tick) is not the only pump any more: Ui:install
+  -- wraps input.step on Gen 3, outermost, so a line a finished trade owes --
+  -- and the evolution behind it -- reaches the player after the hub drops.
+  Stack.clear()
+  check(uiStep ~= nil, L .. "Ui:install wraps input.step on Gen 3")
+  check(uiStepAt ~= nil and clientStepAt ~= nil and uiStepAt < clientStepAt,
+    L .. "outermost: ahead of the client's own tick")
+  eq(#(run.loader.events.listeners["save.loaded"] or {}), loadedBefore + 1,
+    L .. "and listens for save.loaded")
+  eq(#(run.loader.events.listeners["save.created"] or {}), createdBefore + 1,
+    L .. "and save.created")
+  do
+    -- without the link (an older Ui) the chain below it is all that runs --
+    -- which is exactly the case these pin
+    local uiStep = uiStep or function(next, g, dt) return next(g, dt) end
+    local owed = 0
+    Stack.push("bag", noop)
+    ui:whenFree(game, function()
+      return ui:say("KADABRA was\ntraded over!", function() owed = owed + 1 end)
+    end)
+    eq(topId(), "bag", L .. "the owed line waits for the BAG")
+    Stack.pop("bag")
+    eq(uiStep(function() return "stepped" end, game, 1 / 60), "stepped",
+      L .. "the link hands back what the chain below it returned")
+    eq(Gen3Ui.top() and Gen3Ui.top().text, "KADABRA was\ntraded over!",
+      L .. "and the line goes up from Ui's own tick, no hub, no Sessions")
+    steps(game, 200)
+    step(game, "a")
+    eq(owed, 1, L .. "and what hangs on it follows")
+    Stack.clear()
+
+    -- a prompt queued under one save never shows under another
+    local shownStale = 0
+    Stack.push("bag", noop)
+    ui:whenFree(game, function() shownStale = shownStale + 1 return ui:say("From before.") end)
+    local kept = game.session
+    game.session = session3(version, em and "EM_LITTLEROOT_TOWN" or "FR_OAKS_LAB")
+    Stack.pop("bag")
+    uiStep(function() end, game, 1 / 60)
+    eq(shownStale, 0, L .. "a line queued before another save was loaded is dropped unseen")
+    eq(#ui.deferred, 0, L .. "and leaves the queue")
+    eq(Stack.depth(), 0, L .. "nothing went up")
+    game.session = kept
+    Stack.push("bag", noop)
+    ui:whenFree(game, function() shownStale = shownStale + 1 return ui:say("Mine.") end)
+    local asked = 0
+    ui:whenFree(game, function() asked = asked + 1 return ui:say("EVE wants to\nteam up!") end,
+      { owner = "party" })
+    game.session = nil
+    eq(ui.dropStale and ui:dropStale(), 1, L .. "back at the title (no session) it is stale too")
+    eq(#ui.deferred, 1, L .. "but an owned ask (about the hub, not the save) stays")
+    game.session = session3(version, em and "EM_LITTLEROOT_TOWN" or "FR_OAKS_LAB")
+    Stack.pop("bag")
+    uiStep(function() end, game, 1 / 60)
+    eq(asked, 1, L .. "and goes up under the next save")
+    game.session = kept
+    Stack.clear()
+    ui.deferred, ui.deferredBox = {}, nil
+
+    -- ------- a layer pushed ahead of the step does not take its press
+    --
+    -- Client's network tick runs inside input.step, before Input:step makes
+    -- the step's presses: a box it pushes there was stamped with the step
+    -- that had just ended, and took the A pressed while it was not yet up.
+    local ran = {}
+    local probeItems = { { label = "ONE", onSelect = function() ran[#ran + 1] = "ONE" end } }
+    uiStep(function()
+      Gen3Ui.push(game, "Probe", { items = probeItems })
+    end, game, 1 / 60)
+    eq(topId(), "rby_mmo:Probe", L .. "a menu the tick pushed is up")
+    step(game, "a")
+    eq(#ran, 0, L .. "the A of the step it went up ahead of is not its own")
+    step(game, "a")
+    eq(ran[1], "ONE", L .. "the next A is")
+    Stack.clear()
+    -- the same box pushed after Input:step (from handleInput) keeps the old
+    -- stamp: the step after it is already its own
+    Gen3Ui.register("Opener2", { new = function(g)
+      local s = { kind = "opener" }
+      function s.handleInput(_, input)
+        if input:wasPressed("a") then Gen3Ui.push(g, "Probe", { items = probeItems }) end
+      end
+      return s
+    end })
+    Gen3Ui.push(game, "Opener2")
+    step(game)
+    step(game, "a")
+    eq(topId(), "rby_mmo:Probe", L .. "a menu an A opened is up")
+    step(game, "a")
+    eq(#ran, 2, L .. "and the next step's A is its own")
+    Stack.clear()
+  end
+
+  -- ------- the line a trade holds the screen with
+  local hold = ui.holdScreen and ui:holdScreen(game, "Waiting for\nBOB...")
+  check(hold ~= nil, L .. "holdScreen puts a line up")
+  eq(topId(), "rby_mmo:RbyMmoHold", L .. "as its own screen")
+  eq(hold and hold.kind, "hold", L .. "which says what it is")
+  eq(hold and hold.text, "Waiting for\nBOB...", L .. "with its text")
+  steps(game, 200)
+  for _, button in ipairs({ "a", "b", "start", "select", "a" }) do step(game, button) end
+  eq(Gen3Ui.top(), hold, L .. "no button dismisses it")
+  local okHold, errHold = drawAll()
+  check(okHold, L .. "it draws (" .. tostring(errHold) .. ")")
+  eq(Ui.occupied(game), false, L .. "it is this mod's own, so the confirm can go up over it")
+  local answer
+  ui:confirm(game, "Trade for\nZAP?", function(yes) answer = yes end)
+  steps(game, 200)
+  step(game, "a")
+  eq(answer, true, L .. "the confirm over it is answered")
+  eq(Gen3Ui.top(), hold, L .. "and the hold is back on top")
+  check(hold ~= nil and Ui.pop(game, hold), L .. "whoever put it up takes it down")
+  Stack.clear()
+  eq(Stack.depth(), 0, L .. "and it is gone")
+
+  -- ------- a sprite name off the wire draws only when it is a look
+  --
+  -- gfxIdFor's last fallback (when neither the mod's characters nor the
+  -- cart's link-player rule answered) resolved any name the cart has a
+  -- graphic for -- a Cut tree, a boulder -- for a peer to be drawn as.
+  do
+    local realViewer, realGfx = Gen3.viewerGfxFor, Gen3.gfxId
+    Gen3.viewerGfxFor = function() return nil end
+    Gen3.gfxId = function(name) return type(name) == "string" and 77 or nil end
+    eq(Gen3Ui.gfxIdFor(em and "OBJ_EVENT_GFX_CUTTABLE_TREE" or "OBJ_EVENT_GFX_CUT_TREE", {}), nil,
+      L .. "a Cut tree named off the wire is never drawn")
+    eq(Gen3Ui.gfxIdFor("OBJ_EVENT_GFX_PUSHABLE_BOULDER", {}), nil, L .. "nor a boulder")
+    eq(Gen3Ui.gfxIdFor(em and "OBJ_EVENT_GFX_BRENDAN_NORMAL" or "OBJ_EVENT_GFX_RED_NORMAL", {}), 77,
+      L .. "a player look still is")
+    eq(Gen3Ui.gfxIdFor(12, {}), 12, L .. "and a number is the caller's own id")
+    Gen3.viewerGfxFor, Gen3.gfxId = realViewer, realGfx
+  end
+
+  -- ------- measured once, not every frame
+  local Font = Gen3Ui.Font
+  local realFit, realWidth = Font.fit, Font.width
+  local fits, widths = 0, 0
+  Font.fit = function(...) fits = fits + 1 return realFit(...) end
+  Font.width = function(...) widths = widths + 1 return realWidth(...) end
+  local listItems = {
+    { label = "A VERY LONG NAME THAT CANNOT FIT ON ONE ROW OF THIS LIST", right = "Lv50" },
+    { label = "SHORT", right = "NO" },
+  }
+  local lm = Gen3Ui.ListMenu.new(game, "LIST", listItems, {
+    caption = function() return "A CAPTION LONGER THAN THE TITLE WINDOW CAN HOLD AT ALL" end,
+  })
+  Gen3Ui.pushScreen(game, "ProbeList", lm)
+  drawAll()
+  check(fits > 0, L .. "a list's first frame fits its rows")
+  fits, widths = 0, 0
+  drawAll()
+  drawAll()
+  eq(fits, 0, L .. "later frames fit nothing again (" .. fits .. ")")
+  eq(widths, 0, L .. "nor measure a right column again (" .. widths .. ")")
+  listItems[2].label = "CHANGED"
+  drawAll()
+  eq(fits, 1, L .. "a row whose label changed is fitted again, once")
+  Stack.clear()
+  local menuItems = { { label = "ONE" }, { label = "TWO" } }
+  Gen3Ui.pushScreen(game, "ProbeMenu", Gen3Ui.Menu.new(game, menuItems, {}))
+  drawAll()
+  widths = 0
+  drawAll()
+  drawAll()
+  eq(widths, 0, L .. "a Menu measures its rows once (" .. widths .. ")")
+  menuItems[1].label = "ONE MORE"
+  drawAll()
+  eq(widths, 2, L .. "and a changed row again")
+  Stack.clear()
+  Font.fit, Font.width = realFit, realWidth
+
+  local realLabel, realCollisions = Ui.rankLabel3, Ui.nameCollisions
+  local labelled, collided = 0, 0
+  Ui.rankLabel3 = function(...) labelled = labelled + 1 return realLabel(...) end
+  Ui.nameCollisions = function(...) collided = collided + 1 return realCollisions(...) end
+  local keptRanking = st.ranking
+  st.ranking = {
+    { name = "BOB", id = "b0b0", points = 1234, sprite = "OBJ_EVENT_GFX_RED_NORMAL" },
+    { name = "BOB", id = "c1c1", points = 99, sprite = "OBJ_EVENT_GFX_RED_NORMAL" },
+    { name = "CAL", id = "d2d2", points = 5, sprite = "OBJ_EVENT_GFX_RED_NORMAL" },
+  }
+  Ui.push(game, Ui.SCREEN.RANK, {})
+  printed = {}
+  drawAll()
+  drawAll()
+  drawAll()
+  eq(collided, 1, L .. "RANK works the duplicate names out once per answer")
+  eq(labelled, 3, L .. "and each row's name once")
+  check(wasPrinted(realLabel("BOB", "b0b0", true, "1234")), L .. "and still prints them")
+  st.ranking = { { name = "DEE", id = "e3e3", points = 7, sprite = "OBJ_EVENT_GFX_RED_NORMAL" } }
+  drawAll()
+  eq(collided, 2, L .. "a new answer from the hub is worked out again")
+  Ui.rankLabel3, Ui.nameCollisions = realLabel, realCollisions
+  st.ranking = keptRanking
+  Stack.clear()
+
   Stack.clear()
   run.loader.game = nil
   run.release()
@@ -1297,6 +1506,8 @@ do
   eq(ran, 1, "gen 1: once")
   eq(ui1.deferred, nil, "gen 1: nothing is ever queued")
   eq(ui1:pumpDeferred({}), false, "gen 1: and the pump has nothing to do")
+  check(ui1.holdScreen ~= nil and ui1:holdScreen({}, "Waiting...") == nil, "gen 1: holdScreen puts nothing up")
+  check(ui1.dropStale ~= nil and ui1:dropStale() == 0, "gen 1: and nothing is ever stale")
   _G.require = inner
   eq(#seen, 0, "gen 1: no src.*.game3.* module was required")
   run.release()
