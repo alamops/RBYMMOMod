@@ -132,7 +132,7 @@ node hub.js --generation 3
 
 Needs protocol 30 or newer (the release that added Gen 3): an older hub reads
 3 as "not 1 or 2" and runs as Gen 1. `run-server.sh` and `upgrade-server.sh`
-warn before they start one.
+refuse to start or move onto one, before anything is written or built.
 
 If `--generation` / `generation` / `RBY_MMO_GENERATION` is omitted, the hub
 defaults to **1** and prints a startup warning that Gen 2 and Gen 3 hubs must
@@ -1554,8 +1554,8 @@ FireRed / LeafGreen / Emerald (one room for all three). The default is `1`
 written into `server/.env` (`RBY_MMO_GENERATION`, `RBY_MMO_HOST_PORT`).
 Compose interpolates generation as empty when unset — the hub skips empty
 env, so `config.json` wins and a Gold or Gen 3 volume is not forced back to
-1. A Gen 3 lock on a release older than protocol 30 draws a warning before
-anything starts: that hub would read 3 as 1.
+1. A Gen 3 lock on a release older than protocol 30 is refused before
+anything is written or built: that hub would read 3 as 1.
 `upgrade-server.sh` keeps those locks. Friends on the other generation
 are refused.
 

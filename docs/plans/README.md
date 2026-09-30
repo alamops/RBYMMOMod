@@ -12,6 +12,8 @@ Working notes for features that were (or are being) implemented in this repo.
 | [`fix-battle-system-v2-quarkst.md`](fix-battle-system-v2-quarkst.md) | Attack SFX, win-music/HP race, joiner rematch (PROTOCOL 20) |
 | [`gen2-compatibility.md`](gen2-compatibility.md) | Dual Gen1+Gen2 hubs, BattleSim2, trade, co-op, e2e — shipped |
 | [`gen2-new-battle-system.md`](gen2-new-battle-system.md) | The arena, the band, exp and retargeting on Gold — shipped |
+| [`gen3-firered-emerald-support.md`](gen3-firered-emerald-support.md) | FireRed / LeafGreen / Emerald: one Gen 3 hub (PROTOCOL 30), presence, screens, trade, every battle — shipped in 1.5.0 (§10 lists what differs from the plan) |
+| [`gen3-battle-sheet.md`](gen3-battle-sheet.md) | The Gen 3 battle sheet (C4), event vocabulary (C5) and RNG order that `BattleSim3` and `server/lib/battle3` are held to — living contract |
 | [`party-wild-encounter.md`](party-wild-encounter.md) | Party vs Wild (`coop_wild`) — in progress |
 | [`coop-battle-intro-anims.md`](coop-battle-intro-anims.md) | CoopBattle intro balls + sequential Go!/POOF — implemented |
 | [`guild-focus-battle-ui.md`](guild-focus-battle-ui.md) | CoopBattle focus stage + side strips |

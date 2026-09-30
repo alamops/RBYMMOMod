@@ -3,9 +3,13 @@
 **For:** `bryanthaboi/gen1recomp`, the game3 (FireRed / LeafGreen / Emerald)
 mod surface. Against `dev` @ `fdea09dc`.
 **Found by:** `rby_mmo`, porting its shared overworld to Gen 3.
-**Status:** a proposal. `rby_mmo` ships on Gen 3 today with the reach-arounds
-described below, isolated in three files and each behind a `pcall`; nothing in
-this document is a workaround we intend to keep once a seam exists.
+**Status:** a proposal. `rby_mmo` 1.5.0 ships on Gen 3 with the reach-arounds
+described below, isolated in a handful of files (`src/Avatars.lua`,
+`src/Cast.lua`, `src/CoopField.lua`, `src/Gen3Ui.lua`, all reaching the engine
+through `src/Gen3.lua`) and each behind a `pcall`; every module-function wrap
+goes through one discipline, `Gen3.wrapFn` / `unwrapFn`, which keeps the
+original and re-applies rather than stacks on a hot reload. Nothing in this
+document is a workaround we intend to keep once a seam exists.
 
 ## Summary
 
@@ -73,8 +77,9 @@ What that costs:
   so it loses the sort. That is a draw-order hack in a field the engine also
   uses as a position.
 - **The FRLG quest-log recap** captures everything in `Objects.forDraw()`, so a
-  recap can show another player standing where they stood — true, but not
-  something the mod asked for.
+  recap would show another player standing where they stood — and, since the
+  recap is saved, keep them in the save. The mod filters its own objects out
+  (see "Quest-log persistence" at the end).
 
 ### 2. The player's own look (`src/Cast.lua`)
 
@@ -98,9 +103,14 @@ arbitrate it.
 
 `screen.pushed` has no game3 emit, so everything the Gen 1 / Gen 2 mod learns
 from it (a battle arriving, a menu covering the field) is polled from
-`src/ui/game3/stack.lua` and `src/core/game3/battle.lua` instead. (Encounter
-diversion itself goes through `encounter.roll` and `script.command`, which do
-fire on game3.)
+`src/ui/game3/stack.lua` and `src/core/game3/battle.lua` instead. Encounter
+diversion is split: step wilds go through the public `encounter.roll` hook,
+which does fire on game3, while trainers — and the wild fights that never pass
+that hook (fishing, Rock Smash, Sweet Scent) — are taken by wrapping
+`BattleBridge.start`, because a `script.command` link on `trainerbattle` could
+only replace the whole opcode and would then have to suspend the VM through a
+private poll. That wrap, its costs and the `battle.intercept` seam that would
+replace it are described in the addendum at the end.
 
 ## Proposed API delta
 
@@ -215,6 +225,10 @@ battles. Guarded by `Runtime.wants`.
 - `src/Cast.lua`: `installLook3` / `restoreLook3` (becomes a `player.sprite`
   link, as on Gen 1).
 - The Gen 3 stack polling that stands in for `screen.pushed`.
+- With the runtime-object marker asked for at the end of this document: the
+  ghost-pool purge on every map change and the `QuestLogRecorder.capture` and
+  `RotatingTilePuzzle.move` wraps. (The look fence stays either way: a remote
+  player should be drawn as a walking person, not a boulder.)
 
 ## Addendum — taking a battle over (`battle.intercept`)
 
@@ -313,3 +327,11 @@ CONTINUE_SCRIPT ran and no battle started.
 `CoopField.installStart3` / `restoreStart3` / `divertTrainer` and the
 hand-written half of the finish ritual (`Stand:finish` keeps only the call to
 `spec.finish`); the `encounter.roll` link can stay or move to the new hook.
+
+## Additional costs of the reach-around (found in review, 2026-09-30)
+
+**Ghost capture.** `Map.load` calls `Ghosts.capture(Map.current)` (map.lua:303) before `Objects.loadMap` (map.lua:510), copying the live object list into `Ghosts._pools[oldMap]`; `FieldView.collectNeighborActors` (field_view.lua:369, via `Objects.poolForDraw`) keeps drawing that pool while the old map is a neighbour. An injected runtime object is therefore drawn frozen on the far side of every seamless edge, and twice once its owner follows. The mod works around it by retiring an avatar it lets go (`hidden`/`visible`) and purging its marked objects from every ghost pool on each map change. **Ask:** spawnNpc objects should be runtime-owned — `Ghosts.capture` and `adoptPool` skip them (e.g. a `runtime = true` flag on the event object) and they are removed only on the spawner's request.
+
+**Quest-log persistence.** `quest_log_recorder.capture` records `Objects.forDraw()` as actor frames into `session.questLog`, which is saved — so injected objects replay in the FireRed/LeafGreen CONTINUE recap. The mod wraps `QuestLogRecorder.capture` and drops actors whose id is in its local-id block (`GEN3_AVATAR_LOCAL_ID_BASE`..+0xFF). **Ask:** the recorder should skip runtime-flagged objects, or offer a `quest_log.capture` hook.
+
+**Walkers.** Several engine passes walk `Objects._order` or key on graphics for their own ends: `RotatingTilePuzzle.move` shoves every visible object on an arrow tile, gives it a track and names it `lastMoved`; the VS Seeker charge completion (vs_seeker.lua:610-635) freezes every object and waits while any is moving; `Field.interact` offers Cut/Rock Smash/Strength by `def.graphicsId` before the script key. No marker is honoured by these but not by the renderer. The mod hides avatars around `RotatingTilePuzzle.move` and restricts avatar graphics to player looks. **Ask:** one engine predicate (e.g. `Objects.isMapObject(eo)`) that map logic checks, so a spawned object draws and collides like any other but is never moved, recorded or offered a field move.

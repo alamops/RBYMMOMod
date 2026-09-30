@@ -4,6 +4,192 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.5.0] - 2026-09-30
+
+### Added
+
+- **FireRed, LeafGreen and Emerald.** `manifest.games` now claims `gen3`, and
+  every surface the mod has on Red and Gold works on the three Game Boy
+  Advance carts. `START` gets an `MMO` row above `SAVE`, and every screen
+  behind it — the MMO menu, `PLAYERS`, `FRIENDS`, chat and its log, the
+  trainer cards, `RANK`, `SERVERS`, host / join / code entry, `CHARACTER`,
+  the walk-up menu, the trade picker and every request prompt — is drawn
+  natively on the 240×160 screen in the cart's own font and window frames
+  (`src/Gen3Ui.lua`, on the game3 modal stack). A trade ask, a party invite
+  or a friend ask that arrives while the cart's own menu, text or script owns
+  the screen waits for it to close. Plan:
+  `docs/plans/gen3-firered-emerald-support.md`.
+- **Presence on Gen 3.** Other players are real game3 overworld objects,
+  walking on the cart's own sheets with its step animation and depth sorting,
+  with nameplates that follow the game3 camera and the same corner toasts as
+  the other carts. The pace you walk, run (the carts' own Running Shoes) or
+  ride at reaches everyone. `CHARACTER` offers a Gen 3 wardrobe — the heroes
+  of all three carts, rivals, professors, trainer classes, gym leaders and
+  the Elite Four, every one a walking figure — and a look the viewer's cart
+  lacks is drawn the way that cart's Cable Club draws a partner. `PLAYERS`
+  names places from the cart's own map sections, and your party is listed
+  over FireRed's TOWN MAP and Emerald's PokéNav HOENN MAP.
+- **One hub for all three carts, region-scoped.** A Gen 3 hub seats
+  FireRed, LeafGreen and Emerald together: chat, friends, parties, rank,
+  trades and battles cross carts, while the overworld stays per region
+  (Kanto and the Sevii Islands for FireRed / LeafGreen, Hoenn for Emerald) —
+  a player in the other region is on the roster and never on the map.
+- **Trade on Gen 3** (`src/Trade3.lua`). The engine's own
+  `packMon3` / `unpackMon3`, strict; held items and mail travel; the dex is
+  marked seen and caught; the carts' own trade rules (last healthy mon, the
+  National Dex, eggs, event-only MEW / DEOXYS) and their cross-region
+  progress gate apply; a trade evolution plays the cart's EvolutionScene
+  (an Everstone refuses, a trade item is used up). DEOXYS changes forme with
+  the cart it lands in. The swap is shown in text boxes, not the cart's trade
+  animation.
+- **A full Gen 3 battle referee.** `src/BattleSim3/` and its Node twin
+  `server/lib/battle3/` port the carts' battle code: Gen 3 damage, crits,
+  accuracy and the ordered type chart, all 214 `EFFECT_*` move effects, 77
+  abilities, 66 hold effects, weather, end-of-turn residuals, double-battle
+  targeting and spread damage, catching and running. The two are held
+  together by shared vector and turn-parity fixtures; the sheet, the event
+  vocabulary and the RNG order are specified in
+  `docs/plans/gen3-battle-sheet.md`. The hub holds no ROM tables — every
+  number a formula needs arrives on the client's sheet.
+- **Every battle on Gen 3.** Mediated 1-on-1, co-op 2-on-2 against a wild
+  POKéMON or a trainer, and party against party are refereed by the hub on
+  BattleSim3 (`src/Sheet3.lua` builds the sheet, ruleset and bag from the
+  save). Afterwards EXP and EVs are priced by the cart's own formula
+  (`src/Exp3.lua`, which pays from the referee's roster, Exp. Share
+  included), moves are learned through the cart's LearnMove and evolutions
+  play its EvolutionScene; a catch lands in the party or the PC with the dex
+  marked and a nickname prompt; a won trainer fight pays the cart's prize
+  (class × level, Amulet Coin) and a lost one whites out. A fight between
+  players is a Cable Club battle: held-item changes are not written home.
+- **SOLO BATTLES on Gen 3.** Wild and trainer fights run on a local
+  BattleSim3 with foes built the way the engine builds them (wild IV and
+  held-item rolls, trainer rows' IVs, moves and items), the cart's prize and
+  defeat lines, and its after-battle order. Trainers play with a Gen 3 brain
+  ported from the carts' trainer AI scripts, enabled per trainer by its AI
+  flags.
+- **The encounter divert on Gen 3.** Step encounters are taken through the
+  public `encounter.roll` hook. Trainers, and the wild fights that never pass
+  that hook (fishing, Rock Smash, Sweet Scent), are taken at one contained
+  wrap of the engine's `BattleBridge.start`, which runs the cart's own
+  post-battle steps and the trainer opcode's own continuation when the mod's
+  fight ends. The proposed upstream seam that would replace it is in
+  `docs/upstream/gen3-spawn-npc.md`.
+- **The arena and a GBA CLASSIC BATTLE UI on Gen 3.** The arena draws the
+  carts' own 64×64 pics seated at their cart elevation, animated 32×32 icons,
+  overworld walkers and trainer pics, a backdrop built at runtime from the
+  cart's own battle background, weather overlays and the Substitute doll.
+  `CLASSIC BATTLE UI` draws a FireRed / Emerald-style battle screen from the
+  cart's own chrome (HP boxes, EXP bar, party balls, action and move menus
+  with PP and TYPE, party / bag / target pickers, 2-on-2 and 3-on-3 focus).
+  Every Gen 3 move and item resolves a particle look.
+- **Gen 3 test runs.** `tests/drivers/run-mmo-e2e-gen3.sh`
+  (`GEN3_GAME=firered|leafgreen|emerald`), `run-trip-e2e-gen3.sh` (a Node hub
+  on `--generation 3` with FireRed, FireRed and Emerald),
+  `run-mismatch-e2e-gen3.sh`, `run-battlefield-e2e-gen3.sh` and
+  `run-solo-battle-e2e.sh --gen3`, each leg with a screenshot and an
+  `index.html` contact sheet (`tests/drivers/shots_index.py`); `.env` takes
+  `FIRE_RED_ROM_PATH`, `LEAF_GREEN_ROM_PATH` and `EMERALD_ROM_PATH`. Headless:
+  `tests/gen3_*.lua`, `tests/trade3.lua`, `tests/battle_sim3_*.lua`,
+  `server/gen3.test.js`, `server/battle3_*.test.js`, and a tri-generation
+  load block in the main suite.
+
+### Changed
+
+- **PROTOCOL is now 30.** `generation` on `mmo.hello` reads 1, 2 or 3, and a
+  generation a hub does not know is **refused** instead of clamped to 1 — a
+  protocol-29 hub admitted a FireRed client into a Red room. A hello with no
+  generation is still read as Gen 1. The hello also carries the cart
+  (`version`: `firered`, `emerald`, `red`, `gold`, …), kept only when it
+  belongs to the admitted generation and carried on every presence, so a
+  viewer maps another cart's sprite through the cart it came from. The Gen 3
+  battle-sheet dialect (abilities, held items, natures, IVs to 31, EVs to
+  255) is part of the same number. An older mod or hub is refused at the door
+  with a sentence naming both versions: **update the hub and the mod
+  together.**
+- **Hubs lock to generation 3.** `--generation 3` on the CLI, `hub.js` and
+  both deploy scripts, `"generation": 3` in `config.json`, or
+  `RBY_MMO_GENERATION=3`; `HOST GAME` on a Gen 3 boot locks the room to 3 by
+  itself. `status.json` and `rby-mmo-hub stats` now report the generation
+  beside the protocol (`3 (Gen 3 / FRLG + Emerald)`). `run-server.sh` and
+  `upgrade-server.sh` refuse — not warn — a Gen 3 lock on a release older
+  than protocol 30, before anything is written or built, since that hub would
+  read 3 as 1 and turn every Gen 3 player away.
+- **No `B TO RUN` row on a Gen 3 boot.** The carts have Running Shoes of their
+  own and never call the hook that row switches. A stored value is kept for
+  a Gen 1 boot of the same copy.
+- The manifest description now names all three generations.
+
+### Fixed
+
+- **Gold: a mediated fight re-sent learned moves with the Gen 1 effect
+  table.** `sheetMoves` dropped the generation, so a move learned mid-fight
+  on Gold went to the referee with Red's effect id. It keeps the generation
+  now (regression test in `tests/mediated_battle_client.lua`).
+- **Gold: co-op item effects came from the Gen 1 table.** Berries and Kurt's
+  balls were looked up among Red's items. Co-op now reads each generation's
+  own item effects.
+- **Gold: the co-op prize went to the wrong wallet.** The synthetic trainer
+  prize was written to `save.money`, which Gold does not read (it keeps
+  `save.player.money`). It goes through `Gen.money` now.
+- **A trade whose apply returned nothing was reported as a success.** A
+  `Trade2` (and now `Trade3`) apply that answers nil is a failed trade: the
+  player is told, and nothing is saved (pinned in `tests/trade2.lua`).
+- **The main suite is green again.** The co-op party block and the NPC RUN
+  block were stale after #87 and #86, and the victories-table scan could
+  reach a helper function first and crash intermittently at the gym-music
+  block; it now skips non-table entries.
+- **The release archive carried test code.** Thirty-four Gen 1 and Gen 2
+  drivers, suites and parity fixtures, a config backup and a scratch log had
+  no `.modkitignore` line, so the release zip shipped them (the workflow drops
+  only listed paths and `docs/`). Every file under `tests/` is now listed,
+  the new Gen 3 ones included, and so are the unlisted plans and screenshots
+  for a locally built `modkit pack` — among them the review captures under
+  `docs/screenshots/nicknames/`, which were named by a directory line
+  `modkit pack` never matches.
+
+### Known
+
+- **FireRed / LeafGreen ↔ Emerald trades follow the carts' post-game rule.**
+  Both saves must be far enough in: FireRed and LeafGreen once the cart can
+  link with Ruby and Sapphire (the Sevii Islands post-game), Emerald once
+  the player is Champion; a POKéMON from outside a cart's regional dex, or
+  an egg, also needs that cart's National Dex. Same-region trades are free.
+- **SOLO BATTLES leaves more fights to the cart on Gen 3:** Emerald's double
+  trainer battles (two trainers, a partner, or a double on its own), the
+  Safari Zone, roaming and scripted legendaries, the Battle Frontier,
+  Trainer Tower and Trainer Hill, the first battle, and the tutorial fights.
+- **A player on a neighbouring map is not drawn across a seamless map edge.**
+  The engine copies live objects into the neighbour's draw pool when a map
+  loads, which left remote players frozen (and doubled) on the far side;
+  the mod now purges its avatars from those pools, so you see another player
+  once you share a map.
+- **Party-on-map on Gen 3 is a list over the region map**, not a figure
+  standing on a city as on Red.
+- **No official Gen 3 server** is on the `SERVERS` list — none is deployed.
+- **LeafGreen has not been run live.** It shares FireRed's engine path and is
+  covered by the headless suites.
+- **Gen 3 reaches into engine internals** (`engine_internals`, declared since
+  before this release) where the game3 mod API has no seam yet: avatars are
+  injected into the engine's object list, the worn look wraps
+  `OwSprites.playerGraphicsId`, trainer diversion wraps
+  `BattleBridge.start`, and avatars are shielded from the FireRed quest-log
+  recorder and Emerald's rotating-tile puzzle. Each wrap keeps the engine's
+  original and is re-applied, never stacked, across a hot reload; all of it
+  is written up as an upstream proposal in
+  `docs/upstream/gen3-spawn-npc.md`. An engine
+  update that renames one of those internals can break that feature on Gen 3
+  until the mod follows.
+- **A remote player walking nearby can hold the VS Seeker's charge a
+  moment**: the cart waits for every object to stop moving, avatars
+  included.
+- **No Pay Day coins from a fight this mod referees on Gen 3.** A fight
+  between players pays none, as the carts' link battles don't; a solo or
+  co-op fight against a wild POKéMON or a trainer doesn't pay them yet
+  either, where the cart would after its own fight.
+- **Engine, not mod:** on a fresh Emerald save the heal point is still the
+  moving truck, so a whiteout before the first POKéMON CENTER — the cart's
+  or a mod-run fight's — respawns there.
+
 ## [1.4.19] - 2026-09-29
 
 ### Fixed

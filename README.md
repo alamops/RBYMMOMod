@@ -6,12 +6,14 @@ Other trainers walk the same routes you do — real sprites, names over their
 heads, a line in the corner when they talk. Bump into someone outside Viridian
 and trade on the spot. Or throw down, right there on the grass.
 
-A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp).
+A multiplayer mod for [Gen1Recomp](https://github.com/bryanthaboi/gen1recomp),
+on every cart it boots: Red, Blue and Yellow, Gold, and now FireRed,
+LeafGreen and Emerald ([the Gen 3 part](#-firered-leafgreen-emerald--the-same-mod-on-the-gba)).
 
 ![LÖVE 11.x](https://img.shields.io/badge/L%C3%96VE-11.x-e64998?style=for-the-badge)
 ![Players 2–64](https://img.shields.io/badge/players-2--64-3aa757?style=for-the-badge)
 ![No server needed](https://img.shields.io/badge/dedicated%20server-optional-4c8fd6?style=for-the-badge)
-![v1.4.19](https://img.shields.io/badge/version-1.4.19-3aa757?style=for-the-badge)
+![v1.5.0](https://img.shields.io/badge/version-1.5.0-3aa757?style=for-the-badge)
 ![MIT](https://img.shields.io/badge/licence-MIT-666?style=for-the-badge)
 
 **No server to rent. No accounts. No signup.** One of you hosts from inside
@@ -110,6 +112,7 @@ walks the full configuration of each path, screen by screen.
 ```
 ╔════════════════════════════════════════════════════════════╗
 ║  SHARED KANTO      up to 64 trainers, one live overworld   ║
+║  EVERY CART        RBY, Gold, FireRed, LeafGreen, Emerald  ║
 ║  ZERO SETUP        one of you hosts from inside the game   ║
 ║  FULL LINK SUITE   trade + battle, anywhere on the map     ║
 ╚════════════════════════════════════════════════════════════╝
@@ -562,8 +565,11 @@ battle runs and the mod stays invisible. Same posture for anything that goes
 wrong on the way in: it logs a line and steps aside, so the worst case costs
 you a fancier battle screen and never the encounter.
 
-Both carts — Gen 1 (Red/Blue/Yellow) and Gold. And if you're connected and
-partied, **co-op still wins**: solo only takes the fights co-op didn't.
+Every cart — Gen 1 (Red/Blue/Yellow), Gold, and FireRed / LeafGreen /
+Emerald, where the referee is the Gen 3 one and a few more fights stay the
+cart's ([listed with the Gen 3 part](#-firered-leafgreen-emerald--the-same-mod-on-the-gba)).
+And if you're connected and partied, **co-op still wins**: solo only takes
+the fights co-op didn't.
 Design notes: [`docs/plans/offline-solo-battles.md`](docs/plans/offline-solo-battles.md).
 
 ### ✨ EVERY MOVE LOOKS LIKE SOMETHING
@@ -740,7 +746,9 @@ you can see which hub your game opens into without opening anything, and its
 own row reads `NO AUTOJOIN` — press it again to switch it off. `RBY MMO
 OFFICIAL` (Red / Blue / Yellow) and `GSC MMO OFFICIAL` (Gold / Silver /
 Crystal) can be the armed one too; it's the only setting on that row that's
-yours rather than built in.
+yours rather than built in. There is no official FireRed / LeafGreen / Emerald
+hub yet, so a Gen 3 boot is offered neither row — it reaches a hub by address
+like any other.
 
 **Only one server can auto-join.** Arming a second is what disarms the first,
 so the game asks first — `Stop auto-joining <NAME>?`, yes or no, naming the
@@ -891,6 +899,102 @@ spoken for, and `BADGES/8` is the one that leaves most of its row empty.
 Spawning real NPCs means whoever owns the world pass draws your friends too.
 Run it with a voxel renderer and they show up **as voxel characters**, no
 work required.
+
+### 🔥 FIRERED, LEAFGREEN, EMERALD — THE SAME MOD, ON THE GBA
+Everything above works on the Game Boy Advance carts too. Boot FireRed,
+LeafGreen or Emerald and `START` has an `MMO` row above `SAVE`, the same as on
+Red and Gold. Every screen behind it — the menus, `PLAYERS`, `FRIENDS`, the
+chat log, the trainer cards, `RANK`, `SERVERS`, `HOST` and `JOIN`, the
+character list, the trade picker and every yes/no — is drawn natively on the
+cart's 240×160 screen, in the cart's own font and window frames. None of it
+opens over the cart's own menus or text: an ask that arrives while one is up
+waits until it closes.
+
+- **They're really there, again.** Other players are real overworld objects
+  on the cart's own map — its walking sheets, its step animation, its depth
+  sorting — with their nickname over their head. The carts have Running Shoes
+  of their own, so there is no `B TO RUN` row here; how fast you walk, run or
+  ride still reaches everyone else's screen.
+- **A Gen 3 wardrobe.** `CHARACTER` lists the heroes of all three carts, the
+  rivals and professors, the trainer classes, the gym leaders and the Elite
+  Four — every one a figure that walks on its cart. A look the other cart
+  doesn't have is drawn the way that cart's own Cable Club would draw the
+  player: an Emerald player dressed as ROXANNE shows up on FireRed as the
+  Ruby/Sapphire girl. `NIRE` and `NIRE HOOD` stay on Gen 1 for now.
+- **Your party, on the region map.** Open FireRed's TOWN MAP or Emerald's
+  PokéNav HOENN MAP and your party members are listed over it, with where
+  each of them is standing. (A list rather than a figure on a city, as Red
+  draws it.)
+- **Trades are Gen 3 trades.** Held items and mail travel, the dex is marked
+  seen and caught, and a trade evolution plays the cart's own evolution scene
+  — an Everstone refuses, a Metal Coat or a King's Rock is used up. DEOXYS
+  changes forme with the cart it lands in, as it does between the real carts.
+  The swap itself is shown in text boxes rather than the cart's trade
+  animation.
+- **Battles are Gen 3 battles.** 1-on-1, co-op 2-on-2 against a wild POKéMON
+  or a trainer, party against party, and `SOLO BATTLES` all run on a full
+  Gen 3 referee — `src/BattleSim3` in the game, `server/lib/battle3` on a
+  dedicated hub — with abilities, held items, weather, natures and IV/EV
+  stats, every move effect, and double-battle targeting and spread damage.
+  EXP, EVs, move learning and evolution afterwards follow the cart's own
+  rules. The arena draws the carts' own pics, trainers and weather; `CLASSIC
+  BATTLE UI` swaps it for a FireRed/Emerald-style battle screen drawn from the
+  cart's own battle chrome. A fight against another player is a Cable Club
+  battle: a berry eaten or an item stolen with THIEF is back where it was
+  afterwards.
+
+**One hub for all three carts.** A Gen 3 hub seats FireRed, LeafGreen and
+Emerald players together — chat, friends, parties, rank, trades and battles
+all cross carts. What doesn't cross is the overworld: FireRed and LeafGreen
+walk Kanto and the Sevii Islands, Emerald walks Hoenn, so a player in the
+other region is on your `PLAYERS` list, with the place they're in, and never
+on your map. Gen 1 and Gen 2 players are refused by a Gen 3 hub, and a Gen 3
+player by theirs, in one sentence naming both generations.
+
+- **Hosting from the game** needs nothing extra: `HOST GAME` on a FireRed,
+  LeafGreen or Emerald boot locks the room to Gen 3 by itself.
+- **A dedicated hub** takes `--generation 3` —
+  `bash scripts/run-server.sh --generation 3`
+  ([the VPS scripts](#-a-dedicated-hub--configured-entirely-through-one-command)),
+  `rby-mmo-hub init --generation 3`, or `RBY_MMO_GENERATION=3`. It has to be a
+  release on protocol 30 or newer: an older hub reads 3 as 1, and the scripts
+  refuse to put a Gen 3 lock on one rather than start a room that turns every
+  FireRed and Emerald player away.
+- There is **no official Gen 3 server** on the `SERVERS` list yet; join a
+  Gen 3 hub by its address and passcode.
+
+**Trading between FireRed / LeafGreen and Emerald follows the carts' rule.**
+Two FireRed or LeafGreen saves trade freely, and so do two Emerald saves.
+Across the two regions both saves have to be far enough in, exactly as the
+cartridges require at a Cable Club: FireRed and LeafGreen once the cart can
+link with Ruby and Sapphire (the Sevii Islands post-game), Emerald once you
+are Champion — and a POKéMON from outside a cart's regional dex, or an egg,
+also needs that cart to have the National Dex. The trade screen says which of
+you isn't ready, in the cart's own words (`You can't trade with that game
+yet.`).
+
+**What stays different on Gen 3:**
+
+- `SOLO BATTLES` hands a few more fights back to the cart: Emerald's double
+  trainer battles (two trainers, a partner, or a double on its own), the
+  Safari Zone, roaming and scripted legendaries, the Battle Frontier, Trainer
+  Tower and Trainer Hill, the first battle, and the old man's and the
+  POKé DUDE's tutorial fights.
+- A player on the neighbouring map isn't drawn across a seamless map edge —
+  you see them once you're both on the same map.
+- A fight this mod referees pays no Pay Day coins: never between players, as
+  on the carts' own link battles, and not yet after a solo or co-op fight
+  against a wild POKéMON or a trainer either.
+- LeafGreen shares FireRed's engine path end to end and is covered by the
+  headless suites, but no live LeafGreen run has been made.
+- The game3 mod platform has no public way yet to spawn a walking object,
+  dress the player, hear a screen open or take a battle over, so on Gen 3 the
+  mod reaches into the engine (it declares `engine_internals`) in a few
+  contained, reversible places. They are documented, with the seams that
+  would replace them, in
+  [`docs/upstream/gen3-spawn-npc.md`](docs/upstream/gen3-spawn-npc.md); an
+  engine update that renames one of those internals can break presence, your
+  look or battle diversion on Gen 3 until the mod follows it.
 
 ---
 
@@ -1079,6 +1183,7 @@ pipe — `bash -s --` is what keeps them from being eaten:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 3
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --port 25565
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --version vX.Y.Z
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2 --port 25565 --open-firewall
@@ -1091,13 +1196,14 @@ does not fetch a release (unless you pass `--dir` to clone somewhere else).
 ```sh
 bash scripts/run-server.sh
 bash scripts/run-server.sh --generation 2
+bash scripts/run-server.sh --generation 3
 bash scripts/run-server.sh --port 25565 --open-firewall
 bash scripts/run-server.sh --help
 ```
 
 | Flag | What it does |
 | --- | --- |
-| `--generation`, `-g` `1\|2` | Hub lock. `1` is Red/Blue/Yellow (the default), `2` is Gold. Friends on the other generation are refused. |
+| `--generation`, `-g` `1\|2\|3` | Hub lock. `1` is Red/Blue/Yellow (the default), `2` is Gold, `3` is FireRed, LeafGreen and Emerald together. Friends on another generation are refused. A `3` on a release older than protocol 30 is refused before anything is written or started. |
 | `--port <n>` | Host port friends type (default `7788`). The container still listens on 7788; this only remaps the host side. |
 | `--version`, `-v` `<tag>` | GitHub release to clone (`vX.Y.Z` or `X.Y.Z`). Default: the newest release, looked up live. Ignored when this script is run from a checkout and `--dir` is not given. |
 | `--dir <path>` | Where the repo lives / will be cloned. Default: this checkout, or `$RBY_MMO_DIR`, or `./RBYMMOMod`. |
@@ -1110,8 +1216,8 @@ bash scripts/run-server.sh --help
 `--generation` and `--port` are written into `server/.env` as
 `RBY_MMO_GENERATION` and `RBY_MMO_HOST_PORT`, so a later `compose up` or
 `scripts/upgrade-server.sh` keeps them. Compose leaves generation empty
-when unset, so a Gold lock already in `config.json` is not forced back to
-1. `--generation` is how you switch.
+when unset, so a Gold or Gen 3 lock already in `config.json` is not forced
+back to 1. `--generation` is how you switch.
 
 If you omit a flag, the script also honours the matching environment
 variable (`RBY_MMO_GENERATION`, `RBY_MMO_HOST_PORT`, `RBY_MMO_DIR`,
@@ -1159,6 +1265,7 @@ release (`MODS → Import mod .zip`).
 bash scripts/upgrade-server.sh
 bash scripts/upgrade-server.sh --version vX.Y.Z
 bash scripts/upgrade-server.sh --generation 2
+bash scripts/upgrade-server.sh --generation 3
 bash scripts/upgrade-server.sh --reveal
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/upgrade-server.sh | bash -s -- --dir /path/to/RBYMMOMod
 ```
@@ -1167,7 +1274,7 @@ curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/upgr
 | --- | --- |
 | `--version`, `-v` `<tag>` | Target release (`vX.Y.Z` or `X.Y.Z`). Default: the newest GitHub release, looked up live. |
 | `--dir <path>` | Existing checkout to update. Finds one from, in order: this flag, this script's repo, `$RBY_MMO_DIR`, the running container's compose working dir, then `./RBYMMOMod`. |
-| `--generation`, `-g` `1\|2` | Hub lock. Default: keep whatever this checkout / container already runs. |
+| `--generation`, `-g` `1\|2\|3` | Hub lock. Default: keep whatever this checkout / container already runs. A `3` needs the target release to be on protocol 30 or newer; the script stops, changing nothing, if it isn't. |
 | `--reveal` | Print join codes after the restart (same as `invite list --reveal`). Off by default so an upgrade log is safe to keep. |
 | `--dry-run` | Print from → to; change nothing. |
 | `--self-test` | Helper assertions; no Docker, no fetch. |
@@ -1555,6 +1662,50 @@ looks right on Red and wrong on Gold fails rather than ships.
 Both skip cleanly (exit 0) when there is no Gold cache and no
 `GOLD_ROM_PATH`, because CI has no ROM and must not fail for not having one.
 
+### 🔥 …and on FireRed, LeafGreen and Emerald
+
+Gen 3 is a peer too, with runs of its own. Put your carts in `.env` — one key
+each, `FIRE_RED_ROM_PATH`, `LEAF_GREEN_ROM_PATH`, `EMERALD_ROM_PATH` (see
+`.env.example`) — then, from the engine root:
+
+```sh
+bash mods/rby_mmo/tests/drivers/run-mmo-e2e-gen3.sh                    # two FireRed instances
+GEN3_GAME=emerald bash mods/rby_mmo/tests/drivers/run-mmo-e2e-gen3.sh  # two Emerald instances
+bash mods/rby_mmo/tests/drivers/run-trip-e2e-gen3.sh                   # Node hub --generation 3: FireRed, FireRed, Emerald
+bash mods/rby_mmo/tests/drivers/run-mismatch-e2e-gen3.sh               # Gen 3 at a Gen 1 hub, and Red at a Gen 3 one
+bash mods/rby_mmo/tests/drivers/run-battlefield-e2e-gen3.sh            # the Gen 3 arena and GBA battle screen
+bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen3          # SOLO BATTLES on FireRed and Emerald
+```
+
+- 🎮 **`run-mmo-e2e-gen3.sh`** — the in-game host and a guest through the
+  real `START → MMO` menus: host and join by code, avatars walking as the
+  cart's own objects at the right pace, nameplates, the arrival toast, chat,
+  `PLAYERS` / profile card / `ADD FRIEND` / `FRIENDS` / `MY PROFILE` /
+  `RANK`, pressing A on the other player, a trade with a dex check, a party
+  with the region-map list, and leaving
+- 🗺️ **`run-trip-e2e-gen3.sh`** — **region-scoped presence**: the two FireRed
+  players see each other in Pallet Town, and the Emerald player in Littleroot
+  is on everybody's roster and nobody's map; each place is named in its own
+  region, and chat and a FireRed ↔ Emerald trade cross carts
+- 🚪 **`run-mismatch-e2e-gen3.sh`** — a Gen 3 boot dialling a Gen 1 hub, and a
+  Red boot dialling a Gen 3 hub, each refused with the reason on screen
+- 🎨 **`run-battlefield-e2e-gen3.sh`** — pixel assertions on the arena (1-on-1,
+  a hit, 2-on-2, a trainer's pic, the POKéMON list) and on the cart-style
+  classic screen (the move menu, 2-on-2, the party page, the bag, a trainer
+  intro), on FireRed and on Emerald
+- ⚔️ **`run-solo-battle-e2e.sh --gen3`** — wild and trainer fights on the local
+  Gen 3 referee, through to the save
+
+`GEN3_GAME=firered|leafgreen|emerald` picks the cart where a run takes one.
+Each run copies an already-imported cart into a throwaway save identity
+rather than importing it again, and only reads the ROM when no import exists
+anywhere; screenshots land as `g3-<game>-<role>-<NN>-<leg>.png` beside an
+`index.html` contact sheet. Every one of them exits 0 when there is no import
+and no ROM path for its cart. A LeafGreen run works the same way, but none has
+been made yet — LeafGreen is covered by the headless suites
+(`tests/gen3_*.lua`, `tests/trade3.lua`, `tests/battle_sim3_*.lua`,
+`server/gen3.test.js`, `server/battle3_*.test.js`).
+
 ---
 
 ## 📦 Cutting a release
@@ -1639,7 +1790,7 @@ fight.
 
 ## 🚧 Known jank — read this bit
 
-It's `1.4.19` (`experimental: false` — on by default when installed). The full
+It's `1.5.0` (`experimental: false` — on by default when installed). The full
 list lives in `mod.card` under `differences.known`. The ones that'll actually
 bite you:
 
@@ -1671,6 +1822,14 @@ bite you:
   them. Host for people you know, or put everyone on WireGuard/Tailscale —
   see the security posture in [server/README.md](server/README.md), which
   spells out exactly what 30 bits buys.
+- **Gen 3 is built on engine internals.** FireRed, LeafGreen and Emerald
+  have no public mod seam yet for most of what this mod does in the
+  overworld, so it reaches into the engine in a few documented places (see
+  [the Gen 3 part](#-firered-leafgreen-emerald--the-same-mod-on-the-gba)). An
+  engine update can break them before this mod catches up. Smaller Gen 3
+  edges: a player on the next map over isn't drawn across a seamless map
+  edge, cross-region trades wait for both carts' post-game, and nobody has
+  run LeafGreen live yet.
 
 ---
 

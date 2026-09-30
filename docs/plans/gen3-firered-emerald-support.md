@@ -1,12 +1,20 @@
 # Plan — Gen 3 (FireRed / LeafGreen / Emerald) support
 
+> **Status (2026-09-30): shipped in 1.5.0.** Waves 1–4 landed on
+> `feature/firered-and-emerald-support` (`c88370b` … `07b0c12`) with the
+> review fix passes and wave 5 test blocks between them; PROTOCOL 30; version
+> 1.5.0. Everything in §1 is in, with the deviations and known limits recorded
+> in **§10** — read that before treating a line of §3–§5 as today's code.
+> LeafGreen is covered headless only (owner #4). Curated screenshots under
+> `docs/screenshots/gen3/` are added after the final e2e run.
+
 | Field | Value |
 | --- | --- |
 | Date | 2026-09-30 |
 | Source | Owner request 2026-09-30 ("Gen1Recomp announced FireRed + Emerald; every functionality and mechanic must work on them; e2e with screenshots") + owner grill (two passes, same day) |
 | Config | `AGENTS_CONFIG.yml` (quality preset v3: builder/reviewer opus, test_author sonnet, test_runner haiku; host claude_code) |
 | Flags | none |
-| Gates | Grilled by the owner (7 answers, §8); plan approval pending |
+| Gates | Grilled by the owner (7 answers, §8); plan approved; shipped as 1.5.0 (§10) |
 | Branch | `feature/firered-and-emerald-support` |
 | Base SHA | `ea822a5` |
 
@@ -487,3 +495,93 @@ Assumptions (verify in implementation, flip cheaply if wrong):
 | Featured official Gen 3 server row | Out of scope — owner #7 (no hub deployed) |
 | LeafGreen live e2e | Out of scope — no ROM on this machine (owner #4) |
 | Gen 3 NIRE custom art | Out of scope — owner-consistent with Gen 2 (A5) |
+
+## 10. What shipped (1.5.0), and where it differs from this plan
+
+Commits on the branch (base `ea822a5`), in order: `c88370b` wave 1 · `1365d45`,
+`3a51019` wave 2 · `aa82a64`, `294b3e1`, `ce2c61b`, `3d22874`, `ff692f6` wave 3 ·
+`295bd43`, `402d963` fixes · `db55e25` wave 4 (solo) · `2fc927a`, `7b0fe9f`,
+`a256567`, `6c45554`, `9c868d1` review fixes (hub/wire, core/presence, battle
+client, UI + trade) · `2858b47`, `aaea514`, `6a19cd5` tests · `07b0c12` wave 4
+(co-op + divert). Each commit message describes its slice.
+
+### Success criteria (§1)
+
+| # | Criterion | Outcome |
+| --- | --- | --- |
+| 1 | `games` claims `gen3`; `gen3check` clean | Claimed; `modkit gen3check` reports **will load** (unresolved-site notes only, no errors) |
+| 2 | Headless FR + EM load, real surfaces asserted | Main suite's tri-generation block boots Red, Gold, FireRed and Emerald with zero errors and asserts hooks, generation/version/family, the START row before SAVE, render.hud dpi (`aaea514`); per-area suites `tests/gen3_*.lua`, `tests/trade3.lua` |
+| 3 | Gen 3 hub admits FR/LG/E, refuses 1/2 both ways, PROTOCOL 30, region-scoped presence | As planned. Unknown generations are **refused** (were clamped to 1); a missing one is still Gen 1. Hello and presence carry `version`. Parity fixture `generation_*` cases + `server/gen3.test.js`; live `run-trip-e2e-gen3.sh` (FR+FR+EM) and `run-mismatch-e2e-gen3.sh` |
+| 4 | Remote players as real Gen 3 objects, nameplates, bubbles, toasts, party-on-map | Objects, nameplates, toasts: yes. **No chat bubbles** — no generation has them any more; chat is the corner toast everywhere. Party-on-map is a **list** over the region map (FireRed TOWN MAP, Emerald PokéNav HOENN MAP), not marks at cities |
+| 5 | Every MMO screen native at 240×160, reachable from START | Yes (`src/Gen3Ui.lua`); asks and prompts wait on `ui:whenFree` while the cart's own menus / text / scripts own the screen |
+| 6 | Battles on a full Gen 3 intermediator, twin parity | `src/BattleSim3` + `server/lib/battle3`: 214 effects, 77 abilities, 66 hold effects, weather, doubles; shared vector and turn-parity fixtures replayed by both twins, plus thousands of fuzzed Lua-vs-JS fights matching event for event |
+| 7 | Arena + GBA classic UI | Yes (`3d22874`); `run-battlefield-e2e-gen3.sh` pixel-asserts both on FR and EM |
+| 8 | Trade via `packMon3/unpackMon3`, party/PC, dex, item, mail, trade evolution | Yes (`src/Trade3.lua`). Shown in **text boxes**, not the engine's TradeScene animation; the evolution plays the cart's EvolutionScene |
+| 9 | EXP / learn / evolve on engine rules | Yes (`src/Exp3.lua`, LearnMove / EvolveFx Gen 3 arms), paid from the referee's roster |
+| 10 | Gen 1 / Gen 2 unchanged | Headless suite and server tests green; Gen 1/2 wire reads restored to `ea822a5` (39,000-case differential, 0 mismatches) |
+| 11 | Live e2e with screenshots on FR and EM, contact sheet | `run-mmo-e2e-gen3.sh` (FR, EM), trip, mismatch, battlefield and `run-solo-battle-e2e.sh --gen3` (46/46 FR+EM) each write `g3-<game>-<role>-<NN>-<leg>.png` + `index.html` (`tests/drivers/shots_index.py`). The MMO run's legs stop at party + leave: mediated fights are covered by `hub_battle` (Lua + Node, FR vs EM 1v1, coop_npc 2v2, wild catch, mid-fight learn) and the battlefield run, and co-op was live-checked by T11's driver (33/33 on FR and EM), not by a committed leg. Curated `docs/screenshots/gen3/` lands after the final run |
+
+### Deviations from §3–§5
+
+- **Trainer divert (decision 5, A2).** Not `script.command`: a hook there can
+  only replace the whole `trainerbattle` opcode and would have to suspend the
+  VM through a private poll. The shipped seam is one contained wrap of
+  `BattleBridge.start` (`CoopField.installStart3`, `Gen3.wrapFn` discipline)
+  that takes the fight, runs the cart's own post-battle steps and calls the
+  opcode's own `opts.done(result)`. It also catches the wild fights that skip
+  `encounter.roll` (fishing, Rock Smash, Sweet Scent). The fallback A2 feared
+  (engine fight runs) was **not** needed. Upstream: the `battle.intercept`
+  addendum in `docs/upstream/gen3-spawn-npc.md`.
+- **Avatar stepping.** `Objects.pushStep`, not `startTrack` (decision 3):
+  `Objects.carryOut` renumbers any object with a live track across a seamless
+  edge. Review R1 added three more costs the plan did not foresee, all now
+  handled and documented upstream: `Ghosts.capture` copied avatars into the
+  neighbour pool (frozen, doubled ghosts → avatars retired and purged from
+  every pool on each map change, so a remote player on the neighbouring map is
+  **not drawn across a seamless edge**); the FireRed quest log recorded them
+  into the save (`QuestLogRecorder.capture` wrap); Emerald's rotating-tile
+  puzzle shoved them (`RotatingTilePuzzle.move` wrap). A peer's sprite is
+  fenced to curated walking looks or player-trainer graphics
+  (`Gen3.LOOKS` / `lookAllowed`), since `Field.interact` offers Cut / Rock
+  Smash / Strength by graphic.
+- **B TO RUN** is not offered on a Gen 3 boot: the carts have Running Shoes
+  and never call `movement.speed`; the pace still rides presence.
+- **Co-op on Gen 3 is hub-refereed only** (no client host-sim), like Gen 2.
+  A fight between players is a Cable Club spar: held-item changes are not
+  written home; Deoxys uses its link-battle stats only in PvP.
+- **Solo hands more fights back to the cart** than on Gen 1/2
+  (`Config.SOLO_REFUSED_GEN3`): Emerald double trainer battles, two-opponent
+  and partner fights, safari, roamers, scripted / legendary wilds, the
+  Frontier, Trainer Tower / Hill, the first battle, tutorials.
+- **Cross-region trade** keeps the carts' own post-game gate
+  (`Family.gameProgressForLinkTrade`: FireRed / LeafGreen need the "can link
+  with Ruby / Sapphire" flag, Emerald the Champion flag; non-regional species
+  and eggs need the National Dex). A one-function switch in `src/Trade3.lua`
+  if the owner ever wants it relaxed.
+- **Deploy scripts refuse** (not warn) a Gen 3 lock on a release older than
+  protocol 30, before anything is written or built (`2fc927a`).
+- **Swept-in Gold fixes** (§9), all shipped: `sheetMoves` generation
+  (`294b3e1`), co-op item effects per generation and the prize through
+  `Gen.money` (`07b0c12`), plus one found on the way — a nil trade apply is a
+  failed trade, Gen 2 included (`9c868d1`, pinned in `6a19cd5`). The main
+  suite's two blocks left stale by #86 / #87 were fixed in `c88370b`.
+- **Packaging.** `.modkitignore` now lists every file under `tests/` (the
+  Gen 2 and older Gen 1 drivers/suites had shipped in release zips), every
+  plan, the Gen 3 upstream note and the loose screenshots.
+
+### Known limits carried into 1.5.0
+
+- The engine reach-arounds (injected objects, `OwSprites.playerGraphicsId`,
+  `BattleBridge.start`, quest-log / puzzle shields, ghost-pool purge) depend on
+  game3 internals; `docs/upstream/gen3-spawn-npc.md` is the Lane B proposal.
+- A remote avatar that is walking can delay the local VS Seeker's charge
+  completion (the cart waits for every object to stop; `advance3` ignores
+  `eo.frozen`). Minor.
+- No featured official Gen 3 hub (owner #7). LeafGreen not live-tested
+  (owner #4). NIRE stays Gen 1 (A5).
+- Pay Day: a mod-refereed Gen 3 fight pays no coins. Correct for PvP (link
+  rules); for solo / co-op wild and NPC fights the cart would pay them, and
+  doing the same needs the referee to report the coin total (both twins) and
+  the client to pay it (T12 remainder).
+- Engine bug, reported upstream only: a fresh Emerald save's heal map is
+  `EM_INSIDE_OF_TRUCK`, so an early whiteout respawns in the truck.
