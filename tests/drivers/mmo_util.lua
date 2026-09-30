@@ -1279,6 +1279,38 @@ local PHASE = {
   -- host waits on the guest leaving the game through MAIN > LEAVE
   g3_guest_left            = 240,
 
+  -- ------- Gen 3 battle legs (wave 5): two 1v1s, then the party's two 2v2s
+  --
+  -- Each 1v1 (`arena`: the host asks, on the 640x360 arena; `classic`: the
+  -- guest asks, on the GBA page) is: both reseed a lead and say so, the asker
+  -- stands beside the other and picks BATTLE, both drive the fight to its
+  -- result and say so.  The `done` budgets cover the other side's whole fight
+  -- (prompts, a few turns of typed lines, the writeback checks, the ranking
+  -- round trip): generous, because a fight costs a healthy run only its own
+  -- length.
+  g3_host_arena_ready      = 240,  -- closing the trade + a reseed
+  g3_guest_arena_ready     = 240,  -- the same, then the guest's own reseed
+  g3_host_arena_done       = 540,
+  g3_guest_arena_done      = 540,
+  g3_host_classic_ready    = 240,
+  g3_guest_classic_ready   = 240,
+  g3_host_classic_done     = 540,
+  g3_guest_classic_done    = 540,
+  -- co-op, inside the party the party leg formed: both reseed and stand on
+  -- the wild map's grass / beside the trainer, the walker walks, both fight
+  g3_host_wild_ready       = 420,  -- the guest's MEMBERS + region map first
+  g3_guest_wild_ready      = 300,
+  g3_host_wild_done        = 600,  -- a grass walk (up to 3 min) + a 2v1 fight
+  g3_guest_wild_done       = 600,
+  g3_host_catch_ready      = 300,
+  g3_guest_catch_ready     = 300,
+  g3_host_catch_done       = 600,  -- a second grass walk + a ball thrown + the nickname grid
+  g3_guest_catch_done      = 600,
+  g3_host_trainer_ready    = 300,
+  g3_guest_trainer_ready   = 300,
+  g3_host_trainer_done     = 600,  -- a sight walk + a 2v2 fight + the flags
+  g3_guest_trainer_done    = 600,
+
   -- ------- Gen 3 three-client run on the Node hub (run-trip-e2e-gen3.sh)
   --
   -- FireRed A and B in Pallet Town, Emerald C in Littleroot, all JOIN. One
@@ -1288,6 +1320,8 @@ local PHASE = {
   g3trip_presence          = 300,  -- avatars / region scoping / PLAYERS
   g3trip_chat              = 360,  -- menus + a typed line, then the toasts
   g3trip_traded            = 420,  -- menus + a cross-version trade
+  g3trip_fightready        = 300,  -- closing the trade + a reseed
+  g3trip_fought            = 600,  -- prompts + a whole fight + the writeback checks
   g3trip_left              = 300,  -- menus + LEAVE
 
   -- ------- Gen 3 generation mismatch (run-mismatch-e2e-gen3.sh)
@@ -1776,6 +1810,12 @@ end
 -- authentic, and picking by power rather than by name means this works for
 -- any species without hardcoding move ids that differ between versions.
 function M.frontloadDamage(data, mon)
+  -- Gen 3 party mons carry numeric move ids (Gen 1 / Gen 2 carry tables):
+  -- power is read off the cart's own move rows, and moves / pp / maxPp move
+  -- together.
+  if type(mon) == "table" and type((mon.moves or {})[1]) == "number" then
+    return M.g3FrontloadDamage(mon)
+  end
   local best, bestPower
   for i, mv in ipairs(mon.moves or {}) do
     local def = data.moves[mv.id]
@@ -1844,6 +1884,9 @@ end
 -- engine src/world/gen2/Trainers.lua). Return the class id string so
 -- stageTrainer can look the class up and pick its weakest 2+ party member.
 function M.coopTrainer(data)
+  -- Gen 3 (Game3:load stamps `data.generation = 3`): the cart's own trainer
+  -- book, by trainer id.
+  if type(data) == "table" and data.generation == 3 then return M.g3CoopTrainer(data) end
   local classes = data and data.trainers and data.trainers.classes
   if type(classes) == "table" then
     local best
@@ -1935,6 +1978,27 @@ end
 -- then stamp Gen1-shaped kind/oppClass/enemyParty/onFinish so Client/Coop
 -- divert predicates see the same surface they do on Red.
 function M.stageTrainer(game, class, onFinish)
+  -- Gen 3: no state to push -- the cart's trainerbattle opcode calls
+  -- BattleBridge.start with the foe the trainer book resolves, and the mod's
+  -- divert is a wrap of exactly that call.  `class` is a trainer id
+  -- (M.coopTrainer); `onFinish(result)` is the opcode's own `done`.
+  if g3(game) then
+    local BB = g3mod("src.core.game3.battle_bridge")
+    local Trainers = g3mod("src.core.game3.scripting.trainers")
+    local Runtime = g3mod("src.core.game3.runtime")
+    local tid = tonumber(class)
+    if not (BB and Trainers and Runtime and tid) then return nil end
+    local okF, foe = pcall(Trainers.foeFromId, tid)
+    if not (okF and type(foe) == "table") then return nil end
+    local ok, started = pcall(BB.start, Runtime._mod, Runtime._game or game, foe, {
+      wild = false, trainerId = tid, defeatText = foe.defeatText,
+      victoryText = foe.victoryText, trainerName = foe.trainerName,
+      trainerPicId = foe.trainerPicId,
+      done = function(result) if onFinish then onFinish(result) end end,
+    })
+    if not (ok and started ~= false) then return nil end
+    return { g3Staged = true, kind = "trainer", trainerId = tid, foe = foe }
+  end
   if isGen2Staging(game) then
     local okB, Battle = pcall(require, "src.battle.gen2.Battle")
     local okT, Trainers = pcall(require, "src.world.gen2.Trainers")
@@ -2250,6 +2314,21 @@ end
 function M.stageWild(game, species, level, onFinish)
   species = species or "PIDGEY"
   level = level or 5
+  -- Gen 3: a scripted wild battle -- the cart's own startWild entry, which the
+  -- mod's BattleBridge.start wrap diverts the way it diverts a trainer.  (The
+  -- co-op leg walks the grass for the `encounter.roll` door; this is the
+  -- deterministic one for a leg that needs a chosen species.)
+  if g3(game) then
+    local BB = g3mod("src.core.game3.battle_bridge")
+    local Runtime = g3mod("src.core.game3.runtime")
+    local id = M.g3Species(game, species)
+    if not (BB and Runtime and id) then return nil end
+    local ok, started = pcall(BB.startWild, Runtime._mod, Runtime._game or game,
+      { species = id, level = level },
+      { done = function(result) if onFinish then onFinish(result) end end })
+    if not (ok and started ~= false) then return nil end
+    return { g3Staged = true, kind = "wild", species = id, level = level }
+  end
   if isGen2Staging(game) then
     local okB, Battle = pcall(require, "src.battle.gen2.Battle")
     local okM, Mon = pcall(require, "src.battle.gen2.Mon")
@@ -2376,6 +2455,37 @@ end
 -- Another A commits the highlighted row. Balls need no party pick.
 -- Prefer an empty-ish bag so the first row is the item under test.
 function M.throwBattleItem(game, itemId)
+  -- Gen 3: the command list names its own rows (M.COMMANDS3 on a co-op
+  -- screen, commandList() on the 1v1), so ITEM is found by name, and the bag
+  -- list is matched on the cart's numeric item id.
+  if g3(game) then
+    local top = M.g3Fight(game)
+    if not (top and top.phase == "choose") then return false end
+    local list = type(top.commandList) == "function" and top:commandList() or { "FIGHT", "ITEM" }
+    for i, name in ipairs(list) do
+      if name == "ITEM" then top.commandIndex = i end
+    end
+    U.tap(game, "a")
+    U.wait(10)
+    top = M.g3Fight(game)
+    if not (top and top.phase == "item") then return false end
+    local want = M.g3ItemId(game, itemId)
+    local items = type(top.usableItems) == "function" and top:usableItems() or {}
+    local at = 1
+    for i, row in ipairs(items) do
+      if want ~= nil and row.id == want then at = i break end
+    end
+    top.itemIndex = at
+    U.tap(game, "a")
+    U.wait(20)
+    -- a heal asks whom (the first row is the lead); a ball is committed at once
+    top = M.g3Fight(game)
+    if top and top.phase == "item_party" then
+      U.tap(game, "a")
+      U.wait(20)
+    end
+    return want == nil or (items[at] ~= nil and items[at].id == want)
+  end
   local top = M.top(game)
   if not (top and top.sim and top.phase == "choose") then return false end
   local U = M.U
@@ -2432,6 +2542,13 @@ end
 -- clients have got there too. Returns whether it happened, so a caller can
 -- `check` it rather than walking on into a menu that never opened.
 function M.awaitCommandMenu(game, what)
+  if g3(game) then
+    return M.waitSeconds(game, function()
+      local top = M.g3Fight(game)
+      return top ~= nil and top.phase == "choose" and not top.replacing
+        and not top.mustReplace and top.result == nil
+    end, 30, what or "the Gen 3 command menu")
+  end
   return M.waitSeconds(game, function()
     local top = M.top(game)
     return top ~= nil and top.sim ~= nil and top.phase == "choose"
@@ -2704,6 +2821,7 @@ end
 -- (the hub used to seed DEFAULT_NPC_BAG after an empty one).
 function M.assertTrainerKit(game, check, log, opts)
   opts = opts or {}
+  if g3(game) then return M.g3AssertTrainerKit(game, check, log, opts) end
   local expected = M.expectedTrainerKit(game, opts.class)
   if log then
     local kind = "unknown"
@@ -3675,16 +3793,40 @@ end
 -- leg ends on the swap itself. `spare` rides in slot 2: the cart refuses to
 -- trade away a party's only mon ("That's your only POKeMON for battle."), so
 -- a one-mon party can never offer anything.
+--
+-- `battle` is what the fight legs stage.  The 1v1s: a lead each, the host's
+-- the stronger, so a knockout lands in two or three turns and the weaker side
+-- still gets a blow in (the writeback check needs damage on both).  The
+-- guest leads a PIKACHU on both carts: its THUNDER WAVE is what puts a status
+-- on the host's mon in the classic 1v1, so "a link battle leaves no status
+-- behind" is asserted on a status that is really there.  The co-op
+-- legs: leads that do not evolve on a level-up (the host's exp is set one
+-- point short of the next level, so its first knockout levels it -- and a
+-- mon due to evolve would put the evolution scene into the leg), the map with
+-- grass the wild leg walks (Route 1 / Route 101), and the trainer of the
+-- trainer leg -- one of the maps' own early trainers, by the object's local
+-- id on `trainerMap` (probed: a plain single-battle trainer with two
+-- monsters, standing in the open, sight 2-4).
 M.G3_STAGE = {
   firered = {
     map = "FR_PALLET_TOWN", place = "PALLET",
     host = { 12, 10, "down" }, guest = { 10, 12, "up" },
     hostMon = "CHARMANDER", guestMon = "PIKACHU", spare = "RATTATA",
+    battle = {
+      host = "CHARMANDER", hostLevel = 30, guest = "PIKACHU", guestLevel = 20,
+      coopHost = "PIKACHU", coopHostLevel = 30, coopGuest = "RATICATE", coopGuestLevel = 25,
+      wildMap = "FR_ROUTE_1", trainerMap = "FR_ROUTE_3", trainerLid = 3,
+    },
   },
   emerald = {
     map = "EM_LITTLEROOT_TOWN", place = "LITTLEROOT",
     host = { 9, 9, "down" }, guest = { 7, 11, "up" },
     hostMon = "TORCHIC", guestMon = "MUDKIP", spare = "ZIGZAGOON",
+    battle = {
+      host = "TORCHIC", hostLevel = 30, guest = "PIKACHU", guestLevel = 20,
+      coopHost = "PIKACHU", coopHostLevel = 30, coopGuest = "RATICATE", coopGuestLevel = 25,
+      wildMap = "EM_ROUTE101", trainerMap = "EM_ROUTE102", trainerLid = 3,
+    },
   },
 }
 M.G3_STAGE.leafgreen = M.G3_STAGE.firered
@@ -4058,12 +4200,41 @@ end
 -- box to finish typing first (M.shotPrinted).
 function M.g3Shooter(game, dir, gameName, role)
   local n = 0
-  return function(leg, printed)
+  return function(leg, printed, dropIfBlack)
     n = n + 1
     local path = ("%s/g3-%s-%s-%02d-%s.png"):format(dir, gameName, role, n, leg)
-    if printed then return M.shotPrinted(game, path) end
-    return U.shot(game, path)
+    local ok
+    if printed then ok = M.shotPrinted(game, path) else ok = U.shot(game, path) end
+    -- a frame caught mid-fade (the cover a co-op divert holds while the
+    -- battle transition plays) can be all black: a picture of nothing is
+    -- dropped rather than shipped to the contact sheet
+    if dropIfBlack and ok and M.pngIsBlack(path) then
+      os.remove(path)
+      return false
+    end
+    return ok
   end
+end
+
+-- Is this screenshot one flat black frame?  Sampled on a coarse grid.
+function M.pngIsBlack(path)
+  -- the shot is outside LOVE's filesystem: read the bytes, decode from memory
+  local handle = io.open(path, "rb")
+  if not handle then return false end
+  local bytes = handle:read("*a")
+  handle:close()
+  local okImg, data = pcall(function()
+    return love.image.newImageData(love.filesystem.newFileData(bytes, "shot.png"))
+  end)
+  if not (okImg and data) then return false end
+  local w, h = data:getWidth(), data:getHeight()
+  for y = 0, h - 1, 16 do
+    for x = 0, w - 1, 16 do
+      local r, g, b = data:getPixel(x, y)
+      if r > 0.02 or g > 0.02 or b > 0.02 then return false end
+    end
+  end
+  return true
 end
 
 -- The party list over the region map, reached the way a player reaches the
@@ -4170,6 +4341,594 @@ function M.g3CloseRegionMap(game)
   end
   U.wait(45)
   return closed
+end
+
+-- =====================================================================
+-- Gen 3 battle legs (wave 5): the mod's own battle screens on FireRed / Emerald
+-- =====================================================================
+--
+-- A Gen 3 fight of this mod's is a Gen3Ui.pushState layer: the layer's `mod`
+-- IS the screen (MediatedBattle for a 1v1, CoopBattle for a 2-on-2), so
+-- M.g3Top returns it and every field a Gen 1 driver reads off those screens
+-- (`phase`, `commandIndex`, `cursor` / `moveIndex`, `shown`, `draining`,
+-- `result`, `gaps` / `medGaps`) is there under the same name.  What has no Gen 1
+-- twin is how a fight *starts*: the cart raises no screen event, so a co-op
+-- divert happens at `encounter.roll` (a wild) and at a wrap of
+-- BattleBridge.start (a trainer), and the drivers below reach the second one
+-- the way the cart's own script opcode does.
+
+-- The mod's battle screen when it is the top layer, and which kind it is.
+function M.g3Fight(game)
+  local top = M.g3Top(game)
+  if type(top) ~= "table" then return nil end
+  if top.mmoBattle == true then return top, "1v1" end
+  if top.sim ~= nil and top.mode ~= nil then return top, "coop" end
+  return nil
+end
+
+-- Is `state` a layer anywhere on the game3 stack (not only on top)?  A move-
+-- learn prompt or the nickname grid goes up *over* a fight that is not done.
+function M.g3OnStack(state)
+  if state == nil then return false end
+  local Stack = package.loaded["src.ui.game3.stack"]
+  for _, layer in ipairs((Stack and Stack._layers) or {}) do
+    if layer.mod == state then return true end
+  end
+  return false
+end
+
+-- What a party looks like to the things a fight could change: the writeback
+-- checks compare two of these.  Species and level identify the mon; hp,
+-- exp, held item, status and PP are what a link battle must leave alone.
+function M.g3PartyDigest(game)
+  local out = {}
+  local session = M.g3Session(game)
+  for i, mon in ipairs((session and session.party) or {}) do
+    local pp = {}
+    for j, v in ipairs(mon.pp or {}) do pp[j] = tonumber(v) or 0 end
+    local moves = {}
+    for j, v in ipairs(mon.moves or {}) do moves[j] = tonumber(type(v) == "table" and v.id or v) or 0 end
+    out[i] = {
+      species = mon.species, level = tonumber(mon.level) or 0, hp = tonumber(mon.hp) or 0,
+      maxHp = tonumber(mon.maxHp) or 0, exp = tonumber(mon.exp) or 0,
+      item = tonumber(mon.heldItem or mon.item) or 0, status = mon.status,
+      pp = table.concat(pp, ","), moves = table.concat(moves, ","),
+    }
+  end
+  return out
+end
+
+-- The first difference between two digests as "party[1].hp 30 -> 12", or nil.
+-- `fields` limits the comparison (default: all).
+function M.g3DigestDiff(a, b, fields)
+  fields = fields or { "species", "level", "hp", "maxHp", "exp", "item", "status", "pp", "moves" }
+  if #a ~= #b then return ("party size %d -> %d"):format(#a, #b) end
+  for i = 1, #a do
+    for _, key in ipairs(fields) do
+      if a[i][key] ~= b[i][key] then
+        return ("party[%d].%s %s -> %s"):format(i, key, tostring(a[i][key]), tostring(b[i][key]))
+      end
+    end
+  end
+  return nil
+end
+
+-- Put the hardest-hitting move first (moves / pp / maxPp move together): the
+-- Gen 3 twin of M.frontloadDamage, which reads Gen 1 / Gen 2 move tables.
+-- Power comes from the cart's own move rows, so nothing here names a number.
+function M.g3FrontloadDamage(mon)
+  local Moves = g3mod("src.core.game3.battle.moves")
+  if not (Moves and type(mon) == "table" and type(mon.moves) == "table") then return nil end
+  local best, bestPower
+  for i, id in ipairs(mon.moves) do
+    local ok, row = pcall(Moves.get, tonumber(id))
+    local power = ok and type(row) == "table" and tonumber(row.power) or 0
+    if power > 0 and (bestPower == nil or power > bestPower) then best, bestPower = i, power end
+  end
+  if not best or best == 1 then return mon.moves[1] end
+  for _, key in ipairs({ "moves", "pp", "maxPp" }) do
+    local list = mon[key]
+    if type(list) == "table" and list[best] ~= nil then
+      table.insert(list, 1, table.remove(list, best))
+    end
+  end
+  return mon.moves[1]
+end
+
+-- A fresh one-mon (plus optional spare) party that fights straight away:
+-- full HP, no status, a damaging move first, and -- with `exp` -- the exp set
+-- one point under the next level so the first knockout it earns levels it up.
+function M.g3SeedLead(game, species, level, opts)
+  opts = opts or {}
+  local mon = M.g3SeedParty(game, species, level)
+  if not mon then return nil end
+  M.g3FrontloadDamage(mon)
+  mon.hp = mon.maxHp
+  mon.status = nil
+  if opts.spare then M.g3GiveMon(game, opts.spare, opts.spareLevel or 5) end
+  if opts.levelUpNext then
+    local Experience = g3mod("src.core.game3.battle.experience")
+    if Experience and Experience.expForLevel then
+      local ok, threshold = pcall(Experience.expForLevel, mon, mon.level + 1)
+      if ok and tonumber(threshold) then mon.exp = tonumber(threshold) - 1 end
+    end
+  end
+  return mon
+end
+
+-- Stand next to another player's avatar the way a player does before pressing
+-- A: one cell above (facing down) or below (facing up) their reported cell.
+-- Returns the avatar object and its row.
+function M.g3StandBeside(game, exports, name, side)
+  local row = M.avatarRow(exports, name)
+  if not (row and row.rosterX) then return nil end
+  local dy, facing = -1, "down"
+  if side == "below" then dy, facing = 1, "up" end
+  M.g3Teleport(game, row.map or M.g3Session(game).map, row.rosterX, row.rosterY + dy, facing)
+  U.wait(30)
+  return row
+end
+
+-- Answer what the mod (or the cart) puts over a fight that is not finished:
+-- the cart's YES / NO is answered YES (the move-learning exchange ends on it
+-- either way: "Delete a move?" YES -> the picker -> B -> "Stop learning?" YES),
+-- the forget picker is backed out of, the nickname grid keeps the species
+-- name, and any text advances.
+local function g3AnswerOver(game, top)
+  local layerId = M.g3LayerId()
+  if layerId == "naming" then
+    U.tap(game, "start")
+    U.wait(8)
+    U.tap(game, "a")
+    U.wait(8)
+    return
+  end
+  if layerId == "summary" or layerId == "summary_menu" then
+    U.tap(game, "b")
+    U.wait(8)
+    return
+  end
+  if type(top) ~= "table" then U.wait(4) return end
+  local yes = type(top.items) == "table" or (top.onChoose ~= nil and top.index ~= nil)
+  if yes then
+    for _ = 1, 4 do
+      if (top.index or top.cursor or 1) <= 1 or M.top(game) ~= top then break end
+      U.tap(game, "up")
+      U.wait(3)
+    end
+    U.tap(game, "a")
+    U.wait(10)
+    return
+  end
+  U.tap(game, "a")
+  U.wait(8)
+end
+
+local function g3ShownText(top)
+  local s = top and top.shown
+  if type(s) == "table" then s = table.concat(s, " ") end
+  return type(s) == "string" and s or ""
+end
+
+-- Drive a Gen 3 battle screen of this mod from its opening line to its last:
+-- FIGHT with the strongest move that has PP, A through every line, one
+-- screenshot the first time each of these is seen -- the opening line, the
+-- command menu, the move list, a hit landing (the HP bar moving), a knockout,
+-- EXP / a level-up, the result -- and a log of every distinct line it said.
+-- The Gen 1 flows drove this with drivePrompts' blind A; a Gen 3 arena has to
+-- be photographed at the moments it is worth photographing, so the taps here
+-- are keyed on the screen's own `phase`.
+--
+-- opts: shot(name, printed) -- the driver's shooter; label -- prefix for the
+-- shot names; seconds -- the whole fight's budget (wall clock); startSeconds --
+-- how long to wait for the fight to appear; pick(top, moves) -> move index;
+-- onChoose(top) -- called with every command menu, before FIGHT is pressed
+-- (return "skip" to press nothing).  Returns
+-- { kind, turns, result, said = {...}, seen = { intro, command, moves, hit,
+-- faint, exp, levelup, result }, gaps, ended }.
+function M.g3PilotFight(game, opts)
+  opts = opts or {}
+  local shot = opts.shot or function() end
+  local label = opts.label or "fight"
+  local out = { turns = 0, said = {}, seen = {}, ended = false }
+  local startAt = os.time()
+  local deadline = startAt + (opts.seconds or 300)
+  local state, kind
+  local lastShown = ""
+  local lastA = 0
+  local frame = 0
+  local settleFrames = 0
+
+  local function said(text)
+    if text ~= "" and out.said[#out.said] ~= text then out.said[#out.said + 1] = text end
+  end
+  local function once(key, after)
+    if out.seen[key] then return end
+    out.seen[key] = true
+    U.wait(after or 0)
+    shot(label .. "-" .. key)
+  end
+
+  while os.time() < deadline do
+    frame = frame + 1
+    local top, k = M.g3Fight(game)
+    if top ~= nil then
+      if state == nil then state, kind = top, k end
+      out.kind = kind
+      out.gaps = tonumber(top.gaps) or tonumber(top.medGaps) or out.gaps
+      out.result = top.result or out.result
+      out.mode = top.mode or out.mode
+      out.mediated = top.mediated == true or top.mmoBattle == true or out.mediated
+      if top.sim and type(top.sim.slots) == "table" then out.slots = #top.sim.slots end
+      local phase = top.phase
+      local text = g3ShownText(top)
+      if text ~= lastShown then said(text) lastShown = text end
+
+      -- an arena that has not drawn a line yet is still in its entry
+      if not out.seen.intro and text ~= "" and phase ~= "choose" then
+        once("intro", 24)
+      end
+      if phase == "choose" and not (top.replacing or top.mustReplace) and top.result == nil then
+        if not out.seen.command then
+          U.wait(14)
+          once("command")
+        end
+        local skip = opts.onChoose and opts.onChoose(top) == "skip"
+        if not skip then
+          top.commandIndex = 1
+          U.tap(game, "a")
+          U.wait(8)
+        else
+          U.wait(6)
+        end
+      elseif phase == "move" then
+        if not out.seen.moves then
+          U.wait(10)
+          once("moves")
+        end
+        local moves = (function()
+          if type(top.liveMoves) == "function" then
+            local ok, list = pcall(top.liveMoves, top)
+            if ok and type(list) == "table" then return list end
+          end
+          local mon = top.activeMon and top:activeMon()
+          return mon and mon.moves or {}
+        end)()
+        local want = opts.pick and opts.pick(top, moves, out.turns + 1) or nil
+        if not want then
+          local bestPower = -1
+          want = 1
+          for i, mv in ipairs(moves) do
+            local power = tonumber(mv.power) or 0
+            if power > bestPower and (tonumber(mv.pp) or 0) > 0 then want, bestPower = i, power end
+          end
+        end
+        for _ = 1, #moves + 1 do
+          local at = top.cursor or top.moveIndex or 1
+          if at == want or M.top(game) ~= top then break end
+          U.tap(game, "down")
+          U.wait(4)
+        end
+        U.tap(game, "a")
+        U.wait(8)
+        if top.phase ~= "move" then out.turns = out.turns + 1 end
+      elseif phase == "target" or phase == "switch" or phase == "replace" then
+        U.tap(game, "a")
+        U.wait(8)
+      else
+        -- lines and animations: what is on screen decides the shot (the
+        -- move's own line for a hit -- its effect plays and the bar falls
+        -- behind it), A advances the text, and both are kept off the frame
+        -- that matters
+        local lower = text:lower()
+        if lower:find(" used ", 1, true) and not out.seen.hit then once("hit", 26) end
+        if lower:find("fainted", 1, true) and not out.seen.faint then once("faint", 28) end
+        if (lower:find("exp", 1, true) and lower:find("gained", 1, true)) and not out.seen.exp then
+          once("exp", 28)
+        end
+        if lower:find("grew to", 1, true) and not out.seen.levelup then once("levelup", 28) end
+        -- the result is the ending's own last line: the outcome is known long
+        -- before it is narrated, so wait for the queue to run dry with a line up
+        local queued = #(top.lines or top.messages or {})
+        if top.result ~= nil and queued == 0 and not top.draining and text ~= ""
+           and not out.seen.result then
+          once("result", 24)
+        end
+        if frame - lastA >= 5 then
+          U.tap(game, "a")
+          lastA = frame
+        end
+        U.wait(2)
+      end
+    elseif state ~= nil and M.g3OnStack(state) then
+      -- the fight is still there, under a prompt it raised: one picture of
+      -- each kind (the nickname question, the naming grid, a move to forget),
+      -- then answer it
+      local over = M.g3Top(game)
+      local key = M.g3LayerId() or (type(over) == "table" and over.g3Engine) or "text"
+      key = tostring(key):gsub("[^%w]+", "-")
+      if not out.seen["prompt-" .. key] and (out.prompts or 0) < 4 then
+        out.prompts = (out.prompts or 0) + 1
+        out.seen["prompt-" .. key] = true
+        U.wait(24)
+        -- a text box is photographed once it has finished typing
+        shot(label .. "-prompt-" .. key, type(over) == "table" and type(over.pages) == "table")
+      end
+      g3AnswerOver(game, M.g3Top(game))
+    elseif state ~= nil then
+      out.ended = true
+      break
+    else
+      if os.time() - startAt > (opts.startSeconds or 120) then break end
+      U.wait(4)
+    end
+  end
+  return out
+end
+
+-- ------- Gen 3 co-op field helpers
+
+-- The tall-grass cell on `mapId` with grass above and below it, so walking up
+-- and down keeps rolling the step encounter, and the first cell beside it
+-- (for a partner to stand on).  The engine's own game3_cut_grass driver finds
+-- its patch the same way.
+function M.g3GrassCells(game, mapId)
+  local Map = g3mod("src.core.game3.map")
+  local Collision = g3mod("src.core.game3.collision")
+  local Objects = g3mod("src.core.game3.objects")
+  local def = game and game.data and game.data.maps and game.data.maps[mapId]
+  local L = type(def) == "table" and def.midLayout or nil
+  if not (Map and Collision and Objects and L) then return nil end
+  if Map.current ~= mapId then M.g3Teleport(game, mapId, 1, 1, "down") end
+  local function grass(x, y)
+    local ok, g = pcall(Collision.isGrass, x, y)
+    return ok and g and not Objects.at(x, y)
+  end
+  for y = 2, (tonumber(L.height) or 0) - 3 do
+    for x = 1, (tonumber(L.width) or 0) - 3 do
+      if grass(x, y) and grass(x, y - 1) and grass(x, y + 1) and grass(x + 1, y)
+         and grass(x + 1, y - 1) and grass(x + 1, y + 1) then
+        return { x = x, y = y }, { x = x + 1, y = y }
+      end
+    end
+  end
+  return nil
+end
+
+-- The event object of the trainer who stands `cell` cells from the player's
+-- line, by its map-local id (the probe: trainers are the objects with a sight
+-- range and trainerType 1..3).  nil when it is not on the live map.
+function M.g3ObjectById(localId)
+  local Objects = package.loaded["src.core.game3.objects"]
+  if not Objects then return nil end
+  return Objects._byId and Objects._byId[localId] or nil
+end
+
+-- Has the cart marked this trainer beaten?  (trainer_sight.lua's own check:
+-- FLAG_TRAINER_<id> in the live flag store.)
+function M.g3TrainerDefeated(eo)
+  local TrainerSight = g3mod("src.core.game3.trainer_sight")
+  local Space = g3mod("src.core.game3.scripting.space")
+  if not (TrainerSight and Space and eo) then return nil end
+  local ok, done = pcall(TrainerSight.isDefeated, eo, Space.store, nil)
+  if not ok then return nil end
+  return done == true
+end
+
+-- The trainer id the cart's script names for this object (nil when unknown).
+function M.g3TrainerId(eo)
+  local TrainerSight = g3mod("src.core.game3.trainer_sight")
+  if not (TrainerSight and eo) then return nil end
+  local ok, tid = pcall(TrainerSight.getTrainerId, eo)
+  return ok and tid or nil
+end
+
+-- Clear a trainer's beaten flag, so a leg can be run twice on one cart.
+function M.g3ClearTrainer(eo)
+  local tid = M.g3TrainerId(eo)
+  local Flags = g3mod("src.core.game3.scripting.flags")
+  local Space = g3mod("src.core.game3.scripting.space")
+  if not (tid and Flags and Space and type(Space.store) == "table") then return false end
+  local ok = pcall(Flags.setFlag, Space.store, nil, Flags.trainerFlagId(tid), false)
+  return ok
+end
+
+-- The lowest-level trainer in the cart's book with a party of two or more (a
+-- co-op 2-on-2 needs a foe for each seat) and a plain, single-battle class.
+-- Ids only; nothing about what they hold is asserted anywhere.
+function M.g3CoopTrainer(data)
+  local Trainers = g3mod("src.core.game3.scripting.trainers")
+  local GameVersion = g3mod("src.core.GameVersion")
+  if not Trainers then return nil end
+  local emerald = GameVersion and GameVersion.get and GameVersion.get() == "emerald"
+  local pack = Trainers.pack() or {}
+  local bestId, bestTotal
+  for id, row in pairs(pack.trainers or {}) do
+    local tid = tonumber(id)
+    local party = type(row) == "table" and row.party or nil
+    if tid and tid > 0 and type(party) == "table" and #party >= 2 and #party <= 3
+       and not row.doubleBattle and type(row.name) == "string" and row.name ~= "" then
+      local class = tonumber(row.class) or 0
+      local plain = (emerald or (class >= 57 and class ~= 98)) and class ~= 81
+        and class ~= 89 and class ~= 90
+      local total = 0
+      for _, spec in ipairs(party) do total = total + (tonumber(spec.level) or 0) end
+      if plain and total >= 6 and (bestTotal == nil or total < bestTotal
+         or (total == bestTotal and tid < bestId)) then
+        bestId, bestTotal = tid, total
+      end
+    end
+  end
+  return bestId, bestTotal
+end
+
+-- The Gen 3 twin of assertTrainerKit: the trainer's own kit (the cart's trainer
+-- record lists its items, numeric ids and a 0 for an empty slot) against what
+-- the in-process referee seated for it.  Only the in-game host holds a hub to
+-- look into; a guest skips, as on Gen 1.  `opts.class` is the trainer id.
+-- Item ids stay out of the log: counts only.
+function M.g3AssertTrainerKit(game, check, log, opts)
+  local Trainers = g3mod("src.core.game3.scripting.trainers")
+  local tid = tonumber(opts and opts.class)
+  local expected
+  if Trainers and tid then
+    local ok, row = pcall(Trainers.get, tid)
+    if ok and type(row) == "table" and type(row.items) == "table" then
+      expected = 0
+      for _, id in ipairs(row.items) do
+        if (tonumber(id) or 0) > 0 then expected = expected + 1 end
+      end
+    end
+  end
+  local function total(bag)
+    local n = 0
+    for _, count in pairs(type(bag) == "table" and bag or {}) do n = n + (tonumber(count) or 0) end
+    return n
+  end
+  local npc = M.hubNpcBags(game)
+  if not npc then
+    if log then log("skip trainer kit -- no in-process hub on this side") end
+    return
+  end
+  local actual = total(npc.bags[1])
+  if log then
+    log(("trainer kit expected: %s item(s), actual: %d item(s) over %d seat(s)")
+      :format(expected == nil and "?" or tostring(expected), actual, npc.n))
+  end
+  if npc.n >= 2 then
+    check(npc.shared == true, "both NPC seats share one bag -- a 2v2 does not clone the kit",
+          tostring(total(npc.bags[1])) .. " / " .. tostring(total(npc.bags[2])))
+  end
+  check(actual < 8, "the trainer is not carrying two gym kits", tostring(actual))
+  if expected ~= nil then
+    check(actual <= expected, "no more items than the trainer's own kit",
+          ("%d > %d"):format(actual, expected))
+    if expected == 0 then
+      check(actual == 0, "a trainer with no items carries none -- not potion spam", tostring(actual))
+    end
+  end
+end
+
+-- A mod option, set the way the F10 manager row's step() does: the live store
+-- `mod.options:get` reads (game.mods.modOptions).  Fights latch options at
+-- construction, so a flip takes effect from the next fight.
+function M.g3SetOption(game, key, value)
+  local store = game and game.mods and game.mods.modOptions
+  if type(store) ~= "table" then return false end
+  store.rby_mmo = store.rby_mmo or {}
+  store.rby_mmo[key] = value
+  return true
+end
+
+-- Which legs a run drives, from GEN3_LEGS (comma list; default all).  Legs:
+-- chat, social (ADD FRIEND / FRIENDS / RANK), trade, battle (the two 1v1s),
+-- party (invite / members / region map / leave), coop (wild + trainer, which
+-- need the party, so asking for coop asks for party).  Boot, hosting / joining
+-- and presence always run: every other leg stands on them.
+local ALL_LEGS = { "chat", "social", "trade", "battle", "party", "coop" }
+function M.g3Leg(name)
+  local raw = os.getenv("GEN3_LEGS")
+  if raw == nil or raw == "" or raw == "all" then return true end
+  local on = {}
+  for part in raw:gmatch("[^,%s]+") do on[part:lower()] = true end
+  if on.coop then on.party = true end
+  return on[name] == true
+end
+M.G3_LEGS = ALL_LEGS
+
+-- Has a marker been signalled (by either side)?  For a result one side leaves
+-- for the other to read, next to the barriers that order the two.
+function M.signaled(name)
+  local handle = io.open(M.syncPath(name), "r")
+  if not handle then return false end
+  handle:close()
+  return true
+end
+
+-- A walkable cell one step from (x, y), off every visible trainer's line of
+-- sight on the live map, for a partner to stand on while the other walks into
+-- a trainer.  nil when the map offers none.
+function M.g3FreeCellNear(x, y)
+  local Collision = g3mod("src.core.game3.collision")
+  local Objects = g3mod("src.core.game3.objects")
+  if not (Collision and Objects) then return nil end
+  local vec = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+  local cone = {}
+  for _, lid in ipairs(Objects._order or {}) do
+    local eo = Objects._byId and Objects._byId[lid]
+    local d = eo and vec[eo.facing or ""]
+    if eo and d and (tonumber(eo.sight) or 0) > 0 and (tonumber(eo.trainerType) or 0) > 0 then
+      for k = 1, tonumber(eo.sight) do cone[(eo.cellX + d[1] * k) .. "," .. (eo.cellY + d[2] * k)] = true end
+    end
+  end
+  for _, step in ipairs({ { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 }, { 1, 1 }, { -1, 1 } }) do
+    local cx, cy = x + step[1], y + step[2]
+    local okW, walkable = pcall(Collision.isWalkable, cx, cy)
+    local blocked = Objects.at and Objects.at(cx, cy)
+    if okW and walkable and not blocked and not cone[cx .. "," .. cy] then return cx, cy end
+  end
+  return nil
+end
+
+-- Where to stand to walk into a trainer's line of sight, from the trainer's
+-- event object: one cell past the end of the cone (sight + 1 along the way the
+-- trainer faces), looking back at them -- so the next step in is a real
+-- "walked into sight" rather than a teleport onto the cone.  Returns the cell
+-- and the direction to walk.
+function M.g3SightApproach(eo)
+  local vec = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+  local back = { up = "down", down = "up", left = "right", right = "left" }
+  local d = vec[eo.facing]
+  if not d then return nil end
+  local dist = (tonumber(eo.sight) or 1) + 1
+  return eo.cellX + d[1] * dist, eo.cellY + d[2] * dist, back[eo.facing]
+end
+
+-- Is the cart's script VM running (a trainer talking, a door opening)?
+function M.g3ScriptRunning()
+  local Space = package.loaded["src.core.game3.scripting.space"]
+  local vm = Space and Space.vm
+  return vm ~= nil and type(vm.isRunning) == "function" and vm:isRunning() == true
+end
+
+-- The player is free to walk: nothing up, no script, no warp, no lock.
+function M.g3Free(game)
+  if not M.g3Idle(game) then return false end
+  local Field = package.loaded["src.core.game3.field"]
+  if Field and Field.locked then return false end
+  local Warp = package.loaded["src.core.game3.warp"]
+  if Warp and Warp.isBusy and Warp.isBusy() then return false end
+  return not M.g3ScriptRunning()
+end
+
+-- Let the cart finish what it is saying: A on its message box (and nothing
+-- else -- a YES / NO or one of the mod's layers is never answered here) until
+-- the player is free again.  Wall clock: a trainer's approach and speech, and
+-- the flags a win sets, are the cart's own pace.
+function M.g3TalkUntilFree(game, seconds)
+  return M.waitSeconds(game, function()
+    if M.g3Free(game) then return true end
+    local top = M.g3Top(game)
+    if type(top) == "table" and top.g3Engine == "message" and M.g3Layer() == nil then
+      U.tap(game, "a")
+      U.wait(6)
+    else
+      U.wait(4)
+    end
+    return false
+  end, seconds or 60, "the cart to finish talking")
+end
+
+-- How many of an item the live bag holds (item by name or number).
+function M.g3BagCount(game, item)
+  local Bag = g3mod("src.core.game3.bag")
+  local session = M.g3Session(game)
+  local id = M.g3ItemId(game, item)
+  if not (Bag and session and session.bag and id) then return nil end
+  local ok, n = pcall(Bag.get, session.bag, id)
+  if not ok then return nil end
+  if type(n) == "table" then n = n.qty or n.count or n.quantity end
+  return tonumber(n) or 0
 end
 
 return M

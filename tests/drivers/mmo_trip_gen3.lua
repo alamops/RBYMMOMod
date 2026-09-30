@@ -9,17 +9,27 @@
 -- map), every roster names each player's place from their own region, chat
 -- crosses carts, and a FireRed <-> Emerald trade goes through once each cart
 -- has what its own trade rule asks for (the region-link progress flag and the
--- National Dex) -- with each side's dex updated. Shots:
--- g3-<game>-<role>-<NN>-<leg>.png. Co-op / battle legs join in wave 5.
+-- National Dex) -- with each side's dex updated; and (wave 5) a 1v1 between
+-- the two carts through the real ACTIONS menu -- ALPHA's FireRed CHARMANDER
+-- against CHARLIE's Emerald PIKACHU, refereed by the Node hub's BattleSim3 --
+-- with the arena on both screens (each showing the other cart's monster),
+-- a result that mirrors on both sides, and both parties exactly as they were
+-- afterwards (the cart reloads the party after a link battle). BETA looks on.
+-- Shots: g3-<game>-<role>-<NN>-<leg>.png. GEN3_LEGS narrows a run (chat,
+-- trade, battle), as in run-mmo-e2e-gen3.sh.
 
 if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
   love.audio.setVolume(0)
 end
 
+-- `fights`: the lead each cart's fighter brings to the cross-cart 1v1 -- the
+-- FireRed side the stronger, so the weaker side still lands a blow.
 local ROLES = {
-  a = { name = "ALPHA",   mon = "PIKACHU",    spare = "RATTATA",   trades = "c" },
+  a = { name = "ALPHA",   mon = "PIKACHU",    spare = "RATTATA",   trades = "c",
+        fights = { "CHARMANDER", 30 } },
   b = { name = "BETA",    mon = "CHARMANDER", spare = "RATTATA" },
-  c = { name = "CHARLIE", mon = "GEODUDE",    spare = "ZIGZAGOON", trades = "a" },
+  c = { name = "CHARLIE", mon = "GEODUDE",    spare = "ZIGZAGOON", trades = "a",
+        fights = { "PIKACHU", 20 } },
 }
 local ORDER = { "a", "b", "c" }
 -- where each stands: two FireRed players side by side in Pallet, the Emerald
@@ -45,7 +55,8 @@ return function(game)
 
   local function log(...) U.log(TAG, ...) end
   local failures = 0
-  local function check(ok, what)
+  local function check(ok, what, detail)
+    if detail ~= nil then what = what .. " [" .. tostring(detail) .. "]" end
     if ok then
       log("ok " .. what)
     else
@@ -64,7 +75,7 @@ return function(game)
     end
     return ok
   end
-  local TAGS = { "ready", "seen", "presence", "chat", "traded", "left" }
+  local TAGS = { "ready", "seen", "presence", "chat", "traded", "fightready", "fought", "left" }
   local function finish()
     for _, tag in ipairs(TAGS) do H.signal(marker(ROLE, tag)) end
     U.wait(30)
@@ -251,6 +262,93 @@ return function(game)
     shot("after-trade")
   end
   rendezvous("traded")
+
+  -- ------- FireRed <-> Emerald 1v1 (ALPHA asks CHARLIE)
+  --
+  -- Both fighters reseed a lead and say so; ALPHA opens ACTIONS on CHARLIE
+  -- through PLAYERS (they are two regions apart -- no avatar to stand beside)
+  -- and picks BATTLE; CHARLIE answers; both drive the fight; BETA looks on.
+  -- The asker only waits (its "Waiting for..." box is a CANCEL row), the asked
+  -- one answers.
+  if H.g3Leg("battle") then
+    local fighter = ME.fights ~= nil
+    local before
+    if fighter then
+      H.closeToOverworld(game)
+      H.g3SetOption(game, "classicui", false)
+      local lead = H.g3SeedLead(game, ME.fights[1], ME.fights[2])
+      check(lead ~= nil and lead.level == ME.fights[2],
+            ("a level %d %s leads the party"):format(ME.fights[2], ME.fights[1]))
+      before = H.g3PartyDigest(game)
+    end
+    rendezvous("fightready")
+
+    if fighter then
+      local foe = ROLES[ME.trades].name
+      local foeSide = ME.trades
+      local started, trail
+      if ROLE == "a" then
+        local asked = false
+        if H.openMmo(game) and H.selectLabel(game, "PLAYERS") then
+          U.wait(25)
+          if H.selectLabel(game, foe) then
+            U.wait(25)
+            shot("xcart-actions")
+            asked = H.selectLabel(game, "BATTLE")
+          end
+        end
+        check(asked, "PLAYERS > " .. foe .. " > BATTLE asks the " .. (foeSide == "c" and "Emerald" or "FireRed")
+              .. " player")
+        U.wait(6)
+        shot("xcart-waiting")
+        started = H.waitSeconds(game, function() return H.g3Fight(game) ~= nil end, 150,
+                                "the asked player to accept")
+      else
+        local askShot = false
+        started, trail = H.drivePrompts(game, function() return H.g3Fight(game) ~= nil end, 150,
+          function(kind, top)
+            if not askShot and kind ~= nil then
+              askShot = true
+              log("battle ask:", H.textOf(top))
+              shot("xcart-ask", true)
+            end
+          end)
+      end
+      check(started, "the cross-cart battle started (prompts: " .. ((trail or "") == "" and "none" or trail) .. ")")
+      local res = H.g3PilotFight(game, { shot = shot, label = "xcart", seconds = 300 })
+      log(("xcart: kind=%s turns=%d result=%s gaps=%s"):format(tostring(res.kind), res.turns,
+        tostring(res.result), tostring(res.gaps)))
+      log("lines:", (table.concat(res.said, " | "):gsub("%s+", " ")))
+      check(res.kind == "1v1", "the fight is the 1v1 screen (" .. tostring(res.kind) .. ")")
+      check(res.ended, "the fight ran to its end and its screen closed")
+      check(res.gaps == 0, "no gaps in the mediated event stream")
+      check(res.seen.command and res.seen.moves, "the command menu and the move list were on screen")
+      check(res.seen.hit, "a damaging turn played (the HP bar moved)")
+      check(res.seen.faint, "a knockout was narrated")
+      check(res.result == "win" or res.result == "loss", "the fight has a winner (" .. tostring(res.result) .. ")")
+      H.signal(("g3trip_%s_result_%s"):format(ROLE, tostring(res.result)))
+      H.closeToOverworld(game)
+      H.g3Settle(game, 600)
+      check(H.g3Idle(game), "back in the field")
+      local diff = H.g3DigestDiff(before, H.g3PartyDigest(game),
+        { "species", "level", "hp", "maxHp", "exp", "item", "pp", "moves" })
+      check(diff == nil, "the party is exactly as it was -- HP, PP, EXP, items (link battle)", diff)
+      shot("xcart-after")
+      ME.result = res.result
+    else
+      -- BETA: on the roster of both, watching two players go busy and come back
+      H.awaitToastsClear(game, exports)
+      shot("xcart-onlooker")
+    end
+    rendezvous("fought")
+    if fighter then
+      local mine = ME.result
+      local other = (mine == "win" and "loss") or (mine == "loss" and "win") or tostring(mine)
+      local foeSide = ME.trades
+      check(H.signaled(("g3trip_%s_result_%s"):format(foeSide, other)),
+            ("the other cart's result is the mirror of ours (%s / %s)"):format(tostring(mine), other))
+    end
+  end
 
   -- ------- leave
   local left = false

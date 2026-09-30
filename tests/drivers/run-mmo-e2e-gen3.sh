@@ -31,12 +31,25 @@
 # corner toast, the CHAT log), PLAYERS / profile card / ADD FRIEND / FRIENDS /
 # MY PROFILE / RANK, interact (A on the other player), a trade with a dex
 # check, a party (INVITE, MEMBERS, the party list on the region map, LEAVE)
-# and leaving. Screenshots land in SHOT_DIR as
+# and leaving. Between the trade and the party's end (wave 5): two mediated
+# 1v1s through the real ACTIONS menu (the arena, the host asking; then CLASSIC
+# BATTLE UI, the guest asking -- command menu, move list, a damaging turn, the
+# knockout, the result, the party exactly as it was), and, inside the party,
+# a co-op wild 2v1 (both on Route 1 / Route 101 grass, the walker's step
+# encounter diverted into the mod's co-op fight, EXP and a level-up) and a
+# co-op NPC trainer 2v2 (walked into for real, the trainer's flag set on both
+# carts). Screenshots land in SHOT_DIR as
 # g3-<game>-<role>-<NN>-<leg>.png with an index.html contact sheet
 # (tests/drivers/shots_index.py).
 #
 # Env: GEN3_GAME (firered|leafgreen|emerald), SHOT_DIR, MMO_TIMEOUT (s),
-# RBY_MMO_PORT, MMO_RUN_ID, MMO_HOST_SPRITE / MMO_GUEST_SPRITE.
+# RBY_MMO_PORT, MMO_RUN_ID, MMO_HOST_SPRITE / MMO_GUEST_SPRITE, and
+# GEN3_LEGS -- a comma list narrowing the run to some legs (default: all):
+# chat, social (ADD FRIEND / FRIENDS / RANK), trade, battle (the two 1v1s),
+# party (invite / members / region map / leave), coop (wild + trainer; needs
+# the party, so it implies it). Boot, hosting / joining, presence and the
+# final leave always run. E.g. GEN3_LEGS=battle for the fights alone,
+# GEN3_LEGS=coop for the party and its two 2-on-2s.
 
 set -uo pipefail
 
@@ -118,9 +131,12 @@ HOST_ID="mmohost-g3-$GAME-$RUN_ID"
 GUEST_ID="mmoguest-g3-$GAME-$RUN_ID"
 HOST_LOG="/tmp/rby_mmo_gen3_${GAME}_host_$$.log"
 GUEST_LOG="/tmp/rby_mmo_gen3_${GAME}_guest_$$.log"
-TIMEOUT="${MMO_TIMEOUT:-900}"
+TIMEOUT="${MMO_TIMEOUT:-1500}"
+# Both drivers read the same leg list (mmo_util.lua's g3Leg); exported so a
+# narrowed run narrows both sides alike.
+export GEN3_LEGS="${GEN3_LEGS:-all}"
 
-echo "  rby_mmo Gen 3 e2e ($GAME host + guest, driven LOVE)"
+echo "  rby_mmo Gen 3 e2e ($GAME host + guest, driven LOVE) legs: $GEN3_LEGS"
 echo "  engine: $ENGINE_ROOT"
 echo "  env: $ENV_FILE"
 

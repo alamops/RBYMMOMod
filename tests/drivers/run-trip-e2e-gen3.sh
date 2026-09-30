@@ -5,15 +5,20 @@
 # (c) -- all joining through the real menus. Asserts region-scoped presence
 # (ALPHA and BETA see each other in Pallet Town; CHARLIE in Littleroot is on
 # everybody's roster and nobody's map), PLAYERS naming each place in its own
-# region, chat across carts, and a FireRed <-> Emerald trade (dex updated on
-# both sides). Screenshots: g3-<game>-<role>-<NN>-<leg>.png + index.html.
+# region, chat across carts, a FireRed <-> Emerald trade (dex updated on
+# both sides), and a cross-cart 1v1 (ALPHA's FireRed CHARMANDER asks
+# CHARLIE's Emerald PIKACHU through PLAYERS > ACTIONS > BATTLE; the Node hub's
+# BattleSim3 referees; the arena on both screens, mirrored results, both
+# parties as they were). Screenshots: g3-<game>-<role>-<NN>-<leg>.png +
+# index.html.
 #
 #   bash mods/rby_mmo/tests/drivers/run-trip-e2e-gen3.sh
 #
 # Needs a FireRed and an Emerald import (or FIRE_RED_ROM_PATH /
 # EMERALD_ROM_PATH in .env); skips cleanly with neither. Env: SHOT_DIR,
 # MMO_TIMEOUT (s), MMO_HUB_PORT, MMO_RUN_ID, GEN3_TRIP_GAMES ("firered
-# firered emerald" -- the carts of a, b and c).
+# firered emerald" -- the carts of a, b and c), GEN3_LEGS (comma list narrowing
+# the run: chat, trade, battle; default all).
 
 set -uo pipefail
 
@@ -87,7 +92,8 @@ RUN_ID="${MMO_RUN_ID:-$$}"
 HUB_LOG="/tmp/rby_mmo_trip_gen3_server_$$.log"
 SHOT_DIR="${SHOT_DIR:-/tmp/rby_mmo_trip_gen3_shots-$RUN_ID}"
 SYNC_DIR="${MMO_SYNC_DIR:-/tmp/rby_mmo_trip_gen3_sync-$RUN_ID}"
-TIMEOUT="${MMO_TIMEOUT:-900}"
+TIMEOUT="${MMO_TIMEOUT:-1500}"
+export GEN3_LEGS="${GEN3_LEGS:-all}"
 
 rm -rf "${SYNC_DIR:?}"
 mkdir -p "$SHOT_DIR" "$SYNC_DIR"
