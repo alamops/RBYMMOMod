@@ -21824,8 +21824,11 @@ if eng and eng.BattleState then
   local okBadges, victories = pcall(require, "data.scripts.victories")
   local leaderClass, leaderParty
   if okBadges and type(victories) == "table" then
+    -- The engine's victories module also carries helper functions beside the
+    -- badge rows, and `pairs` order is unspecified, so a function can come up
+    -- first -- indexing it threw here on some runs and killed the suite.
     for key, reward in pairs(victories) do
-      if reward.badge and type(key) == "string" then
+      if type(reward) == "table" and reward.badge and type(key) == "string" then
         local hash = key:find("#", 1, true)
         if hash then
           leaderClass = key:sub(1, hash - 1)
