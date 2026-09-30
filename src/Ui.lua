@@ -37,9 +37,14 @@
 --   Ui.unwindTo(game, screen, alsoPop)  everything above it off, and it too
 --   Ui.reopenStartMenu(game)     back to START after an MMO screen
 --   Ui.isGen3()                  which of the two worlds this boot is
+--   Ui.occupied(game)            is the cart using the screen right now, so a
+--                                prompt nobody asked for has to wait (Gen 3;
+--                                always false on Gen 1/2 -- see below)
 --
 -- and the instance methods say / confirm / choose / pushState / pickPartyMon /
--- askNickname, which already went through the doors and work on all three.
+-- askNickname, which already went through the doors and work on all three,
+-- plus whenFree / pumpDeferred / dropDeferred, the queue a prompt waits in
+-- while Ui.occupied says so.
 
 local need, mod = ...
 local Config = need("Config")
@@ -672,7 +677,10 @@ end
 -- name and look at 28 / 43, then the numbers from 62 on a 15px line, the last
 -- (MONEY, own card only) ending at 151 -- inside the frame's 152.
 local CARD3 = { labelX = 16, valueRight = 156, nameY = 28, lookY = 43,
-                first = 62, pitch = 15 }
+                first = 62, pitch = 15,
+                -- the portrait window's content (frame 21,4 7x8), px
+                art = { x = 168, y = 32, w = 56, h = 64 } }
+M.CARD3_LAYOUT = CARD3
 
 function Card:draw3()
   local Font = Gen3Ui.Font
@@ -680,11 +688,11 @@ function Card:draw3()
   Gen3Ui.frame(1, 1, 28, 18)
   Font.draw("TRAINER CARD", 12, 9, { color = "BLUE" })
 
-  -- the character, in its own window
+  -- the character, standing in its own window: placed by its real frame size
+  -- (a person is 16x32 and stands at 2x, the window's full height; a 32x32
+  -- figure only fits once), centred, feet on the window's floor
   Gen3Ui.frame(21, 4, 7, 8)
-  Gen3Ui.drawSprite(p.sprite, 168 + 12, 32, {
-    version = p.version, gender = p.gender, scale = 2,
-  })
+  Gen3Ui.drawSpriteIn(p.sprite, CARD3.art, { version = p.version, gender = p.gender })
 
   local L, R = CARD3.labelX, CARD3.valueRight
   local function row(y, label, value)
@@ -972,8 +980,12 @@ local RANK3 = {
 }
 M.RANK3_LAYOUT = RANK3
 
--- The duplicate-name tag as the cart can print it: its charmap has no "#",
--- and its lowercase hex reads as a word, so "(B0B0)" rather than "#b0b0".
+-- The duplicate-name tag as the cart prints it.  The cart has no "#" --
+-- Gen3Ui's Font would draw Gen 1's "#b0b0" as "№b0b0" (Gen3Ui.GLYPHS), a
+-- number sign run into lowercase hex that reads as a word -- so the tag is
+-- bracketed and upper-cased the way the chat log's scope tag reads there:
+-- "(B0B0)".  Only ever drawn on Gen 3, so it is spelled in the glyphs the
+-- cart has rather than left to the mapping.
 function M.rankTag3(id)
   local tag = M.rankTag(id)
   if not tag then return nil end
@@ -1436,6 +1448,120 @@ function M:pickPartyMon(game, trade, onPick)
   game = game or self.ctx.game
   if not game then return end
   M.push(game, SCREEN.PICK, { trade = trade, onPick = onPick })
+end
+
+-- ------- prompts that wait for the player
+--
+-- Ui.occupied(game): **is the cart using the screen**, so that a prompt this
+-- mod raises unasked -- a trade or battle request, a party invite, the answer
+-- to an ask the player made and then walked away from -- must not go up yet.
+--
+-- On Gen 3 that is Gen3Ui.occupied: the cart's own BAG, POKéMON list, dex,
+-- START, naming grid, message box or yes / no is open, a script or warp has
+-- the player, the cart's battle is running, or the field is not up at all.
+-- A screen of this mod's own is *not* occupied -- a request lands over
+-- PLAYERS the way it always has.  Every cart menu is a stack layer there, and
+-- a mod layer pushed on top of one draws straight through it while the
+-- cart's half-finished action waits underneath.
+--
+-- On Gen 1 and Gen 2 it is always false, deliberately: those prompts have
+-- always gone up at once (Sessions refuses a request mid-fight rather than
+-- queueing it; Friends and Coop keep their own waits), and nothing here
+-- changes when they appear.
+--
+-- Public for every module that raises such a prompt (Sessions, Party today;
+-- Coop's asks can use it the same way).  Cheap: a handful of field reads.
+function M.occupied(game)
+  if not onGen3() then return false end
+  return Gen3Ui.occupied() == true
+end
+
+-- Run `show` now if the player is free, else keep it until they are.
+--
+-- `show()` puts the prompt up and returns the box it pushed (or nil).  opts:
+--   alive()   asked again just before a queued prompt would go up; false
+--             drops it unseen -- the ask it was about was withdrawn, timed out,
+--             or answered some other way while the player was busy
+--   owner     a tag, so the module that queued it can take its entries back
+--             (dropDeferred) when what they were about is gone
+--
+-- Returns show()'s result when it ran at once, else a handle table (truthy:
+-- "something will appear") -- so a caller that treats a nil box as "nothing
+-- went up, carry on without it" is not told that about a prompt that is only
+-- waiting.  Queued prompts go up one at a time, in the order they arrived,
+-- each once the one before it has been dismissed: a pile pushed in one tick
+-- would put the newest on top, to be read first.
+--
+-- Off Gen 3 Ui.occupied is false and the queue is never used, so this is
+-- `return show()`.
+function M:whenFree(game, show, opts)
+  if type(show) ~= "function" then return nil end
+  game = game or (self.ctx and self.ctx.game)
+  local queue = self.deferred
+  if not (queue and queue[1]) and not M.occupied(game) then
+    return show()
+  end
+  opts = opts or {}
+  if not queue then
+    queue = {}
+    self.deferred = queue
+  end
+  local entry = { show = show, alive = opts.alive, owner = opts.owner, deferred = true }
+  queue[#queue + 1] = entry
+  self:pumpDeferred(game)
+  return entry
+end
+
+-- The per-tick half of whenFree: put the next waiting prompt up if the player
+-- is free and the last one it put up has been dismissed.  Ui has no tick of
+-- its own, so this is called from one that has -- Sessions:update, which
+-- runs every step the hub connection is up (every queued prompt is about a
+-- hub message, so that is exactly as long as they can matter).
+function M:pumpDeferred(game)
+  local queue = self.deferred
+  if not (queue and queue[1]) then return false end
+  game = game or (self.ctx and self.ctx.game)
+  local last = self.deferredBox
+  if last ~= nil then
+    if M.holds(game, last) then return false end
+    self.deferredBox = nil
+  end
+  if M.occupied(game) then return false end
+  while queue[1] do
+    local entry = table.remove(queue, 1)
+    local keep = true
+    if type(entry.alive) == "function" then
+      local ok, answer = pcall(entry.alive)
+      keep = ok and answer and true or false
+    end
+    if keep then
+      local ok, box = pcall(entry.show)
+      if not ok then
+        mod.log:warn("a prompt that waited for the player failed to open (%s) "
+          .. "-- report this with the line above", tostring(box))
+      else
+        entry.shown = true
+        if type(box) == "table" then self.deferredBox = box end
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Take back what `owner` queued (every entry, with no owner).  Returns how
+-- many went.
+function M:dropDeferred(owner)
+  local queue = self.deferred
+  if not queue then return 0 end
+  local dropped = 0
+  for i = #queue, 1, -1 do
+    if owner == nil or queue[i].owner == owner then
+      table.remove(queue, i)
+      dropped = dropped + 1
+    end
+  end
+  return dropped
 end
 
 -- ------- registration
@@ -2313,7 +2439,12 @@ function M:install()
   -- brings keeps its Gen 1 rule: the cursor's column, never on the selected
   -- row.  (None are offered on Gen 3 today -- Config.ownCharAllowed -- so the
   -- mark is the rule kept, not a thing drawn.)
-  local CHARPICK3 = { listW = 18, panelLeft = 21, panelTop = 5, panelW = 7, panelH = 14 }
+  -- `art` is where the figure stands inside the panel, px: placed by its real
+  -- frame (Gen3Ui.drawSpriteIn) -- a 16x32 person at 2x, feet at y 118; a
+  -- 32x32 figure, which cannot be doubled in 56px, at 1x on the same floor.
+  local CHARPICK3 = { listW = 18, panelLeft = 21, panelTop = 5, panelW = 7, panelH = 14,
+                      art = { x = 168, y = 46, w = 56, h = 72 } }
+  M.CHARPICK3_LAYOUT = CHARPICK3
 
   local function charPick3(game, client, current, goBack)
     local Font = Gen3Ui.Font
@@ -2343,10 +2474,9 @@ function M:install()
         if not item then return end
         -- stand, step, stand, other step: four beats of 16 frames
         local beat = math.floor((m.anim or 0) / 16) % 4
-        Gen3Ui.drawSprite(item.value, P.panelLeft * 8 + (P.panelW * 8 - 32) / 2,
-          P.panelTop * 8 + 14, {
-            facing = "down", walk = beat % 2 == 1, step = beat == 3, scale = 2,
-          })
+        Gen3Ui.drawSpriteIn(item.value, P.art, {
+          facing = "down", walk = beat % 2 == 1, step = beat == 3,
+        })
       end,
     })
     menu.index = start
@@ -3800,10 +3930,13 @@ function M:install()
       -- the tag distinct, and giving the message its own rows means it gets
       -- the full 18 columns instead of whatever the name left over.
       local tag = Chat.TAG[entry.scope] or "?"
-      -- Gen 3's charmap has no square brackets (they print as blanks), so the
-      -- tag is kept distinct from the name with the parentheses it does have.
+      -- One label on all three generations.  Gen 3's charmap has no square
+      -- brackets, and Gen3Ui's Font prints them as the cart's parentheses
+      -- (Gen3Ui.GLYPHS) -- so the row *reads* "(G)BOB:" there while its
+      -- label, which is what a driver matches, is the same "[G]BOB:" as on
+      -- Red and Gold.
       items[#items + 1] = {
-        label = (gen3 and "(%s)%s:" or "[%s]%s:"):format(tag, entry.name),
+        label = ("[%s]%s:"):format(tag, entry.name),
       }
       local rows
       if gen3 then
@@ -3896,14 +4029,60 @@ function M:install()
 
   -- ------- trade: choose what to offer, on Gen 3
   --
-  -- The live party (the runtime session's -- game.save is only the snapshot of
-  -- the last SAVE there), each row the mon's own name as the cart would print
-  -- it (a nickname, else the species name) with its level, and its party icon
-  -- beside it -- the selected one bobbing, as the cart's party menu does.  The
-  -- rows are 18px so all six fit on one page with a 32x32 icon on each.
-  local function pick3(game, opts)
-    local trade = opts.trade
+  -- One row per party slot of the live party (the runtime session's --
+  -- game.save is only the snapshot of the last SAVE there), drawn from the
+  -- trade's own view of it when it has one: Trade3.TradeSession:entries, which
+  -- carries the cart's name for the mon, its level, held item and mail, and
+  -- whether the cart lets it go -- and if not, the cart's sentence for why.
+  -- Each row wears the mon's party icon (an egg's is the egg), the selected
+  -- one bobbing as in the cart's party menu, with that menu's own held-item /
+  -- mail marker on it.  An egg is "EGG" with no level, as the party menu
+  -- prints one.  A row the cart will not offer is greyed and says NO, and
+  -- while the cursor is on it the title line says why in the cart's words;
+  -- the Gen 1 picker's bare NO left the player guessing.  Rows are 18px so all
+  -- six fit on one page with a 32x32 icon on each.
+  --
+  -- A trade object with no `entries` (a harness's stub, a trade machine that
+  -- predates them) gets the rows this screen always built: the name and level
+  -- off the party, canPick for the NO.
+  local function oneLine(text)
+    return (tostring(text or ""):gsub("%s*\n%s*", " "))
+  end
+
+  local function pickRows3(trade)
     local items = {}
+    if trade and type(trade.entries) == "function" then
+      local ok, entries = pcall(trade.entries, trade)
+      if ok and type(entries) == "table" then
+        for _, e in ipairs(entries) do
+          local blocked = e.blocked == true
+          local name = e.isEgg and "EGG" or e.name or e.speciesName
+          local hold
+          if e.hasMail then
+            hold = "mail"
+          elseif (tonumber(e.heldItem) or 0) ~= 0 then
+            hold = "item"
+          end
+          local right
+          if blocked then
+            right = "NO"
+          elseif not e.isEgg then
+            right = "Lv" .. tostring(e.level or "?")
+          end
+          items[#items + 1] = {
+            label = tostring(name or "?"),
+            right = right,
+            value = e.index,
+            blocked = blocked,
+            reason = blocked and type(e.reason) == "string" and oneLine(e.reason) or nil,
+            mon = e.mon,
+            icon = e.iconSpecies,
+            hold = hold,
+          }
+        end
+        return items
+      end
+    end
     for index, mon in ipairs(Gen3.party() or {}) do
       local blocked = trade and not trade:canPick(index)
       local name = mon.nickname
@@ -3918,11 +4097,25 @@ function M:install()
         mon = mon,
       }
     end
+    return items
+  end
+
+  local function pick3(game, opts)
+    local items = pickRows3(opts.trade)
     return Gen3Ui.ListMenu.new(game, "TRADE WHICH?", items, {
       rowH = 18, indent = 34,
       decorate = function(item, labelX, y, selected, m)
         local frame = selected and (math.floor((m.anim or 0) / 12) % 2) or 0
-        Gen3Ui.drawIcon(item.mon, labelX - 34, y - 11, frame)
+        local x, iy = labelX - 34, y - 11
+        if not Gen3Ui.drawIcon(item.mon, x, iy, frame) and item.icon then
+          Gen3Ui.drawIcon(item.icon, x, iy, frame)
+        end
+        if item.hold then Gen3Ui.drawHoldIcon(item.hold, x, iy) end
+      end,
+      caption = function(m)
+        local item = m.items[m.index]
+        if item and item.blocked and item.reason then return item.reason end
+        return nil
       end,
       onChoose = function(item, menu)
         if item.blocked then return end

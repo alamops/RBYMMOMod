@@ -37,6 +37,11 @@
 --   NamingScreen.new(game, opts)            title/maxLen/default/onDone/pages
 --   Font  Theme  insertBefore  insertAfter  removeLabel
 --   frame  dialogueFrame  drawSprite  drawIcon  drawQr  stamped
+--   printable(text) / GLYPHS                the cart's charset (every Font path)
+--   spriteSize  standIn  drawSpriteIn       a figure placed by its real frame
+--   drawHoldIcon(kind, iconX, iconY)        the party menu's item / mail marker
+--   occupied()                              the cart is using the screen, so a
+--                                           prompt nobody asked for must wait
 --
 -- Layer ids are Config.GEN3_LAYER_PREFIX .. <ScreenId> ("rby_mmo:RbyMmoMain").
 -- The game3 stack *replaces* a same-id layer on push, which a Gen 1 stack
@@ -103,6 +108,7 @@
 local need, mod = ...
 local Config = need("Config")
 local Gen3 = need("Gen3")
+local Chars = need("Chars")
 
 local M = {}
 
@@ -202,6 +208,43 @@ Font.HOLLOW = "\226\150\183"   -- ▷
 local AVG_ADVANCE = 6          -- a missing font's per-glyph guess
 local HOLLOW_W = 7
 
+-- ------- the cart's charset, as the mod's text meets it
+--
+-- The Gen 3 charmap (src/core/game3/scripting/text_ir.lua CHARMAP, plus the
+-- extra symbols frlg_font maps) has round brackets and no square ones, no
+-- "#", "*", "@", "~", "|", "^", "`" or backslash -- and frlg_font draws a
+-- character it cannot map as a blank, so "[G]BOB:" printed " G BOB:".  Worse,
+-- "{" is the font's own markup: "{" .. anything .. "}" is read as a control
+-- tag ({COLOR RED}, {PLAYER}) and swallowed, and in a --developer run an
+-- unknown one *throws* inside the draw.  So every string this toolkit prints
+-- or measures passes through this one table first, and every screen gets the
+-- same answer without having to know the charset: brackets and braces are
+-- the cart's parentheses (src/Toast.lua's gen3Text maps those five the same
+-- way), "#" is the cart's own "№" (0x108, the dex's number sign), and the
+-- rest are the nearest glyph the cart does have.  One character for one
+-- character, always: TextBox's typewriter counts characters, and a mapping
+-- that changed a line's length would reveal it out of step with its text.
+--
+-- Wire.text strips all of these from anything a player sends, so in practice
+-- this only ever meets the mod's own literals -- which is the point: a label
+-- written once for all three generations reads right on this one too.
+M.GLYPHS = {
+  ["["] = "(", ["]"] = ")", ["{"] = "(", ["}"] = ")", ["\\"] = "/",
+  ["#"] = "\226\132\150",       -- №
+  ["*"] = "\195\151",           -- ×
+  ["@"] = "a", ["~"] = "-", ["|"] = "/", ["^"] = "'", ["`"] = "'",
+}
+local GLYPH_CLASS = "[%[%]{}\\#%*@~|%^`]"
+
+-- `text` as the cart can print it (see above).  Pure, and cheap when there is
+-- nothing to map.
+function Font.printable(text)
+  local s = tostring(text or "")
+  if not s:find(GLYPH_CLASS) then return s end
+  return (s:gsub(GLYPH_CLASS, M.GLYPHS))
+end
+M.printable = Font.printable
+
 local function utf8Chars(text)
   local out = {}
   local s = tostring(text or "")
@@ -247,7 +290,7 @@ end
 
 function Font.width(text, opts)
   local total = 0
-  for _, seg in ipairs(segments(text)) do
+  for _, seg in ipairs(segments(Font.printable(text))) do
     if seg.hollow then total = total + HOLLOW_W else total = total + measureRun(seg.text, opts) end
   end
   return total
@@ -284,14 +327,16 @@ end
 
 -- Draw at pixel (x, y) in the 240x160 canvas.  opts.color / opts.colors
 -- ("NORMAL", "WHITE", "BLUE", "RED", "MUTED" or a three-slot table),
--- opts.maxWidth (clip), opts.small.  Returns the width drawn.
+-- opts.maxWidth (clip), opts.small.  Returns the width drawn.  The text is
+-- mapped onto the cart's charset first (Font.printable), so no glyph prints
+-- blank and nothing is read as markup.
 function Font.draw(text, x, y, opts)
   opts = opts or {}
   local F = Glyphs()
   local colors = colorsOf(opts.colors or opts.color or "NORMAL")
   local pen = x
   local maxW = tonumber(opts.maxWidth)
-  for _, seg in ipairs(segments(text)) do
+  for _, seg in ipairs(segments(Font.printable(text))) do
     local room = maxW and (maxW - (pen - x)) or nil
     if room and room <= 0 then break end
     if seg.hollow then
@@ -436,12 +481,18 @@ end
 -- ------- overworld sprites, party icons, QR codes
 
 -- An avatar's graphic on *this* cart: a Gen 3 OBJ_EVENT_GFX_* name from any
--- version (mapped through the cart's own link rule), the Config token, or a
--- number.  opts.version / opts.gender are the owner's (presence carries both).
+-- version, the Config token, or a number.  opts.version / opts.gender are the
+-- owner's (presence carries both).  Mapped by Chars.gfxForViewer -- the look
+-- table first (a FireRed RED_NORMAL and an Emerald RED are one boy), then the
+-- carts' own Cable Club rule -- which is the rule src/Avatars.lua walks the
+-- same player with, so a card, a rank row and the figure in the field never
+-- disagree about who somebody looks like.
 local function gfxIdFor(sprite, opts)
   opts = opts or {}
   if type(sprite) == "number" then return sprite end
-  local id = Gen3.viewerGfxFor(sprite, opts.version, opts.gender)
+  local id = Chars.gfxForViewer(sprite, opts.version, opts.gender)
+  if tonumber(id) then return tonumber(id) end
+  id = Gen3.viewerGfxFor(sprite, opts.version, opts.gender)
   if tonumber(id) then return tonumber(id) end
   return Gen3.gfxId(sprite)
 end
@@ -466,6 +517,82 @@ local function spriteQuad(spr, frame, clipTop, clipH)
   return sub, qw, hh
 end
 
+-- The engine's sheet for `sprite` on this cart (OwSprites.getDraw: a palette
+-- override the cart applied is honoured), and its module.  nil when there is
+-- no such graphic.
+local function sheetFor(sprite, opts)
+  local Ow = engine("src.core.game3.ow_sprites")
+  local gid = gfxIdFor(sprite, opts or {})
+  if not (Ow and gid) then return nil end
+  local okS, spr = pcall(Ow.getDraw or Ow.get, gid)
+  if not (okS and type(spr) == "table" and spr.image) then return nil end
+  return spr, Ow
+end
+
+-- A frame's size in pixels: a figure's sheet frame (16x32 for a person, 32x32
+-- for the bigger graphics), or a Chars.portrait entry's own w / h.  nil, nil
+-- when there is nothing to draw.
+function M.spriteSize(sprite, opts)
+  if type(sprite) == "table" and sprite.image then
+    local w, h = tonumber(sprite.w), tonumber(sprite.h)
+    if w and h then return w, h end
+    local q = sprite.quad
+    if q and q.getViewport then
+      local _, _, qw, qh = q:getViewport()
+      return qw, qh
+    end
+    return nil, nil
+  end
+  local spr = sheetFor(sprite, opts)
+  if not spr then return nil, nil end
+  return tonumber(spr.width) or 16, tonumber(spr.height) or 32
+end
+
+-- Where a w x h frame stands in a box: the largest whole-number scale that
+-- fits (capped at opts.maxScale, default 2 -- a GBA menu never draws a person
+-- bigger than twice the size the field does), centred across and feet on the
+-- box's bottom edge, the way the cart stands a trainer on its card.  Pure, so
+-- the suite pins the arithmetic without a sheet.  -> x, y, scale
+function M.standIn(w, h, box, opts)
+  opts = opts or {}
+  w, h = tonumber(w) or 16, tonumber(h) or 32
+  local bw, bh = tonumber(box.w) or w, tonumber(box.h) or h
+  local maxScale = math.max(1, math.floor(tonumber(opts.maxScale) or 2))
+  local scale = math.min(maxScale, math.floor(bw / w), math.floor(bh / h))
+  if scale < 1 then scale = 1 end
+  local x = (tonumber(box.x) or 0) + math.floor((bw - w * scale) / 2)
+  local y = (tonumber(box.y) or 0) + bh - h * scale
+  return x, y, scale
+end
+
+-- Stand `sprite` in `box` ({ x, y, w, h } px) by its real frame size (see
+-- M.standIn), whatever that is -- a person's 16x32, a 32x32 figure, or a
+-- Chars.portrait entry ({ image, quad, w, h }).  The pose options are
+-- M.drawSprite's.  Returns the drawn width, height and scale, or nil.
+function M.drawSpriteIn(sprite, box, opts)
+  opts = opts or {}
+  local w, h = M.spriteSize(sprite, opts)
+  if not (w and h) then return nil end
+  local x, y, scale = M.standIn(w, h, box, opts)
+  if type(sprite) == "table" and sprite.image then
+    local g = gfx()
+    if not g then return nil end
+    g.setColor(1, 1, 1, 1)
+    if sprite.quad then
+      g.draw(sprite.image, sprite.quad, x, y, 0, scale, scale)
+    else
+      g.draw(sprite.image, x, y, 0, scale, scale)
+    end
+    return w * scale, h * scale, scale
+  end
+  local drawOpts = {}
+  for k, v in pairs(opts) do drawOpts[k] = v end
+  drawOpts.scale = scale
+  local dw, dh = M.drawSprite(sprite, x, y, drawOpts)
+  if not dw then return nil end
+  return dw, dh, scale
+end
+
 -- Draw one frame of an overworld sprite with its top-left at (x, y).
 -- opts.frame (default 0, stand facing down) or opts.facing + opts.walk /
 -- opts.step (OwSprites.pose), opts.scale, opts.clipTop / opts.clipH (a crop
@@ -474,11 +601,9 @@ end
 function M.drawSprite(sprite, x, y, opts)
   opts = opts or {}
   local g = gfx()
-  local Ow = engine("src.core.game3.ow_sprites")
-  local gid = gfxIdFor(sprite, opts)
-  if not (g and Ow and gid) then return nil end
-  local okS, spr = pcall(Ow.getDraw or Ow.get, gid)
-  if not (okS and type(spr) == "table" and spr.image) then return nil end
+  if not g then return nil end
+  local spr, Ow = sheetFor(sprite, opts)
+  if not spr then return nil end
   local frame = tonumber(opts.frame)
   local flip = false
   if not frame then
@@ -510,6 +635,36 @@ function M.drawIcon(subject, x, y, frame)
   local q = icon.quads and icon.quads[(tonumber(frame) or 0) % math.max(frames, 1)]
   g.setColor(1, 1, 1, 1)
   if q then g.draw(icon.image, q, x, y) else g.draw(icon.image, x, y) end
+  return true
+end
+
+-- The party menu's 8x8 held-item marker beside a party icon: frame 0 an item,
+-- frame 1 mail (pokefirered/src/party_menu.c:2743 UpdatePartyMonHeldItemSprite,
+-- the sheet src/ui/game3/party_menu.lua heldItemSheet decodes).  The cart
+-- puts it 16 right and 22 down from the icon's top-left (its sprite centres
+-- in sSpriteCoords, 104,18 -> 108,28), so that is what `iconX, iconY` are.
+-- Asked of the engine once: a cache without the sheet answers false for the
+-- rest of the run instead of throwing every frame.
+local holdSheet
+function M.drawHoldIcon(kind, iconX, iconY)
+  if kind ~= "item" and kind ~= "mail" then return false end
+  local g = gfx()
+  if not g then return false end
+  if holdSheet == nil then
+    holdSheet = false
+    local PartyMenu = engine("src.ui.game3.party_menu")
+    if PartyMenu and type(PartyMenu.heldItemSheet) == "function" then
+      local ok, sheet = pcall(PartyMenu.heldItemSheet)
+      if ok and type(sheet) == "table" and sheet.image and type(sheet.quads) == "table" then
+        holdSheet = sheet
+      end
+    end
+  end
+  if not holdSheet then return false end
+  local q = holdSheet.quads[kind == "mail" and 1 or 0]
+  if not q then return false end
+  g.setColor(1, 1, 1, 1)
+  g.draw(holdSheet.image, q, iconX + 16, iconY + 22)
   return true
 end
 
@@ -849,6 +1004,96 @@ function M.states()
   return out
 end
 
+-- ------- is the cart using the screen
+--
+-- A prompt this mod raises unasked -- somebody's trade or battle request, a
+-- party invite, the answer to an ask the player made and walked away from --
+-- used to go straight onto the stack whatever was there: over the BAG, the
+-- POKéMON list, the dex, an NPC's sentence, START, the naming grid.  The
+-- field freezes under a layer, but the cart's own menu underneath is left
+-- holding a half-finished action with a mod box drawn through it.  This is
+-- the one statement of "not now" those prompts wait on (Ui.occupied /
+-- Ui:whenFree): the moment the player could press START again is the moment
+-- they are free, which is the cart's own rule for when a menu may open
+-- (hud.lua start_button_allowed + Hud.busy).
+--
+-- Occupied, then, while any of:
+--   * the field is not running (title, the boot menus, the FRLG recap), or
+--     the cart's battle is;
+--   * a layer on the stack is the cart's own -- START, BAG, POKéMON, the
+--     dex, the naming grid, the PC, a shop, an evolution ... every one of
+--     them is a stack layer (src/ui/game3/*.lua Stack.push), so a layer of
+--     this mod's sitting over one does not make the player free of it;
+--   * the cart's message box, yes / no, a fade or a script's wait-for-button
+--     is up (Hud.busy's half that is not the stack);
+--   * a script is running, or a warp / forced move / field effect has the
+--     player locked.
+-- A layer of this mod's own on top of nothing of the cart's is *not*
+-- occupied: a request landing while the player browses PLAYERS goes up over
+-- it exactly as it does on Gen 1.  False off Gen 3.
+-- Every one of these is loaded by the time the field runs (hud.lua requires
+-- them), so asking costs a cached lookup; the mod sandbox has no `package`
+-- to peek into instead.
+local function loaded(name)
+  return engine(name)
+end
+
+local function call(t, name, ...)
+  local fn = type(t) == "table" and t[name] or nil
+  if type(fn) ~= "function" then return nil end
+  local ok, value = pcall(fn, ...)
+  return ok and value or nil
+end
+
+local function cartDialogueOpen()
+  local Message = loaded("src.ui.game3.message")
+  if Message and call(Message, "isOpen") then return true end
+  local Choice = loaded("src.ui.game3.choice")
+  if type(Choice) == "table" and Choice.active == true then return true end
+  local Fade = loaded("src.ui.game3.fade")
+  if Fade and call(Fade, "isActive") then return true end
+  local Hud = loaded("src.ui.game3.hud")
+  if type(Hud) == "table" and Hud._waitButton ~= nil then return true end
+  return false
+end
+
+local function fieldLocked()
+  local Space = loaded("src.core.game3.scripting.space")
+  local vm = type(Space) == "table" and Space.vm or nil
+  if type(vm) == "table" and type(vm.isRunning) == "function" then
+    local ok, running = pcall(vm.isRunning, vm)
+    if ok and running then return true end
+  end
+  local Field = loaded("src.core.game3.field")
+  if type(Field) == "table" and Field.locked then return true end
+  local Forced = loaded("src.core.game3.forced_movement")
+  if Forced and call(Forced, "isForced") then return true end
+  local Warp = loaded("src.core.game3.warp")
+  if Warp and call(Warp, "isBusy") then return true end
+  local P = loaded("src.core.game3.player")
+  if type(P) == "table" and P.boulderPush ~= nil then return true end
+  return false
+end
+
+function M.occupied()
+  if not Gen3.active() then return false end
+  if not Gen3.inField() then return true end
+  if Gen3.inBattle() then return true end
+  local mine = false
+  for _, layer in ipairs(layerList()) do
+    if not isModLayer(layer) then return true end
+    mine = true
+  end
+  -- With nothing of this mod's up, the engine's own answer covers anything
+  -- the list above does not name (Hud.busy: the stack is empty here, so it is
+  -- the cart's dialogue, fades and waits).  With a layer of ours up it cannot
+  -- be asked -- it would count that layer -- so the dialogue half is read
+  -- directly.
+  if not mine and Gen3.busy() then return true end
+  if cartDialogueOpen() then return true end
+  return fieldLocked()
+end
+
 -- Everything above `target` off the stack, and `target` too with alsoPop.
 -- False (and nothing touched) when `target` is not on it -- the same guard
 -- Coop.unwindStackTo keeps against hunting for a state that already left.
@@ -1086,6 +1331,10 @@ end
 -- glyph.  opts.rowH / opts.listW (content tiles) / opts.panel(menu) /
 -- opts.decorate(item, x, y, selected, menu) / opts.indent let a screen give a
 -- row a picture or the window a side panel (CHARACTER, TRADE WHICH?).
+-- opts.caption(menu) -> text[, colour] puts a line of its own in the title
+-- window in place of the title while it answers one -- the prompt line the
+-- cart's own pickers use to say why a row cannot be chosen; `title` itself
+-- (what a driver reads) never changes.
 
 local ListMenu = class({})
 M.ListMenu = ListMenu
@@ -1123,6 +1372,7 @@ function ListMenu.new(game, title, items, opts)
   self.indent = tonumber(opts.indent) or 0
   self.panel = opts.panel
   self.decorate = opts.decorate
+  self.caption = opts.caption
   self.rows = tonumber(opts.rows) or math.floor((L.h * TILE) / self.rowH)
   self.holdDir, self.holdFrames = nil, 0
   self.anim = 0
@@ -1243,9 +1493,19 @@ function ListMenu:draw()
   local L = M.LIST
   self:syncScroll()
   M.frame(L.titleLeft, L.titleTop, L.titleW, L.titleH)
-  Font.draw(tostring(self.title or ""), L.titleLeft * TILE + 4, L.titleTop * TILE + 1)
-  if type(self.titleRight) == "string" then
-    Font.drawRight(self.titleRight, (L.titleLeft + L.titleW) * TILE - 4, L.titleTop * TILE + 1)
+  local caption, captionColor
+  if self.caption then
+    local ok, text, color = pcall(self.caption, self)
+    if ok and type(text) == "string" and text ~= "" then caption, captionColor = text, color end
+  end
+  if caption then
+    Font.draw(Font.fit(caption, L.titleW * TILE - 8), L.titleLeft * TILE + 4,
+      L.titleTop * TILE + 1, { color = captionColor or "NORMAL" })
+  else
+    Font.draw(tostring(self.title or ""), L.titleLeft * TILE + 4, L.titleTop * TILE + 1)
+    if type(self.titleRight) == "string" then
+      Font.drawRight(self.titleRight, (L.titleLeft + L.titleW) * TILE - 4, L.titleTop * TILE + 1)
+    end
   end
   M.frame(L.left, L.top, self.listW, L.h)
   local topPx = L.top * TILE

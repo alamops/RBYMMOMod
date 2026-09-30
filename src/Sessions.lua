@@ -259,6 +259,51 @@ local function uiDoor(self, name)
   return nil
 end
 
+-- ------- prompts that wait for the player
+--
+-- src/Ui.lua's Ui.occupied / Ui:whenFree.  On Gen 3 a prompt this module
+-- raises unasked -- somebody's request, the answer to an ask the player made
+-- and walked away from, a trade screen opening on the far side's accept --
+-- waits while the cart is using the screen (its BAG, START, the dex, an
+-- NPC's sentence ...) instead of going up through it, and appears the moment
+-- the player is free.  A ui without them (every harness stub), and Gen 1 /
+-- Gen 2 (where Ui.occupied is always false), show it at once, as before.
+local function gameOf(self, game)
+  if game ~= nil then return game end
+  local ctx = type(self.ui) == "table" and self.ui.ctx or nil
+  return type(ctx) == "table" and ctx.game or nil
+end
+
+function M:occupied(game)
+  local door = uiDoor(self, "occupied")
+  if not door then return false end
+  local ok, busy = pcall(door, gameOf(self, game))
+  return ok and busy == true
+end
+
+local function whenFree(self, game, show, opts)
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.whenFree) == "function" then
+    return ui:whenFree(gameOf(self, game), show, opts)
+  end
+  return show()
+end
+
+-- A sentence for the player, put up when they are free to read it.  onDone
+-- runs when it is dismissed -- or at once when no box could go up at all, so
+-- a continuation hung on it (the trade evolution) is never stranded.  Only a
+-- line with nothing behind it is filed under this module (Ui:whenFree's
+-- owner), so M:onTransportReady can take the stale ones back without ever
+-- taking a continuation with them.
+function M:tell(game, text, onDone)
+  local ui = self.ui
+  return whenFree(self, game, function()
+    local box = ui:say(text, onDone)
+    if not box and onDone then onDone() end
+    return box
+  end, onDone == nil and { owner = self } or nil)
+end
+
 local function unwind3(Stack, target, alsoPop)
   local index = layerIndex3(Stack, target)
   if not index then return false end
@@ -497,18 +542,31 @@ function M:onRequest(game, msg)
     return
   end
 
-  self.incoming = { from = from, name = name, kind = kind }
-  local box = self.ui:confirm(game,
-    ("%s wants to\n%s!"):format(name, kind == "trade" and "trade" or "battle"),
-    function(yes)
-      local pending = self.incoming
-      self.incoming = nil
-      self.incomingBox = nil
-      if not pending then return end
-      self.transport:send(Wire.RESPOND,
-        { to = pending.from, kind = pending.kind, accept = yes and true or false })
-    end)
-  self.incomingBox = { box = box, game = game }
+  -- Free but looking at the cart's own screen (Gen 3: the BAG, START, an
+  -- NPC's sentence -- Ui.occupied) is not busy: the ask is held, not refused,
+  -- and put to the player the moment they close what they have open.  It is
+  -- marked `deferred` until then, which is what M:onCancel and
+  -- waitOutRequest read: an ask withdrawn or run out before it was ever seen
+  -- goes without a box.  While it waits this side still reads as "asked" to
+  -- everybody else, exactly as it would with the box up.
+  local incoming = { from = from, name = name, kind = kind, deferred = true }
+  self.incoming = incoming
+  whenFree(self, game, function()
+    if self.incoming ~= incoming then return nil end
+    incoming.deferred = nil
+    local box = self.ui:confirm(game,
+      ("%s wants to\n%s!"):format(name, kind == "trade" and "trade" or "battle"),
+      function(yes)
+        local pending = self.incoming
+        self.incoming = nil
+        self.incomingBox = nil
+        if not pending then return end
+        self.transport:send(Wire.RESPOND,
+          { to = pending.from, kind = pending.kind, accept = yes and true or false })
+      end)
+    self.incomingBox = { box = box, game = game }
+    return box
+  end, { alive = function() return self.incoming == incoming end, owner = self })
 end
 
 -- The corner line an auto-refusal leaves on the *refusing* player's screen.
@@ -555,7 +613,7 @@ function M:onDecline(msg)
   local kind = outgoing and outgoing.kind
   self.outgoing = nil
   self:closeWaitBox()
-  self.ui:say(M.declineText(name, kind, Wire.declineReason(msg.reason)))
+  self:tell(nil, M.declineText(name, kind, Wire.declineReason(msg.reason)))
 end
 
 -- The asker walked away before we answered.  Their name is stamped by the
@@ -567,8 +625,16 @@ function M:onCancel(msg)
   if not pending then return end
   if from and pending.from ~= from then return end
   self.incoming = nil
+  if pending.deferred then
+    -- Never on screen (the player was in the cart's own menus the whole
+    -- time), so there is no box to take down and no "cancelled" to explain:
+    -- the queued prompt drops itself (its alive check is this field), and
+    -- the corner says who asked, as it does for an ask refused while busy.
+    self:sayRefused(pending.name, pending.kind)
+    return
+  end
   self:closeIncomingBox()
-  self.ui:say(("%s cancelled\nthe invite."):format(name))
+  self:tell(nil, ("%s cancelled\nthe invite."):format(name))
 end
 
 -- A player left the game.  Same duty Party:onPeerGone has for invites: an
@@ -582,7 +648,7 @@ function M:onPeerGone(id)
     local name = self.outgoing.name or "They"
     self.outgoing = nil
     self:closeWaitBox()
-    self.ui:say(("%s went\noffline."):format(name))
+    self:tell(nil, ("%s went\noffline."):format(name))
   end
   if self.incoming and self.incoming.from == id then
     self.incoming = nil
@@ -1085,7 +1151,7 @@ function M:onSessionEnd(reason)
   if session.stage == "trade" or session.stage == "settling" then return end
   self.active = nil
   if reason == "peer_left" then
-    self.ui:say(("%s disconnected."):format(session.peerName))
+    self:tell(nil, ("%s disconnected."):format(session.peerName))
   end
 end
 
@@ -1110,7 +1176,7 @@ function M:endSession(message)
   self.fight = nil
   if fight then fight:finish("draw", "disconnect") end
   if session then session.net:close() end
-  if message then self.ui:say(message) end
+  if message then self:tell(nil, message) end
 end
 
 -- ------- the handshake, then the handoff (trade only)
@@ -1252,6 +1318,11 @@ function M:advanceTrade(game, session)
   if not trade then return end
 
   if trade.stage == "picking" and not session.pickOpen then
+    -- The far side's accept can land while this player has the cart's own
+    -- BAG or START open (Gen 3; Ui.occupied): the picker waits for them to
+    -- close it, asked again every tick, rather than going up through it.  A
+    -- human is choosing either way, and this stage has no clock.
+    if self:occupied(game) then return end
     session.pickOpen = true
     self.ui:pickPartyMon(game, trade, function(index)
       session.pickOpen = false
@@ -1294,6 +1365,11 @@ function M:advanceTrade(game, session)
       session.net:send({ type = "bye" })
       return self:endSession("The trade stopped:\n" .. refused)
     end
+    -- Same wait as the picker's: their pick can arrive while the player is in
+    -- the cart's menus.  Nothing is on the wire from this side yet, so no
+    -- clock runs against the wait (waitOut's CONFIRM_TIMEOUT starts at our
+    -- own answer); the far side's own timeout is what bounds it.
+    if self:occupied(game) then return end
     session.confirmOpen = true
     local theirs = trade.theirParty and trade.theirParty[trade.theirPick]
     local label = theirs and tostring(theirs.species) or "their POKéMON"
@@ -1353,15 +1429,16 @@ function M:advanceTrade(game, session)
         evolved = true
         self:evolveTraded(game, received, evolveTo, evoEntry, slot)
       end
-      if not self.ui:say(("%s was\ntraded over!"):format(name), evolve) then
-        evolve()
-      end
+      -- Through M:tell, so a player who opened the BAG while waiting on the
+      -- far side's confirm reads it once they close the BAG rather than
+      -- through it -- and tell runs `evolve` at once when no box could go up.
+      self:tell(game, ("%s was\ntraded over!"):format(name), evolve)
     else
       -- The peer has our confirm and will apply regardless, so there is no
       -- undo to offer; what there is, is a way to see what actually landed.
       mod.log:warn("applying the finished trade raised (%s) -- check the "
         .. "party from START > POKéMON before trading again", tostring(received))
-      self.ui:say("The trade failed\nto complete.")
+      self:tell(game, "The trade failed\nto complete.")
     end
 
   elseif trade.stage == "cancelled" and not session.applied then
@@ -1632,7 +1709,19 @@ end
 
 -- Transport became ready again (welcome after a blip, or the suite calling
 -- this directly). Resume a live mediated fight with mmo.battle_reconnect.
+--
+-- Anything still held back for the player (M:tell, a deferred ask) is about
+-- the connection before this one -- an ask the hub forgot with it, a "said
+-- no" to an ask the reconnect already cleared -- so it goes, unseen, rather
+-- than surfacing later as an ask nobody can answer.  The line a finished
+-- trade still owes is kept: it carries the evolution behind it, and M:tell
+-- never files such a line under this module (see there).
 function M:onTransportReady()
+  if self.incoming and self.incoming.deferred then self.incoming = nil end
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.dropDeferred) == "function" then
+    ui:dropDeferred(self)
+  end
   local fight = self.fight
   if fight and not fight.finished and fight.onTransportReady then
     return fight:onTransportReady()
@@ -1659,6 +1748,15 @@ function M:update(game, dt)
   self.linkWasDown = not alive
 
   self:waitOutRequest(game, dt)
+
+  -- Prompts held back while the cart had the screen (Ui:whenFree -- this
+  -- module's, Party's, anyone's that shares the Ui): Ui has no tick of its
+  -- own, and this is the one Client runs on every step the hub is up, which
+  -- is as long as any of them can matter.  Nothing queued is one field read.
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.pumpDeferred) == "function" then
+    ui:pumpDeferred(gameOf(self, game))
+  end
 
   local session = self.active
   if not session then return end
@@ -1736,11 +1834,27 @@ function M:waitOutRequest(game, dt)
     if outgoing.clock >= REQUEST_TIMEOUT then
       local name = outgoing.name or "They"
       self:cancelRequest()
-      self.ui:say(("%s never\nanswered."):format(name))
+      self:tell(game, ("%s never\nanswered."):format(name))
     end
   end
 
   local incoming = self.incoming
+  if incoming and incoming.deferred then
+    -- Their ask, still waiting for this player to come out of the cart's
+    -- menus (M:onRequest).  Clocked on the asker's own REQUEST_TIMEOUT: by
+    -- the time it runs out here the asker has given up and cancelled (which
+    -- M:onCancel drops without a box), so this is only the backstop for a
+    -- cancel that never arrived -- the ask is dropped unseen and answered no,
+    -- the reason saying this side was busy, which it was.
+    incoming.clock = (incoming.clock or 0) + dt
+    if incoming.clock >= REQUEST_TIMEOUT then
+      self.incoming = nil
+      self.transport:send(Wire.RESPOND,
+        { to = incoming.from, kind = incoming.kind, accept = false, reason = "busy" })
+      self:sayRefused(incoming.name, incoming.kind)
+    end
+    return
+  end
   local held = incoming and self.incomingBox
   if not (held and held.box) then return end
   local on = self:onStack(held.game or game, held.box)

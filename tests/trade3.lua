@@ -787,6 +787,143 @@ do
   end
 end
 
+-- ------- the trade waits while the cart has the screen (Ui.occupied)
+--
+-- A Gen 3 player can be in the cart's own BAG when the far side accepts,
+-- picks or confirms.  BOB's ui below answers Ui.occupied from a flag and
+-- holds Ui:whenFree prompts until it drops, the contract src/Ui.lua keeps
+-- (the real one is driven in tests/gen3_ui.lua).  The picker, the confirm and
+-- the "traded over!" line all wait for the BAG to close; the swap and its
+-- save do not; and the trade evolution still follows the line, once.
+
+do
+  scenes, evolutions = {}, {}
+  local sa = newSession({ name = "ANN", trainerId = 11, national = true,
+    party = { mon(25, 12, { nickname = "SPARKY" }), mon(16, 5) } })
+  local sb = newSession({ name = "BOB", trainerId = 22, national = true,
+    party = { mon(19, 4), mon(20, 22) } })
+  sa.party[1].species, sa.party[1].speciesId, sa.party[1].nickname = 64, 64, "KADABRA"
+  local a, b = players(sa, sb)
+  local held = {}
+  b.ui.bagOpen = true
+  -- Ui.occupied is a module function (called as ui.occupied(game)); whenFree
+  -- and pumpDeferred are methods, as on the real Ui
+  b.ui.occupied = function() return b.ui.bagOpen end
+  function b.ui:whenFree(_, show, opts)
+    if not self.bagOpen and #held == 0 then return show() end
+    held[#held + 1] = { show = show, alive = opts and opts.alive }
+    return { deferred = true }
+  end
+  function b.ui:pumpDeferred()
+    if self.bagOpen then return false end
+    while held[1] do
+      local entry = table.remove(held, 1)
+      if not entry.alive or entry.alive() then entry.show() return true end
+    end
+    return false
+  end
+  local pickOpens = 0
+  local basePick = b.ui.pickPartyMon
+  function b.ui:pickPartyMon(...)
+    pickOpens = pickOpens + 1
+    return basePick(self, ...)
+  end
+
+  local netA, netB = Net.loopbackPair()
+  a.transport.net, b.transport.net = netA, netB
+  a.sessions:onSession(a.game, { peer = b.id, peerName = b.name, kind = "trade", role = "host", id = "s9" })
+  b.sessions:onSession(b.game, { peer = a.id, peerName = a.name, kind = "trade", role = "guest", id = "s9" })
+  local function tick(n)
+    for _ = 1, n or 1 do
+      deliver(a, b)
+      deliver(b, a)
+      a.sessions:update(a.game, 0.25)
+      b.sessions:update(b.game, 0.25)
+      answer(a, { pick = 1 })
+    end
+  end
+  tick(8)
+  eq(pickOpens, 0, "BOB's picker waits while he is in the cart's BAG")
+  eq(b.sessions.active and b.sessions.active.trade and b.sessions.active.trade.stage, "picking",
+    "though his trade is ready for it")
+  b.ui.bagOpen = false
+  tick(1)
+  eq(pickOpens, 1, "it opens once he closes the BAG")
+  b.ui.bagOpen = true
+  local pick = table.remove(b.ui.picks, 1)
+  if pick then pick.onPick(1) end
+  tick(8)
+  eq(b.ui.asked, nil, "the confirm waits for the BAG too")
+  b.ui.bagOpen = false
+  tick(1)
+  eq(b.ui.asked, 1, "and is asked once it closes")
+  b.ui.bagOpen = true
+  local box = table.remove(b.ui.confirms, 1)
+  if box then box.onChoose(true) end
+  tick(8)
+  eq(sb.party[1].species, 64, "the swap itself does not wait: BOB holds the KADABRA")
+  eq(b.game.saves, 1, "and it is on the cartridge before anything is shown")
+  check(not contains(b.ui.said, "KADABRA was\ntraded over!"), "the line waits for the BAG")
+  eq(#scenes, 0, "and the evolution waits for the line")
+  b.ui.bagOpen = false
+  tick(1)
+  check(contains(b.ui.said, "KADABRA was\ntraded over!"), "the line is read once the BAG closes")
+  eq(#scenes, 0, "the evolution follows the line, not the BAG closing")
+  local dismiss = table.remove(b.ui.sayDone, 1)
+  if dismiss then dismiss() end
+  eq(#scenes, 1, "and plays once the line is dismissed")
+  eq(scenes[1] and scenes[1].target, 65, "into ALAKAZAM")
+  if dismiss then dismiss() end
+  tick(6)
+  eq(#scenes, 1, "exactly once, however often the line is answered")
+  eq(b.sessions.active, nil, "and BOB's session settled")
+end
+
+-- A line with nowhere to go (a ui that pushed nothing) runs its continuation
+-- at once, so a trade evolution can never be stranded behind a box that was
+-- never drawn.
+do
+  local calls = 0
+  local s = Sessions.new({ send = function() return true end }, {
+    say = function() return nil end, ctx = {},
+  })
+  s:tell(nil, "SPARKY was\ntraded over!", function() calls = calls + 1 end)
+  eq(calls, 1, "tell runs onDone at once when no box went up")
+  local boxed = 0
+  local s2 = Sessions.new({ send = function() return true end }, {
+    say = function() return { kind = "text" } end, ctx = {},
+  })
+  s2:tell(nil, "Held.", function() boxed = boxed + 1 end)
+  eq(boxed, 0, "and leaves it to the box when one did")
+end
+
+-- The moves a fight banked are the cart's own exchange (its message box, its
+-- yes / no): learnOn3 runs whether or not the screen reads as occupied --
+-- it is what occupies it -- and chains through its callbacks as before.
+do
+  local begun = {}
+  stub("src.core.game3.battle.learn_move", { begin = function(opts) begun[#begun + 1] = opts end })
+  stub("src.ui.game3.message", { show = function() end, isOpen = function() return true end })
+  stub("src.ui.game3.choice", { yesNo = function() end })
+  local needL = newNeed()
+  local SessionsL = needL("Sessions")
+  local s = SessionsL.new({}, { occupied = function() return true end, ctx = {} })
+  local g3 = { generation = 3, phase = "field", session = {} }
+  check(s:offerForgets(g3, { { mon = mon(16, 10), move = 17 }, { mon = mon(19, 10), move = 98 } }),
+    "a Gen 3 queue is taken while the cart's message box is up")
+  eq(#begun, 1, "the first learn-move exchange starts at once")
+  begun[1].onDone(false)
+  eq(#begun, 2, "and the second follows the first's answer")
+  begun[2].onDone(true)
+  begun[2].onDone(true)
+  eq(#begun, 2, "a stray callback reopens nothing")
+  for _, name in ipairs({ "src.core.game3.battle.learn_move", "src.ui.game3.message",
+      "src.ui.game3.choice" }) do
+    package.loaded[name] = saved[name] or nil
+    saved[name] = nil
+  end
+end
+
 -- ------- a Gen 3 build without the codec refuses rather than falling to Gen 1
 
 do

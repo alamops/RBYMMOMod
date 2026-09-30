@@ -57,6 +57,87 @@ graphics.getColor = function() return 1, 1, 1, 1 end
 local previousLove = _G.love
 _G.love = { graphics = graphics }
 
+-- Every `draw` of one image, as { x, y, sx, sy, quad } (g.draw(image, quad,
+-- x, y, r, sx, sy) records { "draw", image, quad, x, y, r, sx, sy }).
+local function drawsOf(image)
+  local out = {}
+  for _, call in ipairs(drawn) do
+    if call[1] == "draw" and call[2] == image then
+      out[#out + 1] = { x = call[4], y = call[5], sx = call[7], sy = call[8], quad = call[3] }
+    end
+  end
+  return out
+end
+
+-- ------- what reaches the cart's font
+--
+-- Gen3Ui prints through src/ui/game3/frlg_font.lua.  Headless there are no
+-- glyph sheets, so a character the cart cannot print would pass unseen --
+-- wrapping FrlgFont.draw records every string a screen hands the cart, and
+-- `unprintable` answers the first character frlg_font would draw blank
+-- (glyph 0x00 for anything but a space) or read as markup ("{...}").
+local FrlgFont = require("src.ui.game3.frlg_font")
+local realFontDraw = FrlgFont.draw
+local printed, allPrinted = {}, {}
+FrlgFont.draw = function(text, ...)
+  printed[#printed + 1] = tostring(text)
+  allPrinted[#allPrinted + 1] = tostring(text)
+  return realFontDraw(text, ...)
+end
+
+local function unprintable(text)
+  for ch in FrlgFont.utf8Chars(tostring(text)) do
+    if ch == "{" or ch == "}" then return ch end
+    if ch ~= " " and ch ~= "\n" and FrlgFont.glyphId(ch) == 0 then return ch end
+  end
+  return nil
+end
+
+local function wasPrinted(text)
+  for _, line in ipairs(printed) do
+    if line == text then return true end
+  end
+  return false
+end
+
+-- ------- engine sheets, stood in
+--
+-- Headless there is no overworld cache, so OwSprites answers nothing and a
+-- figure is never placed.  These stand in for the two sheets whose
+-- *placement* the suite pins: a person (16x32, nine frames) and a 32x32
+-- figure (BIG_GFX), and the party menu's held-item / mail marker.  Installed
+-- per boot before the loader resolves them (Gen3.engine remembers modules).
+local PERSON_IMG = { getDimensions = function() return 144, 32 end }
+local BIG_IMG = { getDimensions = function() return 288, 32 end }
+local HOLD_IMG = { getDimensions = function() return 8, 16 end }
+local BIG_GFX = 999
+local function fakeSheet(image, w, h)
+  local quads = {}
+  for f = 0, 8 do quads[f] = graphics.newQuad(f * w, 0, w, h) end
+  return { image = image, quads = quads, width = w, height = h, frameCount = 9 }
+end
+local fakeOw = {
+  getDraw = function(id)
+    if id == BIG_GFX then return fakeSheet(BIG_IMG, 32, 32) end
+    return fakeSheet(PERSON_IMG, 16, 32)
+  end,
+  pose = function() return 0, false end,
+}
+local fakePartyMenu = {
+  heldItemSheet = function()
+    return { image = HOLD_IMG, quads = { [0] = "itemQ", [1] = "mailQ" }, w = 8, h = 8 }
+  end,
+}
+local stubbed = {}
+local function stubEngine(name, value)
+  if stubbed[name] == nil then stubbed[name] = package.loaded[name] or false end
+  package.loaded[name] = value
+end
+local function unstubEngine()
+  for name, original in pairs(stubbed) do package.loaded[name] = original or nil end
+  stubbed = {}
+end
+
 -- ------- the loader and the module graph
 
 local function loadGen3(version)
@@ -288,6 +369,10 @@ end
 local function run3(version)
   local L = version .. ": "
   local em = version == "emerald"
+  stubEngine("src.core.game3.ow_sprites", fakeOw)
+  stubEngine("src.ui.game3.party_menu", fakePartyMenu)
+  printed, allPrinted = {}, {}
+  stackTouched = 0
   local run = loadGen3(version)
   eq(run.mod and run.mod.state, "loaded", L .. "the mod loads")
   -- Ui:install registered its screens with Gen3Ui, not the gated registry
@@ -529,10 +614,16 @@ local function run3(version)
   st.players = {
     { id = "bob", name = "BOB", map = em and "EM_OLDALE_TOWN" or "FR_PALLET_TOWN", x = 1, y = 1 },
     { id = "cal", name = "CAL", busy = true },
+    -- a figure wider than a person, for the card's placement
+    { id = "big", name = "OLGA", sprite = BIG_GFX },
   }
   st.chat = {
     { scope = "global", name = "BOB",
       text = "hello there everyone this is a long chat line that has to wrap twice" },
+    -- every character the cart's charmap lacks, and the font's own markup:
+    -- Wire.text keeps them off the wire, but the screen must not depend on it
+    { scope = "party", name = "ZED",
+      text = "#1 [x] {COLOR RED} a*b @c ~d |e ^f `g \\h" },
   }
   st.ranking = {
     { name = "BOB", id = "b0b0", points = 1234, sprite = "OBJ_EVENT_GFX_RED_NORMAL" },
@@ -595,14 +686,27 @@ local function run3(version)
   Ui.push(game, Ui.SCREEN.CHATLOG)
   local log = Gen3Ui.top()
   check(#log.items >= 3, L .. "the long line wraps")
-  eq(log.items[1].label, "(G)BOB:", L .. "the speaker row in parentheses, which the cart can print")
+  eq(log.items[1].label, "[G]BOB:", L .. "the speaker row's label is Gen 1's own")
   local room = Gen3Ui.rightRoom("", nil)
   for _, item in ipairs(log.items) do
     check(Gen3Ui.Font.width(item.label) <= room + 1, L .. "each chat row fits: " .. item.label)
   end
   eq(log.cursor, #log.items, L .. "the log opens on its newest line")
+  log.index = 1
+  printed = {}
   ok, err = drawAll()
   check(ok, L .. "CHAT draws (" .. tostring(err) .. ")")
+  check(wasPrinted("(G)BOB:"), L .. "and prints it in the cart's parentheses")
+  check(not wasPrinted("[G]BOB:"), L .. "never with the brackets the cart prints blank")
+  log.index = #log.items
+  printed = {}
+  drawAll()
+  local nasty
+  for _, line in ipairs(printed) do
+    if line:find("COLOR", 1, true) then nasty = line end
+  end
+  check(nasty ~= nil and nasty:find("(COLOR", 1, true) ~= nil,
+    L .. "a brace is printed as a parenthesis, never read as the font's markup: " .. tostring(nasty))
   Stack.clear()
 
   Ui.push(game, Ui.SCREEN.SCOPE)
@@ -631,6 +735,81 @@ local function run3(version)
   eq(pickedIndex, false, L .. "a blocked row cannot be picked")
   step(game, "up") step(game, "a")
   eq(pickedIndex, 1, L .. "a free one can")
+  Stack.clear()
+
+  -- ...and from the trade's own rows when it has them (Trade3's entries):
+  -- the cart's name, "EGG" with no level, the held-item / mail marker, and a
+  -- blocked row greyed with the cart's reason on the title line under the
+  -- cursor.  `canPick` is never asked when `entries` is there.
+  local ONLY = "That's your only\nPOKéMON for battle."
+  local EGG_NO = "An EGG can't be\ntraded now."
+  local egg = { species = 412, level = 5, isEgg = true, nickname = "" }
+  local rowsTrade = {
+    entries = function()
+      return {
+        { index = 1, mon = session.party[1], name = "IVY", level = 5, heldItem = 13,
+          heldItemName = "POTION", hasMail = false, isEgg = false, blocked = false, iconSpecies = 4 },
+        { index = 2, mon = egg, name = "EGG", level = 5, heldItem = 0, isEgg = true,
+          blocked = true, reason = EGG_NO, iconSpecies = 412 },
+        { index = 3, mon = session.party[2], name = "BUBBLES", level = 7, heldItem = 121,
+          hasMail = true, isEgg = false, blocked = false, iconSpecies = 7 },
+        { index = 4, mon = { species = 16, level = 9 }, name = "PIDGEY", level = 9,
+          heldItem = 0, isEgg = false, blocked = true, reason = ONLY, iconSpecies = 16 },
+        { index = 5, mon = { species = 412, level = 5, isEgg = true }, name = "EGG", level = 5,
+          heldItem = 0, isEgg = true, blocked = false, iconSpecies = 412 },
+      }
+    end,
+    canPick = function() error("entries are the source when a trade has them") end,
+  }
+  local pickedRow = false
+  ui:pickPartyMon(game, rowsTrade, function(i) pickedRow = i end)
+  local rows = Gen3Ui.top()
+  eq(rows.title, "TRADE WHICH?", L .. "the entries picker keeps its title")
+  eq(labels(rows), "IVY,EGG,BUBBLES,PIDGEY,EGG", L .. "rows are the cart's names, an egg is EGG")
+  eq(rows.items[1].right, "Lv5", L .. "a mon shows its level")
+  eq(rows.items[5].right, nil, L .. "an egg shows none, as the party menu prints it")
+  eq(rows.items[2].right, "NO", L .. "a blocked row says NO")
+  eq(rows.items[2].blocked, true, L .. "and is greyed")
+  eq(rows.items[2].reason, "An EGG can't be traded now.", L .. "its reason on one line")
+  eq(rows.items[1].hold, "item", L .. "a held item is marked")
+  eq(rows.items[3].hold, "mail", L .. "mail is marked as mail")
+  eq(rows.items[4].hold, nil, L .. "an empty hand is not")
+  printed = {}
+  ok, err = drawAll()
+  check(ok, L .. "the entries picker draws (" .. tostring(err) .. ")")
+  check(wasPrinted("TRADE WHICH?"), L .. "the title line is the title on a free row")
+  local marks = drawsOf(HOLD_IMG)
+  eq(#marks, 2, L .. "two held-item markers drawn")
+  local LIST = Gen3Ui.LIST
+  local iconX = LIST.left * 8 + LIST.labelDX + 34 - 34
+  local firstY = LIST.top * 8 + 2 - 11
+  eq(marks[1] and marks[1].quad, "itemQ", L .. "row 1 wears the item frame")
+  eq(marks[1] and marks[1].x, iconX + 16, L .. "16px right of its icon, as the party menu puts it")
+  eq(marks[1] and marks[1].y, firstY + 22, L .. "and 22px down")
+  eq(marks[2] and marks[2].quad, "mailQ", L .. "row 3 wears the mail frame")
+  eq(marks[2] and marks[2].y, firstY + 2 * 18 + 22, L .. "on its own row")
+  step(game, "down")
+  printed = {}
+  drawAll()
+  check(wasPrinted("An EGG can't be traded now."), L .. "on the egg the title line says why")
+  check(not wasPrinted("TRADE WHICH?"), L .. "in place of the title")
+  step(game, "a")
+  eq(pickedRow, false, L .. "and A on it picks nothing")
+  eq(Gen3Ui.top(), rows, L .. "the picker stays up")
+  step(game, "down") step(game, "down")
+  printed = {}
+  drawAll()
+  check(wasPrinted("That's your only POKéMON for battle."), L .. "the last mon able to battle says so")
+  step(game, "up")
+  printed = {}
+  drawAll()
+  check(wasPrinted("TRADE WHICH?"), L .. "a free row puts the title back")
+  step(game, "a")
+  eq(pickedRow, 3, L .. "a free row picks its party slot")
+  eq(Stack.depth(), 0, L .. "and the picker closes")
+  ui:pickPartyMon(game, rowsTrade, function(i) pickedRow = i end)
+  step(game, "b")
+  eq(pickedRow, nil, L .. "B answers nil, as on Gen 1")
   Stack.clear()
 
   -- ------- the doors: holds / unwindTo / pop / pushState
@@ -741,6 +920,101 @@ local function run3(version)
     Stack.clear()
   end
 
+  -- ------- ui:say's onDone: exactly once, when the box is dismissed
+  --
+  -- Sessions leans on it twice -- reopening the picker after a refusal, and
+  -- the trade evolution after "X was traded over!" -- so it must run once
+  -- per box, on A or B, and never again for a press that lands after.
+  Stack.clear()
+  local dones = 0
+  local said = ui:say("One line.", function() dones = dones + 1 end)
+  check(type(said) == "table", L .. "say returns the box it put up")
+  step(game, "a")                 -- finish printing
+  eq(dones, 0, L .. "not while it is still being read")
+  step(game, "a")                 -- dismiss
+  eq(dones, 1, L .. "onDone once the box is dismissed")
+  eq(Gen3Ui.has(said), false, L .. "and the box is gone first")
+  steps(game, 4, "a")
+  eq(dones, 1, L .. "a press after it is not a second dismissal")
+  ui:say("By B.", function() dones = dones + 1 end)
+  step(game, "b") step(game, "b")
+  eq(dones, 2, L .. "B dismisses it the same way")
+  local chain = {}
+  ui:say("First.", function()
+    chain[#chain + 1] = "first"
+    ui:say("Second.", function() chain[#chain + 1] = "second" end)
+  end)
+  step(game, "a") step(game, "a")
+  eq(table.concat(chain, ","), "first", L .. "a box opened from onDone")
+  eq(Gen3Ui.top() and Gen3Ui.top().text, "Second.", L .. "is up")
+  eq(Gen3Ui.top().waiting, false, L .. "and the press that closed the first did not touch it")
+  step(game, "a") step(game, "a")
+  eq(table.concat(chain, ","), "first,second", L .. "and answers once itself")
+  local outside = 0
+  local taken = ui:say("Taken down.", function() outside = outside + 1 end)
+  Ui.pop(game, taken)
+  steps(game, 3, "a")
+  eq(outside, 0, L .. "a box taken down from outside never calls back (Gen 1's rule)")
+  eq(Stack.depth(), 0, L .. "no box left")
+
+  -- the trade's own continuation, through Sessions:tell on this Ui
+  local Sessions = need("Sessions")
+  local tellSessions = Sessions.new({ send = function() return true end,
+                                      isReady = function() return true end }, ui)
+  local evolvedN = 0
+  local told = tellSessions:tell(game, "SPARKY was\ntraded over!", function() evolvedN = evolvedN + 1 end)
+  check(type(told) == "table", L .. "tell puts the line up")
+  eq(evolvedN, 0, L .. "the evolution waits for the line")
+  step(game, "a") step(game, "a")
+  eq(evolvedN, 1, L .. "and follows it, once")
+  steps(game, 3, "a")
+  eq(evolvedN, 1, L .. "only once")
+
+  -- ------- figures stand by their real frame size
+  local CARD_ART = Ui.CARD3_LAYOUT.art
+  local sx, sy, sc = Gen3Ui.standIn(16, 32, CARD_ART)
+  eq(("%d,%d,%d"):format(sx, sy, sc), "180,32,2", L .. "a 16x32 person stands at 2x, centred, feet on the floor")
+  sx, sy, sc = Gen3Ui.standIn(32, 32, CARD_ART)
+  eq(("%d,%d,%d"):format(sx, sy, sc), "180,64,1", L .. "a 32x32 figure fits only once, on the same floor")
+  sx, sy, sc = Gen3Ui.standIn(16, 16, CARD_ART)
+  eq(("%d,%d,%d"):format(sx, sy, sc), "180,64,2", L .. "a 16x16 frame is not stretched past 2x")
+  drawn = {}
+  local portraitDrawn = { Gen3Ui.drawSpriteIn({ image = PERSON_IMG, quad = "q", w = 16, h = 32 }, CARD_ART) }
+  eq(portraitDrawn[3], 2, L .. "a Chars.portrait entry is placed by its own w / h")
+  local p1 = drawsOf(PERSON_IMG)[1]
+  eq(p1 and ("%d,%d,%d"):format(p1.x, p1.y, p1.sx), "180,32,2", L .. "at the card's spot")
+
+  Ui.push(game, Ui.SCREEN.PROFILE, { own = true })
+  drawAll()
+  local fig = drawsOf(PERSON_IMG)[1]
+  eq(fig and ("%d,%d,%d"):format(fig.x, fig.y, fig.sx), "180,32,2",
+    L .. "the trainer card stands its person in the portrait window")
+  Stack.clear()
+  Ui.push(game, Ui.SCREEN.PROFILE, { playerId = "big" })
+  drawAll()
+  fig = drawsOf(BIG_IMG)[1]
+  eq(fig and ("%d,%d,%d"):format(fig.x, fig.y, fig.sx), "180,64,1",
+    L .. "and a 32x32 figure at 1x, not squeezed past the window")
+  Stack.clear()
+  Ui.push(game, Ui.SCREEN.CHARPICK, { backTo = Ui.SCREEN.MAIN })
+  drawAll()
+  fig = drawsOf(PERSON_IMG)[1]
+  local PICK_ART = Ui.CHARPICK3_LAYOUT.art
+  eq(fig and ("%d,%d,%d"):format(fig.x, fig.y, fig.sx),
+    ("%d,%d,2"):format(PICK_ART.x + 12, PICK_ART.y + PICK_ART.h - 64),
+    L .. "CHARACTER's preview stands the figure on the panel's floor")
+  Stack.clear()
+
+  -- ------- the cart's charset
+  for ch, want in pairs(Gen3Ui.GLYPHS) do
+    eq(Gen3Ui.Font.printable(ch), want, L .. "maps " .. ch)
+    eq(unprintable(want), nil, L .. ch .. " -> " .. want .. " is a glyph the cart has")
+    eq(FrlgFont.countChars(want), 1, L .. ch .. " stays one character (the typewriter counts them)")
+  end
+  eq(Gen3Ui.Font.printable("[G]BOB: #1 {X}"), "(G)BOB: \226\132\1501 (X)", L .. "a whole line maps")
+  eq(Gen3Ui.Font.width("[G]"), Gen3Ui.Font.width("(G)"), L .. "and is measured as printed")
+  eq(Gen3Ui.Font.printable("PLAIN TEXT, 12!"), "PLAIN TEXT, 12!", L .. "text with nothing to map is itself")
+
   -- ------- toolkit odds and ends
 
   local rows = { { id = "bag", label = "BAG" }, { id = "save", label = "SAVE" } }
@@ -765,8 +1039,228 @@ local function run3(version)
 
   eq(stackTouched, 0, L .. "nothing touched game.stack")
   Stack.clear()
+
+  -- Everything every screen above printed, through the cart's font: not one
+  -- character it would draw blank or read as markup.
+  local blanks = {}
+  for _, text in ipairs(allPrinted) do
+    local ch = unprintable(text)
+    if ch then blanks[#blanks + 1] = ("%q in %q"):format(ch, text) end
+  end
+  check(#allPrinted > 100, L .. "the screens printed through the cart's font (" .. #allPrinted .. " strings)")
+  check(#blanks == 0, L .. "every string a screen printed is in the cart's charset: "
+    .. table.concat(blanks, "; "))
+
+  -- ------- prompts wait while the cart has the screen (Ui.occupied)
+  --
+  -- After the stackTouched check: Sessions' own fight test reads game.stack
+  -- (nil on Gen 3) on purpose.
+  local noop = { draw = function() end }
+  eq(Ui.occupied(game), false, L .. "free: in the field with nothing up")
+  Stack.push("bag", noop)
+  eq(Ui.occupied(game), true, L .. "the cart's BAG is up")
+  ui:say("Over the bag.")
+  eq(Ui.occupied(game), true, L .. "a mod box drawn over the BAG does not free the player of it")
+  Stack.clear()
+  Ui.push(game, Ui.SCREEN.MAIN)
+  eq(Ui.occupied(game), false, L .. "a screen of this mod's own is not occupied")
+  Stack.clear()
+  for _, id in ipairs({ "start", "party", "pokedex", "naming", "summary" }) do
+    Stack.push(id, noop)
+    eq(Ui.occupied(game), true, L .. "the cart's " .. id .. " layer occupies the screen")
+    Stack.clear()
+  end
+  game.phase = "boot"
+  eq(Ui.occupied(game), true, L .. "so does anything but the field")
+  game.phase = "field"
+  -- the cart's own modules, in the state they are in when it is using the
+  -- screen (the real tables Gen3.engine hands the mod, their fields set)
+  local function withField(name, key, value, fn)
+    local module = require(name)
+    local real = module[key]
+    module[key] = value
+    local okF, errF = pcall(fn)
+    module[key] = real
+    if not okF then error(errF, 0) end
+  end
+  withField("src.ui.game3.message", "open", true, function()
+    eq(Ui.occupied(game), true, L .. "an NPC's sentence is up")
+    Ui.push(game, Ui.SCREEN.MAIN)
+    eq(Ui.occupied(game), true, L .. "even under a mod screen")
+    Stack.clear()
+  end)
+  withField("src.ui.game3.choice", "active", true, function()
+    eq(Ui.occupied(game), true, L .. "the cart's YES / NO is up")
+    Ui.push(game, Ui.SCREEN.MAIN)
+    eq(Ui.occupied(game), true, L .. "even under a mod screen")
+    Stack.clear()
+  end)
+  withField("src.core.game3.scripting.space", "vm", { isRunning = function() return true end }, function()
+    eq(Ui.occupied(game), true, L .. "a script has the player")
+  end)
+  withField("src.core.game3.field", "locked", true, function()
+    eq(Ui.occupied(game), true, L .. "a warp or field effect has the player")
+  end)
+  eq(Ui.occupied(game), false, L .. "and free again once all of that is gone")
+
+  -- whenFree: at once when free, queued while not, one at a time in order
+  local shown = {}
+  local now = ui:whenFree(game, function() shown[#shown + 1] = "now" return ui:say("Now.") end)
+  eq(shown[1], "now", L .. "a prompt while free goes up at once")
+  eq(Gen3Ui.top(), now, L .. "and whenFree hands back its box")
+  Stack.clear()
+  shown = {}
+  Stack.push("bag", noop)
+  local h1 = ui:whenFree(game, function() shown[#shown + 1] = "one" return ui:say("One.") end)
+  ui:whenFree(game, function() shown[#shown + 1] = "two" return ui:say("Two.") end)
+  local withdrawn = false
+  ui:whenFree(game, function() shown[#shown + 1] = "three" return ui:say("Three.") end,
+    { alive = function() return not withdrawn end })
+  check(type(h1) == "table" and h1.deferred == true, L .. "a held prompt answers a handle")
+  eq(#shown, 0, L .. "nothing goes up over the BAG")
+  ui:pumpDeferred(game)
+  eq(#shown, 0, L .. "nor while it stays open")
+  Stack.pop("bag")
+  ui:pumpDeferred(game)
+  eq(table.concat(shown, ","), "one", L .. "the first goes up once the BAG closes")
+  ui:pumpDeferred(game)
+  eq(table.concat(shown, ","), "one", L .. "the next waits for it to be dismissed")
+  step(game, "a") step(game, "a")
+  withdrawn = true
+  ui:pumpDeferred(game)
+  eq(table.concat(shown, ","), "one,two", L .. "then the second")
+  step(game, "a") step(game, "a")
+  ui:pumpDeferred(game)
+  eq(table.concat(shown, ","), "one,two", L .. "and one withdrawn meanwhile never goes up")
+  eq(#ui.deferred, 0, L .. "the queue is empty")
+  local tag = {}
+  Stack.push("bag", noop)
+  ui:whenFree(game, function() shown[#shown + 1] = "tagged" end, { owner = tag })
+  eq(ui:dropDeferred(tag), 1, L .. "an owner takes its own back")
+  Stack.pop("bag")
+  ui:pumpDeferred(game)
+  eq(table.concat(shown, ","), "one,two", L .. "and it never shows")
+  Stack.clear()
+
+  -- Sessions: a request over the BAG is held, not refused, and asked on close
+  local Wire = need("Wire")
+  local sent, toasts = {}, {}
+  local transport = {
+    send = function(_, kind, body) sent[#sent + 1] = { kind = kind, body = body or {} } return true end,
+    isReady = function() return true end,
+  }
+  local sessions = Sessions.new(transport, ui)
+  sessions.toast = function(text) toasts[#toasts + 1] = text end
+  Stack.push("bag", noop)
+  sessions:onRequest(game, { from = "bob", name = "BOB", kind = "trade" })
+  eq(#sent, 0, L .. "a request over the BAG is not refused")
+  check(sessions.incoming and sessions.incoming.deferred, L .. "it is held")
+  eq(sessions:busyReason(game), "asked", L .. "while it waits this player reads as asked")
+  eq(topId(), "bag", L .. "and nothing went up over the BAG")
+  sessions:update(game, 1 / 60)
+  eq(topId(), "bag", L .. "not while the BAG stays open")
+  Stack.pop("bag")
+  sessions:update(game, 1 / 60)
+  eq(topId(), "rby_mmo:RbyMmoConfirm", L .. "the ask goes up once the BAG closes")
+  check((Gen3Ui.top().text or ""):find("BOB wants to", 1, true) ~= nil, L .. "naming who asked")
+  eq(sessions.incoming and sessions.incoming.deferred, nil, L .. "no longer held")
+  steps(game, 200)
+  step(game, "a")
+  eq(sent[1] and sent[1].kind, Wire.RESPOND, L .. "and the answer goes back")
+  eq(sent[1] and sent[1].body.accept, true, L .. "as the player gave it")
+  Stack.clear()
+
+  -- withdrawn while it waited: dropped unseen; the corner says who asked
+  Stack.push("bag", noop)
+  sessions:onRequest(game, { from = "cal", name = "CAL", kind = "battle" })
+  sessions:onCancel({ from = "cal", name = "CAL" })
+  eq(sessions.incoming, nil, L .. "a cancel drops a held ask")
+  eq(toasts[#toasts], "CAL asked to battle", L .. "with a line in the corner, not a box")
+  Stack.pop("bag")
+  sessions:update(game, 1 / 60)
+  eq(Stack.depth(), 0, L .. "nothing goes up once the BAG closes")
+
+  -- run out while it waited: answered no ("busy") and dropped
+  Stack.push("bag", noop)
+  local before = #sent
+  sessions:onRequest(game, { from = "dee", name = "DEE", kind = "trade" })
+  sessions:update(game, 60)
+  eq(#sent, before, L .. "half the asker's patience is not the end of it")
+  sessions:update(game, 61)
+  eq(sent[#sent] and sent[#sent].body.accept, false, L .. "the asker's timeout answers it no")
+  eq(sent[#sent] and sent[#sent].body.reason, "busy", L .. "saying this player was busy")
+  eq(sessions.incoming, nil, L .. "and drops it")
+  Stack.pop("bag")
+  sessions:update(game, 1 / 60)
+  eq(Stack.depth(), 0, L .. "so nothing goes up later")
+
+  -- the answer to our own ask, while we are in the BAG
+  sessions.outgoing = { to = "bob", kind = "trade", name = "BOB" }
+  Stack.push("bag", noop)
+  sessions:onDecline({ name = "BOB" })
+  eq(topId(), "bag", L .. "a refusal waits for the BAG too")
+  Stack.pop("bag")
+  sessions:update(game, 1 / 60)
+  eq(Gen3Ui.top() and Gen3Ui.top().text, "BOB said no.", L .. "and is read once it closes")
+  Stack.clear()
+
+  -- a (re)connection drops what was held from before it -- the ask and the
+  -- plain lines -- but never the line a finished trade still owes
+  Stack.push("bag", noop)
+  sessions:onRequest(game, { from = "fay", name = "FAY", kind = "trade" })
+  sessions:tell(game, "Old news.")
+  local owed = 0
+  sessions:tell(game, "KADABRA was\ntraded over!", function() owed = owed + 1 end)
+  sessions:onTransportReady()
+  eq(sessions.incoming, nil, L .. "a reconnect drops a held ask")
+  Stack.pop("bag")
+  sessions:update(game, 1 / 60)
+  eq(Gen3Ui.top() and Gen3Ui.top().text, "KADABRA was\ntraded over!",
+    L .. "the line a trade owes survives it")
+  step(game, "a") step(game, "a")
+  eq(owed, 1, L .. "and its evolution still follows")
+  sessions:update(game, 1 / 60)
+  eq(Stack.depth(), 0, L .. "nothing else from before the reconnect goes up")
+  Stack.clear()
+
+  -- Party: an invite over the dex is held; a second one meanwhile is declined
+  local Party = need("Party")
+  local psent = {}
+  local party = Party.new({ send = function(_, kind, body) psent[#psent + 1] = { kind = kind, body = body or {} } return true end },
+                          ui, { push = function() end })
+  Stack.push("pokedex", noop)
+  party:onInvite(game, { from = "bob", name = "BOB" })
+  eq(topId(), "pokedex", L .. "an invite over the dex waits")
+  check(party.incoming ~= nil, L .. "held as the incoming invite")
+  party:onInvite(game, { from = "cal", name = "CAL" })
+  eq(psent[#psent] and psent[#psent].body.to, "cal", L .. "a second invite meanwhile is declined")
+  eq(psent[#psent] and psent[#psent].body.accept, false, L .. "as it is with the box up")
+  Stack.pop("pokedex")
+  ui:pumpDeferred(game)
+  eq(topId(), "rby_mmo:RbyMmoConfirm", L .. "the invite goes up once the dex closes")
+  steps(game, 200)
+  step(game, "down") step(game, "a")
+  eq(psent[#psent] and psent[#psent].kind, Wire.PARTY_RESPOND, L .. "and is answered")
+  eq(psent[#psent] and psent[#psent].body.accept, false, L .. "with the player's no")
+  Stack.clear()
+  Stack.push("pokedex", noop)
+  party:onInvite(game, { from = "eve", name = "EVE" })
+  party:onPeerGone("eve")
+  Stack.pop("pokedex")
+  ui:pumpDeferred(game)
+  eq(Stack.depth(), 0, L .. "an inviter who left while it waited is never asked about")
+  party.outgoing = { to = "bob", name = "BOB" }
+  Stack.push("pokedex", noop)
+  party:onDecline({ name = "BOB" })
+  party:reset()
+  Stack.pop("pokedex")
+  ui:pumpDeferred(game)
+  eq(Stack.depth(), 0, L .. "a reset takes back the party's waiting lines")
+
+  Stack.clear()
   run.loader.game = nil
   run.release()
+  unstubEngine()
   GameVersion.set("red")
 end
 
@@ -794,6 +1288,15 @@ do
   eq(Gen3Ui.push({}, "Probe"), nil, "gen 1: Gen3Ui pushes nothing (there is no game3 stack)")
   eq(Gen3Ui.top(), nil, "gen 1: and has no top")
   eq(Gen3Ui.drawWidescreen({ width = 1, height = 1 }), false, "gen 1: nor a widescreen pass")
+  eq(Gen3Ui.occupied(), false, "gen 1: Gen3Ui is never occupied")
+  eq(Ui.occupied({}), false, "gen 1: Ui.occupied is always false")
+  local ui1 = Ui.new({ game = {} })
+  local ran = 0
+  eq(ui1:whenFree({}, function() ran = ran + 1 return "box" end), "box",
+    "gen 1: whenFree runs the prompt at once and hands back its box")
+  eq(ran, 1, "gen 1: once")
+  eq(ui1.deferred, nil, "gen 1: nothing is ever queued")
+  eq(ui1:pumpDeferred({}), false, "gen 1: and the pump has nothing to do")
   _G.require = inner
   eq(#seen, 0, "gen 1: no src.*.game3.* module was required")
   run.release()
