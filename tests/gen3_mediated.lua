@@ -934,8 +934,11 @@ do
   h.battle:submitChoice("peer", { action = "fight", move = 0 })
   h.pump()
   check(#statSigns > 0 and statSigns[1] < 0, "1v1: a stat drop reads as a drop off its delta")
-  eq(mine.heldItem, 0, "1v1: the ORAN BERRY eaten in the fight is gone from the save mon")
-  eq(h.fight.mine[1].heldItem, 0, "1v1: ...and from the fight sheet")
+  -- A link fight's party is reloaded after it (cable_club.c:776
+  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty): the berry is gone from
+  -- the fight, and still held in the save.
+  eq(h.fight.mine[1].heldItem, 0, "1v1: the ORAN BERRY eaten in the fight is gone from the fight sheet")
+  eq(mine.heldItem, 139, "1v1: ...and still on the save mon (the cart reloads the party)")
   local guard = 0
   while not h.fight.finished and guard < 30 do
     guard = guard + 1
@@ -1100,9 +1103,11 @@ do
   eq(f.slots[3].transformId, "4", "kinds: Transform draws the copied species")
   eq(f:seatSpeciesKey(f.slots[3], false), "4", "kinds: ...through the seat's key")
   ev({ t = "held", slot = 0, side = "a", mon = 0, amount = 139, holding = 0, text = "ORAN BERRY" })
-  eq(mine.heldItem, 0, "kinds: a berry eaten is written back")
-  ev({ t = "held", slot = 3, side = "b", mon = 0, amount = 139, holding = 0 })
-  eq(mine.heldItem, 0, "kinds: the foe's `held` never touches our save")
+  eq(f.mine[1].heldItem, 0, "kinds: a berry eaten leaves the fight sheet")
+  eq(mine.heldItem, 139, "kinds: ...and never the save, in a fight between players")
+  ev({ t = "held", slot = 3, side = "b", mon = 0, amount = 182, holding = 182 })
+  eq(mine.heldItem, 139, "kinds: the foe's `held` never touches our save")
+  eq(f.foeHeld and f.foeHeld[0], 182, "kinds: ...it is remembered for a catch")
   ev({ t = "faint", slot = 3, side = "b", text = "MEW" })
   drain()
   ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 30, maxHp = 30, level = 9 })
@@ -1114,6 +1119,439 @@ do
   for _, row in ipairs(f.lines) do if type(row) == "table" and row.anim then anims[#anims + 1] = row.anim end end
   eq(table.concat(anims, ","), "TOSS_ANIM,POOF_ANIM,HIDEPIC_ANIM,SHAKE_ANIM,POOF_ANIM,SHOWPIC_ANIM",
      "kinds: a two-shake break-out is the ball flow's rows")
+end
+
+-- ------------------------------------------------------------------
+-- 7. review fixes: each block below failed before its fix
+-- ------------------------------------------------------------------
+
+-- A screen fed by hand, the way a hub delivers a stream: one event at a time.
+local function byHand(mode, extra)
+  extra = extra or {}
+  local f = Mediated.new({ game = GAME, battle = "rf", role = "host",
+    peerId = (mode ~= "wild") and "p" or nil, peerName = extra.peerName or "BOB",
+    mode = mode, wildParty = extra.wildParty, wildCatchMon = extra.wildCatchMon,
+    trainer = extra.trainer, classicUi = true })
+  f.mine = Sheet3.party(GAME)
+  local seq = 0
+  local function ev(e) seq = seq + 1; e.battle, e.seq = "rf", seq; f:onEvent(e) end
+  return f, ev
+end
+
+local function gained(mon, before) return (mon.exp or 0) - before end
+
+-- (a) The EXP split asks the referee who is standing, not the save.
+do
+  -- An Exp. Share holder the referee says fainted: the save still has the HP
+  -- it started the fight with.  PIDGEY 8 is floor(55 * 8 / 7) = 62.
+  newGame()
+  local fighter = monOf(4, 10)
+  local holder = monOf(16, 10, { heldItem = 182, item = 182 })
+  SESSION.party = { fighter, holder }
+  local f, ev = byHand("wild")
+  local fx, hx = fighter.exp, holder.exp
+  ev({ t = "team", slot = 0, side = "a", team = "ox" })
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", mon = 0, speciesId = "16", level = 8 })
+  ev({ t = "msg", text = "next" })
+  eq(gained(fighter, fx), 62, "exp split: a holder the referee knocked out halves nothing")
+  eq(holder.exp, hx, "exp split: ...and is paid nothing")
+
+  -- A mon that came in fainted and was revived this fight holds the Share.
+  newGame()
+  fighter = monOf(4, 10)
+  local revived = monOf(16, 10, { heldItem = 182, item = 182, hp = 0 })
+  SESSION.party = { fighter, revived }
+  f, ev = byHand("wild")
+  fx, hx = fighter.exp, revived.exp
+  ev({ t = "team", slot = 0, side = "a", team = "oo" })
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", mon = 0, speciesId = "16", level = 8 })
+  ev({ t = "msg", text = "next" })
+  eq(gained(fighter, fx), 31, "exp split: a holder revived this fight halves the pool")
+  eq(gained(revived, hx), 31, "exp split: ...and takes the share half")
+
+  -- With no roster yet, the fight sheets' HP answers.
+  newGame()
+  fighter = monOf(4, 10)
+  holder = monOf(16, 10, { heldItem = 182, item = 182 })
+  SESSION.party = { fighter, holder }
+  f, ev = byHand("wild")
+  f.mine[2].hp = 0
+  fx = fighter.exp
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", mon = 0, speciesId = "16", level = 8 })
+  ev({ t = "msg", text = "next" })
+  eq(gained(fighter, fx), 62, "exp split: no roster yet -- the fight sheet's HP says who is down")
+end
+
+-- (b) One knockout's `exp` events split across two frames are priced once.
+do
+  newGame()
+  local a, b = monOf(4, 10), monOf(4, 10, { personality = 9 })
+  SESSION.party = { a, b }
+  local f, ev = byHand("wild")
+  local ax, bx = a.exp, b.exp
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", mon = 0, speciesId = "16", level = 8 })
+  f:update(2.0)   -- the frame ends between the two halves of one knockout
+  ev({ t = "exp", slot = 0, side = "a", mon = 1, speciesId = "16", level = 8 })
+  ev({ t = "msg", text = "next" })
+  eq(gained(a, ax), 31, "exp frames: both fighters share the one knockout")
+  eq(gained(b, bx), 31, "exp frames: ...neither is paid the whole of it")
+  eq(f.expPaid, 2, "exp frames: two payments, one pricing")
+end
+
+-- (c) `exp.gain` is raised for a mediated award, with the engine's ctx.
+do
+  local Runtime = require("src.mods.Runtime")
+  local prevEvents, prevHooks, prevErrors = Runtime.events, Runtime.hooks, Runtime.errors
+  local seen = {}
+  Runtime.install(prevEvents, {
+    chains = { ["exp.gain"] = { true } },
+    call = function(_, name, vanilla, ctx)
+      seen[#seen + 1] = { name = name, ctx = ctx }
+      return vanilla() * 2
+    end,
+  }, prevErrors)
+  newGame()
+  local fighter = monOf(4, 10)
+  SESSION.party = { fighter }
+  local results = Exp3.award({ species = 16, level = 8, sentIn = { [1] = true },
+                               party = SESSION.party, battle = "screen" })
+  Runtime.install(prevEvents, prevHooks, prevErrors)
+  eq(results and results[1] and results[1].amount, 124, "exp.gain: the hook's answer is the amount paid")
+  eq(#seen, 1, "exp.gain: raised once per recipient")
+  local ctx = seen[1] and seen[1].ctx or {}
+  eq(ctx.level, 8, "exp.gain: ctx.level")
+  eq(ctx.isTrainer, false, "exp.gain: ctx.isTrainer")
+  eq(ctx.participants, 1, "exp.gain: ctx.participants")
+  eq(ctx.expShare, false, "exp.gain: ctx.expShare")
+  eq(ctx.mon, fighter, "exp.gain: ctx.mon")
+  eq(ctx.index, 1, "exp.gain: ctx.index")
+  eq(ctx.battle, "screen", "exp.gain: ctx.battle is the caller's")
+  -- ...and nothing is raised with no hook wrapped.
+  seen = {}
+  local plain = Exp3.award({ species = 16, level = 8, sentIn = { [1] = true },
+                             party = { monOf(4, 10) } })
+  eq(plain and plain[1] and plain[1].amount, 62, "exp.gain: unhooked, the cart's amount")
+  eq(#seen, 0, "exp.gain: ...and no call")
+end
+
+-- (d) Held items: written home only where the cart keeps them, and only an
+-- item this client uploaded.
+do
+  -- A fight between players: the cart reloads the party after it.
+  newGame()
+  local mine = monOf(4, 20, { heldItem = 139, item = 139 })
+  SESSION.party = { mine }
+  local f, ev = byHand("1v1")
+  ev({ t = "held", slot = 0, side = "a", mon = 0, amount = 139, holding = 0, text = "ORAN BERRY" })
+  eq(mine.heldItem, 139, "held (1v1): a berry eaten stays in the save")
+  ev({ t = "held", slot = 0, side = "a", mon = 0, amount = 260, holding = 260, text = "TICKET" })
+  eq(f.mine[1].heldItem, 260, "held (1v1): TRICK's item is on the fight sheet")
+  eq(mine.heldItem, 139, "held (1v1): ...and never in the save")
+  eq(mine.item, 139, "held (1v1): ...by either field")
+
+  -- A wild fight: the cart keeps what the fight did.
+  newGame()
+  mine = monOf(4, 20, { heldItem = 139, item = 139 })
+  SESSION.party = { mine }
+  local wildSheet = assert(Sheet3.mon(SESSION, monOf(16, 5, { heldItem = 197, item = 197 }), 0,
+    { wild = true }))
+  local warnsBefore = #warns
+  f, ev = byHand("wild", { wildParty = { wildSheet } })
+  ev({ t = "held", slot = 0, side = "a", mon = 0, amount = 139, holding = 0, text = "ORAN BERRY" })
+  eq(mine.heldItem, 0, "held (wild): a berry eaten stays eaten")
+  ev({ t = "held", slot = 0, side = "a", mon = 0, amount = 197, holding = 197, text = "LUCKY EGG" })
+  eq(mine.heldItem, 197, "held (wild): THIEF keeps the wild mon's item")
+  ev({ t = "held", slot = 0, side = "a", mon = 0, amount = 260, holding = 260, text = "TICKET" })
+  eq(mine.heldItem, 197, "held (wild): an item no upload held never enters the save")
+  eq(#warns, warnsBefore + 1, "held (wild): ...said once, with a remediation")
+end
+
+-- (e) KNOCK OFF, then the catch: the caught mon still holds its item.
+do
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  local target = monOf(16, 5, { heldItem = 197, item = 197, personality = 21, otId = 5 })
+  local sheet = assert(Sheet3.mon(SESSION, target, 0, { wild = true }))
+  local f, ev = byHand("wild", { wildParty = { sheet }, wildCatchMon = target })
+  ev({ t = "held", slot = 3, side = "b", mon = 0, amount = 197, holding = 197, text = "LUCKY EGG" })
+  f:grantCatch3({ caught = { speciesNum = 16, personality = 21, hp = 5, heldItem = 0 } })
+  eq(target.heldItem, 197, "knock off: the caught mon keeps the item KNOCK OFF took from the battler")
+  eq(target.item, 197, "knock off: ...by both fields")
+
+  -- THIEF, then the catch: gone.
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  target = monOf(16, 5, { heldItem = 197, item = 197, personality = 22, otId = 5 })
+  sheet = assert(Sheet3.mon(SESSION, target, 0, { wild = true }))
+  f, ev = byHand("wild", { wildParty = { sheet }, wildCatchMon = target })
+  ev({ t = "held", slot = 3, side = "b", mon = 0, amount = 197, holding = 0, text = "LUCKY EGG" })
+  f:grantCatch3({ caught = { speciesNum = 16, personality = 22, hp = 5, heldItem = 0 } })
+  eq(target.heldItem, 0, "thief: a stolen item is not in the ball")
+
+  -- A caught sheet claiming an item nothing uploaded: the mon keeps its own.
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  target = monOf(16, 5, { heldItem = 197, item = 197, personality = 23, otId = 5 })
+  sheet = assert(Sheet3.mon(SESSION, target, 0, { wild = true }))
+  f = byHand("wild", { wildParty = { sheet }, wildCatchMon = target })
+  f:grantCatch3({ caught = { speciesNum = 16, personality = 23, hp = 5, heldItem = 260 } })
+  eq(target.heldItem, 197, "catch: an item no upload held never rides in on a caught sheet")
+end
+
+-- (f) Deoxys: link stats in a fight between players only.
+do
+  P3._names[410] = "DEOXYS"
+  P3._types[410] = { 13, 13 }
+  P3._stats[410] = { hp = 50, atk = 150, def = 50, spe = 150, spa = 150, spd = 50 }
+  P3._speciesMeta[410] = { catchRate = 3, expYield = 215, genderRatio = 255, growthRate = 5,
+                           friendship = 0, linkStats = { 50, 95, 90, 180, 95, 90 } }
+  P3._abilities[410] = { 46, 0 }
+  local FakeLB = {}
+  function FakeLB.applyLinkStats(mon)
+    mon.attack, mon.defense, mon.speed, mon.spAtk, mon.spDef = 77, 66, 199, 88, 55
+    return mon
+  end
+  stub("src.core.game3.link.battle", FakeLB)
+  newGame()
+  local deoxys = monOf(410, 30, { moves = { 33 }, pp = { 35 }, maxPp = { 35 } })
+  local own = assert(Sheet3.mon(SESSION, deoxys, 0))
+  eq(own.stats.atk, deoxys.attack, "deoxys: a sheet by default carries this cart's own forme")
+  eq(own.beatUp.atk, 150, "deoxys: ...and Beat Up reads the species row")
+  local linked = assert(Sheet3.mon(SESSION, deoxys, 0, { link = true }))
+  eq(linked.stats.atk, 77, "deoxys: { link = true } takes the link-battle stats")
+  eq(linked.stats.spe, 199, "deoxys: ...all five")
+  eq(linked.beatUp.atk, 95, "deoxys: ...and Beat Up the link row")
+  eq(deoxys.attack ~= 77, true, "deoxys: the party mon keeps its own stats")
+  SESSION.party = { deoxys }
+  local pvp = harness("1v1", { assert(Sheet3.mon(SESSION, monOf(4, 5), 0)) })
+  eq(pvp.pending.party.mons[1].stats.atk, 77, "deoxys: a 1v1 uploads the link stats")
+  newGame()
+  SESSION.party = { deoxys }
+  local wild = harness("wild", { assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true })) })
+  eq(wild.pending.party.mons[1].stats.atk, deoxys.attack, "deoxys: a wild fight uploads its own")
+end
+
+-- (g) A mon with no gender field takes the one its species and personality give.
+do
+  newGame()
+  local gender = FakePokemon.gender
+  FakePokemon.gender = function(_, pid) return (tonumber(pid) or 0) % 2 == 0 and "F" or "M" end
+  local mon = monOf(16, 5, { personality = 4 })
+  mon.gender = nil
+  eq(assert(Sheet3.mon(SESSION, mon, 0)).gender, "F", "gender: the engine's answer, not U")
+  mon.personality = 5
+  eq(assert(Sheet3.mon(SESSION, mon, 0)).gender, "M", "gender: ...from the personality")
+  mon.gender = "U"
+  eq(assert(Sheet3.mon(SESSION, mon, 0)).gender, "U", "gender: a genderless mon stays U")
+  FakePokemon.gender = gender
+end
+
+-- (h) Names: the cart's é / ♂ / ♀ spelled out for the wire, kept for local text.
+do
+  newGame()
+  local nido = monOf(29, 5)
+  eq(assert(Sheet3.mon(SESSION, nido, 0)).species, "NIDORANF",
+     "names: NIDORAN♀ goes on the wire as NIDORANF, not NIDORAN")
+  eq(assert(Sheet3.mon(SESSION, monOf(4, 5, { nickname = "REN\195\169" }), 0)).species, "RENE",
+     "names: an é in a nickname is an E")
+  eq(Sheet3.localName(nido), "NIDORAN\226\153\128", "names: the cart's own spelling for local text")
+  eq(Sheet3.localName(monOf(4, 5, { nickname = "REN\195\169" })), "REN\195\169",
+     "names: ...a nickname as typed")
+  FakeBag.add(SESSION.bag, 4, 3)
+  local ball
+  for _, row in ipairs(Sheet3.bag(GAME)) do if row.id == 4 then ball = row end end
+  eq(ball and ball.name, "POKE BALL", "names: the bag uploads POKE BALL, not POK BALL")
+  local held = assert(Sheet3.mon(SESSION, monOf(16, 5, { heldItem = 4, item = 4 }), 0))
+  eq(held.itemName, "POKE BALL", "names: ...and so does a held item's name")
+
+  -- The catch's own lines use the cart's spelling.
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  FakeBag.add(SESSION.bag, 1, 1)
+  local target = monOf(29, 5, { otId = 5 })
+  local c = harness("wild", { assert(Sheet3.mon(SESSION, target, 0, { wild = true })) },
+    { wildCatchMon = target, classicUi = true })
+  c.pump()
+  c.fight.itemPick = { id = 1, effect = Sheet3.itemEffect(1) }
+  c.fight:commitItem(nil, nil)
+  local g = 0
+  while not c.fight.finished and g < 10 do g = g + 1; c.pump() end
+  check(allText(c):find("NIDORAN\226\153\128 was\nadded to the party!", 1, true) ~= nil,
+        "names: 'NIDORAN♀ was added to the party!'")
+  check(contains(c.said, "NICKNAME NIDORAN\226\153\128"), "names: the nickname prompt names it the cart's way")
+  -- (the referee's own sentence) "Gotcha! NIDORANF was caught!" -- once.
+  local _, gotchas = allText(c):gsub("Gotcha!", "")
+  eq(gotchas, 1, "endings: one 'Gotcha!' on Gen 3 -- the referee's, not an echo")
+  check(allText(c):find("You won!", 1, true) == nil, "endings: no generic 'You won!' after a catch")
+end
+
+-- (i) The party page's pics are per monster on Gen 3.
+do
+  newGame()
+  SESSION.party = { monOf(4, 5, { personality = 1 }), monOf(4, 5, { personality = 2 }) }
+  local f = byHand("1v1")
+  f.seatFront = function(_, _, mon) return { pid = mon.personality } end
+  local one, two = f:partyFront(1, f.mine[1]), f:partyFront(2, f.mine[2])
+  eq(one and one.pid, 1, "party pic: the first CHARMANDER's")
+  eq(two and two.pid, 2, "party pic: the second is its own, not the first's cached")
+  eq(f:partyFront(1, f.mine[1]), one, "party pic: ...and each is cached")
+end
+
+-- (j) A missing pic is looked for once, not every frame.
+do
+  newGame()
+  SESSION.party = { monOf(4, 5) }
+  local frontPic, calls = FakePokemon.frontPic, 0
+  FakePokemon.frontPic = function() calls = calls + 1; return nil end
+  local f, ev = byHand("1v1")
+  ev({ t = "send", slot = 3, side = "b", text = "MEW", speciesId = "151", hp = 50, maxHp = 50, level = 20 })
+  calls = 0
+  local seat
+  for _ = 1, 3 do seat = f:gen3SeatModel(3, false) end
+  FakePokemon.frontPic = frontPic
+  eq(calls, 0, "missing pic: the classic page does not re-read it every frame")
+  eq(seat and seat.noPic, true, "missing pic: ...and tells the page not to either")
+  eq(seat and seat.sprite, nil, "missing pic: the seat has no sprite, not `false`")
+end
+
+-- (k) The classic page's back-pic Quad is built once per sheet.
+do
+  local ClassicBattle = need("ClassicBattle")
+  local Gen3m = need("Gen3")
+  local C = Gen3m.engine("src.ui.game3.battle_chrome")
+  local TP = Gen3m.engine("src.core.game3.trainer_pic")
+  if type(C) == "table" and type(TP) == "table" then
+    local saved = { manifest = C.manifest, isRse = C.isRse, drawTerrain = C.drawTerrain,
+                    drawPanel = C.drawPanel, drawMenuFrames = C.drawMenuFrames, back = TP.back }
+    C.manifest = function() return true end
+    C.isRse = function() return false end
+    C.drawTerrain = function() return false end
+    C.drawPanel = function() end
+    C.drawMenuFrames = function() end
+    local sheet = fakeImage("backsheet")
+    TP.back = function() return { image = sheet } end
+    local newQuad, quads = love.graphics.newQuad, 0
+    love.graphics.newQuad = function(...) quads = quads + 1; return newQuad(...) end
+    for _ = 1, 3 do pcall(ClassicBattle.drawGen3, { playerBack = { gender = 0 }, message = "" }) end
+    love.graphics.newQuad = newQuad
+    for k, v in pairs(saved) do if k == "back" then TP.back = v else C[k] = v end end
+    eq(quads, 1, "classic page: one Quad for the player's back-pic sheet, not one a frame")
+  else
+    print("[skip] classic page quad: the engine's battle chrome is not loadable here")
+  end
+end
+
+-- (l) A failed yes / no ends the learn exchange instead of looping it.
+do
+  newGame()
+  local mon = monOf(4, 10, { moves = { 10, 45, 33, 1 }, pp = { 35, 40, 35, 35 },
+                             maxPp = { 35, 40, 35, 35 } })
+  -- The engine's loop, faithfully: "Delete?" no -> "Stop?" no -> "Delete?"...,
+  -- each prompt skipped for "did not learn" once the exchange is headless.
+  local begin = FakeLearn.begin
+  local asks, looped, done = 0, false, {}
+  FakeLearn.begin = function(opts)
+    FakeLearn._headless = opts.headless and true or false
+    local askDelete, askStop
+    local function finish(v) done[#done + 1] = v; opts.onDone(v) end
+    function askDelete()
+      if FakeLearn._headless then return finish(false) end
+      asks = asks + 1
+      if asks > 20 then looped = true; return finish(false) end
+      opts.askYesNo("Delete a move?", function(yes)
+        if yes then return finish(true) end
+        askStop()
+      end)
+    end
+    function askStop()
+      if FakeLearn._headless then return finish(false) end
+      asks = asks + 1
+      if asks > 20 then looped = true; return finish(false) end
+      opts.askYesNo("Stop learning?", function(stop)
+        if stop then return finish(false) end
+        askDelete()
+      end)
+    end
+    askDelete()
+  end
+  local pushScreen = Gen3Ui.pushScreen
+  Gen3Ui.pushScreen = function() return nil end
+  local ui = {
+    say = function(_, _, cb) if cb then cb() end; return {} end,
+    confirm = function() error("no box today") end,
+  }
+  local answered
+  check(LearnMove.open(GAME, mon, 98, function(learned) answered = learned end, { ui = ui }),
+        "learn: the exchange opened")
+  Gen3Ui.pushScreen = pushScreen
+  FakeLearn.begin = begin
+  eq(looped, false, "learn: a confirm that cannot open does not loop the prompts")
+  eq(asks, 1, "learn: ...one failed ask ends it")
+  eq(answered, false, "learn: onDone(false) -- the move was not learned")
+  eq(#done, 1, "learn: ...once")
+end
+
+-- (m) The Gen 3 box pages on a blank line; the openings and endings are the cart's.
+do
+  newGame()
+  local paged = Mediated.new({ game = GAME, battle = "p" })
+  paged:say("one\ntwo\n\nthree")
+  eq(#paged.lines, 2, "say: a blank line is a page break on Gen 3")
+  eq(paged.lines[1], "one\ntwo", "say: ...the first page")
+  eq(paged.lines[2], "three", "say: ...and the second, with no blank line left at its top")
+
+  newGame()
+  SESSION.party = { monOf(4, 5) }
+  local npc = Mediated.new({ game = GAME, battle = "n", role = "host", peerId = "npc",
+    peerName = "POK\195\169MON PROF. PROF. OAK", mode = "coop_npc",
+    trainer = { className = "POK\195\169MON PROF.", trainerName = "PROF. OAK" } })
+  npc:onReady({ battle = "n", mode = "coop_npc", sides = { a = { "me" }, b = { "npc" } } })
+  eq(npc.lines[1], "POK\195\169MON PROF. OAK\nwould like to battle!",
+     "opening: the trainer's name on its own line, the class said once")
+  eq(Mediated.trainerLabel3({ className = "YOUNGSTER", trainerName = "BEN" }), "YOUNGSTER BEN",
+     "opening: an ordinary CLASS NAME")
+  local peer = Mediated.new({ game = GAME, battle = "q", role = "host", peerId = "p",
+    peerName = "BOB" })
+  peer:onReady({ battle = "q", sides = { a = { "me" }, b = { "p" } } })
+  eq(peer.lines[1], "BOB\nwould like to battle!", "opening: a player, the link wording")
+
+  -- A solo trainer fight ends on the caller's cart lines, not "You won!".
+  npc:finish("win", "ko")
+  local ended = table.concat(npc.textLog or {}, " | ")
+  check(ended:find("You won!", 1, true) == nil, "endings: no generic 'You won!' in an NPC fight")
+  -- A fight between players still says how it ended.
+  peer:finish("loss", "ko")
+  local text = table.concat(peer.textLog or {}, " | ")
+  check(text:find("lost", 1, true) ~= nil, "endings: a 1v1 says it was lost")
+end
+
+-- (n) Gen 2 regression, pinned in tests/mediated_battle_client.lua ("Gold: a
+-- republished status move keeps its Crystal effect id").
+
+-- (o) The pre-send checks read in the boot's generation: a malformed Gen 3
+-- field is caught here, not dropped in silence by the hub.
+do
+  newGame()
+  SESSION.party = { monOf(4, 5) }
+  local sent = {}
+  local transport = { isReady = function() return true end,
+                      send = function(_, kind, msg) sent[#sent + 1] = { kind = kind, msg = msg } end }
+  local f = Mediated.new({ transport = transport, game = GAME, battle = "o", role = "host",
+                           peerId = "p", peerName = "BOB" })
+  f.mine = Sheet3.party(GAME)
+  local warnsBefore = #warns
+  eq(f:sendChoice({ action = "switch", slot = 1, pass = 99 }), false,
+     "pre-send: a Gen 3 choice with an out-of-range BATON PASS index is not sent")
+  eq(#sent, 0, "pre-send: ...nothing went out")
+  eq(#warns, warnsBefore + 1, "pre-send: ...and the log says why")
+  check(f:sendChoice({ action = "fight", move = 0, dexCaught = true }),
+        "pre-send: a well-formed Gen 3 choice still goes")
+  eq(Mediated.sendMoveset(transport, "o", 0, f.mine[1].moves), true,
+     "pre-send: a Gen 3 moveset passes its check in the Gen 3 dialect")
 end
 
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.
@@ -1190,18 +1628,21 @@ else
   for _, v in pairs(fighter.evs) do evAfter = evAfter + v end
   check(evAfter > evBefore, "real cache: and paid EVs")
 
-  -- Deoxys fights on its link stats (the cross-version rule).
+  -- Deoxys fights on its link stats in a fight between players (the
+  -- cross-version rule), and on its own cart's forme everywhere else.
   local LB = package.loaded["src.core.game3.link.battle"] or select(2, pcall(require, "src.core.game3.link.battle"))
   local okD, _, deoxys = Party.giveMon({ party = {}, name = "ANN", trainerId = 111 }, 410, 30)
   if okD and deoxys and type(LB) == "table" and LB.applyLinkStats then
     local copy = {}
     for k, v in pairs(deoxys) do copy[k] = v end
     local linked = LB.applyLinkStats(copy)
-    local dsheet = SheetB.mon(SESSION, deoxys, 0)
+    local dsheet = SheetB.mon(SESSION, deoxys, 0, { link = true })
     if linked then
-      eq(dsheet and dsheet.stats.atk, linked.attack, "real cache: Deoxys' sheet carries its link Attack")
+      eq(dsheet and dsheet.stats.atk, linked.attack, "real cache: Deoxys' link sheet carries its link Attack")
       eq(dsheet and dsheet.stats.spe, linked.speed, "real cache: ...and link Speed")
       eq(deoxys.attack ~= nil, true, "real cache: the party mon keeps its own stats")
+      local own = SheetB.mon(SESSION, deoxys, 0)
+      eq(own and own.stats.atk, deoxys.attack, "real cache: outside a link fight, its own forme's Attack")
     else
       print("[skip] this cache carries no Deoxys link row")
     end

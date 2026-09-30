@@ -48,9 +48,18 @@
 --   Sheet3.monFromSheet(sheet, session)    rebuild a party mon from a caught sheet
 --   Sheet3.applyToMon(mon, sheet)          write a referee's hp / status / pp onto a party mon
 --   Sheet3.hiddenPower(ivs)                (type, power), pret Cmd_hiddenpowercalc
+--   Sheet3.displayName(mon, species)       the name the sheet uploads (wire alphabet)
+--   Sheet3.localName(mon, species)         the cart's own spelling, for local text
+--   Sheet3.wireName(text, limit)           a cart string in the wire's alphabet
 --
 -- opts: { wild = true } stamps `catchRate` (the wild seat's sheet only);
--- { link = false } skips Deoxys' link stats (see `statsFor`).
+-- { link = true } gives Deoxys its link-battle stats -- a fight between two
+-- players' carts only (see `statsFor`); every other fight, and the default,
+-- is the forme this cart's own battles use.
+--
+-- Names that ride the wire are the cart's names spelled in the wire's
+-- alphabet (`M.wireName`: é is E, ♂ / ♀ are M / F); the cart's own spelling
+-- stays on this client for its own boxes (`M.localName`).
 --
 -- Nothing here raises: an engine read that throws is a missing field, and a
 -- monster this client cannot describe is skipped with a reason rather than
@@ -256,7 +265,9 @@ local function statsFor(mon, species, opts)
       out.spd = out.spd or int(calc.spDef, nil)
     end
   end
-  if species == M.SPECIES_DEOXYS and not (opts and opts.link == false) then
+  -- Link stats are for a fight between two carts only: a solo, wild or NPC
+  -- fight is this cart's own battle, which reads the forme this cart carries.
+  if species == M.SPECIES_DEOXYS and opts and opts.link == true then
     local link = deoxysLinkStats(mon)
     if link then
       for k, v in pairs(link) do if v then out[k] = v end end
@@ -268,11 +279,12 @@ local function statsFor(mon, species, opts)
   return out
 end
 
--- Beat Up's base Attack / Defense (the species row; Deoxys: its link row).
-local function beatUpOf(species, info)
+-- Beat Up's base Attack / Defense (the species row; Deoxys in a fight between
+-- two carts: its link row, as `statsFor`).
+local function beatUpOf(species, info, opts)
   local base = info and info.baseStats or {}
   local atk, def = int(base.atk, nil), int(base.def, nil)
-  if species == M.SPECIES_DEOXYS then
+  if species == M.SPECIES_DEOXYS and opts and opts.link == true then
     local P = engine("src.core.game3.pokemon")
     local meta = P and try(P.speciesMeta, species)
     local row = type(meta) == "table" and meta.linkStats or nil
@@ -318,7 +330,7 @@ function M.moveRow(moveId, pp, maxPp)
   if left > full then full = left end
   return {
     id = tokenFor(info, id),
-    name = Wire.moveName(info.name) or nil,
+    name = M.wireName(info.name, "move") or nil,
     num = id,
     pp = left,
     maxPp = full,
@@ -352,16 +364,58 @@ end
 -- one monster
 -- ------------------------------------------------------------------
 
+-- The cart spells names in its own charset, which the engine hands over as
+-- UTF-8: POKé BALL, NIDORAN♂, a nickname with an é in it.  The wire's
+-- alphabet (Wire.text) is plain ASCII and *drops* anything else, so "POKé
+-- BALL" arrived as "POK BALL" and both NIDORAN as the same "NIDORAN".
+-- Spelled out before the wire sees it instead: é / É are E, ♂ is M and ♀ is
+-- F -- the engine's own ASCII spelling of the two NIDORAN
+-- (src/core/game3/pokemon.lua NIDORANM / NIDORANF), which both the cart font
+-- and the mod's font draw.  Anything else is left for Wire to judge.
+local SPELL_OUT = {
+  ["\195\169"] = "E", ["\195\137"] = "E",          -- é É
+  ["\226\153\130"] = "M", ["\226\153\128"] = "F", -- ♂ ♀
+}
+
+function M.spellOut(text)
+  if type(text) ~= "string" then return text end
+  return (text:gsub("\195[\169\137]", SPELL_OUT):gsub("\226\153[\128\130]", SPELL_OUT))
+end
+
+-- A cart string in the wire's alphabet: spelled out, then Wire's own cut
+-- (`limit` is Wire.name's when nil, Wire.moveName's when "move").
+function M.wireName(text, limit)
+  if type(text) ~= "string" then return nil end
+  local spelled = M.spellOut(text)
+  if limit == "move" then return Wire.moveName(spelled) end
+  return Wire.name(spelled)
+end
+
+-- The name the sheet uploads: the nickname, else the species, in the wire's
+-- alphabet -- this is what the referee narrates under on *both* screens.
 local function displayName(mon, species)
   local nick = mon.nickname
   if type(nick) == "string" and nick ~= "" then
-    local clean = Wire.name(nick)
+    local clean = M.wireName(nick)
     if clean then return clean end
   end
-  return Wire.name(Gen3.speciesName(species) or "") or Wire.name(mon.name or "")
+  return M.wireName(Gen3.speciesName(species) or "") or M.wireName(mon.name or "")
     or "POKEMON"
 end
 M.displayName = displayName
+
+-- The same name as the cart spells it, for this client's own boxes ("NIDORAN♂
+-- was added to the party!"): the cart's font draws é and the gender signs, so
+-- nothing is cut here.  Falls back to the wire spelling when the cart has no
+-- name to give.
+function M.localName(mon, species)
+  mon = type(mon) == "table" and mon or {}
+  local nick = mon.nickname
+  if type(nick) == "string" and nick:match("%S") then return nick end
+  local name = Gen3.speciesName(species or speciesOf(mon))
+  if type(name) == "string" and name ~= "" then return name end
+  return displayName(mon, species or speciesOf(mon))
+end
 
 local function abilityOf(mon, species, info)
   local id = int(mon.ability or mon.abilityId, nil)
@@ -404,7 +458,13 @@ function M.mon(session, mon, slot, opts)
   if not nature or nature < 0 or nature > 24 then nature = int(mon.personality, 0) % 25 end
   local hpType, hpPower = M.hiddenPower(mon.ivs)
   local gender = mon.gender
-  if gender ~= "M" and gender ~= "F" then gender = "U" end
+  if gender ~= "M" and gender ~= "F" and gender ~= "U" then
+    -- A mon that carries no gender field has the one its species ratio and
+    -- personality give it, the way `monFromSheet` rebuilds one.
+    local P = engine("src.core.game3.pokemon")
+    local got = P and try(P.gender, species, int(mon.personality, 0) % 4294967296)
+    gender = (got == "M" or got == "F") and got or "U"
+  end
   local status = statusOf(mon)
 
   local sheet = {
@@ -423,17 +483,17 @@ function M.mon(session, mon, slot, opts)
     },
     types = types,
     ability = clamp(ability, 0, Config.GEN3_ABILITY_MAX or 77),
-    abilityName = Wire.moveName(Gen3.abilityName(ability) or "") or nil,
+    abilityName = M.wireName(Gen3.abilityName(ability) or "", "move") or nil,
     heldItem = clamp(held, 0, Config.GEN3_ITEM_MAX or 376),
     holdEffect = clamp(int(item and item.holdEffect, 0), 0, 66),
     holdEffectParam = clamp(int(item and item.holdEffectParam, 0), 0, 255),
-    itemName = held > 0 and Wire.moveName(Gen3.itemName(held) or "") or nil,
+    itemName = held > 0 and M.wireName(Gen3.itemName(held) or "", "move") or nil,
     gender = gender,
     friendship = clamp(int(mon.friendship or mon.happiness, info.baseFriendship or 70), 0, 255),
     weight = clamp(int(info.weight, 0), 0, 9999),
     nature = nature,
     hiddenPower = { type = hpType, power = hpPower },
-    beatUp = beatUpOf(species, info) or { atk = 1, def = 1 },
+    beatUp = beatUpOf(species, info, opts) or { atk = 1, def = 1 },
     status = status,
     moves = moves,
   }
@@ -767,7 +827,7 @@ function M.bag(game)
     out[#out + 1] = {
       id = id,
       count = min(count, Config.BATTLE_BAG_COUNT_MAX),
-      name = Wire.moveName(names[id] or Gen3.itemName(id) or "") or nil,
+      name = M.wireName(names[id] or Gen3.itemName(id) or "", "move") or nil,
     }
   end
   table.sort(out, function(a, b) return a.id < b.id end)

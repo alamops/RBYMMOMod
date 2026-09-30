@@ -877,9 +877,14 @@ function M.snapshotMons(game, party, opts)
 end
 
 -- This player's own team.
-function M.snapshotParty(game)
+--
+-- `opts` is read on Gen 3 only: `{ link = true }` for a fight between two
+-- players (LINK_MODES), which is where Deoxys fights on its link-battle stats.
+function M.snapshotParty(game, opts)
   -- Gen 3: the live session party, not game.save (a snapshot there).
-  if Gen.generation(game) == 3 then return Sheet3.party(game) end
+  if Gen.generation(game) == 3 then
+    return Sheet3.party(game, { link = type(opts) == "table" and opts.link == true })
+  end
   local save = game and game.save
   return M.snapshotMons(game, save and save.party)
 end
@@ -953,11 +958,16 @@ function M.sheetMoves(game, mon)
 end
 
 -- PROTOCOL 28: tell the referee this party member's moveset changed.
-function M.sendMoveset(transport, battle, monIndex0, moves)
+--
+-- `generation` (optional) is the boot's, and is the dialect the pre-send check
+-- reads the rows in (Wire.battleMoveset's `generation`, the one the hub reads
+-- them in); nil asks the live boot.  Gen 1 / Gen 2 rows read the same either
+-- way -- none carries the `num` that alone would pick Gen 3's reader.
+function M.sendMoveset(transport, battle, monIndex0, moves, generation)
   if not (transport and battle) then return false end
   if type(moves) ~= "table" or #moves == 0 then return false end
   local msg = { battle = battle, mon = monIndex0, moves = moves }
-  if not Wire.battleMoveset(msg) then return false end
+  if not Wire.battleMoveset(msg, generation or Gen.generation(nil)) then return false end
   if transport:send(Wire.BATTLE_MOVESET, msg) == false then return false end
   return true
 end
@@ -1244,13 +1254,16 @@ end
 --
 -- Checked before it goes rather than after it is refused: both hubs answer a
 -- malformed choice with silence, and silence at a battle screen is a turn the
--- player believes they spent.
-function M.submitChoice(transport, battle, fields)
+-- player believes they spent.  Checked in the generation the hub will read it
+-- in (`generation`, else the live boot's): only Gen 3 reads a choice's
+-- `pass` / `dexCaught`, so only a Gen 3 check can catch a malformed one before
+-- the hub drops it.  A Gen 1 / Gen 2 choice reads exactly as it did.
+function M.submitChoice(transport, battle, fields, generation)
   if not (transport and battle) then return false end
   if transport.isReady and not transport:isReady() then return false end
   local out = { battle = battle }
   for key, value in pairs(fields or {}) do out[key] = value end
-  if not Wire.battleChoice(out) then
+  if not Wire.battleChoice(out, generation or Gen.generation(nil)) then
     mod.log:warn("a battle choice would not have been understood and was not "
       .. "sent; press again, or wait for the turn clock")
     return false
@@ -1709,6 +1722,28 @@ end
 -- read would have found the global nil and indexed it.
 local TRAINER_MODES = { coop_npc = true }
 
+-- The fights the cart fights under link rules: two players, each on their own
+-- cart.  Gen 3 reads this twice.  Deoxys uploads its link-battle stats in
+-- them (Sheet3's `link` option, pokefirered/src/pokemon.c:6163 -- each
+-- version's Deoxys is a different forme, so a cross-version fight uses the
+-- ROM's link row), and nothing the fight does to a held item is written home
+-- from them: the cart saves the party before a Cable Club battle and loads it
+-- back after (pokefirered/src/cable_club.c:776 CB2_ReturnFromCableClubBattle
+-- -> load_save.c:170 LoadPlayerParty; the engine's link/battle.lua LB.finish
+-- runs the same special), so a berry eaten, an item stolen with THIEF or
+-- swapped with TRICK is back where it was once the link closes.  Exported for
+-- src/CoopBattle.lua, whose `coop_pvp` is the other one.
+local LINK_MODES = { ["1v1"] = true, coop_pvp = true }
+M.LINK_MODES = LINK_MODES
+
+-- ...and the fights whose item changes the cart *keeps*: a wild or NPC
+-- trainer battle, where the battle party's held items are copied home at the
+-- end (the engine's battle_bridge.lua writeback, pret
+-- battle_controller_player.c:1909) -- a berry eaten stays eaten, a THIEF from
+-- a wild mon keeps the item.  A mode on neither list (a newer token) writes
+-- nothing home, the safe way round.
+local KEEPS_HELD_MODES = { wild = true, coop_npc = true, coop_wild = true }
+
 -- ------- Gen1 Battlefield theatre gate
 --
 -- Hard-cut when Battlefield.enabled(game) and CLASSIC BATTLE UI is off:
@@ -2107,7 +2142,7 @@ function M:battlefieldSeat(slotIndex, isPlayer)
       maxHp = slot.maxHp,
     }
   end
-  local front = self:seatFront(key, frontMon, slot, isPlayer) or slot.sprite
+  local front = self:seatFront(key, frontMon, slot, isPlayer) or slot.sprite or nil
   -- The exp strip's two clocks, and only ever on this client's own seat.
   --
   -- Ownership is the whole rule: the fraction is read off *this* save file, and
@@ -2503,13 +2538,14 @@ end
 
 function M:say(text)
   if type(text) ~= "string" or text == "" then return end
-  -- A Gen 3 line out of the cart's text pack still carries the printer's
-  -- codes (Exp3.cleanText): each `\p` starts a page of its own here, as it
-  -- does on the cart.
-  if Gen3.active() and text:find("\\", 1, true) then
-    text = Exp3.cleanText(text)
-    if text:find("\n\n", 1, true) then
-      for part in (text .. "\n\n"):gmatch("(.-)\n\n+") do
+  -- A Gen 3 line out of the cart's text pack pages the way the cart does: a
+  -- blank line (what Gen3.battleText makes of the printer's `\p`) starts a
+  -- page of its own.  A line that still carries the printer's raw codes is
+  -- cleaned first (Exp3.cleanText).
+  if Gen3.active() then
+    if text:find("\\", 1, true) then text = Exp3.cleanText(text) end
+    if text:find("\n%s*\n") then
+      for part in (text .. "\n\n"):gmatch("(.-)\n%s*\n%s*") do
         if part ~= "" then self:say(part) end
       end
       return
@@ -2536,7 +2572,7 @@ function M:start(game)
   if self.uploaded then return true end
   if not (self.transport and self.battle) then return false end
 
-  local mons = M.snapshotParty(self.game)
+  local mons = M.snapshotParty(self.game, { link = LINK_MODES[self.mode] == true })
   if #mons == 0 then
     -- Uploading nothing would leave the intermediator holding a seat open
     -- until its grace expired, and the player watching a screen that never
@@ -2552,6 +2588,12 @@ function M:start(game)
 
   self.uploaded = true
   self.mine = mons
+  -- Gen 3: which held items this fight's uploads brought, taken before any
+  -- `held` event can move one (see `ownItem`).
+  if self:generation() == 3 then
+    self.ownItems = nil
+    self:ownItemSet()
+  end
 
   if self.role == "host" or self.mode == "wild" then
     M.sendRuleset(self.transport, self.game, { wild = self.mode == "wild" })
@@ -2610,12 +2652,15 @@ function M:onReady(msg)
   if self.phase == "setup" then
     self.phase = "play"
     if self:generation() == 3 then
-      -- The cart's openings: "Wild X appeared!" / "X would like to battle!".
+      -- The cart's openings: "Wild X appeared!" / "X\nwould like to battle!"
+      -- -- the name on a line of its own, the way pret's
+      -- sText_Trainer1WantsToBattle / sText_LinkTrainerWantsToBattle break it.
       local wild = type(self.wildParty) == "table" and self.wildParty[1] or nil
       if self.mode == "wild" then
         self:say(("Wild %s\nappeared!"):format(tostring(wild and wild.species or "POKéMON")))
       else
-        self:say(("%s would like\nto battle!"):format(self.peerName))
+        self:say(("%s\nwould like to battle!"):format(
+          M.trainerLabel3(self.trainer) or tostring(self.peerName or "?")))
       end
     elseif self.mode == "wild" then
       self:say("A wild pokemon\nappeared!")
@@ -3761,7 +3806,7 @@ function M:syncFightMoves(mon)
   local moves = M.sheetMoves(self.game, mon)
   if #moves == 0 then return false end
   sheet.moves = moves
-  return M.sendMoveset(self.transport, self.battle, index - 1, moves)
+  return M.sendMoveset(self.transport, self.battle, index - 1, moves, self:generation())
 end
 
 -- ------- Gen 3: the award, the held items, the throw, the catch
@@ -3833,7 +3878,8 @@ function M:flushExp3()
     species = batch.species, level = batch.level,
     isTrainer = TRAINER_MODES[self.mode] or false,
     sentIn = batch.sentIn, party = party, session = Gen3.session(),
-  })
+    battle = self,
+  }, { alive = self:standingInFight() })
   if not results then
     self:warnNoExp(why or "the engine refused the award")
     return false
@@ -3841,9 +3887,9 @@ function M:flushExp3()
   for _, r in ipairs(results) do
     local mon = r.mon
     local sheetIndex = self:sheetIndexFor(mon)
-    local sheet = sheetIndex and self.mine and self.mine[sheetIndex] or nil
-    local name = (sheet and sheet.species)
-      or Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+    -- This client's own sentence about its own monster: the cart's spelling
+    -- (NIDORAN♂, an é in a nickname), not the wire's.
+    local name = Sheet3.localName(mon, tonumber(mon.species or mon.speciesId))
     self.expPaid = (self.expPaid or 0) + 1
     self:say(Exp3.gainedText(name, r.gained or r.amount, r.boosted))
     local onField = r.index == activeParty
@@ -3859,11 +3905,40 @@ function M:flushExp3()
   return true
 end
 
+-- Who is standing in *this* fight, by save-party index, for Exp3.award's
+-- `alive` question.  The save party cannot answer it: this screen never writes
+-- HP home mid-fight, so the save still holds the HP the fight started with --
+-- an Exp. Share holder that fainted two turns ago would be paid, and a mon
+-- revived with a REVIVE would not.  The referee's roster for our seat (the
+-- `team` event, one token per uploaded sheet, `x` = fainted) is the fight's
+-- own truth and is current by the time an award is priced: the referee
+-- restates it after every faint and every revive, ahead of the `exp` events
+-- that follow.  A screen that has not seen one yet reads its own sheets' HP.
+-- nil (no sheets at all) leaves Exp3 on the save's HP.
+function M:standingInFight()
+  local mine = self.mine
+  if type(mine) ~= "table" or #mine == 0 then return nil end
+  local roster = self.teams and self.teams[self:mySlot()]
+  if type(roster) ~= "string" then roster = nil end
+  local byParty = {}
+  for i = 1, #mine do
+    local up
+    if roster and #roster >= i then
+      up = roster:sub(i, i) ~= "x"
+    else
+      local hp = type(mine[i]) == "table" and tonumber(mine[i].hp) or nil
+      if hp ~= nil then up = hp > 0 end
+    end
+    if up ~= nil then byParty[self:savePartyIndex(i)] = up end
+  end
+  return function(partyIndex) return byParty[partyIndex] end
+end
+
 -- `levelled`, the Gen 3 way: each level's line in the cart's words, the
 -- moves the cart's learnset gives at that level, then the evolution check.
 function M:levelled3(mon, name, levels)
   if not (type(levels) == "table" and #levels > 0) then return false end
-  name = name or Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+  name = name or Sheet3.localName(mon, tonumber(mon.species or mon.speciesId))
   for _, newLevel in ipairs(levels) do
     self:say(Exp3.grewText(name, newLevel))
     for _, moveId in ipairs(Exp3.movesLearnedAt(mon, newLevel)) do
@@ -3895,24 +3970,127 @@ function M:teach3(mon, name, moveId)
   return true
 end
 
--- A `held` event: what the mon holds now.  Written back on our own side only
--- (the referee's `mon` is the index into the party we uploaded), onto the
--- fight sheet and the save mon both -- a berry eaten or an item stolen in a
--- fight stays eaten or stolen after it (C5 §7.2).
+-- Every held item this client itself put into the fight: its own sheets as
+-- uploaded and the wild / NPC sheets it uploaded for the other side (a solo
+-- or hub-wild fight's foe is described by this client from its own cart).
+-- Taken once, at the upload, before any `held` event has moved an item; a
+-- screen that never uploaded (a harness) takes it at first use.
+function M:ownItemSet()
+  local set = self.ownItems
+  if set then return set end
+  set = {}
+  local function add(list)
+    if type(list) ~= "table" then return end
+    for _, sheet in ipairs(list) do
+      local id = type(sheet) == "table" and tonumber(sheet.heldItem) or nil
+      if id and id > 0 then set[math.floor(id)] = true end
+    end
+  end
+  add(self.mine)
+  add(self.wildParty)
+  add(self.npcParty)
+  self.ownItems = set
+  return set
+end
+
+-- May this item id enter this player's save?  Nothing, always; otherwise only
+-- an item one of this client's own uploads held.  THIEF / COVET / TRICK hand a
+-- mon whatever the other seat's sheet claimed, and a sheet is a claim -- so an
+-- id this client never uploaded (a key item, a ticket) is never written home,
+-- whoever the referee says it came from.
+function M:ownItem(id)
+  id = tonumber(id)
+  if not id then return false end
+  if id == 0 then return true end
+  return self:ownItemSet()[math.floor(id)] == true
+end
+
+-- A `held` event: what the mon holds now (C5 §7.2).
+--
+-- The foe's is remembered, by its party index, for a catch (`caughtHolding`):
+-- its `holding` is the party truth the caught sheet cannot carry (KNOCK OFF).
+--
+-- Ours goes onto the fight sheet always -- the BAG and POKeMON pages read it
+-- -- and onto the save mon only where the cart keeps battle item changes
+-- (KEEPS_HELD_MODES; a link fight's party is reloaded after, see LINK_MODES),
+-- and only as an item this client uploaded itself (`ownItem`).  The
+-- referee's `mon` is the index into the party we uploaded.
 function M:applyHeld(msg)
-  if not (msg and msg.side ~= nil and msg.side == self.mySide) then return false end
+  if not (msg and msg.side ~= nil) then return false end
   local holding = tonumber(msg.holding)
   if not holding or holding < 0 then return false end
   holding = math.floor(holding)
+  if msg.side ~= self.mySide then
+    local index = tonumber(msg.mon)
+    if index and index >= 0 then
+      self.foeHeld = self.foeHeld or {}
+      self.foeHeld[math.floor(index)] = holding
+    end
+    return false
+  end
   local sheetIndex = tonumber(msg.mon) and (math.floor(tonumber(msg.mon)) + 1)
     or self.active
   local sheet = self.mine and self.mine[sheetIndex]
   if type(sheet) == "table" then sheet.heldItem = holding end
+  if not KEEPS_HELD_MODES[self.mode] then return false end
   local mon = self:saveMon(sheetIndex)
   if type(mon) ~= "table" then return false end
+  local had = tonumber(mon.heldItem) or tonumber(mon.item) or 0
+  if holding ~= had and not self:ownItem(holding) then
+    if not self.heldWarned then
+      self.heldWarned = true
+      mod.log:warn("the battle referee handed one of your POKeMON item %d, which "
+        .. "nothing in this fight was holding, so it was not added to your save "
+        .. "-- report this with the server you were playing on", holding)
+    end
+    return false
+  end
   mon.heldItem = holding
   mon.item = holding
   return true
+end
+
+-- The index of the caught mon in the foe party this client uploaded (the
+-- referee's `mon` for that seat), by its personality and species; the lone
+-- sheet of a one-mon wild party otherwise.  nil when it cannot be told.
+function M:caughtFoeIndex(caught)
+  local list = self.wildParty
+  if type(list) ~= "table" or type(caught) ~= "table" then return nil end
+  local pid, sp = tonumber(caught.personality), tonumber(caught.speciesNum)
+  if pid then
+    for i, sheet in ipairs(list) do
+      if type(sheet) == "table" and tonumber(sheet.personality) == pid
+         and (not sp or tonumber(sheet.speciesNum) == sp) then
+        return i - 1
+      end
+    end
+  end
+  if #list == 1 then return 0 end
+  return nil
+end
+
+-- What a caught monster holds leaving the fight.  The referee's caught sheet
+-- states the *battle's* item, and that is not the party's after KNOCK OFF:
+-- the item is gone for the rest of the fight only (pokefirered/src/
+-- battle_script_commands.c:2730, the knocked-off mons; BattleSim3 keeps it as
+-- `mon.knockedOff`), so the monster that goes into the ball still holds it.  The foe's last `held`
+-- event states exactly that party truth (`holding` is the knocked-off item;
+-- THIEF's zero, TRICK's swap), so it wins over the sheet.  Either way the id
+-- must be one this client uploaded (`ownItem`); anything else leaves the
+-- monster with what it held (`current`, the engine mon this client rolled)
+-- or nothing.
+function M:caughtHolding(caught, current)
+  local held
+  local index = self:caughtFoeIndex(caught)
+  if index ~= nil and type(self.foeHeld) == "table" then held = self.foeHeld[index] end
+  if held == nil and type(caught) == "table" and tonumber(caught.heldItem) then
+    held = math.floor(tonumber(caught.heldItem))
+  end
+  if held == nil then return nil end
+  if self:ownItem(held) then return held end
+  local had = type(current) == "table"
+    and (tonumber(current.heldItem) or tonumber(current.item)) or 0
+  return math.floor(had)
 end
 
 -- One Gen 3 `ball` event as the ball-flow rows the arena and the classic page
@@ -3979,12 +4157,20 @@ function M:grantCatch3(msg)
   local mon = self.wildCatchMon
   if type(mon) == "table" and caught then
     Sheet3.applyToMon(mon, { hp = caught.hp, status = caught.status })
-    if tonumber(caught.heldItem) then
-      mon.heldItem = math.floor(tonumber(caught.heldItem))
-      mon.item = mon.heldItem
+    local held = self:caughtHolding(caught, mon)
+    if held then
+      mon.heldItem = held
+      mon.item = held
     end
   end
-  if type(mon) ~= "table" and caught then mon = Sheet3.monFromSheet(caught) end
+  if type(mon) ~= "table" and caught then
+    mon = Sheet3.monFromSheet(caught)
+    if type(mon) == "table" then
+      local held = self:caughtHolding(caught, nil) or 0
+      mon.heldItem = held
+      mon.item = held
+    end
+  end
   if type(mon) ~= "table" then
     self:say("Caught, but could not\nadd to the party.")
     return
@@ -3994,7 +4180,9 @@ function M:grantCatch3(msg)
   local ball = tonumber(self.caughtBall) or tonumber(caught and caught.ball)
   mon.pokeball = ball or tonumber(mon.pokeball) or 4
   local species = tonumber(mon.species or mon.speciesId)
-  local label = Sheet3.displayName({ nickname = "" }, species)
+  -- Every sentence below is this client's own, in the cart's font: the
+  -- cart's spelling of the species (NIDORAN♀), which the wire's cannot carry.
+  local label = Sheet3.localName({ nickname = "" }, species)
   local isNew = Gen.recordCatch(game, mon)
   session.party = type(session.party) == "table" and session.party or {}
   local destination, placed
@@ -4357,7 +4545,7 @@ function M:refreshSlotSprite(index, isPlayer)
   if self:generation() == 3 then
     local sp = tonumber(self:seatSpeciesKey(slot, isPlayer))
     if not sp then
-      slot.sprite = nil
+      slot.sprite = false
       return
     end
     local own = isPlayer and self:saveMon(self.active) or nil
@@ -4365,7 +4553,11 @@ function M:refreshSlotSprite(index, isPlayer)
     local subject = own or sp
     local opts = { form = slot.form }
     local pic = isPlayer and Gen3.backPic(subject, opts) or Gen3.frontPic(subject, opts)
-    slot.sprite = pic and pic.image or nil
+    -- `false` is "looked, and this cache has none": the classic page asks
+    -- again only on nil (`gen3SeatModel`), so a missing pic is one read per
+    -- arrival rather than one a frame -- the `_bfFront` convention.  Every
+    -- `slot.sprite = nil` above and below is what re-arms the read.
+    slot.sprite = pic and pic.image or false
     local monHint = isPlayer and self.mine and self.mine[self.active] or nil
     slot.level = slot.level or (monHint and monHint.level) or 1
     return
@@ -4712,13 +4904,62 @@ function M:finish(result, reason, msg)
   -- clears whatever is left on the way out.
   if not self:hasPendingHpFx() then self:snapDisplay() end
   if reason == "catch" and result == "win" then
-    self:say("Gotcha!")
+    -- Gen 3's referee has already said it, the cart's way ("Gotcha! X was
+    -- caught!"); a second "Gotcha!" under it would be this screen's echo.
+    if self:generation() ~= 3 then self:say("Gotcha!") end
     self:grantCatch(msg)
+  elseif self:generation() == 3 then
+    self:sayEnding3(reason)
   else
     self:say(ENDINGS[self.result] or ENDINGS.draw)
     local why = REASONS[reason]
     if why then self:say(why) end
   end
+end
+
+-- How a Gen 3 fight ends in words: the cart's, and only the cart's.
+--
+-- A fight between players ends on the cart's link-battle line (pret
+-- BufferStringBattle STRINGID_BATTLEEND: "Player defeated\nBOB!" / "Player
+-- lost against\nBOB!" / "...battled to a draw against..."), then whatever
+-- this screen's own reason adds (a timeout, a dropped link -- nothing the cart
+-- has a sentence for).  A wild or NPC fight ends on no generic line at all:
+-- the referee has narrated the knockout, the escape or the catch in the
+-- cart's words, and the caller (src/SoloBattle.lua) prints the cart's own
+-- after-words -- the defeated line and the prize, or the whiteout -- so a
+-- "You won!" ahead of them was a line the cart never shows.  A run needs no
+-- reason line either: "Got away safely!" is the referee's.
+function M:sayEnding3(reason)
+  if LINK_MODES[self.mode] then
+    local outcome = (self.result == "win" and "won") or (self.result == "loss" and "lost")
+      or "drew"
+    self:say(Gen3.battleText("STRINGID_BATTLEEND", {
+      outcome = outcome, linkOpponent1Name = tostring(self.peerName or "?"),
+    }) or ENDINGS[self.result] or ENDINGS.draw)
+  elseif reason == "run" then
+    return
+  end
+  local why = REASONS[reason]
+  if why then self:say(why) end
+end
+
+-- A Gen 3 NPC trainer the way the cart names one: CLASS NAME.  A few cart rows
+-- spell part of the class into the name as well -- FireRed's trainer 511 is
+-- class "POKéMON PROF." named "PROF. OAK" -- and joined naively that reads
+-- "POKéMON PROF. PROF. OAK"; the repeated word is said once.  nil without a
+-- trainer record (the caller falls back to the peer name).
+function M.trainerLabel3(trainer)
+  if type(trainer) ~= "table" then return nil end
+  local function str(v) return (type(v) == "string" and v ~= "") and v or nil end
+  local class = str(trainer.className) or str(trainer.trainerClassName)
+  local name = str(trainer.trainerName)
+  if not (class and name) then return name or class end
+  local upperName, upperClass = name:upper(), class:upper()
+  if upperName:sub(1, #upperClass) == upperClass then return name end
+  local last = upperClass:match("(%S+)%s*$")
+  local first, rest = name:match("^(%S+)%s+(.+)$")
+  if last and first and first:upper() == last then return class .. " " .. rest end
+  return class .. " " .. name
 end
 
 -- ------- outbound
@@ -4768,7 +5009,9 @@ function M:sendChoice(fields)
           and self.transport:isReady()) then
     return false
   end
-  if not M.submitChoice(self.transport, self.battle, fields) then return false end
+  if not M.submitChoice(self.transport, self.battle, fields, self:generation()) then
+    return false
+  end
   self.phase = "play"
   self.pendingTurn = false
   self.answeredTurn = true
@@ -7069,7 +7312,7 @@ function M:startEvolve(row)
   movie.center = index == nil
   if index then
     local slot = self.slots[index]
-    movie.oldSprite = slot and slot.sprite
+    movie.oldSprite = slot and slot.sprite or nil
     if slot then slot.icon = nil end
     if self:usesBattlefield() then
       self:emitFx("evolve", index, self:fxSideFor(index), 1,
@@ -7357,9 +7600,12 @@ end
 
 function M:update(dt)
   self.frame = (self.frame or 0) + 1
-  -- The last knockout of a batch is paid here when nothing followed its `exp`
-  -- events on the wire this frame.
-  if self.expBatch then self:flushExp3() end
+  -- No exp flush here.  A knockout's `exp` events can straddle two frames (a
+  -- hub's packets land when they land), and paying the half that arrived
+  -- first would price the knockout twice -- each half split over its own
+  -- participants.  The referee always follows an exp run with another event
+  -- (the next line, a `turn`, the outcome), and `onEvent` / `onOutcome` pay
+  -- the batch the moment that arrives.
   self:pruneBattlefieldBubbles()
   self:stepFx(dt)
   -- Held fanfare: the outcome was known before the arena had finished showing
@@ -7860,6 +8106,12 @@ end
 -- Cached on the screen and keyed by species + shiny. `seatFront`'s own cache
 -- lives on a field slot and holds one species at a time, which is right for a
 -- seat and wrong here -- a six-monster party walk would evict it on every row.
+--
+-- Gen 3 keys by the monster rather than the species: its pic is a function of
+-- the personality and the OT (shiny is personality xor OT id, Spinda's spots
+-- and Unown's letter are the personality), none of which is a `shiny` flag,
+-- so two SPINDA -- or a shiny and a plain one -- would share whichever pic
+-- was drawn first.
 function M:partyFront(index, sheet)
   local mon = self:saveMon(index)
   if type(mon) ~= "table" then mon = sheet end
@@ -7869,6 +8121,10 @@ function M:partyFront(index, sheet)
   if type(species) == "number" then species = tostring(species) end
   if type(species) ~= "string" or species == "" then return nil end
   local key = species .. (mon.shiny and "*" or "")
+  if self:generation() == 3 then
+    key = ("%s:%s:%s"):format(species, tostring(tonumber(mon.personality) or ""),
+      tostring(tonumber(mon.otId) or ""))
+  end
   local cache = self._bfPartyFronts
   if not cache then
     cache = {}
@@ -8303,10 +8559,10 @@ function M:gen3SeatModel(index, isPlayer)
     return nil
   end
   if slot.sprite == nil then self:refreshSlotSprite(index, isPlayer) end
-  local sprite = slot.sprite
+  local sprite = slot.sprite or nil
   local movie = self.evolving
   if isPlayer and movie and movie.slot == index then
-    sprite = slot.sprite
+    sprite = slot.sprite or nil
   end
   local hidden = self:seatVanished(index) or (not isPlayer and self.foePicHidden)
     or (self.ballFlow and self.ballFlow.index == index and self.ballFlow.hidden) or false
@@ -8319,6 +8575,8 @@ function M:gen3SeatModel(index, isPlayer)
     status = slot.status,
     confused = slot.confused or nil,
     sprite = sprite,
+    -- Looked for and missing: the page must not go looking again every frame.
+    noPic = (sprite == nil and slot.sprite == false) or nil,
     hidden = hidden and true or false,
     substitute = slot.substitute or nil,
     speciesId = key or slot.speciesId,

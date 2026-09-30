@@ -27,6 +27,9 @@
 --     both) takes exp + shareExp, then x1.5 (floored) for a Lucky Egg, for a
 --     trainer's mon and for a traded mon, in that order.
 --   * every recipient gains EVs; a recipient at level 100 gains nothing.
+--   * each recipient's amount is offered to the `exp.gain` hook first, with
+--     the ctx the engine's own award raises it with, so a mod that retunes
+--     experience retunes a mediated fight too.
 --
 -- Unlike Gen 2's award this is one sum per monster, not two passes, so a
 -- screen hands over a whole knockout at once (MediatedBattle banks the `exp`
@@ -179,6 +182,35 @@ end
 -- one knockout
 -- ------------------------------------------------------------------
 
+-- The engine's mod runtime, for the `exp.gain` hook.  Reached through the
+-- same guarded lazy require every Gen 3 arm uses (SoloBattle's
+-- `trainer.party` does the same), so a Gen 1 / Gen 2 boot never loads it here.
+local function Runtime() return engine("src.mods.Runtime") end
+
+-- One recipient's amount through `exp.gain`, the way the engine's own award
+-- raises it (src/core/game3/battle/experience.lua awardFoe, pret
+-- battle_script_commands.c:3230): the same ctx keys, the vanilla amount as the
+-- chain's innermost link, the answer floored and never negative.  Only when a
+-- hook is actually wrapped -- `wantsHook` is the hot-path guard, so an
+-- unhooked award allocates no ctx.  A mediated fight has no engine battle
+-- state and no loser battler: `battle` is whatever the caller handed in (the
+-- screen, as MediatedBattle's `pokemon.caught` payload does), `loser` is nil.
+local function gainHooked()
+  local R = Runtime()
+  if not (R and type(R.wantsHook) == "function" and type(R.call) == "function") then
+    return nil
+  end
+  local ok, wants = pcall(R.wantsHook, "exp.gain")
+  if ok and wants then return R end
+  return nil
+end
+
+local function hookedAmount(R, vanilla, ctx)
+  local ok, amount = pcall(R.call, "exp.gain", function() return vanilla end, ctx)
+  if not ok then return vanilla end
+  return max(0, floor(tonumber(amount) or 0))
+end
+
 -- `ko`:
 --   species    the fallen mon's internal species number (referee fact)
 --   level      its level                                (referee fact)
@@ -186,14 +218,37 @@ end
 --   sentIn     { [partyIndex] = true } -- this player's mons that fought it
 --   party      the party they live in (the session party)
 --   session    for the level-up friendship's map section (optional)
+--   battle     what `exp.gain`'s ctx.battle names (optional; the screen)
+--
+-- `opts` (optional):
+--   alive(partyIndex, mon)  whether that party member is standing *in this
+--       fight*.  The session party's HP is the one the fight started with --
+--       a mediated screen never writes HP home mid-fight -- so a caller that
+--       knows better (the referee's roster) answers here: a fainted Exp. Share
+--       holder is not paid, a mon revived mid-fight is.  nil (or an answer of
+--       nil) falls back to the mon's own HP, which is right for every caller
+--       that writes HP back as it goes.  Eggs are never alive either way.
 --
 -- Returns a list, in party order, of
 --   { index, mon, amount, boosted, gained, levels = { N, ... },
 --     fromLevel, toLevel, fromMaxHp }
 -- or nil plus a reason.  **The mons are mutated in place** -- this is where
 -- the award persists, because the session party is the only place it can.
-function M.award(ko)
+function M.award(ko, opts)
   if type(ko) ~= "table" then return nil, "no knockout to price" end
+  local override = type(opts) == "table" and type(opts.alive) == "function"
+    and opts.alive or nil
+  local function standing(i, mon)
+    if not override then return alive(mon) end
+    -- The egg / species half of `alive` still stands; only the HP question
+    -- is the caller's.
+    if type(mon) ~= "table" or mon.isEgg then return false end
+    local sp = speciesOf(mon)
+    if not sp or sp == 0 or sp == SPECIES_EGG then return false end
+    local ok, answer = pcall(override, i, mon)
+    if ok and answer ~= nil then return answer and true or false end
+    return alive(mon)
+  end
   local E, P = Experience(), Pokemon()
   if not (E and P and type(E.apply) == "function") then
     return nil, "the engine's Gen 3 experience modules are unavailable"
@@ -206,10 +261,11 @@ function M.award(ko)
   local sentIn = type(ko.sentIn) == "table" and ko.sentIn or {}
 
   local viaSentIn, viaExpShare = 0, 0
-  local holder = {}
+  local holder, up = {}, {}
   for i = 1, min(6, #party) do
     local mon = party[i]
-    if alive(mon) then
+    if standing(i, mon) then
+      up[i] = true
       if sentIn[i] then viaSentIn = viaSentIn + 1 end
       if M.holdEffectOf(mon) == M.HOLD_EFFECT_EXP_SHARE then
         holder[i] = true
@@ -220,17 +276,28 @@ function M.award(ko)
   local exp, shareExp = M.split(M.calculated(M.expYield(foe), foeLevel), viaSentIn, viaExpShare)
 
   local mapSec = try(P.currentMapSec, ko.session or Gen3.session())
+  local isTrainer = ko.isTrainer and true or false
   local out = {}
   for i = 1, min(6, #party) do
     local mon = party[i]
-    if alive(mon) and (sentIn[i] or holder[i]) and (int(mon.level, 1) < M.MAX_LEVEL) then
+    if up[i] and (sentIn[i] or holder[i]) and (int(mon.level, 1) < M.MAX_LEVEL) then
       local traded = M.traded(mon)
+      local luckyEgg = M.holdEffectOf(mon) == M.HOLD_EFFECT_LUCKY_EGG
       local amount = M.amount(exp, shareExp, {
         sentIn = sentIn[i], holder = holder[i],
-        luckyEgg = M.holdEffectOf(mon) == M.HOLD_EFFECT_LUCKY_EGG,
-        trainer = ko.isTrainer and true or false,
-        traded = traded,
+        luckyEgg = luckyEgg, trainer = isTrainer, traded = traded,
       })
+      local R = gainHooked()
+      if R then
+        local G3 = engine("src.mods.Gen3Compat")
+        amount = hookedAmount(R, amount, {
+          defeatedDef = G3 and try(G3.speciesView, foe) or nil,
+          level = foeLevel, isTrainer = isTrainer,
+          participants = viaSentIn, traded = traded, luckyEgg = luckyEgg,
+          expShare = holder[i] and true or false, mon = mon, index = i,
+          battle = ko.battle, loser = nil,
+        })
+      end
       local fromMaxHp = int(mon.maxHp, nil)
       -- pokefirered/src/battle_script_commands.c:3271: EVs first, then the
       -- points, so a level crossed on this kill counts the effort just earned.

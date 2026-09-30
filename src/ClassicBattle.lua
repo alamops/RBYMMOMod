@@ -819,7 +819,9 @@ end
 --                     gender ("M" | "F" | nil), sprite | pic (the front pic
 --                     for the foe, the back pic for the ally -- or mon /
 --                     speciesId / species (+ form, shiny, personality) to
---                     resolve one), elevation (else the cart's, from
+--                     resolve one; noPic = true says the caller already
+--                     looked and there is none, so nothing is re-read each
+--                     frame), elevation (else the cart's, from
 --                     speciesId), substitute (the cart's doll stands in),
 --                     hidden, alpha, dx, dy, flash (0..1), caught (foe: the
 --                     owned-ball marker), expFrac (ally, 0..1); confused is
@@ -1220,12 +1222,27 @@ local function drawDoll(gfx, BF, back, seat)
   end
 end
 
+-- The first 64x64 frame of the player's back-pic sheet, one Quad per sheet
+-- image for the life of the image rather than one per drawn frame (weak keys:
+-- a sheet the engine drops takes its quad with it).
+local backQuads = setmetatable({}, { __mode = "k" })
+local function backQuad(gfx, image)
+  local quad = backQuads[image]
+  if quad ~= nil then return quad or nil end
+  pcall(function()
+    local iw, ih = image:getDimensions()
+    quad = gfx.newQuad(0, 0, math.min(64, iw), math.min(64, ih), iw, ih)
+  end)
+  backQuads[image] = quad or false
+  return quad
+end
+
 -- The seat's pic: what the screen resolved, else the art resolved here.
 local function seatPic(BF, seat, back)
   if type(seat) ~= "table" then return nil end
   local img = seat.sprite or seat.pic
   if img then return img end
-  if not BF then return nil end
+  if not BF or seat.noPic then return nil end
   local subject = seat.mon or tonumber(seat.speciesId) or tonumber(seat.species)
   if subject == nil then return nil end
   local opts = { form = seat.form, shiny = seat.shiny, personality = seat.personality }
@@ -1793,11 +1810,7 @@ function M.drawGen3(view, state)
       if type(view.playerBack) == "table" and (view.showPlayer or not ally) then
         local entry = type(Gen3) == "table" and Gen3.trainerBackPic(view.playerBack.gender) or nil
         if type(entry) == "table" and entry.image then
-          local quad = nil
-          pcall(function()
-            local iw, ih = entry.image:getDimensions()
-            quad = gfx.newQuad(0, 0, math.min(64, iw), math.min(64, ih), iw, ih)
-          end)
+          local quad = backQuad(gfx, entry.image)
           gfx.setColor(1, 1, 1, 1)
           if quad then
             gfx.draw(entry.image, quad, G.PLAYER_BACK_X - 32, G.PLAYER_BACK_Y - 32)

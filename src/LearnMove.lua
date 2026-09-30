@@ -162,7 +162,17 @@ local function openGen3(game, mon, moveId, done, opts)
     begin.askYesNo = opts.askYesNo or function(a, b)
       local cb = (type(a) == "function") and a or b
       local prompt = (type(a) == "string" and a ~= "") and a or ""
-      if not gen3Confirm(game, ui, prompt, cb) and cb then cb(false) end
+      if gen3Confirm(game, ui, prompt, cb) then return end
+      -- No box could go up.  A bare "no" is not an answer that ends the
+      -- exchange: "Delete a move?" -> no asks "Stop learning?", and that ->
+      -- no goes back round (the battle wording re-asks from the top), so a
+      -- confirm that keeps failing loops the prompts -- synchronously, since
+      -- nothing waits on a box.  The exchange goes headless for the rest of
+      -- this move instead (the engine's own "nobody to ask" answer, which
+      -- begin() resets for the next one): the "no" leads to the cart's "did
+      -- not learn" line and onDone(false).
+      LearnMove._headless = true
+      if cb then cb(false) end
     end
     begin.askForget = opts.askForget or function(_, cb, ctx)
       local SummaryMenu = engine("src.ui.game3.summary_menu")
