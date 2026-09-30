@@ -3208,6 +3208,12 @@ function M:syncMineStatus(msg)
   if type(status) ~= "string" or status == "" then status = nil end
   local sheet = self.mine and self.mine[self.active]
   if sheet then sheet.status = status end
+  -- A Gen 3 link fight leaves the save alone: the cart reloads the party
+  -- after a Cable Club battle (pokefirered cable_club.c
+  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty), so a paralysis from a
+  -- spar is gone on the way out -- the same rule applyHeld keeps for items.
+  -- Gen 1/2 keep their established write.
+  if Gen3.active() and LINK_MODES[self.mode] then return end
   local save = self:saveMon()
   if save then
     save.status = status

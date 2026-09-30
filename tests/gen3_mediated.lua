@@ -1394,6 +1394,29 @@ do
   check(allText(c):find("You won!", 1, true) == nil, "endings: no generic 'You won!' after a catch")
 end
 
+-- (h2) A status from a PvP spar never reaches the save; a wild one does.
+-- The cart reloads the party after a Cable Club battle (cable_club.c
+-- CB2_ReturnFromCableClubBattle -> LoadPlayerParty) -- live e2e caught a
+-- THUNDER WAVE from a 1v1 left on the save as PAR.
+do
+  newGame()
+  local lead = monOf(4, 5)
+  SESSION.party = { lead }
+  local f = byHand("1v1")
+  f.active = f.active or 1
+  f:syncMineStatus({ t = "status", slot = f:mySlot(), status = "PAR" })
+  eq(lead.status, nil, "pvp status: a spar's paralysis stays out of the save")
+  eq(f.mine[f.active] and f.mine[f.active].status, "PAR",
+     "pvp status: ...while the fight sheet still shows it")
+  newGame()
+  local wildLead = monOf(4, 5)
+  SESSION.party = { wildLead }
+  local w = byHand("wild")
+  w.active = w.active or 1
+  w:syncMineStatus({ t = "status", slot = w:mySlot(), status = "PAR" })
+  eq(wildLead.status, "PAR", "wild status: a wild fight's paralysis is kept, as the cart keeps it")
+end
+
 -- (i) The party page's pics are per monster on Gen 3.
 do
   newGame()
