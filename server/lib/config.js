@@ -54,9 +54,11 @@ const DEFAULTS = {
   version: SCHEMA_VERSION,
   listen: { host: '0.0.0.0', port: 7788 },
   maxPlayers: 4,
-  // Hub generation lock (PROTOCOL 20+): 1 = Gen 1 (RBY), 2 = Gen 2 (Gold).
-  // Compat default is 1 when omitted -- see GENERATION_DEFAULT_WARNING. Gen 2
-  // hubs must set this explicitly (--generation 2 / generation: 2).
+  // Hub generation lock (PROTOCOL 20+): 1 = Gen 1 (Red / Blue / Yellow),
+  // 2 = Gen 2 (Gold / Silver / Crystal), 3 = Gen 3 (FireRed / LeafGreen /
+  // Emerald, all three on one hub; PROTOCOL 30+). Compat default is 1 when
+  // omitted -- see GENERATION_DEFAULT_WARNING. Gen 2 and Gen 3 hubs must set
+  // this explicitly (--generation 2|3 / generation: 2|3).
   generation: 1,
   // The one line the hub hands every player on arrival -- it rides on the
   // welcome and lands in their chat log as a HUB line. Empty means the hub
@@ -117,13 +119,22 @@ const MOTD_ALLOWED = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'];
 
 /*
- * Said once when generation is left to the built-in default. Gen 1 and Gen 2
- * hubs are equal peers; omitting the flag is a one-release compat path for
- * existing Gen 1 deploys, not how Gen 2 is supposed to be brought up.
+ * Said once when generation is left to the built-in default. Gen 1, Gen 2 and
+ * Gen 3 hubs are equal peers; omitting the flag is a one-release compat path
+ * for existing Gen 1 deploys, not how Gen 2 or Gen 3 is supposed to be
+ * brought up -- and a FireRed or Emerald host who forgot it would otherwise
+ * find out from every one of their players being refused.
  */
 const GENERATION_DEFAULT_WARNING =
-  'generation defaulted to 1; Gen 2 hubs must pass --generation 2 ' +
-  '(or set generation: 2 in config)';
+  'generation defaulted to 1; Gen 2 and Gen 3 hubs must pass --generation 2 ' +
+  'or --generation 3 (or set generation: 2 or 3 in config)';
+
+/*
+ * The generations a hub can be locked to. A closed set rather than a range
+ * check so the warning below can name every one of them, and so the next
+ * generation is an entry here rather than a comparison somebody has to find.
+ */
+const GENERATIONS = [1, 2, 3];
 
 /*
  * Clamp bounds. Each range is chosen so that both ends still describe a hub
@@ -443,9 +454,12 @@ function validateMotd(config) {
 }
 
 /*
- * Hub generation is a closed set: 1 or 2. Absent means the compat default of
- * Gen 1, with GENERATION_DEFAULT_WARNING so a Gen 2 host cannot miss that
- * they must set it explicitly. Anything else is pulled to 1 and named.
+ * Hub generation is a closed set: 1, 2 or 3 (GENERATIONS). Absent means the
+ * compat default of Gen 1, with GENERATION_DEFAULT_WARNING so a Gen 2 or
+ * Gen 3 host cannot miss that they must set it explicitly. Anything else is
+ * pulled to 1 and named -- the same rule every other leaf in this file
+ * follows, and a hub that then refuses a player says which generation it is
+ * in the refusal itself, so the mistake is visible from both ends.
  */
 function validateGeneration(config, warnings) {
   const raw = getPath(config, 'generation');
@@ -455,8 +469,8 @@ function validateGeneration(config, warnings) {
     return;
   }
   const n = asInteger(raw);
-  if (n !== 1 && n !== 2) {
-    warnings.push(`generation: "${raw}" is not 1 or 2, using 1`);
+  if (!GENERATIONS.includes(n)) {
+    warnings.push(`generation: "${raw}" is not 1, 2 or 3, using 1`);
     setPath(config, 'generation', 1);
     return;
   }

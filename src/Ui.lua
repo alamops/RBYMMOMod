@@ -10,6 +10,36 @@
 --
 -- Widgets come from mod.ui (the shared toolkit facade), never from a
 -- private require.
+--
+-- ------- Gen 3
+--
+-- A FireRed / LeafGreen / Emerald boot has neither half of that: Game3 has no
+-- game.stack for Screens.push to push onto, and the `screens` registry is
+-- gated there (a write is dropped with a warning).  So on Gen 3 every screen
+-- below is registered with src/Gen3Ui.lua instead, and every widget comes from
+-- it -- the same TextBox / Menu / ListMenu / NamingScreen / Font surface,
+-- drawn at 240x160 in the cart's own frames and glyphs, on the game3 modal
+-- stack.  One screen table serves all three generations; the Gen 3 arms are
+-- behind onGen3() and the Gen 1 / Gen 2 paths are the ones they always were.
+--
+-- ------- the generation-aware doors (use these, not mod.ui / game.stack)
+--
+--   Ui.push(game, id, opts)      mod.ui.push on Gen 1/2, Gen3Ui.push on Gen 3;
+--                                returns the screen that went up
+--   Ui.top(game)                 the screen on top (game.stack:top() / the top
+--                                game3 layer's screen)
+--   Ui.popTop(game)              take the top screen down (on Gen 3 only when
+--                                it is one of this mod's layers)
+--   Ui.pop(game, screenOrId)     take that screen down -- anywhere on the stack
+--                                on Gen 3, only when it is on top on Gen 1/2
+--   Ui.states(game)              every screen, bottom to top
+--   Ui.holds(game, screen)       is it still up (nil when the stack cannot say)
+--   Ui.unwindTo(game, screen, alsoPop)  everything above it off, and it too
+--   Ui.reopenStartMenu(game)     back to START after an MMO screen
+--   Ui.isGen3()                  which of the two worlds this boot is
+--
+-- and the instance methods say / confirm / choose / pushState / pickPartyMon /
+-- askNickname, which already went through the doors and work on all three.
 
 local need, mod = ...
 local Config = need("Config")
@@ -17,6 +47,8 @@ local Wire = need("Wire")
 local Chat = need("Chat")
 local World = need("World")
 local Gen = need("Gen")
+local Gen3 = need("Gen3")
+local Gen3Ui = need("Gen3Ui")
 local Chars = need("Chars")
 local Cast = need("Cast")
 local Places = need("Places")
@@ -27,6 +59,88 @@ local Qr = need("Qr")
 local M = {}
 M.__index = M
 
+-- Is this a Gen 3 boot.  The loader's own generation (Gen3.active: fixed at
+-- Loader construction, a rawget, no require), so it is cheap enough for a
+-- draw path and cannot read a Gen 1 test stub as FireRed.
+local function onGen3()
+  return Gen3.active() == true
+end
+M.isGen3 = onGen3
+
+-- The widget toolkit for this boot: mod.ui (read at call time, so a suite
+-- that swaps stubMod.ui between sections is honoured) or Gen3Ui.
+local function UI()
+  if onGen3() then return Gen3Ui end
+  return mod.ui
+end
+
+-- ------- the doors (see the header)
+
+function M.push(game, id, ...)
+  if onGen3() then return Gen3Ui.push(game, id, ...) end
+  return mod.ui.push(game, id, ...)
+end
+
+function M.top(game)
+  if onGen3() then return Gen3Ui.top() end
+  local stack = type(game) == "table" and game.stack or nil
+  if stack and type(stack.top) == "function" then return stack:top() end
+  return nil
+end
+
+function M.popTop(game)
+  if onGen3() then return Gen3Ui.pop(game) end
+  local stack = type(game) == "table" and game.stack or nil
+  if not (stack and type(stack.pop) == "function") then return false end
+  stack:pop()
+  return true
+end
+
+function M.pop(game, target)
+  if onGen3() then return Gen3Ui.pop(game, target) end
+  if target == nil then return M.popTop(game) end
+  -- A Gen 1 / Gen 2 stack only ever pops its top; a screen buried under
+  -- another is left where it is rather than dug out.
+  if M.top(game) == target then return M.popTop(game) end
+  return false
+end
+
+function M.states(game)
+  if onGen3() then return Gen3Ui.states() end
+  local stack = type(game) == "table" and game.stack or nil
+  local states = stack and stack.states
+  return type(states) == "table" and states or {}
+end
+
+-- true / false, or nil when the stack cannot say (Coop.stackHolds' answer).
+function M.holds(game, target)
+  if target == nil then return nil end
+  if onGen3() then return Gen3Ui.has(target) end
+  local stack = type(game) == "table" and game.stack or nil
+  local states = stack and stack.states
+  if type(states) ~= "table" then return nil end
+  for i = #states, 1, -1 do
+    if states[i] == target then return true end
+  end
+  return false
+end
+
+-- Coop.unwindStackTo's rule: never go hunting for a screen that has already
+-- left, and stop at sixteen.
+function M.unwindTo(game, target, alsoPop)
+  if onGen3() then return Gen3Ui.unwindTo(game, target, alsoPop) end
+  local stack = type(game) == "table" and game.stack or nil
+  if not (stack and target) then return false end
+  if M.holds(game, target) == false then return false end
+  local guard = 0
+  while stack:top() and stack:top() ~= target and guard < 16 do
+    stack:pop()
+    guard = guard + 1
+  end
+  if alsoPop and stack:top() == target then stack:pop() end
+  return true
+end
+
 -- Re-open the boot's START menu after leaving an MMO screen.
 --
 -- Gen 1's StartMenu is a Menu that pops itself on B. Gen 2's Gen2StartMenu
@@ -34,7 +148,12 @@ M.__index = M
 -- bare `push(Gen2StartMenu)` made B/START call close() with a nil onClose --
 -- the menu stayed on the stack forever. Mirror the engine's openStartMenu
 -- opts whenever we reopen Gold's menu.
+--
+-- Gen 3's START is not a pushed screen at all: Gen.reopenStartMenu opens it
+-- the way the START button does, and the ui.start_menu.items hook puts the
+-- MMO row back on it.
 function M.reopenStartMenu(game)
+  if onGen3() then return Gen.reopenStartMenu(game) end
   local id = Gen.startMenuId(game)
   if id == "Gen2StartMenu" then
     mod.ui.push(game, id, {
@@ -70,6 +189,8 @@ M.UI_PAPER = UI_PAPER
 
 local function withUiPaper(screen)
   if type(screen) ~= "table" then return screen end
+  -- SGB zones are a Game Boy frame's concern; a GBA layer has none.
+  if onGen3() then return screen end
   screen.sgbPalettes = function(self, game)
     local zones
     local stack = game and game.stack and game.stack.states
@@ -452,6 +573,13 @@ end
 -- Every naming grid this mod opens, built here rather than at each call
 -- site so a screen added later cannot quietly get the off-screen version.
 local function namingScreen(game, opts)
+  -- Gen 3: Gen3Ui's grid, handed the same two pages the Gen 1 hook swaps in
+  -- (there is no ui.naming.grid on Gen 3), and a typed line it already lays
+  -- out at the GBA's width -- nothing to repaint.
+  if onGen3() then
+    opts.pages = { LETTERS, DIGITS }
+    return Gen3Ui.NamingScreen.new(game, opts)
+  end
   local screen = mod.ui.NamingScreen.new(game, opts)
   local baseDraw = screen.draw
   if type(baseDraw) ~= "function" then
@@ -512,10 +640,13 @@ local CARD_RIGHT = 152
 local portrait = Chars.portrait
 
 function Card.new(game, player, onCancel)
-  return setmetatable({ game = game, player = player, onCancel = onCancel }, Card)
+  return setmetatable({ game = game, player = player, onCancel = onCancel,
+                        gen3 = onGen3() or nil }, Card)
 end
 
 function Card:update()
+  -- Gen 3 layers read input in handleInput (see src/Gen3Ui.lua's header)
+  if self.gen3 then return end
   local input = self.game.input
   if input:wasPressed("b") or input:wasPressed("a") then
     self.game.stack:pop()
@@ -523,7 +654,78 @@ function Card:update()
   end
 end
 
+function Card:handleInput(input)
+  if Gen3Ui.stamped(self, input) then return end
+  if input:wasPressed("b") or input:wasPressed("a") then
+    Gen3Ui.pop(self.game, self)
+    if self.onCancel then self.onCancel() end
+  end
+end
+
+-- The same card on the GBA's 240x160, in FRLG's trainer-card order: the
+-- rows down the left with their values right-aligned against the portrait
+-- window, the character standing in that window at 2x (its 16x32 overworld
+-- frame, 32x64), and the ranked points in a box of their own under it.  At
+-- this width there is room for every row whole, so the Gen 1 card's
+-- juggling of which rows may sit beside the art does not arise; what it kept
+-- is the rule that a row both cards carry sits at the same height on both.
+-- name and look at 28 / 43, then the numbers from 62 on a 15px line, the last
+-- (MONEY, own card only) ending at 151 -- inside the frame's 152.
+local CARD3 = { labelX = 16, valueRight = 156, nameY = 28, lookY = 43,
+                first = 62, pitch = 15 }
+
+function Card:draw3()
+  local Font = Gen3Ui.Font
+  local p = self.player or {}
+  Gen3Ui.frame(1, 1, 28, 18)
+  Font.draw("TRAINER CARD", 12, 9, { color = "BLUE" })
+
+  -- the character, in its own window
+  Gen3Ui.frame(21, 4, 7, 8)
+  Gen3Ui.drawSprite(p.sprite, 168 + 12, 32, {
+    version = p.version, gender = p.gender, scale = 2,
+  })
+
+  local L, R = CARD3.labelX, CARD3.valueRight
+  local function row(y, label, value)
+    Font.draw(label, L, y)
+    if value ~= nil then Font.drawRight(tostring(value), R, y) end
+  end
+  local function nth(n) return CARD3.first + (n - 1) * CARD3.pitch end
+  row(CARD3.nameY, "NAME", tostring(p.name or "?"))
+  -- the look on its own row under the name, as on the Gen 1 card
+  Font.draw(Font.fit(Chars.label(p.sprite or ""), R - L), L, CARD3.lookY,
+            { color = "MUTED" })
+
+  local own = p.money ~= nil
+  local card = p.profile
+  if not card then
+    if own then
+      row(nth(1), "NO SAVE LOADED.")
+      return
+    end
+    row(nth(1), "NO CARD SENT.")
+    row(nth(2), "THEIR BUILD IS")
+    row(nth(3), "OLDER THAN YOURS.")
+    return
+  end
+  local hours = math.floor((card.playtime or 0) / 3600)
+  local minutes = math.floor(((card.playtime or 0) % 3600) / 60)
+  row(nth(1), "IDNo.", ("%05d"):format(card.idNo or 0))
+  row(nth(2), "TIME", ("%d:%02d"):format(hours, minutes))
+  row(nth(3), "BADGES", card.badges or 0)
+  row(nth(4), "SEEN", card.seen or 0)
+  row(nth(5), "OWNED", card.owned or 0)
+  if own then row(nth(6), "MONEY", ("¥%d"):format(p.money)) end
+
+  -- ranked points, live off presence like the Gen 1 card's RANK/
+  Gen3Ui.frame(21, 14, 7, 4)
+  Font.draw("RANK", 172, 113)
+  Font.drawRight(tostring(p.points or 0), 220, 128)
+end
+
 function Card:draw()
+  if self.gen3 then return self:draw3() end
   local Font = mod.ui.Font
   if not (Font and Font.draw) then return end
   local p = self.player
@@ -743,6 +945,7 @@ function Ranks.new(game, client, onCancel)
   client:requestRanking()
   return setmetatable({
     game = game, client = client, onCancel = onCancel, offset = 0,
+    gen3 = onGen3() or nil,
   }, Ranks)
 end
 
@@ -751,7 +954,105 @@ function Ranks:entries()
   return type(rows) == "table" and rows or {}
 end
 
+-- ------- the board on Gen 3
+--
+-- Five rows of 22px in the list window: the place right-aligned in a column
+-- of its own, the character's head and shoulders (the top 20px of its 16x32
+-- overworld frame -- a Gen 3 person is twice the height of a Game Boy one, so
+-- the whole figure would cost the board half its rows), the name, and the
+-- score right-aligned against the frame.  Which part of the list is showing
+-- sits in the title bar, where Gen 1 had a footer row to spare and this has
+-- not.  Everything is measured in the cart's pixels, not in 8px glyphs.
+-- The figure is the frame's rows 8..29 -- a Gen 3 person stands in the lower
+-- three quarters of its 16x32 frame, so the top eight rows are air -- which is
+-- the whole of it from hat to feet, one row tall.
+local RANK3 = {
+  rows = 5, top = 40, rowH = 22, textDY = 4,
+  posRight = 30, artX = 36, artTop = 8, artH = 22, nameX = 58, right = 226, gap = 6,
+}
+M.RANK3_LAYOUT = RANK3
+
+-- The duplicate-name tag as the cart can print it: its charmap has no "#",
+-- and its lowercase hex reads as a word, so "(B0B0)" rather than "#b0b0".
+function M.rankTag3(id)
+  local tag = M.rankTag(id)
+  if not tag then return nil end
+  return "(" .. tag:sub(2):upper() .. ")"
+end
+
+-- The name column on Gen 3: trimmed in pixels to what the score leaves, with
+-- the tag kept whole when another row shares the name.
+function M.rankLabel3(name, id, collide, points)
+  local Font = Gen3Ui.Font
+  name = tostring(name or "")
+  local room = RANK3.right - Font.width(tostring(points or 0)) - RANK3.gap - RANK3.nameX
+  local tag = collide and M.rankTag3(id) or nil
+  if tag then
+    local suffix = " " .. tag
+    return Font.fit(name, math.max(room - Font.width(suffix), 6)) .. suffix
+  end
+  return Font.fit(name, math.max(room, 6))
+end
+
+function Ranks:handleInput(input)
+  if Gen3Ui.stamped(self, input) then return end
+  local rows = self:entries()
+  local maxOffset = math.max(#rows - RANK3.rows, 0)
+  if self.offset > maxOffset then self.offset = maxOffset end
+  if input:wasPressed("down") then
+    self.offset = math.min(self.offset + 1, maxOffset)
+  elseif input:wasPressed("up") then
+    self.offset = math.max(self.offset - 1, 0)
+  elseif input:wasPressed("b") or input:wasPressed("a") then
+    Gen3Ui.pop(self.game, self)
+    if self.onCancel then self.onCancel() end
+  end
+end
+
+function Ranks:draw3()
+  local Font = Gen3Ui.Font
+  local rows = self:entries()
+  local _, asked, seen = self.client:ranking()
+  local maxOffset = math.max(#rows - RANK3.rows, 0)
+  if self.offset > maxOffset then self.offset = maxOffset end
+  Gen3Ui.frame(1, 1, 28, 2)
+  Font.draw("RANK", 12, 9)
+  Gen3Ui.frame(1, 5, 28, 14)
+  if #rows == 0 then
+    if not asked then
+      Font.draw("NOT IN A GAME.", 16, 44)
+      Font.draw("JOIN ONE FIRST.", 16, 59)
+    elseif not seen then
+      Font.draw("ASKING THE HUB...", 16, 44)
+    else
+      Font.draw("NOBODY HAS WON", 16, 44)
+      Font.draw("A BATTLE HERE YET.", 16, 59)
+    end
+    return
+  end
+  local last = math.min(self.offset + RANK3.rows, #rows)
+  local collide = M.nameCollisions(rows)
+  for slot = 1, last - self.offset do
+    local place = self.offset + slot
+    local row = rows[place]
+    local y = RANK3.top + (slot - 1) * RANK3.rowH
+    local ty = y + RANK3.textDY
+    Font.drawRight(tostring(place), RANK3.posRight, ty)
+    Gen3Ui.drawSprite(row.sprite, RANK3.artX, y, {
+      version = row.version, gender = row.gender, clipTop = RANK3.artTop, clipH = RANK3.artH,
+    })
+    local points = tostring(row.points or 0)
+    Font.draw(M.rankLabel3(row.name, row.id, collide[row.name], points), RANK3.nameX, ty)
+    Font.drawRight(points, RANK3.right, ty)
+  end
+  if #rows > RANK3.rows then
+    Font.drawRight(("%d-%d OF %d"):format(self.offset + 1, last, #rows), 228, 9)
+    Gen3Ui.scrollArrows(1, 5, 28, 14, self.offset > 0, last < #rows)
+  end
+end
+
 function Ranks:update()
+  if self.gen3 then return end
   local input = self.game.input
   local rows = self:entries()
   local maxOffset = math.max(#rows - RANK_ROWS, 0)
@@ -770,6 +1071,7 @@ function Ranks:update()
 end
 
 function Ranks:draw()
+  if self.gen3 then return self:draw3() end
   local Font = mod.ui.Font
   if not (Font and Font.draw) then return end
   Font.drawBox(0, 0, 20, 18)
@@ -915,7 +1217,25 @@ end
 -- Measured against the *label as drawn*, not against the bare name: a friend's
 -- row carries a mark in front of their nickname (see M.FRIEND_MARK), and a
 -- place sized to the name alone would be one glyph too wide and run into it.
-local function placeColumn(game, player, label)
+--
+-- Gen 3 measures the same trade in the cart's pixels: the place gets what the
+-- row has left once the name (and a friend mark in front of it, `prefix`) and
+-- a gap have theirs, cut on a whole glyph, and nothing under three glyphs'
+-- worth -- the cart's glyphs are variable-width, so a glyph count would be a
+-- guess at a width Gen3Ui can simply measure.
+local function placeColumn3(game, player, label, prefix)
+  local place = Places.name(game, player.map)
+  if not place then return nil end
+  local Font = Gen3Ui.Font
+  local room = Gen3Ui.rightRoom(label or player.name, prefix)
+  if room < Font.width(("M"):rep(ROSTER_PLACE_MIN)) then return nil end
+  local cut = (Font.fit(place, room):gsub("%s+$", ""))
+  if cut == "" then return nil end
+  return cut
+end
+
+local function placeColumn(game, player, label, prefix)
+  if onGen3() then return placeColumn3(game, player, label, prefix) end
   local place = Places.name(game, player.map)
   if not place then return nil end
   local room = M.placeRoom(label or player.name)
@@ -989,7 +1309,7 @@ end
 function M:say(text, onDone)
   local game = self.ctx.game
   if not game then return nil end
-  return mod.ui.push(game, SCREEN.TEXT, { text = text, onDone = onDone })
+  return M.push(game, SCREEN.TEXT, { text = text, onDone = onDone })
 end
 
 -- opts.defaultNo opens the box with the cursor on NO.
@@ -1005,7 +1325,7 @@ function M:confirm(game, text, onChoose, opts)
   -- Returned so a caller can take the box back down -- Sessions holds the
   -- battle-invite prompt the same way Coop holds its ask box, and cancels
   -- or a peer going offline have to dismiss it rather than leave it buried.
-  return mod.ui.push(game, SCREEN.CONFIRM, {
+  return M.push(game, SCREEN.CONFIRM, {
     text = text,
     onChoose = onChoose,
     defaultNo = opts and opts.defaultNo,
@@ -1098,38 +1418,51 @@ function M:choose(game, text, items)
   -- Returned for the same reason confirm is: a waiting box has to be
   -- dismissible from outside when the answer arrives (or the ask is
   -- cancelled) rather than only when the player presses a row.
-  return mod.ui.push(game, SCREEN.CHOOSE, { text = text, items = items })
+  return M.push(game, SCREEN.CHOOSE, { text = text, items = items })
 end
 
+-- On Gen 3 the state itself goes up as a fullscreen layer (Gen3Ui.pushState:
+-- field frozen, a widescreen state painted by the render.hud pass) and is
+-- returned; it closes by Ui.pop(game, state), there being no game.stack for it
+-- to pop itself from.
 function M:pushState(game, state)
   game = game or self.ctx.game
   if not (game and state) then return end
+  if onGen3() then return Gen3Ui.pushState(game, state) end
   mod.ui.push(game, SCREEN.STATE, { state = state })
 end
 
 function M:pickPartyMon(game, trade, onPick)
   game = game or self.ctx.game
   if not game then return end
-  mod.ui.push(game, SCREEN.PICK, { trade = trade, onPick = onPick })
+  M.push(game, SCREEN.PICK, { trade = trade, onPick = onPick })
 end
 
 -- ------- registration
 
 function M:install()
   local ctx = self.ctx
-  local screens = mod.content.screens
+  local gen3 = onGen3()
+  -- Gen 3 gates the screens registry (a write is dropped, with a warning in
+  -- loader.errors), so every screen below goes to Gen3Ui's own there.
+  local screens = gen3 and Gen3Ui.screens or mod.content.screens
 
   -- Give this mod's naming screens a digits page.  Scoped by title: any
   -- screen the mod did not open -- naming your rival, nicknaming a mon --
   -- falls straight through to next() and keeps the vanilla grid.
-  mod.hooks:wrap("ui.naming.grid", function(next, grid, ctxInfo)
-    local out = next(grid, ctxInfo)
-    if type(ctxInfo) ~= "table" or not ownedTitles[ctxInfo.title] then
-      return out
-    end
-    -- SELECT flips between the two pages, so "lower" becomes "digits"
-    return ctxInfo.lower and DIGITS or LETTERS
-  end)
+  --
+  -- Not on Gen 3, which never fires ui.naming.grid: Gen3Ui's grid is handed
+  -- the two pages directly (namingScreen above).
+  if not gen3 then
+    mod.hooks:wrap("ui.naming.grid", function(next, grid, ctxInfo)
+      local out = next(grid, ctxInfo)
+      if type(ctxInfo) ~= "table" or not ownedTitles[ctxInfo.title] then
+        return out
+      end
+      -- SELECT flips between the two pages, so "lower" becomes "digits"
+      return ctxInfo.lower and DIGITS or LETTERS
+    end)
+  end
 
   -- The mod manager opens its own naming screen for a text option and
   -- titles it "<LABEL>?", which is a title this mod never pushes and so
@@ -1190,6 +1523,8 @@ function M:install()
   function HostInfo.new(game)
     local self = setmetatable({ game = game, payload = nil, qr = nil,
                                 error = nil }, HostInfo)
+    -- a full page on Gen 3 (hides what is under it, freezes the field)
+    if gen3 then self.gen3, self.isOpaque = true, true end
     local platform = mod.platform
     if platform and platform.requestLocalNetworkAccess then
       pcall(platform.requestLocalNetworkAccess, platform)
@@ -1199,12 +1534,13 @@ function M:install()
   end
 
   function HostInfo:update()
+    if self.gen3 then return end
     local input = self.game.input
     if input:wasPressed("b") then
       self.game.stack:pop()
     elseif input:wasPressed("a") then
       if self.qr then
-        mod.ui.push(self.game, SCREEN.HOSTQR, {
+        M.push(self.game, SCREEN.HOSTQR, {
           qr = self.qr, payload = self.payload,
         })
       else
@@ -1213,7 +1549,53 @@ function M:install()
     end
   end
 
+  function HostInfo:handleInput(input)
+    if Gen3Ui.stamped(self, input) then return end
+    if input:wasPressed("b") then
+      Gen3Ui.pop(self.game, self)
+    elseif input:wasPressed("a") then
+      if self.qr then
+        M.push(self.game, SCREEN.HOSTQR, {
+          qr = self.qr, payload = self.payload,
+        })
+      else
+        Gen3Ui.pop(self.game, self)
+      end
+    end
+  end
+
+  -- The same page on the GBA: labels down the left, their values in a column
+  -- of their own, the two keys at the foot.
+  function HostInfo:draw3()
+    local Font = Gen3Ui.Font
+    local client = ctx.client
+    local address = client:hostAddress()
+    local code = client:hostJoinCode()
+    Gen3Ui.frame(1, 1, 28, 18)
+    Font.draw("HOSTING", 12, 9, { color = "BLUE" })
+    local LX, VX, VW = 16, 88, 140
+    if type(address) == "string" and not address:find("^%?") then
+      Font.draw("ADDRESS", LX, 34)
+      Font.draw(Font.fit(address, VW), VX, 34)
+    else
+      Font.draw("PORT", LX, 34)
+      Font.draw(tostring(Config.DEFAULT_PORT), VX, 34)
+      Font.draw("IP", LX, 49)
+      Font.draw("HIDDEN", VX, 49)
+    end
+    Font.draw("JOIN CODE", LX, 64)
+    Font.draw(codeText(code), VX, 64)
+    if self.qr then
+      Font.draw("A: SHOW QR", LX, 94)
+    elseif self.error then
+      Font.draw("QR UNAVAILABLE", LX, 94)
+      Font.draw(Font.fit(tostring(self.error), 208), LX, 109, { color = "MUTED" })
+    end
+    Font.draw("B: BACK", LX, 134)
+  end
+
   function HostInfo:draw()
+    if self.gen3 then return self:draw3() end
     local Font = mod.ui.Font
     if not (Font and Font.draw) then return end
     local client = ctx.client
@@ -1250,18 +1632,70 @@ function M:install()
     elseif not qr then
       error = why
     end
-    return setmetatable({ game = game, qr = qr, payload = payload,
-                          error = error }, HostQr)
+    local self = setmetatable({ game = game, qr = qr, payload = payload,
+                                error = error }, HostQr)
+    if gen3 then self.gen3, self.isOpaque = true, true end
+    return self
   end
 
   function HostQr:update()
+    if self.gen3 then return end
     local input = self.game.input
     if input:wasPressed("a") or input:wasPressed("b") then
       self.game.stack:pop()
     end
   end
 
+  function HostQr:handleInput(input)
+    if Gen3Ui.stamped(self, input) then return end
+    if input:wasPressed("a") or input:wasPressed("b") then
+      Gen3Ui.pop(self.game, self)
+    end
+  end
+
+  -- The code as big as the screen allows: the whole 160px height is the
+  -- square's budget, so the module size comes out an integer 3 for the
+  -- version-6 matrix a pairing payload encodes to (41 modules + the four-
+  -- module quiet zone each side = 49 x 3 = 147px), where inside a frame it
+  -- would be 2.  Integer modules on a paper-white field are what keep it
+  -- scannable once the engine scales the canvas.  The words go in a window of
+  -- their own to its right.
+  function HostQr:draw3()
+    local Font = Gen3Ui.Font
+    local g = love and love.graphics
+    local matrix = self.qr
+    if type(matrix) ~= "table" then
+      Gen3Ui.frame(1, 1, 28, 18)
+      Font.draw("SCAN TO JOIN", 12, 9, { color = "BLUE" })
+      Font.draw("QR UNAVAILABLE", 16, 44)
+      if self.error then
+        Font.draw(Font.fit(tostring(self.error), 208), 16, 59, { color = "MUTED" })
+      end
+      Font.draw("B: BACK", 16, 134)
+      return
+    end
+    if g then
+      g.setColor(1, 1, 1, 1)
+      g.rectangle("fill", 0, 0, Gen3Ui.W, Gen3Ui.H)
+    end
+    local box = Gen3Ui.H - 4
+    local outer = (Gen3Ui.qrScale(#matrix, box) or 1) * (#matrix + 8)
+    Gen3Ui.drawQr(matrix, 2 + math.floor((box - outer) / 2),
+                  math.floor((Gen3Ui.H - outer) / 2), box)
+    Gen3Ui.frame(21, 1, 8, 18)
+    Font.draw("SCAN TO", 172, 12, { color = "BLUE" })
+    Font.draw("JOIN", 172, 27, { color = "BLUE" })
+    local code = self.payload and self.payload.code
+    if code then
+      Font.draw("CODE", 172, 64)
+      Font.draw(codeText(code), 172, 79)
+    end
+    Font.draw("A/B:", 172, 119)
+    Font.draw("BACK", 172, 134)
+  end
+
   function HostQr:draw()
+    if self.gen3 then return self:draw3() end
     local Font = mod.ui.Font
     if not (Font and Font.draw) then return end
     Font.drawBox(0, 0, 20, 18)
@@ -1302,6 +1736,7 @@ function M:install()
   function JoinQr.new(game)
     local self = setmetatable({ game = game, active = false,
                                 status = "POINT CAMERA AT HOST QR" }, JoinQr)
+    if gen3 then self.gen3, self.isOpaque = true, true end
     if qrScanAvailable() then
       local ok, started = pcall(mod.qrcode.scan.start)
       if ok and started ~= false then
@@ -1335,14 +1770,37 @@ function M:install()
     local address = ("%s:%d"):format(payload.address, payload.port)
     client:setJoinAddress(address)
     client:setJoinCode(address, payload.code)
-    self.game.stack:pop()
+    if self.gen3 then Gen3Ui.pop(self.game, self) else self.game.stack:pop() end
     if not client:connect(self.game, address) then
       return false
     end
     return true
   end
 
+  -- Gen 3: the scanner is still polled every frame here; the buttons are
+  -- handleInput's (below).
+  local function pollScan(self)
+    local ok, result = pcall(mod.qrcode.scan.poll)
+    if ok and result then
+      self:finish(result)
+    end
+  end
+
+  function JoinQr:handleInput(input)
+    if Gen3Ui.stamped(self, input) then return end
+    if input:wasPressed("b") then
+      if self.active then pcall(mod.qrcode.scan.cancel) end
+      Gen3Ui.pop(self.game, self)
+    elseif not self.active and input:wasPressed("a") then
+      Gen3Ui.pop(self.game, self)
+    end
+  end
+
   function JoinQr:update()
+    if self.gen3 then
+      if self.active then pollScan(self) end
+      return
+    end
     local input = self.game.input
     if input:wasPressed("b") then
       if self.active then pcall(mod.qrcode.scan.cancel) end
@@ -1359,7 +1817,19 @@ function M:install()
     end
   end
 
+  function JoinQr:draw3()
+    local Font = Gen3Ui.Font
+    Gen3Ui.frame(1, 1, 28, 18)
+    Font.draw("JOIN BY QR", 12, 9, { color = "BLUE" })
+    for i, line in ipairs(Font.wrap(self.status, 208)) do
+      if i > 4 then break end
+      Font.draw(line, 16, 34 + (i - 1) * 15)
+    end
+    Font.draw(self.active and "B: CANCEL" or "A/B: BACK", 16, 134)
+  end
+
   function JoinQr:draw()
+    if self.gen3 then return self:draw3() end
     local Font = mod.ui.Font
     if not (Font and Font.draw) then return end
     Font.drawBox(0, 0, 20, 18)
@@ -1370,7 +1840,7 @@ function M:install()
 
   screens:register(SCREEN.TEXT, { new = function(game, opts)
     opts = opts or {}
-    return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", opts.onDone))
+    return withUiPaper(UI().TextBox.new(game, opts.text or "", opts.onDone))
   end })
 
   screens:register(SCREEN.CONFIRM, { new = function(game, opts)
@@ -1378,7 +1848,7 @@ function M:install()
     -- TextBox pushes the yes/no box itself once the text finishes printing
     -- and calls opts.choice with the answer, which is the vanilla prompt
     -- rhythm rather than two boxes appearing at once
-    return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", nil, {
+    return withUiPaper(UI().TextBox.new(game, opts.text or "", nil, {
       choice = function(yes)
         if opts.onChoose then opts.onChoose(yes and true or false) end
       end,
@@ -1389,7 +1859,10 @@ function M:install()
     }))
   end })
 
+  -- On Gen 3 the state is marked as one (Gen3Ui.asState), so a push of this
+  -- id puts it up the way M:pushState does: fullscreen, field frozen.
   screens:register(SCREEN.STATE, { new = function(_, opts)
+    if gen3 then return opts and Gen3Ui.asState(opts.state) end
     return opts and opts.state
   end })
 
@@ -1403,8 +1876,8 @@ function M:install()
   screens:register(SCREEN.CHOOSE, { new = function(game, opts)
     opts = opts or {}
     local items = opts.items or {}
-    return withUiPaper(mod.ui.TextBox.new(game, opts.text or "", function()
-      mod.ui.push(game, SCREEN.MENU_CHOOSE,
+    return withUiPaper(UI().TextBox.new(game, opts.text or "", function()
+      M.push(game, SCREEN.MENU_CHOOSE,
         { items = items, last = M.cancelRow(items) })
     end))
   end })
@@ -1416,7 +1889,7 @@ function M:install()
     opts = opts or {}
     local items = opts.items or {}
     local last = opts.last
-    return withUiPaper(mod.ui.Menu.new(game, items, {
+    return withUiPaper(UI().Menu.new(game, items, {
       tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
       -- B is the last row, run as though it had been selected. Not nil, and
       -- not a close: a co-op prompt with a working cancel is a trainer the
@@ -1576,13 +2049,13 @@ function M:install()
       if hosting then
         items[#items + 1] = {
           label = "ADDRESS",
-          onSelect = function() mod.ui.push(game, SCREEN.HOSTINFO) end,
+          onSelect = function() M.push(game, SCREEN.HOSTINFO) end,
         }
       end
       if connected then
         items[#items + 1] = {
           label = "PLAYERS",
-          onSelect = function() mod.ui.push(game, SCREEN.ROSTER) end,
+          onSelect = function() M.push(game, SCREEN.ROSTER) end,
         }
         -- No unread marker on this row. It carried "*" first, which the
         -- extracted font has no glyph for -- Font.draw silently drew
@@ -1605,15 +2078,15 @@ function M:install()
         -- having lost them.
         items[#items + 1] = {
           label = "FRIENDS",
-          onSelect = function() mod.ui.push(game, SCREEN.FRIENDS) end,
+          onSelect = function() M.push(game, SCREEN.FRIENDS) end,
         }
         items[#items + 1] = {
           label = "CHAT",
-          onSelect = function() mod.ui.push(game, SCREEN.CHATLOG) end,
+          onSelect = function() M.push(game, SCREEN.CHATLOG) end,
         }
         items[#items + 1] = {
           label = "SAY",
-          onSelect = function() mod.ui.push(game, SCREEN.SCOPE) end,
+          onSelect = function() M.push(game, SCREEN.SCOPE) end,
         }
         -- Its own row rather than a corner of PLAYERS: a party is a standing
         -- arrangement with its own chat, its own list and its own way out,
@@ -1621,7 +2094,7 @@ function M:install()
         -- you check most often the thing you have to go looking for.
         items[#items + 1] = {
           label = "PARTY",
-          onSelect = function() mod.ui.push(game, SCREEN.PARTY) end,
+          onSelect = function() M.push(game, SCREEN.PARTY) end,
         }
         -- The other side of PLAYERS: that one shows you everybody else's
         -- card, and until now there was no way to see the one they are
@@ -1634,9 +2107,9 @@ function M:install()
         items[#items + 1] = {
           label = "MY PROFILE",
           onSelect = function()
-            mod.ui.push(game, SCREEN.PROFILE, {
+            M.push(game, SCREEN.PROFILE, {
               own = true,
-              onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+              onCancel = function() M.push(game, SCREEN.MAIN) end,
             })
           end,
         }
@@ -1646,8 +2119,8 @@ function M:install()
         items[#items + 1] = {
           label = "RANK",
           onSelect = function()
-            mod.ui.push(game, SCREEN.RANK, {
-              onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+            M.push(game, SCREEN.RANK, {
+              onCancel = function() M.push(game, SCREEN.MAIN) end,
             })
           end,
         }
@@ -1669,7 +2142,7 @@ function M:install()
         items[#items + 1] = {
           label = "CHARACTER",
           onSelect = function()
-            mod.ui.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
+            M.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
           end,
         }
       end
@@ -1682,16 +2155,16 @@ function M:install()
           -- everyone else, so that one asks first.
           if not hosting then
             client:leave()
-            return mod.ui.push(game, SCREEN.TEXT, {
+            return M.push(game, SCREEN.TEXT, {
               text = "You left.\nStill playing!",
             })
           end
-          mod.ui.push(game, SCREEN.CONFIRM, {
+          M.push(game, SCREEN.CONFIRM, {
             text = "End the game for\neveryone?",
             onChoose = function(yes)
               if not yes then return end
               client:leave()
-              mod.ui.push(game, SCREEN.TEXT, { text = "The game ended." })
+              M.push(game, SCREEN.TEXT, { text = "The game ended." })
             end,
           })
         end,
@@ -1704,23 +2177,23 @@ function M:install()
       -- branch above, where SERVERS is intentionally absent.
       items[#items + 1] = {
         label = "SERVERS",
-        onSelect = function() mod.ui.push(game, SCREEN.SERVERS) end,
+        onSelect = function() M.push(game, SCREEN.SERVERS) end,
       }
       items[#items + 1] = {
         label = "HOST GAME",
         onSelect = function()
-          mod.ui.push(game, SCREEN.CHARSET, {
+          M.push(game, SCREEN.CHARSET, {
             verb = "HOST",
-            onReady = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+            onReady = function() M.push(game, SCREEN.HOSTSET) end,
           })
         end,
       }
       items[#items + 1] = {
         label = "JOIN GAME",
         onSelect = function()
-          mod.ui.push(game, SCREEN.CHARSET, {
+          M.push(game, SCREEN.CHARSET, {
             verb = "JOIN",
-            onReady = function() mod.ui.push(game, SCREEN.JOINADDR) end,
+            onReady = function() M.push(game, SCREEN.JOINADDR) end,
           })
         end,
       }
@@ -1731,7 +2204,7 @@ function M:install()
         items[#items + 1] = {
           label = "JOIN QR",
           onSelect = function()
-            mod.ui.push(game, SCREEN.JOINQR)
+            M.push(game, SCREEN.JOINQR)
           end,
         }
       end
@@ -1766,12 +2239,12 @@ function M:install()
       items[#items + 1] = {
         label = "CHARACTER",
         onSelect = function()
-          mod.ui.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
+          M.push(game, SCREEN.CHARPICK, { backTo = SCREEN.MAIN })
         end,
       }
     end
 
-    local menu = mod.ui.Menu.new(game, items, {
+    local menu = UI().Menu.new(game, items, {
       tx = 9, ty = 0, tw = 11,
       -- the same ceiling the START menu uses: (18 rows - 2 border) / 2
       maxVisible = 8,
@@ -1812,21 +2285,73 @@ function M:install()
       { label = "LOOK", right = Chars.label(client:spriteChoice()), key = "look" },
       { label = opts.verb or "READY", key = "go" },
     }
-    return mod.ui.ListMenu.new(game, "TRAINER", items, {
+    return UI().ListMenu.new(game, "TRAINER", items, {
       onChoose = function(item, menu)
         menu:close()
         if item.key == "name" then
-          mod.ui.push(game, SCREEN.COMPOSE,
+          M.push(game, SCREEN.COMPOSE,
             { scope = "name", back = SCREEN.CHARSET, backOpts = opts })
         elseif item.key == "look" then
-          mod.ui.push(game, SCREEN.CHARPICK, { back = opts })
+          M.push(game, SCREEN.CHARPICK, { back = opts })
         elseif opts.onReady then
           opts.onReady()
         end
       end,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
   end })
+
+  -- ------- the character list on Gen 3
+  --
+  -- A person on a Gen 3 cart is a 16x32 overworld figure, twice the height of
+  -- a list row, so the portrait cannot share the row the way the Game Boy's
+  -- 16x16 one does.  It gets a window of its own beside the list instead: the
+  -- row under the cursor, standing in it at 2x and walking on the spot -- which
+  -- is also the one thing a name cannot tell a player, whether the character
+  -- they are about to be has a walk cycle worth wearing.  The labels are
+  -- plain (no indent to open a gutter), and the mark for a character the mod
+  -- brings keeps its Gen 1 rule: the cursor's column, never on the selected
+  -- row.  (None are offered on Gen 3 today -- Config.ownCharAllowed -- so the
+  -- mark is the rule kept, not a thing drawn.)
+  local CHARPICK3 = { listW = 18, panelLeft = 21, panelTop = 5, panelW = 7, panelH = 14 }
+
+  local function charPick3(game, client, current, goBack)
+    local Font = Gen3Ui.Font
+    local items, start = {}, 1
+    for i, id in ipairs(Chars.list(game)) do
+      if id == current then start = i end
+      items[#items + 1] = { label = Chars.label(id), value = id }
+    end
+    local menu = Gen3Ui.ListMenu.new(game, "CHARACTER", items, {
+      pageJump = true,
+      listW = CHARPICK3.listW,
+      onChoose = function(item, m)
+        m:close()
+        client:setSpriteChoice(item.value)
+        goBack()
+      end,
+      onCancel = goBack,
+      decorate = function(item, _, y, selected)
+        if not selected and Cast.owns(item.value) then
+          Font.draw(M.FRIEND_MARK, Gen3Ui.LIST.left * 8 + Gen3Ui.LIST.cursorDX, y)
+        end
+      end,
+      panel = function(m)
+        local P = CHARPICK3
+        Gen3Ui.frame(P.panelLeft, P.panelTop, P.panelW, P.panelH)
+        local item = m.items[m.index]
+        if not item then return end
+        -- stand, step, stand, other step: four beats of 16 frames
+        local beat = math.floor((m.anim or 0) / 16) % 4
+        Gen3Ui.drawSprite(item.value, P.panelLeft * 8 + (P.panelW * 8 - 32) / 2,
+          P.panelTop * 8 + 14, {
+            facing = "down", walk = beat % 2 == 1, step = beat == 3, scale = 2,
+          })
+      end,
+    })
+    menu.index = start
+    return menu
+  end
 
   screens:register(SCREEN.CHARPICK, { new = function(game, opts)
     opts = opts or {}
@@ -1845,9 +2370,10 @@ function M:install()
     local direct = type(opts.backTo) == "string"
     local backTo = direct and opts.backTo or SCREEN.CHARSET
     local backOpts = direct and {} or (opts.back or {})
-    local function goBack() mod.ui.push(game, backTo, backOpts) end
+    local function goBack() M.push(game, backTo, backOpts) end
 
     local current = client:spriteChoice()
+    if gen3 then return charPick3(game, client, current, goBack) end
     local items, start = {}, 1
     for i, id in ipairs(Chars.list()) do
       if id == current then start = i end
@@ -1855,7 +2381,7 @@ function M:install()
       -- in `value`, which is what both decorations and the choice read
       items[#items + 1] = { label = previewLabel(id), value = id }
     end
-    local menu = mod.ui.ListMenu.new(game, "CHARACTER", items, {
+    local menu = UI().ListMenu.new(game, "CHARACTER", items, {
       pageJump = true,
       onChoose = function(item, m)
         m:close()
@@ -1891,7 +2417,7 @@ function M:install()
     end
     local player = ctx.roster:get(opts.playerId)
     if not player then
-      return mod.ui.TextBox.new(game, "They just went\noffline.")
+      return UI().TextBox.new(game, "They just went\noffline.")
     end
     return Card.new(game, player, opts.onCancel)
   end })
@@ -1935,28 +2461,28 @@ function M:install()
         key = "code" },
       { label = "START", key = "go" },
     }
-    return mod.ui.ListMenu.new(game, "HOST", items, {
+    return UI().ListMenu.new(game, "HOST", items, {
       onChoose = function(item, menu)
         menu:close()
         if item.key == "players" then
-          mod.ui.push(game, SCREEN.HOSTSIZE)
+          M.push(game, SCREEN.HOSTSIZE)
         elseif item.key == "code" then
-          mod.ui.push(game, SCREEN.HOSTCODE)
+          M.push(game, SCREEN.HOSTCODE)
         elseif not code then
           -- client:host would surface HostServer's own refusal here, which
           -- is a sentence about a port; naming the row that fixes it is
           -- what the host can actually act on
-          mod.ui.push(game, SCREEN.TEXT, {
+          M.push(game, SCREEN.TEXT, {
             text = "Set a join code\nfirst -- players\nneed it to get in.",
-            onDone = function() mod.ui.push(game, SCREEN.HOSTCODE) end,
+            onDone = function() M.push(game, SCREEN.HOSTCODE) end,
           })
         elseif client:host(game) then
           -- and on failure client:host has already said why, in the same
           -- box every other refusal uses
-          mod.ui.push(game, SCREEN.HOSTINFO)
+          M.push(game, SCREEN.HOSTINFO)
         end
       end,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
   end })
 
@@ -1977,27 +2503,27 @@ function M:install()
           if not code then
             -- newJoinCode already warned with a remediation; the player gets
             -- the short version and the other row still works
-            return mod.ui.push(game, SCREEN.TEXT, {
+            return M.push(game, SCREEN.TEXT, {
               text = "Couldn't make a\ncode. Type one\ninstead.",
-              onDone = function() mod.ui.push(game, SCREEN.HOSTCODE) end,
+              onDone = function() M.push(game, SCREEN.HOSTCODE) end,
             })
           end
-          mod.ui.push(game, SCREEN.TEXT, {
+          M.push(game, SCREEN.TEXT, {
             text = ("Players will need:\n%s"):format(codeText(code)),
-            onDone = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+            onDone = function() M.push(game, SCREEN.HOSTSET) end,
           })
         end,
       },
       {
         label = "TYPE ONE",
         onSelect = function()
-          mod.ui.push(game, SCREEN.JOINCODE, { host = true })
+          M.push(game, SCREEN.JOINCODE, { host = true })
         end,
       },
     }
-    return mod.ui.Menu.new(game, items, {
+    return UI().Menu.new(game, items, {
       tx = 8, ty = 0, tw = 12,
-      onCancel = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+      onCancel = function() M.push(game, SCREEN.HOSTSET) end,
     })
   end })
 
@@ -2023,14 +2549,14 @@ function M:install()
         label = ("%d PLAYERS"):format(n),
         onSelect = function()
           client:setMaxPlayers(n)
-          mod.ui.push(game, SCREEN.HOSTSET)
+          M.push(game, SCREEN.HOSTSET)
         end,
       }
     end
 
-    local menu = mod.ui.Menu.new(game, items, {
+    local menu = UI().Menu.new(game, items, {
       tx = 8, ty = 0, tw = 12, maxVisible = 8,
-      onCancel = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+      onCancel = function() M.push(game, SCREEN.HOSTSET) end,
     })
     -- open on what is already configured, so confirming is one button
     menu.index = start
@@ -2041,7 +2567,7 @@ function M:install()
   screens:register(SCREEN.HOSTINFO, { new = function(game)
     local client = ctx.client
     if not client:isHosting() then
-      return mod.ui.TextBox.new(game, "You aren't hosting.")
+      return UI().TextBox.new(game, "You aren't hosting.")
     end
     return HostInfo.new(game)
   end })
@@ -2091,6 +2617,39 @@ function M:install()
   -- somewhere else is only a question of what onDone is; the fabricated name
   -- it passes is ignored.
   local function escapable(screen, onEscape, emptyConfirm)
+    -- Gen 3: the same rule on Gen3Ui's grid, which reads its buttons in
+    -- handleInput rather than update, and says the rule in its banner rather
+    -- than on a free row under the grid.
+    if gen3 then
+      local baseInput, baseConfirm = screen.handleInput, screen.confirm
+      if type(baseInput) ~= "function" or type(baseConfirm) ~= "function" then
+        mod.log:warn("the naming screen is not the shape this mod wraps, so "
+          .. "B-to-go-back is off on it -- update the mod for this engine build")
+        return screen
+      end
+      local function empty(self)
+        return type(self.glyphs) ~= "table" or #self.glyphs == 0
+      end
+      local function leave(self)
+        self.onDone = onEscape
+        return baseConfirm(self)
+      end
+      screen.confirm = function(self, ...)
+        if emptyConfirm and empty(self) then return leave(self) end
+        return baseConfirm(self, ...)
+      end
+      screen.handleInput = function(self, input)
+        if not Gen3Ui.stamped(self, input) and type(input) == "table"
+            and input:wasPressed("b") and empty(self) then
+          return leave(self)
+        end
+        return baseInput(self, input)
+      end
+      screen.hint = function(self)
+        return empty(self) and "B GOES BACK" or "B ERASES"
+      end
+      return screen
+    end
     local baseUpdate, baseConfirm, baseDraw = screen.update, screen.confirm,
                                               screen.draw
     if type(baseUpdate) ~= "function" or type(baseConfirm) ~= "function"
@@ -2192,14 +2751,14 @@ function M:install()
         -- the port, and the code is filed under the address connect dials
         local target = client:setJoinAddress(address)
         if not target then return end
-        mod.ui.push(game, SCREEN.JOINCODE, { address = target, connect = true })
+        M.push(game, SCREEN.JOINCODE, { address = target, connect = true })
       end,
     })
     -- B on an empty line backs out to the MMO menu, which is one more B from
     -- the world. START is left alone: on an empty line it still submits the
     -- address already stored, which is what makes this screen answerable
     -- without typing a character.
-    return escapable(screen, function() mod.ui.push(game, SCREEN.MAIN) end)
+    return escapable(screen, function() M.push(game, SCREEN.MAIN) end)
   end })
 
   -- ------- joining: the code that gets you past the door
@@ -2247,17 +2806,17 @@ function M:install()
           for key, value in pairs(opts) do
             if again[key] == nil then again[key] = value end
           end
-          return mod.ui.push(game, SCREEN.TEXT, {
+          return M.push(game, SCREEN.TEXT, {
             text = ("That isn't a join\ncode. It's %d\nletters and digits."):
               format(Config.CODE_LEN),
-            onDone = function() mod.ui.push(game, SCREEN.JOINCODE, again) end,
+            onDone = function() M.push(game, SCREEN.JOINCODE, again) end,
           })
         end
         if opts.host then
           client:setHostJoinCode(code)
-          return mod.ui.push(game, SCREEN.TEXT, {
+          return M.push(game, SCREEN.TEXT, {
             text = ("Players will need:\n%s"):format(codeText(code)),
-            onDone = function() mod.ui.push(game, SCREEN.HOSTSET) end,
+            onDone = function() M.push(game, SCREEN.HOSTSET) end,
           })
         end
         client:setJoinCode(address, code)
@@ -2265,7 +2824,7 @@ function M:install()
           client:connect(game)
           return
         end
-        mod.ui.push(game, SCREEN.TEXT, {
+        M.push(game, SCREEN.TEXT, {
           text = ("Join code saved:\n%s"):format(codeText(code)),
         })
       end,
@@ -2282,7 +2841,7 @@ function M:install()
     -- screen behind this to go back to. Never a socket left half-dialled,
     -- because nothing has been dialled yet.
     return escapable(screen, function()
-      mod.ui.push(game, opts.host and SCREEN.HOSTCODE or SCREEN.MAIN)
+      M.push(game, opts.host and SCREEN.HOSTCODE or SCREEN.MAIN)
     end, true)
   end })
 
@@ -2313,13 +2872,13 @@ function M:install()
         value = entry.key,
       }
     end
-    return mod.ui.ListMenu.new(game, "SERVERS", items, {
+    return UI().ListMenu.new(game, "SERVERS", items, {
       pageJump = true,
       onChoose = function(item, menu)
         menu:close()
-        mod.ui.push(game, SCREEN.SERVERACT, { key = item.value })
+        M.push(game, SCREEN.SERVERACT, { key = item.value })
       end,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
   end })
 
@@ -2335,8 +2894,8 @@ function M:install()
       -- key is asking after something that no longer exists. Eviction is the
       -- other way it goes. Either way, say so and hand back the list, rather
       -- than build five rows that would all refuse.
-      return mod.ui.TextBox.new(game, "That server is\ngone.", function()
-        mod.ui.push(game, SCREEN.SERVERS)
+      return UI().TextBox.new(game, "That server is\ngone.", function()
+        M.push(game, SCREEN.SERVERS)
       end)
     end
 
@@ -2380,7 +2939,7 @@ function M:install()
     -- would dial a hub nobody asked for. `row` is carried back the way the
     -- MMO menu carries cursor.main, and is clamped on the way in.
     local reopen = function(row)
-      mod.ui.push(game, SCREEN.SERVERACT, { key = key, row = row })
+      M.push(game, SCREEN.SERVERACT, { key = key, row = row })
     end
 
     -- What JOIN GAME does, with both grids already answered.
@@ -2401,7 +2960,7 @@ function M:install()
         mod.log:warn("could not dial the saved server %s -- open it under "
           .. "SERVERS and give EDIT HOST an address like 1.2.3.4:7788",
           tostring(entry.address))
-        return mod.ui.push(game, SCREEN.TEXT, {
+        return M.push(game, SCREEN.TEXT, {
           text = "That address is\nno good. Edit it\nand try again.",
           -- wrapped rather than passed straight, now that reopen takes a
           -- row: whatever the box hands its callback is not one, and this
@@ -2441,7 +3000,7 @@ function M:install()
       local wantsRemove, wantsAuto = item.remove, item.auto
       item.onSelect = function()
         if wantsConnect then
-          mod.ui.push(game, SCREEN.CHARSET, { verb = "JOIN", onReady = dial })
+          M.push(game, SCREEN.CHARSET, { verb = "JOIN", onReady = dial })
         elseif wantsAuto then
           if isAuto then return setAuto(row, false) end
           -- Whoever holds it now, if anybody -- and named, because "some
@@ -2476,7 +3035,7 @@ function M:install()
           -- request to dial.
           reopen(row)
         elseif field then
-          mod.ui.push(game, SCREEN.SERVEREDIT, { key = key, field = field })
+          M.push(game, SCREEN.SERVEREDIT, { key = key, field = field })
         elseif wantsRemove then
           -- Asked before it happens, and the question names the row: this
           -- list is the only copy of an address somebody typed once, and a
@@ -2515,9 +3074,9 @@ function M:install()
                 mod.log:warn("could not delete the server %s -- it is no "
                   .. "longer on the list, so there is nothing left to "
                   .. "remove; reopen SERVERS to see what is", tostring(entry.name))
-                return mod.ui.push(game, SCREEN.TEXT, {
+                return M.push(game, SCREEN.TEXT, {
                   text = "That server is\ngone.",
-                  onDone = function() mod.ui.push(game, SCREEN.SERVERS) end,
+                  onDone = function() M.push(game, SCREEN.SERVERS) end,
                 })
               end
               -- The row said "Forget", so the hub's passcode goes with it:
@@ -2541,7 +3100,7 @@ function M:install()
               -- about a row the player just chose to be rid of. An empty
               -- list is ListMenu's own "Nothing here.", and the MMO menu
               -- drops the SERVERS row the next time it opens.
-              mod.ui.push(game, SCREEN.SERVERS)
+              M.push(game, SCREEN.SERVERS)
             end,
             -- The one confirm in this mod that opens on NO: see the note
             -- above the row.
@@ -2550,12 +3109,12 @@ function M:install()
       end
     end
 
-    local menu = mod.ui.Menu.new(game, items, {
+    local menu = UI().Menu.new(game, items, {
       -- ACTIONS' geometry, and its arithmetic for the same reason: Menu
       -- grows the box downwards to fit its rows (th = rows * 2 + 2), so ty
       -- is what keeps the last row on an 18-tile screen.
       tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
-      onCancel = function() mod.ui.push(game, SCREEN.SERVERS) end,
+      onCancel = function() M.push(game, SCREEN.SERVERS) end,
     })
     -- Where a reopen puts the cursor, clamped rather than trusted: the row
     -- count is fixed today, but an opts table is anybody's to hand in and a
@@ -2625,9 +3184,9 @@ function M:install()
       -- which is where the three rows that do work are.
       mod.log:warn("there is no server field called '%s' to edit -- this "
         .. "screen takes field = host, code or name", tostring(opts.field))
-      return mod.ui.TextBox.new(game, "There is nothing\nto edit there.",
+      return UI().TextBox.new(game, "There is nothing\nto edit there.",
         function()
-          mod.ui.push(game, SCREEN.SERVERACT, { key = opts.key })
+          M.push(game, SCREEN.SERVERACT, { key = opts.key })
         end)
     end
     local store = serverStore()
@@ -2635,8 +3194,8 @@ function M:install()
     if not entry then
       -- Same sentence SERVERACT gives, and for its two reasons: the entry
       -- was re-keyed under another address, or it was evicted.
-      return mod.ui.TextBox.new(game, "That server is\ngone.", function()
-        mod.ui.push(game, SCREEN.SERVERS)
+      return UI().TextBox.new(game, "That server is\ngone.", function()
+        M.push(game, SCREEN.SERVERS)
       end)
     end
 
@@ -2667,15 +3226,15 @@ function M:install()
             .. "(%d character(s)) -- %s",
             tostring(opts.field), #tostring(text), spec.warn)
           local again = { key = key, field = opts.field, typed = text }
-          return mod.ui.push(game, SCREEN.TEXT, {
+          return M.push(game, SCREEN.TEXT, {
             text = spec.refusal,
-            onDone = function() mod.ui.push(game, SCREEN.SERVEREDIT, again) end,
+            onDone = function() M.push(game, SCREEN.SERVEREDIT, again) end,
           })
         end
         -- The key it has now, not the one it had: EDIT HOST re-keys the
         -- entry in place, so reopening on `key` would land on the "that
         -- server is gone" box about the entry that was just edited.
-        mod.ui.push(game, SCREEN.SERVERACT, { key = updated.key or key })
+        M.push(game, SCREEN.SERVERACT, { key = updated.key or key })
       end,
     })
     -- What is already there, on the line and editable. This is a change to a
@@ -2690,7 +3249,7 @@ function M:install()
     -- means the same thing, because there is nothing an empty line could
     -- usefully save.
     return escapable(screen, function()
-      mod.ui.push(game, SCREEN.SERVERACT, { key = key })
+      M.push(game, SCREEN.SERVERACT, { key = key })
     end, true)
   end })
 
@@ -2707,9 +3266,9 @@ function M:install()
       -- Not a dead end.  The sentence says how a party starts and then hands
       -- over the list to start one from, so the row leads somewhere even
       -- when there is nothing to show yet.
-      return mod.ui.TextBox.new(game,
+      return UI().TextBox.new(game,
         "No party yet.\nPick a player to\ninvite.", function()
-          mod.ui.push(game, SCREEN.ROSTER)
+          M.push(game, SCREEN.ROSTER)
         end)
     end
 
@@ -2733,12 +3292,12 @@ function M:install()
     local items = {
       {
         label = "MEMBERS",
-        onSelect = function() mod.ui.push(game, SCREEN.MEMBERS) end,
+        onSelect = function() M.push(game, SCREEN.MEMBERS) end,
       },
       {
         label = "SAY",
         onSelect = function()
-          mod.ui.push(game, SCREEN.COMPOSE, { scope = "party" })
+          M.push(game, SCREEN.COMPOSE, { scope = "party" })
         end,
       },
       { label = Coop.wildMenuLabel(wildOn), toggle = "wild" },
@@ -2755,12 +3314,12 @@ function M:install()
             local name = party:partnerName() or "your friend"
             text = ("Leave the party\nwith %s?"):format(name)
           end
-          mod.ui.push(game, SCREEN.CONFIRM, {
+          M.push(game, SCREEN.CONFIRM, {
             text = text,
             onChoose = function(yes)
-              if not yes then return mod.ui.push(game, SCREEN.PARTY) end
+              if not yes then return M.push(game, SCREEN.PARTY) end
               party:leave()
-              mod.ui.push(game, SCREEN.TEXT, { text = "You left the party." })
+              M.push(game, SCREEN.TEXT, { text = "You left the party." })
             end,
           })
         end,
@@ -2768,7 +3327,7 @@ function M:install()
     }
 
     local function reopen(row)
-      mod.ui.push(game, SCREEN.PARTY, { row = row })
+      M.push(game, SCREEN.PARTY, { row = row })
     end
 
     for row, item in ipairs(items) do
@@ -2790,9 +3349,9 @@ function M:install()
       end
     end
 
-    local menu = mod.ui.Menu.new(game, items, {
+    local menu = UI().Menu.new(game, items, {
       tx = 9, ty = 0, tw = 11,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
     if type(menu) == "table" then
       menu.index = math.min(math.max(tonumber(opts.row) or 1, 1), #items)
@@ -2838,16 +3397,16 @@ function M:install()
     if #items == 0 then
       items[#items + 1] = { label = "Nobody." }
     end
-    return mod.ui.ListMenu.new(game, "PARTY", items, {
+    return UI().ListMenu.new(game, "PARTY", items, {
       onChoose = function(item, menu)
         if not item.value then return end
         menu:close()
-        local back = function() mod.ui.push(game, SCREEN.MEMBERS) end
-        mod.ui.push(game, SCREEN.PROFILE, {
+        local back = function() M.push(game, SCREEN.MEMBERS) end
+        M.push(game, SCREEN.PROFILE, {
           own = item.mine, playerId = item.value, onCancel = back,
         })
       end,
-      onCancel = function() mod.ui.push(game, SCREEN.PARTY) end,
+      onCancel = function() M.push(game, SCREEN.PARTY) end,
     })
   end })
 
@@ -2873,9 +3432,9 @@ function M:install()
       -- Not a dead end, the way the empty PARTY screen is not one: the
       -- sentence says how a friendship starts and then hands over the list to
       -- start one from.
-      return mod.ui.TextBox.new(game,
+      return UI().TextBox.new(game,
         "No friends yet.\nPick a player to\nadd one.", function()
-          mod.ui.push(game, SCREEN.ROSTER)
+          M.push(game, SCREEN.ROSTER)
         end)
     end
 
@@ -2907,7 +3466,7 @@ function M:install()
       }
     end
 
-    return mod.ui.ListMenu.new(game, "FRIENDS", items, {
+    return UI().ListMenu.new(game, "FRIENDS", items, {
       pageJump = true,
       onChoose = function(item, menu)
         menu:close()
@@ -2916,13 +3475,13 @@ function M:install()
         -- which list you found them in.  Offline they are named rather than
         -- pointed at -- there is no connection to address -- and ACTIONS
         -- offers the one command that still means something.
-        mod.ui.push(game, SCREEN.ACTIONS, {
+        M.push(game, SCREEN.ACTIONS, {
           playerId = item.playerId,
           friendName = item.value,
-          onCancel = function() mod.ui.push(game, SCREEN.FRIENDS) end,
+          onCancel = function() M.push(game, SCREEN.FRIENDS) end,
         })
       end,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
   end })
 
@@ -2949,18 +3508,31 @@ function M:install()
       -- away -- so it goes in front of the nickname instead of competing for
       -- the column.  M.FRIEND_MARK's note is the argument for the glyph, and
       -- for why it is not in the cursor column where it would be free.
-      local label = M.rosterLabel(player.name,
-                                  ctx.friends and ctx.friends:isFriend(player.name))
+      --
+      -- Gen 3 keeps the label plain and carries the mark as the row's
+      -- `prefix` (Gen3Ui draws it, and the driver contract reads labels as
+      -- plain text); the glyph and the rule are the same.
+      local label, prefix
+      if gen3 then
+        label = tostring(player.name)
+        if ctx.friends and ctx.friends:isFriend(player.name) then
+          prefix = M.FRIEND_MARK
+        end
+      else
+        label = M.rosterLabel(player.name,
+                              ctx.friends and ctx.friends:isFriend(player.name))
+      end
       local right
       if ctx.party:isPartner(player.id) then
         right = "PARTY"
       elseif player.busy then
         right = "BUSY"
       else
-        right = placeColumn(game, player, label)
+        right = placeColumn(game, player, label, prefix)
       end
       items[#items + 1] = {
         label = label,
+        prefix = prefix,
         right = right,
         value = player.id,
       }
@@ -2968,19 +3540,19 @@ function M:install()
     -- A roster is genuinely a list -- variable length, with a status
     -- column -- so this one stays the full-screen ListMenu the bag and the
     -- PC use, rather than a command box.
-    return mod.ui.ListMenu.new(game, "PLAYERS", items, {
+    return UI().ListMenu.new(game, "PLAYERS", items, {
       pageJump = true,
       onChoose = function(item, menu)
         menu:close()
         local player = ctx.roster:get(item.value)
         if player then
-          mod.ui.push(game, SCREEN.ACTIONS, {
+          M.push(game, SCREEN.ACTIONS, {
             playerId = player.id,
-            onCancel = function() mod.ui.push(game, SCREEN.ROSTER) end,
+            onCancel = function() M.push(game, SCREEN.ROSTER) end,
           })
         end
       end,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
   end })
 
@@ -3013,7 +3585,7 @@ function M:install()
       function(yes)
         if not yes then return reopen() end
         if ctx.friends then ctx.friends:remove(name) end
-        mod.ui.push(game, SCREEN.TEXT, {
+        M.push(game, SCREEN.TEXT, {
           text = ("%s is no longer\nyour friend."):format(name),
           onDone = reopen,
         })
@@ -3030,13 +3602,13 @@ function M:install()
   -- precisely when the person is not around to be asked again.
   local function offlineFriendMenu(game, name, onCancel)
     local function reopen()
-      mod.ui.push(game, SCREEN.ACTIONS,
+      M.push(game, SCREEN.ACTIONS,
         { friendName = name, onCancel = onCancel })
     end
     local items = {
       { label = UNFRIEND, onSelect = function() unfriend(game, name, reopen) end },
     }
-    return mod.ui.Menu.new(game, items, {
+    return UI().Menu.new(game, items, {
       tx = 11, ty = math.max(0, math.min(7, 18 - (#items * 2 + 2))), tw = 9,
       onCancel = onCancel,
     })
@@ -3059,7 +3631,7 @@ function M:install()
       if away and friends and friends:isFriend(away) then
         return offlineFriendMenu(game, away, opts.onCancel)
       end
-      return mod.ui.TextBox.new(game, "They just went\noffline.")
+      return UI().TextBox.new(game, "They just went\noffline.")
     end
 
     -- The commands about the person in front of you: a small box, the way
@@ -3127,7 +3699,7 @@ function M:install()
     items[#items + 1] = { label = "WHISPER" }
 
     local reopen = function()
-      mod.ui.push(game, SCREEN.ACTIONS, {
+      M.push(game, SCREEN.ACTIONS, {
         playerId = player.id, friendName = opts.friendName,
         onCancel = opts.onCancel,
       })
@@ -3138,7 +3710,7 @@ function M:install()
       local wantsFriend, wantsUnfriend = item.friend, item.unfriend
       item.onSelect = function()
         if wantsProfile then
-          mod.ui.push(game, SCREEN.PROFILE,
+          M.push(game, SCREEN.PROFILE,
             { playerId = player.id, onCancel = reopen })
         elseif wantsFriend then
           -- Reopened either way, so the row the player just pressed reads the
@@ -3162,13 +3734,13 @@ function M:install()
         elseif kind then
           ctx.sessions:request(player, kind)
         else
-          mod.ui.push(game, SCREEN.COMPOSE,
+          M.push(game, SCREEN.COMPOSE,
             { scope = "private", to = player.id, toName = player.name })
         end
       end
     end
 
-    return mod.ui.Menu.new(game, items, {
+    return UI().Menu.new(game, items, {
       -- low and to the right, clear of the two characters this menu is
       -- about: a command box that covers the person you are talking to
       -- reads as a bug even when it is not one.
@@ -3228,8 +3800,25 @@ function M:install()
       -- the tag distinct, and giving the message its own rows means it gets
       -- the full 18 columns instead of whatever the name left over.
       local tag = Chat.TAG[entry.scope] or "?"
-      items[#items + 1] = { label = ("[%s]%s:"):format(tag, entry.name) }
-      for _, row in ipairs(wrapLine(entry.text, " ", " ")) do
+      -- Gen 3's charmap has no square brackets (they print as blanks), so the
+      -- tag is kept distinct from the name with the parentheses it does have.
+      items[#items + 1] = {
+        label = (gen3 and "(%s)%s:" or "[%s]%s:"):format(tag, entry.name),
+      }
+      local rows
+      if gen3 then
+        -- wrapped in the cart's pixels to the row's own width, not in the
+        -- Game Boy's fifteen columns: the GBA row holds three times as much
+        local Font = Gen3Ui.Font
+        rows = {}
+        for _, row in ipairs(Font.wrap(entry.text,
+            Gen3Ui.rightRoom("", nil) - Font.width(" "))) do
+          rows[#rows + 1] = " " .. row
+        end
+      else
+        rows = wrapLine(entry.text, " ", " ")
+      end
+      for _, row in ipairs(rows) do
         items[#items + 1] = { label = row }
       end
     end
@@ -3237,10 +3826,10 @@ function M:install()
       items[#items + 1] = { label = "No messages yet." }
     end
     -- newest last, so open on the bottom the way a chat log should read
-    local menu = mod.ui.ListMenu.new(game, "CHAT", items, {
+    local menu = UI().ListMenu.new(game, "CHAT", items, {
       pageJump = true,
       onChoose = function(_, menu) menu:close() end,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
     menu.index = #items
     return menu
@@ -3263,12 +3852,12 @@ function M:install()
     for _, item in ipairs(items) do
       local scope = item.scope
       item.onSelect = function()
-        mod.ui.push(game, SCREEN.COMPOSE, { scope = scope })
+        M.push(game, SCREEN.COMPOSE, { scope = scope })
       end
     end
-    return mod.ui.Menu.new(game, items, {
+    return UI().Menu.new(game, items, {
       tx = 9, ty = 0, tw = 11,
-      onCancel = function() mod.ui.push(game, SCREEN.MAIN) end,
+      onCancel = function() M.push(game, SCREEN.MAIN) end,
     })
   end })
 
@@ -3285,7 +3874,7 @@ function M:install()
         default = client:playerName(game),
         onDone = function(name)
           client:setPlayerName(name)
-          mod.ui.push(game, opts.back or SCREEN.CHARSET, opts.backOpts or {})
+          M.push(game, opts.back or SCREEN.CHARSET, opts.backOpts or {})
         end,
       })
     end
@@ -3305,8 +3894,50 @@ function M:install()
 
   -- ------- trade: choose what to offer
 
+  -- ------- trade: choose what to offer, on Gen 3
+  --
+  -- The live party (the runtime session's -- game.save is only the snapshot of
+  -- the last SAVE there), each row the mon's own name as the cart would print
+  -- it (a nickname, else the species name) with its level, and its party icon
+  -- beside it -- the selected one bobbing, as the cart's party menu does.  The
+  -- rows are 18px so all six fit on one page with a 32x32 icon on each.
+  local function pick3(game, opts)
+    local trade = opts.trade
+    local items = {}
+    for index, mon in ipairs(Gen3.party() or {}) do
+      local blocked = trade and not trade:canPick(index)
+      local name = mon.nickname
+      if type(name) ~= "string" or name == "" then
+        name = Gen3.speciesName(mon.species) or tostring(mon.species)
+      end
+      items[#items + 1] = {
+        label = name,
+        right = blocked and "NO" or ("Lv" .. tostring(mon.level or "?")),
+        value = index,
+        blocked = blocked,
+        mon = mon,
+      }
+    end
+    return Gen3Ui.ListMenu.new(game, "TRADE WHICH?", items, {
+      rowH = 18, indent = 34,
+      decorate = function(item, labelX, y, selected, m)
+        local frame = selected and (math.floor((m.anim or 0) / 12) % 2) or 0
+        Gen3Ui.drawIcon(item.mon, labelX - 34, y - 11, frame)
+      end,
+      onChoose = function(item, menu)
+        if item.blocked then return end
+        menu:close()
+        if opts.onPick then opts.onPick(item.value) end
+      end,
+      onCancel = function()
+        if opts.onPick then opts.onPick(nil) end
+      end,
+    })
+  end
+
   screens:register(SCREEN.PICK, { new = function(game, opts)
     opts = opts or {}
+    if gen3 then return pick3(game, opts) end
     local trade = opts.trade
     local items = {}
     for index, mon in ipairs(game.save.party or {}) do
@@ -3321,7 +3952,7 @@ function M:install()
         blocked = blocked,
       }
     end
-    return mod.ui.ListMenu.new(game, "TRADE WHICH?", items, {
+    return UI().ListMenu.new(game, "TRADE WHICH?", items, {
       onChoose = function(item, menu)
         if item.blocked then return end
         menu:close()

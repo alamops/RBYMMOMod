@@ -34,13 +34,15 @@ whichever word the surface being described uses.
 
 On a VPS with nothing cloned yet, [`scripts/run-server.sh`](../scripts/run-server.sh)
 is the whole path — Docker, the newest GitHub release, compose up, the join
-code on that terminal. `--generation 2` locks it to Gold (default 1 is
-RBY); `--port` remaps the host side. Both land in `server/.env` so a later
-start keeps them. From a checkout you already have:
+code on that terminal. `--generation 2` locks it to Gold, `--generation 3`
+to FireRed / LeafGreen / Emerald (default 1 is RBY); `--port` remaps the
+host side. Both land in `server/.env` so a later start keeps them. From a
+checkout you already have:
 
 ```sh
 bash scripts/run-server.sh                  # this tree, gen 1
 bash scripts/run-server.sh --generation 2   # Gold
+bash scripts/run-server.sh --generation 3   # FireRed + LeafGreen + Emerald
 cd server/
 docker compose up -d
 docker compose exec hub rby-mmo-hub invite list --reveal   # your join code
@@ -48,8 +50,9 @@ docker compose exec hub rby-mmo-hub invite list --reveal   # your join code
 
 Bare `docker compose up` does **not** force generation 1: compose leaves
 `RBY_MMO_GENERATION` empty when unset, and the hub then honours
-`config.json`. Write `RBY_MMO_GENERATION=2` into `server/.env` (or pass
-`--generation 2` to the script) for a Gold hub that has no file yet.
+`config.json`. Write `RBY_MMO_GENERATION=2` (or `3`) into `server/.env`
+(or pass `--generation 2` / `--generation 3` to the script) for a Gold or
+Gen 3 hub that has no file yet.
 
 The first `up` on an empty volume runs `rby-mmo-hub init --yes` for you, so
 the hub comes up *requiring* a join code — you cannot publish an open world by
@@ -79,8 +82,14 @@ node bin/rby-mmo-hub.js start     # run it (Gen 1 hub unless you set generation)
 ```
 
 Hubs are **gen-locked**: a Gen 1 hub only admits Gen 1 (RBY) clients; a Gen 2
-hub only admits Gen 2 (Gold). Both are first-class run targets — pick one
-explicitly rather than treating Gen 2 as an afterthought.
+hub only admits Gen 2 (Gold); a Gen 3 hub only admits Gen 3 — FireRed,
+LeafGreen **and** Emerald, all three together, so a FireRed player and an
+Emerald player chat, trade and battle in one room (overworld presence stays
+per region: FireRed / LeafGreen share Kanto, Emerald walks Hoenn). All three
+are first-class run targets — pick one explicitly rather than treating Gen 2
+or Gen 3 as an afterthought. A client of any other generation is refused at
+hello with a sentence naming both, e.g. `This hub is for generation 3; yours
+is generation 1.`
 
 #### Gen 1 hub
 
@@ -109,10 +118,28 @@ node bin/rby-mmo-hub.js start --generation 2
 node hub.js --generation 2
 ```
 
+#### Gen 3 hub (FireRed, LeafGreen, Emerald)
+
+```sh
+node bin/rby-mmo-hub.js init --yes --generation 3
+node bin/rby-mmo-hub.js start --generation 3
+
+# config.json:  "generation": 3
+# Env: RBY_MMO_GENERATION=3
+
+node hub.js --generation 3
+```
+
+Needs protocol 30 or newer (the release that added Gen 3): an older hub reads
+3 as "not 1 or 2" and runs as Gen 1. `run-server.sh` and `upgrade-server.sh`
+warn before they start one.
+
 If `--generation` / `generation` / `RBY_MMO_GENERATION` is omitted, the hub
-defaults to **1** and prints a startup warning that Gen 2 hubs must pass
-`--generation 2`. In-game HOST always binds the boot's generation (Gold → 2,
-Red/Blue/Yellow → 1) and never relies on that omit path.
+defaults to **1** and prints a startup warning that Gen 2 and Gen 3 hubs must
+pass `--generation 2` or `--generation 3`. A value that is not 1, 2 or 3 is
+pulled to 1 with a warning line naming it. In-game HOST always binds the
+boot's generation (Red/Blue/Yellow → 1, Gold → 2, FireRed / LeafGreen /
+Emerald → 3) and never relies on that omit path.
 
 `init` writes `config.json` (mode 0600) and prints the passcode once:
 
@@ -121,6 +148,7 @@ Configuration written to /srv/hub/config.json (mode 0600, readable only by you).
 
   listening on   0.0.0.0:7788
   players        up to 4
+  generation     1 (Gen 1 / RBY)
   join code      required (always -- there is no open-hub setting)
   log level      info
 
@@ -210,8 +238,8 @@ container, where it is on `PATH`.
 
 | Command | What it does | Its own options |
 | --- | --- | --- |
-| `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--generation 1\|2` (hub gen lock, written into the file), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
-| `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--generation 1\|2`; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
+| `init` | first-run wizard: writes `config.json` at mode 0600 and prints a passcode once. Refuses to overwrite an existing file. | `--yes` (ask nothing, take flags and defaults), `--force` (replace an existing config), `--generation 1\|2\|3` (hub gen lock, written into the file), `--code CODE` (use this passcode instead of a generated one), plus any config flag below |
+| `start` | loads the config, prints who can reach this machine, runs the hub until stopped. **Refuses to run on a group- or world-readable config**, printing the `chmod 600` that fixes it. | any config flag; `--generation 1\|2\|3`; `--limits.maxPending 12` works as well as `--max 8`; `--insecure-config` (run on a loose config anyway, printing what is being accepted) |
 | `status` | every effective setting, its value, and where that value came from (`flag` / `env` / `file` / `default`). Codes masked. | — |
 | `players` | who is connected **right now**, and where they are: name, place name, `BUSY` / `PARTY`, ranked points. Reads the snapshot a running hub keeps (`status.json`) and prints how old it is. | `--json` (one object per player, the ten contract fields only — the nine the table is drawn from plus `admin`, which it does not draw) |
 | `ranking` | the ranked season out of `ranking.json`: place, name (with `#aaaa` id tag when names collide), points, and how many battles each player has won and lost. Top ten, best first. Keyed by player id. | `--json`, `--all` (every player who has scored, not just the top ten) |
@@ -481,11 +509,12 @@ they *are* right now, and they exist only in the running process:
 ```console
 $ docker compose exec hub rby-mmo-hub stats
 The hub
-  address   0.0.0.0:7788
-  uptime    14s
-  protocol  5
-  players   3 of 8
-  pending   1 connection(s) not in the world yet
+  address     0.0.0.0:7788
+  uptime      14s
+  protocol    5
+  generation  1 (Gen 1 / RBY)
+  players     3 of 8
+  pending     1 connection(s) not in the world yet
 
 The door
   connections  4 open, from 1 address(es)
@@ -1515,14 +1544,18 @@ printed on *this* terminal. Arguments still work through the pipe:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --port 25565
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 2
+curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --generation 3
 curl -fsSL https://raw.githubusercontent.com/alamops/RBYMMOMod/main/scripts/run-server.sh | bash -s -- --version vX.Y.Z
 ```
 
-`--generation 2` (or `-g 2`) locks the hub to Gold. The default is `1`
+`--generation 2` (or `-g 2`) locks the hub to Gold, `--generation 3` to
+FireRed / LeafGreen / Emerald (one room for all three). The default is `1`
 (Red/Blue/Yellow). `--port` remaps the host port friends type. Both are
 written into `server/.env` (`RBY_MMO_GENERATION`, `RBY_MMO_HOST_PORT`).
 Compose interpolates generation as empty when unset — the hub skips empty
-env, so `config.json` wins and a Gold volume is not forced back to 1.
+env, so `config.json` wins and a Gold or Gen 3 volume is not forced back to
+1. A Gen 3 lock on a release older than protocol 30 draws a warning before
+anything starts: that hub would read 3 as 1.
 `upgrade-server.sh` keeps those locks. Friends on the other generation
 are refused.
 
@@ -1653,7 +1686,7 @@ GitHub release without your friends needing a new code:
 ```sh
 bash scripts/upgrade-server.sh                 # newest release
 bash scripts/upgrade-server.sh --version vX.Y.Z # a specific one
-bash scripts/upgrade-server.sh --generation 2  # keep or switch the gen lock
+bash scripts/upgrade-server.sh --generation 2  # keep or switch the gen lock (1, 2 or 3)
 ```
 
 That fetches the tag, rebuilds, and leaves the volume alone. Generation and
@@ -1779,9 +1812,9 @@ What compose sets up:
 `scripts/run-server.sh --port` writes `RBY_MMO_HOST_PORT` into `server/.env`
 so an upgrade does not need to edit this file. `RBY_MMO_GENERATION` is
 interpolated the same way, but **empty when unset** — the hub skips empty
-env, so `config.json` wins. `--generation 2` writes `2` into `.env`;
-upgrade sniffs `.env` then the volume's `config.json` so a Gold lock is
-not treated as RBY. `127.0.0.1:7788:7788` keeps it local while you test.
+env, so `config.json` wins. `--generation 2` writes `2` into `.env`
+(`--generation 3`, `3`); upgrade sniffs `.env` then the volume's
+`config.json` so a Gold or Gen 3 lock is not treated as RBY. `127.0.0.1:7788:7788` keeps it local while you test.
 
 ---
 
@@ -1791,6 +1824,7 @@ not treated as RBY. `127.0.0.1:7788:7788` keeps it local while you test.
 node hub.js                         # port 7788, 4 players, generation 1 (compat)
 node hub.js 9000                    # or pick a port
 node hub.js --generation 2          # Gen 2 LAN hub
+node hub.js --generation 3          # Gen 3 LAN hub (FireRed / LeafGreen / Emerald)
 node hub.js 9000 --generation 1     # port + gen lock
 RBY_MMO_MAX=8 node hub.js --generation 1
 RBY_MMO_GENERATION=2 node hub.js
@@ -1798,9 +1832,9 @@ RBY_MMO_GENERATION=2 node hub.js
 
 Unchanged for the LAN case: no config file, no join code, and the same three
 environment variables (`RBY_MMO_PORT`, `RBY_MMO_HOST`, `RBY_MMO_MAX`, the last
-clamped to 2–64), plus optional `--generation 1|2` / `RBY_MMO_GENERATION`.
+clamped to 2–64), plus optional `--generation 1|2|3` / `RBY_MMO_GENERATION`.
 Every command that ever worked here still works; omitting generation keeps
-the Gen 1 compat default and logs the Gen 2 reminder once.
+the Gen 1 compat default and logs the Gen 2 / Gen 3 reminder once.
 
 **This is the one exception to "a passcode is required", and it is a
 deliberate one.** There is no config file here to keep a passcode in, so this

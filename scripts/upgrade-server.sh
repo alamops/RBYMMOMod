@@ -15,6 +15,7 @@
 #   bash scripts/upgrade-server.sh
 #   bash scripts/upgrade-server.sh --version vX.Y.Z
 #   bash scripts/upgrade-server.sh --generation 2
+#   bash scripts/upgrade-server.sh --generation 3
 #   curl -fsSL .../scripts/upgrade-server.sh | bash -s -- --dir /opt/RBYMMOMod
 #
 # Finds the checkout from, in order: --dir, this script's repo, $RBY_MMO_DIR,
@@ -55,8 +56,10 @@ Options:
   --version, -v <tag>   Target release (vX.Y.Z or X.Y.Z).
                         Default: the newest GitHub release, looked up live.
   --dir <path>          Existing checkout to update.
-  --generation, -g <1|2>
-                        Hub lock: 1 = RBY, 2 = Gold. Default: keep
+  --generation, -g <1|2|3>
+                        Hub lock: 1 = RBY, 2 = Gold, 3 = FireRed /
+                        LeafGreen / Emerald (all three on one hub; needs
+                        a release on protocol 30 or newer). Default: keep
                         whatever this checkout / container already
                         runs. Written into server/.env as
                         RBY_MMO_GENERATION. Compose leaves the var empty
@@ -109,8 +112,23 @@ normalize_generation() {
   case "${1:-}" in
     1) printf '1\n' ;;
     2) printf '2\n' ;;
-    *) fail "--generation: expected 1 (RBY) or 2 (Gold), got $1" ;;
+    3) printf '3\n' ;;
+    *) fail "--generation: expected 1 (RBY), 2 (Gold) or 3 (FireRed/LeafGreen/Emerald), got $1" ;;
   esac
+}
+
+# Whether a release on PROTOCOL `proto` can hold generation lock `gen`.
+# Twin of run-server.sh's. A Gen 3 lock needs PROTOCOL 30: an older hub's
+# config.js reads 3 as "not 1 or 2" and quietly runs a Gen 1 hub, which is
+# the one thing an upgrade must not do to a FireRed / Emerald room. An
+# unreadable protocol is not evidence either way, so it passes.
+gen_lock_supported() {
+  local gen="${1:-}" proto="${2:-}"
+  [ "$gen" = 3 ] || return 0
+  case "$proto" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$proto" -ge 30 ]
 }
 
 pick_latest_tag() {
@@ -270,13 +288,13 @@ env_key() {
 generation_from_config_json() {
   local file="$1"
   [ -f "$file" ] || return 0
-  sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([12]\).*/\1/p' "$file" | head -n 1
+  sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([123]\).*/\1/p' "$file" | head -n 1
 }
 
 # Generation locked on the volume. Empty if unknown.
 # Prefer config.json on the volume over `config get`: the latter is the
 # effective config (env already applied), so a compose-injected 1 would
-# hide a Gold lock still sitting in the file.
+# hide a Gold or Gen 3 lock still sitting in the file.
 container_generation() {
   local g tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-cfg.XXXXXX")"
@@ -284,7 +302,7 @@ container_generation() {
     g="$(generation_from_config_json "$tmp" || true)"
     rm -f "$tmp"
     case "$g" in
-      1|2) printf '%s\n' "$g"; return 0 ;;
+      1|2|3) printf '%s\n' "$g"; return 0 ;;
     esac
   else
     rm -f "$tmp"
@@ -292,7 +310,7 @@ container_generation() {
   g="$("${DOCKER[@]}" exec "$CONTAINER_NAME" rby-mmo-hub config get generation 2>/dev/null || true)"
   g="$(printf '%s' "$g" | tr -d '[:space:]')"
   case "$g" in
-    1|2) printf '%s\n' "$g"; return 0 ;;
+    1|2|3) printf '%s\n' "$g"; return 0 ;;
   esac
 }
 
@@ -323,7 +341,7 @@ persist_lock_env() {
   fi
   write_env_key "${ROOT}/server/.env" RBY_MMO_GENERATION "$GENERATION"
   export RBY_MMO_GENERATION="$GENERATION"
-  note "hub generation ${GENERATION} (1 = RBY, 2 = Gold)"
+  note "hub generation ${GENERATION} (1 = RBY, 2 = Gold, 3 = FireRed / LeafGreen / Emerald)"
 }
 
 container_working_dir() {
@@ -424,8 +442,19 @@ self_test() {
   [ "$got" = 1 ] || fail "normalize_generation 1 -> $got"
   got="$(normalize_generation 2)"
   [ "$got" = 2 ] || fail "normalize_generation 2 -> $got"
-  if got="$(normalize_generation 3 2>/dev/null)"; then
-    fail "normalize_generation 3 should fail, got $got"
+  got="$(normalize_generation 3)"
+  [ "$got" = 3 ] || fail "normalize_generation 3 -> $got"
+  for bad in 0 4 gen3 ''; do
+    if got="$(normalize_generation "$bad" 2>/dev/null)"; then
+      fail "normalize_generation '$bad' should fail, got $got"
+    fi
+  done
+  gen_lock_supported 1 20 || fail "gen_lock_supported 1 20 should pass"
+  gen_lock_supported 2 29 || fail "gen_lock_supported 2 29 should pass"
+  gen_lock_supported 3 30 || fail "gen_lock_supported 3 30 should pass"
+  gen_lock_supported 3 unknown || fail "gen_lock_supported 3 unknown should pass"
+  if gen_lock_supported 3 29; then
+    fail "gen_lock_supported 3 29 should fail: a protocol-29 hub has no Gen 3"
   fi
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-self.XXXXXX")"
   printf 'FOO=1\nRBY_MMO_HOST_PORT=25565\n' > "$tmp"
@@ -439,6 +468,9 @@ self_test() {
   printf '{"listen":{"port":7788},"generation":2}\n' > "$tmp"
   got="$(generation_from_config_json "$tmp")"
   [ "$got" = 2 ] || fail "generation_from_config_json -> $got"
+  printf '{"listen":{"port":7788},"generation":3}\n' > "$tmp"
+  got="$(generation_from_config_json "$tmp")"
+  [ "$got" = 3 ] || fail "generation_from_config_json gen 3 -> $got"
   rm -f "$tmp"
   printf 'self-test ok\n'
 }
@@ -510,12 +542,12 @@ fi
 # write .env so a later compose up with a leftover shell 1 cannot stick.
 FROM_GEN="$(env_key "${ROOT}/server/.env" RBY_MMO_GENERATION)"
 case "$FROM_GEN" in
-  1|2) ;;
+  1|2|3) ;;
   *) FROM_GEN="$(container_generation || true)" ;;
 esac
 if [ "$EXPLICIT_GEN" -eq 0 ]; then
   case "$FROM_GEN" in
-    1|2) GENERATION="$FROM_GEN" ;;
+    1|2|3) GENERATION="$FROM_GEN" ;;
     *)
       if [ -n "${RBY_MMO_GENERATION:-}" ]; then
         GENERATION="$(normalize_generation "$RBY_MMO_GENERATION")"
@@ -532,7 +564,7 @@ RBY MMO hub — upgrade
   directory  ${ROOT}
   from       ${FROM_REF}  (package ${FROM_PKG}, protocol ${FROM_PROTO})
   to         ${TO_TAG}
-  generation ${GENERATION}   (1 = RBY, 2 = Gold)
+  generation ${GENERATION}   (1 = RBY, 2 = Gold, 3 = FireRed / LeafGreen / Emerald)
   volume     kept (join code, bans, ranking, history)
 EOF
 
@@ -548,7 +580,7 @@ if [ "$FROM_REF" = "$TO_TAG" ]; then
   fi
   if [ "$EXPLICIT_GEN" -eq 0 ]; then
     case "$FROM_GEN" in
-      1|2) GENERATION="$FROM_GEN" ;;
+      1|2|3) GENERATION="$FROM_GEN" ;;
     esac
   fi
   persist_lock_env
@@ -570,7 +602,7 @@ if [ -z "$FROM_GEN" ]; then
 fi
 if [ "$EXPLICIT_GEN" -eq 0 ]; then
   case "$FROM_GEN" in
-    1|2) GENERATION="$FROM_GEN" ;;
+    1|2|3) GENERATION="$FROM_GEN" ;;
   esac
 fi
 
@@ -582,6 +614,14 @@ fi
 checkout_tag "$ROOT" "$TO_TAG"
 TO_PROTO="$(protocol_of "$ROOT")"
 TO_PKG="$(package_version_of "$ROOT")"
+
+# Before the rebuild, so the running container is still the one serving:
+# a Gen 3 room moved onto a release that predates Gen 3 would come back as
+# a Gen 1 hub refusing every one of its players.
+if ! gen_lock_supported "$GENERATION" "$TO_PROTO"; then
+  warn "generation 3 needs a hub on protocol 30 or newer; ${TO_TAG} is on protocol ${TO_PROTO}."
+  warn "That hub will read 3 as 1 and refuse every FireRed / LeafGreen / Emerald player. Re-run with a newer --version."
+fi
 
 cd "${ROOT}/server"
 

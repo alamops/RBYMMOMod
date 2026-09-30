@@ -431,6 +431,55 @@ async function authIsMandatoryScenario() {
 }
 
 // =====================================================================
+// the generation lock, as init writes it and help describes it (PROTOCOL 30)
+// =====================================================================
+
+async function initGenerationScenario() {
+  const dir = scratchDir('init-generation');
+
+  // --- a Gen 3 hub is a first-class init, named the way a host names it
+  const gen3File = path.join(dir, 'gen3.json');
+  const gen3 = await runCli(['init', '--yes', '--generation', '3', '--config', gen3File],
+    { cwd: dir });
+  ok(gen3.code === cli.OK, 'init --generation 3 succeeds');
+  ok(readConfigFile(gen3File).generation === 3, 'and writes generation 3 into the file');
+  ok(/generation\s+3 \(Gen 3 \/ FRLG \+ Emerald\)/.test(gen3.stdout),
+    'the summary names all three Gen 3 carts, not "Gen 1 / RBY"');
+  ok(!/is not 1, 2 or 3/.test(gen3.stderr), 'and adjusts nothing');
+
+  // --- the other two still read as themselves
+  const gen2File = path.join(dir, 'gen2.json');
+  const gen2 = await runCli(['init', '--yes', '--generation', '2', '--config', gen2File],
+    { cwd: dir });
+  ok(/generation\s+2 \(Gen 2 \/ Gold\)/.test(gen2.stdout), 'a Gen 2 init says Gold');
+  const gen1File = path.join(dir, 'gen1.json');
+  const gen1 = await runCli(['init', '--yes', '--config', gen1File], { cwd: dir });
+  ok(/generation\s+1 \(Gen 1 \/ RBY\)/.test(gen1.stdout), 'an unlocked init is Gen 1');
+
+  // --- the environment can lock one too
+  const envFile = path.join(dir, 'env.json');
+  const env = Object.assign(cleanEnv(), { RBY_MMO_GENERATION: '3' });
+  const fromEnv = await runCli(['init', '--yes', '--config', envFile], { cwd: dir, env });
+  ok(fromEnv.code === cli.OK && readConfigFile(envFile).generation === 3,
+    'RBY_MMO_GENERATION=3 writes a Gen 3 config');
+
+  // --- a generation nobody knows is pulled to 1, out loud
+  const badFile = path.join(dir, 'bad.json');
+  const bad = await runCli(['init', '--yes', '--generation', '4', '--config', badFile],
+    { cwd: dir });
+  ok(bad.code === cli.OK && readConfigFile(badFile).generation === 1,
+    'init --generation 4 writes the Gen 1 default rather than a lock nothing honours');
+  ok(/generation: "4" is not 1, 2 or 3, using 1/.test(bad.stdout + bad.stderr),
+    'and says which value it refused');
+
+  // --- help offers the Gen 3 lock on both verbs that take it
+  for (const verb of ['init', 'start']) {
+    const help = await runCli(['help', verb], { cwd: dir });
+    ok(/--generation 1\|2\|3/.test(help.stdout), `help ${verb} offers --generation 1|2|3`);
+  }
+}
+
+// =====================================================================
 // a host may choose the passcode -- "the same passcode can be configured"
 // =====================================================================
 
@@ -522,6 +571,10 @@ function testValueFor(dotted) {
     // The wave-2 leaf (docs/plans/server-live-ops.md §3) the BOUNDS-only
     // sweep would miss.
     case 'motd': return { raw: 'Reboot at 10pm, back in five.', expected: 'Reboot at 10pm, back in five.' };
+    // The hub lock. 3 rather than 2 because it is the value PROTOCOL 29's
+    // config.js pulled back to 1, so `config set generation 3` round-tripping
+    // is the whole claim.
+    case 'generation': return { raw: '3', expected: 3 };
     default: return null;
   }
 }
@@ -1449,6 +1502,28 @@ function findsPerIp(node) {
   return Object.values(node).some((value) => findsPerIp(value));
 }
 
+// The lock a running hub holds, beside the protocol it speaks: the two
+// numbers a refused player's sentence names.
+async function statsGenerationScenario() {
+  const dir = adminScratchDir();
+  const file = path.join(dir, 'config.json');
+  let answer = statsFixture({ stats: { generation: 3 } });
+  const server = await startAdminFixture(path.join(dir, 'admin.sock'), () => answer);
+  try {
+    const gen3 = await withTimeout(
+      runCli(['stats', '--config', file], { cwd: dir }), 5000, 'stats to answer');
+    ok(/generation\s+3 \(Gen 3 \/ FRLG \+ Emerald\)/.test(gen3.stdout),
+      'stats names a Gen 3 hub\'s lock');
+    answer = statsFixture();
+    const older = await withTimeout(
+      runCli(['stats', '--config', file], { cwd: dir }), 5000, 'stats to answer');
+    ok(/generation\s+-/.test(older.stdout),
+      'a hub that predates the field reads as a dash, not as Gen 1');
+  } finally {
+    await closeAdminFixture(server);
+  }
+}
+
 async function statsScenario() {
   const dir = adminScratchDir();
   const file = path.join(dir, 'config.json');
@@ -2274,6 +2349,7 @@ async function spawnExitCodeScenario() {
 async function main() {
   try {
     await initScenarios();
+    await initGenerationScenario();
     await authIsMandatoryScenario();
     await suppliedPasscodeScenario();
     await configLeafPathScenario();
@@ -2309,6 +2385,7 @@ async function main() {
     await kickNobodyScenario();
     await broadcastHappyScenario();
     await statsScenario();
+    await statsGenerationScenario();
     await statsLockdownScenario();
     await statsJsonScenario();
     await statsRefusalScenario();

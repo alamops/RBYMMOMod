@@ -52,16 +52,132 @@
 --
 -- What the mod API is missing is a "step this NPC" primitive on Handle --
 -- an upstream RFC, not something to fake with a cutscene queue.
+--
+-- ------- Gen 3 (FireRed / LeafGreen / Emerald)
+--
+-- The same idea on a different engine, and with one more reach-around,
+-- because the first rung is missing: the game3 WorldAPI has no spawnNpc
+-- (src/world/game3/WorldAPI.lua answers "not supported on FireRed yet"), and
+-- its removeNpc sets a template object's hide flag rather than removing
+-- anything.  A remote player is therefore a real event object built the way
+-- the engine builds its own -- Objects.spawnFromDefs, from a template
+-- Gen.spawnObjDef describes -- and put into the live object list by hand
+-- (Objects._byId / Objects._order).  From there the engine does all of it:
+-- FieldView draws it with the cart's own overworld sheet, sorts it against
+-- the player and the map's NPCs, and animates its step cycle.  The owner
+-- chose this over drawing avatars ourselves (no depth) and over the Union
+-- Room's VirtualObjects (no walk animation); the Lane B proposal asking
+-- upstream for the missing seam is docs/upstream/gen3-spawn-npc.md.
+--
+-- What that costs, and how each cost is paid:
+--
+--   * Objects.loadMap wipes the list on every map load and every same-map
+--     reload.  Each tick re-checks that the object in the list under an
+--     avatar's localId is still the one this file put there, and puts it
+--     back when it is not -- so a reload is healed on the very next tick,
+--     with the avatar exactly where it stood.
+--   * LocalIds are Config.GEN3_AVATAR_LOCAL_ID_BASE + n: past 0xFF, so no
+--     script opcode (a byte) can address one and no seamless-edge carry id
+--     (0xC0..0xFE) can collide with one.
+--   * Steps are started with Objects.pushStep, which is the engine's own
+--     "begin one step of N frames" with no movement track behind it.  A
+--     track (startTrack) would work too, but Objects.carryOut carries every
+--     object with a live track across a seamless map edge and renumbers it,
+--     so an avatar mid-track while the local player crosses into the next
+--     town would follow them there under a borrowed id.
+--   * The object carries `passable`, the engine's own escape hatch in
+--     Objects.blocks, so an avatar never stands in the local player's way.
+--   * Its template carries a script key no map has (TALK_KEY): that is what
+--     makes Field.interact raise the `world.talk` hook for it at all (the
+--     hook only runs for an object with a script).  The hook link installed
+--     below answers for an avatar by not calling next(), so the engine
+--     neither freezes it nor tries to start a script that does not exist --
+--     and Field.interact then emits world.interacted with the avatar's cell
+--     and kind "npc", which is the event Client's facing-A listener already
+--     turns into the ACTIONS menu on Gen 1 and Gen 2.
+--   * A standing avatar's py sits AVATAR_DEPTH_NUDGE above its cell, the
+--     Gen 1 rule: FieldView sorts equal draw priorities by py and then by
+--     localId, and the player's actor has none -- so without it an avatar
+--     standing on the player's tile would be drawn over them.  The sprite is
+--     drawn from the unfloored py, and a hundredth of a pixel rasterises to
+--     the same pixels; cellOf takes it back off.
+--   * Pace: pushStep is told 16, 8 or 4 frames a tile.  `fast` (a sprint or a
+--     bike, as the sender reports it) takes 8; an avatar that has fallen
+--     behind catches up at 8 from two tiles and at 4 (Mach Bike pace) from
+--     four, so a cyclist is followed rather than respawned.  The field is
+--     frozen while any menu is up, avatars included; they finish the walk
+--     when it closes.
 
 local need, mod = ...
 local Config = need("Config")
 local Gen = need("Gen")
+local Gen3 = need("Gen3")
+local Chars = need("Chars")
 
 local M = {}
 M.__index = M
 
 -- set by the end-to-end driver via the debug export; off in normal play
 M.TRACE = false
+
+-- ------- Gen 3 constants
+
+-- The script key an avatar's template carries (see the header).  Not a key
+-- any map's script bundle has, and never started: the world.talk link below
+-- returns before the engine's talk would.
+local TALK_KEY = "rby_mmo:avatar"
+
+-- Frames per tile for a step, by how far behind the network's cell the
+-- avatar is when it starts it.  16 is the engine's walk, 8 its run
+-- (objects.lua RUN_FRAMES), 4 the Mach Bike; all three are rows of the
+-- engine's STEP_PIXELS table, so each one moves in whole pixels.
+local GEN3_WALK_FRAMES = 16
+local GEN3_FAST_FRAMES = 8
+local GEN3_RUSH_FRAMES = 4
+local GEN3_FAST_LAG = 2
+local GEN3_RUSH_LAG = 4
+
+M.TALK_KEY = TALK_KEY
+M.GEN3_WALK_FRAMES, M.GEN3_FAST_FRAMES, M.GEN3_RUSH_FRAMES =
+  GEN3_WALK_FRAMES, GEN3_FAST_FRAMES, GEN3_RUSH_FRAMES
+M.GEN3_FAST_LAG, M.GEN3_RUSH_LAG = GEN3_FAST_LAG, GEN3_RUSH_LAG
+
+-- The engine's object module, or nil off Gen 3 / when it is missing.
+local function objects3()
+  return Gen3.engine("src.core.game3.objects")
+end
+
+-- Is this a Gen 3 boot?  The cheap test (a field read on the mod facade), so
+-- the per-tick dispatch below costs Gen 1 and Gen 2 nothing.
+local function onGen3()
+  return Gen3.active()
+end
+
+-- An event object this file injected, whatever table it is handed.
+local function isAvatar3(eo)
+  if type(eo) ~= "table" then return false end
+  if eo.mmoAvatar ~= nil then return true end
+  local def = eo.def
+  return type(def) == "table" and def.mmoAvatar ~= nil
+end
+M.isAvatar3 = isAvatar3
+
+-- The Gen 3 seams this file needs from the engine, installed once per load.
+--
+-- world.talk is the A press on an event object that has a script.  An avatar
+-- has one (TALK_KEY) precisely so the press reaches here; answering for it
+-- means not calling next(), which is the hook's documented way to consume a
+-- talk (docs/modding.md, `world.talk`).  Everything else falls through.
+local installed3 = false
+local function install3()
+  if installed3 then return end
+  installed3 = true
+  if not (mod.hooks and type(mod.hooks.wrap) == "function") then return end
+  mod.hooks:wrap("world.talk", function(nextFn, game, eo, ...)
+    if isAvatar3(eo) then return end
+    return nextFn(game, eo, ...)
+  end)
+end
 
 local DELTA = {
   up    = { 0, -1 },
@@ -71,10 +187,14 @@ local DELTA = {
 }
 
 function M.new()
+  -- The Gen 3 hook link goes in with the first instance, which Client makes
+  -- while the entry chunk runs -- i.e. at load, where a hook belongs.
+  if onGen3() then install3() end
   return setmetatable({
-    spawned = {},   -- playerId -> { npcId, x, y, facing, npc }
+    spawned = {},   -- playerId -> { npcId, x, y, facing, npc } (Gen 3: { lid, eo, ... })
     mapId = nil,
     spriteWarned = {},
+    lids = {},      -- Gen 3: localId -> playerId, for the ids in use
   }, M)
 end
 
@@ -83,6 +203,7 @@ end
 -- cannot catch it.  Checking first turns an unknown sprite into a
 -- documented fallback instead of a crash attributed to the overworld.
 function M:spriteFor(requested)
+  if onGen3() then return self:spriteFor3(requested) end
   local sprites = mod.content.sprites
   local resolved = Gen.resolveSprite(nil, requested, sprites)
   if requested and resolved and requested ~= resolved
@@ -218,6 +339,7 @@ function M.undecorate(npc)
 end
 
 function M:spawn(player)
+  if onGen3() then return self:spawn3(player) end
   if not (player.map and player.x and player.y) then return nil end
   local sprite = self:spriteFor(player.sprite)
   if not sprite then
@@ -252,6 +374,7 @@ function M:spawn(player)
 end
 
 function M:despawn(playerId)
+  if onGen3() then return self:despawn3(playerId) end
   local av = self.spawned[playerId]
   if not av then return false end
   self.spawned[playerId] = nil
@@ -281,6 +404,7 @@ end
 -- live NPC is the authority mid-step: self.spawned holds the cell the
 -- network last confirmed, which is where the avatar is *going*.
 function M:cellOf(playerId)
+  if onGen3() then return self:cellOf3(playerId) end
   local av = self.spawned[playerId]
   if not av then return nil end
   local handle = self:handle(av)
@@ -310,6 +434,7 @@ end
 -- whether the avatar is mid-step right now; the end-to-end driver asserts
 -- this is ever true, which is what proves the walk actually animates
 function M:isWalking(playerId)
+  if onGen3() then return self:isWalking3(playerId) end
   local av = self.spawned[playerId]
   if not av then return false end
   local handle = self:handle(av)
@@ -343,6 +468,9 @@ end
 -- player their session.
 function M:refresh(player)
   if type(player) ~= "table" or player.id == nil then return nil end
+  -- Gen 3 touches the engine's object list, not mod.world, so its gate is
+  -- that module being there (refresh3); the rest of the rule is the same.
+  if onGen3() then return self:refresh3(player) end
   if not mod.world then return nil end
   if not self.spawned[player.id] then return nil end
   -- The roster entry can already have moved on: a [MOVE-to-another-map,
@@ -370,6 +498,7 @@ function M.stepToward(fromX, fromY, toX, toY)
 end
 
 function M:advance(av, player)
+  if onGen3() then return self:advance3(av, player) end
   -- av.x/av.y is the network's truth -- where the player *is*. The NPC's
   -- own cellX/cellY is where the avatar has walked to so far, and it is
   -- allowed to lag by a step or two while it catches up.
@@ -429,6 +558,7 @@ end
 -- there is no overworld up (title screen, a battle), in which case every
 -- avatar is dropped and rebuilt on the way back.
 function M:sync(roster, current)
+  if onGen3() then return self:sync3(roster, current) end
   -- mod.world materialises on first touch and answers nil until a Game
   -- exists; every method below goes through it, so this is the one gate
   if not mod.world then return end
@@ -456,6 +586,323 @@ function M:sync(roster, current)
 
   for id in pairs(self.spawned) do
     if not seen[id] then self:despawn(id) end
+  end
+end
+
+-- ------- the Gen 3 arm
+--
+-- Same contract as everything above -- spawned[playerId] is the avatar, sync
+-- is the one per-tick pass, cellOf / isWalking answer the overlay and the
+-- drivers -- over the engine's event objects instead of mod.world's NPCs.
+-- See the Gen 3 part of the header for why each piece is the way it is.
+
+-- The map def the engine built this map's objects from.
+local function mapDef3(mapId)
+  local ok, def = pcall(function()
+    local game = mod.game
+    local maps = game and game.data and game.data.maps
+    return type(maps) == "table" and maps[mapId] or nil
+  end)
+  if ok and type(def) == "table" then return def end
+  return nil
+end
+
+-- Put an avatar's object into the live list (again).  O(1) when it is
+-- already there, which is every tick but the first after a load.
+local function inject3(Objects, av)
+  local byId, order = Objects._byId, Objects._order
+  if type(byId) ~= "table" or type(order) ~= "table" then return false end
+  if byId[av.lid] == av.eo then return true end
+  byId[av.lid] = av.eo
+  for i = 1, #order do
+    if order[i] == av.lid then return true end
+  end
+  order[#order + 1] = av.lid
+  return true
+end
+
+-- ...and take it out.  Only ever *this* object: after a map load the slot
+-- is empty and the order list is a new one, and there is nothing to undo.
+-- Not called from inside Objects.update (sync runs from the input pump,
+-- before the field tick), so the removal cannot disturb the engine's walk
+-- over the list.
+local function extract3(Objects, av)
+  local byId, order = Objects._byId, Objects._order
+  if type(byId) == "table" and byId[av.lid] == av.eo then byId[av.lid] = nil end
+  if type(order) == "table" then
+    for i = #order, 1, -1 do
+      if order[i] == av.lid then table.remove(order, i) end
+    end
+  end
+  if type(Objects._tracks) == "table" then Objects._tracks[av.lid] = nil end
+end
+
+-- The depth nudge, for a standing avatar on a whole pixel.  A moving one is
+-- left alone: tickMotion rewrites py from the cell every frame of a step.
+function M.nudge3(eo)
+  if type(eo) ~= "table" or eo.moving then return end
+  local py = tonumber(eo.py)
+  if py and py % 1 == 0 then eo.py = py - Config.AVATAR_DEPTH_NUDGE end
+end
+
+-- Snap an avatar to a cell with no animation: the resync for a player too
+-- far gone to walk after (a warp within the map, a long stall).  The same
+-- fields finishStep leaves behind, so the engine sees an object that simply
+-- stands there.
+function M.placeAt3(eo, x, y, facing)
+  eo.cellX, eo.cellY = x, y
+  eo.targetX, eo.targetY = x, y
+  eo.homeX, eo.homeY = x, y
+  eo.px, eo.py = x * 16, y * 16
+  eo.moving, eo.progress = false, 0
+  if type(eo.def) == "table" then eo.def.x, eo.def.y = x, y end
+  if DELTA[facing] then eo.facing = facing end
+  local Objects = objects3()
+  if Objects and type(Objects.updateElevation) == "function" then
+    pcall(Objects.updateElevation, eo)
+  end
+end
+
+-- Frames per tile for the step an avatar is about to take.  Pure; see the
+-- header for the numbers.  `lag` counts the step being started.
+function M.stepFrames3(lag, fast)
+  lag = tonumber(lag) or 0
+  if lag >= GEN3_RUSH_LAG then return GEN3_RUSH_FRAMES end
+  if fast or lag >= GEN3_FAST_LAG then return GEN3_FAST_FRAMES end
+  return GEN3_WALK_FRAMES
+end
+
+-- Is the *local* player moving at the fast pace right now?  The movement.speed
+-- hook Gen 1 and Gen 2 learn this from never fires on Gen 3 (the carts have
+-- running shoes and bikes of their own), so the engine's player is read
+-- directly: running, on a bike, or mid-step at anything under the walk.
+-- The value Client's presence `fast` flag wants on a Gen 3 boot.
+function M.localFast3()
+  local P = Gen3.engine("src.core.game3.player")
+  if type(P) ~= "table" then return false end
+  if P.biking == true or P.running == true then return true end
+  local frames = tonumber(P.stepFrames)
+  return P.moving == true and frames ~= nil and frames < GEN3_WALK_FRAMES
+end
+
+function M:allocLid3(playerId)
+  local base = Config.GEN3_AVATAR_LOCAL_ID_BASE
+  for n = 0, 0xFF do
+    local lid = base + n
+    if self.lids[lid] == nil then
+      self.lids[lid] = playerId
+      return lid
+    end
+  end
+  return nil
+end
+
+function M:freeLid3(lid)
+  if lid ~= nil then self.lids[lid] = nil end
+end
+
+-- The graphic a remote player is drawn with on this cart: (id, name).
+--
+-- `sprite` is a graphic name on the *sender's* cart (contract C3) and their
+-- version rides beside it, so Chars.gfxForViewer is the whole answer --
+-- the look table for a look both families have, the carts' link rule for the
+-- rest.  A name nothing recognises (neither a look, nor a graphic here, nor
+-- the hub's sprite-less token) is worth one line in the log: it is a
+-- sender this cart cannot draw faithfully, and it is drawn as the link rule
+-- says instead.
+function M:spriteFor3(requested, player)
+  local version = type(player) == "table" and player.version or nil
+  local gender = type(player) == "table" and tonumber(player.gender) or nil
+  local id, name = Chars.gfxForViewer(requested, version, gender)
+  if not id then
+    local s = Gen3.session()
+    name = Gen3.playerGfxName(s and s.gender)
+    id = name and Gen3.gfxId(name) or nil
+  end
+  if type(requested) == "string" and requested ~= Config.DEFAULT_SPRITE_GEN3
+      and not Chars.look(requested) and not Gen3.gfxId(requested)
+      and not self.spriteWarned[requested] then
+    self.spriteWarned[requested] = true
+    mod.log:warn("sprite %s is not a look this cart knows; drawing that "
+      .. "player as %s instead", tostring(requested), tostring(name))
+  end
+  return id, name
+end
+
+function M:spawn3(player)
+  if not (type(player) == "table" and player.id ~= nil and player.map
+          and tonumber(player.x) and tonumber(player.y)) then
+    return nil
+  end
+  local Objects = objects3()
+  if not (Objects and type(Objects.spawnFromDefs) == "function") then return nil end
+  local gfx, gfxName = self:spriteFor3(player.sprite, player)
+  if not gfx then return nil end
+  local lid = self:allocLid3(player.id)
+  if not lid then return nil end
+
+  -- Gen.spawnObjDef's Gen 3 template: cell, facing, graphic, MOVEMENT_TYPE_NONE
+  -- (stands where it is put, turns only when driven).  The rest is this
+  -- file's: the localId, and the three fields that make it an avatar.
+  local def = Gen.spawnObjDef(player, gfx, mod.game)
+  def.localId = lid
+  def.graphicsId = gfx
+  def.mapId = player.map
+  def.passable = true
+  def.scriptKey = TALK_KEY
+  def.mmoAvatar = player.id
+
+  local ok, pool = pcall(Objects.spawnFromDefs, { def }, mapDef3(player.map), player.map)
+  local eo = ok and type(pool) == "table" and type(pool.byId) == "table"
+    and pool.byId[lid] or nil
+  if type(eo) ~= "table" then
+    self:freeLid3(lid)
+    if not self.spawnWarned then
+      self.spawnWarned = true
+      mod.log:warn("could not place another player on this map (%s); they "
+        .. "stay on the roster and appear on the next map you enter -- report "
+        .. "this with the line above if it keeps happening",
+        tostring(ok and "no object" or pool))
+    end
+    return nil
+  end
+  -- Written on the object as well as carried on its template: the engine
+  -- reads `passable` off the object, and the marker is what the world.talk
+  -- link tests.
+  eo.passable = true
+  eo.mmoAvatar = player.id
+
+  local av = {
+    id = player.id, lid = lid, eo = eo, name = def.name,
+    x = player.x, y = player.y, facing = eo.facing,
+    gfx = gfx, gfxName = gfxName, sprite = player.sprite,
+  }
+  self.spawned[player.id] = av
+  inject3(Objects, av)
+  M.nudge3(eo)
+  return lid
+end
+
+function M:despawn3(playerId)
+  local av = self.spawned[playerId]
+  if not av then return false end
+  self.spawned[playerId] = nil
+  local Objects = objects3()
+  if Objects then extract3(Objects, av) end
+  self:freeLid3(av.lid)
+  return true
+end
+
+-- Where the avatar is right now, in cells: its cell while it stands (the
+-- nudge is a draw-order tie-break and nothing else), its pixel position
+-- mid-step so a nameplate glides with it.
+function M:cellOf3(playerId)
+  local av = self.spawned[playerId]
+  if not av then return nil end
+  local eo = av.eo
+  if type(eo) == "table" then
+    if not eo.moving and eo.cellX and eo.cellY then return eo.cellX, eo.cellY end
+    if eo.px and eo.py then return eo.px / 16, eo.py / 16 end
+  end
+  return av.x, av.y
+end
+
+function M:isWalking3(playerId)
+  local av = self.spawned[playerId]
+  return av ~= nil and type(av.eo) == "table" and av.eo.moving == true
+end
+
+-- A new character on an avatar that is up: the graphic is swapped on the
+-- live object, which keeps its cell and any step in flight -- a Gen 3 object
+-- draws from its graphicsId every frame, so there is nothing to rebuild.
+-- The template gets it too, because Objects.refreshGraphics re-reads it.
+function M:refresh3(player)
+  if not objects3() then return nil end
+  local av = self.spawned[player.id]
+  if not av then return nil end
+  if player.map ~= self.mapId then return nil end
+  local gfx, gfxName = self:spriteFor3(player.sprite, player)
+  if not gfx then return nil end
+  av.eo.graphicsId = gfx
+  if type(av.eo.def) == "table" then av.eo.def.graphicsId = gfx end
+  av.gfx, av.gfxName, av.sprite = gfx, gfxName, player.sprite
+  return av.lid
+end
+
+function M:advance3(av, player)
+  av.x, av.y = player.x, player.y
+  local Objects = objects3()
+  if not Objects then return nil end
+  local eo = av.eo
+
+  -- A reload wiped the list under us: the same object goes straight back,
+  -- where it stood.
+  if type(Objects._byId) == "table" and Objects._byId[av.lid] ~= eo then
+    inject3(Objects, av)
+  end
+
+  -- mid-step: tickMotion finishes it
+  if eo.moving then return nil end
+
+  local dir = M.stepToward(eo.cellX, eo.cellY, player.x, player.y)
+  if not dir then
+    if DELTA[player.facing] and eo.facing ~= player.facing then
+      eo.facing = player.facing
+      av.facing = player.facing
+    end
+    M.nudge3(eo)
+    return nil
+  end
+
+  local lag = math.max(math.abs(player.x - eo.cellX), math.abs(player.y - eo.cellY))
+  if lag > Config.RESYNC_DISTANCE then
+    M.placeAt3(eo, player.x, player.y, player.facing)
+    av.facing = eo.facing
+    M.nudge3(eo)
+    return true
+  end
+
+  if M.TRACE then
+    mod.log:info("step %s %s from (%d,%d) toward (%s,%s)", tostring(player.id),
+      dir, eo.cellX, eo.cellY, tostring(player.x), tostring(player.y))
+  end
+
+  local frames = M.stepFrames3(lag, player.fast)
+  local ok, started = pcall(Objects.pushStep, eo, dir, frames)
+  if not (ok and started) then return nil end
+  av.facing = dir
+  return true
+end
+
+function M:sync3(roster, current)
+  local Objects = objects3()
+  if not Objects then return end
+
+  if not (current and current.mapId) then
+    if next(self.spawned) then self:clear() end
+    self.mapId = nil
+    return
+  end
+
+  if current.mapId ~= self.mapId then
+    self:clear()
+    self.mapId = current.mapId
+  end
+
+  -- For a moment during a warp the engine's list still belongs to the map
+  -- being left (the fade runs before Objects.loadMap).  Nothing is put into
+  -- a list about to be wiped; the next tick after the load does it.
+  if Objects._mapId ~= nil and Objects._mapId ~= current.mapId then return end
+
+  local seen = {}
+  for _, player in ipairs(roster:onMap(current.mapId)) do
+    seen[player.id] = true
+    local av = self.spawned[player.id]
+    if av then self:advance3(av, player) else self:spawn3(player) end
+  end
+
+  for id in pairs(self.spawned) do
+    if not seen[id] then self:despawn3(id) end
   end
 end
 

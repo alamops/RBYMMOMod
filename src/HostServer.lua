@@ -168,9 +168,14 @@ function M:start(port, maxPlayers, joinCode, game)
   self.hub = Hub.new({
     maxPlayers = maxPlayers,
     joinCode = code,
-    -- Bind the hub to this boot's generation (Gold → 2, RBY → 1). Must see
-    -- the live Gold game: a bare Gen.generation() used to answer 1 and the
-    -- host refused its own hello ("hub is for generation 1; yours is 2").
+    -- Bind the hub to this boot's generation (RBY → 1, Gold → 2, FireRed /
+    -- LeafGreen / Emerald → 3). Must see the live game: a bare
+    -- Gen.generation() used to answer 1 on Gold and the host refused its own
+    -- hello ("hub is for generation 1; yours is 2"), and before PROTOCOL 30 a
+    -- FireRed host built a Gen 1 hub that then admitted Red players into it.
+    -- One Gen 3 hub seats all three Gen 3 carts: a FireRed host takes an
+    -- Emerald guest, which is the owner's call (one hub per generation, not
+    -- per cart) and what the hub's `version` field exists to draw.
     generation = Gen.generation(game or mod.game),
     onDrop = function(reason, clientId)
       mod.log:warn("refused a relayed message from player %s (%s); "

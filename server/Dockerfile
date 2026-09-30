@@ -135,7 +135,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 #
 #  3. Run `init --yes` first when, and only when, the config is absent -- what
 #     this does. `init` honours RBY_MMO_* (lib/config.js:140-156), so a
-#     compose file's port and player cap end up in the file it writes; its
+#     compose file's port, player cap and generation lock (RBY_MMO_GENERATION:
+#     1 = RBY, 2 = Gold, 3 = FireRed / LeafGreen / Emerald; there is no ENV
+#     default for it here, on purpose, so an empty compose value leaves the
+#     file's own answer standing) end up in the file it writes; its
 #     default is auth.required = true, so it mints a join code. The result is
 #     that `docker compose up` on an empty volume produces an authenticated
 #     hub and hands the host a way to read the code they give their friends --

@@ -521,11 +521,67 @@ function M.int(value, min, max)
   return n
 end
 
--- Boot generation claimed on mmo.hello (PROTOCOL 20). Exactly 1 or 2; missing
--- or out of range defaults to 1 so a PROTOCOL-20 client that omits the field
--- still joins a Gen1 hub (legacy-shaped hello after the bump).
+-- Boot generation claimed on mmo.hello (PROTOCOL 20; 3 from PROTOCOL 30).
+--
+-- 1, 2 or 3.  **Missing is 1**: that is the one-release compat reading
+-- PROTOCOL 20 made so a legacy-shaped hello still joins a Gen 1 hub, and it
+-- stays -- Wire.lua cannot tell an old client from a new one that forgot, and
+-- a Gen 1 player is the one who must not be locked out by it.
+--
+-- **Present but unknown is nil, never 1.**  4, 0, "gen3", a table: none of
+-- them is a generation, and reading one as Gen 1 is exactly how a FireRed
+-- client -- whose 3 was out of the old 1..2 range -- was *admitted* into a
+-- Red room under PROTOCOL 29 instead of refused.  A hub that guesses a
+-- generation it does not know repeats that for whichever one comes next, so
+-- the hello handler refuses nil with the same sentence it refuses a mismatch.
+--
+-- A JSON number only, the way server/lib/sanitize.js cleanGeneration reads
+-- the same bytes.  Every client sends a number, and the looser readings are
+-- where two languages part: JavaScript's Number(true) is 1, Number([2]) is 2
+-- and Number("0b11") is 3, where Lua's tonumber says nil to all three -- one
+-- hello, admitted by one hub and refused by its twin.
+M.GENERATION_MAX = 3
+
 function M.generation(value)
-  return M.int(value, 1, 2) or 1
+  if value == nil then return 1 end
+  if type(value) ~= "number" then return nil end
+  return M.int(value, 1, M.GENERATION_MAX)
+end
+
+-- The cart a hello was sent from (PROTOCOL 30), and the generation each one
+-- belongs to.  GameVersion's own ids, lower case, and a closed set on both
+-- hubs (server/lib/sanitize.js VERSIONS) for the reason every vocabulary here
+-- is one: a viewer does something different for each value, and an unknown
+-- one has nothing to do.
+--
+-- It exists for Gen 3.  One Gen 3 hub seats FireRed, LeafGreen and Emerald
+-- together, and their overworld graphics share no player name -- FireRed
+-- draws its hero as OBJ_EVENT_GFX_RED_NORMAL, Emerald has no such name -- so
+-- a viewer maps a partner's sprite through the cart it came from
+-- (Gen3.viewerGfxFor), the way the carts' own Cable Club does.  Gen 1 and
+-- Gen 2 carts may send theirs too; it costs nothing and names the cart on a
+-- card.
+--
+-- Keys rather than a list so a lookup is the whole check, and never a string
+-- compared with == (modkit MK409 reads that as a version allow-list).
+M.VERSIONS = {
+  red = 1, blue = 1, yellow = 1,
+  gold = 2, silver = 2, crystal = 2,
+  firered = 3, leafgreen = 3, emerald = 3,
+}
+
+-- A version off the wire, or nil.  With `generation`, only a version of that
+-- generation survives: a hub that admitted a client as Gen 3 relays no
+-- "red" for it, because a viewer handed a version that contradicts the room
+-- would map the sprite for a cart nobody in it is playing.  Nil is always an
+-- acceptable answer -- the field is optional, and a viewer without it falls
+-- back to the sprite name alone.
+function M.version(value, generation)
+  if type(value) ~= "string" then return nil end
+  local gen = rawget(M.VERSIONS, value)
+  if gen == nil then return nil end
+  if generation ~= nil and gen ~= generation then return nil end
+  return value
 end
 
 function M.facing(value)
@@ -937,7 +993,8 @@ end
 -- Presence as it appears in a welcome roster, a join, or a move.  Position
 -- is optional so a player sitting in a menu or a battle can still be listed
 -- without claiming a cell in the world.
--- Optional `generation` (1|2) picks the missing-sprite fallback (Red vs Chris).
+-- Optional `generation` (1|2|3) picks the missing-sprite fallback (Red,
+-- Chris, or the Gen 3 token each viewer resolves on its own cart).
 function M.presence(raw, generation)
   if type(raw) ~= "table" then return nil end
   local id = M.id(raw.id)
@@ -947,6 +1004,13 @@ function M.presence(raw, generation)
     id = id,
     name = name,
     sprite = M.spriteId(raw.sprite) or Config.defaultSpriteFor(generation),
+    -- The cart they are playing (PROTOCOL 30), which is what a Gen 3 viewer
+    -- reads `sprite` against: a FireRed RED_NORMAL and an Emerald
+    -- BRENDAN_NORMAL are names from two different graphics tables.  Nil from
+    -- an older hub, or a client that did not say -- a viewer then goes by the
+    -- sprite name alone.  Unchecked against `generation` here: the hub that
+    -- relayed it already kept only a version of the room's generation.
+    version = M.version(raw.version),
     map = M.mapId(raw.map),
     x = M.int(raw.x, 0, 4096),
     y = M.int(raw.y, 0, 4096),

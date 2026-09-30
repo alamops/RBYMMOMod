@@ -31,10 +31,35 @@
 -- down with it, and Chars.resolve already turns a character this copy does
 -- not carry into RED -- so a broken install degrades to the vanilla cast
 -- rather than to a game that will not start.
+--
+-- ------- Gen 3
+--
+-- Two things change on FireRed, LeafGreen and Emerald.
+--
+-- The cast is not registered at all.  The sprites and battle_sprite_scales
+-- registries have no Gen 3 target (the loader drops every write to them with
+-- a warning), and NIRE is a Gen 1-only character anyway (Config.OWN_CHARS
+-- `gens`), so a row this boot may not wear is skipped before it is written --
+-- which is also what keeps a Gen 3 load free of those two warnings.
+--
+-- And wearing a character is a different operation.  Nothing on a Gen 3
+-- boot is a SpriteRenderer on a player entity (Client.applyLook's lever), and
+-- the player.sprite hook never fires there.  The player is drawn from one
+-- number a frame -- src/core/game3/ow_sprites.lua OwSprites.playerGraphicsId,
+-- which picks the walking, bike, surf, fishing or field-move graphic for the
+-- avatar's state -- so M.installLook3 wraps that one function: the engine's
+-- answer is kept whenever it is anything but the plain walking graphic, and
+-- the walking graphic is swapped for the chosen look.  Bike, surf and fishing
+-- stay the cart's own, because the looks this mod offers have no such sheets.
+-- It is an engine_internals reach-around (docs/upstream/gen3-spawn-npc.md
+-- asks upstream for a player.sprite seam on game3), so the original is kept
+-- on the module and put back by M.restoreLook3.
 
 local need, mod = ...
 local Config = need("Config")
 local Gen = need("Gen")
+local Gen3 = need("Gen3")
+local Chars = need("Chars")
 
 local M = {}
 
@@ -73,6 +98,12 @@ function M.install()
   if done then return true end
   done = true
 
+  -- Gen 3 wears through the engine's own player graphic, not the catalog;
+  -- see the header.  Installed before the catalog question is asked, because
+  -- a Gen 3 boot has no catalog to ask it of.
+  local gen = Gen.generation()
+  if gen == 3 then M.installLook3() end
+
   local content = mod.content
   local sprites = content and content.sprites
   if not (sprites and sprites.register) then
@@ -83,8 +114,15 @@ function M.install()
   end
 
   for _, char in ipairs(Config.OWN_CHARS) do
-    local walk = assetPath(char, "walk.png")
-    if not walk then
+    -- Only Gen 3 is asked: a Gen 1 and a Gen 2 boot have always registered
+    -- the whole cast (Gold then hides what it may not wear), and nothing
+    -- about that moves.  A Gen 3 boot has no catalog target at all, so a row
+    -- it may not wear is never written -- see the header.
+    local skip = gen == 3 and not Config.ownCharAllowed(char, gen)
+    local walk = not skip and assetPath(char, "walk.png") or nil
+    if skip then
+      -- gen-gated: not a failure, and nothing to say about it
+    elseif not walk then
       mod.log:warn("could not resolve %s's art; that character will not be "
         .. "offered -- reinstall the mod folder so %s is present",
         char.label, char.dir)
@@ -225,6 +263,133 @@ end
 -- whether the pics above apply.
 function M.owns(id)
   return registered[id] ~= nil
+end
+
+-- ------- Gen 3: wearing the look
+--
+-- The engine's own function is kept on its module under this key, so a
+-- second install (a hot reload re-running this file) wraps the pristine
+-- original instead of stacking a wrapper on a wrapper.
+local LOOK3_ORIGINAL = "__rby_mmo_playerGraphicsId"
+
+local look3 = {
+  module = nil,     -- the OwSprites table the wrapper is installed on
+  wrapper = nil,    -- the function this file put there
+  retired = false,  -- restoreLook3 ran; a wrapper somebody else stacked on
+                    -- top of ours stays in place but ours answers vanilla
+  raw = nil,        -- the choice string the memo below was computed for
+  gender = nil,
+  worn = false,     -- that choice as a graphic id on this cart, or false
+  walk = false,     -- the plain walking graphic for that gender, or false
+}
+
+-- Is this mod still the loaded one?  mod.find answers nil for a mod the
+-- loader rolled back or that is not active, and a hot reload hands the new
+-- instance a new exports table -- either way a wrapper left behind by that
+-- instance must go back to answering what the engine would.
+local function alive()
+  local ok, handle = pcall(mod.find, Config.MOD_ID)
+  return ok and type(handle) == "table" and handle.exports == mod.exports
+end
+
+local function choiceString()
+  local chosen
+  pcall(function() chosen = mod.save:get("sprite") end)
+  if type(chosen) ~= "string" or chosen == "" then
+    pcall(function() chosen = mod.options:get("sprite") end)
+  end
+  if type(chosen) ~= "string" or chosen == "" then return nil end
+  return chosen
+end
+
+-- The same rule Client.explicitChoice states for Gen 1 and Gen 2: a look is
+-- worn only when the player asked for one, and asking for the look the cart
+-- already draws them as is a restore, not a wear.  Memoised on the choice and
+-- the gender, because this is asked every drawn frame and both change only
+-- when the player does something.
+local function wornLook3(game)
+  local chosen = choiceString()
+  if not chosen then return nil, nil end
+  local session = (type(game) == "table" and type(game.session) == "table"
+    and game.session) or Gen3.session()
+  local gender = Gen3.genderOf(session and session.gender)
+  if look3.raw ~= chosen or look3.gender ~= gender then
+    local id = Chars.resolve(chosen, game)
+    local walkName = Gen3.playerGfxName(gender)
+    local walk = walkName and Gen3.gfxId(walkName) or nil
+    local worn = nil
+    if id ~= walkName and id ~= Gen.defaultSprite(game) then worn = Gen3.gfxId(id) end
+    look3.raw, look3.gender = chosen, gender
+    look3.worn, look3.walk = worn or false, walk or false
+  end
+  return look3.worn or nil, look3.walk or nil
+end
+
+-- What the wrapper answers instead of `base`, or nil to keep it.  Only the
+-- plain walking graphic is ever replaced: the bike, surf, fishing, field-move
+-- and VS Seeker graphics are other numbers, and a worn look has none of them.
+local function swap3(base, game)
+  if look3.retired or not alive() then return nil end
+  local worn, walk = wornLook3(game)
+  if not (worn and walk) or base ~= walk then return nil end
+  return worn
+end
+
+-- The graphic the local player is drawn with right now, and whether it is a
+-- worn look -- for the suite, the drivers and the overlay's own label.
+function M.lookGfx3(game)
+  local OwSprites = look3.module
+  local fn = OwSprites and OwSprites.playerGraphicsId
+  if type(fn) ~= "function" then return nil, false end
+  local ok, id = pcall(fn, game or mod.game)
+  if not ok then return nil, false end
+  local worn = wornLook3(game)
+  return id, worn ~= nil and id == worn
+end
+
+function M.installLook3()
+  if look3.wrapper and look3.module then
+    -- Installed already, or retired in place under somebody else's wrapper
+    -- (see restoreLook3): waking it keeps that wrapper where it is.
+    look3.retired = false
+    return true
+  end
+  local OwSprites = Gen3.engine("src.core.game3.ow_sprites")
+  if not (OwSprites and type(OwSprites.playerGraphicsId) == "function") then
+    mod.log:warn("this build has no overworld player-graphic seam; your "
+      .. "chosen character will show to other players but not on your own "
+      .. "screen -- update the game, or pick your cart's own trainer")
+    return false
+  end
+  local original = rawget(OwSprites, LOOK3_ORIGINAL) or OwSprites.playerGraphicsId
+  rawset(OwSprites, LOOK3_ORIGINAL, original)
+  local function wrapper(game, player)
+    local base = original(game, player)
+    local ok, swapped = pcall(swap3, base, game)
+    if ok and swapped then return swapped end
+    return base
+  end
+  OwSprites.playerGraphicsId = wrapper
+  look3.module, look3.wrapper, look3.retired = OwSprites, wrapper, false
+  look3.raw = nil
+  return true
+end
+
+-- Put the engine's function back.  Only when the slot still holds this
+-- file's wrapper: another mod that wrapped on top of it owns the slot now,
+-- and restoring underneath it would take their change away too -- so ours
+-- is retired in place instead and answers what the engine would.
+function M.restoreLook3()
+  local OwSprites = look3.module
+  if not OwSprites then return false end
+  look3.retired = true
+  local original = rawget(OwSprites, LOOK3_ORIGINAL)
+  if original and OwSprites.playerGraphicsId == look3.wrapper then
+    OwSprites.playerGraphicsId = original
+    rawset(OwSprites, LOOK3_ORIGINAL, nil)
+    look3.module, look3.wrapper = nil, nil
+  end
+  return true
 end
 
 -- Every character this copy actually registered, sorted, for the suite and

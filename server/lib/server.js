@@ -567,8 +567,9 @@ function start(options = {}) {
     // schema deliberately does not know about, so it is read from the object
     // as given rather than from the validated copy validate() pruned it out of.
     protocol: given.protocol,
-    // Gen lock (1|2). T1a teaches Relay to refuse mismatched hello; until
-    // then the opt is harmlessly ignored if absent from the constructor.
+    // Gen lock (1|2|3, validated by lib/config.js). The relay refuses a
+    // hello that names any other generation, in the same sentence the
+    // in-game host uses; a Gen 3 hub admits FireRed, LeafGreen and Emerald.
     generation: config.generation,
     auth: authPort(config, noteCredentialUse, authThrottle),
     log,
@@ -747,6 +748,10 @@ function start(options = {}) {
       host: boundHost,
       port: boundPort,
       protocol: relay.protocol,
+      // Which carts this hub admits. Beside `protocol` because the two are
+      // the pair a refused player's sentence names, and a host reading this
+      // file after one should not have to open config.json to answer it.
+      generation: relay.generation,
       maxPlayers: relay.maxPlayers,
       players,
     };
@@ -1219,6 +1224,7 @@ function start(options = {}) {
       host: boundHost,
       port: boundPort,
       protocol: relay.protocol,
+      generation: relay.generation,
       maxPlayers: relay.maxPlayers,
       players: relay.playerCount,
       pending: relay.pendingCount,
@@ -1495,7 +1501,10 @@ function start(options = {}) {
       boundPort = address && address.port ? address.port : port;
 
       attach();
-      const genLabel = config.generation === 2 ? 'gen 2' : 'gen 1';
+      // The relay's number rather than the config's: it is the one the hello
+      // check compares against, so this line can never name a lock the hub is
+      // not actually holding.
+      const genLabel = `gen ${relay.generation}`;
       log.info(`RBY MMO hub listening on ${boundHost}:${boundPort} ` +
         `(protocol ${relay.protocol}, ${genLabel})`);
 

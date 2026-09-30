@@ -791,6 +791,190 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- generation lock (PROTOCOL 20, widened to 3 by PROTOCOL 30)
+-- ------------------------------------------------------------------
+--
+-- One Gen 3 hub seats FireRed, LeafGreen and Emerald together and refuses
+-- every other generation; Gen 1 and Gen 2 hubs refuse Gen 3.  The seat a
+-- client would notice is the refusal *sentence* and who ends up on whose
+-- roster, so those are what the digest keeps.  Map ids and sprite names are
+-- synthetic engine-shaped strings -- nothing here is read off a cart.
+
+local ID_E = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+local ID_F = "ffffffffffffffffffffffffffffffff"
+
+local function makeGenHub(generation)
+  local hub = Hub.new({ maxPlayers = 8, generation = generation })
+  hub.forceBattleSeed = 1
+  return hub
+end
+
+-- A hello with the generation fields spelled out.  `generation` and
+-- `version` are passed through untouched -- nil stays absent -- because
+-- "missing" is itself one of the cases being pinned.
+local function dialAs(hub, name, playerId, o)
+  local peer = fakePeer()
+  local client = hub:accept(peer)
+  hub:receive(client, {
+    type = Wire.HELLO, proto = Config.PROTOCOL,
+    name = name, map = o.map or "PALLET", x = 5, y = 5, facing = "down",
+    playerId = playerId, sprite = o.sprite,
+    generation = o.generation, version = o.version,
+  })
+  return { client = client, peer = peer, id = client.id, name = name }
+end
+
+-- The fields of a presence the generation work touches.  Absent is a
+-- sentinel rather than nil for the reason slimDecline's reason is: a nil
+-- vanishes from a Lua table, and "no key" and "null" are not the same value
+-- to the comparison on the far side.
+local function slimPresence(p)
+  if not p then return { absent = true } end
+  return {
+    id = p.id,
+    name = p.name,
+    sprite = p.sprite or "(none)",
+    version = p.version or "(none)",
+    map = p.map or "(none)",
+  }
+end
+
+local function slimRoster(players)
+  local out = {}
+  for _, p in ipairs(players or {}) do out[#out + 1] = slimPresence(p) end
+  table.sort(out, function(x, y) return x.id < y.id end)
+  return out
+end
+
+-- What one hello got back: refused with which sentence, or admitted.
+local function outcomeOf(side)
+  local refuse = take(side.peer, Wire.ERROR)
+  local welcome = take(side.peer, Wire.WELCOME)
+  return {
+    admitted = welcome ~= nil,
+    refuse = refuse and refuse.message or "(none)",
+    closed = side.peer.closed == true,
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "generation_gen3_hub_seats_every_gen3_cart",
+  run = function()
+    local hub = makeGenHub(3)
+    local fr = dialAs(hub, "LEAF", ID_A, {
+      generation = 3, version = "firered",
+      sprite = "OBJ_EVENT_GFX_GREEN_NORMAL", map = "FR_PALLET_TOWN",
+    })
+    local frWelcome = take(fr.peer, Wire.WELCOME)
+    local em = dialAs(hub, "MAY", ID_B, {
+      generation = 3, version = "emerald",
+      sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN",
+    })
+    local emWelcome = take(em.peer, Wire.WELCOME)
+    local joinAtFr = take(fr.peer, Wire.JOIN)
+    -- LeafGreen with no sprite (the hub stamps the Gen 3 token), and a
+    -- Gen 3 client claiming a Gen 1 cart (admitted; the version is not kept)
+    local lg = dialAs(hub, "GREEN", ID_C, {
+      generation = 3, version = "leafgreen", map = "FR_VIRIDIAN_CITY",
+    })
+    local lgWelcome = take(lg.peer, Wire.WELCOME)
+    local liar = dialAs(hub, "LIAR", ID_D, {
+      generation = 3, version = "red",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN",
+    })
+    local liarWelcome = take(liar.peer, Wire.WELCOME)
+    local laterAtEm = {}
+    for _, msg in ipairs(takeAll(em.peer, Wire.JOIN)) do
+      laterAtEm[#laterAtEm + 1] = msg.player
+    end
+    return {
+      generation = hub.generation,
+      frWelcomed = frWelcome ~= nil,
+      emWelcomed = emWelcome ~= nil,
+      lgWelcomed = lgWelcome ~= nil,
+      liarWelcomed = liarWelcome ~= nil,
+      emSees = slimRoster(emWelcome and emWelcome.players),
+      frSeesJoin = slimPresence(joinAtFr and joinAtFr.player),
+      emSeesLater = slimRoster(laterAtEm),
+      liarSees = slimRoster(liarWelcome and liarWelcome.players),
+      players = hub.players,
+    }
+  end,
+}
+
+scenarios[#scenarios + 1] = {
+  name = "generation_gen3_refused_by_gen1_and_gen2_hubs",
+  run = function()
+    local gen1 = makeGenHub(1)
+    local atGen1 = outcomeOf(dialAs(gen1, "LEAF", ID_A, {
+      generation = 3, version = "firered", sprite = "OBJ_EVENT_GFX_GREEN_NORMAL",
+    }))
+    local gen2 = makeGenHub(2)
+    local atGen2 = outcomeOf(dialAs(gen2, "MAY", ID_B, {
+      generation = 3, version = "emerald", sprite = "OBJ_EVENT_GFX_MAY_NORMAL",
+    }))
+    return {
+      atGen1 = atGen1, gen1Players = gen1.players,
+      atGen2 = atGen2, gen2Players = gen2.players,
+    }
+  end,
+}
+
+scenarios[#scenarios + 1] = {
+  name = "generation_gen1_and_gen2_refused_by_gen3_hub",
+  run = function()
+    local hub = makeGenHub(3)
+    local red = outcomeOf(dialAs(hub, "RED", ID_A, {
+      generation = 1, version = "red", sprite = Config.DEFAULT_SPRITE,
+    }))
+    -- A hello that names no generation is the PROTOCOL 20 compat Gen 1, and
+    -- a Gen 3 hub refuses it in the Gen 1 sentence rather than guessing 3.
+    local legacy = outcomeOf(dialAs(hub, "OLD", ID_B, {
+      sprite = Config.DEFAULT_SPRITE,
+    }))
+    local gold = outcomeOf(dialAs(hub, "GOLD", ID_C, {
+      generation = 2, version = "gold", sprite = Config.DEFAULT_SPRITE_GEN2,
+    }))
+    return { red = red, legacy = legacy, gold = gold, players = hub.players }
+  end,
+}
+
+scenarios[#scenarios + 1] = {
+  name = "generation_unknown_refused_missing_is_gen1",
+  run = function()
+    local hub = makeGenHub(1)
+    local four = outcomeOf(dialAs(hub, "FOUR", ID_A, { generation = 4 }))
+    local zero = outcomeOf(dialAs(hub, "ZERO", ID_B, { generation = 0 }))
+    local text = outcomeOf(dialAs(hub, "TEXT", ID_C, { generation = "1" }))
+    local yes = outcomeOf(dialAs(hub, "YES", ID_D, { generation = true }))
+    local legacy = dialAs(hub, "OLD", ID_E, { sprite = Config.DEFAULT_SPRITE })
+    local legacyOutcome = outcomeOf(legacy)
+    -- A Gen 1 cart's version survives on a Gen 1 hub; a Gen 3 cart's does
+    -- not, and costs the hello nothing -- the field is optional.
+    local yellow = dialAs(hub, "YELLOW", ID_F, {
+      generation = 1, version = "yellow", sprite = Config.DEFAULT_SPRITE,
+    })
+    local yellowWelcome = take(yellow.peer, Wire.WELCOME)
+    local mixed = dialAs(hub, "MIXED", ID_A, {
+      generation = 1, version = "emerald", sprite = Config.DEFAULT_SPRITE,
+    })
+    local mixedWelcome = take(mixed.peer, Wire.WELCOME)
+    local joinsAtLegacy = {}
+    for _, msg in ipairs(takeAll(legacy.peer, Wire.JOIN)) do
+      joinsAtLegacy[#joinsAtLegacy + 1] = msg.player
+    end
+    return {
+      four = four, zero = zero, text = text, yes = yes,
+      legacy = legacyOutcome,
+      yellowWelcomed = yellowWelcome ~= nil,
+      mixedWelcomed = mixedWelcome ~= nil,
+      legacySees = slimRoster(joinsAtLegacy),
+      players = hub.players,
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

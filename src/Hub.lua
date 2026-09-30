@@ -247,10 +247,15 @@ M.Entropy = Entropy
 
 function M.new(opts)
   opts = opts or {}
-  -- PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
-  -- fixtures and deploys keep working; Gen2 hubs MUST pass generation:2
-  -- (HostServer / CLI -- twin of server/lib/relay.js opts.generation).
-  local generation = Wire.generation(opts.generation)
+  -- PROTOCOL 20 generation lock, 1, 2 or 3 (3 from PROTOCOL 30: FireRed,
+  -- LeafGreen and Emerald share one Gen 3 hub).  Default 1 when omitted so
+  -- existing Gen 1 fixtures and deploys keep working; Gen 2 and Gen 3 hubs
+  -- MUST pass their generation (HostServer passes the boot's -- twin of
+  -- server/lib/relay.js opts.generation).  Read with Wire.int rather than
+  -- Wire.generation: this is the host's own number, not a stranger's hello,
+  -- and a value outside 1..3 here is an embedding bug that the fixture
+  -- default covers the same way the Node constructor does.
+  local generation = Wire.int(opts.generation, 1, Wire.GENERATION_MAX) or 1
   local Turn, Effects = battleSimFor(generation)
   return setmetatable({
     limit = Config.clampPlayers(opts.maxPlayers),
@@ -510,6 +515,11 @@ local function presenceOf(hub, client)
     -- the B button or the bike, so the client is the only authority and this
     -- is what it last reported.
     fast = client.fast == true,
+    -- The cart they said hello from (PROTOCOL 30), fixed for the session.
+    -- With presence because it is how a viewer reads `sprite`: on a Gen 3
+    -- hub a FireRed and an Emerald player draw from two graphics tables that
+    -- share no player name.  Nil when the hello carried none.
+    version = client.version,
     profile = client.profile,
     -- Carried with presence rather than with the card: a rating moves while
     -- the player is standing there, and the card is a snapshot of their
@@ -653,6 +663,7 @@ function M:admit(client)
 
   client.name = hello.name
   client.sprite = hello.sprite or Config.defaultSpriteFor(self.generation)
+  client.version = hello.version
   client.profile = hello.profile
   client.map, client.x, client.y = hello.map, hello.x, hello.y
   client.facing = hello.facing or "down"
@@ -2421,9 +2432,17 @@ handlers[Wire.HELLO] = function(self, client, msg)
     return self:refuseClient(client, ("This game speaks protocol %d; yours "
       .. "speaks %s."):format(Config.PROTOCOL, tostring(msg.proto)))
   end
-  -- PROTOCOL 20: missing generation defaults to 1 (Wire.generation). Same
-  -- sentence as server/lib/relay.js so a client cannot tell which path refused.
+  -- PROTOCOL 20: missing generation defaults to 1 (Wire.generation); 3 is a
+  -- generation from PROTOCOL 30, so a FireRed or Emerald client is refused by
+  -- a Gen 1 or Gen 2 hub here instead of being read as Gen 1.  A generation
+  -- this hub has never heard of is refused too, never guessed.  Same
+  -- sentences as server/lib/relay.js so a client cannot tell which path
+  -- refused it.
   local generation = Wire.generation(msg.generation)
+  if generation == nil then
+    return self:refuseClient(client, ("This hub is for generation %d; yours "
+      .. "is not a generation it knows."):format(self.generation))
+  end
   if generation ~= self.generation then
     return self:refuseClient(client, ("This hub is for generation %d; yours "
       .. "is generation %d."):format(self.generation, generation))
@@ -2449,6 +2468,10 @@ handlers[Wire.HELLO] = function(self, client, msg)
     name = name,
     playerId = playerId,
     generation = generation,
+    -- Only a cart of the generation just admitted (Wire.version): a viewer
+    -- maps this player's sprite through it, and a version that contradicts
+    -- the room would map it for a cart nobody here is playing.
+    version = Wire.version(msg.version, generation),
     sprite = Wire.spriteId(msg.sprite) or Config.defaultSpriteFor(self.generation),
     profile = Wire.profile(msg.profile),
     map = Wire.mapId(msg.map),

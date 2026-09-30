@@ -44,6 +44,7 @@ const {
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
   cleanBattleMoveset,
   BATTLE_MOVE_MAX,
+  cleanGeneration, cleanVersion, GENERATION_MAX,
 } = require('./sanitize');
 const {
   Board, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
@@ -54,9 +55,18 @@ const { createLog, safe } = require('./log');
 const DEFAULT_PLAYERS = 4;
 const DEFAULT_SPRITE = 'SPRITE_RED';
 const DEFAULT_SPRITE_GEN2 = 'SPRITE_CHRIS';
+// Not an engine name, on purpose -- the twin of Config.DEFAULT_SPRITE_GEN3,
+// where the reason is written out. One Gen 3 hub seats FireRed, LeafGreen and
+// Emerald, whose overworld graphics share no player name, so any real name
+// stamped into a sprite-less hello would be wrong for a third of the room.
+// Each viewer resolves this token on its own cart instead.
+const DEFAULT_SPRITE_GEN3 = 'GEN3_PLAYER';
 
 function defaultSpriteFor(generation) {
-  return Number(generation) === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const g = Number(generation);
+  if (g === 2) return DEFAULT_SPRITE_GEN2;
+  if (g === 3) return DEFAULT_SPRITE_GEN3;
+  return DEFAULT_SPRITE;
 }
 // The wire dialect this hub speaks, and the one number both suites greet
 // with. 3 is where parties landed: nothing was removed, but an invite or a
@@ -183,7 +193,19 @@ function defaultSpriteFor(generation) {
 // follow (`COOP_SIDE` / `COOP_FIGHTERS` products). A protocol-26 hub still
 // treats parties as pairs and `FIELD_MAX` as 0‥3 -- third member / wider
 // open / slot 4‥5 drop or silence. Fuller note in src/Config.lua.
-const PROTOCOL = 29;
+// 30: Gen 3 -- FireRed, LeafGreen and Emerald on one hub. (a) `generation`
+// on mmo.hello reads 1, 2 or 3 and a hub locks to any of the three; a
+// protocol-29 hub clamps everything outside 1..2 to 1, so it *admits* a
+// FireRed client into a Red room rather than refusing it. A generation a hub
+// does not know is now refused, never clamped; a missing one is still 1 (the
+// compat reading 20 made). (b) An optional `version` on the hello -- the
+// cart, from the closed VERSIONS set in lib/sanitize.js -- kept only when it
+// belongs to the generation admitted and carried on every presence, because
+// a Gen 3 room's overworld graphics share no player name and a viewer maps a
+// partner's sprite through the cart it came from. (c) The Gen 3 battle sheet
+// dialect a Gen 3 hub referees, landing in the same release. Fuller note in
+// src/Config.lua.
+const PROTOCOL = 30;
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
 // now, and an ask that outlives the moment is one somebody answers yes to long
@@ -375,6 +397,12 @@ function presenceOf(client, relay) {
     // sees the B button or the bike, so the client is the only authority on
     // it and this is the value it last reported.
     fast: Boolean(client.fast),
+    // The cart they said hello from (PROTOCOL 30), fixed for the session.
+    // With presence because it is how a viewer reads `sprite`: on a Gen 3 hub
+    // a FireRed and an Emerald player draw from two graphics tables that
+    // share no player name. Left off the object when the hello carried none,
+    // the way src/Hub.lua's nil never reaches the wire.
+    ...(client.version ? { version: client.version } : {}),
     // The trainer card the player shows others. Carried here because
     // src/Hub.lua does (Hub.lua:74): a player on a dedicated hub would
     // otherwise silently have no card, and the two hosting paths have to
@@ -410,8 +438,16 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     return relay.refuse(client, `This game speaks protocol ${relay.protocol}; yours `
       + `speaks ${shortValue(msg.proto)}.`);
   }
-  // PROTOCOL 20: missing generation defaults to 1. Same sentence as Hub.lua.
-  const generation = cleanInt(msg.generation, 1, 2) ?? 1;
+  // PROTOCOL 20: missing generation defaults to 1 (cleanGeneration); 3 is a
+  // generation from PROTOCOL 30, so a FireRed or Emerald client is refused by
+  // a Gen 1 or Gen 2 hub here instead of being read as Gen 1. A generation
+  // this hub has never heard of is refused too, never guessed. Same sentences
+  // as src/Hub.lua so a client cannot tell which path refused it.
+  const generation = cleanGeneration(msg.generation);
+  if (generation === null) {
+    return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
+      + 'is not a generation it knows.');
+  }
   if (generation !== relay.generation) {
     return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
       + `is generation ${generation}.`);
@@ -445,6 +481,10 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     name,
     playerId,
     generation,
+    // Only a cart of the generation just admitted (cleanVersion): a viewer
+    // maps this player's sprite through it, and a version that contradicts
+    // the room would map it for a cart nobody here is playing.
+    version: cleanVersion(msg.version, generation),
     sprite: cleanSpriteId(msg.sprite) || defaultSpriteFor(generation),
     profile: cleanProfile(msg.profile),
     map: cleanMapId(msg.map),
@@ -1522,11 +1562,14 @@ class Relay {
       ? Number(opts.chatIntervalMs) : 500;
     this.protocol = Number.isFinite(Number(opts.protocol))
       ? Number(opts.protocol) : PROTOCOL;
-    // PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
-    // deploys keep working; Gen2 hubs MUST set generation:2 (CLI / config —
-    // twin of src/Hub.lua opts.generation).
+    // PROTOCOL 20 generation lock, 1, 2 or 3 (3 from PROTOCOL 30: FireRed,
+    // LeafGreen and Emerald share one Gen 3 hub). Default 1 when omitted so
+    // existing Gen 1 deploys keep working; Gen 2 and Gen 3 hubs MUST set it
+    // (CLI / config -- twin of src/Hub.lua opts.generation). cleanInt rather
+    // than cleanGeneration: this is the operator's number, already checked
+    // by lib/config.js, not a stranger's hello.
     {
-      const gen = cleanInt(opts.generation, 1, 2);
+      const gen = cleanInt(opts.generation, 1, GENERATION_MAX);
       this.generation = gen == null ? 1 : gen;
     }
     // Wave 2 T2d: mediated-battle twin at construction. Gen1 keeps lib/battle;
@@ -2064,6 +2107,7 @@ class Relay {
 
     client.name = hello.name;
     client.sprite = hello.sprite || defaultSpriteFor(this.generation);
+    client.version = hello.version || null;
     client.profile = hello.profile || null;
     client.map = hello.map === undefined ? null : hello.map;
     client.x = hello.x === undefined ? null : hello.x;
@@ -3945,6 +3989,6 @@ class Relay {
 // in six places every time it moves.
 module.exports = {
   Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE,
-  DEFAULT_SPRITE_GEN2, defaultSpriteFor,
+  DEFAULT_SPRITE_GEN2, DEFAULT_SPRITE_GEN3, defaultSpriteFor,
   FRIEND_HOLD_MS, FRIEND_HOLD_PER_NAME, FRIEND_HOLD_MAX,
 };

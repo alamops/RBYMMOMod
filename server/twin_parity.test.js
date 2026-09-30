@@ -22,12 +22,14 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
 const {
-  PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2, defaultSpriteFor, SPRITE_GATE_MS,
+  PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2, DEFAULT_SPRITE_GEN3,
+  defaultSpriteFor, SPRITE_GATE_MS,
 } = require('./lib/relay.js');
 const {
   PLAYER_ID_HEX, BATTLE_EVENT_TYPES, DECLINE_REASONS,
   TEAM_TOKENS, cleanBattleTeam, BATTLE_MON_MAX,
   MOVE_NAME_MAX, cleanBattleMove, cleanBattleMon,
+  GENERATION_MAX, VERSIONS, cleanGeneration, cleanVersion,
 } = require('./lib/sanitize.js');
 
 function read(rel) {
@@ -88,6 +90,74 @@ test('DEFAULT_SPRITE_GEN2 matches', () => {
   );
   assert.strictEqual(defaultSpriteFor(2), DEFAULT_SPRITE_GEN2);
   assert.strictEqual(defaultSpriteFor(1), DEFAULT_SPRITE);
+});
+
+test('DEFAULT_SPRITE_GEN3 matches, and each generation stamps its own', () => {
+  // A Gen 3 hub stamps a token rather than an engine name (Config.lua says
+  // why: FireRed and Emerald share no player graphic name). A one-sided
+  // spelling is an avatar one hosting path draws and the other cannot.
+  const config = read('src/Config.lua');
+  assert.strictEqual(
+    luaAssignString(config, 'DEFAULT_SPRITE_GEN3'), DEFAULT_SPRITE_GEN3,
+    'DEFAULT_SPRITE_GEN3 must match on both hubs',
+  );
+  assert.strictEqual(DEFAULT_SPRITE_GEN3, 'GEN3_PLAYER');
+  assert.strictEqual(defaultSpriteFor(3), DEFAULT_SPRITE_GEN3);
+  assert.strictEqual(defaultSpriteFor('3'), DEFAULT_SPRITE_GEN3,
+    'a numeric string reads as its number, the way Config.defaultSpriteFor tonumbers it');
+  assert.strictEqual(defaultSpriteFor(undefined), DEFAULT_SPRITE,
+    'no generation is the Gen 1 fallback, as on the Lua side');
+  // Config.defaultSpriteFor carries the same three arms; read them off the
+  // source so a fourth generation cannot be added to one side only.
+  const body = config.match(/function M\.defaultSpriteFor\(generation\)([\s\S]*?)\nend/);
+  assert.ok(body, 'Config.lua must define M.defaultSpriteFor(generation)');
+  assert.ok(/g == 2 then return M\.DEFAULT_SPRITE_GEN2/.test(body[1]),
+    'Config.defaultSpriteFor(2) is DEFAULT_SPRITE_GEN2');
+  assert.ok(/g == 3 then return M\.DEFAULT_SPRITE_GEN3/.test(body[1]),
+    'Config.defaultSpriteFor(3) is DEFAULT_SPRITE_GEN3');
+});
+
+test('the hello generation range and cart vocabulary match Wire', () => {
+  // PROTOCOL 30. The range is what a hub may be locked to and what a hello
+  // may claim; the carts are what a viewer maps a partner's sprite through.
+  // Both are closed on both hubs, and a one-sided entry is a FireRed player
+  // admitted by one hosting path and refused by the other -- the very drift
+  // the PROTOCOL 29 clamp was.
+  const wire = read('src/Wire.lua');
+  const max = wire.match(/M\.GENERATION_MAX\s*=\s*(\d+)/);
+  assert.ok(max, 'Wire.lua must assign M.GENERATION_MAX');
+  assert.strictEqual(Number(max[1]), GENERATION_MAX,
+    'Wire.GENERATION_MAX and sanitize.GENERATION_MAX must match');
+  assert.strictEqual(GENERATION_MAX, 3, 'PROTOCOL 30 hubs know generations 1..3');
+
+  const tableMatch = wire.match(/M\.VERSIONS\s*=\s*\{([\s\S]*?)\}/);
+  assert.ok(tableMatch, 'Wire.lua must assign M.VERSIONS as a table');
+  const lua = [...tableMatch[1].matchAll(/(\w+)\s*=\s*(\d+)/g)]
+    .map((m) => [m[1], Number(m[2])]).sort();
+  const js = [...VERSIONS.entries()].sort();
+  assert.deepStrictEqual(js, lua,
+    'Wire.VERSIONS and sanitize.js VERSIONS must name the same carts in the '
+    + 'same generations -- add a cart to both in the same change');
+  for (const [, gen] of js) {
+    assert.ok(gen >= 1 && gen <= GENERATION_MAX, 'every cart is a known generation');
+  }
+
+  // The JS half's readings, pinned here beside the vocabulary they read.
+  // The Lua half of the same table is tests/rby_mmo_test.lua's Wire section
+  // and the hub parity fixture's generation cases.
+  assert.strictEqual(cleanGeneration(undefined), 1, 'missing is the Gen 1 compat default');
+  assert.strictEqual(cleanGeneration(null), 1, 'JSON null decodes to nil in Lua: missing too');
+  assert.strictEqual(cleanGeneration(3), 3, 'Gen 3 is a generation, not a clamp to 1');
+  assert.strictEqual(cleanGeneration(4), null, 'an unknown generation is refused, not guessed');
+  assert.strictEqual(cleanGeneration(0), null);
+  assert.strictEqual(cleanGeneration('3'), null, 'a string is not a JSON number');
+  assert.strictEqual(cleanGeneration(true), null, 'Number(true) is 1; Lua tonumber(true) is nil');
+  assert.strictEqual(cleanGeneration([2]), null, 'Number([2]) is 2; Lua says nil');
+  assert.strictEqual(cleanVersion('emerald', 3), 'emerald');
+  assert.strictEqual(cleanVersion('red', 3), null, 'a Gen 3 room relays no Gen 1 cart');
+  assert.strictEqual(cleanVersion('firered'), 'firered', 'no generation: vocabulary only');
+  assert.strictEqual(cleanVersion('constructor'), null, 'a prototype key is not a cart');
+  assert.strictEqual(cleanVersion('FIRERED', 3), null, 'GameVersion ids are lower case');
 });
 
 test('battle reconnect grace and choice timeout match', () => {
@@ -181,6 +251,8 @@ test('shared hello refuse strings stay twin-worded', () => {
     'This game speaks protocol',
     // PROTOCOL 20 generation lock — same template on both hubs.
     'This hub is for generation',
+    // PROTOCOL 30: a generation neither hub knows is refused, never clamped.
+    'is not a generation it knows.',
   ];
   for (const needle of needles) {
     assert.ok(hub.includes(needle), `Hub.lua must contain: ${needle}`);

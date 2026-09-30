@@ -7,7 +7,9 @@
  * BattleSim event streams stay in battle_turn.test.js. This file pins the
  * seats a client would notice if the two hosting paths drifted: admit under
  * playerId, duplicate-id refuse, protocol refuse wording, mediated KO /
- * disconnect-forfeit settlement keyed by playerId, and the mmo.relay hard cut.
+ * disconnect-forfeit settlement keyed by playerId, the mmo.relay hard cut,
+ * and the generation lock (PROTOCOL 30: one Gen 3 hub seats FireRed,
+ * LeafGreen and Emerald and refuses Gen 1 / Gen 2, and the other way round).
  *
  * Expected digests come from luajit running
  * tests/drivers/hub_protocol_parity.lua. When luajit is not on PATH the
@@ -25,7 +27,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { Relay, PROTOCOL, DEFAULT_SPRITE } = require('./lib/relay.js');
+const {
+  Relay, PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2,
+} = require('./lib/relay.js');
 const { createLog } = require('./lib/log.js');
 
 const ROOT = path.join(__dirname, '..');
@@ -218,6 +222,183 @@ function fightItOut(relay, a, b, battleId) {
     if (outcome) break;
   }
   return outcome;
+}
+
+// ------------------------------------------------------------------
+// generation lock (PROTOCOL 20, widened to 3 by PROTOCOL 30)
+// ------------------------------------------------------------------
+//
+// Twins of the Lua driver's generation helpers; the argument for each is
+// written there. Map ids and sprite names are synthetic engine-shaped
+// strings -- nothing here is read off a cart.
+
+const ID_E = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+const ID_F = 'ffffffffffffffffffffffffffffffff';
+
+function makeGenRelay(clock, generation) {
+  const relay = new Relay({
+    maxPlayers: 8,
+    log: quiet,
+    now: clock.now,
+    generation,
+  });
+  relay.forceBattleSeed = 1;
+  return relay;
+}
+
+// `generation` and `version` pass through untouched -- undefined stays
+// absent, which is how the Lua side's nil reaches the hub.
+function dialAs(relay, name, playerId, o) {
+  const peer = { outbox: [], closed: false, remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => { peer.closed = true; };
+  const ephemeral = relay.accept(peer);
+  relay.handle(ephemeral, {
+    type: 'mmo.hello',
+    proto: PROTOCOL,
+    name,
+    map: o.map || 'PALLET',
+    x: 5,
+    y: 5,
+    facing: 'down',
+    playerId,
+    sprite: o.sprite,
+    generation: o.generation,
+    version: o.version,
+  });
+  return { peer, id: playerId, name, ephemeral };
+}
+
+function slimPresence(p) {
+  if (!p) return { absent: true };
+  return {
+    id: p.id,
+    name: p.name,
+    sprite: p.sprite || '(none)',
+    version: p.version || '(none)',
+    map: p.map || '(none)',
+  };
+}
+
+function slimRoster(players) {
+  return (players || []).map(slimPresence)
+    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+}
+
+function outcomeOf(side) {
+  const refuse = take(side, 'mmo.error');
+  const welcome = take(side, 'mmo.welcome');
+  return {
+    admitted: welcome !== null,
+    refuse: refuse ? refuse.message : '(none)',
+    closed: side.peer.closed === true,
+  };
+}
+
+function runGeneration() {
+  return [
+    {
+      name: 'generation_gen3_hub_seats_every_gen3_cart',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const fr = dialAs(relay, 'LEAF', ID_A, {
+          generation: 3, version: 'firered',
+          sprite: 'OBJ_EVENT_GFX_GREEN_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const frWelcome = take(fr, 'mmo.welcome');
+        const em = dialAs(relay, 'MAY', ID_B, {
+          generation: 3, version: 'emerald',
+          sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+        });
+        const emWelcome = take(em, 'mmo.welcome');
+        const joinAtFr = take(fr, 'mmo.join');
+        const lg = dialAs(relay, 'GREEN', ID_C, {
+          generation: 3, version: 'leafgreen', map: 'FR_VIRIDIAN_CITY',
+        });
+        const lgWelcome = take(lg, 'mmo.welcome');
+        const liar = dialAs(relay, 'LIAR', ID_D, {
+          generation: 3, version: 'red',
+          sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const liarWelcome = take(liar, 'mmo.welcome');
+        const laterAtEm = takeAll(em, 'mmo.join').map((msg) => msg.player);
+        return {
+          generation: relay.generation,
+          frWelcomed: frWelcome !== null,
+          emWelcomed: emWelcome !== null,
+          lgWelcomed: lgWelcome !== null,
+          liarWelcomed: liarWelcome !== null,
+          emSees: slimRoster(emWelcome && emWelcome.players),
+          frSeesJoin: slimPresence(joinAtFr && joinAtFr.player),
+          emSeesLater: slimRoster(laterAtEm),
+          liarSees: slimRoster(liarWelcome && liarWelcome.players),
+          players: relay.playerCount,
+        };
+      })(),
+    },
+    {
+      name: 'generation_gen3_refused_by_gen1_and_gen2_hubs',
+      result: (() => {
+        const gen1 = makeGenRelay(makeClock(), 1);
+        const atGen1 = outcomeOf(dialAs(gen1, 'LEAF', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_GREEN_NORMAL',
+        }));
+        const gen2 = makeGenRelay(makeClock(), 2);
+        const atGen2 = outcomeOf(dialAs(gen2, 'MAY', ID_B, {
+          generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL',
+        }));
+        return {
+          atGen1, gen1Players: gen1.playerCount,
+          atGen2, gen2Players: gen2.playerCount,
+        };
+      })(),
+    },
+    {
+      name: 'generation_gen1_and_gen2_refused_by_gen3_hub',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const red = outcomeOf(dialAs(relay, 'RED', ID_A, {
+          generation: 1, version: 'red', sprite: DEFAULT_SPRITE,
+        }));
+        const legacy = outcomeOf(dialAs(relay, 'OLD', ID_B, {
+          sprite: DEFAULT_SPRITE,
+        }));
+        const gold = outcomeOf(dialAs(relay, 'GOLD', ID_C, {
+          generation: 2, version: 'gold', sprite: DEFAULT_SPRITE_GEN2,
+        }));
+        return { red, legacy, gold, players: relay.playerCount };
+      })(),
+    },
+    {
+      name: 'generation_unknown_refused_missing_is_gen1',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 1);
+        const four = outcomeOf(dialAs(relay, 'FOUR', ID_A, { generation: 4 }));
+        const zero = outcomeOf(dialAs(relay, 'ZERO', ID_B, { generation: 0 }));
+        const text = outcomeOf(dialAs(relay, 'TEXT', ID_C, { generation: '1' }));
+        const yes = outcomeOf(dialAs(relay, 'YES', ID_D, { generation: true }));
+        const legacy = dialAs(relay, 'OLD', ID_E, { sprite: DEFAULT_SPRITE });
+        const legacyOutcome = outcomeOf(legacy);
+        const yellow = dialAs(relay, 'YELLOW', ID_F, {
+          generation: 1, version: 'yellow', sprite: DEFAULT_SPRITE,
+        });
+        const yellowWelcome = take(yellow, 'mmo.welcome');
+        const mixed = dialAs(relay, 'MIXED', ID_A, {
+          generation: 1, version: 'emerald', sprite: DEFAULT_SPRITE,
+        });
+        const mixedWelcome = take(mixed, 'mmo.welcome');
+        const joinsAtLegacy = takeAll(legacy, 'mmo.join').map((msg) => msg.player);
+        return {
+          four, zero, text, yes,
+          legacy: legacyOutcome,
+          yellowWelcomed: yellowWelcome !== null,
+          mixedWelcomed: mixedWelcome !== null,
+          legacySees: slimRoster(joinsAtLegacy),
+          players: relay.playerCount,
+        };
+      })(),
+    },
+  ];
 }
 
 function runJs() {
@@ -734,6 +915,7 @@ function runJs() {
         };
       })(),
     },
+    ...runGeneration(),
   ];
 }
 
@@ -756,7 +938,7 @@ const fixture = fs.existsSync(FIXTURE)
 const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 
 test('the hub parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 11, 'the JS half built every scenario');
+  assert.ok(jsRuns.length >= 17, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/hub_protocol_parity.json is available -- '

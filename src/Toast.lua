@@ -21,6 +21,10 @@
 
 local need, mod = ...
 local Config = need("Config")
+-- Only for a Gen 3 boot's draw (see "Gen 3" below): the adapter answers
+-- false / nil everywhere else, and is the one place a src.ui.game3.* module
+-- is reached from.
+local Gen3 = need("Gen3")
 
 local M = {}
 M.__index = M
@@ -434,9 +438,231 @@ end
 local EMPTY = { reached = "empty", drawn = 0 }
 local NO_GRAPHICS = { reached = "no-graphics", drawn = 0 }
 
+-- ------- Gen 3
+--
+-- On a FireRed / LeafGreen / Emerald boot the corner is drawn *inside* the
+-- 240x160 game rect, in the cart's own font, rather than in window space in
+-- Rajdhani.  The Game Boy's 160x144 is small enough that a smooth HUD face
+-- over it reads as an overlay; the GBA screen is not, and its own font --
+-- which has the lowercase and the punctuation the Game Boy's lacked, drawn
+-- from the player's own cache -- is what every other line on that screen is
+-- printed in.  So a toast there looks like the cart's own text on a dark
+-- plate, scaled with the letterbox exactly as the cart's text is.
+--
+-- Where it sits is decided by the one thing on that screen that shares the
+-- corner: the map-name popup.  Both carts slide it down into the top-left on
+-- a map change -- FireRed's is a 24px banner, Emerald's a 40px sign -- which
+-- is exactly the moment an arrival or a chat line is most likely.  The stack
+-- starts below that band instead of on top of it, and keeps to the left of
+-- the player: the camera holds the player at the centre column (x 112..128
+-- of 240), and the cart's own font is a 14px face on a 160px screen, so a
+-- plate as wide as a Game Boy toast would sit on the player's head (the first
+-- live FireRed run drew exactly that).  So a row is at most GEN3.WIDTH wide,
+-- which also keeps it clear of the START menu's column on the right, and the
+-- stack is at most GEN3.MAX_ROWS rows and never reaches the dialogue frame at
+-- the bottom (GEN3.FLOOR): a toast over an NPC's words is the one overlap
+-- that costs the player something they were reading.  When the queue has
+-- more rows than that, the *oldest* rows give way -- the newest line is the
+-- one the player has not read yet, the same rule push() drops by.
+local GEN3 = {
+  INSET = 4,          -- gap from the screen edge
+  PAD_X = 3,          -- plate margin left and right of the text
+  PAD_Y = 1,          -- ...and above and below it: a 14px glyph on a 16px
+                      -- plate, one tile, the pitch the cart's own menus use
+  ROW_GAP = 1,        -- air between stacked plates
+  WIDTH = 104,        -- widest a plate may be, in GBA pixels: INSET + 104
+                      -- stops short of the player's column at x = 112
+  MAX_ROWS = 4,       -- the most rows the corner holds at once
+  FLOOR = 112,        -- the top of the cart's dialogue frame (tiles 14..19)
+  -- the popup's height per family (src/ui/game3/map_name_popup.lua: the
+  -- FireRed banner is Chrome.mapPopupFrame at 24px; Emerald's sign is five
+  -- tiles, Rse.OFFSCREEN_Y = 40)
+  BAND = { frlg = 24, rse = 40 },
+}
+M.GEN3 = GEN3
+
+-- The 240x160 rect of the window this frame, and its two scale factors.
+--
+-- The viewport Game3 hands render.hud (Display.fit) carries the rect and a
+-- scale but no scaleY; gameHeight is 160 * scaleY, so that is where the
+-- vertical factor is read from.  With no usable viewport the rect is derived
+-- from the window the way the Gen 1 / Gen 2 fallback does, at 240x160.
+function M.gen3Frame(viewport, windowW, windowH)
+  local W, H = Config.GEN3_SCREEN_W, Config.GEN3_SCREEN_H
+  local scale = viewport and tonumber(viewport.scale) or nil
+  if scale and scale > 0 then
+    local x = tonumber(viewport.gameX) or 0
+    local y = tonumber(viewport.gameY) or 0
+    local height = tonumber(viewport.gameHeight)
+    local scaleY = (height and height > 0) and height / H or scale
+    return { x = x, y = y, sx = scale, sy = scaleY, derived = false }
+  end
+  windowW, windowH = tonumber(windowW) or W, tonumber(windowH) or H
+  scale = math.max(1, math.floor(math.min(windowW / W, windowH / H)))
+  return {
+    x = math.floor((windowW - W * scale) / 2),
+    y = math.floor((windowH - H * scale) / 2),
+    sx = scale, sy = scale, derived = true,
+  }
+end
+
+-- Where the stack may live, in GBA pixels: its left edge, the first row's
+-- top (below the popup band for this family), the widest a line may be, and
+-- how many rows fit above the dialogue frame at `rowH` a row.
+function M.gen3Box(family, rowH)
+  local band = GEN3.BAND[family] or GEN3.BAND.frlg
+  local top = band + GEN3.INSET
+  local step = rowH + GEN3.ROW_GAP
+  local rows = math.max(1, math.floor((GEN3.FLOOR - top + GEN3.ROW_GAP) / step))
+  rows = math.min(rows, GEN3.MAX_ROWS)
+  return {
+    left = GEN3.INSET,
+    top = top,
+    textWidth = GEN3.WIDTH - GEN3.PAD_X * 2,
+    rows = rows,
+    step = step,
+  }
+end
+
+-- The cart's charset has round brackets and no square ones
+-- (src/core/game3/scripting/text_ir.lua CHARMAP): "[ANN]" would print as
+-- " ANN " with the brackets turned to blanks.  Braces are the font's own
+-- control syntax ({PLAYER}, {COLOR ...}), which Wire keeps off the wire
+-- anyway; mapped here as well so no line can ever be read as markup.  The
+-- queue keeps the text as it was pushed -- this is how it is *drawn*.
+local GEN3_GLYPHS = { ["["] = "(", ["]"] = ")", ["{"] = "(", ["}"] = ")", ["\\"] = "/" }
+
+function M.gen3Text(text)
+  return (tostring(text or ""):gsub("[%[%]{}\\]", GEN3_GLYPHS))
+end
+
+-- Every row the queue would draw, oldest first, each { text, color }, cut to
+-- the newest `maxRows`.
+--
+-- `measure(text)` and `wrap(text, width)` are the font's (injected, so the
+-- suite can drive this with no glyphs at all).  An entry keeps at most
+-- WRAP_MAX rows, the last one ending in the cart's own ellipsis when it had
+-- to be cut, exactly as the Gen 1 / Gen 2 corner caps a sentence.
+local GEN3_TAIL = "…"
+
+local function fitRow(measure, text, width)
+  if measure(text) <= width then return text end
+  local budget = width - measure(GEN3_TAIL)
+  local cut = text
+  while #cut > 0 and measure(cut) > budget do
+    -- step back one whole UTF-8 sequence, never half a glyph
+    local stop = #cut
+    repeat stop = stop - 1 until stop == 0 or cut:byte(stop + 1) < 0x80 or cut:byte(stop + 1) >= 0xC0
+    cut = cut:sub(1, stop)
+  end
+  return cut .. GEN3_TAIL
+end
+
+function M.gen3Rows(queue, measure, wrapText, width, maxRows)
+  local all = {}
+  for _, entry in ipairs(queue or {}) do
+    local text = M.gen3Text(entry.text)
+    local wrapped = wrapText(text, width) or text
+    local rows = {}
+    for line in (tostring(wrapped) .. "\n"):gmatch("(.-)\n") do
+      if line ~= "" then rows[#rows + 1] = line end
+    end
+    if #rows > WRAP_MAX then
+      local rest = table.concat(rows, " ", WRAP_MAX, #rows)
+      for n = #rows, WRAP_MAX, -1 do rows[n] = nil end
+      rows[WRAP_MAX] = fitRow(measure, rest, width)
+    end
+    for _, row in ipairs(rows) do
+      all[#all + 1] = { text = fitRow(measure, row, width), color = entry.color }
+    end
+  end
+  local drop = #all - (tonumber(maxRows) or #all)
+  if drop > 0 then
+    local kept = {}
+    for i = drop + 1, #all do kept[#kept + 1] = all[i] end
+    all = kept
+  end
+  return all
+end
+
+-- The cart's font for this version (src/ui/game3/font.lua picks the
+-- implementation per profile), or nil.
+local function gen3Font()
+  local Font = Gen3.engine("src.ui.game3.font")
+  if not (Font and type(Font.active) == "function") then return nil end
+  local ok, impl = pcall(Font.active)
+  if ok and type(impl) == "table" and type(impl.draw) == "function"
+      and type(impl.measure) == "function" then
+    return impl
+  end
+  return nil
+end
+
+-- White text with the cart's dark-grey shadow (the colours the party menu
+-- and battle text print white in); a friend's blue keeps that shadow so the
+-- two read as the same kind of line in two colours.
+local function gen3Colors(font, tint)
+  local base = type(font.COLOR) == "table" and font.COLOR.WHITE or nil
+  local shadow = base and base.shadow or { 0.38, 0.38, 0.38, 1 }
+  local fg = (type(tint) == "table" and { tint[1] or 1, tint[2] or 1, tint[3] or 1, 1 })
+    or (base and base.fg) or { 1, 1, 1, 1 }
+  return { fg = fg, shadow = shadow, bg = { 0, 0, 0, 0 } }
+end
+
+function M:drawGen3(viewport)
+  local last = { reached = "entered", drawn = 0, gen3 = true }
+  self.last = last
+
+  local font = gen3Font()
+  if not font then last.reached = "no-font" return end
+
+  local windowW, windowH = love.graphics.getDimensions()
+  local frame = M.gen3Frame(viewport, windowW, windowH)
+  last.scale, last.gameX, last.gameY, last.derived = frame.sx, frame.x, frame.y, frame.derived
+
+  local glyphH = tonumber(font.GLYPH_HEIGHT) or 14
+  local rowH = glyphH + GEN3.PAD_Y * 2
+  local box = M.gen3Box(Gen3.family(), rowH)
+  local function measure(text)
+    local ok, w = pcall(font.measure, text)
+    return ok and tonumber(w) or (#text * 6)
+  end
+  local function wrapText(text, width)
+    if type(font.wrap) ~= "function" then return text end
+    local ok, out = pcall(font.wrap, text, width)
+    return ok and out or text
+  end
+  local rows = M.gen3Rows(self.queue, measure, wrapText, box.textWidth, box.rows)
+  last.top, last.maxRows = box.top, box.rows
+
+  local restore = beginFrame()
+  love.graphics.push()
+  love.graphics.translate(frame.x, frame.y)
+  love.graphics.scale(frame.sx, frame.sy)
+  local y = box.top
+  for _, row in ipairs(rows) do
+    love.graphics.setColor(0, 0, 0, 0.65)
+    love.graphics.rectangle("fill", box.left, y, measure(row.text) + GEN3.PAD_X * 2, rowH)
+    local ok = pcall(font.draw, row.text, box.left + GEN3.PAD_X, y + GEN3.PAD_Y, {
+      colors = gen3Colors(font, row.color),
+      maxWidth = box.textWidth,
+    })
+    if ok then
+      last.drawn = last.drawn + 1
+      last.lines = last.lines or {}
+      last.lines[#last.lines + 1] = row.text
+    end
+    y = y + box.step
+  end
+  love.graphics.pop()
+  endFrame(restore)
+  last.reached = "drawn"
+end
+
 function M:draw(viewport)
   if not (love and love.graphics) then self.last = NO_GRAPHICS return end
   if #self.queue == 0 then self.last = EMPTY return end
+  if Gen3.active() then return self:drawGen3(viewport) end
 
   local last = { reached = "entered", drawn = 0 }
   self.last = last

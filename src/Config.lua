@@ -235,7 +235,34 @@ M.MOD_ID = "rby_mmo"
 -- 23s already proved.  27 on this line means the party/field widen; a later
 -- tip that needs another bump takes the next free integer.
 -- This number lives here and in server/lib/relay.js -- bump them together.
-M.PROTOCOL = 29
+--
+-- 30 is Gen 3: FireRed, LeafGreen and Emerald, all three on one hub, and it
+-- moves three things.
+-- (a) `generation` on `mmo.hello` reads 1, 2 *or 3*, and both hubs lock to
+-- any of the three.  A protocol-29 hub clamps every value outside 1..2 to 1,
+-- so it does not refuse a FireRed client -- it *admits* one into a Red room,
+-- where every step, trade and fight afterwards is two carts talking past each
+-- other with nothing on either screen to say so.  That is the worst failure
+-- this number exists to turn into a sentence.  A generation a hub does not
+-- know is now refused rather than clamped; a *missing* one is still Gen 1,
+-- the one-release compat reading 20 made for legacy-shaped hellos.
+-- (b) An optional `version` on the hello -- the cart, from the closed
+-- Wire.VERSIONS set (firered, emerald, red, gold, ...) -- kept only when it
+-- belongs to the generation the hub admitted, and carried on every presence.
+-- One Gen 3 hub seats three carts whose overworld graphics share no player
+-- name (FireRed's hero is RED_NORMAL, Emerald's is BRENDAN_NORMAL, and
+-- neither name exists on the other cart), so a viewer maps a partner's
+-- sprite through the version it was sent from, the way the carts' own Cable
+-- Club does.  A protocol-29 hub drops the field, and every cross-version
+-- avatar would fall back to a guess.
+-- (c) Landing in the same release: the Gen 3 battle sheet dialect
+-- (docs/plans/gen3-battle-sheet.md -- abilities, held items, natures, IVs to
+-- 31) that a Gen 3 hub referees.  A protocol-29 intermediator refuses or
+-- strips every field of it.
+-- Refusal naming both versions is the only sentence either player can act
+-- on.  This number lives here and in server/lib/relay.js -- bump them
+-- together.
+M.PROTOCOL = 30
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.

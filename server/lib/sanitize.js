@@ -55,6 +55,49 @@ function cleanInt(value, min, max) {
   return i >= min && i <= max ? i : null;
 }
 
+// Boot generation claimed on mmo.hello (PROTOCOL 20; 3 from PROTOCOL 30). The
+// twin of Wire.generation, where the argument is written out in full.
+//
+// Missing is 1 -- the one-release compat reading PROTOCOL 20 made, so a
+// legacy-shaped hello still joins a Gen 1 hub. Present but unknown is null,
+// never 1: clamping is how a FireRed client (3, outside the old 1..2) was
+// admitted into a Red room under PROTOCOL 29, and the hello handler refuses
+// null in the same sentence it refuses a mismatch.
+//
+// A JSON number only. cleanInt alone would take Number(true) as 1, [2] as 2
+// and "0b11" as 3, where Lua's tonumber says nil to all three -- one hello
+// admitted by this hub and refused by its twin.
+const GENERATION_MAX = 3;
+
+function cleanGeneration(value) {
+  if (value === undefined || value === null) return 1;
+  if (typeof value !== 'number') return null;
+  return cleanInt(value, 1, GENERATION_MAX);
+}
+
+// The cart a hello was sent from (PROTOCOL 30), keyed to the generation it
+// belongs to. Twin of Wire.VERSIONS: GameVersion's own ids, a closed set,
+// because a viewer maps a partner's sprite through it and an unknown cart has
+// nothing to map. A Map rather than an object literal so "constructor" or
+// "__proto__" off the wire is a miss rather than a prototype hit.
+const VERSIONS = new Map([
+  ['red', 1], ['blue', 1], ['yellow', 1],
+  ['gold', 2], ['silver', 2], ['crystal', 2],
+  ['firered', 3], ['leafgreen', 3], ['emerald', 3],
+]);
+
+// A version off the wire, or null. With `generation`, only a version of that
+// generation survives: a Gen 3 room relays no "red" for anybody in it.
+function cleanVersion(value, generation) {
+  if (typeof value !== 'string') return null;
+  const gen = VERSIONS.get(value);
+  if (gen === undefined) return null;
+  if (generation !== undefined && generation !== null && gen !== generation) {
+    return null;
+  }
+  return value;
+}
+
 // An HMAC response off the wire. Lowercase only, because that is what both
 // Node's crypto and the mod's pure-Lua digest produce, and accepting the
 // other case would mean two spellings of the same credential.
@@ -1578,6 +1621,11 @@ module.exports = {
   COOP_REASONS,
   PARTY_EVENTS,
   LEVEL_MAX,
+  // The hello's generation lock and cart (PROTOCOL 30).
+  cleanGeneration,
+  cleanVersion,
+  GENERATION_MAX,
+  VERSIONS,
   // Mediated battles. The bounds are exported alongside the closed sets for the
   // reason relay.js exports PROTOCOL: a suite that names the constant still
   // asserts the current dialect after one of these moves, where a suite that
