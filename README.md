@@ -910,6 +910,15 @@ cart's 240×160 screen, in the cart's own font and window frames. None of it
 opens over the cart's own menus or text: an ask that arrives while one is up
 waits until it closes.
 
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-start-menu.png" width="300" alt="FireRed's START menu in Pallet Town with an MMO row between the player's name and SAVE">
+  <img src="docs/screenshots/gen3/g3-em-mmo-menu.png" width="300" alt="The MMO menu on Emerald in Littleroot Town: SERVERS, HOST GAME, JOIN GAME, CHARACTER in the cart's own window frame">
+</p>
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-host-setup.png" width="300" alt="The HOST screen on FireRed: PLAYERS 4, JOIN CODE, START">
+  <img src="docs/screenshots/gen3/g3-em-join-code.png" width="300" alt="The JOIN CODE letter grid on Emerald, three characters typed, B ERASES in the title bar">
+</p>
+
 - **They're really there, again.** Other players are real overworld objects
   on the cart's own map — its walking sheets, its step animation, its depth
   sorting — with their nickname over their head. The carts have Running Shoes
@@ -931,6 +940,21 @@ waits until it closes.
   changes forme with the cart it lands in, as it does between the real carts.
   The swap itself is shown in text boxes rather than the cart's trade
   animation.
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-presence-chat.png" width="300" alt="Two FireRed players in Pallet Town, GUESTY and HOSTY on nameplates over their heads, and a corner toast reading [HOSTY]: HELLO FROM HOST">
+  <img src="docs/screenshots/gen3/g3-fr-actions.png" width="300" alt="The walk-up menu over the other player on FireRed: PROFILE, ADD FRIEND, INVITE, TRADE, BATTLE, PARTY BATTLE, WHISPER">
+</p>
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-em-trainer-card.png" width="270" alt="Your own trainer card on Emerald: HOSTY dressed as BRENDAN, IDNo., TIME, BADGES, SEEN, OWNED, MONEY and a RANK box beside the portrait">
+  <img src="docs/screenshots/gen3/g3-fr-party-townmap.png" width="270" alt="FireRed's TOWN MAP with a party list in the corner: HOSTY, ROUTE 1">
+  <img src="docs/screenshots/gen3/g3-em-party-pokenav.png" width="270" alt="Emerald's PokéNav HOENN MAP with the same party list: HOSTY, ROUTE 101">
+</p>
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-trade-picker.png" width="330" alt="TRADE WHICH? on FireRed: PIKACHU Lv30 and RATTATA Lv5, each with its party icon">
+  <img src="docs/screenshots/gen3/g3-fr-trade-done.png" width="293" alt="A FireRed text box over the two players: PIKACHU was traded over!">
+</p>
+
 - **Battles are Gen 3 battles.** 1-on-1, co-op 2-on-2 against a wild POKéMON
   or a trainer, party against party, and `SOLO BATTLES` all run on a full
   Gen 3 referee — `src/BattleSim3` in the game, `server/lib/battle3` on a
@@ -939,9 +963,55 @@ waits until it closes.
   EXP, EVs, move learning and evolution afterwards follow the cart's own
   rules. The arena draws the carts' own pics, trainers and weather; `CLASSIC
   BATTLE UI` swaps it for a FireRed/Emerald-style battle screen drawn from the
-  cart's own battle chrome. A fight against another player is a Cable Club
-  battle: a berry eaten or an item stolen with THIEF is back where it was
-  afterwards.
+  cart's own battle chrome.
+- **A fight between players is a Cable Club battle.** A 1-on-1 or a
+  party-against-party fight leaves both saves exactly as they were — the cart
+  reloads the party after a link battle, so a berry eaten, an item stolen with
+  THIEF, a paralysis, the HP lost and a fainted lead are all back as they
+  were, no EXP is paid, no Pay Day coins are picked up and nobody whites out.
+  The bag still works in one, as it does on Red and Gold: that is this mod's
+  rule for every generation, not the cart's, which locks the bag in a link
+  battle.
+- **Pay Day pays.** Win a solo or co-op fight against a wild POKéMON or a
+  trainer and you pick up the coins it scattered, in the cart's own words —
+  doubled by an Amulet Coin the way the cart doubles them. And a knockout that
+  leaves none of the POKéMON who fought it standing (an EXPLOSION, say) still
+  pays the living Exp. Share holders, as the cart does.
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-pvp-arena.png" width="760" alt="A 1-on-1 between two FireRed players on the arena: HOSTY's CHARMANDER against GUESTY's PIKACHU, each trainer on their own edge with a roster chip, FIGHT / BAG / POKéMON / RUN across the bottom">
+</p>
+<p align="center"><em>1-on-1 on the arena, two FireRed players</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-em-classic-moves.png" width="300" alt="CLASSIC BATTLE UI on Emerald: TORCHIC's move menu with QUICK ATTACK, PECK, SAND-ATTACK, FIRE SPIN, PP 30/30 and TYPE/NORMAL">
+  <img src="docs/screenshots/gen3/g3-fr-classic-sandstorm.png" width="300" alt="CLASSIC BATTLE UI on FireRed in a sandstorm, a Substitute doll standing in for the player's POKéMON: The sandstorm rages.">
+</p>
+<p align="center"><em>CLASSIC BATTLE UI — Emerald's move menu; FireRed's chrome in a sandstorm, behind a Substitute</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-coop-wild-levelup.png" width="760" alt="A co-op wild fight on FireRed: HOSTY's and GUESTY's roster chips stacked top-left, RATICATE and PIKACHU on their side, and PIKACHU grew to LV. 31! in the band">
+</p>
+<p align="center"><em>Co-op against a wild POKéMON — the EXP and the level-up are the cart's</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-em-coop-trainer-noticed.png" width="293" alt="On an Emerald route, an exclamation mark over HOSTY as a Bug Catcher walks up, GUESTY standing beside them with a party marker">
+  <img src="docs/screenshots/gen3/g3-em-coop-catch-nickname.png" width="330" alt="Emerald's own naming screen after a co-op catch: WURMPLE's nickname?">
+</p>
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-em-coop-trainer.png" width="760" alt="A co-op trainer fight on Emerald: PIKACHU and RATICATE against two WURMPLE, Bug Catcher RICK on the far edge with his roster chip, FIGHT / BAG / POKéMON / RUN below">
+</p>
+<p align="center"><em>The trainer who saw you fights you both — Emerald's Bug Catcher RICK against a party of two</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-solo-payday.png" width="760" alt="A SOLO BATTLES wild fight on FireRed after PAY DAY: CHARMANDER alone on the field and SOLO picked up ¥200! in the band">
+</p>
+<p align="center"><em>SOLO BATTLES — Pay Day's coins, picked up</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-em-arena-weather.png" width="760" alt="The arena on Emerald in the rain: rain streaks over the whole field, a Substitute doll on the foe's platform and Rain continues to fall. in the band">
+</p>
+<p align="center"><em>Weather and the Substitute doll on the arena</em></p>
 
 **One hub for all three carts.** A Gen 3 hub seats FireRed, LeafGreen and
 Emerald players together — chat, friends, parties, rank, trades and battles
@@ -950,6 +1020,18 @@ walk Kanto and the Sevii Islands, Emerald walks Hoenn, so a player in the
 other region is on your `PLAYERS` list, with the place they're in, and never
 on your map. Gen 1 and Gen 2 players are refused by a Gen 3 hub, and a Gen 3
 player by theirs, in one sentence naming both generations.
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-players-cross-region.png" width="300" alt="PLAYERS on FireRed: BETA in PALLET TOWN and CHARLIE, an Emerald player, in LITTLEROOT TOWN">
+  <img src="docs/screenshots/gen3/g3-em-chat-log.png" width="300" alt="The CHAT log on Emerald: the hub's welcome, HI FROM ALPHA from a FireRed player and HI FROM CHARLIE">
+</p>
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-xcart-fr-vs-em.png" width="760" alt="FireRed against Emerald on a dedicated hub: ALPHA's CHARMANDER against CHARLIE's PIKACHU, CHARLIE drawn as Emerald's MAY on the far edge, CHARMANDER used METAL CLAW! in the band">
+</p>
+<p align="center"><em>FireRed against Emerald, refereed by a Node hub on <code>--generation 3</code></em></p>
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-mismatch-refused.png" width="300" alt="A FireRed text box: This hub is for generation 1; yours is generation 3.">
+</p>
 
 - **Hosting from the game** needs nothing extra: `HOST GAME` on a FireRed,
   LeafGreen or Emerald boot locks the room to Gen 3 by itself.
@@ -980,11 +1062,21 @@ yet.`).
   Safari Zone, roaming and scripted legendaries, the Battle Frontier, Trainer
   Tower and Trainer Hill, the first battle, and the old man's and the
   POKé DUDE's tutorial fights.
+- Every fight this mod referees is fought under link rules, the solo and
+  co-op ones against wild POKéMON and trainers included: no badge stat boosts,
+  and a traded POKéMON always obeys.
+- A trainer fight that ends in a draw with your team still standing leaves
+  the trainer unbeaten and its script stopped where it waited — no prize, no
+  TM, no badge; the cart has no answer for that ending. A draw that leaves
+  your team on nothing is a whiteout, as on the cart. Walk back into an
+  unbeaten trainer's line of sight and they challenge you again — that is the
+  cart's own sight check.
+- For other mods: a wild encounter or a trainer this mod takes over from the
+  cart, for a co-op or a `SOLO BATTLES` fight, never raises the engine's
+  `battle.started` — the engine's battle never starts. A `SOLO BATTLES` fight
+  does raise `battle.ended` when it is over, as the engine's own would.
 - A player on the neighbouring map isn't drawn across a seamless map edge —
   you see them once you're both on the same map.
-- A fight this mod referees pays no Pay Day coins: never between players, as
-  on the carts' own link battles, and not yet after a solo or co-op fight
-  against a wild POKéMON or a trainer either.
 - LeafGreen shares FireRed's engine path end to end and is covered by the
   headless suites, but no live LeafGreen run has been made.
 - The game3 mod platform has no public way yet to spawn a walking object,
@@ -1681,12 +1773,25 @@ bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen3          # SOLO BA
   real `START → MMO` menus: host and join by code, avatars walking as the
   cart's own objects at the right pace, nameplates, the arrival toast, chat,
   `PLAYERS` / profile card / `ADD FRIEND` / `FRIENDS` / `MY PROFILE` /
-  `RANK`, pressing A on the other player, a trade with a dex check, a party
-  with the region-map list, and leaving
+  `RANK`, pressing A on the other player, a trade with a dex check, and
+  leaving. Then the fights, each through the real `ACTIONS` menu and each with
+  a shot per beat: a mediated 1-on-1 on the arena and another under `CLASSIC
+  BATTLE UI` (command menu, move list, a damaging turn, the knockout, the
+  result — and both parties exactly as they were); and, inside a party with
+  the region-map list, a co-op fight against a wild POKéMON taken from a real
+  grass step (EXP and a level-up), another one ended with a MASTER BALL and the
+  cart's nickname grid, and a co-op trainer fight walked into for real (the
+  divert, a POTION, the trainer's flag set on both carts). `GEN3_LEGS` narrows
+  a run to a comma list of legs — `chat`, `social`, `trade`, `battle`,
+  `party`, `coop` (which brings the party along); boot, hosting, joining,
+  presence and the final leave always run — so `GEN3_LEGS=coop` is the party
+  and its two 2-on-2s alone
 - 🗺️ **`run-trip-e2e-gen3.sh`** — **region-scoped presence**: the two FireRed
   players see each other in Pallet Town, and the Emerald player in Littleroot
   is on everybody's roster and nobody's map; each place is named in its own
-  region, and chat and a FireRed ↔ Emerald trade cross carts
+  region, and chat, a FireRed ↔ Emerald trade and a FireRed-vs-Emerald 1-on-1
+  refereed by the Node hub all cross carts (`GEN3_LEGS`: `chat`, `trade`,
+  `battle`)
 - 🚪 **`run-mismatch-e2e-gen3.sh`** — a Gen 3 boot dialling a Gen 1 hub, and a
   Red boot dialling a Gen 3 hub, each refused with the reason on screen
 - 🎨 **`run-battlefield-e2e-gen3.sh`** — pixel assertions on the arena (1-on-1,
@@ -1694,17 +1799,22 @@ bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen3          # SOLO BA
   classic screen (the move menu, 2-on-2, the party page, the bag, a trainer
   intro), on FireRed and on Emerald
 - ⚔️ **`run-solo-battle-e2e.sh --gen3`** — wild and trainer fights on the local
-  Gen 3 referee, through to the save
+  Gen 3 referee, through to the save: a catch and its nickname, a refused
+  escape, a trainer's prize, a loss and its whiteout, Pay Day's coins picked
+  up, a draw that whites out and a draw with the team standing that leaves the
+  trainer's script halted, a fight opened under the overworld's rain, and a
+  real grass step taken by the divert
 
 `GEN3_GAME=firered|leafgreen|emerald` picks the cart where a run takes one.
 Each run copies an already-imported cart into a throwaway save identity
 rather than importing it again, and only reads the ROM when no import exists
 anywhere; screenshots land as `g3-<game>-<role>-<NN>-<leg>.png` beside an
-`index.html` contact sheet. Every one of them exits 0 when there is no import
-and no ROM path for its cart. A LeafGreen run works the same way, but none has
-been made yet — LeafGreen is covered by the headless suites
-(`tests/gen3_*.lua`, `tests/trade3.lua`, `tests/battle_sim3_*.lua`,
-`server/gen3.test.js`, `server/battle3_*.test.js`).
+`index.html` contact sheet (the Gen 3 pictures further up are frames from
+these runs, cropped, in `docs/screenshots/gen3/`). Every one of them exits 0
+when there is no import and no ROM path for its cart. A LeafGreen run works
+the same way, but none has been made yet — LeafGreen is covered by the
+headless suites (`tests/gen3_*.lua`, `tests/trade3.lua`,
+`tests/battle_sim3_*.lua`, `server/gen3.test.js`, `server/battle3_*.test.js`).
 
 ---
 
@@ -1828,8 +1938,10 @@ bite you:
   [the Gen 3 part](#-firered-leafgreen-emerald--the-same-mod-on-the-gba)). An
   engine update can break them before this mod catches up. Smaller Gen 3
   edges: a player on the next map over isn't drawn across a seamless map
-  edge, cross-region trades wait for both carts' post-game, and nobody has
-  run LeafGreen live yet.
+  edge, cross-region trades wait for both carts' post-game, a trainer fight
+  drawn with your team still standing leaves the trainer unbeaten (and ready
+  to challenge you again), fights the mod referees get no badge boosts, and
+  nobody has run LeafGreen live yet.
 
 ---
 

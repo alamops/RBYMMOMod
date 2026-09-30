@@ -60,7 +60,22 @@ here must match `manifest.version`.
   play its EvolutionScene; a catch lands in the party or the PC with the dex
   marked and a nickname prompt; a won trainer fight pays the cart's prize
   (class × level, Amulet Coin) and a lost one whites out. A fight between
-  players is a Cable Club battle: held-item changes are not written home.
+  players — 1-on-1 or party against party — is a Cable Club battle: both
+  saves come out of it exactly as they went in (the cart reloads the party
+  after a link battle, `cable_club.c` `LoadPlayerParty`), so no held-item,
+  status, HP or PP change is written home, no EXP or Pay Day is paid and
+  nobody whites out.
+- **Pay Day and Exp. Share holders, the cart's way.** A Gen 3 outcome now
+  carries `payDay` — the coins Pay Day scattered (level × 5 per use, saturating
+  at 65535), reported for a won `wild`, `coop_wild` or `coop_npc` fight only
+  and read identically by both hubs. The 1-on-1 client, co-op and
+  `SOLO BATTLES` pay it into the save through the engine's own
+  `Prize.payDay`, doubled by an Amulet Coin the way the cart counts one (your
+  own holder sent out; on FireRed / LeafGreen a foe's too), and say it in the
+  cart's words after its ending lines. An `exp` event may now say
+  `participants = 0`: a knockout that left none of the fighters standing (an
+  EXPLOSION) still pays the living Exp. Share holders, priced on their own.
+  Gen 1 and Gen 2 outcomes and `exp` readings are unchanged.
 - **SOLO BATTLES on Gen 3.** Wild and trainer fights run on a local
   BattleSim3 with foes built the way the engine builds them (wild IV and
   held-item rolls, trainer rows' IVs, moves and items), the cart's prize and
@@ -83,11 +98,18 @@ here must match `manifest.version`.
   with PP and TYPE, party / bag / target pickers, 2-on-2 and 3-on-3 focus).
   Every Gen 3 move and item resolves a particle look.
 - **Gen 3 test runs.** `tests/drivers/run-mmo-e2e-gen3.sh`
-  (`GEN3_GAME=firered|leafgreen|emerald`), `run-trip-e2e-gen3.sh` (a Node hub
-  on `--generation 3` with FireRed, FireRed and Emerald),
-  `run-mismatch-e2e-gen3.sh`, `run-battlefield-e2e-gen3.sh` and
-  `run-solo-battle-e2e.sh --gen3`, each leg with a screenshot and an
-  `index.html` contact sheet (`tests/drivers/shots_index.py`); `.env` takes
+  (`GEN3_GAME=firered|leafgreen|emerald`) — presence, chat, social, trade,
+  then a mediated 1-on-1 on the arena and one under `CLASSIC BATTLE UI`, and
+  inside a party a co-op wild fight (EXP, a level-up), a co-op catch with the
+  nickname grid and a co-op trainer walked into (the divert, a POTION, the
+  flag on both carts); `run-trip-e2e-gen3.sh` (a Node hub on
+  `--generation 3` with FireRed, FireRed and Emerald, including a
+  FireRed-vs-Emerald 1-on-1); `run-mismatch-e2e-gen3.sh`,
+  `run-battlefield-e2e-gen3.sh` and `run-solo-battle-e2e.sh --gen3` (Pay Day,
+  both kinds of draw, overworld weather). `GEN3_LEGS` narrows a run to some
+  legs. Each leg has a screenshot and an `index.html` contact sheet
+  (`tests/drivers/shots_index.py`); the README's Gen 3 gallery is cropped
+  from them (`docs/screenshots/gen3/`). `.env` takes
   `FIRE_RED_ROM_PATH`, `LEAF_GREEN_ROM_PATH` and `EMERALD_ROM_PATH`. Headless:
   `tests/gen3_*.lua`, `tests/trade3.lua`, `tests/battle_sim3_*.lua`,
   `server/gen3.test.js`, `server/battle3_*.test.js`, and a tri-generation
@@ -147,6 +169,58 @@ here must match `manifest.version`.
   `docs/screenshots/nicknames/`, which were named by a directory line
   `modkit pack` never matches.
 
+The Gen 3 review round, before release — none of these reached a published
+version, but each was a real failure on a live boot or on the wire:
+
+- **A Gen 3 trade could duplicate a POKéMON.** The peer was shown a snapshot
+  of the party while the pick and the apply went by slot, so reordering the
+  party while the picker waited duplicated a mon. Picks map to the
+  snapshot, the confirm re-checks identity (species, personality, OT, egg,
+  item), the apply swaps by identity, and the field and `START` are held from
+  the pick until the save.
+- **Frozen, doubled avatars across seamless map edges.** The engine's ghost
+  capture copied remote players into the neighbouring map's draw pool; they
+  are now retired and purged from every pool on each map change.
+- **A peer's sprite could be any cart graphic** — a Cut tree or a boulder —
+  and hijack the viewer's A press. A viewer draws only the curated looks and
+  player-trainer graphics; NPC walkers on the arena draw as themselves.
+- **A fight between players changed the saves.** A PvP spar moved held items
+  between saves, left a THUNDER WAVE's paralysis in the save, and a party
+  against party banked EXP and could white out the loser. Every Gen 3 PvP
+  mode now leaves both saves as the cart does.
+- **The co-op divert could freeze or loop.** A trainer wait that ended with
+  no partner froze the field (the cart's own fight now starts at once); a
+  wild fight handed back to be fought alone was re-diverted forever; a stand-in
+  from before a soft reset or `CONTINUE` could start a stale fight.
+- **Co-op and solo endings.** A won co-op fight could still white out a
+  partner whose own team had fallen, halting the leader's beaten-trainer
+  script with it; a trainer draw was answered to the script as a win (flag set,
+  beaten script run, a badge possible), and a draw with the team standing let
+  the post-battle bytes run (a gym leader's TM with no badge). A won fight
+  never whites out now, and a standing draw halts the trainer's script with
+  the trainer unbeaten.
+- **The referee could stall on crafted rows.** Nature Power / Sleep Talk /
+  Assist / Mirror Move rows that called each other recursed until a stack
+  overflow and a timeout draw; calls are capped at depth 3. The same pass
+  brought BattleSim3 and `server/lib/battle3` closer to the carts (end-of-turn
+  berries, Clear Body / Mist, Substitute, multi-hit move ends, Baton Pass,
+  Pursuit, Future Sight, 3-on-3 Intimidate and more, all in both twins; the
+  three cart quirks kept on purpose are in `docs/plans/gen3-battle-sheet.md`
+  §9.1). Solo trainers follow the carts' AI scripts more closely, FireRed's
+  rival and Champion keep their names, and the engine's end-of-battle
+  effects (Emerald's Pokérus and TV, FireRed's quest log, `battle.ended`) run
+  after a `SOLO BATTLES` fight.
+- **Overworld weather and TILT were never seen on Gen 3.** Two reads went
+  through `package.loaded`, which the mod sandbox leaves empty: no wild,
+  co-op or solo fight opened under the overworld's weather, and nameplates
+  never gave way to the corner roster under the TILT pipeline. Both read
+  through the engine adapter now.
+- **Gen 1 / Gen 2 wire reads are byte-identical to 1.4.19 again.** A stray
+  Gen 3 field could change how a Gen 1 or Gen 2 sheet, choice or event was
+  read; both hubs read with the generation again (a 39,000-case differential
+  against 1.4.19: 0 mismatches), and the two hubs agree on
+  every crafted edge case.
+
 ### Known
 
 - **FireRed / LeafGreen ↔ Emerald trades follow the carts' post-game rule.**
@@ -182,10 +256,20 @@ here must match `manifest.version`.
 - **A remote player walking nearby can hold the VS Seeker's charge a
   moment**: the cart waits for every object to stop moving, avatars
   included.
-- **No Pay Day coins from a fight this mod referees on Gen 3.** A fight
-  between players pays none, as the carts' link battles don't; a solo or
-  co-op fight against a wild POKéMON or a trainer doesn't pay them yet
-  either, where the cart would after its own fight.
+- **Every fight this mod referees on Gen 3 uses link rules**, solo and co-op
+  fights against wild POKéMON and trainers included: no badge stat boosts and
+  no disobedience.
+- **A trainer drawn with your team still standing stays unbeaten.** The
+  trainerbattle opcode has no answer for that ending, so its script is halted
+  where it waited: no prize, no flag, no TM or badge. An unbeaten trainer who
+  still sees you challenges you again — the cart's own sight check. A draw
+  that leaves your team on nothing is a whiteout, as on the cart.
+- **The bag works in a fight between players**, as it does on Red and Gold —
+  this mod's rule for every generation; the carts lock the bag in a link
+  battle.
+- **A fight taken over from the cart never raises `battle.started`** (the
+  engine's battle never starts); a `SOLO BATTLES` fight raises `battle.ended`
+  when it is over, as the engine's own does.
 - **Engine, not mod:** on a fresh Emerald save the heal point is still the
   moving truck, so a whiteout before the first POKéMON CENTER — the cart's
   or a mod-run fight's — respawns there.

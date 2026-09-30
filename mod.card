@@ -402,10 +402,18 @@ return {
         .. "seamless map edge; they appear once you share a map. The party "
         .. "on the region map is a list rather than a figure on a city, and a "
         .. "remote player walking nearby can hold the VS Seeker's charge a "
-        .. "moment, because the cart waits for every object to stop. A fight "
-        .. "this mod referees on Gen 3 pays no Pay Day coins -- right between "
-        .. "players, as on the carts' link battles, but a solo or co-op fight "
-        .. "against a wild mon or a trainer does not pay them yet either.",
+        .. "moment, because the cart waits for every object to stop.",
+      "Every fight this mod referees on Gen 3 is fought under link rules, "
+        .. "solo and co-op fights against wild mons and trainers included: no "
+        .. "badge stat boosts and no disobedience. A fight between players "
+        .. "leaves both saves exactly as they were, as the carts' Cable Club "
+        .. "does (no EXP, no Pay Day, no whiteout), but its bag stays usable "
+        .. "as on Red and Gold -- this mod's rule, where the carts lock it. A "
+        .. "trainer fight drawn with the player's team still standing leaves "
+        .. "the trainer unbeaten and its script halted (no prize, TM or "
+        .. "badge), and that trainer challenges again on sight. A fight taken "
+        .. "over from the cart never raises battle.started; a SOLO BATTLES "
+        .. "fight raises battle.ended as it finishes.",
       "LeafGreen shares FireRed's engine path end to end and is covered by "
         .. "the headless suites, but has not been run live. There is no "
         .. "official Gen 3 server on the SERVERS list; a Gen 3 hub is reached "

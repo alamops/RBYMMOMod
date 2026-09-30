@@ -503,7 +503,13 @@ Commits on the branch (base `ea822a5`), in order: `c88370b` wave 1 · `1365d45`,
 `295bd43`, `402d963` fixes · `db55e25` wave 4 (solo) · `2fc927a`, `7b0fe9f`,
 `a256567`, `6c45554`, `9c868d1` review fixes (hub/wire, core/presence, battle
 client, UI + trade) · `2858b47`, `aaea514`, `6a19cd5` tests · `07b0c12` wave 4
-(co-op + divert). Each commit message describes its slice.
+(co-op + divert) · `a63667b` docs (1.5.0) · `41e5904` referee review fixes
+(both twins) · `068b322` Pay Day and holders-only EXP through both hubs and the
+1v1 client · `fbf44a1` e2e: Gen 3 battle and co-op legs · `7af563c` a PvP
+spar's status stays out of the save · `7c957e8`, `97ac854` co-op review fixes ·
+`ef4bf8b`, `448ab6a` solo review fixes · `2c28135` the TILT read · then the
+final docs pass (the curated `docs/screenshots/gen3/` gallery and these
+notes). Each commit message describes its slice.
 
 ### Success criteria (§1)
 
@@ -519,7 +525,7 @@ client, UI + trade) · `2858b47`, `aaea514`, `6a19cd5` tests · `07b0c12` wave 4
 | 8 | Trade via `packMon3/unpackMon3`, party/PC, dex, item, mail, trade evolution | Yes (`src/Trade3.lua`). Shown in **text boxes**, not the engine's TradeScene animation; the evolution plays the cart's EvolutionScene |
 | 9 | EXP / learn / evolve on engine rules | Yes (`src/Exp3.lua`, LearnMove / EvolveFx Gen 3 arms), paid from the referee's roster |
 | 10 | Gen 1 / Gen 2 unchanged | Headless suite and server tests green; Gen 1/2 wire reads restored to `ea822a5` (39,000-case differential, 0 mismatches) |
-| 11 | Live e2e with screenshots on FR and EM, contact sheet | `run-mmo-e2e-gen3.sh` (FR, EM), trip, mismatch, battlefield and `run-solo-battle-e2e.sh --gen3` (46/46 FR+EM) each write `g3-<game>-<role>-<NN>-<leg>.png` + `index.html` (`tests/drivers/shots_index.py`). The MMO run's legs stop at party + leave: mediated fights are covered by `hub_battle` (Lua + Node, FR vs EM 1v1, coop_npc 2v2, wild catch, mid-fight learn) and the battlefield run, and co-op was live-checked by T11's driver (33/33 on FR and EM), not by a committed leg. Curated `docs/screenshots/gen3/` lands after the final run |
+| 11 | Live e2e with screenshots on FR and EM, contact sheet | `run-mmo-e2e-gen3.sh` (FR, EM), trip, mismatch, battlefield and `run-solo-battle-e2e.sh --gen3` each write `g3-<game>-<role>-<NN>-<leg>.png` + `index.html` (`tests/drivers/shots_index.py`). Since `fbf44a1` the MMO run also drives the **battles and co-op** through the real menus: a mediated 1v1 on the arena and one under CLASSIC BATTLE UI (parties exactly as they were afterwards), and inside the party a co-op wild fight (EXP, level-up), a co-op MASTER BALL catch with the nickname grid and a co-op trainer walked into (divert, POTION, flag on both carts); the trip adds a FireRed-vs-Emerald 1v1 on the Node hub. `GEN3_LEGS` narrows a run. **Final run at `2c28135`** (`tmp/e2e-review/gen3-final/summary.txt`, gitignored): every Gen 3 runner **0 FAIL** — MMO FireRed and Emerald each host 161 / guest 148 checks, trip 44 + 24 + 42, mismatch 15 + 15, solo FireRed 83/83 and Emerald 79/79, battlefield 89 arena + 217 classic pixel checks on each cart; main suite 6081/6081, T4 61/61 suites, every Node test green. Gen 1 / Gen 2 regressions show only the pre-existing FAILs that reproduce identically on base `ea822a5`: Gen 1 `run-mmo-e2e.sh` 2 (host address scrape), Gen 1 `run-hub-e2e.sh` 3 (guest-b registry id), Gold solo 1 (walk sheet); Gen 2 MMO and Red solo pass. The curated gallery (`docs/screenshots/gen3/`, 24 frames, all in `.modkitignore`) is cropped from this run |
 
 ### Deviations from §3–§5
 
@@ -547,8 +553,11 @@ client, UI + trade) · `2858b47`, `aaea514`, `6a19cd5` tests · `07b0c12` wave 4
 - **B TO RUN** is not offered on a Gen 3 boot: the carts have Running Shoes
   and never call `movement.speed`; the pace still rides presence.
 - **Co-op on Gen 3 is hub-refereed only** (no client host-sim), like Gen 2.
-  A fight between players is a Cable Club spar: held-item changes are not
-  written home; Deoxys uses its link-battle stats only in PvP.
+  A fight between players (1v1 or `coop_pvp`) is a Cable Club spar that
+  leaves both saves exactly as they were — no held-item, status, HP or PP
+  change written home, no EXP, no Pay Day, no whiteout (`6c45554`, `7af563c`,
+  `97ac854`; the cart reloads the party, `cable_club.c` `LoadPlayerParty`);
+  Deoxys uses its link-battle stats only in PvP.
 - **Solo hands more fights back to the cart** than on Gen 1/2
   (`Config.SOLO_REFUSED_GEN3`): Emerald double trainer battles, two-opponent
   and partner fights, safari, roamers, scripted / legendary wilds, the
@@ -569,6 +578,56 @@ client, UI + trade) · `2858b47`, `aaea514`, `6a19cd5` tests · `07b0c12` wave 4
   Gen 2 and older Gen 1 drivers/suites had shipped in release zips), every
   plan, the Gen 3 upstream note and the loose screenshots.
 
+### Review round (R1–R7)
+
+Seven read-only reviews, one per slice, ran against the committed diff as the
+slices landed; every finding was fixed before release, each in the commit
+named here.
+
+- **R1 core / presence** (`7b0fe9f`, `a256567`): frozen, doubled avatar ghosts
+  across seamless edges (`Ghosts.capture`), a peer's sprite able to be any
+  cart graphic (fenced to `Gen3.LOOKS` / `lookAllowed`; NPC walkers on the
+  arena draw as themselves), avatars recorded by the FireRed quest log and
+  shoved by Emerald's rotating-tile puzzle, one wrap discipline across hot
+  reloads, per-frame allocations.
+- **R2 UI + trade** (`9c868d1`): a trade duplicated a mon when the party was
+  reordered while the picker waited (picks now map to the snapshot, identity
+  re-checked at confirm and apply, field held from pick to save); picks and
+  confirms accepted out of stage; a nil apply reported as success; the prompt
+  queue pumped only while online; learn prompts racing the evolution scene;
+  cart-font markup in peer names; unknown cart codes.
+- **R3 battle client** (`6c45554`): EXP from the referee's roster, PvP spars
+  moving held items between saves, cart wording for opening / ending lines,
+  Deoxys link stats only in PvP, caching.
+- **R4 hub / wire** (`2fc927a`): Gen 1 / Gen 2 reads restored byte-identical
+  to `ea822a5` (39,000-case differential, 0 mismatches), twin-exact Gen 3
+  sanitisers (LuaJIT `tonumber`, JSON nulls in lists), the second NPC seat's
+  bag names, deploy scripts refusing a Gen 3 lock on an old release.
+- **R5 referee** (`41e5904`, then `068b322`): crafted call rows recursing into a
+  stall (depth cap 3), end-of-turn berries, Clear Body / Mist, Substitute,
+  multi-hit move ends, Baton Pass, Pursuit, Future Sight, doubles and 3v3
+  details, in both twins (35 turn scenarios replayed in Node, 6,500 fuzzed
+  fights with 0 mismatches); Pay Day coins and the holders-only EXP fact
+  reported, then carried by both hubs and paid by the client. Three requests
+  were **kept as the cart has them** and disclosed in
+  `gen3-battle-sheet.md` §9.1: the Roar / Whirlwind level check in trainer
+  fights, Fury Cutter not reset by another move, and King's Rock reading
+  battler 0's hold-effect parameter.
+- **R6 co-op + divert** (`7c957e8`, `97ac854`): a trainer wait with no joiner
+  froze the field; a handed-back wild re-diverted forever; a won fight whiting
+  out a wiped partner; draws run as wins or losses; stale stand-ins after a
+  soft reset; PP write-back, eggs, trainer parties matching solo;
+  party-vs-party spars leaving both saves as the cart does. The live e2e
+  found one more for the 1v1 (`7af563c`: a THUNDER WAVE's paralysis stayed in
+  the save).
+- **R7 solo** (`ef4bf8b`, `448ab6a`): trainer draws answered as wins, then a
+  standing draw letting post-battle bytes run (a TM without the badge) —
+  halted now; FRLG rival / Champion names; overworld weather never read (a
+  `package.loaded` read under the sandbox); AI scripts closer to the carts;
+  the engine's end-of-battle effects (Pokérus, TV, quest log,
+  `battle.ended`); a handed-back wild being a re-roll. The same sandbox read
+  hid the TILT pipeline from the overlay (`2c28135`).
+
 ### Known limits carried into 1.5.0
 
 - The engine reach-arounds (injected objects, `OwSprites.playerGraphicsId`,
@@ -579,9 +638,22 @@ client, UI + trade) · `2858b47`, `aaea514`, `6a19cd5` tests · `07b0c12` wave 4
   `eo.frozen`). Minor.
 - No featured official Gen 3 hub (owner #7). LeafGreen not live-tested
   (owner #4). NIRE stays Gen 1 (A5).
-- Pay Day: a mod-refereed Gen 3 fight pays no coins. Correct for PvP (link
-  rules); for solo / co-op wild and NPC fights the cart would pay them, and
-  doing the same needs the referee to report the coin total (both twins) and
-  the client to pay it (T12 remainder).
+- Link rules everywhere: every mod-refereed Gen 3 fight, solo and co-op
+  against wild mons and trainers included, has no badge stat boosts and no
+  disobedience (BattleSim3 and its twin carry no per-fight exception).
+- A trainer fight drawn with the player's team still standing leaves the
+  trainer unbeaten and its script halted (no prize, flag, TM or badge): the
+  `trainerbattle` opcode's `done` has no third answer. An unbeaten trainer
+  who still sees the player challenges again (the cart's own sight check). A
+  draw that leaves the team on nothing is a whiteout, as on the cart.
+- Emerald's double trainer battles (and the rest of `Config.SOLO_REFUSED_GEN3`)
+  are handed back to the cart in solo.
+- A fight diverted from the cart never raises the engine's `battle.started`
+  (the engine battle never starts); `SOLO BATTLES` raises `battle.ended` as it
+  finishes (`SoloBattle:_finishEffects3`).
+- The bag stays usable in MMO PvP on Gen 3, as on Gen 1 / Gen 2 — a deliberate
+  mod rule the carts do not have (they lock the bag in a link battle). A PvP
+  spar otherwise leaves both saves exactly as they were (`7af563c`,
+  `97ac854`).
 - Engine bug, reported upstream only: a fresh Emerald save's heal map is
   `EM_INSIDE_OF_TRUCK`, so an early whiteout respawns in the truck.

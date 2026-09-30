@@ -388,3 +388,35 @@ docs/screenshots/players-friend-mark.png
 docs/screenshots/nire-bike.png
 docs/screenshots/servers-autojoin.png
 docs/screenshots/servers-autojoin-switch.png
+#
+# The Gen 3 gallery (1.5.0): FireRed and Emerald frames from the final live
+# e2e runs -- run-mmo-e2e-gen3.sh on each cart, run-trip-e2e-gen3.sh,
+# run-mismatch-e2e-gen3.sh, run-solo-battle-e2e.sh --gen3 and
+# run-battlefield-e2e-gen3.sh -- cropped to the GBA screen or the arena. Every
+# one is the cart's own map, font, window frames or battle pics decoded from
+# the player's ROM, so each is listed by name like every screenshot above; a
+# bare docs/screenshots/gen3/ line would do nothing.
+docs/screenshots/gen3/g3-em-arena-weather.png
+docs/screenshots/gen3/g3-em-chat-log.png
+docs/screenshots/gen3/g3-em-classic-moves.png
+docs/screenshots/gen3/g3-em-coop-catch-nickname.png
+docs/screenshots/gen3/g3-em-coop-trainer-noticed.png
+docs/screenshots/gen3/g3-em-coop-trainer.png
+docs/screenshots/gen3/g3-em-join-code.png
+docs/screenshots/gen3/g3-em-mmo-menu.png
+docs/screenshots/gen3/g3-em-party-pokenav.png
+docs/screenshots/gen3/g3-em-trainer-card.png
+docs/screenshots/gen3/g3-fr-actions.png
+docs/screenshots/gen3/g3-fr-classic-sandstorm.png
+docs/screenshots/gen3/g3-fr-coop-wild-levelup.png
+docs/screenshots/gen3/g3-fr-host-setup.png
+docs/screenshots/gen3/g3-fr-mismatch-refused.png
+docs/screenshots/gen3/g3-fr-party-townmap.png
+docs/screenshots/gen3/g3-fr-players-cross-region.png
+docs/screenshots/gen3/g3-fr-presence-chat.png
+docs/screenshots/gen3/g3-fr-pvp-arena.png
+docs/screenshots/gen3/g3-fr-solo-payday.png
+docs/screenshots/gen3/g3-fr-start-menu.png
+docs/screenshots/gen3/g3-fr-trade-done.png
+docs/screenshots/gen3/g3-fr-trade-picker.png
+docs/screenshots/gen3/g3-xcart-fr-vs-em.png
