@@ -1929,6 +1929,15 @@ function M.saveLoaded()
   -- this is true of a single-player copy that never saw a hub, which is
   -- exactly the copy most likely to be in one of these fights.
   pcall(solo.reset, solo)
+  -- Gen 3: what a finished divert still owed the field it was fought on (a
+  -- trainer script's resume, a whiteout's warp) is dropped with the file it
+  -- was owed to -- a Gen 3 CONTINUE raises this *after* the new map is up, and
+  -- the queue would otherwise run the old save's steps in it. The session
+  -- check inside the queue says the same for a return to the title, which
+  -- raises no event; this is the prompt answer. (Any stand-in co-op still
+  -- holds is let go by the leave below, and does nothing to a save it was not
+  -- met in -- CoopField's Stand:fightAlone.)
+  if Gen3.active() then pcall(CoopField.resetDeferred3) end
   M.leave()
   M.restoreLook()
   M.syncLook()
@@ -2638,13 +2647,26 @@ end
 -- the hook returns the encounter it rolled, the wrapper calls the original.
 local gen3Divert = { on = false, installed = false, tried = 0, rolled = false }
 
--- Would anybody take a fight of this kind right now?  Asked before anything is
--- built, so a player nobody would divert for never has a foe rolled twice.
-local function wantsDivert3(kind)
+-- Would anybody take a fight of this kind, met on `mapId`, right now?  Asked
+-- before anything is built, so a player nobody would divert for never has a
+-- foe rolled twice: a wild asks co-op's own gates (Coop:wouldTakeWild -- every
+-- partner here and free), because a partied player whose partner is on
+-- another map is exactly the one co-op declines after the monster is built.
+-- A trainer is still offered to co-op whenever NPC is on: a partner who is
+-- away is *told* so ("was too far to join!"), and building a trainer's team
+-- takes nothing from the RNG (the cart's name-hash personalities, the row's
+-- own IVs).
+local function wantsDivert3(kind, mapId)
   if solo:isOn() then return true end
   if not (transport:isReady() and party:has()) then return false end
   if coop.running then return false end
-  if kind == "wild" then return coop:wantsWild() end
+  if kind == "wild" then
+    if mapId == nil then
+      local current = World.current()
+      mapId = current and current.mapId
+    end
+    return coop:wouldTakeWild(mapId)
+  end
   return coop:wantsNpc()
 end
 
@@ -2699,10 +2721,22 @@ local function offerFight3(stand, kind, soloArgs)
     opts.mapId = mapId
     opts.done = soloArgs.done or function() end
     opts.fallback = function() stand:fightAlone() end
+    -- The monsters the stand-in already built (`opts.party`, and a wild's
+    -- `enc.mon`), so solo fights the very ones the cover announced and the
+    -- RNG is rolled for them once -- not once here and again in SoloBattle.
+    opts.party = stand.enemyParty
     if kind == "trainer" then
       taken = solo:fromGen3Trainer(game, soloArgs.foe, opts) == true
     else
-      taken = solo:fromGen3Encounter(game, soloArgs.enc, opts) == true
+      local enc = soloArgs.enc
+      local lead = stand.enemyParty and stand.enemyParty[1]
+      if type(enc) == "table" and lead then
+        local withMon = {}
+        for k, v in pairs(enc) do withMon[k] = v end
+        withMon.mon = lead
+        enc = withMon
+      end
+      taken = solo:fromGen3Encounter(game, enc, opts) == true
     end
   end)
   if not ok then
@@ -2713,6 +2747,10 @@ local function offerFight3(stand, kind, soloArgs)
       kind == "trainer" and "trainer" or "encounter")
     taken = false
   end
+  -- Solo's fight begins as it is taken; co-op's begins when the join lands
+  -- (Coop:startBattle). Either way the start's bookkeeping runs once, for a
+  -- fight the mod is actually fighting (CoopField's Stand:begin3).
+  if taken then pcall(stand.begin3, stand) end
   return taken
 end
 
@@ -2726,6 +2764,11 @@ local function divertWild3(enc, rollCtx)
     -- Handing the encounter back is starting the cart's fight with the very
     -- monster the cover announced (its personality kept), the way the step
     -- that rolled it would have.
+    --
+    -- Marked as a hand-back (CoopField.HANDBACK3): startWild calls the
+    -- module's `start`, which is CoopField's own wrapper, and the wrapper
+    -- would otherwise offer the fight to a divert again -- a co-op wait that
+    -- timed out opened the same wait, and timed out, and opened it again.
     fightAlone = function()
       local BB = Gen3.engine("src.core.game3.battle_bridge")
       local Runtime = Gen3.engine("src.core.game3.runtime")
@@ -2738,7 +2781,7 @@ local function divertWild3(enc, rollCtx)
         level = enc.level, item = enc.item,
         personality = (lead and lead.personality) or enc.personality,
         moves = enc.moves,
-      }, {})
+      }, { [CoopField.HANDBACK3] = true })
     end,
   })
   if not stand then return false end
@@ -2748,14 +2791,12 @@ local function divertWild3(enc, rollCtx)
   if Encounters and type(Encounters.resetRateModifiers) == "function" then
     pcall(Encounters.resetRateModifiers)
   end
-  local taken = offerFight3(stand, "wild", { enc = enc })
-  if taken then CoopField.wildStart3() end
-  return taken
+  return offerFight3(stand, "wild", { enc = enc })
 end
 
 -- The trainer door, handed to CoopField.installStart3.
 local startHandler3 = {
-  wants = function(kind) return wantsDivert3(kind) end,
+  wants = function(kind, mapId) return wantsDivert3(kind, mapId) end,
   -- A step encounter `encounter.roll` just offered and handed back reaches
   -- BattleBridge.startWild next, in the same call: it is not offered twice.
   skipWild = function()
@@ -3339,7 +3380,7 @@ function M.install()
       local enc = next(tbl, rollCtx)
       if enc == nil then return nil end
       gen3Divert.rolled = false
-      if wantsDivert3("wild") then
+      if wantsDivert3("wild", rollCtx and rollCtx.mapId) then
         local ok, taken = pcall(divertWild3, enc, rollCtx)
         if not ok then
           mod.log:warn("the wild divert failed (%s); this encounter is fought "

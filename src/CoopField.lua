@@ -392,12 +392,18 @@ end
 --     `done(result)`, which is what sets the trainer flag on a win, jumps to
 --     the CONTINUE_SCRIPT and ticks the script VM on.
 --
--- A draw (a refereed fight that could not finish, a lost connection) is handed
--- to the opcode as "lose" without the whiteout: the trainer stays unbeaten and
--- nobody is sent to a POKeMON CENTER for a fight nobody lost.  The opcode has
--- no third answer -- every result it does not read as a loss marks the
--- trainer beaten -- and "beaten by a battle that never ended" is the one
--- reading that must not happen.
+-- A draw that is not a whiteout (a refereed fight that could not finish, a
+-- lost connection -- a draw that leaves this player's team standing) is never
+-- handed to the opcode at all.  The opcode has no third answer: "lose" skips
+-- the flag but then runs the post-battle bytes after the trainerbattle
+-- command (a gym leader's TM, the badge branch), and anything else marks the
+-- trainer beaten.  So the script waiting on the trainer is halted instead
+-- (Vm:halt, what the cart's own whiteout does to it), with no whiteout: the
+-- trainer stays unbeaten, nothing after the battle runs, and nobody is sent to
+-- a POKeMON CENTER for a fight nobody lost.  A draw that *does* leave the team
+-- on nothing is a whiteout on the cart (pret IsPlayerDefeated counts
+-- B_OUTCOME_DREW) and reaches here as "lose" -- Coop.finishBuriedBattle and
+-- SoloBattle both map it.
 --
 -- While a divert is deciding (a co-op wait for the partner) the stand-in is
 -- also the *cover*: a Gen 3 layer holding the field still, with the cart's
@@ -407,6 +413,14 @@ end
 -- takes.  `fightAlone` hands the encounter back -- it takes the cover down and
 -- starts the cart's own battle with exactly the arguments it was cancelled
 -- with -- and is what Coop:release and SoloBattle's give-up path call.
+--
+-- A stand-in belongs to the save that was running when it was built
+-- (`session`).  A load or a soft reset replaces the session (and a return to
+-- the title clears it) while the stand-in can still be held -- a co-op wait's
+-- clock, a dropped connection's release, the deferred queue below -- so
+-- neither `fightAlone` nor `finish` does anything to a world other than its
+-- own: the old fight is never started in the new file, and the new file's
+-- script VM is never handed the old one's result.
 --
 -- ------- the BattleBridge.start wrap (an engine_internals reach-around)
 --
@@ -423,10 +437,20 @@ end
 -- the chain, and an older wrapper of ours left inside one goes inert).  The
 -- wrap is inert unless this mod instance is the loaded one, it only ever
 -- takes a standard trainer fight a divert actually wants
--- (Config.SOLO_REFUSED_GEN3 is refused, link / headless / wild pass straight
--- through), and restoreStart3 puts back what it wrapped when the slot still
--- holds this wrapper.  docs/upstream/gen3-spawn-npc.md asks upstream for the
--- seam that would retire it.
+-- (Config.SOLO_REFUSED_GEN3 is refused, link / headless pass straight
+-- through, and so does a start this mod itself makes to hand a fight back --
+-- `HANDBACK3` below).
+--
+-- Nothing in production takes the wrap off, and nothing has to.  The loader
+-- has no unload callback for a mod (a rollback removes its events, hooks and
+-- exports and runs none of its code), so there is no moment to call
+-- restoreStart3 from.  The wrapper retires itself instead: every call first
+-- asks `alive()` (a rolled-back mod has no exports; a hot-reloaded one has
+-- new ones) and Gen3.wrapLive (a newer wrapper of ours replaced it), and on
+-- either answer it is a straight call to what it wrapped.  restoreStart3 is
+-- the explicit form of the same retirement, kept for the suite and for a
+-- future unload point.  docs/upstream/gen3-spawn-npc.md asks upstream for the
+-- seam that would retire the wrap altogether.
 
 local floor = math.floor
 
@@ -448,6 +472,26 @@ local function alive()
   return ok and type(handle) == "table" and handle.exports == mod.exports
 end
 M.alive3 = alive
+
+-- The key a start this mod makes to hand a fight back carries in its opts.
+-- A step encounter handed back is started through BattleBridge.startWild,
+-- which calls the module's `start` -- this file's wrapper -- and the wrapper
+-- must pass it straight to the cart rather than offer it to a divert again
+-- (a co-op wait that timed out would otherwise open the same wait, forever).
+-- In the opts rather than in a flag beside them, so it marks that one call
+-- and nothing after it, and survives another mod's wrapper in the chain.
+M.HANDBACK3 = "__rby_mmo_handback"
+
+-- pret SPECIES_EGG, and the engine's Pokemon.isEgg rule (src/core/game3/
+-- pokemon.lua): an egg is carried in the party but is never a fighter -- it is
+-- not on a sheet, not on a bench, and not "standing" when a whiteout is
+-- asked.  Stated here once for Coop, CoopBattle and CoopSim.
+local SPECIES_EGG3 = 412
+function M.isEgg3(mon)
+  if type(mon) ~= "table" then return false end
+  return mon.isEgg == true or mon.egg == true
+    or tonumber(mon.species or mon.speciesId) == SPECIES_EGG3
+end
 
 -- ------- which fights a divert may take
 
@@ -647,7 +691,12 @@ local function buildMon(P, spec, opts)
     gender = try3(P.gender, species, personality) or "U",
     heldItem = item, item = item,
     moves = moves, pp = pp, maxPp = maxPp,
-    friendship = tonumber(spec.friendship) or tonumber(type(meta) == "table" and meta.baseFriendship) or 70,
+    -- The species' base friendship: Pokemon.baseFriendship reads the meta
+    -- row's `friendship` (there is no `baseFriendship` key on it -- reading
+    -- that one handed every wild monster 70).
+    friendship = tonumber(spec.friendship)
+      or tonumber(try3(P.baseFriendship, species))
+      or tonumber(type(meta) == "table" and meta.friendship) or 70,
     pokerus = 0,
   }
   if not try3(function() P.applyStats(mon) return true end) then
@@ -668,9 +717,47 @@ function M.wildMon3(enc, session)
   return buildMon(P, enc, { wild = true, family = family3(session) })
 end
 
--- A trainer's whole party (Trainers.foeFromId's `party`, lead first).
-function M.trainerParty3(foe)
+-- src/SoloBattle.lua's Gen 3 foe builders, reached when a fight is built
+-- rather than at load: SoloBattle needs Coop and Coop needs this file, so a
+-- file-scope need() here would be a cycle the resolver refuses.  By the time a
+-- trainer is met every module is loaded and this is a cache hit.
+local function solo3()
+  if type(need) ~= "function" then return nil end
+  local ok, Solo = pcall(need, "SoloBattle")
+  if ok and type(Solo) == "table" and type(Solo.gen3TrainerParty) == "function" then
+    return Solo
+  end
+  return nil
+end
+
+-- A trainer's whole party (Trainers.foeFromId's `party`, lead first), built
+-- the way the cart and a solo fight build it, so a co-op 2v2, a solo 1v1 and
+-- the cart's own battle meet the same monsters: the `trainer.party` hook
+-- another mod may wrap (battle_bridge.lua hooked_trainer_party, which the
+-- divert steps around), the pret personalities (CreateNPCTrainerParty's
+-- trainer-and-species name hash -- which fixes each monster's nature, gender
+-- and ability; a Random32 per monster gave a gym leader's ace a different
+-- nature on every visit), the row's IVs, moves and item.  Those builders are
+-- SoloBattle's (`gen3HookedFoe`, `gen3TrainerParty`) -- one statement of
+-- them, not two that drift.  The mod's own buildMon is the fallback for a
+-- graph without SoloBattle (never in play).
+--
+-- -> party, nil, the (hooked) foe the party came from; nil + reason.
+function M.trainerParty3(foe, trainerId)
   if type(foe) ~= "table" then return nil, "no trainer" end
+  local tid = tonumber(trainerId) or tonumber(foe.trainerId)
+  local Solo = solo3()
+  if Solo then
+    local hooked = foe
+    if type(Solo.gen3HookedFoe) == "function" then
+      local okH, got = pcall(Solo.gen3HookedFoe, foe, tid)
+      if okH and type(got) == "table" then hooked = got end
+    end
+    local ok, party = pcall(Solo.gen3TrainerParty, hooked, tid)
+    if not ok then return nil, tostring(party) end
+    if type(party) ~= "table" or #party == 0 then return nil, "no monsters" end
+    return party, nil, hooked
+  end
   local P = g3("src.core.game3.pokemon")
   if not P then return nil, "the engine's POKeMON module is unavailable" end
   local specs = type(foe.party) == "table" and #foe.party > 0 and foe.party or { foe }
@@ -680,7 +767,7 @@ function M.trainerParty3(foe)
     if not mon then return nil, why end
     out[#out + 1] = mon
   end
-  return out
+  return out, nil, foe
 end
 
 local function label3(text)
@@ -706,7 +793,21 @@ function M.trainerRecord3(foe, opts)
   local tid = tonumber(opts.trainerId) or tonumber(foe.trainerId)
   if not tid then return nil end
   local className = label3(foe.trainerClassName or opts.trainerClassName)
-  local name = label3(foe.trainerName or opts.trainerName)
+  -- The name the cart prints: Trainers.info with the player's rival's name,
+  -- which is what replaces the rival and champion rows' placeholder
+  -- (pret battle_message.c; the engine's battle reads session.rivalName the
+  -- same way).  The foe record carries the placeholder itself.
+  local Trainers = g3("src.core.game3.scripting.trainers")
+  local session = Gen3.session()
+  local rival = type(session) == "table" and session.rivalName or nil
+  if (type(rival) ~= "string" or rival == "") and type(opts.game) == "table"
+     and type(opts.game.save) == "table" then
+    rival = opts.game.save.rivalName
+  end
+  local info = Trainers and try3(Trainers.info, tid,
+    { rivalName = type(rival) == "string" and rival or nil }) or nil
+  local name = label3(type(info) == "table" and info.name or nil)
+    or label3(foe.trainerName or opts.trainerName)
   local pic = tonumber(foe.trainerPic) or tonumber(opts.trainerPicId)
   return {
     id = tostring(tid),
@@ -747,25 +848,115 @@ function M.originTrainer3(npcId)
   return tonumber(npcId:match("^g3t(%d+)$"))
 end
 
--- ------- deferred work: the whiteout warp waits for the screen
+-- The trainer number a map object's script fights now: its own, or -- a
+-- rematch -- the row the cart's rematch table has it on today (FRLG's VS
+-- Seeker tiers, Emerald's match-call table), which is the id the
+-- trainerbattle opcode hands the fight (its `opponentA`).
+local function rematchOf3(base, session)
+  local out = {}
+  local VsSeeker = g3("src.core.game3.vs_seeker")
+  local Space = g3("src.core.game3.scripting.space")
+  if VsSeeker and type(VsSeeker.rematchTrainerId) == "function" then
+    local got = tonumber(try3(VsSeeker.rematchTrainerId, base, storeOf(Space)))
+    if got and got > 0 then out[#out + 1] = got end
+  end
+  if session and family3(session) == "rse" then
+    local Rematch = g3("src.core.game3.rse.rematch")
+    if Rematch and type(Rematch.rematchTrainerId) == "function" then
+      local got = tonumber(try3(Rematch.rematchTrainerId, session, base))
+      if got and got > 0 then out[#out + 1] = got end
+    end
+  end
+  return out
+end
+
+-- Is trainer `trainerId` one of the trainers standing on the map this client
+-- is on?  Every object event the engine has loaded here is asked for the
+-- trainer its script fights (trainer_sight.lua getTrainerId -- the object's
+-- own trainerId, else the trainerbattle command in its script), and a rematch
+-- answers for the row it would fight today.
+--
+-- This is what binds an invite joiner's synthetic finish (Coop's
+-- syntheticFinish3) to their own world: the trainer number and the fight's
+-- trainer record both arrived over the wire, from a partner, and agreeing
+-- with each other proves nothing -- a partner could name a gym leader three
+-- towns away and have this client set that leader's flag and pay their prize.
+-- The object has to be here, on this client's own map.  False (never a
+-- guess) when the engine's objects cannot be read.
+function M.trainerOnMap3(trainerId)
+  local tid = tonumber(trainerId)
+  if not tid then return false end
+  local Objects = g3("src.core.game3.objects")
+  local Sight = g3("src.core.game3.trainer_sight")
+  if not (Objects and Sight and type(Sight.getTrainerId) == "function") then return false end
+  local byId = rawget(Objects, "_byId")
+  if type(byId) ~= "table" then return false end
+  local session = Gen3.session()
+  for _, eo in pairs(byId) do
+    if type(eo) == "table" and not eo.hidden then
+      local base = tonumber(try3(Sight.getTrainerId, eo))
+      if base and base > 0 then
+        if base == tid then return true end
+        for _, again in ipairs(rematchOf3(base, session)) do
+          if again == tid then return true end
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- ------- deferred work: what the fight owes the field waits for the screen
 
 local deferred3 = {}
 -- How long a deferred step waits for the field before it runs anyway.  The
 -- same bound Coop's blackout warp keeps (BLACKOUT_WARP_WAIT): every screen it
 -- waits behind is a post-battle prompt the player is standing in front of.
+-- Counted on the field only: off it (the title screen, a scene the cart runs
+-- off the field) nothing runs at all, however long it takes.
 M.DEFER3_WAIT = 60
+
+-- The cart is talking: its message box or a YES / NO is open.  Read off the
+-- engine's own modules, the way Gen3Ui.occupied reads them.
+local function cartTalking3()
+  local Message = g3("src.ui.game3.message")
+  if Message and try3(Message.isOpen) then return true end
+  local Choice = g3("src.ui.game3.choice")
+  if type(Choice) == "table" and Choice.active == true then return true end
+  return false
+end
 
 -- The field with nothing of anybody's in front of it: no layer on the game3
 -- stack at all (the mod's forget-a-move prompt, an evolution, the cart's
--- menus), the field phase up and the cart's own battle not running.
-function M.free3()
+-- menus), no line of the cart's being printed, the field phase up and the
+-- cart's own battle not running.
+--
+-- `strict` also waits for the script VM to be idle and the field unlocked
+-- (Gen3Ui.occupied).  That is the question for a whiteout that has nothing to
+-- do with the script: a warp (Field.respawnAtHeal halts the VM) must never cut
+-- a script off mid-sentence -- a gym leader's badge speech, the lines a beaten
+-- trainer says -- which is exactly what the looser answer allowed.  It is
+-- *not* the question for a stand-in's own steps: those run while the VM waits
+-- on the very trainerbattle command they are about to answer (Vm:isRunning
+-- counts "waiting"), and asked strictly they would wait on themselves.
+function M.free3(strict)
   if not Gen3.inField() or Gen3.inBattle() then return false end
-  return #Gen3Ui.states() == 0
+  if #Gen3Ui.states() ~= 0 then return false end
+  if cartTalking3() then return false end
+  if strict and Gen3Ui.occupied() then return false end
+  return true
 end
 
-function M.defer3(fn, what)
+-- `opts.strict`: see M.free3.  Each step belongs to the save that queued it
+-- (`session`): a load, a CONTINUE or a return to the title drops it unrun,
+-- because a warp or a script's resume for a world that is gone would be done
+-- to the one that replaced it.
+function M.defer3(fn, what, opts)
   if type(fn) ~= "function" then return false end
-  deferred3[#deferred3 + 1] = { fn = fn, what = what or "a step after the battle", clock = 0 }
+  deferred3[#deferred3 + 1] = {
+    fn = fn, what = what or "a step after the battle", clock = 0,
+    session = Gen3.session(), strict = type(opts) == "table" and opts.strict == true,
+  }
   M.pump3(0)
   return true
 end
@@ -775,8 +966,24 @@ function M.pending3() return #deferred3 end
 function M.pump3(dt)
   local entry = deferred3[1]
   if not entry then return false end
+  local now = Gen3.session()
+  if entry.session ~= nil and entry.session ~= now then
+    -- Every step queued by another save goes at once, unrun.
+    local dropped = 0
+    for i = #deferred3, 1, -1 do
+      local e = deferred3[i]
+      if e.session ~= nil and e.session ~= now then
+        table.remove(deferred3, i)
+        dropped = dropped + 1
+      end
+    end
+    mod.log:info("dropped %d step(s) a battle owed a save that is no longer "
+      .. "loaded", dropped)
+    return false
+  end
+  if not Gen3.inField() then return false end
   entry.clock = entry.clock + (tonumber(dt) or 0)
-  if not M.free3() and entry.clock < M.DEFER3_WAIT then return false end
+  if not M.free3(entry.strict) and entry.clock < M.DEFER3_WAIT then return false end
   table.remove(deferred3, 1)
   local ok, err = pcall(entry.fn)
   if not ok then
@@ -786,6 +993,9 @@ function M.pump3(dt)
   return true
 end
 
+-- Everything queued, dropped unrun.  src/Client.lua calls it when another save
+-- takes over (save.loaded / save.created); pump3's own session check is the
+-- same answer for a return to the title, which raises no event.
 function M.resetDeferred3()
   for i = #deferred3, 1, -1 do deferred3[i] = nil end
 end
@@ -794,8 +1004,10 @@ end
 -- table or Emerald's half -- BattleBridge.applyWhiteoutMoneyLoss is the one
 -- that knows which), the heal and the trip to the heal location
 -- (Field.respawnAtHeal, which also halts a waiting script) once the screen is
--- free.  `after` runs behind the warp.
-function M.whiteout3(game, after)
+-- free.  `after` runs behind the warp.  `opts.strict` waits for the script VM
+-- as well (M.free3): every caller but a stand-in answering its own
+-- trainerbattle command passes it.
+function M.whiteout3(game, after, opts)
   local session = Gen3.session() or (type(game) == "table" and game.session) or nil
   if not session then return false end
   local BB = g3("src.core.game3.battle_bridge")
@@ -818,7 +1030,8 @@ function M.whiteout3(game, after)
         .. "POKeMON CENTER -- your party was healed")
     end
     if after then after() end
-  end, "the trip to the POKeMON CENTER")
+  end, "the trip to the POKeMON CENTER",
+    { strict = type(opts) == "table" and opts.strict == true })
 end
 
 -- ------- the stand-in
@@ -837,7 +1050,7 @@ local function introText3(kind, party, trainer)
   return ("%s\nwould like to battle!"):format(who)
 end
 
--- args: { kind = "wild"|"trainer", party, trainer?, encounter?, opts?,
+-- args: { kind = "wild"|"trainer", party, trainer?, foe?, encounter?, opts?,
 --         fightAlone = fn(), done = fn(result)?, game?, mapId?,
 --         defeatText?, double? }
 function M.stand3(args)
@@ -870,8 +1083,12 @@ function M.stand3(args)
     checkpointOrigin = tid and { npcId = M.originId3(tid) } or nil,
     mapId = args.mapId,
     encounter = args.encounter,
+    foe = args.foe,
     opts = args.opts or {},
     game = args.game,
+    -- The save this encounter happened in (see the section header): nothing
+    -- is started or finished for it once another one is running.
+    session = Gen3.session(),
     -- the cover
     isOpaque = false,
     coverText = introText3(kind, party, trainer),
@@ -879,6 +1096,7 @@ function M.stand3(args)
     fightAloneFn = args.fightAlone,
     doneFn = args.done,
     finished = false,
+    began = false,
   }, Stand)
   -- Coop.buriedFinisher reads onFinish (Gen 1) or onDone (Gen 2); both.
   self.onFinish = function(outcome) return self:finish(outcome) end
@@ -918,13 +1136,49 @@ function Stand:draw()
   if l2 and l2 ~= "" then pcall(Font.draw, l2, 16, 137) end
 end
 
+-- Is the save this encounter happened in still the one running?  A stand-in
+-- built with no session (a suite's, by hand) never says no.
+function Stand:sameSession()
+  if self.session == nil then return true end
+  return Gen3.session() == self.session
+end
+
+-- The mod's fight for this encounter has begun: run what battle_bridge.lua's
+-- start does besides the battle itself (M.trainerStart3 / M.wildStart3 --
+-- the match-call rematch clock, the league's friendship, Emerald's TV tally).
+-- Once, and only for a fight the mod actually fights: a stand-in handed back
+-- (`fightAlone`) is started by the cart's own start, which does all of it
+-- itself, so running it at the take counted it twice for every co-op wait
+-- that timed out.  Called by Coop:startBattle as the co-op screen goes up
+-- and by src/Client.lua as solo takes the fight.
+function Stand:begin3()
+  if self.began then return false end
+  self.began = true
+  if not self:sameSession() then return false end
+  if self.kind == "trainer" then
+    M.trainerStart3(self, self.foe, self.opts)
+  else
+    M.wildStart3()
+  end
+  return true
+end
+
 -- Hand the encounter back to the cart: the cover comes down and the cart's
--- own battle starts, with the arguments it was cancelled with.  Once.
+-- own battle starts, with the arguments it was cancelled with.  Once, and
+-- only into the save it was met in: after a load, a CONTINUE or a return to
+-- the title there is no encounter left to hand back (the script that was
+-- waiting on it went with the old session), and starting it would put the
+-- old file's trainer in front of the new file's player.
 function Stand:fightAlone()
   if self.finished then return false end
   self.finished = true
   self.handedBack = true
   self:takeDown()
+  if not self:sameSession() then
+    mod.log:info("a battle from before the save was loaded was dropped, not "
+      .. "started")
+    return false
+  end
   local fn = self.fightAloneFn
   if type(fn) ~= "function" then
     -- Nothing to start (a suite, or a stand-in built by hand): the script
@@ -950,6 +1204,26 @@ local function lostResult(outcome)
     or outcome == "blackout"
 end
 
+-- The trainer's script, halted where it waits: the cart's own ending for a
+-- trainerbattle that is not answered (Field.respawnAtHeal does exactly this
+-- before its warp).  Vm:halt unfreezes what the script locked and ends it, so
+-- nothing after the trainerbattle command runs.
+local function haltScript3()
+  local Space = g3("src.core.game3.scripting.space")
+  local vm = type(Space) == "table" and Space.vm or nil
+  if type(vm) ~= "table" or type(vm.halt) ~= "function" then return false end
+  local running = type(vm.isRunning) == "function" and try3(vm.isRunning, vm)
+  if not running then return false end
+  local ok, err = pcall(vm.halt, vm, true)
+  if not ok then
+    mod.log:warn("the trainer's script could not be stopped after an unfinished "
+      .. "battle (%s); reload from your last save if the world seems stuck",
+      tostring(err))
+    return false
+  end
+  return true
+end
+
 -- The ritual.  `outcome` is what Coop.finishBuriedBattle / SoloBattle hand
 -- over: "win", "lose" (a whiteout is owed and the engine takes it), "loss",
 -- "draw".
@@ -957,9 +1231,17 @@ function Stand:finish(outcome)
   if self.finished then return false end
   self.finished = true
   self:takeDown()
+  -- A result for a save that is gone is nobody's: the script it would resume
+  -- and the party it would heal belong to the old session (see fightAlone).
+  if not self:sameSession() then
+    mod.log:info("a battle from before the save was loaded ended; its result "
+      .. "was dropped")
+    return false
+  end
   outcome = outcome or "draw"
   local lost = lostResult(outcome)
-  local engineResult = (outcome == "win") and "win" or "lose"
+  local won = outcome == "win"
+  local engineResult = won and "win" or "lose"
   local session = Gen3.session() or (type(self.game) == "table" and self.game.session) or nil
   local Natives = g3("src.core.game3.scripting.natives")
   if session and Natives and type(Natives.outcome_to_code) == "function" then
@@ -971,11 +1253,14 @@ function Stand:finish(outcome)
     if Encounters then try3(Encounters.resetRateModifiers) end
   end
   local done = self.doneFn
-  local function carryOn()
+  local function backToField()
     local Audio = g3("src.core.game3.audio")
     if Audio then try3(Audio.restoreMapSong) end
     local Space = g3("src.core.game3.scripting.space")
     if Space then try3(Space.returnToField) end
+  end
+  local function carryOn()
+    backToField()
     if done then
       local ok, err = pcall(done, engineResult)
       if not ok then
@@ -1000,6 +1285,16 @@ function Stand:finish(outcome)
     -- The whiteout, then the script (which respawnAtHeal has halted, as the
     -- cart's own finish leaves it).
     if not M.whiteout3(self.game, carryOn) then carryOn() end
+    return true
+  end
+  if not won and self.kind == "trainer" then
+    -- A draw that left this player standing (see the section header): the
+    -- opcode is never answered -- "lose" would run the bytes after the
+    -- trainerbattle command as though the trainer had been dealt with, and
+    -- anything else marks them beaten.  The script is halted where it waits,
+    -- nobody is whited out, and the trainer is there to be fought again.
+    haltScript3()
+    M.defer3(backToField, "the field after an unfinished battle")
     return true
   end
   -- The script carries on once the screen is the field's again: the cart runs
@@ -1043,11 +1338,13 @@ function M.trainerStand3(foe, opts, ctx)
   if not tid then return nil, "no trainer id" end
   local refused = M.refused3(opts, foe)
   if refused then return nil, refused end
-  local party, why = M.trainerParty3(foe)
+  local party, why = M.trainerParty3(foe, tid)
   if not party then return nil, why end
-  local trainer = M.trainerRecord3(foe, opts)
+  local trainer = M.trainerRecord3(foe, { trainerId = tid, trainerName = opts.trainerName,
+    trainerClassName = opts.trainerClassName, trainerClass = opts.trainerClass,
+    trainerPicId = opts.trainerPicId, game = ctx.game })
   return M.stand3({
-    kind = "trainer", party = party, trainer = trainer, opts = opts,
+    kind = "trainer", party = party, trainer = trainer, foe = foe, opts = opts,
     game = ctx.game, mapId = ctx.mapId, defeatText = opts.defeatText,
     double = (opts.double or (type(foe) == "table" and foe.doubleBattle)) and true or nil,
     fightAlone = ctx.fightAlone, done = opts.done,
@@ -1055,13 +1352,22 @@ function M.trainerStand3(foe, opts, ctx)
 end
 
 -- What battle_bridge.lua does at a wild battle's start that is not the battle
--- itself: Emerald's TV counts the day's wild battles.
+-- itself (BattleBridge.start, for `opts.wild`): Emerald's TV counts the day's
+-- wild battles, and a cart with match call ticks its rematch clock for a wild
+-- fight too (pokeemerald battle_setup.c:402 -- Rematch.onWildBattleStart).
 function M.wildStart3()
   local session = Gen3.session()
-  if not (session and family3(session) == "rse") then return end
-  local Rse = g3("src.core.game3.rse.init")
-  if Rse and type(Rse.call) == "function" then
-    pcall(Rse.call, "tv", "incrementDailyWildBattles", "IncrementDailyWildBattles", nil)
+  if not session then return end
+  if family3(session) == "rse" then
+    local Rse = g3("src.core.game3.rse.init")
+    if Rse and type(Rse.call) == "function" then
+      pcall(Rse.call, "tv", "incrementDailyWildBattles", "IncrementDailyWildBattles", nil)
+    end
+  end
+  local Caps = g3("src.core.game3.capabilities")
+  if Caps and try3(Caps.gate, session, "match_call") then
+    local Rematch = g3("src.core.game3.rse.rematch")
+    if Rematch then try3(Rematch.onWildBattleStart, session) end
   end
 end
 
@@ -1101,25 +1407,32 @@ end
 -- (fishing, Rock Smash, Sweet Scent -- battle_bridge's own `standardWild`;
 -- every scripted, legendary, roamer, safari or facility wild is refused by
 -- Config.SOLO_REFUSED_GEN3). A step encounter the roll hook already offered
--- is not offered twice: `handler.skipWild()` says so.
+-- is not offered twice: `handler.skipWild()` says so.  Nor is a fight this mod
+-- is handing back to the cart (`opts[M.HANDBACK3]`), which is the cart's now.
 --
 -- `inner` is what the wrapper wrapped -- the engine's start, or another mod's
 -- wrapper around it -- so a fight handed back (`fightAlone`) goes down the
 -- same chain an undiverted one would.
+--
+-- Taking the fight is not beginning it: the start's own bookkeeping
+-- (Stand:begin3) runs when the mod's fight actually begins -- a co-op wait
+-- that times out hands the fight back, and the cart's start then does it.
 local function divertStart(inner, modArg, game, foe, opts)
   local handler = start3.handler
   if not (handler and type(handler.take) == "function") then return false end
   opts = opts or {}
   if opts.link or opts.headless then return false end
+  if opts[M.HANDBACK3] then return false end
   local kind = opts.wild and "wild" or "trainer"
   if kind == "wild" then
     if opts.trainerId then return false end
     if type(handler.skipWild) == "function" and handler.skipWild() then return false end
   end
-  if type(handler.wants) == "function" and not handler.wants(kind) then return false end
   local current = Gen3.position()
+  local mapId = current and current.mapId
+  if type(handler.wants) == "function" and not handler.wants(kind, mapId) then return false end
   local ctx = {
-    game = game, mapId = current and current.mapId,
+    game = game, mapId = mapId,
     fightAlone = function() return inner(modArg, game, foe, opts) end,
   }
   local stand
@@ -1129,18 +1442,12 @@ local function divertStart(inner, modArg, game, foe, opts)
     stand = M.trainerStand3(foe, opts, ctx)
   end
   if not stand then return false end
-  if not handler.take(stand, foe, opts, kind) then return false end
-  if kind == "trainer" then
-    M.trainerStart3(stand, foe, opts)
-  else
-    M.wildStart3()
-  end
-  return true
+  return handler.take(stand, foe, opts, kind) == true
 end
 
--- `handler.wants(kind)` is the cheap question (is anybody going to take a
--- fight of this kind at all?) asked before anything is built, so a player
--- nobody would divert for never has a foe rolled twice; `handler.take(stand,
+-- `handler.wants(kind, mapId)` is the cheap question (is anybody going to take
+-- a fight of this kind, here, at all?) asked before anything is built, so a
+-- player nobody would divert for never has a foe rolled twice; `handler.take(stand,
 -- foe, opts)` is the divert itself (the engine's foe and battle opts ride
 -- along for a taker that builds its own fight), true when it took the fight.
 function M.installStart3(handler)

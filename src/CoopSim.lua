@@ -31,6 +31,9 @@
 local need, mod = ...
 local Config = need("Config")
 local Gen = need("Gen")
+-- For its Gen 3 egg rule (CoopField.isEgg3) alone; CoopField needs nothing of
+-- this file's, so there is no cycle.
+local CoopField = need("CoopField")
 
 local M = {}
 M.__index = M
@@ -160,6 +163,9 @@ function M.new(deps, slots)
     -- Gen 2 / Gen 3 replay shell: resolveTurn must not invent Gen1 Damage
     -- rolls. (The name is historical: it was Gold's alone until Gen 3.)
     gen2NoHostSim = generation == 2 or generation == 3 or hostSimStripped or nil,
+    -- Gen 3 parties carry eggs, and an egg is never a fighter: not the seat's
+    -- first monster, not a reserve (see M:fighter3).
+    eggs3 = generation == 3 or nil,
     slots = {},
     -- Battlers knocked down inside one action, acted on once it finishes: the
     -- engine's pipeline can faint two at a time (Explosion, recoil, a
@@ -177,7 +183,7 @@ function M.new(deps, slots)
       owner = raw.owner,
       name = raw.name or ("P" .. i),
       party = raw.party or {},
-      active = raw.active or 1,
+      active = raw.active or self:firstFighter(raw.party) or 1,
       -- This trainer's own items, if they have any. A player brings their bag;
       -- an NPC brings nothing, which is what stops a gym leader spamming a
       -- SUPER POTION it was never given.
@@ -543,9 +549,31 @@ end
 function M:hasReserve(slot)
   if slot.gone then return nil end
   for i, mon in ipairs(slot.party) do
-    if i ~= slot.active and (mon.hp or 0) > 0 then return i end
+    if i ~= slot.active and (mon.hp or 0) > 0 and self:fighter3(mon) then return i end
   end
   return nil
+end
+
+-- Can this monster fight at all?  Always, off Gen 3; on Gen 3 an egg cannot
+-- (the referee fights only the sheets Sheet3 cut, and an egg has none).
+function M:fighter3(mon)
+  return not (self.eggs3 and CoopField.isEgg3(mon))
+end
+
+-- The seat's opening monster when the slot names none: the first one standing
+-- that can fight -- the referee's own `firstLiving` over the uploaded sheets.
+-- nil off Gen 3, where the first party member always opens (the rule this file
+-- has always had).
+function M:firstFighter(party)
+  if not self.eggs3 or type(party) ~= "table" then return nil end
+  local firstUp
+  for i, mon in ipairs(party) do
+    if self:fighter3(mon) then
+      if (tonumber(mon.hp) or 0) > 0 then return i end
+      firstUp = firstUp or i
+    end
+  end
+  return firstUp
 end
 
 function M:sideBeaten(side)

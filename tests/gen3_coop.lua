@@ -441,6 +441,25 @@ function FakeFlags.getFlag(store, _, id) return store.flags[id] end
 local FakeSpace = { store = STORE }
 function FakeSpace.getStore() return STORE end
 function FakeSpace.returnToField() note("returnToField") end
+-- The script VM a trainerbattle command waits in (Space.vm): `running` is
+-- what Vm:isRunning answers (true while the opcode waits -- the engine counts
+-- "waiting"), `halted` counts Vm:halt.
+local FakeVm = { running = false, halted = 0 }
+function FakeVm:isRunning() return self.running end
+function FakeVm:halt(aborted)
+  self.halted = self.halted + 1
+  self.running = false
+  self.aborted = aborted
+  note("halt")
+end
+FakeSpace.vm = FakeVm
+-- The map's object events (objects.lua `_byId`) and what trainer each one's
+-- script fights (trainer_sight.lua getTrainerId), and a rematch table.
+local FakeObjects = { _byId = {}, _order = {} }
+local FakeSight = {}
+function FakeSight.getTrainerId(eo) return eo and tonumber(eo.trainerId) end
+local FakeVsSeeker = { rematch = {} }
+function FakeVsSeeker.rematchTrainerId(tid) return FakeVsSeeker.rematch[tonumber(tid)] or 0 end
 local FakeNatives = {}
 function FakeNatives.outcome_to_code(r)
   if r == "win" then return 1 elseif r == "lose" then return 2 elseif r == "draw" then return 3 end
@@ -467,7 +486,23 @@ function FakeTrainers.get(id)
   out.id = tonumber(id)
   return out
 end
-function FakeTrainers.info(id) return FakeTrainers.get(id) end
+-- Trainers.info's rival rule (class 81 here, synthetic): the player's rival's
+-- name replaces the row's placeholder when the caller hands one in.
+function FakeTrainers.info(id, opts)
+  local info = FakeTrainers.get(id)
+  if info and type(opts) == "table" and type(opts.rivalName) == "string"
+     and opts.rivalName ~= "" and info.class == 81 then
+    info.name = opts.rivalName
+  end
+  return info
+end
+-- The name-hash personalities (Trainers._doublePersonalities), synthetic:
+-- 0x80 plus a per-slot step, as the engine's hash is 0x80 plus the hash.
+function FakeTrainers._doublePersonalities(t)
+  local out = {}
+  for i = 1, #(t.party or {}) do out[i] = 0x80 + i * 0x1000 end
+  return out
+end
 function FakeTrainers.foeFromId(id)
   local t = TRAINERS[tonumber(id)]
   if not t then return nil end
@@ -498,11 +533,19 @@ function FakePrize.rewardRse(tid, opts)
   local info = FakeTrainers.info(tid) or {}
   return 4 * (info.lastLevel or 1) * (opts.moneyMultiplier or 1) * (opts.double and 2 or 1) * 7
 end
+-- Prize.payDay's shape: the coins times the multiplier, into the session.
+function FakePrize.payDay(session, coins, opts)
+  local bonus = coins * ((opts and opts.moneyMultiplier) or 1)
+  session.money = math.min(999999, (session.money or 0) + bonus)
+  note("payDay", coins, opts and opts.moneyMultiplier)
+  return bonus
+end
 local FakeProfile = {}
 function FakeProfile.get(session)
   local rse = session and session.version == "emerald"
   return { family = rse and "rse" or "frlg", safari = false, kinds = { ghost = not rse },
-           rules = { money = rse and "rse" or "frlg", whiteout = rse and "half" or "frlg" } }
+           rules = { money = rse and "rse" or "frlg", whiteout = rse and "half" or "frlg",
+                     amuletCoinPlayerOnly = rse } }
 end
 local encReset = 0
 local FakeEncounters = { rules = function() return { wildHeldItem = function() return 0 end } end,
@@ -545,6 +588,9 @@ local function installStubs()
     session.pc[#session.pc + 1] = mon
     return true
   end })
+  stub("src.core.game3.objects", FakeObjects)
+  stub("src.core.game3.trainer_sight", FakeSight)
+  stub("src.core.game3.vs_seeker", FakeVsSeeker)
 end
 installStubs()
 
@@ -590,6 +636,9 @@ local function newGame(sessionExtra)
   Stack.clear()
   rec = {}
   STORE.flags = {}
+  FakeVm.running, FakeVm.halted, FakeVm.aborted = false, 0, nil
+  FakeObjects._byId = {}
+  FakeVsSeeker.rematch = {}
   CoopField.resetDeferred3()
   return GAME
 end
@@ -864,6 +913,13 @@ do
         "the fight reaches a result (" .. tostring(host.result) .. ")")
   check(guard > 1, "over more than one turn")
   eq(host.result, guest.result, "and both screens agree about it")
+  -- RF6 #6, both seats: every human's own PP spend reaches their own party
+  -- (the guest's here is its seat's party; each client writes only its own).
+  check((mine.pp[1] or 35) + (mine.pp[2] or 15) < 35 + 15,
+        "the host's PP spend is written to its session mon ("
+        .. tostring(mine.pp[1]) .. "/" .. tostring(mine.pp[2]) .. ")")
+  check((partnerParty[1].pp[1] or 35) < 35,
+        "and the guest's to its own party (" .. tostring(partnerParty[1].pp[1]) .. ")")
   eq(#gen1Asked, 0, "still nothing of Gen 1's was asked for")
 end
 
@@ -1267,15 +1323,36 @@ do
 end
 
 do
+  -- RF6 #4: a draw that leaves the player standing (a dropped link, a
+  -- referee timeout) must not reach the opcode at all -- "lose" ran the bytes
+  -- after trainerbattle (a leader's TM without the badge).
   newGame()
   SESSION.party = { monOf(4, 10) }
   local stand, results = trainerStand(326)
+  FakeVm.running = true   -- the trainerbattle command waits in the VM
   Coop.finishBuriedBattle(stand, GAME, "draw", false)
   CoopField.pump3(0.1)
-  eq(results[1], "lose", "a draw is not a win: the trainer stays unbeaten")
+  eq(#results, 0, "a draw is never handed to the opcode (no post-battle bytes run)")
+  eq(FakeVm.halted, 1, "the trainer's waiting script is halted instead")
+  eq(FakeVm.aborted, true, "as aborted, the cart's own ending for it")
+  eq(STORE.flags[0x500 + 326], nil, "the trainer stays unbeaten")
   eq(recorded("moneyLoss"), 0, "and nobody is taxed for it")
   eq(recorded("respawn"), 0, "or sent to a POKeMON CENTER")
+  eq(recorded("returnToField"), 1, "the field comes back")
   eq(SESSION.battleOutcome, 3, "B_OUTCOME_DREW")
+
+  -- A draw that leaves the team on nothing is the cart's whiteout
+  -- (IsPlayerDefeated counts B_OUTCOME_DREW): "lose", the ritual, no flag.
+  newGame()
+  SESSION.party = { monOf(4, 10, { hp = 0 }) }
+  local stand2, results2 = trainerStand(326)
+  FakeVm.running = true
+  eq(Coop.blacksOut("draw", GAME), true, "a wiped draw blacks out")
+  local handled, ritual = Coop.finishBuriedBattle(stand2, GAME, "draw", true)
+  CoopField.pump3(0.1)
+  eq(handled and ritual, true, "handed over as a loss the engine side whites out")
+  eq(recorded("respawn"), 1, "to the heal location")
+  eq(results2[1], "lose", "and the opcode hears a loss")
 end
 
 do
@@ -1315,6 +1392,13 @@ do
     { say = function() return {} end }, nil, nil, nil)
   STORE.flags = {}
   SESSION.money = 1000
+  -- RF6 #7: the id and the fight's trainer both come off the wire; the
+  -- trainer has to stand on this client's own map.
+  eq(coop:syntheticFinish(GAME, { npcId = "g3t326" }, { trainer = { trainerId = 326 } }), false,
+     "a trainer who is not on this map is not finished, whatever the partner says")
+  eq(STORE.flags[0x500 + 326], nil, "no flag is set for them")
+  eq(SESSION.money, 1000, "and no purse is paid")
+  FakeObjects._byId = { [3] = { localId = 3, trainerId = 326 }, [4] = { localId = 4 } }
   eq(coop:syntheticFinish(GAME, { npcId = "g3t326" }, nil), true,
      "an invite joiner finishes the trainer their partner walked into")
   eq(STORE.flags[0x500 + 326], true, "that trainer's flag is set in this client's store")
@@ -1323,6 +1407,15 @@ do
      "a trainer this cart has no row for is refused")
   eq(coop:syntheticFinish(GAME, { npcId = "g3t326" }, { trainer = { trainerId = 400 } }), false,
      "and one the fight was not against")
+  -- A rematch fights a later row of the same trainer (the object's script
+  -- names the first; the rematch table names today's).
+  STORE.flags = {}
+  eq(coop:syntheticFinish(GAME, { npcId = "g3t400" }, nil), false,
+     "a row no object here fights is refused")
+  FakeVsSeeker.rematch[326] = 400
+  eq(coop:syntheticFinish(GAME, { npcId = "g3t400" }, nil), true,
+     "the row a trainer here fights as a rematch is theirs")
+  eq(STORE.flags[0x500 + 400], true, "and is marked beaten")
 
   -- The forget prompt is the cart's own (LearnMove.begin), one at a time.
   FakeLearn.begun = {}
@@ -1405,6 +1498,390 @@ do
   eq(coop:onWildEncounter(GAME, stand, "FR_ROUTE_1"), true, "a partied wild becomes a wait")
   eq(sent[1] and sent[1].msg.mode, "coop_wild", "a coop_wild one")
   eq(sent[1] and sent[1].msg.label, "PIDGEY", "labelled with the cart's species name")
+end
+
+-- ------- RF6: the review findings on the co-op + divert slice
+
+-- A Coop whose ui holds every line while the cart is using the screen (the
+-- real Ui:whenFree rule) -- which, for a trainer wait, is the whole wait: the
+-- trainerbattle command holds the VM "waiting" under the stand-in's cover.
+local function coopHeld(partnerOnMap)
+  local coop, sent, toasts = coopWith(partnerOnMap)
+  local queued = {}
+  coop.ui = {
+    say = function() return {} end,
+    whenFree = function(_, _, show)
+      if Gen3Ui.occupied() then
+        queued[#queued + 1] = show
+        return { deferred = true }
+      end
+      return show()
+    end,
+  }
+  return coop, sent, toasts, queued
+end
+
+do
+  -- #1: a trainer wait that ends without a join must not freeze the game.
+  local function waitOn(coop)
+    local stand, results, started = trainerStand(326)
+    stand:push(GAME)
+    FakeVm.running = true
+    eq(coop:onTrainerBattle(GAME, stand, "FR_ROUTE_1"), true, "a trainer wait is out")
+    eq(Gen3Ui.occupied(), true, "and the player is busy for the whole of it")
+    return stand, results, started
+  end
+
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  local coop, _, toasts, queued = coopHeld(true)
+  local stand, _, started = waitOn(coop)
+  coop:update(10, GAME)
+  eq(started(), 1, "the clock: the cart's battle starts at once, not behind a queued box")
+  eq(Gen3Ui.has(stand), false, "the cover is down")
+  eq(toasts[#toasts], "BOB couldn't\njoin!", "and the line is in the corner")
+  eq(#queued, 0, "nothing waits on a player who is never free")
+  eq(coop.encounter, nil, "the encounter is spent")
+
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  coop, _, toasts, queued = coopHeld(true)
+  stand, _, started = waitOn(coop)
+  coop:onDecline({ name = "BOB", reason = "no" })
+  eq(started(), 1, "a decline: the cart's battle starts at once")
+  eq(toasts[#toasts - 1], "BOB decided\nnot to join.", "said in the corner")
+  eq(toasts[#toasts], "You can take\nthem alone!", "both lines")
+  eq(#queued, 0, "none of it queued")
+
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  coop, _, toasts, queued = coopHeld(true)
+  stand, _, started = waitOn(coop)
+  coop:onPartyEnd()
+  eq(started(), 1, "the party ending: the cart's battle starts at once")
+  eq(toasts[#toasts], "There's nobody\nto wait for.", "in the corner")
+
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  coop, _, toasts, queued = coopHeld(true)
+  stand, _, started = waitOn(coop)
+  coop.waiting = nil
+  coop:abandon("That battle can't\nstart.")
+  eq(started(), 1, "an abandoned assembly: the held trainer is fought at once")
+  eq(#queued, 0, "with nothing left queued")
+end
+
+do
+  -- #3: a won trainer fight with this player's own team wiped: no whiteout
+  -- (pret never whites out a won battle), and the beaten-script completes.
+  newGame()
+  local fainted = monOf(4, 10, { hp = 0 })
+  SESSION.party = { fainted }
+  SESSION.money = 1000
+  local coop = coopWith(true)
+  local stand, results = trainerStand(326)
+  FakeVm.running = true
+  coop.engineBattle = stand
+  eq(Coop.blacksOut("win", GAME), true, "(this player's own team is on nothing)")
+  coop:onBattleOver("win", GAME, { leveledUp = nil }, nil)
+  CoopField.pump3(0.1)
+  eq(results[1], "win", "the opcode hears the win (the flag, the beaten script)")
+  eq(recorded("moneyLoss"), 0, "no whiteout money is taken")
+  eq(recorded("respawn"), 0, "and nobody is warped mid-script")
+  CoopField.pump3(100)
+  eq(recorded("respawn"), 0, "not later either")
+  eq(fainted.hp, 0, "the party stays as the fight left it (the cart's rule after a won battle)")
+  eq(SESSION.money, 1200, "the prize is paid")
+
+  -- A whiteout that answers no trainerbattle waits for the script to end.
+  newGame()
+  SESSION.party = { monOf(4, 10, { hp = 0 }) }
+  FakeVm.running = true   -- a script is running (a beaten-script, an NPC)
+  eq(Coop.blackout({}, GAME), true, "a party battle lost: the cart's whiteout")
+  CoopField.pump3(0.1)
+  eq(recorded("respawn"), 0, "its warp does not cut a running script off")
+  FakeVm.running = false
+  CoopField.pump3(0.1)
+  eq(recorded("respawn"), 1, "it waits for the script to end")
+end
+
+do
+  -- #5: a stand-in never reaches into a save other than its own.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  local stand, results, started = trainerStand(326)
+  local old = SESSION
+  SESSION = newSession()          -- CONTINUE: another session is running
+  eq(stand:fightAlone(), false, "a stale stand-in is not handed back")
+  eq(started(), 0, "the old save's trainer is never started in the new one")
+  SESSION = old
+  local stand2, results2, started2 = trainerStand(326)
+  SESSION = newSession()
+  eq(stand2:finish("win"), false, "a result for a save that is gone is dropped")
+  CoopField.pump3(0.1)
+  eq(#results2, 0, "and the new save's VM is never handed it")
+  eq(#results, 0, "(nothing resumed)")
+  SESSION = old
+  local stand3, _, started3 = trainerStand(326)
+  stand3:fightAlone()
+  eq(started3(), 1, "a stand-in in its own save is handed back as ever")
+  eq(started2(), 0, "(and the dropped one never was)")
+
+  -- The deferred queue: a step queued by one save is dropped under another,
+  -- and nothing runs off the field (a title screen) however long it waits.
+  newGame()
+  local ran = 0
+  CoopField.defer3(function() ran = ran + 1 end, "a test step")
+  -- (free now: it ran at once)
+  eq(ran, 1, "a step with the field free runs at once")
+  Gen3Ui.pushScreen(GAME, "RbyMmoText", { draw = function() end })
+  CoopField.defer3(function() ran = ran + 1 end, "a test step")
+  SESSION = newSession()
+  CoopField.pump3(0.1)
+  eq(ran, 1, "a step owed to another save is not run")
+  eq(CoopField.pending3(), 0, "it is dropped")
+  Gen3Ui.pop(GAME)
+  CoopField.defer3(function() ran = ran + 1 end, "a test step")
+  eq(ran, 2, "(the new save's own steps run)")
+  GAME.phase = "title"
+  CoopField.defer3(function() ran = ran + 1 end, "a test step")
+  CoopField.pump3(CoopField.DEFER3_WAIT + 5)
+  eq(ran, 2, "off the field nothing runs, even past the wait")
+  GAME.phase = "field"
+  CoopField.pump3(0.1)
+  eq(ran, 3, "and it runs once the field is back in the same save")
+
+  -- The disconnect path after a load: Coop:reset lets go of an old wait.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  local coop = coopWith(true)
+  local waitStand, _, waitStarted = trainerStand(326)
+  waitStand:push(GAME)
+  coop:onTrainerBattle(GAME, waitStand, "FR_ROUTE_1")
+  SESSION = newSession()
+  coop:reset()
+  eq(waitStarted(), 0, "a save load's disconnect starts no stale fight")
+end
+
+do
+  -- #6: PP spent in a Gen 3 co-op NPC / wild fight reaches the session mon.
+  local function ppScreen(mode)
+    newGame()
+    local mine = monOf(4, 20)
+    SESSION.party = { mine }
+    local b1, b2, trainer = npcSeats(GAME, 400)
+    local screen = assert(CoopBattle.new(GAME, {
+      slots = {
+        { side = "a", owner = "me", name = "ANN", party = SESSION.party },
+        { side = "a", owner = "p2", name = "BOB", party = { monOf(16, 20) } },
+        { side = "b", name = "DUO", party = b1 },
+        { side = "b", name = "DUO", party = b2 },
+      },
+      mine = 1, host = true, mode = mode, trainer = trainer, selfId = "me", battleId = "pp1",
+    }))
+    screen.medMine = Sheet3.mons(GAME, SESSION.party, {})
+    screen:onBattleReady({ battle = "pp1", mode = mode,
+      sides = { a = { "me", "p2" }, b = { "n1", "n2" } } })
+    -- The referee's rows for our lead, one PP spent on the first move.
+    local rows = Sheet3.moves(mine)
+    rows[1].pp = rows[1].pp - 4
+    screen:onBattleEvent({ battle = "pp1", seq = 1, t = "moves", slot = 0, side = "a", mon = 0,
+      moves = rows })
+    return mine, screen
+  end
+  local mine, screen = ppScreen("coop_npc")
+  eq(screen.mediated, true, "(a refereed screen)")
+  eq(mine.pp[1], 31, "a trainer fight's PP spend is written to the session mon")
+  eq(mine.pp[2], 40, "slot by slot")
+  eq(screen:liveMoves()[1].pp, 31, "and the FIGHT list shows it")
+  mine = ppScreen("coop_wild")
+  eq(mine.pp[1], 31, "and a party encounter's")
+  mine = ppScreen("coop_pvp")
+  eq(mine.pp[1], 35, "a fight between players spends nothing in the save (link rules)")
+end
+
+do
+  -- #8: the co-op trainer party is the cart's and a solo fight's.
+  newGame()
+  local Solo = need("SoloBattle")
+  local stand = trainerStand(326)
+  local pers = Solo.gen3TrainerPersonalities(326, 1)
+  check(pers ~= nil, "(the cart's name-hash personalities for this trainer)")
+  eq(stand.enemyParty[1].personality, pers and pers[1],
+     "the co-op foe carries the cart's personality, not a random one")
+  local again = trainerStand(326)
+  eq(again.enemyParty[1].personality, stand.enemyParty[1].personality,
+     "so every visit meets the same monster")
+  local soloParty = Solo.gen3TrainerParty(FakeTrainers.foeFromId(326), 326)
+  eq(soloParty[1].personality, stand.enemyParty[1].personality, "the one a solo fight meets")
+  eq(soloParty[1].nature, stand.enemyParty[1].nature, "with its nature")
+  -- The rival is named the cart's way.
+  SESSION.rivalName = "GARY"
+  local rival = trainerStand(326)
+  eq(rival.trainer.name, "GARY", "the rival's placeholder name is the player's rival's")
+  eq(rival.label, "RIVAL GARY", "on the wire label too")
+  SESSION.rivalName = nil
+  -- Another mod's trainer.party hook reshapes the co-op team as it does the
+  -- cart's (battle_bridge.lua hooked_trainer_party): the engine's own mod
+  -- runtime is asked, so its two calls are the ones stood in for here.
+  local Runtime = require("src.mods.Runtime")
+  local Compat = require("src.mods.Gen3Compat")
+  local saved3 = { Runtime.wantsHook, Runtime.call, Compat.partyNames, Compat.partyNums }
+  Runtime.wantsHook = function(name) return name == "trainer.party" end
+  Runtime.call = function(_, _, _, _, party)
+    local out = {}
+    for i, m in ipairs(party) do out[i] = m end
+    out[#out + 1] = { species = 16, level = 9, iv = 0, moves = { 33 } }
+    return out
+  end
+  Compat.partyNames = function(p) return p end
+  Compat.partyNums = function(p) return p end
+  local okHook, hooked = pcall(trainerStand, 326)
+  Runtime.wantsHook, Runtime.call, Compat.partyNames, Compat.partyNums =
+    saved3[1], saved3[2], saved3[3], saved3[4]
+  check(okHook, "(the hooked build ran: " .. tostring(okHook or hooked) .. ")")
+  eq(okHook and #hooked.enemyParty, 2, "a trainer.party hook's extra monster is in the co-op team")
+  eq(okHook and (hooked.enemyParty[2] or {}).species, 16, "(the one it added)")
+end
+
+do
+  -- #9: two identical knockouts in one action are two awards; the
+  -- holders-only share pays EXP. SHARE holders alone.
+  newGame()
+  ITEMS[197] = { name = "EXP. SHARE", pocket = "ITEMS", price = 0, holdEffect = 25 }
+  local lead = monOf(4, 10, { hp = 0 })
+  local holder = monOf(16, 10, { heldItem = 197, item = 197 })
+  SESSION.party = { lead, holder }
+  local b1, b2, trainer = npcSeats(GAME, 400)
+  local screen = assert(CoopBattle.new(GAME, {
+    slots = {
+      { side = "a", owner = "me", name = "ANN", party = SESSION.party },
+      { side = "a", owner = "p2", name = "BOB", party = { monOf(16, 20) } },
+      { side = "b", name = "DUO", party = b1 },
+      { side = "b", name = "DUO", party = b2 },
+    },
+    mine = 1, host = true, mode = "coop_npc", trainer = trainer, selfId = "me", battleId = "x1",
+  }))
+  screen.medMine = Sheet3.mons(GAME, SESSION.party, {})
+  screen.expCredit3 = 18
+  screen:bankExp3({ speciesId = 16, level = 5, mon = 0, participants = 1 })
+  screen:bankExp3({ speciesId = 16, level = 5, mon = 0, participants = 1 })
+  local rows = {}
+  screen:flushExp3Batch(rows)
+  eq(#rows, 2, "two PIDGEY felled by one SURF are two knockouts, not one")
+  screen:bankExp3({ speciesId = 16, level = 5, participants = 0 })
+  rows = {}
+  screen:flushExp3Batch(rows)
+  eq(#rows, 1, "the holders-only share is a knockout of its own")
+  local batch = rows[1] and rows[1].batch
+  eq(batch and next(batch.sentIn), nil, "with nobody sent in (the fallen lead is not paid)")
+  local leadExp, holderExp = lead.exp, holder.exp
+  screen:gainExp3(rows[1])
+  eq(lead.exp, leadExp, "the fainted participant earns nothing")
+  check(holder.exp > holderExp, "the EXP. SHARE holder is paid (" .. tostring(holder.exp - holderExp) .. ")")
+  ITEMS[197] = nil
+end
+
+do
+  -- #11: an egg is carried, never fought.
+  newGame()
+  local egg = monOf(4, 5, { isEgg = true })
+  local lead = monOf(4, 10)
+  local bench = monOf(16, 10)
+  SESSION.party = { egg, lead, bench }
+  eq(Coop.blacksOut("loss", GAME), true, "(a loss is a loss)")
+  lead.hp, bench.hp = 0, 0
+  eq(Coop.blacksOut("win", GAME), true, "fainted monsters and an egg are a wiped team")
+  lead.hp, bench.hp = lead.maxHp, bench.maxHp
+  local b1, b2, trainer = npcSeats(GAME, 400)
+  local screen = assert(CoopBattle.new(GAME, {
+    slots = {
+      { side = "a", owner = "me", name = "ANN", party = SESSION.party },
+      { side = "a", owner = "p2", name = "BOB", party = { monOf(16, 20) } },
+      { side = "b", name = "DUO", party = b1 },
+      { side = "b", name = "DUO", party = b2 },
+    },
+    mine = 1, host = true, mode = "coop_npc", trainer = trainer, selfId = "me", battleId = "e1",
+  }))
+  local seat = screen.sim:slot(1)
+  eq(seat.active, 2, "the seat opens on the first monster that can fight, not the egg")
+  local bench3 = screen:benchOf(seat)
+  eq(#bench3, 1, "the bench leaves the egg out")
+  eq(bench3[1] and bench3[1].index, 3, "(the party index the referee's sheet carries)")
+  for _, row in ipairs(screen:itemPartyRows()) do
+    check(row.index ~= 1, "an item's POKeMON picker leaves the egg out")
+  end
+  eq(screen.sim:hasReserve(seat), 3, "and the egg is no reserve")
+  local sheets = Sheet3.mons(GAME, SESSION.party, {})
+  eq(sheets[2] and sheets[2].slot, 2, "(the sheet for the bench mon names party slot 3)")
+end
+
+do
+  -- #12: co-op is asked before a wild's monster is built.
+  newGame()
+  local coop = coopWith(false)
+  eq(coop:wouldTakeWild("FR_ROUTE_1"), false, "a partner on another map: co-op would not take it")
+  local here = coopWith(true)
+  eq(here:wouldTakeWild("FR_ROUTE_1"), true, "a partner here: it would")
+  here.roster = { get = function() return { id = "p2", map = "FR_ROUTE_1", busy = true } end }
+  eq(here:wouldTakeWild("FR_ROUTE_1"), false, "a partner mid-trade: it would not")
+  here.roster = { get = function() return { id = "p2", map = "FR_ROUTE_1" } end }
+  here.wildCoop = false
+  eq(here:wouldTakeWild("FR_ROUTE_1"), false, "WILD: OFF: it would not")
+end
+
+do
+  -- PAY DAY's coins, picked up by side a after its win (RF8's outcome field).
+  local function payScreen(mode, side, heldCoin, foeCoin, version, winners)
+    newGame(version and { version = version } or nil)
+    ITEMS[189].holdEffect = 32
+    local mine = monOf(4, 20, heldCoin and { heldItem = 189, item = 189 } or nil)
+    SESSION.party = { mine }
+    SESSION.money = 1000
+    local b1, b2, trainer = npcSeats(GAME, 400)
+    local slots = {
+      { side = side, owner = "me", name = "ANN", party = SESSION.party },
+      { side = side, owner = "p2", name = "BOB", party = { monOf(16, 20) } },
+      { side = side == "a" and "b" or "a", name = "DUO", party = b1 },
+      { side = side == "a" and "b" or "a", name = "DUO", party = b2 },
+    }
+    local screen = assert(CoopBattle.new(GAME, {
+      slots = slots, mine = 1, host = true, mode = mode, trainer = trainer,
+      selfId = "me", battleId = "pd1" }))
+    screen.medMine = Sheet3.mons(GAME, SESSION.party, {})
+    local sides = side == "a" and { a = { "me", "p2" }, b = { "n1", "n2" } }
+      or { b = { "me", "p2" }, a = { "n1", "n2" } }
+    screen:onBattleReady({ battle = "pd1", mode = mode, sides = sides })
+    if heldCoin then screen.fielded3 = { [1] = true } end
+    if foeCoin then
+      b1[1].heldItem, b1[1].item = 189, 189
+      screen:noteFoeAmulet3(screen.sim:slot(3), 1)
+    end
+    screen:onBattleOutcome({ battle = "pd1", outcome = "win", winners = winners or { "me", "p2" },
+      losers = { "n1", "n2" }, reason = "ko", payDay = 45 })
+    return screen
+  end
+  local screen = payScreen("coop_wild", "a", false)
+  eq(SESSION.money, 1045, "PAY DAY's coins are picked up after the win")
+  eq(screen.payDayPaid, 45, "(what was paid)")
+  local said = false
+  for _, row in ipairs(screen.messages or {}) do
+    local text = type(row) == "table" and (row.text or row.msg) or row
+    if type(text) == "string" and text:find("picked up", 1, true) then said = true end
+  end
+  if type(screen.shown) == "string" and screen.shown:find("picked up", 1, true) then said = true end
+  check(said, "and the cart's line is said")
+  payScreen("coop_npc", "a", true)
+  eq(SESSION.money, 1090, "an AMULET COIN this player fielded doubles them")
+  payScreen("coop_pvp", "a", false)
+  eq(SESSION.money, 1000, "a fight between players pays none (link rules)")
+  payScreen("coop_npc", "a", false, true, "firered")
+  eq(SESSION.money, 1090, "FireRed doubles them for a foe's AMULET COIN too")
+  payScreen("coop_npc", "a", false, true, "emerald")
+  eq(SESSION.money, 1045, "Emerald counts only the player's own (amuletCoinPlayerOnly)")
+  local other = payScreen("coop_wild", "a", false, false, nil, { "p2" })
+  eq(SESSION.money, 1000, "a player the outcome does not name a winner picks nothing up")
+  eq(other.payDayPaid, nil, "(nothing owed)")
 end
 
 -- ------- walking into the trainer the partner is already waiting at
@@ -1503,12 +1980,21 @@ do
   eq(recorded("engineStart"), 0, "and the cart's battle did not start")
   eq(taken[1] and taken[1].kind, "trainer", "the handler took a trainer")
   eq(taken[1] and taken[1].opts, opts, "with the engine's own opts (the opcode's done)")
-  eq(recorded("league"), 1, "the start's own bookkeeping ran for the fight it took")
+  -- RF6 #10: taking is not beginning. A wait that times out hands the fight
+  -- back and the cart's own start does the bookkeeping; counting it at the
+  -- take counted it twice.
+  eq(recorded("league"), 0, "the start's bookkeeping does not run at the take")
   local stand = taken[1].stand
   stand:fightAlone()
   eq(recorded("engineStart"), 1, "handing it back starts the cart's own battle")
+  eq(recorded("league"), 0, "and the mod runs none of the start's bookkeeping for it")
   stand:fightAlone()
   eq(recorded("engineStart"), 1, "once")
+  local fought = CoopField.trainerStand3(foe, { trainerId = 326 }, { game = GAME })
+  eq(fought:begin3(), true, "a fight the mod fights begins with the start's bookkeeping")
+  eq(recorded("league"), 1, "(the league friendship pass)")
+  eq(fought:begin3(), false, "once")
+  eq(recorded("league"), 1, "and never twice")
 
   -- Refused kinds and declined fights reach the cart untouched.
   taken = {}
@@ -1542,6 +2028,16 @@ do
   eq(#taken, 0, "a wrapper left by an unloaded instance takes nothing")
   eq(recorded("engineStart"), 6, "and the cart fights")
   stubMod.find = find
+
+  -- RF6 #2: a start this mod makes to hand a fight back is the cart's.
+  taken = {}
+  local handedBefore = recorded("engineStart")
+  FakeBB.startWild("ENGINE_MOD", GAME, { species = 16, level = 5 },
+    { [CoopField.HANDBACK3] = true })
+  eq(#taken, 0, "a handed-back wild is never offered to a divert again")
+  eq(recorded("engineStart"), handedBefore + 1, "it reaches the cart as handed back")
+  FakeBB.startWild("ENGINE_MOD", GAME, { species = 16, level = 5 }, {})
+  eq(#taken, 1, "and the marker marked that one start, not the next")
 
   eq(CoopField.restoreStart3(), true, "the wrap comes off")
   eq(FakeBB.start, original, "and the engine's own function is back")
@@ -1723,12 +2219,28 @@ for _, version in ipairs({ "firered", "emerald" }) do
   local resets = encReset
   got = run.loader.hooks:call("encounter.roll", vanilla, {}, { mapId = "FR_ROUTE_1" })
   eq(got, nil, version .. ": a diverted encounter is cancelled at the roll")
-  eq(spied and spied.enc, enc, version .. ": solo was handed the rolled encounter")
+  eq(spied and spied.enc.speciesId, 16, version .. ": solo was handed the rolled encounter")
+  check(spied and spied.enc ~= enc and enc.mon == nil,
+        version .. ": (a copy: the cart's own encounter table is not written)")
+  local built = spied and spied.opts.party
+  eq(type(built) == "table" and #built, 1, version .. ": with the monster the stand-in built")
+  eq(spied and spied.enc.mon, built and built[1], version .. ": as the encounter's own mon too")
   eq(spied and spied.game, game, version .. ": on the live game")
   eq(type(spied and spied.opts.done), "function", version .. ": with a done to call")
   eq(type(spied and spied.opts.fallback), "function", version .. ": and a way to hand it back")
   eq(encReset, resets + 1, version .. ": the encounter rate re-arms as a battle start does")
   eq(#Gen3Ui.states(), 0, version .. ": the cover came down for solo's own screen")
+  -- RF6 #2: handing a step wild back starts the cart's own fight once -- the
+  -- start wrap must not offer it to solo (or a co-op wait) all over again.
+  local offers, startsBefore = 0, recorded("engineStart")
+  local spy = ctx.solo.fromGen3Encounter
+  ctx.solo.fromGen3Encounter = function(...) offers = offers + 1; return spy(...) end
+  spied.opts.fallback()
+  eq(recorded("engineStart"), startsBefore + 1, version .. ": a handed-back wild is the cart's fight")
+  eq(offers, 0, version .. ": and nobody is offered it again (no divert loop)")
+  spied.opts.fallback()
+  eq(recorded("engineStart"), startsBefore + 1, version .. ": once")
+  ctx.solo.fromGen3Encounter = spy
   decide = false
   got = run.loader.hooks:call("encounter.roll", vanilla, {}, { mapId = "FR_ROUTE_1" })
   eq(got, enc, version .. ": declined, the encounter is the cart's again")

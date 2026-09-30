@@ -267,27 +267,54 @@ such moment: battles are module-driven (`battle_bridge.lua` →
   - the wrapper is inert unless this mod instance is the loaded one
     (`mod.find(id).exports == mod.exports`), and answers the original for a
     link / headless start, a step encounter `encounter.roll` already offered,
-    and every kind in `Config.SOLO_REFUSED_GEN3` (safari, roamers, scripted
-    and legendary wilds, frontier, Trainer Tower, the first battle,
-    two-opponent and partner fights, …);
-  - when a divert does take the fight, the mod runs its own and then does what
-    `BattleBridge.start`'s `finish` would have done for it — `battleOutcome`,
-    `applyWhiteoutMoneyLoss` + `Field.respawnAtHeal` on a loss (or the
-    `noWhiteout` / EARLY_RIVAL heal-and-carry-on), the map song,
-    `Space.returnToField` — and calls the opcode's own `opts.done(result)`, so
-    the trainer flag, the CONTINUE_SCRIPT jump and the VM tick are the
-    opcode's, unchanged. A draw is handed over as `"lose"` without the
-    whiteout (the opcode has no third answer; anything it does not read as a
-    loss marks the trainer beaten).
-  - `restoreStart3` puts the original back when the slot still holds this
-    wrapper; one stacked on top by another mod keeps the slot and ours is
-    retired in place.
+    a start the mod itself makes to hand a fight back (its opts carry
+    `CoopField.HANDBACK3` — a step wild handed back reaches `start` through
+    `BattleBridge.startWild`, i.e. through this same wrapper), and every kind
+    in `Config.SOLO_REFUSED_GEN3` (safari, roamers, scripted and legendary
+    wilds, frontier, Trainer Tower, the first battle, two-opponent and partner
+    fights, …);
+  - the foe the mod fights is built the way the cart builds it: the
+    `trainer.party` hook runs first (through the public `ModRuntime.call`, as
+    `battle_bridge.lua`'s `hooked_trainer_party` does), then the trainer's
+    name-hash personalities and row IVs (`SoloBattle.gen3HookedFoe` /
+    `gen3TrainerParty`, which co-op and solo share), and the rival is named
+    from `Trainers.info(id, { rivalName })`;
+  - taking the fight is not beginning it: what `BattleBridge.start` does at a
+    battle's start besides the battle — the match-call rematch clock (wild and
+    trainer), the league's friendship, Emerald's TV tally — runs once, when the
+    mod's own fight actually begins (`Stand:begin3`); a co-op wait that times
+    out hands the fight back and the cart's start does all of it itself;
+  - when the mod's fight ends it does what `BattleBridge.start`'s `finish`
+    would have done for it — `battleOutcome`, `applyWhiteoutMoneyLoss` +
+    `Field.respawnAtHeal` on a loss (or the `noWhiteout` / EARLY_RIVAL
+    heal-and-carry-on), the map song, `Space.returnToField` — and calls the
+    opcode's own `opts.done(result)`, so the trainer flag, the CONTINUE_SCRIPT
+    jump and the VM tick are the opcode's, unchanged. A draw that leaves the
+    player standing (a dropped link, a referee timeout) is *not* handed over:
+    the opcode has no third answer (`"lose"` skips the flag but runs the bytes
+    after `trainerbattle` — a leader's TM without the badge — and anything
+    else marks the trainer beaten), so the mod halts the waiting script
+    (`Space.vm:halt(true)`, what `Field.respawnAtHeal` does before its warp)
+    and whites nobody out. A draw that wipes the player is the cart's whiteout
+    (`IsPlayerDefeated` counts `B_OUTCOME_DREW`) and goes over as `"lose"`.
+    A *won* fight never whites out, however it left one partner's team;
+  - the stand-in is bound to the save it was met in (`Gen3.session()`): after
+    a load, a CONTINUE or a return to the title nothing is handed back and no
+    result is delivered — the old fight is never started in the new file;
+  - nothing in production takes the wrap off: the loader has no unload
+    callback for a mod, so the wrapper retires itself instead (a rolled-back
+    mod has no exports, a hot-reloaded one has new ones, and `Gen3.wrapLive`
+    notices a newer wrapper of ours) and is then a straight call to what it
+    wrapped. `restoreStart3` is the explicit form of that retirement, kept for
+    the suite and for a future unload point: it puts the original back when
+    the slot still holds this wrapper, and one stacked on top by another mod
+    keeps the slot while ours is retired in place.
 
 What that costs: it depends on `BattleBridge.start`'s signature and on
-`opts.done` being the opcode's continuation; it cannot run the `trainer.party`
-hook for the fight it takes (that call is a local of `battle_bridge.lua`); and
-`battle.started` / `battle.ended` are not raised for a fight the engine never
-ran (a mod may not emit an engine event).
+`opts.done` being the opcode's continuation; it has to halt the script VM
+itself for a draw (the opcode's poll is private); and `battle.started` /
+`battle.ended` are not raised for a fight the engine never ran (a mod may not
+emit an engine event).
 
 ### Proposed seam
 
@@ -314,7 +341,7 @@ end)
   which), and `trainer.party` runs before it so a taker sees the hooked party.
 - `spec.finish("draw")` gets a real third answer in the opcode (trainer not
   marked beaten, no whiteout, script halted as after a loss) instead of the
-  mod's `"lose"`-without-whiteout mapping.
+  mod halting the script VM from outside.
 
 Parity pair: *vanilla unchanged* — a headless trainerbattle with no hook runs
 the same battle and sets the same flag; *through the public API* — a
@@ -324,9 +351,10 @@ CONTINUE_SCRIPT ran and no battle started.
 
 ### What `rby_mmo` removes when it lands
 
-`CoopField.installStart3` / `restoreStart3` / `divertTrainer` and the
-hand-written half of the finish ritual (`Stand:finish` keeps only the call to
-`spec.finish`); the `encounter.roll` link can stay or move to the new hook.
+`CoopField.installStart3` / `restoreStart3` / `divertStart` (with the
+`HANDBACK3` marker and `Stand:begin3`'s copy of the start's bookkeeping) and
+the hand-written half of the finish ritual (`Stand:finish` keeps only the call
+to `spec.finish`); the `encounter.roll` link can stay or move to the new hook.
 
 ## Additional costs of the reach-around (found in review, 2026-09-30)
 

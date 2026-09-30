@@ -2452,10 +2452,18 @@ end
 
 -- The mons this trainer could send out instead: alive, and not the one
 -- already standing there.
+--
+-- Gen 3 also leaves out an egg. Our own seat is the live session party, eggs
+-- and all, while the referee fights only the sheets Sheet3 cut from it (an
+-- egg has none): the SWITCH row an egg offered went out as a party index no
+-- sheet carries, and the referee's `partyIndexOf` fell back to counting --
+-- sending out whichever monster happened to sit at that sheet position.
 function M:benchOf(slot)
   local out = {}
+  local gen3 = self.gen3
   for i, mon in ipairs(slot.party or {}) do
-    if i ~= slot.active and (mon.hp or 0) > 0 then
+    if i ~= slot.active and (mon.hp or 0) > 0
+       and not (gen3 and CoopField.isEgg3(mon)) then
       out[#out + 1] = { index = i, mon = mon }
     end
   end
@@ -2613,16 +2621,19 @@ function M:itemPartyRows()
   local active = (seat and seat.active) or 1
   local out = {}
   for i, mon in ipairs(party) do
-    local label = mon.nickname or mon.species or ("#" .. i)
-    if self.gen3 then
-      label = Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+    -- An egg is no target for a battle item (it has no sheet in the fight).
+    if not (self.gen3 and CoopField.isEgg3(mon)) then
+      local label = mon.nickname or mon.species or ("#" .. i)
+      if self.gen3 then
+        label = Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+      end
+      out[#out + 1] = {
+        index = i,
+        label = tostring(label),
+        fainted = (mon.hp or 0) <= 0,
+        active = i == active,
+      }
     end
-    out[#out + 1] = {
-      index = i,
-      label = tostring(label),
-      fainted = (mon.hp or 0) <= 0,
-      active = i == active,
-    }
   end
   return out
 end
@@ -3612,6 +3623,10 @@ function M:playEvents(events)
       if self.gen3 and event.slot == self.mine and event.index then
         self.fielded3 = self.fielded3 or {}
         self.fielded3[event.index] = true
+      elseif self.gen3 and event.index and self:foeSide(event.slot) then
+        -- ...and on the foe's side, which FireRed / LeafGreen count too
+        -- (M:amuletCoin3).
+        self:noteFoeAmulet3(slot, event.index)
       end
       -- Who was standing there, taken before the swap lands: the rows already
       -- queued for this slot are about that monster and nothing else.
@@ -9995,7 +10010,10 @@ function M:medRows(msg)
         local hasBench = false
         if seat then
           for _, mon in ipairs(seat.party or {}) do
-            if (mon.hp or 0) > 0 then hasBench = true; break end
+            -- A Gen 3 egg is carried, not benched (see benchOf).
+            if (mon.hp or 0) > 0 and not (self.gen3 and CoopField.isEgg3(mon)) then
+              hasBench = true; break
+            end
           end
         end
         self.medMustReplace = hasBench or nil
@@ -10363,6 +10381,9 @@ function M:onBattleEvent(msg)
         else
           self:syncLivePp(msg.moves)
         end
+        -- Gen 3's FIGHT rows are copies (Sheet3.moves), so the spend has to
+        -- be written onto the session mon itself to reach the save.
+        if self.gen3 then self:savePp3(msg) end
       else
         self.medMoveList = msg.moves
       end
@@ -10552,6 +10573,8 @@ function M:onBattleOutcome(msg)
   if why then
     self.medPending[#self.medPending + 1] = { kind = "msg", text = why }
   end
+  -- Gen 3: the coins PAY DAY scattered, picked up by the winners.
+  if self.gen3 then self:payDay3(msg, result) end
   self:medFlush()
   -- Catcher-only grant: everyone sees Gotcha; only msg.catcher adds the mon.
   if msg.reason == "catch" then
@@ -11703,6 +11726,22 @@ end
 
 -- ------- the award
 
+-- One `exp` share, banked into the knockout it belongs to.
+--
+-- The referee sends one share per paid participant of a knockout, and a
+-- batch here is one knockout: its foe (species and level) and the set of our
+-- monsters sent in against it (`sentIn`), which is what Exp3.award divides
+-- by.  Consecutive shares for the same foe are the same knockout -- until a
+-- party member repeats: one monster is never paid twice for one knockout, so
+-- a repeat is the next one.  Two identical foes felled by one Surf used to
+-- fold into a single batch here and pay as one knockout.
+--
+-- The holders-only share (`participants` 0 and no `mon`, docs/plans/
+-- gen3-battle-sheet.md §7) is its own knockout with nobody sent in: every
+-- monster that fought the foe has fainted, and pret Cmd_getexp still pays the
+-- living EXP. SHARE holders -- Exp3.award prices an empty `sentIn` as exactly
+-- that.  Read as an ordinary share, it counted the fainted active monster as
+-- sent in and paid it.
 function M:bankExp3(msg)
   if (self.expCredit3 or 0) <= 0 then
     self:warnNoExp("the referee paid experience with no knockout ahead of it, "
@@ -11717,6 +11756,7 @@ function M:bankExp3(msg)
     return false
   end
   local at = tonumber(msg.mon)
+  local holdersOnly = at == nil and tonumber(msg.participants) == 0
   local partyIndex
   if at then
     partyIndex = self:medPartySlot(floor(at) + 1)
@@ -11724,25 +11764,27 @@ function M:bankExp3(msg)
       self:warnNoExp("the referee paid a party member this client never uploaded")
       return false
     end
-  else
+  elseif not holdersOnly then
     local seat = self:mySlot()
     partyIndex = seat and seat.active
   end
-  if not partyIndex then return false end
+  if not (partyIndex or holdersOnly) then return false end
   self.expCredit3 = self.expCredit3 - 1
   species, level = floor(species), math.max(1, floor(level))
   local key = species .. ":" .. level
   local batch = self.expBatch3
-  if batch and batch.key ~= key then
+  if batch and (holdersOnly or batch.holdersOnly or batch.key ~= key
+                or batch.sentIn[partyIndex]) then
     self.expBatches3 = self.expBatches3 or {}
     self.expBatches3[#self.expBatches3 + 1] = batch
     batch = nil
   end
   if not batch then
-    batch = { key = key, species = species, level = level, sentIn = {} }
+    batch = { key = key, species = species, level = level, sentIn = {},
+              holdersOnly = holdersOnly or nil }
     self.expBatch3 = batch
   end
-  batch.sentIn[partyIndex] = true
+  if partyIndex then batch.sentIn[partyIndex] = true end
   return true
 end
 
@@ -11888,6 +11930,31 @@ function M:teach3(mon, name, moveId)
   return true
 end
 
+-- The fights whose PP the cart keeps: a trainer or a wild battle writes the
+-- battle party's PP home (battle_bridge.lua writeback, Downgrade.
+-- writebackPlayerPp).  A fight between players is a link battle, and the cart
+-- reloads both parties after one (pokefirered cable_club.c LoadPlayerParty),
+-- so a spar spends nothing (MediatedBattle.LINK_MODES).
+local KEEPS_PP3 = { coop_npc = true, coop_wild = true }
+
+-- A `moves` event on our seat that names a party member (`mon`, the 0-based
+-- sheet index -- a PP spend or restore): the referee's PP onto the session
+-- mon behind that sheet.  Gen 3's FIGHT rows are copies (Sheet3.moves), so
+-- without this every point of PP spent in a co-op fight was spent in the
+-- fight alone and back in the save afterwards.  Sheet3.applyToMon writes a
+-- slot only when its move is still the move the row names -- a list the
+-- referee rewrote (Transform, Mimic) never reaches the save.
+function M:savePp3(msg)
+  if not KEEPS_PP3[self.mode] then return false end
+  local at = tonumber(msg and msg.mon)
+  if not (at and type(msg.moves) == "table") then return false end
+  local partyIndex = self:medPartySlot(floor(at) + 1)
+  local seat = self:mySlot()
+  local mon = partyIndex and seat and seat.party and seat.party[partyIndex]
+  if type(mon) ~= "table" then return false end
+  return Sheet3.applyToMon(mon, { moves = msg.moves })
+end
+
 -- The FIGHT list and the referee's copy of a mon that just learned a move.
 function M:syncFightMoves3(mon)
   local seat = self:mySlot()
@@ -11991,36 +12058,85 @@ end
 
 -- ------- the arena and the page
 
+-- ------- per-fight memos for the draw paths
+--
+-- The arena and the GBA page are drawn every frame, and what they ask of the
+-- cart for a monster -- its front pic, its icon -- does not change while that
+-- monster (and the species it is showing) stays the same. Each answer is kept
+-- per monster table, weakly, for the life of this screen: a pcall and an opts
+-- table per seat per frame were the cost before.
+local function memo3(self, field, mon, sp)
+  local byMon = self[field]
+  if not byMon then
+    byMon = setmetatable({}, { __mode = "k" })
+    self[field] = byMon
+  end
+  local row = byMon[mon]
+  if not row then
+    row = {}
+    byMon[mon] = row
+  end
+  return row, sp or 0
+end
+
 -- The cart's arena art for a seat.
 function M:gen3Front(battler, species)
   local mon = battler and battler.mon
   if type(mon) ~= "table" then return nil end
   local sp = tonumber(species) or tonumber(mon.species or mon.speciesId)
+  local row, key = memo3(self, "front3Memo", mon, sp)
+  local hit = row[key]
+  if hit ~= nil then return hit or nil end
   local subject = mon
   if sp and sp ~= tonumber(mon.species or mon.speciesId) then subject = sp end
   local ok, pic = pcall(Battlefield.gen3Front, subject, {
     personality = mon.personality, shiny = mon.shiny,
   })
-  return ok and pic or nil
+  pic = ok and pic or nil
+  row[key] = pic or false
+  return pic
 end
 
 function M:gen3Icon(battler, species)
   local mon = battler and battler.mon
   if type(mon) ~= "table" then return nil end
   local sp = tonumber(species) or tonumber(mon.species or mon.speciesId)
+  local row, key = memo3(self, "icon3Memo", mon, sp)
+  local hit = row[key]
+  if hit ~= nil then return hit or nil end
   local subject = (sp and sp ~= tonumber(mon.species or mon.speciesId)) and sp or mon
   local ok, icon = pcall(Battlefield.gen3Icon, subject)
-  return ok and icon or nil
+  icon = ok and icon or nil
+  row[key] = icon or false
+  return icon
 end
 
 -- The roster row the arena reads a player's OW graphic's version / gender
 -- from (contract C3); this player's own from this boot.
+--
+-- Asked for every human seat on every frame the arena draws, so the answer is
+-- kept per player for the fight (a version and a gender do not change inside
+-- one): the roster export it reads builds and sorts the whole player list.
+-- A player the roster does not know yet is asked again next frame, not
+-- remembered as unknown.
 function M:gen3HumanLook(human)
   if type(human) ~= "table" then return human end
+  local looks = self.look3Memo
+  if not looks then
+    looks = {}
+    self.look3Memo = looks
+  end
+  local key = human.id ~= nil and tostring(human.id) or nil
+  local known = key and looks[key]
+  if known then
+    human.version, human.gender = known.version, known.gender
+    return human
+  end
   if human.id ~= nil and human.id == self.selfId then
     local player = Gen3.player()
     human.version = Gen3.version()
     human.gender = player and player.gender or nil
+    looks[key] = { version = human.version, gender = human.gender }
     return human
   end
   local players = exportPlayers()
@@ -12033,6 +12149,7 @@ function M:gen3HumanLook(human)
   if type(row) == "table" then
     human.version = row.version
     human.gender = row.gender
+    if key then looks[key] = { version = row.version, gender = row.gender } end
   end
   return human
 end
@@ -12088,7 +12205,12 @@ function M:gen3SeatModel(index, isPlayer)
     if battler.shownExpFrac == nil then self:seedExpClock(battler) end
     seat.expFrac = battler.shownExpFrac
   end
-  if not isPlayer and self.mode == "coop_wild" then seat.caught = self:wildDexCaught3() end
+  if not isPlayer and self.mode == "coop_wild" then
+    -- The dex's answer is read once per fight for the page (a catch ends the
+    -- fight); the throw itself still asks afresh (commitMediatedItem).
+    if self.dexCaught3 == nil then self.dexCaught3 = self:wildDexCaught3() end
+    seat.caught = self.dexCaught3
+  end
   return seat
 end
 
@@ -12135,12 +12257,13 @@ function M:gen3ClassicModel()
   local mine = self:mySlot()
   local active = mine and mine.battler
   model.prompt = ("What will\n%s do?"):format(tostring(active and active.name or "?"))
-  if self.replacing then
-    local rows = {}
-    for _, entry in ipairs(self:benchOf(mine or {})) do
-      rows[#rows + 1] = self:gen3PartyRow(entry.mon, entry.index)
-    end
-    model.list = { title = "POKéMON", rows = rows, cursor = self.switchIndex or 1 }
+  -- The POKéMON / BAG / TARGET lists are the page's expensive half (a front
+  -- pic and an icon per party row), and nothing on them moves while the
+  -- player is choosing: they are rebuilt when the phase or the cursor does,
+  -- not on every frame (M:classicList3).
+  local list = self:classicList3(phase, mine)
+  if list then
+    model.list = list
   elseif phase == "choose" then
     local items = {}
     for i, entry in ipairs(self:bandCommandItems()) do items[i] = entry.label end
@@ -12162,34 +12285,6 @@ function M:gen3ClassicModel()
     end
     model.moves = rows
     model.cursor = (phase == "item_move") and (self.moveIndex or 1) or (self.moveIndex or 1)
-  elseif phase == "item" then
-    local rows = {}
-    for _, item in ipairs(self:usableItems()) do
-      rows[#rows + 1] = { label = tostring(item.name or item.id), right = "x" .. tostring(item.count or 0) }
-    end
-    model.list = { title = "BAG", rows = rows, cursor = self.itemIndex or 1 }
-  elseif phase == "item_party" then
-    local rows = {}
-    local party = (mine and mine.party) or {}
-    for _, row in ipairs(self:itemPartyRows()) do
-      local entry = self:gen3PartyRow(party[row.index], row.index)
-      entry.dim = row.fainted or nil
-      rows[#rows + 1] = entry
-    end
-    model.list = { title = "POKéMON", rows = rows, cursor = self.switchIndex or 1 }
-  elseif phase == "switch" then
-    local rows = {}
-    for _, entry in ipairs(self:benchOf(mine or {})) do
-      rows[#rows + 1] = self:gen3PartyRow(entry.mon, entry.index)
-    end
-    model.list = { title = "POKéMON", rows = rows, cursor = self.switchIndex or 1 }
-  elseif phase == "target" then
-    local rows = {}
-    for _, seat in ipairs(self:targetChoices()) do
-      local b = seat.battler
-      rows[#rows + 1] = { label = tostring(b and b.name or "?") }
-    end
-    model.list = { title = "TARGET", rows = rows, cursor = self.targetIndex or 1 }
   end
   if model.message == nil and not (model.commands or model.moves or model.list) then
     if phase == "over" then
@@ -12207,6 +12302,70 @@ function M:gen3ClassicModel()
   return model
 end
 
+-- The page's list for this phase (the bench after a faint, the BAG, the
+-- item's POKéMON picker, SWITCH, the TARGET picker), or nil when the phase has
+-- none.  Kept until the phase, the cursor, the replacement state or the bag
+-- list changes: nothing on these rows moves while the player is choosing, and
+-- a party row asks the cart for a front pic and an icon.
+function M:classicList3(phase, mine)
+  local cursor
+  if self.replacing or phase == "item_party" or phase == "switch" then
+    cursor = self.switchIndex or 1
+  elseif phase == "item" then
+    cursor = self.itemIndex or 1
+  elseif phase == "target" then
+    cursor = self.targetIndex or 1
+  else
+    self.list3Memo = nil
+    return nil
+  end
+  local replacing = self.replacing and true or false
+  local memo = self.list3Memo
+  if memo and memo.phase == phase and memo.replacing == replacing
+     and memo.cursor == cursor and memo.items == self.itemList and memo.seat == mine then
+    return memo.list
+  end
+  local list
+  if replacing then
+    local rows = {}
+    for _, entry in ipairs(self:benchOf(mine or {})) do
+      rows[#rows + 1] = self:gen3PartyRow(entry.mon, entry.index)
+    end
+    list = { title = "POKéMON", rows = rows, cursor = cursor }
+  elseif phase == "item" then
+    local rows = {}
+    for _, item in ipairs(self:usableItems()) do
+      rows[#rows + 1] = { label = tostring(item.name or item.id), right = "x" .. tostring(item.count or 0) }
+    end
+    list = { title = "BAG", rows = rows, cursor = cursor }
+  elseif phase == "item_party" then
+    local rows = {}
+    local party = (mine and mine.party) or {}
+    for _, row in ipairs(self:itemPartyRows()) do
+      local entry = self:gen3PartyRow(party[row.index], row.index)
+      entry.dim = row.fainted or nil
+      rows[#rows + 1] = entry
+    end
+    list = { title = "POKéMON", rows = rows, cursor = cursor }
+  elseif phase == "switch" then
+    local rows = {}
+    for _, entry in ipairs(self:benchOf(mine or {})) do
+      rows[#rows + 1] = self:gen3PartyRow(entry.mon, entry.index)
+    end
+    list = { title = "POKéMON", rows = rows, cursor = cursor }
+  else
+    local rows = {}
+    for _, seat in ipairs(self:targetChoices()) do
+      local b = seat.battler
+      rows[#rows + 1] = { label = tostring(b and b.name or "?") }
+    end
+    list = { title = "TARGET", rows = rows, cursor = cursor }
+  end
+  self.list3Memo = { phase = phase, replacing = replacing, cursor = cursor,
+                     items = self.itemList, seat = mine, list = list }
+  return list
+end
+
 -- One POKéMON page row for a party mon (front pic, icon, level, HP).
 function M:gen3PartyRow(mon, index)
   if type(mon) ~= "table" then return { label = "?" } end
@@ -12216,34 +12375,132 @@ function M:gen3PartyRow(mon, index)
   if seat and seat.active == index and seat.battler and seat.battler.mon == mon then
     hp = displayHP(seat.battler)
   end
-  local frontOk, front = pcall(Battlefield.gen3Front, mon)
-  local iconOk, icon = pcall(Battlefield.gen3Icon, mon)
+  -- The same per-monster memo the seats use (memo3), under its own key: the
+  -- page's front pic here is the plain one (no personality opts).
+  local art, key = memo3(self, "row3Memo", mon, sp)
+  local front, icon = art.front, art.icon
+  if art.key ~= key then
+    local frontOk, f = pcall(Battlefield.gen3Front, mon)
+    local iconOk, i = pcall(Battlefield.gen3Icon, mon)
+    front, icon = frontOk and f or nil, iconOk and i or nil
+    art.front, art.icon, art.key = front, icon, key
+  end
   return {
     label = Sheet3.displayName(mon, sp),
-    front = frontOk and front or nil,
-    icon = iconOk and icon or nil,
+    front = front,
+    icon = icon,
     level = mon.level, hp = hp, maxHp = maxHp, status = mon.status,
     right = ("%d/%d"):format(hp, maxHp),
     dim = hp <= 0 or nil,
   }
 end
 
--- Did one of this player's monsters that took the field hold an AMULET COIN
--- (HOLD_EFFECT_DOUBLE_PRIZE)?  The cart doubles a trainer's prize for it.
+-- Is this fight's money doubled (gBattleStruct->moneyMultiplier)?  The cart
+-- sets it when an AMULET COIN (HOLD_EFFECT_DOUBLE_PRIZE) switches in
+-- (ItemBattleEffects ITEMEFFECT_ON_SWITCH_IN, the engine's held_items.lua
+-- onSwitchIn): a holder of this player's on FireRed, LeafGreen and Emerald,
+-- and -- FireRed / LeafGreen only -- one on the foe's side too (Emerald's
+-- `amuletCoinPlayerOnly`, MediatedBattle:moneyMultiplier3's rule).  Both the
+-- trainer's prize (Coop.prize3) and PAY DAY's coins are doubled by it.  A
+-- partner's holder is theirs: their own client doubles their own purse.
 local HOLD_EFFECT_DOUBLE_PRIZE = 32
+
+local function doublesPrize3(mon)
+  local held = type(mon) == "table" and tonumber(mon.heldItem or mon.item) or nil
+  if not (held and held > 0) then return false end
+  local info = Gen3.itemInfo(held)
+  return info ~= nil and tonumber(info.holdEffect) == HOLD_EFFECT_DOUBLE_PRIZE
+end
+
+-- The running cart's battle profile says whether a foe's coin counts; a
+-- build without the profile falls back to the family, the same answer.
+local function amuletCoinPlayerOnly3()
+  local BP = Gen3.engine("src.core.game3.battle.profile")
+  if BP and type(BP.get) == "function" then
+    local ok, bp = pcall(BP.get, Gen3.session())
+    if ok and type(bp) == "table" and type(bp.rules) == "table" then
+      return bp.rules.amuletCoinPlayerOnly == true
+    end
+  end
+  return Gen3.family() == "rse"
+end
+
+-- A foe's send-out: does an AMULET COIN come out with it?  Read at the
+-- switch-in, as the cart reads it, off the monster that seat holds.
+function M:noteFoeAmulet3(slot, index)
+  local mon = type(slot) == "table" and type(slot.party) == "table" and slot.party[index] or nil
+  if doublesPrize3(mon) then self.amuletFoe3 = true end
+  return self.amuletFoe3 == true
+end
+
 function M:amuletCoin3()
   local seat = self.sim and self.sim:slot(self.mine)
   local party = seat and seat.party
-  if type(party) ~= "table" then return false end
-  for index in pairs(self.fielded3 or {}) do
-    local mon = party[index]
-    local held = type(mon) == "table" and tonumber(mon.heldItem or mon.item) or nil
-    if held and held > 0 then
-      local info = Gen3.itemInfo(held)
-      if info and tonumber(info.holdEffect) == HOLD_EFFECT_DOUBLE_PRIZE then return true end
+  if type(party) == "table" then
+    for index in pairs(self.fielded3 or {}) do
+      if doublesPrize3(party[index]) then return true end
     end
   end
+  if self.amuletFoe3 and not amuletCoinPlayerOnly3() then return true end
   return false
+end
+
+-- PAY DAY's coins, for a player the outcome makes a winner.
+--
+-- The referee tallies them the cart's way (level x 5 per use, pret
+-- gPaydayMoney) and reports side a's total on a knockout win in a wild /
+-- coop_wild / coop_npc fight only (`payDay`; never between players -- link
+-- rules, and this checks the mode again as the belt).  The wallet and the
+-- multiplier are the client's, as they are the cart's (Cmd_givepaydaymoney:
+-- `gPaydayMoney * gBattleStruct->moneyMultiplier`): doubled by an AMULET COIN
+-- the cart counts (M:amuletCoin3 -- this player's own holder, or on FireRed /
+-- LeafGreen a foe's), paid into the live session through the engine's own
+-- Prize.payDay, and said in the cart's words (STRINGID_PLAYERPICKEDUPMONEY,
+-- Prize.payDayMessage's string) after the ending, where the cart says it.
+-- Every winner picks the coins up: each fought the fight they were scattered
+-- in (MediatedBattle:payDay3 is the 1v1's twin).  Once per fight.
+local PAYDAY3_MAX = 65535
+function M:payDay3(msg, result)
+  if self.payDayPaid ~= nil then return 0 end
+  if Mediated.LINK_MODES[self.mode] or result ~= "win" then return 0 end
+  local coins = tonumber(msg and msg.payDay)
+  if not coins then return 0 end
+  coins = math.min(PAYDAY3_MAX, floor(coins))
+  if coins <= 0 then return 0 end
+  self.payDayPaid = 0
+  local session = Gen3.session()
+  if type(session) ~= "table" then
+    mod.log:warn("this fight's Pay Day coins could not be paid because no save "
+      .. "is loaded -- start or continue a game before battling; the fight's "
+      .. "result still counts")
+    return 0
+  end
+  local mult = self:amuletCoin3() and 2 or 1
+  local Prize = Gen3.engine("src.core.game3.battle.prize")
+  local paid
+  if Prize and type(Prize.payDay) == "function" then
+    local ok, got = pcall(Prize.payDay, session, coins, { moneyMultiplier = mult })
+    paid = ok and tonumber(got) or nil
+  end
+  if not paid then
+    -- The engine's arithmetic without the engine: coins x multiplier into the
+    -- wallet, capped where the cart caps money.
+    local before = Gen.money.get(session)
+    Gen.money.set(session, before + coins * mult)
+    paid = coins * mult
+  end
+  paid = floor(paid)
+  if paid <= 0 then return 0 end
+  self.payDayPaid = paid
+  local name = session.name or "You"
+  -- pret's buffer is a halfword (PREPARE_HWORD_NUMBER_BUFFER): a doubled
+  -- 65535 prints as what fits, as Prize.payDayMessage prints it.  Through
+  -- Gen3.battleText so the cart's printer codes are cleaned for this screen.
+  local line = Gen3.battleText("STRINGID_PLAYERPICKEDUPMONEY",
+    { playerName = name, buff1 = tostring(paid % 65536) })
+    or ("%s picked up\n¥%d!"):format(tostring(name), paid % 65536)
+  self.medPending[#self.medPending + 1] = { kind = "msg", text = line }
+  return paid
 end
 
 -- The plain 240x160 page when the cart's chrome is not reachable (a headless

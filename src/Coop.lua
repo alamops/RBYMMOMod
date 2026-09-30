@@ -380,6 +380,38 @@ function M:release()
   return true
 end
 
+-- Gen 3's half of "say it, then let go": a wait that ends without a join
+-- hands the cart its fight *now*, and the sentence goes in the corner.
+--
+-- On Gen 1 / Gen 2 the line is a box over the engine's battle and release()
+-- runs when it is dismissed. On Gen 3 that box could never go up: M:tell
+-- waits for Ui:whenFree, and for the whole of a trainer wait the player is
+-- not free -- the trainerbattle command holds the script VM "waiting"
+-- (Vm:isRunning counts it) under the stand-in's cover, which is exactly what
+-- Gen3Ui.occupied reads as busy. The line queued, release() queued behind it,
+-- and the game stood still under the cover for good. So the order turns
+-- round: the cover comes down and the cart's battle starts first, and the
+-- line is a toast (plus the party log) -- the corner survives the battle
+-- screen, a box would only have reached the player after the fight it was
+-- about.
+--
+-- True when the encounter was a Gen 3 stand-in and has been let go; false
+-- leaves the caller's own Gen 1 / Gen 2 path to run untouched.
+function M:letGo3(...)
+  local encounter = self.encounter
+  local engine = encounter and encounter.engine
+  if not (type(engine) == "table" and engine.gen3Divert) then return false end
+  self:release()
+  for i = 1, select("#", ...) do
+    local line = select(i, ...)
+    if type(line) == "string" and line ~= "" then
+      self:note(line)
+      self:toastLine(line)
+    end
+  end
+  return true
+end
+
 -- The co-op battle happened, so the encounter is spent: let the script that
 -- was suspended in front of the trainer carry on, and do *not* fight it again.
 --
@@ -664,12 +696,20 @@ function M.blacksOut(result, game)
   local party = game and game.save and game.save.party
   -- Gen 3's save is a snapshot rebuilt at save time; the live party is the
   -- session's.
-  if onGen3() then party = Gen3.party() or party end
+  local gen3 = onGen3()
+  if gen3 then party = Gen3.party() or party end
   if type(party) ~= "table" or #party == 0 then return false end
+  local fighters = 0
   for _, mon in ipairs(party) do
-    if (tonumber(mon.hp) or 0) > 0 then return false end
+    -- An egg is carried, never standing: a party of fainted monsters and an
+    -- egg is a wiped team on the cart (Gen 3 only -- nothing else had eggs
+    -- with HP to count).
+    if not (gen3 and CoopField.isEgg3(mon)) then
+      fighters = fighters + 1
+      if (tonumber(mon.hp) or 0) > 0 then return false end
+    end
   end
-  return true
+  return fighters > 0
 end
 
 -- Where a blackout returns to. Prefer the live overworld's own healPoint
@@ -812,8 +852,10 @@ function M:blackout(game, context)
   -- table, Emerald's half), its heal and its warp to the last heal location
   -- -- through CoopField's stand-in half, which parks the warp until the
   -- screen is free exactly as the pump below does for Gen 1 / Gen 2.
+  -- Strict: this whiteout answers no trainerbattle command, so its warp waits
+  -- for any script to finish rather than cutting one off (CoopField.free3).
   if onGen3() then
-    if CoopField.whiteout3(game) then return true end
+    if CoopField.whiteout3(game, nil, { strict = true }) then return true end
     mod.log:warn("a lost %s could not black you out (no Gen 3 session); walk "
       .. "to a POKéMON CENTER to heal", noun)
     return false
@@ -1255,6 +1297,32 @@ function M:onWildEncounter(game, state, mapId)
     wildCatchMon = mon,
   }
   return self:beginWildCoop()
+end
+
+-- Would M:onWildEncounter take a wild met on `mapId` right now?  Its gates,
+-- asked before there is an encounter to hand it.
+--
+-- Gen 3 asks this *before* the stand-in's monster is built (src/Client.lua's
+-- wantsDivert3): building one rolls the cart's RNG the way the cart's own
+-- foe does, so a wild that co-op then declined -- a partner on another map,
+-- a partner mid-trade -- was rolled twice, and the monster the cart fought was
+-- not the one the RNG would have given it. Everything here reads the
+-- roster, the party and this module's own state; the one gate it cannot ask
+-- (another fight already on the stack) is still asked by onWildEncounter.
+function M:wouldTakeWild(mapId)
+  if not (self.transport:isReady() and self.party:has()) then return false end
+  if self.running or self.waiting or self.ask then return false end
+  if not self:wantsWild() then return false end
+  if self.offer and self.offer.mode ~= "coop_wild" then return false end
+  local partners = self.party:partners()
+  if #partners == 0 then return false end
+  if self:partnerAway(mapId) then return false end
+  for _, partner in ipairs(partners) do
+    local row = self.roster:get(partner.id)
+    if row and row.busy then return false end
+  end
+  if self.offer and self:sessionBusy() then return false end
+  return true
 end
 
 -- Start a Party vs Wild wait: same wire as a trainer wait, and the same
@@ -2004,6 +2072,11 @@ function M:onDecline(msg)
       return
     end
     local who = name or self.party:partnerName() or "Your friend"
+    -- Gen 3: the fight first, the two sentences in the corner (M:letGo3).
+    if self:letGo3(("%s decided\nnot to join."):format(who),
+                   "You can take\nthem alone!") then
+      return
+    end
     self:tell(("%s decided\nnot to join."):format(who), function()
       self.ui:say("You can take\nthem alone!", function()
         self:release()
@@ -2344,6 +2417,8 @@ end
 function M:abandon(text)
   self.running = false
   self.battle = nil
+  -- Gen 3: the held trainer is handed back before the line (M:letGo3).
+  if self:letGo3(text) then return nil end
   self:tell(text, function() self:release() end)
   return nil
 end
@@ -2450,9 +2525,12 @@ function M:onBattleEvent(msg)
   if event and state then state:onBattleEvent(event) end
 end
 
+-- In this boot's own vocabulary too: a Gen 3 outcome's `payDay` is read by a
+-- Gen 3 client only (Wire.battleOutcome's `generation`).
 function M:onBattleOutcome(msg)
-  local outcome = Wire.battleOutcome(msg)
-  if outcome and self.state then self.state:onBattleOutcome(outcome) end
+  local state = self.state
+  local outcome = Wire.battleOutcome(msg, Gen.generation(state and state.game))
+  if outcome and state then state:onBattleOutcome(outcome) end
 end
 
 -- Transport became ready again under a live mediated co-op fight.
@@ -2726,9 +2804,19 @@ end
 -- Gen 3's synthetic finish, for an invite joiner who never walked into the
 -- trainer: the trainer's flag set in this client's own flag store (so the
 -- trainer is beaten in both worlds, as a walk-in's opcode sets it), and the
--- prize the walk-in would have been paid. The id comes off the wire, so it is
--- bound the way Gen 1's npcId is: it has to name a trainer this cart has, and
--- one the fight itself was against when the screen knows which.
+-- prize the walk-in would have been paid.
+--
+-- Everything that names the trainer here came off the wire from the partner:
+-- the npcId, and the fight's trainer record too (an invite joiner's screen
+-- looked the record up from the field's trainer id -- M.trainerFor). The two
+-- agreeing proves only that the partner was consistent. So the bind is to
+-- this client's own world, the way Gen 1's is to its npcPool: the trainer has
+-- to be one standing on the map this player is on (CoopField.trainerOnMap3 --
+-- the map's own object events, asked which trainer each one fights). A
+-- trainer who is not here is not beaten here and pays nothing, whatever the
+-- partner says: without the bind a partner could name a gym leader three
+-- towns away and have this save mark them beaten and pay their purse. The
+-- consistency check stays as a cheap second refusal.
 function M:syntheticFinish3(game, npcId, coopState)
   local tid = CoopField.originTrainer3(npcId)
   if not tid then return false end
@@ -2738,6 +2826,12 @@ function M:syntheticFinish3(game, npcId, coopState)
     mod.log:warn("co-op win skipped synthetic finish for trainer %s -- the "
       .. "fight was against trainer %s; reload near the trainer if the defeat "
       .. "flag looks wrong", tostring(tid), tostring(expected))
+    return false
+  end
+  if not CoopField.trainerOnMap3(tid) then
+    mod.log:warn("co-op win skipped synthetic finish for trainer %s -- no such "
+      .. "trainer stands on this map, so nothing was marked beaten or paid; the "
+      .. "fight still counts for your partner", tostring(tid))
     return false
   end
   local record = CoopField.trainerRecord3(tid)
@@ -3051,6 +3145,16 @@ function M:startBattle(game, field)
   if engine then
     self:unwindTo(game, engine, true)
     self.engineBattle = engine
+    -- Gen 3: the fight the stand-in held is being fought now, so the cart's
+    -- battle-start bookkeeping runs now (and only now -- a wait that timed
+    -- out handed the fight back, and the cart's own start ran it then).
+    if engine.gen3Divert and type(engine.begin3) == "function" then
+      local ok, why = pcall(engine.begin3, engine)
+      if not ok then
+        mod.log:warn("the start of this battle could not be recorded (%s); the "
+          .. "battle itself is unaffected", tostring(why))
+      end
+    end
   end
   -- The encounter slot is emptied here whatever was in it, and the two cases
   -- it empties are different.
@@ -3200,6 +3304,16 @@ function M:onBattleOver(result, game, state, toLearn)
   if not handled and result == "win" and plan and plan.npcId then
     handled = self:syntheticFinish(game, plan, state)
   end
+  -- Gen 3 never whites out a won battle, whatever it cost one player's team.
+  -- pret decides the whiteout from the battle's outcome alone
+  -- (CB2_EndTrainerBattle / IsPlayerDefeated: B_OUTCOME_WON returns to the
+  -- field and carries the script on), and a partner battle won with the
+  -- player's own half wiped -- Emerald's multi battles -- leaves that party
+  -- exactly as the fight left it, which is also what battle_bridge.lua's
+  -- writeback does for any win. Running the ritual here was worse than a
+  -- divergence: the trainer's beaten script (the badge, the TM, the words)
+  -- runs after the win, and the warp halted it halfway through.
+  if onGen3() and result == "win" then return end
   if blackout and not (handled and engineRitual) then self:blackout(game) end
 end
 
@@ -3300,6 +3414,8 @@ function M:onPartyEnd()
   -- party is a player waiting for nobody, so the fight is handed back rather
   -- than left suspended. Rule 2: it still ends in a battle.
   if hadWait then
+    -- Gen 3: the fight first, the sentence in the corner (M:letGo3).
+    if self:letGo3("There's nobody\nto wait for.") then return end
     self:tell("There's nobody\nto wait for.", function() self:release() end)
   end
 end
@@ -3403,8 +3519,12 @@ function M:update(dt, game)
       -- with everything else above the battle.
       local who = self.party:partnerName() or "Your friend"
       local line = ("%s couldn't\njoin!"):format(who)
-      self:note(line)
-      self:tell(line, function() self:release() end)
+      -- Gen 3: the fight first, the line in the corner (M:letGo3) -- a box
+      -- here waits on a player the waiting trainer script never frees.
+      if not self:letGo3(line) then
+        self:note(line)
+        self:tell(line, function() self:release() end)
+      end
     end
   end
 
