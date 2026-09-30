@@ -1244,8 +1244,25 @@ function M.itemsOf3(trainer)
   return out
 end
 
+-- Which cart's AI scripts a bit layout belongs to.  The engine runs the
+-- cart's own scripts (battle/ai.lua over the imported script pack), and the
+-- two families' differ past their numbering -- FireRed's AI_TryToFaint has no
+-- 4x bonus, Emerald's AI_CheckBadMove sends FISSURE and HORN DRILL to the
+-- immunity checks, slot 5 is PREFER_STRONGEST_MOVE on one and
+-- PREFER_POWER_EXTREMES on the other -- so the layout the running cart's
+-- battle profile hands over (`aiFlagBits`) says which set this is: only
+-- Emerald's names PREFER_POWER_EXTREMES / TRY_SUNNY_DAY_START.
+function M.aiFamily3(bits)
+  if type(bits) == "table" and (bits.PREFER_POWER_EXTREMES ~= nil
+      or bits.TRY_SUNNY_DAY_START ~= nil) then
+    return "rse"
+  end
+  return "frlg"
+end
+
 -- opts (beyond M.new's): trainer (the engine trainer record: `aiFlags`,
--- `items`), aiFlags (override), aiBits (a bit layout, for a suite).
+-- `items`), aiFlags (override), aiBits (a bit layout, for a suite), family
+-- ("frlg" | "rse", override; else read off the layout, M.aiFamily3).
 function M.new3(opts)
   opts = opts or {}
   local trainer = opts.trainer or M.trainerOf(opts.engine)
@@ -1266,12 +1283,16 @@ function M.new3(opts)
     end
   end
   local flags = tonumber(opts.aiFlags) or tonumber(trainer.aiFlags) or 0
+  local bits = type(opts.aiBits) == "table" and opts.aiBits or aiBitsOf3()
+  local family = (opts.family == "rse" or opts.family == "frlg") and opts.family
+    or M.aiFamily3(bits)
   local self = setmetatable({
     generation = 3,
     trainer = trainer,
     rng = rng,
     aiFlags = math.max(0, math.floor(flags)),
-    aiBits = type(opts.aiBits) == "table" and opts.aiBits or aiBitsOf3(),
+    aiBits = bits,
+    family3 = family,
     aiUses = 0, aiLayer2 = 0, turns = 0, lastMon = nil,
     -- battleHistory->trainerItems: the four slots, spent to 0 as they are
     -- used, never compacted (ShouldUseItem's slot arithmetic reads the gaps).
@@ -1420,6 +1441,31 @@ function M:_negated3(ctx, user, target, mv)
   return nil
 end
 
+-- pret MOVE_FISSURE / MOVE_HORN_DRILL: Emerald's AI_CheckBadMove names these
+-- two (and not GUILLOTINE or SHEER COLD) for its immunity checks.
+local MOVE_HORN_DRILL, MOVE_FISSURE = 32, 90
+
+-- pret get_how_powerful_move_is's MOVE_POWER_DISCOURAGED (the engine's
+-- ai_cmds.lua): a move of power 1 or less (status moves, the fixed-damage
+-- and one-hit KO rows, Counter, Hidden Power), or one of
+-- sDiscouragedPowerfulMoveEffects.
+local function discouraged3(mv, G)
+  return int3(mv.power, 0) <= 1 or G.discouraged[int3(mv.effect, 0)] == true
+end
+
+-- Does AI_CheckBadMove put this move through AI_CBM_CheckIfNegatesType (the
+-- type immunity, the absorbing abilities, WONDER GUARD, LEVITATE)?  Only a
+-- move the power reading does not call DISCOURAGED -- and, on Emerald,
+-- FISSURE and HORN DRILL, which it names first.  Every other move goes
+-- straight to the SOUNDPROOF check.
+function M:_negationChecked3(mv, G)
+  local num = int3(mv.num, 0)
+  if self.family3 == "rse" and (num == MOVE_FISSURE or num == MOVE_HORN_DRILL) then
+    return true
+  end
+  return not discouraged3(mv, G)
+end
+
 -- What this move would take off `target` this turn, on the referee's own
 -- formula, with `roll` as the damage roll (85..100) and no critical hit.  Zero
 -- for a move the target's typing or ability swallows.
@@ -1501,8 +1547,6 @@ end
 
 -- ------- ShouldSwitch (battle_ai_switch_items.c:302, engine ai_switch.lua)
 
-local LEVITATE_T = "LEVITATE"
-
 function M:_superMove3(ctx, user, target, moves)
   local E = ctx.S.Effects.E
   for _, mv in ipairs(moves or {}) do
@@ -1541,24 +1585,71 @@ function M:_lastLanded3(ctx)
   return nil
 end
 
+-- ShouldSwitch's own reading of "held in" (the engine's ai_switch.lua
+-- shouldSwitch, pret battle_ai_switch_items.c:302), which is not the rule the
+-- referee enforces and is ported as the cart wrote it: an ARENA TRAP anywhere
+-- on the opposing side holds the AI's mon in even when it is a Flying type or
+-- levitates, and a MAGNET PULL anywhere on the field -- its own side's, its
+-- own -- holds a Steel type in.  (SHADOW TAG: any opposing one.)
+function M:_aiTrapped3(ctx)
+  local b, S = ctx.b, ctx.S
+  local field = {}
+  local sim = ctx.sim
+  if sim and type(sim.fighters) == "table" then
+    for _, fighter in ipairs(sim.fighters) do
+      if fighter.b then field[#field + 1] = fighter.b end
+    end
+  else
+    field = { b, ctx.t }
+  end
+  local steel = hasType(b, S.Types.ID.STEEL)
+  for _, o in ipairs(field) do
+    if o then
+      local a = o.ability
+      if o ~= b and o.side ~= b.side and (a == "SHADOW_TAG" or a == "ARENA_TRAP") then
+        return true
+      end
+      if a == "MAGNET_PULL" and steel then return true end
+    end
+  end
+  return false
+end
+
+-- FindMonWithFlagsAndSuperEffective (pret battle_ai_switch_items.c:236, the
+-- engine's find_mon_with_flags): a bench mon the move that last landed on us
+-- could not touch (`flag` "immune") or barely scratches ("notVery"), holding
+-- a move that hits back super effectively -- each such move a 1-in-`modulo`
+-- roll.  nil when the last hit was nothing or a status move.
+function M:_findMonWithFlags3(ctx, bench, last, flag, modulo)
+  if not (last and int3(last.power, 0) > 0 and ctx.b.lastHitBy ~= nil) then return nil end
+  local S, attacker = ctx.S, ctx.t
+  for _, entry in ipairs(bench) do
+    local pb = pseudoBattler(entry.mon, S, ctx.b.side)
+    local product = self:_product3(ctx, int3(last.type, 0), pb)
+    local immune = product == 0 or (self:_negated3(ctx, attacker, pb, last) ~= nil)
+    local hit = (flag == "immune" and immune)
+      or (flag == "notVery" and not immune and product < 100)
+    if hit then
+      for _, mv in ipairs(entry.mon.moves or {}) do
+        if self:_superMove3(ctx, pb, attacker, { mv }) and self.rng(0, modulo - 1) == 0 then
+          return entry
+        end
+      end
+    end
+  end
+  return nil
+end
+
 function M:_shouldSwitch3(ctx)
   local b, t, S = ctx.b, ctx.t, ctx.S
   local sim = ctx.sim
-  -- Trapped: Mean Look / Spider Web / Block, a partial trap, Ingrain, and the
-  -- three trapping abilities.
+  -- Trapped: Mean Look / Spider Web / Block, a partial trap, Ingrain (the
+  -- referee's own reading) -- and the three trapping abilities, the AI's way.
   if sim and b.fighter then
     local okT, trapped = pcall(sim.isTrapped, sim, b)
     if okT and trapped then return nil end
-    local okE, blocker = pcall(S.Abilities.escapeBlocker, sim, b)
-    if okE and blocker then return nil end
-  else
-    local a = t and t.ability
-    if a == "SHADOW_TAG" or (a == "ARENA_TRAP" and b.ability ~= LEVITATE_T
-        and not hasType(b, S.Types.ID.FLYING)) then
-      return nil
-    end
-    if a == "MAGNET_PULL" and hasType(b, S.Types.ID.STEEL) then return nil end
   end
+  if self:_aiTrapped3(ctx) then return nil end
   local bench = self:_bench3(ctx)
   if #bench == 0 then return nil end
   local rng = self.rng
@@ -1605,9 +1696,20 @@ function M:_shouldSwitch3(ctx)
     end
   end
 
-  -- ShouldSwitchIfNaturalCure: statused, healthy enough, and a coin flip.
-  if statusOf3(b) and b.ability == "NATURAL_CURE" and hpOf(b) >= math.floor(maxHpOf(b) / 2) then
+  -- ShouldSwitchIfNaturalCure (the engine's if_natural_cure): asleep, NATURAL
+  -- CURE, at half HP or more.  Nothing has landed (or a status move did): a
+  -- coin flip -- the cart's `else if` flips a second coin when the first one
+  -- missed, since "nothing" has no power either.  Else a bench mon the last
+  -- hit could not touch, or barely scratched, with a super-effective answer
+  -- (no roll), and last a third coin.
+  if statusOf3(b) == "SLP" and b.ability == "NATURAL_CURE"
+      and hpOf(b) >= math.floor(maxHpOf(b) / 2) then
+    if last == nil and rng(0, 1) == 1 then return to(nil) end
     if (last == nil or int3(last.power, 0) == 0) and rng(0, 1) == 1 then return to(nil) end
+    local found = self:_findMonWithFlags3(ctx, bench, last, "immune", 1)
+      or self:_findMonWithFlags3(ctx, bench, last, "notVery", 1)
+    if found then return to(found) end
+    if rng(0, 1) == 1 then return to(nil) end
   end
 
   -- HasSuperEffectiveMoveAgainstOpponents (9-in-10 per find), or boosted.
@@ -1621,40 +1723,28 @@ function M:_shouldSwitch3(ctx)
   if raised > 3 then return nil end
 
   -- FindMonWithFlagsAndSuperEffective: a bench mon the last hit could not
-  -- touch (1-in-2), then one it barely scratches (1-in-3), each with a move
-  -- that hits back super effectively.
-  if last and int3(last.power, 0) > 0 and ctx.b.lastHitBy ~= nil then
-    local attacker = t
-    for _, spec in ipairs({ { "immune", 2 }, { "notVery", 3 } }) do
-      for _, entry in ipairs(bench) do
-        local pb = pseudoBattler(entry.mon, S, b.side)
-        local product = self:_product3(ctx, int3(last.type, 0), pb)
-        local immune = product == 0 or (self:_negated3(ctx, attacker, pb, last) ~= nil)
-        local hit = (spec[1] == "immune" and immune)
-          or (spec[1] == "notVery" and not immune and product < 100)
-        if hit then
-          for _, mv in ipairs(entry.mon.moves or {}) do
-            if self:_superMove3(ctx, pb, attacker, { mv }) and rng(0, spec[2] - 1) == 0 then
-              return to(entry)
-            end
-          end
-        end
-      end
-    end
-  end
+  -- touch (1-in-2), then one it barely scratches (1-in-3).
+  local found = self:_findMonWithFlags3(ctx, bench, last, "immune", 2)
+    or self:_findMonWithFlags3(ctx, bench, last, "notVery", 3)
+  if found then return to(found) end
   return nil
 end
 
 -- ------- GetMostSuitableMonToSwitchInto (battle_ai_switch_items.c:596)
 --
--- The cart's own two passes, and the first is ported as the cart wrote it:
--- it scores each bench mon by how the *opponent's* types fare against the
+-- The cart's own two passes, and both are ported as the cart wrote them.  The
+-- first scores each bench mon by how the *opponent's* types fare against the
 -- bench mon's types and keeps the highest -- the famous backwards test that
 -- sends in the mon the player's typing hits hardest -- and then accepts it
--- only if it has a super-effective move of its own.  The engine keeps the same
--- reading (Engine.mostSuitableMon); an opponent that played better than the
--- cart here would be a different game.  The second pass takes whoever deals
--- the most damage.
+-- only if it has a super-effective move of its own.  The second is meant to
+-- take whoever deals the most damage, but the cart's AI_CalcDmg there prices
+-- the *active* battler's attack, not the candidate's, so what it measures is
+-- a constant: the engine's reading (Engine.mostSuitableMon, pret
+-- battle_ai_switch_items.c:510) is a base of 2 for every move not of power 1,
+-- times 1.5 when the move shares a type with the mon being replaced, through
+-- the type chart against the opponent -- and the first mon to reach the
+-- highest such value wins.  An opponent that played better than the cart here
+-- would be a different game.
 function M:_replacement3(ctx)
   local S, t = ctx.S, ctx.t
   local candidates = {}
@@ -1681,13 +1771,16 @@ function M:_replacement3(ctx)
     if self:_superMove3(ctx, pb, t, best.moves) then return best end
     invalid[best] = true
   end
-  local best, bestDmg = nil, -1
+  local best, bestDmg = nil, 0
   for _, mon in ipairs(candidates) do
-    local pb = pseudoBattler(mon, S, ctx.b.side)
     for _, mv in ipairs(mon.moves or {}) do
-      if int3(mv.power, 0) ~= 1 then
-        local d = self:_damage3(ctx, pb, t, mv, 100)
-        if d > bestDmg then best, bestDmg = mon, d end
+      if int3(mv.num, 0) ~= 0 and int3(mv.power, 0) ~= 1 then
+        local mt = int3(mv.type, 0)
+        local dmg = 2
+        if hasType(ctx.b, mt) then dmg = math.floor(dmg * 15 / 10) end
+        local ok, typed = pcall(S.Types.typeCalc, ctx.typeTable, mt, t.type1, t.type2, dmg)
+        dmg = ok and int3(typed, 0) or 0
+        if bestDmg < dmg then best, bestDmg = mon, dmg end
       end
     end
   end
@@ -1886,18 +1979,25 @@ function M:_chooseMove3(ctx, legal)
   if self:_flag3("CHECK_BAD_MOVE") then
     for _, i in ipairs(legal) do scores[i] = scores[i] + self:_checkBad3(ctx, moves[i], G) end
   end
+  -- AI_TryToFaint.  `if_can_faint` (the engine's ai_cmds.lua, pret
+  -- Cmd_if_can_faint) skips any move of power under 2 -- the one-hit KO and
+  -- fixed-damage rows, Counter, Hidden Power -- and prices the rest with the
+  -- simulated roll, never under 1.  Only Emerald's script then adds +2 at
+  -- random for a 4x hit; FireRed's ends after the NOT_MOST -1.
   if self:_flag3("TRY_TO_FAINT") then
+    local rse = self.family3 == "rse"
     for _, i in ipairs(legal) do
       local mv = moves[i]
       local eff = int3(mv.effect, 0)
-      if isDamaging(mv, E) and est[i] >= hpOf(t) and est[i] > 0 then
+      if int3(mv.power, 0) >= 2 and hpOf(t) <= math.max(1, est[i] or 0) then
         if eff ~= E.EXPLOSION then
           scores[i] = scores[i] + 4
           if eff == E.QUICK_ATTACK then scores[i] = scores[i] + 2 end
         end
       elseif power[i] == "notbest" then
         scores[i] = scores[i] - 1
-      elseif isDamaging(mv, E) and self:_product3(ctx, self:_moveType3(ctx, b, mv), t) >= 400
+      elseif rse and isDamaging(mv, E)
+          and self:_product3(ctx, self:_moveType3(ctx, b, mv), t) >= 400
           and rand() >= 80 then
         scores[i] = scores[i] + 2
       end
@@ -1916,14 +2016,13 @@ function M:_chooseMove3(ctx, legal)
       if G.risky[int3(moves[i].effect, 0)] and rand() >= 128 then scores[i] = scores[i] + 2 end
     end
   end
-  if self:_flag3("PREFER_STRONGEST_MOVE") then
-    for _, i in ipairs(legal) do
-      if power[i] == "best" and rand() >= 100 then scores[i] = scores[i] + 2 end
-    end
-  end
-  -- Emerald's AI_PreferPowerExtremes: the moves the power reading calls
-  -- "other" -- status moves and the fixed / discouraged ones.
-  if self:_flag3("PREFER_POWER_EXTREMES") then
+  -- Slot 5.  Emerald calls it AI_PreferPowerExtremes, FireRed
+  -- AI_PreferStrongestMove, and the two carts' scripts are the same few
+  -- lines (the ones the engine runs from the cart): get_how_powerful_move_is,
+  -- and +2 at random for a move it calls DISCOURAGED -- the power reading's
+  -- "other", status moves and the fixed / discouraged ones.  Despite the name,
+  -- FireRed's does not favour the strongest move.
+  if self:_flag3("PREFER_STRONGEST_MOVE") or self:_flag3("PREFER_POWER_EXTREMES") then
     for _, i in ipairs(legal) do
       if power[i] == "other" and rand() >= 100 then scores[i] = scores[i] + 2 end
     end
@@ -1982,7 +2081,12 @@ function M:_checkBad3(ctx, mv, G)
   local S, b, t = ctx.S, ctx.b, ctx.t
   local E, T = S.Effects.E, S.Types.ID
   local eff = int3(mv.effect, 0)
-  local neg = self:_negated3(ctx, b, t, mv)
+  local neg
+  if self:_negationChecked3(mv, G) then
+    neg = self:_negated3(ctx, b, t, mv)
+  elseif t.ability == "SOUNDPROOF" and S.Abilities.SOUND_MOVES[int3(mv.num, -1)] then
+    neg = -10
+  end
   if neg then return neg end
   local tAb = t.ability
   local tStatus = statusOf3(t)

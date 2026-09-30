@@ -119,9 +119,11 @@
 -- at all has happened.  With no buried battle to finish, the rewards the
 -- engine's battle would have paid are paid here, the cart's way: the prize
 -- (battle/prize.lua), Pickup, the whiteout (battle_bridge's money loss and
--- Field.respawnAtHeal), and the after-battle evolutions (EvolutionScene).
--- Exp, a level's moves, the catch and the bag are still the screen's, on its
--- Gen 3 arm, exactly as the header says for Gen 1.  The referee is
+-- Field.respawnAtHeal), the after-battle evolutions (EvolutionScene), and
+-- what the engine does as its own battle ends (Emerald's Pokérus and TV,
+-- FireRed's quest log, `battle.ended` -- M:_finishEffects3).  Exp, Pay Day,
+-- a level's moves, the catch and the bag are still the screen's, on its Gen 3
+-- arm, exactly as the header says for Gen 1.  The referee is
 -- src/BattleSim3, the sheets src/Sheet3.lua's; the arena / classic GBA page
 -- and the music are MediatedBattle's Gen 3 arm unchanged.
 
@@ -408,6 +410,10 @@ function M.new(ui, opts)
     -- opened against, the verdict and what it costs).  See M:_begin3.
     gen3 = nil,
     cantEscape = nil, -- a trapped Gen 3 RUN's line, owed a fresh menu
+    -- Set only while M:_handBack3 is starting the engine's own battle: that
+    -- start goes back through src/Client.lua's divert, which would offer the
+    -- very fight being handed back to this file again (and again).
+    handingBack3 = false,
   }, M)
 end
 
@@ -468,10 +474,12 @@ function M:_divert(game, state, mapId, wanted)
   -- battle, a mediated 1v1 an invite opened. The just-pushed encounter is
   -- excluded, since it is the reason we are being asked.
   if Coop.stackHasFightExcept(game, state) then return false end
-  -- Gen 3: `state` is src/CoopField.lua's stand-in for the fight the divert
-  -- cancelled (the buried battle a Gen 3 boot never has), and the fight is
-  -- built from it on the Gen 3 path -- see M:_divertStand3.
-  if Gen.generation(game) == 3 then return self:_divertStand3(game, state, mapId, wanted) end
+  -- Gen 3 is never diverted from here: its engine raises no `screen.pushed`
+  -- (a game3 battle is a module, not a pushed state), so src/Client.lua takes
+  -- a Gen 3 fight where it starts and hands it to `fromGen3Encounter` /
+  -- `fromGen3Trainer` instead.  Whatever reaches this with a Gen 3 game is
+  -- declined, silently, like any other fight this file does not model.
+  if Gen.generation(game) == 3 then return false end
   return self:_begin(game, state, mapId, wanted)
 end
 
@@ -837,7 +845,7 @@ function M:_choose(payload)
     -- a line and the menu back, the turn unspent, so that is parked for the
     -- pump like the trainer refusal above.
     if self.generation == 3 then
-      if sim:submitChoice(PLAYER_SEAT, payload) then return true end
+      if self:_submit3(payload) then return true end
       self.cantEscape = self:_cantEscapeText3()
       return true
     end
@@ -846,7 +854,25 @@ function M:_choose(payload)
       return true
     end
   end
+  if self.generation == 3 then return self:_submit3(payload) end
   return sim:submitChoice(PLAYER_SEAT, payload) and true or false
+end
+
+-- The player's choice into the Gen 3 referee.  The last answer of a turn
+-- resolves that turn inside `submitChoice`, so a resolution that throws would
+-- throw out through the screen's own menu code; it is contained here instead.
+-- A choice that was taken before the throw (the referee is left `resolving`)
+-- answers true -- the menu closes, and M:_pump hands the fight back once it
+-- sees the referee is not coming out of it; one refused before it answers
+-- false, and the menu stays open.
+function M:_submit3(payload)
+  local sim = self.sim
+  local ok, filed = pcall(sim.submitChoice, sim, PLAYER_SEAT, payload)
+  if ok then return filed and true or false end
+  self:warn("choose3", "the mod's battle referee failed on this turn (%s); the fight is "
+    .. "handed back to the ordinary battle system; report it with the move or item "
+    .. "you chose", tostring(filed))
+  return sim.phase == "resolving"
 end
 
 -- The escape roll, in each generation's own arithmetic, out of 256.
@@ -1062,6 +1088,21 @@ function M:_pump()
   end
   faults = faults + self:_drain()
 
+  -- Gen 3: a turn that threw half way through resolving.  BattleSim3 resolves
+  -- a turn in one synchronous call, so a referee still `resolving` once the
+  -- frame is done is one whose resolution raised -- inside a submitted choice
+  -- as often as inside `tick` -- and nothing above counted it: every later
+  -- frame is clean, the referee waits out its resolve deadline and calls the
+  -- fight a draw (a replacement that threw sets no deadline and never ends at
+  -- all).  Counted here instead, so it is handed back like any other fight
+  -- the referee cannot keep going, rather than scored.
+  if self.generation == 3 and sim.phase == "resolving" and not sim.result then
+    faults = faults + 1
+    self:warn("stall3", "the mod's battle referee stopped part way through a turn; "
+      .. "this fight is handed back to the ordinary battle system; report it with "
+      .. "the move or item that was being used")
+  end
+
   if faults > 0 then
     self.faults = (self.faults or 0) + 1
     if self.faults >= (tonumber(Config.SOLO_FAULT_LIMIT) or 3) then
@@ -1124,10 +1165,11 @@ function M:_feed(event)
   event.battle = fight.battle
   event.seq = self.seq
   -- Gen 3 has no engine battle underneath to mark the dex as each foe comes
-  -- out (pret Cmd_switchinanim's HandleSetPokedexFlag), nor to note an Amulet
-  -- Coin the moment its holder is sent in (HeldItems onSwitchIn), so every
-  -- send does both.
-  if self.generation == 3 and event.t == "send" then self:_onSend3(event) end
+  -- out (pret Cmd_switchinanim's HandleSetPokedexFlag), to note an Amulet
+  -- Coin the moment its holder is sent in (HeldItems onSwitchIn), to count
+  -- the balls thrown (gBattleResults) or to know who ran -- so the events
+  -- that say so are read on the way past.  See M:_note3.
+  if self.generation == 3 then self:_note3(event) end
   local ok, err = pcall(fight.onEvent, fight, event)
   if not ok then
     self:warn("event", "part of this battle could not be shown (%s); the "
@@ -1787,11 +1829,11 @@ function M.gen3Kind(opts, foe)
 end
 
 -- Config.SOLO_REFUSED_GEN3, asked of every place a Gen 3 fight spells itself:
--- the battle opts, the foe / encounter, a divert's stand-in, and a `kinds`
--- table on any of them (the engine battle state's own, should a caller hand
--- one in) -- any number of tables, nil ones skipped.  A name counts when it is
--- set to anything but false -- the trainer op passes `firstBattle = false` for
--- an ordinary trainer, and that must not refuse it.
+-- the battle opts, the foe / encounter, and a `kinds` table on any of them
+-- (the engine battle state's own, should a caller hand one in) -- any number
+-- of tables, nil ones skipped.  A name counts when it is set to anything but
+-- false -- the trainer op passes `firstBattle = false` for an ordinary
+-- trainer, and that must not refuse it.
 function M.gen3Refused(...)
   local places = {}
   local function add(t)
@@ -2064,18 +2106,25 @@ end
 -- trainer id (Gen3.audio's battle / victory themes), class and name, the
 -- TRAINER_PIC_* the arena stands on the foe edge, the four item slots, the
 -- AI flags, the overworld graphic (Gen.trainerWalkSpriteId), the dialogs.
+--
+-- The name is the trainer book's first, as the engine's battle reads it
+-- (battle/init.lua: `trainerInfo.name or opts.trainerName`): Trainers.info
+-- answers FireRed's rival and Champion with the name the player gave the
+-- rival (`rivalName`, pret battle_message.c:2078), where the foe record and
+-- the row both carry the cart's placeholder.
 function M.gen3TrainerRecord(foe, trainerId, opts)
   opts = type(opts) == "table" and opts or {}
   foe = type(foe) == "table" and foe or {}
   local Trainers = Gen3.engine("src.core.game3.scripting.trainers")
   local session = Gen3.session()
+  local rivalName = strOr(opts.rivalName, session and session.rivalName)
   local info = (Trainers and trainerId)
-    and try3(Trainers.info, trainerId, { rivalName = session and session.rivalName }) or nil
+    and try3(Trainers.info, trainerId, { rivalName = rivalName }) or nil
   info = type(info) == "table" and info or {}
   local dialogs = type(info.dialogs) == "table" and info.dialogs or {}
   local class = int3(foe.trainerClass, nil) or int3(info.class, nil)
   local className = strOr(foe.trainerClassName, info.className)
-  local name = strOr(opts.trainerName, foe.trainerName, info.name)
+  local name = strOr(info.name, opts.trainerName, foe.trainerName)
   local graphicsId = int3(opts.graphicsId, nil)
     or (type(opts.object) == "table" and int3(opts.object.graphicsId, nil)) or nil
   return {
@@ -2137,6 +2186,25 @@ function M.gen3Terrain(game)
   return terrain, underwater and true or false
 end
 
+-- pret battle_util.c:1709 (the engine's battle/init.lua overworld_weather):
+-- the overworld weather ids a battle opens under -- rain, thunderstorm and
+-- downpour as RAIN, the sandstorm, the drought.
+local FIELD_WEATHER3 = { [3] = "RAIN", [5] = "RAIN", [13] = "RAIN", [8] = "SAND", [12] = "SUN" }
+
+-- The overworld's weather, as a battle opens under it.  Sheet3.fieldWeather
+-- first, which reads the engine's weather module through `package.loaded`;
+-- then the module itself through the guarded engine require -- the mod
+-- sandbox hands a mod no real `package` (src/mods/LegacyCompat.lua's shim
+-- has an empty `loaded`), so on a live boot that is the reading that answers.
+function M.gen3FieldWeather()
+  local w = try3(Sheet3.fieldWeather)
+  if w then return w end
+  local W = Gen3.engine("src.core.game3.weather")
+  if not W then return nil end
+  local id = int3(try3(W.get), nil) or int3(W.current, 0)
+  return FIELD_WEATHER3[id]
+end
+
 -- Is anything in this party still able to fight?
 function M.gen3Standing(party)
   for _, mon in ipairs(type(party) == "table" and party or {}) do
@@ -2174,13 +2242,36 @@ end
 -- Teleport by the foe); a whiteout is "lose" whatever the knockouts said --
 -- a draw that leaves the player standing on nothing is a defeat on the cart
 -- (pret IsPlayerDefeated counts B_OUTCOME_DREW); the rest is the verdict.
-function M.gen3Result(verdict, reason, whiteout)
+--
+-- `ranSide` is the side the referee's `run` event named ("a" ours, "b"
+-- theirs), which is what decides a flight -- not the verdict: a POKé DOLL or
+-- FLUFFY TAIL ends the fight with the thrower's side as the winners and no
+-- `run` event at all, and on the cart that is the player's escape
+-- (B_OUTCOME_RAN).  Without it the verdict is read, as before.
+--
+-- `kind` "trainer": a draw is "lose".  The trainerbattle opcode reads
+-- everything that is not a loss as a win -- the trainer flag, the beaten
+-- script and its badge or TM -- and a draw is not one on the cart
+-- (IsPlayerDefeated again).  M.gen3OutcomeWord keeps the DREW for the save.
+function M.gen3Result(verdict, reason, whiteout, ranSide, kind)
   if reason == "catch" then return "caught" end
-  if reason == "run" then return (verdict == "win") and "fled" or "run" end
+  if reason == "run" then
+    if ranSide == "b" then return "fled" end
+    if ranSide == "a" then return "run" end
+    return (verdict == "win") and "fled" or "run"
+  end
   if whiteout then return "lose" end
   if verdict == "win" then return "win" end
   if verdict == "loss" then return "lose" end
+  if kind == "trainer" then return "lose" end
   return "draw"
+end
+
+-- The word session.battleOutcome is written from (Natives.outcome_to_code):
+-- M.gen3Result's, except that a drawn trainer fight the player is still
+-- standing after stays B_OUTCOME_DREW for a script that reads the outcome.
+function M.gen3OutcomeWord(verdict, reason, whiteout, ranSide)
+  return M.gen3Result(verdict, reason, whiteout, ranSide, nil)
 end
 
 -- ------------------------------------------------------------------
@@ -2204,23 +2295,54 @@ end
 --              faulting).  Without it, BattleBridge.start / startWild are
 --              called with the same foe and `done`.
 --   mapId      informational.
+--   party      (optional) the opponent's monsters, already built as engine
+--              monsters (src/CoopField.lua's stand-in builds them for its
+--              cover before solo is asked): fought as they are, so the
+--              monster the cover announced is the one fought and handed back,
+--              and a wild's personality / IVs / item are rolled once, not
+--              twice.  A wild encounter may carry its one monster as
+--              `enc.mon` instead.  Built here, the engine's way, when absent.
 --   + the engine's battle opts, read for refusals (Config.SOLO_REFUSED_GEN3)
 --     and, on a trainer, for what they mean: trainerId, defeatText,
---     victoryText, trainerName, trainerPicId, noWhiteout, double,
---     graphicsId / object (the NPC's overworld graphic, for the arena).
+--     victoryText, trainerName, trainerPicId, noWhiteout, double, rivalName,
+--     earlyRival / rivalFlags, graphicsId / object (the NPC's overworld
+--     graphic, for the arena).
+--
+-- Both decline while this file is handing a fight back to the engine (see
+-- M:_handBack3): that start re-enters the divert that called them.
+
+-- An engine monster a caller handed in, when it is one: a species, a level
+-- and a move list are what every later step reads off it.
+local function prebuilt3(mon)
+  return type(mon) == "table" and int3(mon.species, 0) > 0 and int3(mon.level, 0) > 0
+    and type(mon.moves) == "table" and #mon.moves > 0
+end
+
+-- The caller's prebuilt party (`opts.party`), when every member of it is an
+-- engine monster; nil to build one.
+local function prebuiltParty3(party)
+  if type(party) ~= "table" or #party == 0 then return nil end
+  for _, mon in ipairs(party) do
+    if not prebuilt3(mon) then return nil end
+  end
+  return party
+end
 
 -- A wild encounter: `enc` is what `encounter.roll` produced -- the engine
 -- encounter { species (number or pret name), speciesId, level, item,
--- personality, moves, roamer, foe } -- or any foe row of that shape.
+-- personality, moves, roamer, foe } -- or any foe row of that shape, and
+-- optionally `mon` (see `party` above).
 function M:fromGen3Encounter(game, enc, opts)
   opts = type(opts) == "table" and opts or {}
   if not self:isOn() then return false end
-  if self.fight then return false end
+  if self.fight or self.handingBack3 then return false end
   if not (type(game) == "table" and Gen.generation(game) == 3) then return false end
   if type(enc) ~= "table" then return false end
   if M.gen3Refused(opts, enc) or enc.roamer then return false end
   if self:_fightOnScreen3() then return false end
-  local mon = M.gen3FoeMon(enc, { wild = true })
+  local given = prebuiltParty3(opts.party)
+  local mon = (given and given[1]) or (prebuilt3(enc.mon) and enc.mon) or nil
+  mon = mon or M.gen3FoeMon(enc, { wild = true })
   if not mon then
     self:warn("nofoe3", "the wild POKéMON in this encounter could not be built for the "
       .. "mod's battle system, so it is fought the ordinary way; report this with "
@@ -2242,7 +2364,7 @@ end
 function M:fromGen3Trainer(game, foe, opts)
   opts = type(opts) == "table" and opts or {}
   if not self:isOn() then return false end
-  if self.fight then return false end
+  if self.fight or self.handingBack3 then return false end
   if not (type(game) == "table" and Gen.generation(game) == 3) then return false end
   local trainerId = int3(opts.trainerId, nil)
     or (type(foe) == "table" and int3(foe.trainerId, nil)) or int3(foe, nil)
@@ -2258,8 +2380,11 @@ function M:fromGen3Trainer(game, foe, opts)
   if M.gen3Refused(opts, foe) then return false end
   if M.gen3Double(opts, foe) then return false end
   if self:_fightOnScreen3() then return false end
-  local hooked = M.gen3HookedFoe(foe, trainerId)
-  local party = M.gen3TrainerParty(hooked, trainerId)
+  -- A prebuilt party has been through the `trainer.party` hook already (the
+  -- stand-in built it with M.gen3HookedFoe); it is not run a second time.
+  local given = prebuiltParty3(opts.party)
+  local hooked = given and foe or M.gen3HookedFoe(foe, trainerId)
+  local party = given or M.gen3TrainerParty(hooked, trainerId)
   if #party == 0 then
     self:warn("nofoe3", "this trainer's party could not be built for the mod's battle "
       .. "system, so the trainer is fought the ordinary way; report this with the "
@@ -2268,54 +2393,6 @@ function M:fromGen3Trainer(game, foe, opts)
   end
   local trainer = M.gen3TrainerRecord(hooked, trainerId, opts)
   return self:_begin3(game, "trainer", party, opts, { foe = foe, trainer = trainer })
-end
-
--- ------- the stand-in path (src/Client.lua's own divert)
---
--- The Gen 3 divert in src/Client.lua cancels the cart's fight (a wild at
--- `encounter.roll`, a trainer at BattleBridge.start) and offers co-op and then
--- solo a *stand-in* for it -- src/CoopField.lua's stand3: the buried-battle
--- shape `onWildEncounter` / `onTrainerBattle` have always been handed
--- (`kind`, `enemyParty` of engine-built Gen 3 monsters, `trainer`, `opts` --
--- the engine's battle opts -- `onFinish`) plus `fightAlone`, which hands the
--- encounter back to the cart.  So those two entries stay the whole public
--- surface a divert needs, on every generation.
---
--- What changes on Gen 3 is who pays for what at the end.  The stand-in's
--- `onFinish` is battle_bridge's finish half, done for a fight the engine did
--- not run -- `session.battleOutcome`, the whiteout (or the early rival's
--- heal), the map music, the map's resume scripts, the trainer op's own
--- `done` -- so on this path the ending hands the stand-in its result and does
--- none of those itself.  The prize, Pickup, the party's HP / PP / status, the
--- leftover learn prompts and the after-battle evolutions are still this
--- file's, and the stand-in's result goes last, once they have closed.
-function M:_divertStand3(game, state, mapId, wanted)
-  local opts = type(state.opts) == "table" and state.opts or {}
-  if M.gen3Refused(opts, state, state.encounter) then return false end
-  if wanted == "trainer" and (state.double or M.gen3Double(opts, state)) then return false end
-  if self:_fightOnScreen3() then return false end
-  local party = state.enemyParty
-  if type(party) ~= "table" or #party == 0 then return false end
-  local extra = { stand = state, foe = state.encounter }
-  if wanted == "wild" then
-    extra.wildMon = party[1]
-  else
-    local t = type(state.trainer) == "table" and state.trainer or {}
-    local tid = int3(state.trainerId, nil) or int3(t.trainerId, nil) or int3(t.id, nil)
-    extra.trainer = M.gen3TrainerRecord({
-      trainerClass = t.trainerClass or t.class,
-      trainerClassName = t.className or t.trainerClassName,
-      trainerName = t.trainerName or t.name,
-      trainerPic = t.trainerPic or t.pic or state.trainerPic,
-      items = t.items, aiFlags = t.aiFlags, gender = t.gender,
-    }, tid, opts)
-  end
-  local stageOpts = {}
-  for k, v in pairs(opts) do stageOpts[k] = v end
-  stageOpts.mapId = mapId
-  -- The stand-in owns the script's resume: its `done` is never called here.
-  stageOpts.done, stageOpts.fallback = nil, nil
-  return self:_begin3(game, wanted, party, stageOpts, extra)
 end
 
 -- Another fight already owns the screen: the cart's own battle, or a mod
@@ -2393,7 +2470,11 @@ function M:_begin3(game, kind, party, opts, extra)
     specialTypes = ruleset.specialTypes,
     movePool = ruleset.movePool,
     terrain = ruleset.terrain or terrain,
-    weather = ruleset.weather,
+    -- The overworld's weather opens every fight the engine runs off the link
+    -- (battle/init.lua `overworldWeather`, pret battle_util.c:1709), trainers
+    -- included; the ruleset names one only for a wild fight (Sheet3.ruleset),
+    -- so a trainer on a rainy route asks the field itself.
+    weather = ruleset.weather or M.gen3FieldWeather(),
     underwater = ruleset.underwater == true or underwater,
     choiceTimeout = Config.SOLO_CHOICE_TIMEOUT,
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
@@ -2405,6 +2486,11 @@ function M:_begin3(game, kind, party, opts, extra)
         name = (player and player.name ~= nil and player.name ~= "") and player.name or "PLAYER",
         mons = mine.mons,
         bag = mine.bag,
+        -- The badges this save holds, for a referee that applies the cart's
+        -- badge boosts and obedience.  BattleSim3 accepts and ignores them
+        -- today (link rules, docs/plans/gen3-battle-sheet.md §6): a solo
+        -- fight has neither, which is a stated difference from the cart.
+        badges = M.gen3Badges(),
       } },
       b = { {
         playerId = FOE_SEAT,
@@ -2449,19 +2535,33 @@ function M:_begin3(game, kind, party, opts, extra)
     opts = opts,
     done = opts.done,
     foe = extra.foe,
-    -- src/CoopField.lua's stand-in, when a divert handed one in: it owns the
-    -- battle_bridge finish half (see M:_divertStand3).
-    stand = extra.stand,
     trainer = trainer,
     party = party,
     session = session,
     levels = M.levels3(session and session.party),
     verdict = nil, whiteout = false, healAfter = false,
     amuletPlayer = false, amuletFoe = false,
+    -- The side the referee's `run` event named, when one did (M.gen3Result).
+    ranSide = nil,
+    -- pret gBattleResults, as far as the ending reads it (the TV, M:_note3).
+    results = { catchAttempts = {}, usedMasterBall = false, lastUsedItem = 0 },
   }
 
+  -- Claimed only once it is on screen.  A layer the modal stack refused would
+  -- leave a referee running a fight nobody can see or answer; the caller is
+  -- told no instead, and fights the cart's own battle.
+  local pushed = nil
   if self.ui and type(self.ui.pushState) == "function" then
-    self.ui:pushState(game, fight)
+    local okP, layer = pcall(self.ui.pushState, self.ui, game, fight)
+    pushed = okP and layer or nil
+  end
+  if not pushed then
+    fight.onDone = nil
+    self:_clear3()
+    self:warn("push3", "the mod's battle screen could not be opened over the field, so "
+      .. "this fight is fought the ordinary way; if it keeps happening, turn SOLO "
+      .. "BATTLES off in the mod manager (F10) and report it")
+    return false
   end
   fight:onReady({
     battle = battleId,
@@ -2496,6 +2596,54 @@ function M:_onSend3(event)
   if mon and int3(mon.heldItem, 0) ~= 0 and int3(mon.holdEffect, 0) == HOLD_DOUBLE_PRIZE then
     if foeSide then g3.amuletFoe = true else g3.amuletPlayer = true end
   end
+end
+
+-- pret ITEM_MASTER_BALL: gBattleResults keeps it apart from the rest.
+local ITEM_MASTER_BALL = 1
+
+-- Every Gen 3 event on its way to the screen: a `send` (M:_onSend3); a `run`,
+-- whose side is who left (M.gen3Result); and our side's `ball`, counted the
+-- way Cmd_handleballthrow keeps gBattleResults (the engine's
+-- Catching.tryCatch: the last ball, a MASTER BALL flag, a per-ball count
+-- indexed ball id - 1, capped at 255) for the ending's TV report.
+function M:_note3(event)
+  local g3 = self.gen3
+  local t = event.t
+  if t == "send" then return self:_onSend3(event) end
+  if not g3 then return end
+  if t == "run" and (event.side == "a" or event.side == "b") then
+    g3.ranSide = event.side
+  elseif t == "ball" and event.side == "a" then
+    local ball = int3(event.text, nil)
+    if not ball or ball < 1 then return end
+    local r = g3.results
+    r.lastUsedItem = ball
+    if ball == ITEM_MASTER_BALL then
+      r.usedMasterBall = true
+    elseif int3(r.catchAttempts[ball - 1], 0) < 255 then
+      r.catchAttempts[ball - 1] = int3(r.catchAttempts[ball - 1], 0) + 1
+    end
+  end
+end
+
+-- The badges this save holds, as the set of badge numbers (1..8) the cart's
+-- FLAG_BADGE0n_GET flags say -- the live flag store while the field runs, the
+-- session's serialised flags before that (src/Gen3.lua badgeCount's reading).
+-- nil for none, or on a build that cannot say.
+function M.gen3Badges()
+  local session = Gen3.session()
+  local Flags = Gen3.engine("src.core.game3.scripting.flags")
+  if not (session and Flags and type(Flags.hasBadge) == "function") then return nil end
+  local store = session
+  if Gen3.inField() then
+    local Space = Gen3.engine("src.core.game3.scripting.space")
+    if Space and type(Space.store) == "table" then store = Space.store end
+  end
+  local out, any = {}, false
+  for n = 1, 8 do
+    if try3(Flags.hasBadge, store, n) == true then out[n] = true; any = true end
+  end
+  return any and out or nil
 end
 
 -- A mid-fight learn, onto the referee's copy (the hub's applyBattleMoveset3,
@@ -2625,7 +2773,8 @@ function M:_settle3(outcome)
   g3.verdict = verdict
   local reason = outcome.reason
   local standing = hasLiving(sim.byId[PLAYER_SEAT])
-  g3.whiteout = (verdict == "loss" or verdict == "draw") and reason ~= "run" and not standing
+  local lost = (verdict == "loss" or verdict == "draw") and reason ~= "run" and not standing
+  g3.whiteout = lost
   -- The early rival's heal-after flag (RIVAL_BATTLE_HEAL_AFTER, battle_bridge
   -- writeback's `noWhiteout or (earlyRival and rivalFlags bit 0)`): a loss
   -- that heals the party and lets the script carry on, no warp and no money.
@@ -2638,8 +2787,15 @@ function M:_settle3(outcome)
   local okW, errW = pcall(function()
     if self.kind == "trainer" and verdict == "win" and reason == "ko" then
       self:_trainerWon3()
-    elseif g3.whiteout then
-      self:_lostLines3()
+    elseif lost then
+      -- pret BattleScript_LocalBattleLost's early-rival arm (the engine's
+      -- D.pushBattleLost): the rival crows first -- the trainer's victory
+      -- speech -- and a heal-after fight says nothing more.
+      local t = g3.trainer or {}
+      if self.kind == "trainer" and opts.earlyRival and t.victoryText then
+        self:_say3(t.victoryText)
+      end
+      if g3.whiteout then self:_lostLines3() end
     end
   end)
   if not okW then
@@ -2774,33 +2930,49 @@ function M:_whiteout3(game, session)
   end
 end
 
+-- Everything that describes a running fight, let go together (the ending, a
+-- hand-back, a screen that would not open).
+function M:_clear3()
+  self.fight, self.sim, self.brain = nil, nil, nil
+  self.engine, self.game, self.wildMon = nil, nil, nil
+  self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
+  self.settled, self.pendingWarp, self.refuseRun = false, nil, nil
+  self.failedRun, self.generation, self.cantEscape = nil, nil, nil
+  self.runAttempts, self.faults = 0, 0
+  self.playerMoves, self.playerTurns = nil, 0
+  self.playerMon, self.playerMove = nil, nil
+  self.gen3 = nil
+end
+
+-- The engine monster a sim fighter has out at the end (or last had out, for a
+-- side that was knocked out), found through its sheet's party slot in `party`.
+local function endMon3(fighter, party)
+  if not (fighter and type(party) == "table") then return nil end
+  local sheet = fighter.mons and fighter.active and fighter.mons[fighter.active] or nil
+  if not sheet and fighter.lastB then sheet = fighter.lastB.mon end
+  if not sheet then
+    for _, m in ipairs(fighter.mons or {}) do sheet = sheet or m end
+  end
+  local mon = sheet and party[int3(sheet.slot, 0) + 1] or nil
+  return type(mon) == "table" and mon or nil
+end
+
 -- Half two on Gen 3: the screen is off the stack.
 --
 -- In the engine's own order (battle_bridge.lua finish): the party home, the
--- cart's gBattleOutcome, the whiteout or the rival's heal, Pickup after a win,
--- the map's resume scripts -- then, one at a time, any move-learn prompt the
--- player left unanswered and the after-battle evolutions (pret
--- FreeResetData_ReturnToOvOrDoEvolutions: a won battle only), and last the
--- caller's `done`, so a trainer script resumes over a settled party.
+-- cart's gBattleOutcome, the whiteout or the rival's heal, Pickup after a win
+-- -- then, one at a time, any move-learn prompt the player left unanswered
+-- and the after-battle evolutions (pret FreeResetData_ReturnToOvOrDoEvolutions:
+-- a won battle only), and last, once those have closed, the rest of what the
+-- engine does as a battle it ran comes to an end (M:_finishEffects3), the
+-- map's resume scripts and the caller's `done` -- so a trainer script resumes
+-- over a settled party, on a field no prompt is still covering.
 function M:_ended3(result, toLearn)
   local game, sim, g3 = self.game, self.sim, self.gen3
   local reason = self.reason
   local evoResolved = self.fight and self.fight.evoResolved
-  self.fight, self.sim, self.brain = nil, nil, nil
-  self.engine, self.game, self.wildMon = nil, nil, nil
-  self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
-  self.settled, self.refuseRun, self.failedRun, self.cantEscape = false, nil, nil, nil
-  self.generation, self.runAttempts, self.faults = nil, 0, 0
-  self.gen3 = nil
+  self:_clear3()
   if not (game and sim and g3) then return false end
-
-  -- A divert's stand-in is still up as the field's cover under where the
-  -- screen was; it comes down before any prompt goes up over it.  (Its own
-  -- finish takes it down too, and does nothing the second time.)
-  local stand = g3.stand
-  if type(stand) == "table" and type(stand.takeDown) == "function" then
-    pcall(stand.takeDown, stand)
-  end
 
   local session = Gen3.session()
   local same = session ~= nil and session == g3.session
@@ -2813,27 +2985,29 @@ function M:_ended3(result, toLearn)
   end
   local verdict = g3.verdict or result
   local whiteout = same and g3.whiteout and not M.gen3Standing(session.party)
-  local outcome = M.gen3Result(verdict, reason, whiteout)
+  -- A flight is decided by who ran; one with no `run` event was a POKé DOLL /
+  -- FLUFFY TAIL thrown by our side (the only side with a bag in a wild fight).
+  local ranSide = (reason == "run") and (g3.ranSide or "a") or nil
+  local outcome = M.gen3Result(verdict, reason, whiteout, ranSide, g3.kind)
+  local word = M.gen3OutcomeWord(verdict, reason, whiteout, ranSide)
   local won = verdict == "win" and reason == "ko"
 
+  -- Read now: the ending's reports name the monsters out at the end.
+  local playerMon = same and endMon3(sim.byId and sim.byId[PLAYER_SEAT], session.party) or nil
+  local foeMon = endMon3(sim.byId and sim.byId[FOE_SEAT], g3.party)
+
   if same then
-    -- The battle_bridge finish half is the stand-in's when there is one (see
-    -- M:_divertStand3); this file's own entries run it here.
-    if not stand then
-      local Natives = Gen3.engine("src.core.game3.scripting.natives")
-      local code = Natives and try3(Natives.outcome_to_code, outcome)
-      if code ~= nil then session.battleOutcome = code end
-      if whiteout then
-        self:_whiteout3(game, session)
-      elseif g3.healAfter then
-        local Party = Gen3.engine("src.core.game3.party")
-        if Party then pcall(Party.healAll, session.party) end
-      end
-      local Space = Gen3.engine("src.core.game3.scripting.space")
-      if Space then pcall(Space.returnToField) end
+    local Natives = Gen3.engine("src.core.game3.scripting.natives")
+    local code = Natives and try3(Natives.outcome_to_code, word)
+    if code ~= nil then session.battleOutcome = code end
+    if whiteout then
+      self:_whiteout3(game, session)
+    elseif g3.healAfter then
+      local Party = Gen3.engine("src.core.game3.party")
+      if Party then pcall(Party.healAll, session.party) end
     end
     -- Pickup after a win (pret Cmd_pickup, the engine's
-    -- give_payday_money_and_pickup), which no stand-in knows to run.
+    -- give_payday_money_and_pickup).
     if won then
       local Prize = Gen3.engine("src.core.game3.battle.prize")
       local bp = battleProfile3()
@@ -2848,13 +3022,22 @@ function M:_ended3(result, toLearn)
   local function finish()
     if finished then return end
     finished = true
-    local okD, errD = true, nil
-    if stand then
-      local onFinish = stand.onFinish
-      if type(onFinish) == "function" then
-        okD, errD = pcall(onFinish, outcome)
+    if same then
+      local okE, errE = pcall(self._finishEffects3, self, session, g3, {
+        result = outcome, word = word, playerMon = playerMon, foeMon = foeMon,
+      })
+      if not okE then
+        self:warn("effects3", "part of the end of this battle could not be recorded (%s); "
+          .. "the battle itself counted -- report this with the battle you were in",
+          tostring(errE))
       end
-    elseif type(done) == "function" then
+      -- The map's resume scripts (pokefirered battle_setup.c:432), after the
+      -- last prompt the fight left up has closed.
+      local Space = Gen3.engine("src.core.game3.scripting.space")
+      if Space then pcall(Space.returnToField) end
+    end
+    local okD, errD = true, nil
+    if type(done) == "function" then
       okD, errD = pcall(done, outcome)
     end
     if not okD then
@@ -2864,6 +3047,99 @@ function M:_ended3(result, toLearn)
   end
   self:_afterBattle3(game, same and toLearn or nil, levelled, finish)
   return true
+end
+
+-- What the engine does as a battle it ran itself comes to an end, beyond the
+-- rewards (battle/init.lua finish, then battle_bridge.lua finish), for a
+-- fight off the link:
+--
+--   * Emerald's Pokérus: a chance to catch it, then its spread through the
+--     party (pret ReturnFromBattleToOverworld; Pokemon.randomlyGivePartyPokerus
+--     / partySpreadPokerus).
+--   * FireRed / LeafGreen's quest log: a won or caught fight becomes the
+--     "previously on your quest" scene (quest_log_recorder.battle), where the
+--     cart keeps them.
+--   * Emerald's TV: "POKéMON TODAY" and its breaking news
+--     (pret TryPutPokemonTodayOnAir, the engine's BattleBridge.tvBattleEnd).
+--     Called with the session first, as the TV reads it: the engine's own
+--     call hands it the results table in that place.
+--   * `battle.ended`, the engine event every listener waits on (src/Client.lua
+--     narrates a fight to a partner from it; the engine's Discord presence
+--     leaves its battle line).  Emitted through the engine's own mod runtime,
+--     with the engine's payload -- `{ battle = <state>, result }` -- the
+--     state being what the engine's battle state says about the fight
+--     (`wild`, `link`, the trainer's class / name / id, `player` / `enemy`
+--     as `{ mon = <engine monster> }`, the parties, `battleResults`), and
+--     `rbyMmoSolo` saying whose fight it was.
+function M:_finishEffects3(session, g3, ending)
+  local bp = battleProfile3()
+  local family = (bp and bp.family) or Gen3.family()
+  local wild = g3.kind == "wild"
+  local t = g3.trainer or {}
+  -- The engine battle state's own word: a catch is "catch" there.
+  local stateResult = (ending.result == "caught") and "catch" or ending.result
+  local st = {
+    rbyMmoSolo = true,
+    wild = wild, link = false, over = true, result = stateResult,
+    trainerId = (not wild) and int3(t.trainerId, nil) or nil,
+    trainerClass = (not wild) and int3(t.trainerClass, nil) or nil,
+    trainerClassName = (not wild) and t.className or nil,
+    trainerName = (not wild) and t.trainerName or nil,
+    player = ending.playerMon and { mon = ending.playerMon } or nil,
+    enemy = ending.foeMon and { mon = ending.foeMon } or nil,
+    playerParty = session.party, foeParty = g3.party,
+    battleResults = g3.results, kinds = {}, session = session,
+  }
+
+  local Pokemon = Gen3.engine("src.core.game3.pokemon")
+  if family == "rse" and Pokemon then
+    pcall(Pokemon.randomlyGivePartyPokerus, session.party, session)
+    pcall(Pokemon.partySpreadPokerus, session.party, session)
+  end
+
+  local FieldModules = Gen3.engine("src.core.game3.field_modules")
+  if family ~= "rse" and FieldModules and try3(FieldModules.enabled, "questLog", session) == true then
+    local Recorder = Gen3.engine("src.core.game3.quest_log_recorder")
+    if Recorder then pcall(Recorder.battle, session, st) end
+  end
+
+  if family == "rse" then
+    local Rse = Gen3.engine("src.core.game3.rse.init")
+    local Natives = Gen3.engine("src.core.game3.scripting.natives")
+    if Rse and type(Rse.call) == "function" then
+      local function speciesOf(mon)
+        return mon and (int3(Pokemon and try3(Pokemon.speciesOf, mon), nil)
+          or int3(mon.species, 0)) or 0
+      end
+      local function nickOf(mon)
+        if not mon then return "" end
+        return strOr(mon.nickname, mon.name) or ""
+      end
+      local caught = ending.result == "caught"
+      local r = g3.results or {}
+      local results = {
+        playerMon1Species = speciesOf(ending.playerMon), playerMon1Name = nickOf(ending.playerMon),
+        playerMon2Species = 0,
+        caughtMonSpecies = caught and speciesOf(ending.foeMon) or 0,
+        caughtMonNick = caught and nickOf(ending.foeMon) or "",
+        caughtMonBall = caught and int3(r.lastUsedItem, 0) or 0,
+        catchAttempts = r.catchAttempts or {},
+        usedMasterBall = r.usedMasterBall == true,
+        lastUsedItem = int3(r.lastUsedItem, 0),
+        lastOpponentSpecies = speciesOf(ending.foeMon),
+        shinyWildMon = wild and ending.foeMon ~= nil and Pokemon ~= nil
+          and try3(Pokemon.isShiny, ending.foeMon) == true or false,
+      }
+      local code = Natives and try3(Natives.outcome_to_code, ending.word) or nil
+      pcall(Rse.call, "tv", "onBattleEnd", "TryPutPokemonTodayOnAir", nil, session, results,
+        code, { trainer = not wild })
+    end
+  end
+
+  local Runtime = Gen3.engine("src.mods.Runtime")
+  if Runtime and try3(Runtime.wants, "battle.ended") == true then
+    pcall(Runtime.emit, "battle.ended", { battle = st, result = stateResult })
+  end
 end
 
 -- The prompts a Gen 3 fight still owes, one after another, then `finish`:
@@ -2937,77 +3213,86 @@ end
 -- same opponent, with the caller's `done` on it.
 function M:_reset3()
   local game, fight, g3 = self.game, self.fight, self.gen3
-  self.fight, self.sim, self.brain = nil, nil, nil
-  self.engine, self.game, self.wildMon = nil, nil, nil
-  self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
-  self.settled, self.pendingWarp, self.refuseRun = false, nil, nil
-  self.failedRun, self.generation, self.cantEscape = nil, nil, nil
-  self.runAttempts, self.faults = 0, 0
-  self.playerMoves, self.playerTurns = nil, 0
-  self.playerMon, self.playerMove = nil, nil
-  self.gen3 = nil
+  self:_clear3()
   if fight then
     fight.onDone = nil
     if Gen3Ui.has(fight) then pcall(Gen3Ui.pop, game, fight) end
   end
   if not g3 then return true end
   local session = Gen3.session()
-  if session == nil or session ~= g3.session then
-    -- A load dropped everything that was waiting; a stand-in's cover must not
-    -- outlive it.
-    local stand = g3.stand
-    if type(stand) == "table" and type(stand.takeDown) == "function" then
-      pcall(stand.takeDown, stand)
-    end
-    return true
-  end
+  if session == nil or session ~= g3.session then return true end
   self:_handBack3(game, g3)
   return true
 end
 
+-- The encounter as the engine is handed it back: the one wild monster this
+-- fight was fought against, not a fresh roll of the same species -- its
+-- personality, IVs, item and moves ride on the foe row the engine's battle
+-- builds its monster from (battle/init.lua foe_mon_from).
+local function handedFoe3(g3)
+  local foe = g3.foe
+  local mon = (g3.kind == "wild") and type(g3.party) == "table" and g3.party[1] or nil
+  if type(foe) ~= "table" or type(mon) ~= "table" then return foe end
+  local copy = {}
+  for k, v in pairs(foe) do copy[k] = v end
+  copy.mon = nil
+  copy.species = int3(mon.species, nil) or copy.species
+  copy.level = int3(mon.level, nil) or copy.level
+  copy.personality, copy.nature = mon.personality, mon.nature
+  copy.ivs, copy.evs = mon.ivs, mon.evs
+  copy.item = int3(mon.item, nil) or int3(mon.heldItem, 0)
+  copy.moves, copy.pp = copyList(mon.moves), copyList(mon.pp)
+  copy.ability, copy.gender, copy.friendship = mon.ability, mon.gender, mon.friendship
+  return copy
+end
+
+-- Start the engine's own battle in this fight's place.  src/Client.lua's
+-- divert sits in front of that start (the BattleBridge.start wrap), so for as
+-- long as it runs this file answers every offer with no (`handingBack3`) --
+-- otherwise the hand-back would be diverted straight back into a solo fight,
+-- handed back again, and so on.
 function M:_handBack3(game, g3)
-  local opts = g3.opts or {}
-  -- A stand-in knows how to hand its own encounter back (the cart's fight,
-  -- started with exactly the arguments the divert cancelled it with).
-  local stand = g3.stand
-  if type(stand) == "table" and type(stand.fightAlone) == "function" then
-    local ok, err = pcall(stand.fightAlone, stand)
+  self.handingBack3 = true
+  local okH, errH = pcall(function()
+    local opts = g3.opts or {}
+    if type(opts.fallback) == "function" then
+      local ok, err = pcall(opts.fallback)
+      if not ok then
+        self:warn("fallback3", "the ordinary battle could not be started again (%s); walk "
+          .. "into it again, or reload from your last save", tostring(err))
+      end
+      return
+    end
+    local BB = Gen3.engine("src.core.game3.battle_bridge")
+    local startOpts = {}
+    for k, v in pairs(opts) do
+      if k ~= "fallback" and k ~= "done" and k ~= "mapId" and k ~= "party" then
+        startOpts[k] = v
+      end
+    end
+    startOpts.done = g3.done
+    local ok, err = false, "the engine's battle bridge is unavailable"
+    if BB then
+      if g3.kind == "wild" then
+        ok, err = pcall(BB.startWild, nil, game, handedFoe3(g3), startOpts)
+      else
+        startOpts.wild = false
+        startOpts.trainerId = startOpts.trainerId or (g3.trainer and g3.trainer.trainerId)
+        ok, err = pcall(BB.start, nil, game, g3.foe, startOpts)
+      end
+    end
     if not ok then
-      self:warn("fallback3", "the ordinary battle could not be started again (%s); walk "
-        .. "into it again, or reload from your last save", tostring(err))
+      self:warn("fallback3", "the ordinary battle could not be started again (%s); walk into "
+        .. "it again, or reload from your last save", tostring(err))
+      -- The engine's own answer to a battle that will not start (BattleBridge's
+      -- doStart failure): the waiting script is released as though it was won.
+      if type(g3.done) == "function" then pcall(g3.done, "win") end
     end
-    return
-  end
-  if type(opts.fallback) == "function" then
-    local ok, err = pcall(opts.fallback)
-    if not ok then
-      self:warn("fallback3", "the ordinary battle could not be started again (%s); walk "
-        .. "into it again, or reload from your last save", tostring(err))
-    end
-    return
-  end
-  local BB = Gen3.engine("src.core.game3.battle_bridge")
-  local startOpts = {}
-  for k, v in pairs(opts) do
-    if k ~= "fallback" and k ~= "done" and k ~= "mapId" then startOpts[k] = v end
-  end
-  startOpts.done = g3.done
-  local ok, err = false, "the engine's battle bridge is unavailable"
-  if BB then
-    if g3.kind == "wild" then
-      ok, err = pcall(BB.startWild, nil, game, g3.foe, startOpts)
-    else
-      startOpts.wild = false
-      startOpts.trainerId = startOpts.trainerId or (g3.trainer and g3.trainer.trainerId)
-      ok, err = pcall(BB.start, nil, game, g3.foe, startOpts)
-    end
-  end
-  if not ok then
+  end)
+  self.handingBack3 = false
+  if not okH then
     self:warn("fallback3", "the ordinary battle could not be started again (%s); walk into "
-      .. "it again, or reload from your last save", tostring(err))
-    -- The engine's own answer to a battle that will not start (BattleBridge's
-    -- doStart failure): the waiting script is released as though it was won.
-    if type(g3.done) == "function" then pcall(g3.done, "win") end
+      .. "it again, or reload from your last save", tostring(errH))
   end
 end
 

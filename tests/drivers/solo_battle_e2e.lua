@@ -95,8 +95,12 @@ end
 --     to (the whiteout);
 --   * the real thing: walking in tall grass until the step encounter fires,
 --     which src/Client.lua's `encounter.roll` divert hands to solo through
---     `onWildEncounter` -- first with SOLO BATTLES off (the cart's own battle
---     must run), then on.
+--     `fromGen3Encounter` -- first with SOLO BATTLES off (the cart's own
+--     battle must run), then on;
+--   * the endings the cart words its own way: PAY DAY's coins, a trainer
+--     drawn (both last monsters down at once, and a draw the player is still
+--     standing after), FireRed's rival under the name the player gave them,
+--     and a trainer met on a rainy field.
 --
 -- Screenshots land in SHOT_DIR as g3-<game>-solo-NN-<leg>.png.
 --
@@ -648,6 +652,235 @@ local function runGen3(game, H, U, env)
     end
   end
 
+  -- The id of a move in this cart's own table, by pret name.
+  local function moveId(name) return H.g3Const(game, "moves", name) end
+
+  -- One lead that knows only `move` (full PP), at `level`.
+  local function seedWith(species, level, move)
+    local mon = seed(species, level)
+    if not (mon and move) then return mon end
+    local Moves = require("src.core.game3.battle.moves")
+    local okP, row = pcall(Moves.get, move)
+    local pp = (okP and type(row) == "table" and tonumber(row.pp)) or 10
+    mon.moves, mon.pp, mon.maxPp = { move }, { pp }, { pp }
+    return mon
+  end
+
+  local Natives = require("src.core.game3.scripting.natives")
+  local OUTCOME = Natives.B_OUTCOME or {}
+
+  -- ------------------------------------------------------------------
+  -- G9. PAY DAY: the coins land once, with the cart's line
+  -- ------------------------------------------------------------------
+  do
+    settle()
+    toGrass()
+    local payDay = moveId("MOVE_PAY_DAY")
+    local mon = seedWith(STARTER, 40, payDay)
+    session().money = 3000
+    local result
+    local took = payDay and mon and solo:fromGen3Encounter(game, wildOf(WILD, 3),
+      { done = function(r) result = r end })
+    check(took, "payday: a wild fight with only PAY DAY known")
+    if took then
+      awaitChoose(60, "the PAY DAY grid")
+      local sawCoins, sawLine = false, false
+      H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if f.phase == "choose" then fightWith(1) return false end
+        if not sawCoins and shown():find("Coins scattered", 1, true) then
+          sawCoins = true
+          shot("payday-scatter")
+        end
+        if not sawLine and shown():find("picked up", 1, true) then
+          sawLine = true
+          shot("payday-picked-up")
+        end
+        nudge()
+        return false
+      end, 120, "the PAY DAY fight to end")
+      check(result == "win", "payday: won", tostring(result))
+      check(sawCoins, "payday: 'Coins scattered everywhere!'")
+      check(sawLine, "payday: 'picked up' the coins, on screen")
+      check((tonumber(session().money) or 0) == 3000 + 40 * 5,
+            "payday: level x 5 coins paid, once", tostring(session().money))
+      settle()
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G10. a trainer draw: both last monsters down at once (SELFDESTRUCT)
+  -- ------------------------------------------------------------------
+  --
+  -- The cart counts a draw as a defeat (IsPlayerDefeated), so the trainer
+  -- script is answered "lose" -- the trainerbattle opcode sets the trainer
+  -- flag (and runs the beaten script, the badge, the TM) for anything else --
+  -- and a player with nothing standing whites out.  No prize.
+  if not easyId then
+    skip("the trainer draw leg", "no single easy trainer in this cart's book")
+  else
+    settle()
+    toGrass()
+    local boom = moveId("MOVE_SELF_DESTRUCT")
+    local mon = seedWith(STARTER, 60, boom)
+    session().money = 3000
+    local mapBefore = Map.current
+    local result
+    local took = boom and mon and solo:fromGen3Trainer(game, easyId,
+      { trainerId = easyId, done = function(r) result = r end })
+    check(took, "draw: taken")
+    if took then
+      awaitChoose(60, "the SELFDESTRUCT grid")
+      shot("draw-command")
+      local sawBoom = false
+      H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if f.phase == "choose" then fightWith(1) return false end
+        if not sawBoom and shown():find("SELFDESTRUCT", 1, true) then
+          sawBoom = true
+          shot("draw-selfdestruct")
+        end
+        nudge()
+        return false
+      end, 120, "the drawn trainer fight to end")
+      check(result == "lose", "draw: the trainer script hears 'lose' -- no trainer flag, "
+        .. "no beaten script", tostring(result))
+      check(session().battleOutcome ~= OUTCOME.WON, "draw: the save's outcome is not a win",
+            tostring(session().battleOutcome))
+      check((tonumber(session().money) or 0) <= 3000, "draw: no prize",
+            tostring(session().money))
+      settle()
+      U.wait(30)
+      shot("draw-after")
+      check(Map.current ~= mapBefore, "draw: with nothing standing, the player whites out",
+            tostring(mapBefore) .. " -> " .. tostring(Map.current))
+    end
+  end
+
+  -- A draw the player is still standing after -- the one the cart has no
+  -- word for (here: the referee's own clock, forced) -- is the same "lose" to
+  -- the script, B_OUTCOME_DREW on the save, and nobody is whited out.
+  if easyId then
+    settle()
+    toGrass()
+    seed(STARTER, 40)
+    session().money = 3000
+    local mapBefore = Map.current
+    local result
+    local took = solo:fromGen3Trainer(game, easyId, { trainerId = easyId, done = function(r) result = r end })
+    check(took, "standing draw: taken")
+    if took then
+      awaitChoose(60, "the grid before the called draw")
+      solo.sim:_finish("draw", nil, nil, "timeout")
+      H.waitSeconds(game, function()
+        local f = fight()
+        return f == nil or (f.phase == "over" and shown() ~= "")
+      end, 20, "the draw's ending")
+      shot("standing-draw")
+      driveToEnd(function() fightWith(1) end, 60)
+      check(result == "lose", "standing draw: the trainer script hears 'lose'", tostring(result))
+      check(session().battleOutcome == OUTCOME.DREW, "standing draw: B_OUTCOME_DREW on the save",
+            tostring(session().battleOutcome))
+      check((tonumber(session().money) or 0) == 3000, "standing draw: no prize, no loss",
+            tostring(session().money))
+      settle()
+      check(Map.current == mapBefore, "standing draw: nobody standing is whited out",
+            tostring(mapBefore) .. " -> " .. tostring(Map.current))
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G11. FireRed / LeafGreen's rival is the name the player gave them
+  -- ------------------------------------------------------------------
+  local rivalId
+  if not emerald then
+    local pack = Trainers.pack() or {}
+    local best = 999
+    for id, row in pairs(pack.trainers or {}) do
+      local tid = tonumber(id)
+      local class = type(row) == "table" and tonumber(row.class) or nil
+      local p = type(row) == "table" and row.party or nil
+      if tid and (class == 81 or class == 89 or class == 90) and type(p) == "table" and #p >= 1
+          and not row.doubleBattle then
+        local last = tonumber(p[#p].level) or 999
+        if last < best then rivalId, best = tid, last end
+      end
+    end
+  end
+  if emerald then
+    skip("the rival name leg", "Emerald's rival is not named by the player")
+  elseif not rivalId then
+    skip("the rival name leg", "no single rival battle in this cart's book")
+  else
+    settle()
+    toGrass()
+    seed(STARTER, 70)
+    session().rivalName = "ZAKK"
+    local result
+    local took = solo:fromGen3Trainer(game, rivalId, { trainerId = rivalId, done = function(r) result = r end })
+    check(took, "rival: trainer " .. tostring(rivalId) .. " taken")
+    if took then
+      local label = fight() and fight().peerName or ""
+      check(label:find("ZAKK", 1, true) ~= nil, "rival: named by the player's rival name", label)
+      check(not label:find("TERRY", 1, true), "rival: not the cart's placeholder", label)
+      H.waitSeconds(game, function() return said("ZAKK") end, 10, "the rival's intro")
+      shot("rival-intro")
+      driveToEnd(function(f) fightWith(bestMove(f)) end, 240)
+      check(result == "win", "rival: beaten", tostring(result))
+      settle()
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G12. a trainer on a rainy field fights in the rain
+  -- ------------------------------------------------------------------
+  --
+  -- The engine opens every battle off the link under the overworld's weather.
+  -- The rain is set the way a map script sets it (setweather / doweather,
+  -- here applied at once), then the trainer is met.
+  if not easyId then
+    skip("the rain leg", "no single easy trainer in this cart's book")
+  else
+    settle()
+    toGrass()
+    seed(STARTER, 40)
+    local Weather = require("src.core.game3.weather")
+    pcall(Weather.apply, 3, { seamless = false }) -- WEATHER_RAIN
+    local raining = H.waitSeconds(game, function()
+      local ok, id = pcall(Weather.get)
+      return ok and tonumber(id) == 3
+    end, 15, "the rain to set in")
+    check(raining, "rain: the overworld is raining")
+    U.wait(30)
+    shot("rain-field")
+    local result
+    local took = solo:fromGen3Trainer(game, easyId, { trainerId = easyId, done = function(r) result = r end })
+    check(took, "rain: the trainer is taken")
+    if took then
+      check(solo.sim and solo.sim.field and solo.sim.field.weather == "RAIN",
+            "rain: the fight opens in the rain",
+            tostring(solo.sim and solo.sim.field and solo.sim.field.weather))
+      local sawRainLine = false
+      H.waitSeconds(game, function()
+        if said("rain") or said("RAIN") then sawRainLine = true return true end
+        local f = fight()
+        if f and f.phase == "choose" then return true end
+        nudge()
+        return false
+      end, 30, "the rain line")
+      awaitChoose(60, "the grid in the rain")
+      shot("rain-arena")
+      check(sawRainLine or (fight() and fight().weatherShown == "RAIN"),
+            "rain: the arena shows it")
+      driveToEnd(function(f) fightWith(bestMove(f)) end, 240)
+      check(result == "win", "rain: beaten", tostring(result))
+      settle()
+    end
+    toGrass()
+  end
+
   -- ------------------------------------------------------------------
   -- G8. the real thing: a step encounter, taken by src/Client.lua's divert
   -- ------------------------------------------------------------------
@@ -663,8 +896,6 @@ local function runGen3(game, H, U, env)
       endEngineBattle()
     else
       check(true, "a real grass encounter was taken by the mod's divert")
-      local viaStand = solo.gen3 and solo.gen3.stand ~= nil
-      log("grass divert via the stand-in:", tostring(viaStand))
       awaitChoose(60, "the diverted wild's grid")
       shot("grass-divert")
       driveToEnd(function() command("RUN") end, 60)

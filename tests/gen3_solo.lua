@@ -115,6 +115,11 @@ P3._moveNames[45] = "GROWL"
 ROM[300] = { effect = 0, power = 250, type = 14, accuracy = 100, pp = 10,
              secondaryChance = 0, target = 0, priority = 0, flags = 2 }
 P3._moveNames[300] = "MINDBLAST"
+-- PAY DAY: pret EFFECT_PAY_DAY (34) on an invented row; its coins are the
+-- move's secondary effect, so the row carries a certain one.
+ROM[6] = { effect = 34, power = 40, type = 0, accuracy = 100, pp = 20,
+           secondaryChance = 100, target = 0, priority = 0, flags = 2 }
+P3._moveNames[6] = "PAYDAY"
 ITEMS[1] = { name = "MASTER BALL", pocket = "POKE_BALLS", price = 0 }
 ITEMS[21] = { name = "HYPER POTION", pocket = "ITEMS", price = 1200 }
 ITEMS[127] = { name = "AMULET COIN", pocket = "ITEMS", price = 100, holdEffect = 32 }
@@ -358,7 +363,10 @@ function FakeDamage.ensureStats(mon, level)
 end
 
 -- An invented trainer book.  Class 57's prize value comes from the engine's
--- own table (battle/prize.lua); nothing below asserts it as a literal.
+-- own table (battle/prize.lua); nothing below asserts it as a literal.  903
+-- is a rival: its row carries the cart's placeholder name, and the book
+-- answers with the player's rival name instead (Trainers.info's `rivalName`,
+-- for the rival and Champion classes).
 local TRAINERS = {
   [900] = { class = 57, className = "YOUNGSTER", name = "BEN", pic = 5, gender = 0,
             encounterMusic = 0, lastLevel = 3, aiFlags = 1, items = { 0, 0, 0, 0 },
@@ -369,7 +377,11 @@ local TRAINERS = {
   [902] = { class = 57, className = "TWINS", name = "AMY", pic = 6, gender = 1,
             encounterMusic = 130, lastLevel = 5, aiFlags = 1, items = { 0, 0, 0, 0 },
             doubleBattle = true, party = { { species = 16, level = 5 }, { species = 16, level = 5 } } },
+  [903] = { class = 89, className = "RIVAL", name = "TERRY", pic = 7, gender = 0,
+            encounterMusic = 0, lastLevel = 3, aiFlags = 1, items = { 0, 0, 0, 0 },
+            party = { { species = 16, level = 3 } } },
 }
+local RIVAL_CLASSES = { [81] = true, [89] = true, [90] = true }
 local FakeTrainers = {}
 local function trainerView(id)
   local t = TRAINERS[tonumber(id)]
@@ -381,7 +393,14 @@ local function trainerView(id)
   return out
 end
 FakeTrainers.get = trainerView
-FakeTrainers.info = trainerView
+function FakeTrainers.info(id, opts)
+  local out = trainerView(id)
+  if out and RIVAL_CLASSES[out.class] and type(opts) == "table"
+      and type(opts.rivalName) == "string" and opts.rivalName ~= "" then
+    out.name = opts.rivalName
+  end
+  return out
+end
 function FakeTrainers.dialogs(id) return (trainerView(id) or {}).dialogs or {} end
 function FakeTrainers._doublePersonalities(t)
   local out = {}
@@ -455,6 +474,44 @@ local FakeEncounters = {
 }
 local battleActive = false
 
+-- What the ending does beyond the rewards (SoloBattle M:_finishEffects3), in
+-- the order it did it: Pokérus, the quest log, the TV, `battle.ended`.
+local effectsLog = {}
+local function effectsOf(kind)
+  local out = {}
+  for _, e in ipairs(effectsLog) do if e[1] == kind then out[#out + 1] = e end end
+  return out
+end
+function FakePokemon.randomlyGivePartyPokerus(party, s)
+  effectsLog[#effectsLog + 1] = { "pokerus.give", party, s }
+end
+function FakePokemon.partySpreadPokerus(party, s)
+  effectsLog[#effectsLog + 1] = { "pokerus.spread", party, s }
+end
+function FakePokemon.isShiny() return false end
+local FakeFieldModules = { enabled = function(name) return name == "questLog" end }
+local FakeQuestLog = {
+  battle = function(s, st) effectsLog[#effectsLog + 1] = { "questlog", s, st } end,
+}
+local FakeRse = {
+  call = function(name, fn, what, logger, ...)
+    effectsLog[#effectsLog + 1] = { "rse", name, fn, what, logger, ... }
+    return nil, true
+  end,
+}
+local FakeRuntime = {
+  wants = function(name) return name == "battle.ended" end,
+  wantsHook = function() return false end,
+  emit = function(name, payload) effectsLog[#effectsLog + 1] = { "emit", name, payload } end,
+  call = function(_, vanilla, ...) return vanilla(nil, ...) end,
+}
+-- The overworld weather module (Weather.get), its id set per scenario.
+local FakeWeather = { id = 0 }
+function FakeWeather.get() return FakeWeather.id end
+-- FLAG_BADGE0n_GET, read off a `badges` set on the store (the session here).
+local FakeFlags = {}
+function FakeFlags.hasBadge(store, n) return type(store.badges) == "table" and store.badges[n] == true end
+
 stub("src.core.game3.runtime", { getSession = function() return SESSION end })
 stub("src.core.game3.pokemon", FakePokemon)
 stub("src.core.game3.bag", FakeBag)
@@ -482,6 +539,12 @@ stub("src.core.game3.party", FakeParty)
 stub("src.core.game3.scripting.natives", FakeNatives)
 stub("src.core.game3.scripting.space", FakeSpace)
 stub("src.core.game3.encounters", FakeEncounters)
+stub("src.core.game3.field_modules", FakeFieldModules)
+stub("src.core.game3.quest_log_recorder", FakeQuestLog)
+stub("src.core.game3.rse.init", FakeRse)
+stub("src.mods.Runtime", FakeRuntime)
+stub("src.core.game3.scripting.flags", FakeFlags)
+stub("src.core.game3.weather", FakeWeather)
 
 -- The real pure engine modules, after the stand-ins they close over.
 local Experience = require("src.core.game3.battle.experience")
@@ -526,6 +589,7 @@ local function newGame(sessionExtra)
   bridgeCalls, fieldCalls = {}, {}
   spaceCalls, encounterResets = 0, 0
   battleActive = false
+  effectsLog = {}
   return GAME
 end
 
@@ -587,7 +651,12 @@ local function drive(solo, onChoose, maxSteps)
       end
     end
     if fight.phase == "over" and #fight.lines == 0 and not fight.shown then
-      fight:update(2.0)
+      -- A on the last line is taken only once the screen's own ending has
+      -- nothing left to say (a Pay Day line is owed until then).
+      for _ = 1, 60 do
+        fight:update(2.0)
+        if #fight.lines == 0 and not fight.shown and not fight.payDayLine then break end
+      end
       fight:leave()
       return true, lastFight
     end
@@ -809,6 +878,163 @@ do
      .. "that still has a super-effective move (pret's backwards test)")
 end
 
+-- ------- the cart's own scripts, per family (the engine runs them from the
+--         cart: battle/ai.lua over the imported script pack)
+
+-- Emerald's AI_SCRIPT_* numbering (pokeemerald include/constants/battle_ai.h,
+-- the engine's emerald battle profile): the layout the brain reads the
+-- family off.
+local EM_BITS = { CHECK_BAD_MOVE = 0, TRY_TO_FAINT = 1, CHECK_VIABILITY = 2, SETUP_FIRST_TURN = 3,
+                  RISKY = 4, PREFER_POWER_EXTREMES = 5, PREFER_BATON_PASS = 6, DOUBLE_BATTLE = 7,
+                  HP_AWARE = 8, TRY_SUNNY_DAY_START = 9 }
+
+-- rng that clears every "if_random_less_than" (the 0..255 draws answer 255)
+-- and answers the bottom of every other range.
+local function highRand(lo, hi)
+  if hi == nil then return 1 end
+  if lo == 0 and hi == 255 then return 255 end
+  return lo
+end
+
+do
+  eq(Brain.aiFamily3(Brain.AI_BITS_FRLG), "frlg", "aiFamily3: FireRed's layout")
+  eq(Brain.aiFamily3(EM_BITS), "rse", "aiFamily3: Emerald's")
+  eq(brain3(1).family3, "frlg", "brain3: the family is read off the layout it runs")
+  eq(brain3(1, { aiBits = EM_BITS }).family3, "rse", "brain3: ...Emerald's too")
+end
+
+-- TRY_TO_FAINT: `if_can_faint` passes over anything of power under 2, so a
+-- one-hit KO move is not a knockout to it.
+do
+  local ohko = mv(32, { power = 1, effect = E.OHKO })
+  local npc = { sheet({ moves = { mv(1, { power = 40 }), ohko } }) }
+  local _, view = field(npc, sheet())
+  eq(brain3(4):choose(view).move, 0, "brain3: TRY_TO_FAINT does not count a one-hit KO move as a knockout")
+  local _, ko = field({ sheet({ moves = { mv(1, { power = 40 }), mv(2, { power = 200 }) } }) }, sheet({ hp = 30 }))
+  eq(brain3(4):choose(ko).move, 1, "brain3: ...a real knockout still is")
+end
+
+-- TRY_TO_FAINT's 4x bonus is Emerald's script alone.
+do
+  local npc = { sheet({ moves = { mv(1, { power = 40 }), mv(52, { power = 40, type = 10 }) } }) }
+  local _, view = field(npc, sheet({ types = { 12, 6 } }))
+  local fr = brain3(4, { rng = highRand })
+  fr:choose(view)
+  eq(fr.lastScores3 and fr.lastScores3[2], 100, "brain3: FireRed's AI_TryToFaint has no 4x bonus")
+  local _, view2 = field(npc, sheet({ types = { 12, 6 } }))
+  local em = brain3(2, { rng = highRand, aiBits = EM_BITS })
+  em:choose(view2)
+  eq(em.lastScores3 and em.lastScores3[2], 102, "brain3: Emerald's adds +2 for a 4x hit")
+end
+
+-- Slot 5: FireRed's PREFER_STRONGEST_MOVE is the same script as Emerald's
+-- PREFER_POWER_EXTREMES -- a DISCOURAGED move (status, fixed damage) +2.
+do
+  local npc = { sheet({ moves = { mv(1, { power = 40 }), mv(45, { power = 0, effect = E.ATTACK_DOWN }) } }) }
+  local _, view = field(npc, sheet())
+  eq(brain3(32, { rng = highRand }):choose(view).move, 1,
+     "brain3: FireRed's PREFER_STRONGEST_MOVE favours the status move, as the cart's script does")
+  local _, view2 = field(npc, sheet())
+  eq(brain3(32, { rng = highRand, aiBits = EM_BITS }):choose(view2).move, 1,
+     "brain3: ...exactly as Emerald's PREFER_POWER_EXTREMES")
+end
+
+-- AI_CheckBadMove sends only a move the power reading does not discourage
+-- through the immunity checks (and, on Emerald, FISSURE / HORN DRILL too).
+do
+  -- EXPLOSION (a discouraged effect) into a Ghost is not written off here.
+  local npc = { sheet({ moves = { mv(153, { power = 250, effect = E.EXPLOSION }),
+                                  mv(52, { power = 40, type = 10 }) } }) }
+  local _, view = field(npc, sheet({ types = { 7 } }))
+  eq(brain3(1):choose(view).move, 0,
+     "brain3: a discouraged move skips AI_CBM_CheckIfNegatesType (its score is left at 100)")
+  -- FISSURE into a Flying type: FireRed's script never checks it...
+  local fissure = mv(90, { power = 1, type = 4, effect = E.OHKO })
+  local _, fr = field({ sheet({ moves = { fissure, mv(1, { power = 40 }) } }) }, sheet({ types = { 2 } }))
+  eq(brain3(1):choose(fr).move, 0, "brain3: FireRed does not send FISSURE through the immunity checks")
+  -- ...Emerald's names it and marks it down.
+  local _, em = field({ sheet({ moves = { fissure, mv(1, { power = 40 }) } }) }, sheet({ types = { 2 } }))
+  eq(brain3(1, { aiBits = EM_BITS }):choose(em).move, 1,
+     "brain3: Emerald sends FISSURE through them, and a Flying type is immune")
+  -- the SOUNDPROOF check still covers a discouraged sound move
+  eq(pickAgainst(43, mv(47, { power = 0, effect = E.SLEEP }), 1).move, 1,
+     "brain3: SING into SOUNDPROOF is still avoided")
+end
+
+-- ShouldSwitch's own trap reading: an opposing ARENA TRAP holds a Flying type
+-- in, and a MAGNET PULL anywhere -- its own -- holds a Steel type in.
+do
+  local function perishField(npcLead, player)
+    local npc = { npcLead, sheet({ slot = 1, moves = { mv(1, { power = 40 }) } }) }
+    local _, view = field(npc, player)
+    view.battler.perishTurns = 0
+    return view
+  end
+  local free = perishField(sheet({ slot = 0 }), sheet())
+  eq(brain3(1):choose(free).action, "switch", "brain3: a perish count at 0 switches out")
+  local trapped = perishField(sheet({ slot = 0, types = { 2 } }), sheet({ ability = 71 }))
+  eq(brain3(1):choose(trapped).action, "fight",
+     "brain3: an opposing ARENA TRAP holds a Flying type in, as the cart's AI reads it")
+  local pulled = perishField(sheet({ slot = 0, types = { 8 }, ability = 42 }), sheet())
+  eq(brain3(1):choose(pulled).action, "fight",
+     "brain3: its own MAGNET PULL holds a Steel type in")
+end
+
+-- ShouldSwitchIfNaturalCure: asleep only; then the flags search.
+do
+  local function coin(lo, hi)
+    if hi == nil then return 1 end
+    if lo == 0 and hi == 1 then return 1 end
+    return lo
+  end
+  local function cureField(status)
+    local npc = { sheet({ slot = 0, ability = 30 }), sheet({ slot = 1 }) }
+    local _, view = field(npc, sheet())
+    view.battler.mon.status = status
+    return view
+  end
+  eq(brain3(1, { rng = coin }):choose(cureField("PSN")).action, "fight",
+     "brain3: NATURAL CURE does not switch out of poison (the cart asks for sleep)")
+  eq(brain3(1, { rng = coin }):choose(cureField("SLP")).action, "switch",
+     "brain3: ...it switches out of sleep")
+  -- asleep, hit by an Electric move: a Ground bench mon with a Grass move
+  -- for the Water player is sent in (FindMonWithFlags, no roll), where the
+  -- super-effective check alone would have stayed.
+  local function sayStay(lo, hi)
+    if hi == nil then return 1 end
+    if lo == 0 and hi == 9 then return 1 end
+    return lo
+  end
+  local grass = mv(22, { power = 45, type = 12 })
+  local npc = { sheet({ slot = 0, ability = 30, moves = { grass } }),
+                sheet({ slot = 1, types = { 4 }, moves = { grass } }) }
+  local _, view = field(npc, sheet({ types = { 11 }, moves = { mv(85, { power = 95, type = 13 }) } }))
+  view.battler.mon.status = "SLP"
+  view.battler.lastLandedMove = 85
+  view.battler.lastHitBy = "p"
+  local c = brain3(1, { rng = sayStay }):choose(view)
+  eq(c and c.action, "switch", "brain3: NATURAL CURE asleep: the mon the last hit cannot touch")
+  eq(c and c.slot, 1, "brain3: ...is the one sent in")
+end
+
+-- GetMostSuitableMonToSwitchInto's second pass, read the cart's way: a base
+-- of 2 per move not of power 1, x1.5 for sharing a type with the mon being
+-- replaced, through the chart -- not whoever hits hardest.
+do
+  local npc = {
+    sheet({ slot = 0, hp = 0, types = { 10 } }),
+    sheet({ slot = 1, types = { 0 }, moves = { mv(2, { power = 200 }) } }),
+    sheet({ slot = 2, types = { 11 }, moves = { mv(52, { power = 10, type = 10 }) } }),
+  }
+  local _, view = field(npc, sheet())
+  view.mustReplace = true
+  view.mon = npc[1]
+  view.battler = nil
+  local c = brain3(1):choose(view)
+  eq(c and c.slot, 2, "brain3: the send-out's second pass prices STAB off the fainted mon, "
+     .. "not the candidate's damage")
+end
+
 -- ===================================================================
 -- 2. SoloBattle, Gen 3
 -- ===================================================================
@@ -838,6 +1064,17 @@ do
   eq(Solo.gen3Result("win", "run", false), "fled", "gen3Result: the wild mon left")
   eq(Solo.gen3Result("draw", "ko", true), "lose", "gen3Result: a whiteout draw is a defeat")
   eq(Solo.gen3Result("win", "ko", false), "win", "gen3Result: win")
+  -- A flight is decided by who ran, not by who the referee named the winner.
+  eq(Solo.gen3Result("win", "run", false, "a"), "run",
+     "gen3Result: our side left -- a POKe DOLL names us the winners, and it is still RAN")
+  eq(Solo.gen3Result("loss", "run", false, "b"), "fled", "gen3Result: their side left")
+  -- A draw is not a win for a trainer script; the save still says DREW.
+  eq(Solo.gen3Result("draw", "timeout", false, nil, "trainer"), "lose",
+     "gen3Result: a drawn trainer fight answers the script 'lose'")
+  eq(Solo.gen3Result("draw", "timeout", false, nil, "wild"), "draw", "gen3Result: a wild draw is a draw")
+  eq(Solo.gen3OutcomeWord("draw", "timeout", false), "draw", "gen3OutcomeWord: ...and the save says DREW")
+  eq(Solo.gen3Result("draw", "ko", true, nil, "trainer"), "lose",
+     "gen3Result: a double knockout is the cart's whiteout either way")
 
   newGame()
   SESSION.party = { monOf(4, 20) }
@@ -1114,38 +1351,371 @@ do
   eq(#bridgeCalls, 0, "reload: nothing restarted over a different save")
 end
 
--- (h) the stand-in path: src/Client.lua's divert hands `onWildEncounter` /
---     `onTrainerBattle` src/CoopField.lua's stand-in for the fight it
---     cancelled.  A stand-in of that shape, built by hand, recording what the
---     fight hands it.
-local function newStand(kind, party, trainer, opts)
-  local stand = {
-    kind = kind, gen3Divert = true, wild = kind == "wild",
-    enemyParty = party, enemy = { mon = party[1] },
-    trainer = trainer, trainerId = trainer and trainer.trainerId or nil,
-    oppClass = trainer and trainer.trainerClass or nil,
-    trainerPic = trainer and trainer.trainerPic or nil,
-    opts = opts or {}, finished = nil, downs = 0, alone = 0,
-  }
-  function stand:takeDown() self.downs = self.downs + 1; return true end
-  function stand:fightAlone() self.alone = self.alone + 1; return true end
-  stand.onFinish = function(outcome) stand.finished = outcome; return true end
-  stand.onDone = stand.onFinish
-  return stand
+-- Warnings a scenario provokes on purpose are checked where they happen and
+-- then dropped, so the suite's closing "nothing could not" check still
+-- covers every other scenario.
+local function dropWarnsSince(mark)
+  for i = #warns, mark + 1, -1 do warns[i] = nil end
 end
 
+local function countIn(list, needle)
+  local n = 0
+  for _, line in ipairs(list or {}) do
+    if type(line) == "string" and line:find(needle, 1, true) then n = n + 1 end
+  end
+  return n
+end
+
+local function indexIn(list, needle)
+  for i, line in ipairs(list or {}) do
+    if type(line) == "string" and line:find(needle, 1, true) then return i end
+  end
+  return nil
+end
+
+-- Up to the command menu of a fight that has just been taken.
+local function toMenu(solo)
+  local f = solo.fight
+  for _ = 1, 40 do
+    f:update(2.0); solo:update(0.5, GAME)
+    if f.phase == "choose" then break end
+  end
+  return f
+end
+
+-- (h) Gen 3's one door is `fromGen3*`.  The engine raises no `screen.pushed`
+--     on Gen 3, so the Gen 1 / Gen 2 screen divert (`onWildEncounter` /
+--     `onTrainerBattle`) declines there; src/Client.lua hands solo the
+--     stand-in's monsters instead (`opts.party`, a wild's `enc.mon`), and the
+--     fight is fought -- and handed back -- with exactly those.
 do
   newGame()
   SESSION.party = { monOf(4, 30) }
-  FakeBag.add(SESSION.bag, 1, 1)
   local solo = newSolo()
   local wild = Solo.gen3FoeMon({ species = 16, level = 5 }, { wild = true })
-  local stand = newStand("wild", { wild })
-  check(solo:onWildEncounter(GAME, stand, "FR_ROUTE_1"), "stand: the wild stand-in is taken")
-  eq(solo.gen3 and solo.gen3.stand, stand, "stand: the fight remembers who owns its ending")
-  eq(solo.wildMon, wild, "stand: the stand-in's own engine monster is the catch target")
+  eq(solo:onWildEncounter(GAME, { kind = "wild", enemyParty = { wild } }, "FR_ROUTE_1"), false,
+     "divert: a Gen 3 screen divert is declined -- fromGen3Encounter is the Gen 3 door")
+  eq(solo:onTrainerBattle(GAME, { kind = "trainer", enemyParty = { wild } }, "FR_ROUTE_1"), false,
+     "divert: ...and fromGen3Trainer the trainer's")
+  eq(solo:isRunning(), false, "divert: nothing was started")
+
+  -- enc.mon: the cover's own monster, not a second roll of the species
+  local built = Solo.gen3FoeMon({ species = 16, level = 5, personality = 424242 }, { wild = true })
+  local rolled = rngState
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 5, mon = built }, {}),
+        "prebuilt: a wild with its monster built is taken")
+  eq(solo.wildMon, built, "prebuilt: that monster is the one fought and caught")
+  eq(rngState, rolled, "prebuilt: nothing was rolled for it a second time")
+  solo:reset()
+  local handed = bridgeCalls[#bridgeCalls]
+  eq(handed and handed[1], "startWild", "prebuilt: handed back to the engine")
+  eq(handed and handed[2] and handed[2].personality, 424242,
+     "prebuilt: the engine is handed the monster that was fought, personality and all")
+  eq(handed and handed[2] and handed[2].ivs, built.ivs, "prebuilt: ...and its IVs")
+  eq(handed and handed[2] and handed[2].mon, nil, "prebuilt: ...as a foe row, not the fought table")
+
+  -- opts.party (either door): used as it is
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  local party = Solo.gen3TrainerParty(FakeTrainers.foeFromId(900), 900)
+  local tsolo = newSolo()
+  check(tsolo:fromGen3Trainer(GAME, 900, { trainerId = 900, party = party }), "prebuilt: a trainer is taken")
+  eq(tsolo.gen3 and tsolo.gen3.party, party, "prebuilt: the stand-in's party is the trainer's team")
+  tsolo:reset()
+  local wsolo = newSolo()
+  local lead = Solo.gen3FoeMon({ species = 16, level = 4 }, { wild = true })
+  check(wsolo:fromGen3Encounter(GAME, { species = 16, level = 4 }, { party = { lead } }),
+        "prebuilt: a wild with opts.party is taken")
+  eq(wsolo.wildMon, lead, "prebuilt: opts.party's lead is the wild monster")
+  wsolo:reset()
+end
+
+-- The hand-back goes through the same divert that offered the fight, which
+-- must not be able to hand it straight back to solo (a fight re-diverted into
+-- itself forever).  A fallback that asks again, and the engine's own start
+-- that asks again, are both told no.
+do
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  local solo = newSolo()
+  local again, asked = nil, 0
+  local enc = { species = 16, level = 5 }
+  local opts = {}
+  opts.fallback = function()
+    asked = asked + 1
+    again = solo:fromGen3Encounter(GAME, enc, {})
+  end
+  check(solo:fromGen3Encounter(GAME, enc, opts), "handback: taken")
+  solo:reset()
+  eq(asked, 1, "handback: the caller's fallback started the cart's fight")
+  eq(again, false, "handback: the divert it re-entered did not hand it to solo again")
+  eq(solo:isRunning(), false, "handback: no second solo fight")
+  eq(solo.handingBack3, false, "handback: the guard is down once the start returned")
+
+  local start = FakeBridge.startWild
+  local reoffered
+  FakeBridge.startWild = function(...)
+    reoffered = solo:fromGen3Encounter(GAME, enc, {})
+    return start(...)
+  end
+  check(solo:fromGen3Encounter(GAME, enc, {}), "handback: taken (no fallback)")
+  solo:reset()
+  FakeBridge.startWild = start
+  eq(reoffered, false, "handback: the engine start's own divert declines too")
+  eq(solo:isRunning(), false, "handback: ...and nothing is running")
+  check(solo:fromGen3Encounter(GAME, enc, {}), "handback: the next encounter is taken as usual")
+  solo:reset()
+end
+
+-- (i) A draw against a trainer.  The trainerbattle opcode reads anything but
+--     a loss as a win (the flag, the beaten script, the badge); the cart
+--     counts a draw as a defeat.  A draw the player is still standing after
+--     (a referee's own clock) answers 'lose', whites nobody out, pays nothing,
+--     and leaves B_OUTCOME_DREW on the save.
+do
+  newGame()
+  local lead = monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } })
+  SESSION.party = { lead }
+  SESSION.money = 500
+  local solo = newSolo()
+  local result, calls = nil, 0
+  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900,
+    done = function(r) result = r; calls = calls + 1 end }), "draw: taken")
+  solo.sim:_finish("draw", nil, nil, "timeout")
+  local ok, fight = drive(solo, function(f) f:pickMove(1) end)
+  check(ok, "draw: the fight ended")
+  eq(result, "lose", "draw: the trainer script is answered 'lose' -- no flag, no beaten script")
+  eq(calls, 1, "draw: once")
+  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save's outcome is DREW")
+  eq(SESSION.money, 500, "draw: no prize")
+  eq(#fieldCalls, 0, "draw: nobody still standing is whited out")
+  check(not textOf(fight):find("STRINGID_PLAYERGOTMONEY", 1, true), "draw: no money line")
+end
+
+-- (j) A turn that throws half way through: the referee is left `resolving`,
+--     and would call the fight a draw once its resolve clock ran out.  It is
+--     handed back to the engine instead, a few frames later.
+do
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local solo = newSolo()
+  local result
+  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900, done = function(r) result = r end }),
+        "stall: taken")
+  local fight = toMenu(solo)
+  eq(fight.phase, "choose", "stall: at the command menu")
+  local mark = #warns
+  solo.sim._resolveFights = function() error("a move this build cannot resolve") end
+  local okPick = pcall(fight.pickMove, fight, 1)
+  check(okPick, "stall: the throw stays out of the screen's menu code")
+  for _ = 1, 80 do
+    if not solo:isRunning() then break end
+    solo:update(0.5, GAME)
+  end
+  eq(solo:isRunning(), false, "stall: the fight was let go")
+  eq(result, nil, "stall: never scored -- not a draw, not a win")
+  local last = bridgeCalls[#bridgeCalls]
+  eq(last and last[1], "start", "stall: the engine's own trainer battle starts in its place")
+  eq(last and last[3] and last[3].trainerId, 900, "stall: ...against the same trainer")
+  check(contains(warns, "part way through a turn"), "stall: the log says why")
+  dropWarnsSince(mark)
+end
+
+-- (k) FireRed's rival and Champion are named by the player: the trainer book
+--     answers with `rivalName`, where the row and the foe record carry the
+--     cart's placeholder.
+do
+  newGame({ rivalName = "GARY" })
+  SESSION.party = { monOf(4, 20) }
+  local rec = Solo.gen3TrainerRecord(FakeTrainers.foeFromId(903), 903, {})
+  eq(rec.trainerName, "GARY", "rival: the name the player gave the rival, not the row's placeholder")
+  eq(Solo.gen3FoeLabel(rec), "RIVAL GARY", "rival: 'RIVAL GARY would like to battle!'")
+  eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(903), 903, { rivalName = "BLUE" }).trainerName,
+     "BLUE", "rival: the battle opts' rivalName first, as the engine's start passes it")
+  eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(900), 900, {}).trainerName, "BEN",
+     "rival: an ordinary trainer keeps its own name")
+  local solo = newSolo()
+  check(solo:fromGen3Trainer(GAME, 903, { trainerId = 903 }), "rival: taken")
+  eq(solo.fight and solo.fight.peerName, "RIVAL GARY", "rival: the screen names the rival the player named")
+  solo:reset()
+end
+
+-- (l) The overworld's weather opens a trainer fight too (the engine applies
+--     it to every battle off the link), not only a wild one.
+do
+  newGame()
+  SESSION.party = { monOf(4, 20) }
+  FakeWeather.id = 3 -- WEATHER_RAIN
+  local solo = newSolo()
+  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "weather: a trainer on a rainy route")
+  eq(solo.sim and solo.sim.field and solo.sim.field.weather, "RAIN", "weather: the fight opens in the rain")
+  solo:reset()
+  local wsolo = newSolo()
+  check(wsolo:fromGen3Encounter(GAME, { species = 16, level = 3 }, {}), "weather: a wild on the same route")
+  eq(wsolo.sim and wsolo.sim.field and wsolo.sim.field.weather, "RAIN", "weather: ...in the rain as before")
+  wsolo:reset()
+  -- A live boot's sandbox has no `package`, so Sheet3's reading comes back
+  -- empty there; the engine's weather module is asked directly.
+  local sheetReading = Sheet3.fieldWeather
+  Sheet3.fieldWeather = function() return nil end
+  FakeWeather.id = 13 -- WEATHER_DOWNPOUR
+  local live = newSolo()
+  check(live:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "weather: a trainer in a downpour (live reading)")
+  eq(live.sim and live.sim.field and live.sim.field.weather, "RAIN",
+     "weather: the engine's weather module answers where package.loaded cannot")
+  live:reset()
+  Sheet3.fieldWeather = sheetReading
+  FakeWeather.id = 0
+  local dry = newSolo()
+  check(dry:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "weather: a trainer under a clear sky")
+  eq(dry.sim and dry.sim.field and dry.sim.field.weather, nil, "weather: no weather when the field has none")
+  dry:reset()
+end
+
+-- (m) PAY DAY.  The coins are the screen's to pay (MediatedBattle's Gen 3
+--     `payDay3`, fed the local referee's outcome), once, after the knockout,
+--     with the cart's line -- after a trainer's prize line, as
+--     BattleScript_LocalTrainerBattleWon says it.  This file pays nothing more.
+do
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 6 }, pp = { 20 }, maxPp = { 20 } }) }
+  SESSION.money = 1000
+  local solo = newSolo()
+  local result
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 2 }, { done = function(r) result = r end }),
+        "payday: a wild fight with PAY DAY")
+  local ok, fight = drive(solo, function(f) f:pickMove(1) end)
+  check(ok, "payday: the fight ended")
+  eq(result, "win", "payday: won by the knockout")
+  eq(SESSION.money, 1000 + 20 * 5, "payday: level x 5 coins, paid once")
+  eq(countIn(fight.textLog, "STRINGID_PLAYERPICKEDUPMONEY|100"), 1, "payday: 'ANN picked up ¥100!', once")
+
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 6 }, pp = { 20 }, maxPp = { 20 } }) }
+  SESSION.money = 500
+  local tsolo = newSolo()
+  check(tsolo:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "payday: a trainer fight with PAY DAY")
+  local okT, tfight = drive(tsolo, function(f) f:pickMove(1) end)
+  check(okT, "payday: the trainer fight ended")
+  local prize = Prize.calc(900, { lastLevel = 3 })
+  eq(SESSION.money, 500 + prize + 20 * 5, "payday: the prize and the coins, each once")
+  local prizeAt = indexIn(tfight.textLog, "STRINGID_PLAYERGOTMONEY")
+  local coinsAt = indexIn(tfight.textLog, "STRINGID_PLAYERPICKEDUPMONEY")
+  check(prizeAt and coinsAt and prizeAt < coinsAt, "payday: the coins' line comes after the prize line",
+        tostring(prizeAt) .. " / " .. tostring(coinsAt))
+  eq(countIn(tfight.textLog, "STRINGID_PLAYERPICKEDUPMONEY"), 1, "payday: ...once")
+end
+
+-- (n) The early rival's loss: the rival's victory speech first
+--     (BattleScript_LocalBattleLost's early-rival arm), and with the heal-after
+--     flag nothing more -- no lost lines, no warp.
+do
+  newGame()
+  local rivalLead = monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 }, hp = 3 })
+  SESSION.party = { rivalLead }
+  SESSION.money = 500
+  local solo = newSolo()
+  local result
+  check(solo:fromGen3Trainer(GAME, 901, { trainerId = 901, earlyRival = true, rivalFlags = 1,
+    victoryText = "HA! LOOK AT THAT!", done = function(r) result = r end }), "rival loss: taken")
+  local _, fight = drive(solo, function(f) f:pickMove(1) end)
+  eq(countIn(fight.textLog, "HA! LOOK AT THAT!"), 1, "rival loss: the rival's victory speech")
+  check(not textOf(fight):find("STRINGID_PLAYERLOSTAGAINSTENEMYTRAINER", 1, true),
+        "rival loss: a heal-after fight says nothing more")
+  eq(#fieldCalls, 0, "rival loss: no whiteout")
+  eq(rivalLead.hp, rivalLead.maxHp, "rival loss: healed")
+  eq(result, "lose", "rival loss: the script hears it lost (VAR_RESULT)")
+
+  newGame()
+  SESSION.party = { monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 }, hp = 3 }) }
+  local hard = newSolo()
+  check(hard:fromGen3Trainer(GAME, 901, { trainerId = 901, earlyRival = true, rivalFlags = 0,
+    victoryText = "HA! LOOK AT THAT!" }), "rival loss (no heal): taken")
+  local _, hardFight = drive(hard, function(f) f:pickMove(1) end)
+  local speechAt = indexIn(hardFight.textLog, "HA! LOOK AT THAT!")
+  local lostAt = indexIn(hardFight.textLog, "STRINGID_PLAYERLOSTAGAINSTENEMYTRAINER")
+  check(speechAt and lostAt and speechAt < lostAt, "rival loss (no heal): the speech, then the lost lines")
+  eq(fieldCalls[1], "respawn", "rival loss (no heal): the whiteout")
+
+  -- An ordinary trainer's loss has no speech in it.
+  newGame()
+  SESSION.party = { monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 }, hp = 3 }) }
+  local plain = newSolo()
+  check(plain:fromGen3Trainer(GAME, 901, { trainerId = 901, victoryText = "HA! LOOK AT THAT!" }),
+        "plain loss: taken")
+  local _, plainFight = drive(plain, function(f) f:pickMove(1) end)
+  eq(countIn(plainFight.textLog, "HA! LOOK AT THAT!"), 0, "plain loss: no victory speech")
+end
+
+-- (o) The map's resume scripts run once the after-battle prompts have
+--     closed, right before `done` -- not under an evolution or a learn prompt.
+do
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local solo = newSolo()
+  local order = {}
+  local realField = FakeSpace.returnToField
+  FakeSpace.returnToField = function() order[#order + 1] = "field" end
+  solo._afterBattle3 = function(_, _, _, _, finish)
+    order[#order + 1] = "prompts"
+    return finish()
+  end
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 2 },
+    { done = function() order[#order + 1] = "done" end }), "order: taken")
+  drive(solo, function(f) f:pickMove(1) end)
+  FakeSpace.returnToField = realField
+  eq(table.concat(order, ","), "prompts,field,done",
+     "order: the prompts, then the map's resume scripts, then done")
+end
+
+-- (p) What the engine does as its own battle ends, done for one it did not
+--     run: FireRed's quest log and `battle.ended` (the engine's payload); on
+--     Emerald, Pokérus and the TV instead of the quest log.
+do
+  newGame()
+  local lead = monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } })
+  SESSION.party = { lead }
+  local solo = newSolo()
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 2 }, {}), "effects: a FireRed wild win")
+  local wild = solo.wildMon
+  drive(solo, function(f) f:pickMove(1) end)
+  local ql = effectsOf("questlog")[1]
+  check(ql ~= nil, "effects: the quest log records the win")
+  eq(ql and ql[2], SESSION, "effects: ...on the session")
+  eq(ql and ql[3].result, "win", "effects: ...as a win")
+  eq(ql and ql[3].wild, true, "effects: ...against a wild")
+  eq(ql and ql[3].enemy and ql[3].enemy.mon, wild, "effects: ...naming the wild monster")
+  eq(ql and ql[3].player and ql[3].player.mon, lead, "effects: ...and ours")
+  local ended = effectsOf("emit")[1]
+  eq(ended and ended[2], "battle.ended", "effects: battle.ended is raised")
+  eq(ended and ended[3].result, "win", "effects: ...with the result")
+  eq(ended and ended[3].battle and ended[3].battle.wild, true, "effects: ...and the battle's state")
+  eq(ended and ended[3].battle.enemy.mon.species, 16, "effects: ...whose foe is the wild monster")
+  eq(ended and ended[3].battle.link, false, "effects: ...off the link")
+  eq(#effectsOf("pokerus.give"), 0, "effects: no Pokérus on FireRed")
+  eq(#effectsOf("rse"), 0, "effects: no TV on FireRed")
+
+  -- a trainer: the quest log names the trainer
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local tsolo = newSolo()
+  check(tsolo:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "effects: a FireRed trainer win")
+  drive(tsolo, function(f) f:pickMove(1) end)
+  local tql = effectsOf("questlog")[1]
+  eq(tql and tql[3].trainerName, "BEN", "effects: the quest log names the trainer")
+  eq(tql and tql[3].trainerClass, 57, "effects: ...and its class (the gym / E4 / Champion lines)")
+  eq(tql and tql[3].wild, false, "effects: ...a trainer fight")
+
+  -- Emerald: Pokérus and the TV, with the session first
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  FakeBag.add(SESSION.bag, 1, 1)
+  PROFILE.family = "rse"
+  local em = newSolo()
+  check(em:fromGen3Encounter(GAME, { species = 16, level = 5 }, {}), "effects (rse): a wild to catch")
+  local emWild = em.wildMon
   local thrown = false
-  drive(solo, function(f)
+  drive(em, function(f)
     if not thrown then
       thrown = true
       f.itemPick = { id = 1, effect = Sheet3.itemEffect(1) }
@@ -1154,48 +1724,76 @@ do
       f:pickMove(1)
     end
   end)
-  eq(stand.finished, "caught", "stand: its onFinish is handed the engine's word")
-  check(stand.downs >= 1, "stand: its cover came down before anything went up over it")
-  eq(SESSION.party[2], wild, "stand: the catch joined the party")
-  eq(#bridgeCalls, 0, "stand: no whiteout or restart from this file -- the stand-in's to run")
-  eq(spaceCalls, 0, "stand: nor the resume scripts")
+  PROFILE.family = "frlg"
+  eq(#effectsOf("pokerus.give"), 1, "effects (rse): the party may catch Pokérus")
+  eq(#effectsOf("pokerus.spread"), 1, "effects (rse): ...and spread it")
+  eq(#effectsOf("questlog"), 0, "effects (rse): no quest log on Emerald")
+  local tv = effectsOf("rse")[1]
+  eq(tv and tv[2], "tv", "effects (rse): the TV is told")
+  eq(tv and tv[3], "onBattleEnd", "effects (rse): ...onBattleEnd")
+  eq(tv and tv[6], SESSION, "effects (rse): ...with the session first, as the TV reads it")
+  eq(tv and tv[7] and tv[7].caughtMonSpecies, 16, "effects (rse): ...the catch")
+  eq(tv and tv[7] and tv[7].usedMasterBall, true, "effects (rse): ...in a MASTER BALL")
+  eq(tv and tv[7] and tv[7].lastUsedItem, 1, "effects (rse): ...the last ball thrown")
+  eq(tv and tv[8], FakeNatives.outcome_to_code("caught"), "effects (rse): ...B_OUTCOME_CAUGHT")
+  eq(tv and tv[9] and tv[9].trainer, false, "effects (rse): ...a wild battle")
+  local emEnded = effectsOf("emit")[1]
+  eq(emEnded and emEnded[3].result, "catch", "effects (rse): battle.ended says 'catch', the engine's word")
+  eq(emEnded and emEnded[3].battle.enemy.mon, emWild, "effects (rse): ...naming the caught monster")
+end
 
-  -- a trainer stand-in: the prize is this file's, the ritual the stand-in's
+-- (q) A screen the modal stack will not take is not a fight: the caller is
+--     told no (and fights the cart's battle), and nothing is left running.
+do
   newGame()
-  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
-  SESSION.money = 200
-  local foe = FakeTrainers.foeFromId(900)
-  local party = Solo.gen3TrainerParty(foe, 900)
-  local tstand = newStand("trainer", party, {
-    trainerId = 900, trainerClass = 57, className = "YOUNGSTER", name = "BEN", trainerPic = 5,
-    items = { 0, 0, 0, 0 }, aiFlags = 1,
-  }, { trainerId = 900 })
-  local tsolo = newSolo()
-  check(tsolo:onTrainerBattle(GAME, tstand, "FR_ROUTE_1"), "stand: the trainer stand-in is taken")
-  eq(tsolo.fight.peerName, "YOUNGSTER BEN", "stand: named the cart's way")
-  eq(tsolo.fight.trainer.trainerId, 900, "stand: the numeric trainer id reached the screen")
-  local _, fight = drive(tsolo, function(f) f:pickMove(1) end)
-  eq(tstand.finished, "win", "stand: onFinish('win') -- the trainer op sets its flag from it")
-  eq(SESSION.money, 200 + Prize.calc(900, { lastLevel = 3 }), "stand: the prize, paid once, by this file")
-  check(textOf(fight):find("STRINGID_PLAYERGOTMONEY", 1, true) ~= nil, "stand: the money line")
+  SESSION.party = { monOf(4, 20) }
+  local mark = #warns
+  local refusing = setmetatable({ pushState = function() return nil end }, { __index = UI })
+  local solo = Solo.new(refusing, { enabled = function() return true end, seed = function() return 7 end })
+  eq(solo:fromGen3Encounter(GAME, { species = 16, level = 3 }, {}), false,
+     "push: a fight whose screen could not go up is declined")
+  eq(solo:isRunning(), false, "push: nothing is running")
+  eq(solo.gen3, nil, "push: no half-built fight is left behind")
+  eq(encounterResets, 0, "push: the encounter cooldown was not spent on it")
+  check(contains(warns, "could not be opened"), "push: the log says why")
+  dropWarnsSince(mark)
+  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900 }) == false, "push: a trainer the same way")
+  dropWarnsSince(mark)
+end
 
-  -- a double trainer stand-in is handed back (the solo screen is a 1v1)
-  local dstand = newStand("trainer", party, { trainerId = 902 }, { double = true })
-  eq(newSolo():onTrainerBattle(GAME, dstand, "FR_ROUTE_1"), false, "stand: a double is declined")
-  -- a refused kind on the stand-in's opts
-  local sstand = newStand("wild", { wild }, nil, { safari = true })
-  eq(newSolo():onWildEncounter(GAME, sstand, "FR_ROUTE_1"), false, "stand: a safari stand-in is declined")
-
-  -- the hand-back asks the stand-in to fight alone
+-- (r) A POKé DOLL is the player's escape (B_OUTCOME_RAN), though the referee
+--     names the thrower's side the winners.
+do
   newGame()
-  SESSION.party = { monOf(4, 30) }
-  local hs = newStand("wild", { Solo.gen3FoeMon({ species = 16, level = 5 }, { wild = true }) })
-  local hsolo = newSolo()
-  check(hsolo:onWildEncounter(GAME, hs, "FR_ROUTE_1"), "stand: taken for the hand-back case")
-  hsolo:reset()
-  eq(hs.alone, 1, "stand: reset hands the encounter back through fightAlone")
-  eq(hs.finished, nil, "stand: ...and does not finish it")
-  eq(#bridgeCalls, 0, "stand: the stand-in starts the cart's fight, not this file")
+  SESSION.party = { monOf(4, 20) }
+  ITEMS[80] = { name = "POKe DOLL", pocket = "ITEMS", price = 1000 }
+  FakeBag.add(SESSION.bag, 80, 1)
+  local solo = newSolo()
+  local result
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, { done = function(r) result = r end }),
+        "doll: taken")
+  local thrown = false
+  drive(solo, function(f)
+    if not thrown then
+      thrown = true
+      f.itemPick = { id = 80, effect = Sheet3.itemEffect(80) }
+      f:commitItem(nil, nil)
+    else
+      f:pickMove(1)
+    end
+  end)
+  eq(result, "run", "doll: done('run') -- the player got away, the wild monster did not flee")
+  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("run"), "doll: B_OUTCOME_RAN on the save")
+end
+
+-- (s) The badges ride on our side for a referee that uses them (BattleSim3
+--     does not: link rules, sheet doc §6).
+do
+  newGame({ badges = { [1] = true, [3] = true } })
+  local b = Solo.gen3Badges()
+  check(b and b[1] and b[3] and not b[2], "badges: the save's badge flags, by number")
+  newGame()
+  eq(Solo.gen3Badges(), nil, "badges: none held, none sent")
 end
 
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.
