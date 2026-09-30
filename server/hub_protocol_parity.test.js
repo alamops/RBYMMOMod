@@ -1114,6 +1114,110 @@ function dialect3() {
   ];
 }
 
+/*
+ * The Gen 3 dialect at the edges where the two twins used to read one message
+ * two ways: a list that is an object, a number LuaJIT's tonumber reads and JS's
+ * Number does not (or the reverse), a choice index that is `true`. The nulls
+ * here are real: the Lua driver spells each as NULL and closes it up the way
+ * src/link/Json.lua's decoder does, because that is all the Lua hub is ever
+ * handed of one. Twin of edges3 in tests/drivers/hub_protocol_parity.lua.
+ */
+function edges3() {
+  const chartHole = [10, 12, 20, null, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+  const chartGap = [10, 12, null, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+  return [
+    ['ruleset', { typeTable: chartHole }],
+    ['ruleset', { typeTable: chartGap }],
+    ['ruleset', { typeTable: CHART3, specialTypes: [10, null, 11] }],
+    ['ruleset', { typeTable: CHART3, movePool: [null, POOL3[0]] }],
+    ['ruleset', { typeTable: CHART3, specialTypes: { a: 1 } }],
+    ['ruleset', { typeTable: CHART3, movePool: { a: 'x' } }],
+    ['ruleset', { typeTable: CHART3, specialTypes: {} }],
+    ['ruleset', { typeTable: CHART3, movePool: { a: null } }],
+    ['ruleset', { typeTable: { a: 10 } }],
+    ['mon', mon3({ types: [null, 10] })],
+    ['mon', mon3({ moves: [move3(), null] })],
+    ['mon', mon3({ heldItem: '1e-9999999' })],
+    ['mon', mon3({ level: '\u00a050' })],
+    ['mon', mon3({ level: ' \t50\n' })],
+    ['mon', mon3({ moves: [move3({ priority: '-0x1' })] })],
+    ['mon', mon3({ ability: '0x1.8p1', holdEffect: '0b11' })],
+    ['party', { battle: 'b1', mons: [mon3(), null] }],
+    ['party', { battle: 'b1', generation: [3], mons: [mon3()] }],
+    ['bag', [{ id: 13, count: 2 }, null]],
+    ['bag', { 13: 2, 22: null }],
+    ['bag', { 13: null }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 0, pass: true,
+    }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 0, pass: '',
+    }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 0, pass: [3],
+    }],
+    ['choice', { battle: 'b1', action: 'switch', slot: true }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: '0x0', pass: ' 2 ',
+    }],
+    ['moveset', { battle: 'b1', mon: 0, moves: [null, move3()] }],
+    ['moveset', { battle: 'b1', mon: true, moves: [move3()] }],
+    ['event', {
+      battle: 'b1',
+      seq: 9,
+      t: 'anim',
+      slot: 0,
+      side: 'a',
+      text: 'SWEEP',
+      target: true,
+      spread: '',
+      stage: [1],
+      holding: '0x10',
+    }],
+  ];
+}
+
+// Gen 1 / Gen 2 read paths, as they were before Gen 3 had a dialect: a stray
+// `num` on an older row, and Gen 3's choice fields on an older choice, are
+// ignored rather than read -- on both hosting paths. Twin of gen12 in the Lua
+// driver.
+function gen12() {
+  const stray = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, num: 7,
+  };
+  const sheet = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spd: 90, spc: 90,
+    },
+    moves: [stray],
+  };
+  const asked = {
+    battle: 'b1', action: 'fight', move: 0, pass: 'far', dexCaught: 1,
+  };
+  return [
+    ['mon', sheet],
+    ['party', { battle: 'b1', mons: [sheet] }, 1],
+    ['ruleset', { chart: CHART, metronomePool: [stray] }, 1],
+    ['ruleset', { chart: CHART, metronomePool: [stray] }, 2],
+    ['ruleset', { chart: CHART, metronomePool: [stray] }],
+    ['choice', asked, 1],
+    ['choice', asked, 2],
+    ['choice', asked],
+    ['event', { battle: 'b1', seq: 1, t: 'ability' }, 1],
+    ['event', {
+      battle: 'b1', seq: 2, t: 'stat', slot: 0, side: 'a', target: 2, stage: 1, delta: 1, holding: 3,
+    }, 2],
+    ['event', {
+      battle: 'b1', seq: 3, t: 'moves', slot: 0, side: 'a', moves: [stray],
+    }, 1],
+    ['moveset', { battle: 'b1', mon: 0, moves: [stray] }, 1],
+  ];
+}
+
 function runGen3() {
   return [
     {
@@ -1240,9 +1344,42 @@ function runGen3() {
           else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
           else if (kind === 'party') got = sanitize.cleanBattleParty(input, 3);
           else if (kind === 'bag') got = sanitize.cleanBattleBag(input, 3);
-          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, 3);
           else if (kind === 'event') got = sanitize.cleanBattleEvent(input);
           else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, 3);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+    {
+      name: 'gen3_wire_edges',
+      result: (() => {
+        const cases = edges3().map(([kind, input]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, 3);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, 3);
+          else if (kind === 'bag') got = sanitize.cleanBattleBag(input, 3);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, 3);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input);
+          else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, 3);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+    {
+      name: 'gen12_read_paths',
+      result: (() => {
+        const cases = gen12().map(([kind, input, gen]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, gen);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, gen);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
+          else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, gen);
           return { kind, got: orNil(got) };
         });
         return { cases };

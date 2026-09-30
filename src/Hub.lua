@@ -1834,6 +1834,12 @@ end
 -- a 2v2 would otherwise drink the kit twice. Alias the remaining seats onto
 -- the first fighter's bag (and the hub sheet) so a potion spent on either
 -- box is spent once. Wildlife is skipped: those seats carry no bag.
+--
+-- The kit's names go with it (Gen 3): only the first seat was ever given the
+-- bag, so only its fighter holds the display names noteBagNames kept, and a
+-- second seat drinking the shared potion was narrated "TRAINER used an
+-- item!" beside the first seat's "TRAINER used POTION!".  The older sims keep
+-- no names, and nothing is written for them.
 function M:shareNpcBags(record)
   local seats = record and record.npcIds
   if not (record and record.sim and type(seats) == "table" and #seats >= 2) then
@@ -1845,7 +1851,10 @@ function M:shareNpcBags(record)
   record.bags = record.bags or {}
   for i = 2, #seats do
     local other = record.sim.byId[seats[i]]
-    if other then other.bag = primary.bag end
+    if other then
+      other.bag = primary.bag
+      if primary.bagNames ~= nil then other.bagNames = primary.bagNames end
+    end
     record.bags[seats[i]] = record.bags[seats[1]]
   end
 end
@@ -3442,7 +3451,9 @@ handlers[Wire.BATTLE_CHOICE] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end
 
-  local choice = Wire.battleChoice(msg)
+  -- The hub's generation, so only a Gen 3 hub reads Gen 3's `pass` /
+  -- `dexCaught` (a Gen 1 / Gen 2 choice is read exactly as it always was).
+  local choice = Wire.battleChoice(msg, self.generation)
   if not choice or choice.battle ~= record.id then return end
   -- Item choices are proved against the bag uploaded with the party
   -- (PROTOCOL 15). A missing stack costs the message and nothing else —

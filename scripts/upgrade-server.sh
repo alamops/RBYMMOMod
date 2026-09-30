@@ -131,6 +131,18 @@ gen_lock_supported() {
   [ "$proto" -ge 30 ]
 }
 
+# Stop, naming the fix, when a Gen 3 lock is about to be written for a hub
+# that cannot hold it. A warning was not enough: the rebuild went on, and the
+# room came back a Gen 1 hub refusing every one of its players, the warning
+# long scrolled away above the build log. Called before server/.env is
+# written and before the checkout moves, so a refusal changes nothing.
+# Twin of run-server.sh's.
+refuse_unsupported_gen_lock() {
+  local gen="${1:-}" proto="${2:-}" where="${3:-}"
+  gen_lock_supported "$gen" "$proto" && return 0
+  fail "generation ${gen} needs a hub on protocol 30 or newer; ${where} is on protocol ${proto}, which reads 3 as 1 and would refuse every FireRed / LeafGreen / Emerald player. Nothing was changed. Re-run with --version <a release on protocol 30 or newer>, or pass --generation 1 or 2 to take this hub off Gen 3."
+}
+
 pick_latest_tag() {
   awk -F'[v.]' '
     $0 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ {
@@ -209,6 +221,16 @@ protocol_of() {
   local file="${root}/src/Config.lua"
   [ -f "$file" ] || { printf 'unknown\n'; return 0; }
   awk '/^M\.PROTOCOL = / { print $3; exit }' "$file"
+}
+
+# PROTOCOL of a ref that is fetched but not checked out, so a release can be
+# refused before the checkout moves the tree. `unknown` when the ref has no
+# src/Config.lua to read.
+protocol_of_ref() {
+  local root="$1" ref="$2" got
+  got="$(cd "$root" && git show "${ref}:src/Config.lua" 2>/dev/null \
+    | awk '/^M\.PROTOCOL = / { print $3; exit }')"
+  printf '%s\n' "${got:-unknown}"
 }
 
 package_version_of() {
@@ -380,7 +402,9 @@ find_checkout() {
   fail "no hub checkout found. Pass --dir /path/to/RBYMMOMod (the folder that contains server/compose.yml)."
 }
 
-checkout_tag() {
+# Fetched and checked out in two steps so what the release is (its PROTOCOL)
+# can be read in between, while the tree is still the one that is running.
+fetch_tag() {
   local root="$1"
   local tag="$2"
   (
@@ -389,6 +413,14 @@ checkout_tag() {
     # Depth-1 clones cannot see other tags until we fetch this one by name.
     # --force updates a local tag left by a previous fetch of the same name.
     git_http fetch --force --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+  )
+}
+
+checkout_tag() {
+  local root="$1"
+  local tag="$2"
+  (
+    cd "$root"
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
       fail "${root} has uncommitted changes in tracked files. Commit, stash, or discard them before upgrading. (Untracked files such as server/.env are left alone.)"
     fi
@@ -455,6 +487,46 @@ self_test() {
   gen_lock_supported 3 unknown || fail "gen_lock_supported 3 unknown should pass"
   if gen_lock_supported 3 29; then
     fail "gen_lock_supported 3 29 should fail: a protocol-29 hub has no Gen 3"
+  fi
+  # The refusal is a stop, not a warning: it exits non-zero (in a subshell
+  # here, since fail exits) and names the remedy.
+  ( refuse_unsupported_gen_lock 3 30 v9.9.9 ) || fail "refuse_unsupported_gen_lock 3 30 should pass"
+  ( refuse_unsupported_gen_lock 1 29 v9.9.9 ) || fail "refuse_unsupported_gen_lock 1 29 should pass"
+  ( refuse_unsupported_gen_lock 3 unknown v9.9.9 ) 2>/dev/null \
+    || fail "refuse_unsupported_gen_lock 3 unknown should pass"
+  if ( refuse_unsupported_gen_lock 3 29 v9.9.9 ) 2>/dev/null; then
+    fail "refuse_unsupported_gen_lock 3 29 should stop the upgrade"
+  fi
+  got="$( ( refuse_unsupported_gen_lock 3 29 v9.9.9 ) 2>&1 || true)"
+  case "$got" in
+    *"protocol 30 or newer"*"--version"*) ;;
+    *) fail "refuse_unsupported_gen_lock should name the fix, got: $got" ;;
+  esac
+  # PROTOCOL read off a fetched tag without checking it out. Needs git;
+  # skipped (not failed) on a box without it, as the upgrade itself needs it.
+  if command -v git >/dev/null 2>&1; then
+    local repo
+    repo="$(mktemp -d "${TMPDIR:-/tmp}/rby-mmo-self-git.XXXXXX")"
+    (
+      cd "$repo"
+      git init -q .
+      mkdir -p src
+      printf 'local M = {}\nM.PROTOCOL = 29\nreturn M\n' > src/Config.lua
+      git add src/Config.lua
+      git -c user.name=self-test -c user.email=self-test@localhost -c commit.gpgsign=false \
+        commit -q -m old
+      git tag v0.0.29
+      printf 'local M = {}\nM.PROTOCOL = 30\nreturn M\n' > src/Config.lua
+      git -c user.name=self-test -c user.email=self-test@localhost -c commit.gpgsign=false \
+        commit -q -am new
+    ) >/dev/null 2>&1 || { rm -rf "$repo"; fail "self-test could not build a scratch git repo"; }
+    got="$(protocol_of_ref "$repo" refs/tags/v0.0.29)"
+    [ "$got" = 29 ] || { rm -rf "$repo"; fail "protocol_of_ref tag -> $got"; }
+    got="$(protocol_of "$repo")"
+    [ "$got" = 30 ] || { rm -rf "$repo"; fail "protocol_of checkout -> $got"; }
+    got="$(protocol_of_ref "$repo" refs/tags/no-such-tag)"
+    [ "$got" = unknown ] || { rm -rf "$repo"; fail "protocol_of_ref missing -> $got"; }
+    rm -rf "$repo"
   fi
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-self.XXXXXX")"
   printf 'FOO=1\nRBY_MMO_HOST_PORT=25565\n' > "$tmp"
@@ -569,7 +641,10 @@ RBY MMO hub — upgrade
 EOF
 
 if [ "$FROM_REF" = "$TO_TAG" ]; then
+  # The same-tag path writes the lock too (persist_lock_env), so it is held to
+  # the same check: this tree is the release, and its PROTOCOL is FROM_PROTO.
   if [ "$DRY_RUN" -eq 1 ]; then
+    refuse_unsupported_gen_lock "$GENERATION" "$FROM_PROTO" "$TO_TAG"
     note "already on ${TO_TAG}. Nothing to fetch."
     note "dry-run: not writing server/.env."
     exit 0
@@ -583,6 +658,7 @@ if [ "$FROM_REF" = "$TO_TAG" ]; then
       1|2|3) GENERATION="$FROM_GEN" ;;
     esac
   fi
+  refuse_unsupported_gen_lock "$GENERATION" "$FROM_PROTO" "$TO_TAG"
   persist_lock_env
   note "already on ${TO_TAG}. Nothing to fetch. Use --version to pick a different release, or \`docker compose up -d --build\` in server/ to rebuild this tag."
   exit 0
@@ -611,17 +687,16 @@ if [ -n "$FROM_GEN" ] && [ "$FROM_GEN" != "$GENERATION" ]; then
   warn "Clients of gen ${FROM_GEN} will be refused. Pass --generation ${FROM_GEN} to keep this hub on that gen."
 fi
 
+# Refused before the checkout moves the tree or the rebuild starts, so the
+# running container is still the one serving and the checkout is where it
+# was: a Gen 3 room moved onto a release that predates Gen 3 would come back
+# as a Gen 1 hub refusing every one of its players.
+fetch_tag "$ROOT" "$TO_TAG"
+refuse_unsupported_gen_lock "$GENERATION" "$(protocol_of_ref "$ROOT" "refs/tags/${TO_TAG}")" "$TO_TAG"
+
 checkout_tag "$ROOT" "$TO_TAG"
 TO_PROTO="$(protocol_of "$ROOT")"
 TO_PKG="$(package_version_of "$ROOT")"
-
-# Before the rebuild, so the running container is still the one serving:
-# a Gen 3 room moved onto a release that predates Gen 3 would come back as
-# a Gen 1 hub refusing every one of its players.
-if ! gen_lock_supported "$GENERATION" "$TO_PROTO"; then
-  warn "generation 3 needs a hub on protocol 30 or newer; ${TO_TAG} is on protocol ${TO_PROTO}."
-  warn "That hub will read 3 as 1 and refuse every FireRed / LeafGreen / Emerald player. Re-run with a newer --version."
-fi
 
 cd "${ROOT}/server"
 

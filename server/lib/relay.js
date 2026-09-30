@@ -1382,7 +1382,9 @@ handlers['mmo.battle_choice'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || !record.sim) return;
 
-  const choice = cleanBattleChoice(msg);
+  // The hub's generation, so only a Gen 3 hub reads Gen 3's `pass` /
+  // `dexCaught` (a Gen 1 / Gen 2 choice is read exactly as it always was).
+  const choice = cleanBattleChoice(msg, relay.generation);
   if (!choice || choice.battle !== record.id) return;
   // Item choices are proved against the bag uploaded with the party
   // (PROTOCOL 15). A missing stack costs the message and nothing else —
@@ -3306,6 +3308,12 @@ class Relay {
    * a 2v2 would otherwise drink the kit twice. Alias the remaining seats onto
    * the first fighter's bag (and the hub sheet) so a potion spent on either
    * box is spent once. Wildlife is skipped: those seats carry no bag.
+   *
+   * The kit's names go with it (Gen 3): only the first seat was ever given the
+   * bag, so only its fighter holds the display names noteBagNames kept, and a
+   * second seat drinking the shared potion was narrated "TRAINER used an
+   * item!" beside the first seat's "TRAINER used POTION!". The older sims keep
+   * no names, and nothing is written for them. Twin of Hub:shareNpcBags.
    */
   shareNpcBags(record) {
     const seats = record && record.npcIds;
@@ -3318,7 +3326,10 @@ class Relay {
     if (!record.bags) record.bags = new Map();
     for (let i = 1; i < seats.length; i += 1) {
       const other = record.sim.byId.get(seats[i]);
-      if (other) other.bag = primary.bag;
+      if (other) {
+        other.bag = primary.bag;
+        if (primary.bagNames !== undefined) other.bagNames = primary.bagNames;
+      }
       record.bags.set(seats[i], record.bags.get(seats[0]));
     }
   }

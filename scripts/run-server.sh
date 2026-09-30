@@ -164,6 +164,18 @@ gen_lock_supported() {
   [ "$proto" -ge 30 ]
 }
 
+# Stop, naming the fix, when a Gen 3 lock is about to be written for a hub
+# that cannot hold it. A warning was not enough: the build went on and the
+# hub came up a Gen 1 hub refusing every FireRed / LeafGreen / Emerald
+# player, the warning long scrolled away above the build log. Called before
+# server/.env is written and before anything is built or started.
+# Twin of upgrade-server.sh's.
+refuse_unsupported_gen_lock() {
+  local gen="${1:-}" proto="${2:-}" where="${3:-}"
+  gen_lock_supported "$gen" "$proto" && return 0
+  fail "generation ${gen} needs a hub on protocol 30 or newer; ${where} is on protocol ${proto}, which reads 3 as 1 and would refuse every FireRed / LeafGreen / Emerald player. Stopped before server/.env was written or anything was started. Use a release on protocol 30 or newer (an existing tree moves with: bash scripts/upgrade-server.sh --dir ${where} --version <tag>), or pass --generation 1 or 2."
+}
+
 # Portable newest vX.Y.Z from a list of tags, no GNU sort -V, no python.
 pick_latest_tag() {
   awk -F'[v.]' '
@@ -583,6 +595,20 @@ self_test() {
   if gen_lock_supported 3 29; then
     fail "gen_lock_supported 3 29 should fail: a protocol-29 hub has no Gen 3"
   fi
+  # The refusal is a stop, not a warning: it exits non-zero (in a subshell
+  # here, since fail exits) and names the remedy.
+  ( refuse_unsupported_gen_lock 3 30 /srv/hub ) || fail "refuse_unsupported_gen_lock 3 30 should pass"
+  ( refuse_unsupported_gen_lock 2 29 /srv/hub ) || fail "refuse_unsupported_gen_lock 2 29 should pass"
+  ( refuse_unsupported_gen_lock 3 unknown /srv/hub ) 2>/dev/null \
+    || fail "refuse_unsupported_gen_lock 3 unknown should pass"
+  if ( refuse_unsupported_gen_lock 3 29 /srv/hub ) 2>/dev/null; then
+    fail "refuse_unsupported_gen_lock 3 29 should stop the install"
+  fi
+  got="$( ( refuse_unsupported_gen_lock 3 29 /srv/hub ) 2>&1 || true)"
+  case "$got" in
+    *"protocol 30 or newer"*"--generation 1 or 2"*) ;;
+    *) fail "refuse_unsupported_gen_lock should name the fix, got: $got" ;;
+  esac
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-self.XXXXXX")"
   printf 'FOO=1\nRBY_MMO_HOST_PORT=7788\n' > "$tmp"
   write_env_key "$tmp" RBY_MMO_HOST_PORT 25565
@@ -822,13 +848,10 @@ elif [ -n "$prev" ] && [ "$prev" != "$GENERATION" ]; then
   warn "Clients of gen ${prev} will be refused. This hub only admits the generation it is locked to."
 fi
 
-# Said before anything is built, while another --version is still one flag
-# away: the tree about to run is the one whose PROTOCOL decides whether a
-# Gen 3 lock means anything to it.
-if ! gen_lock_supported "$GENERATION" "$(protocol_of "$DIR")"; then
-  warn "generation 3 needs a hub on protocol 30 or newer; ${DIR} is on protocol $(protocol_of "$DIR")."
-  warn "That hub will read 3 as 1 and refuse every FireRed / LeafGreen / Emerald player. Re-run with a newer --version."
-fi
+# Refused before anything is written or built, while another --version is
+# still one flag away: the tree about to run is the one whose PROTOCOL
+# decides whether a Gen 3 lock means anything to it.
+refuse_unsupported_gen_lock "$GENERATION" "$(protocol_of "$DIR")" "$DIR"
 
 write_env_key "${DIR}/server/.env" RBY_MMO_HOST_PORT "$PORT"
 write_env_key "${DIR}/server/.env" RBY_MMO_GENERATION "$GENERATION"

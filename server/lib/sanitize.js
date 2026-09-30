@@ -21,7 +21,6 @@ const TEXT_OK = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
 const EffectsGen1 = require('./battle/Effects');
 const EffectsGen2 = require('./battle2/Effects');
 const Items3 = require('./battle3/Items');
-const { toNumber: luaToNumber } = require('./battle3/lua');
 
 const EffectsGen3 = { itemEffect: (id) => Items3.bagEffect(id) };
 
@@ -30,17 +29,118 @@ function effectsFor(generation) {
   return generation === 2 ? EffectsGen2 : EffectsGen1;
 }
 
-// Wire.int, spelled exactly: a JSON number or a string Lua's tonumber reads,
-// floored, inside [min, max] -- and nothing else. cleanInt takes Number(true)
-// as 1 and '' as 0 where Lua says nil to both; the Gen 3 dialect below is new
-// on both twins, so it is written against the stricter reading from the start.
+/*
+ * LuaJIT's tonumber on a string, which is what Wire.int calls: the reading the
+ * Lua hub gives every numeric field, so the one this twin has to give too.
+ *
+ * Whitespace is ASCII only (tab, LF, VT, FF, CR, space) -- String#trim would
+ * also strip a no-break space, which reaches Lua as the two bytes C2 A0 and is
+ * no number there. A sign may lead any form, hex included ("-0x1" is -1; JS's
+ * Number says NaN). Hex takes a fraction and a binary exponent ("0x1.8p1" is
+ * 3), rounded once to the nearest double as strscan rounds it; "0b" binary
+ * takes up to 64 significant digits. A written exponent of 2^20 or more is no
+ * number at all, even "1e-9999999" -- strscan refuses it rather than calling
+ * it 0. inf / nan (which Wire.int refuses anyway) come back null here.
+ */
+const LUA_SPACE = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;
+const LUA_DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE]([+-]?\d+))?$/;
+const LUA_HEX = /^([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?\d+))?$/;
+const LUA_BINARY = /^([+-]?)0[bB]([01]+)$/;
+const LUA_EXPONENT_LIMIT = 1048576;
+
+function luaExponent(text) {
+  const digits = text.replace(/^[+-]/, '').replace(/^0+/, '');
+  if (digits.length > 7) return null;
+  const n = Number(digits || '0');
+  if (n >= LUA_EXPONENT_LIMIT) return null;
+  return text[0] === '-' ? -n : n;
+}
+
+// mantissa * 2^exp2, rounded once (to nearest, ties to even) to a double.
+function luaScale(mantissa, exp2) {
+  if (mantissa === 0n) return 0;
+  const top = mantissa.toString(2).length - 1 + exp2;
+  if (top > 1023) return Infinity;
+  const unit = Math.max(top - 52, -1074);
+  const shift = unit - exp2;
+  let q;
+  if (shift <= 0) {
+    q = mantissa << BigInt(-shift);
+  } else {
+    const big = BigInt(shift);
+    q = mantissa >> big;
+    const rest = mantissa - (q << big);
+    const half = 1n << (big - 1n);
+    if (rest > half || (rest === half && (q & 1n) === 1n)) q += 1n;
+  }
+  return Number(q) * 2 ** unit;
+}
+
+function luaNumber(value) {
+  if (typeof value === 'number') return Number.isNaN(value) ? null : value;
+  if (typeof value !== 'string') return null;
+  const s = value.replace(LUA_SPACE, '');
+  let m = LUA_DECIMAL.exec(s);
+  if (m) {
+    if (m[1] !== undefined && luaExponent(m[1]) === null) return null;
+    return Number(s);
+  }
+  m = LUA_HEX.exec(s);
+  if (m) {
+    const [, sign, whole, fraction = '', exponent] = m;
+    if (!whole && !fraction) return null;
+    const exp = exponent === undefined ? 0 : luaExponent(exponent);
+    if (exp === null) return null;
+    const n = luaScale(BigInt(`0x${whole}${fraction}`), exp - 4 * fraction.length);
+    return sign === '-' ? -n : n;
+  }
+  m = LUA_BINARY.exec(s);
+  if (m) {
+    const digits = m[2].replace(/^0+/, '');
+    if (digits.length > 64) return null;
+    const n = digits ? Number(BigInt(`0b${digits}`)) : 0;
+    return m[1] === '-' && n !== 0 ? -n : n;
+  }
+  return null;
+}
+
+// Wire.int, spelled exactly: a JSON number or a string LuaJIT's tonumber reads
+// (luaNumber), floored, inside [min, max] -- and nothing else. cleanInt takes
+// Number(true) as 1 and '' as 0 where Lua says nil to both; the Gen 3 dialect
+// below is new on both twins, so it is written against the stricter reading
+// from the start.
 function luaInt(value, min, max) {
-  const n = luaToNumber(value);
+  const n = luaNumber(value);
   if (n === null || !Number.isFinite(n)) return null;
   const i = Math.floor(n);
   if (min !== undefined && min !== null && i < min) return null;
   if (max !== undefined && max !== null && i > max) return null;
   return i;
+}
+
+/*
+ * A list as src/Wire.lua is handed it, or null. The engine's Json.decode
+ * appends nothing for a null element (`arr[#arr + 1] = nil`) and stores
+ * nothing for a null value, so `[10, null, 12]` reaches the Lua hub as
+ * `{ 10, 12 }` and `{}` or `{"a": null}` as the same empty table `[]` becomes.
+ * The Lua side cannot see the hole, so the Gen 3 dialect reads its lists
+ * through here: closed up the same way, an empty (or all-null) object taken as
+ * the empty list, any other object refused -- Wire.lua's isList. Both twins
+ * then judge one list, and refuse or keep it whole alike.
+ */
+function luaList(value) {
+  if (Array.isArray(value)) return value.filter((v) => v !== null && v !== undefined);
+  if (value === null || typeof value !== 'object') return null;
+  for (const key of Object.keys(value)) {
+    if (value[key] !== null && value[key] !== undefined) return null;
+  }
+  return [];
+}
+
+// The entries of a JSON object as Lua's decoder keeps them: a null value is
+// no key at all. Twin reading for a Gen 3 map-shaped bag.
+function luaEntries(value) {
+  return Object.entries(value).filter(([, v]) => v !== null && v !== undefined);
 }
 
 function cleanText(value, limit) {
@@ -954,8 +1054,9 @@ function cleanBattleMode(value) {
  * §3.1). Refused whole, never trimmed: a list cut mid-row shifts every later
  * row by one. Twin of Wire.lua's typeTable3.
  */
-function cleanTypeTable3(raw) {
-  if (!Array.isArray(raw)) return null;
+function cleanTypeTable3(value) {
+  const raw = luaList(value);
+  if (!raw) return null;
   const n = raw.length;
   if (n === 0 || n % 3 !== 0 || n > BATTLE_TYPE_TABLE3_MAX * 3) return null;
   const out = [];
@@ -1035,9 +1136,10 @@ function cleanBattleRuleset3(raw) {
     out.seed = seed;
   }
   if (present(raw.specialTypes)) {
-    if (!Array.isArray(raw.specialTypes)) return null;
+    const list = luaList(raw.specialTypes);
+    if (!list) return null;
     const special = [];
-    for (const entry of raw.specialTypes) {
+    for (const entry of list) {
       const t = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
       if (t === null) return null;
       special.push(t);
@@ -1045,9 +1147,10 @@ function cleanBattleRuleset3(raw) {
     out.specialTypes = special;
   }
   if (present(raw.movePool)) {
-    if (!Array.isArray(raw.movePool)) return null;
+    const list = luaList(raw.movePool);
+    if (!list) return null;
     const pool = [];
-    for (const entry of raw.movePool) {
+    for (const entry of list) {
       if (pool.length >= BATTLE_MOVE_POOL3_MAX) break;
       const clean = cleanPoolEntry3(entry);
       if (!clean) return null;
@@ -1095,12 +1198,15 @@ function cleanBattleRuleset(raw, generation) {
     }
     ruleset.specialTypes = special;
   }
+  // Read in the older dialect by name, never by sniffing a row's `num`: this is
+  // a Gen 1 / Gen 2 ruleset. Twin of Wire.battleRuleset.
   if (raw.metronomePool !== undefined && raw.metronomePool !== null) {
     if (!Array.isArray(raw.metronomePool)) return null;
+    const rowGeneration = luaInt(generation, 1, 2) ?? 1;
     const pool = [];
     for (const entry of raw.metronomePool) {
       if (pool.length >= METRONOME_POOL_MAX) break;
-      const move = cleanBattleMove(entry);
+      const move = cleanBattleMove(entry, rowGeneration);
       if (!move) return null;
       pool.push(move);
     }
@@ -1162,9 +1268,10 @@ function cleanBattleMove3(raw) {
   return move;
 }
 
-// `generation` (optional): 3 reads the Gen 3 row; absent, a row that states a
-// `num` is a Gen 3 row (no Gen 1 / Gen 2 sheet carries one). Twin of
-// Wire.battleMove.
+// `generation` (optional): 3 reads the Gen 3 row, 1 or 2 the older row whatever
+// else it carries; absent, a row that states a `num` is a Gen 3 row (no Gen 1 /
+// Gen 2 sheet carries one). Every reader that knows its generation passes it.
+// Twin of Wire.battleMove.
 function cleanBattleMove(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
   const gen = luaInt(generation, 1, GENERATION_MAX);
@@ -1311,9 +1418,10 @@ function cleanBattleMon3(raw) {
   // Written only when there is one, as the older dialect does.
   if (status) mon.status = status;
 
-  if (!Array.isArray(raw.types)) return null;
+  const typeList = luaList(raw.types);
+  if (!typeList) return null;
   const types = [];
-  for (const entry of raw.types) {
+  for (const entry of typeList) {
     if (types.length >= 2) break;
     const t = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
     if (t === null) return null;
@@ -1322,9 +1430,10 @@ function cleanBattleMon3(raw) {
   if (!types.length) return null;
   mon.types = types;
 
-  if (!Array.isArray(raw.moves)) return null;
+  const moveList = luaList(raw.moves);
+  if (!moveList) return null;
   const moves = [];
-  for (const entry of raw.moves) {
+  for (const entry of moveList) {
     if (moves.length >= BATTLE_MOVE_MAX) return null;
     const move = cleanBattleMove(entry, 3);
     if (!move) return null;
@@ -1465,7 +1574,9 @@ function cleanBattleMon(raw) {
   if (raw.moves.length < 1 || raw.moves.length > BATTLE_MOVE_MAX) return null;
   const moves = [];
   for (const entry of raw.moves) {
-    const move = cleanBattleMove(entry);
+    // This sheet's own dialect (1 or 2, resolved above), so a stray `num` on a
+    // row is ignored rather than sending the row to the Gen 3 reader.
+    const move = cleanBattleMove(entry, generation);
     if (!move) return null;
     moves.push(move);
   }
@@ -1579,8 +1690,10 @@ function cleanBattleBag3(raw) {
     out.push(entry);
     return true;
   };
+  // Lists and maps read as the Lua decoder leaves them (luaList, luaEntries):
+  // a null element or value is not there at all.
   if (Array.isArray(raw)) {
-    for (const entry of raw) {
+    for (const entry of luaList(raw)) {
       if (entry === null || typeof entry !== 'object') return null;
       let name = null;
       if (entry.name !== undefined && entry.name !== null) {
@@ -1592,7 +1705,7 @@ function cleanBattleBag3(raw) {
       }
     }
   } else {
-    for (const [key, value] of Object.entries(raw)) {
+    for (const [key, value] of luaEntries(raw)) {
       if (!push(cleanItemId3(key), luaInt(value, 1, BATTLE_BAG_COUNT_MAX), null)) return null;
     }
   }
@@ -1664,8 +1777,11 @@ function cleanBattleParty(raw, hubGeneration) {
   if (hubGeneration !== undefined && hubGeneration !== null && hubGen === null) {
     return null;
   }
+  // A Gen 3 hub reads the tags a sheet carries the way Wire.int does (luaInt:
+  // the dialect is new on both twins); Gen 1 / Gen 2 keep cleanInt as ever.
+  const genInt = hubGen === 3 ? luaInt : cleanInt;
 
-  let partyGen = cleanInt(raw.generation, 1, GENERATION_MAX);
+  let partyGen = genInt(raw.generation, 1, GENERATION_MAX);
   if (raw.generation !== undefined && raw.generation !== null && partyGen === null) {
     return null;
   }
@@ -1685,13 +1801,15 @@ function cleanBattleParty(raw, hubGeneration) {
     party.side = side;
   }
 
-  if (!Array.isArray(raw.mons)) return null;
-  if (raw.mons.length < 1 || raw.mons.length > BATTLE_MON_MAX) return null;
+  // A Gen 3 party's list is read as the Lua decoder leaves it (luaList).
+  const monList = partyGen === 3 ? luaList(raw.mons) : raw.mons;
+  if (!Array.isArray(monList)) return null;
+  if (monList.length < 1 || monList.length > BATTLE_MON_MAX) return null;
   const mons = [];
-  for (const entry of raw.mons) {
+  for (const entry of monList) {
     if (entry !== null && typeof entry === 'object'
         && entry.generation !== undefined && entry.generation !== null) {
-      const monGen = cleanInt(entry.generation, 1, GENERATION_MAX);
+      const monGen = genInt(entry.generation, 1, GENERATION_MAX);
       if (monGen === null) return null;
       if (hubGen !== null && monGen !== hubGen) return null;
     }
@@ -1751,29 +1869,36 @@ function cleanBattleReady(raw) {
  * at SLOT_MAX for which is which. A present-but-out-of-range one refuses the
  * choice rather than being dropped, because dropping it would turn a `fight` into
  * an action with no move and stall a clock that forfeits.
+ *
+ * `generation` (optional) is the hub's. Only 3 reads Gen 3's two extra fields,
+ * and reads every index the way Wire.int does (luaInt); a Gen 1 / Gen 2 hub --
+ * and a caller that names none -- reads a choice exactly as it did before Gen 3
+ * existed, ignoring them whatever they hold. Twin of Wire.battleChoice.
  */
-function cleanBattleChoice(raw) {
+function cleanBattleChoice(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
   const needs = BATTLE_ACTIONS.get(raw.action);
   if (!needs) return null;
   const battle = cleanId(raw.battle);
   if (!battle) return null;
+  const gen3 = luaInt(generation, 3, 3) !== null;
+  const readInt = gen3 ? luaInt : cleanInt;
 
   const choice = { battle, action: raw.action };
   if (raw.slot !== undefined && raw.slot !== null) {
-    const slot = cleanInt(raw.slot, 0, SLOT_MAX);
+    const slot = readInt(raw.slot, 0, SLOT_MAX);
     if (slot === null) return null;
     choice.slot = slot;
   }
   if (raw.move !== undefined && raw.move !== null) {
-    const move = cleanInt(raw.move, 0, BATTLE_MOVE_MAX - 1);
+    const move = readInt(raw.move, 0, BATTLE_MOVE_MAX - 1);
     if (move === null) return null;
     choice.move = move;
   }
   if (raw.target !== undefined && raw.target !== null) {
     // A field slot, not a party slot: an event and a target both point at
     // somebody who is out, not at a bench position.
-    const target = cleanInt(raw.target, 0, FIELD_MAX);
+    const target = readInt(raw.target, 0, FIELD_MAX);
     if (target === null) return null;
     choice.target = target;
   }
@@ -1785,15 +1910,18 @@ function cleanBattleChoice(raw) {
   // Gen 3 (docs/plans/gen3-battle-sheet.md §1.2): Baton Pass's destination (a
   // *party* index, asked up front) and the thrower's word that its dex has the
   // wild species caught (Repeat Ball). A Gen 3 item rides in `item` as its
-  // numeric id spelled as a string. Twin of Wire.battleChoice.
-  if (raw.pass !== undefined && raw.pass !== null) {
-    const pass = cleanInt(raw.pass, 0, SLOT_MAX);
-    if (pass === null) return null;
-    choice.pass = pass;
-  }
-  if (raw.dexCaught !== undefined && raw.dexCaught !== null) {
-    if (typeof raw.dexCaught !== 'boolean') return null;
-    choice.dexCaught = raw.dexCaught;
+  // numeric id spelled as a string. Neither field exists in Gen 1 / Gen 2, so
+  // neither is read there. Twin of Wire.battleChoice.
+  if (gen3) {
+    if (raw.pass !== undefined && raw.pass !== null) {
+      const pass = luaInt(raw.pass, 0, SLOT_MAX);
+      if (pass === null) return null;
+      choice.pass = pass;
+    }
+    if (raw.dexCaught !== undefined && raw.dexCaught !== null) {
+      if (typeof raw.dexCaught !== 'boolean') return null;
+      choice.dexCaught = raw.dexCaught;
+    }
   }
 
   if (needs !== true && choice[needs] === undefined) return null;
@@ -1820,10 +1948,17 @@ function cleanBattleChoice(raw) {
  *
  * `text` borrows MESSAGE_MAX because it lands in the same box a chat line does
  * and is drawn by the same code, even though an intermediator wrote it.
+ *
+ * `generation` (optional) is the reader's own. 1 or 2 reads an event exactly as
+ * before Gen 3 had a stream: the older vocabulary only, none of Gen 3's six
+ * fields, and `moves` rows in the older dialect whatever `num` they carry. 3, or
+ * none named, reads the union. Twin of Wire.battleEvent.
  */
-function cleanBattleEvent(raw) {
+function cleanBattleEvent(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
-  if (!BATTLE_EVENT_TYPES.has(raw.t) && !BATTLE_EVENT_TYPES3.has(raw.t)) return null;
+  const gen = luaInt(generation, 1, GENERATION_MAX);
+  const older = gen === 1 || gen === 2;
+  if (!BATTLE_EVENT_TYPES.has(raw.t) && !(!older && BATTLE_EVENT_TYPES3.has(raw.t))) return null;
   const battle = cleanId(raw.battle);
   const seq = cleanInt(raw.seq, 0, SEQ_MAX);
   if (!battle || seq === null) return null;
@@ -1936,36 +2071,39 @@ function cleanBattleEvent(raw) {
   // Gen 3's six fields (§7.3), each dropped rather than fatal like the rest:
   // target (a field slot), spread (0/1), stat (which stat), stage (-6..6, where
   // it now sits), delta (-12..12, the change applied -- signed, where `amount`
-  // is unsigned), holding (the item a `held` event leaves held, 0 = none).
-  if (raw.target !== undefined && raw.target !== null) {
-    const target = cleanInt(raw.target, 0, FIELD_MAX);
-    if (target !== null) event.target = target;
-  }
-  if (raw.spread !== undefined && raw.spread !== null) {
-    const spread = cleanInt(raw.spread, 0, 1);
-    if (spread !== null) event.spread = spread;
-  }
-  if (raw.stat !== undefined && raw.stat !== null && EVENT_STATS3.has(raw.stat)) {
-    event.stat = raw.stat;
-  }
-  if (raw.stage !== undefined && raw.stage !== null) {
-    const stage = cleanInt(raw.stage, -STAGE3_MAX, STAGE3_MAX);
-    if (stage !== null) event.stage = stage;
-  }
-  if (raw.delta !== undefined && raw.delta !== null) {
-    const delta = cleanInt(raw.delta, -DELTA3_MAX, DELTA3_MAX);
-    if (delta !== null) event.delta = delta;
-  }
-  if (raw.holding !== undefined && raw.holding !== null) {
-    const holding = cleanInt(raw.holding, 0, GEN3_ITEM_MAX);
-    if (holding !== null) event.holding = holding;
+  // is unsigned), holding (the item a `held` event leaves held, 0 = none). Read
+  // the way Wire.int reads them (luaInt): they are new on both twins.
+  if (!older) {
+    if (raw.target !== undefined && raw.target !== null) {
+      const target = luaInt(raw.target, 0, FIELD_MAX);
+      if (target !== null) event.target = target;
+    }
+    if (raw.spread !== undefined && raw.spread !== null) {
+      const spread = luaInt(raw.spread, 0, 1);
+      if (spread !== null) event.spread = spread;
+    }
+    if (raw.stat !== undefined && raw.stat !== null && EVENT_STATS3.has(raw.stat)) {
+      event.stat = raw.stat;
+    }
+    if (raw.stage !== undefined && raw.stage !== null) {
+      const stage = luaInt(raw.stage, -STAGE3_MAX, STAGE3_MAX);
+      if (stage !== null) event.stage = stage;
+    }
+    if (raw.delta !== undefined && raw.delta !== null) {
+      const delta = luaInt(raw.delta, -DELTA3_MAX, DELTA3_MAX);
+      if (delta !== null) event.delta = delta;
+    }
+    if (raw.holding !== undefined && raw.holding !== null) {
+      const holding = luaInt(raw.holding, 0, GEN3_ITEM_MAX);
+      if (holding !== null) event.holding = holding;
+    }
   }
   if (raw.moves !== undefined && raw.moves !== null) {
     if (Array.isArray(raw.moves)) {
       const moves = [];
       for (const entry of raw.moves) {
         if (moves.length >= BATTLE_MOVE_MAX) break;
-        const move = cleanBattleMove(entry);
+        const move = cleanBattleMove(entry, gen);
         if (move) moves.push(move);
       }
       if (moves.length > 0) event.moves = moves;
@@ -2036,12 +2174,16 @@ function cleanBattleOutcome(raw) {
 // cleanBattleMove documents.
 function cleanBattleMoveset(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
+  // Gen 3 reads its index and list the way Wire.lua is handed them (luaInt,
+  // luaList); Gen 1 / Gen 2 exactly as before.
+  const gen3 = luaInt(generation, 3, 3) !== null;
   const battle = cleanId(raw.battle);
-  const mon = cleanInt(raw.mon, 0, BATTLE_MON_MAX - 1);
+  const mon = (gen3 ? luaInt : cleanInt)(raw.mon, 0, BATTLE_MON_MAX - 1);
   if (!battle || mon === null) return null;
-  if (!Array.isArray(raw.moves) || raw.moves.length < 1) return null;
+  const list = gen3 ? luaList(raw.moves) : raw.moves;
+  if (!Array.isArray(list) || list.length < 1) return null;
   const moves = [];
-  for (const entry of raw.moves) {
+  for (const entry of list) {
     if (moves.length >= BATTLE_MOVE_MAX) return null;
     const move = cleanBattleMove(entry, generation);
     if (!move) return null;
@@ -2176,7 +2318,9 @@ module.exports = {
   // directly, and the bounds, named as Wire.lua names them.
   BATTLE_EVENT_TYPES3,
   effectsFor,
+  luaNumber,
   luaInt,
+  luaList,
   cleanItemId3,
   cleanTypeTable3,
   cleanPoolEntry3,

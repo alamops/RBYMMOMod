@@ -1167,9 +1167,141 @@ scenarios[#scenarios + 1] = {
       elseif kind == "mon" then got = Wire.battleMon(input)
       elseif kind == "party" then got = Wire.battleParty(input, 3)
       elseif kind == "bag" then got = Wire.battleBag(input, 3)
-      elseif kind == "choice" then got = Wire.battleChoice(input)
+      elseif kind == "choice" then got = Wire.battleChoice(input, 3)
       elseif kind == "event" then got = Wire.battleEvent(input)
       elseif kind == "moveset" then got = Wire.battleMoveset(input, 3)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return { cases = out }
+  end,
+}
+
+-- The Gen 3 dialect at the edges where the two twins used to read one message
+-- two ways: a list that is an object, a number LuaJIT's tonumber reads and
+-- JS's Number does not (or the reverse), a choice index that is `true`.
+--
+-- And JSON's null inside a list, which the Lua half is never handed at all:
+-- src/link/Json.lua appends nothing for a null element and stores nothing for
+-- a null value, so `[10, null, 12]` reaches Hub.lua as { 10, 12 }.  A case
+-- below spells that null as NULL and `decoded` closes it up the way the
+-- engine's decoder does; the JS half hands the same case to lib/sanitize with
+-- a real null in it (tests/hub_battle.lua holds the engine decoder to this).
+local NULL = setmetatable({}, { __tostring = function() return "null" end })
+
+local function decoded(v)
+  if v == NULL then return nil end
+  if type(v) ~= "table" then return v end
+  local out, top = {}, 0
+  for k in pairs(v) do
+    if type(k) == "number" and k > top then top = k end
+  end
+  for i = 1, top do
+    if v[i] ~= nil and v[i] ~= NULL then out[#out + 1] = decoded(v[i]) end
+  end
+  for k, value in pairs(v) do
+    if type(k) ~= "number" and value ~= NULL then out[k] = decoded(value) end
+  end
+  return out
+end
+
+local function edges3()
+  local chartHole = { 10, 12, 20, NULL, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0 }
+  local chartGap = { 10, 12, NULL, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0 }
+  return {
+    { "ruleset", { typeTable = chartHole } },
+    { "ruleset", { typeTable = chartGap } },
+    { "ruleset", { typeTable = CHART3, specialTypes = { 10, NULL, 11 } } },
+    { "ruleset", { typeTable = CHART3, movePool = { NULL, POOL3[1] } } },
+    { "ruleset", { typeTable = CHART3, specialTypes = { a = 1 } } },
+    { "ruleset", { typeTable = CHART3, movePool = { a = "x" } } },
+    { "ruleset", { typeTable = CHART3, specialTypes = {} } },
+    { "ruleset", { typeTable = CHART3, movePool = { a = NULL } } },
+    { "ruleset", { typeTable = { a = 10 } } },
+    { "mon", mon3({ types = { NULL, 10 } }) },
+    { "mon", mon3({ moves = { move3(), NULL } }) },
+    { "mon", mon3({ heldItem = "1e-9999999" }) },
+    { "mon", mon3({ level = "\194\16050" }) },
+    { "mon", mon3({ level = " \t50\n" }) },
+    { "mon", mon3({ moves = { move3({ priority = "-0x1" }) } }) },
+    { "mon", mon3({ ability = "0x1.8p1", holdEffect = "0b11" }) },
+    { "party", { battle = "b1", mons = { mon3(), NULL } } },
+    { "party", { battle = "b1", generation = { 3 }, mons = { mon3() } } },
+    { "bag", { { id = 13, count = 2 }, NULL } },
+    { "bag", { ["13"] = 2, ["22"] = NULL } },
+    { "bag", { ["13"] = NULL } },
+    { "choice", { battle = "b1", action = "fight", move = 0, pass = true } },
+    { "choice", { battle = "b1", action = "fight", move = 0, pass = "" } },
+    { "choice", { battle = "b1", action = "fight", move = 0, pass = { 3 } } },
+    { "choice", { battle = "b1", action = "switch", slot = true } },
+    { "choice", { battle = "b1", action = "fight", move = "0x0", pass = " 2 " } },
+    { "moveset", { battle = "b1", mon = 0, moves = { NULL, move3() } } },
+    { "moveset", { battle = "b1", mon = true, moves = { move3() } } },
+    { "event", { battle = "b1", seq = 9, t = "anim", slot = 0, side = "a", text = "SWEEP",
+                 target = true, spread = "", stage = { 1 }, holding = "0x10" } },
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "gen3_wire_edges",
+  run = function()
+    local out = {}
+    for i, case in ipairs(edges3()) do
+      local kind, input = case[1], decoded(case[2])
+      local got
+      if kind == "ruleset" then got = Wire.battleRuleset(input, 3)
+      elseif kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, 3)
+      elseif kind == "bag" then got = Wire.battleBag(input, 3)
+      elseif kind == "choice" then got = Wire.battleChoice(input, 3)
+      elseif kind == "event" then got = Wire.battleEvent(input)
+      elseif kind == "moveset" then got = Wire.battleMoveset(input, 3)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return { cases = out }
+  end,
+}
+
+-- Gen 1 / Gen 2 read paths, as they were before Gen 3 had a dialect: a stray
+-- `num` on an older row, and Gen 3's choice fields on an older choice, are
+-- ignored rather than read -- on both hosting paths.
+local function gen12()
+  local stray = { id = "thump", pp = 20, power = 40, accuracy = 255, type = 0, effect = 0,
+                  chance = 0, num = 7 }
+  local sheet = { species = "ALPHA", level = 50, hp = 100, maxHp = 100,
+                  stats = { atk = 90, def = 90, spd = 90, spc = 90 }, moves = { stray } }
+  local asked = { battle = "b1", action = "fight", move = 0, pass = "far", dexCaught = 1 }
+  return {
+    { "mon", sheet },
+    { "party", { battle = "b1", mons = { sheet } }, 1 },
+    { "ruleset", { chart = CHART, metronomePool = { stray } }, 1 },
+    { "ruleset", { chart = CHART, metronomePool = { stray } }, 2 },
+    { "ruleset", { chart = CHART, metronomePool = { stray } } },
+    { "choice", asked, 1 },
+    { "choice", asked, 2 },
+    { "choice", asked },
+    { "event", { battle = "b1", seq = 1, t = "ability" }, 1 },
+    { "event", { battle = "b1", seq = 2, t = "stat", slot = 0, side = "a", target = 2,
+                 stage = 1, delta = 1, holding = 3 }, 2 },
+    { "event", { battle = "b1", seq = 3, t = "moves", slot = 0, side = "a", moves = { stray } }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { stray } }, 1 },
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "gen12_read_paths",
+  run = function()
+    local out = {}
+    for i, case in ipairs(gen12()) do
+      local kind, input, gen = case[1], case[2], case[3]
+      local got
+      if kind == "ruleset" then got = Wire.battleRuleset(input, gen)
+      elseif kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, gen)
+      elseif kind == "choice" then got = Wire.battleChoice(input, gen)
+      elseif kind == "event" then got = Wire.battleEvent(input, gen)
+      elseif kind == "moveset" then got = Wire.battleMoveset(input, gen)
       end
       out[i] = { kind = kind, got = orNil(got) }
     end

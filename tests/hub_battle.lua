@@ -1457,6 +1457,70 @@ do
   ok(gen2.Turn ~= Turn1, "Gen2 hub never holds Gen1 Turn")
 end
 
+-- ------- Gen 1 / Gen 2 read paths are what they were before Gen 3
+--
+-- Gen 3 added a move row keyed on `num` and two choice fields (`pass`,
+-- `dexCaught`).  Neither may reach an older read: a stray `num` on a Gen 1 /
+-- Gen 2 row is ignored as it always was -- rather than sending the row to the
+-- Gen 3 reader, which refuses it for want of target / priority / flags -- and a
+-- stray `pass` on an older choice is ignored rather than refusing the turn.
+-- server/hub_battle.test.js pins the same on the Node twin.
+do
+  local stray = move()
+  stray.num = 7
+  local sheet = mon()
+  sheet.moves = { stray }
+  local clean = Wire.battleMon(sheet)
+  ok(clean ~= nil, "a Gen 1 sheet whose row carries a stray num still reads")
+  eq(clean and clean.moves[1].id, "thump", "as the older row")
+  eq(clean and clean.moves[1].num, nil, "with the stray field left behind")
+  local gold = mon()
+  gold.stats = { atk = 200, def = 200, spe = 100, spa = 100, spd = 100 }
+  gold.moves = { stray }
+  local goldClean = Wire.battleMon(gold)
+  eq(goldClean and goldClean.generation, 2, "a Gen 2 sheet with the same row reads too")
+  eq(goldClean and goldClean.moves[1].num, nil, "in the older dialect")
+  ok(Wire.battleParty({ battle = "b1", mons = { sheet } }, 1) ~= nil,
+     "and a Gen 1 hub takes the party it sits in")
+  for _, gen in ipairs({ 1, 2 }) do
+    local rules = Wire.battleRuleset({ chart = CHART, metronomePool = { stray } }, gen)
+    ok(rules ~= nil, "a Gen " .. gen .. " metronome pool row with a stray num reads")
+    eq(rules and rules.metronomePool[1].num, nil, "as the older row on Gen " .. gen)
+  end
+  ok(Wire.battleRuleset({ chart = CHART, metronomePool = { stray } }) ~= nil,
+     "and on a ruleset that names no hub generation")
+
+  local asked = { battle = "b1", action = "fight", move = 0, pass = "far", dexCaught = 1 }
+  for _, gen in ipairs({ 1, 2, "none" }) do
+    local c = Wire.battleChoice(asked, gen ~= "none" and gen or nil)
+    ok(c ~= nil, "a choice with Gen 3 fields in it is still a choice (" .. gen .. ")")
+    eq(c and c.pass, nil, "whose stray pass is not read (" .. gen .. ")")
+    eq(c and c.dexCaught, nil, "nor its dex word (" .. gen .. ")")
+  end
+  eq(Wire.battleChoice(asked, 3), nil, "while a Gen 3 hub refuses the same fields unread")
+
+  -- On the hub: a Gen 1 fight files a turn whose choice carries a stray pass.
+  local hub = Hub.new({ maxPlayers = 4 })
+  local f = openFight(hub)
+  local record = hub.battles[f.id]
+  hub:receive(f.ann.client, { type = Wire.BATTLE_CHOICE, battle = f.id, action = "fight",
+                              move = 0, pass = "far" })
+  ok(record.sim.byId[f.ann.client.id].choice ~= nil, "a Gen 1 hub files that turn")
+
+  -- Events, when the reader names its generation.
+  eq(Wire.battleEvent({ battle = "b1", seq = 1, t = "ability" }, 1), nil,
+     "a Gen 1 reader has no ability kind")
+  ok(Wire.battleEvent({ battle = "b1", seq = 1, t = "ability" }) ~= nil,
+     "(which a reader naming none still draws)")
+  local ev = Wire.battleEvent({ battle = "b1", seq = 2, t = "stat", slot = 0, side = "a",
+    target = 2, stage = 1, delta = 1, holding = 3 }, 2)
+  ok(ev ~= nil and ev.target == nil and ev.stage == nil and ev.delta == nil and ev.holding == nil,
+     "a Gen 2 reader keeps none of Gen 3's event fields")
+  local mv = Wire.battleEvent({ battle = "b1", seq = 3, t = "moves", slot = 0, side = "a",
+    moves = { stray } }, 1)
+  eq(mv and mv.moves and mv.moves[1].id, "thump", "and reads a moves row in the older dialect")
+end
+
 -- ------------------------------------------------------------------
 -- 12. Gen 3 (PROTOCOL 30): the hub referees on BattleSim3
 -- ------------------------------------------------------------------
@@ -1648,13 +1712,30 @@ do
   eq(record.sim, nil, "the trainer still owes a team")
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3c", side = "b",
                      mons = { glassjaw3(), glassjaw3() },
-                     bag = { { id = 22, count = 1 } } })
+                     bag = { { id = 22, count = 1, name = "KIT TONIC" } } })
   ok(record.sim ~= nil, "the host's side b completes the Gen 3 field")
   local bagA = record.sim.byId[record.npcIds[1]].bag
   local bagB = record.sim.byId[record.npcIds[2]].bag
   eq(bagA and bagA[22], 1, "the trainer's one potion, by numeric id")
   ok(bagA == bagB, "one table on both seats: spending it once spends it")
   eq(record.bags[record.npcIds[2]]["22"], 1, "and the hub sheet aliases it too")
+  -- The kit's names travel with the shared bag: only the first seat was handed
+  -- it, so the second used to open with no names and narrate "used an item!".
+  local second = record.sim.byId[record.npcIds[2]]
+  ok(second.bagNames == record.sim.byId[record.npcIds[1]].bagNames,
+     "the second seat shares the first seat's bag names")
+  eq(second.bagNames[22], "KIT TONIC", "so it knows the potion by the uploaded name")
+  record.sim:drainEvents()
+  second.choice = { action = "item", item = 22 }
+  record.sim:_useItem(second)
+  local narrated = false
+  for _, event in ipairs(record.sim:drainEvents()) do
+    if type(event.text) == "string" and event.text:find("TRAINER used KIT TONIC!", 1, true) then
+      narrated = true
+    end
+  end
+  ok(narrated, "and a potion drunk from the second seat is narrated by name")
+  second.choice = nil
 
   ok(fightItOut(hub, { { client = ann, battle = "g3c" }, { client = bob, battle = "g3c" } }),
      "the trainer answers at once and the fight runs out")
@@ -1807,14 +1888,14 @@ do
   eq(Wire.battleBag({ { id = 13, count = 1 }, { id = "13", count = 1 } }, 3), nil,
      "the same item twice is refused")
 
-  -- Choices and events.
-  local c = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 2 })
+  -- Choices and events.  Gen 3's two choice fields are read on a Gen 3 hub.
+  local c = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 2 }, 3)
   eq(c and c.pass, 2, "a Baton Pass destination rides the fight choice")
-  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 6 }), nil,
+  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 6 }, 3), nil,
      "outside the party it is refused")
-  local ic = Wire.battleChoice({ battle = "b1", action = "item", item = "9", dexCaught = true })
+  local ic = Wire.battleChoice({ battle = "b1", action = "item", item = "9", dexCaught = true }, 3)
   eq(ic and ic.dexCaught, true, "Repeat Ball's dex word rides the item choice")
-  eq(Wire.battleChoice({ battle = "b1", action = "item", item = "9", dexCaught = 1 }), nil,
+  eq(Wire.battleChoice({ battle = "b1", action = "item", item = "9", dexCaught = 1 }, 3), nil,
      "and only as a boolean")
   local ev = Wire.battleEvent({ battle = "b1", seq = 3, t = "stat", slot = 0, side = "a",
     text = "ATK fell", stat = "atk", stage = -2, delta = -2 })
@@ -1835,6 +1916,42 @@ do
   local mv = Wire.battleEvent({ battle = "b1", seq = 8, t = "moves", slot = 0, side = "a",
     moves = { move3() } })
   eq(mv and mv.moves and mv.moves[1].num, 33, "a Gen 3 moves event keeps its rows' numbers")
+end
+
+-- ------- Gen 3 lists: what Json.decode hands over, and what is a list at all
+--
+-- lib/sanitize.js used to refuse what this side took (an object where a list
+-- belongs: ipairs reads nothing and called it the empty list) and the reverse
+-- (a JSON null inside a list, which this side is never handed -- the engine's
+-- decoder appends nothing for it).  Both twins now judge one list:
+-- tests/fixtures/hub_protocol_parity.json pins the cases message for message,
+-- and the engine's own decoder is held to the reading here, where it can be
+-- reached (run from the engine root).
+do
+  eq(Wire.battleRuleset({ typeTable = CHART3, specialTypes = { a = 1 } }, 3), nil,
+     "an object where the special-type list belongs is refused")
+  eq(Wire.battleRuleset({ typeTable = CHART3, movePool = { a = "x" } }, 3), nil,
+     "and where the move pool belongs")
+  ok(Wire.battleRuleset({ typeTable = CHART3, specialTypes = {} }, 3) ~= nil,
+     "while the empty table is the empty list, as `{}` and `[]` decode alike")
+  local okJson, Json = pcall(require, "src.link.Json")
+  if okJson and type(Json) == "table" and type(Json.decode) == "function" then
+    local list = Json.decode("[10,null,12]")
+    eq(#list, 2, "the engine's decoder closes a null element up")
+    eq(list[2], 12, "so the element after it moves down")
+    eq(next(Json.decode('{"a":null}')), nil, "and stores nothing for a null value")
+    local hole = Wire.battleRuleset(Json.decode(
+      '{"typeTable":[10,12,20,null,11,10,20,12,11,20,-1,-1,0,0,7,0]}'), 3)
+    eq(hole and #hole.typeTable, #CHART3, "a null between rows leaves the rows around it")
+    eq(Wire.battleRuleset(Json.decode(
+      '{"typeTable":[10,12,null,11,10,20,12,11,20,-1,-1,0,0,7,0]}'), 3), nil,
+      "and a null in place of a cell refuses the chart")
+    local bag = Wire.battleBag(Json.decode('{"13":2,"22":null}'), 3)
+    eq(bag and #bag, 1, "a null count in a map bag is no entry at all")
+  else
+    io.write("hub_battle: src.link.Json not reachable from here (run from the engine root); "
+      .. "decoder checks skipped\n")
+  end
 end
 
 -- ------------------------------------------------------------------

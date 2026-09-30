@@ -1327,6 +1327,24 @@ end
 -- test or a replay sends one precisely because it needs that seed and no other,
 -- so quietly substituting a different one would answer the request with a run
 -- that looks right and reproduces nothing.
+
+-- A Gen 3 list, as src/link/Json.lua's encoder tells one from an object: a
+-- sequence (`#t > 0`) or the empty table.  ipairs over an object reads
+-- nothing, so without this `{ a = 1 }` passed as the empty list where
+-- lib/sanitize.js -- which has JSON's arrays and objects to go on -- refused
+-- it.  The empty table is the one shape this side cannot tell apart (`{}` and
+-- `[]` decode alike), so the JS twin takes an empty object as the empty list
+-- too.
+--
+-- A JSON null *inside* a list never reaches this file at all: the engine's
+-- Json.decode appends nothing for it (`arr[#arr + 1] = nil`), so
+-- `[10, null, 12]` arrives as `{ 10, 12 }`.  Nothing here can see the hole, so
+-- the JS twin closes its lists up the same way (luaList) before reading them
+-- -- the two then judge one list, and refuse or keep it whole alike.
+local function isList(t)
+  return type(t) == "table" and (#t > 0 or next(t) == nil)
+end
+
 -- Gen 3's chart: the cart's ORDERED triples (atk, def, mult in tenths), the
 -- Foresight sentinel -1, -1, 0 in place (docs/plans/gen3-battle-sheet.md
 -- §3.1).  Rebuilt cell by cell like chartOf, and refused whole rather than
@@ -1334,7 +1352,7 @@ end
 -- rewrites the chart, and a sentinel with a real type on one side is a row the
 -- sim cannot read as either.
 local function typeTable3(raw)
-  if type(raw) ~= "table" then return nil end
+  if not isList(raw) then return nil end
   local n = #raw
   if n == 0 or n % 3 ~= 0 or n > Config.BATTLE_TYPE_TABLE3_MAX * 3 then return nil end
   local out = {}
@@ -1353,9 +1371,10 @@ end
 -- "num:effect:power:type:accuracy:pp:chance:target:priority:flags:id" string,
 -- or a move row.  A string is parsed with the grammar the sim uses (eleven
 -- fields, ten plain integers, an id) and bounded like a sheet's move row, then
--- written back canonically -- "+5" and "05" arrive as 5 on both twins and go
--- out as "5", so what the sim parses is what was checked.  An id past 40 is
--- refused rather than cut, as the sim refuses it.  A row table is a move row.
+-- written back canonically -- "05" and "-0" are canonicalised ("5", "0") on
+-- both twins, and a leading "+" is refused as the grammar has no sign but
+-- "-", so what the sim parses is what was checked.  An id past 40 is refused
+-- rather than cut, as the sim refuses it.  A row table is a move row.
 local function poolEntry3(raw)
   if type(raw) == "table" then return M.battleMove(raw, 3) end
   if type(raw) ~= "string" or #raw > M.POOL_ENTRY3_MAX then return nil end
@@ -1411,7 +1430,7 @@ local function battleRuleset3(raw)
     if out.seed == nil then return nil end
   end
   if raw.specialTypes ~= nil then
-    if type(raw.specialTypes) ~= "table" then return nil end
+    if not isList(raw.specialTypes) then return nil end
     local special = {}
     for _, entry in ipairs(raw.specialTypes) do
       local t = M.int(entry, 0, Config.BATTLE_TYPE_MAX - 1)
@@ -1421,7 +1440,7 @@ local function battleRuleset3(raw)
     out.specialTypes = special
   end
   if raw.movePool ~= nil then
-    if type(raw.movePool) ~= "table" then return nil end
+    if not isList(raw.movePool) then return nil end
     local pool = {}
     for _, entry in ipairs(raw.movePool) do
       if #pool >= Config.BATTLE_MOVE_POOL3_MAX then break end
@@ -1472,12 +1491,16 @@ function M.battleRuleset(raw, generation)
     out.specialTypes = special
   end
   -- Optional Metronome pick pool: full move sheets from the host's decode.
+  -- Read in the older dialect by name, never by sniffing a row's `num`: this
+  -- is a Gen 1 / Gen 2 ruleset, and a stray `num` on one of its rows is
+  -- ignored exactly as it was before Gen 3 had a row of its own.
   if raw.metronomePool ~= nil then
     if type(raw.metronomePool) ~= "table" then return nil end
+    local rowGeneration = M.int(generation, 1, 2) or 1
     local pool = {}
     for _, entry in ipairs(raw.metronomePool) do
       if #pool >= Config.BATTLE_METRONOME_POOL_MAX then break end
-      local move = M.battleMove(entry)
+      local move = M.battleMove(entry, rowGeneration)
       if not move then return nil end
       pool[#pool + 1] = move
     end
@@ -1564,10 +1587,13 @@ local function battleMove3(raw)
   return out
 end
 
--- `generation` (optional): 3 reads the Gen 3 row; absent, a row that states a
--- `num` is a Gen 3 row (no Gen 1 / Gen 2 sheet has ever carried one), which is
--- how a client sanitising a `moves` event from a Gen 3 referee keeps the
--- fields it needs without every caller learning the hub's generation.
+-- `generation` (optional): 3 reads the Gen 3 row, 1 or 2 the older row
+-- whatever else it carries.  Absent, a row that states a `num` is a Gen 3 row
+-- (no Gen 1 / Gen 2 sheet has ever carried one), which is how a client
+-- sanitising a `moves` event from a Gen 3 referee keeps the fields it needs
+-- without learning the hub's generation.  Every reader that *knows* its
+-- generation passes it -- a Gen 1 / Gen 2 sheet or ruleset never takes the
+-- Gen 3 reader by sniffing, which is what kept those read paths as they were.
 function M.battleMove(raw, generation)
   if type(raw) ~= "table" then return nil end
   local gen = M.int(generation, 1, M.GENERATION_MAX)
@@ -1899,7 +1925,9 @@ function M.battleMon(raw)
   local moves = {}
   for _, entry in ipairs(raw.moves) do
     if #moves >= Config.BATTLE_MOVE_MAX then return nil end
-    local move = M.battleMove(entry)
+    -- This sheet's own dialect (1 or 2, stamped above), so a stray `num` on a
+    -- row is ignored rather than sending the row to the Gen 3 reader.
+    local move = M.battleMove(entry, generation)
     if not move then return nil end
     moves[#moves + 1] = move
   end
@@ -2189,7 +2217,11 @@ M.BATTLE_ACTIONS = {
 -- note at M.SLOT_MAX for which is which.  A present-but-out-of-range one refuses
 -- the choice rather than being dropped, because dropping it would turn a `fight`
 -- into an action with no move and stall a clock that forfeits.
-function M.battleChoice(raw)
+--
+-- `generation` (optional) is the hub's.  Only 3 reads Gen 3's two extra fields
+-- below; a Gen 1 / Gen 2 hub -- and a caller that names none -- reads a choice
+-- exactly as it did before Gen 3 existed, ignoring them whatever they hold.
+function M.battleChoice(raw, generation)
   if type(raw) ~= "table" then return nil end
   local needs = M.BATTLE_ACTIONS[raw.action]
   if not needs then return nil end
@@ -2220,14 +2252,17 @@ function M.battleChoice(raw)
   -- word that its dex already has the wild species caught (Repeat Ball).  A
   -- Gen 3 item rides in `item` as its numeric pret id spelled as a string
   -- ("13"), which M.id already takes.  Neither field exists in Gen 1 / Gen 2,
-  -- whose choices never carry them.
-  if raw.pass ~= nil then
-    out.pass = M.int(raw.pass, 0, M.SLOT_MAX)
-    if out.pass == nil then return nil end
-  end
-  if raw.dexCaught ~= nil then
-    if type(raw.dexCaught) ~= "boolean" then return nil end
-    out.dexCaught = raw.dexCaught
+  -- so neither is read there: a stray `pass` on a Gen 1 choice is ignored,
+  -- as it always was, rather than refusing the turn.
+  if M.int(generation, 3, 3) then
+    if raw.pass ~= nil then
+      out.pass = M.int(raw.pass, 0, M.SLOT_MAX)
+      if out.pass == nil then return nil end
+    end
+    if raw.dexCaught ~= nil then
+      if type(raw.dexCaught) ~= "boolean" then return nil end
+      out.dexCaught = raw.dexCaught
+    end
   end
 
   if needs ~= true and out[needs] == nil then return nil end
@@ -2353,9 +2388,19 @@ end
 -- `seq` has a floor and no ceiling.  It is only ever compared, never sized, so an
 -- absurdly large one sorts late and does nothing else -- whereas a cap would be a
 -- battle length nobody chose.
-function M.battleEvent(raw)
+--
+-- `generation` (optional) is the reader's own.  1 or 2 reads an event exactly
+-- as before Gen 3 had a stream: the older vocabulary only, none of Gen 3's six
+-- fields, and `moves` rows in the older dialect whatever `num` they carry.  3,
+-- or none named, reads the union -- which is what a caller that does not say
+-- needs in order to draw a Gen 3 referee's stream.
+function M.battleEvent(raw, generation)
   if type(raw) ~= "table" then return nil end
-  if not (M.BATTLE_EVENTS[raw.t] or M.BATTLE_EVENTS3[raw.t]) then return nil end
+  local gen = M.int(generation, 1, M.GENERATION_MAX)
+  local older = gen == 1 or gen == 2
+  if not (M.BATTLE_EVENTS[raw.t] or (not older and M.BATTLE_EVENTS3[raw.t])) then
+    return nil
+  end
   local battle = M.id(raw.battle)
   local seq = M.int(raw.seq, 0)
   if not (battle and seq) then return nil end
@@ -2438,17 +2483,19 @@ function M.battleEvent(raw)
   --   delta    the change actually applied, signed -- Gen 3 states it here
   --            rather than in `amount`, which is unsigned on every kind
   --   holding  the item id a `held` event leaves the mon holding (0 = none)
-  if raw.target ~= nil then out.target = M.int(raw.target, 0, M.FIELD_MAX) end
-  if raw.spread ~= nil then out.spread = M.int(raw.spread, 0, 1) end
-  if raw.stat ~= nil and M.EVENT_STATS3[raw.stat] then out.stat = raw.stat end
-  if raw.stage ~= nil then out.stage = M.int(raw.stage, -M.STAGE3_MAX, M.STAGE3_MAX) end
-  if raw.delta ~= nil then out.delta = M.int(raw.delta, -M.DELTA3_MAX, M.DELTA3_MAX) end
-  if raw.holding ~= nil then out.holding = M.int(raw.holding, 0, Config.GEN3_ITEM_MAX) end
+  if not older then
+    if raw.target ~= nil then out.target = M.int(raw.target, 0, M.FIELD_MAX) end
+    if raw.spread ~= nil then out.spread = M.int(raw.spread, 0, 1) end
+    if raw.stat ~= nil and M.EVENT_STATS3[raw.stat] then out.stat = raw.stat end
+    if raw.stage ~= nil then out.stage = M.int(raw.stage, -M.STAGE3_MAX, M.STAGE3_MAX) end
+    if raw.delta ~= nil then out.delta = M.int(raw.delta, -M.DELTA3_MAX, M.DELTA3_MAX) end
+    if raw.holding ~= nil then out.holding = M.int(raw.holding, 0, Config.GEN3_ITEM_MAX) end
+  end
   if type(raw.moves) == "table" then
     local moves = {}
     for _, entry in ipairs(raw.moves) do
       if #moves >= Config.BATTLE_MOVE_MAX then break end
-      local move = M.battleMove(entry)
+      local move = M.battleMove(entry, gen)
       if move then moves[#moves + 1] = move end
     end
     if #moves > 0 then out.moves = moves end

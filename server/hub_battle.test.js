@@ -1386,6 +1386,81 @@ testRefusedCoopOpenLeavesNoPaperwork();
   ok(gen2.Turn !== battle1.Turn, 'Gen2 hub never holds Gen1 Turn');
 }
 
+/*
+ * Gen 1 / Gen 2 read paths are what they were before Gen 3. Gen 3 added a move
+ * row keyed on `num` and two choice fields (`pass`, `dexCaught`); neither may
+ * reach an older read. A stray `num` on a Gen 1 / Gen 2 row is ignored as it
+ * always was -- rather than sending the row to the Gen 3 reader, which refuses
+ * it for want of target / priority / flags -- and a stray `pass` on an older
+ * choice is ignored rather than refusing the turn. Twin of the same section in
+ * tests/hub_battle.lua.
+ */
+function testGen12ReadPathsUnchanged() {
+  const sanitize = require('./lib/sanitize.js');
+  const sheet = mon(40);
+  sheet.moves[0].num = 7;
+  const clean = sanitize.cleanBattleMon(sheet);
+  ok(clean, 'a Gen 1 sheet whose row carries a stray num still reads');
+  ok(clean && clean.moves[0].id === 'm1', 'as the older row');
+  ok(clean && clean.moves[0].num === undefined, 'with the stray field left behind');
+  const gold = mon(40);
+  gold.stats = { atk: 120, def: 40, spe: 80, spa: 80, spd: 80 };
+  gold.moves[0].num = 7;
+  const goldClean = sanitize.cleanBattleMon(gold);
+  ok(goldClean && goldClean.generation === 2, 'a Gen 2 sheet with the same row reads too');
+  ok(goldClean && goldClean.moves[0].num === undefined, 'in the older dialect');
+  ok(sanitize.cleanBattleParty({ battle: 'b1', mons: [sheet] }, 1),
+    'and a Gen 1 hub takes the party it sits in');
+  for (const gen of [1, 2]) {
+    const rules = sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] }, gen);
+    ok(rules, `a Gen ${gen} metronome pool row with a stray num reads`);
+    ok(rules && rules.metronomePool[0].num === undefined, `as the older row on Gen ${gen}`);
+  }
+  ok(sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] }),
+    'and on a ruleset that names no hub generation');
+
+  const asked = {
+    battle: 'b1', action: 'fight', move: 0, pass: 'far', dexCaught: 1,
+  };
+  for (const gen of [1, 2, undefined]) {
+    const c = sanitize.cleanBattleChoice(asked, gen);
+    ok(c, `a choice with Gen 3 fields in it is still a choice (${gen})`);
+    ok(c && c.pass === undefined, `whose stray pass is not read (${gen})`);
+    ok(c && c.dexCaught === undefined, `nor its dex word (${gen})`);
+  }
+  ok(sanitize.cleanBattleChoice(asked, 3) === null,
+    'while a Gen 3 hub refuses the same fields unread');
+
+  // On the hub: a Gen 1 fight files a turn whose choice carries a stray pass.
+  const clock = makeClock();
+  const relay = makeRelay(clock);
+  const a = dial(relay, 'OLDA');
+  const b = dial(relay, 'OLDB');
+  const session = openBattle(relay, a, b);
+  uploadAndReady(relay, a, b, session);
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: session.id, action: 'fight', move: 0, pass: 'far',
+  });
+  ok(relay.battles.get(session.id).sim.byId.get(a.id).choice, 'a Gen 1 hub files that turn');
+
+  // Events, when the reader names its generation.
+  ok(sanitize.cleanBattleEvent({ battle: 'b1', seq: 1, t: 'ability' }, 1) === null,
+    'a Gen 1 reader has no ability kind');
+  ok(sanitize.cleanBattleEvent({ battle: 'b1', seq: 1, t: 'ability' }),
+    '(which a reader naming none still draws)');
+  const ev = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 2, t: 'stat', slot: 0, side: 'a', target: 2, stage: 1, delta: 1, holding: 3,
+  }, 2);
+  ok(ev && ev.target === undefined && ev.stage === undefined && ev.delta === undefined
+    && ev.holding === undefined, "a Gen 2 reader keeps none of Gen 3's event fields");
+  const mv = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 3, t: 'moves', slot: 0, side: 'a', moves: [sheet.moves[0]],
+  }, 1);
+  ok(mv && mv.moves && mv.moves[0].id === 'm1', 'and reads a moves row in the older dialect');
+}
+
+testGen12ReadPathsUnchanged();
+
 // ---------------------------------------------------------------------------
 // Gen 3 (PROTOCOL 30): the hub referees on lib/battle3
 // ---------------------------------------------------------------------------
@@ -1638,7 +1713,7 @@ function testGen3CoopNpc() {
     battle: 'g3c',
     side: 'b',
     mons: [glassjaw3(), glassjaw3()],
-    bag: [{ id: 22, count: 1 }],
+    bag: [{ id: 22, count: 1, name: 'KIT TONIC' }],
   });
   ok(record.sim, 'the host\'s side b completes the Gen 3 field');
   const bagA = record.sim.byId.get(record.npcIds[0]).bag;
@@ -1646,6 +1721,19 @@ function testGen3CoopNpc() {
   ok(bagA && bagA[22] === 1, "the trainer's one potion, by numeric id");
   ok(bagA === bagB, 'one table on both seats: spending it once spends it');
   ok(record.bags.get(record.npcIds[1])['22'] === 1, 'and the hub sheet aliases it too');
+  // The kit's names travel with the shared bag: only the first seat was handed
+  // it, so the second used to open with no names and narrate "used an item!".
+  const second = record.sim.byId.get(record.npcIds[1]);
+  ok(second.bagNames === record.sim.byId.get(record.npcIds[0]).bagNames,
+    "the second seat shares the first seat's bag names");
+  ok(second.bagNames[22] === 'KIT TONIC', 'so it knows the potion by the uploaded name');
+  record.sim.drainEvents();
+  second.choice = { action: 'item', item: 22 };
+  record.sim._useItem(second);
+  ok(record.sim.drainEvents().some((event) => typeof event.text === 'string'
+    && event.text.includes('TRAINER used KIT TONIC!')),
+  'and a potion drunk from the second seat is narrated by name');
+  second.choice = null;
 
   a.peer.outbox = [];
   ok(fightOut(relay, 'g3c', [a, b]), 'the trainer answers at once and the fight runs out');
@@ -1836,20 +1924,21 @@ function testGen3DialectAndLimits() {
   ok(sanitize.cleanBattleBag([{ id: 13, count: 1 }, { id: '13', count: 1 }], 3) === null,
     'the same item twice is refused');
 
+  // Gen 3's two choice fields are read on a Gen 3 hub.
   const c = sanitize.cleanBattleChoice({
     battle: 'b1', action: 'fight', move: 0, pass: 2,
-  });
+  }, 3);
   ok(c && c.pass === 2, 'a Baton Pass destination rides the fight choice');
   ok(sanitize.cleanBattleChoice({
     battle: 'b1', action: 'fight', move: 0, pass: 6,
-  }) === null, 'outside the party it is refused');
+  }, 3) === null, 'outside the party it is refused');
   const ic = sanitize.cleanBattleChoice({
     battle: 'b1', action: 'item', item: '9', dexCaught: true,
-  });
+  }, 3);
   ok(ic && ic.dexCaught === true, "Repeat Ball's dex word rides the item choice");
   ok(sanitize.cleanBattleChoice({
     battle: 'b1', action: 'item', item: '9', dexCaught: 1,
-  }) === null, 'and only as a boolean');
+  }, 3) === null, 'and only as a boolean');
   const ev = sanitize.cleanBattleEvent({
     battle: 'b1', seq: 3, t: 'stat', slot: 0, side: 'a', text: 'ATK fell', stat: 'atk', stage: -2, delta: -2,
   });
@@ -1874,6 +1963,39 @@ function testGen3DialectAndLimits() {
     battle: 'b1', seq: 8, t: 'moves', slot: 0, side: 'a', moves: [move3()],
   });
   ok(mv && mv.moves && mv.moves[0].num === 33, "a Gen 3 moves event keeps its rows' numbers");
+
+  // Wire.int's reading, spelled out: LuaJIT's tonumber, not JS's Number.
+  const { luaNumber, luaInt, luaList } = sanitize;
+  ok(luaNumber('-0x1') === -1 && luaNumber('+0x10') === 16, 'a sign leads a hex number, as in LuaJIT');
+  ok(luaNumber('0x1.8p1') === 3 && luaNumber('0b11') === 3, 'hex fractions and binary read as LuaJIT reads them');
+  ok(luaNumber('\u00a012') === null && luaNumber('12\u00a0') === null,
+    'a no-break space is not whitespace to Lua');
+  ok(luaNumber(' \t12\n') === 12, 'ASCII whitespace is');
+  ok(luaNumber('1e-9999999') === null, 'a written exponent past 2^20 is no number at all');
+  ok(luaInt(true, 0, 5) === null && luaInt('', 0, 5) === null && luaInt([3], 0, 5) === null,
+    'true, the empty string and a list are not integers');
+  ok(sanitize.cleanBattleChoice({ battle: 'b1', action: 'fight', move: 0, pass: true }, 3) === null,
+    'so a Gen 3 pass of true is refused, as the Lua hub refuses it');
+
+  // Lists as the Lua hub is handed them: the engine's Json.decode closes a null
+  // element up and stores nothing for a null value.
+  const closed = luaList([10, null, 12]);
+  ok(closed && closed.length === 2 && closed[1] === 12, 'a null element is closed up');
+  ok(luaList({}).length === 0 && luaList({ a: null }).length === 0, 'an empty (or all-null) object is the empty list');
+  ok(luaList({ a: 1 }) === null, 'any other object is not a list');
+  const hole = sanitize.cleanBattleRuleset(
+    JSON.parse('{"typeTable":[10,12,20,null,11,10,20,12,11,20,-1,-1,0,0,7,0]}'), 3,
+  );
+  ok(hole && hole.typeTable.length === CHART3.length, 'a null between rows leaves the rows around it');
+  ok(sanitize.cleanBattleRuleset(
+    JSON.parse('{"typeTable":[10,12,null,11,10,20,12,11,20,-1,-1,0,0,7,0]}'), 3,
+  ) === null, 'and a null in place of a cell refuses the chart');
+  const nullBag = sanitize.cleanBattleBag(JSON.parse('{"13":2,"22":null}'), 3);
+  ok(nullBag && nullBag.length === 1, 'a null count in a map bag is no entry at all');
+  ok(sanitize.cleanBattleRuleset({ typeTable: CHART3, specialTypes: { a: 1 } }, 3) === null,
+    'an object where the special-type list belongs is refused');
+  ok(sanitize.cleanBattleRuleset({ typeTable: CHART3, specialTypes: {} }, 3),
+    'while the empty object is the empty list, as it is to the Lua hub');
 }
 
 testGen3SimSelection();

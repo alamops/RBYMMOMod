@@ -530,3 +530,89 @@ test('the Gen 3 bag catalog is one table on both sims', () => {
   assert.strictEqual(sanitize.effectsFor(3).itemEffect('350').noConsume, true,
     'the Poke Flute is proved but never spent');
 });
+
+test("sanitize's luaNumber reads a string as LuaJIT's tonumber does", (t) => {
+  // Wire.int is LuaJIT's tonumber, floored and bounded; luaInt spells that
+  // reading out (luaNumber) for every Gen 3 field. They used to part on signed
+  // hex ("-0x1"), hex fractions and binary, a no-break space (which String#trim
+  // strips and Lua does not) and a written exponent past 2^20. Hold the two to
+  // one answer over those forms and a seeded spread of generated strings --
+  // when luajit is here to ask; skipped (not failed) without it, as the parity
+  // suites are.
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('luajit', ['-v'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    t.skip('luajit not on PATH');
+    return;
+  }
+  const cases = new Set([
+    '-0x1', '+0x1', '0x1p4', '0x1.8', '0X1F', '0x.8', '0x8.', '0x', '0x-1', '0x1P-1',
+    '0x1.8p-1075', '0x1p-1075', '0x1p-1074', '-0x1000000000000000p-1100',
+    '0x0.fffffffffffffffffff', '0x1.00000000000008', '0x1.00000000000018', '-0x0', '-0x0p1',
+    '0b1', '0b', '0b2', '-0b11', '0B11', '-0b0', `0b0${'1'.repeat(64)}`, `0b${'1'.repeat(65)}`,
+    'inf', 'nan', 'Infinity', '1e400', '1e1048576', '1e-1048576', '1e-1048575', '0x0p1048576',
+    '  12  ', '\v12\f', ' 12', '12 ', '﻿12', '12\u0000', '1.', '.5', '+.5', '-', '+',
+    '1e+', '- 1', '00012', '1_000', '0o7', '-0', '', ' ', `0.${'0'.repeat(900)}1e901`,
+    '4294967295.99999999999999999', '0x100000000.0000000001p-4', '0x7fffffff.ffffffff',
+  ]);
+  let seed = 20260930;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = (list) => list[Math.floor(rand() * list.length)];
+  const run = (alphabet, max) => {
+    let out = '';
+    for (let n = Math.floor(rand() * max); n > 0; n -= 1) out += pick(alphabet);
+    return out;
+  };
+  const DEC = [...'0123456789'];
+  const HEX = [...'0123456789abcdefABCDEF'];
+  const SPACE = [' ', '\t', '\n', '\v', '\f', '\r', ' ', ' ', '', ''];
+  for (let i = 0; i < 4000; i += 1) {
+    let body;
+    const kind = Math.floor(rand() * 5);
+    if (kind === 0) {
+      body = run(DEC, 20) + (rand() < 0.5 ? '.' : '') + run(DEC, 12);
+      if (rand() < 0.4) body += pick(['e', 'E']) + pick(['', '+', '-']) + run(DEC, 8);
+    } else if (kind === 1) {
+      body = pick(['0x', '0X']) + run(HEX, 20) + (rand() < 0.5 ? '.' : '') + run(HEX, 20);
+      if (rand() < 0.5) body += pick(['p', 'P']) + pick(['', '+', '-']) + run(DEC, 5);
+    } else if (kind === 2) {
+      body = pick(['0b', '0B']) + run(['0', '1'], 70);
+    } else if (kind === 3) {
+      body = run([...'0123456789.eEpPxXbB+- abcdef'], 8);
+    } else {
+      body = String(Math.floor(rand() * 2000000) - 1000000);
+    }
+    cases.add(pick(SPACE) + pick(['', '', '+', '-']) + body + pick(SPACE));
+  }
+  const list = [...cases];
+  const script = [
+    'for line in io.lines() do',
+    "  local s = line:gsub('..', function(h) return string.char(tonumber(h, 16)) end)",
+    '  local n = tonumber(s)',
+    "  if n == nil or n ~= n or n == math.huge or n == -math.huge then io.write('null\\n')",
+    "  else io.write(string.format('%.17g\\n', n)) end",
+    'end',
+  ].join('\n');
+  const lua = spawnSync('luajit', ['-e', script], {
+    input: `${list.map((s) => Buffer.from(s, 'utf8').toString('hex')).join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
+  assert.strictEqual(lua.status, 0, `luajit failed: ${lua.stderr}`);
+  const answers = lua.stdout.trim().split('\n');
+  assert.strictEqual(answers.length, list.length, 'one answer per string');
+  const differ = [];
+  list.forEach((s, i) => {
+    const mine = sanitize.luaNumber(s);
+    const js = mine === null || !Number.isFinite(mine) ? 'null' : mine;
+    const want = answers[i] === 'null' ? 'null' : Number(answers[i]);
+    if (js !== want) differ.push(`${JSON.stringify(s)} lua=${answers[i]} js=${js}`);
+  });
+  assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${list.length} strings read differently`);
+});
