@@ -215,3 +215,101 @@ battles. Guarded by `Runtime.wants`.
 - `src/Cast.lua`: `installLook3` / `restoreLook3` (becomes a `player.sprite`
   link, as on Gen 1).
 - The Gen 3 stack polling that stands in for `screen.pushed`.
+
+## Addendum — taking a battle over (`battle.intercept`)
+
+**Found by:** `rby_mmo` wave 4 (co-op and solo battles on game3). Against the
+same `dev` @ `fdea09dc`.
+
+### What `rby_mmo` does today, and why
+
+On Gen 1 / Gen 2 a co-op or solo fight *stands in* for the engine's own: the
+engine pushes its BattleState, `screen.pushed` announces it, the mod buries it
+under its own screen and, when its fight ends, calls the buried battle's
+`onFinish(result)` — the overworld's whole post-battle flow (trainer flag,
+prize, whiteout, the script waiting in front of the trainer). game3 has no
+such moment: battles are module-driven (`battle_bridge.lua` →
+`battle/init.lua`), and by the time one exists it is already the cart's.
+
+- **Wild encounters** go through the public `encounter.roll` hook
+  (`src/core/game3/encounters.lua` `Encounters.onStep`): the mod's link returns
+  `nil`, the step starts no battle, and the mod starts its own with the rolled
+  monster (built the way `battle/init.lua` `foe_mon_from` builds a foe). This
+  needs nothing from upstream. Fishing, Rock Smash and Sweet Scent start their
+  fights through `BattleBridge.startWild` without passing the hook, so they
+  are taken at the same wrap trainers are (below), under the same refusals.
+- **Trainers** are the reach-around. The `trainerbattle` / `dotrainerbattle`
+  opcode (`scripting/ops_a.lua:1510`) does reach mods through `script.command`
+  (`:2276`), but a hook there can only replace the *whole* opcode — rematch
+  rules, the already-beaten skip, the double-battle check, the intro text, the
+  trainer turning to face the player — and would then have to suspend the VM
+  through its private `ctx.nativePoll`. The fight itself starts in exactly one
+  place, `BattleBridge.start(mod, game, foe, opts)` (via the VM adapter's
+  `startTrainerBattle`), with the opcode's continuation in `opts.done`. So
+  `src/CoopField.lua` (`installStart3` / `restoreStart3`) wraps that one
+  function:
+  - the original is kept on the module under `__rby_mmo_start`, so a hot
+    reload wraps the pristine original rather than a wrapper;
+  - the wrapper is inert unless this mod instance is the loaded one
+    (`mod.find(id).exports == mod.exports`), and answers the original for a
+    link / headless start, a step encounter `encounter.roll` already offered,
+    and every kind in `Config.SOLO_REFUSED_GEN3` (safari, roamers, scripted
+    and legendary wilds, frontier, Trainer Tower, the first battle,
+    two-opponent and partner fights, …);
+  - when a divert does take the fight, the mod runs its own and then does what
+    `BattleBridge.start`'s `finish` would have done for it — `battleOutcome`,
+    `applyWhiteoutMoneyLoss` + `Field.respawnAtHeal` on a loss (or the
+    `noWhiteout` / EARLY_RIVAL heal-and-carry-on), the map song,
+    `Space.returnToField` — and calls the opcode's own `opts.done(result)`, so
+    the trainer flag, the CONTINUE_SCRIPT jump and the VM tick are the
+    opcode's, unchanged. A draw is handed over as `"lose"` without the
+    whiteout (the opcode has no third answer; anything it does not read as a
+    loss marks the trainer beaten).
+  - `restoreStart3` puts the original back when the slot still holds this
+    wrapper; one stacked on top by another mod keeps the slot and ours is
+    retired in place.
+
+What that costs: it depends on `BattleBridge.start`'s signature and on
+`opts.done` being the opcode's continuation; it cannot run the `trainer.party`
+hook for the fight it takes (that call is a local of `battle_bridge.lua`); and
+`battle.started` / `battle.ended` are not raised for a fight the engine never
+ran (a mod may not emit an engine event).
+
+### Proposed seam
+
+One hook, raised at the top of `BattleBridge.start` (after the refusal checks
+the bridge already makes, before `PartyView` / the transition):
+
+```lua
+mod.hooks:wrap("battle.intercept", function(next, game, spec)
+  -- spec = { kind = "wild" | "trainer", foe = <foe record>, opts = <start opts,
+  --          read-only>, trainerId?, mapId, finish = function(result) end }
+  -- Return true to take the fight: the engine starts nothing, and the taker
+  -- calls spec.finish(result) exactly once ("win" | "lose" | "draw" | "run" |
+  -- "caught"), which runs the bridge's own finish (writeback of nothing,
+  -- battleOutcome, whiteout, TV / roamer, battle.ended, map song,
+  -- returnToField) and then opts.done.
+  return next(game, spec)
+end)
+```
+
+- Guarded by `Runtime.wantsHook("battle.intercept")`; vanilla (`next`)
+  answers false and the bridge proceeds exactly as today.
+- Raised for every start the bridge handles, so fishing / Rock Smash / Sweet
+  Scent / scripted wilds are covered by the same seam (the spec's `opts` says
+  which), and `trainer.party` runs before it so a taker sees the hooked party.
+- `spec.finish("draw")` gets a real third answer in the opcode (trainer not
+  marked beaten, no whiteout, script halted as after a loss) instead of the
+  mod's `"lose"`-without-whiteout mapping.
+
+Parity pair: *vanilla unchanged* — a headless trainerbattle with no hook runs
+the same battle and sets the same flag; *through the public API* — a
+`tests/modkit/cases/` case wraps `battle.intercept`, takes a trainer fight,
+calls `spec.finish("win")`, and asserts the trainer flag is set, the
+CONTINUE_SCRIPT ran and no battle started.
+
+### What `rby_mmo` removes when it lands
+
+`CoopField.installStart3` / `restoreStart3` / `divertTrainer` and the
+hand-written half of the finish ritual (`Stand:finish` keeps only the call to
+`spec.finish`); the `encounter.roll` link can stay or move to the new hook.

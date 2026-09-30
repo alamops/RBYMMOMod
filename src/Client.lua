@@ -25,6 +25,10 @@ local Coop = need("Coop")
 -- which is an *instance* and is nil between battles -- which is exactly when
 -- a save is loaded.
 local CoopBattle = need("CoopBattle")
+-- Gen 3's encounter divert: the stand-in for the cart's battle a divert
+-- cancels, and the BattleBridge.start wrap trainers are taken at (see the Gen
+-- 3 section of src/CoopField.lua, and the wiring in M.install below).
+local CoopField = need("CoopField")
 -- The mod's own battle system for a player with nobody to play with. The one
 -- module in here that *substitutes* for a piece of the game instead of adding
 -- to it, and so the one gated on an option row rather than on a connection --
@@ -2609,6 +2613,177 @@ local function stirEntropy(dt)
     loveRandom and loveRandom() or delta)
 end
 
+-- ------- Gen 3: taking the cart's fights over
+--
+-- A Gen 1 / Gen 2 boot diverts on `screen.pushed` (see the listener in
+-- M.install): the engine pushes its battle and co-op / solo stand in for it.
+-- A Gen 3 boot raises no screen events and runs its battles as modules, so the
+-- divert happens where the fight is *started* instead, one step earlier:
+--
+--   * a wild at `encounter.roll` (the public hook the step encounter goes
+--     through, src/core/game3/encounters.lua): the hook answers nil and the
+--     cart never starts the fight;
+--   * a trainer at BattleBridge.start (the trainerbattle opcode's fight
+--     entry, wrapped by CoopField.installStart3 -- see its header for why the
+--     `script.command` hook cannot do this alone): the wrapper takes the
+--     fight and hands the opcode's own `done(result)` the mod's result.
+--
+-- Both build CoopField's stand-in (kind, enemyParty, trainer, onFinish,
+-- fightAlone -- the buried BattleState's shape) and offer it exactly as the
+-- Gen 1 / Gen 2 listener offers a pushed battle: co-op first, solo over what
+-- co-op handed back. The stand-in goes up as a cover layer first, so co-op's
+-- wait for the partner has a frozen field and the cart's own "Wild X
+-- appeared!" in front of it, as the engine's intro is on Gen 1 / Gen 2.
+-- Declined by both, the cover comes down and the cart's fight runs untouched:
+-- the hook returns the encounter it rolled, the wrapper calls the original.
+local gen3Divert = { on = false, installed = false, tried = 0, rolled = false }
+
+-- Would anybody take a fight of this kind right now?  Asked before anything is
+-- built, so a player nobody would divert for never has a foe rolled twice.
+local function wantsDivert3(kind)
+  if solo:isOn() then return true end
+  if not (transport:isReady() and party:has()) then return false end
+  if coop.running then return false end
+  if kind == "wild" then return coop:wantsWild() end
+  return coop:wantsNpc()
+end
+
+-- The Gen 3 twin of offerFight (M.install): true when co-op or solo took the
+-- fight, which is then theirs to finish (or hand back).
+--
+-- Co-op is offered the stand-in itself (the buried-battle shape its whole
+-- flow is written against). Solo is offered what src/SoloBattle.lua's Gen 3
+-- entries take -- the rolled encounter, or the trainer's foe record and the
+-- engine's battle opts -- with `done` (the engine's own continuation: the
+-- trainer script's resume, which it calls once, after its rewards and
+-- whiteout) and `fallback` (the stand-in's fightAlone, the one way it hands a
+-- fight back). The cover is down before solo is asked: its screen is its own.
+local function offerFight3(stand, kind, soloArgs)
+  local game = ctx.game
+  if not stand:push(game) then
+    mod.log:warn("could not hold the field for a %s divert; this one is fought "
+      .. "the ordinary way", kind)
+    return false
+  end
+  local current = World.current()
+  local mapId = stand.mapId or (current and current.mapId)
+  local connected = transport:isReady()
+  local taken = false
+  if connected then
+    local ok, err = pcall(function()
+      if kind == "trainer" then
+        taken = coop:onTrainerBattle(game, stand, mapId) == true
+      else
+        taken = coop:onWildEncounter(game, stand, mapId) == true
+      end
+    end)
+    if not ok then
+      -- Not read as a refusal when co-op had already claimed the stand-in
+      -- (its wait is out, and its own clock hands the fight back through
+      -- Coop:release) -- the listener's posture on Gen 1 / Gen 2, for the
+      -- same reason: a second owner is worse than the ordinary fight.
+      local claimed = coop.encounter ~= nil and coop.encounter.engine == stand
+      mod.log:warn("the co-op divert failed (%s); this %s is fought the "
+        .. "ordinary way -- the battle itself is unaffected", tostring(err),
+        kind == "trainer" and "trainer" or "encounter")
+      if claimed then return true end
+      taken = false
+    end
+  end
+  if taken then return true end
+  stand:takeDown()
+  if not solo:isOn() then return false end
+  local ok, err = pcall(function()
+    local opts = {}
+    for k, v in pairs(soloArgs.opts or {}) do opts[k] = v end
+    opts.mapId = mapId
+    opts.done = soloArgs.done or function() end
+    opts.fallback = function() stand:fightAlone() end
+    if kind == "trainer" then
+      taken = solo:fromGen3Trainer(game, soloArgs.foe, opts) == true
+    else
+      taken = solo:fromGen3Encounter(game, soloArgs.enc, opts) == true
+    end
+  end)
+  if not ok then
+    mod.log:warn("the solo battle divert failed (%s); this %s is fought on "
+      .. "the game's own battle screen instead -- the battle itself is "
+      .. "unaffected; turn SOLO BATTLES off in the mod manager (F10) if it "
+      .. "keeps happening", tostring(err),
+      kind == "trainer" and "trainer" or "encounter")
+    taken = false
+  end
+  return taken
+end
+
+-- The wild door: `encounter.roll`'s own result, and whether to cancel it.
+local function divertWild3(enc, rollCtx)
+  local game = ctx.game
+  local stand
+  stand = CoopField.wildStand3(enc, {
+    game = game,
+    mapId = rollCtx and rollCtx.mapId,
+    -- Handing the encounter back is starting the cart's fight with the very
+    -- monster the cover announced (its personality kept), the way the step
+    -- that rolled it would have.
+    fightAlone = function()
+      local BB = Gen3.engine("src.core.game3.battle_bridge")
+      local Runtime = Gen3.engine("src.core.game3.runtime")
+      if not (BB and type(BB.startWild) == "function") then
+        error("no BattleBridge.startWild on this build")
+      end
+      local lead = stand and stand.enemyParty and stand.enemyParty[1]
+      return BB.startWild(Runtime and Runtime._mod, (Runtime and Runtime._game) or game, {
+        species = tonumber(enc.speciesId) or tonumber(enc.species),
+        level = enc.level, item = enc.item,
+        personality = (lead and lead.personality) or enc.personality,
+        moves = enc.moves,
+      }, {})
+    end,
+  })
+  if not stand then return false end
+  -- The cart resets its encounter rate modifiers whenever a battle starts; a
+  -- fight the hook cancelled never reaches that line.
+  local Encounters = Gen3.engine("src.core.game3.encounters")
+  if Encounters and type(Encounters.resetRateModifiers) == "function" then
+    pcall(Encounters.resetRateModifiers)
+  end
+  local taken = offerFight3(stand, "wild", { enc = enc })
+  if taken then CoopField.wildStart3() end
+  return taken
+end
+
+-- The trainer door, handed to CoopField.installStart3.
+local startHandler3 = {
+  wants = function(kind) return wantsDivert3(kind) end,
+  -- A step encounter `encounter.roll` just offered and handed back reaches
+  -- BattleBridge.startWild next, in the same call: it is not offered twice.
+  skipWild = function()
+    local rolled = gen3Divert.rolled
+    gen3Divert.rolled = false
+    return rolled
+  end,
+  take = function(stand, foe, opts, kind)
+    if kind == "wild" then
+      return offerFight3(stand, "wild", { enc = foe, opts = opts, done = opts and opts.done })
+    end
+    return offerFight3(stand, "trainer", { foe = foe, opts = opts, done = opts and opts.done })
+  end,
+}
+
+-- Per tick on Gen 3: the stand-ins' deferred work, and the BattleBridge wrap
+-- -- installed from the field rather than at load, because a headless load or
+-- a boot still on its menus has no battle bridge to reach (and Gen3.engine
+-- remembers a miss for the rest of the session).
+local function tickDivert3(game, dt)
+  pcall(CoopField.pump3, dt)
+  if gen3Divert.installed or gen3Divert.tried >= 3 then return end
+  if not (Gen3.inField() and type(game) == "table" and game.phase == "field") then return end
+  gen3Divert.tried = gen3Divert.tried + 1
+  local ok, installed = pcall(CoopField.installStart3, startHandler3)
+  gen3Divert.installed = ok and installed == true
+end
+
 local function tick(game, dt)
   ctx.game = game
   dt = dt or 0
@@ -2661,6 +2836,12 @@ local function tick(game, dt)
       .. "(F10) if it happens again", tostring(soloErr))
     pcall(solo.reset, solo)
   end
+
+  -- Gen 3's half of the same exception, for the same reason: what a divert
+  -- owes the cart after the mod's fight (the trainer's script carried on, the
+  -- whiteout's warp) waits for the screen to be the field's again, and that
+  -- wait is not a hub's business. One table read on an empty queue.
+  if gen3Divert.on then tickDivert3(game, dt) end
 
   if not transport:isOpen() then return end
 
@@ -3146,6 +3327,33 @@ function M.install()
         .. "keeps happening", tostring(err),
         kind == "trainer" and "trainer" or "encounter")
     end
+  end
+
+  -- Gen 3: the step encounter's own hook (see "Gen 3: taking the cart's
+  -- fights over" above). Registered on a Gen 3 boot only: on Gen 1 / Gen 2 a
+  -- wrap here would put the encounter path onto the hooked branch for a hook
+  -- that has nothing to do there.
+  if Gen3.active() then
+    gen3Divert.on = true
+    mod.hooks:wrap("encounter.roll", function(next, tbl, rollCtx)
+      local enc = next(tbl, rollCtx)
+      if enc == nil then return nil end
+      gen3Divert.rolled = false
+      if wantsDivert3("wild") then
+        local ok, taken = pcall(divertWild3, enc, rollCtx)
+        if not ok then
+          mod.log:warn("the wild divert failed (%s); this encounter is fought "
+            .. "the ordinary way", tostring(taken))
+        elseif taken then
+          return nil
+        end
+      end
+      -- Handed back: the step starts the cart's fight with it in a moment,
+      -- through BattleBridge.startWild -- which the start wrap must not offer
+      -- a second time.
+      gen3Divert.rolled = true
+      return enc
+    end)
   end
 
   mod.events:on("screen.pushed", function(payload)

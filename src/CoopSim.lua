@@ -50,11 +50,40 @@ M.__index = M
 -- **Gen 2:** Gen1 Damage / CoopField host-sim is refused. Construction still
 -- succeeds as a slot shell for hub-mediated BattleSim2 event replay; resolve
 -- paths that need Damage/field no-op with a clear warn.
+--
+-- **Gen 3:** the same replay shell, for the same reason and one more: the
+-- Gen 1 `Damage` / `BattleState` a caller might hand in are dead modules on
+-- Emerald.  Co-op there is BattleSim3's on a Gen 3 hub.  Its battlers are built
+-- by `deps.battlerFor(mon, facePlayer)` (CoopBattle's Gen 3 builder: C4 move
+-- rows, the cart's pics) instead of `makeBattler`, and `targetsFor` may offer
+-- the partner as well as the foes (Gen 3 doubles let a move be aimed at an
+-- ally; see `targetsFor`).
 function M.new(deps, slots)
   deps = deps or {}
   local generation = Gen.generation(deps.game)
   local hostSimStripped = false
-  if generation == 2 and (deps.damage or deps.field) then
+  if generation == 3 and (deps.damage or deps.field or deps.makeBattler) then
+    hostSimStripped = true
+    mod.log:warn("CoopSim Gen1 host-sim (Damage/CoopField) is disabled on "
+      .. "Gen 3; use hub-mediated co-op on a Gen 3 hub (BattleSim3) instead")
+    deps = {
+      data = deps.data,
+      ruleset = deps.ruleset,
+      game = deps.game,
+      status = deps.status,
+      turnOrder = deps.turnOrder,
+      rng = deps.rng,
+      experience = deps.experience,
+      movesAt = deps.movesAt,
+      trainer = deps.trainer,
+      aiUses = deps.aiUses,
+      save = deps.save,
+      facingSide = deps.facingSide,
+      onError = deps.onError,
+      picFor = deps.picFor,
+      battlerFor = deps.battlerFor,
+    }
+  elseif generation == 2 and (deps.damage or deps.field) then
     hostSimStripped = true
     mod.log:warn("CoopSim Gen1 host-sim (Damage/CoopField) is disabled on "
       .. "Gen 2; use hub-mediated co-op on a Gen 2 hub (BattleSim2) instead")
@@ -116,14 +145,21 @@ function M.new(deps, slots)
     -- the sprite on Gen 1). The classic stage draws `battler.sprite`; without
     -- this a Gen 2 classic co-op fight had no monsters on it at all.
     picFor = deps.picFor,
+    -- `battlerFor(mon, facePlayer)` -> battler, the Gen 3 builder (see the
+    -- note above M.new). Absent on Gen 1 / Gen 2, where `makeBattler` or the
+    -- fallback below builds one.
+    battlerFor = deps.battlerFor,
+    -- Gen 3 doubles: a SELECTED move may be aimed at the partner too.
+    allyTargets = generation == 3 or nil,
     -- Which side draws as the Gen 1 "player" half: back sprites, no "Enemy"
     -- name prefix, player-side move anims. Defaults to "a" (host / absolute
     -- layout). CoopBattle sets this to the local seat's side so a side-b
     -- viewer still sees their pair facing up after viewPos remaps them to
     -- the bottom of the screen.
     facingSide = deps.facingSide == "b" and "b" or "a",
-    -- Gen 2 replay shell: resolveTurn must not invent Gen1 Damage rolls.
-    gen2NoHostSim = generation == 2 or hostSimStripped or nil,
+    -- Gen 2 / Gen 3 replay shell: resolveTurn must not invent Gen1 Damage
+    -- rolls. (The name is historical: it was Gold's alone until Gen 3.)
+    gen2NoHostSim = generation == 2 or generation == 3 or hostSimStripped or nil,
     slots = {},
     -- Battlers knocked down inside one action, acted on once it finishes: the
     -- engine's pipeline can faint two at a time (Explosion, recoil, a
@@ -223,7 +259,18 @@ function M:sendOut(slot, index, trusted)
   -- `facingSide` rather than absolute "a", or a side-b client would keep
   -- drawing foes as backs after layout remaps its own pair to the bottom.
   local facePlayer = slot.side == self.facingSide
-  if self.makeBattler then
+  if self.battlerFor then
+    local ok, built = pcall(self.battlerFor, mon, facePlayer)
+    if not (ok and type(built) == "table") then
+      if mod and mod.log then
+        mod.log:warn("CoopSim: a Gen 3 battler could not be built for seat %s "
+          .. "(%s); the seat keeps the monster it had -- report this with the "
+          .. "species", tostring(slot.index), tostring(built))
+      end
+      return nil
+    end
+    slot.battler = built
+  elseif self.makeBattler then
     -- A save-shaped stand-in carrying nothing but the badges, because that is
     -- the only field `makeBattler` reads off it. Passing the real save would
     -- work for exactly one of the four slots and be wrong for the other three.
@@ -524,18 +571,30 @@ end
 -- seats stay aimable. The hub accepts a fight aimed at a mustReplace seat;
 -- returning nothing here made FIGHT print "Wait for the other trainer!" and
 -- never submit, while the referee kept waiting on that choice -- a hard stall.
-function M:targetsFor(slot)
+--
+-- `opts.ally` (Gen 3 only, `allyTargets`): the living partner seats are
+-- offered after the foes, never the chooser's own. pret's doubles cursor
+-- (HandleInputChooseTarget) walks every other battler for a SELECTED move, and
+-- BattleSim3 takes a living ally as `target` (docs/plans/gen3-battle-sheet.md
+-- §1.2). Foes first, so the picker still opens on an opponent.
+function M:targetsFor(slot, opts)
   local foe = slot.side == "a" and "b" or "a"
   local out = self:living(foe)
-  if #out > 0 then return out end
-  for _, s in ipairs(self.slots) do
-    if s.side == foe and not s.gone then
-      for _, mon in ipairs(s.party or {}) do
-        if (mon.hp or 0) > 0 then
-          out[#out + 1] = s
-          break
+  if #out == 0 then
+    for _, s in ipairs(self.slots) do
+      if s.side == foe and not s.gone then
+        for _, mon in ipairs(s.party or {}) do
+          if (mon.hp or 0) > 0 then
+            out[#out + 1] = s
+            break
+          end
         end
       end
+    end
+  end
+  if opts and opts.ally and self.allyTargets then
+    for _, s in ipairs(self:living(slot.side)) do
+      if s ~= slot then out[#out + 1] = s end
     end
   end
   return out
