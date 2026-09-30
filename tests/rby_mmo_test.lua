@@ -8439,6 +8439,31 @@ local function settle(side)
   return done ~= nil
 end
 
+-- End a co-op fight on the hub, the way a finished one ends it.
+--
+-- Every handoff in this harness stops at M:begin: the dispatch hands it a bare
+-- `{}` game, so there is no party to pack and it abandons ("2-on-2 needs the
+-- link modules."), which `settle` then drains. Nothing here ever reaches
+-- M:onBattleOver -- the one place a client sends the COOP_LEAVE that closes the
+-- hub's group and aborts its still-unsettled mediated record -- so the fight
+-- stays open on the hub with every seat still bound to it.
+--
+-- That used to be invisible, because opening the next fight simply overwrote
+-- the old binding. It is not any more: since #87 the hub refuses to seat a
+-- player who is still bound to a different unsettled fight (openCoopBattle /
+-- openMediatedBattle -- the old sim kept ticking toward forfeit under the new
+-- one), so every later join on the same hub is answered COOP_OFFER_END{alone}
+-- and every later four-way COOP_DECLINE{gone}, while the previous fight's
+-- `lastPlan` sits there looking like the new one. Called between scenarios
+-- that share a hub, and sent from every side named: one goodbye closes the
+-- whole group, so the rest are no-ops, exactly as on a real hub.
+local function endFight(...)
+  for i = 1, select("#", ...) do
+    local side = select(i, ...)
+    side.transport.send(nil, Wire.COOP_LEAVE, {})
+  end
+end
+
 -- Drive M:update in fixed steps -- the clock every standing offer, wait and
 -- ask now runs on (round 9). Small steps by default so JOIN_RETRY_EVERY
 -- (0.5s) is crossed the same way a real fixed-step game would; callers
@@ -8735,6 +8760,11 @@ eq(ann.coop.lastPlan.kind, "npc", "as a co-op fight against an NPC")
 eq(#ann.coop.lastPlan.allies, 2, "with both of them on the same side")
 settle(ann); settle(bob)
 eq(ann.coop.running, false, "neither is left marked as mid-battle")
+-- ...and the hub lets both of them go, or the next join below is refused
+-- (see endFight).
+endFight(ann, bob)
+eq(ann.client.battleId, nil, "the hub no longer holds ANN in that fight")
+eq(bob.client.battleId, nil, "nor BOB")
 
 -- Joiner who also walked into the trainer still carries it for unwind
 -- (the ACTIONS / same-trainer door into the same wait). Round 13's same-map
@@ -8759,6 +8789,7 @@ check(bob.coop.lastPlan ~= nil, "joiner reaches the handoff")
 check(bob.coop.lastPlan.engine == bob.engine,
       "and BOB's own trainer battle rides along on his plan too, for the unwind")
 settle(ann); settle(bob)
+endFight(ann, bob)
 
 -- ------- rule 3: nobody joins once it has started
 
@@ -8782,6 +8813,7 @@ eq(joins, 1, "a second join finds nothing left to accept")
 pump(ann); pump(bob)
 -- both are mid-handoff again; hand their encounters back before moving on
 settle(ann); settle(bob)
+endFight(ann, bob)
 
 -- ------- R9-A2: the retry, mid-fight and mid-trade
 --
@@ -8816,6 +8848,11 @@ settle(ann); settle(bob)
   pump(rAnn); pump(rBob)
   check(rAnn.coop.lastPlan ~= nil, "the fight opens for both")
   settle(rAnn); settle(rBob)
+  endFight(rAnn, rBob)
+  -- Cleared so "opens again" below is about the second fight, not a leftover
+  -- of this one -- which is how that check stayed green while the hub was
+  -- refusing the second fight outright.
+  rAnn.coop.lastPlan, rBob.coop.lastPlan = nil, nil
 
   -- the offer lands mid-trade: the same deferral, through Sessions:isBusy()
   rBob.busy = true
@@ -9314,6 +9351,7 @@ check(take(wAnn.peer, Wire.COOP_JOINED) ~= nil,
       "a free on-map partner auto-joins without a confirm box")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob) -- every join below opens a fresh hub fight
 pump(wAnn); pump(wBob)
 
 -- Mutual coop_wild waits: lexicographically smaller playerId's wait wins.
@@ -9334,6 +9372,7 @@ eq(winner.coop:isWaiting(), false,
    "the smaller-id waiter is told their partner joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 pump(wAnn); pump(wBob)
 
 -- Partner already waiting on coop_wild: a second local wild joins instead of
@@ -9358,6 +9397,7 @@ eq(wAnn.coop:isWaiting(), false,
    "the standing waiter is joined from the second wild")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 eq(wBob.coop:joinFromMenu(wBob.game), false,
    "joinFromMenu with no offer is a no-op")
 wBob.coop.offer = { from = wAnn.id, battle = WILD_KEY, mode = "coop_wild" }
@@ -9512,6 +9552,7 @@ pump(wAnn)
 eq(wAnn.coop:isWaiting(), false, "the waiter is told they joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 pump(wAnn); pump(wBob)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
@@ -9534,6 +9575,7 @@ pump(wAnn)
 eq(wAnn.coop:isWaiting(), false, "the trainer waiter is told they joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 pump(wAnn); pump(wBob)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
@@ -9579,12 +9621,14 @@ pump(wAnn)
 eq(wAnn.coop:isWaiting(), false, "the waiter is told they joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob); resetCoopWild(wCal)
+-- Ended through the hub rather than by nilling coopBattleId by hand: since
+-- #87 the seats are also bound through battleId to the unsettled mediated
+-- record, and a hand-cleared group left that binding behind (see endFight).
+endFight(wAnn, wBob, wCal)
 pump(wAnn); pump(wBob); pump(wCal)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
 wCal.coop.wildCoop, wCal.coop.npcCoop = true, true
-wCal.client.coopBattleId, wBob.client.coopBattleId = nil, nil
-wAnn.client.coopBattleId = nil
 
 -- All-ON trio: first JOIN still fans COOP_BATTLE to the third (nobody skipped).
 eq(wildEngage(wAnn), true, "all-ON host posts the wait")
@@ -9594,6 +9638,7 @@ check(take(wCal.peer, Wire.COOP_BATTLE) ~= nil,
 check(wCal.client.coopBattleId ~= nil, "and is seated")
 
 resetCoopWild(wAnn); resetCoopWild(wBob); resetCoopWild(wCal)
+endFight(wAnn, wBob, wCal)
 pump(wAnn); pump(wBob); pump(wCal)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
@@ -13678,17 +13723,31 @@ end)()
   eq(next(pvpMenu.pending), nil, "and commits nothing -- no action was filed")
   eq(pvpMenu.phase, "choose", "the phase itself is untouched by asking")
 
+  -- #86: an NPC RUN is refused on the spot and never filed. Forwarding it used
+  -- to forfeit the gym, because the referee took every run as a concession;
+  -- the sim still no-ops a filed one (modified-client proof), but an honest
+  -- menu never sends it and the turn is not spent. Same contract
+  -- tests/coop_mediated.lua pins for the mediated screen.
   local npcMenu = setmetatable({
     sim = npcClient.sim, mine = 1, phase = "choose", commandIndex = runIndex,
-    pending = {},
+    pending = {}, messages = {},
   }, { __index = CoopBattle })
   local committed
   npcMenu.commit = function(_, action) committed = action end
   CoopBattle.updateCommand(npcMenu, { wasPressed = function(_, k) return k == "a" end })
   eq(npcMenu.runAsk, nil, "against an NPC, RUN never raises a prompt")
-  check(committed ~= nil and committed.kind == "run",
-        "it is filed as the ordinary refused action instead -- byte-identical "
-        .. "to today")
+  eq(committed, nil, "and files no action -- a run would forfeit the fight")
+  local refused = false
+  for _, row in ipairs(npcMenu.messages) do
+    local text = type(row) == "table" and row.text or row
+    if type(text) == "string" and text:lower():find("running", 1, true) then
+      refused = true
+    end
+  end
+  check(refused, "it says the original's line: no running from a trainer battle")
+  eq(npcMenu.phase, "messages", "the line plays")
+  eq(npcMenu.after, "choose",
+     "and the command menu comes back without spending the turn")
 
   -- ------- the partner's prompt: NO by default, and a settle floor before
   -- any button counts

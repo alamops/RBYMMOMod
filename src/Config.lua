@@ -847,6 +847,66 @@ M.SOLO_REFUSED_BATTLE_TYPES = {
   [9] = true,   -- BATTLETYPE_TRAP       (no escape, Rocket base)
 }
 
+-- ------- and Gen 3's, which is a list of its own
+--
+-- A third list rather than more names on the first, because the first two are
+-- pinned (tests/solo_battle.lua counts seven names and five bytes) and because
+-- none of these names means anything on a Gen 1 or Gen 2 battle: they are the
+-- fields the game3 engine spells its fights with.  Every one is a key of the
+-- battle start opts, the wild `foe`, the battle state (st), or st.kinds --
+-- src/core/game3/battle_bridge.lua BattleBridge.EXTRA_KINDS and its
+-- `standardWild` test, src/core/game3/battle/init.lua (st.safari, st.roamer,
+-- st.firstBattle, st.oldManTutorial, st.pokedude, st.ghostBattle, ...),
+-- battle/kinds.lua (BOOLEAN_KINDS / EXTRA_KINDS).  A divert asks all four
+-- places, the way SoloBattle.refused asks two.
+--
+-- There is no byte-keyed half: the cart's gBattleTypeFlags is a bitfield, but
+-- this engine never exposes it -- it splits every bit into its own boolean --
+-- so a value set would be refusing numbers no Gen 3 fight carries.
+--
+-- The same test decides as for Gen 1 and Gen 2: a fight whose rules the
+-- referee does not model is handed back, silently, rather than run wrong.
+--
+--   * Not a standard wild: `safari` (BALL / BAIT / ROCK, a step budget),
+--     `roamer` (Raikou / Entei / Suicune, Latios / Latias -- flees on its own
+--     and banks its HP back into the save), `wildScripted` / `legendary` and
+--     the Emerald legend kinds (`kyogreGroudon`, `regi`, `groudon`, `kyogre`,
+--     `rayquaza`) -- a map script is waiting on the cart's B_OUTCOME and the
+--     presentation (weather, music) is the event -- and `ghost` /
+--     `ghostBattle`, the Silph Scope Marowak.  battle_bridge's own
+--     `standardWild` excludes exactly these.
+--   * Scripted lessons: `firstBattle` / `firstBattleKind` (FireRed's rival
+--     in Oak's lab, Emerald's Birch rescue -- the profiles' "oak" / "birch"
+--     kinds, fights the cart lets you lose and carry on), `oldManTutorial`
+--     (Viridian), `tutorialKind` / `tutorial` (the "oldman" / "wally" catch
+--     lessons), `pokedude` (the Viridian school demonstrations).  All of them
+--     are meant to go one way, on cue.
+--   * Facilities, whose rules are their own and whose results feed a streak:
+--     `frontier` and its halls (`dome`, `palace`, `arena`, `factory`, `pike`,
+--     `pyramid`), `battleTower`, `trainerTower`, `trainerHill`,
+--     `secretBase`, `eReader`.
+--   * Link and recorded fights, which are another player's or a replay:
+--     `link`, `multi`, `unionRoom`, `spectate`, `recordedLink`,
+--     `towerLinkMulti`.
+--   * Two sides the referee cannot seat: `partner` (Steven fights beside you
+--     under the cart's AI) and `twoOpponents` (two trainers, two parties and
+--     two AIs on one side, each with its own defeat flag).
+--
+-- Audited and deliberately **not** listed: `double` (a trainer's own
+-- double-battle flag -- the Gen 3 referee plays doubles), `trainer` and
+-- `wild` themselves, and `autoFight` / `headless` (the engine's own
+-- test-driver switches, never armed by a fight a player walks into).
+M.SOLO_REFUSED_GEN3 = {
+  "safari", "roamer", "wildScripted", "legendary", "ghost", "ghostBattle",
+  "kyogreGroudon", "regi", "groudon", "kyogre", "rayquaza",
+  "firstBattle", "firstBattleKind", "oldManTutorial", "tutorialKind",
+  "tutorial", "pokedude",
+  "frontier", "dome", "palace", "arena", "factory", "pike", "pyramid",
+  "battleTower", "trainerTower", "trainerHill", "secretBase", "eReader",
+  "link", "multi", "unionRoom", "spectate", "recordedLink", "towerLinkMulti",
+  "partner", "twoOpponents",
+}
+
 -- How many frames in a row the local referee may fail before the fight is
 -- handed back.
 --
@@ -1094,9 +1154,55 @@ M.SPRITES = {
 M.DEFAULT_SPRITE = "SPRITE_RED"
 M.DEFAULT_SPRITE_GEN2 = "SPRITE_CHRIS"
 
+-- Gen 3's fallback is not an engine name at all, and that is the point.
+--
+-- A Gen 3 hub admits FireRed, LeafGreen and Emerald together, and their
+-- overworld graphics share no player name: FireRed draws its hero as
+-- OBJ_EVENT_GFX_RED_NORMAL (id 0), Emerald has no such name and draws its own
+-- as OBJ_EVENT_GFX_BRENDAN_NORMAL (also id 0).  Whatever real name a hub
+-- stamped into a sprite-less hello would be the wrong one for a third of the
+-- room.  So the hub stamps this token, and each *viewer* resolves it on its
+-- own cart through the engine's link-player rule, by the sender's version and
+-- gender (Gen3.viewerGfxFor -> Family.linkPlayerGfx) -- which is exactly how
+-- the carts themselves draw a Cable Club partner.  It passes Wire.spriteId
+-- (word characters, under 40) like any other id, and it never reaches an
+-- engine lookup: a client always sends its real graphic (Gen3.playerGfxName).
+M.DEFAULT_SPRITE_GEN3 = "GEN3_PLAYER"
+
 function M.defaultSpriteFor(generation)
-  if tonumber(generation) == 2 then return M.DEFAULT_SPRITE_GEN2 end
+  local g = tonumber(generation)
+  if g == 2 then return M.DEFAULT_SPRITE_GEN2 end
+  if g == 3 then return M.DEFAULT_SPRITE_GEN3 end
   return M.DEFAULT_SPRITE
+end
+
+-- 1, 2 or 3 from a number (or its string) or a manifest-style "gen3" token;
+-- nil for anything else.  The generation gates below used to read an
+-- unparseable generation as Gen 1 (`tonumber(g) or 1`), which is the one
+-- answer a gate must not guess: "gen3" became 1 and a Gen 1-only row opened
+-- on a FireRed boot.  Unknown is unknown, and a row that names its
+-- generations stays shut to it.
+local function knownGeneration(value)
+  local n = tonumber(value)
+  if n == nil and type(value) == "string" then
+    n = tonumber(value:match("^gen(%d)$"))
+  end
+  if n == 1 or n == 2 or n == 3 then return n end
+  return nil
+end
+M.knownGeneration = knownGeneration
+
+-- Whether a `gens` list admits `generation`.  An empty or missing list admits
+-- every generation (that is what omitting it means); a list admits only the
+-- generations it names, and never an unknown one.
+local function gensAllow(gens, generation)
+  if type(gens) ~= "table" or #gens == 0 then return true end
+  local g = knownGeneration(generation)
+  if g == nil then return false end
+  for i = 1, #gens do
+    if gens[i] == g then return true end
+  end
+  return false
 end
 
 -- ------- the characters this mod brings of its own
@@ -1110,6 +1216,9 @@ end
 -- `gens` lists which boots may wear them. Omit it to allow every generation.
 -- Gen 2 art / palettes / battle pics are not ready yet, so both NIREs stay
 -- Gen 1-only until that work lands (Chars / Gen / Cast all honour this).
+-- Gen 3 is shut to them for the same reason and one more: a Gen 3 overworld
+-- figure is an OBJ_EVENT_GFX_* graphic drawn by the engine, not a SPRITE_*
+-- sheet, so there is nothing for this art to be registered as there yet.
 --
 -- `dir` holds four files, all original art shaped like the engine's own:
 -- walk.png (16x96, six 16x16 frames), bike.png (the same sheet, riding),
@@ -1156,13 +1265,7 @@ M.OWN_CHARS = {
 -- True when this OWN_CHARS row may be offered / worn on `generation`.
 function M.ownCharAllowed(char, generation)
   if type(char) ~= "table" then return false end
-  local gens = char.gens
-  if type(gens) ~= "table" or #gens == 0 then return true end
-  local g = tonumber(generation) or 1
-  for i = 1, #gens do
-    if gens[i] == g then return true end
-  end
-  return false
+  return gensAllow(char.gens, generation)
 end
 
 function M.ownCharId(id)
@@ -1273,6 +1376,12 @@ M.RANK_REPORT_GRACE = 60
 --
 -- `gens` is which boots may see / dial that row. RBY Official is Gen 1 only;
 -- GSC Official is Gen 2 only. A boot never sees the other generation's hub.
+--
+-- There is no Gen 3 row (owner decision, 2026-09-30: no official FireRed /
+-- Emerald hub is deployed).  A Gen 3 boot is therefore offered *neither* row
+-- -- both name their generation, and gensAllow admits only what a row names
+-- -- and a Gen 3 player reaches a hub by address or room code like any other
+-- community server.  Adding one is a row here with `gens = { 3 }`.
 M.FEATURED_SERVERS = {
   {
     name = "RBY MMO OFFICIAL",
@@ -1294,15 +1403,6 @@ M.FEATURED_SERVER_NAME = M.FEATURED_SERVERS[1].name
 M.FEATURED_SERVER_HOST = M.FEATURED_SERVERS[1].host
 M.FEATURED_SERVER_CODE = M.FEATURED_SERVERS[1].code
 M.FEATURED_SERVER_GENS = M.FEATURED_SERVERS[1].gens
-
-local function gensAllow(gens, generation)
-  if type(gens) ~= "table" or #gens == 0 then return true end
-  local g = tonumber(generation) or 1
-  for i = 1, #gens do
-    if gens[i] == g then return true end
-  end
-  return false
-end
 
 -- The configured official matching `address`, or nil. Portless forms only
 -- match a featured host whose port is DEFAULT_PORT -- GSC's 25565 is not
@@ -1361,5 +1461,58 @@ M.SERVER_LIST_MAX = 16
 -- key belongs to one playthrough. src/Store.lua carries the whole of that
 -- story.
 M.SERVERS_KEY = "servers"
+
+-- ------- Gen 3 (FireRed / LeafGreen / Emerald)
+--
+-- The numbers the Gen 3 arms agree on, declared once so no two of them can
+-- disagree.  src/Gen3.lua is where the engine is reached; this is only the
+-- dial board.  None of it is on the wire except where a line says so, and
+-- none of it moves PROTOCOL.
+
+-- The first event-object localId an avatar is injected under, counting up by
+-- one per remote player (so MAX_PLAYERS of them fit under 0x1100).
+--
+-- Map templates use small ids, the player is 0xFF (Objects.PLAYER_LOCAL_ID)
+-- and a seamless map edge renumbers carried objects into 0xC0..0xFE
+-- (objects.lua FOREIGN_BASE).  Script opcodes address objects by a byte, so an
+-- id past 0xFF is one no map script can ever move, hide or talk to by
+-- accident -- the avatar is the mod's, and nothing on the cart can reach it.
+M.GEN3_AVATAR_LOCAL_ID_BASE = 0x1000
+
+-- The GBA canvas every Gen 3 layer draws into (src/core/game3/display.lua
+-- Display.W / Display.H): the UI pass renders at native size and the engine
+-- scales the result, so a mod layer lays itself out in these pixels.
+M.GEN3_SCREEN_W = 240
+M.GEN3_SCREEN_H = 160
+
+-- The game3 modal stack keys layers by a string, and a same-id push replaces
+-- the layer (stack.lua).  Every mod layer is "rby_mmo:<ScreenId>", so none can
+-- ever replace an engine layer ("start", "naming", "bag", ...) or be replaced
+-- by one, and a driver can tell the mod's layers apart by prefix.
+M.GEN3_LAYER_PREFIX = "rby_mmo:"
+
+-- The START row this mod adds (ui.start_menu.items), and the row it sits
+-- before.  Anchored on the row *id*, because Gen 3 row labels are the
+-- cart's own text (RomText) and a label anchor would miss on every language
+-- the cart ships in.
+M.GEN3_START_ROW_ID = "rby_mmo"
+M.GEN3_START_ANCHOR_ID = "save"
+
+-- The bounds of a Gen 3 POKeMON on a battle sheet or a trade, as the carts
+-- define them -- pret constants via the engine's own Gen 3 codec
+-- (src/link/Protocol.lua unpackMon3): internal species ids stop at 411
+-- (SPECIES_LAST; Hoenn species are 277+ internally), moves at 354
+-- (MOVE_LAST), items at 376 (Emerald's ITEMS_COUNT - 1; FireRed stops at
+-- 374 and every FireRed id is an Emerald id), abilities at 77, natures are
+-- personality % 25.  IVs are 0..31 per stat, EVs 0..255 per stat and 510
+-- in all -- the Gen 1 / Gen 2 caps (15 and 65535 Stat Exp) do not apply.
+M.GEN3_SPECIES_MAX = 411
+M.GEN3_MOVE_MAX = 354
+M.GEN3_ITEM_MAX = 376
+M.GEN3_ABILITY_MAX = 77
+M.GEN3_NATURE_COUNT = 25
+M.GEN3_IV_MAX = 31
+M.GEN3_EV_MAX = 255
+M.GEN3_EV_TOTAL_MAX = 510
 
 return M

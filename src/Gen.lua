@@ -1,14 +1,25 @@
--- Dual Gen 1 / Gen 2 helpers for presence, save fields, and UI ids.
+-- Gen 1 / Gen 2 / Gen 3 helpers for presence, save fields, and UI ids.
 --
 -- One place for the shape differences that every presence/save call site
--- would otherwise hardcode: money lives on save vs save.player, dex uses
--- owned vs caught, free-roam is "overworld on top" vs "empty stack", and
--- spawn movement is STAY+range vs numeric STANDING_*. Callers pass a game
--- when they have one; generation falls back through Handshake / Fingerprint
--- and defaults to 1 so a headless load without data stays Gen 1-shaped.
+-- would otherwise hardcode: money lives on save vs save.player vs the Gen 3
+-- session, dex uses owned vs caught, free-roam is "overworld on top" vs
+-- "empty stack" vs "field phase with nothing in front of it", and spawn
+-- movement is STAY+range vs numeric STANDING_* vs an event-object template.
+-- Callers pass a game when they have one; generation falls back through
+-- Handshake / Fingerprint and the loader's own generation, and defaults to 1
+-- so a headless load without data stays Gen 1-shaped.
+--
+-- The Gen 3 arms ask src/Gen3.lua for every engine detail.  That file is the
+-- only one that requires src.core.game3.* / src.ui.game3.*, lazily and only on
+-- a Gen 3 boot -- the loader *throws* on a cross-generation require, so a
+-- Gen 3 answer computed here must never be reached on Red or Gold, and a
+-- Gen 1 or Gen 2 module (src.battle.BattleState, src.core.gen2.*, ...) must
+-- never be required on FireRed or Emerald.  Every arm below is ordered so the
+-- Gen 3 branch returns before the Gen 1 / Gen 2 code it sits above runs.
 
 local need, mod = ...
 local Config = need("Config")
+local Gen3 = need("Gen3")
 
 local M = {}
 
@@ -35,8 +46,39 @@ local function gameOf(game)
   return nil
 end
 
--- 1 or 2. Handshake.generation when present, else Fingerprint.generationOf
--- on the merged dataset; anything else reads as Gen 1.
+-- The loader's own generation when it is 3, for a game that carries no word
+-- of its own.
+--
+-- Handshake answers 1 both for a real Gen 1 game and for "nothing to go on"
+-- (no game, a game with no `generation` and no data), so on its own it cannot
+-- tell a headless Gen 3 load -- where mod.game is nil until a test injects
+-- one -- from Red.  The loader can: its generation is fixed at construction
+-- and a Gen 3 loader never runs a Gen 1 or Gen 2 game (the generation gate
+-- skipped every mod that could not follow it there).  So when the game
+-- does not *say* it is Gen 1, a Gen 3 loader's word wins.
+--
+-- Only 3.  A Gen 2 loader with no game has always read as 1 here and the Gold
+-- suites are written against that; the Gen 3 port does not move it.
+--
+-- rawget: the facade answers `generation` as a plain field (no __index), and
+-- this runs on per-frame paths where a pcall'd closure is what Battlefield
+-- and CoopBattle already count against Gen.generation.
+local function loaderSaysGen3(game)
+  if type(mod) ~= "table" or tonumber(rawget(mod, "generation")) ~= 3 then
+    return false
+  end
+  if type(game) == "table" then
+    if tonumber(game.generation) == 1 then return false end
+    local data = game.data
+    if type(data) == "table" and tonumber(data.generation) == 1 then return false end
+  end
+  return true
+end
+
+-- 1, 2 or 3. Handshake.generation when present, else Fingerprint.generationOf
+-- on the merged dataset, else a Gen 3 loader (above); anything else reads as
+-- Gen 1.  Game3 carries generation = 3 on the instance and on its data, so a
+-- live FireRed / LeafGreen / Emerald boot answers 3 from the first source.
 function M.generation(game)
   game = gameOf(game)
   local gen, got = 1, false
@@ -47,19 +89,120 @@ function M.generation(game)
       got = true
     end
   end)
-  if ok and got and (gen == 1 or gen == 2) then return gen end
+  if ok and got and (gen == 2 or gen == 3) then return gen end
+  if ok and got and gen == 1 then
+    if loaderSaysGen3(game) then return 3 end
+    return 1
+  end
   ok = pcall(function()
     local Fingerprint = require("src.link.Fingerprint")
     gen = tonumber(Fingerprint.generationOf(game and game.data)) or 1
   end)
-  if ok and gen == 2 then return 2 end
+  if ok and (gen == 2 or gen == 3) then return gen end
+  if loaderSaysGen3(game) then return 3 end
   return 1
+end
+
+function M.isGen3(game)
+  return M.generation(game) == 3
+end
+
+-- The cheap half of isGen3 for per-frame paths (freeRoam runs every draw):
+-- a game that says 3, or a Gen 3 boot.  No pcall, no require.
+local function onGen3(game)
+  if type(game) == "table" and tonumber(game.generation) == 3 then return true end
+  return Gen3.active()
+end
+
+local function gameVersionModule()
+  local ok, GV = pcall(require, "src.core.GameVersion")
+  if ok and type(GV) == "table" then return GV end
+  return nil
+end
+
+-- The first cart of a generation in the launcher's own column order
+-- (GameVersion.ORDER): Red, Gold, FireRed -- the carts each port was written
+-- against.  Read from GameVersion rather than spelled here, so no version
+-- string is allow-listed in this file (modkit MK409) and a reordered
+-- launcher is followed rather than contradicted.
+local function referenceVersion(GV, gen)
+  if not (GV and type(GV.ORDER) == "table" and type(GV.VERSIONS) == "table") then
+    return nil
+  end
+  for _, id in ipairs(GV.ORDER) do
+    local row = GV.VERSIONS[id]
+    if type(row) == "table" and (tonumber(row.generation) or 1) == gen then return id end
+  end
+  return nil
+end
+
+-- The cart: one of GameVersion.ORDER (red ... emerald).  GameVersion's
+-- current pick when it is this generation's (the launcher sets it before any
+-- mod loads); on Gen 3 the session's own stamp first (Gen3.version), since a
+-- CONTINUE carries it; and the generation's reference cart when nothing says.
+function M.version(game)
+  local gen = M.generation(game)
+  local GV = gameVersionModule()
+  if gen == 3 then
+    local live = gameOf(game)
+    local sessionVersion = type(live) == "table" and type(live.session) == "table"
+      and live.session.version or nil
+    local row = GV and type(GV.VERSIONS) == "table" and GV.VERSIONS[sessionVersion] or nil
+    if type(row) == "table" and tonumber(row.generation) == 3 then return sessionVersion end
+    return Gen3.version() or referenceVersion(GV, 3)
+  end
+  local current = GV and type(GV.get) == "function" and GV.get() or nil
+  local row = GV and type(GV.VERSIONS) == "table" and GV.VERSIONS[current] or nil
+  if type(row) == "table" and (tonumber(row.generation) or 1) == gen then return current end
+  return referenceVersion(GV, gen)
+end
+
+-- The lineage within a generation: "gen1" (Red / Blue / Yellow), "gs" (Gold /
+-- Silver), "crystal", "frlg" (FireRed / LeafGreen), "rse" (Emerald).  Gen 1
+-- and Gen 2 are GameVersion.engine of the running cart; Gen 3 is its layout,
+-- because every Gen 3 cart shares the one "game3" engine and the layout is
+-- what actually differs (maps, bag, start menu, battle profile).  A headless
+-- Gen 3 load with no version reads as "frlg", the family it is folded
+-- against.
+local GEN2_LINEAGES = { gs = true, crystal = true }
+
+function M.family(game)
+  local gen = M.generation(game)
+  local version = M.version(game)
+  local GV = gameVersionModule()
+  if gen == 3 then
+    local layout = GV and type(GV.layout) == "function" and GV.layout(version) or nil
+    if layout == "frlg" or layout == "rse" then return layout end
+    return "frlg"
+  end
+  if gen == 2 then
+    local ok, engine = pcall(function() return GV.engine(version) end)
+    if ok and GEN2_LINEAGES[engine] then return engine end
+    return "gs"
+  end
+  return "gen1"
+end
+
+-- A Gen 3 save or session: both carry engine = "game3" and generation = 3
+-- (Schema.newGame / Schema.toSaveTable).
+local function gen3Save(save)
+  return type(save) == "table"
+    and (save.engine == "game3" or tonumber(save.generation) == 3)
 end
 
 -- Gen 2 always writes player.money (even at 0); Gen 1 keeps save.money.
 -- `create` is only true from money.set — get must never allocate save.player.
+--
+-- Gen 3 keeps it on the session, and `game.save` there is a *snapshot*
+-- (Schema.toSaveTable, rebuilt at save time): money written into it is gone
+-- at the next save, which is how a co-op prize would vanish.  So a Gen 3 save
+-- resolves to the live session whenever there is one, and to itself only when
+-- there is not (a headless test handing in a bare table).
 local function moneyHost(save, create)
   if type(save) ~= "table" then return nil end
+  if gen3Save(save) then
+    return Gen3.session() or save
+  end
   if save.generation == 2 then
     if type(save.player) == "table" then return save.player end
     if create then
@@ -81,14 +224,44 @@ function M.money.get(save)
   return math.floor(tonumber(host.money) or 0)
 end
 
+-- The cart's MAX_MONEY on Gen 3 (AddMoney caps there); Gen 1 and Gen 2 have
+-- always been left to their callers, which cap at the same 999999.
+local GEN3_MAX_MONEY = 999999
+
 function M.money.set(save, n)
   local host = moneyHost(save, true)
   if not host then return end
+  if gen3Save(save) then
+    local v = math.floor(tonumber(n) or 0)
+    if v < 0 then v = 0 end
+    if v > GEN3_MAX_MONEY then v = GEN3_MAX_MONEY end
+    host.money = v
+    -- Keep the snapshot a caller handed in agreeing with the session, so a
+    -- read of the same table later in this frame sees the new amount.
+    if host ~= save then save.money = v end
+    return
+  end
   host.money = math.floor(tonumber(n) or 0)
 end
 
 -- seen, owned/caught. Profile wire still names the second field `owned`.
+--
+-- Gen 3: session.dex (the snapshot shares the same table), counted in
+-- national mode by the engine's own dex module -- every species this save has
+-- met, Hoenn ones a trade brought in included (see Gen3.dexCounts).
 function M.dexCounts(save)
+  if gen3Save(save) then
+    if Gen3.session() then return Gen3.dexCounts() end
+    local dex = type(save.dex) == "table" and save.dex or {}
+    local seen, caught = 0, 0
+    for _, on in pairs(dex.seen or {}) do
+      if on and on ~= 0 then seen = seen + 1 end
+    end
+    for _, on in pairs(dex.caught or dex.owned or {}) do
+      if on and on ~= 0 then caught = caught + 1 end
+    end
+    return seen, caught
+  end
   local dex = save and save.pokedex or {}
   local seen, owned = 0, 0
   for _ in pairs(dex.seen or {}) do seen = seen + 1 end
@@ -99,7 +272,15 @@ end
 
 -- Gen 2: count save.player.badges when that table exists. Otherwise the
 -- engine's Badges.count (Gen 1 inventory keys), soft-failed.
+--
+-- Gen 3 badges are event flags, not a table, and the Gen 1 Badges module would
+-- read FireRed's save as a Red inventory and answer 0; Gen3.badgeCount asks
+-- the engine's flag module, per the running cart's own badge list.  Checked
+-- first so src.inventory.Badges is never required on a Gen 3 boot.
 function M.badgeCount(game, save)
+  if gen3Save(save) or onGen3(game) then
+    return Gen3.badgeCount()
+  end
   local badges = save and save.player and save.player.badges
   if type(badges) == "table" then
     local n = 0
@@ -119,8 +300,14 @@ end
 
 -- Gen 2 World exposes acceptsMenuInput; Gen 1 OverworldState does not.
 -- Used when Handshake has no game yet but an overworld is already up.
+--
+-- Never true on Gen 3: Game3 rides Game2's start-menu path (runtime.lua), so
+-- a capability sniff is exactly the test that could read FireRed as Gold, and
+-- mod.world:overworld() there is a Gen3Compat facade, not a world to sniff.
 local function bootIsGen2(game)
-  if M.generation(game) == 2 then return true end
+  local gen = M.generation(game)
+  if gen == 2 then return true end
+  if gen == 3 then return false end
   local world = mod.world
   -- Guard: headless stubs often set mod.world to a fake without :overworld.
   local ow = world and type(world.overworld) == "function" and world:overworld() or nil
@@ -130,7 +317,14 @@ end
 -- True when the player is looking at the world: Gen 1's overworld-on-top,
 -- or Gen 2's empty stack with a live map (pipelineGate's free-roam case).
 -- Empty-stack free-roam is Gen 2 only — Gen 1 still requires top == overworld.
+--
+-- Gen 3 has no game.stack for `top` to come from: the field phase with
+-- nothing in front of it -- no game3 stack layer, no legacy module menu, no
+-- message, fade or battle (Gen3.freeRoam, i.e. the engine's own Hud.busy).
+-- `top` is ignored there.  onGen3 rather than Gen.generation because this
+-- runs every draw.
 function M.freeRoam(game, top)
+  if onGen3(game) then return Gen3.freeRoam() end
   local world = mod.world
   local overworld = world and type(world.overworld) == "function" and world:overworld() or nil
   if top and overworld and top == overworld then return true end
@@ -141,11 +335,29 @@ function M.freeRoam(game, top)
   return false
 end
 
+-- The boot's START menu.  On Gen 1 / Gen 2 a screen id for mod.ui.push; on
+-- Gen 3 the game3 stack layer id StartMenu.show pushes ("start",
+-- src/ui/game3/start_menu.lua), which is what a caller tests Stack.has /
+-- Stack.top against.  Re-opening it on Gen 3 is not a push at all -- it is
+-- M.reopenStartMenu below.
 function M.startMenuId(game)
-  if M.generation(game) == 2 then return "Gen2StartMenu" end
+  local gen = M.generation(game)
+  if gen == 2 then return "Gen2StartMenu" end
+  if gen == 3 then return "start" end
   -- Split so gen2check MK409 does not flag a bare Gen1 screen id literal
   -- in a helper that also returns Gen2StartMenu on Gold.
   return "Start" .. "Menu"
+end
+
+-- Gen 3 only: put START back up after leaving an MMO screen, the way the
+-- START button does (Hud.openStartMenu, via Gen3.openStartMenu -- which
+-- leaves an already-open menu alone, since the engine's opener toggles).  The
+-- ui.start_menu.items hook runs on every open, so the MMO row comes back with
+-- it.  False off Gen 3 and when the menu could not be opened; Gen 1 and Gen 2
+-- keep their mod.ui.push paths in src/Ui.lua (reopenStartMenu).
+function M.reopenStartMenu(game)
+  if M.generation(game) ~= 3 then return false end
+  return Gen3.openStartMenu(gameOf(game))
 end
 
 -- ------- the nickname a catch earns
@@ -165,9 +377,18 @@ end
 -- pops on Gold and leaves Gen 1 alone: doing either on both generations
 -- either strands the grid on the stack forever or takes the screen underneath
 -- it down with the answer.
+--
+-- Gen 3 is Gen 1's shape on the third point: src/ui/game3/naming.lua's
+-- Naming.close pops the "naming" layer *before* it calls onDone.  It differs
+-- on the first two -- the grid is not a pushed screen but Naming.open, and it
+-- is the cart's CAUGHT_MON template (the mon's icon, "<SPECIES>'s nickname?")
+-- -- so askNickname opens it the way battle/init.lua's own catch flow does.
 
 function M.nicknameScreenId(game)
-  if M.generation(game) == 2 then return "Gen2NamingScreen" end
+  local gen = M.generation(game)
+  if gen == 2 then return "Gen2NamingScreen" end
+  -- The game3 stack layer Naming.open pushes, for a caller watching the stack.
+  if gen == 3 then return "naming" end
   -- Split for the reason startMenuId's is: gen2check MK409 flags a bare Gen 1
   -- screen id literal in a helper that also answers with a Gen 2 one.
   return "Naming" .. "Screen"
@@ -181,10 +402,19 @@ end
 -- its own (Gen2 BattleState:askNickname), so there is nothing to look up and
 -- the fallback *is* the line.  `displayName` is substituted through a function
 -- so a name carrying `%` cannot blow up gsub's replacement parser.
+--
+-- Gen 3 asks STRINGID_GIVENICKNAMECAPTURED, the line battle/init.lua's
+-- prompt_nickname prints, through the engine's own battle-text expansion; the
+-- sentence below is only for a build whose text pack is not there.
 function M.nicknamePromptText(game, displayName)
   local name = tostring(displayName or "")
   if name == "" then name = "POKeMON" end
-  if M.generation(game) == 2 then
+  local gen = M.generation(game)
+  if gen == 3 then
+    return Gen3.battleText("STRINGID_GIVENICKNAMECAPTURED", { opponentMon1 = name })
+      or ("Give a nickname to the\ncaptured " .. name .. "?")
+  end
+  if gen == 2 then
     return "Give a nickname to\n" .. name .. "?"
   end
   local text = game and game.data and game.data.text
@@ -210,6 +440,16 @@ end
 -- Only Gen 1, and only while a battlefield fight is actually on the stack:
 -- Gold paints window-space via `drawsWidescreen`, and Oak / the NAME RATER
 -- must keep the ordinary letterbox.
+--
+-- Gen 3 never needs the fit: its naming grid is a fullscreen game3 stack layer
+-- drawn at the GBA's own 240x160 whatever is under it, so there is no postage
+-- stamp to enlarge -- and there is no game.stack of states to find a
+-- battlefield in.  catchPageOverBattlefield answers false there (the `~= 1`
+-- below), fitCatchPage is a no-op, and showCaughtStatus puts no page up: the
+-- cart's own catch flow shows no status screen, only the dex registration
+-- page for a first catch (FireRed Pokedex.showRegistration, Emerald
+-- rse/pokedex showCaughtMon), which belongs to the caller that knows the
+-- catch was new.
 
 M.CATCH_PAGE_W = 160
 M.CATCH_PAGE_H = 144
@@ -308,7 +548,9 @@ end
 -- answer that is never coming.
 function M.askNickname(game, mon, displayName, onDone)
   if not (type(game) == "table" and type(mon) == "table") then return false end
-  local gen2 = M.generation(game) == 2
+  local gen = M.generation(game)
+  if gen == 3 then return M.askNickname3(mon, displayName, onDone) end
+  local gen2 = gen == 2
   local name = tostring(displayName or mon.species or "")
 
   -- Guarded because the two screens reach it differently (Gold's onCancel and
@@ -360,6 +602,51 @@ function M.askNickname(game, mon, displayName, onDone)
     return false
   end
   M.fitCatchPage(pushed, game)
+  return true
+end
+
+-- The Gen 3 grid, opened the way battle/init.lua's prompt_nickname opens it:
+-- CAUGHT_MON template, the cart's ten-character POKeMON name, the species'
+-- icon (species / gender / personality) and "<SPECIES>'s nickname?" in the
+-- cart's words.  Naming pops itself before onDone, so nothing is popped here.
+--
+-- One Gen 3 rule the other two do not have: typing the species' own name is
+-- not a nickname.  A Gen 3 mon keeps nickname = "" for "none" (the engine
+-- shows the species name for it, and an evolution renames only those), so
+-- the engine's catch flow writes the answer only when it differs from the
+-- name it offered, and so does this.
+function M.askNickname3(mon, displayName, onDone)
+  if type(mon) ~= "table" then return false end
+  local species = tonumber(mon.species or mon.speciesId)
+  local speciesName = Gen3.speciesName(species)
+  local name = tostring(displayName or speciesName or "")
+
+  local answered = false
+  local function done(typed)
+    if answered then return end
+    answered = true
+    if type(typed) == "string" and typed ~= "" and typed ~= name then
+      mon.nickname = typed
+    end
+    if onDone then onDone(typed) end
+  end
+
+  local opened = Gen3.openNaming({
+    template = "CAUGHT_MON",
+    maxLen = Config.NICKNAME_MAX,
+    species = species,
+    gender = mon.gender,
+    personality = mon.personality,
+    seed = name,
+    title = Gen3.nicknameTitle(speciesName or name),
+    onDone = done,
+  })
+  if not opened then
+    mod.log:warn("could not open the naming screen for the POKeMON you just "
+      .. "caught; it keeps its species name and can be renamed at the NAME "
+      .. "RATER")
+    return false
+  end
   return true
 end
 
@@ -437,8 +724,15 @@ end
 -- Ordered the way the engine orders it: the dex and the OT are written before
 -- the monster is put anywhere, so a catch that ends up with nowhere to go
 -- still counted as seen (`storeCaughtMon` marks owned before `Party.add`).
+--
+-- Gen 3 writes into the live session, never game.save (a snapshot there), and
+-- does it the way Catching.storeCaught does: OT name / id / secret id from the
+-- session, met location and level, and Dex.registerCapture -- see
+-- Gen3.recordCatch.  Its species is a number, which is why markDex (string
+-- species only) is not the Gen 3 path.
 function M.recordCatch(game, mon)
   if not (type(game) == "table" and type(mon) == "table") then return nil end
+  if M.generation(game) == 3 then return Gen3.recordCatch(mon) end
   local save = game.save
   if type(save) ~= "table" then return nil end
   stampOT(game, save, mon)
@@ -457,22 +751,62 @@ function M.recordCatch(game, mon)
 end
 
 -- "This one is new", in each game's own words (_ItemUseBallText06 on Red,
--- NewDexDataText on Gold).
+-- NewDexDataText on Gold, STRINGID_PKMNDATAADDEDTODEX on FireRed / Emerald --
+-- the line catch_seq.lua prints after a first catch, through the engine's own
+-- battle-text expansion when its text pack is there).
 function M.dexAddedText(game, displayName)
   local name = tostring(displayName or "")
   if name == "" then name = "It" end
-  if M.generation(game) == 2 then
+  local gen = M.generation(game)
+  if gen == 3 then
+    return Gen3.battleText("STRINGID_PKMNDATAADDEDTODEX", { opponentMon1 = name })
+      or (name .. "'s data was\nadded to the POKéDEX.")
+  end
+  if gen == 2 then
     return name .. "'s data was newly\nadded to the #DEX."
   end
   return "New POKéDEX data\nwill be added for\n" .. name .. "!"
 end
 
+-- The avatar's object name.  Generation-neutral: on Gen 3 it names the
+-- injected event object's def, the way it names the runtime NPC on Red/Gold.
 function M.avatarName(playerId)
   return "mmo_" .. tostring(playerId)
 end
 
+-- The object an avatar is spawned from.
+--
+-- Gen 1: mod.world:spawnNpc's STAY + range.  Gen 2: numeric STANDING_*.
+-- Gen 3 has no spawnNpc (src/world/game3/WorldAPI.lua answers "not supported
+-- on FireRed yet"): an avatar is an event object built by
+-- Objects.spawnFromDefs and injected into the map's object list, so this
+-- returns that builder's template -- cell, facing, the numeric
+-- OBJ_EVENT_GFX_* id `sprite` names on this cart (Gen3.viewerGfxFor has
+-- already mapped another version's name; a name this cart lacks falls to the
+-- player's own look), movementType 0 (MOVEMENT_TYPE_NONE: stands where it is
+-- put and turns only when driven).  The localId is the injector's to assign
+-- (Config.GEN3_AVATAR_LOCAL_ID_BASE + n) and is left off.
 function M.spawnObjDef(player, sprite, game)
   local facing = (player and player.facing) or "down"
+  if M.generation(game or mod.game or gameOf(nil)) == 3 then
+    if facing ~= "up" and facing ~= "left" and facing ~= "right" then facing = "down" end
+    local graphicsId = Gen3.gfxId(sprite)
+    local gfxName = graphicsId and (type(sprite) == "string" and sprite or Gen3.gfxName(graphicsId))
+    if not graphicsId then
+      local s = Gen3.session()
+      gfxName = Gen3.playerGfxName(s and s.gender)
+      graphicsId = Gen3.gfxId(gfxName)
+    end
+    return {
+      x = player and player.x,
+      y = player and player.y,
+      facing = facing,
+      graphicsId = graphicsId,
+      gfxName = gfxName,
+      movementType = 0,
+      name = M.avatarName(player and player.id),
+    }
+  end
   local def = {
     sprite = sprite,
     x = player.x,
@@ -499,9 +833,20 @@ end
 -- First Config.SPRITES id the catalog carries, then Chris / Red.
 -- OWN_CHARS (NIRE, …) are never a boot default — on Gen 2 they are not
 -- wearable yet, and even on Gen 1 the fallback should be an engine sprite.
+--
+-- Gen 3 has no SPRITE_* catalog (the sprites registry is gated there, and the
+-- overworld draws OBJ_EVENT_GFX_* graphics by number), so the default is the
+-- player's own look on this cart -- RED / GREEN on FireRed and LeafGreen,
+-- BRENDAN / MAY on Emerald, by the save's gender -- which is also what this
+-- client should say it looks like on the wire (contract C3).  The hub's
+-- sprite-less token (Config.DEFAULT_SPRITE_GEN3) is only the last resort.
 function M.defaultSprite(game, spritesRegistry)
-  spritesRegistry = spritesRegistry or (mod.content and mod.content.sprites)
   local gen = M.generation(game)
+  if gen == 3 then
+    local s = Gen3.session()
+    return Gen3.playerGfxName(s and s.gender) or Config.defaultSpriteFor(3)
+  end
+  spritesRegistry = spritesRegistry or (mod.content and mod.content.sprites)
   for _, row in ipairs(Config.SPRITES or {}) do
     local id = row[2]
     local own = Config.ownCharId(id)
@@ -518,7 +863,20 @@ function M.defaultSprite(game, spritesRegistry)
   return Config.defaultSpriteFor(gen)
 end
 
+-- Gen 3: a name this cart has a graphic for is kept (a FireRed name on
+-- Emerald is not -- Gen3.viewerGfxFor is the cross-version mapping, and it is
+-- the viewer's to apply with the sender's version in hand); anything else,
+-- the Gen 1 SPRITE_* ids and the mod's own characters included, is the
+-- default look.
 function M.resolveSprite(game, requested, spritesRegistry)
+  if M.generation(game) == 3 then
+    local own = Config.ownCharId(requested)
+    if not (own and not Config.ownCharAllowed(own, 3))
+        and type(requested) == "string" and Gen3.gfxId(requested) then
+      return requested
+    end
+    return M.defaultSprite(game, spritesRegistry)
+  end
   spritesRegistry = spritesRegistry or (mod.content and mod.content.sprites)
   local own = Config.ownCharId(requested)
   if own and not Config.ownCharAllowed(own, M.generation(game)) then
@@ -538,10 +896,28 @@ local GEN2_SFX = {
   Ball_Poof = "Sfx_BallPoof",
 }
 
+-- Gen 1 clip labels -> the game3 SE_* names the battle itself plays
+-- (battle/anim_seq.lua: SUPER_EFFECTIVE / NOT_EFFECTIVE / EFFECTIVE for a
+-- hit; battle/catch_seq.lua: SE_BALL for each wobble, SE_BALL_OPEN for the
+-- break-out).  Played through Gen3.audio.playSe, which resolves the name
+-- against the running cart's own SE table -- the numbers differ on Emerald.
+local GEN3_SFX = {
+  Super_Effective = "SE_SUPER_EFFECTIVE",
+  Not_Very_Effective = "SE_NOT_EFFECTIVE",
+  Damage = "SE_EFFECTIVE",
+  Tink = "SE_BALL",
+  Ball_Poof = "SE_BALL_OPEN",
+}
+
 -- Battle / catch SFX id for the live generation. Gen 1 keeps the RBY label.
+-- Gen 3 answers an SE_* name; an unmapped label passes through and
+-- soft-fails in Audio.playSe exactly as an unmapped Gold one does in
+-- Sound.play.
 function M.sfx(game, name)
   if type(name) ~= "string" then return name end
-  if M.generation(game) ~= 2 then return name end
+  local gen = M.generation(game)
+  if gen == 3 then return GEN3_SFX[name] or name end
+  if gen ~= 2 then return name end
   return GEN2_SFX[name] or name
 end
 
@@ -624,13 +1000,51 @@ function M.gen2VictorySong(game, opts)
   return BattleMusic.victorySong({ class = class })
 end
 
+-- The mod's battle opts, in the terms Gen3.audio.battleSong / victorySong
+-- take: which kind of fight (the same isWildMode / isLinkMode reading Gold's
+-- songs get), and the trainer as a *numeric* Gen 3 id or class -- a Gen 1
+-- OPP_* string has no row in scripting/trainers.lua and is left out rather
+-- than guessed at.
+local function gen3MusicOpts(opts)
+  local t = opts.trainer
+  local trainerId = tonumber(opts.trainerId)
+    or (type(t) == "table" and tonumber(t.trainerId or t.id)) or nil
+  local class = tonumber(opts.trainerClass or opts.class or opts.oppClass)
+    or (type(t) == "table" and tonumber(t.trainerClass or t.classId or t.class)) or nil
+  local wild = isWildMode(opts)
+  -- An NPC fight whose trainer this cart cannot name is still an NPC fight:
+  -- it takes the ordinary trainer theme, never the Cable Club's.
+  local npc = opts.mode == "coop_npc" or opts.kind == "trainer"
+    or trainerId ~= nil or class ~= nil
+  return {
+    wild = wild,
+    link = not wild and not npc and isLinkMode(opts, nil),
+    trainerId = trainerId,
+    trainerClass = class,
+    trainerName = type(t) == "table" and t.name or nil,
+    species = tonumber(opts.species),
+  }
+end
+
 -- Theatre: battle theme / win jingle / map restore.
 -- Pass opts.Music (engine.Music) so headless suites can stub the boundary.
 -- Gen 1 uses playBattle(kind) / playVictory(kind); Gen 2 plays song labels
 -- from BattleMusic (data.audio.battle[kind] does not exist on Gold).
+-- Gen 3 plays the song number Gen3.audio resolves the way battle_bridge.lua
+-- does (Emerald's profile music table, else FireRed's roles), through the
+-- game3 m4a player; opts.Audio stubs that boundary the way opts.Music stubs
+-- the GB one.  It returns the song, like Gold's arm.
 
 function M.playBattleMusic(game, opts)
   opts = opts or {}
+  if M.generation(game) == 3 then
+    local song = Gen3.audio.battleSong(gen3MusicOpts(opts))
+    if song then
+      local Audio = opts.Audio or Gen3.audio
+      pcall(Audio.playSong, song)
+    end
+    return song
+  end
   local Music = opts.Music
   if not Music then
     local ok, m = pcall(require, "src.core.Music")
@@ -656,6 +1070,14 @@ end
 
 function M.playVictoryMusic(game, opts)
   opts = opts or {}
+  if M.generation(game) == 3 then
+    local song = Gen3.audio.victorySong(gen3MusicOpts(opts))
+    if song then
+      local Audio = opts.Audio or Gen3.audio
+      pcall(Audio.playSong, song)
+    end
+    return song
+  end
   local Music = opts.Music
   if not Music then
     local ok, m = pcall(require, "src.core.Music")
@@ -691,7 +1113,15 @@ end
 -- nothing, `resolveHumanSheet` returned no sheet, and the figure simply never
 -- drew. `rawget` and not a plain index for the reason the engine uses it: a
 -- dataset may carry a metatable that would synthesise a Gen 1 answer.
+--
+-- Gen 3 has none to hand out: an overworld figure there is an OBJ_EVENT_GFX_*
+-- graphic the engine draws by number (OwSprites), not a SPRITE_* sheet
+-- record, and Game3's data carries no `sprites` table in either shape.  nil
+-- is the honest answer, and it is the one a caller already treats as "no
+-- catalog" -- a Gen 3 figure is resolved through Gen3.gfxId instead.
 function M.spriteCatalog(game)
+  -- onGen3, not Gen.generation: the battle screens ask this while drawing.
+  if onGen3(game) then return nil end
   local data = game and game.data
   if type(data) ~= "table" then return nil end
   local gen2 = rawget(data, "gen2Sprites")
@@ -781,11 +1211,39 @@ local GENERIC_TRAINER_SPRITES = {
   "SPRITE_COOLTRAINER_M", "SPRITE_YOUNGSTER", "SPRITE_GENTLEMAN",
 }
 
+-- The same last resort on a Gen 3 cart, spelled as its graphics and probed
+-- against this version's table: FireRed has all three, Emerald has no
+-- COOLTRAINER_M and falls to the YOUNGSTER.
+local GENERIC_TRAINER_GFX = {
+  "OBJ_EVENT_GFX_COOLTRAINER_M", "OBJ_EVENT_GFX_YOUNGSTER", "OBJ_EVENT_GFX_GENTLEMAN",
+}
+
+-- Gen 3: the graphic the trainer walks around as, as an OBJ_EVENT_GFX_* name
+-- this cart has.  There is no class -> graphic table to vote from the way
+-- there is above: a Gen 3 map object names its graphic and its script, and
+-- the trainer id lives inside the script.  But a Gen 3 NPC fight always
+-- starts from the object that spotted the player (trainerbattle runs in its
+-- script), so the caller has the answer in hand -- `graphicsId` (a number)
+-- or `gfxName` / `sprite` (a name) on the trainer table.  Without one, the
+-- generic figure; without a trainer, nil.
+local function trainerWalkGfx3(trainer)
+  local name = trainer.gfxName or trainer.sprite or trainer.spriteId
+  if type(name) == "string" and Gen3.gfxId(name) then return name end
+  local id = tonumber(trainer.graphicsId)
+  local byId = id and Gen3.gfxName(id)
+  if byId then return byId end
+  for _, generic in ipairs(GENERIC_TRAINER_GFX) do
+    if Gen3.gfxId(generic) then return generic end
+  end
+  return nil
+end
+
 -- OPP_YOUNGSTER -> SPRITE_YOUNGSTER when the catalog has a walk sheet; the
 -- overworld's own answer for the classes it does not (OPP_LASS,
 -- OPP_BUG_CATCHER, ...); a generic trainer after that.
 function M.trainerWalkSpriteId(trainer, game)
   if type(trainer) ~= "table" then return nil end
+  if onGen3(game) then return trainerWalkGfx3(trainer) end
   local id = trainer.id or trainer.sprite or trainer.spriteId
   if type(id) ~= "string" or id == "" then return nil end
   local spriteId = id
@@ -823,8 +1281,15 @@ function M.trainerWalkSpriteId(trainer, game)
   return nil
 end
 
+-- Gen 3: Audio.restoreMapSong, what battle_bridge.lua calls after every fight
+-- (the map's song, or the surf / bike override, or a saved cue).
 function M.restoreMapMusic(game, opts)
   opts = opts or {}
+  if M.generation(game) == 3 then
+    local Audio = opts.Audio or Gen3.audio
+    pcall(Audio.restoreMapSong)
+    return
+  end
   local Music = opts.Music
   if not Music then
     local ok, m = pcall(require, "src.core.Music")
