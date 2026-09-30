@@ -15,11 +15,32 @@ const TEXT_OK = /[^A-Za-z0-9 .,!?'\-:;()/]/g;
 // Bag proofs use the hub's generation twin. Gen1 Effects remains the default
 // when generation is omitted (compat). Gen2 item tables are selected when
 // cleanBattleBag/Party run with generation:2 (relay passes relay.generation).
+// Gen 3 has no Effects.itemEffect: its bag is lib/battle3/Items.BAG keyed by
+// numeric pret item id (docs/plans/gen3-battle-sheet.md §4), put behind the
+// same one-function shape here -- twin of Wire.lua's effectsFor.
 const EffectsGen1 = require('./battle/Effects');
 const EffectsGen2 = require('./battle2/Effects');
+const Items3 = require('./battle3/Items');
+const { toNumber: luaToNumber } = require('./battle3/lua');
+
+const EffectsGen3 = { itemEffect: (id) => Items3.bagEffect(id) };
 
 function effectsFor(generation) {
+  if (generation === 3) return EffectsGen3;
   return generation === 2 ? EffectsGen2 : EffectsGen1;
+}
+
+// Wire.int, spelled exactly: a JSON number or a string Lua's tonumber reads,
+// floored, inside [min, max] -- and nothing else. cleanInt takes Number(true)
+// as 1 and '' as 0 where Lua says nil to both; the Gen 3 dialect below is new
+// on both twins, so it is written against the stricter reading from the start.
+function luaInt(value, min, max) {
+  const n = luaToNumber(value);
+  if (n === null || !Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  if (min !== undefined && min !== null && i < min) return null;
+  if (max !== undefined && max !== null && i > max) return null;
+  return i;
 }
 
 function cleanText(value, limit) {
@@ -502,6 +523,44 @@ const STAT_MAX = 999;
 const IV_MAX = 15;
 const EV_MAX = 65535;
 
+/*
+ * The Gen 3 dialect's bounds (docs/plans/gen3-battle-sheet.md §2-§4, contract
+ * C4), named as Wire.lua names them. The id caps mirror Config's GEN3_* numbers;
+ * the move type keeps the generous 0..31 the older dialects use.
+ */
+const GEN3_SPECIES_MAX = 411; // Config.GEN3_SPECIES_MAX
+const GEN3_MOVE_MAX = 354; // Config.GEN3_MOVE_MAX
+const GEN3_ITEM_MAX = 376; // Config.GEN3_ITEM_MAX
+const GEN3_ABILITY_MAX = 77; // Config.GEN3_ABILITY_MAX
+const GEN3_NATURE_COUNT = 25; // Config.GEN3_NATURE_COUNT
+const GEN3_IV_MAX = 31; // Config.GEN3_IV_MAX
+const GEN3_EV_MAX = 255; // Config.GEN3_EV_MAX
+const BATTLE_TYPE_TABLE3_MAX = 150; // Config.BATTLE_TYPE_TABLE3_MAX (triples)
+const BATTLE_MOVE_POOL3_MAX = 360; // Config.BATTLE_MOVE_POOL3_MAX
+const POWER3_MAX = 255;
+const ACCURACY3_MAX = 100; // percent in Gen 3, not a 0..255 byte
+const EFFECT3_MAX = 213; // EFFECT_* 0..213
+const TARGET3_MAX = 255; // MOVE_TARGET_* bitmask
+const PRIORITY3_MAX = 7; // signed: -7..7
+const FLAGS3_MAX = 63; // FLAG_* bits
+const HOLD_EFFECT3_MAX = 66; // HOLD_EFFECT_*
+const HOLD_PARAM3_MAX = 255;
+const WEIGHT3_MAX = 9999; // hectograms
+const SLEEP3_MAX = 7;
+const U32_MAX = 4294967295; // personality / OT id passthrough
+const GENDERS3 = new Set(['M', 'F', 'U']);
+// A type-table cell: a type id or the Foresight sentinel -1; a multiplier in
+// tenths up to the 4x CHART_MAX allows a Gen 1 cell.
+const TYPE_CELL3_MIN = -1;
+const TYPE_MULT3_MAX = 40;
+const TERRAIN3_MAX = 9; // BATTLE_TERRAIN_*
+const WEATHERS3 = new Set(['RAIN', 'SUN', 'SAND', 'HAIL']);
+const POOL_ENTRY3_MAX = 128;
+// The stat a Gen 3 `stat` event names, and how far a stage sits / moves.
+const EVENT_STATS3 = new Set(['atk', 'def', 'spe', 'spa', 'spd', 'acc', 'eva']);
+const STAGE3_MAX = 6;
+const DELTA3_MAX = 12;
+
 // The party a combatant may submit, and the moves one of them may carry.
 // Mirrors Config.BATTLE_MON_MAX, BATTLE_MOVE_MAX, and battle-bag caps.
 const BATTLE_MON_MAX = 6;
@@ -649,6 +708,13 @@ const BATTLE_EVENT_TYPES = new Set([
   'switch', 'item', 'run', 'turn', 'over', 'wait', 'reconnect',
   'chose', 'unchose', 'moves', 'exp', 'team',
 ]);
+
+// Gen 3's six kinds (docs/plans/gen3-battle-sheet.md §7.2): an ability acting,
+// the weather, a held item (and what is left held), a picture change, the
+// substitute doll, a ball's shakes. Their own set for the reason Wire.lua gives
+// at M.BATTLE_EVENTS3 (the Gen 1 sim mirrors the set above exactly); a kind in
+// either set is an event cleanBattleEvent reads.
+const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball']);
 
 /*
  * The three ball states a roster is spelled in. Wire.lua spells this
@@ -882,8 +948,134 @@ function cleanBattleMode(value) {
  * so substituting a different one would answer the request with a run that looks
  * right and reproduces nothing.
  */
-function cleanBattleRuleset(raw) {
+/*
+ * Gen 3's chart: the cart's ORDERED triples (atk, def, mult in tenths), the
+ * Foresight sentinel -1, -1, 0 in place (docs/plans/gen3-battle-sheet.md
+ * §3.1). Refused whole, never trimmed: a list cut mid-row shifts every later
+ * row by one. Twin of Wire.lua's typeTable3.
+ */
+function cleanTypeTable3(raw) {
+  if (!Array.isArray(raw)) return null;
+  const n = raw.length;
+  if (n === 0 || n % 3 !== 0 || n > BATTLE_TYPE_TABLE3_MAX * 3) return null;
+  const out = [];
+  for (let i = 0; i < n; i += 3) {
+    const a = luaInt(raw[i], TYPE_CELL3_MIN, MOVE_TYPE_MAX);
+    const d = luaInt(raw[i + 1], TYPE_CELL3_MIN, MOVE_TYPE_MAX);
+    const m = luaInt(raw[i + 2], 0, TYPE_MULT3_MAX);
+    if (a === null || d === null || m === null) return null;
+    if ((a === TYPE_CELL3_MIN) !== (d === TYPE_CELL3_MIN)) return null;
+    out.push(a, d, m);
+  }
+  return out;
+}
+
+/*
+ * One Gen 3 move-pool entry (§3.3): the packed
+ * "num:effect:power:type:accuracy:pp:chance:target:priority:flags:id" string,
+ * parsed with the sim's grammar, bounded like a sheet's move row and written
+ * back canonically; or a move row. Twin of Wire.lua's poolEntry3.
+ */
+function cleanPoolEntry3(raw) {
+  if (raw !== null && typeof raw === 'object') return cleanBattleMove(raw, 3);
+  if (typeof raw !== 'string' || raw.length > POOL_ENTRY3_MAX) return null;
+  const parts = raw.split(':');
+  if (parts.length !== 11) return null;
+  const n = [];
+  for (let i = 0; i < 10; i += 1) {
+    if (!/^-?\d+$/.test(parts[i])) return null;
+    n.push(Number(parts[i]) + 0);
+  }
+  const row = cleanBattleMove({
+    num: n[0],
+    effect: n[1],
+    power: n[2],
+    type: n[3],
+    accuracy: n[4],
+    pp: n[5],
+    chance: n[6],
+    target: n[7],
+    priority: n[8],
+    flags: n[9],
+    id: parts[10],
+  }, 3);
+  if (!row || row.id !== parts[10]) return null;
+  return [row.num, row.effect, row.power, row.type, row.accuracy, row.pp, row.chance,
+    row.target, row.priority, row.flags, row.id].join(':');
+}
+
+// Which dialect a ruleset is in: the hub's generation when given, else the
+// message's, else a `typeTable` is Gen 3's shape. Twin of rulesetIsGen3.
+function rulesetIsGen3(raw, generation) {
+  const hub = luaInt(generation, 1, GENERATION_MAX);
+  if (hub !== null) return hub === 3;
+  const own = luaInt(raw.generation, 1, GENERATION_MAX);
+  if (own !== null) return own === 3;
+  return raw.typeTable !== undefined && raw.typeTable !== null;
+}
+
+/*
+ * The Gen 3 ruleset: { generation: 3, typeTable?, seed?, specialTypes?,
+ * movePool?, terrain?, weather?, underwater? }. `typeTable` is optional (the
+ * sim reads its absence as every matchup neutral, and src/Sheet3.lua sends none
+ * when a cart's chart cannot be read); every optional field that is present
+ * and unreadable refuses the whole ruleset. Twin of Wire.lua's battleRuleset3.
+ */
+function cleanBattleRuleset3(raw) {
+  const out = { generation: 3 };
+  const present = (v) => v !== undefined && v !== null;
+  if (present(raw.typeTable)) {
+    const typeTable = cleanTypeTable3(raw.typeTable);
+    if (!typeTable) return null;
+    out.typeTable = typeTable;
+  }
+  if (present(raw.seed)) {
+    const seed = luaInt(raw.seed, 1, SEED_MAX);
+    if (seed === null) return null;
+    out.seed = seed;
+  }
+  if (present(raw.specialTypes)) {
+    if (!Array.isArray(raw.specialTypes)) return null;
+    const special = [];
+    for (const entry of raw.specialTypes) {
+      const t = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
+      if (t === null) return null;
+      special.push(t);
+    }
+    out.specialTypes = special;
+  }
+  if (present(raw.movePool)) {
+    if (!Array.isArray(raw.movePool)) return null;
+    const pool = [];
+    for (const entry of raw.movePool) {
+      if (pool.length >= BATTLE_MOVE_POOL3_MAX) break;
+      const clean = cleanPoolEntry3(entry);
+      if (!clean) return null;
+      pool.push(clean);
+    }
+    out.movePool = pool;
+  }
+  if (present(raw.terrain)) {
+    const terrain = luaInt(raw.terrain, 0, TERRAIN3_MAX);
+    if (terrain === null) return null;
+    out.terrain = terrain;
+  }
+  if (present(raw.weather)) {
+    if (!WEATHERS3.has(raw.weather)) return null;
+    out.weather = raw.weather;
+  }
+  if (present(raw.underwater)) {
+    if (typeof raw.underwater !== 'boolean') return null;
+    if (raw.underwater) out.underwater = true;
+  }
+  return out;
+}
+
+// `generation` (optional) is the hub's; Gen 1 / Gen 2 rulesets are read
+// exactly as before.
+function cleanBattleRuleset(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
+  if (rulesetIsGen3(raw, generation)) return cleanBattleRuleset3(raw);
   const chart = cleanChart(raw.chart);
   if (!chart) return null;
 
@@ -934,8 +1126,51 @@ function cleanBattleRuleset(raw) {
  * refuses the battler, and the battler refuses the party: one loud failure at
  * the boundary instead of a quiet one three formulas in.
  */
-function cleanBattleMove(raw) {
+/*
+ * The Gen 3 move row (docs/plans/gen3-battle-sheet.md §2): Gen 3 widths plus
+ * `num`, `target`, `priority` and `flags`, every one required; `maxPp` and
+ * `name` optional. Twin of Wire.lua's battleMove3.
+ */
+function cleanBattleMove3(raw) {
+  const move = {
+    id: cleanId(raw.id),
+    num: luaInt(raw.num, 1, GEN3_MOVE_MAX),
+    pp: luaInt(raw.pp, 0, PP_MAX),
+    power: luaInt(raw.power, 0, POWER3_MAX),
+    accuracy: luaInt(raw.accuracy, 0, ACCURACY3_MAX),
+    type: luaInt(raw.type, 0, MOVE_TYPE_MAX),
+    effect: luaInt(raw.effect, 0, EFFECT3_MAX),
+    chance: luaInt(raw.chance, 0, CHANCE_MAX),
+    target: luaInt(raw.target, 0, TARGET3_MAX),
+    priority: luaInt(raw.priority, -PRIORITY3_MAX, PRIORITY3_MAX),
+    flags: luaInt(raw.flags, 0, FLAGS3_MAX),
+  };
+  if (!move.id) return null;
+  for (const key of Object.keys(move)) {
+    if (move[key] === null) return null;
+  }
+  if (raw.maxPp !== undefined && raw.maxPp !== null) {
+    const maxPp = luaInt(raw.maxPp, 0, PP_MAX);
+    if (maxPp === null) return null;
+    move.maxPp = maxPp;
+  }
+  if (raw.name !== undefined && raw.name !== null) {
+    const name = cleanMoveName(raw.name);
+    if (!name) return null;
+    move.name = name;
+  }
+  return move;
+}
+
+// `generation` (optional): 3 reads the Gen 3 row; absent, a row that states a
+// `num` is a Gen 3 row (no Gen 1 / Gen 2 sheet carries one). Twin of
+// Wire.battleMove.
+function cleanBattleMove(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
+  const gen = luaInt(generation, 1, GENERATION_MAX);
+  if (gen === 3 || (gen === null && raw.num !== undefined && raw.num !== null)) {
+    return cleanBattleMove3(raw);
+  }
   const id = cleanId(raw.id);
   const pp = cleanInt(raw.pp, 0, PP_MAX);
   const power = cleanInt(raw.power, 0, POWER_MAX);
@@ -1022,8 +1257,165 @@ function cleanBattleMove(raw) {
  * Optional `generation` (1|2) selects the stats dialect; absent falls back to
  * shape sniff on `stats`. Optional `heldItem` is a Gen 2 item id.
  */
+// A Gen 3 stat-like block: every key at the caller's width, nothing else.
+function cleanBlock3(value, keys, min, max) {
+  if (value === null || typeof value !== 'object') return null;
+  const out = {};
+  for (const key of keys) {
+    const n = luaInt(value[key], min, max);
+    if (n === null) return null;
+    out[key] = n;
+  }
+  return out;
+}
+
+const IV_KEYS3 = ['hp', 'atk', 'def', 'spe', 'spa', 'spd'];
+
+/*
+ * One Gen 3 battler (docs/plans/gen3-battle-sheet.md §2, contract C4). The Gen
+ * 2 stat keys (final stats) plus what the Gen 3 sim reads off a sheet because
+ * the hub holds no species, item or ability table -- all required. Optional,
+ * each refused when present and unreadable: display names, slot, status /
+ * sleepTurns, catchRate, the passthrough ivs / evs / personality / otId, the
+ * caught sheet's ball, and weight / hiddenPower / beatUp -- which are required
+ * on an *upload* (cleanBattleParty checks them) but not on an outcome's caught
+ * sheet. Twin of Wire.lua's battleMon3.
+ */
+function cleanBattleMon3(raw) {
+  const stats = cleanBlock3(raw.stats, BATTLE_STATS_GEN2, 1, STAT_MAX);
+  if (!stats) return null;
+  const status = cleanBattleStatus(raw.status);
+  if (status === false) return null;
+
+  const mon = {
+    generation: 3,
+    species: cleanText(raw.species, NAME_MAX),
+    speciesNum: luaInt(raw.speciesNum, 1, GEN3_SPECIES_MAX),
+    level: luaInt(raw.level, 1, LEVEL_MAX),
+    hp: luaInt(raw.hp, 0, HP_MAX),
+    maxHp: luaInt(raw.maxHp, 1, HP_MAX),
+    stats,
+    ability: luaInt(raw.ability, 0, GEN3_ABILITY_MAX),
+    heldItem: luaInt(raw.heldItem, 0, GEN3_ITEM_MAX),
+    holdEffect: luaInt(raw.holdEffect, 0, HOLD_EFFECT3_MAX),
+    holdEffectParam: luaInt(raw.holdEffectParam, 0, HOLD_PARAM3_MAX),
+    gender: GENDERS3.has(raw.gender) ? raw.gender : null,
+    friendship: luaInt(raw.friendship, 0, 255),
+    nature: luaInt(raw.nature, 0, GEN3_NATURE_COUNT - 1),
+  };
+  if (!mon.species) return null;
+  for (const key of Object.keys(mon)) {
+    if (mon[key] === null) return null;
+  }
+  if (mon.hp > mon.maxHp) return null;
+  // Written only when there is one, as the older dialect does.
+  if (status) mon.status = status;
+
+  if (!Array.isArray(raw.types)) return null;
+  const types = [];
+  for (const entry of raw.types) {
+    if (types.length >= 2) break;
+    const t = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
+    if (t === null) return null;
+    types.push(t);
+  }
+  if (!types.length) return null;
+  mon.types = types;
+
+  if (!Array.isArray(raw.moves)) return null;
+  const moves = [];
+  for (const entry of raw.moves) {
+    if (moves.length >= BATTLE_MOVE_MAX) return null;
+    const move = cleanBattleMove(entry, 3);
+    if (!move) return null;
+    moves.push(move);
+  }
+  if (!moves.length) return null;
+  mon.moves = moves;
+
+  const present = (v) => v !== undefined && v !== null;
+  if (present(raw.speciesId)) {
+    const speciesId = cleanId(raw.speciesId);
+    if (!speciesId) return null;
+    mon.speciesId = speciesId;
+  }
+  if (present(raw.slot)) {
+    const slot = luaInt(raw.slot, 0, SLOT_MAX);
+    if (slot === null) return null;
+    mon.slot = slot;
+  }
+  if (present(raw.abilityName)) {
+    const abilityName = cleanMoveName(raw.abilityName);
+    if (!abilityName) return null;
+    mon.abilityName = abilityName;
+  }
+  if (present(raw.itemName)) {
+    const itemName = cleanMoveName(raw.itemName);
+    if (!itemName) return null;
+    mon.itemName = itemName;
+  }
+  if (present(raw.weight)) {
+    const weight = luaInt(raw.weight, 0, WEIGHT3_MAX);
+    if (weight === null) return null;
+    mon.weight = weight;
+  }
+  if (present(raw.hiddenPower)) {
+    if (typeof raw.hiddenPower !== 'object') return null;
+    const type = luaInt(raw.hiddenPower.type, 0, MOVE_TYPE_MAX);
+    const power = luaInt(raw.hiddenPower.power, 0, POWER3_MAX);
+    if (type === null || power === null) return null;
+    mon.hiddenPower = { type, power };
+  }
+  if (present(raw.beatUp)) {
+    if (typeof raw.beatUp !== 'object') return null;
+    const atk = luaInt(raw.beatUp.atk, 1, 255);
+    const def = luaInt(raw.beatUp.def, 1, 255);
+    if (atk === null || def === null) return null;
+    mon.beatUp = { atk, def };
+  }
+  if (present(raw.sleepTurns)) {
+    const sleepTurns = luaInt(raw.sleepTurns, 0, SLEEP3_MAX);
+    if (sleepTurns === null) return null;
+    mon.sleepTurns = sleepTurns;
+  }
+  if (present(raw.catchRate)) {
+    const catchRate = luaInt(raw.catchRate, 0, 255);
+    if (catchRate === null) return null;
+    mon.catchRate = catchRate;
+  }
+  if (present(raw.ivs)) {
+    const ivs = cleanBlock3(raw.ivs, IV_KEYS3, 0, GEN3_IV_MAX);
+    if (!ivs) return null;
+    mon.ivs = ivs;
+  }
+  if (present(raw.evs)) {
+    const evs = cleanBlock3(raw.evs, IV_KEYS3, 0, GEN3_EV_MAX);
+    if (!evs) return null;
+    mon.evs = evs;
+  }
+  if (present(raw.personality)) {
+    const personality = luaInt(raw.personality, 0, U32_MAX);
+    if (personality === null) return null;
+    mon.personality = personality;
+  }
+  if (present(raw.otId)) {
+    const otId = luaInt(raw.otId, 0, U32_MAX);
+    if (otId === null) return null;
+    mon.otId = otId;
+  }
+  if (present(raw.ball)) {
+    const ball = luaInt(raw.ball, 0, GEN3_ITEM_MAX);
+    if (ball === null) return null;
+    mon.ball = ball;
+  }
+  return mon;
+}
+
 function cleanBattleMon(raw) {
   if (raw === null || typeof raw !== 'object') return null;
+  // `generation` 3 selects the Gen 3 dialect (cleanBattleParty stamps it from
+  // the hub's generation); 1 / 2 / absent is read exactly as before.
+  if (luaInt(raw.generation, 3, 3) !== null) return cleanBattleMon3(raw);
 
   const generationHint = cleanInt(raw.generation, 1, 2);
   const stats = cleanStatBlock(raw.stats, 1, STAT_MAX, generationHint);
@@ -1154,9 +1546,64 @@ function cleanBattleMon(raw) {
  * `{id, count}` or a map of id → count; duplicates and oversize refuse.
  * `generation` selects Effects.itemEffect (1 = Gen1, 2 = Gen2); omitted → 1.
  */
+/*
+ * A Gen 3 bag id: a pret item number, as a JSON number or the numeric string a
+ * map key (or a choice) spells it as -- nothing else. Twin of Wire.itemId3.
+ */
+function cleanItemId3(value) {
+  if (typeof value === 'string') {
+    if (!/^\d+$/.test(value)) return null;
+  } else if (typeof value !== 'number') {
+    return null;
+  }
+  const n = Number(value);
+  if (n !== Math.floor(n)) return null;
+  return luaInt(n, 1, GEN3_ITEM_MAX);
+}
+
+/*
+ * The Gen 3 bag (§4): list of { id, count, name? } or a map id -> count,
+ * numeric pret ids restricted to lib/battle3's catalog. Out: { id: <number>,
+ * count, name? } sorted by id. Twin of Wire.lua's battleBag3.
+ */
+function cleanBattleBag3(raw) {
+  const out = [];
+  const seen = new Set();
+  const push = (id, count, name) => {
+    if (id === null || count === null) return false;
+    if (seen.has(id) || out.length >= BATTLE_BAG_MAX) return false;
+    if (!EffectsGen3.itemEffect(id)) return false;
+    seen.add(id);
+    const entry = { id, count };
+    if (name) entry.name = name;
+    out.push(entry);
+    return true;
+  };
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (entry === null || typeof entry !== 'object') return null;
+      let name = null;
+      if (entry.name !== undefined && entry.name !== null) {
+        name = cleanMoveName(entry.name);
+        if (!name) return null;
+      }
+      if (!push(cleanItemId3(entry.id), luaInt(entry.count, 1, BATTLE_BAG_COUNT_MAX), name)) {
+        return null;
+      }
+    }
+  } else {
+    for (const [key, value] of Object.entries(raw)) {
+      if (!push(cleanItemId3(key), luaInt(value, 1, BATTLE_BAG_COUNT_MAX), null)) return null;
+    }
+  }
+  out.sort((a, b) => a.id - b.id);
+  return out;
+}
+
 function cleanBattleBag(raw, generation) {
   if (raw === undefined || raw === null) return [];
   if (typeof raw !== 'object') return null;
+  if (generation === 3) return cleanBattleBag3(raw);
 
   const Effects = effectsFor(generation);
   const out = [];
@@ -1191,6 +1638,12 @@ function cleanBattleBag(raw, generation) {
   return out;
 }
 
+// The three formula inputs a Gen 3 upload must carry (see cleanBattleMon3).
+function uploadComplete3(mon) {
+  return mon.weight !== undefined && mon.hiddenPower !== undefined
+    && mon.beatUp !== undefined;
+}
+
 function cleanBattleParty(raw, hubGeneration) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
@@ -1203,14 +1656,16 @@ function cleanBattleParty(raw, hubGeneration) {
   // Hub generation (second arg) is authoritative when provided: stamp
   // party.generation from it, and refuse when an explicit party/mon
   // generation disagrees (mirrors Wire.battleParty).
+  // 1..GENERATION_MAX: a Gen 3 hub (PROTOCOL 30) reads its parties in the
+  // Gen 3 dialect (cleanBattleMon3, cleanBattleBag3).
   const hubGen = hubGeneration !== undefined && hubGeneration !== null
-    ? cleanInt(hubGeneration, 1, 2)
+    ? cleanInt(hubGeneration, 1, GENERATION_MAX)
     : null;
   if (hubGeneration !== undefined && hubGeneration !== null && hubGen === null) {
     return null;
   }
 
-  let partyGen = cleanInt(raw.generation, 1, 2);
+  let partyGen = cleanInt(raw.generation, 1, GENERATION_MAX);
   if (raw.generation !== undefined && raw.generation !== null && partyGen === null) {
     return null;
   }
@@ -1236,7 +1691,7 @@ function cleanBattleParty(raw, hubGeneration) {
   for (const entry of raw.mons) {
     if (entry !== null && typeof entry === 'object'
         && entry.generation !== undefined && entry.generation !== null) {
-      const monGen = cleanInt(entry.generation, 1, 2);
+      const monGen = cleanInt(entry.generation, 1, GENERATION_MAX);
       if (monGen === null) return null;
       if (hubGen !== null && monGen !== hubGen) return null;
     }
@@ -1247,6 +1702,11 @@ function cleanBattleParty(raw, hubGeneration) {
     }
     const mon = cleanBattleMon(sheet);
     if (!mon) return null;
+    // A Gen 3 sheet has to be complete as an *upload* (weight, hiddenPower,
+    // beatUp -- an outcome's caught sheet may leave them out), and a Gen 3
+    // party holds no Gen 1 / Gen 2 mon. Twin of Wire.battleParty.
+    if (mon.generation === 3 && !uploadComplete3(mon)) return null;
+    if ((partyGen === 3) !== (mon.generation === 3)) return null;
     mons.push(mon);
   }
   party.mons = mons;
@@ -1322,6 +1782,19 @@ function cleanBattleChoice(raw) {
     if (!item) return null;
     choice.item = item;
   }
+  // Gen 3 (docs/plans/gen3-battle-sheet.md §1.2): Baton Pass's destination (a
+  // *party* index, asked up front) and the thrower's word that its dex has the
+  // wild species caught (Repeat Ball). A Gen 3 item rides in `item` as its
+  // numeric id spelled as a string. Twin of Wire.battleChoice.
+  if (raw.pass !== undefined && raw.pass !== null) {
+    const pass = cleanInt(raw.pass, 0, SLOT_MAX);
+    if (pass === null) return null;
+    choice.pass = pass;
+  }
+  if (raw.dexCaught !== undefined && raw.dexCaught !== null) {
+    if (typeof raw.dexCaught !== 'boolean') return null;
+    choice.dexCaught = raw.dexCaught;
+  }
 
   if (needs !== true && choice[needs] === undefined) return null;
   return choice;
@@ -1350,7 +1823,7 @@ function cleanBattleChoice(raw) {
  */
 function cleanBattleEvent(raw) {
   if (raw === null || typeof raw !== 'object') return null;
-  if (!BATTLE_EVENT_TYPES.has(raw.t)) return null;
+  if (!BATTLE_EVENT_TYPES.has(raw.t) && !BATTLE_EVENT_TYPES3.has(raw.t)) return null;
   const battle = cleanId(raw.battle);
   const seq = cleanInt(raw.seq, 0, SEQ_MAX);
   if (!battle || seq === null) return null;
@@ -1358,7 +1831,8 @@ function cleanBattleEvent(raw) {
   const event = { battle, seq, t: raw.t };
   if (raw.text !== undefined && raw.text !== null) {
     // Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — cleanText strips `_`.
-    const text = (raw.t === 'item' || raw.t === 'anim')
+    // A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4").
+    const text = (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball')
       ? cleanId(raw.text)
       : cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
@@ -1459,6 +1933,33 @@ function cleanBattleEvent(raw) {
     const confused = cleanInt(raw.confused, 0, 1);
     if (confused !== null) event.confused = confused;
   }
+  // Gen 3's six fields (§7.3), each dropped rather than fatal like the rest:
+  // target (a field slot), spread (0/1), stat (which stat), stage (-6..6, where
+  // it now sits), delta (-12..12, the change applied -- signed, where `amount`
+  // is unsigned), holding (the item a `held` event leaves held, 0 = none).
+  if (raw.target !== undefined && raw.target !== null) {
+    const target = cleanInt(raw.target, 0, FIELD_MAX);
+    if (target !== null) event.target = target;
+  }
+  if (raw.spread !== undefined && raw.spread !== null) {
+    const spread = cleanInt(raw.spread, 0, 1);
+    if (spread !== null) event.spread = spread;
+  }
+  if (raw.stat !== undefined && raw.stat !== null && EVENT_STATS3.has(raw.stat)) {
+    event.stat = raw.stat;
+  }
+  if (raw.stage !== undefined && raw.stage !== null) {
+    const stage = cleanInt(raw.stage, -STAGE3_MAX, STAGE3_MAX);
+    if (stage !== null) event.stage = stage;
+  }
+  if (raw.delta !== undefined && raw.delta !== null) {
+    const delta = cleanInt(raw.delta, -DELTA3_MAX, DELTA3_MAX);
+    if (delta !== null) event.delta = delta;
+  }
+  if (raw.holding !== undefined && raw.holding !== null) {
+    const holding = cleanInt(raw.holding, 0, GEN3_ITEM_MAX);
+    if (holding !== null) event.holding = holding;
+  }
   if (raw.moves !== undefined && raw.moves !== null) {
     if (Array.isArray(raw.moves)) {
       const moves = [];
@@ -1531,7 +2032,9 @@ function cleanBattleOutcome(raw) {
 // claim its moves (PROTOCOL 28). Bounded numbers, 1..BATTLE_MOVE_MAX long;
 // a missing field refuses the message rather than applying a half-sheet
 // over a live battler. The hub then allows only add-one or replace-one.
-function cleanBattleMoveset(raw) {
+// `generation` (optional) is the hub's and picks the move-row dialect the way
+// cleanBattleMove documents.
+function cleanBattleMoveset(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
   const mon = cleanInt(raw.mon, 0, BATTLE_MON_MAX - 1);
@@ -1540,7 +2043,7 @@ function cleanBattleMoveset(raw) {
   const moves = [];
   for (const entry of raw.moves) {
     if (moves.length >= BATTLE_MOVE_MAX) return null;
-    const move = cleanBattleMove(entry);
+    const move = cleanBattleMove(entry, generation);
     if (!move) return null;
     moves.push(move);
   }
@@ -1669,4 +2172,41 @@ module.exports = {
   PARTICIPANTS_MAX,
   REASON_MAX,
   TEAM_TOKENS,
+  // The Gen 3 dialect (PROTOCOL 30): the cleaners the hub and suites reach
+  // directly, and the bounds, named as Wire.lua names them.
+  BATTLE_EVENT_TYPES3,
+  effectsFor,
+  luaInt,
+  cleanItemId3,
+  cleanTypeTable3,
+  cleanPoolEntry3,
+  GEN3_SPECIES_MAX,
+  GEN3_MOVE_MAX,
+  GEN3_ITEM_MAX,
+  GEN3_ABILITY_MAX,
+  GEN3_NATURE_COUNT,
+  GEN3_IV_MAX,
+  GEN3_EV_MAX,
+  BATTLE_TYPE_TABLE3_MAX,
+  BATTLE_MOVE_POOL3_MAX,
+  POWER3_MAX,
+  ACCURACY3_MAX,
+  EFFECT3_MAX,
+  TARGET3_MAX,
+  PRIORITY3_MAX,
+  FLAGS3_MAX,
+  HOLD_EFFECT3_MAX,
+  HOLD_PARAM3_MAX,
+  WEIGHT3_MAX,
+  SLEEP3_MAX,
+  U32_MAX,
+  GENDERS3,
+  TYPE_CELL3_MIN,
+  TYPE_MULT3_MAX,
+  TERRAIN3_MAX,
+  WEATHERS3,
+  POOL_ENTRY3_MAX,
+  EVENT_STATS3,
+  STAGE3_MAX,
+  DELTA3_MAX,
 };

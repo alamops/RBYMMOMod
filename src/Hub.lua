@@ -7,7 +7,8 @@
 -- engine's own link code, and its `mmo.relay` payloads pass through unread.
 --
 -- **Battle does not.** From PROTOCOL 10 a battle this hub brokers is
--- resolved *here*, by BattleSim/Turn (Gen1) or BattleSim2/Turn (Gen2) per
+-- resolved *here*, by BattleSim/Turn (Gen1), BattleSim2/Turn (Gen2) or
+-- BattleSim3/Turn (Gen 3: FireRed, LeafGreen, Emerald -- PROTOCOL 30) per
 -- `opts.generation`, and the clients receive an ordered stream of events
 -- they draw rather than rolling their own. The mediated-battles section
 -- below is that plumbing, and server/lib/relay.js runs the same one over
@@ -47,7 +48,14 @@ local Rank = need("Rank")
 
 -- Wave 2 T2d: pick the mediated-battle twin at Hub.new from hub generation.
 -- Gen1 (default) keeps BattleSim; Gen2 never loads Gen1 Turn for refereeing.
+-- Gen 3 referees on BattleSim3, whose bag catalog is Items.bagEffect keyed by
+-- numeric pret item id -- Wire.effectsFor(3) puts it behind the one
+-- `itemEffect` the bag paths below call, the same adapter Wire proves an
+-- upload against, so the proof and the spend read one table.
 local function battleSimFor(generation)
+  if generation == 3 then
+    return need("BattleSim3/Turn"), Wire.effectsFor(3)
+  end
   if generation == 2 then
     return need("BattleSim2/Turn"), need("BattleSim2/Effects")
   end
@@ -1519,6 +1527,7 @@ function M:openMediatedBattle(id, plan)
     ruleset = nil,
     parties = {},      -- seat id -> the sanitised party that filled it
     bags = {},         -- player id -> { [itemId] = count } from party.bag
+    bagNames = {},     -- Gen 3: player id -> { [itemId] = display name }
     bagHold = {},      -- player id -> itemId held until turn resolves
     sim = nil,
     settled = false,
@@ -1595,6 +1604,7 @@ function M:fillBattleParty(record, client, party)
     -- never reaches this branch, so their own bag is not wiped by that upload.
     record.bags = record.bags or {}
     record.bags[client.id] = self:bagMap(party.bag)
+    self:noteBagNames(record, client.id, party.bag)
     return true
   end
 
@@ -1634,6 +1644,7 @@ function M:fillBattleParty(record, client, party)
   record.bags = record.bags or {}
   if kept[1] and not self:isWildSeat(record, kept[1]) then
     record.bags[kept[1]] = self:bagMap(party.bag)
+    self:noteBagNames(record, kept[1], party.bag)
   end
   return true
 end
@@ -1664,6 +1675,53 @@ local function movesetDeltaOk(old, incoming)
   return false
 end
 
+-- Gen 3's moveset apply.  BattleSim3 keeps the battler apart from the party
+-- mon (`fighter.b`, whose `moves` is the mon's list until Transform / Mimic
+-- lays an overlay copy over it), and its rows carry the four fields the Gen 3
+-- sim branches on (num, target, priority, flags).  So the party list is always
+-- rewritten -- it is what the fight goes on with after the next switch and
+-- what the overlay drops back to -- and the active battler takes the new list
+-- only when it is not wearing an overlay: a Transform is left alone exactly as
+-- the older sims leave a transformed mon alone.  Twin of relay.js.
+local function moveRow3(prev, nm)
+  if prev and prev.id == nm.id then
+    return {
+      id = prev.id, name = prev.name ~= nil and prev.name or nm.name,
+      num = prev.num ~= nil and prev.num or nm.num,
+      pp = prev.pp, maxPp = prev.maxPp ~= nil and prev.maxPp or nm.maxPp,
+      power = prev.power, accuracy = prev.accuracy,
+      type = prev.type ~= nil and prev.type or nm.type,
+      effect = prev.effect, chance = prev.chance,
+      target = prev.target ~= nil and prev.target or nm.target,
+      priority = prev.priority ~= nil and prev.priority or nm.priority,
+      flags = prev.flags ~= nil and prev.flags or nm.flags,
+    }
+  end
+  return {
+    id = nm.id, name = nm.name, num = nm.num, pp = nm.pp,
+    maxPp = nm.maxPp ~= nil and nm.maxPp or nm.pp,
+    power = nm.power, accuracy = nm.accuracy, type = nm.type,
+    effect = nm.effect, chance = nm.chance, target = nm.target,
+    priority = nm.priority, flags = nm.flags,
+  }
+end
+
+local function applyBattleMoveset3(fighter, payload)
+  local mon = fighter.mons[payload.mon + 1]
+  if not mon then return false end
+  local incoming = payload.moves
+  if type(incoming) ~= "table" or #incoming == 0 then return false end
+  local old = type(mon.moves) == "table" and mon.moves or {}
+  if not movesetDeltaOk(old, incoming) then return false end
+  local nextMoves = {}
+  for i, nm in ipairs(incoming) do nextMoves[i] = moveRow3(old[i], nm) end
+  local b = fighter.b
+  local active = b ~= nil and b.mon == mon
+  mon.moves = nextMoves
+  if active and not b.overlay then b.moves = nextMoves end
+  return true
+end
+
 -- Mid-fight learn / replace (PROTOCOL 28). Twin of Relay.applyBattleMoveset.
 -- Unchanged ids keep the hub's PP and combat fields; a transformed battler
 -- is left alone so this does not end Transform a turn early.
@@ -1671,6 +1729,7 @@ function M:applyBattleMoveset(record, client, payload)
   if not (record and record.sim and payload) then return false end
   local fighter = record.sim.byId and record.sim.byId[client.id]
   if not (fighter and type(fighter.mons) == "table") then return false end
+  if self.generation == 3 then return applyBattleMoveset3(fighter, payload) end
   local mon = fighter.mons[payload.mon + 1]
   if not mon or mon.transformed then return false end
   local incoming = payload.moves
@@ -1702,22 +1761,50 @@ function M:applyBattleMoveset(record, client, payload)
 end
 
 -- List of `{id, count}` → lookup map. Empty / nil → empty map (no items).
+--
+-- Keys are strings on every generation, because that is how a choice names
+-- an item (Wire.battleChoice's `item` is an id-shaped string).  A Gen 3 bag
+-- arrives with numeric pret ids (Wire.battleBag) and a Gen 3 choice spells
+-- the same id as a numeric string ("13"), so a number is keyed by its
+-- tostring -- which is also exactly how the JS twin's object keys spell it.
 function M:bagMap(entries)
   local map = {}
   for _, entry in ipairs(entries or {}) do
-    if type(entry) == "table" and type(entry.id) == "string"
-       and type(entry.count) == "number" and entry.count > 0 then
-      map[entry.id] = entry.count
+    if type(entry) == "table" and type(entry.count) == "number" and entry.count > 0 then
+      if type(entry.id) == "string" then
+        map[entry.id] = entry.count
+      elseif type(entry.id) == "number" then
+        map[tostring(entry.id)] = entry.count
+      end
     end
   end
   return map
 end
 
--- Shallow copy of an id→count bag map (or nil when empty / absent).
+-- Gen 3's display names for one seat's bag (`name` on a Wire.battleBag entry),
+-- keyed like bagMap, so the referee can say "Ann used POTION!" rather than
+-- "Ann used an item!".  Nothing on the older generations, whose sims narrate
+-- the item id itself.
+function M:noteBagNames(record, seat, entries)
+  if self.generation ~= 3 then return end
+  local names = {}
+  for _, entry in ipairs(entries or {}) do
+    if type(entry) == "table" and type(entry.name) == "string" and entry.id ~= nil then
+      names[tostring(entry.id)] = entry.name
+    end
+  end
+  record.bagNames = record.bagNames or {}
+  record.bagNames[seat] = names
+end
+
+-- Shallow copy of an id→count bag map (or nil when empty / absent).  A Gen 3
+-- fighter's bag is keyed by the numeric id inside BattleSim3; it comes back
+-- keyed by string, the hub's spelling (see bagMap).
 function M:cloneBagMap(src)
   if type(src) ~= "table" then return nil end
   local out, any = {}, false
   for id, count in pairs(src) do
+    if type(id) == "number" then id = tostring(id) end
     if type(id) == "string" and type(count) == "number" and count > 0 then
       out[id] = count
       any = true
@@ -1725,6 +1812,22 @@ function M:cloneBagMap(src)
   end
   if not any then return nil end
   return out
+end
+
+-- The bag a Gen 3 fighter opens with: BattleSim3's list form, numeric ids in
+-- id order, each with the display name its owner uploaded.  nil for none.
+function M:simBag3(record, seat, bag)
+  local names = record.bagNames and record.bagNames[seat] or {}
+  local list = {}
+  for id, count in pairs(bag or {}) do
+    local n = Wire.itemId3(id)
+    if n and type(count) == "number" and count > 0 then
+      list[#list + 1] = { id = n, count = count, name = names[id] }
+    end
+  end
+  if #list == 0 then return nil end
+  table.sort(list, function(a, b) return a.id < b.id end)
+  return list
 end
 
 -- One trainer, one bag. After Turn.create each NPC fighter holds a clone, so
@@ -1828,13 +1931,15 @@ function M:tryStartSim(record)
     -- Youngster does not spam potions they never carried.
     record.bags = record.bags or {}
     local bag = record.bags[seat]
+    if self.generation == 3 then bag = self:simBag3(record, seat, bag)
+    else bag = bag and self:cloneBagMap(bag) or nil end
     return {
       playerId = seat,
       name = (client and client.name)
         or (self:isNpcSeat(record, seat) and "TRAINER" or seat),
       mons = party.mons,
       badges = party.badges,
-      bag = bag and self:cloneBagMap(bag) or nil,
+      bag = bag,
     }
   end
 
@@ -1861,19 +1966,30 @@ function M:tryStartSim(record)
   -- constructed, which is not something a connection can reach.
   local seed = (type(self.forceBattleSeed) == "number")
     and self.forceBattleSeed or self:battleSeed()
-  local battle, why = self.Turn.create({
+  local rules = record.ruleset
+  local createOpts = {
     id = record.id,
     mode = record.mode,
     seed = seed,
-    chart = record.ruleset.chart,
-    specialTypes = record.ruleset.specialTypes,
-    metronomePool = record.ruleset.metronomePool,
+    chart = rules.chart,
+    specialTypes = rules.specialTypes,
+    metronomePool = rules.metronomePool,
     choiceTimeout = Config.BATTLE_CHOICE_TIMEOUT,
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
     resolveTimeout = Config.BATTLE_RESOLVE_TIMEOUT,
     now = battleSeconds(self.clock),
     sides = { a = roster(record.sides.a), b = roster(record.sides.b) },
-  })
+  }
+  -- Gen 3's ruleset is the ordered type table and the packed move pool, plus
+  -- the field a wild fight opens on (docs/plans/gen3-battle-sheet.md §3).
+  if self.generation == 3 then
+    createOpts.typeTable = rules.typeTable
+    createOpts.movePool = rules.movePool
+    createOpts.terrain = rules.terrain
+    createOpts.weather = rules.weather
+    createOpts.underwater = rules.underwater
+  end
+  local battle, why = self.Turn.create(createOpts)
   if not battle then
     -- Turn.create answers a reason rather than raising, and this file owns no
     -- logger, so the refusal goes out the seam that already exists for "a
@@ -1972,8 +2088,18 @@ function M:flushBattle(record)
   -- Fighter bags are authoritative after resolve (Turn spends on item use,
   -- including NPC auto-pick). Sync the hub sheet and drop holds so we never
   -- double-spend with commitBagHolds.
-  if record.sim.phase ~= "choice" then
+  --
+  -- On Gen 3 the sheet also follows the sim after every turn that resolved,
+  -- not only when the phase is caught outside choice: a turn that resolves and
+  -- opens the next one inside the same call is back in choice by the time this
+  -- runs, and the sheet would go on proving a potion the sim already spent.
+  -- (The older generations keep their behaviour byte for byte; the sim still
+  -- refuses an overdrawn item there, so the gap is a stale sheet, not a free
+  -- heal.)
+  if record.sim.phase ~= "choice"
+     or (self.generation == 3 and record.bagTurn ~= record.sim.turn) then
     self:syncBagsFromSim(record)
+    record.bagTurn = record.sim.turn
   end
   for _, event in ipairs(record.sim:drainEvents()) do
     self:broadcastBattle(record, Wire.BATTLE_EVENT, event)
@@ -3281,7 +3407,7 @@ handlers[Wire.BATTLE_RULESET] = function(self, client, msg)
   if not record or record.sim then return end
   if client.id ~= record.hostId then return end
 
-  local ruleset = Wire.battleRuleset(msg)
+  local ruleset = Wire.battleRuleset(msg, self.generation)
   if not ruleset then
     return noteDrop(self, client,
       "the ruleset is not a shape we can fight under")
@@ -3346,7 +3472,7 @@ end
 handlers[Wire.BATTLE_MOVESET] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end
-  local payload = Wire.battleMoveset(msg)
+  local payload = Wire.battleMoveset(msg, self.generation)
   if not payload or payload.battle ~= record.id then return end
   self:applyBattleMoveset(record, client, payload)
 end

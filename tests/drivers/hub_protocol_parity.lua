@@ -975,6 +975,209 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- Gen 3 (PROTOCOL 30): a mediated fight on BattleSim3 / lib/battle3, and the
+-- Gen 3 dialect of every upload read by Wire.lua and lib/sanitize.js side by
+-- side.  The digests carry sentinels rather than nil ("(nil)") for the reason
+-- slimPresence does: a nil vanishes from a Lua table where JS keeps a null.
+-- ------------------------------------------------------------------
+
+local CHART3 = { 10, 12, 20, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0 }
+local POOL3 = { "33:0:40:0:100:35:0:0:0:51:POOL_TAP", "52:4:40:10:100:25:10:0:0:18:POOL_SPARK" }
+
+local function move3(o)
+  o = o or {}
+  return {
+    id = o.id or "TAP3", num = o.num or 33, pp = o.pp or 20, maxPp = o.maxPp or 20,
+    power = o.power or 90, type = o.type or 0, accuracy = o.accuracy or 100,
+    effect = o.effect or 0, chance = o.chance or 0, target = o.target or 0,
+    priority = o.priority or 0, flags = o.flags or 51, name = o.name,
+  }
+end
+
+local function mon3(o)
+  o = o or {}
+  return {
+    generation = 3, species = o.species or "GAMMA", speciesNum = o.speciesNum or 1,
+    level = o.level or 50, hp = o.hp or 150, maxHp = o.maxHp or o.hp or 150,
+    stats = { atk = o.atk or 120, def = o.def or 80, spe = o.spe or 90,
+              spa = o.spa or 80, spd = o.spd or 80 },
+    types = o.types or { 0 }, ability = o.ability or 0,
+    heldItem = o.heldItem or 0, holdEffect = o.holdEffect or 0,
+    holdEffectParam = o.holdEffectParam or 0, gender = o.gender or "M",
+    friendship = 70, weight = 300, nature = 0,
+    hiddenPower = { type = 1, power = 50 }, beatUp = { atk = 60, def = 60 },
+    catchRate = o.catchRate,
+    moves = o.moves or { move3() },
+  }
+end
+
+local function orNil(v)
+  if v == nil then return "(nil)" end
+  return v
+end
+
+-- The scalar fields of one battle event, sentinel for the absent ones that a
+-- Gen 3 referee can set (the `moves` rows are pinned by the sim fixtures).
+local EVENT_KEYS = { "t", "text", "amount", "hp", "maxHp", "slot", "side", "status",
+  "mon", "target", "spread", "stat", "stage", "delta", "holding", "confused", "team" }
+
+local function slimEvent(e)
+  local out = {}
+  for _, k in ipairs(EVENT_KEYS) do out[k] = orNil(e[k]) end
+  out.moves = e.moves and #e.moves or 0
+  return out
+end
+
+scenarios[#scenarios + 1] = {
+  name = "gen3_mediated_fight",
+  run = function()
+    local hub = makeGenHub(3)
+    local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "emerald",
+      sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN" })
+    take(a.peer, Wire.WELCOME)
+    take(b.peer, Wire.WELCOME)
+    takeAll(a.peer, Wire.JOIN)
+    takeAll(b.peer, Wire.JOIN)
+    local sess = openFight(hub, a, b)
+    a.peer.outbox = {}
+    b.peer.outbox = {}
+    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id,
+      generation = 3, typeTable = CHART3, movePool = POOL3, terrain = 3 })
+    local hurt = mon3({ atk = 400, def = 400, spe = 300, hp = 100, maxHp = 150,
+      moves = { move3({ power = 200 }) } })
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { hurt },
+      bag = { { id = 13, count = 2, name = "TONIC" }, { id = "350", count = 1 } } })
+    hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = sess.id,
+      mons = { mon3({ species = "DELTA", hp = 1, def = 5, atk = 10, spe = 1,
+                      moves = { move3({ power = 10 }) } }) } })
+    local record = hub.battles[sess.id]
+    local opened = record.sim ~= nil
+    hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = sess.id,
+      action = "item", item = "13", slot = 0 })
+    local held = record.bagHold[a.id]
+    hub:receive(b.client, { type = Wire.BATTLE_CHOICE, battle = sess.id,
+      action = "fight", move = 0 })
+    local bagAfter = { potion = orNil(record.bags[a.id]["13"]), flute = orNil(record.bags[a.id]["350"]) }
+    local outcome = fightItOut(hub, a, b, sess.id)
+    return {
+      opened = opened,
+      ruleset = { triples = #record.ruleset.typeTable / 3, pool = record.ruleset.movePool,
+                  terrain = record.ruleset.terrain },
+      held = orNil(held),
+      bagAfter = bagAfter,
+      outcome = slimOutcome(outcome),
+      battleGone = hub.battles[sess.id] == nil,
+    }
+  end,
+}
+
+-- The same fight's opening event stream, event by event: the envelope the
+-- hub wraps around BattleSim3 has to hand every client the same stream on
+-- both hosting paths.
+scenarios[#scenarios + 1] = {
+  name = "gen3_event_stream",
+  run = function()
+    local hub = makeGenHub(3)
+    local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "leafgreen",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "firered",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    local sess = openFight(hub, a, b)
+    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id,
+      typeTable = CHART3 })
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id,
+      mons = { mon3({ ability = 22, types = { 10 }, moves = { move3({ type = 10, effect = 4, chance = 100 }) } }),
+               mon3({ species = "ZETA", ability = 2, types = { 11 } }) } })
+    hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = sess.id,
+      mons = { mon3({ species = "ETA", ability = 45, types = { 12 },
+                      heldItem = 139, holdEffect = 1, holdEffectParam = 10 }) } })
+    local events = {}
+    for _ = 1, 3 do
+      if not hub.battles[sess.id] then break end
+      for _, msg in ipairs(takeAll(a.peer, Wire.BATTLE_EVENT)) do events[#events + 1] = slimEvent(msg) end
+      hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = sess.id, action = "fight", move = 0 })
+      hub:receive(b.client, { type = Wire.BATTLE_CHOICE, battle = sess.id, action = "fight", move = 0 })
+    end
+    for _, msg in ipairs(takeAll(a.peer, Wire.BATTLE_EVENT)) do events[#events + 1] = slimEvent(msg) end
+    return { events = events, count = #events }
+  end,
+}
+
+-- The Gen 3 dialect at the boundary: each input through the Lua sanitiser,
+-- and the JS half runs the same inputs through lib/sanitize.
+local function dialect3()
+  local caught = mon3({ species = "CAUGHT" })
+  caught.weight, caught.hiddenPower, caught.beatUp = nil, nil, nil
+  caught.ball, caught.personality, caught.otId = 4, 305419896, 4660
+  caught.ivs = { hp = 31, atk = 0, def = 1, spe = 2, spa = 3, spd = 4 }
+  local noAbility = mon3(); noAbility.ability = nil
+  local badGender = mon3(); badGender.gender = "X"
+  local named = mon3({ moves = { move3({ name = "Tap Three" }), move3({ id = "B", num = 182,
+    power = 0, accuracy = 0, effect = 111, target = 16, priority = 3, flags = 0 }) } })
+  named.abilityName, named.itemName, named.sleepTurns, named.status = "BLAZE", "ORAN", 3, "SLP"
+  return {
+    { "ruleset", { generation = 3, typeTable = CHART3, movePool = POOL3, terrain = 9,
+                   weather = "SAND", underwater = false, seed = 99, specialTypes = { 10, 11 } } },
+    { "ruleset", { typeTable = CHART3, movePool = { "7:0:40:0:100:10:0:0:-0:3:X", { id = "ROW",
+      num = 12, pp = 5, power = 0, accuracy = 0, type = 0, effect = 38, chance = 0, target = 0,
+      priority = 0, flags = 2 } } } },
+    { "ruleset", { typeTable = { 0, -1, 10 } } },
+    { "ruleset", { typeTable = CHART3, movePool = { "+7:0:40:0:100:10:0:0:0:3:X" } } },
+    { "ruleset", { typeTable = CHART3, weather = "FOG" } },
+    { "ruleset", { typeTable = CHART3, underwater = "yes" } },
+    { "ruleset", { movePool = { "999:0:40:0:100:10:0:0:0:3:X" } } },
+    { "mon", named },
+    { "mon", caught },
+    { "mon", noAbility },
+    { "mon", badGender },
+    { "party", { battle = "b1", mons = { named } } },
+    { "party", { battle = "b1", mons = { caught } } },
+    { "bag", { { id = 13, count = 2, name = "TONIC" }, { id = "1", count = 1 }, { id = 350, count = 1 } } },
+    { "bag", { ["13"] = 2, ["22"] = 1 } },
+    { "bag", { { id = "0x0D", count = 1 } } },
+    { "bag", { { id = 5, count = 1 } } },
+    { "bag", { { id = 13, count = 1 }, { id = "13", count = 1 } } },
+    { "choice", { battle = "b1", action = "fight", move = 1, target = 4, pass = 2 } },
+    { "choice", { battle = "b1", action = "item", item = "9", dexCaught = true, slot = 0 } },
+    { "choice", { battle = "b1", action = "item", item = "9", dexCaught = 1 } },
+    { "event", { battle = "b1", seq = 3, t = "stat", slot = 0, side = "a", text = "ATK fell",
+                 stat = "atk", stage = -2, delta = -2, amount = 2 } },
+    { "event", { battle = "b1", seq = 4, t = "held", slot = 3, side = "b", mon = 0, amount = 139,
+                 holding = 0, text = "ORAN BERRY" } },
+    { "event", { battle = "b1", seq = 5, t = "ball", slot = 0, side = "a", target = 3, amount = 4, text = "4" } },
+    { "event", { battle = "b1", seq = 6, t = "anim", slot = 1, side = "a", text = "SWEEP",
+                 target = 4, spread = 1, stat = "hp", stage = 9, delta = -20, holding = 999 } },
+    { "event", { battle = "b1", seq = 7, t = "weather", text = "RAIN", amount = 1 } },
+    { "event", { battle = "b1", seq = 8, t = "moves", slot = 0, side = "a", moves = { move3(), { id = "OLD",
+      pp = 1, power = 1, accuracy = 1, type = 0, effect = 0, chance = 0 } } } },
+    { "moveset", { battle = "b1", mon = 0, moves = { move3(), move3({ id = "NEW", num = 44 }) } } },
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "gen3_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(dialect3()) do
+      local kind, input = case[1], case[2]
+      local got
+      if kind == "ruleset" then got = Wire.battleRuleset(input, 3)
+      elseif kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, 3)
+      elseif kind == "bag" then got = Wire.battleBag(input, 3)
+      elseif kind == "choice" then got = Wire.battleChoice(input)
+      elseif kind == "event" then got = Wire.battleEvent(input)
+      elseif kind == "moveset" then got = Wire.battleMoveset(input, 3)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return { cases = out }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

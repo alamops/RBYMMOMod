@@ -1458,6 +1458,386 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 12. Gen 3 (PROTOCOL 30): the hub referees on BattleSim3
+-- ------------------------------------------------------------------
+--
+-- One Gen 3 hub seats FireRed, LeafGreen and Emerald, and a fight it brokers is
+-- resolved by BattleSim3 against the Gen 3 dialect of every upload
+-- (docs/plans/gen3-battle-sheet.md, contract C4): the ordered type table and
+-- the packed move pool instead of a percent chart, sheets that carry abilities
+-- and held items, and bags keyed by numeric pret item id.  server/hub_battle.test.js
+-- pins the same fights on the Node twin, message for message.  Every number
+-- below is synthetic except the pret enum values the sheet contract names.
+
+local Turn3 = need("BattleSim3/Turn")
+
+-- A tiny ordered chart: three super-effective rows, the Foresight sentinel,
+-- and one ghost immunity behind it.
+local CHART3 = { 10, 12, 20, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0 }
+local POOL3 = { "33:0:40:0:100:35:0:0:0:51:POOL_TAP", "52:4:40:10:100:25:10:0:0:18:POOL_SPARK" }
+
+local function move3(o)
+  o = o or {}
+  return {
+    id = o.id or "TAP3", num = o.num or 33, pp = o.pp or 20, maxPp = o.maxPp or 20,
+    power = o.power or 90, type = o.type or 0, accuracy = o.accuracy or 100,
+    effect = o.effect or 0, chance = o.chance or 0, target = o.target or 0,
+    priority = o.priority or 0, flags = o.flags or 51, name = o.name,
+  }
+end
+
+local function mon3(o)
+  o = o or {}
+  return {
+    generation = 3, species = o.species or "GAMMA", speciesNum = o.speciesNum or 1,
+    level = o.level or 50, hp = o.hp or 150, maxHp = o.maxHp or o.hp or 150,
+    stats = { atk = o.atk or 120, def = o.def or 80, spe = o.spe or 90,
+              spa = o.spa or 80, spd = o.spd or 80 },
+    types = o.types or { 0 }, ability = o.ability or 0,
+    heldItem = o.heldItem or 0, holdEffect = o.holdEffect or 0,
+    holdEffectParam = o.holdEffectParam or 0, gender = o.gender or "M",
+    friendship = 70, weight = 300, nature = 0,
+    hiddenPower = { type = 1, power = 50 }, beatUp = { atk = 60, def = 60 },
+    catchRate = o.catchRate,
+    moves = o.moves or { move3() },
+  }
+end
+
+local function bruiser3() return mon3({ atk = 400, def = 400, spe = 300, moves = { move3({ power = 200 }) } }) end
+local function glassjaw3()
+  return mon3({ species = "DELTA", hp = 1, def = 5, atk = 10, spe = 1, moves = { move3({ power = 10 }) } })
+end
+
+local function join3(hub, name, version)
+  local peer = fakePeer()
+  local client = hub:accept(peer)
+  if client then
+    hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      name = name, map = "FR_PALLET_TOWN", x = 5, y = 5, facing = "down",
+      generation = 3, version = version or "firered",
+      playerId = testPlayerId(name) })
+  end
+  return client, peer
+end
+
+local function eventText(peer, needle)
+  for _, msg in ipairs(peer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and type(msg.text) == "string"
+       and msg.text:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+-- ------- the hub picks its sim by generation
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  eq(hub.generation, 3, "generation:3 is stored")
+  ok(hub.Turn == Turn3, "generation 3 loads BattleSim3/Turn")
+  ok(hub.Effects == Wire.effectsFor(3), "and proves bags against Wire's Gen 3 catalog")
+  ok(hub.Effects.itemEffect("13") ~= nil, "a numeric-string id reads the catalog")
+  ok(hub.Effects.itemEffect(350).noConsume == true, "Poke Flute is never spent")
+  eq(hub.Effects.itemEffect(5), nil, "the Safari Ball is not a mediated item")
+end
+
+-- ------- 1v1 PvP: ordered chart, Gen 3 sheets, a numeric bag, a KO
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 7
+  local ann, annPeer = join3(hub, "ANN", "firered")
+  local bob, bobPeer = join3(hub, "BOB", "emerald")
+  ok(ann and ann.ready and bob and bob.ready, "FireRed and Emerald meet on one Gen 3 hub")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+  ok(id ~= nil and hub.battles[id] ~= nil, "the battle session opens a mediated record")
+
+  -- A Gen 1 percent chart is not a Gen 3 ruleset: the hub reads its own dialect.
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  eq(hub.battles[id].ruleset and hub.battles[id].ruleset.typeTable, nil,
+     "a percent chart carries no ordered table on a Gen 3 hub")
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                     typeTable = { 10, 12 } })
+  eq(hub.battles[id].ruleset and hub.battles[id].ruleset.typeTable, nil,
+     "a triple list cut mid-row is refused")
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, generation = 3,
+                     typeTable = CHART3, movePool = POOL3 })
+  local rules = hub.battles[id].ruleset
+  ok(rules ~= nil and #rules.typeTable == #CHART3, "the ordered chart lands whole")
+  eq(rules.movePool[1], POOL3[1], "and the packed pool survives canonical")
+
+  -- Bags are numeric pret ids.  13 heals; 5 (the Safari Ball) is refused.
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { bruiser3() },
+                     bag = { { id = 5, count = 1 } } })
+  eq(hub.battles[id].parties[ann.id], nil, "a bag naming an unmediated item refuses the party")
+  -- Hurt, so a potion has something to do (the sim refuses an item with no effect).
+  local hurt = bruiser3()
+  hurt.hp = 100
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id,
+                     mons = { hurt },
+                     bag = { { id = 13, count = 2, name = "TONIC" }, { id = "350", count = 1 } } })
+  local noWeight = glassjaw3()
+  noWeight.weight = nil
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { noWeight } })
+  eq(hub.battles[id].parties[bob.id], nil, "an upload missing a Gen 3 formula input is refused")
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { glassjaw3() } })
+
+  local record = hub.battles[id]
+  ok(record.sim ~= nil, "the message that completes the set opens a Gen 3 fight")
+  eq(record.bags[ann.id]["13"], 2, "the hub holds the bag keyed as a choice spells it")
+  eq(record.sim.byId[ann.id].bag[13], 2, "and the sim holds it by numeric id")
+  local ready = take(annPeer, Wire.BATTLE_READY)
+  ok(ready ~= nil and Wire.battleReady(ready) ~= nil, "battle_ready goes out")
+  local sawSend = false
+  for _, msg in ipairs(annPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT then
+      ok(Wire.battleEvent(msg) ~= nil, "every opening event survives the client sanitiser")
+      if msg.t == "send" then sawSend = true end
+    end
+  end
+  ok(sawSend, "and the opening sends are among them")
+
+  -- The bag proof on a numeric-string id: held, cancel drops the hold, spent at resolve.
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id, action = "item", item = "13" })
+  eq(record.sim.byId[bob.id].choice, nil, "an item with no stack is refused")
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "item",
+                     item = "13", slot = 0 })
+  ok(record.sim.byId[ann.id].choice ~= nil, "a proved Gen 3 potion is filed")
+  eq(record.bagHold[ann.id], "13", "and held, not spent")
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "cancel" })
+  eq(record.bagHold[ann.id], nil, "cancel drops the hold")
+  eq(record.bags[ann.id]["13"], 2, "without spending")
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "item",
+                     item = "13", slot = 0 })
+  annPeer.outbox = {}
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  eq(record.bags[ann.id]["13"], 1, "the turn resolves and one potion is gone")
+  ok(eventText(annPeer, "ANN used TONIC!"), "narrated under the name the bag uploaded")
+
+  -- The Poke Flute is proved and never spent.
+  if record.sim and record.sim.phase == "choice" then
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "item", item = "350" })
+    ok(record.sim.byId[ann.id].choice ~= nil, "the flute is proved present")
+    hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+    eq(record.bags[ann.id]["350"], 1, "and is still in the bag after the turn")
+  end
+
+  ok(fightItOut(hub, { { client = ann, battle = id }, { client = bob, battle = id } }),
+     "the fight reaches an end")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome ~= nil and Wire.battleOutcome(outcome) ~= nil, "the outcome goes out, sanitisable")
+  eq(outcome and outcome.reason, "ko", "a KO")
+  eq(outcome and outcome.winners[1], ann.id, "for the side that hit")
+  ok(take(bobPeer, Wire.BATTLE_OUTCOME) ~= nil, "and the loser hears it")
+  eq(hub.battles[id], nil, "the record is settled and forgotten")
+end
+
+-- ------- 2v2 against a trainer: one kit shared across both NPC seats
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 3
+  local ann, annPeer = join3(hub, "ANN")
+  local bob = join3(hub, "BOB", "leafgreen")
+  hub:openCoopBattle("g3c", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["g3c"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3c", typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3c", side = "a", mons = { bruiser3() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g3c", side = "a", mons = { bruiser3() } })
+  eq(record.sim, nil, "the trainer still owes a team")
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3c", side = "b",
+                     mons = { glassjaw3(), glassjaw3() },
+                     bag = { { id = 22, count = 1 } } })
+  ok(record.sim ~= nil, "the host's side b completes the Gen 3 field")
+  local bagA = record.sim.byId[record.npcIds[1]].bag
+  local bagB = record.sim.byId[record.npcIds[2]].bag
+  eq(bagA and bagA[22], 1, "the trainer's one potion, by numeric id")
+  ok(bagA == bagB, "one table on both seats: spending it once spends it")
+  eq(record.bags[record.npcIds[2]]["22"], 1, "and the hub sheet aliases it too")
+
+  ok(fightItOut(hub, { { client = ann, battle = "g3c" }, { client = bob, battle = "g3c" } }),
+     "the trainer answers at once and the fight runs out")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  ok(outcome ~= nil and Wire.battleOutcome(outcome) ~= nil, "outcome sanitisable")
+  eq(outcome and outcome.outcome, "win", "the two players win")
+  eq(outcome and outcome.losers[1], record.npcIds[1], "over the trainer's seats")
+end
+
+-- ------- a wild catch: numeric ball id, the caught sheet on the outcome
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 11
+  local ann, annPeer = join3(hub, "ANN", "emerald")
+  local record = hub:openMediatedBattle("g3w", { mode = "wild", hostId = ann.id, memberIds = { ann.id } })
+  ok(record ~= nil, "a Gen 3 wild record opens")
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3w", typeTable = CHART3,
+                     weather = "RAIN", terrain = 3, underwater = true })
+  ok(record.ruleset and record.ruleset.weather == "RAIN" and record.ruleset.underwater,
+     "a wild ruleset keeps its weather and field")
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3w", side = "a", mons = { mon3() },
+                     bag = { { id = 1, count = 1 } } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3w", side = "b",
+                     mons = { mon3({ species = "EPSILON", catchRate = 45 }) } })
+  ok(record.sim ~= nil, "the wild fight opens")
+  eq(record.sim.field.weather, "RAIN", "under the overworld's rain")
+  eq(record.sim.byId[record.npcIds[1]].bag, nil, "wildlife carries no bag")
+  annPeer.outbox = {}
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = "g3w", action = "item", item = "1",
+                     dexCaught = false })
+  local sawBall = false
+  for _, msg in ipairs(annPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and msg.t == "ball" then
+      sawBall = Wire.battleEvent(msg) ~= nil and msg.amount == 4 and msg.text == "1"
+    end
+  end
+  ok(sawBall, "one ball event: four shakes, the ball named by its id")
+  local outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+  local clean = outcome and Wire.battleOutcome(outcome)
+  ok(clean ~= nil, "the catch outcome survives the client sanitiser")
+  eq(clean and clean.reason, "catch", "reason catch")
+  eq(clean and clean.catcher, ann.id, "caught by the thrower")
+  eq(clean and clean.caught and clean.caught.species, "EPSILON", "the wild sheet rides along")
+  eq(clean and clean.caught and clean.caught.ball, 1, "with the ball it went into")
+  eq(clean and clean.caught and clean.caught.generation, 3, "read in the Gen 3 dialect")
+end
+
+-- ------- mid-fight learn on Gen 3: the row keeps num / target / priority / flags
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  local ann = join3(hub, "ANN")
+  local bob = join3(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  local record = hub.battles[id]
+  local fighter = record.sim.byId[ann.id]
+  local learned = move3({ id = "SHIELD3", num = 182, power = 0, accuracy = 0,
+                          effect = 111, target = 16, priority = 3, flags = 0 })
+  hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+                     moves = { move3(), learned } })
+  local row = fighter.mons[1].moves[2]
+  eq(row and row.num, 182, "the learned row keeps its move number")
+  eq(row and row.priority, 3, "its priority")
+  eq(row and row.target, 16, "and its target")
+  ok(fighter.b.moves == fighter.mons[1].moves, "the active battler fights with the new list")
+  eq(fighter.mons[1].moves[1].pp, 20, "the unchanged slot keeps the hub's PP")
+end
+
+-- ------- the Gen 3 dialect at the boundary, and the limits a full upload meets
+
+do
+  -- A worst-case ruleset: the full ordered table and a full pool of long ids.
+  local tt = {}
+  for i = 1, Config.BATTLE_TYPE_TABLE3_MAX do
+    tt[#tt + 1] = i % 18; tt[#tt + 1] = (i * 7) % 18; tt[#tt + 1] = 20
+  end
+  local pool = {}
+  for i = 1, Config.BATTLE_MOVE_POOL3_MAX do
+    pool[i] = table.concat({ (i % 354) + 1, 213, 255, 17, 100, 99, 100, 255, -7, 63,
+      string.rep("X", 36) .. string.format("%04d", i) }, ":")
+  end
+  local rules = { type = Wire.BATTLE_RULESET, battle = "b1", generation = 3,
+                  typeTable = tt, movePool = pool, terrain = 9, weather = "HAIL" }
+  ok(Wire.payloadOk(rules), "a full Gen 3 ruleset is inside PAYLOAD_MAX_NODES")
+  local clean = Wire.battleRuleset(rules, 3)
+  ok(clean ~= nil, "and the sanitiser takes it whole")
+  eq(clean and #clean.movePool, Config.BATTLE_MOVE_POOL3_MAX, "every pool entry kept")
+  local over = {}
+  for i = 1, #pool do over[i] = pool[i] end
+  over[#over + 1] = pool[1]
+  eq(#Wire.battleRuleset({ typeTable = tt, movePool = over }, 3).movePool,
+     Config.BATTLE_MOVE_POOL3_MAX, "a pool past the cap keeps the cap")
+  local big = {}
+  for i = 1, 3 * (Config.BATTLE_TYPE_TABLE3_MAX + 1) do big[i] = 0 end
+  eq(Wire.battleRuleset({ typeTable = big }, 3), nil, "a table past its cap is refused")
+  eq(Wire.battleRuleset({ typeTable = { 0, -1, 10 } }, 3), nil,
+     "half a sentinel is refused")
+  eq(Wire.battleRuleset({ typeTable = CHART3, movePool = { "1:2:3" } }, 3), nil,
+     "a pool entry that does not parse refuses the ruleset")
+  eq(Wire.battleRuleset({ typeTable = CHART3, weather = "FOG" }, 3), nil,
+     "an unknown weather refuses it")
+  eq(Wire.battleRuleset({ generation = 3, typeTable = CHART3, movePool = { "+7:0:40:0:100:10:0:0:-0:3:X" } }), nil,
+     "a signed-plus integer is not the sim's grammar")
+  ok(Wire.battleRuleset({ generation = 3, movePool = { "7:0:40:0:100:10:0:0:-0:3:X" } }).movePool[1]
+     == "7:0:40:0:100:10:0:0:0:3:X", "and -0 is written back as 0")
+
+  -- A full six-mon Gen 3 party with a full bag.
+  local mons = {}
+  for i = 1, Config.BATTLE_MON_MAX do
+    local m = mon3({ moves = { move3(), move3({ id = "B" }), move3({ id = "C" }), move3({ id = "D" }) } })
+    m.speciesId = tostring(i); m.slot = i - 1; m.abilityName = "ABILITYNAME"; m.itemName = "ITEMNAME"
+    m.ivs = { hp = 31, atk = 31, def = 31, spe = 31, spa = 31, spd = 31 }
+    m.evs = { hp = 255, atk = 255, def = 0, spe = 0, spa = 0, spd = 0 }
+    m.personality = 4294967295; m.otId = 12345
+    mons[i] = m
+  end
+  local bag = {}
+  local ids = { 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41 }
+  for i, n in ipairs(ids) do bag[i] = { id = n, count = 99, name = "ITEM" .. n } end
+  local party = { type = Wire.BATTLE_PARTY, battle = "b1", generation = 3, mons = mons, bag = bag }
+  ok(Wire.payloadOk(party), "a full Gen 3 party is inside PAYLOAD_MAX_NODES")
+  local cp = Wire.battleParty(party, 3)
+  ok(cp ~= nil and #cp.mons == 6 and #cp.bag == #ids, "and sanitises whole")
+
+  -- The sheet's own checks.
+  local noAbility = mon3(); noAbility.ability = nil
+  eq(Wire.battleMon(noAbility), nil, "a Gen 3 sheet without an ability is refused")
+  local badGender = mon3(); badGender.gender = "X"
+  eq(Wire.battleMon(badGender), nil, "a gender outside M/F/U is refused")
+  local caught = mon3(); caught.weight, caught.hiddenPower, caught.beatUp = nil, nil, nil
+  ok(Wire.battleMon(caught) ~= nil, "a caught sheet without the upload-only inputs still reads")
+  eq(Wire.battleParty({ battle = "b1", mons = { caught } }, 3), nil,
+     "but an upload without them does not")
+  eq(Wire.battleParty({ battle = "b1", mons = { mon3() }, generation = 2 }, 3), nil,
+     "a party claiming another generation is refused on a Gen 3 hub")
+  local mixed = { generation = 2, species = "OLDER", level = 50, hp = 100, maxHp = 100,
+    stats = { atk = 50, def = 50, spe = 50, spa = 50, spd = 50 }, moves = { move() } }
+  ok(Wire.battleMon(mixed) ~= nil, "(a well-formed Gen 2 sheet on its own)")
+  eq(Wire.battleParty({ battle = "b1", generation = 3, mons = { mon3(), mixed } }), nil,
+     "and a Gen 3 party with a Gen 2 sheet in it is refused")
+  eq(Wire.battleBag({ ["13"] = 2, ["22"] = 1 }, 3)[1].id, 13, "the map form reads numeric-string keys")
+  eq(Wire.battleBag({ { id = "0x0D", count = 1 } }, 3), nil, "a hex id is not an item id")
+  eq(Wire.battleBag({ { id = 13, count = 1 }, { id = "13", count = 1 } }, 3), nil,
+     "the same item twice is refused")
+
+  -- Choices and events.
+  local c = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 2 })
+  eq(c and c.pass, 2, "a Baton Pass destination rides the fight choice")
+  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 6 }), nil,
+     "outside the party it is refused")
+  local ic = Wire.battleChoice({ battle = "b1", action = "item", item = "9", dexCaught = true })
+  eq(ic and ic.dexCaught, true, "Repeat Ball's dex word rides the item choice")
+  eq(Wire.battleChoice({ battle = "b1", action = "item", item = "9", dexCaught = 1 }), nil,
+     "and only as a boolean")
+  local ev = Wire.battleEvent({ battle = "b1", seq = 3, t = "stat", slot = 0, side = "a",
+    text = "ATK fell", stat = "atk", stage = -2, delta = -2 })
+  ok(ev ~= nil and ev.stat == "atk" and ev.stage == -2 and ev.delta == -2,
+     "a Gen 3 stat event keeps its signed stage and delta")
+  local held = Wire.battleEvent({ battle = "b1", seq = 4, t = "held", slot = 3, side = "b",
+    mon = 0, amount = 139, holding = 0, text = "BERRY" })
+  ok(held ~= nil and held.holding == 0 and held.amount == 139, "a held event keeps what is left held")
+  local anim = Wire.battleEvent({ battle = "b1", seq = 5, t = "anim", slot = 0, side = "a",
+    text = "SWEEP", target = 4, spread = 1 })
+  ok(anim ~= nil and anim.target == 4 and anim.spread == 1, "an anim keeps its target and spread")
+  local ball = Wire.battleEvent({ battle = "b1", seq = 6, t = "ball", slot = 0, side = "a",
+    target = 3, amount = 2, text = "4" })
+  ok(ball ~= nil and ball.text == "4", "a ball names its id like an item does")
+  for _, kind in ipairs({ "ability", "weather", "form", "sub" }) do
+    ok(Wire.battleEvent({ battle = "b1", seq = 7, t = kind }) ~= nil, "kind " .. kind .. " is in the vocabulary")
+  end
+  local mv = Wire.battleEvent({ battle = "b1", seq = 8, t = "moves", slot = 0, side = "a",
+    moves = { move3() } })
+  eq(mv and mv.moves and mv.moves[1].num, 33, "a Gen 3 moves event keeps its rows' numbers")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("hub_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

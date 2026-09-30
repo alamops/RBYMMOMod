@@ -315,7 +315,8 @@ test('the team roster alphabet is the same three tokens on both sides', () => {
 
   // ...and the two sim mirrors, which are where the tokens are actually
   // produced. They mirror rather than import, so they can drift silently.
-  for (const rel of ['src/BattleSim/events.lua', 'src/BattleSim2/events.lua']) {
+  for (const rel of ['src/BattleSim/events.lua', 'src/BattleSim2/events.lua',
+    'src/BattleSim3/events.lua']) {
     const src = read(rel);
     const mirror = src.match(/M\.TEAM_TOKENS\s*=\s*\{([\s\S]*?)\}/);
     assert.ok(mirror, `${rel} must assign M.TEAM_TOKENS`);
@@ -385,4 +386,147 @@ test('inbound client→hub message types match on both hubs', () => {
     hubHandlers.length >= inbound.length,
     `Hub.lua handler count (${hubHandlers.length}) under-covers inbound (${inbound.length})`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Gen 3 (PROTOCOL 30): the battle3 twin, the Gen 3 sheet dialect, the caps
+// ---------------------------------------------------------------------------
+
+const Battle3 = require('./lib/battle3');
+const sanitize = require('./lib/sanitize.js');
+
+// Every `key = true` in a Lua table literal assigned to `M.<name>`.
+function luaSet(src, name) {
+  const m = src.match(new RegExp(`M\\.${name}\\s*=\\s*\\{([\\s\\S]*?)\\}`));
+  assert.ok(m, `must assign M.${name} as a table`);
+  return [...m[1].matchAll(/(\w+)\s*=\s*true/g)].map((x) => x[1]).sort();
+}
+
+// Every `key = "type"` in a Lua table literal.
+function luaTypedKeys(src, pattern) {
+  const m = src.match(pattern);
+  assert.ok(m, `table ${pattern} not found`);
+  return Object.fromEntries([...m[1].matchAll(/(\w+)\s*=\s*"(\w+)"/g)].map((x) => [x[1], x[2]]));
+}
+
+function luaNumber(src, name, label) {
+  const m = src.match(new RegExp(`M\\.${name}\\s*=\\s*(-?\\d+)`));
+  assert.ok(m, `${label} must assign M.${name}`);
+  return Number(m[1]);
+}
+
+test('Gen 3 battle caps match Config.lua and sanitize.js', () => {
+  // The ruleset's two lists and the sheet's id caps. A one-sided cap is a
+  // ruleset or a sheet one hosting path fights and the other refuses.
+  const config = read('src/Config.lua');
+  for (const name of ['BATTLE_TYPE_TABLE3_MAX', 'BATTLE_MOVE_POOL3_MAX', 'GEN3_SPECIES_MAX',
+    'GEN3_MOVE_MAX', 'GEN3_ITEM_MAX', 'GEN3_ABILITY_MAX', 'GEN3_NATURE_COUNT', 'GEN3_IV_MAX',
+    'GEN3_EV_MAX']) {
+    assert.strictEqual(luaNumber(config, name, 'Config.lua'), sanitize[name],
+      `Config.${name} and sanitize.${name} must match`);
+  }
+  assert.strictEqual(sanitize.BATTLE_TYPE_TABLE3_MAX, 150, 'docs/plans/gen3-battle-sheet.md §3.1');
+  assert.strictEqual(sanitize.BATTLE_MOVE_POOL3_MAX, 360, 'docs/plans/gen3-battle-sheet.md §3.3');
+});
+
+test('Gen 3 sheet bounds match Wire.lua and sanitize.js', () => {
+  const wire = read('src/Wire.lua');
+  for (const name of ['MOVE_TYPE_MAX', 'POWER3_MAX', 'ACCURACY3_MAX', 'EFFECT3_MAX',
+    'TARGET3_MAX', 'PRIORITY3_MAX', 'FLAGS3_MAX', 'HOLD_EFFECT3_MAX', 'HOLD_PARAM3_MAX',
+    'WEIGHT3_MAX', 'SLEEP3_MAX', 'U32_MAX', 'TYPE_CELL3_MIN', 'TYPE_MULT3_MAX', 'TERRAIN3_MAX',
+    'POOL_ENTRY3_MAX', 'STAGE3_MAX', 'DELTA3_MAX']) {
+    assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name],
+      `Wire.${name} and sanitize.${name} must match`);
+  }
+  assert.strictEqual(sanitize.MOVE_TYPE_MAX, 31, 'the move type keeps the older dialects\' width');
+  assert.deepStrictEqual([...sanitize.GENDERS3].sort(), luaSet(wire, 'GENDERS3'),
+    'the Gen 3 genders are one closed set on both sides');
+  assert.deepStrictEqual([...sanitize.WEATHERS3].sort(), luaSet(wire, 'WEATHERS3'),
+    'the ruleset weathers are one closed set on both sides');
+  assert.deepStrictEqual([...sanitize.EVENT_STATS3].sort(), luaSet(wire, 'EVENT_STATS3'),
+    'a stat event names the same seven stats on both sides');
+});
+
+test('the Gen 3 event vocabulary is one vocabulary across Wire and both sims', () => {
+  // Wire (the client's sanitiser) must know every kind BattleSim3 emits, and
+  // the Node twin must emit exactly the Lua sim's kinds with the Lua sim's
+  // fields -- the parity fixtures prove the streams equal, this proves the
+  // whitelists they are checked against are too.
+  const wire = read('src/Wire.lua');
+  const sim = read('src/BattleSim3/events.lua');
+  const wireKinds3 = luaSet(wire, 'BATTLE_EVENTS3');
+  assert.deepStrictEqual([...sanitize.BATTLE_EVENT_TYPES3].sort(), wireKinds3,
+    'Wire.BATTLE_EVENTS3 and sanitize.js BATTLE_EVENT_TYPES3 name the same Gen 3 kinds');
+  const wireKinds = luaSet(wire, 'BATTLE_EVENTS').concat(wireKinds3).sort();
+  const simKinds = luaSet(sim, 'KINDS');
+  assert.deepStrictEqual(Object.keys(Battle3.Events.KINDS).sort(), simKinds,
+    'lib/battle3/events.js KINDS mirrors src/BattleSim3/events.lua');
+  assert.deepStrictEqual(simKinds, wireKinds,
+    "BattleSim3 speaks exactly Wire's two tables: BATTLE_EVENTS plus BATTLE_EVENTS3");
+  for (const kind of ['ability', 'weather', 'held', 'form', 'sub', 'ball']) {
+    assert.ok(simKinds.includes(kind), `BattleSim3 speaks ${kind} (C5)`);
+  }
+  const fields = luaTypedKeys(sim, /M\.FIELDS\s*=\s*\{([\s\S]*?)\}/);
+  assert.deepStrictEqual(Battle3.Events.FIELDS, fields,
+    'lib/battle3/events.js FIELDS mirrors the Lua whitelist, types included');
+  const moveFields = luaTypedKeys(sim, /local MOVE_FIELDS\s*=\s*\{([\s\S]*?)\}/);
+  assert.deepStrictEqual(Battle3.Events.MOVE_FIELDS, moveFields,
+    'and the Gen 3 move row a `moves` event carries');
+  // The Gen 3 fields each have a Wire sanitiser (battleEvent reads raw.<field>).
+  for (const field of ['target', 'spread', 'stat', 'stage', 'delta', 'holding']) {
+    assert.ok(new RegExp(`raw\\.${field}\\b`).test(wire), `Wire.battleEvent must read ${field}`);
+  }
+});
+
+test('lib/battle3 Turn constants match src/BattleSim3/Turn.lua', () => {
+  const turn = read('src/BattleSim3/Turn.lua');
+  for (const name of ['VERSION', 'GENERATION', 'MONS_PER_PARTY', 'FIGHTERS_PER_SIDE',
+    'CHOICE_TIMEOUT', 'RECONNECT_GRACE', 'RESOLVE_TIMEOUT', 'TIE_BREAK_ROLL', 'AIM_SEED_OFFSET']) {
+    assert.strictEqual(luaNumber(turn, name, 'BattleSim3/Turn.lua'), Battle3.Turn[name],
+      `BattleSim3 Turn.${name} and lib/battle3 Turn.${name} must match`);
+  }
+  assert.deepStrictEqual(Object.keys(Battle3.Turn.MODES).sort(),
+    ['1v1', 'coop_npc', 'coop_pvp', 'coop_wild', 'wild'], 'the same five modes');
+  assert.strictEqual(Battle3.GENERATION, 3);
+  const config = read('src/Config.lua');
+  assert.strictEqual(luaNumber(config, 'BATTLE_MON_MAX', 'Config.lua'), Battle3.Turn.MONS_PER_PARTY);
+  assert.strictEqual(luaNumber(config, 'BATTLE_CHOICE_TIMEOUT', 'Config.lua'),
+    Battle3.Turn.CHOICE_TIMEOUT);
+});
+
+test('the Gen 3 bag catalog is one table on both sims', () => {
+  // docs/plans/gen3-battle-sheet.md §4. Wire / sanitize prove an upload
+  // against it and both hubs spend against it, so a one-sided id is an item
+  // one hosting path accepts and the other refuses.
+  const items = read('src/BattleSim3/Items.lua');
+  const body = items.match(/M\.BAG\s*=\s*\{([\s\S]*?)\n\}/);
+  assert.ok(body, 'BattleSim3/Items.lua must assign M.BAG');
+  // Top-level fields of each row, scalars by value; a nested cure set reads
+  // as "set" (its members are pinned by the turn fixtures, which cure).
+  const lua = {};
+  for (const m of body[1].matchAll(/\[(\d+)\]\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g)) {
+    const flat = m[2].replace(/\{[^{}]*\}/g, 'SET');
+    const row = {};
+    for (const f of flat.matchAll(/(\w+)\s*=\s*("?[\w]+"?)/g)) {
+      let v = f[2];
+      if (v === 'true') v = true;
+      else if (v === 'SET' || v === 'ALL') v = 'set';
+      else if (/^"/.test(v)) v = v.slice(1, -1);
+      else if (/^\d+$/.test(v)) v = Number(v);
+      row[f[1]] = v;
+    }
+    lua[m[1]] = row;
+  }
+  const js = {};
+  for (const id of Object.keys(Battle3.Items.BAG)) {
+    const row = {};
+    for (const [k, v] of Object.entries(Battle3.Items.BAG[id])) {
+      row[k] = (v !== null && typeof v === 'object') ? 'set' : v;
+    }
+    js[id] = row;
+  }
+  assert.deepStrictEqual(js, lua, 'the same ids with the same effects');
+  assert.strictEqual(Battle3.Items.bagEffect(5), null, 'the Safari Ball stays unmediated');
+  assert.strictEqual(sanitize.effectsFor(3).itemEffect('350').noConsume, true,
+    'the Poke Flute is proved but never spent');
 });

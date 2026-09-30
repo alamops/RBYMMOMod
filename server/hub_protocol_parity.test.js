@@ -916,6 +916,338 @@ function runJs() {
       })(),
     },
     ...runGeneration(),
+    ...runGen3(),
+  ];
+}
+
+// ------------------------------------------------------------------
+// Gen 3 (PROTOCOL 30): twins of the Lua driver's gen3_* scenarios -- a
+// mediated fight on lib/battle3, its opening event stream, and the Gen 3
+// dialect read by lib/sanitize. Absent values are the "(nil)" sentinel on both
+// sides, because a nil vanishes from a Lua table where JSON keeps a null.
+// ------------------------------------------------------------------
+
+const sanitize = require('./lib/sanitize.js');
+
+const CHART3 = [10, 12, 20, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+const POOL3 = ['33:0:40:0:100:35:0:0:0:51:POOL_TAP', '52:4:40:10:100:25:10:0:0:18:POOL_SPARK'];
+
+function move3(o) {
+  const p = o || {};
+  const row = {
+    id: p.id || 'TAP3',
+    num: p.num || 33,
+    pp: p.pp || 20,
+    maxPp: p.maxPp || 20,
+    power: p.power || 90,
+    type: p.type || 0,
+    accuracy: p.accuracy || 100,
+    effect: p.effect || 0,
+    chance: p.chance || 0,
+    target: p.target || 0,
+    priority: p.priority || 0,
+    flags: p.flags || 51,
+  };
+  // Lua's `o.x or default` keeps an explicit 0 only where 0 is not falsy in
+  // Lua -- which is everywhere; mirror that for the fields set to 0 below.
+  for (const key of ['power', 'accuracy', 'flags']) {
+    if (p[key] === 0) row[key] = 0;
+  }
+  if (p.name) row.name = p.name;
+  return row;
+}
+
+function mon3(o) {
+  const p = o || {};
+  const sheet = {
+    generation: 3,
+    species: p.species || 'GAMMA',
+    speciesNum: p.speciesNum || 1,
+    level: p.level || 50,
+    hp: p.hp || 150,
+    maxHp: p.maxHp || p.hp || 150,
+    stats: {
+      atk: p.atk || 120, def: p.def || 80, spe: p.spe || 90, spa: p.spa || 80, spd: p.spd || 80,
+    },
+    types: p.types || [0],
+    ability: p.ability || 0,
+    heldItem: p.heldItem || 0,
+    holdEffect: p.holdEffect || 0,
+    holdEffectParam: p.holdEffectParam || 0,
+    gender: p.gender || 'M',
+    friendship: 70,
+    weight: 300,
+    nature: 0,
+    hiddenPower: { type: 1, power: 50 },
+    beatUp: { atk: 60, def: 60 },
+    moves: p.moves || [move3()],
+  };
+  if (p.catchRate !== undefined) sheet.catchRate = p.catchRate;
+  return sheet;
+}
+
+const orNil = (v) => (v === undefined || v === null ? '(nil)' : v);
+
+const EVENT_KEYS = ['t', 'text', 'amount', 'hp', 'maxHp', 'slot', 'side', 'status',
+  'mon', 'target', 'spread', 'stat', 'stage', 'delta', 'holding', 'confused', 'team'];
+
+function slimEvent(e) {
+  const out = {};
+  for (const k of EVENT_KEYS) out[k] = orNil(e[k]);
+  out.moves = Array.isArray(e.moves) ? e.moves.length : 0;
+  return out;
+}
+
+function dialect3() {
+  const caught = mon3({ species: 'CAUGHT' });
+  delete caught.weight;
+  delete caught.hiddenPower;
+  delete caught.beatUp;
+  caught.ball = 4;
+  caught.personality = 305419896;
+  caught.otId = 4660;
+  caught.ivs = {
+    hp: 31, atk: 0, def: 1, spe: 2, spa: 3, spd: 4,
+  };
+  const noAbility = mon3();
+  delete noAbility.ability;
+  const badGender = mon3();
+  badGender.gender = 'X';
+  const named = mon3({
+    moves: [move3({ name: 'Tap Three' }), move3({
+      id: 'B', num: 182, power: 0, accuracy: 0, effect: 111, target: 16, priority: 3, flags: 0,
+    })],
+  });
+  named.abilityName = 'BLAZE';
+  named.itemName = 'ORAN';
+  named.sleepTurns = 3;
+  named.status = 'SLP';
+  return [
+    ['ruleset', {
+      generation: 3,
+      typeTable: CHART3,
+      movePool: POOL3,
+      terrain: 9,
+      weather: 'SAND',
+      underwater: false,
+      seed: 99,
+      specialTypes: [10, 11],
+    }],
+    ['ruleset', {
+      typeTable: CHART3,
+      movePool: ['7:0:40:0:100:10:0:0:-0:3:X', {
+        id: 'ROW',
+        num: 12,
+        pp: 5,
+        power: 0,
+        accuracy: 0,
+        type: 0,
+        effect: 38,
+        chance: 0,
+        target: 0,
+        priority: 0,
+        flags: 2,
+      }],
+    }],
+    ['ruleset', { typeTable: [0, -1, 10] }],
+    ['ruleset', { typeTable: CHART3, movePool: ['+7:0:40:0:100:10:0:0:0:3:X'] }],
+    ['ruleset', { typeTable: CHART3, weather: 'FOG' }],
+    ['ruleset', { typeTable: CHART3, underwater: 'yes' }],
+    ['ruleset', { movePool: ['999:0:40:0:100:10:0:0:0:3:X'] }],
+    ['mon', named],
+    ['mon', caught],
+    ['mon', noAbility],
+    ['mon', badGender],
+    ['party', { battle: 'b1', mons: [named] }],
+    ['party', { battle: 'b1', mons: [caught] }],
+    ['bag', [{ id: 13, count: 2, name: 'TONIC' }, { id: '1', count: 1 }, { id: 350, count: 1 }]],
+    ['bag', { 13: 2, 22: 1 }],
+    ['bag', [{ id: '0x0D', count: 1 }]],
+    ['bag', [{ id: 5, count: 1 }]],
+    ['bag', [{ id: 13, count: 1 }, { id: '13', count: 1 }]],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 1, target: 4, pass: 2,
+    }],
+    ['choice', {
+      battle: 'b1', action: 'item', item: '9', dexCaught: true, slot: 0,
+    }],
+    ['choice', {
+      battle: 'b1', action: 'item', item: '9', dexCaught: 1,
+    }],
+    ['event', {
+      battle: 'b1', seq: 3, t: 'stat', slot: 0, side: 'a', text: 'ATK fell', stat: 'atk', stage: -2, delta: -2, amount: 2,
+    }],
+    ['event', {
+      battle: 'b1', seq: 4, t: 'held', slot: 3, side: 'b', mon: 0, amount: 139, holding: 0, text: 'ORAN BERRY',
+    }],
+    ['event', {
+      battle: 'b1', seq: 5, t: 'ball', slot: 0, side: 'a', target: 3, amount: 4, text: '4',
+    }],
+    ['event', {
+      battle: 'b1',
+      seq: 6,
+      t: 'anim',
+      slot: 1,
+      side: 'a',
+      text: 'SWEEP',
+      target: 4,
+      spread: 1,
+      stat: 'hp',
+      stage: 9,
+      delta: -20,
+      holding: 999,
+    }],
+    ['event', {
+      battle: 'b1', seq: 7, t: 'weather', text: 'RAIN', amount: 1,
+    }],
+    ['event', {
+      battle: 'b1',
+      seq: 8,
+      t: 'moves',
+      slot: 0,
+      side: 'a',
+      moves: [move3(), {
+        id: 'OLD', pp: 1, power: 1, accuracy: 1, type: 0, effect: 0, chance: 0,
+      }],
+    }],
+    ['moveset', { battle: 'b1', mon: 0, moves: [move3(), move3({ id: 'NEW', num: 44 })] }],
+  ];
+}
+
+function runGen3() {
+  return [
+    {
+      name: 'gen3_mediated_fight',
+      result: (() => {
+        const clock = makeClock();
+        const relay = makeGenRelay(clock, 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+        });
+        take(a, 'mmo.welcome');
+        take(b, 'mmo.welcome');
+        takeAll(a, 'mmo.join');
+        takeAll(b, 'mmo.join');
+        const sess = openFight(relay, a, b);
+        a.peer.outbox = [];
+        b.peer.outbox = [];
+        relay.handle(a.id, {
+          type: 'mmo.battle_ruleset',
+          battle: sess.id,
+          generation: 3,
+          typeTable: CHART3,
+          movePool: POOL3,
+          terrain: 3,
+        });
+        const hurt = mon3({
+          atk: 400, def: 400, spe: 300, hp: 100, maxHp: 150, moves: [move3({ power: 200 })],
+        });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [hurt],
+          bag: [{ id: 13, count: 2, name: 'TONIC' }, { id: '350', count: 1 }],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'DELTA', hp: 1, def: 5, atk: 10, spe: 1, moves: [move3({ power: 10 })],
+          })],
+        });
+        const record = relay.battles.get(sess.id);
+        const opened = !!record.sim;
+        relay.handle(a.id, {
+          type: 'mmo.battle_choice', battle: sess.id, action: 'item', item: '13', slot: 0,
+        });
+        const held = record.bagHold[a.id];
+        relay.handle(b.id, {
+          type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+        });
+        const bagAfter = {
+          potion: orNil(record.bags.get(a.id)['13']),
+          flute: orNil(record.bags.get(a.id)['350']),
+        };
+        const outcome = fightItOut(relay, a, b, sess.id);
+        return {
+          opened,
+          ruleset: {
+            triples: record.ruleset.typeTable.length / 3,
+            pool: record.ruleset.movePool,
+            terrain: record.ruleset.terrain,
+          },
+          held: orNil(held),
+          bagAfter,
+          outcome: slimOutcome(outcome),
+          battleGone: !relay.battles.has(sess.id),
+        };
+      })(),
+    },
+    {
+      name: 'gen3_event_stream',
+      result: (() => {
+        const clock = makeClock();
+        const relay = makeGenRelay(clock, 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'leafgreen', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const sess = openFight(relay, a, b);
+        relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [
+            mon3({
+              ability: 22, types: [10], moves: [move3({ type: 10, effect: 4, chance: 100 })],
+            }),
+            mon3({ species: 'ZETA', ability: 2, types: [11] }),
+          ],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'ETA', ability: 45, types: [12], heldItem: 139, holdEffect: 1, holdEffectParam: 10,
+          })],
+        });
+        const events = [];
+        for (let i = 0; i < 3; i += 1) {
+          if (!relay.battles.has(sess.id)) break;
+          for (const msg of takeAll(a, 'mmo.battle_event')) events.push(slimEvent(msg));
+          relay.handle(a.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+          relay.handle(b.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+        }
+        for (const msg of takeAll(a, 'mmo.battle_event')) events.push(slimEvent(msg));
+        return { events, count: events.length };
+      })(),
+    },
+    {
+      name: 'gen3_dialect',
+      result: (() => {
+        const cases = dialect3().map(([kind, input]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, 3);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, 3);
+          else if (kind === 'bag') got = sanitize.cleanBattleBag(input, 3);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input);
+          else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, 3);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
   ];
 }
 

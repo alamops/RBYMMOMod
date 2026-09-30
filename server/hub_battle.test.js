@@ -1386,4 +1386,501 @@ testRefusedCoopOpenLeavesNoPaperwork();
   ok(gen2.Turn !== battle1.Turn, 'Gen2 hub never holds Gen1 Turn');
 }
 
+// ---------------------------------------------------------------------------
+// Gen 3 (PROTOCOL 30): the hub referees on lib/battle3
+// ---------------------------------------------------------------------------
+//
+// One Gen 3 hub seats FireRed, LeafGreen and Emerald, and a fight it brokers is
+// resolved by lib/battle3 against the Gen 3 dialect of every upload
+// (docs/plans/gen3-battle-sheet.md, contract C4): the ordered type table and
+// the packed move pool, sheets with abilities and held items, bags keyed by
+// numeric pret item id. tests/hub_battle.lua pins the same fights on the Lua
+// hub, message for message. Every number is synthetic except the pret enum
+// values the sheet contract names.
+
+const sanitize = require('./lib/sanitize.js');
+
+const CHART3 = [10, 12, 20, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+const POOL3 = ['33:0:40:0:100:35:0:0:0:51:POOL_TAP', '52:4:40:10:100:25:10:0:0:18:POOL_SPARK'];
+
+function move3(o) {
+  const p = o || {};
+  const row = {
+    id: p.id || 'TAP3',
+    num: p.num === undefined ? 33 : p.num,
+    pp: p.pp === undefined ? 20 : p.pp,
+    maxPp: p.maxPp === undefined ? 20 : p.maxPp,
+    power: p.power === undefined ? 90 : p.power,
+    type: p.type || 0,
+    accuracy: p.accuracy === undefined ? 100 : p.accuracy,
+    effect: p.effect || 0,
+    chance: p.chance || 0,
+    target: p.target || 0,
+    priority: p.priority || 0,
+    flags: p.flags === undefined ? 51 : p.flags,
+  };
+  if (p.name) row.name = p.name;
+  return row;
+}
+
+function mon3(o) {
+  const p = o || {};
+  const sheet = {
+    generation: 3,
+    species: p.species || 'GAMMA',
+    speciesNum: p.speciesNum || 1,
+    level: p.level || 50,
+    hp: p.hp === undefined ? 150 : p.hp,
+    maxHp: p.maxHp || p.hp || 150,
+    stats: {
+      atk: p.atk || 120, def: p.def || 80, spe: p.spe || 90, spa: p.spa || 80, spd: p.spd || 80,
+    },
+    types: p.types || [0],
+    ability: p.ability || 0,
+    heldItem: p.heldItem || 0,
+    holdEffect: p.holdEffect || 0,
+    holdEffectParam: p.holdEffectParam || 0,
+    gender: p.gender || 'M',
+    friendship: 70,
+    weight: 300,
+    nature: 0,
+    hiddenPower: { type: 1, power: 50 },
+    beatUp: { atk: 60, def: 60 },
+    moves: p.moves || [move3()],
+  };
+  if (p.catchRate !== undefined) sheet.catchRate = p.catchRate;
+  return sheet;
+}
+
+const bruiser3 = () => mon3({
+  atk: 400, def: 400, spe: 300, moves: [move3({ power: 200 })],
+});
+const glassjaw3 = () => mon3({
+  species: 'DELTA', hp: 1, def: 5, atk: 10, spe: 1, moves: [move3({ power: 10 })],
+});
+
+function dial3(relay, name, version) {
+  return dialGen3(relay, name, version || 'firered');
+}
+
+// dial() with a Gen 3 hello: a Gen 3 hub refuses a hello with no generation
+// (missing is 1).
+function dialGen3(relay, name, version) {
+  const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => {};
+  const id = relay.accept(peer);
+  const playerId = testPlayerId(name);
+  relay.handle(id, {
+    type: 'mmo.hello',
+    proto: PROTOCOL,
+    name,
+    sprite: 'OBJ_EVENT_GFX_RED_NORMAL',
+    map: 'FR_PALLET_TOWN',
+    x: 5,
+    y: 5,
+    facing: 'down',
+    generation: 3,
+    version,
+    playerId,
+  });
+  return { id: playerId, peer, name, ephemeralId: id };
+}
+
+function eventText(player, needle) {
+  return player.peer.outbox.some((m) => m.type === 'mmo.battle_event'
+    && typeof m.text === 'string' && m.text.includes(needle));
+}
+
+// The Node half of the Lua fightItOut: answer every open turn from both seats.
+function fightOut(relay, battle, players, limit) {
+  for (let turn = 0; turn < (limit || 20); turn += 1) {
+    for (const p of players) {
+      relay.handle(p.id, {
+        type: 'mmo.battle_choice', battle, action: 'fight', move: 0,
+      });
+    }
+    if (!relay.battles.has(battle)) return true;
+  }
+  return false;
+}
+
+function testGen3SimSelection() {
+  const battle3 = require('./lib/battle3');
+  ok(battle3.GENERATION === 3, 'battle3 index GENERATION===3');
+  const relay = new Relay({ generation: 3, maxPlayers: 8, log: quiet });
+  ok(relay.generation === 3, 'generation:3 is stored');
+  ok(relay.Turn === battle3.Turn, 'generation 3 loads lib/battle3 Turn');
+  ok(relay.Effects === sanitize.effectsFor(3),
+    "and proves bags against sanitize's Gen 3 catalog");
+  ok(relay.Effects.itemEffect('13') != null, 'a numeric-string id reads the catalog');
+  ok(relay.Effects.itemEffect(350).noConsume === true, 'Poke Flute is never spent');
+  ok(relay.Effects.itemEffect(5) == null, 'the Safari Ball is not a mediated item');
+}
+
+function testGen3OneVOne() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  relay.forceBattleSeed = 7;
+  const a = dial3(relay, 'ANN', 'firered');
+  const b = dial3(relay, 'BOB', 'emerald');
+  ok(take(a, 'mmo.welcome') && take(b, 'mmo.welcome'),
+    'FireRed and Emerald meet on one Gen 3 hub');
+  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+  relay.handle(b.id, {
+    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+  });
+  const session = take(a, 'mmo.session');
+  ok(session && relay.battles.has(session.id), 'the battle session opens a mediated record');
+  const id = session.id;
+  const record = relay.battles.get(id);
+
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  ok(!record.ruleset || !record.ruleset.typeTable,
+    'a percent chart carries no ordered table on a Gen 3 hub');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: [10, 12] });
+  ok(!record.ruleset || !record.ruleset.typeTable, 'a triple list cut mid-row is refused');
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', generation: 3, typeTable: CHART3, movePool: POOL3,
+  });
+  ok(record.ruleset && record.ruleset.typeTable.length === CHART3.length,
+    'the ordered chart lands whole');
+  ok(record.ruleset.movePool[0] === POOL3[0], 'and the packed pool survives canonical');
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, mons: [bruiser3()], bag: [{ id: 5, count: 1 }],
+  });
+  ok(!record.parties.has(a.id), 'a bag naming an unmediated item refuses the party');
+  const hurt = bruiser3();
+  hurt.hp = 100;
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    mons: [hurt],
+    bag: [{ id: 13, count: 2, name: 'TONIC' }, { id: '350', count: 1 }],
+  });
+  const noWeight = glassjaw3();
+  delete noWeight.weight;
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [noWeight] });
+  ok(!record.parties.has(b.id), 'an upload missing a Gen 3 formula input is refused');
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [glassjaw3()] });
+
+  ok(record.sim, 'the message that completes the set opens a Gen 3 fight');
+  ok(record.bags.get(a.id)['13'] === 2, 'the hub holds the bag keyed as a choice spells it');
+  ok(record.sim.byId.get(a.id).bag[13] === 2, 'and the sim holds it by numeric id');
+  const ready = take(a, 'mmo.battle_ready');
+  ok(ready && sanitize.cleanBattleReady(ready), 'battle_ready goes out');
+  const opening = a.peer.outbox.filter((m) => m.type === 'mmo.battle_event');
+  ok(opening.every((m) => sanitize.cleanBattleEvent(m)),
+    'every opening event survives the client sanitiser');
+  ok(opening.some((m) => m.t === 'send'), 'and the opening sends are among them');
+
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'item', item: '13',
+  });
+  ok(!record.sim.byId.get(b.id).choice, 'an item with no stack is refused');
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'item', item: '13', slot: 0,
+  });
+  ok(record.sim.byId.get(a.id).choice, 'a proved Gen 3 potion is filed');
+  ok(record.bagHold[a.id] === '13', 'and held, not spent');
+  relay.handle(a.id, { type: 'mmo.battle_choice', battle: id, action: 'cancel' });
+  ok(record.bagHold[a.id] === undefined, 'cancel drops the hold');
+  ok(record.bags.get(a.id)['13'] === 2, 'without spending');
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'item', item: '13', slot: 0,
+  });
+  a.peer.outbox = [];
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  ok(record.bags.get(a.id)['13'] === 1, 'the turn resolves and one potion is gone');
+  ok(eventText(a, 'ANN used TONIC!'), 'narrated under the name the bag uploaded');
+
+  if (record.sim && record.sim.phase === 'choice') {
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: id, action: 'item', item: '350',
+    });
+    ok(record.sim.byId.get(a.id).choice, 'the flute is proved present');
+    relay.handle(b.id, {
+      type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+    });
+    ok(record.bags.get(a.id)['350'] === 1, 'and is still in the bag after the turn');
+  }
+
+  ok(fightOut(relay, id, [a, b]), 'the fight reaches an end');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && sanitize.cleanBattleOutcome(outcome), 'the outcome goes out, sanitisable');
+  ok(outcome.reason === 'ko', 'a KO');
+  ok(outcome.winners[0] === a.id, 'for the side that hit');
+  ok(take(b, 'mmo.battle_outcome'), 'and the loser hears it');
+  ok(!relay.battles.has(id), 'the record is settled and forgotten');
+}
+
+function testGen3CoopNpc() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  relay.forceBattleSeed = 3;
+  const a = dial3(relay, 'ANN');
+  const b = dial3(relay, 'BOB', 'leafgreen');
+  relay.openCoopBattle('g3c', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('g3c');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g3c', side: 'a', mons: [bruiser3()],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'g3c', side: 'a', mons: [bruiser3()],
+  });
+  ok(record.sim === null, 'the trainer still owes a team');
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g3c',
+    side: 'b',
+    mons: [glassjaw3(), glassjaw3()],
+    bag: [{ id: 22, count: 1 }],
+  });
+  ok(record.sim, 'the host\'s side b completes the Gen 3 field');
+  const bagA = record.sim.byId.get(record.npcIds[0]).bag;
+  const bagB = record.sim.byId.get(record.npcIds[1]).bag;
+  ok(bagA && bagA[22] === 1, "the trainer's one potion, by numeric id");
+  ok(bagA === bagB, 'one table on both seats: spending it once spends it');
+  ok(record.bags.get(record.npcIds[1])['22'] === 1, 'and the hub sheet aliases it too');
+
+  a.peer.outbox = [];
+  ok(fightOut(relay, 'g3c', [a, b]), 'the trainer answers at once and the fight runs out');
+  const outcome = take(a, 'mmo.battle_outcome');
+  ok(outcome && sanitize.cleanBattleOutcome(outcome), 'outcome sanitisable');
+  ok(outcome.outcome === 'win', 'the two players win');
+  ok(outcome.losers[0] === record.npcIds[0], "over the trainer's seats");
+}
+
+function testGen3WildCatch() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  relay.forceBattleSeed = 11;
+  const a = dial3(relay, 'ANN', 'emerald');
+  const record = relay.openMediatedBattle('g3w', {
+    mode: 'wild', hostId: a.id, memberIds: [a.id],
+  });
+  ok(record, 'a Gen 3 wild record opens');
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', typeTable: CHART3, weather: 'RAIN', terrain: 3, underwater: true,
+  });
+  ok(record.ruleset && record.ruleset.weather === 'RAIN' && record.ruleset.underwater,
+    'a wild ruleset keeps its weather and field');
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g3w', side: 'a', mons: [mon3()], bag: [{ id: 1, count: 1 }],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g3w',
+    side: 'b',
+    mons: [mon3({ species: 'EPSILON', catchRate: 45 })],
+  });
+  ok(record.sim, 'the wild fight opens');
+  ok(record.sim.field.weather === 'RAIN', "under the overworld's rain");
+  ok(!record.sim.byId.get(record.npcIds[0]).bag, 'wildlife carries no bag');
+  a.peer.outbox = [];
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: 'g3w', action: 'item', item: '1', dexCaught: false,
+  });
+  const ball = a.peer.outbox.find((m) => m.type === 'mmo.battle_event' && m.t === 'ball');
+  ok(ball && sanitize.cleanBattleEvent(ball) && ball.amount === 4 && ball.text === '1',
+    'one ball event: four shakes, the ball named by its id');
+  const outcome = take(a, 'mmo.battle_outcome');
+  const clean = outcome && sanitize.cleanBattleOutcome(outcome);
+  ok(clean, 'the catch outcome survives the client sanitiser');
+  ok(clean.reason === 'catch', 'reason catch');
+  ok(clean.catcher === a.id, 'caught by the thrower');
+  ok(clean.caught && clean.caught.species === 'EPSILON', 'the wild sheet rides along');
+  ok(clean.caught.ball === 1, 'with the ball it went into');
+  ok(clean.caught.generation === 3, 'read in the Gen 3 dialect');
+}
+
+function testGen3MidFightMoveset() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  const a = dial3(relay, 'ANN');
+  const b = dial3(relay, 'BOB');
+  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+  relay.handle(b.id, {
+    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+  });
+  const { id } = take(a, 'mmo.session');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  const record = relay.battles.get(id);
+  const fighter = record.sim.byId.get(a.id);
+  const learned = move3({
+    id: 'SHIELD3', num: 182, power: 0, accuracy: 0, effect: 111, target: 16, priority: 3, flags: 0,
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [move3(), learned],
+  });
+  const row = fighter.mons[0].moves[1];
+  ok(row && row.num === 182, 'the learned row keeps its move number');
+  ok(row.priority === 3, 'its priority');
+  ok(row.target === 16, 'and its target');
+  ok(fighter.b.moves === fighter.mons[0].moves, 'the active battler fights with the new list');
+  ok(fighter.mons[0].moves[0].pp === 20, "the unchanged slot keeps the hub's PP");
+}
+
+function testGen3DialectAndLimits() {
+  // A worst-case ruleset: the full ordered table and a full pool of long ids.
+  const tt = [];
+  for (let i = 1; i <= sanitize.BATTLE_TYPE_TABLE3_MAX; i += 1) tt.push(i % 18, (i * 7) % 18, 20);
+  const pool = [];
+  for (let i = 1; i <= sanitize.BATTLE_MOVE_POOL3_MAX; i += 1) {
+    pool.push([(i % 354) + 1, 213, 255, 17, 100, 99, 100, 255, -7, 63,
+      'X'.repeat(36) + String(i).padStart(4, '0')].join(':'));
+  }
+  const rules = {
+    type: 'mmo.battle_ruleset',
+    battle: 'b1',
+    generation: 3,
+    typeTable: tt,
+    movePool: pool,
+    terrain: 9,
+    weather: 'HAIL',
+  };
+  ok(sanitize.payloadOk(rules), 'a full Gen 3 ruleset is inside PAYLOAD_MAX_NODES');
+  const line = JSON.stringify(rules).length;
+  ok(line < sanitize.MAX_LINE, `and one line of it (${line} bytes) is inside MAX_LINE`);
+  const clean = sanitize.cleanBattleRuleset(rules, 3);
+  ok(clean && clean.movePool.length === sanitize.BATTLE_MOVE_POOL3_MAX,
+    'and the sanitiser takes it whole');
+  ok(sanitize.cleanBattleRuleset({ typeTable: tt, movePool: pool.concat([pool[0]]) }, 3)
+    .movePool.length === sanitize.BATTLE_MOVE_POOL3_MAX, 'a pool past the cap keeps the cap');
+  ok(sanitize.cleanBattleRuleset({
+    typeTable: new Array(3 * (sanitize.BATTLE_TYPE_TABLE3_MAX + 1)).fill(0),
+  }, 3) === null, 'a table past its cap is refused');
+  ok(sanitize.cleanBattleRuleset({ typeTable: [0, -1, 10] }, 3) === null,
+    'half a sentinel is refused');
+  ok(sanitize.cleanBattleRuleset({ typeTable: CHART3, movePool: ['1:2:3'] }, 3) === null,
+    'a pool entry that does not parse refuses the ruleset');
+  ok(sanitize.cleanBattleRuleset({ typeTable: CHART3, weather: 'FOG' }, 3) === null,
+    'an unknown weather refuses it');
+  ok(sanitize.cleanBattleRuleset({
+    generation: 3, typeTable: CHART3, movePool: ['+7:0:40:0:100:10:0:0:-0:3:X'],
+  }) === null, "a signed-plus integer is not the sim's grammar");
+  ok(sanitize.cleanBattleRuleset({
+    generation: 3, movePool: ['7:0:40:0:100:10:0:0:-0:3:X'],
+  }).movePool[0] === '7:0:40:0:100:10:0:0:0:3:X', 'and -0 is written back as 0');
+
+  const mons = [];
+  for (let i = 1; i <= 6; i += 1) {
+    const m = mon3({
+      moves: [move3(), move3({ id: 'B' }), move3({ id: 'C' }), move3({ id: 'D' })],
+    });
+    m.speciesId = String(i);
+    m.slot = i - 1;
+    m.abilityName = 'ABILITYNAME';
+    m.itemName = 'ITEMNAME';
+    m.ivs = {
+      hp: 31, atk: 31, def: 31, spe: 31, spa: 31, spd: 31,
+    };
+    m.evs = {
+      hp: 255, atk: 255, def: 0, spe: 0, spa: 0, spd: 0,
+    };
+    m.personality = 4294967295;
+    m.otId = 12345;
+    mons.push(m);
+  }
+  const ids = [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41];
+  const bag = ids.map((n) => ({ id: n, count: 99, name: `ITEM${n}` }));
+  const party = {
+    type: 'mmo.battle_party', battle: 'b1', generation: 3, mons, bag,
+  };
+  ok(sanitize.payloadOk(party), 'a full Gen 3 party is inside PAYLOAD_MAX_NODES');
+  ok(JSON.stringify(party).length < sanitize.MAX_LINE, 'and inside MAX_LINE');
+  const cp = sanitize.cleanBattleParty(party, 3);
+  ok(cp && cp.mons.length === 6 && cp.bag.length === ids.length, 'and sanitises whole');
+
+  const noAbility = mon3();
+  delete noAbility.ability;
+  ok(sanitize.cleanBattleMon(noAbility) === null, 'a Gen 3 sheet without an ability is refused');
+  const badGender = mon3();
+  badGender.gender = 'X';
+  ok(sanitize.cleanBattleMon(badGender) === null, 'a gender outside M/F/U is refused');
+  const caught = mon3();
+  delete caught.weight;
+  delete caught.hiddenPower;
+  delete caught.beatUp;
+  ok(sanitize.cleanBattleMon(caught), 'a caught sheet without the upload-only inputs still reads');
+  ok(sanitize.cleanBattleParty({ battle: 'b1', mons: [caught] }, 3) === null,
+    'but an upload without them does not');
+  ok(sanitize.cleanBattleParty({ battle: 'b1', mons: [mon3()], generation: 2 }, 3) === null,
+    'a party claiming another generation is refused on a Gen 3 hub');
+  const mixed = {
+    generation: 2,
+    species: 'OLDER',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 50, def: 50, spe: 50, spa: 50, spd: 50,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 200, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  ok(sanitize.cleanBattleMon(mixed), '(a well-formed Gen 2 sheet on its own)');
+  ok(sanitize.cleanBattleParty({ battle: 'b1', generation: 3, mons: [mon3(), mixed] }) === null,
+    'and a Gen 3 party with a Gen 2 sheet in it is refused');
+  ok(sanitize.cleanBattleBag({ 13: 2, 22: 1 }, 3)[0].id === 13,
+    'the map form reads numeric-string keys');
+  ok(sanitize.cleanBattleBag([{ id: '0x0D', count: 1 }], 3) === null, 'a hex id is not an item id');
+  ok(sanitize.cleanBattleBag([{ id: 13, count: 1 }, { id: '13', count: 1 }], 3) === null,
+    'the same item twice is refused');
+
+  const c = sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'fight', move: 0, pass: 2,
+  });
+  ok(c && c.pass === 2, 'a Baton Pass destination rides the fight choice');
+  ok(sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'fight', move: 0, pass: 6,
+  }) === null, 'outside the party it is refused');
+  const ic = sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'item', item: '9', dexCaught: true,
+  });
+  ok(ic && ic.dexCaught === true, "Repeat Ball's dex word rides the item choice");
+  ok(sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'item', item: '9', dexCaught: 1,
+  }) === null, 'and only as a boolean');
+  const ev = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 3, t: 'stat', slot: 0, side: 'a', text: 'ATK fell', stat: 'atk', stage: -2, delta: -2,
+  });
+  ok(ev && ev.stat === 'atk' && ev.stage === -2 && ev.delta === -2,
+    'a Gen 3 stat event keeps its signed stage and delta');
+  const held = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 4, t: 'held', slot: 3, side: 'b', mon: 0, amount: 139, holding: 0, text: 'BERRY',
+  });
+  ok(held && held.holding === 0 && held.amount === 139, 'a held event keeps what is left held');
+  const anim = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 5, t: 'anim', slot: 0, side: 'a', text: 'SWEEP', target: 4, spread: 1,
+  });
+  ok(anim && anim.target === 4 && anim.spread === 1, 'an anim keeps its target and spread');
+  const ball = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 6, t: 'ball', slot: 0, side: 'a', target: 3, amount: 2, text: '4',
+  });
+  ok(ball && ball.text === '4', 'a ball names its id like an item does');
+  for (const kind of ['ability', 'weather', 'form', 'sub']) {
+    ok(sanitize.cleanBattleEvent({ battle: 'b1', seq: 7, t: kind }), `kind ${kind} is in the vocabulary`);
+  }
+  const mv = sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 8, t: 'moves', slot: 0, side: 'a', moves: [move3()],
+  });
+  ok(mv && mv.moves && mv.moves[0].num === 33, "a Gen 3 moves event keeps its rows' numbers");
+}
+
+testGen3SimSelection();
+testGen3OneVOne();
+testGen3CoopNpc();
+testGen3WildCatch();
+testGen3MidFightMoveset();
+testGen3DialectAndLimits();
+
 console.log(`hub_battle: ${passed} checks passed`);

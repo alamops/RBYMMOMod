@@ -634,6 +634,29 @@ function M.movePool()
   return out
 end
 
+-- The move row a battle event names by its token (C5 `anim.text` is the
+-- sheet's move `id`), for a caller holding nothing else -- the VFX catalogue
+-- wants the move's type and power, and a foe's moves never reached this
+-- client as rows.  Indexed once per pool, so every token the referee can
+-- emit resolves; the `MOVE_<n>` fallback token reads its number back.
+local tokenIndex = setmetatable({}, { __mode = "k" })
+
+function M.rowByToken(token)
+  if type(token) ~= "string" or token == "" then return nil end
+  local pool = M.movePool()
+  local index = tokenIndex[pool]
+  if not index then
+    index = {}
+    for _, packed in ipairs(pool) do
+      local id, tok = packed:match("^(%d+):.*:([^:]+)$")
+      if id and tok then index[tok] = tonumber(id) end
+    end
+    tokenIndex[pool] = index
+  end
+  local id = index[token] or tonumber(token:match("^MOVE_(%d+)$") or "")
+  return id and M.moveRow(id) or nil
+end
+
 -- The overworld weather a wild fight opens under (pret battle_util.c:1709,
 -- the engine's battle/init.lua overworld_weather): rain, downpour and
 -- thunderstorm are RAIN, the sandstorm SAND, the drought SUN.  Read from the

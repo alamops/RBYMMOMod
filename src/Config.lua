@@ -705,6 +705,23 @@ M.BATTLE_TYPE_MAX = 20
 -- ship in this repo.
 M.BATTLE_METRONOME_POOL_MAX = 200
 
+-- The Gen 3 ruleset's two lists (docs/plans/gen3-battle-sheet.md §3).
+--
+-- Gen 3's chart is not a rectangle but the cart's ORDERED list of
+-- `atk, def, mult` triples (the order is where the floors fall), so it has its
+-- own cap in triples rather than a width: the cart has 112, and 150 leaves the
+-- same data-pack slack BATTLE_TYPE_MAX leaves.  450 integers.
+--
+-- The move pool is Metronome's / Nature Power's / Sketch's source, one packed
+-- string per move ("num:effect:power:type:accuracy:pp:chance:target:priority:
+-- flags:id") rather than a row table -- ~340 rows as tables would be ~4000
+-- nodes, over PAYLOAD_MAX_NODES with the rest of a battle start; as strings it
+-- is one node each and ~13 KB, well inside the 64 KiB line.  Both are thrown
+-- away with the battle, like every ruleset list.  Gen 1 / Gen 2 keep
+-- BATTLE_TYPE_MAX and BATTLE_METRONOME_POOL_MAX untouched.
+M.BATTLE_TYPE_TABLE3_MAX = 150
+M.BATTLE_MOVE_POOL3_MAX = 360
+
 -- ------- solo battles
 --
 -- The same referee with nobody on the other end of a socket: one player's

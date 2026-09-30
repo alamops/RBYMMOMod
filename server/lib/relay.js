@@ -13,10 +13,11 @@
  * this hub brokered is resolved here -- see the "mediated battles" section
  * below -- because a battle decided by one of the two players is a battle
  * decided by whichever of them modified their copy first. Every roll, the
- * turn order and the sole win/loss verdict live in lib/battle/Turn.js (Gen1)
- * or lib/battle2/Turn.js (Gen2), selected at construction from
- * `opts.generation`; this file owns the plumbing around it: who is in which
- * fight, whose party is still missing, and where the events go.
+ * turn order and the sole win/loss verdict live in lib/battle/Turn.js (Gen1),
+ * lib/battle2/Turn.js (Gen2) or lib/battle3/Turn.js (Gen 3: FireRed, LeafGreen,
+ * Emerald -- PROTOCOL 30), selected at construction from `opts.generation`;
+ * this file owns the plumbing around it: who is in which fight, whose party is
+ * still missing, and where the events go.
  *
  * **No sockets appear anywhere below.** Everything talks to *peer handles*
  * -- any object answering send(msg), close() and carrying a remoteAddress
@@ -45,6 +46,7 @@ const {
   cleanBattleMoveset,
   BATTLE_MOVE_MAX,
   cleanGeneration, cleanVersion, GENERATION_MAX,
+  effectsFor, cleanItemId3,
 } = require('./sanitize');
 const {
   Board, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
@@ -1346,7 +1348,7 @@ handlers['mmo.battle_ruleset'] = (relay, client, msg) => {
   if (!record || record.sim) return;
   if (client.id !== record.hostId) return;
 
-  const ruleset = cleanBattleRuleset(msg);
+  const ruleset = cleanBattleRuleset(msg, relay.generation);
   if (!ruleset) {
     return noteDrop(relay, client, 'the ruleset is not a shape we can fight under');
   }
@@ -1413,7 +1415,7 @@ handlers['mmo.battle_choice'] = (relay, client, msg) => {
 handlers['mmo.battle_moveset'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || !record.sim) return;
-  const payload = cleanBattleMoveset(msg);
+  const payload = cleanBattleMoveset(msg, relay.generation);
   if (!payload || payload.battle !== record.id) return;
   relay.applyBattleMoveset(record, client, payload);
 };
@@ -1548,6 +1550,66 @@ function movesetDeltaOk(old, incoming) {
   return false;
 }
 
+/*
+ * Gen 3's moveset apply. lib/battle3 keeps the battler apart from the party mon
+ * (`fighter.b`, whose `moves` is the mon's list until Transform / Mimic lays an
+ * overlay copy over it), and its rows carry num / target / priority / flags. So
+ * the party list is always rewritten, and the active battler takes the new list
+ * only when it is not wearing an overlay -- a Transform is left alone, as the
+ * older sims leave a transformed mon alone. Twin of Hub.lua's
+ * applyBattleMoveset3.
+ */
+function moveRow3(prev, nm) {
+  const pick = (a, b) => (a !== undefined && a !== null ? a : b);
+  if (prev && prev.id === nm.id) {
+    return {
+      id: prev.id,
+      name: pick(prev.name, nm.name),
+      num: pick(prev.num, nm.num),
+      pp: prev.pp,
+      maxPp: pick(prev.maxPp, nm.maxPp),
+      power: prev.power,
+      accuracy: prev.accuracy,
+      type: pick(prev.type, nm.type),
+      effect: prev.effect,
+      chance: prev.chance,
+      target: pick(prev.target, nm.target),
+      priority: pick(prev.priority, nm.priority),
+      flags: pick(prev.flags, nm.flags),
+    };
+  }
+  return {
+    id: nm.id,
+    name: nm.name,
+    num: nm.num,
+    pp: nm.pp,
+    maxPp: pick(nm.maxPp, nm.pp),
+    power: nm.power,
+    accuracy: nm.accuracy,
+    type: nm.type,
+    effect: nm.effect,
+    chance: nm.chance,
+    target: nm.target,
+    priority: nm.priority,
+    flags: nm.flags,
+  };
+}
+
+function applyBattleMoveset3(fighter, payload) {
+  const mon = fighter.mons[payload.mon];
+  if (!mon) return false;
+  const incoming = payload.moves;
+  if (!Array.isArray(incoming) || incoming.length === 0) return false;
+  const old = Array.isArray(mon.moves) ? mon.moves : [];
+  if (!movesetDeltaOk(old, incoming)) return false;
+  const next = incoming.map((nm, i) => moveRow3(old[i], nm));
+  const b = fighter.b;
+  const active = !!b && b.mon === mon;
+  mon.moves = next;
+  if (active && !b.overlay) b.moves = next;
+  return true;
+}
+
 // --------------------------------------------------------------------- relay
 
 class Relay {
@@ -1573,13 +1635,19 @@ class Relay {
       this.generation = gen == null ? 1 : gen;
     }
     // Wave 2 T2d: mediated-battle twin at construction. Gen1 keeps lib/battle;
-    // Gen2 never instantiates Gen1 Turn for refereeing.
+    // Gen2 never instantiates Gen1 Turn for refereeing. Gen 3 referees on
+    // lib/battle3, whose bag catalog is Items.bagEffect keyed by numeric pret
+    // item id -- lib/sanitize's effectsFor(3) puts it behind the one
+    // `itemEffect` the bag paths below call, the same adapter an upload is
+    // proved against, so the proof and the spend read one table (twin of
+    // src/Hub.lua's battleSimFor).
     {
-      const battle = this.generation === 2
-        ? require('./battle2')
-        : require('./battle');
+      let battle;
+      if (this.generation === 3) battle = require('./battle3');
+      else if (this.generation === 2) battle = require('./battle2');
+      else battle = require('./battle');
       this.Turn = battle.Turn;
-      this.Effects = battle.Effects;
+      this.Effects = this.generation === 3 ? effectsFor(3) : battle.Effects;
     }
     this.auth = opts.auth || null;
     /*
@@ -2988,6 +3056,8 @@ class Relay {
       ruleset: null,
       parties: new Map(),
       bags: new Map(),
+      // Gen 3: seat -> { [itemId]: display name } (see noteBagNames).
+      bagNames: new Map(),
       bagHold: Object.create(null),
       sim: null,
       settled: false,
@@ -3057,6 +3127,7 @@ class Relay {
     const fighter = byId && (typeof byId.get === 'function'
       ? byId.get(client.id) : byId[client.id]);
     if (!fighter || !Array.isArray(fighter.mons)) return false;
+    if (this.generation === 3) return applyBattleMoveset3(fighter, payload);
     const mon = fighter.mons[payload.mon];
     if (!mon || mon.transformed) return false;
     const incoming = payload.moves;
@@ -3121,6 +3192,7 @@ class Relay {
       // never reaches this branch, so their own bag is not wiped by that upload.
       if (!record.bags) record.bags = new Map();
       record.bags.set(client.id, this.bagMap(party.bag));
+      this.noteBagNames(record, client.id, party.bag);
       return true;
     }
 
@@ -3156,23 +3228,65 @@ class Relay {
     if (!record.bags) record.bags = new Map();
     if (kept[0] && !this.isWildSeat(record, kept[0])) {
       record.bags.set(kept[0], this.bagMap(party.bag));
+      this.noteBagNames(record, kept[0], party.bag);
     }
     return true;
   }
 
   // List of `{id, count}` → lookup map. Empty / null → empty map (no items).
+  // Keys are strings on every generation, because that is how a choice names
+  // an item; a Gen 3 bag's numeric pret id is keyed by its String() spelling,
+  // which is what its choice ("13") says. Twin of Hub:bagMap.
   bagMap(entries) {
     const map = Object.create(null);
     for (const entry of entries || []) {
-      if (entry && typeof entry.id === 'string'
-          && typeof entry.count === 'number' && entry.count > 0) {
-        map[entry.id] = entry.count;
+      if (entry && typeof entry.count === 'number' && entry.count > 0) {
+        if (typeof entry.id === 'string') map[entry.id] = entry.count;
+        else if (typeof entry.id === 'number') map[String(entry.id)] = entry.count;
       }
     }
     return map;
   }
 
-  // Shallow copy of an id→count bag map (null when empty / absent).
+  // Gen 3's display names for one seat's bag, keyed like bagMap, so the
+  // referee can say "Ann used POTION!". Nothing on the older generations.
+  // Twin of Hub:noteBagNames.
+  noteBagNames(record, seat, entries) {
+    if (this.generation !== 3) return;
+    const names = Object.create(null);
+    for (const entry of entries || []) {
+      if (entry && typeof entry.name === 'string'
+          && entry.id !== undefined && entry.id !== null) {
+        names[String(entry.id)] = entry.name;
+      }
+    }
+    if (!record.bagNames) record.bagNames = new Map();
+    record.bagNames.set(seat, names);
+  }
+
+  // The bag a Gen 3 fighter opens with: lib/battle3's list form, numeric ids
+  // in id order, each with its uploaded display name; null for none. Twin of
+  // Hub:simBag3.
+  simBag3(record, seat, bag) {
+    const names = (record.bagNames && record.bagNames.get(seat)) || Object.create(null);
+    const list = [];
+    for (const id of Object.keys(bag || {})) {
+      const n = cleanItemId3(id);
+      const count = bag[id];
+      if (n !== null && typeof count === 'number' && count > 0) {
+        const entry = { id: n, count };
+        if (typeof names[id] === 'string') entry.name = names[id];
+        list.push(entry);
+      }
+    }
+    if (!list.length) return null;
+    list.sort((a, b) => a.id - b.id);
+    return list;
+  }
+
+  // Shallow copy of an id→count bag map (null when empty / absent). A Gen 3
+  // fighter's bag is keyed by the numeric id inside lib/battle3; object keys
+  // are strings here already, which is the hub's spelling.
   cloneBagMap(src) {
     if (!src || typeof src !== 'object') return null;
     const out = Object.create(null);
@@ -3309,6 +3423,10 @@ class Relay {
       const ids = Object.keys(bag);
       for (let j = 0; j < ids.length; j += 1) {
         const id = ids[j];
+        // A Gen 3 bag is keyed by the numeric pret item id -- an enum value,
+        // not a name off the player's cart -- and its digits turn up in any
+        // count column, so the leak guard is for the older generations' names.
+        if (this.generation === 3 && /^\d+$/.test(id)) continue;
         if (typeof id === 'string' && id !== '' && body.indexOf(id) >= 0) {
           this.log.warn('npc bag dump refused: item ids must not leave the hub');
           return;
@@ -3392,7 +3510,9 @@ class Relay {
       // Youngster does not spam potions they never carried.
       if (!record.bags) record.bags = new Map();
       const bag = record.bags.get(seat);
-      const bagCopy = this.cloneBagMap(bag);
+      const bagCopy = this.generation === 3
+        ? this.simBag3(record, seat, bag)
+        : this.cloneBagMap(bag);
       return {
         playerId: seat,
         name: (client && client.name)
@@ -3429,13 +3549,14 @@ class Relay {
     const seed = typeof this.forceBattleSeed === 'number'
       ? this.forceBattleSeed
       : (1 + Math.floor(Math.random() * BATTLE_SEED_MAX));
-    const created = this.Turn.attempt({
+    const rules = record.ruleset;
+    const createOpts = {
       id: record.id,
       mode: record.mode,
       seed,
-      chart: record.ruleset.chart,
-      specialTypes: record.ruleset.specialTypes,
-      metronomePool: record.ruleset.metronomePool,
+      chart: rules.chart,
+      specialTypes: rules.specialTypes,
+      metronomePool: rules.metronomePool,
       choiceTimeout: BATTLE_CHOICE_TIMEOUT,
       reconnectGrace: BATTLE_RECONNECT_GRACE,
       resolveTimeout: BATTLE_RESOLVE_TIMEOUT,
@@ -3444,7 +3565,17 @@ class Relay {
         a: sideRoster(record.sides.a),
         b: sideRoster(record.sides.b),
       },
-    });
+    };
+    // Gen 3's ruleset is the ordered type table and the packed move pool, plus
+    // the field a wild fight opens on (docs/plans/gen3-battle-sheet.md §3).
+    if (this.generation === 3) {
+      createOpts.typeTable = rules.typeTable;
+      createOpts.movePool = rules.movePool;
+      createOpts.terrain = rules.terrain;
+      createOpts.weather = rules.weather;
+      createOpts.underwater = rules.underwater;
+    }
+    const created = this.Turn.attempt(createOpts);
     if (!created.battle) {
       this.log.warn(`mediated battle ${record.id} refused: ${safe(created.reason)}`);
       // Seats are filled and the turn machine still will not fight on this
@@ -3539,8 +3670,15 @@ class Relay {
     // Fighter bags are authoritative after resolve (Turn spends on item use,
     // including NPC auto-pick). Sync the hub sheet and drop holds so we never
     // double-spend with commitBagHolds.
-    if (record.sim.phase !== 'choice') {
+    //
+    // On Gen 3 the sheet also follows the sim after every turn that resolved:
+    // a turn that resolves and opens the next one inside the same call is back
+    // in choice by the time this runs. The older generations keep their
+    // behaviour byte for byte. Twin of Hub:flushBattle.
+    if (record.sim.phase !== 'choice'
+        || (this.generation === 3 && record.bagTurn !== record.sim.turn)) {
       this.syncBagsFromSim(record);
+      record.bagTurn = record.sim.turn;
     }
     const events = record.sim.drainEvents();
     for (const event of events) {

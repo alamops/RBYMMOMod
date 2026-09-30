@@ -587,6 +587,17 @@ do
   end
   eq(growl and growl.effect, 18, "ruleset: a pool row keeps its effect")
   eq(growl and growl.priority, 0, "ruleset: ...and its priority")
+  -- An `anim` event names its move by the sheet token only; the VFX catalogue
+  -- reads the move's type and power back from the pool.
+  local token = growl and growl.id
+  local row = token and Sheet3.rowByToken(token)
+  eq(row and row.num, 45, "rowByToken: a pool token reads back its move row")
+  eq(Sheet3.rowByToken("MOVE_45") and Sheet3.rowByToken("MOVE_45").num, 45,
+     "rowByToken: the numeric fallback token reads back too")
+  eq(Sheet3.rowByToken("NOT_A_MOVE"), nil, "rowByToken: an unknown token is nil")
+  local spec = Vfx.forMove3(token, row)
+  check(type(spec) == "table" and spec.style ~= nil,
+        "a Gen 3 anim token resolves a VFX look through its row")
   eq(rules.weather, nil, "ruleset: a fight between players has clear skies")
   stub("src.core.game3.weather", { get = function() return 3 end })
   eq(Sheet3.ruleset(GAME, { wild = true }).weather, "RAIN",

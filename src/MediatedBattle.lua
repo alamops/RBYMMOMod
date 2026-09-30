@@ -81,12 +81,25 @@ local Gen3 = need("Gen3")
 local Gen3Ui = need("Gen3Ui")
 -- The Gen 3 upload (C4 sheets, ruleset, bag) and the Gen 3 award.
 local Sheet3 = need("Sheet3")
+
 local Exp3 = need("Exp3")
 local SoloBrain = need("SoloBrain")
 local Battlefield = need("Battlefield")
 -- Which particle effect a move / item / condition / stat stage wears. A
 -- catalogue, not a renderer: Battlefield draws what this resolves.
 local Vfx = need("Vfx")
+
+-- The look an item event plays.  Gen 1/2 name the item on the wire; Gen 3
+-- sends the pret item number, which the Gen 3 catalogue reads by the name the
+-- cart prints (balls answer nil in both, left to the throw chain).
+local function itemVfx(id)
+  if Gen3.active() then
+    local n = tonumber(id)
+    return Vfx.forItem3(n and Gen3.itemName(n) or id)
+  end
+  return Vfx.forItem(id)
+end
+
 -- The Gen 2 half of the award. Gen 1 prices a refereed faint with the engine's
 -- `src/battle/Experience.lua`, which Gold does not have -- its award lives
 -- inside a live `src/battle/gen2/Battle.lua` this screen never owns. `Exp2` is
@@ -2901,7 +2914,7 @@ function M:onEvent(msg)
     -- answer nil (`Vfx.forItem`) and are left to the throw chain below, which
     -- already draws the arc, the rocking and the burst -- a second effect over
     -- that would be drawing the same throw twice.
-    self:queueVfx(Vfx.forItem(msg.text), msg.slot, msg.slot)
+    self:queueVfx(itemVfx(msg.text), msg.slot, msg.slot)
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
     if effect and effect.ball then
@@ -2932,7 +2945,7 @@ function M:onEvent(msg)
     -- A held item acted: Leftovers, a berry, a Focus Band, Thief / Knock Off /
     -- Trick.  `holding` is what the mon holds now, and it is the writeback.
     self:applyHeld(msg)
-    self:queueVfx(Vfx.forItem(msg.amount and tostring(msg.amount) or nil), msg.slot, msg.slot)
+    self:queueVfx(itemVfx(msg.amount and tostring(msg.amount) or nil), msg.slot, msg.slot)
 
   elseif kind == "form" then
     -- The battler's picture changed: Castform's form, or Transform's species.
@@ -6116,7 +6129,14 @@ function M:startMoveVfx(row)
   -- catalogue answers for a nil definition rather than refusing: an unknown
   -- move draws NORMAL's impact, which is the right amount of "something
   -- happened" for a move nobody here can name.
-  local spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  -- Gen 3's token is the sheet's move id, not a data.moves key (Emerald has
+  -- no data.moves at all), so its type and power come from the move row.
+  local spec
+  if Gen3.active() then
+    spec = Vfx.forMove3(animId, Sheet3.rowByToken(animId))
+  else
+    spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  end
   self.moveVfx = spec
 
   local from = row.slot

@@ -22,18 +22,28 @@ local Config = need("Config")
 
 local M = {}
 
--- Effects for bag proofs: Gen1 default, Gen2 when hub generation is 2.
--- Lazy so a Gen1-only load never pulls BattleSim2.
+-- Effects for bag proofs: Gen1 default, Gen2 when hub generation is 2, and
+-- Gen 3's catalog when it is 3.  Gen 3 has no `Effects.itemEffect`: its bag is
+-- BattleSim3/Items.BAG keyed by numeric pret item id (docs/plans/
+-- gen3-battle-sheet.md §4), so it is put behind the same one-function shape
+-- here rather than every caller learning a second one.
+-- Lazy so a Gen1-only load never pulls BattleSim2 or BattleSim3.
 local effectsByGen = {}
 local function effectsFor(generation)
-  local key = (generation == 2) and 2 or 1
+  local key = (generation == 2 or generation == 3) and generation or 1
   local cached = effectsByGen[key]
   if cached then return cached end
-  local path = key == 2 and "BattleSim2/Effects" or "BattleSim/Effects"
-  local Effects = need(path)
+  local Effects
+  if key == 3 then
+    local Items = need("BattleSim3/Items")
+    Effects = { itemEffect = function(id) return Items.bagEffect(id) end }
+  else
+    Effects = need(key == 2 and "BattleSim2/Effects" or "BattleSim/Effects")
+  end
   effectsByGen[key] = Effects
   return Effects
 end
+M.effectsFor = effectsFor
 
 -- client -> hub
 M.HELLO         = "mmo.hello"
@@ -1194,6 +1204,44 @@ M.FIELD_MAX = Config.COOP_FIGHTERS - 1
 M.HP_MAX = 999
 M.STAT_MAX = 999
 
+-- The Gen 3 dialect's bounds (docs/plans/gen3-battle-sheet.md §2-§4, contract
+-- C4).  A Gen 3 sheet carries what Gen 1 / Gen 2 never needed -- an ability, a
+-- held item with its hold effect, a gender, a nature, a move's priority, target
+-- and flags -- because the hub holds no ROM tables and the sim branches on all
+-- of them.  The ranges are pret's (the enum widths, u8 fields, the signed
+-- priority), the id caps are Config's GEN3_* numbers; the move type keeps the
+-- generous 0..31 the older dialects use, for the same reason (a type past the
+-- chart is a neutral matchup, not a malformed party).
+M.MOVE_TYPE_MAX = 31
+M.POWER3_MAX = 255
+M.ACCURACY3_MAX = 100         -- percent in Gen 3, not a 0..255 byte
+M.EFFECT3_MAX = 213           -- EFFECT_* 0..213 (battle_move_effects.h)
+M.TARGET3_MAX = 255           -- MOVE_TARGET_* bitmask
+M.PRIORITY3_MAX = 7           -- signed: -7..7
+M.FLAGS3_MAX = 63             -- FLAG_* bits (contact .. King's Rock)
+M.HOLD_EFFECT3_MAX = 66       -- HOLD_EFFECT_* (hold_effects.h)
+M.HOLD_PARAM3_MAX = 255
+M.WEIGHT3_MAX = 9999          -- hectograms
+M.SLEEP3_MAX = 7
+M.U32_MAX = 4294967295        -- personality / OT id passthrough
+M.GENDERS3 = { M = true, F = true, U = true }
+-- The type-table cell a Gen 3 ruleset may hold: a type id or the Foresight
+-- sentinel -1, and a multiplier in tenths up to the same 4x CHART_MAX allows
+-- a Gen 1 cell (400 percent is 40 tenths).
+M.TYPE_CELL3_MIN = -1
+M.TYPE_MULT3_MAX = 40
+M.TERRAIN3_MAX = 9            -- BATTLE_TERRAIN_*
+M.WEATHERS3 = { RAIN = true, SUN = true, SAND = true, HAIL = true }
+-- A packed move-pool entry is ten small integers, ten colons and an id of at
+-- most 40: 128 is room for every honest one and a ceiling on the rest.
+M.POOL_ENTRY3_MAX = 128
+-- The stat names a Gen 3 `stat` event states, and how far a stage can sit or
+-- move: a stage is -6..6, and one change can cross the whole range at most
+-- (Belly Drum from -6, Haze's reset from +6 reads as its own delta).
+M.EVENT_STATS3 = { atk = true, def = true, spe = true, spa = true, spd = true, acc = true, eva = true }
+M.STAGE3_MAX = 6
+M.DELTA3_MAX = 12
+
 -- Gen 1's status conditions, as three-letter tokens.
 --
 -- A closed set for the reason every closed set in this file is one: the sim
@@ -1279,8 +1327,130 @@ end
 -- test or a replay sends one precisely because it needs that seed and no other,
 -- so quietly substituting a different one would answer the request with a run
 -- that looks right and reproduces nothing.
-function M.battleRuleset(raw)
+-- Gen 3's chart: the cart's ORDERED triples (atk, def, mult in tenths), the
+-- Foresight sentinel -1, -1, 0 in place (docs/plans/gen3-battle-sheet.md
+-- §3.1).  Rebuilt cell by cell like chartOf, and refused whole rather than
+-- trimmed: a triple list cut mid-row shifts every later row by one and silently
+-- rewrites the chart, and a sentinel with a real type on one side is a row the
+-- sim cannot read as either.
+local function typeTable3(raw)
   if type(raw) ~= "table" then return nil end
+  local n = #raw
+  if n == 0 or n % 3 ~= 0 or n > Config.BATTLE_TYPE_TABLE3_MAX * 3 then return nil end
+  local out = {}
+  for i = 1, n, 3 do
+    local a = M.int(raw[i], M.TYPE_CELL3_MIN, M.MOVE_TYPE_MAX)
+    local d = M.int(raw[i + 1], M.TYPE_CELL3_MIN, M.MOVE_TYPE_MAX)
+    local m = M.int(raw[i + 2], 0, M.TYPE_MULT3_MAX)
+    if a == nil or d == nil or m == nil then return nil end
+    if (a == M.TYPE_CELL3_MIN) ~= (d == M.TYPE_CELL3_MIN) then return nil end
+    out[i], out[i + 1], out[i + 2] = a, d, m
+  end
+  return out
+end
+
+-- One Gen 3 move-pool entry (§3.3): the packed
+-- "num:effect:power:type:accuracy:pp:chance:target:priority:flags:id" string,
+-- or a move row.  A string is parsed with the grammar the sim uses (eleven
+-- fields, ten plain integers, an id) and bounded like a sheet's move row, then
+-- written back canonically -- "+5" and "05" arrive as 5 on both twins and go
+-- out as "5", so what the sim parses is what was checked.  An id past 40 is
+-- refused rather than cut, as the sim refuses it.  A row table is a move row.
+local function poolEntry3(raw)
+  if type(raw) == "table" then return M.battleMove(raw, 3) end
+  if type(raw) ~= "string" or #raw > M.POOL_ENTRY3_MAX then return nil end
+  local parts = {}
+  for piece in (raw .. ":"):gmatch("([^:]*):") do parts[#parts + 1] = piece end
+  if #parts ~= 11 then return nil end
+  local n = {}
+  for i = 1, 10 do
+    if not parts[i]:match("^%-?%d+$") then return nil end
+    -- `+ 0` folds "-0" into 0, so the canonical string is the same bytes JS writes.
+    n[i] = tonumber(parts[i]) + 0
+  end
+  local row = M.battleMove({
+    num = n[1], effect = n[2], power = n[3], type = n[4], accuracy = n[5], pp = n[6],
+    chance = n[7], target = n[8], priority = n[9], flags = n[10], id = parts[11],
+  }, 3)
+  if not row or row.id ~= parts[11] then return nil end
+  return table.concat({ row.num, row.effect, row.power, row.type, row.accuracy, row.pp,
+    row.chance, row.target, row.priority, row.flags, row.id }, ":")
+end
+
+-- Which dialect a ruleset is in.  The hub's own generation decides when it is
+-- given (a Gen 1 / Gen 2 hub reads every ruleset exactly as it always did);
+-- otherwise the message's `generation`, and a `typeTable` with neither is
+-- Gen 3's shape.
+local function rulesetIsGen3(raw, generation)
+  local hub = M.int(generation, 1, M.GENERATION_MAX)
+  if hub then return hub == 3 end
+  local own = M.int(raw.generation, 1, M.GENERATION_MAX)
+  if own then return own == 3 end
+  return raw.typeTable ~= nil
+end
+
+-- The Gen 3 ruleset: { generation = 3, typeTable?, seed?, specialTypes?,
+-- movePool?, terrain?, weather?, underwater? } (§3, and Turn.create's options).
+--
+-- `typeTable` is optional here where Gen 1's `chart` is the message: the sim
+-- reads its absence as every matchup neutral, and src/Sheet3.lua sends none
+-- (with a warning naming the remediation) when a cart's chart cannot be read,
+-- rather than leaving the players with no fight at all.  Present-but-unreadable
+-- still refuses the whole ruleset, as every optional field below does -- a
+-- ruleset half-understood is a different fight from the one uploaded.  The pool
+-- is capped (the tail is dropped, as Gen 1's metronomePool is) and an entry
+-- that does not parse refuses it.
+local function battleRuleset3(raw)
+  local out = { generation = 3 }
+  if raw.typeTable ~= nil then
+    out.typeTable = typeTable3(raw.typeTable)
+    if not out.typeTable then return nil end
+  end
+  if raw.seed ~= nil then
+    out.seed = M.int(raw.seed, 1, M.SEED_MAX)
+    if out.seed == nil then return nil end
+  end
+  if raw.specialTypes ~= nil then
+    if type(raw.specialTypes) ~= "table" then return nil end
+    local special = {}
+    for _, entry in ipairs(raw.specialTypes) do
+      local t = M.int(entry, 0, Config.BATTLE_TYPE_MAX - 1)
+      if t == nil then return nil end
+      special[#special + 1] = t
+    end
+    out.specialTypes = special
+  end
+  if raw.movePool ~= nil then
+    if type(raw.movePool) ~= "table" then return nil end
+    local pool = {}
+    for _, entry in ipairs(raw.movePool) do
+      if #pool >= Config.BATTLE_MOVE_POOL3_MAX then break end
+      local clean = poolEntry3(entry)
+      if not clean then return nil end
+      pool[#pool + 1] = clean
+    end
+    out.movePool = pool
+  end
+  if raw.terrain ~= nil then
+    out.terrain = M.int(raw.terrain, 0, M.TERRAIN3_MAX)
+    if out.terrain == nil then return nil end
+  end
+  if raw.weather ~= nil then
+    if not M.WEATHERS3[raw.weather] then return nil end
+    out.weather = raw.weather
+  end
+  if raw.underwater ~= nil then
+    if type(raw.underwater) ~= "boolean" then return nil end
+    if raw.underwater then out.underwater = true end
+  end
+  return out
+end
+
+-- `generation` (optional) is the hub's; see rulesetIsGen3.  Gen 1 / Gen 2
+-- rulesets are read exactly as before.
+function M.battleRuleset(raw, generation)
+  if type(raw) ~= "table" then return nil end
+  if rulesetIsGen3(raw, generation) then return battleRuleset3(raw) end
   local chart = chartOf(raw.chart)
   if not chart then return nil end
   local out = { chart = chart }
@@ -1348,8 +1518,60 @@ end
 -- function's own rule: a field that arrived and did not survive is the sending
 -- side being wrong about something, and quietly narrating under the id would
 -- hide it.
-function M.battleMove(raw)
+-- The Gen 3 move row (docs/plans/gen3-battle-sheet.md §2, "Move row"): the
+-- older dialect's fields at Gen 3's widths (power a u8, accuracy a percent,
+-- EFFECT_* up to 213), plus the four the Gen 3 sim branches on -- `num` (pret
+-- MOVE_* number: Struggle, Curse, the two-turn and sound-move lists ...),
+-- `target` (MOVE_TARGET_* bitmask), `priority` (signed) and `flags` (contact,
+-- Protect, Magic Coat, Snatch, Mirror Move, King's Rock).  Every one required,
+-- on this function's rule; `maxPp` and `name` optional as before.  No
+-- `highCrit`: Gen 3's high-crit moves are an effect (§5.2), not a flag.
+-- M.id, refusing rather than cutting past 40 characters -- the reading
+-- lib/sanitize.js's cleanId has always had.  The Gen 3 dialect is new on both
+-- twins, so it takes the one the two can agree on; the older dialects keep
+-- M.id's cut exactly as they always had it.
+local function id3(value)
+  if type(value) ~= "string" or #value > 40 then return nil end
+  return M.id(value)
+end
+
+local function battleMove3(raw)
+  local out = {
+    id = id3(raw.id),
+    num = M.int(raw.num, 1, Config.GEN3_MOVE_MAX),
+    pp = M.int(raw.pp, 0, 99),
+    power = M.int(raw.power, 0, M.POWER3_MAX),
+    accuracy = M.int(raw.accuracy, 0, M.ACCURACY3_MAX),
+    type = M.int(raw.type, 0, M.MOVE_TYPE_MAX),
+    effect = M.int(raw.effect, 0, M.EFFECT3_MAX),
+    chance = M.int(raw.chance, 0, 100),
+    target = M.int(raw.target, 0, M.TARGET3_MAX),
+    priority = M.int(raw.priority, -M.PRIORITY3_MAX, M.PRIORITY3_MAX),
+    flags = M.int(raw.flags, 0, M.FLAGS3_MAX),
+  }
+  if not (out.id and out.num and out.pp and out.power and out.accuracy and out.type
+          and out.effect and out.chance and out.target and out.priority and out.flags) then
+    return nil
+  end
+  if raw.maxPp ~= nil then
+    out.maxPp = M.int(raw.maxPp, 0, 99)
+    if out.maxPp == nil then return nil end
+  end
+  if raw.name ~= nil then
+    out.name = M.moveName(raw.name)
+    if out.name == nil then return nil end
+  end
+  return out
+end
+
+-- `generation` (optional): 3 reads the Gen 3 row; absent, a row that states a
+-- `num` is a Gen 3 row (no Gen 1 / Gen 2 sheet has ever carried one), which is
+-- how a client sanitising a `moves` event from a Gen 3 referee keeps the
+-- fields it needs without every caller learning the hub's generation.
+function M.battleMove(raw, generation)
   if type(raw) ~= "table" then return nil end
+  local gen = M.int(generation, 1, M.GENERATION_MAX)
+  if gen == 3 or (gen == nil and raw.num ~= nil) then return battleMove3(raw) end
   local out = {
     id = M.id(raw.id),
     pp = M.int(raw.pp, 0, 99),
@@ -1467,8 +1689,165 @@ end
 -- Optional `generation` (1|2) selects the stats dialect; absent falls back to
 -- shape sniff on `stats` (see statsGeneration). Optional `heldItem` is a Gen 2
 -- item id string — cleaned like any other id, dropped when absent.
+-- A Gen 3 stat-like block: every key of `keys` at the caller's width, and
+-- nothing else.  Refused whole when one is missing, for statsOf's reason.
+local function block3(raw, keys, min, max)
+  if type(raw) ~= "table" then return nil end
+  local out = {}
+  for _, key in ipairs(keys) do
+    local n = M.int(raw[key], min, max)
+    if n == nil then return nil end
+    out[key] = n
+  end
+  return out
+end
+
+local IV_KEYS3 = { "hp", "atk", "def", "spe", "spa", "spd" }
+
+-- One Gen 3 battler (docs/plans/gen3-battle-sheet.md §2, contract C4).
+--
+-- The Gen 2 stat keys (final stats: nature, IVs and EVs are already folded in
+-- by the client's own Pokemon.calcStats), plus what the Gen 3 sim reads off a
+-- sheet because the hub has no species, item or ability table: `speciesNum`
+-- (Light Ball, Thick Club, Soul Dew, Castform ... branch on it), `types`,
+-- `ability`, `heldItem` with its `holdEffect` / `holdEffectParam`, `gender`
+-- (Attract, Cute Charm), `friendship` (Return), `nature` (confusion-berry
+-- dislikes).  All of those are required: a missing one is not a neutral value,
+-- it is a mon whose owner sees a different fight from the referee.
+--
+-- Optional here, and each refused when present and unreadable: the display
+-- names, `slot`, `status` / `sleepTurns`, `catchRate` (the wild seat), the
+-- passthrough `ivs` / `evs` / `personality` / `otId` (never read by a formula;
+-- copied onto a caught sheet so the catcher rebuilds the exact mon), `ball`
+-- (the caught sheet's), and the three formula inputs the sim's own caught
+-- sheet does not restate -- `weight`, `hiddenPower`, `beatUp`.  Those three
+-- ARE required on an upload: M.battleParty checks them, because an outcome's
+-- caught sheet goes through this same function and must not be refused for
+-- leaving out a Low Kick weight the catcher never needs.
+local function battleMon3(raw)
+  local stats = block3(raw.stats, STAT_KEYS_GEN2, 1, M.STAT_MAX)
+  if not stats then return nil end
+  local status = M.battleStatus(raw.status)
+  if status == false then return nil end
+
+  local out = {
+    generation = 3,
+    species = M.name(raw.species),
+    speciesNum = M.int(raw.speciesNum, 1, Config.GEN3_SPECIES_MAX),
+    level = M.int(raw.level, 1, M.LEVEL_MAX),
+    hp = M.int(raw.hp, 0, M.HP_MAX),
+    maxHp = M.int(raw.maxHp, 1, M.HP_MAX),
+    stats = stats,
+    status = status,
+    ability = M.int(raw.ability, 0, Config.GEN3_ABILITY_MAX),
+    heldItem = M.int(raw.heldItem, 0, Config.GEN3_ITEM_MAX),
+    holdEffect = M.int(raw.holdEffect, 0, M.HOLD_EFFECT3_MAX),
+    holdEffectParam = M.int(raw.holdEffectParam, 0, M.HOLD_PARAM3_MAX),
+    gender = M.GENDERS3[raw.gender] and raw.gender or nil,
+    friendship = M.int(raw.friendship, 0, 255),
+    nature = M.int(raw.nature, 0, Config.GEN3_NATURE_COUNT - 1),
+  }
+  if out.species == nil or out.speciesNum == nil or out.level == nil or out.hp == nil
+     or out.maxHp == nil or out.ability == nil or out.heldItem == nil
+     or out.holdEffect == nil or out.holdEffectParam == nil or out.gender == nil
+     or out.friendship == nil or out.nature == nil then
+    return nil
+  end
+  if out.hp > out.maxHp then return nil end
+
+  if type(raw.types) ~= "table" then return nil end
+  local types = {}
+  for _, entry in ipairs(raw.types) do
+    if #types >= 2 then break end
+    local t = M.int(entry, 0, Config.BATTLE_TYPE_MAX - 1)
+    if t == nil then return nil end
+    types[#types + 1] = t
+  end
+  if #types == 0 then return nil end
+  out.types = types
+
+  if type(raw.moves) ~= "table" then return nil end
+  local moves = {}
+  for _, entry in ipairs(raw.moves) do
+    if #moves >= Config.BATTLE_MOVE_MAX then return nil end
+    local move = M.battleMove(entry, 3)
+    if not move then return nil end
+    moves[#moves + 1] = move
+  end
+  if #moves == 0 then return nil end
+  out.moves = moves
+
+  if raw.speciesId ~= nil then
+    out.speciesId = id3(raw.speciesId)
+    if not out.speciesId then return nil end
+  end
+  if raw.slot ~= nil then
+    out.slot = M.int(raw.slot, 0, M.SLOT_MAX)
+    if out.slot == nil then return nil end
+  end
+  if raw.abilityName ~= nil then
+    out.abilityName = M.moveName(raw.abilityName)
+    if not out.abilityName then return nil end
+  end
+  if raw.itemName ~= nil then
+    out.itemName = M.moveName(raw.itemName)
+    if not out.itemName then return nil end
+  end
+  if raw.weight ~= nil then
+    out.weight = M.int(raw.weight, 0, M.WEIGHT3_MAX)
+    if out.weight == nil then return nil end
+  end
+  if raw.hiddenPower ~= nil then
+    if type(raw.hiddenPower) ~= "table" then return nil end
+    local t = M.int(raw.hiddenPower.type, 0, M.MOVE_TYPE_MAX)
+    local p = M.int(raw.hiddenPower.power, 0, M.POWER3_MAX)
+    if t == nil or p == nil then return nil end
+    out.hiddenPower = { type = t, power = p }
+  end
+  if raw.beatUp ~= nil then
+    if type(raw.beatUp) ~= "table" then return nil end
+    local a = M.int(raw.beatUp.atk, 1, 255)
+    local d = M.int(raw.beatUp.def, 1, 255)
+    if a == nil or d == nil then return nil end
+    out.beatUp = { atk = a, def = d }
+  end
+  if raw.sleepTurns ~= nil then
+    out.sleepTurns = M.int(raw.sleepTurns, 0, M.SLEEP3_MAX)
+    if out.sleepTurns == nil then return nil end
+  end
+  if raw.catchRate ~= nil then
+    out.catchRate = M.int(raw.catchRate, 0, 255)
+    if out.catchRate == nil then return nil end
+  end
+  if raw.ivs ~= nil then
+    out.ivs = block3(raw.ivs, IV_KEYS3, 0, Config.GEN3_IV_MAX)
+    if not out.ivs then return nil end
+  end
+  if raw.evs ~= nil then
+    out.evs = block3(raw.evs, IV_KEYS3, 0, Config.GEN3_EV_MAX)
+    if not out.evs then return nil end
+  end
+  if raw.personality ~= nil then
+    out.personality = M.int(raw.personality, 0, M.U32_MAX)
+    if out.personality == nil then return nil end
+  end
+  if raw.otId ~= nil then
+    out.otId = M.int(raw.otId, 0, M.U32_MAX)
+    if out.otId == nil then return nil end
+  end
+  if raw.ball ~= nil then
+    out.ball = M.int(raw.ball, 0, Config.GEN3_ITEM_MAX)
+    if out.ball == nil then return nil end
+  end
+  return out
+end
+
+-- `generation` 3 on the sheet selects the Gen 3 dialect above (M.battleParty
+-- stamps it from the hub's generation); 1 / 2 / absent is read exactly as
+-- before.
 function M.battleMon(raw)
   if type(raw) ~= "table" then return nil end
+  if M.int(raw.generation, 3, 3) then return battleMon3(raw) end
 
   local generation = M.int(raw.generation, 1, 2)
   local stats = statsOf(raw.stats, 1, M.STAT_MAX, generation)
@@ -1607,9 +1986,63 @@ end
 --
 -- Optional `generation` (1|2) selects BattleSim vs BattleSim2 Effects for
 -- itemEffect; omitted → Gen 1 (compat).
+-- A Gen 3 bag id: a pret item number, as a JSON number or the numeric string a
+-- map key (or a choice) spells it as.  Nothing else -- no "0x0D", no " 13 ":
+-- the JS twin reads these same bytes and the two must agree on every one.
+local function itemId3(value)
+  if type(value) == "string" then
+    if not value:match("^%d+$") then return nil end
+  elseif type(value) ~= "number" then
+    return nil
+  end
+  local n = tonumber(value)
+  if n ~= math.floor(n) then return nil end
+  return M.int(n, 1, Config.GEN3_ITEM_MAX)
+end
+M.itemId3 = itemId3
+
+-- The Gen 3 bag (docs/plans/gen3-battle-sheet.md §4): `{ { id, count, name? } }`
+-- or `{ [id] = count }`, numeric pret ids restricted to BattleSim3's catalog.
+-- Out: `{ { id = <number>, count, name? } }` sorted by id.  `name` is the
+-- client's display name for "Ann used POTION!" and is optional; present and
+-- unreadable refuses, like every optional field in this section.
+local function battleBag3(raw)
+  local Effects = effectsFor(3)
+  local out, seen = {}, {}
+  local function push(id, count, name)
+    if not id or count == nil then return false end
+    if seen[id] then return false end
+    if #out >= Config.BATTLE_BAG_MAX then return false end
+    if not Effects.itemEffect(id) then return false end
+    seen[id] = true
+    out[#out + 1] = { id = id, count = count, name = name }
+    return true
+  end
+  if #raw > 0 or raw[1] ~= nil then
+    for _, entry in ipairs(raw) do
+      if type(entry) ~= "table" then return nil end
+      local name = nil
+      if entry.name ~= nil then
+        name = M.moveName(entry.name)
+        if not name then return nil end
+      end
+      if not push(itemId3(entry.id), M.int(entry.count, 1, Config.BATTLE_BAG_COUNT_MAX), name) then
+        return nil
+      end
+    end
+  else
+    for key, value in pairs(raw) do
+      if not push(itemId3(key), M.int(value, 1, Config.BATTLE_BAG_COUNT_MAX)) then return nil end
+    end
+  end
+  table.sort(out, function(a, b) return a.id < b.id end)
+  return out
+end
+
 function M.battleBag(raw, generation)
   if raw == nil then return {} end
   if type(raw) ~= "table" then return nil end
+  if generation == 3 then return battleBag3(raw) end
 
   local Effects = effectsFor(generation)
   local out, seen = {}, {}
@@ -1647,6 +2080,12 @@ function M.battleBag(raw, generation)
   return out
 end
 
+-- The three formula inputs a Gen 3 *upload* must carry even though an
+-- outcome's caught sheet may leave them out (see battleMon3).
+local function uploadComplete3(mon)
+  return mon.weight ~= nil and mon.hiddenPower ~= nil and mon.beatUp ~= nil
+end
+
 function M.battleParty(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
@@ -1656,16 +2095,17 @@ function M.battleParty(raw, generation)
 
   -- Hub generation (second arg) is authoritative when provided: stamp
   -- party.generation from it, and refuse a mon/party whose explicit
-  -- generation disagrees.
+  -- generation disagrees.  1..GENERATION_MAX: a Gen 3 hub (PROTOCOL 30) reads
+  -- its parties in the Gen 3 dialect (battleMon3, battleBag3).
   local hubGen = nil
   if generation ~= nil then
-    hubGen = M.int(generation, 1, 2)
+    hubGen = M.int(generation, 1, M.GENERATION_MAX)
     if not hubGen then return nil end
   end
 
   local partyGen = nil
   if raw.generation ~= nil then
-    partyGen = M.int(raw.generation, 1, 2)
+    partyGen = M.int(raw.generation, 1, M.GENERATION_MAX)
     if not partyGen then return nil end
     if hubGen and partyGen ~= hubGen then return nil end
   end
@@ -1687,7 +2127,7 @@ function M.battleParty(raw, generation)
     if #mons >= Config.BATTLE_MON_MAX then return nil end
     local hadExplicit = type(entry) == "table" and entry.generation ~= nil
     if hubGen and hadExplicit then
-      local monGen = M.int(entry.generation, 1, 2)
+      local monGen = M.int(entry.generation, 1, M.GENERATION_MAX)
       if not monGen or monGen ~= hubGen then return nil end
     end
     local sheet = entry
@@ -1699,6 +2139,12 @@ function M.battleParty(raw, generation)
     local mon = M.battleMon(sheet)
     if not mon then return nil end
     if hubGen and hadExplicit and mon.generation ~= hubGen then return nil end
+    -- A Gen 3 sheet read as Gen 3 has to be complete as an upload, and a
+    -- Gen 3 party has no Gen 1 / Gen 2 mon in it (a sheet whose own tag the
+    -- stamp did not reach -- an explicit 2 on a party that said 3 -- is
+    -- refused above; this closes the mixed party with no hub generation).
+    if mon.generation == 3 and not uploadComplete3(mon) then return nil end
+    if (partyGen == 3) ~= (mon.generation == 3) then return nil end
     mons[#mons + 1] = mon
   end
   if #mons == 0 then return nil end
@@ -1768,6 +2214,21 @@ function M.battleChoice(raw)
     out.item = M.id(raw.item)
     if not out.item then return nil end
   end
+  -- Gen 3 (docs/plans/gen3-battle-sheet.md §1.2).  `pass` is Baton Pass's
+  -- destination -- a *party* index, asked up front because a mediated fight
+  -- cannot open the party menu mid-move -- and `dexCaught` is the thrower's
+  -- word that its dex already has the wild species caught (Repeat Ball).  A
+  -- Gen 3 item rides in `item` as its numeric pret id spelled as a string
+  -- ("13"), which M.id already takes.  Neither field exists in Gen 1 / Gen 2,
+  -- whose choices never carry them.
+  if raw.pass ~= nil then
+    out.pass = M.int(raw.pass, 0, M.SLOT_MAX)
+    if out.pass == nil then return nil end
+  end
+  if raw.dexCaught ~= nil then
+    if type(raw.dexCaught) ~= "boolean" then return nil end
+    out.dexCaught = raw.dexCaught
+  end
 
   if needs ~= true and out[needs] == nil then return nil end
   return out
@@ -1810,6 +2271,26 @@ M.BATTLE_EVENTS = {
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
   chose = true, unchose = true, moves = true, exp = true, team = true,
+}
+
+-- Gen 3's six kinds (docs/plans/gen3-battle-sheet.md §7.2, contract C5).
+--
+-- A table of their own rather than six more rows above, because
+-- src/BattleSim/events.lua mirrors M.BATTLE_EVENTS *exactly* (its suite holds
+-- the two equal), and a Gen 1 referee has no ability, weather or held item to
+-- speak of.  M.battleEvent accepts a kind from either table -- a client
+-- sanitises whichever generation's stream it is drawing -- and BattleSim3's own
+-- vocabulary is the union of the two (server/twin_parity.test.js).
+--
+--   ability    -- an ability visibly acted (amount = ability id, text = name)
+--   weather    -- weather started (1), continues (2) or ended (0); text = kind
+--   held       -- a held item acted; `holding` is what the mon holds after
+--   form       -- the picture changed: Castform's form, or Transform's species
+--   sub        -- the substitute doll went up (1) or faded (0)
+--   ball       -- one throw: target = wild slot, amount = shakes (4 = caught),
+--                 text = the ball's item id
+M.BATTLE_EVENTS3 = {
+  ability = true, weather = true, held = true, form = true, sub = true, ball = true,
 }
 
 -- The three ball states a roster is spelled in, and the most of them a seat may
@@ -1874,15 +2355,16 @@ end
 -- battle length nobody chose.
 function M.battleEvent(raw)
   if type(raw) ~= "table" then return nil end
-  if not M.BATTLE_EVENTS[raw.t] then return nil end
+  if not (M.BATTLE_EVENTS[raw.t] or M.BATTLE_EVENTS3[raw.t]) then return nil end
   local battle = M.id(raw.battle)
   local seq = M.int(raw.seq, 0)
   if not (battle and seq) then return nil end
 
   local out = { battle = battle, seq = seq, t = raw.t }
   -- Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — M.text strips `_`.
+  -- A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4").
   if raw.text ~= nil then
-    if raw.t == "item" or raw.t == "anim" then
+    if raw.t == "item" or raw.t == "anim" or raw.t == "ball" then
       out.text = M.id(raw.text)
     else
       out.text = M.text(raw.text, Config.MESSAGE_MAX)
@@ -1948,6 +2430,20 @@ function M.battleEvent(raw)
   -- Fight-local volatile, not a standing status: 1 confused, 0 snapped out.
   -- Absent means "do not touch the chip". Never a party-sheet field.
   if raw.confused ~= nil then out.confused = M.int(raw.confused, 0, 1) end
+  -- Gen 3's six fields (§7.3), each dropped rather than fatal like the rest:
+  --   target   the field slot a move (anim) or a ball is aimed at
+  --   spread   1 when one move animation covers several targets
+  --   stat     which stat a `stat` event moved (atk def spe spa spd acc eva)
+  --   stage    the stage it now sits at, -6..6
+  --   delta    the change actually applied, signed -- Gen 3 states it here
+  --            rather than in `amount`, which is unsigned on every kind
+  --   holding  the item id a `held` event leaves the mon holding (0 = none)
+  if raw.target ~= nil then out.target = M.int(raw.target, 0, M.FIELD_MAX) end
+  if raw.spread ~= nil then out.spread = M.int(raw.spread, 0, 1) end
+  if raw.stat ~= nil and M.EVENT_STATS3[raw.stat] then out.stat = raw.stat end
+  if raw.stage ~= nil then out.stage = M.int(raw.stage, -M.STAGE3_MAX, M.STAGE3_MAX) end
+  if raw.delta ~= nil then out.delta = M.int(raw.delta, -M.DELTA3_MAX, M.DELTA3_MAX) end
+  if raw.holding ~= nil then out.holding = M.int(raw.holding, 0, Config.GEN3_ITEM_MAX) end
   if type(raw.moves) == "table" then
     local moves = {}
     for _, entry in ipairs(raw.moves) do
@@ -2082,7 +2578,10 @@ end
 -- claim its moves. Bounded numbers, 1..BATTLE_MOVE_MAX long; a missing field
 -- refuses the message rather than applying a half-sheet over a live battler.
 -- The hub then allows only an append of one slot or a single-id replace.
-function M.battleMoveset(raw)
+--
+-- `generation` (optional) is the hub's, and picks the move-row dialect the way
+-- M.battleMove documents (absent: a row stating `num` is Gen 3's).
+function M.battleMoveset(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
   local mon = M.int(raw.mon, 0, Config.BATTLE_MON_MAX - 1)
@@ -2091,7 +2590,7 @@ function M.battleMoveset(raw)
   local moves = {}
   for _, entry in ipairs(raw.moves) do
     if #moves >= Config.BATTLE_MOVE_MAX then return nil end
-    local move = M.battleMove(entry)
+    local move = M.battleMove(entry, generation)
     if not move then return nil end
     moves[#moves + 1] = move
   end
