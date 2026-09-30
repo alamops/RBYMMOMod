@@ -51,7 +51,417 @@ if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
   love.audio.setVolume(0)
 end
 
+-- ======================================================================
+-- Gen 3 (FireRed / Emerald): staged arena frames
+-- ======================================================================
+--
+-- A Gen 3 boot has no `game.stack` and no MediatedBattle Gen 1 wiring to push,
+-- so this arm stages the arena the way a battle screen hands it to the
+-- renderer: a view ctx built from Gen 3 art (Battlefield.gen3Front / gen3Icon,
+-- the OW walkers, an NPC trainer pic), drawn by a state pushed with
+-- Gen3Ui.pushState whose drawsWidescreen() is true -- the live mod's render.hud
+-- pass (Gen3Ui.drawWidescreen) paints it in window space, exactly the seam the
+-- real screens use. Every frame is also rendered into a private 640x360 canvas
+-- and pixel-asserted there, at the layout's own coordinates.
+--
+-- The module graph is a second one built on the live loader's sandbox
+-- (loader:_api / _modEnv), so the mod facade says generation 3 and every
+-- src.core.game3.* reach is the one the shipped code makes.
+--
+-- Frames: arena-idle (1v1, commands), arena-hit (flash + shake + a
+-- Thunderbolt beam), arena-2v2 (two seats and two trainers a side), arena-npc
+-- (an NPC trainer's own front pic on the foe edge), arena-party (the band's
+-- POKeMON list with its front-pic gutter). SHOT_DIR/g3-<fr|em>-<frame>.png.
+local function runGen3(game)
+  io.stdout:setvbuf("no")
+  local U = require("tests.drivers.util")
+  local TAG = "BF_SHOT:"
+  local function log(...)
+    local parts = { TAG }
+    for i = 1, select("#", ...) do parts[#parts + 1] = tostring(select(i, ...)) end
+    print(table.concat(parts, "\t"))
+  end
+  local SHOT_DIR = os.getenv("SHOT_DIR") or "/tmp/rby_mmo_bf_shots"
+  os.execute('mkdir -p "' .. SHOT_DIR .. '" 2>/dev/null')
+  local VER = os.getenv("POKEPORT_VERSION") or "firered"
+  local EM = VER == "emerald"
+  local V = EM and "em" or "fr"
+
+  local pass, fail = 0, 0
+  local function check(cond, label, detail)
+    if cond then pass = pass + 1; log("PASS", label, detail or "")
+    else fail = fail + 1; log("FAIL", label, detail or "") end
+  end
+  local function finish()
+    log("GAPS:" .. tostring(fail))
+    log("SUMMARY", "pass=" .. pass, "fail=" .. fail)
+    log("DONE")
+    love.event.quit(fail > 0 and 1 or 0)
+  end
+
+  -- ---- boot: title -> new game -> the field, then onto tall grass
+  for _ = 1, 900 do
+    if game.phase == "boot" and game.boot then break end
+    U.wait(1)
+  end
+  pcall(game._handleBootAction, game, { action = "new_game", name = "ALEX" })
+  for _ = 1, 1500 do
+    if game.phase == "field" and game.session then break end
+    U.wait(1)
+  end
+  U.wait(60)
+  check(game.phase == "field", "Gen 3 boot reached the field", tostring(game.phase))
+  local Map = require("src.core.game3.map")
+  local Player = require("src.core.game3.player")
+  local Runtime = require("src.core.game3.runtime")
+  local Collision = require("src.core.game3.collision")
+  local session = Runtime.getSession()
+  local function placeAt(mapId, x, y)
+    pcall(Map.load, nil, game, mapId, { x = x, y = y, facing = "down" })
+    if session then session.x, session.y, session.facing = x, y, "down" end
+    Player.cellX, Player.cellY = x, y
+    Player.px, Player.py = x * 16, y * 16
+    Player.targetX, Player.targetY = x, y
+    Player.moving = false
+    Player.facing = "down"
+    U.wait(45)
+  end
+  local route = EM and "EM_ROUTE101" or "FR_ROUTE1"
+  placeAt(route, 8, 8)
+  -- the arena's backdrop is the cart's terrain for the tile underfoot: stand in
+  -- tall grass (pret MB_TALL_GRASS 0x02) so the fight is a grass one
+  local grass = nil
+  do
+    local def = Map.currentDef and Map.currentDef()
+    local layout = def and def.midLayout
+    local w = layout and layout.width or 40
+    local h = layout and layout.height or 40
+    for y = 2, h - 3 do
+      for x = 2, w - 3 do
+        local ok, b = pcall(Collision.behavior, x, y)
+        if ok and b == 0x02 then grass = { x = x, y = y }; break end
+      end
+      if grass then break end
+    end
+  end
+  if grass then placeAt(route, grass.x, grass.y) end
+  log("placed", route, grass and (grass.x .. "," .. grass.y) or "no grass found")
+
+  -- ---- the mod's modules, on the live loader's sandbox
+  local loader = game.mods
+  local record = loader and loader.mods and loader.mods.rby_mmo
+  check(record ~= nil, "the mod is loaded on this boot", record and tostring(record.state))
+  if not record then return finish() end
+  local api = loader:_api(record)
+  local env = loader:_modEnv(record)
+  local cache = {}
+  local function need(name)
+    if cache[name] ~= nil then return cache[name] end
+    local body = api:read("src/" .. name .. ".lua")
+    local chunk = assert(env.loadstring(body, "@rby_mmo/src/" .. name .. ".lua"))
+    local value = chunk(need, api)
+    cache[name] = value == nil and true or value
+    return cache[name]
+  end
+  local Battlefield = need("Battlefield")
+  local Vfx = need("Vfx")
+  local Gen3Ui = need("Gen3Ui")
+  local Gen3 = need("Gen3")
+  Battlefield.reloadArena()
+
+  check(Battlefield.enabled(game), "the theatre gate is up on Gen 3",
+    "generation " .. tostring(game.generation))
+
+  -- ---- the art every seat and human wears
+  local ALLY_SP, FOE_SP = 25, EM and 280 or 1          -- PIKACHU / TORCHIC | BULBASAUR
+  local ALLY2_SP, FOE2_SP = 7, EM and 283 or 16         -- SQUIRTLE / MUDKIP | PIDGEY
+  local BENCH = { 4, 19, EM and 277 or 10 }
+  local function seat(sp, name, level, hp, maxHp, extra)
+    local s = {
+      name = name, level = level, hp = hp, maxHp = maxHp,
+      front = Battlefield.gen3Front(sp), icon = Battlefield.gen3Icon(sp),
+      elevation = Battlefield.gen3Elevation(sp),
+    }
+    for k, v in pairs(extra or {}) do s[k] = v end
+    return s
+  end
+  local SELF_LOOK = EM and "OBJ_EVENT_GFX_BRENDAN_NORMAL" or "OBJ_EVENT_GFX_RED_NORMAL"
+  local PEER_LOOK = EM and "OBJ_EVENT_GFX_MAY_NORMAL" or "OBJ_EVENT_GFX_GREEN_NORMAL"
+  local PARTNER_LOOK = EM and "OBJ_EVENT_GFX_RED" or "OBJ_EVENT_GFX_RS_BRENDAN"
+  local ally1 = seat(ALLY_SP, "SPARKY", 25, 40, 55, { expFrac = 0.6 })
+  local foe1 = seat(FOE_SP, EM and "TORCHIC" or "BULBASAUR", 18, 32, 45)
+  check(ally1.front ~= nil and foe1.front ~= nil, "Gen 3 front pics resolve for both seats")
+  check(ally1.icon ~= nil, "a Gen 3 party icon record resolves", tostring(ally1.icon and ally1.icon.frames))
+
+  -- an NPC trainer from the cart's own table, with a front pic that loads
+  local npcPic, npcName = nil, "TRAINER"
+  pcall(function()
+    local Trainers = require("src.core.game3.scripting.trainers")
+    for id = 1, 400 do
+      local ok, info = pcall(Trainers.info, id)
+      if ok and type(info) == "table" and info.pic ~= nil
+         and Battlefield.gen3TrainerPic(info.pic) then
+        npcPic = info.pic
+        npcName = tostring(info.name or info.className or "TRAINER")
+        break
+      end
+    end
+  end)
+  check(npcPic ~= nil, "an NPC trainer pic resolves from the cart", tostring(npcPic))
+
+  -- ---- the staged screen
+  local ctx, band = nil, nil
+  local function drawBand()
+    if not band then return end
+    Battlefield.drawBandBackdrop()
+    if band.kind == "grid" then
+      Battlefield.drawCommandGrid(band.items, band.cursor or 1)
+    elseif band.kind == "list" then
+      Battlefield.drawListPanel(band.rows, band.cursor or 1, { title = band.title })
+    else
+      Battlefield.drawMessagePanel(band.text or "")
+    end
+  end
+  local function drawArena()
+    pcall(Battlefield.draw, { game = game }, ctx, { game = game })
+    pcall(drawBand)
+  end
+  local state = {
+    screenId = "BfShotGen3",
+    drawsWidescreen = function() return true end,
+    drawWidescreen = function(_, w, h)
+      local G = love.graphics
+      G.setColor(0, 0, 0, 1)
+      G.rectangle("fill", 0, 0, w, h)
+      local up = math.min(h / Battlefield.HEIGHT, w / Battlefield.WIDTH)
+      local ox = math.floor((w - Battlefield.WIDTH * up) / 2)
+      local oy = math.floor((h - Battlefield.HEIGHT * up) / 2)
+      G.push()
+      G.translate(ox, oy)
+      G.scale(up, up)
+      drawArena()
+      G.pop()
+      G.setColor(1, 1, 1, 1)
+    end,
+    draw = function() end,
+    update = function() end,
+  }
+
+  -- The same frame into a private canvas, for pixel asserts at canvas
+  -- coordinates (the window-space shot is for eyes).
+  local function renderCanvas()
+    local c = love.graphics.newCanvas(Battlefield.WIDTH, Battlefield.HEIGHT)
+    love.graphics.push("all")
+    love.graphics.setCanvas(c)
+    love.graphics.origin()
+    love.graphics.clear(0, 0, 0, 1)
+    drawArena()
+    love.graphics.pop()
+    return c:newImageData()
+  end
+  local function maxSat(data, r)
+    local best = 0
+    local x0, y0 = math.max(0, math.floor(r.x)), math.max(0, math.floor(r.y))
+    local x1 = math.min(Battlefield.WIDTH - 1, math.floor(r.x + r.w - 1))
+    local y1 = math.min(Battlefield.HEIGHT - 1, math.floor(r.y + r.h - 1))
+    for y = y0, y1 do
+      for x = x0, x1 do
+        local cr, cg, cb = data:getPixel(x, y)
+        local s = math.max(math.abs(cr - cg), math.abs(cg - cb), math.abs(cr - cb))
+        if s > best then best = s end
+      end
+    end
+    return best
+  end
+  local function assertFrame(label)
+    local ok, data = pcall(renderCanvas)
+    if not (ok and data) then
+      check(false, label .. ": the frame renders into a canvas", tostring(data))
+      return nil
+    end
+    local layout = Battlefield.layout(ctx)
+    for _, mon in ipairs(layout.mons) do
+      if not mon.substitute then
+        local r = { x = mon.x - 32, y = mon.y - 56, w = 64, h = 64 }
+        local s = maxSat(data, r)
+        check(s > 0.15, ("%s: %s seat %d draws saturated Gen 3 art"):format(label, mon.side, mon.seatIndex),
+          ("max sat=%.2f"):format(s))
+      end
+    end
+    for _, h in ipairs(layout.humans) do
+      local r = { x = h.x - h.drawW / 2, y = h.y - h.drawH, w = h.drawW, h = h.drawH }
+      if h.trainerPic ~= nil then r = { x = h.x - 32, y = h.y - 64, w = 64, h = 64 } end
+      local s = maxSat(data, r)
+      check(s > 0.12, ("%s: %s trainer %d is drawn (walker or trainer pic)"):format(label, h.side, h.index),
+        ("max sat=%.2f"):format(s))
+    end
+    -- a 64px Gen 3 figure stays out of the roster chips' corner
+    for _, h in ipairs(layout.humans) do
+      local reach = (h.trainerPic ~= nil or h.side == "foe") and 64 or Battlefield.HUMAN_REACH3
+      local fig = { x = h.x - h.drawW / 2, y = h.y - reach, w = h.drawW, h = reach }
+      for _, chip in ipairs(layout.rosters) do
+        local hit = fig.x < chip.x + chip.w and chip.x < fig.x + fig.w
+          and fig.y < chip.y + chip.h and chip.y < fig.y + fig.h
+        check(not hit, ("%s: %s trainer %d clears the %s roster chip"):format(
+          label, h.side, h.index, chip.side), ("feet y=%d chip y=%d"):format(h.y, chip.y))
+      end
+    end
+    -- the backdrop is the cart's wallpaper, not black and not the vector stand-in
+    local top = maxSat(data, { x = 300, y = 4, w = 40, h = 20 })
+    local r, g, b = data:getPixel(320, 200)
+    check(r + g + b > 0.6, label .. ": the arena backdrop is painted", ("rgb=%.2f,%.2f,%.2f sat=%.2f"):format(r, g, b, top))
+    return data, layout
+  end
+
+  local function shoot(name, label)
+    U.wait(4)
+    local path = ("%s/g3-%s-%s.png"):format(SHOT_DIR, V, name)
+    local ok = U.shot(game, path)
+    check(ok, label .. ": screenshot reached disk", path)
+    return ok
+  end
+
+  local pushed = Gen3Ui.pushState(game, state)
+  check(pushed ~= nil, "the staged widescreen state is on the Gen 3 stack")
+
+  -- ---- frame 1: idle 1v1, the command grid
+  ctx = {
+    mode = "1v1",
+    allyHumans = { { id = "self", name = "ALEX", spriteId = SELF_LOOK, party = "oosx" } },
+    foeHumans = { { id = "peer", name = "BLUE", spriteId = PEER_LOOK, party = "oox",
+                    version = VER, gender = 1 } },
+    allySeats = { ally1 }, foeSeats = { foe1 }, frame = 0,
+  }
+  band = { kind = "grid", cursor = 1, items = {
+    { label = "FIGHT" }, { label = "BAG" }, { label = "POKéMON" }, { label = "RUN" } } }
+  U.wait(10)
+  local data = assertFrame("idle")
+  check(Battlefield.arena() ~= nil, "idle: the Gen 3 arena was composed from the cart's background")
+  local plat = Battlefield.gen3Platform()
+  check(plat ~= nil and plat.w > 64 and plat.h > 16,
+    "idle: the cart's platform oval was cut out of its background",
+    plat and (plat.w .. "x" .. plat.h .. " feetDy=" .. plat.feetDy) or "none")
+  shoot("arena-idle", "idle")
+
+  -- ---- frame 2: a hit -- flash + shake on the foe, and a Thunderbolt beam
+  local spec = Vfx.forMove3("THUNDERBOLT", { type = 13, power = 95, effect = 6, target = 0 })
+  check(spec.delivery == "beam" and spec.palette == "ELECTRIC",
+    "hit: Thunderbolt resolves to its catalogue look on Gen 3", spec.style .. "/" .. spec.delivery)
+  foe1.hp = 12
+  foe1.shownHp = 20
+  ctx.fx = {
+    { kind = "flash", side = "foe", seatIndex = 1, t = 0.3 },
+    { kind = "shake", side = "foe", seatIndex = 1, t = 0.35 },
+    { kind = "vfx", side = "foe", seatIndex = 1, fromSide = "ally", fromSeat = 1,
+      t = 0.55, style = spec.style, palette = spec.palette, delivery = spec.delivery,
+      scale = spec.scale, intensity = spec.intensity, seed = 7 },
+  }
+  band = { kind = "message", text = "SPARKY used\nTHUNDERBOLT!" }
+  U.wait(4)
+  assertFrame("hit")
+  shoot("arena-hit", "hit")
+  ctx.fx = nil
+
+  -- ---- frame 2b: rain over the field, and a Substitute doll in the foe seat
+  ctx.fx = nil
+  foe1.substitute = true
+  ctx.weather = "RAIN"
+  band = { kind = "message", text = "Rain continues to fall." }
+  U.wait(4)
+  local wdata = assertFrame("weather")
+  local doll = Battlefield.gen3SubstituteDoll(false)
+  check(doll ~= nil, "weather: the cart's Substitute doll resolves from the animation cache")
+  if wdata then
+    -- the rain's streak colour, in the corridor between the seats
+    local hits = 0
+    for y = 110, 250, 2 do
+      for x = 280, 360, 2 do
+        local r, g, b = wdata:getPixel(x, y)
+        if b > 0.85 and r > 0.6 and r < 0.9 and b > r then hits = hits + 1 end
+      end
+    end
+    check(hits > 3, "weather: rain streaks fall across the field", "hits=" .. hits)
+  end
+  shoot("arena-weather", "weather")
+  foe1.substitute = nil
+  ctx.weather = nil
+
+  -- ---- frame 3: 2v2 -- two seats and two trainers a side
+  local ally2 = seat(ALLY2_SP, EM and "MUDKIP" or "SQUIRTLE", 22, 50, 50)
+  local foe2 = seat(FOE2_SP, EM and "MUDKIP" or "PIDGEY", 20, 9, 41, { status = "PSN" })
+  ctx = {
+    mode = "coop_npc",
+    allyHumans = {
+      { id = "self", name = "ALEX", spriteId = SELF_LOOK, party = "oos" },
+      { id = "mate", name = "DEE", spriteId = PARTNER_LOOK, party = "oo",
+        version = EM and "firered" or "emerald", gender = 0 },
+    },
+    foeHumans = {
+      { id = "p1", name = "BLUE", spriteId = PEER_LOOK, party = "oox", version = VER, gender = 1 },
+      { id = "p2", name = "ZED", spriteId = "OBJ_EVENT_GFX_YOUNGSTER", party = "ox" },
+    },
+    allySeats = { ally1, ally2 }, foeSeats = { foe1, foe2 }, frame = 30,
+  }
+  band = { kind = "message", text = "What will SPARKY do?" }
+  U.wait(4)
+  assertFrame("2v2")
+  shoot("arena-2v2", "2v2")
+
+  -- ---- frame 4: an NPC trainer, drawn as the cart's own front pic
+  ctx = {
+    mode = "1v1",
+    allyHumans = { { id = "self", name = "ALEX", spriteId = SELF_LOOK, party = "oo" } },
+    foeHumans = { { id = "npc", name = npcName, trainerPic = npcPic, party = "oox" } },
+    allySeats = { ally1 }, foeSeats = { foe1 }, frame = 0,
+  }
+  band = { kind = "list", title = "MOVES", cursor = 1, rows = {
+    { label = "THUNDERBOLT", tag = Gen3.typeName(13) or "ELECTRIC", right = "10/15" },
+    { label = "QUICK ATTACK", tag = Gen3.typeName(0) or "NORMAL", right = "30/30" },
+    { label = "THUNDER WAVE", tag = Gen3.typeName(13) or "ELECTRIC", right = "5/20" },
+    { label = "GROWL", tag = Gen3.typeName(0) or "NORMAL", right = "40/40" },
+  } }
+  U.wait(4)
+  local _, npcLayout = assertFrame("npc")
+  local npcHuman = nil
+  for _, h in ipairs(npcLayout and npcLayout.humans or {}) do
+    if h.side == "foe" then npcHuman = h end
+  end
+  check(npcHuman ~= nil and npcHuman.trainerPic == npcPic,
+    "npc: the foe edge carries the NPC's trainer pic id through the layout")
+  shoot("arena-npc", "npc")
+
+  -- ---- frame 5: the POKeMON list, with the front-pic gutter
+  local rows = {}
+  for i, sp in ipairs(BENCH) do
+    rows[#rows + 1] = { label = Gen3.speciesName(sp) or ("MON " .. sp),
+                        front = Battlefield.gen3Front(sp), right = (20 + i) .. "/" .. (30 + i) }
+  end
+  ctx = {
+    mode = "1v1",
+    allyHumans = { { id = "self", name = "ALEX", spriteId = SELF_LOOK, party = "oooo" } },
+    foeHumans = { { id = "peer", name = "BLUE", spriteId = PEER_LOOK, party = "oox" } },
+    allySeats = { ally1 }, foeSeats = { foe1 }, frame = 0,
+  }
+  band = { kind = "list", title = "POKeMON", cursor = 1, rows = rows }
+  U.wait(4)
+  data = assertFrame("party")
+  local gutter = Battlefield.listPreviewRect()
+  if data and gutter then
+    local s = maxSat(data, { x = gutter.x, y = gutter.y, w = gutter.size, h = gutter.size })
+    check(s > 0.15, "party: the gutter carries the highlighted mon's Gen 3 front pic",
+      ("max sat=%.2f"):format(s))
+  else
+    check(false, "party: the band spares a preview gutter")
+  end
+  shoot("arena-party", "party")
+
+  Gen3Ui.pop(game, state)
+  U.wait(4)
+  return finish()
+end
+
 return function(game)
+  if tonumber(game and game.generation) == 3 then return runGen3(game) end
   local U = require("tests.drivers.util")
   -- H.waitFor: spin-until-predicate, budgeted in frames -- used below to
   -- drive the ball-flow queue on to HIDEPIC/wobble without pinning an exact
@@ -824,6 +1234,10 @@ return function(game)
 
   -- ---- Dig / Fly vanish: charge hides the seat and holds it ----
   -- Drop the ball hold so a leftover wobble cannot steal the seat assert.
+  -- The budgets are frames, and the fx clocks are seconds (the callout beat,
+  -- then the dig / fly slide): a run with vsync off steps far more frames per
+  -- second, so the budget is generous and the wait still ends the moment the
+  -- seat hides.
   if screen.clearBallFlow then screen:clearBallFlow() end
   screen.fx = nil
   screen.ballFlow = nil
@@ -832,7 +1246,7 @@ return function(game)
   }
   local reachedDig = H.waitFor(game, function()
     return Battlefield.fxSeat(screen.fx, "ally", 1).hidden == true
-  end, 80, "DIG charge to hide the ally seat")
+  end, 400, "DIG charge to hide the ally seat")
   check(reachedDig, "dig: charge hides the ally seat")
   local pathDig = SHOT_DIR .. "/battlefield-dig.png"
   if U.shot(game, pathDig) then
@@ -845,7 +1259,7 @@ return function(game)
   }
   local emerged = H.waitFor(game, function()
     return Battlefield.fxSeat(screen.fx or {}, "ally", 1).hidden ~= true
-  end, 80, "DIG release to show the ally seat")
+  end, 400, "DIG release to show the ally seat")
   check(emerged, "dig: release clears the hide")
 
   screen.lines[#screen.lines + 1] = {
@@ -853,7 +1267,7 @@ return function(game)
   }
   local reachedFly = H.waitFor(game, function()
     return Battlefield.fxSeat(screen.fx, "foe", 1).hidden == true
-  end, 80, "FLY charge to hide the foe seat")
+  end, 400, "FLY charge to hide the foe seat")
   check(reachedFly, "fly: charge hides the foe seat")
 
   -- ---- (d) bubble frame: rounded callout, moveName emphasised ----

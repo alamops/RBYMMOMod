@@ -812,6 +812,11 @@ M.CHARGE_STYLE = {
   SKULL_BASH   = { style = "shine", palette = "NORMAL", delivery = "self", scale = 1.10 },
   RAZOR_WIND   = { style = "gust", palette = "NORMAL", delivery = "self", scale = 1.10 },
   SKY_ATTACK   = { style = "shine", palette = "FLYING", delivery = "self", scale = 1.20 },
+  -- Gen 3's two new semi-invulnerable turns. Names no Gen 1 or Gen 2 move
+  -- carries, so these two rows are dead weight on those carts rather than a
+  -- change to anything they draw.
+  DIVE         = { style = "splash", palette = "WATER", delivery = "self", scale = 1.15 },
+  BOUNCE       = { style = "gust", palette = "FLYING", delivery = "self", scale = 1.15 },
 }
 
 -- Moves that fire once per hit of a multi-hit or that a client sees twice in a
@@ -1122,6 +1127,350 @@ function M.forImpact(spec)
   local pal = (type(spec) == "table" and spec.palette) or M.DEFAULT_PALETTE
   if not M.PALETTES[pal] then pal = M.DEFAULT_PALETTE end
   return specOf("impact", pal, "burst", 0.85, 0.8, nil)
+end
+
+-- ------------------------------------------------------------------
+-- Gen 3 (FireRed / LeafGreen / Emerald)
+-- ------------------------------------------------------------------
+--
+-- **A separate door, never a change to the Gen 1 / Gen 2 one.** A Gen 3 move
+-- arrives as a sheet row (docs/plans/gen3-battle-sheet.md, C4): the type is a
+-- pret `TYPE_*` *number*, not a registry id string; the effect is a pret
+-- `EFFECT_*` number; the target is a `MOVE_TARGET_*` bit mask. None of those
+-- mean anything to `M.forMove`, and teaching it to read numbers would change
+-- what it answers for a Gen 1 caller that ever passed one. So Gen 3 has its own
+-- entry points -- `forMove3`, `forItem3` -- and its own override tables, and
+-- every table above keeps answering exactly what it answered before.
+--
+-- **Still never nil, and never a blank.** 354 moves resolve like this, in
+-- order: an explicit Gen 3 entry (`MOVE_STYLE3`), else the Gen 1 / Gen 2 entry
+-- for the same move (the ROM names Gen 3 carries for the classic moves are the
+-- old twelve-character spellings -- SOLARBEAM, SELFDESTRUCT -- so those rows
+-- already match; `GEN3_MOVE_ALIAS` folds the pret constant spellings a caller
+-- may hold instead), else the move's *shape* read off its effect and target
+-- (a self boost plays on the user, a stat drop is a falling-arrow gesture at the
+-- target, a spread move plays across the field), else its type. A move this
+-- file has never heard of still wears its type's colours at its power's weight.
+--
+-- The numbers below are pret's own enums (include/constants/pokemon.h TYPE_*,
+-- battle_move_effects.h EFFECT_*, battle.h MOVE_TARGET_*): public constants,
+-- the same ones src/BattleSim3 branches on. No ROM value is read or kept here.
+
+-- pret TYPE_*: 0..17, MYSTERY (???, Curse's type) at 9.
+M.GEN3_TYPES = {
+  [0] = "NORMAL", [1] = "FIGHTING", [2] = "FLYING", [3] = "POISON",
+  [4] = "GROUND", [5] = "ROCK", [6] = "BUG", [7] = "GHOST", [8] = "STEEL",
+  [9] = "MYSTERY", [10] = "FIRE", [11] = "WATER", [12] = "GRASS",
+  [13] = "ELECTRIC", [14] = "PSYCHIC", [15] = "ICE", [16] = "DRAGON",
+  [17] = "DARK",
+}
+
+-- The type key a Gen 3 row names: a pret number, or a name the caller already
+-- resolved (the cart's own gTypeNames text is upper-case and one word, so it is
+-- already a key). nil for anything else.
+function M.gen3TypeKey(value)
+  local n = tonumber(value)
+  if n then return M.GEN3_TYPES[floor(n)] end
+  if type(value) == "string" and value ~= "" then return M.typeKey(value) end
+  return nil
+end
+
+-- pret constant spellings -> the catalogue's key for the same move. The cart's
+-- own move names are the twelve-character ones the tables above already use;
+-- these are only the ones a caller holding a pret `MOVE_*` token would spell
+-- differently.
+M.GEN3_MOVE_ALIAS = {
+  SOLAR_BEAM = "SOLARBEAM", SELF_DESTRUCT = "SELFDESTRUCT",
+  POISON_POWDER = "POISONPOWDER", ANCIENT_POWER = "ANCIENTPOWER",
+  SONIC_BOOM = "SONICBOOM", SOFT_BOILED = "SOFTBOILED",
+  SMOKE_SCREEN = "SMOKESCREEN", CONVERSION_2 = "CONVERSION2",
+  DRAGON_BREATH = "DRAGONBREATH", FEATHER_DANCE = "FEATHERDANCE",
+  GRASS_WHISTLE = "GRASSWHISTLE",
+}
+
+-- The catalogue key for a Gen 3 move id: the engine's own constant name
+-- (Moves.constName upper-cases the ROM name and turns spaces and hyphens into
+-- underscores, so WILL-O-WISP is WILL_O_WISP), folded through the alias table.
+-- A display name a caller passes instead is folded the same way.
+function M.moveKey3(moveId)
+  local id = upperId(moveId)
+  if not id then return nil end
+  id = id:gsub("[%s%-]+", "_")
+  return M.GEN3_MOVE_ALIAS[id] or id
+end
+
+-- The moves Gen 3 added (and the few old ones whose Gen 3 shape the type
+-- misreads). Same field rules as MOVE_STYLE: a field left out falls through.
+M.MOVE_STYLE3 = {
+  -- ------- beams and streams
+  HYDRO_CANNON = beam(1.30),
+  BLAST_BURN   = { style = "ember", delivery = "beam", scale = 1.30 },
+  OVERHEAT     = { style = "ember", delivery = "beam", scale = 1.25 },
+  SIGNAL_BEAM  = { style = "sparkle", palette = "BUG", delivery = "beam", scale = 1.00 },
+  PSYCHO_BOOST = { style = "psi", delivery = "beam", scale = 1.30 },
+  DRAGONBREATH = { style = "ember", palette = "DRAGON", delivery = "beam", scale = 1.00 },
+  LUSTER_PURGE = { style = "psi", delivery = "projectile", scale = 1.10 },
+  MIST_BALL    = { style = "psi", delivery = "projectile", scale = 1.10 },
+
+  -- ------- across the whole field
+  ERUPTION     = { style = "blast", palette = "FIRE", delivery = "field", scale = 1.50,
+                   intensity = 1.3 },
+  WATER_SPOUT  = { style = "splash", palette = "WATER", delivery = "field", scale = 1.45,
+                   intensity = 1.2 },
+  HEAT_WAVE    = { style = "ember", palette = "FIRE", delivery = "field", scale = 1.35 },
+  MUDDY_WATER  = { style = "splash", palette = "GROUND", delivery = "field", scale = 1.35 },
+  HYPER_VOICE  = { style = "note", palette = "NORMAL", delivery = "field", scale = 1.25 },
+  HAIL         = { style = "shard", palette = "ICE", delivery = "field", scale = 1.45,
+                   duration = 0.60 },
+  MUD_SPORT    = { style = "quake", palette = "GROUND", delivery = "field" },
+  WATER_SPORT  = { style = "splash", palette = "WATER", delivery = "field" },
+  TEETER_DANCE = { style = "psi", palette = "NORMAL", delivery = "field" },
+  AROMATHERAPY = { style = "cure", palette = "GRASS", delivery = "field" },
+  FRENZY_PLANT = { style = "leaf", palette = "GRASS", scale = 1.40, intensity = 1.3 },
+  SHEER_COLD   = { style = "shard", palette = "ICE", scale = 1.45, intensity = 1.3 },
+
+  -- ------- thrown, not swung
+  WEATHER_BALL = { delivery = "projectile", scale = 1.05 },
+  SHOCK_WAVE   = { style = "spark", delivery = "projectile" },
+  WATER_PULSE  = { style = "splash", delivery = "projectile" },
+  ROCK_TOMB    = { style = "rock", delivery = "projectile", scale = 1.10 },
+  ROCK_BLAST   = { style = "rock", delivery = "projectile" },
+  BULLET_SEED  = { style = "leaf", delivery = "projectile", scale = 0.85 },
+  ICICLE_SPEAR = { style = "shard", delivery = "projectile", scale = 0.90 },
+  MUD_SHOT     = { style = "quake", palette = "GROUND", delivery = "projectile" },
+  AIR_CUTTER   = { style = "gust", delivery = "projectile" },
+  ICE_BALL     = { style = "shard", delivery = "projectile" },
+  SPIT_UP      = { style = "blast", palette = "NORMAL", delivery = "projectile" },
+  SEED_BOMB    = { style = "leaf", delivery = "projectile" },
+  WILL_O_WISP  = { style = "ember", palette = "GHOST", delivery = "projectile",
+                   intensity = 0.8 },
+  EXTRASENSORY = { style = "psi", delivery = "projectile" },
+  DOOM_DESIRE  = { style = "shine", palette = "STEEL", delivery = "self", scale = 1.20 },
+
+  -- ------- blows with a look of their own
+  AERIAL_ACE   = { style = "gust", palette = "FLYING", scale = 1.10 },
+  SKY_UPPERCUT = { style = "impact", palette = "FIGHTING", scale = 1.15 },
+  FOCUS_PUNCH  = { style = "impact", palette = "FIGHTING", scale = 1.30, intensity = 1.2 },
+  SUPERPOWER   = { style = "impact", palette = "FIGHTING", scale = 1.30 },
+  BRICK_BREAK  = { style = "impact", palette = "FIGHTING", scale = 1.10 },
+  METEOR_MASH  = { style = "impact", palette = "STEEL", scale = 1.15 },
+  SHADOW_PUNCH = { style = "impact", palette = "GHOST" },
+  ASTONISH     = { style = "spirit", palette = "GHOST" },
+  KNOCK_OFF    = { style = "impact", palette = "DARK" },
+  FAKE_OUT     = { style = "impact", palette = "NORMAL", scale = 0.90 },
+  BLAZE_KICK   = { style = "ember", palette = "FIRE", scale = 1.10 },
+  POISON_FANG  = { style = "impact", palette = "POISON" },
+  DRAGON_CLAW  = { style = "impact", palette = "DRAGON", scale = 1.10 },
+  LEAF_BLADE   = { style = "leaf", palette = "GRASS", scale = 1.15 },
+  SAND_TOMB    = { style = "quake", palette = "GROUND" },
+
+  -- ------- acts on the user
+  CALM_MIND    = selfBuff("psi", "PSYCHIC"),
+  BULK_UP      = selfBuff("rage", "FIGHTING"),
+  DRAGON_DANCE = selfBuff("rage", "DRAGON"),
+  IRON_DEFENSE = selfBuff("shine", "STEEL"),
+  COSMIC_POWER = selfBuff("sparkle", "PSYCHIC"),
+  TAIL_GLOW    = selfBuff("shine", "BUG"),
+  HOWL         = selfBuff("note", "BUFF"),
+  CHARGE       = selfBuff("spark", "ELECTRIC"),
+  STOCKPILE    = selfBuff("rage", "BUFF"),
+  CAMOUFLAGE   = selfBuff("puff", "NORMAL"),
+  WISH         = selfBuff("sparkle", "HEAL"),
+  INGRAIN      = selfBuff("leaf", "GRASS"),
+  SLACK_OFF    = selfBuff("heal", "HEAL"),
+  SWALLOW      = selfBuff("heal", "HEAL"),
+  REFRESH      = selfBuff("cure", "CURE"),
+  MAGIC_COAT   = selfBuff("shine", "PSYCHIC"),
+  SNATCH       = selfBuff("shadow", "DARK"),
+  GRUDGE       = selfBuff("spirit", "GHOST"),
+  IMPRISON     = selfBuff("psi", "PSYCHIC"),
+  FOLLOW_ME    = selfBuff("sparkle", "NORMAL"),
+  HELPING_HAND = selfBuff("buff", "BUFF"),
+  RECYCLE      = selfBuff("sparkle", "NORMAL"),
+  NATURE_POWER = selfBuff("sparkle", "GRASS"),
+  ASSIST       = selfBuff("sparkle", "NORMAL"),
+
+  -- ------- gestures at the target
+  UPROAR       = { style = "note", delivery = "projectile" },
+  METAL_SOUND  = { style = "note", palette = "STEEL", delivery = "projectile" },
+  GRASSWHISTLE = { style = "note", palette = "GRASS", delivery = "projectile" },
+  YAWN         = { style = "note", palette = "PSYCHIC", delivery = "projectile" },
+  FAKE_TEARS   = { style = "splash", palette = "WATER", delivery = "projectile",
+                   intensity = 0.8 },
+  TICKLE       = { style = "sparkle", palette = "NORMAL", delivery = "projectile" },
+  FEATHERDANCE = { style = "gust", palette = "FLYING", delivery = "projectile" },
+  TAUNT        = { style = "shadow", palette = "DARK", delivery = "projectile" },
+  TORMENT      = { style = "shadow", palette = "DARK", delivery = "projectile" },
+  FLATTER      = { style = "sparkle", palette = "DARK", delivery = "projectile" },
+  MEMENTO      = { style = "spirit", palette = "DARK", delivery = "projectile" },
+  BLOCK        = { style = "shadow", palette = "NORMAL" },
+  ODOR_SLEUTH  = { style = "psi", palette = "NORMAL" },
+  SKILL_SWAP   = { style = "psi", palette = "PSYCHIC", delivery = "projectile" },
+  ROLE_PLAY    = { style = "psi", palette = "PSYCHIC", delivery = "projectile" },
+  TRICK        = { style = "sparkle", palette = "PSYCHIC", delivery = "projectile" },
+}
+
+-- pret EFFECT_* numbers the shape rules below read.
+local E3_SELF_BOOST = {
+  [10] = true, [11] = true, [12] = true, [13] = true, [14] = true, [15] = true,
+  [16] = true, [50] = true, [51] = true, [52] = true, [53] = true, [54] = true,
+  [55] = true, [56] = true, [47] = true, [142] = true, [206] = true, [208] = true,
+  [211] = true, [212] = true, [156] = true, [108] = true,
+}
+local E3_STAT_DROP = {
+  [18] = true, [19] = true, [20] = true, [21] = true, [22] = true, [23] = true,
+  [24] = true, [58] = true, [59] = true, [60] = true, [61] = true, [62] = true,
+  [63] = true, [64] = true, [205] = true,
+}
+local E3_SELF_HEAL = {
+  [32] = true, [37] = true, [132] = true, [133] = true, [134] = true,
+  [157] = true, [162] = true, [179] = true,
+}
+-- A condition inflicted without damage: the look of that condition, thrown.
+local E3_INFLICT = {
+  [1] = "SLP", [33] = "TOX", [49] = "confusion", [66] = "PSN", [67] = "PAR",
+  [167] = "BRN", [187] = "SLP", [118] = "confusion", [166] = "confusion",
+}
+-- MOVE_TARGET_* bits.
+local TARGET_USER = 16
+local TARGET_FOES_AND_ALLY = 32
+
+-- One Gen 3 move's look. `row` is the C4 move row (or the engine's own
+-- Moves.get record): `type` a pret number, `power`, `effect`, `target`, and an
+-- optional `category`. `typeName` wins over the row's type when given. Never
+-- nil.
+function M.forMove3(moveId, row, typeName)
+  local id = M.moveKey3(moveId)
+  row = type(row) == "table" and row or {}
+  local typeId = M.gen3TypeKey(typeName) or M.gen3TypeKey(row.type)
+
+  local out = typeSpec(typeId)
+  local power = num(row.power, 0)
+  local status = row.category == "status" or (row.category == nil and power <= 0)
+  if status then
+    out.intensity = 0.75
+    out.scale = 0.90
+  else
+    local band = M.powerBand(power)
+    if band then
+      out.intensity = band.intensity
+      out.scale = band.scale
+    end
+  end
+
+  -- The move's shape, for a move nobody named: read off what it does.
+  local over = id and (M.MOVE_STYLE3[id] or M.MOVE_STYLE[id]) or nil
+  if not over then
+    local effect = floor(num(row.effect, -1))
+    local target = floor(num(row.target, 0))
+    local inflicted = status and E3_INFLICT[effect] or nil
+    if status and E3_SELF_HEAL[effect] then
+      out.style, out.palette, out.delivery = "heal", "HEAL", "self"
+    elseif status and (E3_SELF_BOOST[effect] or target == TARGET_USER) then
+      out.style, out.palette, out.delivery = "buff", "BUFF", "self"
+    elseif status and E3_STAT_DROP[effect] then
+      out.style, out.palette, out.delivery = "debuff", "DEBUFF", "projectile"
+    elseif inflicted then
+      local look = M.STATUS_STYLE[inflicted]
+      if look then
+        out.style, out.palette = look.style, look.palette
+      end
+      out.delivery = "projectile"
+    elseif not status and target == TARGET_FOES_AND_ALLY then
+      out.delivery = "field"
+      out.scale = math.max(out.scale or 1, 1.30)
+    end
+  else
+    if over.style then out.style = over.style end
+    if over.palette then out.palette = over.palette end
+    if over.delivery then out.delivery = over.delivery end
+    if over.scale then out.scale = over.scale end
+    if over.intensity then out.intensity = over.intensity end
+    if over.duration then out.duration = over.duration end
+  end
+  if not M.DELIVERIES[out.delivery] then out.delivery = "burst" end
+  if not M.STYLES[out.style] then out.style = M.DEFAULT_STYLE end
+  if not M.PALETTES[out.palette] then out.palette = M.DEFAULT_PALETTE end
+  return out
+end
+
+-- The charge-turn look for a Gen 3 two-turn move (Dig, Fly, Dive, Bounce,
+-- SolarBeam, Skull Bash, Razor Wind, Sky Attack), or nil for a move that has
+-- none. Through the alias table, so a pret spelling finds the same row.
+function M.chargeStyle3(moveId)
+  local id = M.moveKey3(moveId)
+  if not id then return nil end
+  local entry = M.CHARGE_STYLE[id]
+  if not entry then return nil end
+  return specOf(entry.style, entry.palette, entry.delivery or "self",
+    entry.scale or 1, entry.intensity or 1, entry.duration)
+end
+
+-- The Gen 3 bag, by the names the cart prints (PARLYZ HEAL, ENERGYPOWDER,
+-- POKé DOLL...) folded to keys. Separate from ITEM_STYLE for the same reason
+-- the move table is: several of these names are Gold's too (MOOMOO_MILK,
+-- BERRY_JUICE, ENERGY_ROOT...), and a look added for Gen 3 must not start
+-- drawing on a Gold fight that has never had one.
+M.ITEM_STYLE3 = {
+  PARALYZE_HEAL = { style = "cure", palette = "ELECTRIC" },
+  MOOMOO_MILK   = { style = "heal", palette = "HEAL" },
+  ENERGYPOWDER  = { style = "heal", palette = "GRASS" },
+  ENERGY_POWDER = { style = "heal", palette = "GRASS" },
+  ENERGY_ROOT   = { style = "heal", palette = "GRASS", scale = 1.15 },
+  HEAL_POWDER   = { style = "cure", palette = "GRASS" },
+  REVIVAL_HERB  = { style = "revive", palette = "GRASS" },
+  BERRY_JUICE   = { style = "heal", palette = "HEAL", scale = 0.90 },
+  LAVA_COOKIE   = { style = "cure", palette = "FIRE" },
+  SACRED_ASH    = { style = "revive", palette = "FIRE", scale = 1.30, intensity = 1.3 },
+  BLUE_FLUTE    = { style = "note", palette = "WATER" },
+  YELLOW_FLUTE  = { style = "note", palette = "ELECTRIC" },
+  RED_FLUTE     = { style = "note", palette = "FIRE" },
+  POKE_FLUTE    = { style = "note", palette = "CURE", delivery = "field",
+                    scale = 1.3, duration = 0.60 },
+  FLUFFY_TAIL   = { style = "puff", palette = "ESCAPE", scale = 1.2 },
+  ORAN_BERRY    = { style = "heal", palette = "HEAL", scale = 0.85 },
+  SITRUS_BERRY  = { style = "heal", palette = "HEAL" },
+  CHERI_BERRY   = { style = "cure", palette = "ELECTRIC" },
+  CHESTO_BERRY  = { style = "cure", palette = "PSYCHIC" },
+  PECHA_BERRY   = { style = "cure", palette = "POISON" },
+  RAWST_BERRY   = { style = "cure", palette = "FIRE" },
+  ASPEAR_BERRY  = { style = "cure", palette = "ICE" },
+  LEPPA_BERRY   = { style = "sparkle", palette = "CURE" },
+  PERSIM_BERRY  = { style = "cure", palette = "PSYCHIC" },
+  LUM_BERRY     = { style = "cure", palette = "CURE", intensity = 1.2 },
+}
+
+local ITEM_BALLS3 = {
+  POKE_BALL = true, GREAT_BALL = true, ULTRA_BALL = true, MASTER_BALL = true,
+  SAFARI_BALL = true, NET_BALL = true, DIVE_BALL = true, NEST_BALL = true,
+  REPEAT_BALL = true, TIMER_BALL = true, LUXURY_BALL = true, PREMIER_BALL = true,
+}
+
+-- "POKé DOLL" -> POKE_DOLL, "GUARD SPEC." -> GUARD_SPEC, "X ATTACK" -> X_ATTACK.
+function M.itemKey3(name)
+  if type(name) ~= "string" or name == "" then return nil end
+  local key = name:upper()
+    :gsub("\195\169", "E"):gsub("\195\137", "E")
+    :gsub("[%.']", ""):gsub("[%s%-]+", "_")
+    :gsub("^_+", ""):gsub("_+$", "")
+  if key == "" then return nil end
+  return key
+end
+
+-- A Gen 3 bag item's look, or nil (a ball -- the throw is its own flow -- or an
+-- item this table has never heard of, which plays nothing rather than a guess).
+-- `item` is the name the cart prints, or a pret-style key.
+function M.forItem3(item)
+  local id = M.itemKey3(item)
+  if id == nil or ITEM_BALLS3[id] then return nil end
+  local entry = M.ITEM_STYLE3[id] or M.ITEM_STYLE[id]
+  if not entry then return nil end
+  local out = specOf(entry.style, entry.palette, entry.delivery or "self",
+    entry.scale or 1, entry.intensity or 1, entry.duration)
+  if not M.DELIVERIES[out.delivery] then out.delivery = "self" end
+  if not M.STYLES[out.style] then out.style = M.DEFAULT_STYLE end
+  if not M.PALETTES[out.palette] then out.palette = M.DEFAULT_PALETTE end
+  return out
 end
 
 return M
