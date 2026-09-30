@@ -386,8 +386,12 @@ function M.set(C, eff, primary, certain, affectsUser)
     return true
   elseif eff == "STEAL_ITEM" then
     -- src/battle_script_commands.c:2610 (a mediated fight is a link fight: either
-    -- side may steal)
-    if user.knockedOff then return false end
+    -- side may steal).  A mon whose item was knocked off may not (:2628, pret
+    -- knockedOffMons): it still owns that item after the fight (Knock Off keeps
+    -- `mon.knockedOff` for the `holding` writeback), so a stolen item would
+    -- vanish there.  The cart skips this check only in link fights; this one
+    -- writes items back like a non-link fight, so the check stands.
+    if user.mon.knockedOff then return false end
     local tItem = int(target.mon.heldItem, 0)
     if tItem ~= 0 and target.ability == "STICKY_HOLD" then
       B:emitAbility(target)

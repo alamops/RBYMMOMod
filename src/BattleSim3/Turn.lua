@@ -37,15 +37,15 @@
 --      multi-hit roll(0,3) (+ roll(0,3)); per strike Psywave roll(0,10), crit
 --      roll(0,n-1) (not vs Battle / Shell Armor, not for fixed damage), damage
 --      roll(85,100), Present roll(0,255), Focus Band roll(0,99) (holder only),
---      Beat Up's crit + damage per party member; secondary roll(0,99) (not for
---      certain effects); effect-internal draws (sleep turns roll(0,3), confusion
---      turns roll(0,3), trap turns roll(0,3), Tri Attack roll(0,2), Thrash
---      roll(0,1), Uproar roll(0,3), Disable roll(0,3), Encore roll(0,3), Spite
---      roll(0,3), Conversion / Conversion 2 roll(1,n), Roar's level check
---      roll(0,255) and pick roll(1,n), OHKO roll(1,100)); move end: Effect Spore
---      roll(0,9) then roll(0,3) until non-zero, Static / Flame Body / Poison
---      Point / Cute Charm roll(0,2), King's Rock roll(0,99); after the action,
---      berry / Trace draws as in 1;
+--      Beat Up's crit (not vs Battle / Shell Armor) + damage per party member;
+--      secondary roll(0,99) (not for certain effects); effect-internal draws
+--      (sleep turns roll(0,3), confusion turns roll(0,3), trap turns roll(0,3),
+--      Tri Attack roll(0,2), Thrash roll(0,1), Uproar roll(0,3), Disable
+--      roll(0,3), Encore roll(0,3), Spite roll(0,3), Conversion / Conversion 2
+--      roll(1,n), Roar's level check roll(0,255) and pick roll(1,n), OHKO
+--      roll(1,100)); move end: Effect Spore roll(0,9) then roll(0,3) until
+--      non-zero, Static / Flame Body / Poison Point / Cute Charm roll(0,2),
+--      King's Rock roll(0,99); after the action, berry / Trace draws as in 1;
 --   7. end of turn: one roll(0,255) per tied group of the re-sort, then the
 --      phases in order (Shed Skin roll(0,2), confusion-berry turns, Starf-type
 --      berry roll(0,4) until raisable, Thrash fatigue roll(0,3), Yawn's sleep
@@ -1259,7 +1259,13 @@ function Battle:_beginTurn()
     local b = f.b
     local choice = f.choice
     if b and b.mon.hp > 0 and choice and choice.action == "fight" then
-      local row = choice.recharge and nil or self:_actionMove(b, choice)
+      -- A recharge turn chooses no move (pokefirered/src/battle_main.c:3126
+      -- withholds the menu; :2993 left gChosenMoveByBattler MOVE_NONE): Rage
+      -- ends, no Focus Punch line, bracket 0 (the cart reads the stale chosen
+      -- slot, :3490 -- the recharge move or its caller, priority 0 on every
+      -- cart).  A branch, because `choice.recharge and nil or x` is always x.
+      local row = nil
+      if not choice.recharge then row = self:_actionMove(b, choice) end
       -- pokefirered/src/battle_util.c:1223: Rage ends unless Rage is used again
       local num = row and int(row.num, 0) or 0
       if b.rage and num ~= Move.MOVE.RAGE then b.rage = nil end

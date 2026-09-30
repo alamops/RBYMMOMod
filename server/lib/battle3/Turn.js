@@ -1391,10 +1391,13 @@ Battle.prototype._beginTurn = function _beginTurn() {
     const { b } = f;
     const { choice } = f;
     if (b && b.mon.hp > 0 && choice && choice.action === 'fight') {
-      // The Lua reads `choice.recharge and nil or self:_actionMove(b, choice)`,
-      // and `x and nil or y` is always y: the recharge turn's row is looked up
-      // like any other. Mirrored as written (draws nothing either way).
-      const row = this._actionMove(b, choice)[0];
+      // A recharge turn chooses no move (pokefirered/src/battle_main.c:3126
+      // withholds the menu; :2993 left gChosenMoveByBattler MOVE_NONE): Rage
+      // ends, no Focus Punch line, bracket 0 (the cart reads the stale chosen
+      // slot, :3490 -- the recharge move or its caller, priority 0 on every
+      // cart).
+      let row = null;
+      if (!truthy(choice.recharge)) row = this._actionMove(b, choice)[0];
       // pokefirered/src/battle_util.c:1223: Rage ends unless Rage is used again
       const num = row ? int(row.num, 0) : 0;
       if (truthy(b.rage) && num !== Move.MOVE.RAGE) delete b.rage;

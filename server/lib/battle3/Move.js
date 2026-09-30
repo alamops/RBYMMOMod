@@ -1470,8 +1470,14 @@ function beatUp(C) {
       // pokefirered/src/battle_script_commands.c:8606
       if (truthy(user.helpingHand)) dmg = Math.floor(dmg * 15 / 10);
       B.say(`${mon.species}'s attack!`);
-      const stage = Crit.stage(user, C.move);
-      const [crit] = Crit.check(stage, B.roll(0, Crit.chance(stage) - 1));
+      // pokefirered/data/battle_scripts_1.s:1947: a critcalc per member, and
+      // Cmd_critcalc (battle_script_commands.c:1196) skips the roll entirely
+      // against Battle Armor / Shell Armor, as Damage.calc does.
+      let crit = false;
+      if (target.ability !== 'BATTLE_ARMOR' && target.ability !== 'SHELL_ARMOR') {
+        const stage = Crit.stage(user, C.move);
+        [crit] = Crit.check(stage, B.roll(0, Crit.chance(stage) - 1));
+      }
       if (crit) dmg *= 2;
       const r = B.roll(Damage.ROLL_MIN, Damage.ROLL_MAX);
       dmg = Math.floor(dmg * r / 100);

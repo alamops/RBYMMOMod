@@ -642,8 +642,12 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
   }
   if (eff === 'STEAL_ITEM') {
     // src/battle_script_commands.c:2610 (a mediated fight is a link fight: either
-    // side may steal)
-    if (truthy(user.knockedOff)) return false;
+    // side may steal). A mon whose item was knocked off may not (:2628, pret
+    // knockedOffMons): it still owns that item after the fight (Knock Off keeps
+    // `mon.knockedOff` for the `holding` writeback), so a stolen item would
+    // vanish there. The cart skips this check only in link fights; this one
+    // writes items back like a non-link fight, so the check stands.
+    if (truthy(user.mon.knockedOff)) return false;
     const tItem = int(target.mon.heldItem, 0);
     if (tItem !== 0 && target.ability === 'STICKY_HOLD') {
       B.emitAbility(target);

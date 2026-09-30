@@ -138,6 +138,16 @@ function Bm:_standingAt(slot)
   return nil
 end
 
+-- The battler a field slot holds as the cart's gBattleMons[position] does: the
+-- occupant whether standing or not, else the last battler that stood there (a
+-- seat emptied by a faint keeps its fainted mon's data until someone switches
+-- in).  Never nil for a seat that has fielded a battler.
+function Bm:_occupantAt(slot)
+  local f = self:_fighterAtSlot(slot)
+  if not f then return nil end
+  return f.b or f.lastB
+end
+
 function Bm:_sideName(side)
   local f = self.bySide[side] and self.bySide[side][1]
   return f and f.name or ("side " .. side)
@@ -406,9 +416,15 @@ end
 
 M.PHASE = PHASE
 
--- pokefirered/data/battle_scripts_1.s:3461 (the delayed hit lands)
+-- pokefirered/data/battle_scripts_1.s:3461 (the delayed hit lands).  The damage
+-- was fixed at use from the user's stats and level (Effects.lua FUTURE_SIGHT);
+-- the attacker here is only the seat, as pret's gBattlerAttacker =
+-- futureSightAttacker[target] is a battler position (battle_util.c:1093): its
+-- present occupant, or -- when the user fainted and nobody has replaced it (the
+-- replace phase comes after the end of turn, or the bench is empty) -- the
+-- fainted user itself, which still lands the hit.
 function Bm:_futureSightHit(tok, target)
-  local attacker = self:_standingAt(tok.attackerSlot) or tok.attacker
+  local attacker = self:_occupantAt(tok.attackerSlot)
   self:say(self:nameOf(target) .. " took the " .. self:moveLabel(tok.move) .. " attack!")
   local C = Move.newCtx(self, attacker, target, tok.move, nil, { futureSight = true })
   C.accOverride = int(tok.move.accuracy, 90)

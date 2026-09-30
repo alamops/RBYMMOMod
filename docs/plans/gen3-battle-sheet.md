@@ -315,6 +315,13 @@ stat `n % 5` in the order Atk, Def, Spe, SpA, SpD (equal ⇒ neutral); the berry
 flavour of hold effect `10+f` maps f = 0 Spicy→Atk, 1 Dry→SpA, 2 Sweet→Spe,
 3 Bitter→SpD, 4 Sour→Def. A nature that *lowers* that stat dislikes it (confuses).
 
+Lum Berry (hold effect 9) says **one** sentence however much it cures (pret
+`BattleScript_BerryCureChosenStatusRet`): "X's ITEM normalized its status!" when the
+post-action / end-of-turn check (`ITEMEFFECT_NORMAL`) cures a status and confusion
+together, otherwise "X's ITEM cured its WORD problem!" — always that one at move end
+(`ITEMEFFECT_MOVE_END`), WORD being the last condition cured in pret's order
+(poison, sleep, paralysis, burn, freeze, confusion).
+
 Ability ids (pret `abilities.h`) 1 STENCH … 77 AIR_LOCK. Hold effects (pret
 `hold_effects.h`) 1 RESTORE_HP … 66 STICK. Both tables are written out in
 `src/BattleSim3/Abilities.lua` and `Items.lua`.
@@ -352,6 +359,14 @@ where `turn` counts completed turns (0 during the first turn, pret
   ingrain … yawn; then fainted-actions, Future Sight, Perish Song) over the battlers
   re-sorted by this turn's move priority and speed with the same tie policy — not
   BattleSim2's field order. This is the cart's `ENDTURN_ORDER`.
+* **Future Sight / Doom Desire** lands from its user's *seat* (pret stores a
+  battler position, `futureSightAttacker`). The damage was fixed at use from the
+  user's stats and level; at landing the attacker (its accuracy stage, Compound
+  Eyes, who hit whom) is the seat's current occupant, or — when the user fainted
+  and the seat is still empty — the fainted user itself, and the hit still lands.
+  The seat is empty either until the `replace` phase, which the sim runs after the
+  end of turn (the cart sends the replacement in first), or for good when the bench
+  is empty.
 * **Focus Punch** "is tightening its focus" lines are said right after ordering,
   before any switch (pret `CheckFocusPunch_ClearVarsBeforeTurnStarts`).
 * **Running.** 1v1 / coop_pvp: RUN is a concession (always allowed). coop_npc: the
@@ -366,7 +381,10 @@ where `turn` counts completed turns (0 during the first turn, pret
   turn of a two-turn move, Bide, Thrash/Petal Dance/Outrage, Uproar, Rollout/Ice
   Ball. A partial trap does **not** lock the victim in Gen 3 (it can still attack;
   it cannot switch or flee). Forced-only turns wait for the next `tick` exactly as
-  in BattleSim2.
+  in BattleSim2. A **recharge** turn chooses no move (pret leaves
+  `gChosenMoveByBattler` `MOVE_NONE`): Rage ends, no Focus Punch line, and it sorts
+  in priority bracket 0 (the cart reads the stale chosen slot — the recharge move
+  or the move that called it — priority 0 on every cart).
 * **Faint** asks the seat for a replacement in the `replace` phase (BattleSim2).
 * **Timeout / NPC** auto-pick: BattleSim2's heuristic (bag cures/heals, super-effective
   damage, status/setup, SE bench switch) using Gen 3 effect ids, item ids and the
@@ -424,7 +442,7 @@ stat switch item run turn over wait reconnect chose unchose moves exp team`);
 | --- | --- | --- |
 | `ability` | `slot`, `side`, `amount` = ability id (1..77), `text` = ability display name | an ability visibly acted: Intimidate, Drizzle/Drought/Sand Stream, Trace (the traced id), Speed Boost, Rain Dish, Shed Skin, Levitate / Wonder Guard / Volt Absorb / Water Absorb / Flash Fire / Lightning Rod / Soundproof / Damp / Sturdy / Suction Cups / Sticky Hold / Clear Body / Keen Eye / Hyper Cutter / Own Tempo / Oblivious / Insomnia / Vital Spirit / Limber / Immunity / Water Veil / Magma Armor / Inner Focus / Shield Dust-less prevention text, contact procs (Static, Flame Body, Poison Point, Effect Spore, Rough Skin, Cute Charm), Color Change, Synchronize, Natural Cure (no text on the cart; the event only), Liquid Ooze, Forecast, Truant loafing. Always followed or preceded by the `msg` that narrates it |
 | `weather` | `text` = `RAIN` / `SUN` / `SAND` / `HAIL`, `amount` = 1 started, 2 continues, 0 ended, `slot`/`side` = the seat that started it (absent otherwise) | move or ability starts, each end-of-turn continue, expiry |
-| `held` | `slot`, `side`, `mon` (party index), `amount` = item id that acted, **`holding`** = item id the mon holds once the battle is over (0 = none), `text` = item display name | Leftovers, Shell Bell, every berry, White Herb, Mental Herb, Focus Band (a Choice Band lock is a submit refusal, no event), Quick Claw is silent on the cart (no event), King's Rock is silent (the flinch is the effect), Thief / Covet steal (both mons), Knock Off, Trick (both), Recycle, Smoke Ball fleeing. `holding` is the client's writeback: consumed / stolen items persist after the fight. **Knock Off** is the exception to "now holds": the item is gone for the rest of the fight but comes back afterwards (pret keeps it in the party struct), so its `held` event says `holding` = the knocked-off id; Trick and Thief then fail against it |
+| `held` | `slot`, `side`, `mon` (party index), `amount` = item id that acted, **`holding`** = item id the mon holds once the battle is over (0 = none), `text` = item display name | Leftovers, Shell Bell, every berry, White Herb, Mental Herb, Focus Band (a Choice Band lock is a submit refusal, no event), Quick Claw is silent on the cart (no event), King's Rock is silent (the flinch is the effect), Thief / Covet steal (both mons), Knock Off, Trick (both), Recycle, Smoke Ball fleeing. `holding` is the client's writeback: consumed / stolen items persist after the fight. **Knock Off** is the exception to "now holds": the item is gone for the rest of the fight but comes back afterwards (pret keeps it in the party struct), so its `held` event says `holding` = the knocked-off id; Trick and Thief then fail against it, and the knocked-off mon itself can no longer steal with Thief / Covet (pret `knockedOffMons`: it would lose the item it still owns) |
 | `form` | `slot`, `side`, `amount` = Castform form (0 normal, 1 sunny, 2 rainy, 3 snowy) **or** `speciesId` + `text` = species (Transform) | the battler's picture changes |
 | `sub` | `slot`, `side`, `amount` = 1 made / 0 faded | draw / remove the substitute doll |
 | `ball` | `slot` (thrower), `side`, **`target`** (wild field slot), `amount` = shakes 0..3, or 4 caught, `text` = ball item id | one per throw, after the `item` event and before the narration ("Oh, no! The POKeMON broke free!" / "Aww! It appeared to be caught!" / "Aargh! Almost had it!" / "Shoot! It was so close, too!" / "Gotcha! X was caught!"). A caught fight ends `over` `catch` with `outcome().caught` = the wild sheet (with its `ball` id) |
@@ -438,7 +456,10 @@ side conditions (Reflect, Light Screen, Mist, Safeguard, Spikes — `msg`).
 
 `target` (number, field slot 0..FIELD_MAX), `spread` (0/1), `stat` (string, the
 seven keys), `stage` (number −6..6), `delta` (number −12..12), `holding`
-(number 0..376). Kinds to add to `Wire.BATTLE_EVENTS`: `ability weather held form sub ball`.
+(number 0..376). The new kinds `ability weather held form sub ball` live in their
+own Gen 3 whitelist, `Wire.BATTLE_EVENTS3` (twin: `sanitize.BATTLE_EVENT_TYPES3`),
+beside the unchanged Gen 1/2 `Wire.BATTLE_EVENTS`; `Wire.battleEvent` accepts a
+kind from either.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -474,7 +495,8 @@ in this order, and nowhere else; the list in the header of
    `roll(0,3)` (+ `roll(0,3)` when > 1); per strike: Psywave `roll(0,10)`, crit
    `roll(0,n−1)` (not vs Battle/Shell Armor, not for fixed damage), damage
    `roll(85,100)` (non-zero damage), Present `roll(0,255)`, Focus Band
-   `roll(0,99)` (holder only), Beat Up's crit + damage per party member;
+   `roll(0,99)` (holder only), Beat Up's crit (not vs Battle/Shell Armor,
+   pret `critcalc` per member) + damage per party member;
    secondary `roll(0,99)` (not certain, not blocked); effect-internal draws
    (sleep turns `roll(0,3)`, confusion turns `roll(0,3)`, trap turns
    `roll(0,3)`, Tri Attack `roll(0,2)`, Thrash turns `roll(0,1)`, Uproar

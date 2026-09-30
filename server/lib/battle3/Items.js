@@ -295,9 +295,12 @@ function lum(B, b, allowNormalized) {
   } else {
     text = `${B.nameOf(b)}'s ${lbl} cured its ${word} problem!`;
   }
-  // Lua: `confused and nil or text` -- `nil or text` is text, so the sentence
-  // is passed either way. Mirrored as written.
-  if (truthy(s)) B.cure(b, text);
+  // data/battle_scripts_1.s:4287: one sentence for the whole cure. With
+  // confusion as well, the status clears silently and the confusion line below
+  // says it.
+  if (truthy(s)) {
+    if (confused) B.cure(b, null); else B.cure(b, text);
+  }
   if (confused) {
     delete b.confusion;
     B.emit('status', {

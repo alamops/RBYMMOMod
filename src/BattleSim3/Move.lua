@@ -1266,8 +1266,14 @@ local function beatUp(C)
       -- pokefirered/src/battle_script_commands.c:8606
       if user.helpingHand then dmg = floor(dmg * 15 / 10) end
       B:say(mon.species .. "'s attack!")
-      local stage = Crit.stage(user, C.move)
-      local crit = Crit.check(stage, B:roll(0, Crit.chance(stage) - 1))
+      -- pokefirered/data/battle_scripts_1.s:1947: a critcalc per member, and
+      -- Cmd_critcalc (battle_script_commands.c:1196) skips the roll entirely
+      -- against Battle Armor / Shell Armor, as Damage.calc does.
+      local crit = false
+      if target.ability ~= "BATTLE_ARMOR" and target.ability ~= "SHELL_ARMOR" then
+        local stage = Crit.stage(user, C.move)
+        crit = Crit.check(stage, B:roll(0, Crit.chance(stage) - 1))
+      end
       if crit then dmg = dmg * 2 end
       local r = B:roll(Damage.ROLL_MIN, Damage.ROLL_MAX)
       dmg = floor(dmg * r / 100)

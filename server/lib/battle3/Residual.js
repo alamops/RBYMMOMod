@@ -151,6 +151,16 @@ Bm._standingAt = function _standingAt(slot) {
   return null;
 };
 
+// The battler a field slot holds as the cart's gBattleMons[position] does: the
+// occupant whether standing or not, else the last battler that stood there (a
+// seat emptied by a faint keeps its fainted mon's data until someone switches
+// in). Never null for a seat that has fielded a battler.
+Bm._occupantAt = function _occupantAt(slot) {
+  const f = this._fighterAtSlot(slot);
+  if (!f) return null;
+  return f.b || f.lastB || null;
+};
+
 Bm._sideName = function _sideName(side) {
   const f = this.bySide[side] ? this.bySide[side][0] : null;
   return (f && truthy(f.name)) ? f.name : `side ${side}`;
@@ -447,10 +457,15 @@ PHASE.volatiles = function volatiles(B, b) {
 
 M.PHASE = PHASE;
 
-// pokefirered/data/battle_scripts_1.s:3461 (the delayed hit lands)
+// pokefirered/data/battle_scripts_1.s:3461 (the delayed hit lands). The damage
+// was fixed at use from the user's stats and level (Effects.js FUTURE_SIGHT);
+// the attacker here is only the seat, as pret's gBattlerAttacker =
+// futureSightAttacker[target] is a battler position (battle_util.c:1093): its
+// present occupant, or -- when the user fainted and nobody has replaced it (the
+// replace phase comes after the end of turn, or the bench is empty) -- the
+// fainted user itself, which still lands the hit.
 Bm._futureSightHit = function _futureSightHit(tok, target) {
-  const standing = this._standingAt(tok.attackerSlot);
-  const attacker = truthy(standing) ? standing : tok.attacker;
+  const attacker = this._occupantAt(tok.attackerSlot);
   this.say(`${this.nameOf(target)} took the ${this.moveLabel(tok.move)} attack!`);
   const C = Move.newCtx(this, attacker, target, tok.move, null, { futureSight: true });
   C.accOverride = int(tok.move.accuracy, 90);

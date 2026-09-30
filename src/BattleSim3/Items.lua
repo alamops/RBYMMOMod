@@ -203,7 +203,12 @@ local function lum(B, b, allowNormalized)
   else
     text = B:nameOf(b) .. "'s " .. lbl .. " cured its " .. word .. " problem!"
   end
-  if s then B:cure(b, confused and nil or text) end
+  -- data/battle_scripts_1.s:4287: one sentence for the whole cure.  With
+  -- confusion as well, the status clears silently and the confusion line below
+  -- says it (spelled as a branch: `confused and nil or text` is always text).
+  if s then
+    if confused then B:cure(b, nil) else B:cure(b, text) end
+  end
   if confused then
     b.confusion = nil
     B:emit("status", { slot = b.slot, side = b.side, confused = 0, text = text })
