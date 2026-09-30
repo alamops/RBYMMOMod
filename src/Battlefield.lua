@@ -3884,15 +3884,26 @@ M.MON_DRAW3_FEET = 64 - math.ceil(64 * M.MON_TOP_REACH)
 -- (a player's presence look or Gen.trainerWalkSpriteId's pick for an NPC), a
 -- number, or nil; a peer's version / gender map it through the cart's own link
 -- rule (Gen3.viewerGfxFor, contract C3).
+--
+-- Only a peer's look is fenced.  A human described by a peer (it carries the
+-- peer's `version` / `gender`) goes through Gen3.viewerGfxFor alone, which
+-- draws curated looks and maps anything else to the link rule -- a wire name
+-- never picks a raw cart graphic.  A local human (an NPC trainer's walker, our
+-- own look) is this cart's own data, so its name is drawn as itself first;
+-- viewerGfxFor would otherwise turn every NPC class outside the look table
+-- into the player's figure.
 function G3.walker(h)
   local Ow = Gen3.engine("src.core.game3.ow_sprites")
   if not Ow then return nil end
   local sprite = h.spriteId
   local gid = tonumber(sprite)
+  local peer = h.version ~= nil or h.gender ~= nil
+  if not gid and not peer and type(sprite) == "string" then
+    gid = Gen3.gfxId(sprite)
+  end
   if not gid then
     local ok, id = pcall(Gen3.viewerGfxFor, sprite, h.version, h.gender)
     gid = ok and tonumber(id) or nil
-    if not gid and type(sprite) == "string" then gid = Gen3.gfxId(sprite) end
   end
   if not gid then return nil end
   local okS, spr = pcall(Ow.getDraw or Ow.get, gid)

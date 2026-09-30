@@ -167,6 +167,34 @@ local Battlefield = need("Battlefield")
 local ClassicBattle = need("ClassicBattle")
 local Vfx = need("Vfx")
 
+-- ---- walkers: a local human's own graphic, a peer's fenced look
+-- An NPC trainer's walker is this cart's data and is drawn as named; a
+-- peer-described human (it carries `version` / `gender`) only reaches a
+-- graphic through Gen3.viewerGfxFor, so a wire name can never pick a raw cart
+-- graphic such as a Cut tree.
+do
+  local asked = {}
+  local savedGfx, savedViewer = Gen3Stub.gfxId, Gen3Stub.viewerGfxFor
+  Gen3Stub.gfxId = function(name) asked[#asked + 1] = "raw:" .. tostring(name); return 41 end
+  Gen3Stub.viewerGfxFor = function(name) asked[#asked + 1] = "viewer:" .. tostring(name); return 0 end
+  local owSprite = { image = fakeImage("ow"), quads = { [0] = "q" } }
+  stubModules["src.core.game3.ow_sprites"] = {
+    get = function(gid) asked[#asked + 1] = "draw:" .. tostring(gid); return owSprite end,
+  }
+  Battlefield.walker3({ spriteId = "OBJ_EVENT_GFX_BUG_CATCHER" })
+  eq(asked[1], "raw:OBJ_EVENT_GFX_BUG_CATCHER", "walker: an NPC's own graphic is drawn as named")
+  eq(asked[2], "draw:41", "walker: ...straight from the cart's sheet")
+  asked = {}
+  Battlefield.walker3({ spriteId = "OBJ_EVENT_GFX_CUT_TREE", version = "firered", gender = 0 })
+  eq(asked[1], "viewer:OBJ_EVENT_GFX_CUT_TREE", "walker: a peer's look goes through the fence")
+  for _, entry in ipairs(asked) do
+    check(not entry:find("^raw:"), "walker: a peer's name never picks a raw cart graphic", entry)
+  end
+  eq(asked[#asked], "draw:0", "walker: ...and draws what the fence answered")
+  stubModules["src.core.game3.ow_sprites"] = nil
+  Gen3Stub.gfxId, Gen3Stub.viewerGfxFor = savedGfx, savedViewer
+end
+
 -- ---- the theatre gate
 check(Battlefield.onGen3(), "the stub boot reads as Gen 3")
 check(Battlefield.enabled({ generation = 3 }), "the theatre gate is up on a Gen 3 boot")
