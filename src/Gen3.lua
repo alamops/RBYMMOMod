@@ -68,7 +68,8 @@
 --   mapName(mapId)  region(mapId)   "kanto"|"sevii"|"hoenn"
 --   stack() busy() inField() inBattle() freeRoam()
 --   openStartMenu(game)  openNaming(opts)  nicknameTitle(speciesName)
---   battleText(stringId, fill)
+--   battleText(stringId, fill)      the cart's line, printer codes cleaned
+--   cleanText(text)                 \p -> blank line, \l / \n -> newline
 --   audio.playSe/playSong/songId/playCry/restoreMapSong/battleSong/victorySong
 
 local need, mod = ...
@@ -1002,15 +1003,36 @@ function M.nicknameTitle(speciesName)
   return type(title) == "string" and title ~= "" and title or nil
 end
 
+-- A line of the cart's text as the mod's boxes print it.
+--
+-- The engine's text pack hands a string back with the message printer's own
+-- control codes still in it (TextIR.toAscii: `\p` next page, `\l` scroll a
+-- line, plus the odd literal `\n`) -- codes the cart's printer acts on and a
+-- mod box would print as two characters ("Give a nickname to the captured
+-- PIDGEY?\p").  A page break becomes a blank line, which is the paragraph
+-- break Gen3Ui's TextBox pages on (Gen3Ui.paginate); the other two become a
+-- line break, which it rejoins and re-wraps to the window; and one trailing
+-- the sentence goes altogether.  Pure, and idempotent: a clean line comes
+-- back as it went in.  src/Exp3.lua's cleanText is the same rule, kept there
+-- for its own callers.
+function M.cleanText(text)
+  if type(text) ~= "string" then return text end
+  text = text:gsub("\\[pl]%s*$", ""):gsub("\\p", "\n\n"):gsub("\\[ln]", "\n")
+  return (text:gsub("%s+$", ""))
+end
+
 -- A battle string (STRINGID_*) in the cart's words, the same expansion the
--- engine's battle box prints (BattleText.get).  nil when the text pack is not
--- there, so the caller can fall back to a sentence of its own.
+-- engine's battle box prints (BattleText.get), cleaned for a mod box
+-- (M.cleanText).  nil when the text pack is not there, so the caller can fall
+-- back to a sentence of its own.
 function M.battleText(stringId, fill)
   if not M.active() then return nil end
   local BattleText = engine("src.core.game3.battle.battle_text")
   local text = BattleText and try(BattleText.get, stringId, fill or {})
-  if type(text) ~= "string" or text == "" then return nil end
-  return (text:gsub("%s+$", ""))
+  if type(text) ~= "string" then return nil end
+  text = M.cleanText(text)
+  if text == "" then return nil end
+  return text
 end
 
 -- ------- sound

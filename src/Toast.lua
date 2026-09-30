@@ -25,6 +25,10 @@ local Config = need("Config")
 -- false / nil everywhere else, and is the one place a src.ui.game3.* module
 -- is reached from.
 local Gen3 = need("Gen3")
+-- The cart's charset (Gen3Ui.printable), so a toast and a screen print the
+-- same line the same way.  Pure string work: nothing of the engine's is
+-- touched by asking it, on any generation.
+local Gen3Ui = need("Gen3Ui")
 
 local M = {}
 M.__index = M
@@ -70,6 +74,11 @@ function M:push(text, color)
 end
 
 function M:update(dt)
+  -- On Gen 3 the clock stops while the corner waits for the field to come
+  -- back (M.gen3Held): a line held behind a menu still gets its full five
+  -- seconds once it can be read, rather than running out unseen.  The
+  -- queue is looked at first so the idle tick asks the engine nothing.
+  if #self.queue > 0 and M.gen3Held() then return end
   dt = tonumber(dt) or 0
   local index = 1
   while index <= #self.queue do
@@ -481,6 +490,74 @@ local GEN3 = {
 }
 M.GEN3 = GEN3
 
+-- When the corner waits.
+--
+-- A toast annotates the field, and the column it lives in is only clear
+-- while the field is what the player is looking at.  The mod's full-screen
+-- screens (PLAYERS, CHAT, the trainer card, the letter grid, a trade, the
+-- arena) and the cart's own (BAG, POKéMON, the dex, the region map, the
+-- PokéNav) all start at the top-left tile, so the stack -- in the cart's
+-- font, scaled with the letterbox -- lands on their title and first rows:
+-- exactly the words the player opened the screen to read.  The cart's
+-- battle puts the foe's HP box in that corner too.
+--
+-- So on Gen 3 the corner is held, not drawn and not aged, while any of:
+--   * the field is not running (the title, the boot menus, the FRLG recap);
+--   * the cart's battle is;
+--   * something on the stack covers the field (Stack.fullscreen -- every
+--     layer above that asks for it, the mod's own opaque screens included:
+--     Gen3Ui.pushScreen passes isOpaque through as `fullscreen`);
+--   * one of this mod's boxes reaches into the column (a Menu sized by a
+--     long label -- the ones today sit against the right edge, clear of it).
+-- START, a mod menu against the right edge and a text box along the bottom
+-- leave the column alone, which is what the corner's geometry above was
+-- drawn around, so the corner stays up over those exactly as before.  The
+-- lines wait and appear, each with its full time, the moment the player is
+-- back in the field -- the newest TOAST_MAX of them, by push()'s own rule.
+-- False on Gen 1 and Gen 2, whose corner is untouched.
+local function gen3ColumnCovered(Stack)
+  if type(Stack.drawOrder) ~= "function" then return false end
+  local ok, order = pcall(Stack.drawOrder)
+  if not (ok and type(order) == "table") then return false end
+  local band = GEN3.BAND[Gen3.family()] or GEN3.BAND.frlg
+  local colLeft, colRight = GEN3.INSET, GEN3.INSET + GEN3.WIDTH
+  local colTop, colBottom = band + GEN3.INSET, GEN3.FLOOR
+  for _, layer in ipairs(order) do
+    local box = type(layer) == "table" and layer.mod or nil
+    if Gen3Ui.isModLayer(layer) and type(box) == "table"
+        and type(box.geometry) == "function" then
+      local okG, geo = pcall(box.geometry, box)
+      if okG and type(geo) == "table" and tonumber(geo.left) and tonumber(geo.w) then
+        -- the content rect in tiles; the frame is drawn one tile outside it
+        local x0, x1 = (geo.left - 1) * 8, (geo.left + geo.w + 1) * 8
+        local y0, y1 = ((tonumber(geo.top) or 0) - 1) * 8,
+                       ((tonumber(geo.top) or 0) + (tonumber(geo.h) or 0) + 1) * 8
+        if x0 < colRight and x1 > colLeft and y0 < colBottom and y1 > colTop then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+function M.gen3Held()
+  if not Gen3.active() then return false end
+  if not Gen3.inField() then return true end
+  if Gen3.inBattle() then return true end
+  local Stack = Gen3.stack()
+  if type(Stack) ~= "table" then return false end
+  if type(Stack.fullscreen) == "function" then
+    local ok, full = pcall(Stack.fullscreen)
+    if ok and full then return true end
+  end
+  return gen3ColumnCovered(Stack)
+end
+
+-- What state() reports while the corner is held: shared, like EMPTY above,
+-- because a held frame is every frame of a menu the player is sitting in.
+local HELD = { reached = "held", drawn = 0, gen3 = true }
+
 -- The 240x160 rect of the window this frame, and its two scale factors.
 --
 -- The viewport Game3 hands render.hud (Display.fit) carries the rect and a
@@ -524,16 +601,17 @@ function M.gen3Box(family, rowH)
   }
 end
 
--- The cart's charset has round brackets and no square ones
--- (src/core/game3/scripting/text_ir.lua CHARMAP): "[ANN]" would print as
--- " ANN " with the brackets turned to blanks.  Braces are the font's own
--- control syntax ({PLAYER}, {COLOR ...}), which Wire keeps off the wire
--- anyway; mapped here as well so no line can ever be read as markup.  The
--- queue keeps the text as it was pushed -- this is how it is *drawn*.
-local GEN3_GLYPHS = { ["["] = "(", ["]"] = ")", ["{"] = "(", ["}"] = ")", ["\\"] = "/" }
-
+-- The cart's charset has round brackets and no square ones, and no "#",
+-- "*", "@", "~", "|", "^" or "`" either (src/core/game3/scripting/text_ir.lua
+-- CHARMAP): the font draws a character it cannot map as a blank, so
+-- "[ANN]" would print as " ANN ".  Braces are the font's own control syntax
+-- ({PLAYER}, {COLOR ...}), which Wire keeps off the wire anyway.  Every one
+-- of them is mapped by Gen3Ui.printable, the table every Gen 3 screen prints
+-- through, so a sentence reads the same in the corner as in the CHAT log --
+-- one table, not two that drift.  The queue keeps the text as it was pushed:
+-- this is how it is *drawn*.
 function M.gen3Text(text)
-  return (tostring(text or ""):gsub("[%[%]{}\\]", GEN3_GLYPHS))
+  return Gen3Ui.printable(text)
 end
 
 -- Every row the queue would draw, oldest first, each { text, color }, cut to
@@ -662,7 +740,10 @@ end
 function M:draw(viewport)
   if not (love and love.graphics) then self.last = NO_GRAPHICS return end
   if #self.queue == 0 then self.last = EMPTY return end
-  if Gen3.active() then return self:drawGen3(viewport) end
+  if Gen3.active() then
+    if M.gen3Held() then self.last = HELD return end
+    return self:drawGen3(viewport)
+  end
 
   local last = { reached = "entered", drawn = 0 }
   self.last = last

@@ -1323,17 +1323,58 @@ end
 -- pokefirered/src/region_map.c:734 MAP_WINDOW; the button takes the last 22
 -- pixels of it) -- its name box is top-left and the frame art runs down both
 -- sides.  Emerald's: bottom-left, open sea, with its name box bottom-right.
-local REGION_MAP_LAYERS = { region_map = "frlg", rse_region_map = "rse" }
+--
+-- Emerald has a second region map, and it is the one a player actually
+-- carries: the PokéNav's HOENN MAP (src/ui/game3/rse/pokenav/region_map.lua,
+-- pokeemerald/src/pokenav_region_map.c).  It is not a layer of its own -- the
+-- whole PokéNav is one layer, "rse_pokenav", whatever screen it is showing --
+-- so it counts only while the shell is on that screen with the map up
+-- (pokenavOnMap below).  The same Hoenn picture fills the screen as on the
+-- wall map, but the PokéNav frames it differently: its header art and the
+-- "HOENN MAP" tab across the top, its help bar along the bottom-left (8..136
+-- across, from 22 tiles down less the header's 32px slide: y 144,
+-- pokenav/gfx.lua Gfx.drawHelpBar), and the place-name box sliding in along
+-- the bottom-right (tile 17 across, pokenav_region_map.c:533).  So the list
+-- keeps the wall map's column, the open sea in the bottom-left -- the same
+-- picture under it, so the same margin clears the same markers -- but stands
+-- on the help bar rather than over it: its foot a margin above the bar's top.
+local REGION_MAP_LAYERS = { region_map = "frlg", rse_region_map = "rse", rse_pokenav = "pokenav" }
 local FRLG_PANEL_RIGHT = 194
+local POKENAV_HELP_TOP = 22 * 8 - 32
 local PANEL_FILL = { 0.06, 0.07, 0.12, 0.78 }
 
--- "frlg" | "rse" when a region map is the top layer, else nil.
+-- True while the PokéNav's HOENN MAP is the screen it shows, faded all the
+-- way in.  Asked of the live shell (Pokenav.active): the screen it is on
+-- (menuId), that the map has been put up and not yet taken down (its own
+-- `visible`), and that no fade is running -- so the list appears once the map
+-- is there to read and is gone before it fades out, never over the main
+-- menu, the condition graphs or MATCH CALL that share the layer.  Only asked
+-- when that layer is on top, which only an Emerald boot ever puts there.
+local function pokenavOnMap()
+  local Pokenav = engine3("src.ui.game3.rse.pokenav.init")
+  if not (Pokenav and type(Pokenav.active) == "function") then return false end
+  local ok, shell = pcall(Pokenav.active)
+  if not (ok and type(shell) == "table") then return false end
+  local onMap = type(Pokenav.MENU) == "table" and Pokenav.MENU.REGION_MAP or "region_map"
+  if shell.menuId ~= onMap or shell.phase ~= "menu" then return false end
+  local screen = shell.screen
+  if not (type(screen) == "table" and screen.visible == true) then return false end
+  if type(shell.fadeActive) == "function" then
+    local okF, fading = pcall(shell.fadeActive, shell)
+    if okF and fading then return false end
+  end
+  return true
+end
+
+-- "frlg" | "rse" | "pokenav" when a region map is the top layer, else nil.
 function M:regionMapState3()
   local Stack = Gen3.stack()
   if not (Stack and type(Stack.top) == "function") then return nil end
   local ok, top = pcall(Stack.top)
   if not (ok and type(top) == "table") then return nil end
-  return REGION_MAP_LAYERS[top.id]
+  local layout = REGION_MAP_LAYERS[top.id]
+  if layout == "pokenav" and not pokenavOnMap() then return nil end
+  return layout
 end
 
 -- Who goes in the list: every non-self party member the roster has on a
@@ -1360,6 +1401,19 @@ function M:regionMapMarks3(game)
   return out
 end
 
+-- Where the list's plate goes, in window pixels: its top-left for a plate
+-- `boxW` x `boxH` over the 240x160 rect at (gameX, gameY) and `scale`, in
+-- the corner the layout leaves clear (above).  A margin of 4 game pixels
+-- from whatever it stands against.  Pure, so the suite pins the corners.
+function M.regionPanel3(layout, boxW, boxH, scale, gameX, gameY)
+  local margin = 4 * scale
+  local floor = (layout == "pokenav") and POKENAV_HELP_TOP or GEN3_VIEW_H
+  local top = gameY + floor * scale - margin - boxH
+  if layout == "rse" or layout == "pokenav" then return gameX + margin, top end
+  return gameX + FRLG_PANEL_RIGHT * scale - boxW, top
+end
+M.POKENAV_HELP_TOP = POKENAV_HELP_TOP
+
 function M:drawRegionMap3(font, game, layout, scale, gameX, gameY)
   local last = self.last
   local marks = self:regionMapMarks3(game)
@@ -1382,10 +1436,8 @@ function M:drawRegionMap3(font, game, layout, scale, gameX, gameY)
   end
   local boxW = width + pad * 4
   local boxH = #lines * rowH * 2 + pad * 2
-  local margin = 4 * scale
-  local x = (layout == "rse") and (gameX + margin)
-    or (gameX + FRLG_PANEL_RIGHT * scale - boxW)
-  local y = gameY + GEN3_VIEW_H * scale - margin - boxH
+  local x, y = M.regionPanel3(layout, boxW, boxH, scale, gameX, gameY)
+  last.panel = { x = x, y = y, w = boxW, h = boxH, layout = layout }
 
   local hudRestore = beginHud()
   love.graphics.setFont(font)

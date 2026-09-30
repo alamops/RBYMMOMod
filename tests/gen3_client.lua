@@ -9,8 +9,10 @@
 -- mod's own sandbox env, so a cross-generation require still throws exactly
 -- as in game -- and calls the Client functions a hook would: the hello, the
 -- trainer card, the party narration, the pace flag, the official-server
--- refusal, and the toast geometry.  Numbers here are synthetic; nothing is
--- read from a ROM.
+-- refusal, the toast geometry, the corner's charset and the screens it waits
+-- behind, a friend ask waiting out the cart's own menus (Ui:whenFree), and
+-- the cart's battle text cleaned of its printer codes.  Numbers here are
+-- synthetic; nothing is read from a ROM.
 --
 -- Run from the engine checkout root:
 --   luajit mods/rby_mmo/tests/gen3_client.lua
@@ -465,6 +467,193 @@ local function clientGraph(run, version)
   local blue = drawn[2] and drawn[2].opts and drawn[2].opts.colors
   eq(blue and blue.fg[3], Config.FRIEND_BLUE[3], label .. ": a friend arrives in blue")
 
+  -- ------- the corner prints the cart's charset, the way every screen does
+  local Gen3Ui = need("Gen3Ui")
+  local odd = "#1 *@~|^` [x] {y}\\"
+  eq(Toast.gen3Text(odd), Gen3Ui.printable(odd),
+    label .. ": a toast maps a line exactly as Gen3Ui's screens do")
+  check(not Toast.gen3Text(odd):find("[#%*@~|%^`%[%]{}\\]"),
+    label .. ": no character the cart's font draws as a blank is left")
+  eq(Toast.gen3Text("#"), "\226\132\150", label .. ": '#' is the cart's own number sign")
+  eq(Toast.gen3Text("@PAL"), "aPAL", label .. ": '@' is the nearest glyph the cart has")
+  eq(Toast.gen3Text("PLAIN LINE"), "PLAIN LINE", label .. ": a line with nothing to map is untouched")
+
+  -- ------- the corner waits while something covers the field
+  --
+  -- A mod full-screen list (Gen3Ui passes isOpaque through as the layer's
+  -- `fullscreen`), the cart's own BAG, its battle, and a mod box that reaches
+  -- into the column all hold it: not drawn, not aged, not dropped.  START, a
+  -- mod menu against the right edge and a text box leave it up, as before.
+  local viewport = { width = 800, height = 600, gameX = 40, gameY = 60,
+                     gameWidth = 720, gameHeight = 480, scale = 3 }
+  local prefix = Config.GEN3_LAYER_PREFIX
+  package.loaded["src.ui.game3.font"] = fontSlot
+  g.translate, g.scale, g.rectangle = function() end, function() end, function() end
+  for i = #drawn, 1, -1 do drawn[i] = nil end
+  local corner = Toast.new({})
+  corner:push("#1 @PAL here")
+  Stack.clear()
+  eq(Toast.gen3Held(), false, label .. ": free roam: the corner is up")
+
+  Stack.push(prefix .. "RbyMmoPlayers", { draw = function() end }, { fullscreen = true })
+  eq(Toast.gen3Held(), true, label .. ": a full-screen MMO list (PLAYERS) holds the corner")
+  corner:update(3)
+  eq(corner:list()[1].age, 0, label .. ": ...its clock stops while held")
+  corner:draw(viewport)
+  eq(corner:state().last.reached, "held", label .. ": ...nothing is drawn over the list")
+  eq(#drawn, 0, label .. ": ...not one row")
+  eq(corner:state().count, 1, label .. ": ...and the line is kept for later")
+  -- a box of the mod's over that list: the list is still drawn, still held
+  Stack.push(prefix .. "RbyMmoText", { draw = function() end }, { hideBelow = false })
+  eq(Toast.gen3Held(), true, label .. ": a text box over the list keeps it held")
+  Stack.clear()
+
+  Stack.push("bag", { draw = function() end }, { hideBelow = true, fullscreen = true })
+  eq(Toast.gen3Held(), true, label .. ": the cart's BAG holds it")
+  Stack.clear()
+  Stack.push(em and "rse_pokenav" or "region_map", { draw = function() end },
+             { hideBelow = true, fullscreen = true })
+  eq(Toast.gen3Held(), true, label .. ": so does the cart's map")
+  Stack.clear()
+
+  Stack.push("start", { draw = function() end }, { hideBelow = false })
+  eq(Toast.gen3Held(), false, label .. ": START leaves the corner up (it was drawn around it)")
+  Stack.clear()
+  local narrow = Gen3Ui.Menu.new(game, { { label = "PROFILE" }, { label = "TRADE" } }, { tx = 11 })
+  Stack.push(prefix .. "RbyMmoActions", narrow, { hideBelow = false })
+  eq(Toast.gen3Held(), false, label .. ": a mod menu against the right edge leaves it up")
+  Stack.clear()
+  local long = ("W"):rep(40)
+  local wide = Gen3Ui.Menu.new(game, { { label = long }, { label = long }, { label = long },
+                                       { label = long }, { label = long } }, {})
+  Stack.push(prefix .. "RbyMmoWide", wide, { hideBelow = false })
+  eq(Toast.gen3Held(), true, label .. ": a mod menu wide enough to reach the column holds it")
+  Stack.clear()
+
+  local Battle = require("src.core.game3.battle")
+  local isActive = Battle.isActive
+  Battle.isActive = function() return true end
+  eq(Toast.gen3Held(), true, label .. ": the cart's battle holds it (the foe's HP box is there)")
+  Battle.isActive = isActive
+  game.phase = "boot"
+  eq(Toast.gen3Held(), true, label .. ": off the field it is held")
+  game.phase = "field"
+
+  eq(Toast.gen3Held(), false, label .. ": back in the field it is not")
+  corner:draw(viewport)
+  eq(corner:state().last.reached, "drawn", label .. ": ...the held line is drawn")
+  eq(drawn[1] and drawn[1].text, "\226\132\150" .. "1 aPAL here",
+    label .. ": ...in the cart's charset")
+  eq(corner:list()[1].text, "#1 @PAL here", label .. ": ...while the queue keeps it as pushed")
+  corner:update(Config.TOAST_SECONDS - 1)
+  eq(corner:state().count, 1, label .. ": ...with its full time still to run")
+  corner:update(1)
+  eq(corner:state().count, 0, label .. ": ...and it goes once that has")
+  g.translate, g.scale, g.rectangle = savedFns.translate, savedFns.scale, savedFns.rectangle
+  package.loaded["src.ui.game3.font"] = savedFont
+
+  -- ------- a friend ask waits for the cart's own menus (Ui:whenFree)
+  --
+  -- A Friends with no session `busy` (that is Client's, and it is covered
+  -- above), so what holds the box here is the screen alone: the real Ui's
+  -- whenFree / pumpDeferred / Ui.occupied, with only the two boxes stubbed.
+  local Friends = need("Friends")
+  local shown = {}
+  local ui = Ui.new({ game = game })
+  ui.confirm = function(_, _, text, onChoose)
+    shown[#shown + 1] = { kind = "confirm", text = text, onChoose = onChoose }
+    return nil
+  end
+  ui.say = function(_, text)
+    shown[#shown + 1] = { kind = "say", text = text }
+    return nil
+  end
+  local wire = {}
+  local pal = Friends.new({
+    send = function(_, kind, fields) wire[#wire + 1] = { kind = kind, fields = fields } end,
+    isReady = function() return true end,
+  }, ui)
+  pal:setHub("127.0.0.1:7788", "ALEX")
+  Stack.clear()
+  Stack.push("bag", { draw = function() end }, { hideBelow = true, fullscreen = true })
+  eq(Ui.occupied(game), true, label .. ": the BAG open is the cart using the screen")
+  pal:onAsk(game, { name = "PAL" })
+  eq(#shown, 0, label .. ": a friend ask does not go up over the BAG")
+  eq(pal.asking, "PAL", label .. ": ...it is taken, and waits")
+  pal:onAsk(game, { name = "PAL" })
+  pal:update(game, 1)
+  ui:pumpDeferred(game)
+  eq(#shown, 0, label .. ": ...a second delivery of it does not stack a box")
+  Stack.clear()
+  ui:pumpDeferred(game)
+  eq(#shown, 1, label .. ": the BAG closed: the ask goes up")
+  eq(shown[1] and shown[1].text, "PAL wants to be\nfriends!", label .. ": ...as the same question")
+  if shown[1] and shown[1].onChoose then shown[1].onChoose(true) end
+  eq(pal.asking, nil, label .. ": answering clears it")
+  eq(pal:isFriend("PAL"), true, label .. ": YES still makes the friend")
+  eq(wire[#wire] and wire[#wire].kind, Wire.FRIEND_ANSWER, label .. ": ...and still answers the hub")
+  eq(wire[#wire] and wire[#wire].fields.accept, true, label .. ": ...with a yes")
+
+  -- the answer to our own ask, landing while the BAG is open: the line waits too
+  Stack.push("bag", { draw = function() end }, { hideBelow = true, fullscreen = true })
+  pal.outgoing.BOB = true
+  pal:onAnswer({ name = "BOB", accept = false })
+  eq(#shown, 1, label .. ": 'said no' does not go up over the BAG")
+  Stack.clear()
+  ui:pumpDeferred(game)
+  eq(shown[2] and shown[2].text, "BOB said no.", label .. ": ...it does once the BAG closes")
+
+  -- a waiting ask belongs to its connection
+  Stack.push("bag", { draw = function() end }, { hideBelow = true, fullscreen = true })
+  pal:onAsk(game, { name = "CAL" })
+  eq(pal.asking, "CAL", label .. ": another ask waits behind the BAG")
+  pal:reset()
+  Stack.clear()
+  ui:pumpDeferred(game)
+  eq(#shown, 2, label .. ": a reset drops it unseen (the hub asks again on the next welcome)")
+  eq(ui.deferred and #ui.deferred or 0, 0, label .. ": ...and leaves nothing queued")
+
+  -- nothing up at all: exactly the old path, at once
+  pal:setHub("127.0.0.1:7788", "ALEX")
+  pal:onAsk(game, { name = "DEE" })
+  eq(#shown, 3, label .. ": in free roam an ask goes up at once")
+  eq(shown[3] and shown[3].kind, "confirm", label .. ": ...as the yes / no box")
+  if shown[3] and shown[3].onChoose then shown[3].onChoose(false) end
+  eq(pal:isFriend("DEE"), false, label .. ": NO makes no friend")
+  eq(wire[#wire] and wire[#wire].fields.accept, false, label .. ": ...and answers no")
+  Stack.clear()
+
+  -- ------- the cart's battle text, cleaned for a mod box
+  eq(Gen3.cleanText("Give a nickname to the\ncaptured PIDGEY?\\p"),
+    "Give a nickname to the\ncaptured PIDGEY?", label .. ": a trailing page break goes")
+  eq(Gen3.cleanText("One\\pTwo\\lthree\\nfour"), "One\n\nTwo\nthree\nfour",
+    label .. ": \\p is a blank line, \\l and \\n a line break")
+  eq(Gen3.cleanText(Gen3.cleanText("One\\pTwo\\l")), "One\n\nTwo", label .. ": and cleaning is idempotent")
+  eq(Gen3.cleanText(nil), nil, label .. ": a nil stays nil")
+  local BT = "src.core.game3.battle.battle_text"
+  local savedBT = package.loaded[BT]
+  local pack = {
+    get = function(_, fill)
+      return ("Give a nickname to the\ncaptured %s?\\p"):format(tostring(fill.opponentMon1))
+    end,
+  }
+  package.loaded[BT] = pack
+  -- a graph of its own, so Gen3's module cache meets the stand-in text pack
+  local fresh = resolver(run)
+  local Gen3b, Genb = fresh("Gen3"), fresh("Gen")
+  local prompt = Genb.nicknamePromptText(game, "PIDGEY")
+  eq(prompt, "Give a nickname to the\ncaptured PIDGEY?",
+    label .. ": the nickname prompt reaches the box without the printer's \\p")
+  check(type(prompt) == "string" and not prompt:find("\\", 1, true),
+    label .. ": no printer code is left in it")
+  pack.get = function() return "One page\\pand the next\\lscrolled\\p" end
+  local paged = Gen3b.battleText("STRINGID_TEST")
+  eq(paged, "One page\n\nand the next\nscrolled", label .. ": battleText returns the cleaned line")
+  eq(#Gen3Ui.paginate(paged), 2, label .. ": ...whose page break the Gen 3 text box pages on")
+  pack.get = function() return "\\p" end
+  eq(Gen3b.battleText("STRINGID_TEST"), nil, label .. ": a line that is only codes is no line")
+  package.loaded[BT] = savedBT
+
   -- ------- your own look: no renderer to swap, Cast's graphic wrap on / off
   eq(Client.syncLook(), false, label .. ": nobody chosen, nothing worn")
   eq(Client.wornLook(), nil, label .. ": ...so wornLook is nil")
@@ -499,6 +688,25 @@ local function gen1Load()
   })
   eq(out[3] and out[3].label, "MMO", "gen 1: MMO still goes in before SAVE by label")
   T.same(out[3] and out[3].desc, { "Play with", "friends" }, "gen 1: with its Gen 2 desc")
+
+  -- the corner never waits, and a friend ask goes up at once, through the
+  -- same Ui:whenFree a Gen 3 boot queues in
+  local need = resolver(run)
+  local Toast, Ui, Friends = need("Toast"), need("Ui"), need("Friends")
+  eq(Toast.gen3Held(), false, "gen 1: the corner is never held")
+  local corner = Toast.new({})
+  corner:push("#1 @PAL")
+  corner:update(1)
+  eq(corner:list()[1].age, 1, "gen 1: the corner ages as it always has")
+  eq(corner:list()[1].text, "#1 @PAL", "gen 1: and its text is its own")
+  local shown = {}
+  local ui = Ui.new({ game = { generation = 1 } })
+  ui.confirm = function(_, _, text) shown[#shown + 1] = text end
+  local pal = Friends.new({ send = function() end, isReady = function() return true end }, ui)
+  pal:setHub("127.0.0.1:7788", "ASH")
+  pal:onAsk({ generation = 1 }, { name = "PAL" })
+  eq(shown[1], "PAL wants to be\nfriends!", "gen 1: a friend ask goes up at once")
+  eq(ui.deferred and #ui.deferred or 0, 0, "gen 1: nothing is ever queued")
   run.release()
 end
 

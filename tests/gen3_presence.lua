@@ -548,6 +548,70 @@ local function cart(version)
   check(listed, label .. ": with the partner's place on it")
   Stack.pop(em and "rse_region_map" or "region_map")
 
+  -- where the list stands, per layout (window pixels at 4x, rect at 0,0)
+  local fx, fy = Overlay.regionPanel3("frlg", 100, 60, 4, 0, 0)
+  eq(fx + 100, 194 * 4, label .. ": FRLG: the plate's right edge stops short of the region button")
+  eq(fy + 60, (160 - 4) * 4, label .. ": FRLG: ...a margin above the bottom")
+  local rx, ry = Overlay.regionPanel3("rse", 100, 60, 4, 0, 0)
+  eq(rx, 4 * 4, label .. ": Emerald wall map: bottom-left")
+  eq(ry + 60, (160 - 4) * 4, label .. ": Emerald wall map: ...a margin above the bottom")
+  local px, py = Overlay.regionPanel3("pokenav", 100, 60, 4, 0, 0)
+  eq(Overlay.POKENAV_HELP_TOP, 144, label .. ": the PokéNav help bar's top (22 tiles less the 32px header)")
+  eq(px, rx, label .. ": PokéNav: the plate keeps the wall map's column (same picture under it)")
+  eq(py + 60, (144 - 4) * 4, label .. ": PokéNav: ...its foot a margin above the help bar, not over it")
+  check(px + 100 <= 136 * 4, label .. ": PokéNav: ...clear of the place-name box at tile 17")
+  local ox, oy = Overlay.regionPanel3("pokenav", 100, 60, 3, 40, 50)
+  eq(ox, 40 + 4 * 3, label .. ": PokéNav: placed inside the letterboxed rect (x)")
+  eq(oy, 50 + (144 - 4) * 3 - 60, label .. ": PokéNav: ...and (y)")
+
+  -- The PokéNav's HOENN MAP (Emerald): the whole PokéNav is one layer, so
+  -- only its map screen counts, and only once the map is up and faded in.
+  if em then
+    local Pokenav = require("src.ui.game3.rse.pokenav.init")
+    local Host = Pokenav.Host
+    local savedShell = Host._s
+    local fading = false
+    local shell = {
+      menuId = Pokenav.MENU.MAIN_MENU, phase = "menu", screen = { visible = true },
+      fadeActive = function() return fading end,
+    }
+    Host._s = shell
+    Stack.push(Pokenav.ID, { draw = function() end })
+    eq(Pokenav.ID, "rse_pokenav", label .. ": the PokéNav's layer is rse_pokenav")
+    eq(overlay:regionMapState3(), nil, label .. ": the PokéNav's main menu is not a map")
+    shell.menuId = Pokenav.MENU.MATCH_CALL
+    eq(overlay:regionMapState3(), nil, label .. ": ...nor is MATCH CALL")
+    shell.menuId = Pokenav.MENU.REGION_MAP
+    eq(overlay:regionMapState3(), "pokenav", label .. ": the HOENN MAP is recognised")
+    fading = true
+    eq(overlay:regionMapState3(), nil, label .. ": ...not while it is fading in or out")
+    fading = false
+    shell.screen.visible = false
+    eq(overlay:regionMapState3(), nil, label .. ": ...not once the map has been taken down")
+    shell.screen.visible = true
+    shell.phase = "shutdown"
+    eq(overlay:regionMapState3(), nil, label .. ": ...nor while the PokéNav shuts")
+    shell.phase = "menu"
+    for i = #printed, 1, -1 do printed[i] = nil end
+    overlay:draw(game, viewport)
+    local navState = overlay:state()
+    eq(navState.reached, "regionmap", label .. ": the party list is drawn over the PokéNav's map")
+    eq(navState.panel and navState.panel.layout, "pokenav", label .. ": ...in the PokéNav's corner")
+    eq(navState.panel and navState.panel.x, 4 * 4, label .. ": ...in the wall map's column")
+    check(navState.panel and navState.panel.y + navState.panel.h <= (Overlay.POKENAV_HELP_TOP - 4) * 4,
+          label .. ": ...and above the help bar")
+    local onNav = false
+    for _, p in ipairs(printed) do
+      if p.text == "VIRIDIAN CITY" then onNav = true end
+    end
+    check(onNav, label .. ": with the partner's place on it")
+    shell.menuId = Pokenav.MENU.MAIN_MENU
+    overlay:draw(game, viewport)
+    eq(overlay:state().reached, "not-overworld", label .. ": back on the PokéNav's menu, no list")
+    Stack.pop(Pokenav.ID)
+    Host._s = savedShell
+  end
+
   World.current = worldCurrent
   restoreLove()
 
