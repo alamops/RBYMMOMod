@@ -148,24 +148,133 @@ for _, name in ipairs({ "save.loaded", "save.created" }) do
         .. "like a loaded one")
 end
 
--- ------- Dual-gen headless load (TT0)
+-- ------- Tri-gen headless load (TT0, extended by TT1)
 --
--- Wave 0 claimed games:["gen1","gen2"]. Both boots must reach loaded with
--- an empty error list through the real loader (generation opt selects the
--- Gen2Compat facade without a Gold ROM).
+-- The manifest claims games:["gen1","gen2","gen3"], so every boot it claims
+-- has to reach `loaded` with an EMPTY error list through the real loader:
+-- generation=1 (Red), generation=2 (selects the Gen2Compat facade without a
+-- Gold ROM), and generation=3 twice over -- FireRed and Emerald, which share
+-- one loader generation and differ by the cart GameVersion names (the
+-- launcher sets it before any mod loads) and by the layout the mod reads
+-- from it (frlg / rse).  The Gen 3 boots use the SDK's own synthetic Gen 3
+-- dataset; nothing here is read from a ROM.
+--
+-- The three gated-registry notes a Gen 3 boot used to carry ("registry has no
+-- Gen 3 target" for screens / sprites / battle_sprite_scales) were removed in
+-- wave 2, so on every generation an error is a regression rather than an
+-- expected note -- which is why the assertion is zero, not "only gated".
+--
+-- "loaded" is the weak half: a mod whose entry chunk installed nothing would
+-- still say so.  So each boot is also asked for what it claims to have put in
+-- the game -- the three seams every generation's client wires (the per-tick
+-- pump, the HUD overlay, the START menu row) -- and, on Gen 3, for what only a
+-- Gen 3 load can answer: the mod's own Gen module reads the boot as 3 and
+-- names the cart, the START row lands before SAVE on the cart's own menu, and
+-- the battlefield theatre opens for a Gen 3 table on a Gen 3 boot yet stays
+-- refused for the same table on a Red or Gold boot (Battlefield.enabled's
+-- gate; tests/gen3_battlefield.lua drives the theatre itself).
 do
-  for _, gen in ipairs({ 1, 2 }) do
-    local dual = T.sdk.loadMod("mods/rby_mmo", {
-      fs = enabledFs(),
-      generation = gen,
-    })
-    eq(#dual.errors, 0,
-       "generation=" .. gen .. " loads with no errors")
-    check(dual.mod ~= nil, "generation=" .. gen .. " finds the mod")
-    eq(dual.mod.state, "loaded",
-       "generation=" .. gen .. " reaches loaded")
-    dual.release()
+  local GameVersion = require("src.core.GameVersion")
+
+  -- The mod's modules through its own sandbox env and the real facade, the
+  -- way main.lua resolves them, so a cross-generation require would throw
+  -- exactly as it does in game.  A graph of its own: nothing is installed
+  -- twice and the loader's captured hook links stay the ones under test.
+  local function sandboxNeed(run)
+    local api = run.loader:_api(run.mod)
+    local env = run.loader:_modEnv(run.mod)
+    local cache = {}
+    local function sandboxed(name)
+      if cache[name] ~= nil then return cache[name] end
+      local body = api:read("src/" .. name .. ".lua")
+      local chunk = assert(env.loadstring(body, "@rby_mmo/src/" .. name .. ".lua"))
+      local value = chunk(sandboxed, api)
+      cache[name] = value == nil and true or value
+      return cache[name]
+    end
+    return sandboxed
   end
+
+  local cases = {
+    { label = "generation=1", gen = 1 },
+    { label = "generation=2", gen = 2 },
+    { label = "generation=3 (FireRed)", gen = 3, version = "firered", family = "frlg",
+      map = "FR_PALLET_TOWN" },
+    { label = "generation=3 (Emerald)", gen = 3, version = "emerald", family = "rse",
+      map = "EM_LITTLEROOT_TOWN" },
+  }
+
+  for _, case in ipairs(cases) do
+    local label, gen = case.label, case.gen
+    if case.version then GameVersion.set(case.version) end
+    local opts = { fs = enabledFs(), generation = gen }
+    if gen == 3 then opts.data = T.sdk.gen3Data() end
+    local tri = T.sdk.loadMod("mods/rby_mmo", opts)
+
+    eq(#tri.errors, 0, label .. " loads with no errors")
+    check(tri.mod ~= nil, label .. " finds the mod")
+    eq(tri.mod and tri.mod.state, "loaded", label .. " reaches loaded")
+
+    for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items" }) do
+      local chain = tri.loader.hooks.chains[hook]
+      check(chain ~= nil and #chain > 0, label .. " wraps " .. hook)
+    end
+
+    local sandbox = sandboxNeed(tri)
+    local Gen, Config, Battlefield = sandbox("Gen"), sandbox("Config"), sandbox("Battlefield")
+    local session = {
+      engine = "game3", generation = 3, version = case.version,
+      name = "ALEX", gender = 0, trainerId = 4321, secretId = 999, money = 3000,
+      dex = { seen = {}, owned = {}, caught = {} }, party = {},
+      flags = {}, vars = {}, map = case.map, x = 5, y = 6, facing = "down",
+    }
+    local game = { generation = gen, phase = "field", data = tri.data }
+    if gen == 3 then game.session = session end
+
+    -- The Gen 1 / Gen 2 answer for "no game yet" is 1 by design (a Gen 2
+    -- loader with no game has always read as Red and the Gold suites are
+    -- written against that), so only a Gen 3 load is asked to answer without
+    -- a game: the loader's word is the boot's truth there.
+    if gen == 3 then
+      eq(Gen.generation(), 3, label .. ": Gen.generation() answers 3 on a Gen 3 load with no game yet")
+    end
+    tri.loader.game = game
+    eq(Gen.generation(), gen, label .. ": Gen.generation() answers " .. gen .. " with a game in the loader")
+    eq(Gen.isGen3(), gen == 3, label .. ": Gen.isGen3() agrees")
+    check(Battlefield.enabled({ generation = 3 }) == (gen == 3),
+          label .. ": the theatre opens for a Gen 3 table only on a Gen 3 boot")
+    check(Battlefield.enabled({ data = {} }),
+          label .. ": ...and a Gen 1-shaped game enables it on every boot")
+
+    if gen == 3 then
+      eq(Gen.version(), case.version, label .. ": Gen.version() names the cart")
+      eq(Gen.family(), case.family, label .. ": Gen.family() names its layout")
+
+      local startLink = tri.loader.hooks.chains["ui.start_menu.items"][1].callback
+      local function passthrough(_, items) return items end
+      local items = {}
+      for _, id in ipairs({ "bag", "trainer", "save", "option", "exit" }) do
+        items[#items + 1] = { id = id, label = id:upper() }
+      end
+      local out = startLink(passthrough, game, items)
+      eq(#out, 6, label .. ": the START link adds one row to the cart's field menu")
+      eq(out[3] and out[3].id, Config.GEN3_START_ROW_ID, label .. ": ...the MMO row")
+      eq(out[4] and out[4].id, Config.GEN3_START_ANCHOR_ID, label .. ": ...directly before SAVE")
+      check(type(out[3] and out[3].onSelect) == "function",
+            label .. ": ...carrying its own onSelect for the cart's menu to dispatch")
+
+      local hudLink = tri.loader.hooks.chains["render.hud"][1].callback
+      local viewport = { width = 800, height = 600, gameX = 40, gameY = 60,
+                         gameWidth = 720, gameHeight = 480, scale = 3 }
+      eq(hudLink(function() return "drawn" end, game, viewport), "drawn",
+         label .. ": the render.hud link hands back what the chain drew")
+      eq(viewport.dpiX, 1, label .. ": ...having filled in the dpi Game3's viewport lacks")
+    end
+
+    tri.loader.game = nil
+    tri.release()
+  end
+  GameVersion.set("red")
 end
 
 -- ------- movement.speed: holding B on foot halves the step
@@ -3887,11 +3996,25 @@ end)()
   })
   eq(locked.generation, 2, "HostServer-shaped Hub.new locks to generation 2")
 
+  -- The same lock for a FireRed / LeafGreen / Emerald host: a Gen 3-shaped game
+  -- (T3's stub shape, no live boot needed -- Gen.generation reads the dataset)
+  -- must lock generation 3, or the host's own hello would be refused by the
+  -- hub it just started.
+  local gen3Game = { data = { type_chart = { generation = 3 } } }
+  eq(Gen.generation(gen3Game), 3, "a Gen 3-shaped game is generation 3")
+  local locked3 = Hub.new({
+    maxPlayers = 2,
+    generation = Gen.generation(gen3Game),
+  })
+  eq(locked3.generation, 3, "HostServer-shaped Hub.new locks to generation 3")
+
   -- Explicit game wins over a Gen1-shaped _G.Game (the Gold boot hazard).
   local savedGame = rawget(_G, "Game")
   rawset(_G, "Game", { data = {} })
   eq(Gen.generation(goldGame), 2,
      "explicit Gold game wins over a Gen1 _G.Game singleton")
+  eq(Gen.generation({ data = { type_chart = { generation = 3 } } }), 3,
+     "and so does an explicit Gen 3 game")
   if savedGame ~= nil then
     rawset(_G, "Game", savedGame)
   else
@@ -4095,6 +4218,51 @@ do
   eq(Gen.resolveSprite(goldGame, "SPRITE_NIRE"),
      Gen.defaultSprite(goldGame),
      "and a peer wearing NIRE draws as the Gold default")
+
+  -- Gen 3 is the third answer to the same gate.  NIRE's art is a Game Boy
+  -- overworld sheet (gens = { 1 }), and a FireRed / Emerald boot draws its
+  -- people from the cart's own object-event graphics, so it is no more
+  -- offered there than on Gold.  A Gen 3-shaped stub is enough for the
+  -- helpers: which sprite is worn is a function of the game's shape.
+  local gen3Game = { data = { type_chart = { generation = 3 } } }
+  eq(Gen.generation(gen3Game), 3, "a Gen 3-shaped stub is generation 3")
+  local gen3Offered = {}
+  for _, id in ipairs(Chars.list(gen3Game)) do gen3Offered[id] = true end
+  eq(gen3Offered.SPRITE_NIRE, nil, "NIRE is not offered on Gen 3")
+  eq(gen3Offered.SPRITE_NIRE_HOOD, nil, "nor is NIRE HOOD")
+  eq(Chars.available("SPRITE_NIRE", gen3Game), false,
+     "and cannot be worn on Gen 3")
+  eq(Chars.resolve("SPRITE_NIRE", gen3Game),
+     Gen.defaultSprite(gen3Game),
+     "a saved NIRE choice falls back on Gen 3")
+  eq(Gen.resolveSprite(gen3Game, "SPRITE_NIRE"),
+     Gen.defaultSprite(gen3Game),
+     "and a peer wearing NIRE draws as the Gen 3 default")
+  eq(Gen.defaultSprite(gen3Game), Config.DEFAULT_SPRITE_GEN3,
+     "which, with no cart to ask, is the token each viewer resolves on its own")
+
+  -- The dials underneath: one default per generation, and a gate that admits
+  -- only what a row names.  Unknown is unknown -- it never reads as Gen 1.
+  eq(Config.defaultSpriteFor(1), Config.DEFAULT_SPRITE, "Gen 1's fallback is Red")
+  eq(Config.defaultSpriteFor(2), Config.DEFAULT_SPRITE_GEN2, "Gen 2's is Chris")
+  eq(Config.defaultSpriteFor(3), Config.DEFAULT_SPRITE_GEN3,
+     "Gen 3's is the cart-resolved token, not any one engine's player name")
+  eq(Config.defaultSpriteFor("3"), Config.DEFAULT_SPRITE_GEN3, "read from a string too")
+  check(Config.DEFAULT_SPRITE_GEN3 ~= Config.DEFAULT_SPRITE
+        and Config.DEFAULT_SPRITE_GEN3 ~= Config.DEFAULT_SPRITE_GEN2,
+        "and the three fallbacks are three different ids")
+  local nire = Config.ownCharId("SPRITE_NIRE")
+  eq(Config.ownCharAllowed(nire, 1), true, "NIRE is allowed on Gen 1")
+  eq(Config.ownCharAllowed(nire, 2), false, "refused on Gen 2")
+  eq(Config.ownCharAllowed(nire, 3), false, "refused on Gen 3")
+  eq(Config.ownCharAllowed(nire, "gen3"), false,
+     "including under the manifest's own \"gen3\" spelling")
+  eq(Config.ownCharAllowed(nire, 4), false,
+     "and on a generation nothing knows, rather than guessing Gen 1")
+  eq(Config.ownCharAllowed(nire, nil), false, "or on no generation at all")
+  eq(Config.knownGeneration("gen3"), 3, "a manifest-style token names its generation")
+  eq(Config.knownGeneration(3), 3, "as does the number")
+  eq(Config.knownGeneration(4), nil, "and a generation past Gen 3 is unknown")
 end
 
 -- ------- the pics the catalog does not cover
@@ -15607,12 +15775,29 @@ end)()
   -- the throws exactly as Red does.
   check(Battlefield.enabled(goldGame),
         "Gen2 draws the top-down theatre too")
-  -- Still a gate rather than `true`: a generation the engine grows later has no
-  -- front pics this file knows how to ask for, and the GB fallback is a better
-  -- answer than an arena full of blanks.
-  check(not Battlefield.enabled({ data = { type_chart = { generation = 3 } } })
-        or Gen.generation({ data = { type_chart = { generation = 3 } } }) ~= 3,
-        "an unknown generation falls back to the classic path")
+  -- Still a gate rather than `true`, and Gen 3 is now a known generation
+  -- (Battlefield's THEATRE_GENERATIONS carries it) -- so this used to pass only
+  -- because a Gen 3 table was clamped to Gen 1 by Gen.generation and the
+  -- clause after the `or` was never reached.  The truth it pins now is the
+  -- gate T9 kept on purpose: Gen 3's art (64x64 pics, the cart's icons and
+  -- walkers, the backdrop from its own battle scene) is reached through the
+  -- *running* engine, so a table that merely says generation 3 on a boot that
+  -- is not one -- this stub, a dataset read out of context -- has none of it to
+  -- draw with and keeps the classic path rather than an arena full of blanks.
+  local gen3Shaped = { data = { type_chart = { generation = 3 } } }
+  eq(Gen.generation(gen3Shaped), 3,
+     "a Gen 3-shaped stub reads as generation 3, no longer clamped to Gen 1")
+  check(not Battlefield.enabled(gen3Shaped),
+        "but without a live Gen 3 boot (Gen3.active() is false) it stays off the theatre")
+  -- The other half: the same table through a module graph whose mod facade is
+  -- a Gen 3 loader, which is the fact Gen3.active() reads.  The real loader
+  -- version of this (a Gen 3 load, both carts) is the tri-gen block near the
+  -- top of this file; tests/gen3_battlefield.lua drives the theatre itself.
+  local gen3Battlefield = resolver(setmetatable({ generation = 3 }, { __index = stubMod }))("Battlefield")
+  check(gen3Battlefield.enabled(gen3Shaped),
+        "and on a Gen 3 boot the same table enables the theatre")
+  eq(Gen.generation({ data = { type_chart = { generation = 4 } } }), 1,
+     "a generation the mod does not know still reads as Gen 1 -- Gen.generation only answers 1, 2 or 3")
 
   for _, mode in ipairs({ "coop_wild", "wild" }) do
     local wild = Battlefield.layout({
@@ -26735,6 +26920,20 @@ do
      "GSC Official is allowed on Gen 2")
   eq(Config.featuredServerAllowed(1, gsc.host), false,
      "and refused on Gen 1")
+  -- No official hub is deployed for FireRed / LeafGreen / Emerald (owner
+  -- decision, 2026-09-30; the FEATURED_SERVERS note in Config.lua), so a Gen 3
+  -- boot is offered neither row -- both name their generation, and a gate
+  -- admits only what a row names.  Unknown generations stay shut the same way.
+  eq(Config.featuredServerAllowed(3), false,
+     "no official hub is offered on Gen 3")
+  eq(Config.featuredServerAllowed(3, Config.FEATURED_SERVER_HOST), false,
+     "RBY Official is refused on Gen 3")
+  eq(Config.featuredServerAllowed(3, gsc.host), false,
+     "and so is GSC Official")
+  eq(Config.featuredServerAllowed(3, "friend.example.com:7788"), true,
+     "while a community hub is never gated, on any generation")
+  eq(Config.featuredServerAllowed(4), false,
+     "a generation nothing knows is offered no official hub")
   eq(Servers.isFeaturedAddress(Config.FEATURED_SERVER_HOST), true,
      "isFeaturedAddress recognises the RBY official host")
   eq(Servers.isFeaturedAddress("play.rbymmo.com"), true,
@@ -26769,6 +26968,13 @@ do
      "Gen 1 still shows only RBY Official")
   eq(store:menuList(redGame)[1].name, Config.FEATURED_SERVER_NAME,
      "under the RBY official label")
+  local gen3Game = { data = { type_chart = { generation = 3 } } }
+  eq(#store:menuList(gen3Game), 0,
+     "Gen 3 sees neither official row on a fresh SERVERS list")
+  eq(store:menuGet(Config.FEATURED_SERVER_HOST, gen3Game), nil,
+     "menuGet refuses the RBY official key on Gen 3")
+  eq(store:menuGet(gsc.host, gen3Game), nil,
+     "and the GSC official key too")
 
   local resolved = store:menuGet(featured.key)
   check(resolved ~= nil, "menuGet resolves the synthetic row")
@@ -27225,6 +27431,19 @@ do
   }
   eq(store:autoJoinEntry(redGame), nil,
      "while a Gen 1 boot cannot resolve the GSC official auto-join")
+  -- Gen 3 has no official row to arm or dial (Config.FEATURED_SERVERS names
+  -- only Gen 1 and Gen 2), so the same gate refuses both -- and the GSC arming
+  -- Gold left behind resolves to nothing there too, rather than a Gen 3 boot
+  -- dialling a Gold-only hub.
+  local gen3Game = {
+    data = { type_chart = { generation = 3 } },
+  }
+  eq(store:autoJoinEntry(gen3Game), nil,
+     "a Gen 3 boot cannot resolve the GSC official auto-join either")
+  eq(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true, gen3Game), nil,
+     "and cannot arm RBY Official")
+  eq(store:setAutoJoin(gsc.host, true, gen3Game), nil,
+     "or GSC Official")
   -- Restore the RBY official arming this block started with, so the stub
   -- assertions below still see one featured auto-join row.
   check(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true) ~= nil,
@@ -28917,6 +29136,16 @@ do
   redMenu.opts.onCancel()
   eq(pushed and pushed.id, "StartMenu",
      "on Gen 1, B from MMO still reopens StartMenu")
+
+  -- Gen 3's START is a layer on the cart's own stack rather than a screen the
+  -- mod can push (Ui.reopenStartMenu hands it to Gen.reopenStartMenu on a live
+  -- Gen 3 boot, which needs the engine), so what a headless suite can pin is
+  -- the id the helpers name it by -- the layer StartMenu.show pushes.
+  local MenuGen = need("Gen")
+  eq(MenuGen.startMenuId(goldGame), "Gen2StartMenu", "Gold's START menu is named for Gold")
+  eq(MenuGen.startMenuId(redGame), "StartMenu", "Red's for Red")
+  eq(MenuGen.startMenuId({ data = { type_chart = { generation = 3 } } }), "start",
+     "and a Gen 3 boot's is the cart's own \"start\" layer")
 end
 
 stubSprites = {}
@@ -29524,6 +29753,11 @@ local gen2 = { data = { gen2Constants = {}, pokemon = { PIDGEY = { name = "PIDGE
 
 eq(Gen.nicknameScreenId(gen1), "NamingScreen", "Gen 1 catches open the Gen 1 grid")
 eq(Gen.nicknameScreenId(gen2), "Gen2NamingScreen", "and Gold's opens Gold's")
+-- Gen 3 is not a pushed mod screen at all: the id is the game3 stack layer
+-- the cart's own naming grid pushes, which is what a caller watching the
+-- stack looks for.
+eq(Gen.nicknameScreenId({ data = { type_chart = { generation = 3 } } }), "naming",
+   "and a Gen 3 catch opens the cart's grid layer")
 eq(Config.NICKNAME_MAX, 10,
    "the grid takes the same ten characters every other nickname in the save gets")
 
