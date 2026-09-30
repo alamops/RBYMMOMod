@@ -114,8 +114,10 @@
 --   solo:fromGen3Trainer(game, foe, opts)
 --
 -- (see their own headers below for the exact inputs).  True means this file
--- owns the fight and will call `opts.done(result)` exactly once when it is
--- over, in the engine's own vocabulary; false means it declined and nothing
+-- owns the fight and will call `opts.done(result)` at most once when it is
+-- over, in the engine's own vocabulary (never for a trainer drawn with the
+-- player still standing: that script is halted -- see M:_ended3); false
+-- means it declined and nothing
 -- at all has happened.  With no buried battle to finish, the rewards the
 -- engine's battle would have paid are paid here, the cart's way: the prize
 -- (battle/prize.lua), Pickup, the whiteout (battle_bridge's money loss and
@@ -2186,25 +2188,6 @@ function M.gen3Terrain(game)
   return terrain, underwater and true or false
 end
 
--- pret battle_util.c:1709 (the engine's battle/init.lua overworld_weather):
--- the overworld weather ids a battle opens under -- rain, thunderstorm and
--- downpour as RAIN, the sandstorm, the drought.
-local FIELD_WEATHER3 = { [3] = "RAIN", [5] = "RAIN", [13] = "RAIN", [8] = "SAND", [12] = "SUN" }
-
--- The overworld's weather, as a battle opens under it.  Sheet3.fieldWeather
--- first, which reads the engine's weather module through `package.loaded`;
--- then the module itself through the guarded engine require -- the mod
--- sandbox hands a mod no real `package` (src/mods/LegacyCompat.lua's shim
--- has an empty `loaded`), so on a live boot that is the reading that answers.
-function M.gen3FieldWeather()
-  local w = try3(Sheet3.fieldWeather)
-  if w then return w end
-  local W = Gen3.engine("src.core.game3.weather")
-  if not W then return nil end
-  local id = int3(try3(W.get), nil) or int3(W.current, 0)
-  return FIELD_WEATHER3[id]
-end
-
 -- Is anything in this party still able to fight?
 function M.gen3Standing(party)
   for _, mon in ipairs(type(party) == "table" and party or {}) do
@@ -2253,6 +2236,9 @@ end
 -- everything that is not a loss as a win -- the trainer flag, the beaten
 -- script and its badge or TM -- and a draw is not one on the cart
 -- (IsPlayerDefeated again).  M.gen3OutcomeWord keeps the DREW for the save.
+-- (A trainer drawn with the player still standing is not answered at all --
+-- M:_ended3 halts its script -- so this is the word only for a draw that
+-- whites out, and a safe one for any caller that asks.)
 function M.gen3Result(verdict, reason, whiteout, ranSide, kind)
   if reason == "catch" then return "caught" end
   if reason == "run" then
@@ -2279,9 +2265,11 @@ end
 -- ------------------------------------------------------------------
 --
 -- Both answer true when the fight is now this file's -- the screen is up, the
--- referee is running, and `opts.done(result)` will be called exactly once
--- after it ends (or after the engine's own battle, if a failing referee has
--- to hand it back) -- and false, silently, when it declined, in which case
+-- referee is running, and `opts.done(result)` will be called once after it
+-- ends (or after the engine's own battle, if a failing referee has to hand it
+-- back), except for a trainer drawn with the player still standing, whose
+-- waiting script is halted instead (M:_ended3) -- and false, silently, when
+-- it declined, in which case
 -- nothing at all has happened and the caller starts the engine's own battle.
 --
 -- opts (both):
@@ -2474,7 +2462,7 @@ function M:_begin3(game, kind, party, opts, extra)
     -- (battle/init.lua `overworldWeather`, pret battle_util.c:1709), trainers
     -- included; the ruleset names one only for a wild fight (Sheet3.ruleset),
     -- so a trainer on a rainy route asks the field itself.
-    weather = ruleset.weather or M.gen3FieldWeather(),
+    weather = ruleset.weather or Sheet3.fieldWeather(),
     underwater = ruleset.underwater == true or underwater,
     choiceTimeout = Config.SOLO_CHOICE_TIMEOUT,
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
@@ -3015,6 +3003,19 @@ function M:_ended3(result, toLearn)
     end
   end
 
+  -- A trainer fight this player ends neither winning nor whited out (a draw
+  -- with their team still standing -- the one ending the cart has no word
+  -- for) is never handed to the trainerbattle opcode.  Its `done` has no third
+  -- answer: anything but a loss sets the trainer flag and runs the beaten
+  -- script, and a loss sets no flag but lets the VM run on into the bytes
+  -- after the command (ops_a.lua: nothing halts it; on the cart a loss's
+  -- whiteout ends the script) -- a gym leader's TM, handed over with no badge.
+  -- So the script waiting on the trainer is halted instead, as the whiteout
+  -- would have halted it, and nobody is whited out: the trainer stays
+  -- unbeaten and the save says B_OUTCOME_DREW.  src/CoopField.lua's
+  -- Stand:finish holds co-op to the same rule.
+  local halt = same and g3.kind == "trainer" and verdict ~= "win"
+    and not whiteout and not g3.healAfter
   local levelled = same and won and M.levelled3(session.party, g3.levels) or nil
   levelled = EvolveFx.withoutResolved(levelled, evoResolved)
   local done = g3.done
@@ -3024,18 +3025,21 @@ function M:_ended3(result, toLearn)
     finished = true
     if same then
       local okE, errE = pcall(self._finishEffects3, self, session, g3, {
-        result = outcome, word = word, playerMon = playerMon, foeMon = foeMon,
+        result = halt and word or outcome, word = word,
+        playerMon = playerMon, foeMon = foeMon,
       })
       if not okE then
         self:warn("effects3", "part of the end of this battle could not be recorded (%s); "
           .. "the battle itself counted -- report this with the battle you were in",
           tostring(errE))
       end
+      if halt then M.haltScript3() end
       -- The map's resume scripts (pokefirered battle_setup.c:432), after the
       -- last prompt the fight left up has closed.
       local Space = Gen3.engine("src.core.game3.scripting.space")
       if Space then pcall(Space.returnToField) end
     end
+    if halt then return end
     local okD, errD = true, nil
     if type(done) == "function" then
       okD, errD = pcall(done, outcome)
@@ -3046,6 +3050,24 @@ function M:_ended3(result, toLearn)
     end
   end
   self:_afterBattle3(game, same and toLearn or nil, levelled, finish)
+  return true
+end
+
+-- The script VM's waiting trainerbattle, ended where it waits (Vm:halt,
+-- aborted -- what Field.respawnAtHeal does to it on the cart's whiteout):
+-- whatever the script locked is released and nothing after the command runs.
+-- False when no script is running.
+function M.haltScript3()
+  local Space = Gen3.engine("src.core.game3.scripting.space")
+  local vm = type(Space) == "table" and Space.vm or nil
+  if type(vm) ~= "table" or type(vm.halt) ~= "function" then return false end
+  if type(vm.isRunning) == "function" and try3(vm.isRunning, vm) ~= true then return false end
+  local ok, err = pcall(vm.halt, vm, true)
+  if not ok then
+    mod.log:warn("the trainer's script could not be stopped after an unfinished battle "
+      .. "(%s); reload from your last save if the world seems stuck", tostring(err))
+    return false
+  end
   return true
 end
 
@@ -3225,18 +3247,20 @@ function M:_reset3()
   return true
 end
 
--- The encounter as the engine is handed it back: the one wild monster this
--- fight was fought against, not a fresh roll of the same species -- its
--- personality, IVs, item and moves ride on the foe row the engine's battle
--- builds its monster from (battle/init.lua foe_mon_from).
-local function handedFoe3(g3)
-  local foe = g3.foe
-  local mon = (g3.kind == "wild") and type(g3.party) == "table" and g3.party[1] or nil
-  if type(foe) ~= "table" or type(mon) ~= "table" then return foe end
+-- A wild foe row for the engine's own battle, carrying the one monster that
+-- was met rather than a fresh roll of its species: its personality, IVs,
+-- nature, held item and moves ride on the row the engine's battle builds its
+-- monster from (battle/init.lua foe_mon_from re-rolls the IVs and the item
+-- only when the row leaves them out).  `foe` is the encounter row (copied,
+-- never written; its `mon` is dropped), `mon` the engine monster.  The foe
+-- unchanged when there is no monster to carry.  Exported for src/Client.lua's
+-- own hand-back of a step encounter, so both hand the same monster back.
+function M.gen3HandedFoe(foe, mon)
+  if type(mon) ~= "table" then return foe end
   local copy = {}
-  for k, v in pairs(foe) do copy[k] = v end
+  for k, v in pairs(type(foe) == "table" and foe or {}) do copy[k] = v end
   copy.mon = nil
-  copy.species = int3(mon.species, nil) or copy.species
+  copy.species = int3(mon.species, nil) or int3(mon.speciesId, nil) or copy.species
   copy.level = int3(mon.level, nil) or copy.level
   copy.personality, copy.nature = mon.personality, mon.nature
   copy.ivs, copy.evs = mon.ivs, mon.evs
@@ -3274,7 +3298,8 @@ function M:_handBack3(game, g3)
     local ok, err = false, "the engine's battle bridge is unavailable"
     if BB then
       if g3.kind == "wild" then
-        ok, err = pcall(BB.startWild, nil, game, handedFoe3(g3), startOpts)
+        local mon = type(g3.party) == "table" and g3.party[1] or nil
+        ok, err = pcall(BB.startWild, nil, game, M.gen3HandedFoe(g3.foe, mon), startOpts)
       else
         startOpts.wild = false
         startOpts.trainerId = startOpts.trainerId or (g3.trainer and g3.trainer.trainerId)

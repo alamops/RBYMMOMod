@@ -717,14 +717,16 @@ function M.rowByToken(token)
   return id and M.moveRow(id) or nil
 end
 
--- The overworld weather a wild fight opens under (pret battle_util.c:1709,
--- the engine's battle/init.lua overworld_weather): rain, downpour and
--- thunderstorm are RAIN, the sandstorm SAND, the drought SUN.  Read from the
--- weather module only if the field already loaded it -- asking must not start
--- a weather system.
+-- The overworld weather a fight opens under (pret battle_util.c:1709, the
+-- engine's battle/init.lua overworld_weather): rain, downpour and
+-- thunderstorm are RAIN, the sandstorm SAND, the drought SUN.  Read through
+-- the guarded engine require: the mod sandbox hands a mod no real `package`
+-- (src/mods/LegacyCompat.lua's shim, whose `loaded` is empty), so reading
+-- package.loaded answered nil on every live boot.  The field has loaded the
+-- weather module long before any fight is met, so asking starts nothing.
 function M.fieldWeather()
   if not Gen3.active() then return nil end
-  local W = package.loaded["src.core.game3.weather"]
+  local W = Gen3.engine("src.core.game3.weather")
   if type(W) ~= "table" then return nil end
   local id = tonumber(try(W.get)) or tonumber(W.current) or 0
   if id == 3 or id == 5 or id == 13 then return "RAIN" end

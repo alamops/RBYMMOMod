@@ -2762,8 +2762,11 @@ local function divertWild3(enc, rollCtx)
     game = game,
     mapId = rollCtx and rollCtx.mapId,
     -- Handing the encounter back is starting the cart's fight with the very
-    -- monster the cover announced (its personality kept), the way the step
-    -- that rolled it would have.
+    -- monster the cover announced, the way the step that rolled it would
+    -- have: its personality, IVs, nature, held item and moves ride on the foe
+    -- row (SoloBattle.gen3HandedFoe, the row solo's own hand-back builds) --
+    -- the engine re-rolls whatever the row leaves out, and a monster the
+    -- player may already have fought would come back a different one.
     --
     -- Marked as a hand-back (CoopField.HANDBACK3): startWild calls the
     -- module's `start`, which is CoopField's own wrapper, and the wrapper
@@ -2776,12 +2779,13 @@ local function divertWild3(enc, rollCtx)
         error("no BattleBridge.startWild on this build")
       end
       local lead = stand and stand.enemyParty and stand.enemyParty[1]
-      return BB.startWild(Runtime and Runtime._mod, (Runtime and Runtime._game) or game, {
+      local foe = SoloBattle.gen3HandedFoe({
         species = tonumber(enc.speciesId) or tonumber(enc.species),
         level = enc.level, item = enc.item,
-        personality = (lead and lead.personality) or enc.personality,
-        moves = enc.moves,
-      }, { [CoopField.HANDBACK3] = true })
+        personality = enc.personality, moves = enc.moves,
+      }, lead)
+      return BB.startWild(Runtime and Runtime._mod, (Runtime and Runtime._game) or game,
+        foe, { [CoopField.HANDBACK3] = true })
     end,
   })
   if not stand then return false end

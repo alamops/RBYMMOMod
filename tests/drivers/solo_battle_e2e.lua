@@ -246,9 +246,12 @@ local function runGen3(game, H, U, env)
   end
 
   -- Back to a field nobody is standing in front of.
+  -- Idle, and no script still running: FireRed's whiteout carries on in a
+  -- script at the heal location (its own fade to black and back), and a
+  -- teleport out of the middle of that leaves the screen faded to black.
   local function settle()
     return H.waitSeconds(game, function()
-      if H.g3Idle(game) and not Battle.isActive() then return true end
+      if H.g3Idle(game) and not Battle.isActive() and not H.g3ScriptRunning() then return true end
       nudge()
       return false
     end, 60, "the field after the fight")
@@ -760,8 +763,10 @@ local function runGen3(game, H, U, env)
   end
 
   -- A draw the player is still standing after -- the one the cart has no
-  -- word for (here: the referee's own clock, forced) -- is the same "lose" to
-  -- the script, B_OUTCOME_DREW on the save, and nobody is whited out.
+  -- word for (here: the referee's own clock, forced) -- is never handed to
+  -- the trainer script at all ("lose" would run the bytes after the
+  -- trainerbattle command); a waiting script is halted instead.  The save
+  -- says B_OUTCOME_DREW, and nobody is whited out.
   if easyId then
     settle()
     toGrass()
@@ -780,7 +785,10 @@ local function runGen3(game, H, U, env)
       end, 20, "the draw's ending")
       shot("standing-draw")
       driveToEnd(function() fightWith(1) end, 60)
-      check(result == "lose", "standing draw: the trainer script hears 'lose'", tostring(result))
+      check(result == nil, "standing draw: the trainer script is never answered", tostring(result))
+      local Space = require("src.core.game3.scripting.space")
+      local vm = Space and Space.vm
+      check(not (vm and vm.isRunning and vm:isRunning()), "standing draw: no script is left running")
       check(session().battleOutcome == OUTCOME.DREW, "standing draw: B_OUTCOME_DREW on the save",
             tostring(session().battleOutcome))
       check((tonumber(session().money) or 0) == 3000, "standing draw: no prize, no loss",
@@ -788,6 +796,116 @@ local function runGen3(game, H, U, env)
       settle()
       check(Map.current == mapBefore, "standing draw: nobody standing is whited out",
             tostring(mapBefore) .. " -> " .. tostring(Map.current))
+    end
+  end
+
+  -- The same standing draw against a real trainer, met the cart's way (seen,
+  -- walked up to, its intro said, its trainerbattle command waiting in the
+  -- script VM): the script is halted where it waits -- no flag, and none of
+  -- the bytes after the command (the trainer's post-battle words) run.
+  do
+    local stage = (H.G3_STAGE[VERSION] or H.G3_STAGE.firered).battle
+    settle()
+    seed(STARTER, 40)
+    session().money = 3000
+    H.g3Teleport(game, stage.trainerMap, 1, 1, "down")
+    local eo = H.g3ObjectById(stage.trainerLid)
+    local sx, sy, dir
+    if eo then sx, sy, dir = H.g3SightApproach(eo) end
+    if not sx then
+      skip("the real trainer draw leg", "no trainer with a line of sight on " .. tostring(stage.trainerMap))
+    else
+      H.g3ClearTrainer(eo)
+      local placed = H.g3Teleport(game, stage.trainerMap, sx, sy, dir)
+      check(placed, "real draw: standing just outside the trainer's line of sight")
+      local met = placed and H.waitSeconds(game, function()
+        if solo.fight then return true end
+        local top = H.g3Top(game)
+        if type(top) == "table" and top.g3Engine == "message" and H.g3Layer() == nil then
+          U.tap(game, "a"); U.wait(6)
+          return false
+        end
+        if not H.g3Free(game) then U.wait(4) return false end
+        U.hold(game, dir, 16)
+        U.wait(1)
+        return false
+      end, 180, "the trainer to see us and solo to take the fight")
+      check(met, "real draw: walking into sight raised the fight, and solo took it")
+      if met then
+        awaitChoose(60, "the real trainer's grid")
+        check(H.g3ScriptRunning(), "real draw: the trainer's script waits on the fight")
+        local result
+        local done = solo.gen3 and solo.gen3.done
+        if solo.gen3 and type(done) == "function" then
+          solo.gen3.done = function(r) result = r; return done(r) end
+        end
+        -- One cell out of the trainer's line while the fight is up: the
+        -- engine looks for a trainer's sight on every idle frame, and an
+        -- unbeaten trainer still facing us would come straight back for
+        -- another go -- its intro is not the post-battle words asked about.
+        local P = require("src.core.game3.player")
+        local side = (dir == "up" or dir == "down") and { 1, 0 } or { 0, 1 }
+        P.cellX, P.cellY = P.cellX + side[1], P.cellY + side[2]
+        P.px, P.py, P.targetX, P.targetY = P.cellX * 16, P.cellY * 16, P.cellX, P.cellY
+        session().x, session().y = P.cellX, P.cellY
+        -- What is halted, and in what state: the trainerbattle command waits
+        -- in the VM ("waiting", native) until it is answered.
+        local Space = require("src.core.game3.scripting.space")
+        local vm = Space.vm
+        local halts, ownHalt = {}, vm and rawget(vm, "halt")
+        if vm then
+          local realHalt = vm.halt
+          vm.halt = function(self, aborted)
+            local c = self.ctx or {}
+            halts[#halts + 1] = { aborted = aborted, status = c.status, mode = c.mode }
+            return realHalt(self, aborted)
+          end
+        end
+        solo.sim:_finish("draw", nil, nil, "timeout")
+        H.waitSeconds(game, function()
+          local f = fight()
+          return f == nil or (f.phase == "over" and shown() ~= "")
+        end, 20, "the draw's ending")
+        shot("real-draw")
+        driveToEnd(function() fightWith(1) end, 60)
+        -- Four seconds of whatever the script might still say (none, now).
+        local sawWords = false
+        local clock = love and love.timer
+        local deadline = clock and (clock.getTime() + 4) or nil
+        for _ = 1, 2400 do
+          if deadline and clock.getTime() >= deadline then break end
+          local top = H.g3Top(game)
+          if type(top) == "table" and top.g3Engine == "message" then
+            sawWords = true
+            U.tap(game, "a")
+          end
+          U.wait(1)
+        end
+        shot("real-draw-after")
+        if vm then vm.halt = ownHalt end
+        check(result == nil, "real draw: the trainerbattle command is never answered", tostring(result))
+        check(#halts == 1 and halts[1].aborted == true and halts[1].status == "waiting",
+              "real draw: the script was halted while its trainerbattle command waited",
+              #halts .. " halt(s), " .. tostring(halts[1] and halts[1].status))
+        check(not sawWords, "real draw: no post-battle words -- the bytes after the command did not run")
+        check(not H.g3ScriptRunning(), "real draw: the trainer's script was halted where it waited")
+        check(H.g3TrainerDefeated(H.g3ObjectById(stage.trainerLid)) == false,
+              "real draw: the trainer stays unbeaten")
+        check(session().battleOutcome == OUTCOME.DREW, "real draw: B_OUTCOME_DREW on the save",
+              tostring(session().battleOutcome))
+        check((tonumber(session().money) or 0) == 3000, "real draw: no prize, nobody taxed",
+              tostring(session().money))
+        check(Map.current == stage.trainerMap, "real draw: nobody whited out", tostring(Map.current))
+        check(H.g3Free(game), "real draw: the field is the player's again")
+      end
+      -- Nothing of this trainer may outlive the leg: a fight still up (it came
+      -- back for another go) is won, the cart's own battle ended, the flag
+      -- cleared, and the player sent back to the grass.
+      if solo.fight then driveToEnd(function(f) fightWith(bestMove(f)) end, 240) end
+      if Battle.isActive() then endEngineBattle() end
+      settle()
+      H.g3ClearTrainer(H.g3ObjectById(stage.trainerLid))
+      toGrass()
     end
   end
 

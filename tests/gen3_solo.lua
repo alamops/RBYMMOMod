@@ -467,6 +467,32 @@ function FakeNatives.outcome_to_code(r)
 end
 local spaceCalls = 0
 local FakeSpace = { returnToField = function() spaceCalls = spaceCalls + 1 end }
+-- The script VM a trainerbattle command waits in (Space.vm), the way
+-- tests/gen3_coop.lua stands it in: `running` is what Vm:isRunning answers
+-- (the engine counts "waiting"), `halted` counts Vm:halt.
+local FakeVm = { running = false, halted = 0 }
+function FakeVm:isRunning() return self.running end
+function FakeVm:halt(aborted)
+  self.halted = self.halted + 1
+  self.running = false
+  self.aborted = aborted
+end
+FakeSpace.vm = FakeVm
+
+-- The trainerbattle opcode's continuation, as ops_a.lua writes it: a result
+-- that is not a loss sets the trainer flag; either way the VM then runs on
+-- from the bytes after the command -- unless something halted it first (the
+-- whiteout's respawnAtHeal, on the cart).  What ran is recorded.
+local function trainerOpcode()
+  local op = { flag = false, postBytes = false, answered = nil }
+  function op.done(result)
+    op.answered = result
+    local lost = result == "lose" or result == "whiteout" or result == "blackout"
+    if not lost then op.flag = true end
+    if FakeVm.running then op.postBytes = true end
+  end
+  return op
+end
 local encounterResets = 0
 local FakeEncounters = {
   resetRateModifiers = function() encounterResets = encounterResets + 1 end,
@@ -590,6 +616,7 @@ local function newGame(sessionExtra)
   spaceCalls, encounterResets = 0, 0
   battleActive = false
   effectsLog = {}
+  FakeVm.running, FakeVm.halted, FakeVm.aborted = false, 0, nil
   return GAME
 end
 
@@ -1412,7 +1439,15 @@ do
   eq(handed and handed[2] and handed[2].personality, 424242,
      "prebuilt: the engine is handed the monster that was fought, personality and all")
   eq(handed and handed[2] and handed[2].ivs, built.ivs, "prebuilt: ...and its IVs")
+  eq(handed and handed[2] and handed[2].item, built.item or 0, "prebuilt: ...its held item")
+  eq(table.concat((handed and handed[2] and handed[2].moves) or {}, ","), table.concat(built.moves, ","),
+     "prebuilt: ...its moves")
   eq(handed and handed[2] and handed[2].mon, nil, "prebuilt: ...as a foe row, not the fought table")
+  local row = { species = 16, level = 5, mon = built, personality = 1 }
+  local copy = Solo.gen3HandedFoe(row, built)
+  eq(row.personality, 1, "gen3HandedFoe: the encounter row is copied, never written")
+  check(copy.moves ~= built.moves, "gen3HandedFoe: ...and the move list is the engine's own copy")
+  eq(Solo.gen3HandedFoe(row, nil), row, "gen3HandedFoe: no monster, the row as it was")
 
   -- opts.party (either door): used as it is
   newGame()
@@ -1467,29 +1502,63 @@ do
   solo:reset()
 end
 
--- (i) A draw against a trainer.  The trainerbattle opcode reads anything but
---     a loss as a win (the flag, the beaten script, the badge); the cart
---     counts a draw as a defeat.  A draw the player is still standing after
---     (a referee's own clock) answers 'lose', whites nobody out, pays nothing,
---     and leaves B_OUTCOME_DREW on the save.
+-- (i) A draw against a trainer the player is still standing after (a
+--     referee's own clock).  The trainerbattle opcode has no answer for it:
+--     anything but a loss sets the trainer flag and runs the beaten script,
+--     and a loss sets no flag but lets the VM run on into the bytes after the
+--     command (a gym leader's TM without the badge) -- the cart's loss only
+--     stops there because its whiteout halts the script.  So the waiting
+--     script is halted, the opcode is never answered, nobody is whited out,
+--     nothing is paid, and the save says B_OUTCOME_DREW -- CoopField's rule.
 do
   newGame()
   local lead = monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } })
   SESSION.party = { lead }
   SESSION.money = 500
   local solo = newSolo()
-  local result, calls = nil, 0
-  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900,
-    done = function(r) result = r; calls = calls + 1 end }), "draw: taken")
+  local op = trainerOpcode()
+  FakeVm.running = true -- the trainerbattle command waits in the VM
+  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900, done = op.done }), "draw: taken")
   solo.sim:_finish("draw", nil, nil, "timeout")
   local ok, fight = drive(solo, function(f) f:pickMove(1) end)
   check(ok, "draw: the fight ended")
-  eq(result, "lose", "draw: the trainer script is answered 'lose' -- no flag, no beaten script")
-  eq(calls, 1, "draw: once")
+  eq(op.answered, nil, "draw: the trainerbattle opcode is never answered")
+  eq(op.postBytes, false, "draw: no post-battle bytes run (no TM without the badge)")
+  eq(op.flag, false, "draw: the trainer stays unbeaten")
+  eq(FakeVm.halted, 1, "draw: the waiting script is halted instead")
+  eq(FakeVm.aborted, true, "draw: ...as aborted, the whiteout's own ending for it")
   eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save's outcome is DREW")
   eq(SESSION.money, 500, "draw: no prize")
   eq(#fieldCalls, 0, "draw: nobody still standing is whited out")
+  check(spaceCalls >= 1, "draw: the field comes back")
   check(not textOf(fight):find("STRINGID_PLAYERGOTMONEY", 1, true), "draw: no money line")
+  local ended = effectsOf("emit")[1]
+  eq(ended and ended[3].result, "draw", "draw: battle.ended says 'draw'")
+
+  -- The same draw with no script waiting (a fight nothing is waiting on):
+  -- nothing to halt, nothing answered.
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local free = newSolo()
+  local op2 = trainerOpcode()
+  check(free:fromGen3Trainer(GAME, 900, { trainerId = 900, done = op2.done }), "draw (no script): taken")
+  free.sim:_finish("draw", nil, nil, "timeout")
+  drive(free, function(f) f:pickMove(1) end)
+  eq(FakeVm.halted, 0, "draw (no script): nothing running, nothing halted")
+  eq(op2.answered, nil, "draw (no script): and nothing answered")
+
+  -- A win still answers the opcode, which sets the flag; a whiteout's loss
+  -- answers it after the whiteout has halted the script.
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local won = newSolo()
+  local op3 = trainerOpcode()
+  FakeVm.running = true
+  check(won:fromGen3Trainer(GAME, 900, { trainerId = 900, done = op3.done }), "win: taken")
+  drive(won, function(f) f:pickMove(1) end)
+  eq(op3.answered, "win", "win: the opcode hears the win")
+  eq(op3.flag, true, "win: ...and sets the trainer flag")
+  eq(FakeVm.halted, 0, "win: nothing is halted")
 end
 
 -- (j) A turn that throws half way through: the referee is left `resolving`,
@@ -1554,17 +1623,27 @@ do
   check(wsolo:fromGen3Encounter(GAME, { species = 16, level = 3 }, {}), "weather: a wild on the same route")
   eq(wsolo.sim and wsolo.sim.field and wsolo.sim.field.weather, "RAIN", "weather: ...in the rain as before")
   wsolo:reset()
-  -- A live boot's sandbox has no `package`, so Sheet3's reading comes back
-  -- empty there; the engine's weather module is asked directly.
-  local sheetReading = Sheet3.fieldWeather
-  Sheet3.fieldWeather = function() return nil end
-  FakeWeather.id = 13 -- WEATHER_DOWNPOUR
-  local live = newSolo()
-  check(live:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "weather: a trainer in a downpour (live reading)")
-  eq(live.sim and live.sim.field and live.sim.field.weather, "RAIN",
-     "weather: the engine's weather module answers where package.loaded cannot")
-  live:reset()
-  Sheet3.fieldWeather = sheetReading
+  -- A live boot's sandbox hands a mod no real `package` (LegacyCompat's
+  -- shim: an empty `loaded`).  Sheet3 compiled into such an environment still
+  -- reads the field's weather, through the engine require.
+  do
+    local h = assert(io.open(MOD_PATH .. "/src/Sheet3.lua", "rb"))
+    local body = h:read("*a")
+    h:close()
+    local env = setmetatable({ package = { loaded = {}, preload = {}, path = "", cpath = "" } },
+      { __index = _G })
+    local chunk = assert(loadstr(body, "@Sheet3.lua"))
+    setfenv(chunk, env)
+    local Sandboxed = chunk(need, stubMod)
+    FakeWeather.id = 13 -- WEATHER_DOWNPOUR
+    eq(Sandboxed.fieldWeather(), "RAIN", "weather: a sandboxed Sheet3 still sees the downpour")
+    eq(Sandboxed.ruleset(GAME, { wild = true }).weather, "RAIN",
+       "weather: ...and a co-op / hub wild fight's ruleset opens in it")
+    FakeWeather.id = 8 -- WEATHER_SANDSTORM
+    eq(Sandboxed.fieldWeather(), "SAND", "weather: the sandstorm")
+    FakeWeather.id = 12 -- WEATHER_DROUGHT
+    eq(Sandboxed.fieldWeather(), "SUN", "weather: the drought")
+  end
   FakeWeather.id = 0
   local dry = newSolo()
   check(dry:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "weather: a trainer under a clear sky")

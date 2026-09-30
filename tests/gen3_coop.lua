@@ -2288,6 +2288,20 @@ for _, version in ipairs({ "firered", "emerald" }) do
   spied.opts.fallback()
   eq(recorded("engineStart"), startsBefore + 1, version .. ": a handed-back wild is the cart's fight")
   eq(offers, 0, version .. ": and nobody is offered it again (no divert loop)")
+  -- ...against the very monster the cover announced and solo was handed:
+  -- the engine re-rolls whatever the foe row leaves out.
+  local handedFoe
+  for _, r in ipairs(rec) do if r.kind == "engineStart" then handedFoe = r[1] end end
+  local lead = built and built[1]
+  eq(handedFoe and handedFoe.personality, lead and lead.personality,
+     version .. ": the handed-back wild keeps its personality")
+  check(handedFoe and lead and handedFoe.ivs == lead.ivs and type(lead.ivs) == "table",
+        version .. ": ...its IVs (not a re-roll)")
+  eq(handedFoe and handedFoe.item, lead and (tonumber(lead.item) or tonumber(lead.heldItem) or 0),
+     version .. ": ...its held item")
+  eq(table.concat((handedFoe and handedFoe.moves) or {}, ","),
+     table.concat((lead and lead.moves) or {}, ","), version .. ": ...its moves")
+  eq(handedFoe and handedFoe.level, lead and lead.level, version .. ": ...its level")
   spied.opts.fallback()
   eq(recorded("engineStart"), startsBefore + 1, version .. ": once")
   ctx.solo.fromGen3Encounter = spy
