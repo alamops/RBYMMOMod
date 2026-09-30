@@ -1225,8 +1225,12 @@ end
 
 -- A perspective (TILT) world is not the flat camera above; the corner list
 -- stands in for the plates there, as it does for Gen 1's voxel pipelines.
+--
+-- Read through Gen3.engine, not package.loaded: the mod sandbox's `package`
+-- shim carries an empty `loaded`, so that read was nil on every live boot and
+-- the plates stayed on under TILT.
 local function tilted3()
-  local Tilt = package.loaded["src.render.Tilt"]
+  local Tilt = engine3("src.render.Tilt")
   if type(Tilt) ~= "table" or type(Tilt.active) ~= "function" then return false end
   local ok, on = pcall(Tilt.active)
   return ok and on == true

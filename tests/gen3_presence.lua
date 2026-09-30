@@ -786,6 +786,19 @@ local function cart(version)
   eq(overlay:state().reached, "not-overworld", label .. ": a layer up hides the plates")
   Stack.pop("rby_mmo:Test")
 
+  -- a perspective (TILT) world: the corner roster stands in for the plates.
+  -- Read through Gen3.engine -- the sandbox's package.loaded is empty, so a
+  -- package.loaded read never saw TILT on a live boot.
+  local Tilt = Gen3.engine("src.render.Tilt")
+  check(type(Tilt) == "table", label .. ": the Tilt module is reachable through Gen3.engine")
+  if type(Tilt) == "table" then
+    local active = Tilt.active
+    Tilt.active = function() return true end
+    overlay:draw(game, viewport)
+    Tilt.active = active
+    eq(overlay:state().reached, "roster", label .. ": under TILT the corner list stands in for the plates")
+  end
+
   -- the region map: the party list, in words, whatever the family
   roster:move("p1", em and "FR_VIRIDIAN_CITY" or "EM_LITTLEROOT_TOWN", 3, 3, "down", false)
   Stack.push(em and "rse_region_map" or "region_map", { draw = function() end })
