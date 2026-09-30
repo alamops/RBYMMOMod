@@ -2414,9 +2414,23 @@ end
 
 -- Give up on a battle that cannot be assembled, without breaking rule 2: the
 -- trainer somebody walked into is still fought.
+--
+-- And say so to the hub, with the same one-goodbye-closes-all COOP_LEAVE a
+-- finished battle sends. The hub seated every member the moment the plan was
+-- agreed, and since #87 it refuses to seat a player still bound to an
+-- unfinished fight -- so an assembly given up here in silence left all of them
+-- hub-busy until the hour-long sweep (COOP_BATTLE_MAX), and the others waiting
+-- in `begin`, or on a screen for a battle_ready, for a fight nobody was coming
+-- to. With nothing running yet the hub closes the group, calls the record off
+-- and tells everyone in it (M:onBattleOutcome). Sent for any assembly, id or
+-- not: the goodbye names no fight, it closes whichever group the hub has this
+-- player in -- and there is only ever the one -- while a goodbye from a
+-- member it has already let out is dropped there.
 function M:abandon(text)
+  local assembling = self.battle ~= nil
   self.running = false
   self.battle = nil
+  if assembling then self.transport:send(Wire.COOP_LEAVE, {}) end
   -- Gen 3: the held trainer is handed back before the line (M:letGo3).
   if self:letGo3(text) then return nil end
   self:tell(text, function() self:release() end)
@@ -2508,9 +2522,10 @@ end
 --
 -- Nil-safe about the screen: the record on the hub is opened when the battle is
 -- *agreed*, and the screen goes up a short exchange later, so a message that
--- arrives in that window has nowhere to go and is dropped. It cannot be one that
--- matters -- mmo.battle_ready is not sent until every seat has uploaded a party,
--- and the uploads come from the screens.
+-- arrives in that window has nowhere to go and is dropped. A ready or an event
+-- cannot be one that matters -- mmo.battle_ready is not sent until every seat
+-- has uploaded a party, and the uploads come from the screens. An outcome can;
+-- see M:onBattleOutcome.
 function M:onBattleReady(msg)
   local ready = Wire.battleReady(msg)
   if ready and self.state then self.state:onBattleReady(ready) end
@@ -2527,10 +2542,24 @@ end
 
 -- In this boot's own vocabulary too: a Gen 3 outcome's `payDay` is read by a
 -- Gen 3 client only (Wire.battleOutcome's `generation`).
+--
+-- **The one message that does matter before the screen is up.** An outcome
+-- that arrives while this client is still assembling can only be the hub
+-- calling the fight off -- a member gave up (M:abandon) or dropped before
+-- every seat uploaded, so there is no sim to have decided anything. The hub
+-- has already let every seat out; dropping it here left this client waiting
+-- in `begin` for a field that is never coming, with the trainer it walked
+-- into still held. Matched on the plan's id, so a stale outcome for some
+-- other fight cannot end this one.
 function M:onBattleOutcome(msg)
   local state = self.state
   local outcome = Wire.battleOutcome(msg, Gen.generation(state and state.game))
-  if outcome and state then state:onBattleOutcome(outcome) end
+  if not outcome then return end
+  if state then return state:onBattleOutcome(outcome) end
+  local plan = self.battle and self.battle.plan
+  if plan and plan.id ~= nil and outcome.battle == plan.id then
+    return self:abandon("The battle was\ncalled off.")
+  end
 end
 
 -- Transport became ready again under a live mediated co-op fight.
@@ -2563,12 +2592,12 @@ function M:tryStart(game)
     -- The host is the only client that ever sees all four parties, so it is
     -- the only one that can know this -- and the other three are sitting in
     -- `begin` with `running` set, waiting for a field that is now never
-    -- coming. Told over the relay first and then closed with the same
-    -- one-goodbye-closes-all COOP_LEAVE a finished battle uses: after the
-    -- goodbye the group is gone and there is no longer any path to reach them.
+    -- coming. Told over the relay first, so they hear the reason; abandon's
+    -- COOP_LEAVE then closes the group, and after that goodbye there is no
+    -- longer any path to reach them. A refusal without a sentence of its own
+    -- for them still reaches them, as the hub calling the fight off.
     if closeGroup then
       self.transport:send(Wire.COOP_RELAY, { payload = { t = "abort" } })
-      self.transport:send(Wire.COOP_LEAVE, {})
     end
     return self:abandon(why or "That battle can't\nstart.")
   end

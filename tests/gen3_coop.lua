@@ -1602,6 +1602,44 @@ do
   coop:abandon("That battle can't\nstart.")
   eq(started(), 1, "an abandoned assembly: the held trainer is fought at once")
   eq(#queued, 0, "with nothing left queued")
+
+  -- ...and the hub is told, so neither seat stays bound to the fight given
+  -- up. Before, the goodbye came only from a finished battle.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  local sent
+  coop, sent, toasts, queued = coopHeld(true)
+  stand, _, started = waitOn(coop)
+  coop.waiting = nil
+  coop.running = true
+  coop.battle = { plan = { id = "c7", hostId = "me" }, host = true,
+                  parties = {}, badges = {}, ready = false }
+  coop:abandon("That battle can't\nstart.")
+  local leaves = 0
+  for _, m in ipairs(sent) do
+    if m.kind == Wire.COOP_LEAVE then leaves = leaves + 1 end
+  end
+  eq(leaves, 1, "giving up an assembly says goodbye to the hub, once")
+
+  -- The partner's half: the hub calls the fight off while this player is
+  -- still assembling, before any screen is up to hear it.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  coop, sent, toasts, queued = coopHeld(true)
+  stand, _, started = waitOn(coop)
+  coop.waiting = nil
+  coop.running = true
+  coop.battle = { plan = { id = "c8", hostId = "p2" }, host = false,
+                  parties = {}, badges = {}, ready = false }
+  coop:onBattleOutcome({ battle = "c9", outcome = "draw", reason = "gone" })
+  check(coop.battle ~= nil, "an outcome for some other fight leaves the assembly be")
+  eq(started(), 0, "and the held trainer with it")
+  coop:onBattleOutcome({ battle = "c8", outcome = "draw", reason = "gone" })
+  eq(coop.battle, nil, "the hub calling it off ends the assembly")
+  eq(coop.running, false, "and the player is no longer mid-battle")
+  eq(started(), 1, "the held trainer is fought at once")
+  eq(toasts[#toasts], "The battle was\ncalled off.", "and the line is in the corner")
+  eq(#queued, 0, "with nothing left queued")
 end
 
 do

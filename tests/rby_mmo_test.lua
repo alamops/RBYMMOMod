@@ -8422,6 +8422,9 @@ local coopDispatch = {
   [Wire.COOP_ASK] = function(s, m) s.coop:onAsk({}, m) end,
   [Wire.COOP_DECLINE] = function(s, m) s.coop:onDecline(m) end,
   [Wire.COOP_BATTLE] = function(s, m) s.coop:onBattle({}, m) end,
+  -- Client.lua hands every outcome to Coop as well as to Sessions: one that
+  -- lands before a battle screen is up is the hub calling an assembly off.
+  [Wire.BATTLE_OUTCOME] = function(s, m) s.coop:onBattleOutcome(m) end,
   [Wire.JOIN] = function(s, m) s.roster:put(Wire.presence(m.player)) end,
   [Wire.MOVE] = function(s, m)
     local id = Wire.id(m.id)
@@ -8611,20 +8614,16 @@ end
 --
 -- Every handoff in this harness stops at M:begin: the dispatch hands it a bare
 -- `{}` game, so there is no party to pack and it abandons ("2-on-2 needs the
--- link modules."), which `settle` then drains. Nothing here ever reaches
--- M:onBattleOver -- the one place a client sends the COOP_LEAVE that closes the
--- hub's group and aborts its still-unsettled mediated record -- so the fight
--- stays open on the hub with every seat still bound to it.
---
--- That used to be invisible, because opening the next fight simply overwrote
--- the old binding. It is not any more: since #87 the hub refuses to seat a
--- player who is still bound to a different unsettled fight (openCoopBattle /
--- openMediatedBattle -- the old sim kept ticking toward forfeit under the new
--- one), so every later join on the same hub is answered COOP_OFFER_END{alone}
--- and every later four-way COOP_DECLINE{gone}, while the previous fight's
--- `lastPlan` sits there looking like the new one. Called between scenarios
--- that share a hub, and sent from every side named: one goodbye closes the
--- whole group, so the rest are no-ops, exactly as on a real hub.
+-- link modules."), which `settle` then drains. Abandoning says goodbye now
+-- (M:abandon), so a side that got that far already let the whole group go.
+-- A seat a scenario never let reach M:begin -- its COOP_BATTLE taken off the
+-- peer to be read, never dispatched -- is still bound, though, and since #87
+-- the hub refuses to seat a player bound to a different unsettled fight
+-- (openCoopBattle / openMediatedBattle), so every later join on the same hub
+-- would be answered COOP_OFFER_END{alone} and every later four-way
+-- COOP_DECLINE{gone}. Called between scenarios that share a hub, and sent from
+-- every side named: one goodbye closes the whole group, so the rest are
+-- no-ops, exactly as on a real hub.
 local function endFight(...)
   for i = 1, select("#", ...) do
     local side = select(i, ...)
@@ -9875,14 +9874,25 @@ end)()
 -- in it.
 
 ;(function()
-  -- The four-way above left a live group behind it -- and so did the earlier
-  -- NPC join, which opens a group of two. Selected by shape rather than by
-  -- whichever `pairs` happened to yield first, or this passes or fails
-  -- depending on a hash order.
-  local liveId
-  for id, group in pairs(hub.coopBattles or {}) do
-    if #(group.members or {}) == 4 then liveId = id end
+  -- The four-way above never got past M:begin -- this harness has no link
+  -- modules to pack a party with -- and giving up there is a goodbye too
+  -- (M:abandon). It used to be silent: the group of four sat on the hub with
+  -- every seat still bound to its unsettled record, refusing each of them any
+  -- other fight until the age sweep below, an hour later on a real hub.
+  for _, group in pairs(hub.coopBattles or {}) do
+    check(#(group.members or {}) ~= 4,
+          "an assembly given up at the handoff does not leave its group behind")
   end
+  for _, side in ipairs({ ann, bob, cal, dee }) do
+    eq(side.client.coopBattleId, nil,
+       side.name .. " is not left filed under the fight that was given up")
+    eq(hub:unsettledBattle(side.client), nil,
+       side.name .. " is not left bound to its record either")
+  end
+
+  -- So the goodbye itself is driven on a group of four opened directly.
+  local liveId = hub:openCoopBattle("live4", {
+    ann.client.id, bob.client.id, cal.client.id, dee.client.id })
   check(liveId ~= nil, "agreeing on a party battle opens a relay group")
   local group = hub.coopBattles[liveId]
   eq(#group.members, 4, "with all four in it")
@@ -9913,6 +9923,84 @@ end)()
   eq(hub.coopBattles[staleId], nil,
      "a group whose battle never ended is reclaimed on age")
   eq(ann.client.coopBattleId, nil, "and its members are let out of it too")
+end)()
+
+-- ------- a co-op fight given up during assembly lets everybody go
+--
+-- The bug this pins: M:abandon never said goodbye. The hub seats every member
+-- the moment a co-op fight is agreed, and since #87 it refuses to seat a
+-- player still bound to an unfinished one -- so when one client could not
+-- assemble (a party that would not pack, a field it could not read) the
+-- whole group stayed hub-busy until the age sweep, an hour on a real hub,
+-- and the partner sat in M:begin waiting for a party that was never coming,
+-- with the trainer they had walked into still held. Driven on a fresh hub:
+-- ANN walks into a trainer and genuinely assembles, BOB joins and gives up.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local gHub = Hub.new({ maxPlayers = 8 })
+  local gAnn = coopSide(gHub, "GANN")
+  local gBob = coopSide(gHub, "GBOB")
+  pump(gAnn); pump(gBob)
+  gAnn.party:invite({ id = gBob.client.id, name = "GBOB" })
+  pump(gBob); answerConfirm(gBob, true)
+  pump(gAnn); pump(gBob)
+  eq(gAnn.party:count(), 2, "sanity: ANN and BOB are a pair")
+
+  eq(engage(gAnn), true, "ANN holds her trainer for BOB")
+  pump(gBob) -- the offer lands and BOB, free, takes it on the spot
+  local fightId = gAnn.client.coopBattleId
+  check(fightId ~= nil, "the hub seats the pair the moment BOB joins")
+  eq(gBob.client.coopBattleId, fightId, "both of them, in one fight")
+
+  -- ANN's half assembles the way it does in game: her party packs and goes
+  -- out, and as the one standing at the trainer she hosts, waiting on BOB's.
+  local realPack = CoopBattle.packParty
+  CoopBattle.packParty = function()
+    return { { species = "FIXMON_A", level = 5, hp = 20 } }
+  end
+  local ok, err = pcall(pump, gAnn)
+  CoopBattle.packParty = realPack
+  check(ok, "ANN's handoff runs (" .. tostring(err) .. ")")
+  local pending = gAnn.coop.battle
+  check(pending ~= nil and not pending.ready, "ANN is assembling, waiting on BOB")
+  eq(pending and pending.plan.id, fightId, "under the fight the hub named")
+  check(gAnn.coop.encounter ~= nil, "with her trainer still held")
+
+  -- BOB's half cannot assemble -- this harness has no link modules to pack a
+  -- party with -- so he gives up at the handoff.
+  gAnn.said, gBob.said = {}, {}
+  pump(gBob)
+  check(said(gBob, "link modules"), "BOB gives up at the handoff")
+  eq(gBob.client.coopBattleId, nil, "and the hub lets BOB go")
+  eq(gAnn.client.coopBattleId, nil,
+     "and ANN with him -- one goodbye closes the whole group")
+  eq(gHub.coopBattles[fightId], nil, "the group is gone")
+  eq(gHub:unsettledBattle(gBob.client), nil, "BOB is not bound to its record")
+  eq(gHub:unsettledBattle(gAnn.client), nil, "and neither is ANN")
+
+  -- ANN is told, instead of waiting on a party that is never coming.
+  pump(gAnn)
+  eq(gAnn.coop.battle, nil, "ANN's assembly ends when the hub calls it off")
+  eq(gAnn.coop.running, false, "and she is no longer marked mid-battle")
+  check(said(gAnn, "called off"), "in the sentence the battle screens use")
+  settle(gAnn)
+  eq(gAnn.coop.encounter, nil, "her trainer is handed back -- rule 2")
+  check(fightsAlone(gAnn), "to be fought alone")
+  eq(gAnn.finished, nil, "not finished off as if a fight had happened")
+
+  -- And the pair is free for the next fight straight away, not in an hour.
+  settle(gBob)
+  resetCoopWild(gAnn)
+  pump(gAnn); pump(gBob)
+  eq(engage(gAnn), true, "ANN walks into another trainer")
+  pump(gBob)
+  local nextId = gBob.client.coopBattleId
+  check(nextId ~= nil and nextId ~= fightId,
+        "BOB is seated in the next fight, not refused as still busy")
+  eq(gAnn.client.coopBattleId, nextId, "alongside ANN")
+  resetCoopWild(gAnn); resetCoopWild(gBob)
+  endFight(gAnn, gBob)
 end)()
 
 -- ------- partner gating: two layers, and both are checked
@@ -10178,13 +10266,17 @@ end)()
   -- the wrapper `coopSide`'s fake transport flattens elsewhere in this file,
   -- and this harness deliberately does not, so it is unwrapped here instead.
   local sawAbort, sawField, sawLeave = false, false, false
+  local leaves, leftBeforeAbort = 0, false
   for _, m in ipairs(sent) do
     local relayed = type(m.payload) == "table" and m.payload.payload
     if m.type == Wire.COOP_RELAY and type(relayed) == "table"
-       and relayed.t == "abort" then sawAbort = true end
+       and relayed.t == "abort" then
+      sawAbort = true
+      leftBeforeAbort = leftBeforeAbort or sawLeave
+    end
     if m.type == Wire.COOP_RELAY and type(relayed) == "table"
        and relayed.t == "field" then sawField = true end
-    if m.type == Wire.COOP_LEAVE then sawLeave = true end
+    if m.type == Wire.COOP_LEAVE then sawLeave = true; leaves = leaves + 1 end
   end
   check(sawAbort, "a dead-party host relays an abort")
   check(not sawField,
@@ -10192,6 +10284,10 @@ end)()
   check(sawLeave,
         "and says goodbye -- the same one-goodbye-closes-all a finished "
         .. "battle uses")
+  eq(leftBeforeAbort, false,
+     "the abort goes first: after the goodbye the group is gone, and the "
+     .. "other three would never hear why")
+  eq(leaves, 1, "and says it once")
   eq(host.battle, nil, "its own assembly is abandoned")
   eq(host.running, false, "and it is no longer marked mid-battle")
 end)()

@@ -160,6 +160,16 @@ here must match `manifest.version`.
   block were stale after #87 and #86, and the victories-table scan could
   reach a helper function first and crash intermittently at the gym-music
   block; it now skips non-table entries.
+- **A co-op fight given up during setup kept everyone busy for an hour.**
+  When one client could not set a co-op fight up (a team that would not
+  pack, a field it could not read, a trainer that cannot fight two), it gave
+  up without telling the hub. Since #87 that left every player in the fight
+  refused any trade, 1-on-1 or co-op until the hub's hour-long sweep, and a
+  partner still setting up waited for good, their trainer held. Giving up
+  now sends the goodbye a finished fight sends: the hub frees every seat and
+  calls the fight off, and a partner still setting up is told "The battle
+  was called off." and fights their trainer alone. The hubs are unchanged
+  (regression tests in `tests/rby_mmo_test.lua` and `tests/gen3_coop.lua`).
 - **The release archive carried test code.** Thirty-four Gen 1 and Gen 2
   drivers, suites and parity fixtures, a config backup and a scratch log had
   no `.modkitignore` line, so the release zip shipped them (the workflow drops
