@@ -1166,7 +1166,20 @@ M.AMOUNT_MAX = 9999
 -- full parties: BATTLE_MON_MAX * COOP_SIDE. One number that covers both shapes
 -- beats two that have to be kept in step. It bounds a foreign value before it
 -- enters a formula, it does not restate a game rule.
+--
+-- **Gen 3 reads a zero**, and only Gen 3 (M.battleEvent's `generation`): the
+-- holders-only fact (docs/plans/gen3-battle-sheet.md §7.1) -- a seat whose
+-- fighters all fell still pays its Exp. Share holders, the way pret
+-- Cmd_getexp does with `viaSentIn` 0 behind a SAFE_DIV.  The Gen 3 formula
+-- (src/Exp3.lua split) never divides by this field, so the zero is a fact
+-- there rather than a divisor; the older readings keep the floor of one.
 M.PARTICIPANTS_MAX = Config.BATTLE_MON_MAX * Config.COOP_SIDE
+
+-- The most Pay Day coins an outcome may say side a picked up (Gen 3 only,
+-- M.battleOutcome).  pret's gPaydayMoney is a u16 that saturates, so this is
+-- the cart's own ceiling rather than a guess; the Amulet Coin doubling is the
+-- client's, applied after the read.
+M.PAYDAY3_MAX = 65535
 
 -- How long a reason token this build has never heard of may be.  Refused past it
 -- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
@@ -2300,7 +2313,8 @@ end
 --                 banking this share (`mon`, optional).  Not an amount: the hub
 --                 holds no species table and can never compute one, so the
 --                 referee states the facts and each client runs its own
---                 Experience formula over its own party.
+--                 Experience formula over its own party.  Gen 3 adds the
+--                 holders-only fact: `participants` 0 and no `mon`.
 M.BATTLE_EVENTS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
@@ -2445,8 +2459,11 @@ function M.battleEvent(raw, generation)
   if raw.participants ~= nil then
     -- Deliberately not `winners`: an OUTCOME's winners is a list of player ids,
     -- and one name over two shapes is the sanitiser bug that reads a count as a
-    -- roster.  This one is a count, and it divides.
-    out.participants = M.int(raw.participants, 1, M.PARTICIPANTS_MAX)
+    -- roster.  This one is a count, and on Gen 1 / Gen 2 it divides.
+    --
+    -- Gen 3 (or none named) also reads 0: BattleSim3's holders-only fact
+    -- (sheet doc §7.1), which carries no `mon` -- see M.PARTICIPANTS_MAX.
+    out.participants = M.int(raw.participants, older and 1 or 0, M.PARTICIPANTS_MAX)
   end
   -- Which of the winner's six the award is *for* -- a **party** index, bounded
   -- by SLOT_MAX, and so the one field on an event that is not about the field.
@@ -2571,8 +2588,14 @@ end
 -- one other player.  A 2v2 does need them, since "loss" alone does not say which
 -- pair, and a rank settle has four ids to move.  Present-and-malformed refuses
 -- the message: these are the names a rating moves for.
-function M.battleOutcome(raw)
+--
+-- `generation` (optional) is the reader's own, M.battleEvent's convention: 1
+-- or 2 reads an outcome exactly as before Gen 3 had one, 3 or none named also
+-- reads `payDay`.
+function M.battleOutcome(raw, generation)
   if type(raw) ~= "table" then return nil end
+  local gen = M.int(generation, 1, M.GENERATION_MAX)
+  local older = gen == 1 or gen == 2
   local battle = M.id(raw.battle)
   local outcome = M.outcome(raw.outcome)
   if not (battle and outcome) then return nil end
@@ -2603,6 +2626,18 @@ function M.battleOutcome(raw)
   if raw.catcher ~= nil then
     out.catcher = M.id(raw.catcher)
     if not out.catcher then return nil end
+  end
+  -- Gen 3's Pay Day coins (sheet doc §1, §6): side a's total, present only on
+  -- a knockout win in a wild / coop_wild / coop_npc fight.  **Dropped rather
+  -- than fatal**, unlike the fields above, and the difference is who a bad
+  -- value can hurt.  A wrong winner or catcher moves a rating or a monster to
+  -- the wrong player, so refusing is the safe failure; a mangled coin count
+  -- has no recipient of its own (the winners list above decides who is paid),
+  -- and refusing the whole outcome over it would leave a finished fight on a
+  -- screen with no way out -- M.battleReason's argument -- to protect a
+  -- bonus.  The Amulet Coin doubling is the reader's, never the wire's.
+  if not older and raw.payDay ~= nil then
+    out.payDay = M.int(raw.payDay, 1, M.PAYDAY3_MAX)
   end
   return out
 end

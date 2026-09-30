@@ -1998,11 +1998,209 @@ function testGen3DialectAndLimits() {
     'while the empty object is the empty list, as it is to the Lua hub');
 }
 
+/*
+ * Gen 3 Pay Day and the holders-only exp fact (sheet doc §1, §7.1). A 2v2
+ * against a trainer: ANN's PAYER scatters coins every turn; BOB's BOOMER blows
+ * itself up to take the first trainer mon with it, so BOB's seat fought that
+ * knockout with nobody left standing who did -- the holders-only fact
+ * (`participants` 0, no `mon`) goes to it, while ANN's fighter is paid as the
+ * one participant. BOB sends his second mon, PAYER finishes the second trainer
+ * mon, and the outcome carries the coins of all three Pay Days to both players.
+ * Twin of the block in tests/hub_battle.lua.
+ */
+const IDLE3 = {
+  id: 'IDLE', num: 150, effect: 85, power: 0, target: 16, flags: 0,
+};
+
+function testGen3PayDayAndHoldersOnly() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  relay.forceBattleSeed = 1;
+  const a = dial3(relay, 'ANN');
+  const b = dial3(relay, 'BOB', 'emerald');
+  relay.openCoopBattle('g3pay', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('g3pay');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: 'g3pay', typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g3pay',
+    side: 'a',
+    mons: [mon3({
+      species: 'PAYER',
+      level: 40,
+      spe: 300,
+      atk: 50,
+      moves: [move3({
+        id: 'COINS', num: 6, effect: 34, power: 20, chance: 100,
+      })],
+    })],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party',
+    battle: 'g3pay',
+    side: 'a',
+    mons: [
+      mon3({
+        species: 'BOOMER',
+        spe: 200,
+        atk: 999,
+        moves: [move3({
+          id: 'BLAST', num: 153, effect: 7, power: 250,
+        })],
+      }),
+      mon3({
+        species: 'SHARER', heldItem: 182, holdEffect: 25, moves: [move3(IDLE3)],
+      }),
+    ],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g3pay',
+    side: 'b',
+    mons: [
+      mon3({
+        species: 'TRAINEE', def: 5, spe: 1, moves: [move3(IDLE3)],
+      }),
+      mon3({
+        species: 'TRAINEE', def: 5, spe: 1, moves: [move3(IDLE3)],
+      }),
+    ],
+  });
+  ok(record.sim, 'pay day: the Gen 3 coop_npc field opens');
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+
+  const exps = [];
+  let outcome = null;
+  for (let turn = 0; turn < 8; turn += 1) {
+    if (!relay.battles.has('g3pay')) break;
+    if (record.sim.byId.get(b.id).mustReplace) {
+      relay.handle(b.id, {
+        type: 'mmo.battle_choice', battle: 'g3pay', action: 'switch', slot: 1,
+      });
+    }
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: 'g3pay', action: 'fight', move: 0,
+    });
+    relay.handle(b.id, {
+      type: 'mmo.battle_choice', battle: 'g3pay', action: 'fight', move: 0,
+    });
+    for (const msg of takeAll(a, 'mmo.battle_event')) {
+      if (msg.t === 'exp') exps.push(msg);
+    }
+    outcome = take(a, 'mmo.battle_outcome');
+    if (outcome) break;
+  }
+
+  const first = exps.find((e) => e.slot === 0);
+  const holders = exps.find((e) => e.slot === 1 && e.participants === 0);
+  ok(first && first.participants === 1, 'pay day: the fighter still standing is the one participant');
+  ok(first.mon === 0, 'pay day: ...and names its party index');
+  ok(holders, 'pay day: the seat whose fighter fell gets the holders-only fact');
+  ok(holders.mon === undefined, 'pay day: ...with no mon (nobody of it that fought stands)');
+  const clean = sanitize.cleanBattleEvent(holders, 3);
+  ok(clean && clean.participants === 0, 'pay day: a Gen 3 reader keeps the zero');
+  ok(clean.mon === undefined, 'pay day: ...and still no mon');
+  const older = sanitize.cleanBattleEvent(holders, 2);
+  ok(older && older.participants === undefined,
+    'pay day: a Gen 2 reader drops the zero, as it always has');
+
+  ok(outcome, "pay day: the trainer's side falls");
+  ok(outcome.outcome === 'win', 'pay day: the players win');
+  ok(outcome.reason === 'ko', 'pay day: by knockout');
+  ok(outcome.payDay === 600, 'pay day: three Pay Days at level 40 is 3 x 200 coins');
+  const atBob = take(b, 'mmo.battle_outcome');
+  ok(atBob && atBob.payDay === 600, 'pay day: both players on side a hear the coins');
+  const read = sanitize.cleanBattleOutcome(outcome, 3);
+  ok(read && read.payDay === 600, 'pay day: the Gen 3 outcome reader keeps it');
+  ok(sanitize.cleanBattleOutcome(outcome, 1).payDay === undefined,
+    'pay day: an older reader never sees it');
+  ok(!relay.battles.has('g3pay'), 'pay day: the record settles and clears');
+}
+
+// ...and a fight between players pays nobody: the coins are counted, the
+// outcome carries none (link rules), and neither does a Gen 1 hub's.
+function testGen3PvpPaysNoPayDay() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  relay.forceBattleSeed = 1;
+  const a = dial3(relay, 'ANN');
+  const b = dial3(relay, 'BOB', 'leafgreen');
+  const session = openBattle(relay, a, b);
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: session.id, typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: session.id,
+    mons: [mon3({
+      species: 'PAYER',
+      level: 40,
+      spe: 300,
+      atk: 400,
+      moves: [move3({
+        id: 'COINS', num: 6, effect: 34, power: 60, chance: 100,
+      })],
+    })],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party',
+    battle: session.id,
+    mons: [mon3({
+      species: 'DELTA', def: 5, spe: 1, moves: [move3(IDLE3)],
+    })],
+  });
+  const record = relay.battles.get(session.id);
+  let outcome = null;
+  for (let turn = 0; turn < 6; turn += 1) {
+    if (!relay.battles.has(session.id)) break;
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: session.id, action: 'fight', move: 0,
+    });
+    relay.handle(b.id, {
+      type: 'mmo.battle_choice', battle: session.id, action: 'fight', move: 0,
+    });
+    outcome = take(a, 'mmo.battle_outcome') || take(b, 'mmo.battle_outcome');
+    if (outcome) break;
+  }
+  ok(record.sim.snapshot().payDay.a > 0, 'pvp pay day: the referee counted the coins');
+  ok(outcome && outcome.outcome === 'win', 'pvp pay day: the fight ends');
+  ok(outcome.payDay === undefined, 'pvp pay day: and the outcome pays nobody');
+
+  const gen1 = makeRelay(makeClock());
+  const a1 = dial(gen1, 'ANN');
+  const b1 = dial(gen1, 'BOB');
+  gen1.openCoopBattle('g1c', [a1.id, b1.id], { mode: 'coop_npc', hostId: a1.id });
+  gen1.handle(a1.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  gen1.handle(a1.id, {
+    type: 'mmo.battle_party', battle: 'g1c', side: 'a', mons: [mon(200)],
+  });
+  gen1.handle(b1.id, {
+    type: 'mmo.battle_party', battle: 'g1c', side: 'a', mons: [mon(200)],
+  });
+  gen1.handle(a1.id, {
+    type: 'mmo.battle_party', battle: 'g1c', side: 'b', mons: [mon(10, 1), mon(10, 1)],
+  });
+  let g1 = null;
+  for (let turn = 0; turn < 30 && !g1; turn += 1) {
+    if (!gen1.battles.has('g1c')) break;
+    for (const player of [a1, b1]) {
+      gen1.handle(player.id, {
+        type: 'mmo.battle_choice', battle: 'g1c', action: 'fight', move: 0,
+      });
+    }
+    g1 = take(a1, 'mmo.battle_outcome') || take(b1, 'mmo.battle_outcome');
+  }
+  ok(g1 && g1.outcome === 'win', 'gen 1 coop_npc: the players win');
+  ok(Object.keys(g1).sort().join(',') === 'battle,losers,outcome,reason,type,winners',
+    'gen 1 coop_npc: the outcome is the fields it always was, no payDay');
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
 testGen3WildCatch();
 testGen3MidFightMoveset();
 testGen3DialectAndLimits();
+testGen3PayDayAndHoldersOnly();
+testGen3PvpPaysNoPayDay();
 
 console.log(`hub_battle: ${passed} checks passed`);

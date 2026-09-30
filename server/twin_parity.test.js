@@ -434,11 +434,12 @@ test('Gen 3 sheet bounds match Wire.lua and sanitize.js', () => {
   for (const name of ['MOVE_TYPE_MAX', 'POWER3_MAX', 'ACCURACY3_MAX', 'EFFECT3_MAX',
     'TARGET3_MAX', 'PRIORITY3_MAX', 'FLAGS3_MAX', 'HOLD_EFFECT3_MAX', 'HOLD_PARAM3_MAX',
     'WEIGHT3_MAX', 'SLEEP3_MAX', 'U32_MAX', 'TYPE_CELL3_MIN', 'TYPE_MULT3_MAX', 'TERRAIN3_MAX',
-    'POOL_ENTRY3_MAX', 'STAGE3_MAX', 'DELTA3_MAX']) {
+    'POOL_ENTRY3_MAX', 'STAGE3_MAX', 'DELTA3_MAX', 'PAYDAY3_MAX']) {
     assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name],
       `Wire.${name} and sanitize.${name} must match`);
   }
   assert.strictEqual(sanitize.MOVE_TYPE_MAX, 31, 'the move type keeps the older dialects\' width');
+  assert.strictEqual(sanitize.PAYDAY3_MAX, 65535, 'pret gPaydayMoney is a u16 that saturates');
   assert.deepStrictEqual([...sanitize.GENDERS3].sort(), luaSet(wire, 'GENDERS3'),
     'the Gen 3 genders are one closed set on both sides');
   assert.deepStrictEqual([...sanitize.WEATHERS3].sort(), luaSet(wire, 'WEATHERS3'),
@@ -529,6 +530,28 @@ test('the Gen 3 bag catalog is one table on both sims', () => {
   assert.strictEqual(Battle3.Items.bagEffect(5), null, 'the Safari Ball stays unmediated');
   assert.strictEqual(sanitize.effectsFor(3).itemEffect('350').noConsume, true,
     'the Poke Flute is proved but never spent');
+});
+
+test('Pay Day rides the outcome of the same fights on both hubs and both sims', () => {
+  // Both hubs copy the referee's coins onto an outcome only in the fights the
+  // referee counts them for (docs/plans/gen3-battle-sheet.md §6): the three
+  // where side a is players and side b is the hub's NPC seats. A one-sided
+  // mode is a fight one hosting path pays and the other does not.
+  const keys = (body) => [...body.matchAll(/(\w+)\s*=\s*true/g)].map((x) => x[1]).sort();
+  const hub = read('src/Hub.lua').match(/local PAY_DAY_MODES\s*=\s*\{([^}]*)\}/);
+  assert.ok(hub, 'Hub.lua must declare local PAY_DAY_MODES');
+  const relay = read('server/lib/relay.js').match(/const PAY_DAY_MODES\s*=\s*new Set\(\[([^\]]*)\]\)/);
+  assert.ok(relay, 'relay.js must declare const PAY_DAY_MODES');
+  const relayModes = [...relay[1].matchAll(/'(\w+)'/g)].map((x) => x[1]).sort();
+  const sim = read('src/BattleSim3/Turn.lua').match(/local EXP_MODES\s*=\s*\{([^}]*)\}/);
+  assert.ok(sim, 'src/BattleSim3/Turn.lua must declare local EXP_MODES');
+  const simJs = read('server/lib/battle3/Turn.js').match(/const EXP_MODES\s*=\s*\{([^}]*)\}/);
+  assert.ok(simJs, 'lib/battle3/Turn.js must declare const EXP_MODES');
+  const simJsModes = [...simJs[1].matchAll(/(\w+):\s*true/g)].map((x) => x[1]).sort();
+  assert.deepStrictEqual(keys(hub[1]), relayModes, 'Hub.lua and relay.js pay Pay Day in the same modes');
+  assert.deepStrictEqual(keys(hub[1]), keys(sim[1]), "and they are BattleSim3's EXP_MODES");
+  assert.deepStrictEqual(simJsModes, keys(sim[1]), 'which the Node sim mirrors');
+  assert.deepStrictEqual(relayModes, ['coop_npc', 'coop_wild', 'wild'], 'never a player-vs-player mode');
 });
 
 test("sanitize's luaNumber reads a string as LuaJIT's tonumber does", (t) => {

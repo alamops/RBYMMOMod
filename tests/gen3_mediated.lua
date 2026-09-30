@@ -120,6 +120,10 @@ ITEMS[139] = { name = "ORAN BERRY", pocket = "BERRY_POUCH", price = 20,
 ITEMS[182] = { name = "EXP. SHARE", pocket = "ITEMS", price = 3000, holdEffect = 25 }
 ITEMS[197] = { name = "LUCKY EGG", pocket = "ITEMS", price = 200, holdEffect = 40 }
 ITEMS[350] = { name = "POKE FLUTE", pocket = "KEY_ITEMS", price = 0 }
+ITEMS[189] = { name = "AMULET COIN", pocket = "ITEMS", price = 100, holdEffect = 32 }
+ROM[6] = { effect = 34, power = 40, type = 0, accuracy = 100, pp = 20,
+           secondaryChance = 100, target = 0, priority = 0, flags = 3 }
+P3._moveNames[6] = "PAY DAY"
 P3._speciesMeta[16].evSpe = 1
 P3._speciesMeta[4].evSpa = 1
 P3._abilityNames[2] = "DRIZZLE"
@@ -876,7 +880,8 @@ local function harness(mode, foeSheets, extra)
     local out = battle:outcome()
     if out and not fight.finished then
       fight:onOutcome({ battle = "g3", outcome = out.outcome, winners = out.winners,
-                        losers = out.losers, reason = out.reason, caught = out.caught })
+                        losers = out.losers, reason = out.reason, caught = out.caught,
+                        payDay = out.payDay })
     end
     for _ = 1, 400 do
       fight:update(2.0)
@@ -1552,6 +1557,228 @@ do
         "pre-send: a well-formed Gen 3 choice still goes")
   eq(Mediated.sendMoveset(transport, "o", 0, f.mine[1].moves), true,
      "pre-send: a Gen 3 moveset passes its check in the Gen 3 dialect")
+end
+
+-- ------------------------------------------------------------------
+-- 8. Pay Day's coins and the holders-only exp fact (RF8; sheet doc §1, §7.1)
+-- ------------------------------------------------------------------
+
+local Wire = need("Wire")
+
+local function lineAt(h, needle)
+  for i, line in ipairs(h.fight.textLog or {}) do
+    if line:find(needle, 1, true) then return i end
+  end
+  return nil
+end
+
+-- Frames until the ending has printed and the owed Pay Day line with it: the
+-- harness stops at the first frame the queue is empty, and the exp strip may
+-- still be filling then.
+local function settle(fight)
+  for _ = 1, 200 do
+    fight:update(2.0)
+    if not fight.payDayLine and #fight.lines == 0 and not fight.shown then return true end
+  end
+  return false
+end
+
+-- (a) A wild fight won with PAY DAY: the referee's coins, paid once, x1.
+do
+  newGame()
+  local mine = monOf(4, 20, { moves = { 6 }, pp = { 20 }, maxPp = { 20 } })
+  SESSION.party = { mine }
+  local foe = assert(Sheet3.mon(SESSION, monOf(16, 3, { hp = 1 }), 0, { wild = true }))
+  local h = harness("wild", { foe }, { classicUi = true })
+  h.pump()
+  eq(h.fight.phase, "choose", "pay day: the grid opens")
+  h.fight:pickMove(1)   -- PAY DAY knocks the 1-HP PIDGEY out
+  h.pump()
+  check(settle(h.fight), "pay day: the ending prints out")
+  check(h.fight.finished, "pay day: the knockout ends the fight")
+  eq(h.battle:outcome().payDay, 100, "pay day: the referee counted level 20 x 5 coins")
+  eq(SESSION.money, 1100, "pay day: the wallet takes them, x1 with no AMULET COIN out")
+  eq(h.fight.payDayPaid, 100, "pay day: ...and the screen says what it paid")
+  local gained, picked = lineAt(h, "gained"), lineAt(h, "picked up")
+  check(picked ~= nil and h.fight.textLog[picked]:find("100", 1, true) ~= nil,
+        "pay day: the cart's 'picked up' line names the amount")
+  check(gained ~= nil and picked ~= nil and gained < picked,
+        "pay day: ...after the knockout's exp, where the cart says it")
+  h.fight:payDay3({ payDay = 100 })
+  h.fight:onOutcome({ battle = "g3", outcome = "win", winners = { "me" }, losers = { "wild" },
+                      reason = "ko", payDay = 100 })
+  eq(SESSION.money, 1100, "pay day: a second look at the outcome pays nothing more")
+end
+
+-- (b) An AMULET COIN that came out doubles them.
+do
+  newGame()
+  local mine = monOf(4, 20, { moves = { 6 }, pp = { 20 }, maxPp = { 20 },
+                              heldItem = 189, item = 189 })
+  SESSION.party = { mine }
+  local foe = assert(Sheet3.mon(SESSION, monOf(16, 3, { hp = 1 }), 0, { wild = true }))
+  local h = harness("wild", { foe }, { classicUi = true })
+  h.pump()
+  eq(h.fight.amuletMine, true, "amulet coin: its holder walking on is noted")
+  h.fight:pickMove(1)
+  h.pump()
+  settle(h.fight)
+  eq(SESSION.money, 1200, "amulet coin: PAY DAY's 100 coins are paid x2")
+  check(lineAt(h, "200") ~= nil, "amulet coin: ...and the line says 200")
+
+  -- Held in the bag's sense only (never sent out): no doubling.
+  newGame()
+  local lead = monOf(4, 20, { moves = { 6 }, pp = { 20 }, maxPp = { 20 } })
+  local bench = monOf(4, 20, { personality = 9, heldItem = 189, item = 189 })
+  SESSION.party = { lead, bench }
+  foe = assert(Sheet3.mon(SESSION, monOf(16, 3, { hp = 1 }), 0, { wild = true }))
+  h = harness("wild", { foe }, { classicUi = true })
+  h.pump()
+  h.fight:pickMove(1)
+  h.pump()
+  eq(h.fight.amuletMine, nil, "amulet coin: a benched holder that never came out is not")
+  eq(SESSION.money, 1100, "amulet coin: ...and PAY DAY pays x1")
+end
+
+-- (c) The foe's AMULET COIN: FireRed / LeafGreen double for it too, Emerald
+-- does not (its `amuletCoinPlayerOnly`, pret battle_util.c:3294).
+do
+  for _, case in ipairs({ { version = "firered", money = 1200 }, { version = "emerald", money = 1100 } }) do
+    newGame({ version = case.version })
+    SESSION.party = { monOf(4, 20, { moves = { 6 }, pp = { 20 }, maxPp = { 20 } }) }
+    local foe = assert(Sheet3.mon(SESSION, monOf(16, 3, { hp = 1, heldItem = 189, item = 189 }), 0,
+                                  { wild = true }))
+    local h = harness("wild", { foe }, { classicUi = true })
+    h.pump()
+    eq(h.fight.amuletFoe, true, "amulet coin (" .. case.version .. "): the wild holder is noted")
+    h.fight:pickMove(1)
+    h.pump()
+    eq(SESSION.money, case.money, "amulet coin (" .. case.version .. "): the foe's coin "
+       .. (case.money == 1200 and "doubles PAY DAY" or "does not count"))
+  end
+end
+
+-- (d) Who is paid: side a's winner, never a fight between players, never a
+-- loser, and never an outcome that carries no coins.
+do
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  local f = byHand("1v1")
+  f:onOutcome({ battle = "rf", outcome = "win", winners = { "me" }, losers = { "p" },
+                reason = "ko", payDay = 300 })
+  eq(f.result, "win", "pvp: the verdict lands")
+  eq(SESSION.money, 1000, "pvp: an outcome that (wrongly) carries coins pays nothing (link rules)")
+  eq(f.payDayLine, nil, "pvp: ...and owes no line")
+
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  f = byHand("wild")
+  f.peerId = "w"
+  f:onOutcome({ battle = "rf", outcome = "win", winners = { "w" }, losers = { "me" },
+                reason = "ko", payDay = 300 })
+  eq(f.result, "loss", "loser: the verdict lands")
+  eq(SESSION.money, 1000, "loser: the side that lost is paid nothing")
+
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  f = byHand("wild")
+  f.peerId = "w"
+  f:onOutcome({ battle = "rf", outcome = "win", winners = { "me" }, losers = { "w" }, reason = "ko" })
+  eq(SESSION.money, 1000, "no coins: an ordinary win pays nothing")
+  eq(f.payDayLine, nil, "no coins: ...and says nothing")
+
+  -- What the wire hands over: Wire's Gen 3 reading keeps the coins, an older
+  -- reading drops them, and a mangled count is dropped without the outcome.
+  local raw = { battle = "rf", outcome = "win", winners = { "me" }, losers = { "w" },
+                reason = "ko", payDay = 300 }
+  eq(Wire.battleOutcome(raw, 3).payDay, 300, "wire: a Gen 3 outcome keeps payDay")
+  eq(Wire.battleOutcome(raw).payDay, 300, "wire: ...as does a reader that names no generation")
+  eq(Wire.battleOutcome(raw, 1).payDay, nil, "wire: Gen 1 never reads it")
+  eq(Wire.battleOutcome(raw, 2).payDay, nil, "wire: nor Gen 2")
+  raw.payDay = 70000
+  local clean = Wire.battleOutcome(raw, 3)
+  check(clean ~= nil and clean.payDay == nil, "wire: past the cart's u16 the count is dropped, the outcome kept")
+end
+
+-- (e) A trainer win (the solo path's shape): the caller's after-words -- the
+-- defeated line and the prize -- print before the coins, as the cart orders
+-- BattleScript_LocalTrainerBattleWon ahead of BattleScript_PayDayMoneyAndPickUpItems.
+do
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  local f = byHand("coop_npc")
+  f:onOutcome({ battle = "rf", outcome = "win", winners = { "me" }, losers = { "p" },
+                reason = "ko", payDay = 250 })
+  eq(SESSION.money, 1250, "trainer: the coins land with the verdict")
+  f:say("ANN defeated\nYOUNGSTER BEN!")
+  f:say("ANN got ¥80\nfor winning!")
+  settle(f)
+  local defeated, prize, picked
+  for i, line in ipairs(f.textLog or {}) do
+    if line:find("defeated", 1, true) then defeated = i end
+    if line:find("for winning", 1, true) then prize = i end
+    if line:find("picked up", 1, true) then picked = i end
+  end
+  check(defeated and prize and picked and defeated < picked and prize < picked,
+        "trainer: the 'picked up' line follows the defeated line and the prize")
+  check(picked and f.textLog[picked]:find("250", 1, true) ~= nil, "trainer: ...naming the coins")
+end
+
+-- (f) The holders-only fact: `participants` 0 and no `mon` banks the knockout
+-- with nobody sent in, so only the living Exp. Share holders are paid --
+-- never the active mon a `mon`-less event otherwise falls back to.
+do
+  newGame()
+  local fighter = monOf(4, 10)
+  local holder = monOf(16, 10, { heldItem = 182, item = 182 })
+  local bystander = monOf(4, 10, { personality = 9 })
+  SESSION.party = { fighter, holder, bystander }
+  local f, ev = byHand("wild")
+  local fx, hx, bx = fighter.exp, holder.exp, bystander.exp
+  local sanitised = Wire.battleEvent({ battle = "rf", seq = 99, t = "exp", slot = 0,
+    speciesId = "16", level = 8, participants = 0 }, 3)
+  eq(sanitised.participants, 0, "holders-only: Wire's Gen 3 reading keeps the zero")
+  check(Mediated.holdersOnly(sanitised), "holders-only: ...and the screen reads it as the fact")
+  eq(Wire.battleEvent({ battle = "rf", seq = 99, t = "exp", slot = 0, participants = 0 }, 1)
+       .participants, nil, "holders-only: a Gen 1 reading never keeps a zero")
+  ev({ t = "team", slot = 0, side = "a", team = "ooo" })
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", speciesId = "16", level = 8, participants = 0 })
+  ev({ t = "msg", text = "next" })
+  -- PIDGEY 8: calculated floor(55 * 8 / 7) = 62, the holders' half 31, one holder.
+  eq(gained(holder, hx), 31, "holders-only: the Exp. Share holder takes the share half")
+  eq(gained(fighter, fx), 0, "holders-only: the active mon is not paid as a fighter")
+  eq(gained(bystander, bx), 0, "holders-only: nor is anyone else")
+  eq(f.expPaid, 1, "holders-only: one payment")
+
+  -- Two knockouts' holders-only facts of one species and level (an Explosion
+  -- that takes two trainer mons with it) are two knockouts, not one.
+  newGame()
+  holder = monOf(16, 10, { heldItem = 182, item = 182 })
+  SESSION.party = { monOf(4, 10, { hp = 0 }), holder }
+  f, ev = byHand("coop_npc")
+  hx = holder.exp
+  ev({ t = "team", slot = 0, side = "a", team = "xo" })
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "faint", slot = 4, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", speciesId = "16", level = 8, participants = 0 })
+  ev({ t = "exp", slot = 0, side = "a", speciesId = "16", level = 8, participants = 0 })
+  ev({ t = "msg", text = "next" })
+  -- A trainer's mon: floor(31 * 1.5) = 46, twice.
+  eq(gained(holder, hx), 92, "holders-only: each knockout pays the holder its own share")
+
+  -- No holder standing: the fact pays nobody, and says nothing.
+  newGame()
+  fighter = monOf(4, 10)
+  SESSION.party = { fighter, monOf(4, 10, { personality = 9 }) }
+  f, ev = byHand("wild")
+  fx = fighter.exp
+  ev({ t = "team", slot = 0, side = "a", team = "oo" })
+  ev({ t = "faint", slot = 3, side = "b", text = "PIDGEY" })
+  ev({ t = "exp", slot = 0, side = "a", speciesId = "16", level = 8, participants = 0 })
+  ev({ t = "msg", text = "next" })
+  eq(gained(fighter, fx), 0, "holders-only: with no Exp. Share out, nobody is paid")
+  eq(f.expPaid, nil, "holders-only: ...and no gained line")
 end
 
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.

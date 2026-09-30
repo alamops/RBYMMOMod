@@ -720,7 +720,20 @@ const AMOUNT_MAX = 9999;
 // full parties: BATTLE_MON_MAX * COOP_SIDE. One number that covers both shapes
 // beats two that have to be kept in step; it bounds a foreign value before it
 // enters a formula, it does not restate a game rule.
+//
+// **Gen 3 reads a zero**, and only Gen 3 (cleanBattleEvent's `generation`):
+// the holders-only fact (docs/plans/gen3-battle-sheet.md §7.1) -- a seat whose
+// fighters all fell still pays its Exp. Share holders, the way pret
+// Cmd_getexp does with `viaSentIn` 0 behind a SAFE_DIV. The Gen 3 formula
+// (src/Exp3.lua split) never divides by this field, so the zero is a fact
+// there rather than a divisor; the older readings keep the floor of one.
+// Twin of Wire.PARTICIPANTS_MAX.
 const PARTICIPANTS_MAX = BATTLE_MON_MAX * COOP_SIDE;
+// The most Pay Day coins an outcome may say side a picked up (Gen 3 only,
+// cleanBattleOutcome). pret's gPaydayMoney is a u16 that saturates, so this is
+// the cart's own ceiling rather than a guess; the Amulet Coin doubling is the
+// client's, applied after the read. Twin of Wire.PAYDAY3_MAX.
+const PAYDAY3_MAX = 65535;
 // How long a reason token this build has never heard of may be. Refused past it
 // rather than trimmed -- a cut token matches nothing and is a value nobody sent.
 const REASON_MAX = 32;
@@ -2024,8 +2037,15 @@ function cleanBattleEvent(raw, generation) {
   if (raw.participants !== undefined && raw.participants !== null) {
     // Deliberately not `winners`: an outcome's winners is a list of player ids,
     // and one name over two shapes is the sanitiser bug that reads a count as a
-    // roster. This one is a count, and it divides.
-    const participants = cleanInt(raw.participants, 1, PARTICIPANTS_MAX);
+    // roster. This one is a count, and on Gen 1 / Gen 2 it divides.
+    //
+    // Gen 3 (or none named) also reads 0: BattleSim3's holders-only fact (sheet
+    // doc §7.1), which carries no `mon` -- see PARTICIPANTS_MAX. Read there the
+    // way Wire.int reads it (luaInt), like the rest of the Gen 3 fields; the
+    // older readings keep cleanInt, byte for byte.
+    const participants = older
+      ? cleanInt(raw.participants, 1, PARTICIPANTS_MAX)
+      : luaInt(raw.participants, 0, PARTICIPANTS_MAX);
     if (participants !== null) event.participants = participants;
   }
   // Which of the winner's six the award is *for* -- a **party** index, bounded
@@ -2126,9 +2146,15 @@ function cleanBattleEvent(raw, generation) {
  * one other player. A 2v2 does need them, since "loss" alone does not say which
  * pair, and a rank settle has four ids to move. Present-and-malformed refuses the
  * message: these are the names a rating moves for.
+ *
+ * `generation` (optional) is the reader's own, cleanBattleEvent's convention: 1
+ * or 2 reads an outcome exactly as before Gen 3 had one, 3 or none named also
+ * reads `payDay`. Twin of Wire.battleOutcome.
  */
-function cleanBattleOutcome(raw) {
+function cleanBattleOutcome(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
+  const gen = luaInt(generation, 1, GENERATION_MAX);
+  const older = gen === 1 || gen === 2;
   const battle = cleanId(raw.battle);
   const outcome = cleanOutcome(raw.outcome);
   if (!battle || !outcome) return null;
@@ -2162,6 +2188,18 @@ function cleanBattleOutcome(raw) {
     const catcher = cleanId(raw.catcher);
     if (!catcher) return null;
     result.catcher = catcher;
+  }
+  // Gen 3's Pay Day coins (sheet doc §1, §6): side a's total, present only on a
+  // knockout win in a wild / coop_wild / coop_npc fight. **Dropped rather than
+  // fatal**, unlike the fields above: a wrong winner or catcher moves a rating
+  // or a monster to the wrong player, where a mangled coin count has no
+  // recipient of its own (the winners list decides who is paid), and refusing
+  // the whole outcome over it would strand a finished fight on a screen with no
+  // way out to protect a bonus. Read the way Wire.int reads it (luaInt). The
+  // Amulet Coin doubling is the reader's, never the wire's.
+  if (!older && raw.payDay !== undefined && raw.payDay !== null) {
+    const payDay = luaInt(raw.payDay, 1, PAYDAY3_MAX);
+    if (payDay !== null) result.payDay = payDay;
   }
   return result;
 }
@@ -2312,6 +2350,7 @@ module.exports = {
   SEQ_MAX,
   AMOUNT_MAX,
   PARTICIPANTS_MAX,
+  PAYDAY3_MAX,
   REASON_MAX,
   TEAM_TOKENS,
   // The Gen 3 dialect (PROTOCOL 30): the cleaners the hub and suites reach

@@ -258,6 +258,11 @@ const BATTLE_SEED_MAX = 1073741824;
 // Milliseconds are what this hub's clock speaks and seconds are what the turn
 // machine does. One conversion, in one place.
 const battleSeconds = (ms) => Math.floor(ms / 1000);
+// The fights whose outcome may carry Pay Day coins: the sim's own EXP_MODES
+// (lib/battle3/Turn.js `_checkOver`), the three where side a is players and
+// side b is the hub's NPC seats. 1v1 / coop_pvp are link rules and pay none.
+// Twin of Hub.lua PAY_DAY_MODES.
+const PAY_DAY_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
 // Smallest gap between two character changes from one player. The chat
 // gate's window (500ms), for a sharper reason than scrollback: an avatar
 // bakes its sheet when it spawns, so every other client in the game despawns
@@ -3860,6 +3865,15 @@ class Relay {
     if (outcome.reason) payload.reason = outcome.reason;
     if (outcome.caught) payload.caught = outcome.caught;
     if (outcome.catcher) payload.catcher = outcome.catcher;
+    /*
+     * Gen 3's Pay Day coins: side a's total on a knockout win (lib/battle3
+     * `_checkOver`; none under link rules). A broadcast is already side a only
+     * here: in the three NPC modes every member is a human seated on side a
+     * (openMediatedBattle puts the npc seats alone on side b), and each client
+     * still checks the winners list before it pays. The mode test keeps the
+     * field off a player-vs-player fight even if a sim ever set it.
+     */
+    if (outcome.payDay && PAY_DAY_MODES.has(record.mode)) payload.payDay = outcome.payDay;
     this.broadcastBattle(record, 'mmo.battle_outcome', payload);
 
     // Rank from the intermediator alone -- no dual mmo.result vote.

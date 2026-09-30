@@ -2589,10 +2589,13 @@ function M:start(game)
   self.uploaded = true
   self.mine = mons
   -- Gen 3: which held items this fight's uploads brought, taken before any
-  -- `held` event can move one (see `ownItem`).
+  -- `held` event can move one (see `ownItem`), and the hold effect each was
+  -- uploaded with (see `holdEffect3`).
   if self:generation() == 3 then
     self.ownItems = nil
     self:ownItemSet()
+    self.uploadHoldMap = nil
+    self:uploadHolds()
   end
 
   if self.role == "host" or self.mode == "wild" then
@@ -2726,6 +2729,9 @@ function M:onEvent(msg)
     -- drew a full bar over a number that was not its maximum.  `noteSlot`
     -- keeps that reading as the fallback for a stream that states none.
     self:noteSlot(msg)
+    -- Gen 3: an AMULET COIN walking on doubles this fight's Pay Day coins
+    -- (the cart's switch-in item check; see `noteAmulet3`).
+    if self:generation() == 3 then self:noteAmulet3(msg) end
     -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
     -- below is still *theirs*, so everything that describes what is drawn on it
     -- -- the level pill, the pic, the exp clocks -- is deferred to the swap
@@ -3811,9 +3817,28 @@ end
 
 -- ------- Gen 3: the award, the held items, the throw, the catch
 
+-- Is this `exp` event BattleSim3's holders-only fact (sheet doc §7.1)?
+-- `participants` 0 and no `mon`: this seat fought the fallen foe, every
+-- monster of it that did has fainted since, and something of it still stands
+-- -- pret Cmd_getexp then pays the living Exp. Share holders alone
+-- (`viaSentIn` 0 behind a SAFE_DIV).  Only Wire's Gen 3 reading keeps a zero.
+function M.holdersOnly(msg)
+  return type(msg) == "table" and msg.mon == nil and tonumber(msg.participants) == 0
+end
+
 -- Bank one `exp` event of a knockout (see `flushExp3`).  True when it was
 -- taken, which is what spends the knockout's credit.
+--
+-- The holders-only fact banks the knockout with an **empty** sentIn set, so
+-- Exp3.award prices it as `split(calculated, 0, holders)` and pays each living
+-- Exp. Share holder its half and nobody else -- never the active mon, which is
+-- what a `mon`-less event falls back to otherwise (a PROTOCOL 21 referee).  It
+-- is the seat's whole share of that knockout (the referee sends it only to a
+-- seat nothing else of that knockout pays), so it is a batch of its own: one
+-- already open is priced first, and the next event starts another rather than
+-- merging a second knockout of the same species and level into this one.
 function M:bankExp3(msg)
+  local holdersOnly = M.holdersOnly(msg)
   local paidIndex = self:paidSheetIndex(msg)
   local mine = self.mine
   if msg and msg.mon ~= nil and type(mine) == "table" and #mine > 0
@@ -3831,15 +3856,16 @@ function M:bankExp3(msg)
   species, level = math.floor(species), math.max(1, math.floor(level))
   local key = species .. ":" .. level
   local batch = self.expBatch
-  if batch and batch.key ~= key then
+  if batch and (batch.key ~= key or batch.holdersOnly or holdersOnly) then
     self:flushExp3()
     batch = nil
   end
   if not batch then
-    batch = { key = key, species = species, level = level, sentIn = {} }
+    batch = { key = key, species = species, level = level, sentIn = {},
+              holdersOnly = holdersOnly or nil }
     self.expBatch = batch
   end
-  batch.sentIn[self:savePartyIndex(paidIndex)] = true
+  if not holdersOnly then batch.sentIn[self:savePartyIndex(paidIndex)] = true end
   return true
 end
 
@@ -4681,6 +4707,179 @@ function M:onOutcome(msg)
   if self.expBatch then self:flushExp3() end
   self.pendingTurn = false
   self:finish(M.resultFor(msg, self.peerId), msg.reason, msg)
+  if self:generation() == 3 then self:payDay3(msg) end
+end
+
+-- ------- Gen 3: Pay Day
+--
+-- pret Cmd_givepaydaymoney (pokefirered/src/battle_script_commands.c:7064):
+-- a battle the player's side won pays the coins Pay Day scattered, times the
+-- battle's money multiplier, and says "PLAYER picked up ¥N!".  The referee
+-- counts the coins (BattleSim3 `outcome().payDay`, side a's total, never in a
+-- link fight); the multiplier and the wallet are this client's, the way the
+-- engine's own battle keeps them (battle/init.lua give_payday_money_and_pickup
+-- over battle/prize.lua Prize.payDay / Prize.payDayMessage).
+
+-- pret include/constants/hold_effects.h HOLD_EFFECT_DOUBLE_PRIZE (AMULET COIN).
+local HOLD_EFFECT_DOUBLE_PRIZE = 32
+M.HOLD_EFFECT_DOUBLE_PRIZE = HOLD_EFFECT_DOUBLE_PRIZE
+
+-- The hold effect of one item id: the cart's item row first (Gen3.itemInfo),
+-- then the hold effect a sheet this client uploaded stated for that same item
+-- (`uploadHolds`, taken at the upload like `ownItemSet`).  0 for no item.
+function M:holdEffect3(itemId)
+  local id = tonumber(itemId)
+  if not id or id <= 0 then return 0 end
+  id = math.floor(id)
+  local info = Gen3.itemInfo(id)
+  local he = type(info) == "table" and tonumber(info.holdEffect) or nil
+  if he then return math.floor(he) end
+  local holds = self:uploadHolds()
+  return holds[id] or 0
+end
+
+-- item id -> hold effect, as this client's own uploads stated them.  Taken at
+-- the upload (`start`), before any `held` event can move an item onto a sheet
+-- whose stated hold effect belonged to another; a screen that never uploaded
+-- (a harness) takes it at first use.
+function M:uploadHolds()
+  local holds = self.uploadHoldMap
+  if holds then return holds end
+  holds = {}
+  local function add(list)
+    if type(list) ~= "table" then return end
+    for _, sheet in ipairs(list) do
+      local id = type(sheet) == "table" and tonumber(sheet.heldItem) or nil
+      local he = type(sheet) == "table" and tonumber(sheet.holdEffect) or nil
+      if id and id > 0 and he then holds[math.floor(id)] = math.floor(he) end
+    end
+  end
+  add(self.mine)
+  add(self.wildParty)
+  add(self.npcParty)
+  self.uploadHoldMap = holds
+  return holds
+end
+
+-- A `send`: did an AMULET COIN just come out?  pret ItemBattleEffects
+-- ITEMEFFECT_ON_SWITCH_IN (the engine's held_items.lua onSwitchIn) sets the
+-- battle's money multiplier to 2 for a holder on the player's side, and --
+-- FireRed / LeafGreen only; Emerald's `amuletCoinPlayerOnly` -- for one on
+-- the foe's.  Read at the switch-in, as the cart reads it: the item the mon
+-- holds *now* (a `held` event may have moved one -- TRICK hands a coin to a
+-- mon that only counts once it next comes out), and a multiplier once set
+-- stays set for the rest of the fight.
+--
+-- Our seat's sheets are ours; the foe's are the wild / trainer sheets this
+-- client uploaded for side b (a solo or hub-wild fight), whose `held` events
+-- `applyHeld` keeps in `foeHeld`.  A foe this client never described (a peer)
+-- is unknown and counts for nothing -- and a fight against a peer pays no
+-- Pay Day anyway.
+function M:noteAmulet3(msg)
+  local index = tonumber(msg and msg.mon)
+  if not index or index < 0 then return false end
+  index = math.floor(index)
+  local mine = msg.side == self.mySide
+  local held
+  if mine then
+    local sheet = self.mine and self.mine[index + 1]
+    held = type(sheet) == "table" and sheet.heldItem or nil
+  else
+    local foes = self.wildParty or self.npcParty
+    local sheet = type(foes) == "table" and foes[index + 1] or nil
+    held = self.foeHeld and self.foeHeld[index]
+    if held == nil and type(sheet) == "table" then held = sheet.heldItem end
+  end
+  if self:holdEffect3(held) ~= HOLD_EFFECT_DOUBLE_PRIZE then return false end
+  if mine then self.amuletMine = true else self.amuletFoe = true end
+  return true
+end
+
+-- Does an AMULET COIN on the foe's side count?  The running cart's battle
+-- profile says (Emerald's `amuletCoinPlayerOnly`); a build without the
+-- profile module falls back to the cart family, which is the same answer.
+local function amuletCoinPlayerOnly()
+  local BP = Gen3.engine("src.core.game3.battle.profile")
+  if BP and type(BP.get) == "function" then
+    local ok, bp = pcall(BP.get, Gen3.session())
+    if ok and type(bp) == "table" and type(bp.rules) == "table" then
+      return bp.rules.amuletCoinPlayerOnly == true
+    end
+  end
+  return Gen3.family() == "rse"
+end
+
+-- This fight's money multiplier (gBattleStruct->moneyMultiplier): 2 once an
+-- AMULET COIN has come out where the cart counts it, else 1.
+function M:moneyMultiplier3()
+  if self.amuletMine then return 2 end
+  if self.amuletFoe and not amuletCoinPlayerOnly() then return 2 end
+  return 1
+end
+
+-- Pay the coins an outcome reports, once, and owe the line.
+--
+-- Paid only to a player the outcome makes a winner on side a -- the side the
+-- referee counts the coins for -- and never in a link fight (the referee sends
+-- none there; this is the belt).  The money lands now, the moment the verdict
+-- does, so nothing between here and the screen closing can lose it; the line
+-- waits for the ending to finish printing (`update`'s over branch), which puts
+-- it where the cart says it: after the knockout's exp, and after whatever the
+-- caller prints behind `onOutcome` -- src/SoloBattle.lua's defeated line and
+-- trainer prize, which the cart's BattleScript_LocalTrainerBattleWon says
+-- before BattleScript_PayDayMoneyAndPickUpItems.  Answers the amount paid
+-- (the coins times the multiplier), 0 when nothing was owed.
+function M:payDay3(msg)
+  if self.payDayPaid ~= nil then return 0 end
+  local coins = tonumber(type(msg) == "table" and msg.payDay or nil)
+  if not coins or coins < 1 then return 0 end
+  coins = math.floor(coins)
+  if LINK_MODES[self.mode] or self.mySide ~= "a" or self.result ~= "win" then return 0 end
+  self.payDayPaid = 0
+  local session = Gen3.session()
+  if type(session) ~= "table" then
+    mod.log:warn("this fight's Pay Day coins could not be paid because no save "
+      .. "is loaded -- start or continue a game before battling; the fight's "
+      .. "result still counts")
+    return 0
+  end
+  local mult = self:moneyMultiplier3()
+  local Prize = Gen3.engine("src.core.game3.battle.prize")
+  local bonus
+  if Prize and type(Prize.payDay) == "function" then
+    local ok, paid = pcall(Prize.payDay, session, coins, { moneyMultiplier = mult })
+    bonus = ok and tonumber(paid) or nil
+  end
+  if not bonus then
+    -- The engine's arithmetic without the engine: coins x multiplier into the
+    -- wallet, capped where the cart caps money (Prize.MAX_MONEY).
+    bonus = coins * mult
+    local before = tonumber(session.money) or 0
+    session.money = math.min(999999, before + bonus)
+  end
+  bonus = math.floor(bonus)
+  if bonus <= 0 then return 0 end
+  self.payDayPaid = bonus
+  local name = playerName(self.game)
+  local text
+  if Prize and type(Prize.payDayMessage) == "function" then
+    local ok, line = pcall(Prize.payDayMessage, name, bonus)
+    if ok and type(line) == "string" and line ~= "" then text = line end
+  end
+  -- pret's buffer is a halfword (PREPARE_HWORD_NUMBER_BUFFER): a doubled
+  -- 65535 prints as what fits, exactly as Prize.payDayMessage does.
+  self.payDayLine = text or (("%s picked up\n¥%d!"):format(name, bonus % 65536))
+  return bonus
+end
+
+-- Say the owed Pay Day line, once.  True when it queued one (the caller then
+-- lets the queue print it before anything else happens).
+function M:sayPayDay3()
+  local line = self.payDayLine
+  if not line then return false end
+  self.payDayLine = nil
+  self:say(line)
+  return true
 end
 
 -- This player's result, worked out from who is named rather than from the
@@ -7620,6 +7819,9 @@ function M:update(dt)
   if self:tickMessages(dt, input) then return end
 
   if self.phase == "over" then
+    -- Gen 3's Pay Day line, owed since `onOutcome` paid the coins: after the
+    -- whole ending -- ours and the caller's -- has printed (`payDay3`).
+    if self:sayPayDay3() then return end
     -- The catch's naming prompt, owed since `grantCatch` and asked now that
     -- the ending has finished printing -- the engine's own ordering, and the
     -- last thing between the player and the way out.

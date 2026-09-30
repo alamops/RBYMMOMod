@@ -1918,6 +1918,133 @@ do
   eq(mv and mv.moves and mv.moves[1].num, 33, "a Gen 3 moves event keeps its rows' numbers")
 end
 
+-- ------- Gen 3 Pay Day and the holders-only exp fact (sheet doc §1, §7.1)
+--
+-- A 2v2 against a trainer.  ANN's PAYER scatters coins every turn; BOB's
+-- BOOMER blows itself up to take the first trainer mon with it, so BOB's seat
+-- fought that knockout with nobody left standing who did -- the holders-only
+-- fact (`participants` 0, no `mon`) goes to it, while ANN's fighter is paid as
+-- the one participant.  BOB sends his second mon, PAYER finishes the second
+-- trainer mon, and the outcome carries the coins of all three Pay Days to both
+-- players (side a is every human in the fight).  server/hub_battle.test.js
+-- pins the same fight on the Node twin.
+
+local IDLE3 = { id = "IDLE", num = 150, effect = 85, power = 0, target = 16, flags = 0 }
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 1
+  local ann, annPeer = join3(hub, "ANN")
+  local bob, bobPeer = join3(hub, "BOB", "emerald")
+  hub:openCoopBattle("g3pay", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["g3pay"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3pay", typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3pay", side = "a", mons = {
+    mon3({ species = "PAYER", level = 40, spe = 300, atk = 50,
+           moves = { move3({ id = "COINS", num = 6, effect = 34, power = 20, chance = 100 }) } }) } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g3pay", side = "a", mons = {
+    mon3({ species = "BOOMER", spe = 200, atk = 999,
+           moves = { move3({ id = "BLAST", num = 153, effect = 7, power = 250 }) } }),
+    mon3({ species = "SHARER", heldItem = 182, holdEffect = 25, moves = { move3(IDLE3) } }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3pay", side = "b", mons = {
+    mon3({ species = "TRAINEE", def = 5, spe = 1, moves = { move3(IDLE3) } }),
+    mon3({ species = "TRAINEE", def = 5, spe = 1, moves = { move3(IDLE3) } }) } })
+  ok(record.sim ~= nil, "pay day: the Gen 3 coop_npc field opens")
+  annPeer.outbox, bobPeer.outbox = {}, {}
+
+  local exps, outcome = {}, nil
+  for _ = 1, 8 do
+    if not hub.battles["g3pay"] then break end
+    if record.sim.byId[bob.id].mustReplace then
+      hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = "g3pay", action = "switch", slot = 1 })
+    end
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = "g3pay", action = "fight", move = 0 })
+    hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = "g3pay", action = "fight", move = 0 })
+    for _ = 1, 64 do
+      local msg = take(annPeer, Wire.BATTLE_EVENT)
+      if not msg then break end
+      if msg.t == "exp" then exps[#exps + 1] = msg end
+    end
+    outcome = take(annPeer, Wire.BATTLE_OUTCOME)
+    if outcome then break end
+  end
+
+  -- The first knockout: ANN's fighter, and BOB's holders-only fact.
+  local first, holders = nil, nil
+  for _, e in ipairs(exps) do
+    if e.slot == 0 and not first then first = e end
+    if e.slot == 1 and e.participants == 0 and not holders then holders = e end
+  end
+  eq(first and first.participants, 1, "pay day: the fighter still standing is the one participant")
+  eq(first and first.mon, 0, "pay day: ...and names its party index")
+  ok(holders ~= nil, "pay day: the seat whose fighter fell gets the holders-only fact")
+  eq(holders and holders.mon, nil, "pay day: ...with no mon (nobody of it that fought stands)")
+  local clean = holders and Wire.battleEvent(holders, 3)
+  eq(clean and clean.participants, 0, "pay day: a Gen 3 reader keeps the zero")
+  eq(clean and clean.mon, nil, "pay day: ...and still no mon")
+  local older = holders and Wire.battleEvent(holders, 2)
+  eq(older and older.participants, nil, "pay day: a Gen 2 reader drops the zero, as it always has")
+
+  ok(outcome ~= nil, "pay day: the trainer's side falls")
+  eq(outcome and outcome.outcome, "win", "pay day: the players win")
+  eq(outcome and outcome.reason, "ko", "pay day: by knockout")
+  eq(outcome and outcome.payDay, 600, "pay day: three Pay Days at level 40 is 3 x 200 coins")
+  local atBob = take(bobPeer, Wire.BATTLE_OUTCOME)
+  eq(atBob and atBob.payDay, 600, "pay day: both players on side a hear the coins")
+  local read = outcome and Wire.battleOutcome(outcome, 3)
+  eq(read and read.payDay, 600, "pay day: the Gen 3 outcome reader keeps it")
+  eq(outcome and Wire.battleOutcome(outcome, 1).payDay, nil, "pay day: an older reader never sees it")
+  eq(hub.battles["g3pay"], nil, "pay day: the record settles and clears")
+end
+
+-- ------- ...and a fight between players pays nobody: the coins are counted,
+-- the outcome carries none (link rules), and neither does a Gen 1 hub's.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 1
+  local ann, annPeer = join3(hub, "ANN")
+  local bob, bobPeer = join3(hub, "BOB", "leafgreen")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = {
+    mon3({ species = "PAYER", level = 40, spe = 300, atk = 400,
+           moves = { move3({ id = "COINS", num = 6, effect = 34, power = 60, chance = 100 }) } }) } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = {
+    mon3({ species = "DELTA", def = 5, spe = 1, moves = { move3(IDLE3) } }) } })
+  local record = hub.battles[id]
+  local outcome = nil
+  for _ = 1, 6 do
+    if not hub.battles[id] then break end
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+    hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+    outcome = take(annPeer, Wire.BATTLE_OUTCOME) or take(bobPeer, Wire.BATTLE_OUTCOME)
+    if outcome then break end
+  end
+  ok(record.sim:snapshot().payDay.a > 0, "pvp pay day: the referee counted the coins")
+  eq(outcome and outcome.outcome, "win", "pvp pay day: the fight ends")
+  eq(outcome and outcome.payDay, nil, "pvp pay day: and the outcome pays nobody")
+
+  local gen1 = Hub.new({ maxPlayers = 4 })
+  gen1.forceBattleSeed = 1
+  local a1, a1Peer = join(gen1, "ANN")
+  local b1, b1Peer = join(gen1, "BOB")
+  gen1:openCoopBattle("g1c", { a1.id, b1.id }, { mode = "coop_npc", hostId = a1.id })
+  gen1:receive(a1, { type = Wire.BATTLE_RULESET, battle = "g1c", chart = CHART })
+  gen1:receive(a1, { type = Wire.BATTLE_PARTY, battle = "g1c", side = "a", mons = { bruiser() } })
+  gen1:receive(b1, { type = Wire.BATTLE_PARTY, battle = "g1c", side = "a", mons = { bruiser() } })
+  gen1:receive(a1, { type = Wire.BATTLE_PARTY, battle = "g1c", side = "b", mons = { glassjaw(), glassjaw() } })
+  fightItOut(gen1, { { client = a1, battle = "g1c" }, { client = b1, battle = "g1c" } })
+  local g1 = take(a1Peer, Wire.BATTLE_OUTCOME) or take(b1Peer, Wire.BATTLE_OUTCOME)
+  eq(g1 and g1.outcome, "win", "gen 1 coop_npc: the players win")
+  local keys = {}
+  for k in pairs(g1 or {}) do keys[#keys + 1] = k end
+  table.sort(keys)
+  eq(table.concat(keys, ","), "battle,losers,outcome,reason,type,winners",
+     "gen 1 coop_npc: the outcome is the fields it always was, no payDay")
+end
+
 -- ------- Gen 3 lists: what Json.decode hands over, and what is a list at all
 --
 -- lib/sanitize.js used to refuse what this side took (an object where a list

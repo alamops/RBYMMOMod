@@ -1310,6 +1310,146 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- Gen 3 Pay Day coins and the holders-only exp fact, through the hub
+-- (docs/plans/gen3-battle-sheet.md §1 outcome, §7.1 exp).  A coop_wild field:
+-- ANN's PAYER scatters coins first, BOB's BOOMER blows itself up to take the
+-- wild mon down with it.  ANN's fighter is paid as a participant; BOB's seat
+-- fought but has nobody standing who did, so it gets the holders-only fact
+-- (`participants` 0, no `mon`); and the outcome carries side a's coins to
+-- both players.  Then each twin's sanitiser reads what it was sent, and the
+-- boundary cases of the two new readings.
+-- ------------------------------------------------------------------
+
+local IDLE3 = { id = "IDLE", num = 150, effect = 85, power = 0, target = 16, flags = 0 }
+
+local function slimExp(e)
+  if not e then return "(nil)" end
+  return { slot = orNil(e.slot), participants = orNil(e.participants), mon = orNil(e.mon),
+           level = orNil(e.level), species = orNil(e.species) }
+end
+
+local function slimPaid(msg)
+  if not msg then return "(nil)" end
+  return { outcome = msg.outcome, reason = orNil(msg.reason), winners = orNil(msg.winners),
+           losers = orNil(msg.losers), payDay = orNil(msg.payDay) }
+end
+
+local PAYDAY_EDGES = { 200, 0, 1, 65535, 65536, -3, 1.5, "0x10", " 7 ", "1e2", true, { 3 } }
+local PARTICIPANT_EDGES = { 0, "0", -1, 1.9, 12, 13, " 0 " }
+
+scenarios[#scenarios + 1] = {
+  name = "gen3_coop_wild_payday",
+  run = function()
+    local hub = makeGenHub(3)
+    local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "emerald",
+      sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN" })
+    local id = "c1"
+    local opened = hub:openCoopBattle(id, { a.id, b.id }, { mode = "coop_wild", hostId = a.id }) ~= nil
+    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+      mon3({ species = "PAYER", level = 40, spe = 300, atk = 50,
+             moves = { move3({ id = "COINS", num = 6, effect = 34, power = 20, chance = 100 }) } }) } })
+    hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+      mon3({ species = "BOOMER", spe = 200, atk = 999,
+             moves = { move3({ id = "BLAST", num = 153, effect = 7, power = 250 }) } }),
+      mon3({ species = "SHARER", heldItem = 182, holdEffect = 25, moves = { move3(IDLE3) } }) } })
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+      mon3({ species = "WILDLING", def = 5, spe = 1, catchRate = 45, moves = { move3(IDLE3) } }) } })
+    local record = hub.battles[id]
+    local simOpen = record ~= nil and record.sim ~= nil
+    a.peer.outbox, b.peer.outbox = {}, {}
+    local exps, outcome = {}, nil
+    for _ = 1, 6 do
+      if not hub.battles[id] then break end
+      hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+      hub:receive(b.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+      for _, msg in ipairs(takeAll(a.peer, Wire.BATTLE_EVENT)) do
+        if msg.t == "exp" then exps[#exps + 1] = msg end
+      end
+      outcome = take(a.peer, Wire.BATTLE_OUTCOME)
+      if outcome then break end
+    end
+    local atBob = take(b.peer, Wire.BATTLE_OUTCOME)
+    local raw, read3, read2, read1 = {}, {}, {}, {}
+    for i, e in ipairs(exps) do
+      raw[i] = slimExp(e)
+      read3[i] = slimExp(Wire.battleEvent(e, 3))
+      read2[i] = slimExp(Wire.battleEvent(e, 2))
+      read1[i] = slimExp(Wire.battleEvent(e, 1))
+    end
+    local payEdges = {}
+    for i, v in ipairs(PAYDAY_EDGES) do
+      local got = Wire.battleOutcome({ battle = "b1", outcome = "win", payDay = v }, 3)
+      payEdges[i] = { kept = got ~= nil, payDay = orNil(got and got.payDay) }
+    end
+    local partEdges = {}
+    for i, v in ipairs(PARTICIPANT_EDGES) do
+      local e = { battle = "b1", seq = i, t = "exp", slot = 0, level = 5, participants = v }
+      partEdges[i] = {
+        gen3 = orNil((Wire.battleEvent(e, 3) or {}).participants),
+        none = orNil((Wire.battleEvent(e) or {}).participants),
+      }
+    end
+    return {
+      opened = opened,
+      simOpen = simOpen,
+      exp = raw,
+      expRead3 = read3,
+      expRead2 = read2,
+      expRead1 = read1,
+      outcome = slimPaid(outcome),
+      outcomeAtBob = slimPaid(atBob),
+      read3 = slimPaid(outcome and Wire.battleOutcome(outcome, 3)),
+      readNone = slimPaid(outcome and Wire.battleOutcome(outcome)),
+      read2 = slimPaid(outcome and Wire.battleOutcome(outcome, 2)),
+      read1 = slimPaid(outcome and Wire.battleOutcome(outcome, 1)),
+      payEdges = payEdges,
+      partEdges = partEdges,
+      battleGone = hub.battles[id] == nil,
+    }
+  end,
+}
+
+-- The same Pay Day in a fight between players pays nobody: a Gen 3 1v1 where
+-- the winner used it.  The referee counts the coins and the outcome carries
+-- none (link rules), on both hosting paths.
+scenarios[#scenarios + 1] = {
+  name = "gen3_pvp_payday_absent",
+  run = function()
+    local hub = makeGenHub(3)
+    local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "leafgreen",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    local sess = openFight(hub, a, b)
+    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id, typeTable = CHART3 })
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = {
+      mon3({ species = "PAYER", level = 40, spe = 300, atk = 400,
+             moves = { move3({ id = "COINS", num = 6, effect = 34, power = 60, chance = 100 }) } }) } })
+    hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = {
+      mon3({ species = "DELTA", hp = 150, def = 5, spe = 1, moves = { move3(IDLE3) } }) } })
+    local record = hub.battles[sess.id]
+    local outcome = nil
+    for _ = 1, 6 do
+      if not hub.battles[sess.id] then break end
+      hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = sess.id, action = "fight", move = 0 })
+      hub:receive(b.client, { type = Wire.BATTLE_CHOICE, battle = sess.id, action = "fight", move = 0 })
+      outcome = take(a.peer, Wire.BATTLE_OUTCOME) or take(b.peer, Wire.BATTLE_OUTCOME)
+      if outcome then break end
+    end
+    -- The coins were counted (the sim's own tally, side a) and not paid.
+    local tally = record and record.sim and record.sim:snapshot().payDay
+    return {
+      counted = orNil(tally and tally.a),
+      outcome = slimPaid(outcome),
+      battleGone = hub.battles[sess.id] == nil,
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

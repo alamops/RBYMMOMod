@@ -917,6 +917,7 @@ function runJs() {
     },
     ...runGeneration(),
     ...runGen3(),
+    ...runPayDay3(),
   ];
 }
 
@@ -1215,6 +1216,209 @@ function gen12() {
       battle: 'b1', seq: 3, t: 'moves', slot: 0, side: 'a', moves: [stray],
     }, 1],
     ['moveset', { battle: 'b1', mon: 0, moves: [stray] }, 1],
+  ];
+}
+
+/*
+ * Gen 3 Pay Day coins and the holders-only exp fact, through the hub (sheet
+ * doc §1 outcome, §7.1 exp). Twins of gen3_coop_wild_payday and
+ * gen3_pvp_payday_absent in the Lua driver: a coop_wild field where ANN's
+ * PAYER scatters coins and BOB's BOOMER takes the wild mon down with it, so
+ * BOB's seat gets the holders-only fact and the outcome carries side a's coins;
+ * then the same Pay Day in a 1v1, which pays nobody.
+ */
+const IDLE3 = {
+  id: 'IDLE', num: 150, effect: 85, power: 0, target: 16, flags: 0,
+};
+
+function slimExp(e) {
+  if (!e) return '(nil)';
+  return {
+    slot: orNil(e.slot),
+    participants: orNil(e.participants),
+    mon: orNil(e.mon),
+    level: orNil(e.level),
+    species: orNil(e.species),
+  };
+}
+
+function slimPaid(msg) {
+  if (!msg) return '(nil)';
+  return {
+    outcome: msg.outcome,
+    reason: orNil(msg.reason),
+    winners: orNil(msg.winners),
+    losers: orNil(msg.losers),
+    payDay: orNil(msg.payDay),
+  };
+}
+
+const PAYDAY_EDGES = [200, 0, 1, 65535, 65536, -3, 1.5, '0x10', ' 7 ', '1e2', true, [3]];
+const PARTICIPANT_EDGES = [0, '0', -1, 1.9, 12, 13, ' 0 '];
+
+function runPayDay3() {
+  return [
+    {
+      name: 'gen3_coop_wild_payday',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+        });
+        const id = 'c1';
+        const opened = relay.openCoopBattle(id, [a.id, b.id], {
+          mode: 'coop_wild', hostId: a.id,
+        }) != null;
+        relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: id,
+          side: 'a',
+          mons: [mon3({
+            species: 'PAYER',
+            level: 40,
+            spe: 300,
+            atk: 50,
+            moves: [move3({
+              id: 'COINS', num: 6, effect: 34, power: 20, chance: 100,
+            })],
+          })],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: id,
+          side: 'a',
+          mons: [
+            mon3({
+              species: 'BOOMER',
+              spe: 200,
+              atk: 999,
+              moves: [move3({
+                id: 'BLAST', num: 153, effect: 7, power: 250,
+              })],
+            }),
+            mon3({
+              species: 'SHARER', heldItem: 182, holdEffect: 25, moves: [move3(IDLE3)],
+            }),
+          ],
+        });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: id,
+          side: 'b',
+          mons: [mon3({
+            species: 'WILDLING', def: 5, spe: 1, catchRate: 45, moves: [move3(IDLE3)],
+          })],
+        });
+        const record = relay.battles.get(id);
+        const simOpen = !!(record && record.sim);
+        a.peer.outbox = [];
+        b.peer.outbox = [];
+        const exps = [];
+        let outcome = null;
+        for (let turn = 0; turn < 6; turn += 1) {
+          if (!relay.battles.has(id)) break;
+          relay.handle(a.id, {
+            type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+          });
+          relay.handle(b.id, {
+            type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+          });
+          for (const msg of takeAll(a, 'mmo.battle_event')) {
+            if (msg.t === 'exp') exps.push(msg);
+          }
+          outcome = take(a, 'mmo.battle_outcome');
+          if (outcome) break;
+        }
+        const atBob = take(b, 'mmo.battle_outcome');
+        const payEdges = PAYDAY_EDGES.map((v) => {
+          const got = sanitize.cleanBattleOutcome({ battle: 'b1', outcome: 'win', payDay: v }, 3);
+          return { kept: got !== null, payDay: orNil(got && got.payDay) };
+        });
+        const partEdges = PARTICIPANT_EDGES.map((v, i) => {
+          const e = {
+            battle: 'b1', seq: i + 1, t: 'exp', slot: 0, level: 5, participants: v,
+          };
+          return {
+            gen3: orNil((sanitize.cleanBattleEvent(e, 3) || {}).participants),
+            none: orNil((sanitize.cleanBattleEvent(e) || {}).participants),
+          };
+        });
+        return {
+          opened,
+          simOpen,
+          exp: exps.map(slimExp),
+          expRead3: exps.map((e) => slimExp(sanitize.cleanBattleEvent(e, 3))),
+          expRead2: exps.map((e) => slimExp(sanitize.cleanBattleEvent(e, 2))),
+          expRead1: exps.map((e) => slimExp(sanitize.cleanBattleEvent(e, 1))),
+          outcome: slimPaid(outcome),
+          outcomeAtBob: slimPaid(atBob),
+          read3: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 3)),
+          readNone: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome)),
+          read2: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 2)),
+          read1: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 1)),
+          payEdges,
+          partEdges,
+          battleGone: !relay.battles.has(id),
+        };
+      })(),
+    },
+    {
+      name: 'gen3_pvp_payday_absent',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'leafgreen', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const sess = openFight(relay, a, b);
+        relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'PAYER',
+            level: 40,
+            spe: 300,
+            atk: 400,
+            moves: [move3({
+              id: 'COINS', num: 6, effect: 34, power: 60, chance: 100,
+            })],
+          })],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'DELTA', hp: 150, def: 5, spe: 1, moves: [move3(IDLE3)],
+          })],
+        });
+        const record = relay.battles.get(sess.id);
+        let outcome = null;
+        for (let turn = 0; turn < 6; turn += 1) {
+          if (!relay.battles.has(sess.id)) break;
+          relay.handle(a.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+          relay.handle(b.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+          outcome = take(a, 'mmo.battle_outcome') || take(b, 'mmo.battle_outcome');
+          if (outcome) break;
+        }
+        const tally = record && record.sim && record.sim.snapshot().payDay;
+        return {
+          counted: orNil(tally && tally.a),
+          outcome: slimPaid(outcome),
+          battleGone: !relay.battles.has(sess.id),
+        };
+      })(),
+    },
   ];
 }
 

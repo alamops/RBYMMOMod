@@ -1403,6 +1403,12 @@ local function battleSeconds(clock)
   return math.floor(tonumber(clock) or 0)
 end
 
+-- The fights whose outcome may carry Pay Day coins: the sim's own EXP_MODES
+-- (src/BattleSim3/Turn.lua `_checkOver`), the three where side a is players
+-- and side b is the hub's NPC seats.  1v1 / coop_pvp are link rules and pay
+-- none.  Twin of relay.js PAY_DAY_MODES.
+local PAY_DAY_MODES = { wild = true, coop_wild = true, coop_npc = true }
+
 -- The fight this connection is in, when the hub is the one running it.  nil
 -- for a player who is not fighting, and for a co-op group still on the legacy
 -- client-simulated path.
@@ -2293,6 +2299,13 @@ function M:settleMediated(record, outcome)
   if outcome.reason then payload.reason = outcome.reason end
   if outcome.caught then payload.caught = outcome.caught end
   if outcome.catcher then payload.catcher = outcome.catcher end
+  -- Gen 3's Pay Day coins: side a's total on a knockout win (BattleSim3
+  -- `_checkOver`; none under link rules).  A broadcast is already side a
+  -- only here: in the three NPC modes every member is a human seated on side
+  -- a (`openMediatedBattle` puts the npc seats alone on side b), and each
+  -- client still checks the winners list before it pays.  The mode test
+  -- keeps the field off a player-vs-player fight even if a sim ever set it.
+  if outcome.payDay and PAY_DAY_MODES[record.mode] then payload.payDay = outcome.payDay end
   self:broadcastBattle(record, Wire.BATTLE_OUTCOME, payload)
 
   local match = self.matches[record.id]
