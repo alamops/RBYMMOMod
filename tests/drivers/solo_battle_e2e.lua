@@ -79,6 +79,602 @@ if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
   love.audio.setVolume(0)
 end
 
+-- ==================================================================
+-- Gen 3 (FireRed / LeafGreen / Emerald)
+-- ==================================================================
+--
+-- A Game3 has no battle state on a stack to stage: its battles are modules
+-- (battle_bridge -> battle/init.lua) and the mod takes a fight *before* the
+-- cart starts one.  So this arm drives the two ways a Gen 3 solo fight
+-- begins:
+--
+--   * the mod's own entries, `SoloBattle:fromGen3Encounter` /
+--     `fromGen3Trainer`, reached on the live instance (the ctx behind the
+--     exports) -- a wild fight won on the arena, the same on CLASSIC BATTLE
+--     UI, a catch, RUN refused by the roll, a trainer beaten, a trainer lost
+--     to (the whiteout);
+--   * the real thing: walking in tall grass until the step encounter fires,
+--     which src/Client.lua's `encounter.roll` divert hands to solo through
+--     `onWildEncounter` -- first with SOLO BATTLES off (the cart's own battle
+--     must run), then on.
+--
+-- Screenshots land in SHOT_DIR as g3-<game>-solo-NN-<leg>.png.
+--
+-- Legal: nothing below names a ROM value it asserts on.  Species and trainers
+-- are looked up by pret name in the player's own cart, and every number read
+-- back is the save's own.
+
+local function runGen3(game, H, U, env)
+  local log, check, skip = env.log, env.check, env.skip
+  local VERSION = os.getenv("POKEPORT_VERSION") or "firered"
+  local emerald = VERSION == "emerald"
+  local tagGame = emerald and "em" or (VERSION == "leafgreen" and "lg" or "fr")
+  local n = 0
+  local function shot(leg)
+    n = n + 1
+    return U.shot(game, ("%s/g3-%s-solo-%02d-%s.png"):format(env.SHOT_DIR, tagGame, n, leg))
+  end
+
+  local Runtime = require("src.core.game3.runtime")
+  local Trainers = require("src.core.game3.scripting.trainers")
+  local BattleBridge = require("src.core.game3.battle_bridge")
+  local Battle = require("src.core.game3.battle")
+  local Encounters = require("src.core.game3.encounters")
+  local Map = require("src.core.game3.map")
+  local Player = require("src.core.game3.player")
+  local Bag = require("src.core.game3.bag")
+
+  local STARTER = emerald and "TORCHIC" or "CHARMANDER"
+  local WILD = emerald and "ZIGZAGOON" or "PIDGEY"
+  local GRASS_MAP = emerald and "EM_ROUTE101" or "FR_ROUTE_1"
+  local Collision = require("src.core.game3.collision")
+  local Objects = require("src.core.game3.objects")
+
+  local booted = H.g3BootToPlay(game, { name = "SOLO" })
+  if not check(booted, "booted a " .. VERSION .. " new game into the field") then return end
+  local exports = H.requireMod(game, env.TAG)
+  if not check(exports ~= nil, "rby_mmo is loaded on " .. VERSION) then return end
+  local ctx = H.modCtx(game)
+  local solo = ctx and ctx.solo
+  if not check(type(solo) == "table" and type(solo.fromGen3Encounter) == "function",
+               "the live SoloBattle instance, with its Gen 3 entries") then
+    return
+  end
+  local function session() return Runtime.getSession() end
+
+  local store = game.mods and game.mods.modOptions
+  local function setOption(key, value)
+    if not store then return end
+    store[env.MOD_ID] = store[env.MOD_ID] or {}
+    store[env.MOD_ID][key] = value
+  end
+
+  -- ------- reading the live fight
+
+  local function fight() return solo.fight end
+  local function layerId() return H.g3LayerId() end
+  local function shown()
+    local f = fight()
+    return f and type(f.shown) == "string" and f.shown or ""
+  end
+  local function said(needle)
+    local f = fight()
+    for _, line in ipairs((f and f.lines) or {}) do
+      if type(line) == "string" and line:find(needle, 1, true) then return true end
+    end
+    return shown():find(needle, 1, true) ~= nil
+  end
+
+  local function awaitChoose(seconds, what)
+    return H.waitSeconds(game, function()
+      local f = fight()
+      return f ~= nil and f.phase == "choose"
+    end, seconds or 60, what or "the Gen 3 command grid")
+  end
+
+  -- Answer whatever the cart or the mod has up between turns and after the
+  -- fight, the way a player mashing through would: A on text, START then A on
+  -- the naming grid (keep the species name), B out of a summary picker.
+  local function nudge()
+    local id = layerId()
+    if id == "naming" then
+      U.tap(game, "start"); U.wait(8); U.tap(game, "a"); U.wait(8)
+      return
+    end
+    if id == "summary" or id == "summary_menu" then U.tap(game, "b"); U.wait(6) return end
+    U.tap(game, "a")
+    U.wait(4)
+  end
+
+  -- The strongest damaging move on our side, as a cursor index.
+  local function bestMove(f)
+    local mine = f.mine and f.mine[f.active or 1]
+    local best, power = 1, -1
+    for i, mv in ipairs((mine and mine.moves) or {}) do
+      if (tonumber(mv.power) or 0) > power and (tonumber(mv.pp) or 0) > 0 then
+        best, power = i, tonumber(mv.power) or 0
+      end
+    end
+    return best
+  end
+
+  -- FIGHT, then the move at `index`.
+  local function fightWith(index, onMoveMenu)
+    local f = fight()
+    if not (f and f.phase == "choose") then return false end
+    f.commandIndex = 1
+    U.tap(game, "a"); U.wait(8)
+    f = fight()
+    if not (f and f.phase == "move") then return false end
+    if onMoveMenu then onMoveMenu() end
+    local moves = (f.mine and f.mine[f.active or 1] and f.mine[f.active or 1].moves) or {}
+    local steps = ((index or 1) - (f.cursor or 1)) % math.max(1, #moves)
+    for _ = 1, steps do U.tap(game, "down"); U.wait(4) end
+    U.tap(game, "a"); U.wait(6)
+    return true
+  end
+
+  -- The command at `name` (FIGHT / ITEM / SWITCH / RUN), in whichever grid
+  -- this screen lays out, by setting the cursor the way the arrows would.
+  local function command(name)
+    local f = fight()
+    if not (f and f.phase == "choose") then return false end
+    local list = f:commandList()
+    for i, c in ipairs(list) do
+      if c == name then f.commandIndex = i end
+    end
+    U.tap(game, "a"); U.wait(8)
+    return true
+  end
+
+  -- Mash the fight to its end: `onChoose(f)` answers each command menu.
+  local function driveToEnd(onChoose, seconds)
+    return H.waitSeconds(game, function()
+      local f = fight()
+      if not f then return true end
+      if f.phase == "choose" then
+        onChoose(f)
+      else
+        nudge()
+      end
+      return fight() == nil
+    end, seconds or 240, "the Gen 3 solo fight to end")
+  end
+
+  -- Back to a field nobody is standing in front of.
+  local function settle()
+    return H.waitSeconds(game, function()
+      if H.g3Idle(game) and not Battle.isActive() then return true end
+      nudge()
+      return false
+    end, 60, "the field after the fight")
+  end
+
+  local function party() return session().party end
+  local function lead() return party()[1] end
+  local function ppSum(mon)
+    local total = 0
+    for _, v in ipairs((mon and mon.pp) or {}) do total = total + (tonumber(v) or 0) end
+    return total
+  end
+  local function seed(species, level)
+    local mon = H.g3SeedParty(game, species, level)
+    if mon then mon.hp = mon.maxHp; mon.status = nil end
+    return mon
+  end
+
+  local function wildOf(name, level)
+    return { species = H.g3Species(game, name), level = level }
+  end
+
+  -- Two real trainers from this cart's own book: an easy single (a party of
+  -- one, low level) and a hard one (the highest last level of a single
+  -- battle).  Ids only -- nothing here is asserted about what they hold.
+  local easyId, hardId
+  do
+    local pack = Trainers.pack() or {}
+    local easyLevel, hardLevel = 999, -1
+    for id, row in pairs(pack.trainers or {}) do
+      local tid = tonumber(id)
+      local p = type(row) == "table" and row.party or nil
+      local named = type(row) == "table" and type(row.name) == "string" and row.name ~= ""
+      if tid and tid > 0 and named and type(p) == "table" and #p >= 1 and not row.doubleBattle then
+        local last = tonumber(p[#p].level) or 0
+        local class = tonumber(row.class) or 0
+        -- FireRed / LeafGreen keep Ruby's trainer table under their own
+        -- (classes below YOUNGSTER's 57 are its unused leftovers); Emerald's
+        -- whole table is its own.  The rival classes, and FireRed's PLAYER
+        -- class (the link / Union Room stand-ins), are left alone.
+        local plain = (emerald or (class >= 57 and class ~= 98)) and class ~= 81
+          and class ~= 89 and class ~= 90
+        -- a YOUNGSTER when the book has one (both carts do), the lowest
+        -- party-of-one otherwise
+        local youngster = type(row.className) == "string" and row.className:upper() == "YOUNGSTER"
+          or (pack.classNames and tostring(pack.classNames[class]):upper() == "YOUNGSTER")
+        local score = last - (youngster and 1000 or 0)
+        if plain and #p == 1 and last >= 3 and score < easyLevel then easyId, easyLevel = tid, score end
+        if plain and last > hardLevel then hardId, hardLevel = tid, last end
+      end
+    end
+    log(("trainers: easy=%s (score %s) hard=%s (L%s)"):format(tostring(easyId), tostring(easyLevel),
+      tostring(hardId), tostring(hardLevel)))
+  end
+
+  -- ------------------------------------------------------------------
+  -- G1. SOLO BATTLES off: a real grass encounter is the cart's own battle
+  -- ------------------------------------------------------------------
+
+  -- A cell of tall grass on the grass map with grass above and below it, so
+  -- walking up and down keeps rolling the step encounter (the engine's own
+  -- game3_cut_grass driver finds its patch the same way).
+  local function grassCell()
+    local def = game.data and game.data.maps and game.data.maps[GRASS_MAP]
+    local L = type(def) == "table" and def.midLayout or nil
+    if not L then return nil end
+    if Map.current ~= GRASS_MAP then H.g3Teleport(game, GRASS_MAP, 1, 1, "down") end
+    local function grass(x, y)
+      local ok, g = pcall(Collision.isGrass, x, y)
+      return ok and g and not Objects.at(x, y)
+    end
+    for y = 2, (tonumber(L.height) or 0) - 3 do
+      for x = 1, (tonumber(L.width) or 0) - 2 do
+        if grass(x, y) and grass(x, y - 1) and grass(x, y + 1) then return x, y end
+      end
+    end
+    return nil
+  end
+
+  -- Stand in the grass map (a whiteout earlier in the run may have sent the
+  -- player home; the loss leg measures its own warp from here).
+  local function toGrass()
+    local x, y = grassCell()
+    if x then H.g3Teleport(game, GRASS_MAP, x, y, "down") end
+    return x ~= nil
+  end
+
+  -- Walk up and down in the grass until something takes the step: the mod's
+  -- screen (solo.fight) or the cart's own battle.
+  local function walkForEncounter(seconds)
+    local x, y = grassCell()
+    if not x then return nil, "no tall grass on " .. GRASS_MAP end
+    H.g3Teleport(game, GRASS_MAP, x, y, "down")
+    local dirs = { "down", "up" }
+    local i = 0
+    local found = nil
+    H.waitSeconds(game, function()
+      if solo.fight then found = "solo" return true end
+      if Battle.isActive() then found = "engine" return true end
+      if not H.g3Idle(game) then nudge() return false end
+      i = i + 1
+      U.hold(game, dirs[(i % 2) + 1], 16)
+      U.wait(2)
+      return false
+    end, seconds or 90, "a step encounter in the grass")
+    return found
+  end
+
+  -- End the cart's own battle without fighting it (the driver is not here to
+  -- test the engine's battle).
+  local function endEngineBattle()
+    pcall(BattleBridge.finishPending, "run")
+    H.waitSeconds(game, function() return not Battle.isActive() end, 20, "the cart's battle to end")
+    settle()
+  end
+
+  setOption(env.OPTION_KEY, false)
+  seed(STARTER, 40)
+  check(not solo:isOn(), "SOLO BATTLES reads off, as the runner seeded it")
+  do
+    local found, why = walkForEncounter(90)
+    if found == nil then
+      skip("the SOLO-off grass leg", tostring(why or "no encounter in time"))
+    else
+      check(found == "engine", "with SOLO BATTLES off the cart runs its own battle", tostring(found))
+      -- past the transition, onto the cart's own command menu
+      H.waitSeconds(game, function()
+        local ok, st = pcall(Battle.getState)
+        return ok and type(st) == "table" and Battle.isActive() and st.enemy ~= nil
+      end, 10, "the cart's battle to come up")
+      U.wait(150)
+      shot("off-cart-battle")
+      if found == "engine" then endEngineBattle() end
+    end
+  end
+
+  setOption(env.OPTION_KEY, true)
+  check(solo:isOn(), "SOLO BATTLES reads on once the row is flipped")
+
+  -- ------------------------------------------------------------------
+  -- G2. a wild fight won on the arena: commands, move select, damage, EXP
+  -- ------------------------------------------------------------------
+  do
+    settle()
+    local mon = seed(STARTER, 40)
+    local expBefore, ppBefore = tonumber(mon and mon.exp) or 0, ppSum(mon)
+    local result
+    local took = solo:fromGen3Encounter(game, wildOf(WILD, 4), { done = function(r) result = r end })
+    check(took, "the entry takes a wild encounter")
+    check(took and fight() ~= nil and fight().mmoBattle and H.g3Top(game) == fight(),
+          "the mod's battle screen is the game3 layer on top")
+    if took then
+      check(awaitChoose(60, "the wild command grid"), "the command grid opens")
+      shot("wild-command")
+      local seenDamage = false
+      fightWith(bestMove(fight()), function() shot("wild-move-select") end)
+      H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if f.draining or f.hitHold then
+          if not seenDamage then seenDamage = true; U.wait(6); shot("wild-damage") end
+          return true
+        end
+        return false
+      end, 20, "the hit to land")
+      check(seenDamage, "a damaging turn plays on the arena")
+      local sawExpLine = false
+      H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if f.phase == "choose" then fightWith(bestMove(f)) return false end
+        if not sawExpLine and shown():find("EXP", 1, true) then
+          sawExpLine = true
+          shot("wild-exp")
+        end
+        nudge()
+        return false
+      end, 120, "the wild fight to end")
+      check(sawExpLine, "the cart's 'gained EXP. Points' line was on screen")
+      local sawExp = (tonumber(lead().exp) or 0) > expBefore
+      check(result == "win", "done('win') for a knockout", tostring(result))
+      check(sawExp, "the knockout paid EXP onto the session mon",
+            ("%d -> %d"):format(expBefore, tonumber(lead().exp) or 0))
+      check(ppSum(lead()) < ppBefore, "the PP the fight spent came home (mon.pp[])",
+            ("%d -> %d"):format(ppBefore, ppSum(lead())))
+      settle()
+      shot("wild-after")
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G3. CLASSIC BATTLE UI: the GBA page, and RUN from a slower wild mon
+  -- ------------------------------------------------------------------
+  do
+    setOption("classicui", true)
+    seed(STARTER, 40)
+    local result
+    local took = solo:fromGen3Encounter(game, wildOf(WILD, 3), { done = function(r) result = r end })
+    check(took, "classic: taken")
+    if took then
+      check(fight().classicUi == true, "classic: the screen latched CLASSIC BATTLE UI")
+      check(awaitChoose(60, "the classic command grid"), "classic: the command grid opens")
+      shot("classic-command")
+      local f = fight()
+      f.commandIndex = 1
+      U.tap(game, "a"); U.wait(8)
+      if fight() and fight().phase == "move" then shot("classic-move-select") end
+      U.tap(game, "b"); U.wait(6)
+      command("RUN")
+      H.waitSeconds(game, function() return said("Got away") or fight() == nil end, 10, "the escape line")
+      shot("classic-run-away")
+      driveToEnd(function() command("RUN") end, 60)
+      check(result == "run", "classic: a faster runner gets away -- done('run')", tostring(result))
+      settle()
+    end
+    setOption("classicui", false)
+  end
+
+  -- ------------------------------------------------------------------
+  -- G4. a catch: the BAG, a MASTER BALL, "Gotcha!", the party and the dex
+  -- ------------------------------------------------------------------
+  do
+    seed(STARTER, 40)
+    local ball = H.g3ItemId(game, "MASTER_BALL")
+    H.g3GiveItem(game, "MASTER_BALL", 1)
+    local ballsBefore = Bag.get(session().bag, ball) or 0
+    local species = H.g3Species(game, WILD)
+    local partyBefore = #party()
+    local result
+    local took = solo:fromGen3Encounter(game, wildOf(WILD, 4), { done = function(r) result = r end })
+    check(took, "catch: taken")
+    if took then
+      check(awaitChoose(60, "the grid before the ball"), "catch: the command grid opens")
+      command("ITEM")
+      local f = fight()
+      if f and f.phase == "item" then
+        local rows = f:usableItems()
+        for i, row in ipairs(rows) do if tonumber(row.id) == ball then f.itemIndex = i end end
+        shot("catch-bag")
+        U.tap(game, "a"); U.wait(10)
+      end
+      local gotcha = H.waitSeconds(game, function()
+        if shown():find("Gotcha", 1, true) or shown():find("caught", 1, true) then return true end
+        local g = fight()
+        if g and g.phase ~= "choose" then U.tap(game, "a"); U.wait(4) end
+        return false
+      end, 30, "Gotcha!")
+      check(gotcha, "catch: 'Gotcha!'")
+      shot("catch-gotcha")
+      local sawNaming = false
+      H.waitSeconds(game, function()
+        if layerId() == "naming" then
+          if not sawNaming then sawNaming = true; U.wait(20); shot("catch-nickname") end
+        end
+        if fight() == nil and layerId() ~= "naming" then return true end
+        nudge()
+        return false
+      end, 60, "the catch to finish")
+      check(sawNaming, "catch: the nickname grid was offered")
+      check(result == "caught", "catch: done('caught')", tostring(result))
+      check(#party() == partyBefore + 1, "catch: the party grew by one",
+            ("%d -> %d"):format(partyBefore, #party()))
+      local caught = party()[#party()]
+      check(caught and tonumber(caught.species) == species, "catch: it is the wild mon")
+      check(caught and tonumber(caught.pokeball) == ball, "catch: in a MASTER BALL")
+      check(caught and caught.otName == session().name, "catch: the catcher is its OT")
+      local Dex = require("src.core.game3.dex")
+      local okDex, isCaught = pcall(Dex.isCaught, session().dex, species)
+      check(okDex and isCaught, "catch: the dex has it caught")
+      check((Bag.get(session().bag, ball) or 0) < ballsBefore, "catch: the ball was spent")
+      settle()
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G5. RUN refused by the roll: a slow runner and a fast wild mon
+  -- ------------------------------------------------------------------
+  do
+    seed(STARTER, 40)
+    local sawCant = false
+    for attempt = 1, 6 do
+      local result
+      local took = solo:fromGen3Encounter(game, wildOf(emerald and "NINJASK" or "ELECTRODE",
+        emerald and 30 or 60),
+        { done = function(r) result = r end })
+      if not took then break end
+      awaitChoose(60, "the grid before RUN")
+      command("RUN")
+      H.waitSeconds(game, function()
+        if said("Can't escape") then return true end
+        return fight() == nil or said("Got away")
+      end, 15, "the escape roll")
+      if said("Can't escape") then
+        sawCant = true
+        shot("run-cant-escape")
+      end
+      -- leave either way: RUN until it works (the odds climb each try), else
+      -- fight on; a loss here is a wild whiteout, which is fine too.
+      driveToEnd(function() command("RUN") end, 120)
+      settle()
+      seed(STARTER, 40)
+      log(("run attempt %d: result=%s"):format(attempt, tostring(result)))
+      if sawCant then break end
+    end
+    check(sawCant, "a slower runner is refused by the roll: \"Can't escape!\"")
+  end
+
+  -- ------------------------------------------------------------------
+  -- G6. a trainer beaten: the intro, the trainer on the arena, the prize
+  -- ------------------------------------------------------------------
+  if not easyId then
+    skip("the trainer-win leg", "no single easy trainer in this cart's book")
+  else
+    settle()
+    toGrass()
+    seed(STARTER, 40)
+    local moneyBefore = tonumber(session().money) or 0
+    local expBefore = tonumber(lead().exp) or 0
+    local result
+    local took = solo:fromGen3Trainer(game, easyId, { trainerId = easyId, done = function(r) result = r end })
+    check(took, "trainer: the entry takes trainer " .. tostring(easyId))
+    if took then
+      -- The trainer's own AI, in this cart's own bit layout: FireRed numbers
+      -- TRY_TO_FAINT 2, Emerald 1 (the engine battle profile's aiFlagBits).
+      local brain = solo.brain
+      check(brain ~= nil and brain.generation == 3, "trainer: the Gen 3 brain answers for them")
+      local bits = brain and brain.aiBits or {}
+      check(bits.TRY_TO_FAINT == (emerald and 1 or 2),
+            "trainer: the brain reads the cart's own AI flag layout",
+            "TRY_TO_FAINT=" .. tostring(bits.TRY_TO_FAINT))
+      H.waitSeconds(game, function() return said("would like") end, 10, "the trainer's intro")
+      shot("trainer-intro")
+      check(awaitChoose(60, "the trainer command grid"), "trainer: the command grid opens")
+      shot("trainer-command")
+      local sawMoney = false
+      H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if f.phase == "choose" then fightWith(bestMove(f)) return false end
+        if not sawMoney and (shown():find("got", 1, true) and shown():find("winning", 1, true)
+            or shown():find("\194\165", 1, true)) then
+          sawMoney = true
+          shot("trainer-prize")
+        end
+        nudge()
+        return false
+      end, 240, "the trainer fight to end")
+      check(result == "win", "trainer: done('win') -- what sets the trainer flag", tostring(result))
+      check((tonumber(session().money) or 0) > moneyBefore, "trainer: the prize was paid",
+            ("%d -> %d"):format(moneyBefore, tonumber(session().money) or 0))
+      check((tonumber(lead().exp) or 0) > expBefore, "trainer: its mons paid EXP")
+      check(sawMoney, "trainer: the money line was on screen")
+      settle()
+      shot("trainer-after")
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G7. a trainer lost to: the lost lines, the whiteout, the heal location
+  -- ------------------------------------------------------------------
+  if not (hardId or easyId) then
+    skip("the loss leg", "no trainer to lose to")
+  else
+    settle()
+    toGrass()
+    local mon = seed(emerald and "WURMPLE" or "CATERPIE", 3)
+    if mon then mon.hp = 1 end
+    session().money = 3000
+    local mapBefore = Map.current
+    local result
+    local took = solo:fromGen3Trainer(game, hardId or easyId,
+      { trainerId = hardId or easyId, done = function(r) result = r end })
+    check(took, "loss: taken")
+    if took then
+      awaitChoose(60, "the grid before the loss")
+      local sawLost = false
+      H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if f.phase == "choose" then fightWith(1) return false end
+        local text = shown()
+        if not sawLost and (text:find("out of", 1, true) or text:find("against", 1, true)
+            or text:find("paid", 1, true) or text:find("whited", 1, true)
+            or text:find("panicked", 1, true)) then
+          sawLost = true
+          shot("loss-lines")
+        end
+        nudge()
+        return false
+      end, 180, "the loss to end")
+      check(sawLost, "loss: the cart's lost lines were on screen")
+      check(result == "lose", "loss: done('lose')", tostring(result))
+      settle()
+      U.wait(30)
+      shot("loss-respawn")
+      check(Map.current ~= mapBefore, "loss: the whiteout warped to the heal location",
+            tostring(mapBefore) .. " -> " .. tostring(Map.current))
+      check((tonumber(lead().hp) or 0) == (tonumber(lead().maxHp) or -1), "loss: the party was healed")
+      check((tonumber(session().money) or 0) < 3000, "loss: the whiteout took money",
+            tostring(session().money))
+    end
+  end
+
+  -- ------------------------------------------------------------------
+  -- G8. the real thing: a step encounter, taken by src/Client.lua's divert
+  -- ------------------------------------------------------------------
+  do
+    settle()
+    seed(STARTER, 40)
+    local found, why = walkForEncounter(120)
+    if found == nil then
+      skip("the grass divert leg", tostring(why or "no encounter in time"))
+    elseif found == "engine" then
+      skip("the grass divert leg", "the cart ran its own battle -- the Gen 3 divert "
+        .. "(src/Client.lua encounter.roll) is not installed in this build")
+      endEngineBattle()
+    else
+      check(true, "a real grass encounter was taken by the mod's divert")
+      local viaStand = solo.gen3 and solo.gen3.stand ~= nil
+      log("grass divert via the stand-in:", tostring(viaStand))
+      awaitChoose(60, "the diverted wild's grid")
+      shot("grass-divert")
+      driveToEnd(function() command("RUN") end, 60)
+      settle()
+      check(H.g3Idle(game), "grass: the field is the player's again")
+      shot("grass-after")
+    end
+  end
+end
+
 return function(game)
   local H = dofile("mods/rby_mmo/tests/drivers/mmo_util.lua")
   local U = H.U
@@ -117,6 +713,23 @@ return function(game)
   end
   local function shot(name)
     U.shot(game, SHOT_DIR .. "/" .. name .. ".png")
+  end
+
+  -- FireRed / LeafGreen / Emerald boot a Game3, whose battles are modules
+  -- rather than stack states: everything below this line is written against a
+  -- Gen 1 / Gen 2 stack, so a Gen 3 run is its own arm (runGen3, at the end
+  -- of this file), sharing only the log / check / shot vocabulary.
+  if tonumber(game.generation) == 3 then
+    local env = { log = log, check = check, skip = skip, shot = shot, TAG = TAG,
+                  SHOT_DIR = SHOT_DIR, OPTION_KEY = OPTION_KEY, MOD_ID = MOD_ID }
+    local ok, err = pcall(runGen3, game, H, U, env)
+    if not ok then check(false, "the Gen 3 arm ran to its end", tostring(err)) end
+    log("shots in", SHOT_DIR)
+    log("GAPS:" .. tostring(fail))
+    log("SUMMARY", "pass=" .. pass, "fail=" .. fail)
+    log("DONE")
+    love.event.quit(fail > 0 and 1 or 0)
+    return
   end
 
   -- ------------------------------------------------------------------

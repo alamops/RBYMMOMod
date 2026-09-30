@@ -637,6 +637,46 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 11. Gen 3 is its own brain, never Red's (the old `~= 2 -> 1` clamp)
+-- ------------------------------------------------------------------
+--
+-- The full Gen 3 arm is tests/gen3_solo.lua, over a real BattleSim3 referee;
+-- what is pinned here is the dispatch, on bare sheets with no referee in the
+-- view (the brain reads a battler-shaped copy of each).  (That no Gen 1 /
+-- Gen 2 engine module is reached on the way is gen3_solo's to assert: this
+-- suite has loaded them itself by here.)
+
+do
+  local brain = SoloBrain.new{ generation = 3, trainer = { aiFlags = 1, items = { 13, 0, 0, 0 } },
+    rng = function(lo) return lo end }
+  ok(brain ~= nil, "a Gen 3 brain builds with no dataset -- the sheets carry the numbers")
+  eq(brain and brain.generation, 3, "...and it is Gen 3, not clamped to 1")
+  eq(SoloBrain.new{ generation = 3 }, nil, "a Gen 3 fight with no trainer record has no brain")
+  local bag = SoloBrain.bagFor({ items = { 13, 0, 13, 21 } }, nil, 3)
+  eq(bag[13], 2, "bagFor(3) counts the numeric item slots")
+  eq(#SoloBrain.itemsFor({ items = { 13, 0, 0, 21 } }, nil, 3), 2, "itemsFor(3) drops empty slots")
+
+  local function row(num, power, typeId)
+    return { id = "FIX3_" .. num, num = num, pp = 10, maxPp = 10, power = power, type = typeId,
+             accuracy = 100, effect = 0, chance = 0, target = 0, priority = 0, flags = 0 }
+  end
+  local function sheet3(fields)
+    local s = { speciesNum = 1, level = 50, hp = 100, maxHp = 100, types = { 0 }, ability = 0,
+                stats = { atk = 80, def = 80, spe = 80, spa = 80, spd = 80 },
+                moves = { row(1, 40, 0) } }
+    for k, v in pairs(fields) do s[k] = v end
+    return s
+  end
+  -- ABILITY_LEVITATE (26) makes a Ground (4) move do nothing; CHECK_BAD_MOVE
+  -- (bit 0) scores it down, and the plain move is taken instead.
+  local mon = sheet3({ moves = { row(89, 100, 4), row(1, 40, 0) } })
+  local foe = sheet3({ ability = 26, types = { 14 } })
+  local choice = brain and brain:choose{ mon = mon, foe = foe, party = { mon } }
+  eq(choice and choice.action, "fight", "Gen 3 on bare sheets still answers")
+  eq(choice and choice.move, 1, "...and steers around LEVITATE")
+end
+
+-- ------------------------------------------------------------------
 -- every scenario above is a legitimate decline or a legitimate answer --
 -- none of them should have made the adapter's own pcall catch anything
 -- ------------------------------------------------------------------

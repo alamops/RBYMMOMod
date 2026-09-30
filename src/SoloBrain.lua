@@ -222,6 +222,14 @@ end
 function M.itemsFor(trainer, data, generation)
   local out = {}
   if type(trainer) ~= "table" then return out end
+  -- Gen 3 keeps a trainer's kit as up to four numeric pret item ids (the
+  -- engine trainer row's `items`, 0 for an empty slot) and has no class table
+  -- to consult -- nor could it: the Gen 1 TrainerAI module is a boot error on
+  -- Emerald.  So its answer is the list itself, zeros dropped.
+  if generation == 3 then
+    for _, id in ipairs(M.itemsOf3(trainer)) do out[#out + 1] = id end
+    return out
+  end
   local seen = {}
   local function put(id)
     if type(id) ~= "string" or id == "" or seen[id] then return end
@@ -247,6 +255,12 @@ end
 function M.bagFor(trainer, data, generation)
   local bag = {}
   if type(trainer) ~= "table" then return bag end
+  -- Gen 3: one use per slot, keyed by the numeric id the BattleSim3 bag is
+  -- keyed by (docs/plans/gen3-battle-sheet.md §4).
+  if generation == 3 then
+    for _, id in ipairs(M.itemsOf3(trainer)) do bag[id] = (bag[id] or 0) + 1 end
+    return bag
+  end
   if generation == 2 or type(trainer.items) == "table" then
     for _, id in ipairs(trainer.items or {}) do
       if type(id) == "string" and id ~= "" then
@@ -293,6 +307,14 @@ end
 function M.new(opts)
   opts = opts or {}
   local game = opts.game
+  -- Gen 3 is built by its own constructor, before anything below asks for a
+  -- dataset: its moves, types and stats all ride on the BattleSim3 sheets
+  -- (docs/plans/gen3-battle-sheet.md), so there is no `data.moves` to need,
+  -- and none of the Gen 1 / Gen 2 engine modules may be reached for at all.
+  if tonumber(opts.generation) == 3
+      or (opts.generation == nil and Gen.generation(game) == 3) then
+    return M.new3(opts)
+  end
   local data = opts.data or (type(game) == "table" and game.data) or nil
   if type(data) ~= "table" or type(data.moves) ~= "table" then
     return nil, "no dataset to read the trainer's moves from"
@@ -306,6 +328,9 @@ function M.new(opts)
     return nil, "this battle has no trainer record, so there is no AI to bridge"
   end
 
+  -- Three-way, not a clamp: Gen 3 left above through M.new3, so what reaches
+  -- here is Gold (2) or Red -- and anything unrecognisable (a stub game with
+  -- no generation) reads as Red, the build this file was first written for.
   local generation = tonumber(opts.generation) or Gen.generation(game)
   if generation ~= 2 then generation = 1 end
 
@@ -527,6 +552,11 @@ function M:_decide(view)
   -- monster that can still fight, which is also exactly what
   -- `TrainerAI.switchAction` picks when it rotates -- so both generations get
   -- the same one answer here.
+  --
+  -- Gen 3 is the exception: the cart's opponent controller sends out
+  -- GetMostSuitableMonToSwitchInto, not the next monster in the party (see
+  -- M:_replacement3), so its forced send-out is its own.
+  if self.generation == 3 then return self:_decideGen3(view) end
   if view.mustReplace then
     local slot = self:_firstLivingBench(view)
     if slot == nil then return nil end
@@ -1083,6 +1113,1129 @@ function M:_gen2SwitchOrItem(view, flags)
     if id == item then table.remove(self.items2, index); break end
   end
   return { action = "item", item = item }
+end
+
+-- ------------------------------------------------------------------
+-- Gen 3
+-- ------------------------------------------------------------------
+--
+-- FireRed / LeafGreen / Emerald trainers think with pret's AI *scripts*
+-- (data/battle_ai_scripts.s, run by src/core/game3/battle/ai_vm.lua over the
+-- engine's own battle state), and that is the one Gen 3 engine AI this file
+-- does not bridge the way it bridges Red's TrainerAI and Gold's Ai: the VM
+-- reads some sixty commands' worth of an engine `st` -- battle history, the
+-- controller's per-battler records, the move table by ROM number -- and a copy
+-- of *that* synthesised from a BattleSim3 field would be a second battle
+-- state kept in step with the first, which is exactly the puppet the header
+-- above argues against.
+--
+-- So the scripts are ported rather than driven.  What is kept from the cart is
+-- the part a player can feel:
+--
+--   * **the trainer's own AI flags** (the engine trainer row's `aiFlags`, the
+--     cart's gTrainers[].aiFlags) pick which scripts run, bit for bit through
+--     the version's own layout -- FireRed numbers CHECK_VIABILITY 1 /
+--     TRY_TO_FAINT 2, Emerald the other way round, and Emerald adds
+--     PREFER_POWER_EXTREMES and TRY_SUNNY_DAY_START -- read from the engine's
+--     battle profile.  A youngster with CHECK_BAD_MOVE alone and a gym leader
+--     with half the bits set fight differently for the reason they do on the
+--     cart; a trainer with no bits at all picks among its usable moves at
+--     random, which is what an empty script list does there (and what Gold's
+--     bridge does for a class with no AI word);
+--   * **scoring**: every usable move starts at 100 and each script moves it
+--     (AI_CheckBadMove's -8 / -10 / -12, TryToFaint's +4, SetupFirstTurn's
+--     +2 ...), the simulated 85..100 damage roll per move
+--     (AI_THINKING_STRUCT->simulatedRNG), and the best score wins, ties drawn
+--     at random;
+--   * **ShouldSwitch and ShouldUseItem** (battle_ai_switch_items.c, the
+--     engine's ai_switch.lua / ai_items.lua) ahead of the move, and
+--     GetMostSuitableMonToSwitchInto for a send-out -- including the cart's
+--     own backwards typing test, because a faithful opponent is the point;
+--   * and everything a Gen 3 script reads that Gen 2's never could:
+--     abilities (Levitate, Volt / Water Absorb, Flash Fire, Wonder Guard,
+--     Soundproof, Sturdy, Damp, Insomnia, Limber, Own Tempo, Clear Body, Hyper
+--     Cutter, Keen Eye, Oblivious, Suction Cups, Immunity, Water Veil, Shadow
+--     Tag / Arena Trap / Magnet Pull, Natural Cure), the weather (Thunder,
+--     SolarBeam, Weather Ball, the sun-scaled heals, the four weather moves,
+--     Swift Swim / Chlorophyll), and held items (their damage boosts through
+--     the sim's own formula, Choice Band's lock, Thief / Trick / Knock Off
+--     only against something held).
+--
+-- The damage every script asks about is the referee's own pure formula
+-- (BattleSim3/Damage.calc) over the referee's own battlers -- stages, screens,
+-- weather, abilities and held items included -- called with no generator, so
+-- asking never draws from the fight's RNG and the fight stays reproducible
+-- from its seed.
+--
+-- The view carries the sim (`view.sim`, `view.battler`, `view.foeBattler`)
+-- when SoloBattle builds it; a view of bare sheets (a suite, a caller with
+-- only the monsters) is read through a battler-shaped copy with neutral
+-- stages, so the brain answers either way.
+
+local sim3
+local function Sim3()
+  if sim3 == nil then
+    local parts, all = {}, true
+    for key, name in pairs({
+      Types = "BattleSim3/Types", Damage = "BattleSim3/Damage",
+      Effects = "BattleSim3/Effects", Items = "BattleSim3/Items",
+      Abilities = "BattleSim3/Abilities",
+    }) do
+      local ok, value = pcall(need, name)
+      if ok and type(value) == "table" then parts[key] = value else all = false end
+    end
+    sim3 = all and parts or false
+    if not all then
+      warnOnce("sim3", "the mod's Gen 3 battle modules (src/BattleSim3/) did not "
+        .. "load, so solo trainers on this cart fight with the referee's generic "
+        .. "picker; reinstall the mod folder so every file under src/ is present")
+    end
+  end
+  return sim3 or nil
+end
+
+-- FireRed / LeafGreen's AI_SCRIPT_* bit numbers (pokefirered/include/
+-- constants/battle_ai.h:37, the engine profile's FRLG_AI_BITS), the fallback
+-- when the engine's battle profile cannot be asked.
+M.AI_BITS_FRLG = {
+  CHECK_BAD_MOVE = 0, CHECK_VIABILITY = 1, TRY_TO_FAINT = 2, SETUP_FIRST_TURN = 3,
+  RISKY = 4, PREFER_STRONGEST_MOVE = 5, PREFER_BATON_PASS = 6, DOUBLE_BATTLE = 7,
+  HP_AWARE = 8,
+}
+
+-- The running cart's bit layout: the engine battle profile's `aiFlagBits`
+-- (Emerald's differs from FireRed's), reached through src/Gen3.lua so it is
+-- only ever required on a Gen 3 boot.
+local function aiBitsOf3()
+  local okG, Gen3 = pcall(need, "Gen3")
+  if not (okG and type(Gen3) == "table" and type(Gen3.engine) == "function") then
+    return M.AI_BITS_FRLG
+  end
+  local BP = Gen3.engine("src.core.game3.battle.profile")
+  if not (BP and type(BP.get) == "function") then return M.AI_BITS_FRLG end
+  local ok, bp = pcall(BP.get, Gen3.session and Gen3.session() or nil)
+  if ok and type(bp) == "table" and type(bp.aiFlagBits) == "table" then
+    return bp.aiFlagBits
+  end
+  return M.AI_BITS_FRLG
+end
+
+local function bitSet(flags, bit)
+  if type(bit) ~= "number" then return false end
+  return math.floor((tonumber(flags) or 0) / (2 ^ bit)) % 2 == 1
+end
+
+local function int3(value, fallback)
+  local n = tonumber(value)
+  if not n or n ~= n then return fallback end
+  return math.floor(n)
+end
+
+-- A Gen 3 trainer's items: the numeric ids in the engine row's `items` (four
+-- slots, 0 for an empty one), in slot order.  Exported for SoloBattle and the
+-- bag helpers above.
+function M.itemsOf3(trainer)
+  local out = {}
+  if type(trainer) ~= "table" or type(trainer.items) ~= "table" then return out end
+  for _, raw in ipairs(trainer.items) do
+    local id = int3(raw, nil)
+    if id and id > 0 then out[#out + 1] = id end
+  end
+  return out
+end
+
+-- opts (beyond M.new's): trainer (the engine trainer record: `aiFlags`,
+-- `items`), aiFlags (override), aiBits (a bit layout, for a suite).
+function M.new3(opts)
+  opts = opts or {}
+  local trainer = opts.trainer or M.trainerOf(opts.engine)
+  if type(trainer) ~= "table" then
+    return nil, "this battle has no trainer record, so there is no AI to bridge"
+  end
+  if not Sim3() then
+    return nil, "the mod's Gen 3 battle modules are unavailable"
+  end
+  local rng = opts.rng
+  if type(rng) ~= "function" then
+    rng = function(lo, hi)
+      if hi == nil then lo, hi = 1, lo end
+      if hi < lo then return lo end
+      local love_ = rawget(_G, "love")
+      local roll = love_ and love_.math and love_.math.random or math.random
+      return roll(lo, hi)
+    end
+  end
+  local flags = tonumber(opts.aiFlags) or tonumber(trainer.aiFlags) or 0
+  local self = setmetatable({
+    generation = 3,
+    trainer = trainer,
+    rng = rng,
+    aiFlags = math.max(0, math.floor(flags)),
+    aiBits = type(opts.aiBits) == "table" and opts.aiBits or aiBitsOf3(),
+    aiUses = 0, aiLayer2 = 0, turns = 0, lastMon = nil,
+    -- battleHistory->trainerItems: the four slots, spent to 0 as they are
+    -- used, never compacted (ShouldUseItem's slot arithmetic reads the gaps).
+    items3 = M.itemsOf3(trainer),
+    itemsNo3 = #M.itemsOf3(trainer),
+  }, M)
+  return self
+end
+
+function M:_flag3(name)
+  return bitSet(self.aiFlags, self.aiBits and self.aiBits[name])
+end
+
+-- ------- reading the field
+
+local STAGE_ZERO = { atk = 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 }
+
+-- A battler-shaped reading of a bare sheet (no sim in the view).
+local function pseudoBattler(mon, S, side)
+  if type(mon) ~= "table" then return nil end
+  local types = type(mon.types) == "table" and mon.types or {}
+  local t1 = int3(types[1], 0)
+  local t2 = int3(types[2], nil)
+  if t2 == t1 then t2 = nil end
+  local stages = {}
+  for k, v in pairs(STAGE_ZERO) do stages[k] = v end
+  return {
+    mon = mon, stats = type(mon.stats) == "table" and mon.stats or {},
+    moves = type(mon.moves) == "table" and mon.moves or {},
+    stages = stages, type1 = t1, type2 = t2,
+    ability = S.Abilities.nameOf(mon.ability), abilityName = mon.abilityName,
+    speciesNum = mon.speciesNum, side = side, isFirstTurn = 0,
+  }
+end
+
+function M:_ctx3(view)
+  local S = Sim3()
+  if not S then return nil end
+  local sim = type(view.sim) == "table" and view.sim or nil
+  local b = type(view.battler) == "table" and view.battler or pseudoBattler(view.mon, S, "b")
+  if not b then return nil end
+  local t = type(view.foeBattler) == "table" and view.foeBattler
+    or pseudoBattler(view.foe, S, "a")
+  local typeTable = (sim and sim.typeTable) or view.typeTable
+  local weather = view.weather
+  if weather == nil and sim and type(sim.weather) == "function" then
+    local ok, w = pcall(sim.weather, sim)
+    if ok then weather = w end
+  end
+  local function sideOf(side)
+    if sim and type(sim.sides) == "table" and sim.sides[side] then return sim.sides[side] end
+    return {}
+  end
+  return {
+    S = S, sim = sim, b = b, t = t,
+    typeTable = typeTable, specialTypes = sim and sim.specialTypes or nil,
+    weather = weather,
+    party = type(view.party) == "table" and view.party or { view.mon },
+    active = tonumber(view.active),
+    bag = type(view.bag) == "table" and view.bag or nil,
+    mySide = sideOf(b.side or "b"),
+    foeSide = sideOf((t and t.side) or "a"),
+    -- gBattleResults.battleTurnCounter: 0 on the fight's first turn.
+    turnCount = math.max(0, (tonumber(sim and sim.turn) or tonumber(view.turn) or 1) - 1),
+  }
+end
+
+local function hpOf(b) return int3(b and b.mon and b.mon.hp, 0) end
+local function maxHpOf(b) return math.max(1, int3(b and b.mon and b.mon.maxHp, 1)) end
+local function pct(b) return math.floor(hpOf(b) * 100 / maxHpOf(b)) end
+local function statusOf3(b)
+  local s = b and b.mon and b.mon.status
+  if type(s) ~= "string" or s == "" then return nil end
+  return s:upper()
+end
+local function hasType(b, t) return b ~= nil and (b.type1 == t or b.type2 == t) end
+
+-- The move's type as it will be dealt: Hidden Power's own, Weather Ball's
+-- weather (pret Cmd_weatherdamage / the engine's typing), else the row's.
+function M:_moveType3(ctx, user, mv)
+  local S, E = ctx.S, ctx.S.Effects.E
+  local eff = int3(mv.effect, 0)
+  if eff == E.HIDDEN_POWER then
+    local hp = user and user.mon and user.mon.hiddenPower
+    if type(hp) == "table" and tonumber(hp.type) then return int3(hp.type, 0) end
+  elseif eff == E.WEATHER_BALL and ctx.weather then
+    local T = S.Types.ID
+    local by = { RAIN = T.WATER, SUN = T.FIRE, SAND = T.ROCK, HAIL = T.ICE }
+    if by[ctx.weather] then return by[ctx.weather] end
+  end
+  return int3(mv.type, 0)
+end
+
+-- The chart's product for a type against a battler (100 neutral, 0 immune).
+function M:_product3(ctx, moveType, target)
+  if not target then return 100 end
+  local ok, product = pcall(ctx.S.Types.effectivenessOf, ctx.typeTable, moveType,
+    target.type1, target.type2, target.identified and true or false)
+  if ok and tonumber(product) then return tonumber(product) end
+  return 100
+end
+
+-- EFFECT_* ids whose damage ignores the row's power, from BattleSim3's own
+-- effect table the first time a Gen 3 fight asks.
+local fixedDamage
+local function fixedSet(E)
+  if not fixedDamage then
+    fixedDamage = {}
+    for _, name in ipairs({ "SUPER_FANG", "DRAGON_RAGE", "LEVEL_DAMAGE", "PSYWAVE",
+                            "SONICBOOM", "COUNTER", "MIRROR_COAT", "ENDEAVOR" }) do
+      if E[name] then fixedDamage[E[name]] = true end
+    end
+  end
+  return fixedDamage
+end
+
+-- Does this move deal damage at all?  Any power, or a fixed / one-hit KO
+-- effect.  (pret's power *reading*, below, is stricter: it counts only
+-- power > 1, which leaves Return, Flail, Hidden Power ... "other".)
+local function isDamaging(mv, E)
+  local eff = int3(mv.effect, 0)
+  if fixedSet(E)[eff] or eff == E.OHKO then return true end
+  return int3(mv.power, 0) > 0
+end
+
+-- AI_CBM_CheckIfNegatesType, and Soundproof: would this move do nothing at
+-- all to `target`?  Returns the pret score change (-10 / -12) or nil.
+function M:_negated3(ctx, user, target, mv)
+  if not target then return nil end
+  local S = ctx.S
+  local E, T = S.Effects.E, S.Types.ID
+  local ab = target.ability
+  if ab == "SOUNDPROOF" and S.Abilities.SOUND_MOVES[int3(mv.num, -1)] then return -10 end
+  if not isDamaging(mv, E) then return nil end
+  local mtype = self:_moveType3(ctx, user, mv)
+  if self:_product3(ctx, mtype, target) == 0 then return -10 end
+  local power = int3(mv.power, 0)
+  if ab == "VOLT_ABSORB" and mtype == T.ELECTRIC and power ~= 0 then return -12 end
+  if ab == "WATER_ABSORB" and mtype == T.WATER and power ~= 0 then return -12 end
+  if ab == "FLASH_FIRE" and mtype == T.FIRE then return -12 end
+  if ab == "LEVITATE" and mtype == T.GROUND then return -10 end
+  if ab == "WONDER_GUARD" and int3(mv.num, 0) ~= 165
+      and self:_product3(ctx, mtype, target) <= 100 then
+    return -10
+  end
+  return nil
+end
+
+-- What this move would take off `target` this turn, on the referee's own
+-- formula, with `roll` as the damage roll (85..100) and no critical hit.  Zero
+-- for a move the target's typing or ability swallows.
+function M:_damage3(ctx, user, target, mv, roll)
+  if not (user and target and type(mv) == "table") then return 0 end
+  local S = ctx.S
+  local E = S.Effects.E
+  if self:_negated3(ctx, user, target, mv) then return 0 end
+  local eff = int3(mv.effect, 0)
+  if eff == E.OHKO then
+    if target.ability == "STURDY" then return 0 end
+    if int3(target.mon.level, 1) > int3(user.mon.level, 1) then return 0 end
+    return hpOf(target)
+  end
+  local side = (ctx.sim and ctx.sim.sides and ctx.sim.sides[target.side]) or {}
+  local ok, dmg = pcall(S.Damage.calc, user, target, mv, {
+    typeTable = ctx.typeTable, specialTypes = ctx.specialTypes, weather = ctx.weather,
+    reflect = int3(side.reflectTurns, 0) > 0, lightScreen = int3(side.lightScreenTurns, 0) > 0,
+    noCrit = true, forceRoll = roll or 100, magnitudeRoll = 50, psywaveRoll = 5,
+    defenderId = target.slot,
+  })
+  if not ok then return 0 end
+  dmg = int3(dmg, 0) or 0
+  -- The two-strike moves the formula prices once.
+  if eff == E.DOUBLE_HIT or eff == E.TWINEEDLE then dmg = dmg * 2 end
+  if eff == E.MULTI_HIT then dmg = dmg * 3 end
+  return math.max(0, dmg)
+end
+
+-- The usable slots (1-based into the battler's current move list): the
+-- referee's own moveLimitations when the view carries the sim -- Disable,
+-- Taunt, Torment, Imprison, Encore, Choice Band, empty PP -- else PP alone.
+function M:_legal3(ctx)
+  local b = ctx.b
+  local moves = type(b.moves) == "table" and b.moves or {}
+  local bad = {}
+  local sim = ctx.sim
+  if sim and type(sim.moveLimitations) == "function" and b.fighter then
+    local ok, got = pcall(sim.moveLimitations, sim, b)
+    if ok and type(got) == "table" then bad = got end
+  else
+    for i, mv in ipairs(moves) do
+      if int3(mv.pp, 0) <= 0 or int3(mv.num, 1) == 0 then bad[i] = true end
+    end
+  end
+  local out = {}
+  for i = 1, #moves do
+    if not bad[i] then out[#out + 1] = i end
+  end
+  return out
+end
+
+-- ------- the decision
+
+function M:_decideGen3(view)
+  local ctx = self:_ctx3(view)
+  if not ctx then return nil end
+  if view.mustReplace then
+    local pick = self:_replacement3(ctx)
+    if not pick then return nil end
+    return { action = "switch", slot = int3(pick.slot, 0) }
+  end
+  if not ctx.t then return nil end
+
+  -- A seat the referee has already locked (recharge, a rampage, a two-turn
+  -- release) owes it nothing and is not asked; one with nothing usable is
+  -- Struggle, which the referee reads off any index.
+  local legal = self:_legal3(ctx)
+  if #legal == 0 then return { action = "fight", move = 0 } end
+
+  -- battle_main.c:3125 HandleAction: ShouldSwitch, then ShouldUseItem, then
+  -- the move.  Wild fights never reach this file (no trainer record).
+  local switch = self:_shouldSwitch3(ctx)
+  if switch then return switch end
+  local item = self:_shouldUseItem3(ctx)
+  if item then return item end
+  return self:_chooseMove3(ctx, legal)
+end
+
+-- ------- ShouldSwitch (battle_ai_switch_items.c:302, engine ai_switch.lua)
+
+local LEVITATE_T = "LEVITATE"
+
+function M:_superMove3(ctx, user, target, moves)
+  local E = ctx.S.Effects.E
+  for _, mv in ipairs(moves or {}) do
+    if int3(mv.num, 0) ~= 0 and isDamaging(mv, E)
+        and self:_product3(ctx, self:_moveType3(ctx, user, mv), target) > 100
+        and not self:_negated3(ctx, user, target, mv) then
+      return true
+    end
+  end
+  return false
+end
+
+function M:_bench3(ctx)
+  local out = {}
+  for index, mon in ipairs(ctx.party) do
+    if mon ~= ctx.b.mon and int3(mon.hp, 0) > 0 then out[#out + 1] = { index = index, mon = mon } end
+  end
+  return out
+end
+
+-- The player's move that last landed on our battler (pret expLastLandedMove),
+-- as a row: the player's own move list carries it.
+function M:_lastLanded3(ctx)
+  local num = int3(ctx.b.lastLandedMove, 0)
+  if num == 0 then return nil end
+  for _, mv in ipairs((ctx.t and ctx.t.moves) or {}) do
+    if int3(mv.num, -1) == num then return mv end
+  end
+  local mon = ctx.t and ctx.t.mon
+  for _, mv in ipairs((mon and mon.moves) or {}) do
+    if int3(mv.num, -1) == num then return mv end
+  end
+  if ctx.b.lastHitByType ~= nil then
+    return { num = num, type = ctx.b.lastHitByType, power = 2, effect = 0 }
+  end
+  return nil
+end
+
+function M:_shouldSwitch3(ctx)
+  local b, t, S = ctx.b, ctx.t, ctx.S
+  local sim = ctx.sim
+  -- Trapped: Mean Look / Spider Web / Block, a partial trap, Ingrain, and the
+  -- three trapping abilities.
+  if sim and b.fighter then
+    local okT, trapped = pcall(sim.isTrapped, sim, b)
+    if okT and trapped then return nil end
+    local okE, blocker = pcall(S.Abilities.escapeBlocker, sim, b)
+    if okE and blocker then return nil end
+  else
+    local a = t and t.ability
+    if a == "SHADOW_TAG" or (a == "ARENA_TRAP" and b.ability ~= LEVITATE_T
+        and not hasType(b, S.Types.ID.FLYING)) then
+      return nil
+    end
+    if a == "MAGNET_PULL" and hasType(b, S.Types.ID.STEEL) then return nil end
+  end
+  local bench = self:_bench3(ctx)
+  if #bench == 0 then return nil end
+  local rng = self.rng
+
+  local function to(entry)
+    if not entry then
+      entry = self:_replacement3(ctx)
+      if not entry then return nil end
+      return { action = "switch", slot = int3(entry.slot, 0) }
+    end
+    return { action = "switch", slot = int3(entry.mon.slot, 0) }
+  end
+
+  -- ShouldSwitchIfPerishSong: the count has run out.
+  if b.perishTurns ~= nil and int3(b.perishTurns, 1) == 0 then return to(nil) end
+
+  -- ShouldSwitchIfWonderGuard: nothing of ours gets past it, a bench mon's
+  -- does (each super-effective find rolls 2-in-3).
+  if t and t.ability == "WONDER_GUARD" and not self:_superMove3(ctx, b, t, b.moves) then
+    for _, entry in ipairs(bench) do
+      local pb = pseudoBattler(entry.mon, S, b.side)
+      for _, mv in ipairs(entry.mon.moves or {}) do
+        if self:_superMove3(ctx, pb, t, { mv }) and rng(0, 2) < 2 then return to(entry) end
+      end
+    end
+  end
+
+  local last = self:_lastLanded3(ctx)
+  -- FindMonThatAbsorbsOpponentsMove.
+  do
+    local skip = (self:_superMove3(ctx, b, t, b.moves) and rng(0, 2) ~= 0) or last == nil
+    if not skip and int3(last.power, 0) > 0 then
+      local T = S.Types.ID
+      local mt = int3(last.type, 0)
+      local absorb = (mt == T.FIRE and "FLASH_FIRE") or (mt == T.WATER and "WATER_ABSORB")
+        or (mt == T.ELECTRIC and "VOLT_ABSORB") or nil
+      if absorb and b.ability ~= absorb then
+        for _, entry in ipairs(bench) do
+          if S.Abilities.nameOf(entry.mon.ability) == absorb and rng(0, 1) == 1 then
+            return to(entry)
+          end
+        end
+      end
+    end
+  end
+
+  -- ShouldSwitchIfNaturalCure: statused, healthy enough, and a coin flip.
+  if statusOf3(b) and b.ability == "NATURAL_CURE" and hpOf(b) >= math.floor(maxHpOf(b) / 2) then
+    if (last == nil or int3(last.power, 0) == 0) and rng(0, 1) == 1 then return to(nil) end
+  end
+
+  -- HasSuperEffectiveMoveAgainstOpponents (9-in-10 per find), or boosted.
+  for _, mv in ipairs(b.moves or {}) do
+    if self:_superMove3(ctx, b, t, { mv }) and rng(0, 9) ~= 0 then return nil end
+  end
+  local raised = 0
+  for _, v in pairs(b.stages or {}) do
+    if (tonumber(v) or 0) > 0 then raised = raised + v end
+  end
+  if raised > 3 then return nil end
+
+  -- FindMonWithFlagsAndSuperEffective: a bench mon the last hit could not
+  -- touch (1-in-2), then one it barely scratches (1-in-3), each with a move
+  -- that hits back super effectively.
+  if last and int3(last.power, 0) > 0 and ctx.b.lastHitBy ~= nil then
+    local attacker = t
+    for _, spec in ipairs({ { "immune", 2 }, { "notVery", 3 } }) do
+      for _, entry in ipairs(bench) do
+        local pb = pseudoBattler(entry.mon, S, b.side)
+        local product = self:_product3(ctx, int3(last.type, 0), pb)
+        local immune = product == 0 or (self:_negated3(ctx, attacker, pb, last) ~= nil)
+        local hit = (spec[1] == "immune" and immune)
+          or (spec[1] == "notVery" and not immune and product < 100)
+        if hit then
+          for _, mv in ipairs(entry.mon.moves or {}) do
+            if self:_superMove3(ctx, pb, attacker, { mv }) and rng(0, spec[2] - 1) == 0 then
+              return to(entry)
+            end
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- ------- GetMostSuitableMonToSwitchInto (battle_ai_switch_items.c:596)
+--
+-- The cart's own two passes, and the first is ported as the cart wrote it:
+-- it scores each bench mon by how the *opponent's* types fare against the
+-- bench mon's types and keeps the highest -- the famous backwards test that
+-- sends in the mon the player's typing hits hardest -- and then accepts it
+-- only if it has a super-effective move of its own.  The engine keeps the same
+-- reading (Engine.mostSuitableMon); an opponent that played better than the
+-- cart here would be a different game.  The second pass takes whoever deals
+-- the most damage.
+function M:_replacement3(ctx)
+  local S, t = ctx.S, ctx.t
+  local candidates = {}
+  for _, mon in ipairs(ctx.party) do
+    if mon ~= ctx.b.mon and int3(mon.hp, 0) > 0 then candidates[#candidates + 1] = mon end
+  end
+  if #candidates == 0 then return nil end
+  if not t then return candidates[1] end
+  local invalid = {}
+  while true do
+    local best, bestV = nil, 0
+    for _, mon in ipairs(candidates) do
+      if not invalid[mon] then
+        local pb = pseudoBattler(mon, S, ctx.b.side)
+        local v = 100
+        for _, oType in ipairs({ t.type1, t.type2 or t.type1 }) do
+          v = math.floor(v * self:_product3(ctx, oType, pb) / 100)
+        end
+        if bestV < v then best, bestV = mon, v end
+      end
+    end
+    if not best then break end
+    local pb = pseudoBattler(best, S, ctx.b.side)
+    if self:_superMove3(ctx, pb, t, best.moves) then return best end
+    invalid[best] = true
+  end
+  local best, bestDmg = nil, -1
+  for _, mon in ipairs(candidates) do
+    local pb = pseudoBattler(mon, S, ctx.b.side)
+    for _, mv in ipairs(mon.moves or {}) do
+      if int3(mv.power, 0) ~= 1 then
+        local d = self:_damage3(ctx, pb, t, mv, 100)
+        if d > bestDmg then best, bestDmg = mon, d end
+      end
+    end
+  end
+  return best or candidates[1]
+end
+
+-- ------- ShouldUseItem (battle_ai_switch_items.c:562, engine ai_items.lua)
+--
+-- The trainer's four item slots, in order, each spent to empty once used; a
+-- slot past the first is only reached when the trainer is down to as many
+-- monsters as it has items left after it (the cart's rationing).  The kind
+-- of each item is read off the referee's own bag catalog, the same table the
+-- use is refereed by.
+function M:_shouldUseItem3(ctx)
+  local items = self.items3
+  if type(items) ~= "table" or #items == 0 then return nil end
+  local b, S = ctx.b, ctx.S
+  local valid = 0
+  for _, mon in ipairs(ctx.party) do
+    if int3(mon.hp, 0) > 0 then valid = valid + 1 end
+  end
+  local hp, maxHp = hpOf(b), maxHpOf(b)
+  local firstTurn = int3(b.isFirstTurn, 0) > 0
+  local status = statusOf3(b)
+  for i = 0, 3 do
+    if not (i > 0 and valid > (self.itemsNo3 - i) + 1) then
+      local id = items[i + 1] or 0
+      local effect = id ~= 0 and S.Items.bagEffect(id) or nil
+      local use = false
+      if effect then
+        if id == 19 then
+          use = hp < math.floor(maxHp / 4) and hp ~= 0
+        elseif effect.heal or effect.healFull then
+          local param = effect.healFull and 255 or int3(effect.heal, 0)
+          use = param ~= 0 and hp ~= 0 and (hp < math.floor(maxHp / 4) or maxHp - hp > param)
+        elseif effect.cure or effect.confusion then
+          if status and effect.cure and effect.cure[status] then use = true end
+          if effect.confusion and int3(b.confusion, 0) > 0 then use = true end
+        elseif effect.stage or effect.focusEnergy then
+          use = firstTurn
+        elseif effect.mist then
+          use = firstTurn and int3(ctx.mySide.mistTurns, 0) == 0
+        end
+      end
+      if use and (ctx.bag == nil or (tonumber(ctx.bag[id]) or 0) > 0) then
+        items[i + 1] = 0
+        return { action = "item", item = id }
+      end
+    end
+  end
+  return nil
+end
+
+-- ------- the scripts
+
+-- EFFECT_* groups, by the scripts that name them.  Built on first use from
+-- BattleSim3's own effect table so the numbers are written down once.
+local groups3
+
+local function groupsOf(E)
+  if groups3 then return groups3 end
+  local function set(...)
+    local out = {}
+    for _, name in ipairs({ ... }) do
+      if E[name] then out[E[name]] = true end
+    end
+    return out
+  end
+  groups3 = {
+    selfUp = {
+      [E.ATTACK_UP] = "atk", [E.DEFENSE_UP] = "def", [E.SPEED_UP] = "spe",
+      [E.SPECIAL_ATTACK_UP] = "spa", [E.SPECIAL_DEFENSE_UP] = "spd",
+      [E.ACCURACY_UP] = "acc", [E.EVASION_UP] = "eva",
+      [E.ATTACK_UP_2] = "atk", [E.DEFENSE_UP_2] = "def", [E.SPEED_UP_2] = "spe",
+      [E.SPECIAL_ATTACK_UP_2] = "spa", [E.SPECIAL_DEFENSE_UP_2] = "spd",
+      [E.ACCURACY_UP_2] = "acc", [E.EVASION_UP_2] = "eva",
+      [E.DEFENSE_CURL] = "def", [E.MINIMIZE] = "eva",
+    },
+    foeDown = {
+      [E.ATTACK_DOWN] = "atk", [E.DEFENSE_DOWN] = "def", [E.SPEED_DOWN] = "spe",
+      [E.SPECIAL_ATTACK_DOWN] = "spa", [E.SPECIAL_DEFENSE_DOWN] = "spd",
+      [E.ACCURACY_DOWN] = "acc", [E.EVASION_DOWN] = "eva",
+      [E.ATTACK_DOWN_2] = "atk", [E.DEFENSE_DOWN_2] = "def", [E.SPEED_DOWN_2] = "spe",
+      [E.SPECIAL_ATTACK_DOWN_2] = "spa", [E.SPECIAL_DEFENSE_DOWN_2] = "spd",
+      [E.ACCURACY_DOWN_2] = "acc", [E.EVASION_DOWN_2] = "eva",
+    },
+    heal = set("RESTORE_HP", "MORNING_SUN", "SYNTHESIS", "MOONLIGHT", "SOFTBOILED", "SWALLOW"),
+    sunHeal = set("MORNING_SUN", "SYNTHESIS", "MOONLIGHT"),
+    weather = { [E.RAIN_DANCE] = "RAIN", [E.SUNNY_DAY] = "SUN",
+                [E.SANDSTORM] = "SAND", [E.HAIL] = "HAIL" },
+    -- AI_SetupFirstTurn_SetupEffectsToEncourage (battle_ai_scripts.s)
+    setup = set("ATTACK_UP", "DEFENSE_UP", "SPEED_UP", "SPECIAL_ATTACK_UP",
+      "SPECIAL_DEFENSE_UP", "ACCURACY_UP", "EVASION_UP", "ATTACK_DOWN", "DEFENSE_DOWN",
+      "SPEED_DOWN", "SPECIAL_ATTACK_DOWN", "SPECIAL_DEFENSE_DOWN", "ACCURACY_DOWN",
+      "EVASION_DOWN", "CONVERSION", "LIGHT_SCREEN", "SPECIAL_DEFENSE_UP_2", "FOCUS_ENERGY",
+      "CONFUSE", "ATTACK_UP_2", "DEFENSE_UP_2", "SPEED_UP_2", "SPECIAL_ATTACK_UP_2",
+      "ACCURACY_UP_2", "EVASION_UP_2", "ATTACK_DOWN_2", "DEFENSE_DOWN_2", "SPEED_DOWN_2",
+      "SPECIAL_ATTACK_DOWN_2", "SPECIAL_DEFENSE_DOWN_2", "ACCURACY_DOWN_2", "EVASION_DOWN_2",
+      "REFLECT", "POISON", "PARALYZE", "SUBSTITUTE", "LEECH_SEED", "MINIMIZE", "CURSE",
+      "SWAGGER", "CAMOUFLAGE", "YAWN", "DEFENSE_CURL", "TORMENT", "FLATTER", "WILL_O_WISP",
+      "INGRAIN", "IMPRISON", "TEETER_DANCE", "TICKLE", "DOUBLE_TEAM", "COSMIC_POWER",
+      "BULK_UP", "CALM_MIND", "DRAGON_DANCE"),
+    -- AI_Risky_EffectsToEncourage
+    risky = set("SLEEP", "EXPLOSION", "MIRROR_MOVE", "OHKO", "HIGH_CRITICAL", "CONFUSE",
+      "METRONOME", "PSYWAVE", "COUNTER", "DESTINY_BOND", "SWAGGER", "ATTRACT", "PRESENT",
+      "ALL_STATS_UP_HIT", "BELLY_DRUM", "MIRROR_COAT", "FOCUS_PUNCH", "REVENGE",
+      "TEETER_DANCE"),
+    -- sDiscouragedPowerfulMoveEffects (battle_ai_script_commands.c)
+    discouraged = set("EXPLOSION", "DREAM_EATER", "RAZOR_WIND", "SKY_ATTACK", "RECHARGE",
+      "SKULL_BASH", "SOLAR_BEAM", "SPIT_UP", "FOCUS_PUNCH", "SUPERPOWER", "ERUPTION",
+      "OVERHEAT"),
+    -- AI_HPAware's three lists (battle_ai_scripts.s)
+    hpHigh = set("EXPLOSION", "RESTORE_HP", "REST", "DESTINY_BOND", "FLAIL", "ENDURE",
+      "MORNING_SUN", "SYNTHESIS", "MOONLIGHT", "SOFTBOILED", "MEMENTO", "GRUDGE", "OVERHEAT"),
+    hpMedium = set("EXPLOSION", "ATTACK_UP", "DEFENSE_UP", "SPEED_UP", "SPECIAL_ATTACK_UP",
+      "SPECIAL_DEFENSE_UP", "ACCURACY_UP", "EVASION_UP", "ATTACK_DOWN", "DEFENSE_DOWN",
+      "SPEED_DOWN", "SPECIAL_ATTACK_DOWN", "SPECIAL_DEFENSE_DOWN", "ACCURACY_DOWN",
+      "EVASION_DOWN", "BIDE", "CONVERSION", "LIGHT_SCREEN", "MIST", "FOCUS_ENERGY",
+      "ATTACK_UP_2", "DEFENSE_UP_2", "SPEED_UP_2", "SPECIAL_ATTACK_UP_2",
+      "SPECIAL_DEFENSE_UP_2", "ACCURACY_UP_2", "EVASION_UP_2", "ATTACK_DOWN_2",
+      "DEFENSE_DOWN_2", "SPEED_DOWN_2", "SPECIAL_ATTACK_DOWN_2", "SPECIAL_DEFENSE_DOWN_2",
+      "ACCURACY_DOWN_2", "EVASION_DOWN_2", "CONVERSION_2", "SAFEGUARD", "BELLY_DRUM",
+      "TICKLE", "COSMIC_POWER", "BULK_UP", "CALM_MIND", "DRAGON_DANCE"),
+    hpLow = set("ATTACK_UP", "DEFENSE_UP", "SPEED_UP", "SPECIAL_ATTACK_UP",
+      "SPECIAL_DEFENSE_UP", "ACCURACY_UP", "EVASION_UP", "ATTACK_DOWN", "DEFENSE_DOWN",
+      "SPEED_DOWN", "SPECIAL_ATTACK_DOWN", "SPECIAL_DEFENSE_DOWN", "ACCURACY_DOWN",
+      "EVASION_DOWN", "BIDE", "CONVERSION", "LIGHT_SCREEN", "MIST", "FOCUS_ENERGY",
+      "ATTACK_UP_2", "DEFENSE_UP_2", "SPEED_UP_2", "SPECIAL_ATTACK_UP_2",
+      "SPECIAL_DEFENSE_UP_2", "ACCURACY_UP_2", "EVASION_UP_2", "ATTACK_DOWN_2",
+      "DEFENSE_DOWN_2", "SPEED_DOWN_2", "SPECIAL_ATTACK_DOWN_2", "SPECIAL_DEFENSE_DOWN_2",
+      "ACCURACY_DOWN_2", "EVASION_DOWN_2", "RAGE", "CONVERSION_2", "LOCK_ON", "SAFEGUARD",
+      "BELLY_DRUM", "PSYCH_UP", "MIRROR_COAT", "SOLAR_BEAM", "ERUPTION", "TICKLE",
+      "COSMIC_POWER", "BULK_UP", "CALM_MIND", "DRAGON_DANCE"),
+    targetLow = set("SLEEP", "EXPLOSION", "ATTACK_UP", "DEFENSE_UP", "SPEED_UP",
+      "SPECIAL_ATTACK_UP", "SPECIAL_DEFENSE_UP", "ACCURACY_UP", "EVASION_UP", "ATTACK_DOWN",
+      "DEFENSE_DOWN", "SPEED_DOWN", "SPECIAL_ATTACK_DOWN", "SPECIAL_DEFENSE_DOWN",
+      "ACCURACY_DOWN", "EVASION_DOWN", "BIDE", "CONVERSION", "TOXIC", "LIGHT_SCREEN",
+      "OHKO", "SUPER_FANG", "FOCUS_ENERGY", "CONFUSE", "ATTACK_UP_2", "DEFENSE_UP_2",
+      "SPEED_UP_2", "SPECIAL_ATTACK_UP_2", "SPECIAL_DEFENSE_UP_2", "ACCURACY_UP_2",
+      "EVASION_UP_2", "ATTACK_DOWN_2", "DEFENSE_DOWN_2", "SPEED_DOWN_2",
+      "SPECIAL_ATTACK_DOWN_2", "SPECIAL_DEFENSE_DOWN_2", "ACCURACY_DOWN_2",
+      "EVASION_DOWN_2", "POISON", "PARALYZE", "PAIN_SPLIT", "CONVERSION_2", "LOCK_ON",
+      "SAFEGUARD", "BELLY_DRUM", "PSYCH_UP", "MIRROR_COAT", "SOLAR_BEAM", "ERUPTION",
+      "TICKLE", "COSMIC_POWER", "BULK_UP", "CALM_MIND", "DRAGON_DANCE"),
+  }
+  return groups3
+end
+
+-- pret's MOVE_POWER_* reading: "other" for a non-damaging or discouraged move,
+-- else "best" when nothing else on the list would deal more.
+local function powerClasses(self, ctx, legal, est, G)
+  local out = {}
+  local moves = ctx.b.moves
+  local E = ctx.S.Effects.E
+  local function counted(i)
+    local mv = moves[i]
+    return int3(mv.power, 0) > 1 and not G.discouraged[int3(mv.effect, 0)]
+      and not fixedSet(E)[int3(mv.effect, 0)] and int3(mv.effect, 0) ~= E.OHKO
+  end
+  for _, i in ipairs(legal) do
+    if not counted(i) then
+      out[i] = "other"
+    else
+      local best = true
+      for _, j in ipairs(legal) do
+        if j ~= i and counted(j) and (est[j] or 0) > (est[i] or 0) then best = false end
+      end
+      out[i] = best and "best" or "notbest"
+    end
+  end
+  return out
+end
+
+function M:_chooseMove3(ctx, legal)
+  local S, b, t = ctx.S, ctx.b, ctx.t
+  local E = S.Effects.E
+  local G = groupsOf(E)
+  local rng = self.rng
+  local flags = self.aiFlags
+  local moves = b.moves
+
+  -- No scripts at all: the controller picks a usable slot at random.
+  if flags == 0 then
+    return { action = "fight", move = legal[rng(1, #legal)] - 1 }
+  end
+
+  local scores, est = {}, {}
+  for _, i in ipairs(legal) do
+    scores[i] = 100
+    -- AI_THINKING_STRUCT->simulatedRNG[i] = 100 - (Random() % 16)
+    est[i] = self:_damage3(ctx, b, t, moves[i], 100 - rng(0, 15))
+  end
+  local power = powerClasses(self, ctx, legal, est, G)
+  local rand = function() return rng(0, 255) end
+
+  if self:_flag3("CHECK_BAD_MOVE") then
+    for _, i in ipairs(legal) do scores[i] = scores[i] + self:_checkBad3(ctx, moves[i], G) end
+  end
+  if self:_flag3("TRY_TO_FAINT") then
+    for _, i in ipairs(legal) do
+      local mv = moves[i]
+      local eff = int3(mv.effect, 0)
+      if isDamaging(mv, E) and est[i] >= hpOf(t) and est[i] > 0 then
+        if eff ~= E.EXPLOSION then
+          scores[i] = scores[i] + 4
+          if eff == E.QUICK_ATTACK then scores[i] = scores[i] + 2 end
+        end
+      elseif power[i] == "notbest" then
+        scores[i] = scores[i] - 1
+      elseif isDamaging(mv, E) and self:_product3(ctx, self:_moveType3(ctx, b, mv), t) >= 400
+          and rand() >= 80 then
+        scores[i] = scores[i] + 2
+      end
+    end
+  end
+  if self:_flag3("CHECK_VIABILITY") then
+    for _, i in ipairs(legal) do scores[i] = scores[i] + self:_viability3(ctx, moves[i], G, est[i]) end
+  end
+  if self:_flag3("SETUP_FIRST_TURN") and ctx.turnCount == 0 then
+    for _, i in ipairs(legal) do
+      if G.setup[int3(moves[i].effect, 0)] and rand() >= 80 then scores[i] = scores[i] + 2 end
+    end
+  end
+  if self:_flag3("RISKY") then
+    for _, i in ipairs(legal) do
+      if G.risky[int3(moves[i].effect, 0)] and rand() >= 128 then scores[i] = scores[i] + 2 end
+    end
+  end
+  if self:_flag3("PREFER_STRONGEST_MOVE") then
+    for _, i in ipairs(legal) do
+      if power[i] == "best" and rand() >= 100 then scores[i] = scores[i] + 2 end
+    end
+  end
+  -- Emerald's AI_PreferPowerExtremes: the moves the power reading calls
+  -- "other" -- status moves and the fixed / discouraged ones.
+  if self:_flag3("PREFER_POWER_EXTREMES") then
+    for _, i in ipairs(legal) do
+      if power[i] == "other" and rand() >= 100 then scores[i] = scores[i] + 2 end
+    end
+  end
+  if self:_flag3("PREFER_BATON_PASS") then
+    local hasPass = false
+    for _, i in ipairs(legal) do
+      if int3(moves[i].effect, 0) == E.BATON_PASS then hasPass = true end
+    end
+    if hasPass then
+      local raised = 0
+      for _, v in pairs(b.stages or {}) do
+        if (tonumber(v) or 0) > 0 then raised = raised + v end
+      end
+      for _, i in ipairs(legal) do
+        local eff = int3(moves[i].effect, 0)
+        if eff == E.BATON_PASS then
+          scores[i] = scores[i] + ((raised > 0) and 2 or -2)
+        elseif (G.selfUp[eff] or eff == E.SUBSTITUTE or eff == E.INGRAIN) and ctx.turnCount <= 1 then
+          scores[i] = scores[i] + 3
+        end
+      end
+    end
+  end
+  if self:_flag3("HP_AWARE") then
+    local mine, theirs = pct(b), pct(t)
+    for _, i in ipairs(legal) do
+      local eff = int3(moves[i].effect, 0)
+      local list = (mine > 70 and G.hpHigh) or (mine > 30 and G.hpMedium) or G.hpLow
+      if list[eff] and rand() >= 50 then scores[i] = scores[i] - 2 end
+      if theirs <= 30 and G.targetLow[eff] and rand() >= 50 then scores[i] = scores[i] - 2 end
+    end
+  end
+  -- Emerald's AI_TrySunnyDayStart: open the fight with the sun.
+  if self:_flag3("TRY_SUNNY_DAY_START") and int3(b.isFirstTurn, 0) > 0 then
+    for _, i in ipairs(legal) do
+      if int3(moves[i].effect, 0) == E.SUNNY_DAY and ctx.weather ~= "SUN" then
+        scores[i] = scores[i] + 5
+      end
+    end
+  end
+
+  local best, pool = nil, {}
+  for _, i in ipairs(legal) do
+    local s = scores[i]
+    if best == nil or s > best then best, pool = s, { i }
+    elseif s == best then pool[#pool + 1] = i end
+  end
+  self.lastScores3 = scores
+  local pick = pool[rng(1, #pool)]
+  return { action = "fight", move = pick - 1 }
+end
+
+-- AI_CheckBadMove: the negations, then each effect's "this will fail" test.
+function M:_checkBad3(ctx, mv, G)
+  local S, b, t = ctx.S, ctx.b, ctx.t
+  local E, T = S.Effects.E, S.Types.ID
+  local eff = int3(mv.effect, 0)
+  local neg = self:_negated3(ctx, b, t, mv)
+  if neg then return neg end
+  local tAb = t.ability
+  local tStatus = statusOf3(t)
+  local tSafe = int3(ctx.foeSide.safeguardTurns, 0) > 0
+  local mtype = self:_moveType3(ctx, b, mv)
+  local immuneByType = self:_product3(ctx, mtype, t) == 0
+
+  local up = G.selfUp[eff]
+  if up then
+    if int3(b.stages and b.stages[up], 0) >= 6 then return -10 end
+    return 0
+  end
+  local down = G.foeDown[eff]
+  if down then
+    if int3(t.stages and t.stages[down], 0) <= -6 then return -10 end
+    if tAb == "CLEAR_BODY" or tAb == "WHITE_SMOKE" then return -10 end
+    if down == "atk" and tAb == "HYPER_CUTTER" then return -10 end
+    if down == "acc" and tAb == "KEEN_EYE" then return -10 end
+    if int3(ctx.foeSide.mistTurns, 0) > 0 then return -10 end
+    return 0
+  end
+  if eff == E.SLEEP or eff == E.YAWN then
+    if tAb == "INSOMNIA" or tAb == "VITAL_SPIRIT" then return -10 end
+    if tStatus or tSafe then return -10 end
+    if eff == E.YAWN and int3(t.yawnTurns, 0) > 0 then return -10 end
+  elseif eff == E.TOXIC or eff == E.POISON then
+    if hasType(t, T.POISON) or hasType(t, T.STEEL) or tAb == "IMMUNITY" then return -10 end
+    if tStatus or tSafe then return -10 end
+  elseif eff == E.PARALYZE then
+    if immuneByType or tAb == "LIMBER" then return -10 end
+    if tStatus or tSafe then return -10 end
+  elseif eff == E.WILL_O_WISP then
+    if hasType(t, T.FIRE) or tAb == "WATER_VEIL" or tAb == "FLASH_FIRE" then return -10 end
+    if tStatus or tSafe then return -10 end
+  elseif eff == E.CONFUSE or eff == E.SWAGGER or eff == E.FLATTER or eff == E.TEETER_DANCE then
+    if tAb == "OWN_TEMPO" or tSafe then return -10 end
+    if int3(t.confusion, 0) > 0 then return -5 end
+  elseif eff == E.ATTRACT then
+    local g1, g2 = b.mon and b.mon.gender, t.mon and t.mon.gender
+    if t.infatuatedWith ~= nil or tAb == "OBLIVIOUS" then return -10 end
+    if g1 == "U" or g2 == "U" or g1 == g2 then return -10 end
+  elseif eff == E.LEECH_SEED then
+    if hasType(t, T.GRASS) or t.seededBy ~= nil then return -10 end
+  elseif eff == E.DREAM_EATER or eff == E.NIGHTMARE then
+    if tStatus ~= "SLP" then return -8 end
+    if eff == E.NIGHTMARE and t.nightmare then return -10 end
+  elseif eff == E.OHKO then
+    if tAb == "STURDY" then return -10 end
+    if int3(t.mon.level, 1) > int3(b.mon.level, 1) then return -10 end
+  elseif eff == E.EXPLOSION then
+    if tAb == "DAMP" then return -10 end
+    -- the last mon standing does not blow itself up while the player has more
+    local mine = 0
+    for _, mon in ipairs(ctx.party) do
+      if mon ~= b.mon and int3(mon.hp, 0) > 0 then mine = mine + 1 end
+    end
+    if mine == 0 then
+      local theirs = 0
+      local fighter = t.fighter
+      for _, mon in ipairs((fighter and fighter.mons) or {}) do
+        if mon ~= t.mon and int3(mon.hp, 0) > 0 then theirs = theirs + 1 end
+      end
+      if theirs > 0 then return -10 end
+    end
+  elseif G.heal[eff] then
+    if hpOf(b) >= maxHpOf(b) then return -8 end
+  elseif eff == E.REST then
+    if hpOf(b) >= maxHpOf(b) then return -8 end
+    if b.ability == "INSOMNIA" or b.ability == "VITAL_SPIRIT" then return -10 end
+  elseif eff == E.BELLY_DRUM then
+    if pct(b) < 51 then return -10 end
+  elseif eff == E.SUBSTITUTE then
+    if int3(b.substituteHP, 0) > 0 then return -8 end
+    if pct(b) <= 25 then return -10 end
+  elseif eff == E.LIGHT_SCREEN then
+    if int3(ctx.mySide.lightScreenTurns, 0) > 0 then return -8 end
+  elseif eff == E.REFLECT then
+    if int3(ctx.mySide.reflectTurns, 0) > 0 then return -8 end
+  elseif eff == E.MIST then
+    if int3(ctx.mySide.mistTurns, 0) > 0 then return -8 end
+  elseif eff == E.SAFEGUARD then
+    if int3(ctx.mySide.safeguardTurns, 0) > 0 then return -8 end
+  elseif eff == E.FOCUS_ENERGY then
+    if b.focusEnergy then return -10 end
+  elseif eff == E.SPIKES then
+    if int3(ctx.foeSide.spikes, 0) >= 3 then return -10 end
+  elseif G.weather[eff] then
+    if ctx.weather == G.weather[eff] then return -8 end
+  elseif eff == E.ROAR then
+    if tAb == "SUCTION_CUPS" or t.ingrain then return -10 end
+    local bench = 0
+    for _, mon in ipairs((t.fighter and t.fighter.mons) or {}) do
+      if mon ~= t.mon and int3(mon.hp, 0) > 0 then bench = bench + 1 end
+    end
+    if bench == 0 then return -10 end
+  elseif eff == E.DISABLE then
+    if t.disabledNum then return -8 end
+  elseif eff == E.ENCORE then
+    if int3(t.encoreTurns, 0) > 0 then return -8 end
+  elseif eff == E.TAUNT then
+    if int3(t.tauntTurns, 0) > 0 then return -1 end
+  elseif eff == E.TORMENT then
+    if t.tormented then return -10 end
+  elseif eff == E.FORESIGHT then
+    if t.identified then return -10 end
+  elseif eff == E.PERISH_SONG then
+    if t.perishTurns ~= nil then return -10 end
+  elseif eff == E.MEAN_LOOK then
+    if t.trappedBy ~= nil then return -10 end
+  elseif eff == E.INGRAIN then
+    if b.ingrain then return -10 end
+  elseif eff == E.SNORE or eff == E.SLEEP_TALK then
+    if statusOf3(b) ~= "SLP" then return -8 end
+  elseif eff == E.FAKE_OUT then
+    if int3(b.isFirstTurn, 0) <= 0 then return -10 end
+  elseif eff == E.STOCKPILE then
+    if int3(b.stockpile, 0) >= 3 then return -10 end
+  elseif eff == E.SPIT_UP or eff == E.SWALLOW then
+    if int3(b.stockpile, 0) == 0 then return -10 end
+  elseif eff == E.REFRESH then
+    local s = statusOf3(b)
+    if not (s == "PSN" or s == "TOX" or s == "BRN" or s == "PAR") then return -10 end
+  elseif eff == E.HELPING_HAND or eff == E.FOLLOW_ME then
+    return -10   -- a singles fight has nobody to help or to draw fire from
+  elseif eff == E.TRICK then
+    if int3(b.mon.heldItem, 0) == 0 and int3(t.mon.heldItem, 0) == 0 then return -10 end
+    if tAb == "STICKY_HOLD" then return -10 end
+  elseif eff == E.KNOCK_OFF or eff == E.THIEF then
+    -- still damaging; the item half simply has nothing to take
+    return 0
+  elseif eff == E.RECYCLE then
+    if not b.usedHeldItem or int3(b.mon.heldItem, 0) ~= 0 then return -10 end
+  elseif eff == E.MEMENTO then
+    if int3(t.stages and t.stages.atk, 0) <= -6 and int3(t.stages and t.stages.spa, 0) <= -6 then
+      return -10
+    end
+  elseif eff == E.TICKLE then
+    if int3(t.stages and t.stages.atk, 0) <= -6 and int3(t.stages and t.stages.def, 0) <= -6 then
+      return -10
+    end
+  elseif eff == E.COSMIC_POWER then
+    if int3(b.stages.def, 0) >= 6 and int3(b.stages.spd, 0) >= 6 then return -10 end
+  elseif eff == E.BULK_UP then
+    if int3(b.stages.atk, 0) >= 6 and int3(b.stages.def, 0) >= 6 then return -10 end
+  elseif eff == E.CALM_MIND then
+    if int3(b.stages.spa, 0) >= 6 and int3(b.stages.spd, 0) >= 6 then return -10 end
+  elseif eff == E.DRAGON_DANCE then
+    if int3(b.stages.atk, 0) >= 6 and int3(b.stages.spe, 0) >= 6 then return -10 end
+  elseif eff == E.MUD_SPORT then
+    if b.mudSport then return -10 end
+  elseif eff == E.WATER_SPORT then
+    if b.waterSport then return -10 end
+  elseif eff == E.BATON_PASS then
+    local bench = 0
+    for _, mon in ipairs(ctx.party) do
+      if mon ~= b.mon and int3(mon.hp, 0) > 0 then bench = bench + 1 end
+    end
+    if bench == 0 then return -10 end
+  elseif eff == E.PROTECT or eff == E.ENDURE then
+    if int3(b.protectStreak, 0) > 0 then return -2 end
+  end
+  return 0
+end
+
+-- AI_CheckViability's readings a sheet can answer: heal thresholds, the
+-- weather's effect on the move, stat-change sense, status against a target
+-- that is nearly down, the self-KO trade.
+function M:_viability3(ctx, mv, G, estimate)
+  local S, b, t = ctx.S, ctx.b, ctx.t
+  local E, T = S.Effects.E, S.Types.ID
+  local eff = int3(mv.effect, 0)
+  local rng = self.rng
+  local mine, theirs = pct(b), pct(t)
+  local w = ctx.weather
+  local faster = false
+  do
+    local okS, Field = pcall(need, "BattleSim3/Field")
+    if okS and type(Field) == "table" and type(Field.speed) == "function" then
+      faster = Field.speed(b, w) > Field.speed(t, w)
+    end
+  end
+  local score = 0
+
+  if G.heal[eff] or eff == E.REST then
+    if mine >= 100 then score = score - 3
+    elseif mine > 80 and rng(0, 255) >= 70 then score = score - 3
+    elseif mine < 40 then score = score + ((faster or rng(0, 255) >= 128) and 2 or 1)
+    elseif rng(0, 255) >= 128 then score = score + 1 end
+    if G.sunHeal[eff] then
+      if w == "SUN" then score = score + 1 elseif w then score = score - 1 end
+    end
+  elseif G.selfUp[eff] then
+    local stage = int3(b.stages and b.stages[G.selfUp[eff]], 0)
+    if stage >= 3 then score = score - 1 end
+    if mine < 70 and rng(0, 255) >= 128 then score = score - 2 end
+    if mine >= 100 and stage == 0 and rng(0, 255) >= 128 then score = score + 1 end
+  elseif G.foeDown[eff] then
+    local stage = int3(t.stages and t.stages[G.foeDown[eff]], 0)
+    if stage <= -3 then score = score - 1 end
+    if theirs < 70 and rng(0, 255) >= 128 then score = score - 2 end
+  elseif eff == E.SLEEP or eff == E.TOXIC or eff == E.POISON or eff == E.PARALYZE
+      or eff == E.WILL_O_WISP or eff == E.LEECH_SEED or eff == E.CONFUSE then
+    if theirs <= 50 and rng(0, 255) >= 128 then score = score - 1 end
+    if eff == E.SLEEP then
+      -- a sleeper is worth more to a mon that knows Dream Eater / Nightmare
+      for _, other in ipairs(b.moves or {}) do
+        local oe = int3(other.effect, 0)
+        if oe == E.DREAM_EATER or oe == E.NIGHTMARE then score = score + 1; break end
+      end
+    end
+    if eff == E.PARALYZE and not faster and rng(0, 255) >= 64 then score = score + 1 end
+  elseif eff == E.EXPLOSION then
+    if mine >= 80 and theirs > 50 then score = score - 3
+    elseif mine < 30 then score = score + 1 end
+  elseif eff == E.PROTECT then
+    local s = statusOf3(t)
+    if s == "TOX" or s == "PSN" or s == "BRN" or t.seededBy ~= nil or t.cursed then
+      score = score + 1
+    end
+  elseif eff == E.SUBSTITUTE then
+    if mine < 50 then score = score - 1 end
+  elseif G.weather[eff] then
+    local want = G.weather[eff]
+    if mine < 40 then score = score - 1 end
+    local ab = b.ability
+    if (want == "RAIN" and ab == "SWIFT_SWIM") or (want == "SUN" and ab == "CHLOROPHYLL") then
+      score = score + 1
+    end
+    if want == "RAIN" and hasType(b, T.WATER) then score = score + 1 end
+    if want == "SUN" and hasType(b, T.FIRE) then score = score + 1 end
+    if (want == "SAND" and (hasType(b, T.ROCK) or hasType(b, T.GROUND) or hasType(b, T.STEEL)))
+        or (want == "HAIL" and hasType(b, T.ICE)) then
+      score = score + 1
+    end
+    if w and w ~= want then score = score + 1 end
+  elseif eff == E.THUNDER then
+    if w == "RAIN" then score = score + 1 elseif w == "SUN" then score = score - 1 end
+  elseif eff == E.SOLAR_BEAM then
+    if w == "SUN" then score = score + 1
+    elseif w == "RAIN" or w == "SAND" or w == "HAIL" then score = score - 1 end
+  elseif eff == E.WEATHER_BALL then
+    if w then score = score + 1 end
+  elseif eff == E.THIEF or eff == E.KNOCK_OFF or eff == E.TRICK then
+    if int3(t.mon.heldItem, 0) ~= 0 and t.ability ~= "STICKY_HOLD" then score = score + 1 end
+    if eff == E.THIEF and int3(b.mon.heldItem, 0) ~= 0 then score = score - 1 end
+  elseif eff == E.OHKO then
+    if theirs < 50 then score = score - 1 end
+  end
+  -- A damaging move the player's ability would feed (Flash Fire) or a fire
+  -- move into rain / water move into sun is priced by the formula already;
+  -- a move that does nothing this turn at all is CheckBadMove's to punish.
+  if estimate ~= nil and isDamaging(mv, E) and estimate == 0 then score = score - 1 end
+  return score
 end
 
 return M

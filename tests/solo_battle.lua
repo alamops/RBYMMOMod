@@ -1302,6 +1302,39 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- Gen 3's statics, and that none of them reaches this generation's path
+-- ------------------------------------------------------------------
+--
+-- The Gen 3 fight itself is tests/gen3_solo.lua (it needs the game3 stand-ins
+-- and the modal stack). What is pinned here is the vocabulary the Gen 3
+-- divert is decided with -- all pure functions -- and that the referee per
+-- generation is still the one this file was written against.
+
+;(function()
+  eq(Solo.turnFor(1), Turn, "turnFor(1) is still BattleSim")
+  eq(Solo.turnFor(3), need("BattleSim3/Turn"), "turnFor(3) is BattleSim3")
+  ok(Solo.gen3Refused({ safari = true }), "gen3Refused: a safari opt")
+  ok(Solo.gen3Refused({}, { roamer = true }), "gen3Refused: a roamer foe")
+  ok(Solo.gen3Refused(nil, nil, { kinds = { tutorial = "wally" } }),
+     "gen3Refused: a kinds table on any argument")
+  ok(not Solo.gen3Refused({ firstBattle = false, trainerId = 5 }, {}),
+     "gen3Refused: firstBattle = false is an ordinary trainer")
+  ok(Solo.gen3Double({ double = true }, {}), "gen3Double: the double flag")
+  ok(not Solo.gen3Double({}, { doubleBattle = false }), "gen3Double: a single")
+  eq(Solo.gen3Result("win", "catch"), "caught", "gen3Result: a catch")
+  eq(Solo.gen3Result("loss", "run"), "run", "gen3Result: the player ran")
+  eq(Solo.gen3Result("win", "run"), "fled", "gen3Result: the wild mon left")
+  eq(Solo.gen3Result("draw", "ko", true), "lose", "gen3Result: a whiteout draw is a defeat")
+  eq(Solo.gen3Kind({ wild = true }), "wild", "gen3Kind: wild")
+  eq(Solo.gen3Kind({ trainerId = 7 }), "trainer", "gen3Kind: trainer")
+  local s = Solo.new(nil, { enabled = function() return true end })
+  eq(s:fromGen3Encounter({ generation = 1, save = {} }, { species = 1, level = 5 }, {}), false,
+     "the Gen 3 entries decline on a Gen 1 game")
+  eq(s:fromGen3Trainer({ generation = 1, save = {} }, 5, {}), false, "...both of them")
+  eq(s:isRunning(), false, "and nothing was started")
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
