@@ -18,7 +18,138 @@ if os.getenv("MMO_SOUND") ~= "1" then
   end
 end
 
+-- ------- Gen 3 (FireRed / LeafGreen / Emerald)
+--
+-- A Game3 has no StateStack. Its menus live on the module-level modal stack
+-- src/ui/game3/stack.lua (layers keyed by id, the top one alone getting
+-- input), the cart's own dialogue is src/ui/game3/message.lua and its YES /
+-- NO is src/ui/game3/choice.lua -- neither of those two is a layer. Every
+-- helper below that reads "what is on screen" gets a Gen 3 arm that looks at
+-- those three instead, and every arm is taken only on a Game3 (which carries
+-- `generation = 3` on the instance itself), so a Gen 1 or Gen 2 run walks
+-- exactly the code it always walked.
+--
+-- The mod's own screens need no translation: src/Gen3Ui.lua's driver
+-- contract makes the layer's `mod` the screen object, with `items[i].label`,
+-- `index` / `cursor`, `text` / `pages` / `waiting`, and the naming grid's
+-- `glyphs` / `grid()` / `row` / `col` / `title` -- the Gen 1 widget fields
+-- this file already reads. Engine layers are presented through small views:
+-- START as a menu (its rows are StartMenu.ENTRIES, its cursor
+-- StartMenu.cursor), the cart's message as a text box and its YES / NO as a
+-- choice -- one stable table each, so "is the same thing still on top"
+-- comparisons keep working across calls.
+local function g3(game)
+  return type(game) == "table" and rawget(game, "generation") == 3
+end
+M.isGen3 = g3
+
+local function g3mod(name)
+  local ok, mod = pcall(require, name)
+  if ok and type(mod) == "table" then return mod end
+  return nil
+end
+
+local g3Views = {}
+
+local function g3StartView()
+  if g3Views.start then return g3Views.start end
+  g3Views.start = setmetatable({ id = "start", g3Engine = "start" }, {
+    __index = function(_, key)
+      local SM = package.loaded["src.ui.game3.start_menu"]
+      if not SM then return nil end
+      if key == "items" then return SM.ENTRIES end
+      if key == "index" or key == "cursor" then return SM.cursor end
+      return nil
+    end,
+  })
+  return g3Views.start
+end
+
+local function g3MessageView()
+  if g3Views.message then return g3Views.message end
+  g3Views.message = setmetatable({ g3Engine = "message" }, {
+    __index = function(_, key)
+      local Message = package.loaded["src.ui.game3.message"]
+      if not Message then return nil end
+      if key == "pages" then
+        local ok, page = pcall(Message.currentPage)
+        local text = ok and page or nil
+        if type(text) == "table" then text = table.concat(text, " ") end
+        return { { tostring(text or "") } }
+      end
+      if key == "waiting" then return Message.isWaiting and Message.isWaiting() end
+      return nil
+    end,
+  })
+  return g3Views.message
+end
+
+local function g3ChoiceView()
+  if g3Views.choice then return g3Views.choice end
+  g3Views.choice = setmetatable({ g3Engine = "choice", onChoose = true }, {
+    __index = function(_, key)
+      local Choice = package.loaded["src.ui.game3.choice"]
+      if key == "index" then return Choice and Choice.cursor or 1 end
+      return nil
+    end,
+  })
+  return g3Views.choice
+end
+
+-- The top layer itself ({ id, mod, ... }), for the ones that need its id.
+function M.g3Layer()
+  local Stack = package.loaded["src.ui.game3.stack"] or g3mod("src.ui.game3.stack")
+  if not Stack then return nil end
+  local ok, layer = pcall(Stack.top)
+  return ok and type(layer) == "table" and layer or nil
+end
+
+function M.g3LayerId()
+  local layer = M.g3Layer()
+  return layer and layer.id or nil
+end
+
+function M.g3Has(id)
+  local Stack = package.loaded["src.ui.game3.stack"]
+  return Stack ~= nil and Stack.has(id) == true
+end
+
+function M.g3Top(game) -- luacheck: ignore game
+  local layer = M.g3Layer()
+  if layer then
+    if layer.id == "start" then return g3StartView() end
+    if type(layer.mod) == "table" then return layer.mod end
+    return layer
+  end
+  local Message = package.loaded["src.ui.game3.message"]
+  if Message and Message.isOpen and Message.isOpen() then return g3MessageView() end
+  local Choice = package.loaded["src.ui.game3.choice"]
+  if Choice and Choice.active then return g3ChoiceView() end
+  return nil
+end
+
+-- Nothing up, nothing talking, nothing asking: the field is the player's.
+function M.g3Idle(game)
+  if not g3(game) or game.phase ~= "field" or game.session == nil then return false end
+  local Stack = package.loaded["src.ui.game3.stack"]
+  if Stack and Stack.busy() then return false end
+  local Message = package.loaded["src.ui.game3.message"]
+  if Message and Message.isOpen and Message.isOpen() then return false end
+  local Choice = package.loaded["src.ui.game3.choice"]
+  if Choice and Choice.active then return false end
+  return true
+end
+
+-- The live session (game.save on a Game3 is only the snapshot of the last
+-- SAVE; party, bag, dex and flags that matter are on the runtime session).
+function M.g3Session(game)
+  local Runtime = package.loaded["src.core.game3.runtime"] or g3mod("src.core.game3.runtime")
+  local s = Runtime and Runtime.getSession and Runtime.getSession() or nil
+  return s or (game and game.session) or nil
+end
+
 function M.top(game)
+  if g3(game) and game.stack == nil then return M.g3Top(game) end
   return game.stack and game.stack:top() or nil
 end
 
@@ -165,6 +296,19 @@ end
 -- exists: "no items" does not say whether the menu failed to open or opened
 -- as something else.
 function M.stackNames(game)
+  if g3(game) and game.stack == nil then
+    local Stack = package.loaded["src.ui.game3.stack"]
+    local ids = {}
+    for _, layer in ipairs((Stack and Stack._layers) or {}) do
+      ids[#ids + 1] = tostring(layer.id)
+    end
+    local Message = package.loaded["src.ui.game3.message"]
+    if Message and Message.isOpen and Message.isOpen() then ids[#ids + 1] = "<message>" end
+    local Choice = package.loaded["src.ui.game3.choice"]
+    if Choice and Choice.active then ids[#ids + 1] = "<choice>" end
+    if #ids == 0 then return "<empty stack>" end
+    return table.concat(ids, " > ")
+  end
   local out = {}
   for _, state in ipairs((game.stack and game.stack.states) or {}) do
     out[#out + 1] = stateName(state)
@@ -205,6 +349,25 @@ function M.selectLabel(game, label, frames)
   local target
   for i, item in ipairs(menu.items) do
     if labelMatches(item.label, label) then target = i break end
+  end
+
+  -- Gen 3: Gen3Ui's ListMenu does not wrap by default, so the downs-only
+  -- arithmetic below would stop at the last row short of a target above the
+  -- cursor. Walk the cursor there instead, watching it move.
+  if g3(game) then
+    for _ = 1, #menu.items * 2 + 2 do
+      local at = menu.index or menu.cursor or 1
+      if at == target then break end
+      U.tap(game, at < target and "down" or "up")
+      U.wait(2)
+    end
+    if (menu.index or menu.cursor or 1) ~= target then
+      U.log("WARN the cursor did not reach row " .. tostring(label))
+    end
+    U.wait(2)
+    U.tap(game, "a")
+    U.wait(10)
+    return true
   end
 
   local steps = (target - (menu.index or 1)) % #menu.items
@@ -348,6 +511,24 @@ end
 -- play but makes a driver that samples avatar movement behind an open text
 -- box wait forever for a step that cannot finish.
 function M.closeToOverworld(game, tries)
+  -- Gen 3: the field is "on top" when no layer, message or choice is up. B
+  -- first for the same reason as below (a menu cancels, a mod box and the
+  -- cart's message both advance on it), then A when B changed nothing.
+  if g3(game) and game.stack == nil then
+    for _ = 1, tries or 24 do
+      if M.g3Idle(game) then return true end
+      local top = M.top(game)
+      U.tap(game, "b")
+      U.wait(6)
+      if not M.g3Idle(game) and M.top(game) == top then
+        U.tap(game, "a")
+        U.wait(6)
+      end
+    end
+    if M.g3Idle(game) then return true end
+    U.log("WARN could not get back to the field; up is", M.stackNames(game))
+    return false
+  end
   for _ = 1, tries or 24 do
     local top = M.top(game)
     if top == nil or top == game.overworld or top.isOverworld then return true end
@@ -748,6 +929,14 @@ end
 -- The party's own copy of the mon of `species` -- what a driver asserts the
 -- catch's paperwork against (nickname, OT, whatever else lands on it).
 function M.partyMon(game, species)
+  if g3(game) then
+    local session = M.g3Session(game)
+    local want = M.g3Species(game, species)
+    for _, mon in ipairs((session and session.party) or {}) do
+      if mon.species == want then return mon end
+    end
+    return nil
+  end
   local party = game.save and game.save.party or {}
   for _, mon in ipairs(party) do
     if mon.species == species then return mon end
@@ -765,6 +954,16 @@ end
 -- Is this species marked in the #DEX -- `caught` on Gold, `owned` on Red,
 -- the same pair src/Gen.lua stamps and reads back.
 function M.dexOwned(game, species)
+  -- Gen 3: the live session's dex, keyed by numeric species, read with the
+  -- cart's own predicate (caught, which is what a trade or catch registers)
+  if g3(game) then
+    local session = M.g3Session(game)
+    local Dex = g3mod("src.core.game3.dex")
+    local id = M.g3Species(game, species)
+    if not (session and type(session.dex) == "table" and Dex and id) then return nil end
+    local ok, caught = pcall(Dex.isCaught, session.dex, id)
+    return ok and caught == true
+  end
   local dex = game.save and game.save.pokedex
   if type(dex) ~= "table" then return nil end
   local bag = dex.caught or dex.owned or {}
@@ -1039,6 +1238,60 @@ local PHASE = {
   trip_npc               = 600,  -- stage trainer + 3-wide coop_npc field
   trip_wild              = 600,  -- stage wild + 4-slot coop_wild field
   trip_left              = 300,  -- menus + LEAVE
+
+  -- ------- Gen 3 in-game host + guest (tests/drivers/run-mmo-e2e-gen3.sh)
+  --
+  -- FireRed or Emerald on both sides, the host's own HostServer as the hub.
+  -- Every leg is driven through the real menus, so the budgets are menu walks
+  -- plus the d-pad typing a Gen 3 grid costs (a chat line is ~15 cells, each
+  -- up to a dozen steps away) -- small in wall-clock, generous here because a
+  -- generous barrier costs a healthy run nothing.
+  -- host waits on the guest connecting (menus + address + a code) and walking
+  g3_guest_walked          = 300,
+  -- guest waits on the host's presence checks, nameplate and toast shots
+  g3_host_walk_start       = 180,
+  g3_guest_baseline        =  90,  -- floor
+  g3_host_walk_done        = 120,  -- a few running steps
+  -- each side types a chat line on the grid; the other waits for it
+  g3_host_said             = 240,  -- MMO > SAY > EVERYONE + ~15 cells
+  g3_guest_said            = 300,  -- the toast check + the same typing
+  -- host waits on the guest walking PLAYERS > card > ADD FRIEND
+  g3_guest_asked_friend    = 240,
+  -- guest waits on the host answering the yes/no the ask opened
+  g3_host_answered_friend  = 180,  -- 90 drivePrompts + closing out
+  -- host waits on the guest's FRIENDS / PLAYERS / MY PROFILE / RANK shots
+  g3_guest_social_done     = 360,
+  -- guest waits on the host standing still for the interact leg
+  g3_host_ready_for_interact = 180,
+  -- host waits on the guest teleporting beside it and asking for a trade
+  g3_guest_trade_requested = 240,
+  -- each side's half of the trade (drivePrompts 150 + shots)
+  g3_host_trade_done       = 300,
+  g3_guest_trade_done      = 300,
+  -- guest waits on the host back in the field for the invite
+  g3_host_ready_for_party  = 180,
+  -- host waits on the guest asking it to team up
+  g3_guest_party_invited   = 180,
+  -- guest waits on the host having answered and read its own members list
+  g3_host_party_checked    = 240,
+  -- host waits on the guest's MEMBERS / region map / PARTY > LEAVE
+  g3_guest_party_done      = 360,
+  -- host waits on the guest leaving the game through MAIN > LEAVE
+  g3_guest_left            = 240,
+
+  -- ------- Gen 3 three-client run on the Node hub (run-trip-e2e-gen3.sh)
+  --
+  -- FireRed A and B in Pallet Town, Emerald C in Littleroot, all JOIN. One
+  -- budget per tag; `patience` folds g3trip_<role>_<tag> onto g3trip_<tag>.
+  g3trip_ready             = 900,  -- cold boot + menus + a code, times three
+  g3trip_seen              = 240,  -- both peers on each roster
+  g3trip_presence          = 300,  -- avatars / region scoping / PLAYERS
+  g3trip_chat              = 360,  -- menus + a typed line, then the toasts
+  g3trip_traded            = 420,  -- menus + a cross-version trade
+  g3trip_left              = 300,  -- menus + LEAVE
+
+  -- ------- Gen 3 generation mismatch (run-mismatch-e2e-gen3.sh)
+  g3mismatch_done          = 600,
 }
 
 local SYNC_DIR = os.getenv("MMO_SYNC_DIR") or "/tmp/rby_mmo_sync"
@@ -1065,6 +1318,8 @@ function M.patience(name)
   if shared and PHASE["mismatch_" .. shared] then return PHASE["mismatch_" .. shared] end
   shared = name:match("^trip_%a_(.+)$")
   if shared and PHASE["trip_" .. shared] then return PHASE["trip_" .. shared] end
+  shared = name:match("^g3trip_%a_(.+)$")
+  if shared and PHASE["g3trip_" .. shared] then return PHASE["g3trip_" .. shared] end
   return 180
 end
 
@@ -1134,6 +1389,7 @@ end
 -- Gen 2 empty stack with a loaded map (POKEPORT_DRIVER skips Gold cinema).
 function M.inPlay(game)
   if not game then return false end
+  if g3(game) then return M.g3Idle(game) end
   local ow = M.overworld(game)
   if not (ow and ow.map and ow.player) then return false end
   local top = M.top(game)
@@ -1181,6 +1437,8 @@ end
 M.INTRO_A_TAPS = 1500
 
 function M.newGame(game, tag)
+  -- Gen 3 has no intro to mash through: the title's own new-game action
+  if g3(game) then return M.g3BootToPlay(game, { name = "PLAYER" }) end
   U.wait(5)
   U.tap(game, "start")             -- skip the intro movie
   U.wait(10)
@@ -1216,7 +1474,8 @@ end
 -- Gen 2 + POKEPORT_DRIVER already lands in free-roam (empty stack). Gen 1
 -- still needs U.newGame. Never mash A while StartMenu.list is up -- that is
 -- how PACK flash-loops happen in a LOVE window.
-function M.bootToPlay(game)
+function M.bootToPlay(game, opts)
+  if g3(game) then return M.g3BootToPlay(game, opts) end
   U.wait(20)
   if M.inPlay(game) then return true end
   if M.generation(game) == 2 then
@@ -1243,6 +1502,7 @@ end
 -- Seed a one-mon party the e2e can trade / fight with. Gen 2 uses Mon.new
 -- (spa/spd sheets); Gen 1 keeps Pokemon.new.
 function M.seedParty(game, species, level)
+  if g3(game) then return M.g3SeedParty(game, species, level) end
   if not (game and game.save and game.data) then return nil end
   level = level or 50
   if M.generation(game) == 2 then
@@ -1261,6 +1521,15 @@ end
 
 -- this game's own player cell
 function M.playerCell(game)
+  if g3(game) then
+    local Player = package.loaded["src.core.game3.player"]
+    local Map = package.loaded["src.core.game3.map"]
+    local session = M.g3Session(game)
+    if not Player then return nil end
+    local mapId = (Map and type(Map.current) == "string" and Map.current)
+      or (session and session.map)
+    return { mapId = mapId, x = Player.cellX, y = Player.cellY }
+  end
   local ow = M.overworld(game)
   if not (ow and ow.map and ow.player) then return nil end
   return { mapId = ow.map.id, x = ow.player.cellX, y = ow.player.cellY }
@@ -1300,6 +1569,20 @@ end
 function M.wornMatches(game, exports)
   local wornLook = exports and exports.wornLook and exports.wornLook() or nil
   if wornLook == nil then return false, nil, nil end
+  -- Gen 3: a look is an OBJ_EVENT_GFX_* name, and what the player is drawn
+  -- as is the graphics id the engine's OwSprites hands the field renderer --
+  -- compared through this cart's own constants, the same resolution the mod
+  -- applies when it wears the look.
+  if g3(game) then
+    local OwSprites = g3mod("src.core.game3.ow_sprites")
+    local gid
+    if OwSprites and type(OwSprites.playerGraphicsId) == "function" then
+      local ok, value = pcall(OwSprites.playerGraphicsId, game)
+      if ok then gid = value end
+    end
+    local want = M.g3Const(game, "event_objects", wornLook)
+    return want ~= nil and gid == want, wornLook, gid
+  end
   local record = game.data and game.data.sprites and game.data.sprites[wornLook]
   local worn = M.playerSheet(game)
   local wornImage = worn and (worn.def and worn.def.image or worn.image) or nil
@@ -1416,6 +1699,18 @@ function M.drivePrompts(game, done, seconds, onStep)
     -- the text says whether it was the same question twice.
     local kind = classify(top)
     if onStep then onStep(kind, top) end
+    -- Gen 3: a Gen3Ui text box with its YES / NO open exposes `items` (the
+    -- driver contract), so it classifies as a menu -- and one opened with
+    -- defaultNo would be answered NO by the menu branch's plain A. Walk the
+    -- cursor onto YES first, the way the choice branch does.
+    if g3(game) and kind == "menu" and top.kind == "text" and top.choosing then
+      local guard = 0
+      while M.top(game) == top and (top.index or 1) > 1 and guard < 4 do
+        U.tap(game, "up")
+        U.wait(3)
+        guard = guard + 1
+      end
+    end
     if kind == "choice" then
       -- YES is index 1; walk the cursor there rather than assuming it
       local guard = 0
@@ -1500,6 +1795,13 @@ end
 -- species in party order, for asserting a trade actually swapped something
 function M.partySpecies(game)
   local out = {}
+  if g3(game) then
+    local session = M.g3Session(game)
+    for _, mon in ipairs((session and session.party) or {}) do
+      out[#out + 1] = tostring(mon.species)
+    end
+    return out
+  end
   for _, mon in ipairs((game.save and game.save.party) or {}) do
     out[#out + 1] = tostring(mon.species)
   end
@@ -1998,6 +2300,7 @@ end
 -- and is not a stack state; pushing the Gen 1 controller breaks free-roam.
 function M.teleport(game, mapId, x, y, facing)
   facing = facing or "down"
+  if g3(game) then return M.g3Teleport(game, mapId, x, y, facing) end
   if M.generation(game) ~= 2 then
     U.teleport(game, mapId, x, y, facing)
     return true
@@ -2033,6 +2336,7 @@ end
 -- Put a battle-usable item in the live bag (and clear the battle item cache).
 -- Call before the mediated bag sheet is uploaded so the hub sees the count.
 function M.giveItem(game, itemId, count)
+  if g3(game) then return M.g3GiveItem(game, itemId, count) end
   if not (game and game.save and type(itemId) == "string") then return false end
   game.save.inventory = game.save.inventory or {}
   game.save.inventory[itemId] = (game.save.inventory[itemId] or 0)
@@ -2044,6 +2348,16 @@ end
 
 -- Count party mons matching a species id (or total party size when species is nil).
 function M.partySpeciesCount(game, species)
+  if g3(game) then
+    local session = M.g3Session(game)
+    local party = (session and session.party) or {}
+    if species == nil then return #party end
+    local want, n = M.g3Species(game, species), 0
+    for _, mon in ipairs(party) do
+      if mon and mon.species == want then n = n + 1 end
+    end
+    return n
+  end
   local party = game and game.save and game.save.party or {}
   if species == nil then return #party end
   local n = 0
@@ -3112,6 +3426,7 @@ end
 
 -- open the START menu and step into MMO
 function M.openMmo(game)
+  if g3(game) then return M.g3OpenMmo(game) end
   U.tap(game, "start")
   U.wait(15)
   return M.selectLabel(game, "MMO")
@@ -3340,6 +3655,521 @@ function M.reconnectViaServers(game, exports, address, joinCode, check, log,
         tostring(M.top(game) and (M.top(game).title or "?")))
   end
   return back
+end
+
+-- =====================================================================
+-- ------- Gen 3 driver kit (FireRed / LeafGreen / Emerald)
+--
+-- What the Gen 3 drivers (mmo_host_gen3 / mmo_join_gen3 / mmo_trip_gen3 /
+-- mmo_mismatch_gen3) call directly. Everything here runs inside the engine
+-- process, behind no mod facade, and reaches the cart through src.core.game3
+-- / src.ui.game3 -- the only way there is on a Game3, which has no
+-- game.stack, no game.overworld and a session instead of game.save. None of
+-- it is ever reached on a Gen 1 or Gen 2 boot.
+
+-- Where each cart's scenario stands, and what it trades. Pallet Town and
+-- Littleroot Town are the two home towns (region-disjoint map ids, so the
+-- trip run can prove presence stays per region); the cells are measured open
+-- ground (Littleroot's (10,9) is under the moving truck). The species are
+-- each cart's own starters / mascot, none of which trade-evolves, so a trade
+-- leg ends on the swap itself. `spare` rides in slot 2: the cart refuses to
+-- trade away a party's only mon ("That's your only POKeMON for battle."), so
+-- a one-mon party can never offer anything.
+M.G3_STAGE = {
+  firered = {
+    map = "FR_PALLET_TOWN", place = "PALLET",
+    host = { 12, 10, "down" }, guest = { 10, 12, "up" },
+    hostMon = "CHARMANDER", guestMon = "PIKACHU", spare = "RATTATA",
+  },
+  emerald = {
+    map = "EM_LITTLEROOT_TOWN", place = "LITTLEROOT",
+    host = { 9, 9, "down" }, guest = { 7, 11, "up" },
+    hostMon = "TORCHIC", guestMon = "MUDKIP", spare = "ZIGZAGOON",
+  },
+}
+M.G3_STAGE.leafgreen = M.G3_STAGE.firered
+
+-- Wall-clock settling for animations the cart times in seconds rather than
+-- frames (fades, the region map's open): a driver steps faster than real time
+-- when nothing throttles the window, so a frame count can end before a fade
+-- has.
+function M.settleSeconds(game, seconds) -- luacheck: ignore game
+  local timer = love and love.timer
+  if not (timer and timer.getTime) then
+    U.wait(math.floor((seconds or 1) * 60))
+    return
+  end
+  local deadline = timer.getTime() + (seconds or 1)
+  while timer.getTime() < deadline do U.wait(1) end
+end
+
+-- firered | leafgreen | emerald
+function M.g3Version(game)
+  local session = M.g3Session(game)
+  if session and type(session.version) == "string" then return session.version end
+  local GameVersion = g3mod("src.core.GameVersion")
+  return GameVersion and GameVersion.get and GameVersion.get() or "firered"
+end
+
+-- A pret constant (SPECIES_*, ITEM_*, FLAG_*, OBJ_EVENT_GFX_*) resolved in this
+-- cart's own table -- the ids differ between FireRed and Emerald, so a driver
+-- names things and asks.
+function M.g3Const(game, kind, name)
+  local Constants = g3mod("src.core.game3.constants")
+  if not (Constants and type(name) == "string") then return nil end
+  local ok, set = pcall(Constants.of, M.g3Version(game))
+  if not ok or not set then return nil end
+  local okId, id = pcall(set.id, set, kind, name)
+  return okId and id or nil
+end
+
+local function prefixed(prefix, name)
+  name = tostring(name):upper():gsub("[%s%.%-]", "_")
+  if name:sub(1, #prefix) ~= prefix then name = prefix .. name end
+  return name
+end
+
+-- A numeric species (the internal numbering party mons carry) from a number
+-- or a name ("PIKACHU", "SPECIES_TORCHIC").
+function M.g3Species(game, species)
+  if type(species) == "number" then return species end
+  if type(species) ~= "string" then return nil end
+  if tonumber(species) then return tonumber(species) end
+  return M.g3Const(game, "species", prefixed("SPECIES_", species))
+end
+
+function M.g3ItemId(game, item)
+  if type(item) == "number" then return item end
+  if type(item) ~= "string" then return nil end
+  if tonumber(item) then return tonumber(item) end
+  return M.g3Const(game, "items", prefixed("ITEM_", item))
+end
+
+-- Close whatever the cart itself has up (its message, its YES / NO) and let a
+-- warp land. Frames: all of it is this process, nothing on the wire.
+function M.g3Settle(game, frames)
+  local Warp = package.loaded["src.core.game3.warp"]
+  for _ = 1, frames or 600 do
+    local busy = (Warp and Warp.isBusy and Warp.isBusy()) or not M.g3Idle(game)
+    if not busy then return true end
+    if not M.g3Idle(game) then
+      U.tap(game, "b")
+      U.wait(2)
+    end
+    U.wait(1)
+  end
+  return M.g3Idle(game)
+end
+
+-- Title to the field on a Game3, the way the engine's own game3 drivers do it:
+-- wait for the boot screen, answer it with a new game (the title menu's own
+-- action, carrying the name and gender the cart's intro would have asked),
+-- then wait for the field. opts: name, gender (0 boy / 1 girl), map/x/y/facing
+-- to stand somewhere other than the bedroom (FireRed) or the moving truck
+-- (Emerald) the new game opens in.
+function M.g3BootToPlay(game, opts)
+  opts = opts or {}
+  for _ = 1, 1800 do
+    if game.phase == "boot" and game.boot then break end
+    if game.phase == "field" and game.session then break end
+    U.wait(1)
+  end
+  if game.phase == "boot" then
+    if not game.boot then
+      U.log("FAIL the Gen 3 title never came up (phase " .. tostring(game.phase) .. ")")
+      return false
+    end
+    game:_handleBootAction({
+      action = "new_game",
+      name = opts.name or "PLAYER",
+      gender = opts.gender or 0,
+    })
+  end
+  local reached = false
+  for _ = 1, 2400 do
+    if game.phase == "field" and game.session then reached = true break end
+    U.wait(1)
+  end
+  if not reached then
+    U.log("FAIL the Gen 3 new game never reached the field (phase "
+      .. tostring(game.phase) .. ")")
+    return false
+  end
+  U.wait(90)
+  M.g3Settle(game, 600)
+  if opts.map then
+    M.g3Teleport(game, opts.map, opts.x, opts.y, opts.facing or "down")
+  end
+  return M.g3Idle(game)
+end
+
+-- Stand on a map. The engine's own game3 drivers do exactly this (Map.load
+-- with the destination, then the session and Player singletons put on the
+-- cell), and it is also what a warp ends in -- map.entered fires, the mod
+-- re-injects its avatars into the fresh object list.
+function M.g3Teleport(game, mapId, x, y, facing)
+  facing = facing or "down"
+  M.g3Settle(game, 600)
+  local Map = g3mod("src.core.game3.map")
+  local Player = g3mod("src.core.game3.player")
+  if not (Map and Player) then return false end
+  local ok, err = pcall(Map.load, nil, game, mapId, { x = x, y = y, facing = facing })
+  if not ok then
+    U.log("WARN Map.load " .. tostring(mapId) .. " failed: " .. tostring(err))
+  end
+  local session = M.g3Session(game)
+  if session then session.x, session.y, session.facing, session.map = x, y, facing, mapId end
+  Player.cellX, Player.cellY = x, y
+  Player.px, Player.py = x * 16, y * 16
+  Player.targetX, Player.targetY = x, y
+  Player.facing = facing
+  U.wait(40)
+  M.g3Settle(game, 600)
+  local cell = M.playerCell(game)
+  return ok and cell ~= nil and cell.mapId == mapId and cell.x == x and cell.y == y
+end
+
+-- Append one mon to the live party through the cart's own givemon.
+function M.g3GiveMon(game, species, level, nickname)
+  local session = M.g3Session(game)
+  local Party = g3mod("src.core.game3.party")
+  local id = M.g3Species(game, species)
+  if not (session and Party and id) then return nil end
+  local ok, given, _, mon = pcall(Party.giveMon, session, id, level or 50, nickname)
+  if not (ok and given) then return nil end
+  return mon
+end
+
+-- Replace the live party with one mon (the Gen 3 arm of M.seedParty).
+function M.g3SeedParty(game, species, level)
+  local session = M.g3Session(game)
+  if not session then return nil end
+  session.party = {}
+  return M.g3GiveMon(game, species, level or 50)
+end
+
+function M.g3GiveItem(game, item, count)
+  local session = M.g3Session(game)
+  local Bag = g3mod("src.core.game3.bag")
+  local id = M.g3ItemId(game, item)
+  if not (session and Bag and id) then return false end
+  session.bag = session.bag or Bag.new()
+  local ok, added = pcall(Bag.add, session.bag, id, count or 1)
+  return ok and added ~= false
+end
+
+-- A cart event flag, set in the LIVE flag store (Space.store) the running
+-- game reads, and in the session's snapshot as well so a save carries it.
+function M.g3SetFlag(game, name, on)
+  if on == nil then on = true end
+  local id = M.g3Const(game, "flags", name)
+  local Flags = g3mod("src.core.game3.scripting.flags")
+  local Space = g3mod("src.core.game3.scripting.space")
+  if not (id and Flags) then return false end
+  local store = Space and Space.store
+  if type(store) == "table" then pcall(Flags.setFlag, store, nil, id, on) end
+  local session = M.g3Session(game)
+  if session then
+    session.flags = session.flags or {}
+    pcall(Flags.setFlag, session, nil, id, on)
+  end
+  return true
+end
+
+function M.g3Flag(game, name)
+  local id = M.g3Const(game, "flags", name)
+  local Flags = g3mod("src.core.game3.scripting.flags")
+  local Space = g3mod("src.core.game3.scripting.space")
+  if not (id and Flags and Space and type(Space.store) == "table") then return false end
+  local ok, set = pcall(Flags.getFlag, Space.store, nil, id)
+  return ok and set == true
+end
+
+-- The National Dex, the way the cart turns it on (Dex.enableNational: the
+-- dex's own national bit, the magic var and the flag), applied to the live
+-- store as well as the session snapshot.
+function M.g3EnableNationalDex(game)
+  local session = M.g3Session(game)
+  local Dex = g3mod("src.core.game3.dex")
+  if not (session and Dex and Dex.enableNational) then return false end
+  local okS = pcall(Dex.enableNational, session)
+  local Space = g3mod("src.core.game3.scripting.space")
+  local store = Space and Space.store
+  if type(store) == "table" then
+    pcall(Dex.enableNational, setmetatable({
+      version = session.version, dex = session.dex,
+      flags = store.flags, vars = store.vars,
+    }, { __index = session }))
+  end
+  return okS
+end
+
+-- What a cart needs before it trades across regions (pokefirered
+-- trade.c:CanTradeSelectedMon / pokeemerald link.c InitLocalLinkPlayer): the
+-- "may link with the other region" progress flag -- FLAG_SYS_CAN_LINK_WITH_RS
+-- on FireRed / LeafGreen, FLAG_IS_CHAMPION on Emerald -- and the National Dex.
+-- The story sets these (the Sevii ruby delivery / the Elite Four); a driver
+-- that starts a new game sets them the way it seeds a party.
+function M.g3AllowCrossRegionTrade(game)
+  local version = M.g3Version(game)
+  local flag = version == "emerald" and "FLAG_IS_CHAMPION" or "FLAG_SYS_CAN_LINK_WITH_RS"
+  local okF = M.g3SetFlag(game, flag, true)
+  local okD = M.g3EnableNationalDex(game)
+  return okF and okD and M.g3Flag(game, flag)
+end
+
+-- START, the button, until the cart's START layer is up. The field ignores
+-- START mid-step, so a press that lands during a step is retried.
+function M.g3OpenStart(game)
+  if not M.g3Idle(game) then M.closeToOverworld(game) end
+  for _ = 1, 4 do
+    U.tap(game, "start")
+    if M.waitFor(game, function() return M.g3Has("start") end, 45, "the START menu") then
+      U.wait(6)
+      return true
+    end
+    U.wait(20)
+  end
+  return false
+end
+
+-- A START row by its id (the rows' labels are the cart's own text; ids are
+-- stable -- "bag", "pokenav", "rby_mmo", ...).
+function M.g3StartRow(game, id)
+  local SM = package.loaded["src.ui.game3.start_menu"]
+  if not (SM and M.g3Has("start")) then return false end
+  local target
+  for i, e in ipairs(SM.ENTRIES or {}) do
+    if e.id == id then target = i break end
+  end
+  if not target then
+    U.log("WARN no START row with id " .. tostring(id) .. ": " .. M.rowLabels(game))
+    return false
+  end
+  for _ = 1, #SM.ENTRIES * 2 do
+    if SM.cursor == target then break end
+    U.tap(game, SM.cursor < target and "down" or "up")
+    U.wait(3)
+  end
+  U.wait(2)
+  U.tap(game, "a")
+  U.wait(10)
+  return true
+end
+
+-- START > MMO > the MAIN layer.
+M.G3_MAIN = "rby_mmo:RbyMmoMain"
+
+function M.g3OpenMmo(game)
+  if not M.g3OpenStart(game) then
+    U.log("WARN START did not open; up is " .. M.stackNames(game))
+    return false
+  end
+  if not M.selectLabel(game, "MMO") then return false end
+  return M.waitFor(game, function() return M.g3LayerId() == M.G3_MAIN end, 90,
+                   "the MMO menu layer")
+end
+
+-- The injected event object standing in for `playerId` on this map (Avatars
+-- marks it `mmoAvatar`), or nil.
+function M.g3AvatarObject(playerId)
+  local Objects = package.loaded["src.core.game3.objects"]
+  if not Objects then return nil end
+  for _, localId in ipairs(Objects._order or {}) do
+    local eo = Objects._byId and Objects._byId[localId]
+    if eo and eo.mmoAvatar == playerId then return eo, localId end
+  end
+  return nil
+end
+
+-- One step per direction; `run` holds B with it (running shoes permitting).
+function M.g3Walk(game, dirs, run)
+  for _, dir in ipairs(dirs) do
+    if run then
+      M.holdAll(game, { dir, "b" }, 12)
+    else
+      U.hold(game, dir, 16)
+    end
+    U.wait(6)
+  end
+end
+
+-- The lines in the corner right now (Toast:state().lines).
+function M.toastLines(exports)
+  local out = {}
+  local st = exports and exports.toasts and exports.toasts() or nil
+  for _, line in ipairs((st and st.lines) or {}) do
+    out[#out + 1] = tostring(type(line) == "table" and line.text or line)
+  end
+  return out
+end
+
+-- Wait (wall clock) for the corner to empty, so a screen photographed next
+-- is not half hidden behind a toast -- the corner draws over the top rows of
+-- a Gen 3 menu. The toast legs photograph the corner on purpose, before this.
+function M.awaitToastsClear(game, exports, seconds)
+  return M.waitSeconds(game, function() return #M.toastLines(exports) == 0 end,
+                       seconds or 12, "the toasts to clear")
+end
+
+function M.toastSays(exports, needle)
+  for _, line in ipairs(M.toastLines(exports)) do
+    if line:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+function M.chatHas(exports, text, name)
+  for _, line in ipairs((exports and exports.chat and exports.chat()) or {}) do
+    if line.text == text and (name == nil or line.name == name) then return true end
+  end
+  return false
+end
+
+-- Say something through the menus a player uses: MMO > SAY > <scope row> >
+-- the letter grid > START. `scopeLabel` is EVERYONE / NEARBY / PARTY.
+-- Returns whether the grid held exactly `text` when it was submitted.
+function M.sayViaMenu(game, scopeLabel, text)
+  if not M.openMmo(game) then return false end
+  U.wait(10)
+  if not M.selectLabel(game, "SAY") then return false end
+  U.wait(15)
+  if not M.selectLabel(game, scopeLabel or "EVERYONE") then return false end
+  U.wait(20)
+  local grid = M.top(game)
+  if not (grid and type(grid.glyphs) == "table") then
+    U.log("WARN SAY opened no letter grid; up is " .. M.stackNames(game))
+    return false
+  end
+  if not M.typeOnGrid(game, text) then return false end
+  local typed = table.concat(grid.glyphs)
+  if typed ~= text then
+    U.log("WARN the SAY grid holds " .. typed .. ", not " .. text)
+    return false
+  end
+  U.tap(game, "start")
+  U.wait(20)
+  return true
+end
+
+-- Screenshots named g3-<game>-<role>-<NN>-<leg>.png, numbered in the order
+-- the driver takes them, so a contact sheet sorts into the run's own order
+-- and a leg appended later needs no renumbering. `printed` waits for a text
+-- box to finish typing first (M.shotPrinted).
+function M.g3Shooter(game, dir, gameName, role)
+  local n = 0
+  return function(leg, printed)
+    n = n + 1
+    local path = ("%s/g3-%s-%s-%02d-%s.png"):format(dir, gameName, role, n, leg)
+    if printed then return M.shotPrinted(game, path) end
+    return U.shot(game, path)
+  end
+end
+
+-- The party list over the region map, reached the way a player reaches the
+-- map. FireRed / LeafGreen: the TOWN MAP key item, used from the BAG (START >
+-- BAG > KEY ITEMS > TOWN MAP > USE -- the cart's item_use "map" path). The
+-- key item is seeded first, as a driver seeds a party. Emerald has no Town
+-- Map item; its region map layer (rse_region_map) is the one the cart puts up
+-- for a wall map (special FieldShowRegionMap) and for FLY, and it is opened
+-- here through that special's own entry, RegionMap.show{ mode = "wall" }.
+-- Returns the layer id that came up, or nil.
+function M.g3OpenRegionMap(game)
+  local version = M.g3Version(game)
+  if version == "emerald" then
+    M.closeToOverworld(game)
+    local RseMap = g3mod("src.ui.game3.rse.region_map")
+    if not RseMap then return nil end
+    local ok, err = pcall(RseMap.show, { session = M.g3Session(game), mode = "wall" })
+    if not ok then U.log("WARN rse region map: " .. tostring(err)) return nil end
+    if M.waitFor(game, function() return M.g3Has("rse_region_map") end, 120,
+                 "the Hoenn map") then
+      U.wait(30)
+      M.settleSeconds(game, 1.5)
+      return "rse_region_map"
+    end
+    return nil
+  end
+
+  local TOWN_MAP = M.g3ItemId(game, "TOWN_MAP")
+  local Bag = g3mod("src.core.game3.bag")
+  local session = M.g3Session(game)
+  if not (TOWN_MAP and Bag and session) then return nil end
+  if not (session.bag and Bag.has(session.bag, TOWN_MAP, 1)) then
+    M.g3GiveItem(game, TOWN_MAP, 1)
+  end
+  if not M.g3OpenStart(game) then return nil end
+  if not M.g3StartRow(game, "bag") then return nil end
+  local BagMenu = g3mod("src.ui.game3.bag_menu")
+  if not (BagMenu and M.waitFor(game, function() return BagMenu.isOpen() end, 120, "the BAG")) then
+    return nil
+  end
+  U.wait(40) -- the bag's open transition eats input for 23 frames
+  for _ = 1, 8 do
+    if BagMenu.currentPocket() == "KEY_ITEMS" then break end
+    U.tap(game, "right")
+    U.wait(24)
+  end
+  if BagMenu.currentPocket() ~= "KEY_ITEMS" then
+    U.log("WARN the bag never reached KEY ITEMS (on " .. tostring(BagMenu.currentPocket()) .. ")")
+    return nil
+  end
+  local row
+  for i, r in ipairs(BagMenu.list() or {}) do
+    if r.id == TOWN_MAP then row = i break end
+  end
+  if not row then
+    U.log("WARN no TOWN MAP in KEY ITEMS")
+    return nil
+  end
+  for _ = 1, 40 do
+    if BagMenu.cursor == row then break end
+    U.tap(game, BagMenu.cursor < row and "down" or "up")
+    U.wait(4)
+  end
+  U.tap(game, "a")
+  U.wait(12)
+  if BagMenu.mode == "action" then
+    local use
+    for i, act in ipairs(BagMenu.ACTIONS or {}) do
+      if act == "USE" then use = i break end
+    end
+    for _ = 1, 8 do
+      if use == nil or BagMenu.actionCursor == use then break end
+      U.tap(game, "down")
+      U.wait(4)
+    end
+    U.tap(game, "a")
+  end
+  if M.waitFor(game, function() return M.g3Has("region_map") end, 240, "the Town Map") then
+    U.wait(30)
+    M.settleSeconds(game, 1.5)
+    return "region_map"
+  end
+  return nil
+end
+
+-- B out of the region map and back to the field. Closing the Town Map lands
+-- back in the BAG over START (the cart's own order, measured: "start > bag"),
+-- so B backs out of both; the bag's exit transition and the field's resume
+-- then take a moment before START is taken again -- waited out here, the way
+-- a player waits for the screen to settle before pressing it.
+function M.g3CloseRegionMap(game)
+  for _ = 1, 6 do
+    if not (M.g3Has("region_map") or M.g3Has("rse_region_map")) then break end
+    U.tap(game, "b")
+    U.wait(30)
+  end
+  local closed = M.closeToOverworld(game, 32)
+  local Field = package.loaded["src.core.game3.field"]
+  local Warp = package.loaded["src.core.game3.warp"]
+  for _ = 1, 240 do
+    local locked = (Field and Field.locked) or (Warp and Warp.isBusy and Warp.isBusy())
+    if not locked then break end
+    U.wait(1)
+  end
+  U.wait(45)
+  return closed
 end
 
 return M

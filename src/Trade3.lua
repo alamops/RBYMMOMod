@@ -333,8 +333,14 @@ end
 -- a player who became Champion since their last save can trade across
 -- regions now, not after saving.  Any other session (an in-memory peer, a
 -- test) is read as it is.
+--
+-- The live session is recognised by identity, never by the absence of a
+-- `store` field: every Emerald session carries a `store` of its own -- the
+-- `{flags, vars}` fallback src/core/game3/time_events.lua builds -- which is
+-- not Space.store, so trusting it read stale flags and refused every
+-- FireRed <-> Emerald trade to a Champion with the National Dex.
 local function liveView(session)
-  if type(session) ~= "table" or session.store ~= nil then return session end
+  if type(session) ~= "table" then return session end
   if Gen3.session() ~= session then return session end
   local Space = engine("src.core.game3.scripting.space")
   local store = Space and Space.store

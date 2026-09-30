@@ -305,6 +305,31 @@ do
   eq(em.progressFlags, 0x11, "national and champion")
 end
 
+-- The running game's session is read through the script engine's live flag
+-- store even when it carries a `store` of its own: every Emerald session has
+-- one (src/core/game3/time_events.lua's `{flags, vars}` fallback), and it is
+-- not Space.store.  Reading it made a Champion's FireRed <-> Emerald trade
+-- refuse ("You can't trade with that game yet.") in the live trip e2e.
+do
+  local Space = require("src.core.game3.scripting.space")
+  local Runtime = package.loaded["src.core.game3.runtime"]
+  local savedGet, savedStore = Runtime.getSession, Space.store
+  local s = newSession({ version = "emerald", national = true })
+  s.store = { flags = {}, vars = {} }
+  local live = { flags = {}, vars = {} }
+  live.flags[Family.flag("emerald", Family.PROGRESS_FLAG[Family.of("emerald")])] = true
+  Space.store = live
+  Runtime.getSession = function() return s end
+  local info = Trade3.localInfo(s, "emerald")
+  eq(math.floor(info.progressFlags / 16) % 16, 1,
+    "the live session's champion flag comes from Space.store, not its stale store")
+  local peer = newSession({ version = "emerald", national = true })
+  peer.store = { flags = {}, vars = {} }
+  eq(math.floor(Trade3.localInfo(peer, "emerald").progressFlags / 16) % 16, 0,
+    "any other session is read as it is, its own store included")
+  Runtime.getSession, Space.store = savedGet, savedStore
+end
+
 -- ------- the loopback hub
 
 local function newPlayer(id, name, session, fingerprint, netEnd)
