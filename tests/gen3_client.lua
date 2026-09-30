@@ -170,7 +170,17 @@ local function realLoad(version)
   eq(viewport.dpiY, 1, label .. ": ...and dpiY")
 
   -- ------- input.step runs on every phase, the title included
-  local stepLink = run.loader.hooks.chains["input.step"][1].callback
+  -- Client's tick is the priority-0 link: Ui adds its own outer input.step
+  -- link at priority 10 on Gen 3 (the offline prompt pump), which sorts first
+  -- and would otherwise be the one this exercises.
+  local stepLink
+  for _, entry in ipairs(run.loader.hooks.chains["input.step"]) do
+    if (entry.priority or 0) == 0 then stepLink = entry.callback end
+  end
+  check(stepLink ~= nil, label .. ": Client's input.step link is on the chain")
+  check(#run.loader.hooks.chains["input.step"] >= 2,
+    label .. ": ...beside Ui's own pump link")
+  stepLink = stepLink or function(nxt) return nxt() end
   game.phase = "boot"
   eq(stepLink(function() return "stepped" end, game, 1 / 60), "stepped",
     label .. ": the tick passes the title screen's step through")
