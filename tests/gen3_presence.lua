@@ -232,6 +232,42 @@ local function cart(version)
   local _, tokenName = Chars.gfxForViewer(Config.DEFAULT_SPRITE_GEN3, nil, 1)
   check(tokenName ~= nil, label .. ": the hub's sprite-less token still draws somebody")
 
+  -- An untrusted `sprite` naming a graphic this cart has but that is not a
+  -- look: never drawn as itself.  A FireRed Field.interact reads an object's
+  -- graphic before its script, so a peer as a Cut tree would be offered to
+  -- Cut (which removes the object) and a boulder to Strength.
+  local hostile = em and {
+    "OBJ_EVENT_GFX_CUTTABLE_TREE", "OBJ_EVENT_GFX_BREAKABLE_ROCK", "OBJ_EVENT_GFX_PUSHABLE_BOULDER",
+    "OBJ_EVENT_GFX_SS_TIDAL", "OBJ_EVENT_GFX_TRUCK", "OBJ_EVENT_GFX_BERRY_TREE",
+  } or {
+    "OBJ_EVENT_GFX_CUT_TREE", "OBJ_EVENT_GFX_ROCK_SMASH_ROCK", "OBJ_EVENT_GFX_PUSHABLE_BOULDER",
+    "OBJ_EVENT_GFX_SS_ANNE", "OBJ_EVENT_GFX_METEORITE",
+  }
+  local linkBoy = Chars.gfxForViewer(Config.DEFAULT_SPRITE_GEN3, version, 0)
+  local tested = 0
+  for _, name in ipairs(hostile) do
+    local hid = gid(name)
+    if hid then
+      tested = tested + 1
+      eq(Gen3.lookAllowed(name), false, label .. ": " .. name .. " is not a look")
+      local vid = Gen3.viewerGfxFor(name, version, 0)
+      check(vid ~= hid, label .. ": viewerGfxFor does not draw a peer as " .. name)
+      eq(vid, linkBoy, label .. ": ...but as the link rule's player (" .. name .. ")")
+      local cid = Chars.gfxForViewer(name, em and "firered" or "emerald", 1)
+      check(cid ~= nil and cid ~= hid, label .. ": nor does Chars.gfxForViewer, from either family (" .. name .. ")")
+      eq(Gen.resolveSprite(game, name), Gen.defaultSprite(game),
+         label .. ": resolveSprite does not keep " .. name)
+    end
+  end
+  check(tested >= 4, label .. ": the cart has the non-look graphics to test against (" .. tested .. ")")
+  eq(Gen.resolveSprite(game, "OBJ_EVENT_GFX_YOUNGSTER"), "OBJ_EVENT_GFX_YOUNGSTER",
+     label .. ": a look still resolves as itself")
+  eq(Gen.resolveSprite(game, myRed), myRed, label .. ": ...and so does the hero")
+  eq(Gen3.viewerGfxFor("OBJ_EVENT_GFX_YOUNGSTER", version, 0), youngster,
+     label .. ": a look is still drawn as itself")
+  check(Gen3.lookAllowed(em and "OBJ_EVENT_GFX_RIVAL_MAY_NORMAL" or "OBJ_EVENT_GFX_RS_MAY"),
+        label .. ": a player-trainer graphic is allowed")
+
   -- ------------------------------------------------ Places
   eq(Places.name(game, "EM_LITTLEROOT_TOWN"), "LITTLEROOT TOWN", label .. ": an Emerald town is named")
   eq(Places.name(game, "FR_VIRIDIAN_CITY"), "VIRIDIAN CITY", label .. ": a FireRed city is named")
@@ -282,6 +318,54 @@ local function cart(version)
   eq(OwSprites.playerGraphicsId(game, P), walk, label .. ": the engine draws the hero again")
   check(Cast.installLook3(), label .. ": installLook3 wraps it again")
   eq(OwSprites.playerGraphicsId(game, P), worn, label .. ": and wears the look again")
+
+  -- The wrapper answers every drawn frame, three to five times: with the
+  -- choice standing still it allocates nothing (no mod.find handle per call,
+  -- no pcall closures reading the choice).
+  -- measured with the JIT off: a trace's own bookkeeping counts as garbage,
+  -- and allocation sinking would hide exactly the tables this looks for
+  local jitWas = jit and jit.status and jit.status()
+  if jit then jit.off(); jit.flush() end
+  collectgarbage("collect")
+  collectgarbage("stop")
+  local before = collectgarbage("count")
+  for _ = 1, 2000 do OwSprites.playerGraphicsId(game, P) end
+  local grew = collectgarbage("count") - before
+  collectgarbage("restart")
+  if jit and jitWas then jit.on() end
+  check(grew < 4, label .. ": 2000 look-wrapper calls allocate nothing (" .. math.floor(grew * 1024) .. " bytes)")
+
+  -- Another mod wraps on top of ours, then this mod is hot-reloaded: the new
+  -- wrapper goes over *theirs*, not over the engine's original -- which would
+  -- drop their wrapper from the chain -- and ours underneath it goes inert.
+  local ours = OwSprites.playerGraphicsId
+  local foreignCalls = 0
+  local function foreign(g, p)
+    foreignCalls = foreignCalls + 1
+    return ours(g, p)
+  end
+  OwSprites.playerGraphicsId = foreign
+  local need3 = resolver(run)
+  local Cast3 = need3("Cast")
+  check(Cast3.installLook3(), label .. ": a reloaded graph wraps again")
+  check(OwSprites.playerGraphicsId ~= foreign, label .. ": ...on top of the other mod's wrapper")
+  foreignCalls = 0
+  eq(OwSprites.playerGraphicsId(game, P), worn, label .. ": the look is worn through the new wrapper")
+  eq(foreignCalls, 1, label .. ": ...with the other mod's wrapper still in the chain")
+  eq(rawget(OwSprites, "__rby_mmo_playerGraphicsId"), original,
+     label .. ": the stash still holds the engine's own function")
+  check(Cast3.restoreLook3(), label .. ": the reloaded graph restores")
+  eq(OwSprites.playerGraphicsId, foreign, label .. ": ...putting back the other mod's wrapper, not the original")
+  eq(OwSprites.playerGraphicsId(game, P), walk,
+     label .. ": ...and our older wrapper under it answers as the engine would")
+  -- the other mod takes its own wrapper off, the old graph's comes off after
+  -- it, and the reloaded graph -- the live one now -- wears the look again
+  OwSprites.playerGraphicsId = ours
+  Cast.restoreLook3()
+  eq(OwSprites.playerGraphicsId, original, label .. ": unwound to the engine's function")
+  eq(rawget(OwSprites, "__rby_mmo_playerGraphicsId"), nil, label .. ": ...and the stash is gone")
+  check(Cast3.installLook3(), label .. ": and wrapped once more")
+  eq(OwSprites.playerGraphicsId(game, P), worn, label .. ": wearing the look")
   api.save:set("sprite", nil)
 
   -- ------------------------------------------------ Avatars
@@ -318,6 +402,67 @@ local function cart(version)
   local drawn = false
   for _, o in ipairs(Objects.forDraw()) do if o == eo then drawn = true end end
   check(drawn, label .. ": the engine's draw list includes it")
+
+  -- The engine passes that walk the same list for their own ends leave it
+  -- out.  The quest log (FRLG's CONTINUE recap, saved with the game) records
+  -- the draw list as actors: the map's own object stays, the avatar does not.
+  local Recorder = Gen3.engine("src.core.game3.quest_log_recorder")
+  check(Recorder ~= nil, label .. ": the engine's quest-log recorder is reachable")
+  if Recorder then
+    local frame = Recorder.capture(game, session)
+    local sawOak, sawAvatar = false, false
+    for _, actor in ipairs(frame and frame.actors or {}) do
+      if actor.id == 1 then sawOak = true end
+      if actor.id == base then sawAvatar = true end
+    end
+    check(sawOak, label .. ": the quest log still records the map's own object")
+    check(not sawAvatar, label .. ": but not another player")
+    drawn = false
+    for _, o in ipairs(Objects.forDraw()) do if o == eo then drawn = true end end
+    check(drawn, label .. ": ...and the avatar is still drawn after the capture")
+  end
+  -- Emerald's rotating-tile puzzle shoves every object standing on an arrow;
+  -- another player standing on one is not the switch-presser's to move.
+  if em then
+    local Puzzle = Gen3.engine("src.core.game3.rotating_tile_puzzle")
+    local Collision = Gen3.engine("src.core.game3.collision")
+    local Constants = Gen3.engine("src.core.game3.constants")
+    local okStart, arrow = pcall(function()
+      return Constants.of(version):require("metatile_labels", "METATILE_MossdeepGym_YellowArrow_Right")
+    end)
+    check(Puzzle ~= nil and Collision ~= nil and okStart, label .. ": the puzzle is reachable headless")
+    if Puzzle and Collision and okStart then
+      local savedDef = Collision._mapDef
+      -- a synthetic layout: an arrow under Oak and under the avatar, floor elsewhere
+      Collision._mapDef = { midLayout = { midAt = function(_, x, y)
+        if (x == 6 and y == 3) or (x == eo.cellX and y == eo.cellY) then return arrow end
+        return 0
+      end } }
+      Puzzle.init(false)
+      Puzzle.move(nil, 0)
+      local movedLids = {}
+      for _, o in ipairs(Puzzle._p and Puzzle._p.objects or {}) do movedLids[o.lid] = true end
+      check(movedLids[1], label .. ": the puzzle still moves the map's own object")
+      check(not movedLids[base], label .. ": but not another player")
+      check(Puzzle.lastMoved ~= base, label .. ": ...who is never its lastMoved")
+      eq(Objects._tracks[base], nil, label .. ": ...and gets no movement track")
+      eq(eo.visible, true, label .. ": the avatar is visible again after the call")
+      eq(eo.mmoShielded, nil, label .. ": ...with no shield left on it")
+      -- an engine error inside the call still reaches its caller, and the
+      -- avatar it left shielded is visible again on the next tick
+      Collision._mapDef = { midLayout = { midAt = function() error("synthetic layout failure") end } }
+      Puzzle.init(false)
+      check(not pcall(Puzzle.move, nil, 0), label .. ": a puzzle error still reaches the engine")
+      eq(eo.visible, false, label .. ": ...leaving the avatar shielded for the moment")
+      avatars:sync(roster, here)
+      eq(eo.visible, true, label .. ": the next tick lifts the shield")
+      eq(eo.mmoShielded, nil, label .. ": ...and forgets it")
+      Puzzle.free()
+      Collision._mapDef = savedDef
+      Objects.clearMovements()
+      if type(Objects._perm) == "table" then Objects._perm[MAP] = nil end
+    end
+  end
 
   -- a step, walked by the engine
   roster:move("p1", MAP, 5, 6, "right", false)
@@ -414,6 +559,44 @@ local function cart(version)
   eq(Objects._byId[base + 1], nil, label .. ": taken out of the engine's list")
   check(not contains(Objects._order, base + 1), label .. ": and its order list")
   eq(avatars.lids[base + 1], nil, label .. ": its id is free again")
+  eq(av2.eo.hidden, true, label .. ": and the object let go is hidden for good")
+  eq(av2.eo.visible, false, label .. ": ...not drawn from any list that still holds it")
+
+  -- A peer who presents as a field-move object is not one: the avatar is
+  -- built with a look, so the field never offers Cut / Rock Smash / Strength
+  -- on another player, and the A press still reaches the ACTIONS menu.
+  local cutName = em and "OBJ_EVENT_GFX_CUTTABLE_TREE" or "OBJ_EVENT_GFX_CUT_TREE"
+  roster:put({ id = "evil", name = "TREE", map = MAP, x = 2, y = 9, facing = "down",
+               sprite = cutName, version = version, gender = 0 })
+  avatars:sync(roster, here)
+  local evil = avatars.spawned.evil and avatars.spawned.evil.eo
+  check(evil ~= nil, label .. ": a peer with a hostile sprite still gets an avatar")
+  if evil then
+    check(evil.graphicsId ~= gid(cutName), label .. ": ...but not drawn as a Cut tree")
+    eq(evil.graphicsId, linkBoy, label .. ": ...drawn by the link rule instead")
+    eq(evil.def.graphicsId, evil.graphicsId, label .. ": its template agrees (Field.interact reads that)")
+    local FieldMoves = Gen3.engine("src.core.game3.field_moves")
+    local ids = FieldMoves and FieldMoves.GFX_IDS
+    if type(ids) == "table" then
+      check(evil.def.graphicsId ~= ids.CUT_TREE and evil.def.graphicsId ~= ids.ROCK_SMASH_ROCK
+            and evil.def.graphicsId ~= ids.PUSHABLE_BOULDER,
+            label .. ": none of the graphics Field.interact offers a field move on")
+    end
+    local talkedEvil = 0
+    run.loader.hooks:call("world.talk", function() talkedEvil = talkedEvil + 1 end, game, evil)
+    eq(talkedEvil, 0, label .. ": the A press on it is still the mod's")
+  end
+  -- and a look change to a hostile graphic is refused the same way
+  roster:setSprite("evil", em and "OBJ_EVENT_GFX_PUSHABLE_BOULDER" or "OBJ_EVENT_GFX_ROCK_SMASH_ROCK")
+  local evilRow = roster:get("evil")
+  evilRow.version, evilRow.gender = version, 0
+  avatars:refresh(evilRow)
+  if evil then
+    eq(evil.graphicsId, linkBoy, label .. ": a refreshed hostile look is refused too")
+  end
+  roster:remove("evil")
+  avatars:sync(roster, here)
+  eq(avatars.spawned.evil, nil, label .. ": (the hostile peer leaves)")
 
   -- a player walking off to another map
   roster:move("p1", "FR_ROUTE_1", 3, 3, "up", false)
@@ -438,6 +621,66 @@ local function cart(version)
   avatars:sync(roster, { mapId = "FR_PALLET_TOWN", x = 1, y = 1, facing = "down" })
   eq(avatars.spawned.p1, nil, label .. ": nothing is put into a list about to be wiped")
   roster:move("p1", MAP, 4, 6, "down", false)
+
+  -- A seamless crossing.  Map.load snapshots the list it is leaving into
+  -- that map's ghost pool (Ghosts.capture) before loading the next, and
+  -- FieldView keeps drawing a neighbour's pool -- so an avatar left behind
+  -- would stand frozen on the old map's side of the edge, and a player who
+  -- followed would be drawn twice.  Driven with the engine's own Ghosts.
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  check(Ghosts ~= nil, label .. ": the engine's ghost pools are reachable")
+  if Ghosts then
+    local NEXT = "FR_PALLET_TOWN"
+    local nextDef = { midLayout = { width = 20, height = 18 }, objects = {} }
+    local nextHere = { mapId = NEXT, x = 3, y = 3, facing = "up" }
+    local function ghostsOf(playerId)
+      local n = 0
+      for mapId in pairs(Ghosts._pools) do
+        for _, o in ipairs(Ghosts.forDraw(mapId) or {}) do
+          if o.mmoAvatar == playerId then n = n + 1 end
+        end
+      end
+      return n
+    end
+    local function drawnOf(playerId)
+      local n = ghostsOf(playerId)
+      for _, o in ipairs(Objects.forDraw()) do
+        if o.mmoAvatar == playerId then n = n + 1 end
+      end
+      return n
+    end
+    Ghosts.clear()
+    avatars:sync(roster, here)
+    local left = avatars.spawned.p1 and avatars.spawned.p1.eo
+    check(left ~= nil, label .. ": (standing next to the edge)")
+    Ghosts.capture(MAP)                        -- Map.load, on the way out
+    eq(ghostsOf("p1"), 1, label .. ": the engine copies the avatar into the old map's ghost pool")
+    Objects.loadMap(nil, NEXT, nextDef)       -- ...then loads the next map
+    avatars:sync(roster, nextHere)            -- and the next tick
+    eq(ghostsOf("p1"), 0, label .. ": no frozen copy is left drawn on the neighbouring map")
+    eq(left and left.hidden, true, label .. ": the avatar let go is hidden")
+    local pooled = false
+    for _, pool in pairs(Ghosts._pools) do
+      for _, lid in ipairs(pool.order or {}) do
+        if Avatars.isAvatar3(pool.byId[lid]) then pooled = true end
+      end
+    end
+    check(not pooled, label .. ": and no ghost pool holds an avatar at all")
+    local oakPooled = false
+    for _, lid in ipairs(Ghosts._pools[MAP] and Ghosts._pools[MAP].order or {}) do
+      if lid == 1 then oakPooled = true end
+    end
+    check(oakPooled, label .. ": the map's own objects stay in its ghost pool")
+    -- the other player follows across the edge: drawn exactly once
+    roster:move("p1", NEXT, 3, 1, "up", false)
+    avatars:sync(roster, nextHere)
+    eq(drawnOf("p1"), 1, label .. ": a player who follows is drawn exactly once")
+    avatars:clear()
+    Ghosts.clear()
+    Objects.loadMap(nil, MAP, mapDef)
+    avatars:sync(roster, nil)
+    roster:move("p1", MAP, 4, 6, "down", false)
+  end
 
   -- the local player's own pace, for presence
   P.biking, P.running, P.moving, P.stepFrames = false, false, false, 16
@@ -509,6 +752,20 @@ local function cart(version)
   if selfPlate then
     eq(selfPlate.x, math.floor(120 * 4 - (#"LEAF" * 6) / 2), label .. ": own plate centred on the frame")
   end
+
+  -- The partner's "!" rides the same head as their plate: the same camera,
+  -- through the draw's projection for the mark.
+  overlay.alert = { id = "p1", map = MAP, clock = 0, hold = 1 }
+  local rects = {}
+  local rectangle = love.graphics.rectangle
+  love.graphics.rectangle = function(_, x, y, w, h) rects[#rects + 1] = { x = x, y = y, w = w, h = h } end
+  overlay:draw(game, viewport)
+  love.graphics.rectangle = rectangle
+  eq(overlay:state().alert, "waiter", label .. ": the partner's mark is drawn")
+  local body = rects[2]   -- after its shadow
+  eq(body and (body.x + body.w / 2), 152 * 4, label .. ": ...centred over the partner's head, as the plate is")
+  check(body and plate and body.y + body.h < plate.y, label .. ": ...and above the plate")
+  overlay.alert = nil
 
   -- off the edge of the 240x160 frame: not drawn, not reported
   for i = #printed, 1, -1 do printed[i] = nil end

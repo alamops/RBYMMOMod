@@ -1202,6 +1202,12 @@ end
 -- the player zoomed with the ZOOM hotkeys.  src.render.* is shared by every
 -- generation, so this is no cross-generation reach.
 local zoomModule, rendererModule, zoomTried
+-- A named function over the two modules rather than a closure per call: this
+-- is asked every frame the survey zoom is on.
+local function zoomRatio()
+  local S = rendererModule:fitScale()
+  return zoomModule.scale(S) / S
+end
 local function zoom3()
   if not zoomTried then
     zoomTried = true
@@ -1212,10 +1218,7 @@ local function zoom3()
   end
   local Zoom, Renderer = zoomModule, rendererModule
   if not (Zoom and Renderer) or (tonumber(Zoom.offset) or 0) == 0 then return 1 end
-  local ok, ratio = pcall(function()
-    local S = Renderer:fitScale()
-    return Zoom.scale(S) / S
-  end)
+  local ok, ratio = pcall(zoomRatio)
   if ok and type(ratio) == "number" and ratio > 0 then return ratio end
   return 1
 end
@@ -1457,6 +1460,29 @@ end
 
 -- ------- the Gen 3 draw
 
+-- The camera a Gen 3 plate is placed through this frame: set once at the top
+-- of each draw3 and read by the two functions below.  Module state rather
+-- than two closures over draw3's locals, because draw3 runs every frame and
+-- a closure is an allocation each time it is made.
+local cam3px, cam3py, cam3panX, cam3panY, cam3zoom = 0, 0, 0, 0, 1
+local cam3overlay, cam3avatars = nil, nil
+
+-- An avatar's plate, placed from its live cell (mid-step: its pixel
+-- position) and its own graphic's head.
+local function headOf3(gfx, wx, wy)
+  local inset, h = headInset3(gfx)
+  local centreX, top = M.screenOf3(wx, wy, cam3px, cam3py, h, cam3panX, cam3panY, cam3zoom)
+  return centreX, top + inset * cam3zoom
+end
+
+-- The partner's "!" rides the same head as their plate.
+local function project3(wx, wy)
+  local alert = cam3overlay and cam3overlay.alert
+  local spawned = cam3avatars and cam3avatars.spawned
+  local av = alert and spawned and spawned[alert.id]
+  return headOf3(av and av.gfx, wx, wy)
+end
+
 function M:draw3(game, viewport)
   local ctx = self.ctx
   local last = self.last
@@ -1519,25 +1545,14 @@ function M:draw3(game, viewport)
     return
   end
 
-  -- An avatar's plate, placed from its live cell (mid-step: its pixel
-  -- position) and its own graphic's head.
   local avatars = ctx.avatars
-  local function headOf(gfx, wx, wy)
-    local inset, h = headInset3(gfx)
-    local centreX, top = M.screenOf3(wx, wy, px, py, h, panX, panY, zoom)
-    return centreX, top + inset * zoom
-  end
-  -- The partner's "!" rides the same head as their plate.
-  local function project(wx, wy)
-    local alert = self.alert
-    local av = alert and avatars.spawned and avatars.spawned[alert.id]
-    return headOf(av and av.gfx, wx, wy)
-  end
+  cam3px, cam3py, cam3panX, cam3panY, cam3zoom = px, py, panX, panY, zoom
+  cam3overlay, cam3avatars = self, avatars
 
   if #here == 0 and not self:selfName(game) then
     last.reached = "nobody-here"
     last.alert = self:drawAlertLayer(labelFont, current.mapId, px, py, scale,
-                                     gameX, gameY, project, GEN3_VIEW_W, GEN3_VIEW_H)
+                                     gameX, gameY, project3, GEN3_VIEW_W, GEN3_VIEW_H)
     endHud(hudRestore)
     return
   end
@@ -1547,7 +1562,7 @@ function M:draw3(game, viewport)
     local ax, ay = avatars:cellOf(player.id)
     if ax and ay then
       local av = avatars.spawned and avatars.spawned[player.id]
-      local centreX, top = headOf(av and av.gfx, ax * CELL, ay * CELL)
+      local centreX, top = headOf3(av and av.gfx, ax * CELL, ay * CELL)
       self:drawLabel(labelFont, self:nameFor(player), centreX, top,
                      scale, gameX, gameY, self:labelColor(player),
                      GEN3_VIEW_W, GEN3_VIEW_H)
@@ -1556,13 +1571,13 @@ function M:draw3(game, viewport)
 
   local mine = self:selfName(game)
   if mine and mine ~= "" then
-    local centreX, top = headOf(selfGfx, px, py)
+    local centreX, top = headOf3(selfGfx, px, py)
     self:drawLabel(labelFont, mine, centreX, top, scale, gameX, gameY,
                    SELF_YELLOW, GEN3_VIEW_W, GEN3_VIEW_H)
   end
 
   last.alert = self:drawAlertLayer(labelFont, current.mapId, px, py, scale,
-                                   gameX, gameY, project, GEN3_VIEW_W, GEN3_VIEW_H)
+                                   gameX, gameY, project3, GEN3_VIEW_W, GEN3_VIEW_H)
   endHud(hudRestore)
 end
 

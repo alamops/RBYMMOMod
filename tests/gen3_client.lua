@@ -549,6 +549,63 @@ local function clientGraph(run, version)
   eq(corner:state().count, 1, label .. ": ...with its full time still to run")
   corner:update(1)
   eq(corner:state().count, 0, label .. ": ...and it goes once that has")
+
+  -- ------- a standing corner costs nothing per frame
+  --
+  -- The rows (charset mapping, wrap, ellipsis, colours, draw options) are
+  -- built once per queue change and only drawn after that, and the frame's
+  -- own tables are reused: 300 frames of the same two lines -- aged, held
+  -- checked and drawn, as Client's tick and render.hud do -- allocate nothing.
+  local quiet = {
+    GLYPH_HEIGHT = 14,
+    COLOR = fakeFont.COLOR,
+    measure = function(text) return #text * 6 end,
+    wrap = function(text, width) return wrap(text, width) end,
+    draw = function() end,
+  }
+  local activeWas = fontSlot.active
+  fontSlot.active = function() return quiet end
+  local steady = Toast.new({})
+  steady:push("[ANN]: a line long enough to wrap " .. ("word "):rep(8))
+  steady:push("BOB is here", Config.FRIEND_BLUE)
+  Stack.clear()
+  steady:draw(viewport)
+  eq(steady:state().last.reached, "drawn", label .. ": a standing corner draws")
+  local rowsDrawn = steady:state().last.drawn
+  -- the stub love's push / setColor record into tables of their own, which
+  -- is the stub's allocation and not the corner's: quiet ones for the count
+  local stubFns = { push = g.push, pop = g.pop, setColor = g.setColor }
+  g.push, g.pop, g.setColor = function() end, function() end, function() end
+  -- measured with the JIT off: a trace's own bookkeeping counts as garbage,
+  -- and allocation sinking would hide exactly the tables this looks for
+  local jitWas = jit and jit.status and jit.status()
+  if jit then jit.off(); jit.flush() end
+  collectgarbage("collect")
+  collectgarbage("stop")
+  local before = collectgarbage("count")
+  for _ = 1, 300 do
+    steady:update(0.001)
+    steady:draw(viewport)
+  end
+  local grew = collectgarbage("count") - before
+  collectgarbage("restart")
+  if jit and jitWas then jit.on() end
+  g.push, g.pop, g.setColor = stubFns.push, stubFns.pop, stubFns.setColor
+  check(grew < 4, label .. ": 300 frames of a standing corner allocate nothing ("
+    .. math.floor(grew * 1024) .. " bytes)")
+  eq(steady:state().last.drawn, rowsDrawn, label .. ": ...drawing the same rows every frame")
+  steady:push("NEW line")
+  steady:draw(viewport)
+  local lines = steady:state().last.lines or {}
+  eq(lines[#lines], "NEW line", label .. ": a pushed line is drawn on the very next frame")
+  steady:clear()
+  steady:push("ONLY line")
+  steady:draw(viewport)
+  lines = steady:state().last.lines or {}
+  eq(#lines, 1, label .. ": a cleared corner rebuilds from nothing")
+  eq(lines[1], "ONLY line", label .. ": ...with just the new line")
+  fontSlot.active = activeWas
+
   g.translate, g.scale, g.rectangle = savedFns.translate, savedFns.scale, savedFns.rectangle
   package.loaded["src.ui.game3.font"] = savedFont
 

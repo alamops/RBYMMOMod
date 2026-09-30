@@ -863,16 +863,17 @@ function M.defaultSprite(game, spritesRegistry)
   return Config.defaultSpriteFor(gen)
 end
 
--- Gen 3: a name this cart has a graphic for is kept (a FireRed name on
--- Emerald is not -- Gen3.viewerGfxFor is the cross-version mapping, and it is
--- the viewer's to apply with the sender's version in hand); anything else,
--- the Gen 1 SPRITE_* ids and the mod's own characters included, is the
--- default look.
+-- Gen 3: a look (Gen3.lookAllowed: a row of the curated wardrobe, or a
+-- player-trainer graphic) this cart has a graphic for is kept (a FireRed name
+-- on Emerald is not -- Gen3.viewerGfxFor is the cross-version mapping, and it
+-- is the viewer's to apply with the sender's version in hand); anything else
+-- is the default look -- the Gen 1 SPRITE_* ids and the mod's own characters,
+-- and every graphic of the cart's that is not a person to be (a Cut tree, a
+-- boulder, a boat), because `requested` may have come off the wire.
 function M.resolveSprite(game, requested, spritesRegistry)
   if M.generation(game) == 3 then
-    local own = Config.ownCharId(requested)
-    if not (own and not Config.ownCharAllowed(own, 3))
-        and type(requested) == "string" and Gen3.gfxId(requested) then
+    if type(requested) == "string" and Gen3.lookAllowed(requested)
+        and Gen3.gfxId(requested) then
       return requested
     end
     return M.defaultSprite(game, spritesRegistry)

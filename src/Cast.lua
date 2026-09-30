@@ -267,12 +267,16 @@ end
 
 -- ------- Gen 3: wearing the look
 --
--- The engine's own function is kept on its module under this key, so a
--- second install (a hot reload re-running this file) wraps the pristine
--- original instead of stacking a wrapper on a wrapper.
+-- The engine's own function is kept on its module under this key, and the
+-- wrap itself is Gen3.wrapFn's: a second install (a hot reload re-running
+-- this file) peels this mod's previous wrapper off the slot instead of
+-- stacking a wrapper on a wrapper -- but wraps *another* mod's wrapper when
+-- one sits on top of ours, rather than the pristine original, so that mod's
+-- change stays in the chain.
 local LOOK3_ORIGINAL = "__rby_mmo_playerGraphicsId"
 
 local look3 = {
+  handle = nil,     -- Gen3.wrapFn's handle for the wrapper this file put in
   module = nil,     -- the OwSprites table the wrapper is installed on
   wrapper = nil,    -- the function this file put there
   retired = false,  -- restoreLook3 ran; a wrapper somebody else stacked on
@@ -287,19 +291,34 @@ local look3 = {
 -- loader rolled back or that is not active, and a hot reload hands the new
 -- instance a new exports table -- either way a wrapper left behind by that
 -- instance must go back to answering what the engine would.
+--
+-- The wrapper asks this on every call, and the engine calls playerGraphicsId
+-- three to five times a frame; mod.find builds a handle table each time it
+-- answers.  So the answer is kept for ALIVE_RECHECK calls and asked again
+-- after that (and on the first call after every install).  A hot reload does
+-- not wait for the recheck: the new instance's install takes the slot's live
+-- mark (Gen3.wrapLive), which is one rawget and is asked every call.
+local ALIVE_RECHECK = 120
+local aliveAnswer, aliveCountdown = false, 0
 local function alive()
+  aliveCountdown = aliveCountdown - 1
+  if aliveCountdown > 0 then return aliveAnswer end
+  aliveCountdown = ALIVE_RECHECK
   local ok, handle = pcall(mod.find, Config.MOD_ID)
-  return ok and type(handle) == "table" and handle.exports == mod.exports
+  aliveAnswer = ok and type(handle) == "table" and handle.exports == mod.exports
+  return aliveAnswer
+end
+
+-- The player's choice, read without a closure: asked every drawn frame.
+local function stored(store, key)
+  if type(store) ~= "table" or type(store.get) ~= "function" then return nil end
+  local ok, value = pcall(store.get, store, key)
+  if ok and type(value) == "string" and value ~= "" then return value end
+  return nil
 end
 
 local function choiceString()
-  local chosen
-  pcall(function() chosen = mod.save:get("sprite") end)
-  if type(chosen) ~= "string" or chosen == "" then
-    pcall(function() chosen = mod.options:get("sprite") end)
-  end
-  if type(chosen) ~= "string" or chosen == "" then return nil end
-  return chosen
+  return stored(mod.save, "sprite") or stored(mod.options, "sprite")
 end
 
 -- The same rule Client.explicitChoice states for Gen 1 and Gen 2: a look is
@@ -328,8 +347,12 @@ end
 -- What the wrapper answers instead of `base`, or nil to keep it.  Only the
 -- plain walking graphic is ever replaced: the bike, surf, fishing, field-move
 -- and VS Seeker graphics are other numbers, and a worn look has none of them.
+-- Cheapest test first: retired and superseded are field reads, alive is a
+-- countdown between its rechecks.
 local function swap3(base, game)
-  if look3.retired or not alive() then return nil end
+  if look3.retired or not Gen3.wrapLive(look3.handle) or not alive() then
+    return nil
+  end
   local worn, walk = wornLook3(game)
   if not (worn and walk) or base ~= walk then return nil end
   return worn
@@ -348,10 +371,11 @@ function M.lookGfx3(game)
 end
 
 function M.installLook3()
-  if look3.wrapper and look3.module then
+  if look3.handle then
     -- Installed already, or retired in place under somebody else's wrapper
     -- (see restoreLook3): waking it keeps that wrapper where it is.
     look3.retired = false
+    aliveCountdown = 0
     return true
   end
   local OwSprites = Gen3.engine("src.core.game3.ow_sprites")
@@ -361,33 +385,32 @@ function M.installLook3()
       .. "screen -- update the game, or pick your cart's own trainer")
     return false
   end
-  local original = rawget(OwSprites, LOOK3_ORIGINAL) or OwSprites.playerGraphicsId
-  rawset(OwSprites, LOOK3_ORIGINAL, original)
-  local function wrapper(game, player)
-    local base = original(game, player)
-    local ok, swapped = pcall(swap3, base, game)
-    if ok and swapped then return swapped end
-    return base
-  end
-  OwSprites.playerGraphicsId = wrapper
-  look3.module, look3.wrapper, look3.retired = OwSprites, wrapper, false
+  local handle = Gen3.wrapFn(OwSprites, "playerGraphicsId", LOOK3_ORIGINAL,
+    function(inner)
+      return function(game, player)
+        local base = inner(game, player)
+        local ok, swapped = pcall(swap3, base, game)
+        if ok and swapped then return swapped end
+        return base
+      end
+    end)
+  if not handle then return false end
+  look3.handle, look3.module, look3.wrapper = handle, OwSprites, handle.wrapper
+  look3.retired = false
   look3.raw = nil
+  aliveCountdown = 0
   return true
 end
 
--- Put the engine's function back.  Only when the slot still holds this
+-- Put back what the wrapper wrapped.  Only when the slot still holds this
 -- file's wrapper: another mod that wrapped on top of it owns the slot now,
 -- and restoring underneath it would take their change away too -- so ours
 -- is retired in place instead and answers what the engine would.
 function M.restoreLook3()
-  local OwSprites = look3.module
-  if not OwSprites then return false end
+  if not look3.handle then return false end
   look3.retired = true
-  local original = rawget(OwSprites, LOOK3_ORIGINAL)
-  if original and OwSprites.playerGraphicsId == look3.wrapper then
-    OwSprites.playerGraphicsId = original
-    rawset(OwSprites, LOOK3_ORIGINAL, nil)
-    look3.module, look3.wrapper = nil, nil
+  if Gen3.unwrapFn(look3.handle) then
+    look3.handle, look3.module, look3.wrapper = nil, nil, nil
   end
   return true
 end

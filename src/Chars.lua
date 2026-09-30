@@ -15,7 +15,7 @@
 -- FireRed, LeafGreen and Emerald have no sprite catalog to walk: the sprites
 -- registry is gated on a Gen 3 boot, and an overworld figure there is an
 -- OBJ_EVENT_GFX_* graphic the engine draws by number from the player's own
--- cache.  So on Gen 3 the wearable list is a curated one (LOOKS, below) and
+-- cache.  So on Gen 3 the wearable list is a curated one (Gen3.LOOKS) and
 -- a character id is a graphic *name* on the running cart -- the same string
 -- that rides the wire as `sprite` (contract C3).  Only names are written
 -- here, never pixels: the art is the player's, decoded by the engine.
@@ -79,113 +79,20 @@ M.excluded = excluded
 
 -- ------- Gen 3 looks
 --
--- One row per look a player may wear on a Gen 3 cart: the label the
--- CHARACTER screen shows, the graphic's name on each family (`frlg` for
--- FireRed / LeafGreen, `rse` for Emerald, `both` when pret spells it the same
--- on the two), and the gender the cart's link rule should fall back to when
--- a viewer's family has no such look at all (a FireRed screen showing an
--- Emerald player dressed as ROXANNE draws the R/S girl, as a Cable Club
--- would).
---
--- Chosen, not generated, and chosen for one property: every one is a
--- *walking* person on its cart.  An event-object graphic can be a sitting
--- child, a doll, a berry tree or a boat, and a remote player worn as one of
--- those would slide from tile to tile without a step cycle.  Where the cache
--- is up, M.walks3 checks the frame count as well, so a build whose sheet
--- turned out to be stationary drops the row instead of drawing it wrong.
---
--- Order is the order the CHARACTER screen lists them in: the four heroes
--- first, then the rivals and professors, the trainer classes, and the gym
--- leaders and Elite Four at the end.
-local LOOKS = {
-  { label = "RED", frlg = "OBJ_EVENT_GFX_RED_NORMAL", rse = "OBJ_EVENT_GFX_RED", gender = 0 },
-  { label = "LEAF", frlg = "OBJ_EVENT_GFX_GREEN_NORMAL", rse = "OBJ_EVENT_GFX_LEAF", gender = 1 },
-  { label = "BRENDAN", frlg = "OBJ_EVENT_GFX_RS_BRENDAN", rse = "OBJ_EVENT_GFX_BRENDAN_NORMAL", gender = 0 },
-  { label = "MAY", frlg = "OBJ_EVENT_GFX_RS_MAY", rse = "OBJ_EVENT_GFX_MAY_NORMAL", gender = 1 },
-  { label = "BLUE", frlg = "OBJ_EVENT_GFX_BLUE", gender = 0 },
-  { label = "WALLY", rse = "OBJ_EVENT_GFX_WALLY", gender = 0 },
-  { label = "PROF. OAK", frlg = "OBJ_EVENT_GFX_PROF_OAK", gender = 0 },
-  { label = "PROF. BIRCH", rse = "OBJ_EVENT_GFX_PROF_BIRCH", gender = 0 },
-  { label = "BILL", frlg = "OBJ_EVENT_GFX_BILL", gender = 0 },
-  { label = "STEVEN", rse = "OBJ_EVENT_GFX_STEVEN", gender = 0 },
-  { label = "YOUNGSTER", both = "OBJ_EVENT_GFX_YOUNGSTER", gender = 0 },
-  { label = "BUG CATCHER", both = "OBJ_EVENT_GFX_BUG_CATCHER", gender = 0 },
-  { label = "LASS", both = "OBJ_EVENT_GFX_LASS", gender = 1 },
-  { label = "CAMPER", both = "OBJ_EVENT_GFX_CAMPER", gender = 0 },
-  { label = "PICNICKER", both = "OBJ_EVENT_GFX_PICNICKER", gender = 1 },
-  { label = "BEAUTY", both = "OBJ_EVENT_GFX_BEAUTY", gender = 1 },
-  { label = "BLACK BELT", both = "OBJ_EVENT_GFX_BLACK_BELT", gender = 0 },
-  { label = "HIKER", both = "OBJ_EVENT_GFX_HIKER", gender = 0 },
-  { label = "SAILOR", both = "OBJ_EVENT_GFX_SAILOR", gender = 0 },
-  { label = "GENTLEMAN", both = "OBJ_EVENT_GFX_GENTLEMAN", gender = 0 },
-  { label = "SCIENTIST", frlg = "OBJ_EVENT_GFX_SCIENTIST", rse = "OBJ_EVENT_GFX_SCIENTIST_1", gender = 0 },
-  { label = "FISHERMAN", frlg = "OBJ_EVENT_GFX_FISHER", rse = "OBJ_EVENT_GFX_FISHERMAN", gender = 0 },
-  { label = "COOLTRAINER M", frlg = "OBJ_EVENT_GFX_COOLTRAINER_M", gender = 0 },
-  { label = "COOLTRAINER F", frlg = "OBJ_EVENT_GFX_COOLTRAINER_F", gender = 1 },
-  { label = "BIKER", frlg = "OBJ_EVENT_GFX_BIKER", gender = 0 },
-  { label = "ROCKER", frlg = "OBJ_EVENT_GFX_ROCKER", gender = 0 },
-  { label = "POKEMANIAC", frlg = "OBJ_EVENT_GFX_POKE_MANIAC", rse = "OBJ_EVENT_GFX_MANIAC", gender = 0 },
-  { label = "CHANNELER", frlg = "OBJ_EVENT_GFX_CHANNELER", gender = 1 },
-  { label = "ROCKET M", frlg = "OBJ_EVENT_GFX_ROCKET_M", gender = 0 },
-  { label = "ROCKET F", frlg = "OBJ_EVENT_GFX_ROCKET_F", gender = 1 },
-  { label = "EXPERT M", rse = "OBJ_EVENT_GFX_EXPERT_M", gender = 0 },
-  { label = "EXPERT F", rse = "OBJ_EVENT_GFX_EXPERT_F", gender = 1 },
-  { label = "PSYCHIC", rse = "OBJ_EVENT_GFX_PSYCHIC_M", gender = 0 },
-  { label = "HEX MANIAC", rse = "OBJ_EVENT_GFX_HEX_MANIAC", gender = 1 },
-  { label = "NINJA BOY", rse = "OBJ_EVENT_GFX_NINJA_BOY", gender = 0 },
-  { label = "RICH BOY", rse = "OBJ_EVENT_GFX_RICH_BOY", gender = 0 },
-  { label = "SCHOOL KID", rse = "OBJ_EVENT_GFX_SCHOOL_KID_M", gender = 0 },
-  { label = "AQUA M", rse = "OBJ_EVENT_GFX_AQUA_MEMBER_M", gender = 0 },
-  { label = "AQUA F", rse = "OBJ_EVENT_GFX_AQUA_MEMBER_F", gender = 1 },
-  { label = "MAGMA M", rse = "OBJ_EVENT_GFX_MAGMA_MEMBER_M", gender = 0 },
-  { label = "MAGMA F", rse = "OBJ_EVENT_GFX_MAGMA_MEMBER_F", gender = 1 },
-  { label = "ARCHIE", rse = "OBJ_EVENT_GFX_ARCHIE", gender = 0 },
-  { label = "MAXIE", rse = "OBJ_EVENT_GFX_MAXIE", gender = 0 },
-  { label = "GIOVANNI", frlg = "OBJ_EVENT_GFX_GIOVANNI", gender = 0 },
-  { label = "BROCK", frlg = "OBJ_EVENT_GFX_BROCK", gender = 0 },
-  { label = "MISTY", frlg = "OBJ_EVENT_GFX_MISTY", gender = 1 },
-  { label = "LT. SURGE", frlg = "OBJ_EVENT_GFX_LT_SURGE", gender = 0 },
-  { label = "ERIKA", frlg = "OBJ_EVENT_GFX_ERIKA", gender = 1 },
-  { label = "KOGA", frlg = "OBJ_EVENT_GFX_KOGA", gender = 0 },
-  { label = "SABRINA", frlg = "OBJ_EVENT_GFX_SABRINA", gender = 1 },
-  { label = "BLAINE", frlg = "OBJ_EVENT_GFX_BLAINE", gender = 0 },
-  { label = "LORELEI", frlg = "OBJ_EVENT_GFX_LORELEI", gender = 1 },
-  { label = "BRUNO", frlg = "OBJ_EVENT_GFX_BRUNO", gender = 0 },
-  { label = "AGATHA", frlg = "OBJ_EVENT_GFX_AGATHA", gender = 1 },
-  { label = "LANCE", frlg = "OBJ_EVENT_GFX_LANCE", gender = 0 },
-  { label = "ROXANNE", rse = "OBJ_EVENT_GFX_ROXANNE", gender = 1 },
-  { label = "BRAWLY", rse = "OBJ_EVENT_GFX_BRAWLY", gender = 0 },
-  { label = "WATTSON", rse = "OBJ_EVENT_GFX_WATTSON", gender = 0 },
-  { label = "FLANNERY", rse = "OBJ_EVENT_GFX_FLANNERY", gender = 1 },
-  { label = "NORMAN", rse = "OBJ_EVENT_GFX_NORMAN", gender = 0 },
-  { label = "WINONA", rse = "OBJ_EVENT_GFX_WINONA", gender = 1 },
-  { label = "TATE", rse = "OBJ_EVENT_GFX_TATE", gender = 0 },
-  { label = "LIZA", rse = "OBJ_EVENT_GFX_LIZA", gender = 1 },
-  { label = "JUAN", rse = "OBJ_EVENT_GFX_JUAN", gender = 0 },
-  { label = "SIDNEY", rse = "OBJ_EVENT_GFX_SIDNEY", gender = 0 },
-  { label = "PHOEBE", rse = "OBJ_EVENT_GFX_PHOEBE", gender = 1 },
-  { label = "GLACIA", rse = "OBJ_EVENT_GFX_GLACIA", gender = 1 },
-  { label = "DRAKE", rse = "OBJ_EVENT_GFX_DRAKE", gender = 0 },
-  { label = "WALLACE", rse = "OBJ_EVENT_GFX_WALLACE", gender = 0 },
-}
+-- The curated wardrobe -- one row per look, both families' spellings, the
+-- gender the link rule falls back to -- is Gen3.LOOKS (src/Gen3.lua, "the
+-- looks a player may wear", where the reason every row is a walking person
+-- is written down).  It lives there because it is also the fence on what a
+-- remote player may be drawn as, and the viewer mapping that enforces it is
+-- Gen3's; this file lists it for the CHARACTER screen and answers the
+-- wearable question over it.
+local LOOKS = Gen3.LOOKS
 M.LOOKS = LOOKS
-
--- name -> row, for every spelling a row carries (either family's).  Built
--- once: the table above is static, and this is asked from a draw path.
-local lookByName = {}
-for _, row in ipairs(LOOKS) do
-  for _, key in ipairs({ "both", "frlg", "rse" }) do
-    local name = row[key]
-    if name then lookByName[name] = row end
-  end
-end
 
 -- The row a graphic name belongs to, whichever family spelled it; nil for a
 -- name no row carries.
-function M.look(name)
-  if type(name) ~= "string" then return nil end
-  return lookByName[name]
-end
+local look = Gen3.look
+M.look = look
 
 -- The spelling of a row on one family ("frlg" | "rse"), or nil when that
 -- family has no such look.
@@ -243,7 +150,7 @@ end
 local function wearable3(name, game)
   if type(name) ~= "string" then return false end
   if name == fallbackSprite(game) then return true end
-  local row = lookByName[name]
+  local row = look(name)
   if not row or nameOn(row, family3(game)) ~= name then return false end
   local id = Gen3.gfxId(name)
   if not id then return false end
@@ -253,7 +160,7 @@ end
 -- "OBJ_EVENT_GFX_COOLTRAINER_M" -> "COOLTRAINER M", unless the row has a
 -- label of its own ("OBJ_EVENT_GFX_GREEN_NORMAL" is LEAF, not GREEN NORMAL).
 local function label3(id)
-  local row = lookByName[id]
+  local row = look(id)
   if row then return row.label end
   local s = tostring(id):gsub("^OBJ_EVENT_GFX_", ""):gsub("_NORMAL$", "")
   return (s:gsub("_", " "))
@@ -268,13 +175,16 @@ end
 -- family's spelling.  Everything else -- the hub's sprite-less token, a look
 -- this family has no graphic for, a name no row carries -- goes to
 -- Gen3.viewerGfxFor, which applies the carts' own Cable Club rule by the
--- sender's version and gender.  The row's gender is the better guess there
--- than none: a FireRed viewer with an Emerald ROXANNE draws a girl.
+-- sender's version and gender, and never draws a peer as a graphic that is
+-- not a look (a Cut tree, a boulder, a boat: the name is untrusted, and the
+-- avatar is a real event object the field interacts with by its graphic).
+-- The row's gender is the better guess there than none: a FireRed viewer
+-- with an Emerald ROXANNE draws a girl.
 function M.gfxForViewer(sprite, partnerVersion, gender)
   if not Gen3.active() then return nil end
   local family = family3()
   if type(sprite) == "string" then
-    local row = lookByName[sprite]
+    local row = look(sprite)
     local mine = row and nameOn(row, family)
     if mine then
       local id = Gen3.gfxId(mine)
@@ -356,7 +266,7 @@ end
 function M.resolve(id, game)
   if M.available(id, game) then return id end
   if gen3(game) then
-    local mine = nameOn(lookByName[id], family3(game))
+    local mine = nameOn(look(id), family3(game))
     if mine and wearable3(mine, game) then return mine end
   end
   return fallbackSprite(game)

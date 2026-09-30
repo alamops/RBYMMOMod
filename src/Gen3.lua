@@ -65,6 +65,9 @@
 --   trainerPic(picId)  trainerBackPic(gender)
 --   gfxId(name)  gfxName(id)  playerGfxName(gender, version)
 --   viewerGfxFor(sprite, partnerVersion, gender)
+--   LOOKS  look(name)  lookAllowed(name)   the curated wardrobe (Chars lists it)
+--   wrapFn(module, field, stashKey, build) / wrapLive(h) / unwrapFn(h)
+--                                   the one way an engine function is wrapped
 --   mapName(mapId)  region(mapId)   "kanto"|"sevii"|"hoenn"
 --   stack() busy() inField() inBattle() freeRoam()
 --   openStartMenu(game)  openNaming(opts)  nicknameTitle(speciesName)
@@ -80,9 +83,13 @@ local M = {}
 -- ------- is this a Gen 3 boot
 
 -- mod.game through the facade.  pcall because the facade's __index resolves
--- the game per generation and a half-built loader can throw from it.
+-- the game per generation and a half-built loader can throw from it.  The
+-- read is a named function rather than a closure: this runs from per-frame
+-- paths (inField under the toast corner and the overlay), and a closure per
+-- call is an allocation per frame.
+local function readGame() return mod.game end
 local function liveGame()
-  local ok, game = pcall(function() return mod.game end)
+  local ok, game = pcall(readGame)
   if ok and type(game) == "table" then return game end
   return nil
 end
@@ -136,6 +143,91 @@ local function gameData()
   local data = game and game.data
   if type(data) == "table" then return data end
   return nil
+end
+
+-- ------- wrapping an engine function
+--
+-- Where a Gen 3 seam is missing, this port wraps the one engine function that
+-- decides the thing (OwSprites.playerGraphicsId for the worn look, the quest
+-- log's capture and the rotating-tile puzzle's walker for the avatars).
+-- Every such wrap is done here, one way, because three things have to hold
+-- for each of them and each is easy to get wrong alone:
+--
+--   * A hot reload re-runs the installer against a slot that may already
+--     hold this mod's previous wrapper.  That wrapper is peeled off -- the
+--     new one goes over whatever it wrapped -- so wrappers never stack.
+--   * But the slot may hold *another mod's* wrapper, stacked on ours.  Only
+--     this mod's own wrappers are peeled, and only from the top: the moment
+--     the walk meets a function that is not ours, that is what gets wrapped.
+--     Wrapping the stashed original instead would silently drop the other
+--     mod's wrapper from the chain.  Ours underneath it stays in place and
+--     goes inert (wrapLive below), so the chain still reaches the engine.
+--   * Removing ours puts back exactly what it wrapped -- and only when the
+--     slot still holds it; with somebody else on top the caller retires it
+--     in place instead (the caller's flag, read by its own wrapper).
+--
+-- Which functions are ours is a weak-keyed table kept on the engine module
+-- itself (WRAPS_KEY), so every graph of this mod -- the one a hot reload
+-- builds included -- sees the same registry.  `stashKey` keeps the pristine
+-- original on the module for readers that want the engine's own answer; it
+-- goes when the last of ours is unwrapped.  `stashKey .. ":live"` names the
+-- newest wrapper installed under that key: an older one still in some chain
+-- answers as if it were not there.
+local WRAPS_KEY = "__rby_mmo_wraps"
+
+local function wrapsOf(module)
+  local tags = rawget(module, WRAPS_KEY)
+  if type(tags) ~= "table" then
+    tags = setmetatable({}, { __mode = "k" })
+    rawset(module, WRAPS_KEY, tags)
+  end
+  return tags
+end
+
+-- Install build(inner) into module[field]; a handle { module, field, stash,
+-- liveKey, wrapper, inner }, or nil when there is no such function.
+function M.wrapFn(module, field, stashKey, build)
+  if type(module) ~= "table" or type(build) ~= "function" then return nil end
+  local current = module[field]
+  if type(current) ~= "function" then return nil end
+  local tags = wrapsOf(module)
+  local inner = current
+  while tags[inner] ~= nil do inner = tags[inner] end
+  if rawget(module, stashKey) == nil then rawset(module, stashKey, inner) end
+  local wrapper = build(inner)
+  if type(wrapper) ~= "function" then return nil end
+  tags[wrapper] = inner
+  local liveKey = stashKey .. ":live"
+  rawset(module, liveKey, wrapper)
+  module[field] = wrapper
+  return {
+    module = module, field = field, stash = stashKey, liveKey = liveKey,
+    wrapper = wrapper, inner = inner,
+  }
+end
+
+-- Is this still the newest wrapper under its key?  One rawget: this is asked
+-- from inside the wrapper, every call.
+function M.wrapLive(handle)
+  return type(handle) == "table"
+    and rawget(handle.module, handle.liveKey) == handle.wrapper
+end
+
+-- Put back what the wrapper wrapped, when the slot still holds it: true.
+-- False (nothing touched) when somebody else's wrapper is on top.
+function M.unwrapFn(handle)
+  if type(handle) ~= "table" then return false end
+  local module = handle.module
+  if module[handle.field] ~= handle.wrapper then return false end
+  module[handle.field] = handle.inner
+  wrapsOf(module)[handle.wrapper] = nil
+  if rawget(module, handle.liveKey) == handle.wrapper then
+    rawset(module, handle.liveKey, nil)
+  end
+  if rawget(module, handle.stash) == handle.inner then
+    rawset(module, handle.stash, nil)
+  end
+  return true
 end
 
 -- ------- session, version, family
@@ -773,6 +865,151 @@ local SENT_AVATARS = {
   OBJ_EVENT_GFX_MAY_NORMAL = { gender = 1, from = "emerald" },
 }
 
+-- ------- the looks a player may wear
+--
+-- One row per look a player may wear on a Gen 3 cart: the label the
+-- CHARACTER screen shows, the graphic's name on each family (`frlg` for
+-- FireRed / LeafGreen, `rse` for Emerald, `both` when pret spells it the same
+-- on the two), and the gender the cart's link rule should fall back to when
+-- a viewer's family has no such look at all (a FireRed screen showing an
+-- Emerald player dressed as ROXANNE draws the R/S girl, as a Cable Club
+-- would).
+--
+-- Chosen, not generated, and chosen for one property: every one is a
+-- *walking* person on its cart.  An event-object graphic can be a sitting
+-- child, a doll, a berry tree or a boat, and a remote player worn as one of
+-- those would slide from tile to tile without a step cycle.  Where the cache
+-- is up, Chars.walks3 checks the frame count as well, so a build whose sheet
+-- turned out to be stationary drops the row instead of drawing it wrong.
+--
+-- It lives here, beside the viewer mapping, rather than in src/Chars.lua
+-- (which lists it for the CHARACTER screen as Chars.LOOKS) because it is also
+-- the fence on what a *remote* player may be drawn as.  `sprite` arrives from
+-- a peer, and the object an avatar is built from is a real event object: a
+-- FireRed Field.interact reads its graphic before its script, so a peer
+-- presenting as OBJ_EVENT_GFX_CUT_TREE would be offered to Cut -- and Cut
+-- removes the object -- and ROCK_SMASH_ROCK / PUSHABLE_BOULDER the same, with
+-- the ACTIONS menu unreachable behind them.  viewerGfxFor draws a name as
+-- itself only when it is a row here or a player-trainer graphic; anything
+-- else is drawn by the link rule.  Gen3 cannot need Chars (Chars needs Gen3),
+-- so the table has to be on this side of that edge.
+--
+-- Order is the order the CHARACTER screen lists them in: the four heroes
+-- first, then the rivals and professors, the trainer classes, and the gym
+-- leaders and Elite Four at the end.
+local LOOKS = {
+  { label = "RED", frlg = "OBJ_EVENT_GFX_RED_NORMAL", rse = "OBJ_EVENT_GFX_RED", gender = 0 },
+  { label = "LEAF", frlg = "OBJ_EVENT_GFX_GREEN_NORMAL", rse = "OBJ_EVENT_GFX_LEAF", gender = 1 },
+  { label = "BRENDAN", frlg = "OBJ_EVENT_GFX_RS_BRENDAN", rse = "OBJ_EVENT_GFX_BRENDAN_NORMAL", gender = 0 },
+  { label = "MAY", frlg = "OBJ_EVENT_GFX_RS_MAY", rse = "OBJ_EVENT_GFX_MAY_NORMAL", gender = 1 },
+  { label = "BLUE", frlg = "OBJ_EVENT_GFX_BLUE", gender = 0 },
+  { label = "WALLY", rse = "OBJ_EVENT_GFX_WALLY", gender = 0 },
+  { label = "PROF. OAK", frlg = "OBJ_EVENT_GFX_PROF_OAK", gender = 0 },
+  { label = "PROF. BIRCH", rse = "OBJ_EVENT_GFX_PROF_BIRCH", gender = 0 },
+  { label = "BILL", frlg = "OBJ_EVENT_GFX_BILL", gender = 0 },
+  { label = "STEVEN", rse = "OBJ_EVENT_GFX_STEVEN", gender = 0 },
+  { label = "YOUNGSTER", both = "OBJ_EVENT_GFX_YOUNGSTER", gender = 0 },
+  { label = "BUG CATCHER", both = "OBJ_EVENT_GFX_BUG_CATCHER", gender = 0 },
+  { label = "LASS", both = "OBJ_EVENT_GFX_LASS", gender = 1 },
+  { label = "CAMPER", both = "OBJ_EVENT_GFX_CAMPER", gender = 0 },
+  { label = "PICNICKER", both = "OBJ_EVENT_GFX_PICNICKER", gender = 1 },
+  { label = "BEAUTY", both = "OBJ_EVENT_GFX_BEAUTY", gender = 1 },
+  { label = "BLACK BELT", both = "OBJ_EVENT_GFX_BLACK_BELT", gender = 0 },
+  { label = "HIKER", both = "OBJ_EVENT_GFX_HIKER", gender = 0 },
+  { label = "SAILOR", both = "OBJ_EVENT_GFX_SAILOR", gender = 0 },
+  { label = "GENTLEMAN", both = "OBJ_EVENT_GFX_GENTLEMAN", gender = 0 },
+  { label = "SCIENTIST", frlg = "OBJ_EVENT_GFX_SCIENTIST", rse = "OBJ_EVENT_GFX_SCIENTIST_1", gender = 0 },
+  { label = "FISHERMAN", frlg = "OBJ_EVENT_GFX_FISHER", rse = "OBJ_EVENT_GFX_FISHERMAN", gender = 0 },
+  { label = "COOLTRAINER M", frlg = "OBJ_EVENT_GFX_COOLTRAINER_M", gender = 0 },
+  { label = "COOLTRAINER F", frlg = "OBJ_EVENT_GFX_COOLTRAINER_F", gender = 1 },
+  { label = "BIKER", frlg = "OBJ_EVENT_GFX_BIKER", gender = 0 },
+  { label = "ROCKER", frlg = "OBJ_EVENT_GFX_ROCKER", gender = 0 },
+  { label = "POKEMANIAC", frlg = "OBJ_EVENT_GFX_POKE_MANIAC", rse = "OBJ_EVENT_GFX_MANIAC", gender = 0 },
+  { label = "CHANNELER", frlg = "OBJ_EVENT_GFX_CHANNELER", gender = 1 },
+  { label = "ROCKET M", frlg = "OBJ_EVENT_GFX_ROCKET_M", gender = 0 },
+  { label = "ROCKET F", frlg = "OBJ_EVENT_GFX_ROCKET_F", gender = 1 },
+  { label = "EXPERT M", rse = "OBJ_EVENT_GFX_EXPERT_M", gender = 0 },
+  { label = "EXPERT F", rse = "OBJ_EVENT_GFX_EXPERT_F", gender = 1 },
+  { label = "PSYCHIC", rse = "OBJ_EVENT_GFX_PSYCHIC_M", gender = 0 },
+  { label = "HEX MANIAC", rse = "OBJ_EVENT_GFX_HEX_MANIAC", gender = 1 },
+  { label = "NINJA BOY", rse = "OBJ_EVENT_GFX_NINJA_BOY", gender = 0 },
+  { label = "RICH BOY", rse = "OBJ_EVENT_GFX_RICH_BOY", gender = 0 },
+  { label = "SCHOOL KID", rse = "OBJ_EVENT_GFX_SCHOOL_KID_M", gender = 0 },
+  { label = "AQUA M", rse = "OBJ_EVENT_GFX_AQUA_MEMBER_M", gender = 0 },
+  { label = "AQUA F", rse = "OBJ_EVENT_GFX_AQUA_MEMBER_F", gender = 1 },
+  { label = "MAGMA M", rse = "OBJ_EVENT_GFX_MAGMA_MEMBER_M", gender = 0 },
+  { label = "MAGMA F", rse = "OBJ_EVENT_GFX_MAGMA_MEMBER_F", gender = 1 },
+  { label = "ARCHIE", rse = "OBJ_EVENT_GFX_ARCHIE", gender = 0 },
+  { label = "MAXIE", rse = "OBJ_EVENT_GFX_MAXIE", gender = 0 },
+  { label = "GIOVANNI", frlg = "OBJ_EVENT_GFX_GIOVANNI", gender = 0 },
+  { label = "BROCK", frlg = "OBJ_EVENT_GFX_BROCK", gender = 0 },
+  { label = "MISTY", frlg = "OBJ_EVENT_GFX_MISTY", gender = 1 },
+  { label = "LT. SURGE", frlg = "OBJ_EVENT_GFX_LT_SURGE", gender = 0 },
+  { label = "ERIKA", frlg = "OBJ_EVENT_GFX_ERIKA", gender = 1 },
+  { label = "KOGA", frlg = "OBJ_EVENT_GFX_KOGA", gender = 0 },
+  { label = "SABRINA", frlg = "OBJ_EVENT_GFX_SABRINA", gender = 1 },
+  { label = "BLAINE", frlg = "OBJ_EVENT_GFX_BLAINE", gender = 0 },
+  { label = "LORELEI", frlg = "OBJ_EVENT_GFX_LORELEI", gender = 1 },
+  { label = "BRUNO", frlg = "OBJ_EVENT_GFX_BRUNO", gender = 0 },
+  { label = "AGATHA", frlg = "OBJ_EVENT_GFX_AGATHA", gender = 1 },
+  { label = "LANCE", frlg = "OBJ_EVENT_GFX_LANCE", gender = 0 },
+  { label = "ROXANNE", rse = "OBJ_EVENT_GFX_ROXANNE", gender = 1 },
+  { label = "BRAWLY", rse = "OBJ_EVENT_GFX_BRAWLY", gender = 0 },
+  { label = "WATTSON", rse = "OBJ_EVENT_GFX_WATTSON", gender = 0 },
+  { label = "FLANNERY", rse = "OBJ_EVENT_GFX_FLANNERY", gender = 1 },
+  { label = "NORMAN", rse = "OBJ_EVENT_GFX_NORMAN", gender = 0 },
+  { label = "WINONA", rse = "OBJ_EVENT_GFX_WINONA", gender = 1 },
+  { label = "TATE", rse = "OBJ_EVENT_GFX_TATE", gender = 0 },
+  { label = "LIZA", rse = "OBJ_EVENT_GFX_LIZA", gender = 1 },
+  { label = "JUAN", rse = "OBJ_EVENT_GFX_JUAN", gender = 0 },
+  { label = "SIDNEY", rse = "OBJ_EVENT_GFX_SIDNEY", gender = 0 },
+  { label = "PHOEBE", rse = "OBJ_EVENT_GFX_PHOEBE", gender = 1 },
+  { label = "GLACIA", rse = "OBJ_EVENT_GFX_GLACIA", gender = 1 },
+  { label = "DRAKE", rse = "OBJ_EVENT_GFX_DRAKE", gender = 0 },
+  { label = "WALLACE", rse = "OBJ_EVENT_GFX_WALLACE", gender = 0 },
+}
+M.LOOKS = LOOKS
+
+-- name -> row, for every spelling a row carries (either family's).  Built
+-- once: the table above is static, and this is asked from a draw path.
+local lookByName = {}
+for _, row in ipairs(LOOKS) do
+  for _, key in ipairs({ "both", "frlg", "rse" }) do
+    local name = row[key]
+    if name then lookByName[name] = row end
+  end
+end
+
+-- The graphics a player-trainer is drawn with somewhere on a Gen 3 cart:
+-- each family's own hero (what a player who chose nobody sends), and every
+-- name the carts' Cable Club rule (Family.LINK_PLAYER_GFX) draws a partner
+-- as.  Walking people all, and each one a thing a legitimate peer's `sprite`
+-- can be.
+local PLAYER_TRAINER_GFX = {
+  OBJ_EVENT_GFX_RED_NORMAL = true, OBJ_EVENT_GFX_GREEN_NORMAL = true,
+  OBJ_EVENT_GFX_BRENDAN_NORMAL = true, OBJ_EVENT_GFX_MAY_NORMAL = true,
+  OBJ_EVENT_GFX_RS_BRENDAN = true, OBJ_EVENT_GFX_RS_MAY = true,
+  OBJ_EVENT_GFX_RED = true, OBJ_EVENT_GFX_LEAF = true,
+  OBJ_EVENT_GFX_LINK_RS_BRENDAN = true, OBJ_EVENT_GFX_LINK_RS_MAY = true,
+  OBJ_EVENT_GFX_RIVAL_BRENDAN_NORMAL = true, OBJ_EVENT_GFX_RIVAL_MAY_NORMAL = true,
+}
+
+-- The row a graphic name belongs to, whichever family spelled it; nil for a
+-- name no row carries.
+function M.look(name)
+  if type(name) ~= "string" then return nil end
+  return lookByName[name]
+end
+
+-- May a remote player be drawn as `name` itself?  A look row (either
+-- family's spelling) or a player-trainer graphic; never an arbitrary graphic
+-- of the cart's, and never the hub's sprite-less token (that one is the link
+-- rule's by definition).
+function M.lookAllowed(name)
+  if type(name) ~= "string" then return false end
+  return lookByName[name] ~= nil or PLAYER_TRAINER_GFX[name] == true
+end
+
 -- The cart's own link-player rule: pokefirered/src/overworld.c:3516 draws an
 -- Emerald partner as RS_BRENDAN / RS_MAY, pokeemerald/src/overworld.c:3167
 -- draws a FireRed partner as RED / LEAF and another Emerald as the rival
@@ -796,11 +1033,15 @@ end
 -- with (contract C3), `partnerVersion` the version their hello carried, and
 -- `gender` 0/1.  A player avatar from another family goes through the link
 -- rule above (a FireRed RED_NORMAL is RED on Emerald, where RED_NORMAL does
--- not exist); any other name this cart has is drawn as itself; anything else
--- -- Config.DEFAULT_SPRITE_GEN3, the token a hub stamps when a hello carried
--- no sprite, a Gen 1 SPRITE_* id, a graphic this version lacks -- falls to the
--- link rule by gender.  An unknown partner version is read as the viewer's
--- own, which is the right guess for the name-less token.
+-- not exist); a look row is drawn in this family's spelling of it, or as the
+-- name itself when this cart has that; a player-trainer graphic this cart has
+-- is drawn as itself.  Anything else falls to the link rule by gender:
+-- Config.DEFAULT_SPRITE_GEN3, the token a hub stamps when a hello carried no
+-- sprite; a Gen 1 SPRITE_* id; a graphic this version lacks -- and every
+-- graphic of the cart's that is not a look at all (a Cut tree, a boulder, a
+-- boat: see "the looks a player may wear" above for why that fence is here).
+-- An unknown partner version is read as the viewer's own, which is the right
+-- guess for the name-less token.
 function M.viewerGfxFor(sprite, partnerVersion, gender)
   if not M.active() then return nil end
   local viewer = M.version()
@@ -816,8 +1057,19 @@ function M.viewerGfxFor(sprite, partnerVersion, gender)
       end
       return linkGfx(viewer, from, sent.gender)
     end
-    local id = M.gfxId(sprite, viewer)
-    if id then return id, sprite end
+    local row = lookByName[sprite]
+    if row then
+      local mine = row.both or row[ownFamily or "frlg"]
+      local id = mine and M.gfxId(mine, viewer)
+      if id then return id, mine end
+      -- the row's gender is the better guess for the link rule than none: a
+      -- FireRed viewer with an Emerald ROXANNE draws a girl
+      if gender == nil then gender = row.gender end
+    end
+    if row or PLAYER_TRAINER_GFX[sprite] then
+      local id = M.gfxId(sprite, viewer)
+      if id then return id, sprite end
+    end
   end
   return linkGfx(viewer, partner or viewer, gender)
 end

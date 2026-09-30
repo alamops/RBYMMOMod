@@ -50,7 +50,7 @@ local ROW_GAP = 2                   -- air between stacked rows
 local WHITE = { 1, 1, 1 }
 
 function M.new(ctx)
-  return setmetatable({ ctx = ctx, queue = {} }, M)
+  return setmetatable({ ctx = ctx, queue = {}, rev = 0 }, M)
 end
 
 -- ------- the queue
@@ -70,6 +70,8 @@ function M:push(text, color)
   local entry = { text = text, age = 0, color = color }
   self.queue[#self.queue + 1] = entry
   while #self.queue > Config.TOAST_MAX do table.remove(self.queue, 1) end
+  -- the Gen 3 corner's row memo is keyed on this (see rows3)
+  self.rev = (self.rev or 0) + 1
   return entry
 end
 
@@ -86,13 +88,17 @@ function M:update(dt)
     entry.age = entry.age + dt
     if entry.age >= Config.TOAST_SECONDS then
       table.remove(self.queue, index)
+      self.rev = (self.rev or 0) + 1
     else
       index = index + 1
     end
   end
 end
 
-function M:clear() self.queue = {} end
+function M:clear()
+  self.queue = {}
+  self.rev = (self.rev or 0) + 1
+end
 
 -- A copy, not the live list: this is what mod.exports hands a driver, and a
 -- driver holding the queue itself could age or empty it by accident.
@@ -420,12 +426,11 @@ end
 -- is how Overlay's labels once drew every frame and appeared nowhere.  The
 -- transform itself is untouched: this draws in window pixels, which is what
 -- render.hud already hands us.
-local function beginFrame()
-  local restore = {
-    shader = love.graphics.getShader(),
-    blend = love.graphics.getBlendMode(),
-    font = love.graphics.getFont(),
-  }
+local function beginFrame(into)
+  local restore = into or {}
+  restore.shader = love.graphics.getShader()
+  restore.blend = love.graphics.getBlendMode()
+  restore.font = love.graphics.getFont()
   love.graphics.setShader()
   love.graphics.setBlendMode("alpha")
   return restore
@@ -547,6 +552,14 @@ function M.gen3Held()
   if Gen3.inBattle() then return true end
   local Stack = Gen3.stack()
   if type(Stack) ~= "table" then return false end
+  -- Nothing on the stack covers nothing.  Asked first because it is the
+  -- free-roam answer, i.e. nearly every frame with a line in the corner, and
+  -- the two questions below both build the stack's draw order -- a fresh
+  -- table per call, even for an empty stack.
+  if type(Stack.depth) == "function" then
+    local ok, depth = pcall(Stack.depth)
+    if ok and depth == 0 then return false end
+  end
   if type(Stack.fullscreen) == "function" then
     local ok, full = pcall(Stack.fullscreen)
     if ok and full then return true end
@@ -564,23 +577,28 @@ local HELD = { reached = "held", drawn = 0, gen3 = true }
 -- scale but no scaleY; gameHeight is 160 * scaleY, so that is where the
 -- vertical factor is read from.  With no usable viewport the rect is derived
 -- from the window the way the Gen 1 / Gen 2 fallback does, at 240x160.
-function M.gen3Frame(viewport, windowW, windowH)
+--
+-- `out`, when given, is filled and returned instead of a new table (the
+-- per-frame caller passes one it keeps).
+function M.gen3Frame(viewport, windowW, windowH, out)
   local W, H = Config.GEN3_SCREEN_W, Config.GEN3_SCREEN_H
+  local frame = out or {}
   local scale = viewport and tonumber(viewport.scale) or nil
   if scale and scale > 0 then
-    local x = tonumber(viewport.gameX) or 0
-    local y = tonumber(viewport.gameY) or 0
     local height = tonumber(viewport.gameHeight)
-    local scaleY = (height and height > 0) and height / H or scale
-    return { x = x, y = y, sx = scale, sy = scaleY, derived = false }
+    frame.x = tonumber(viewport.gameX) or 0
+    frame.y = tonumber(viewport.gameY) or 0
+    frame.sx = scale
+    frame.sy = (height and height > 0) and height / H or scale
+    frame.derived = false
+    return frame
   end
   windowW, windowH = tonumber(windowW) or W, tonumber(windowH) or H
   scale = math.max(1, math.floor(math.min(windowW / W, windowH / H)))
-  return {
-    x = math.floor((windowW - W * scale) / 2),
-    y = math.floor((windowH - H * scale) / 2),
-    sx = scale, sy = scale, derived = true,
-  }
+  frame.x = math.floor((windowW - W * scale) / 2)
+  frame.y = math.floor((windowH - H * scale) / 2)
+  frame.sx, frame.sy, frame.derived = scale, scale, true
+  return frame
 end
 
 -- Where the stack may live, in GBA pixels: its left edge, the first row's
@@ -687,48 +705,112 @@ local function gen3Colors(font, tint)
   return { fg = fg, shadow = shadow, bg = { 0, 0, 0, 0 } }
 end
 
+-- ------- the Gen 3 draw, allocation-free while the queue stands still
+--
+-- The corner draws every frame a line is up, and on Gen 3 building its rows
+-- is real work: the charset mapping, the font's wrap, the ellipsis cut, a
+-- table per row and per row's colours.  None of it changes until the queue
+-- does, so it is built once per queue revision (M:push / M:update / M:clear
+-- bump `rev`) and per font and box, and every frame between just draws it.
+-- What the frame itself needs -- the rect, the restore record, the state
+-- seam's table -- is reused rather than rebuilt.
+
+-- The font the rows are measured and wrapped with, for the two functions
+-- below: module state rather than two closures made per frame.
+local g3font
+local function g3measure(text)
+  local ok, w = pcall(g3font.measure, text)
+  return ok and tonumber(w) or (#text * 6)
+end
+local function g3wrap(text, width)
+  if type(g3font.wrap) ~= "function" then return text end
+  local ok, out = pcall(g3font.wrap, text, width)
+  return ok and out or text
+end
+
+-- The box per family and row height (pure, so one table each is enough).
+local boxes3 = {}
+local function box3(family, rowH)
+  local byFamily = boxes3[family]
+  if not byFamily then
+    byFamily = {}
+    boxes3[family] = byFamily
+  end
+  local box = byFamily[rowH]
+  if not box then
+    box = M.gen3Box(family, rowH)
+    byFamily[rowH] = box
+  end
+  return box
+end
+
+-- The rows to draw, each with its plate width and its draw options already
+-- built; rebuilt only when something they depend on moved.  The queue's
+-- identity and length are checked beside `rev` so a queue somebody replaced
+-- by hand is still noticed.
+local function rows3(self, font, box)
+  local queue = self.queue
+  local c = self.rowMemo3
+  if c and c.rev == (self.rev or 0) and c.queue == queue and c.count == #queue
+      and c.font == font and c.box == box then
+    return c.rows
+  end
+  g3font = font
+  local rows = M.gen3Rows(queue, g3measure, g3wrap, box.textWidth, box.rows)
+  for _, row in ipairs(rows) do
+    row.plateW = g3measure(row.text) + GEN3.PAD_X * 2
+    row.opts = { colors = gen3Colors(font, row.color), maxWidth = box.textWidth }
+  end
+  self.rowMemo3 = {
+    rev = self.rev or 0, queue = queue, count = #queue, font = font, box = box,
+    rows = rows,
+  }
+  return rows
+end
+
+local restore3 = {}
+local frame3 = {}
+
 function M:drawGen3(viewport)
-  local last = { reached = "entered", drawn = 0, gen3 = true }
+  -- One state table per toast, reset in place: state() hands it out as the
+  -- last frame's verdict and it is only ever read between frames.
+  local last = self.last3
+  if not last then
+    last = { lines = {} }
+    self.last3 = last
+  end
+  local lines = last.lines
+  for i = #lines, 1, -1 do lines[i] = nil end
+  last.reached, last.drawn, last.gen3 = "entered", 0, true
+  last.top, last.maxRows = nil, nil
   self.last = last
 
   local font = gen3Font()
   if not font then last.reached = "no-font" return end
 
   local windowW, windowH = love.graphics.getDimensions()
-  local frame = M.gen3Frame(viewport, windowW, windowH)
+  local frame = M.gen3Frame(viewport, windowW, windowH, frame3)
   last.scale, last.gameX, last.gameY, last.derived = frame.sx, frame.x, frame.y, frame.derived
 
   local glyphH = tonumber(font.GLYPH_HEIGHT) or 14
   local rowH = glyphH + GEN3.PAD_Y * 2
-  local box = M.gen3Box(Gen3.family(), rowH)
-  local function measure(text)
-    local ok, w = pcall(font.measure, text)
-    return ok and tonumber(w) or (#text * 6)
-  end
-  local function wrapText(text, width)
-    if type(font.wrap) ~= "function" then return text end
-    local ok, out = pcall(font.wrap, text, width)
-    return ok and out or text
-  end
-  local rows = M.gen3Rows(self.queue, measure, wrapText, box.textWidth, box.rows)
+  local box = box3(Gen3.family() or "frlg", rowH)
+  local rows = rows3(self, font, box)
   last.top, last.maxRows = box.top, box.rows
 
-  local restore = beginFrame()
+  local restore = beginFrame(restore3)
   love.graphics.push()
   love.graphics.translate(frame.x, frame.y)
   love.graphics.scale(frame.sx, frame.sy)
   local y = box.top
-  for _, row in ipairs(rows) do
+  for i = 1, #rows do
+    local row = rows[i]
     love.graphics.setColor(0, 0, 0, 0.65)
-    love.graphics.rectangle("fill", box.left, y, measure(row.text) + GEN3.PAD_X * 2, rowH)
-    local ok = pcall(font.draw, row.text, box.left + GEN3.PAD_X, y + GEN3.PAD_Y, {
-      colors = gen3Colors(font, row.color),
-      maxWidth = box.textWidth,
-    })
+    love.graphics.rectangle("fill", box.left, y, row.plateW, rowH)
+    local ok = pcall(font.draw, row.text, box.left + GEN3.PAD_X, y + GEN3.PAD_Y, row.opts)
     if ok then
       last.drawn = last.drawn + 1
-      last.lines = last.lines or {}
-      last.lines[#last.lines + 1] = row.text
+      lines[#lines + 1] = row.text
     end
     y = y + box.step
   end

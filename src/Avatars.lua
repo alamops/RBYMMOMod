@@ -107,6 +107,24 @@
 --     four, so a cyclist is followed rather than respawned.  The field is
 --     frozen while any menu is up, avatars included; they finish the walk
 --     when it closes.
+--   * The live list is not the only copy.  Map.load snapshots the list it is
+--     leaving into that map's ghost pool (Ghosts.capture) before loading the
+--     next, and FieldView draws a neighbouring map's pool -- so after a
+--     seamless crossing every avatar left behind would stand frozen on the
+--     old map's side of the edge, and a player who followed would be drawn
+--     twice.  An avatar that is let go is therefore hidden as well as
+--     unlisted (retire3), and the pools are purged of avatars whenever the
+--     avatars are cleared (purgeGhosts3), which every map change does.
+--   * The sprite is untrusted, and FireRed's Field.interact reads an object's
+--     graphic before its script: a peer presenting as a Cut tree or a boulder
+--     would be offered to Cut / Strength (and Cut removes the object).  Only
+--     a look (Gen3.lookAllowed) is ever drawn as itself -- Gen3.viewerGfxFor
+--     draws anything else by the carts' link rule.
+--   * Two engine passes walk the live list for purposes of their own -- the
+--     FRLG quest log's capture (which would save other players into the
+--     recap) and Emerald's rotating-tile puzzle (which would shove them).
+--     Both are wrapped so an avatar takes no part; see "the engine walkers"
+--     below.
 
 local need, mod = ...
 local Config = need("Config")
@@ -162,16 +180,134 @@ local function isAvatar3(eo)
 end
 M.isAvatar3 = isAvatar3
 
+-- ------- the engine walkers an avatar must stay out of
+--
+-- An avatar is in the engine's live object list so that FieldView draws,
+-- sorts and animates it; but a few engine passes walk that same list for
+-- their own purposes and have no business with another player.  There is no
+-- marker they honour short of hiding the object -- which would hide it from
+-- the renderer too, since both read the same fields -- so the two that
+-- matter are wrapped (Gen3.wrapFn: the one wrapping discipline, hot-reload
+-- and other-mod safe), each as narrowly as it allows:
+--
+--   * FireRed / LeafGreen's quest log.  quest_log_recorder.capture records
+--     Objects.forDraw() -- the renderer's own list -- as a frame of actors,
+--     and those frames go into session.questLog and from there into the save,
+--     so the "previously on your quest" recap on CONTINUE would replay other
+--     players standing about.  The capture is left to run and the avatars'
+--     actors are dropped from the frame it returns (an actor's id is the
+--     object's localId, and ours are the GEN3_AVATAR_LOCAL_ID_BASE block no
+--     map object can have).  Nothing on the avatar is touched.
+--   * Emerald's rotating-tile puzzle (Mossdeep Gym, the Trick House).
+--     RotatingTilePuzzle.move walks every visible object in the list, and
+--     one standing on an arrow tile is remembered, given a movement track and
+--     named the puzzle's lastMoved -- so another player standing on an arrow
+--     would be shoved by *your* switch, fighting advance3 for the object.
+--     The avatars are made invisible for exactly the length of that call
+--     (it draws nothing) and visible again after; if the engine throws in
+--     between, advance3 puts them back on the next tick (`mmoShielded`).
+local QUEST_KEY = "__rby_mmo_questCapture"
+local PUZZLE_KEY = "__rby_mmo_rotatingMove"
+local questWrap, puzzleWrap
+
+local function avatarActor(actor)
+  if type(actor) ~= "table" then return false end
+  local id = tonumber(actor.id)
+  local base = Config.GEN3_AVATAR_LOCAL_ID_BASE
+  return id ~= nil and id >= base and id <= base + 0xFF
+end
+
+-- The frame capture returned, with the avatars' actors taken out in place.
+-- Varargs so whatever else the engine returns is forwarded untouched.
+local function withoutAvatars(frame, ...)
+  local actors = type(frame) == "table" and frame.actors or nil
+  if type(actors) == "table" then
+    local n = 0
+    for i = 1, #actors do
+      local actor = actors[i]
+      if not avatarActor(actor) then
+        n = n + 1
+        actors[n] = actor
+      end
+    end
+    for i = #actors, n + 1, -1 do actors[i] = nil end
+  end
+  return frame, ...
+end
+
+local function shield3()
+  local Objects = objects3()
+  local byId = Objects and Objects._byId
+  local order = Objects and Objects._order
+  if type(byId) ~= "table" or type(order) ~= "table" then return end
+  for i = 1, #order do
+    local eo = byId[order[i]]
+    if isAvatar3(eo) and eo.visible then
+      eo.visible = false
+      eo.mmoShielded = true
+    end
+  end
+end
+
+local function unshield3(...)
+  local Objects = objects3()
+  local byId = Objects and Objects._byId
+  local order = Objects and Objects._order
+  if type(byId) == "table" and type(order) == "table" then
+    for i = 1, #order do
+      local eo = byId[order[i]]
+      if type(eo) == "table" and eo.mmoShielded then
+        eo.mmoShielded = nil
+        eo.visible = true
+      end
+    end
+  end
+  return ...
+end
+
+local function installWalkers3()
+  local Recorder = Gen3.engine("src.core.game3.quest_log_recorder")
+  if type(Recorder) == "table" and type(Recorder.capture) == "function" then
+    questWrap = Gen3.wrapFn(Recorder, "capture", QUEST_KEY, function(inner)
+      return function(...)
+        if not Gen3.wrapLive(questWrap) then return inner(...) end
+        return withoutAvatars(inner(...))
+      end
+    end)
+  end
+  -- The puzzle module registers itself with Emerald's system table when it
+  -- is first required, so it is only ever reached on an Emerald boot.
+  if Gen3.family() == "rse" then
+    local Puzzle = Gen3.engine("src.core.game3.rotating_tile_puzzle")
+    if type(Puzzle) == "table" and type(Puzzle.move) == "function" then
+      puzzleWrap = Gen3.wrapFn(Puzzle, "move", PUZZLE_KEY, function(inner)
+        return function(...)
+          if not Gen3.wrapLive(puzzleWrap) then return inner(...) end
+          shield3()
+          return unshield3(inner(...))
+        end
+      end)
+    end
+  end
+end
+
 -- The Gen 3 seams this file needs from the engine, installed once per load.
 --
 -- world.talk is the A press on an event object that has a script.  An avatar
 -- has one (TALK_KEY) precisely so the press reaches here; answering for it
 -- means not calling next(), which is the hook's documented way to consume a
 -- talk (docs/modding.md, `world.talk`).  Everything else falls through.
+-- The walker wraps above go in beside it.
 local installed3 = false
 local function install3()
   if installed3 then return end
   installed3 = true
+  local ok, err = pcall(installWalkers3)
+  if not ok then
+    mod.log:warn("could not keep other players out of the quest log and the "
+      .. "tile puzzles (%s); they may show in the CONTINUE recap -- report "
+      .. "this with the line above", tostring(err))
+  end
   if not (mod.hooks and type(mod.hooks.wrap) == "function") then return end
   mod.hooks:wrap("world.talk", function(nextFn, game, eo, ...)
     if isAvatar3(eo) then return end
@@ -398,6 +534,9 @@ end
 function M:clear()
   for id in pairs(self.spawned) do self:despawn(id) end
   self.spawned = {}
+  -- Gen 3: whatever the engine copied into a ghost pool on the way out of
+  -- the last map goes too (despawn3 / retire3 say why)
+  if onGen3() then M.purgeGhosts3() end
 end
 
 -- where an avatar actually is right now, for the overlay's nameplate.  The
@@ -719,8 +858,11 @@ function M:spriteFor3(requested, player)
     name = Gen3.playerGfxName(s and s.gender)
     id = name and Gen3.gfxId(name) or nil
   end
+  -- Not a look is not drawn as itself -- a Cut tree or a boulder included,
+  -- which is the case this line exists to name: the graphic a peer asked for
+  -- is one this cart has, and Gen3.viewerGfxFor still refused it.
   if type(requested) == "string" and requested ~= Config.DEFAULT_SPRITE_GEN3
-      and not Chars.look(requested) and not Gen3.gfxId(requested)
+      and not Gen3.lookAllowed(requested)
       and not self.spriteWarned[requested] then
     self.spriteWarned[requested] = true
     mod.log:warn("sprite %s is not a look this cart knows; drawing that "
@@ -789,8 +931,58 @@ function M:despawn3(playerId)
   self.spawned[playerId] = nil
   local Objects = objects3()
   if Objects then extract3(Objects, av) end
+  M.retire3(av.eo)
   self:freeLid3(av.lid)
   return true
+end
+
+-- An avatar this file has let go of is hidden for good, not just unlisted.
+--
+-- Taking it out of the live list is not the whole of letting it go, because
+-- the live list is not the only place the engine keeps the object.  Map.load
+-- snapshots the list it is leaving (Ghosts.capture, map.lua:303) *before* it
+-- loads the next map, so on a seamless crossing every avatar standing on the
+-- old map goes into that map's ghost pool -- and FieldView draws a
+-- neighbouring map's ghost pool for as long as the map stays a neighbour
+-- (collectNeighborActors -> Objects.poolForDraw).  Nothing moves it there
+-- again: the player it stood for is frozen on the old map's side of the
+-- edge, and drawn twice once they follow.  poolForDraw skips a hidden,
+-- invisible object, so hiding it is what makes every reference the engine
+-- still holds -- that pool, or any other -- stop drawing it.  purgeGhosts3
+-- then takes it out of the pools this file can see.
+function M.retire3(eo)
+  if type(eo) ~= "table" or not isAvatar3(eo) then return end
+  eo.hidden = true
+  eo.visible = false
+  eo.mmoShielded = nil
+end
+
+-- Every avatar out of every ghost pool (see retire3).  Only ever objects
+-- this file made -- the marker is the test -- so the map's own NPCs in the
+-- same pools are untouched.  A handful of pools (the neighbours and the one
+-- just left), walked on a map change and on a clear, never per frame.
+function M.purgeGhosts3()
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  local pools = type(Ghosts) == "table" and Ghosts._pools or nil
+  if type(pools) ~= "table" then return 0 end
+  local n = 0
+  for _, pool in pairs(pools) do
+    local byId = type(pool) == "table" and pool.byId or nil
+    local order = type(pool) == "table" and pool.order or nil
+    if type(byId) == "table" and type(order) == "table" then
+      for i = #order, 1, -1 do
+        local lid = order[i]
+        local eo = byId[lid]
+        if isAvatar3(eo) then
+          M.retire3(eo)
+          byId[lid] = nil
+          table.remove(order, i)
+          n = n + 1
+        end
+      end
+    end
+  end
+  return n
 end
 
 -- Where the avatar is right now, in cells: its cell while it stands (the
@@ -834,6 +1026,13 @@ function M:advance3(av, player)
   local Objects = objects3()
   if not Objects then return nil end
   local eo = av.eo
+
+  -- A walker shield the engine threw out of before it could be lifted (see
+  -- "the engine walkers" above): visible again from this tick.
+  if eo.mmoShielded then
+    eo.mmoShielded = nil
+    eo.visible = true
+  end
 
   -- A reload wiped the list under us: the same object goes straight back,
   -- where it stood.
