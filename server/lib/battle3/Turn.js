@@ -939,7 +939,8 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
       }
     }
     const row = out.struggle ? Move.STRUGGLE : at(b.moves, out.move);
-    const ttype = int(row.target, 0);
+    // Aimed as the cart's menu aims it: a Ghost's CURSE like a SELECTED move.
+    const ttype = this.aimTarget(b, row);
     if (ttype === T.SELECTED || ttype === T.USER_OR_SELECTED) {
       let tf;
       if (choice.target != null) {

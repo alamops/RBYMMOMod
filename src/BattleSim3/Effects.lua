@@ -1299,9 +1299,12 @@ end
 H[E.CURSE] = function(C)
   local B, user = C.B, C.user
   if isType(user, Types.ID.GHOST) then
+    -- The aimed battler (Move.lua `_pickTarget`); still the user when nothing
+    -- was aimed -- a called or Encored Curse -- and then the battler opposite
+    -- (BattleScript_GhostCurse's getmovetarget; engine setup.lua curse: foeOf).
     local t = C.target
     if t == user or not t then
-      t = B:foes(user)[1]
+      t = B:oppositeFoe(user)
       C.target = t
     end
     if not t then return C:fail() end

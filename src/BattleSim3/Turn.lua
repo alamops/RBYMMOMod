@@ -876,7 +876,8 @@ function Battle:_normaliseChoice(fighter, choice)
       end
     end
     local row = out.struggle and Move.STRUGGLE or b.moves[out.move]
-    local ttype = int(row.target, 0)
+    -- Aimed as the cart's menu aims it: a Ghost's CURSE like a SELECTED move.
+    local ttype = self:aimTarget(b, row)
     if ttype == T.SELECTED or ttype == T.USER_OR_SELECTED then
       local tf
       if choice.target ~= nil then

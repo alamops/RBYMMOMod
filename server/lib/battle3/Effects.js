@@ -1657,9 +1657,12 @@ H[E.FUTURE_SIGHT] = function effectFutureSight(C) {
 H[E.CURSE] = function effectCurse(C) {
   const { B, user } = C;
   if (isType(user, Types.ID.GHOST)) {
+    // The aimed battler (Move.js `_pickTarget`); still the user when nothing
+    // was aimed -- a called or Encored Curse -- and then the battler opposite
+    // (BattleScript_GhostCurse's getmovetarget; engine setup.lua curse: foeOf).
     let t = C.target;
     if (t === user || !truthy(t)) {
-      t = B.foes(user)[0];
+      t = B.oppositeFoe(user);
       C.target = t;
     }
     if (!truthy(t)) return C.fail();

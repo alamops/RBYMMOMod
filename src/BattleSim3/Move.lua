@@ -707,11 +707,58 @@ local function followMe(B, user)
   return nil
 end
 
+-- A Ghost's CURSE: the cart's move menu offers it as MOVE_TARGET_SELECTED
+-- (pokefirered/src/battle_controller_player.c:444; engine ui.lua
+-- move_target_type) although its table target is USER.  Read by number, as
+-- the cart does, and by the battler's type at the time.
+local function ghostCurse(b, row)
+  return row ~= nil and int(row.num, 0) == MOVE.CURSE and isType(b, Types.ID.GHOST)
+end
+
+-- The target kind a seat aims this row with: SELECTED for a Ghost's CURSE,
+-- else the row's own byte.  The byte (USER for Curse) still rules everything
+-- the cart keys on gBattleMoves[].target: Follow Me, Lightning Rod, Pressure.
+function Bm:aimTarget(b, row)
+  if ghostCurse(b, row) then return T.SELECTED end
+  return int(row and row.target, 0)
+end
+
+-- A chosen aim whose battler is gone (a stolen KO, a switch): the same seat's
+-- newcomer, else the nearest foe to that seat (a foe's), else the first foe.
+function Bm:_reaim(user, t)
+  if t and (t.mon.hp <= 0 or t.fighter.b ~= t) then
+    local now = t.fighter.b
+    if now and now.mon.hp > 0 then return now end
+    if t.side ~= user.side then return self:_nearestFoe(user, t.slot) end
+    return self:foes(user)[1]
+  end
+  return t
+end
+
+-- The battler opposite this one (the engine adapter's foeOf, State.OPPOSITE:
+-- battler 0 faces 1, 2 faces 3): the foe seat in the same position if it
+-- stands, else the nearest standing foe to that position.
+function Bm:oppositeFoe(b)
+  local other = (b.side == "a") and "b" or "a"
+  return self:_nearestFoe(b, self.bySide[other][1].slot + b.fighter.index - 1)
+end
+
 -- The battler an action lands on.  `aimed` is the chosen / stored target
 -- battler (or nil); `random` true re-picks a SELECTED move's target at random
 -- (a called or Encored move); `called` marks a called move (GetMoveTarget).
 function Bm:_pickTarget(user, row, aimed, random, called)
   local ttype = int(row.target, 0)
+  -- A Ghost's CURSE: HandleAction_UseMove (pokefirered/src/battle_main.c:4024,
+  -- engine resolveTarget) keeps the chosen battler -- the table target is
+  -- USER, so Follow Me and Lightning Rod pass it by -- and an emptied aim
+  -- moves on as a SELECTED one does.  Nothing aimed (a called or Encored Curse
+  -- recomputes GetMoveTarget, which for USER is the user): the user, and the
+  -- effect turns on the battler opposite (BattleScript_GhostCurse's
+  -- getmovetarget; engine setup.lua curse).
+  if ghostCurse(user, row) then
+    if random or called or aimed == nil then return user end
+    return self:_reaim(user, aimed)
+  end
   if ttype == T.USER then return user end
   -- An active Follow Me takes every MOVE_TARGET_SELECTED move, even one aimed
   -- at the ally (pokefirered/src/battle_main.c:4027 HandleAction_UseMove), and
@@ -728,17 +775,7 @@ function Bm:_pickTarget(user, row, aimed, random, called)
   if ttype == T.SELECTED or ttype == T.USER_OR_SELECTED then
     local t = aimed
     if random or t == nil then t = self:_randomFoe(user) end
-    -- stolen KO / emptied aim: the same seat's newcomer, else the nearest foe
-    if t and (t.mon.hp <= 0 or t.fighter.b ~= t) then
-      local now = t.fighter.b
-      if now and now.mon.hp > 0 then
-        t = now
-      elseif t.side ~= user.side then
-        t = self:_nearestFoe(user, t.slot)
-      else
-        t = self:foes(user)[1]
-      end
-    end
+    t = self:_reaim(user, t)
     -- Lightning Rod (doubles, no Follow Me): the earliest-moving foe with it.
     if t and self.double and int(row.type, -1) == Types.ID.ELECTRIC and t.ability ~= "LIGHTNING_ROD" then
       local best, bestN = nil, nil

@@ -82,7 +82,7 @@ seat cap (`1v1` / `wild` allow one, so a shared team there is refused as
 
 | action | fields | notes |
 | --- | --- | --- |
-| `fight` | `move` 0..3 (index into the *current* move list), `target` field slot (optional), `pass` party index 0..5 (optional) | `target` is read only for `MOVE_TARGET_SELECTED` moves and may name a living **ally** (Gen 3 lets a player aim at the partner) or any living foe, never the user. Absent ⇒ first living foe. Other target kinds ignore it. `pass` is the Baton Pass destination (the cart opens the party menu mid-move; a mediated fight asks up front): a living bench mon; absent or not legal ⇒ the first living bench mon in party order. |
+| `fight` | `move` 0..3 (index into the *current* move list), `target` field slot (optional), `pass` party index 0..5 (optional) | `target` is read only for `MOVE_TARGET_SELECTED` moves — and a **Ghost's CURSE**, which the cart's menu aims the same way (§6) — and may name a living **ally** (Gen 3 lets a player aim at the partner) or any living foe, never the user. Absent ⇒ first living foe. Other target kinds ignore it. `pass` is the Baton Pass destination (the cart opens the party menu mid-move; a mediated fight asks up front): a living bench mon; absent or not legal ⇒ the first living bench mon in party order. |
 | `switch` | `slot` 0..5 (party index) | refused while trapped (Mean Look / Block / Spider Web, Ingrain, a partial trap, Shadow Tag, Arena Trap, Magnet Pull); a forced replacement is always legal |
 | `item` | `item` numeric item id (number or numeric string), `slot` party index (optional), `move` 0..3 (PP items), `dexCaught` bool (Repeat Ball: the thrower's dex already has the species caught) | ids per §4 |
 | `run` | — | wild modes: refused when trapped (unless Smoke Ball / Run Away); see §6 |
@@ -537,6 +537,17 @@ where `turn` counts completed turns (0 during the first turn, pret
 * **Follow Me** takes every `MOVE_TARGET_SELECTED` move and a *called* move's random
   target (`GetMoveTarget`); a chosen random-target move (Thrash, Uproar) is not
   pulled.
+* **A Ghost's CURSE** is aimed like a `MOVE_TARGET_SELECTED` move (pret
+  `battle_controller_player.c:444` offers MOVE_CURSE as SELECTED when the user is a
+  Ghost, by its type at the time): the filed `target` (a foe or the ally) is where
+  the curse lands, the default is the first living foe (the menu cursor's start), and
+  an aim whose battler fell or left moves on as a SELECTED move's does. Its table
+  target stays `USER`, so Follow Me and Lightning Rod never pull it and Pressure
+  costs nothing (`HandleAction_UseMove` / `ppreduce` read the table byte). A Curse
+  with nothing aimed — called by Sleep Talk / Metronome / Assist, or Encored —
+  curses the battler **opposite** the user (`BattleScript_GhostCurse`'s
+  `getmovetarget`; the engine's `foeOf`: battler 0 faces 1, 2 faces 3), or the
+  nearest standing foe when that one is down. A non-Ghost CURSE is unchanged.
 * **Soundproof** is asked per target (`attackcanceler` runs for each target pass):
   one Soundproof foe blocks a spread sound move for itself only, and a called
   sound move is blocked too.

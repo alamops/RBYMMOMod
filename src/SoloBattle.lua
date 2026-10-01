@@ -2522,13 +2522,20 @@ function M:_begin3(game, kind, party, opts, extra)
   -- it, and so does every Gen 3 arm the pump reaches.
   self.generation = 3
   local fight
+  -- The party as the fight found it, before the double screen -- which fights
+  -- on the live party -- has touched a monster of it (M.snapshotParty3); put
+  -- back on every way out that is not the fight's own ending.
+  local partySnap = nil
   if double then
+    local session0 = Gen3.session()
+    partySnap = M.snapshotParty3(session0 and session0.party)
     fight = self:_doubleScreen3(game, pending, {
       battle = battleId, mode = mode, trainer = trainer,
       enemySheets = enemySheets, foeSeats = foeSeats,
     })
     if not fight then
       self.generation = nil
+      M.restoreParty3(partySnap)
       return false
     end
   else
@@ -2568,6 +2575,7 @@ function M:_begin3(game, kind, party, opts, extra)
   if not (started and type(mine) == "table" and type(mine.mons) == "table"
           and #mine.mons > 0) then
     self.generation = nil
+    M.restoreParty3(partySnap)
     return false
   end
 
@@ -2627,6 +2635,7 @@ function M:_begin3(game, kind, party, opts, extra)
   })
   if not sim then
     self.generation = nil
+    M.restoreParty3(partySnap)
     self:warn("nosim", "the mod's battle system could not assemble this fight (%s), so "
       .. "it is fought the ordinary way; report this with the battle you were in",
       tostring(why))
@@ -2675,6 +2684,8 @@ function M:_begin3(game, kind, party, opts, extra)
     double = double or nil,
     foeSeats = double and foeSeats or nil,
     foeOut = double and {} or nil,
+    -- The party as the fight found it (a double only; M:_reset3 restores it).
+    partySnap = partySnap,
   }
 
   -- Claimed only once it is on screen.  A layer the modal stack refused would
@@ -2688,6 +2699,7 @@ function M:_begin3(game, kind, party, opts, extra)
   if not pushed then
     fight.onDone = nil
     self:_clear3()
+    M.restoreParty3(partySnap)
     self:warn("push3", "the mod's battle screen could not be opened over the field, so "
       .. "this fight is fought the ordinary way; if it keeps happening, turn SOLO "
       .. "BATTLES off in the mod manager (F10) and report it")
@@ -3621,6 +3633,75 @@ function M:_afterBattle3(game, toLearn, levelled, finish)
   nextStep()
 end
 
+-- ------- the party as a double found it
+--
+-- A single's screen (MediatedBattle) fights copies: HP, status and PP stay on
+-- the referee's sheets until M:_reconcile3 brings them home.  A lone double's
+-- screen is CoopBattle's, and co-op seats fight on the live session party
+-- itself (newSoloDouble: "the same table") -- HP and status as the referee's
+-- damage and status events replay, PP as each `moves` event lands (savePp3),
+-- a held item as it is eaten or knocked off (applyHeld3), EXP, the level, its
+-- stats and the moves it teaches as each knockout pays (gainExp3,
+-- LearnMove).  The fight's own ending is right regardless: M:_reconcile3
+-- writes the referee's final HP / PP / status over all of it, and the rest is
+-- what the fight earned.  A hand-back is not: the cart's battle against the
+-- same trainer would start from a party already hurt, poisoned, out of PP and
+-- part-levelled by a fight it never saw -- and pay the same EXP again.  So the
+-- party is recorded as the fight is diverted and put back, value for value,
+-- before the cart's battle starts in its place.
+--
+-- In place, never replaced: each member, and each plain table it holds (its
+-- moves, PP, IVs, EVs, stats), is the very table it was, with the contents it
+-- had -- keys the fight added are taken off again -- so nothing that kept a
+-- reference to one is left holding a copy.  Plain data only: a table with a
+-- metatable is a reference to something else and is kept as that reference,
+-- never walked.  Three levels down covers a Gen 3 party monster (the
+-- monster, its lists, anything a list holds).  The list itself -- who, in
+-- which order -- is put back too.
+local PARTY_SNAP_DEPTH = 3
+
+local function snapTable3(t, depth, recs)
+  if recs[t] then return end
+  local fields, nested = {}, {}
+  recs[t] = { ref = t, fields = fields }
+  for k, v in pairs(t) do
+    fields[k] = v
+    if type(v) == "table" and depth > 1 and getmetatable(v) == nil then
+      nested[#nested + 1] = v
+    end
+  end
+  for _, child in ipairs(nested) do snapTable3(child, depth - 1, recs) end
+end
+
+-- The record; nil for no party.
+function M.snapshotParty3(party)
+  if type(party) ~= "table" then return nil end
+  local recs, members = {}, {}
+  for i, mon in ipairs(party) do
+    members[i] = mon
+    if type(mon) == "table" and getmetatable(mon) == nil then
+      snapTable3(mon, PARTY_SNAP_DEPTH, recs)
+    end
+  end
+  return { party = party, members = members, count = #members, recs = recs }
+end
+
+-- Put it back.  False for no record (nothing to do, nothing done).
+function M.restoreParty3(snap)
+  if type(snap) ~= "table" or type(snap.party) ~= "table" then return false end
+  local party = snap.party
+  for i = #party, snap.count + 1, -1 do party[i] = nil end
+  for i = 1, snap.count do party[i] = snap.members[i] end
+  for _, rec in pairs(snap.recs) do
+    local t, fields = rec.ref, rec.fields
+    for k in pairs(t) do
+      if fields[k] == nil then t[k] = nil end
+    end
+    for k, v in pairs(fields) do t[k] = v end
+  end
+  return true
+end
+
 -- `reset` on Gen 3.  There is no buried battle to put back on top, so what
 -- "hand it back" means here is: take our screen off without running its
 -- ending, and -- unless the save changed underneath (a load drops the fight
@@ -3636,6 +3717,16 @@ function M:_reset3()
   if not g3 then return true end
   local session = Gen3.session()
   if session == nil or session ~= g3.session then return true end
+  -- A double's screen has been writing the fight onto the live party; the
+  -- cart's battle starts from the party it would have started from, so it is
+  -- put back first (after the pop, which is the screen's last chance to
+  -- write).  A single's screen never touched HP, status or PP, and has no
+  -- snapshot.
+  if g3.partySnap and not M.restoreParty3(g3.partySnap) then
+    self:warn("restore3", "your party could not be put back the way this battle found it "
+      .. "before the ordinary battle took over; check your POKéMON's HP and PP, or "
+      .. "reload from your last save")
+  end
   self:_handBack3(game, g3)
   return true
 end
