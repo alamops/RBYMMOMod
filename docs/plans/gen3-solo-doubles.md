@@ -421,3 +421,8 @@ the save and the script VM. Run recipe (from this session, not a subagent):
 | A LeafGreen live run | **out of scope**: no ROM on this machine |
 | An empty seat sorts last in turn order while `battlerCount()` counts every seat (`Move.lua:115`, `_beginTurn`). "Moved last" checks (Protect, Magic Coat, Snatch) can be off whenever a doubles side has an empty seat; pret sorts absent battlers by speed | **out of scope**: pre-existing. Co-op 2v2 has had it since the referee landed; T1 found it, this change did not create it. A referee fidelity ticket |
 | Hub-hosted shared teams (`Hub.lua:1736` disconnects one seat id) | **out of scope**: no hub ever passes `seats`. Only relevant if co-op adopts shared teams |
+| Arena trainer roster chip truncates a long name mid-word ("GINA & .", "ELI & A.") | **out of scope**: the chip's existing truncation, the same for long single and co-op trainer names; the intro line shows the full name. A cosmetic ticket |
+| A move callout lingered once behind the refill picker (FireRed e2e, seen once) | **out of scope**: the shared callout fade, not reproduced since; noted |
+| "Player defeated …" in the e2e boot | **out of scope**: the line uses the save's own name, and that boot leaves the save named "Player" (the chip and prize read the mod's name); identical in singles |
+| Bag items used before a mid-fight hand-back stay spent; singles keep mid-fight EXP after a hand-back | **out of scope**: pre-existing on both screens (found by T3), not created by this change |
+| Arena "which mon is choosing" cue | **in this run**: `43e0271` (found by the e2e legs): "What will X do?" beside a 2×2 command grid, the cart's action box |
