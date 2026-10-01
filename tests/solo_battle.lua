@@ -1321,6 +1321,46 @@ end)()
      "gen3Refused: firstBattle = false is an ordinary trainer")
   ok(Solo.gen3Double({ double = true }, {}), "gen3Double: the double flag")
   ok(not Solo.gen3Double({}, { doubleBattle = false }), "gen3Double: a single")
+  ok(Solo.gen3Double({}, { doubleBattle = true }), "gen3Double: a double trainer row")
+  ok(Solo.gen3Double({ trainerIdB = 5 }, {}), "gen3Double: a second trainer is a double of a kind")
+  ok(not Solo.gen3Double(nil, nil), "gen3Double: nothing is not")
+  -- The wider question above; the take-over decision below it.
+  ok(Solo.gen3LoneDouble({ double = true }, {}), "gen3LoneDouble: the double flag")
+  ok(Solo.gen3LoneDouble({}, { doubleBattle = true }), "gen3LoneDouble: a double trainer row")
+  ok(not Solo.gen3LoneDouble({}, { doubleBattle = false }), "gen3LoneDouble: a single is not")
+  ok(not Solo.gen3LoneDouble(nil, nil), "gen3LoneDouble: nothing is not")
+  ok(not Solo.gen3LoneDouble({ trainerIdB = 5 }, {}), "gen3LoneDouble: a second trainer is not")
+  ok(not Solo.gen3LoneDouble({ double = true, trainerIdB = 5 }, { doubleBattle = true }),
+     "gen3LoneDouble: ...whatever else says double")
+  local function gen3Mon(species, extra)
+    local m = { species = species, hp = 20 }
+    for k, v in pairs(extra or {}) do m[k] = v end
+    return m
+  end
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16) }), 2, "gen3UsableMons: two")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16, { hp = 0 }) }), 1, "gen3UsableMons: a fainted one is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), { species = 16 } }), 1, "gen3UsableMons: one with no HP is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16, { isEgg = true }) }), 1, "gen3UsableMons: an egg is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16, { egg = true }) }), 1, "gen3UsableMons: ...either egg flag")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(412) }), 1, "gen3UsableMons: the egg species is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(0) }), 1, "gen3UsableMons: no species is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), { speciesId = 16, hp = 3 } }), 2,
+     "gen3UsableMons: a monster known only by its speciesId counts")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), "junk", false }), 1, "gen3UsableMons: a non-monster entry is not")
+  eq(Solo.gen3UsableMons({}), 0, "gen3UsableMons: an empty party")
+  eq(Solo.gen3UsableMons(nil), 0, "gen3UsableMons: no party")
+  local two = { gen3Mon(4), gen3Mon(16) }
+  ok(Solo.gen3TakesDouble({ double = true }, {}, two), "gen3TakesDouble: a lone double, two usable")
+  ok(Solo.gen3TakesDouble({}, { doubleBattle = true }, two), "gen3TakesDouble: ...by the row")
+  ok(not Solo.gen3TakesDouble({ double = true }, {}, { gen3Mon(4) }), "gen3TakesDouble: not with one monster")
+  ok(not Solo.gen3TakesDouble({ double = true }, {}, { gen3Mon(4), gen3Mon(16, { hp = 0 }) }),
+     "gen3TakesDouble: ...nor with one usable and a fainted one")
+  ok(not Solo.gen3TakesDouble({ double = true }, {}, nil), "gen3TakesDouble: nor with no party")
+  ok(not Solo.gen3TakesDouble({ double = true, trainerIdB = 5 }, {}, two),
+     "gen3TakesDouble: not a second trainer's, whatever the party")
+  ok(not Solo.gen3TakesDouble({}, {}, two), "gen3TakesDouble: not a single")
+  ok(Solo.gen3Refused({ partner = true }, {}), "gen3Refused: Steven's partner stays refused")
+  ok(Solo.gen3Refused({ twoOpponents = true }, {}), "gen3Refused: ...and two opponents")
   eq(Solo.gen3Result("win", "catch"), "caught", "gen3Result: a catch")
   eq(Solo.gen3Result("loss", "run"), "run", "gen3Result: the player ran")
   eq(Solo.gen3Result("win", "run"), "fled", "gen3Result: the wild mon left")
@@ -1332,6 +1372,104 @@ end)()
      "the Gen 3 entries decline on a Gen 1 game")
   eq(s:fromGen3Trainer({ generation = 1, save = {} }, 5, {}), false, "...both of them")
   eq(s:isRunning(), false, "and nothing was started")
+end)()
+
+-- ------------------------------------------------------------------
+-- A Gen 3 double's pure helpers: the seats, the second monster, the party
+-- as a fight found it
+-- ------------------------------------------------------------------
+--
+-- Table-in, table-out: the referee is a stand-in that answers `seatsOf`, the
+-- way the real one does for a shared team's two seats.
+
+;(function()
+  local function simWith(seats) return { seatsOf = function() return seats end } end
+
+  -- seatIds3: the owner's own id first, then `<id>#2` for a shared team's second seat
+  local two = simWith({ { playerId = "me" }, { playerId = "me#2" } })
+  eq(table.concat(Solo.seatIds3(two, "me"), ","), "me,me#2", "seatIds3: both seats of a shared team, in slot order")
+  eq(table.concat(Solo.seatIds3(simWith({ { playerId = "foe" } }), "foe"), ","), "foe",
+     "seatIds3: a one-seat side is its one id")
+  eq(table.concat(Solo.seatIds3(simWith({}), "me"), ","), "me", "seatIds3: no seats answered -> the owner's id")
+  eq(table.concat(Solo.seatIds3({ seatsOf = function() error("boom") end }, "me"), ","), "me",
+     "seatIds3: a referee that throws -> the owner's id")
+  eq(table.concat(Solo.seatIds3({}, "me"), ","), "me", "seatIds3: a referee with no seatsOf -> the owner's id")
+
+  -- secondMon3: the monster on (or last on) the second player seat
+  local party = { { name = "p1" }, { name = "p2" }, { name = "p3" }, { name = "p4" } }
+  local standing = simWith({ { playerId = "me", active = 1, mons = { { slot = 0 } } },
+                             { playerId = "me#2", active = 2, mons = { { slot = 0 }, { slot = 3 } } } })
+  eq(Solo.secondMon3(standing, party), party[4], "secondMon3: the second seat's active monster, by its party slot")
+  local fainted = simWith({ { playerId = "me" }, { playerId = "me#2", lastB = { mon = { slot = 1 } } } })
+  eq(Solo.secondMon3(fainted, party), party[2],
+     "secondMon3: a seat with nothing standing is the monster that last stood there")
+  eq(Solo.secondMon3(simWith({ { playerId = "me" } }), party), nil, "secondMon3: no second seat, no monster")
+  eq(Solo.secondMon3(simWith({ { playerId = "me" }, { playerId = "me#2" } }), party), nil,
+     "secondMon3: a second seat that never had one has none")
+  eq(Solo.secondMon3(standing, nil), nil, "secondMon3: no party")
+  eq(Solo.secondMon3(nil, party), nil, "secondMon3: no referee")
+  eq(Solo.secondMon3({ seatsOf = function() error("boom") end }, party), nil, "secondMon3: a referee that throws")
+  eq(Solo.secondMon3(simWith({ { playerId = "me" }, { playerId = "me#2", active = 1, mons = { { slot = 9 } } } }), party),
+     nil, "secondMon3: a slot the party does not hold is no monster")
+
+  -- snapshotParty3 / restoreParty3: everything a fight wrote, put back in place
+  local moves, pp = { 1, 2 }, { 5, 6 }
+  local m1 = { species = 4, hp = 20, level = 10, shiny = false, moves = moves, pp = pp,
+               ivs = { hp = 31 }, deep = { inner = { x = 1 } } }
+  local m2 = { species = 16, hp = 30 }
+  local m3 = { species = 29, hp = 10 }
+  local live = { m1, m2, m3 }
+  local snap = Solo.snapshotParty3(live)
+  ok(type(snap) == "table", "snapshotParty3: a party is recorded")
+  -- what a fight does to the live party
+  m1.hp, m1.level, m1.status, m1.shiny, m1.fightKey = 1, 11, "PSN", true, "added"
+  moves[1], pp[2] = 99, 0
+  m1.ivs.hp = 0
+  m1.deep.inner.x = 2
+  live[1], live[2] = m2, m1
+  live[3] = nil
+  live[4] = { species = 5 }
+  eq(Solo.restoreParty3(snap), true, "restoreParty3: a record is restored")
+  eq(live[1], m1, "restoreParty3: the first member is the same monster table")
+  eq(live[2], m2, "restoreParty3: ...the second")
+  eq(live[3], m3, "restoreParty3: ...a removed member is back")
+  eq(live[4], nil, "restoreParty3: ...a member the fight added is gone")
+  eq(#live, 3, "restoreParty3: ...the same size")
+  eq(m1.hp, 20, "restoreParty3: HP")
+  eq(m1.level, 10, "restoreParty3: level")
+  eq(m1.status, nil, "restoreParty3: a status the fight added is off again")
+  eq(m1.fightKey, nil, "restoreParty3: a key the fight added is off again")
+  eq(m1.shiny, false, "restoreParty3: a false field is restored as false, not dropped")
+  eq(m1.moves, moves, "restoreParty3: the moves list is the very table it was")
+  eq(moves[1], 1, "restoreParty3: ...with its contents")
+  eq(pp[2], 6, "restoreParty3: ...and the PP")
+  eq(m1.ivs.hp, 31, "restoreParty3: a nested table is restored in place")
+  eq(m1.deep.inner.x, 1, "restoreParty3: ...three levels down")
+  -- something with a metatable is a reference to something else: kept, never walked
+  local shared = setmetatable({ n = 1 }, { __index = {} })
+  m2.ref = shared
+  local snap2 = Solo.snapshotParty3(live)
+  shared.n = 2
+  m2.ref = nil
+  Solo.restoreParty3(snap2)
+  eq(m2.ref, shared, "restoreParty3: a table with a metatable comes back as the same reference")
+  eq(shared.n, 2, "restoreParty3: ...and is not itself rewound")
+  -- a monster that holds itself is no loop
+  local loop = { species = 4, hp = 5 }
+  loop.me = loop
+  local snap3 = Solo.snapshotParty3({ loop })
+  ok(type(snap3) == "table", "snapshotParty3: a self-referencing monster is recorded, not looped on")
+  -- no record
+  eq(Solo.snapshotParty3(nil), nil, "snapshotParty3: no party, no record")
+  eq(Solo.snapshotParty3("junk"), nil, "snapshotParty3: not a party, no record")
+  eq(Solo.restoreParty3(nil), false, "restoreParty3: no record, nothing done")
+  eq(Solo.restoreParty3({}), false, "restoreParty3: a record with no party, nothing done")
+  -- an empty party is a record too: it empties the list again
+  local empty = {}
+  local snap4 = Solo.snapshotParty3(empty)
+  empty[1] = { species = 4 }
+  eq(Solo.restoreParty3(snap4), true, "restoreParty3: an empty party's record restores")
+  eq(#empty, 0, "restoreParty3: ...to empty")
 end)()
 
 -- ------------------------------------------------------------------

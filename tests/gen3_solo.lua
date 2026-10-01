@@ -13,12 +13,21 @@
 --   1. SoloBrain, Gen 3: crafted fields on a real BattleSim3 referee --
 --      ability immunities, the weather, heal thresholds, the KO, the
 --      trainer's AI flag bits in both carts' layouts, items, switching and
---      the send-out.
+--      the send-out; and a lone double's two trainer seats on the shared-team
+--      referee (FireRed's random flank, Emerald's scored targets and
+--      AI_DoubleBattle, claim-aware switching and send-outs, a Ghost CURSE
+--      aimed at the foe opposite).
 --   2. SoloBattle, Gen 3: a wild fight to a catch, a trainer fight to a win
 --      (prize money, exp, the `done` the trainer script resumes on), a loss to
 --      the whiteout, RUN (away, refused by the roll, refused by a trap), the
 --      refusals, the after-battle prompts, the hand-back, and the mid-fight
 --      moveset.
+--   3. SoloBattle, Gen 3, the lone double: the take-over decision and the
+--      hand-backs, the seats (two a side over one shared team), the choices
+--      filed per seat, the trainer's answers for both seats, refills from the
+--      shared bench, the ending (prize x2, EXP, reconcile, the TV, whiteout,
+--      draw) and the hand-back that puts the party back -- first on a
+--      stand-in for the double screen, then on CoopBattle's real one.
 --
 -- Legal: every species, move, trainer and item row below is either the SDK
 -- fixture's or invented here with synthetic numbers; the only real values are
@@ -1062,6 +1071,480 @@ do
      .. "not the candidate's damage")
 end
 
+-- ------- a lone double: the trainer's two seats, one brain (contract C2 of
+--         docs/plans/gen3-solo-doubles.md)
+--
+-- The shared-team referee (`seats = 2` on a side) and a view shaped as
+-- SoloBattle:_foeView3 shapes it: `double`, the choosing seat's field slot,
+-- the living `partner`, the player's standing battlers as `foes`, and the
+-- party indices the sibling seat has `claimed`.  Section 3 holds the other end
+-- of that contract -- the view a real fight hands the brain.
+
+do
+  local FR = Brain.AI_BITS_FRLG
+  local function highRng(lo, hi) if hi == nil then return 1 end return hi end
+  -- answers the queued values first (clamped into the range asked), then the
+  -- bottom of every range
+  local function queued(values)
+    local q = { table.unpack and table.unpack(values) or unpack(values) }
+    return function(lo, hi)
+      if hi == nil then lo, hi = 1, lo end
+      if #q > 0 then
+        local v = table.remove(q, 1)
+        if v < lo then v = lo end
+        if v > hi then v = hi end
+        return v
+      end
+      return lo
+    end
+  end
+  -- a seeded LCG with rng(lo, hi) / rng(n) semantics
+  local function seeded(seed)
+    local state = seed % 2147483647
+    if state <= 0 then state = state + 2147483646 end
+    return function(lo, hi)
+      if hi == nil then lo, hi = 1, lo end
+      if hi < lo then return lo end
+      state = (state * 48271) % 2147483647
+      return lo + (state % (hi - lo + 1))
+    end
+  end
+
+  -- The trainer's shared team on side b (two seats), the player's on side a,
+  -- and the C2 view for trainer seat `which` (1 or 2).
+  local function lone(npc, player, extra)
+    extra = extra or {}
+    local battle = assert(Sim.Turn.create({
+      id = "dbl", mode = "coop_npc", seed = extra.seed or 3, typeTable = CHART,
+      weather = extra.weather,
+      sides = {
+        a = { { playerId = "p", name = "P", seats = extra.playerSeats or 2, mons = player } },
+        b = { { playerId = "n", name = "N", seats = extra.npcSeats or 2, mons = npc, bag = extra.bag } },
+      },
+    }))
+    battle:drainEvents()
+    local function viewFor(which, claimed)
+      local me = battle.byId[which == 2 and "n#2" or "n"]
+      local mate = battle.byId[which == 2 and "n" or "n#2"]
+      local foes = {}
+      for _, id in ipairs({ "p", "p#2" }) do
+        local f = battle.byId[id]
+        if f and f.b and f.b.mon.hp > 0 then foes[#foes + 1] = { slot = f.slot, battler = f.b } end
+      end
+      return {
+        sim = battle, battler = me.b, foeBattler = foes[1] and foes[1].battler or nil, fighter = me,
+        mon = me.b and me.b.mon or (me.lastB and me.lastB.mon), foe = foes[1] and foes[1].battler.mon,
+        party = me.mons, active = me.active, bag = me.bag,
+        double = true, seat = me.slot, partner = mate and mate.b or nil,
+        foes = foes, claimed = claimed or {},
+      }
+    end
+    return battle, viewFor
+  end
+
+  local function tackle() return mv(33, { power = 40, type = 0 }) end
+
+  -- --- FireRed / LeafGreen: one random flank (Random() & 2, flipped when empty)
+  do
+    -- slot 0 a Ghost (a Normal move is -10 into it), slot 1 a Normal
+    local npc = { sheet({ slot = 0, moves = { tackle(), mv(52, { power = 40, type = 10 }) } }), sheet({ slot = 1 }) }
+    local player = { sheet({ slot = 0, types = { 7 } }), sheet({ slot = 1, types = { 0 } }) }
+    local _, viewFor = lone(npc, player)
+    local left = brain3(1, { aiBits = FR, rng = queued({ 0 }) }):choose(viewFor(1))
+    eq(left and left.target, 0, "brain3 double: FireRed's flank roll, left -> the left position, slot 0")
+    eq(left and left.move, 1, "brain3 double: ...and the scripts score against that flank (Tackle into the Ghost is out)")
+    local right = brain3(1, { aiBits = FR, rng = queued({ 1 }) }):choose(viewFor(1))
+    eq(right and right.target, 1, "brain3 double: the roll, right -> slot 1")
+    eq(right and right.move, 0, "brain3 double: ...where Tackle is fine (a tie goes to the first move)")
+    eq(left and left.action, "fight", "brain3 double: a fight, aimed")
+  end
+
+  do -- the flip when the rolled flank is empty, either way
+    local npc = { sheet({ slot = 0, moves = { tackle() } }), sheet({ slot = 1 }) }
+    local player = { sheet({ slot = 0 }), sheet({ slot = 1 }) }
+    local battle, viewFor = lone(npc, player)
+    battle.byId.p.b.mon.hp = 0
+    eq(brain3(1, { aiBits = FR, rng = queued({ 0 }) }):choose(viewFor(1)).target, 1,
+       "brain3 double: the rolled flank is empty (left down) -> flipped to slot 1")
+    local battle2, viewFor2 = lone(npc, player)
+    battle2.byId["p#2"].b.mon.hp = 0
+    eq(brain3(1, { aiBits = FR, rng = queued({ 1 }) }):choose(viewFor2(1)).target, 0,
+       "brain3 double: the rolled flank is empty (right down) -> flipped to slot 0")
+    eq(brain3(1, { aiBits = FR, rng = queued({ 0 }) }):choose(viewFor2(1)).target, 0,
+       "brain3 double: ...and a flank that stands is taken as rolled")
+  end
+
+  do -- the distribution: both flanks, deterministic per seed, never the partner
+    local npc = { sheet({ slot = 0, moves = { tackle() } }), sheet({ slot = 1 }) }
+    local player = { sheet({ slot = 0 }), sheet({ slot = 1 }) }
+    local _, viewFor = lone(npc, player)
+    local seen, other, differing = { [0] = 0, [1] = 0 }, 0, 0
+    for seed = 1, 200 do
+      local a = brain3(1, { aiBits = FR, rng = seeded(seed) }):choose(viewFor(1))
+      local b = brain3(1, { aiBits = FR, rng = seeded(seed) }):choose(viewFor(1))
+      if not (a and b and a.target == b.target and a.move == b.move and a.action == b.action) then
+        differing = differing + 1
+      end
+      if a and seen[a.target] then seen[a.target] = seen[a.target] + 1 else other = other + 1 end
+    end
+    check(seen[0] > 60 and seen[1] > 60, "brain3 double: FireRed draws both flanks ("
+          .. seen[0] .. " / " .. seen[1] .. " of 200)")
+    eq(other, 0, "brain3 double: ...never its partner, never an unaimed fight move")
+    eq(differing, 0, "brain3 double: the same seed answers the same")
+  end
+
+  do -- FireRed's DOUBLE_BATTLE script is a bare `end`: a partner is not avoided
+    local quake = mv(89, { power = 100, type = 4, target = 32 })
+    local npc = { sheet({ slot = 0, moves = { quake, quake } }), sheet({ slot = 1, types = { 10 } }) }
+    local _, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local b = brain3(1 + 128, { aiBits = FR })
+    b:choose(viewFor(1))
+    eq(b.lastScores3 and b.lastScores3[1], 100, "brain3 double: FireRed's DOUBLE_BATTLE bit scores nothing")
+  end
+
+  -- --- Emerald: every battler scored, the best target wins
+  do
+    local function run(lowSlot)
+      local npc = { sheet({ slot = 0, moves = { mv(33, { power = 80, type = 0 }) } }), sheet({ slot = 1 }) }
+      local player = { sheet({ slot = 0, hp = lowSlot == 0 and 5 or 100 }),
+                       sheet({ slot = 1, hp = lowSlot == 1 and 5 or 100 }) }
+      local _, viewFor = lone(npc, player)
+      local b = brain3(2, { aiBits = EM_BITS })   -- Emerald's bit 1 is TRY_TO_FAINT
+      return b:choose(viewFor(1)), b
+    end
+    local c1, b1 = run(1)
+    eq(c1 and c1.target, 1, "brain3 double: Emerald aims at the target it can knock out (slot 1)")
+    eq(b1.lastScores3 and b1.lastScores3[1], 104, "brain3 double: ...scored +4 against that one")
+    eq((run(0)).target, 0, "brain3 double: ...and at slot 0 when that one is the low one")
+
+    local npc = { sheet({ slot = 0, moves = { tackle() } }), sheet({ slot = 1 }) }
+    local _, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    eq(brain3(1, { aiBits = EM_BITS, rng = lowRng }):choose(viewFor(1)).target, 0,
+       "brain3 double: equal targets are drawn at random -- a low roll, slot 0")
+    eq(brain3(1, { aiBits = EM_BITS, rng = highRng }):choose(viewFor(1)).target, 1,
+       "brain3 double: ...a high roll, slot 1")
+  end
+
+  do -- the partner pass: a Fire move into a FLASH FIRE ally that has not lit
+    local fire = mv(53, { power = 90, type = 10 })
+    local npc = { sheet({ slot = 0, moves = { tackle(), fire } }), sheet({ slot = 1, ability = 18 }) }
+    local battle, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local b = brain3(1, { aiBits = EM_BITS })
+    local c = b:choose(viewFor(1))
+    eq(c and c.target, 4, "brain3 double: Emerald feeds a FLASH FIRE partner the Fire move (its slot, 4)")
+    eq(c and c.move, 1, "brain3 double: ...the Fire move")
+    eq(b.lastScores3 and b.lastScores3[2], 103, "brain3 double: ...at 103 (AI_TryOnAlly, run because it is a double)")
+    eq(b.lastScores3 and b.lastScores3[1], 70, "brain3 double: ...and Tackle at 70 against the ally")
+    battle.byId["n#2"].b.flashFire = true
+    local lit = brain3(1, { aiBits = EM_BITS }):choose(viewFor(1))
+    check(lit and lit.target ~= 4, "brain3 double: a partner whose FLASH FIRE has lit is not fed another")
+    -- the same pair seen from seat 2: its partner is slot 3
+    local npc2 = { sheet({ slot = 0, ability = 18 }), sheet({ slot = 1, moves = { tackle(), fire } }) }
+    local _, viewFor2 = lone(npc2, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    eq(brain3(1, { aiBits = EM_BITS }):choose(viewFor2(2)).target, 3,
+       "brain3 double: seat 2 aims at its partner on slot 3")
+    -- FireRed's script has no such pass: the same Fire move is aimed at a foe
+    local _, viewFr = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local fr = brain3(1, { aiBits = FR, rng = queued({ 0 }) }):choose(viewFr(1))
+    eq(fr and fr.target, 0, "brain3 double: FireRed never aims at its partner")
+    -- Emerald ORs AI_DoubleBattle into every double's flags: a trainer row with
+    -- no script bit at all still prices the partner (and one that FireRed
+    -- would leave to the flank roll alone)
+    local _, viewBare = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local bare = brain3(0, { aiBits = EM_BITS }):choose(viewBare(1))
+    eq(bare and bare.target, 4, "brain3 double: Emerald runs the double script for a trainer with no AI flags")
+    local _, viewBareFr = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local bareFr = brain3(0, { aiBits = FR, rng = queued({ 1 }) }):choose(viewBareFr(1))
+    eq(bareFr and bareFr.target, 1, "brain3 double: FireRed with no AI flags is the flank roll alone")
+  end
+
+  do -- the partner pass counts only at 100 or more (the cart sets a lower best to -1)
+    -- the scorer is stood in for, so the choice among the passes is what is read
+    local npc = { sheet({ slot = 0, moves = { tackle() } }), sheet({ slot = 1 }) }
+    local _, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local function pick(allyScore, foeScore)
+      local b = brain3(1, { aiBits = EM_BITS })
+      b._scoreMoves3 = function(_, ctx, legal)
+        local scores = {}
+        for _, i in ipairs(legal) do scores[i] = ctx.tIsAlly and allyScore or foeScore end
+        return scores
+      end
+      return b:choose(viewFor(1))
+    end
+    eq(pick(70, 60).target, 0, "brain3 double: a partner pass under 100 loses even to a worse foe pass")
+    eq(pick(99, 60).target, 0, "brain3 double: ...at 99 too")
+    eq(pick(100, 60).target, 4, "brain3 double: ...at exactly 100 it counts, and beats a worse foe pass")
+    eq(pick(105, 100).target, 4, "brain3 double: ...a partner pass at 100 or more is a real candidate, and the best")
+    eq(pick(100, 120).target, 0, "brain3 double: ...and a better foe pass still beats it")
+  end
+
+  do -- AI_DoubleBattle: a spread move beside a partner it would hit
+    local quake = function() return mv(89, { power = 100, type = 4, target = 32 }) end
+    local function score(partnerFields, extra)
+      local npc = { sheet({ slot = 0, moves = { quake(), tackle() } }), sheet(partnerFields) }
+      local _, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) }, extra)
+      local b = brain3(1, { aiBits = EM_BITS })
+      local c = b:choose(viewFor(1))
+      return b.lastScores3 and b.lastScores3[1], c
+    end
+    eq((score({ slot = 1, types = { 10 } })), 90, "brain3 double: EARTHQUAKE beside a Fire partner is marked down (-10)")
+    eq((score({ slot = 1, types = { 13 } })), 90, "brain3 double: ...an Electric one")
+    eq((score({ slot = 1, types = { 3 } })), 90, "brain3 double: ...a Poison one")
+    eq((score({ slot = 1, types = { 5 } })), 90, "brain3 double: ...a Rock one")
+    eq((score({ slot = 1, types = { 2 } })), 102, "brain3 double: ...a Flying partner is out of its reach (+2)")
+    eq((score({ slot = 1, ability = 26 })), 102, "brain3 double: ...so is a LEVITATE one")
+    local s, c = score({ slot = 1, types = { 0 } })
+    eq(s, 97, "brain3 double: ...anyone else is hit for a small cost (-3)")
+    eq(c and c.move, 1, "brain3 double: ...so the trainer uses Tackle instead")
+    eq(c and c.target ~= nil, true, "brain3 double: ...aimed at a foe")
+    local _, fly = score({ slot = 1, types = { 2 } })
+    eq(fly and fly.move, 0, "brain3 double: EARTHQUAKE beside a Flying partner is taken")
+    eq(fly and fly.target, nil, "brain3 double: ...and a spread move names no target")
+    -- a trainer with one monster: the empty position reads as zeroes (-3)
+    local npc1 = { sheet({ slot = 0, moves = { quake(), tackle() } }) }
+    local _, vf1 = lone(npc1, { sheet({ slot = 0 }), sheet({ slot = 1 }) }, { npcSeats = 1 })
+    local b1 = brain3(1, { aiBits = EM_BITS })
+    b1:choose(vf1(1))
+    eq(b1.lastScores3 and b1.lastScores3[1], 97, "brain3 double: an empty partner position costs the same small -3")
+  end
+
+  do -- check_ability on the target's partner: LIGHTNING ROD
+    local bolt = mv(85, { power = 95, type = 13 })
+    local npc = { sheet({ slot = 0, moves = { bolt } }), sheet({ slot = 1 }) }
+    local player = { sheet({ slot = 0, types = { 0 }, ability = 5 }), sheet({ slot = 1, ability = 31 }) }
+    local _, viewFor = lone(npc, player)
+    local b = brain3(1, { aiBits = EM_BITS, rng = queued({}) })
+    local c = b:choose(viewFor(1))
+    eq(c and c.target, 1, "brain3 double: with LIGHTNING ROD on slot 1, the bolt's best target is the rod itself")
+  end
+
+  -- --- AI_CheckBadMove in a double
+  do
+    local helping = mv(270, { power = 0, effect = 176, target = 16 })
+    local _, viewFor = lone({ sheet({ slot = 0, moves = { helping } }), sheet({ slot = 1 }) },
+                            { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local b = brain3(1, { aiBits = FR })
+    local c = b:choose(viewFor(1))
+    eq(b.lastScores3 and b.lastScores3[1], 100, "brain3 double: HELPING HAND is not written off in a double")
+    eq(c and c.target, nil, "brain3 double: ...and a move on the user names no target")
+
+    -- EXPLOSION: the player's own partner is not a reserve
+    local boom = mv(153, { power = 250, effect = 7, target = 32 })
+    local npc = { sheet({ slot = 0, moves = { boom, tackle() } }), sheet({ slot = 1 }) }
+    local _, withReserve = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }), sheet({ slot = 2 }) })
+    local br = brain3(1, { aiBits = FR })
+    br:choose(withReserve(1))
+    eq(br.lastScores3 and br.lastScores3[1], 90, "brain3 double: no EXPLOSION while the player still has a reserve")
+    local _, noReserve = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local bn = brain3(1, { aiBits = FR })
+    bn:choose(noReserve(1))
+    eq(bn.lastScores3 and bn.lastScores3[1], 100, "brain3 double: ...and the player's own partner is not a reserve")
+  end
+
+  -- --- switching and the send-out: never an active, never a claimed monster
+  do
+    local npc = { sheet({ slot = 0 }), sheet({ slot = 1 }), sheet({ slot = 2 }), sheet({ slot = 3 }) }
+    local battle, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    battle.byId.n.b.perishTurns = 0
+    local c = brain3(1, { aiBits = FR }):choose(viewFor(1))
+    eq(c and c.action, "switch", "brain3 double: a seat whose perish count ran out switches")
+    check(c and c.slot ~= 0 and c.slot ~= 1,
+          "brain3 double: ...never into either monster already out (got " .. tostring(c and c.slot) .. ")")
+    local c2 = brain3(1, { aiBits = FR }):choose(viewFor(1, { [3] = true }))
+    eq(c2 and c2.slot, 3, "brain3 double: ...nor into the one its sibling seat claimed")
+    local c3 = brain3(1, { aiBits = FR }):choose(viewFor(1, { [3] = true, [4] = true }))
+    check(c3 == nil or c3.action ~= "switch", "brain3 double: ...and with nothing unclaimed left, it stays in")
+  end
+
+  do -- the forced send-out
+    local npc = { sheet({ slot = 0 }), sheet({ slot = 1 }), sheet({ slot = 2 }), sheet({ slot = 3 }) }
+    local _, viewFor = lone(npc, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+    local v = viewFor(1)
+    v.mon.hp = 0
+    v.mustReplace = true
+    local c = brain3(1, { aiBits = FR }):choose(v)
+    eq(c and c.action, "switch", "brain3 double: an emptied seat asks for a send-out")
+    check(c and c.slot >= 2, "brain3 double: ...never the partner's monster (got " .. tostring(c and c.slot) .. ")")
+    v.claimed = { [3] = true }
+    eq(brain3(1, { aiBits = FR }):choose(v).slot, 3,
+       "brain3 double: ...nor the monster its sibling seat claimed (party index 3): the fourth, slot 3, is left")
+    v.claimed = { [3] = true, [4] = true }
+    eq(brain3(1, { aiBits = FR }):choose(v), nil,
+       "brain3 double: ...and with nothing left it gives no answer (the referee leaves the seat empty)")
+  end
+
+  do -- the send-out's typing reads one random flank of the player's
+    local grass = sheet({ slot = 2, types = { 12 }, moves = { mv(55, { power = 40, type = 11 }) } })
+    local firem = sheet({ slot = 3, types = { 10 }, moves = { mv(22, { power = 40, type = 12 }) } })
+    local npc = { sheet({ slot = 0 }), sheet({ slot = 1 }), grass, firem }
+    local player = { sheet({ slot = 0, types = { 10 } }), sheet({ slot = 1, types = { 11 } }) }
+    local _, viewFor = lone(npc, player)
+    local v = viewFor(1)
+    v.mon.hp = 0
+    v.mustReplace = true
+    eq(brain3(1, { aiBits = FR, rng = queued({ 0 }) }):choose(v).slot, 2,
+       "brain3 double: against the Fire flank the send-out is the Grass monster with a Water move")
+    eq(brain3(1, { aiBits = FR, rng = queued({ 1 }) }):choose(v).slot, 3,
+       "brain3 double: ...against the Water flank, the Fire monster with a Grass move")
+  end
+
+  -- --- the 1v1 view is untouched: no `double`, no target on any answer
+  do
+    local npc = { sheet({ moves = { mv(1, { power = 40 }), mv(2, { power = 200 }) } }) }
+    local _, view = field(npc, sheet({ hp = 30 }))
+    eq(view.double, nil, "brain3: a single's view is not a double's")
+    local c = brain3(4):choose(view)
+    eq(c and c.move, 1, "brain3 single: the knockout is still taken")
+    eq(c and c.target, nil, "brain3 single: ...and a 1v1 answer carries no target")
+  end
+
+  -- --- a Ghost CURSE names the foe opposite the user (a seat-2 Ghost -> slot 1)
+  do
+    local function curse() return mv(174, { power = 0, type = 7, effect = E.CURSE, target = 16 }) end
+    local function ghostField(player, npcTypes)
+      local npc = { sheet({ slot = 0, moves = { tackle() } }),
+                    sheet({ slot = 1, types = npcTypes or { 7 }, moves = { curse() } }) }
+      return lone(npc, player)
+    end
+    for _, fam in ipairs({ { "FireRed", FR }, { "Emerald", EM_BITS } }) do
+      local name, bits = fam[1], fam[2]
+      for _, roll in ipairs({ lowRng, highRng }) do
+        local battle, viewFor = ghostField({ sheet({ slot = 0 }), sheet({ slot = 1 }) })
+        local c = brain3(1, { aiBits = bits, rng = roll }):choose(viewFor(2))
+        eq(c and c.move, 0, "brain3 double: " .. name .. " seat 2 uses its CURSE")
+        eq(c and c.target, 1, "brain3 double: " .. name .. " seat 2's Ghost CURSE names slot 1, the foe opposite")
+        check(battle:submitChoice("n#2", c), "brain3 double: " .. name .. " the referee takes that choice")
+        check(battle:submitChoice("n", { action = "fight", move = 0, target = 0 }),
+              "brain3 double: " .. name .. " seat 1 files")
+        check(battle:submitChoice("p", { action = "fight", move = 0, target = 3 }),
+              "brain3 double: " .. name .. " player 1 files")
+        check(battle:submitChoice("p#2", { action = "fight", move = 0, target = 3 }),
+              "brain3 double: " .. name .. " player 2 files")
+        eq(battle.byId["p#2"].b.cursed, true, "brain3 double: " .. name .. " the curse lands on slot 1")
+        eq(battle.byId.p.b.cursed, nil, "brain3 double: ...and not on slot 0")
+      end
+      -- slot 1 never filled: the nearest foe is slot 0
+      local _, viewOne = ghostField({ sheet({ slot = 0 }) })
+      eq(brain3(1, { aiBits = bits }):choose(viewOne(2)).target, 0,
+         "brain3 double: " .. name .. " with slot 1 empty, the curse names slot 0")
+      -- a seat-1 Ghost faces slot 0
+      local npc1 = { sheet({ slot = 0, types = { 7 }, moves = { curse() } }), sheet({ slot = 1 }) }
+      local _, vf1 = lone(npc1, { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+      eq(brain3(1, { aiBits = bits, rng = highRng }):choose(vf1(1)).target, 0,
+         "brain3 double: " .. name .. " a seat-1 Ghost CURSE names slot 0")
+      -- a non-Ghost CURSE is a move on the user: no target
+      local _, vf3 = ghostField({ sheet({ slot = 0 }), sheet({ slot = 1 }) }, { 0 })
+      eq(brain3(1, { aiBits = bits, rng = highRng }):choose(vf3(2)).target, nil,
+         "brain3 double: " .. name .. " a non-Ghost CURSE names no target")
+      -- the same rule with no referee in the view
+      local _, vf4 = ghostField({ sheet({ slot = 0 }), sheet({ slot = 1 }) })
+      local v4 = vf4(2)
+      v4.sim = nil
+      eq(brain3(1, { aiBits = bits }):choose(v4).target, 1,
+         "brain3 double: " .. name .. " with no referee in the view, the same opposite slot")
+      local v5 = vf4(2)
+      v5.sim = nil
+      v5.foes = { v5.foes[1] }
+      eq(brain3(1, { aiBits = bits }):choose(v5).target, 0,
+         "brain3 double: " .. name .. " ...and slot 1 not standing -> the nearest, slot 0")
+      local _, vf6 = lone({ sheet({ slot = 0, types = { 7 }, moves = { curse() } }), sheet({ slot = 1 }) },
+                          { sheet({ slot = 0 }), sheet({ slot = 1 }) })
+      local v6 = vf6(1)
+      v6.sim = nil
+      eq(brain3(1, { aiBits = bits, rng = highRng }):choose(v6).target, 0,
+         "brain3 double: " .. name .. " seat 1 with no referee in the view -> slot 0, the one opposite")
+    end
+  end
+
+  -- --- fuzz: never a throw, never an illegal pick, deterministic per seed
+  do
+    local effects = { 0, E.SLEEP, E.TOXIC, E.EXPLOSION, E.ROAR, E.BATON_PASS, E.HELPING_HAND, E.FOLLOW_ME,
+      E.RESTORE_HP, E.ATTACK_UP, E.SUNNY_DAY, E.PROTECT, E.SKILL_SWAP, E.SWAGGER, E.WILL_O_WISP, E.PERISH_SONG }
+    local nums = { 33, 89, 222, 285, 261, 92, 270, 207, 126, 87, 85, 53, 52, 7 }
+    local abilities = { 0, 0, 18, 26, 31, 62, 54, 23, 74, 14, 25, 10 }
+    local threw, illegal, nondet, refused = 0, 0, 0, 0
+    local answered, aimed, switched = 0, 0, 0
+    for seed = 1, 600 do
+      local rng = seeded(seed * 104729)
+      local function pick(list) return list[rng(1, #list)] end
+      local function mon(slot)
+        local moves = {}
+        for i = 1, rng(1, 4) do
+          moves[i] = mv(pick(nums), { effect = pick(effects),
+            power = (rng(0, 2) == 0) and 0 or rng(10, 120), type = rng(0, 17),
+            target = pick({ 0, 0, 8, 16, 32 }), pp = (rng(0, 12) == 0) and 0 or 10 })
+        end
+        local maxHp = rng(40, 160)
+        return sheet({ slot = slot,
+          types = (rng(0, 1) == 0) and { rng(0, 17) } or { rng(0, 17), rng(0, 17) },
+          ability = pick(abilities), moves = moves, maxHp = maxHp, hp = rng(1, maxHp),
+          status = pick({ false, false, "PSN", "SLP" }) or nil, heldItem = pick({ 0, 140 }) })
+      end
+      local npc, player = {}, {}
+      for i = 1, rng(2, 5) do npc[i] = mon(i - 1) end
+      for i = 1, rng(2, 4) do player[i] = mon(i - 1) end
+      local battle, viewFor = lone(npc, player, { seed = seed })
+      if rng(0, 2) == 0 then battle.byId.p.b.mon.hp = 0 end
+      if rng(0, 3) == 0 then battle.byId["n#2"].b.mon.hp = 0 end
+      local which = rng(1, 2)
+      local claimed = {}
+      if rng(0, 1) == 0 then claimed[rng(1, #npc)] = true end
+      local v = viewFor(which, claimed)
+      if v.partner and v.partner.mon.hp <= 0 then v.partner = nil end
+      if #v.foes > 0 and v.mon and v.mon.hp > 0 then
+        v.mustReplace = rng(0, 4) == 0
+        if v.mustReplace then v.mon.hp = 0 end
+        local flags = rng(0, 1023)
+        local bits = (rng(0, 1) == 0) and FR or EM_BITS
+        local items = { pick({ 0, 21 }), 0, 0, 0 }
+        local function ask()
+          local b = brain3(flags, { aiBits = bits, rng = seeded(seed), items = items })
+          return pcall(b._decide, b, v)
+        end
+        local ok, c = ask()
+        if not ok then
+          threw = threw + 1
+        else
+          local ok2, c2 = ask()
+          local function key(x) return x and (tostring(x.action) .. "/" .. tostring(x.move) .. "/"
+            .. tostring(x.target) .. "/" .. tostring(x.slot) .. "/" .. tostring(x.item)) or "nil" end
+          if not ok2 or key(c) ~= key(c2) then nondet = nondet + 1 end
+          if c then
+            answered = answered + 1
+            if c.action == "switch" then
+              switched = switched + 1
+              local idx
+              for i, m in ipairs(v.party) do if m.slot == c.slot then idx = i end end
+              if not idx or v.party[idx].hp <= 0 or idx == v.fighter.active
+                  or (v.partner and v.party[idx] == v.partner.mon) or claimed[idx] then
+                illegal = illegal + 1
+              end
+            elseif c.action == "fight" and c.target ~= nil then
+              aimed = aimed + 1
+              local row = v.battler.moves[c.move + 1]
+              local named = false
+              for _, f in ipairs(v.foes) do if f.slot == c.target then named = true end end
+              if v.partner and c.target == v.partner.slot then named = bits == EM_BITS end
+              if not named or (row and (row.target or 0) ~= 0) then illegal = illegal + 1 end
+              if not v.mustReplace and not battle:submitChoice(v.fighter.playerId, c) then
+                refused = refused + 1
+              end
+            end
+          end
+        end
+      end
+    end
+    eq(threw, 0, "brain3 double fuzz: no seed throws")
+    eq(illegal, 0, "brain3 double fuzz: no active / claimed / fainted switch-in, no target on a "
+       .. "move that takes none, FireRed never aims at its partner")
+    eq(nondet, 0, "brain3 double fuzz: the same seed answers the same")
+    eq(refused, 0, "brain3 double fuzz: the referee takes every aimed answer")
+    check(answered > 300 and aimed > 100 and switched > 10,
+          ("brain3 double fuzz: it covered ground (answered %d, aimed %d, switched %d)")
+            :format(answered, aimed, switched))
+  end
+end
+
 -- ===================================================================
 -- 2. SoloBattle, Gen 3
 -- ===================================================================
@@ -1086,6 +1569,44 @@ do
         "gen3Refused: firstBattle = false is an ordinary trainer, not a refusal")
   check(Solo.gen3Double({ double = true }, {}), "gen3Double: the double flag")
   check(Solo.gen3Double({}, { doubleBattle = true }), "gen3Double: a double trainer row")
+  check(Solo.gen3Double({ trainerIdB = 5 }, {}), "gen3Double: a second trainer is a double of a kind too")
+  check(not Solo.gen3Double({}, {}) and not Solo.gen3Double(nil, nil), "gen3Double: a single is not")
+  check(not Solo.gen3Double({}, { doubleBattle = false }), "gen3Double: ...nor a row that says false")
+  -- the lone double: one trainer, one party (gen3Double is the wider question)
+  check(Solo.gen3LoneDouble({ double = true }, {}), "gen3LoneDouble: the double flag")
+  check(Solo.gen3LoneDouble({}, { doubleBattle = true }), "gen3LoneDouble: a double trainer row")
+  check(not Solo.gen3LoneDouble({}, {}) and not Solo.gen3LoneDouble(nil, nil), "gen3LoneDouble: a single is not")
+  check(not Solo.gen3LoneDouble({}, { doubleBattle = false }), "gen3LoneDouble: a row that says false is not")
+  check(not Solo.gen3LoneDouble({ trainerIdB = 5 }, {}), "gen3LoneDouble: a second trainer is not")
+  check(not Solo.gen3LoneDouble({ double = true, trainerIdB = 5 }, {}),
+        "gen3LoneDouble: ...whatever else says double")
+  check(not Solo.gen3LoneDouble({ trainerIdB = 5 }, { doubleBattle = true }),
+        "gen3LoneDouble: ...nor does the row bring it back")
+  -- usable: a species, not an egg, HP above zero (the cart's monsStateToDoubles)
+  eq(Solo.gen3UsableMons({ monOf(4, 5), monOf(16, 5) }), 2, "gen3UsableMons: two")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), monOf(16, 5, { hp = 0 }) }), 1, "gen3UsableMons: a fainted one is not")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), monOf(16, 5, { isEgg = true }) }), 1, "gen3UsableMons: an egg is not")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), monOf(16, 5, { egg = true }) }), 1, "gen3UsableMons: ...either egg flag")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), { species = 412, hp = 10 } }), 1, "gen3UsableMons: the egg species is not")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), { species = 0, hp = 10 } }), 1, "gen3UsableMons: no species is not")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), { species = 16 } }), 1, "gen3UsableMons: no HP is not")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), "junk", false }), 1, "gen3UsableMons: a non-monster entry is not")
+  eq(Solo.gen3UsableMons({ monOf(4, 5), { speciesId = 16, hp = 4 } }), 2,
+     "gen3UsableMons: a monster known only by its speciesId counts")
+  eq(Solo.gen3UsableMons({}), 0, "gen3UsableMons: an empty party")
+  eq(Solo.gen3UsableMons(nil), 0, "gen3UsableMons: no party")
+  -- the take-over decision: a lone double AND two who can fight
+  local two = { monOf(4, 5), monOf(16, 5) }
+  check(Solo.gen3TakesDouble({ double = true }, {}, two), "gen3TakesDouble: a lone double, two usable")
+  check(Solo.gen3TakesDouble({}, { doubleBattle = true }, two), "gen3TakesDouble: ...by the row")
+  check(not Solo.gen3TakesDouble({ double = true }, {}, { monOf(4, 5) }), "gen3TakesDouble: not with one monster")
+  check(not Solo.gen3TakesDouble({ double = true }, {}, { monOf(4, 5), monOf(16, 5, { hp = 0 }) }),
+        "gen3TakesDouble: ...nor one usable and a fainted one")
+  check(not Solo.gen3TakesDouble({ double = true }, {}, nil), "gen3TakesDouble: nor no party")
+  check(not Solo.gen3TakesDouble({ double = true, trainerIdB = 5 }, {}, two), "gen3TakesDouble: not a second trainer")
+  check(not Solo.gen3TakesDouble({}, {}, two), "gen3TakesDouble: not a single")
+  check(Solo.gen3Refused({ partner = true }, {}), "gen3Refused: Steven's partner stays refused")
+  check(Solo.gen3Refused({ twoOpponents = true }, {}), "gen3Refused: ...and two opponents")
   eq(Solo.gen3Result("win", "catch", false), "caught", "gen3Result: catch")
   eq(Solo.gen3Result("loss", "run", false), "run", "gen3Result: the player ran")
   eq(Solo.gen3Result("win", "run", false), "fled", "gen3Result: the wild mon left")
@@ -1113,7 +1634,8 @@ do
      "a safari encounter is handed back")
   eq(solo:fromGen3Encounter(GAME, { species = 16, level = 3, roamer = true }, {}), false,
      "a roamer is handed back")
-  eq(solo:fromGen3Trainer(GAME, 902, {}), false, "a double trainer is handed back")
+  eq(solo:fromGen3Trainer(GAME, 902, {}), false,
+     "a double trainer is handed back (this party has one usable monster, so the cart refuses it)")
   eq(solo:fromGen3Encounter({ generation = 1 }, { species = 16, level = 3 }, {}), false,
      "not a Gen 3 game: declined")
   battleActive = true
@@ -1873,6 +2395,1374 @@ do
   check(b and b[1] and b[3] and not b[2], "badges: the save's badge flags, by number")
   newGame()
   eq(Solo.gen3Badges(), nil, "badges: none held, none sent")
+end
+
+-- ===================================================================
+-- 3. SoloBattle, Gen 3: the lone double
+-- ===================================================================
+--
+-- A trainer with the double flag, one trainer and one party, is fought on the
+-- mod's referee as the cart fights it: two monsters a side, each side one
+-- shared team (docs/plans/gen3-solo-doubles.md).  What is asserted here is
+-- SoloBattle's half: the take-over decision, the seats it builds (contract
+-- C1), the screen it asks for and the choices it takes back (C3), the trainer
+-- answers for both seats (C2), and the ending -- the doubled prize, EXP, the
+-- reconcile, the TV, the whiteout, the draw, the hand-back.
+--
+-- The screen is a stand-in for CoopBattle.newSoloDouble for the first half
+-- (it makes the same uploads as MediatedBattle:start and keeps every event it
+-- is sent), so a test can play either seat by its field slot and aim, refill
+-- and skip exactly; the real screen, driven by key presses, is the second
+-- half.  Its own behaviour is tests/gen3_solo_double.lua's.
+
+do
+  local PLAYER, PLAYER2, FOE, FOE2 = "solo_player", "solo_player#2", "solo_foe", "solo_foe#2"
+  local Wire = need("Wire")
+  local CoopBattle = need("CoopBattle")
+  local realNewSoloDouble = CoopBattle.newSoloDouble
+  check(type(realNewSoloDouble) == "function", "double: CoopBattle.newSoloDouble is in the tree")
+
+  -- More trainer rows: 905 a three-mon double, 906 a strong double (the loss
+  -- and the player's refills), 907 a four-mon weak double (two on the bench,
+  -- the claims), 908 a one-mon "double", 909 a double that poisons.  910-912
+  -- (an Amulet Coin, two kinds, a potion) are added where they are used.
+  TRAINERS[905] = { class = 57, className = "TWINS", name = "TRIO", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 2, aiFlags = 1, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 2 }, { species = 16, level = 2 }, { species = 16, level = 2 } } }
+  TRAINERS[906] = { class = 84, className = "LEADER", name = "DUO", pic = 9, gender = 0,
+    encounterMusic = 0, lastLevel = 60, aiFlags = 7, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 151, level = 60, moves = { 300 } }, { species = 151, level = 60, moves = { 300 } } } }
+  TRAINERS[907] = { class = 57, className = "TWINS", name = "QUAD", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 2, aiFlags = 1, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 2 }, { species = 16, level = 2 }, { species = 16, level = 2 },
+              { species = 16, level = 2 } } }
+  TRAINERS[908] = { class = 57, className = "TWINS", name = "SOLO", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 2, aiFlags = 1, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 2 } } }
+  -- A poisoning hit (pret EFFECT_POISON_HIT, a certain secondary), so one turn
+  -- leaves damage and a status on whoever it lands on.
+  ROM[302] = { effect = 2, power = 40, type = 3, accuracy = 100, pp = 35,
+               secondaryChance = 100, target = 0, priority = 0, flags = 2 }
+  P3._moveNames[302] = "VENOMJAB"
+  TRAINERS[909] = { class = 57, className = "TWINS", name = "VEN", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 20, aiFlags = 1, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 20, moves = { 302 } }, { species = 16, level = 20, moves = { 302 } } } }
+  -- Emerald's money table, for Prize.rewardRse.
+  FakeTrainers.pack = function() return { money = { [57] = 4, [84] = 25 }, moneyDefault = 5 } end
+
+  -- ------- the C3 stub screen: what CoopBattle.newSoloDouble must answer to
+  local stubMade = {}
+  local Stub = {}
+  Stub.__index = Stub
+  local function stubScreen(game, opts)
+    local s = setmetatable({
+      game = game, opts = opts, transport = opts.transport, battle = opts.battle,
+      onDone = opts.onDone, events = {}, lines = {}, sentChoices = {},
+    }, Stub)
+    stubMade[#stubMade + 1] = s
+    return s
+  end
+  -- The uploads, exactly as MediatedBattle:start sends them (C3: "exactly as").
+  function Stub:start(game)
+    self.med = Mediated.new({ transport = self.transport, ui = UI, game = game,
+      battle = self.battle, role = "host", mode = self.opts.mode,
+      npcParty = self.opts.npcParty, trainer = self.opts.trainer, peerId = self.opts.foeId })
+    return self.med:start(game)
+  end
+  function Stub:onReady(msg) self.ready = msg end
+  function Stub:onEvent(e) self.events[#self.events + 1] = e end
+  function Stub:onOutcome(o) self.outcome = o end
+  function Stub:say(t) self.lines[#self.lines + 1] = tostring(t) end
+  function Stub:update() end
+  function Stub:draw() end
+  function Stub:exit()
+    local f = self.onDone
+    self.onDone = nil
+    if f then f(self.resultWord or "?", self.toLearn or {}) end
+  end
+  -- A choice as CoopBattle files it: the wire fields plus `seat`, through the
+  -- same Mediated.submitChoice the mediated path uses.
+  function Stub:choose(seat, fields)
+    fields.seat = seat
+    self.sentChoices[#self.sentChoices + 1] = fields
+    return Mediated.submitChoice(self.transport, self.battle, fields, 3)
+  end
+  function Stub:leave() return Gen3Ui.pop(self.game, self) end
+  CoopBattle.newSoloDouble = stubScreen
+
+  local function eventsOf(s, t, side)
+    local out = {}
+    for _, e in ipairs(s.events) do
+      if e.t == t and (side == nil or e.side == side) then out[#out + 1] = e end
+    end
+    return out
+  end
+
+  -- A seeded rng for every brain a fight builds, and a record of every view
+  -- each is shown with the answer it gave (from the opening pump on): the
+  -- fight is then a function of the referee's seed alone.
+  local brainViews = {}
+  local brainSeed = 11
+  do
+    local newBrain = Brain.new
+    Brain.new = function(opts, ...)
+      opts = opts or {}
+      if opts.rng == nil then
+        local state = brainSeed
+        opts.rng = function(lo, hi)
+          if hi == nil then lo, hi = 1, lo end
+          if hi < lo then return lo end
+          state = (state * 48271) % 2147483647
+          return lo + (state % (hi - lo + 1))
+        end
+      end
+      local brain = newBrain(opts, ...)
+      if type(brain) == "table" then
+        local choose = brain.choose
+        brain.choose = function(self_, view)
+          local copy = {}
+          for k, v in pairs(view) do copy[k] = v end
+          local claimed = {}
+          for k, v in pairs(view.claimed or {}) do claimed[k] = v end
+          copy.claimed = claimed
+          local choice = choose(self_, view)
+          copy.answer = choice
+          brainViews[#brainViews + 1] = copy
+          return choice
+        end
+      end
+      return brain
+    end
+  end
+
+  -- Every choice the referee is handed, by seat id, with the turn it was filed in.
+  local filedBy = {}
+  local function instrument(solo)
+    local sim = solo.sim
+    local submit = sim.submitChoice
+    sim.submitChoice = function(self_, id, choice)
+      -- read before the call: the last choice of a turn resolves it in there
+      local turn, phase = self_.turn, self_.phase
+      local ok = submit(self_, id, choice)
+      filedBy[#filedBy + 1] = { id = id, ok = ok, action = choice and choice.action,
+        seat = choice and choice.seat, turn = turn, phase = phase }
+      return ok
+    end
+  end
+
+  -- The player's side, one frame: every seat that owes, in slot order -- a
+  -- move at `aim[i]` (the first standing foe slot when that one is down), or,
+  -- in a replacement phase, `pickBench(seat, bench)`'s choice off the bench
+  -- (the first one by default).  Seat 2's command goes through the same
+  -- screen call as seat 1's, as CoopBattle's chooser files them.
+  local function playerTurn(solo, plan)
+    plan = plan or {}
+    local sim, s = solo.sim, solo.fight
+    if not (sim and s) then return end
+    for i, seat in ipairs(sim:seatsOf(PLAYER)) do
+      if sim:_owes(seat) then
+        if sim.phase == "replace" then
+          local bench = sim:benchOf(seat)
+          local pick = plan.pickBench and plan.pickBench(seat, bench) or bench[1]
+          s:choose(seat.slot, { action = "switch", slot = seat.mons[pick].slot })
+        elseif sim.phase == "choice" then
+          local target = plan.aim and plan.aim[i]
+          if target then
+            local standing = false
+            for _, f in ipairs(sim:seatsOf(FOE)) do
+              if f.slot == target and f.b and f.b.mon.hp > 0 then standing = true end
+            end
+            if not standing then target = nil end
+          end
+          if not target then
+            for _, f in ipairs(sim:seatsOf(FOE)) do
+              if f.b and f.b.mon.hp > 0 then target = f.slot; break end
+            end
+          end
+          s:choose(seat.slot, { action = "fight", move = plan.move or 0, target = target })
+        end
+      end
+    end
+  end
+
+  -- Pump a stubbed double the way the game does: the referee once a frame,
+  -- the player's seats answered by `playerTurn`, until the outcome has come
+  -- (then leave the screen, as A on the last line would).
+  local function driveDouble(solo, plan, maxSteps)
+    local last = solo.fight
+    for _ = 1, maxSteps or 200 do
+      solo:update(0.5, GAME)
+      local s = solo.fight
+      if not s then return true, last end
+      last = s
+      if s.outcome then
+        solo:update(0.5, GAME)
+        s:leave()
+        return true, s
+      end
+      playerTurn(solo, plan)
+    end
+    return false, last
+  end
+
+  local function party2(a, b, more)
+    local party = { a, b }
+    for _, m in ipairs(more or {}) do party[#party + 1] = m end
+    return party
+  end
+  local function strong(species, level, extra)
+    local fields = { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }
+    for k, v in pairs(extra or {}) do fields[k] = v end
+    return monOf(species, level, fields)
+  end
+
+  -- (a) the take-over decision, through the door -----------------------
+  do
+    newGame()
+    SESSION.party = party2(monOf(4, 20), monOf(16, 20))
+    local solo = newSolo()
+    local made = #stubMade
+    check(solo:fromGen3Trainer(GAME, 902, {}), "takes: two usable monsters, the row's own double flag")
+    eq(#stubMade, made + 1, "takes: ...on the double screen")
+    eq(getmetatable(solo.fight), Stub, "takes: ...not the single's MediatedBattle")
+    eq(solo.gen3 and solo.gen3.double, true, "takes: the fight is marked a double")
+    solo:reset()
+
+    -- the flag on the opts alone (a trainerbattle type 4 / 6 / 8's own)
+    newGame()
+    SESSION.party = party2(monOf(4, 20), monOf(16, 20))
+    local flagged = newSolo()
+    check(flagged:fromGen3Trainer(GAME, { trainerId = 900 }, { trainerId = 900, double = true }),
+          "takes: the opcode's own double flag on a single-row trainer")
+    eq(flagged.sim and flagged.sim.double, true, "takes: ...a doubles referee")
+    eq(flagged.fight and flagged.fight.opts.foeSeats, 1, "takes: ...with the trainer's one monster behind one seat")
+    flagged:reset()
+
+    -- leads: the first two monsters that can fight -- a fainted one and an egg are skipped
+    newGame()
+    local fainted = monOf(4, 20, { hp = 0 })
+    local lead1 = monOf(4, 20)
+    local egg = monOf(16, 20, { isEgg = true })
+    local lead2 = monOf(151, 20)
+    SESSION.party = { fainted, lead1, egg, lead2 }
+    local leads = newSolo()
+    check(leads:fromGen3Trainer(GAME, 902, {}), "leads: a party with a fainted lead and an egg is taken")
+    local sim = leads.sim
+    local seat1, seat2 = sim.byId[PLAYER], sim.byId[PLAYER2]
+    eq(seat1.mons[seat1.active].slot, 1, "leads: seat 1 is the first monster that can fight (party member 2)")
+    eq(seat2.mons[seat2.active].slot, 3, "leads: seat 2 the next one, past the egg (party member 4)")
+    eq(Solo.secondMon3(sim, SESSION.party), lead2, "leads: secondMon3 finds seat 2's engine monster")
+    eq(table.concat(leads.fight.ready.sides.a, ","), PLAYER .. "," .. PLAYER2, "leads: both seats are announced")
+    leads:reset()
+  end
+
+  -- (b) the hand-backs: the caller fights the cart's own battle ----------
+  do
+    local speciesEgg = monOf(16, 20)
+    speciesEgg.species, speciesEgg.speciesId = 412, 412
+    local cases = {
+      { "a one-monster party", { monOf(4, 20) }, {} },
+      { "one usable monster (the second has fainted)", { monOf(4, 20), monOf(16, 20, { hp = 0 }) }, {} },
+      { "one usable monster (the second is an egg)", { monOf(4, 20), monOf(16, 20, { isEgg = true }) }, {} },
+      { "one usable monster (the second is the egg species)", { monOf(4, 20), speciesEgg }, {} },
+      { "one usable monster behind two fainted ones",
+        { monOf(4, 20, { hp = 0 }), monOf(16, 20, { hp = 0 }), monOf(151, 20) }, {} },
+      { "a second trainer", { monOf(4, 20), monOf(16, 20) }, { trainerIdB = 900 } },
+      { "a second trainer behind the double flag", { monOf(4, 20), monOf(16, 20) }, { double = true, trainerIdB = 900 } },
+      { "Steven's partner", { monOf(4, 20), monOf(16, 20) }, { partner = true } },
+      { "two opponents", { monOf(4, 20), monOf(16, 20) }, { twoOpponents = true } },
+    }
+    for _, case in ipairs(cases) do
+      newGame()
+      SESSION.party = case[2]
+      local solo = newSolo()
+      local made, mark = #stubMade, #warns
+      eq(solo:fromGen3Trainer(GAME, 902, case[3]), false, "handed back: " .. case[1])
+      eq(solo:isRunning(), false, "handed back: nothing is running (" .. case[1] .. ")")
+      eq(#stubMade, made, "handed back: no double screen was built (" .. case[1] .. ")")
+      eq(Stack.depth(), 0, "handed back: nothing went onto the stack (" .. case[1] .. ")")
+      eq(#bridgeCalls, 0, "handed back: the caller's own start is the cart's, not ours (" .. case[1] .. ")")
+      eq(#warns, mark, "handed back: it is a decision, not a fault -- nothing logged (" .. case[1] .. ")")
+      eq(encounterResets, 0, "handed back: the encounter cooldown was not spent (" .. case[1] .. ")")
+    end
+    -- the same two-monster party, a single trainer: the single's screen, no double
+    newGame()
+    SESSION.party = party2(monOf(4, 20), monOf(16, 20))
+    local solo = newSolo()
+    local made = #stubMade
+    check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "single: a plain trainer is still taken")
+    eq(#stubMade, made, "single: ...on MediatedBattle, never the double screen")
+    solo:reset()
+  end
+
+  -- (c) a FireRed double, won -------------------------------------------
+  local winFight
+  do
+    newGame()
+    brainViews, filedBy = {}, {}
+    local a = strong(4, 8)
+    local b = strong(151, 8, { moves = { 1 } })
+    SESSION.party = party2(a, b)
+    SESSION.money = 500
+    local hpA, hpB = a.hp, b.hp
+    local awardOpts
+    local award = Prize.awardTrainerWin
+    Prize.awardTrainerWin = function(s, id, o) awardOpts = o; return award(s, id, o) end
+    local solo = newSolo()
+    local result, calls = nil, 0
+    local op = trainerOpcode()
+    FakeVm.running = true
+    local took = solo:fromGen3Trainer(GAME, 902, { trainerId = 902, double = true,
+      done = function(r) result = r; calls = calls + 1; op.done(r) end })
+    check(took, "double: a lone double with two usable monsters is taken")
+    local s = solo.fight
+    eq(getmetatable(s), Stub, "double: the screen is CoopBattle.newSoloDouble's")
+    -- contract C3: what the screen was asked for
+    local o = s.opts
+    eq(o.selfId, PLAYER, "C3: selfId")
+    eq(o.foeId, FOE, "C3: foeId")
+    eq(o.foeSeats, 2, "C3: foeSeats 2 for a two-monster trainer")
+    eq(o.mode, Config.SOLO_TRAINER_MODE, "C3: mode coop_npc")
+    eq(#o.npcParty, 2, "C3: npcParty is the trainer's two sheets")
+    eq(o.trainer and o.trainer.doubleBattle, true, "C3: the trainer record says doubleBattle (the screen's intro lines)")
+    eq(o.trainer and o.trainer.trainerId, 902, "C3: ...and is the numeric trainer")
+    eq(o.peerName, Solo.gen3FoeLabel(o.trainer), "C3: peerName is the label the single opens with")
+    eq(o.battle, s.battle, "C3: the battle id")
+    check(type(o.onDone) == "function" and type(o.transport) == "table", "C3: a transport and an onDone")
+    check(Gen3Ui.has(s), "double: the screen is a game3 layer")
+    -- contract C1: the seats the referee was built with
+    local sides = s.ready and s.ready.sides
+    eq(sides and table.concat(sides.a, ","), PLAYER .. "," .. PLAYER2, "onReady: both player seats, in slot order")
+    eq(sides and table.concat(sides.b, ","), FOE .. "," .. FOE2, "onReady: both trainer seats")
+    eq(s.ready and s.ready.mode, Config.SOLO_TRAINER_MODE, "onReady: the mode")
+    local sim = solo.sim
+    check(sim.double, "referee: a doubles fight")
+    eq(#sim:seatsOf(PLAYER), 2, "referee: two player seats")
+    eq(#sim:seatsOf(FOE), 2, "referee: two trainer seats")
+    check(sim.byId[PLAYER].mons == sim.byId[PLAYER2].mons, "referee: the player's seats share one team")
+    check(sim.byId[FOE].mons == sim.byId[FOE2].mons, "referee: ...and so do the trainer's")
+    eq(sim.byId[PLAYER].owner, PLAYER, "referee: seat 1 is owned by the player")
+    eq(sim.byId[PLAYER2].owner, PLAYER, "referee: ...and so is seat 2")
+    eq(sim.byId[PLAYER].active, 1, "referee: seat 1 leads with the first monster")
+    eq(sim.byId[PLAYER2].active, 2, "referee: seat 2 with the second")
+    -- both seats out on both sides, at the cart's field slots
+    local slots = {}
+    for _, e in ipairs(eventsOf(s, "send")) do slots[#slots + 1] = tostring(e.slot) end
+    table.sort(slots)
+    eq(table.concat(slots, ","), "0,1,3,4", "both seats out on both sides (slots 0, 1, 3, 4)")
+    instrument(solo)
+    -- after the opening pump both trainer seats have answered, by the brain
+    check(sim.byId[FOE].choice ~= nil and sim.byId[FOE2].choice ~= nil,
+          "foe: both trainer seats answered the first turn before the player was asked")
+    -- a trainer's RUN: parked, the turn unspent, the other seat still owing
+    local turn = sim.turn
+    check(s:choose(0, { action = "run" }), "run: a trainer RUN is taken (and parked)")
+    solo:update(0.5, GAME)
+    eq(sim.turn, turn, "run: the turn was not spent")
+    check(sim.byId[PLAYER].choice == nil and sim.byId[PLAYER2].choice == nil, "run: neither seat's choice was filed")
+    check(s:choose(1, { action = "run" }), "run: ...nor does mon 2's menu let a trainer fight be left (parked too)")
+    solo:update(0.5, GAME)
+    eq(sim.turn, turn, "run: ...the turn is still unspent")
+    check(sim.byId[PLAYER].choice == nil and sim.byId[PLAYER2].choice == nil,
+          "run: ...and nothing was filed for either seat")
+
+    local ok = driveDouble(solo, { aim = { 3, 4 } })
+    check(ok, "double: the fight ran to its end")
+    eq(result, "win", "double: done('win')")
+    eq(calls, 1, "double: done exactly once")
+    check(op.flag, "double: the trainer's flag is set (the script's continuation)")
+    eq(Gen3Ui.has(s), false, "double: the screen left the stack")
+    check(not solo:isRunning(), "double: nothing is left running")
+
+    -- two commands a turn, each filed under its own seat by the screen's `seat`
+    local to1, to2, byTurn = 0, 0, {}
+    for _, f in ipairs(filedBy) do
+      if f.ok and f.id == PLAYER and f.seat == 0 then to1 = to1 + 1 end
+      if f.ok and f.id == PLAYER2 and f.seat == 1 then to2 = to2 + 1 end
+      if f.ok and (f.id == PLAYER or f.id == PLAYER2) and f.phase == "choice" then
+        byTurn[f.turn] = byTurn[f.turn] or {}
+        byTurn[f.turn][f.id] = true
+      end
+    end
+    check(to1 > 0 and to2 > 0, "choices: slot 0 files under solo_player, slot 1 under solo_player#2 ("
+          .. to1 .. " / " .. to2 .. ")")
+    eq(to1, to2, "choices: one command per seat each turn")
+    local both = true
+    for _, seats in pairs(byTurn) do if not (seats[PLAYER] and seats[PLAYER2]) then both = false end end
+    check(next(byTurn) ~= nil and both, "choices: every turn took a command from mon 1 and one from mon 2")
+
+    -- the trainer's side: C2 views, both seats, every answer legal
+    local sawSeats, sawFoes2, sawDouble = {}, false, true
+    local answered = 0
+    for _, v in ipairs(brainViews) do
+      if not v.double then sawDouble = false end
+      sawSeats[v.seat] = true
+      if type(v.foes) == "table" and #v.foes == 2 then sawFoes2 = true end
+      if type(v.answer) == "table" then answered = answered + 1 end
+    end
+    check(#brainViews >= 2 and sawDouble, "brain: every view it was shown is a double view")
+    check(sawSeats[3] and sawSeats[4], "brain: asked for both trainer seats (3 and 4)")
+    check(sawFoes2, "brain: shown both player battlers as its foes")
+    eq(answered, #brainViews, "brain: answered every time it was asked")
+    local foeFiled, refused = 0, 0
+    for _, f in ipairs(filedBy) do
+      if f.id == FOE or f.id == FOE2 then
+        foeFiled = foeFiled + 1
+        if not f.ok then refused = refused + 1 end
+      end
+    end
+    check(foeFiled >= 1, "foe: the brain's answers were filed after the screen was up (" .. foeFiled .. ")")
+    eq(refused, 0, "foe: the referee took every trainer answer (none illegal)")
+    local aimedLegal, aimedAny = true, false
+    for _, v in ipairs(brainViews) do
+      local ans = v.answer
+      if ans and ans.action == "fight" and ans.target ~= nil then
+        aimedAny = true
+        if not (ans.target == 0 or ans.target == 1) then aimedLegal = false end
+      end
+    end
+    check(aimedAny and aimedLegal, "foe: FireRed's trainer aims at a player battler (slot 0 or 1), never its partner")
+    local partnerSeen = false
+    for _, v in ipairs(brainViews) do if v.partner and v.partner.slot ~= v.seat then partnerSeen = true end end
+    check(partnerSeen, "brain: its partner is the trainer's other battler")
+
+    -- the prize: the doubled one, through the engine's own formula
+    eq(awardOpts and awardOpts.double, true, "prize: double = true reached Prize.awardTrainerWin")
+    local single = Prize.calc(902, { lastLevel = 5, moneyMultiplier = 1 })
+    local want = Prize.calc(902, { lastLevel = 5, moneyMultiplier = 1, double = true })
+    check(single > 0, "prize: the engine prices this trainer")
+    eq(want, 2 * single, "prize: a double pays twice the single")
+    eq(SESSION.money, 500 + want, "prize: paid into the session")
+    check(table.concat(s.lines, " | "):find("STRINGID_PLAYERGOTMONEY|" .. want, 1, true) ~= nil,
+          "prize: the money line says the doubled amount")
+    -- EXP: split among the participants, both monsters, once per knockout
+    local exps, mons, faints = eventsOf(s, "exp"), {}, eventsOf(s, "faint", "b")
+    local allTwo = true
+    for _, e in ipairs(exps) do
+      mons[e.mon] = true
+      if e.participants ~= 2 then allTwo = false end
+    end
+    check(mons[0] and mons[1], "exp: both of the player's monsters are paid")
+    check(#exps > 0 and allTwo, "exp: split between the two participants on every knockout")
+    eq(#exps, 2 * #faints, "exp: two shares for each foe that fainted (" .. #faints .. " fainted)")
+    -- the reconcile: the referee's HP and PP came home onto both session monsters
+    check(a.hp < hpA or b.hp < hpB, "reconcile: damage came home (a " .. a.hp .. "/" .. hpA
+          .. ", b " .. b.hp .. "/" .. hpB .. ")")
+    local simA, simB = sim.byId[PLAYER].mons[1], sim.byId[PLAYER].mons[2]
+    eq(a.hp, simA.hp, "reconcile: seat 1's monster has the referee's HP")
+    eq(b.hp, simB.hp, "reconcile: seat 2's monster has the referee's HP")
+    eq(a.pp[1], simA.moves[1].pp, "reconcile: seat 1's PP")
+    eq(b.pp[1], simB.moves[1].pp, "reconcile: seat 2's PP")
+    -- the quest log and battle.ended take one monster a side: the first seats'
+    local ql = effectsOf("questlog")[1]
+    eq(ql and ql[3].player and ql[3].player.mon, a, "quest log: seat 1's monster")
+    eq(ql and ql[3].double, true, "quest log: a double battle")
+    eq(ql and ql[3].player2 and ql[3].player2.mon, b, "quest log: ...with seat 2's monster beside it")
+    local ended = effectsOf("emit")[1]
+    eq(ended and ended[2], "battle.ended", "battle.ended is raised")
+    eq(ended and ended[3].result, "win", "battle.ended: the result")
+    eq(ended and ended[3].battle and ended[3].battle.player and ended[3].battle.player.mon, a,
+       "battle.ended: the first seat's monster")
+    Prize.awardTrainerWin = award
+    winFight = s
+  end
+
+  -- (c0) the after-battle prompts reach the SECOND seat's monster: a level it
+  --      gained and a move it was left asking about, once the screen is off
+  do
+    newGame()
+    local a = strong(16, 8)
+    local b = strong(4, 15)
+    SESSION.party = party2(a, b)
+    local solo = newSolo()
+    local result, order = nil, {}
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902,
+      done = function(r) result = r; order[#order + 1] = "done" end }), "prompts: taken")
+    local s = solo.fight
+    -- what the real screen's knockouts do to the live monsters, done by hand
+    b.level = 16
+    s.toLearn = { { mon = b, move = 52 } }
+    local realLearn = FakeLearn.begin
+    FakeLearn.begin = function(opts) order[#order + 1] = "learn"; return realLearn(opts) end
+    local realStart = FakeScene.start
+    FakeScene.start = function(...) order[#order + 1] = "evolve"; return realStart(...) end
+    check(driveDouble(solo, { aim = { 3, 4 } }), "prompts: the fight ran to its end")
+    FakeLearn.begin, FakeScene.start = realLearn, realStart
+    eq(result, "win", "prompts: done('win')")
+    eq(#FakeLearn.begun, 1, "prompts: the unanswered move-learn prompt opened, once")
+    eq(FakeLearn.begun[1] and FakeLearn.begun[1].mon, b, "prompts: ...for seat 2's monster")
+    eq(FakeLearn.begun[1] and FakeLearn.begun[1].moveId, 52, "prompts: ...for the move it was left asking about")
+    eq(#FakeScene.started, 1, "prompts: the cart's evolution scene opened, once")
+    eq(FakeScene.started[1] and FakeScene.started[1].mon, b, "prompts: ...for the monster that levelled on seat 2")
+    eq(FakeScene.started[1] and FakeScene.started[1].into, 5, "prompts: ...into what the cart says")
+    eq(table.concat(order, ","), "learn,evolve,done", "prompts: the move, then the evolution, then done")
+  end
+
+  -- (c1) an Amulet Coin on EITHER seat's monster, either side, doubles the prize
+  --      again (the cart sets the multiplier as its holder is sent in, whichever
+  --      battler position that is)
+  TRAINERS[910] = { class = 57, className = "TWINS", name = "GILT", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 5, aiFlags = 1, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 5 }, { species = 16, level = 5, heldItem = 127 } } }
+  do
+    local function prizeOf(label, trainerId, holder)
+      newGame()
+      SESSION.party = party2(strong(4, 30), strong(151, 30, holder and { heldItem = 127, item = 127 } or nil))
+      SESSION.money = 0
+      local solo = newSolo()
+      check(solo:fromGen3Trainer(GAME, trainerId, { trainerId = trainerId }), label .. ": taken")
+      check(driveDouble(solo, { aim = { 3, 4 } }), label .. ": the fight ran to its end")
+      return SESSION.money
+    end
+    local plain = Prize.calc(902, { lastLevel = 5, moneyMultiplier = 1, double = true })
+    eq(prizeOf("amulet (none)", 902, false), plain, "amulet: no coin, the plain doubled prize")
+    eq(prizeOf("amulet (seat 2)", 902, true),
+       Prize.calc(902, { lastLevel = 5, moneyMultiplier = 2, double = true }),
+       "amulet: the coin on seat 2's lead doubles it again")
+    eq(prizeOf("amulet (their seat 2)", 910, false),
+       Prize.calc(910, { lastLevel = 5, moneyMultiplier = 2, double = true }),
+       "amulet: ...and so does one on the trainer's second seat (FireRed counts either side)")
+  end
+
+  -- (c2) the choice's seat: slot 0 -> solo_player, slot 1 -> solo_player#2 ---
+  do
+    newGame()
+    SESSION.party = party2(strong(4, 8), strong(151, 8))
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902 }), "seat: taken")
+    local sim = solo.sim
+    eq(solo:_seat3({ seat = 0 }), PLAYER, "seat: field slot 0 is the first seat")
+    eq(solo:_seat3({ seat = 1 }), PLAYER2, "seat: field slot 1 is the second")
+    eq(solo:_seat3({}), PLAYER, "seat: no `seat` is the first")
+    eq(solo:_seat3({ seat = 3 }), nil, "seat: a trainer's slot is no seat of ours")
+    eq(solo:_seat3({ seat = 9 }), nil, "seat: nor is a slot nobody stands on")
+    check(solo:_choose({ action = "fight", move = 0, target = 3, seat = 1 }), "seat: a command for slot 1 is taken")
+    check(sim.byId[PLAYER2].choice ~= nil and sim.byId[PLAYER].choice == nil,
+          "seat: ...and filed under the second seat only")
+    eq(solo:_choose({ action = "fight", move = 0, target = 3, seat = 9 }), false,
+       "seat: a command for a slot that is none of ours is refused (the menu stays open)")
+    check(sim.byId[PLAYER].choice == nil, "seat: ...and filed nowhere")
+    local turn = sim.turn
+    check(solo:_choose({ action = "fight", move = 0, target = 4 }), "seat: a command with no `seat` is the first's")
+    check(sim.turn > turn, "seat: ...filed under the first seat, which completed the turn")
+    solo:reset()
+
+    -- a single has one seat: a `seat` on its payload is not read
+    newGame()
+    SESSION.party = party2(strong(4, 8), strong(151, 8))
+    local single = newSolo()
+    check(single:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "seat: a single is taken")
+    eq(single:_seat3({ seat = 1 }), PLAYER, "seat: a single's only seat, whatever `seat` says")
+    single:reset()
+  end
+
+  -- A double whose two trainer monsters are different species, for the TV's
+  -- "last to faint" -- the second seat's monster is the one left standing.
+  TRAINERS[911] = { class = 57, className = "TWINS", name = "MISMATCH", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 5, aiFlags = 1, items = { 0, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 5 }, { species = 4, level = 5 } } }
+
+  -- (d) Emerald: the TV's second monster, the doubled money table --------
+  do
+    newGame()
+    PROFILE.family = "rse"
+    PROFILE.rules.money = "rse"
+    local a = strong(4, 30)
+    local b = strong(151, 30, { moves = { 1 } })
+    SESSION.party = party2(a, b)
+    SESSION.money = 0
+    local rseOpts
+    local reward = Prize.rewardRse
+    Prize.rewardRse = function(id, o) rseOpts = o; return reward(id, o) end
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902 }), "rse: the row's doubleBattle is taken")
+    local ok = driveDouble(solo, { aim = { 3, 4 } })
+    check(ok, "rse: the fight ran to its end")
+    eq(rseOpts and rseOpts.double, true, "rse: Prize.rewardRse got double = true")
+    eq(SESSION.money, Prize.calcRse(902, { double = true }), "rse: the doubled money")
+    local single = Prize.calcRse(902, { double = false })
+    check(single > 0 and SESSION.money == 2 * single, "rse: ...twice the single's (" .. SESSION.money .. " / " .. single .. ")")
+    local tv
+    for _, e in ipairs(effectsLog) do if e[1] == "rse" and e[2] == "tv" then tv = e end end
+    local results = tv and tv[7]
+    eq(results and results.playerMon1Species, 4, "tv: mon 1 is seat 1's monster")
+    eq(results and results.playerMon2Species, 151, "tv: mon 2 is seat 2's (playerMon2Species)")
+    eq(results and results.lastOpponentSpecies, 16, "tv: the trainer's monster that fainted last")
+    eq(#effectsOf("questlog"), 0, "rse: no quest log on Emerald")
+    Prize.rewardRse = reward
+    PROFILE.family = "frlg"
+    PROFILE.rules.money = "frlg"
+
+    -- the monster that fainted LAST, whichever slot it stood on: both player
+    -- monsters go for the first trainer seat, so the second seat's is the last
+    newGame()
+    PROFILE.family = "rse"
+    PROFILE.rules.money = "rse"
+    SESSION.party = party2(strong(4, 30), strong(151, 30, { moves = { 1 } }))
+    local mixed = newSolo()
+    check(mixed:fromGen3Trainer(GAME, 911, { trainerId = 911 }), "tv: a trainer with two kinds, taken")
+    local ms = mixed.fight
+    check(driveDouble(mixed, { aim = { 3, 3 } }), "tv: the fight ran to its end")
+    PROFILE.family = "frlg"
+    PROFILE.rules.money = "frlg"
+    local faintsB = eventsOf(ms, "faint", "b")
+    eq(#faintsB, 2, "tv: both of the trainer's monsters fainted")
+    eq(faintsB[1] and faintsB[1].slot, 3, "tv: the first seat's went first")
+    eq(faintsB[2] and faintsB[2].slot, 4, "tv: the second seat's last")
+    local tvMixed
+    for _, e in ipairs(effectsLog) do if e[1] == "rse" and e[2] == "tv" then tvMixed = e end end
+    eq(tvMixed and tvMixed[7] and tvMixed[7].lastOpponentSpecies, 4,
+       "tv: lastOpponentSpecies is the monster that fainted last (the second seat's), not the first seat's")
+
+    -- a single's TV report has no second monster
+    newGame()
+    PROFILE.family = "rse"
+    PROFILE.rules.money = "rse"
+    SESSION.party = party2(strong(4, 30), strong(151, 30))
+    local one = newSolo()
+    check(one:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "rse single: taken")
+    drive(one, function(f) f:pickMove(1) end)
+    PROFILE.family = "frlg"
+    PROFILE.rules.money = "frlg"
+    local tv1
+    for _, e in ipairs(effectsLog) do if e[1] == "rse" and e[2] == "tv" then tv1 = e end end
+    eq(tv1 and tv1[7] and tv1[7].playerMon2Species, 0, "rse single: the cart's playerMon2Species is 0 on a single")
+  end
+
+  -- (e) the trainer's refills -------------------------------------------
+  do
+    -- a three-mon trainer, both foes down in one turn, one on the bench: only
+    -- the first seat refills, and the other stays empty for good
+    newGame()
+    SESSION.party = party2(strong(4, 40), strong(151, 40, { moves = { 1 } }))
+    brainViews, filedBy = {}, {}
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 905, { trainerId = 905, double = true }), "trio: taken")
+    instrument(solo)
+    local s, sim = solo.fight, solo.sim
+    playerTurn(solo, { aim = { 3, 4 } })
+    for _ = 1, 4 do solo:update(0.5, GAME) end
+    local faints, foeSends = eventsOf(s, "faint", "b"), eventsOf(s, "send", "b")
+    eq(#faints, 2, "trio: both foes went down in the first turn")
+    eq(#foeSends, 3, "trio: one refill only -- two knocked out, one on the bench")
+    eq(foeSends[3] and foeSends[3].slot, 3, "trio: the first seat is the one refilled")
+    eq(foeSends[3] and foeSends[3].mon, 2, "trio: ...with the one monster left")
+    eq(sim.byId[FOE2].mustReplace, nil, "trio: the other seat stays empty, not owed")
+    eq(sim.byId[FOE2].b, nil, "trio: ...with nothing standing on it")
+    local asked = { [3] = 0, [4] = 0 }
+    for _, v in ipairs(brainViews) do
+      if v.mustReplace and asked[v.seat] ~= nil then asked[v.seat] = asked[v.seat] + 1 end
+    end
+    eq(asked[3], 1, "trio: the brain was asked once, for the send-out of the seat that is owed one")
+    eq(asked[4], 0, "trio: ...and never for the seat that is not (no speculative call spends its items)")
+    local ok = driveDouble(solo, { aim = { 3, 4 } })
+    check(ok, "trio: the fight ran to its end")
+    check(solo.gen3 == nil and not solo:isRunning(), "trio: and let go")
+
+    -- a four-mon trainer: both refill, from the whole bench, and never the same monster
+    newGame()
+    SESSION.party = party2(strong(4, 40), strong(151, 40, { moves = { 1 } }))
+    brainViews, filedBy = {}, {}
+    local quad = newSolo()
+    check(quad:fromGen3Trainer(GAME, 907, { trainerId = 907, double = true }), "quad: taken")
+    instrument(quad)
+    local qs = quad.fight
+    playerTurn(quad, { aim = { 3, 4 } })
+    for _ = 1, 4 do quad:update(0.5, GAME) end
+    local qFaints, qSends = eventsOf(qs, "faint", "b"), eventsOf(qs, "send", "b")
+    eq(#qFaints, 2, "quad: both foes went down in the first turn")
+    eq(#qSends, 4, "quad: both seats refilled")
+    check(qSends[3] and qSends[4] and qSends[3].mon ~= qSends[4].mon, "quad: ...with different monsters")
+    check(qSends[3] and qSends[4] and qSends[3].mon >= 2 and qSends[4].mon >= 2,
+          "quad: ...neither of them a fainted lead")
+    local claimSeen = false
+    for _, v in ipairs(brainViews) do
+      if v.mustReplace and v.seat == 4 and next(v.claimed) ~= nil then claimSeen = true end
+    end
+    check(claimSeen, "quad: the second seat's send-out view carried the first seat's claim")
+    for _, v in ipairs(brainViews) do
+      if v.mustReplace then
+        for idx in pairs(v.claimed) do
+          check(not (type(v.answer) == "table" and v.answer.action == "switch"
+                     and v.party[idx] and v.answer.slot == v.party[idx].slot),
+                "quad: a send-out answer is never a monster the sibling claimed (party " .. idx .. ")")
+        end
+      end
+    end
+    check(driveDouble(quad, { aim = { 3, 4 } }), "quad: the fight ran to its end")
+  end
+
+  -- (e2) ONE brain answers both trainer seats: the four item slots are the
+  --      trainer's, not a monster's -- one HYPER POTION is drunk once, whichever
+  --      seat reaches for it first, though both monsters are under a quarter HP
+  TRAINERS[912] = { class = 57, className = "TWINS", name = "POTS", pic = 6, gender = 1,
+    encounterMusic = 130, lastLevel = 5, aiFlags = 1, items = { 21, 0, 0, 0 }, doubleBattle = true,
+    party = { { species = 16, level = 5 }, { species = 16, level = 5 } } }
+  do
+    newGame()
+    SESSION.party = party2(strong(4, 40), strong(151, 40, { moves = { 1 } }))
+    local foes = Solo.gen3TrainerParty(FakeTrainers.foeFromId(912), 912)
+    foes[1].hp, foes[2].hp = 2, 2
+    brainViews, filedBy = {}, {}
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 912, { trainerId = 912, party = foes }), "items: taken")
+    local sim = solo.sim
+    local c1, c2 = sim.byId[FOE].choice, sim.byId[FOE2].choice
+    eq(c1 and c1.action, "item", "items: the first seat drinks the potion")
+    eq(c1 and c1.item, 21, "items: ...by its id")
+    eq(c2 and c2.action, "fight", "items: the second seat, as low, does not -- the one potion is spent")
+    check(driveDouble(solo, { aim = { 3, 4 } }), "items: the fight ran to its end")
+    local drunk = 0
+    for _, v in ipairs(brainViews) do
+      if type(v.answer) == "table" and v.answer.action == "item" then drunk = drunk + 1 end
+    end
+    eq(drunk, 1, "items: one potion drunk in the whole fight, by either seat")
+  end
+
+  -- (f) the player's refills, from the shared bench ----------------------
+  do
+    -- two leads at 1 HP before a strong pair: both go down in the first turn,
+    -- two monsters wait on the bench; either seat may take either of them, and
+    -- the second seat is offered only what the first did not take
+    local function refill(label, pick1, pick2, want0, want1)
+      newGame()
+      brainViews, filedBy = {}, {}
+      local a = strong(4, 3, { hp = 1 })
+      local b = strong(16, 3, { hp = 1 })
+      local c = strong(151, 40)
+      local d = strong(29, 40)
+      SESSION.party = { a, b, c, d }
+      local solo = newSolo()
+      check(solo:fromGen3Trainer(GAME, 906, { trainerId = 906, double = true }), label .. ": taken")
+      local s, sim = solo.fight, solo.sim
+      instrument(solo)
+      local seat1, seat2 = sim.byId[PLAYER], sim.byId[PLAYER2]
+      playerTurn(solo, { aim = { 3, 4 } })
+      for _ = 1, 4 do solo:update(0.5, GAME) end
+      eq(sim.phase, "replace", label .. ": both leads fainted, a replacement is owed")
+      check(sim:_owes(seat1) and sim:_owes(seat2), label .. ": both seats owe one")
+      eq(#eventsOf(s, "faint", "a"), 2, label .. ": two faints on the player's side")
+      eq(#sim:benchOf(seat1), 2, label .. ": the whole bench is open to seat 1 (two monsters)")
+      eq(#sim:benchOf(seat2), 2, label .. ": ...and to seat 2")
+      local sendsBefore = #eventsOf(s, "send", "a")
+      local offered = {}
+      playerTurn(solo, { pickBench = function(seat, bench)
+        offered[seat.slot] = #bench
+        return (seat.slot == 0 and pick1 or pick2)(bench)
+      end })
+      for _ = 1, 4 do solo:update(0.5, GAME) end
+      eq(offered[0], 2, label .. ": seat 1 was offered both bench monsters")
+      eq(offered[1], 1, label .. ": seat 2 was offered only the one seat 1 left")
+      local sends = eventsOf(s, "send", "a")
+      eq(#sends, sendsBefore + 2, label .. ": both seats refilled")
+      local bySlot = {}
+      for i = sendsBefore + 1, #sends do bySlot[sends[i].slot] = sends[i].mon end
+      eq(bySlot[0], want0, label .. ": seat 1 sent out party member " .. (want0 + 1))
+      eq(bySlot[1], want1, label .. ": seat 2 sent out party member " .. (want1 + 1))
+      check(bySlot[0] ~= bySlot[1], label .. ": never the same monster on both seats")
+      check(driveDouble(solo, { aim = { 3, 4 } }), label .. ": the fight ran to its end")
+      local refused = 0
+      for _, f in ipairs(filedBy) do
+        if (f.id == PLAYER or f.id == PLAYER2) and not f.ok then refused = refused + 1 end
+      end
+      eq(refused, 0, label .. ": the referee took every one of the player's choices")
+    end
+    local first = function(bench) return bench[1] end
+    local last = function(bench) return bench[#bench] end
+    refill("refill (seat 1 the last)", last, first, 3, 2)
+    refill("refill (seat 1 the first)", first, first, 2, 3)
+  end
+
+  do
+    -- the same pair of faints with ONE monster on the bench: one seat refilled
+    newGame()
+    brainViews, filedBy = {}, {}
+    local a = strong(4, 3, { hp = 1 })
+    local b = strong(16, 3, { hp = 1 })
+    local c = strong(151, 40)
+    SESSION.party = { a, b, c }
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 906, { trainerId = 906, double = true }), "last: taken")
+    local s, sim = solo.fight, solo.sim
+    local seat1, seat2 = sim.byId[PLAYER], sim.byId[PLAYER2]
+    playerTurn(solo, { aim = { 3, 4 } })
+    for _ = 1, 4 do solo:update(0.5, GAME) end
+    eq(sim.phase, "replace", "last: both leads fainted")
+    check(sim:_owes(seat1), "last: seat 1 owes a monster")
+    check(not sim:_owes(seat2), "last: seat 2 does not -- one monster, one slot")
+    local before = #eventsOf(s, "send", "a")
+    playerTurn(solo)
+    for _ = 1, 4 do solo:update(0.5, GAME) end
+    eq(#eventsOf(s, "send", "a"), before + 1, "last: the one monster came out, on one seat")
+    local sent = eventsOf(s, "send", "a")[before + 1]
+    eq(sent and sent.slot, 0, "last: ...on seat 1's slot")
+    eq(sent and sent.mon, 2, "last: ...the bench monster")
+    local fighters = 0
+    for _, seat in ipairs(sim:seatsOf(PLAYER)) do
+      if seat.b and seat.b.mon.hp > 0 then fighters = fighters + 1 end
+    end
+    eq(fighters, 1, "last: one battler of ours is standing")
+    check(driveDouble(solo, { aim = { 3, 4 } }), "last: the fight ran to its end (a lone monster against two)")
+  end
+
+  -- (g) a double lost: the whiteout --------------------------------------
+  do
+    newGame()
+    local a = strong(4, 5, { hp = 3 })
+    local b = strong(16, 5, { hp = 3, moves = { 33 } })
+    SESSION.party = party2(a, b)
+    SESSION.money = 500
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 906, { trainerId = 906, double = true,
+      done = function(r) result = r end }), "loss: taken")
+    local ok, s = driveDouble(solo, nil)
+    check(ok, "loss: the fight ran to its end")
+    eq(result, "lose", "loss: done('lose')")
+    eq(fieldCalls[1], "respawn", "loss: the whiteout's respawn (the warp, the heal)")
+    eq(bridgeCalls[1] and bridgeCalls[1][1], "loss", "loss: the cart's money loss")
+    eq(SESSION.money, 380, "loss: ...taken from the session")
+    eq(a.hp, a.maxHp, "loss: the party was healed by the respawn (seat 1's monster)")
+    eq(b.hp, b.maxHp, "loss: ...and seat 2's")
+    local text = table.concat(s.lines, " | ")
+    check(text:find("STRINGID_PLAYERLOSTAGAINSTENEMYTRAINER", 1, true) ~= nil, "loss: the cart's lost line")
+    check(text:find("STRINGID_PLAYERGOTMONEY", 1, true) == nil, "loss: no prize")
+  end
+
+  -- (h) a double drawn with the player standing: the script is halted -----
+  do
+    newGame()
+    SESSION.party = party2(strong(4, 30), strong(151, 30))
+    SESSION.money = 500
+    local solo = newSolo()
+    local result, calls = nil, 0
+    FakeVm.running = true
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902, double = true,
+      done = function(r) result = r; calls = calls + 1 end }), "draw: taken")
+    local s = solo.fight
+    solo.sim:_finish("draw", nil, nil, "timeout")
+    solo:update(0.5, GAME)
+    check(s.outcome ~= nil, "draw: the screen was told the outcome")
+    s:leave()
+    eq(calls, 0, "draw: the trainer opcode is never answered")
+    eq(result, nil, "draw: ...so no flag, no beaten script")
+    eq(FakeVm.halted, 1, "draw: the waiting script is halted instead")
+    eq(FakeVm.aborted, true, "draw: ...as aborted, the whiteout's own ending for it")
+    eq(#fieldCalls, 0, "draw: nobody is whited out (the player stands)")
+    eq(SESSION.money, 500, "draw: nothing is paid")
+    eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save says DREW")
+    check(not table.concat(s.lines, " | "):find("STRINGID_PLAYERGOTMONEY", 1, true), "draw: no money line")
+  end
+
+  -- (i) a move learned mid-fight reaches the second seat's battler ----------
+  do
+    newGame()
+    SESSION.party = party2(strong(4, 30), strong(151, 30, { moves = { 1 } }))
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902, double = true }), "learn: taken")
+    local sim = solo.sim
+    local seat2 = sim.byId[PLAYER2]
+    local mon = seat2.b.mon
+    local nm = {}
+    for k, v in pairs(mon.moves[1]) do nm[k] = v end
+    local added = { id = "FIX_33", num = 33, pp = 35, maxPp = 35, power = 35, type = 0,
+      accuracy = 95, effect = 0, chance = 0, target = 0, priority = 0, flags = 2 }
+    check(solo.fight.transport:send(Wire.BATTLE_MOVESET,
+      { battle = solo.fight.battle, mon = mon.slot, moves = { nm, added } }),
+      "learn: the moveset reached the referee")
+    eq(#seat2.b.moves, 2, "learn: seat 2's battler fights with the new list")
+    eq(#sim.byId[PLAYER].b.moves, 1, "learn: ...and seat 1's is untouched")
+    solo:reset()
+  end
+
+  -- (j) a one-monster "double" trainer: one trainer seat ----------------------
+  do
+    newGame()
+    SESSION.party = party2(strong(4, 30), strong(151, 30, { moves = { 1 } }))
+    SESSION.money = 500
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 908, { trainerId = 908, double = true,
+      done = function(r) result = r end }), "one foe: taken")
+    eq(solo.fight.opts.foeSeats, 1, "one foe: foeSeats 1 -- the cart's absent battler from the start")
+    eq(table.concat(solo.fight.ready.sides.b, ","), FOE, "one foe: a single trainer seat is announced")
+    eq(table.concat(solo.fight.ready.sides.a, ","), PLAYER .. "," .. PLAYER2, "one foe: ...against both of ours")
+    eq(#solo.sim:seatsOf(FOE), 1, "one foe: the referee seated one")
+    local ok = driveDouble(solo, nil)
+    check(ok, "one foe: the fight ran to its end")
+    eq(result, "win", "one foe: won")
+    local want = Prize.calc(908, { lastLevel = 2, moneyMultiplier = 1, double = true })
+    eq(SESSION.money, 500 + want, "one foe: the prize is still the double's -- the cart's flag is the battle's")
+  end
+
+  -- (k) the single is untouched --------------------------------------------
+  do
+    newGame()
+    SESSION.party = party2(strong(4, 20), monOf(151, 20))
+    SESSION.money = 500
+    local awardOpts
+    local award = Prize.awardTrainerWin
+    Prize.awardTrainerWin = function(s, id, o) awardOpts = o; return award(s, id, o) end
+    local solo = newSolo()
+    local made = #stubMade
+    check(solo:fromGen3Trainer(GAME, { trainerId = 900 }, { trainerId = 900 }), "single: taken")
+    eq(getmetatable(solo.fight), Mediated, "single: MediatedBattle, one seat")
+    eq(#stubMade, made, "single: no double screen")
+    eq(solo.sim.double, false, "single: not a doubles referee")
+    eq(#solo.sim:seatsOf(PLAYER), 1, "single: one player seat")
+    eq(solo.fight.trainer.doubleBattle, nil, "single: no doubleBattle on the trainer record")
+    eq(solo.gen3.double, nil, "single: no double on the fight's own state")
+    eq(solo.gen3.partySnap, nil, "single: no party snapshot (its screen fights copies)")
+    local ok = drive(solo, function(f) f:pickMove(1) end)
+    check(ok, "single: the fight ran to its end")
+    eq(awardOpts and awardOpts.double, false, "single: the prize is not doubled")
+    Prize.awardTrainerWin = award
+    -- the record's own flag
+    eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(902), 902, {}).doubleBattle, true,
+       "record: a lone double's trainer record says doubleBattle")
+    eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(900), 900, {}).doubleBattle, nil,
+       "record: a single's does not")
+    eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(902), 902, { trainerIdB = 900 }).doubleBattle, nil,
+       "record: nor does a second trainer's")
+  end
+
+  -- (l) the hand-backs mid-fight put the party back --------------------------
+  do
+    -- the stand-in screen leaves the live party alone, so what the real one
+    -- does to it is done here: HP, a status, PP, a level, a key it adds, a
+    -- moved member -- then the fight is let go.
+    newGame()
+    local a = strong(4, 20)
+    local b = strong(16, 20)
+    local c = monOf(29, 18)
+    SESSION.party = { a, b, c }
+    local before = {
+      hp = { a.hp, b.hp, c.hp }, level = a.level, exp = a.exp, pp1 = a.pp[1], moves = a.moves,
+      ppTable = a.pp, ivs = b.ivs, status = a.status, n = #SESSION.party,
+    }
+    local solo = newSolo()
+    local result
+    local fallbackSaw
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902, double = true,
+      done = function(r) result = r end,
+      fallback = function()
+        fallbackSaw = { hp = { a.hp, b.hp, c.hp }, n = #SESSION.party, status = a.status,
+          pp = a.pp[1], extra = a.fightKey, first = SESSION.party[1] }
+      end }), "restore: taken")
+    check(solo.gen3.partySnap ~= nil, "restore: the party was recorded at the divert")
+    a.hp, b.hp, c.hp = 1, 2, 3
+    a.status = "PSN"
+    a.pp[1] = 1
+    a.level, a.exp = a.level + 1, a.exp + 500
+    a.fightKey = "added by the fight"
+    b.ivs.hp = 0
+    SESSION.party[3] = nil
+    SESSION.party[1], SESSION.party[2] = b, a
+    solo:reset()
+    check(not solo:isRunning(), "restore: the fight was let go")
+    check(fallbackSaw ~= nil, "restore: the caller's fallback started the cart's battle")
+    eq(fallbackSaw and fallbackSaw.hp[1], before.hp[1], "restore: ...from the party the fight found (seat 1's HP)")
+    eq(fallbackSaw and fallbackSaw.hp[2], before.hp[2], "restore: ...seat 2's HP")
+    eq(fallbackSaw and fallbackSaw.hp[3], before.hp[3], "restore: ...the bench's")
+    eq(fallbackSaw and fallbackSaw.n, 3, "restore: ...the same size")
+    eq(fallbackSaw and fallbackSaw.first, a, "restore: ...in the same order (a first)")
+    eq(SESSION.party[2], b, "restore: ...b second")
+    eq(SESSION.party[3], c, "restore: ...c third, put back")
+    eq(a.level, before.level, "restore: a level the fight paid is taken back")
+    eq(a.exp, before.exp, "restore: ...and the EXP")
+    eq(a.status, before.status, "restore: ...and the status")
+    eq(a.pp[1], before.pp1, "restore: ...and the PP")
+    eq(a.fightKey, nil, "restore: a key the fight added is taken off again")
+    check(a.moves == before.moves and a.pp == before.ppTable and b.ivs == before.ivs,
+          "restore: nested tables are the very tables they were (restored in place)")
+    eq(b.ivs.hp, 31, "restore: ...with their contents")
+    eq(result, nil, "restore: done is the cart's battle's to call now")
+  end
+
+  do
+    -- the engine's own start gets the double: the foe row says it, and so do the opts
+    newGame()
+    SESSION.party = party2(strong(4, 30), strong(151, 30))
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902, double = true,
+      done = function(r) result = r end }), "fault: taken")
+    local s = solo.fight
+    local mark = #warns
+    solo.sim.tick = function() error("boom") end
+    for _ = 1, (Config.SOLO_FAULT_LIMIT or 3) + 1 do solo:update(0.5, GAME) end
+    check(not solo:isRunning(), "fault: the fight was let go")
+    eq(Gen3Ui.has(s), false, "fault: the double screen came off the stack")
+    local start = bridgeCalls[#bridgeCalls]
+    eq(start and start[1], "start", "fault: the engine's own trainer battle was started")
+    eq(start and start[3] and start[3].double, true, "fault: ...as a double")
+    eq(start and start[2] and start[2].doubleBattle, true, "fault: ...against the double's own foe row")
+    eq(start and start[3] and start[3].trainerId, 902, "fault: ...against the same trainer")
+    eq(result, nil, "fault: done is not ours to call (the engine's battle owns it now)")
+    check(contains(warns, "referee stopped answering") or contains(warns, "could not keep this fight"),
+          "fault: the log says why")
+    dropWarnsSince(mark)
+
+    -- a turn that throws half way through, the second seat's command being the
+    -- one that resolves it: contained, then handed back, with the party put back
+    newGame()
+    local ha, hb = strong(4, 30), strong(151, 30)
+    SESSION.party = party2(ha, hb)
+    local hpBefore = ha.hp
+    local stall = newSolo()
+    local stalled
+    check(stall:fromGen3Trainer(GAME, 902, { trainerId = 902, done = function(r) stalled = r end }),
+          "stall: taken")
+    local m3 = #warns
+    stall.sim._resolveFights = function() error("a move this build cannot resolve") end
+    ha.hp = 3
+    local okPlay = pcall(playerTurn, stall, { aim = { 3, 4 } })
+    check(okPlay, "stall: the throw stays out of the screen's menu code")
+    for _ = 1, 80 do
+      if not stall:isRunning() then break end
+      stall:update(0.5, GAME)
+    end
+    eq(stall:isRunning(), false, "stall: the fight was let go")
+    eq(stalled, nil, "stall: never scored -- not a draw, not a win")
+    local startS = bridgeCalls[#bridgeCalls]
+    eq(startS and startS[1], "start", "stall: the engine's own trainer battle starts in its place")
+    eq(startS and startS[2] and startS[2].doubleBattle, true, "stall: ...against the double's foe row")
+    eq(ha.hp, hpBefore, "stall: ...from the party the fight found")
+    check(contains(warns, "part way through a turn"), "stall: the log says why")
+    dropWarnsSince(m3)
+
+    -- the row alone (no flag on the opts): the engine's foe row carries it
+    newGame()
+    SESSION.party = party2(strong(4, 30), strong(151, 30))
+    local rowSolo = newSolo()
+    check(rowSolo:fromGen3Trainer(GAME, 902, { trainerId = 902 }), "fault (row): taken")
+    local m2 = #warns
+    rowSolo.sim.tick = function() error("boom") end
+    for _ = 1, (Config.SOLO_FAULT_LIMIT or 3) + 1 do rowSolo:update(0.5, GAME) end
+    local start2 = bridgeCalls[#bridgeCalls]
+    eq(start2 and start2[2] and start2[2].doubleBattle, true, "fault (row): the foe row is still a double")
+    dropWarnsSince(m2)
+  end
+
+  -- (m) a double screen that cannot be had is a fight not taken ------------
+  do
+    local function opened(label, ctor)
+      newGame()
+      local a, b = strong(4, 20), strong(16, 20)
+      SESSION.party = party2(a, b)
+      local hpA = a.hp
+      CoopBattle.newSoloDouble = ctor
+      local solo = newSolo()
+      local mark = #warns
+      eq(solo:fromGen3Trainer(GAME, 902, { trainerId = 902 }), false, label .. ": the fight is not taken")
+      eq(solo:isRunning(), false, label .. ": nothing is running")
+      eq(solo.gen3, nil, label .. ": no half-built fight is left behind")
+      eq(Stack.depth(), 0, label .. ": nothing went onto the stack")
+      eq(a.hp, hpA, label .. ": the party is as it was")
+      eq(encounterResets, 0, label .. ": the encounter cooldown was not spent")
+      CoopBattle.newSoloDouble = stubScreen
+      return mark
+    end
+    local mark = opened("no screen", function() return nil, "no party to fight with" end)
+    check(contains(warns, "could not be opened"), "no screen: the log says why")
+    dropWarnsSince(mark)
+    mark = opened("a throwing screen", function() error("boom") end)
+    check(contains(warns, "could not be opened"), "a throwing screen: the log says why")
+    dropWarnsSince(mark)
+    -- an upload that fails after the screen has touched the party: put back
+    newGame()
+    local a, b = strong(4, 20), strong(16, 20)
+    SESSION.party = party2(a, b)
+    local hpA = a.hp
+    CoopBattle.newSoloDouble = function(game, opts)
+      local s = stubScreen(game, opts)
+      s.start = function() a.hp = 1; a.status = "PSN"; return false end
+      return s
+    end
+    local failing = newSolo()
+    local m3 = #warns
+    eq(failing:fromGen3Trainer(GAME, 902, { trainerId = 902 }), false, "failed upload: the fight is not taken")
+    eq(a.hp, hpA, "failed upload: what the screen touched is put back (HP)")
+    eq(a.status, nil, "failed upload: ...and the status")
+    eq(failing.generation, nil, "failed upload: the solo is not left claiming Gen 3")
+    CoopBattle.newSoloDouble = stubScreen
+    dropWarnsSince(m3)
+    -- a screen the stack refuses
+    newGame()
+    SESSION.party = party2(strong(4, 20), strong(16, 20))
+    local refusing = setmetatable({ pushState = function() return nil end }, { __index = UI })
+    local solo = Solo.new(refusing, { enabled = function() return true end, seed = function() return 7 end })
+    local m4 = #warns
+    eq(solo:fromGen3Trainer(GAME, 902, { trainerId = 902 }), false, "refused by the stack: the fight is not taken")
+    eq(solo:isRunning(), false, "refused by the stack: nothing is running")
+    check(contains(warns, "could not be opened"), "refused by the stack: the log says why")
+    dropWarnsSince(m4)
+  end
+
+  CoopBattle.newSoloDouble = realNewSoloDouble
+
+  -- ======================= the real screen ==============================
+  --
+  -- CoopBattle.newSoloDouble itself, driven by key presses: the leads' EXP,
+  -- the doubled prize and the party it fights on are the live ones.
+  do
+    local say = CoopBattle.say
+    CoopBattle.say = function(self_, text)
+      self_.textLog = self_.textLog or {}
+      self_.textLog[#self_.textLog + 1] = tostring(text)
+      return say(self_, text)
+    end
+  end
+
+  local function keyInput(key)
+    return { pressed = {}, wasPressed = function(_, k) return key ~= nil and k == key end,
+             isDown = function() return false end }
+  end
+
+  -- One frame of the real screen: A on any open menu, aiming at a foe, and a
+  -- replacement taken from the first monster offered.
+  local function frame(solo)
+    local fight = solo.fight
+    if not fight then return false end
+    local key
+    local menu = (fight.phase == "choose" or fight.phase == "move" or fight.phase == "target")
+    if (menu or fight.replacing) and not fight:boxLive() then
+      key = "a"
+      if fight.phase == "target" then
+        local p = fight:targetChoices()[fight.targetIndex or 1]
+        if p and not fight:foeSide(p.index) then key = "down" end
+      end
+    end
+    GAME.input = keyInput(key)
+    fight:update(key and (1 / 60) or 1.0)
+    GAME.input = keyInput(nil)
+    return true
+  end
+
+  local function deepCopy(v, seen)
+    if type(v) ~= "table" then return v end
+    seen = seen or {}
+    if seen[v] then return seen[v] end
+    local out = {}
+    seen[v] = out
+    for k, x in pairs(v) do out[k] = deepCopy(x, seen) end
+    return out
+  end
+
+  local function deepDiff(a, b, path, diffs)
+    path = path or "party"
+    diffs = diffs or {}
+    if type(a) ~= "table" or type(b) ~= "table" then
+      if a ~= b then diffs[#diffs + 1] = path .. ": " .. tostring(a) .. " ~= " .. tostring(b) end
+      return diffs
+    end
+    for k, v in pairs(a) do deepDiff(v, b[k], path .. "." .. tostring(k), diffs) end
+    for k, v in pairs(b) do
+      if a[k] == nil then diffs[#diffs + 1] = path .. "." .. tostring(k) .. ": nil ~= " .. tostring(v) end
+    end
+    return diffs
+  end
+
+  -- (n) a double won through the real screen --------------------------------
+  do
+    newGame()
+    local a = strong(4, 8)
+    local b = strong(16, 8)
+    local c = monOf(29, 18)
+    SESSION.party = { a, b, c }
+    SESSION.money = 500
+    local expA, expB, expC = a.exp, b.exp, c.exp
+    local solo = newSolo()
+    local result, calls = nil, 0
+    local op = trainerOpcode()
+    FakeVm.running = true
+    local took = solo:fromGen3Trainer(GAME, 902, { trainerId = 902,
+      done = function(r) result = r; calls = calls + 1; op.done(r) end })
+    check(took, "real: the lone double is taken (" .. table.concat(warns, " / ") .. ")")
+    local fight = solo.fight
+    check(fight and fight.soloDouble, "real: on CoopBattle's solo double screen")
+    eq(#solo.sim:seatsOf(PLAYER), 2, "real: two player seats on the referee")
+    eq(#fight.sim.slots, 4, "real: four battlers on the screen")
+    local sim = solo.sim
+    local frames = 0
+    for _ = 1, 6000 do
+      if not solo.fight then break end
+      frames = frames + 1
+      solo:update(1 / 60, GAME)
+      if not frame(solo) then break end
+    end
+    check(solo.fight == nil, "real: the fight ended and was let go (" .. frames .. " frames)")
+    eq(result, "win", "real: done('win')")
+    eq(calls, 1, "real: done exactly once")
+    check(op.flag, "real: the trainer's flag is set")
+    check(a.exp > expA and b.exp > expB, "real: both leads earned EXP")
+    eq(c.exp, expC, "real: the monster that never left the bench did not")
+    local want = Prize.calc(902, { lastLevel = 5, moneyMultiplier = 1, double = true })
+    eq(SESSION.money, 500 + want, "real: the doubled prize was paid")
+    check(a.hp < a.maxHp or b.hp < b.maxHp, "real: the damage the fight did is on the party")
+    eq(a.hp, sim.byId[PLAYER].mons[1].hp, "real: seat 1's monster ends on the referee's HP")
+    eq(b.hp, sim.byId[PLAYER].mons[2].hp, "real: seat 2's monster ends on the referee's HP")
+    eq(Gen3Ui.has(fight), false, "real: the screen left the stack")
+    local text = table.concat(fight.textLog or {}, " | ")
+    check(text:find("STRINGID_PLAYERGOTMONEY|" .. want, 1, true) ~= nil, "real: the money line names the doubled prize")
+    check(text:find("would like to battle", 1, true) ~= nil or text:find("TWINS", 1, true) ~= nil,
+          "real: the trainer's challenge was said")
+  end
+
+  -- (o) a lost double through the real screen ---------------------------------
+  do
+    newGame()
+    local a = strong(4, 5, { hp = 3 })
+    local b = strong(16, 5, { hp = 3 })
+    SESSION.party = { a, b }
+    SESSION.money = 500
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 906, { trainerId = 906, done = function(r) result = r end }),
+          "real loss: taken")
+    for _ = 1, 6000 do
+      if not solo.fight then break end
+      solo:update(1 / 60, GAME)
+      if not frame(solo) then break end
+    end
+    check(solo.fight == nil, "real loss: the fight ended")
+    eq(result, "lose", "real loss: done('lose')")
+    eq(fieldCalls[1], "respawn", "real loss: the whiteout's respawn")
+    eq(SESSION.money, 380, "real loss: the money loss")
+  end
+
+  -- (p) a trainer with one monster, through the real screen ------------------
+  do
+    newGame()
+    local a = strong(4, 20)
+    local b = strong(16, 20)
+    SESSION.party = { a, b }
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 908, { trainerId = 908, done = function(r) result = r end }),
+          "real one foe: taken")
+    eq(#solo.fight.sim.slots, 3, "real one foe: three battlers on the screen -- two of ours, one of theirs")
+    for _ = 1, 6000 do
+      if not solo.fight then break end
+      solo:update(1 / 60, GAME)
+      if not frame(solo) then break end
+    end
+    check(solo.fight == nil, "real one foe: the fight ended")
+    eq(result, "win", "real one foe: done('win')")
+    check(a.exp > 0 and a.hp > 0 and b.hp > 0, "real one foe: both of ours came through")
+  end
+
+  -- (q) the hand-back after a real fight began: the party exactly as it was ---
+  do
+    newGame()
+    local a = strong(4, 20)
+    local b = strong(16, 20)
+    local c = monOf(29, 18)
+    SESSION.party = { a, b, c }
+    local party = SESSION.party
+    local before = deepCopy(party)
+    local aMoves, aPp, bIvs = a.moves, a.pp, b.ivs
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 909, { trainerId = 909, done = function(r) result = r end }),
+          "real hand-back: the lone double is taken")
+    local fight = solo.fight
+    check(fight and fight.soloDouble, "real hand-back: on the real solo double screen")
+    check(solo.gen3 and solo.gen3.partySnap ~= nil, "real hand-back: the party was recorded at the divert")
+    -- fight until the live party carries damage, a status and spent PP
+    local hurt, poisoned, spent = false, false, false
+    for _ = 1, 3000 do
+      if not solo.fight then break end
+      solo:update(1 / 60, GAME)
+      if not frame(solo) then break end
+      hurt = hurt or a.hp < before[1].hp or b.hp < before[2].hp
+      poisoned = poisoned or a.status ~= nil or b.status ~= nil
+      spent = spent or a.pp[1] < before[1].pp[1] or b.pp[1] < before[2].pp[1]
+      if hurt and poisoned and spent then break end
+    end
+    check(solo.fight ~= nil, "real hand-back: the fight is still running")
+    check(hurt, "real hand-back: the screen wrote damage onto the live party mid-fight")
+    check(poisoned, "real hand-back: ...and a status")
+    check(spent, "real hand-back: ...and spent PP")
+    check(#deepDiff(before, party) > 0, "real hand-back: so the live party differs from the divert")
+    -- a referee that throws every frame: the fault limit hands the fight back
+    local screen = solo.fight
+    local mark = #warns
+    solo.sim.tick = function() error("boom") end
+    for _ = 1, (Config.SOLO_FAULT_LIMIT or 3) + 1 do solo:update(1 / 60, GAME) end
+    check(not solo:isRunning(), "real hand-back: the fight was let go")
+    eq(Gen3Ui.has(screen), false, "real hand-back: the double screen came off the stack")
+    local diffs = deepDiff(before, party)
+    eq(#diffs, 0, "real hand-back: the party is exactly the divert's (" .. table.concat(diffs, "; ") .. ")")
+    eq(party[1], a, "real hand-back: member 1 is the same monster table")
+    eq(party[2], b, "real hand-back: member 2 is the same monster table")
+    eq(party[3], c, "real hand-back: member 3 is the same monster table")
+    check(a.moves == aMoves and a.pp == aPp and b.ivs == bIvs,
+          "real hand-back: nested tables restored in place, not replaced")
+    eq(a.status, nil, "real hand-back: no status left behind")
+    local start = bridgeCalls[#bridgeCalls]
+    eq(start and start[1], "start", "real hand-back: the engine's own battle was started")
+    eq(start and start[2] and start[2].doubleBattle, true, "real hand-back: ...as a double (the foe row)")
+    eq(start and start[3] and start[3].trainerId, 909, "real hand-back: ...against the same trainer")
+    eq(result, nil, "real hand-back: done is the engine battle's now, not ours")
+    dropWarnsSince(mark)
+  end
+
+  do
+    -- EXP the fight paid mid-fight, rolled back too: the cart's battle pays it again
+    newGame()
+    local a = strong(4, 30)
+    local b = strong(151, 30, { moves = { 1 } })
+    SESSION.party = { a, b }
+    local before = deepCopy(SESSION.party)
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 902, { trainerId = 902, double = true }), "real hand-back 2: taken")
+    local expGained = false
+    for _ = 1, 3000 do
+      if not solo.fight then break end
+      solo:update(1 / 60, GAME)
+      if not frame(solo) then break end
+      expGained = expGained or a.exp > before[1].exp or b.exp > before[2].exp
+      if expGained then break end
+    end
+    check(solo.fight ~= nil and expGained, "real hand-back 2: EXP landed on the live party mid-fight")
+    local mark = #warns
+    solo.sim.tick = function() error("boom") end
+    for _ = 1, (Config.SOLO_FAULT_LIMIT or 3) + 1 do solo:update(1 / 60, GAME) end
+    local diffs = deepDiff(before, SESSION.party)
+    eq(#diffs, 0, "real hand-back 2: EXP, HP and PP are all back (" .. table.concat(diffs, "; ") .. ")")
+    local start = bridgeCalls[#bridgeCalls]
+    eq(start and start[3] and start[3].double, true, "real hand-back 2: the engine's battle starts with double = true")
+    dropWarnsSince(mark)
+  end
+
+  do
+    -- the fight's own ending reconciles; the restore is the hand-back's only
+    newGame()
+    local a = strong(4, 20)
+    local b = strong(16, 20)
+    SESSION.party = { a, b }
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Trainer(GAME, 909, { trainerId = 909, done = function(r) result = r end }),
+          "real ending: taken")
+    local sim = solo.sim
+    for _ = 1, 6000 do
+      if not solo.fight then break end
+      solo:update(1 / 60, GAME)
+      if not frame(solo) then break end
+    end
+    check(solo.fight == nil, "real ending: the fight ran to its end")
+    check(result == "win" or result == "lose", "real ending: done(" .. tostring(result) .. ")")
+    if result == "win" then
+      local simA, simB = sim.byId[PLAYER].mons[1], sim.byId[PLAYER].mons[2]
+      eq(a.hp, simA.hp, "real ending: seat 1's HP is the referee's (reconciled, not restored)")
+      eq(b.hp, simB.hp, "real ending: seat 2's HP is the referee's")
+      eq(a.pp[1], simA.moves[1].pp, "real ending: seat 1's PP is the referee's")
+    end
+  end
+
+  CoopBattle.newSoloDouble = realNewSoloDouble
 end
 
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.
