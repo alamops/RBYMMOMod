@@ -244,9 +244,11 @@ version, but each was a real failure on a live boot or on the wire:
   never whites out now, and a standing draw halts the trainer's script with
   the trainer unbeaten.
 - **A Ghost's CURSE in a double cursed the first foe, whoever was aimed
-  at.** It is now aimed like any single-target move. When nobody aims it
-  (a co-op computer seat, a timed-out seat, Encore, Sleep Talk), it curses
-  the battler opposite the user, as the cart's AI and `foeOf` do.
+  at.** It is now aimed like any single-target move, in solo doubles and in
+  co-op alike: the move menu asks a Ghost where to lay it, as the cart's
+  does. When nobody aims it (a co-op computer seat, a timed-out seat,
+  Encore, Sleep Talk), it curses the battler opposite the user, as the
+  cart's AI and `foeOf` do.
 - **The referee could stall on crafted rows.** Nature Power / Sleep Talk /
   Assist / Mirror Move rows that called each other recursed until a stack
   overflow and a timeout draw; calls are capped at depth 3. The same pass

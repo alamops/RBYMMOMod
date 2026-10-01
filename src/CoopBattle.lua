@@ -11869,10 +11869,11 @@ end
 
 function M:needsTarget3(moveInst)
   if type(moveInst) ~= "table" then return true end
-  local target = tonumber(moveInst.target) or 0
-  -- A solo double aims by the byte the cart's move menu reads (a Ghost's
-  -- CURSE is aimed; `moveTargetType3`). Co-op keeps the row's own byte.
-  if self.ownSlots then target = self:moveTargetType3(self:mySlot(), moveInst) end
+  -- Aimed by the byte the cart's move menu reads, co-op and solo double alike:
+  -- a Ghost's CURSE is aimed at a battler, anyone else's is the user's own
+  -- (`moveTargetType3`). The referee lands an aimed Ghost CURSE where it was
+  -- aimed and an unaimed one on the battler opposite (gen3-battle-sheet §6).
+  local target = self:moveTargetType3(self:mySlot(), moveInst)
   for _, bit in ipairs(UNAIMED_TARGET_BITS) do
     if hasBit(target, bit) then return false end
   end

@@ -3177,6 +3177,64 @@ block("co-op", function()
   check(s.sim:slot(1).battler.mon == SESSION.party[1], "co-op: our seat wears the live party's lead")
 end)
 
+-- Co-op aims a Ghost's CURSE too: the cart's move menu reads the monster
+-- choosing, whoever is fighting beside it, and the hub's referee lands it on
+-- the filed slot. Anyone else's CURSE still asks nobody.
+block("co-op curse", function()
+  for _, aim in ipairs({ { index = 4, field = 4, victim = "PIDGEY" },
+                         { index = 3, field = 3, victim = "MEW" } }) do
+    local f = makeCoop({
+      party = { mon(92, 20, { moves = { 174, 33 } }), mon(29, 18) },
+      partnerParty = { mon(16, 12) },
+    })
+    local s = f.screen
+    local tag = "co-op curse -> " .. aim.victim
+    eq(s.ownSlots, nil, tag .. ": a co-op screen")
+    eq(f.settle(), "choose", tag .. ": menu")
+    eq(s:needsTarget3(s:liveMoves()[1]), true, tag .. ": a Ghost's CURSE asks for a target")
+    f.press("a")
+    s.moveIndex = 1
+    f.press("a")
+    eq(s.phase, "target", tag .. ": the cursor opens")
+    aimAt(f, aim.index)
+    eq(#f.choices, 1, tag .. ": the command went")
+    eq(choiceAt(f, 1).move, 0, tag .. ": CURSE, 0-based")
+    eq(choiceAt(f, 1).target, aim.field, tag .. ": filed at the aimed field slot")
+    eq(f.err, nil, tag .. ": the referee took it")
+    f.settle()
+    local laid
+    for _, ev in ipairs(f.events) do
+      if ev.t == "msg" and ev.text and ev.text:find("laid a CURSE on", 1, true) then
+        laid = laid or ev.text
+      end
+    end
+    check(laid and laid:find(aim.victim, 1, true), tag .. ": it cursed the aimed foe: " .. tostring(laid))
+  end
+
+  local f = makeCoop({
+    party = { mon(4, 20, { moves = { 174 } }), mon(29, 18) },
+    partnerParty = { mon(16, 12) },
+  })
+  local s = f.screen
+  eq(f.settle(), "choose", "co-op curse: menu")
+  eq(s:needsTarget3(s:liveMoves()[1]), false, "co-op curse: a non-Ghost's CURSE is not aimed")
+  f.press("a")
+  s.moveIndex = 1
+  f.press("a")
+  eq(#f.choices, 1, "co-op curse: ...it goes at once")
+  -- Co-op's send path stamps its default foe on every move (it always has);
+  -- the referee ignores a target on anyone else's CURSE, which is the user's.
+  eq(f.err, nil, "co-op curse: the referee took it")
+  f.settle()
+  local laid, raised = false, false
+  for _, ev in ipairs(f.events) do
+    if ev.t == "msg" and ev.text and ev.text:find("laid a CURSE on", 1, true) then laid = true end
+    if ev.t == "stat" and ev.slot == 0 and (tonumber(ev.delta) or 0) > 0 then raised = true end
+  end
+  eq(laid, false, "co-op curse: a non-Ghost's CURSE curses nobody")
+  check(raised, "co-op curse: ...it raises the user's own stats")
+end)
+
 -- The arena skin of the same fight is the co-op layout, not the solo double's.
 block("co-op arena", function()
   local f = makeCoop({
