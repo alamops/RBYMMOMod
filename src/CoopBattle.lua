@@ -895,6 +895,10 @@ end
 -- to rather than to be a notification -- a listener that has to reach into
 -- `battle` for everything might as well not have been told.
 function M:announce(name, extra)
+  -- A solo double is SOLO BATTLES' fight, not a co-op one: nobody else is in
+  -- it, and a listener told "coop_battle_started" would count a lone trainer
+  -- battle as a party battle.  The 1v1 solo screen announces nothing either.
+  if self.soloDouble then return end
   local slots = (self.sim and self.sim.slots) or {}
   local human = 0
   for _, slot in ipairs(slots) do
@@ -1091,6 +1095,9 @@ end
 
 -- Display name for trainer appear / "sent out" lines (BattleState introText).
 function M:trainerIntroName()
+  -- A solo double is handed the label the 1v1 solo screen opens with
+  -- (SoloBattle.gen3FoeLabel, as `peerName`), so both say the same name.
+  if self.trainerLabel3 then return self.trainerLabel3 end
   local t = self.trainer
   -- Gen 3 names a trainer by class and name, as the cart's "X would like to
   -- battle!" / "X sent out Y!" do.
@@ -1563,6 +1570,21 @@ local function gridPress(index, count, input, cols)
 end
 
 function M:say(text)
+  -- A solo double is also handed the cart's own after-words by
+  -- src/SoloBattle.lua (the defeated line, the defeat speech, the prize, the
+  -- whiteout), straight out of the text pack: a blank line there is the
+  -- printer's `\p` (Gen3.battleText), a page of its own on the cart, and a
+  -- line may still carry the printer's raw codes -- MediatedBattle:say's two
+  -- rules, which its 1v1 twin of this fight has always applied.
+  if self.soloDouble and type(text) == "string" then
+    if text:find("\\", 1, true) then text = Exp3.cleanText(text) end
+    if text:find("\n%s*\n") then
+      for part in (text .. "\n\n"):gmatch("(.-)\n%s*\n%s*") do
+        if part ~= "" then self:say(part) end
+      end
+      return
+    end
+  end
   for _, page in ipairs(pageBoxText(text)) do
     self.messages[#self.messages + 1] = page
   end
@@ -1873,6 +1895,11 @@ function M:update(dt)
     -- on screen and nothing to wait for -- the next tick takes the row behind
     -- it rather than treating the queue as spent.
     if #self.messages > 0 then return end
+    -- A solo double's PAY DAY line, held back by `payDay3` until the rest of
+    -- the ending has been read: the cart says it after the prize
+    -- (BattleScript_LocalTrainerBattleWon, then PayDayMoneyAndPickUpItems),
+    -- and the prize is src/SoloBattle.lua's, said behind `onOutcome`.
+    if self.result and self:sayPayDay3() then return end
     -- The catch's naming prompt, owed since `grantCatch` and asked here:
     -- everything the ending had to say has been read, and the screen is about
     -- to pop. It takes this tick (the push makes it no longer the top of the
@@ -1994,6 +2021,16 @@ function M:update(dt)
     return
   end
 
+  -- A solo double asks its seats in order, and the one whose menu opens is
+  -- settled here, at the moment it opens: a seat the referee has already
+  -- answered for (a recharge, a rampage -- its `chose` lands after the
+  -- `turn`) or that has nobody standing in it is passed over, and a turn with
+  -- no seat left to ask files what is held. See `syncChooser`.
+  if self.ownSlots and self.mediated and self.phase == "choose"
+     and not self:syncChooser() then
+    return
+  end
+
   if self.phase == "choose" then return self:updateCommand(input) end
   if self.phase == "move" then return self:updateMove(input) end
   if self.phase == "target" then return self:updateTarget(input) end
@@ -2056,13 +2093,13 @@ function M:replaceHold()
   if self.result or self.replacing then return false end
   if not self.medReplaceWait then return false end
   local pending = self.sim and self.sim:awaitingChoice()
-  return (pending ~= nil and pending.index ~= self.mine)
+  return (pending ~= nil and not self:isMine(pending.index))
 end
 
 function M:waitingOn()
   if self.result or self.replacing then return nil end
   local pending = self.sim and self.sim:awaitingChoice()
-  if pending and pending.index ~= self.mine then
+  if pending and not self:isMine(pending.index) then
     return Config.COOP_CHOICE_TIMEOUT, (pending.name or "Someone")
   end
   if self.phase == "wait" then
@@ -2094,7 +2131,7 @@ function M:missingActors()
   if not self.sim then return out end
   local acted = self.acted or {}
   for _, slot in ipairs(self.sim.slots or {}) do
-    if slot.owner ~= nil and slot.index ~= self.mine
+    if slot.owner ~= nil and not self:isMine(slot.index)
        and not self.sim:isDown(slot) and not acted[slot.index] then
       out[#out + 1] = tostring(slot.name or "Someone")
     end
@@ -2180,11 +2217,23 @@ function M:spectating()
   -- down, and a nil field there would take the screen out through the pcall
   -- that guards drawing rather than through anything that could report it.
   if not self.sim then return false end
+  -- A solo double is out of the decisions only once neither of its seats has
+  -- anybody standing: one emptied seat (pret's absent battler) leaves the
+  -- other choosing as before.
+  if self.ownSlots then
+    for _, at in ipairs(self.ownSlots) do
+      local own = self.sim:slot(at)
+      if own and not self.sim:isDown(own) then return false end
+    end
+    return true
+  end
   local slot = self:mySlot()
   return slot ~= nil and self.sim:isDown(slot)
 end
 
 function M:liveMoves()
+  -- A solo double's FIGHT list is the choosing seat's, overlay and all.
+  if self.ownSlots then return self:liveMovesAt(self.mine) end
   if self.medMoveList then return self.medMoveList end
   local slot = self:mySlot()
   local battler = slot and slot.battler
@@ -2207,6 +2256,7 @@ function M:rememberedMove()
 end
 
 function M:hasLivePP()
+  if self.ownSlots then return self:hasLivePPAt(self.mine) end
   if self.medMoveList then
     for _, move in ipairs(self.medMoveList) do
       if (move.pp or 0) > 0 then return true end
@@ -2219,8 +2269,17 @@ end
 
 -- Write referee PP onto the list FIGHT already shows. Same-length, same-ids
 -- only -- a Transform/Mimic list still replaces via medMoveList.
-function M:syncLivePp(moves)
-  local current = self:liveMoves()
+--
+-- `index` is the seat the `moves` event named: a solo double has two lists,
+-- and the one being spent is not always the one whose menu is up. Co-op has
+-- one seat and reads the list it always read.
+function M:syncLivePp(moves, index)
+  local current
+  if self.ownSlots and index then
+    current = self:liveMovesAt(index)
+  else
+    current = self:liveMoves()
+  end
   if type(current) ~= "table" or type(moves) ~= "table" then return false end
   if #moves ~= #current or #current == 0 then return false end
   for i, slot in ipairs(current) do
@@ -2313,6 +2372,17 @@ function M:updateCommand(input)
         self:say("No! There's no\nrunning from a\ntrainer battle!")
       end
     end
+  elseif self.ownSlots and input:wasPressed("b") then
+    -- A solo double's partner cancel: B on mon 2's command menu takes mon 1's
+    -- held command back and reopens mon 1's (pret
+    -- battle_controller_player.c:286; the engine's ui.lua / D.cancelPartner).
+    self:cancelPartner()
+  elseif self.ownSlots and input:wasPressed("start") then
+    -- ...and START there flips the doubles boxes between bars and HP numbers
+    -- (pret battle_controller_player.c:306 SwapHpBarsWithHpText; the engine's
+    -- healthbox.lua swapHpBarsWithHpText): a toggle that stays until START is
+    -- pressed again, never reset by the engine.  Drawn by the GBA page.
+    self.hpText3 = not self.hpText3
   end
 end
 
@@ -2453,6 +2523,9 @@ function M:updateMove(input)
                            target = first.index })
     end
     self.targetIndex = 1
+    -- The cursor's first frame: the GBA page's target blink starts lit here
+    -- (pret battle_main.c:2019 blink start), and again on every move of it.
+    self.targetSince3 = self.frame
     self.phase = "target"
   end
 end
@@ -2465,12 +2538,20 @@ end
 -- egg has none): the SWITCH row an egg offered went out as a party index no
 -- sheet carries, and the referee's `partyIndexOf` fell back to counting --
 -- sending out whichever monster happened to sit at that sheet position.
+--
+-- A solo double's two seats share one party, so a seat's bench also leaves
+-- out what the other seat holds: the monster standing there and the one it
+-- has already picked this turn (`siblingTaken`; pret party_menu.c:5934, the
+-- cart's "already in battle" / "already selected").  Co-op seats each have a
+-- party of their own and never reach that arm.
 function M:benchOf(slot)
   local out = {}
   local gen3 = self.gen3
+  local taken = self.ownSlots and self:siblingTaken(slot) or nil
   for i, mon in ipairs(slot.party or {}) do
     if i ~= slot.active and (mon.hp or 0) > 0
-       and not (gen3 and CoopField.isEgg3(mon)) then
+       and not (gen3 and CoopField.isEgg3(mon))
+       and not (taken and taken[i]) then
       out[#out + 1] = { index = i, mon = mon }
     end
   end
@@ -2484,6 +2565,8 @@ end
 -- is no "never mind" available, so B does nothing here rather than dropping
 -- the player back into a turn they cannot take.
 function M:updateReplace(input)
+  -- A solo double asks each emptied seat in turn (see `updateReplaceOwn`).
+  if self.ownSlots then return self:updateReplaceOwn(input) end
   local slot = self.sim:slot(self.mine)
   local bench = self:benchOf(slot)
   if #bench == 0 then
@@ -2786,6 +2869,11 @@ function M:updateTarget(input)
     if self:usesBattlefield() then
       local nextIdx = Battlefield.nextTarget(targets, self.targetIndex or 1, step)
       if nextIdx then self.targetIndex = nextIdx end
+      self.targetSince3 = self.frame
+    elseif self.ownSlots then
+      -- A solo double on the GBA page walks the cart's own ring (no list;
+      -- the aimed-at battler blinks). See `stepTarget3`.
+      self:stepTarget3(targets, step)
     else
       self.targetIndex =
         math.max(1, math.min(#targets, self.targetIndex + step))
@@ -2794,7 +2882,10 @@ function M:updateTarget(input)
       self:beginFocusSlides()
     end
   elseif input:wasPressed("b") then
-    self.phase = "choose"
+    -- The cart backs out of aiming into the move menu, the move still under
+    -- the cursor (pret battle_controller_player.c:346; the engine's ui.lua
+    -- handle_target_input). Co-op has always gone back to the commands.
+    self.phase = self.ownSlots and "move" or "choose"
   elseif input:wasPressed("a") then
     local target = targets[self.targetIndex]
     self:commit({ slot = self.mine, move = self.moveIndex, target = target.index })
@@ -3199,6 +3290,8 @@ function M:applyReplace(action)
 end
 
 function M:commit(action)
+  -- A solo double holds mon 1's command until mon 2's is in (`commitOwn`).
+  if self.ownSlots and self.mediated then return self:commitOwn(action) end
   self.phase = "wait"
   -- A fight, and only a fight: `kind` is set on run / switch / item, and an
   -- item's `move` names the move being restored rather than one being used.
@@ -3604,7 +3697,11 @@ function M:playEvents(events)
       -- who they are waiting for rather than showing an empty box.
       local waiting = self.sim:slot(event.slot)
       if waiting then waiting.awaiting = true end
-      if event.slot == self.mine then
+      if self.ownSlots and self:isMine(event.slot) then
+        -- A solo double may owe two: each is queued, and asked in battler
+        -- order (pret HandleFaintedMonActions).
+        self:queueReplace(event.slot)
+      elseif event.slot == self.mine then
         self.replacing = true
         self.switchIndex = 1
       else
@@ -3627,7 +3724,7 @@ function M:playEvents(events)
       local slot = self.sim:slot(event.slot)
       -- Gen 3: which of our monsters took the field, for the AMULET COIN's
       -- doubled prize (the cart doubles it when a holder switches in).
-      if self.gen3 and event.slot == self.mine and event.index then
+      if self.gen3 and self:isMine(event.slot) and event.index then
         self.fielded3 = self.fielded3 or {}
         self.fielded3[event.index] = true
       elseif self.gen3 and event.index and self:foeSide(event.slot) then
@@ -3698,7 +3795,9 @@ function M:playEvents(events)
       -- normally causes it. Without this the slow player was left sitting in a
       -- bench list for a slot that was already filled, unable to take their
       -- next turn, and their eventual pick was dropped as a stale duplicate.
-      if event.slot == self.mine and self.replacing then
+      if self.ownSlots then
+        if self:isMine(event.slot) then self:dropReplace(event.slot) end
+      elseif event.slot == self.mine and self.replacing then
         self.replacing = nil
         self.switchIndex = 1
       end
@@ -3723,7 +3822,10 @@ function M:playEvents(events)
       -- Once per save rather than once per process: `saidUnranked` is reset
       -- when a save is loaded (see Client), because a player who loads a
       -- different game is exactly the one who has not been told yet.
-      if self.result == "win" and not self.ranksPoints and not M.saidUnranked then
+      -- Never in a solo double: nobody was ranked against anybody, and the
+      -- cart's own after-words follow (src/SoloBattle.lua).
+      if self.result == "win" and not self.ranksPoints and not M.saidUnranked
+         and not self.soloDouble then
         M.saidUnranked = true
         self:say("No points for a\n2-on-2 vs an NPC.")
         self:say("Battle players to\nclimb the ranks!")
@@ -3782,6 +3884,10 @@ function M:playEvents(events)
   self.commandIndex = 1
   self.moveIndex = 1
   self.targetIndex = 1
+  -- ...and a solo double's next turn starts at mon 1 again, nothing held --
+  -- unless this batch is a replacement still being answered, whose picker
+  -- owns `mine` until the last owing seat has picked.
+  if self.ownSlots and not self.replacing then self:resetChooser() end
 end
 
 function M:resultFor(winner)
@@ -4428,8 +4534,8 @@ function M:snapDisplay()
   -- Only the seat that owns a strip owns clocks to weld: this screen's own
   -- slot. Classic 160×144 reads the same clock on the focused-ally HUD, so
   -- the weld is not theatre-gated. Welding wider would invent clocks on
-  -- battlers no plate reads them off -- foes, the partner.
-  local owns = self.mine
+  -- battlers no plate reads them off -- foes, the partner. (A solo double owns
+  -- both of its seats' strips: `isMine`.)
   for _, slot in ipairs(self.sim.slots or {}) do
     local battler = slot.battler
     if battler and battler.mon then
@@ -4439,7 +4545,7 @@ function M:snapDisplay()
       -- underneath one) would otherwise leave a strip frozen part-way and a
       -- pill a level behind the monster it names. nil stays nil -- a monster
       -- with no fraction to show still shows none.
-      if owns and slot.index == owns then
+      if self:isMine(slot.index) then
         battler.shownExpFrac = expFraction(self.game, battler.mon)
         battler.shownLevel = tonumber(battler.mon.level) or battler.shownLevel
       end
@@ -6188,7 +6294,7 @@ function M:battlefieldSeats(theirs)
         -- first *noted* by the display: `seedExpClock` only ever fills a nil,
         -- so a strip mid-fill is never disturbed by a draw.
         local expFrac, shownLevel
-        if not theirs and slot.index == self.mine then
+        if not theirs and self:isMine(slot.index) then
           self:seedExpClock(battler)
           expFrac = battler.shownExpFrac
           shownLevel = battler.shownLevel
@@ -6238,8 +6344,16 @@ function M:battlefieldAllyHumans()
   local mine = self:mySlot()
   if not mine then return humans end
   local mySide = mine.side
+  -- One figure per player, not per seat: a solo double's two seats are one
+  -- trainer behind two monsters, the ally-side mirror of the NPC shape below
+  -- (Battlefield's count-driven layout stacks the figure apart from the
+  -- pair when the counts differ). Co-op owners are all distinct, so this
+  -- never folds two of theirs together.
+  local seen = {}
   for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
-    if slot.side == mySide and slot.owner ~= nil and not slot.gone then
+    if slot.side == mySide and slot.owner ~= nil and not slot.gone
+       and not seen[slot.owner] then
+      seen[slot.owner] = true
       -- Prefer self first, then partner, in seat order otherwise.
       humans[#humans + 1] = {
         id = slot.owner,
@@ -6253,7 +6367,7 @@ function M:battlefieldAllyHumans()
         -- fighting with -- which is also why it never lags: a faint writes hp
         -- on that table, and the next frame draws it.
         party = slot.party,
-        _mine = (slot.index == self.mine),
+        _mine = self:isMine(slot.index),
       }
       -- Gen 3 maps a player's OW graphic through their version and gender
       -- (contract C3).
@@ -9745,6 +9859,10 @@ end
 -- save upload at all.
 function M:uploadMediated()
   if self.medUploaded then return false end
+  -- A solo double uploads what a solo trainer fight does (`start`): no side
+  -- on its own party, and the trainer's sheets as handed over -- never the
+  -- interleave below, which would deal one shared party out twice.
+  if self.soloDouble then return self:start(self.game) end
   if not (self.transport and self.battleId and self.sim) then return false end
   if not M.mediates(self.mode) then return false end
 
@@ -9865,14 +9983,25 @@ function M:medMap(sides)
     for _, slot in ipairs(self.sim.slots or {}) do
       if slot.side == side and slot.owner == nil then spare[#spare + 1] = slot.index end
     end
+    -- A solo double's shared team is two seat ids for one owner ("solo_player",
+    -- "solo_player#2", docs/plans/gen3-battle-sheet.md §1.3): each takes the
+    -- owner's next seat on that side, in order, rather than both landing on
+    -- the first (`seatSlotFor`).
+    local used = self.ownSlots and {} or nil
     for i = 1, #ids do
       local field = base + i - 1
-      local owned = self:slotOwnedBy(ids[i])
+      local owned
+      if used then
+        owned = self:seatSlotFor(ids[i], side, used)
+      else
+        owned = self:slotOwnedBy(ids[i])
+      end
       local index = (owned and owned.side == side) and owned.index
         or table.remove(spare, 1)
       if index then
         byField[field] = index
         byIndex[index] = field
+        if used then used[index] = true end
       end
     end
   end
@@ -9961,6 +10090,16 @@ function M:medRows(msg)
     -- printed, so the field being one monster behind at least has an explanation
     -- on it.
     local at = slot and self:medSendIndex(index, slot, msg)
+    -- A solo double's opening pair is said the cart's way -- the trainer's two,
+    -- then ours, one sentence a side (`composeIntro3`) -- so the referee's four
+    -- opening sends are held as they come and laid out at the first `turn`.
+    if self.soloIntro3 and index then
+      rows[#rows + 1] = {
+        kind = "introsend", slot = index, index = at, confused = msg.confused,
+        name = tostring(msg.text),
+      }
+      return rows
+    end
     -- Whose send-out it is decides the sentence, now that the referee's sends
     -- are the *only* ones a player sees (the client-side intro that used to
     -- narrate the opening pair is gone -- see `queueMediatedIntro`). Our own
@@ -9968,7 +10107,7 @@ function M:medRows(msg)
     -- a wild POKeMON is nobody's send-out at all and keeps the "Wild X
     -- appeared!" it was introduced with, because "TRAINER sent out X!" over a
     -- monster no trainer owns is simply untrue.
-    if index == self.mine then
+    if self:isMine(index) then
       say(("Go! %s!"):format(tostring(msg.text)))
     elseif self:sentByTrainer(index) then
       say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
@@ -10016,7 +10155,12 @@ function M:medRows(msg)
     -- Authoritative mustReplace: amount=1 means a living bench remains.
     -- Empty bench omits amount so we never arm the replace picker. Absent
     -- amount (older stream) falls back to a local bench check.
-    if index == self.mine then
+    --
+    -- Not for a solo double: its referee (BattleSim3) always solicits each
+    -- owing seat by name (`turn` with a slot), and a shared team's `amount`
+    -- speaks for the party, not the seat -- both seats down with one bench
+    -- monster is two faints with `amount` 1 and one seat asked.
+    if index == self.mine and not self.ownSlots then
       if msg.amount == 1 then
         self.medMustReplace = true
       elseif msg.amount ~= nil then
@@ -10328,7 +10472,7 @@ function M:medStampIndex(index, slot, mon)
   if not (slot and at) then return nil end
   at = math.floor(at) + 1
   if at < 1 then return nil end
-  if index == self.mine then at = self:medPartySlot(at) end
+  if self:isMine(index) then at = self:medPartySlot(at) end
   local pick = at and (slot.party or {})[at]
   if not pick then return nil end
   if (pick.hp or 0) <= 0 then return nil end
@@ -10369,7 +10513,9 @@ function M:onBattleEvent(msg)
   if msg.t == "unchose" then
     local index = self:medSlotOf(msg)
     if index then self:unmarkActed(index) end
-    if index == self.mine then
+    if self.ownSlots then
+      if index and self.pendingItems then self.pendingItems[index] = nil end
+    elseif index == self.mine then
       self.pendingItem = nil
       self.pendingItemSlot = nil
     end
@@ -10385,33 +10531,54 @@ function M:onBattleEvent(msg)
     self:say(msg.text)
     return true
   end
-  if msg.t == "item" and self:medSlotOf(msg) == self.mine then
-    self:confirmMediatedItem(msg.text, msg.amount)
+  if msg.t == "item" then
+    -- A solo double holds one pending item per seat (`fileOwn`); the event
+    -- names the seat whose bag use it was.
+    local at = self:medSlotOf(msg)
+    if self.ownSlots then
+      if self:isMine(at) then self:confirmOwnItem(at, msg.text, msg.amount) end
+    elseif at == self.mine then
+      self:confirmMediatedItem(msg.text, msg.amount)
+    end
     -- Still narrate via medRows below.
   end
   if msg.t == "moves" then
     local index = self:medSlotOf(msg)
-    if index == self.mine and type(msg.moves) == "table" then
+    -- One of our seats: co-op's one, either of a solo double's two (each
+    -- with its own Transform / Mimic overlay, `overlayAt`).
+    local ours
+    if self.ownSlots then ours = self:isMine(index) else ours = index == self.mine end
+    if ours and type(msg.moves) == "table" then
       -- `mon` marks a PP spend/restore. Absent is Transform/Mimic -- replace
       -- the overlay even when the copied ids match the current list.
       if msg.mon ~= nil then
-        if self.medMoveList then
-          self.medMoveList = msg.moves
+        if self:overlayAt(index) then
+          self:setOverlayAt(index, msg.moves)
         else
-          self:syncLivePp(msg.moves)
+          self:syncLivePp(msg.moves, index)
         end
         -- Gen 3's FIGHT rows are copies (Sheet3.moves), so the spend has to
         -- be written onto the session mon itself to reach the save.
         if self.gen3 then self:savePp3(msg) end
       else
-        self.medMoveList = msg.moves
+        self:setOverlayAt(index, msg.moves)
       end
     end
     return true
   end
+  -- A send-out on one of a solo double's seats: that seat's overlay goes, its
+  -- replacement claim is spent, and its picker (if the referee answered for
+  -- it) comes down. The co-op arm below is the one-seat original.
+  local sentAt = (msg.t == "send" or msg.t == "switch") and self:medSlotOf(msg) or nil
+  if self.ownSlots then
+    if sentAt and self:isMine(sentAt) then
+      self:setOverlayAt(sentAt, nil)
+      if self.claims then self.claims[sentAt] = nil end
+      self:dropReplace(sentAt)
+    end
   -- A send-out on our seat replaces the Transform/Mimic list: the new mon
   -- fights with its uploaded moves until another `moves` event lands.
-  if (msg.t == "send" or msg.t == "switch") and self:medSlotOf(msg) == self.mine then
+  elseif (msg.t == "send" or msg.t == "switch") and self:medSlotOf(msg) == self.mine then
     self.medMoveList = nil
     self.medMustReplace = nil
     if self.replacing then self.replacing = nil end
@@ -10438,7 +10605,10 @@ function M:onBattleEvent(msg)
     -- `M:replaceHold`).
     local owed = self:medSlotOf(msg)
     self.medReplaceWait = owed
-    self:medFlush()
+    -- A solo double's opening pair, laid out the cart's way before the batch
+    -- that carries it is played.
+    if self.soloIntro3 then self:composeIntro3() end
+    local played = self:medFlush()
     if owed == nil then
       -- Arm replace only after the faint/msg batch is queued: update() drains
       -- `messages` before `replacing`, so pacing is faint line → picker → send.
@@ -10453,6 +10623,32 @@ function M:onBattleEvent(msg)
           self.medMustReplace = nil
           self.replacing = nil
         end
+      end
+      -- ------- a solo double's `turn` with nothing in front of it
+      --
+      -- Not a new turn: src/SoloBattle.lua feeds a bare `turn` to hand the
+      -- window back unspent (a trainer RUN that reached it, M:_pump), and no
+      -- batch played means no `playEvents` to put the menu back. So it is put
+      -- back here, from mon 1: a seat the referee already holds an answer for
+      -- says so with its `chose`, which lands after this and is passed over at
+      -- the handover (`syncChooser`).
+      if self.ownSlots and not played and not self.result and not self.replacing then
+        self:resetChooser()
+        self.phase = "messages"
+        self.after = "choose"
+      end
+    elseif self.ownSlots and self:isMine(owed) then
+      -- One of a solo double's seats is asked: the `choose` row above queued
+      -- its picker (`queueReplace`). The older stream's `medMustReplace` is
+      -- never armed for a shared team, and a seat this screen has nothing to
+      -- offer -- a party it disagrees with the referee about -- is let go
+      -- rather than opened onto an empty list.
+      self.medMustReplace = nil
+      local seat = self.sim and self.sim:slot(owed)
+      local bench = seat and self:benchOf(seat) or {}
+      if #bench == 0 then
+        if seat then seat.awaiting = nil end
+        self:dropReplace(owed)
       end
     elseif owed == self.mine then
       -- ------- and this is the arming, **once**
@@ -10489,6 +10685,7 @@ function M:onBattleEvent(msg)
     self.medMustReplace = nil
     self.medReplaceWait = nil
     self.replacing = nil
+    self.replaceQueue = nil
     -- Ball opts / foe hide outlive the turn event: anims still drain from the
     -- message queue after medFlush. Cleared when the fight ends.
     self.medBall = nil
@@ -10555,6 +10752,7 @@ function M:medFlush()
   -- Hub refused the pending item (never debited) or spend already landed.
   self.pendingItem = nil
   self.pendingItemSlot = nil
+  self.pendingItems = nil
   if #rows == 0 then return false end
   self:playEvents(rows)
   return true
@@ -10734,6 +10932,12 @@ function M:sendMediatedChoice(action)
   if self.awaitingReconnect then return false end
   action = action or {}
   local kind = action.kind or "move"
+  -- A solo double says which of its seats a choice is for: `seat`, the field
+  -- slot, which src/SoloBattle.lua's transport turns into the seat's referee
+  -- id (contract C3). Read off the action rather than off `mine`, because two
+  -- held commands go out together after the cursor has moved on. Co-op has
+  -- one seat and sends no such field.
+  local seatAt = self.ownSlots and (action.slot or self.mine) or nil
   local fields
   if kind == "switch" or kind == CoopSim.REPLACE then
     fields = { action = "switch", slot = (action.index or 1) - 1 }
@@ -10751,9 +10955,15 @@ function M:sendMediatedChoice(action)
     local moveIndex = math.floor(tonumber(action.move) or 1)
     -- Same gate as the move menu: a 0-PP index is refused here so a call
     -- site that skipped the menu cannot put a choice on the wire the hub
-    -- will silently drop.
-    local pick = self:liveMoves()[moveIndex]
-    if pick and self:hasLivePP() and (tonumber(pick.pp) or 0) <= 0 then
+    -- will silently drop. (A solo double's held command is checked against
+    -- the list of the seat it is for.)
+    local pick, hasPP
+    if seatAt then
+      pick, hasPP = self:liveMovesAt(seatAt)[moveIndex], self:hasLivePPAt(seatAt)
+    else
+      pick, hasPP = self:liveMoves()[moveIndex], self:hasLivePP()
+    end
+    if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 then
       -- Same sentence and phase as updateMove. A call site that skipped the
       -- menu (target-picker commit) must still show why the choice did not
       -- go -- otherwise commit returns the seat to choose with a blank box.
@@ -10765,6 +10975,7 @@ function M:sendMediatedChoice(action)
     fields = { action = "fight", move = (action.move or 1) - 1,
                target = self:medFieldOf(action.target) }
   end
+  if seatAt then fields.seat = self:medFieldOf(seatAt) end
   -- Checked in this boot's generation, which is the hub's (the hello refuses
   -- a mismatch): only Gen 3 reads `pass` / `dexCaught`.
   return Mediated.submitChoice(self.transport, self.battleId, fields,
@@ -10836,6 +11047,10 @@ function M:boxText()
     return text or ""
   end
   if text ~= nil and text ~= "" then return text end
+  -- A solo double waits on nobody but its own referee, which answers on the
+  -- next frame: a "waiting for the others" line would be a flash of a wait
+  -- that does not exist (the 1v1 solo screen shows none either).
+  if self.soloDouble and self.phase == "wait" then return "" end
   if self:spectating() then
     return "No POKeMON left!\nWatching..."
   end
@@ -11507,6 +11722,9 @@ function M:usableItems3()
     for _, entry in ipairs(Sheet3.bag(self.game)) do add(tonumber(entry.id), entry.count) end
   end
   table.sort(out, function(a, b) return a.id < b.id end)
+  -- A solo double's one bag: what the other seat's held command is using is
+  -- already out of it (`holdBackItems3`).
+  if self.ownSlots then self:holdBackItems3(out) end
   return out
 end
 
@@ -11571,6 +11789,9 @@ end
 function M:needsTarget3(moveInst)
   if type(moveInst) ~= "table" then return true end
   local target = tonumber(moveInst.target) or 0
+  -- A solo double aims by the byte the cart's move menu reads (a Ghost's
+  -- CURSE is aimed; `moveTargetType3`). Co-op keeps the row's own byte.
+  if self.ownSlots then target = self:moveTargetType3(self:mySlot(), moveInst) end
   for _, bit in ipairs(UNAIMED_TARGET_BITS) do
     if hasBit(target, bit) then return false end
   end
@@ -11600,14 +11821,17 @@ function M:medRows3(msg, rows, index, slot, say)
   if kind == "exp" then
     -- A link battle pays no experience (the sheet's link rules; the referee
     -- sends none there) -- and one that arrived anyway is not banked.
-    if index == self.mine and not Mediated.LINK_MODES[self.mode] then self:bankExp3(msg) end
+    -- Either seat of a solo double: a shared team's share names the seat its
+    -- monster is out on, or the first seat when it is benched.
+    if self:isMine(index) and not Mediated.LINK_MODES[self.mode] then self:bankExp3(msg, index) end
     return true
   end
   if kind == "team" then
     -- Our seat's roster, one token per uploaded sheet (`x` = down): what
     -- `standingInFight3` answers Exp3's `alive` from.  Not consumed -- the
-    -- rest of the screen reads the event as it always did.
-    if index == self.mine and type(msg.team) == "string" then self.myTeam3 = msg.team end
+    -- rest of the screen reads the event as it always did.  (A shared team's
+    -- roster comes once, on its first seat.)
+    if self:isMine(index) and type(msg.team) == "string" then self.myTeam3 = msg.team end
     return false
   end
   if kind == "ability" then
@@ -11724,11 +11948,12 @@ end
 -- (MediatedBattle.LINK_MODES).  And only as an item this client uploaded
 -- itself (`ownItem3`).
 function M:applyHeld3(msg, index)
-  if index ~= self.mine then return false end
+  if not self:isMine(index) then return false end
   local holding = tonumber(msg and msg.holding)
   if not holding or holding < 0 then return false end
   holding = floor(holding)
-  local seat = self:mySlot()
+  -- The seat the event names (co-op's own; either of a solo double's).
+  local seat = self.sim and self.sim:slot(index)
   local at = tonumber(msg.mon) and self:medPartySlot(floor(tonumber(msg.mon)) + 1)
     or (seat and seat.active)
   if not at then return false end
@@ -11799,7 +12024,7 @@ end
 -- living EXP. SHARE holders -- Exp3.award prices an empty `sentIn` as exactly
 -- that.  Read as an ordinary share, it counted the fainted active monster as
 -- sent in and paid it.
-function M:bankExp3(msg)
+function M:bankExp3(msg, index)
   if (self.expCredit3 or 0) <= 0 then
     self:warnNoExp("the referee paid experience with no knockout ahead of it, "
       .. "which is not a payout this client can account for")
@@ -11822,7 +12047,8 @@ function M:bankExp3(msg)
       return false
     end
   elseif not holdersOnly then
-    local seat = self:mySlot()
+    -- No party index: the active of the seat the share was paid on.
+    local seat = (index and self.sim and self.sim:slot(index)) or self:mySlot()
     partyIndex = seat and seat.active
   end
   if not (partyIndex or holdersOnly) then return false end
@@ -11869,12 +12095,20 @@ function M:gainExp3(row)
     self:warnNoExp("this client holds no party to pay")
     return false
   end
-  local battler = seat and seat.battler
-  local fromFrac, fromLevel
-  if battler then
-    self:seedExpClock(battler)
-    fromFrac = battler.shownExpFrac
-    fromLevel = battler.shownLevel or (battler.mon and battler.mon.level) or 1
+  -- The monsters standing on our seats, each with the strip it starts from:
+  -- the one paid that is out fills its own plate. Co-op has the one seat; a
+  -- solo double has two out of the one party, and either may be paid.
+  local fielded = {}
+  for _, at in ipairs(self.ownSlots or { self.mine }) do
+    local own = self.sim and self.sim:slot(at)
+    local battler = own and own.battler
+    if battler and type(battler.mon) == "table" then
+      self:seedExpClock(battler)
+      fielded[battler.mon] = {
+        battler = battler, slot = at, fromFrac = battler.shownExpFrac,
+        fromLevel = battler.shownLevel or battler.mon.level or 1,
+      }
+    end
   end
   local results, why = Exp3.award({
     species = batch.species, level = batch.level,
@@ -11891,17 +12125,18 @@ function M:gainExp3(row)
     local name = Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
     self.expPaid = (self.expPaid or 0) + 1
     self:say(Exp3.gainedText(name, r.gained or r.amount, r.boosted))
-    local active = battler ~= nil and battler.mon == mon
-    if active and self.messages then
+    local out = fielded[mon]
+    local battler = out and out.battler
+    if out and self.messages then
       self.messages[#self.messages + 1] = {
-        expfill = battler, slot = self.mine, name = name,
-        fromFrac = fromFrac, fromLevel = fromLevel,
+        expfill = battler, slot = out.slot, name = name,
+        fromFrac = out.fromFrac, fromLevel = out.fromLevel,
       }
     end
     self:levelled3(mon, name, r.levels)
     -- A level raised the maximum (Pokemon.applyStats, inside the engine's
     -- apply) and the current HP by the same step: the plate climbs to it.
-    if active and #(r.levels or {}) > 0 then
+    if out and #(r.levels or {}) > 0 then
       local newMax = tonumber(mon.maxHp)
       if newMax then
         battler.curStats = battler.curStats or {}
@@ -11909,7 +12144,7 @@ function M:gainExp3(row)
       end
       local grown = (tonumber(mon.maxHp) or 0) - (tonumber(r.fromMaxHp) or tonumber(mon.maxHp) or 0)
       if grown > 0 and self.messages then
-        self.messages[#self.messages + 1] = { drain = battler, slot = self.mine, to = mon.hp }
+        self.messages[#self.messages + 1] = { drain = battler, slot = out.slot, to = mon.hp }
       end
     end
   end
@@ -12014,11 +12249,15 @@ end
 
 -- The FIGHT list and the referee's copy of a mon that just learned a move.
 function M:syncFightMoves3(mon)
-  local seat = self:mySlot()
-  local battler = seat and seat.battler
-  if battler and battler.mon == mon then
-    battler.curMoves = Sheet3.moves(mon)
-    self.medMoveList = nil
+  -- Whichever of our seats the monster is out on (co-op's one, either of a
+  -- solo double's two): its FIGHT rows, and its overlay gone.
+  for _, at in ipairs(self.ownSlots or { self.mine }) do
+    local seat = self.sim and self.sim:slot(at)
+    local battler = seat and seat.battler
+    if battler and battler.mon == mon then
+      battler.curMoves = Sheet3.moves(mon)
+      self:setOverlayAt(at, nil)
+    end
   end
   if not (self.mediated and self.transport and self.battleId) then return false end
   local index = self:sheetIndexFor(mon)
@@ -12245,7 +12484,7 @@ function M:gen3SeatModel(index, isPlayer)
   local sp = slot.transformId or tonumber(mon.species)
   local seat = {
     name = battler.name,
-    level = (isPlayer and index == self.mine and battler.shownLevel) or mon.level or 1,
+    level = (isPlayer and self:isMine(index) and battler.shownLevel) or mon.level or 1,
     hp = displayHP(battler),
     maxHp = tonumber(mon.maxHp) or (battler.curStats and battler.curStats.hp) or 1,
     status = mon.status,
@@ -12258,7 +12497,7 @@ function M:gen3SeatModel(index, isPlayer)
     form = slot.form,
     gender = (mon.gender == "M" or mon.gender == "F") and mon.gender or nil,
   }
-  if isPlayer and index == self.mine then
+  if isPlayer and self:isMine(index) then
     if battler.shownExpFrac == nil then self:seedExpClock(battler) end
     seat.expFrac = battler.shownExpFrac
   end
@@ -12286,24 +12525,41 @@ end
 
 function M:gen3ClassicModel()
   local phase = self.phase
-  local allyAt = self:allyFocus()
-  local foeAt = self:foeFocus()
-  if foeAt == nil or not self:foeSide(foeAt) then
-    local foes = self:stripSeats(true)
-    foeAt = foes[1]
+  -- A solo double is the cart's own double screen (contract C4): all four
+  -- seats at their doubles positions in place of the centre pair and the
+  -- strips co-op's focus view draws (`gen3DoubleView`).
+  local double = self.ownSlots and self:gen3DoubleView(phase) or nil
+  local model
+  if double then
+    model = {
+      double = double,
+      phase = phase,
+      mode = self.mode,
+      frame = self.frame,
+      weather = self.weatherShown,
+      message = self.shown,
+      hint = self.shown ~= nil,
+    }
+  else
+    local allyAt = self:allyFocus()
+    local foeAt = self:foeFocus()
+    if foeAt == nil or not self:foeSide(foeAt) then
+      local foes = self:stripSeats(true)
+      foeAt = foes[1]
+    end
+    model = {
+      foe = self:gen3SeatModel(foeAt, false),
+      ally = self:gen3SeatModel(allyAt, true),
+      foeStrip = stripOf(self, true, foeAt),
+      allyStrip = stripOf(self, false, allyAt),
+      phase = phase,
+      mode = (self.mode == "coop_wild") and "coop_wild" or self.mode,
+      frame = self.frame,
+      weather = self.weatherShown,
+      message = self.shown,
+      hint = self.shown ~= nil,
+    }
   end
-  local model = {
-    foe = self:gen3SeatModel(foeAt, false),
-    ally = self:gen3SeatModel(allyAt, true),
-    foeStrip = stripOf(self, true, foeAt),
-    allyStrip = stripOf(self, false, allyAt),
-    phase = phase,
-    mode = (self.mode == "coop_wild") and "coop_wild" or self.mode,
-    frame = self.frame,
-    weather = self.weatherShown,
-    message = self.shown,
-    hint = self.shown ~= nil,
-  }
   local player = Gen3.player()
   model.playerBack = { gender = player and player.gender or 0 }
   if self.showEnemyTrainer and type(self.trainer) == "table" then
@@ -12318,14 +12574,19 @@ function M:gen3ClassicModel()
   -- pic and an icon per party row), and nothing on them moves while the
   -- player is choosing: they are rebuilt when the phase or the cursor does,
   -- not on every frame (M:classicList3).
-  local list = self:classicList3(phase, mine)
+  --
+  -- A double's aim has no TARGET window on the cart: the move menu stays up,
+  -- the cursor on the move, and the battler aimed at blinks (the engine's
+  -- ui.lua: "target" draws the move menu) -- so no list then, and the moves.
+  local aiming = double ~= nil and phase == "target" and not self.replacing
+  local list = (not aiming) and self:classicList3(phase, mine) or nil
   if list then
     model.list = list
   elseif phase == "choose" then
     local items = {}
     for i, entry in ipairs(self:bandCommandItems()) do items[i] = entry.label end
     model.commands, model.commandIndex = items, self.commandIndex or 1
-  elseif phase == "move" or phase == "item_move" then
+  elseif phase == "move" or phase == "item_move" or aiming then
     local moves
     if phase == "item_move" then
       local party = (mine and mine.party) or {}
@@ -12335,10 +12596,18 @@ function M:gen3ClassicModel()
     end
     local rows = {}
     for _, move in ipairs(moves or {}) do
-      rows[#rows + 1] = {
+      local row = {
         label = move.name or self:moveLabel(move.id) or tostring(move.id),
         type = tonumber(move.type), pp = tonumber(move.pp), maxPp = tonumber(move.maxPp),
       }
+      -- A double's move menu previews who a move will hit (the engine's
+      -- ui.lua preview_targets): the move's number, and its target byte as
+      -- the menu reads it for the monster choosing (`moveTargetType3`).
+      if double and phase ~= "item_move" then
+        row.num = tonumber(move.num) or tonumber(move.id)
+        row.target = self:moveTargetType3(mine, move)
+      end
+      rows[#rows + 1] = row
     end
     model.moves = rows
     model.cursor = (phase == "item_move") and (self.moveIndex or 1) or (self.moveIndex or 1)
@@ -12428,9 +12697,14 @@ function M:gen3PartyRow(mon, index)
   if type(mon) ~= "table" then return { label = "?" } end
   local sp = tonumber(mon.species or mon.speciesId)
   local hp, maxHp = tonumber(mon.hp) or 0, tonumber(mon.maxHp) or 1
-  local seat = self:mySlot()
-  if seat and seat.active == index and seat.battler and seat.battler.mon == mon then
-    hp = displayHP(seat.battler)
+  -- A fielded monster reads its plate's clock -- on whichever of our seats it
+  -- stands (a solo double fields two out of this one party).
+  for _, at in ipairs(self.ownSlots or { self.mine }) do
+    local seat = self.sim and self.sim:slot(at)
+    if seat and seat.active == index and seat.battler and seat.battler.mon == mon then
+      hp = displayHP(seat.battler)
+      break
+    end
   end
   -- The same per-monster memo the seats use (memo3), under its own key: the
   -- page's front pic here is the plain one (no personality opts).
@@ -12556,6 +12830,13 @@ function M:payDay3(msg, result)
   local line = Gen3.battleText("STRINGID_PLAYERPICKEDUPMONEY",
     { playerName = name, buff1 = tostring(paid % 65536) })
     or ("%s picked up\n¥%d!"):format(tostring(name), paid % 65536)
+  -- A solo double says it last, after src/SoloBattle.lua's defeated line and
+  -- prize (the cart's BattleScript_LocalTrainerBattleWon order, which
+  -- MediatedBattle:payDay3 keeps for the 1v1): held for `sayPayDay3`.
+  if self.soloDouble then
+    self.payDayLine3 = line
+    return paid
+  end
   self.medPending[#self.medPending + 1] = { kind = "msg", text = line }
   return paid
 end
@@ -12572,6 +12853,843 @@ function M:drawGen3Classic()
     pcall(Mediated.drawGen3Plain, self, model)
   end
   return true
+end
+
+-- =====================================================================
+-- the solo double (contract C3 of docs/plans/gen3-solo-doubles.md)
+-- =====================================================================
+--
+-- A lone trainer's double battle on FireRed / LeafGreen / Emerald, fought on
+-- SOLO BATTLES' own referee (src/SoloBattle.lua drives BattleSim3 locally,
+-- with `seats = 2` sides: docs/plans/gen3-battle-sheet.md §1.3).  This player
+-- fields two monsters out of one party -- the cart's gPlayerParty behind
+-- battlers 0 and 2 -- against one trainer behind one or two.  Everything this
+-- screen already is draws it: the replay shell, the Gen 3 arms, the arena
+-- (one trainer behind each pair), the GBA page, the target pickers, the
+-- per-seat replacement.  What is new is that **both** of side a's seats are
+-- this client's (`ownSlots`):
+--
+--   * `mine` is the seat whose menu is up -- the chooser -- and walks
+--     `ownSlots` in battler order, mon 1 then mon 2 (pret battle_main.c
+--     HandleTurnActionSelectionState; the engine's D.advanceSelection);
+--   * mon 1's command is held (`buffered`) until mon 2's is in; B on mon 2's
+--     command menu takes it back (pret battle_controller_player.c:286, the
+--     engine's D.cancelPartner); both then go out together, each naming its
+--     seat by field slot (`seat`, which SoloBattle's transport maps onto the
+--     seat's referee id);
+--   * either seat's bench leaves out both monsters standing and the one the
+--     other seat has picked (`siblingTaken`; pret party_menu.c:5916), and a
+--     pick naming one of those is refused in the cart's own words;
+--   * a replacement is asked per owing seat, in battler order (`queueReplace`);
+--   * the award, the PP, the held items, the plates and the bag read "one of
+--     my seats" (`isMine`) wherever co-op read "my seat".
+--
+-- `ownSlots == nil` is every co-op fight, and every arm that reads it leaves
+-- that path as it was: there `isMine(i)` is exactly `i == self.mine`.
+
+-- pret include/constants/moves.h MOVE_CURSE, include/constants/pokemon.h
+-- TYPE_GHOST, include/constants/battle.h MOVE_TARGET_SELECTED / _USER.
+local MOVE_CURSE3, TYPE_GHOST3 = 174, 7
+local TARGET_SELECTED3, TARGET_USER3 = 0, 16
+
+-- ------- whose seat
+
+-- Is this seat one of this client's own?  Co-op has one (`mine`); a solo
+-- double has both of side a's (`ownSlots`).
+function M:isMine(index)
+  if index == nil then return false end
+  local own = self.ownSlots
+  if not own then return index == self.mine end
+  for _, at in ipairs(own) do
+    if at == index then return true end
+  end
+  return false
+end
+
+-- The referee's seat id onto this screen's seat: the slot that id owns on
+-- that side, else -- a shared team's second seat, `<owner>#2` -- the owner's
+-- next seat on it that `used` has not handed out yet (Turn.create names a
+-- shared team's seats `playerId`, `playerId .. "#2"`).
+function M:seatSlotFor(id, side, used)
+  if id == nil or not self.sim then return nil end
+  local owner = tostring(id):match("^(.-)#%d+$") or id
+  for _, slot in ipairs(self.sim.slots or {}) do
+    if slot.side == side and slot.owner ~= nil and not used[slot.index]
+       and (slot.owner == id or slot.owner == owner) then
+      return slot
+    end
+  end
+  return nil
+end
+
+-- ------- each seat's own FIGHT list
+
+-- The Transform / Mimic list the referee sent for one of our seats, if any.
+-- A solo double keeps one per seat; co-op's one seat keeps `medMoveList`.
+function M:overlayAt(index)
+  if self.ownSlots then return self.medMoveLists and self.medMoveLists[index] or nil end
+  return self.medMoveList
+end
+
+function M:setOverlayAt(index, list)
+  if self.ownSlots then
+    if index == nil then return end
+    self.medMoveLists = self.medMoveLists or {}
+    self.medMoveLists[index] = list
+    return
+  end
+  self.medMoveList = list
+end
+
+-- `liveMoves` for a named seat: its overlay, else its battler's own rows.
+function M:liveMovesAt(index)
+  local list = self:overlayAt(index)
+  if list then return list end
+  local slot = self.sim and self.sim:slot(index)
+  local battler = slot and slot.battler
+  return (battler and battler.curMoves) or {}
+end
+
+function M:hasLivePPAt(index)
+  local list = self:overlayAt(index)
+  if list then
+    for _, move in ipairs(list) do
+      if (move.pp or 0) > 0 then return true end
+    end
+    return false
+  end
+  local slot = self.sim and self.sim:slot(index)
+  return self.sim ~= nil and self.sim:hasPP(slot and slot.battler)
+end
+
+-- ------- two commands a turn
+
+-- Does this own seat owe the referee a command now?  Somebody standing in it,
+-- no answer the referee already holds (a recharge or a rampage is filed for
+-- it at the turn's open, and says so with a `chose`), nothing held for it.
+function M:ownSeatOwes(index)
+  local slot = self.sim and self.sim:slot(index)
+  if not slot or self.sim:isDown(slot) then return false end
+  if self.acted and self.acted[index] then return false end
+  if self.buffered and self.buffered[index] then return false end
+  return true
+end
+
+local function hasHeld(self)
+  for _ in pairs(self.buffered or {}) do return true end
+  return false
+end
+
+-- A seat's command menu, opened fresh: every cursor where a new turn puts it,
+-- and the bag list rebuilt (what the other seat holds is out of it).
+function M:openSeatMenu()
+  self.phase = "choose"
+  self.commandIndex = 1
+  self.moveIndex = 1
+  self.targetIndex = 1
+  self.switchIndex = 1
+  self.itemIndex = 1
+  self.itemPick, self.itemPartyIndex = nil, nil
+  self.itemList = nil
+end
+
+-- A new turn: mon 1 first, nothing held, nothing claimed. `mine` goes to the
+-- first seat with a monster standing (a seat emptied for good -- pret's
+-- absent battler -- is never asked); a seat the referee answered for is
+-- passed over at the handover, once its `chose` has landed (`syncChooser`).
+function M:resetChooser()
+  local own = self.ownSlots
+  if not own then return end
+  self.buffered = nil
+  self.claims = nil
+  self.chooser, self.mine = 1, own[1]
+  for pos, index in ipairs(own) do
+    local slot = self.sim and self.sim:slot(index)
+    if slot and not self.sim:isDown(slot) then
+      self.chooser, self.mine = pos, index
+      break
+    end
+  end
+  self.itemList = nil
+end
+
+-- The handover's check, made as the command menu opens (see `update`): the
+-- seat it opens for is the first, from the chooser on, that still owes a
+-- command. False when none does -- what is held is filed and the screen waits.
+function M:syncChooser()
+  local own = self.ownSlots
+  for pos = self.chooser or 1, #own do
+    local index = own[pos]
+    if self:ownSeatOwes(index) then
+      if self.mine ~= index then
+        self.mine, self.chooser = index, pos
+        self:openSeatMenu()
+      end
+      return true
+    end
+  end
+  if hasHeld(self) then
+    self:fileOwn()
+  else
+    self.phase = "wait"
+  end
+  return false
+end
+
+-- The next seat that owes a command, after the chooser; its menu opens.
+function M:advanceChooser()
+  local own = self.ownSlots
+  for pos = (self.chooser or 1) + 1, #own do
+    local index = own[pos]
+    if self:ownSeatOwes(index) then
+      self.mine, self.chooser = index, pos
+      self:openSeatMenu()
+      return true
+    end
+  end
+  return false
+end
+
+-- `commit`, for a solo double: the choice is held for its seat, and the next
+-- seat is asked; the last one in files them all (`fileOwn`).  The cart's own
+-- order -- it takes both monsters' actions before the turn runs, and hands
+-- mon 1's back on B (`cancelPartner`).
+--
+-- Two refusals happen here, before anything is held, rather than at the
+-- referee after mon 2 has chosen: a switch naming a monster this party has on
+-- the field or already picked (the cart's party-menu line, `switchRefusal`),
+-- and a move with no PP left (the move menu's own line, `sendMediatedChoice`'s
+-- gate).
+function M:commitOwn(action)
+  action = action or {}
+  local index = action.slot or self.mine
+  local fight = action.kind == nil and tonumber(action.move) ~= nil
+  if action.kind == "switch" then
+    local line = self:switchRefusal(index, action.index)
+    if line then
+      self:say(line)
+      self.phase = "messages"
+      self.after = "switch"
+      return false
+    end
+  elseif fight then
+    local pick = self:liveMovesAt(index)[math.floor(tonumber(action.move))]
+    if pick and self:hasLivePPAt(index) and (tonumber(pick.pp) or 0) <= 0 then
+      self:say("There's no PP left\nfor this move!")
+      self.phase = "messages"
+      self.after = "move"
+      return false
+    end
+  end
+  local held = {
+    action = action, command = self.commandIndex,
+    item = self.pendingItem, itemSlot = self.pendingItemSlot,
+  }
+  if fight then
+    -- Where this monster's move list opens next turn (`rememberedMove`),
+    -- written once the command actually goes.
+    local slot = self.sim and self.sim:slot(index)
+    held.memKey = (slot and slot.active) or 1
+    held.memMove = math.floor(tonumber(action.move))
+  end
+  self.pendingItem, self.pendingItemSlot = nil, nil
+  self.buffered = self.buffered or {}
+  self.buffered[index] = held
+  if self:advanceChooser() then return true end
+  return self:fileOwn()
+end
+
+-- Every held command, out to the referee in seat order, each naming its seat.
+--
+-- A refusal stops there: that seat -- and any held behind it -- is asked
+-- again, and one filed ahead of it stays filed (the referee holds it; this
+-- screen does not use the referee's `cancel`, plan decision 5).
+function M:fileOwn()
+  local own = self.ownSlots
+  self.phase = "wait"
+  for pos, index in ipairs(own) do
+    local held = self.buffered and self.buffered[index]
+    if held then
+      if not self:sendMediatedChoice(held.action) then
+        for later = pos, #own do self.buffered[own[later]] = nil end
+        self.mine, self.chooser = index, pos
+        -- The PP gate prints its own line and opens the move list behind it;
+        -- any other refusal reopens the seat's command menu.
+        if self.phase == "wait" then self:openSeatMenu() end
+        return false
+      end
+      self.buffered[index] = nil
+      self:markActed(index)
+      if held.memKey then
+        self.moveMemory = self.moveMemory or {}
+        self.moveMemory[held.memKey] = held.memMove
+      end
+      if held.item then
+        -- Spent from the bag when the referee's `item` names this seat
+        -- (`confirmOwnItem`), as co-op's one pending item is.
+        self.pendingItems = self.pendingItems or {}
+        self.pendingItems[index] = { id = held.item, slot = held.itemSlot }
+      end
+    end
+  end
+  return true
+end
+
+-- B on mon 2's command menu: mon 1's held command is dropped and mon 1's
+-- menu reopens where it was left (pret battle_controller_player.c:286; the
+-- engine's ui.lua handle_double_input / D.cancelPartner).  Two things keep
+-- it shut, both the cart's: no held command ahead (mon 1 was answered for, or
+-- has nobody standing -- `absent[0]`), and a held bag item that is not a
+-- ball -- a medicine already taken out of the bag, which the cart cannot put
+-- back (it refunds balls only, ITEM_PREMIER_BALL and below).
+function M:cancelPartner()
+  local own = self.ownSlots
+  for back = (self.chooser or 1) - 1, 1, -1 do
+    local index = own[back]
+    local held = self.buffered and self.buffered[index]
+    if held then
+      local action = held.action or {}
+      if action.kind == "item" then
+        local effect = Sheet3.itemEffect(tonumber(action.item))
+        if not (effect and effect.ball) then return false end
+      end
+      self.buffered[index] = nil
+      self.mine, self.chooser = index, back
+      self:openSeatMenu()
+      self.commandIndex = held.command or 1
+      return true
+    end
+  end
+  return false
+end
+
+-- ------- one party, two seats
+
+-- What the other seat of a shared party holds: the monster standing there
+-- ("battle") and the one it has picked this turn -- a held switch, or a
+-- replacement already sent ("selected").  pret party_menu.c:5934 (the
+-- engine's commands.lua switchError): the partner battler's party index
+-- unless it is absent, then gBattleStruct->monToSwitchIntoId of the partner.
+function M:siblingTaken(slot)
+  local own = self.ownSlots
+  if not (own and type(slot) == "table") then return nil end
+  local taken
+  for _, index in ipairs(own) do
+    if index ~= slot.index then
+      local other = self.sim and self.sim:slot(index)
+      if other and other.party == slot.party then
+        taken = taken or {}
+        if other.battler and other.active then taken[other.active] = "battle" end
+        local held = self.buffered and self.buffered[index]
+        local action = held and held.action
+        if action and action.kind == "switch" and action.index then
+          taken[action.index] = taken[action.index] or "selected"
+        end
+        local claim = self.claims and self.claims[index]
+        if claim then taken[claim] = taken[claim] or "selected" end
+      end
+    end
+  end
+  return taken
+end
+
+-- One of the cart's party-menu lines, out of the player's own text pack
+-- (EvolveFx's gen3Text pattern), or nil without it.
+local function partyMenuText3(key, name)
+  local RomText = Gen3.engine("src.core.game3.rom_text")
+  if not (RomText and type(RomText.ascii) == "function") then return nil end
+  local ok, text = pcall(RomText.ascii, key, { stringVars = { name } })
+  if not ok or type(text) ~= "string" then return nil end
+  text = Gen3.cleanText(text)
+  if text == "" then return nil end
+  return text
+end
+
+-- Why seat `index` may not send out party member `partyIndex`, in the cart's
+-- words, or nil when it may: a monster already on the field -- its own, or
+-- the other seat's -- is gText_PkmnAlreadyInBattle, the other seat's pick
+-- gText_PkmnAlreadySelected (pret party_menu.c:5916, the engine's
+-- commands.lua switchError).  A fainted pick or an egg is not this screen's
+-- to word: the bench never lists one, and the referee refuses it.
+function M:switchRefusal(index, partyIndex)
+  if not self.ownSlots then return nil end
+  local slot = self.sim and self.sim:slot(index)
+  local mon = slot and slot.party and slot.party[partyIndex]
+  if type(mon) ~= "table" or (mon.hp or 0) <= 0 then return nil end
+  local why
+  if partyIndex == slot.active then
+    why = "battle"
+  else
+    why = (self:siblingTaken(slot) or {})[partyIndex]
+  end
+  if not why then return nil end
+  local name = Sheet3.displayName(mon, tonumber(mon.species or mon.speciesId))
+  if why == "battle" then
+    return partyMenuText3("gText_PkmnAlreadyInBattle", name)
+      or (tostring(name) .. " is already\nin battle!")
+  end
+  return partyMenuText3("gText_PkmnAlreadySelected", name)
+    or (tostring(name) .. " has already\nbeen selected.")
+end
+
+-- ------- a replacement per seat
+
+-- A seat of ours the referee has asked for a monster (a `choose` row): queued
+-- in the order asked -- battler order, pret HandleFaintedMonActions -- and the
+-- picker opened on the first.
+function M:queueReplace(index)
+  local queue = self.replaceQueue or {}
+  self.replaceQueue = queue
+  for _, at in ipairs(queue) do
+    if at == index then return end
+  end
+  queue[#queue + 1] = index
+  if not self.replacing or self.mine ~= queue[1] then self.switchIndex = 1 end
+  self.mine = queue[1]
+  self.replacing = true
+end
+
+-- That seat is answered (or its send-out has landed): off the queue, and the
+-- picker moves on to the next seat asked, or comes down.
+function M:dropReplace(index)
+  local queue = self.replaceQueue
+  if not queue then return end
+  for i = #queue, 1, -1 do
+    if queue[i] == index then table.remove(queue, i) end
+  end
+  if #queue == 0 then
+    self.replaceQueue = nil
+    self.replacing = nil
+    return
+  end
+  if self.mine ~= queue[1] then
+    self.mine = queue[1]
+    self.switchIndex = 1
+  end
+  self.replacing = true
+end
+
+-- `updateReplace` for a solo double: the seat at the head of the queue picks,
+-- from a bench that leaves out the other seat's monster and its pick; the
+-- pick goes out at once, naming the seat, and is held as that seat's claim so
+-- the next seat asked cannot take it too.  Cannot be cancelled, as ever.
+function M:updateReplaceOwn(input)
+  local index = self.mine
+  local slot = self.sim and self.sim:slot(index)
+  local bench = slot and self:benchOf(slot) or {}
+  if #bench == 0 then
+    self:dropReplace(index)
+    return
+  end
+  self.switchIndex = math.min(self.switchIndex or 1, #bench)
+  local moved = listPress(self.switchIndex, #bench, input)
+  if moved then
+    self.switchIndex = moved
+  elseif input:wasPressed("a") then
+    local pick = bench[self.switchIndex].index
+    if not self:sendMediatedChoice({ kind = "switch", index = pick, slot = index }) then
+      return
+    end
+    self.claims = self.claims or {}
+    self.claims[index] = pick
+    self:dropReplace(index)
+    -- Every owing seat has answered: the referee sends them out behind its
+    -- next `turn`, and nothing is asked until that batch has played.
+    if not self.replacing then self.phase = "wait" end
+  end
+end
+
+-- ------- one bag, two seats
+
+-- The referee took one of our seats' bag uses: that seat's pending item is the
+-- one to spend (`confirmMediatedItem`, through co-op's one-item fields).
+function M:confirmOwnItem(index, itemId, amount)
+  local held = self.pendingItems and self.pendingItems[index]
+  if not held then return false end
+  self.pendingItems[index] = nil
+  self.pendingItem, self.pendingItemSlot = held.id, held.slot
+  return self:confirmMediatedItem(itemId, amount)
+end
+
+-- The bag as the seat choosing now sees it: an item the other seat's held
+-- command uses is already out of it -- the cart takes a medicine out when it
+-- is chosen (the referee's Battle:_bagHas holds it back from the sibling
+-- likewise), so two seats and one POTION is one POTION.  A flute is never
+-- spent and never held back.
+function M:holdBackItems3(list)
+  local held = {}
+  for _, entry in pairs(self.buffered or {}) do
+    local action = entry.action
+    if action and action.kind == "item" then
+      local id = tonumber(action.item)
+      if id then held[id] = (held[id] or 0) + 1 end
+    end
+  end
+  for i = #list, 1, -1 do
+    local item = list[i]
+    local n = held[tonumber(item.id)]
+    if n and not (item.effect and item.effect.noConsume) then
+      item.count = (item.count or 0) - n
+      if item.count <= 0 then table.remove(list, i) end
+    end
+  end
+  return list
+end
+
+-- ------- the opening
+
+-- A send-out line in the cart's words (STRINGID_INTROSENDOUT; the engine's
+-- battle_text.lua special(1) and intro_seq.lua sendOutText): the trainer's
+-- "<TRAINER> sent out X and Y!" and our "Go! X and Y!" when two came out, the
+-- one-monster lines when one did.  The sentence of the player's own text
+-- pack; this screen's spelling of it only without one.
+function M:sendOutLine3(side, names)
+  local two = #names >= 2
+  local t = type(self.trainer) == "table" and self.trainer or {}
+  local player = Gen3.player()
+  local fill = {
+    side = (side == "a") and 0 or 1,
+    double = two or nil,
+    trainer = true,
+    playerName = player and player.name or nil,
+    trainer1Class = t.className or t.trainerClassName or t.trainerClass,
+    trainer1Name = t.trainerName or t.name,
+  }
+  if side == "a" then
+    fill.playerMon1, fill.playerMon2 = names[1], names[2]
+  else
+    fill.opponentMon1, fill.opponentMon2 = names[1], names[2]
+  end
+  local text = Gen3.battleText("STRINGID_INTROSENDOUT", fill)
+  if text then return text end
+  if side == "a" then
+    if two then return ("Go! %s and\n%s!"):format(names[1], names[2]) end
+    return ("Go! %s!"):format(names[1])
+  end
+  local who = self:trainerIntroName()
+  if two then return ("%s sent\nout %s and %s!"):format(who, names[1], names[2]) end
+  return ("%s sent out\n%s!"):format(who, names[1])
+end
+
+-- The referee's four opening sends, laid out the cart's way (pret
+-- battle_controllers / the engine's intro_seq.lua build_trainer for a
+-- double): the trainer's line and its monsters, then ours and our monsters --
+-- where the referee sends side a first.  Placed where the first of them stood
+-- in the batch, so a switch-in ability (Intimidate, Drizzle) still follows
+-- the arrivals that cause it.
+function M:composeIntro3()
+  self.soloIntro3 = nil
+  local pending = self.medPending or {}
+  local at, foes, allies, kept = nil, {}, {}, {}
+  for _, row in ipairs(pending) do
+    if type(row) == "table" and row.kind == "introsend" then
+      at = at or (#kept + 1)
+      if self:foeSide(row.slot) then foes[#foes + 1] = row else allies[#allies + 1] = row end
+    else
+      kept[#kept + 1] = row
+    end
+  end
+  if not at then return false end
+  local function bySlot(a, b) return a.slot < b.slot end
+  table.sort(foes, bySlot)
+  table.sort(allies, bySlot)
+  local rows = {}
+  local function side(list, which)
+    if #list == 0 then return end
+    local names = {}
+    for i, row in ipairs(list) do names[i] = row.name end
+    rows[#rows + 1] = { kind = "msg", text = self:sendOutLine3(which, names) }
+    for _, row in ipairs(list) do
+      if row.index then
+        rows[#rows + 1] = { kind = "send", slot = row.slot, index = row.index,
+                            confused = row.confused }
+      end
+    end
+  end
+  side(foes, "b")
+  side(allies, "a")
+  for i = #rows, 1, -1 do table.insert(kept, at, rows[i]) end
+  self.medPending = kept
+  return true
+end
+
+-- ------- aiming
+
+-- The target byte the cart's move menu aims by (pret
+-- battle_controller_player.c:444 HandleInputChooseMove; the engine's ui.lua
+-- move_target_type): the row's own, except CURSE, which reads the monster
+-- choosing -- a Ghost aims it at a battler, anyone else curses itself.
+function M:moveTargetType3(slot, row)
+  if type(row) ~= "table" then return 0 end
+  if tonumber(row.num) == MOVE_CURSE3 then
+    return self:seatIsGhost3(slot) and TARGET_SELECTED3 or TARGET_USER3
+  end
+  return tonumber(row.target) or 0
+end
+
+-- Is the monster on this seat a Ghost?  Its species' types (a Transform's
+-- species' when it wears one) -- the screen's reading of gBattleMons' types,
+-- which only Color Change and Conversion move.
+function M:seatIsGhost3(slot)
+  if type(slot) ~= "table" then return false end
+  local battler = slot.battler
+  local types = battler and battler.curTypes
+  if slot.transformId then
+    local info = Gen3.speciesInfo(slot.transformId)
+    if type(info) == "table" and type(info.types) == "table" then types = info.types end
+  end
+  for _, t in ipairs(types or {}) do
+    if tonumber(t) == TYPE_GHOST3 then return true end
+  end
+  return false
+end
+
+-- The GBA page's target cursor: the cart's ring of battlers (pret
+-- battle_controller_player.c:171 sTargetIdentities -- player left, player
+-- right, opponent right, opponent left), LEFT / UP one way and RIGHT / DOWN
+-- the other, skipping whoever this move may not be aimed at (`targets`, the
+-- picker's own list: the chooser is never on it).  Each move restarts the
+-- blink lit (pret battle_main.c:2019).
+function M:stepTarget3(targets, step)
+  local allies, foes = {}, {}
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if self:foeSide(slot.index) then foes[#foes + 1] = slot.index
+    else allies[#allies + 1] = slot.index end
+  end
+  local ring = { allies[1], allies[2], foes[2], foes[1] }
+  local where = {}
+  for i, entry in ipairs(targets) do where[entry.index] = i end
+  local current = targets[self.targetIndex or 1]
+  local pos = 4
+  for i = 1, 4 do
+    if current and ring[i] == current.index then pos = i end
+  end
+  for _ = 1, 4 do
+    pos = pos + step
+    if pos < 1 then pos = 4 elseif pos > 4 then pos = 1 end
+    local index = ring[pos]
+    if index and where[index] then
+      self.targetIndex = where[index]
+      break
+    end
+  end
+  self.targetSince3 = self.frame
+end
+
+-- ------- the GBA double screen's model (contract C4)
+
+-- All four seats at the cart's doubles positions: `foes[1]` / `allies[1]`
+-- the first seat of each side (field slots 3 and 0), `[2]` the second; the
+-- ally whose menu is up (`choosing`, through the command, move and target
+-- phases -- the cart bobs it in the action and move menus); the battler
+-- aimed at (`blink`, with the frame the cursor landed on); and the START
+-- toggle's HP numbers (`hpText`).
+function M:gen3DoubleView(phase)
+  local double = { foes = {}, allies = {} }
+  local nFoe, nAlly = 0, 0
+  for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
+    if self:foeSide(slot.index) then
+      nFoe = nFoe + 1
+      double.foes[nFoe] = self:gen3SeatModel(slot.index, false)
+    else
+      nAlly = nAlly + 1
+      double.allies[nAlly] = self:gen3SeatModel(slot.index, true)
+    end
+  end
+  local choosing = (phase == "choose" or phase == "move" or phase == "target")
+    and not self.replacing
+  if choosing then
+    for pos, at in ipairs(self.ownSlots or {}) do
+      if at == self.mine then double.choosing = pos end
+    end
+  end
+  if phase == "target" and not self.replacing then
+    local pick = self:targetChoices()[self.targetIndex or 1]
+    if pick then
+      local n = 0
+      for _, slot in ipairs(self.sim.slots or {}) do
+        if slot.side == pick.side then
+          n = n + 1
+          if slot.index == pick.index then
+            double.blink = {
+              side = self:foeSide(slot.index) and "b" or "a", index = n,
+              since = self.targetSince3 or self.frame,
+            }
+          end
+        end
+      end
+    end
+  end
+  double.hpText = self.hpText3 and true or nil
+  return double
+end
+
+-- The PAY DAY line `payDay3` held back, said once the ending has been read.
+function M:sayPayDay3()
+  local line = self.payDayLine3
+  if not line then return false end
+  self.payDayLine3 = nil
+  self:say(line)
+  return true
+end
+
+-- ------- the screen's half of contract C3
+
+-- What a solo double uploads, exactly as MediatedBattle:start does for a solo
+-- trainer fight: the ruleset, this player's party and bag (no side -- the
+-- caller's table transport reads side nil as the player's), and the trainer's
+-- team with its kit as side "b".  The sheets are the live session party's
+-- (Mediated.snapshotParty, Sheet3.party), kept as `medMine` for every
+-- party-addressed field the referee sends back.  True when it went; nothing
+-- is said otherwise -- the caller hands the fight back to the cart.
+function M:start(game)
+  if game then self.game = game end
+  if not self.soloDouble then return false end
+  if self.medUploaded then return true end
+  if not (self.transport and self.battleId and self.sim) then return false end
+  local mons = Mediated.snapshotParty(self.game, { link = false })
+  if type(mons) ~= "table" or #mons == 0 then
+    mod.log:warn("no POKéMON could be described for a double battle, so it is "
+      .. "fought the ordinary way -- check the party from START > POKéMON, and "
+      .. "report this if it is not empty")
+    return false
+  end
+  self.medUploaded = true
+  self.medMine = mons
+  Mediated.sendRuleset(self.transport, self.game, { wild = false })
+  local bag = Mediated.snapshotBag(self.game)
+  self.bagSheet = Mediated.bagCounts(bag)
+  Mediated.sendParty(self.transport, self.battleId, mons, nil, bag,
+    Mediated.badgesOf(self.game))
+  if type(self.npcParty) == "table" and #self.npcParty > 0 then
+    self.medNpcSheets = self.npcParty
+    Mediated.sendParty(self.transport, self.battleId, self.npcParty, "b",
+      Mediated.trainerBagEntries(self.trainer, self.game))
+  end
+  -- Which held items this fight's uploads brought (`ownItem3`).
+  self.ownItems3 = nil
+  self:ownItemSet3()
+  return true
+end
+
+-- MediatedBattle's inbound names, onto this screen's mediated machinery; the
+-- events are the referee's own (src/SoloBattle.lua renumbers and stamps
+-- them), read exactly as a hub's sanitised ones are.
+function M:onReady(msg)
+  if type(msg) ~= "table" then return false end
+  return self:onBattleReady(msg)
+end
+
+function M:onEvent(msg)
+  if type(msg) ~= "table" then return false end
+  return self:onBattleEvent(msg)
+end
+
+function M:onOutcome(msg)
+  if type(msg) ~= "table" then return false end
+  return self:onBattleOutcome(msg)
+end
+
+-- The leads the referee fields (pret SetBattlePartyIds; Turn.create): the
+-- first monster that can fight, then the next one after it.
+local function soloLeads3(party)
+  local first, second
+  for i, mon in ipairs(party or {}) do
+    if type(mon) == "table" and (tonumber(mon.hp) or 0) > 0 and not CoopField.isEgg3(mon) then
+      if not first then
+        first = i
+      else
+        second = i
+        break
+      end
+    end
+  end
+  return first, second
+end
+
+-- A trainer's monster for the field, rebuilt from the sheet the referee
+-- fights (Sheet3.monFromSheet), one per sheet and in the sheets' order -- the
+-- referee's `mon` stamps on that side count in them -- with the sheet's own
+-- HP ceiling, so a bar reads the referee's numbers. A sheet the rebuild
+-- cannot take still holds its place.
+local function foeMon3(sheet)
+  local mon = Sheet3.monFromSheet(sheet)
+  local species = tonumber(sheet.speciesNum) or tonumber(sheet.speciesId)
+  if type(mon) ~= "table" then
+    mon = {
+      species = species, speciesId = species, nickname = "",
+      level = tonumber(sheet.level) or 1, personality = tonumber(sheet.personality),
+      moves = {}, pp = {}, maxPp = {}, heldItem = tonumber(sheet.heldItem) or 0,
+    }
+  end
+  mon.maxHp = tonumber(sheet.maxHp) or tonumber(mon.maxHp) or 1
+  Sheet3.applyToMon(mon, { hp = sheet.hp, status = sheet.status })
+  return mon
+end
+
+-- The solo double's screen (contract C3).
+--
+-- opts: transport (the caller's table transport), ui, battle (the battle id),
+-- trainer (src/SoloBattle.lua's gen3TrainerRecord), peerName (the label the
+-- 1v1 opens with), npcParty (the trainer's sheets, uploaded as side "b"),
+-- mode ("coop_npc"), selfId / foeId (the referee owners), foeSeats (1 | 2),
+-- onDone(result, toLearn); classicUi is the suite's hook, as for `M.new`.
+--
+-- Side a is two seats over the live session party -- the same table, so the
+-- referee's HP, a level, a learned move land on the save monster exactly as a
+-- co-op seat's do -- led by the first two monsters that can fight; side b is
+-- the trainer behind one seat or two over one rebuilt party.  Answers the
+-- screen, or nil and why.
+function M.newSoloDouble(game, opts)
+  opts = type(opts) == "table" and opts or {}
+  if Gen.generation(game) ~= 3 then
+    return nil, "a solo double battle is a Gen 3 fight"
+  end
+  local selfId = opts.selfId or "solo_player"
+  local trainer = type(opts.trainer) == "table" and opts.trainer or nil
+  local party = Gen3.party()
+  if type(party) ~= "table" and type(game) == "table" and type(game.session) == "table" then
+    party = game.session.party
+  end
+  if type(party) ~= "table" then return nil, "no party to fight with" end
+  local sheets = type(opts.npcParty) == "table" and opts.npcParty or {}
+  if #sheets == 0 then return nil, "the trainer has no monsters to field" end
+  local foeParty = {}
+  for i, sheet in ipairs(sheets) do foeParty[i] = foeMon3(sheet) end
+  local lead1, lead2 = soloLeads3(party)
+  local foe1, foe2 = soloLeads3(foeParty)
+  local label = opts.peerName or Mediated.trainerLabel3(trainer) or "TRAINER"
+  local player = Gen3.player()
+  local myName = (player and type(player.name) == "string" and player.name ~= "")
+    and player.name or "PLAYER"
+  -- An empty seat is active 0: CoopSim fields nothing there (`sendOut` of a
+  -- party index nobody holds), the referee's absent battler.
+  local slots = {
+    { side = "a", owner = selfId, name = myName, party = party, active = lead1 },
+    { side = "a", owner = selfId, name = myName, party = party, active = lead2 or 0 },
+    { side = "b", name = label, party = foeParty, active = foe1 },
+  }
+  if tonumber(opts.foeSeats) ~= 1 then
+    slots[4] = { side = "b", name = label, party = foeParty, active = foe2 or 0 }
+  end
+  local screen, why = M.new(game, {
+    slots = slots, mine = 1, host = true,
+    mode = opts.mode or Config.SOLO_TRAINER_MODE,
+    trainer = trainer,
+    trainerPic = trainer and tonumber(trainer.trainerPic or trainer.pic) or nil,
+    transport = opts.transport, battleId = opts.battle, selfId = selfId,
+    ui = opts.ui, onDone = opts.onDone, classicUi = opts.classicUi,
+  })
+  if not screen then return nil, why end
+  screen.soloDouble = true
+  screen.ownSlots = { 1, 2 }
+  screen.chooser = 1
+  screen.battle = opts.battle
+  screen.foeId = opts.foeId or "solo_foe"
+  screen.npcParty = sheets
+  screen.trainerLabel3 = label
+  screen.soloIntro3 = true
+  return screen
 end
 
 return M

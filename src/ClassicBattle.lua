@@ -806,10 +806,12 @@ end
 -- **A lone trainer's double battle is the cart's double screen**
 -- (docs/plans/gen3-solo-doubles.md, contract C4): four battlers at the cart's
 -- doubles positions (AnimCoords.DOUBLES), drawn back to front, four doubles
--- healthboxes (name, gender, Lv, HP bar, status -- no HP figures and no EXP
--- bar, as the cart's doubles boxes have none), the battler being aimed at
--- blinking while the move menu stays up, and the monster choosing (plus,
--- while aiming, the target's box) bobbing as the cart bobs them.
+-- healthboxes (name, gender, Lv, HP bar, status -- no EXP bar, and HP figures
+-- only on the player's two boxes once START has swapped them in for the
+-- bars), the battlers the hovered move will hit washing white in the move
+-- menu, the battler being aimed at blinking while the move menu stays up,
+-- and the monster choosing (plus, while aiming, the target's box) bobbing as
+-- the cart bobs them.
 --
 -- ------- the contract (what MediatedBattle / CoopBattle call)
 --
@@ -823,6 +825,11 @@ end
 --       carrying `double`.
 --   M.gen3BlinkShown(blink, frame) -> whether the aimed-at battler is lit on
 --       this frame (the cart's blink, pure).
+--   M.gen3PreviewTargets(view) -> the battlers the hovered move would wash
+--       ({ a1 = true, b2 = true ... }) and the fade's start (0..16), or nil, 0
+--       when the double's move menu is not up (the cart's rule, pure).
+--   M.gen3PreviewWash(startY, n) -> the wash n frames into one preview fade
+--       (0..16 towards white) and the fade's whole length in frames (pure).
 --   M.gen3CommandLabel(idOrLabel) -> the cart's own word for a command.
 --   M.G3 -> the geometry constants; M.G3D -> the double screen's.
 --
@@ -847,7 +854,12 @@ end
 --   prompt          "What will\nX do?" (the action menu's question)
 --   commands        labels in grid order (FIGHT BAG / POKéMON RUN), and
 --   commandIndex    the cursor (1..4); aliases commandCursor
---   moves           { { label | name, type (name or pret number), pp, maxPp } }
+--   moves           { { label | name, type (name or pret number), pp, maxPp,
+--                     target, num } } -- `target` (the move's MOVE_TARGET_*
+--                     byte as the cart's move menu reads it: a Ghost's CURSE
+--                     is SELECTED) and `num` (its move number; else a
+--                     numeric `id`) drive a double's hover preview; a row
+--                     without `target` previews nothing
 --   cursor          the move cursor (1..4); alias moveCursor
 --   list            { title, rows = { { label, right, dim, front, icon,
 --                     level, hp, maxHp, status } }, cursor } -- a POKéMON
@@ -881,14 +893,23 @@ end
 --                              -- the battler being aimed at ("a" an ally,
 --                              "b" a foe); `since` (optional) is the `frame`
 --                              the cursor landed on, which restarts the
---                              cart's blink, else the page clock phases it.
+--                              cart's blink, else the page clock phases it;
+--                     hpText = true -- the player's two boxes show their HP
+--                              figures in place of the bars (the cart's
+--                              START in the action menu, healthbox.lua
+--                              swapHpBarsWithHpText; the foes' never do).
 --                   Seats are the shape above (the ally's `expFrac` is not
---                   drawn: the doubles box has no EXP bar). With phase
---                   "target" the move menu (`moves`, `cursor`) stays up and
---                   the target blinks; a `list` is not drawn then (the cart
---                   has no TARGET window). `foeParty` is not drawn: the cart
---                   shows that row only at the intro and on a switch, and
---                   the doubles field has no free room for a standing one.
+--                   drawn: the doubles box has no EXP bar). While the move
+--                   menu is up (`moves`, no `commands` / `list`, phase not
+--                   "target") the battlers the hovered move will hit wash
+--                   white, by its `target` and `num`, on the cart's fade
+--                   clock (kept on `state`; without one the page clock
+--                   phases it). With phase "target" the move menu (`moves`,
+--                   `cursor`) stays up and the target blinks; a `list` is
+--                   not drawn then (the cart has no TARGET window).
+--                   `foeParty` is not drawn: the cart shows that row only at
+--                   the intro and on a switch, and the doubles field has no
+--                   free room for a standing one.
 
 -- pret / engine positions. Every number is a layout constant from the engine's
 -- battle UI source (the pret lines it cites), not a byte out of any ROM.
@@ -962,6 +983,22 @@ M.G3D = {
   BOUNCE_BOX = { idx = 128, delta = 7, amp = 1 },
   BOUNCE_MON = { idx = 192, delta = 7, amp = 1 },
   BOUNCE_TARGET_BOX = { idx = 128, delta = 15, amp = 1 },
+  -- ui.lua preview_targets / tick_preview (battle_controller_player.c:2889,
+  -- :442) over the cart's palette fade (ui.lua fade_begin / fade_update,
+  -- palette.c:151, :393, :757): a hovered move's battlers wash towards white
+  -- from startY 8/16, deltaY 2 lighter a step, each step a delay of 8 frames
+  -- plus the fade's two passes (BG, then the OBJ palettes the battlers wear),
+  -- then 5 frames finishing; the next fade begins the frame after
+  PREVIEW_Y = 8, PREVIEW_DELTA = 2, PREVIEW_DELAY = 8, PREVIEW_FINISH = 5,
+  -- the fade's blend colour, RGB_WHITE in the cart's 5-bit channels
+  PREVIEW_RGB = { 31, 31, 31 },
+  -- healthbox.lua draw_doubles / draw_hp_text_doubles (pokefirered
+  -- battle_interface.c:864, :925): with the figures swapped in, "cur/" and
+  -- "max" sit one 8px cell a character from the bar's left + 8 (the small
+  -- font 3 rows higher than the bold digits), and the box's bottom-right
+  -- corner tile goes to the corner + (96, 16)
+  HP_TEXT_DX = 8, HP_TEXT_CELL = 8, HP_TEXT_FONT_DY = -3,
+  HP_TEXT_CORNER_TILE = 116, HP_TEXT_CORNER_DX = 96,
 }
 local D = M.G3D
 
@@ -999,6 +1036,11 @@ local function c5(v) return math.floor(v * 255 / 31 + 0.5) / 255 end
 local CREAM = { c5(31), c5(31), c5(27), 1 }
 local HB_TEXT = {
   fg = { c5(8), c5(8), c5(8), 1 }, shadow = { c5(27), c5(26), c5(22), 1 },
+}
+-- The HP bar's own ink, which a doubles box's swapped-in figures print in
+-- when the cache has no bold HP digits (healthbox.lua BAR_FG / BAR_SHADOW).
+local HB_HP_TEXT = {
+  fg = { c5(7), c5(7), c5(7), 1 }, shadow = { c5(26), c5(25), c5(23), 1 },
 }
 
 -- The "Lv" placeholder the healthbox sheets bake (pret overwrites it with the
@@ -1275,15 +1317,99 @@ function M.gen3BlinkShown(blink, frame)
   return math.floor(n / D.BLINK_FRAMES) % 2 == 0
 end
 
+-- MOVE_TARGET_* (the engine's ui.lua MT, pokefirered include/battle.h).
+local MT = {
+  SELECTED = 0, DEPENDS = 1, USER_OR_SELECTED = 2, RANDOM = 4, BOTH = 8,
+  USER = 16, FOES_AND_ALLY = 32, OPPONENTS_FIELD = 64,
+}
+-- ui.lua PREVIEW_ALL / PREVIEW_ALLIES / MOVE_HELPING_HAND
+-- (battle_controller_player.c:2889): the USER moves that touch the whole
+-- field (Haze, Sandstorm, Perish Song, the weathers, the Sports), the user's
+-- side (Safeguard, the screens, Mist, Heal Bell, Aromatherapy) or the
+-- partner, by pret move number.
+local PREVIEW_ALL = {
+  [114] = true, [201] = true, [195] = true, [240] = true, [241] = true,
+  [258] = true, [300] = true, [346] = true,
+}
+local PREVIEW_ALLIES = {
+  [219] = true, [115] = true, [113] = true, [54] = true, [215] = true, [312] = true,
+}
+local MOVE_HELPING_HAND = 270
+
+local function allFour() return { a1 = true, b1 = true, a2 = true, b2 = true } end
+
+-- The cart's rule for one move (ui.lua preview_targets): an exact match on
+-- the target byte, as the engine compares it. `chooser` is the ally whose
+-- menu is up (1 | 2), its partner the other.
+local function previewMask(move, chooser)
+  local tt = math.floor(num3(move.target, 0))
+  local num = math.floor(num3(move.num, num3(move.id, 0)))
+  local partner = "a" .. (3 - chooser)
+  if tt == MT.SELECTED or tt == MT.DEPENDS or tt == MT.USER_OR_SELECTED or tt == MT.RANDOM then
+    -- still to be aimed (or the cart's own pick): all four from 0, which
+    -- shows nothing -- the cart lights only what it already knows is hit
+    return allFour(), 0
+  elseif tt == MT.BOTH or tt == MT.OPPONENTS_FIELD then
+    return { b1 = true, b2 = true }, D.PREVIEW_Y
+  elseif tt == MT.USER then
+    if PREVIEW_ALL[num] then return allFour(), D.PREVIEW_Y end
+    if PREVIEW_ALLIES[num] then return { a1 = true, a2 = true }, D.PREVIEW_Y end
+    if num == MOVE_HELPING_HAND then return { [partner] = true }, D.PREVIEW_Y end
+    return { ["a" .. chooser] = true }, D.PREVIEW_Y
+  elseif tt == MT.FOES_AND_ALLY then
+    return { b1 = true, [partner] = true, b2 = true }, D.PREVIEW_Y
+  end
+  return {}, 0
+end
+
+-- The hovered move's preview in a double's move menu: the battlers keyed
+-- "a1".."b2" (the view's allies / foes) and the fade's startY. The cart runs
+-- it only in the move menu (ui.lua tick_preview: is_double and mode
+-- "moves"), so not while aiming, nor over a list or the action menu.
+function M.gen3PreviewTargets(view)
+  view = type(view) == "table" and view or {}
+  local double = type(view.double) == "table" and view.double or nil
+  if not double or view.phase == "target" or view.commands ~= nil
+     or type(view.list) == "table" or type(view.moves) ~= "table" then
+    return nil, 0
+  end
+  local moves = view.moves
+  local cursor = math.max(1, math.min(4, math.floor(num3(view.cursor or view.moveCursor, 1))))
+  if #moves > 0 and cursor > #moves then cursor = #moves end
+  local move = moves[cursor]
+  if type(move) ~= "table" or tonumber(move.target) == nil then return nil, 0 end
+  -- the engine's chooser is Ui._active or battler 0
+  local chooser = tonumber(double.choosing)
+  if chooser ~= 1 and chooser ~= 2 then chooser = 1 end
+  return previewMask(move, chooser)
+end
+
+-- One preview fade, `n` frames in (ui.lua fade_begin / fade_update): startY
+-- from the frame it begins, deltaY lighter every delay + 2 frames down to 0,
+-- then the finishing frames; the cart's next fade begins the frame after
+-- them, so a fade from 8 lasts 46 frames and one from 0 (nothing lit) 6.
+function M.gen3PreviewWash(startY, n)
+  startY = math.max(0, math.floor(num3(startY, 0)))
+  local stepFrames = D.PREVIEW_DELAY + 2
+  local lit = math.ceil(startY / D.PREVIEW_DELTA) * stepFrames
+  local length = lit + D.PREVIEW_FINISH + 1
+  n = math.floor(num3(n, 0))
+  if n < 0 or n > lit then return 0, length end
+  return math.max(0, startY - D.PREVIEW_DELTA * math.floor(n / stepFrames)), length
+end
+
 -- The double screen's rects: per battler its pic frame (64x64 on its feet;
 -- the player's cut at the textbox as the cart cuts them) and its healthbox's
 -- drawn part, keyed foePic1 / foeBox1 ... allyPic2 / allyBox2 for the seats
--- present; `blink` is the aimed-at battler's pic; `list` a window the page
--- draws. Bobbing (two pixels at most) is not in them. On the cart the pics
--- overlap one another and the healthboxes cover the pics' edges by design;
--- what holds is that everything lies on the 240x160 page, no healthbox
--- reaches the textbox, the two sides' boxes stay apart, and the two boxes of
--- one side share at most SIDE_BOX_SHARE rows.
+-- present; `blink` is the aimed-at battler's pic; `preview` the pics the
+-- hovered move washes (a list, in the cart's battler order 0..3; absent when
+-- the preview lights nothing); allyHp1 / allyHp2 the HP figures' cells when
+-- `hpText` swaps them in; `list` a window the page draws. Bobbing (two
+-- pixels at most) is not in them. On the cart the pics overlap one another
+-- and the healthboxes cover the pics' edges by design; what holds is that
+-- everything lies on the 240x160 page, no healthbox reaches the textbox, the
+-- two sides' boxes stay apart, and the two boxes of one side share at most
+-- SIDE_BOX_SHARE rows.
 function M.gen3DoubleLayout(view)
   view = type(view) == "table" and view or {}
   local double = type(view.double) == "table" and view.double or {}
@@ -1298,12 +1424,26 @@ function M.gen3DoubleLayout(view)
       out["allyBox" .. i] = rect(D.ALLY_BOX_X[i] + vis.dx, D.ALLY_BOX_Y[i] + vis.dy, vis.w, vis.h)
       local top = D.ALLY_FEET_Y[i] + 1 - G.PIC
       out["allyPic" .. i] = rect(D.ALLY_PIC_X[i] - G.PIC / 2, top, G.PIC, G.PANEL_Y - top)
+      if double.hpText == true then
+        -- seven cells from the bar's left + 8: "cur/" then "max"
+        out["allyHp" .. i] = rect(D.ALLY_BOX_X[i] + 32 + D.HP_TEXT_DX, D.ALLY_BOX_Y[i] + 16,
+          7 * D.HP_TEXT_CELL, D.HP_TEXT_CELL)
+      end
     end
   end
   local side, index = blinkTarget(double.blink)
   if side then
     local pic = out[(side == "a" and "allyPic" or "foePic") .. index]
     if pic then out.blink = rect(pic.x, pic.y, pic.w, pic.h) end
+  end
+  local mask, startY = M.gen3PreviewTargets(view)
+  if mask and startY > 0 then
+    local lit = {}
+    for _, key in ipairs({ "a1", "b1", "a2", "b2" }) do
+      local pic = mask[key] and out[(key:sub(1, 1) == "a" and "allyPic" or "foePic") .. key:sub(2)]
+      if pic then lit[#lit + 1] = rect(pic.x, pic.y, pic.w, pic.h) end
+    end
+    if #lit > 0 then out.preview = lit end
   end
   if type(view.list) == "table" and view.phase ~= "target" and not M.gen3IsPartyList(view.list) then
     out.list = rect((G.LIST_TX - 1) * 8, (G.LIST_TY - 1) * 8,
@@ -1483,9 +1623,36 @@ end
 -- healthbox.lua draw_doubles lays it (pokefirered battle_interface.c:1531,
 -- :1608): the doubles sheet (BattleChrome.drawDoublesBox falls back to the
 -- singles foe sheet itself when the cache has none), the HP bar with the
--- status border on either side, name and gender, Lv, the status icon. No HP
--- figures (the cart swaps them in only on START), no EXP bar, no caught ball.
-local function drawDoubleBox(gfx, C, F, seat, isPlayer, x, y)
+-- status border on either side, name and gender, Lv, the status icon. No EXP
+-- bar, no caught ball; HP figures only where `hpText` (the player's boxes
+-- after START) swaps them in for the bar.
+--
+-- The figures as healthbox.lua draw_hp_text_doubles prints them
+-- (battle_interface.c:864): "%3d/" and "%3d", a character to an 8px cell
+-- from the bar's left + 8, blanks skipped -- the cart's bold HP digits when
+-- the cache has them, else the small font in the bar's ink.
+local function drawDoubleHpText(C, F, hp, maxHp, bx, by)
+  local text = ("%3d/%3d"):format(math.max(0, math.min(999, math.floor(hp))),
+    math.max(0, math.min(999, math.floor(maxHp))))
+  local bold = false
+  if type(C.hasHpBoldDigits) == "function" and type(C.drawHpBoldChar) == "function" then
+    local ok, has = pcall(C.hasHpBoldDigits)
+    bold = ok and has == true
+  end
+  for i = 1, #text do
+    local ch = text:sub(i, i)
+    if ch ~= " " then
+      local cx = bx + D.HP_TEXT_DX + (i - 1) * D.HP_TEXT_CELL
+      if bold then
+        pcall(C.drawHpBoldChar, ch, cx, by)
+      else
+        drawText(F, ch, cx, by + D.HP_TEXT_FONT_DY, { small = true, colors = HB_HP_TEXT })
+      end
+    end
+  end
+end
+
+local function drawDoubleBox(gfx, C, F, seat, isPlayer, x, y, hpText)
   if type(C.drawDoublesBox) == "function" then
     pcall(C.drawDoublesBox, isPlayer, x, y)
   else
@@ -1496,7 +1663,16 @@ local function drawDoubleBox(gfx, C, F, seat, isPlayer, x, y)
   local hp = math.max(0, math.min(maxHp, num3(seat.hp, 0)))
   local ailment = ailmentOf(seat)
   local statused = ailment >= 1 and ailment <= 6
-  pcall(C.drawHpBar, x + (isPlayer and 32 or 24), y + 16, hp, maxHp, statused)
+  if hpText and isPlayer then
+    -- the figures where the bar was, and the box's corner tile that closes
+    -- them in (healthbox.lua draw_doubles, battle_interface.c:925)
+    drawDoubleHpText(C, F, hp, maxHp, x + 32, y + 16)
+    if type(C.drawElementTile) == "function" then
+      pcall(C.drawElementTile, D.HP_TEXT_CORNER_TILE, x + D.HP_TEXT_CORNER_DX, y + 16, true)
+    end
+  else
+    pcall(C.drawHpBar, x + (isPlayer and 32 or 24), y + 16, hp, maxHp, statused)
+  end
   drawNameGender(F, tostring(seat.name or "?"), seat.gender, x + (isPlayer and 16 or 8), y + 3)
   drawLevel(F, seat.shownLevel or seat.level, x, y + 3, isPlayer and 72 or 64)
   local SummaryChrome = g3eng("src.ui.game3.summary_chrome")
@@ -2046,11 +2222,74 @@ local function doubleMotion(view, double, frame)
   return hiddenKey, picKey, picDy, boxKey, boxDy
 end
 
+-- The preview's wash this frame, { a1 = coeff, ... } for the battlers lit,
+-- else nil. A cart fade, once begun, plays out with the mask it began with
+-- (BeginNormalPaletteFade refuses while one runs, palette.c:151, the
+-- clearing fade a cursor move asks for as well), so a cursor moved mid-fade
+-- lets the old move's battlers finish first, and the next fade takes the
+-- move hovered when it begins. That needs where the running fade began and
+-- what it lights: kept on the screen's state (as the terrain is), restarted
+-- when the menu opens; with no state the page clock phases it.
+local PREVIEW_MEMO = "__g3PreviewFade"
+local function previewWash(view, double, state, frame)
+  local mask, startY = M.gen3PreviewTargets(view)
+  local memo = type(state) == "table"
+  if not mask then
+    if memo and rawget(state, PREVIEW_MEMO) ~= nil then rawset(state, PREVIEW_MEMO, nil) end
+    return nil
+  end
+  local f = math.floor(num3(frame, 0))
+  local chooser = double.choosing
+  local run = memo and rawget(state, PREVIEW_MEMO) or nil
+  if type(run) ~= "table" or run.chooser ~= chooser or f < run.start then
+    -- the menu just opened: the cart's first fade begins on this frame
+    run = { start = f, mask = mask, startY = startY, chooser = chooser }
+    if memo then
+      rawset(state, PREVIEW_MEMO, run)
+    else
+      local _, length = M.gen3PreviewWash(startY, 0)
+      run.start = f - f % length
+    end
+  else
+    local _, length = M.gen3PreviewWash(run.startY, 0)
+    if f >= run.start + length then
+      -- the next fade, on the move hovered now (whole fades skipped between
+      -- two draws are taken to have been this move's too)
+      local _, nextLength = M.gen3PreviewWash(startY, 0)
+      local begun = run.start + length
+      run.start = begun + math.floor((f - begun) / nextLength) * nextLength
+      run.mask, run.startY = mask, startY
+    end
+  end
+  local coeff = M.gen3PreviewWash(run.startY, f - run.start)
+  if coeff <= 0 then return nil end
+  local lit = nil
+  for key in pairs(run.mask) do
+    lit = lit or {}
+    lit[key] = coeff
+  end
+  return lit
+end
+
+-- The cart's palette blend for one battler (ui.lua draw_mon:
+-- BallOpen.setBlendShader(coeff, 31, 31, 31), the engine's own BlendPalette
+-- shader) -> true when it is on, for the caller to switch off again.
+local function washOn(coeff)
+  if not coeff or coeff <= 0 then return false end
+  local BallOpen = g3eng("src.core.game3.battle.ball_open")
+  if not (BallOpen and type(BallOpen.setBlendShader) == "function") then return false end
+  local rgb = D.PREVIEW_RGB
+  local ok, on = pcall(BallOpen.setBlendShader, coeff, rgb[1], rgb[2], rgb[3])
+  return ok and on == true
+end
+
 -- The double screen's field (ui.lua draw_double_mons and
 -- draw_double_healthboxes): the foe trainer first, the four battlers back to
--- front with the player's back pic between the sides, the overlays, then the
--- four healthboxes, the first battler of each side over its partner.
-local function drawDoubleField(gfx, C, F, BF, view, double, frame)
+-- front with the player's back pic between the sides (the move preview's
+-- wash on the pics it lights, a doll too, as the cart blends the battler's
+-- palette; `wash` is previewWash's), the overlays, then the four
+-- healthboxes, the first battler of each side over its partner.
+local function drawDoubleField(gfx, C, F, BF, view, double, frame, wash)
   local foes, allies = double.foes, double.allies
   local anyFoe = doubleSeat(foes, 1) or doubleSeat(foes, 2)
   local anyAlly = doubleSeat(allies, 1) or doubleSeat(allies, 2)
@@ -2074,6 +2313,7 @@ local function drawDoubleField(gfx, C, F, BF, view, double, frame)
     local out = foesOut
     if isPlayer then out = alliesOut end
     if seat and out and not seat.hidden and hiddenKey ~= side .. i then
+      local washed = wash ~= nil and washOn(wash[side .. i])
       if isPlayer then
         if seat.substitute then
           -- the cart stands a doll on its substitute line, unbobbed
@@ -2091,9 +2331,11 @@ local function drawDoubleField(gfx, C, F, BF, view, double, frame)
       else
         drawFoePic(gfx, BF, seat, D.FOE_PIC_X[i], D.FOE_FEET_Y[i])
       end
+      if washed then pcall(gfx.setShader) end
     end
   end
   drawFieldOverlays(gfx, BF, view, frame)
+  local hpText = double.hpText == true
   for _, at in ipairs(D.BOX_ORDER) do
     local side, i = at[1], at[2]
     local isPlayer = side == "a"
@@ -2102,7 +2344,7 @@ local function drawDoubleField(gfx, C, F, BF, view, double, frame)
       local x = isPlayer and D.ALLY_BOX_X[i] or D.FOE_BOX_X[i]
       local y = isPlayer and D.ALLY_BOX_Y[i] or D.FOE_BOX_Y[i]
       if boxKey == side .. i then y = y + boxDy end
-      drawDoubleBox(gfx, C, F, seat, isPlayer, x, y)
+      drawDoubleBox(gfx, C, F, seat, isPlayer, x, y, hpText)
     end
   end
 end
@@ -2137,6 +2379,9 @@ function M.drawGen3(view, state)
       -- TARGET window, so the screen's list is not drawn then
       local list = view.list
       if double and view.phase == "target" then list = nil end
+      -- the move preview's fade clock, run (and reset once the move menu
+      -- goes) whatever the page shows, the POKéMON page included
+      local wash = double and previewWash(view, double, state, frame) or nil
       -- a POKéMON list is the whole page
       if type(list) == "table" and M.gen3IsPartyList(list) then
         drawPartyPage(gfx, C, F, BF, list, frame)
@@ -2152,7 +2397,7 @@ function M.drawGen3(view, state)
         gfx.setColor(1, 1, 1, 1)
       end
       if double then
-        drawDoubleField(gfx, C, F, BF, view, double, frame)
+        drawDoubleField(gfx, C, F, BF, view, double, frame, wash)
       else
         drawSingleField(gfx, C, F, BF, view, frame)
       end

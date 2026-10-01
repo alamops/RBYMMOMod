@@ -937,7 +937,11 @@ M.SOLO_REFUSED_BATTLE_TYPES = {
 --     two AIs on one side, each with its own defeat flag).
 --
 -- Audited and deliberately **not** listed: `double` (a trainer's own
--- double-battle flag -- the Gen 3 referee plays doubles), `trainer` and
+-- double-battle flag: a *lone* double -- one trainer, one party, one AI --
+-- is fought, two seats a side over one shared team each, when the player has
+-- two usable monsters, and handed back to the cart's own "not enough" refusal
+-- when not; SoloBattle.gen3TakesDouble decides, and `partner` /
+-- `twoOpponents` above stay refused whatever it says), `trainer` and
 -- `wild` themselves, and `autoFight` / `headless` (the engine's own
 -- test-driver switches, never armed by a fight a player walks into).
 M.SOLO_REFUSED_GEN3 = {

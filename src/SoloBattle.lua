@@ -127,7 +127,11 @@
 -- a level's moves, the catch and the bag are still the screen's, on its Gen 3
 -- arm, exactly as the header says for Gen 1.  The referee is
 -- src/BattleSim3, the sheets src/Sheet3.lua's; the arena / classic GBA page
--- and the music are MediatedBattle's Gen 3 arm unchanged.
+-- and the music are MediatedBattle's Gen 3 arm unchanged.  A lone trainer
+-- double (one trainer sending out two) is the one Gen 3 fight with a second
+-- screen: two seats a side over one shared team each on the referee, and
+-- CoopBattle's solo double in front of it (M:_doubleScreen3) -- see
+-- docs/plans/gen3-solo-doubles.md.
 
 local need, mod = ...
 local Config = need("Config")
@@ -335,10 +339,33 @@ end
 -- engine's RNG, so a speculative call spends a gym leader's FULL HEAL on a turn
 -- nobody asked about. `Turn:autoPick` refuses politely when a seat owes
 -- nothing; the brain has no way to know.
+-- A shared team's emptied seat (BattleSim3's `seats = 2`, a Gen 3 double) is
+-- owed a monster only while the bench still holds one after every sibling
+-- *ahead* of it that is owed one too -- `Battle:_canRefill`, restated like the
+-- three above (pret HandleFaintedMonActions walks the battlers in order), over
+-- the referee's public `benchOf`, which already leaves out the partner's
+-- active monster and its claim.  Both seats down and one monster left: only
+-- the first is asked.
+local function canRefill(sim, fighter)
+  local ok, bench = pcall(sim.benchOf, sim, fighter)
+  if not (ok and type(bench) == "table") then return hasLiving(fighter) end
+  local n = #bench
+  for _, seat in ipairs(fighter.seats) do
+    if seat == fighter then break end
+    if seat.mustReplace and seat.choice == nil then n = n - 1 end
+  end
+  return n > 0
+end
+
 local function owes(sim, fighter)
   if not (sim and fighter) then return false end
   if fighter.choice ~= nil then return false end
-  if fighter.mustReplace then return hasLiving(fighter) end
+  if fighter.mustReplace then
+    if type(fighter.seats) == "table" and #fighter.seats > 1 then
+      return canRefill(sim, fighter)
+    end
+    return hasLiving(fighter)
+  end
   if sim.phase == "replace" then return false end
   if sim.phase ~= "choice" then return false end
   return activeOf(fighter) ~= nil
@@ -834,6 +861,13 @@ end
 function M:_choose(payload)
   local sim = self.sim
   if not (sim and type(payload) == "table") then return false end
+  -- Gen 3: which of our seats this is for (a lone double has two; see
+  -- M:_seat3).  A choice naming neither is refused, and the menu stays open.
+  local seat = PLAYER_SEAT
+  if self.generation == 3 then
+    seat = self:_seat3(payload)
+    if not seat then return false end
+  end
   if payload.action == "run" then
     if self.kind == "trainer" then
       self.refuseRun = true
@@ -847,8 +881,8 @@ function M:_choose(payload)
     -- a line and the menu back, the turn unspent, so that is parked for the
     -- pump like the trainer refusal above.
     if self.generation == 3 then
-      if self:_submit3(payload) then return true end
-      self.cantEscape = self:_cantEscapeText3()
+      if self:_submit3(payload, seat) then return true end
+      self.cantEscape = self:_cantEscapeText3(seat)
       return true
     end
     if not self:_escapes() then
@@ -856,20 +890,25 @@ function M:_choose(payload)
       return true
     end
   end
-  if self.generation == 3 then return self:_submit3(payload) end
+  if self.generation == 3 then return self:_submit3(payload, seat) end
   return sim:submitChoice(PLAYER_SEAT, payload) and true or false
 end
 
--- The player's choice into the Gen 3 referee.  The last answer of a turn
+-- The player's choice into the Gen 3 referee, for `seat` (PLAYER_SEAT, or a
+-- lone double's second seat).  The last answer of a turn
 -- resolves that turn inside `submitChoice`, so a resolution that throws would
 -- throw out through the screen's own menu code; it is contained here instead.
 -- A choice that was taken before the throw (the referee is left `resolving`)
 -- answers true -- the menu closes, and M:_pump hands the fight back once it
 -- sees the referee is not coming out of it; one refused before it answers
 -- false, and the menu stays open.
-function M:_submit3(payload)
+--
+-- The double screen's `seat` rides along into `submitChoice` untouched: the
+-- referee builds the filed choice from the fields it knows (Turn.lua
+-- `_normaliseChoice`) and reads nothing else, so there is nothing to strip.
+function M:_submit3(payload, seat)
   local sim = self.sim
-  local ok, filed = pcall(sim.submitChoice, sim, PLAYER_SEAT, payload)
+  local ok, filed = pcall(sim.submitChoice, sim, seat or PLAYER_SEAT, payload)
   if ok then return filed and true or false end
   self:warn("choose3", "the mod's battle referee failed on this turn (%s); the fight is "
     .. "handed back to the ordinary battle system; report it with the move or item "
@@ -1249,6 +1288,8 @@ end
 -- or skip (no target) rather than declining, and the loop is what carries a
 -- trap/recharge chain without a wait line.
 function M:_answerFoe()
+  -- A Gen 3 lone double has two trainer seats to answer, and its own loop.
+  if self.gen3 and self.gen3.double then return self:_answerFoes3() end
   local sim = self.sim
   local foe = sim and sim.byId and sim.byId[FOE_SEAT]
   if not (sim and foe) then return false end
@@ -1854,14 +1895,55 @@ function M.gen3Refused(...)
   return false
 end
 
--- A double battle.  The Gen 3 referee plays doubles (co-op seats two a side)
--- but this file's screen is MediatedBattle, the 1v1 -- one fighter a side, one
--- monster out each -- so a trainer who sends out two at once is handed back to
--- the engine rather than fought as a single battle the cart never had.
+-- A double battle of any shape: the trainer's own double flag, its row's, or a
+-- second trainer.  Not the take-over decision on its own -- M.gen3TakesDouble
+-- is -- but the question that sends a fight to it: anything this says yes to
+-- is either fought as the cart's double (two monsters a side from one shared
+-- team, CoopBattle's solo double screen) or handed back, never fought as a
+-- single battle the cart never had.
 function M.gen3Double(opts, foe)
   opts = type(opts) == "table" and opts or {}
   if opts.double == true or opts.trainerIdB ~= nil then return true end
   return type(foe) == "table" and foe.doubleBattle == true
+end
+
+-- A *lone* double: one trainer -- one party, one AI, one defeat flag -- who
+-- sends out two at once (trainerbattle types 4 / 6 / 7 / 8, the row's
+-- doubleBattle).  A second trainer (`trainerIdB`, gBattleTypeFlags'
+-- TWO_OPPONENTS) is not: that is two parties and two AIs on one side, which
+-- the referee does not seat (Config.SOLO_REFUSED_GEN3 refuses
+-- `twoOpponents` too).
+function M.gen3LoneDouble(opts, foe)
+  opts = type(opts) == "table" and opts or {}
+  if opts.trainerIdB ~= nil then return false end
+  if opts.double == true then return true end
+  return type(foe) == "table" and foe.doubleBattle == true
+end
+
+-- How many monsters of this party can be sent out: a species, not an egg, HP
+-- above zero -- the count the engine's Party.monsStateToDoubles takes (pret
+-- GetMonsStateToDoubles, pokefirered/src/pokemon.c), which battle_bridge's
+-- start and the trainerbattle opcode both gate a double on.
+function M.gen3UsableMons(party)
+  local n = 0
+  for _, mon in ipairs(type(party) == "table" and party or {}) do
+    if type(mon) == "table" then
+      local species = int3(mon.species or mon.speciesId, 0)
+      if species ~= 0 and species ~= 412 and not mon.isEgg and not mon.egg
+          and int3(mon.hp, 0) ~= 0 then
+        n = n + 1
+      end
+    end
+  end
+  return n
+end
+
+-- The take-over decision for a double: a lone one, and a party that can put
+-- two monsters on the field (PLAYER_HAS_TWO_USABLE_MONS).  With fewer the
+-- fight is handed back and the cart says its own "not enough POKéMON" and
+-- halts, exactly as it does with this mod off.
+function M.gen3TakesDouble(opts, foe, party)
+  return M.gen3LoneDouble(opts, foe) and M.gen3UsableMons(party) >= 2
 end
 
 -- ------------------------------------------------------------------
@@ -2142,6 +2224,10 @@ function M.gen3TrainerRecord(foe, trainerId, opts)
     graphicsId = graphicsId,
     defeatText = textOf3(opts.defeatText) or textOf3(foe.defeatText) or textOf3(dialogs.defeat),
     victoryText = textOf3(opts.victoryText) or textOf3(foe.victoryText) or textOf3(dialogs.victory),
+    -- A lone double (M.gen3LoneDouble): the screen's "Go! X and Y!" / "sent
+    -- out X and Y!" intro, the prize's x2 and the ending read it.  Absent on
+    -- a single, so a single trainer's record is what it always was.
+    doubleBattle = M.gen3LoneDouble(opts, foe) or nil,
   }
 end
 
@@ -2366,7 +2452,14 @@ function M:fromGen3Trainer(game, foe, opts)
   end
   if type(foe) ~= "table" then return false end
   if M.gen3Refused(opts, foe) then return false end
-  if M.gen3Double(opts, foe) then return false end
+  -- A lone double with two usable monsters is fought as the cart's double;
+  -- any other double (a second trainer, a party that cannot field two) is
+  -- the cart's to refuse in its own words.
+  local double = M.gen3Double(opts, foe)
+  if double then
+    local session = Gen3.session()
+    if not M.gen3TakesDouble(opts, foe, session and session.party) then return false end
+  end
   if self:_fightOnScreen3() then return false end
   -- A prebuilt party has been through the `trainer.party` hook already (the
   -- stand-in built it with M.gen3HookedFoe); it is not run a second time.
@@ -2380,7 +2473,8 @@ function M:fromGen3Trainer(game, foe, opts)
     return false
   end
   local trainer = M.gen3TrainerRecord(hooked, trainerId, opts)
-  return self:_begin3(game, "trainer", party, opts, { foe = foe, trainer = trainer })
+  return self:_begin3(game, "trainer", party, opts,
+    { foe = foe, trainer = trainer, double = double or nil })
 end
 
 -- Another fight already owns the screen: the cart's own battle, or a mod
@@ -2418,26 +2512,58 @@ function M:_begin3(game, kind, party, opts, extra)
   local mode = (kind == "wild") and Config.SOLO_WILD_MODE or Config.SOLO_TRAINER_MODE
   local trainer = extra.trainer
   local pending = {}
+  -- A lone double (M.gen3TakesDouble said yes): two seats a side over one
+  -- shared team each -- the cart's gPlayerParty behind battlers 0 and 2,
+  -- gEnemyParty behind 1 and 3 -- except that a trainer with one monster
+  -- fields one (pret's absent battler from the start).
+  local double = extra.double == true and kind == "trainer"
+  local foeSeats = (double and #enemySheets >= 2) and 2 or 1
   -- Stated before the screen is built: the transport's moveset handling reads
   -- it, and so does every Gen 3 arm the pump reaches.
   self.generation = 3
-  local fight = MediatedBattle.new({
-    transport = self:_transport(pending),
-    ui = self.ui,
-    game = game,
-    battle = battleId,
-    role = "host",
-    peerId = (kind ~= "wild") and FOE_SEAT or nil,
-    peerName = (kind == "wild") and "WILD" or M.gen3FoeLabel(trainer),
-    trainer = (kind ~= "wild") and trainer or nil,
-    npcParty = (kind ~= "wild") and enemySheets or nil,
-    mode = mode,
-    wildParty = (kind == "wild") and enemySheets or nil,
-    wildCatchMon = extra.wildMon,
-    onDone = function(result, toLearn) self:_ended(result, toLearn) end,
-  })
+  local fight
+  if double then
+    fight = self:_doubleScreen3(game, pending, {
+      battle = battleId, mode = mode, trainer = trainer,
+      enemySheets = enemySheets, foeSeats = foeSeats,
+    })
+    if not fight then
+      self.generation = nil
+      return false
+    end
+  else
+    fight = MediatedBattle.new({
+      transport = self:_transport(pending),
+      ui = self.ui,
+      game = game,
+      battle = battleId,
+      role = "host",
+      peerId = (kind ~= "wild") and FOE_SEAT or nil,
+      peerName = (kind == "wild") and "WILD" or M.gen3FoeLabel(trainer),
+      trainer = (kind ~= "wild") and trainer or nil,
+      npcParty = (kind ~= "wild") and enemySheets or nil,
+      mode = mode,
+      wildParty = (kind == "wild") and enemySheets or nil,
+      wildCatchMon = extra.wildMon,
+      onDone = function(result, toLearn) self:_ended(result, toLearn) end,
+    })
+  end
 
-  local started = fight:start(game)
+  local started
+  if double then
+    -- The double screen is the newer code at this boundary; a throw out of
+    -- its upload is a fight not taken, said once, rather than a raise into
+    -- src/Client.lua's divert.
+    local okS, value = pcall(fight.start, fight, game)
+    if not okS then
+      self:warn("double3start", "the mod's double-battle screen could not describe your party "
+        .. "(%s), so this double battle is fought the ordinary way; report it with the "
+        .. "trainer you met", tostring(value))
+    end
+    started = okS and value
+  else
+    started = fight:start(game)
+  end
   local mine = pending.party
   if not (started and type(mine) == "table" and type(mine.mons) == "table"
           and #mine.mons > 0) then
@@ -2468,9 +2594,17 @@ function M:_begin3(game, kind, party, opts, extra)
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
     resolveTimeout = Config.BATTLE_RESOLVE_TIMEOUT,
     now = 0,
+    -- A double is one entry a side with `seats` on it (contract C1 of
+    -- docs/plans/gen3-solo-doubles.md, the shared team of
+    -- docs/plans/gen3-battle-sheet.md §1.3): the referee expands it into two
+    -- seats over the one party and the one bag -- the trainer's four item
+    -- slots are spent from a single kit whichever of its monsters reaches
+    -- for them, as on the cart.  A single leaves `seats` unset, which is the
+    -- one-seat entry the referee always had.
     sides = {
       a = { {
         playerId = PLAYER_SEAT,
+        seats = double and 2 or nil,
         name = (player and player.name ~= nil and player.name ~= "") and player.name or "PLAYER",
         mons = mine.mons,
         bag = mine.bag,
@@ -2482,6 +2616,7 @@ function M:_begin3(game, kind, party, opts, extra)
       } },
       b = { {
         playerId = FOE_SEAT,
+        seats = double and foeSeats or nil,
         name = foeName,
         mons = enemySheets,
         -- The trainer's four item slots as the referee's bag (§4 ids only):
@@ -2533,6 +2668,13 @@ function M:_begin3(game, kind, party, opts, extra)
     ranSide = nil,
     -- pret gBattleResults, as far as the ending reads it (the TV, M:_note3).
     results = { catchAttempts = {}, usedMasterBall = false, lastUsedItem = 0 },
+    -- A lone double: two player seats, `foeSeats` trainer seats.  The ending
+    -- reads `double` for the prize and the TV; M:_note3 keeps `foeOut` (the
+    -- party index out on each trainer slot) and `lastFoeFainted` from it, and
+    -- M:_answerFoes3 `trackedTurn` (the turn the player's history was read).
+    double = double or nil,
+    foeSeats = double and foeSeats or nil,
+    foeOut = double and {} or nil,
   }
 
   -- Claimed only once it is on screen.  A layer the modal stack refused would
@@ -2551,22 +2693,214 @@ function M:_begin3(game, kind, party, opts, extra)
       .. "BATTLES off in the mod manager (F10) and report it")
     return false
   end
+  -- The seats, as the referee named them: in a double both of each shared
+  -- team, in slot order (solo_player, solo_player#2; solo_foe and, for a
+  -- trainer with two monsters or more, solo_foe#2).
+  local sides = { a = { PLAYER_SEAT }, b = { FOE_SEAT } }
+  if double then
+    sides = { a = M.seatIds3(sim, PLAYER_SEAT), b = M.seatIds3(sim, FOE_SEAT) }
+  end
   fight:onReady({
     battle = battleId,
     mode = mode,
-    sides = { a = { PLAYER_SEAT }, b = { FOE_SEAT } },
+    sides = sides,
   })
   self:_pump()
   return true
+end
+
+-- The screen of a lone double: CoopBattle's solo double (contract C3 of
+-- docs/plans/gen3-solo-doubles.md) -- two monsters a side, a command menu per
+-- monster, targets, a replacement per seat -- behind the same narrow surface
+-- MediatedBattle serves a single (`start`, `onReady`, `onEvent`, `onOutcome`,
+-- `say`, `onDone`, `evoResolved`, `battle`), over the same table transport.
+-- Reached for here rather than at load: CoopBattle is the co-op screen, and
+-- every other fight this file runs never needs it.  nil when it cannot be
+-- built, said once; the caller hands the fight back.
+function M:_doubleScreen3(game, pending, args)
+  local okC, CoopBattle = pcall(need, "CoopBattle")
+  if not (okC and type(CoopBattle) == "table" and type(CoopBattle.newSoloDouble) == "function") then
+    self:warn("double3load", "the mod's double-battle screen could not be loaded, so this "
+      .. "double battle is fought the ordinary way; reinstall the mod folder so every "
+      .. "file under src/ is present")
+    return nil
+  end
+  local trainer = args.trainer
+  local ok, fight = pcall(CoopBattle.newSoloDouble, game, {
+    transport = self:_transport(pending),
+    ui = self.ui,
+    battle = args.battle,
+    trainer = trainer,
+    -- "TWINS ELI & ANNE would like to battle!", as the single says it.
+    peerName = M.gen3FoeLabel(trainer),
+    npcParty = args.enemySheets,
+    mode = args.mode,
+    selfId = PLAYER_SEAT,
+    foeId = FOE_SEAT,
+    foeSeats = args.foeSeats,
+    onDone = function(result, toLearn) self:_ended(result, toLearn) end,
+  })
+  if not (ok and type(fight) == "table" and type(fight.start) == "function") then
+    self:warn("double3open", "the mod's double-battle screen could not be opened (%s), so "
+      .. "this double battle is fought the ordinary way; report it with the trainer "
+      .. "you met", tostring(ok and "no screen" or fight))
+    return nil
+  end
+  return fight
+end
+
+-- A party's seat ids in slot order, from the referee itself (`seatsOf`):
+-- the owner's own id first, then `<id>#2` for a shared team's second seat.
+function M.seatIds3(sim, ownerId)
+  local out = {}
+  local ok, seats = pcall(sim.seatsOf, sim, ownerId)
+  for _, seat in ipairs(ok and type(seats) == "table" and seats or {}) do
+    out[#out + 1] = seat.playerId
+  end
+  if #out == 0 then out[1] = ownerId end
+  return out
 end
 
 -- ------------------------------------------------------------------
 -- small Gen 3 pieces the shared pump calls
 -- ------------------------------------------------------------------
 
+-- The player seat a Gen 3 choice is filed into.  A lone double's screen
+-- (CoopBattle's solo double, contract C3 of docs/plans/gen3-solo-doubles.md)
+-- says which monster it is choosing for by its field slot, `seat` -- side a's
+-- 0 or 1 -- and the referee takes a choice by the seat's own id (PLAYER_SEAT,
+-- PLAYER_SEAT .. "#2"), so the slot is looked up among our seats rather than
+-- spelled: whatever the referee named the seat on that slot is the answer.
+-- An absent `seat` is the first.  Every other Gen 3 fight has one seat, and
+-- a `seat` there is not read.  nil for a slot none of our seats stands on.
+function M:_seat3(payload)
+  local g3, sim = self.gen3, self.sim
+  if not (g3 and g3.double) then return PLAYER_SEAT end
+  local slot = int3(payload.seat, 0)
+  for _, seat in ipairs(sim and sim:seatsOf(PLAYER_SEAT) or {}) do
+    if seat.slot == slot then return seat.playerId end
+  end
+  return nil
+end
+
+-- The trainer's answers in a lone double: every trainer seat that owes the
+-- referee one -- a command for the turn, or a monster for an emptied seat --
+-- in seat order (pret's battler order: the left monster's command, then the
+-- right's), asked of ONE brain, because the trainer's item budget is the
+-- trainer's and not a monster's (the brain facts of
+-- docs/plans/gen3-solo-doubles.md).  Each seat falls back to `Turn:autoPick`
+-- on its own, as the single's one seat does; a seat neither can answer is
+-- left for the next frame without holding its sibling up.  Looped for the
+-- single's reason (M:_answerFoe): filing the last answer can resolve the turn
+-- and open the next one, where a seat owes again.
+function M:_answerFoes3()
+  local sim, g3 = self.sim, self.gen3
+  if not (sim and g3) then return false end
+  local okS, seats = pcall(sim.seatsOf, sim, FOE_SEAT)
+  if not (okS and type(seats) == "table" and #seats > 0) then return false end
+  local bound = (tonumber(Config.BATTLE_MON_MAX) or 6)
+    * math.max(1, tonumber(Config.COOP_FIGHTERS) or 1) * #seats
+  local filed, stuck = false, {}
+  for _ = 1, bound do
+    -- A seat that could not be answered is skipped for the rest of this
+    -- phase of this turn only; a turn the loop opens asks it afresh.
+    local stamp = tostring(sim.phase) .. ":" .. tostring(sim.turn)
+    local seat = nil
+    for _, s in ipairs(seats) do
+      if stuck[s] ~= stamp and owes(sim, s) then seat = s; break end
+    end
+    if not seat then break end
+
+    local got = false
+    local brain = self.brain
+    if brain then
+      -- The player's history is a per-turn reading: once, however many of
+      -- the trainer's seats are asked in it.
+      if sim.phase == "choice" and g3.trackedTurn ~= sim.turn then
+        g3.trackedTurn = sim.turn
+        self:_trackPlayer()
+      end
+      local ok, choice = pcall(brain.choose, brain, self:_foeView3(seat, seats))
+      if not ok then
+        self:warn("brain", "the trainer's own AI could not be asked for a move "
+          .. "(%s), so this fight is played with the referee's generic picker; "
+          .. "report this with the trainer you were fighting", tostring(choice))
+      elseif type(choice) == "table" and sim:submitChoice(seat.playerId, choice) then
+        got = true
+      end
+    end
+    if not got then
+      got = sim:autoPick(seat.playerId) and true or false
+    end
+    if got then filed = true else stuck[seat] = stamp end
+  end
+  return filed
+end
+
+-- What the brain is shown for one trainer seat of a double: the single's view
+-- of that seat (its monster, the shared party and bag, the referee, its
+-- battler) plus contract C2 of docs/plans/gen3-solo-doubles.md --
+--
+--   double   true
+--   seat     the choosing seat's field slot (3 or 4)
+--   partner  the trainer's other battler while it stands, else nil
+--   foes     the player's standing battlers, { slot, battler }, by slot
+--   claimed  party indices (1-based: the referee's own, once it normalised
+--            the sibling's choice) the sibling seat has filed a switch or a
+--            replacement into this turn -- the party menu's "already
+--            selected" (pret monToSwitchIntoId)
+--
+-- `foe` / `foeBattler` are the first of `foes`, for whatever part of the brain
+-- reads one; a fainted seat's last monster stands in for the send-out
+-- question, as on the single.
+function M:_foeView3(seat, seats)
+  local sim = self.sim
+  local foes = {}
+  local okP, players = pcall(sim.seatsOf, sim, PLAYER_SEAT)
+  for _, p in ipairs(okP and type(players) == "table" and players or {}) do
+    if p.b and activeOf(p) then foes[#foes + 1] = { slot = p.slot, battler = p.b } end
+  end
+  local partner, claimed = nil, {}
+  for _, s in ipairs(seats) do
+    if s ~= seat then
+      if s.b and activeOf(s) then partner = s.b end
+      local c = s.choice
+      if type(c) == "table" and c.action == "switch" and tonumber(c.slot) then
+        claimed[tonumber(c.slot)] = true
+      end
+    end
+  end
+  local lead = foes[1]
+  local view = {
+    mon = seat.active and seat.mons[seat.active] or nil,
+    foe = lead and lead.battler.mon or nil,
+    party = seat.mons,
+    active = seat.active,
+    bag = seat.bag,
+    mustReplace = seat.mustReplace and true or false,
+    playerUsedMoves = self.playerMoves,
+    playerTurns = self.playerTurns,
+    sim = sim,
+    battler = seat.b,
+    foeBattler = lead and lead.battler or nil,
+    fighter = seat,
+    double = true,
+    seat = seat.slot,
+    partner = partner,
+    foes = foes,
+    claimed = claimed,
+  }
+  if view.mon == nil and seat.lastB then view.mon = seat.lastB.mon end
+  return view
+end
+
 -- A `send`: the dex's "seen" for a foe (the engine monster the sheet was cut
 -- from carries the personality Unown / Spinda record), and an Amulet Coin on
--- whoever just came out.
+-- whoever just came out.  Either seat of a double: a shared team's two seats
+-- hold the one `mons` table, so the party index finds the monster from the
+-- first seat whichever slot it came out on -- and the cart's Amulet Coin
+-- (gBattleStruct->moneyMultiplier, set as its holder is sent in) does not ask
+-- which battler position it was either.
 function M:_onSend3(event)
   local g3, sim = self.gen3, self.sim
   if not (g3 and sim and sim.byId) then return end
@@ -2580,6 +2914,9 @@ function M:_onSend3(event)
     if species then
       pcall(Gen3.dexMark, species, true, false, src and src.personality)
     end
+    -- Who is out on each trainer slot, for the double's last-fainted foe.
+    local slot = int3(event.slot, nil)
+    if g3.foeOut and slot and mon then g3.foeOut[slot] = mon end
   end
   if mon and int3(mon.heldItem, 0) ~= 0 and int3(mon.holdEffect, 0) == HOLD_DOUBLE_PRIZE then
     if foeSide then g3.amuletFoe = true else g3.amuletPlayer = true end
@@ -2599,7 +2936,14 @@ function M:_note3(event)
   local t = event.t
   if t == "send" then return self:_onSend3(event) end
   if not g3 then return end
-  if t == "run" and (event.side == "a" or event.side == "b") then
+  if t == "faint" and event.side == "b" and g3.foeOut then
+    -- A double's gBattleResults.lastOpponentSpecies: the trainer's monster
+    -- that fainted last, whichever slot it stood on (pret Cmd_tryfaintmon
+    -- writes it from gBattlerPartyIndexes of the fainting battler).  A
+    -- single's ending reads the one foe slot's monster instead, as before.
+    local mon = g3.foeOut[int3(event.slot, -1)]
+    if mon then g3.lastFoeFainted = mon end
+  elseif t == "run" and (event.side == "a" or event.side == "b") then
     g3.ranSide = event.side
   elseif t == "ball" and event.side == "a" then
     local ball = int3(event.text, nil)
@@ -2680,18 +3024,24 @@ function M:_applyMoveset3(payload)
       nextMoves[i] = Turn.copyMove(nm)
     end
   end
-  local b = fighter.b
-  local active = b ~= nil and b.mon == mon
   mon.moves = nextMoves
-  if active and not b.overlay then b.moves = nextMoves end
+  -- Whichever seat has it out: a double's two seats share the party, so the
+  -- monster that learned may be standing on either (`seatsOf`; a single is
+  -- its one seat).
+  local okS, seats = pcall(sim.seatsOf, sim, PLAYER_SEAT)
+  if not (okS and type(seats) == "table" and #seats > 0) then seats = { fighter } end
+  for _, seat in ipairs(seats) do
+    local b = seat.b
+    if b ~= nil and b.mon == mon and not b.overlay then b.moves = nextMoves end
+  end
   return true
 end
 
 -- The line a trapped RUN prints: the ability that holds the runner when one
 -- does (pret STRINGID_PREVENTSESCAPE), else STRINGID_CANTESCAPE's.
-function M:_cantEscapeText3()
+function M:_cantEscapeText3(seat)
   local sim = self.sim
-  local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
+  local player = sim and sim.byId and sim.byId[seat or PLAYER_SEAT]
   local b = player and player.b
   if b then
     local okA, Abilities = pcall(need, "BattleSim3/Abilities")
@@ -2760,6 +3110,8 @@ function M:_settle3(outcome)
   if not g3 then return end
   g3.verdict = verdict
   local reason = outcome.reason
+  -- The whole party, either seat's monsters: a double's two seats share the
+  -- one `mons` table, so the first seat's is every monster the player has.
   local standing = hasLiving(sim.byId[PLAYER_SEAT])
   local lost = (verdict == "loss" or verdict == "draw") and reason ~= "run" and not standing
   g3.whiteout = lost
@@ -2807,9 +3159,13 @@ end
 -- the trainer's defeat speech, and getmoneyreward -- FireRed's
 -- 4 x last level x class value (Prize.awardTrainerWin, said only when
 -- something was paid), Emerald's money table (Prize.rewardRse, always said).
+-- A lone double pays twice over on both carts (pokefirered Cmd_getmoneyreward's
+-- `BATTLE_TYPE_DOUBLE ? 2 : 1`, pokeemerald GetTrainerMoneyToGive's DOUBLE
+-- arm; the engine's prize.lua `double`).
 function M:_trainerWon3()
   local g3 = self.gen3
   local t = g3.trainer or {}
+  local double = g3.double == true
   local fill = self:_fill3()
   self:_say3(Gen3.battleText("STRINGID_PLAYERDEFEATEDTRAINER1", fill)
     or ("%s defeated\n%s!"):format(fill.playerName, M.gen3FoeLabel(t)))
@@ -2822,7 +3178,7 @@ function M:_trainerWon3()
   local mult = self:_moneyMultiplier3(bp)
   local name = session.name or fill.playerName
   if bp and bp.rules and bp.rules.money == "rse" then
-    local amount = int3(try3(Prize.rewardRse, trainerId, { double = false, moneyMultiplier = mult }), 0)
+    local amount = int3(try3(Prize.rewardRse, trainerId, { double = double, moneyMultiplier = mult }), 0)
     local gained = int3(try3(Prize.apply, session, amount), 0)
     g3.prize = gained
     self:_say3(try3(Prize.moneyMessage, name, amount))
@@ -2837,7 +3193,7 @@ function M:_trainerWon3()
     lastLevel = int3(last and last.level, 1)
   end
   local gained = int3(try3(Prize.awardTrainerWin, session, trainerId, {
-    lastLevel = lastLevel, double = false, moneyMultiplier = mult,
+    lastLevel = lastLevel, double = double, moneyMultiplier = mult,
   }), 0)
   g3.prize = gained
   if gained > 0 then self:_say3(try3(Prize.moneyMessage, name, gained)) end
@@ -2875,7 +3231,9 @@ end
 -- HP, PP and status home onto the session party -- the same delta rule as
 -- M:_applyMon (a level's HP growth survives), through Sheet3.applyToMon (PP
 -- lives in `mon.pp[]` by slot on a Gen 3 mon) -- and the sleep counter with
--- them.  Resolved through each sheet's own party slot.
+-- them.  Resolved through each sheet's own party slot.  Once for a double
+-- too: its two seats hold the one `mons` table, so the first seat's list is
+-- the whole party, whichever side of the field each monster fought on.
 function M:_reconcile3(sim, session)
   local party = session and session.party
   local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
@@ -2934,6 +3292,7 @@ end
 
 -- The engine monster a sim fighter has out at the end (or last had out, for a
 -- side that was knocked out), found through its sheet's party slot in `party`.
+-- A double's first seat for the reports that take one monster a side.
 local function endMon3(fighter, party)
   if not (fighter and type(party) == "table") then return nil end
   local sheet = fighter.mons and fighter.active and fighter.mons[fighter.active] or nil
@@ -2941,6 +3300,23 @@ local function endMon3(fighter, party)
   if not sheet then
     for _, m in ipairs(fighter.mons or {}) do sheet = sheet or m end
   end
+  local mon = sheet and party[int3(sheet.slot, 0) + 1] or nil
+  return type(mon) == "table" and mon or nil
+end
+
+-- The player's second battler at the end of a double, as pret's
+-- HandleEndTurn_FinishBattle fills gBattleResults.playerMon2Species: the
+-- second player battler's gBattlerPartyIndexes -- the monster standing on
+-- that position, or the last one that stood there (a fainted battler's party
+-- index is never cleared).  nil for a seat that never had one, where the cart
+-- would leave the species 0.
+function M.secondMon3(sim, party)
+  if not (sim and type(party) == "table") then return nil end
+  local ok, seats = pcall(sim.seatsOf, sim, PLAYER_SEAT)
+  local seat = ok and type(seats) == "table" and seats[2] or nil
+  if not seat then return nil end
+  local sheet = seat.active and seat.mons and seat.mons[seat.active] or nil
+  if not sheet and seat.lastB then sheet = seat.lastB.mon end
   local mon = sheet and party[int3(sheet.slot, 0) + 1] or nil
   return type(mon) == "table" and mon or nil
 end
@@ -2980,9 +3356,19 @@ function M:_ended3(result, toLearn)
   local word = M.gen3OutcomeWord(verdict, reason, whiteout, ranSide)
   local won = verdict == "win" and reason == "ko"
 
-  -- Read now: the ending's reports name the monsters out at the end.
+  -- Read now: the ending's reports name the monsters out at the end.  In a
+  -- double the reports that take one monster a side (the quest log,
+  -- `battle.ended`) are given each side's first seat; the TV also reads the
+  -- player's second battler and the trainer's monster that fainted last.
   local playerMon = same and endMon3(sim.byId and sim.byId[PLAYER_SEAT], session.party) or nil
   local foeMon = endMon3(sim.byId and sim.byId[FOE_SEAT], g3.party)
+  local playerMon2, lastFoeMon = nil, nil
+  if g3.double then
+    if same then playerMon2 = M.secondMon3(sim, session.party) end
+    local fainted = g3.lastFoeFainted
+    local src = fainted and type(g3.party) == "table" and g3.party[int3(fainted.slot, 0) + 1] or nil
+    lastFoeMon = type(src) == "table" and src or nil
+  end
 
   if same then
     local Natives = Gen3.engine("src.core.game3.scripting.natives")
@@ -3027,6 +3413,7 @@ function M:_ended3(result, toLearn)
       local okE, errE = pcall(self._finishEffects3, self, session, g3, {
         result = halt and word or outcome, word = word,
         playerMon = playerMon, foeMon = foeMon,
+        playerMon2 = playerMon2, lastFoeMon = lastFoeMon,
       })
       if not okE then
         self:warn("effects3", "part of the end of this battle could not be recorded (%s); "
@@ -3109,6 +3496,10 @@ function M:_finishEffects3(session, g3, ending)
     trainerName = (not wild) and t.trainerName or nil,
     player = ending.playerMon and { mon = ending.playerMon } or nil,
     enemy = ending.foeMon and { mon = ending.foeMon } or nil,
+    -- A double, in the engine state's own words: `double`, and `player2` --
+    -- the name BattleBridge.tvBattleEnd reads the second battler by.
+    double = g3.double or nil,
+    player2 = ending.playerMon2 and { mon = ending.playerMon2 } or nil,
     playerParty = session.party, foeParty = g3.party,
     battleResults = g3.results, kinds = {}, session = session,
   }
@@ -3141,14 +3532,16 @@ function M:_finishEffects3(session, g3, ending)
       local r = g3.results or {}
       local results = {
         playerMon1Species = speciesOf(ending.playerMon), playerMon1Name = nickOf(ending.playerMon),
-        playerMon2Species = 0,
+        -- 0 on a single; a double's second battler (M.secondMon3).
+        playerMon2Species = speciesOf(ending.playerMon2),
         caughtMonSpecies = caught and speciesOf(ending.foeMon) or 0,
         caughtMonNick = caught and nickOf(ending.foeMon) or "",
         caughtMonBall = caught and int3(r.lastUsedItem, 0) or 0,
         catchAttempts = r.catchAttempts or {},
         usedMasterBall = r.usedMasterBall == true,
         lastUsedItem = int3(r.lastUsedItem, 0),
-        lastOpponentSpecies = speciesOf(ending.foeMon),
+        -- A double's is the trainer's monster that fainted last (M:_note3).
+        lastOpponentSpecies = speciesOf(ending.lastFoeMon or ending.foeMon),
         shinyWildMon = wild and ending.foeMon ~= nil and Pokemon ~= nil
           and try3(Pokemon.isShiny, ending.foeMon) == true or false,
       }
