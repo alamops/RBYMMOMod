@@ -2321,10 +2321,41 @@ function M:commandCols()
   if not self:usesBattlefield() then return 2 end
   local cols = Battlefield and Battlefield.bandGridCols
   if type(cols) ~= "function" then return 2 end
-  local ok, got = pcall(cols, #M.COMMANDS)
+  local ok, got = pcall(cols, #M.COMMANDS, self:commandGridOpts())
   got = ok and math.floor(tonumber(got) or 0) or 0
   if got < 1 then return 2 end
   return got
+end
+
+-- Where the arena's command grid goes: the whole band (nil) everywhere but a
+-- solo double, whose band is the cart's own action box -- "What will X do?"
+-- on the left, the four commands 2×2 on the right (pret
+-- battle_controller_player.c HandleInputChooseAction over the action prompt).
+-- The double asks for two commands a turn, and four identical buttons for
+-- both left nothing on screen saying whose turn it was. One rect, read by the
+-- painter and by `commandCols`, so the cursor walks the grid that is drawn.
+M.SOLO_PROMPT_SHARE = 0.48
+M.SOLO_PROMPT_GAP = 6
+function M:commandGridOpts()
+  if not self.soloDouble then return nil end
+  local rect = Battlefield and Battlefield.bandRect
+  if type(rect) ~= "function" then return nil end
+  local ok, x, y, w, h = pcall(rect)
+  if not (ok and x and w) then return nil end
+  local split = math.floor(w * M.SOLO_PROMPT_SHARE)
+  return {
+    prompt = { x = x, y = y, w = split, h = h, hint = false },
+    x = x + split + M.SOLO_PROMPT_GAP, y = y,
+    w = w - split - M.SOLO_PROMPT_GAP, h = h,
+  }
+end
+
+-- "What will X do?" for whichever of this player's monsters is choosing --
+-- the classic page's prompt and the arena band's, one sentence.
+function M:choosePrompt()
+  local mine = self:mySlot()
+  local active = mine and mine.battler
+  return ("What will\n%s do?"):format(tostring(active and active.name or "?"))
 end
 
 function M:updateCommand(input)
@@ -7867,7 +7898,9 @@ function M:drawBandWidgets()
     return true
   end
   if self.phase == "choose" then
-    grid(self:bandCommandItems(), self.commandIndex or 1)
+    local opts = self:commandGridOpts()
+    if opts then message(self:choosePrompt(), opts.prompt) end
+    grid(self:bandCommandItems(), self.commandIndex or 1, opts)
     return true
   end
   if self.phase == "move" then
@@ -12616,8 +12649,7 @@ function M:gen3ClassicModel()
     model.showTrainer = true
   end
   local mine = self:mySlot()
-  local active = mine and mine.battler
-  model.prompt = ("What will\n%s do?"):format(tostring(active and active.name or "?"))
+  model.prompt = self:choosePrompt()
   -- The POKéMON / BAG / TARGET lists are the page's expensive half (a front
   -- pic and an icon per party row), and nothing on them moves while the
   -- player is choosing: they are rebuilt when the phase or the cursor does,

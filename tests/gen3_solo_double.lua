@@ -1357,6 +1357,45 @@ block("commands", function()
   check(hitFour, "commands: ...and mon 1's second command, not its first")
 end)
 
+-- ------- the arena band says whose command it is
+--
+-- Two commands a turn under four identical buttons left nothing on the arena
+-- saying which monster was choosing (the e2e's cmd1 / cmd2 shots were the same
+-- picture). The band takes the cart's action box instead: the prompt on the
+-- left, the commands 2×2 on the right -- and the cursor walks that grid.
+block("band", function()
+  local f = makeFight({ party = { mon(4, 20, { moves = { 33 } }), mon(16, 20, { moves = { 33 } }) } })
+  local s = f.screen
+  eq(f.settle(), "choose", "band: the first menu opens")
+  eq(s:usesBattlefield(), true, "band: the arena is the default")
+  local opts = s:commandGridOpts()
+  check(opts ~= nil and opts.prompt ~= nil, "band: a solo double puts a prompt beside the grid")
+  local bx, by, bw, bh = Battlefield.bandRect()
+  eq(opts.prompt.x, bx, "band: the prompt starts at the band's left edge")
+  check(opts.prompt.x + opts.prompt.w <= opts.x, "band: the grid sits right of the prompt")
+  eq(opts.x + opts.w, bx + bw, "band: the grid ends at the band's right edge")
+  eq(opts.y, by, "band: the grid keeps the band's top")
+  eq(opts.h, bh, "band: and its height")
+  eq(s:commandCols(), 2, "band: the commands sit 2x2 beside the prompt")
+  eq(Battlefield.bandGridCols(#CoopBattle.COMMANDS, opts), s:commandCols(),
+     "band: the cursor reads the rule the painter draws by")
+  local first = s:mySlot().battler.name
+  check(s:choosePrompt():find(first, 1, true) ~= nil, "band: the prompt names mon 1")
+  fightWith(f, 1)
+  eq(s.mine, 2, "band: mon 2 is asked next")
+  local second = s:mySlot().battler.name
+  check(second ~= first and s:choosePrompt():find(second, 1, true) ~= nil,
+        "band: the prompt names mon 2 when it is mon 2's turn")
+  s.commandIndex = 1
+  f.press("right")
+  eq(s.commandIndex, 2, "band: right walks to BAG")
+  f.press("down")
+  eq(s.commandIndex, 4, "band: down walks the 2x2 to RUN")
+
+  local c = makeCoop({ party = { mon(4, 12), mon(29, 12) }, partnerParty = { mon(16, 12) } })
+  eq(c.screen:commandGridOpts(), nil, "band: co-op keeps its full-width row")
+end)
+
 -- A command the referee refuses is refused at that seat's own menu, in the
 -- cart's words, and mon 2 is never asked: a POTION on a monster at full HP
 -- (the review's probe -- it used to loop back to mon 1 with no line).
