@@ -1057,11 +1057,12 @@ yet.`).
 
 **What stays different on Gen 3:**
 
-- `SOLO BATTLES` hands a few more fights back to the cart: Emerald's double
-  trainer battles (two trainers, a partner, or a double on its own), the
-  Safari Zone, roaming and scripted legendaries, the Battle Frontier, Trainer
-  Tower and Trainer Hill, the first battle, and the old man's and the
-  POKé DUDE's tutorial fights.
+- `SOLO BATTLES` hands a few more fights back to the cart: doubles against
+  two trainers at once or beside Steven, the Safari Zone, roaming and
+  scripted legendaries, the Battle Frontier, Trainer Tower and Trainer Hill,
+  the first battle, and the old man's and the POKé DUDE's tutorial fights.
+  A lone double (one trainer, two of theirs out) is the mod's: you fight it
+  with two of yours, from one team, as on the cart.
 - Every fight this mod referees is fought under link rules, the solo and
   co-op ones against wild POKéMON and trainers included: no badge stat boosts,
   and a traded POKéMON always obeys.

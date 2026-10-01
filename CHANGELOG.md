@@ -82,6 +82,36 @@ here must match `manifest.version`.
   defeat lines, and its after-battle order. Trainers play with a Gen 3 brain
   ported from the carts' trainer AI scripts, enabled per trainer by its AI
   flags.
+- **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
+  out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
+  referee instead of the cart's. That covers the Twins and couples on the
+  routes, and gym doubles like Tate & Liza with their badge.
+  - **Two from one team, as on the cart.** Either slot switches in any bench
+    monster, a fainted slot refills from the whole team, and with one left
+    only one comes out. The trainer's side works the same way.
+  - **Two commands a turn.** B on the second monster's menu goes back to the
+    first's.
+  - **Aiming.** Single-target moves aim at either foe or your partner. You
+    are asked only when more than one other battler stands, and a Ghost's
+    CURSE is aimed as the cart aims it.
+  - **The trainer AI.** FireRed / LeafGreen pick a random side and Emerald
+    scores every target. Emerald runs its double-battle AI script, so it
+    keeps an EARTHQUAKE off its own partner and fires a Fire move into a
+    Flash Fire partner.
+  - **Rewards.** The prize is doubled, EXP is split per participant, and Pay
+    Day, the Amulet Coin, learn-move and evolution all work. Emerald's TV
+    records both monsters.
+  - **Both battle screens.** The arena seats the trainer behind both foes.
+    `CLASSIC BATTLE UI` draws the cart's own double screen: two healthboxes
+    a side, the target blinking while you aim, the move preview, and START
+    for HP figures.
+  - **When it is handed back.** With fewer than two usable POKéMON the fight
+    goes back to the cart, which refuses it in its own words. Two trainers at
+    once and Steven as a partner stay the cart's.
+  - **How it works.** The referee's twins share one team across two seats
+    (`seats = 2`; `docs/plans/gen3-battle-sheet.md` §1.3). One-seat fights
+    replay byte for byte, held by the turn-parity fixture. The plan is in
+    `docs/plans/gen3-solo-doubles.md`.
 - **The encounter divert on Gen 3.** Step encounters are taken through the
   public `encounter.roll` hook. Trainers, and the wild fights that never pass
   that hook (fishing, Rock Smash, Sweet Scent), are taken at one contained
@@ -238,10 +268,13 @@ version, but each was a real failure on a live boot or on the wire:
   link with Ruby and Sapphire (the Sevii Islands post-game), Emerald once
   the player is Champion; a POKéMON from outside a cart's regional dex, or
   an egg, also needs that cart's National Dex. Same-region trades are free.
-- **SOLO BATTLES leaves more fights to the cart on Gen 3:** Emerald's double
-  trainer battles (two trainers, a partner, or a double on its own), the
-  Safari Zone, roaming and scripted legendaries, the Battle Frontier,
-  Trainer Tower and Trainer Hill, the first battle, and the tutorial fights.
+- **SOLO BATTLES leaves more fights to the cart on Gen 3:**
+  - doubles against two trainers at once, or with Steven as your partner (a
+    lone double is the mod's; see Added);
+  - the Safari Zone;
+  - roaming and scripted legendaries;
+  - the Battle Frontier, Trainer Tower and Trainer Hill;
+  - the first battle and the tutorial fights.
 - **A player on a neighbouring map is not drawn across a seamless map edge.**
   The engine copies live objects into the neighbour's draw pool when a map
   loads, which left remote players frozen (and doubled) on the far side;

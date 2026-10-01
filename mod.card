@@ -393,11 +393,12 @@ return {
         .. "or an egg, needs that cart's National Dex. Trades within one region "
         .. "are free. The swap is shown in text boxes, not the cart's trade "
         .. "animation.",
-      "SOLO BATTLES on Gen 3 leaves more fights to the cart: Emerald's "
-        .. "double trainer battles (two trainers, a partner, or a double on its "
-        .. "own), the Safari Zone, roaming and scripted legendaries, the Battle "
-        .. "Frontier, Trainer Tower and Trainer Hill, the first battle and the "
-        .. "tutorial fights.",
+      "SOLO BATTLES on Gen 3 leaves more fights to the cart: doubles "
+        .. "against two trainers at once or beside Steven, the Safari Zone, "
+        .. "roaming and scripted legendaries, the Battle Frontier, Trainer "
+        .. "Tower and Trainer Hill, the first battle and the tutorial fights. "
+        .. "A lone double is the mod's, two of yours from one team, as on the "
+        .. "cart.",
       "On Gen 3 a player on a neighbouring map is not drawn across a "
         .. "seamless map edge; they appear once you share a map. The party "
         .. "on the region map is a list rather than a figure on a city, and a "

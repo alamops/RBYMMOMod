@@ -559,9 +559,10 @@ notes). Each commit message describes its slice.
   `97ac854`; the cart reloads the party, `cable_club.c` `LoadPlayerParty`);
   Deoxys uses its link-battle stats only in PvP.
 - **Solo hands more fights back to the cart** than on Gen 1/2
-  (`Config.SOLO_REFUSED_GEN3`): Emerald double trainer battles, two-opponent
-  and partner fights, safari, roamers, scripted / legendary wilds, the
-  Frontier, Trainer Tower / Hill, the first battle, tutorials.
+  (`Config.SOLO_REFUSED_GEN3`): two-opponent and partner fights, safari,
+  roamers, scripted / legendary wilds, the Frontier, Trainer Tower / Hill, the
+  first battle, tutorials. Lone trainer doubles (all three carts) are fought
+  since `docs/plans/gen3-solo-doubles.md`.
 - **Cross-region trade** keeps the carts' own post-game gate
   (`Family.gameProgressForLinkTrade`: FireRed / LeafGreen need the "can link
   with Ruby / Sapphire" flag, Emerald the Champion flag; non-regional species
@@ -646,8 +647,9 @@ named here.
   `trainerbattle` opcode's `done` has no third answer. An unbeaten trainer
   who still sees the player challenges again (the cart's own sight check). A
   draw that leaves the team on nothing is a whiteout, as on the cart.
-- Emerald's double trainer battles (and the rest of `Config.SOLO_REFUSED_GEN3`)
-  are handed back to the cart in solo.
+- Two-trainer and partner doubles (and the rest of `Config.SOLO_REFUSED_GEN3`)
+  are handed back to the cart in solo. Lone doubles are the mod's
+  (`docs/plans/gen3-solo-doubles.md`).
 - A fight diverted from the cart never raises the engine's `battle.started`
   (the engine battle never starts); `SOLO BATTLES` raises `battle.ended` as it
   finishes (`SoloBattle:_finishEffects3`).

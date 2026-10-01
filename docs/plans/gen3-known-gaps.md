@@ -7,7 +7,7 @@ where it lives in the code and what closing it would take.
 | # | Gap | Kind | Size |
 |---|-----|------|------|
 | 1 | LeafGreen never run live | verification (needs a ROM) | S |
-| 2 | Solo battles leave some fights to the cart | mod work, per fight type | S → XL |
+| 2 | Solo battles leave some fights to the cart (lone doubles: done) | mod work, per fight type | M → XL |
 | 3 | Cross-region trades follow the post-game rule | cart-faithful, decision | S |
 | 4 | Players across a seamless map edge are not drawn | needs an engine seam | M |
 | 5 | Party-on-map is a list, not a marker | mod UI work | M |
@@ -43,26 +43,29 @@ every Gen 3 runner takes `GEN3_GAME=leafgreen`.
 
 ## 2. Solo battles leave some fights to the cart
 
-- [ ] Decide which of these are worth taking over, cheapest first.
+- [x] **Lone doubles: done** (`docs/plans/gen3-solo-doubles.md`). This was on
+      all three carts, not only Emerald; FireRed / LeafGreen lone doubles had
+      been handed back too.
+- [ ] Decide which of the rest are worth taking over, cheapest first.
 
-**What is left to the cart today:** Emerald double battles (a lone double,
-two trainers at once, or Steven as a partner), the Safari Zone, roaming and
-scripted legendaries, the Battle Frontier, Trainer Tower / Trainer Hill, the
-first battle, and the tutorial fights.
+**What is left to the cart today:**
+- doubles against two trainers at once, or with Steven as a partner;
+- the Safari Zone;
+- roaming and scripted legendaries;
+- the Battle Frontier, Trainer Tower / Trainer Hill;
+- the first battle and the tutorial fights.
 
 **Where:**
 - `Config.SOLO_REFUSED_GEN3` (`src/Config.lua`, ~l.920–955) lists every
   refused start flag and why.
 - `CoopField.refused3` (`src/CoopField.lua`) applies it; `divertStart` is the
   `BattleBridge.start` wrap that takes or hands back a fight.
-- `SoloBattle.gen3Double` (`src/SoloBattle.lua`) hands back a trainer's own
-  double: the referee already plays doubles, but the solo screen is the 1v1
-  `MediatedBattle`.
+- `SoloBattle.gen3TakesDouble` (`src/SoloBattle.lua`) takes a lone double
+  with two usable monsters; `trainerIdB` (two trainers) is still handed back.
 
 **Suggested order:**
-1. **Lone doubles.** The referee (`BattleSim3` / `server/lib/battle3`)
-   already seats two a side for co-op; what's missing is a solo screen with
-   two monsters out (reuse `CoopBattle`'s two-a-side layout).
+1. ~~**Lone doubles.**~~ Done. The referee's twins share one team across
+   two seats (`seats = 2`), and the screen is `CoopBattle.newSoloDouble`.
 2. **Roamers and scripted legendaries.** Catch writeback exists (co-op
    catch); the extra work is the roamer's state (HP / status carried between
    encounters) and the script's own after-battle flags.
