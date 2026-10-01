@@ -723,6 +723,12 @@ function Bm:aimTarget(b, row)
   return int(row and row.target, 0)
 end
 
+-- Whether this row, used by this battler, is a Ghost's CURSE (the auto-pick
+-- files one unaimed, Turn.lua `_autoFight`).
+function Bm:isGhostCurse(b, row)
+  return ghostCurse(b, row)
+end
+
 -- A chosen aim whose battler is gone (a stolen KO, a switch): the same seat's
 -- newcomer, else the nearest foe to that seat (a foe's), else the first foe.
 function Bm:_reaim(user, t)

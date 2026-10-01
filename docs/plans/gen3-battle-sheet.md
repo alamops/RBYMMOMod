@@ -134,11 +134,26 @@ sim:submitChoice("solo_player#2", { action = "fight", move = 0, target = 3 })
 * **Replacement** follows battler order (pret `HandleFaintedMonActions`): a
   fainted seat is asked (`turn` with its `slot`) only if the bench still has a mon
   after every sibling **ahead** of it that is owed one. Both seats down with one
-  bench mon: only the first seat is asked and refills; the other is never asked
-  and, once the replace phase's switch-ins are done, stays **empty for good**
-  (pret's absent battler) — no `mustReplace`, untargetable, and a Future Sight
-  due there is dropped. With two or more bench mons both seats are asked and
-  either may take any bench mon the other has not claimed.
+  bench mon: only the first seat is asked and refills; the other is not asked
+  and, once the replace phase's switch-ins are done, stands **empty** (pret's
+  absent battler, `gAbsentBattlerFlags`) — no `mustReplace`, untargetable, never
+  solicited, and a Future Sight due there is dropped. A seat whose mon falls with
+  nothing on the bench is emptied the same way. With two or more bench mons both
+  seats are asked and either may take any bench mon the other has not claimed.
+* **A Revive refills an empty seat.** pret re-checks every absent battler at the
+  top of each faint flow — after every action and at the end of the turn
+  (`HandleFaintedMonActions` case 0, `battle_util.c:1156`; the engine's
+  `Engine.refreshAbsent`) — and one whose party has a replacement again is asked
+  for it. So right after a bag action that revives a party member, an empty seat
+  is owed a mon again, and the replace phase that follows the turn asks it
+  (`turn` with its `slot`); the newcomer is in the turn order from the next turn,
+  and a Future Sight due on the seat that turn waits for it. The order rule above
+  still holds: when the sibling also fell that turn and the revived mon is the
+  only bench mon, the seat first in battler order takes it and the other stands
+  empty (again) — §9.1 for the cart giving it to the seat owed first. A seat
+  that **started** empty is never refilled (the engine fields no battler there to
+  re-check). One-seat fighters are untouched: only a shared team has a sibling
+  standing while a seat is empty.
 * **The bag** is one bag. An item a sibling has filed this turn is held back
   from the other seat (the cart spends a medicine when it is *chosen*): two seats
   and one Potion, the second seat's Potion is refused until the first cancels.
@@ -459,12 +474,13 @@ where `turn` counts completed turns (0 during the first turn, pret
   Eyes, who hit whom) is the seat's current occupant, or — when the user fainted
   and the seat is still empty — the fainted user itself, and the hit still lands.
   The user's seat is empty either until the `replace` phase, which the sim runs
-  after the end of turn, or for good when the bench is empty. The **target**
-  seat follows the cart too: the cart sends replacements in *before* the Future
-  Sight step (`HandleFaintedMonActions` precedes `HandleWishPerishSongOnTurnEnd`),
-  so a hit due on a seat emptied this turn waits (turns 0) and lands on the
-  newcomer right after the replace phase's switch-ins; a seat that will never be
-  refilled drops it (pret skips an absent battler for good).
+  after the end of turn, or while its bench is empty (until a Revive, §1.3). The
+  **target** seat follows the cart too: the cart sends replacements in *before*
+  the Future Sight step (`HandleFaintedMonActions` precedes
+  `HandleWishPerishSongOnTurnEnd`), so a hit due on a seat emptied — or re-armed
+  by a Revive — this turn waits (turns 0) and lands on the newcomer right after
+  the replace phase's switch-ins; a seat left empty drops it (pret skips an
+  absent battler; §9.1 for one a Revive refills later).
 * **Focus Punch** "is tightening its focus" lines are said right after ordering,
   before any switch (pret `CheckFocusPunch_ClearVarsBeforeTurnStarts`).
 * **Running.** 1v1 / coop_pvp: RUN is a concession (always allowed). coop_npc: the
@@ -486,7 +502,8 @@ where `turn` counts completed turns (0 during the first turn, pret
 * **Faint** asks the seat for a replacement in the `replace` phase (BattleSim2).
 * **Timeout / NPC** auto-pick: BattleSim2's heuristic (bag cures/heals, super-effective
   damage, status/setup, SE bench switch) using Gen 3 effect ids, item ids and the
-  ordered chart.
+  ordered chart. A picked move is aimed at the foe the aim stream drew, except a
+  Ghost's CURSE, which goes unaimed (below).
 * **Link rules**: no badge boosts, no disobedience, no EXP and no Pay Day coins in
   1v1 / coop_pvp. `exp` events are facts (BattleSim2).
 * **Pay Day** adds `level × 5` to its side's tally (pret `gPaydayMoney`, a u16 that
@@ -542,12 +559,22 @@ where `turn` counts completed turns (0 during the first turn, pret
   Ghost, by its type at the time): the filed `target` (a foe or the ally) is where
   the curse lands, the default is the first living foe (the menu cursor's start), and
   an aim whose battler fell or left moves on as a SELECTED move's does. Its table
-  target stays `USER`, so Follow Me and Lightning Rod never pull it and Pressure
-  costs nothing (`HandleAction_UseMove` / `ppreduce` read the table byte). A Curse
+  target stays `USER`, so Follow Me and Lightning Rod never pull it
+  (`HandleAction_UseMove` reads the table byte). Pressure costs nothing for it
+  either: the referee follows the engine's `Ctx:ppReduce` (`engine.lua:309`),
+  whose single-target Pressure arm skips a `MOVE_TARGET_USER` row (`:329`). pret's
+  `Cmd_ppreduce` may compare the attacker with the target battler instead — which
+  a Ghost's curse sets to the foe — so the cart may charge a Pressure foe 2 PP;
+  unverified here (no pret source is local). A Curse
   with nothing aimed — called by Sleep Talk / Metronome / Assist, or Encored —
   curses the battler **opposite** the user (`BattleScript_GhostCurse`'s
   `getmovetarget`; the engine's `foeOf`: battler 0 faces 1, 2 faces 3), or the
-  nearest standing foe when that one is down. A non-Ghost CURSE is unchanged.
+  nearest standing foe when that one is down. The **auto-pick** (NPC seats, a
+  timed-out seat, `autoPick`) files a Ghost's CURSE with no `target`, so it takes
+  the same unaimed path: the cart's AI aims every `USER`-row move at itself
+  (`battle_controller_opponent.c:1370`; the engine's `ai.lua:353`), and its curse
+  lands opposite, never on the random foe the heuristic drew. A non-Ghost CURSE is
+  unchanged.
 * **Soundproof** is asked per target (`attackcanceler` runs for each target pass):
   one Soundproof foe blocks a spread sound move for itself only, and a called
   sound move is blocked too.
@@ -745,7 +772,9 @@ What the sim still does differently from pret, and why:
 | balls vs other bag actions | one bag action each, in battler order | balls after every other bag action, fastest thrower first | BattleSim2's mediated-fight policy for co-op throws (several humans may throw at one wild mon) |
 | post-action held-item pass | reads **battler 0** only (`ItemBattleEffects(ITEMEFFECT_NORMAL, 0, TRUE)`, `battle_util.c:1211`) | every standing battler, first that acts | the engine port's reading; on that pass only status cures and White / Mental Herb act, and `ITEMEFFECT_MOVE_END` already runs them for every battler at every move end, so a difference needs a condition set outside any move |
 | Future Sight vs Perish Song with a replacement pending | replacement, then Future Sight, then Perish Song | Perish Song at the end of turn, then the replace phase, then the waiting hit | the sim's replace phase follows the end of turn; only the order of the lines differs |
-| a Future Sight seat that is never refilled | the counter stays forever (absent battler) | the token is dropped | equivalent: nobody ever stands there again |
+| a Future Sight due on an empty seat | the counter stays (absent battler) | the token is dropped when it comes due there | equivalent while the seat stays empty; if a Revive refills it later (§1.3), the cart's hit still lands on the newcomer and the sim's is gone |
+| when a replacement comes in | right after the action that emptied the seat (or, by a Revive, re-armed it): `HandleFaintedMonActions` runs after every action (the engine's `D.afterEach` faint flow), so the newcomer can be hit later that turn, and one bench mon owed to two seats goes to the seat owed first | the replace phase after the end of turn, in battler order (§1.3) | BattleSim2's replace phase (§6) asks every owed seat at once; the same mons stand, the last one possibly in the other seat |
+| a Revive on the mon that last stood in an empty seat | still "in battle": the absent battler keeps its party index (`gBattlerPartyIndexes`; the engine's `replacementCandidates`, `engine.lua:2228`, skips it), so neither seat can send it | an ordinary bench mon: it refills the empty seat | the cart's rule strands a living mon that no seat can field |
 | Magnet Pull in doubles | FRLG: foes only; Emerald (`ABILITYEFFECT_CHECK_FIELD_EXCEPT_BATTLER` with no side check): the holder's Steel partner is trapped too | foes only, for every fight | the sim carries no cart version per battle (a fight may mix FireRed and Emerald players) |
 | Roar / Whirlwind level check | applied in trainer fights too (`TryDoForceSwitchOut` runs in both branches of `Cmd_forcerandomswitch`, both carts) | the same | kept on purpose: it is the cart's rule, not a wild-only one |
 | Fury Cutter after another move | not reset (Gen 3 has no `TryClearRageAndFuryCutter`; `TryClearRageStatuses` clears Rage only) | the same | kept on purpose |

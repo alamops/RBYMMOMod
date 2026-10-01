@@ -454,9 +454,10 @@ end
 -- (HandleFaintedMonActions) sends every replacement in BEFORE this step, so a
 -- hit due at a seat emptied this turn lands on the newcomer.  Here the replace
 -- phase follows the end of turn, so such a token waits at 0 (`pending`) and
--- `_landPendingFutureSight` fires it once the seat is filled.  A seat that will
--- never be filled (no living bench: pret's absent battler, skipped for good)
--- drops it.
+-- `_landPendingFutureSight` fires it once the seat is filled.  A seat left
+-- empty (no living bench: pret's absent battler, skipped) drops it; one a
+-- Revive re-armed this turn is owed a mon again (Turn.lua `_refreshVacant`),
+-- so its hit waits too.
 function Bm:_tickFutureSight()
   for _, f in ipairs(self.order) do
     local side = self.sides[f.side]
