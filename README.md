@@ -1009,6 +1009,17 @@ waits until it closes.
 <p align="center"><em>SOLO BATTLES — Pay Day's coins, picked up</em></p>
 
 <p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-solo-double-arena.png" width="760" alt="A SOLO BATTLES double on FireRed against TWINS ELI and ANNE: PIKACHU and CHARMANDER against CLEFAIRY and JIGGLYPUFF, the twins behind both foes, and What will CHARMANDER do? beside FIGHT, BAG, POKéMON, RUN">
+</p>
+<p align="center"><em>SOLO BATTLES takes the cart's double battles: two of yours from one team, one command each</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/gen3/g3-em-solo-double-classic-target.png" width="300" alt="CLASSIC BATTLE UI on Emerald in a double against TWINS GINA and MIA: SEEDOT and LOTAD against TORCHIC and PIKACHU, two healthboxes a side, the move menu up while a target is picked">
+  <img src="docs/screenshots/gen3/g3-em-solo-double-classic-hp.png" width="300" alt="The same Emerald double with START pressed: the player's two healthboxes show 96/ 96 and 86/ 86 instead of bars, and What will TORCHIC do? beside FIGHT, BAG, POKéMON, RUN">
+</p>
+<p align="center"><em>On CLASSIC BATTLE UI, the cart's own double screen — aiming, and START for the HP figures</em></p>
+
+<p align="center">
   <img src="docs/screenshots/gen3/g3-em-arena-weather.png" width="760" alt="The arena on Emerald in the rain: rain streaks over the whole field, a Substitute doll on the foe's platform and Rain continues to fall. in the band">
 </p>
 <p align="center"><em>Weather and the Substitute doll on the arena</em></p>
