@@ -186,9 +186,21 @@ local, and nothing new crosses the wire.
 4. **The AI follows the carts** (owner decision): the per-family target rule,
    the DOUBLE_BATTLE script when on, and claim-aware switching and
    replacement.
-5. **Two commands a turn are buffered in the screen.** Mon 1's choice is held,
-   B on mon 2 discards it and reopens mon 1, and both are filed when mon 2
-   confirms. The referee's `cancel` is not used.
+5. **Two commands a turn, each filed at choice time** (reversed after review;
+   it first buffered mon 1 until mon 2 confirmed). The cart checks each
+   battler's action as it is chosen (`HandleTurnActionSelectionState`): a
+   Disabled / Taunted / Tormented / sealed / Choice-locked move, a medicine
+   that would do nothing, a trapped switch is refused there with its line and
+   that battler's menu stays up; the next battler is asked only once it has an
+   action. Buffering let those refusals arrive after mon 2 had chosen, where
+   both were dropped and mon 1 reopened with no line (a POTION on a full-HP
+   mon 1 looped forever). So each command goes to the referee the moment it is
+   confirmed; a refusal keeps that seat's menu with the cart's line (SoloBattle
+   words it, `refusalText3`, and hands it back on the transport); B on mon 2's
+   command menu sends the referee's `cancel` for mon 1, which unfiles the
+   choice and releases its claim, and reopens mon 1 (still refused after a
+   non-ball item, as on the cart). Mon 2's bench and bag leave out what mon 1
+   filed, as the referee does.
 6. **Fewer than two usable monsters means hand back**, mirroring
    `monsStateToDoubles`. `trainerIdB`/`twoOpponents`/`partner` stay refused.
 7. **Spread damage stays as the referee has it.** Only `BOTH` is halved in Gen 3
@@ -247,6 +259,20 @@ CoopBattle.newSoloDouble(game, {
 - Choices go out as `BATTLE_CHOICE` with an extra local field
   `seat = <field slot>`. T3's `_choose` maps 0→`solo_player`,
   1→`solo_player#2`.
+- Each choice is filed at choice time (decision 5): the table transport
+  answers the referee's verdict synchronously, and on a refusal sets
+  `transport.refusal` to the cart's line for it (the screen clears it before
+  each choice and says it, keeping that seat's menu). Partner cancel is
+  `{ action = "cancel", seat = <mon 1's field slot> }`, the referee's own.
+- A re-armed empty seat (a Revive gave the party a bench) is solicited like any
+  replacement (`turn` with its slot); the screen writes the revive's HP onto
+  the live party mon at the referee's `item` and frees the fainted battler, so
+  the seat's picker lists it.
+- The backstop (`SoloBattle:_backstop3`): when a player seat owes the referee
+  a choice while the screen reports `waitingOnReferee()` for 3 s of pump time,
+  the screen is asked to `reopenOwed(field, replace)` once per seat per
+  window, else the referee `autoPick`s it; both are logged with a remediation.
+  It never fires in a fight where the two agree.
 
 **C4 — classic double view (T4 builds, T5 draws).** `model.double` is present
 instead of `foe`/`ally`/strips:
@@ -293,8 +319,8 @@ model.double = {
 | T1 | The shared-team seat model in both referee twins (C1), plus parity scenarios and the sheet-contract doc | `src/BattleSim3/Turn.lua`, `src/BattleSim3/Move.lua`, `src/BattleSim3/Effects.lua`, `server/lib/battle3/Turn.js`, `server/lib/battle3/Move.js`, `server/lib/battle3/Effects.js`, `tests/fixtures/battle3_turn_parity.json`, `tests/battle_sim3_turn.lua`, `server/battle3_turn.test.js`, `docs/plans/gen3-battle-sheet.md` | — | Every existing scenario's expectations are unchanged. New scenarios: a `seats=2` trainer double; a shared-bench faint plus replace from either slot; the last monster (one seat refilled); a sibling switch conflict; EXP dedupe; bag reservation (two seats, one Potion); an item on the partner's active; a double KO with one bench monster. Lua and Node agree on all of them. |
 | T2 | Doubles in the Gen 3 trainer AI (C2), the cart's rule per family | `src/SoloBrain.lua` | — | FRLG picks a random target per the engine's rule, and Emerald scores per target. DOUBLE_BATTLE runs when the cart would. Switching and replacement honour `claimed` and both actives. The 1v1 view keeps today's behaviour. |
 | T5 | The GBA-native classic double layout (C4) | `src/ClassicBattle.lua` | — | `drawGen3` draws four pics and four doubles healthboxes at the engine positions, plus the target blink, when `view.double` is set. `M.gen3DoubleLayout(view)` is exposed for layout checks. Singles rendering is unchanged. |
-| T3 | Solo takes lone doubles (C1+C2+C3 consumer) | `src/SoloBattle.lua`, `src/Config.lua` (the `SOLO_REFUSED_GEN3` comment only) | T1 (and C2/C3 by contract) | A double with ≥2 usable monsters is taken. It runs two seats a side, a claim-aware `_answerFoe`, `seat`-mapped choices, prize ×2, `doubleBattle` on the record, both seats reconciled, Emerald TV mon 2, and the whiteout/draw/halt rules. A double with <2 usable monsters is handed back. `trainerIdB` is handed back. 1v1 is unchanged. |
-| T4 | The solo-double screen on `CoopBattle` (C3), building C4 | `src/CoopBattle.lua`, `src/CoopSim.lua`, `src/Battlefield.lua` (only if the one-human-two-seats ally side needs it) | T1 (event shapes) | `newSoloDouble` meets C3. `ownSlots` gives a chooser cursor, buffered choices with partner cancel, bench exclusion with an "already in battle" refusal, targets including the ally, per-seat replacement, EXP/learn/evolve for both own slots, trainer and "Go! X and Y!" intro lines, and C4 for classic. `ownSlots == nil` leaves co-op untouched. |
+| T3 | Solo takes lone doubles (C1+C2+C3 consumer) | `src/SoloBattle.lua`, `src/Config.lua` (the `SOLO_REFUSED_GEN3` comment only) | T1 (and C2/C3 by contract) | A double with ≥2 usable monsters is taken. It runs two seats a side, a claim-aware `_answerFoe`, `seat`-mapped choices, prize ×2 (from the fight's own `double`; review dropped the record's unread `doubleBattle`), both seats reconciled, Emerald TV mon 2, and the whiteout/draw/halt rules. A double with <2 usable monsters is handed back. `trainerIdB` is handed back. 1v1 is unchanged. |
+| T4 | The solo-double screen on `CoopBattle` (C3), building C4 | `src/CoopBattle.lua`, `src/CoopSim.lua`, `src/Battlefield.lua` (only if the one-human-two-seats ally side needs it) | T1 (event shapes) | `newSoloDouble` meets C3. `ownSlots` gives a chooser cursor, choices filed at choice time with the referee's `cancel` for partner cancel (decision 5), bench exclusion with an "already in battle" refusal, targets including the ally, per-seat replacement, EXP/learn/evolve for both own slots, trainer and "Go! X and Y!" intro lines, and C4 for classic. `ownSlots == nil` leaves co-op untouched. |
 | T5b | Two more GBA-double behaviours: move-target preview and the START HP-number swap (C4 additions) | `src/ClassicBattle.lua` | T5 | Hovering a move in a double highlights the battlers it will hit, per its target byte; holding START shows HP numbers instead of the four bars; singles are unchanged. |
 | T6 | Docs | `CHANGELOG.md`, `README.md`, `mod.card`, `docs/plans/gen3-known-gaps.md`, `docs/plans/gen3-firered-emerald-support.md`, `.modkitignore` | T3, T4 | The 1.5.0 Added entry is written; the Known bullet is reworded (lone doubles are taken, and FR/LG were never only Emerald); gap #2 is marked done; new files are listed in `.modkitignore`. |
 
@@ -372,7 +398,7 @@ the save and the script VM. Run recipe (from this session, not a subagent):
 | FireRed/LeafGreen lone doubles (the docs said only Emerald) | **in this run**: T3; docs T6 |
 | trainerbattle types 6/8 after a double (continue / post scripts, gym doubles) | **in this run**: T3 (same path as singles), TT2 |
 | <2 usable monsters | **in this run**: T3 hand-back, TT2/TT5 |
-| prize ×2, `doubleBattle` on the trainer record | **in this run**: T3 |
+| prize ×2 (`g3.double`; the record's `doubleBattle` was dropped in review, nothing read it) | **in this run**: T3 |
 | EXP dedupe for a monster that fought from both slots | **in this run**: T1 |
 | Bag: two seats on the last item; items on the partner's active | **in this run**: T1 |
 | Emerald TV `playerMon2Species` | **in this run**: T3 |

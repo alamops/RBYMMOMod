@@ -776,7 +776,7 @@ function M:_transport(pending)
   local solo = self
   return {
     isReady = function() return true end,
-    send = function(_, msgType, payload)
+    send = function(transport, msgType, payload)
       if msgType == Wire.BATTLE_RULESET then
         pending.ruleset = payload
       elseif msgType == Wire.BATTLE_PARTY then
@@ -792,7 +792,16 @@ function M:_transport(pending)
         -- that names nobody). The screen keeps the menu open then.
         -- Parked RUN is handled, not refused -- `_choose` returns true
         -- so `sendChoice` still closes the menu for the pump.
-        return solo:_choose(payload) and true or false
+        transport.refusal = nil
+        local taken = solo:_choose(payload) and true or false
+        -- A lone double's screen keeps the refused seat's menu up with the
+        -- line the cart prints for that refusal (CoopBattle `refuseOwn`),
+        -- worded here, beside the referee that knows why (M.refusalText3).
+        if not taken and solo.gen3 and solo.gen3.double then
+          local ok, line = pcall(solo._refusal3, solo, payload)
+          transport.refusal = ok and line or nil
+        end
+        return taken
       elseif msgType == Wire.BATTLE_MOVESET and solo.generation == 3 then
         -- A move learned mid-fight (the screen's LearnMove exchange) is the
         -- hub's to apply on the online path; here it is ours, or the monster
@@ -1159,6 +1168,10 @@ function M:_pump()
   else
     self.faults = 0
   end
+
+  -- Gen 3's lone double: one of our seats the referee is still waiting on
+  -- while the screen has stopped asking about it (M:_backstop3).
+  if self.generation == 3 and self.gen3 and self.gen3.double then self:_backstop3() end
 
   local outcome = sim:outcome()
   if outcome and not self.settled then self:_settle(outcome) end
@@ -2224,10 +2237,6 @@ function M.gen3TrainerRecord(foe, trainerId, opts)
     graphicsId = graphicsId,
     defeatText = textOf3(opts.defeatText) or textOf3(foe.defeatText) or textOf3(dialogs.defeat),
     victoryText = textOf3(opts.victoryText) or textOf3(foe.victoryText) or textOf3(dialogs.victory),
-    -- A lone double (M.gen3LoneDouble): the screen's "Go! X and Y!" / "sent
-    -- out X and Y!" intro, the prize's x2 and the ending read it.  Absent on
-    -- a single, so a single trainer's record is what it always was.
-    doubleBattle = M.gen3LoneDouble(opts, foe) or nil,
   }
 end
 
@@ -2725,7 +2734,9 @@ end
 -- docs/plans/gen3-solo-doubles.md) -- two monsters a side, a command menu per
 -- monster, targets, a replacement per seat -- behind the same narrow surface
 -- MediatedBattle serves a single (`start`, `onReady`, `onEvent`, `onOutcome`,
--- `say`, `onDone`, `evoResolved`, `battle`), over the same table transport.
+-- `say`, `onDone`, `evoResolved`, `battle`), over the same table transport,
+-- plus the two M:_backstop3 reads (`waitingOnReferee`, `reopenOwed`) and the
+-- transport's `refusal` line it reads back (`_transport`).
 -- Reached for here rather than at load: CoopBattle is the co-op screen, and
 -- every other fight this file runs never needs it.  nil when it cannot be
 -- built, said once; the caller hands the fight back.
@@ -2793,6 +2804,63 @@ function M:_seat3(payload)
     if seat.slot == slot then return seat.playerId end
   end
   return nil
+end
+
+-- How long a lone double's screen may sit waiting on the referee while the
+-- referee waits on one of our seats, in seconds of pump time, before
+-- M:_backstop3 steps in.  A real fight never comes near it: the two agree
+-- within the frame the events are drained in.
+local OWED_BACKSTOP3 = 3
+
+-- The backstop for a seat the screen never asks.
+--
+-- Nothing else would end that wait.  A solo fight has no choice clock
+-- (`SOLO_CHOICE_TIMEOUT` is 0), a trainer's RUN is refused, and M:_pump's
+-- stall count only catches a referee stuck part way through a turn -- so if
+-- the double's screen and the referee ever disagree about who owes (a
+-- replacement `send` it could not map leaving a seat looking fainted, a
+-- solicitation it let go of), the fight sits behind an empty wait box for
+-- good.  So: the referee owes a choice from one of our seats, the screen says
+-- it has nothing to show and nothing to ask (`waitingOnReferee`), and that has
+-- held for OWED_BACKSTOP3 seconds.  The screen is asked to put that seat's
+-- question back up first (`reopenOwed` -- its menu, or its replacement
+-- picker), once per seat per window; if it cannot, or it is the same seat in
+-- the same window again, the referee answers for it (`autoPick`, the picker
+-- every timed-out seat of a hub fight gets).  Either is a disagreement worth
+-- reporting, and says so.
+function M:_backstop3()
+  local sim, fight, g3 = self.sim, self.fight, self.gen3
+  local seat = nil
+  if not sim.result and (sim.phase == "choice" or sim.phase == "replace")
+     and type(fight.waitingOnReferee) == "function" and try3(fight.waitingOnReferee, fight) then
+    local okS, seats = pcall(sim.seatsOf, sim, PLAYER_SEAT)
+    for _, s in ipairs(okS and type(seats) == "table" and seats or {}) do
+      if owes(sim, s) then seat = s; break end
+    end
+  end
+  if not seat then
+    g3.owedSince = nil
+    return false
+  end
+  g3.owedSince = g3.owedSince or self.clock
+  if self.clock - g3.owedSince < OWED_BACKSTOP3 then return false end
+  g3.owedSince = nil
+  local window = ("%s:%s:%s"):format(tostring(sim.phase), tostring(sim.turn), tostring(seat.playerId))
+  if g3.reopened ~= window and type(fight.reopenOwed) == "function" then
+    g3.reopened = window
+    if try3(fight.reopenOwed, fight, seat.slot, seat.mustReplace == true) then
+      self:warn("reopen3", "the double battle screen stopped asking for one of your POKéMON's "
+        .. "choices while the referee waited on it, so it was asked again; if it keeps "
+        .. "happening, report it with the trainer you were fighting")
+      return true
+    end
+  end
+  local filed = try3(sim.autoPick, sim, seat.playerId) == true
+  self:warn("autopick3", "the double battle screen could not ask for one of your POKéMON's "
+    .. "choices, so the referee chose for it to keep the fight going; if it keeps "
+    .. "happening, turn SOLO BATTLES off in the mod manager (F10) and report it with "
+    .. "the trainer you were fighting")
+  return filed
 end
 
 -- The trainer's answers in a lone double: every trainer seat that owes the
@@ -3067,6 +3135,138 @@ function M:_cantEscapeText3(seat)
     end
   end
   return "Can't escape!"
+end
+
+-- ------------------------------------------------------------------
+-- a lone double's refused command, in the cart's words
+-- ------------------------------------------------------------------
+
+-- The party member a choice's `slot` names (the referee's own partyIndexOf:
+-- the sheet carrying that party position, else the position counted off).
+local function partyIndex3(fighter, wireSlot)
+  for i, mon in ipairs(fighter.mons or {}) do
+    if int3(mon.slot, -1) == wireSlot then return i end
+  end
+  return wireSlot + 1
+end
+
+-- The cart's "Foe " in front of a trainer's monster's name (sText_FoePkmnPrefix),
+-- out of the player's own text pack.
+local function foePrefix3()
+  local RomText = Gen3.engine("src.core.game3.rom_text")
+  local prefix = RomText and try3(RomText.plain, "sText_FoePkmnPrefix") or nil
+  return type(prefix) == "string" and prefix or "Foe "
+end
+
+-- Why the referee turned player seat `seatId`'s command down, in the line the
+-- cart prints for the same refusal at the same point -- it checks each
+-- battler's action as it is chosen and keeps that battler's menu up -- or nil
+-- when the referee's reason is not one the cart has a line for (a menu that
+-- should never have offered it).  Read off the referee's own state, in the
+-- order Turn.lua `_normaliseChoice` refuses in:
+--
+--   * a move: the limitations pret's TrySetCantSelectMoveBattleScript checks
+--     (battle_util.c:302; the engine's commands.lua selectionError) --
+--     Disabled, Tormented, Taunted, sealed by Imprison, not the Choice Band's
+--     move, no PP -- the last that applies being the one said, as there;
+--   * an item: a medicine that would do nothing (the referee's own
+--     `_itemHasEffect`; party_menu.c gText_WontHaveEffect, the engine's
+--     items.lua);
+--   * a switch: a trapped monster (party_menu.c:5964 gText_PkmnCantSwitchOut)
+--     or one a foe's ability holds (pokemon.c:6029
+--     gText_PkmnsXPreventsSwitching; the engine's Engine.canSwitch).
+--
+-- Each line is the player's own text pack's (Gen3.battleText), else this
+-- file's spelling of it.  Pure over the referee: the double screen's suite asks
+-- it from its own table transport.
+function M.refusalText3(sim, seatId, choice)
+  local fighter = type(sim) == "table" and type(sim.byId) == "table" and sim.byId[seatId] or nil
+  local b = fighter and fighter.b
+  if not (b and b.mon and type(choice) == "table") then return nil end
+  local okI, Items = pcall(need, "BattleSim3/Items")
+  if not (okI and type(Items) == "table") then return nil end
+  local name = sim:nameOf(b)
+  local active = { side = "player", name = name }
+
+  if choice.action == "fight" then
+    local index = int3(choice.move, nil)
+    local mv = index and type(b.moves) == "table" and b.moves[index + 1] or nil
+    if type(mv) ~= "table" then return nil end
+    local okL, bad = pcall(sim.moveLimitations, sim, b)
+    if not (okL and type(bad) == "table" and bad[index + 1]) then return nil end
+    local num, label = int3(mv.num, 0), sim:moveLabel(mv)
+    local fill = { active = active, currentMove = num > 0 and num or label, trainer = true }
+    local key, line
+    if b.disabledNum and num == b.disabledNum then
+      key, line = "STRINGID_PKMNMOVEISDISABLED", ("%s's %s\nis disabled!"):format(name, label)
+    end
+    if b.tormented and num == b.lastMoveNum then
+      key, line = "STRINGID_PKMNCANTUSEMOVETORMENT",
+        ("%s can't use the same\nmove in a row due to the TORMENT!"):format(name)
+    end
+    if int3(b.tauntTurns, 0) > 0 and int3(mv.power, 0) == 0 then
+      key, line = "STRINGID_PKMNCANTUSEMOVETAUNT", ("%s can't use\n%s after the taunt!"):format(name, label)
+    end
+    if try3(sim.isImprisoned, sim, b, num) then
+      key, line = "STRINGID_PKMNCANTUSEMOVESEALED", ("%s can't use the\nsealed %s!"):format(name, label)
+    end
+    local band = b.choicedMove
+    if band and band ~= num and try3(Items.of, b) == (Items.HOLD and Items.HOLD.CHOICE_BAND) then
+      local item = int3(b.mon.heldItem, 0)
+      fill = { active = active, lastItem = item > 0 and item or sim:itemLabel(b),
+               currentMove = band, trainer = true }
+      key, line = "STRINGID_ITEMALLOWSONLYYMOVE",
+        ("%s allows the\nuse of only %s!"):format(sim:itemLabel(b), sim:moveLabelByNum(band))
+    end
+    if int3(mv.pp, 0) <= 0 then
+      key, line, fill = "STRINGID_NOPPLEFT", "There's no PP left for\nthis move!", {}
+    end
+    if not key then return nil end
+    return Gen3.battleText(key, fill) or line
+  end
+
+  if choice.action == "item" then
+    local item = try3(Items.idOf, choice.item)
+    local effect = item and try3(Items.bagEffect, item) or nil
+    if not effect or effect.ball or effect.escape or effect.flute then return nil end
+    -- Out of the bag for this seat (the other has filed the last one): the
+    -- screen's bag does not list it, so there is no line of the cart's for it.
+    if fighter.bag and try3(sim._bagHas, sim, fighter, item) == false then return nil end
+    local index = fighter.active
+    local slot = int3(choice.slot, nil)
+    if slot ~= nil then index = partyIndex3(fighter, slot) end
+    if not (index and fighter.mons[index]) then return nil end
+    if effect.activeOnly and index ~= fighter.active then return nil end
+    local moveIndex = int3(choice.move, nil)
+    if moveIndex then moveIndex = moveIndex + 1 elseif effect.needsMove then return nil end
+    if try3(sim._itemHasEffect, sim, fighter, effect, index, moveIndex) ~= false then return nil end
+    return Gen3.battleText("gText_WontHaveEffect", {}) or "It won't have\nany effect."
+  end
+
+  if choice.action == "switch" and not fighter.mustReplace then
+    if try3(sim.isTrapped, sim, b) then
+      return Gen3.battleText("gText_PkmnCantSwitchOut", { stringVars = { name } })
+        or ("%s can't be switched\nout!"):format(name)
+    end
+    local okA, Abilities = pcall(need, "BattleSim3/Abilities")
+    if okA and type(Abilities) == "table" and type(Abilities.escapeBlocker) == "function" then
+      local ok, foe = pcall(Abilities.escapeBlocker, sim, b)
+      if ok and foe then
+        local who = foePrefix3() .. sim:nameOf(foe)
+        local ability = sim:abilityLabel(foe)
+        return Gen3.battleText("gText_PkmnsXPreventsSwitching", { buff1 = who, lastAbility = ability })
+          or ("%s's %s\nprevents switching!"):format(who, ability)
+      end
+    end
+  end
+  return nil
+end
+
+-- That, for a choice the double's screen sent: the seat its `seat` names.
+function M:_refusal3(payload)
+  local seat = self:_seat3(payload)
+  if not seat then return nil end
+  return M.refusalText3(self.sim, seat, payload)
 end
 
 -- ------------------------------------------------------------------
