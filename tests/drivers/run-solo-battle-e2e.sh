@@ -52,7 +52,11 @@
 #
 # Env knobs: SOLO_TIMEOUT (seconds per leg, default 900), SHOT_DIR (defaults
 # to a **run-specific** directory -- two concurrent runs must not overwrite
-# each other's screenshots), MMO_SOUND=1 to hear it.
+# each other's screenshots), MMO_SOUND=1 to hear it, SOLO_LEGS (Gen 3 only: a
+# comma list of legs to drive -- singles, double, or one of double-arena,
+# double-classic, double-ko, double-lastmon, double-refusal, double-handback,
+# double-real -- default every leg; read by the driver, so it passes straight
+# through).
 
 set -uo pipefail
 

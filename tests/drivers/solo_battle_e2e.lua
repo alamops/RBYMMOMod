@@ -79,6 +79,28 @@ if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
   love.audio.setVolume(0)
 end
 
+-- Which Gen 3 legs a run drives, from SOLO_LEGS (a comma / space list;
+-- unset, empty or "all" is every leg, which is what a default run does).  The
+-- names are "singles" (the wild / trainer legs above the doubles) and the
+-- lone-double legs, together as "double" or one by one: double-arena,
+-- double-classic, double-ko, double-lastmon, double-refusal, double-handback,
+-- double-real.
+-- A cart's run is minutes long, so iterating on one leg is worth a knob; it
+-- never changes what an unset run does.
+local SOLO_LEGS = (function()
+  local raw = os.getenv("SOLO_LEGS")
+  if raw == nil or raw == "" or raw:lower() == "all" then return nil end
+  local on = {}
+  for part in raw:gmatch("[^,%s]+") do on[part:lower()] = true end
+  return on
+end)()
+
+local function legOn(name, group)
+  if SOLO_LEGS == nil then return true end
+  if SOLO_LEGS[name] then return true end
+  return group ~= nil and SOLO_LEGS[group] == true
+end
+
 -- ==================================================================
 -- Gen 3 (FireRed / LeafGreen / Emerald)
 -- ==================================================================
@@ -100,7 +122,14 @@ end
 --   * the endings the cart words its own way: PAY DAY's coins, a trainer
 --     drawn (both last monsters down at once, and a draw the player is still
 --     standing after), FireRed's rival under the name the player gave them,
---     and a trainer met on a rainy field.
+--     and a trainer met on a rainy field;
+--   * the lone trainer doubles (the legs under "Lone doubles" below): two
+--     seats, two commands a turn, aiming, switching, the refill after a
+--     knockout, both UIs, the hand-back, and the real flow through the
+--     twins' script.
+--
+-- SOLO_LEGS (a comma list; default every leg) picks which run: "singles",
+-- "double", or one double leg by name -- see `legOn`.
 --
 -- Screenshots land in SHOT_DIR as g3-<game>-solo-NN-<leg>.png.
 --
@@ -272,6 +301,1393 @@ local function runGen3(game, H, U, env)
 
   local function wildOf(name, level)
     return { species = H.g3Species(game, name), level = level }
+  end
+
+  -- ------------------------------------------------------------------
+  -- Lone doubles (docs/plans/gen3-solo-doubles.md)
+  -- ------------------------------------------------------------------
+  --
+  -- SOLO BATTLES fights a *lone* trainer double -- one trainer, one party, one
+  -- AI, one defeat flag, two monsters a side -- on the mod's referee, with
+  -- CoopBattle's solo-double screen (`newSoloDouble`: `ownSlots`, a chooser,
+  -- buffered commands) in both UIs.  What this proves is what the headless
+  -- suites cannot see: the screen's real menus under real key presses, the
+  -- arena and the GBA double page actually drawn, and -- on the real flow --
+  -- the trainer's script resuming off the fight's result.
+  --
+  --   double-arena     the picked double, on the arena: both seats out, the
+  --                    intro lines; mon 1's command, mon 2's, B back to mon
+  --                    1, a re-pick; aiming at each foe (the picker lists the
+  --                    partner too); a switch to a bench monster; to the win:
+  --                    prize x2, every participant's EXP, a clean referee
+  --   double-classic   the same on CLASSIC BATTLE UI: the GBA double page's
+  --                    model, the command and move menus, the target blink,
+  --                    START's HP figures
+  --   double-ko        one of ours faints; the replacement picker comes up for
+  --                    that seat, and its bench leaves out the monster the
+  --                    other seat has out
+  --   double-lastmon   the last bench monster is gone: one seat is refilled,
+  --                    not two, and the fight is fought on by one
+  --   double-refusal   a command the referee turns down (a Disabled move): the
+--                    cart's line, the seat's menu kept, nothing filed, the
+--                    other seat not asked until another move goes through
+--   double-handback  fewer than two usable monsters: SOLO does not take it
+  --   double-real      Route 8 / Route 104's twins, met the cart's way: the
+  --                    sight approach, the script, the fight, the script's
+  --                    resume (flag, prize); and with one monster, the cart's
+  --                    own refusal in its own words
+  --
+  -- Which double is picked by scanning the cart's own book (a named, non-
+  -- LEADER double with a party of two, the lowest last level); the stage the
+  -- real flow walks into is the one the picked trainer is staged on, and the
+  -- leg skips when it is not.
+  local DOUBLE_STAGE = {
+    firered = { map = "FR_ROUTE_8", lid = 12 },
+    leafgreen = { map = "FR_ROUTE_8", lid = 12 },
+    emerald = { map = "EM_ROUTE104", lid = 23 },
+  }
+
+  local function doubleLegs()
+    local legs = { "double-arena", "double-classic", "double-ko", "double-lastmon",
+                   "double-refusal", "double-handback", "double-real" }
+    local any = false
+    for _, name in ipairs(legs) do
+      if legOn(name, "double") then any = true end
+    end
+    if not any then return end
+
+    local Moves = require("src.core.game3.battle.moves")
+    local Prize = require("src.core.game3.battle.prize")
+    local Natives = require("src.core.game3.scripting.natives")
+    local OUTCOME = Natives.B_OUTCOME or {}
+
+    -- ------- the double: the lowest-level named, non-LEADER lone double
+    local doubleId, doubleLast
+    do
+      local pack = Trainers.pack() or {}
+      for id, row in pairs(pack.trainers or {}) do
+        local tid = tonumber(id)
+        local p = type(row) == "table" and row.party or nil
+        local named = type(row) == "table" and type(row.name) == "string" and row.name ~= ""
+        local class = type(row) == "table" and tonumber(row.class) or 0
+        local className = tostring((type(row) == "table" and row.className)
+          or (pack.classNames and pack.classNames[class]) or ""):upper()
+        if tid and tid > 0 and named and row.doubleBattle and type(p) == "table" and #p == 2
+            and not className:find("LEADER", 1, true) then
+          local last = tonumber(p[#p].level) or 999
+          if doubleLast == nil or last < doubleLast or (last == doubleLast and tid < doubleId) then
+            doubleId, doubleLast = tid, last
+          end
+        end
+      end
+      log(("double: picked trainer %s (last level %s)"):format(tostring(doubleId), tostring(doubleLast)))
+    end
+    if not doubleId then
+      skip("the lone-double legs", "no named lone double with a party of two in this cart's book")
+      return
+    end
+
+    -- What the cart pays for this trainer, once and as a double: FireRed /
+    -- LeafGreen 4 x last level x class value, Emerald's money table -- the
+    -- engine's own Prize formulas, which is where the mod reads them from.
+    local function prizeOf(double)
+      local fn = emerald and Prize.calcRse or Prize.calc
+      local ok, amount = pcall(fn, doubleId, { double = double })
+      return ok and tonumber(amount) or nil
+    end
+
+    local function moveId(name) return H.g3Const(game, "moves", name) end
+    local pound, growl = moveId("MOVE_POUND"), moveId("MOVE_GROWL")
+
+    local STRONG = "PIKACHU"
+    local WEAK = emerald and "WURMPLE" or "CATERPIE"
+
+    -- One lead that knows only `move`, full PP.
+    local function pinMove(mon, move)
+      local okP, row = pcall(Moves.get, move)
+      local pp = (okP and type(row) == "table" and tonumber(row.pp)) or 10
+      mon.moves, mon.pp, mon.maxPp = { move }, { pp }, { pp }
+    end
+
+    -- `move` in front of a monster's own moves (the strongest of them behind
+    -- it, which the seeding put first).
+    local function putFirst(mon, move)
+      local okP, row = pcall(Moves.get, move)
+      local pp = (okP and type(row) == "table" and tonumber(row.pp)) or 10
+      table.insert(mon.moves, 1, move)
+      table.insert(mon.pp, 1, pp)
+      table.insert(mon.maxPp, 1, pp)
+      while #mon.moves > 4 do
+        table.remove(mon.moves)
+        table.remove(mon.pp)
+        table.remove(mon.maxPp)
+      end
+    end
+
+    -- The party the fight is fought with: `{ species = , level = , move = ,
+    -- first = , hp = }` rows, in order -- seat 1 takes the first, seat 2 the
+    -- second, the rest are the bench.  Healthy (or at `hp`), a damaging move
+    -- first unless `move` pins the only one, or `first` puts one in front.
+    local function seedTeam(specs)
+      local team = {}
+      for i, spec in ipairs(specs) do
+        local mon
+        if i == 1 then
+          mon = H.g3SeedParty(game, spec.species, spec.level)
+        else
+          mon = H.g3GiveMon(game, spec.species, spec.level)
+        end
+        if mon then
+          if spec.move then pinMove(mon, spec.move) else H.g3FrontloadDamage(mon) end
+          if spec.first then putFirst(mon, spec.first) end
+          mon.hp = spec.hp or mon.maxHp
+          mon.status = nil
+        end
+        team[i] = mon
+      end
+      return team
+    end
+
+    -- Each party monster's EXP, by party slot (read live: a fight writes the
+    -- save's monsters, not the tables the seeding handed back).
+    local function expsOf()
+      local out = {}
+      for i, mon in ipairs(party()) do out[i] = tonumber(mon and mon.exp) or 0 end
+      return out
+    end
+
+    -- Put the cart's own battle (a refused double it ran itself) away without
+    -- fighting it; this driver is not here to test the engine's battle.
+    local function endCartBattle()
+      pcall(BattleBridge.finishPending, "run")
+      H.waitSeconds(game, function() return not Battle.isActive() end, 20, "the cart's battle to end")
+      settle()
+    end
+
+    -- ------- reading the screen
+
+    -- The line on the box, on one line.
+    local function lineNow()
+      local f = fight()
+      local s = f and f.shown
+      if type(s) == "table" then s = table.concat(s, " ") end
+      if type(s) ~= "string" then return "" end
+      return (s:gsub("%s*\n%s*", " "))
+    end
+
+    local function foeSlotsOf(f)
+      local out = {}
+      for _, s in ipairs((f.sim and f.sim.slots) or {}) do
+        if f:foeSide(s.index) then out[#out + 1] = s.index end
+      end
+      return out
+    end
+
+    local function copyList(list)
+      local out = {}
+      for i, v in ipairs(list or {}) do out[i] = v end
+      return out
+    end
+
+    local function indexSet(bench)
+      local out = {}
+      for _, entry in ipairs(bench or {}) do out[#out + 1] = entry.index end
+      table.sort(out)
+      return table.concat(out, ",")
+    end
+
+    -- The strongest damaging move, one aimed at a chosen battler first (a
+    -- spread move asks nobody); a status move last.
+    local function bestMove(moves, skip)
+      local best, bestScore = 1, -1
+      for i, mv in ipairs(moves or {}) do
+        if (tonumber(mv.pp) or 0) > 0 and not (skip and skip[i]) then
+          local power = tonumber(mv.power) or 0
+          local score = (power > 0) and (power + ((tonumber(mv.target) or 0) == 0 and 1000 or 0)) or 0
+          if score > bestScore then best, bestScore = i, score end
+        end
+      end
+      return best
+    end
+
+    -- ------- the pilot
+    --
+    -- Plays a solo double with the real keys, a seat at a time: every command
+    -- is FIGHT / SWITCH / B on the screen's own menus, the cursors walked with
+    -- the d-pad.  `opts.plan(c)` answers each command menu (`c` = { f, turn,
+    -- pos (the chooser, 1 or 2), visit (the n-th time this seat's menu has
+    -- opened this turn) }) with { kind = "fight", move = i | fn, target =
+    -- slot | fn } / { kind = "switch", pick = fn } / { kind = "back" }; the
+    -- default is the strongest move at the first foe standing.  Hooks:
+    -- onMenu(c), onMove(c, f, moves, want), onTarget(c, f, targets),
+    -- onAimed(c, f, entry), onBack(c, before, after), onSwitchList(c, f,
+    -- bench), onReplace(rec, f, bench), replacePick(bench) -> row.
+    local function fightDouble(opts)
+      opts = opts or {}
+      local tag = opts.tag or "double"
+      local rep = {
+        said = {}, filed = {}, aimed = {}, replaces = {}, switches = {}, backs = {},
+        turns = 0, medGaps = 0, ended = false, stuck = 0,
+      }
+      local visits, shotDone = {}, {}
+      local lastTurnNumber = nil
+      -- A command the referee will not take (a move the foe Disabled, a
+      -- Taunt, Torment, no PP) reopens that seat's menu with the turn
+      -- unspent; the pilot then tries another move, as a player would.
+      local lastMove, skipMoves, backed = {}, {}, {}
+      rep.refusals = 0
+      rep.commits = {}
+      local inMenu = false
+
+      -- The referee's held choice for one of our seats (a command is filed
+      -- with it the moment it is chosen; B takes it back through its `cancel`).
+      local function refereeChoiceOf(pos)
+        local sim = solo.sim
+        local ft = sim and sim.byId and sim.byId[(pos == 1) and "solo_player" or "solo_player#2"]
+        return ft and ft.choice or nil
+      end
+
+      -- What a command did on the screen once it was chosen: filed with the
+      -- referee (the menu moves on), or turned down (the cart's line, and the
+      -- seat's menu kept open).
+      local function noteCommit(c)
+        local g = fight()
+        if not g then return end
+        local rec = { turn = c.turn, pos = c.pos, visit = c.visit, phase = g.phase,
+                      chooser = g.chooser, referee = refereeChoiceOf(c.pos) ~= nil }
+        if g.phase == "messages" then
+          for _ = 1, 24 do
+            if lineNow() ~= "" then break end
+            U.wait(1)
+          end
+          rec.line = lineNow()
+        end
+        rep.commits[#rep.commits + 1] = rec
+        if opts.onCommit then opts.onCommit(c, rec) end
+      end
+      local deadline = os.time() + (opts.seconds or 240)
+
+      local function shotOnce(key, frames)
+        if shotDone[key] or opts.noAutoShots then return end
+        shotDone[key] = true
+        U.wait(frames or 4)
+        shot(tag .. "-" .. key)
+      end
+
+      local function pressA(frames)
+        U.tap(game, "a")
+        U.wait(frames or 8)
+      end
+
+      local function noteFiled(c, kind, extra)
+        local t = rep.filed[c.turn] or {}
+        rep.filed[c.turn] = t
+        local row = extra or {}
+        row.kind = kind
+        t[c.pos] = row
+        if os.getenv("SOLO_DEBUG") == "1" then
+          log(("%s: turn %d mon %d %s move=%s target=%s index=%s"):format(
+            tag, c.turn, c.pos, kind, tostring(row.move), tostring(row.target), tostring(row.index)))
+        end
+      end
+
+      local function pickCommand(f, name)
+        for i, cmd in ipairs(f:commandList()) do
+          if cmd == name then f.commandIndex = i end
+        end
+        pressA(8)
+      end
+
+      -- The target picker: walk the cursor onto the foe asked for with the
+      -- d-pad (the arena walks its field, the GBA page its ring).
+      local function aim(c, act)
+        local f = fight()
+        local targets = f:targetChoices()
+        c.targets = targets
+        if opts.onTarget then opts.onTarget(c, f, targets) end
+        local want = act.target
+        if type(want) == "function" then want = want(targets, f) end
+        local at
+        for i, e in ipairs(targets) do
+          if e.index == want then at = i end
+        end
+        if not at then
+          for i, e in ipairs(targets) do
+            if f:foeSide(e.index) then at = i break end
+          end
+        end
+        at = at or 1
+        local reached = f.targetIndex == at
+        for _, key in ipairs({ "right", "left", "down", "up" }) do
+          if reached then break end
+          for _ = 1, #targets do
+            if f.targetIndex == at then reached = true break end
+            U.tap(game, key)
+            U.wait(4)
+          end
+          reached = reached or f.targetIndex == at
+        end
+        if not reached then
+          check(false, tag .. ": the d-pad walks the aim onto the foe asked for",
+                ("want entry %d of %d, cursor on %s"):format(at, #targets, tostring(f.targetIndex)))
+          f.targetIndex = at
+        end
+        if opts.onAimed then opts.onAimed(c, f, targets[at]) end
+        local slotIdx = targets[at] and targets[at].index
+        pressA(8)
+        f = fight()
+        if f and f.phase == "target" then pressA(8) end
+        rep.aimed[slotIdx or 0] = (rep.aimed[slotIdx or 0] or 0) + 1
+        noteFiled(c, "fight", { move = c.move, target = slotIdx })
+        noteCommit(c)
+      end
+
+      local function doBack(c)
+        local f = c.f
+        local own = f.ownSlots
+        local filed = f.filed and f.filed[own[1]]
+        local before = {
+          chooser = f.chooser, filed = filed ~= nil,
+          target = filed and filed.action and filed.action.target,
+          command = filed and filed.command,
+          referee = refereeChoiceOf(1) ~= nil,
+        }
+        U.tap(game, "b")
+        U.wait(8)
+        local g = fight()
+        local after = {}
+        if g then
+          after = {
+            chooser = g.chooser, mine = g.mine, phase = g.phase,
+            filed = (g.filed and g.filed[own[1]]) ~= nil,
+            referee = refereeChoiceOf(1) ~= nil,
+            commandIndex = g.commandIndex,
+          }
+        end
+        rep.backs[#rep.backs + 1] = { before = before, after = after, turn = c.turn }
+        backed[c.turn] = true
+        local t = rep.filed[c.turn]
+        if t then t[1] = nil end
+        if opts.onBack then opts.onBack(c, before, after) end
+      end
+
+      local function doSwitch(c, act)
+        local f = c.f
+        pickCommand(f, "SWITCH")
+        f = fight()
+        if not (f and f.phase == "switch") then
+          rep.stuck = rep.stuck + 1
+          log(tag .. ": SWITCH did not open the party list", f and f.phase)
+          return
+        end
+        local bench = f:benchOf(f:mySlot())
+        if opts.onSwitchList then opts.onSwitchList(c, f, bench) end
+        local at = (act.pick and act.pick(bench)) or 1
+        for _ = 1, at - 1 do
+          U.tap(game, "down")
+          U.wait(4)
+        end
+        local pick = bench[fight().switchIndex or 1]
+        pressA(8)
+        f = fight()
+        if f and f.phase == "switch" then pressA(8) end
+        rep.switches[#rep.switches + 1] = { turn = c.turn, pos = c.pos, index = pick and pick.index, bench = #bench }
+        noteFiled(c, "switch", { index = pick and pick.index })
+      end
+
+      local function doFight(c, act)
+        local f = c.f
+        pickCommand(f, "FIGHT")
+        f = fight()
+        if not (f and f.phase == "move") then
+          rep.stuck = rep.stuck + 1
+          log(tag .. ": FIGHT did not open the move menu", f and f.phase)
+          return
+        end
+        local moves = f:liveMoves()
+        local want = act.move
+        if type(want) == "function" then want = want(moves, f) end
+        local seatKey = c.turn .. ":" .. c.pos
+        local skip = skipMoves[seatKey]
+        -- a move the referee already turned down this turn is not asked again
+        if want == nil or (skip and skip[want]) then want = bestMove(moves, skip) end
+        lastMove[seatKey] = want
+        for _ = 1, #moves + 1 do
+          if f.moveIndex == want then break end
+          U.tap(game, "down")
+          U.wait(4)
+        end
+        c.move = want
+        if opts.onMove then opts.onMove(c, f, moves, want) end
+        pressA(8)
+        f = fight()
+        if f and f.phase == "target" then
+          aim(c, act)
+        else
+          noteFiled(c, "fight", { move = want })
+          noteCommit(c)
+        end
+      end
+
+      -- Why would the referee refuse this seat's last move?  Its own limits.
+      local function limitsOf(pos)
+        local sim = solo.sim
+        local ft = sim and sim.byId and sim.byId[(pos == 1) and "solo_player" or "solo_player#2"]
+        local b = ft and ft.b
+        if not b then return "no battler" end
+        local nums = {}
+        for i, mv in ipairs(b.moves or {}) do nums[i] = tostring(mv.num) .. ":pp" .. tostring(mv.pp) end
+        return ("disabled=%s tormented=%s taunt=%s encore=%s choiced=%s moves=%s"):format(
+          tostring(b.disabledNum), tostring(b.tormented), tostring(b.tauntTurns),
+          tostring(b.encoreTurns), tostring(b.choicedMove), table.concat(nums, " "))
+      end
+
+      local function handleCommand(c)
+        local seatKey = c.turn .. ":" .. c.pos
+        if c.visit >= 2 and not backed[c.turn] and lastMove[seatKey] then
+          rep.refusals = rep.refusals + 1
+          skipMoves[seatKey] = skipMoves[seatKey] or {}
+          skipMoves[seatKey][lastMove[seatKey]] = true
+          local n = 0
+          for _ in pairs(skipMoves[seatKey]) do n = n + 1 end
+          if n >= #c.f:liveMoves() then skipMoves[seatKey] = nil end
+          if rep.refusals <= 3 then
+            log(("%s: the referee did not take seat %d's move %d on turn %d (%s); trying another"):format(
+              tag, c.pos, lastMove[seatKey], c.turn, limitsOf(c.pos)))
+          end
+        end
+        if opts.onMenu then opts.onMenu(c) end
+        local act = (opts.plan and opts.plan(c)) or { kind = "fight" }
+        if act.kind == "back" then return doBack(c) end
+        if act.kind == "switch" then return doSwitch(c, act) end
+        return doFight(c, act)
+      end
+
+      local function handleReplace(f)
+        local bench = f:benchOf(f:mySlot())
+        local rec = { seat = f.mine, bench = bench, queue = copyList(f.replaceQueue), turn = rep.turns }
+        rep.replaces[#rep.replaces + 1] = rec
+        rec.n = #rep.replaces
+        if opts.onReplace then opts.onReplace(rec, f, bench) end
+        local at = (opts.replacePick and opts.replacePick(bench, rec)) or 1
+        for _ = 1, at - 1 do
+          U.tap(game, "down")
+          U.wait(4)
+        end
+        local row = bench[fight().switchIndex or 1]
+        rec.picked = row and row.index
+        pressA(8)
+      end
+
+      -- where the screen was left, for whoever reads the log
+      local function dumpStuck(why)
+        local f = fight()
+        if not f then return end
+        log(("%s: %s at phase=%s chooser=%s mine=%s replacing=%s result=%s turn=%d queued=%d line=[%s]"):format(
+          tag, why, tostring(f.phase), tostring(f.chooser), tostring(f.mine), tostring(f.replacing),
+          tostring(f.result), rep.turns, #(f.messages or {}), lineNow()))
+        for _, slot in ipairs((f.sim and f.sim.slots) or {}) do
+          local mon = slot.party and slot.party[slot.active or 0]
+          log(("%s:   slot %s side %s active %s hp %s/%s status %s"):format(tag, tostring(slot.index),
+            tostring(slot.side), tostring(slot.active), tostring(mon and mon.hp), tostring(mon and mon.maxHp),
+            tostring(mon and mon.status)))
+        end
+        -- ...and the referee's own view of the seats
+        local sim = solo.sim
+        if sim and sim.fighters then
+          log(("%s:   referee phase=%s turn=%s"):format(tag, tostring(sim.phase), tostring(sim.turn)))
+          for _, ft in ipairs(sim.fighters) do
+            local owes
+            if type(sim._owes) == "function" then
+              local okO, v = pcall(sim._owes, sim, ft)
+              owes = okO and v or "?"
+            end
+            log(("%s:   seat %s slot=%s side=%s connected=%s choice=%s mustReplace=%s active=%s owes=%s"):format(
+              tag, tostring(ft.playerId), tostring(ft.slot), tostring(ft.side), tostring(ft.connected),
+              tostring(ft.choice and ft.choice.action), tostring(ft.mustReplace), tostring(ft.active),
+              tostring(owes)))
+            local b = ft.b
+            if b then
+              local pps = {}
+              for i, mv in ipairs(b.moves or {}) do pps[i] = tostring(mv.num) .. ":" .. tostring(mv.pp) end
+              log(("%s:     disabledNum=%s tormented=%s taunt=%s encore=%s choiced=%s moves=%s"):format(
+                tag, tostring(b.disabledNum), tostring(b.tormented), tostring(b.tauntTurns),
+                tostring(b.encoreTurns), tostring(b.choicedMove), table.concat(pps, " ")))
+            end
+          end
+        end
+      end
+
+      -- A turn never takes minutes: a screen that has said and asked nothing
+      -- new for this long is wedged, and says so rather than waiting out the
+      -- whole budget.
+      local STALL_SECONDS = 100
+      local lastKey, lastChange = nil, os.time()
+      -- ...and one that never gets through a turn, whatever the screen is
+      -- doing meanwhile (a menu that keeps coming back, say)
+      local TURN_SECONDS = 150
+      local seenTurn, turnSince = nil, os.time()
+
+      while os.time() < deadline do
+        local f = fight()
+        if not f then
+          rep.ended = true
+          return rep
+        end
+        local text = lineNow()
+        local key = table.concat({ tostring(f.phase), tostring(f.chooser), tostring(f.replacing),
+          tostring(f.result), text, tostring(#(f.messages or {})) }, "|")
+        if key ~= lastKey then
+          lastKey, lastChange = key, os.time()
+        elseif os.time() - lastChange > STALL_SECONDS then
+          U.log(("TIMEOUT: the %s stood still for %ds"):format(tag, STALL_SECONDS))
+          dumpStuck("stalled")
+          return rep
+        end
+        local turnNow = solo.sim and tonumber(solo.sim.turn)
+        if turnNow ~= seenTurn or f.replacing then
+          seenTurn, turnSince = turnNow, os.time()
+        elseif os.time() - turnSince > TURN_SECONDS then
+          U.log(("TIMEOUT: the %s never got past turn %s in %ds"):format(tag, tostring(turnNow), TURN_SECONDS))
+          dumpStuck("stuck in one turn")
+          return rep
+        end
+        if text ~= "" and rep.said[#rep.said] ~= text then rep.said[#rep.said + 1] = text end
+        rep.medGaps = math.max(rep.medGaps, tonumber(f.medGaps) or 0)
+        local low = text:lower()
+        if low:find("would like to battle", 1, true) then shotOnce("intro", 6) end
+        if low:find("go!", 1, true) and low:find(" and ", 1, true) then shotOnce("sendout", 6) end
+        if low:find("fainted", 1, true) then shotOnce("ko", 4) end
+        if low:find("defeated", 1, true) and f.result == "win" then shotOnce("win", 4) end
+        if low:find("for winning", 1, true) or low:find("\194\165", 1, true) then shotOnce("prize", 4) end
+
+        if f.phase ~= "choose" then inMenu = false end
+        if f.replacing and f.phase ~= "messages" then
+          handleReplace(f)
+        elseif f.phase == "choose" and not f.result and not f.replacing then
+          -- A turn is the referee's: a refused command leaves the menu for a
+          -- line and comes back to it, which is the same turn.
+          local number = solo.sim and tonumber(solo.sim.turn)
+          if number ~= nil then
+            if number ~= lastTurnNumber then
+              lastTurnNumber = number
+              rep.turns = rep.turns + 1
+            end
+          elseif not inMenu then
+            rep.turns = rep.turns + 1
+          end
+          inMenu = true
+          local pos = f.chooser or 1
+          local key = rep.turns .. ":" .. pos
+          visits[key] = (visits[key] or 0) + 1
+          handleCommand({ f = f, turn = rep.turns, pos = pos, visit = visits[key], rep = rep })
+        elseif f.phase == "move" or f.phase == "target" or f.phase == "switch" then
+          -- a menu left open by a refusal: back out of it
+          U.tap(game, "b")
+          U.wait(6)
+        else
+          nudge()
+        end
+        U.wait(2)
+      end
+      U.log(("TIMEOUT waiting %ds for the %s to end"):format(opts.seconds or 240, tag))
+      dumpStuck("out of time")
+      return rep
+    end
+
+    local function sawLine(rep, ...)
+      for _, line in ipairs(rep.said) do
+        local low = line:lower()
+        local all = true
+        for i = 1, select("#", ...) do
+          if not low:find((select(i, ...)):lower(), 1, true) then all = false end
+        end
+        if all then return line end
+      end
+      return nil
+    end
+
+    local function money() return tonumber(session().money) or 0 end
+
+    -- A shot, and the file it landed in (`shot` numbers them as it goes).
+    local function shotFile(leg)
+      shot(leg)
+      return ("%s/g3-%s-solo-%02d-%s.png"):format(env.SHOT_DIR, tagGame, n, leg)
+    end
+
+    local function readFile(path)
+      local handle = io.open(path, "rb")
+      if not handle then return nil end
+      local bytes = handle:read("*a")
+      handle:close()
+      return bytes
+    end
+
+    -- SoloBattle's stuck-seat backstop (`_backstop3`, three seconds) answers
+    -- for a seat the screen stopped asking about, and says so once through
+    -- `warned`.  A real fight must never come near it.
+    local backstopReported = false
+    local function backstopQuiet(leg)
+      local warned = solo.warned or {}
+      if warned.reopen3 or warned.autopick3 then
+        if not backstopReported then
+          backstopReported = true
+          check(false, leg .. ": the stuck-seat backstop never fires in a real fight",
+                warned.reopen3 and "it asked a seat again" or "it picked for a seat")
+        end
+      else
+        check(true, leg .. ": the stuck-seat backstop never fired")
+      end
+    end
+
+    -- ------------------------------------------------------------------
+    -- the arena: two commands a turn, B back, aiming, a switch, the win
+    -- ------------------------------------------------------------------
+    if legOn("double-arena", "double") then
+      settle()
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", false)
+      local team = seedTeam({
+        { species = STARTER, level = 40 }, { species = STRONG, level = 40 },
+        { species = WILD, level = 30 },
+      })
+      check(#party() == 3 and team[1] and team[2] and team[3], "double: a team of three was seeded")
+      session().money = 3000
+      local moneyBefore, expBefore = money(), expsOf()
+      local result
+      local took = solo:fromGen3Trainer(game, doubleId,
+        { trainerId = doubleId, done = function(r) result = r end })
+      check(took, "double: SOLO takes the lone double " .. tostring(doubleId))
+      local f0 = fight()
+      check(took and f0 ~= nil and f0.soloDouble == true, "double: it is the solo-double screen")
+      if took and f0 then
+        check(f0.classicUi ~= true and f0:usesBattlefield(), "double: on the arena, not the GBA page")
+        check(type(f0.ownSlots) == "table" and #f0.ownSlots == 2, "double: both side-a seats are ours")
+        local foes = foeSlotsOf(f0)
+        local foeA, foeB = foes[1], foes[2]
+        check(foeA ~= nil and foeB ~= nil, "double: two foe seats")
+        local sawTargets, switchOk = false, nil
+        local rep = fightDouble({
+          tag = "double",
+          plan = function(c)
+            if c.turn == 1 and c.pos == 1 then
+              -- the first pick is aimed at the second foe and taken back; the
+              -- re-pick at the first is what goes out
+              return { kind = "fight", target = (c.visit == 1) and foeB or foeA }
+            elseif c.turn == 1 and c.pos == 2 then
+              if c.visit == 1 then return { kind = "back" } end
+              return { kind = "switch" }
+            elseif c.pos == 1 then
+              return { kind = "fight", target = foeB }
+            end
+            return { kind = "fight", target = foeA }
+          end,
+          onMenu = function(c)
+            local f = c.f
+            if c.turn == 1 and c.pos == 1 and c.visit == 1 then
+              local own = f.ownSlots
+              local s1, s2 = f.sim:slot(own[1]), f.sim:slot(own[2])
+              check(s1 and s1.battler and s2 and s2.battler, "double: both our seats have a monster out")
+              local a, b = f.sim:slot(foeA), f.sim:slot(foeB)
+              check(a and a.battler and b and b.battler, "double: both foe seats have a monster out")
+              check(f.chooser == 1 and f.mine == own[1], "double: mon 1's command menu opens first")
+              shot("double-cmd1")
+            elseif c.turn == 1 and c.pos == 2 and c.visit == 1 then
+              check(f.chooser == 2 and f.mine == f.ownSlots[2], "double: mon 2's command menu follows")
+              check(f.filed and f.filed[f.ownSlots[1]] ~= nil and solo.sim.byId["solo_player"].choice ~= nil,
+                    "double: mon 1's command is already filed with the referee")
+              check(solo.sim.byId["solo_player#2"].choice == nil, "double: ...and mon 2's is still to come")
+              shot("double-cmd2")
+            end
+          end,
+          onBack = function(c, before, after)
+            check(before.filed and before.referee and before.chooser == 2 and before.target == foeB,
+                  "double: mon 1's pick (the second foe) was filed, and there to take back",
+                  ("filed=%s referee=%s chooser=%s target=%s"):format(tostring(before.filed),
+                    tostring(before.referee), tostring(before.chooser), tostring(before.target)))
+            check(after.chooser == 1 and after.phase == "choose" and not after.filed and not after.referee,
+                  "double: B on mon 2's menu hands back mon 1's menu, and the referee no longer holds mon 1's choice",
+                  ("chooser=%s phase=%s filed=%s referee=%s"):format(tostring(after.chooser),
+                    tostring(after.phase), tostring(after.filed), tostring(after.referee)))
+            check(after.commandIndex == before.command,
+                  "double: mon 1's menu reopens on the command it had chosen",
+                  ("%s vs %s"):format(tostring(after.commandIndex), tostring(before.command)))
+            shot("double-back")
+          end,
+          onTarget = function(c, f, targets)
+            if sawTargets then return end
+            sawTargets = true
+            local foesListed, allies = 0, 0
+            for _, e in ipairs(targets) do
+              if f:foeSide(e.index) then foesListed = foesListed + 1
+              elseif e.index ~= f.mine then allies = allies + 1 end
+            end
+            check(foesListed == 2 and allies == 1 and #targets == 3,
+                  "double: the target picker lists both foes and the partner",
+                  ("%d foes, %d partner, %d entries"):format(foesListed, allies, #targets))
+            U.wait(10)
+            shot("double-target")
+          end,
+          onSwitchList = function(c, f, bench)
+            local own = f.ownSlots
+            local mine, other = f.sim:slot(own[2]), f.sim:slot(own[1])
+            local clean = #bench == 1
+            for _, entry in ipairs(bench) do
+              if entry.index == mine.active or entry.index == other.active then clean = false end
+            end
+            switchOk = clean
+            check(clean, "double: the bench leaves out both monsters on the field",
+                  ("bench %s; out %s and %s"):format(indexSet(bench), tostring(mine.active), tostring(other.active)))
+            shot("double-switch")
+          end,
+          seconds = 300,
+        })
+        check(rep.ended, "double: the fight ended")
+        check(#rep.backs == 1, "double: one B-back was played", tostring(#rep.backs))
+        check(switchOk ~= nil and #rep.switches == 1, "double: the switch to the bench monster was played")
+        -- what was filed, not what was tried: the first pick (taken back) does
+        -- not count
+        local filedAt = {}
+        for _, turn in pairs(rep.filed) do
+          for _, row in pairs(turn) do
+            if row.target then filedAt[row.target] = (filedAt[row.target] or 0) + 1 end
+          end
+        end
+        check(filedAt[foeA] ~= nil and filedAt[foeB] ~= nil,
+              "double: both foes were aimed at, and the aim was sent",
+              ("%s/%s"):format(tostring(filedAt[foeA]), tostring(filedAt[foeB])))
+        local t1 = rep.filed[1] or {}
+        check(t1[1] and t1[1].target == foeA and t1[2] and t1[2].kind == "switch",
+              "double: turn 1 filed the re-pick at the first foe, and the switch",
+              ("%s / %s"):format(tostring(t1[1] and t1[1].target), tostring(t1[2] and t1[2].kind)))
+        check(rep.stuck == 0, "double: no menu refused a command it was given", tostring(rep.stuck))
+        check(sawLine(rep, "would like to battle") ~= nil, "double: the trainer's intro line was said")
+        check(sawLine(rep, "sent out", " and ") ~= nil, "double: 'the trainer sent out X and Y!' was said")
+        check(sawLine(rep, "go!", " and ") ~= nil, "double: 'Go! X and Y!' was said")
+        check(sawLine(rep, "fainted") ~= nil, "double: a knockout was said")
+        check(result == "win", "double: done('win')", tostring(result))
+        local once, twice = prizeOf(false), prizeOf(true)
+        local gained = money() - moneyBefore
+        check(once ~= nil and twice ~= nil and twice == 2 * once and gained == twice,
+              "double: the prize is the cart's double prize (x2 the single's)",
+              ("paid %d; single %s, double %s"):format(gained, tostring(once), tostring(twice)))
+        local now = party()
+        for i = 1, 3 do
+          check(now[i] and (tonumber(now[i].exp) or 0) > expBefore[i],
+                ("double: monster %d took part and gained EXP"):format(i),
+                ("%d -> %d"):format(expBefore[i], tonumber(now[i] and now[i].exp) or -1))
+        end
+        check(rep.medGaps == 0, "double: the referee's events arrived in order", tostring(rep.medGaps))
+        backstopQuiet("double")
+        check(OUTCOME.WON ~= nil and session().battleOutcome == OUTCOME.WON,
+              "double: the save's outcome is a win", tostring(session().battleOutcome))
+        settle()
+        check(H.g3Idle(game) and not Battle.isActive(), "double: the field is the player's again")
+        shot("double-after")
+      end
+    end
+
+    -- ------------------------------------------------------------------
+    -- CLASSIC BATTLE UI: the GBA double page
+    -- ------------------------------------------------------------------
+    if legOn("double-classic", "double") then
+      settle()
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", true)
+      local team = seedTeam({
+        { species = STARTER, level = 40 }, { species = STRONG, level = 40 },
+        { species = WILD, level = 30 },
+      })
+      session().money = 3000
+      local moneyBefore = money()
+      local result
+      local took = solo:fromGen3Trainer(game, doubleId,
+        { trainerId = doubleId, done = function(r) result = r end })
+      check(took, "classic double: SOLO takes the lone double")
+      local f0 = fight()
+      if took and f0 then
+        check(f0.classicUi == true and not f0:usesBattlefield(),
+              "classic double: the screen latched CLASSIC BATTLE UI")
+        local foes = foeSlotsOf(f0)
+        local foeB = foes[2]
+        local didMenu, didMove, didTarget = false, false, false
+        local rep = fightDouble({
+          tag = "double-classic",
+          plan = function(c)
+            if c.turn == 1 and c.pos == 1 then return { kind = "fight", target = foeB } end
+            return { kind = "fight" }
+          end,
+          onMenu = function(c)
+            if didMenu or c.turn ~= 1 or c.pos ~= 1 then return end
+            didMenu = true
+            local f = c.f
+            local model = f:gen3ClassicModel()
+            local d = model.double
+            check(type(d) == "table", "classic double: the page model carries `double`")
+            if type(d) == "table" then
+              check(d.foes and d.foes[1] and d.foes[2] and d.allies and d.allies[1] and d.allies[2],
+                    "classic double: two foes and two allies are modelled")
+              check(model.foe == nil and model.ally == nil and model.foeStrip == nil and model.allyStrip == nil,
+                    "classic double: no centre pair or focus strips beside it")
+              check(d.choosing == 1, "classic double: mon 1 is the one choosing", tostring(d.choosing))
+              check(d.hpText ~= true, "classic double: the bars are up, not the HP figures")
+            end
+            check(type(model.commands) == "table" and #model.commands >= 4,
+                  "classic double: the command menu is the page's")
+            U.wait(24)
+            shot("double-classic-command")
+            -- START swaps the bars for HP numbers, and again swaps them back
+            U.tap(game, "start")
+            U.wait(8)
+            local on = fight()
+            local m2 = on and on:gen3ClassicModel()
+            check(on and on.hpText3 == true and m2 and m2.double and m2.double.hpText == true,
+                  "classic double: START puts the HP figures up",
+                  tostring(on and on.hpText3))
+            U.wait(8)
+            shot("double-classic-hp")
+            U.tap(game, "start")
+            U.wait(8)
+            local off = fight()
+            local m3 = off and off:gen3ClassicModel()
+            check(off and off.hpText3 ~= true and m3 and m3.double and m3.double.hpText ~= true,
+                  "classic double: START again puts the bars back")
+          end,
+          onMove = function(c, f, moves)
+            if didMove or c.turn ~= 1 or c.pos ~= 1 then return end
+            didMove = true
+            local model = f:gen3ClassicModel()
+            check(type(model.moves) == "table" and #model.moves == #moves and model.double ~= nil,
+                  "classic double: the move menu is the page's, on the double")
+            local withTarget = 0
+            for _, row in ipairs(model.moves or {}) do
+              if row.target ~= nil then withTarget = withTarget + 1 end
+            end
+            check(withTarget == #moves, "classic double: every move carries its target byte (the preview's input)",
+                  tostring(withTarget))
+            U.wait(16)
+            shot("double-classic-move")
+          end,
+          onAimed = function(c, f, entry)
+            if didTarget or c.turn ~= 1 or c.pos ~= 1 then return end
+            didTarget = true
+            local model = f:gen3ClassicModel()
+            local d = model.double
+            check(model.phase == "target" and type(model.moves) == "table",
+                  "classic double: aiming keeps the move menu up", tostring(model.phase))
+            check(d and d.blink and d.blink.side == "b" and d.blink.index == 2,
+                  "classic double: the second foe is the battler blinking",
+                  d and d.blink and (tostring(d.blink.side) .. tostring(d.blink.index)) or "no blink")
+            -- The cart's blink is 8 frames lit, 8 hidden, restarted by each
+            -- cursor move: one frame of each, and the two must differ.
+            local function blinkPhase()
+              local g = fight()
+              local m = g and g:gen3ClassicModel()
+              local b = m and m.double and m.double.blink
+              return b and ((g.frame or 0) - (b.since or 0)) % 16 or nil
+            end
+            for _ = 1, 40 do
+              local at = blinkPhase()
+              if at and at <= 3 then break end
+              U.wait(1)
+            end
+            local litPath = shotFile("double-classic-target")
+            for _ = 1, 40 do
+              local at = blinkPhase()
+              if at and at >= 10 and at <= 13 then break end
+              U.wait(1)
+            end
+            local offPath = shotFile("double-classic-target-off")
+            local lit, off = readFile(litPath), readFile(offPath)
+            check(lit ~= nil and off ~= nil and lit ~= off,
+                  "classic double: the aimed-at battler blinks -- its lit and hidden frames differ")
+          end,
+          seconds = 300,
+        })
+        check(rep.ended, "classic double: the fight ended")
+        check(didMenu and didMove and didTarget, "classic double: the command, move and target pages were all up")
+        check(result == "win", "classic double: done('win')", tostring(result))
+        local gained = money() - moneyBefore
+        check(gained == prizeOf(true), "classic double: the double prize was paid",
+              ("%d vs %s"):format(gained, tostring(prizeOf(true))))
+        check(rep.medGaps == 0, "classic double: the referee's events arrived in order", tostring(rep.medGaps))
+        backstopQuiet("classic double")
+        settle()
+        shot("double-classic-after")
+      end
+      setOption("classicui", false)
+    end
+
+    -- ------------------------------------------------------------------
+    -- a knockout and the refill from the bench
+    -- ------------------------------------------------------------------
+    --
+    -- Mon 1 is a weak lead on 1 HP that only growls; mon 2 hits it with a
+    -- plain POUND, aimed at the partner (the picker offers it), until it falls
+    -- -- a knockout of ours that depends on nothing the foes choose, and one
+    -- more thing the picker must do.  Until then nothing is aimed at a foe, so
+    -- the fight cannot end before it has been seen.
+    local function friendlyFire(c, fallen)
+      local own = c.f.ownSlots
+      if not fallen then
+        if c.pos == 1 then return { kind = "fight", move = 1 } end
+        return { kind = "fight", move = 1, target = own[1] }
+      end
+      return { kind = "fight" }
+    end
+
+    if legOn("double-ko", "double") then
+      settle()
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", false)
+      if not (pound and growl) then
+        skip("the KO + refill leg", "this cart's table has no MOVE_POUND / MOVE_GROWL to stage it with")
+      else
+        local team = seedTeam({
+          { species = WEAK, level = 10, move = growl, hp = 1 },
+          { species = STRONG, level = 55, first = pound },
+          { species = STARTER, level = 30 }, { species = WILD, level = 30 },
+        })
+        check(#party() == 4 and team[1] and team[4], "ko double: a team of four was seeded")
+        session().money = 3000
+        local result
+        local took = solo:fromGen3Trainer(game, doubleId,
+          { trainerId = doubleId, done = function(r) result = r end })
+        check(took, "ko double: SOLO takes the lone double")
+        local f0 = fight()
+        if took and f0 then
+          local refilled, pickedIndex, partnerOffered = nil, nil, false
+          local rep = fightDouble({
+            tag = "double-ko",
+            plan = function(c) return friendlyFire(c, #c.rep.replaces >= 1) end,
+            onTarget = function(c, f, targets)
+              if c.pos ~= 2 or partnerOffered then return end
+              for _, e in ipairs(targets) do
+                if e.index == f.ownSlots[1] then partnerOffered = true end
+              end
+            end,
+            onMenu = function(c)
+              if pickedIndex and refilled == nil then
+                local seat = c.f.sim:slot(c.f.ownSlots[1])
+                refilled = seat and seat.active == pickedIndex
+                check(refilled, "ko double: the emptied seat holds the monster that was picked",
+                      ("active %s, picked %s"):format(tostring(seat and seat.active), tostring(pickedIndex)))
+              end
+            end,
+            onReplace = function(rec, f, bench)
+              -- the first knockout is the staged one; a monster that falls
+              -- later in the fight (a foe's doing) is asked for as well, from
+              -- whatever is left
+              if rec.n ~= 1 then return end
+              local own = f.ownSlots
+              local other = f.sim:slot(own[2])
+              check(rec.seat == own[1], "ko double: the replacement is asked for the seat that fell (seat 1)",
+                    ("seat %s, ours %s/%s"):format(tostring(rec.seat), tostring(own[1]), tostring(own[2])))
+              check(#rec.queue == 1 and rec.queue[1] == own[1],
+                    "ko double: only that seat owes a monster", tostring(#rec.queue))
+              local out = false
+              for _, entry in ipairs(bench) do
+                if entry.index == other.active or (entry.mon and (tonumber(entry.mon.hp) or 0) <= 0) then out = true end
+              end
+              check(#bench == 2 and not out and indexSet(bench) == "3,4",
+                    "ko double: the bench is the two reserves -- not the other seat's monster, not the fallen one",
+                    ("bench %s, the other seat holds %s"):format(indexSet(bench), tostring(other.active)))
+              shot("double-refill")
+            end,
+            replacePick = function(bench, rec)
+              if rec.n ~= 1 then return 1 end
+              pickedIndex = bench[#bench] and bench[#bench].index
+              return #bench
+            end,
+            seconds = 300,
+          })
+          check(rep.ended, "ko double: the fight ended")
+          check(partnerOffered, "ko double: the target picker offered the partner")
+          check(#rep.replaces >= 1 and rep.replaces[1].seat == f0.ownSlots[1],
+                "ko double: the replacement picker came up for seat 1", tostring(#rep.replaces))
+          check(refilled == true, "ko double: the refill landed on the seat")
+          check(result == "win", "ko double: done('win')", tostring(result))
+          check(party()[1] and (tonumber(party()[1].hp) or 1) == 0, "ko double: the fallen lead is still down on the save")
+          check(rep.medGaps == 0, "ko double: the referee's events arrived in order", tostring(rep.medGaps))
+        backstopQuiet("ko double")
+          settle()
+        end
+      end
+    end
+
+    -- ------------------------------------------------------------------
+    -- the last monster: one seat refilled, not two
+    -- ------------------------------------------------------------------
+    if legOn("double-lastmon", "double") then
+      settle()
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", false)
+      if not (pound and growl) then
+        skip("the last-monster leg", "this cart's table has no MOVE_POUND / MOVE_GROWL to stage it with")
+      else
+        -- one monster against two, after turns spent knocking out the other:
+        -- strong enough not to lose to chance
+        seedTeam({
+          { species = WEAK, level = 10, move = growl, hp = 1 },
+          { species = STRONG, level = 70, first = pound },
+        })
+        check(#party() == 2, "last-mon double: a team of two was seeded")
+        session().money = 3000
+        local result
+        local took = solo:fromGen3Trainer(game, doubleId,
+          { trainerId = doubleId, done = function(r) result = r end })
+        check(took, "last-mon double: SOLO takes it with two usable monsters")
+        local f0 = fight()
+        if took and f0 then
+          local fellAt, seatOneAgain, laterMenus = nil, 0, 0
+          local rep = fightDouble({
+            tag = "double-lastmon",
+            plan = function(c)
+              local s1 = c.f.sim:slot(c.f.ownSlots[1])
+              return friendlyFire(c, c.f.sim:isDown(s1))
+            end,
+            onMenu = function(c)
+              local s1 = c.f.sim:slot(c.f.ownSlots[1])
+              if c.f.sim:isDown(s1) then
+                fellAt = fellAt or c.turn
+                laterMenus = laterMenus + 1
+                if c.pos ~= 2 then seatOneAgain = seatOneAgain + 1 end
+              end
+            end,
+            seconds = 300,
+          })
+          check(rep.ended, "last-mon double: the fight ended")
+          check(fellAt ~= nil, "last-mon double: the first monster fell", tostring(fellAt))
+          check(#rep.replaces == 0, "last-mon double: nobody was asked for a replacement (no bench)",
+                tostring(#rep.replaces))
+          check(laterMenus >= 1 and seatOneAgain == 0,
+                "last-mon double: after the knockout only the other seat is ever asked",
+                ("%d later menus, seat 1 asked %d times"):format(laterMenus, seatOneAgain))
+          check(result == "win", "last-mon double: the last monster won it alone", tostring(result))
+          check(party()[1] and (tonumber(party()[1].hp) or 1) == 0, "last-mon double: the fallen lead is down on the save")
+          check(rep.medGaps == 0, "last-mon double: the referee's events arrived in order", tostring(rep.medGaps))
+        backstopQuiet("last-mon double")
+          settle()
+        end
+      end
+    end
+
+    -- ------------------------------------------------------------------
+    -- a command the referee turns down: the cart's line, the menu kept
+    -- ------------------------------------------------------------------
+    --
+    -- A foe's DISABLE has taken mon 1's first move (the referee's own state,
+    -- as the move leaves it).  Choosing it is turned down in the cart's words
+    -- and mon 1's menu stays open; nothing is filed, so mon 2 is not asked;
+    -- another move goes through, and then mon 2 is.
+    if legOn("double-refusal", "double") then
+      settle()
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", false)
+      seedTeam({
+        { species = STARTER, level = 40 }, { species = STRONG, level = 40 },
+        { species = WILD, level = 30 },
+      })
+      session().money = 3000
+      local result
+      local took = solo:fromGen3Trainer(game, doubleId,
+        { trainerId = doubleId, done = function(r) result = r end })
+      check(took, "refusal double: SOLO takes the lone double")
+      local f0 = fight()
+      if took and f0 then
+        local shotRefusal = false
+        local rep = fightDouble({
+          tag = "double-refusal",
+          onMenu = function(c)
+            if c.turn == 1 and c.pos == 1 and c.visit == 1 then
+              local b = solo.sim.byId["solo_player"].b
+              b.disabledNum = b.moves[1].num
+            end
+          end,
+          plan = function(c)
+            if c.turn == 1 and c.pos == 1 then
+              return { kind = "fight", move = (c.visit == 1) and 1 or 2 }
+            end
+            return { kind = "fight" }
+          end,
+          onCommit = function(c, rec)
+            if rec.line and not shotRefusal then
+              shotRefusal = true
+              U.wait(10)
+              shot("double-refused")
+            end
+          end,
+          seconds = 300,
+        })
+        check(rep.ended, "refusal double: the fight ended")
+        local first, second, third = rep.commits[1], rep.commits[2], rep.commits[3]
+        check(first and first.turn == 1 and first.pos == 1 and first.phase == "messages"
+                and first.chooser == 1 and first.referee == false,
+              "refusal double: the disabled move is turned down -- a line, mon 1's seat kept, nothing filed",
+              first and ("%s chooser=%s referee=%s"):format(tostring(first.phase), tostring(first.chooser), tostring(first.referee)) or "no commit")
+        check(first and type(first.line) == "string" and first.line:lower():find("disabled", 1, true) ~= nil,
+              "refusal double: ...in the cart's words (the move is disabled)", first and first.line or "no line")
+        check(second and second.turn == 1 and second.pos == 1 and second.visit >= 2 and second.referee == true,
+              "refusal double: mon 1 chose again, and the referee took it",
+              second and ("turn %s pos %s visit %s referee=%s"):format(tostring(second.turn), tostring(second.pos),
+                tostring(second.visit), tostring(second.referee)) or "no commit")
+        check(third and third.turn == 1 and third.pos == 2,
+              "refusal double: mon 2 was asked only after mon 1's command was in",
+              third and ("turn %s pos %s"):format(tostring(third.turn), tostring(third.pos)) or "no commit")
+        -- (a foe's own DISABLE can turn another down later in the fight; this
+        -- one is the staged first)
+        check(rep.refusals >= 1, "refusal double: the turned-down command was noticed and another tried",
+              tostring(rep.refusals))
+        check(result == "win", "refusal double: done('win')", tostring(result))
+        check(rep.medGaps == 0, "refusal double: the referee's events arrived in order", tostring(rep.medGaps))
+        backstopQuiet("refusal double")
+        settle()
+      end
+    end
+
+    -- ------------------------------------------------------------------
+    -- fewer than two usable monsters: handed back
+    -- ------------------------------------------------------------------
+    if legOn("double-handback", "double") then
+      settle()
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", false)
+      -- one monster
+      local team = seedTeam({ { species = STARTER, level = 40 } })
+      check(#party() == 1 and team[1], "hand-back: a one-monster party was seeded")
+      local hpBefore = tonumber(team[1] and team[1].hp) or 0
+      local result
+      local took = solo:fromGen3Trainer(game, doubleId,
+        { trainerId = doubleId, done = function(r) result = r end })
+      check(took == false, "hand-back: one usable monster -- SOLO does not take the double", tostring(took))
+      check(fight() == nil and not solo.handingBack3 and not Battle.isActive(),
+            "hand-back: no mod fight, none of the cart's yet, nothing left half-started")
+      check(result == nil, "hand-back: the script is not answered", tostring(result))
+      check(#party() == 1 and (tonumber(party()[1].hp) or -1) == hpBefore,
+            "hand-back: the party is as it was")
+      -- two monsters, one fainted
+      local two = seedTeam({ { species = STARTER, level = 40 }, { species = STRONG, level = 40 } })
+      if two[2] then two[2].hp = 0 end
+      took = solo:fromGen3Trainer(game, doubleId, { trainerId = doubleId, done = function(r) result = r end })
+      check(took == false, "hand-back: two monsters, one fainted -- SOLO does not take it", tostring(took))
+      check(fight() == nil and not Battle.isActive() and result == nil,
+            "hand-back: ...and nothing started")
+      check(#party() == 2 and (tonumber(party()[2].hp) or -1) == 0 and (tonumber(party()[1].hp) or 0) > 0,
+            "hand-back: ...and the party is as it was")
+      -- the control: the same trainer with two usable monsters is taken
+      seedTeam({ { species = STARTER, level = 40 }, { species = STRONG, level = 40 } })
+      took = solo:fromGen3Trainer(game, doubleId, { trainerId = doubleId, done = function(r) result = r end })
+      check(took == true and fight() ~= nil and fight().soloDouble == true,
+            "hand-back: the same trainer with two usable monsters is taken")
+      if took then
+        local rep = fightDouble({ tag = "hand-back", noAutoShots = true, seconds = 240 })
+        check(rep.ended and result == "win", "hand-back: ...and fought to a win", tostring(result))
+      end
+      settle()
+    end
+
+    -- ------------------------------------------------------------------
+    -- the real flow: the twins' sight, the script, the fight, the script's
+    -- resume; and the cart's own refusal with one monster
+    -- ------------------------------------------------------------------
+    if legOn("double-real", "double") then
+      local stage = DOUBLE_STAGE[VERSION] or DOUBLE_STAGE.firered
+      setOption(env.OPTION_KEY, true)
+      setOption("classicui", false)
+
+      -- The cell, and the way to walk, that steps the player into the
+      -- trainer's line of sight: one past the end of the cone along the line
+      -- when that is ground, else beside the cone's far cell.
+      local function approachFor(eo)
+        local sx, sy, dir = H.g3SightApproach(eo)
+        local function open(x, y)
+          local okW, walkable = pcall(Collision.isWalkable, x, y)
+          return okW and walkable and not Objects.at(x, y)
+        end
+        if sx and open(sx, sy) then return sx, sy, dir end
+        local vec = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+        local d = vec[eo.facing]
+        if not d then return nil end
+        local reach = tonumber(eo.sight) or 1
+        local cx, cy = eo.cellX + d[1] * reach, eo.cellY + d[2] * reach
+        local nx, ny = H.g3FreeCellNear(cx, cy)
+        if not nx or (nx ~= cx and ny ~= cy) then return nil end
+        local way = (cx > nx and "right") or (cx < nx and "left") or (cy > ny and "down") or "up"
+        return nx, ny, way
+      end
+
+      -- The trainer's objects (both twins), unbeaten, and where to stand.
+      local function stageTwins()
+        settle()
+        H.g3Teleport(game, stage.map, 1, 1, "down")
+        local eo = H.g3ObjectById(stage.lid)
+        if not eo then return nil, ("no object %d on %s"):format(stage.lid, stage.map) end
+        local tid = H.g3TrainerId(eo)
+        if tid ~= doubleId then
+          return nil, ("object %d on %s is trainer %s, not the picked %s"):format(
+            stage.lid, stage.map, tostring(tid), tostring(doubleId))
+        end
+        local sx, sy, dir = approachFor(eo)
+        if not sx then return nil, "no free cell to walk into its sight from" end
+        local twin = H.g3ObjectById(stage.lid + 1)
+        H.g3ClearTrainer(eo)
+        if twin then H.g3ClearTrainer(twin) end
+        return { eo = eo, twin = twin, x = sx, y = sy, dir = dir }
+      end
+
+      -- Walk into sight and answer the cart's boxes, until `done()`.
+      local function walkIn(st, done, seconds, what)
+        return H.waitSeconds(game, function()
+          if done() then return true end
+          local top = H.g3Top(game)
+          if type(top) == "table" and top.g3Engine == "message" and H.g3Layer() == nil then
+            U.tap(game, "a")
+            U.wait(6)
+            return false
+          end
+          if not H.g3Free(game) then
+            U.wait(4)
+            return false
+          end
+          U.hold(game, st.dir, 16)
+          U.wait(1)
+          return false
+        end, seconds or 180, what)
+      end
+
+      -- ---- two usable monsters: the solo double from the script, to the end
+      do
+        local st, why = stageTwins()
+        if not st then
+          skip("the real-flow double leg", why)
+        else
+          local team = seedTeam({
+            { species = STARTER, level = 40 }, { species = STRONG, level = 40 },
+            { species = WILD, level = 30 },
+          })
+          session().money = 3000
+          local moneyBefore, expBefore = money(), expsOf()
+          local placed = H.g3Teleport(game, stage.map, st.x, st.y, st.dir)
+          check(placed, "real double: standing just outside the twins' line of sight")
+          local met = placed and walkIn(st, function() return solo.fight ~= nil end, 180,
+            "the twins to see us and solo to take the fight")
+          check(met and fight() ~= nil and fight().soloDouble == true,
+                "real double: walking into sight raised the fight and solo took it as a double")
+          if met and fight() then
+            check(not Battle.isActive(), "real double: the cart's own battle did not start")
+            check(H.g3ScriptRunning(), "real double: the trainer's script waits on the fight")
+            check(H.g3TrainerDefeated(st.eo) == false, "real double: the twins are unbeaten until it is won")
+            local rep = fightDouble({ tag = "double-real", seconds = 300 })
+            check(rep.ended, "real double: the fight ended")
+            check(rep.medGaps == 0, "real double: the referee's events arrived in order", tostring(rep.medGaps))
+        backstopQuiet("real double")
+            H.g3TalkUntilFree(game, 90)
+            check(H.g3TrainerDefeated(st.eo) == true,
+                  "real double: the script resumed -- the trainer's defeat flag is set")
+            if st.twin then
+              check(H.g3TrainerDefeated(st.twin) == true, "real double: ...for the other twin too (one trainer)")
+            end
+            local gained = money() - moneyBefore
+            check(gained == prizeOf(true), "real double: the double prize was paid by the script's resume",
+                  ("%d vs %s"):format(gained, tostring(prizeOf(true))))
+            local now = party()
+            for i = 1, 2 do
+              check(now[i] and (tonumber(now[i].exp) or 0) > expBefore[i],
+                    ("real double: monster %d (out on the field) gained EXP"):format(i))
+            end
+            if #rep.replaces == 0 and #rep.switches == 0 then
+              check(now[3] and (tonumber(now[3].exp) or 0) == expBefore[3],
+                    "real double: the bench monster that never came out gained nothing")
+            end
+            check(OUTCOME.WON ~= nil and session().battleOutcome == OUTCOME.WON,
+                  "real double: the save's outcome is a win", tostring(session().battleOutcome))
+            check(H.g3Free(game) and not H.g3ScriptRunning(), "real double: control is the field's again")
+            shot("double-real-after")
+          end
+          -- nothing of this fight may outlive the leg
+          if solo.fight then fightDouble({ tag = "double-real-cleanup", noAutoShots = true, seconds = 240 }) end
+          if Battle.isActive() then endCartBattle() end
+          settle()
+        end
+      end
+
+      -- ---- one monster: the cart's own rules, SOLO stays out of it
+      --
+      -- The cart's trainer does not come for a player who cannot double
+      -- (pokefirered trainer_see.c:114), and talking to one is refused in the
+      -- trainer's own "not enough POKéMON" words, the script halted.
+      do
+        local st, why = stageTwins()
+        if not st then
+          skip("the real-flow refusal leg", why)
+        else
+          seedTeam({ { species = STARTER, level = 40 } })
+          session().money = 3000
+          local moneyBefore = money()
+          local vec = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+          local back = { up = "down", down = "up", left = "right", right = "left" }
+          local d = vec[st.eo.facing]
+          local ax, ay = st.eo.cellX + d[1], st.eo.cellY + d[2]
+          -- in the line of sight, right in front of the trainer, looking at it
+          local placed = H.g3Teleport(game, stage.map, ax, ay, back[st.eo.facing])
+          check(placed, "real refusal: standing in the twins' line of sight, facing one of them")
+          -- four seconds of nothing (a quiet wait: not finding it is the point)
+          local early = false
+          do
+            local until_ = os.time() + 4
+            while os.time() < until_ and not early do
+              early = solo.fight ~= nil or Battle.isActive() or H.g3ScriptRunning()
+              U.wait(2)
+            end
+          end
+          check(not early and fight() == nil and not Battle.isActive(),
+                "real refusal: in sight with one monster, the trainer does not come, and neither battle starts")
+          -- talk to it
+          local sawMessage, taken, shotRefused = false, false, false
+          local spoken = {}
+          U.tap(game, "a")
+          local done = H.waitSeconds(game, function()
+            if solo.fight or Battle.isActive() then taken = true return true end
+            local top = H.g3Top(game)
+            if type(top) == "table" and top.g3Engine == "message" and H.g3Layer() == nil then
+              sawMessage = true
+              local page = top.pages and top.pages[1] and top.pages[1][1]
+              if page and spoken[#spoken] ~= page then spoken[#spoken + 1] = page end
+              if not shotRefused then
+                shotRefused = true
+                U.wait(40)
+                shot("double-real-refused")
+              end
+              U.wait(24)
+              U.tap(game, "a")
+              U.wait(6)
+              return false
+            end
+            if sawMessage then return H.g3Free(game) end
+            U.wait(4)
+            return false
+          end, 60, "the cart to refuse a double with one monster")
+          for i, page in ipairs(spoken) do log("real refusal: the cart said [" .. i .. "]", (page:gsub("\n", " / "))) end
+          check(done and not taken, "real refusal: the cart finished talking, with no battle of any kind")
+          check(sawMessage, "real refusal: the cart refused in its own words (a message box)")
+          check(fight() == nil and not Battle.isActive(), "real refusal: SOLO did not take it, and neither did the cart")
+          check(H.g3TrainerDefeated(st.eo) == false, "real refusal: the trainer stays unbeaten")
+          check(money() == moneyBefore, "real refusal: no prize, nobody taxed", tostring(money()))
+          check(H.g3Free(game) and not H.g3ScriptRunning(), "real refusal: the script is over and the field is the player's")
+          if solo.fight then fightDouble({ tag = "double-real-cleanup", noAutoShots = true, seconds = 240 }) end
+          if Battle.isActive() then endCartBattle() end
+          -- out of the line of sight, and the flag as the cart left it
+          H.g3Teleport(game, stage.map, 1, 1, "down")
+          H.g3ClearTrainer(st.eo)
+          settle()
+        end
+      end
+    end
+  end
+
+  if not legOn("singles") then
+    doubleLegs()
+    return
   end
 
   -- Two real trainers from this cart's own book: an easy single (a party of
@@ -1022,6 +2438,8 @@ local function runGen3(game, H, U, env)
       shot("grass-after")
     end
   end
+
+  doubleLegs()
 end
 
 return function(game)
