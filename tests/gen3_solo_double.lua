@@ -20,10 +20,12 @@
 --   1. uploads and seating: what `start` sends, `medMap` of the shared
 --      team's `#2` seat, the leads;
 --   2. the opening: the trainer's line, its send-out, ours -- one mon and two;
---   3. two commands a turn: mon 1 held, mon 2 confirms, both filed with their
---      `seat`; B back to mon 1 (and not after a medicine); a seat the referee
---      answered for (a recharge) is skipped; one standing seat, one command;
---      the bare `turn`;
+--   3. two commands a turn: each filed with its `seat` as it is confirmed; a
+--      command the referee refuses keeps that seat's menu with the cart's
+--      line and mon 2 is never asked; B back to mon 1 through the referee's
+--      `cancel`, its claim released (and not after a medicine); a seat the
+--      referee answered for (a recharge) is skipped; one standing seat, one
+--      command; the bare `turn`;
 --   4. the party list: the bench leaves out both actives and the sibling's
 --      pick, the cart's two refusal lines, the list reopened after one;
 --   5. aiming: asked only when more than one other battler stands, the
@@ -32,8 +34,9 @@
 --      to the move menu;
 --   6. replacement: a double knockout owes two picks in battler order, the
 --      second bench leaves out the first's claim; one bench monster refills
---      one seat;
---   7. one bag: a medicine held for mon 1 is out of mon 2's bag, an X item is
+--      one seat; a seat left empty that the referee asks for again (a REVIVE
+--      gave the party a bench) gets its picker, its send-out, and its menu;
+--   7. one bag: a medicine filed for mon 1 is out of mon 2's bag, an X item is
 --      only ever the chooser's own monster's;
 --   8. the ending: EXP to both seats, `onDone("win")`, the after-words said
 --      through `say`, PAY DAY after them, a loss;
@@ -49,7 +52,9 @@
 --      strip classic model.
 --  13. through src/SoloBattle.lua: a lone double is taken onto this screen and
 --      played to the win on the glue the caller owns (the seat -> referee id
---      map, the referee, the `done` the trainer script resumes on).
+--      map, the referee, the `done` the trainer script resumes on, the
+--      refusal's line), the backstop for a seat the screen stopped asking
+--      about (silent in a real fight), and a trainer seat asked again.
 --
 -- Each block of checks runs under `block`, so an error in one flow is a
 -- failure of its own and the rest of the run is still measured.
@@ -693,6 +698,7 @@ local Turn = need("BattleSim3/Turn")
 local Battlefield = need("Battlefield")
 local ClassicBattle = need("ClassicBattle")
 local Mediated = need("MediatedBattle")
+local Solo = need("SoloBattle")
 local G3, G3D = ClassicBattle.G3, ClassicBattle.G3D
 
 -- One block of checks.  An error raised inside it is a failure of its own, not
@@ -735,6 +741,7 @@ P3._speciesMeta[92] = P3._speciesMeta[16]
 P3._abilities[92] = { 51, 0 }
 P3._learnsets[92] = { { 1, 174 } }
 ITEMS[75] = { name = "X ATTACK", pocket = "ITEMS", price = 500 }
+ITEMS[24] = { name = "REVIVE", pocket = "ITEMS", price = 1500 }
 if not FakePokemon.types then
   function FakePokemon.types(sp) return P3._types[tonumber(sp)] end
 end
@@ -839,7 +846,9 @@ end
 -- A solo double, the way src/SoloBattle.lua builds one: our party, the fixture
 -- trainer 400 (its team is `opts.foeParty`), the referee seated with
 -- `seats = 2` on both sides from what `start` uploaded, and a table transport
--- that files each choice under the seat id its `seat` names.
+-- that files each choice under the seat id its `seat` names -- answering the
+-- referee's verdict at once, and naming a refusal the way SoloBattle's
+-- transport does (`refusal`, Solo.refusalText3).
 --
 --   party, foeParty   the two teams
 --   bag               { { itemId, count } ... } put into the session bag first
@@ -863,7 +872,7 @@ local function makeFight(opts)
   local pending = {}
   local transport = {
     isReady = function() return true end,
-    send = function(_, kind, payload)
+    send = function(self_, kind, payload)
       ctx.sent[#ctx.sent + 1] = { kind = kind, payload = payload }
       if kind == Wire.BATTLE_RULESET then
         pending.ruleset = payload
@@ -871,6 +880,7 @@ local function makeFight(opts)
         if payload.side == "b" then pending.foe = payload else pending.party = payload end
       elseif kind == Wire.BATTLE_CHOICE then
         ctx.choices[#ctx.choices + 1] = copyTable(payload)
+        self_.refusal = nil
         local seatId
         if payload.seat == 0 then seatId = "solo_player"
         elseif payload.seat == 1 then seatId = "solo_player#2" end
@@ -880,6 +890,10 @@ local function makeFight(opts)
         end
         local ok, filed = pcall(ctx.sim.submitChoice, ctx.sim, seatId, payload)
         if not ok then ctx.err = filed end
+        if ok and not filed then
+          ctx.refused = (ctx.refused or 0) + 1
+          self_.refusal = Solo.refusalText3(ctx.sim, seatId, payload)
+        end
         return (ok and filed) and true or false
       end
     end,
@@ -1004,13 +1018,14 @@ end
 local function bothFight(f)
   local s = f.screen
   fightWith(f, 1)
-  if s.phase == "choose" and s.buffered then fightWith(f, 1) end
+  if s.phase == "choose" and s.mine == 2 then fightWith(f, 1) end
 end
 
--- How many commands the screen is holding back (an emptied table holds none).
-local function heldCount(s)
+-- How many of this turn's commands the screen has filed with the referee (an
+-- emptied table holds none).
+local function filedCount(s)
   local n = 0
-  for _ in pairs(s.buffered or {}) do n = n + 1 end
+  for _ in pairs(s.filed or {}) do n = n + 1 end
   return n
 end
 
@@ -1026,10 +1041,37 @@ end
 -- The n-th command the screen sent, or an empty one.
 local function choiceAt(f, n) return f.choices[n] or {} end
 
--- The command held for own seat `seat` (1 | 2), or an empty one.
-local function heldAction(s, seat)
-  local held = s.buffered and s.buffered[seat]
-  return held and held.action or {}
+-- The command own seat `seat` (1 | 2) has filed this turn, or an empty one.
+local function filedAction(s, seat)
+  local filed = s.filed and s.filed[seat]
+  return filed and filed.action or {}
+end
+
+-- Read the box down to whatever it hands back to (a menu, a list, a picker),
+-- and say which: `settle` only stops at the command menu, a switch list or a
+-- replacement picker, and a refusal goes back to the move or item list too.
+local function readOut(f)
+  local s = f.screen
+  for _ = 1, 400 do
+    if s.phase ~= "messages" and not s:boxLive() then return s.phase end
+    f.press(nil)
+  end
+  return "stuck:" .. tostring(s.phase)
+end
+
+-- The referee's seat fighters, and the choice each holds.
+local PLAYER1, PLAYER2 = "solo_player", "solo_player#2"
+local function heldBy(f, id) return f.sim.byId[id] and f.sim.byId[id].choice end
+
+-- Every `chose` / `unchose` the referee sent for our side, as "c0", "u0", ...
+local function choseLog(f)
+  local out = {}
+  for _, ev in ipairs(f.events) do
+    if (ev.t == "chose" or ev.t == "unchose") and ev.side == "a" then
+      out[#out + 1] = (ev.t == "chose" and "c" or "u") .. tostring(ev.slot)
+    end
+  end
+  return table.concat(out, ",")
 end
 
 -- Indices as "a,b,c", whatever is missing.
@@ -1103,7 +1145,7 @@ block("uploads", function()
   eq(joined(s.ownSlots[1], s.ownSlots[2]), "1,2", "uploads: both of side a's seats are ours")
   eq(s.battle, "sd1", "uploads: `battle` is the id the caller handed in")
   check(type(s.onDone) == "function", "uploads: `onDone` is the caller's")
-  eq(s.foeId, "solo_foe", "uploads: the trainer's referee owner")
+  eq(s.foeId, nil, "uploads: the trainer's owner id is accepted and not kept (nothing reads it)")
   eq(s.mode, "coop_npc", "uploads: the mode the hub path reads for a trainer")
 
   -- the referee seated both sides' shared teams from those uploads
@@ -1233,8 +1275,9 @@ end)
 -- 3. two commands a turn
 -- ------------------------------------------------------------------
 
--- mon 1 is held, mon 2 confirms, both go out under their seats; B on mon 2
--- reopens mon 1.
+-- Each command goes to the referee the moment it is confirmed, under its own
+-- seat; B on mon 2's command menu takes mon 1's back through the referee's
+-- `cancel`, and mon 1 chooses again.
 block("commands", function()
   local f = makeFight({
     party = { mon(4, 20, { moves = { 33, 57, 14 } }), mon(16, 20, { moves = { 33, 45 } }),
@@ -1244,33 +1287,45 @@ block("commands", function()
   eq(f.settle(), "choose", "commands: the first menu opens")
   eq(s.mine, 1, "commands: mon 1 chooses first")
   eq(s.chooser, 1, "commands: chooser 1")
-  eq(s.buffered, nil, "commands: nothing is held at the turn's start")
+  eq(s.filed, nil, "commands: nothing is filed at the turn's start")
 
   f.press("a")
   eq(s.phase, "move", "commands: FIGHT opens mon 1's moves")
   f.press("a")
   eq(s.phase, "target", "commands: TACKLE (SELECTED) asks for a target")
   f.press("a")
-  eq(#f.choices, 0, "commands: mon 1's confirm sends nothing yet")
+  eq(#f.choices, 1, "commands: mon 1's confirm goes to the referee at once")
+  eq(choiceAt(f, 1).seat, 0, "commands: under seat 0")
+  eq(choiceAt(f, 1).action, "fight", "commands: a move")
+  eq(choiceAt(f, 1).move, 0, "commands: TACKLE, 0-based")
+  eq(choiceAt(f, 1).target, 3, "commands: at the foe the cursor opened on, field 3")
+  check(heldBy(f, PLAYER1) ~= nil, "commands: the referee holds mon 1's command")
+  eq(heldBy(f, PLAYER2), nil, "commands: ...and nothing yet for mon 2")
   eq(s.mine, 2, "commands: mon 2's menu is up")
   eq(s.chooser, 2, "commands: chooser 2")
   eq(s.phase, "choose", "commands: on mon 2's command menu")
-  check(s.buffered and s.buffered[1] ~= nil, "commands: mon 1's command is held")
-  eq(heldAction(s, 1).move, 1, "commands: ...it is the move mon 1 picked")
+  eq(filedAction(s, 1).move, 1, "commands: the screen keeps what mon 1 filed")
 
   f.press("b")
-  eq(s.mine, 1, "commands: B on mon 2's command menu reopens mon 1")
+  eq(#f.choices, 2, "commands: B on mon 2's command menu sends one thing")
+  eq(choiceAt(f, 2).action, "cancel", "commands: ...the referee's own cancel")
+  eq(choiceAt(f, 2).seat, 0, "commands: ...for seat 0")
+  eq(heldBy(f, PLAYER1), nil, "commands: the referee no longer holds mon 1's command")
+  eq(s.mine, 1, "commands: mon 1's menu reopens")
   eq(s.chooser, 1, "commands: chooser back to 1")
   eq(s.phase, "choose", "commands: on mon 1's command menu")
-  check(not (s.buffered and s.buffered[1]), "commands: mon 1's held command was dropped")
+  check(not (s.filed and s.filed[1]), "commands: the screen let go of mon 1's command too")
   eq(s.commandIndex, 1, "commands: the cursor is where mon 1 left it (FIGHT)")
-  eq(#f.choices, 0, "commands: nothing was filed by the back-out")
   f.press("b")
   eq(s.mine, 1, "commands: B on mon 1's menu has nothing to take back")
   eq(s.phase, "choose", "commands: ...and stays")
+  eq(#f.choices, 2, "commands: ...and sends nothing")
 
   -- mon 1 again, at the second foe (field slot 4)
   fightWith(f, 1, 4)
+  eq(#f.choices, 3, "commands: mon 1's new command went at once")
+  eq(choiceAt(f, 3).seat, 0, "commands: ...under seat 0")
+  eq(choiceAt(f, 3).target, 4, "commands: ...aimed at field 4 this time")
   eq(s.mine, 2, "commands: mon 2's turn again")
   -- mon 2: FIGHT, TACKLE, aimed at its partner
   f.press("a")
@@ -1278,34 +1333,208 @@ block("commands", function()
   f.press("a")
   eq(s.phase, "target", "commands: mon 2 aims too")
   aimAt(f, 1)
-  eq(#f.choices, 2, "commands: mon 2's confirm files both commands at once")
-  eq(choiceAt(f, 1).seat, 0, "commands: the first goes out under seat 0")
-  eq(choiceAt(f, 2).seat, 1, "commands: the second under seat 1")
-  eq(choiceAt(f, 1).action, "fight", "commands: a move")
-  eq(choiceAt(f, 1).move, 0, "commands: TACKLE, 0-based")
-  eq(choiceAt(f, 1).target, 4, "commands: mon 1 aimed at field 4")
-  eq(choiceAt(f, 2).target, 0, "commands: mon 2 aimed at its partner, field 0")
+  eq(#f.choices, 4, "commands: mon 2's confirm is one more command")
+  eq(choiceAt(f, 4).seat, 1, "commands: under seat 1")
+  eq(choiceAt(f, 4).target, 0, "commands: mon 2 aimed at its partner, field 0")
   eq(f.unseated, nil, "commands: every choice named its seat")
-  eq(f.err, nil, "commands: the referee took both without a throw")
-  eq(heldCount(s), 0, "commands: nothing is left held")
+  eq(f.refused, nil, "commands: the referee refused none of them")
+  eq(f.err, nil, "commands: the referee took them without a throw")
+  eq(s.phase, "wait", "commands: both in, the screen waits on the referee")
   eq(f.settle(), "choose", "commands: the turn plays out and a menu opens")
-  local heard = {}
-  for _, ev in ipairs(f.events) do
-    if ev.t == "chose" and ev.side == "a" then heard[#heard + 1] = ev.slot end
-  end
-  eq(joined(heard[1], heard[2]), "0,1", "commands: the referee heard seat 0 before seat 1")
+  eq(choseLog(f), "c0,u0,c0,c1",
+     "commands: the referee heard seat 0, its cancel, seat 0 again, then seat 1")
   eq(s.mine, 1, "commands: the next turn starts at mon 1 again")
   eq(s.chooser, 1, "commands: ...with the chooser reset")
-  eq(s.buffered, nil, "commands: ...and nothing held")
-  local hitAlly = false
+  eq(s.filed, nil, "commands: ...and nothing filed")
+  local hitAlly, hitFour = false, false
   for _, ev in ipairs(f.events) do
     if ev.t == "anim" and ev.slot == 1 and ev.target == 0 then hitAlly = true end
+    if ev.t == "anim" and ev.slot == 0 and ev.target == 4 then hitFour = true end
   end
   check(hitAlly, "commands: the referee resolved mon 2's TACKLE onto its partner")
+  check(hitFour, "commands: ...and mon 1's second command, not its first")
+end)
+
+-- A command the referee refuses is refused at that seat's own menu, in the
+-- cart's words, and mon 2 is never asked: a POTION on a monster at full HP
+-- (the review's probe -- it used to loop back to mon 1 with no line).
+block("refused", function()
+  local f = makeFight({
+    party = { mon(4, 20), mon(16, 20), mon(29, 18) },
+    bag = { { 13, 1 } },
+  })
+  local s = f.screen
+  eq(f.settle(), "choose", "refused: menu")
+  s.commandIndex = 2
+  f.press("a")
+  eq(s.phase, "item", "refused: the bag opens")
+  f.press("a")
+  eq(s.phase, "item_party", "refused: POTION asks who")
+  s.switchIndex = 1
+  f.press("a")
+  eq(#f.choices, 1, "refused: the POTION went to the referee")
+  eq(choiceAt(f, 1).seat, 0, "refused: ...for seat 0")
+  eq(f.refused, 1, "refused: ...which turned it down (mon 1 is at full HP)")
+  eq(heldBy(f, PLAYER1), nil, "refused: the referee holds nothing for mon 1")
+  eq(s.phase, "messages", "refused: the refusal is said")
+  local line = s.messages[#s.messages] or s.shown
+  check(says(line, "won't have", "effect"), "refused: ...in the cart's words: " .. flat(line))
+  eq(s.mine, 1, "refused: still mon 1 choosing -- mon 2 is never asked")
+  eq(s.after, "item_party", "refused: ...and it goes back to the party list")
+  eq(s.filed, nil, "refused: nothing is filed")
+  eq(s.pendingItems, nil, "refused: nothing is waiting to be spent")
+  eq(readOut(f), "item_party", "refused: the line read, mon 1's party list is back")
+  eq(s.mine, 1, "refused: ...for mon 1")
+  check(s.itemPick ~= nil, "refused: ...still aiming the POTION")
+  f.press("b")
+  eq(s.phase, "item", "refused: B to the bag")
+  f.press("b")
+  eq(s.phase, "choose", "refused: B to mon 1's commands")
+  eq(s.mine, 1, "refused: ...still mon 1's")
+  fightWith(f, 1)
+  eq(#f.choices, 2, "refused: mon 1's move went")
+  eq(choiceAt(f, 2).seat, 0, "refused: ...under seat 0")
+  eq(s.mine, 2, "refused: only now is mon 2 asked")
+  eq(FakeBag.get(SESSION.bag, 13), 1, "refused: the POTION was never spent")
+end)
+
+-- A Disabled move and a Taunted status move: refused at the move list, each in
+-- its own line, the list kept, mon 2 not asked.  (The referee's own Disable
+-- and Taunt fields, set where a foe's move would set them.)
+block("refused", function()
+  local f = makeFight({
+    party = { mon(4, 20, { moves = { 33, 45 } }), mon(16, 20), mon(29, 18) },
+  })
+  local s = f.screen
+  eq(f.settle(), "choose", "disabled: menu")
+  local b = f.sim.byId[PLAYER1].b
+  b.disabledNum = 33
+  f.press("a")
+  s.moveIndex = 1
+  f.press("a")
+  eq(s.phase, "target", "disabled: TACKLE is aimed first")
+  f.press("a")
+  eq(f.refused, 1, "disabled: the referee refused the Disabled TACKLE")
+  eq(s.phase, "messages", "disabled: and the screen says so")
+  local line = s.messages[#s.messages] or s.shown
+  check(says(line, "TACKLE", "disabled"), "disabled: ...in the cart's words: " .. flat(line))
+  eq(s.after, "move", "disabled: back to the move list")
+  eq(s.mine, 1, "disabled: mon 2 is not asked")
+  eq(readOut(f), "move", "disabled: the move list is back")
+  eq(s.mine, 1, "disabled: ...mon 1's")
+  b.disabledNum = nil
+  b.tauntTurns = 2
+  s.moveIndex = 2
+  f.press("a")
+  eq(f.refused, 2, "taunt: a status move under Taunt is refused")
+  line = s.messages[#s.messages] or s.shown
+  check(says(line, "GROWL", "taunt"), "taunt: ...in the cart's words: " .. flat(line))
+  eq(readOut(f), "move", "taunt: the move list is back")
+  b.tauntTurns = nil
+  s.moveIndex = 1
+  f.press("a")
+  aimAt(f)
+  eq(#f.choices, 3, "refused: the move that may be used goes")
+  eq(s.mine, 2, "refused: and then mon 2 is asked")
+end)
+
+-- A switch out of a trap: refused at the party list in the cart's words.
+block("refused", function()
+  local f = makeFight({ party = { mon(4, 20), mon(16, 20), mon(29, 18) } })
+  local s = f.screen
+  eq(f.settle(), "choose", "trapped: menu")
+  local b = f.sim.byId[PLAYER1].b
+  b.ingrain = true
+  s.commandIndex = 3
+  f.press("a")
+  eq(s.phase, "switch", "trapped: the party list opens")
+  f.press("a")
+  eq(f.refused, 1, "trapped: the referee refused the switch (Ingrain)")
+  local line = s.messages[#s.messages] or s.shown
+  check(says(line, "CHARMANDER", "switched"), "trapped: ...in the cart's words: " .. flat(line))
+  eq(readOut(f), "switch", "trapped: the party list is back")
+  eq(s.mine, 1, "trapped: ...mon 1's, mon 2 not asked")
+  b.ingrain = nil
+  f.press("a")
+  eq(#f.choices, 2, "trapped: free again, the switch goes")
+  eq(s.mine, 2, "trapped: and mon 2 is asked")
+end)
+
+-- B gives mon 1's switch back: the referee drops the command and the monster
+-- it claimed, and mon 2's party list has that monster again.
+block("cancel", function()
+  local f = makeFight({ party = { mon(4, 20), mon(16, 20), mon(29, 18), mon(5, 18) } })
+  local s = f.screen
+  eq(f.settle(), "choose", "cancel: menu")
+  s.commandIndex = 3
+  f.press("a")
+  f.press("a")
+  eq(#f.choices, 1, "cancel: mon 1's switch went at once")
+  eq(choiceAt(f, 1).slot, 2, "cancel: ...to party 3")
+  local seat2 = f.sim.byId[PLAYER2]
+  check(f.sim:partyTaken(seat2, 3), "cancel: the referee holds party 3 for mon 1's switch")
+  local function benchIds()
+    local ids = {}
+    for _, row in ipairs(s:benchOf(s:mySlot())) do ids[#ids + 1] = row.index end
+    return table.concat(ids, ",")
+  end
+  eq(s.mine, 2, "cancel: mon 2 asked")
+  eq(benchIds(), "4", "cancel: mon 2's bench leaves out mon 1's pick")
+  f.press("b")
+  eq(choiceAt(f, 2).action, "cancel", "cancel: B sent the cancel")
+  eq(heldBy(f, PLAYER1), nil, "cancel: the referee holds nothing for mon 1")
+  check(not f.sim:partyTaken(seat2, 3), "cancel: ...and has let party 3 go")
+  eq(s.mine, 1, "cancel: mon 1's menu is back")
+  eq(s.commandIndex, 3, "cancel: ...on POKéMON, where it was left")
+  fightWith(f, 1)
+  eq(s.mine, 2, "cancel: mon 1 fights instead, mon 2 asked")
+  eq(benchIds(), "3,4", "cancel: mon 2's bench has party 3 again")
+  f.pump()
+  eq(heldBy(f, PLAYER1) and heldBy(f, PLAYER1).action, "fight",
+     "cancel: the late `unchose` did not undo the new command")
+  check(s.filed and s.filed[1], "cancel: ...on the screen either")
+end)
+
+-- A ball is the one bag item B gives back (the cart refunds balls); taken
+-- back and a POTION filed in its place before the referee's `unchose` for the
+-- ball has been read, the late word does not undo the POTION's spend.
+block("cancel", function()
+  local f = makeFight({
+    party = { mon(4, 20, { hp = 10 }), mon(16, 20), mon(29, 18) },
+    bag = { { 4, 1 }, { 13, 1 } },
+  })
+  local s = f.screen
+  eq(f.settle(), "choose", "ball back: menu")
+  s.commandIndex = 2
+  f.press("a")
+  s.itemIndex = 1
+  f.press("a")
+  eq(filedAction(s, 1).kind, "item", "ball back: mon 1's POKé BALL is filed")
+  eq(tonumber(filedAction(s, 1).item), 4, "ball back: ...the ball")
+  eq(s.mine, 2, "ball back: mon 2 asked")
+  -- B and the POTION, frame on frame, the referee's events not read between
+  f.tick("b")
+  eq(s.mine, 1, "ball back: B takes the ball back")
+  eq(choiceAt(f, #f.choices).action, "cancel", "ball back: ...through the referee's cancel")
+  s.commandIndex = 2
+  f.tick("a")
+  s.itemIndex = 2
+  f.tick("a")
+  eq(s.phase, "item_party", "ball back: POTION asks who")
+  s.switchIndex = 1
+  f.tick("a")
+  eq(tonumber(filedAction(s, 1).item), 13, "ball back: the POTION is filed for mon 1")
+  f.pump()
+  check(s.pendingItems and s.pendingItems[1] and tonumber(s.pendingItems[1].id) == 13,
+        "ball back: the late `unchose` left the POTION's spend pending")
+  fightWith(f, 1)
+  f.settle()
+  eq(FakeBag.get(SESSION.bag, 13), 0, "ball back: the POTION was spent when the referee used it")
+  eq(FakeBag.get(SESSION.bag, 4), 1, "ball back: the ball was never spent")
 end)
 
 -- RUN is the cart's answer to a trainer battle, for either seat: refused, with
--- nothing held, nothing sent, and the same mon still choosing.
+-- nothing filed, nothing sent, and the same mon still choosing.
 block("run", function()
   local f = makeFight({ party = { mon(4, 20), mon(16, 20), mon(29, 18) } })
   local s = f.screen
@@ -1315,13 +1544,13 @@ block("run", function()
   eq(s.phase, "messages", "run: RUN is answered with a line")
   check(says(s.messages[#s.messages], "trainer battle"), "run: ...there is no running from a trainer battle")
   eq(#f.choices, 0, "run: nothing was sent")
-  eq(heldCount(s), 0, "run: nothing was held")
+  eq(filedCount(s), 0, "run: nothing was filed")
   eq(f.settle(), "choose", "run: the menu comes back")
   eq(s.mine, 1, "run: for the same mon")
 end)
 
--- A move with no PP left is refused in the move menu's own words, before
--- anything is held.
+-- A move with no PP left is refused in the move menu's own words, before the
+-- referee is asked.
 block("commands", function()
   local f = makeFight({
     party = { mon(4, 20, { moves = { 33, 45 }, pp = { 0, 40 }, maxPp = { 35, 40 } }),
@@ -1335,12 +1564,12 @@ block("commands", function()
   eq(s.phase, "messages", "commands: a 0-PP move is refused with a line")
   check(contains(s.messages, "PP") or (s.shown and s.shown:find("PP", 1, true)),
         "commands: ...about PP")
-  eq(s.buffered, nil, "commands: ...and nothing was held")
+  eq(s.filed, nil, "commands: ...and nothing was filed")
   eq(#f.choices, 0, "commands: ...nor sent")
 end)
 
 -- A seat the referee answered for -- mon 2's HYPER BEAM leaves it recharging
--- -- is not asked: mon 1 is the only command, and it goes at once.
+-- -- is not asked: mon 1 is the only command, and it closes the turn.
 block("recharge", function()
   local f = makeFight({
     party = { mon(4, 30, { moves = { 33 } }), mon(16, 30, { moves = { 63 } }), mon(29, 18) },
@@ -1361,7 +1590,7 @@ block("recharge", function()
   fightWith(f, 1, 3)
   eq(#f.choices, 3, "recharge: one command is all that was owed -- it goes out at once")
   eq(choiceAt(f, 3).seat, 0, "recharge: under seat 0")
-  eq(heldCount(s), 0, "recharge: nothing is held for a second command")
+  eq(filedCount(s), 1, "recharge: that one command is the turn's whole")
   eq(s.phase, "wait", "recharge: the screen waits on the referee")
   eq(f.settle(), "choose", "recharge: turn 3 opens")
   eq(s.mine, 1, "recharge: mon 1 first again")
@@ -1370,7 +1599,7 @@ block("recharge", function()
 end)
 
 -- ...and the other way about: mon 1 is the one recharging, so mon 2 is the
--- first and only one asked, and has no held command to take back.
+-- first and only one asked, and has no command of mon 1's to take back.
 block("recharge", function()
   local f = makeFight({
     party = { mon(4, 30, { moves = { 63 } }), mon(16, 30, { moves = { 33 } }), mon(29, 18) },
@@ -1383,12 +1612,14 @@ block("recharge", function()
   eq(f.settle(), "choose", "recharge: turn 2 opens")
   eq(s.mine, 2, "recharge: mon 1 is answered for, so mon 2 chooses")
   eq(s.chooser, 2, "recharge: the chooser starts at 2")
+  local before = #f.choices
   f.press("b")
-  eq(s.mine, 2, "recharge: B has no held command to take back")
+  eq(s.mine, 2, "recharge: B has no command of ours to take back")
   eq(s.phase, "choose", "recharge: ...and the menu stays")
+  eq(#f.choices, before, "recharge: ...and no cancel is sent for the referee's own")
   fightWith(f, 1, 3)
-  eq(#f.choices, 3, "recharge: mon 2's single command goes at once")
-  eq(choiceAt(f, 3).seat, 1, "recharge: under seat 1")
+  eq(#f.choices, before + 1, "recharge: mon 2's single command goes at once")
+  eq(choiceAt(f, before + 1).seat, 1, "recharge: under seat 1")
 end)
 
 -- One standing seat, one command: the seat with nobody in it is not asked.
@@ -1402,12 +1633,13 @@ block("one seat", function()
   fightWith(f, 1)
   eq(#f.choices, 1, "one seat: one command is the whole turn")
   eq(choiceAt(f, 1).seat, 0, "one seat: under seat 0")
-  eq(heldCount(s), 0, "one seat: nothing held")
+  eq(s.phase, "wait", "one seat: nobody else is asked")
   eq(f.err, nil, "one seat: the referee took it")
 end)
 
--- The bare `turn` (SoloBattle's RUN backstop): whatever was held is dropped and
--- the choice reopens at mon 1.
+-- The bare `turn` (SoloBattle's RUN backstop) hands the window that is still
+-- open back: what was filed in it stays filed at the referee, so the menu
+-- reopens on the seat that still owes, and nothing goes out twice.
 block("bare turn", function()
   local f = makeFight({
     party = { mon(4, 20), mon(16, 20), mon(29, 18) },
@@ -1415,17 +1647,21 @@ block("bare turn", function()
   local s = f.screen
   eq(f.settle(), "choose", "bare turn: menu")
   fightWith(f, 1)
-  eq(s.mine, 2, "bare turn: mon 2 asked, mon 1's command held")
-  check(s.buffered and s.buffered[1], "bare turn: held")
+  eq(s.mine, 2, "bare turn: mon 2 asked, mon 1's command filed")
+  check(heldBy(f, PLAYER1) ~= nil, "bare turn: the referee holds mon 1's")
+  f.pump()
   f.feed({ t = "turn", amount = f.sim.turn })
   eq(s.phase, "messages", "bare turn: the window is handed back")
-  check(s.buffered == nil, "bare turn: nothing held any more")
-  eq(s.mine, 1, "bare turn: back to mon 1")
-  eq(s.chooser, 1, "bare turn: chooser 1")
+  check(s.filed and s.filed[1], "bare turn: mon 1's command is still filed")
   f.tick(nil); f.tick(nil)
   eq(s.phase, "choose", "bare turn: the command menu reopens")
-  eq(s.mine, 1, "bare turn: ...for mon 1")
-  eq(#f.choices, 0, "bare turn: nothing was ever filed")
+  eq(s.mine, 2, "bare turn: ...for mon 2, the seat that still owes")
+  eq(#f.choices, 1, "bare turn: nothing was sent again")
+  fightWith(f, 1)
+  eq(#f.choices, 2, "bare turn: mon 2's command closes the turn")
+  eq(f.refused, nil, "bare turn: the referee took both")
+  eq(f.settle(), "choose", "bare turn: the turn plays out")
+  eq(s.mine, 1, "bare turn: and the next one starts at mon 1")
 end)
 
 -- ------------------------------------------------------------------
@@ -1453,9 +1689,10 @@ block("switch", function()
   s.commandIndex = 3
   f.press("a")
   f.press("a")
-  eq(s.mine, 2, "switch: mon 1's switch is held, mon 2 asked")
-  eq(heldAction(s, 1).kind, "switch", "switch: ...it is a switch")
-  eq(heldAction(s, 1).index, 3, "switch: ...to party 3")
+  eq(s.mine, 2, "switch: mon 1's switch is filed, mon 2 asked")
+  eq(filedAction(s, 1).kind, "switch", "switch: ...it is a switch")
+  eq(filedAction(s, 1).index, 3, "switch: ...to party 3")
+  eq(#f.choices, 1, "switch: ...and it went to the referee at once")
   local bench2 = s:benchOf(s:mySlot())
   eq(#bench2, 1, "switch: mon 2's bench leaves out both actives and mon 1's pick")
   eq(bench2[1] and bench2[1].index, 4, "switch: only party 4 is left")
@@ -1481,7 +1718,8 @@ block("switch", function()
   local back = f.settle()
   eq(s.mine, 2, "switch: still mon 2 choosing")
   eq(s.phase, "switch", "switch: a refusal leaves mon 2 on its party list (" .. back .. ")")
-  eq(heldAction(s, 1).index, 3, "switch: mon 1's held switch survived the refusals")
+  eq(filedAction(s, 1).index, 3, "switch: mon 1's filed switch survived the refusals")
+  eq(heldBy(f, PLAYER1) and heldBy(f, PLAYER1).slot, 3, "switch: ...at the referee too")
 
   s.switchIndex = 1
   f.press("a")
@@ -1550,7 +1788,7 @@ block("aim", function()
   f.press("a")
   eq(s.phase, "choose", "aim: SURF (BOTH) is aimed at nobody -- mon 2's menu is up")
   eq(s.mine, 2, "aim: ...mon 2's")
-  check(s.buffered[1] ~= nil, "aim: ...with SURF held for mon 1")
+  check(s.filed and s.filed[1] ~= nil, "aim: ...with SURF filed for mon 1")
   eq(s:needsTarget3(s:liveMovesAt(1)[2]), false, "aim: a spread move needs no target")
   eq(s:needsTarget3(s:liveMovesAt(1)[3]), false, "aim: a self move (SWORDS DANCE) needs none")
   eq(s:needsTarget3(s:liveMovesAt(1)[1]), true, "aim: a selected one does")
@@ -1689,7 +1927,7 @@ block("ring", function()
   end
   f.press("a")
   eq(s.phase, "choose", "ring: confirming files mon 1's aim and asks mon 2")
-  eq(heldAction(s, 1).target, 3, "ring: ...at opponent left, screen slot 3")
+  eq(filedAction(s, 1).target, 3, "ring: ...at opponent left, screen slot 3")
 
   -- mon 2's ring runs past its own seat to the partner on the left
   f.press("a")
@@ -1820,7 +2058,7 @@ block("last mon", function()
   fightWith(f, 1)
   eq(#f.choices, 4, "last mon: one command is the whole turn, filed at once")
   eq(choiceAt(f, 4).seat, 0, "last mon: under seat 0")
-  eq(heldCount(s), 0, "last mon: nothing held")
+  eq(s.phase, "wait", "last mon: nobody else is asked")
 end)
 
 -- One of the two falls: the other stands, so the bench the picker offers
@@ -1879,6 +2117,91 @@ block("one seat left", function()
   check(d.allies[2] ~= nil, "one seat left: the standing one is drawn")
 end)
 
+-- A seat emptied for good is asked again once a REVIVE gives the party a bench:
+-- the cart sends the revived monster in at the turn's end (the engine's
+-- refreshAbsent -> pickReplacement).  The referee's re-arm -- `mustReplace`
+-- on the vacant seat, its replace phase soliciting it with a `turn` naming
+-- the seat -- is staged here on the referee itself, through its own
+-- `_openReplace`, since the referee that sends it lands with its own change.
+-- The screen opens that seat's picker over the revived monster, files the
+-- pick under the seat, draws the send-out, and asks the seat for a command
+-- from then on.
+block("re-armed seat", function()
+  local f = makeFight({
+    classicUi = true,
+    party = { mon(4, 5, { hp = 1 }), mon(16, 5, { hp = 1 }), mon(29, 80) },
+    foeParty = { { species = 151, level = 40, iv = 31, moves = { 57 } },
+                 { species = 151, level = 40, iv = 31, moves = { 57 } } },
+    bag = { { 24, 1 } },
+  })
+  local s = f.screen
+  local pidgey = SESSION.party[2]
+  eq(f.settle(), "choose", "re-armed: menu")
+  bothFight(f)
+  eq(f.settle(), "replacing", "re-armed: both down, one bench monster -- one seat is asked")
+  eq(s.mine, 1, "re-armed: seat 1")
+  f.press("a")
+  eq(f.settle(), "choose", "re-armed: the next turn, seat 2 left empty")
+  check(s.sim:isDown(s.sim:slot(2)), "re-armed: seat 2 is empty")
+  eq(f.sim.byId[PLAYER2].b, nil, "re-armed: ...on the referee too")
+  eq(s.mine, 1, "re-armed: only mon 1 chooses")
+
+  -- mon 1: REVIVE on PIDGEY, the monster that fell on seat 2
+  s.commandIndex = 2
+  f.press("a")
+  eq(s.phase, "item", "re-armed: the bag opens")
+  f.press("a")
+  eq(s.phase, "item_party", "re-armed: REVIVE asks who")
+  s.switchIndex = 2
+  f.press("a")
+  local revived = #f.choices
+  eq(choiceAt(f, revived).action, "item", "re-armed: the REVIVE went")
+  eq(choiceAt(f, revived).slot, 1, "re-armed: ...on party 2")
+  eq(f.refused, nil, "re-armed: the referee took it")
+  -- The turn it closed, as the referee left it -- everything up to the next
+  -- turn's opening, which the re-arm comes in front of.
+  local evs = f.sim:drainEvents()
+  local cut = #evs + 1
+  for i, ev in ipairs(evs) do
+    if ev.t == "turn" and ev.slot == nil then cut = i end
+  end
+  for i = 1, cut - 1 do f.feed(evs[i]) end
+  check(f.sim.byId[PLAYER2].mons[2].hp > 0, "re-armed: the referee revived PIDGEY")
+  check(pidgey.hp > 0, "re-armed: the screen wrote the revive onto the live party mon")
+  eq(pidgey.hp, math.max(1, math.floor(pidgey.maxHp / 2)), "re-armed: ...at half its HP, the referee's number")
+  check(s.sim:isDown(s.sim:slot(2)), "re-armed: seat 2 is still empty -- a revived monster is benched")
+  eq(FakeBag.get(SESSION.bag, 24), 0, "re-armed: the REVIVE was spent")
+  -- the re-arm
+  local seat2 = f.sim.byId[PLAYER2]
+  seat2.mustReplace = true
+  f.sim:_openReplace()
+  for _, ev in ipairs(f.sim:drainEvents()) do f.feed(ev) end
+  eq(f.settle(), "replacing", "re-armed: the empty seat's picker opens")
+  eq(s.replaceQueue and #s.replaceQueue, 1, "re-armed: one seat asked")
+  eq(s.mine, 2, "re-armed: ...seat 2")
+  local bench = s:benchOf(s:mySlot())
+  eq(#bench, 1, "re-armed: its bench is the revived monster")
+  eq(bench[1] and bench[1].index, 2, "re-armed: ...PIDGEY, party 2 -- its own last monster, not held back")
+  f.press("a")
+  local sent = #f.choices
+  eq(choiceAt(f, sent).action, "switch", "re-armed: the pick went")
+  eq(choiceAt(f, sent).seat, 1, "re-armed: ...under seat 1")
+  eq(choiceAt(f, sent).slot, 1, "re-armed: ...party 2")
+  eq(f.refused, nil, "re-armed: the referee took it")
+  eq(f.settle(), "choose", "re-armed: the next turn opens")
+  local slot2 = s.sim:slot(2)
+  check(not s.sim:isDown(slot2), "re-armed: seat 2 stands again")
+  check(slot2.battler and slot2.battler.mon == pidgey, "re-armed: ...with PIDGEY")
+  check(lineIndex(f.seen, "Go! ", "PIDGEY") ~= nil, "re-armed: its send-out was said")
+  check(s:gen3ClassicModel().double.allies[2] ~= nil, "re-armed: and it is drawn")
+  eq(s.mine, 1, "re-armed: mon 1 chooses first")
+  fightWith(f, 1)
+  eq(s.mine, 2, "re-armed: and seat 2 is asked for a command again")
+  fightWith(f, 1)
+  eq(choiceAt(f, #f.choices).seat, 1, "re-armed: ...which goes under seat 1")
+  eq(f.refused, nil, "re-armed: the referee took both")
+end)
+
 -- ------------------------------------------------------------------
 -- 7. one bag, two seats
 -- ------------------------------------------------------------------
@@ -1904,8 +2227,8 @@ block("bag", function()
   eq(#rows, 3, "bag: every party member is a target")
   s.switchIndex = 2
   f.press("a")
-  eq(s.mine, 2, "bag: mon 1's POTION is held and mon 2 is asked")
-  eq(heldAction(s, 1).kind, "item", "bag: ...it is an item")
+  eq(s.mine, 2, "bag: mon 1's POTION is filed and mon 2 is asked")
+  eq(filedAction(s, 1).kind, "item", "bag: ...it is an item")
   local left = s:usableItems()
   eq(#left, 1, "bag: mon 2 still sees the POTION")
   eq(left[1].count, 1, "bag: ...one of them -- the other is mon 1's")
@@ -1957,7 +2280,8 @@ block("bag", function()
   f.settle()
   f.press("b")
   eq(s.mine, 2, "bag: B does not hand a medicine back (the cart's rule)")
-  check(s.buffered and s.buffered[1], "bag: ...mon 1's POTION stays held")
+  check(s.filed and s.filed[1], "bag: ...mon 1's POTION stays filed")
+  check(heldBy(f, PLAYER1) ~= nil, "bag: ...at the referee too (no cancel was sent)")
   fightWith(f, 1)
   eq(#f.choices, 2, "bag: mon 2 fights, and both go out")
   eq(choiceAt(f, 1).action, "item", "bag: mon 1's item")
@@ -1981,14 +2305,14 @@ block("x item", function()
   f.press("a")
   eq(s.phase, "item", "x item: the bag opens")
   f.press("a")
-  eq(s.mine, 2, "x item: X ATTACK is held at once -- no party picker -- and mon 2 asked")
-  eq(heldAction(s, 1).kind, "item", "x item: ...an item")
-  eq(heldAction(s, 1).partySlot, 0, "x item: ...on mon 1's own party slot")
+  eq(s.mine, 2, "x item: X ATTACK is filed at once -- no party picker -- and mon 2 asked")
+  eq(filedAction(s, 1).kind, "item", "x item: ...an item")
+  eq(filedAction(s, 1).partySlot, 0, "x item: ...on mon 1's own party slot")
   local left = s:usableItems()
   eq(left[1] and left[1].count, 1, "x item: mon 2 sees the other X ATTACK")
   f.press("b")
   eq(s.mine, 2, "x item: B does not take an X item back either (it is not a ball)")
-  check(s.buffered and s.buffered[1], "x item: ...it stays held")
+  check(s.filed and s.filed[1], "x item: ...it stays filed")
   s.commandIndex = 2
   f.press("a")
   f.press("a")
@@ -2793,7 +3117,7 @@ block("co-op", function()
   eq(choiceAt(f, 1).seat, nil, "co-op: it names no seat")
   eq(choiceAt(f, 1).action, "fight", "co-op: a move")
   eq(choiceAt(f, 1).target, 3, "co-op: at the foe aimed at")
-  eq(s.buffered, nil, "co-op: nothing is ever held")
+  eq(s.filed, nil, "co-op: nothing is ever kept as filed")
   eq(s.claims, nil, "co-op: nothing is claimed")
   eq(f.err, nil, "co-op: the referee took it")
   eq(f.settle(), "choose", "co-op: the turn plays out")
@@ -2815,60 +3139,187 @@ block("co-op arena", function()
 end)
 
 -- ------------------------------------------------------------------
--- 13. through SoloBattle: the glue the caller owns (seat -> referee id)
+-- 13. through SoloBattle: the glue the caller owns (seat -> referee id, the
+--     refusal's line, the backstop, a trainer seat asked again)
 -- ------------------------------------------------------------------
 
-block("solo", function()
-  local Solo = need("SoloBattle")
+local SOLO_UI = {
+  pushState = function(_, game, state) return Gen3Ui.pushState(game, state) end,
+  say = function(_, _, cb) if cb then cb() end; return {} end,
+  confirm = function(_, _, _, cb) if cb then cb(true) end; return {} end,
+  askNickname = function() return true end,
+}
+
+-- A lone double taken through src/SoloBattle.lua itself, against trainer 400
+-- (FOE_DEFAULT): the real door, the real transport, the real referee.
+local function startSolo(party, bag)
   OPTIONS.solo = true
-  local UI = {
-    pushState = function(_, game, state) return Gen3Ui.pushState(game, state) end,
-    say = function(_, _, cb) if cb then cb() end; return {} end,
-    confirm = function(_, _, _, cb) if cb then cb(true) end; return {} end,
-    askNickname = function() return true end,
-  }
   newGame()
-  local a = mon(4, 20, { moves = { 10 } })
-  local b = mon(16, 20, { moves = { 10 } })
-  SESSION.party = { a, b, mon(29, 18) }
+  SESSION.party = party
+  for _, entry in ipairs(bag or {}) do FakeBag.add(SESSION.bag, entry[1], entry[2]) end
   TRAINERS[400].party = FOE_DEFAULT
   TRAINERS[400].items = { 0, 0, 0, 0 }
-  local expA, expB = a.exp, b.exp
-  local solo = Solo.new(UI, {
+  local solo = Solo.new(SOLO_UI, {
     enabled = function() return OPTIONS.solo == true end,
     seed = function() return 7 end,
   })
-  local result
-  local took = solo:fromGen3Trainer(GAME, 400, { trainerId = 400, done = function(r) result = r end })
-  check(took, "solo: a lone double is taken (" .. table.concat(warns, " / ") .. ")")
+  local run = { solo = solo }
+  run.took = solo:fromGen3Trainer(GAME, 400, { trainerId = 400,
+    done = function(r) run.result = r end })
+  return run
+end
+
+-- One frame the way the game runs one: the pump, then the screen, A on any open
+-- menu or picker (aiming at a foe, never the partner).
+local function soloFrame(solo, press)
+  solo:update(1 / 60, GAME)
+  local fight = solo.fight
+  if not fight then return false end
+  local key
+  local menu = fight.phase == "choose" or fight.phase == "move" or fight.phase == "target"
+  if press and (menu or fight.replacing) and not fight:boxLive() then
+    key = "a"
+    if fight.phase == "target" then
+      local pick = fight:targetChoices()[fight.targetIndex or 1]
+      if pick and not fight:foeSide(pick.index) then key = "down" end
+    end
+  end
+  GAME.input = fakeInput(key)
+  fight:update(key and (1 / 60) or 1.0)
+  GAME.input = fakeInput()
+  return true
+end
+
+local function playSolo(solo, limit)
+  local frames = 0
+  for _ = 1, limit or 4000 do
+    if not solo.fight then break end
+    frames = frames + 1
+    if not soloFrame(solo, true) then break end
+  end
+  return frames
+end
+
+-- Down to mon 1's command menu, nothing pressed.
+local function untilMenu(solo)
+  for _ = 1, 400 do
+    local fight = solo.fight
+    if fight and fight.phase == "choose" and not fight:boxLive() then
+      soloFrame(solo, false)
+      if fight.phase == "choose" then return true end
+    end
+    if not soloFrame(solo, false) then return false end
+  end
+  return false
+end
+
+block("solo", function()
+  local a = mon(4, 20, { moves = { 10 } })
+  local b = mon(16, 20, { moves = { 10 } })
+  local expA, expB = a.exp, b.exp
+  local run = startSolo({ a, b, mon(29, 18) })
+  local solo = run.solo
+  check(run.took, "solo: a lone double is taken (" .. table.concat(warns, " / ") .. ")")
   local fight = solo.fight
   check(fight and fight.soloDouble == true, "solo: it is fought on the solo double screen")
   eq(fight and fight.ownSlots and #fight.ownSlots, 2, "solo: with both seats ours")
-  local presses, frames = 0, 0
-  for _ = 1, 4000 do
-    if not solo.fight then break end
-    frames = frames + 1
-    solo:update(1 / 60, GAME)
-    fight = solo.fight
-    if not fight then break end
-    local key
-    local menu = fight.phase == "choose" or fight.phase == "move" or fight.phase == "target"
-    if (menu or fight.replacing) and not fight:boxLive() then
-      key = "a"
-      presses = presses + 1
-      -- aim at a foe, never the partner
-      if fight.phase == "target" then
-        local pick = fight:targetChoices()[fight.targetIndex or 1]
-        if pick and not fight:foeSide(pick.index) then key = "down" end
-      end
-    end
-    GAME.input = fakeInput(key)
-    fight:update(key and (1 / 60) or 1.0)
+  local frames = playSolo(solo)
+  check(solo.fight == nil, "solo: the fight ended and let go (" .. frames .. " frames)")
+  eq(run.result, "win", "solo: the script's done() hears win")
+  check(a.exp > expA and b.exp > expB, "solo: both leads earned EXP")
+  check(not contains(warns, "double battle screen"), "solo: the backstop never stepped in")
+end)
+
+-- SoloBattle's own transport names the refusal (Solo.refusalText3), and the
+-- screen says it at mon 1's menu: a POTION on a monster at full HP.
+block("solo refusal", function()
+  local run = startSolo({ mon(4, 20, { moves = { 10 } }), mon(16, 20, { moves = { 10 } }), mon(29, 18) },
+                        { { 13, 1 } })
+  local solo = run.solo
+  check(run.took and untilMenu(solo), "solo refusal: mon 1's menu")
+  local fight = solo.fight
+  eq(fight.mine, 1, "solo refusal: mon 1 chooses")
+  fight.itemPick = fight:usableItems()[1]
+  eq(fight.itemPick and fight.itemPick.id, 13, "solo refusal: the POTION")
+  check(not fight:commitMediatedItem(1, nil), "solo refusal: the POTION on mon 1 is refused")
+  local line = fight.transport.refusal
+  check(says(line, "won't have", "effect"), "solo refusal: the transport named the cart's line: " .. flat(line))
+  eq(fight.phase, "messages", "solo refusal: the screen says it")
+  check(says(fight.messages[#fight.messages], "won't have"), "solo refusal: ...that line")
+  eq(fight.after, "item_party", "solo refusal: ...back to the party list")
+  eq(fight.mine, 1, "solo refusal: mon 2 is not asked")
+  eq(solo.sim.byId[PLAYER1].choice, nil, "solo refusal: the referee holds nothing for mon 1")
+  for _ = 1, 40 do
+    if fight.phase == "item_party" then break end
+    soloFrame(solo, false)
+  end
+  eq(fight.phase, "item_party", "solo refusal: the line read, the party list is back")
+  for _ = 1, 2 do
+    GAME.input = fakeInput("b")
+    fight:update(1 / 60)
     GAME.input = fakeInput()
   end
-  check(solo.fight == nil, "solo: the fight ended and let go (" .. frames .. " frames, " .. presses .. " presses)")
-  eq(result, "win", "solo: the script's done() hears win")
-  check(a.exp > expA and b.exp > expB, "solo: both leads earned EXP")
+  eq(fight.phase, "choose", "solo refusal: B, B: mon 1's commands")
+  playSolo(solo)
+  eq(run.result, "win", "solo refusal: the fight goes on to the win")
+  eq(FakeBag.get(SESSION.bag, 13), 1, "solo refusal: the POTION was never spent")
+end)
+
+-- The backstop (SoloBattle M:_backstop3): the screen made to believe it has
+-- nothing to ask while the referee waits on mon 1.  Under three seconds it
+-- waits; then the screen puts mon 1's menu back; the same seat in the same
+-- window again and the referee picks for it; mon 2, still owed, gets its menu
+-- put back too -- and the fight plays on to the end.
+block("solo backstop", function()
+  local run = startSolo({ mon(4, 20, { moves = { 10 } }), mon(16, 20, { moves = { 10 } }), mon(29, 18) })
+  local solo = run.solo
+  check(run.took and untilMenu(solo), "backstop: mon 1's menu")
+  local fight = solo.fight
+  local mark = #warns
+  check(not fight:waitingOnReferee(), "backstop: a menu up is not waiting on the referee")
+  fight.phase = "wait"
+  check(fight:waitingOnReferee(), "backstop: the screen now says it waits on the referee")
+  for _ = 1, 170 do solo:update(1 / 60, GAME) end
+  eq(fight.phase, "wait", "backstop: under three seconds nothing is done")
+  eq(#warns, mark, "backstop: ...and nothing is said")
+  for _ = 1, 20 do solo:update(1 / 60, GAME) end
+  eq(fight.phase, "choose", "backstop: then mon 1's menu is put back up")
+  eq(fight.mine, 1, "backstop: ...mon 1's")
+  check(contains(warns, "asked again"), "backstop: ...and it is reported")
+  eq(solo.sim.byId[PLAYER1].choice, nil, "backstop: the referee was not answered for it")
+  fight.phase = "wait"
+  for _ = 1, 190 do solo:update(1 / 60, GAME) end
+  check(solo.sim.byId[PLAYER1].choice ~= nil, "backstop: the same seat again -- the referee picked for mon 1")
+  check(contains(warns, "referee chose"), "backstop: ...and that is reported, with what to do")
+  for _ = 1, 190 do solo:update(1 / 60, GAME) end
+  eq(fight.phase, "choose", "backstop: mon 2, still owed, gets its menu put back")
+  eq(fight.mine, 2, "backstop: ...mon 2's")
+  playSolo(solo)
+  eq(run.result, "win", "backstop: the fight played on to its end")
+  for i = #warns, mark + 1, -1 do table.remove(warns, i) end
+end)
+
+-- A trainer seat left empty that the referee asks for again is answered like
+-- any other owing seat (M:_answerFoes3): the re-arm staged on the referee as
+-- in "re-armed seat", the trainer's second seat vacated the way
+-- Battle:_faintBattler leaves one (no battler, no active, the last kept) with
+-- its monster standing again.
+block("solo re-armed foe", function()
+  local run = startSolo({ mon(4, 20, { moves = { 10 } }), mon(16, 20, { moves = { 10 } }), mon(29, 18) })
+  local solo = run.solo
+  check(run.took and untilMenu(solo), "re-armed foe: mon 1's menu")
+  local sim = solo.sim
+  local foe2 = sim.byId["solo_foe#2"]
+  foe2.lastB, foe2.b, foe2.active = foe2.b, nil, nil
+  foe2.mustReplace = true
+  sim:_openReplace()
+  eq(sim.phase, "replace", "re-armed foe: the referee asks the vacant trainer seat")
+  check(solo:_answerFoes3(), "re-armed foe: the trainer's emptied seat is answered")
+  check(foe2.b ~= nil, "re-armed foe: a monster is out on it again")
+  eq(foe2.active, 2, "re-armed foe: ...its second, the one standing again")
+  eq(sim.phase, "choice", "re-armed foe: and the referee moved on to the turn")
+  playSolo(solo)
+  eq(run.result, "win", "re-armed foe: the fight played on to its end")
 end)
 
 -- ------------------------------------------------------------------

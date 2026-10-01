@@ -2724,7 +2724,10 @@ do
     eq(o.foeSeats, 2, "C3: foeSeats 2 for a two-monster trainer")
     eq(o.mode, Config.SOLO_TRAINER_MODE, "C3: mode coop_npc")
     eq(#o.npcParty, 2, "C3: npcParty is the trainer's two sheets")
-    eq(o.trainer and o.trainer.doubleBattle, true, "C3: the trainer record says doubleBattle (the screen's intro lines)")
+    -- No `doubleBattle` rides on the record: the screen's intro counts the
+    -- monsters it sends out, the prize and the TV read the fight's own flag.
+    eq(o.trainer and o.trainer.doubleBattle, nil, "C3: the trainer record carries no doubleBattle (nothing reads one)")
+    eq(solo.gen3 and solo.gen3.double, true, "C3: ...the fight's own state says double")
     eq(o.trainer and o.trainer.trainerId, 902, "C3: ...and is the numeric trainer")
     eq(o.peerName, Solo.gen3FoeLabel(o.trainer), "C3: peerName is the label the single opens with")
     eq(o.battle, s.battle, "C3: the battle id")
@@ -3317,13 +3320,11 @@ do
     check(ok, "single: the fight ran to its end")
     eq(awardOpts and awardOpts.double, false, "single: the prize is not doubled")
     Prize.awardTrainerWin = award
-    -- the record's own flag
-    eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(902), 902, {}).doubleBattle, true,
-       "record: a lone double's trainer record says doubleBattle")
+    -- the record carries no double flag of its own, whatever the row says
+    eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(902), 902, {}).doubleBattle, nil,
+       "record: a lone double's trainer record carries no doubleBattle")
     eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(900), 900, {}).doubleBattle, nil,
-       "record: a single's does not")
-    eq(Solo.gen3TrainerRecord(FakeTrainers.foeFromId(902), 902, { trainerIdB = 900 }).doubleBattle, nil,
-       "record: nor does a second trainer's")
+       "record: nor does a single's")
   end
 
   -- (l) the hand-backs mid-fight put the party back --------------------------
@@ -3761,6 +3762,12 @@ do
       eq(a.pp[1], simA.moves[1].pp, "real ending: seat 1's PP is the referee's")
     end
   end
+
+  -- The backstop for a seat the screen stops asking about (M:_backstop3: the
+  -- referee waiting on one of our seats while the screen waits on the
+  -- referee) never stepped into any of these real fights.
+  check(not contains(warns, "double battle screen"),
+        "real: the backstop never stepped in: " .. table.concat(warns, " / "))
 
   CoopBattle.newSoloDouble = realNewSoloDouble
 end

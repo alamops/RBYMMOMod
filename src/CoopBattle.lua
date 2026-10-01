@@ -2024,8 +2024,9 @@ function M:update(dt)
   -- A solo double asks its seats in order, and the one whose menu opens is
   -- settled here, at the moment it opens: a seat the referee has already
   -- answered for (a recharge, a rampage -- its `chose` lands after the
-  -- `turn`) or that has nobody standing in it is passed over, and a turn with
-  -- no seat left to ask files what is held. See `syncChooser`.
+  -- `turn`), that this screen has already filed for, or that has nobody
+  -- standing in it is passed over, and a turn with no seat left to ask waits
+  -- on the referee. See `syncChooser`.
   if self.ownSlots and self.mediated and self.phase == "choose"
      and not self:syncChooser() then
     return
@@ -2374,7 +2375,7 @@ function M:updateCommand(input)
     end
   elseif self.ownSlots and input:wasPressed("b") then
     -- A solo double's partner cancel: B on mon 2's command menu takes mon 1's
-    -- held command back and reopens mon 1's (pret
+    -- filed command back from the referee and reopens mon 1's (pret
     -- battle_controller_player.c:286; the engine's ui.lua / D.cancelPartner).
     self:cancelPartner()
   elseif self.ownSlots and input:wasPressed("start") then
@@ -2542,14 +2543,19 @@ end
 -- A solo double's two seats share one party, so a seat's bench also leaves
 -- out what the other seat holds: the monster standing there and the one it
 -- has already picked this turn (`siblingTaken`; pret party_menu.c:5934, the
--- cart's "already in battle" / "already selected").  Co-op seats each have a
--- party of their own and never reach that arm.
+-- cart's "already in battle" / "already selected").  A seat of its with
+-- nobody standing in it -- emptied, its last monster revived since -- keeps
+-- no party member back for itself (the cart skips an absent battler's party
+-- index).  Co-op seats each have a party of their own and never reach either
+-- arm.
 function M:benchOf(slot)
   local out = {}
   local gen3 = self.gen3
   local taken = self.ownSlots and self:siblingTaken(slot) or nil
+  local own = slot.active
+  if self.ownSlots and self.sim and self.sim:isDown(slot) then own = nil end
   for i, mon in ipairs(slot.party or {}) do
-    if i ~= slot.active and (mon.hp or 0) > 0
+    if i ~= own and (mon.hp or 0) > 0
        and not (gen3 and CoopField.isEgg3(mon))
        and not (taken and taken[i]) then
       out[#out + 1] = { index = i, mon = mon }
@@ -2832,6 +2838,9 @@ function M:commitMediatedItem(partyIndex, moveIndex)
   if not self:commit(fields) then
     self.pendingItem = nil
     self.pendingItemSlot = nil
+    -- A solo double's refused medicine goes back to the party list it was
+    -- aimed from (`refuseOwn`), which reads the pick it is aiming.
+    if self.ownSlots then self.itemPick = pick end
     return false
   end
   return true
@@ -3290,7 +3299,8 @@ function M:applyReplace(action)
 end
 
 function M:commit(action)
-  -- A solo double holds mon 1's command until mon 2's is in (`commitOwn`).
+  -- A solo double files each seat's command as it is confirmed, and asks the
+  -- next seat only once the referee has taken it (`commitOwn`).
   if self.ownSlots and self.mediated then return self:commitOwn(action) end
   self.phase = "wait"
   -- A fight, and only a fight: `kind` is set on run / switch / item, and an
@@ -3884,7 +3894,7 @@ function M:playEvents(events)
   self.commandIndex = 1
   self.moveIndex = 1
   self.targetIndex = 1
-  -- ...and a solo double's next turn starts at mon 1 again, nothing held --
+  -- ...and a solo double's next turn starts at mon 1 again, nothing filed --
   -- unless this batch is a replacement still being answered, whose picker
   -- owns `mine` until the last owing seat has picked.
   if self.ownSlots and not self.replacing then self:resetChooser() end
@@ -10089,6 +10099,7 @@ function M:medRows(msg)
     -- Neither matching is a send-out this screen cannot draw; the line is still
     -- printed, so the field being one monster behind at least has an explanation
     -- on it.
+    if self.soloDouble and slot then self:reviveSent3(index, slot, msg) end
     local at = slot and self:medSendIndex(index, slot, msg)
     -- A solo double's opening pair is said the cart's way -- the trainer's two,
     -- then ours, one sentence a side (`composeIntro3`) -- so the referee's four
@@ -10512,10 +10523,18 @@ function M:onBattleEvent(msg)
   end
   if msg.t == "unchose" then
     local index = self:medSlotOf(msg)
-    if index then self:unmarkActed(index) end
     if self.ownSlots then
-      if index and self.pendingItems then self.pendingItems[index] = nil end
-    elseif index == self.mine then
+      -- Our own partner cancel, already applied when it was filed
+      -- (`cancelPartner`): a seat that has filed again since is not undone by
+      -- the late word of the first.
+      if index and not (self.filed and self.filed[index]) then
+        self:unmarkActed(index)
+        if self.pendingItems then self.pendingItems[index] = nil end
+      end
+      return true
+    end
+    if index then self:unmarkActed(index) end
+    if index == self.mine then
       self.pendingItem = nil
       self.pendingItemSlot = nil
     end
@@ -10532,7 +10551,7 @@ function M:onBattleEvent(msg)
     return true
   end
   if msg.t == "item" then
-    -- A solo double holds one pending item per seat (`fileOwn`); the event
+    -- A solo double holds one pending item per seat (`noteFiled`); the event
     -- names the seat whose bag use it was.
     local at = self:medSlotOf(msg)
     if self.ownSlots then
@@ -10608,6 +10627,16 @@ function M:onBattleEvent(msg)
     -- A solo double's opening pair, laid out the cart's way before the batch
     -- that carries it is played.
     if self.soloIntro3 then self:composeIntro3() end
+    -- A solo double's choice window, numbered: a slot-less `turn` naming the
+    -- turn already open is that window handed back (see below), and what was
+    -- filed in it is still filed at the referee -- the flush that follows
+    -- forgets the pending spends, so they are kept aside for it.
+    local reopened = nil
+    if self.ownSlots and owed == nil then
+      local n = tonumber(msg.amount)
+      if n ~= nil and n == self.medTurn3 then reopened = { items = self.pendingItems } end
+      self.medTurn3 = n
+    end
     local played = self:medFlush()
     if owed == nil then
       -- Arm replace only after the faint/msg batch is queued: update() drains
@@ -10626,14 +10655,23 @@ function M:onBattleEvent(msg)
       end
       -- ------- a solo double's `turn` with nothing in front of it
       --
-      -- Not a new turn: src/SoloBattle.lua feeds a bare `turn` to hand the
-      -- window back unspent (a trainer RUN that reached it, M:_pump), and no
-      -- batch played means no `playEvents` to put the menu back. So it is put
-      -- back here, from mon 1: a seat the referee already holds an answer for
-      -- says so with its `chose`, which lands after this and is passed over at
-      -- the handover (`syncChooser`).
+      -- src/SoloBattle.lua feeds a bare `turn` to hand the window back unspent
+      -- (a trainer RUN that reached it, M:_pump), and no batch played means no
+      -- `playEvents` to put the menu back. So it is put back here, from mon 1.
+      -- The window is the one still open -- the same turn number -- so a seat
+      -- this screen filed in it stays filed (the referee holds that command;
+      -- the flush only forgot that it had answered), and is passed over at the
+      -- handover (`syncChooser`) like a seat the referee answered for. A new
+      -- turn that happened to play nothing starts from nothing.
       if self.ownSlots and not played and not self.result and not self.replacing then
-        self:resetChooser()
+        if reopened then
+          self.pendingItems = reopened.items
+          for index in pairs(self.filed or {}) do self:markActed(index) end
+          self.chooser, self.mine = 1, self.ownSlots[1]
+          self.itemList = nil
+        else
+          self:resetChooser()
+        end
         self.phase = "messages"
         self.after = "choose"
       end
@@ -10934,9 +10972,9 @@ function M:sendMediatedChoice(action)
   local kind = action.kind or "move"
   -- A solo double says which of its seats a choice is for: `seat`, the field
   -- slot, which src/SoloBattle.lua's transport turns into the seat's referee
-  -- id (contract C3). Read off the action rather than off `mine`, because two
-  -- held commands go out together after the cursor has moved on. Co-op has
-  -- one seat and sends no such field.
+  -- id (contract C3). Read off the action rather than off `mine`: a partner
+  -- cancel names the seat behind the cursor, and a replacement the seat at
+  -- the head of its queue. Co-op has one seat and sends no such field.
   local seatAt = self.ownSlots and (action.slot or self.mine) or nil
   local fields
   if kind == "switch" or kind == CoopSim.REPLACE then
@@ -10951,6 +10989,10 @@ function M:sendMediatedChoice(action)
     if action.dexCaught ~= nil then fields.dexCaught = action.dexCaught end
   elseif kind == "run" then
     fields = { action = "run" }
+  elseif kind == "cancel" then
+    -- A solo double's partner cancel (`cancelPartner`): the referee's own,
+    -- which unfiles the seat's choice and frees whatever it had claimed.
+    fields = { action = "cancel" }
   else
     local moveIndex = math.floor(tonumber(action.move) or 1)
     -- Same gate as the move menu: a 0-PP index is refused here so a call
@@ -10975,7 +11017,13 @@ function M:sendMediatedChoice(action)
     fields = { action = "fight", move = (action.move or 1) - 1,
                target = self:medFieldOf(action.target) }
   end
-  if seatAt then fields.seat = self:medFieldOf(seatAt) end
+  if seatAt then
+    fields.seat = self:medFieldOf(seatAt)
+    -- What src/SoloBattle.lua's transport names when the referee turns this
+    -- choice down (the cart's line, read by `refuseOwn`); cleared first, so a
+    -- choice that never reached it (one Wire would not send) reads no stale one.
+    if type(self.transport) == "table" then self.transport.refusal = nil end
+  end
   -- Checked in this boot's generation, which is the hub's (the hello refuses
   -- a mismatch): only Gen 3 reads `pass` / `dexCaught`.
   return Mediated.submitChoice(self.transport, self.battleId, fields,
@@ -12872,11 +12920,13 @@ end
 --   * `mine` is the seat whose menu is up -- the chooser -- and walks
 --     `ownSlots` in battler order, mon 1 then mon 2 (pret battle_main.c
 --     HandleTurnActionSelectionState; the engine's D.advanceSelection);
---   * mon 1's command is held (`buffered`) until mon 2's is in; B on mon 2's
---     command menu takes it back (pret battle_controller_player.c:286, the
---     engine's D.cancelPartner); both then go out together, each naming its
+--   * each command goes to the referee the moment it is confirmed, naming its
 --     seat by field slot (`seat`, which SoloBattle's transport maps onto the
---     seat's referee id);
+--     seat's referee id), and a refusal keeps that seat's menu up with the
+--     cart's line -- the cart checks each battler's action as it is chosen;
+--     B on mon 2's command menu takes mon 1's back through the referee's own
+--     `cancel` (pret battle_controller_player.c:286, the engine's
+--     D.cancelPartner);
 --   * either seat's bench leaves out both monsters standing and the one the
 --     other seat has picked (`siblingTaken`; pret party_menu.c:5916), and a
 --     pick naming one of those is refused in the cart's own words;
@@ -12966,22 +13016,17 @@ end
 
 -- Does this own seat owe the referee a command now?  Somebody standing in it,
 -- no answer the referee already holds (a recharge or a rampage is filed for
--- it at the turn's open, and says so with a `chose`), nothing held for it.
+-- it at the turn's open, and says so with a `chose`), nothing filed for it.
 function M:ownSeatOwes(index)
   local slot = self.sim and self.sim:slot(index)
   if not slot or self.sim:isDown(slot) then return false end
   if self.acted and self.acted[index] then return false end
-  if self.buffered and self.buffered[index] then return false end
+  if self.filed and self.filed[index] then return false end
   return true
 end
 
-local function hasHeld(self)
-  for _ in pairs(self.buffered or {}) do return true end
-  return false
-end
-
 -- A seat's command menu, opened fresh: every cursor where a new turn puts it,
--- and the bag list rebuilt (what the other seat holds is out of it).
+-- and the bag list rebuilt (what the other seat has filed is out of it).
 function M:openSeatMenu()
   self.phase = "choose"
   self.commandIndex = 1
@@ -12993,14 +13038,14 @@ function M:openSeatMenu()
   self.itemList = nil
 end
 
--- A new turn: mon 1 first, nothing held, nothing claimed. `mine` goes to the
+-- A new turn: mon 1 first, nothing filed, nothing claimed. `mine` goes to the
 -- first seat with a monster standing (a seat emptied for good -- pret's
 -- absent battler -- is never asked); a seat the referee answered for is
 -- passed over at the handover, once its `chose` has landed (`syncChooser`).
 function M:resetChooser()
   local own = self.ownSlots
   if not own then return end
-  self.buffered = nil
+  self.filed = nil
   self.claims = nil
   self.chooser, self.mine = 1, own[1]
   for pos, index in ipairs(own) do
@@ -13015,7 +13060,7 @@ end
 
 -- The handover's check, made as the command menu opens (see `update`): the
 -- seat it opens for is the first, from the chooser on, that still owes a
--- command. False when none does -- what is held is filed and the screen waits.
+-- command. False when none does -- every command is filed and the screen waits.
 function M:syncChooser()
   local own = self.ownSlots
   for pos = self.chooser or 1, #own do
@@ -13028,11 +13073,7 @@ function M:syncChooser()
       return true
     end
   end
-  if hasHeld(self) then
-    self:fileOwn()
-  else
-    self.phase = "wait"
-  end
+  self.phase = "wait"
   return false
 end
 
@@ -13050,20 +13091,26 @@ function M:advanceChooser()
   return false
 end
 
--- `commit`, for a solo double: the choice is held for its seat, and the next
--- seat is asked; the last one in files them all (`fileOwn`).  The cart's own
--- order -- it takes both monsters' actions before the turn runs, and hands
--- mon 1's back on B (`cancelPartner`).
+-- `commit`, for a solo double: the command goes to the referee the moment it
+-- is confirmed, naming its seat, and only a command the referee took moves
+-- the chooser on.  The cart's own order (pret battle_main.c
+-- HandleTurnActionSelectionState): each battler's action is checked as it is
+-- chosen -- a Disabled, Taunted, Tormented, sealed or Choice-locked move
+-- (battle_util.c:302 TrySetCantSelectMoveBattleScript), a medicine that would
+-- do nothing (party_menu.c, gText_WontHaveEffect), a trapped switch
+-- (party_menu.c:5964) is refused there, with its line, and that battler's
+-- menu stays up; the next battler is asked only once it has an action.  The
+-- referee is the one that knows a Disable or a trap, so its verdict is the
+-- check: src/SoloBattle.lua's table transport answers synchronously and names
+-- the cart's line for what it refused (`transport.refusal`, `refuseOwn`).
 --
--- Two refusals happen here, before anything is held, rather than at the
--- referee after mon 2 has chosen: a switch naming a monster this party has on
--- the field or already picked (the cart's party-menu line, `switchRefusal`),
--- and a move with no PP left (the move menu's own line, `sendMediatedChoice`'s
--- gate).
+-- Two refusals happen here, before the referee is asked: a switch naming a
+-- monster this party has on the field or the other seat has filed (the
+-- cart's party-menu line, `switchRefusal`), and a move with no PP left (the
+-- move menu's own line, `sendMediatedChoice`'s gate).
 function M:commitOwn(action)
   action = action or {}
   local index = action.slot or self.mine
-  local fight = action.kind == nil and tonumber(action.move) ~= nil
   if action.kind == "switch" then
     local line = self:switchRefusal(index, action.index)
     if line then
@@ -13072,101 +13119,150 @@ function M:commitOwn(action)
       self.after = "switch"
       return false
     end
-  elseif fight then
-    local pick = self:liveMovesAt(index)[math.floor(tonumber(action.move))]
-    if pick and self:hasLivePPAt(index) and (tonumber(pick.pp) or 0) <= 0 then
-      self:say("There's no PP left\nfor this move!")
-      self.phase = "messages"
-      self.after = "move"
-      return false
-    end
   end
-  local held = {
-    action = action, command = self.commandIndex,
-    item = self.pendingItem, itemSlot = self.pendingItemSlot,
-  }
-  if fight then
-    -- Where this monster's move list opens next turn (`rememberedMove`),
-    -- written once the command actually goes.
-    local slot = self.sim and self.sim:slot(index)
-    held.memKey = (slot and slot.active) or 1
-    held.memMove = math.floor(tonumber(action.move))
-  end
-  self.pendingItem, self.pendingItemSlot = nil, nil
-  self.buffered = self.buffered or {}
-  self.buffered[index] = held
+  if not self:sendMediatedChoice(action) then return self:refuseOwn(index, action) end
+  self:noteFiled(index, action)
   if self:advanceChooser() then return true end
-  return self:fileOwn()
-end
-
--- Every held command, out to the referee in seat order, each naming its seat.
---
--- A refusal stops there: that seat -- and any held behind it -- is asked
--- again, and one filed ahead of it stays filed (the referee holds it; this
--- screen does not use the referee's `cancel`, plan decision 5).
-function M:fileOwn()
-  local own = self.ownSlots
   self.phase = "wait"
-  for pos, index in ipairs(own) do
-    local held = self.buffered and self.buffered[index]
-    if held then
-      if not self:sendMediatedChoice(held.action) then
-        for later = pos, #own do self.buffered[own[later]] = nil end
-        self.mine, self.chooser = index, pos
-        -- The PP gate prints its own line and opens the move list behind it;
-        -- any other refusal reopens the seat's command menu.
-        if self.phase == "wait" then self:openSeatMenu() end
-        return false
-      end
-      self.buffered[index] = nil
-      self:markActed(index)
-      if held.memKey then
-        self.moveMemory = self.moveMemory or {}
-        self.moveMemory[held.memKey] = held.memMove
-      end
-      if held.item then
-        -- Spent from the bag when the referee's `item` names this seat
-        -- (`confirmOwnItem`), as co-op's one pending item is.
-        self.pendingItems = self.pendingItems or {}
-        self.pendingItems[index] = { id = held.item, slot = held.itemSlot }
-      end
-    end
-  end
   return true
 end
 
--- B on mon 2's command menu: mon 1's held command is dropped and mon 1's
--- menu reopens where it was left (pret battle_controller_player.c:286; the
--- engine's ui.lua handle_double_input / D.cancelPartner).  Two things keep
--- it shut, both the cart's: no held command ahead (mon 1 was answered for, or
--- has nobody standing -- `absent[0]`), and a held bag item that is not a
--- ball -- a medicine already taken out of the bag, which the cart cannot put
--- back (it refunds balls only, ITEM_PREMIER_BALL and below).
+-- A command the referee took for own seat `index`: what this screen keeps of
+-- it until the turn turns -- the command (for `siblingTaken`, and for B to
+-- take back), the seat answered (`acted`), the move list's cursor for next
+-- turn (`rememberedMove`), and an item's pending spend, made when the
+-- referee's `item` names this seat (`confirmOwnItem`), as co-op's one pending
+-- item is.
+function M:noteFiled(index, action)
+  self.filed = self.filed or {}
+  self.filed[index] = { action = action, command = self.commandIndex }
+  self:markActed(index)
+  if action.kind == nil and tonumber(action.move) then
+    local slot = self.sim and self.sim:slot(index)
+    self.moveMemory = self.moveMemory or {}
+    self.moveMemory[(slot and slot.active) or 1] = math.floor(tonumber(action.move))
+  end
+  if self.pendingItem then
+    self.pendingItems = self.pendingItems or {}
+    self.pendingItems[index] = { id = self.pendingItem, slot = self.pendingItemSlot }
+    self.pendingItem, self.pendingItemSlot = nil, nil
+  end
+end
+
+-- A command the referee turned down: the seat keeps its menu, opened where the
+-- cart leaves it -- the move list behind a refused move (its selection script
+-- returns to HandleInputChooseMove), the party list behind a refused switch
+-- or a refused medicine (the party menu's message, then the menu again), the
+-- bag behind an item it never asked a monster for -- with the transport's
+-- line in front of it.  A gate on the way (the PP line) has already said why
+-- and where it goes back to.  Nothing was filed, so the other seat is never
+-- asked.
+function M:refuseOwn(index, action)
+  self.mine = index
+  if self.phase == "messages" then return false end
+  local back = "move"
+  if action.kind == "switch" then
+    back = "switch"
+  elseif action.kind == "item" then
+    local effect = Sheet3.itemEffect(tonumber(action.item))
+    back = (effect and (effect.needsMove or effect.needsParty or effect.faintedOnly))
+      and "item_party" or "item"
+  end
+  local line = type(self.transport) == "table" and self.transport.refusal or nil
+  if type(line) == "string" and line ~= "" then
+    self:say(line)
+    self.phase = "messages"
+    self.after = back
+  else
+    self.phase = back
+  end
+  return false
+end
+
+-- B on mon 2's command menu: mon 1's command is taken back from the referee
+-- (its `cancel`, which unfiles the seat's choice and frees the monster or the
+-- item it had claimed) and mon 1's menu reopens where it was left (pret
+-- battle_controller_player.c:286; the engine's ui.lua handle_double_input /
+-- D.cancelPartner).  Two things keep it shut, both the cart's: no command of
+-- ours ahead (mon 1 was answered for, or has nobody standing -- `absent[0]`),
+-- and a bag item that is not a ball -- a medicine already taken out of the
+-- bag, which the cart cannot put back (it refunds balls only,
+-- ITEM_PREMIER_BALL and below).
 function M:cancelPartner()
   local own = self.ownSlots
   for back = (self.chooser or 1) - 1, 1, -1 do
     local index = own[back]
-    local held = self.buffered and self.buffered[index]
-    if held then
-      local action = held.action or {}
+    local filed = self.filed and self.filed[index]
+    if filed then
+      local action = filed.action or {}
       if action.kind == "item" then
         local effect = Sheet3.itemEffect(tonumber(action.item))
         if not (effect and effect.ball) then return false end
       end
-      self.buffered[index] = nil
+      if not self:sendMediatedChoice({ kind = "cancel", slot = index }) then return false end
+      -- Applied now rather than on the referee's `unchose`, which lands on the
+      -- next pump: the menu reopening this frame reads both (`ownSeatOwes`).
+      self.filed[index] = nil
+      self:unmarkActed(index)
+      if self.pendingItems then self.pendingItems[index] = nil end
       self.mine, self.chooser = index, back
       self:openSeatMenu()
-      self.commandIndex = held.command or 1
+      self.commandIndex = filed.command or 1
       return true
     end
   end
   return false
 end
 
+-- ------- when the screen and the referee disagree
+
+-- Has this screen nothing to show and nothing to ask -- every answer it owed
+-- is in, and it is waiting on the referee?  src/SoloBattle.lua's backstop
+-- reads it (M:_backstop3): true for seconds on end while the referee waits on
+-- one of our seats is the two disagreeing about who owes, which no deadline
+-- would ever end (a solo fight has no choice clock, and a trainer's RUN is
+-- refused).
+function M:waitingOnReferee()
+  if not self.soloDouble or self.result or self.finished then return false end
+  if self.phase ~= "wait" or self.replacing or self.runAsk then return false end
+  if self.shown ~= nil or #(self.messages or {}) > 0 then return false end
+  return true
+end
+
+-- ...and the backstop's first answer: own seat `field` (the referee's field
+-- slot, as a choice names it) is asked again -- its replacement picker when
+-- the referee wants a monster for it (`replace`), else its command menu, with
+-- anything this screen still believes it filed for it forgotten.  False when
+-- there is nothing to ask with (an empty bench, nobody standing), and the
+-- caller has the referee pick instead.
+function M:reopenOwed(field, replace)
+  if not self.ownSlots or self.result then return false end
+  local index = (self.medSlots or {})[tonumber(field)]
+  if not self:isMine(index) then return false end
+  local slot = self.sim and self.sim:slot(index)
+  if not slot then return false end
+  if self.filed then self.filed[index] = nil end
+  if self.pendingItems then self.pendingItems[index] = nil end
+  self:unmarkActed(index)
+  if replace then
+    if #self:benchOf(slot) == 0 then return false end
+    slot.awaiting = true
+    self:queueReplace(index)
+    return true
+  end
+  if self.sim:isDown(slot) then return false end
+  for pos, at in ipairs(self.ownSlots) do
+    if at == index then self.chooser = pos end
+  end
+  self.mine = index
+  self:openSeatMenu()
+  return true
+end
+
 -- ------- one party, two seats
 
 -- What the other seat of a shared party holds: the monster standing there
--- ("battle") and the one it has picked this turn -- a held switch, or a
+-- ("battle") and the one it has picked this turn -- a filed switch, or a
 -- replacement already sent ("selected").  pret party_menu.c:5934 (the
 -- engine's commands.lua switchError): the partner battler's party index
 -- unless it is absent, then gBattleStruct->monToSwitchIntoId of the partner.
@@ -13179,9 +13275,11 @@ function M:siblingTaken(slot)
       local other = self.sim and self.sim:slot(index)
       if other and other.party == slot.party then
         taken = taken or {}
-        if other.battler and other.active then taken[other.active] = "battle" end
-        local held = self.buffered and self.buffered[index]
-        local action = held and held.action
+        if other.battler and other.active and not self.sim:isDown(other) then
+          taken[other.active] = "battle"
+        end
+        local filed = self.filed and self.filed[index]
+        local action = filed and filed.action
         if action and action.kind == "switch" and action.index then
           taken[action.index] = taken[action.index] or "selected"
         end
@@ -13210,14 +13308,16 @@ end
 -- the other seat's -- is gText_PkmnAlreadyInBattle, the other seat's pick
 -- gText_PkmnAlreadySelected (pret party_menu.c:5916, the engine's
 -- commands.lua switchError).  A fainted pick or an egg is not this screen's
--- to word: the bench never lists one, and the referee refuses it.
+-- to word: the bench never lists one, and the referee refuses it.  A seat
+-- with nobody standing in it holds nobody "in battle" (the cart skips an
+-- absent battler's party index).
 function M:switchRefusal(index, partyIndex)
   if not self.ownSlots then return nil end
   local slot = self.sim and self.sim:slot(index)
   local mon = slot and slot.party and slot.party[partyIndex]
   if type(mon) ~= "table" or (mon.hp or 0) <= 0 then return nil end
   local why
-  if partyIndex == slot.active then
+  if partyIndex == slot.active and not self.sim:isDown(slot) then
     why = "battle"
   else
     why = (self:siblingTaken(slot) or {})[partyIndex]
@@ -13302,28 +13402,81 @@ end
 -- ------- one bag, two seats
 
 -- The referee took one of our seats' bag uses: that seat's pending item is the
--- one to spend (`confirmMediatedItem`, through co-op's one-item fields).
+-- one to spend (`confirmMediatedItem`, through co-op's one-item fields) -- and
+-- a REVIVE's monster is back on its feet (`reviveOwn3`).
 function M:confirmOwnItem(index, itemId, amount)
   local held = self.pendingItems and self.pendingItems[index]
   if not held then return false end
   self.pendingItems[index] = nil
   self.pendingItem, self.pendingItemSlot = held.id, held.slot
-  return self:confirmMediatedItem(itemId, amount)
+  local same = itemId == nil or tonumber(itemId) == tonumber(held.id)
+  local ok = self:confirmMediatedItem(itemId, amount)
+  if same then self:reviveOwn3(held.id, held.slot) end
+  return ok
 end
 
--- The bag as the seat choosing now sees it: an item the other seat's held
--- command uses is already out of it -- the cart takes a medicine out when it
--- is chosen (the referee's Battle:_bagHas holds it back from the sibling
--- likewise), so two seats and one POTION is one POTION.  A flute is never
+-- A REVIVE of ours the referee has just used (its `item` event names our seat):
+-- the monster it was used on stands again at the referee's own numbers
+-- (Battle:_useItem: half its HP, at least 1, or all of it, and no status),
+-- written onto the live party mon -- the referee says nothing else about a
+-- monster on the bench, and the bench, the replacement picker and the
+-- send-out all read that HP.  It is no longer standing where it fell: a seat
+-- it fainted on keeps it as its battler, and that seat stays empty until the
+-- referee sends somebody into it (pret's absent battler, which the engine's
+-- refreshAbsent fills at the turn's end), so the battler goes.  Anything that
+-- is not a revive, or a monster that is up already, is left alone.
+function M:reviveOwn3(itemId, partyIndex)
+  local effect = Sheet3.itemEffect(tonumber(itemId))
+  local revive = effect and type(effect.sim) == "table" and effect.sim.revive or nil
+  if not revive then return false end
+  local first = self.sim and self.sim:slot(self.ownSlots[1])
+  local mon = first and first.party and first.party[tonumber(partyIndex) or 0]
+  if type(mon) ~= "table" or (tonumber(mon.hp) or 0) > 0 then return false end
+  local maxHp = math.max(1, math.floor(tonumber(mon.maxHp) or 1))
+  local hp = (revive == "full") and maxHp or math.max(1, math.floor(maxHp / 2))
+  Sheet3.applyToMon(mon, { hp = hp })
+  self:benchFallen3(mon)
+  return true
+end
+
+-- A monster back on its feet is benched, not standing where it fell: off any
+-- seat of its side that still holds it as its fainted battler.
+function M:benchFallen3(mon)
+  for _, seat in ipairs((self.sim and self.sim.slots) or {}) do
+    if seat.battler and seat.battler.mon == mon then seat.battler = nil end
+  end
+end
+
+-- A referee `send` naming a monster this screen has at 0 HP while the event
+-- says it stands (`hp`): the referee never fields a fainted monster, so it is
+-- one revived since -- a REVIVE this screen did not see the end of, or the
+-- trainer's -- and the send's own HP and status are the truth, written before
+-- the stamp is read (`medStampIndex` refuses a fainted pick, and the field
+-- would leave the seat empty rather than put it out).  A solo double only.
+function M:reviveSent3(index, slot, msg)
+  local hp = tonumber(msg.hp)
+  local at = tonumber(msg.mon)
+  if not (hp and hp > 0 and at) then return false end
+  at = math.floor(at) + 1
+  if self:isMine(index) then at = self:medPartySlot(at) end
+  local mon = at and (slot.party or {})[at]
+  if type(mon) ~= "table" or (tonumber(mon.hp) or 0) > 0 then return false end
+  Sheet3.applyToMon(mon, { hp = hp, status = msg.status })
+  self:benchFallen3(mon)
+  return true
+end
+
+-- The bag as the seat choosing now sees it: an item the other seat has filed
+-- (`pendingItems`, until the referee's `item` spends it or a `cancel` gives it
+-- back) is already out of it -- the cart takes a medicine out when it is
+-- chosen, and the referee's Battle:_bagHas holds it back from the sibling
+-- likewise -- so two seats and one POTION is one POTION.  A flute is never
 -- spent and never held back.
 function M:holdBackItems3(list)
   local held = {}
-  for _, entry in pairs(self.buffered or {}) do
-    local action = entry.action
-    if action and action.kind == "item" then
-      local id = tonumber(action.item)
-      if id then held[id] = (held[id] or 0) + 1 end
-    end
+  for index, entry in pairs(self.pendingItems or {}) do
+    local id = index ~= self.mine and tonumber(entry.id) or nil
+    if id then held[id] = (held[id] or 0) + 1 end
   end
   for i = #list, 1, -1 do
     local item = list[i]
@@ -13632,8 +13785,10 @@ end
 -- opts: transport (the caller's table transport), ui, battle (the battle id),
 -- trainer (src/SoloBattle.lua's gen3TrainerRecord), peerName (the label the
 -- 1v1 opens with), npcParty (the trainer's sheets, uploaded as side "b"),
--- mode ("coop_npc"), selfId / foeId (the referee owners), foeSeats (1 | 2),
+-- mode ("coop_npc"), selfId (the player's referee owner), foeSeats (1 | 2),
 -- onDone(result, toLearn); classicUi is the suite's hook, as for `M.new`.
+-- `foeId` (the trainer's owner) is accepted and not kept: nothing on this
+-- screen addresses the trainer's seats by id (`onReady`'s sides map them).
 --
 -- Side a is two seats over the live session party -- the same table, so the
 -- referee's HP, a level, a learned move land on the save monster exactly as a
@@ -13685,7 +13840,6 @@ function M.newSoloDouble(game, opts)
   screen.ownSlots = { 1, 2 }
   screen.chooser = 1
   screen.battle = opts.battle
-  screen.foeId = opts.foeId or "solo_foe"
   screen.npcParty = sheets
   screen.trainerLabel3 = label
   screen.soloIntro3 = true
