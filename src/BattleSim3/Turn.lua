@@ -69,8 +69,9 @@
 --     battle) is two seats over ONE party and ONE bag: seat 2 is
 --     `<playerId>#2`, both carry `owner`.  Neither seat benches the other's
 --     active mon or the one it has claimed this turn; emptied seats refill in
---     battler order, so with one mon left only one seat is filled; a mon
---     earns EXP once per owner; outcomes, `waiting` and `team` name owners.
+--     battler order, so with one mon left only one seat is filled, and a
+--     Revive refills a seat left empty; a mon earns EXP once per owner;
+--     outcomes, `waiting` and `team` name owners.
 --   * Order: runs, then switches and bag items together in battler order (each
 --     switch after any Pursuit aimed at it), balls after them by speed, then
 --     moves by priority then speed, Quick Claw first in its bracket; ties: one
@@ -85,7 +86,8 @@
 --   * Link rules: no badge boosts, no disobedience, no exp and no Pay Day coins
 --     in 1v1 / coop_pvp (a won wild / coop_npc fight reports side a's coins as
 --     `outcome().payDay`).  King's Rock keeps the cart's battler-0 quirk.
---   * Timeout / NPC auto-pick: BattleSim2's heuristic on Gen 3 ids.
+--   * Timeout / NPC auto-pick: BattleSim2's heuristic on Gen 3 ids; a Ghost's
+--     CURSE goes unaimed, as the cart's AI files it.
 --
 -- Nothing here raises.  Bad input is refused with nil-plus-reason from `create`
 -- or a plain `false` from `submitChoice`.
@@ -663,13 +665,41 @@ function Battle:_canRefill(fighter)
   return bench > 0
 end
 
--- A shared team's seat whose sibling took the last bench mon stays empty for
--- good (pret marks the battler absent, gAbsentBattlerFlags, and never asks it
--- again).  A one-seat fighter is only ever owed a mon it still has.
+-- A shared team's seat whose sibling took the last bench mon stands empty
+-- (`vacant`: pret marks the battler absent, gAbsentBattlerFlags, and the
+-- replacement stage passes it by) until a Revive gives its party a bench
+-- again (`_refreshVacant`).  A one-seat fighter is only ever owed a mon it
+-- still has.
 function Battle:_vacateSeats()
   for _, fighter in ipairs(self.fighters) do
     if fighter.mustReplace and #fighter.seats > 1 and #self:benchOf(fighter) == 0 then
       fighter.mustReplace, fighter.pendingFought = nil, nil
+      fighter.vacant = true
+    end
+  end
+end
+
+-- pret HandleFaintedMonActions case 0 (battle_util.c:1156; the engine's
+-- Engine.refreshAbsent, engine.lua:2259): at the top of every faint flow --
+-- after each action and at the end of the turn (init.lua D.faintFlow) -- an
+-- absent battler whose party has a replacement again is present again, and
+-- the replacement stage that follows asks it for one (init.lua:3202).  Here
+-- the seat is owed a mon again; the replace phase asks it in battler order
+-- (`_canRefill`), and a seat a sibling ahead took the mon from is vacated
+-- again (`_vacateSeats`).  Only a Revive can give a vacant seat a bench
+-- (every other living mon of its party is out on the sibling seat), so
+-- `_resolveSwitches` re-checks after each bag action -- a Future Sight due on
+-- the seat that turn then waits for the newcomer, as the cart sends it in
+-- before the hit -- and `_resolveTurn` again with the end-of-turn faint flow
+-- (D.endTurn).  The pending participation is the opposition standing now, as
+-- for a seat emptied now (`_faintBattler`).  A seat that started empty is not
+-- vacant: the engine fields no battler there to re-check (state.lua:382).
+function Battle:_refreshVacant()
+  for _, fighter in ipairs(self.order) do
+    if fighter.vacant and #self:benchOf(fighter) > 0 then
+      fighter.vacant = nil
+      fighter.mustReplace = true
+      fighter.pendingFought = self:_standingOpposition(fighter)
     end
   end
 end
@@ -1059,6 +1089,18 @@ function Battle:_autoItemChoice(fighter, b)
   return nil
 end
 
+-- An auto-picked move, aimed at the foe the heuristic drew -- except a
+-- Ghost's CURSE, which is filed unaimed: the cart's AI aims every USER-row
+-- move at itself (pokefirered/src/battle_controller_opponent.c:1370; the
+-- engine's ai.lua:353), so its curse lands on the battler opposite
+-- (`_pickTarget` and Effects CURSE; the engine's effects/setup.lua foeOf),
+-- never on the random foe `_autoTarget` drew.  NPC seats and timed-out seats
+-- alike.
+function Battle:_autoFight(b, move, foe)
+  if self:isGhostCurse(b, b.moves[move]) then return { action = "fight", move = move } end
+  return { action = "fight", move = move, target = foe.slot }
+end
+
 function Battle:_autoChoice(fighter)
   if fighter.mustReplace then
     local foe = self:_autoTarget(fighter)
@@ -1090,7 +1132,7 @@ function Battle:_autoChoice(fighter)
   local bad = self:moveLimitations(b)
   if not defender or defender.mon.hp <= 0 then
     for i = 1, #b.moves do
-      if not bad[i] then return { action = "fight", move = i, target = foe.slot } end
+      if not bad[i] then return self:_autoFight(b, i, foe) end
     end
     return { action = "fight", move = 1, struggle = true, target = foe.slot }
   end
@@ -1130,7 +1172,7 @@ function Battle:_autoChoice(fighter)
     if se then return { action = "switch", slot = se } end
   end
   if pick and pickEff > 100 then
-    return { action = "fight", move = pick, target = foe.slot }
+    return self:_autoFight(b, pick, foe)
   end
 
   if not Status.normalise(defender.mon.status) and not foeSub then
@@ -1143,7 +1185,7 @@ function Battle:_autoChoice(fighter)
       end
     end
     if statusPick and (weSlower or foeBoosted or not pick or pickEff <= 100) then
-      return { action = "fight", move = statusPick, target = foe.slot }
+      return self:_autoFight(b, statusPick, foe)
     end
   end
 
@@ -1155,7 +1197,7 @@ function Battle:_autoChoice(fighter)
       if not bad[i] and m.power == 0 then
         local kind = AUTO_SETUP[m.effect]
         if kind == true or (type(kind) == "string" and b.stages[kind] <= 0) then
-          return { action = "fight", move = i, target = foe.slot }
+          return self:_autoFight(b, i, foe)
         end
       end
     end
@@ -1168,7 +1210,7 @@ function Battle:_autoChoice(fighter)
       if not bad[i] and (not pick or m.power > pickPow) then pick, pickPow = i, m.power end
     end
   end
-  return { action = "fight", move = pick or 1, target = foe.slot }
+  return self:_autoFight(b, pick or 1, foe)
 end
 
 function Battle:_autoChoiceOrSkip(fighter)
@@ -1308,6 +1350,7 @@ function Battle:_switchIn(fighter, index, baton)
   end
   fighter.active = index
   fighter.mustReplace = nil
+  fighter.vacant = nil   -- engine.lua:1951: a switch-in clears the absent flag
   local nb = self:_newBattler(fighter, index)
   if baton then
     -- pokefirered/src/battle_main.c:2350: status2 keeps confusion, Focus
@@ -1486,6 +1529,7 @@ function Battle:_resolveTurn()
   self:_faintSweep()
   self:_drainExp()
   if not self.result then self:_checkOver() end
+  if not self.result then self:_refreshVacant() end
 
   if not self.result and self:_anyMustReplace() then
     self:_openReplace()
@@ -1619,7 +1663,10 @@ function Battle:_resolveSwitches()
       end
     elseif choice and choice.action == "item" then
       local effect = Items.bagEffect(choice.item)
-      if not (effect and effect.ball) then self:_useItem(fighter) end
+      if not (effect and effect.ball) then
+        self:_useItem(fighter)
+        self:_refreshVacant()
+      end
     end
   end
 end
@@ -2023,6 +2070,9 @@ function Battle:_faintBattler(b)
   else
     fighter.mustReplace = nil
     fighter.pendingFought = nil
+    -- No bench: a shared team's seat is pret's absent battler until a Revive
+    -- gives the party one again (`_refreshVacant`).
+    if #fighter.seats > 1 then fighter.vacant = true end
   end
   if self.phase ~= "resolving" then
     self:_drainExp()

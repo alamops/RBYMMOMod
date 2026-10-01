@@ -872,6 +872,12 @@ Bm.aimTarget = function aimTarget(b, row) {
   return int(row != null ? row.target : null, 0);
 };
 
+// Whether this row, used by this battler, is a Ghost's CURSE (the auto-pick
+// files one unaimed, Turn.js `_autoFight`).
+Bm.isGhostCurse = function isGhostCurse(b, row) {
+  return ghostCurse(b, row);
+};
+
 // A chosen aim whose battler is gone (a stolen KO, a switch): the same seat's
 // newcomer, else the nearest foe to that seat (a foe's), else the first foe.
 Bm._reaim = function _reaim(user, t) {

@@ -44,8 +44,10 @@
  * is two seats over ONE party and ONE bag: seat 2 is `<playerId>#2`, both
  * carry `owner`. Neither seat benches the other's active mon or the one it has
  * claimed this turn; emptied seats refill in battler order, so with one mon
- * left only one seat is filled; a mon earns EXP once per owner; outcomes,
- * `waiting` and `team` name owners (the Lua header's policy list).
+ * left only one seat is filled, and a Revive refills a seat left empty; a mon
+ * earns EXP once per owner; outcomes, `waiting` and `team` name owners (the Lua
+ * header's policy list, which also says the auto-pick files a Ghost's CURSE
+ * unaimed).
  *
  * Shape differences from the Lua, all forced by the language:
  *
@@ -721,14 +723,42 @@ Battle.prototype._canRefill = function _canRefill(fighter) {
   return bench > 0;
 };
 
-// A shared team's seat whose sibling took the last bench mon stays empty for
-// good (pret marks the battler absent, gAbsentBattlerFlags, and never asks it
-// again). A one-seat fighter is only ever owed a mon it still has.
+// A shared team's seat whose sibling took the last bench mon stands empty
+// (`vacant`: pret marks the battler absent, gAbsentBattlerFlags, and the
+// replacement stage passes it by) until a Revive gives its party a bench
+// again (`_refreshVacant`). A one-seat fighter is only ever owed a mon it
+// still has.
 Battle.prototype._vacateSeats = function _vacateSeats() {
   for (const fighter of this.fighters) {
     if (truthy(fighter.mustReplace) && fighter.seats.length > 1 && this.benchOf(fighter).length === 0) {
       fighter.mustReplace = null;
       fighter.pendingFought = null;
+      fighter.vacant = true;
+    }
+  }
+};
+
+// pret HandleFaintedMonActions case 0 (battle_util.c:1156; the engine's
+// Engine.refreshAbsent, engine.lua:2259): at the top of every faint flow --
+// after each action and at the end of the turn (init.lua D.faintFlow) -- an
+// absent battler whose party has a replacement again is present again, and
+// the replacement stage that follows asks it for one (init.lua:3202). Here
+// the seat is owed a mon again; the replace phase asks it in battler order
+// (`_canRefill`), and a seat a sibling ahead took the mon from is vacated
+// again (`_vacateSeats`). Only a Revive can give a vacant seat a bench
+// (every other living mon of its party is out on the sibling seat), so
+// `_resolveSwitches` re-checks after each bag action -- a Future Sight due on
+// the seat that turn then waits for the newcomer, as the cart sends it in
+// before the hit -- and `_resolveTurn` again with the end-of-turn faint flow
+// (D.endTurn). The pending participation is the opposition standing now, as
+// for a seat emptied now (`_faintBattler`). A seat that started empty is not
+// vacant: the engine fields no battler there to re-check (state.lua:382).
+Battle.prototype._refreshVacant = function _refreshVacant() {
+  for (const fighter of this.order) {
+    if (truthy(fighter.vacant) && this.benchOf(fighter).length > 0) {
+      fighter.vacant = null;
+      fighter.mustReplace = true;
+      fighter.pendingFought = this._standingOpposition(fighter);
     }
   }
 };
@@ -1148,6 +1178,18 @@ Battle.prototype._autoItemChoice = function _autoItemChoice(fighter, b) {
   return null;
 };
 
+// An auto-picked move, aimed at the foe the heuristic drew -- except a
+// Ghost's CURSE, which is filed unaimed: the cart's AI aims every USER-row
+// move at itself (pokefirered/src/battle_controller_opponent.c:1370; the
+// engine's ai.lua:353), so its curse lands on the battler opposite
+// (`_pickTarget` and Effects CURSE; the engine's effects/setup.lua foeOf),
+// never on the random foe `_autoTarget` drew. NPC seats and timed-out seats
+// alike.
+Battle.prototype._autoFight = function _autoFight(b, move, foe) {
+  if (this.isGhostCurse(b, at(b.moves, move))) return { action: 'fight', move };
+  return { action: 'fight', move, target: foe.slot };
+};
+
 Battle.prototype._autoChoice = function _autoChoice(fighter) {
   if (truthy(fighter.mustReplace)) {
     const foe = this._autoTarget(fighter);
@@ -1184,7 +1226,7 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
   const bad = this.moveLimitations(b);
   if (!defender || defender.mon.hp <= 0) {
     for (let i = 1; i <= b.moves.length; i += 1) {
-      if (!truthy(bad[i])) return { action: 'fight', move: i, target: foe.slot };
+      if (!truthy(bad[i])) return this._autoFight(b, i, foe);
     }
     return {
       action: 'fight', move: 1, struggle: true, target: foe.slot,
@@ -1231,7 +1273,7 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
     if (se != null) return { action: 'switch', slot: se };
   }
   if (pick != null && pickEff > 100) {
-    return { action: 'fight', move: pick, target: foe.slot };
+    return this._autoFight(b, pick, foe);
   }
 
   if (!truthy(Status.normalise(defender.mon.status)) && !foeSub) {
@@ -1248,7 +1290,7 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
       }
     }
     if (statusPick != null && (weSlower || foeBoosted || pick == null || pickEff <= 100)) {
-      return { action: 'fight', move: statusPick, target: foe.slot };
+      return this._autoFight(b, statusPick, foe);
     }
   }
 
@@ -1260,7 +1302,7 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
       if (!truthy(bad[i]) && m.power === 0) {
         const kind = AUTO_SETUP[m.effect];
         if (kind === true || (typeof kind === 'string' && b.stages[kind] <= 0)) {
-          return { action: 'fight', move: i, target: foe.slot };
+          return this._autoFight(b, i, foe);
         }
       }
     }
@@ -1277,7 +1319,7 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
       }
     }
   }
-  return { action: 'fight', move: orv(pick, 1), target: foe.slot };
+  return this._autoFight(b, orv(pick, 1), foe);
 };
 
 Battle.prototype._autoChoiceOrSkip = function _autoChoiceOrSkip(fighter) {
@@ -1424,6 +1466,7 @@ Battle.prototype._switchIn = function _switchIn(fighter, index, baton) {
   }
   fighter.active = index;
   fighter.mustReplace = null;
+  fighter.vacant = null; // engine.lua:1951: a switch-in clears the absent flag
   const nb = this._newBattler(fighter, index);
   if (baton) {
     // pokefirered/src/battle_main.c:2350: status2 keeps confusion, Focus
@@ -1632,6 +1675,7 @@ Battle.prototype._resolveTurn = function _resolveTurn() {
   this._faintSweep();
   this._drainExp();
   if (!truthy(this.result)) this._checkOver();
+  if (!truthy(this.result)) this._refreshVacant();
 
   if (!truthy(this.result) && this._anyMustReplace()) {
     this._openReplace();
@@ -1767,7 +1811,10 @@ Battle.prototype._resolveSwitches = function _resolveSwitches() {
       }
     } else if (choice && choice.action === 'item') {
       const effect = Items.bagEffect(choice.item);
-      if (!(effect && truthy(effect.ball))) this._useItem(fighter);
+      if (!(effect && truthy(effect.ball))) {
+        this._useItem(fighter);
+        this._refreshVacant();
+      }
     }
   }
 };
@@ -2234,6 +2281,9 @@ Battle.prototype._faintBattler = function _faintBattler(b) {
   } else {
     fighter.mustReplace = null;
     fighter.pendingFought = null;
+    // No bench: a shared team's seat is pret's absent battler until a Revive
+    // gives the party one again (`_refreshVacant`).
+    if (fighter.seats.length > 1) fighter.vacant = true;
   }
   if (this.phase !== 'resolving') {
     this._drainExp();
