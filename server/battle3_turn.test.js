@@ -31,6 +31,12 @@
  *   { op: "repeat", times, untilOver, steps } run `steps` `times` times,
  *                                            stopping first when untilOver and
  *                                            outcome() is set
+ *   { op: "waiting" }                        snapshot().waiting -> results
+ *   { op: "seats", player }                  the seat ids of seatsOf(player)
+ *                                            -> results
+ *
+ * A scenario with `refuses` is a create that must be refused, for exactly that
+ * reason; it has no steps and no `expect`.
  *
  * A result the Lua appends as `t[#t + 1] = nil` never lands; a null/undefined
  * result is therefore not appended here either.
@@ -138,6 +144,8 @@ function run(scn) {
       else if (st.op === 'tick') push(battle.tick(st.now));
       else if (st.op === 'disconnect') push(battle.disconnect(st.player));
       else if (st.op === 'reconnect') push(battle.reconnect(st.player));
+      else if (st.op === 'waiting') push(battle.snapshot().waiting);
+      else if (st.op === 'seats') push(battle.seatsOf(st.player).map((seat) => seat.playerId));
       else if (st.op === 'repeat') {
         for (let i = 0; i < st.times; i += 1) {
           if (st.untilOver && battle.outcome()) break;
@@ -148,7 +156,7 @@ function run(scn) {
       }
     }
   };
-  exec(scn.steps);
+  exec(scn.steps || []);
   got.outcome = outcomeOf(battle.outcome());
   got.snapshot = digest(battle);
   got.badEvents = bad;
@@ -168,6 +176,10 @@ test('fixture is the Gen 3 turn pack', () => {
 for (const scn of fixture.scenarios) {
   test(`scenario ${scn.name}`, () => {
     const got = run(scn);
+    if (scn.refuses != null) {
+      assert.strictEqual(got.refused, scn.refuses, 'create is refused for exactly that reason');
+      return;
+    }
     assert.ok(!got.refused, `create refused: ${got.refused}`);
     assert.deepStrictEqual(got.badEvents, [], 'every event is inside the C5 whitelist');
     const exp = scn.expect;

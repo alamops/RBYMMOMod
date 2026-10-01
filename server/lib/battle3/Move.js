@@ -588,11 +588,43 @@ Bm.isImprisoned = function isImprisoned(b, num) {
 // seats, switching, escape
 // ------------------------------------------------------------------
 
-// Living bench party indices (1-based) of a seat, in party order.
+// The seat that has party member `index` out, or null. A shared party (a side
+// entry with `seats = 2`, Turn.create) fields two of its members, one per
+// seat; every other fighter is its own one-seat list (`fighter.seats`).
+Bm.fieldedSeat = function fieldedSeat(fighter, index) {
+  if (index == null) return null;
+  for (const seat of fighter.seats) {
+    if (seat.active === index) return seat;
+  }
+  return null;
+};
+
+// Whether party member `index` is spoken for: out on one of the party's seats,
+// or -- while choices are being filed -- the destination of a sibling seat's
+// switch or replacement. The cart's party menu says "already in battle" for
+// either battler's mon and "already selected" for the partner's pending one
+// (pokefirered/src/party_menu.c:5934; engine.lua switchCandidates /
+// replacementCandidates, both read monToSwitchIntoId). Once the turn
+// resolves a filed switch has either happened or been dropped, so only the
+// seats count then. A one-seat fighter only ever has its own active.
+Bm.partyTaken = function partyTaken(fighter, index) {
+  const filing = this.phase === 'choice' || this.phase === 'replace';
+  for (const seat of fighter.seats) {
+    if (seat.active === index) return true;
+    const c = seat.choice;
+    if (filing && seat !== fighter && c && c.action === 'switch' && c.slot === index) return true;
+  }
+  return false;
+};
+
+// Living bench party indices (1-based) of a seat, in party order: neither
+// seat's active mon of a shared party, nor one its sibling has claimed
+// (`partyTaken`; pret HasNoMonsToSwitch, battle_util.c, skips both battlers'
+// party indices and the partner's monToSwitchIntoId).
 Bm.benchOf = function benchOf(fighter) {
   const out = [];
   for (let i = 1; i <= fighter.mons.length; i += 1) {
-    if (i !== fighter.active && fighter.mons[i - 1].hp > 0) out.push(i);
+    if (fighter.mons[i - 1].hp > 0 && !this.partyTaken(fighter, i)) out.push(i);
   }
   return out;
 };

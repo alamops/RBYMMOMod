@@ -65,6 +65,12 @@
 --   * Seats, field slots and the replace phase are BattleSim2's.  A fight with
 --     more than one seat on a side is a doubles fight (spread moves, doubled
 --     screens, Helping Hand, Follow Me, Lightning Rod, Pressure counting).
+--   * A shared team (a side entry with `seats = 2`, the cart's own double
+--     battle) is two seats over ONE party and ONE bag: seat 2 is
+--     `<playerId>#2`, both carry `owner`.  Neither seat benches the other's
+--     active mon or the one it has claimed this turn; emptied seats refill in
+--     battler order, so with one mon left only one seat is filled; a mon
+--     earns EXP once per owner; outcomes, `waiting` and `team` name owners.
 --   * Order: runs, then switches and bag items together in battler order (each
 --     switch after any Pursuit aimed at it), balls after them by speed, then
 --     moves by priority then speed, Quick Claw first in its bracket; ties: one
@@ -109,6 +115,7 @@ M.GENERATION = 3
 
 M.MONS_PER_PARTY      = 6     -- Config.BATTLE_MON_MAX
 M.FIGHTERS_PER_SIDE   = 3     -- Config.COOP_SIDE
+M.SEATS_PER_PARTY     = 2     -- a shared team fields at most two (the cart's double)
 M.CHOICE_TIMEOUT      = 60    -- Config.BATTLE_CHOICE_TIMEOUT
 M.RECONNECT_GRACE     = 60    -- Config.BATTLE_RECONNECT_GRACE
 M.RESOLVE_TIMEOUT     = 30    -- Config.BATTLE_RESOLVE_TIMEOUT
@@ -391,7 +398,15 @@ end
 -- opts:
 --   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 --   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
---   sides = { a = { { playerId, name, mons, bag } }, b = { ... } }
+--   sides = { a = { { playerId, name, mons, bag, seats? } }, b = { ... } }
+--
+-- `seats = 2` makes one entry a shared team: two fighters over the same `mons`
+-- and `bag` tables -- seat 1 keeps `playerId`, seat 2 is `playerId .. "#2"`,
+-- both have `owner = playerId` -- which is how the cart fields one trainer's
+-- party in a double battle (gPlayerParty / gEnemyParty behind battlers 0 and
+-- 2, or 1 and 3).  The leads are the first two living mons; with only one,
+-- seat 2 starts empty.  Every fighter carries `owner` and `seats` (the list of
+-- seats over its party, in slot order: itself alone without `seats = 2`).
 function M.create(opts)
   if type(opts) ~= "table" then return nil, "battle needs an options table" end
 
@@ -461,6 +476,19 @@ function M.create(opts)
       local playerId = str(entry.playerId)
       if not playerId then return nil, "a fighter on side " .. side .. " has no playerId" end
       if self.byId[playerId] then return nil, "duplicate playerId " .. playerId end
+      local seats = (entry.seats == nil) and 1 or int(entry.seats, 0)
+      if seats < 1 or seats > M.SEATS_PER_PARTY then
+        return nil, playerId .. " has a bad seat count"
+      end
+      local bucket = self.bySide[side]
+      if #bucket + seats > maxFighters(mode, side) then
+        return nil, "side " .. side .. " has more fighters than " .. mode .. " allows"
+      end
+      for seat = 2, seats do
+        if self.byId[playerId .. "#" .. seat] then
+          return nil, "duplicate playerId " .. playerId .. "#" .. seat
+        end
+      end
       local mons = {}
       if type(entry.mons) == "table" then
         for i = 1, #entry.mons do
@@ -471,16 +499,27 @@ function M.create(opts)
       end
       if #mons == 0 then return nil, playerId .. " brought no monsters" end
       local bag, bagNames = copyBag(entry.bag)
-      local fighter = {
-        playerId = playerId, name = str(entry.name) or playerId, side = side,
-        index = index, slot = Events.fieldSlot(side, index), mons = mons,
-        bag = bag, bagNames = bagNames or {}, active = firstLiving(mons),
-        connected = true, graceEndsAt = nil, choice = nil, team = nil, fought = {},
-      }
-      self.fighters[#self.fighters + 1] = fighter
-      self.byId[playerId] = fighter
-      local bucket = self.bySide[side]
-      bucket[#bucket + 1] = fighter
+      bagNames = bagNames or {}
+      local party, lead = {}, nil
+      for seat = 1, seats do
+        -- The cart's leads: the first usable mon, then the next one after it
+        -- (pokefirered/src/battle_controllers.c SetBattlePartyIds); none left,
+        -- and the seat starts empty (pret's absent battler).
+        local active = nil
+        if seat == 1 then lead = firstLiving(mons); active = lead
+        elseif lead then active = firstLiving(mons, lead) end
+        local fighter = {
+          playerId = (seat == 1) and playerId or (playerId .. "#" .. seat), owner = playerId,
+          seats = party, name = str(entry.name) or playerId, side = side,
+          index = #bucket + 1, slot = Events.fieldSlot(side, #bucket + 1), mons = mons,
+          bag = bag, bagNames = bagNames, active = active,
+          connected = true, graceEndsAt = nil, choice = nil, team = nil, fought = {},
+        }
+        party[#party + 1] = fighter
+        self.fighters[#self.fighters + 1] = fighter
+        self.byId[fighter.playerId] = fighter
+        bucket[#bucket + 1] = fighter
+      end
     end
   end
 
@@ -525,14 +564,28 @@ function Battle:_emit(kind, fields)
   return event
 end
 
+-- One roster per party: a shared team's second seat holds the same list, so
+-- its first seat speaks for both.
 function Battle:_syncTeams()
   for _, fighter in ipairs(self.fighters) do
-    local roster = Events.teamString(fighter.mons)
-    if roster ~= fighter.team then
-      fighter.team = roster
-      self:_emit("team", { slot = fighter.slot, side = fighter.side, team = roster })
+    if fighter.seats[1] == fighter then
+      local roster = Events.teamString(fighter.mons)
+      if roster ~= fighter.team then
+        fighter.team = roster
+        self:_emit("team", { slot = fighter.slot, side = fighter.side, team = roster })
+      end
     end
   end
+end
+
+-- The seats one owner fields, in slot order: both of a shared team, else the
+-- one fighter (a seat id finds its party too).  Empty for an unknown id.
+function Battle:seatsOf(ownerId)
+  local out = {}
+  local fighter = self.byId[str(ownerId) or ""]
+  if not fighter then return out end
+  for i, seat in ipairs(fighter.seats) do out[i] = seat end
+  return out
 end
 
 function Battle:drainEvents()
@@ -583,15 +636,47 @@ function Battle:_sideAlive(side)
   return false
 end
 
+-- The side's players for an outcome: owners, each once (a shared team's two
+-- seats are one player).
 function Battle:_sidePlayers(side)
-  local out = {}
-  for _, fighter in ipairs(self.bySide[side]) do out[#out + 1] = fighter.playerId end
+  local out, seen = {}, {}
+  for _, fighter in ipairs(self.bySide[side]) do
+    if not seen[fighter.owner] then
+      seen[fighter.owner] = true
+      out[#out + 1] = fighter.owner
+    end
+  end
   return out
+end
+
+-- Whether a seat that must replace has a mon to send.  A shared team refills
+-- its emptied seats in battler order -- pret HandleFaintedMonActions walks the
+-- battlers in order and HasNoMonsToSwitch counts the partner's
+-- monToSwitchIntoId -- so a sibling ahead of this seat that is still owed a
+-- mon takes one off the bench first.  With one mon left only one seat refills.
+function Battle:_canRefill(fighter)
+  local bench = #self:benchOf(fighter)
+  for _, seat in ipairs(fighter.seats) do
+    if seat == fighter then break end
+    if seat.mustReplace and seat.choice == nil then bench = bench - 1 end
+  end
+  return bench > 0
+end
+
+-- A shared team's seat whose sibling took the last bench mon stays empty for
+-- good (pret marks the battler absent, gAbsentBattlerFlags, and never asks it
+-- again).  A one-seat fighter is only ever owed a mon it still has.
+function Battle:_vacateSeats()
+  for _, fighter in ipairs(self.fighters) do
+    if fighter.mustReplace and #fighter.seats > 1 and #self:benchOf(fighter) == 0 then
+      fighter.mustReplace, fighter.pendingFought = nil, nil
+    end
+  end
 end
 
 function Battle:_owes(fighter)
   if fighter.choice ~= nil then return false end
-  if fighter.mustReplace then return firstLiving(fighter.mons) ~= nil end
+  if fighter.mustReplace then return self:_canRefill(fighter) end
   if self.phase == "replace" then return false end
   if activeMon(fighter) == nil then return false end
   return true
@@ -629,8 +714,31 @@ end
 -- choices
 -- ------------------------------------------------------------------
 
+-- Whether the bag still holds `item` for this seat.  A shared team has one
+-- bag, and the cart takes a medicine out of it when it is CHOSEN -- the
+-- engine's partner cancel cannot give a non-ball item back (init.lua
+-- D.cancelPartner, pokefirered/src/battle_controller_player.c:286) -- so one
+-- the sibling seat has filed this turn is not there to choose again.  A flute
+-- is never spent, so it is never held back.
 function Battle:_bagHas(fighter, item)
-  return fighter.bag and (fighter.bag[item] or 0) > 0
+  if not fighter.bag then return false end
+  local n = fighter.bag[item] or 0
+  local effect = Items.bagEffect(item)
+  if not (effect and effect.noConsume) then
+    for _, seat in ipairs(fighter.seats) do
+      local c = seat.choice
+      if seat ~= fighter and c and c.action == "item" and c.item == item then n = n - 1 end
+    end
+  end
+  return n > 0
+end
+
+-- The battler party member `index` stands as: this seat's, or -- a shared
+-- team -- the sibling seat's, so a medicine on the partner works on its
+-- battler (the engine's items.lua active_for_slot finds battler 0 or 2).
+function Battle:_partyBattler(fighter, index)
+  local seat = self:fieldedSeat(fighter, index)
+  return seat and seat.b or nil
 end
 
 function Battle:_spendBag(fighter, item)
@@ -645,7 +753,7 @@ end
 function Battle:_itemHasEffect(fighter, effect, index, moveIndex)
   local mon = fighter.mons[index]
   if not mon then return false end
-  local b = (index == fighter.active) and fighter.b or nil
+  local b = self:_partyBattler(fighter, index)
   if effect.revive then return mon.hp <= 0 end
   if mon.hp <= 0 then return false end
   if effect.activeOnly then
@@ -690,6 +798,7 @@ function Battle:_normaliseChoice(fighter, choice)
     local target = partyIndexOf(fighter, slot)
     local bench = fighter.mons[target]
     if not bench or bench.hp <= 0 then return nil end
+    if self:partyTaken(fighter, target) then return nil end
     return { action = "switch", slot = target }
   end
 
@@ -722,6 +831,10 @@ function Battle:_normaliseChoice(fighter, choice)
       index = partyIndexOf(fighter, slot)
       if not fighter.mons[index] then return nil end
     end
+    -- An X item / Dire Hit / Guard Spec. is the choosing battler's own, even
+    -- in a double (pokefirered/src/item_use.c ItemUseInBattle_StatIncrease
+    -- reads gBattlerInMenuId; the engine's items.lua user_battler); a
+    -- medicine may name any party member, the partner's battler included.
     if effect.activeOnly and index ~= fighter.active then return nil end
     out.slot = index
     if choice.move ~= nil then
@@ -740,7 +853,7 @@ function Battle:_normaliseChoice(fighter, choice)
     if slot == nil then return nil end
     local target = partyIndexOf(fighter, slot)
     local bench = fighter.mons[target]
-    if not bench or bench.hp <= 0 or target == fighter.active then return nil end
+    if not bench or bench.hp <= 0 or self:partyTaken(fighter, target) then return nil end
     if self:_switchBlocked(b) then return nil end
     return { action = "switch", slot = target }
   end
@@ -788,7 +901,9 @@ function Battle:_normaliseChoice(fighter, choice)
       local p = int(choice.pass, nil)
       if p ~= nil then
         local idx = partyIndexOf(fighter, p)
-        if fighter.mons[idx] and fighter.mons[idx].hp > 0 and idx ~= fighter.active then out.pass = idx end
+        if fighter.mons[idx] and fighter.mons[idx].hp > 0 and not self:partyTaken(fighter, idx) then
+          out.pass = idx
+        end
       end
     end
     return out
@@ -888,7 +1003,7 @@ function Battle:_bestSeBench(fighter, defender)
   if not defender then return nil end
   local best, bestEff = nil, 100
   for i = 1, #fighter.mons do
-    if i ~= fighter.active then
+    if not self:partyTaken(fighter, i) then
       local bench = fighter.mons[i]
       if bench and bench.hp > 0 then
         local maxEff = 100
@@ -949,7 +1064,7 @@ function Battle:_autoChoice(fighter)
     local defender = foe and foe.b
     local se = self:_bestSeBench(fighter, defender)
     if se then return { action = "switch", slot = se } end
-    local next_ = firstLiving(fighter.mons)
+    local next_ = self:benchOf(fighter)[1]
     if next_ then return { action = "switch", slot = next_ } end
     return nil
   end
@@ -1103,7 +1218,7 @@ end
 
 function Battle:_anyMustReplace()
   for _, fighter in ipairs(self.fighters) do
-    if fighter.mustReplace and firstLiving(fighter.mons) ~= nil then return true end
+    if fighter.mustReplace and self:_canRefill(fighter) then return true end
   end
   return false
 end
@@ -1138,8 +1253,10 @@ function Battle:_closeReplace()
       end
     end
   end
+  if not self.result then self:_vacateSeats() end
   -- A delayed hit that came due on an emptied seat lands on the newcomer, as
-  -- the cart's replacement-first end of turn has it (Residual.lua).
+  -- the cart's replacement-first end of turn has it (Residual.lua); one due on
+  -- a seat just vacated is dropped there.
   if not self.result then self:_landPendingFutureSight() end
   self:_drainExp()
   self.phase = "choice"
@@ -1587,7 +1704,7 @@ function Battle:_useItem(fighter)
         self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
       if finish then
         finish.caught = self:_caughtSheet(target, item)
-        finish.catcher = fighter.playerId
+        finish.catcher = fighter.owner
       end
     else
       self:say(SHAKE_TEXT[shakes] or SHAKE_TEXT[0])
@@ -1609,14 +1726,19 @@ function Battle:_useItem(fighter)
   if effect.flute then
     local woke = false
     for _, seat in ipairs(self.order) do
-      for i = 1, #seat.mons do
-        local mon = seat.mons[i]
-        if Status.normalise(mon.status) == "SLP" and mon.hp > 0 then
-          woke = true
-          if seat.b and seat.active == i then
-            self:cure(seat.b, nil)
-          else
-            mon.status, mon.sleepTurns = nil, nil
+      -- Each party once, from its first seat: a shared team's partner wakes
+      -- on its own battler.
+      if seat.seats[1] == seat then
+        for i = 1, #seat.mons do
+          local mon = seat.mons[i]
+          if Status.normalise(mon.status) == "SLP" and mon.hp > 0 then
+            woke = true
+            local b = self:_partyBattler(seat, i)
+            if b then
+              self:cure(b, nil)
+            else
+              mon.status, mon.sleepTurns = nil, nil
+            end
           end
         end
       end
@@ -1628,7 +1750,7 @@ function Battle:_useItem(fighter)
 
   local index = choice.slot or fighter.active
   local mon = fighter.mons[index]
-  local b = (index == fighter.active) and fighter.b or nil
+  local b = self:_partyBattler(fighter, index)
   if not mon or not self:_itemHasEffect(fighter, effect, index, choice.move) then
     self:say("But it had no effect!")
     return
@@ -1740,8 +1862,12 @@ end
 -- participation (BattleSim2's, verbatim in behaviour)
 -- ------------------------------------------------------------------
 
-local function foughtKey(slot, index)
-  return slot .. ":" .. index
+-- Participation is keyed by PARTY member, not by seat: pret's sentIn bits
+-- (gSentPokesToOpponent) are party indices, so a shared team's mon that
+-- fought from both seats is one participant.  The key names the party by its
+-- first seat's slot -- a one-seat fighter's own.
+local function foughtKey(fighter, index)
+  return fighter.seats[1].slot .. ":" .. index
 end
 
 function Battle:_refield(fighter)
@@ -1751,10 +1877,10 @@ function Battle:_refield(fighter)
   local foes = self.bySide[fighter.side == "a" and "b" or "a"]
   for _, foe in ipairs(foes) do
     if activeMon(foe) then
-      fighter.fought[foughtKey(foe.slot, foe.active)] = true
+      fighter.fought[foughtKey(foe, foe.active)] = true
       if mine then
         foe.fought = foe.fought or {}
-        foe.fought[foughtKey(fighter.slot, mine)] = true
+        foe.fought[foughtKey(fighter, mine)] = true
       end
     end
   end
@@ -1769,7 +1895,7 @@ function Battle:_standingOpposition(fighter)
   local keys = {}
   local foes = self.bySide[fighter.side == "a" and "b" or "a"]
   for _, foe in ipairs(foes) do
-    if activeMon(foe) then keys[#keys + 1] = foughtKey(foe.slot, foe.active) end
+    if activeMon(foe) then keys[#keys + 1] = foughtKey(foe, foe.active) end
   end
   return keys
 end
@@ -1777,13 +1903,13 @@ end
 -- A participant that faints stops being one (it earns nothing), but its SEAT
 -- is remembered as having fought (`foughtSeats`): pret's sentIn bits outlive a
 -- faint, and a seat whose participants all fell still pays its Exp. Share
--- holders (`_awardExp`).
+-- holders (`_awardExp`).  A shared team is remembered as one seat, its first.
 function Battle:_unfield(fighter, index)
-  local key = foughtKey(fighter.slot, index)
+  local key = foughtKey(fighter, index)
   for _, other in ipairs(self.fighters) do
     if other.fought and other.fought[key] then
       other.foughtSeats = other.foughtSeats or {}
-      other.foughtSeats[fighter.slot] = true
+      other.foughtSeats[fighter.seats[1].slot] = true
     end
     if other.fought then other.fought[key] = nil end
     local pending = other.pendingFought
@@ -1798,6 +1924,15 @@ end
 local EXP_MODES = { wild = true, coop_wild = true, coop_npc = true }
 local EXP_OWNER_SIDE = "a"
 
+-- The field slot an `exp` fact names for party member `index`: the seat it is
+-- out on, else (benched) its party's first seat.
+function Battle:_expSlot(fighter, index)
+  local seat = self:fieldedSeat(fighter, index) or fighter.seats[1]
+  return seat.slot
+end
+
+-- One pass per PARTY (its first seat): a shared team's mon is one participant
+-- however many seats it fought from, and gets one `exp` fact.
 function Battle:_awardExp(fallen, mon)
   if not EXP_MODES[self.mode] then return end
   if fallen.side == EXP_OWNER_SIDE then return end
@@ -1805,14 +1940,16 @@ function Battle:_awardExp(fallen, mon)
   local participants, alive = 0, {}
   local seatFought, seatPaid = {}, {}
   for _, fighter in ipairs(self.bySide[EXP_OWNER_SIDE]) do
-    if fallen.foughtSeats and fallen.foughtSeats[fighter.slot] then seatFought[fighter] = true end
-    for index = 1, #fighter.mons do
-      if fought[foughtKey(fighter.slot, index)] then
-        participants = participants + 1
-        seatFought[fighter] = true
-        if fighter.mons[index].hp > 0 then
-          alive[#alive + 1] = { fighter = fighter, index = index }
-          seatPaid[fighter] = true
+    if fighter.seats[1] == fighter then
+      if fallen.foughtSeats and fallen.foughtSeats[fighter.slot] then seatFought[fighter] = true end
+      for index = 1, #fighter.mons do
+        if fought[foughtKey(fighter, index)] then
+          participants = participants + 1
+          seatFought[fighter] = true
+          if fighter.mons[index].hp > 0 then
+            alive[#alive + 1] = { fighter = fighter, index = index }
+            seatPaid[fighter] = true
+          end
         end
       end
     end
@@ -1822,14 +1959,15 @@ function Battle:_awardExp(fallen, mon)
       if activeMon(fighter) then
         participants = participants + 1
         alive[#alive + 1] = { fighter = fighter, index = fighter.active }
-        seatFought[fighter], seatPaid[fighter] = true, true
+        seatFought[fighter.seats[1]], seatPaid[fighter.seats[1]] = true, true
       end
     end
   end
   for _, winner in ipairs(alive) do
     self:_emit("exp", {
-      slot = winner.fighter.slot, species = mon.species, speciesId = mon.speciesId,
-      level = mon.level, participants = participants, mon = winner.index - 1,
+      slot = self:_expSlot(winner.fighter, winner.index), species = mon.species,
+      speciesId = mon.speciesId, level = mon.level, participants = participants,
+      mon = winner.index - 1,
     })
   end
   -- pokefirered/src/battle_script_commands.c:3113 Cmd_getexp pays the living
@@ -1868,7 +2006,8 @@ function Battle:_faintBattler(b)
   mon.status, mon.sleepTurns = nil, nil
   self:_unfield(fighter, b.partyIndex)
   self:_unlink(b)
-  local next_ = firstLiving(fighter.mons)
+  -- A shared team's bench leaves out the partner's active mon (`benchOf`).
+  local next_ = self:benchOf(fighter)[1]
   self:_emit("faint", {
     slot = fighter.slot, side = fighter.side, text = mon.species, amount = next_ and 1 or nil,
   })
@@ -2028,7 +2167,7 @@ end
 -- ------------------------------------------------------------------
 
 function Battle:snapshot()
-  local field, waiting = {}, {}
+  local field, waiting, owing = {}, {}, {}
   for _, fighter in ipairs(self.fighters) do
     local b = fighter.b
     local mon = b and b.mon
@@ -2044,7 +2183,11 @@ function Battle:snapshot()
       status = mon and mon.status or nil,
       party = party,
     }
-    if self:_owes(fighter) then waiting[#waiting + 1] = fighter.playerId end
+    -- `waiting` names owners, each once: a shared team is one player.
+    if self:_owes(fighter) and not owing[fighter.owner] then
+      owing[fighter.owner] = true
+      waiting[#waiting + 1] = fighter.owner
+    end
   end
   return {
     battle = self.id, mode = self.mode, phase = self.phase, turn = self.turn, seq = self.seq,

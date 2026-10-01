@@ -24,9 +24,15 @@
 --   { op = "repeat", times, untilOver, steps } run `steps` `times` times,
 --                                              stopping first when untilOver and
 --                                              outcome() is set
+--   { op = "waiting" }                         snapshot().waiting -> `results`
+--   { op = "seats", player }                   the seat ids of seatsOf(player)
+--                                              -> `results`
 --
 -- `create.typeTable == "$chart"` / `create.movePool == "$pool"` are replaced by
 -- the fixture's shared `typeTable` / `movePool` before Turn.create.
+--
+-- A scenario with `refuses` is a create that must be refused, for exactly that
+-- reason; it has no steps and no `expect`.
 --
 -- `expect` = { events, batches, results, outcome, snapshot }, where outcome is
 -- { battle, outcome, reason, winners?, losers?, catcher?, caughtSpecies?,
@@ -281,6 +287,11 @@ local function run(scn)
       elseif st.op == "tick" then got.results[#got.results + 1] = battle:tick(st.now)
       elseif st.op == "disconnect" then got.results[#got.results + 1] = battle:disconnect(st.player)
       elseif st.op == "reconnect" then got.results[#got.results + 1] = battle:reconnect(st.player)
+      elseif st.op == "waiting" then got.results[#got.results + 1] = battle:snapshot().waiting
+      elseif st.op == "seats" then
+        local ids = {}
+        for i, seat in ipairs(battle:seatsOf(st.player)) do ids[i] = seat.playerId end
+        got.results[#got.results + 1] = ids
       elseif st.op == "repeat" then
         for _ = 1, st.times do
           if st.untilOver and battle:outcome() then break end
@@ -291,7 +302,7 @@ local function run(scn)
       end
     end
   end
-  exec(scn.steps)
+  exec(scn.steps or {})
   got.outcome = outcomeOf(battle:outcome())
   got.snapshot = digest(battle)
   got.badEvents = bad
@@ -314,6 +325,13 @@ for index, scn in ipairs(fixture.scenarios) do
   if not ok then
     fail(scn.name, "threw: " .. tostring(got))
     results[index] = nil
+  elseif scn.refuses ~= nil then
+    if got.refused ~= scn.refuses then
+      fail(scn.name, "create\n  expected refusal " .. encode(scn.refuses) .. "\n  got      " ..
+        encode(got.refused or "a battle"))
+    else
+      passed = passed + 1
+    end
   elseif got.refused then
     fail(scn.name, "create refused: " .. tostring(got.refused))
   else
@@ -360,19 +378,23 @@ if UPDATE then
     lines[#lines + 1] = "    {"
     lines[#lines + 1] = '      "name": ' .. encode(scn.name) .. ","
     lines[#lines + 1] = '      "create": ' .. encode(scn.create) .. ","
-    lines[#lines + 1] = '      "steps": ' .. encode(scn.steps) .. ","
-    lines[#lines + 1] = '      "expect": {'
-    lines[#lines + 1] = '        "batches": ' .. encode(got and got.batches or {}) .. ","
-    lines[#lines + 1] = '        "results": ' .. encode(got and got.results or {}) .. ","
-    lines[#lines + 1] = '        "outcome": ' .. encode(got and got.outcome or NULL) .. ","
-    lines[#lines + 1] = '        "snapshot": ' .. encode(got and got.snapshot or NULL) .. ","
-    lines[#lines + 1] = '        "events": ['
-    local evs = got and got.events or {}
-    for i, e in ipairs(evs) do
-      lines[#lines + 1] = "          " .. encode(e) .. ((i < #evs) and "," or "")
+    if scn.refuses ~= nil then
+      lines[#lines + 1] = '      "refuses": ' .. encode(scn.refuses)
+    else
+      lines[#lines + 1] = '      "steps": ' .. encode(scn.steps) .. ","
+      lines[#lines + 1] = '      "expect": {'
+      lines[#lines + 1] = '        "batches": ' .. encode(got and got.batches or {}) .. ","
+      lines[#lines + 1] = '        "results": ' .. encode(got and got.results or {}) .. ","
+      lines[#lines + 1] = '        "outcome": ' .. encode(got and got.outcome or NULL) .. ","
+      lines[#lines + 1] = '        "snapshot": ' .. encode(got and got.snapshot or NULL) .. ","
+      lines[#lines + 1] = '        "events": ['
+      local evs = got and got.events or {}
+      for i, e in ipairs(evs) do
+        lines[#lines + 1] = "          " .. encode(e) .. ((i < #evs) and "," or "")
+      end
+      lines[#lines + 1] = "        ]"
+      lines[#lines + 1] = "      }"
     end
-    lines[#lines + 1] = "        ]"
-    lines[#lines + 1] = "      }"
     lines[#lines + 1] = "    }" .. ((index < #fixture.scenarios) and "," or "")
   end
   lines[#lines + 1] = "  ]"

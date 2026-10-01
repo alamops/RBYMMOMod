@@ -5,7 +5,7 @@
 | Date | 2026-09-30 |
 | Owner | T5 (`src/BattleSim3/*`, this document) |
 | Parent plan | [`gen3-firered-emerald-support.md`](gen3-firered-emerald-support.md) §3 decision 6, §5 C4/C5 |
-| Consumers | T7 (Node twin `server/lib/battle3`, Wire/sanitize Gen 3 dialect, hub sim selection), T8 (`Sheet3`, mediated client), T9 (arena / classic GBA UI), T11 (co-op), T12 (solo) |
+| Consumers | T7 (Node twin `server/lib/battle3`, Wire/sanitize Gen 3 dialect, hub sim selection), T8 (`Sheet3`, mediated client), T9 (arena / classic GBA UI), T11 (co-op), T12 (solo); the shared-team seats of §1.3 are contract C1 of [`gen3-solo-doubles.md`](gen3-solo-doubles.md) |
 | Reference | engine `~/Projects/alamops/gen1recomp/src/core/game3/battle/` (pret-cited), pret `pokefirered` / `pokeemerald` |
 
 This is the contract every Gen 3 battle surface codes against. `src/BattleSim3/`
@@ -44,6 +44,7 @@ battle:drainEvents()                       -- { event, ... } since the last drai
 battle:disconnect(playerId) / battle:reconnect(playerId)
 battle:outcome()                           -- nil | { battle, outcome, winners, losers, reason, caught?, catcher?, payDay? }
 battle:snapshot()                          -- tests / logs only (same shape as BattleSim2 + field digest)
+battle:seatsOf(ownerId)                    -- the owner's seat fighters in slot order (§1.3); {} if unknown
 ```
 
 The Node twin exposes `Turn.attempt(opts) -> { battle, reason }` as the Gen 2 twin does.
@@ -51,7 +52,7 @@ The Node twin exposes `Turn.attempt(opts) -> { battle, reason }` as the Gen 2 tw
 `Turn` also exports `MODES`, `VERSION`, `STATUS_FROM_WIRE` / `STATUS_TO_WIRE`,
 `MONS_PER_PARTY` (6), `FIGHTERS_PER_SIDE` (3), `CHOICE_TIMEOUT`, `RECONNECT_GRACE`,
 `RESOLVE_TIMEOUT`, `TIE_BREAK_ROLL` (128), `AIM_SEED_OFFSET` (1597334677) — same
-values as BattleSim2.
+values as BattleSim2 — and `SEATS_PER_PARTY` (2, §1.3).
 
 ### 1.1 `create(opts)`
 
@@ -69,8 +70,13 @@ values as BattleSim2.
 | `choiceTimeout`, `reconnectGrace`, `resolveTimeout`, `now` | ints | same clock as BattleSim2 |
 | `sides` | `{ a = { fighter... }, b = { fighter... } }` | fighters, below |
 
-A **fighter** (one seat): `{ playerId, name, mons = { sheet... (≤ 6) }, bag = bag? }`.
+A **fighter** (one seat): `{ playerId, name, mons = { sheet... (≤ 6) }, bag = bag?, seats = 1|2? }`.
 `badges` is accepted and ignored (§6: badge boosts are off in mediated fights).
+`seats = 2` makes the entry a **shared team** (§1.3); absent or `1` is one seat,
+exactly as before. Anything else (`0`, `3`, …) refuses the battle with
+`"<playerId> has a bad seat count"`, and both seats count against the side's
+seat cap (`1v1` / `wild` allow one, so a shared team there is refused as
+`"side a has more fighters than 1v1 allows"`).
 
 ### 1.2 Choices (zero-based on the wire, like BattleSim2)
 
@@ -87,6 +93,74 @@ a slot is refused when it has 0 PP, is Disabled, is Tormented (same as last move
 is a status move under Taunt, is Imprisoned by a foe, or is not the Choice Band
 move. When **every** slot is refused the choice is Struggle (any index accepted).
 Encore does not refuse: whatever index is chosen, the Encored move is used.
+
+### 1.3 Shared teams (`seats = 2`) — the cart's own double battle
+
+On the cart one trainer fields **two battlers from one party** (gPlayerParty
+behind battlers 0 and 2, gEnemyParty behind 1 and 3). A side entry with
+`seats = 2` is exactly that:
+
+```lua
+sides = {
+  a = { { playerId = "solo_player", seats = 2, name, mons, bag, badges } },
+  b = { { playerId = "solo_foe", seats = 2 --[[ or 1 ]], name, mons, bag } },
+}
+sim:submitChoice("solo_player#2", { action = "fight", move = 0, target = 3 })
+```
+
+* `create` expands it into **two fighters over the same `mons` table and the same
+  bag** (counts and names). Seat 1 keeps `playerId`; seat 2 is `playerId .. "#2"`.
+  Every fighter has `owner` (its entry's `playerId`, so both seats of a shared team
+  name the same owner) and `seats` (the fighters over its party, in slot order —
+  itself alone for an ordinary entry). `battle:seatsOf(id)` returns a copy of that
+  list for an owner or a seat id.
+* Seats take field slots in order like any other fighters (side a `0, 1`, side b
+  `3, 4`, `Events.fieldSlot`), and battler order stays `a1 b1 a2 b2`. A side with
+  two seats is a doubles fight (§6).
+* **Choices, `autoPick`, the clock** are per seat, addressed by the seat's own id.
+  No new choice field: `Wire.battleChoice` is unchanged.
+* **Leads** (pret `SetBattlePartyIds`): seat 1 gets the first living mon, seat 2
+  the next living one after it. With only one living mon seat 2 starts **empty**:
+  no `send`, no battler, never owing.
+* **The bench** of a seat is every living mon of the party except **both** seats'
+  active mons and — while choices are being filed — the destination of the
+  sibling seat's filed switch or replacement (pret `HasNoMonsToSwitch`; the party
+  menu's "already in battle" / "already selected"). A `switch` or replacement
+  naming the sibling's active, its claim, or the seat's own active is refused
+  (`false`), even when the sibling is switching that mon out this turn. A
+  `cancel` releases the claim. The same bench feeds Roar / Whirlwind, Baton Pass
+  (`pass` naming a taken mon is dropped, as any illegal `pass` is), the auto-pick
+  and the `faint` event's `amount` (1 = this party still has a bench mon).
+* **Replacement** follows battler order (pret `HandleFaintedMonActions`): a
+  fainted seat is asked (`turn` with its `slot`) only if the bench still has a mon
+  after every sibling **ahead** of it that is owed one. Both seats down with one
+  bench mon: only the first seat is asked and refills; the other is never asked
+  and, once the replace phase's switch-ins are done, stays **empty for good**
+  (pret's absent battler) — no `mustReplace`, untargetable, and a Future Sight
+  due there is dropped. With two or more bench mons both seats are asked and
+  either may take any bench mon the other has not claimed.
+* **The bag** is one bag. An item a sibling has filed this turn is held back
+  from the other seat (the cart spends a medicine when it is *chosen*): two seats
+  and one Potion, the second seat's Potion is refused until the first cancels.
+  Flutes are never spent, so they are never held back.
+* **Items on the partner**: a medicine, PP item or flute whose `slot` names the
+  sibling seat's active mon works on that **battler** — `drain` / `status` /
+  confusion and infatuation cures / `moves` at the partner's slot, exactly as on
+  one's own (the engine's `active_for_slot`). X items, Dire Hit and Guard Spec.
+  stay the choosing seat's own (pret `ItemUseInBattle_StatIncrease` reads
+  `gBattlerInMenuId`): naming the partner refuses them.
+* **EXP** is counted per party member (pret's sentIn bits are party indices): a
+  mon that fought from both seats is one participant and gets one `exp` fact.
+  Its `slot` is the seat it is out on, or the party's first seat when it is
+  benched; `mon` is its party index. A party's holders-only fact (§7.1) comes
+  once, on its first seat.
+* **Owners, not seats**, are the players: `outcome().winners` / `losers`,
+  `catcher` and `snapshot().waiting` list owner ids, each once
+  (`"solo_player"`, never `"solo_player#2"`), and the `team` roster is emitted
+  once per party, on its first seat's slot.
+* Heal Bell / Aromatherapy from a shared team reaches the partner through its
+  battler (the ally pass, with its battle ability) and the rest of the party as
+  the bench; a Soundproof partner is not cured behind its back.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -358,7 +432,9 @@ where `turn` counts completed turns (0 during the first turn, pret
   spread moves, doubled screens, Helping Hand, Follow Me, Lightning Rod redirection,
   Pressure counting and the "moved last" checks apply. `BOTH` hits every standing
   foe; `FOES_AND_ALLY` hits every other standing battler; "partner" means the
-  nearest living ally seat.
+  nearest living ally seat. A **shared team** (`seats = 2`, §1.3) is two of
+  those seats over one party and one bag: a shared bench, battler-order refills
+  (one mon left fills one seat), EXP once per party member, owners in outcomes.
 * **Turn order** (pret `SetActionsAndBattlersTurnOrder`, `battle_main.c:3532`): runs,
   then the switches and the bag items **together, in battler order** (a1, b1, a2, …;
   each switch preceded by any foe Pursuit aimed at it) -- a1's Potion comes before
@@ -512,8 +588,8 @@ stat switch item run turn over wait reconnect chose unchose moves exp team`);
 | `send` / `switch` | as BattleSim2 | a switch-in's ability / Spikes / White Herb follow as their own events |
 | `item` | `slot`, `side`, `text` = the numeric item id as a string | bag use (no vitamins in Gen 3 battles) |
 | `moves` | `slot`, `side`, `moves` (Gen 3 move rows: `id name num pp maxPp power accuracy type effect chance target priority flags`), `mon` | `mon` present on a PP change of the real party list, absent on a Transform / Mimic overlay |
-| `faint`, `turn`, `over`, `wait`, `reconnect`, `chose`, `unchose`, `run`, `team`, `msg` | unchanged | `over` reasons: `ko run catch disconnect timeout` (Roar/Whirlwind and Teleport out of a wild fight end it with `run`) |
-| `exp` | `slot`, `species`, `speciesId`, `level`, `participants`, `mon` | as BattleSim2: one per living participant (`mon` = its party index, `participants` = the share count). **New: the holders-only fact** -- `participants` **0** and **no `mon`** -- goes to a seat that fought the fallen foe but has no participant standing (all fainted, e.g. after Explosion), when it still has a living mon: pret `Cmd_getexp` pays the living Exp. Share holders regardless (`viaSentIn` 0 is a `SAFE_DIV`). The client prices it as a knockout with an **empty sentIn set**: `Exp3.split(calculated, 0, viaExpShare)` pays each living holder `floor(floor(calculated / 2) / viaExpShare)` (min 1) and nobody else. |
+| `faint`, `turn`, `over`, `wait`, `reconnect`, `chose`, `unchose`, `run`, `team`, `msg` | unchanged | `over` reasons: `ko run catch disconnect timeout` (Roar/Whirlwind and Teleport out of a wild fight end it with `run`). A shared team (§1.3): `team` comes once per party on its first seat's slot; `faint`'s `amount` 1 says the party still has a bench mon (the replace phase's `turn` with a `slot` says which seat is asked) |
+| `exp` | `slot`, `species`, `speciesId`, `level`, `participants`, `mon` | as BattleSim2: one per living participant (`mon` = its party index, `participants` = the share count). **New: the holders-only fact** -- `participants` **0** and **no `mon`** -- goes to a seat that fought the fallen foe but has no participant standing (all fainted, e.g. after Explosion), when it still has a living mon: pret `Cmd_getexp` pays the living Exp. Share holders regardless (`viaSentIn` 0 is a `SAFE_DIV`). The client prices it as a knockout with an **empty sentIn set**: `Exp3.split(calculated, 0, viaExpShare)` pays each living holder `floor(floor(calculated / 2) / viaExpShare)` (min 1) and nobody else. **Shared team** (§1.3): participation is per party member, so a mon that fought from both seats is one participant with one fact; its `slot` is the seat it is out on, else (benched) the party's first seat; the holders-only fact comes once per party, on its first seat. |
 
 ### 7.2 New kinds
 

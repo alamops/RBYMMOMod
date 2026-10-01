@@ -8,7 +8,7 @@
 | Flags | none |
 | Gates | grilled + approved by owner |
 | Branch | `feature/firered-and-emerald-support` (unpushed, 1.5.0) |
-| Base SHA | `78e695a` (tree dirty with `.modkitignore` + `docs/plans/gen3-known-gaps.md` from the previous turn; both fold into this work) |
+| Base SHA | `229da2b` (the plan + known-gaps commit on top of `78e695a`; review diffs against it) |
 
 ## 1. Objective & success criteria
 
@@ -262,6 +262,30 @@ model.double = {
 - Every other model field (`phase`, `message`, `commands`, `moves`, `list`,
   `prompt`, `trainer`, `weather`, `frame`) keeps its meaning.
 
+**C4 additions after wave 1** (from T5's report; T4 supplies them, T5b draws them):
+- In phase `"target"` the model still carries `moves` + `cursor`. The cart keeps
+  the move menu up while aiming, and without them the textbox would be empty.
+- `double.blink.since = frame`, set each time the target cursor moves, restarts
+  the 8-frame blink from "shown", as on the cart.
+- `moves[i].target` is the move's target byte (`MOVE_TARGET_*`), so hovering a
+  move previews the battlers it will hit (engine `ui.lua` `preview_targets`).
+- `double.hpText = true` while START is held swaps the bars for HP numbers
+  (engine `healthbox.lua` `swapHpBarsWithHpText`).
+
+**Shared-team facts T3/T4 code against** (from T1's report):
+- A filed choice's `slot` is the 1-based party index after normalisation, so
+  `view.claimed` comes from `sim:seatsOf(id)[k].choice`.
+- `team` events arrive only on a party's first slot (0 or 3).
+- Winners, losers, `waiting` and `catcher` carry owner ids.
+- X items, Dire Hit and Guard Spec. are refused on the partner, as on the cart
+  (`gBattlerInMenuId`).
+
+**Brain facts T3 codes against** (from T2's report):
+- **One** brain instance answers both trainer seats, because the trainer's item
+  uses are per-trainer.
+- A switch is `{ action = "switch", slot = <party index> }`.
+- `view.partner` is the living partner, or nil.
+
 ## 4. Work breakdown — implementation tasks
 
 | ID | Goal | Owns (exclusive) | Depends on | Acceptance |
@@ -271,6 +295,7 @@ model.double = {
 | T5 | The GBA-native classic double layout (C4) | `src/ClassicBattle.lua` | — | `drawGen3` draws four pics and four doubles healthboxes at the engine positions, plus the target blink, when `view.double` is set. `M.gen3DoubleLayout(view)` is exposed for layout checks. Singles rendering is unchanged. |
 | T3 | Solo takes lone doubles (C1+C2+C3 consumer) | `src/SoloBattle.lua`, `src/Config.lua` (the `SOLO_REFUSED_GEN3` comment only) | T1 (and C2/C3 by contract) | A double with ≥2 usable monsters is taken. It runs two seats a side, a claim-aware `_answerFoe`, `seat`-mapped choices, prize ×2, `doubleBattle` on the record, both seats reconciled, Emerald TV mon 2, and the whiteout/draw/halt rules. A double with <2 usable monsters is handed back. `trainerIdB` is handed back. 1v1 is unchanged. |
 | T4 | The solo-double screen on `CoopBattle` (C3), building C4 | `src/CoopBattle.lua`, `src/CoopSim.lua`, `src/Battlefield.lua` (only if the one-human-two-seats ally side needs it) | T1 (event shapes) | `newSoloDouble` meets C3. `ownSlots` gives a chooser cursor, buffered choices with partner cancel, bench exclusion with an "already in battle" refusal, targets including the ally, per-seat replacement, EXP/learn/evolve for both own slots, trainer and "Go! X and Y!" intro lines, and C4 for classic. `ownSlots == nil` leaves co-op untouched. |
+| T5b | Two more GBA-double behaviours: move-target preview and the START HP-number swap (C4 additions) | `src/ClassicBattle.lua` | T5 | Hovering a move in a double highlights the battlers it will hit, per its target byte; holding START shows HP numbers instead of the four bars; singles are unchanged. |
 | T6 | Docs | `CHANGELOG.md`, `README.md`, `mod.card`, `docs/plans/gen3-known-gaps.md`, `docs/plans/gen3-firered-emerald-support.md`, `.modkitignore` | T3, T4 | The 1.5.0 Added entry is written; the Known bullet is reworded (lone doubles are taken, and FR/LG were never only Emerald); gap #2 is marked done; new files are listed in `.modkitignore`. |
 
 ## 5. Work breakdown — test tasks
@@ -299,7 +324,7 @@ the save and the script VM. Run recipe (from this session, not a subagent):
 
 - **Wave 1** (parallel, disjoint): **T1**, **T2**, **T5**. A barrier follows,
   then a commit, `wave 1: shared-team referee, doubles AI, GBA double layout`.
-- **Wave 2** (parallel, disjoint): **T3**, **T4**. They depend on T1's real
+- **Wave 2** (parallel, disjoint): **T3**, **T4**, **T5b**. T3 and T4 depend on T1's real
   referee and code to C2/C3/C4. A barrier follows, then integration by me:
   wire solo → screen → referee, a headless smoke run, and fixes to the glue.
   Then commit.
@@ -359,3 +384,5 @@ the save and the script VM. Run recipe (from this session, not a subagent):
 | The GBA double layout for co-op classic | **out of scope**: co-op keeps its focus view; a different ticket |
 | Safari, roamers, legendaries, Frontier, Trainer Tower/Hill, first/tutorial fights | **out of scope**: the other rows of gap #2 |
 | A LeafGreen live run | **out of scope**: no ROM on this machine |
+| An empty seat sorts last in turn order while `battlerCount()` counts every seat (`Move.lua:115`, `_beginTurn`). "Moved last" checks (Protect, Magic Coat, Snatch) can be off whenever a doubles side has an empty seat; pret sorts absent battlers by speed | **out of scope**: pre-existing. Co-op 2v2 has had it since the referee landed; T1 found it, this change did not create it. A referee fidelity ticket |
+| Hub-hosted shared teams (`Hub.lua:1736` disconnects one seat id) | **out of scope**: no hub ever passes `seats`. Only relevant if co-op adopts shared teams |

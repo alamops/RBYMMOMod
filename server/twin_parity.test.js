@@ -481,7 +481,7 @@ test('the Gen 3 event vocabulary is one vocabulary across Wire and both sims', (
 
 test('lib/battle3 Turn constants match src/BattleSim3/Turn.lua', () => {
   const turn = read('src/BattleSim3/Turn.lua');
-  for (const name of ['VERSION', 'GENERATION', 'MONS_PER_PARTY', 'FIGHTERS_PER_SIDE',
+  for (const name of ['VERSION', 'GENERATION', 'MONS_PER_PARTY', 'FIGHTERS_PER_SIDE', 'SEATS_PER_PARTY',
     'CHOICE_TIMEOUT', 'RECONNECT_GRACE', 'RESOLVE_TIMEOUT', 'TIE_BREAK_ROLL', 'AIM_SEED_OFFSET']) {
     assert.strictEqual(luaNumber(turn, name, 'BattleSim3/Turn.lua'), Battle3.Turn[name],
       `BattleSim3 Turn.${name} and lib/battle3 Turn.${name} must match`);

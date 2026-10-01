@@ -471,11 +471,43 @@ end
 -- seats, switching, escape
 -- ------------------------------------------------------------------
 
--- Living bench party indices (1-based) of a seat, in party order.
+-- The seat that has party member `index` out, or nil.  A shared party (a side
+-- entry with `seats = 2`, Turn.create) fields two of its members, one per
+-- seat; every other fighter is its own one-seat list (`fighter.seats`).
+function Bm:fieldedSeat(fighter, index)
+  if index == nil then return nil end
+  for _, seat in ipairs(fighter.seats) do
+    if seat.active == index then return seat end
+  end
+  return nil
+end
+
+-- Whether party member `index` is spoken for: out on one of the party's seats,
+-- or -- while choices are being filed -- the destination of a sibling seat's
+-- switch or replacement.  The cart's party menu says "already in battle" for
+-- either battler's mon and "already selected" for the partner's pending one
+-- (pokefirered/src/party_menu.c:5934; engine.lua switchCandidates /
+-- replacementCandidates, both read monToSwitchIntoId).  Once the turn
+-- resolves a filed switch has either happened or been dropped, so only the
+-- seats count then.  A one-seat fighter only ever has its own active.
+function Bm:partyTaken(fighter, index)
+  local filing = self.phase == "choice" or self.phase == "replace"
+  for _, seat in ipairs(fighter.seats) do
+    if seat.active == index then return true end
+    local c = seat.choice
+    if filing and seat ~= fighter and c and c.action == "switch" and c.slot == index then return true end
+  end
+  return false
+end
+
+-- Living bench party indices (1-based) of a seat, in party order: neither
+-- seat's active mon of a shared party, nor one its sibling has claimed
+-- (`partyTaken`; pret HasNoMonsToSwitch, battle_util.c, skips both battlers'
+-- party indices and the partner's monToSwitchIntoId).
 function Bm:benchOf(fighter)
   local out = {}
   for i = 1, #fighter.mons do
-    if i ~= fighter.active and fighter.mons[i].hp > 0 then out[#out + 1] = i end
+    if fighter.mons[i].hp > 0 and not self:partyTaken(fighter, i) then out[#out + 1] = i end
   end
   return out
 end

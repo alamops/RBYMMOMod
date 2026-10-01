@@ -1043,9 +1043,12 @@ H[E.HEAL_BELL] = function(C)
   end
   -- The benched party: every mon of the user's seat that is not on the field,
   -- except (Heal Bell only) a Soundproof one -- pokefirered/src/battle_script_
-  -- commands.c:7995 reads each party member's species ability.
+  -- commands.c:7995 reads each party member's species ability.  A shared
+  -- party's partner is out on the sibling seat: the ally pass above already
+  -- asked its battler's ability (the cart reads gBattleMons for the partner's
+  -- party index too), so a Soundproof partner is not cured here behind it.
   for i, mon in ipairs(user.fighter.mons) do
-    if i ~= user.fighter.active and mon.hp > 0 and Status.normalise(mon.status)
+    if not B:fieldedSeat(user.fighter, i) and mon.hp > 0 and Status.normalise(mon.status)
         and not (isBell and Abilities.nameOf(mon.ability) == "SOUNDPROOF") then
       mon.status, mon.sleepTurns = nil, nil
     end

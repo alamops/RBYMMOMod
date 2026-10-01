@@ -15,7 +15,9 @@
 -- On Gen 3 (FireRed / LeafGreen / Emerald) the classic skin is the cart's
 -- own 240x160 battle page instead: see "Gen 3: the GBA battle page" at the
 -- end of this file (M.drawGen3), which the two battle screens hand a plain
--- view model and which draws with the cart's battle chrome.
+-- view model and which draws with the cart's battle chrome. A lone trainer's
+-- double battle there is the cart's own double screen (M.G3D), not the
+-- guild focus.
 
 local need, mod = ...
 -- Gen 3 engine reach (lazy, generation-guarded; nil off a Gen 3 boot).
@@ -801,6 +803,14 @@ end
 -- healthbox, allies down the left edge under the foe's -- with the focused one
 -- animated, backed brighter and pointed at by the cart's arrow.
 --
+-- **A lone trainer's double battle is the cart's double screen**
+-- (docs/plans/gen3-solo-doubles.md, contract C4): four battlers at the cart's
+-- doubles positions (AnimCoords.DOUBLES), drawn back to front, four doubles
+-- healthboxes (name, gender, Lv, HP bar, status -- no HP figures and no EXP
+-- bar, as the cart's doubles boxes have none), the battler being aimed at
+-- blinking while the move menu stays up, and the monster choosing (plus,
+-- while aiming, the target's box) bobbing as the cart bobs them.
+--
 -- ------- the contract (what MediatedBattle / CoopBattle call)
 --
 --   M.drawGen3(view, state) -> true when drawn; false when the cart chrome is
@@ -809,8 +819,12 @@ end
 --       240x160 origin: call it from the screen's `draw()` while the state is
 --       up through Gen3Ui.pushState and its `drawsWidescreen()` says false.
 --   M.gen3Layout(view) -> the page's rects (pure; the suite asserts them).
+--   M.gen3DoubleLayout(view) -> the double screen's rects (pure), for a view
+--       carrying `double`.
+--   M.gen3BlinkShown(blink, frame) -> whether the aimed-at battler is lit on
+--       this frame (the cart's blink, pure).
 --   M.gen3CommandLabel(idOrLabel) -> the cart's own word for a command.
---   M.G3 -> the geometry constants.
+--   M.G3 -> the geometry constants; M.G3D -> the double screen's.
 --
 -- `view` (every field optional unless marked):
 --   foe, ally       the focused pair, each a seat:
@@ -854,6 +868,27 @@ end
 --                   "sunny" too): the arena's weather painter over the field
 --   evolveFront, evolveFlash   a bench evolution: a front pic mid-field
 --   frame           an animation clock (60/s); else the state's, else time
+--   double          a lone trainer's double battle, in place of foe / ally /
+--                   the strips (contract C4):
+--                     foes   = { [1] = seat | nil, [2] = seat | nil } --
+--                              [1] the opponent's first battler (field slot
+--                              3, the cart's opponent left), [2] slot 4;
+--                     allies = { [1] = seat | nil, [2] = seat | nil } --
+--                              [1] slot 0 (player left), [2] slot 1;
+--                     choosing = 1 | 2 | nil -- the ally whose command menu
+--                              is up (it bobs, with its box);
+--                     blink = { side = "a" | "b", index = 1 | 2, since } | nil
+--                              -- the battler being aimed at ("a" an ally,
+--                              "b" a foe); `since` (optional) is the `frame`
+--                              the cursor landed on, which restarts the
+--                              cart's blink, else the page clock phases it.
+--                   Seats are the shape above (the ally's `expFrac` is not
+--                   drawn: the doubles box has no EXP bar). With phase
+--                   "target" the move menu (`moves`, `cursor`) stays up and
+--                   the target blinks; a `list` is not drawn then (the cart
+--                   has no TARGET window). `foeParty` is not drawn: the cart
+--                   shows that row only at the intro and on a switch, and
+--                   the doubles field has no free room for a standing one.
 
 -- pret / engine positions. Every number is a layout constant from the engine's
 -- battle UI source (the pret lines it cites), not a byte out of any ROM.
@@ -882,6 +917,53 @@ M.G3 = {
   PARTY_PIC_X = 8, PARTY_PIC_Y = 8, PARTY_TITLE_Y = 138,
 }
 local G = M.G3
+
+-- The double screen. Layout constants from the engine's doubles code (the
+-- pret lines it cites), never a byte out of any ROM. The cart numbers its
+-- battlers by position -- 0 player left, 1 opponent left, 2 player right, 3
+-- opponent right -- so the view's foes[1] / foes[2] are battlers 1 / 3 and
+-- allies[1] / allies[2] are 0 / 2; each pair below is { [1], [2] }.
+-- Everything not here (the textbox, the trainer and the player's back pic --
+-- a lone trainer stands where a singles one does, intro_seq.lua -- the
+-- evolution and the weather) is the singles page's, from M.G3.
+M.G3D = {
+  -- AnimCoords.DOUBLES (pokefirered battle_anim_mons.c:31): foe (200,40) and
+  -- (152,32), feet on base y + 31 as FOE_FEET_Y derives them
+  FOE_PIC_X = { 200, 152 }, FOE_FEET_Y = { 71, 63 },
+  -- the player's (32,80) and (90,88): base y + back offset + 4 as singles
+  -- (ui.lua battler_sprite_center), feet on base y + 35
+  ALLY_PIC_X = { 32, 90 }, ALLY_FEET_Y = { 115, 123 },
+  -- battle_anim_mons.c:252: a player pic's centre sinks no lower than
+  -- 160 - 64 + 8 - 4, so its top row no lower than 68
+  ALLY_TOP_MAX = 68,
+  -- Anim.substituteY (battle_anim_mons.c:286): base y + 16 / + 17
+  FOE_DOLL_Y = { 56, 48 }, ALLY_DOLL_Y = { 97, 105 },
+  -- Healthbox.CENTERS[true] (pokefirered battle_interface.c:726): foe
+  -- (44,19) (32,44), player (159,75) (171,100); the sheet's corner is - (32,16)
+  FOE_BOX_X = { 12, 0 }, FOE_BOX_Y = { 3, 28 },
+  ALLY_BOX_X = { 127, 139 }, ALLY_BOX_Y = { 59, 84 },
+  -- the drawn part of the doubles healthbox sheets (both sides; FireRed's is
+  -- a row taller than Emerald's), for the layout checks
+  BOX_VIS = { dx = 1, dy = 2, w = 100, h = 26 },
+  -- the boxes of one side sit 25 rows apart, so FireRed's 26-row sheets share
+  -- one: the first battler's box is drawn last and covers it
+  SIDE_BOX_SHARE = 1,
+  -- AnimCoords.DRAW_ORDER_DOUBLES { 3, 1, 0, 2 } (ui.lua draw_double_mons):
+  -- back to front, the player's back pic between the sides
+  DRAW_ORDER = { { "b", 2 }, { "b", 1 }, { "a", 1 }, { "a", 2 } },
+  -- ui.lua draw_double_healthboxes (battle_interface.c:540): battlers 3..0
+  BOX_ORDER = { { "b", 2 }, { "a", 2 }, { "b", 1 }, { "a", 1 } },
+  -- ui.lua blink_start / tick_target (battle_main.c:2019): lit 8 frames,
+  -- hidden 8, restarted lit whenever the cursor moves
+  BLINK_FRAMES = 8,
+  -- ui.lua start_bounce / tick_bounces (battle_main.c:2091, :2159; the
+  -- callers battle_controller_player.c:223, :326): the choosing battler's
+  -- box and pic, and while aiming the target's box
+  BOUNCE_BOX = { idx = 128, delta = 7, amp = 1 },
+  BOUNCE_MON = { idx = 192, delta = 7, amp = 1 },
+  BOUNCE_TARGET_BOX = { idx = 128, delta = 15, amp = 1 },
+}
+local D = M.G3D
 
 local function g3eng(name)
   if type(Gen3) ~= "table" or type(Gen3.engine) ~= "function" then return nil end
@@ -1170,18 +1252,81 @@ function M.gen3IsPartyList(list)
   return false
 end
 
+local function doubleSeat(seats, i)
+  local seat = type(seats) == "table" and seats[i] or nil
+  return type(seat) == "table" and seat or nil
+end
+
+-- The battler a double's `blink` names: "a" / "b" and 1 / 2, else nil.
+local function blinkTarget(blink)
+  if type(blink) ~= "table" then return nil end
+  local i = tonumber(blink.index)
+  if i ~= 1 and i ~= 2 then return nil end
+  if blink.side ~= "a" and blink.side ~= "b" then return nil end
+  return blink.side, i
+end
+
+-- The cart's target blink (ui.lua tick_target): lit for BLINK_FRAMES from
+-- the moment the cursor lands, hidden as long, and so on.
+function M.gen3BlinkShown(blink, frame)
+  if not blinkTarget(blink) then return true end
+  local n = math.floor(num3(frame, 0) - num3(blink.since, 0))
+  if n < 0 then return true end
+  return math.floor(n / D.BLINK_FRAMES) % 2 == 0
+end
+
+-- The double screen's rects: per battler its pic frame (64x64 on its feet;
+-- the player's cut at the textbox as the cart cuts them) and its healthbox's
+-- drawn part, keyed foePic1 / foeBox1 ... allyPic2 / allyBox2 for the seats
+-- present; `blink` is the aimed-at battler's pic; `list` a window the page
+-- draws. Bobbing (two pixels at most) is not in them. On the cart the pics
+-- overlap one another and the healthboxes cover the pics' edges by design;
+-- what holds is that everything lies on the 240x160 page, no healthbox
+-- reaches the textbox, the two sides' boxes stay apart, and the two boxes of
+-- one side share at most SIDE_BOX_SHARE rows.
+function M.gen3DoubleLayout(view)
+  view = type(view) == "table" and view or {}
+  local double = type(view.double) == "table" and view.double or {}
+  local out = { panel = rect(0, G.PANEL_Y, G.W, G.PANEL_H) }
+  local vis = D.BOX_VIS
+  for i = 1, 2 do
+    if doubleSeat(double.foes, i) then
+      out["foeBox" .. i] = rect(D.FOE_BOX_X[i] + vis.dx, D.FOE_BOX_Y[i] + vis.dy, vis.w, vis.h)
+      out["foePic" .. i] = rect(D.FOE_PIC_X[i] - G.PIC / 2, D.FOE_FEET_Y[i] + 1 - G.PIC, G.PIC, G.PIC)
+    end
+    if doubleSeat(double.allies, i) then
+      out["allyBox" .. i] = rect(D.ALLY_BOX_X[i] + vis.dx, D.ALLY_BOX_Y[i] + vis.dy, vis.w, vis.h)
+      local top = D.ALLY_FEET_Y[i] + 1 - G.PIC
+      out["allyPic" .. i] = rect(D.ALLY_PIC_X[i] - G.PIC / 2, top, G.PIC, G.PANEL_Y - top)
+    end
+  end
+  local side, index = blinkTarget(double.blink)
+  if side then
+    local pic = out[(side == "a" and "allyPic" or "foePic") .. index]
+    if pic then out.blink = rect(pic.x, pic.y, pic.w, pic.h) end
+  end
+  if type(view.list) == "table" and view.phase ~= "target" and not M.gen3IsPartyList(view.list) then
+    out.list = rect((G.LIST_TX - 1) * 8, (G.LIST_TY - 1) * 8,
+      (G.LIST_TW + 2) * 8, (G.LIST_TH + 2) * 8)
+  end
+  return out
+end
+
 -- ------- drawing pieces
 
 -- A pic stood on its feet line: the art's lowest opaque row lands on `feetY`
--- (what the cart's pic offsets do), centred on `cx`.
-local function drawStandingPic(gfx, BF, img, cx, feetY, seat)
+-- (what the cart's pic offsets do), centred on `cx`. `maxTop` (the double
+-- screen's player side) is the lowest the cart lets the frame's top sink.
+local function drawStandingPic(gfx, BF, img, cx, feetY, seat, maxTop)
   if not img then return end
   seat = seat or {}
   local ok, iw, ih = pcall(img.getDimensions, img)
   if not ok then return end
   local pad = BF and BF.picFloorPad and BF.picFloorPad(img) or 0
   local x = math.floor(cx - iw / 2 + num3(seat.dx, 0))
-  local y = math.floor(feetY - (ih - 1 - pad) - num3(seat.elevation, 0) + num3(seat.dy, 0))
+  local top = feetY - (ih - 1 - pad) - num3(seat.elevation, 0)
+  if maxTop and top > maxTop then top = maxTop end
+  local y = math.floor(top + num3(seat.dy, 0))
   local alpha = math.max(0, math.min(1, num3(seat.alpha, 1)))
   if alpha <= 0 then return end
   pcall(function() img:setFilter("nearest", "nearest") end)
@@ -1202,10 +1347,11 @@ end
 -- The cart's Substitute doll in a seat, where the cart stands it
 -- (pokefirered battle_anim_mons.c:286 substituteY: the foe's centred on
 -- (176, 56), the player's on (72, 97)); the plush stand-in without the cache.
-local function drawDoll(gfx, BF, back, seat)
+-- `cx`, `cy`, `feetY` place it elsewhere (the double screen's battlers).
+local function drawDoll(gfx, BF, back, seat, cx, cy, feetY)
   local img = BF and BF.gen3SubstituteDoll and BF.gen3SubstituteDoll(back) or nil
-  local cx = back and G.ALLY_PIC_X or G.FOE_PIC_X
-  local cy = back and G.ALLY_DOLL_Y or G.FOE_DOLL_Y
+  cx = cx or (back and G.ALLY_PIC_X or G.FOE_PIC_X)
+  cy = cy or (back and G.ALLY_DOLL_Y or G.FOE_DOLL_Y)
   local alpha = math.max(0, math.min(1, num3(seat and seat.alpha, 1)))
   if img then
     local ok, iw, ih = pcall(img.getDimensions, img)
@@ -1218,7 +1364,8 @@ local function drawDoll(gfx, BF, back, seat)
     end
   end
   if BF and BF.drawDollStandIn then
-    BF.drawDollStandIn(gfx, cx, back and G.PANEL_Y or G.FOE_FEET_Y, back and 48 or 40, alpha, false)
+    BF.drawDollStandIn(gfx, cx, feetY or (back and G.PANEL_Y or G.FOE_FEET_Y), back and 48 or 40,
+      alpha, false)
   end
 end
 
@@ -1328,6 +1475,33 @@ local function drawAllyBox(gfx, C, F, seat)
   if seat.expFrac ~= nil and type(C.drawExpBar) == "function" then
     local frac = math.max(0, math.min(1, num3(seat.expFrac, 0)))
     pcall(C.drawExpBar, x + 32, y + 32, frac)
+  end
+  gfx.setColor(1, 1, 1, 1)
+end
+
+-- One doubles healthbox with its corner on (x, y), the way the engine's
+-- healthbox.lua draw_doubles lays it (pokefirered battle_interface.c:1531,
+-- :1608): the doubles sheet (BattleChrome.drawDoublesBox falls back to the
+-- singles foe sheet itself when the cache has none), the HP bar with the
+-- status border on either side, name and gender, Lv, the status icon. No HP
+-- figures (the cart swaps them in only on START), no EXP bar, no caught ball.
+local function drawDoubleBox(gfx, C, F, seat, isPlayer, x, y)
+  if type(C.drawDoublesBox) == "function" then
+    pcall(C.drawDoublesBox, isPlayer, x, y)
+  else
+    pcall(C.drawEnemyBox, x, y)
+  end
+  eraseInk(gfx, x, y, isPlayer and INK.ally or INK.foe)
+  local maxHp = math.max(1, num3(seat.maxHp, 1))
+  local hp = math.max(0, math.min(maxHp, num3(seat.hp, 0)))
+  local ailment = ailmentOf(seat)
+  local statused = ailment >= 1 and ailment <= 6
+  pcall(C.drawHpBar, x + (isPlayer and 32 or 24), y + 16, hp, maxHp, statused)
+  drawNameGender(F, tostring(seat.name or "?"), seat.gender, x + (isPlayer and 16 or 8), y + 3)
+  drawLevel(F, seat.shownLevel or seat.level, x, y + 3, isPlayer and 72 or 64)
+  local SummaryChrome = g3eng("src.ui.game3.summary_chrome")
+  if statused and SummaryChrome then
+    pcall(SummaryChrome.drawStatusIcon, x + (isPlayer and 10 or 2), y + 16, ailment)
   end
   gfx.setColor(1, 1, 1, 1)
 end
@@ -1738,6 +1912,201 @@ local function frameOf(view, state)
   return t
 end
 
+-- ------- the field (singles and doubles share these)
+
+-- The foe trainer's front pic, where its monsters will stand (ui.lua
+-- draw_enemy_trainer: (176, 40), a lone trainer's double included).
+local function drawEnemyTrainer(gfx, BF, trainer)
+  local picId = trainer.pic or trainer.picId
+  local img = BF and picId ~= nil and BF.gen3TrainerPic(picId) or nil
+  if img then
+    local ok, iw, ih = pcall(img.getDimensions, img)
+    if ok then
+      gfx.setColor(1, 1, 1, 1)
+      gfx.draw(img, G.TRAINER_X - math.floor(iw / 2), G.TRAINER_Y - math.floor(ih / 2))
+    end
+  end
+end
+
+-- The player's own back pic (the first frame of the sheet).
+local function drawPlayerBack(gfx, playerBack)
+  local entry = type(Gen3) == "table" and Gen3.trainerBackPic(playerBack.gender) or nil
+  if type(entry) == "table" and entry.image then
+    local quad = backQuad(gfx, entry.image)
+    gfx.setColor(1, 1, 1, 1)
+    if quad then
+      gfx.draw(entry.image, quad, G.PLAYER_BACK_X - 32, G.PLAYER_BACK_Y - 32)
+    end
+  end
+end
+
+-- A foe's front pic on its platform: a floater hovers over it by the cart's
+-- own elevation for it, when the screen did not say (a seat carrying its
+-- species).
+local function drawFoePic(gfx, BF, foe, cx, feetY)
+  local stand = foe
+  if foe.elevation == nil and BF and BF.gen3Elevation then
+    local elev = BF.gen3Elevation(tonumber(foe.speciesId) or tonumber(foe.species))
+    if elev then
+      stand = setmetatable({ elevation = elev }, { __index = foe })
+    end
+  end
+  drawStandingPic(gfx, BF, seatPic(BF, foe, false), cx, feetY, stand)
+end
+
+-- Over the battlers, under the healthboxes as the cart layers it: a bench
+-- evolution mid-field, the weather (the arena's own painter, at the page's
+-- scale), the evolution's flash.
+local function drawFieldOverlays(gfx, BF, view, frame)
+  if view.evolveFront then
+    drawStandingPic(gfx, BF, view.evolveFront, G.W / 2, 88, nil)
+  end
+  if view.weather and BF and BF.drawWeather then
+    BF.drawWeather(view.weather, 0, 0, G.W, G.PANEL_Y, frame, 0.5)
+  end
+  local flash = math.max(0, math.min(1, num3(view.evolveFlash, 0)))
+  if flash > 0 then
+    gfx.setColor(1, 1, 1, flash)
+    gfx.rectangle("fill", 0, 0, G.W, G.PANEL_Y)
+  end
+  gfx.setColor(1, 1, 1, 1)
+end
+
+-- The singles field: the focused pair, the guild-focus rails (2v2 / 3v3),
+-- the two healthboxes and the foe's remaining party under its box.
+local function drawSingleField(gfx, C, F, BF, view, frame)
+  local foe, ally = view.foe, view.ally
+  -- the foe trainer, where the foe will stand
+  if type(view.trainer) == "table" and (view.showTrainer or not foe) then
+    drawEnemyTrainer(gfx, BF, view.trainer)
+  end
+  if type(foe) == "table" and not foe.hidden and not (view.showTrainer and view.trainer) then
+    if foe.substitute then
+      drawDoll(gfx, BF, false, foe)
+    else
+      drawFoePic(gfx, BF, foe, G.FOE_PIC_X, G.FOE_FEET_Y)
+    end
+  end
+  -- the player's own back pic, while no monster is out
+  if type(view.playerBack) == "table" and (view.showPlayer or not ally) then
+    drawPlayerBack(gfx, view.playerBack)
+  end
+  if type(ally) == "table" and not ally.hidden and not (view.showPlayer and view.playerBack) then
+    if ally.substitute then
+      drawDoll(gfx, BF, true, ally)
+    else
+      drawStandingPic(gfx, BF, seatPic(BF, ally, true), G.ALLY_PIC_X, G.ALLY_FEET_Y, ally)
+    end
+  end
+  drawFieldOverlays(gfx, BF, view, frame)
+
+  -- the guild-focus rails (2v2 / 3v3)
+  drawStrip(gfx, BF, F, "foe", view.foeStrip, frame)
+  drawStrip(gfx, BF, F, "ally", view.allyStrip, frame)
+
+  -- the healthboxes, and the foe's remaining party under its box
+  if type(foe) == "table" then drawFoeBox(gfx, C, F, foe) end
+  if type(ally) == "table" then drawAllyBox(gfx, C, F, ally) end
+  if view.foeParty ~= nil and M.wantsFoeBalls(view.mode) then
+    drawFoeBalls(C, view.foeParty)
+  end
+end
+
+-- pokefirered trig.c:4 / battle_main.c:2159 (ui.lua sin_q8, tick_bounces):
+-- sin(idx) * amp + amp, the index stepping `delta` a frame -- a bob of a
+-- pixel or two, phased by the page clock.
+local function bounce3(spec, frame)
+  local idx = (spec.idx + spec.delta * math.floor(num3(frame, 0))) % 256
+  local v = math.floor(math.sin(idx * math.pi / 128) * 256 + 0.5)
+  return math.floor(v * spec.amp / 256) + spec.amp
+end
+
+-- What moves on the double screen this frame, by the cart's rules: while the
+-- command or move menu is up the choosing battler's pic and box bob
+-- (battle_controller_player.c:223); while aiming, the target's box bobs
+-- instead of the chooser's (:326) and the target blinks.
+-- -> hiddenKey ("a1".."b2" or nil), the bobbing pic's key and offset, the
+--    bobbing box's key and offset.
+local function doubleMotion(view, double, frame)
+  local side, index = blinkTarget(double.blink)
+  local hiddenKey = nil
+  if side and not M.gen3BlinkShown(double.blink, frame) then hiddenKey = side .. index end
+  local aiming = side ~= nil and view.phase == "target"
+  local menuUp = aiming or view.commands ~= nil or view.moves ~= nil
+  local choosing = tonumber(double.choosing)
+  if choosing ~= 1 and choosing ~= 2 then choosing = nil end
+  local picKey, picDy, boxKey, boxDy = nil, 0, nil, 0
+  if menuUp and choosing then
+    picKey, picDy = "a" .. choosing, bounce3(D.BOUNCE_MON, frame)
+    boxKey, boxDy = "a" .. choosing, bounce3(D.BOUNCE_BOX, frame)
+  end
+  if aiming then
+    boxKey, boxDy = side .. index, bounce3(D.BOUNCE_TARGET_BOX, frame)
+  end
+  return hiddenKey, picKey, picDy, boxKey, boxDy
+end
+
+-- The double screen's field (ui.lua draw_double_mons and
+-- draw_double_healthboxes): the foe trainer first, the four battlers back to
+-- front with the player's back pic between the sides, the overlays, then the
+-- four healthboxes, the first battler of each side over its partner.
+local function drawDoubleField(gfx, C, F, BF, view, double, frame)
+  local foes, allies = double.foes, double.allies
+  local anyFoe = doubleSeat(foes, 1) or doubleSeat(foes, 2)
+  local anyAlly = doubleSeat(allies, 1) or doubleSeat(allies, 2)
+  local hiddenKey, picKey, picDy, boxKey, boxDy = doubleMotion(view, double, frame)
+  if type(view.trainer) == "table" and (view.showTrainer or not anyFoe) then
+    drawEnemyTrainer(gfx, BF, view.trainer)
+  end
+  local foesOut = not (view.showTrainer and view.trainer)
+  local alliesOut = not (view.showPlayer and view.playerBack)
+  local backDrawn = false
+  for _, at in ipairs(D.DRAW_ORDER) do
+    local side, i = at[1], at[2]
+    local isPlayer = side == "a"
+    if isPlayer and not backDrawn then
+      backDrawn = true
+      if type(view.playerBack) == "table" and (view.showPlayer or not anyAlly) then
+        drawPlayerBack(gfx, view.playerBack)
+      end
+    end
+    local seat = doubleSeat(isPlayer and allies or foes, i)
+    local out = foesOut
+    if isPlayer then out = alliesOut end
+    if seat and out and not seat.hidden and hiddenKey ~= side .. i then
+      if isPlayer then
+        if seat.substitute then
+          -- the cart stands a doll on its substitute line, unbobbed
+          drawDoll(gfx, BF, true, seat, D.ALLY_PIC_X[i], D.ALLY_DOLL_Y[i], G.PANEL_Y)
+        else
+          local stand = seat
+          if picKey == side .. i and picDy ~= 0 then
+            stand = setmetatable({ dy = num3(seat.dy, 0) + picDy }, { __index = seat })
+          end
+          drawStandingPic(gfx, BF, seatPic(BF, seat, true), D.ALLY_PIC_X[i], D.ALLY_FEET_Y[i],
+            stand, D.ALLY_TOP_MAX)
+        end
+      elseif seat.substitute then
+        drawDoll(gfx, BF, false, seat, D.FOE_PIC_X[i], D.FOE_DOLL_Y[i], D.FOE_FEET_Y[i])
+      else
+        drawFoePic(gfx, BF, seat, D.FOE_PIC_X[i], D.FOE_FEET_Y[i])
+      end
+    end
+  end
+  drawFieldOverlays(gfx, BF, view, frame)
+  for _, at in ipairs(D.BOX_ORDER) do
+    local side, i = at[1], at[2]
+    local isPlayer = side == "a"
+    local seat = doubleSeat(isPlayer and allies or foes, i)
+    if seat then
+      local x = isPlayer and D.ALLY_BOX_X[i] or D.FOE_BOX_X[i]
+      local y = isPlayer and D.ALLY_BOX_Y[i] or D.FOE_BOX_Y[i]
+      if boxKey == side .. i then y = y + boxDy end
+      drawDoubleBox(gfx, C, F, seat, isPlayer, x, y)
+    end
+  end
+end
+
 -- Draw the whole Gen 3 page. See the contract above.
 function M.drawGen3(view, state)
   -- off a Gen 3 boot there is no cart chrome to draw with, and nothing here
@@ -1762,9 +2131,15 @@ function M.drawGen3(view, state)
     gfx.push("all")
     local okAll, err = pcall(function()
       gfx.setColor(1, 1, 1, 1)
+      local double = type(view.double) == "table" and view.double or nil
+      -- a double's aim keeps the move menu up and blinks the battler aimed
+      -- at (ui.lua Ui.draw: "target" draws the move menu): the cart has no
+      -- TARGET window, so the screen's list is not drawn then
+      local list = view.list
+      if double and view.phase == "target" then list = nil end
       -- a POKéMON list is the whole page
-      if type(view.list) == "table" and M.gen3IsPartyList(view.list) then
-        drawPartyPage(gfx, C, F, BF, view.list, frame)
+      if type(list) == "table" and M.gen3IsPartyList(list) then
+        drawPartyPage(gfx, C, F, BF, list, frame)
         return
       end
 
@@ -1776,88 +2151,21 @@ function M.drawGen3(view, state)
         gfx.rectangle("fill", 0, 0, G.W, G.PANEL_Y)
         gfx.setColor(1, 1, 1, 1)
       end
-
-      local foe, ally = view.foe, view.ally
-      -- the foe trainer, where the foe will stand
-      if type(view.trainer) == "table" and (view.showTrainer or not foe) then
-        local picId = view.trainer.pic or view.trainer.picId
-        local img = BF and picId ~= nil and BF.gen3TrainerPic(picId) or nil
-        if img then
-          local ok, iw, ih = pcall(img.getDimensions, img)
-          if ok then
-            gfx.setColor(1, 1, 1, 1)
-            gfx.draw(img, G.TRAINER_X - math.floor(iw / 2), G.TRAINER_Y - math.floor(ih / 2))
-          end
-        end
-      end
-      if type(foe) == "table" and not foe.hidden and not (view.showTrainer and view.trainer) then
-        if foe.substitute then
-          drawDoll(gfx, BF, false, foe)
-        else
-          -- a floater hovers over its platform by the cart's own elevation
-          -- for it, when the screen did not say (a seat carrying its species)
-          local stand = foe
-          if foe.elevation == nil and BF and BF.gen3Elevation then
-            local elev = BF.gen3Elevation(tonumber(foe.speciesId) or tonumber(foe.species))
-            if elev then
-              stand = setmetatable({ elevation = elev }, { __index = foe })
-            end
-          end
-          drawStandingPic(gfx, BF, seatPic(BF, foe, false), G.FOE_PIC_X, G.FOE_FEET_Y, stand)
-        end
-      end
-      -- the player's own back pic, while no monster is out
-      if type(view.playerBack) == "table" and (view.showPlayer or not ally) then
-        local entry = type(Gen3) == "table" and Gen3.trainerBackPic(view.playerBack.gender) or nil
-        if type(entry) == "table" and entry.image then
-          local quad = backQuad(gfx, entry.image)
-          gfx.setColor(1, 1, 1, 1)
-          if quad then
-            gfx.draw(entry.image, quad, G.PLAYER_BACK_X - 32, G.PLAYER_BACK_Y - 32)
-          end
-        end
-      end
-      if type(ally) == "table" and not ally.hidden and not (view.showPlayer and view.playerBack) then
-        if ally.substitute then
-          drawDoll(gfx, BF, true, ally)
-        else
-          drawStandingPic(gfx, BF, seatPic(BF, ally, true), G.ALLY_PIC_X, G.ALLY_FEET_Y, ally)
-        end
-      end
-      if view.evolveFront then
-        drawStandingPic(gfx, BF, view.evolveFront, G.W / 2, 88, nil)
-      end
-      -- the weather over the field (the arena's own painter, at the page's
-      -- scale), under the healthboxes as the cart layers it
-      if view.weather and BF and BF.drawWeather then
-        BF.drawWeather(view.weather, 0, 0, G.W, G.PANEL_Y, frame, 0.5)
-      end
-      local flash = math.max(0, math.min(1, num3(view.evolveFlash, 0)))
-      if flash > 0 then
-        gfx.setColor(1, 1, 1, flash)
-        gfx.rectangle("fill", 0, 0, G.W, G.PANEL_Y)
-      end
-      gfx.setColor(1, 1, 1, 1)
-
-      -- the guild-focus rails (2v2 / 3v3)
-      drawStrip(gfx, BF, F, "foe", view.foeStrip, frame)
-      drawStrip(gfx, BF, F, "ally", view.allyStrip, frame)
-
-      -- the healthboxes, and the foe's remaining party under its box
-      if type(foe) == "table" then drawFoeBox(gfx, C, F, foe) end
-      if type(ally) == "table" then drawAllyBox(gfx, C, F, ally) end
-      if view.foeParty ~= nil and M.wantsFoeBalls(view.mode) then
-        drawFoeBalls(C, view.foeParty)
+      if double then
+        drawDoubleField(gfx, C, F, BF, view, double, frame)
+      else
+        drawSingleField(gfx, C, F, BF, view, frame)
       end
 
       -- the textbox
-      if type(view.list) == "table" then
-        drawListWindow(gfx, C, F, view.list)
+      if type(list) == "table" then
+        drawListWindow(gfx, C, F, list)
         return
       end
       local mode = "none"
       if view.commands then mode = "menu"
       elseif view.moves then mode = "moves" end
+      if double and view.phase == "target" and view.moves then mode = "moves" end
       pcall(C.drawPanel, mode)
       pcall(C.drawMenuFrames, mode)
       if mode == "menu" then

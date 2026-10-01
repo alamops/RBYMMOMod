@@ -1358,11 +1358,14 @@ H[E.HEAL_BELL] = function effectHealBell(C) {
   }
   // The benched party: every mon of the user's seat that is not on the field,
   // except (Heal Bell only) a Soundproof one -- pokefirered/src/battle_script_
-  // commands.c:7995 reads each party member's species ability.
+  // commands.c:7995 reads each party member's species ability. A shared
+  // party's partner is out on the sibling seat: the ally pass above already
+  // asked its battler's ability (the cart reads gBattleMons for the partner's
+  // party index too), so a Soundproof partner is not cured here behind it.
   const { mons } = user.fighter;
   for (let i = 1; i <= mons.length; i += 1) {
     const mon = mons[i - 1];
-    if (i !== user.fighter.active && mon.hp > 0 && truthy(Status.normalise(mon.status))
+    if (!B.fieldedSeat(user.fighter, i) && mon.hp > 0 && truthy(Status.normalise(mon.status))
         && !(isBell && Abilities.nameOf(mon.ability) === 'SOUNDPROOF')) {
       delete mon.status;
       delete mon.sleepTurns;

@@ -40,6 +40,13 @@
  *
  * Nothing else rolls. A battle replays from its seed plus the choice log.
  *
+ * A shared team (a side entry with `seats = 2`, the cart's own double battle)
+ * is two seats over ONE party and ONE bag: seat 2 is `<playerId>#2`, both
+ * carry `owner`. Neither seat benches the other's active mon or the one it has
+ * claimed this turn; emptied seats refill in battler order, so with one mon
+ * left only one seat is filled; a mon earns EXP once per owner; outcomes,
+ * `waiting` and `team` name owners (the Lua header's policy list).
+ *
  * Shape differences from the Lua, all forced by the language:
  *
  *   * `create` cannot return a value *and* a reason, so it returns the battle
@@ -76,6 +83,7 @@ M.GENERATION = 3;
 
 M.MONS_PER_PARTY = 6; // Config.BATTLE_MON_MAX
 M.FIGHTERS_PER_SIDE = 3; // Config.COOP_SIDE
+M.SEATS_PER_PARTY = 2; // a shared team fields at most two (the cart's double)
 M.CHOICE_TIMEOUT = 60; // Config.BATTLE_CHOICE_TIMEOUT
 M.RECONNECT_GRACE = 60; // Config.BATTLE_RECONNECT_GRACE
 M.RESOLVE_TIMEOUT = 30; // Config.BATTLE_RESOLVE_TIMEOUT
@@ -413,7 +421,15 @@ Battle.prototype._sendEvent = function _sendEvent(fighter) {
 // opts:
 //   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 //   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
-//   sides = { a: [{ playerId, name, mons, bag }], b: [...] }
+//   sides = { a: [{ playerId, name, mons, bag, seats? }], b: [...] }
+//
+// `seats = 2` makes one entry a shared team: two fighters over the same `mons`
+// and `bag` -- seat 1 keeps `playerId`, seat 2 is `playerId + '#2'`, both have
+// `owner = playerId` -- which is how the cart fields one trainer's party in a
+// double battle (gPlayerParty / gEnemyParty behind battlers 0 and 2, or 1 and
+// 3). The leads are the first two living mons; with only one, seat 2 starts
+// empty. Every fighter carries `owner` and `seats` (the list of seats over its
+// party, in slot order: itself alone without `seats = 2`).
 //
 // Returns { battle, reason }: the battle and null, or null and why.
 function attempt(opts) {
@@ -495,6 +511,19 @@ function attempt(opts) {
       const playerId = str(entry.playerId);
       if (!playerId) return refuse(`a fighter on side ${side} has no playerId`);
       if (self.byId.has(playerId)) return refuse(`duplicate playerId ${playerId}`);
+      const seats = (entry.seats == null) ? 1 : int(entry.seats, 0);
+      if (seats < 1 || seats > M.SEATS_PER_PARTY) {
+        return refuse(`${playerId} has a bad seat count`);
+      }
+      const bucket = self.bySide[side];
+      if (bucket.length + seats > maxFighters(mode, side)) {
+        return refuse(`side ${side} has more fighters than ${mode} allows`);
+      }
+      for (let seat = 2; seat <= seats; seat += 1) {
+        if (self.byId.has(`${playerId}#${seat}`)) {
+          return refuse(`duplicate playerId ${playerId}#${seat}`);
+        }
+      }
       const mons = [];
       if (isTable(entry.mons)) {
         const n = len(entry.mons);
@@ -505,26 +534,44 @@ function attempt(opts) {
         }
       }
       if (mons.length === 0) return refuse(`${playerId} brought no monsters`);
-      const [bag, bagNames] = copyBag(entry.bag);
-      const fighter = {
-        playerId,
-        name: str(entry.name) || playerId,
-        side,
-        index,
-        slot: Events.fieldSlot(side, index),
-        mons,
-        bag,
-        bagNames: bagNames || {},
-        active: firstLiving(mons),
-        connected: true,
-        graceEndsAt: null,
-        choice: null,
-        team: null,
-        fought: {},
-      };
-      self.fighters.push(fighter);
-      self.byId.set(playerId, fighter);
-      self.bySide[side].push(fighter);
+      const [bag, names] = copyBag(entry.bag);
+      const bagNames = names || {};
+      const party = [];
+      let lead = null;
+      for (let seat = 1; seat <= seats; seat += 1) {
+        // The cart's leads: the first usable mon, then the next one after it
+        // (pokefirered/src/battle_controllers.c SetBattlePartyIds); none left,
+        // and the seat starts empty (pret's absent battler).
+        let active = null;
+        if (seat === 1) {
+          lead = firstLiving(mons);
+          active = lead;
+        } else if (lead != null) {
+          active = firstLiving(mons, lead);
+        }
+        const fighter = {
+          playerId: (seat === 1) ? playerId : `${playerId}#${seat}`,
+          owner: playerId,
+          seats: party,
+          name: str(entry.name) || playerId,
+          side,
+          index: bucket.length + 1,
+          slot: Events.fieldSlot(side, bucket.length + 1),
+          mons,
+          bag,
+          bagNames,
+          active,
+          connected: true,
+          graceEndsAt: null,
+          choice: null,
+          team: null,
+          fought: {},
+        };
+        party.push(fighter);
+        self.fighters.push(fighter);
+        self.byId.set(fighter.playerId, fighter);
+        bucket.push(fighter);
+      }
     }
   }
 
@@ -576,14 +623,26 @@ Battle.prototype._emit = function _emit(kind, fields) {
   return event;
 };
 
+// One roster per party: a shared team's second seat holds the same list, so
+// its first seat speaks for both.
 Battle.prototype._syncTeams = function _syncTeams() {
   for (const fighter of this.fighters) {
-    const roster = Events.teamString(fighter.mons);
-    if (roster !== fighter.team) {
-      fighter.team = roster;
-      this._emit('team', { slot: fighter.slot, side: fighter.side, team: roster });
+    if (fighter.seats[0] === fighter) {
+      const roster = Events.teamString(fighter.mons);
+      if (roster !== fighter.team) {
+        fighter.team = roster;
+        this._emit('team', { slot: fighter.slot, side: fighter.side, team: roster });
+      }
     }
   }
+};
+
+// The seats one owner fields, in slot order: both of a shared team, else the
+// one fighter (a seat id finds its party too). Empty for an unknown id.
+Battle.prototype.seatsOf = function seatsOf(ownerId) {
+  const fighter = this.byId.get(str(ownerId) || '');
+  if (!fighter) return [];
+  return fighter.seats.slice();
 };
 
 Battle.prototype.drainEvents = function drainEvents() {
@@ -634,15 +693,49 @@ Battle.prototype._sideAlive = function _sideAlive(side) {
   return false;
 };
 
+// The side's players for an outcome: owners, each once (a shared team's two
+// seats are one player).
 Battle.prototype._sidePlayers = function _sidePlayers(side) {
   const out = [];
-  for (const fighter of this.bySide[side]) out.push(fighter.playerId);
+  const seen = new Set();
+  for (const fighter of this.bySide[side]) {
+    if (!seen.has(fighter.owner)) {
+      seen.add(fighter.owner);
+      out.push(fighter.owner);
+    }
+  }
   return out;
+};
+
+// Whether a seat that must replace has a mon to send. A shared team refills
+// its emptied seats in battler order -- pret HandleFaintedMonActions walks the
+// battlers in order and HasNoMonsToSwitch counts the partner's
+// monToSwitchIntoId -- so a sibling ahead of this seat that is still owed a
+// mon takes one off the bench first. With one mon left only one seat refills.
+Battle.prototype._canRefill = function _canRefill(fighter) {
+  let bench = this.benchOf(fighter).length;
+  for (const seat of fighter.seats) {
+    if (seat === fighter) break;
+    if (truthy(seat.mustReplace) && seat.choice == null) bench -= 1;
+  }
+  return bench > 0;
+};
+
+// A shared team's seat whose sibling took the last bench mon stays empty for
+// good (pret marks the battler absent, gAbsentBattlerFlags, and never asks it
+// again). A one-seat fighter is only ever owed a mon it still has.
+Battle.prototype._vacateSeats = function _vacateSeats() {
+  for (const fighter of this.fighters) {
+    if (truthy(fighter.mustReplace) && fighter.seats.length > 1 && this.benchOf(fighter).length === 0) {
+      fighter.mustReplace = null;
+      fighter.pendingFought = null;
+    }
+  }
 };
 
 Battle.prototype._owes = function _owes(fighter) {
   if (fighter.choice != null) return false;
-  if (truthy(fighter.mustReplace)) return firstLiving(fighter.mons) != null;
+  if (truthy(fighter.mustReplace)) return this._canRefill(fighter);
   if (this.phase === 'replace') return false;
   if (activeMon(fighter) == null) return false;
   return true;
@@ -680,10 +773,32 @@ Battle.prototype._anyDisconnected = function _anyDisconnected() {
 // choices
 // ------------------------------------------------------------------
 
+// Whether the bag still holds `item` for this seat. A shared team has one
+// bag, and the cart takes a medicine out of it when it is CHOSEN -- the
+// engine's partner cancel cannot give a non-ball item back (init.lua
+// D.cancelPartner, pokefirered/src/battle_controller_player.c:286) -- so one
+// the sibling seat has filed this turn is not there to choose again. A flute
+// is never spent, so it is never held back.
 Battle.prototype._bagHas = function _bagHas(fighter, item) {
   if (!truthy(fighter.bag)) return false;
-  const n = fighter.bag[item];
-  return (truthy(n) ? n : 0) > 0;
+  const held = fighter.bag[item];
+  let n = truthy(held) ? held : 0;
+  const effect = Items.bagEffect(item);
+  if (!(effect && truthy(effect.noConsume))) {
+    for (const seat of fighter.seats) {
+      const c = seat.choice;
+      if (seat !== fighter && c && c.action === 'item' && c.item === item) n -= 1;
+    }
+  }
+  return n > 0;
+};
+
+// The battler party member `index` stands as: this seat's, or -- a shared
+// team -- the sibling seat's, so a medicine on the partner works on its
+// battler (the engine's items.lua active_for_slot finds battler 0 or 2).
+Battle.prototype._partyBattler = function _partyBattler(fighter, index) {
+  const seat = this.fieldedSeat(fighter, index);
+  return (seat && seat.b) ? seat.b : null;
 };
 
 Battle.prototype._spendBag = function _spendBag(fighter, item) {
@@ -698,7 +813,7 @@ Battle.prototype._spendBag = function _spendBag(fighter, item) {
 Battle.prototype._itemHasEffect = function _itemHasEffect(fighter, effect, index, moveIndex) {
   const mon = at(fighter.mons, index);
   if (!mon) return false;
-  const b = (index === fighter.active) ? fighter.b : null;
+  const b = this._partyBattler(fighter, index);
   if (truthy(effect.revive)) return mon.hp <= 0;
   if (mon.hp <= 0) return false;
   if (truthy(effect.activeOnly)) {
@@ -745,6 +860,7 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
     const target = partyIndexOf(fighter, slot);
     const bench = at(fighter.mons, target);
     if (!bench || bench.hp <= 0) return null;
+    if (this.partyTaken(fighter, target)) return null;
     return { action: 'switch', slot: target };
   }
 
@@ -777,6 +893,10 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
       index = partyIndexOf(fighter, slot);
       if (!at(fighter.mons, index)) return null;
     }
+    // An X item / Dire Hit / Guard Spec. is the choosing battler's own, even
+    // in a double (pokefirered/src/item_use.c ItemUseInBattle_StatIncrease
+    // reads gBattlerInMenuId; the engine's items.lua user_battler); a
+    // medicine may name any party member, the partner's battler included.
     if (truthy(effect.activeOnly) && index !== fighter.active) return null;
     out.slot = index;
     if (choice.move != null) {
@@ -795,7 +915,7 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
     if (slot == null) return null;
     const target = partyIndexOf(fighter, slot);
     const bench = at(fighter.mons, target);
-    if (!bench || bench.hp <= 0 || target === fighter.active) return null;
+    if (!bench || bench.hp <= 0 || this.partyTaken(fighter, target)) return null;
     if (this._switchBlocked(b)) return null;
     return { action: 'switch', slot: target };
   }
@@ -848,7 +968,9 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
       if (p != null) {
         const idx = partyIndexOf(fighter, p);
         const pm = at(fighter.mons, idx);
-        if (pm && pm.hp > 0 && idx !== fighter.active) out.pass = idx;
+        if (pm && pm.hp > 0 && !this.partyTaken(fighter, idx)) {
+          out.pass = idx;
+        }
       }
     }
     return out;
@@ -969,7 +1091,7 @@ Battle.prototype._bestSeBench = function _bestSeBench(fighter, defender) {
   let best = null;
   let bestEff = 100;
   for (let i = 1; i <= fighter.mons.length; i += 1) {
-    if (i !== fighter.active) {
+    if (!this.partyTaken(fighter, i)) {
       const bench = fighter.mons[i - 1];
       if (bench && bench.hp > 0) {
         let maxEff = 100;
@@ -1031,7 +1153,7 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
     const defender = foe ? foe.b : null;
     const se = this._bestSeBench(fighter, defender);
     if (se != null) return { action: 'switch', slot: se };
-    const next = firstLiving(fighter.mons);
+    const next = this.benchOf(fighter)[0];
     if (next != null) return { action: 'switch', slot: next };
     return null;
   }
@@ -1205,7 +1327,7 @@ Battle.prototype._openTurn = function _openTurn() {
 
 Battle.prototype._anyMustReplace = function _anyMustReplace() {
   for (const fighter of this.fighters) {
-    if (truthy(fighter.mustReplace) && firstLiving(fighter.mons) != null) return true;
+    if (truthy(fighter.mustReplace) && this._canRefill(fighter)) return true;
   }
   return false;
 };
@@ -1240,8 +1362,10 @@ Battle.prototype._closeReplace = function _closeReplace() {
       }
     }
   }
+  if (!truthy(this.result)) this._vacateSeats();
   // A delayed hit that came due on an emptied seat lands on the newcomer, as
-  // the cart's replacement-first end of turn has it (Residual.js).
+  // the cart's replacement-first end of turn has it (Residual.js); one due on
+  // a seat just vacated is dropped there.
   if (!truthy(this.result)) this._landPendingFutureSight();
   this._drainExp();
   this.phase = 'choice';
@@ -1773,7 +1897,7 @@ Battle.prototype._useItem = function _useItem(fighter) {
         this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'), 'catch');
       if (finish) {
         finish.caught = this._caughtSheet(target, item);
-        finish.catcher = fighter.playerId;
+        finish.catcher = fighter.owner;
       }
     } else {
       this.say(SHAKE_TEXT[shakes] != null ? SHAKE_TEXT[shakes] : SHAKE_TEXT[0]);
@@ -1795,15 +1919,20 @@ Battle.prototype._useItem = function _useItem(fighter) {
   if (truthy(effect.flute)) {
     let woke = false;
     for (const seat of this.order) {
-      for (let i = 1; i <= seat.mons.length; i += 1) {
-        const mon = seat.mons[i - 1];
-        if (Status.normalise(mon.status) === 'SLP' && mon.hp > 0) {
-          woke = true;
-          if (seat.b && seat.active === i) {
-            this.cure(seat.b, null);
-          } else {
-            mon.status = null;
-            mon.sleepTurns = null;
+      // Each party once, from its first seat: a shared team's partner wakes
+      // on its own battler.
+      if (seat.seats[0] === seat) {
+        for (let i = 1; i <= seat.mons.length; i += 1) {
+          const mon = seat.mons[i - 1];
+          if (Status.normalise(mon.status) === 'SLP' && mon.hp > 0) {
+            woke = true;
+            const b = this._partyBattler(seat, i);
+            if (b) {
+              this.cure(b, null);
+            } else {
+              mon.status = null;
+              mon.sleepTurns = null;
+            }
           }
         }
       }
@@ -1815,7 +1944,7 @@ Battle.prototype._useItem = function _useItem(fighter) {
 
   const index = orv(choice.slot, fighter.active);
   const mon = at(fighter.mons, index);
-  const b = (index === fighter.active) ? fighter.b : null;
+  const b = this._partyBattler(fighter, index);
   if (!mon || !this._itemHasEffect(fighter, effect, index, choice.move)) {
     this.say('But it had no effect!');
     return;
@@ -1934,8 +2063,12 @@ Battle.prototype._faintSweep = function _faintSweep() {
 // participation (BattleSim2's, verbatim in behaviour)
 // ------------------------------------------------------------------
 
-function foughtKey(slot, index) {
-  return `${slot}:${index}`;
+// Participation is keyed by PARTY member, not by seat: pret's sentIn bits
+// (gSentPokesToOpponent) are party indices, so a shared team's mon that
+// fought from both seats is one participant. The key names the party by its
+// first seat's slot -- a one-seat fighter's own.
+function foughtKey(fighter, index) {
+  return `${fighter.seats[0].slot}:${index}`;
 }
 
 Battle.prototype._refield = function _refield(fighter) {
@@ -1945,10 +2078,10 @@ Battle.prototype._refield = function _refield(fighter) {
   const foes = this.bySide[fighter.side === 'a' ? 'b' : 'a'];
   for (const foe of foes) {
     if (activeMon(foe)) {
-      fighter.fought[foughtKey(foe.slot, foe.active)] = true;
+      fighter.fought[foughtKey(foe, foe.active)] = true;
       if (mine != null) {
         foe.fought = foe.fought || {};
-        foe.fought[foughtKey(fighter.slot, mine)] = true;
+        foe.fought[foughtKey(fighter, mine)] = true;
       }
     }
   }
@@ -1963,7 +2096,7 @@ Battle.prototype._standingOpposition = function _standingOpposition(fighter) {
   const keys = [];
   const foes = this.bySide[fighter.side === 'a' ? 'b' : 'a'];
   for (const foe of foes) {
-    if (activeMon(foe)) keys.push(foughtKey(foe.slot, foe.active));
+    if (activeMon(foe)) keys.push(foughtKey(foe, foe.active));
   }
   return keys;
 };
@@ -1971,13 +2104,13 @@ Battle.prototype._standingOpposition = function _standingOpposition(fighter) {
 // A participant that faints stops being one (it earns nothing), but its SEAT
 // is remembered as having fought (`foughtSeats`): pret's sentIn bits outlive a
 // faint, and a seat whose participants all fell still pays its Exp. Share
-// holders (`_awardExp`).
+// holders (`_awardExp`). A shared team is remembered as one seat, its first.
 Battle.prototype._unfield = function _unfield(fighter, index) {
-  const key = foughtKey(fighter.slot, index);
+  const key = foughtKey(fighter, index);
   for (const other of this.fighters) {
     if (other.fought && truthy(other.fought[key])) {
       other.foughtSeats = other.foughtSeats || {};
-      other.foughtSeats[fighter.slot] = true;
+      other.foughtSeats[fighter.seats[0].slot] = true;
     }
     if (other.fought) delete other.fought[key];
     const pending = other.pendingFought;
@@ -1992,6 +2125,15 @@ Battle.prototype._unfield = function _unfield(fighter, index) {
 const EXP_MODES = { wild: true, coop_wild: true, coop_npc: true };
 const EXP_OWNER_SIDE = 'a';
 
+// The field slot an `exp` fact names for party member `index`: the seat it is
+// out on, else (benched) its party's first seat.
+Battle.prototype._expSlot = function _expSlot(fighter, index) {
+  const seat = this.fieldedSeat(fighter, index) || fighter.seats[0];
+  return seat.slot;
+};
+
+// One pass per PARTY (its first seat): a shared team's mon is one participant
+// however many seats it fought from, and gets one `exp` fact.
 Battle.prototype._awardExp = function _awardExp(fallen, mon) {
   if (!own(EXP_MODES, this.mode)) return;
   if (fallen.side === EXP_OWNER_SIDE) return;
@@ -2001,14 +2143,16 @@ Battle.prototype._awardExp = function _awardExp(fallen, mon) {
   const seatFought = new Set();
   const seatPaid = new Set();
   for (const fighter of this.bySide[EXP_OWNER_SIDE]) {
-    if (fallen.foughtSeats && truthy(fallen.foughtSeats[fighter.slot])) seatFought.add(fighter);
-    for (let index = 1; index <= fighter.mons.length; index += 1) {
-      if (truthy(fought[foughtKey(fighter.slot, index)])) {
-        participants += 1;
-        seatFought.add(fighter);
-        if (fighter.mons[index - 1].hp > 0) {
-          alive.push({ fighter, index });
-          seatPaid.add(fighter);
+    if (fighter.seats[0] === fighter) {
+      if (fallen.foughtSeats && truthy(fallen.foughtSeats[fighter.slot])) seatFought.add(fighter);
+      for (let index = 1; index <= fighter.mons.length; index += 1) {
+        if (truthy(fought[foughtKey(fighter, index)])) {
+          participants += 1;
+          seatFought.add(fighter);
+          if (fighter.mons[index - 1].hp > 0) {
+            alive.push({ fighter, index });
+            seatPaid.add(fighter);
+          }
         }
       }
     }
@@ -2018,14 +2162,14 @@ Battle.prototype._awardExp = function _awardExp(fallen, mon) {
       if (activeMon(fighter)) {
         participants += 1;
         alive.push({ fighter, index: fighter.active });
-        seatFought.add(fighter);
-        seatPaid.add(fighter);
+        seatFought.add(fighter.seats[0]);
+        seatPaid.add(fighter.seats[0]);
       }
     }
   }
   for (const winner of alive) {
     this._emit('exp', {
-      slot: winner.fighter.slot,
+      slot: this._expSlot(winner.fighter, winner.index),
       species: mon.species,
       speciesId: mon.speciesId,
       level: mon.level,
@@ -2073,7 +2217,8 @@ Battle.prototype._faintBattler = function _faintBattler(b) {
   mon.sleepTurns = null;
   this._unfield(fighter, b.partyIndex);
   this._unlink(b);
-  const next = firstLiving(fighter.mons);
+  // A shared team's bench leaves out the partner's active mon (`benchOf`).
+  const next = this.benchOf(fighter)[0];
   this._emit('faint', {
     slot: fighter.slot, side: fighter.side, text: mon.species, amount: next != null ? 1 : null,
   });
@@ -2239,6 +2384,7 @@ Battle.prototype.tick = function tick(nowSeconds) {
 Battle.prototype.snapshot = function snapshot() {
   const field = [];
   const waiting = [];
+  const owing = new Set();
   for (const fighter of this.fighters) {
     const { b } = fighter;
     const mon = b ? b.mon : null;
@@ -2259,7 +2405,11 @@ Battle.prototype.snapshot = function snapshot() {
       status: mon ? mon.status : null,
       party,
     });
-    if (this._owes(fighter)) waiting.push(fighter.playerId);
+    // `waiting` names owners, each once: a shared team is one player.
+    if (this._owes(fighter) && !owing.has(fighter.owner)) {
+      owing.add(fighter.owner);
+      waiting.push(fighter.owner);
+    }
   }
   return {
     battle: this.id,

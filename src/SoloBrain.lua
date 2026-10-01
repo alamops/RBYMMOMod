@@ -485,22 +485,40 @@ end
 --   playerUsedMoves move ids the player has used this fight       (optional)
 --   playerTurns     turns the player's active monster has been out (optional)
 --
+-- and, for a Gen 3 lone double only (absent on every 1v1, which then reads
+-- exactly as it always has):
+--
+--   double          true
+--   seat            the field slot of the trainer seat choosing (3 or 4)
+--   partner         the trainer's other active battler, or nil
+--   foes            { { slot = <field slot>, battler = <battler> }, ... }:
+--                   the player's LIVING battlers, one or two
+--   claimed         { [party index] = true }: what the sibling seat already
+--                   switches or sends in this turn
+--
 -- Returns a choice in `Turn:submitChoice`'s vocabulary --
 -- `{ action = "fight", move = <zero-based index> }`,
 -- `{ action = "switch", slot = <the monster's own slot> }` or
 -- `{ action = "item", item = <id> }` -- or nil when it has no answer, which is
 -- a normal outcome and the caller's cue to call `Turn:autoPick`.
 --
--- No `target` is stated. Solo seats one fighter per side, so the sim's own
--- "first living foe" default is the only monster a choice could mean, and
--- naming a slot would only give the answer a second way to be refused.
+-- No `target` is stated in a 1v1. Solo seats one fighter per side there, so
+-- the sim's own "first living foe" default is the only monster a choice could
+-- mean, and naming a slot would only give the answer a second way to be
+-- refused. A double names one -- `target = <field slot>` -- on a
+-- single-target move only, since that is the one kind the referee aims by
+-- the choice; a spread, self or random move is left to the referee's own
+-- reading, as the cart's controller leaves it to the move's target byte.
 function M:choose(view)
   if type(view) ~= "table" then return nil end
   if type(view.mon) ~= "table" then return nil end
   -- A forced send-out is answered without ever looking across the field, and
   -- the seat opposite may be mid-replacement itself, so the far monster is
   -- required only for the choices that actually score against it.
-  if not view.mustReplace and type(view.foe) ~= "table" then return nil end
+  if not view.mustReplace and type(view.foe) ~= "table"
+      and not (view.double and type(view.foes) == "table" and #view.foes > 0) then
+    return nil
+  end
 
   self:_rollover(view)
 
@@ -1159,7 +1177,13 @@ end
 --     SolarBeam, Weather Ball, the sun-scaled heals, the four weather moves,
 --     Swift Swim / Chlorophyll), and held items (their damage boosts through
 --     the sim's own formula, Choice Band's lock, Thief / Trick / Knock Off
---     only against something held).
+--     only against something held);
+--   * **a lone double** the way each family plays one (M:_chooseDouble3):
+--     FireRed / LeafGreen aim at a random foe and score against it, Emerald
+--     scores every move against every battler -- its own partner included --
+--     and takes the best target; Emerald's AI_DoubleBattle and AI_TryOnAlly
+--     (M:_doubleBattle3, M:_tryOnAlly3); and a switch or send-out that never
+--     names either seat's active or the sibling seat's claim (M:_benchable3).
 --
 -- The damage every script asks about is the referee's own pure formula
 -- (BattleSim3/Damage.calc) over the referee's own battlers -- stages, screens,
@@ -1302,8 +1326,10 @@ function M.new3(opts)
   return self
 end
 
-function M:_flag3(name)
-  return bitSet(self.aiFlags, self.aiBits and self.aiBits[name])
+-- `flags`, when given, is the set a fight actually runs (ctx.aiFlags: an
+-- Emerald double's has DOUBLE_BATTLE ORed in); else the trainer's own.
+function M:_flag3(name, flags)
+  return bitSet(flags or self.aiFlags, self.aiBits and self.aiBits[name])
 end
 
 -- ------- reading the field
@@ -1346,7 +1372,7 @@ function M:_ctx3(view)
     if sim and type(sim.sides) == "table" and sim.sides[side] then return sim.sides[side] end
     return {}
   end
-  return {
+  local ctx = {
     S = S, sim = sim, b = b, t = t,
     typeTable = typeTable, specialTypes = sim and sim.specialTypes or nil,
     weather = weather,
@@ -1357,7 +1383,11 @@ function M:_ctx3(view)
     foeSide = sideOf((t and t.side) or "a"),
     -- gBattleResults.battleTurnCounter: 0 on the fight's first turn.
     turnCount = math.max(0, (tonumber(sim and sim.turn) or tonumber(view.turn) or 1) - 1),
+    -- The scripts this fight runs: the trainer's own, unless a double adds one.
+    aiFlags = self.aiFlags,
   }
+  if view.double then self:_double3(ctx, view) end
+  return ctx
 end
 
 local function hpOf(b) return int3(b and b.mon and b.mon.hp, 0) end
@@ -1369,6 +1399,123 @@ local function statusOf3(b)
   return s:upper()
 end
 local function hasType(b, t) return b ~= nil and (b.type1 == t or b.type2 == t) end
+
+-- A view's battler, or a bare sheet read as one (a suite's hand-built view).
+local function asBattler(x, S, side)
+  if type(x) ~= "table" then return nil end
+  if type(x.mon) == "table" then return x end
+  return pseudoBattler(x, S, side)
+end
+
+-- The double's half of the reading (the C2 view, docs/plans/gen3-solo-doubles.md).
+--
+--   foes      the player's living battlers as { slot, b }, by field slot --
+--             pret battler order puts the player's left (slot 0) before its
+--             right (slot 1), and every loop below walks them that way
+--   partner   the trainer's other active battler (nil when that position is
+--             empty), partnerSlot its field slot
+--   claimed   party indices the sibling seat is already sending in
+--   attacker  gBattleMons[gLastHitBy[battler]]: whoever stands where the
+--             battler that last hit us stood -- the cart reads the position,
+--             not the monster, and keeps reading it after a faint (the
+--             fainted mon's data is never cleared)
+--   t         the first foe, until a target rule picks one
+--
+-- And the scripts: Emerald's BattleAI_SetupAIData ORs AI_SCRIPT_DOUBLE_BATTLE
+-- into every double's flags (pokeemerald battle_ai_script_commands.c:378, the
+-- engine's ai.lua:472); FireRed / LeafGreen run the trainer's own flags only,
+-- whose DOUBLE_BATTLE bit no trainer row on either cart sets -- and whose
+-- AI_DoubleBattle is a bare `end` either way (see M:_doubleBattle3).
+function M:_double3(ctx, view)
+  local S = ctx.S
+  local foes = {}
+  for _, entry in ipairs(type(view.foes) == "table" and view.foes or {}) do
+    if type(entry) == "table" then
+      local fb = asBattler(entry.battler or entry.mon, S, "a")
+      local slot = fb and (int3(entry.slot, nil) or int3(fb.slot, nil))
+      if slot and hpOf(fb) > 0 then foes[#foes + 1] = { slot = slot, b = fb } end
+    end
+  end
+  table.sort(foes, function(x, y) return x.slot < y.slot end)
+  ctx.double = true
+  ctx.foes = foes
+  ctx.seat = int3(view.seat, nil) or int3(ctx.b.slot, nil)
+  local partner = asBattler(view.partner, S, ctx.b.side or "b")
+  if partner and hpOf(partner) <= 0 then partner = nil end
+  ctx.partner = partner
+  ctx.partnerSlot = (partner and int3(partner.slot, nil)) or (ctx.seat == 4 and 3 or 4)
+  ctx.claimed = type(view.claimed) == "table" and view.claimed or {}
+  local hit = ctx.b.lastHitBy
+  if type(hit) == "table" then
+    ctx.attacker = (type(hit.fighter) == "table" and hit.fighter.b) or hit
+  end
+  if foes[1] then ctx.t = foes[1].b end
+  if self.family3 == "rse" then
+    local bit = self.aiBits and self.aiBits.DOUBLE_BATTLE
+    if type(bit) == "number" and not bitSet(ctx.aiFlags, bit) then
+      ctx.aiFlags = ctx.aiFlags + 2 ^ bit
+    end
+  end
+end
+
+-- May this party member be sent in?  Alive, not the battler choosing -- and,
+-- in a double, not the partner's active either, nor what the sibling seat
+-- already claimed this turn: GetMostSuitableMonToSwitchInto and every
+-- ShouldSwitch finder skip gBattlerPartyIndexes of both battlerIn1 and
+-- battlerIn2 and both seats' monToSwitchIntoId (pret battle_ai_switch_items.c,
+-- the engine's ai_switch.lua `excluded`).
+function M:_benchable3(ctx, index, mon)
+  if mon == ctx.b.mon or int3(mon.hp, 0) <= 0 then return false end
+  if ctx.partner and mon == ctx.partner.mon then return false end
+  if ctx.claimed and ctx.claimed[index] then return false end
+  return true
+end
+
+-- The battler at the other position of `battler`'s side, read the way the
+-- cart's gBattleMons is: whoever stands there, else whoever last stood there
+-- (a fainted mon's types and ability stay in the struct), else nil -- a
+-- position that was never filled, which the cart reads as zeroes: no
+-- ability, Normal type.
+function M:_flankmate3(ctx, battler)
+  if not battler then return nil end
+  if battler == ctx.b then
+    if ctx.partner then return ctx.partner end
+  elseif battler == ctx.partner then
+    return ctx.b
+  else
+    local mine = false
+    for _, foe in ipairs(ctx.foes or {}) do
+      if foe.b == battler then mine = true end
+    end
+    if mine then
+      for _, foe in ipairs(ctx.foes) do
+        if foe.b ~= battler then return foe.b end
+      end
+    end
+  end
+  local fighter, sim = battler.fighter, ctx.sim
+  if not (sim and type(fighter) == "table" and type(sim.bySide) == "table") then return nil end
+  for _, other in ipairs(sim.bySide[fighter.side] or {}) do
+    if other ~= fighter then return other.b or other.lastB end
+  end
+  return nil
+end
+
+-- One of the player's two positions at random, flipped to the other when
+-- that one is empty: BattleAI_SetupAIData's FireRed target
+-- (`Random() & BIT_FLANK`, the engine's ai.lua:280-282) and the opponent
+-- GetMostSuitableMonToSwitchInto types a double's send-out against
+-- (battle_ai_switch_items.c:448).  The roll is drawn even when only one
+-- position stands, as the cart draws it.
+function M:_flankFoe3(ctx)
+  local want = self.rng(0, 1)
+  local other = nil
+  for _, foe in ipairs(ctx.foes or {}) do
+    if foe.slot == want then return foe end
+    other = other or foe
+  end
+  return other
+end
 
 -- The move's type as it will be dealt: Hidden Power's own, Weather Ball's
 -- weather (pret Cmd_weatherdamage / the engine's typing), else the row's.
@@ -1542,6 +1689,7 @@ function M:_decideGen3(view)
   if switch then return switch end
   local item = self:_shouldUseItem3(ctx)
   if item then return item end
+  if ctx.double then return self:_chooseDouble3(ctx, legal) end
   return self:_chooseMove3(ctx, legal)
 end
 
@@ -1559,25 +1707,54 @@ function M:_superMove3(ctx, user, target, moves)
   return false
 end
 
+-- HasSuperEffectiveMoveAgainstOpponents with noRng (pret
+-- battle_ai_switch_items.c:176): the move list hits the battler opposite, or
+-- in a double either of the player's, super effectively.
+function M:_superAgainstFoes3(ctx, user, moves)
+  for _, foe in ipairs(self:_opponents3(ctx)) do
+    if self:_superMove3(ctx, user, foe, moves) then return true end
+  end
+  return false
+end
+
+-- The battlers ShouldSwitch reads across the field: the one opposite, or a
+-- double's living foes in pret battler order (the engine's ai_switch.lua
+-- has_super_effective: the left position, then the right).
+function M:_opponents3(ctx)
+  if not ctx.double then return { ctx.t } end
+  local out = {}
+  for _, foe in ipairs(ctx.foes) do out[#out + 1] = foe.b end
+  return out
+end
+
 function M:_bench3(ctx)
   local out = {}
   for index, mon in ipairs(ctx.party) do
-    if mon ~= ctx.b.mon and int3(mon.hp, 0) > 0 then out[#out + 1] = { index = index, mon = mon } end
+    if self:_benchable3(ctx, index, mon) then out[#out + 1] = { index = index, mon = mon } end
   end
   return out
 end
 
 -- The player's move that last landed on our battler (pret expLastLandedMove),
--- as a row: the player's own move list carries it.
+-- as a row: the player's own move list carries it -- in a double, the list
+-- of whoever landed it first, then either foe's.
 function M:_lastLanded3(ctx)
   local num = int3(ctx.b.lastLandedMove, 0)
   if num == 0 then return nil end
-  for _, mv in ipairs((ctx.t and ctx.t.moves) or {}) do
-    if int3(mv.num, -1) == num then return mv end
+  local sources = { ctx.t }
+  if ctx.double then
+    sources = {}
+    if ctx.attacker then sources[1] = ctx.attacker end
+    for _, foe in ipairs(ctx.foes) do sources[#sources + 1] = foe.b end
   end
-  local mon = ctx.t and ctx.t.mon
-  for _, mv in ipairs((mon and mon.moves) or {}) do
-    if int3(mv.num, -1) == num then return mv end
+  for _, src in ipairs(sources) do
+    for _, mv in ipairs(src.moves or {}) do
+      if int3(mv.num, -1) == num then return mv end
+    end
+    local mon = src.mon
+    for _, mv in ipairs((mon and mon.moves) or {}) do
+      if int3(mv.num, -1) == num then return mv end
+    end
   end
   if ctx.b.lastHitByType ~= nil then
     return { num = num, type = ctx.b.lastHitByType, power = 2, effect = 0 }
@@ -1599,6 +1776,10 @@ function M:_aiTrapped3(ctx)
     for _, fighter in ipairs(sim.fighters) do
       if fighter.b then field[#field + 1] = fighter.b end
     end
+  elseif ctx.double then
+    field = { b }
+    if ctx.partner then field[#field + 1] = ctx.partner end
+    for _, foe in ipairs(ctx.foes) do field[#field + 1] = foe.b end
   else
     field = { b, ctx.t }
   end
@@ -1619,10 +1800,12 @@ end
 -- engine's find_mon_with_flags): a bench mon the move that last landed on us
 -- could not touch (`flag` "immune") or barely scratches ("notVery"), holding
 -- a move that hits back super effectively -- each such move a 1-in-`modulo`
--- roll.  nil when the last hit was nothing or a status move.
+-- roll.  nil when the last hit was nothing or a status move.  "Hits back" is
+-- against gBattleMons[gLastHitBy]: the one foe in a 1v1, and in a double
+-- whoever stands where the last hit came from (ctx.attacker).
 function M:_findMonWithFlags3(ctx, bench, last, flag, modulo)
   if not (last and int3(last.power, 0) > 0 and ctx.b.lastHitBy ~= nil) then return nil end
-  local S, attacker = ctx.S, ctx.t
+  local S, attacker = ctx.S, (ctx.double and ctx.attacker) or ctx.t
   for _, entry in ipairs(bench) do
     local pb = pseudoBattler(entry.mon, S, ctx.b.side)
     local product = self:_product3(ctx, int3(last.type, 0), pb)
@@ -1667,8 +1850,11 @@ function M:_shouldSwitch3(ctx)
   if b.perishTurns ~= nil and int3(b.perishTurns, 1) == 0 then return to(nil) end
 
   -- ShouldSwitchIfWonderGuard: nothing of ours gets past it, a bench mon's
-  -- does (each super-effective find rolls 2-in-3).
-  if t and t.ability == "WONDER_GUARD" and not self:_superMove3(ctx, b, t, b.moves) then
+  -- does (each super-effective find rolls 2-in-3).  Singles only: the cart's
+  -- returns FALSE in a double before it looks (battle_ai_switch_items.c:32,
+  -- the engine's if_wonder_guard).
+  if not ctx.double and t and t.ability == "WONDER_GUARD"
+      and not self:_superMove3(ctx, b, t, b.moves) then
     for _, entry in ipairs(bench) do
       local pb = pseudoBattler(entry.mon, S, b.side)
       for _, mv in ipairs(entry.mon.moves or {}) do
@@ -1678,9 +1864,10 @@ function M:_shouldSwitch3(ctx)
   end
 
   local last = self:_lastLanded3(ctx)
-  -- FindMonThatAbsorbsOpponentsMove.
+  -- FindMonThatAbsorbsOpponentsMove.  Its HasSuperEffectiveMoveAgainst-
+  -- Opponents(TRUE) asks both of a double's foes.
   do
-    local skip = (self:_superMove3(ctx, b, t, b.moves) and rng(0, 2) ~= 0) or last == nil
+    local skip = (self:_superAgainstFoes3(ctx, b, b.moves) and rng(0, 2) ~= 0) or last == nil
     if not skip and int3(last.power, 0) > 0 then
       local T = S.Types.ID
       local mt = int3(last.type, 0)
@@ -1712,9 +1899,12 @@ function M:_shouldSwitch3(ctx)
     if rng(0, 1) == 1 then return to(nil) end
   end
 
-  -- HasSuperEffectiveMoveAgainstOpponents (9-in-10 per find), or boosted.
-  for _, mv in ipairs(b.moves or {}) do
-    if self:_superMove3(ctx, b, t, { mv }) and rng(0, 9) ~= 0 then return nil end
+  -- HasSuperEffectiveMoveAgainstOpponents (9-in-10 per find; a double's
+  -- second foe after the first), or boosted.
+  for _, foe in ipairs(self:_opponents3(ctx)) do
+    for _, mv in ipairs(b.moves or {}) do
+      if self:_superMove3(ctx, b, foe, { mv }) and rng(0, 9) ~= 0 then return nil end
+    end
   end
   local raised = 0
   for _, v in pairs(b.stages or {}) do
@@ -1745,13 +1935,23 @@ end
 -- the type chart against the opponent -- and the first mon to reach the
 -- highest such value wins.  An opponent that played better than the cart here
 -- would be a different game.
+--
+-- A double changes two things, both the cart's (battle_ai_switch_items.c:448,
+-- the engine's Engine.mostSuitableMon): neither seat's active nor the
+-- sibling seat's pending send-in is a candidate (M:_benchable3), and the
+-- opponent both passes test against is one of the player's two positions at
+-- random (M:_flankFoe3) -- the other foe is never consulted.
 function M:_replacement3(ctx)
   local S, t = ctx.S, ctx.t
   local candidates = {}
-  for _, mon in ipairs(ctx.party) do
-    if mon ~= ctx.b.mon and int3(mon.hp, 0) > 0 then candidates[#candidates + 1] = mon end
+  for index, mon in ipairs(ctx.party) do
+    if self:_benchable3(ctx, index, mon) then candidates[#candidates + 1] = mon end
   end
   if #candidates == 0 then return nil end
+  if ctx.double then
+    local foe = self:_flankFoe3(ctx)
+    if foe then t = foe.b end
+  end
   if not t then return candidates[1] end
   local invalid = {}
   while true do
@@ -1954,18 +2154,113 @@ local function powerClasses(self, ctx, legal, est, G)
   return out
 end
 
+-- The best-scored usable slot, ties drawn at random, and its score.
+function M:_bestOf3(scores, legal)
+  local best, pool = nil, {}
+  for _, i in ipairs(legal) do
+    local s = scores[i]
+    if best == nil or s > best then best, pool = s, { i }
+    elseif s == best then pool[#pool + 1] = i end
+  end
+  return pool[self.rng(1, #pool)], best
+end
+
 function M:_chooseMove3(ctx, legal)
+  local rng = self.rng
+  -- No scripts at all: the controller picks a usable slot at random.
+  if ctx.aiFlags == 0 then
+    return { action = "fight", move = legal[rng(1, #legal)] - 1 }
+  end
+  local scores = self:_scoreMoves3(ctx, legal)
+  self.lastScores3 = scores
+  local pick = self:_bestOf3(scores, legal)
+  return { action = "fight", move = pick - 1 }
+end
+
+-- ------- a double's target (BattleAI_SetupAIData / ChooseMoveOrAction_Doubles)
+--
+-- The two families part here, and each is ported as its cart wrote it.
+--
+-- FireRed / LeafGreen aim first and score after: one of the player's two
+-- positions at random (M:_flankFoe3), and every script then runs against
+-- that one battler, exactly as a 1v1 runs against the one opposite.  Its
+-- scripts never look at the AI's own partner.
+--
+-- Emerald scores every move against every battler but itself
+-- (pokeemerald battle_ai_script_commands.c:448, the engine's
+-- Ai.chooseDoubles): each standing foe *and* its own partner, a fresh
+-- simulated roll per pass, the best move per target with ties drawn at
+-- random -- and a partner pass counts only at 100 or more (AI_TryOnAlly
+-- prices almost everything at -30, so what survives is a move the cart
+-- means for the ally).  The target with the highest best wins, ties drawn at
+-- random, and its move is the one used.
+--
+-- Either way the target is named only for a MOVE_TARGET_SELECTED move: the
+-- controller re-aims a user / user-or-selected move at the user and a BOTH
+-- move at the player's left position (battle_controller_opponent.c:1370),
+-- and the referee reads its own target for every other kind.
+function M:_chooseDouble3(ctx, legal)
+  local rng = self.rng
+  -- No standing foe to aim at (a view caught between faints): score the 1v1
+  -- reading and leave the target to the referee.
+  if #ctx.foes == 0 then return self:_chooseMove3(ctx, legal) end
+  if self.family3 == "rse" and ctx.aiFlags ~= 0 then
+    -- pret battler ids 0..3 are the player's left, the AI side's left, the
+    -- player's right, the AI side's right: field slots 0, 3, 1, 4.
+    local cands = {}
+    for _, foe in ipairs(ctx.foes) do
+      cands[#cands + 1] = { slot = foe.slot, b = foe.b, order = foe.slot * 2 }
+    end
+    if ctx.partner then
+      cands[#cands + 1] = { slot = ctx.partnerSlot, b = ctx.partner, ally = true,
+                            order = (ctx.partnerSlot - 3) * 2 + 1 }
+    end
+    table.sort(cands, function(x, y) return x.order < y.order end)
+    local most, pool = nil, {}
+    for _, cand in ipairs(cands) do
+      ctx.t, ctx.tIsAlly = cand.b, cand.ally
+      cand.scores = self:_scoreMoves3(ctx, legal)
+      cand.pick, cand.best = self:_bestOf3(cand.scores, legal)
+      if cand.ally and cand.best < 100 then cand.best = -1 end
+      if most == nil or cand.best > most then most, pool = cand.best, { cand }
+      elseif cand.best == most then pool[#pool + 1] = cand end
+    end
+    local chosen = pool[rng(1, #pool)]
+    ctx.t, ctx.tIsAlly = chosen.b, chosen.ally
+    self.lastScores3 = chosen.scores
+    return self:_aimed3(ctx, chosen.pick, chosen.slot)
+  end
+  -- FireRed / LeafGreen (and an Emerald trainer with no script bit at all,
+  -- whose BattleAI_SetupAIData target is the same flank roll).
+  local foe = self:_flankFoe3(ctx)
+  if foe then ctx.t = foe.b end
+  local choice = self:_chooseMove3(ctx, legal)
+  return self:_aimed3(ctx, choice.move + 1, foe and foe.slot or nil)
+end
+
+-- pret include/constants/battle.h MOVE_TARGET_SELECTED: the one target byte a
+-- double's choice names its battler for (see M:_chooseDouble3).
+local MOVE_TARGET_SELECTED = 0
+
+function M:_aimed3(ctx, i, slot)
+  local out = { action = "fight", move = i - 1 }
+  local row = ctx.b.moves and ctx.b.moves[i]
+  if slot ~= nil and type(row) == "table" and int3(row.target, 0) == MOVE_TARGET_SELECTED then
+    out.target = slot
+  end
+  return out
+end
+
+-- Every script's verdict on every usable slot against ctx.t, in the order
+-- the cart's loop runs them (AI flag bit by bit, each over the whole
+-- moveset), plus the simulated damage roll each pass draws first.
+function M:_scoreMoves3(ctx, legal)
   local S, b, t = ctx.S, ctx.b, ctx.t
   local E = S.Effects.E
   local G = groupsOf(E)
   local rng = self.rng
-  local flags = self.aiFlags
+  local flags = ctx.aiFlags
   local moves = b.moves
-
-  -- No scripts at all: the controller picks a usable slot at random.
-  if flags == 0 then
-    return { action = "fight", move = legal[rng(1, #legal)] - 1 }
-  end
 
   local scores, est = {}, {}
   for _, i in ipairs(legal) do
@@ -1976,7 +2271,23 @@ function M:_chooseMove3(ctx, legal)
   local power = powerClasses(self, ctx, legal, est, G)
   local rand = function() return rng(0, 255) end
 
-  if self:_flag3("CHECK_BAD_MOVE") then
+  -- Emerald, scoring against its own partner: every script up to
+  -- PREFER_BATON_PASS opens `if_target_is_ally AI_Ret`, and the last three
+  -- -- DOUBLE_BATTLE, HP_AWARE, TRY_SUNNY_DAY_START -- open
+  -- `if_target_is_ally AI_TryOnAlly`, so each of those the fight runs
+  -- prices the move for the ally once more (M:_tryOnAlly3).
+  if ctx.tIsAlly then
+    for _, name in ipairs({ "DOUBLE_BATTLE", "HP_AWARE", "TRY_SUNNY_DAY_START" }) do
+      if self:_flag3(name, flags) then
+        for _, i in ipairs(legal) do
+          scores[i] = scores[i] + self:_tryOnAlly3(ctx, moves[i], power[i], rand)
+        end
+      end
+    end
+    return scores
+  end
+
+  if self:_flag3("CHECK_BAD_MOVE", flags) then
     for _, i in ipairs(legal) do scores[i] = scores[i] + self:_checkBad3(ctx, moves[i], G) end
   end
   -- AI_TryToFaint.  `if_can_faint` (the engine's ai_cmds.lua, pret
@@ -1984,7 +2295,7 @@ function M:_chooseMove3(ctx, legal)
   -- fixed-damage rows, Counter, Hidden Power -- and prices the rest with the
   -- simulated roll, never under 1.  Only Emerald's script then adds +2 at
   -- random for a 4x hit; FireRed's ends after the NOT_MOST -1.
-  if self:_flag3("TRY_TO_FAINT") then
+  if self:_flag3("TRY_TO_FAINT", flags) then
     local rse = self.family3 == "rse"
     for _, i in ipairs(legal) do
       local mv = moves[i]
@@ -2003,15 +2314,15 @@ function M:_chooseMove3(ctx, legal)
       end
     end
   end
-  if self:_flag3("CHECK_VIABILITY") then
+  if self:_flag3("CHECK_VIABILITY", flags) then
     for _, i in ipairs(legal) do scores[i] = scores[i] + self:_viability3(ctx, moves[i], G, est[i]) end
   end
-  if self:_flag3("SETUP_FIRST_TURN") and ctx.turnCount == 0 then
+  if self:_flag3("SETUP_FIRST_TURN", flags) and ctx.turnCount == 0 then
     for _, i in ipairs(legal) do
       if G.setup[int3(moves[i].effect, 0)] and rand() >= 80 then scores[i] = scores[i] + 2 end
     end
   end
-  if self:_flag3("RISKY") then
+  if self:_flag3("RISKY", flags) then
     for _, i in ipairs(legal) do
       if G.risky[int3(moves[i].effect, 0)] and rand() >= 128 then scores[i] = scores[i] + 2 end
     end
@@ -2022,12 +2333,12 @@ function M:_chooseMove3(ctx, legal)
   -- and +2 at random for a move it calls DISCOURAGED -- the power reading's
   -- "other", status moves and the fixed / discouraged ones.  Despite the name,
   -- FireRed's does not favour the strongest move.
-  if self:_flag3("PREFER_STRONGEST_MOVE") or self:_flag3("PREFER_POWER_EXTREMES") then
+  if self:_flag3("PREFER_STRONGEST_MOVE", flags) or self:_flag3("PREFER_POWER_EXTREMES", flags) then
     for _, i in ipairs(legal) do
       if power[i] == "other" and rand() >= 100 then scores[i] = scores[i] + 2 end
     end
   end
-  if self:_flag3("PREFER_BATON_PASS") then
+  if self:_flag3("PREFER_BATON_PASS", flags) then
     local hasPass = false
     for _, i in ipairs(legal) do
       if int3(moves[i].effect, 0) == E.BATON_PASS then hasPass = true end
@@ -2047,7 +2358,14 @@ function M:_chooseMove3(ctx, legal)
       end
     end
   end
-  if self:_flag3("HP_AWARE") then
+  -- AI_DoubleBattle (bit 7, between PREFER_BATON_PASS and HP_AWARE), against
+  -- a foe; only a double runs it (see M:_doubleBattle3).
+  if ctx.double and self:_flag3("DOUBLE_BATTLE", flags) then
+    for _, i in ipairs(legal) do
+      scores[i] = scores[i] + self:_doubleBattle3(ctx, moves[i], power[i])
+    end
+  end
+  if self:_flag3("HP_AWARE", flags) then
     local mine, theirs = pct(b), pct(t)
     for _, i in ipairs(legal) do
       local eff = int3(moves[i].effect, 0)
@@ -2057,7 +2375,7 @@ function M:_chooseMove3(ctx, legal)
     end
   end
   -- Emerald's AI_TrySunnyDayStart: open the fight with the sun.
-  if self:_flag3("TRY_SUNNY_DAY_START") and int3(b.isFirstTurn, 0) > 0 then
+  if self:_flag3("TRY_SUNNY_DAY_START", flags) and int3(b.isFirstTurn, 0) > 0 then
     for _, i in ipairs(legal) do
       if int3(moves[i].effect, 0) == E.SUNNY_DAY and ctx.weather ~= "SUN" then
         scores[i] = scores[i] + 5
@@ -2065,15 +2383,180 @@ function M:_chooseMove3(ctx, legal)
     end
   end
 
-  local best, pool = nil, {}
-  for _, i in ipairs(legal) do
-    local s = scores[i]
-    if best == nil or s > best then best, pool = s, { i }
-    elseif s == best then pool[#pool + 1] = i end
+  return scores
+end
+
+-- count_alive_pokemon (pret Cmd_count_alive_pokemon, the engine's
+-- ai_cmds.lua): `battler`'s party, living, minus the mon it has out -- and in
+-- a double minus its flankmate's too (gBattlerPartyIndexes of the partner
+-- position), so a seat never counts its own partner as a reserve.
+function M:_aliveBehind3(ctx, battler, party)
+  local mate = ctx.double and self:_flankmate3(ctx, battler) or nil
+  local n = 0
+  for _, mon in ipairs(party) do
+    if mon ~= battler.mon and not (mate and mon == mate.mon) and int3(mon.hp, 0) > 0 then
+      n = n + 1
+    end
   end
-  self.lastScores3 = scores
-  local pick = pool[rng(1, #pool)]
-  return { action = "fight", move = pick - 1 }
+  return n
+end
+
+-- Cmd_check_ability's answer: 1 the battler has it, 0 it has another, 2 the
+-- cart cannot say -- no ability at all, which is how an empty position (or no
+-- battler) reads.  The brain reads the referee's battler for every side, as
+-- the rest of this file does, where the cart guesses the player's from the
+-- species.
+local function checkAbility3(battler, name)
+  local ab = battler and battler.ability
+  if ab == nil or ab == "" then return 2 end
+  return (ab == name) and 1 or 0
+end
+
+-- The moves AI_DoubleBattle and AI_TryOnAlly name (pret include/constants/
+-- moves.h), and the item AI_TrySwaggerOnAlly looks for (items.h).
+local MOVE_EARTHQUAKE, MOVE_MAGNITUDE, MOVE_SKILL_SWAP = 89, 222, 285
+local MOVE_WILL_O_WISP, MOVE_TOXIC, MOVE_HELPING_HAND, MOVE_SWAGGER = 261, 92, 270, 207
+local ITEM_PERSIM_BERRY = 140
+-- AI_TrySkillSwapOnAlly's "a partner with a move COMPOUND EYES would steady":
+-- FIRE BLAST, THUNDER, CROSS CHOP, HYDRO PUMP, DYNAMIC PUNCH, BLIZZARD, MEGAHORN.
+local COMPOUND_EYES_MOVES = {
+  [126] = true, [87] = true, [238] = true, [56] = true, [223] = true, [59] = true, [224] = true,
+}
+
+local function knows3(battler, num)
+  for _, m in ipairs((battler and battler.moves) or {}) do
+    if int3(m.num, 0) == num then return true end
+  end
+  return false
+end
+
+-- AI_DoubleBattle against a foe (pokeemerald data/battle_ai_scripts.s, run
+-- by the engine from the cart's own pack).  FireRed / LeafGreen's
+-- AI_DoubleBattle is a bare `end` -- the bit runs and scores nothing -- so
+-- only Emerald's arms are here, in the script's own order:
+--   * SKILL SWAP: +5 to shed the user's TRUANT, else +2 to take the foe's
+--     SHADOW TAG or PURE POWER;
+--   * EARTHQUAKE / MAGNITUDE, which hit the partner too: +2 when the partner
+--     is out of reach (LEVITATE, Flying), -10 when it is a Fire, Electric,
+--     Poison or Rock type, -3 otherwise -- an empty partner position reads
+--     as zeroes, so it is the -3;
+--   * an Electric move, while the foe's partner could pull it with
+--     LIGHTNING ROD (check_ability anything but "no"): -2, and -8 more if
+--     that partner is a Ground type;
+--   * a Fire move, with the user's FLASH FIRE already lit: +1;
+--   * otherwise, a user without GUTS that has a status: -5 for a move the
+--     power reading calls DISCOURAGED, else +1, and +2 more for the
+--     strongest -- the script tests `if_not_equal ABILITY_GUTS` where it
+--     reads as if it meant the reverse, and is ported as it runs;
+--   * and a GUTS user whose partner knows HELPING HAND: +1 for any move the
+--     power reading does not discourage.
+-- The type it branches on is the row's (get_curr_move_type), not Hidden
+-- Power's or Weather Ball's dealt type.
+function M:_doubleBattle3(ctx, mv, power)
+  if self.family3 ~= "rse" then return 0 end
+  local S, b, t = ctx.S, ctx.b, ctx.t
+  local T = S.Types.ID
+  local num = int3(mv.num, 0)
+  if num == MOVE_SKILL_SWAP then
+    if b.ability == "TRUANT" then return 5 end
+    if t.ability == "SHADOW_TAG" or t.ability == "PURE_POWER" then return 2 end
+    return 0
+  end
+  local mtype = int3(mv.type, 0)
+  if num == MOVE_EARTHQUAKE or num == MOVE_MAGNITUDE then
+    local p = self:_flankmate3(ctx, b)
+    if checkAbility3(p, "LEVITATE") == 1 or hasType(p, T.FLYING) then return 2 end
+    if hasType(p, T.FIRE) or hasType(p, T.ELECTRIC) or hasType(p, T.POISON)
+        or hasType(p, T.ROCK) then
+      return -10
+    end
+    return -3
+  end
+  if mtype == T.ELECTRIC then
+    local tp = self:_flankmate3(ctx, t)
+    if checkAbility3(tp, "LIGHTNING_ROD") == 0 then return 0 end
+    if hasType(tp, T.GROUND) then return -10 end
+    return -2
+  end
+  if mtype == T.FIRE then
+    return b.flashFire and 1 or 0
+  end
+  if b.ability ~= "GUTS" then
+    if not statusOf3(b) then return 0 end
+    if power == "other" then return -5 end
+    return (power == "best") and 3 or 1
+  end
+  -- if_has_move AI_USER_PARTNER skips a partner at 0 HP.
+  local p = ctx.partner
+  if p and hpOf(p) > 0 and knows3(p, MOVE_HELPING_HAND) and power ~= "other" then return 1 end
+  return 0
+end
+
+-- AI_TryOnAlly (pokeemerald data/battle_ai_scripts.s): Emerald scoring a
+-- move against its own partner.  -30 -- never aim it at the ally -- for
+-- everything but what the cart means for one:
+--   * a move the power reading does not discourage: only a Fire move into a
+--     FLASH FIRE partner that has not caught one yet, +3;
+--   * SKILL SWAP: +10 to relieve a TRUANT partner of it; else, from a user
+--     without LEVITATE, +3 to hand over COMPOUND EYES to a partner holding
+--     one of the inaccurate moves it steadies; from a LEVITATE user, -30 into
+--     a LEVITATE partner, +1 per Electric type the partner has (handing it
+--     the Ground immunity it lacks) -- and on the way, wherever a type is not
+--     Electric, the script falls into the COMPOUND EYES test with that *type*
+--     still in the register, which TYPE_PSYCHIC (14, COMPOUND EYES's number
+--     too) passes;
+--   * WILL-O-WISP / TOXIC onto a GUTS partner with no status, while the user
+--     itself is at 91% or more: +5;
+--   * HELPING HAND: +2, or -1 one time in four;
+--   * SWAGGER into a partner holding a PERSIM BERRY: +3 unless its Attack is
+--     already above +1, where the script ends at 0.
+function M:_tryOnAlly3(ctx, mv, power, rand)
+  local b, t = ctx.b, ctx.t
+  local T = ctx.S.Types.ID
+  local num = int3(mv.num, 0)
+  if power ~= "other" then
+    if int3(mv.type, 0) == T.FIRE and checkAbility3(t, "FLASH_FIRE") == 1 then
+      return t.flashFire and -30 or 3
+    end
+    return -30
+  end
+  if num == MOVE_SKILL_SWAP then
+    if t.ability == "TRUANT" then return 10 end
+    local score, passes = 0, nil
+    if b.ability ~= "LEVITATE" then
+      passes = b.ability == "COMPOUND_EYES"
+    elseif t.ability == "LEVITATE" then
+      return -30
+    elseif t.type1 ~= T.ELECTRIC then
+      passes = t.type1 == T.PSYCHIC
+    else
+      score = 1
+      local t2 = t.type2 or t.type1
+      if t2 == T.ELECTRIC then return 2 end
+      passes = t2 == T.PSYCHIC
+    end
+    -- if_has_move AI_USER_PARTNER: the user's partner is the ally scored.
+    if passes and hpOf(t) > 0 then
+      for _, m in ipairs(t.moves or {}) do
+        if COMPOUND_EYES_MOVES[int3(m.num, 0)] then return score + 3 end
+      end
+    end
+    return score - 30
+  end
+  if num == MOVE_WILL_O_WISP or num == MOVE_TOXIC then
+    if t.ability ~= "GUTS" or statusOf3(t) or pct(b) < 91 then return -30 end
+    return 5
+  end
+  if num == MOVE_HELPING_HAND then
+    if rand() < 64 then return -1 end
+    return 2
+  end
+  if num == MOVE_SWAGGER then
+    if int3(t.mon and t.mon.heldItem, 0) ~= ITEM_PERSIM_BERRY then return -30 end
+    if int3(t.stages and t.stages.atk, 0) > 1 then return 0 end
+    return 3
+  end
+  return -30
 end
 
 -- AI_CheckBadMove: the negations, then each effect's "this will fail" test.
@@ -2139,16 +2622,10 @@ function M:_checkBad3(ctx, mv, G)
   elseif eff == E.EXPLOSION then
     if tAb == "DAMP" then return -10 end
     -- the last mon standing does not blow itself up while the player has more
-    local mine = 0
-    for _, mon in ipairs(ctx.party) do
-      if mon ~= b.mon and int3(mon.hp, 0) > 0 then mine = mine + 1 end
-    end
+    local mine = self:_aliveBehind3(ctx, b, ctx.party)
     if mine == 0 then
-      local theirs = 0
       local fighter = t.fighter
-      for _, mon in ipairs((fighter and fighter.mons) or {}) do
-        if mon ~= t.mon and int3(mon.hp, 0) > 0 then theirs = theirs + 1 end
-      end
+      local theirs = self:_aliveBehind3(ctx, t, (fighter and fighter.mons) or {})
       if theirs > 0 then return -10 end
     end
   elseif G.heal[eff] then
@@ -2177,10 +2654,7 @@ function M:_checkBad3(ctx, mv, G)
     if ctx.weather == G.weather[eff] then return -8 end
   elseif eff == E.ROAR then
     if tAb == "SUCTION_CUPS" or t.ingrain then return -10 end
-    local bench = 0
-    for _, mon in ipairs((t.fighter and t.fighter.mons) or {}) do
-      if mon ~= t.mon and int3(mon.hp, 0) > 0 then bench = bench + 1 end
-    end
+    local bench = self:_aliveBehind3(ctx, t, (t.fighter and t.fighter.mons) or {})
     if bench == 0 then return -10 end
   elseif eff == E.DISABLE then
     if t.disabledNum then return -8 end
@@ -2210,7 +2684,11 @@ function M:_checkBad3(ctx, mv, G)
     local s = statusOf3(b)
     if not (s == "PSN" or s == "TOX" or s == "BRN" or s == "PAR") then return -10 end
   elseif eff == E.HELPING_HAND or eff == E.FOLLOW_ME then
-    return -10   -- a singles fight has nobody to help or to draw fire from
+    -- A singles fight has nobody to help or to draw fire from.  In a double
+    -- the cart's own test passes: AI_CBM_HelpingHand is `is_double_battle`,
+    -- -10 only outside one, and AI_CheckBadMove names no Follow Me arm.
+    if ctx.double then return 0 end
+    return -10
   elseif eff == E.TRICK then
     if int3(b.mon.heldItem, 0) == 0 and int3(t.mon.heldItem, 0) == 0 then return -10 end
     if tAb == "STICKY_HOLD" then return -10 end
@@ -2240,10 +2718,7 @@ function M:_checkBad3(ctx, mv, G)
   elseif eff == E.WATER_SPORT then
     if b.waterSport then return -10 end
   elseif eff == E.BATON_PASS then
-    local bench = 0
-    for _, mon in ipairs(ctx.party) do
-      if mon ~= b.mon and int3(mon.hp, 0) > 0 then bench = bench + 1 end
-    end
+    local bench = self:_aliveBehind3(ctx, b, ctx.party)
     if bench == 0 then return -10 end
   elseif eff == E.PROTECT or eff == E.ENDURE then
     if int3(b.protectStreak, 0) > 0 then return -2 end
