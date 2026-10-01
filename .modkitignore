@@ -254,6 +254,8 @@ docs/plans/party-wild-encounter.md
 docs/plans/server-authoritative-battle-system.md
 docs/plans/gen3-firered-emerald-support.md
 docs/plans/gen3-battle-sheet.md
+docs/plans/gen3-known-gaps.md
+docs/plans/gen3-solo-doubles.md
 # The upstream issue behind the mod-sandbox migration: a request for storage
 # scoped to the copy rather than to one playthrough. Same footing as the plans
 # above -- it argues with the engine about Storage.lua, and a player who
