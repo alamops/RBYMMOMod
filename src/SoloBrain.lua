@@ -508,7 +508,9 @@ end
 -- refused. A double names one -- `target = <field slot>` -- on a
 -- single-target move only, since that is the one kind the referee aims by
 -- the choice; a spread, self or random move is left to the referee's own
--- reading, as the cart's controller leaves it to the move's target byte.
+-- reading, as the cart's controller leaves it to the move's target byte.  A
+-- Ghost's CURSE names the foe opposite the user, where the cart's AI curse
+-- lands.
 function M:choose(view)
   if type(view) ~= "table" then return nil end
   if type(view.mon) ~= "table" then return nil end
@@ -2198,7 +2200,9 @@ end
 -- Either way the target is named only for a MOVE_TARGET_SELECTED move: the
 -- controller re-aims a user / user-or-selected move at the user and a BOTH
 -- move at the player's left position (battle_controller_opponent.c:1370),
--- and the referee reads its own target for every other kind.
+-- and the referee reads its own target for every other kind.  The one
+-- exception is a Ghost's CURSE, which names the foe opposite the user
+-- (M:_oppositeFoe3).
 function M:_chooseDouble3(ctx, legal)
   local rng = self.rng
   -- No standing foe to aim at (a view caught between faints): score the 1v1
@@ -2241,11 +2245,43 @@ end
 -- pret include/constants/battle.h MOVE_TARGET_SELECTED: the one target byte a
 -- double's choice names its battler for (see M:_chooseDouble3).
 local MOVE_TARGET_SELECTED = 0
+-- pret include/constants/moves.h MOVE_CURSE.
+local MOVE_CURSE = 174
+
+-- The battler a Ghost's CURSE turns on when the cart's AI uses it.  The AI
+-- aims every USER-row move at itself (battle_controller_opponent.c:1370, the
+-- engine's ai.lua:353), and the Ghost curse then lands on the battler
+-- opposite the user (the engine's effects/setup.lua foeOf: battler 0 faces 1,
+-- 2 faces 3), else the nearest standing foe.  The referee aims a Ghost's
+-- CURSE as a SELECTED move and defaults an unnamed one to the first living
+-- foe, so a second seat must name its opposite or curse the wrong battler.
+-- The referee's own Battle:oppositeFoe when the view carries it, else the
+-- same rule over the view's foes: the player slot in the seat's position,
+-- nearest first, ties to the lower slot.
+function M:_oppositeFoe3(ctx)
+  local sim, b = ctx.sim, ctx.b
+  if sim and type(sim.oppositeFoe) == "function" and type(b.fighter) == "table" then
+    local ok, foe = pcall(sim.oppositeFoe, sim, b)
+    if ok and type(foe) == "table" and int3(foe.slot, nil) then return int3(foe.slot, nil) end
+  end
+  local want = ctx.seat and (ctx.seat - 3) or 0
+  local best, bestD = nil, nil
+  for _, foe in ipairs(ctx.foes) do
+    local d = math.abs(foe.slot - want)
+    if bestD == nil or d < bestD then best, bestD = foe, d end
+  end
+  return best and best.slot or nil
+end
 
 function M:_aimed3(ctx, i, slot)
   local out = { action = "fight", move = i - 1 }
   local row = ctx.b.moves and ctx.b.moves[i]
-  if slot ~= nil and type(row) == "table" and int3(row.target, 0) == MOVE_TARGET_SELECTED then
+  if type(row) ~= "table" then return out end
+  if int3(row.num, 0) == MOVE_CURSE and hasType(ctx.b, ctx.S.Types.ID.GHOST) then
+    out.target = self:_oppositeFoe3(ctx)
+    return out
+  end
+  if slot ~= nil and int3(row.target, 0) == MOVE_TARGET_SELECTED then
     out.target = slot
   end
   return out
