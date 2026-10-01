@@ -71,7 +71,13 @@ end
 -- Frames: arena-idle (1v1, commands), arena-hit (flash + shake + a
 -- Thunderbolt beam), arena-2v2 (two seats and two trainers a side), arena-npc
 -- (an NPC trainer's own front pic on the foe edge), arena-party (the band's
--- POKeMON list with its front-pic gutter). SHOT_DIR/g3-<fr|em>-<frame>.png.
+-- POKeMON list with its front-pic gutter), and a SOLO DOUBLE
+-- (docs/plans/gen3-solo-doubles.md): arena-solo-double (one player figure
+-- behind two ally seats, one trainer behind two foes -- the shape
+-- CoopBattle:battlefieldAllyHumans / battlefieldFoeHumans hand the arena),
+-- arena-solo-double-1foe (the trainer's second seat empty) and
+-- arena-solo-double-target (aiming, the partner among the targets), each with
+-- its layout checks. SHOT_DIR/g3-<fr|em>-<frame>.png.
 local function runGen3(game)
   io.stdout:setvbuf("no")
   local U = require("tests.drivers.util")
@@ -454,6 +460,218 @@ local function runGen3(game)
     check(false, "party: the band spares a preview gutter")
   end
   shoot("arena-party", "party")
+
+  -- ---- frames 6-8: a SOLO DOUBLE -- one player behind two ally seats, one
+  -- trainer behind two foes. The arena's layout is count-driven: a side with
+  -- one figure and two seats gets the figure its own stack (centred on the
+  -- field's centre line, between the pair's rows) where a side with a figure
+  -- per seat pairs them row by row.
+  --
+  -- A real lone-double trainer from the cart's own book, by what the row says
+  -- (doubleBattle, a party of two or more, a name, a front pic that loads).
+  local twinPic, twinName = nil, "TRAINER"
+  pcall(function()
+    local Trainers = require("src.core.game3.scripting.trainers")
+    local pack = Trainers.pack() or {}
+    local bestId = nil
+    for id, row in pairs(pack.trainers or {}) do
+      local tid = tonumber(id)
+      if tid and tid > 0 and type(row) == "table" and row.doubleBattle and type(row.party) == "table"
+         and #row.party >= 2 and type(row.name) == "string" and row.name ~= ""
+         and row.pic ~= nil and (bestId == nil or tid < bestId)
+         and Battlefield.gen3TrainerPic(row.pic) then
+        bestId = tid
+        twinPic = row.pic
+        twinName = row.name
+      end
+    end
+  end)
+  check(twinPic ~= nil, "solo double: a lone-double trainer's front pic resolves from the cart's book",
+    twinName)
+  twinPic = twinPic or npcPic
+
+  -- the field slots the referee gives them: allies 0, 1; the trainer's 3, 4
+  local function sdSeat(sp, name, level, hp, maxHp, index, extra)
+    local e = { index = index }
+    for k, v in pairs(extra or {}) do e[k] = v end
+    return seat(sp, name, level, hp, maxHp, e)
+  end
+  local sd1 = sdSeat(ALLY_SP, "SPARKY", 25, 40, 55, 0, { expFrac = 0.6 })
+  local sd2 = sdSeat(ALLY2_SP, Gen3.speciesName(ALLY2_SP) or "ALLY2", 22, 50, 50, 1, { expFrac = 0.3 })
+  local sf1 = sdSeat(FOE_SP, Gen3.speciesName(FOE_SP) or "FOE1", 18, 32, 45, 3)
+  local sf2 = sdSeat(FOE2_SP, Gen3.speciesName(FOE2_SP) or "FOE2", 20, 9, 41, 4, { status = "PSN" })
+  local function soloCtx(foeSeats, extra)
+    local c = {
+      mode = "coop_npc",
+      -- one player, whatever the number of seats (battlefieldAllyHumans folds
+      -- the two seats of one owner into one figure) ...
+      allyHumans = { { id = "solo_player", name = "ALEX", spriteId = SELF_LOOK, party = "oooo" } },
+      -- ... and one trainer behind the foes (the NPC shape of
+      -- battlefieldFoeHumans)
+      foeHumans = { { id = "npc", name = twinName, trainerPic = twinPic, party = "ooox" } },
+      allySeats = { sd1, sd2 }, foeSeats = foeSeats, frame = 0,
+    }
+    for k, v in pairs(extra or {}) do c[k] = v end
+    return c
+  end
+
+  -- The rects the layout checks run on: a mon's 64px draw frame, a figure's
+  -- reach (a walker's 16x32 frame is headroom for its top rows; a trainer
+  -- pic or the foe edge reserve the whole frame), as assertFrame reads them.
+  local function monBox(m) return { x = m.x - 32, y = m.y - 56, w = 64, h = 64 } end
+  local function figureBox(h)
+    local reach = (h.trainerPic ~= nil or h.side == "foe") and 64 or Battlefield.HUMAN_REACH3
+    return { x = h.x - h.drawW / 2, y = h.y - reach, w = h.drawW, h = reach }
+  end
+  local function onCanvas(r)
+    return r.x >= 0 and r.y >= 0 and r.x + r.w <= Battlefield.WIDTH and r.y + r.h <= Battlefield.HEIGHT
+  end
+  local function apart(a, b)
+    return not (a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h)
+  end
+  local function rectStr(r) return ("%d,%d %dx%d"):format(r.x, r.y, r.w, r.h) end
+
+  local function assertSoloDouble(label, layout, nAlly, nFoe)
+    local mons, humans, things = {}, {}, {}
+    local counts = { ally = 0, foe = 0, allyHumans = 0, foeHumans = 0 }
+    for _, m in ipairs(layout.mons) do
+      mons[#mons + 1] = { name = ("%s mon %d"):format(m.side, m.seatIndex), rect = monBox(m), m = m }
+      counts[m.side] = counts[m.side] + 1
+    end
+    for _, h in ipairs(layout.humans) do
+      humans[#humans + 1] = { name = ("%s figure %d"):format(h.side, h.index), rect = figureBox(h), h = h }
+      counts[h.side .. "Humans"] = counts[h.side .. "Humans"] + 1
+    end
+    check(counts.ally == nAlly and counts.foe == nFoe,
+      ("%s: %d ally and %d foe seats are placed"):format(label, nAlly, nFoe),
+      ("got %d / %d"):format(counts.ally, counts.foe))
+    check(counts.allyHumans == 1 and counts.foeHumans == 1,
+      label .. ": one player figure and one trainer, whatever the seats",
+      ("got %d / %d"):format(counts.allyHumans, counts.foeHumans))
+    check(#layout.rosters == 2 and #layout.plates == nAlly + nFoe,
+      label .. ": a roster chip for the player and the trainer, a plate per seat",
+      ("%d chips, %d plates"):format(#layout.rosters, #layout.plates))
+
+    -- everything is on the 640x360 canvas, and nothing stands in the menu band
+    local off = {}
+    local function onField(name, r)
+      if not onCanvas(r) then off[#off + 1] = name .. "=" .. rectStr(r) end
+    end
+    for _, a in ipairs(mons) do onField(a.name, a.rect) end
+    for _, a in ipairs(humans) do onField(a.name, a.rect) end
+    for i, p in ipairs(layout.plates) do onField("plate " .. i, p) end
+    for i, c in ipairs(layout.rosters) do onField("chip " .. i, c) end
+    if layout.card then onField("card", layout.card) end
+    check(#off == 0, label .. ": every mon, figure, plate, chip and card is on the canvas", table.concat(off, "; "))
+    local lowest, lowName = 0, nil
+    for _, a in ipairs(mons) do
+      if a.rect.y + a.rect.h > lowest then lowest, lowName = a.rect.y + a.rect.h, a.name end
+    end
+    for _, a in ipairs(humans) do
+      local feet = a.h.y
+      if feet > lowest then lowest, lowName = feet, a.name end
+    end
+    check(lowest <= layout.field.y + layout.field.h,
+      label .. ": nothing stands in the menu band", ("%s reaches y=%d, the field ends at %d"):format(
+        tostring(lowName), lowest, layout.field.y + layout.field.h))
+
+    -- no overlaps among what stands on the field ...
+    local bad = {}
+    local solids = {}
+    for _, a in ipairs(mons) do solids[#solids + 1] = a end
+    for _, a in ipairs(humans) do solids[#solids + 1] = a end
+    for i = 1, #solids do
+      for j = i + 1, #solids do
+        if not apart(solids[i].rect, solids[j].rect) then
+          bad[#bad + 1] = solids[i].name .. " x " .. solids[j].name
+        end
+      end
+    end
+    check(#bad == 0, label .. ": no two mons or figures overlap", table.concat(bad, "; "))
+    -- ... nor among the HUD (plates, roster chips), nor the HUD over a figure
+    local hud = {}
+    for i, p in ipairs(layout.plates) do hud[#hud + 1] = { name = ("%s plate %d"):format(p.side, i), rect = p } end
+    for i, c in ipairs(layout.rosters) do hud[#hud + 1] = { name = ("%s chip %d"):format(c.side, i), rect = c } end
+    bad = {}
+    for i = 1, #hud do
+      for j = i + 1, #hud do
+        if not apart(hud[i].rect, hud[j].rect) then bad[#bad + 1] = hud[i].name .. " x " .. hud[j].name end
+      end
+    end
+    check(#bad == 0, label .. ": no two plates or roster chips overlap", table.concat(bad, "; "))
+    bad = {}
+    for _, f in ipairs(humans) do
+      for _, p in ipairs(hud) do
+        if not apart(f.rect, p.rect) then bad[#bad + 1] = f.name .. " x " .. p.name end
+      end
+    end
+    check(#bad == 0, label .. ": no figure stands in a plate or a roster chip", table.concat(bad, "; "))
+    bad = {}
+    for _, a in ipairs(mons) do
+      for _, p in ipairs(hud) do
+        if not apart(a.rect, p.rect) then bad[#bad + 1] = a.name .. " x " .. p.name end
+      end
+    end
+    check(#bad == 0, label .. ": no mon stands in a plate or a roster chip", table.concat(bad, "; "))
+
+    -- the side's figure and its seats: a lone figure behind two seats stands
+    -- within the pair's two rows (its own stack, on the field's centre line,
+    -- pushed clear of the HUD); one behind one seat stands on its row
+    for _, side in ipairs({ "ally", "foe" }) do
+      local ys, fig = {}, nil
+      for _, a in ipairs(mons) do if a.m.side == side then ys[#ys + 1] = a.m.y end end
+      for _, a in ipairs(humans) do if a.h.side == side then fig = a.h end end
+      if fig and #ys == 2 then
+        check(math.min(ys[1], ys[2]) <= fig.y and fig.y <= math.max(ys[1], ys[2]),
+          ("%s: the %s's lone figure stands within its two seats' rows"):format(label, side),
+          ("figure y=%d, seats y=%d / %d"):format(fig.y, ys[1], ys[2]))
+      elseif fig and #ys == 1 then
+        check(fig.y == ys[1], ("%s: the %s's figure stands on its one seat's row"):format(label, side),
+          ("figure y=%d, seat y=%d"):format(fig.y, ys[1]))
+      end
+    end
+  end
+
+  -- ---- frame 6: the whole double -- the command grid
+  ctx = soloCtx({ sf1, sf2 })
+  band = { kind = "grid", cursor = 1, items = {
+    { label = "FIGHT" }, { label = "BAG" }, { label = "POKéMON" }, { label = "RUN" } } }
+  U.wait(10)
+  local _, soloLayout = assertFrame("solo double")
+  if soloLayout then assertSoloDouble("solo double", soloLayout, 2, 2) end
+  shoot("arena-solo-double", "solo double")
+
+  -- ---- frame 7: the trainer's second seat empty (one foe left)
+  ctx = soloCtx({ sf1 })
+  band = { kind = "message", text = "What will SPARKY do?" }
+  U.wait(4)
+  local _, oneLayout = assertFrame("solo double 1 foe")
+  if oneLayout then assertSoloDouble("solo double 1 foe", oneLayout, 2, 1) end
+  shoot("arena-solo-double-1foe", "solo double 1 foe")
+
+  -- ---- frame 8: aiming -- the partner is among the targets (the cart lets a
+  -- single-target move hit it), the arrow and card over the one picked
+  ctx = soloCtx({ sf1, sf2 }, {
+    showTarget = true,
+    targets = { { index = 3 }, { index = 4 }, { index = 1 } },
+    targetIndex = 3,
+  })
+  band = { kind = "message", text = "Attack whom?" }
+  U.wait(4)
+  local _, aimLayout = assertFrame("solo double target")
+  if aimLayout then
+    assertSoloDouble("solo double target", aimLayout, 2, 2)
+    local tm = aimLayout.target
+    check(tm ~= nil and tm.side == "ally" and tm.seatIndex == 2,
+      "solo double target: the picked target is the partner (ally seat 2)",
+      tm and (tm.side .. " " .. tostring(tm.seatIndex)) or "no target")
+    check(aimLayout.arrow ~= nil and tm ~= nil and aimLayout.arrow.x == tm.x
+      and aimLayout.arrow.tipY < tm.y,
+      "solo double target: the arrow points down at the partner from above")
+    check(aimLayout.card ~= nil and onCanvas(aimLayout.card),
+      "solo double target: the card for the picked target is on the canvas")
+  end
+  shoot("arena-solo-double-target", "solo double target")
 
   Gen3Ui.pop(game, state)
   U.wait(4)

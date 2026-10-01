@@ -94,7 +94,7 @@ here must match `manifest.version`.
   - **Aiming.** Single-target moves aim at either foe or your partner. You
     are asked only when more than one other battler stands, and a Ghost's
     CURSE is aimed as the cart aims it.
-  - **The trainer AI.** FireRed / LeafGreen pick a random side and Emerald
+  - **The trainer AI.** FireRed / LeafGreen aim at a random foe and Emerald
     scores every target. Emerald runs its double-battle AI script, so it
     keeps an EARTHQUAKE off its own partner and fires a Fire move into a
     Flash Fire partner.
