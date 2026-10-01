@@ -4,10 +4,13 @@
 #
 # The Gen 1 / Gen 2 siblings are run-battlefield-e2e.sh / -gen2.sh. Same two
 # drivers, their Gen 3 arms: tests/drivers/battlefield_shot.lua stages the
-# 640x360 arena (1v1 idle, a hit, 2v2, an NPC trainer's pic, the POKeMON list)
+# 640x360 arena (1v1 idle, a hit, 2v2, an NPC trainer's pic, the POKeMON list,
+# the solo double: one player behind two seats, the trainer behind two foes)
 # and tests/drivers/classic_battle_shot.lua the cart's own 240x160 battle page
 # (1v1, the move menu, 2v2 guild focus, the POKeMON page, the bag, a trainer
-# intro). Both pixel-assert what they draw and gate on GAPS:0.
+# intro, and the GBA double screen: chooser, move-target previews, the target
+# blink, START HP figures, empty seats). Both pixel-assert what they draw and
+# gate on GAPS:0.
 #
 #   1. Runs the mod's Lua suite headlessly (the same bar the other scripts set)
 #   2. For each game (GEN3_GAME=firered|emerald|both, default both): seeds a
