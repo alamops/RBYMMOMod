@@ -229,6 +229,15 @@ sim:fighter(id) / sim.byId[id]   -- seat fighters; .owner on both
   slot of the seat the monster is on, or the owner's first seat's slot when
   benched; `mon` is the party index.
 - **Outcomes:** `winners`/`losers`/`waiting` list owners, deduplicated.
+- **Vacant seats (added in review):** a shared-team seat left with no bench
+  becomes `vacant` (pret's absent battler). When a Revive gives the party a
+  bench again, the referee re-arms it: `mustReplace` is set and the replace
+  phase solicits it with `turn{slot}`, in battler order (pret
+  `HandleFaintedMonActions` case 0; engine `refreshAbsent`). A seat that
+  started the battle empty is never refilled.
+- **Ghost CURSE (added in review):** a Ghost's CURSE is aimed like SELECTED.
+  An unaimed one curses the battler opposite, and that includes auto-picked
+  and called ones.
 
 **C2 — brain view (T3 builds, T2 consumes).** On top of today's view, for a
 double:

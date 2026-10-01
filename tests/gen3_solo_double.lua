@@ -34,8 +34,9 @@
 --      to the move menu;
 --   6. replacement: a double knockout owes two picks in battler order, the
 --      second bench leaves out the first's claim; one bench monster refills
---      one seat; a seat left empty that the referee asks for again (a REVIVE
---      gave the party a bench) gets its picker, its send-out, and its menu;
+--      one seat; a seat left vacant that the referee re-arms at the turn's
+--      end (mon 1's REVIVE gave the party a bench) gets its picker, its
+--      send-out, and its menu;
 --   7. one bag: a medicine filed for mon 1 is out of mon 2's bag, an X item is
 --      only ever the chooser's own monster's;
 --   8. the ending: EXP to both seats, `onDone("win")`, the after-words said
@@ -54,7 +55,8 @@
 --      played to the win on the glue the caller owns (the seat -> referee id
 --      map, the referee, the `done` the trainer script resumes on, the
 --      refusal's line), the backstop for a seat the screen stopped asking
---      about (silent in a real fight), and a trainer seat asked again.
+--      about (silent in a real fight), and a vacant trainer seat the
+--      referee re-arms, answered by the pump.
 --
 -- Each block of checks runs under `block`, so an error in one flow is a
 -- failure of its own and the rest of the run is still measured.
@@ -2119,13 +2121,12 @@ end)
 
 -- A seat emptied for good is asked again once a REVIVE gives the party a bench:
 -- the cart sends the revived monster in at the turn's end (the engine's
--- refreshAbsent -> pickReplacement).  The referee's re-arm -- `mustReplace`
--- on the vacant seat, its replace phase soliciting it with a `turn` naming
--- the seat -- is staged here on the referee itself, through its own
--- `_openReplace`, since the referee that sends it lands with its own change.
--- The screen opens that seat's picker over the revived monster, files the
--- pick under the seat, draws the send-out, and asks the seat for a command
--- from then on.
+-- refreshAbsent -> pickReplacement), and so does the referee -- its vacant
+-- seat is owed a monster again (`_refreshVacant`) and the replace phase that
+-- closes the turn solicits it with a `turn` naming the seat, ahead of the next
+-- turn.  Nothing is staged: the REVIVE is mon 1's own command.  The screen
+-- opens that seat's picker over the revived monster, files the pick under the
+-- seat, draws the send-out, and asks both seats for a command from then on.
 block("re-armed seat", function()
   local f = makeFight({
     classicUi = true,
@@ -2144,6 +2145,7 @@ block("re-armed seat", function()
   eq(f.settle(), "choose", "re-armed: the next turn, seat 2 left empty")
   check(s.sim:isDown(s.sim:slot(2)), "re-armed: seat 2 is empty")
   eq(f.sim.byId[PLAYER2].b, nil, "re-armed: ...on the referee too")
+  eq(f.sim.byId[PLAYER2].vacant, true, "re-armed: ...which holds it vacant")
   eq(s.mine, 1, "re-armed: only mon 1 chooses")
 
   -- mon 1: REVIVE on PIDGEY, the monster that fell on seat 2
@@ -2153,35 +2155,43 @@ block("re-armed seat", function()
   f.press("a")
   eq(s.phase, "item_party", "re-armed: REVIVE asks who")
   s.switchIndex = 2
+  local mark = #f.events
   f.press("a")
   local revived = #f.choices
   eq(choiceAt(f, revived).action, "item", "re-armed: the REVIVE went")
+  eq(choiceAt(f, revived).seat, 0, "re-armed: ...as mon 1's command")
   eq(choiceAt(f, revived).slot, 1, "re-armed: ...on party 2")
   eq(f.refused, nil, "re-armed: the referee took it")
-  -- The turn it closed, as the referee left it -- everything up to the next
-  -- turn's opening, which the re-arm comes in front of.
-  local evs = f.sim:drainEvents()
-  local cut = #evs + 1
-  for i, ev in ipairs(evs) do
-    if ev.t == "turn" and ev.slot == nil then cut = i end
+  -- The referee closed the turn on that one command; what it said, read the
+  -- way the pump reads it.
+  f.pump()
+  local solicit, turnAfter, solicitedAt = nil, nil, nil
+  for i = mark + 1, #f.events do
+    local ev = f.events[i]
+    if ev.t == "turn" and ev.slot ~= nil and not solicit then solicit, solicitedAt = ev, i end
+    if ev.t == "turn" and ev.slot == nil then turnAfter = turnAfter or i end
   end
-  for i = 1, cut - 1 do f.feed(evs[i]) end
+  eq(solicit and solicit.slot, 1, "re-armed: the turn ended on a `turn` soliciting seat 2 (field 1)")
+  check(solicit and (turnAfter == nil or turnAfter > solicitedAt),
+        "re-armed: ...ahead of the next turn's opening")
+  eq(f.sim.phase, "replace", "re-armed: the referee waits in its replace phase")
+  eq(f.sim.byId[PLAYER2].mustReplace, true, "re-armed: ...owed a monster for seat 2")
   check(f.sim.byId[PLAYER2].mons[2].hp > 0, "re-armed: the referee revived PIDGEY")
   check(pidgey.hp > 0, "re-armed: the screen wrote the revive onto the live party mon")
   eq(pidgey.hp, math.max(1, math.floor(pidgey.maxHp / 2)), "re-armed: ...at half its HP, the referee's number")
   check(s.sim:isDown(s.sim:slot(2)), "re-armed: seat 2 is still empty -- a revived monster is benched")
   eq(FakeBag.get(SESSION.bag, 24), 0, "re-armed: the REVIVE was spent")
-  -- the re-arm
-  local seat2 = f.sim.byId[PLAYER2]
-  seat2.mustReplace = true
-  f.sim:_openReplace()
-  for _, ev in ipairs(f.sim:drainEvents()) do f.feed(ev) end
   eq(f.settle(), "replacing", "re-armed: the empty seat's picker opens")
   eq(s.replaceQueue and #s.replaceQueue, 1, "re-armed: one seat asked")
   eq(s.mine, 2, "re-armed: ...seat 2")
   local bench = s:benchOf(s:mySlot())
   eq(#bench, 1, "re-armed: its bench is the revived monster")
   eq(bench[1] and bench[1].index, 2, "re-armed: ...PIDGEY, party 2 -- its own last monster, not held back")
+  local solicits = 0
+  for _, ev in ipairs(f.events) do
+    if ev.t == "turn" and ev.slot == 1 then solicits = solicits + 1 end
+  end
+  eq(solicits, 1, "re-armed: seat 2 was solicited once")
   f.press("a")
   local sent = #f.choices
   eq(choiceAt(f, sent).action, "switch", "re-armed: the pick went")
@@ -2192,6 +2202,8 @@ block("re-armed seat", function()
   local slot2 = s.sim:slot(2)
   check(not s.sim:isDown(slot2), "re-armed: seat 2 stands again")
   check(slot2.battler and slot2.battler.mon == pidgey, "re-armed: ...with PIDGEY")
+  check(f.sim.byId[PLAYER2].b ~= nil and f.sim.byId[PLAYER2].active == 2,
+        "re-armed: ...and the referee has it out there")
   check(lineIndex(f.seen, "Go! ", "PIDGEY") ~= nil, "re-armed: its send-out was said")
   check(s:gen3ClassicModel().double.allies[2] ~= nil, "re-armed: and it is drawn")
   eq(s.mine, 1, "re-armed: mon 1 chooses first")
@@ -3151,13 +3163,14 @@ local SOLO_UI = {
 }
 
 -- A lone double taken through src/SoloBattle.lua itself, against trainer 400
--- (FOE_DEFAULT): the real door, the real transport, the real referee.
-local function startSolo(party, bag)
+-- (`foeParty`, else FOE_DEFAULT): the real door, the real transport, the real
+-- referee.
+local function startSolo(party, bag, foeParty)
   OPTIONS.solo = true
   newGame()
   SESSION.party = party
   for _, entry in ipairs(bag or {}) do FakeBag.add(SESSION.bag, entry[1], entry[2]) end
-  TRAINERS[400].party = FOE_DEFAULT
+  TRAINERS[400].party = foeParty or FOE_DEFAULT
   TRAINERS[400].items = { 0, 0, 0, 0 }
   local solo = Solo.new(SOLO_UI, {
     enabled = function() return OPTIONS.solo == true end,
@@ -3300,26 +3313,84 @@ block("solo backstop", function()
 end)
 
 -- A trainer seat left empty that the referee asks for again is answered like
--- any other owing seat (M:_answerFoes3): the re-arm staged on the referee as
--- in "re-armed seat", the trainer's second seat vacated the way
--- Battle:_faintBattler leaves one (no battler, no active, the last kept) with
--- its monster standing again.
+-- any other owing seat (M:_answerFoes3), through the referee's own re-arm.
+-- No Gen 3 trainer can bring that about -- the AI's item kinds are a full
+-- restore, an HP heal, a status cure, an X item and GUARD SPEC., each used on
+-- the battler choosing (pret battle_ai_switch_items.c:546; the engine's
+-- ai_items.lua, SoloBrain:_shouldUseItem3), so it never revives a monster on
+-- its bench -- so only the trainer's party is staged: its second monster
+-- falls for real and leaves its seat vacant, and is then standing again on
+-- the referee's sheet, as a REVIVE would leave it.  The turn that follows
+-- ends the referee's way: the vacant seat is owed a monster (`_refreshVacant`)
+-- and solicited, the pump's trainer answers it, the monster goes back out on
+-- the screen, and the fight plays on.
 block("solo re-armed foe", function()
-  local run = startSolo({ mon(4, 20, { moves = { 10 } }), mon(16, 20, { moves = { 10 } }), mon(29, 18) })
+  local run = startSolo(
+    { mon(4, 20, { moves = { 57 } }), mon(16, 20, { moves = { 57 } }), mon(29, 18) }, nil,
+    { { species = 151, level = 22, iv = 0, moves = { 33 } },
+      { species = 16, level = 2, iv = 0, moves = { 33 } } })
   local solo = run.solo
   check(run.took and untilMenu(solo), "re-armed foe: mon 1's menu")
-  local sim = solo.sim
-  local foe2 = sim.byId["solo_foe#2"]
-  foe2.lastB, foe2.b, foe2.active = foe2.b, nil, nil
-  foe2.mustReplace = true
-  sim:_openReplace()
-  eq(sim.phase, "replace", "re-armed foe: the referee asks the vacant trainer seat")
-  check(solo:_answerFoes3(), "re-armed foe: the trainer's emptied seat is answered")
-  check(foe2.b ~= nil, "re-armed foe: a monster is out on it again")
-  eq(foe2.active, 2, "re-armed foe: ...its second, the one standing again")
-  eq(sim.phase, "choice", "re-armed foe: and the referee moved on to the turn")
+  local sim, fight = solo.sim, solo.fight
+  local foe1, foe2 = sim.byId["solo_foe"], sim.byId["solo_foe#2"]
+  local seen = {}
+  local onEvent = fight.onEvent
+  fight.onEvent = function(self_, ev)
+    seen[#seen + 1] = ev
+    return onEvent(self_, ev)
+  end
+  local answered = {}
+  local submit, autoPick = sim.submitChoice, sim.autoPick
+  sim.submitChoice = function(self_, id, choice)
+    local phase = self_.phase
+    local ok = submit(self_, id, choice)
+    if id == "solo_foe#2" and phase == "replace" then answered[#answered + 1] = ok end
+    return ok
+  end
+  sim.autoPick = function(self_, id)
+    local phase = self_.phase
+    local ok = autoPick(self_, id)
+    if id == "solo_foe#2" and phase == "replace" then answered[#answered + 1] = ok end
+    return ok
+  end
+  -- turn 1: SURF from both seats knocks the trainer's PIDGEY out; its partner
+  -- stands, so there is nothing to send in and the seat is left vacant
+  for _ = 1, 2000 do
+    soloFrame(solo, true)
+    if foe2.vacant and fight.phase == "choose" and not fight:boxLive() then break end
+  end
+  eq(foe2.vacant, true, "re-armed foe: the trainer's second seat was left vacant")
+  eq(foe2.b, nil, "re-armed foe: ...with nobody on it")
+  check(foe1.b ~= nil and foe1.b.mon.hp > 0, "re-armed foe: its MEW still stands")
+  local pidgey = foe1.mons[2]
+  eq(pidgey.hp, 0, "re-armed foe: its PIDGEY fainted")
+  -- the trainer's party, staged: PIDGEY standing again on the referee's sheet
+  pidgey.hp = 6
+  local mark = #seen
+  local sentAt = nil
+  for _ = 1, 3000 do
+    if not soloFrame(solo, true) then break end
+    for i = mark + 1, #seen do
+      if seen[i].t == "send" and seen[i].slot == 4 then sentAt = sentAt or i end
+    end
+    if sentAt then break end
+  end
+  local solicitedAt = nil
+  for i = mark + 1, #seen do
+    if seen[i].t == "turn" and seen[i].slot == 4 then solicitedAt = solicitedAt or i end
+  end
+  check(solicitedAt ~= nil, "re-armed foe: the turn ended on a `turn` soliciting the vacant seat (field 4)")
+  check(#answered >= 1 and answered[#answered] == true,
+        "re-armed foe: the pump's trainer answered it, and the referee took the answer")
+  check(sentAt ~= nil and solicitedAt ~= nil and sentAt > solicitedAt,
+        "re-armed foe: then PIDGEY was sent back out")
+  check(foe2.b ~= nil and foe2.active == 2, "re-armed foe: the referee has PIDGEY on that seat")
+  eq(foe2.vacant, nil, "re-armed foe: ...which is no longer vacant")
+  local slot4 = fight.sim:slot(4)
+  check(slot4 and not fight.sim:isDown(slot4), "re-armed foe: the screen has it standing again")
   playSolo(solo)
   eq(run.result, "win", "re-armed foe: the fight played on to its end")
+  check(not contains(warns, "double battle screen"), "re-armed foe: the backstop never stepped in")
 end)
 
 -- ------------------------------------------------------------------

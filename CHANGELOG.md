@@ -88,8 +88,12 @@ here must match `manifest.version`.
   routes, and gym doubles like Tate & Liza with their badge.
   - **Two from one team, as on the cart.** Either slot switches in any bench
     monster, a fainted slot refills from the whole team, and with one left
-    only one comes out. The trainer's side works the same way.
-  - **Two commands a turn.** B on the second monster's menu goes back to the
+    only one comes out. A REVIVE used while a slot stands empty sends the
+    revived monster into it at the end of the turn. The trainer's side works
+    the same way.
+  - **Two commands a turn.** Each is checked as you make it, so a disabled
+    move, an item that would do nothing or a trapped switch is refused then,
+    in the cart's words. B on the second monster's menu goes back to the
     first's.
   - **Aiming.** Single-target moves aim at either foe or your partner. You
     are asked only when more than one other battler stands, and a Ghost's
@@ -239,6 +243,10 @@ version, but each was a real failure on a live boot or on the wire:
   the post-battle bytes run (a gym leader's TM with no badge). A won fight
   never whites out now, and a standing draw halts the trainer's script with
   the trainer unbeaten.
+- **A Ghost's CURSE in a double cursed the first foe, whoever was aimed
+  at.** It is now aimed like any single-target move. When nobody aims it
+  (a co-op computer seat, a timed-out seat, Encore, Sleep Talk), it curses
+  the battler opposite the user, as the cart's AI and `foeOf` do.
 - **The referee could stall on crafted rows.** Nature Power / Sleep Talk /
   Assist / Mirror Move rows that called each other recursed until a stack
   overflow and a timeout draw; calls are capped at depth 3. The same pass
