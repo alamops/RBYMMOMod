@@ -2390,18 +2390,19 @@ end
 -- (s) The badges ride on our side, for the referee's badge boosts and
 --     obedience caps (docs/plans/gen3-badge-rules.md, contract K1): the save's
 --     badge flags as the badge numbers a hub upload carries.  Our own sheets
---     carry the obedience check's `traded` / `fateful` (K2); the wild
+--     carry the obedience check's `traded` / `unfateful` (K2); the wild
 --     monster's never do.
 do
+  -- Gen3.badgeList is the one reading every path shares (solo's side entry,
+  -- a hub upload): the save's badge flags as their numbers, nil for none.
+  local Gen3 = need("Gen3")
   newGame({ badges = { [1] = true, [3] = true } })
-  local b = Solo.gen3Badges()
-  check(b and b[1] and b[3] and not b[2], "badges: the save's badge flags, by number")
+  eq(table.concat(Gen3.badgeList() or {}, ","), "1,3", "badges: the save's badge flags, by number")
   newGame()
-  eq(Solo.gen3Badges(), nil, "badges: none held, none sent")
+  eq(Gen3.badgeList(), nil, "badges: none held, none sent")
 
   -- The live flag store wins whenever it is a table, field or not -- the
   -- engine's own order (Engine.hasBadge), and the moment of a divert.
-  local Gen3 = need("Gen3")
   newGame({ badges = { [1] = true } })
   FakeSpace.store = { badges = { [2] = true, [8] = true } }
   GAME.phase = "battle"
@@ -2439,12 +2440,17 @@ do
   eq(mons[1] and mons[1].traded, nil, "traded: ANN's own catch is not")
   eq(mons[2] and mons[2].traded, true, "traded: another OT id is")
   eq(mons[3] and mons[3].traded, true, "traded: ...as is ANN's id under another OT name")
-  eq(mons[1] and mons[1].fateful, nil, "fateful: only MEW and DEOXYS carry it")
-  eq(mons[4] and mons[4].fateful, true, "fateful: an event MEW")
-  eq(mons[5] and mons[5].fateful, nil, "fateful: ...not one whose bit is explicitly clear")
-  eq(mons[6] and mons[6].fateful, true, "fateful: ...but one that never had the field (the engine's reading)")
+  eq(mons[4] and mons[4].unfateful, nil, "unfateful: an event MEW carries nothing")
+  eq(mons[5] and mons[5].unfateful, true, "unfateful: a MEW whose bit is explicitly clear")
+  eq(mons[6] and mons[6].unfateful, nil,
+     "unfateful: ...not one that never had the field (the engine's reading)")
+  local retired = false
+  for i = 1, #mons do
+    if mons[i].fateful ~= nil then retired = true end
+  end
+  eq(retired, false, "K2: the retired fateful never reaches the referee")
   local wild = seen and seen.sides.b[1].mons[1] or {}
-  check(wild.traded == nil and wild.fateful == nil, "K2: the wild monster's sheet carries neither")
+  check(wild.traded == nil and wild.unfateful == nil, "K2: the wild monster's sheet carries neither")
   drive(solo, function(f) f:pickMove(1) end)
   check(not solo:isRunning(), "badges: the fight still runs to its end")
 end

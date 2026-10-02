@@ -1316,23 +1316,30 @@ scenarios[#scenarios + 1] = {
 --
 --   * a Gen 3 party's badge numbers ("1".."8"; the sanitisers keep any id and
 --     drop the rest, the referee reads 1..8);
---   * a Gen 3 sheet's `traded` / `fateful` -- true kept, false dropped,
---     anything else refuses the sheet;
+--   * a Gen 3 sheet's `traded` / `unfateful` -- true kept, false dropped,
+--     anything else refuses the sheet; the retired `fateful` neither copied
+--     nor read;
 --   * the `obey` event: each of the eight outcome tokens kept, any other text
 --     dropped with the event kept, and the kind refused by a Gen 2 reader;
 --   * a Gold party's badge names, Johto and Kanto;
 --   * the Gen 1 / Gen 2 ruleset's `typeIds` (the chart's axis by name):
---     1..BATTLE_TYPE_MAX ids, anything unreadable refusing the ruleset, and
---     never read on Gen 3.
+--     1..BATTLE_TYPE_MAX ids, all or nothing, anything unreadable DROPPING the
+--     list and keeping the ruleset, a JSON null closed up first (NULL, as
+--     `decoded` reads it), a ruleset with none, and never read on Gen 3.
 -- ------------------------------------------------------------------
 
 local OBEY_TOKENS = { "ignores_asleep", "uses_random_move", "falls_asleep", "hits_itself",
                       "loafing", "wont_obey", "turned_away", "pretend_not_notice" }
 
 local function badgeRules()
-  local function flagged(traded, fateful)
+  local function flagged(traded, unfateful)
     local sheet = mon3({ species = "MEW", speciesNum = 151 })
-    sheet.traded, sheet.fateful = traded, fateful
+    sheet.traded, sheet.unfateful = traded, unfateful
+    return sheet
+  end
+  local function retired(fateful)
+    local sheet = mon3({ species = "MEW", speciesNum = 151 })
+    sheet.fateful = fateful
     return sheet
   end
   local gold = { species = "ALPHA", level = 50, hp = 100, maxHp = 100,
@@ -1354,6 +1361,9 @@ local function badgeRules()
     { "mon", flagged(true, nil) },
     { "mon", flagged("yes", nil) },
     { "mon", flagged(nil, 1) },
+    { "mon", flagged(nil, true) },
+    { "mon", retired(true) },
+    { "mon", retired(1) },
     { "party", { battle = "b1", mons = { gold },
                  badges = { "ZEPHYR", "MINERAL", "RISING", "BOULDER", "EARTH" } }, 2 },
     { "party", { battle = "b1", mons = { gold }, badges = { "ZEPHYR", "ZEPHYR", "bad id!" } }, 2 },
@@ -1366,6 +1376,12 @@ local function badgeRules()
     { "ruleset", { chart = CHART, typeIds = { "NORMAL", string.rep("X", 41) } }, 2 },
     { "ruleset", { chart = CHART, typeIds = {} }, 2 },
     { "ruleset", { chart = CHART, typeIds = "NORMAL" }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", "mymod.FAIRY" }, specialTypes = { 1 } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", NULL, "FIRE" } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { NULL, NULL } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", NULL, "BAD TYPE" } }, 2 },
+    { "ruleset", { chart = CHART, specialTypes = { 1 } }, 1 },
+    { "ruleset", { chart = CHART }, 2 },
     { "ruleset", { typeTable = CHART3, typeIds = { "NORMAL" } }, 3 },
   }
   for i, token in ipairs(OBEY_TOKENS) do
@@ -1387,7 +1403,7 @@ scenarios[#scenarios + 1] = {
   run = function()
     local out = {}
     for i, case in ipairs(badgeRules()) do
-      local kind, input, gen = case[1], case[2], case[3]
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
       local got
       if kind == "ruleset" then got = Wire.battleRuleset(input, gen)
       elseif kind == "mon" then got = Wire.battleMon(input)

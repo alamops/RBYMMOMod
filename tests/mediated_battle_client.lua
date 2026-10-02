@@ -305,7 +305,7 @@ check(Wire.battleMon({ species = "SHELLY", speciesId = "not a species!",
                                    accuracy = 255, type = 0, effect = 0,
                                    chance = 0 } } }) == nil,
       "an unreadable id refuses the battler, like every other id on the sheet")
--- The obedience check's `traded` / `fateful` are Gen 3's (contract K2 of
+-- The obedience check's `traded` / `unfateful` are Gen 3's (contract K2 of
 -- docs/plans/gen3-badge-rules.md): the Gen 1 / Gen 2 reader never copies them.
 do
   local stripped = Wire.battleMon({
@@ -313,9 +313,9 @@ do
     stats = { atk = 1, def = 1, spd = 1, spc = 1 },
     moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
                 type = 0, effect = 0, chance = 0 } },
-    traded = true, fateful = true,
+    traded = true, unfateful = true,
   })
-  check(stripped ~= nil and stripped.traded == nil and stripped.fateful == nil,
+  check(stripped ~= nil and stripped.traded == nil and stripped.unfateful == nil,
         "Wire.battleMon (Gen 1) strips the Gen 3 obedience facts")
 end
 
@@ -487,15 +487,57 @@ check(specialSet[0] and specialSet[2], "FIRE and WATER indices are Special")
 check(not specialSet[1], "NORMAL is Physical")
 -- The chart's axis by name (`typeIds`): what Gold's badge type boost reads a
 -- move's type index through on the referee (BattleSim2 `_typeIdOf`).  The same
--- order every row and move index on this upload uses, and it crosses the wire.
-eq(table.concat(ruleset.typeIds or {}, ","), "FIRE,NORMAL,WATER", "typeIds: the chart's axis by name, in order")
-local ruleWire = Wire.battleRuleset(ruleset, 2)
+-- order every row and move index on this upload uses, and it crosses the wire
+-- -- on Gold only: Gen 1's referee has no type boost and never reads it.
+local function goldWith(data)
+  local game = gameWith({}, data)
+  game.generation = 2
+  return game
+end
+eq(ruleset.typeIds, nil, "typeIds: a Gen 1 ruleset carries none")
+local goldRules = Mediated.snapshotRuleset(goldWith(DATA))
+eq(table.concat(goldRules.typeIds or {}, ","), "FIRE,NORMAL,WATER",
+   "typeIds: Gold's ruleset names the chart's axis, in order")
+local ruleWire = Wire.battleRuleset(goldRules, 2)
 eq(table.concat(ruleWire and ruleWire.typeIds or {}, ","), "FIRE,NORMAL,WATER",
    "typeIds: Wire keeps them on a Gen 2 ruleset")
-if ruleset.typeIds then
-  ruleset.typeIds[1] = "SCRIBBLED"
+if goldRules.typeIds then
+  goldRules.typeIds[1] = "SCRIBBLED"
   eq(Mediated.typeOrder(DATA).ids[1], "FIRE", "typeIds: a copy -- the type order's cache is not written through it")
-  ruleset.typeIds[1] = "FIRE"
+end
+
+-- A registry id is any non-empty string, and a content mod's type need not fit
+-- the wire's id alphabet.  The client leaves the axis off rather than send one
+-- a hub would drop -- naming the id and how to fix it -- and the ruleset, chart
+-- and all, still goes up: the fight is lost a 1/8 boost, not refereeing.
+do
+  local modded = { type_chart = {
+    types = { NORMAL = { name = "NORMAL", category = "physical" },
+              ["mymod.FAIRY"] = { name = "FAIRY", category = "special" } },
+    matchups = { { attacker = "mymod.FAIRY", defender = "NORMAL", multiplier = 2 } },
+  }, moves = {} }
+  local mark = #warns
+  local rules = Mediated.snapshotRuleset(goldWith(modded))
+  eq(#rules.chart, 2, "typeIds (modded): the chart still names both types")
+  eq(rules.typeIds, nil, "typeIds (modded): an id off the wire's alphabet leaves the axis off")
+  local named = false
+  for i = mark + 1, #warns do
+    if tostring(warns[i]):find("mymod.FAIRY", 1, true) then named = true end
+  end
+  check(named, "typeIds (modded): ...and the warning names the id")
+  local clean = Wire.battleRuleset(rules, 2)
+  check(clean ~= nil and clean.chart ~= nil, "typeIds (modded): the ruleset survives its sanitiser")
+  -- A hub handed one anyway (an older client, a hand-made upload) drops the
+  -- list and keeps the ruleset, rather than refusing the fight.
+  local sent = {}
+  for k, v in pairs(rules) do sent[k] = v end
+  sent.typeIds = { "NORMAL", "mymod.FAIRY" }
+  clean = Wire.battleRuleset(sent, 2)
+  check(clean ~= nil and clean.chart ~= nil and clean.typeIds == nil,
+        "typeIds (modded): Wire drops an unreadable axis and keeps the ruleset")
+  sent.typeIds = "NORMAL"
+  clean = Wire.battleRuleset(sent, 2)
+  check(clean ~= nil and clean.typeIds == nil, "typeIds: ...as it does one that is not a list")
 end
 
 -- ------- the physical/special split comes off the chart's own records
@@ -621,7 +663,12 @@ end
 local cut = Mediated.snapshotRuleset(gameWith({}, wide))
 eq(#cut.chart, Config.BATTLE_TYPE_MAX, "a pack with too many types is trimmed")
 check(Wire.battleRuleset(cut) ~= nil, "so that the ruleset still sanitises")
-eq(#(cut.typeIds or {}), Config.BATTLE_TYPE_MAX, "typeIds: trimmed with the chart, so it still fits the wire")
+local goldCut = Mediated.snapshotRuleset(goldWith(wide))
+eq(#(goldCut.typeIds or {}), Config.BATTLE_TYPE_MAX,
+   "typeIds: Gold's axis is trimmed with the chart, so it still fits the wire")
+local goldCutWire = Wire.battleRuleset(goldCut, 2)
+eq(goldCutWire and goldCutWire.typeIds and #goldCutWire.typeIds, Config.BATTLE_TYPE_MAX,
+   "typeIds: ...and crosses it whole")
 
 -- The ordering is a plain sort, and it has to be: nothing on the wire states
 -- it, so two clients whose tables iterated differently would read every one of

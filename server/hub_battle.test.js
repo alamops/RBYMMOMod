@@ -2249,7 +2249,7 @@ function testGen3FamilyMixedCarts() {
   const record = relay.battles.get('g3f');
   relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
   const annMon = tradee3();
-  annMon.fateful = true;
+  annMon.unfateful = true;
   // Each upload claims the other cart's family: no party field decides it.
   relay.handle(a.id, {
     type: 'mmo.battle_party',
@@ -2275,11 +2275,11 @@ function testGen3FamilyMixedCarts() {
     ok(npc && !has(npc, 'family'), `family: an NPC seat's entry has none (${npcId})`);
   }
   // What the hub was handed reaches the entry unchanged: the badges as the set
-  // the sanitiser rebuilt, the sheet's traded / fateful on the mon itself.
+  // the sanitiser rebuilt, the sheet's traded / unfateful on the mon itself.
   ok(annEntry.badges && annEntry.badges['1'] === true && annEntry.badges['3'] === true,
     'family: the uploaded badges ride the entry');
   ok(annEntry.mons[0].traded === true, "family: the mon's traded flag rides the entry");
-  ok(annEntry.mons[0].fateful === true, 'family: and its fateful flag');
+  ok(annEntry.mons[0].unfateful === true, 'family: and its unfateful flag');
   const annFighter = record.sim.byId.get(a.id);
   const bobFighter = record.sim.byId.get(b.id);
   ok(annFighter.family === 'rse', "family: the referee plays Emerald's rule for ANN");
@@ -2531,6 +2531,23 @@ function testGen2TypeIdsBoost() {
   ok(bugHit(['FOG'], TYPE_IDS2).hit === plain, 'typeIds: a badge for another type does nothing to it');
   ok(bugHit(['HIVE'], undefined).hit === plain,
     "typeIds: with no typeIds the move's type has no name, and nothing fires");
+  // An axis the hub cannot read -- a content mod's type id off the wire's id
+  // alphabet, since a registry id is any non-empty string -- is dropped, not
+  // refused: the ruleset stands, the field opens, and it plays exactly as one
+  // uploaded with no typeIds at all.
+  const modded = bugHit(['HIVE'], ['DARK', 'mymod.BUG', 'FIRE']);
+  ok(modded.record && modded.record.sim, 'typeIds (unreadable): the field still opens');
+  ok(modded.seen.opts && modded.seen.opts.typeIds == null,
+    'typeIds (unreadable): ...and Turn.attempt is handed no axis');
+  ok(modded.seen.opts && modded.seen.opts.chart && modded.seen.opts.specialTypes.length === 1,
+    'typeIds (unreadable): ...but the rest of the ruleset');
+  ok(modded.hit === plain, 'typeIds (unreadable): ...so nothing fires');
+  // A JSON null inside the list is closed up first, as Lua's decoder does
+  // before Wire.lua sees it: the hub reads the axis that is left.
+  const holed = bugHit(['HIVE'], ['DARK', 'BUG', 'FIRE', null]);
+  ok((holed.record.sim && holed.record.sim.typeIds || []).join(',') === 'DARK,BUG,FIRE',
+    'typeIds (null-holed): the nulls are closed up, as on the Lua hub');
+  ok(holed.hit === boosted.hit, 'typeIds (null-holed): ...and HIVE still boosts the BUG move');
 }
 
 testGen3SimSelection();

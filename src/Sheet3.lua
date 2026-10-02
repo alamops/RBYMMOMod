@@ -57,7 +57,7 @@
 -- players' carts only (see `statsFor`); every other fight, and the default,
 -- is the forme this cart's own battles use.  { own = true } marks this
 -- player's own monsters (Sheet3.party sets it): off the link, their sheets
--- carry the obedience check's `traded` / `fateful` (contract K2 of
+-- carry the obedience check's `traded` / `unfateful` (contract K2 of
 -- docs/plans/gen3-badge-rules.md).
 --
 -- Names that ride the wire are the cart's names spelled in the wire's
@@ -456,20 +456,22 @@ local function tradedOf(mon)
     or (mon.otName ~= nil and pname ~= nil and tostring(mon.otName) ~= tostring(pname))
 end
 
--- Contract K2's `fateful`: does the obedience check take this Mew / Deoxys as
--- event-legal?  The engine reads one field for it and applies the
--- always-disobey rule to an explicit false only (battle/engine.lua:1299,
+-- Contract K2's `unfateful`: does the obedience check hold this Mew / Deoxys
+-- to the always-disobey rule?  The engine reads one field for it and applies
+-- the rule to an explicit false only (battle/engine.lua:1299,
 -- `mon.fatefulEncounter == false`): a link-traded monster carries the bit as a
 -- boolean (src/link/Protocol.lua unpackMon3), an event encounter sets it true
 -- (scripting/natives_events.lua, natives_event_islands.lua), and a monster
 -- that never had the field obeys the ordinary rules -- a save import keeps the
 -- cart's ribbon bit as `modernFatefulEncounter`, which that check does not
--- read.  So `fateful` is set unless the field is false: the engine's verdict,
--- which a referee reading "no `fateful`, no exemption" then reproduces.  Any
--- other species never asks, and carries nothing.
-local function fatefulOf(mon, species)
+-- read.  So the sheet names the one case that check punishes, an explicit
+-- false, and says nothing otherwise: an absent flag reads as the engine's
+-- nil, the ordinary rules, so a sheet that leaves it out can never cost a
+-- Mew its obedience (the referee reads `unfateful == true`, not "no fateful
+-- bit").  Any other species never asks, and carries nothing.
+local function unfatefulOf(mon, species)
   if not FATEFUL_SPECIES[species] then return false end
-  return mon.fatefulEncounter ~= false
+  return mon.fatefulEncounter == false
 end
 
 -- One C4 sheet.  `slot` is the 0-based party index the sheet was cut from
@@ -573,7 +575,7 @@ function M.mon(session, mon, slot, opts)
   -- at all (`link`; the referee ignores them there too).
   if opts.own and not opts.link then
     if tradedOf(mon) then sheet.traded = true end
-    if fatefulOf(mon, species) then sheet.fateful = true end
+    if unfatefulOf(mon, species) then sheet.unfateful = true end
   end
   return sheet
 end

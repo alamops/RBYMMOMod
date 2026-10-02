@@ -9933,7 +9933,7 @@ function M:uploadMediated()
   -- player is a link battle, so Deoxys fights on its link stats there
   -- (Sheet3's `link`); a trainer or a wild fight is the cart's own and does not,
   -- and there the sheets are `own`, so each carries the obedience check's
-  -- `traded` / `fateful` (contract K2 of docs/plans/gen3-badge-rules.md).
+  -- `traded` / `unfateful` (contract K2 of docs/plans/gen3-badge-rules.md).
   local mons = self.gen3
       and Sheet3.mons(self.game, mine.party,
         { link = Mediated.LINK_MODES[self.mode] == true, own = true })
@@ -11662,9 +11662,9 @@ end
 --   * doubles targeting is the cart's: a SELECTED move aims at either foe or
 --     the partner, a spread / self / field move is never asked about
 --     (`needsTarget3`);
---   * the six new kinds (ability, weather, held, form, sub, ball) and `stat`'s
---     `delta` are read here (`medRows3`), the `anim` target decides where the
---     particles land;
+--   * the seven new kinds (ability, weather, held, form, sub, ball, obey) and
+--     `stat`'s `delta` are read here (`medRows3`), the `anim` target decides
+--     where the particles land;
 --   * a knockout is priced whole on this client's session party by Exp3
 --     (Cmd_getexp: the living participants' split, the Exp. Share holders'
 --     half, Lucky Egg / trainer / traded), a level's moves come off the cart's
@@ -11926,7 +11926,8 @@ function M:medRows3(msg, rows, index, slot, say)
     return true
   end
   if kind == "obey" then
-    -- A traded mon over its badge cap disobeyed (contract K3): one line, the
+    -- A player's mon disobeyed -- traded and over its badge cap, or a Mew /
+    -- Deoxys whose sheet says `unfateful` (contract K3): one line, the
     -- cart's (MediatedBattle.obeyText3), phrased when its row plays so it
     -- names whoever the screen is showing on that seat by then.  The engine
     -- draws nothing for it; whatever the outcome does next -- the called

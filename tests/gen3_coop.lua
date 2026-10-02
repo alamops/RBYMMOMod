@@ -20,7 +20,7 @@
 --      party, and a catch into the session party;
 --  3b. the badge rules through the real screens and the in-game hub
 --      (docs/plans/gen3-badge-rules.md): each human's own badges (K1) and
---      traded / fateful sheets (K2) reach the referee on their own cart's
+--      traded / unfateful sheets (K2) reach the referee on their own cart's
 --      terms, a boosted strike and a changed speed order against the same fight
 --      with the badges taken away, a traded mon over its cap refusing on a
 --      human seat with the cart's line said once (K3), and none of it in a
@@ -1286,7 +1286,7 @@ end
 
 -- ------------------------------------------------------------------
 -- 3b. badge rules through the real co-op screens and the in-game hub
---     (docs/plans/gen3-badge-rules.md: K1 badges, K2 traded / fateful,
+--     (docs/plans/gen3-badge-rules.md: K1 badges, K2 traded / unfateful,
 --     K3 the obey event)
 -- ------------------------------------------------------------------
 --
@@ -1548,7 +1548,8 @@ do
     -- read as traded had his sheets been cut under ANN's (111) -- so the
     -- upload is only right if each client cuts its own.  His MEW came from a
     -- stranger and its ribbon field was never set, which the engine reads as
-    -- event-legal (`fateful`); ANN's MEW has the bit explicitly clear.
+    -- the ordinary rules (nothing named); ANN's MEW has the bit explicitly
+    -- clear, the one case the engine holds to cap 0 (`unfateful`).
     local annP = player("ANN", "firered", 111, { 1, 3 }, { RSE_BADGE1 + 7 })
     local bobP = player("BOB", "emerald", 333, { 5, 7 }, { FRLG_BADGE1 })
     local f = badgeFight({ id = "bd1", mode = "coop_npc", seed = SEED, trainerId = 401,
@@ -1564,17 +1565,21 @@ do
     local hostMons, guestMons = hostUp and hostUp.mons or {}, guestUp and guestUp.mons or {}
     eq(hostMons[1] and hostMons[1].traded, nil, "traded: ANN's own catch is not")
     eq(hostMons[2] and hostMons[2].traded, nil, "traded: ...nor her MEW, caught by her")
-    eq(hostMons[2] and hostMons[2].fateful, nil, "fateful: ...and her MEW's ribbon bit is explicitly clear")
+    eq(hostMons[2] and hostMons[2].unfateful, true, "unfateful: ...and her MEW's ribbon bit is explicitly clear")
     eq(guestMons[1] and guestMons[1].traded, nil, "traded: BOB's own catch is not (cut under BOB's trainer id)")
     eq(guestMons[2] and guestMons[2].traded, true, "traded: BOB's MEW from a stranger is")
-    eq(guestMons[2] and guestMons[2].fateful, true, "fateful: ...and it carries no clear ribbon bit")
+    eq(guestMons[2] and guestMons[2].unfateful, nil, "unfateful: ...and it names no clear ribbon bit")
+    local retired = false
+    for _, mon in ipairs(hostMons) do if mon.fateful ~= nil then retired = true end end
+    for _, mon in ipairs(guestMons) do if mon.fateful ~= nil then retired = true end end
+    eq(retired, false, "K2: neither upload carries the retired fateful")
     local npcUp = uploadOf(f.hostT, "b")
     eq(npcUp and npcUp.badges, nil, "the trainer's team carries no badges")
     local npcClean = true
     for _, mon in ipairs(npcUp and npcUp.mons or {}) do
-      if mon.traded ~= nil or mon.fateful ~= nil then npcClean = false end
+      if mon.traded ~= nil or mon.unfateful ~= nil then npcClean = false end
     end
-    check(npcUp ~= nil and npcClean, "...and its sheets neither traded nor fateful")
+    check(npcUp ~= nil and npcClean, "...and its sheets neither traded nor unfateful")
 
     check(f.record.sim ~= nil, "the hub referees the fight")
     local annF, bobF = fighterOf(f, f.ann.id), fighterOf(f, f.bob.id)
@@ -1585,9 +1590,9 @@ do
     eq(setNums(bobF and bobF.badges), "5,7", "referee: ...with BOB's own badges, not ANN's")
     eq(bobF and bobF.family, "rse", "referee: ...as his Emerald cart")
     eq(bobF and bobF.mons[2].traded, true, "referee: BOB's traded MEW is traded here too")
-    eq(bobF and bobF.mons[2].fateful, true, "referee: ...with its ribbon bit")
+    eq(bobF and bobF.mons[2].unfateful, nil, "referee: ...held to the ordinary rules, nothing named")
     eq(bobF and bobF.mons[1].traded, nil, "referee: ...and his own catch is not")
-    eq(annF and annF.mons[2].fateful, nil, "referee: ANN's MEW has no ribbon bit to claim")
+    eq(annF and annF.mons[2].unfateful, true, "referee: ANN's MEW is held to its clear ribbon bit")
     for _, npcId in ipairs(f.record.npcIds or {}) do
       local seat = fighterOf(f, npcId)
       eq(seat and seat.badgeRules, nil, "referee: a trainer's seat plays no badge rules")
@@ -1714,9 +1719,12 @@ do
       local wildFoe = o.mode == "coop_wild"
         and monOf(16, 76, { moves = { 33 }, pp = { 35 }, maxPp = { 35 }, otId = 5, otName = "" })
         or nil
+      local annLead = o.annLead
+        and lead(o.annLead[1], 50, annP, { 70, 10 }, o.annLead[2])
+        or lead(4, 50, annP, { 70, 10 }, o.annTraded and stranger or nil)
       local r = badgeFight({ id = o.id, mode = o.mode or "coop_npc", seed = o.seed, trainerId = 401,
         ann = annP, bob = bobP, wild = wildFoe,
-        annParty = { lead(4, 50, annP, { 70, 10 }, o.annTraded and stranger or nil) },
+        annParty = { annLead },
         bobParty = { lead(16, 50, bobP, { 71 }, o.bobTraded and stranger or nil) } })
       r.pump()
       r.host:commit({ slot = 1, move = 1, target = 3 })
@@ -1774,6 +1782,30 @@ do
     eq(uploadOf(own.hostT, "a").mons[1].traded, nil, "obey (own catch): her sheet says it is not traded")
     eq(#own.turn.obeys, 0, "obey (own catch): a mon that is hers obeys at any level")
     check(own.turn.dealt[0] ~= nil, "obey (own catch): ANN's strike landed")
+
+    -- The Mew / Deoxys rule (contract K2, battle/engine.lua:1299): ANN's own
+    -- MEW whose fateful-encounter bit is explicitly clear obeys nobody -- cap
+    -- 0, the eighth badge or not, so every seed disobeys -- and one that never
+    -- had the field plays the ordinary rules, as the engine's nil does: her
+    -- own catch, so it obeys.  The referee reads `unfateful == true`; an
+    -- absent flag can never cost a MEW its obedience.
+    local mewClear = obeyRun({ id = "ob8", seed = 5, annBadges = { 8 },
+                               annLead = { 151, { fatefulEncounter = false } } })
+    local mewUp = uploadOf(mewClear.hostT, "a")
+    eq(mewUp and mewUp.mons[1].unfateful, true, "obey (MEW, bit clear): ANN's sheet names the clear bit")
+    eq(mewUp and mewUp.mons[1].traded, nil, "obey (MEW, bit clear): ...of her own catch")
+    eq(nums(mewUp and mewUp.badges), "8", "obey (MEW, bit clear): ...and she sends the eighth badge")
+    local mewF = fighterOf(mewClear, mewClear.ann.id)
+    eq(mewF and mewF.mons[1].unfateful, true, "obey (MEW, bit clear): the referee holds the flag")
+    eq(#mewClear.turn.obeys, 1, "obey (MEW, bit clear): it disobeys, badge 8 and all")
+    eq(mewClear.turn.obeys[1] and mewClear.turn.obeys[1].slot, 0, "obey (MEW, bit clear): ...on ANN's seat")
+    eq(mewClear.turns, 2, "obey (MEW, bit clear): the turn went on")
+    local mewUnset = obeyRun({ id = "ob9", seed = 5, annLead = { 151 } })
+    local unsetUp = uploadOf(mewUnset.hostT, "a")
+    check(unsetUp ~= nil and unsetUp.mons[1].unfateful == nil and unsetUp.mons[1].fateful == nil,
+          "obey (MEW, field unset): ANN's sheet names nothing")
+    eq(#mewUnset.turn.obeys, 0, "obey (MEW, field unset): it obeys with no badge at all")
+    check(mewUnset.turn.dealt[0] ~= nil, "obey (MEW, field unset): ANN's strike landed")
 
     -- Another outcome: ignores orders and uses a different move -- which
     -- lands, and is announced once after the line that said why.
@@ -1857,7 +1889,7 @@ do
               for at, mon in ipairs(msg.mons) do
                 mons[at] = copyTable(mon)
                 mons[at].traded = true
-                if mon.species == "MEW" then mons[at].fateful = true end
+                if mon.species == "MEW" then mons[at].unfateful = true end
               end
               msg.mons = mons
             end
@@ -1908,9 +1940,9 @@ do
       eq(sent and sent.badges, nil, "pvp: " .. NAMES[i] .. " uploads no badges")
       local flagged = false
       for _, mon in ipairs(sent and sent.mons or {}) do
-        if mon.traded ~= nil or mon.fateful ~= nil then flagged = true end
+        if mon.traded ~= nil or mon.unfateful ~= nil or mon.fateful ~= nil then flagged = true end
       end
-      eq(flagged, false, "pvp: " .. NAMES[i] .. "'s sheets carry neither traded nor fateful")
+      eq(flagged, false, "pvp: " .. NAMES[i] .. "'s sheets carry neither traded nor unfateful")
       local fighter = fighterOf(honest, honest.ids[i])
       eq(fighter and fighter.badgeRules, nil, "pvp: " .. NAMES[i] .. "'s seat plays no badge rules")
       eq(fighter and fighter.badges, nil, "pvp: ...and holds no badges")
@@ -1927,6 +1959,8 @@ do
     local sentUp = forged.record.parties and forged.record.parties[forged.ids[1]]
     check(sentUp ~= nil and sentUp.badges ~= nil and sentUp.mons[1].traded == true,
           "pvp (hostile): the forged badges and traded flag reached the hub's record")
+    eq(sentUp and sentUp.mons[2] and sentUp.mons[2].unfateful, true,
+       "pvp (hostile): ...as did the forged MEW's unfateful (cap 0, were the rule on)")
     for i = 1, 4 do
       local fighter = fighterOf(forged, forged.ids[i])
       eq(fighter and fighter.badgeRules, nil, "pvp (hostile): " .. NAMES[i] .. "'s seat plays no badge rules")

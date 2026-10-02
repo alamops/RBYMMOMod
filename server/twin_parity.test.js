@@ -240,14 +240,16 @@ test('highCrit and baseSpd ride the battle sheet as optional fields', () => {
   assert.strictEqual(cleanBattleMon({ ...mon, baseSpd: 'fast' }), null,
     'an unreadable baseSpd refuses the battler');
   // The Gen 3 obedience facts (contract K2) are not Gen 1's to read.
-  const gen1 = cleanBattleMon({ ...mon, traded: true, fateful: true });
-  assert.ok(gen1 && gen1.traded === undefined && gen1.fateful === undefined,
-    'the Gen 1 dialect strips traded / fateful');
+  const gen1 = cleanBattleMon({ ...mon, traded: true, unfateful: true });
+  assert.ok(gen1 && gen1.traded === undefined && gen1.unfateful === undefined,
+    'the Gen 1 dialect strips traded / unfateful');
 });
 
 test('Gen 3 obedience facts: true or absent, twin of Wire.battleMon3', () => {
-  // docs/plans/gen3-badge-rules.md contract K2: `traded` / `fateful` on a
+  // docs/plans/gen3-badge-rules.md contract K2: `traded` / `unfateful` on a
   // player's own Gen 3 sheet, read the way the ruleset's `underwater` is.
+  // `unfateful` names a Mew / Deoxys whose fateful-encounter bit is explicitly
+  // clear; the retired `fateful` is neither copied nor read.
   const move3 = {
     num: 33, id: 'MOVE_33', pp: 35, maxPp: 35, power: 40, type: 0,
     accuracy: 100, effect: 0, chance: 0, target: 0, priority: 0, flags: 0,
@@ -263,19 +265,26 @@ test('Gen 3 obedience facts: true or absent, twin of Wire.battleMon3', () => {
   const base = cleanBattleMon(mon3);
   assert.ok(base, '(a well-formed Gen 3 sheet on its own)');
   assert.strictEqual(base.traded, undefined, 'absent traded stays absent');
-  assert.strictEqual(base.fateful, undefined, 'absent fateful stays absent');
-  const both = cleanBattleMon({ ...mon3, traded: true, fateful: true });
+  assert.strictEqual(base.unfateful, undefined, 'absent unfateful stays absent');
+  const both = cleanBattleMon({ ...mon3, traded: true, unfateful: true });
   assert.strictEqual(both.traded, true, 'traded = true comes through');
-  assert.strictEqual(both.fateful, true, 'fateful = true comes through');
-  const off = cleanBattleMon({ ...mon3, traded: false, fateful: false });
-  assert.ok(off && off.traded === undefined && off.fateful === undefined,
+  assert.strictEqual(both.unfateful, true, 'unfateful = true comes through');
+  const off = cleanBattleMon({ ...mon3, traded: false, unfateful: false });
+  assert.ok(off && off.traded === undefined && off.unfateful === undefined,
     'a false is kept as absent');
   assert.strictEqual(cleanBattleMon({ ...mon3, traded: 'yes' }), null,
     'a non-boolean traded refuses the mon');
-  assert.strictEqual(cleanBattleMon({ ...mon3, fateful: 1 }), null,
-    'a non-boolean fateful refuses the mon');
+  assert.strictEqual(cleanBattleMon({ ...mon3, unfateful: 1 }), null,
+    'a non-boolean unfateful refuses the mon');
   assert.strictEqual(cleanBattleMon({ ...mon3, traded: null }).traded, undefined,
     'a null traded is absent, as Lua reads a JSON null');
+  assert.strictEqual(cleanBattleMon({ ...mon3, unfateful: null }).unfateful, undefined,
+    'a null unfateful is absent too');
+  const retired = cleanBattleMon({ ...mon3, fateful: true });
+  assert.ok(retired && retired.fateful === undefined && retired.unfateful === undefined,
+    'the retired fateful is dropped, not copied');
+  assert.ok(cleanBattleMon({ ...mon3, fateful: 1 }),
+    '...and never read, so a non-boolean one refuses nothing');
 });
 
 test('shared hello refuse strings stay twin-worded', () => {

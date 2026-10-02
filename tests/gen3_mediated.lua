@@ -658,6 +658,9 @@ do
 end
 
 -- K2: the obedience check's facts on this player's own sheets, off the link.
+-- `unfateful` names the one Mew / Deoxys the engine's check punishes -- an
+-- explicit `fatefulEncounter == false` (battle/engine.lua:1299) -- and the
+-- referee reads `unfateful == true`, so an absent flag is the ordinary rules.
 do
   newGame()
   local Wire = need("Wire")
@@ -674,36 +677,57 @@ do
   eq(own[1].traded, nil, "traded: ANN's own catch is not")
   eq(own[2].traded, true, "traded: another OT id is (Engine.isTradedMon)")
   eq(own[3].traded, true, "traded: ...as is ANN's id under another OT name")
-  eq(own[1].fateful, nil, "fateful: only MEW and DEOXYS carry it")
-  eq(own[4].fateful, true, "fateful: an event MEW")
-  eq(own[5].fateful, nil, "fateful: ...not one whose bit is explicitly clear (engine.lua:1299)")
-  eq(own[6].fateful, true, "fateful: ...but one that never had the field obeys as the engine's does")
+  eq(own[4].unfateful, nil, "unfateful: an event MEW carries nothing")
+  eq(own[5].unfateful, true, "unfateful: a MEW whose bit is explicitly clear (engine.lua:1299)")
+  eq(own[6].unfateful, nil,
+     "unfateful: ...not one that never had the field, which obeys as the engine's does")
+  local retired = false
+  for i = 1, #own do
+    if own[i].fateful ~= nil then retired = true end
+  end
+  eq(retired, false, "K2: the retired fateful is never sent")
+  SESSION.party = { monOf(16, 5, { fatefulEncounter = false }) }
+  local other = Mediated.snapshotParty(GAME, { link = false })
+  eq(other[1] and other[1].unfateful, nil, "unfateful: only MEW and DEOXYS carry it")
+  SESSION.party = {
+    monOf(16, 5, { otId = 999 }),
+    monOf(151, 5, { fatefulEncounter = false }),
+  }
   local linked = Mediated.snapshotParty(GAME, { link = true })
-  eq(linked[2].traded, nil, "K2: a link battle's sheets carry no traded")
-  eq(linked[4].fateful, nil, "K2: ...and no fateful")
-  local foe = Mediated.snapshotMons(GAME, { monOf(16, 5, { otId = 999 }), monOf(151, 5) })
+  eq(linked[1].traded, nil, "K2: a link battle's sheets carry no traded")
+  eq(linked[2].unfateful, nil, "K2: ...and no unfateful")
+  local foe = Mediated.snapshotMons(GAME, { monOf(16, 5, { otId = 999 }),
+                                            monOf(151, 5, { fatefulEncounter = false }) })
   eq(foe[1].traded, nil, "K2: a wild or trainer monster's sheet never carries traded")
-  eq(foe[2].fateful, nil, "K2: ...or fateful")
+  eq(foe[2].unfateful, nil, "K2: ...or unfateful")
 
   -- Wire's Gen 3 dialect keeps them, as `true` or absent; a non-boolean
-  -- refuses the mon; the Gen 1 / Gen 2 reader never copies them.
+  -- refuses the mon; the Gen 1 / Gen 2 reader never copies them; the retired
+  -- `fateful` is not read at all.
   local clean = Wire.battleMon(own[2])
   eq(clean and clean.traded, true, "wire: traded survives the Gen 3 dialect")
-  clean = Wire.battleMon(own[4])
-  eq(clean and clean.fateful, true, "wire: ...as does fateful")
+  clean = Wire.battleMon(own[5])
+  eq(clean and clean.unfateful, true, "wire: ...as does unfateful")
   local copy = {}
   for k, v in pairs(own[1]) do copy[k] = v end
-  copy.traded, copy.fateful = false, false
+  copy.traded, copy.unfateful = false, false
   clean = Wire.battleMon(copy)
-  check(clean ~= nil and clean.traded == nil and clean.fateful == nil,
+  check(clean ~= nil and clean.traded == nil and clean.unfateful == nil,
         "wire: a false is read as absent")
-  copy.traded, copy.fateful = "yes", nil
+  copy.traded, copy.unfateful = "yes", nil
   eq(Wire.battleMon(copy), nil, "wire: a non-boolean traded refuses the mon")
-  copy.traded, copy.fateful = nil, 1
-  eq(Wire.battleMon(copy), nil, "wire: ...as does a non-boolean fateful")
+  copy.traded, copy.unfateful = nil, 1
+  eq(Wire.battleMon(copy), nil, "wire: ...as does a non-boolean unfateful")
+  copy.unfateful, copy.fateful = nil, true
+  clean = Wire.battleMon(copy)
+  check(clean ~= nil and clean.fateful == nil and clean.unfateful == nil,
+        "wire: the retired fateful is dropped, not copied")
+  copy.fateful = 1
+  check(Wire.battleMon(copy) ~= nil, "wire: ...and never read, so a non-boolean one refuses nothing")
   local party = Wire.battleParty({ battle = "k2", mons = own }, 3)
   eq(party and party.mons[2].traded, true, "wire: a Gen 3 party keeps traded")
-  eq(party and party.mons[4].fateful, true, "wire: ...and fateful")
+  eq(party and party.mons[5].unfateful, true, "wire: ...and unfateful")
+  eq(party and party.mons[4].unfateful, nil, "wire: ...on the one MEW that named it")
 end
 
 -- ------------------------------------------------------------------

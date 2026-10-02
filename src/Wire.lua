@@ -1488,15 +1488,16 @@ local function battleRuleset3(raw)
   return out
 end
 
--- The chart's axis by name (Gen 1 / Gen 2 `typeIds`): the type registry id of
--- each chart index in order (MediatedBattle.typeOrder's), which BattleSim2
--- resolves a move's type index through for Gold's badge type boost
--- (DoBadgeTypeBoosts is keyed by type, a move row carries only the index).
--- Present-but-unreadable refuses the ruleset, as `specialTypes` does: a stray
--- entry would name the wrong type at its index.  Never longer than a chart may
--- be wide (BATTLE_TYPE_MAX, the width `chartOf` refuses past), and an id past
--- 40 characters is refused rather than cut -- the reading lib/sanitize.js's
--- cleanId has, so the two twins answer one list the same way.
+-- The chart's axis by name (Gen 2 `typeIds`): the type registry id of each
+-- chart index in order (MediatedBattle.typeOrder's), which BattleSim2 resolves
+-- a move's type index through for Gold's badge type boost (DoBadgeTypeBoosts
+-- is keyed by type, a move row carries only the index).  All or nothing: one
+-- unreadable entry makes the whole list nil, since a stray entry would name the
+-- wrong type at its index.  Never longer than a chart may be wide
+-- (BATTLE_TYPE_MAX, the width `chartOf` refuses past), and an id past 40
+-- characters is refused rather than cut -- the reading lib/sanitize.js's
+-- cleanId has, so the two twins answer one list the same way.  Exported as
+-- M.typeIds so the uploading client asks the very question the hub will.
 local function typeIdsOf(raw)
   if type(raw) ~= "table" then return nil end
   local n = #raw
@@ -1511,6 +1512,7 @@ local function typeIdsOf(raw)
   end
   return out
 end
+M.typeIds = typeIdsOf
 
 -- `generation` (optional) is the hub's; see rulesetIsGen3.  Gen 1 / Gen 2
 -- rulesets are read exactly as before.
@@ -1539,9 +1541,15 @@ function M.battleRuleset(raw, generation)
   end
   -- Optional chart axis by name (typeIdsOf).  Absent = no move's type can be
   -- named, so no badge type boost fires (BattleSim2 Turn.lua `_typeIdOf`).
+  -- Unreadable is DROPPED, not refused, unlike `specialTypes`: the list only
+  -- names types for a boost, the chart and every index on the upload stand
+  -- without it, and a content mod's type id need not fit the wire's id
+  -- alphabet (a registry id is any non-empty string -- "mymod.FAIRY") -- so
+  -- refusing would cost a modded install every refereed fight to save a 1/8
+  -- boost.  The fight goes on with no badge type boost, which is the
+  -- absent reading.
   if raw.typeIds ~= nil then
     out.typeIds = typeIdsOf(raw.typeIds)
-    if not out.typeIds then return nil end
   end
   -- Optional Metronome pick pool: full move sheets from the host's decode.
   -- Read in the older dialect by name, never by sniffing a row's `num`: this
@@ -1798,7 +1806,7 @@ local IV_KEYS3 = { "hp", "atk", "def", "spe", "spa", "spd" }
 -- names, `slot`, `status` / `sleepTurns`, `catchRate` (the wild seat), the
 -- passthrough `ivs` / `evs` / `personality` / `otId` (never read by a formula;
 -- copied onto a caught sheet so the catcher rebuilds the exact mon), `ball`
--- (the caught sheet's), the obedience check's `traded` / `fateful` (booleans,
+-- (the caught sheet's), the obedience check's `traded` / `unfateful` (booleans,
 -- a player's own sheet only), and the three formula inputs the sim's own caught
 -- sheet does not restate -- `weight`, `hiddenPower`, `beatUp`.  Those three
 -- ARE required on an upload: M.battleParty checks them, because an outcome's
@@ -1922,15 +1930,19 @@ local function battleMon3(raw)
   -- The obedience check's facts about a player's own monster (contract K2,
   -- docs/plans/gen3-badge-rules.md): `true` or absent, so a `false` is kept as
   -- absent and anything that is not a boolean refuses the mon -- the same
-  -- posture as the ruleset's `underwater`.  Gen 3 only: the Gen 1 / Gen 2
-  -- reader below builds its sheet field by field and never copies either.
+  -- posture as the ruleset's `underwater`.  `unfateful` names a Mew / Deoxys
+  -- whose fateful-encounter bit is explicitly clear (the engine's
+  -- `fatefulEncounter == false`); its absence is the ordinary rules, so the
+  -- retired `fateful` is not copied and a sheet still carrying one fights as
+  -- if it said nothing.  Gen 3 only: the Gen 1 / Gen 2 reader below builds its
+  -- sheet field by field and never copies either.
   if raw.traded ~= nil then
     if type(raw.traded) ~= "boolean" then return nil end
     if raw.traded then out.traded = true end
   end
-  if raw.fateful ~= nil then
-    if type(raw.fateful) ~= "boolean" then return nil end
-    if raw.fateful then out.fateful = true end
+  if raw.unfateful ~= nil then
+    if type(raw.unfateful) ~= "boolean" then return nil end
+    if raw.unfateful then out.unfateful = true end
   end
   return out
 end
@@ -2376,9 +2388,10 @@ M.BATTLE_EVENTS = {
   chose = true, unchose = true, moves = true, exp = true, team = true,
 }
 
--- Gen 3's six kinds (docs/plans/gen3-battle-sheet.md §7.2, contract C5).
+-- Gen 3's seven kinds (docs/plans/gen3-battle-sheet.md §7.2, contract C5; `obey`
+-- is contract K3 of docs/plans/gen3-badge-rules.md).
 --
--- A table of their own rather than six more rows above, because
+-- A table of their own rather than seven more rows above, because
 -- src/BattleSim/events.lua mirrors M.BATTLE_EVENTS *exactly* (its suite holds
 -- the two equal), and a Gen 1 referee has no ability, weather or held item to
 -- speak of.  M.battleEvent accepts a kind from either table -- a client
@@ -2392,9 +2405,10 @@ M.BATTLE_EVENTS = {
 --   sub        -- the substitute doll went up (1) or faded (0)
 --   ball       -- one throw: target = wild slot, amount = shakes (4 = caught),
 --                 text = the ball's item id
---   obey       -- a traded mon over its badge cap disobeyed (text = the branch
---                 token, gen3-battle-sheet.md §7.2.1); the referee's own `msg`
---                 sentence follows it
+--   obey       -- a player's mon disobeyed: a traded one over its badge cap, or
+--                 a Mew / Deoxys whose sheet says `unfateful` (cap 0, whatever
+--                 the badges) -- text = the branch token, gen3-battle-sheet.md
+--                 §7.2.1; the referee's own `msg` sentence follows it
 M.BATTLE_EVENTS3 = {
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
   obey = true,
@@ -2462,10 +2476,11 @@ end
 -- battle length nobody chose.
 --
 -- `generation` (optional) is the reader's own.  1 or 2 reads an event exactly
--- as before Gen 3 had a stream: the older vocabulary only, none of Gen 3's six
--- fields, and `moves` rows in the older dialect whatever `num` they carry.  3,
--- or none named, reads the union -- which is what a caller that does not say
--- needs in order to draw a Gen 3 referee's stream.
+-- as before Gen 3 had a stream: the older vocabulary only (none of Gen 3's
+-- seven kinds), none of its six fields (target, spread, stat, stage, delta,
+-- holding), and `moves` rows in the older dialect whatever `num` they carry.
+-- 3, or none named, reads the union -- which is what a caller that does not
+-- say needs in order to draw a Gen 3 referee's stream.
 function M.battleEvent(raw, generation)
   if type(raw) ~= "table" then return nil end
   local gen = M.int(generation, 1, M.GENERATION_MAX)

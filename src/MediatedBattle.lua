@@ -55,10 +55,10 @@
 --     the referee's badge boosts and obedience caps, while a 1v1 is a link
 --     battle and sends none (`badgesOf`, docs/plans/gen3-badge-rules.md);
 --     there are no vitamins (§6);
---   * the referee is BattleSim3, so the stream carries Gen 3's six extra
---     kinds (ability weather held form sub ball, C5 §7.2) -- each has a place
---     in the queue below, and `held` is the writeback of a consumed / stolen
---     item;
+--   * the referee is BattleSim3, so the stream carries Gen 3's seven extra
+--     kinds (ability weather held form sub ball, C5 §7.2, and obey, K3 of
+--     docs/plans/gen3-badge-rules.md) -- each has a place in the queue below,
+--     and `held` is the writeback of a consumed / stolen item;
 --   * a knockout is priced by src/Exp3.lua on the session party (Cmd_getexp:
 --     Exp. Share, Lucky Egg, traded, trainer, EVs), a level's moves by the
 --     cart's learnset, a full moveset by the cart's own LearnMove exchange
@@ -565,12 +565,28 @@ function M.snapshotRuleset(game, opts)
   -- every row, column, move and monster on this upload calls `i`.  Gold's badge
   -- type boost (DoBadgeTypeBoosts, keyed by type) is what reads it -- the
   -- referee holds no type table and a move row carries only the index
-  -- (BattleSim2 `_typeIdOf`).  A copy, so nothing downstream can write into
-  -- `typeOrder`'s cache.
-  if order and #order.ids > 0 then
-    local ids = {}
-    for i, id in ipairs(order.ids) do ids[i] = id end
-    out.typeIds = ids
+  -- (BattleSim2 `_typeIdOf`) -- so it rides Gen 2 only: Gen 1's referee has no
+  -- type boost and never reads it.  Read through Wire.typeIds, the hub's own
+  -- question, which answers with a copy (nothing downstream can write into
+  -- `typeOrder`'s cache) or nil when one id cannot ride the wire: a registry
+  -- id is any non-empty string, and a content mod's type ("mymod.FAIRY") fails
+  -- the wire's id alphabet.  Then the list is left off rather than sent for a
+  -- hub to drop, and the fight -- solo too, which reads this same ruleset, so
+  -- both fight alike -- goes on without a badge type boost.
+  if order and #order.ids > 0 and Gen.generation(game) == 2 then
+    local ids = Wire.typeIds(order.ids)
+    if ids then
+      out.typeIds = ids
+    else
+      local bad = {}
+      for _, id in ipairs(order.ids) do
+        if not Wire.typeIds({ id }) then bad[#bad + 1] = ("%q"):format(id) end
+      end
+      mod.log:warn("type chart id %s cannot ride the wire, so this fight has "
+        .. "no badge type boost (the type chart is unchanged). Give the type "
+        .. "a registry id made of letters, digits, _ and - (40 characters at most)",
+        table.concat(bad, ", "))
+    end
   end
   return out
 end
@@ -1777,10 +1793,12 @@ end
 local TRAINER_MODES = { coop_npc = true }
 
 -- The fights the cart fights under link rules: two players, each on their own
--- cart.  Gen 3 reads this twice.  Deoxys uploads its link-battle stats in
--- them (Sheet3's `link` option, pokefirered/src/pokemon.c:6163 -- each
--- version's Deoxys is a different forme, so a cross-version fight uses the
--- ROM's link row), and nothing the fight does to a held item is written home
+-- cart.  Every generation reads it for the badges (`badgesOf` sends none in
+-- a link battle: no cart boosts or obedience there), and Gen 3 reads it twice
+-- more.  Deoxys uploads its link-battle stats in them (Sheet3's `link`
+-- option, pokefirered/src/pokemon.c:6163 -- each version's Deoxys is a
+-- different forme, so a cross-version fight uses the ROM's link row), and
+-- nothing the fight does to a held item is written home
 -- from them: the cart saves the party before a Cable Club battle and loads it
 -- back after (pokefirered/src/cable_club.c:776 CB2_ReturnFromCableClubBattle
 -- -> load_save.c:170 LoadPlayerParty; the engine's link/battle.lua LB.finish
@@ -3096,8 +3114,9 @@ function M:onEvent(msg)
       if msg.slot == self:mySlot() then self.caughtBall = msg.text end
     end
 
-  -- ------- Gen 3's six (C5 §7.2).  Each is narrated by the referee's own
-  -- `msg` beside it; what arrives here is the sight and the state.
+  -- ------- Gen 3's seven (C5 §7.2, `obey` K3).  Each is narrated by the
+  -- referee's own `msg` beside it; what arrives here is the sight and the
+  -- state.
   elseif kind == "ability" then
     -- An ability visibly acted (Intimidate, Drizzle, Levitate...).  The seat
     -- remembers which, and a shine plays on it in the stream's order.
@@ -3134,7 +3153,8 @@ function M:onEvent(msg)
     self:queueBall3(msg)
 
   elseif kind == "obey" then
-    -- A traded mon over its badge cap disobeyed (K3): the cart's line, and
+    -- A player's mon disobeyed -- traded and over its badge cap, or a Mew /
+    -- Deoxys whose sheet says `unfateful` (K3): the cart's line, and
     -- the referee's sentence behind it is not said twice.  Whatever the
     -- outcome does next -- the called move's stream, the nap's `status`, the
     -- self-hit's line and `damage` -- arrives as its own events and plays as
