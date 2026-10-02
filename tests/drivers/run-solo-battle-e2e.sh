@@ -53,10 +53,14 @@
 # Env knobs: SOLO_TIMEOUT (seconds per leg, default 900), SHOT_DIR (defaults
 # to a **run-specific** directory -- two concurrent runs must not overwrite
 # each other's screenshots), MMO_SOUND=1 to hear it, SOLO_LEGS (Gen 3 only: a
-# comma list of legs to drive -- singles, double, or one of double-arena,
-# double-classic, double-ko, double-lastmon, double-refusal, double-handback,
-# double-real -- default every leg; read by the driver, so it passes straight
-# through).
+# comma list of legs to drive -- singles, double, badge, obey, or one of
+# double-arena, double-classic, double-ko, double-lastmon, double-refusal,
+# double-handback, double-real, badge-boost, badge-guard, badge-trainer,
+# obey-arena, obey-classic, obey-badge8, obey-outcomes -- default every leg;
+# read by the driver, so it passes straight through).  The badge and obey legs
+# are the cart's badge rules against the computer (docs/plans/gen3-badge-rules.md):
+# the x110/100 stat boosts, in a with / without pair of fights on one seed, and
+# a traded monster over its level cap disobeying in the cart's own words.
 
 set -uo pipefail
 

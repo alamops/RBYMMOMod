@@ -400,7 +400,23 @@ return function(game)
   -- arena's ask and asks for the GBA page's.
   local B = STAGE.battle
 
+  -- The guest holds badges 3 and 7 (Speed, Sp. Atk and Sp. Def) -- the cart's
+  -- own flags -- before its first fight; the host holds 1 and 5.  The host's
+  -- driver reads what the hub's referee made of them (mmo_host_gen3.lua
+  -- refereeRules): the guest's own on side a against the computer, none in the
+  -- link battles.  Badge 3 also keeps the guest's staged lead moving first in
+  -- the co-op wild fight.
+  local badgesHeld = false
+  local function holdBadges()
+    if badgesHeld then return end
+    badgesHeld = true
+    local ok = H.g3SetBadges(game, { 3, 7 })
+    local held = table.concat(H.g3BadgesHeld(game), ",")
+    check(ok and held == "3,7", "the guest holds badges 3 and 7 (the cart's own flags)", held)
+  end
+
   local function pvpLeg(name, classic, guestAsks)
+    holdBadges()
     H.closeToOverworld(game)
     H.await(game, "g3_host_" .. name .. "_ready")
     H.g3SetOption(game, "classicui", classic)
@@ -429,6 +445,12 @@ return function(game)
     -- The asker only waits: its "Waiting for NAME..." box is a CANCEL row
     -- (and a confirm behind it), so mashing A there withdraws the ask before
     -- the other side has even seen it.  The one who is asked answers.
+    -- The CLASSIC fight is the hostile one: this client sends badges 1, 3, 5
+    -- and 7 with its party in a link battle, which it never would on its own
+    -- (the host reads what arrived against what the referee made of it).
+    local stopForge = (name == "classic") and H.forgeBadgeUploads(game, { 1, 3, 5, 7 }) or nil
+    check(name ~= "classic" or stopForge ~= nil,
+          name .. ": the guest's transport can be made to forge badges")
     local started, trail
     if guestAsks then
       U.wait(6)
@@ -462,6 +484,11 @@ return function(game)
       end
     end
     local res = H.g3PilotFight(game, { shot = shot, label = "pvp-" .. name, seconds = 300, pick = pick })
+    if stopForge then
+      local n = stopForge()
+      check(n >= 1, name .. ": the guest's client really did send its party with forged badges",
+            tostring(n) .. " upload(s)")
+    end
     log(("pvp %s: kind=%s turns=%d result=%s gaps=%s lines=%d"):format(name, tostring(res.kind),
       res.turns, tostring(res.result), tostring(res.gaps), #res.said))
     log("lines:", (table.concat(res.said, " | "):gsub("%s+", " ")))
@@ -570,6 +597,7 @@ return function(game)
     -- ------- co-op inside the party (see mmo_host_gen3.lua): the host walks, the
     -- guest stands beside and is auto-joined into every fight.
     if leg("coop") then
+      holdBadges()
       local function ppSum(row)
         local n = 0
         for v in tostring(row and row.pp or ""):gmatch("%d+") do n = n + tonumber(v) end

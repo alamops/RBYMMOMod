@@ -4027,6 +4027,142 @@ function M.g3Flag(game, name)
   return ok and set == true
 end
 
+-- ------- badges (docs/plans/gen3-badge-rules.md)
+--
+-- The cart's own badge flags, FLAG_BADGE01_GET .. FLAG_BADGE08_GET (the same
+-- pret name on FireRed / LeafGreen and Emerald; M.g3Const resolves each to its
+-- cart's id).  A badge is the flag, which is also where the mod reads it from
+-- (Gen3.badgeList, the engine's Engine.hasBadge order), so setting the flag is
+-- how a leg gives a player a badge -- never a field on the referee.
+
+function M.g3BadgeFlag(n)
+  return ("FLAG_BADGE%02d_GET"):format(n)
+end
+
+-- Exactly these badges and no others (the rest cleared).  `list` is badge
+-- numbers 1..8; an empty list takes every badge away.  True when every flag
+-- reads back as asked, which is the live store the mod's own reading uses.
+function M.g3SetBadges(game, list)
+  local want = {}
+  for _, n in ipairs(list or {}) do want[n] = true end
+  local ok = true
+  for n = 1, 8 do
+    local on = want[n] == true
+    if not M.g3SetFlag(game, M.g3BadgeFlag(n), on) then ok = false end
+    if M.g3Flag(game, M.g3BadgeFlag(n)) ~= on then ok = false end
+  end
+  return ok
+end
+
+-- The badge numbers the live flag store holds, ascending.
+function M.g3BadgesHeld(game)
+  local out = {}
+  for n = 1, 8 do
+    if M.g3Flag(game, M.g3BadgeFlag(n)) then out[#out + 1] = n end
+  end
+  return out
+end
+
+-- A named upvalue of a function (the way modCtx reaches the mod's `ctx`): how
+-- a driver gets at the very module instance the mod's own code holds -- the
+-- referee's Damage, say -- rather than loading a second copy of it.
+function M.fnUpvalue(fn, name)
+  if type(fn) ~= "function" or not (debug and debug.getupvalue) then return nil end
+  local i = 1
+  while true do
+    local upName, value = debug.getupvalue(fn, i)
+    if not upName then return nil end
+    if upName == name then return value end
+    i = i + 1
+  end
+end
+
+-- A badge set as "1,3,7": a stable thing to compare and to print.  Takes the
+-- referee's set ({ [n] = true }) and the wire's list ({ "1", "3" }) alike;
+-- anything that is not a badge 1..8 is left out, and nothing is "".
+function M.badgeString(set)
+  if type(set) ~= "table" then return "" end
+  local held = {}
+  for k, v in pairs(set) do
+    local n
+    if v == true then n = tonumber(k) else n = tonumber(v) end
+    if n and n >= 1 and n <= 8 and n == math.floor(n) then held[n] = true end
+  end
+  local out = {}
+  for n = 1, 8 do
+    if held[n] then out[#out + 1] = tostring(n) end
+  end
+  return table.concat(out, ",")
+end
+
+-- A hostile client, for the one question a headless suite cannot ask of a
+-- live hub: `mmo.battle_party` uploads on this instance's transport carry
+-- `badges` whatever the mod's own screens decided to send.  Every upload this
+-- instance makes (or, with `opts.side`, those for that side of the field) goes
+-- out with the given badge list; the uploaded party table is copied, never
+-- touched.  Returns a function that takes the wrapper off and answers how many
+-- uploads it altered, or nil when the transport cannot be reached.
+function M.forgeBadgeUploads(game, badges, opts)
+  opts = opts or {}
+  local ctx = M.modCtx(game)
+  local transport = ctx and ctx.client and ctx.client.transport
+  if not (transport and type(transport.send) == "function") then return nil end
+  local inner = transport.send
+  local forged = 0
+  transport.send = function(self, msgType, payload)
+    if msgType == "mmo.battle_party" and type(payload) == "table"
+       and (opts.side == nil or payload.side == opts.side) then
+      local copy = {}
+      for k, v in pairs(payload) do copy[k] = v end
+      copy.badges = {}
+      for i, n in ipairs(badges) do copy.badges[i] = tostring(n) end
+      forged = forged + 1
+      return inner(self, msgType, copy)
+    end
+    return inner(self, msgType, payload)
+  end
+  return function()
+    if transport.send ~= inner then transport.send = inner end
+    return forged
+  end
+end
+
+-- The battles the in-game hub on THIS instance is refereeing right now, as the
+-- rules each fighter was built with: `{ id, mode, sim, uploaded = { [seat] =
+-- "1,3" }, fighters = { { id, side, badges = "1,3", hasBadges, badgeRules,
+-- family, fighter }, ... } }` for every record that has a live referee.  The
+-- fighters are the hub's own (the K1 entry the referee kept), so what they say
+-- is what the turn machine applies; `uploaded` is what each seat's client sent
+-- (the sanitised party's badges), the other half of the question.  Empty when
+-- this instance is not hosting.
+function M.hubBattleView(game)
+  local ctx = M.modCtx(game)
+  local hub = ctx and ctx.server and ctx.server.hub
+  local out = {}
+  if not (hub and type(hub.battles) == "table") then return out end
+  for id, record in pairs(hub.battles) do
+    local sim = record and record.sim
+    if sim and type(sim.fighters) == "table" then
+      local row = { id = id, mode = record.mode, sim = sim, fighters = {}, uploaded = {} }
+      for seat, party in pairs(record.parties or {}) do
+        row.uploaded[seat] = M.badgeString(party and party.badges)
+      end
+      for _, fighter in ipairs(sim.fighters) do
+        row.fighters[#row.fighters + 1] = {
+          id = fighter.playerId, side = fighter.side,
+          badges = M.badgeString(fighter.badges),
+          hasBadges = fighter.badges ~= nil,
+          badgeRules = fighter.badgeRules == true,
+          family = fighter.family,
+          fighter = fighter,
+        }
+      end
+      out[#out + 1] = row
+    end
+  end
+  return out
+end
+
 -- The National Dex, the way the cart turns it on (Dex.enableNational: the
 -- dex's own national bit, the magic var and the flag), applied to the live
 -- store as well as the session snapshot.

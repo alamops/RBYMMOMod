@@ -32,6 +32,16 @@
 -- lead; the trainer's flag set on both carts, no rematch).  The host walks, the
 -- guest stands beside and is auto-joined.
 --
+-- Badge rules (docs/plans/gen3-badge-rules.md): the host holds badges 1 and 5,
+-- the guest 3 and 7 (the cart's own flags), and at each fight's first command
+-- menu `refereeRules` reads this host's own hub live -- its fighters and their
+-- battlers.  The 1v1s carry no badges and no badge rules, and the guest's CLASSIC
+-- ask forges badges onto its upload (H.forgeBadgeUploads) to show the referee
+-- drops them; the co-op wild and trainer fights carry each player's own badges
+-- and the cart's family on side a, the guest's Speed boosted (badge 3) and the
+-- host's raw, and none on the computer's seat -- the first wild fight forges
+-- badges onto this client's upload for that side too.
+--
 -- GEN3_LEGS (comma list; default all) narrows a run to some legs -- chat,
 -- social, trade, battle, party, coop (which implies party) -- and both sides
 -- read it, so a narrowed run narrows both alike.  Each leg is one block
@@ -382,7 +392,123 @@ return function(game)
     return false
   end
 
+  -- ------- the cart's badge rules, as this host's own referee holds them
+  --
+  -- (docs/plans/gen3-badge-rules.md.)  A fight against the computer carries each
+  -- human's own badges, and the cart family their own cart plays by, on side a;
+  -- a fight between the two players is a link battle and carries none.  The host
+  -- holds badges 1 and 5 (Attack, Defense), the guest 3 and 7 (Speed, Sp. Atk
+  -- and Sp. Def) -- the cart's own flags, set in each driver before the first
+  -- fight (the guest's Speed badge keeps its staged lead moving first in the
+  -- co-op wild fight).  What is read is the hub's own referee, live, at a
+  -- fight's first command menu: its fighters and their battlers, not what a
+  -- client says it sent.
+  local HOST_BADGES, GUEST_BADGES = { 1, 5 }, { 3, 7 }
+  local FAMILY = (GAME == "emerald") and "rse" or "frlg"
+  local badgesHeld = false
+  local function holdBadges()
+    if badgesHeld then return end
+    badgesHeld = true
+    local ok = H.g3SetBadges(game, HOST_BADGES)
+    local held = table.concat(H.g3BadgesHeld(game), ",")
+    check(ok and held == "1,5", "the host holds badges 1 and 5 (the cart's own flags)", held)
+  end
+
+  -- `forged` (optional) names the hostile uploads this fight was set up with
+  -- (the guest's driver and this one forge `badges` onto an upload with
+  -- H.forgeBadgeUploads): `guest` is what the guest's client sent, `b` what
+  -- this client sent for the computer's side.  Each must have reached the hub
+  -- as sent -- and the referee must have dropped it all the same.
+  local function refereeRules(label, mode, forged)
+    forged = forged or {}
+    local row
+    for _, r in ipairs(H.hubBattleView(game)) do
+      if r.mode == mode then row = r end
+    end
+    local modes = {}
+    for _, r in ipairs(H.hubBattleView(game)) do modes[#modes + 1] = tostring(r.mode) end
+    if not check(row ~= nil, label .. ": this host's hub holds a live " .. mode .. " referee",
+                 "live: " .. table.concat(modes, ",")) then
+      return
+    end
+    local link = mode == "1v1" or mode == "coop_pvp"
+    local sideA, sideB = {}, {}
+    for _, f in ipairs(row.fighters) do
+      local list = (f.side == "a") and sideA or sideB
+      list[#list + 1] = f
+    end
+    local ups = {}
+    for seat, set in pairs(row.uploaded) do ups[#ups + 1] = tostring(seat):sub(1, 8) .. "=[" .. set .. "]" end
+    table.sort(ups)
+    log(label .. ": the referee's fighters:", #row.fighters, "uploaded", table.concat(ups, " "))
+    -- a Speed the plain way (no stage, status or held item), or nil
+    local function speedOf(f, boosted)
+      local b = f.fighter.b
+      if not (b and b.stats and b.mon) then return nil end
+      if (tonumber(b.stages and b.stages.spe) or 0) ~= 0 or b.mon.status ~= nil
+         or (tonumber(b.mon.heldItem) or 0) ~= 0 then
+        return nil
+      end
+      local raw = tonumber(b.stats.spe) or 0
+      local want = boosted and math.floor(raw * 110 / 100) or raw
+      local got = row.sim:_speedOf(b)
+      return got == want, ("%s from raw %s, wanted %s"):format(tostring(got), tostring(raw), tostring(want))
+    end
+    if link then
+      check(#row.fighters == 2, label .. ": two seats on the field", tostring(#row.fighters))
+      for _, f in ipairs(row.fighters) do
+        local who = (f.id == guest.id) and "the guest's" or "the host's"
+        check(not f.hasBadges and not f.badgeRules and f.family == nil,
+              label .. ": link rules -- " .. who .. " seat carries no badges, no badge rules, no cart family",
+              ("badges [%s] rules %s family %s"):format(f.badges, tostring(f.badgeRules), tostring(f.family)))
+        local sent = (f.id == guest.id and forged.guest) or ""
+        if sent ~= "" then
+          check(row.uploaded[f.id] == sent,
+                label .. ": the hostile upload reached the hub as sent (" .. who .. " client forged badges ["
+                .. sent .. "]) -- and the referee dropped them all the same",
+                "[" .. tostring(row.uploaded[f.id]) .. "]")
+        else
+          check((row.uploaded[f.id] or "") == "",
+                label .. ": and its client did not upload any", "[" .. tostring(row.uploaded[f.id]) .. "]")
+        end
+        local ok, detail = speedOf(f, false)
+        if ok ~= nil then check(ok, label .. ": " .. who .. " Speed is raw (no badge 3 in a link battle)", detail) end
+      end
+      return
+    end
+    check(#sideA == 2, label .. ": both players are on side a", tostring(#sideA))
+    for _, f in ipairs(sideA) do
+      local isGuest = f.id == guest.id
+      local want = isGuest and table.concat(GUEST_BADGES, ",") or table.concat(HOST_BADGES, ",")
+      local who = isGuest and "the guest's" or "the host's"
+      check(f.badges == want and f.badgeRules and f.family == FAMILY,
+            ("%s: %s seat holds its own badges [%s], badge rules on, family %s"):format(label, who, want, FAMILY),
+            ("badges [%s] rules %s family %s"):format(f.badges, tostring(f.badgeRules), tostring(f.family)))
+      check(row.uploaded[f.id] == want, label .. ": " .. who .. " client uploaded exactly those",
+            "[" .. tostring(row.uploaded[f.id]) .. "]")
+      local ok, detail = speedOf(f, want:find("3", 1, true) ~= nil)
+      if ok ~= nil then
+        check(ok, label .. ": " .. who .. " Speed is " .. (isGuest and "floor(raw x 110 / 100) (badge 3)" or "raw (no badge 3)"),
+              detail)
+      end
+    end
+    for _, f in ipairs(sideB) do
+      if forged.b then
+        check(row.uploaded[f.id] == forged.b,
+              label .. ": the hostile upload for the computer's side reached the hub as sent [" .. forged.b
+              .. "] -- and the referee dropped it all the same",
+              "[" .. tostring(row.uploaded[f.id]) .. "]")
+      end
+      check(not f.hasBadges and not f.badgeRules and f.family == nil,
+            label .. ": the computer's seat carries no badges, no badge rules, no cart family",
+            ("badges [%s] rules %s family %s"):format(f.badges, tostring(f.badgeRules), tostring(f.family)))
+      local ok, detail = speedOf(f, false)
+      if ok ~= nil then check(ok, label .. ": and its Speed is raw", detail) end
+    end
+  end
+
   local function pvpLeg(name, classic, hostAsks)
+    holdBadges()
     H.closeToOverworld(game)
     H.g3SetOption(game, "classicui", classic)
     local lead = H.g3SeedLead(game, B.host, B.hostLevel)
@@ -430,7 +556,13 @@ return function(game)
     end
     check(started, name .. ": a mediated battle started on the host (prompts: "
           .. (trail == "" and "none" or trail) .. ")")
-    local res = H.g3PilotFight(game, { shot = shot, label = "pvp-" .. name, seconds = 300 })
+    local ruled = false
+    local res = H.g3PilotFight(game, { shot = shot, label = "pvp-" .. name, seconds = 300,
+      onChoose = function()
+        if ruled then return end
+        ruled = true
+        refereeRules("pvp " .. name, "1v1", name == "classic" and { guest = "1,3,5,7" } or nil)
+      end })
     log(("pvp %s: kind=%s turns=%d result=%s gaps=%s lines=%d"):format(name, tostring(res.kind),
       res.turns, tostring(res.result), tostring(res.gaps), #res.said))
     log("lines:", (table.concat(res.said, " | "):gsub("%s+", " ")))
@@ -515,6 +647,7 @@ return function(game)
     -- refereed by this room's own hub (BattleSim3): the wild ones come in by
     -- the `encounter.roll` door, the trainer by the BattleBridge.start wrap.
     if leg("coop") then
+      holdBadges()
       local function ppSum(row)
         local n = 0
         for v in tostring(row and row.pp or ""):gmatch("%d+") do n = n + tonumber(v) end
@@ -563,6 +696,11 @@ return function(game)
         end
         local before = H.g3PartyDigest(game)
         local balls = H.g3BagCount(game, "MASTER_BALL")
+        -- the first wild fight is the hostile one: this client sends badges
+        -- for the computer's side too (the second plays it straight)
+        local stopForge = (not catching) and H.forgeBadgeUploads(game, { 1, 3, 5, 7 }, { side = "b" }) or nil
+        local forging = stopForge ~= nil
+        check(catching or forging, name .. ": the host's transport can be made to forge the computer's badges")
         H.signal("g3_host_" .. name .. "_ready")
         H.await(game, "g3_guest_" .. name .. "_ready")
         check(partnerOnMap(), name .. ": the partner stands on the same map (roster + avatar)")
@@ -586,10 +724,14 @@ return function(game)
         end, 200, "a step encounter in the grass")
         check(met, name .. ": walking the grass raised an encounter and the co-op fight took it over")
         if met then
-          local thrown = false
+          local thrown, ruled = false, false
           local res = H.g3PilotFight(game, {
             shot = shot, label = name, seconds = 300,
             onChoose = function()
+              if not ruled then
+                ruled = true
+                refereeRules(name, "coop_wild", forging and { b = "1,3,5,7" } or nil)
+              end
               if catching and not thrown then
                 thrown = true
                 check(H.throwBattleItem(game, "MASTER_BALL"), name .. ": MASTER BALL filed from the ITEM menu")
@@ -598,6 +740,12 @@ return function(game)
             end,
           })
           coopResult(name, res, "coop_wild", 3)
+          if stopForge then
+            local n = stopForge()
+            stopForge = nil
+            check(n >= 1, name .. ": the host's client really did send the computer's side with forged badges",
+                  tostring(n) .. " upload(s)")
+          end
           H.closeToOverworld(game)
           H.g3Settle(game, 600)
           check(H.g3Free(game), name .. ": back in the field, free to walk")
@@ -629,6 +777,7 @@ return function(game)
           end
           shot(name .. "-after")
         end
+        if stopForge then stopForge() end   -- no encounter came: do not leak the forger
         H.signal("g3_host_" .. name .. "_done")
         H.await(game, "g3_guest_" .. name .. "_done")
       end
@@ -691,6 +840,7 @@ return function(game)
             onChoose = function()
               if not kitChecked then
                 kitChecked = true
+                refereeRules("trainer", "coop_npc")
                 H.assertTrainerKit(game, check, log, { class = tid })
               end
               if not healed then

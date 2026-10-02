@@ -84,7 +84,10 @@ end
 -- names are "singles" (the wild / trainer legs above the doubles) and the
 -- lone-double legs, together as "double" or one by one: double-arena,
 -- double-classic, double-ko, double-lastmon, double-refusal, double-handback,
--- double-real.
+-- double-real.  The badge-rule legs (docs/plans/gen3-badge-rules.md) are the
+-- group "badge" (badge-boost, badge-guard, badge-trainer) and the group "obey"
+-- (obey-arena, obey-classic, obey-badge8, obey-outcomes), likewise whole or
+-- one by one.
 -- A cart's run is minutes long, so iterating on one leg is worth a knob; it
 -- never changes what an unset run does.
 local SOLO_LEGS = (function()
@@ -126,10 +129,14 @@ end
 --   * the lone trainer doubles (the legs under "Lone doubles" below): two
 --     seats, two commands a turn, aiming, switching, the refill after a
 --     knockout, both UIs, the hand-back, and the real flow through the
---     twins' script.
+--     twins' script;
+--   * the cart's badge rules against the computer (the legs under "Badge
+--     rules" below): the x110/100 stat boosts a save's badges give -- with a
+--     with / without pair of fights on one seed -- and a traded monster over
+--     its badge level cap disobeying, in the cart's own words, on both UIs.
 --
 -- SOLO_LEGS (a comma list; default every leg) picks which run: "singles",
--- "double", or one double leg by name -- see `legOn`.
+-- "double", "badge", "obey", or one leg by name -- see `legOn`.
 --
 -- Screenshots land in SHOT_DIR as g3-<game>-solo-NN-<leg>.png.
 --
@@ -1685,8 +1692,781 @@ local function runGen3(game, H, U, env)
     end
   end
 
+  -- ------------------------------------------------------------------
+  -- Badge rules (docs/plans/gen3-badge-rules.md)
+  -- ------------------------------------------------------------------
+  --
+  -- Against the computer the cart's badges count: x110/100 (floored) on
+  -- Attack for badge 1, Speed for 3, Defense for 5, Sp. Atk and Sp. Def for 7,
+  -- and a TRADED monster above its badge level cap (10 with no badge; 30 / 50 /
+  -- 70 with badge 2 / 4 / 6; none with badge 8) may disobey.  The referee
+  -- (BattleSim3) owns both, off the badges the player's save holds and the
+  -- `traded` fact on the monster's sheet; what these legs prove is the part a
+  -- headless suite cannot see -- that a real save's badge flags and a real
+  -- traded party monster reach the live referee through SOLO BATTLES, and that
+  -- the screens then say what the cart says.
+  --
+  --   badge-boost    the same wild fight twice with the same seed and the same
+  --                  first command: no badges, then badges 1 + 3.  Pinned stats
+  --                  put the foe's Speed between the player's raw Speed and its
+  --                  x110/100, so badge 3 flips who moves first; the referee's
+  --                  own Damage.calc, replayed on the very RNG state of each
+  --                  real hit, says what the hit does with and without the
+  --                  badges, and the foe's HP afterwards is exactly that.  A
+  --                  second pair, the player faster either way, makes the same
+  --                  point across two real fights (same draws, so the foe's HP
+  --                  differs by exactly the badge's share of the hit).
+  --   badge-guard    badges 5 + 7: the foe's physical hit lands softer (Defense),
+  --                  the player's special hit harder (Sp. Atk), Speed untouched
+  --   badge-trainer  a trainer fight (the coop_npc mode) carries the same
+  --                  badges on the player's battler and none on the trainer's
+  --   obey-arena     a traded L50 monster, no badges: the referee emits `obey`
+  --                  events for the player's seat, the screen says the cart's
+  --                  line for each (once), the fight still ends in a win
+  --   obey-classic   the same on CLASSIC BATTLE UI (the GBA page)
+  --   obey-badge8    the same traded monster with badge 8: it never disobeys
+  --   obey-outcomes  a seed run of two-move fights until the self-hit, the nap,
+  --                  a called move and a loafing line have all been through
+  --                  the screen, each said once in the cart's words
+  --
+  -- Numbers pinned on the monsters are synthetic fixture values; every number
+  -- asserted is read off the live referee or computed by its own Damage.
+  local function badgeLegs()
+    local legs = { "badge-boost", "badge-guard", "badge-trainer",
+                   "obey-arena", "obey-classic", "obey-badge8", "obey-outcomes" }
+    local function wants(name) return legOn(name, name:match("^(%a+)%-")) end
+    local any = false
+    for _, name in ipairs(legs) do
+      if wants(name) then any = true end
+    end
+    if not any then return end
+
+    local Moves = require("src.core.game3.battle.moves")
+    local function moveId(name) return H.g3Const(game, "moves", name) end
+    local SWIFT, WATER_GUN, TACKLE = moveId("MOVE_SWIFT"), moveId("MOVE_WATER_GUN"), moveId("MOVE_TACKLE")
+    if not (SWIFT and WATER_GUN and TACKLE) then
+      skip("the badge legs", "this cart's move table has no SWIFT / WATER GUN / TACKLE")
+      return
+    end
+    if not solo.gen3FoeMon then
+      skip("the badge legs", "SoloBattle.gen3FoeMon is not exported on this build")
+      return
+    end
+
+    setOption(env.OPTION_KEY, true)
+    setOption("classicui", false)
+
+    local function setBadges(list)
+      local ok = H.g3SetBadges(game, list)
+      local held = table.concat(H.g3BadgesHeld(game), ",")
+      local asked = {}
+      for _, n in ipairs(list or {}) do asked[#asked + 1] = tostring(n) end
+      check(ok and held == table.concat(asked, ","),
+            "badges: the save's flags hold exactly [" .. table.concat(asked, ",") .. "]", held)
+      return ok
+    end
+
+    -- One lead that knows only these moves (one, or a list), at full PP.
+    local function pinMove(mon, moves)
+      if type(moves) ~= "table" then moves = { moves } end
+      local list, pps = {}, {}
+      for i, move in ipairs(moves) do
+        local okP, row = pcall(Moves.get, move)
+        list[i] = move
+        pps[i] = (okP and type(row) == "table" and tonumber(row.pp)) or 10
+      end
+      local maxPp = {}
+      for i, v in ipairs(pps) do maxPp[i] = v end
+      mon.moves, mon.pp, mon.maxPp = list, pps, maxPp
+    end
+
+    -- Synthetic stats, set the way the cart's own party monster holds them
+    -- (the aliases too: Sheet3 reads `attack` before `atk`).
+    local function pinStats(mon, st)
+      mon.attack, mon.atk = st.atk, st.atk
+      mon.defense, mon.def = st.def, st.def
+      mon.speed, mon.spe = st.spe, st.spe
+      mon.spAtk, mon.spa = st.spa, st.spa
+      mon.spDef, mon.spd = st.spd, st.spd
+      mon.maxHp, mon.hp = st.hp, st.hp
+      if type(mon.stats) == "table" then
+        mon.stats.attack, mon.stats.atk = st.atk, st.atk
+        mon.stats.defense, mon.stats.def = st.def, st.def
+        mon.stats.speed, mon.stats.spe = st.spe, st.spe
+        mon.stats.spAtk, mon.stats.spa = st.spa, st.spa
+        mon.stats.spDef, mon.stats.spd = st.spd, st.spd
+      end
+    end
+
+    -- The wild foe, built once by SoloBattle's own builder and handed in
+    -- prebuilt, so every run of a pair fights the same monster: no held item,
+    -- fixed personality and IVs, one known move.
+    local function foeMon(level, st, move)
+      local mon = solo.gen3FoeMon({
+        species = H.g3Species(game, WILD), level = level, item = 0, moves = { move },
+        personality = 1234567,
+        ivs = { hp = 15, atk = 15, def = 15, spe = 15, spa = 15, spd = 15 },
+      }, { wild = true })
+      if mon and st then pinStats(mon, st) end
+      if mon then mon.status = nil end
+      return mon
+    end
+
+    -- ------- watching the live referee
+
+    local function view(b, over) return setmetatable(over, { __index = b }) end
+    local function copyOpts(o)
+      local c = {}
+      for k, v in pairs(o) do c[k] = v end
+      if type(o.rng) == "table" then
+        c.rng = setmetatable({ s = o.rng.s, draws = o.rng.draws }, getmetatable(o.rng))
+      end
+      return c
+    end
+    -- The hit by hand: each stat a badge raises, raised x110/100 floored on
+    -- the raw stat, and the badges themselves taken off.
+    local function raised(Damage, b, pairs_)
+      local stats = {}
+      for k, v in pairs(b.stats or {}) do stats[k] = v end
+      for _, pair in ipairs(pairs_) do
+        if Damage.hasBadge(b, pair[1]) then
+          stats[pair[2]] = math.floor(110 * stats[pair[2]] / 100)
+        end
+      end
+      return view(b, { badges = false, stats = stats })
+    end
+    local function replay(Damage, C, o)
+      local user, tgt, move = C.user, C.target, C.move
+      local with, info = Damage.calc(user, tgt, move, copyOpts(o))
+      local bare = Damage.calc(view(user, { badges = false }), view(tgt, { badges = false }),
+        move, copyOpts(o))
+      local byHand = Damage.calc(
+        raised(Damage, user, { { 1, "atk" }, { 7, "spa" } }),
+        raised(Damage, tgt, { { 5, "def" }, { 7, "spd" } }),
+        move, copyOpts(o))
+      return {
+        from = user.side, to = tgt.side, with = with, bare = bare, byHand = byHand,
+        crit = type(info) == "table" and info.critical == true,
+        atk = user.stats and user.stats.atk, spa = user.stats and user.stats.spa,
+        def = tgt.stats and tgt.stats.def, spd = tgt.stats and tgt.stats.spd,
+        userBadges = H.badgeString(user.badges), targetBadges = H.badgeString(tgt.badges),
+      }
+    end
+
+    -- Everything the referee emits and everything the screen says, in order,
+    -- from here on; and, for every real hit, that hit replayed on the same
+    -- RNG state with the badges on and off (the hit itself is untouched: the
+    -- replay draws from a copy of the generator).
+    local function watch(sim, f)
+      local rec = { events = {}, obey = {}, said = {}, hits = {}, errors = {} }
+      local emit = sim._emit
+      sim._emit = function(self, kind, fields)
+        local ev = emit(self, kind, fields)
+        if ev then
+          rec.events[#rec.events + 1] = {
+            t = ev.t, side = ev.side, slot = ev.slot, text = ev.text, amount = ev.amount, hp = ev.hp,
+          }
+          if ev.t == "obey" then
+            rec.obey[#rec.obey + 1] = { token = ev.text, side = ev.side, slot = ev.slot }
+          end
+        end
+        return ev
+      end
+      local say, depth = f.say, 0
+      f.say = function(self, text, ...)
+        if depth == 0 and type(text) == "string" then rec.said[#rec.said + 1] = text end
+        depth = depth + 1
+        local ok, err = pcall(say, self, text, ...)
+        depth = depth - 1
+        if not ok then error(err, 0) end
+      end
+      local Damage = H.fnUpvalue(sim._disobey, "Damage")
+      rec.haveDamage = Damage ~= nil
+      local calcOpts = sim._calcOpts
+      sim._calcOpts = function(self, C, target, extra)
+        local o = calcOpts(self, C, target, extra)
+        if Damage and type(C) == "table" and C.user and C.target and C.move and target == C.target then
+          local ok, row = pcall(replay, Damage, C, o)
+          if ok and row then rec.hits[#rec.hits + 1] = row else rec.errors[#rec.errors + 1] = tostring(row) end
+        end
+        return o
+      end
+      return rec
+    end
+
+    local function firstOf(list, pred)
+      for _, item in ipairs(list) do
+        if pred(item) then return item end
+      end
+      return nil
+    end
+    local function firstHit(rec, from)
+      return firstOf(rec.hits, function(h) return h.from == from end)
+    end
+    local function firstDamage(rec, side)
+      return firstOf(rec.events, function(e) return e.t == "damage" and e.side == side end)
+    end
+    local function firstAnimSide(rec)
+      local ev = firstOf(rec.events, function(e) return e.t == "anim" end)
+      return ev and ev.side or nil
+    end
+    local function turnOpened(rec, n)
+      return firstOf(rec.events, function(e)
+        return e.t == "turn" and (e.amount or 0) >= n and e.slot == nil
+      end) ~= nil
+    end
+
+    -- Play the fight out to its end: FIGHT / move 1 on every command menu, A
+    -- on every line.  `onFrame(f)` sees the screen each poll.
+    local function play(onFrame, seconds, what)
+      return H.waitSeconds(game, function()
+        local f = fight()
+        if not f then return true end
+        if onFrame then onFrame(f) end
+        if f.phase == "choose" then fightWith(1) else nudge() end
+        return fight() == nil
+      end, seconds or 240, what or "the fight to end")
+    end
+
+    -- ------- the badge fights
+
+    -- One wild fight on the pinned fixture.  spec: label, badges (list),
+    -- playerMove, foeMove, playerSpe, foeSpe, seed, shotTag (a screenshot of
+    -- the command menu and of the first hit, named for this fight).
+    local function badgeFight(spec)
+      settle()
+      setBadges(spec.badges)
+      local mon = seed(STARTER, 30)
+      if not mon then check(false, spec.label .. ": a lead was seeded") return nil end
+      pinMove(mon, spec.playerMove)
+      pinStats(mon, { atk = 80, def = 60, spe = spec.playerSpe, spa = 80, spd = 60, hp = 300 })
+      local foe = foeMon(30, { atk = 70, def = 60, spe = spec.foeSpe, spa = 70, spd = 60, hp = 60 },
+        spec.foeMove)
+      if not foe then check(false, spec.label .. ": the wild foe was built") setBadges({}) return nil end
+      local before = solo.seedFn
+      solo.seedFn = function() return spec.seed end
+      local result
+      local took = solo:fromGen3Encounter(game, wildOf(WILD, 30),
+        { party = { foe }, done = function(r) result = r end })
+      solo.seedFn = before
+      if not (check(took and solo.sim ~= nil and fight() ~= nil, spec.label .. ": the fight was taken")) then
+        setBadges({})
+        return nil
+      end
+      local sim = solo.sim
+      local rec = watch(sim, fight())
+      rec.label = spec.label
+      check(rec.haveDamage, spec.label .. ": the referee's own Damage is reachable for the replay")
+      check(awaitChoose(60, "the badge fight's command grid"), spec.label .. ": the command grid opens")
+
+      local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
+      local pb, fb = pf and pf.b, ff and ff.b
+      if not (pb and fb) then
+        check(false, spec.label .. ": both battlers are on the field")
+        driveToEnd(function(f) fightWith(1) end, 240)
+        setBadges({})
+        return nil
+      end
+      rec.facts = {
+        playerBadges = H.badgeString(pb.badges), foeBadges = H.badgeString(fb.badges),
+        foeHasBadges = fb.badges ~= nil,
+        playerRules = pf.badgeRules == true, foeRules = ff.badgeRules == true,
+        rawP = pb.stats.spe, rawF = fb.stats.spe,
+        speedP = sim:_speedOf(pb), speedF = sim:_speedOf(fb),
+        mode = sim.mode,
+      }
+      if spec.shotTag then shot(spec.shotTag .. "-command") end
+
+      -- the same first command in every fight: FIGHT, move 1
+      fightWith(1)
+      local landed = false
+      play(function(f)
+        if not landed and spec.shotTag and (f.draining or f.hitHold) then
+          landed = true
+          U.wait(36)
+          shot(spec.shotTag .. "-hit")
+        end
+      end, 240, "the badge fight to end")
+      rec.result = result
+      rec.turn1 = turnOpened(rec, 2)
+      setBadges({})
+      settle()
+      return rec
+    end
+
+    -- What every fight of the fixture must have, whatever the badges.
+    local function fixtureChecks(rec, spec)
+      local L = rec.label
+      check(rec.facts.rawP == spec.playerSpe and rec.facts.rawF == spec.foeSpe,
+            L .. ": the referee's battlers carry the fixture's pinned Speed (player / foe)",
+            tostring(rec.facts.rawP) .. " / " .. tostring(rec.facts.rawF))
+      check(rec.facts.playerRules and not rec.facts.foeRules,
+            L .. ": badge rules are on for the player's side only",
+            tostring(rec.facts.playerRules) .. " / " .. tostring(rec.facts.foeRules))
+      check(rec.facts.foeBadges == "" and not rec.facts.foeHasBadges,
+            L .. ": the foe's battler carries no badges")
+      check(rec.facts.speedF == rec.facts.rawF, L .. ": the foe's Speed is raw",
+            tostring(rec.facts.speedF))
+      check(#rec.errors == 0, L .. ": every hit could be replayed", rec.errors[1])
+      check(rec.turn1, L .. ": turn 1 resolved")
+      check(rec.result == "win", L .. ": the fight still ends in a win", tostring(rec.result))
+    end
+
+    -- The first hit each way: the referee's own damage, with the badges, by
+    -- hand, and without them, against what the screen's referee really dealt.
+    local function hitChecks(rec, from, expectBadges)
+      local L = rec.label
+      local hit = firstHit(rec, from)
+      local to = (from == "a") and "b" or "a"
+      local ev = firstDamage(rec, to)
+      if not check(hit ~= nil and ev ~= nil, L .. ": side " .. from .. " landed a hit that was replayed",
+                   hit and "" or "no replayed hit") then
+        return nil
+      end
+      check(ev.amount == hit.with, L .. ": the damage the referee dealt is its own Damage.calc's",
+            ("dealt %s, calc %s"):format(tostring(ev.amount), tostring(hit.with)))
+      check(hit.with == hit.byHand,
+            L .. ": and that is the hit with the raised stat worked by hand (floor(110 x stat / 100))",
+            ("calc %s, by hand %s"):format(tostring(hit.with), tostring(hit.byHand)))
+      if expectBadges == "boost" then
+        check(hit.with > hit.bare, L .. ": the badge makes the hit stronger than the same hit without it",
+              ("%s with, %s without"):format(tostring(hit.with), tostring(hit.bare)))
+      elseif expectBadges == "guard" then
+        check(hit.with < hit.bare, L .. ": the badge makes the hit softer than the same hit without it",
+              ("%s with, %s without"):format(tostring(hit.with), tostring(hit.bare)))
+      else
+        check(hit.with == hit.bare, L .. ": no badge, no difference: the hit is the unboosted one",
+              ("%s with, %s without"):format(tostring(hit.with), tostring(hit.bare)))
+      end
+      return hit, ev
+    end
+
+    -- ---- the pair that flips the order: badge 3 crosses the foe's Speed
+    local FLIP = { playerSpe = 100, foeSpe = 105, playerMove = SWIFT, foeMove = SWIFT, seed = 4242 }
+    local SAME = { playerSpe = 100, foeSpe = 60, playerMove = SWIFT, foeMove = SWIFT, seed = 4242 }
+    local function with(base, extra)
+      local out = {}
+      for k, v in pairs(base) do out[k] = v end
+      for k, v in pairs(extra) do out[k] = v end
+      return out
+    end
+
+    if wants("badge-boost") then
+      local spec0 = with(FLIP, { label = "badge flip, no badges", badges = {} })
+      local spec1 = with(FLIP, { label = "badge flip, badges 1+3", badges = { 1, 3 }, shotTag = "badge-boost" })
+      local none = badgeFight(spec0)
+      local boosted = badgeFight(spec1)
+      if none and boosted then
+        fixtureChecks(none, spec0)
+        fixtureChecks(boosted, spec1)
+        local P = FLIP.playerSpe
+        check(none.facts.playerBadges == "" and boosted.facts.playerBadges == "1,3",
+              "badge boost: the player's battler holds the save's badges (none / 1,3)",
+              ("[%s] / [%s]"):format(none.facts.playerBadges, boosted.facts.playerBadges))
+        check(none.facts.speedP == P,
+              "badge boost: no badges, the player's Speed is raw", tostring(none.facts.speedP))
+        check(boosted.facts.speedP == math.floor(P * 110 / 100),
+              "badge boost: badge 3, the player's Speed is floor(raw x 110 / 100)",
+              ("%s from %s"):format(tostring(boosted.facts.speedP), tostring(boosted.facts.rawP)))
+        check(none.facts.speedP < none.facts.speedF and boosted.facts.speedP > boosted.facts.speedF,
+              "badge boost: badge 3 takes the player's Speed from under the foe's to over it",
+              ("%s v %s -> %s v %s"):format(none.facts.speedP, none.facts.speedF,
+                boosted.facts.speedP, boosted.facts.speedF))
+        check(firstAnimSide(none) == "b",
+              "badge boost: with no badges the foe moves first", tostring(firstAnimSide(none)))
+        check(firstAnimSide(boosted) == "a",
+              "badge boost: with badges 1+3 the player moves first -- the order flipped",
+              tostring(firstAnimSide(boosted)))
+        local hitNone, evNone = hitChecks(none, "a", "none")
+        local hitBoost, evBoost = hitChecks(boosted, "a", "boost")
+        hitChecks(none, "b", "none")
+        hitChecks(boosted, "b", "none")   -- badge 5 is not held: the foe's hit is unboosted
+        if hitBoost then
+          check(hitBoost.atk == 80 and math.floor(110 * hitBoost.atk / 100) == 88,
+                "badge boost: the Attack the hit read is the fixture's pinned stat, raw (the boost is applied in the formula)",
+                tostring(hitBoost.atk))
+          check(evBoost and evBoost.hp == 60 - hitBoost.with,
+                "badge boost: the foe's HP after the hit is its max less the boosted damage",
+                ("%s left, expected %s"):format(tostring(evBoost and evBoost.hp), tostring(60 - hitBoost.with)))
+        end
+        if hitNone then
+          check(evNone and evNone.hp == 60 - hitNone.with,
+                "badge boost: with no badges the foe's HP is its max less the plain damage",
+                ("%s left, expected %s"):format(tostring(evNone and evNone.hp), tostring(60 - hitNone.with)))
+        end
+      end
+
+      -- ---- the pair the order does not change: same draws, so the same hit
+      local same0 = with(SAME, { label = "badge same-order, no badges", badges = {} })
+      local same1 = with(SAME, { label = "badge same-order, badges 1+3", badges = { 1, 3 } })
+      local a2 = badgeFight(same0)
+      local b2 = badgeFight(same1)
+      if a2 and b2 then
+        fixtureChecks(a2, same0)
+        fixtureChecks(b2, same1)
+        check(firstAnimSide(a2) == "a" and firstAnimSide(b2) == "a",
+              "badge boost: the player is faster either way -- the same order in both fights")
+        local hitA = hitChecks(a2, "a", "none")
+        local hitB, evB = hitChecks(b2, "a", "boost")
+        local evA = firstDamage(a2, "b")
+        if hitA and hitB and evA and evB then
+          check(hitA.bare == hitB.bare and hitA.with == hitB.bare,
+                "badge boost: the identical first hit: the unboosted damage is the same in both fights",
+                ("%s / %s"):format(tostring(hitA.with), tostring(hitB.bare)))
+          check(evA.hp - evB.hp == hitB.with - hitB.bare and evA.hp > evB.hp,
+                "badge boost: the foe's HP after it is lower with badge 1 by exactly the formula's difference",
+                ("%s -> %s, difference %s, formula %s"):format(tostring(evA.hp), tostring(evB.hp),
+                  tostring(evA.hp - evB.hp), tostring(hitB.with - hitB.bare)))
+        end
+        local foeA, foeB = firstDamage(a2, "a"), firstDamage(b2, "a")
+        check(foeA ~= nil and foeB ~= nil and foeA.amount == foeB.amount,
+              "badge boost: the foe's hit on the player is the same in both (badges 1+3 do not touch it)",
+              ("%s / %s"):format(tostring(foeA and foeA.amount), tostring(foeB and foeB.amount)))
+      end
+    end
+
+    -- ---- badges 5 + 7: the other side of the formula
+    if wants("badge-guard") then
+      local spec = { label = "badge guard, badges 5+7", badges = { 5, 7 }, playerSpe = 100, foeSpe = 105,
+                     playerMove = WATER_GUN, foeMove = SWIFT, seed = 4242, shotTag = "badge-guard" }
+      local rec = badgeFight(spec)
+      if rec then
+        fixtureChecks(rec, spec)
+        check(rec.facts.playerBadges == "5,7", "badge guard: the player's battler holds badges 5 and 7",
+              rec.facts.playerBadges)
+        check(rec.facts.speedP == rec.facts.rawP,
+              "badge guard: no badge 3, the player's Speed stays raw", tostring(rec.facts.speedP))
+        check(firstAnimSide(rec) == "b", "badge guard: the foe is faster and moves first", tostring(firstAnimSide(rec)))
+        hitChecks(rec, "a", "boost")    -- Sp. Atk, badge 7
+        hitChecks(rec, "b", "guard")    -- Defense, badge 5
+      end
+    end
+
+    -- ---- a trainer: the coop_npc mode
+    if wants("badge-trainer") then
+      local pack = Trainers.pack() or {}
+      local trainerId, trainerLevel
+      for id, row in pairs(pack.trainers or {}) do
+        local tid = tonumber(id)
+        local p = type(row) == "table" and row.party or nil
+        local named = type(row) == "table" and type(row.name) == "string" and row.name ~= ""
+        local class = type(row) == "table" and tonumber(row.class) or 0
+        local plain = (emerald or (class >= 57 and class ~= 98)) and class ~= 81
+          and class ~= 89 and class ~= 90
+        if tid and tid > 0 and named and plain and type(p) == "table" and #p == 1
+            and not row.doubleBattle then
+          local last = tonumber(p[#p].level) or 999
+          if last >= 3 and (trainerLevel == nil or last < trainerLevel) then trainerId, trainerLevel = tid, last end
+        end
+      end
+      if not trainerId then
+        skip("badge-trainer", "no single trainer with a party of one in this cart's book")
+      else
+        settle()
+        setBadges({ 1, 3 })
+        seed(STARTER, 40)
+        local result
+        local took = solo:fromGen3Trainer(game, trainerId, { trainerId = trainerId, done = function(r) result = r end })
+        if check(took and solo.sim ~= nil, "badge trainer: trainer " .. tostring(trainerId) .. " was taken") then
+          local sim = solo.sim
+          awaitChoose(60, "the trainer grid with badges")
+          local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
+          local pb, fb = pf and pf.b, ff and ff.b
+          if check(pb ~= nil and fb ~= nil, "badge trainer: both battlers are on the field") then
+            check(sim.mode == "coop_npc", "badge trainer: the referee runs it as coop_npc", tostring(sim.mode))
+            check(H.badgeString(pb.badges) == "1,3" and pf.badgeRules == true,
+                  "badge trainer: the player's battler holds badges 1 and 3",
+                  H.badgeString(pb.badges))
+            check(fb.badges == nil and ff.badgeRules ~= true and (fb.mon and fb.mon.traded) == nil,
+                  "badge trainer: the trainer's battler holds none, and is not 'traded'")
+            local plain = (tonumber(pb.stages and pb.stages.spe) or 0) == 0 and pb.mon.status == nil
+              and (tonumber(pb.mon.heldItem) or 0) == 0
+            if plain then
+              check(sim:_speedOf(pb) == math.floor(pb.stats.spe * 110 / 100),
+                    "badge trainer: badge 3, the player's Speed is floor(raw x 110 / 100)",
+                    ("%s from %s"):format(tostring(sim:_speedOf(pb)), tostring(pb.stats.spe)))
+            else
+              log("badge trainer: the lead is not plain (stage / status / item); the Speed check is skipped")
+            end
+            shot("badge-trainer-command")
+          end
+          driveToEnd(function(f) fightWith(bestMove(f)) end, 240)
+          check(result == "win", "badge trainer: the trainer fight ends in a win", tostring(result))
+        end
+        setBadges({})
+        settle()
+      end
+    end
+
+    -- ------- obedience
+
+    -- The cart's line for each outcome, as it is said on the screen, and the
+    -- referee tokens that map to it: the first row a line fits is its row.
+    local OBEY_LINES = {
+      { key = "asleep", phrase = "ignored orders while asleep", tokens = { ignores_asleep = true } },
+      { key = "ignored", phrase = "ignored orders", tokens = { uses_random_move = true } },
+      { key = "nap", phrase = "began to nap", tokens = { falls_asleep = true } },
+      { key = "loafing", phrase = "loafing around", tokens = { loafing = true } },
+      { key = "turned", phrase = "turned away", tokens = { turned_away = true } },
+      { key = "pretend", phrase = "pretended not to notice", tokens = { pretend_not_notice = true } },
+      { key = "wont", phrase = "won't obey", tokens = { wont_obey = true, hits_itself = true } },
+    }
+    local function flat(text)
+      return (tostring(text):gsub("\226\128\153", "'"):gsub("%s+", " "):lower())
+    end
+    local function lineKey(text)
+      local t = flat(text)
+      for _, row in ipairs(OBEY_LINES) do
+        if t:find(row.phrase, 1, true) then return row.key end
+      end
+      return nil
+    end
+    local function tokenKey(token)
+      for _, row in ipairs(OBEY_LINES) do
+        if row.tokens[token] then return row.key end
+      end
+      return nil
+    end
+    local function countsOf(list, keyOf)
+      local out = {}
+      for _, item in ipairs(list) do
+        local key = keyOf(item)
+        if key then out[key] = (out[key] or 0) + 1 end
+      end
+      return out
+    end
+    local function describe(counts)
+      local parts = {}
+      for _, row in ipairs(OBEY_LINES) do
+        if counts[row.key] then parts[#parts + 1] = row.key .. "=" .. counts[row.key] end
+      end
+      return #parts > 0 and table.concat(parts, " ") or "none"
+    end
+
+    -- A traded lead at `level` that knows only SWIFT: its OT is not this
+    -- player's, by id and by name (what Sheet3's `tradedOf` compares).  False
+    -- when this save has no trainer id to differ from.
+    local function tradedLead(level, moves)
+      local mon = seed(STARTER, level)
+      if not mon then return nil end
+      pinMove(mon, moves or SWIFT)
+      local s = session()
+      local pid = tonumber(s.trainerId or s.id or s.playerId)
+      if not pid then return nil, "the session has no trainer id" end
+      mon.otId = pid + 1
+      mon.otName, mon.ot = "TRADER", "TRADER"
+      mon.maxHp, mon.hp = math.max(300, tonumber(mon.maxHp) or 0), math.max(300, tonumber(mon.maxHp) or 0)
+      return mon
+    end
+
+    -- One fight of the traded lead.  spec: label, seed, badges, classic,
+    -- shotTag.  The foe is a weak wild monster a single landed hit knocks
+    -- out, so the fight ends the moment the lead finally obeys.
+    local function obeyFight(spec)
+      settle()
+      setBadges(spec.badges or {})
+      setOption("classicui", spec.classic == true)
+      local mon, why = tradedLead(50, spec.moves)
+      if not mon then
+        check(false, spec.label .. ": a traded lead was seeded", why)
+        setOption("classicui", false)
+        return nil
+      end
+      local foe = foeMon(5, { atk = 30, def = 30, spe = 20, spa = 30, spd = 30, hp = 30 }, TACKLE)
+      if not foe then
+        check(false, spec.label .. ": the wild foe was built")
+        setOption("classicui", false)
+        setBadges({})
+        return nil
+      end
+      local before = solo.seedFn
+      solo.seedFn = function() return spec.seed end
+      local result
+      local took = solo:fromGen3Encounter(game, wildOf(WILD, 5),
+        { party = { foe }, done = function(r) result = r end })
+      solo.seedFn = before
+      if not check(took and solo.sim ~= nil and fight() ~= nil, spec.label .. ": the fight was taken") then
+        setOption("classicui", false)
+        setBadges({})
+        return nil
+      end
+      local sim, f = solo.sim, fight()
+      local rec = watch(sim, f)
+      rec.label, rec.seed = spec.label, spec.seed
+      rec.classic = f.classicUi == true
+      check(awaitChoose(60, "the obedience fight's command grid"), spec.label .. ": the command grid opens")
+      local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
+      local pb, fb = pf and pf.b, ff and ff.b
+      rec.facts = pb and fb and {
+        level = pb.mon.level, traded = pb.mon.traded == true, unfateful = pb.mon.unfateful,
+        foeTraded = fb.mon.traded, playerBadges = H.badgeString(pb.badges),
+        rules = pf.badgeRules == true,
+      } or nil
+
+      local shotDone = false
+      rec.lineKeys = {}
+      play(function(g)
+        -- the moment the screen is showing a disobedience line: let the page
+        -- finish typing, photograph it, then carry on
+        if #rec.obey == 0 then return end
+        local key = lineKey(g.shown or "")
+        if not key then return end
+        rec.lineKeys[key] = true
+        if spec.shotTag and not shotDone then
+          shotDone = true
+          rec.shownLine = flat(g.shown or "")
+          U.wait(30)
+          shot(spec.shotTag)
+          rec.shot = true
+        elseif spec.shotEach and not spec.shotEach[key] then
+          spec.shotEach[key] = true
+          U.wait(30)
+          shot("obey-" .. key)
+        end
+      end, 240, "the obedience fight to end")
+      rec.result = result
+      setOption("classicui", false)
+      setBadges({})
+      settle()
+      return rec
+    end
+
+    -- Seeds tried in order; the first fight that has a disobedience in it is
+    -- the leg's fight.  (A traded L50 monster over a cap of 10 obeys on a
+    -- bit under one roll in five, so most seeds disobey at once; the list is
+    -- only the net under the rest.)
+    local OBEY_SEEDS = { 7, 23, 51, 77, 91, 131, 177, 211 }
+    local function obeyUntilDisobeyed(spec)
+      local rec
+      for i, seedValue in ipairs(OBEY_SEEDS) do
+        rec = obeyFight(with(spec, { seed = seedValue,
+          label = ("%s (seed %d)"):format(spec.label, seedValue) }))
+        if not rec then return nil end
+        if #rec.obey > 0 then return rec end
+        log(("%s: seed %d obeyed throughout; trying the next"):format(spec.label, seedValue))
+        if i == #OBEY_SEEDS then return rec end
+      end
+      return rec
+    end
+
+    -- Do the lines the screen said match the referee's `obey` events, once
+    -- for each, outcome by outcome?  (The referee's own sentence for an
+    -- outcome sits right behind its event; the screen says the cart's line in
+    -- its place and not both.)
+    local function linesMatch(rec)
+      local want = countsOf(rec.obey, function(ob) return tokenKey(ob.token) end)
+      local got = countsOf(rec.said, lineKey)
+      local same = true
+      for _, row in ipairs(OBEY_LINES) do
+        if (want[row.key] or 0) ~= (got[row.key] or 0) then same = false end
+      end
+      return same, ("events: %s; said: %s"):format(describe(want), describe(got)), want
+    end
+
+    local function obeyChecks(rec, classic)
+      local L = rec.label
+      check(rec.facts ~= nil and rec.facts.level == 50 and rec.facts.traded == true,
+            L .. ": the referee's lead is the L50 monster, marked traded",
+            rec.facts and ("L%s traded=%s"):format(tostring(rec.facts.level), tostring(rec.facts.traded)))
+      check(rec.facts ~= nil and rec.facts.foeTraded == nil, L .. ": the wild foe is not marked traded")
+      check(rec.facts ~= nil and rec.facts.unfateful == nil,
+            L .. ": and the lead is an ordinary species -- no `unfateful` mark, so the ordinary level caps apply")
+      check(rec.facts ~= nil and rec.facts.playerBadges == "" and rec.facts.rules,
+            L .. ": and the lead holds no badges, with the badge rules on", rec.facts and rec.facts.playerBadges)
+      check(rec.classic == classic, L .. ": the screen is on " .. (classic and "CLASSIC BATTLE UI" or "the arena"),
+            tostring(rec.classic))
+      check(#rec.obey >= 1, L .. ": the referee emitted an `obey` event for a disobedient lead",
+            ("%d event(s)"):format(#rec.obey))
+      local onlyPlayer = true
+      for _, ob in ipairs(rec.obey) do
+        if ob.side ~= "a" then onlyPlayer = false end
+      end
+      check(onlyPlayer, L .. ": every `obey` is the player's own seat -- the foe never disobeys")
+      local same, said = linesMatch(rec)
+      check(same, L .. ": the screen said the cart's line once for each outcome, and no other", said)
+      check(rec.shot == true, L .. ": a disobedience line was on the screen and photographed",
+            rec.shownLine)
+      check(rec.result == "win", L .. ": the fight still ends normally (a win)", tostring(rec.result))
+      check(#rec.errors == 0, L .. ": no referee call failed under the watch", rec.errors[1])
+    end
+
+    if wants("obey-arena") then
+      local rec = obeyUntilDisobeyed({ label = "obey arena", classic = false, shotTag = "obey-arena" })
+      if rec then
+        obeyChecks(rec, false)
+        log("obey arena: lines said", (table.concat(rec.said, " | "):gsub("%s+", " ")))
+      end
+    end
+
+    if wants("obey-classic") then
+      local rec = obeyUntilDisobeyed({ label = "obey classic", classic = true, shotTag = "obey-classic" })
+      if rec then
+        obeyChecks(rec, true)
+        log("obey classic: lines said", (table.concat(rec.said, " | "):gsub("%s+", " ")))
+      end
+    end
+
+    if wants("obey-badge8") then
+      local spec = { label = "obey badge 8", badges = { 8 }, classic = false, seed = OBEY_SEEDS[1] }
+      local rec = obeyFight(spec)
+      if rec then
+        local L = rec.label
+        check(rec.facts ~= nil and rec.facts.traded == true and rec.facts.level == 50,
+              L .. ": the lead is still the traded L50 monster",
+              rec.facts and ("L%s traded=%s"):format(tostring(rec.facts.level), tostring(rec.facts.traded)))
+        check(rec.facts ~= nil and rec.facts.playerBadges == "8",
+              L .. ": and holds badge 8", rec.facts and rec.facts.playerBadges)
+        check(#rec.obey == 0, L .. ": with badge 8 it never disobeys: no `obey` event in the fight",
+              ("%d event(s)"):format(#rec.obey))
+        check(countsOf(rec.said, lineKey) ~= nil and next(countsOf(rec.said, lineKey)) == nil,
+              L .. ": and the screen said none of the disobedience lines",
+              describe(countsOf(rec.said, lineKey)))
+        check(firstAnimSide(rec) == "a", L .. ": the lead moved first and attacked", tostring(firstAnimSide(rec)))
+        check(rec.result == "win", L .. ": the fight ends in a win", tostring(rec.result))
+      end
+    end
+
+    -- Every way a traded monster can refuse, as far as one fight list reaches:
+    -- a lead that knows two moves, so a called move is reachable, fought on a
+    -- run of seeds until the self-hit, the nap, the called move and a loafing
+    -- line have each been through the screen.  (Ignoring orders while asleep
+    -- needs SNORE or SLEEP TALK picked while asleep; this pilot picks move 1
+    -- and never builds that.)  Every disobedient fight must say the cart's line
+    -- once for each outcome and still end in a win.
+    if wants("obey-outcomes") then
+      local shotKeys, seen, fights = {}, {}, 0
+      local function covered()
+        return seen.wont and seen.nap and seen.ignored
+          and (seen.loafing or seen.turned or seen.pretend)
+      end
+      for i = 1, 40 do
+        local seedValue = 1000 + i * 37
+        local rec = obeyFight({ label = ("obey outcomes (seed %d)"):format(seedValue), seed = seedValue,
+          classic = false, moves = { SWIFT, TACKLE }, shotEach = shotKeys })
+        if not rec then break end
+        fights = fights + 1
+        local same, said, want = linesMatch(rec)
+        check(same and rec.result == "win" and #rec.errors == 0,
+              rec.label .. ": every outcome said once in the cart's words, and the fight ends in a win",
+              ("%s; result %s"):format(said, tostring(rec.result)))
+        for key, n in pairs(want) do seen[key] = (seen[key] or 0) + n end
+        if covered() then break end
+      end
+      log("obey outcomes: reached", describe(seen), "in", fights, "fight(s)")
+      check(seen.wont ~= nil, "obey outcomes: \"won't obey!\" (the self-hit's line) was reached and said")
+      check(seen.nap ~= nil, "obey outcomes: \"began to nap!\" was reached and said")
+      check(seen.ignored ~= nil, "obey outcomes: \"ignored orders!\" (a called move) was reached and said")
+      check(seen.loafing ~= nil or seen.turned ~= nil or seen.pretend ~= nil,
+            "obey outcomes: a loafing line (loafing / turned away / pretended) was reached and said")
+    end
+
+    setBadges({})
+    setOption("classicui", false)
+  end
+
   if not legOn("singles") then
     doubleLegs()
+    badgeLegs()
     return
   end
 
@@ -2440,6 +3220,7 @@ local function runGen3(game, H, U, env)
   end
 
   doubleLegs()
+  badgeLegs()
 end
 
 return function(game)

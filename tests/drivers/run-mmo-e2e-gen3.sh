@@ -38,7 +38,12 @@
 # a co-op wild 2v1 (both on Route 1 / Route 101 grass, the walker's step
 # encounter diverted into the mod's co-op fight, EXP and a level-up) and a
 # co-op NPC trainer 2v2 (walked into for real, the trainer's flag set on both
-# carts). Screenshots land in SHOT_DIR as
+# carts). Both sides hold badges (the host 1 and 5, the guest 3 and 7) and the
+# host reads its own hub's referee live at each fight's first command menu: the
+# 1v1s are link battles and carry no badge rules (even with a hostile upload of
+# badges from the guest's client), the co-op wild and trainer fights carry each
+# player's own badges and cart family on side a and none on the computer's
+# (even with a hostile upload for its side). Screenshots land in SHOT_DIR as
 # g3-<game>-<role>-<NN>-<leg>.png with an index.html contact sheet
 # (tests/drivers/shots_index.py).
 #
