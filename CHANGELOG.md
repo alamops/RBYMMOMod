@@ -93,8 +93,9 @@ here must match `manifest.version`.
     around, ignore orders, use a different move, nap or hurt itself, in the
     cart's own sequence and words. The caps are 10 with no badges, 30, 50 and
     70 with badges 2, 4 and 6, and none with badge 8. FireRed / LeafGreen
-    keep their Focus Punch exemption, and Emerald doesn't. Event MEW and
-    DEOXYS obey; others never do.
+    keep their Focus Punch exemption, and Emerald doesn't. A MEW or DEOXYS
+    that didn't come from an event never obeys; an event one follows the
+    usual rules.
   - **Fights between players stay link battles.** In 1-on-1 and party
     against party there are no boosts and no disobedience. The referee
     enforces this itself, so a modified client can't change it.

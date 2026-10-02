@@ -1954,8 +1954,7 @@ bite you:
   edges: a player on the next map over isn't drawn across a seamless map
   edge, cross-region trades wait for both carts' post-game, a trainer fight
   drawn with your team still standing leaves the trainer unbeaten (and ready
-  to challenge you again), fights the mod referees get no badge boosts, and
-  nobody has run LeafGreen live yet.
+  to challenge you again), and nobody has run LeafGreen live yet.
 
 ---
 

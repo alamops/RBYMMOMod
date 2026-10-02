@@ -138,28 +138,14 @@ another page or in another region (show them in the list, as today).
       computer get the carts' badge boosts and obedience on Gen 3, and every
       generation's fights between players are link battles. On the way it
       turned out Gen 2 had never applied badge boosts (the referee read Red's
-      badge names). That is fixed too, so the "Gen 1 and Gen 2 already apply"
-      line below was only ever true of Gen 1.
+      badge names). That is fixed too.
 
-**Current behaviour:** no badge stat boosts and no disobedience in any
-Gen 3 fight the mod runs, including solo and co-op against wild POKéMON and
-trainers. **Gen 1 and Gen 2 already apply badge boosts against the computer**
-(see `Coop:buildField`, "Against an NPC they do"), so Gen 3 is the odd one out.
-
-**Where:** `src/BattleSim3/Damage.lua` (~l.260, badge boosts),
-`src/BattleSim3/Move.lua` (~l.21, no disobedience), `src/BattleSim3/Field.lua`
-(~l.99); Node twin `server/lib/battle3/`; sheet contract
-`docs/plans/gen3-battle-sheet.md`.
-
-**To do:**
-1. Carry the badges on the Gen 3 sheet (`src/Sheet3.lua`) for NPC modes
-   only; PvP stays link rules.
-2. Apply pret's badge boosts (`pokemon.c`) and the obedience check
-   (`battle_util.c`) in `BattleSim3` **and** `server/lib/battle3`, line for
-   line.
-3. Add vectors to `tests/fixtures/battle_sim3_vectors.json` and turn cases to
-   `battle3_turn_parity.json`.
-4. Update the sheet doc and the CHANGELOG entry.
+**Now:** fights against the computer apply the carts' badge boosts and
+obedience, on Gen 1 (boosts), Gen 2 (Gold's boosts and type badges) and Gen 3
+(boosts and obedience). Every generation's fights between players are link
+battles. Where it lives: the referees' `BADGE_MODES` gate, the Gen 3 sheet's
+`traded` / `fateful`, and the `obey` event (`docs/plans/gen3-battle-sheet.md`
+§6, §7.2.1).
 
 ## 7. A trainer draw with your team standing leaves the trainer unbeaten
 
