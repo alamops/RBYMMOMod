@@ -16,7 +16,11 @@
 --   * that the event stream reaches the same screen the client-simulated path
 --     draws on -- HP, faints, send-outs and the result -- rather than a second
 --     renderer built beside it;
---   * and that Config.MEDIATED_COOP is not a runtime off-switch.
+--   * and that Config.MEDIATED_COOP is not a runtime off-switch;
+--   * and (section 14) that a player's badges ride a co-op upload only against
+--     the computer -- a coop_npc upload carries them, a coop_pvp one never does
+--     -- and that the referee drops badges forged onto a coop_pvp or the
+--     trainer's team.
 --
 -- Run: luajit mods/rby_mmo/tests/coop_mediated.lua
 --      (from the engine checkout root -- a co-op field is built out of the
@@ -2702,6 +2706,161 @@ do
      "M:unwindTo and Coop.unwindStackTo return the same verdict")
   eq(#stackA.states, #stackB.states,
      "...and leave the stack in the same shape")
+end
+
+
+-- ------------------------------------------------------------------
+-- 14. badges ride a co-op upload only against the computer
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen3-badge-rules.md, Gen 1 and Gen 2: no cart boosts in a link
+-- battle (pokered's ApplyBadgeStatBoosts and pokecrystal's BadgeStatBoosts both
+-- return early under a link), so a coop_pvp upload carries no badges even from
+-- a player who holds them, and a coop_npc one carries its own player's.  The
+-- referee is the gate that counts, not the client: badges forged onto a
+-- coop_pvp upload, or onto the trainer's team, are dropped all the same.
+
+do
+  -- What this player's save says.  A Gold client reads its own stores
+  -- (`player.badges` Johto, `player.kantoBadges` Kanto), Red's reads the badge
+  -- rows against the bag.  The field a screen builds here is Gen 1's shell
+  -- whatever the save is (CoopField.new refuses a Gold game), so the Gold save
+  -- is put on the screen after the field exists: what a client uploads is read
+  -- off `self.game`.
+  local function holder(generation)
+    local game = newGame()
+    if generation == 2 then
+      game.generation = 2
+      game.save.player = { badges = { ZEPHYR = true }, kantoBadges = { BOULDER = true } }
+    else
+      game.save.inventory = { BOULDERBADGE = 1 }
+    end
+    return game
+  end
+  local HELD = { [1] = "BOULDERBADGE", [2] = "ZEPHYR,BOULDER" }
+  local function partyOf(sc, side)
+    for _, msg in ipairs(sc.sent) do
+      if msg.type == Wire.BATTLE_PARTY and msg.payload.side == side then return msg.payload end
+    end
+    return nil
+  end
+  local function upload(generation, mode, mine)
+    local sc = screen({ slots = mode == "coop_npc" and npcSlots() or pvpSlots(), mine = mine,
+                        host = mine == 1, mode = mode, selfId = mine == 1 and "ann" or "bob" })
+    sc.game = holder(generation)
+    eq(sc:uploadMediated(), true, "badges: the " .. mode .. " upload goes out")
+    return sc
+  end
+
+  for generation = 1, 2 do
+    local cart = generation == 1 and "Gen 1" or "Gold"
+    local host = upload(generation, "coop_npc", 1)
+    local up = partyOf(host, "a")
+    eq(table.concat(up and up.badges or {}, ","), HELD[generation],
+       "badges (" .. cart .. "): a coop_npc host uploads its own player's")
+    check(up ~= nil and Wire.battleParty(up) ~= nil and Wire.battleParty(up).badges ~= nil,
+          "badges (" .. cart .. "): ...and they survive Wire.battleParty")
+    eq(partyOf(host, "b") and partyOf(host, "b").badges, nil,
+       "badges (" .. cart .. "): the trainer's team carries none")
+    local guest = upload(generation, "coop_npc", 2)
+    eq(table.concat(partyOf(guest, "a").badges or {}, ","), HELD[generation],
+       "badges (" .. cart .. "): ...and a coop_npc guest uploads its own")
+
+    local pvpHost = upload(generation, "coop_pvp", 1)
+    eq(partyOf(pvpHost, "a") and partyOf(pvpHost, "a").badges, nil,
+       "badges (" .. cart .. "): a coop_pvp host uploads none, holding them")
+    local pvpGuest = upload(generation, "coop_pvp", 2)
+    eq(partyOf(pvpGuest, "a") and partyOf(pvpGuest, "a").badges, nil,
+       "badges (" .. cart .. "): ...nor does a coop_pvp guest")
+  end
+
+  -- Through a real hub, Gen 1: a trainer fight seats ANN's badge on her fighter
+  -- and none on BOB's; a four-player spar seats none, though every client
+  -- holds one and the second spar has the badge forged onto every upload.
+  local function join(hub, name)
+    local peer = { outbox = {} }
+    function peer:send(msg) self.outbox[#self.outbox + 1] = msg end
+    function peer:close() end
+    local client = hub:accept(peer)
+    hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      playerId = testPlayerId(name), name = name, map = "PALLET", x = 5, y = 5, facing = "down" })
+    return client
+  end
+  -- What the screen sent, as that client's own messages.  `forge` hangs a
+  -- badge on the uploads a hostile client would: `true` on every party, or the
+  -- name of one side ("b" is the trainer's team).
+  local function relay(hub, client, sc, forge)
+    for _, msg in ipairs(sc.sent) do
+      local payload = {}
+      for k, v in pairs(msg.payload) do payload[k] = v end
+      payload.type = msg.type
+      if msg.type == Wire.BATTLE_PARTY and (forge == true or forge == payload.side) then
+        payload.badges = { "BOULDERBADGE" }
+      end
+      hub:receive(client, payload)
+    end
+  end
+  local function badgeNames(fighter)
+    local names = {}
+    for name in pairs(fighter and fighter.badges or {}) do names[#names + 1] = name end
+    table.sort(names)
+    return table.concat(names, ",")
+  end
+
+  for _, forge in ipairs({ false, "b" }) do
+    local label = forge and "badges (hub, forged trainer)" or "badges (hub)"
+    local hub = Hub.new({ maxPlayers = 4 })
+    local ann, bob = join(hub, "ANN"), join(hub, "BOB")
+    hub:openCoopBattle("bd1", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+    local npcField = npcSlots()
+    npcField[1].owner, npcField[2].owner = ann.id, bob.id
+    local annScreen = screen({ slots = npcField, mine = 1, host = true, mode = "coop_npc",
+                               selfId = ann.id, battleId = "bd1" })
+    local bobScreen = screen({ slots = npcField, mine = 2, host = false, mode = "coop_npc",
+                               selfId = bob.id, battleId = "bd1" })
+    annScreen.game = holder(1)
+    annScreen:uploadMediated()
+    bobScreen:uploadMediated()
+    relay(hub, ann, annScreen, forge)
+    relay(hub, bob, bobScreen)
+    local record = hub.battles["bd1"]
+    check(record and record.sim ~= nil, label .. ": the trainer fight is refereed")
+    eq(badgeNames(record.sim.byId[ann.id]), "BOULDERBADGE", label .. ": ANN's seat holds her badge against the trainer")
+    eq(badgeNames(record.sim.byId[bob.id]), "", label .. ": ...and BOB's, who holds none, holds none")
+    if forge then
+      check(record.parties[record.npcIds[1]].badges ~= nil, label .. ": the forged badge reached the hub's record")
+    end
+    for _, npcId in ipairs(record.npcIds) do
+      eq(record.sim.byId[npcId].badges, nil, label .. ": the trainer's seat holds none")
+    end
+  end
+
+  for _, forged in ipairs({ false, true }) do
+    local label = forged and "badges (hub, forged)" or "badges (hub)"
+    local spar = Hub.new({ maxPlayers = 4 })
+    local names = { "ANN", "BOB", "CAL", "DEE" }
+    local clients, ids = {}, {}
+    for i, name in ipairs(names) do clients[i] = join(spar, name); ids[i] = clients[i].id end
+    spar:openCoopBattle("bp1", ids, { mode = "coop_pvp", hostId = ids[1],
+      sides = { a = { ids[1], ids[2] }, b = { ids[3], ids[4] } } })
+    local field = pvpSlots()
+    for i = 1, 4 do field[i].owner = ids[i] end
+    for i = 1, 4 do
+      local sc = screen({ slots = field, mine = i, host = i == 1, mode = "coop_pvp",
+                          selfId = ids[i], battleId = "bp1" })
+      sc.game = holder(1)
+      sc:uploadMediated()
+      relay(spar, clients[i], sc, forged)
+    end
+    local sparRecord = spar.battles["bp1"]
+    check(sparRecord and sparRecord.sim ~= nil, label .. ": the spar is refereed")
+    if forged then
+      check(sparRecord.parties[ids[1]].badges ~= nil, label .. ": the forged badges reached the hub's record")
+    end
+    for i = 1, 4 do
+      eq(sparRecord.sim.byId[ids[i]].badges, nil, label .. ": " .. names[i] .. "'s seat holds no badge")
+    end
+  end
 end
 
 T.finish("coop_mediated")

@@ -18,6 +18,13 @@
 --      asks nobody), the C5 kinds (weather, ability, stat delta), the result;
 --   3. a 2-on-2 against a wild: the knockout priced by Exp3 on the session
 --      party, and a catch into the session party;
+--  3b. the badge rules through the real screens and the in-game hub
+--      (docs/plans/gen3-badge-rules.md): each human's own badges (K1) and
+--      traded / fateful sheets (K2) reach the referee on their own cart's
+--      terms, a boosted strike and a changed speed order against the same fight
+--      with the badges taken away, a traded mon over its cap refusing on a
+--      human seat with the cart's line said once (K3), and none of it in a
+--      coop_pvp spar -- from an honest client or a hostile one;
 --   4. the stand-in and the ritual: prize (FireRed and Emerald rules, the
 --      AMULET COIN), the trainer script's `done` after the screen is free,
 --      the whiteout, a draw, the rival's heal-and-carry-on, blacksOut on the
@@ -35,7 +42,8 @@
 -- Legal: every species, move, trainer and item row below is the SDK
 -- fixture's or invented here with synthetic numbers; the only real values are
 -- pret enum numbers the battle code branches on (MOVE_TARGET_*, HOLD_EFFECT_*,
--- ITEM_* ids), the policy docs/plans/gen3-battle-sheet.md states for the sim.
+-- ITEM_* ids, the badge flags FLAG_BADGE01_GET), the policy
+-- docs/plans/gen3-battle-sheet.md states for the sim.
 --
 -- Run from the engine checkout root:
 --
@@ -438,6 +446,12 @@ local FakeFlags = {}
 function FakeFlags.trainerFlagId(id) return 0x500 + tonumber(id) end
 function FakeFlags.setFlag(store, _, id, on) store.flags[id] = on end
 function FakeFlags.getFlag(store, _, id) return store.flags[id] end
+-- FireRed / LeafGreen's badge test (pret FLAG_BADGE01_GET is 0x820 there): the
+-- flag store answers one badge by its number.  Emerald's is the battle
+-- profile's own `badgeFlags` below, asked flag by flag, as the engine does
+-- (battle/engine.lua Engine.hasBadge).
+local FRLG_BADGE1, RSE_BADGE1 = 0x820, 0x867
+function FakeFlags.hasBadge(store, n) return store.flags[FRLG_BADGE1 + n - 1] == true end
 local FakeSpace = { store = STORE }
 function FakeSpace.getStore() return STORE end
 function FakeSpace.returnToField() note("returnToField") end
@@ -543,7 +557,13 @@ end
 local FakeProfile = {}
 function FakeProfile.get(session)
   local rse = session and session.version == "emerald"
+  local badgeFlags = nil
+  if rse then
+    badgeFlags = {}
+    for n = 1, 8 do badgeFlags[n] = RSE_BADGE1 + n - 1 end
+  end
   return { family = rse and "rse" or "frlg", safari = false, kinds = { ghost = not rse },
+           badgeFlags = badgeFlags,
            rules = { money = rse and "rse" or "frlg", whiteout = rse and "half" or "frlg",
                      amuletCoinPlayerOnly = rse } }
 end
@@ -1261,6 +1281,666 @@ do
   eq(SESSION.party[2].pokeball, 1, "in the ball it was caught in")
   eq(FakeBag.get(SESSION.bag, 1), 0, "and the ball was spent")
   eq(SESSION.dex.caught[16], true, "the dex has it caught")
+end
+
+
+-- ------------------------------------------------------------------
+-- 3b. badge rules through the real co-op screens and the in-game hub
+--     (docs/plans/gen3-badge-rules.md: K1 badges, K2 traded / fateful,
+--     K3 the obey event)
+-- ------------------------------------------------------------------
+--
+-- Two humans, each on their own cart -- ANN on FireRed, BOB on Emerald -- each
+-- with their own session, trainer id and flag store.  This process is one
+-- machine, so a player is a *swap* of what the fakes read (`actAs`: the
+-- session and the flag store), made around that screen's own upload (`enter`),
+-- which is the moment a client reads its badges and cuts its sheets.  Everything
+-- after the upload is the hub's: src/Hub.lua seating src/BattleSim3, and the
+-- real CoopBattle screens it feeds.  A boost or a refusal to obey is read off
+-- the referee's own stream, a fight at a pinned `forceBattleSeed` against the
+-- same fight with the badges taken away.
+
+do
+  local Gen3 = need("Gen3")
+  local Mediated = need("MediatedBattle")
+
+  -- Two synthetic hitting moves in the SDK fixture's row shape: a physical one
+  -- (Normal) and a special one (Fire; Gen 3 splits by type), single-target and
+  -- strong enough that a x1.1 stat shows in the damage.
+  ROM[70] = { effect = 0, power = 120, type = 0, accuracy = 100, pp = 20,
+              secondaryChance = 0, target = 0, priority = 0, flags = 3 }
+  P3._moveNames[70] = "BODY SLAM"
+  ROM[71] = { effect = 0, power = 120, type = 10, accuracy = 100, pp = 20,
+              secondaryChance = 0, target = 0, priority = 0, flags = 0 }
+  P3._moveNames[71] = "FLAMETHROWER"
+
+  -- A trainer whose lead is faster than ANN's CHARMANDER, but by less than the
+  -- x1.1 of badge 3 (the speeds are read off the referee below, not assumed).
+  TRAINERS[401] = { class = 44, className = "PKMN TRAINER", name = "TWINS", pic = 9,
+                    items = { 0, 0, 0, 0 }, lastLevel = 76, doubleBattle = true,
+                    party = { { species = 16, level = 76, iv = 0, moves = { 33 } },
+                              { species = 16, level = 60, iv = 0, moves = { 33 } } } }
+
+  local function nums(list) return table.concat(list or {}, ",") end
+  -- Comparisons that answer false, rather than raise, when a strike never
+  -- happened: a broken rule must read as a failed check, not a dead block.
+  local function more(a, b) return a ~= nil and b ~= nil and a > b end
+  local function before(turn, a, b)
+    local x, y = turn.at(a), turn.at(b)
+    return x ~= nil and y ~= nil and x < y
+  end
+  -- A stream, as one comparable string.
+  local function sigOf(log)
+    local sig = {}
+    for _, e in ipairs(log) do
+      sig[#sig + 1] = table.concat({ tostring(e.t), tostring(e.slot), tostring(e.amount),
+                                     tostring(e.hp), tostring(e.text) }, ":")
+    end
+    return table.concat(sig, "|")
+  end
+  local function setNums(set)
+    local out = {}
+    for n in pairs(set or {}) do out[#out + 1] = n end
+    table.sort(out)
+    return table.concat(out, ",")
+  end
+
+  -- The flags that say "this player holds these badges", on their own cart's
+  -- numbering (FireRed 0x820.., Emerald 0x867..).
+  local function badgeFlagsOf(version, list)
+    local base = version == "emerald" and RSE_BADGE1 or FRLG_BADGE1
+    local flags = {}
+    for _, n in ipairs(list) do flags[base + n - 1] = true end
+    return flags
+  end
+
+  local function player(name, version, trainerId, badges, stray)
+    local session = newSession({ name = name, trainerId = trainerId,
+                                 secretId = trainerId + 1, version = version })
+    local flags = badgeFlagsOf(version, badges)
+    -- Flags that are *another cart's* badges: they must not count.
+    for _, id in ipairs(stray or {}) do flags[id] = true end
+    return { name = name, version = version, session = session, flags = flags }
+  end
+
+  local function actAs(p)
+    SESSION = p.session
+    GAME.session = p.session
+    STORE.flags = p.flags
+  end
+
+  local function lead(species, level, owner, moves, extra)
+    local pp, maxPp = {}, {}
+    for i, id in ipairs(moves) do pp[i], maxPp[i] = ROM[id].pp, ROM[id].pp end
+    local mon = { moves = moves, pp = pp, maxPp = maxPp,
+                  otId = owner.session.trainerId, otName = owner.name }
+    for k, v in pairs(extra or {}) do mon[k] = v end
+    return monOf(species, level, mon)
+  end
+
+  -- Two humans against a trainer's two seats (coop_npc) or a wild mon
+  -- (coop_wild), each upload made as its own player.
+  local function badgeFight(o)
+    newGame()
+    local annP, bobP = o.ann, o.bob
+    local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+    hub.forceBattleSeed = o.seed
+    local ann, annPeer = join3(hub, "ANN", annP.version)
+    local bob, bobPeer = join3(hub, "BOB", bobP.version)
+    hub:openCoopBattle(o.id, { ann.id, bob.id }, { mode = o.mode, hostId = ann.id })
+    annP.session.party, bobP.session.party = o.annParty, o.bobParty
+    actAs(annP)
+    local slots = {
+      { side = "a", owner = ann.id, name = "ANN", party = o.annParty },
+      { side = "a", owner = bob.id, name = "BOB", party = o.bobParty },
+    }
+    local trainer
+    if o.mode == "coop_npc" then
+      local b1, b2, record = npcSeats(GAME, o.trainerId)
+      trainer = record
+      slots[3] = { side = "b", name = "TWINS", party = b1 }
+      slots[4] = { side = "b", name = "TWINS", party = b2 }
+    else
+      slots[3] = { side = "b", name = "PIDGEY", party = { o.wild } }
+    end
+    local hostT, guestT = transportFor(hub, ann), transportFor(hub, bob)
+    -- A hostile client: what it sends is rewritten on its way out.
+    if o.forge then
+      local real = hostT.send
+      hostT.send = function(self, kind, msg) return real(self, kind, o.forge(kind, msg)) end
+    end
+    local host = assert(CoopBattle.new(GAME, { slots = slots, mine = 1, host = true,
+      mode = o.mode, trainer = trainer, wildCatchMon = o.wild, transport = hostT,
+      battleId = o.id, selfId = ann.id }))
+    local guest = assert(CoopBattle.new(GAME, { slots = slots, mine = 2, host = false,
+      mode = o.mode, transport = guestT, battleId = o.id, selfId = bob.id }))
+    -- What each screen put up for reading, a line at a time, in order.  Taken
+    -- as the line goes up (the field is assigned from nil each time), because
+    -- a fast step dismisses it in the tick it appears.
+    local function watch(screen)
+      local said = {}
+      local class = getmetatable(screen)
+      setmetatable(screen, { __index = class.__index or class,
+        __newindex = function(t, k, v)
+          if k == "shown" and v ~= nil then said[#said + 1] = (tostring(v):gsub("%s*\n%s*", " ")) end
+          rawset(t, k, v)
+        end })
+      return said
+    end
+    local f = { hub = hub, ann = ann, bob = bob, annPeer = annPeer, bobPeer = bobPeer,
+                host = host, guest = guest, hostT = hostT, guestT = guestT,
+                record = hub.battles[o.id], annP = annP, bobP = bobP, log = {},
+                hostSaid = watch(host), guestSaid = watch(guest) }
+    host:enter()
+    actAs(bobP)
+    guest:enter()
+    actAs(annP)
+    f.record = hub.battles[o.id]
+    -- Let the opening play out to the first menu, keeping the referee's stream.
+    function f.pump()
+      for _, msg in ipairs(annPeer.outbox) do
+        if msg.type == Wire.BATTLE_EVENT then f.log[#f.log + 1] = msg end
+      end
+      deliver(annPeer, host)
+      deliver(bobPeer, guest)
+      settle(host)
+      settle(guest)
+    end
+    return f
+  end
+
+  -- The upload a screen's transport sent for one side.
+  local function uploadOf(transport, side)
+    for _, msg in ipairs(transport.sent) do
+      if msg.type == Wire.BATTLE_PARTY and msg.side == side then return msg end
+    end
+    return nil
+  end
+
+  local function fighterOf(f, id) return f.record.sim.byId[id] end
+
+  -- From a stream: who acted in what order (`anim` rows by the acting slot),
+  -- the damage each human's first strike did to the foe, and the `obey` events.
+  local function readTurn(log)
+    local order, dealt, obeys, cur = {}, {}, {}, nil
+    for i, e in ipairs(log) do
+      if e.t == "anim" then
+        order[#order + 1] = e.slot
+        cur = e.slot
+      elseif e.t == "damage" and e.side == "b" and cur ~= nil and dealt[cur] == nil then
+        dealt[cur] = e.amount
+      elseif e.t == "obey" then
+        obeys[#obeys + 1] = { slot = e.slot, token = e.text, say = log[i + 1] }
+      end
+    end
+    local function index(slot)
+      for i, s in ipairs(order) do if s == slot then return i end end
+      return nil
+    end
+    return { order = order, dealt = dealt, obeys = obeys, at = index }
+  end
+
+  -- One turn of the same fight, at one seed: ANN's lead strikes the trainer's
+  -- first seat, BOB's the second.  Only the badges the two humans hold differ.
+  local SEED = 5
+  local function turnOne(annBadges, bobBadges, id, forge)
+    local annP = player("ANN", "firered", 111, annBadges)
+    local bobP = player("BOB", "emerald", 333, bobBadges)
+    local f = badgeFight({ id = id, mode = "coop_npc", seed = SEED, trainerId = 401,
+      ann = annP, bob = bobP, forge = forge,
+      annParty = { lead(4, 50, annP, { 70 }) },
+      bobParty = { lead(16, 50, bobP, { 71 }) } })
+    f.pump()
+    f.host:commit({ slot = 1, move = 1, target = 3 })
+    f.guest:commit({ slot = 2, move = 1, target = 4 })
+    f.pump()
+    f.turn = readTurn(f.log)
+    return f
+  end
+
+  -- The cart's lines for the disobedience outcomes, in capitals so a line the
+  -- player's text pack printed can be told from the referee's own sentence.  A
+  -- stand-in for the engine's pack (Gen3.battleText), as tests/gen3_mediated.lua
+  -- §9 has one: the engine's battle_text.lua names a mon on the player's side
+  -- by `atk` with side "player".  Switched off, it answers as this harness's
+  -- real one does -- there is no ROM text here, so with nothing at all.
+  local CART = {
+    STRINGID_PKMNIGNORESASLEEP = "%s IGNORED\nORDERS WHILE ASLEEP!",
+    STRINGID_PKMNIGNOREDORDERS = "%s IGNORED\nORDERS!",
+    STRINGID_PKMNBEGANTONAP = "%s BEGAN TO NAP!",
+    STRINGID_PKMNLOAFING = "%s IS\nLOAFING AROUND!",
+    STRINGID_PKMNWONTOBEY = "%s WON'T\nOBEY!",
+    STRINGID_PKMNTURNEDAWAY = "%s TURNED AWAY!",
+    STRINGID_PKMNPRETENDNOTNOTICE = "%s PRETENDED\nNOT TO NOTICE!",
+  }
+  local realText, packOn = Gen3.battleText, true
+  Gen3.battleText = function(id, fill)
+    local shape = CART[id]
+    if not (shape and packOn) then return realText(id, fill) end
+    local atk = type(fill) == "table" and fill.atk or nil
+    if not (type(atk) == "table" and atk.side == "player" and type(atk.name) == "string") then
+      return nil
+    end
+    return shape:format(atk.name)
+  end
+  local function flat(text) return (tostring(text):gsub("%s*\n%s*", " ")) end
+  local function cartLine(token, name)
+    return flat(CART[Mediated.OBEY_STRINGS3[token]]:format(name))
+  end
+  local function count(lines, text)
+    local n = 0
+    for _, line in ipairs(lines) do if line == flat(text) then n = n + 1 end end
+    return n
+  end
+  local function indexOf(lines, text)
+    for i, line in ipairs(lines) do if line == flat(text) then return i end end
+    return nil
+  end
+
+  local ok, err = pcall(function()
+    -- --------------------------------------------------------------
+    -- K1 + K2: each human's own badges and sheets reach the referee
+    -- --------------------------------------------------------------
+    --
+    -- ANN's flags carry a stray Emerald badge-8 flag and BOB's a stray FireRed
+    -- badge-1 flag: a cart reads its own numbering, so neither counts.  BOB's
+    -- lead has BOB's own OT (333): not traded under BOB's session, and it would
+    -- read as traded had his sheets been cut under ANN's (111) -- so the
+    -- upload is only right if each client cuts its own.  His MEW came from a
+    -- stranger and its ribbon field was never set, which the engine reads as
+    -- event-legal (`fateful`); ANN's MEW has the bit explicitly clear.
+    local annP = player("ANN", "firered", 111, { 1, 3 }, { RSE_BADGE1 + 7 })
+    local bobP = player("BOB", "emerald", 333, { 5, 7 }, { FRLG_BADGE1 })
+    local f = badgeFight({ id = "bd1", mode = "coop_npc", seed = SEED, trainerId = 401,
+      ann = annP, bob = bobP,
+      annParty = { lead(4, 50, annP, { 70 }),
+                   lead(151, 5, annP, { 10 }, { fatefulEncounter = false }) },
+      bobParty = { lead(16, 50, bobP, { 71 }),
+                   lead(151, 30, bobP, { 10 }, { otId = 999, otName = "ZED" }) } })
+
+    local hostUp, guestUp = uploadOf(f.hostT, "a"), uploadOf(f.guestT, "a")
+    eq(nums(hostUp and hostUp.badges), "1,3", "badges: ANN uploads her own, off her FireRed flags")
+    eq(nums(guestUp and guestUp.badges), "5,7", "badges: BOB uploads his own, off his Emerald profile's flags")
+    local hostMons, guestMons = hostUp and hostUp.mons or {}, guestUp and guestUp.mons or {}
+    eq(hostMons[1] and hostMons[1].traded, nil, "traded: ANN's own catch is not")
+    eq(hostMons[2] and hostMons[2].traded, nil, "traded: ...nor her MEW, caught by her")
+    eq(hostMons[2] and hostMons[2].fateful, nil, "fateful: ...and her MEW's ribbon bit is explicitly clear")
+    eq(guestMons[1] and guestMons[1].traded, nil, "traded: BOB's own catch is not (cut under BOB's trainer id)")
+    eq(guestMons[2] and guestMons[2].traded, true, "traded: BOB's MEW from a stranger is")
+    eq(guestMons[2] and guestMons[2].fateful, true, "fateful: ...and it carries no clear ribbon bit")
+    local npcUp = uploadOf(f.hostT, "b")
+    eq(npcUp and npcUp.badges, nil, "the trainer's team carries no badges")
+    local npcClean = true
+    for _, mon in ipairs(npcUp and npcUp.mons or {}) do
+      if mon.traded ~= nil or mon.fateful ~= nil then npcClean = false end
+    end
+    check(npcUp ~= nil and npcClean, "...and its sheets neither traded nor fateful")
+
+    check(f.record.sim ~= nil, "the hub referees the fight")
+    local annF, bobF = fighterOf(f, f.ann.id), fighterOf(f, f.bob.id)
+    eq(annF and annF.badgeRules, true, "referee: ANN's seat plays the cart's badge rules")
+    eq(setNums(annF and annF.badges), "1,3", "referee: ...with ANN's badges")
+    eq(annF and annF.family, "frlg", "referee: ...as her FireRed cart (Focus Punch's exemption)")
+    eq(bobF and bobF.badgeRules, true, "referee: BOB's seat plays them too")
+    eq(setNums(bobF and bobF.badges), "5,7", "referee: ...with BOB's own badges, not ANN's")
+    eq(bobF and bobF.family, "rse", "referee: ...as his Emerald cart")
+    eq(bobF and bobF.mons[2].traded, true, "referee: BOB's traded MEW is traded here too")
+    eq(bobF and bobF.mons[2].fateful, true, "referee: ...with its ribbon bit")
+    eq(bobF and bobF.mons[1].traded, nil, "referee: ...and his own catch is not")
+    eq(annF and annF.mons[2].fateful, nil, "referee: ANN's MEW has no ribbon bit to claim")
+    for _, npcId in ipairs(f.record.npcIds or {}) do
+      local seat = fighterOf(f, npcId)
+      eq(seat and seat.badgeRules, nil, "referee: a trainer's seat plays no badge rules")
+      eq(seat and seat.badges, nil, "referee: ...and holds no badges")
+      eq(seat and seat.family, nil, "referee: ...and names no cart")
+    end
+
+    -- --------------------------------------------------------------
+    -- the boosts: the same turn with the badges taken away
+    -- --------------------------------------------------------------
+    local none = turnOne({}, {}, "bd2")
+    local annSpe = fighterOf(none, none.ann.id).b.stats.spe
+    local foeSpe = fighterOf(none, none.record.npcIds[1]).b.stats.spe
+    check(annSpe < foeSpe, "boosts: the premise -- the trainer's lead outspeeds ANN's CHARMANDER ("
+      .. tostring(annSpe) .. " < " .. tostring(foeSpe) .. ")")
+    check(none.turn.at(3) ~= nil and none.turn.at(0) ~= nil, "boosts: both strikes land")
+    check(before(none.turn, 3, 0), "boosts: with no badges the trainer's lead strikes first")
+    check(none.turn.dealt[0] ~= nil and none.turn.dealt[1] ~= nil,
+          "boosts: ...and both humans' strikes did damage (" .. tostring(none.turn.dealt[0])
+          .. " / " .. tostring(none.turn.dealt[1]) .. ")")
+
+    -- Badge 1 (Attack): ANN's physical strike hits harder -- and only hers.
+    -- The order is unchanged, so every roll lines up with the baseline's.
+    local atk = turnOne({ 1 }, {}, "bd3")
+    check(before(atk.turn, 3, 0), "badge 1: the order is the baseline's")
+    check(more(atk.turn.dealt[0], none.turn.dealt[0]),
+          "badge 1: ANN's strike is stronger than with no badges (" .. tostring(atk.turn.dealt[0])
+          .. " > " .. tostring(none.turn.dealt[0]) .. ")")
+    eq(atk.turn.dealt[1], none.turn.dealt[1], "badge 1: ...and BOB's partner strike is not")
+
+    -- Badge 7 (Sp. Atk) on the *other* human's cart: BOB's special strike.
+    local spa = turnOne({}, { 7 }, "bd4")
+    check(more(spa.turn.dealt[1], none.turn.dealt[1]),
+          "badge 7: BOB's strike is stronger than with no badges (" .. tostring(spa.turn.dealt[1])
+          .. " > " .. tostring(none.turn.dealt[1]) .. ")")
+    eq(spa.turn.dealt[0], none.turn.dealt[0], "badge 7: ...and ANN's partner strike is not")
+
+    -- Badge 3 (Speed): the order flips.
+    local spe = turnOne({ 3 }, {}, "bd5")
+    check(before(spe.turn, 0, 3),
+          "badge 3: ANN's CHARMANDER now strikes before the trainer's lead")
+    eq(spe.turn.at(1), none.turn.at(1), "badge 3: ...and BOB's place in the order is the baseline's")
+
+    -- The trainer's team is never the player's: a hostile host who hangs badges
+    -- and a traded flag on every one of its monsters (any of which, at L76 with
+    -- no cap-lifting badge, would refuse to obey) plays the same fight.
+    local forgedFoe = turnOne({}, {}, "bd7", function(kind, msg)
+      if kind ~= Wire.BATTLE_PARTY or msg.side ~= "b" then return msg end
+      msg = copyTable(msg)
+      msg.badges = { "1", "3" }
+      local mons = {}
+      for i, mon in ipairs(msg.mons) do
+        mons[i] = copyTable(mon)
+        mons[i].traded = true
+      end
+      msg.mons = mons
+      return msg
+    end)
+    local forgedSeat = forgedFoe.record.parties[forgedFoe.record.npcIds[1]]
+    check(forgedSeat ~= nil and forgedSeat.badges ~= nil and forgedSeat.mons[1].traded == true,
+          "forged trainer: the badges and traded flag reached the hub's record")
+    for _, npcId in ipairs(forgedFoe.record.npcIds) do
+      local seat = fighterOf(forgedFoe, npcId)
+      eq(seat and seat.badgeRules, nil, "forged trainer: its seat plays no badge rules")
+      eq(seat and seat.badges, nil, "forged trainer: ...and holds no badges")
+    end
+    eq(#forgedFoe.turn.obeys, 0, "forged trainer: none of its monsters disobeys")
+    check(#sigOf(none.log) > 400, "forged trainer: the stream compared is a whole turn's")
+    eq(sigOf(forgedFoe.log), sigOf(none.log), "forged trainer: the fight is the honest one's, event for event")
+
+    -- Everyone's badges at once (the fight above).
+    local both = turnOne({ 1, 3 }, { 5, 7 }, "bd6")
+    check(before(both.turn, 0, 3), "both: ANN strikes first")
+    check(more(both.turn.dealt[1], none.turn.dealt[1]), "both: BOB's strike is boosted")
+
+    -- --------------------------------------------------------------
+    -- coop_wild: the same rule against a wild mon
+    -- --------------------------------------------------------------
+    local function wildTurn(annBadges, id)
+      local wannP = player("ANN", "firered", 111, annBadges)
+      local wbobP = player("BOB", "emerald", 333, {})
+      local wild = monOf(16, 76, { moves = { 33 }, pp = { 35 }, maxPp = { 35 }, otId = 5, otName = "" })
+      local w = badgeFight({ id = id, mode = "coop_wild", seed = SEED, ann = wannP, bob = wbobP,
+        annParty = { lead(4, 50, wannP, { 70 }) }, bobParty = { lead(16, 50, wbobP, { 71 }) },
+        wild = wild })
+      w.pump()
+      w.host:commit({ slot = 1, move = 1, target = 3 })
+      w.guest:commit({ slot = 2, move = 1, target = 3 })
+      w.pump()
+      w.turn = readTurn(w.log)
+      return w
+    end
+    local wNone = wildTurn({}, "bw1")
+    local wBadged = wildTurn({ 1 }, "bw2")
+    eq(nums(uploadOf(wBadged.hostT, "a").badges), "1", "coop_wild: ANN uploads her badge")
+    eq(uploadOf(wBadged.guestT, "a").badges, nil, "coop_wild: ...and BOB, with none, uploads none")
+    eq(uploadOf(wBadged.hostT, "b").badges, nil, "coop_wild: the wild mon's seat carries none")
+    local wAnn, wFoe = fighterOf(wBadged, wBadged.ann.id), fighterOf(wBadged, wBadged.record.npcIds[1])
+    eq(wAnn and wAnn.badgeRules, true, "coop_wild: ANN's seat plays the badge rules")
+    eq(setNums(wAnn and wAnn.badges), "1", "coop_wild: ...with her badge")
+    eq(wFoe and wFoe.badgeRules, nil, "coop_wild: the wild mon plays none")
+    eq(wAnn and wAnn.family, "frlg", "coop_wild: ANN's seat names her FireRed cart")
+    eq(fighterOf(wBadged, wBadged.bob.id).family, "rse", "coop_wild: ...and BOB's his Emerald")
+    check(more(wBadged.turn.dealt[0], wNone.turn.dealt[0]),
+          "coop_wild: ANN's strike is stronger with badge 1 (" .. tostring(wBadged.turn.dealt[0])
+          .. " > " .. tostring(wNone.turn.dealt[0]) .. ")")
+    eq(wBadged.turn.dealt[1], wNone.turn.dealt[1], "coop_wild: ...and BOB's, with no badge, is not")
+
+    -- --------------------------------------------------------------
+    -- K3: a traded mon over its badge cap, on a human seat
+    -- --------------------------------------------------------------
+    --
+    -- A traded L50 mon with no badge obeys to level 10 only, and mostly ignores
+    -- its player.  The seeds are pinned and the stream is the referee's own:
+    -- at 5 ANN's CHARMANDER won't obey, at 1 it ignores orders and uses another
+    -- move, at 7 BOB's PIDGEY loafs around.
+    eq(realText("STRINGID_PKMNLOAFING", { atk = { side = "player", name = "CHARMANDER" } }), nil,
+       "obey: the premise -- this harness has no text pack of its own")
+
+    local function obeyRun(o)
+      local annP = player("ANN", "firered", 111, o.annBadges or {})
+      local bobP = player("BOB", "emerald", 333, {})
+      local stranger = { otId = 999, otName = "ZED" }
+      local wildFoe = o.mode == "coop_wild"
+        and monOf(16, 76, { moves = { 33 }, pp = { 35 }, maxPp = { 35 }, otId = 5, otName = "" })
+        or nil
+      local r = badgeFight({ id = o.id, mode = o.mode or "coop_npc", seed = o.seed, trainerId = 401,
+        ann = annP, bob = bobP, wild = wildFoe,
+        annParty = { lead(4, 50, annP, { 70, 10 }, o.annTraded and stranger or nil) },
+        bobParty = { lead(16, 50, bobP, { 71 }, o.bobTraded and stranger or nil) } })
+      r.pump()
+      r.host:commit({ slot = 1, move = 1, target = 3 })
+      r.guest:commit({ slot = 2, move = 1, target = wildFoe and 3 or 4 })
+      r.pump()
+      r.turn = readTurn(r.log)
+      r.turns = 0
+      for _, e in ipairs(r.log) do if e.t == "turn" then r.turns = r.turns + 1 end end
+      return r
+    end
+    local function screensSay(r, line, times, what)
+      eq(count(r.hostSaid, line), times, "ANN's screen: " .. what)
+      eq(count(r.guestSaid, line), times, "BOB's screen: " .. what)
+    end
+
+    -- ANN's mon, traded and over the cap, with the player's text pack.
+    packOn = true
+    local ob = obeyRun({ id = "ob1", seed = 5, annTraded = true })
+    local up = uploadOf(ob.hostT, "a")
+    eq(up and up.mons[1].traded, true, "obey: ANN's sheet says her CHARMANDER is traded")
+    eq(up and up.badges, nil, "obey: ...and she holds no badge to send")
+    eq(#ob.turn.obeys, 1, "obey: the referee sends one refusal for the turn")
+    local refusal = ob.turn.obeys[1] or {}
+    eq(refusal.slot, 0, "obey: ...from ANN's seat")
+    eq(refusal.token, "wont_obey", "obey: ...naming the outcome")
+    eq(refusal.say and refusal.say.t, "msg", "obey: ...with its own sentence straight behind")
+    screensSay(ob, cartLine("wont_obey", "CHARMANDER"), 1, "the cart's line, once")
+    screensSay(ob, refusal.say and refusal.say.text or "?", 0, "...and not the referee's sentence as well")
+    eq(ob.turn.dealt[0], nil, "obey: the mon that would not obey did not strike")
+    check(ob.turn.dealt[1] ~= nil, "obey: ...the turn went on -- BOB's partner struck")
+    eq(ob.turns, 2, "obey: ...and the next turn opened")
+    eq(ob.host.phase, "choose", "obey: ANN's screen is at its menu again")
+    eq(ob.guest.phase, "choose", "obey: ...and BOB's")
+
+    -- The same fight with the player's text pack gone: the referee's sentence,
+    -- said once, in the line's place.
+    packOn = false
+    local nopack = obeyRun({ id = "ob2", seed = 5, annTraded = true })
+    local nopackRefusal = nopack.turn.obeys[1]
+    eq(nopackRefusal and nopackRefusal.token, "wont_obey", "obey (no pack): the same refusal at the same seed")
+    screensSay(nopack, nopackRefusal and nopackRefusal.say.text or "?", 1,
+               "no text pack -- the referee's sentence, once")
+    screensSay(nopack, cartLine("wont_obey", "CHARMANDER"), 0, "...and no line of the cart's")
+    eq(nopack.turns, 2, "obey (no pack): the turn went on")
+    packOn = true
+
+    -- The same seed, the same mon, but the rule is not on: ANN holds the
+    -- eighth badge (no cap) / the mon is her own catch.
+    local capped = obeyRun({ id = "ob3", seed = 5, annTraded = true, annBadges = { 8 } })
+    eq(nums(uploadOf(capped.hostT, "a").badges), "8", "obey (badge 8): ANN sends her badge")
+    eq(uploadOf(capped.hostT, "a").mons[1].traded, true, "obey (badge 8): ...of a traded mon")
+    eq(#capped.turn.obeys, 0, "obey (badge 8): the traded mon obeys, whatever its level")
+    check(capped.turn.dealt[0] ~= nil, "obey (badge 8): ANN's strike landed")
+    local own = obeyRun({ id = "ob4", seed = 5 })
+    eq(uploadOf(own.hostT, "a").mons[1].traded, nil, "obey (own catch): her sheet says it is not traded")
+    eq(#own.turn.obeys, 0, "obey (own catch): a mon that is hers obeys at any level")
+    check(own.turn.dealt[0] ~= nil, "obey (own catch): ANN's strike landed")
+
+    -- Another outcome: ignores orders and uses a different move -- which
+    -- lands, and is announced once after the line that said why.
+    local called = obeyRun({ id = "ob5", seed = 1, annTraded = true })
+    eq(called.turn.obeys[1] and called.turn.obeys[1].token, "uses_random_move", "obey (called): the outcome")
+    local calledLine = cartLine("uses_random_move", "CHARMANDER")
+    screensSay(called, calledLine, 1, "the cart's line, once")
+    screensSay(called, "CHARMANDER used SCRATCH!", 1, "the move it used instead, once")
+    check(more(indexOf(called.hostSaid, "CHARMANDER used SCRATCH!"), indexOf(called.hostSaid, calledLine)),
+          "obey (called): ...in that order")
+    check(called.turn.dealt[0] ~= nil, "obey (called): the called move struck")
+    eq(called.turns, 2, "obey (called): the turn went on")
+
+    -- Against a wild mon the rule is the same.
+    local wildOb = obeyRun({ id = "ob7", mode = "coop_wild", seed = 5, annTraded = true })
+    eq(wildOb.turn.obeys[1] and wildOb.turn.obeys[1].token, "wont_obey", "obey (coop_wild): the traded mon won't obey")
+    screensSay(wildOb, cartLine("wont_obey", "CHARMANDER"), 1, "coop_wild: the cart's line, once")
+    eq(wildOb.turn.dealt[0], nil, "obey (coop_wild): ...and did not strike")
+    check(wildOb.turn.dealt[1] ~= nil, "obey (coop_wild): ...while BOB's partner did")
+    eq(wildOb.turns, 2, "obey (coop_wild): the turn went on")
+
+    -- The partner's seat, on BOB's Emerald: ANN's screen reads it too.
+    local partner = obeyRun({ id = "ob6", seed = 7, bobTraded = true })
+    eq(uploadOf(partner.guestT, "a").mons[1].traded, true, "obey (partner): BOB's sheet says his PIDGEY is traded")
+    local bobRefusal = partner.turn.obeys[1]
+    eq(bobRefusal and bobRefusal.slot, 1, "obey (partner): the refusal is on BOB's seat")
+    eq(bobRefusal and bobRefusal.token, "loafing", "obey (partner): ...a loafing line")
+    screensSay(partner, cartLine("loafing", "PIDGEY"), 1, "BOB's PIDGEY, in the cart's line, once")
+    screensSay(partner, bobRefusal and bobRefusal.say.text or "?", 0, "...not the referee's sentence")
+    eq(partner.turn.dealt[1], nil, "obey (partner): BOB's mon did not strike")
+    check(partner.turn.dealt[0] ~= nil, "obey (partner): ANN's did")
+    eq(partner.turns, 2, "obey (partner): the turn went on")
+
+    -- --------------------------------------------------------------
+    -- coop_pvp: a link battle -- nothing of it applies
+    -- --------------------------------------------------------------
+    --
+    -- Four players, each holding badges and a traded mon over the cap.  An
+    -- honest client uploads none of it; a hostile one uploads all of it, and the
+    -- referee ignores it all the same: the fight plays out identically.
+    local NAMES = { "ANN", "BOB", "CAL", "DEE" }
+    local VERSIONS = { "firered", "emerald", "firered", "emerald" }
+    local function pvpFight(forged)
+      newGame()
+      local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+      hub.forceBattleSeed = 7
+      local clients, peers, players, ids = {}, {}, {}, {}
+      for i, name in ipairs(NAMES) do
+        clients[i], peers[i] = join3(hub, name, VERSIONS[i])
+        players[i] = player(name, VERSIONS[i], 100 * i + 11, { 1, 3, 5, 7 })
+        players[i].session.party = {
+          lead(i % 3 == 1 and 4 or 16, 50, players[i], { 10 }, { otId = 999, otName = "ZED" }),
+          lead(151, 30, players[i], { 10 }, { otId = 999, otName = "ZED" }),
+        }
+        ids[i] = clients[i].id
+      end
+      hub:openCoopBattle("pv2", ids, { mode = "coop_pvp", hostId = ids[1],
+        sides = { a = { ids[1], ids[2] }, b = { ids[3], ids[4] } } })
+      local function slotsFor(me)
+        local out = {}
+        for i = 1, 4 do
+          actAs(players[i])
+          local party = i == me and players[i].session.party
+            or assert(CoopBattle.unpackParty(GAME,
+                 assert(CoopBattle.packParty(players[i].session.party, GAME))))
+          out[i] = { side = i <= 2 and "a" or "b", owner = ids[i], name = NAMES[i], party = party }
+        end
+        return out
+      end
+      local screens, transports = {}, {}
+      for i = 1, 4 do
+        transports[i] = transportFor(hub, clients[i])
+        if forged then
+          -- A hostile client: badges and every flag of K2, on every mon.
+          local real = transports[i].send
+          transports[i].send = function(self, kind, msg)
+            if kind == Wire.BATTLE_PARTY and msg.mons then
+              msg = copyTable(msg)
+              msg.badges = { "1", "3", "5", "7" }
+              local mons = {}
+              for at, mon in ipairs(msg.mons) do
+                mons[at] = copyTable(mon)
+                mons[at].traded = true
+                if mon.species == "MEW" then mons[at].fateful = true end
+              end
+              msg.mons = mons
+            end
+            return real(self, kind, msg)
+          end
+        end
+        local slots = slotsFor(i)
+        screens[i] = assert(CoopBattle.new(GAME, { slots = slots, mine = i, host = i == 1,
+          mode = "coop_pvp", transport = transports[i], battleId = "pv2", selfId = ids[i],
+          ranksPoints = true }))
+        actAs(players[i])
+        -- The rule is on for this player against the computer; it is the link
+        -- that takes it away.
+        eq(nums(Mediated.badgesOf(GAME, "coop_npc")), "1,3,5,7",
+           "pvp: " .. NAMES[i] .. " holds badges (a fight against the computer would send them)")
+        screens[i]:enter()
+      end
+      actAs(players[1])
+      local log, rounds = {}, 0
+      local function collect()
+        for _, msg in ipairs(peers[1].outbox) do
+          if msg.type == Wire.BATTLE_EVENT then log[#log + 1] = msg end
+        end
+      end
+      for _ = 1, 3 do
+        collect()
+        for i = 1, 4 do deliver(peers[i], screens[i]) end
+        for i = 1, 4 do
+          settle(screens[i])
+          local sc = screens[i]
+          if sc.phase == "choose" and not sc.result then
+            local aim = sc:targetChoices()[1]
+            sc:commit({ slot = i, move = 1, target = aim and aim.index })
+            rounds = rounds + 1
+          end
+        end
+      end
+      collect()
+      return { hub = hub, record = hub.battles["pv2"], ids = ids, transports = transports,
+               log = log, sig = sigOf(log), rounds = rounds, screens = screens }
+    end
+
+    local honest = pvpFight(false)
+    check(honest.record and honest.record.sim ~= nil, "pvp: four uploads, and the hub referees")
+    for i = 1, 4 do
+      local sent = uploadOf(honest.transports[i], i <= 2 and "a" or "b")
+      check(sent ~= nil, "pvp: " .. NAMES[i] .. " uploaded a party")
+      eq(sent and sent.badges, nil, "pvp: " .. NAMES[i] .. " uploads no badges")
+      local flagged = false
+      for _, mon in ipairs(sent and sent.mons or {}) do
+        if mon.traded ~= nil or mon.fateful ~= nil then flagged = true end
+      end
+      eq(flagged, false, "pvp: " .. NAMES[i] .. "'s sheets carry neither traded nor fateful")
+      local fighter = fighterOf(honest, honest.ids[i])
+      eq(fighter and fighter.badgeRules, nil, "pvp: " .. NAMES[i] .. "'s seat plays no badge rules")
+      eq(fighter and fighter.badges, nil, "pvp: ...and holds no badges")
+    end
+    local honestTurn = readTurn(honest.log)
+    eq(#honestTurn.obeys, 0, "pvp: no mon disobeys, though every lead is a traded L50")
+    local firstFour = {}
+    for i = 1, 4 do firstFour[i] = honestTurn.order[i] end
+    table.sort(firstFour)
+    eq(table.concat(firstFour, ","), "0,1,3,4", "pvp: ...all four struck in the first turn (field slots 0 1 | 3 4)")
+    check(honest.rounds >= 8, "pvp: and the fight went on over several turns (" .. tostring(honest.rounds) .. " commits)")
+
+    local forged = pvpFight(true)
+    local sentUp = forged.record.parties and forged.record.parties[forged.ids[1]]
+    check(sentUp ~= nil and sentUp.badges ~= nil and sentUp.mons[1].traded == true,
+          "pvp (hostile): the forged badges and traded flag reached the hub's record")
+    for i = 1, 4 do
+      local fighter = fighterOf(forged, forged.ids[i])
+      eq(fighter and fighter.badgeRules, nil, "pvp (hostile): " .. NAMES[i] .. "'s seat plays no badge rules")
+      eq(fighter and fighter.badges, nil, "pvp (hostile): ...and holds no badges")
+    end
+    eq(#readTurn(forged.log).obeys, 0, "pvp (hostile): no mon disobeys")
+    check(#honest.sig > 400, "pvp (hostile): ...the stream compared is a whole fight's (" .. #honest.sig .. " bytes)")
+    eq(forged.sig, honest.sig, "pvp (hostile): the fight is the honest one's, event for event")
+  end)
+  if not ok then check(false, "badges: the block raised -- " .. tostring(err)) end
+
+  Gen3.battleText = realText
+  ROM[70], ROM[71], P3._moveNames[70], P3._moveNames[71] = nil, nil, nil, nil
+  TRAINERS[401] = nil
 end
 
 
