@@ -243,12 +243,18 @@ function M.applyStage(base, stage)
   return floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
 end
 
--- Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
+-- Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge,
+-- capped at MAX_STAT_VALUE (999) -- pokered's .applyBoostToStat compares the
+-- boosted word against it and writes 999 back when it went over; the engine's
+-- port caps the same way (gen1recomp src/battle/Damage.lua:44-54, citing
+-- engine/battle/core.asm:6454).
 -- `wireStatKey` is atk/def/spd/spc; `badges` is a set of badge ids → true.
 -- A fighter only holds a set where the cart would have applied it -- side a
 -- of a fight against the computer; Turn.create drops it in 1v1 / coop_pvp
 -- (link battles, which the cart never boosts) and on side b (Turn.BADGE_MODES)
 -- -- so this never has to ask what kind of fight it is in.
+M.MAX_STAT_VALUE = 999
+
 local BADGE_FOR_STAT = {
   atk = "BOULDERBADGE",
   def = "THUNDERBADGE",
@@ -261,7 +267,7 @@ function M.badgeBoost(statValue, wireStatKey, badges)
   if type(badges) ~= "table" then return base end
   local badge = BADGE_FOR_STAT[wireStatKey]
   if not badge or not badges[badge] then return base end
-  return floor(base * 9 / 8)
+  return min(M.MAX_STAT_VALUE, floor(base * 9 / 8))
 end
 
 -- ------------------------------------------------------------------

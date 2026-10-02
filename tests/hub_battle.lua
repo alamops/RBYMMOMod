@@ -2045,6 +2045,189 @@ do
      "gen 1 coop_npc: the outcome is the fields it always was, no payDay")
 end
 
+-- ------- whose cart: each human seat's `family` is the hub's word, from its hello
+--
+-- Obedience has one rule that differs by cart (docs/plans/gen3-badge-rules.md
+-- §1.2): Focus Punch skips the random-move branch on FireRed / LeafGreen and
+-- not on Emerald, so the referee reads a fighter entry's `family`.  One Gen 3
+-- hub seats both carts, and a hub that left the field off played every
+-- Emerald mon by FireRed's rule.  The hub stamps each human seat with the cart
+-- its own hello named; a party claiming a family is not read; an NPC seat gets
+-- none; a link fight's referee drops it with the badges; a Gen 1 hub never
+-- writes the field.  server/hub_battle.test.js pins the same on the Node twin.
+
+-- Turn.create's options as the hub assembled them, the field still built by
+-- the real referee: the fighter entries are what these blocks look at.
+local function spyCreate(hub)
+  local real, seen = hub.Turn, {}
+  hub.Turn = setmetatable({
+    create = function(opts) seen.opts = opts; return real.create(opts) end,
+  }, { __index = real })
+  return seen
+end
+
+local function entryOf(seen, side, playerId)
+  for _, entry in ipairs(seen.opts and seen.opts.sides[side] or {}) do
+    if entry.playerId == playerId then return entry end
+  end
+  return nil
+end
+
+local FOCUS3 = { id = "FOCUS3", num = 264, effect = 170, power = 150, type = 1,
+                 priority = -3, flags = 35 }
+
+-- A level-100 mon from another trainer: over the no-badge cap of 10, so every
+-- move it is told to use asks the obedience roll first.
+local function tradee3()
+  local m = mon3({ species = "TRADEE", level = 100, moves = { move3(FOCUS3), move3() } })
+  m.traded = true
+  return m
+end
+
+-- Emerald and FireRed side by side against a trainer.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 3
+  local seen = spyCreate(hub)
+  local ann = join3(hub, "ANN", "emerald")
+  local bob = join3(hub, "BOB", "firered")
+  hub:openCoopBattle("g3f", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["g3f"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3f", typeTable = CHART3 })
+  local annMon = tradee3()
+  annMon.fateful = true
+  -- Each upload claims the other cart's family: no party field decides it.
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3f", side = "a", family = "frlg",
+                     badges = { "1", "3" }, mons = { annMon } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g3f", side = "a", family = "rse",
+                     mons = { bruiser3() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3f", side = "b",
+                     mons = { glassjaw3(), glassjaw3() } })
+  ok(record.sim ~= nil, "family: the mixed-cart coop_npc field opens")
+  local annEntry, bobEntry = entryOf(seen, "a", ann.id), entryOf(seen, "a", bob.id)
+  eq(annEntry and annEntry.family, "rse", "family: the Emerald player's entry is rse")
+  eq(bobEntry and bobEntry.family, "frlg", "family: the FireRed player's entry is frlg")
+  for _, npcId in ipairs(record.npcIds) do
+    local npc = entryOf(seen, "b", npcId)
+    ok(npc ~= nil and npc.family == nil, "family: an NPC seat's entry has none (" .. npcId .. ")")
+  end
+  -- What the hub was handed reaches the entry unchanged: the badges as the set
+  -- the sanitiser rebuilt, the sheet's traded / fateful on the mon itself.
+  ok(annEntry and annEntry.badges and annEntry.badges["1"] == true and annEntry.badges["3"] == true,
+     "family: the uploaded badges ride the entry")
+  eq(annEntry and annEntry.mons[1].traded, true, "family: the mon's traded flag rides the entry")
+  eq(annEntry and annEntry.mons[1].fateful, true, "family: and its fateful flag")
+  local annFighter, bobFighter = record.sim.byId[ann.id], record.sim.byId[bob.id]
+  eq(annFighter.family, "rse", "family: the referee plays Emerald's rule for ANN")
+  eq(bobFighter.family, "frlg", "family: and FireRed's for BOB")
+  eq(annFighter.badgeRules, true, "family: against the computer, badge rules apply")
+  ok(annFighter.badges and annFighter.badges[1] and annFighter.badges[3] and not annFighter.badges[2],
+     "family: with ANN's own badges 1 and 3")
+  eq(bobFighter.badges, nil, "family: and none for BOB, who brought none")
+  eq(annFighter.mons[1].traded, true, "family: the referee's mon is still traded")
+end
+
+-- The rule it decides, end to end: the same fight, the same seed, only ANN's
+-- cart differs.  Her traded Focus Punch user disobeys on the first turn, and
+-- the second roll lands under the cap -- Emerald answers with another move,
+-- FireRed's exemption skips that branch and she naps instead.  Seed 10 was
+-- found by a probe; the Node twin draws the same.
+local function focusPunchObey(version)
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 10
+  local ann, annPeer = join3(hub, "ANN", version)
+  local bob = join3(hub, "BOB", "firered")
+  hub:openCoopBattle("g3o", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3o", typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3o", side = "a", mons = { tradee3() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g3o", side = "a",
+                     mons = { mon3({ moves = { move3(IDLE3) } }) } })
+  local wall = function() return mon3({ species = "TRAINEE", hp = 900, moves = { move3(IDLE3) } }) end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3o", side = "b", mons = { wall(), wall() } })
+  if not hub.battles["g3o"].sim then return nil end
+  annPeer.outbox = {}
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = "g3o", action = "fight", move = 0 })
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = "g3o", action = "fight", move = 0 })
+  local tokens = {}
+  for _, msg in ipairs(annPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and msg.t == "obey" and msg.side == "a" then
+      tokens[#tokens + 1] = msg.text
+    end
+  end
+  return table.concat(tokens, ",")
+end
+
+eq(focusPunchObey("emerald"), "uses_random_move",
+   "family: an Emerald mon's Focus Punch can be swapped for another move")
+eq(focusPunchObey("firered"), "falls_asleep",
+   "family: a FireRed mon's is exempt from that branch, same seed")
+
+-- A link fight: the entries still say whose cart, and the referee reads none of
+-- it -- no badge rules, no badges, no family, and nobody disobeys.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 10
+  local seen = spyCreate(hub)
+  local ann, annPeer = join3(hub, "ANN", "emerald")
+  local bob = join3(hub, "BOB", "firered")
+  local cal = join3(hub, "CAL", "leafgreen")
+  local dee = join3(hub, "DEE", "emerald")
+  hub:openCoopBattle("g3p", { ann.id, bob.id, cal.id, dee.id }, { mode = "coop_pvp", hostId = ann.id })
+  local record = hub.battles["g3p"]
+  eq(record and record.mode, "coop_pvp", "family pvp: a four-player link fight opens")
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3p", typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3p", badges = { "1", "2", "3" },
+                     mons = { tradee3() } })
+  for _, who in ipairs({ bob, cal, dee }) do
+    hub:receive(who, { type = Wire.BATTLE_PARTY, battle = "g3p", badges = { "8" },
+                       mons = { mon3({ hp = 900, moves = { move3(IDLE3) } }) } })
+  end
+  ok(record.sim ~= nil, "family pvp: the field opens")
+  eq(entryOf(seen, "a", ann.id).family, "rse", "family pvp: the entry still names ANN's cart")
+  eq(entryOf(seen, "b", cal.id).family, "frlg", "family pvp: on either side")
+  for _, who in ipairs({ ann, bob, cal, dee }) do
+    local fighter = record.sim.byId[who.id]
+    ok(fighter.badgeRules == nil and fighter.badges == nil and fighter.family == nil,
+       "family pvp: the referee plays link rules for " .. who.name)
+  end
+  annPeer.outbox = {}
+  for _, who in ipairs({ ann, bob, cal, dee }) do
+    hub:receive(who, { type = Wire.BATTLE_CHOICE, battle = "g3p", action = "fight", move = 0 })
+  end
+  ok(count(annPeer, Wire.BATTLE_EVENT) > 0, "family pvp: the turn resolves")
+  local obeyed = 0
+  for _, msg in ipairs(annPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and msg.t == "obey" then obeyed = obeyed + 1 end
+  end
+  eq(obeyed, 0, "family pvp: and the over-cap traded mon is not asked to obey")
+end
+
+-- Gen 1: the field is Gen 3's alone.
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  hub.forceBattleSeed = 1
+  local seen = spyCreate(hub)
+  local ann = hub:accept(fakePeer())
+  hub:receive(ann, { type = Wire.HELLO, proto = Config.PROTOCOL, name = "ANN", map = "PALLET",
+                     x = 5, y = 5, facing = "down", version = "red", playerId = testPlayerId("ANN") })
+  local bob = join(hub, "BOB")
+  eq(ann.version, "red", "family gen 1: the hello's cart is recorded")
+  hub:openCoopBattle("g1f", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g1f", chart = CHART })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g1f", side = "a", mons = { bruiser() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g1f", side = "a", mons = { bruiser() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g1f", side = "b", mons = { glassjaw(), glassjaw() } })
+  ok(hub.battles["g1f"].sim ~= nil, "family gen 1: the coop_npc field opens")
+  local entries = 0
+  for _, side in ipairs({ "a", "b" }) do
+    for _, entry in ipairs(seen.opts.sides[side]) do
+      entries = entries + 1
+      eq(entry.family, nil, "family gen 1: no entry carries one (" .. entry.playerId .. ")")
+    end
+  end
+  eq(entries, 4, "family gen 1: all four seats were looked at")
+end
+
 -- ------- Gen 3 lists: what Json.decode hands over, and what is a list at all
 --
 -- lib/sanitize.js used to refuse what this side took (an object where a list

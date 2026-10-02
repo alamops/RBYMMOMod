@@ -11,6 +11,8 @@
 --     compute() takes pre-staged attack/defense ints like Gen 1's API.
 --   * After base (+ optional item boost + crit): cap at 997 then +2
 --     (MIN_DAMAGE), so every non-immune damaging hit leaves DamageCalc ≥ 2.
+--   * DoBadgeTypeBoosts (opts.badgeTypeBoost) next, ahead of STAB: an
+--     eighth of the running damage, at least 1.
 --   * STAB is floor(d * 15/10); type rows are percents applied one at a
 --     time as floor(d * pct/100), with a non-immune floor of 1.
 --   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
@@ -116,7 +118,7 @@ end
 -- defender: { defense|def, spd|spc, ... }
 -- move:     { power }
 -- opts:     { crit, stab, typeEffect|typeEff, roll, physical,
---             itemBoostPercent }
+--             itemBoostPercent, badgeTypeBoost }
 function M.compute(attacker, defender, move, opts)
   attacker, defender = attacker or {}, defender or {}
   move, opts = move or {}, opts or {}
@@ -161,6 +163,14 @@ function M.compute(attacker, defender, move, opts)
 
   -- Cap at DAMAGE_CAP then add MIN_DAMAGE (engine DamageCalc tail).
   d = min(d, M.MAX_DAMAGE - M.MIN_DAMAGE) + M.MIN_DAMAGE
+
+  -- DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146), farcalled by
+  -- BattleCommand_Stab ahead of the STAB multiply: the player owns the badge
+  -- whose row names the move's type, and the running damage gains an eighth
+  -- of itself, at least 1 (engine src/battle/gen2/Damage.lua:269-274).  The
+  -- engine runs DoWeatherModifiers just before it; this sim has no weather,
+  -- so nothing sits between the DamageCalc tail and here.
+  if opts.badgeTypeBoost then d = d + max(1, floor(d / 8)) end
 
   if opts.stab then d = floor(d * 15 / 10) end
 

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generation": 2,
-  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: no species, move, ability or item names — only integer ids and type indices. All arithmetic is integer. DAMAGE (engine src/battle/gen2/Damage.lua): no 255-stat clamp. levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,min(999,floor(d*roll/100))) for roll in 85..100. Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: ladder 1-in-{15,8,4,3,2,2,2} by critical level 0..6; isCrit when roll==0 for roll in 0..chance-1. Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), speciesItemBonus(+2), capped at 6. ACCURACY: percent domain; accuracy 0 or alwaysHits never misses; else value=stage-scaled accuracy clamped 1..100, hit = roll < value for roll in 0..99 (no Gen1 1/256 miss). STATUS: freeze thaws when roll%5==0 (1/5); burn/poison residual max(1,floor(maxHp/8)); burn halves physical attack; toxic max(1,floor(maxHp*counter/16)); paralysis stops when roll%4==0 (1/4); sleep wakes and can move when the counter hits 0.",
+  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: no species, move, ability or item names — only integer ids and type indices. All arithmetic is integer. DAMAGE (engine src/battle/gen2/Damage.lua): no 255-stat clamp. levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,min(999,floor(d*roll/100))) for roll in 85..100. Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: ladder 1-in-{15,8,4,3,2,2,2} by critical level 0..6; isCrit when roll==0 for roll in 0..chance-1. Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), speciesItemBonus(+2), capped at 6. ACCURACY: percent domain; accuracy 0 or alwaysHits never misses; else value=stage-scaled accuracy clamped 1..100, hit = roll < value for roll in 0..99 (no Gen1 1/256 miss). STATUS: freeze thaws when roll%5==0 (1/5); burn/poison residual max(1,floor(maxHp/8)); burn halves physical attack; toxic max(1,floor(maxHp*counter/16)); paralysis stops when roll%4==0 (1/4); sleep wakes and can move when the counter hits 0. BADGES (Crystal, as gen1recomp src/battle/gen2/Battle.lua ports it): badgeStats is Effects.badgeBoost(stat, key, badges, spa) -> value, badges a set of Gold ids. ZEPHYR->atk, MINERAL->def, PLAIN->spe, GLACIER->spa, each boostStat = min(999, v + floor(v/8)); Kanto ids boost no stat; spd only when GLACIER is held and glacierBoostsSpDef(boostStat(spa)): true at >= 999, else a = (floor(v/256) - 3 - (v%256 < 231 ? 1 : 0)) mod 256 and boosted when a is odd. badgeTypes is Effects.badgeTypeBoost(typeId, badges) -> boosted: the first of the 16 DoBadgeTypeBoosts rows naming typeId (registry id, PSYCHIC_TYPE for Psychic) answers whether its badge is held. Damage's badgeTypeBoost adds max(1, floor(d/8)) right after the 997+2 tail and before STAB.",
   "damage": [
     {
       "id": "dmg_physical_basic",
@@ -243,6 +243,108 @@
         "minDamage": 0,
         "maxDamage": 0
       }
+    },
+    {
+      "id": "dmg_badge_type_boost",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 100,
+        "badgeTypeBoost": true
+      },
+      "out": {
+        "base": 17,
+        "modified": 21,
+        "damage": 21
+      }
+    },
+    {
+      "id": "dmg_badge_type_at_least_one",
+      "in": {
+        "level": 5,
+        "power": 10,
+        "attack": 10,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": false,
+        "roll": 100,
+        "badgeTypeBoost": true
+      },
+      "out": {
+        "base": 0,
+        "modified": 3,
+        "damage": 3
+      }
+    },
+    {
+      "id": "dmg_badge_type_before_stab",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 30,
+        "defense": 100,
+        "physical": true,
+        "stab": true,
+        "typeEffect": [200],
+        "crit": false,
+        "roll": 100,
+        "badgeTypeBoost": true
+      },
+      "out": {
+        "base": 5,
+        "modified": 24,
+        "damage": 24
+      }
+    },
+    {
+      "id": "dmg_badge_type_after_crit",
+      "in": {
+        "level": 50,
+        "power": 40,
+        "attack": 100,
+        "defense": 100,
+        "physical": true,
+        "stab": false,
+        "typeEffect": [100],
+        "crit": true,
+        "roll": 100,
+        "badgeTypeBoost": true
+      },
+      "out": {
+        "base": 17,
+        "modified": 40,
+        "damage": 40
+      }
+    },
+    {
+      "id": "dmg_badge_type_special_resisted_band",
+      "in": {
+        "level": 50,
+        "power": 80,
+        "spa": 120,
+        "spd": 90,
+        "physical": false,
+        "stab": true,
+        "typeEffect": [50],
+        "crit": false,
+        "roll": null,
+        "badgeTypeBoost": true
+      },
+      "out": {
+        "base": 46,
+        "modified": 40,
+        "minDamage": 34,
+        "maxDamage": 40,
+        "damage": null
+      }
     }
   ],
   "accuracy": [
@@ -349,6 +451,140 @@
       "id": "status_toxic_ramp",
       "in": { "status": "toxic", "maxHp": 80, "toxicCounter": 3 },
       "out": { "residualDamage": 15 }
+    }
+  ],
+  "badgeStats": [
+    {
+      "id": "badge_zephyr_attack",
+      "in": { "stat": 100, "key": "atk", "badges": { "ZEPHYR": true } },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_mineral_defense",
+      "in": { "stat": 100, "key": "def", "badges": { "MINERAL": true } },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_plain_speed",
+      "in": { "stat": 100, "key": "spe", "badges": { "PLAIN": true } },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_glacier_spatk",
+      "in": { "stat": 100, "key": "spa", "badges": { "GLACIER": true } },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_kanto_and_gen1_names_boost_no_stat",
+      "in": { "stat": 100, "key": "atk", "badges": { "BOULDER": true, "BOULDERBADGE": true } },
+      "out": { "value": 100 }
+    },
+    {
+      "id": "badge_other_stats_badge",
+      "in": { "stat": 100, "key": "def", "badges": { "ZEPHYR": true } },
+      "out": { "value": 100 }
+    },
+    {
+      "id": "badge_under_eight_gains_nothing",
+      "in": { "stat": 7, "key": "atk", "badges": { "ZEPHYR": true } },
+      "out": { "value": 7 }
+    },
+    {
+      "id": "badge_cap_999",
+      "in": { "stat": 950, "key": "atk", "badges": { "ZEPHYR": true } },
+      "out": { "value": 999 }
+    },
+    {
+      "id": "badge_cap_edge_888",
+      "in": { "stat": 888, "key": "atk", "badges": { "ZEPHYR": true } },
+      "out": { "value": 999 }
+    },
+    {
+      "id": "badge_cap_edge_887",
+      "in": { "stat": 887, "key": "atk", "badges": { "ZEPHYR": true } },
+      "out": { "value": 997 }
+    },
+    {
+      "id": "badge_glacier_spdef_fires",
+      "in": { "stat": 100, "key": "spd", "badges": { "GLACIER": true }, "spa": 227 },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_glacier_spdef_quiet",
+      "in": { "stat": 100, "key": "spd", "badges": { "GLACIER": true }, "spa": 200 },
+      "out": { "value": 100 }
+    },
+    {
+      "id": "badge_glacier_spdef_quiet_high",
+      "in": { "stat": 100, "key": "spd", "badges": { "GLACIER": true }, "spa": 440 },
+      "out": { "value": 100 }
+    },
+    {
+      "id": "badge_glacier_spdef_fires_high",
+      "in": { "stat": 100, "key": "spd", "badges": { "GLACIER": true }, "spa": 700 },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_glacier_spdef_capped_spatk",
+      "in": { "stat": 100, "key": "spd", "badges": { "GLACIER": true }, "spa": 900 },
+      "out": { "value": 112 }
+    },
+    {
+      "id": "badge_glacier_spdef_capped",
+      "in": { "stat": 950, "key": "spd", "badges": { "GLACIER": true }, "spa": 227 },
+      "out": { "value": 999 }
+    },
+    {
+      "id": "badge_spdef_needs_glacier",
+      "in": { "stat": 100, "key": "spd", "badges": { "ZEPHYR": true, "MINERAL": true, "PLAIN": true }, "spa": 227 },
+      "out": { "value": 100 }
+    },
+    {
+      "id": "badge_none",
+      "in": { "stat": 100, "key": "atk", "badges": null },
+      "out": { "value": 100 }
+    }
+  ],
+  "badgeTypes": [
+    {
+      "id": "badge_type_flying_zephyr",
+      "in": { "typeId": "FLYING", "badges": { "ZEPHYR": true } },
+      "out": { "boosted": true }
+    },
+    {
+      "id": "badge_type_psychic_marsh",
+      "in": { "typeId": "PSYCHIC_TYPE", "badges": { "MARSH": true } },
+      "out": { "boosted": true }
+    },
+    {
+      "id": "badge_type_psychic_needs_registry_id",
+      "in": { "typeId": "PSYCHIC", "badges": { "MARSH": true } },
+      "out": { "boosted": false }
+    },
+    {
+      "id": "badge_type_rock_kanto_boulder",
+      "in": { "typeId": "ROCK", "badges": { "BOULDER": true } },
+      "out": { "boosted": true }
+    },
+    {
+      "id": "badge_type_rock_gen1_name",
+      "in": { "typeId": "ROCK", "badges": { "BOULDERBADGE": true } },
+      "out": { "boosted": false }
+    },
+    {
+      "id": "badge_type_unowned",
+      "in": { "typeId": "FIRE", "badges": { "ZEPHYR": true } },
+      "out": { "boosted": false }
+    },
+    {
+      "id": "badge_type_no_row",
+      "in": { "typeId": "DARK", "badges": { "ZEPHYR": true, "HIVE": true, "PLAIN": true, "FOG": true, "MINERAL": true, "STORM": true, "GLACIER": true, "RISING": true, "BOULDER": true, "CASCADE": true, "THUNDER": true, "RAINBOW": true, "SOUL": true, "MARSH": true, "VOLCANO": true, "EARTH": true } },
+      "out": { "boosted": false }
+    },
+    {
+      "id": "badge_type_unnamed",
+      "in": { "typeId": null, "badges": { "ZEPHYR": true, "HIVE": true, "PLAIN": true, "FOG": true, "MINERAL": true, "STORM": true, "GLACIER": true, "RISING": true, "BOULDER": true, "CASCADE": true, "THUNDER": true, "RAINBOW": true, "SOUL": true, "MARSH": true, "VOLCANO": true, "EARTH": true } },
+      "out": { "boosted": false }
     }
   ]
 }

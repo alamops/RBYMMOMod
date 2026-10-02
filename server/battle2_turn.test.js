@@ -27,7 +27,9 @@
  * by battle_turn.test.js on the Gen 1 pair.
  * The badge scenarios add one more referee rule both twins must apply alike:
  * an uploaded badge set counts only on side a of a fight against the computer
- * (Turn.BADGE_MODES), never in a link battle and never on side b.
+ * (Turn.BADGE_MODES), never in a link battle and never on side b -- and what it
+ * does there is Crystal's: the stat boosts, Glacier's Sp. Def tail, the 999 cap
+ * and DoBadgeTypeBoosts.
  *
  * The scenarios below are the JS half of that pair and have to stay a literal
  * mirror of the driver's: same seeds, same parties, same choices in the same
@@ -312,21 +314,32 @@ scenario('move_names', (events) => {
 
 // uploaded badge sets, and where the referee lets them count (Turn.BADGE_MODES
 // / Turn.BADGE_SIDE: side a of a fight against the computer, never a link
-// battle -- Crystal's BadgeStatBoosts returns early in one). Speeds sit a step
-// apart so a SOULBADGE that leaked would reorder the field rather than merely
-// move a damage number, and the npc fight carries a special move so VOLCANO
-// (Sp.Atk) and MARSH (Sp.Def) are both read. `badges_link` and
-// `badges_coop_pvp` fight as though nobody held a badge; `badges_npc` boosts
-// side a and ignores side b's upload.
+// battle -- Crystal's BadgeStatBoosts returns early in one). Every seat holds
+// all sixteen Gold badges and the ruleset names the types, so a leak would
+// show as a stat boost or a type boost. Speeds sit a step apart so a PLAIN
+// that leaked would reorder the field rather than merely move a damage number,
+// and the npc fight carries a special move so GLACIER (Sp. Atk) and VOLCANO's
+// type boost are both read. `badges_link` and `badges_coop_pvp` fight as
+// though nobody held a badge; `badges_npc` boosts side a and ignores side b's
+// upload; `badges_gold` drives the rules a plain fight never reaches -- the
+// 999 cap, Glacier's Sp. Def tail, a type boost on a move with no stat badge
+// behind it, and a confusion self-hit on boosted stats.
 const allBadges = () => ({
-  BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true,
-  VOLCANOBADGE: true, MARSHBADGE: true,
+  ZEPHYR: true, HIVE: true, PLAIN: true, FOG: true,
+  MINERAL: true, STORM: true, GLACIER: true, RISING: true,
+  BOULDER: true, CASCADE: true, THUNDER: true, RAINBOW: true,
+  SOUL: true, MARSH: true, VOLCANO: true, EARTH: true,
 });
+
+// Chart index 0 is NORMAL (PLAIN's type), 1 FIRE (VOLCANO's, and Special),
+// 2 BUG (HIVE's).
+const TYPE_IDS = ['NORMAL', 'FIRE', 'BUG'];
 
 scenario('badges_link', (events) => {
   const thump = () => mv('thump', 40, 255, 0);
   const battle = build({
     id: 'bl', mode: '1v1', seed: 2718, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: TYPE_IDS,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
         mn({ species: 'Alpha', maxHp: 200, atk: 60, spe: 40, moves: [thump()] })] }],
@@ -347,6 +360,7 @@ scenario('badges_coop_pvp', (events) => {
   const thump = () => mv('thump', 40, 255, 0);
   const battle = build({
     id: 'bp', mode: 'coop_pvp', seed: 3141, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: TYPE_IDS,
     sides: {
       a: [
         { playerId: 'a1', name: 'Ann', badges: allBadges(), mons: [
@@ -379,6 +393,7 @@ scenario('badges_npc', (events) => {
   const battle = build({
     id: 'bn', mode: 'coop_npc', seed: 1618, choiceTimeout: 60, reconnectGrace: 60,
     specialTypes: [1],
+    typeIds: TYPE_IDS,
     sides: {
       a: [
         { playerId: 'a1', name: 'Ann', badges: allBadges(), mons: [
@@ -401,6 +416,51 @@ scenario('badges_npc', (events) => {
     battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
     battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
     battle.submitChoice('n1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('n2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+scenario('badges_gold', (events) => {
+  const bite = () => mv('bite', 40, 255, 2);
+  const thump = () => mv('thump', 40, 255, 0);
+  const zap = () => mv('zap', 40, 255, 1);
+  // Abe is confused, so his turns spend the confusion byte and, on this seed,
+  // hit himself on MINERAL's boosted Defense.
+  const abe = mn({ species: 'Gamma', maxHp: 300, atk: 50, def: 40,
+    spa: 227, spd: 50, spe: 30, moves: [thump()] });
+  abe.confusion = 4;
+  const battle = build({
+    id: 'bg', mode: 'coop_npc', seed: 2027, choiceTimeout: 60, reconnectGrace: 60,
+    specialTypes: [1],
+    typeIds: TYPE_IDS,
+    sides: {
+      a: [
+        // 950 Attack under ZEPHYR is the 999 cap; HIVE type-boosts the BUG
+        // move, which no stat badge stands behind.
+        { playerId: 'a1', name: 'Ann', badges: { ZEPHYR: true, PLAIN: true, HIVE: true },
+          mons: [mn({ species: 'Alpha', maxHp: 300, atk: 950, spe: 40,
+            moves: [bite()] })] },
+        // Sp. Atk 227 boosts to 255 under GLACIER, which Glacier's tail reads
+        // as a Sp. Def boost too; MINERAL stands behind Defense.
+        { playerId: 'a2', name: 'Abe', badges: { GLACIER: true, MINERAL: true },
+          mons: [abe] },
+      ],
+      b: [
+        { playerId: 'n1', name: 'NpcA', badges: allBadges(), mons: [
+          mn({ species: 'Beta', maxHp: 400, spa: 70, spe: 42, moves: [zap()] })] },
+        { playerId: 'n2', name: 'NpcB', badges: allBadges(), mons: [
+          mn({ species: 'Delta', maxHp: 999, def: 600, atk: 70, spe: 37,
+            moves: [thump()] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('n1', { action: 'fight', move: 0, target: 1 });
     battle.submitChoice('n2', { action: 'fight', move: 0, target: 1 });
     drainInto(battle, events);
   }
@@ -470,7 +530,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 9, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 10, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -973,41 +1033,51 @@ test('a leftover choice does not resolve the turn until reconnect()', () => {
 });
 
 // ------------------------------------------------------------------
-// badges: against the computer only
+// badge rules: Crystal's, and against the computer only
 // ------------------------------------------------------------------
 
 // Twin of tests/battle_sim2_turn.lua's 7, same sheets and seed, so the numbers
 // are the same numbers. Crystal boosts the player's monster and only outside a
 // link battle (BadgeStatBoosts opens with `ld a, [wLinkMode] / and a / ret nz`),
 // so the referee keeps an uploaded set on side a of wild / coop_wild / coop_npc
-// and drops it in 1v1, coop_pvp and on side b. Three halves: a PvP fight with
-// badges is the unbadged fight, damage and turn order alike; the same seats
-// against the computer are boosted, so the gate is the mode and not a removal;
-// and side b's upload is ignored even there.
+// and drops it in 1v1, coop_pvp and on side b. What a kept set does is Gold's,
+// not Red's: the ids are Gold's (ZEPHYR ... EARTH), ZEPHYR / MINERAL / PLAIN /
+// GLACIER boost Attack / Defense / Speed / Sp. Atk by an eighth up to 999,
+// Sp. Def only through Glacier's buggy tail, and DoBadgeTypeBoosts adds an
+// eighth to a move whose type's badge is held.
 
-const ALL_BADGES = {
-  BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true,
-  VOLCANOBADGE: true, MARSHBADGE: true,
-};
+const { Effects } = require('./lib/battle2');
+
+// Every Gold badge, Johto then Kanto.
+const ALL_BADGES = {};
+for (const row of Effects.BADGE_TYPE_BOOSTS) ALL_BADGES[row.badge] = true;
+
+// The ruleset's type axis. Index 0 is a type no badge names, so a move of type
+// 0 is never type-boosted; 1 is BUG (HIVE's), 2 is FIRE and Special.
+const RULES = { typeIds: ['DARK', 'BUG', 'FIRE'], specialTypes: [2] };
 
 // One exchange: Ann (side a) and Bob (side b) each swing once. `a` / `b`
-// override the stats and carry each seat's upload.
-const exchange = (mode, a, b) => {
-  const thump = (power) => ({
-    id: 'thump', pp: 20, power, accuracy: 255, type: 0, effect: 0, chance: 0,
+// override the stats, the move's power and type, and carry each seat's upload;
+// `rules` is the ruleset (typeIds, specialTypes).
+const exchange = (mode, a, b, rules = {}) => {
+  const move = (power, type) => ({
+    id: 'thump', pp: 20, power, accuracy: 255, type, effect: 0, chance: 0,
   });
+  const ann = {
+    species: 'Alpha', level: 20, hp: 200, maxHp: 200,
+    stats: { atk: a.atk || 88, def: a.def || 40, spe: a.spe || 40, spa: a.spa || 40, spd: 40 },
+    moves: [move(50, a.type || 0)],
+  };
+  if (a.confusion) ann.confusion = a.confusion;
   const battle = build({
-    id: 'b1', mode, seed: 777001, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'b1', mode, seed: a.seed || 777001, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: rules.typeIds, specialTypes: rules.specialTypes,
     sides: {
-      a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [{
-        species: 'Alpha', level: 20, hp: 200, maxHp: 200,
-        stats: { atk: a.atk || 88, def: 40, spe: a.spe || 40, spa: 40, spd: 40 },
-        moves: [thump(50)],
-      }] }],
+      a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [ann] }],
       b: [{ playerId: 'p2', name: 'Bob', badges: b.badges, mons: [{
         species: 'Beta', level: 20, hp: 200, maxHp: 200,
-        stats: { atk: b.atk || 40, def: 80, spe: b.spe || 40, spa: 40, spd: 40 },
-        moves: [thump(b.power || 1)],
+        stats: { atk: b.atk || 40, def: b.def || 80, spe: b.spe || 40, spa: b.spa || 40, spd: 40 },
+        moves: [move(b.power || 1, b.type || 0)],
       }] }],
     },
   });
@@ -1023,60 +1093,146 @@ const firstHit = (events) => {
   const hit = events.find((event) => event.t === 'damage');
   return hit ? hit.slot : null;
 };
+// What a confusion self-hit cost, or null when the seat did not hit itself.
+const selfHit = (events) => {
+  let hurt = false;
+  for (const event of events) {
+    if (event.t === 'msg' && typeof event.text === 'string'
+        && event.text.includes('hurt itself')) {
+      hurt = true;
+    } else if (hurt && event.t === 'damage') {
+      return event.amount;
+    }
+  }
+  return null;
+};
 
-// Damage: BOULDERBADGE on Ann's physical hit. Speed: Ann at 40 against Bob at
-// 42, so SOULBADGE (40 -> 45) is exactly what decides who swings first.
-const HIT = { badges: { BOULDERBADGE: true } };
-const FAST = { badges: { SOULBADGE: true }, spe: 40 };
-const FOE = { spe: 42 };
+// A seed on which Ann hits herself on the first turn of a confusion.
+let confusedSeed = null;
+for (let seed = 1; seed <= 200; seed += 1) {
+  if (selfHit(exchange('coop_npc', { seed, confusion: 3 }, {})) !== null) {
+    confusedSeed = seed;
+    break;
+  }
+}
 
 test('badges count in the three fights against the computer, on side a', () => {
   assert.deepStrictEqual(Object.keys(Turn.BADGE_MODES).sort(),
     ['coop_npc', 'coop_wild', 'wild'], 'and in no other mode');
   assert.strictEqual(Turn.BADGE_SIDE, 'a', "and only on the player's side of them");
+  assert.ok(confusedSeed !== null, 'found a seed where a confused Ann hits herself');
 });
 
 for (const mode of ['1v1', 'coop_pvp']) {
   test(`${mode}: a link battle ignores every uploaded badge`, () => {
     const bare = exchange(mode, {}, {});
     assert.strictEqual(hitOn(bare, 3), 18, 'the unbadged attack lands for 18');
-    assert.strictEqual(hitOn(exchange(mode, HIT, {}), 3), 18,
-      'BOULDERBADGE does not raise the damage');
+    assert.strictEqual(hitOn(exchange(mode, { badges: { ZEPHYR: true } }, {}), 3), 18,
+      'ZEPHYR does not raise the damage');
     // One seat at a time: both at once would cancel here (each attack is
-    // boosted by the same ninth its target's defence is) and prove nothing.
+    // boosted by the same eighth its target's defence is) and prove nothing.
     assert.deepStrictEqual(exchange(mode, { badges: ALL_BADGES }, {}), bare,
       'side a uploading every badge fights the unbadged fight');
     assert.deepStrictEqual(exchange(mode, {}, { badges: ALL_BADGES }), bare,
       'so does side b uploading every badge');
-    assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, FOE)), 0,
+    assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, { spe: 42 })), 0,
       'unbadged, Bob (42) outspeeds Ann (40)');
-    assert.strictEqual(firstHit(exchange(mode, FAST, FOE)), 0,
-      'SOULBADGE does not let Ann overtake him');
+    assert.strictEqual(firstHit(exchange(mode, { spe: 40, badges: { PLAIN: true } }, { spe: 42 })), 0,
+      'PLAIN does not let Ann overtake him');
+    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { HIVE: true } }, {}, RULES), 3), 12,
+      'HIVE does not type-boost a BUG move either');
+    const bareSelf = selfHit(exchange(mode, { seed: confusedSeed, confusion: 3 }, {}));
+    assert.ok(bareSelf !== null, 'the confused Ann hits herself on this seed too');
+    assert.strictEqual(
+      selfHit(exchange(mode, { seed: confusedSeed, confusion: 3, badges: { ZEPHYR: true } }, {})),
+      bareSelf, 'nor does ZEPHYR reach a confusion self-hit');
   });
 }
 
 for (const mode of ['coop_npc', 'wild']) {
-  test(`${mode}: side a's badges still boost against the computer`, () => {
+  test(`${mode}: side a's badges follow Gold's rules against the computer`, () => {
     assert.strictEqual(hitOn(exchange(mode, {}, {}), 3), 18, 'unbadged, the same 18');
-    // 88 -> floor(88 * 9 / 8) = 99 Attack; BattleSim2 reaches the same 20.
-    assert.strictEqual(hitOn(exchange(mode, HIT, {}), 3), 20,
-      "BOULDERBADGE raises side a's physical damage to 20");
-    assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, FOE)), 0,
+    // 88 -> 88 + floor(88 / 8) = 99 Attack; BattleSim2 reaches the same 20.
+    assert.strictEqual(hitOn(exchange(mode, { badges: { ZEPHYR: true } }, {}), 3), 20,
+      "ZEPHYR raises side a's physical damage to 20");
+    assert.strictEqual(
+      hitOn(exchange(mode, { badges: { BOULDER: true, BOULDERBADGE: true } }, {}), 3), 18,
+      "BOULDER (Kanto) and BOULDERBADGE (Red's id) boost no stat on Gold");
+    assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, { spe: 42 })), 0,
       'unbadged, the foe (42) still goes first');
-    assert.strictEqual(firstHit(exchange(mode, FAST, FOE)), 3,
-      'SOULBADGE (40 -> 45) puts side a in front');
+    assert.strictEqual(firstHit(exchange(mode, { spe: 40, badges: { PLAIN: true } }, { spe: 42 })), 3,
+      'PLAIN (40 -> 45) puts side a in front');
+    assert.strictEqual(hitOn(exchange(mode, {}, { power: 30 }), 0), 11,
+      "Bob's 30-power hit on an unbadged Ann is 11");
+    assert.strictEqual(hitOn(exchange(mode, { badges: { MINERAL: true } }, { power: 30 }), 0), 9,
+      'MINERAL (Defense 40 -> 45) cuts it to 9');
+    assert.strictEqual(hitOn(exchange(mode, { type: 2, spa: 88 }, {}, RULES), 3), 23,
+      "Ann's Special hit, unbadged, is 23");
+    assert.strictEqual(
+      hitOn(exchange(mode, { type: 2, spa: 88, badges: { GLACIER: true } }, {}, RULES), 3), 25,
+      'GLACIER (Sp. Atk 88 -> 99) raises it to 25');
+
+    // Glacier's Sp. Def tail, both ways: Bob's Special hit on Ann. Sp. Atk 227
+    // boosts to 255, which the tail reads as odd (Sp. Def boosted); 200 boosts
+    // to 225, even, and Sp. Def stays as it was.
+    const special = { power: 30, type: 2, spa: 60 };
+    assert.strictEqual(hitOn(exchange(mode, { spa: 227 }, special, RULES), 0), 10,
+      "Bob's Special hit on an unbadged Ann is 10");
+    assert.strictEqual(
+      hitOn(exchange(mode, { spa: 227, badges: { GLACIER: true } }, special, RULES), 0), 9,
+      'GLACIER with Sp. Atk 227 (-> 255) boosts Sp. Def too: 9');
+    assert.strictEqual(
+      hitOn(exchange(mode, { spa: 200, badges: { GLACIER: true } }, special, RULES), 0), 10,
+      'GLACIER with Sp. Atk 200 (-> 225) leaves Sp. Def alone: 10');
+
+    // The 999 cap: 950 + floor(950 / 8) = 1068 is held at 999, so a badged 950
+    // hits exactly as an unbadged 999 does, and harder than a bare 950.
+    assert.strictEqual(hitOn(exchange(mode, { atk: 950 }, { def: 600 }), 3), 24,
+      'an unbadged Attack of 950 hits for 24');
+    assert.strictEqual(hitOn(exchange(mode, { atk: 999 }, { def: 600 }), 3), 26,
+      'an unbadged Attack of 999 hits for 26');
+    assert.strictEqual(
+      hitOn(exchange(mode, { atk: 950, badges: { ZEPHYR: true } }, { def: 600 }), 3), 26,
+      'ZEPHYR on 950 is capped at 999 and hits for the same 26');
+
+    // DoBadgeTypeBoosts: Ann's BUG move (no STAB, so 12 bare) and HIVE.
+    assert.strictEqual(hitOn(exchange(mode, { type: 1 }, {}, RULES), 3), 12,
+      "Ann's BUG move, no badge, is 12");
+    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { HIVE: true } }, {}, RULES), 3), 13,
+      'HIVE adds its eighth: 13');
+    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { FOG: true } }, {}, RULES), 3), 12,
+      'a badge of another type adds nothing');
+    assert.strictEqual(
+      hitOn(exchange(mode, { type: 1, badges: { HIVE: true } }, {},
+        { specialTypes: RULES.specialTypes }), 3), 12,
+      "with no typeIds the move's type has no name, and nothing fires");
+    assert.strictEqual(
+      hitOn(exchange(mode, { badges: { HIVE: true } }, { power: 30, type: 1 }, RULES), 0),
+      hitOn(exchange(mode, {}, { power: 30, type: 1 }, RULES), 0),
+      "the foe's BUG move is not boosted by Ann's HIVE");
+
+    // HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
+    const bareSelf = selfHit(exchange(mode, { seed: confusedSeed, confusion: 3 }, {}));
+    const zephyrSelf = selfHit(exchange(mode,
+      { seed: confusedSeed, confusion: 3, badges: { ZEPHYR: true } }, {}));
+    assert.ok(bareSelf !== null && zephyrSelf !== null && zephyrSelf > bareSelf,
+      'ZEPHYR raises a confusion self-hit too');
   });
 }
 
 test("coop_npc: side b's upload is ignored against the computer too", () => {
-  // Each of these would have changed the fight had it counted: THUNDERBADGE
-  // would cut Ann's hit, BOULDERBADGE would raise Bob's, and SOULBADGE
-  // (37 -> 41) would put Bob ahead of Ann's 40.
+  // Each of these would have changed the fight had it counted: MINERAL would
+  // cut Ann's hit, ZEPHYR would raise Bob's, and PLAIN (37 -> 41) would put
+  // Bob ahead of Ann's 40.
   const bare = exchange('coop_npc', {}, { power: 30 });
   const hostile = exchange('coop_npc', {}, { badges: ALL_BADGES, power: 30 });
-  assert.strictEqual(hitOn(hostile, 3), hitOn(bare, 3), "side b's THUNDERBADGE is ignored");
-  assert.strictEqual(hitOn(hostile, 0), hitOn(bare, 0), "side b's BOULDERBADGE is ignored");
+  assert.strictEqual(hitOn(hostile, 3), hitOn(bare, 3), "side b's MINERAL is ignored");
+  assert.strictEqual(hitOn(hostile, 0), hitOn(bare, 0), "side b's ZEPHYR is ignored");
   assert.deepStrictEqual(hostile, bare, "side b's upload changes nothing at all");
   assert.strictEqual(firstHit(exchange('coop_npc', {}, { badges: ALL_BADGES, spe: 37 })), 3,
-    "side b's SOULBADGE does not overtake side a");
+    "side b's PLAIN does not overtake side a");
+  assert.deepStrictEqual(
+    exchange('coop_npc', {}, { badges: ALL_BADGES, power: 30, type: 1 }, RULES),
+    exchange('coop_npc', {}, { power: 30, type: 1 }, RULES),
+    "side b's HIVE does not type-boost its BUG move");
 });

@@ -42,7 +42,7 @@ function expectFields(actual, expected, label) {
 test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped — reread the notes before touching this');
   assert.strictEqual(vectors.generation, 2, 'this suite is Gen2-only');
-  for (const group of ['damage', 'accuracy', 'crit', 'status']) {
+  for (const group of ['damage', 'accuracy', 'crit', 'status', 'badgeStats', 'badgeTypes']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -228,6 +228,27 @@ test('the before-move dispatcher answers only for statuses that gate a turn', ()
     'toxic multiplies maxHp by counter over 16');
   assert.strictEqual(status.residual({ status: 'burn', maxHp: 80 }), 10,
     'burn is 1/8 in Gen2');
+});
+
+// Crystal's stat boosts (with Glacier's Sp. Def tail and the 999 cap) and the
+// badge type boost's lookup, both checked against the Gold engine's own
+// Battle.battleStat / badgeTypeBoost before they were written down.
+test('badge stat vectors', async (t) => {
+  for (const v of vectors.badgeStats) {
+    await t.test(v.id, () => {
+      const got = { value: Effects.badgeBoost(v.in.stat, v.in.key, v.in.badges, v.in.spa) };
+      expectFields(got, v.out, v.id);
+    });
+  }
+});
+
+test('badge type vectors', async (t) => {
+  for (const v of vectors.badgeTypes) {
+    await t.test(v.id, () => {
+      const got = { boosted: Effects.badgeTypeBoost(v.in.typeId, v.in.badges) };
+      expectFields(got, v.out, v.id);
+    });
+  }
 });
 
 test('Rng LCG matches the Lua twin for a known seed stream', () => {

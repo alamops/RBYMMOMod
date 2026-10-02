@@ -10,8 +10,10 @@
 --
 -- Known gaps left for follow-up: Gen2-native effect jump table, held-item
 -- damage/accuracy hooks (type-boost, Bright Powder, Scope Lens mid-turn),
--- weather/badge boosts inside Damage.compute from Turn, Gen2 sleep/confusion
--- parity tests, and Wire spa/spd event fields (T2c).
+-- weather inside Damage.compute from Turn, Gen2 sleep/confusion parity tests,
+-- and Wire spa/spd event fields (T2c).  Badge boosts are not a gap: Crystal's
+-- stat and type rules apply to side a against the computer (BADGE_MODES,
+-- Effects.badgeBoost / badgeTypeBoost).
 --
 -- The formula modules beside this one each answer a single question with no
 -- memory.  This is the thing that holds the fight: it owns the field, the
@@ -64,6 +66,10 @@
 --   * *Physical / Special* follow Gen1 type categories via host-uploaded
 --     `specialTypes` on the ruleset (indices into the uploaded chart). Absent
 --     specialTypes keeps every damaging move on atk/def.
+--   * *Type names* ride on the ruleset as `typeIds`, the chart's axis in
+--     order (`typeIds[i + 1]` names type index i), because the badge type
+--     boost is keyed by type and a move only carries an index.  Absent
+--     typeIds, no move's type can be named and no type boost fires.
 --   * A *faint sends the next living monster in party order*, immediately and
 --     without asking.  The original stops and asks; asking here would mean a
 --     second kind of choice phase with its own deadline and its own forfeit
@@ -140,22 +146,24 @@ M.SIDES = { "a", "b" }
 -- The modes an uploaded `badges` set counts in, and the one side it counts on.
 --
 -- The fights against the computer, on the player's seats, because that is the
--- only place the cart applies the x9/8 boosts at all: pokecrystal's
+-- only place the cart applies its badge boosts at all: pokecrystal's
 -- BadgeStatBoosts (engine/battle/core.asm) opens with `ld a, [wLinkMode] /
 -- and a / ret nz`, returning before it reads a badge in any link battle, and
 -- raises wBattleMon -- the player's monster -- and nothing else; the engine's
 -- port says the same (gen1recomp src/battle/gen2/Battle.lua:811-815, "never
--- the enemy and never in link").  1v1 and coop_pvp are link battles in
--- everything but the cable, so both sides fight them unboosted.  Side b of the
--- other three is the synthetic wild / trainer seat (see EXP_MODES on
--- `_awardExp`), which no cart boosts, so a set uploaded for it is a confused
--- or a hostile client and is dropped the same way.
+-- the enemy and never in link"), and DoBadgeTypeBoosts (engine/battle/
+-- misc.asm:146) boosts only the player's own move.  1v1 and coop_pvp are
+-- link battles in everything but the cable, so both sides fight them
+-- unboosted.  Side b of the other three is the synthetic wild / trainer seat
+-- (see EXP_MODES on `_awardExp`), which no cart boosts, so a set uploaded
+-- for it is a confused or a hostile client and is dropped the same way.
 --
 -- The referee is the gate rather than the client or the hub: a client can
 -- forge an upload and a hub passes `badges` through untouched, and this is the
 -- one place both hubs and solo share.  It is applied once, in `create`, where a
 -- seat's set is copied -- every reader after that (`_speedOf`, both ends of the
--- damage step) sees nil and needs no gate of its own.
+-- damage step, the type boost, the confusion self-hit) sees nil and needs
+-- no gate of its own.
 M.BADGE_MODES = { wild = true, coop_wild = true, coop_npc = true }
 M.BADGE_SIDE = "a"
 
@@ -482,6 +490,26 @@ local function seatBadges(mode, side, raw)
   return copyBadges(raw)
 end
 
+-- The ruleset's type registry ids in chart-axis order, so `typeIds[i + 1]`
+-- names the type a move or a monster calls `i` (MediatedBattle.typeOrder
+-- builds that axis).  Kept dense: an entry that is not a string reads as
+-- false, a type with no name, rather than shifting every index after it.
+local function copyTypeIds(raw)
+  if type(raw) ~= "table" then return nil end
+  local out, any = {}, false
+  for i = 1, #raw do
+    local id = raw[i]
+    if type(id) == "string" and id ~= "" then
+      out[i] = id
+      any = true
+    else
+      out[i] = false
+    end
+  end
+  if not any then return nil end
+  return out
+end
+
 -- Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 -- shapes Wire.bag does: a list of {id,count} or a map.
 local function copyBag(raw)
@@ -557,7 +585,8 @@ local function partyIndexOf(fighter, wireSlot)
 end
 
 -- opts:
---   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
+--   id, mode, seed, chart, specialTypes, typeIds, metronomePool,
+--   choiceTimeout, reconnectGrace, resolveTimeout, now
 --   sides = { a = { { playerId, name, mons, bag, badges } }, b = { ... } }
 --
 -- `badges` is kept only on side a of a BADGE_MODES fight and dropped
@@ -579,6 +608,7 @@ function M.create(opts)
     aim            = Rng.new(int(opts.seed, 0) + M.AIM_SEED_OFFSET),
     chart          = type(opts.chart) == "table" and opts.chart or nil,
     specialTypes   = nil,
+    typeIds        = copyTypeIds(opts.typeIds),
     metronomePool  = nil,
     choiceTimeout  = max(0, int(opts.choiceTimeout, M.CHOICE_TIMEOUT)),
     reconnectGrace = max(0, int(opts.reconnectGrace, M.RECONNECT_GRACE)),
@@ -1767,6 +1797,14 @@ function Battle:_typePercents(moveType, defender)
   return out
 end
 
+-- The registry id of chart index `typeIndex` (`typeIds`), or nil when the
+-- ruleset named none or this index is past its end.
+function Battle:_typeIdOf(typeIndex)
+  local ids = self.typeIds
+  if not ids then return nil end
+  return ids[int(typeIndex, -1) + 1] or nil
+end
+
 local function hasType(mon, typeId)
   for i = 1, #mon.types do
     if mon.types[i] == typeId then return true end
@@ -2329,10 +2367,14 @@ function Battle:_runGates(fighter, mon)
   end
 
   if mon.confusion > 0 then
+    -- HitConfusion reads the battle stats, badge boosts included (engine
+    -- src/battle/gen2/Battle.lua:4133-4157 reads them through battleStat).
     local gate = Status.beforeMove({
       status = "confusion",
       turnsRemaining = mon.confusion,
-      level = mon.level, attack = mon.stats.atk, defense = mon.stats.def,
+      level = mon.level,
+      attack = Effects.badgeBoost(mon.stats.atk, "atk", fighter.badges),
+      defense = Effects.badgeBoost(mon.stats.def, "def", fighter.badges),
     }, self.rng:byte())
     if gate then
       mon.confusion = int(gate.turnsRemaining, 0)
@@ -2673,11 +2715,14 @@ function Battle:_useMove(fighter, mon, opts)
     local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
     local atkKey = isSpecial and "spa" or "atk"
     local defKey = isSpecial and "spd" or "def"
+    -- Both ends read the battle stat with its owner's badge boost; the
+    -- defender's Sp. Atk rides along for Glacier's Sp. Def tail.
     local atkStat = Effects.badgeBoost(
       isSpecial and mon.stats.spa or mon.stats.atk, atkKey, fighter.badges)
     local atkStage = isSpecial and mon.stages.spa or mon.stages.atk
     local defStat = Effects.badgeBoost(
-      isSpecial and defender.stats.spd or defender.stats.def, defKey, target.badges)
+      isSpecial and defender.stats.spd or defender.stats.def, defKey, target.badges,
+      defender.stats.spa)
     local defStage = isSpecial and defender.stages.spd or defender.stages.def
 
     local attack = Effects.applyStage(atkStat, atkStage)
@@ -2700,6 +2745,10 @@ function Battle:_useMove(fighter, mon, opts)
         typeEffect = percents,
         roll = self.rng:damageRoll(),
         physical = not isSpecial,
+        -- The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
+        -- this is the cart's "player's turn only" without asking whose turn.
+        badgeTypeBoost = Effects.badgeTypeBoost(self:_typeIdOf(move.type),
+          fighter.badges),
       })
 
     if result.immune then

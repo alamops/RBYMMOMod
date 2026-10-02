@@ -291,25 +291,114 @@ function applyStage(base, stage) {
   return Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
 }
 
-// Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
+// Crystal's badge rules, as gen1recomp ports them (src/battle/gen2/Battle.lua,
+// the engine every number here was checked against). `badges` is a set of
+// Gold badge ids -> true: the eight Johto ids and the eight Kanto ids that
+// name the rows of the engine's BADGE_TYPE_BOOSTS (ZEPHYR ... RISING, BOULDER
+// ... EARTH), which is what a Gold client uploads. Gen 1's BOULDERBADGE-style
+// ids mean nothing here: Gold has no badge by that name.
+//
 // A fighter only holds a set where the cart would have applied it -- side a
 // of a fight against the computer; Turn.attempt drops it in 1v1 / coop_pvp
 // (link battles, where Crystal's BadgeStatBoosts returns early) and on side b
-// (Turn.BADGE_MODES) -- so this never has to ask what kind of fight it is in.
+// (Turn.BADGE_MODES) -- so nothing below has to ask what kind of fight it is.
+
+// BadgeStatBoosts (engine/battle/core.asm:6534; port Battle.lua:209-220,
+// BADGE_STAT_BOOSTS): every other wJohtoBadges bit boosts a stat, walked
+// after PlainBadge and MineralBadge swap places, which is what lands Mineral
+// on Defense and Plain on Speed. Kanto badges boost no stat; Sp. Def has no
+// badge of its own and is only ever reached by Glacier's buggy tail below.
 const BADGE_FOR_STAT = {
-  atk: 'BOULDERBADGE',
-  def: 'THUNDERBADGE',
-  spe: 'SOULBADGE',
-  spa: 'VOLCANOBADGE',
-  spd: 'MARSHBADGE',
+  atk: 'ZEPHYR',
+  def: 'MINERAL',
+  spe: 'PLAIN',
+  spa: 'GLACIER',
 };
 
-function badgeBoost(statValue, wireStatKey, badges) {
+// MAX_STAT_VALUE, the ceiling BoostStat caps a boosted stat at.
+const MAX_STAT_VALUE = 999;
+
+// BoostStat (engine/battle/core.asm:6590; port Battle.lua:787-792):
+// raise a stat by an eighth, capped at MAX_STAT_VALUE. The eighth is a plain
+// shift, so a stat under 8 gains nothing.
+function boostStat(value) {
+  const v = Math.max(0, int(value, 0));
+  return Math.min(MAX_STAT_VALUE, v + Math.floor(v / 8));
+}
+
+// BadgeStatBoosts' buggy tail (port Battle.lua:794-809, glacierBoostsSpDef):
+// the closing Special Defense check does `srl a` assuming `a` still holds the
+// badge bits, but when GlacierBadge fired for Special Attack the BoostStat
+// before it overwrote `a` with its cap-check arithmetic. So with Glacier
+// owned, whether Sp. Def is ALSO boosted turns on the boosted Sp. Atk:
+//   * at or past the 999 cap `a` leaves as LOW(999) = $e7, odd: boosted;
+//   * otherwise `a` is high(v) - 3 - borrow, the borrow set when low(v) <
+//     LOW(999), and the bit shifted out of it decides.
+// (pokegold's own comment marks the check buggy.) The byte wrap is spelled
+// out because JS `%` keeps the sign; the Lua twin's floored `% 256` does not.
+function glacierBoostsSpDef(boostedSpa) {
+  const v = Math.max(0, int(boostedSpa, 0));
+  if (v >= MAX_STAT_VALUE) return true;
+  const borrow = (v % 256) < 231 ? 1 : 0;
+  const a = (((Math.floor(v / 256) - 3 - borrow) % 256) + 256) % 256;
+  return a % 2 === 1;
+}
+
+// The stat a hit or the turn order reads, plus the badge boost (port
+// Battle.lua:811-833, battleStat). `wireStatKey` is atk/def/spe/spa/spd.
+// `spa` is the same monster's unboosted Sp. Atk, and is read only for `spd`:
+// it is what Glacier's tail is decided on.
+function badgeBoost(statValue, wireStatKey, badges, spa) {
   const base = Math.max(0, int(statValue, 0));
   if (!badges || typeof badges !== 'object') return base;
-  const badge = BADGE_FOR_STAT[wireStatKey];
-  if (!badge || !badges[badge]) return base;
-  return Math.floor((base * 9) / 8);
+  const badge = Object.prototype.hasOwnProperty.call(BADGE_FOR_STAT, wireStatKey)
+    ? BADGE_FOR_STAT[wireStatKey] : undefined;
+  if (badge) {
+    if (badges[badge]) return boostStat(base);
+    return base;
+  }
+  if (wireStatKey === 'spd' && badges.GLACIER
+      && glacierBoostsSpDef(boostStat(spa))) {
+    return boostStat(base);
+  }
+  return base;
+}
+
+// DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146; port
+// Battle.lua:835-848, badgeTypeBoost; rows from data/types/
+// badge_type_boosts.asm in the cart's own walk order -- the eight wJohtoBadges
+// bits, then the eight wKantoBadges bits). On the player's turn the move's
+// type is looked up here, each type at most once, and owning that row's badge
+// adds an eighth to the damage (Damage.compute's `badgeTypeBoost`). `type`
+// is the type's registry id, which the ruleset's `typeIds` resolves a move's
+// chart index to -- PSYCHIC_TYPE is Psychic's, because PSYCHIC is a move.
+const BADGE_TYPE_BOOSTS = [
+  { badge: 'ZEPHYR', type: 'FLYING' },
+  { badge: 'HIVE', type: 'BUG' },
+  { badge: 'PLAIN', type: 'NORMAL' },
+  { badge: 'FOG', type: 'GHOST' },
+  { badge: 'MINERAL', type: 'STEEL' },
+  { badge: 'STORM', type: 'FIGHTING' },
+  { badge: 'GLACIER', type: 'ICE' },
+  { badge: 'RISING', type: 'DRAGON' },
+  { badge: 'BOULDER', type: 'ROCK' },
+  { badge: 'CASCADE', type: 'WATER' },
+  { badge: 'THUNDER', type: 'ELECTRIC' },
+  { badge: 'RAINBOW', type: 'GRASS' },
+  { badge: 'SOUL', type: 'POISON' },
+  { badge: 'MARSH', type: 'PSYCHIC_TYPE' },
+  { badge: 'VOLCANO', type: 'FIRE' },
+  { badge: 'EARTH', type: 'GROUND' },
+];
+
+// Whether a move of type `typeId` is boosted for a fighter holding `badges`.
+// The first row naming the type answers, as the cart's scan does.
+function badgeTypeBoost(typeId, badges) {
+  if (!badges || typeof badges !== 'object' || typeof typeId !== 'string') return false;
+  for (const row of BADGE_TYPE_BOOSTS) {
+    if (row.type === typeId) return badges[row.badge] === true;
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------
@@ -1274,6 +1363,12 @@ module.exports = {
   stageMult,
   applyStage,
   badgeBoost,
+  boostStat,
+  glacierBoostsSpDef,
+  badgeTypeBoost,
+  BADGE_FOR_STAT,
+  BADGE_TYPE_BOOSTS,
+  MAX_STAT_VALUE,
   isPhase1Primary,
   isPhase5Volatile,
   isPhase6Primary,

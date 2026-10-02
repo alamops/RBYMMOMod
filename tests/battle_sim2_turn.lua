@@ -1718,18 +1718,21 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 7. badge boosts: against the computer only
+-- 7. badge rules: Crystal's, and against the computer only
 -- ------------------------------------------------------------------
 --
 -- Crystal boosts the player's monster and only outside a link battle
 -- (BadgeStatBoosts opens with `ld a, [wLinkMode] / and a / ret nz`), so the
 -- referee keeps an uploaded set on side a of wild / coop_wild / coop_npc and
 -- drops it in 1v1, coop_pvp and on side b (Turn.BADGE_MODES, Turn.BADGE_SIDE).
--- Three halves, the same three the Gen 1 suite states: a PvP fight with badges
--- is the unbadged fight, damage and turn order alike; the same seats against
--- the computer are boosted, so the gate is the mode and not a removal; and
--- side b's upload is ignored even there.  server/battle2_turn.test.js builds
--- the same sheets on the same seed and reaches the same numbers.
+-- What a kept set does is Gold's, not Red's: the ids are Gold's (ZEPHYR ...
+-- EARTH), ZEPHYR / MINERAL / PLAIN / GLACIER boost Attack / Defense / Speed /
+-- Sp. Atk by an eighth up to 999, Sp. Def only through Glacier's buggy tail,
+-- and DoBadgeTypeBoosts adds an eighth to a move whose type's badge is held.
+-- Every formula here was checked against the Gold engine's own functions
+-- (src/battle/gen2/Battle.lua) through the vector pack; this section states
+-- the rules on a whole turn.  server/battle2_turn.test.js builds the same
+-- sheets on the same seed and reaches the same numbers.
 
 do
   local modes = {}
@@ -1739,27 +1742,43 @@ do
      "badges count in the three fights against the computer, and no other")
   eq(Turn.BADGE_SIDE, "a", "...and only on the player's side of them")
 
-  local ALL = { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true,
-                VOLCANOBADGE = true, MARSHBADGE = true }
+  -- Every Gold badge, Johto then Kanto.
+  local ALL = {}
+  for _, row in ipairs(Effects.BADGE_TYPE_BOOSTS) do ALL[row.badge] = true end
+
+  -- The ruleset's type axis.  Index 0 is a type no badge names, so a move of
+  -- type 0 is never type-boosted; 1 is BUG (HIVE's), 2 is FIRE and Special.
+  local RULES = { typeIds = { "DARK", "BUG", "FIRE" }, specialTypes = { 2 } }
 
   -- One exchange: Ann (side a) and Bob (side b) each swing once.  `a` / `b`
-  -- override the stats and carry each seat's upload.
-  local function exchange(mode, a, b)
-    local battle = battleOf({
-      mode = mode, seed = 777001,
+  -- override the stats, the move's power and type, and carry each seat's
+  -- upload; `rules` is the ruleset (typeIds, specialTypes).
+  local function exchange(mode, a, b, rules)
+    rules = rules or {}
+    local battle, err = Turn.create({
+      id = "b1", mode = mode, seed = a.seed or 777001,
+      choiceTimeout = 60, reconnectGrace = 60,
+      typeIds = rules.typeIds, specialTypes = rules.specialTypes,
       sides = {
         a = { { playerId = "p1", name = "Ann", badges = a.badges,
-                mons = { mon({
-                  maxHp = 200, hp = 200, atk = a.atk or 88, def = 40,
-                  spe = a.spe or 40, moves = { move({ power = 50 }) },
-                }) } } },
+                mons = { (function()
+                  local m = mon({
+                    maxHp = 200, hp = 200, atk = a.atk or 88, def = a.def or 40,
+                    spe = a.spe or 40, spa = a.spa or 40,
+                    moves = { move({ power = 50, type = a.type or 0 }) },
+                  })
+                  m.confusion = a.confusion
+                  return m
+                end)() } } },
         b = { { playerId = "p2", name = "Bob", badges = b.badges,
                 mons = { mon({
                   species = "Beta", maxHp = 200, hp = 200, atk = b.atk or 40,
-                  def = 80, spe = b.spe or 40, moves = { move({ power = b.power or 1 }) },
+                  def = b.def or 80, spe = b.spe or 40, spa = b.spa or 40,
+                  moves = { move({ power = b.power or 1, type = b.type or 0 }) },
                 }) } } },
       },
     })
+    if not battle then error("fixture battle refused: " .. tostring(err), 0) end
     battle:submitChoice("p1", { action = "fight", move = 0 })
     battle:submitChoice("p2", { action = "fight", move = 0 })
     return drain(battle)
@@ -1773,6 +1792,18 @@ do
   local function firstHit(events)
     for _, event in ipairs(events) do
       if event.t == "damage" then return event.slot end
+    end
+    return nil
+  end
+  -- What a confusion self-hit cost, or nil when the seat did not hit itself.
+  local function selfHit(events)
+    local hurt = false
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text and event.text:find("hurt itself", 1, true) then
+        hurt = true
+      elseif hurt and event.t == "damage" then
+        return event.amount
+      end
     end
     return nil
   end
@@ -1802,54 +1833,118 @@ do
     return table.concat(rows, "|")
   end
 
-  -- Damage: BOULDERBADGE on Ann's physical hit.  Speed: Ann at 40 against Bob
-  -- at 42, so SOULBADGE (40 -> 45) is exactly what decides who swings first.
-  local hit = { badges = { BOULDERBADGE = true } }
-  local fast = { badges = { SOULBADGE = true }, spe = 40 }
-  local foe = { spe = 42 }
+  -- A seed on which Ann hits herself on the first turn of a confusion.
+  local confusedSeed
+  for seed = 1, 200 do
+    if selfHit(exchange("coop_npc", { seed = seed, confusion = 3 }, {})) then
+      confusedSeed = seed
+      break
+    end
+  end
+  ok(confusedSeed ~= nil, "found a seed where a confused Ann hits herself")
 
   -- (a) the link modes: every byte of the badged fight is the unbadged one.
   for _, mode in ipairs({ "1v1", "coop_pvp" }) do
     local bare = exchange(mode, {}, {})
     eq(hitOn(bare, 3), 18, mode .. ": the unbadged attack lands for 18")
-    eq(hitOn(exchange(mode, hit, {}), 3), 18,
-       mode .. ": BOULDERBADGE does not raise the damage -- a link battle")
+    eq(hitOn(exchange(mode, { badges = { ZEPHYR = true } }, {}), 3), 18,
+       mode .. ": ZEPHYR does not raise the damage -- a link battle")
     -- One seat at a time: both at once would cancel here (each attack is
-    -- boosted by the same ninth its target's defence is) and prove nothing.
+    -- boosted by the same eighth its target's defence is) and prove nothing.
     eq(streamOf(exchange(mode, { badges = ALL }, {})), streamOf(bare),
        mode .. ": side a uploading every badge fights the unbadged fight")
     eq(streamOf(exchange(mode, {}, { badges = ALL })), streamOf(bare),
        mode .. ": so does side b uploading every badge")
-    eq(firstHit(exchange(mode, { spe = 40 }, foe)), 0,
+    eq(firstHit(exchange(mode, { spe = 40 }, { spe = 42 })), 0,
        mode .. ": unbadged, Bob (42) outspeeds Ann (40)")
-    eq(firstHit(exchange(mode, fast, foe)), 0,
-       mode .. ": SOULBADGE does not let Ann overtake him")
+    eq(firstHit(exchange(mode, { spe = 40, badges = { PLAIN = true } }, { spe = 42 })), 0,
+       mode .. ": PLAIN does not let Ann overtake him")
+    eq(hitOn(exchange(mode, { type = 1, badges = { HIVE = true } }, {}, RULES), 3), 12,
+       mode .. ": HIVE does not type-boost a BUG move either")
+    local bareSelf = selfHit(exchange(mode, { seed = confusedSeed, confusion = 3 }, {}))
+    ok(bareSelf ~= nil, mode .. ": the confused Ann hits herself on this seed too")
+    eq(selfHit(exchange(mode, { seed = confusedSeed, confusion = 3,
+                                badges = { ZEPHYR = true } }, {})), bareSelf,
+       mode .. ": nor does ZEPHYR reach a confusion self-hit")
   end
 
-  -- (b) the same seats against the computer: boosted, which is what makes the
-  --     gate the mode rather than a removal of the boost.
+  -- (b) the same seats against the computer, under Gold's mapping.
   for _, mode in ipairs({ "coop_npc", "wild" }) do
     eq(hitOn(exchange(mode, {}, {}), 3), 18, mode .. ": unbadged, the same 18")
-    -- 88 -> floor(88 * 9 / 8) = 99 Attack; lib/battle2 reaches the same 20.
-    eq(hitOn(exchange(mode, hit, {}), 3), 20,
-       mode .. ": BOULDERBADGE raises side a's physical damage to 20")
-    eq(firstHit(exchange(mode, { spe = 40 }, foe)), 0,
+    -- 88 -> 88 + floor(88 / 8) = 99 Attack; lib/battle2 reaches the same 20.
+    eq(hitOn(exchange(mode, { badges = { ZEPHYR = true } }, {}), 3), 20,
+       mode .. ": ZEPHYR raises side a's physical damage to 20")
+    eq(hitOn(exchange(mode, { badges = { BOULDER = true, BOULDERBADGE = true } }, {}), 3), 18,
+       mode .. ": BOULDER (Kanto) and BOULDERBADGE (Red's id) boost no stat on Gold")
+    eq(firstHit(exchange(mode, { spe = 40 }, { spe = 42 })), 0,
        mode .. ": unbadged, the foe (42) still goes first")
-    eq(firstHit(exchange(mode, fast, foe)), 3,
-       mode .. ": SOULBADGE (40 -> 45) puts side a in front")
+    eq(firstHit(exchange(mode, { spe = 40, badges = { PLAIN = true } }, { spe = 42 })), 3,
+       mode .. ": PLAIN (40 -> 45) puts side a in front")
+    eq(hitOn(exchange(mode, {}, { power = 30 }), 0), 11,
+       mode .. ": Bob's 30-power hit on an unbadged Ann is 11")
+    eq(hitOn(exchange(mode, { badges = { MINERAL = true } }, { power = 30 }), 0), 9,
+       mode .. ": MINERAL (Defense 40 -> 45) cuts it to 9")
+    eq(hitOn(exchange(mode, { type = 2, spa = 88 }, {}, RULES), 3), 23,
+       mode .. ": Ann's Special hit, unbadged, is 23")
+    eq(hitOn(exchange(mode, { type = 2, spa = 88, badges = { GLACIER = true } }, {}, RULES), 3), 25,
+       mode .. ": GLACIER (Sp. Atk 88 -> 99) raises it to 25")
+
+    -- Glacier's Sp. Def tail, both ways: Bob's Special hit on Ann.  Sp. Atk
+    -- 227 boosts to 255, which the tail reads as odd (Sp. Def boosted); 200
+    -- boosts to 225, even, and Sp. Def stays as it was.
+    local special = { power = 30, type = 2, spa = 60 }
+    eq(hitOn(exchange(mode, { spa = 227 }, special, RULES), 0), 10,
+       mode .. ": Bob's Special hit on an unbadged Ann is 10")
+    eq(hitOn(exchange(mode, { spa = 227, badges = { GLACIER = true } }, special, RULES), 0), 9,
+       mode .. ": GLACIER with Sp. Atk 227 (-> 255) boosts Sp. Def too: 9")
+    eq(hitOn(exchange(mode, { spa = 200, badges = { GLACIER = true } }, special, RULES), 0), 10,
+       mode .. ": GLACIER with Sp. Atk 200 (-> 225) leaves Sp. Def alone: 10")
+
+    -- The 999 cap: 950 + floor(950 / 8) = 1068 is held at 999, so a badged
+    -- 950 hits exactly as an unbadged 999 does, and harder than a bare 950.
+    eq(hitOn(exchange(mode, { atk = 950 }, { def = 600 }), 3), 24,
+       mode .. ": an unbadged Attack of 950 hits for 24")
+    eq(hitOn(exchange(mode, { atk = 999 }, { def = 600 }), 3), 26,
+       mode .. ": an unbadged Attack of 999 hits for 26")
+    eq(hitOn(exchange(mode, { atk = 950, badges = { ZEPHYR = true } }, { def = 600 }), 3), 26,
+       mode .. ": ZEPHYR on 950 is capped at 999 and hits for the same 26")
+
+    -- DoBadgeTypeBoosts: Ann's BUG move (no STAB, so 12 bare) and HIVE.
+    eq(hitOn(exchange(mode, { type = 1 }, {}, RULES), 3), 12,
+       mode .. ": Ann's BUG move, no badge, is 12")
+    eq(hitOn(exchange(mode, { type = 1, badges = { HIVE = true } }, {}, RULES), 3), 13,
+       mode .. ": HIVE adds its eighth: 13")
+    eq(hitOn(exchange(mode, { type = 1, badges = { FOG = true } }, {}, RULES), 3), 12,
+       mode .. ": a badge of another type adds nothing")
+    eq(hitOn(exchange(mode, { type = 1, badges = { HIVE = true } }, {},
+                      { specialTypes = RULES.specialTypes }), 3), 12,
+       mode .. ": with no typeIds the move's type has no name, and nothing fires")
+    eq(hitOn(exchange(mode, { badges = { HIVE = true } }, { power = 30, type = 1 }, RULES), 0),
+       hitOn(exchange(mode, {}, { power = 30, type = 1 }, RULES), 0),
+       mode .. ": the foe's BUG move is not boosted by Ann's HIVE")
+
+    -- HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
+    local bareSelf = selfHit(exchange(mode, { seed = confusedSeed, confusion = 3 }, {}))
+    local zephyrSelf = selfHit(exchange(mode, { seed = confusedSeed, confusion = 3,
+                                                badges = { ZEPHYR = true } }, {}))
+    ok(bareSelf and zephyrSelf and zephyrSelf > bareSelf,
+       mode .. ": ZEPHYR raises a confusion self-hit too")
   end
 
   -- (c) side b's upload, ignored against the computer too.  Each of these
-  --     would have changed the fight had it counted: THUNDERBADGE would cut
-  --     Ann's hit, BOULDERBADGE would raise Bob's, and SOULBADGE (37 -> 41)
-  --     would put Bob ahead of Ann's 40.
+  --     would have changed the fight had it counted: MINERAL would cut Ann's
+  --     hit, ZEPHYR would raise Bob's, and PLAIN (37 -> 41) would put Bob
+  --     ahead of Ann's 40.
   local bare = exchange("coop_npc", {}, { power = 30 })
   local hostile = exchange("coop_npc", {}, { badges = ALL, power = 30 })
-  eq(hitOn(hostile, 3), hitOn(bare, 3), "coop_npc: side b's THUNDERBADGE is ignored")
-  eq(hitOn(hostile, 0), hitOn(bare, 0), "coop_npc: side b's BOULDERBADGE is ignored")
+  eq(hitOn(hostile, 3), hitOn(bare, 3), "coop_npc: side b's MINERAL is ignored")
+  eq(hitOn(hostile, 0), hitOn(bare, 0), "coop_npc: side b's ZEPHYR is ignored")
   eq(streamOf(hostile), streamOf(bare), "coop_npc: side b's upload changes nothing at all")
   eq(firstHit(exchange("coop_npc", {}, { badges = ALL, spe = 37 })), 3,
-     "coop_npc: side b's SOULBADGE does not overtake side a")
+     "coop_npc: side b's PLAIN does not overtake side a")
+  eq(streamOf(exchange("coop_npc", {}, { badges = ALL, power = 30, type = 1 }, RULES)),
+     streamOf(exchange("coop_npc", {}, { power = 30, type = 1 }, RULES)),
+     "coop_npc: side b's HIVE does not type-boost its BUG move")
 end
 
 -- ------------------------------------------------------------------

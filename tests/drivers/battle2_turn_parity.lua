@@ -25,9 +25,11 @@
 --     `switch` / `send`.
 --   * `retarget` -- a stolen KO. The slower ally's action must land on the
 --     seat that is left, and it must land on it having drawn the same bytes.
---   * `badges_link` / `badges_coop_pvp` / `badges_npc` -- where an uploaded
---     badge set counts (Turn.BADGE_MODES): side a of a fight against the
---     computer, never a link battle and never side b.
+--   * `badges_link` / `badges_coop_pvp` / `badges_npc` / `badges_gold` --
+--     where an uploaded badge set counts (Turn.BADGE_MODES: side a of a fight
+--     against the computer, never a link battle and never side b), and what
+--     it does there: Crystal's stat boosts, Glacier's Sp. Def tail, the 999
+--     cap and DoBadgeTypeBoosts.
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -457,21 +459,32 @@ end)
 
 -- uploaded badge sets, and where the referee lets them count (Turn.BADGE_MODES
 -- / Turn.BADGE_SIDE: side a of a fight against the computer, never a link
--- battle -- Crystal's BadgeStatBoosts returns early in one).  Speeds sit a step
--- apart so a SOULBADGE that leaked would reorder the field rather than merely
--- move a damage number, and the npc fight carries a special move so VOLCANO
--- (Sp.Atk) and MARSH (Sp.Def) are both read.  `badges_link` and
--- `badges_coop_pvp` fight as though nobody held a badge; `badges_npc` boosts
--- side a and ignores side b's upload.
+-- battle -- Crystal's BadgeStatBoosts returns early in one).  Every seat holds
+-- all sixteen Gold badges and the ruleset names the types, so a leak would
+-- show as a stat boost or a type boost.  Speeds sit a step apart so a PLAIN
+-- that leaked would reorder the field rather than merely move a damage
+-- number, and the npc fight carries a special move so GLACIER (Sp. Atk) and
+-- VOLCANO's type boost are both read.  `badges_link` and `badges_coop_pvp`
+-- fight as though nobody held a badge; `badges_npc` boosts side a and ignores
+-- side b's upload; `badges_gold` drives the rules a plain fight never reaches
+-- -- the 999 cap, Glacier's Sp. Def tail, a type boost on a move with no
+-- stat badge behind it, and a confusion self-hit on boosted stats.
 local function allBadges()
-  return { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true,
-           VOLCANOBADGE = true, MARSHBADGE = true }
+  return { ZEPHYR = true, HIVE = true, PLAIN = true, FOG = true,
+           MINERAL = true, STORM = true, GLACIER = true, RISING = true,
+           BOULDER = true, CASCADE = true, THUNDER = true, RAINBOW = true,
+           SOUL = true, MARSH = true, VOLCANO = true, EARTH = true }
 end
+
+-- Chart index 0 is NORMAL (PLAIN's type), 1 FIRE (VOLCANO's, and Special),
+-- 2 BUG (HIVE's).
+local TYPE_IDS = { "NORMAL", "FIRE", "BUG" }
 
 scenario("badges_link", function(events)
   local thump = function() return mv("thump", 40, 255, 0) end
   local battle = build({
     id = "bl", mode = "1v1", seed = 2718, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = TYPE_IDS,
     sides = {
       a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
         mn({ species = "Alpha", maxHp = 200, atk = 60, spe = 40, moves = { thump() } }) } } },
@@ -492,6 +505,7 @@ scenario("badges_coop_pvp", function(events)
   local thump = function() return mv("thump", 40, 255, 0) end
   local battle = build({
     id = "bp", mode = "coop_pvp", seed = 3141, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = TYPE_IDS,
     sides = {
       a = {
         { playerId = "a1", name = "Ann", badges = allBadges(), mons = {
@@ -524,6 +538,7 @@ scenario("badges_npc", function(events)
   local battle = build({
     id = "bn", mode = "coop_npc", seed = 1618, choiceTimeout = 60, reconnectGrace = 60,
     specialTypes = { 1 },
+    typeIds = TYPE_IDS,
     sides = {
       a = {
         { playerId = "a1", name = "Ann", badges = allBadges(), mons = {
@@ -546,6 +561,51 @@ scenario("badges_npc", function(events)
     battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
     battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
     battle:submitChoice("n1", { action = "fight", move = 0, target = 0 })
+    battle:submitChoice("n2", { action = "fight", move = 0, target = 1 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+scenario("badges_gold", function(events)
+  local bite = function() return mv("bite", 40, 255, 2) end
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local zap = function() return mv("zap", 40, 255, 1) end
+  -- Abe is confused, so his turns spend the confusion byte and, on this seed,
+  -- hit himself on MINERAL's boosted Defense.
+  local abe = mn({ species = "Gamma", maxHp = 300, atk = 50, def = 40,
+                   spa = 227, spd = 50, spe = 30, moves = { thump() } })
+  abe.confusion = 4
+  local battle = build({
+    id = "bg", mode = "coop_npc", seed = 2027, choiceTimeout = 60, reconnectGrace = 60,
+    specialTypes = { 1 },
+    typeIds = TYPE_IDS,
+    sides = {
+      a = {
+        -- 950 Attack under ZEPHYR is the 999 cap; HIVE type-boosts the BUG
+        -- move, which no stat badge stands behind.
+        { playerId = "a1", name = "Ann", badges = { ZEPHYR = true, PLAIN = true, HIVE = true },
+          mons = { mn({ species = "Alpha", maxHp = 300, atk = 950, spe = 40,
+                        moves = { bite() } }) } },
+        -- Sp. Atk 227 boosts to 255 under GLACIER, which Glacier's tail reads
+        -- as a Sp. Def boost too; MINERAL stands behind Defense.
+        { playerId = "a2", name = "Abe", badges = { GLACIER = true, MINERAL = true },
+          mons = { abe } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA", badges = allBadges(), mons = {
+          mn({ species = "Beta", maxHp = 400, spa = 70, spe = 42, moves = { zap() } }) } },
+        { playerId = "n2", name = "NpcB", badges = allBadges(), mons = {
+          mn({ species = "Delta", maxHp = 999, def = 600, atk = 70, spe = 37,
+               moves = { thump() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 3 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 4 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("n1", { action = "fight", move = 0, target = 1 })
     battle:submitChoice("n2", { action = "fight", move = 0, target = 1 })
     drainInto(battle, events)
   end

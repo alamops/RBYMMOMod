@@ -67,6 +67,7 @@ end
 local BattleSim = need("BattleSim2/init")
 local Damage, Accuracy = BattleSim.Damage, BattleSim.Accuracy
 local Crit, Status, Rng = BattleSim.Crit, BattleSim.Status, BattleSim.Rng
+local Effects = BattleSim.Effects
 
 -- ------------------------------------------------------------------
 -- a JSON reader, just enough for the fixture
@@ -269,6 +270,7 @@ each("damage", function(input)
       roll = orNil(input.roll),
       physical = input.physical,
       itemBoostPercent = input.itemBoostPercent,
+      badgeTypeBoost = input.badgeTypeBoost,
     })
 end)
 
@@ -349,6 +351,22 @@ each("status", function(input)
   local handler = STATUS[input.status]
   if not handler then error("no handler for status " .. tostring(input.status), 0) end
   return handler(input)
+end)
+
+-- ------------------------------------------------------------------
+-- badges: Crystal's stat boosts (with Glacier's Sp. Def tail and the 999
+-- cap) and the badge type boost's lookup, both checked against the Gold
+-- engine's own Battle.battleStat / badgeTypeBoost before they were written
+-- down here
+-- ------------------------------------------------------------------
+
+each("badgeStats", function(input)
+  return { value = Effects.badgeBoost(input.stat, input.key,
+    orNil(input.badges), orNil(input.spa)) }
+end)
+
+each("badgeTypes", function(input)
+  return { boosted = Effects.badgeTypeBoost(orNil(input.typeId), orNil(input.badges)) }
 end)
 
 -- ------------------------------------------------------------------

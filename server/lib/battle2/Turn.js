@@ -49,6 +49,10 @@
  *     defer to the next tick.
  *   * *Metronome* picks from host-uploaded metronomePool on the ruleset.
  *   * *Physical / Special* via host-uploaded specialTypes (Gen1 type categories).
+ *   * *Type names* ride on the ruleset as `typeIds`, the chart's axis in
+ *     order (`typeIds[i]` names type index i), because the badge type boost is
+ *     keyed by type and a move only carries an index. Absent typeIds, no
+ *     move's type can be named and no type boost fires.
  *   * A *faint sends the next living monster in party order*, immediately.
  *   * *Residuals* run in field order (side a, then side b), not speed order.
  *   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
@@ -111,22 +115,24 @@ const SIDES = ['a', 'b'];
 // The modes an uploaded `badges` set counts in, and the one side it counts on.
 //
 // The fights against the computer, on the player's seats, because that is the
-// only place the cart applies the x9/8 boosts at all: pokecrystal's
+// only place the cart applies its badge boosts at all: pokecrystal's
 // BadgeStatBoosts (engine/battle/core.asm) opens with `ld a, [wLinkMode] /
 // and a / ret nz`, returning before it reads a badge in any link battle, and
 // raises wBattleMon -- the player's monster -- and nothing else; the engine's
 // port says the same (gen1recomp src/battle/gen2/Battle.lua:811-815, "never
-// the enemy and never in link"). 1v1 and coop_pvp are link battles in
-// everything but the cable, so both sides fight them unboosted. Side b of the
-// other three is the synthetic wild / trainer seat (see EXP_MODES below),
-// which no cart boosts, so a set uploaded for it is a confused or a hostile
-// client and is dropped the same way.
+// the enemy and never in link"), and DoBadgeTypeBoosts (engine/battle/
+// misc.asm:146) boosts only the player's own move. 1v1 and coop_pvp are link
+// battles in everything but the cable, so both sides fight them unboosted.
+// Side b of the other three is the synthetic wild / trainer seat (see
+// EXP_MODES below), which no cart boosts, so a set uploaded for it is a
+// confused or a hostile client and is dropped the same way.
 //
 // The referee is the gate rather than the client or the hub: a client can
 // forge an upload and a hub passes `badges` through untouched, and this is the
 // one place both hubs and solo share. It is applied once, in `attempt`, where a
 // seat's set is copied -- every reader after that (`_speedOf`, both ends of the
-// damage step) sees null and needs no gate of its own.
+// damage step, the type boost, the confusion self-hit) sees null and needs
+// no gate of its own.
 const BADGE_MODES = { wild: true, coop_wild: true, coop_npc: true };
 const BADGE_SIDE = 'a';
 
@@ -613,6 +619,26 @@ function seatBadges(mode, side, raw) {
   return copyBadges(raw);
 }
 
+// The ruleset's type registry ids in chart-axis order, so `typeIds[i]` names
+// the type a move or a monster calls `i` (MediatedBattle.typeOrder builds that
+// axis). Kept dense: an entry that is not a string reads as false, a type with
+// no name, rather than shifting every index after it.
+function copyTypeIds(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  let any = false;
+  for (const id of raw) {
+    if (typeof id === 'string' && id !== '') {
+      out.push(id);
+      any = true;
+    } else {
+      out.push(false);
+    }
+  }
+  if (!any) return null;
+  return out;
+}
+
 // Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 // shapes Wire.bag does: a list of {id,count} or a map.
 function copyBag(raw) {
@@ -650,6 +676,7 @@ class Battle {
     this.aim = Rng.create(int(opts.seed, 0) + AIM_SEED_OFFSET);
     this.chart = isTable(opts.chart) ? opts.chart : null;
     this.specialTypes = null;
+    this.typeIds = copyTypeIds(opts.typeIds);
     if (Array.isArray(opts.specialTypes)) {
       const set = Object.create(null);
       for (const t of opts.specialTypes) set[Math.max(0, int(t, 0))] = true;
@@ -1735,6 +1762,14 @@ class Battle {
     return out;
   }
 
+  // The registry id of chart index `typeIndex` (`typeIds`), or null when the
+  // ruleset named none or this index is past its end.
+  _typeIdOf(typeIndex) {
+    const ids = this.typeIds;
+    if (!ids) return null;
+    return ids[int(typeIndex, -1)] || null;
+  }
+
   _resolveTurn() {
     this.phase = 'resolving';
     // Armed for the rare case resolution does not leave this phase in the same
@@ -2300,10 +2335,14 @@ class Battle {
     }
 
     if (mon.confusion > 0) {
+      // HitConfusion reads the battle stats, badge boosts included (engine
+      // src/battle/gen2/Battle.lua:4133-4157 reads them through battleStat).
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
-        level: mon.level, attack: mon.stats.atk, defense: mon.stats.def,
+        level: mon.level,
+        attack: Effects.badgeBoost(mon.stats.atk, 'atk', fighter.badges),
+        defense: Effects.badgeBoost(mon.stats.def, 'def', fighter.badges),
       }, this.rng.byte());
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
@@ -2650,11 +2689,14 @@ class Battle {
       const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
       const atkKey = isSpecial ? 'spa' : 'atk';
       const defKey = isSpecial ? 'spd' : 'def';
+      // Both ends read the battle stat with its owner's badge boost; the
+      // defender's Sp. Atk rides along for Glacier's Sp. Def tail.
       const atkStat = Effects.badgeBoost(
         isSpecial ? mon.stats.spa : mon.stats.atk, atkKey, fighter.badges);
       const atkStage = isSpecial ? mon.stages.spa : mon.stages.atk;
       const defStat = Effects.badgeBoost(
-        isSpecial ? defender.stats.spd : defender.stats.def, defKey, target.badges);
+        isSpecial ? defender.stats.spd : defender.stats.def, defKey, target.badges,
+        defender.stats.spa);
       const defStage = isSpecial ? defender.stages.spd : defender.stages.def;
 
       let attack = Effects.applyStage(atkStat, atkStage);
@@ -2678,6 +2720,10 @@ class Battle {
         typeEffect: percents,
         roll,
         physical: !isSpecial,
+        // The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
+        // this is the cart's "player's turn only" without asking whose turn.
+        badgeTypeBoost: Effects.badgeTypeBoost(this._typeIdOf(move.type),
+          fighter.badges),
       });
 
       if (result.immune) {
@@ -3425,7 +3471,8 @@ class Battle {
  * attempt(opts) -> { battle, reason }
  *
  * opts:
- *   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
+ *   id, mode, seed, chart, specialTypes, typeIds, metronomePool,
+ *   choiceTimeout, reconnectGrace, resolveTimeout, now
  *   sides = { a: [ { playerId, name, mons, bag, badges } ], b: [ ... ] }
  *
  * `badges` is kept only on side a of a BADGE_MODES fight and dropped

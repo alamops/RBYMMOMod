@@ -3427,6 +3427,15 @@ do
      "BOULDERBADGE boosts attack by floor(9/8)")
   eq(Effects.badgeBoost(64, "def", { THUNDERBADGE = true }), 72,
      "THUNDERBADGE boosts defense")
+  -- pokered's .applyBoostToStat holds the boosted word at MAX_STAT_VALUE (the
+  -- engine's port: src/battle/Damage.lua:44-54).
+  eq(Effects.MAX_STAT_VALUE, 999, "the cap is MAX_STAT_VALUE, 999")
+  eq(Effects.badgeBoost(887, "atk", { BOULDERBADGE = true }), 997,
+     "887 boosts to 997, under the cap")
+  eq(Effects.badgeBoost(888, "atk", { BOULDERBADGE = true }), 999,
+     "888 boosts to exactly 999")
+  eq(Effects.badgeBoost(950, "atk", { BOULDERBADGE = true }), 999,
+     "950 would boost to 1068 and is held at 999")
 
   local modes = {}
   for mode in pairs(Turn.BADGE_MODES) do modes[#modes + 1] = mode end

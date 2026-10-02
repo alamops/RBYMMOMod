@@ -16,6 +16,8 @@
  *   * Crit is a flat x2 after the base product (not a doubled level term).
  *   * After base (+ optional item boost + crit): cap at 997 then +2
  *     (MIN_DAMAGE), so every non-immune damaging hit leaves DamageCalc ≥ 2.
+ *   * DoBadgeTypeBoosts (input.badgeTypeBoost) next, ahead of STAB: an
+ *     eighth of the running damage, at least 1.
  *   * STAB is floor(d * 15/10); type rows are percents applied one at a time
  *     as floor(d * pct/100), with a non-immune floor of 1.
  *   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
@@ -107,7 +109,8 @@ function applyRoll(modified, roll) {
 
 /*
  * compute({ level, power, attack|atk, defense|def, spa|spc, spd|spc,
- *           stab, typeEffect|typeEff, crit, roll, physical, itemBoostPercent })
+ *           stab, typeEffect|typeEff, crit, roll, physical, itemBoostPercent,
+ *           badgeTypeBoost })
  *
  * Flat shape for the fixture / hub call sites. `roll` null/undefined asks for
  * the band: then `damage` is null and minDamage/maxDamage bound it.
@@ -155,6 +158,14 @@ function compute(input) {
 
   // Cap at DAMAGE_CAP then add MIN_DAMAGE (engine DamageCalc tail).
   d = Math.min(d, MAX_DAMAGE - MIN_DAMAGE) + MIN_DAMAGE;
+
+  // DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146), farcalled by
+  // BattleCommand_Stab ahead of the STAB multiply: the player owns the badge
+  // whose row names the move's type, and the running damage gains an eighth
+  // of itself, at least 1 (engine src/battle/gen2/Damage.lua:269-274). The
+  // engine runs DoWeatherModifiers just before it; this sim has no weather,
+  // so nothing sits between the DamageCalc tail and here.
+  if (src.badgeTypeBoost) d += Math.max(1, Math.floor(d / 8));
 
   if (src.stab) d = idiv(d * 15, 10);
 

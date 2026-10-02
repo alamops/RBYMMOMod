@@ -2043,6 +2043,21 @@ const HIT = { badges: { BOULDERBADGE: true } };
 const FAST = { badges: { SOULBADGE: true }, spd: 40 };
 const FOE = { spd: 42 };
 
+test('the Gen 1 boost is x9/8, held at MAX_STAT_VALUE', () => {
+  // Twin of the cap lines in tests/battle_sim_turn.lua's 23: pokered's
+  // .applyBoostToStat holds the boosted word at 999 (the engine's port:
+  // src/battle/Damage.lua:44-54).
+  const { Effects } = require('./lib/battle');
+  assert.strictEqual(Effects.MAX_STAT_VALUE, 999, 'the cap is MAX_STAT_VALUE, 999');
+  assert.strictEqual(Effects.badgeBoost(64, 'atk', { BOULDERBADGE: true }), 72, 'floor(64 * 9 / 8)');
+  assert.strictEqual(Effects.badgeBoost(887, 'atk', { BOULDERBADGE: true }), 997,
+    '887 boosts to 997, under the cap');
+  assert.strictEqual(Effects.badgeBoost(888, 'atk', { BOULDERBADGE: true }), 999,
+    '888 boosts to exactly 999');
+  assert.strictEqual(Effects.badgeBoost(950, 'atk', { BOULDERBADGE: true }), 999,
+    '950 would boost to 1068 and is held at 999');
+});
+
 test('badges count in the three fights against the computer, on side a', () => {
   assert.deepStrictEqual(Object.keys(Turn.BADGE_MODES).sort(),
     ['coop_npc', 'coop_wild', 'wild'], 'and in no other mode');

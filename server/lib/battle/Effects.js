@@ -191,11 +191,17 @@ function applyStage(base, stage) {
   return Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
 }
 
-// Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
+// Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge,
+// capped at MAX_STAT_VALUE (999) -- pokered's .applyBoostToStat compares the
+// boosted word against it and writes 999 back when it went over; the engine's
+// port caps the same way (gen1recomp src/battle/Damage.lua:44-54, citing
+// engine/battle/core.asm:6454).
 // A fighter only holds a set where the cart would have applied it -- side a
 // of a fight against the computer; Turn.attempt drops it in 1v1 / coop_pvp
 // (link battles, which the cart never boosts) and on side b (Turn.BADGE_MODES)
 // -- so this never has to ask what kind of fight it is in.
+const MAX_STAT_VALUE = 999;
+
 const BADGE_FOR_STAT = {
   atk: 'BOULDERBADGE',
   def: 'THUNDERBADGE',
@@ -208,7 +214,7 @@ function badgeBoost(statValue, wireStatKey, badges) {
   if (!badges || typeof badges !== 'object') return base;
   const badge = BADGE_FOR_STAT[wireStatKey];
   if (!badge || !badges[badge]) return base;
-  return Math.floor((base * 9) / 8);
+  return Math.min(MAX_STAT_VALUE, Math.floor((base * 9) / 8));
 }
 
 // ------------------------------------------------------------------
@@ -1158,6 +1164,7 @@ module.exports = {
   stageMult,
   applyStage,
   badgeBoost,
+  MAX_STAT_VALUE,
   isPhase1Primary,
   isPhase5Volatile,
   isPhase6Primary,

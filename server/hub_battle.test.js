@@ -2194,6 +2194,236 @@ function testGen3PvpPaysNoPayDay() {
     'gen 1 coop_npc: the outcome is the fields it always was, no payDay');
 }
 
+// Whose cart: each human seat's `family` is the hub's word, from its hello.
+//
+// Obedience has one rule that differs by cart (docs/plans/gen3-badge-rules.md
+// §1.2): Focus Punch skips the random-move branch on FireRed / LeafGreen and
+// not on Emerald, so the referee reads a fighter entry's `family`. One Gen 3
+// hub seats both carts, and a hub that left the field off played every Emerald
+// mon by FireRed's rule. The hub stamps each human seat with the cart its own
+// hello named; a party claiming a family is not read; an NPC seat gets none; a
+// link fight's referee drops it with the badges; a Gen 1 hub never writes the
+// field. tests/hub_battle.lua pins the same on the Lua twin.
+
+// Turn.attempt's options as the hub assembled them, the field still built by
+// the real referee: the fighter entries are what these tests look at.
+function spyAttempt(relay) {
+  const real = relay.Turn;
+  const seen = { opts: null };
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  return seen;
+}
+
+function entryOf(seen, side, playerId) {
+  return ((seen.opts && seen.opts.sides[side]) || []).find((e) => e.playerId === playerId) || null;
+}
+
+const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+const FOCUS3 = {
+  id: 'FOCUS3', num: 264, effect: 170, power: 150, type: 1, priority: -3, flags: 35,
+};
+
+// A level-100 mon from another trainer: over the no-badge cap of 10, so every
+// move it is told to use asks the obedience roll first.
+function tradee3() {
+  const m = mon3({ species: 'TRADEE', level: 100, moves: [move3(FOCUS3), move3()] });
+  m.traded = true;
+  return m;
+}
+
+// Emerald and FireRed side by side against a trainer.
+function testGen3FamilyMixedCarts() {
+  const clock = makeClock();
+  const relay = makeRelay(clock, { generation: 3 });
+  relay.forceBattleSeed = 3;
+  const seen = spyAttempt(relay);
+  const a = dial3(relay, 'ANN', 'emerald');
+  const b = dial3(relay, 'BOB', 'firered');
+  relay.openCoopBattle('g3f', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('g3f');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
+  const annMon = tradee3();
+  annMon.fateful = true;
+  // Each upload claims the other cart's family: no party field decides it.
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g3f',
+    side: 'a',
+    family: 'frlg',
+    badges: ['1', '3'],
+    mons: [annMon],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'g3f', side: 'a', family: 'rse', mons: [bruiser3()],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g3f', side: 'b', mons: [glassjaw3(), glassjaw3()],
+  });
+  ok(record.sim, 'family: the mixed-cart coop_npc field opens');
+  const annEntry = entryOf(seen, 'a', a.id);
+  const bobEntry = entryOf(seen, 'a', b.id);
+  ok(annEntry && annEntry.family === 'rse', "family: the Emerald player's entry is rse");
+  ok(bobEntry && bobEntry.family === 'frlg', "family: the FireRed player's entry is frlg");
+  for (const npcId of record.npcIds) {
+    const npc = entryOf(seen, 'b', npcId);
+    ok(npc && !has(npc, 'family'), `family: an NPC seat's entry has none (${npcId})`);
+  }
+  // What the hub was handed reaches the entry unchanged: the badges as the set
+  // the sanitiser rebuilt, the sheet's traded / fateful on the mon itself.
+  ok(annEntry.badges && annEntry.badges['1'] === true && annEntry.badges['3'] === true,
+    'family: the uploaded badges ride the entry');
+  ok(annEntry.mons[0].traded === true, "family: the mon's traded flag rides the entry");
+  ok(annEntry.mons[0].fateful === true, 'family: and its fateful flag');
+  const annFighter = record.sim.byId.get(a.id);
+  const bobFighter = record.sim.byId.get(b.id);
+  ok(annFighter.family === 'rse', "family: the referee plays Emerald's rule for ANN");
+  ok(bobFighter.family === 'frlg', "family: and FireRed's for BOB");
+  ok(annFighter.badgeRules === true, 'family: against the computer, badge rules apply');
+  ok(annFighter.badges && annFighter.badges[1] && annFighter.badges[3] && !annFighter.badges[2],
+    "family: with ANN's own badges 1 and 3");
+  ok(bobFighter.badges == null, 'family: and none for BOB, who brought none');
+  ok(annFighter.mons[0].traded === true, "family: the referee's mon is still traded");
+}
+
+// The rule it decides, end to end: the same fight, the same seed, only ANN's
+// cart differs. Her traded Focus Punch user disobeys on the first turn, and the
+// second roll lands under the cap -- Emerald answers with another move,
+// FireRed's exemption skips that branch and she naps instead. Seed 10 was found
+// by a probe; the Lua twin draws the same.
+function focusPunchObey(version) {
+  const relay = makeRelay(makeClock(), { generation: 3 });
+  relay.forceBattleSeed = 10;
+  const a = dial3(relay, 'ANN', version);
+  const b = dial3(relay, 'BOB', 'firered');
+  relay.openCoopBattle('g3o', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g3o', side: 'a', mons: [tradee3()],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'g3o', side: 'a', mons: [mon3({ moves: [move3(IDLE3)] })],
+  });
+  const wall = () => mon3({ species: 'TRAINEE', hp: 900, moves: [move3(IDLE3)] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g3o', side: 'b', mons: [wall(), wall()],
+  });
+  if (!relay.battles.get('g3o').sim) return null;
+  a.peer.outbox = [];
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: 'g3o', action: 'fight', move: 0,
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: 'g3o', action: 'fight', move: 0,
+  });
+  return a.peer.outbox
+    .filter((m) => m.type === 'mmo.battle_event' && m.t === 'obey' && m.side === 'a')
+    .map((m) => m.text)
+    .join(',');
+}
+
+function testGen3FamilyFocusPunch() {
+  ok(focusPunchObey('emerald') === 'uses_random_move',
+    "family: an Emerald mon's Focus Punch can be swapped for another move");
+  ok(focusPunchObey('firered') === 'falls_asleep',
+    "family: a FireRed mon's is exempt from that branch, same seed");
+}
+
+// A link fight: the entries still say whose cart, and the referee reads none
+// of it -- no badge rules, no badges, no family, and nobody disobeys.
+function testGen3FamilyLinkRules() {
+  const relay = makeRelay(makeClock(), { generation: 3 });
+  relay.forceBattleSeed = 10;
+  const seen = spyAttempt(relay);
+  const a = dial3(relay, 'ANN', 'emerald');
+  const b = dial3(relay, 'BOB', 'firered');
+  const c = dial3(relay, 'CAL', 'leafgreen');
+  const d = dial3(relay, 'DEE', 'emerald');
+  relay.openCoopBattle('g3p', [a.id, b.id, c.id, d.id], { mode: 'coop_pvp', hostId: a.id });
+  const record = relay.battles.get('g3p');
+  ok(record && record.mode === 'coop_pvp', 'family pvp: a four-player link fight opens');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g3p', badges: ['1', '2', '3'], mons: [tradee3()],
+  });
+  for (const who of [b, c, d]) {
+    relay.handle(who.id, {
+      type: 'mmo.battle_party',
+      battle: 'g3p',
+      badges: ['8'],
+      mons: [mon3({ hp: 900, moves: [move3(IDLE3)] })],
+    });
+  }
+  ok(record.sim, 'family pvp: the field opens');
+  ok(entryOf(seen, 'a', a.id).family === 'rse', "family pvp: the entry still names ANN's cart");
+  ok(entryOf(seen, 'b', c.id).family === 'frlg', 'family pvp: on either side');
+  for (const who of [a, b, c, d]) {
+    const fighter = record.sim.byId.get(who.id);
+    ok(fighter.badgeRules == null && fighter.badges == null && fighter.family == null,
+      `family pvp: the referee plays link rules for ${who.name}`);
+  }
+  a.peer.outbox = [];
+  for (const who of [a, b, c, d]) {
+    relay.handle(who.id, {
+      type: 'mmo.battle_choice', battle: 'g3p', action: 'fight', move: 0,
+    });
+  }
+  const events = a.peer.outbox.filter((m) => m.type === 'mmo.battle_event');
+  ok(events.length > 0, 'family pvp: the turn resolves');
+  ok(events.filter((m) => m.t === 'obey').length === 0,
+    'family pvp: and the over-cap traded mon is not asked to obey');
+}
+
+// Gen 1: the field is Gen 3's alone.
+function testGen1NoFamily() {
+  const relay = makeRelay(makeClock());
+  const seen = spyAttempt(relay);
+  const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => {};
+  const annId = testPlayerId('ANN');
+  relay.handle(relay.accept(peer), {
+    type: 'mmo.hello',
+    proto: PROTOCOL,
+    name: 'ANN',
+    sprite: DEFAULT_SPRITE,
+    map: 'PALLET',
+    x: 5,
+    y: 5,
+    facing: 'down',
+    version: 'red',
+    playerId: annId,
+  });
+  const a = { id: annId, peer, name: 'ANN' };
+  const b = dial(relay, 'BOB');
+  ok(relay.clients.get(a.id).version === 'red', "family gen 1: the hello's cart is recorded");
+  relay.openCoopBattle('g1f', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g1f', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'g1f', side: 'a', mons: [mon(200)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g1f', side: 'b', mons: [mon(10, 1), mon(10, 1)],
+  });
+  ok(relay.battles.get('g1f').sim, 'family gen 1: the coop_npc field opens');
+  let entries = 0;
+  for (const side of ['a', 'b']) {
+    for (const entry of seen.opts.sides[side]) {
+      entries += 1;
+      ok(!has(entry, 'family'), `family gen 1: no entry carries one (${entry.playerId})`);
+    }
+  }
+  ok(entries === 4, 'family gen 1: all four seats were looked at');
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
@@ -2202,5 +2432,9 @@ testGen3MidFightMoveset();
 testGen3DialectAndLimits();
 testGen3PayDayAndHoldersOnly();
 testGen3PvpPaysNoPayDay();
+testGen3FamilyMixedCarts();
+testGen3FamilyFocusPunch();
+testGen3FamilyLinkRules();
+testGen1NoFamily();
 
 console.log(`hub_battle: ${passed} checks passed`);
