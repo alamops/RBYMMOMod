@@ -21,6 +21,7 @@ local M = {
   Crit = need("BattleSim2/Crit"),
   Status = need("BattleSim2/Status"),
   Effects = need("BattleSim2/Effects"),
+  Items = need("BattleSim2/Items"),
   Events = need("BattleSim2/events"),
   Turn = need("BattleSim2/Turn"),
 }

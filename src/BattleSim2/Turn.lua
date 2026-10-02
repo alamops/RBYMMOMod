@@ -8,16 +8,17 @@
 -- Hypnosis / Screech actually resolve); Gen2-only effects and the item
 -- catalog are still a follow-up.
 --
--- Known gaps left for follow-up: Gen2-native effect jump table, held-item
--- damage/accuracy hooks (type-boost, Bright Powder, Scope Lens mid-turn),
--- weather inside Damage.compute from Turn, Gen2 sleep parity tests, and Wire
--- spa/spd event fields (T2c).  Badge boosts are not a gap: Crystal's stat and
--- type rules apply to side a against the computer (BADGE_MODES,
+-- Known gaps left for follow-up: Gen2-native effect jump table, weather
+-- inside Damage.compute from Turn, Gen2 sleep parity tests, and Wire spa/spd
+-- event fields (T2c).  Badge boosts are not a gap: Crystal's stat and type
+-- rules apply to side a against the computer (BADGE_MODES,
 -- Effects.badgeBoost / badgeTypeBoost).  Nor is the damage step: the battle
--- stats (stage, badge, burn / paralysis), the crit stage rule, TruncateHL_BC,
--- per-side screens, the confusion self-hit, typeless Struggle and move
--- priority all follow pokecrystal (docs/plans/gen12-referee-fidelity.md);
--- where the Gold engine port reads otherwise, the cart wins.
+-- stats (stage, badge, burn / paralysis), the crit stage rule, TruncateHL_BC
+-- by cart family (K6), per-side screens, the confusion self-hit, typeless
+-- Struggle and move priority all follow pokecrystal (docs/plans/
+-- gen12-referee-fidelity.md); where the Gold engine port reads otherwise, the
+-- cart wins.  Nor are held items (Items.lua: the static rules, keyed on the
+-- sheet's hold effect), obedience (`_obey`) or the flinch reset (`_openTurn`).
 --
 -- The formula modules beside this one each answer a single question with no
 -- memory.  This is the thing that holds the fight: it owns the field, the
@@ -29,29 +30,39 @@
 -- different fight, so every draw site is spelled out here and every one of
 -- them is conditional in a way both runtimes can reproduce:
 --
---   1. a speed tie-break byte, one per group of actors in the same priority
---      bracket at the same speed;
+--   1. Quick Claw bytes: in each priority bracket two or more fighters share,
+--      one byte per Quick Claw holder (side b's first, then side a's, each in
+--      field order) until one fires, then
+--      a speed tie-break byte, one per group of actors in the same priority
+--      bracket, Quick Claw standing and speed;
 --   2. one gate byte per actor whose monster has a gating status;
 --   3. one gate byte per actor whose monster is confused;
---   4. per move that is actually used: accuracy byte, multihit-count byte
---      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
---      (damaging hits only), in that order, and none of them drawn when an
---      earlier step ended the move (a missed move draws no crit byte).
+--   4. the obedience bytes of a traded monster over its badge cap, on a
+--      `badgeRules` seat (`_obey`, BattleCommand_CheckObedience's own draws,
+--      each only when reached);
+--   5. per move that is actually used: accuracy byte, multihit-count byte
+--      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
+--      on a holder, side-chance byte (damaging hits only), the King's Rock
+--      byte, in that order, and none of them drawn when an earlier step ended
+--      the move (a missed move draws no crit byte).
 --
--- Nothing else rolls.  Residuals, switches, items and the clock are all
--- deterministic, so a battle replays from its seed plus the choice log.
+-- Nothing else rolls.  Residuals, switches, the bag, the between-turn held
+-- items and the clock are all deterministic, so a battle replays from its seed
+-- plus the choice log -- and a fight with no held item, no traded monster and
+-- no priority move draws exactly what it drew before any of them existed.
 --
 -- **Policies chosen where Gen 1 had no answer**, each one written down because
 -- the two runtimes have to pick the same one:
 --
 --   * *Turn order* is pokecrystal's DetermineMoveOrder widened to a field:
 --     the priority bracket first (Effects.movePriority, GetMovePriority's
---     table), then Speed (the battle stat: stage, badge, paralysis), then the
---     tie-break below.  Switches and items are not in it -- they resolve
---     before any move, as the cart's `.use_move` puts a player who is not
---     fighting first.  Quick Claw (`.equal_priority`) is the one thing that
---     belongs between the bracket and the Speed compare, and it is where a
---     held-item roll would go (`_orderActors`).
+--     table), then a Quick Claw that fired in it (`.equal_priority`; at most
+--     one per bracket, `_quickClaws`), then Speed (the battle stat: stage,
+--     badge, paralysis), then the tie-break below.  Switches and items are not
+--     in it -- they resolve before any move, as the cart's `.use_move` puts a
+--     player who is not fighting first -- and neither is a seat whose turn is
+--     a forced skip (recharge, a trap, Bide storing), so it rolls no Quick
+--     Claw either.
 --   * *Speed ties* break on a single RNG byte per tied group: below 128 the
 --     side-a member goes first, otherwise the group reverses.  One draw per
 --     group rather than per pair, so a 2v2 with four equal speeds costs one
@@ -135,6 +146,7 @@ local Status   = need("BattleSim2/Status")
 local Effects  = need("BattleSim2/Effects")
 local Rng      = need("BattleSim2/Rng")
 local Events   = need("BattleSim2/events")
+local Items    = need("BattleSim2/Items")
 
 local M = {}
 
@@ -195,6 +207,28 @@ M.BADGE_SIDE = "a"
 -- `wLinkMode == LINK_COLOSSEUM` -- TruncateHL_BC's single pass
 -- (Damage.truncateStats) -- and nowhere else yet.
 M.LINK_MODES = { ["1v1"] = true, coop_pvp = true }
+
+-- The cart lineages whose rules differ (contract K6): `family` on a side entry,
+-- stamped by the hub from the hello `version` it admitted (gold / silver ->
+-- "gs", crystal -> "crystal"; never read off the wire) and by solo from
+-- Gen.family().  The fight reads it off side a's first fighter, and an absent
+-- or unknown one is Gold / Silver's.  TruncateHL_BC is the rule that reads it
+-- (`_onePassTruncate`): every held-item, obedience and flinch rule in this
+-- file is the same routine on both carts (each one diffed against pokegold).
+M.FAMILIES = { gs = true, crystal = true }
+M.DEFAULT_FAMILY = "gs"
+
+-- Berserk Gene's confusion when the seat's last confusion count ran out:
+-- HandleBerserkGene sets SUBSTATUS_CONFUSED and never writes the count, and
+-- CheckTurn's `dec [hl]` on a 0 count wraps to 255 -- 256 checks before it
+-- snaps out (docs/bugs_and_glitches.md).
+M.BERSERK_CONFUSION = 256
+
+-- Guard on the cart's rejection-sampling loops (`.rand1`, `.rand2`,
+-- `.RandomMove`, `.Nap`), which redraw until a byte lands in range.  Each is
+-- won within a handful of draws; the guard only keeps a referee that must never
+-- hang from trusting that, and both runtimes stop at the same count.
+M.REDRAW_LIMIT = 1024
 
 -- Roster cap per side. coop_wild is humans vs one wild (up to FIGHTERS_PER_SIDE
 -- humans on a, wild on b); other modes keep a single per-side ceiling
@@ -489,6 +523,24 @@ local function copyMon(raw, fallback)
     catchRate = max(0, min(255, int(raw.catchRate, 255))),
   }
 
+  -- The Gold held item and what the engine's item row says about it (contract
+  -- K2): the id, its HELD_* effect and parameter, the name a sentence calls it
+  -- and whether it is Mail.  Kept only alongside an item -- an effect with no
+  -- item is nothing held -- and the referee's copy is the one that changes: a
+  -- berry eaten or an item stolen is gone from it for the rest of the fight
+  -- (Items.take / Items.give), and the `held` event tells the owner.
+  local heldItem = str(raw.heldItem)
+  if heldItem then
+    out.heldItem = heldItem
+    out.holdEffect = str(raw.holdEffect)
+    out.holdParam = max(0, min(255, int(raw.holdParam, 0)))
+    out.itemName = str(raw.itemName)
+    if raw.mail == true then out.mail = true end
+  end
+  -- The obedience check's one fact about the monster (contract K1): its OT is
+  -- not the player.  Only `true` counts; `_obey` asks it on `badgeRules` seats.
+  if raw.traded == true then out.traded = true end
+
   -- Optional Stat Exp sheet (atk/def/spe/spa/spd, optional hp). Absent keys stay 0
   -- at vitamin time; present values are what HP_UP / PROTEIN / … mutate.
   if type(raw.evs) == "table" then
@@ -617,7 +669,7 @@ end
 -- opts:
 --   id, mode, seed, chart, specialTypes, typeIds, metronomePool,
 --   choiceTimeout, reconnectGrace, resolveTimeout, now
---   sides = { a = { { playerId, name, mons, bag, badges } }, b = { ... } }
+--   sides = { a = { { playerId, name, mons, bag, badges, family } }, b = { ... } }
 --
 -- `badges` is kept only on side a of a BADGE_MODES fight and dropped
 -- everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -719,6 +771,18 @@ function M.create(opts)
         slot      = Events.fieldSlot(side, index),
         mons      = mons,
         badges    = seatBadges(mode, side, entry.badges),
+        -- The cart's player in a fight against the computer, as BattleSim3
+        -- keeps it: side a of M.BADGE_MODES.  Obedience and the flinch-reset
+        -- exception ask this, which `badges` cannot answer -- a player with no
+        -- badge at all has the most to disobey.
+        badgeRules = (side == M.BADGE_SIDE and M.BADGE_MODES[mode]) and true or nil,
+        -- Contract K6, validated the way BattleSim3 keeps its own `family`;
+        -- the fight reads side a's first seat's (`self.family` below).
+        family    = M.FAMILIES[entry.family] and entry.family or M.DEFAULT_FAMILY,
+        -- wPlayerConfuseCount for this field position: what the last confusion
+        -- here left behind, which a switch-in does not reset and Berserk
+        -- Gene's confusion inherits (`_berserkGene`).
+        confuseCount = 0,
         bag       = copyBag(entry.bag),
         active    = firstLiving(mons),
         connected = true,
@@ -736,6 +800,10 @@ function M.create(opts)
       bucket[#bucket + 1] = fighter
     end
   end
+
+  -- The fight's cart (K6): side a's first seat speaks for it, as the hub's
+  -- host seat does for the whole fight.
+  self.family = self.bySide.a[1] and self.bySide.a[1].family or M.DEFAULT_FAMILY
 
   -- Everybody is fielded at once, so the opening participation sets are the
   -- opening field.  `_refield` re-adds the standing opposition every time it
@@ -1725,7 +1793,30 @@ function Battle:_openTurn()
   for _, fighter in ipairs(self.fighters) do
     fighter.choice = nil
     fighter.forced = nil
+    -- CheckPlayerLockedIn resets both SUBSTATUS_FLINCHED bits as the player
+    -- is asked for a move (pokecrystal engine/battle/core.asm:581-604,
+    -- pokegold the same), so a flinch landed on a monster that had already
+    -- moved -- King's Rock asks nobody whether the target went first -- dies
+    -- here instead of costing it the next turn.  The cart's one exception:
+    -- the check returns before the reset while the player's monster must
+    -- recharge.  "The player" is a `badgeRules` seat, and there the skip is
+    -- kept per seat for its own fielded monster, as the Gen 1 twin keeps
+    -- pokered's; the enemy's bit the skip would also spare is never set at
+    -- that point (the move that left the player recharging was Hyper Beam,
+    -- which runs no `kingsrock` and flinches nothing).  A link fight has no
+    -- single player, so there the reset is unconditional.  The flag a skip
+    -- keeps is never read: CheckTurn asks about recharging before flinching,
+    -- and the next turn's reset takes it.
+    local mon = activeMon(fighter)
+    local kept = nil
+    if fighter.badgeRules and mon and mon.mustRecharge then kept = mon end
+    for i = 1, #fighter.mons do
+      if fighter.mons[i] ~= kept then fighter.mons[i].flinch = false end
+    end
   end
+  -- HandleBerserkGene, at the head of BattleTurn's loop -- before the menu,
+  -- so its lines come before the `turn` that opens it.
+  self:_berserkGene()
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
   -- Before the window opens: a player deciding this turn is looking at the
   -- rosters, and anything a status or a bench potion moved last turn has to be
@@ -1874,6 +1965,466 @@ local function hasType(mon, typeId)
     if mon.types[i] == typeId then return true end
   end
   return false
+end
+
+-- ------------------------------------------------------------------
+-- held items (Items.lua holds the rules; these are the cart's call sites)
+-- ------------------------------------------------------------------
+
+-- K6: TruncateHL_BC folds once in a link battle on either cart, and once in
+-- every battle on Gold / Silver, whose routine has no loop (pokegold
+-- engine/battle/effect_commands.asm:2625); only Crystal outside a link battle
+-- loops until both values fit.
+function Battle:_onePassTruncate()
+  return M.LINK_MODES[self.mode] == true or self.family ~= "crystal"
+end
+
+-- Which of this seat's party a monster is, 1-based -- by identity, because a
+-- monster an action just felled has already left `fighter.active`.
+function Battle:_partyIndex(fighter, mon)
+  for i = 1, #fighter.mons do
+    if fighter.mons[i] == mon then return i end
+  end
+  return nil
+end
+
+-- The `held` event (contract K3): whose item acted, which item, and whether
+-- the monster still holds it (1) or holds nothing now (0).  The caller says
+-- the cart's sentence right after it.
+function Battle:_emitHeld(fighter, mon, itemId, amount)
+  local index = self:_partyIndex(fighter, mon)
+  self:_emit("held", {
+    slot = fighter.slot, side = fighter.side,
+    mon = index and (index - 1) or nil,
+    text = itemId, amount = amount,
+  })
+end
+
+-- The registry id of a move's type, as DamageCalc's type-boost scan reads
+-- BATTLE_VARS_MOVE_TYPE: Struggle's row says NORMAL (`STRUGGLE.typeId`).
+function Battle:_moveTypeId(move)
+  if type(move) ~= "table" then return nil end
+  return move.typeId or self:_typeIdOf(move.type)
+end
+
+-- The attacker's type-boost item for this move, as Damage.compute's
+-- `itemBoostPercent` (nil when it holds none, or one for another type).
+function Battle:_typeBoostOf(mon, move)
+  return Items.typeBoostPercent(mon, self:_moveTypeId(move))
+end
+
+-- wBattleMonSpecies: what BattleCommand_Critical's Lucky Punch / Stick check
+-- reads, which Transform rewrites (Effects' TRANSFORM_EFFECT records it).
+function Battle:_battleSpecies(mon)
+  if mon.transformed then return mon.transformSpecies end
+  return mon.speciesId
+end
+
+-- HandleBerserkGene (pokecrystal engine/battle/core.asm:348-423, pokegold the
+-- same), player then enemy -- every seat in field order.  Keyed on the item ID
+-- (`sub BERSERK_GENE`).  The item is gone first, then the monster is confused
+-- WITHOUT a count being written (the documented bug: it inherits whatever this
+-- field position's last confusion left -- `fighter.confuseCount` -- or, from 0,
+-- wraps to 256 checks), its Attack goes up two stages (AttackUp2, which says
+-- nothing when Attack is already at +6), and only a monster that was not
+-- confused already is told it became confused.
+function Battle:_berserkGene()
+  for _, fighter in ipairs(self.fighters) do
+    local mon = activeMon(fighter)
+    if mon and mon.heldItem == Items.BERSERK_GENE then
+      local name = Items.label(mon)
+      local item = Items.take(mon)
+      local wasConfused = mon.confusion > 0
+      if not wasConfused then
+        local count = int(fighter.confuseCount, 0)
+        mon.confusion = (count > 0) and count or M.BERSERK_CONFUSION
+      end
+      self:_emitHeld(fighter, mon, item.heldItem, 0)
+      self:_say(mon.species .. "'s " .. name .. " activated!")
+      local before = Effects.clampStage(mon.stages.atk)
+      local after = Effects.clampStage(before + 2)
+      if after ~= before then
+        mon.stages.atk = after
+        local text = mon.species .. "'s ATTACK rose"
+        self:_say(text)
+        self:_emit("stat", { slot = fighter.slot, side = fighter.side,
+                             amount = after, text = text })
+      end
+      if not wasConfused then
+        local text = mon.species .. " became confused"
+        self:_say(text)
+        self:_emit("status", { slot = fighter.slot, side = fighter.side,
+                               confused = 1, text = text })
+      end
+    end
+  end
+end
+
+-- DetermineMoveOrder's `.equal_priority`, widened to a field.  The cart asks
+-- only when two battlers share a bracket, and draws for a Quick Claw holder
+-- whatever the Speeds say: one holder, one BattleRandom against its parameter;
+-- both, the enemy's first (`.both_have_quick_claw`, non-link) and the player's
+-- only if that one missed.  So here: in every bracket two or more actors share
+-- -- brackets highest first -- the holders draw in that order, side b's seats
+-- then side a's, each in field order, until one fires; the one that fired
+-- moves first in its bracket and the rest keep their Speed order.  A bracket
+-- with one actor, and an actor holding no claw, draws nothing.  `clawParam` is
+-- set only by `_resolveFights`, so a ball throw never rolls.
+function Battle:_quickClaws(actors)
+  local counts, brackets = {}, {}
+  for _, actor in ipairs(actors) do
+    local p = actor.priority or 0
+    if not counts[p] then counts[p] = 0; brackets[#brackets + 1] = p end
+    counts[p] = counts[p] + 1
+  end
+  table.sort(brackets, function(x, y) return x > y end)
+  for _, p in ipairs(brackets) do
+    if counts[p] >= 2 then
+      local holders = {}
+      for _, actor in ipairs(actors) do
+        if (actor.priority or 0) == p and actor.clawParam ~= nil then
+          holders[#holders + 1] = actor
+        end
+      end
+      table.sort(holders, function(x, y)
+        local xs, ys = x.fighter.side == "b" and 0 or 1, y.fighter.side == "b" and 0 or 1
+        if xs ~= ys then return xs < ys end
+        return x.order < y.order
+      end)
+      for _, holder in ipairs(holders) do
+        if Items.quickClawFires(holder.clawParam, self.rng:byte()) then
+          holder.claw = true
+          break
+        end
+      end
+    end
+  end
+end
+
+-- One hit's HP off the defender, through BattleCommand_ApplyDamage's Focus
+-- Band arm (effect_commands.asm:2107-2195): a holder rolls BattleRandom
+-- against the parameter on EVERY hit that reaches it -- lethal or not, through
+-- a substitute or not -- and when the roll lands and the hit would take the
+-- last of its HP, FalseSwipe leaves it one (the substitute quirk included: the
+-- clamp reads the monster's HP, and the line is said either way).  Only a
+-- clamp says anything; the band is never used up.
+function Battle:_strike(fighter, mon, amount)
+  local banded = false
+  local effect, param = Items.effect(mon)
+  if effect == Items.FOCUS_BAND and mon.hp > 0 then
+    if self.rng:byte() < param then
+      amount, banded = Items.focusBand(amount, mon.hp)
+    end
+  end
+  self:_damage(fighter, mon, amount, nil)
+  if banded then
+    self:_emitHeld(fighter, mon, mon.heldItem, 1)
+    self:_say(mon.species .. " hung on with " .. Items.label(mon) .. "!")
+  end
+end
+
+-- BattleCommand_Thief (engine/battle/move_effects/thief.asm, identical in
+-- pokegold), both ways and in every mode: the cart's player branch steals from
+-- a wild monster too (its link check only bars a wild fight over a cable), and
+-- the enemy branch has no gate at all -- an item the computer takes is gone.
+-- The user must hold nothing, the target must hold something, and Mail is
+-- never taken (ItemIsMail).  Nothing is drawn, and nothing about the hit is
+-- asked: the command sits after applydamage and before checkfaint, so a foe
+-- the hit knocked out is still robbed, and wEffectFailed -- set only by an
+-- effectchance this script does not run -- never stops it, a substitute
+-- included.
+function Battle:_thief(fighter, mon, target, defender)
+  if mon.heldItem or not defender.heldItem then return end
+  if Items.isMail(defender) then return end
+  local item = Items.take(defender)
+  Items.give(mon, item)
+  self:_emitHeld(target, defender, item.heldItem, 0)
+  self:_emitHeld(fighter, mon, item.heldItem, 1)
+  self:_say(mon.species .. " stole " .. Items.label(mon) .. " from its foe!")
+end
+
+-- BattleCommand_HeldFlinch, the `kingsrock` command at the end of the move
+-- scripts Items.kingsRockMove lists: the attacker's HELD_FLINCH, a hit that
+-- did not miss (every early return above is one), a target with no substitute
+-- standing, and BattleRandom under the parameter -- then the target's
+-- recharge is cancelled (EndRechargeOpp) and it flinches.  Nobody asks whether
+-- the target already moved; the flag that lands on one that did is what the
+-- next turn's reset clears (`_openTurn`).  A target the hit knocked out is out
+-- of reach: checkfaint ends the script before `kingsrock` runs.  The cart
+-- prints nothing.
+function Battle:_kingsRock(mon, move, effectId, defender)
+  local effect, param = Items.effect(mon)
+  if effect ~= Items.FLINCH then return end
+  if not Items.kingsRockMove(effectId, Effects.moveKey(move)) then return end
+  if defender.hp <= 0 or (defender.substitute or 0) > 0 then return end
+  if self.rng:byte() < param then
+    defender.flinch = true
+    defender.mustRecharge = false
+  end
+end
+
+-- UseHeldStatusHealingItem (core.asm:4383-4437): a status berry whose cure
+-- covers the status the monster has takes it off -- MiracleBerry (ALL_STATUS)
+-- confusion too -- and is eaten.  Asked right after a status lands (the
+-- `farcall` at the end of every status-inflicting command) and again between
+-- turns (HandleHealingItems).  Returns true when it acted.
+function Battle:_statusBerry(fighter, mon)
+  local effect = Items.effect(mon)
+  local cures = effect and Items.STATUS_CURE[effect]
+  if not cures or not mon.status or not cures[mon.status] then return false end
+  local name = Items.label(mon)
+  local text = mon.species .. " recovered using a " .. name .. "!"
+  mon.status, mon.statusTurns = nil, 0
+  self:_emit("status", { slot = fighter.slot, side = fighter.side, text = text })
+  if effect == Items.HEAL_STATUS and mon.confusion > 0 then
+    mon.confusion = 0
+    self:_emit("status", { slot = fighter.slot, side = fighter.side,
+                           confused = 0, text = text })
+  end
+  local item = Items.take(mon)
+  self:_emitHeld(fighter, mon, item.heldItem, 0)
+  self:_say(text)
+  return true
+end
+
+-- UseConfusionHealingItem (core.asm:4439-4478): Bitter Berry, or MiracleBerry,
+-- on a confused monster.  Asked right after confusion lands (BattleCommand_
+-- FinishConfusingTarget) and between turns.
+function Battle:_confusionBerry(fighter, mon)
+  if not (mon.confusion > 0) then return false end
+  local effect = Items.effect(mon)
+  if effect ~= Items.HEAL_CONFUSION and effect ~= Items.HEAL_STATUS then return false end
+  local text = "A " .. Items.label(mon) .. " rid " .. mon.species .. " of its confusion."
+  mon.confusion = 0
+  self:_emit("status", { slot = fighter.slot, side = fighter.side,
+                         confused = 0, text = text })
+  local item = Items.take(mon)
+  self:_emitHeld(fighter, mon, item.heldItem, 0)
+  self:_say(text)
+  return true
+end
+
+-- HandleHPHealingItem (core.asm:4272-4353): Berry, Gold Berry, Berry Juice
+-- (HELD_BERRY) restore their parameter once the holder is under half its
+-- maximum -- strictly: at exactly half the cart keeps the berry -- and are
+-- eaten (ConsumeHeldItem).
+function Battle:_hpBerry(fighter, mon)
+  local effect, param = Items.effect(mon)
+  if effect ~= Items.BERRY or not Items.berryWants(mon.hp, mon.maxHp) then return false end
+  local name = Items.label(mon)
+  self:_heal(fighter, mon, param)
+  local item = Items.take(mon)
+  self:_emitHeld(fighter, mon, item.heldItem, 0)
+  self:_say(mon.species .. " recovered using a " .. name .. "!")
+  return true
+end
+
+-- HandleLeftovers (core.asm:1279-1326): player then enemy, a sixteenth of the
+-- maximum to a holder that is not already full.  Kept.
+function Battle:_heldLeftovers()
+  for _, fighter in ipairs(self.fighters) do
+    local mon = activeMon(fighter)
+    if mon and Items.holds(mon, Items.LEFTOVERS) and mon.hp < mon.maxHp then
+      self:_heal(fighter, mon, Items.sixteenth(mon.maxHp))
+      self:_emitHeld(fighter, mon, mon.heldItem, 1)
+      self:_say(mon.species .. " recovered with " .. Items.label(mon) .. ".")
+    end
+  end
+end
+
+-- HandleMysteryberry (core.asm:1328-1464): player then enemy.  The first move
+-- slot with no PP gets 5 back (1 for Sketch, the cart's "lousy hack") and the
+-- berry is eaten; a holder with PP in every slot keeps it.  The cart scans the
+-- PARTY moves and only tops up the battle copy when the monster is not
+-- transformed; the referee holds one move list, so a transformed monster
+-- spends the berry on the slot its list shows and gains no PP from it.
+function Battle:_heldMysteryberry()
+  for _, fighter in ipairs(self.fighters) do
+    local mon = activeMon(fighter)
+    if mon and Items.holds(mon, Items.RESTORE_PP) then
+      local slot = nil
+      for i = 1, #mon.moves do
+        if mon.moves[i].pp <= 0 then slot = i; break end
+      end
+      if slot then
+        local move = mon.moves[slot]
+        if not mon.transformed then
+          move.pp = move.pp + ((Effects.moveKey(move) == "SKETCH") and 1 or 5)
+          if int(move.maxPp, 0) < move.pp then move.maxPp = move.pp end
+          self:_emitMoves(fighter, mon, fighter.active)
+        end
+        local name = Items.label(mon)
+        local item = Items.take(mon)
+        self:_emitHeld(fighter, mon, item.heldItem, 0)
+        self:_say(mon.species .. " recovered PP using " .. name .. ".")
+      end
+    end
+  end
+end
+
+-- HandleStatBoostingHeldItems (core.asm:4480-4548): player then enemy, a
+-- HELD_<STAT>_UP item raises its stat one stage and is used up -- unless the
+-- stat is already as high as it goes, when nothing happens and the item stays.
+function Battle:_heldStatBoosts()
+  for _, fighter in ipairs(self.fighters) do
+    local mon = activeMon(fighter)
+    local effect = mon and Items.effect(mon)
+    local stat = effect and Items.STAT_UP[effect]
+    if stat then
+      local before = Effects.clampStage(mon.stages[stat])
+      local after = Effects.clampStage(before + 1)
+      if after ~= before then
+        local name = Items.label(mon)
+        local item = Items.take(mon)
+        mon.stages[stat] = after
+        self:_emitHeld(fighter, mon, item.heldItem, 0)
+        self:_say(mon.species .. "'s " .. name .. " activated!")
+        local text = mon.species .. "'s " .. (Effects.STAT_LABELS[stat] or stat) .. " rose"
+        self:_say(text)
+        self:_emit("stat", { slot = fighter.slot, side = fighter.side,
+                             amount = after, text = text })
+      end
+    end
+  end
+end
+
+-- HandleHealingItems (core.asm:4249-4270).  Each of its three routines works on
+-- the battler OPPOSITE hBattleTurn, and the non-link order sets the player's
+-- turn first -- so the enemy's items go first here: side b's seats, then side
+-- a's, each asked HP berry, then status berry, then confusion berry.
+function Battle:_heldHealing()
+  for _, side in ipairs({ "b", "a" }) do
+    for _, fighter in ipairs(self.bySide[side]) do
+      local mon = activeMon(fighter)
+      if mon then
+        self:_hpBerry(fighter, mon)
+        self:_statusBerry(fighter, mon)
+        self:_confusionBerry(fighter, mon)
+      end
+    end
+  end
+end
+
+-- ------------------------------------------------------------------
+-- obedience (pokecrystal BattleCommand_CheckObedience, effect_commands.asm:
+-- 631-938; pokegold's is the same routine without the Battle Tower exit)
+-- ------------------------------------------------------------------
+--
+-- Asked by `_useMove` after the gates, for the move the monster chose.  Only
+-- on a `badgeRules` seat (the cart returns for the enemy's turn and in a link
+-- battle), only for a `traded` monster (its OT id is not the player's), and
+-- never for a charged move's release (CheckUserIsCharging) or a rampage's
+-- continuation (CheckRampage skips past the command).  Returns nil when the
+-- monster obeys, "stop" when the action is spent, or the 1-based slot of the
+-- move it uses instead.  Every draw is the cart's, in its order, and each is
+-- drawn only when reached: a monster at or under its cap draws nothing.
+
+-- `.rand1` / `.rand2`: BattleRandom (nibble-swapped for `.rand1`) until it is
+-- under the cap plus the level.
+function Battle:_obeyDraw(span, swapped)
+  local r = 0
+  for _ = 1, M.REDRAW_LIMIT do
+    r = self.rng:byte()
+    if swapped then r = Items.swap(r) end
+    if r < span then return r end
+  end
+  return r % span
+end
+
+-- `.UseInstead`: no other move when the monster knows one, when any move is
+-- disabled, or when the chosen move holds every PP the monster has left;
+-- otherwise BattleRandom & 3 until it names another known move with PP.
+function Battle:_obeyInstead(mon, selected)
+  if #mon.moves <= 1 then return nil end
+  if mon.disable and mon.disable.turns > 0 then return nil end
+  local total = 0
+  for i = 1, #mon.moves do total = total + max(0, int(mon.moves[i].pp, 0)) end
+  local chosen = mon.moves[selected or 0]
+  if (chosen and chosen.pp or 0) == total then return nil end
+  local rows = min(4, #mon.moves)
+  for _ = 1, M.REDRAW_LIMIT do
+    local r = self.rng:byte() % 4
+    if r < rows and (r + 1) ~= selected and mon.moves[r + 1].pp > 0 then return r + 1 end
+  end
+  return nil
+end
+
+-- `.EndDisobedience`: the move a foe's Mirror Move would copy is forgotten,
+-- and a Bide that was releasing has already spent its energy (StoreEnergy ran
+-- before the check).
+function Battle:_disobeyed(fighter, mon)
+  mon.lastMoveIndex = 0
+  if fighter.choice and fighter.choice.bideRelease then mon.bide = nil end
+  return "stop"
+end
+
+-- `.DoNothing`: BattleRandom & 3 picks the line.
+local LOAF_LINES = { " is loafing around.", " won't obey!", " turned away!", " ignored orders!" }
+M.LOAF_LINES = LOAF_LINES
+
+function Battle:_loaf(fighter, mon)
+  self:_say(mon.species .. LOAF_LINES[(self.rng:byte() % 4) + 1])
+  return self:_disobeyed(fighter, mon)
+end
+
+function Battle:_obey(fighter, mon, move)
+  if not fighter.badgeRules or mon.traded ~= true then return nil end
+  if mon.charging and Effects.isCharge(mon.charging.effect) then return nil end
+  if mon.thrashing then return nil end
+  local cap = Items.obedienceCap(fighter.badges)
+  local level = mon.level
+  if cap >= level then return nil end
+  local span = min(255, cap + level)
+  if self:_obeyDraw(span, true) < cap then return nil end
+
+  -- IgnoreSleepOnly: Snore or Sleep Talk, chosen while asleep.  The cart's
+  -- line has its one-glyph ellipsis; the wire's alphabet (Wire.text) has no
+  -- such glyph, so it is spelled with three dots.
+  if mon.status == "sleep" and Items.SLEEP_BYPASS[Effects.moveKey(move)] then
+    self:_say(mon.species .. " ignored orders...sleeping!")
+    return "stop"
+  end
+
+  if self:_obeyDraw(span, false) < cap then
+    local slot = self:_obeyInstead(mon, fighter.choice and fighter.choice.move)
+    if slot then
+      if fighter.choice and fighter.choice.bideRelease then mon.bide = nil end
+      return slot
+    end
+    return self:_loaf(fighter, mon)
+  end
+
+  local over = level - cap
+  local r = Items.swap(self.rng:byte())
+  if r < over then
+    -- `.Nap`: the status byte is overwritten, whatever it held.
+    local turns = 0
+    for _ = 1, M.REDRAW_LIMIT do
+      turns = Items.napTurns(self.rng:byte())
+      if turns ~= 0 then break end
+    end
+    if turns == 0 then turns = 1 end
+    mon.status, mon.statusTurns = "sleep", turns
+    local text = mon.species .. " began to nap!"
+    self:_say(text)
+    self:_emit("status", { slot = fighter.slot, side = fighter.side,
+                           status = M.STATUS_TO_WIRE.sleep, text = text })
+    return self:_disobeyed(fighter, mon)
+  end
+  if r - over >= over then return self:_loaf(fighter, mon) end
+
+  -- "won't obey!" and HitConfusion: the same self-hit the confusion gate
+  -- deals (`_selfHitStats`, the selected move's Explosion halving and
+  -- type-boost item included), past the monster's own substitute.
+  self:_say(mon.species .. " won't obey!")
+  local attack, defense = self:_selfHitStats(fighter, mon, move)
+  local damage = Status.selfHitDamage({
+    level = mon.level, attack = attack, defense = defense,
+    itemBoostPercent = self:_typeBoostOf(mon, move),
+  })
+  self:_say(mon.species .. " hurt itself in confusion")
+  self:_damage(fighter, mon, damage, nil, true)
+  return self:_disobeyed(fighter, mon)
 end
 
 function Battle:_resolveTurn()
@@ -2042,34 +2593,40 @@ function Battle:_resolveItems()
   end
 end
 
--- Sort actors by priority bracket (desc), then active-mon speed (desc), then
--- field order; tied groups flip on one RNG byte >= TIE_BREAK_ROLL.  Shared by
--- fights and ball throws -- a ball carries no `priority`, so every thrower
--- sits in one bracket and the order is Speed's, as it always was.
+-- Sort actors by priority bracket (desc), then a Quick Claw that fired, then
+-- active-mon speed (desc), then field order; tied groups flip on one RNG byte
+-- >= TIE_BREAK_ROLL.  Shared by fights and ball throws -- a ball carries no
+-- `priority` and no `clawParam`, so every thrower sits in one bracket, rolls
+-- no claw, and the order is Speed's, as it always was.
 --
 -- pokecrystal's DetermineMoveOrder for two battlers: CompareMovePriority,
 -- then (`.equal_priority`) each side's Quick Claw roll, then the Speed
 -- compare, then the coin flip.  A Quick Claw is a roll *inside* a bracket, so
--- it belongs between the bracket key and the Speed key here, drawn before the
--- tie-break bytes.
+-- it sits between the bracket key and the Speed key here, drawn before the
+-- tie-break bytes (`_quickClaws`).
 function Battle:_orderActors(actors)
   if #actors <= 1 then return end
+
+  self:_quickClaws(actors)
 
   table.sort(actors, function(x, y)
     local xp, yp = x.priority or 0, y.priority or 0
     if xp ~= yp then return xp > yp end
+    local xc, yc = x.claw and 1 or 0, y.claw and 1 or 0
+    if xc ~= yc then return xc > yc end
     if x.speed ~= y.speed then return x.speed > y.speed end
     return x.order < y.order          -- field order: side a, then side b
   end)
 
-  -- One byte per group of actors in one bracket at one Speed, spent only when
-  -- the group is actually tied, so an ordinary turn between two different
-  -- speeds costs no draw at all on either runtime.
+  -- One byte per group of actors in one bracket, of one Quick Claw standing,
+  -- at one Speed, spent only when the group is actually tied, so an ordinary
+  -- turn between two different speeds costs no draw at all on either runtime.
   local i = 1
   while i <= #actors do
     local j = i
     while j < #actors and actors[j + 1].speed == actors[i].speed
-          and (actors[j + 1].priority or 0) == (actors[i].priority or 0) do
+          and (actors[j + 1].priority or 0) == (actors[i].priority or 0)
+          and (actors[j + 1].claw and true or false) == (actors[i].claw and true or false) do
       j = j + 1
     end
     if j > i and self.rng:byte() >= M.TIE_BREAK_ROLL then
@@ -2383,12 +2940,15 @@ function Battle:_resolveFights()
     local choice = fighter.choice
     local mon = activeMon(fighter)
     if choice and choice.action == "fight" and mon then
+      local effect, param = Items.effect(mon)
       actors[#actors + 1] = {
         fighter = fighter,
         mon = mon,                      -- pinned: see the skip in the loop
         priority = self:_priorityOf(fighter, mon),
         speed = self:_speedOf(fighter, mon),
         order = #actors + 1,
+        -- A Quick Claw holder's parameter, for `_quickClaws`; nil otherwise.
+        clawParam = (effect == Items.QUICK_CLAW) and param or nil,
       }
     end
   end
@@ -2428,45 +2988,69 @@ function Battle:_selfHitStats(fighter, mon, selected)
   local attack = self:_battleStat(fighter, mon, "atk")
   local defense = self:_battleStat(fighter, mon, "def")
   if self:_screenUp(fighter.side, false) then defense = defense * 2 end
-  attack, defense = Damage.truncateStats(attack, defense, M.LINK_MODES[self.mode])
+  attack, defense = Damage.truncateStats(attack, defense, self:_onePassTruncate())
   if selected and Effects.isExplode(selected.effect) then
     defense = max(1, floor(defense / 2))
   end
   return attack, defense
 end
 
+-- One status gate (Status.beforeMove: its byte, its line, the counter it
+-- ticks).  Returns whether the monster may move past it.
+function Battle:_statusGate(fighter, mon)
+  local gate = Status.beforeMove(
+    { status = mon.status, turnsRemaining = mon.statusTurns }, self.rng:byte())
+  if not gate then return true end
+  mon.statusTurns = int(gate.turnsRemaining, mon.statusTurns)
+  if gate.wokeUp then
+    mon.status, mon.statusTurns = nil, 0
+    self:_emit("status", { slot = fighter.slot, side = fighter.side,
+                           text = mon.species .. " woke up" })
+  elseif gate.thawed then
+    mon.status, mon.statusTurns = nil, 0
+    self:_emit("status", { slot = fighter.slot, side = fighter.side,
+                           text = mon.species .. " thawed out" })
+  elseif gate.fullyParalyzed then
+    self:_say(mon.species .. " is fully paralyzed")
+  elseif mon.status == "sleep" then
+    self:_say(mon.species .. " is fast asleep")
+  elseif mon.status == "freeze" then
+    self:_say(mon.species .. " is frozen solid")
+  end
+  return gate.canMove
+end
+
 -- Returns false when a gate stopped the move.  `selected` is the move the
--- monster is about to use (Struggle when every slot is empty): the confusion
--- self-hit reads it the way the cart's DamageCalc does.
+-- monster is about to use (Struggle when every slot is empty): the sleep gate's
+-- Snore / Sleep Talk exception and the confusion self-hit read it the way the
+-- cart's CheckTurn and DamageCalc do.
+--
+-- CheckTurn's order (pokecrystal engine/battle/effect_commands.asm:110-331):
+-- sleep, freeze, then SUBSTATUS_FLINCHED -- read and cleared at `.not_frozen`
+-- -- so a sleeping or frozen monster spends its turn on its status, ticking its
+-- counter, whatever flinched it; the referee's paralysis gate stays where it
+-- always stood, after the flinch and before confusion.
 function Battle:_runGates(fighter, mon, selected)
+  if mon.status == "sleep" or mon.status == "freeze" then
+    local asleep = mon.status == "sleep"
+    if not self:_statusGate(fighter, mon) then
+      -- "Snore and Sleep Talk bypass sleep": the monster is still told it is
+      -- fast asleep, and the move goes on (to obedience, and then itself).
+      if not (asleep and mon.status == "sleep" and selected
+              and Items.SLEEP_BYPASS[Effects.moveKey(selected)]) then
+        return false
+      end
+    end
+  end
+
   if mon.flinch then
     mon.flinch = false
     self:_say(mon.species .. " flinched")
     return false
   end
 
-  if GATING[mon.status] then
-    local gate = Status.beforeMove(
-      { status = mon.status, turnsRemaining = mon.statusTurns }, self.rng:byte())
-    if gate then
-      mon.statusTurns = int(gate.turnsRemaining, mon.statusTurns)
-      if gate.wokeUp then
-        mon.status, mon.statusTurns = nil, 0
-        self:_emit("status", { slot = fighter.slot, side = fighter.side,
-                               text = mon.species .. " woke up" })
-      elseif gate.thawed then
-        mon.status, mon.statusTurns = nil, 0
-        self:_emit("status", { slot = fighter.slot, side = fighter.side,
-                               text = mon.species .. " thawed out" })
-      elseif gate.fullyParalyzed then
-        self:_say(mon.species .. " is fully paralyzed")
-      elseif mon.status == "sleep" then
-        self:_say(mon.species .. " is fast asleep")
-      elseif mon.status == "freeze" then
-        self:_say(mon.species .. " is frozen solid")
-      end
-      if not gate.canMove then return false end
-    end
+  if mon.status == "paralysis" then
+    if not self:_statusGate(fighter, mon) then return false end
   end
 
   if mon.confusion > 0 then
@@ -2474,8 +3058,7 @@ function Battle:_runGates(fighter, mon, selected)
     -- turn's byte lands on a self-hit: they draw nothing.  Status.confusionTick
     -- also takes `itemBoostPercent` -- DamageCalc's type-boost item scan, run
     -- for the SELECTED move's type (STRUGGLE.typeId for Struggle), the other
-    -- cart bug -- and none is passed because no sheet hands the referee a
-    -- held item.
+    -- cart bug.
     local attack, defense = self:_selfHitStats(fighter, mon, selected)
     local gate = Status.beforeMove({
       status = "confusion",
@@ -2483,9 +3066,13 @@ function Battle:_runGates(fighter, mon, selected)
       level = mon.level,
       attack = attack,
       defense = defense,
+      itemBoostPercent = self:_typeBoostOf(mon, selected),
     }, self.rng:byte())
     if gate then
       mon.confusion = int(gate.turnsRemaining, 0)
+      -- CheckTurn's `dec [hl]` on wPlayerConfuseCount: what this field
+      -- position's count now holds (`_berserkGene` inherits it).
+      fighter.confuseCount = mon.confusion
       if gate.snappedOut then
         self:_say(mon.species .. " snapped out of confusion")
         self:_emit("status", {
@@ -2506,7 +3093,27 @@ function Battle:_runGates(fighter, mon, selected)
   return true
 end
 
+-- A status or a confusion this move's effect just put on `targetMon`, and
+-- the held item the cart asks about it straight away: UseHeldStatusHealingItem
+-- at the end of every status-inflicting command (SleepTarget, PoisonTarget,
+-- Poison, BurnTarget, FreezeTarget, ParalyzeTarget, Paralyze) and
+-- UseConfusionHealingItem at the end of FinishConfusingTarget.  `before` is
+-- what the target carried going in.  A confusion that lands also becomes this
+-- field position's confuse count (BattleCommand_Confuse writes
+-- wEnemyConfuseCount / wPlayerConfuseCount).
+function Battle:_afterInfliction(targetFighter, targetMon, before)
+  if not (targetFighter and targetMon) or targetMon.hp <= 0 then return end
+  if targetMon.status and not before.status then
+    self:_statusBerry(targetFighter, targetMon)
+  end
+  if targetMon.confusion > 0 and before.confusion == 0 then
+    targetFighter.confuseCount = targetMon.confusion
+    self:_confusionBerry(targetFighter, targetMon)
+  end
+end
+
 function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId)
+  local before = { status = targetMon.status, confusion = targetMon.confusion }
   local result = Effects.applyPrimary({
     effectId = effectId,
     rng = self.rng,
@@ -2536,9 +3143,11 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
     })
   end
   if result.movesChanged then self:_emitMoves(fighter, mon) end
+  self:_afterInfliction(targetFighter, targetMon, before)
 end
 
 function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, chance)
+  local before = { status = targetMon.status, confusion = targetMon.confusion }
   local result = Effects.applySide({
     effectId = effectId,
     chance = chance,
@@ -2553,6 +3162,7 @@ function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, cha
   for _, entry in ipairs(result.events or {}) do
     self:_emit(entry.kind, entry.fields)
   end
+  self:_afterInfliction(targetFighter, targetMon, before)
 end
 
 function Battle:_markLastMove(mon, moveIndex)
@@ -2592,13 +3202,33 @@ function Battle:_useMove(fighter, mon, opts)
   if not move then return end
   local struggling = move == STRUGGLE
 
-  if not called and not self:_runGates(fighter, mon, move) then return end
+  -- A move used in place of a disobeyed one runs no CheckTurn of its own: the
+  -- cart calls DoMove for it from inside the check (`.UseInstead`).
+  local disobeyed = opts.disobeyed == true
+  if not called and not disobeyed and not self:_runGates(fighter, mon, move) then return end
 
-  if not struggling and not called and mon.disable and mon.disable.turns > 0
+  if not struggling and not called and not disobeyed and mon.disable and mon.disable.turns > 0
      and mon.disable.moveIndex == choice.move then
     local blocked = mon.moves[choice.move]
     self:_say(moveLabel(blocked) .. " is disabled")
     return
+  end
+
+  -- `checkobedience`, the first command of every move script, for the move
+  -- the monster chose (`_obey`).  A move it uses instead is that move used
+  -- in full -- its own PP, its own effect -- under "used instead,", and then
+  -- the cart's `.EndDisobedience` forgets it as the last move.
+  if not called and not disobeyed then
+    local verdict = self:_obey(fighter, mon, move)
+    if verdict == "stop" then return end
+    if type(verdict) == "number" then
+      local saved = fighter.choice
+      fighter.choice = { action = "fight", move = verdict, target = saved.target }
+      self:_useMove(fighter, mon, { disobeyed = true })
+      fighter.choice = saved
+      mon.lastMoveIndex = 0
+      return
+    end
   end
 
   -- Resolved once, here, and used for the whole action: see `_retarget`.
@@ -2632,7 +3262,7 @@ function Battle:_useMove(fighter, mon, opts)
     slot = fighter.slot, side = fighter.side, text = move.id,
     amount = chargingUp and 1 or nil,
   })
-  self:_say(mon.species .. " used " .. moveLabel(move))
+  self:_say(mon.species .. (disobeyed and " used instead, " or " used ") .. moveLabel(move))
 
   if choice.bideRelease and mon.bide then
     local stored = mon.bide.stored
@@ -2642,7 +3272,10 @@ function Battle:_useMove(fighter, mon, opts)
       self:_markLastMove(mon, choice.move)
       return
     end
-    self:_damage(target, defender, 2 * stored, nil)
+    -- Bide's script releases through applydamage, so a Focus Band answers
+    -- it, and ends in `kingsrock`.
+    self:_strike(target, defender, 2 * stored)
+    self:_kingsRock(mon, move, effectId, defender)
     self:_markLastMove(mon, choice.move)
     return
   end
@@ -2721,10 +3354,14 @@ function Battle:_useMove(fighter, mon, opts)
   -- still carries a Gen 1 accuracy byte (1..255) is scaled down.
   local acc = max(0, int(move.accuracy, 100))
   if acc > 100 then acc = max(1, floor(acc * 100 / 255)) end
+  local powderEffect, powderParam = Items.effect(defender)
   local hit = Accuracy.hit(acc, self.rng:nextInt(0, Accuracy.ROLL_MAX), {
     accuracyStage = mon.stages.acc,
     evasionStage = defender.stages.eva,
     alwaysHits = alwaysHits or acc <= 0,
+    -- The defender's Bright Powder (`.BrightPowder`), past which Swift and X
+    -- Accuracy never reach: Accuracy.hit returns before it for them.
+    brightPowder = (powderEffect == Items.BRIGHTPOWDER) and powderParam or nil,
   })
   if not hit then
     self:_say(mon.species .. " missed")
@@ -2789,10 +3426,15 @@ function Battle:_useMove(fighter, mon, opts)
   end
 
   local hits = Effects.hitCount(effectId, self.rng)
-  -- Gen 2 crit ladder (not Gen 1 base-Speed threshold).
+  -- Gen 2 crit ladder (not Gen 1 base-Speed threshold), with the attacker's
+  -- item: Scope Lens (HELD_CRITICAL_UP) adds a level, and Chansey's Lucky
+  -- Punch / Farfetch'd's Stick -- by item ID, on the battle species -- set it
+  -- to 2 outright (Crit.level).
   local critOpts = {
     focusEnergy = mon.focusEnergy,
     highCritMove = move.highCrit == true,
+    scopeLens = Items.holds(mon, Items.CRITICAL_UP),
+    speciesItemBonus = Items.critSpeciesItem(self:_battleSpecies(mon), mon.heldItem),
   }
   local critLevel = Crit.level(critOpts)
   local critChance = Crit.chance(critLevel)
@@ -2859,14 +3501,17 @@ function Battle:_useMove(fighter, mon, opts)
       attack = max(1, int(mon.stats[atkKey], 1))
       defense = max(1, int(defender.stats[defKey], 1))
     end
-    -- 4. ThickClubBoost / LightBallBoost double the attack here, still
-    --    16-bit, which is why they can wrap past 1024 in a link battle; the
-    --    referee holds no held item, so neither fires.
-    -- 5. TruncateHL_BC: both folded into a byte (one pass in a link battle).
-    attack, defense = Damage.truncateStats(attack, defense, M.LINK_MODES[self.mode])
-    -- 6. DittoMetalPowder runs on the folded defense (the same no-item note
-    --    as 4), and then BattleCommand_DamageCalc halves it for Explosion /
+    -- 4. ThickClubBoost (physical) / LightBallBoost (special) double the
+    --    attack here, still 16-bit, which is why they can wrap past 1024 when
+    --    the fold below makes one pass (Items.speciesAttack).
+    attack = Items.speciesAttack(mon, isSpecial, attack)
+    -- 5. TruncateHL_BC: both folded into a byte -- one pass in a link battle
+    --    and on Gold / Silver, a loop on Crystal otherwise (K6).
+    attack, defense = Damage.truncateStats(attack, defense, self:_onePassTruncate())
+    -- 6. DittoMetalPowder on the folded pair (Items.metalPowder), and then
+    --    BattleCommand_DamageCalc halves the defense for Explosion /
     --    Self-Destruct, at least 1 (:2904-2913).
+    attack, defense = Items.metalPowder(defender, attack, defense)
     if Effects.isExplode(effectId) then
       defense = max(1, floor(defense / 2))
     end
@@ -2884,8 +3529,10 @@ function Battle:_useMove(fighter, mon, opts)
         typeEffect = percents,
         roll = self.rng:damageRoll(),
         physical = not isSpecial,
-        -- DamageCalc's type-boost item scan (`itemBoostPercent`, ahead of the
-        -- crit x2) has no input: the referee holds no held item.
+        -- DamageCalc's type-boost item scan, ahead of the crit x2: the
+        -- attacker's HELD_<TYPE>_BOOST against the move's type -- NORMAL for
+        -- Struggle, whose row still says so, so a Pink / Polkadot Bow counts.
+        itemBoostPercent = self:_typeBoostOf(mon, move),
         --
         -- The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
         -- this is the cart's "player's turn only" without asking whose turn.
@@ -2918,7 +3565,7 @@ function Battle:_useMove(fighter, mon, opts)
   for _ = 1, hits do
     if defender.hp <= 0 then break end
     local hpBefore = defender.hp
-    self:_damage(target, defender, damage, nil)
+    self:_strike(target, defender, damage)
     totalDealt = totalDealt + (hpBefore - defender.hp)
   end
 
@@ -2933,6 +3580,12 @@ function Battle:_useMove(fighter, mon, opts)
     if Effects.isPayDay(effectId) then
       self:_say("Coins scattered")
     end
+  end
+
+  -- The Thief script's `thief`, right after the damage (a Gold sheet names
+  -- the move, not EFFECT_THIEF; Items.THIEF).
+  if Effects.moveKey(move) == Items.THIEF then
+    self:_thief(fighter, mon, target, defender)
   end
 
   if (struggling or Effects.isRecoil(effectId)) and totalDealt >= 1 then
@@ -2986,6 +3639,9 @@ function Battle:_useMove(fighter, mon, opts)
     self:_faintUser(fighter, mon)
   end
 
+  -- `kingsrock`, the last command of the scripts that hold one.
+  self:_kingsRock(mon, move, effectId, defender)
+
   self:_markLastMove(mon, choice.move)
 
   if mon.thrashing then
@@ -2994,6 +3650,7 @@ function Battle:_useMove(fighter, mon, opts)
       mon.thrashing = nil
       local turns = self.rng:byte() % 4 + 2
       mon.confusion = turns
+      fighter.confuseCount = turns
       self:_say(mon.species .. " became confused")
       self:_emit("status", {
         slot = fighter.slot, side = fighter.side, confused = 1,
@@ -3352,18 +4009,23 @@ function Battle:_faint(fighter, mon)
 end
 
 -- The end of the turn.  pokecrystal's HandleBetweenTurnEffects (engine/
--- battle/core.asm:250-296) runs, after its faint-checked block (Future Sight,
--- weather, Wrap, Perish Song): Leftovers, Mysteryberry, Defrost, Safeguard,
--- HandleScreens, the stat-boosting held items, the healing held items, then
--- Encore.  This referee's per-seat residual walk (`_residualDamage`) stands
--- where that first block and the cart's per-move ResidualDamage stand; of the
--- rest, only the screens exist here, so they tick straight after it -- and a
--- held item that acts between turns goes on the side of `_tickScreens` its
--- row in that list puts it.
+-- battle/core.asm:250-296, pokegold the same) runs, after its faint-checked
+-- block (Future Sight, weather, Wrap, Perish Song): Leftovers, Mysteryberry,
+-- Defrost, Safeguard, HandleScreens, the stat-boosting held items, the healing
+-- held items, then Encore.  This referee's per-seat residual walk
+-- (`_residualDamage`) stands where that first block and the cart's per-move
+-- ResidualDamage stand, and the rest follows in the cart's order -- Defrost,
+-- Safeguard and Encore are not in this referee.  A seat that fainted this turn
+-- is replaced after all of it (the replace phase), where the cart sends its
+-- successor out first, so a successor's Leftovers waits a turn.
 function Battle:_resolveResiduals()
   self:_residualDamage()
   if self.result then return end
+  self:_heldLeftovers()
+  self:_heldMysteryberry()
   self:_tickScreens()
+  self:_heldStatBoosts()
+  self:_heldHealing()
 end
 
 -- HandleScreens (core.asm:1620-1680): side a then side b (the non-link

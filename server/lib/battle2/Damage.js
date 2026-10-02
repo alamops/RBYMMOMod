@@ -112,12 +112,16 @@ function base(level, power, attack, defense) {
 // each. While either is 255 or more, both are shifted right twice -- a value
 // the shift empties becomes 1 -- and what comes out are the low bytes.
 //
-// `link` is the cart's `wLinkMode == LINK_COLOSSEUM` early exit: one pass and
-// no re-check, so a stat still past 1023 after it keeps only its low byte --
-// the wrap bug docs/bugs_and_glitches.md names. A wrapped 0 is not repaired
-// here: a defense of 0 is lifted to 1 by DamageCalc (`compute` below) and an
-// attack of 0 leaves the base at 0. Returns { attack, defense }.
-function truncateStats(attack, defense, link) {
+// `onePass` stops after one pass with no re-check, so a stat still past 1023
+// after it keeps only its low byte -- the wrap bug docs/bugs_and_glitches.md
+// names. Crystal takes that exit in a link battle (`wLinkMode ==
+// LINK_COLOSSEUM`); Gold and Silver have no loop at all (pokegold
+// effect_commands.asm:2625), so they always fold once. Which one a fight is
+// rides on the fight's cart family (Turn `_onePassTruncate`, contract K6). A
+// wrapped 0 is not repaired here: a defense of 0 is lifted to 1 by DamageCalc
+// (`compute` below) and an attack of 0 leaves the base at 0. Returns
+// { attack, defense }.
+function truncateStats(attack, defense, onePass) {
   let a = Math.max(0, int(attack, 0));
   let d = Math.max(0, int(defense, 0));
   while (a > 255 || d > 255) {
@@ -125,7 +129,7 @@ function truncateStats(attack, defense, link) {
     if (d === 0) d = 1;
     a = Math.floor(a / 4);
     if (a === 0) a = 1;
-    if (link) break;
+    if (onePass) break;
   }
   return { attack: a % 256, defense: d % 256 };
 }
@@ -181,8 +185,11 @@ function compute(input) {
 
   let d = baseVal;
 
+  // DamageCalc .DoneItem: the type-boost item's (100 + parameter) out of 100.
+  // The sum is a byte on the cart (Items.typeBoostPercent), so a parameter past
+  // 155 arrives here as a negative percent and is applied all the same.
   if (src.itemBoostPercent !== undefined && src.itemBoostPercent !== null
-      && int(src.itemBoostPercent, 0) > 0) {
+      && int(src.itemBoostPercent, 0) !== 0) {
     d = idiv(d * (100 + int(src.itemBoostPercent, 0)), 100);
   }
 

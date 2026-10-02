@@ -816,6 +816,184 @@ local function typesOf(data, mon, order)
   return out
 end
 
+-- ------- the referee-fidelity sheet fields (docs/plans/gen12-referee-fidelity.md)
+
+-- Contract K1: is this monster somebody else's?  The obedience check's one fact
+-- about a player's own monster, read the way both carts read it -- the 16-bit
+-- OT id on the party struct against the save's own player id (pokered
+-- engine/battle/core.asm and pokecrystal engine/battle/core.asm compare
+-- MON_OTID with wPlayerID; the engines keep them as `mon.otId` and
+-- `save.player.id`, Gen 1's BattleState.stampOT and Gold's Mon.stampOT).
+--
+-- `true` or nil, never `false`: the wire keeps `true` and drops `false`
+-- anyway, and an absent field is the ordinary rules.  A monster with no OT id
+-- on record is the player's own -- the Gold engine's own checkObedience
+-- (src/battle/gen2/Battle.lua) answers the same, and so does contract K1 -- even
+-- where Gen 1's engine counts a repaired `traded` flag for its exp boost
+-- (SaveData.repairTradedOtIds): a cart's monster always has an OT id, and a
+-- missing one is a port's record, not a trade this player made.  No player id
+-- (a save that never stamped one) is nothing to compare against, and nil too.
+function M.tradedOf(game, mon)
+  local save = type(game) == "table" and game.save or nil
+  local player = type(save) == "table" and save.player or nil
+  local playerId = type(player) == "table" and tonumber(player.id) or nil
+  local otId = type(mon) == "table" and tonumber(mon.otId) or nil
+  if not (playerId and otId) or playerId ~= playerId or otId ~= otId then return nil end
+  if floor(otId) % 65536 == floor(playerId) % 65536 then return nil end
+  return true
+end
+
+-- The Gold item modules, resolved on first use and only by a Gen 2 caller: the
+-- loader throws on a cross-generation require (modkit MK403), so nothing here
+-- is reached at file scope or off a Gold boot -- `goldBadges`' posture, a
+-- pcall'd require of a module the running engine owns.  A success is kept; a
+-- failure is asked again next time rather than remembered as "no modules".
+local goldItemMods = {}
+local function goldItemModule(key, name)
+  local hit = goldItemMods[key]
+  if hit then return hit end
+  local ok, module = pcall(require, name)
+  if ok and type(module) == "table" then
+    goldItemMods[key] = module
+    return module
+  end
+  return nil
+end
+
+local warnedHoldEffect2 = false
+
+-- Contract K2: everything the Gold referee reads off one held item, from this
+-- client's own item data at sheet-build time -- the hub holds no item table,
+-- and no value here is shipped by this mod.
+--
+--   heldItem    the engine's item id (Wire.id), the field Gold sheets always had
+--   holdEffect  the item's HELD_* token, as the engine merged it
+--               (src/core/gen2/ItemEffects.lua heldItemFor: the `held_items`
+--               registry, a content mod's patch included, else the item row's
+--               own columns -- data/items/attributes.asm's effect byte)
+--   holdParam   the parameter byte beside it (0..255)
+--   itemName    the name the cart prints (ItemNames, ITEM_NAME_LENGTH - 1)
+--   mail        `true` for a mail item -- Thief cannot take one -- by the
+--               engine's own test (src/core/gen2/Mail.lua isMail, pokecrystal
+--               ItemIsMail over data/items/mail_items.asm)
+--
+-- A field the sanitiser would refuse is left off instead (Wire.battleMon refuses
+-- the whole monster for a present-and-unreadable one): a content mod's hold
+-- effect spelled outside the HELD_* alphabet rides as the bare id, said once in
+-- the log, rather than costing the player the monster -- and then the party.
+-- nil for no item.
+function M.heldFields2(game, itemId)
+  local id = Wire.id(itemId)
+  if not id then return nil end
+  local out = { heldItem = id }
+  local data = type(game) == "table" and game.data or nil
+  local ItemEffects = goldItemModule("ItemEffects", "src.core.gen2.ItemEffects")
+  local row
+  if ItemEffects and type(ItemEffects.heldItemFor) == "function" then
+    local ok, got = pcall(ItemEffects.heldItemFor, itemId, data)
+    if ok and type(got) == "table" then row = got end
+  end
+  if row and row.heldEffect ~= nil then
+    local effect = Wire.holdEffect2(row.heldEffect)
+    if effect then
+      out.holdEffect = effect
+      local param = tonumber(row.heldParameter)
+      if param and param == param then
+        out.holdParam = clamp(floor(param), 0, Wire.HOLD_PARAM2_MAX)
+      end
+    elseif not warnedHoldEffect2 then
+      warnedHoldEffect2 = true
+      mod.log:warn("the held item %s names a hold effect (%s) the battle referee "
+        .. "cannot read, so it is fought as an item with no effect -- spell a "
+        .. "modded hold effect HELD_ and capitals, digits or underscores",
+        tostring(itemId), tostring(row.heldEffect))
+    end
+  end
+  local items = type(data) == "table" and type(data.items) == "table" and data.items or nil
+  local def = items and items[itemId]
+  local name = Wire.text(type(def) == "table" and def.name or nil, Wire.ITEM_NAME2_MAX)
+  if name then out.itemName = name end
+  local Mail = goldItemModule("Mail", "src.core.gen2.Mail")
+  if Mail and type(Mail.isMail) == "function" then
+    local ok, isMail = pcall(Mail.isMail, itemId)
+    if ok and isMail == true then out.mail = true end
+  end
+  return out
+end
+
+-- The K2 fields onto a sheet: `itemId`'s, or none of them for nil.  Every one
+-- is cleared first, so a sheet never pairs one item's id with another's effect.
+local ITEM_FIELDS2 = { "heldItem", "holdEffect", "holdParam", "itemName", "mail" }
+function M.setSheetItem2(game, sheet, itemId)
+  if type(sheet) ~= "table" then return nil end
+  for _, key in ipairs(ITEM_FIELDS2) do sheet[key] = nil end
+  local fields = itemId ~= nil and M.heldFields2(game, itemId) or nil
+  for key, value in pairs(fields or {}) do sheet[key] = value end
+  return fields
+end
+
+-- A Gold wild monster's held item, rolled the way the cart rolls it -- because
+-- the engine does not (src/battle/gen2/Mon.lua: "wild mons roll one from
+-- BaseData's two item slots on the cart, which is not modeled yet").
+--
+-- pokecrystal (and pokegold) engine/battle/core.asm LoadEnemyMon, `.WildItem`:
+-- a BATTLETYPE_FORCEITEM encounter (Ho-Oh, Lugia, Snorlax) always holds item 1;
+-- otherwise one BattleRandom against `75 percent + 1` -- below it, no item --
+-- and a second against `8 percent`, below which item 2, else item 1.  `percent`
+-- is `* $ff / 100` in integer arithmetic, so the thresholds are 192 and 20: an
+-- item 64 times in 256, item 2 on 20 of those 256.  The two slots are the
+-- species' own (`data.pokemon[id].items`, BaseData's item1 / item2, which the
+-- importer reads off the player's ROM; either may be absent -- NO_ITEM).
+--
+-- `opts.random` is a function answering one byte (0..255): the caller's own
+-- source, never the referee's -- the fight's seed is drawn after this, and a
+-- fight with no items must draw exactly what it drew before.  The cart spends
+-- both draws even for a species with no items; a species with none spends
+-- nothing here, since a byte from a source nobody else reads changes nothing.
+-- `opts.battleType` is the Gold battle's own (src/battle/gen2/Battle.lua
+-- BATTLETYPE_FORCEITEM = 10).
+--
+-- Writes the item onto the engine monster -- the one a catch keeps -- and
+-- answers it; a monster that already holds one (a scripted gift's) is left as
+-- it is.  Gen 2 only, and nil anywhere else.
+M.WILD_ITEM_NONE_BELOW2 = 192   -- 75 percent + 1
+M.WILD_ITEM2_BELOW2 = 20        -- 8 percent
+M.BATTLETYPE_FORCEITEM2 = 10
+function M.rollWildItem2(game, mon, opts)
+  if type(mon) ~= "table" then return nil end
+  if Gen.generation(game) ~= 2 then return nil end
+  if type(mon.item) == "string" and mon.item ~= "" then return mon.item end
+  opts = type(opts) == "table" and opts or {}
+  local data = type(game) == "table" and game.data or nil
+  local def = type(data) == "table" and type(data.pokemon) == "table"
+    and data.pokemon[mon.species] or nil
+  local slots = type(def) == "table" and type(def.items) == "table" and def.items or {}
+  local function slot(i)
+    local id = slots[i]
+    if type(id) ~= "string" or id == "" or id == "NO_ITEM" then return nil end
+    return id
+  end
+  local item1, item2 = slot(1), slot(2)
+  local item
+  if tonumber(opts.battleType) == M.BATTLETYPE_FORCEITEM2 then
+    item = item1
+  elseif item1 or item2 then
+    local random = opts.random
+    if type(random) ~= "function" then return nil end
+    local function byte()
+      local ok, value = pcall(random)
+      value = ok and tonumber(value) or nil
+      if not value or value ~= value then return 0 end
+      return floor(value) % 256
+    end
+    if byte() >= M.WILD_ITEM_NONE_BELOW2 then
+      item = (byte() < M.WILD_ITEM2_BELOW2) and item2 or item1
+    end
+  end
+  if item then mon.item = item end
+  return item
+end
+
 -- Any team, as the intermediator will fight it.
 --
 -- Split out from `snapshotParty` because a co-op fight has more than one team
@@ -829,6 +1007,13 @@ end
 -- Best-effort throughout: a monster that cannot be described is skipped rather
 -- than taking the party with it, because a party of five is a fight and a party
 -- of none is not.  An empty result is the caller's to refuse -- see M:start.
+--
+-- `opts` on Gen 1 / Gen 2 (Gen 3 hands it to Sheet3.mons): `{ own = true }`
+-- for this player's own monsters, which then carry contract K1's `traded`
+-- unless `link` is set too -- a link battle runs no obedience check on either
+-- cart, and a sheet built for one states none.  A foe's sheet (a wild monster,
+-- a trainer's) is never `own`: the cart asks the question of the player's
+-- battle monster alone.
 function M.snapshotMons(game, party, opts)
   if type(party) ~= "table" then return {} end
   -- Gen 3: the C4 sheet.  Every sheet built here carries its species' catch
@@ -841,6 +1026,7 @@ function M.snapshotMons(game, party, opts)
   local data = game and game.data
   local order = typeOrder(data)
   local generation = Gen.generation(game)
+  local stampTraded = type(opts) == "table" and opts.own == true and opts.link ~= true
 
   local out = {}
   for index = 1, #party do
@@ -878,11 +1064,15 @@ function M.snapshotMons(game, party, opts)
             types   = typesOf(data, mon, order),
             moves   = moves,
           }
-          -- Gen 2 held item (engine field `item`). Optional; Wire.id cleans it.
+          -- Gen 2 held item (engine field `item`), and with it what the Gold
+          -- referee reads off it (contract K2: hold effect, parameter, name,
+          -- mail) -- all of it absent when nothing is held.  Optional;
+          -- Wire.id cleans the id.
           if generation == 2 and type(mon.item) == "string" and mon.item ~= "" then
-            local held = Wire.id(mon.item)
-            if held then sheet.heldItem = held end
+            M.setSheetItem2(game, sheet, mon.item)
           end
+          -- Contract K1, on this player's own monsters outside a link battle.
+          if stampTraded then sheet.traded = M.tradedOf(game, mon) end
           out[#out + 1] = sheet
           local def = type(data) == "table" and type(data.pokemon) == "table"
             and data.pokemon[mon.species] or nil
@@ -909,15 +1099,19 @@ end
 
 -- This player's own team.
 --
--- `opts` is read on Gen 3 only: `{ link = true }` for a fight between two
--- players (LINK_MODES), which is where Deoxys fights on its link-battle stats.
+-- `opts`: `{ link = true }` for a fight between two players (LINK_MODES).  On
+-- Gen 3 that is where Deoxys fights on its link-battle stats; on every
+-- generation it is the fight whose sheets state no `traded` (contract K1 of
+-- docs/plans/gen12-referee-fidelity.md on Gen 1 / Gen 2, Sheet3's own on Gen 3),
+-- because no cart runs its obedience check in a link battle.
 function M.snapshotParty(game, opts)
+  local link = type(opts) == "table" and opts.link == true
   -- Gen 3: the live session party, not game.save (a snapshot there).
   if Gen.generation(game) == 3 then
-    return Sheet3.party(game, { link = type(opts) == "table" and opts.link == true })
+    return Sheet3.party(game, { link = link })
   end
   local save = game and game.save
-  return M.snapshotMons(game, save and save.party)
+  return M.snapshotMons(game, save and save.party, { own = true, link = link })
 end
 
 -- ------- what goes out before the fight opens, in one place
@@ -1057,12 +1251,35 @@ end
 --
 -- Gen 1 reads the badge *rows* rather than a list written down here, so a mod
 -- that adds a badge -- or retunes which ones boost what -- is covered without
--- this file knowing about it.
+-- this file knowing about it.  Behind them go the four badges pokered's
+-- obedience check reads (contract K4 of docs/plans/gen12-referee-fidelity.md:
+-- engine/battle/core.asm CheckForDisobedience tests EARTHBADGE, MARSHBADGE,
+-- RAINBOWBADGE and CASCADEBADGE for the level cap), which no boost row names:
+-- those are the cart's own bits, so they are a list here, held the way the save
+-- holds every Gen 1 badge -- under its inventory key (src/inventory/Badges.lua
+-- itemFor: the `constants.badges` record's `item`, else the badge id), or in
+-- `player.badges` -- and sent by the same id the boost rows use.
 --
 -- MK403: never hard-require Gen 1 `src.battle.Damage` on Gold.  Gold asks a
 -- soft-required Gen 2 Battle module and nothing else; Gen 1 prefers
 -- `data.constants.badgeBoosts`, then Gen 1 Damage.  Missing rows soft-degrade
--- to no badges.
+-- to no boost badges (the four obedience badges are still read).
+M.OBEDIENCE_BADGES1 = { "CASCADEBADGE", "RAINBOWBADGE", "MARSHBADGE", "EARTHBADGE" }
+
+-- The inventory key a Gen 1 badge is held under: its `constants.badges`
+-- record's `item` when it names one, else the id (Badges.itemFor's reading,
+-- restated so a Gold boot never requires a Gen 1 inventory module).
+local function badgeKey1(data, id)
+  local list = type(data) == "table" and type(data.constants) == "table"
+    and data.constants.badges or nil
+  for _, entry in ipairs(type(list) == "table" and list or {}) do
+    if type(entry) == "table" and entry.id == id then
+      return (type(entry.item) == "string" and entry.item ~= "") and entry.item or id
+    end
+  end
+  return id
+end
+
 function M.badgesOf(game, mode)
   if M.LINK_MODES[mode] then return nil end
   local generation = Gen.generation(game)
@@ -1079,24 +1296,23 @@ function M.badgesOf(game, mode)
     local ok, Damage = pcall(require, table.concat({ "src", "battle", "Damage" }, "."))
     rows = ok and Damage and Damage.BADGE_BOOSTS or nil
   end
-  if not rows then return nil end
 
   local inventory = save.inventory or {}
   local playerBadges = save.player and save.player.badges
   local out, seen = {}, {}
-  for _, row in ipairs(rows) do
-    local id = row.badge
-    if id and not seen[id] then
-      local has = inventory[id]
-      if not has and type(playerBadges) == "table" then
-        has = playerBadges[id]
-      end
-      if has then
-        seen[id] = true
-        out[#out + 1] = id
-      end
+  local function take(id, key)
+    if not id or seen[id] then return end
+    local has = inventory[key or id]
+    if not has and type(playerBadges) == "table" then
+      has = playerBadges[id]
+    end
+    if has then
+      seen[id] = true
+      out[#out + 1] = id
     end
   end
+  for _, row in ipairs(type(rows) == "table" and rows or {}) do take(row.badge) end
+  for _, id in ipairs(M.OBEDIENCE_BADGES1) do take(id, badgeKey1(data, id)) end
   if #out == 0 then return nil end
   return out
 end
@@ -1813,8 +2029,17 @@ M.LINK_MODES = LINK_MODES
 -- end (the engine's battle_bridge.lua writeback, pret
 -- battle_controller_player.c:1909) -- a berry eaten stays eaten, a THIEF from
 -- a wild mon keeps the item.  A mode on neither list (a newer token) writes
--- nothing home, the safe way round.
+-- nothing home, the safe way round.  Gold keeps the same list: pokecrystal's
+-- ConsumeHeldItem and BattleCommand_Thief write the player's party struct as
+-- well as the battle's (engine/battle/consume_held_item.asm,
+-- move_effects/thief.asm -- "if the enemy steals your item, it's gone for good
+-- if you don't get it back"), so a berry eaten against the computer stays
+-- eaten and a THIEF from a wild mon keeps its item -- and a fight between
+-- players here never writes home on any generation (owner decision,
+-- docs/plans/gen12-referee-fidelity.md §9).  Exported for src/CoopBattle.lua's
+-- Gen 2 arm.
 local KEEPS_HELD_MODES = { wild = true, coop_npc = true, coop_wild = true }
+M.KEEPS_HELD_MODES = KEEPS_HELD_MODES
 
 -- ------- Gen1 Battlefield theatre gate
 --
@@ -2668,6 +2893,10 @@ function M:start(game)
     self:ownItemSet()
     self.uploadHoldMap = nil
     self:uploadHolds()
+  elseif self:generation() == 2 then
+    -- Gold's: the same set, by item id (see `ownItem2`).
+    self.ownItems2 = nil
+    self:ownItemSet2()
   end
 
   if self.role == "host" or self.mode == "wild" then
@@ -2867,8 +3096,13 @@ function M:onEvent(msg)
     -- keeps that reading as the fallback for a stream that states none.
     self:noteSlot(msg)
     -- Gen 3: an AMULET COIN walking on doubles this fight's Pay Day coins
-    -- (the cart's switch-in item check; see `noteAmulet3`).
-    if self:generation() == 3 then self:noteAmulet3(msg) end
+    -- (the cart's switch-in item check; see `noteAmulet3`).  Gold's doubles
+    -- the trainer's prize the same way (`noteAmulet2`).
+    if self:generation() == 3 then
+      self:noteAmulet3(msg)
+    elseif self:generation() == 2 then
+      self:noteAmulet2(msg)
+    end
     -- Parked behind somebody still finishing their exit (`noteSlot`): the seat
     -- below is still *theirs*, so everything that describes what is drawn on it
     -- -- the level pill, the pic, the exp clocks -- is deferred to the swap
@@ -3129,6 +3363,15 @@ function M:onEvent(msg)
     -- the sky changes under the line that says so rather than at parse.
     local sky = (msg.amount ~= 0) and msg.text or nil
     self.lines[#self.lines + 1] = { stateRow = "weather", value = sky or false }
+
+  elseif kind == "held" and self:generation() == 2 then
+    -- Gold's own `held` (contract K3 of docs/plans/gen12-referee-fidelity.md):
+    -- `text` is the item's id and `amount` says whether the mon still holds it
+    -- -- Leftovers, a berry eaten, a Focus Band, THIEF on either end.  The
+    -- referee's own sentence is the `msg` behind it; this is the writeback
+    -- (`applyHeld2`) and the look, which Gold names by id like an `item`.
+    self:applyHeld2(msg)
+    self:queueVfx(itemVfx(msg.text), msg.slot, msg.slot)
 
   elseif kind == "held" then
     -- A held item acted: Leftovers, a berry, a Focus Band, Thief / Knock Off /
@@ -4272,6 +4515,182 @@ function M:caughtHolding(caught, current)
   return math.floor(had)
 end
 
+-- ------- Gold's held items (docs/plans/gen12-referee-fidelity.md, K2 / K3)
+--
+-- The Gen 3 four above, in Gold's dialect: items are string ids (the engine's
+-- `mon.item`), and a `held` event says the item and whether the mon still has
+-- it (`text`, `amount` 1 / 0) where Gen 3's says what it holds now.
+
+-- Every held item this client itself put into the fight, by id: its own sheets
+-- as uploaded and the wild / trainer sheets it uploaded for the other side.
+-- Taken once, at the upload, before any `held` event has moved an item; a
+-- screen that never uploaded (a harness) takes it at first use.  `ownItemSet`'s
+-- twin, for `ownItem2`.
+function M:ownItemSet2()
+  local set = self.ownItems2
+  if set then return set end
+  set = {}
+  local function add(list)
+    if type(list) ~= "table" then return end
+    for _, sheet in ipairs(list) do
+      local id = type(sheet) == "table" and Wire.id(sheet.heldItem) or nil
+      if id then set[id] = true end
+    end
+  end
+  add(self.mine)
+  add(self.wildParty)
+  add(self.npcParty)
+  self.ownItems2 = set
+  return set
+end
+
+-- May this item enter this player's save?  Only one this client's own uploads
+-- held: THIEF hands a mon whatever the other seat's sheet claimed, and a sheet
+-- is a claim -- a key item, a ticket, a Master Ball the far side wrote onto its
+-- monster is never written home, whoever the referee says it came from.  (A
+-- monster losing its item needs no such test; see `applyHeld2`.)
+function M:ownItem2(id)
+  id = Wire.id(id)
+  if not id then return false end
+  return self:ownItemSet2()[id] == true
+end
+
+-- The engine's mail test, guarded like every Gold require here.
+local function isMail2(itemId)
+  if type(itemId) ~= "string" or itemId == "" then return false end
+  local Mail = goldItemModule("Mail", "src.core.gen2.Mail")
+  if not (Mail and type(Mail.isMail) == "function") then return false end
+  local ok, is = pcall(Mail.isMail, itemId)
+  return ok and is == true
+end
+M.isMail2 = isMail2
+
+-- What a Gold `held` event leaves the mon holding: the item id when `amount`
+-- is 1, nil when it is 0 -- and `false` for an event that says neither (no
+-- `amount`, or a 1 with no item), which changes nothing anybody keeps.
+local function heldAfter2(msg)
+  local amount = tonumber(msg and msg.amount)
+  if amount == 0 then return nil end
+  if amount == 1 then
+    local id = Wire.id(msg.text)
+    if id then return id end
+  end
+  return false
+end
+M.heldAfter2 = heldAfter2
+
+-- A Gold `held` event.
+--
+-- The foe's is remembered, by its party index, for a catch (`caughtHolding2`):
+-- what the wild monster still holds at the throw is what the caught one keeps
+-- (pokecrystal PokeBallEffect saves wEnemyMonItem across its LoadEnemyMon and
+-- puts it back), so a berry it ate or an item a THIEF took is gone from it.
+--
+-- Ours goes onto the fight sheet always -- every K2 field re-read for the item
+-- it now holds, so an AMULET COIN taken with THIEF counts at its next send-out
+-- (`noteAmulet2`) -- and onto the save mon only where the cart keeps a fight's
+-- item changes (KEEPS_HELD_MODES: never a fight between players), only for the
+-- seat that is this client's own (`msg.side`), and only as an item this client
+-- uploaded itself (`ownItem2`).  Losing an item needs no such proof -- the cart
+-- writes NO_ITEM over the party struct for a berry eaten or a THIEF suffered --
+-- except a letter: Thief cannot take mail and no Gold item effect consumes it,
+-- so a referee saying a mail is gone is wrong, and the save's letter (which
+-- `save.mail` keeps by party slot) is not orphaned on its word.
+function M:applyHeld2(msg)
+  if not (type(msg) == "table" and msg.side ~= nil) then return false end
+  local holding = heldAfter2(msg)
+  if holding == false then return false end
+  local index = tonumber(msg.mon)
+  index = index and index >= 0 and floor(index) or nil
+  if msg.side ~= self.mySide then
+    if index then
+      self.foeHeld2 = self.foeHeld2 or {}
+      self.foeHeld2[index] = holding or false
+    end
+    return false
+  end
+  -- Before the sheet below moves: what this client brought is what it
+  -- uploaded, not what the referee has since said.
+  self:ownItemSet2()
+  local sheetIndex = index and (index + 1) or self.active
+  local sheet = self.mine and self.mine[sheetIndex]
+  -- A `mon` past what this client uploaded is a monster it cannot name: the
+  -- save is never written through an index no sheet stands behind.
+  if type(sheet) ~= "table" then return false end
+  M.setSheetItem2(self.game, sheet, holding)
+  if not KEEPS_HELD_MODES[self.mode] then return false end
+  local mon = self:saveMon(sheetIndex)
+  if type(mon) ~= "table" then return false end
+  local had = (type(mon.item) == "string" and mon.item ~= "") and mon.item or nil
+  if holding == had then return true end
+  if holding ~= nil and not self:ownItem2(holding) then
+    if not self.heldWarned2 then
+      self.heldWarned2 = true
+      mod.log:warn("the battle referee handed one of your POKeMON a %s, which "
+        .. "nothing in this fight was holding, so it was not added to your save "
+        .. "-- report this with the server you were playing on", holding)
+    end
+    return false
+  end
+  if had and isMail2(had) then
+    if not self.mailWarned2 then
+      self.mailWarned2 = true
+      mod.log:warn("the battle referee took a letter (%s) off one of your POKeMON, "
+        .. "which no move or item can do, so your save keeps it -- report this "
+        .. "with the server you were playing on", had)
+    end
+    return false
+  end
+  mon.item = holding
+  return true
+end
+
+-- What a caught Gold monster holds leaving the fight: the foe's last `held`
+-- event when there was one (a berry eaten, a THIEF suffered -- `false` is
+-- nothing), else what the engine monster already holds (`current`: the item
+-- `rollWildItem2` gave it, or nothing).  Only ever an item this client
+-- described itself (`ownItem2`); a claim it did not make leaves the monster as
+-- it was.  nil when there is nothing to say (no `held` about it).
+function M:caughtHolding2(index, current)
+  if not (type(self.foeHeld2) == "table" and index ~= nil) then return nil end
+  local held = self.foeHeld2[index]
+  if held == nil then return nil end
+  if held == false then return false end
+  if self:ownItem2(held) then return held end
+  return (type(current) == "table" and type(current.item) == "string" and current.item ~= "")
+    and current.item or false
+end
+
+-- pokecrystal CheckAmuletCoin (engine/battle/core.asm), in SendOutPlayerMon:
+-- the player's monster coming out holding a HELD_AMULET_COIN item sets
+-- wAmuletCoin, nothing clears it for the rest of the fight, and the win's
+-- prize is doubled (WinTrainerBattle `.give_money` -> `.DoubleReward`).  Only
+-- the player's own monster -- the cart reads wBattleMonItem and nothing of the
+-- foe's.  Read off our sheet as it stands at the `send` (`applyHeld2` keeps it
+-- on the item the monster holds now), by the K2 hold effect the sheet carries.
+M.HELD_AMULET_COIN2 = "HELD_AMULET_COIN"
+function M:noteAmulet2(msg)
+  if not (type(msg) == "table" and msg.side == self.mySide) then return false end
+  local index = tonumber(msg.mon)
+  local sheet
+  if type(self.mine) == "table" then
+    if index then
+      sheet = index >= 0 and self.mine[floor(index) + 1] or nil
+    else
+      sheet = self.mine[self.active or 1]
+    end
+  end
+  if type(sheet) ~= "table" or sheet.heldItem == nil then return false end
+  if sheet.holdEffect ~= M.HELD_AMULET_COIN2 then return false end
+  self.amuletOut2 = true
+  return true
+end
+
+-- Whether this fight's prize is doubled: an AMULET COIN came out on our seat.
+function M:amuletCoin2()
+  return self.amuletOut2 == true
+end
+
 -- One Gen 3 `ball` event as the ball-flow rows the arena and the classic page
 -- already play.  `amount` is the shakes (0..3) or 4 for a catch, which rocks
 -- three times and clicks.
@@ -5097,6 +5516,16 @@ function M:grantCatch(msg)
   local game = self.game
   local save = game and game.save
   if not save then return end
+  -- Gold: the item the wild monster still holds at the throw (`caughtHolding2`
+  -- -- the lone wild sheet is the referee's party index 0).
+  if self:generation() == 2 then
+    local held = self:caughtHolding2(0, mon)
+    if held == false then
+      mon.item = nil
+    elseif held ~= nil then
+      mon.item = held
+    end
+  end
   -- The name the prompt will ask about: a fresh catch has no nickname, so
   -- this is the species record's display name -- the same thing the engine's
   -- own catch prompt asks about (BattleState:storeCaughtMon passes

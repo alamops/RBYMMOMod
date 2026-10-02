@@ -18,6 +18,8 @@
  * takes (moveAccuracy, roll, opts).
  */
 
+const Items = require('./Items.js');
+
 const MIN = 1;
 const MAX = 100;
 const ROLL_MAX = 99;
@@ -70,10 +72,13 @@ function effectiveFromMods(accuracy, accuracyMod, evasionMod) {
 
 /*
  * hit({ accuracy, accuracyStage, evasionStage, accuracyMod, evasionMod,
- *       alwaysHits, roll })
+ *       alwaysHits, brightPowder, roll })
  *
  * `alwaysHits` (or accuracy 0) skips the roll and reports null effective
- * accuracy. Missing `roll` defaults to 0.
+ * accuracy. Missing `roll` defaults to 0. `brightPowder` is the DEFENDER's
+ * HELD_BRIGHTPOWDER parameter: `.BrightPowder` takes it off the stage-scaled
+ * accuracy before the roll (Items.brightPowder), and an always-hit move never
+ * meets it.
  */
 function hit(input) {
   const src = input || {};
@@ -91,6 +96,9 @@ function hit(input) {
     effectiveAccuracy = effective(acc, src.accuracyStage, src.evasionStage);
   } else {
     effectiveAccuracy = effectiveFromMods(acc, src.accuracyMod, src.evasionMod);
+  }
+  if (src.brightPowder !== undefined && src.brightPowder !== null) {
+    effectiveAccuracy = Items.brightPowder(effectiveAccuracy, src.brightPowder);
   }
   return {
     effectiveAccuracy,

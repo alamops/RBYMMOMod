@@ -7,8 +7,10 @@
  * {15,8,4,3,2,2,2}. A hit is critical when random(N) returns 0.
  *
  * Level contributions (capped at 6):
- *   +1 Focus Energy, +2 high-crit move, +1 Scope Lens,
- *   +2 species+item bonus (Lucky Punch / Stick).
+ *   +1 Focus Energy, +2 high-crit move, +1 Scope Lens.
+ * The species+item bonus (Chansey's Lucky Punch, Farfetch'd's Stick) is not a
+ * contribution: BattleCommand_Critical loads c = 2 and jumps straight to
+ * `.Tally`, so with it the level IS 2 (the Lua twin cites the lines).
  *
  * Unlike Gen1 there is no Focus Energy bug here — Focus Energy raises the
  * level. Crit *damage* (flat x2) lives in Damage.js; this module only answers
@@ -34,14 +36,16 @@ function chance(level) {
   return CRITICAL_CHANCES[capped];
 }
 
+const SPECIES_ITEM_LEVEL = 2;
+
 // opts: { focusEnergy, highCritMove, scopeLens, speciesItemBonus }
 function level(opts) {
   const o = opts || {};
+  if (o.speciesItemBonus) return SPECIES_ITEM_LEVEL;
   let lvl = 0;
   if (o.focusEnergy) lvl += 1;
   if (o.highCritMove) lvl += 2;
   if (o.scopeLens) lvl += 1;
-  if (o.speciesItemBonus) lvl += 2;
   return Math.min(6, lvl);
 }
 
@@ -69,4 +73,5 @@ module.exports = {
   level,
   int,
   CRITICAL_CHANCES,
+  SPECIES_ITEM_LEVEL,
 };

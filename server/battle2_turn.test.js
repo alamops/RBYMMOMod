@@ -89,6 +89,32 @@ function mn(o) {
     stages: o.stages,
     confusion: o.confusion,
     focusEnergy: o.focusEnergy,
+    // What the held-item and obedience scenarios add (contracts K1 / K2); the
+    // item is [id, HELD_* effect, parameter, name, mail], synthetic throughout.
+    speciesId: o.speciesId,
+    statusTurns: o.statusTurns,
+    traded: o.traded,
+    disable: o.disable,
+    ...(o.item ? {
+      heldItem: o.item[0],
+      holdEffect: o.item[1],
+      holdParam: o.item[2],
+      itemName: o.item[3],
+      mail: o.item[4],
+    } : {}),
+  };
+}
+
+// A full move for the held-item scenarios: an effect id and its chance.
+function hm(id, power, type, effect, pp, chance) {
+  return {
+    id,
+    pp: pp === undefined ? 60 : pp,
+    power,
+    accuracy: 255,
+    type: type === undefined ? 0 : type,
+    effect: effect === undefined ? 0 : effect,
+    chance: chance === undefined ? 0 : chance,
   };
 }
 
@@ -553,15 +579,15 @@ scenario('crit_stages', (events) => {
   return battle;
 });
 
-// TruncateHL_BC's loop against its single link pass (see the driver).
-function truncation(mode, id, foeId) {
+// TruncateHL_BC by cart family, K6 (see the driver).
+function truncation(mode, id, foeId, family) {
   return (events) => {
     const thump = () => mv('thump', 70, 255, 0);
     const wall = () => fx('wall_up', 0, 1, 65, 20);
     const battle = build({
       id, mode, seed: 31337, choiceTimeout: 60, reconnectGrace: 60,
       sides: {
-        a: [{ playerId: 'p1', name: 'Ann', mons: [
+        a: [{ playerId: 'p1', name: 'Ann', family, mons: [
           mn({ species: 'Alpha', level: 30, maxHp: 400, atk: 200, spe: 50,
             types: [2], moves: [thump()] })] }],
         b: [{ playerId: foeId, name: 'Bob', mons: [
@@ -581,6 +607,8 @@ function truncation(mode, id, foeId) {
 }
 scenario('truncate_wild', truncation('wild', 'tw', 'wild'));
 scenario('truncate_link', truncation('1v1', 'tl', 'p2'));
+scenario('truncate_crystal_wild', truncation('wild', 'tcw', 'wild', 'crystal'));
+scenario('truncate_crystal_link', truncation('1v1', 'tcl', 'p2', 'crystal'));
 
 // Screens belong to the SIDE (see the driver).
 scenario('screens_side', (events) => {
@@ -748,6 +776,405 @@ scenario('priority', (events) => {
 });
 
 // ------------------------------------------------------------------
+// Gold held items, obedience and the flinch reset (see the driver for what
+// each scenario pins). Every parameter is synthetic.
+// ------------------------------------------------------------------
+
+// Build, drain, then play each round and drain after it.
+function play(events, opts, rounds) {
+  const battle = build(opts);
+  drainInto(battle, events);
+  for (const round of rounds) {
+    if (battle.outcome()) break;
+    round(battle);
+    drainInto(battle, events);
+  }
+  return battle;
+}
+
+const repeat = (fn, n) => Array.from({ length: n }, () => fn);
+
+scenario('quick_claw', (events) => {
+  const claw = ['QUICK_CLAW', 'HELD_QUICK_CLAW', 100, 'QUICK CLAW'];
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    b.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+  };
+  return play(events, {
+    id: 'qc', mode: 'coop_pvp', seed: 4, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 999, spe: 10,
+        item: claw, moves: [hm('thump', 10)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 999, spe: 90,
+        moves: [hm('thump', 10)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 999, spe: 20,
+        item: claw, moves: [hm('thump', 10)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 999, spe: 50,
+        item: claw, moves: [hm('QUICK_ATTACK', 10)] })] }],
+    },
+  }, repeat(round, 4));
+});
+
+scenario('held_between_turns', (events) => {
+  const round = (b) => {
+    for (const id of ['a1', 'a2', 'a3']) b.submitChoice(id, { action: 'fight', move: 0, target: 3 });
+    for (const id of ['b1', 'b2', 'b3']) b.submitChoice(id, { action: 'fight', move: 0, target: 1 });
+  };
+  return play(events, {
+    id: 'bt', mode: 'coop_pvp', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 320, hp: 200, spe: 90,
+        item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [hm('tap', 1)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 400, spe: 80,
+        item: ['MYSTERYBERRY', 'HELD_RESTORE_PP', 0, 'MYSTERYBERRY'],
+        moves: [hm('tap', 1), hm('SKETCH', 0, 0, 0, 0), hm('spent', 40, 0, 0, 0)] })] },
+      { playerId: 'a3', name: 'Cal', mons: [mn({ species: 'Eta', maxHp: 200, hp: 90, spe: 70,
+        item: ['GOLD_BERRY', 'HELD_BERRY', 25, 'GOLD BERRY'], moves: [hm('tap', 1)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 200, hp: 99, spe: 60,
+        item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'], moves: [hm('tap', 1)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 400, spe: 50,
+        item: ['X_GEM', 'HELD_ATTACK_UP', 0, 'X GEM'], moves: [hm('tap', 1)] })] },
+      { playerId: 'b3', name: 'Bo', mons: [mn({ species: 'Zeta', maxHp: 400, spe: 40,
+        item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 2));
+});
+
+scenario('status_berries', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('a3', { action: 'fight', move: 0, target: 5 });
+    for (const id of ['b1', 'b2', 'b3']) b.submitChoice(id, { action: 'fight', move: 0, target: 0 });
+  };
+  return play(events, {
+    id: 'sb', mode: 'coop_pvp', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, status: 'PSN',
+        confusion: 3, item: ['MIRACLEBERRY', 'HELD_HEAL_STATUS', 0, 'MIRACLEBERRY'],
+        moves: [hm('doze_dust', 0, 0, 32)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 80,
+        confusion: 4, item: ['BITTER_BERRY', 'HELD_HEAL_CONFUSION', 0, 'BITTER BERRY'],
+        moves: [hm('venom_jab', 20, 0, 2, 60, 100)] })] },
+      { playerId: 'a3', name: 'Cal', mons: [mn({ species: 'Eta', maxHp: 300, spe: 70, status: 'BRN',
+        item: ['ICE_BERRY', 'HELD_HEAL_BURN', 0, 'ICE BERRY'], moves: [hm('daze_ray', 0, 0, 49)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 60,
+        item: ['MINT_BERRY', 'HELD_HEAL_SLEEP', 0, 'MINT BERRY'], moves: [hm('tap', 1)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 300, spe: 50,
+        item: ['PSNCUREBERRY', 'HELD_HEAL_POISON', 0, 'PSNCUREBERRY'], moves: [hm('tap', 1)] })] },
+      { playerId: 'b3', name: 'Bo', mons: [mn({ species: 'Zeta', maxHp: 300, spe: 40,
+        item: ['BITTER_BERRY', 'HELD_HEAL_CONFUSION', 0, 'BITTER BERRY'], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 2));
+});
+
+scenario('focus_band', (events) => {
+  const round = (b) => {
+    b.submitChoice('p1', { action: 'fight', move: 0 });
+    b.submitChoice('p2', { action: 'fight', move: 0 });
+  };
+  return play(events, {
+    id: 'fb', mode: '1v1', seed: 13, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, atk: 60, spe: 90,
+        types: [2], moves: [hm('thump', 40)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 40, spe: 10, types: [2],
+        item: ['FOCUS_BAND', 'HELD_FOCUS_BAND', 160, 'FOCUS BAND'], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 6));
+});
+
+scenario('kings_rock', (events) => {
+  const rock = ['KINGS_ROCK', 'HELD_FLINCH', 200, "KING'S ROCK"];
+  const rounds = [[0, 0], [1, 0], [2, 0], [0, 0]].map((picks) => (b) => {
+    b.submitChoice('p1', { action: 'fight', move: picks[0] });
+    b.submitChoice('p2', { action: 'fight', move: picks[1] });
+  });
+  return play(events, {
+    id: 'kr', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 999, spe: 90, types: [2],
+        item: rock, moves: [hm('thump', 10), hm('THUNDER', 10), hm('ember_hit', 10, 0, 4)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 999, spe: 10, types: [2],
+        item: rock, moves: [hm('thump', 10)] })] }],
+    },
+  }, rounds);
+});
+
+scenario('thief', (events) => {
+  const round = (b) => {
+    b.submitChoice('p1', { action: 'fight', move: 0 });
+    b.submitChoice('wild', { action: 'fight', move: 0 });
+  };
+  return play(events, {
+    id: 'th', mode: 'wild', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+        moves: [hm('THIEF', 10)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 320, spe: 10, types: [2],
+        item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [hm('THIEF', 10)] })] }],
+    },
+  }, repeat(round, 2));
+});
+
+scenario('thief_refused', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('a3', { action: 'fight', move: 0, target: 5 });
+    for (const id of ['b1', 'b2', 'b3']) b.submitChoice(id, { action: 'fight', move: 0, target: 0 });
+  };
+  return play(events, {
+    id: 'tr', mode: 'coop_pvp', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+        item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'], moves: [hm('THIEF', 10)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 80, types: [2],
+        moves: [hm('THIEF', 10)] })] },
+      { playerId: 'a3', name: 'Cal', mons: [mn({ species: 'Eta', maxHp: 300, atk: 200, spe: 70,
+        types: [2], moves: [hm('THIEF', 60)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 60, types: [2],
+        item: ['CHARCOAL', 'HELD_FIRE_BOOST', 20, 'CHARCOAL'], moves: [hm('tap', 1)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 300, spe: 50, types: [2],
+        item: ['FLOWER_MAIL', null, 0, 'FLOWER MAIL', true], moves: [hm('tap', 1)] })] },
+      { playerId: 'b3', name: 'Bo', mons: [mn({ species: 'Zeta', maxHp: 5, spe: 40, types: [2],
+        item: ['QUICK_CLAW', 'HELD_QUICK_CLAW', 100, 'QUICK CLAW'], moves: [hm('tap', 1)] })] }],
+    },
+  }, [round]);
+});
+
+scenario('berserk_gene', (events) => {
+  const gene = ['BERSERK_GENE', null, 0, 'BERSERKGENE'];
+  const rounds = [
+    (b) => {
+      b.submitChoice('p1', { action: 'fight', move: 0 });
+      b.submitChoice('wild', { action: 'fight', move: 0 });
+    },
+    (b) => {
+      b.submitChoice('p1', { action: 'switch', slot: 1 });
+      b.submitChoice('wild', { action: 'fight', move: 1 });
+    },
+    (b) => {
+      b.submitChoice('p1', { action: 'fight', move: 0 });
+      b.submitChoice('wild', { action: 'fight', move: 1 });
+    },
+  ];
+  return play(events, {
+    id: 'bg2', mode: 'wild', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2], moves: [hm('tap', 1)] }),
+        mn({ species: 'Gamma', maxHp: 300, spe: 80, types: [2], item: gene,
+          moves: [hm('tap', 1)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10,
+        types: [2], item: gene, moves: [hm('daze_ray', 0, 0, 49), hm('tap', 1)] })] }],
+    },
+  }, rounds);
+});
+
+scenario('metal_powder', (events) => {
+  const powder = ['METAL_POWDER', 'HELD_METAL_POWDER', 0, 'METAL POWDER'];
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    b.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+  };
+  return play(events, {
+    id: 'mp', mode: 'coop_pvp', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', family: 'crystal', mons: [mn({ species: 'Alpha', maxHp: 400,
+        atk: 120, def: 200, spe: 90, types: [2], moves: [hm('thump', 40)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', speciesId: 'DITTO', maxHp: 400,
+        atk: 120, def: 60, spe: 80, types: [2], moves: [hm('thump', 40)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', speciesId: 'DITTO', maxHp: 400,
+        def: 60, spe: 60, types: [2], item: powder, moves: [hm('copycat', 0, 0, 57)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', speciesId: 'MEW', maxHp: 400,
+        def: 60, spe: 50, types: [2], item: powder, moves: [hm('copycat', 0, 0, 57)] })] }],
+    },
+  }, repeat(round, 2));
+});
+
+scenario('species_items', (events) => {
+  const rounds = [[0, 0], [1, 1]].map((picks) => (b) => {
+    b.submitChoice('p1', { action: 'fight', move: picks[0] });
+    b.submitChoice('p2', { action: 'fight', move: picks[1] });
+  });
+  return play(events, {
+    id: 'si', mode: '1v1', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    specialTypes: [1],
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', speciesId: 'PIKACHU', level: 30,
+        maxHp: 600, atk: 100, spa: 100, def: 100, spd: 100, spe: 90, types: [2],
+        item: ['LIGHT_BALL', null, 0, 'LIGHT BALL'], moves: [hm('zap', 40, 1), hm('thump', 40)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', speciesId: 'CUBONE', level: 30,
+        maxHp: 600, atk: 600, spa: 100, def: 100, spd: 100, spe: 10, types: [2],
+        item: ['THICK_CLUB', null, 0, 'THICK CLUB'], moves: [hm('thump', 40), hm('zap', 40, 1)] })] }],
+    },
+  }, rounds);
+});
+
+scenario('type_boost', (events) => {
+  const round = (b) => {
+    b.submitChoice('p1', { action: 'fight', move: 0 });
+    b.submitChoice('p2', { action: 'fight', move: 0 });
+  };
+  return play(events, {
+    id: 'tb', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    specialTypes: [1], typeIds: ['NORMAL', 'FIRE', 'WATER'],
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', level: 30, maxHp: 600, atk: 100,
+        spa: 100, def: 100, spd: 100, spe: 90, types: [2], confusion: 5,
+        item: ['CHARCOAL', 'HELD_FIRE_BOOST', 20, 'CHARCOAL'], moves: [hm('ember_hit', 40, 1)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', level: 30, maxHp: 600, atk: 100,
+        def: 100, spe: 10, types: [2], item: ['PINK_BOW', 'HELD_NORMAL_BOOST', 20, 'PINK BOW'],
+        moves: [hm('thump', 40, 0, 0, 0)] })] }],
+    },
+  }, repeat(round, 3));
+});
+
+scenario('crit_items', (events) => {
+  const round = (b) => {
+    b.submitChoice('p1', { action: 'fight', move: 0 });
+    b.submitChoice('p2', { action: 'fight', move: 0 });
+  };
+  const slash = hm('slash_hit', 20);
+  slash.highCrit = true;
+  return play(events, {
+    id: 'ci', mode: '1v1', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', speciesId: 'CHANSEY', maxHp: 900,
+        spe: 90, types: [2], focusEnergy: true, item: ['LUCKY_PUNCH', null, 0, 'LUCKY PUNCH'],
+        moves: [slash] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2],
+        item: ['SCOPE_LENS', 'HELD_CRITICAL_UP', 0, 'SCOPE LENS'], moves: [hm('thump', 20)] })] }],
+    },
+  }, repeat(round, 6));
+});
+
+scenario('bright_powder', (events) => {
+  const rounds = [1, 2, 3, 4, 5, 6].map((i) => (b) => {
+    b.submitChoice('p1', { action: 'fight', move: i % 2 === 1 ? 0 : 1 });
+    b.submitChoice('p2', { action: 'fight', move: 0 });
+  });
+  return play(events, {
+    id: 'bp', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 900, spe: 90, types: [2],
+        moves: [hm('thump', 10), hm('star_dart', 10, 0, 17)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2],
+        item: ['BRIGHTPOWDER', 'HELD_BRIGHTPOWDER', 120, 'BRIGHTPOWDER'], moves: [hm('tap', 1)] })] }],
+    },
+  }, rounds);
+});
+
+scenario('obey_traded', (events) => {
+  const round = (b) => {
+    b.submitChoice('p1', { action: 'fight', move: 0 });
+    b.submitChoice('wild', { action: 'fight', move: 0 });
+  };
+  return play(events, {
+    id: 'ob', mode: 'wild', seed: 660, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', level: 80, maxHp: 900, atk: 60,
+        def: 200, spe: 90, types: [2], traded: true,
+        moves: [hm('thump', 10), hm('pound_two', 10), hm('pound_three', 10), hm('pound_four', 10)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', level: 80, maxHp: 900, spe: 10,
+        types: [2], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 8));
+});
+
+scenario('obey_asleep', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('wild', { action: 'fight', move: 0, target: 0 });
+  };
+  return play(events, {
+    id: 'oa', mode: 'coop_wild', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', level: 60, maxHp: 900, spe: 90,
+        types: [2], status: 'SLP', statusTurns: 7, traded: true,
+        moves: [hm('SNORE', 10), hm('thump', 10)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', level: 60, maxHp: 900, spe: 80,
+        types: [2], status: 'SLP', statusTurns: 7, traded: true,
+        moves: [hm('SLEEP_TALK', 0), hm('thump', 10)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', level: 60, maxHp: 900, spe: 10,
+        types: [2], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 4));
+});
+
+scenario('obey_badges', (events) => {
+  const round = (b) => {
+    for (const id of ['a1', 'a2', 'a3']) b.submitChoice(id, { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('wild', { action: 'fight', move: 0, target: 0 });
+  };
+  const seat = (id, name, species, level, spe, badges) => ({
+    playerId: id, name, badges, mons: [mn({ species, level,
+      maxHp: 900, spe, types: [2], traded: true,
+      moves: [hm('thump', 10), hm('pound_two', 10)] })],
+  });
+  return play(events, {
+    id: 'obb', mode: 'coop_wild', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [seat('a1', 'Ann', 'Alpha', 100, 88, { RISING: true }),
+        seat('a2', 'Abe', 'Gamma', 70, 90, { STORM: true, FOG: true, HIVE: true }),
+        seat('a3', 'Cal', 'Eta', 75, 85, { STORM: true })],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', level: 50, maxHp: 900, spe: 10,
+        types: [2], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 4));
+});
+
+scenario('obey_fallbacks', (events) => {
+  const round = (b) => {
+    for (const id of ['a1', 'a2', 'a3']) b.submitChoice(id, { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('wild', { action: 'fight', move: 0, target: 0 });
+  };
+  return play(events, {
+    id: 'obf', mode: 'coop_wild', seed: 7, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', level: 80, maxHp: 900, spe: 90,
+        types: [2], traded: true, moves: [hm('thump', 10)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', level: 80, maxHp: 900, spe: 80,
+        types: [2], traded: true, moves: [hm('thump', 10), hm('pound_two', 10, 0, 0, 0)] })] },
+      { playerId: 'a3', name: 'Cal', mons: [mn({ species: 'Eta', level: 80, maxHp: 900, spe: 70,
+        types: [2], traded: true, disable: { moveIndex: 2, turns: 9 },
+        moves: [hm('thump', 10), hm('pound_two', 10)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', level: 50, maxHp: 900, spe: 10,
+        types: [2], moves: [hm('tap', 1)] })] }],
+    },
+  }, repeat(round, 6));
+});
+
+function obeyNever(mode, id) {
+  return (events) => {
+    const foe = mode === 'wild' ? 'wild' : 'p2';
+    const round = (b) => {
+      b.submitChoice('p1', { action: 'fight', move: 0 });
+      b.submitChoice(foe, { action: 'fight', move: 0 });
+    };
+    return play(events, {
+      id, mode, seed: 99, choiceTimeout: 60, reconnectGrace: 60,
+      sides: {
+        a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha',
+          level: mode === 'wild' ? 5 : 80, maxHp: 900, spe: 90, types: [2],
+          traded: mode !== 'wild' ? true : undefined,
+          moves: [hm('thump', 10), hm('pound_two', 10)] })] }],
+        b: [{ playerId: foe, name: 'Bob', mons: [mn({ species: 'Beta', level: 80, maxHp: 900, spe: 10,
+          types: [2], traded: true, moves: [hm('tap', 1), hm('pound_two', 1)] })] }],
+      },
+    }, repeat(round, 4));
+  };
+}
+scenario('obey_link', obeyNever('1v1', 'ol'));
+scenario('obey_side_b', obeyNever('wild', 'osb'));
+
+// ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
 
@@ -810,7 +1237,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 19, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 40, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -1847,4 +2274,453 @@ test('fidelity: an NPC never re-raises a screen that is already up', () => {
   const second = animOrder(battle.drainEvents());
   assert.ok(!second.includes('wall_up'), 'and does not cast it again while it is up');
   assert.ok(second.includes('thump'), 'it attacks instead');
+});
+
+// ------------------------------------------------------------------
+// Gold held items, obedience, the flinch reset and the cart family -- the
+// same claims as section 9 of tests/battle_sim2_turn.lua, every parameter
+// synthetic.
+// ------------------------------------------------------------------
+
+const { Items, crit: Crit2 } = require('./lib/battle2');
+
+// A sheet with an item ([id, effect, param, name, mail]) and the obedience
+// fields, on top of `sheet`.
+function held(o) {
+  const m = sheet(o);
+  m.speciesId = o.speciesId;
+  m.traded = o.traded;
+  m.statusTurns = o.statusTurns;
+  m.focusEnergy = o.focusEnergy;
+  m.disable = o.disable;
+  if (o.item) {
+    [m.heldItem, m.holdEffect, m.holdParam, m.itemName, m.mail] = o.item;
+  }
+  return m;
+}
+function fight(o) {
+  const foe = o.foe || ((o.mode === 'wild' || o.mode === 'coop_wild') ? 'wild' : 'p2');
+  const battle = build({
+    id: 'b1', mode: o.mode || '1v1', seed: o.seed === undefined ? 4242 : o.seed,
+    choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: o.typeIds, specialTypes: o.specialTypes, chart: o.chart,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: o.badges, family: o.family, mons: o.a }],
+      b: [{ playerId: foe, name: 'Bob', mons: o.b }],
+    },
+  });
+  return { battle, foe };
+}
+function roundOf(battle, foe, a, b) {
+  battle.submitChoice('p1', a || { action: 'fight', move: 0 });
+  battle.submitChoice(foe, b || { action: 'fight', move: 0 });
+  return battle.drainEvents();
+}
+const heldEvents = (events) => events.filter((e) => e.t === 'held')
+  .map((e) => `${e.text}:${e.amount}@${e.slot}`).join(',');
+const sawHeld = (events) => events.some((e) => e.t === 'held');
+const rngOf = (battle) => battle.snapshot().rngState;
+const LEFTOVERS = ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'];
+const monOf = (battle, id, index = 0) => battle.byId.get(id).mons[index];
+
+test('held items: the sheet keeps K1 / K2, and each seat its badge rules and family (K6)', () => {
+  const battle = build({
+    id: 'b1', mode: 'wild', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', family: 'crystal', mons: [
+        held({ species: 'Alpha', traded: true, item: ['FLOWER_MAIL', null, 77, 'FLOWER MAIL', true],
+          moves: [hit('tap', 1)] }),
+        held({ species: 'Gamma', moves: [hit('tap', 1)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', family: 'crystal', mons: [
+        held({ species: 'Beta', item: ['LEFTOVERS', 'HELD_LEFTOVERS', 999, 'LEFTOVERS'],
+          moves: [hit('tap', 1)] })] }],
+    },
+  });
+  const alpha = monOf(battle, 'p1');
+  assert.strictEqual(alpha.heldItem, 'FLOWER_MAIL');
+  assert.strictEqual(alpha.holdParam, 77);
+  assert.strictEqual(alpha.mail, true);
+  assert.strictEqual(alpha.itemName, 'FLOWER MAIL');
+  assert.strictEqual(alpha.traded, true);
+  assert.strictEqual(monOf(battle, 'wild').holdParam, 255, 'a parameter past a byte is held at 255');
+  assert.strictEqual(monOf(battle, 'p1', 1).heldItem, undefined, 'no item, none of the fields');
+  assert.strictEqual(monOf(battle, 'p1', 1).traded, undefined);
+  assert.strictEqual(battle.byId.get('p1').badgeRules, true);
+  assert.strictEqual(battle.byId.get('wild').badgeRules, null, 'side b never plays by badge rules');
+  assert.strictEqual(battle.family, 'crystal', "the fight's cart is side a's first seat's");
+  const link = build({
+    id: 'b1', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', family: 'silver', mons: [held({ species: 'Alpha', moves: [hit('tap', 1)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', family: 'crystal', mons: [held({ species: 'Beta', moves: [hit('tap', 1)] })] }],
+    },
+  });
+  assert.strictEqual(link.byId.get('p1').badgeRules, null, 'a link battle has no badge-rules seat');
+  assert.strictEqual(link.family, 'gs', "an unknown family on side a is Gold / Silver's");
+  const orphan = held({ species: 'Alpha', moves: [hit('tap', 1)] });
+  orphan.holdEffect = 'HELD_LEFTOVERS';
+  const lone = build({
+    id: 'b1', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [orphan] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [held({ species: 'Beta', moves: [hit('tap', 1)] })] }],
+    },
+  });
+  assert.strictEqual(monOf(lone, 'p1').holdEffect, undefined, 'a hold effect with no item is nothing held');
+});
+
+test('K6: TruncateHL_BC folds once on Gold / Silver and in a link battle, loops on Crystal otherwise', () => {
+  const onePass = (mode, family) => fight({
+    mode, family,
+    a: [held({ species: 'Alpha', moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', moves: [hit('tap', 1)] })],
+  }).battle._onePassTruncate();
+  assert.strictEqual(onePass('wild', undefined), true);
+  assert.strictEqual(onePass('wild', 'gs'), true);
+  assert.strictEqual(onePass('wild', 'crystal'), false);
+  assert.strictEqual(onePass('1v1', 'crystal'), true);
+  assert.strictEqual(onePass('coop_pvp', 'gs'), true);
+});
+
+test('held items: Quick Claw rolls inside a bracket only, side b first, and a bracket of one draws nothing', () => {
+  const claw = ['QUICK_CLAW', 'HELD_QUICK_CLAW', 255, 'QUICK CLAW'];
+  const order = (item, bMove, seed = 3) => {
+    const { battle, foe } = fight({
+      seed,
+      a: [held({ species: 'Alpha', spe: 10, item, moves: [hit('ann_hit', 10)] })],
+      b: [held({ species: 'Beta', spe: 90, moves: [bMove || hit('bob_hit', 10)] })],
+    });
+    battle.drainEvents();
+    return { order: animOrder(roundOf(battle, foe)), rng: rngOf(battle) };
+  };
+  assert.strictEqual(order(claw).order, 'ann_hit,bob_hit', 'a claw that fires puts the slower holder first');
+  assert.strictEqual(order(undefined).order, 'bob_hit,ann_hit');
+  assert.notStrictEqual(order(undefined).rng, order(claw).rng, 'its byte is a real draw');
+  assert.strictEqual(order(claw, hit('QUICK_ATTACK', 10)).order, 'QUICK_ATTACK,ann_hit',
+    'never past a higher bracket');
+  assert.strictEqual(order(claw, hit('QUICK_ATTACK', 10), 9).rng,
+    order(undefined, hit('QUICK_ATTACK', 10), 9).rng, 'a bracket of one draws nothing');
+  const { battle, foe } = fight({
+    seed: 3,
+    a: [held({ species: 'Alpha', spe: 50, item: claw, moves: [hit('ann_hit', 10)] })],
+    b: [held({ species: 'Beta', spe: 10, item: claw, moves: [hit('bob_hit', 10)] })],
+  });
+  battle.drainEvents();
+  assert.strictEqual(animOrder(roundOf(battle, foe)), 'bob_hit,ann_hit', "side b's claw rolls first");
+});
+
+test('held items: Leftovers, a Berry eaten and gone, the strict half', () => {
+  const { battle, foe } = fight({
+    seed: 7,
+    a: [held({ species: 'Alpha', maxHp: 320, hp: 100, spe: 90, item: LEFTOVERS, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', maxHp: 100, hp: 50, spe: 10, item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'],
+      moves: [hit('tap', 0, 0, 85)] })],
+  });
+  battle.drainEvents();
+  const events = roundOf(battle, foe);
+  assert.ok(said(events, 'Alpha recovered with LEFTOVERS.'));
+  assert.strictEqual(monOf(battle, 'p1').heldItem, 'LEFTOVERS');
+  assert.strictEqual(heldEvents(events), 'LEFTOVERS:1@0,BERRY:0@3');
+  assert.ok(said(events, 'Beta recovered using a BERRY!'));
+  assert.strictEqual(monOf(battle, foe).heldItem, null);
+  assert.strictEqual(monOf(battle, foe).hp, 49 + 12);
+  const quiet = fight({
+    seed: 7,
+    a: [held({ species: 'Alpha', spe: 90, moves: [hit('tap', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 100, hp: 50, spe: 10, item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'],
+      moves: [hit('tap', 0, 0, 85)] })],
+  });
+  quiet.battle.drainEvents();
+  assert.ok(!sawHeld(roundOf(quiet.battle, quiet.foe)), 'at exactly half the Berry is kept');
+  assert.strictEqual(Items.sixteenth(320), 20);
+});
+
+test('held items: a status berry right after infliction, and only the matching one', () => {
+  const run = (item) => {
+    const { battle, foe } = fight({
+      seed: 11,
+      a: [held({ species: 'Alpha', spe: 90, moves: [hit('doze_dust', 0, 0, 32)] })],
+      b: [held({ species: 'Beta', spe: 10, item, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe), battle, foe };
+  };
+  const mint = run(['MINT_BERRY', 'HELD_HEAL_SLEEP', 0, 'MINT BERRY']);
+  assert.ok(said(mint.events, 'Beta fell asleep'));
+  assert.ok(said(mint.events, 'Beta recovered using a MINT BERRY!'));
+  assert.strictEqual(monOf(mint.battle, mint.foe).status, null);
+  assert.ok(said(mint.events, 'Beta used tap'), 'the target moves this very turn');
+  const ice = run(['ICE_BERRY', 'HELD_HEAL_BURN', 0, 'ICE BERRY']);
+  assert.ok(!sawHeld(ice.events), 'a berry for another status does nothing');
+  assert.strictEqual(monOf(ice.battle, ice.foe).heldItem, 'ICE_BERRY');
+});
+
+test('held items: Focus Band rolls on every hit and holds a lethal one at 1', () => {
+  const band = ['FOCUS_BAND', 'HELD_FOCUS_BAND', 255, 'FOCUS BAND'];
+  const run = (item, hp) => {
+    const { battle, foe } = fight({
+      seed: 21,
+      a: [held({ species: 'Alpha', atk: 200, spe: 90, moves: [hit('thump', 80)] })],
+      b: [held({ species: 'Beta', maxHp: 400, hp, spe: 10, item, moves: [hit('tap', 0, 0, 85)] })],
+    });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe), battle, foe };
+  };
+  const lethal = run(band, 5);
+  assert.strictEqual(monOf(lethal.battle, lethal.foe).hp, 1);
+  assert.ok(said(lethal.events, 'Beta hung on with FOCUS BAND!'));
+  assert.strictEqual(heldEvents(lethal.events), 'FOCUS_BAND:1@3');
+  const bare = run(undefined, 400);
+  const banded = run(band, 400);
+  assert.notStrictEqual(rngOf(bare.battle), rngOf(banded.battle), 'a non-lethal hit still rolls');
+  assert.ok(!sawHeld(banded.events), 'and says nothing');
+});
+
+test("held items: King's Rock -- eligible scripts only, never through a standing substitute", () => {
+  const rock = ['KINGS_ROCK', 'HELD_FLINCH', 255, "KING'S ROCK"];
+  const run = (move, item, b) => {
+    const { battle, foe } = fight({
+      seed: 3,
+      a: [held({ species: 'Alpha', spe: 90, item, moves: [move] })],
+      b: [b || held({ species: 'Beta', maxHp: 400, spe: 10, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe), battle };
+  };
+  assert.ok(said(run(hit('thump', 10), rock).events, 'Beta flinched'));
+  assert.strictEqual(rngOf(run(hit('thump', 10)).battle), rngOf(run(hit('THUNDER', 10), rock).battle),
+    'a folded-0 move without `kingsrock` draws nothing');
+  assert.strictEqual(rngOf(run(hit('ember_hit', 10, 0, 4), rock).battle),
+    rngOf(run(hit('ember_hit', 10, 0, 4)).battle), 'nor does a status hit');
+  const subbed = () => held({ species: 'Beta', maxHp: 400, spe: 10, substitute: 300, moves: [hit('tap', 1)] });
+  const sub = run(hit('thump', 10), rock, subbed());
+  assert.ok(!said(sub.events, 'Beta flinched'));
+  assert.strictEqual(rngOf(sub.battle), rngOf(run(hit('thump', 10), undefined, subbed()).battle));
+  assert.strictEqual(Items.kingsRockMove(Effects.idOf('TWO_TO_FIVE_ATTACKS_EFFECT'), 'fury_hits'), true);
+});
+
+test('held items: Lucky Punch reads the battle species through Transform, Metal Powder the party one', () => {
+  const { battle, foe } = fight({
+    seed: 5,
+    a: [held({ species: 'Alpha', speciesId: 'DITTO', spe: 90, item: ['LUCKY_PUNCH', null, 0, 'LUCKY PUNCH'],
+      moves: [hit('copycat', 0, 0, 57)] })],
+    b: [held({ species: 'Beta', speciesId: 'CHANSEY', spe: 10, moves: [hit('tap', 1)] })],
+  });
+  battle.drainEvents();
+  roundOf(battle, foe);
+  const alpha = monOf(battle, 'p1');
+  assert.strictEqual(battle._battleSpecies(alpha), 'CHANSEY');
+  assert.strictEqual(Items.critSpeciesItem(battle._battleSpecies(alpha), alpha.heldItem), true);
+  assert.strictEqual(alpha.speciesId, 'DITTO');
+  assert.deepStrictEqual(Items.metalPowder({ heldItem: 'METAL_POWDER', speciesId: alpha.speciesId }, 100, 100),
+    { attack: 100, defense: 150 });
+  assert.strictEqual(Crit2.level({ speciesItemBonus: true, focusEnergy: true, highCritMove: true, scopeLens: true }), 2);
+});
+
+test('held items: Thief both ways, never Mail, never into a full hand', () => {
+  const run = (bItem, aItem) => {
+    const { battle, foe } = fight({
+      seed: 4,
+      a: [held({ species: 'Alpha', spe: 90, item: aItem, moves: [hit('THIEF', 10)] })],
+      b: [held({ species: 'Beta', maxHp: 400, spe: 10, item: bItem, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe), battle, foe };
+  };
+  const charcoal = ['CHARCOAL', 'HELD_FIRE_BOOST', 20, 'CHARCOAL'];
+  const stolen = run(charcoal);
+  assert.ok(said(stolen.events, 'Alpha stole CHARCOAL from its foe!'));
+  assert.strictEqual(heldEvents(stolen.events), 'CHARCOAL:0@3,CHARCOAL:1@0');
+  assert.strictEqual(monOf(stolen.battle, 'p1').holdEffect, 'HELD_FIRE_BOOST');
+  assert.strictEqual(monOf(stolen.battle, stolen.foe).heldItem, null);
+  assert.ok(!sawHeld(run(['FLOWER_MAIL', null, 0, 'FLOWER MAIL', true]).events), 'Mail by flag');
+  assert.ok(!sawHeld(run(['SURF_MAIL', null, 0, 'SURF MAIL']).events), 'Mail by id');
+  assert.ok(!sawHeld(run(charcoal, ['BERRY', 'HELD_BERRY', 12, 'BERRY']).events), 'a full hand');
+  assert.ok(!sawHeld(run(undefined).events), 'an empty foe');
+  const { battle, foe } = fight({
+    mode: 'wild', seed: 4,
+    a: [held({ species: 'Alpha', spe: 90, item: LEFTOVERS, moves: [hit('tap', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('THIEF', 10)] })],
+  });
+  battle.drainEvents();
+  assert.ok(said(roundOf(battle, foe), 'Beta stole LEFTOVERS from its foe!'), "the computer's Thief is not gated");
+  assert.strictEqual(monOf(battle, 'p1').heldItem, null);
+});
+
+test('held items: Berserk Gene -- 256, an already-confused holder, Attack at +6', () => {
+  const gene = ['BERSERK_GENE', null, 0, 'BERSERKGENE'];
+  const { battle } = fight({
+    a: [held({ species: 'Alpha', spe: 90, item: gene, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })],
+  });
+  const events = battle.drainEvents();
+  const alpha = monOf(battle, 'p1');
+  assert.strictEqual(alpha.confusion, Turn.BERSERK_CONFUSION);
+  assert.strictEqual(alpha.stages.atk, 2);
+  assert.strictEqual(alpha.heldItem, null);
+  assert.ok(said(events, "Alpha's BERSERKGENE activated!"));
+  const geneAt = events.findIndex((e) => e.t === 'held');
+  const turnAt = events.findIndex((e) => e.t === 'turn');
+  assert.ok(geneAt >= 0 && geneAt < turnAt, 'before the turn opens');
+  const maxed = held({ species: 'Alpha', spe: 90, item: gene, moves: [hit('tap', 1)] });
+  maxed.stages = { atk: 6 };
+  maxed.confusion = 3;
+  const second = fight({ a: [maxed], b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })] });
+  const events2 = second.battle.drainEvents();
+  assert.strictEqual(monOf(second.battle, 'p1').confusion, 3);
+  assert.ok(!said(events2, 'Alpha became confused'));
+  assert.ok(!said(events2, "Alpha's ATTACK rose"));
+});
+
+test('obedience: who is asked, and when nothing is drawn', () => {
+  const run = (o) => {
+    const { battle, foe } = fight({
+      mode: o.mode || 'wild', seed: o.seed === undefined ? 31 : o.seed, badges: o.badges,
+      a: [held({ species: 'Alpha', level: o.level || 80, spe: 90, traded: o.traded,
+        moves: [hit('thump', 10), hit('pound_two', 10)] })],
+      b: [held({ species: 'Beta', level: 80, spe: 10, maxHp: 900, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    for (let i = 0; i < 4; i += 1) roundOf(battle, foe);
+    return rngOf(battle);
+  };
+  const base = run({});
+  assert.notStrictEqual(run({ traded: true }), base, 'a traded L80 monster with no badge is asked');
+  assert.strictEqual(run({ traded: true, level: 10 }), run({ level: 10 }), 'at the cap: no draw');
+  assert.strictEqual(run({ traded: true, badges: { RISING: true } }), base, 'RISING: no draw');
+  assert.strictEqual(run({ traded: true, mode: '1v1' }), run({ mode: '1v1' }), 'a link battle never asks');
+  // CheckUserIsCharging and CheckRampage skip the command.
+  const locked = (traded, field, value) => {
+    const mon = held({ species: 'Alpha', level: 80, spe: 90, traded,
+      moves: [hit('beam_up', 60, 0, 39), hit('rampage', 60, 0, 27)] });
+    mon[field] = value;
+    const { battle, foe } = fight({
+      mode: 'wild', seed: 31, a: [mon],
+      b: [held({ species: 'Beta', level: 80, maxHp: 900, spe: 10, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    battle.tick(1);
+    const events = battle.drainEvents().concat(roundOf(battle, foe));
+    return { rng: rngOf(battle), events };
+  };
+  const charged = () => ({ moveIndex: 1, effect: 39, moveId: 'beam_up', targetSlot: 3 });
+  const tradedCharge = locked(true, 'charging', charged());
+  assert.strictEqual(tradedCharge.rng, locked(undefined, 'charging', charged()).rng,
+    "a charged move's release is never asked");
+  assert.ok(said(tradedCharge.events, 'Alpha used beam_up'), 'and goes off');
+  assert.strictEqual(locked(true, 'thrashing', { turns: 1, moveIndex: 2 }).rng,
+    locked(undefined, 'thrashing', { turns: 1, moveIndex: 2 }).rng, "nor is a rampage's continuation");
+});
+
+test('obedience: Snore / Sleep Talk pass the sleep gate, and a disobedient sleeper ignores orders', () => {
+  const sleeper = (move, traded, seed) => {
+    const { battle, foe } = fight({
+      mode: 'wild', seed,
+      a: [held({ species: 'Alpha', level: 80, spe: 90, status: 'SLP', statusTurns: 7, traded,
+        moves: [move, hit('thump', 10)] })],
+      b: [held({ species: 'Beta', level: 80, maxHp: 900, spe: 10, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    return roundOf(battle, foe);
+  };
+  const snore = sleeper(hit('SNORE', 10), undefined, 3);
+  assert.ok(said(snore, 'Alpha is fast asleep') && said(snore, 'Alpha used SNORE'));
+  const other = sleeper(hit('thump', 10), undefined, 3);
+  assert.ok(said(other, 'Alpha is fast asleep') && !said(other, 'Alpha used thump'));
+  let ignored = null;
+  for (let seed = 1; seed <= 40 && !ignored; seed += 1) {
+    const events = sleeper(hit('SLEEP_TALK', 0), true, seed);
+    if (said(events, 'Alpha ignored orders...sleeping!')) ignored = events;
+  }
+  assert.ok(ignored, 'a disobedient sleeper using Sleep Talk ignores orders');
+  assert.ok(!said(ignored, 'Alpha used SLEEP_TALK'));
+});
+
+test('obedience: `.UseInstead` spends the other move and forgets the last move', () => {
+  let found = null;
+  for (let seed = 1; seed <= 400 && !found; seed += 1) {
+    const { battle, foe } = fight({
+      mode: 'wild', seed,
+      a: [held({ species: 'Alpha', level: 80, spe: 90, traded: true,
+        moves: [hit('thump', 10), hit('pound_two', 10)] })],
+      b: [held({ species: 'Beta', level: 80, maxHp: 900, spe: 10, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    if (said(roundOf(battle, foe), 'Alpha used instead, pound_two')) found = battle;
+  }
+  assert.ok(found);
+  const alpha = monOf(found, 'p1');
+  assert.strictEqual(alpha.moves[1].pp, 29);
+  assert.strictEqual(alpha.moves[0].pp, 30);
+  assert.strictEqual(alpha.lastMoveIndex, 0);
+});
+
+test('the flinch reset at turn open, and the recharge exception', () => {
+  const rock = ['KINGS_ROCK', 'HELD_FLINCH', 255, "KING'S ROCK"];
+  const { battle, foe } = fight({
+    mode: 'wild', seed: 3,
+    a: [held({ species: 'Alpha', spe: 90, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', spe: 10, item: rock, moves: [hit('thump', 10)] })],
+  });
+  battle.drainEvents();
+  const orig = Turn.Battle.prototype._openTurn;
+  let seen = null;
+  Turn.Battle.prototype._openTurn = function patched() {
+    seen = this.byId.get('p1').mons[0].flinch;
+    return orig.call(this);
+  };
+  try {
+    roundOf(battle, foe);
+  } finally {
+    Turn.Battle.prototype._openTurn = orig;
+  }
+  assert.strictEqual(seen, true, "the slower holder's roll lands on a target that already moved");
+  assert.strictEqual(monOf(battle, 'p1').flinch, false, "the turn's open clears it");
+  assert.ok(said(roundOf(battle, foe), 'Alpha used tap'));
+  const kept = fight({
+    mode: 'wild', seed: 3,
+    a: [held({ species: 'Alpha', spe: 90, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })],
+  }).battle;
+  const alpha = monOf(kept, 'p1');
+  alpha.flinch = true;
+  alpha.mustRecharge = true;
+  monOf(kept, 'wild').flinch = true;
+  kept._openTurn();
+  assert.strictEqual(alpha.flinch, true, "the player's recharging monster keeps its flag");
+  assert.strictEqual(monOf(kept, 'wild').flinch, false);
+  const linked = fight({
+    mode: '1v1', seed: 3,
+    a: [held({ species: 'Alpha', spe: 90, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })],
+  }).battle;
+  const lalpha = monOf(linked, 'p1');
+  lalpha.flinch = true;
+  lalpha.mustRecharge = true;
+  linked._openTurn();
+  assert.strictEqual(lalpha.flinch, false, 'a link battle resets every flag');
+});
+
+test('held items: Mysteryberry, the stat-up items, and the held vocabulary', () => {
+  const { battle, foe } = fight({
+    seed: 2,
+    a: [held({ species: 'Alpha', spe: 90, item: ['MYSTERYBERRY', 'HELD_RESTORE_PP', 0, 'MYSTERYBERRY'],
+      moves: [hit('tap', 1), hit('spent', 40, 0, 0, 0)] })],
+    b: [held({ species: 'Beta', spe: 10, item: ['X_GEM', 'HELD_SPEED_UP', 0, 'X GEM'], moves: [hit('tap', 1)] })],
+  });
+  const events = battle.drainEvents().concat(roundOf(battle, foe));
+  assert.strictEqual(monOf(battle, 'p1').moves[1].pp, 5);
+  assert.ok(said(events, 'Alpha recovered PP using MYSTERYBERRY.'));
+  assert.strictEqual(monOf(battle, foe).stages.spe, 1);
+  assert.ok(said(events, "Beta's X GEM activated!"));
+  const topped = held({ species: 'Beta', spe: 10, item: ['X_GEM', 'HELD_SPEED_UP', 0, 'X GEM'], moves: [hit('tap', 1)] });
+  topped.stages = { spe: 6 };
+  const full = fight({ seed: 2, a: [held({ species: 'Alpha', spe: 90, moves: [hit('tap', 1)] })], b: [topped] });
+  full.battle.drainEvents();
+  assert.ok(!sawHeld(roundOf(full.battle, full.foe)), 'not past +6, where the item is kept');
+  for (const e of events) {
+    const [fine, why] = Events.check(e);
+    assert.ok(fine, `held vocabulary: ${why}`);
+  }
+  assert.strictEqual(Events.KINDS.held, true);
 });

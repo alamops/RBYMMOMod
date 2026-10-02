@@ -38,6 +38,24 @@
 --     `screens_side` (per side, five turns, a failed recast, surviving a
 --     switch and Haze), `self_hit` (own Reflect, the Explosion-selected
 --     halving), `struggle_typeless`, `metronome_last_pp` and `priority`.
+--   * the cart family (contract K6): `truncate_wild` / `truncate_link` fight
+--     with no `family` (Gold / Silver: one pass everywhere), and
+--     `truncate_crystal_wild` / `truncate_crystal_link` say "crystal" (a loop
+--     outside a link battle, one pass in one).
+--   * Gold held items, obedience and the flinch reset (wave 2 of the same
+--     plan): `quick_claw` (the roll inside a bracket, side b's first, a bracket
+--     of one drawing nothing), `held_between_turns` (HandleBetweenTurnEffects'
+--     order, a berry eaten and gone), `status_berries` (cured right after
+--     infliction and between turns), `focus_band` (a roll on every hit),
+--     `kings_rock` (eligible / ineligible scripts, the flinch reset at turn
+--     open), `thief` / `thief_refused` (both ways; Mail, a full hand, a KO),
+--     `berserk_gene` (256 and the inherited count), `metal_powder` (the party
+--     species through Transform, the overflow), `species_items` (Light Ball /
+--     Thick Club and the one-pass wrap), `type_boost` (Struggle's NORMAL, the
+--     self-hit's selected type), `crit_items`, `bright_powder` (Swift exempt),
+--     and obedience: `obey_traded` (use-instead, loafing, nap, self-hit),
+--     `obey_asleep` (Snore and Sleep Talk), `obey_badges`, `obey_fallbacks`,
+--     `obey_link` and `obey_side_b` (never).
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -202,14 +220,25 @@ end
 -- Gen 2 sheet dialect throughout: spe / spa / spd, never the Gen 1
 -- spd=Speed / spc=Special pair, so `copyMon` takes the Gen 2 branch.
 local function mn(o)
-  return {
+  local m = {
     species = o.species, level = o.level or 20, hp = o.hp,
     maxHp = o.maxHp or 100, status = o.status, types = o.types,
     stats = { atk = o.atk or 40, def = o.def or 40,
               spe = o.spe or 40, spa = o.spa or 40, spd = o.spd or 40 },
     moves = o.moves,
     stages = o.stages, confusion = o.confusion, focusEnergy = o.focusEnergy,
+    -- What the held-item and obedience scenarios add (contracts K1 / K2):
+    -- the registry id the species-keyed items read, a sleep counter, the
+    -- `traded` flag, a standing Disable, and the item -- { id, HELD_* effect,
+    -- parameter, name, mail } -- with synthetic parameters throughout.
+    speciesId = o.speciesId, statusTurns = o.statusTurns, traded = o.traded,
+    disable = o.disable,
   }
+  if o.item then
+    m.heldItem, m.holdEffect, m.holdParam = o.item[1], o.item[2], o.item[3]
+    m.itemName, m.mail = o.item[4], o.item[5]
+  end
+  return m
 end
 
 -- A move with an effect id (src/BattleSim2/Effects.lua numbering), which `mv`
@@ -217,6 +246,12 @@ end
 local function fx(id, power, ty, effect, pp)
   return { id = id, pp = pp or 60, power = power, accuracy = 255,
            type = ty, effect = effect, chance = 0 }
+end
+
+-- A full move for the held-item scenarios: an effect id and its chance.
+local function hm(id, power, ty, effect, pp, chance)
+  return { id = id, pp = pp or 60, power = power, accuracy = 255,
+           type = ty or 0, effect = effect or 0, chance = chance or 0 }
 end
 
 local function build(opts)
@@ -707,18 +742,20 @@ scenario("crit_stages", function(events)
   return battle
 end)
 
--- TruncateHL_BC.  Bob's Defense 600 under his Reflect is 1200; Ann's Attack is
--- 200.  Outside a link battle the loop folds twice: 12 against 75.  In one (the
--- cart's LINK_COLOSSEUM exit) it folds once and keeps the low bytes: 50
--- against 300 -> 44, the wrap bug.  Same sheets, same seed, only the mode.
-local function truncation(mode, id, foeId)
+-- TruncateHL_BC, by cart (contract K6).  Bob's Defense 600 under his Reflect
+-- is 1200; Ann's Attack is 200.  Crystal outside a link battle loops: 12
+-- against 75.  A link battle on either cart -- and every battle on Gold /
+-- Silver, whose routine has no loop -- folds once and keeps the low bytes: 50
+-- against 300 -> 44, the wrap bug.  Same sheets, same seed; only the mode and
+-- the `family` side a's seat carries (none is Gold / Silver's).
+local function truncation(mode, id, foeId, family)
   return function(events)
     local thump = function() return mv("thump", 70, 255, 0) end
     local wall = function() return fx("wall_up", 0, 1, 65, 20) end
     local battle = build({
       id = id, mode = mode, seed = 31337, choiceTimeout = 60, reconnectGrace = 60,
       sides = {
-        a = { { playerId = "p1", name = "Ann", mons = {
+        a = { { playerId = "p1", name = "Ann", family = family, mons = {
           mn({ species = "Alpha", level = 30, maxHp = 400, atk = 200, spe = 50,
                types = { 2 }, moves = { thump() } }) } } },
         b = { { playerId = foeId, name = "Bob", mons = {
@@ -738,6 +775,8 @@ local function truncation(mode, id, foeId)
 end
 scenario("truncate_wild", truncation("wild", "tw", "wild"))
 scenario("truncate_link", truncation("1v1", "tl", "p2"))
+scenario("truncate_crystal_wild", truncation("wild", "tcw", "wild", "crystal"))
+scenario("truncate_crystal_link", truncation("1v1", "tcl", "p2", "crystal"))
 
 -- Screens belong to the SIDE.  Ann raises Reflect on turn 1 and her partner
 -- Abe is covered by it; her recast on turn 2 fails; she switches out on turn 3
@@ -917,6 +956,437 @@ scenario("priority", function(events)
   drainInto(battle, events)
   return battle
 end)
+
+-- ------------------------------------------------------------------
+-- Gold held items, obedience and the flinch reset (docs/plans/
+-- gen12-referee-fidelity.md, wave 2).  Every parameter is synthetic.
+-- ------------------------------------------------------------------
+
+-- Build, drain, then play each round and drain after it.
+local function play(events, opts, rounds)
+  local battle = build(opts)
+  drainInto(battle, events)
+  for _, round in ipairs(rounds) do
+    if battle:outcome() then break end
+    round(battle)
+    drainInto(battle, events)
+  end
+  return battle
+end
+
+-- Quick Claw inside a bracket.  Bea's QUICK_ATTACK is alone in its bracket,
+-- so her claw never rolls; in the base bracket Bob's claw rolls first and
+-- Ann's only when his missed.  Turns 1-2: Bob missed and Ann's fired (Ann,
+-- Speed 10, moves ahead of Abe's 90); turn 3: Bob's fired; turn 4: neither.
+scenario("quick_claw", function(events)
+  local claw = { "QUICK_CLAW", "HELD_QUICK_CLAW", 100, "QUICK CLAW" }
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    b:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  end
+  return play(events, { id = "qc", mode = "coop_pvp", seed = 4, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 999, spe = 10,
+              item = claw, moves = { hm("thump", 10) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 999, spe = 90,
+              moves = { hm("thump", 10) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 999, spe = 20,
+              item = claw, moves = { hm("thump", 10) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 999, spe = 50,
+              item = claw, moves = { hm("QUICK_ATTACK", 10) } }) } } },
+    } }, { round, round, round, round })
+end)
+
+-- HandleBetweenTurnEffects' held items, in the cart's order: Leftovers (Ann;
+-- Bo's is full and stays quiet), Mysteryberry (Abe: SKETCH is his first empty
+-- slot, so +1), the screens, the stat-up item (Bea), then the healing items --
+-- side b's first, so Bob's Berry before Cal's Gold Berry.  Both berries are
+-- eaten: turn 2, under half again, neither heals.
+scenario("held_between_turns", function(events)
+  local function round(b)
+    for _, id in ipairs({ "a1", "a2", "a3" }) do b:submitChoice(id, { action = "fight", move = 0, target = 3 }) end
+    for _, id in ipairs({ "b1", "b2", "b3" }) do b:submitChoice(id, { action = "fight", move = 0, target = 1 }) end
+  end
+  return play(events, { id = "bt", mode = "coop_pvp", seed = 5, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 320, hp = 200, spe = 90,
+              item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("tap", 1) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 400, spe = 80,
+              item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 0, "MYSTERYBERRY" },
+              moves = { hm("tap", 1), hm("SKETCH", 0, 0, 0, 0), hm("spent", 40, 0, 0, 0) } }) } },
+            { playerId = "a3", name = "Cal", mons = { mn({ species = "Eta", maxHp = 200, hp = 90, spe = 70,
+              item = { "GOLD_BERRY", "HELD_BERRY", 25, "GOLD BERRY" }, moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 200, hp = 99, spe = 60,
+              item = { "BERRY", "HELD_BERRY", 12, "BERRY" }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 400, spe = 50,
+              item = { "X_GEM", "HELD_ATTACK_UP", 0, "X GEM" }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b3", name = "Bo", mons = { mn({ species = "Zeta", maxHp = 400, spe = 40,
+              item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round })
+end)
+
+-- The status berries, both ways.  Right after a status lands: Bob's Mint Berry
+-- cures the sleep Ann's move put on him, Bea's PsnCureBerry the poison Abe's
+-- hit did, Bo's Bitter Berry the confusion Cal's did -- each eaten, so turn 2's
+-- sleep and confusion stay.  Between turns: Ann's MiracleBerry takes her PSN
+-- and her confusion together, Abe's Bitter Berry his confusion, Cal's Ice Berry
+-- his burn.
+scenario("status_berries", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("a3", { action = "fight", move = 0, target = 5 })
+    for _, id in ipairs({ "b1", "b2", "b3" }) do b:submitChoice(id, { action = "fight", move = 0, target = 0 }) end
+  end
+  return play(events, { id = "sb", mode = "coop_pvp", seed = 5, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, status = "PSN",
+              confusion = 3, item = { "MIRACLEBERRY", "HELD_HEAL_STATUS", 0, "MIRACLEBERRY" },
+              moves = { hm("doze_dust", 0, 0, 32) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 80,
+              confusion = 4, item = { "BITTER_BERRY", "HELD_HEAL_CONFUSION", 0, "BITTER BERRY" },
+              moves = { hm("venom_jab", 20, 0, 2, 60, 100) } }) } },
+            { playerId = "a3", name = "Cal", mons = { mn({ species = "Eta", maxHp = 300, spe = 70, status = "BRN",
+              item = { "ICE_BERRY", "HELD_HEAL_BURN", 0, "ICE BERRY" }, moves = { hm("daze_ray", 0, 0, 49) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 60,
+              item = { "MINT_BERRY", "HELD_HEAL_SLEEP", 0, "MINT BERRY" }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, spe = 50,
+              item = { "PSNCUREBERRY", "HELD_HEAL_POISON", 0, "PSNCUREBERRY" }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b3", name = "Bo", mons = { mn({ species = "Zeta", maxHp = 300, spe = 40,
+              item = { "BITTER_BERRY", "HELD_HEAL_CONFUSION", 0, "BITTER BERRY" }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round })
+end)
+
+-- Focus Band rolls on every hit: turns 1-2 are not lethal (the bytes are
+-- drawn, nothing is said), turn 3's would be and the band holds Bob at 1 HP,
+-- turn 4's roll misses and he faints.
+scenario("focus_band", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "fb", mode = "1v1", seed = 13, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, atk = 60, spe = 90,
+              types = { 2 }, moves = { hm("thump", 40) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 40, spe = 10, types = { 2 },
+              item = { "FOCUS_BAND", "HELD_FOCUS_BAND", 160, "FOCUS BAND" }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round, round, round })
+end)
+
+-- King's Rock.  Turn 1: Ann's plain hit (a `kingsrock` script) flinches Bob,
+-- who has not moved.  Turn 2: THUNDER folds to effect 0 on a Gold sheet but
+-- runs no `kingsrock`, so Ann rolls nothing; Bob's hit lands his own roll on
+-- Ann, who already moved.  Turn 3: that flag died at the turn's open, so Ann
+-- acts -- with a burn hit, another script without the command.  Turn 4: a
+-- plain hit again.
+scenario("kings_rock", function(events)
+  local rock = { "KINGS_ROCK", "HELD_FLINCH", 200, "KING'S ROCK" }
+  local rounds = {}
+  for i, picks in ipairs({ { 0, 0 }, { 1, 0 }, { 2, 0 }, { 0, 0 } }) do
+    rounds[i] = function(b)
+      b:submitChoice("p1", { action = "fight", move = picks[1] })
+      b:submitChoice("p2", { action = "fight", move = picks[2] })
+    end
+  end
+  return play(events, { id = "kr", mode = "1v1", seed = 1, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 999, spe = 90, types = { 2 },
+              item = rock, moves = { hm("thump", 10), hm("THUNDER", 10), hm("ember_hit", 10, 0, 4) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 999, spe = 10, types = { 2 },
+              item = rock, moves = { hm("thump", 10) } }) } } },
+    } }, rounds)
+end)
+
+-- Thief, both ways, against the computer: Ann takes the wild monster's
+-- Leftovers, the wild monster takes them straight back, and they heal it at the
+-- end of the turn; turn 2 is the same trade.
+scenario("thief", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("wild", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "th", mode = "wild", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              moves = { hm("THIEF", 10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 320, spe = 10, types = { 2 },
+              item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("THIEF", 10) } }) } } },
+    } }, { round, round })
+end)
+
+-- Thief refused and allowed: Ann already holds a Berry, so she takes nothing;
+-- Bea's FLOWER_MAIL is Mail; Cal's hit knocks Bo out and still takes his Quick
+-- Claw (`thief` runs before checkfaint).
+scenario("thief_refused", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("a3", { action = "fight", move = 0, target = 5 })
+    for _, id in ipairs({ "b1", "b2", "b3" }) do b:submitChoice(id, { action = "fight", move = 0, target = 0 }) end
+  end
+  return play(events, { id = "tr", mode = "coop_pvp", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              item = { "BERRY", "HELD_BERRY", 12, "BERRY" }, moves = { hm("THIEF", 10) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 80, types = { 2 },
+              moves = { hm("THIEF", 10) } }) } },
+            { playerId = "a3", name = "Cal", mons = { mn({ species = "Eta", maxHp = 300, atk = 200, spe = 70,
+              types = { 2 }, moves = { hm("THIEF", 60) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 60, types = { 2 },
+              item = { "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, spe = 50, types = { 2 },
+              item = { "FLOWER_MAIL", nil, 0, "FLOWER MAIL", true }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b3", name = "Bo", mons = { mn({ species = "Zeta", maxHp = 5, spe = 40, types = { 2 },
+              item = { "QUICK_CLAW", "HELD_QUICK_CLAW", 100, "QUICK CLAW" }, moves = { hm("tap", 1) } }) } } },
+    } }, { round })
+end)
+
+-- Berserk Gene.  The wild one's goes off as the first turn opens: Attack +2 and
+-- a confusion with nothing behind its seat's count, so 256.  Its daze ray
+-- confuses Ann's Alpha (count 4), Ann switches, and her gene-holding Gamma goes
+-- off at the next turn's open inheriting that 4.
+scenario("berserk_gene", function(events)
+  local gene = { "BERSERK_GENE", nil, 0, "BERSERKGENE" }
+  local rounds = {
+    function(b)
+      b:submitChoice("p1", { action = "fight", move = 0 })
+      b:submitChoice("wild", { action = "fight", move = 0 })
+    end,
+    function(b)
+      b:submitChoice("p1", { action = "switch", slot = 1 })
+      b:submitChoice("wild", { action = "fight", move = 1 })
+    end,
+    function(b)
+      b:submitChoice("p1", { action = "fight", move = 0 })
+      b:submitChoice("wild", { action = "fight", move = 1 })
+    end,
+  }
+  return play(events, { id = "bg2", mode = "wild", seed = 2, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+              mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 }, moves = { hm("tap", 1) } }),
+              mn({ species = "Gamma", maxHp = 300, spe = 80, types = { 2 }, item = gene,
+                   moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 300, spe = 10,
+              types = { 2 }, item = gene, moves = { hm("daze_ray", 0, 0, 49), hm("tap", 1) } }) } } },
+    } }, rounds)
+end)
+
+-- Metal Powder reads the PARTY species, on Crystal's looping fold: Bob, a
+-- Ditto, keeps it after he transforms into Ann -- whose Defense 200 overflows
+-- the boost, so the hit's attack is halved too -- and Bea, a Mew, transforms
+-- into a Ditto (Abe) and gets nothing.
+scenario("metal_powder", function(events)
+  local powder = { "METAL_POWDER", "HELD_METAL_POWDER", 0, "METAL POWDER" }
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    b:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  end
+  return play(events, { id = "mp", mode = "coop_pvp", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", family = "crystal", mons = { mn({ species = "Alpha", maxHp = 400,
+              atk = 120, def = 200, spe = 90, types = { 2 }, moves = { hm("thump", 40) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", speciesId = "DITTO", maxHp = 400,
+              atk = 120, def = 60, spe = 80, types = { 2 }, moves = { hm("thump", 40) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", speciesId = "DITTO", maxHp = 400,
+              def = 60, spe = 60, types = { 2 }, item = powder, moves = { hm("copycat", 0, 0, 57) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", speciesId = "MEW", maxHp = 400,
+              def = 60, spe = 50, types = { 2 }, item = powder, moves = { hm("copycat", 0, 0, 57) } }) } } },
+    } }, { round, round })
+end)
+
+-- Light Ball doubles Pikachu's special attack only and Thick Club Cubone's
+-- physical attack only, before the fold -- which, on Gold's one pass, wraps
+-- Bob's doubled 600: 1200 / 4 = 300, low byte 44.
+scenario("species_items", function(events)
+  local rounds = {}
+  for i, picks in ipairs({ { 0, 0 }, { 1, 1 } }) do
+    rounds[i] = function(b)
+      b:submitChoice("p1", { action = "fight", move = picks[1] })
+      b:submitChoice("p2", { action = "fight", move = picks[2] })
+    end
+  end
+  return play(events, { id = "si", mode = "1v1", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    specialTypes = { 1 },
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", speciesId = "PIKACHU", level = 30,
+              maxHp = 600, atk = 100, spa = 100, def = 100, spd = 100, spe = 90, types = { 2 },
+              item = { "LIGHT_BALL", nil, 0, "LIGHT BALL" }, moves = { hm("zap", 40, 1), hm("thump", 40) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", speciesId = "CUBONE", level = 30,
+              maxHp = 600, atk = 600, spa = 100, def = 100, spd = 100, spe = 10, types = { 2 },
+              item = { "THICK_CLUB", nil, 0, "THICK CLUB" }, moves = { hm("thump", 40), hm("zap", 40, 1) } }) } } },
+    } }, rounds)
+end)
+
+-- Type-boost items: Ann's Charcoal on her FIRE move; Bob's Pink Bow on his
+-- Struggle (its row says NORMAL); and Ann's Charcoal again on her confusion
+-- self-hits, because the move she selected is FIRE -- the cart bug.
+scenario("type_boost", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "tb", mode = "1v1", seed = 1, choiceTimeout = 60, reconnectGrace = 60,
+    specialTypes = { 1 }, typeIds = { "NORMAL", "FIRE", "WATER" },
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", level = 30, maxHp = 600, atk = 100,
+              spa = 100, def = 100, spd = 100, spe = 90, types = { 2 }, confusion = 5,
+              item = { "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, moves = { hm("ember_hit", 40, 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", level = 30, maxHp = 600, atk = 100,
+              def = 100, spe = 10, types = { 2 }, item = { "PINK_BOW", "HELD_NORMAL_BOOST", 20, "PINK BOW" },
+              moves = { hm("thump", 40, 0, 0, 0) } }) } } },
+    } }, { round, round, round })
+end)
+
+-- Crit items: Chansey's Lucky Punch sets the level to 2 whatever Focus Energy
+-- and the high-crit move would add; Bob's Scope Lens adds one.
+scenario("crit_items", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  local slash = hm("slash_hit", 20)
+  slash.highCrit = true
+  return play(events, { id = "ci", mode = "1v1", seed = 2, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", speciesId = "CHANSEY", maxHp = 900,
+              spe = 90, types = { 2 }, focusEnergy = true, item = { "LUCKY_PUNCH", nil, 0, "LUCKY PUNCH" },
+              moves = { slash } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 2 },
+              item = { "SCOPE_LENS", "HELD_CRITICAL_UP", 0, "SCOPE LENS" }, moves = { hm("thump", 20) } }) } } },
+    } }, { round, round, round, round, round, round })
+end)
+
+-- Bright Powder: Ann's sure hit misses Bob at the powder's rate, and her
+-- Swift-effect move never does.
+scenario("bright_powder", function(events)
+  local rounds = {}
+  for i = 1, 6 do
+    rounds[i] = function(b)
+      b:submitChoice("p1", { action = "fight", move = (i % 2 == 1) and 0 or 1 })
+      b:submitChoice("p2", { action = "fight", move = 0 })
+    end
+  end
+  return play(events, { id = "bp", mode = "1v1", seed = 1, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 900, spe = 90, types = { 2 },
+              moves = { hm("thump", 10), hm("star_dart", 10, 0, 17) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 2 },
+              item = { "BRIGHTPOWDER", "HELD_BRIGHTPOWDER", 120, "BRIGHTPOWDER" }, moves = { hm("tap", 1) } }) } } },
+    } }, rounds)
+end)
+
+-- Obedience: a traded level-80 monster with no badge (cap 10) against a wild
+-- one.  On this seed it uses another move instead (turns 1 and 7), loafs
+-- around (2), turns away (3), won't obey and hits itself (4), obeys (5),
+-- ignores orders (6) and naps (8).
+scenario("obey_traded", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("wild", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "ob", mode = "wild", seed = 660, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", level = 80, maxHp = 900, atk = 60,
+              def = 200, spe = 90, types = { 2 }, traded = true,
+              moves = { hm("thump", 10), hm("pound_two", 10), hm("pound_three", 10), hm("pound_four", 10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", level = 80, maxHp = 900, spe = 10,
+              types = { 2 }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round, round, round, round, round })
+end)
+
+-- Obedience while asleep: Snore and Sleep Talk pass the sleep gate ("fast
+-- asleep", then the move), and a disobedient sleeper "ignored orders...sleeping!".
+scenario("obey_asleep", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("wild", { action = "fight", move = 0, target = 0 })
+  end
+  return play(events, { id = "oa", mode = "coop_wild", seed = 5, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", level = 60, maxHp = 900, spe = 90,
+              types = { 2 }, status = "SLP", statusTurns = 7, traded = true,
+              moves = { hm("SNORE", 10), hm("thump", 10) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", level = 60, maxHp = 900, spe = 80,
+              types = { 2 }, status = "SLP", statusTurns = 7, traded = true,
+              moves = { hm("SLEEP_TALK", 0), hm("thump", 10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", level = 60, maxHp = 900, spe = 10,
+              types = { 2 }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round })
+end)
+
+-- Obedience caps by badge: RISING obeys at level 100, STORM's 70 lets a
+-- level-70 monster obey -- neither draws a byte -- and a level-75 one under
+-- STORM is asked every turn.
+scenario("obey_badges", function(events)
+  local function round(b)
+    for _, id in ipairs({ "a1", "a2", "a3" }) do b:submitChoice(id, { action = "fight", move = 0, target = 3 }) end
+    b:submitChoice("wild", { action = "fight", move = 0, target = 0 })
+  end
+  local function seat(id, name, species, level, spe, badges)
+    return { playerId = id, name = name, badges = badges, mons = { mn({ species = species, level = level,
+             maxHp = 900, spe = spe, types = { 2 }, traded = true,
+             moves = { hm("thump", 10), hm("pound_two", 10) } }) } }
+  end
+  return play(events, { id = "obb", mode = "coop_wild", seed = 1, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { seat("a1", "Ann", "Alpha", 100, 88, { RISING = true }),
+            seat("a2", "Abe", "Gamma", 70, 90, { STORM = true, FOG = true, HIVE = true }),
+            seat("a3", "Cal", "Eta", 75, 85, { STORM = true }) },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", level = 50, maxHp = 900, spe = 10,
+              types = { 2 }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round })
+end)
+
+-- `.UseInstead` with nowhere to go loafs instead: Ann knows one move, Abe's
+-- other move is out of PP, Cal's is disabled -- on this seed each of them
+-- reaches the branch at least once.
+scenario("obey_fallbacks", function(events)
+  local function round(b)
+    for _, id in ipairs({ "a1", "a2", "a3" }) do b:submitChoice(id, { action = "fight", move = 0, target = 3 }) end
+    b:submitChoice("wild", { action = "fight", move = 0, target = 0 })
+  end
+  return play(events, { id = "obf", mode = "coop_wild", seed = 7, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", level = 80, maxHp = 900, spe = 90,
+              types = { 2 }, traded = true, moves = { hm("thump", 10) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", level = 80, maxHp = 900, spe = 80,
+              types = { 2 }, traded = true, moves = { hm("thump", 10), hm("pound_two", 10, 0, 0, 0) } }) } },
+            { playerId = "a3", name = "Cal", mons = { mn({ species = "Eta", level = 80, maxHp = 900, spe = 70,
+              types = { 2 }, traded = true, disable = { moveIndex = 2, turns = 9 },
+              moves = { hm("thump", 10), hm("pound_two", 10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", level = 50, maxHp = 900, spe = 10,
+              types = { 2 }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round, round, round })
+end)
+
+-- Never in a link battle and never on side b: a traded level-80 sheet on each
+-- obeys without a draw (the rngState is the untraded fight's).
+local function obeyNever(mode, id)
+  return function(events)
+    local foe = (mode == "wild") and "wild" or "p2"
+    local function round(b)
+      b:submitChoice("p1", { action = "fight", move = 0 })
+      b:submitChoice(foe, { action = "fight", move = 0 })
+    end
+    return play(events, { id = id, mode = mode, seed = 99, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha",
+                level = (mode == "wild") and 5 or 80, maxHp = 900, spe = 90, types = { 2 },
+                traded = (mode ~= "wild") or nil, moves = { hm("thump", 10), hm("pound_two", 10) } }) } } },
+        b = { { playerId = foe, name = "Bob", mons = { mn({ species = "Beta", level = 80, maxHp = 900, spe = 10,
+                types = { 2 }, traded = true, moves = { hm("tap", 1), hm("pound_two", 1) } }) } } },
+      } }, { round, round, round, round })
+  end
+end
+scenario("obey_link", obeyNever("1v1", "ol"))
+scenario("obey_side_b", obeyNever("wild", "osb"))
 
 -- ------------------------------------------------------------------
 

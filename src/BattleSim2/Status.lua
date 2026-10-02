@@ -101,6 +101,16 @@ function M.confusionTick(state, roll)
              canMove = true, selfDamage = 0 }
   end
 
+  return { turnsRemaining = left, snappedOut = false, selfHit = true,
+           canMove = false, selfDamage = M.selfHitDamage(state) }
+end
+
+-- HitConfusion's damage on its own: the confusion gate's self-hit above, and
+-- the disobedient monster's "won't obey!" self-hit (BattleCommand_CheckObedience
+-- calls the same HitConfusion).  `state` carries level, attack, defense and the
+-- optional itemBoostPercent.
+function M.selfHitDamage(state)
+  state = state or {}
   local hit = Damage.compute(
     { level = state.level, attack = state.attack, atk = state.atk },
     { defense = state.defense, def = state.def },
@@ -108,9 +118,7 @@ function M.confusionTick(state, roll)
     { crit = false, stab = false, typeEffect = { 100 },
       roll = Damage.ROLL_MAX, physical = true,
       itemBoostPercent = state.itemBoostPercent })
-
-  return { turnsRemaining = left, snappedOut = false, selfHit = true,
-           canMove = false, selfDamage = hit.damage or 0 }
+  return hit.damage or 0
 end
 
 function M.confusionSelfHit(roll)

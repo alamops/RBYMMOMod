@@ -6,8 +6,12 @@
 -- byte against the chance).
 --
 -- Level contributions (capped at 6):
---   +1 Focus Energy, +2 high-crit move, +1 Scope Lens,
---   +2 species+item bonus (Lucky Punch / Stick).
+--   +1 Focus Energy, +2 high-crit move, +1 Scope Lens.
+-- The species+item bonus (Chansey's Lucky Punch, Farfetch'd's Stick) is not a
+-- contribution: BattleCommand_Critical loads c = 2 and jumps straight to
+-- `.Tally`, past Focus Energy, the high-crit list and Scope Lens, so with it
+-- the level IS 2 (pokecrystal engine/battle/effect_commands.asm:1120-1206;
+-- the Gold engine port adds it instead, and the cart wins).
 --
 -- Unlike Gen 1 there is no Focus Energy bug here — Focus Energy raises the
 -- level.  Crit *damage* (flat x2, ignore negative attacker stages) lives in
@@ -35,14 +39,16 @@ function M.chance(level)
   return M.CRITICAL_CHANCES[capped]
 end
 
+M.SPECIES_ITEM_LEVEL = 2
+
 -- opts: { focusEnergy, highCritMove, scopeLens, speciesItemBonus }
 function M.level(opts)
   opts = opts or {}
+  if opts.speciesItemBonus then return M.SPECIES_ITEM_LEVEL end
   local level = 0
   if opts.focusEnergy then level = level + 1 end
   if opts.highCritMove then level = level + 2 end
   if opts.scopeLens then level = level + 1 end
-  if opts.speciesItemBonus then level = level + 2 end
   return min(6, level)
 end
 

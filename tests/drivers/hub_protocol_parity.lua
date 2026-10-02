@@ -1701,6 +1701,88 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- Gold's cart lineage on a fighter entry (contract K6 of
+-- docs/plans/gen12-referee-fidelity.md)
+-- ------------------------------------------------------------------
+--
+-- The Gen 2 referee reads side a's first fighter's `family` for the rule Gold
+-- / Silver and Crystal disagree on (TruncateHL_BC), and each hub stamps it on
+-- a human seat from the hello it admitted: gold / silver -> gs, crystal ->
+-- crystal, nothing for a hello that named no cart, an NPC seat, or any Kanto
+-- cart.  The digest is the entries the referee is handed (Turn.create here,
+-- Turn.attempt on relay.js), in seat order, "(nil)" for no field -- what the
+-- referee then does with it is tests/fixtures/battle2_turn_parity.json's.
+
+local function sheet2(o)
+  o = o or {}
+  return {
+    species = o.species or "ALPHA", level = 50, hp = o.hp or 300, maxHp = o.hp or 300,
+    stats = { atk = 100, def = 100, spe = o.spe or 50, spa = 50, spd = 100 },
+    moves = { move({ power = 20 }) },
+  }
+end
+
+local function familyFight(generation, versions, mode)
+  local hub = makeGenHub(generation)
+  local seen = {}
+  local real = hub.Turn
+  hub.Turn = setmetatable({
+    create = function(opts) seen.opts = opts; return real.create(opts) end,
+  }, { __index = real })
+  local ids = { ID_A, ID_B, ID_C, ID_D }
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local players = {}
+  for i, version in ipairs(versions) do
+    players[i] = dialAs(hub, "P" .. i, ids[i], {
+      generation = generation, version = version ~= "(none)" and version or nil, sprite = sprite,
+    })
+  end
+  local memberIds = {}
+  for i, p in ipairs(players) do memberIds[i] = p.id end
+  local opts = { mode = mode, hostId = memberIds[1] }
+  if mode == "coop_pvp" then
+    opts.sides = { a = { memberIds[1], memberIds[2] }, b = { memberIds[3], memberIds[4] } }
+  end
+  hub:openCoopBattle("kf", memberIds, opts)
+  local record = hub.battles["kf"]
+  local function sheet() return generation == 2 and sheet2() or mon() end
+  hub:receive(players[1].client, { type = Wire.BATTLE_RULESET, battle = "kf", chart = CHART })
+  for _, p in ipairs(players) do
+    hub:receive(p.client, { type = Wire.BATTLE_PARTY, battle = "kf",
+                            side = mode == "coop_npc" and "a" or nil, mons = { sheet() } })
+  end
+  if mode == "coop_npc" then
+    hub:receive(players[1].client, { type = Wire.BATTLE_PARTY, battle = "kf", side = "b",
+                                     mons = { sheet(), sheet() } })
+  end
+  local entries = {}
+  for _, side in ipairs({ "a", "b" }) do
+    for _, entry in ipairs(seen.opts and seen.opts.sides[side] or {}) do
+      local npc = false
+      for _, npcId in ipairs(record and record.npcIds or {}) do
+        if npcId == entry.playerId then npc = true end
+      end
+      entries[#entries + 1] = {
+        side = side, seat = npc and "npc" or entry.playerId, family = entry.family or "(nil)",
+      }
+    end
+  end
+  return { opened = record ~= nil and record.sim ~= nil, entries = entries }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "gen2_cart_family_stamp",
+  run = function()
+    return {
+      gold = familyFight(2, { "crystal", "silver" }, "coop_npc"),
+      bare = familyFight(2, { "gold", "(none)" }, "coop_npc"),
+      spar = familyFight(2, { "crystal", "gold", "silver", "crystal" }, "coop_pvp"),
+      kanto = familyFight(1, { "red", "yellow" }, "coop_npc"),
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

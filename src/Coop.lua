@@ -483,6 +483,13 @@ end
 -- as arguments, and are therefore callable from a sibling module loaded
 -- through the same need() resolver as `Coop.finishBuriedBattle(...)`.
 
+-- 2 for a fight whose prize an AMULET COIN doubled, else 1: `true` from the
+-- fight's own answer and nothing else (pokecrystal's wAmuletCoin is a flag the
+-- send-out sets, never a count).
+function M.amuletFactor(amuletCoin)
+  return amuletCoin == true and 2 or 1
+end
+
 -- Prize money, which the engine pays from inside its own battle screen and
 -- so never gets to pay for one it did not run. Its formula, at the level of
 -- the strongest monster the trainer had -- a 2-on-2 has two last opponents,
@@ -512,7 +519,13 @@ function M.payTrainerPrize(engine, game, result)
     for _, mon in ipairs(enemyParty or {}) do
       best = math.max(best, tonumber(mon.level) or 0)
     end
-    local prize = (tonumber(trainer.baseMoney) or 0) * best
+    -- Gold's AMULET COIN: pokecrystal WinTrainerBattle `.give_money` doubles
+    -- wBattleReward when wAmuletCoin is set (`.DoubleReward`), and the fight
+    -- that knows whether one came out on this player's seat stamps it here
+    -- (`amuletCoin`: src/SoloBattle.lua from MediatedBattle:amuletCoin2, the
+    -- co-op ending from CoopBattle's).  A Kanto cart has no held items, so a
+    -- Gen 1 battle never carries it.
+    local prize = (tonumber(trainer.baseMoney) or 0) * best * M.amuletFactor(engine.amuletCoin)
     local save = game and game.save
     if prize > 0 and save then
       Gen.money.set(save, math.min(999999, Gen.money.get(save) + prize))
@@ -2950,7 +2963,11 @@ function M:syntheticFinish(game, plan, coopState)
   end
 
   local trainer, best, class, partyIndex = M.trainerPrizeInfo(game, npcId)
-  local prize = (tonumber(trainer and trainer.baseMoney) or 0) * best
+  -- Doubled for an AMULET COIN this player sent out (Gold; see
+  -- M.payTrainerPrize) -- the screen is the one that saw it come out.
+  local amulet = coopState and type(coopState.amuletCoin2) == "function"
+    and coopState:amuletCoin2() or nil
+  local prize = (tonumber(trainer and trainer.baseMoney) or 0) * best * M.amuletFactor(amulet)
   if prize > 0 then
     -- Through Gen.money, which knows where each generation keeps it: Gold
     -- keeps it on `save.player.money`, and writing `save.money` here paid
@@ -3158,6 +3175,11 @@ function M:startBattle(game, field)
       if plan.kind ~= "wild" and plan.mode ~= "coop_wild" then return nil end
       return plan.wildCatchMon or M.wildMonOf(plan.engine)
     end)(),
+    -- Gold's battle type off the encounter the host walked into (a forced-item
+    -- encounter holds item 1 every time), for the wild held item the host
+    -- rolls at its upload (CoopBattle:wildMons, MediatedBattle.rollWildItem2).
+    wildBattleType = engine and type(engine.battle) == "table"
+      and engine.battle.battleType or nil,
     -- Whether a win here is worth points, so the screen can say so once
     -- rather than leave a player wondering why their rating did not move.
     ranksPoints = M.ranksPoints(battle.plan),
@@ -3287,6 +3309,9 @@ function M:onBattleOver(result, game, state, toLearn)
     -- screen knows which of our monsters were sent out.
     if self.engineBattle.gen3Divert and state and type(state.amuletCoin3) == "function" then
       self.engineBattle.amuletCoin = state:amuletCoin3()
+    elseif state and type(state.amuletCoin2) == "function" then
+      -- ...and Gold's (M.payTrainerPrize), the same question asked the same way.
+      self.engineBattle.amuletCoin = state:amuletCoin2() == true or nil
     end
     self.encounter = { engine = self.engineBattle, game = game }
     self.engineBattle = nil

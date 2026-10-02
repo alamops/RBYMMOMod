@@ -18,31 +18,43 @@
  * draw site is spelled out here and every one of them is conditional in a way
  * both runtimes can reproduce:
  *
- *   1. a speed tie-break byte, one per group of actors in the same priority
- *      bracket at the same speed;
+ *   1. Quick Claw bytes: in each priority bracket two or more fighters share,
+ *      one byte per Quick Claw holder (side b's first, then side a's, each in
+ *      field order) until one fires, then
+ *      a speed tie-break byte, one per group of actors in the same priority
+ *      bracket, Quick Claw standing and speed;
  *   2. one gate byte per actor whose monster has a gating status;
  *   3. one gate byte per actor whose monster is confused;
- *   4. per move that is actually used: accuracy byte, multihit-count byte
- *      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
- *      (damaging hits only), in that order, and none of them drawn when an
- *      earlier step ended the move (a missed move draws no crit byte).
+ *   4. the obedience bytes of a traded monster over its badge cap, on a
+ *      `badgeRules` seat (`_obey`, each only when reached);
+ *   5. per move that is actually used: accuracy byte, multihit-count byte
+ *      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
+ *      on a holder, side-chance byte (damaging hits only), the King's Rock
+ *      byte, in that order, and none of them drawn when an earlier step ended
+ *      the move (a missed move draws no crit byte).
  *
  * The damage roll is drawn even when the hit turns out to be an immunity,
  * because in the Lua the roll is an argument to `Damage.compute` and arguments
  * are evaluated before the call finds out. That is a draw the port cannot
  * optimise away without desyncing the two runtimes on the next attack.
  *
- * Nothing else rolls. Residuals, switches, items and the clock are all
- * deterministic, so a battle replays from its seed plus the choice log.
+ * Nothing else rolls. Residuals, switches, the bag, the between-turn held
+ * items and the clock are all deterministic, so a battle replays from its seed
+ * plus the choice log -- and a fight with no held item, no traded monster and
+ * no priority move draws exactly what it drew before any of them existed.
  *
  * **Policies chosen where Gen 1 had no answer** -- the whole list, and the
  * reasoning behind each, lives in the Lua header rather than being restated
  * here; what follows is only what the port has to keep true:
  *
- *   * *Turn order* is the priority bracket (Effects.movePriority), then
- *     Speed (the battle stat), then the tie-break; switches and items resolve
- *     before any move. Quick Claw would roll between the bracket and Speed
- *     (`_orderActors`).
+ *   * *Turn order* is the priority bracket (Effects.movePriority), then a
+ *     Quick Claw that fired in it (at most one per bracket, `_quickClaws`),
+ *     then Speed (the battle stat), then the tie-break; switches and items
+ *     resolve before any move, and a seat whose turn is a forced skip rolls no
+ *     Quick Claw.
+ *   * *Held items* (Items.js: the static rules keyed on the sheet's hold
+ *     effect), *obedience* (`_obey`) and the *flinch reset* (`_openTurn`)
+ *     follow pokecrystal; the Lua header has the citations.
  *   * *Speed ties* break on a single byte per tied group, below 128 leaving the
  *     side-a member first and otherwise reversing the group. A group is one
  *     bracket at one Speed.
@@ -94,6 +106,7 @@ const Status = require('./Status.js');
 const Effects = require('./Effects.js');
 const Rng = require('./Rng.js');
 const Events = require('./events.js');
+const Items = require('./Items.js');
 
 const VERSION = 1;
 
@@ -150,6 +163,24 @@ const BADGE_SIDE = 'a';
 // `wLinkMode == LINK_COLOSSEUM` -- TruncateHL_BC's single pass
 // (Damage.truncateStats) -- and nowhere else yet.
 const LINK_MODES = { '1v1': true, coop_pvp: true };
+
+// The cart lineages whose rules differ (contract K6): `family` on a side entry,
+// stamped by the hub (never read off the wire) and by solo. The fight reads
+// side a's first fighter's; absent or unknown is Gold / Silver's. Only
+// TruncateHL_BC reads it (`_onePassTruncate`).
+const FAMILIES = { gs: true, crystal: true };
+const DEFAULT_FAMILY = 'gs';
+
+// Berserk Gene's confusion when the seat's last confusion count ran out: 256
+// checks (a 0 count wraps on CheckTurn's `dec [hl]`).
+const BERSERK_CONFUSION = 256;
+
+// Guard on the cart's rejection-sampling loops; both runtimes stop at the same
+// count (the Lua twin explains).
+const REDRAW_LIMIT = 1024;
+
+// `.DoNothing`: BattleRandom & 3 picks the line.
+const LOAF_LINES = [' is loafing around.', " won't obey!", ' turned away!', ' ignored orders!'];
 
 // The modes a faint pays experience in -- the ones vanilla awards it in. 1v1
 // and coop_pvp never do; see `_awardExp` for why the gate is the mode rather
@@ -546,6 +577,20 @@ function copyMon(raw, fallback) {
     xAccuracy: raw.xAccuracy === true,
     catchRate: Math.max(0, Math.min(255, int(raw.catchRate, 255))),
   };
+
+  // The Gold held item and what the engine's item row says about it (contract
+  // K2), kept only alongside an item; the referee's copy is the one that
+  // changes (Items.take / Items.give). Absent keys stay absent, the Lua shape.
+  const heldItem = str(raw.heldItem);
+  if (heldItem) {
+    out.heldItem = heldItem;
+    out.holdEffect = str(raw.holdEffect);
+    out.holdParam = Math.max(0, Math.min(255, int(raw.holdParam, 0)));
+    out.itemName = str(raw.itemName);
+    if (raw.mail === true) out.mail = true;
+  }
+  // The obedience check's one fact about the monster (contract K1).
+  if (raw.traded === true) out.traded = true;
 
   // Optional Stat Exp sheet (atk/def/spe/spa/spd, optional hp).
   if (isTable(raw.evs)) {
@@ -1670,7 +1715,19 @@ class Battle {
     for (const fighter of this.fighters) {
       fighter.choice = null;
       fighter.forced = null;
+      // CheckPlayerLockedIn resets both SUBSTATUS_FLINCHED bits as the player
+      // is asked for a move, except while the player's monster must recharge;
+      // "the player" is a `badgeRules` seat, kept per seat for its own fielded
+      // monster, and the reset is unconditional everywhere else (the Lua twin
+      // explains).
+      const mon = activeMon(fighter);
+      const kept = fighter.badgeRules && mon && mon.mustRecharge ? mon : null;
+      for (const each of fighter.mons) {
+        if (each !== kept) each.flinch = false;
+      }
     }
+    // HandleBerserkGene, at the head of BattleTurn's loop -- before the menu.
+    this._berserkGene();
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     // Before the window opens: a player deciding this turn is looking at the
     // rosters, and anything a status or a bench potion moved last turn has to
@@ -1820,6 +1877,383 @@ class Battle {
     const ids = this.typeIds;
     if (!ids) return null;
     return ids[int(typeIndex, -1)] || null;
+  }
+
+  // ------------------------------------------------------------------
+  // held items (Items.js holds the rules; these are the cart's call sites --
+  // the Lua twin's notes cite each one)
+  // ------------------------------------------------------------------
+
+  // K6: one pass in a link battle on either cart and in every battle on Gold /
+  // Silver; only Crystal outside a link battle loops.
+  _onePassTruncate() {
+    return has(LINK_MODES, this.mode) || this.family !== 'crystal';
+  }
+
+  // Which of this seat's party a monster is, 1-based, by identity.
+  _partyIndex(fighter, mon) {
+    for (let i = 1; i <= fighter.mons.length; i += 1) {
+      if (fighter.mons[i - 1] === mon) return i;
+    }
+    return null;
+  }
+
+  // The `held` event (contract K3); the caller says the cart's sentence next.
+  _emitHeld(fighter, mon, itemId, amount) {
+    const index = this._partyIndex(fighter, mon);
+    this._emit('held', {
+      slot: fighter.slot, side: fighter.side,
+      mon: index === null ? undefined : index - 1,
+      text: itemId, amount,
+    });
+  }
+
+  // The registry id of a move's type (Struggle's row says NORMAL).
+  _moveTypeId(move) {
+    if (!isTable(move)) return null;
+    return move.typeId || this._typeIdOf(move.type);
+  }
+
+  // The attacker's type-boost item for this move, or null.
+  _typeBoostOf(mon, move) {
+    return Items.typeBoostPercent(mon, this._moveTypeId(move));
+  }
+
+  // wBattleMonSpecies, which Transform rewrites.
+  _battleSpecies(mon) {
+    if (mon.transformed) return mon.transformSpecies === undefined ? null : mon.transformSpecies;
+    return mon.speciesId === undefined ? null : mon.speciesId;
+  }
+
+  // HandleBerserkGene, every seat in field order.
+  _berserkGene() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && mon.heldItem === Items.BERSERK_GENE) {
+        const name = Items.label(mon);
+        const item = Items.take(mon);
+        const wasConfused = mon.confusion > 0;
+        if (!wasConfused) {
+          const count = int(fighter.confuseCount, 0);
+          mon.confusion = count > 0 ? count : BERSERK_CONFUSION;
+        }
+        this._emitHeld(fighter, mon, item.heldItem, 0);
+        this._say(`${mon.species}'s ${name} activated!`);
+        const before = Effects.clampStage(mon.stages.atk);
+        const after = Effects.clampStage(before + 2);
+        if (after !== before) {
+          mon.stages.atk = after;
+          const text = `${mon.species}'s ATTACK rose`;
+          this._say(text);
+          this._emit('stat', { slot: fighter.slot, side: fighter.side, amount: after, text });
+        }
+        if (!wasConfused) {
+          const text = `${mon.species} became confused`;
+          this._say(text);
+          this._emit('status', { slot: fighter.slot, side: fighter.side, confused: 1, text });
+        }
+      }
+    }
+  }
+
+  // DetermineMoveOrder's `.equal_priority`, widened to a field: in every
+  // bracket two or more actors share, highest first, the Quick Claw holders
+  // draw (side b's seats, then side a's, each in field order) until one fires.
+  _quickClaws(actors) {
+    const counts = new Map();
+    const brackets = [];
+    for (const actor of actors) {
+      const p = actor.priority === undefined ? 0 : actor.priority;
+      if (!counts.has(p)) { counts.set(p, 0); brackets.push(p); }
+      counts.set(p, counts.get(p) + 1);
+    }
+    brackets.sort((x, y) => y - x);
+    for (const p of brackets) {
+      if (counts.get(p) >= 2) {
+        const holders = actors.filter((actor) => (actor.priority === undefined ? 0 : actor.priority) === p
+          && actor.clawParam !== null && actor.clawParam !== undefined);
+        holders.sort((x, y) => {
+          const xs = x.fighter.side === 'b' ? 0 : 1;
+          const ys = y.fighter.side === 'b' ? 0 : 1;
+          if (xs !== ys) return xs - ys;
+          return x.order - y.order;
+        });
+        for (const holder of holders) {
+          if (Items.quickClawFires(holder.clawParam, this.rng.byte())) {
+            holder.claw = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // One hit through BattleCommand_ApplyDamage's Focus Band arm.
+  _strike(fighter, mon, rawAmount) {
+    let amount = rawAmount;
+    let banded = false;
+    const held = Items.effect(mon);
+    if (held.effect === Items.FOCUS_BAND && mon.hp > 0) {
+      if (this.rng.byte() < held.param) {
+        const band = Items.focusBand(amount, mon.hp);
+        amount = band.amount;
+        banded = band.held;
+      }
+    }
+    this._damage(fighter, mon, amount, null);
+    if (banded) {
+      this._emitHeld(fighter, mon, mon.heldItem, 1);
+      this._say(`${mon.species} hung on with ${Items.label(mon)}!`);
+    }
+  }
+
+  // BattleCommand_Thief, both ways and in every mode.
+  _thief(fighter, mon, target, defender) {
+    if (mon.heldItem || !defender.heldItem) return;
+    if (Items.isMail(defender)) return;
+    const item = Items.take(defender);
+    Items.give(mon, item);
+    this._emitHeld(target, defender, item.heldItem, 0);
+    this._emitHeld(fighter, mon, item.heldItem, 1);
+    this._say(`${mon.species} stole ${Items.label(mon)} from its foe!`);
+  }
+
+  // BattleCommand_HeldFlinch (`kingsrock`).
+  _kingsRock(mon, move, effectId, defender) {
+    const held = Items.effect(mon);
+    if (held.effect !== Items.FLINCH) return;
+    if (!Items.kingsRockMove(effectId, Effects.moveKey(move))) return;
+    if (defender.hp <= 0 || (defender.substitute || 0) > 0) return;
+    if (this.rng.byte() < held.param) {
+      defender.flinch = true;
+      defender.mustRecharge = false;
+    }
+  }
+
+  // UseHeldStatusHealingItem. Returns true when it acted.
+  _statusBerry(fighter, mon) {
+    const held = Items.effect(mon);
+    const cures = held.effect && has(Items.STATUS_CURE, held.effect)
+      ? Items.STATUS_CURE[held.effect] : null;
+    if (!cures || !mon.status || !has(cures, mon.status)) return false;
+    const name = Items.label(mon);
+    const text = `${mon.species} recovered using a ${name}!`;
+    mon.status = null;
+    mon.statusTurns = 0;
+    this._emit('status', { slot: fighter.slot, side: fighter.side, text });
+    if (held.effect === Items.HEAL_STATUS && mon.confusion > 0) {
+      mon.confusion = 0;
+      this._emit('status', { slot: fighter.slot, side: fighter.side, confused: 0, text });
+    }
+    const item = Items.take(mon);
+    this._emitHeld(fighter, mon, item.heldItem, 0);
+    this._say(text);
+    return true;
+  }
+
+  // UseConfusionHealingItem.
+  _confusionBerry(fighter, mon) {
+    if (!(mon.confusion > 0)) return false;
+    const held = Items.effect(mon);
+    if (held.effect !== Items.HEAL_CONFUSION && held.effect !== Items.HEAL_STATUS) return false;
+    const text = `A ${Items.label(mon)} rid ${mon.species} of its confusion.`;
+    mon.confusion = 0;
+    this._emit('status', { slot: fighter.slot, side: fighter.side, confused: 0, text });
+    const item = Items.take(mon);
+    this._emitHeld(fighter, mon, item.heldItem, 0);
+    this._say(text);
+    return true;
+  }
+
+  // HandleHPHealingItem: Berry, Gold Berry, Berry Juice.
+  _hpBerry(fighter, mon) {
+    const held = Items.effect(mon);
+    if (held.effect !== Items.BERRY || !Items.berryWants(mon.hp, mon.maxHp)) return false;
+    const name = Items.label(mon);
+    this._heal(fighter, mon, held.param);
+    const item = Items.take(mon);
+    this._emitHeld(fighter, mon, item.heldItem, 0);
+    this._say(`${mon.species} recovered using a ${name}!`);
+    return true;
+  }
+
+  // HandleLeftovers: player then enemy.
+  _heldLeftovers() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && Items.holds(mon, Items.LEFTOVERS) && mon.hp < mon.maxHp) {
+        this._heal(fighter, mon, Items.sixteenth(mon.maxHp));
+        this._emitHeld(fighter, mon, mon.heldItem, 1);
+        this._say(`${mon.species} recovered with ${Items.label(mon)}.`);
+      }
+    }
+  }
+
+  // HandleMysteryberry: player then enemy.
+  _heldMysteryberry() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && Items.holds(mon, Items.RESTORE_PP)) {
+        let slot = null;
+        for (let i = 1; i <= mon.moves.length; i += 1) {
+          if (mon.moves[i - 1].pp <= 0) { slot = i; break; }
+        }
+        if (slot !== null) {
+          const move = mon.moves[slot - 1];
+          if (!mon.transformed) {
+            move.pp += Effects.moveKey(move) === 'SKETCH' ? 1 : 5;
+            if (int(move.maxPp, 0) < move.pp) move.maxPp = move.pp;
+            this._emitMoves(fighter, mon, fighter.active);
+          }
+          const name = Items.label(mon);
+          const item = Items.take(mon);
+          this._emitHeld(fighter, mon, item.heldItem, 0);
+          this._say(`${mon.species} recovered PP using ${name}.`);
+        }
+      }
+    }
+  }
+
+  // HandleStatBoostingHeldItems: player then enemy.
+  _heldStatBoosts() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      const held = mon ? Items.effect(mon) : { effect: null };
+      const stat = held.effect && has(Items.STAT_UP, held.effect) ? Items.STAT_UP[held.effect] : null;
+      if (stat) {
+        const before = Effects.clampStage(mon.stages[stat]);
+        const after = Effects.clampStage(before + 1);
+        if (after !== before) {
+          const name = Items.label(mon);
+          const item = Items.take(mon);
+          mon.stages[stat] = after;
+          this._emitHeld(fighter, mon, item.heldItem, 0);
+          this._say(`${mon.species}'s ${name} activated!`);
+          const text = `${mon.species}'s ${Effects.STAT_LABELS[stat] || stat} rose`;
+          this._say(text);
+          this._emit('stat', { slot: fighter.slot, side: fighter.side, amount: after, text });
+        }
+      }
+    }
+  }
+
+  // HandleHealingItems: the enemy's items first (side b, then side a), each
+  // asked HP berry, then status berry, then confusion berry.
+  _heldHealing() {
+    for (const side of ['b', 'a']) {
+      for (const fighter of this.bySide[side]) {
+        const mon = activeMon(fighter);
+        if (mon) {
+          this._hpBerry(fighter, mon);
+          this._statusBerry(fighter, mon);
+          this._confusionBerry(fighter, mon);
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // obedience (BattleCommand_CheckObedience; the Lua twin cites the lines)
+  // ------------------------------------------------------------------
+
+  // `.rand1` / `.rand2`.
+  _obeyDraw(span, swapped) {
+    let r = 0;
+    for (let n = 0; n < REDRAW_LIMIT; n += 1) {
+      r = this.rng.byte();
+      if (swapped) r = Items.swap(r);
+      if (r < span) return r;
+    }
+    return r % span;
+  }
+
+  // `.UseInstead`: a 1-based slot, or null.
+  _obeyInstead(mon, selected) {
+    if (mon.moves.length <= 1) return null;
+    if (mon.disable && mon.disable.turns > 0) return null;
+    let total = 0;
+    for (const m of mon.moves) total += Math.max(0, int(m.pp, 0));
+    const chosen = mon.moves[(selected || 0) - 1];
+    if ((chosen ? chosen.pp : 0) === total) return null;
+    const rows = Math.min(4, mon.moves.length);
+    for (let n = 0; n < REDRAW_LIMIT; n += 1) {
+      const r = this.rng.byte() % 4;
+      if (r < rows && (r + 1) !== selected && mon.moves[r].pp > 0) return r + 1;
+    }
+    return null;
+  }
+
+  // `.EndDisobedience`.
+  _disobeyed(fighter, mon) {
+    mon.lastMoveIndex = 0;
+    if (fighter.choice && fighter.choice.bideRelease) mon.bide = null;
+    return 'stop';
+  }
+
+  // `.DoNothing`.
+  _loaf(fighter, mon) {
+    this._say(`${mon.species}${LOAF_LINES[this.rng.byte() % 4]}`);
+    return this._disobeyed(fighter, mon);
+  }
+
+  // null when the monster obeys, 'stop', or the 1-based slot it uses instead.
+  _obey(fighter, mon, move) {
+    if (!fighter.badgeRules || mon.traded !== true) return null;
+    if (mon.charging && Effects.isCharge(mon.charging.effect)) return null;
+    if (mon.thrashing) return null;
+    const cap = Items.obedienceCap(fighter.badges);
+    const level = mon.level;
+    if (cap >= level) return null;
+    const span = Math.min(255, cap + level);
+    if (this._obeyDraw(span, true) < cap) return null;
+
+    // IgnoreSleepOnly: Snore or Sleep Talk, chosen while asleep (the cart's
+    // ellipsis glyph is three dots here: Wire.text has no such glyph).
+    if (mon.status === 'sleep' && has(Items.SLEEP_BYPASS, Effects.moveKey(move))) {
+      this._say(`${mon.species} ignored orders...sleeping!`);
+      return 'stop';
+    }
+
+    if (this._obeyDraw(span, false) < cap) {
+      const slot = this._obeyInstead(mon, fighter.choice ? fighter.choice.move : null);
+      if (slot !== null) {
+        if (fighter.choice && fighter.choice.bideRelease) mon.bide = null;
+        return slot;
+      }
+      return this._loaf(fighter, mon);
+    }
+
+    const over = level - cap;
+    const r = Items.swap(this.rng.byte());
+    if (r < over) {
+      // `.Nap`: the status byte is overwritten, whatever it held.
+      let turns = 0;
+      for (let n = 0; n < REDRAW_LIMIT; n += 1) {
+        turns = Items.napTurns(this.rng.byte());
+        if (turns !== 0) break;
+      }
+      if (turns === 0) turns = 1;
+      mon.status = 'sleep';
+      mon.statusTurns = turns;
+      const text = `${mon.species} began to nap!`;
+      this._say(text);
+      this._emit('status', {
+        slot: fighter.slot, side: fighter.side, status: STATUS_TO_WIRE.sleep, text,
+      });
+      return this._disobeyed(fighter, mon);
+    }
+    if (r - over >= over) return this._loaf(fighter, mon);
+
+    // "won't obey!" and HitConfusion, past the monster's own substitute.
+    this._say(`${mon.species} won't obey!`);
+    const folded = this._selfHitStats(fighter, mon, move);
+    const damage = Status.selfHitDamage({
+      level: mon.level, attack: folded.attack, defense: folded.defense,
+      itemBoostPercent: this._typeBoostOf(mon, move),
+    });
+    this._say(`${mon.species} hurt itself in confusion`);
+    this._damage(fighter, mon, damage, null, true);
+    return this._disobeyed(fighter, mon);
   }
 
   _resolveTurn() {
@@ -1986,34 +2420,40 @@ class Battle {
     }
   }
 
-  // Sort actors by priority bracket (desc), then active-mon speed (desc), then
-  // field order; tied groups flip on one RNG byte >= TIE_BREAK_ROLL. Shared by
-  // fights and ball throws -- a ball carries no `priority`, so every thrower
-  // sits in one bracket and the order is Speed's, as it always was.
+  // Sort actors by priority bracket (desc), then a Quick Claw that fired, then
+  // active-mon speed (desc), then field order; tied groups flip on one RNG byte
+  // >= TIE_BREAK_ROLL. Shared by fights and ball throws -- a ball carries no
+  // `priority` and no `clawParam`, so every thrower sits in one bracket, rolls
+  // no claw, and the order is Speed's, as it always was.
   //
   // pokecrystal's DetermineMoveOrder for two battlers: CompareMovePriority,
   // then (`.equal_priority`) each side's Quick Claw roll, then the Speed
   // compare, then the coin flip. A Quick Claw is a roll *inside* a bracket, so
-  // it belongs between the bracket key and the Speed key here, drawn before
-  // the tie-break bytes.
+  // it sits between the bracket key and the Speed key here, drawn before the
+  // tie-break bytes (`_quickClaws`).
   _orderActors(actors) {
     if (actors.length <= 1) return;
 
+    this._quickClaws(actors);
+
     const bracket = (actor) => (actor.priority === undefined ? 0 : actor.priority);
+    const claw = (actor) => (actor.claw ? 1 : 0);
     actors.sort((x, y) => {
       if (bracket(x) !== bracket(y)) return bracket(y) - bracket(x);
+      if (claw(x) !== claw(y)) return claw(y) - claw(x);
       if (x.speed !== y.speed) return y.speed - x.speed;
       return x.order - y.order; // field order: side a, then side b
     });
 
-    // One byte per group of actors in one bracket at one Speed, spent only
-    // when the group is actually tied, so an ordinary turn between two
-    // different speeds costs no draw at all on either runtime.
+    // One byte per group of actors in one bracket, of one Quick Claw standing,
+    // at one Speed, spent only when the group is actually tied, so an ordinary
+    // turn between two different speeds costs no draw at all on either runtime.
     let i = 0;
     while (i < actors.length) {
       let j = i;
       while (j < actors.length - 1 && actors[j + 1].speed === actors[i].speed
-             && bracket(actors[j + 1]) === bracket(actors[i])) j += 1;
+             && bracket(actors[j + 1]) === bracket(actors[i])
+             && claw(actors[j + 1]) === claw(actors[i])) j += 1;
       if (j > i && this.rng.byte() >= TIE_BREAK_ROLL) {
         for (let lo = i, hi = j; lo < hi; lo += 1, hi -= 1) {
           const swap = actors[lo];
@@ -2330,12 +2770,15 @@ class Battle {
       const choice = fighter.choice;
       const mon = activeMon(fighter);
       if (choice && choice.action === 'fight' && mon) {
+        const held = Items.effect(mon);
         actors.push({
           fighter,
           mon, // pinned: see the skip in the loop
           priority: this._priorityOf(fighter, mon),
           speed: this._speedOf(fighter, mon),
           order: actors.length + 1,
+          // A Quick Claw holder's parameter, for `_quickClaws`; null otherwise.
+          clawParam: held.effect === Items.QUICK_CLAW ? held.param : null,
         });
       }
     }
@@ -2375,52 +2818,72 @@ class Battle {
     const attack = this._battleStat(fighter, mon, 'atk');
     let defense = this._battleStat(fighter, mon, 'def');
     if (this._screenUp(fighter.side, false)) defense *= 2;
-    const folded = Damage.truncateStats(attack, defense, has(LINK_MODES, this.mode));
+    const folded = Damage.truncateStats(attack, defense, this._onePassTruncate());
     if (selected && Effects.isExplode(selected.effect)) {
       folded.defense = Math.max(1, Math.floor(folded.defense / 2));
     }
     return folded;
   }
 
+  // One status gate (Status.beforeMove: its byte, its line, the counter it
+  // ticks). Returns whether the monster may move past it.
+  _statusGate(fighter, mon) {
+    const gate = Status.beforeMove(
+      { status: mon.status, turnsRemaining: mon.statusTurns }, this.rng.byte(),
+    );
+    if (!gate) return true;
+    mon.statusTurns = int(gate.turnsRemaining, mon.statusTurns);
+    if (gate.wokeUp) {
+      mon.status = null;
+      mon.statusTurns = 0;
+      this._emit('status', {
+        slot: fighter.slot, side: fighter.side,
+        text: `${mon.species} woke up`,
+      });
+    } else if (gate.thawed) {
+      mon.status = null;
+      mon.statusTurns = 0;
+      this._emit('status', {
+        slot: fighter.slot, side: fighter.side,
+        text: `${mon.species} thawed out`,
+      });
+    } else if (gate.fullyParalyzed) {
+      this._say(`${mon.species} is fully paralyzed`);
+    } else if (mon.status === 'sleep') {
+      this._say(`${mon.species} is fast asleep`);
+    } else if (mon.status === 'freeze') {
+      this._say(`${mon.species} is frozen solid`);
+    }
+    return gate.canMove;
+  }
+
   // Returns false when a gate stopped the move. `selected` is the move the
-  // monster is about to use (Struggle when every slot is empty): the confusion
-  // self-hit reads it the way the cart's DamageCalc does.
+  // monster is about to use (Struggle when every slot is empty): the sleep
+  // gate's Snore / Sleep Talk exception and the confusion self-hit read it the
+  // way the cart's CheckTurn and DamageCalc do. CheckTurn's order: sleep,
+  // freeze, then the flinch (`.not_frozen`); the referee's paralysis gate stays
+  // after the flinch and before confusion.
   _runGates(fighter, mon, selected) {
+    if (mon.status === 'sleep' || mon.status === 'freeze') {
+      const asleep = mon.status === 'sleep';
+      if (!this._statusGate(fighter, mon)) {
+        // "Snore and Sleep Talk bypass sleep": told it is fast asleep, the
+        // monster goes on to obedience and the move.
+        if (!(asleep && mon.status === 'sleep' && selected
+              && has(Items.SLEEP_BYPASS, Effects.moveKey(selected)))) {
+          return false;
+        }
+      }
+    }
+
     if (mon.flinch) {
       mon.flinch = false;
       this._say(`${mon.species} flinched`);
       return false;
     }
 
-    if (has(GATING, mon.status)) {
-      const gate = Status.beforeMove(
-        { status: mon.status, turnsRemaining: mon.statusTurns }, this.rng.byte(),
-      );
-      if (gate) {
-        mon.statusTurns = int(gate.turnsRemaining, mon.statusTurns);
-        if (gate.wokeUp) {
-          mon.status = null;
-          mon.statusTurns = 0;
-          this._emit('status', {
-            slot: fighter.slot, side: fighter.side,
-            text: `${mon.species} woke up`,
-          });
-        } else if (gate.thawed) {
-          mon.status = null;
-          mon.statusTurns = 0;
-          this._emit('status', {
-            slot: fighter.slot, side: fighter.side,
-            text: `${mon.species} thawed out`,
-          });
-        } else if (gate.fullyParalyzed) {
-          this._say(`${mon.species} is fully paralyzed`);
-        } else if (mon.status === 'sleep') {
-          this._say(`${mon.species} is fast asleep`);
-        } else if (mon.status === 'freeze') {
-          this._say(`${mon.species} is frozen solid`);
-        }
-        if (!gate.canMove) return false;
-      }
+    if (mon.status === 'paralysis') {
+      if (!this._statusGate(fighter, mon)) return false;
     }
 
     if (mon.confusion > 0) {
@@ -2428,8 +2891,7 @@ class Battle {
       // turn's byte lands on a self-hit: they draw nothing. Status.confusionTick
       // also takes `itemBoostPercent` -- DamageCalc's type-boost item scan, run
       // for the SELECTED move's type (STRUGGLE.typeId for Struggle), the other
-      // cart bug -- and none is passed because no sheet hands the referee a
-      // held item.
+      // cart bug.
       const folded = this._selfHitStats(fighter, mon, selected);
       const gate = Status.beforeMove({
         status: 'confusion',
@@ -2437,9 +2899,12 @@ class Battle {
         level: mon.level,
         attack: folded.attack,
         defense: folded.defense,
+        itemBoostPercent: this._typeBoostOf(mon, selected),
       }, this.rng.byte());
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
+        // CheckTurn's `dec [hl]` on this field position's confuse count.
+        fighter.confuseCount = mon.confusion;
         if (gate.snappedOut) {
           this._say(`${mon.species} snapped out of confusion`);
           this._emit('status', {
@@ -2460,7 +2925,24 @@ class Battle {
     return true;
   }
 
+  // A status or a confusion this move's effect just put on `targetMon`, and
+  // the held item the cart asks about it straight away (UseHeldStatusHealingItem
+  // at the end of every status-inflicting command, UseConfusionHealingItem at
+  // the end of FinishConfusingTarget). A confusion that lands also becomes this
+  // field position's confuse count.
+  _afterInfliction(targetFighter, targetMon, before) {
+    if (!(targetFighter && targetMon) || targetMon.hp <= 0) return;
+    if (targetMon.status && !before.status) {
+      this._statusBerry(targetFighter, targetMon);
+    }
+    if (targetMon.confusion > 0 && before.confusion === 0) {
+      targetFighter.confuseCount = targetMon.confusion;
+      this._confusionBerry(targetFighter, targetMon);
+    }
+  }
+
   _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId) {
+    const before = { status: targetMon.status, confusion: targetMon.confusion };
     const result = Effects.applyPrimary({
       effectId,
       rng: this.rng,
@@ -2492,9 +2974,11 @@ class Battle {
       });
     }
     if (result.movesChanged) this._emitMoves(fighter, mon);
+    this._afterInfliction(targetFighter, targetMon, before);
   }
 
   _applySide(fighter, mon, targetFighter, targetMon, effectId, chance) {
+    const before = { status: targetMon.status, confusion: targetMon.confusion };
     const result = Effects.applySide({
       effectId,
       chance,
@@ -2509,6 +2993,7 @@ class Battle {
     for (const entry of result.events || []) {
       this._emit(entry.kind, entry.fields);
     }
+    this._afterInfliction(targetFighter, targetMon, before);
   }
 
   _markLastMove(mon, moveIndex) {
@@ -2545,13 +3030,31 @@ class Battle {
     if (!move) return;
     const struggling = move === STRUGGLE;
 
-    if (!called && !this._runGates(fighter, mon, move)) return;
+    // A move used in place of a disobeyed one runs no CheckTurn of its own.
+    const disobeyed = opts.disobeyed === true;
+    if (!called && !disobeyed && !this._runGates(fighter, mon, move)) return;
 
-    if (!struggling && !called && mon.disable && mon.disable.turns > 0
+    if (!struggling && !called && !disobeyed && mon.disable && mon.disable.turns > 0
         && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
       this._say(`${moveLabel(blocked)} is disabled`);
       return;
+    }
+
+    // `checkobedience`, for the move the monster chose (`_obey`). A move it
+    // uses instead is used in full under "used instead,", and then forgotten
+    // as the last move (`.EndDisobedience`).
+    if (!called && !disobeyed) {
+      const verdict = this._obey(fighter, mon, move);
+      if (verdict === 'stop') return;
+      if (typeof verdict === 'number') {
+        const saved = fighter.choice;
+        fighter.choice = { action: 'fight', move: verdict, target: saved.target };
+        this._useMove(fighter, mon, { disobeyed: true });
+        fighter.choice = saved;
+        mon.lastMoveIndex = 0;
+        return;
+      }
     }
 
     // Resolved once, here, and used for the whole action: see `_retarget`.
@@ -2584,7 +3087,7 @@ class Battle {
       slot: fighter.slot, side: fighter.side, text: move.id,
       amount: chargingUp ? 1 : undefined,
     });
-    this._say(`${mon.species} used ${moveLabel(move)}`);
+    this._say(`${mon.species}${disobeyed ? ' used instead, ' : ' used '}${moveLabel(move)}`);
 
     if (choice.bideRelease && mon.bide) {
       const stored = mon.bide.stored;
@@ -2594,7 +3097,10 @@ class Battle {
         this._markLastMove(mon, choice.move);
         return;
       }
-      this._damage(target, defender, 2 * stored, null);
+      // Bide's script releases through applydamage, so a Focus Band answers
+      // it, and ends in `kingsrock`.
+      this._strike(target, defender, 2 * stored);
+      this._kingsRock(mon, move, effectId, defender);
       this._markLastMove(mon, choice.move);
       return;
     }
@@ -2674,12 +3180,16 @@ class Battle {
     // still carries a Gen1 accuracy byte (1..255) is scaled down.
     let acc = Math.max(0, int(move.accuracy, 100));
     if (acc > 100) acc = Math.max(1, Math.floor(acc * 100 / 255));
+    const powder = Items.effect(defender);
     const shot = Accuracy.hit({
       accuracy: acc,
       accuracyStage: mon.stages.acc,
       evasionStage: defender.stages.eva,
       roll: this.rng.nextInt(0, Accuracy.ROLL_MAX),
       alwaysHits: alwaysHits || acc <= 0,
+      // The defender's Bright Powder (`.BrightPowder`), past which Swift and
+      // X Accuracy never reach.
+      brightPowder: powder.effect === Items.BRIGHTPOWDER ? powder.param : null,
     });
     if (!shot.hit) {
       this._say(`${mon.species} missed`);
@@ -2744,10 +3254,14 @@ class Battle {
     }
 
     const hits = Effects.hitCount(effectId, this.rng);
-    // Gen2 crit ladder (not Gen1 base-Speed threshold).
+    // Gen2 crit ladder (not Gen1 base-Speed threshold), with the attacker's
+    // item: Scope Lens adds a level; Lucky Punch / Stick on the battle species
+    // set it to 2 outright (Crit.level).
     const critOpts = {
       focusEnergy: mon.focusEnergy,
       highCritMove: move.highCrit === true,
+      scopeLens: Items.holds(mon, Items.CRITICAL_UP),
+      speciesItemBonus: Items.critSpeciesItem(this._battleSpecies(mon), mon.heldItem),
     };
     const critLevel = Crit.level(critOpts);
     const critChance = Crit.chance(critLevel);
@@ -2817,16 +3331,19 @@ class Battle {
         attack = Math.max(1, int(mon.stats[atkKey], 1));
         defense = Math.max(1, int(defender.stats[defKey], 1));
       }
-      // 4. ThickClubBoost / LightBallBoost double the attack here, still
-      //    16-bit, which is why they can wrap past 1024 in a link battle; the
-      //    referee holds no held item, so neither fires.
-      // 5. TruncateHL_BC: both folded into a byte (one pass in a link battle).
-      const folded = Damage.truncateStats(attack, defense, has(LINK_MODES, this.mode));
-      attack = folded.attack;
-      defense = folded.defense;
-      // 6. DittoMetalPowder runs on the folded defense (the same no-item note
-      //    as 4), and then BattleCommand_DamageCalc halves it for Explosion /
+      // 4. ThickClubBoost (physical) / LightBallBoost (special) double the
+      //    attack here, still 16-bit, which is why they can wrap past 1024
+      //    when the fold below makes one pass (Items.speciesAttack).
+      attack = Items.speciesAttack(mon, isSpecial, attack);
+      // 5. TruncateHL_BC: both folded into a byte -- one pass in a link battle
+      //    and on Gold / Silver, a loop on Crystal otherwise (K6).
+      const folded = Damage.truncateStats(attack, defense, this._onePassTruncate());
+      // 6. DittoMetalPowder on the folded pair (Items.metalPowder), and then
+      //    BattleCommand_DamageCalc halves the defense for Explosion /
       //    Self-Destruct, at least 1 (:2904-2913).
+      const powdered = Items.metalPowder(defender, folded.attack, folded.defense);
+      attack = powdered.attack;
+      defense = powdered.defense;
       if (Effects.isExplode(effectId)) {
         defense = Math.max(1, Math.floor(defense / 2));
       }
@@ -2847,8 +3364,9 @@ class Battle {
         typeEffect: percents,
         roll,
         physical: !isSpecial,
-        // DamageCalc's type-boost item scan (`itemBoostPercent`, ahead of the
-        // crit x2) has no input: the referee holds no held item.
+        // DamageCalc's type-boost item scan, ahead of the crit x2: NORMAL for
+        // Struggle, whose row still says so.
+        itemBoostPercent: this._typeBoostOf(mon, move),
         //
         // The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
         // this is the cart's "player's turn only" without asking whose turn.
@@ -2882,7 +3400,7 @@ class Battle {
     for (let h = 0; h < hits; h += 1) {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
-      this._damage(target, defender, damage, null);
+      this._strike(target, defender, damage);
       totalDealt += hpBefore - defender.hp;
     }
 
@@ -2897,6 +3415,11 @@ class Battle {
       if (Effects.isPayDay(effectId)) {
         this._say('Coins scattered');
       }
+    }
+
+    // The Thief script's `thief`, right after the damage (Items.THIEF).
+    if (Effects.moveKey(move) === Items.THIEF) {
+      this._thief(fighter, mon, target, defender);
     }
 
     if ((struggling || Effects.isRecoil(effectId)) && totalDealt >= 1) {
@@ -2950,6 +3473,9 @@ class Battle {
       this._faintUser(fighter, mon);
     }
 
+    // `kingsrock`, the last command of the scripts that hold one.
+    this._kingsRock(mon, move, effectId, defender);
+
     this._markLastMove(mon, choice.move);
 
     if (mon.thrashing) {
@@ -2958,6 +3484,7 @@ class Battle {
         mon.thrashing = null;
         const turns = this.rng.byte() % 4 + 2;
         mon.confusion = turns;
+        fighter.confuseCount = turns;
         this._say(`${mon.species} became confused`);
         this._emit('status', {
           slot: fighter.slot, side: fighter.side, confused: 1,
@@ -3282,13 +3809,17 @@ class Battle {
   }
 
   // The end of the turn: pokecrystal's HandleBetweenTurnEffects order (core.asm
-  // :250-296), where the screens tick after Leftovers / Mysteryberry / Defrost
-  // / Safeguard and before the held stat-boost and healing items. The Lua
-  // twin's note maps that list onto this referee's two steps.
+  // :250-296, pokegold the same) -- the residual walk, Leftovers,
+  // Mysteryberry, (Defrost, Safeguard), the screens, the stat-boosting held
+  // items, the healing held items. The Lua twin's note has the rest.
   _resolveResiduals() {
     this._residualDamage();
     if (this.result) return;
+    this._heldLeftovers();
+    this._heldMysteryberry();
     this._tickScreens();
+    this._heldStatBoosts();
+    this._heldHealing();
   }
 
   // HandleScreens (core.asm:1620-1680): side a then side b, Light Screen before
@@ -3686,6 +4217,13 @@ function attempt(opts) {
         slot: Events.fieldSlot(side, index),
         mons,
         badges: seatBadges(self.mode, side, entry.badges),
+        // The cart's player in a fight against the computer, as BattleSim3
+        // keeps it: obedience and the flinch-reset exception ask this.
+        badgeRules: (side === BADGE_SIDE && has(BADGE_MODES, self.mode)) ? true : null,
+        // Contract K6; the fight reads side a's first seat's (`self.family`).
+        family: has(FAMILIES, entry.family) ? entry.family : DEFAULT_FAMILY,
+        // wPlayerConfuseCount for this field position (`_berserkGene`).
+        confuseCount: 0,
         bag: copyBag(entry.bag),
         active: firstLiving(mons),
         connected: true,
@@ -3706,6 +4244,9 @@ function attempt(opts) {
       self.bySide[side].push(fighter);
     }
   }
+
+  // The fight's cart (K6): side a's first seat speaks for it.
+  self.family = self.bySide.a[0] ? self.bySide.a[0].family : DEFAULT_FAMILY;
 
   // Everybody is fielded at once, so the opening participation sets are the
   // opening field. `_refield` re-adds the standing opposition every time it
@@ -3760,6 +4301,11 @@ module.exports = {
   BADGE_MODES,
   BADGE_SIDE,
   LINK_MODES,
+  FAMILIES,
+  DEFAULT_FAMILY,
+  BERSERK_CONFUSION,
+  REDRAW_LIMIT,
+  LOAF_LINES,
   STATUS_FROM_WIRE,
   STATUS_TO_WIRE,
 };

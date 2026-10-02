@@ -15,10 +15,15 @@
  * draw site is spelled out here and every one of them is conditional in a way
  * both runtimes can reproduce:
  *
- *   1. a speed tie-break byte, one per group of equally fast actors;
+ *   1. a speed tie-break byte, one per group of actors in one priority
+ *      bracket at one Speed;
  *   2. one gate byte per actor whose monster has a gating status;
  *   3. one gate byte per actor whose monster is confused;
- *   4. per move that is actually used: accuracy byte, multihit-count byte
+ *   4. the obedience rolls of a traded monster over its trainer's badge cap
+ *      (`_obey`, Status' obedience section: CheckForDisobedience's loops, the
+ *      instead-move, nap and loaf draws) -- a fight with no traded monster on
+ *      the player's side draws none of them;
+ *   5. per move that is actually used: accuracy byte, multihit-count byte
  *      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
  *      (damaging hits only), in that order, and none of them drawn when an
  *      earlier step ended the move (a missed move draws no crit byte).
@@ -35,8 +40,14 @@
  * reasoning behind each, lives in the Lua header rather than being restated
  * here; what follows is only what the port has to keep true:
  *
- *   * *Speed ties* break on a single byte per tied group, below 128 leaving the
- *     side-a member first and otherwise reversing the group.
+ *   * *Turn order* is the priority bracket (Effects.movePriority: QUICK_ATTACK
+ *     +1, COUNTER -1, off the selected move), then the stored Speed, then the
+ *     tie-break (`_orderActors`); every seat's switch and item resolve before
+ *     any move -- the cart's player's do, and its TrainerAI's in-order item
+ *     or switch is the one thing not copied.
+ *   * *Speed ties* break on a single byte per tied group -- one bracket at one
+ *     Speed -- below 128 leaving the side-a member first and otherwise
+ *     reversing the group.
  *   * *Running* is mode-gated like Teleport: wild/coop_wild flee, 1v1/coop_pvp
  *     concede, coop_npc refuses without finishing.
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
@@ -44,7 +55,14 @@
  *     Bags are client claims (sheet trust locked). Forced lock-in injects on
  *     openTurn (trapper continue anim + residual; no menu); forced-only turns
  *     defer to the next tick.
- *   * *Metronome* picks from host-uploaded metronomePool on the ruleset.
+ *   * *Metronome* picks from host-uploaded metronomePool on the ruleset. A
+ *     called move runs no gate and is never Struggle: a call made with the
+ *     last PP takes no recoil.
+ *   * *Obedience*: a `badgeRules` seat (side a of BADGE_MODES) runs
+ *     CheckForDisobedience for a monster whose sheet says `traded`; link
+ *     fights and side b never roll (`_obey`).
+ *   * *The flinch reset* at a turn's open skips a `badgeRules` seat's own
+ *     raging or recharging monster; everywhere else it is unconditional.
  *   * *Physical / Special* via host-uploaded specialTypes (Gen1 type categories).
  *   * A *faint with a living bench opens the `replace` phase*, between the turn
  *     it happened on and the next one: the turn number does not move, no other
@@ -294,6 +312,16 @@ const ACTIONS = {
 const STRUGGLE = {
   id: 'STRUGGLE', power: 50, accuracy: 255,
   type: 0, effect: 0, chance: 0,
+};
+
+// The sentences `.monDoesNothing` prints (pokered data/text/text_2.asm
+// _LoafingAroundText .. _IgnoredOrdersText), keyed by Status.LOAF_LINES, with
+// the monster's name in front -- the cart's English, punctuation included.
+const LOAF_TEXT = {
+  loafing: ' is loafing around.',
+  wont_obey: " won't obey!",
+  turned_away: ' turned away!',
+  ignored_orders: ' ignored orders!',
 };
 
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -562,6 +590,10 @@ function copyMon(raw, fallback) {
   if (raw.baseSpd !== undefined && raw.baseSpd !== null) {
     out.baseSpd = Math.max(0, Math.min(255, int(raw.baseSpd, 0)));
   }
+  // K1: the monster's OT id is not its trainer's (stamped by the owner's
+  // client, true or absent). Only `_obey` reads it, and only on a `badgeRules`
+  // seat; anywhere else it rides along inert.
+  if (raw.traded === true) out.traded = true;
   return out;
 }
 
@@ -1651,13 +1683,28 @@ class Battle {
       fighter.choice = null;
       fighter.forced = null;
       // MainInBattleLoop resets both FLINCHED bits as a turn opens
-      // (core.asm :296-300), so a flinch landed on a monster that had already
-      // moved dies here instead of costing it the NEXT turn. The cart skips
-      // that reset while the player's own monster is raging or recharging;
-      // the referee does not model the skip -- see `_fillForcedChoices`,
-      // where recharge is a forced pass rather than a gate a flinch could
-      // pre-empt.
-      for (const mon of fighter.mons) mon.flinch = false;
+      // (core.asm :293-300), so a flinch landed on a monster that had already
+      // moved dies here instead of costing it the NEXT turn -- unless the
+      // player's monster is using Rage or must recharge, when the cart jumps
+      // past the reset to `.selectEnemyMove`. A raging monster a slower foe
+      // flinched therefore loses its next Rage to that flinch (`_runGates`).
+      //
+      // "The player" is a `badgeRules` seat: there the skip is kept, per seat,
+      // for that seat's own fielded monster -- a co-op side holds two players,
+      // where the cart had one, and each one's rage protects only its own
+      // flinch. The skip also spares the enemy's bit on the cart, but in a
+      // one-on-one that bit is never set at this point (only the player's own
+      // move can flinch the enemy, and a raging or recharging player's last
+      // move was Rage or Hyper Beam, neither of which flinches), so the
+      // computer's seats are reset like everyone else's rather than inventing
+      // whose rage would guard them in a 2v2. A link fight has no single
+      // player -- each console runs this from its own side, and the referee
+      // cannot be both -- so there the reset is unconditional.
+      const mon = activeMon(fighter);
+      const kept = fighter.badgeRules && mon && (mon.raging || mon.mustRecharge) ? mon : null;
+      for (const each of fighter.mons) {
+        if (each !== kept) each.flinch = false;
+      }
     }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     // Before the window opens, not after: a player deciding this turn is
@@ -1753,6 +1800,18 @@ class Battle {
   // kept for the callers' shape.
   _speedOf(fighter, mon) {
     return mon.cur.spd;
+  }
+
+  // The bracket an action moves in: the selected move's (Effects.movePriority),
+  // which is Struggle's when every slot is empty -- the move `_useMove` will
+  // resolve to -- and the slot's own otherwise. Read off the choice, as the
+  // cart reads wPlayerSelectedMove before anything runs: a Metronome moves at
+  // Metronome's priority whatever it calls, and a disobedient monster at the
+  // priority of the move it was told to use, whatever it does instead.
+  _priorityOf(fighter, mon) {
+    const choice = fighter.choice;
+    if (allPpEmpty(mon)) return Effects.movePriority(STRUGGLE);
+    return Effects.movePriority(mon.moves[(choice ? choice.move : 0) - 1]);
   }
 
   // The battler opposite this one: the foe seat in the same position if it
@@ -1956,30 +2015,45 @@ class Battle {
         }
       }
     }
-    this._sortActorsBySpeed(balls);
+    this._orderActors(balls);
     for (const actor of balls) {
       if (this.result) return;
       this._resolveOneItem(actor.fighter);
     }
   }
 
-  // Sort actors by active-mon speed (desc), then field order; tied groups flip
-  // on one RNG byte >= TIE_BREAK_ROLL. Shared by fights and ball throws.
-  _sortActorsBySpeed(actors) {
+  // Sort actors by priority bracket (desc), then active-mon speed (desc), then
+  // field order; tied groups flip on one RNG byte >= TIE_BREAK_ROLL. Shared by
+  // fights and ball throws -- a ball carries no `priority`, so every thrower
+  // sits in one bracket and the order is Speed's, as it always was.
+  //
+  // pokered's MainInBattleLoop for two battlers (core.asm :369-412): a Quick
+  // Attack on one side only moves first, a Counter on one side only moves
+  // last, the same move on both sides goes to `.compareSpeed`, and a Speed tie
+  // is the coin flip. battle2's `_orderActors` is the same machine with Gen
+  // 2's table; a cart compare between two moves is a bracket compare between
+  // two actors, so a field of any size sorts the same way.
+  _orderActors(actors) {
     if (actors.length <= 1) return;
 
     actors.sort((x, y) => {
+      const xp = x.priority || 0;
+      const yp = y.priority || 0;
+      if (xp !== yp) return yp - xp;
       if (x.speed !== y.speed) return y.speed - x.speed;
       return x.order - y.order; // field order: side a, then side b
     });
 
-    // One byte per group of equally fast actors, spent only when the group is
-    // actually tied, so an ordinary turn between two different speeds costs no
-    // draw at all on either runtime.
+    // One byte per group of actors in one bracket at one Speed, spent only
+    // when the group is actually tied, so an ordinary turn between two
+    // different speeds costs no draw at all on either runtime.
     let i = 0;
     while (i < actors.length) {
       let j = i;
-      while (j < actors.length - 1 && actors[j + 1].speed === actors[i].speed) j += 1;
+      while (j < actors.length - 1 && actors[j + 1].speed === actors[i].speed
+             && (actors[j + 1].priority || 0) === (actors[i].priority || 0)) {
+        j += 1;
+      }
       if (j > i && this.rng.byte() >= TIE_BREAK_ROLL) {
         for (let lo = i, hi = j; lo < hi; lo += 1, hi -= 1) {
           const swap = actors[lo];
@@ -2327,6 +2401,7 @@ class Battle {
         actors.push({
           fighter,
           mon, // pinned: see the skip in the loop
+          priority: this._priorityOf(fighter, mon),
           speed: this._speedOf(fighter, mon),
           order: actors.length + 1,
         });
@@ -2334,7 +2409,7 @@ class Battle {
     }
     if (actors.length === 0) return;
 
-    this._sortActorsBySpeed(actors);
+    this._orderActors(actors);
 
     for (const actor of actors) {
       if (this.result) break;
@@ -2387,27 +2462,13 @@ class Battle {
     }
 
     if (mon.confusion > 0) {
-      // The self-hit reads the battle stats as stored: pokered's
-      // HandleSelfConfusionDamage (core.asm :3672-3710) puts wBattleMon's own
-      // Defense in the enemy's slot and runs GetDamageVarsForPlayerAttack, so
-      // the Attack and Defense are wBattleMon's -- stages, badges and a stored
-      // burn all in them -- through the same scaling and 997 cap as any hit,
-      // with no crit and no random factor (Status' fixed max roll). And the
-      // Reflect check in there still reads the ENEMY's status byte, so it is
-      // the opponent's Reflect that doubles the confused monster's own
-      // Defense -- the cart's quirk, kept. Gen 1 has one opponent; in a 2v2 it
-      // is the battler opposite (`_oppositeFoe`). The enemy's own self-hit is
-      // the mirror image (:5774-5805), so this is both seats' rule.
-      const opposite = this._oppositeFoe(fighter);
-      const opposed = opposite ? activeMon(opposite) : null;
-      let defense = mon.cur.def;
-      if (opposed && opposed.reflect) defense *= 2;
+      const hit = this._selfHitState(fighter, mon);
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
-        level: mon.level,
-        attack: mon.cur.atk,
-        defense,
+        level: hit.level,
+        attack: hit.attack,
+        defense: hit.defense,
       }, this.rng.byte());
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
@@ -2427,6 +2488,80 @@ class Battle {
     }
 
     return true;
+  }
+
+  // What HandleSelfConfusionDamage hits with (core.asm :3672-3710), for both of
+  // its callers: the confusion gate above and a disobedient "won't obey". It
+  // reads the battle stats as stored: it puts wBattleMon's own Defense in the
+  // enemy's slot and runs GetDamageVarsForPlayerAttack, so the Attack and
+  // Defense are wBattleMon's -- stages, badges and a stored burn all in them
+  // -- through the same scaling and 997 cap as any hit, with no crit and no
+  // random factor (Status.selfHitDamage's fixed max roll). And the Reflect
+  // check in there still reads the ENEMY's status byte, so it is the
+  // opponent's Reflect that doubles the monster's own Defense -- the cart's
+  // quirk, kept. Gen 1 has one opponent; in a 2v2 it is the battler opposite
+  // (`_oppositeFoe`). The enemy's own self-hit is the mirror image
+  // (:5774-5805), so this is both seats' rule.
+  _selfHitState(fighter, mon) {
+    const opposite = this._oppositeFoe(fighter);
+    const opposed = opposite ? activeMon(opposite) : null;
+    let defense = mon.cur.def;
+    if (opposed && opposed.reflect) defense *= 2;
+    return { level: mon.level, attack: mon.cur.atk, defense };
+  }
+
+  // CheckForDisobedience (core.asm :3830-4007), where ExecutePlayerMove calls
+  // it: after the status gates and the disabled-move check, before anything
+  // about the move itself. Only a `badgeRules` seat's traded monster gets here
+  // (the caller's gate). Returns { goes: true } when the move goes ahead --
+  // with `instead`, the slot of the move used instead, when the monster picked
+  // its own (`.useRandomMove`) -- and { goes: false } when the turn is spent:
+  //
+  //   * "nap": `.monNaps` writes SLP and the 1..7 counter over the whole
+  //     status byte -- a burn, a poison or a paralysis is simply gone -- and
+  //     touches no stat, so a stored burn or paralysis penalty stays in the
+  //     battle stats (nothing recomputes them; ItemUseMedicine is the only
+  //     cure that does). The badly-poisoned flag lives in another byte on the
+  //     cart and outlives the nap there; the referee folds it into `status`,
+  //     so it goes with it.
+  //   * "selfhit": "won't obey!", then HandleSelfConfusionDamage itself --
+  //     "hurt itself", the same stored-stat hit and borrowed Reflect as
+  //     confusion's (`_selfHitState`).
+  //   * "nothing": one of the four `.monDoesNothing` lines.
+  //   * "random" with every `.useRandomMove` refusal hit falls to "nothing".
+  _obey(fighter, mon, struggling) {
+    const choice = fighter.choice;
+    let verdict = Status.obedienceRoll(mon.level,
+      Status.obedienceCap(fighter.badges), this.rng);
+    if (verdict === 'obeys') return { goes: true, instead: null };
+    if (verdict === 'random') {
+      const disabled = !!(mon.disable && mon.disable.turns > 0);
+      const slot = Status.disobedientMove(mon.moves, choice.move, disabled,
+        struggling, this.rng);
+      if (slot) return { goes: true, instead: slot };
+      verdict = 'nothing';
+    }
+
+    if (verdict === 'nap') {
+      mon.status = 'sleep';
+      mon.statusTurns = Status.napTurns(this.rng);
+      const text = `${mon.species} began to nap!`;
+      this._say(text);
+      this._emit('status', {
+        slot: fighter.slot, side: fighter.side, status: STATUS_TO_WIRE.sleep, text,
+      });
+      return { goes: false, instead: null };
+    }
+
+    if (verdict === 'selfhit') {
+      this._say(`${mon.species} won't obey!`);
+      this._say(`${mon.species} hurt itself in confusion`);
+      this._damage(fighter, mon, Status.selfHitDamage(this._selfHitState(fighter, mon)), null);
+      return { goes: false, instead: null };
+    }
+
+    this._say(`${mon.species}${LOAF_TEXT[Status.loafLine(this.rng)]}`);
+    return { goes: false, instead: null };
   }
 
   _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId) {
@@ -2498,18 +2633,56 @@ class Battle {
 
   _useMove(fighter, mon, opts = {}) {
     const choice = fighter.choice;
-    // Empty sheet (`moves.length === 0`) is Struggle. Returning here used to
-    // eat that turn before `allPpEmpty` could pick the synthetic move.
-    const struggling = allPpEmpty(mon) || choice.struggle;
-    if (!struggling && !mon.moves[choice.move - 1]) return;
+    // A move Metronome or Mirror Move called is not the turn's own move. The
+    // gates and the obedience check already ran for the move that called it
+    // -- MetronomePickMove and MirrorMoveCopyMove jump back to
+    // CheckIfPlayerNeedsToChargeUp (core.asm :3206, :3211), past
+    // CheckPlayerStatusConditions and CheckForDisobedience -- and it is never
+    // Struggle, whatever PP the calling slot has left: Struggle is a move, not
+    // a state of the user's PP, so the call that spent the last PP takes no
+    // recoil.
+    const called = opts.moveOverride !== undefined && opts.moveOverride !== null;
+    // The move this action resolves to. Every slot empty -- an empty sheet
+    // (`moves.length === 0`) included -- is the synthetic STRUGGLE; returning
+    // on the missing slot used to eat that turn instead.
+    let move = opts.moveOverride;
+    if (!called) move = allPpEmpty(mon) ? STRUGGLE : mon.moves[choice.move - 1];
+    if (!move) return;
+    const struggling = move === STRUGGLE;
+    // The slot this action is *using*: the chosen one, or the one a
+    // disobedient monster picked instead (below), carried into a Metronome /
+    // Mirror Move call. Whatever the action records for a later turn -- a
+    // charge, a thrash, a Rage, a trap, a Bide, the last move a Mirror Move
+    // copies -- is recorded against it, because the cart overwrote
+    // wPlayerSelectedMove with the move it used. Two things still answer to
+    // the *chosen* slot, wPlayerMoveListIndex, which `.chooseMove` never
+    // rewrites: the PP spent (DecrementPP) and the slot Mimic writes over
+    // (`_applyPrimary`).
+    let usedSlot = opts.slot || choice.move;
+    let disobedient = opts.disobedient === true;
 
-    if (!this._runGates(fighter, mon)) return;
+    if (!called && !this._runGates(fighter, mon)) return;
 
-    if (!struggling && mon.disable && mon.disable.turns > 0
+    if (!struggling && !called && mon.disable && mon.disable.turns > 0
         && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
       this._say(`${moveLabel(blocked)} is disabled`);
       return;
+    }
+
+    // CheckForDisobedience: a traded monster of the player's, on the turn's
+    // own move. A forced action never asks -- Bide, a thrash, a Rage and a
+    // charge's release all leave CheckPlayerStatusConditions (or the
+    // CHARGING_UP branch) on a path that skips it -- and neither does a called
+    // move (above).
+    if (!called && fighter.badgeRules && mon.traded && !fighter.forced) {
+      const verdict = this._obey(fighter, mon, struggling);
+      if (!verdict.goes) return;
+      if (verdict.instead) {
+        usedSlot = verdict.instead;
+        move = mon.moves[verdict.instead - 1];
+        disobedient = true;
+      }
     }
 
     // Resolved once, here, and used for the whole action: see `_retarget`.
@@ -2525,50 +2698,62 @@ class Battle {
     // was already empty when it started.
     const targetSlot = target.slot;
 
-    const move = opts.moveOverride || (struggling ? STRUGGLE : mon.moves[choice.move - 1]);
     const effectId = int(move.effect, 0);
     const releasing = mon.charging !== null && mon.charging !== undefined
       && Effects.isCharge(mon.charging.effect);
     const mirrorCopy = opts.mirrorCopy === true;
 
-    if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) {
-      move.pp -= 1;
+    // DecrementPP spends wPlayerMoveListIndex's PP -- the chosen slot -- even
+    // when a disobedient monster used another move (`usedSlot` above).
+    const paying = disobedient && !called ? mon.moves[choice.move - 1] : move;
+    if (!struggling && paying.pp > 0 && !releasing && !choice.bideRelease) {
+      paying.pp -= 1;
       // FIGHT reads the uploaded sheet. Publish whenever PP actually moved
       // (Transform/Mimic already emit via movesChanged). Skip an override
       // copy -- Metronome/Mirror already spent the real slot on the first call.
-      if (!opts.moveOverride) this._emitMoves(fighter, mon, fighter.active);
+      if (!called) this._emitMoves(fighter, mon, fighter.active);
     }
     const chargingUp = Effects.isCharge(effectId) && !mon.charging;
     this._emit('anim', {
       slot: fighter.slot, side: fighter.side, text: move.id,
       amount: chargingUp ? 1 : undefined,
     });
-    this._say(`${mon.species} used ${moveLabel(move)}`);
+    // DisplayUsedMoveText with wMonIsDisobedient set takes UsedMove2Text and
+    // `.UsedInsteadText` (pokered engine/battle/used_move_text.asm; text_2.asm
+    // _UsedInsteadText): "<MON> used instead, <MOVE>", in this file's shape of
+    // the used line. A Metronome call keeps the flag (MetronomePickMove leaves
+    // it), a Mirror Move copy clears it (MirrorMoveCheck's `xor a`), and the
+    // calls below pass it on accordingly.
+    if (disobedient) {
+      this._say(`${mon.species} used instead, ${moveLabel(move)}`);
+    } else {
+      this._say(`${mon.species} used ${moveLabel(move)}`);
+    }
 
     if (choice.bideRelease && mon.bide) {
       const stored = mon.bide.stored;
       mon.bide = null;
       if (stored <= 0) {
         this._say('But it failed');
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       this._damage(target, defender, 2 * stored, null, fighter);
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       return;
     }
 
     // Charge / Fly: first turn sets state and ends; second turn releases.
     if (Effects.isCharge(effectId) && !mon.charging) {
       mon.charging = {
-        moveIndex: choice.move,
+        moveIndex: usedSlot,
         effect: effectId,
         targetSlot,
         moveId: move.id,
       };
       if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
       this._say(Effects.chargeMessage(mon, effectId, move.id));
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       return;
     }
 
@@ -2589,7 +2774,7 @@ class Battle {
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
         }
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
     }
@@ -2598,13 +2783,14 @@ class Battle {
       const lastIdx = int(defender.lastMoveIndex, 0);
       if (lastIdx < 1 || !defender.moves[lastIdx - 1]) {
         this._say('But it failed');
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       this._useMove(fighter, mon, {
         moveOverride: copyMove(defender.moves[lastIdx - 1]),
         mirrorCopy: true,
+        slot: usedSlot,
       });
       return;
     }
@@ -2614,14 +2800,16 @@ class Battle {
       const pool = this.metronomePool;
       if (!pool || pool.length === 0) {
         this._say('But nothing happened');
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       const pick = this.rng.byte() % pool.length;
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       this._useMove(fighter, mon, {
         moveOverride: copyMove(pool[pick]),
         metronomeCall: true,
+        slot: usedSlot,
+        disobedient,
       });
       return;
     }
@@ -2642,7 +2830,7 @@ class Battle {
       if (Effects.isJumpKick(effectId)) {
         this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
       }
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       return;
     }
 
@@ -2650,7 +2838,7 @@ class Battle {
     if (effectId === 8 && defender.status !== 'sleep') {
       this._say('But it failed');
       if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       return;
     }
 
@@ -2659,11 +2847,11 @@ class Battle {
         mon.bide = {
           turns: Effects.bideTurns(this.rng),
           stored: 0,
-          moveIndex: choice.move,
+          moveIndex: usedSlot,
           targetSlot,
         };
         this._say(`${mon.species} began storing energy`);
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       if (Effects.isSwitchAndTeleport(effectId)) {
@@ -2672,12 +2860,12 @@ class Battle {
         } else {
           this._say('But it failed');
         }
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       if (Effects.isNoOp(effectId)) {
         this._say('But nothing happened');
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       if (Effects.handlesPrimary(effectId)) {
@@ -2685,7 +2873,7 @@ class Battle {
       } else {
         this._say('But nothing happened');
       }
-      this._markLastMove(mon, choice.move);
+      this._markLastMove(mon, usedSlot);
       return;
     }
 
@@ -2693,7 +2881,7 @@ class Battle {
       if (this._speedOf(fighter, mon) <= this._speedOf(target, defender)) {
         this._say('But it failed');
         if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
     }
@@ -2726,7 +2914,7 @@ class Battle {
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
         }
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       const fixed = Effects.fixedDamage({
@@ -2741,7 +2929,7 @@ class Battle {
         this.rng.damageRoll();
         this._say('But it failed');
         if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       this.rng.damageRoll();
@@ -2794,7 +2982,7 @@ class Battle {
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
         }
-        this._markLastMove(mon, choice.move);
+        this._markLastMove(mon, usedSlot);
         return;
       }
       damage = result.damage === null || result.damage === undefined
@@ -2846,13 +3034,13 @@ class Battle {
     if (Effects.isThrash(effectId) && !mon.thrashing) {
       mon.thrashing = {
         turns: Effects.thrashTurns(this.rng),
-        moveIndex: choice.move,
+        moveIndex: usedSlot,
       };
     }
 
     if (Effects.isRage(effectId)) {
       mon.raging = true;
-      mon.rageMove = choice.move;
+      mon.rageMove = usedSlot;
     }
 
     if (Effects.isTrapping(effectId) && totalDealt > 0) {
@@ -2869,7 +3057,7 @@ class Battle {
       };
       mon.trapping = {
         turns,
-        moveIndex: choice.move,
+        moveIndex: usedSlot,
         targetSlot: target.slot,
       };
     }
@@ -2882,7 +3070,7 @@ class Battle {
       this._faintUser(fighter, mon);
     }
 
-    this._markLastMove(mon, choice.move);
+    this._markLastMove(mon, usedSlot);
 
     if (mon.thrashing) {
       mon.thrashing.turns -= 1;
@@ -3620,6 +3808,11 @@ function attempt(opts) {
       }
       if (mons.length === 0) return refuse(`${playerId} brought no monsters`);
 
+      // The cart's player in a fight against the computer, exactly as
+      // battle3's `create` decides it: side a of a BADGE_MODES fight. Kept
+      // beside `badges` because a player with no badges at all is the one
+      // with the most to disobey.
+      const badgeRules = side === BADGE_SIDE && has(BADGE_MODES, self.mode);
       const fighter = {
         playerId,
         name: str(entry.name) || playerId,
@@ -3627,6 +3820,7 @@ function attempt(opts) {
         index,
         slot: Events.fieldSlot(side, index),
         mons,
+        badgeRules: badgeRules || null,
         badges: seatBadges(self.mode, side, entry.badges),
         bag: copyBag(entry.bag),
         active: firstLiving(mons),

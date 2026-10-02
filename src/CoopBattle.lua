@@ -699,6 +699,8 @@ function M.new(game, opts)
     -- the host's side-b upload (else snapshot of wildCatchMon at upload time).
     wildCatchMon = opts.wildCatchMon,
     wildParty = opts.wildParty,
+    -- Gold: the encounter's battle type, for the wild item roll (`wildMons`).
+    wildBattleType = opts.wildBattleType,
     mediated = false,
     medUploaded = false,
     medFailed = false, -- upload refused; do not fall back to host-sim
@@ -3750,6 +3752,12 @@ function M:playEvents(events)
       end
     elseif event.kind == "exp" then
       self:gainExp(event)
+    elseif event.kind == "held2" then
+      -- Gold's `held`, where the stream put it (medRows).
+      self:applyHeld2(event.msg, event.slot)
+    elseif event.kind == "amulet2" then
+      -- ...and its AMULET COIN check at our own send-out (medRows).
+      self:noteAmulet2(event.msg, event.slot)
     elseif event.kind == "exp3" then
       self:gainExp3(event)
     elseif event.kind == "state3" then
@@ -5934,6 +5942,13 @@ end
 
 local function moveNameFromBattleText(text)
   if type(text) ~= "string" then return nil end
+  -- A disobedient monster's own pick (docs/plans/gen12-referee-fidelity.md):
+  -- both Gen 1 / Gen 2 referees say the cart's "<MON> used instead, <MOVE>"
+  -- (pokered _UsedInsteadText, pokecrystal UsedInsteadText).  "instead," is
+  -- part of the sentence, not of the move -- read past it first, wherever the
+  -- page broke the line (`%s` spans the newline), so the shout is the move and
+  -- keys the same as the anim row's.
+  text = text:gsub("([Uu]sed)%s+[Ii]nstead,%s*", "%1\n")
   local move = text:match("[Uu]sed\n([^\n!]+)")
     or text:match("[Uu]sed%s+([^\n!]+)")
   if not move then return nil end
@@ -5941,6 +5956,8 @@ local function moveNameFromBattleText(text)
   if move == "" then return nil end
   return move
 end
+-- For the suites: the move a battle line names, or nil.
+M.moveNameFromBattleText = moveNameFromBattleText
 
 -- Soft roster / self look lookup. Never throws; missing exports just omit
 -- the walk sheet (Battlefield draws a silhouette).
@@ -9893,14 +9910,42 @@ end
 -- Sheets for the wild seat (coop_wild side b): prebuilt `wildParty`, else a
 -- snapshot of the stashed `wildCatchMon`. Never npcMons interleave — that
 -- walks every ownerless trainer slot.
+--
+-- Gold's wild monster is given the held item the cart would have rolled for it
+-- first (Mediated.rollWildItem2, pokecrystal LoadEnemyMon `.WildItem`), onto
+-- the engine monster itself -- the one a catch keeps -- because the engine
+-- builds every wild monster holding nothing.  Rolled here, at the host's
+-- upload, and once: the encounter is the host's alone (a joiner never holds
+-- `wildCatchMon` to roll for), and an encounter co-op never fought -- a wait
+-- that timed out and handed the engine's own battle back -- is left exactly as
+-- the engine built it.
 function M:wildMons()
   if type(self.wildParty) == "table" and #self.wildParty > 0 then
     return self.wildParty
   end
   if self.wildCatchMon then
+    if self.gen2Mediated and not self.wildItemRolled2 then
+      self.wildItemRolled2 = true
+      Mediated.rollWildItem2(self.game, self.wildCatchMon, {
+        battleType = self.wildBattleType,
+        random = function() return M.randomByte() end,
+      })
+    end
     return Mediated.snapshotMons(self.game, { self.wildCatchMon })
   end
   return nil
+end
+
+-- One byte (0..255) for the rolls the cart makes outside the referee (the wild
+-- item above): the love-then-math roll this mod uses wherever the engine's own
+-- battle would have drawn, never the referee's stream.  A field a suite can
+-- replace.
+function M.randomByte()
+  local love_ = rawget(_G, "love")
+  local roll = love_ and love_.math and love_.math.random or math.random
+  local ok, value = pcall(roll, 0, 255)
+  if ok and tonumber(value) then return math.floor(value) % 256 end
+  return 0
 end
 
 -- Offer this fight to the intermediator.
@@ -9934,10 +9979,13 @@ function M:uploadMediated()
   -- (Sheet3's `link`); a trainer or a wild fight is the cart's own and does not,
   -- and there the sheets are `own`, so each carries the obedience check's
   -- `traded` / `unfateful` (contract K2 of docs/plans/gen3-badge-rules.md).
+  -- Gen 1 / Gen 2 sheets are `own` the same way, for contract K1 of
+  -- docs/plans/gen12-referee-fidelity.md (`traded`, outside a link battle).
   local mons = self.gen3
       and Sheet3.mons(self.game, mine.party,
         { link = Mediated.LINK_MODES[self.mode] == true, own = true })
-    or Mediated.snapshotMons(self.game, mine.party)
+    or Mediated.snapshotMons(self.game, mine.party,
+        { link = Mediated.LINK_MODES[self.mode] == true, own = true })
   if #mons == 0 then
     -- Uploading nothing would leave the hub holding a seat open. Ending the
     -- fight is better than host-sim with a different item/effect surface.
@@ -9999,10 +10047,14 @@ function M:uploadMediated()
     end
   end
   -- Gen 3: which held items this client's own uploads brought, taken before
-  -- any `held` event can move one (see `ownItem3`).
+  -- any `held` event can move one (see `ownItem3`).  Gold's the same, by id
+  -- (`ownItem2`).
   if self.gen3 then
     self.ownItems3 = nil
     self:ownItemSet3()
+  elseif self.gen2Mediated then
+    self.ownItems2 = nil
+    self:ownItemSet2()
   end
   return not self.medFailed
 end
@@ -10154,6 +10206,13 @@ function M:medRows(msg)
     -- printed, so the field being one monster behind at least has an explanation
     -- on it.
     if self.soloDouble and slot then self:reviveSent3(index, slot, msg) end
+    -- Gold: an AMULET COIN coming out on our seat (`noteAmulet2`), read where
+    -- the stream puts the send-out -- the cart's CheckAmuletCoin runs in the
+    -- send-out itself -- so a `held` earlier in the same batch (a THIEF that
+    -- took the coin) is already applied when it is asked (`playEvents`).
+    if self.gen2Mediated and index then
+      rows[#rows + 1] = { kind = "amulet2", msg = msg, slot = index }
+    end
     local at = slot and self:medSendIndex(index, slot, msg)
     -- A solo double's opening pair is said the cart's way -- the trainer's two,
     -- then ours, one sentence a side (`composeIntro3`) -- so the referee's four
@@ -10431,6 +10490,22 @@ function M:medRows(msg)
     -- Applied in onBattleEvent (markActed / unmarkActed / medMoveList), never
     -- narrated. Reaching here is a no-op so a queued copy cannot print the
     -- trainer's name as a battle line.
+
+  elseif kind == "held" and self.gen2Mediated then
+    -- Gold's own `held` (contract K3), never said -- its `text` is the item's
+    -- *id*, and the referee's own sentence about it is the `msg` right behind;
+    -- falling through to the branch below would print "LEFTOVERS" as a battle
+    -- line.  Applied (`applyHeld2`) as a row, in the stream's order, rather
+    -- than at parse: an `exp` row is paid when the batch is played, and the
+    -- cart pays a knockout at the faint -- so a THIEF later in the same turn
+    -- that takes an EXP.SHARE must not have taken it before the award reads
+    -- it (Exp2 counts holders by item at award time, the cart's
+    -- IsAnyMonHoldingExpShare).
+    rows[#rows + 1] = { kind = "held2", msg = msg, slot = index }
+    local look = self:itemVfx(msg.text)
+    if look and index then
+      rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index }
+    end
 
   else
     -- status, stat, run, wait, reconnect: the referee's own sentence is
@@ -10906,6 +10981,19 @@ end
 function M:grantCatch(msg)
   if self.gen3 then return self:grantCatch3(msg) end
   local mon = self.wildCatchMon
+  -- Gold: the item the wild monster still holds at the throw -- the one the
+  -- host rolled for it (`wildMons`), unless a `held` event said it was eaten or
+  -- taken (`applyHeld2` keeps the foe's in `foeHeld2`; the lone wild sheet is
+  -- party index 0).  pokecrystal PokeBallEffect keeps wEnemyMonItem as the
+  -- battle left it.  Only an item this client described (`ownItem2`).
+  if self.gen2Mediated and mon and type(self.foeHeld2) == "table" then
+    local held = self.foeHeld2[0]
+    if held == false then
+      mon.item = nil
+    elseif held ~= nil and self:ownItem2(held) then
+      mon.item = held
+    end
+  end
   if not mon and msg and msg.caught then
     mon = M.monFromCaughtSheet(self.game, msg.caught)
     if not mon then
@@ -12116,6 +12204,146 @@ function M:applyHeld3(msg, index)
   mon.heldItem = holding
   mon.item = holding
   return true
+end
+
+-- ------- Gold's held items (docs/plans/gen12-referee-fidelity.md, K2 / K3)
+--
+-- MediatedBattle's Gen 2 four (ownItemSet2 / ownItem2 / applyHeld2 /
+-- noteAmulet2), for the 2-on-2: the same rules, read through this screen's own
+-- seats -- `isMine` for whose, `medPartySlot` for which monster.
+
+-- Every held item this client itself put into the fight, by id: its own sheets
+-- as uploaded, and the trainer's or the wild POKeMON's when this client is the
+-- host that described them.  Taken once, at the upload; a screen that never
+-- uploaded (a harness) takes it at first use.  `ownItemSet3`'s Gold twin.
+function M:ownItemSet2()
+  local set = self.ownItems2
+  if set then return set end
+  set = {}
+  local function add(list)
+    if type(list) ~= "table" then return end
+    for _, sheet in ipairs(list) do
+      local id = type(sheet) == "table" and Wire.id(sheet.heldItem) or nil
+      if id then set[id] = true end
+    end
+  end
+  add(self.medMine)
+  add(self.medNpcSheets)
+  add(self.medWildSheets)
+  self.ownItems2 = set
+  return set
+end
+
+-- May this item enter this player's save?  Only one this client's own uploads
+-- held -- the anti-forgery rule `ownItem3` keeps.  A joiner who THIEFs from a
+-- trainer or a wild monster the host described keeps nothing: the item is a
+-- claim another client wrote, and this client cannot tell it from a forgery
+-- (out of scope by design, docs/plans/gen12-referee-fidelity.md §9).
+function M:ownItem2(id)
+  id = Wire.id(id)
+  if not id then return false end
+  return self:ownItemSet2()[id] == true
+end
+
+-- The medMine sheet for one of our party positions (1-based), or nil.
+function M:medSheetAt(at)
+  if not (at and self.medMine) then return nil end
+  for _, sheet in ipairs(self.medMine) do
+    if type(sheet) == "table" and tonumber(sheet.slot) == at - 1 then return sheet end
+  end
+  return nil
+end
+
+-- A Gold `held` event (contract K3): `text` the item, `amount` 1 it is still
+-- held / 0 it is gone.
+--
+-- A foe seat's is remembered by its party index, for a catch (`grantCatch`):
+-- the wild monster keeps what it still holds at the throw.
+--
+-- Our own seat's moves the fight sheet always (every K2 field re-read for the
+-- item now held -- `noteAmulet2` reads it at the next send-out) and the save
+-- mon only where the cart keeps a fight's item changes: KEEPS_HELD_MODES,
+-- never coop_pvp (owner decision; the cart reloads a link battle's party).  A
+-- partner's seat is the partner's to write, on their own save.  A gained item
+-- must be one this client uploaded (`ownItem2`); a lost one needs no proof --
+-- except a letter, which neither THIEF nor any item effect can take on the
+-- cart, so a referee saying one is gone does not orphan the save's mail.
+function M:applyHeld2(msg, index)
+  local holding = Mediated.heldAfter2(msg)
+  if holding == false then return false end
+  local mon = tonumber(msg.mon)
+  mon = mon and mon >= 0 and floor(mon) or nil
+  if not self:isMine(index) then
+    if index and self:foeSide(index) and mon then
+      self.foeHeld2 = self.foeHeld2 or {}
+      self.foeHeld2[mon] = holding or false
+    end
+    return false
+  end
+  local seat = self.sim and self.sim:slot(index)
+  -- The sheet the referee names, or -- only when it names none -- whoever is
+  -- out: a `mon` this client never uploaded is a monster it cannot write.
+  local at
+  if mon then at = self:medPartySlot(mon + 1) else at = seat and seat.active end
+  if not at then return false end
+  -- Before the sheet below moves: what this client brought is what it
+  -- uploaded, not what the referee has since said.
+  self:ownItemSet2()
+  local sheet = self:medSheetAt(at)
+  if sheet then Mediated.setSheetItem2(self.game, sheet, holding) end
+  if not Mediated.KEEPS_HELD_MODES[self.mode] then return false end
+  local party = seat and seat.party and seat.party[at]
+  if type(party) ~= "table" then return false end
+  local had = (type(party.item) == "string" and party.item ~= "") and party.item or nil
+  if holding == had then return true end
+  if holding ~= nil and not self:ownItem2(holding) then
+    if not self.heldWarned2 then
+      self.heldWarned2 = true
+      mod.log:warn("the battle referee handed one of your POKeMON a %s, which "
+        .. "nothing you brought to this fight was holding, so it was not added "
+        .. "to your save -- report this with the server you were playing on",
+        holding)
+    end
+    return false
+  end
+  if had and Mediated.isMail2(had) then
+    if not self.mailWarned2 then
+      self.mailWarned2 = true
+      mod.log:warn("the battle referee took a letter (%s) off one of your POKeMON, "
+        .. "which no move or item can do, so your save keeps it -- report this "
+        .. "with the server you were playing on", had)
+    end
+    return false
+  end
+  party.item = holding
+  return true
+end
+
+-- pokecrystal CheckAmuletCoin, at each of our own send-outs: the monster
+-- coming out holding a HELD_AMULET_COIN item doubles a won trainer's prize for
+-- the rest of the fight (MediatedBattle:noteAmulet2 states the cart's side).
+-- Read off our uploaded sheet as `applyHeld2` keeps it.
+function M:noteAmulet2(msg, index)
+  if not self:isMine(index) then return false end
+  local mon = tonumber(msg and msg.mon)
+  local at
+  if mon and mon >= 0 then
+    at = self:medPartySlot(floor(mon) + 1)
+  else
+    local seat = self.sim and self.sim:slot(index)
+    at = seat and seat.active
+  end
+  local sheet = self:medSheetAt(at)
+  if not (sheet and sheet.heldItem ~= nil) then return false end
+  if sheet.holdEffect ~= Mediated.HELD_AMULET_COIN2 then return false end
+  self.amuletOut2 = true
+  return true
+end
+
+-- Whether this player's prize is doubled (Coop.payTrainerPrize / the invite
+-- joiner's synthetic finish read it).
+function M:amuletCoin2()
+  return self.amuletOut2 == true
 end
 
 -- A queued Gen 3 state change reaching the head of the queue.

@@ -1409,17 +1409,27 @@ end
 -- none.  Twin of relay.js PAY_DAY_MODES.
 local PAY_DAY_MODES = { wild = true, coop_wild = true, coop_npc = true }
 
--- The cart family a Gen 3 fighter entry's `family` names (BattleSim3
--- Turn.FAMILIES, docs/plans/gen3-battle-sheet.md §1.1), keyed by the cart the
--- player's hello named (Wire.VERSIONS).  Obedience reads it for one rule:
+-- The cart family a fighter entry's `family` names, keyed by the cart the
+-- player's hello named (Wire.VERSIONS).  Gen 3 (BattleSim3 Turn.FAMILIES,
+-- docs/plans/gen3-battle-sheet.md §1.1): obedience reads it for one rule --
 -- FireRed / LeafGreen exempt Focus Punch from the random-move branch, Emerald
 -- does not -- so one Gen 3 hub seating both carts has to say whose mon is
--- whose, or every Emerald mon in a co-op fight plays FireRed's rule.  The
--- hub's own word, from the hello it admitted, never a field off the wire: a
--- party carries no `family` and none is read.  A cart not listed (no version
--- in the hello) leaves the field off, and the referee plays the engine's
--- default, frlg.  Twin of relay.js CART_FAMILY.
-local CART_FAMILY = { firered = "frlg", leafgreen = "frlg", emerald = "rse" }
+-- whose, or every Emerald mon in a co-op fight plays FireRed's rule.  Gen 2
+-- (contract K6 of docs/plans/gen12-referee-fidelity.md, Gen.family's names):
+-- BattleSim2 reads side a's first fighter for the rule Gold / Silver and
+-- Crystal disagree on -- TruncateHL_BC loops on Crystal outside a link battle
+-- and makes one pass on Gold / Silver (pokegold effect_commands.asm) -- so a
+-- Gold hub seating a Crystal player has to say so.  The hub's own word, from
+-- the hello it admitted, never a field off the wire: a party carries no
+-- `family` and none is read.  A cart not listed (no version in the hello;
+-- every Gen 1 cart) leaves the field off, and the referee plays its default
+-- (frlg, gs).  The hello admitted only a cart of this hub's generation
+-- (Wire.version), so a key is always this hub's own.  Twin of relay.js
+-- CART_FAMILY.
+local CART_FAMILY = {
+  gold = "gs", silver = "gs", crystal = "crystal",
+  firered = "frlg", leafgreen = "frlg", emerald = "rse",
+}
 
 -- The fight this connection is in, when the hub is the one running it.  nil
 -- for a player who is not fighting, and for a co-op group still on the legacy
@@ -1967,11 +1977,12 @@ function M:tryStartSim(record)
       mons = party.mons,
       badges = party.badges,
       bag = bag,
-      -- Gen 3 only, and only a human seat's: an NPC seat has no connection and
-      -- so no cart, and the referee reads no side b for badge rules anyway.
+      -- Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
+      -- connection and so no cart, and the referees read side a's anyway.
       -- Every human is still connected here -- a seat that drops while the
       -- field is assembling calls the fight off (leaveBattle).
-      family = (self.generation == 3 and client) and CART_FAMILY[client.version] or nil,
+      family = ((self.generation == 2 or self.generation == 3) and client)
+        and CART_FAMILY[client.version] or nil,
     }
   end
 

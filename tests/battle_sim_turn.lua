@@ -6185,6 +6185,490 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 26. Gen 1 priority, obedience, the called-move path, the flinch-reset skip
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-fidelity.md §1 items 6-8 (task G1b).  The
+-- obedience branches are forced rather than found: `script` hands the
+-- battle's generator the BattleRandom bytes CheckForDisobedience reads, in
+-- order, and then falls back to a seeded generator for everything after.
+-- Beside each script is the cart's arithmetic for it (pokered core.asm
+-- :3830-4007; Status' obedience section; the vector pack's `obedience`
+-- notes): with no badge the cap is 10, so a level-100 monster has b = 110
+-- for the first two rolls and b = 90 for the third.  The g1_priority* /
+-- g1_obey_* / g1_flinch_* parity scenarios hold lib/battle to the same
+-- streams on real seeds.
+
+do
+  local Rng = BattleSim.Rng
+
+  local function script(battle, bytes)
+    local fallback = Rng.new(99)
+    local used = 0
+    battle.rng = {
+      byte = function()
+        used = used + 1
+        if bytes[used] ~= nil then return bytes[used] end
+        return fallback:byte()
+      end,
+      nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+      damageRoll = function() return fallback:damageRoll() end,
+      next = function() return fallback:next() end,
+      state = function() return fallback:state() end,
+    }
+  end
+
+  -- A sheet names its moves (PROTOCOL 26), and Wire's text filter drops an
+  -- underscore, so an id that has one gets the display name a client sends.
+  local function fxm(id, power, effect, o)
+    o = o or {}
+    local out = move({ id = id, power = power, effect = effect, pp = o.pp,
+                       chance = o.chance })
+    if id:find("_", 1, true) then out.name = id:gsub("_", " ") end
+    return out
+  end
+
+  -- `a` / `b`: mon() options plus `traded` and `extra` (raw sheet fields
+  -- mon() does not carry); `badges` ride side a's seat.
+  local function arena(o)
+    local function sheet(opts)
+      local raw = mon(opts)
+      if opts.traded then raw.traded = true end
+      for key, value in pairs(opts.extra or {}) do raw[key] = value end
+      return raw
+    end
+    local aMons, bMons = {}, {}
+    for i, opts in ipairs(o.a) do aMons[i] = sheet(opts) end
+    for i, opts in ipairs(o.b) do bMons[i] = sheet(opts) end
+    local battle = battleOf({
+      mode = o.mode or "wild", seed = o.seed or 6401, metronomePool = o.pool,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", badges = o.badges, mons = aMons } },
+        b = { { playerId = "p2", name = "Bob", mons = bMons } },
+      },
+    })
+    drain(battle)
+    return battle
+  end
+
+  local function step(battle, aChoice, bChoice)
+    battle:submitChoice("p1", aChoice)
+    battle:submitChoice("p2", bChoice)
+    return drain(battle)
+  end
+  local function use(i) return { action = "fight", move = i } end
+  local function said(events, text)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == text then return true end
+    end
+    return false
+  end
+  -- Who acted, in order: the slots of the turn's `anim` events.
+  local function order(events)
+    local out = {}
+    for _, event in ipairs(events) do
+      if event.t == "anim" then out[#out + 1] = event.slot .. ":" .. event.text end
+    end
+    return table.concat(out, " ")
+  end
+  local function hits(events, slot)
+    local out = {}
+    for _, event in ipairs(events) do
+      if event.t == "damage" and event.slot == slot then out[#out + 1] = event.amount end
+    end
+    return out
+  end
+
+  local splash = function() return fxm("splash", 0, 85) end
+  -- The traded level-100 monster every obedience case starts from: faster
+  -- than Bob, so its rolls are the turn's first draws.
+  local function rogue(o)
+    local out = { species = "Alpha", level = 100, maxHp = 999, atk = 30, def = 60,
+                  spd = 90, traded = true, baseSpd = 0,
+                  moves = { fxm("thump", 10, 0), fxm("chop", 10, 0), splash() } }
+    for k, v in pairs(o or {}) do out[k] = v end
+    return out
+  end
+  local function bob(o)
+    local out = { species = "Beta", maxHp = 999, spd = 30, baseSpd = 0, moves = { splash() } }
+    for k, v in pairs(o or {}) do out[k] = v end
+    return out
+  end
+
+  -- (a) Priority.  Quick Attack +1 beats Speed, Counter -1 loses to it, the
+  --     same move on both sides is Speed's, and a Metronome that calls Quick
+  --     Attack sits in bracket 0 -- as does Struggle, even off a Quick Attack
+  --     slot.  The link fight and the computer fight order alike.
+  do
+    for _, mode in ipairs({ "1v1", "wild" }) do
+      local kit = function() return { fxm("QUICK_ATTACK", 10, 0), fxm("thump", 10, 0),
+                                       fxm("COUNTER", 10, 0) } end
+      local battle = arena({ mode = mode,
+        a = { { species = "Alpha", maxHp = 400, spd = 30, baseSpd = 0, moves = kit() } },
+        b = { { species = "Beta", maxHp = 400, spd = 90, baseSpd = 0, moves = kit() } } })
+      eq(order(step(battle, use(0), use(1))), "0:QUICK_ATTACK 3:thump",
+         mode .. ": the slower Quick Attack moves first")
+      eq(order(step(battle, use(0), use(0))), "3:QUICK_ATTACK 0:QUICK_ATTACK",
+         mode .. ": Quick Attack on both sides is Speed's")
+      eq(order(step(battle, use(1), use(2))), "0:thump 3:COUNTER",
+         mode .. ": the faster Counter moves last")
+      eq(order(step(battle, use(2), use(2))), "3:COUNTER 0:COUNTER",
+         mode .. ": Counter on both sides is Speed's")
+    end
+
+    local metro = arena({ pool = { fxm("QUICK_ATTACK", 10, 0) },
+      a = { { species = "Alpha", maxHp = 400, spd = 30, baseSpd = 0,
+              moves = { fxm("metronome", 0, 83) } } },
+      b = { { species = "Beta", maxHp = 400, spd = 90, baseSpd = 0,
+              moves = { fxm("thump", 10, 0) } } } })
+    eq(order(step(metro, use(0), use(0))), "3:thump 0:metronome 0:QUICK_ATTACK",
+       "a Metronome that calls Quick Attack moves at Metronome's bracket")
+
+    local spent = arena({
+      a = { { species = "Alpha", maxHp = 400, spd = 30, baseSpd = 0,
+              moves = { fxm("QUICK_ATTACK", 10, 0, { pp = 0 }) } } },
+      b = { { species = "Beta", maxHp = 400, spd = 90, baseSpd = 0,
+              moves = { fxm("thump", 10, 0) } } } })
+    eq(order(step(spent, use(0), use(0))), "3:thump 0:STRUGGLE",
+       "Struggle off an empty Quick Attack slot has no priority")
+
+    -- Different brackets never share a tie byte: at equal Speed, side b's
+    -- Quick Attack goes first on every seed (a tie group would put side a
+    -- first on half of them).
+    local always = true
+    for seed = 1, 40 do
+      local tied = arena({ mode = "1v1", seed = seed,
+        a = { { species = "Alpha", maxHp = 400, spd = 50, baseSpd = 0,
+                moves = { fxm("thump", 10, 0) } } },
+        b = { { species = "Beta", maxHp = 400, spd = 50, baseSpd = 0,
+                moves = { fxm("QUICK_ATTACK", 10, 0) } } } })
+      if order(step(tied, use(0), use(0))) ~= "3:QUICK_ATTACK 0:thump" then always = false end
+    end
+    ok(always, "a Quick Attack at equal Speed wins without a coin flip")
+  end
+
+  -- (b) Who obeys without a roll.  A roller draws at least one byte and
+  --     shifts every roll after it, so a battle that does not roll plays out
+  --     exactly -- events and generator state -- as the same battle with the
+  --     monster untraded.
+  do
+    local function same(label, o)
+      local function run(traded)
+        local a = {}
+        for i, opts in ipairs(o.a) do
+          local copy = {}
+          for k, v in pairs(opts) do copy[k] = v end
+          if i == 1 and o.side ~= "b" then copy.traded = traded end
+          a[i] = copy
+        end
+        local b = {}
+        for i, opts in ipairs(o.b) do
+          local copy = {}
+          for k, v in pairs(opts) do copy[k] = v end
+          if i == 1 and o.side == "b" then copy.traded = traded end
+          b[i] = copy
+        end
+        local battle = arena({ mode = o.mode, badges = o.badges, seed = 6402, a = a, b = b })
+        local events = step(battle, use(0), use(0))
+        return dumpAll(events) .. "#" .. battle.rng:state()
+      end
+      eq(run(true), run(false), label)
+    end
+    same("level 10 under no badge (cap 10) obeys without a draw",
+      { a = { rogue({ level = 10 }) }, b = { bob() } })
+    same("CASCADEBADGE's cap 30 covers level 30",
+      { badges = { CASCADEBADGE = true }, a = { rogue({ level = 30 }) }, b = { bob() } })
+    same("EARTHBADGE's cap 101 covers level 100",
+      { badges = { EARTHBADGE = true }, a = { rogue() }, b = { bob() } })
+    same("a link fight never checks",
+      { mode = "1v1", a = { rogue() }, b = { bob() } })
+    same("coop_pvp never checks",
+      { mode = "coop_pvp", a = { rogue() }, b = { bob() } })
+    same("side b never checks",
+      { side = "b", a = { rogue({ traded = false }) }, b = { bob({ level = 100 }) } })
+    same("a thrash's continuation never checks",
+      { a = { rogue({ extra = { thrashing = { turns = 2, moveIndex = 1 } } }) }, b = { bob() } })
+    same("a Rage's continuation never checks",
+      { a = { rogue({ moves = { fxm("fury", 10, 81) },
+                      extra = { raging = true, rageMove = 1 } }) }, b = { bob() } })
+    same("a charge's release never checks",
+      { a = { rogue({ moves = { fxm("glow", 10, 39) },
+                      extra = { charging = { moveIndex = 1, effect = 39, targetSlot = 3 } } }) },
+        b = { bob() } })
+    same("a Bide's release never checks",
+      { a = { rogue({ moves = { fxm("bide", 0, 26) },
+                      extra = { bide = { turns = 0, stored = 5, moveIndex = 1, targetSlot = 3 } } }) },
+        b = { bob() } })
+  end
+
+  -- (c) The first roll passes (swap(0x20) = 2 < 10): the chosen move, as
+  --     chosen.
+  do
+    local battle = arena({ a = { rogue() }, b = { bob() } })
+    script(battle, { 0x20 })
+    local events = step(battle, use(0), use(0))
+    ok(said(events, "Alpha used thump"), "an R1 pass uses the chosen move")
+    eq(activeMonOf(battle, "p1").moves[1].pp, 19, "...and pays for it")
+  end
+
+  -- (d) `.useRandomMove`: R1 swap(0x05) = 80 (< 110, not < 10), R2 0x02 < 10.
+  --     `.chooseMove` redraws 0 (the chosen slot) and takes 1 (chop).  The
+  --     line is the cart's "used instead,"; the PP comes off the CHOSEN slot
+  --     (DecrementPP reads wPlayerMoveListIndex); the move used is the one a
+  --     Mirror Move would copy.
+  do
+    local battle = arena({ a = { rogue() }, b = { bob() } })
+    script(battle, { 0x05, 0x02, 0x00, 0x01 })
+    local events = step(battle, use(0), use(0))
+    ok(said(events, "Alpha used instead, chop"), "a random move says \"used instead,\"")
+    eq(order(events), "0:chop 3:splash", "...and is the move animated")
+    local alpha = activeMonOf(battle, "p1")
+    eq(alpha.moves[1].pp, 19, "the chosen slot pays the PP")
+    eq(alpha.moves[2].pp, 20, "...the move used does not")
+    eq(alpha.lastMoveIndex, 2, "...and is the last move used")
+
+    -- A disobedient monster moves at the bracket of the move it was told to
+    -- use: a chosen Quick Attack still goes first, whatever it uses instead.
+    local quick = arena({
+      a = { rogue({ spd = 10, moves = { fxm("QUICK_ATTACK", 10, 0), fxm("thump", 10, 0) } }) },
+      b = { bob() } })
+    script(quick, { 0x05, 0x02, 0x01 })
+    eq(order(step(quick, use(0), use(0))), "0:thump 3:splash",
+       "the chosen Quick Attack's bracket moves the move used instead")
+  end
+
+  -- (e) Every `.useRandomMove` refusal falls to `.monDoesNothing` without a
+  --     `.chooseMove` draw: the third byte, 0x02, is read as the loaf line
+  --     (2 & 3 = turned away) and nothing is spent.
+  do
+    local function refused(label, moves, extra)
+      local battle = arena({ a = { rogue({ moves = moves, extra = extra }) }, b = { bob() } })
+      script(battle, { 0x05, 0x02, 0x02 })
+      local events = step(battle, use(0), use(0))
+      ok(said(events, "Alpha turned away!"), label .. ": loafs instead")
+      eq(order(events), "3:splash", label .. ": ...and uses nothing")
+      eq(activeMonOf(battle, "p1").moves[1].pp, moves[1].pp, label .. ": ...or any PP")
+    end
+    refused("one move known", { fxm("thump", 10, 0) })
+    refused("a move disabled", { fxm("thump", 10, 0), fxm("chop", 10, 0) },
+      { disable = { moveIndex = 2, turns = 3 } })
+    refused("Struggle", { fxm("thump", 10, 0, { pp = 0 }), fxm("chop", 10, 0, { pp = 0 }) })
+    refused("no PP outside the chosen slot", { fxm("thump", 10, 0), fxm("chop", 10, 0, { pp = 0 }) })
+  end
+
+  -- (f) `.monNaps`: R3 swap(0x24) = 66 < b = 90.  The nap draw 0x18 is
+  --     swap(0x30) & 7 = 3 turns, written over the whole status: a paralysis
+  --     (whose gate passed on 200) is gone but its quartered Speed stays in
+  --     the battle stat; a burn's halved Attack likewise.
+  do
+    local par = arena({ a = { rogue({ spd = 200, status = "PAR" }) }, b = { bob() } })
+    eq(activeMonOf(par, "p1").cur.spd, 50, "the paralysis seeds a quartered Speed")
+    script(par, { 200, 0x05, 0x02 * 25, 0x24, 0x18 })
+    local events = step(par, use(0), use(0))
+    ok(said(events, "Alpha began to nap!"), "the nap is announced")
+    local napped = nil
+    for _, event in ipairs(events) do
+      if event.t == "status" and event.slot == 0 then napped = event end
+    end
+    eq(napped and napped.status, "SLP", "...with the status event's sleep token")
+    local alpha = activeMonOf(par, "p1")
+    eq(alpha.status, "sleep", "the nap overwrites the paralysis")
+    eq(alpha.statusTurns, 3, "...for swap(0x30) & 7 = 3 turns")
+    eq(alpha.cur.spd, 50, "...and leaves the stored Speed quartered")
+
+    local brn = arena({ a = { rogue({ status = "BRN" }) }, b = { bob() } })
+    script(brn, { 0x05, 50, 0x24, 0x18 })
+    step(brn, use(0), use(0))
+    local burned = activeMonOf(brn, "p1")
+    eq(burned.status, "sleep", "the nap overwrites a burn")
+    eq(burned.cur.atk, 15, "...and the halved Attack stays stored")
+
+    -- Asleep, it rolls nothing: the sleep gate stops it first.
+    local events2 = step(brn, use(0), use(0))
+    ok(said(events2, "Alpha is fast asleep"), "the next turn is asleep, not disobedient")
+  end
+
+  -- (g) "won't obey!" and HandleSelfConfusionDamage: R3 swap(0xA5) = 90, not
+  --     below 90 and 90 - 90 < 90.  Level 100, 30 Attack into the 60 Defense
+  --     the FOE's Reflect doubles: 42 x 40 x 30 / 120 / 50 + 2 = 10 (18
+  --     without the Reflect, 42 x 40 x 30 / 60 / 50 + 2).
+  do
+    local function selfHit(reflect)
+      local battle = arena({ a = { rogue() },
+        b = { bob({ extra = reflect and { reflect = true } or nil }) } })
+      script(battle, { 0x05, 50, 0xA5 })
+      local events = step(battle, use(0), use(0))
+      ok(said(events, "Alpha won't obey!") and said(events, "Alpha hurt itself in confusion"),
+         "won't obey, then the self-hit")
+      return hits(events, 0)[1]
+    end
+    eq(selfHit(true), 10, "the foe's Reflect doubles the self-hit's Defense")
+    eq(selfHit(false), 18, "...and without it the hit is 18")
+  end
+
+  -- (h) `.monDoesNothing`'s four lines: R3 swap(0x4B) = 180, 180 - 90 >= 90;
+  --     then R & 3.
+  do
+    for _, case in ipairs({
+      { 0x00, "Alpha is loafing around." }, { 0x05, "Alpha won't obey!" },
+      { 0xFE, "Alpha turned away!" }, { 0x0B, "Alpha ignored orders!" },
+    }) do
+      local battle = arena({ a = { rogue() }, b = { bob() } })
+      script(battle, { 0x05, 50, 0x4B, case[1] })
+      local events = step(battle, use(0), use(0))
+      ok(said(events, case[2]), "loaf line: " .. case[2])
+      eq(#hits(events, 0), 0, "...and nobody is hurt: " .. case[2])
+    end
+  end
+
+  -- (i) wMonIsDisobedient through a call: a Metronome picked instead keeps
+  --     the flag, so its call says "used instead," too; a Mirror Move picked
+  --     instead clears it (MirrorMoveCheck's `xor a`), so the copy is plain.
+  do
+    local metro = arena({ pool = { fxm("chop", 10, 0) },
+      a = { rogue({ moves = { fxm("thump", 10, 0), fxm("metronome", 0, 83) } }) },
+      b = { bob() } })
+    script(metro, { 0x05, 0x02, 0x01 })
+    local events = step(metro, use(0), use(0))
+    ok(said(events, "Alpha used instead, metronome")
+       and said(events, "Alpha used instead, chop"),
+       "a Metronome picked instead calls its move \"instead\" too")
+    eq(activeMonOf(metro, "p1").moves[1].pp, 19, "...and the chosen slot pays")
+
+    local mirror = arena({
+      a = { rogue({ moves = { fxm("thump", 10, 0), fxm("mirror", 0, 9) } }) },
+      b = { bob() } })
+    script(mirror, { 0x20 })
+    step(mirror, use(0), use(0))
+    script(mirror, { 0x05, 0x02, 0x01 })
+    events = step(mirror, use(0), use(0))
+    ok(said(events, "Alpha used instead, mirror") and said(events, "Alpha used splash"),
+       "a Mirror Move picked instead copies plainly")
+  end
+
+  -- (j) The called move: Struggle only when the move IS Struggle.  A
+  --     Metronome or a Mirror Move that spends the last PP takes no recoil;
+  --     the Struggle that follows does.  And the call runs no gate: a
+  --     confused caller's counter ticks once (6 -> 5), not twice.
+  do
+    local metro = arena({ pool = { fxm("thump", 10, 0) },
+      a = { { species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+              moves = { fxm("metronome", 0, 83, { pp = 1 }) } } },
+      b = { bob() } })
+    local events = step(metro, use(0), use(0))
+    ok(said(events, "Alpha used thump"), "the last PP calls a move")
+    ok(not said(events, "Alpha is hit with recoil"), "...which takes no Struggle recoil")
+    events = step(metro, use(0), use(0))
+    ok(said(events, "Alpha used STRUGGLE") and said(events, "Alpha is hit with recoil"),
+       "the next turn's Struggle does")
+
+    local mirror = arena({
+      a = { { species = "Alpha", maxHp = 400, spd = 10, baseSpd = 0,
+              moves = { fxm("mirror", 0, 9, { pp = 1 }) } } },
+      b = { bob({ moves = { fxm("thump", 10, 0) } }) } })
+    events = step(mirror, use(0), use(0))
+    ok(said(events, "Alpha used thump"), "a Mirror Move on its last PP copies")
+    ok(not said(events, "Alpha is hit with recoil"), "...and takes no recoil")
+
+    local dizzy = arena({ pool = { fxm("thump", 10, 0) },
+      a = { { species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0, confusion = 6,
+              moves = { fxm("metronome", 0, 83) } } },
+      b = { bob() } })
+    script(dizzy, { 200 })
+    events = step(dizzy, use(0), use(0))
+    ok(said(events, "Alpha used thump"), "a confused caller that keeps its head calls")
+    eq(activeMonOf(dizzy, "p1").confusion, 5, "...and the call runs no second confusion gate")
+  end
+
+  -- (k) The flinch-reset skip.  A raging player's monster a slower Stomp
+  --     flinched loses its next Rage to the flinch; in a link fight the reset
+  --     at the turn's open clears it; the computer's raging monster is always
+  --     reset; and a recharging one keeps the flinch through the recharge
+  --     turn's open, losing it at the next.
+  do
+    local function rage(mode, side)
+      local fury = { fxm("fury", 20, 81) }
+      local stomp = { fxm("stomp", 10, 31, { chance = 100 }) }
+      local fast = { species = side == "b" and "Beta" or "Alpha", maxHp = 400, spd = 90,
+                     baseSpd = 0, moves = fury }
+      local slow = { species = side == "b" and "Alpha" or "Beta", maxHp = 400, spd = 30,
+                     baseSpd = 0, moves = stomp }
+      local battle = arena({ mode = mode,
+        a = { side == "b" and slow or fast }, b = { side == "b" and fast or slow } })
+      step(battle, use(0), use(0))
+      return step(battle, use(0), use(0))
+    end
+    ok(said(rage("wild"), "Alpha flinched"), "the player's raging monster keeps the flinch")
+    ok(not said(rage("1v1"), "Alpha flinched"), "a link fight resets it")
+    ok(not said(rage("wild", "b"), "Beta flinched"), "the computer's raging monster is reset")
+
+    local beam = arena({
+      a = { { species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0, moves = { fxm("beam", 20, 80) } } },
+      b = { bob({ maxHp = 400, moves = { fxm("stomp", 10, 31, { chance = 100 }) } }) } })
+    step(beam, use(0), use(0))
+    eq(activeMonOf(beam, "p1").flinch, true, "a recharging monster keeps its flinch at the open")
+    beam:submitChoice("p2", use(0))
+    drain(beam)
+    eq(activeMonOf(beam, "p1").flinch, false, "...and loses it at the next")
+
+    -- Per seat in co-op: the raging seat keeps its flinch, its partner's is
+    -- reset like any.
+    local coop = battleOf({ mode = "coop_wild", seed = 6403, sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = { mon({ species = "Alpha", maxHp = 400, spd = 90,
+          baseSpd = 0, moves = { fxm("fury", 20, 81) } }) } },
+        { playerId = "a2", name = "Abe", mons = { mon({ species = "Gamma", maxHp = 400, spd = 80,
+          baseSpd = 0, moves = { fxm("thump", 10, 0) } }) } },
+      },
+      b = { { playerId = "w", name = "Wild", mons = { mon({ species = "Beta", maxHp = 900,
+        spd = 30, baseSpd = 0, moves = { fxm("stomp", 10, 31, { chance = 100 }) } }) } } },
+    } })
+    drain(coop)
+    local function round(target)
+      coop:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+      coop:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+      coop:submitChoice("w", { action = "fight", move = 0, target = target })
+      return drain(coop)
+    end
+    round(0)
+    local second = round(1)
+    ok(said(second, "Alpha flinched"), "co-op: the raging seat keeps its flinch")
+    local third = round(1)
+    ok(not said(third, "Gamma flinched"), "co-op: the partner's flinch is reset")
+    ok(said(third, "Gamma used thump"), "...and it moves")
+  end
+
+  -- (l) The fields the rules read: `badgeRules` on side a of a fight against
+  --     the computer and nowhere else, `traded` kept only as true.
+  do
+    local function rules(mode)
+      local battle = battleOf({ mode = mode, sides = mode == "coop_wild" and {
+        a = { { playerId = "p1", name = "Ann", mons = { mon() } },
+              { playerId = "p3", name = "Abe", mons = { mon() } } },
+        b = { { playerId = "p2", name = "Bob", mons = { mon() } } },
+      } or nil })
+      return tostring(fighterById(battle, "p1").badgeRules) .. "/"
+        .. tostring(fighterById(battle, "p2").badgeRules)
+    end
+    eq(rules("wild"), "true/nil", "wild: side a has the badge rules")
+    eq(rules("coop_wild"), "true/nil", "coop_wild: side a has them")
+    eq(rules("coop_npc"), "true/nil", "coop_npc: side a has them")
+    eq(rules("1v1"), "nil/nil", "1v1: nobody")
+    eq(rules("coop_pvp"), "nil/nil", "coop_pvp: nobody")
+
+    local function traded(value)
+      local raw = mon()
+      raw.traded = value
+      local battle = battleOf({ aMons = { raw } })
+      return activeMonOf(battle, "p1").traded
+    end
+    eq(traded(true), true, "traded = true is kept")
+    eq(traded(false), nil, "traded = false is absent")
+    eq(traded("yes"), nil, "a non-boolean traded is absent")
+  end
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

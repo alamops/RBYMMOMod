@@ -3017,4 +3017,360 @@ do
      "and does not claim a forfeit the wire never took")
 end
 
+-- ------------------------------------------------------------------
+-- referee fidelity: the client half (docs/plans/gen12-referee-fidelity.md)
+-- ------------------------------------------------------------------
+--
+-- K1 `traded` on the player's own Gen 1 / Gen 2 sheets outside a link battle;
+-- K2 the Gold held item's data beside `heldItem`; K4 the four Kanto obedience
+-- badges; Gold's `held` event written home (applyHeld2) in the fights the cart
+-- keeps an item change from, and never in a fight between players; the wild
+-- held item Gold's engine does not roll; and the AMULET COIN.  The item rows
+-- below are invented for this file -- ids the cart's constants name, numbers
+-- nobody's ROM holds.
+
+-- An invented Gold item table, in the engine's shape (data.items rows with the
+-- `heldEffect` / `heldParameter` columns src/core/gen2/ItemEffects.lua reads).
+local GOLD_ITEMS = {
+  LEFTOVERS   = { name = "LEFTOVERS", heldEffect = "HELD_LEFTOVERS", heldParameter = 7 },
+  BERRY       = { name = "BERRY", heldEffect = "HELD_BERRY", heldParameter = 9 },
+  NUGGET      = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+  AMULET_COIN = { name = "AMULET COIN", heldEffect = "HELD_AMULET_COIN", heldParameter = 3 },
+  FLOWER_MAIL = { name = "FLOWER MAIL", heldEffect = "HELD_NONE", heldParameter = 0 },
+  MASTER_BALL = { name = "MASTER BALL" },
+  ODD_THING   = { name = "ODD THING", heldEffect = "mymod.glow", heldParameter = 1 },
+}
+
+local function goldData(items)
+  return setmetatable({ items = items or GOLD_ITEMS,
+                        pokemon = { CHARMANDER = DATA.pokemon.CHARMANDER,
+                                    SQUIRTLE = DATA.pokemon.SQUIRTLE } },
+                      { __index = DATA })
+end
+
+-- A Gold game whose player id is 4321, and a party mon with an OT and an item.
+local function goldMon(species, item, otId)
+  local m = mon(species)
+  m.item, m.otId = item, otId
+  return m
+end
+local function goldGame(party, data)
+  return {
+    generation = 2,
+    data = data or goldData(),
+    save = { generation = 2, party = party, inventory = {},
+             player = { name = "GOLD", id = 4321, money = 0 } },
+  }
+end
+
+-- ------- K1: traded, on our own sheets outside a link battle
+do
+  local function redGame(party, playerId)
+    local game = gameWith(party, DATA)
+    game.save.player.id = playerId
+    return game
+  end
+  local own = mon("CHARMANDER"); own.otId = 4321
+  local swap = mon("SQUIRTLE"); swap.otId = 9876
+  local bare = mon("CHARMANDER")
+  local sheets = Mediated.snapshotParty(redGame({ own, swap, bare }, 4321))
+  eq(sheets[1].traded, nil, "K1 (Gen 1): a mon whose OT id is the player's is not traded")
+  eq(sheets[2].traded, true, "K1 (Gen 1): a mon from another OT id is traded")
+  eq(sheets[3].traded, nil, "K1 (Gen 1): a mon with no OT id on record is the player's own")
+  local packed1 = Wire.battleParty({ battle = "k1", mons = sheets, generation = 1 })
+  eq(packed1 and packed1.mons[2].traded, true, "K1 (Gen 1): traded survives Wire.battleParty")
+  local linked = Mediated.snapshotParty(redGame({ own, swap }, 4321), { link = true })
+  eq(linked[2].traded, nil, "K1 (Gen 1): a link battle's sheets state no traded")
+  local foes = Mediated.snapshotMons(redGame({ own, swap }, 4321), { own, swap })
+  eq(foes[2].traded, nil, "K1: a foe's sheet (no `own`) is never stamped")
+  eq(Mediated.snapshotParty(redGame({ swap }, nil))[1].traded, nil,
+     "K1: no player id on the save is nothing to compare against")
+  local wide = mon("SQUIRTLE"); wide.otId = 65536 + 4321
+  eq(Mediated.snapshotParty(redGame({ wide }, 4321))[1].traded, nil,
+     "K1: the OT id is the cart's 16-bit word")
+  eq(Mediated.tradedOf({ save = { player = { id = 7 } } }, { otId = "7" }), nil,
+     "K1: tradedOf reads numbers the way the save may hold them")
+
+  local gold = goldGame({ goldMon("CHARMANDER", nil, 4321), goldMon("SQUIRTLE", nil, 1) })
+  local goldSheets = Mediated.snapshotParty(gold)
+  eq(goldSheets[1].traded, nil, "K1 (Gold): the player's own mon")
+  eq(goldSheets[2].traded, true, "K1 (Gold): a traded mon")
+  local packed2 = Wire.battleParty({ battle = "k1", mons = goldSheets, generation = 2 })
+  eq(packed2 and packed2.mons[2].traded, true, "K1 (Gold): traded survives Wire.battleParty")
+  eq(Mediated.snapshotParty(gold, { link = true })[2].traded, nil,
+     "K1 (Gold): ...and a link battle's sheets carry none")
+
+  -- Through the screen's own upload: a fight against the computer stamps it, a
+  -- 1v1 does not.
+  local function uploadFor(mode)
+    local sent = {}
+    local fight = Mediated.new({
+      transport = { send = function(_, t, p) sent[#sent + 1] = { type = t, payload = p } end },
+      game = gold, battle = "k1u", role = "host", mode = mode,
+    })
+    fight:start(gold)
+    for _, msg in ipairs(sent) do
+      if msg.type == Wire.BATTLE_PARTY and msg.payload.side == nil then return msg.payload end
+    end
+    return nil
+  end
+  eq(uploadFor("wild").mons[2].traded, true, "K1: a wild fight's upload carries traded")
+  eq(uploadFor("coop_npc").mons[2].traded, true, "K1: ...and a trainer fight's")
+  eq(uploadFor("1v1").mons[2].traded, nil, "K1: a 1v1 is a link battle: none")
+end
+
+-- ------- K2: Gold's held item on the sheet
+do
+  local game = goldGame({
+    goldMon("CHARMANDER", "LEFTOVERS"), goldMon("SQUIRTLE", "FLOWER_MAIL"),
+    goldMon("CHARMANDER"),
+  })
+  local sheets = Mediated.snapshotParty(game)
+  eq(sheets[1].heldItem, "LEFTOVERS", "K2: the item id")
+  eq(sheets[1].holdEffect, "HELD_LEFTOVERS", "K2: its hold effect token, off the engine's item row")
+  eq(sheets[1].holdParam, 7, "K2: the parameter beside it")
+  eq(sheets[1].itemName, "LEFTOVERS", "K2: the name the box narrates under")
+  eq(sheets[1].mail, nil, "K2: not mail")
+  eq(sheets[2].mail, true, "K2: a mail item says so (the engine's Mail.isMail)")
+  eq(sheets[2].itemName, "FLOWER MAIL", "K2: ...under its printed name")
+  for _, key in ipairs({ "heldItem", "holdEffect", "holdParam", "itemName", "mail" }) do
+    eq(sheets[3][key], nil, "K2: a mon holding nothing carries no " .. key)
+  end
+  local packed = Wire.battleParty({ battle = "k2", mons = sheets, generation = 2 })
+  check(packed ~= nil, "K2: the sheets survive Wire.battleParty")
+  eq(packed and packed.mons[1].holdEffect, "HELD_LEFTOVERS", "K2: holdEffect crosses the wire")
+  eq(packed and packed.mons[1].holdParam, 7, "K2: holdParam too")
+  eq(packed and packed.mons[2].mail, true, "K2: and mail")
+
+  -- The merged `held_items` registry wins over the item row: a content mod's
+  -- patch reaches the referee (ItemEffects.heldItemFor).
+  local patched = goldData()
+  patched.gen2HeldItems = { LEFTOVERS = { heldEffect = "HELD_BERRY", heldParameter = 2 } }
+  local p = Mediated.snapshotParty(goldGame({ goldMon("CHARMANDER", "LEFTOVERS") }, patched))
+  eq(p[1].holdEffect, "HELD_BERRY", "K2: the held_items registry's effect is the one sent")
+  eq(p[1].holdParam, 2, "K2: ...with its parameter")
+
+  -- A hold effect off the wire's alphabet would refuse the mon at the hub; it
+  -- rides as the bare item instead, said once.
+  local mark = #warns
+  local odd = Mediated.snapshotParty(goldGame({ goldMon("CHARMANDER", "ODD_THING") }))
+  eq(odd[1].heldItem, "ODD_THING", "K2 (modded): the item still rides")
+  eq(odd[1].holdEffect, nil, "K2 (modded): an unreadable hold effect is left off")
+  eq(odd[1].holdParam, nil, "K2 (modded): ...and its parameter with it")
+  check(Wire.battleParty({ battle = "k2", mons = odd, generation = 2 }) ~= nil,
+        "K2 (modded): the sheet survives the sanitiser")
+  local named = false
+  for i = mark + 1, #warns do
+    if tostring(warns[i]):find("ODD_THING", 1, true) then named = true end
+  end
+  check(named, "K2 (modded): the warning names the item")
+
+  -- Gen 1 has no held items: a Kanto sheet carries none of it, whatever its
+  -- monster table says.
+  local red = gameWith({ goldMon("CHARMANDER", "LEFTOVERS") }, DATA)
+  local redSheet = Mediated.snapshotParty(red)[1]
+  eq(redSheet.heldItem, nil, "K2: a Gen 1 sheet carries no item")
+  eq(redSheet.holdEffect, nil, "K2: ...and no hold effect")
+end
+
+-- ------- K4: the Kanto obedience badges
+do
+  local badgeData = setmetatable({ constants = {
+    badgeBoosts = { { badge = "BOULDERBADGE", stat = "attack" } },
+    -- A save that keeps one badge under another inventory key (Badges.itemFor).
+    badges = { { id = "BOULDERBADGE" }, { id = "CASCADEBADGE" }, { id = "MARSHBADGE", item = "MARSH_PIN" } },
+  } }, { __index = DATA })
+  local game = gameWith({ mon("CHARMANDER") }, badgeData)
+  game.save.inventory = { BOULDERBADGE = 1, CASCADEBADGE = 1, MARSH_PIN = 1 }
+  game.save.player.badges = { EARTHBADGE = true }
+  local function list(mode) return table.concat(Mediated.badgesOf(game, mode) or {}, ",") end
+  eq(list("wild"), "BOULDERBADGE,CASCADEBADGE,MARSHBADGE,EARTHBADGE",
+     "K4: the boost rows, then the obedience badges the save holds")
+  eq(list("coop_npc"), "BOULDERBADGE,CASCADEBADGE,MARSHBADGE,EARTHBADGE", "K4: ...in a trainer fight")
+  eq(Mediated.badgesOf(game, "1v1"), nil, "K4: none in a link battle")
+  eq(Mediated.badgesOf(game, "coop_pvp"), nil, "K4: ...on either link mode")
+  game.save.inventory = { RAINBOWBADGE = 1 }
+  game.save.player.badges = nil
+  eq(list("wild"), "RAINBOWBADGE", "K4: an obedience badge alone, with no boost badge")
+  local set = Wire.badges(Mediated.badgesOf(game, "wild"))
+  check(set and set.RAINBOWBADGE, "K4: Wire.badges keeps the id the referee reads")
+  -- Gold reads its own stores; a Kanto badge item in the bag is nothing to it.
+  local gold = goldGame({})
+  gold.save.inventory = { EARTHBADGE = 1, CASCADEBADGE = 1 }
+  eq(Mediated.badgesOf(gold, "wild"), nil, "K4: Gold never sends a Gen 1 obedience badge")
+end
+
+-- ------- the wild held item Gold's engine does not roll
+do
+  local function bytes(list)
+    local i = 0
+    return function() i = i + 1; return list[i] end, function() return i end
+  end
+  local itemData = goldData()
+  itemData.pokemon = { SQUIRTLE = { name = "SQUIRTLE", items = { "BERRY", "NUGGET" } },
+                       CHARMANDER = { name = "CHARMANDER" },
+                       PIDGEY = { name = "PIDGEY", items = { nil, "NUGGET" } } }
+  local game = goldGame({}, itemData)
+  local function rolled(species, list, battleType)
+    local m = mon(species)
+    local random, drawn = bytes(list)
+    local got = Mediated.rollWildItem2(game, m, { random = random, battleType = battleType })
+    return got, m.item, drawn()
+  end
+  local item, held, drawn = rolled("SQUIRTLE", { 191 })
+  eq(item, nil, "wild item: below 75 percent + 1 (192) holds nothing")
+  eq(held, nil, "wild item: ...and the monster is left empty-handed")
+  eq(drawn, 1, "wild item: ...on one draw")
+  item, held, drawn = rolled("SQUIRTLE", { 192, 20 })
+  eq(item, "BERRY", "wild item: 192 and up holds one; 20 and up on the second draw is item 1")
+  eq(held, "BERRY", "wild item: written onto the engine monster (what a catch keeps)")
+  eq(drawn, 2, "wild item: ...on two draws")
+  item = rolled("SQUIRTLE", { 255, 19 })
+  eq(item, "NUGGET", "wild item: under 8 percent (20) on the second draw is item 2")
+  item, held = rolled("PIDGEY", { 200, 50 })
+  eq(item, nil, "wild item: an empty item 1 slot is NO_ITEM")
+  item, held, drawn = rolled("CHARMANDER", { 255, 0 })
+  eq(item, nil, "wild item: a species with no items holds none")
+  eq(drawn, 0, "wild item: ...and draws nothing")
+  item, held, drawn = rolled("SQUIRTLE", {}, Mediated.BATTLETYPE_FORCEITEM2)
+  eq(item, "BERRY", "wild item: a forced-item encounter holds item 1")
+  eq(drawn, 0, "wild item: ...without a draw")
+  local gift = mon("SQUIRTLE"); gift.item = "LEFTOVERS"
+  eq(Mediated.rollWildItem2(game, gift, { random = function() return 255 end }), "LEFTOVERS",
+     "wild item: a monster already holding one keeps it")
+  local red = mon("SQUIRTLE")
+  eq(Mediated.rollWildItem2(gameWith({}, itemData), red, { random = function() return 255 end }), nil,
+     "wild item: Gen 1 rolls nothing")
+  eq(red.item, nil, "wild item: ...and writes nothing")
+end
+
+-- ------- Gold's `held` event: applyHeld2, per mode
+do
+  -- A Gold screen in `mode` holding ANN's party [LEFTOVERS, BERRY, FLOWER_MAIL],
+  -- the wild foe (when `wild`) holding NUGGET.
+  local function goldFight(mode, wildItem)
+    local party = {
+      goldMon("CHARMANDER", "LEFTOVERS", 4321),
+      goldMon("SQUIRTLE", "BERRY", 4321),
+      goldMon("CHARMANDER", "FLOWER_MAIL", 4321),
+    }
+    local game = goldGame(party)
+    local wildParty
+    if wildItem then
+      wildParty = Mediated.snapshotMons(game, { goldMon("SQUIRTLE", wildItem) })
+    end
+    local fight = Mediated.new({
+      transport = { send = function() return true end },
+      game = game, battle = "h2", role = "host", mode = mode, wildParty = wildParty,
+    })
+    fight:start(game)
+    fight.seqNext = 0
+    function fight.feed(fields)
+      fight.seqNext = fight.seqNext + 1
+      fields.battle, fields.seq = "h2", fight.seqNext
+      fight:onEvent(fields)
+    end
+    return fight, party
+  end
+  local function eaten(fight)
+    fight.feed({ t = "held", slot = 0, side = "a", mon = 1, text = "BERRY", amount = 0 })
+  end
+
+  for _, mode in ipairs({ "wild", "coop_npc", "coop_wild" }) do
+    local fight, party = goldFight(mode)
+    eaten(fight)
+    eq(party[2].item, nil, "held (" .. mode .. "): a berry eaten is gone from the save")
+    eq(fight.mine[2].heldItem, nil, "held (" .. mode .. "): ...and from the fight sheet")
+    eq(fight.mine[2].holdEffect, nil, "held (" .. mode .. "): ...with every K2 field")
+    eq(party[1].item, "LEFTOVERS", "held (" .. mode .. "): the other mons keep theirs")
+  end
+  for _, mode in ipairs({ "1v1", "coop_pvp" }) do
+    local fight, party = goldFight(mode)
+    eaten(fight)
+    eq(party[2].item, "BERRY", "held (" .. mode .. "): a fight between players never writes home")
+    eq(fight.mine[2].heldItem, nil, "held (" .. mode .. "): ...though the fight sheet follows the referee")
+  end
+
+  -- Still holding it (LEFTOVERS healing): nothing moves.
+  local fight, party = goldFight("wild")
+  fight.feed({ t = "held", slot = 0, side = "a", mon = 0, text = "LEFTOVERS", amount = 1 })
+  eq(party[1].item, "LEFTOVERS", "held: a `held` that still holds changes nothing")
+
+  -- THIEF from the wild monster this client described: kept.
+  fight, party = goldFight("wild", "NUGGET")
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 0 })
+  fight.feed({ t = "held", slot = 0, side = "a", mon = 1, text = "NUGGET", amount = 1 })
+  eq(party[2].item, "NUGGET", "held: an item THIEF took from our own described foe is kept")
+  eq(fight.mine[2].holdEffect, "HELD_NONE", "held: ...the sheet re-read for the new item")
+  eq(fight.foeHeld2 and fight.foeHeld2[0], false, "held: the foe's loss is remembered for a catch")
+
+  -- A forged gain: an item nothing in this fight held.
+  local mark = #warns
+  fight, party = goldFight("wild")
+  fight.feed({ t = "held", slot = 0, side = "a", mon = 1, text = "MASTER_BALL", amount = 1 })
+  eq(party[2].item, "BERRY", "held: an item nobody uploaded never enters the save")
+  check(#warns > mark, "held: ...and it is said")
+
+  -- The foe's events never touch our save.
+  fight, party = goldFight("wild", "NUGGET")
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 0 })
+  eq(party[1].item, "LEFTOVERS", "held: a foe's event writes nothing of ours")
+  eq(party[2].item, "BERRY", "held: ...on any of our mons")
+
+  -- A letter is never taken off on the referee's word.
+  fight, party = goldFight("wild")
+  fight.feed({ t = "held", slot = 0, side = "a", mon = 2, text = "FLOWER_MAIL", amount = 0 })
+  eq(party[3].item, "FLOWER_MAIL", "held: a mail item stays in the save")
+
+  -- An event with no fate changes nothing.
+  fight, party = goldFight("wild")
+  fight.feed({ t = "held", slot = 0, side = "a", mon = 1, text = "BERRY" })
+  eq(party[2].item, "BERRY", "held: no `amount` is no change")
+
+  -- A `mon` past the sheets this client uploaded names nobody it can write.
+  fight, party = goldFight("wild")
+  party[4] = goldMon("SQUIRTLE", "BERRY", 4321)
+  fight.feed({ t = "held", slot = 0, side = "a", mon = 3, text = "BERRY", amount = 0 })
+  eq(party[4].item, "BERRY", "held: an index no uploaded sheet stands behind writes nothing")
+
+  -- A Gen 3 screen's `held` is its own (numeric `holding`), untouched by this.
+  check(Wire.battleEvent({ battle = "x", seq = 1, t = "held", text = "BERRY", amount = 0 }, 2) ~= nil,
+        "held: Wire keeps a Gold reader's `held`")
+  eq(Wire.battleEvent({ battle = "x", seq = 1, t = "held", text = "BERRY", amount = 0 }, 1), nil,
+     "held: ...and a Gen 1 reader drops it")
+
+  -- The catch keeps what the wild monster still holds at the throw.
+  fight = goldFight("wild", "NUGGET")
+  local wildMon = goldMon("SQUIRTLE", "NUGGET")
+  eq(fight:caughtHolding2(0, wildMon), nil, "catch: no `held` about it says nothing")
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 0 })
+  eq(fight:caughtHolding2(0, wildMon), false, "catch: an item it lost is not caught with it")
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "MASTER_BALL", amount = 1 })
+  eq(fight:caughtHolding2(0, wildMon), "NUGGET",
+     "catch: an item this client never described leaves the monster as it was")
+
+  -- AMULET COIN: our own monster coming out holding one, and only ours.
+  local coinParty = { goldMon("CHARMANDER", "AMULET_COIN", 4321), goldMon("SQUIRTLE", nil, 4321) }
+  local coinGame = goldGame(coinParty)
+  local coin = Mediated.new({ transport = { send = function() return true end },
+                              game = coinGame, battle = "a2", role = "host", mode = "coop_npc" })
+  coin:start(coinGame)
+  eq(coin:amuletCoin2(), false, "amulet: nothing has come out yet")
+  coin:onEvent({ battle = "a2", seq = 1, t = "send", slot = 3, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+  eq(coin:amuletCoin2(), false, "amulet: a foe's send-out is not ours")
+  coin:onEvent({ battle = "a2", seq = 2, t = "send", slot = 0, side = "a", mon = 1, text = "SQUIRTLE", hp = 30 })
+  eq(coin:amuletCoin2(), false, "amulet: our mon holding nothing")
+  coin:onEvent({ battle = "a2", seq = 3, t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  eq(coin:amuletCoin2(), true, "amulet: our mon coming out with the coin latches it")
+  coin:onEvent({ battle = "a2", seq = 4, t = "held", slot = 0, side = "a", mon = 0, text = "AMULET_COIN", amount = 0 })
+  eq(coin:amuletCoin2(), true, "amulet: ...for the rest of the fight, whatever happens to the coin")
+  local stolen = Mediated.new({ transport = { send = function() return true end },
+                                game = goldGame({ goldMon("CHARMANDER", "AMULET_COIN", 4321) }),
+                                battle = "a3", role = "host", mode = "coop_npc" })
+  stolen:start(stolen.game)
+  stolen:onEvent({ battle = "a3", seq = 1, t = "held", slot = 0, side = "a", mon = 0, text = "AMULET_COIN", amount = 0 })
+  stolen:onEvent({ battle = "a3", seq = 2, t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  eq(stolen:amuletCoin2(), false, "amulet: a coin taken before the send-out counts for nothing")
+end
+
 T.finish("mediated_battle_client")

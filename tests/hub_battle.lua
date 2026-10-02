@@ -2054,7 +2054,8 @@ end
 -- Emerald mon by FireRed's rule.  The hub stamps each human seat with the cart
 -- its own hello named; a party claiming a family is not read; an NPC seat gets
 -- none; a link fight's referee drops it with the badges; a Gen 1 hub never
--- writes the field.  server/hub_battle.test.js pins the same on the Node twin.
+-- writes the field (Gold's own, contract K6, is pinned further down).
+-- server/hub_battle.test.js pins the same on the Node twin.
 
 -- Turn.create's options as the hub assembled them, the field still built by
 -- the real referee: the fighter entries are what these blocks look at.
@@ -2202,7 +2203,7 @@ do
   eq(obeyed, 0, "family pvp: and the over-cap traded mon is not asked to obey")
 end
 
--- Gen 1: the field is Gen 3's alone.
+-- Gen 1: no field at all -- it is Gen 2's and Gen 3's (no Kanto rule reads one).
 do
   local hub = Hub.new({ maxPlayers = 4 })
   hub.forceBattleSeed = 1
@@ -2316,6 +2317,130 @@ do
   ok(moddedSeen.opts ~= nil and moddedSeen.opts.chart ~= nil and #moddedSeen.opts.specialTypes == 1,
      "typeIds (unreadable): ...but the rest of the ruleset")
   eq(modded, plain, "typeIds (unreadable): ...so nothing fires")
+end
+
+-- ------- Gold's cart lineage on a fighter entry (contract K6)
+--
+-- docs/plans/gen12-referee-fidelity.md: BattleSim2 reads side a's first
+-- fighter's `family` for the rule Gold / Silver and Crystal disagree on
+-- (TruncateHL_BC loops on Crystal outside a link battle, one pass on Gold /
+-- Silver), so a Gen 2 hub stamps each human seat the way a Gen 3 hub does --
+-- from the hello it admitted, never off the party -- gold / silver -> gs,
+-- crystal -> crystal.  An NPC seat gets none.  The K1 / K2 fields a Gold sheet
+-- carries ride the entry through the sanitiser, and a Gold `held` event goes
+-- out to every member as the referee wrote it.  server/hub_battle.test.js pins
+-- the same on the Node twin.
+local function join2v(hub, name, version)
+  local peer = fakePeer()
+  local client = hub:accept(peer)
+  if client then
+    hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      name = name, map = "NEW_BARK_TOWN", x = 5, y = 5, facing = "down",
+      generation = 2, version = version, playerId = testPlayerId(name) })
+  end
+  return client, peer
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 2 })
+  hub.forceBattleSeed = 5
+  local seen = spyCreate(hub)
+  local ann, annPeer = join2v(hub, "ANN", "crystal")
+  local bob = join2v(hub, "BOB", "silver")
+  eq(ann.version, "crystal", "family gen 2: the hello's cart is recorded")
+  hub:openCoopBattle("g2f", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["g2f"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g2f", chart = CHART2,
+                     typeIds = TYPE_IDS2, specialTypes = { 2 } })
+  local held = sheet2({ spe = 200 })
+  held.heldItem, held.holdEffect, held.holdParam, held.itemName = "LEFTOVERS", "HELD_LEFTOVERS", 6, "LEFTOVERS"
+  held.traded = true
+  -- The upload claims the other cart's family: no party field decides it.
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g2f", side = "a", family = "gs",
+                     generation = 2, mons = { held } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g2f", side = "a", family = "crystal",
+                     generation = 2, mons = { sheet2({ spe = 100 }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g2f", side = "b", generation = 2,
+                     mons = { sheet2({ species = "WALL", hp = 900, spe = 1 }),
+                              sheet2({ species = "WALL", hp = 900, spe = 1 }) } })
+  ok(record and record.sim ~= nil, "family gen 2: the coop_npc field opens")
+  local annEntry, bobEntry = entryOf(seen, "a", ann.id), entryOf(seen, "a", bob.id)
+  eq(annEntry and annEntry.family, "crystal", "family gen 2: the Crystal player's entry is crystal")
+  eq(bobEntry and bobEntry.family, "gs", "family gen 2: the Silver player's entry is gs")
+  for _, npcId in ipairs(record and record.npcIds or {}) do
+    local npc = entryOf(seen, "b", npcId)
+    ok(npc ~= nil and npc.family == nil, "family gen 2: an NPC seat's entry has none (" .. npcId .. ")")
+  end
+  local annMon = annEntry and annEntry.mons[1]
+  eq(annMon and annMon.traded, true, "gen 2 sheet: traded rides the entry (K1)")
+  eq(annMon and annMon.heldItem, "LEFTOVERS", "gen 2 sheet: the item rides the entry")
+  eq(annMon and annMon.holdEffect, "HELD_LEFTOVERS", "gen 2 sheet: ...with its hold effect (K2)")
+  eq(annMon and annMon.holdParam, 6, "gen 2 sheet: ...its parameter")
+  eq(annMon and annMon.itemName, "LEFTOVERS", "gen 2 sheet: ...and its name")
+
+  -- A Gold `held` the referee writes goes out to every member untouched: put
+  -- straight into the referee's own event buffer, so what is pinned here is the
+  -- hub's pass-through and not the referee's vocabulary (tests/battle_sim2_*).
+  if record and record.sim then
+    annPeer.outbox = {}
+    record.sim.buffer[#record.sim.buffer + 1] = {
+      battle = "g2f", seq = 9000, t = "held", slot = 0, side = "a", mon = 0,
+      text = "LEFTOVERS", amount = 1,
+    }
+    hub:flushBattle(record)
+    local out
+    for _, msg in ipairs(annPeer.outbox) do
+      if msg.type == Wire.BATTLE_EVENT and msg.t == "held" then out = msg end
+    end
+    eq(out and out.text, "LEFTOVERS", "gen 2 held: the hub passes the referee's event through")
+    eq(out and out.amount, 1, "gen 2 held: ...amount and all")
+    local clean = out and Wire.battleEvent(out, 2)
+    eq(clean and clean.text, "LEFTOVERS", "gen 2 held: ...and a Gold client's sanitiser keeps it")
+  end
+end
+
+-- Gold alone, and a hello with no cart: no family -- the referee plays gs.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 2 })
+  hub.forceBattleSeed = 5
+  local seen = spyCreate(hub)
+  local gold = join2v(hub, "GOLDY", "gold")
+  local bare = join2v(hub, "BARE", nil)
+  hub:openCoopBattle("g2n", { gold.id, bare.id }, { mode = "coop_npc", hostId = gold.id })
+  hub:receive(gold, { type = Wire.BATTLE_RULESET, battle = "g2n", chart = CHART2 })
+  hub:receive(gold, { type = Wire.BATTLE_PARTY, battle = "g2n", side = "a", mons = { sheet2({ spe = 200 }) } })
+  hub:receive(bare, { type = Wire.BATTLE_PARTY, battle = "g2n", side = "a", mons = { sheet2({ spe = 100 }) } })
+  hub:receive(gold, { type = Wire.BATTLE_PARTY, battle = "g2n", side = "b",
+                      mons = { sheet2({ species = "WALL", hp = 900, spe = 1 }),
+                               sheet2({ species = "WALL", hp = 900, spe = 1 }) } })
+  ok(hub.battles["g2n"] and hub.battles["g2n"].sim ~= nil, "family gen 2 (gold): the field opens")
+  eq(entryOf(seen, "a", gold.id) and entryOf(seen, "a", gold.id).family, "gs",
+     "family gen 2 (gold): a Gold player's entry is gs")
+  eq(entryOf(seen, "a", bare.id) and entryOf(seen, "a", bare.id).family, nil,
+     "family gen 2 (no cart): a hello naming no cart leaves the field off")
+end
+
+-- A four-player Gold spar: the entries still say whose cart (the referee reads
+-- side a's; a link fight plays one pass whoever's it is).
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 2 })
+  hub.forceBattleSeed = 5
+  local seen = spyCreate(hub)
+  local who = { join2v(hub, "ANN", "crystal"), join2v(hub, "BOB", "gold"),
+                join2v(hub, "CAL", "silver"), join2v(hub, "DEE", "crystal") }
+  local ids = {}
+  for i, c in ipairs(who) do ids[i] = c.id end
+  hub:openCoopBattle("g2p", ids, { mode = "coop_pvp", hostId = ids[1],
+                                   sides = { a = { ids[1], ids[2] }, b = { ids[3], ids[4] } } })
+  hub:receive(who[1], { type = Wire.BATTLE_RULESET, battle = "g2p", chart = CHART2 })
+  for i = 1, 4 do
+    hub:receive(who[i], { type = Wire.BATTLE_PARTY, battle = "g2p", mons = { sheet2({ spe = 10 * i }) } })
+  end
+  ok(hub.battles["g2p"] and hub.battles["g2p"].sim ~= nil, "family gen 2 pvp: the spar opens")
+  eq(entryOf(seen, "a", ids[1]).family, "crystal", "family gen 2 pvp: ANN's entry names her cart")
+  eq(entryOf(seen, "a", ids[2]).family, "gs", "family gen 2 pvp: BOB's")
+  eq(entryOf(seen, "b", ids[3]).family, "gs", "family gen 2 pvp: on either side")
+  eq(entryOf(seen, "b", ids[4]).family, "crystal", "family gen 2 pvp: DEE's")
 end
 
 -- ------- Gen 3 lists: what Json.decode hands over, and what is a list at all

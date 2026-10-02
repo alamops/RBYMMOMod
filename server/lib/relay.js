@@ -263,18 +263,27 @@ const battleSeconds = (ms) => Math.floor(ms / 1000);
 // side b is the hub's NPC seats. 1v1 / coop_pvp are link rules and pay none.
 // Twin of Hub.lua PAY_DAY_MODES.
 const PAY_DAY_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
-// The cart family a Gen 3 fighter entry's `family` names (lib/battle3
-// Turn.FAMILIES, docs/plans/gen3-battle-sheet.md §1.1), keyed by the cart the
-// player's hello named (sanitize VERSIONS). Obedience reads it for one rule:
+// The cart family a fighter entry's `family` names, keyed by the cart the
+// player's hello named (sanitize VERSIONS). Gen 3 (lib/battle3 Turn.FAMILIES,
+// docs/plans/gen3-battle-sheet.md §1.1): obedience reads it for one rule --
 // FireRed / LeafGreen exempt Focus Punch from the random-move branch, Emerald
 // does not -- so one Gen 3 hub seating both carts has to say whose mon is
-// whose, or every Emerald mon in a co-op fight plays FireRed's rule. The hub's
-// own word, from the hello it admitted, never a field off the wire: a party
-// carries no `family` and none is read. A cart not listed (no version in the
-// hello) leaves the field off, and the referee plays the engine's default,
-// frlg. A Map so a version can only ever hit these three keys. Twin of Hub.lua
-// CART_FAMILY.
-const CART_FAMILY = new Map([['firered', 'frlg'], ['leafgreen', 'frlg'], ['emerald', 'rse']]);
+// whose, or every Emerald mon in a co-op fight plays FireRed's rule. Gen 2
+// (contract K6 of docs/plans/gen12-referee-fidelity.md, Gen.family's names):
+// lib/battle2 reads side a's first fighter for the rule Gold / Silver and
+// Crystal disagree on -- TruncateHL_BC loops on Crystal outside a link battle
+// and makes one pass on Gold / Silver (pokegold effect_commands.asm) -- so a
+// Gold hub seating a Crystal player has to say so. The hub's own word, from the
+// hello it admitted, never a field off the wire: a party carries no `family`
+// and none is read. A cart not listed (no version in the hello; every Gen 1
+// cart) leaves the field off, and the referee plays its default (frlg, gs). A
+// Map so a version can only ever hit these keys; the hello admitted only a cart
+// of this hub's generation (cleanVersion), so a key is always this hub's own.
+// Twin of Hub.lua CART_FAMILY.
+const CART_FAMILY = new Map([
+  ['gold', 'gs'], ['silver', 'gs'], ['crystal', 'crystal'],
+  ['firered', 'frlg'], ['leafgreen', 'frlg'], ['emerald', 'rse'],
+]);
 // Smallest gap between two character changes from one player. The chat
 // gate's window (500ms), for a sharper reason than scrollback: an avatar
 // bakes its sheet when it spawns, so every other client in the game despawns
@@ -3549,12 +3558,13 @@ class Relay {
         badges: party.badges,
         bag: bagCopy || undefined,
       };
-      // Gen 3 only, and only a human seat's: an NPC seat has no connection and
-      // so no cart, and the referee reads no side b for badge rules anyway.
+      // Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
+      // connection and so no cart, and the referees read side a's anyway.
       // Every human is still connected here -- a seat that drops while the
       // field is assembling calls the fight off (leaveBattle). Left off the
       // object rather than set undefined, as Hub.lua's nil is no key at all.
-      const family = this.generation === 3 && client ? CART_FAMILY.get(client.version) : undefined;
+      const familyGen = this.generation === 2 || this.generation === 3;
+      const family = familyGen && client ? CART_FAMILY.get(client.version) : undefined;
       if (family) entry.family = family;
       return entry;
     };

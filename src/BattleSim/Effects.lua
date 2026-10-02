@@ -1234,6 +1234,31 @@ function M.isRage(effectId)
   return int(effectId, 0) == 81
 end
 
+-- ------------------------------------------------------------------
+-- move priority
+-- ------------------------------------------------------------------
+--
+-- pokered has no priority table: MainInBattleLoop (core.asm :370-391) asks
+-- two questions of wPlayerSelectedMove / wEnemySelectedMove before it
+-- compares Speed -- QUICK_ATTACK moves first, COUNTER moves last, and the two
+-- sides naming the same one fall through to `.compareSpeed`.  As brackets
+-- that is +1, -1 and 0 for everything else, which is BattleSim2's shape
+-- (GetMovePriority) with Gen 1's two rows.  Keyed by the move id, because the
+-- cart compares move ids: the selected move is what is read, so Metronome and
+-- Mirror Move sit in bracket 0 whatever they call.
+M.BASE_PRIORITY = 0
+M.MOVE_PRIORITY = {
+  QUICK_ATTACK = 1,
+  COUNTER = -1,
+}
+
+-- The priority bracket of a move (a move record or its id).
+function M.movePriority(moveOrId)
+  local priority = M.MOVE_PRIORITY[M.moveKey(moveOrId)]
+  if priority == nil then return M.BASE_PRIORITY end
+  return priority
+end
+
 -- Gen1 category is type-based (Fire/Water/…/Dragon → Special; else Physical).
 -- `specialTypes` is a set of chart indices uploaded with the ruleset; absent
 -- or empty means every damaging move stays Physical (atk/def).

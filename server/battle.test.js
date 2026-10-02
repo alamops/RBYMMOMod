@@ -52,7 +52,7 @@ function expectFields(actual, expected, label) {
 
 test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped -- reread the notes before touching this');
-  for (const group of ['damage', 'accuracy', 'crit', 'status']) {
+  for (const group of ['damage', 'accuracy', 'crit', 'status', 'obedience']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -256,6 +256,73 @@ test('confusion self-hits exactly half the time and shares the damage formula', 
     stab: false, typeEffect: [100], crit: false, roll: 255,
   }).damage;
   assert.strictEqual(viaStatus, viaDamage, 'the self-hit is the ordinary formula, not a second one');
+});
+
+// CheckForDisobedience's pieces, each fed the exact BattleRandom sequence the
+// case names: a scripted generator that hands the bytes out in order and
+// throws past the end, so a piece that draws one byte too many fails rather
+// than reading a default -- and `draws` says how many it actually took, which
+// is the half of the contract a verdict alone cannot show.
+function scripted(bytes) {
+  let used = 0;
+  return {
+    byte() {
+      used += 1;
+      if (used > bytes.length) throw new Error('drew past the scripted bytes');
+      return bytes[used - 1];
+    },
+    used: () => used,
+  };
+}
+
+const OBEDIENCE = {
+  cap: (input) => {
+    const set = {};
+    for (const id of input.badges) set[id] = true;
+    return { cap: status.obedienceCap(set) };
+  },
+  roll: (input) => {
+    const rng = scripted(input.bytes);
+    const verdict = status.obedienceRoll(input.level, input.cap, rng);
+    return { verdict, draws: rng.used() };
+  },
+  nap: (input) => {
+    const rng = scripted(input.bytes);
+    const turns = status.napTurns(rng);
+    return { turns, draws: rng.used() };
+  },
+  loaf: (input) => {
+    const rng = scripted(input.bytes);
+    const line = status.loafLine(rng);
+    return { line, draws: rng.used() };
+  },
+  random: (input) => {
+    const moves = input.pp.map((pp) => ({ pp }));
+    const rng = scripted(input.bytes);
+    const slot = status.disobedientMove(moves, input.selected, input.disabled,
+      input.struggling, rng);
+    return { slot, draws: rng.used() };
+  },
+};
+
+test('obedience vectors', async (t) => {
+  for (const v of vectors.obedience) {
+    await t.test(v.id, () => {
+      const handler = OBEDIENCE[v.in.step];
+      assert.ok(handler, `${v.id}: no handler for obedience step ${v.in.step}`);
+      expectFields(handler(v.in), v.out, v.id);
+    });
+  }
+});
+
+test('the nibble swap behind two of the rolls is a self-inverse bijection', () => {
+  const seen = new Set();
+  for (let b = 0; b <= 255; b++) {
+    const s = status.swapNibbles(b);
+    seen.add(s);
+    assert.strictEqual(status.swapNibbles(s), b, `swap(swap(${b}))`);
+  }
+  assert.strictEqual(seen.size, 256);
 });
 
 test('the turn a mon snaps out of confusion is a turn it acts', () => {

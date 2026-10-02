@@ -2379,7 +2379,7 @@ function testGen3FamilyLinkRules() {
     'family pvp: and the over-cap traded mon is not asked to obey');
 }
 
-// Gen 1: the field is Gen 3's alone.
+// Gen 1: no field at all -- it is Gen 2's and Gen 3's (no Kanto rule reads one).
 function testGen1NoFamily() {
   const relay = makeRelay(makeClock());
   const seen = spyAttempt(relay);
@@ -2550,6 +2550,156 @@ function testGen2TypeIdsBoost() {
   ok(holed.hit === boosted.hit, 'typeIds (null-holed): ...and HIVE still boosts the BUG move');
 }
 
+// Gold's cart lineage on a fighter entry (contract K6).
+//
+// docs/plans/gen12-referee-fidelity.md: lib/battle2 reads side a's first
+// fighter's `family` for the rule Gold / Silver and Crystal disagree on
+// (TruncateHL_BC loops on Crystal outside a link battle, one pass on Gold /
+// Silver), so a Gen 2 hub stamps each human seat the way a Gen 3 hub does --
+// from the hello it admitted, never off the party -- gold / silver -> gs,
+// crystal -> crystal. An NPC seat gets none. The K1 / K2 fields a Gold sheet
+// carries ride the entry through the sanitiser, and a Gold `held` event goes
+// out to every member as the referee wrote it. tests/hub_battle.lua pins the
+// same on the Lua twin.
+function dial2v(relay, name, version) {
+  const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => {};
+  const id = relay.accept(peer);
+  const playerId = testPlayerId(name);
+  const hello = {
+    type: 'mmo.hello',
+    proto: PROTOCOL,
+    name,
+    map: 'NEW_BARK_TOWN',
+    x: 5,
+    y: 5,
+    facing: 'down',
+    generation: 2,
+    playerId,
+  };
+  if (version) hello.version = version;
+  relay.handle(id, hello);
+  return { id: playerId, peer, name, ephemeralId: id };
+}
+
+function testGen2Family() {
+  const relay = makeRelay(makeClock(), { generation: 2 });
+  relay.forceBattleSeed = 5;
+  const seen = spyAttempt(relay);
+  const a = dial2v(relay, 'ANN', 'crystal');
+  const b = dial2v(relay, 'BOB', 'silver');
+  ok(relay.clients.get(a.id).version === 'crystal', "family gen 2: the hello's cart is recorded");
+  relay.openCoopBattle('g2f', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('g2f');
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', battle: 'g2f', chart: CHART2, typeIds: TYPE_IDS2, specialTypes: [2],
+  });
+  const held = sheet2({ spe: 200 });
+  Object.assign(held, {
+    heldItem: 'LEFTOVERS', holdEffect: 'HELD_LEFTOVERS', holdParam: 6, itemName: 'LEFTOVERS', traded: true,
+  });
+  // The upload claims the other cart's family: no party field decides it.
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: 'g2f', side: 'a', family: 'gs', generation: 2, mons: [held],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'g2f', side: 'a', family: 'crystal', generation: 2,
+    mons: [sheet2({ spe: 100 })],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g2f',
+    side: 'b',
+    generation: 2,
+    mons: [sheet2({ species: 'WALL', hp: 900, spe: 1 }), sheet2({ species: 'WALL', hp: 900, spe: 1 })],
+  });
+  ok(record && record.sim, 'family gen 2: the coop_npc field opens');
+  const annEntry = entryOf(seen, 'a', a.id);
+  const bobEntry = entryOf(seen, 'a', b.id);
+  ok(annEntry && annEntry.family === 'crystal', "family gen 2: the Crystal player's entry is crystal");
+  ok(bobEntry && bobEntry.family === 'gs', "family gen 2: the Silver player's entry is gs");
+  for (const npcId of (record && record.npcIds) || []) {
+    const npc = entryOf(seen, 'b', npcId);
+    ok(npc && !has(npc, 'family'), `family gen 2: an NPC seat's entry has none (${npcId})`);
+  }
+  const annMon = annEntry && annEntry.mons[0];
+  ok(annMon && annMon.traded === true, 'gen 2 sheet: traded rides the entry (K1)');
+  ok(annMon && annMon.heldItem === 'LEFTOVERS', 'gen 2 sheet: the item rides the entry');
+  ok(annMon && annMon.holdEffect === 'HELD_LEFTOVERS', 'gen 2 sheet: ...with its hold effect (K2)');
+  ok(annMon && annMon.holdParam === 6, 'gen 2 sheet: ...its parameter');
+  ok(annMon && annMon.itemName === 'LEFTOVERS', 'gen 2 sheet: ...and its name');
+
+  // A Gold `held` the referee writes goes out to every member untouched: put
+  // straight into the referee's own event buffer, so what is pinned here is
+  // the hub's pass-through and not the referee's vocabulary.
+  if (record && record.sim) {
+    a.peer.outbox = [];
+    record.sim.buffer.push({
+      battle: 'g2f', seq: 9000, t: 'held', slot: 0, side: 'a', mon: 0, text: 'LEFTOVERS', amount: 1,
+    });
+    relay.flushBattle(record);
+    const out = a.peer.outbox.find((m) => m.type === 'mmo.battle_event' && m.t === 'held');
+    ok(out && out.text === 'LEFTOVERS', "gen 2 held: the hub passes the referee's event through");
+    ok(out && out.amount === 1, 'gen 2 held: ...amount and all');
+    const sanitize = require('./lib/sanitize.js');
+    const clean = out && sanitize.cleanBattleEvent(out, 2);
+    ok(clean && clean.text === 'LEFTOVERS', "gen 2 held: ...and a Gold client's sanitiser keeps it");
+  }
+}
+
+// Gold alone, and a hello with no cart: no family -- the referee plays gs.
+function testGen2FamilyGoldAndNone() {
+  const relay = makeRelay(makeClock(), { generation: 2 });
+  relay.forceBattleSeed = 5;
+  const seen = spyAttempt(relay);
+  const gold = dial2v(relay, 'GOLDY', 'gold');
+  const bare = dial2v(relay, 'BARE', undefined);
+  relay.openCoopBattle('g2n', [gold.id, bare.id], { mode: 'coop_npc', hostId: gold.id });
+  relay.handle(gold.id, { type: 'mmo.battle_ruleset', battle: 'g2n', chart: CHART2 });
+  relay.handle(gold.id, {
+    type: 'mmo.battle_party', battle: 'g2n', side: 'a', mons: [sheet2({ spe: 200 })],
+  });
+  relay.handle(bare.id, {
+    type: 'mmo.battle_party', battle: 'g2n', side: 'a', mons: [sheet2({ spe: 100 })],
+  });
+  relay.handle(gold.id, {
+    type: 'mmo.battle_party',
+    battle: 'g2n',
+    side: 'b',
+    mons: [sheet2({ species: 'WALL', hp: 900, spe: 1 }), sheet2({ species: 'WALL', hp: 900, spe: 1 })],
+  });
+  ok(relay.battles.get('g2n') && relay.battles.get('g2n').sim, 'family gen 2 (gold): the field opens');
+  const goldEntry = entryOf(seen, 'a', gold.id);
+  ok(goldEntry && goldEntry.family === 'gs', "family gen 2 (gold): a Gold player's entry is gs");
+  const bareEntry = entryOf(seen, 'a', bare.id);
+  ok(bareEntry && !has(bareEntry, 'family'),
+    'family gen 2 (no cart): a hello naming no cart leaves the field off');
+}
+
+// A four-player Gold spar: the entries still say whose cart (the referee reads
+// side a's; a link fight plays one pass whoever's it is).
+function testGen2FamilyPvp() {
+  const relay = makeRelay(makeClock(), { generation: 2 });
+  relay.forceBattleSeed = 5;
+  const seen = spyAttempt(relay);
+  const who = [dial2v(relay, 'ANN', 'crystal'), dial2v(relay, 'BOB', 'gold'),
+    dial2v(relay, 'CAL', 'silver'), dial2v(relay, 'DEE', 'crystal')];
+  const ids = who.map((c) => c.id);
+  relay.openCoopBattle('g2p', ids, {
+    mode: 'coop_pvp', hostId: ids[0], sides: { a: [ids[0], ids[1]], b: [ids[2], ids[3]] },
+  });
+  relay.handle(ids[0], { type: 'mmo.battle_ruleset', battle: 'g2p', chart: CHART2 });
+  who.forEach((c, i) => {
+    relay.handle(c.id, { type: 'mmo.battle_party', battle: 'g2p', mons: [sheet2({ spe: 10 * (i + 1) })] });
+  });
+  ok(relay.battles.get('g2p') && relay.battles.get('g2p').sim, 'family gen 2 pvp: the spar opens');
+  ok(entryOf(seen, 'a', ids[0]).family === 'crystal', "family gen 2 pvp: ANN's entry names her cart");
+  ok(entryOf(seen, 'a', ids[1]).family === 'gs', "family gen 2 pvp: BOB's");
+  ok(entryOf(seen, 'b', ids[2]).family === 'gs', 'family gen 2 pvp: on either side');
+  ok(entryOf(seen, 'b', ids[3]).family === 'crystal', "family gen 2 pvp: DEE's");
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
@@ -2563,5 +2713,8 @@ testGen3FamilyFocusPunch();
 testGen3FamilyLinkRules();
 testGen1NoFamily();
 testGen2TypeIdsBoost();
+testGen2Family();
+testGen2FamilyGoldAndNone();
+testGen2FamilyPvp();
 
 console.log(`hub_battle: ${passed} checks passed`);

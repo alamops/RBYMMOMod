@@ -25,7 +25,9 @@
 -- Every one of these is byte-shared with `src/BattleSim/Turn.lua` and with the
 -- Node twin under `server/lib/battle2/`; `server/battle2_turn.test.js` runs the
 -- same scenarios, and a case that passes on one side and fails on the other is
--- exactly the drift these suites exist to catch.
+-- exactly the drift these suites exist to catch.  Sections 8 and 9 state the
+-- pokecrystal fidelity rules one at a time: the damage step, then the Gold
+-- held items, obedience, the flinch reset and the cart family (K6).
 
 -- ------------------------------------------------------------------
 -- where we are
@@ -2307,6 +2309,476 @@ do
   local second = drain(battle)
   ok(animOrder(second):find("wall_up", 1, true) == nil, "...and does not cast it again while it is up")
   ok(animOrder(second):find("thump", 1, true) ~= nil, "...it attacks instead")
+end
+
+-- ------------------------------------------------------------------
+-- 9. Gold held items, obedience, the flinch reset and the cart family
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-fidelity.md, Gen 2, wave 2: the rules one at a
+-- time.  The parity driver pins whole fights both runtimes agree on; the
+-- formulas are in the vector pack's ITEMS section.  Every parameter is
+-- synthetic; server/battle2_turn.test.js holds the same claims.
+
+local Items, Crit = BattleSim2.Items, BattleSim2.Crit
+
+-- A sheet with an item ({ id, effect, param, name, mail }) and the obedience
+-- fields, on top of section 8's `sheet`.
+local function held(o)
+  local m = sheet(o)
+  m.speciesId, m.traded, m.statusTurns = o.speciesId, o.traded, o.statusTurns
+  m.focusEnergy, m.disable = o.focusEnergy, o.disable
+  if o.item then
+    m.heldItem, m.holdEffect, m.holdParam = o.item[1], o.item[2], o.item[3]
+    m.itemName, m.mail = o.item[4], o.item[5]
+  end
+  return m
+end
+local function fight(o)
+  local foe = o.foe or ((o.mode == "wild" or o.mode == "coop_wild") and "wild" or "p2")
+  return battleOf({
+    mode = o.mode or "1v1", seed = o.seed or 4242, typeIds = o.typeIds,
+    specialTypes = o.specialTypes, chart = o.chart,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = o.badges, family = o.family, mons = o.a } },
+      b = { { playerId = foe, name = "Bob", mons = o.b } },
+    },
+  }), foe
+end
+local function round(battle, foe, a, b)
+  battle:submitChoice("p1", a or { action = "fight", move = 0 })
+  battle:submitChoice(foe, b or { action = "fight", move = 0 })
+  return drain(battle)
+end
+local function heldEvents(events)
+  local out = {}
+  for _, event in ipairs(events) do
+    if event.t == "held" then out[#out + 1] = event.text .. ":" .. event.amount .. "@" .. event.slot end
+  end
+  return table.concat(out, ",")
+end
+local LEFTOVERS = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }
+
+-- (a) the sheet: K1 / K2 kept, badgeRules and family per seat (K6)
+do
+  local battle = battleOf({
+    mode = "wild", seed = 1,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", family = "crystal", mons = {
+        held({ species = "Alpha", traded = true, item = { "FLOWER_MAIL", nil, 77, "FLOWER MAIL", true },
+               moves = { hit("tap", 1) } }),
+        held({ species = "Gamma", moves = { hit("tap", 1) } }) } } },
+      b = { { playerId = "wild", name = "Wild", family = "crystal", mons = {
+        held({ species = "Beta", item = { "LEFTOVERS", "HELD_LEFTOVERS", 999, "LEFTOVERS" },
+               moves = { hit("tap", 1) } }) } } },
+    },
+  })
+  local ann, wild = battle.byId.p1, battle.byId.wild
+  local alpha, beta = ann.mons[1], wild.mons[1]
+  eq(alpha.heldItem, "FLOWER_MAIL", "copyMon keeps heldItem")
+  eq(alpha.holdParam, 77, "...its parameter")
+  eq(alpha.mail, true, "...the Mail flag")
+  eq(alpha.itemName, "FLOWER MAIL", "...and the display name")
+  eq(alpha.traded, true, "...and K1's traded")
+  eq(beta.holdParam, 255, "a parameter past a byte is held at 255")
+  eq(ann.mons[2].heldItem, nil, "a monster with no item carries none of the fields")
+  eq(ann.mons[2].traded, nil, "...and no traded")
+  eq(ann.badgeRules, true, "side a of a wild fight plays by the badge rules")
+  eq(wild.badgeRules, nil, "...side b never does")
+  eq(battle.family, "crystal", "the fight's cart is side a's first seat's")
+  local link = battleOf({ mode = "1v1", sides = {
+    a = { { playerId = "p1", name = "Ann", family = "silver", mons = { held({ species = "Alpha", moves = { hit("tap", 1) } }) } } },
+    b = { { playerId = "p2", name = "Bob", family = "crystal", mons = { held({ species = "Beta", moves = { hit("tap", 1) } }) } } },
+  } })
+  eq(link.byId.p1.badgeRules, nil, "a link battle has no badge-rules seat")
+  eq(link.family, "gs", "an unknown family on side a reads as Gold / Silver's, whatever side b says")
+  local held2 = held({ species = "Alpha", item = { "LEFTOVERS" }, moves = { hit("tap", 1) } })
+  held2.heldItem = nil
+  held2.holdEffect = "HELD_LEFTOVERS"
+  local orphan = battleOf({ mode = "1v1", sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held2 } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", moves = { hit("tap", 1) } }) } } },
+  } })
+  eq(orphan.byId.p1.mons[1].holdEffect, nil, "a hold effect with no item is nothing held")
+end
+
+-- (b) K6: TruncateHL_BC's pass count by cart and mode
+do
+  local function onePass(mode, family)
+    local foe = (mode == "wild") and "wild" or "p2"
+    local battle = battleOf({ mode = mode, sides = {
+      a = { { playerId = "p1", name = "Ann", family = family, mons = { held({ species = "Alpha", moves = { hit("tap", 1) } }) } } },
+      b = { { playerId = foe, name = "Bob", mons = { held({ species = "Beta", moves = { hit("tap", 1) } }) } } },
+    } })
+    return battle:_onePassTruncate()
+  end
+  eq(onePass("wild", nil), true, "Gold / Silver (no family): one pass outside a link battle")
+  eq(onePass("wild", "gs"), true, "...and with gs stated")
+  eq(onePass("wild", "crystal"), false, "Crystal loops outside a link battle")
+  eq(onePass("1v1", "crystal"), true, "...and folds once in one")
+  eq(onePass("coop_pvp", "gs"), true, "a link battle on Gold folds once too")
+end
+
+-- (c) Quick Claw: inside a bracket only, and a bracket of one draws nothing
+do
+  local claw = { "QUICK_CLAW", "HELD_QUICK_CLAW", 255, "QUICK CLAW" }
+  local function order(item, bMove, seed)
+    local battle, foe = fight({ seed = seed or 3,
+      a = { held({ species = "Alpha", spe = 10, item = item, moves = { hit("ann_hit", 10) } }) },
+      b = { held({ species = "Beta", spe = 90, moves = { bMove or hit("bob_hit", 10) } }) } })
+    drain(battle)
+    local events = round(battle, foe)
+    return animOrder(events), battle.rng:state()
+  end
+  eq((order(claw)), "ann_hit,bob_hit", "a claw that fires (255) puts the slower holder first")
+  eq((order(nil)), "bob_hit,ann_hit", "...where Speed alone puts it last")
+  local _, bare = order(nil)
+  local _, clawed = order(claw)
+  ok(bare ~= clawed, "...and its byte is a real draw")
+  local qa = order(claw, hit("QUICK_ATTACK", 10))
+  eq(qa, "QUICK_ATTACK,ann_hit", "a claw never lifts its holder past a higher bracket")
+  local _, s1 = order(claw, hit("QUICK_ATTACK", 10), 9)
+  local _, s2 = order(nil, hit("QUICK_ATTACK", 10), 9)
+  eq(s1, s2, "...and with each bracket holding one actor, nothing is drawn")
+  -- side b's holder rolls first: with both holding a sure claw, Bob (side b) goes first
+  local battle, foe = fight({ seed = 3,
+    a = { held({ species = "Alpha", spe = 50, item = claw, moves = { hit("ann_hit", 10) } }) },
+    b = { held({ species = "Beta", spe = 10, item = claw, moves = { hit("bob_hit", 10) } }) } })
+  drain(battle)
+  eq(animOrder(round(battle, foe)), "bob_hit,ann_hit", "both holding: side b's claw is rolled first and fires")
+end
+
+-- (d) Leftovers, a Berry eaten and gone, the strict half, the held event
+do
+  local battle, foe = fight({ seed = 7,
+    a = { held({ species = "Alpha", maxHp = 320, hp = 100, spe = 90, item = LEFTOVERS, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 100, hp = 50, spe = 10, item = { "BERRY", "HELD_BERRY", 12, "BERRY" },
+                moves = { hit("tap", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  ok(said(events, "Alpha recovered with LEFTOVERS."), "Leftovers: the cart's sentence")
+  eq(battle.byId.p1.mons[1].heldItem, "LEFTOVERS", "...and kept")
+  eq(heldEvents(events), "LEFTOVERS:1@0,BERRY:0@3", "held events: Leftovers still held, the Berry gone")
+  ok(said(events, "Beta recovered using a BERRY!"), "a Berry under half: eaten")
+  eq(battle.byId[foe].mons[1].heldItem, nil, "...and gone from the referee's copy")
+  eq(battle.byId[foe].mons[1].hp, 49 + 12, "...after healing its parameter (12)")
+  local quiet, qfoe = fight({ seed = 7,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 100, hp = 50, spe = 10, item = { "BERRY", "HELD_BERRY", 12, "BERRY" },
+                moves = { hit("tap", 0, 0, 85) } }) } })
+  drain(quiet)
+  local events2 = round(quiet, qfoe)
+  ok(not sawKind(events2, "held"), "at exactly half the cart keeps the Berry (2*HP < max)")
+  eq(Items.sixteenth(320), 20, "Leftovers heals a sixteenth")
+end
+
+-- (e) status berries right after infliction, and only the matching one
+do
+  local battle, foe = fight({ seed = 11,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("doze_dust", 0, 0, 32) } }) },
+    b = { held({ species = "Beta", spe = 10, item = { "MINT_BERRY", "HELD_HEAL_SLEEP", 0, "MINT BERRY" },
+                moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  ok(said(events, "Beta fell asleep"), "the sleep lands")
+  ok(said(events, "Beta recovered using a MINT BERRY!"), "...and the Mint Berry takes it straight away")
+  eq(battle.byId[foe].mons[1].status, nil, "...so the target is awake")
+  ok(said(events, "Beta used tap"), "...and moves this very turn")
+  local wrong, wfoe = fight({ seed = 11,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("doze_dust", 0, 0, 32) } }) },
+    b = { held({ species = "Beta", spe = 10, item = { "ICE_BERRY", "HELD_HEAL_BURN", 0, "ICE BERRY" },
+                moves = { hit("tap", 1) } }) } })
+  drain(wrong)
+  local events2 = round(wrong, wfoe)
+  ok(not sawKind(events2, "held"), "a berry for another status does nothing, then or between turns")
+  eq(wrong.byId[wfoe].mons[1].heldItem, "ICE_BERRY", "...and is kept")
+end
+
+-- (f) Focus Band: every hit rolls, a lethal one is held at 1
+do
+  local band = { "FOCUS_BAND", "HELD_FOCUS_BAND", 255, "FOCUS BAND" }
+  local function bandFight(item, hp, seed)
+    local battle, foe = fight({ seed = seed or 21,
+      a = { held({ species = "Alpha", atk = 200, spe = 90, moves = { hit("thump", 80) } }) },
+      b = { held({ species = "Beta", maxHp = 400, hp = hp, spe = 10, item = item, moves = { hit("tap", 0, 0, 85) } }) } })
+    drain(battle)
+    local events = round(battle, foe)
+    return events, battle, foe
+  end
+  local events, battle, foe = bandFight(band, 5)
+  eq(battle.byId[foe].mons[1].hp, 1, "a lethal hit the band catches leaves 1 HP")
+  ok(said(events, "Beta hung on with FOCUS BAND!"), "...with the cart's line")
+  eq(heldEvents(events), "FOCUS_BAND:1@3", "...and the band is still held")
+  local _, bare = bandFight(nil, 400)
+  local quietEvents, banded = bandFight(band, 400)
+  ok(bare.rng:state() ~= banded.rng:state(), "a non-lethal hit still rolls the band")
+  ok(not sawKind(quietEvents, "held"), "...and says nothing")
+end
+
+-- (g) King's Rock: eligible scripts only, no substitute, no fainted target
+do
+  local rock = { "KINGS_ROCK", "HELD_FLINCH", 255, "KING'S ROCK" }
+  local function kr(move, item, b, seed)
+    local battle, foe = fight({ seed = seed or 3,
+      a = { held({ species = "Alpha", spe = 90, item = item, moves = { move } }) },
+      b = { b or held({ species = "Beta", maxHp = 400, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    return round(battle, foe), battle
+  end
+  local events = kr(hit("thump", 10), rock)
+  ok(said(events, "Beta flinched"), "a plain hit with King's Rock flinches a slower target")
+  local _, plain = kr(hit("thump", 10), nil)
+  local _, rocked = kr(hit("THUNDER", 10), rock)
+  eq(plain.rng:state(), rocked.rng:state(), "a folded-0 move whose script has no `kingsrock` draws nothing")
+  local _, burnt = kr(hit("ember_hit", 10, 0, 4), rock)
+  local _, burntPlain = kr(hit("ember_hit", 10, 0, 4), nil)
+  eq(burnt.rng:state(), burntPlain.rng:state(), "...nor does a status hit")
+  local subbed = held({ species = "Beta", maxHp = 400, spe = 10, moves = { hit("tap", 1) } })
+  subbed.substitute = 300
+  local subEvents, subBattle = kr(hit("thump", 10), rock, subbed)
+  ok(not said(subEvents, "Beta flinched"), "a substitute still standing shields the target")
+  local _, subPlain = kr(hit("thump", 10), nil, held({ species = "Beta", maxHp = 400, spe = 10, substitute = 300,
+                                                        moves = { hit("tap", 1) } }))
+  eq(subBattle.rng:state(), subPlain.rng:state(), "...and no byte is drawn for it")
+  eq(Items.kingsRockMove(Effects.idOf("TWO_TO_FIVE_ATTACKS_EFFECT"), "fury_hits"), true, "multi-hit scripts end in `kingsrock`")
+end
+
+-- (h) the species items read the right species through Transform
+do
+  -- Lucky Punch reads the BATTLE species: a Ditto that becomes a Chansey has it.
+  local battle, foe = fight({ seed = 5,
+    a = { held({ species = "Alpha", speciesId = "DITTO", spe = 90, item = { "LUCKY_PUNCH", nil, 0, "LUCKY PUNCH" },
+                 moves = { hit("copycat", 0, 0, 57) } }) },
+    b = { held({ species = "Beta", speciesId = "CHANSEY", spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  round(battle, foe)
+  local alpha = battle.byId.p1.mons[1]
+  eq(battle:_battleSpecies(alpha), "CHANSEY", "Transform rewrites the battle species")
+  eq(Items.critSpeciesItem(battle:_battleSpecies(alpha), alpha.heldItem), true, "...so Lucky Punch sets the level")
+  eq(alpha.speciesId, "DITTO", "...while the party species stays")
+  eq(Items.metalPowder({ heldItem = "METAL_POWDER", speciesId = alpha.speciesId }, 100, 100), 100,
+     "Metal Powder's attack side is untouched while the defense fits")
+  local _, d = Items.metalPowder({ heldItem = "METAL_POWDER", speciesId = alpha.speciesId }, 100, 100)
+  eq(d, 150, "...and the party species is what Metal Powder reads")
+  eq(Crit.level({ speciesItemBonus = true, focusEnergy = true, highCritMove = true, scopeLens = true }), 2,
+     "the species item sets the crit level to 2 outright")
+end
+
+-- (i) Thief: Mail by flag or by id, a full hand, both ways
+do
+  local function thief(bItem, aItem, seed)
+    local battle, foe = fight({ seed = seed or 4,
+      a = { held({ species = "Alpha", spe = 90, item = aItem, moves = { hit("THIEF", 10) } }) },
+      b = { held({ species = "Beta", maxHp = 400, spe = 10, item = bItem, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    return round(battle, foe), battle, foe
+  end
+  local events, battle, foe = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" })
+  ok(said(events, "Alpha stole CHARCOAL from its foe!"), "Thief takes the foe's item")
+  eq(heldEvents(events), "CHARCOAL:0@3,CHARCOAL:1@0", "...two held events: the victim's, then the thief's")
+  eq(battle.byId.p1.mons[1].holdEffect, "HELD_FIRE_BOOST", "...and the rule travels with it")
+  eq(battle.byId[foe].mons[1].heldItem, nil, "...the victim holds nothing")
+  local mailEvents = thief({ "FLOWER_MAIL", nil, 0, "FLOWER MAIL", true })
+  ok(not sawKind(mailEvents, "held"), "Mail (the flag) is never taken")
+  local idEvents = thief({ "SURF_MAIL", nil, 0, "SURF MAIL" })
+  ok(not sawKind(idEvents, "held"), "...nor a Mail id the sheet forgot to flag")
+  local fullEvents = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, { "BERRY", "HELD_BERRY", 12, "BERRY" })
+  ok(not sawKind(fullEvents, "held"), "a thief already holding something takes nothing")
+  local emptyEvents = thief(nil)
+  ok(not sawKind(emptyEvents, "held"), "...and a foe holding nothing gives nothing")
+  -- the computer's Thief is not gated (Gen 3's is): the wild monster robs the player
+  local wild, wfoe = fight({ mode = "wild", seed = 4,
+    a = { held({ species = "Alpha", spe = 90, item = LEFTOVERS, moves = { hit("tap", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("THIEF", 10) } }) } })
+  drain(wild)
+  local wildEvents = round(wild, wfoe)
+  ok(said(wildEvents, "Beta stole LEFTOVERS from its foe!"), "a wild Thief takes the player's item")
+  eq(wild.byId.p1.mons[1].heldItem, nil, "...and it is gone")
+end
+
+-- (j) Berserk Gene: 256, an already-confused holder, Attack at +6
+do
+  local gene = { "BERSERK_GENE", nil, 0, "BERSERKGENE" }
+  local battle = fight({
+    a = { held({ species = "Alpha", spe = 90, item = gene, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  local events = drain(battle)
+  local alpha = battle.byId.p1.mons[1]
+  eq(alpha.confusion, Turn.BERSERK_CONFUSION, "from a count of 0 the confusion runs 256 checks")
+  eq(alpha.stages.atk, 2, "Attack +2")
+  eq(alpha.heldItem, nil, "the gene is used up")
+  ok(said(events, "Alpha's BERSERKGENE activated!"), "...with the cart's line")
+  local turnAt, geneAt = 0, 0
+  for i, event in ipairs(events) do
+    if event.t == "turn" then turnAt = i end
+    if event.t == "held" then geneAt = i end
+  end
+  ok(geneAt > 0 and geneAt < turnAt, "...before the turn opens")
+  local maxed = held({ species = "Alpha", spe = 90, item = gene, moves = { hit("tap", 1) } })
+  maxed.stages = { atk = 6 }
+  maxed.confusion = 3
+  local battle2 = fight({ a = { maxed }, b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  local events2 = drain(battle2)
+  eq(battle2.byId.p1.mons[1].confusion, 3, "an already-confused holder keeps its count")
+  ok(not said(events2, "Alpha became confused"), "...and is not told again")
+  ok(not said(events2, "Alpha's ATTACK rose"), "Attack at +6 says nothing")
+end
+
+-- (k) obedience gates: who is asked, and when nothing is drawn
+do
+  local function obeyRun(o)
+    local battle, foe = fight({ mode = o.mode or "wild", seed = o.seed or 31, badges = o.badges,
+      a = { held({ species = "Alpha", level = o.level or 80, spe = 90, traded = o.traded,
+                   moves = { hit("thump", 10), hit("pound_two", 10) } }) },
+      b = { held({ species = "Beta", level = 80, spe = 10, maxHp = 900, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    local events = {}
+    for _ = 1, 4 do for _, e in ipairs(round(battle, foe)) do events[#events + 1] = e end end
+    return events, battle.rng:state()
+  end
+  local _, base = obeyRun({})
+  local _, traded = obeyRun({ traded = true })
+  ok(base ~= traded, "a traded L80 monster with no badge is asked (cap 10)")
+  local _, capped = obeyRun({ traded = true, level = 10 })
+  local _, cappedBase = obeyRun({ level = 10 })
+  eq(capped, cappedBase, "at the cap it obeys without a draw")
+  local _, rising = obeyRun({ traded = true, badges = { RISING = true } })
+  eq(rising, base, "RISING: every level obeys, no draw")
+  local _, link = obeyRun({ traded = true, mode = "1v1" })
+  local _, linkBase = obeyRun({ mode = "1v1" })
+  eq(link, linkBase, "a link battle never asks")
+  local _, pvp = obeyRun({ traded = true, mode = "1v1", badges = {} })
+  eq(pvp, linkBase, "...whatever it uploads")
+  -- CheckUserIsCharging and CheckRampage skip the command: a charged move's
+  -- release and a rampage's continuation are never asked.
+  local function locked(traded, field, value)
+    local mon = held({ species = "Alpha", level = 80, spe = 90, traded = traded,
+                       moves = { hit("beam_up", 60, 0, 39), hit("rampage", 60, 0, 27) } })
+    mon[field] = value
+    local battle, foe = fight({ mode = "wild", seed = 31, a = { mon },
+      b = { held({ species = "Beta", level = 80, maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    battle:tick(1)
+    local events = drain(battle)
+    for _, e in ipairs(round(battle, foe)) do events[#events + 1] = e end
+    return battle.rng:state(), events
+  end
+  local charged = { moveIndex = 1, effect = 39, moveId = "beam_up", targetSlot = 3 }
+  local tradedCharge, chargeEvents = locked(true, "charging", charged)
+  eq(tradedCharge, (locked(nil, "charging", { moveIndex = 1, effect = 39, moveId = "beam_up", targetSlot = 3 })),
+     "a charged move's release is never asked")
+  ok(said(chargeEvents, "Alpha used beam_up"), "...and goes off")
+  eq((locked(true, "thrashing", { turns = 1, moveIndex = 2 })),
+     (locked(nil, "thrashing", { turns = 1, moveIndex = 2 })), "nor is a rampage's continuation")
+end
+
+-- (l) obedience while asleep, and the Snore / Sleep Talk sleep bypass
+do
+  local function sleeper(move, traded, seed)
+    local battle, foe = fight({ mode = "wild", seed = seed,
+      a = { held({ species = "Alpha", level = 80, spe = 90, status = "SLP", statusTurns = 7, traded = traded,
+                   moves = { move, hit("thump", 10) } }) },
+      b = { held({ species = "Beta", level = 80, maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    return round(battle, foe)
+  end
+  local snore = sleeper(hit("SNORE", 10), nil, 3)
+  ok(said(snore, "Alpha is fast asleep") and said(snore, "Alpha used SNORE"), "Snore gets past the sleep gate")
+  local other = sleeper(hit("thump", 10), nil, 3)
+  ok(said(other, "Alpha is fast asleep") and not said(other, "Alpha used thump"), "...any other move does not")
+  local ignored
+  for seed = 1, 40 do
+    local events = sleeper(hit("SLEEP_TALK", 0), true, seed)
+    if said(events, "Alpha ignored orders...sleeping!") then ignored = events; break end
+  end
+  ok(ignored ~= nil, "a disobedient sleeper using Sleep Talk ignores orders")
+  ok(ignored and not said(ignored, "Alpha used SLEEP_TALK"), "...and the move is not used")
+end
+
+-- (m) `.UseInstead` spends the other move's PP and forgets the last move
+do
+  local found
+  for seed = 1, 400 do
+    local battle, foe = fight({ mode = "wild", seed = seed,
+      a = { held({ species = "Alpha", level = 80, spe = 90, traded = true,
+                   moves = { hit("thump", 10), hit("pound_two", 10) } }) },
+      b = { held({ species = "Beta", level = 80, maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    local events = round(battle, foe)
+    if said(events, "Alpha used instead, pound_two") then found = battle; break end
+  end
+  ok(found ~= nil, "a disobedient monster uses another move instead")
+  if found then
+    local alpha = found.byId.p1.mons[1]
+    eq(alpha.moves[2].pp, 29, "...spending that move's PP")
+    eq(alpha.moves[1].pp, 30, "...not the chosen one's")
+    eq(alpha.lastMoveIndex, 0, "...and `.EndDisobedience` forgets it as the last move")
+  end
+end
+
+-- (n) the flinch reset at turn open, and the recharge exception
+do
+  local rock = { "KINGS_ROCK", "HELD_FLINCH", 255, "KING'S ROCK" }
+  local battle, foe = fight({ mode = "wild", seed = 3,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, item = rock, moves = { hit("thump", 10) } }) } })
+  drain(battle)
+  local B = Turn.Battle
+  local orig = B._openTurn
+  local seen
+  B._openTurn = function(self) seen = self.byId.p1.mons[1].flinch; return orig(self) end
+  round(battle, foe)
+  B._openTurn = orig
+  eq(seen, true, "the slower holder's roll lands on a target that already moved")
+  eq(battle.byId.p1.mons[1].flinch, false, "...and the turn's open clears it")
+  ok(said(round(battle, foe), "Alpha used tap"), "...so it acts next turn")
+  -- a badge-rules seat whose monster must recharge keeps its own flag
+  local kept = fight({ mode = "wild", seed = 3,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  local alpha = kept.byId.p1.mons[1]
+  alpha.flinch, alpha.mustRecharge = true, true
+  kept.byId.wild.mons[1].flinch = true
+  kept:_openTurn()
+  eq(alpha.flinch, true, "the player's recharging monster keeps its flag (CheckPlayerLockedIn returns first)")
+  eq(kept.byId.wild.mons[1].flinch, false, "...the computer's is reset")
+  local linked = fight({ mode = "1v1", seed = 3,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  local lalpha = linked.byId.p1.mons[1]
+  lalpha.flinch, lalpha.mustRecharge = true, true
+  linked:_openTurn()
+  eq(lalpha.flinch, false, "a link battle resets every flag")
+end
+
+-- (o) Mysteryberry, the stat-up items, and every event passing the whitelist
+do
+  local battle, foe = fight({ seed = 2,
+    a = { held({ species = "Alpha", spe = 90, item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 0, "MYSTERYBERRY" },
+                 moves = { hit("tap", 1), hit("spent", 40, 0, 0, 0) } }) },
+    b = { held({ species = "Beta", spe = 10, item = { "X_GEM", "HELD_SPEED_UP", 0, "X GEM" },
+                moves = { hit("tap", 1) } }) } })
+  local events = drain(battle)
+  for _, e in ipairs(round(battle, foe)) do events[#events + 1] = e end
+  eq(battle.byId.p1.mons[1].moves[2].pp, 5, "Mysteryberry: +5 PP to the first empty slot")
+  ok(said(events, "Alpha recovered PP using MYSTERYBERRY."), "...with the cart's line")
+  eq(battle.byId[foe].mons[1].stages.spe, 1, "a HELD_SPEED_UP item raises Speed a stage")
+  ok(said(events, "Beta's X GEM activated!"), "...and says so")
+  local topped = held({ species = "Beta", spe = 10, item = { "X_GEM", "HELD_SPEED_UP", 0, "X GEM" },
+                        moves = { hit("tap", 1) } })
+  topped.stages = { spe = 6 }
+  local full, ffoe = fight({ seed = 2, a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 1) } }) },
+                             b = { topped } })
+  drain(full)
+  local fullEvents = round(full, ffoe)
+  ok(not sawKind(fullEvents, "held"), "...but not past +6, where the item is kept")
+  local good = true
+  for _, e in ipairs(events) do
+    local fine, why = Events.check(e)
+    if not fine then good = false; io.stderr:write("held whitelist: " .. tostring(why) .. "\n") end
+  end
+  ok(good, "every event the held items emit passes the vocabulary check")
+  ok(Events.KINDS.held == true, "`held` is a Gen 2 kind")
 end
 
 -- ------------------------------------------------------------------

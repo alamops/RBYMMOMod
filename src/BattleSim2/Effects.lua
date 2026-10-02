@@ -506,6 +506,7 @@ local STAT_LABELS = {
   atk = "ATTACK", def = "DEFENSE", spe = "SPEED",
   spa = "SP.ATK", spd = "SP.DEF", acc = "ACCURACY", eva = "EVASION",
 }
+M.STAT_LABELS = STAT_LABELS
 
 -- effect id -> { stat, delta, selfTarget }
 local STAT_EFFECTS = {
@@ -919,6 +920,11 @@ function M.applyPrimary(ctx)
     end
     userMon.moves = copied
     userMon.transformed = true
+    -- BattleCommand_Transform copies the target's species into the battle
+    -- struct (wBattleMonSpecies), which BattleCommand_Critical's Lucky Punch /
+    -- Stick check reads; the party species -- `speciesId`, untouched -- is what
+    -- Light Ball, Thick Club and Metal Powder read (Items.lua).
+    userMon.transformSpecies = targetMon.speciesId
     out.messages[#out.messages + 1] =
       userMon.species .. " transformed into " .. targetMon.species
     out.movesChanged = true

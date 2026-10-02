@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255.",
+  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255. OBEDIENCE (pokered CheckForDisobedience, engine/battle/core.asm :3830-4007; every byte below is one BattleRandom, and `bytes` is the exact sequence drawn, `draws` how many of them were consumed). cap: the first of EARTHBADGE 101, MARSHBADGE 70, RAINBOWBADGE 50, CASCADEBADGE 30 the badge set holds, else 10. roll: c = cap, d = min(255, level); c >= d obeys without a draw; b = min(255, c + d) (the cart's add-with-carry capped at $ff); loop1 redraws swap(R) until it is below b and obeys if it is below c; loop2 redraws R until it is below b and answers random if below c; then b = d - c and r = swap(R): r < b naps, r - b >= b is nothing, anything else is selfhit. swap exchanges the two nibbles of a byte. nap: swap((2R) mod 256) mod 8, redrawn while it is 0, so 1..7 turns. loaf: R mod 4 picks loafing / wont_obey / turned_away / ignored_orders. random: null without a draw when fewer than two moves are known, any move is disabled, Struggle is selected, or no slot but the chosen one has PP; otherwise (R mod 4) + 1 is redrawn until it names a slot that exists, is not the chosen one and has PP.",
   "damage": [
     {
       "id": "dmg_neutral_basic",
@@ -1189,6 +1189,491 @@
         "selfHit": true,
         "canMove": false,
         "selfDamage": 10
+      }
+    }
+  ],
+  "obedience": [
+    {
+      "id": "obedience_cap_no_badge",
+      "in": {
+        "step": "cap",
+        "badges": []
+      },
+      "out": {
+        "cap": 10
+      }
+    },
+    {
+      "id": "obedience_cap_boost_badges_only",
+      "in": {
+        "step": "cap",
+        "badges": [
+          "BOULDERBADGE",
+          "THUNDERBADGE",
+          "SOULBADGE",
+          "VOLCANOBADGE"
+        ]
+      },
+      "out": {
+        "cap": 10
+      }
+    },
+    {
+      "id": "obedience_cap_cascade",
+      "in": {
+        "step": "cap",
+        "badges": [
+          "CASCADEBADGE"
+        ]
+      },
+      "out": {
+        "cap": 30
+      }
+    },
+    {
+      "id": "obedience_cap_rainbow_over_cascade",
+      "in": {
+        "step": "cap",
+        "badges": [
+          "CASCADEBADGE",
+          "RAINBOWBADGE"
+        ]
+      },
+      "out": {
+        "cap": 50
+      }
+    },
+    {
+      "id": "obedience_cap_marsh",
+      "in": {
+        "step": "cap",
+        "badges": [
+          "MARSHBADGE"
+        ]
+      },
+      "out": {
+        "cap": 70
+      }
+    },
+    {
+      "id": "obedience_cap_earth_over_all",
+      "in": {
+        "step": "cap",
+        "badges": [
+          "BOULDERBADGE",
+          "CASCADEBADGE",
+          "MARSHBADGE",
+          "EARTHBADGE"
+        ]
+      },
+      "out": {
+        "cap": 101
+      }
+    },
+    {
+      "id": "obedience_roll_at_cap_no_draw",
+      "in": {
+        "step": "roll",
+        "level": 30,
+        "cap": 30,
+        "bytes": []
+      },
+      "out": {
+        "verdict": "obeys",
+        "draws": 0
+      }
+    },
+    {
+      "id": "obedience_roll_earth_cap_no_draw",
+      "in": {
+        "step": "roll",
+        "level": 100,
+        "cap": 101,
+        "bytes": []
+      },
+      "out": {
+        "verdict": "obeys",
+        "draws": 0
+      }
+    },
+    {
+      "id": "obedience_roll_r1_pass",
+      "in": {
+        "step": "roll",
+        "level": 60,
+        "cap": 50,
+        "bytes": [
+          32
+        ]
+      },
+      "out": {
+        "verdict": "obeys",
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_roll_r1_redraws_at_b",
+      "in": {
+        "step": "roll",
+        "level": 60,
+        "cap": 50,
+        "bytes": [
+          7,
+          19
+        ]
+      },
+      "out": {
+        "verdict": "obeys",
+        "draws": 2
+      }
+    },
+    {
+      "id": "obedience_roll_cap_itself_does_not_pass",
+      "in": {
+        "step": "roll",
+        "level": 60,
+        "cap": 50,
+        "bytes": [
+          35,
+          50,
+          9
+        ]
+      },
+      "out": {
+        "verdict": "nothing",
+        "draws": 3
+      }
+    },
+    {
+      "id": "obedience_roll_random",
+      "in": {
+        "step": "roll",
+        "level": 60,
+        "cap": 50,
+        "bytes": [
+          67,
+          49
+        ]
+      },
+      "out": {
+        "verdict": "random",
+        "draws": 2
+      }
+    },
+    {
+      "id": "obedience_roll_r2_redraws_at_b",
+      "in": {
+        "step": "roll",
+        "level": 60,
+        "cap": 50,
+        "bytes": [
+          67,
+          200,
+          110,
+          30
+        ]
+      },
+      "out": {
+        "verdict": "random",
+        "draws": 4
+      }
+    },
+    {
+      "id": "obedience_roll_nap",
+      "in": {
+        "step": "roll",
+        "level": 100,
+        "cap": 10,
+        "bytes": [
+          5,
+          50,
+          36
+        ]
+      },
+      "out": {
+        "verdict": "nap",
+        "draws": 3
+      }
+    },
+    {
+      "id": "obedience_roll_selfhit_low_edge",
+      "in": {
+        "step": "roll",
+        "level": 100,
+        "cap": 10,
+        "bytes": [
+          5,
+          50,
+          165
+        ]
+      },
+      "out": {
+        "verdict": "selfhit",
+        "draws": 3
+      }
+    },
+    {
+      "id": "obedience_roll_selfhit_high_edge",
+      "in": {
+        "step": "roll",
+        "level": 100,
+        "cap": 10,
+        "bytes": [
+          5,
+          50,
+          59
+        ]
+      },
+      "out": {
+        "verdict": "selfhit",
+        "draws": 3
+      }
+    },
+    {
+      "id": "obedience_roll_nothing_edge",
+      "in": {
+        "step": "roll",
+        "level": 100,
+        "cap": 10,
+        "bytes": [
+          5,
+          50,
+          75
+        ]
+      },
+      "out": {
+        "verdict": "nothing",
+        "draws": 3
+      }
+    },
+    {
+      "id": "obedience_roll_carry_caps_b_at_255",
+      "in": {
+        "step": "roll",
+        "level": 250,
+        "cap": 10,
+        "bytes": [
+          255,
+          1,
+          255,
+          9
+        ]
+      },
+      "out": {
+        "verdict": "random",
+        "draws": 4
+      }
+    },
+    {
+      "id": "obedience_nap_three_turns",
+      "in": {
+        "step": "nap",
+        "bytes": [
+          24
+        ]
+      },
+      "out": {
+        "turns": 3,
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_nap_redraws_zero",
+      "in": {
+        "step": "nap",
+        "bytes": [
+          7,
+          128,
+          63
+        ]
+      },
+      "out": {
+        "turns": 7,
+        "draws": 3
+      }
+    },
+    {
+      "id": "obedience_nap_doubling_carries_out",
+      "in": {
+        "step": "nap",
+        "bytes": [
+          200
+        ]
+      },
+      "out": {
+        "turns": 1,
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_loaf_loafing",
+      "in": {
+        "step": "loaf",
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "line": "loafing",
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_loaf_wont_obey",
+      "in": {
+        "step": "loaf",
+        "bytes": [
+          5
+        ]
+      },
+      "out": {
+        "line": "wont_obey",
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_loaf_turned_away",
+      "in": {
+        "step": "loaf",
+        "bytes": [
+          254
+        ]
+      },
+      "out": {
+        "line": "turned_away",
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_loaf_ignored_orders",
+      "in": {
+        "step": "loaf",
+        "bytes": [
+          11
+        ]
+      },
+      "out": {
+        "line": "ignored_orders",
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_random_one_move_refused",
+      "in": {
+        "step": "random",
+        "pp": [
+          5
+        ],
+        "selected": 1,
+        "disabled": false,
+        "struggling": false,
+        "bytes": []
+      },
+      "out": {
+        "slot": null,
+        "draws": 0
+      }
+    },
+    {
+      "id": "obedience_random_disabled_refused",
+      "in": {
+        "step": "random",
+        "pp": [
+          5,
+          5
+        ],
+        "selected": 1,
+        "disabled": true,
+        "struggling": false,
+        "bytes": []
+      },
+      "out": {
+        "slot": null,
+        "draws": 0
+      }
+    },
+    {
+      "id": "obedience_random_struggle_refused",
+      "in": {
+        "step": "random",
+        "pp": [
+          0,
+          0
+        ],
+        "selected": 1,
+        "disabled": false,
+        "struggling": true,
+        "bytes": []
+      },
+      "out": {
+        "slot": null,
+        "draws": 0
+      }
+    },
+    {
+      "id": "obedience_random_only_chosen_has_pp_refused",
+      "in": {
+        "step": "random",
+        "pp": [
+          5,
+          0,
+          0
+        ],
+        "selected": 1,
+        "disabled": false,
+        "struggling": false,
+        "bytes": []
+      },
+      "out": {
+        "slot": null,
+        "draws": 0
+      }
+    },
+    {
+      "id": "obedience_random_redraws_the_chosen_slot",
+      "in": {
+        "step": "random",
+        "pp": [
+          5,
+          5,
+          5,
+          5
+        ],
+        "selected": 2,
+        "disabled": false,
+        "struggling": false,
+        "bytes": [
+          1,
+          7
+        ]
+      },
+      "out": {
+        "slot": 4,
+        "draws": 2
+      }
+    },
+    {
+      "id": "obedience_random_skips_missing_chosen_and_spent",
+      "in": {
+        "step": "random",
+        "pp": [
+          5,
+          5,
+          0
+        ],
+        "selected": 1,
+        "disabled": false,
+        "struggling": false,
+        "bytes": [
+          3,
+          2,
+          0,
+          5
+        ]
+      },
+      "out": {
+        "slot": 2,
+        "draws": 4
       }
     }
   ]

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generation": 2,
-  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: no species, move, ability or item names — only integer ids and type indices. All arithmetic is integer. DAMAGE (pokecrystal BattleCommand_DamageCalc): no 255-stat clamp inside compute(), which takes the byte pair TruncateHL_BC hands it (see TRUNCATE). levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,min(999,floor(d*roll/100))) for roll in 85..100. Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: ladder 1-in-{15,8,4,3,2,2,2} by critical level 0..6; isCrit when roll==0 for roll in 0..chance-1. Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), speciesItemBonus(+2), capped at 6. ACCURACY: percent domain; accuracy 0 or alwaysHits never misses; else value=stage-scaled accuracy clamped 1..100, hit = roll < value for roll in 0..99 (no Gen1 1/256 miss). STATUS: freeze thaws when roll%5==0 (1/5); burn/poison residual max(1,floor(maxHp/8)); burn halves physical attack; toxic max(1,floor(maxHp*counter/16)); paralysis stops when roll%4==0 (1/4); sleep wakes and can move when the counter hits 0. BADGES (Crystal, as gen1recomp src/battle/gen2/Battle.lua ports it): badgeStats is Effects.badgeBoost(stat, key, badges, spa) -> value, badges a set of Gold ids. ZEPHYR->atk, MINERAL->def, PLAIN->spe, GLACIER->spa, each boostStat = min(999, v + floor(v/8)); Kanto ids boost no stat; spd only when GLACIER is held and glacierBoostsSpDef(boostStat(spa)): true at >= 999, else a = (floor(v/256) - 3 - (v%256 < 231 ? 1 : 0)) mod 256 and boosted when a is odd. badgeTypes is Effects.badgeTypeBoost(typeId, badges) -> boosted: the first of the 16 DoBadgeTypeBoosts rows naming typeId (registry id, PSYCHIC_TYPE for Psychic) answers whether its badge is held. Damage's badgeTypeBoost adds max(1, floor(d/8)) right after the 997+2 tail and before STAB. STAGES (pokecrystal CalcBattleStats): stages is Effects.applyStage(stat, stage) -> value = floor(stat*pct/100) for the stage percent (25,28,33,40,50,66,100,150,200,250,300,350,400), then 0 -> 1 and anything past 999 -> 999. BATTLESTATS (CalcPlayerStats): battleStats is Effects.battleStat({stats, stages, status}, key, badges) -> value: applyStage, then the badge boost (spd's Glacier tail reads boostStat of the STAGED spa), then burn halves atk / paralysis quarters spe, each at least 1. TRUNCATE (TruncateHL_BC): truncate is Damage.truncateStats(attack, defense, link) -> attack, defense: while either is over 255, defense = floor(defense/4) and attack = floor(attack/4), each 0 -> 1; link stops after one pass; both come out mod 256 (the wrap bug). STATUS confusion: a self-hit is Damage.compute at power 40 with no crit, STAB or matchup and roll 100 (no variation) on the attack/defense given, plus itemBoostPercent when given.",
+  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: every number is synthetic; ITEMS names only the item and species ids the carts' id-keyed rules compare against (pret labels, not ROM bytes) and the HELD_* effect names, never a value read from an item row. All arithmetic is integer. DAMAGE (pokecrystal BattleCommand_DamageCalc): no 255-stat clamp inside compute(), which takes the byte pair TruncateHL_BC hands it (see TRUNCATE). levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,min(999,floor(d*roll/100))) for roll in 85..100. Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: ladder 1-in-{15,8,4,3,2,2,2} by critical level 0..6; isCrit when roll==0 for roll in 0..chance-1. Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), capped at 6; speciesItemBonus (Lucky Punch / Stick) SETS the level to 2, past the others (BattleCommand_Critical's jump to .Tally). ACCURACY: percent domain; accuracy 0 or alwaysHits never misses; else value=stage-scaled accuracy clamped 1..100, hit = roll < value for roll in 0..99 (no Gen1 1/256 miss). brightPowder (the defender's HELD_BRIGHTPOWDER parameter, never met by alwaysHits): byte = floor(value*255/100) - param, at least 0; value = byte >= 255 ? value : ceil(byte*100/255). STATUS: freeze thaws when roll%5==0 (1/5); burn/poison residual max(1,floor(maxHp/8)); burn halves physical attack; toxic max(1,floor(maxHp*counter/16)); paralysis stops when roll%4==0 (1/4); sleep wakes and can move when the counter hits 0. BADGES (Crystal, as gen1recomp src/battle/gen2/Battle.lua ports it): badgeStats is Effects.badgeBoost(stat, key, badges, spa) -> value, badges a set of Gold ids. ZEPHYR->atk, MINERAL->def, PLAIN->spe, GLACIER->spa, each boostStat = min(999, v + floor(v/8)); Kanto ids boost no stat; spd only when GLACIER is held and glacierBoostsSpDef(boostStat(spa)): true at >= 999, else a = (floor(v/256) - 3 - (v%256 < 231 ? 1 : 0)) mod 256 and boosted when a is odd. badgeTypes is Effects.badgeTypeBoost(typeId, badges) -> boosted: the first of the 16 DoBadgeTypeBoosts rows naming typeId (registry id, PSYCHIC_TYPE for Psychic) answers whether its badge is held. Damage's badgeTypeBoost adds max(1, floor(d/8)) right after the 997+2 tail and before STAB. STAGES (pokecrystal CalcBattleStats): stages is Effects.applyStage(stat, stage) -> value = floor(stat*pct/100) for the stage percent (25,28,33,40,50,66,100,150,200,250,300,350,400), then 0 -> 1 and anything past 999 -> 999. BATTLESTATS (CalcPlayerStats): battleStats is Effects.battleStat({stats, stages, status}, key, badges) -> value: applyStage, then the badge boost (spd's Glacier tail reads boostStat of the STAGED spa), then burn halves atk / paralysis quarters spe, each at least 1. TRUNCATE (TruncateHL_BC): truncate is Damage.truncateStats(attack, defense, link) -> attack, defense: while either is over 255, defense = floor(defense/4) and attack = floor(attack/4), each 0 -> 1; link stops after one pass; both come out mod 256 (the wrap bug). STATUS confusion: a self-hit is Damage.compute at power 40 with no crit, STAB or matchup and roll 100 (no variation) on the attack/defense given, plus itemBoostPercent when given. ITEMS (src/BattleSim2/Items.lua, pokecrystal == pokegold for every rule): `kind` picks the rule. typeBoost: Items.typeBoostPercent(sheet, typeId) -> percent = (100 + holdParam) mod 256 - 100 when the HELD_<TYPE>_BOOST names typeId, else null; Damage's itemBoostPercent applies any non-zero percent as floor(d*(100+percent)/100). quickClaw: byte < param. brightPowder: as ACCURACY. speciesAttack (SpeciesItemBoost): LIGHT_BALL on PIKACHU doubles a special attack, THICK_CLUB on CUBONE/MAROWAK a physical one, mod 65536. metalPowder (DittoMetalPowder, folded pair): defender DITTO holding METAL_POWDER: s = def + floor(def/2); s < 256 -> def = s; else attack = max(1, floor(attack/2)), def = floor(s/2). focusBand (FalseSwipe): amount >= hp -> hp - 1 (at least 0), held true. sixteenth (GetSixteenthMaxHP): q = floor(maxHp/4) mod 256 (0 -> 1), then floor(q/4) (0 -> 1). berryWants: 2*hp < maxHp. obedienceCap: first of RISING 101, STORM 70, FOG 50, HIVE 30, else 10. swap: nibble swap. napTurns: swap((2*byte) mod 256) mod 8 (0 means redraw). kingsRockMove: the referee effect ids whose script runs `kingsrock` {0,3,7,16,17,26,27,29,39,40,41,43,44,45,48,77,81}, minus the effect-0 moves named in Items.KINGS_ROCK_FOLDED_EXCEPTIONS. critSpeciesItem: LUCKY_PUNCH on CHANSEY, STICK on FARFETCH_D (the battle species).",
   "damage": [
     {
       "id": "dmg_physical_basic",
@@ -347,7 +347,8 @@
       }
     },
     { "id": "dmg_crit_after_item_boost", "in": { "level": 50, "power": 40, "attack": 100, "defense": 100, "physical": true, "stab": false, "typeEffect": [100], "crit": true, "roll": 100, "itemBoostPercent": 10 }, "out": { "base": 17, "modified": 38, "damage": 38 } },
-    { "id": "dmg_after_link_wrap", "in": { "level": 30, "power": 70, "attack": 50, "defense": 44, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 100 }, "out": { "base": 22, "modified": 24, "damage": 24 } }
+    { "id": "dmg_after_link_wrap", "in": { "level": 30, "power": 70, "attack": 50, "defense": 44, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 100 }, "out": { "base": 22, "modified": 24, "damage": 24 } },
+    { "id": "dmg_item_boost_byte_wraps", "in": { "level": 50, "power": 40, "attack": 100, "defense": 100, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 100, "itemBoostPercent": -56 }, "out": { "base": 17, "modified": 9, "damage": 9 } }
   ],
   "accuracy": [
     {
@@ -374,7 +375,12 @@
       "id": "acc_zero_never_misses",
       "in": { "accuracy": 0, "roll": 99 },
       "out": { "hit": true, "effectiveAccuracy": null }
-    }
+    },
+    { "id": "acc_bright_powder_hits", "in": { "accuracy": 100, "roll": 92, "accuracyStage": 0, "evasionStage": 0, "brightPowder": 20 }, "out": { "hit": true, "effectiveAccuracy": 93 } },
+    { "id": "acc_bright_powder_misses", "in": { "accuracy": 100, "roll": 93, "accuracyStage": 0, "evasionStage": 0, "brightPowder": 20 }, "out": { "hit": false, "effectiveAccuracy": 93 } },
+    { "id": "acc_bright_powder_after_stages", "in": { "accuracy": 100, "roll": 41, "accuracyStage": 0, "evasionStage": 2, "brightPowder": 20 }, "out": { "hit": true, "effectiveAccuracy": 42 } },
+    { "id": "acc_bright_powder_floors_at_zero", "in": { "accuracy": 5, "roll": 0, "accuracyStage": 0, "evasionStage": 0, "brightPowder": 120 }, "out": { "hit": false, "effectiveAccuracy": 0 } },
+    { "id": "acc_bright_powder_never_meets_swift", "in": { "accuracy": 100, "roll": 99, "alwaysHits": true, "brightPowder": 255 }, "out": { "hit": true, "effectiveAccuracy": null } }
   ],
   "crit": [
     {
@@ -401,7 +407,9 @@
       "id": "crit_ladder_level3",
       "in": { "criticalLevel": 3, "roll": 2 },
       "out": { "isCrit": false, "chance": 3, "level": 3 }
-    }
+    },
+    { "id": "crit_species_item_sets_level2", "in": { "criticalLevel": 0, "roll": 0, "speciesItemBonus": true, "focusEnergy": true, "highCritMove": true, "scopeLens": true }, "out": { "isCrit": true, "chance": 4, "level": 2 } },
+    { "id": "crit_scope_lens_level1", "in": { "criticalLevel": 0, "roll": 1, "scopeLens": true }, "out": { "isCrit": false, "chance": 8, "level": 1 } }
   ],
   "status": [
     {
@@ -619,5 +627,62 @@
     { "id": "truncate_link_one_fold_enough", "in": { "attack": 950, "defense": 600, "link": true }, "out": { "attack": 237, "defense": 150 } },
     { "id": "truncate_empty_shift_is_one", "in": { "attack": 3, "defense": 1000, "link": false }, "out": { "attack": 1, "defense": 250 } },
     { "id": "truncate_link_attack_wraps_to_zero", "in": { "attack": 1024, "defense": 50, "link": true }, "out": { "attack": 0, "defense": 12 } }
+  ],
+  "items": [
+    { "id": "item_type_boost_match", "in": { "kind": "typeBoost", "heldItem": "CHARCOAL", "holdEffect": "HELD_FIRE_BOOST", "holdParam": 20, "typeId": "FIRE" }, "out": { "percent": 20 } },
+    { "id": "item_type_boost_other_type", "in": { "kind": "typeBoost", "heldItem": "CHARCOAL", "holdEffect": "HELD_FIRE_BOOST", "holdParam": 20, "typeId": "WATER" }, "out": { "percent": null } },
+    { "id": "item_type_boost_psychic_type", "in": { "kind": "typeBoost", "heldItem": "TWISTEDSPOON", "holdEffect": "HELD_PSYCHIC_BOOST", "holdParam": 30, "typeId": "PSYCHIC_TYPE" }, "out": { "percent": 30 } },
+    { "id": "item_type_boost_byte_wraps", "in": { "kind": "typeBoost", "heldItem": "PINK_BOW", "holdEffect": "HELD_NORMAL_BOOST", "holdParam": 200, "typeId": "NORMAL" }, "out": { "percent": -56 } },
+    { "id": "item_type_boost_nothing_held", "in": { "kind": "typeBoost", "heldItem": null, "holdEffect": null, "holdParam": null, "typeId": "NORMAL" }, "out": { "percent": null } },
+    { "id": "item_quick_claw_fires_under", "in": { "kind": "quickClaw", "param": 100, "byte": 99 }, "out": { "fires": true } },
+    { "id": "item_quick_claw_misses_at", "in": { "kind": "quickClaw", "param": 100, "byte": 100 }, "out": { "fires": false } },
+    { "id": "item_bright_powder_full", "in": { "kind": "brightPowder", "effective": 100, "param": 20 }, "out": { "effective": 93 } },
+    { "id": "item_bright_powder_half", "in": { "kind": "brightPowder", "effective": 50, "param": 20 }, "out": { "effective": 42 } },
+    { "id": "item_bright_powder_floor", "in": { "kind": "brightPowder", "effective": 5, "param": 120 }, "out": { "effective": 0 } },
+    { "id": "item_bright_powder_zero_param", "in": { "kind": "brightPowder", "effective": 100, "param": 0 }, "out": { "effective": 100 } },
+    { "id": "item_light_ball_special", "in": { "kind": "speciesAttack", "heldItem": "LIGHT_BALL", "speciesId": "PIKACHU", "special": true, "attack": 300 }, "out": { "attack": 600 } },
+    { "id": "item_light_ball_not_physical", "in": { "kind": "speciesAttack", "heldItem": "LIGHT_BALL", "speciesId": "PIKACHU", "special": false, "attack": 300 }, "out": { "attack": 300 } },
+    { "id": "item_light_ball_other_species", "in": { "kind": "speciesAttack", "heldItem": "LIGHT_BALL", "speciesId": "RAICHU", "special": true, "attack": 300 }, "out": { "attack": 300 } },
+    { "id": "item_thick_club_physical", "in": { "kind": "speciesAttack", "heldItem": "THICK_CLUB", "speciesId": "MAROWAK", "special": false, "attack": 700 }, "out": { "attack": 1400 } },
+    { "id": "item_thick_club_not_special", "in": { "kind": "speciesAttack", "heldItem": "THICK_CLUB", "speciesId": "CUBONE", "special": true, "attack": 700 }, "out": { "attack": 700 } },
+    { "id": "item_thick_club_16bit_wrap", "in": { "kind": "speciesAttack", "heldItem": "THICK_CLUB", "speciesId": "CUBONE", "special": false, "attack": 40000 }, "out": { "attack": 14464 } },
+    { "id": "item_metal_powder_half_again", "in": { "kind": "metalPowder", "heldItem": "METAL_POWDER", "speciesId": "DITTO", "attack": 100, "defense": 100 }, "out": { "attack": 100, "defense": 150 } },
+    { "id": "item_metal_powder_just_fits", "in": { "kind": "metalPowder", "heldItem": "METAL_POWDER", "speciesId": "DITTO", "attack": 100, "defense": 170 }, "out": { "attack": 100, "defense": 255 } },
+    { "id": "item_metal_powder_overflow_halves_both", "in": { "kind": "metalPowder", "heldItem": "METAL_POWDER", "speciesId": "DITTO", "attack": 100, "defense": 200 }, "out": { "attack": 50, "defense": 150 } },
+    { "id": "item_metal_powder_overflow_attack_floor", "in": { "kind": "metalPowder", "heldItem": "METAL_POWDER", "speciesId": "DITTO", "attack": 1, "defense": 171 }, "out": { "attack": 1, "defense": 128 } },
+    { "id": "item_metal_powder_not_ditto", "in": { "kind": "metalPowder", "heldItem": "METAL_POWDER", "speciesId": "MEW", "attack": 100, "defense": 100 }, "out": { "attack": 100, "defense": 100 } },
+    { "id": "item_focus_band_not_lethal", "in": { "kind": "focusBand", "amount": 30, "hp": 40 }, "out": { "amount": 30, "held": false } },
+    { "id": "item_focus_band_lethal", "in": { "kind": "focusBand", "amount": 40, "hp": 40 }, "out": { "amount": 39, "held": true } },
+    { "id": "item_focus_band_at_one", "in": { "kind": "focusBand", "amount": 500, "hp": 1 }, "out": { "amount": 0, "held": true } },
+    { "id": "item_sixteenth_plain", "in": { "kind": "sixteenth", "maxHp": 160 }, "out": { "value": 10 } },
+    { "id": "item_sixteenth_at_least_one", "in": { "kind": "sixteenth", "maxHp": 15 }, "out": { "value": 1 } },
+    { "id": "item_sixteenth_large", "in": { "kind": "sixteenth", "maxHp": 999 }, "out": { "value": 62 } },
+    { "id": "item_sixteenth_quarter_low_byte", "in": { "kind": "sixteenth", "maxHp": 1024 }, "out": { "value": 1 } },
+    { "id": "item_berry_under_half", "in": { "kind": "berryWants", "hp": 49, "maxHp": 100 }, "out": { "wants": true } },
+    { "id": "item_berry_at_half_waits", "in": { "kind": "berryWants", "hp": 50, "maxHp": 100 }, "out": { "wants": false } },
+    { "id": "item_berry_odd_max", "in": { "kind": "berryWants", "hp": 50, "maxHp": 101 }, "out": { "wants": true } },
+    { "id": "obey_cap_none", "in": { "kind": "obedienceCap", "badges": {} }, "out": { "cap": 10 } },
+    { "id": "obey_cap_hive", "in": { "kind": "obedienceCap", "badges": { "HIVE": true } }, "out": { "cap": 30 } },
+    { "id": "obey_cap_fog", "in": { "kind": "obedienceCap", "badges": { "FOG": true, "HIVE": true } }, "out": { "cap": 50 } },
+    { "id": "obey_cap_storm", "in": { "kind": "obedienceCap", "badges": { "STORM": true } }, "out": { "cap": 70 } },
+    { "id": "obey_cap_rising", "in": { "kind": "obedienceCap", "badges": { "RISING": true, "HIVE": true } }, "out": { "cap": 101 } },
+    { "id": "obey_cap_other_badges", "in": { "kind": "obedienceCap", "badges": { "ZEPHYR": true, "PLAIN": true, "EARTH": true } }, "out": { "cap": 10 } },
+    { "id": "obey_swap_nibbles", "in": { "kind": "swap", "byte": 18 }, "out": { "value": 33 } },
+    { "id": "obey_swap_high", "in": { "kind": "swap", "byte": 240 }, "out": { "value": 15 } },
+    { "id": "obey_nap_one", "in": { "kind": "napTurns", "byte": 8 }, "out": { "value": 1 } },
+    { "id": "obey_nap_redraw", "in": { "kind": "napTurns", "byte": 64 }, "out": { "value": 0 } },
+    { "id": "obey_nap_seven", "in": { "kind": "napTurns", "byte": 56 }, "out": { "value": 7 } },
+    { "id": "obey_nap_carry_lost", "in": { "kind": "napTurns", "byte": 200 }, "out": { "value": 1 } },
+    { "id": "kings_rock_plain_hit", "in": { "kind": "kingsRockMove", "effectId": 0, "moveId": "thump" }, "out": { "rolls": true } },
+    { "id": "kings_rock_folded_exception", "in": { "kind": "kingsRockMove", "effectId": 0, "moveId": "THUNDER" }, "out": { "rolls": false } },
+    { "id": "kings_rock_status_hit", "in": { "kind": "kingsRockMove", "effectId": 4, "moveId": "ember_hit" }, "out": { "rolls": false } },
+    { "id": "kings_rock_twineedle", "in": { "kind": "kingsRockMove", "effectId": 77, "moveId": "TWINEEDLE" }, "out": { "rolls": true } },
+    { "id": "kings_rock_hyper_beam", "in": { "kind": "kingsRockMove", "effectId": 80, "moveId": "HYPER_BEAM" }, "out": { "rolls": false } },
+    { "id": "kings_rock_charge", "in": { "kind": "kingsRockMove", "effectId": 39, "moveId": "SKULL_BASH" }, "out": { "rolls": true } },
+    { "id": "kings_rock_flinch_hit", "in": { "kind": "kingsRockMove", "effectId": 31, "moveId": "BITE" }, "out": { "rolls": false } },
+    { "id": "crit_item_lucky_punch", "in": { "kind": "critSpeciesItem", "species": "CHANSEY", "itemId": "LUCKY_PUNCH" }, "out": { "set": true } },
+    { "id": "crit_item_stick", "in": { "kind": "critSpeciesItem", "species": "FARFETCH_D", "itemId": "STICK" }, "out": { "set": true } },
+    { "id": "crit_item_wrong_species", "in": { "kind": "critSpeciesItem", "species": "CHANSEY", "itemId": "STICK" }, "out": { "set": false } },
+    { "id": "crit_item_no_species", "in": { "kind": "critSpeciesItem", "species": null, "itemId": "LUCKY_PUNCH" }, "out": { "set": false } }
   ]
 }

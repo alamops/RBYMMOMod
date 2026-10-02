@@ -215,12 +215,22 @@ local function fightOf(kind, o)
           maxHp = o.pHp or 200, level = 20 }),
   })
   for id, count in pairs(o.inventory or {}) do game.save.inventory[id] = count end
+  -- `cart2`: a Gold game (the referee-fidelity section at the end of this file
+  -- installs what reads it as one) -- the cart's data, and the player's id and
+  -- purse where Gold keeps them.
+  if o.cart2 then
+    game.generation = 2
+    game.data = o.data or game.data
+    game.save.generation = 2
+    game.save.player = { name = "PLAYER", id = 4321, money = o.money or 3000 }
+  end
 
   local state, wildMon
   if kind == "wild" then
     wildMon = o.wildMon or mon({ species = "BETA", spd = o.eSpd or 10,
                                  maxHp = o.eHp or 40, atk = o.eAtk or 20 })
-    state = { kind = "wild", enemy = { mon = wildMon }, enemyParty = { wildMon } }
+    state = { kind = "wild", enemy = { mon = wildMon }, enemyParty = { wildMon },
+              battleType = o.battleType }
   else
     state = {
       kind = "trainer",
@@ -292,6 +302,7 @@ local function fightOf(kind, o)
   local solo = Solo.new(ui, {
     enabled = function() return o.enabled ~= false end,
     seed = function() return o.seed or 4242 end,
+    random = o.random,
   })
   local started = (kind == "wild")
     and solo:onWildEncounter(game, state, o.mapId or "MAP")
@@ -1496,6 +1507,222 @@ end)()
   empty[1] = { species = 4 }
   eq(Solo.restoreParty3(snap4), true, "restoreParty3: an empty party's record restores")
   eq(#empty, 0, "restoreParty3: ...to empty")
+end)()
+
+-- ------------------------------------------------------------------
+-- Gold solo: the client half of referee fidelity
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-fidelity.md: Gold's cart lineage on side a (K6), the
+-- player's traded mons (K1), the wild held item the engine never rolls, a
+-- `held` event written home, SMOKE BALL and AMULET COIN.  This harness pins
+-- package.path empty, so every game above reads as Gen 1; this section makes
+-- a Gold game read as one by standing in for the four engine modules the
+-- client asks -- the link handshake's generation (a game's own `generation`,
+-- which is what the real one reads first), the launcher's cart, and the Gold
+-- item / mail tables in their engine shape -- and takes them away again after.
+-- Item rows and species slots are invented for this file.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function(id) return id == "FLOWER_MAIL" end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+
+  local goldData = setmetatable({
+    items = {
+      BERRY       = { name = "BERRY", heldEffect = "HELD_BERRY", heldParameter = 5 },
+      NUGGET      = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+      SMOKE_BALL  = { name = "SMOKE BALL", heldEffect = "HELD_ESCAPE", heldParameter = 0 },
+      AMULET_COIN = { name = "AMULET COIN", heldEffect = "HELD_AMULET_COIN", heldParameter = 0 },
+    },
+    pokemon = {
+      ALPHA = { name = "ALPHA", types = { "NORM" }, catchRate = 200 },
+      BETA  = { name = "BETA", types = { "NORM" }, catchRate = 200, items = { "BERRY", "NUGGET" } },
+    },
+  }, { __index = data })
+  local function goldMon(o, item, otId)
+    local m = mon(o)
+    m.item, m.otId = item, otId
+    return m
+  end
+  local function bytes(list)
+    local i = 0
+    return function() i = i + 1; return list[i] end, function() return i end
+  end
+  local Turn2 = need("BattleSim2/Turn")
+  local function spyCreate(fn)
+    local real, seen = Turn2.create, nil
+    Turn2.create = function(opts) seen = opts; return real(opts) end
+    local okRun, result = pcall(fn)
+    Turn2.create = real
+    return seen, okRun and result or nil, okRun or result
+  end
+
+  -- K6: side a's family, Gen.family's word for the running cart.
+  local seen, f = spyCreate(function()
+    return fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  end)
+  ok(f and f.started, "gold solo: a Gold wild fight is taken over")
+  eq(seen and seen.sides.a[1].family, "gs", "K6: side a is Gold / Silver when the launcher names no cart")
+  eq(seen and seen.sides.b[1].family, nil, "K6: ...and side b carries none")
+  package.loaded["src.core.GameVersion"] = {
+    ORDER = { "red", "gold", "crystal" },
+    VERSIONS = { red = { generation = 1 }, gold = { generation = 2 }, crystal = { generation = 2 } },
+    get = function() return "crystal" end,
+    engine = function(v) return v == "crystal" and "crystal" or "gs" end,
+  }
+  seen = spyCreate(function()
+    return fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  end)
+  eq(seen and seen.sides.a[1].family, "crystal", "K6: a Crystal boot says crystal")
+  package.loaded["src.core.GameVersion"] = nil
+  local realOne, seenOne = Turn.create, nil
+  Turn.create = function(opts) seenOne = opts; return realOne(opts) end
+  pcall(fightOf, "wild")
+  Turn.create = realOne
+  eq(seenOne and seenOne.sides.a[1].family, nil, "K6: a Gen 1 fight's side a carries no family")
+
+  -- K1: the player's own traded mon says so; the fight is against the computer.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 90, maxHp = 200 }, nil, 77),
+                                  goldMon({ species = "ALPHA", maxHp = 200 }, nil, 4321) } })
+  eq(f.fight.mine[1].traded, true, "K1 solo: a mon from another OT id is uploaded traded")
+  eq(f.fight.mine[2].traded, nil, "K1 solo: the player's own is not")
+
+  -- The wild held item: the cart's two draws, onto the engine monster.
+  local random, drawn = bytes({ 250, 99 })
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random })
+  eq(f.wildMon.item, "BERRY", "wild item: rolled onto the engine monster the catch keeps")
+  eq(f.fight.wildParty[1].heldItem, "BERRY", "wild item: the foe's sheet carries it")
+  eq(f.fight.wildParty[1].holdEffect, "HELD_BERRY", "wild item: ...with its K2 fields")
+  eq(drawn(), 2, "wild item: two draws, off the solo's own byte source")
+  random, drawn = bytes({ 191 })
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random })
+  eq(f.wildMon.item, nil, "wild item: under 192 the monster holds nothing")
+  random, drawn = bytes({})
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random, battleType = 10 })
+  eq(f.wildMon.item, "BERRY", "wild item: a forced-item encounter holds item 1")
+  eq(drawn(), 0, "wild item: ...with no draw")
+  -- A divert that declines after the roll leaves the engine's monster as it was.
+  random = bytes({ 250, 99 })
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random, party = {} })
+  eq(f.started, false, "wild item: an empty party is not taken over")
+  eq(f.wildMon.item, nil, "wild item: ...and the roll is undone -- the engine's battle starts as built")
+  -- The fight's seed is not moved by the roll.
+  local seedSeen
+  seen = spyCreate(function()
+    return fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }), seed = 99 })
+  end)
+  seedSeen = seen and seen.seed
+  eq(seedSeen, 99, "wild item: the referee's seed is the solo's, untouched by the roll")
+
+  -- The catch keeps what the wild monster holds at the throw.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "BERRY", amount = 0 })
+  f.fight:grantCatch({ caught = {} })
+  eq(f.wildMon.item, nil, "catch: a wild monster that ate its berry is caught holding nothing")
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.fight:grantCatch({ caught = {} })
+  eq(f.wildMon.item, "BERRY", "catch: ...and one that kept it is caught with it")
+
+  -- `held` written home: a berry eaten, in a wild fight and against a trainer.
+  for _, kind in ipairs({ "wild", "trainer" }) do
+    f = fightOf(kind, { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 90, maxHp = 200 }, "BERRY", 4321) } })
+    f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "BERRY", amount = 0 })
+    eq(f.party[1].item, nil, "held solo (" .. kind .. "): the berry eaten is gone from the save")
+  end
+  -- ...and the whole way round, from the referee itself: a holder already under
+  -- half its maximum eats its BERRY in the first turn (HandleHPHealingItem),
+  -- the referee says so with a `held`, and the save loses the berry.
+  f = fightOf("trainer", { cart2 = true, data = goldData, seed = 7,
+                           party = { goldMon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200, hp = 90 },
+                                             "BERRY", 4321) },
+                           foes = { mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 }) } })
+  f.fight:sendChoice({ action = "fight", move = 0 })
+  for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+  local ate
+  for _, event in ipairs(f.events) do
+    if event.t == "held" and event.side == "a" and event.text == "BERRY" and event.amount == 0 then ate = event end
+  end
+  ok(ate ~= nil, "held solo (referee): the Gold referee's own `held` reaches the screen")
+  eq(f.party[1].item, nil, "held solo (referee): ...and the berry it ate is gone from the save")
+  -- A foe's THIEF on a trainer fight: gone for good ("if the enemy steals your
+  -- item, it's gone for good if you don't get it back").
+  f = fightOf("trainer", { cart2 = true, data = goldData,
+                           party = { goldMon({ species = "ALPHA", spd = 90, maxHp = 200 }, "NUGGET", 4321) } })
+  f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "NUGGET", amount = 0 })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 1 })
+  eq(f.party[1].item, nil, "held solo: a trainer's THIEF takes the item from the save")
+  -- The player's THIEF from the wild monster: kept.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "BERRY", amount = 0 })
+  f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "BERRY", amount = 1 })
+  eq(f.party[1].item, "BERRY", "held solo: the player's THIEF from a wild monster is kept")
+
+  -- SMOKE BALL: a slow runner holding one gets away, with the cart's line,
+  -- no roll and no attempt counted.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 1, maxHp = 200 }, "SMOKE_BALL", 4321) },
+                        eSpd = 250 })
+  f.fight:sendChoice({ action = "run" })
+  eq(f.solo.runAttempts, 0, "smoke ball: the attempt is not counted (the cart skips wNumFleeAttempts)")
+  for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+  local fledAt, ranAt
+  for i, event in ipairs(f.events) do
+    if event.t == "msg" and tostring(event.text):find("fled using a", 1, true) then fledAt = fledAt or i end
+    if event.t == "run" then ranAt = ranAt or i end
+  end
+  ok(fledAt ~= nil, "smoke ball: the cart's line is printed")
+  eq(fledAt and f.events[fledAt].text, "ALPHA\nfled using a\nSMOKE BALL!",
+     "smoke ball: BattleText_UserFledUsingAStringBuffer1, the item's name filled in")
+  ok(fledAt and ranAt and fledAt < ranAt, "smoke ball: ...ahead of the escape itself")
+  local out = f.sim:outcome()
+  eq(out and out.reason, "run", "smoke ball: the fight ends in an escape")
+  -- The same runner with the ball gone (a THIEF took it) rolls like anyone.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 1, maxHp = 200 }, "SMOKE_BALL", 4321) },
+                        eSpd = 250 })
+  f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "SMOKE_BALL", amount = 0 })
+  f.fight:sendChoice({ action = "run" })
+  eq(f.solo.runAttempts, 1, "smoke ball: once taken, the run is the ordinary roll")
+  eq(f.solo.fledLine, nil, "smoke ball: ...and no line is owed")
+
+  -- AMULET COIN: the lead comes out holding one and the trainer's prize doubles.
+  local function trainerWin(item)
+    local fight = fightOf("trainer", {
+      cart2 = true, data = goldData, money = 3000, seed = 7,
+      party = { goldMon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 20 }, item, 4321) },
+      foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+    })
+    local result = playOut(fight)
+    fight.fight:exit()
+    return fight, result
+  end
+  local plainWin, plainOut = trainerWin(nil)
+  eq(plainOut and plainOut.outcome, "win", "amulet: the Gold trainer fight is won")
+  eq(plainWin.game.save.player.money, 3400, "amulet: the prize, 20 base against level 20")
+  local coinWin, coinOut = trainerWin("AMULET_COIN")
+  eq(coinOut and coinOut.outcome, "win", "amulet: ...won holding the coin")
+  eq(coinWin.state.amuletCoin, true, "amulet: the buried battle is told the coin came out")
+  eq(coinWin.game.save.player.money, 3800, "amulet: the prize doubled (pokecrystal .DoubleReward)")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
 end)()
 
 -- ------------------------------------------------------------------

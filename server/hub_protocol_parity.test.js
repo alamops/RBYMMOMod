@@ -919,6 +919,7 @@ function runJs() {
     ...runGen3(),
     ...runPayDay3(),
     ...runFidelity(),
+    ...runFamily2(),
   ];
 }
 
@@ -1841,6 +1842,87 @@ function runFidelity() {
         });
         return { cases };
       })(),
+    },
+  ];
+}
+
+// Gold's cart lineage on a fighter entry (contract K6 of
+// docs/plans/gen12-referee-fidelity.md). Twin of the Lua driver's
+// gen2_cart_family_stamp; the argument is written there. The digest is the
+// entries the referee is handed -- Turn.attempt here, Turn.create there.
+function sheet2() {
+  return {
+    species: 'ALPHA',
+    level: 50,
+    hp: 300,
+    maxHp: 300,
+    stats: {
+      atk: 100, def: 100, spe: 50, spa: 50, spd: 100,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 20, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+}
+
+function familyFight(generation, versions, mode) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const seen = {};
+  const real = relay.Turn;
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  const ids = [ID_A, ID_B, ID_C, ID_D];
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const players = versions.map((version, i) => dialAs(relay, `P${i + 1}`, ids[i], {
+    generation, version: version !== '(none)' ? version : undefined, sprite,
+  }));
+  const memberIds = players.map((p) => p.id);
+  const opts = { mode, hostId: memberIds[0] };
+  if (mode === 'coop_pvp') {
+    opts.sides = { a: [memberIds[0], memberIds[1]], b: [memberIds[2], memberIds[3]] };
+  }
+  relay.openCoopBattle('kf', memberIds, opts);
+  const record = relay.battles.get('kf');
+  const sheet = () => (generation === 2 ? sheet2() : mon());
+  relay.handle(players[0].id, { type: 'mmo.battle_ruleset', battle: 'kf', chart: CHART });
+  for (const p of players) {
+    const msg = { type: 'mmo.battle_party', battle: 'kf', mons: [sheet()] };
+    if (mode === 'coop_npc') msg.side = 'a';
+    relay.handle(p.id, msg);
+  }
+  if (mode === 'coop_npc') {
+    relay.handle(players[0].id, {
+      type: 'mmo.battle_party', battle: 'kf', side: 'b', mons: [sheet(), sheet()],
+    });
+  }
+  const npcIds = (record && record.npcIds) || [];
+  const entries = [];
+  for (const side of ['a', 'b']) {
+    for (const entry of (seen.opts && seen.opts.sides[side]) || []) {
+      entries.push({
+        side,
+        seat: npcIds.includes(entry.playerId) ? 'npc' : entry.playerId,
+        family: entry.family === undefined || entry.family === null ? '(nil)' : entry.family,
+      });
+    }
+  }
+  return { opened: !!(record && record.sim), entries };
+}
+
+function runFamily2() {
+  return [
+    {
+      name: 'gen2_cart_family_stamp',
+      result: {
+        gold: familyFight(2, ['crystal', 'silver'], 'coop_npc'),
+        bare: familyFight(2, ['gold', '(none)'], 'coop_npc'),
+        spar: familyFight(2, ['crystal', 'gold', 'silver', 'crystal'], 'coop_pvp'),
+        kanto: familyFight(1, ['red', 'yellow'], 'coop_npc'),
+      },
     },
   ];
 }

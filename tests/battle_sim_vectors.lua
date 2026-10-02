@@ -338,6 +338,88 @@ each("status", function(input)
 end)
 
 -- ------------------------------------------------------------------
+-- obedience
+-- ------------------------------------------------------------------
+--
+-- CheckForDisobedience's pieces, each fed the exact BattleRandom sequence the
+-- case names: a scripted generator that hands the bytes out in order and
+-- throws past the end, so a piece that draws one byte too many fails rather
+-- than reading a default -- and `draws` says how many it actually took, which
+-- is the half of the contract a verdict alone cannot show.
+
+local function scripted(bytes)
+  local used = 0
+  return {
+    byte = function()
+      used = used + 1
+      local b = bytes[used]
+      if b == nil then error("drew past the scripted bytes", 0) end
+      return b
+    end,
+    used = function() return used end,
+  }
+end
+
+local OBEDIENCE = {}
+
+function OBEDIENCE.cap(input)
+  local set = {}
+  for _, id in ipairs(input.badges) do set[id] = true end
+  return { cap = Status.obedienceCap(set) }
+end
+
+function OBEDIENCE.roll(input)
+  local rng = scripted(input.bytes)
+  local verdict = Status.obedienceRoll(input.level, input.cap, rng)
+  return { verdict = verdict, draws = rng.used() }
+end
+
+function OBEDIENCE.nap(input)
+  local rng = scripted(input.bytes)
+  local turns = Status.napTurns(rng)
+  return { turns = turns, draws = rng.used() }
+end
+
+function OBEDIENCE.loaf(input)
+  local rng = scripted(input.bytes)
+  local line = Status.loafLine(rng)
+  return { line = line, draws = rng.used() }
+end
+
+function OBEDIENCE.random(input)
+  local moves = {}
+  for i, pp in ipairs(input.pp) do moves[i] = { pp = pp } end
+  local rng = scripted(input.bytes)
+  local slot = Status.disobedientMove(moves, input.selected, input.disabled,
+    input.struggling, rng)
+  return { slot = slot, draws = rng.used() }
+end
+
+each("obedience", function(input)
+  local handler = OBEDIENCE[input.step]
+  if not handler then error("no handler for obedience step " .. tostring(input.step), 0) end
+  return handler(input)
+end)
+
+-- The nibble swap behind two of the rolls, over every byte: a bijection, and
+-- its own inverse.
+do
+  local seen, involution = {}, true
+  for b = 0, 255 do
+    local s = Status.swapNibbles(b)
+    seen[s] = true
+    if Status.swapNibbles(s) ~= b then involution = false end
+  end
+  local count = 0
+  for _ in pairs(seen) do count = count + 1 end
+  if count ~= 256 or not involution then
+    fail("obedience_swap", "swapNibbles is a self-inverse bijection", true, false)
+  else
+    passed = passed + 1
+  end
+end
+
+-- ------------------------------------------------------------------
 -- Rng: the one module the fixture cannot pin
 -- ------------------------------------------------------------------
 --

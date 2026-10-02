@@ -855,6 +855,11 @@ function applyPrimary(ctx) {
       highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
+    // BattleCommand_Transform copies the target's species into the battle
+    // struct, which the Lucky Punch / Stick crit check reads; the party
+    // species -- `speciesId`, untouched -- is what Light Ball, Thick Club and
+    // Metal Powder read (Items.js).
+    userMon.transformSpecies = targetMon.speciesId === undefined ? null : targetMon.speciesId;
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
     out.movesChanged = true;
     return out;
@@ -1449,6 +1454,7 @@ module.exports = {
   applyStage,
   battleStat,
   resetStages,
+  STAT_LABELS,
   SCREEN_TURNS,
   BASE_PRIORITY,
   MOVE_PRIORITY,

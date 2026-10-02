@@ -1161,6 +1161,31 @@ function isRage(effectId) {
   return int(effectId, 0) === 81;
 }
 
+// ------------------------------------------------------------------
+// move priority
+// ------------------------------------------------------------------
+//
+// pokered has no priority table: MainInBattleLoop (core.asm :370-391) asks
+// two questions of wPlayerSelectedMove / wEnemySelectedMove before it
+// compares Speed -- QUICK_ATTACK moves first, COUNTER moves last, and the two
+// sides naming the same one fall through to `.compareSpeed`. As brackets
+// that is +1, -1 and 0 for everything else, which is battle2's shape
+// (GetMovePriority) with Gen 1's two rows. Keyed by the move id, because the
+// cart compares move ids: the selected move is what is read, so Metronome and
+// Mirror Move sit in bracket 0 whatever they call.
+const BASE_PRIORITY = 0;
+const MOVE_PRIORITY = {
+  QUICK_ATTACK: 1,
+  COUNTER: -1,
+};
+
+// The priority bracket of a move (a move record or its id).
+function movePriority(moveOrId) {
+  const key = moveKey(moveOrId);
+  if (!Object.prototype.hasOwnProperty.call(MOVE_PRIORITY, key)) return BASE_PRIORITY;
+  return MOVE_PRIORITY[key];
+}
+
 // Gen1 category is type-based. specialTypes is a set of chart indices.
 function isSpecialType(typeId, specialTypes) {
   if (!specialTypes || typeof specialTypes !== 'object') return false;
@@ -1502,6 +1527,9 @@ module.exports = {
   isThrash,
   thrashTurns,
   isRage,
+  BASE_PRIORITY,
+  MOVE_PRIORITY,
+  movePriority,
   isSpecialType,
   itemEffect,
   itemFailsOnFainted,

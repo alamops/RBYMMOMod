@@ -22,9 +22,10 @@ const Rng = require('./Rng.js');
 const Turn = require('./Turn.js');
 const events = require('./events.js');
 const Effects = require('./Effects.js');
+const Items = require('./Items.js');
 
 module.exports = {
-  damage, accuracy, crit, status, Rng, Turn, events, Effects,
+  damage, accuracy, crit, status, Rng, Turn, events, Effects, Items,
   VERSION: 1,
   GENERATION: 2,
 };

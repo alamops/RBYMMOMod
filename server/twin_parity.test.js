@@ -602,11 +602,13 @@ test('Pay Day rides the outcome of the same fights on both hubs and both sims', 
   assert.deepStrictEqual(relayModes, ['coop_npc', 'coop_wild', 'wild'], 'never a player-vs-player mode');
 });
 
-test('Hub.lua and relay.js name a Gen 3 seat\'s cart family the same way', () => {
-  // The referee's obedience reads a fighter's `family` (Focus Punch is exempt
-  // on FireRed / LeafGreen, not on Emerald; gen3-battle-sheet.md §1.1), and
-  // each hub stamps it from the client's own hello version. A cart one hub
-  // maps and the other does not is a disobedience roll that differs by host.
+test('Hub.lua and relay.js name a seat\'s cart family the same way', () => {
+  // The referees read a fighter's `family` -- Gen 3's obedience (Focus Punch
+  // is exempt on FireRed / LeafGreen, not on Emerald; gen3-battle-sheet.md
+  // §1.1), Gen 2's TruncateHL_BC (a loop on Crystal, one pass on Gold /
+  // Silver; contract K6 of docs/plans/gen12-referee-fidelity.md) -- and each
+  // hub stamps it from the client's own hello version. A cart one hub maps and
+  // the other does not is a fight that differs by host.
   const hub = read('src/Hub.lua').match(/local CART_FAMILY\s*=\s*\{([^}]*)\}/);
   assert.ok(hub, 'Hub.lua must declare local CART_FAMILY');
   const relay = read('server/lib/relay.js').match(/const CART_FAMILY\s*=\s*new Map\(\[([\s\S]*?)\]\);/);
@@ -614,7 +616,14 @@ test('Hub.lua and relay.js name a Gen 3 seat\'s cart family the same way', () =>
   const hubPairs = [...hub[1].matchAll(/(\w+)\s*=\s*"(\w+)"/g)].map((x) => `${x[1]}=${x[2]}`).sort();
   const relayPairs = [...relay[1].matchAll(/\['(\w+)',\s*'(\w+)'\]/g)].map((x) => `${x[1]}=${x[2]}`).sort();
   assert.deepStrictEqual(hubPairs, relayPairs, 'one cart -> family table on both hubs');
-  assert.deepStrictEqual(hubPairs, ['emerald=rse', 'firered=frlg', 'leafgreen=frlg'], 'the three Gen 3 carts');
+  assert.deepStrictEqual(hubPairs, [
+    'crystal=crystal', 'emerald=rse', 'firered=frlg', 'gold=gs', 'leafgreen=frlg', 'silver=gs',
+  ], 'the three Gold carts (Gen.family names) and the three Gen 3 carts -- never a Kanto one');
+  // Both stamp it on a Gen 2 or a Gen 3 hub's human seats and nowhere else.
+  const hubGate = read('src/Hub.lua').match(/family = \(\(self\.generation == 2 or self\.generation == 3\) and client\)/);
+  assert.ok(hubGate, 'Hub.lua stamps family on generation 2 and 3 seats only');
+  const relayGate = read('server/lib/relay.js').match(/const familyGen = this\.generation === 2 \|\| this\.generation === 3;/);
+  assert.ok(relayGate, 'relay.js stamps family on generation 2 and 3 seats only');
 });
 
 test('the Gen 3 badge rules are one rule on both sims', () => {

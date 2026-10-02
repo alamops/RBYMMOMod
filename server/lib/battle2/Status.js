@@ -105,6 +105,21 @@ function confusionTick(state, roll) {
     };
   }
 
+  return {
+    turnsRemaining: left,
+    snappedOut: false,
+    selfHit: true,
+    canMove: false,
+    selfDamage: selfHitDamage(s),
+  };
+}
+
+// HitConfusion's damage on its own: the confusion gate's self-hit above, and
+// the disobedient monster's "won't obey!" self-hit (BattleCommand_CheckObedience
+// calls the same HitConfusion). `state` carries level, attack, defense and the
+// optional itemBoostPercent.
+function selfHitDamage(state) {
+  const s = state || {};
   const hit = Damage.compute({
     level: s.level,
     power: CONFUSION_POWER,
@@ -119,14 +134,7 @@ function confusionTick(state, roll) {
     physical: true,
     itemBoostPercent: s.itemBoostPercent,
   });
-
-  return {
-    turnsRemaining: left,
-    snappedOut: false,
-    selfHit: true,
-    canMove: false,
-    selfDamage: hit.damage || 0,
-  };
+  return hit.damage || 0;
 }
 
 // ------- residuals
@@ -212,6 +220,7 @@ module.exports = {
   paralysisSpeed,
   confusionSelfHit,
   confusionTick,
+  selfHitDamage,
   residualBurn,
   residualPoison,
   residualToxic,

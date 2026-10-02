@@ -198,6 +198,10 @@ local function mn(o)
   if o.catchRate ~= nil then out.catchRate = o.catchRate end
   if o.evs then out.evs = o.evs end
   if o.baseSpd ~= nil then out.baseSpd = o.baseSpd end
+  -- K1's `traded`, and raw sheet fields the shorthand above does not carry
+  -- (reflect, disable, ...) -- both absent from every scenario before G1b's.
+  if o.traded then out.traded = true end
+  for key, value in pairs(o.extra or {}) do out[key] = value end
   return out
 end
 
@@ -248,6 +252,19 @@ local function probe(battle, at)
         sSpc = mon.stages.spc, sAcc = mon.stages.acc, sEva = mon.stages.eva,
         reflect = mon.reflect == true, lightScreen = mon.lightScreen == true,
       }
+    end
+  end
+end
+
+-- A flinch the stream never shows (the g1_flinch_* scenarios): a standing
+-- seat's FLINCHED bit, read between turns -- after one turn's events and the
+-- next turn's open, which is where the reset does or does not happen.  Rows
+-- of their own shape in the same `probes` list.
+local function probeFlinch(battle, at)
+  for _, fighter in ipairs(battle.fighters) do
+    local mon = fighter.active and fighter.mons[fighter.active]
+    if mon and mon.hp > 0 then
+      probes[#probes + 1] = { at = at, slot = fighter.slot, flinch = mon.flinch == true }
     end
   end
 end
@@ -1185,7 +1202,7 @@ end)
 --     high-crit move forces one.
 local function fx(id, power, effect, o)
   o = o or {}
-  local out = { id = id, pp = 60, power = power, accuracy = 255,
+  local out = { id = id, pp = o.pp or 60, power = power, accuracy = 255,
                 type = o.type or 0, effect = effect, chance = o.chance or 0 }
   if o.highCrit then out.highCrit = true end
   return out
@@ -1536,6 +1553,307 @@ scenario("g1_flinch_reset", function(events)
     battle:submitChoice("p2", { action = "fight", move = 0 })
     drainInto(battle, events)
   end
+  return battle
+end)
+
+-- 42-58. Gen 1 priority, obedience, the called-move path and the flinch-reset
+--     skip (docs/plans/gen12-referee-fidelity.md §1 items 6-8, task G1b).
+--     Every obedience seed was picked by a scan to reach the branch its
+--     comment names; tests/battle_sim_turn.lua (section 26) forces each branch
+--     with scripted bytes and works the arithmetic, and the vector pack's
+--     `obedience` section pins the rolls themselves.
+
+-- Quick Attack +1, Counter -1, read off the selected move; the same move on
+-- both sides falls to Speed.  1v1 is a link fight: priority is every mode's.
+--   T1 QA vs thump: the slow QA first.   T2 QA vs QA: the faster first.
+--   T3 thump vs COUNTER: the slow thump first.   T4 COUNTER vs COUNTER: Speed.
+--   T5 QA vs COUNTER: QA first.
+scenario("g1_priority", function(events)
+  local function kit()
+    return { fx("QUICK_ATTACK", 10, 0), fx("thump", 10, 0), fx("COUNTER", 10, 0) }
+  end
+  local battle = build({
+    id = "g1q", mode = "1v1", seed = 6301, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 30, baseSpd = 0, moves = kit() }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 90, baseSpd = 0, moves = kit() }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _, pair in ipairs({ { 0, 1 }, { 0, 0 }, { 1, 2 }, { 2, 2 }, { 0, 2 } }) do
+    battle:submitChoice("p1", { action = "fight", move = pair[1] })
+    battle:submitChoice("p2", { action = "fight", move = pair[2] })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- Four actors in three brackets: the two Quick Attacks at Speed 20 are one
+-- tie group (one byte: this seed's turn-1 byte is >= 128, NpcA's first; its
+-- turn-2 byte is below, Ann's first), then the plain move, then the Counter
+-- at Speed 99, last.
+scenario("g1_priority_group", function(events)
+  local battle = build({
+    id = "g1g", mode = "coop_npc", seed = 6302, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 400, spd = 20, baseSpd = 0,
+               moves = { fx("QUICK_ATTACK", 10, 0) } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 400, spd = 50, baseSpd = 0,
+               moves = { fx("thump", 10, 0) } }) } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 20, baseSpd = 0,
+               moves = { fx("QUICK_ATTACK", 10, 0) } }) } },
+        { playerId = "n2", name = "NpcB", mons = {
+          mn({ species = "Delta", maxHp = 400, spd = 99, baseSpd = 0,
+               moves = { fx("COUNTER", 10, 0) } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    battle:submitChoice("n1", { action = "fight", move = 0, target = 0 })
+    battle:submitChoice("n2", { action = "fight", move = 0, target = 1 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- A Metronome that calls Quick Attack moved at Metronome's bracket: the
+-- faster foe goes first.  The call spends Alpha's last PP and takes no
+-- Struggle recoil, and runs no second paralysis gate; the next turn's
+-- Struggle is the real thing and does recoil.
+scenario("g1_metronome_last_pp", function(events)
+  local battle = build({
+    id = "g1m", mode = "wild", seed = 6302, choiceTimeout = 60, reconnectGrace = 60,
+    metronomePool = { fx("QUICK_ATTACK", 10, 0) },
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 120, status = "PAR", baseSpd = 0,
+             moves = { fx("metronome", 0, 83, { pp = 1 }) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("thump", 10, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- The whole CheckForDisobedience ladder on one traded level-100 monster with
+-- no badge (cap 10), paralysed, against a foe behind a Reflect.  Seed 6809's
+-- twelve turns: loafing around; won't obey + the self-hit (Defense doubled by
+-- the FOE's Reflect); ignored orders; an R1 pass (thump); a nap over the
+-- paralysis (whose quartered Speed stays stored -- probe 5); asleep; woke up;
+-- turned away; won't obey (the loaf line); won't obey + self-hit; loafing
+-- around; a move used instead.
+scenario("g1_obey_ladder", function(events)
+  local battle = build({
+    id = "g1l", mode = "wild", seed = 6809, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", level = 100, maxHp = 999, atk = 30, def = 60, spd = 90,
+             status = "PAR", traded = true, baseSpd = 0,
+             moves = { fx("thump", 10, 0), fx("chop", 10, 0), fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 999, spd = 30, baseSpd = 0, extra = { reflect = true },
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for turn = 1, 12 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    if turn == 5 then probe(battle, 5) end
+  end
+  return battle
+end)
+
+-- An R1 pass, then `.useRandomMove`: "used instead," and the PP comes off
+-- the CHOSEN slot (thump 60 -> 59 -> 58; chop untouched), then a loaf line.
+-- Level 60 under RAINBOWBADGE (cap 50).
+scenario("g1_obey_instead", function(events)
+  local battle = build({
+    id = "g1i", mode = "wild", seed = 6316, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann",
+              badges = { CASCADEBADGE = true, RAINBOWBADGE = true }, mons = {
+        mn({ species = "Alpha", level = 60, maxHp = 400, spd = 90, traded = true, baseSpd = 0,
+             moves = { fx("thump", 10, 0), fx("chop", 10, 0), fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 30, baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 3 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- `.useRandomMove`'s four refusals, each on seed 6303 -- whose rolls answer
+-- "use another move" -- and each falling to `.monDoesNothing` ("is loafing
+-- around.") without a `.chooseMove` draw: one move known; a move disabled;
+-- Struggle selected; no PP outside the chosen slot.
+local function refusal(name, moves, extra)
+  return function(events)
+    local battle = build({
+      id = name, mode = "wild", seed = 6303, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann",
+                badges = { CASCADEBADGE = true, RAINBOWBADGE = true }, mons = {
+          mn({ species = "Alpha", level = 60, maxHp = 400, spd = 90, traded = true,
+               baseSpd = 0, moves = moves, extra = extra }) } } },
+        b = { { playerId = "p2", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 30, baseSpd = 0,
+               moves = { fx("splash", 0, 85) } }) } } },
+      },
+    })
+    drainInto(battle, events)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    return battle
+  end
+end
+scenario("g1_obey_refuse_one", refusal("g1r1", { fx("thump", 10, 0) }))
+scenario("g1_obey_refuse_disabled", refusal("g1r2",
+  { fx("thump", 10, 0), fx("chop", 10, 0) }, { disable = { moveIndex = 2, turns = 5 } }))
+scenario("g1_obey_refuse_struggle", refusal("g1r3",
+  { fx("thump", 10, 0, { pp = 0 }), fx("chop", 10, 0, { pp = 0 }) }))
+scenario("g1_obey_refuse_pp", refusal("g1r4",
+  { fx("thump", 10, 0), fx("chop", 10, 0, { pp = 0 }) }))
+
+-- No roll at all: EARTHBADGE's cap (101) over a level-100 traded monster, and
+-- CASCADEBADGE's 30 over a level-30 one -- the cap compare comes first.
+scenario("g1_obey_capped", function(events)
+  local battle = build({
+    id = "g1c", mode = "coop_wild", seed = 6302, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", badges = { EARTHBADGE = true }, mons = {
+          mn({ species = "Alpha", level = 100, maxHp = 400, spd = 90, traded = true,
+               baseSpd = 0, moves = { fx("thump", 10, 0), fx("chop", 10, 0) } }) } },
+        { playerId = "a2", name = "Abe", badges = { CASCADEBADGE = true }, mons = {
+          mn({ species = "Gamma", level = 30, maxHp = 400, spd = 70, traded = true,
+               baseSpd = 0, moves = { fx("thump", 10, 0), fx("chop", 10, 0) } }) } },
+      },
+      b = { { playerId = "w", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 900, spd = 30, baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("w", { action = "fight", move = 0, target = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- Never in a link fight (LINK_STATE_BATTLING returns before the check), and
+-- never for side b (the computer's own party): both traded level-100s with
+-- no badge obey every turn and draw nothing for it.
+local function obeyNever(id, mode, aTraded)
+  return function(events)
+    local battle = build({
+      id = id, mode = mode, seed = 6809, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = {
+          mn({ species = "Alpha", level = 100, maxHp = 999, spd = 90, traded = aTraded,
+               baseSpd = 0, moves = { fx("thump", 10, 0), fx("chop", 10, 0) } }) } } },
+        b = { { playerId = "p2", name = "Bob", mons = {
+          mn({ species = "Beta", level = 100, maxHp = 999, spd = 30, traded = true,
+               baseSpd = 0, moves = { fx("thump", 10, 0), fx("chop", 10, 0) } }) } } },
+      },
+    })
+    drainInto(battle, events)
+    for _ = 1, 3 do
+      battle:submitChoice("p1", { action = "fight", move = 0 })
+      battle:submitChoice("p2", { action = "fight", move = 0 })
+      drainInto(battle, events)
+    end
+    return battle
+  end
+end
+scenario("g1_obey_link", obeyNever("g1k", "1v1", true))
+scenario("g1_obey_side_b", obeyNever("g1b", "wild", false))
+
+-- The flinch-reset skip.  A raging monster on the player's seat that a slower
+-- Stomp flinches keeps the flinch through the next turn's open and loses its
+-- Rage to it ("Alpha flinched", turn after turn: the Stomp lands every time).
+local function rageFlinch(id, mode)
+  return function(events)
+    local battle = build({
+      id = id, mode = mode, seed = 6303, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+               moves = { fx("fury", 20, 81) } }) } } },
+        b = { { playerId = "p2", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 30, baseSpd = 0,
+               moves = { fx("stomp", 10, 31, { chance = 100 }) } }) } } },
+      },
+    })
+    drainInto(battle, events)
+    for turn = 1, 3 do
+      battle:submitChoice("p1", { action = "fight", move = 0 })
+      battle:submitChoice("p2", { action = "fight", move = 0 })
+      drainInto(battle, events)
+      probeFlinch(battle, turn)
+    end
+    return battle
+  end
+end
+scenario("g1_flinch_rage", rageFlinch("g1fr", "wild"))
+-- ...and in a link fight the reset is unconditional: the Rage goes on.
+scenario("g1_flinch_rage_link", rageFlinch("g1fl", "1v1"))
+
+-- A Hyper Beam user that a slower Stomp flinches keeps that flinch through the
+-- recharge turn's open (probe 1) -- the forced recharge reads no gate -- and
+-- the turn after resets it (probe 2): the beam goes again, unflinched.
+scenario("g1_flinch_recharge", function(events)
+  local battle = build({
+    id = "g1fh", mode = "wild", seed = 6303, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("beam", 20, 80) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 30, baseSpd = 0,
+             moves = { fx("stomp", 10, 31, { chance = 100 }) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  probeFlinch(battle, 1)
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  probeFlinch(battle, 2)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
   return battle
 end)
 

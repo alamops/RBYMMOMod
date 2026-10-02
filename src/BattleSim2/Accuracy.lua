@@ -16,6 +16,7 @@
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
 local need = ...
+local Items = need("BattleSim2/Items")
 
 local M = {}
 
@@ -66,8 +67,15 @@ function M.effectiveFromMods(accuracy, accuracyMod, evasionMod)
   return min(M.MAX, max(M.MIN, value))
 end
 
--- opts: { accuracyStage, evasionStage, accuracyMod, evasionMod, alwaysHits }
+-- opts: { accuracyStage, evasionStage, accuracyMod, evasionMod, alwaysHits,
+--         brightPowder }
 -- Returns hit (boolean) and effective accuracy (nil when never-miss).
+--
+-- `brightPowder` is the DEFENDER's HELD_BRIGHTPOWDER parameter, when it holds
+-- one: BattleCommand_CheckHit's `.BrightPowder` takes it off the stage-scaled
+-- accuracy after `.StatModifiers` and before the roll (Items.brightPowder does
+-- the arithmetic), so an always-hit move -- Swift, X Accuracy -- returns above
+-- and never meets it, as on the cart.
 function M.hit(moveAccuracy, roll, opts)
   opts = opts or {}
   if opts.alwaysHits then return true, nil end
@@ -79,6 +87,9 @@ function M.hit(moveAccuracy, roll, opts)
     effective = M.effective(acc, opts.accuracyStage, opts.evasionStage)
   else
     effective = M.effectiveFromMods(acc, opts.accuracyMod, opts.evasionMod)
+  end
+  if opts.brightPowder ~= nil then
+    effective = Items.brightPowder(effective, opts.brightPowder)
   end
   return int(roll, 0) < effective, effective
 end

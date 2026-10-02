@@ -69,11 +69,16 @@ function toNumber(value) {
 //                 brought and which are healthy / statused / down. Ball states
 //                 and nothing else -- no species, no level, no moves -- which
 //                 is exactly what the classic ball row reveals.
+//   held       -- a held item acted (Gold's one kind of its own, contract K3 of
+//                 docs/plans/gen12-referee-fidelity.md; Wire.BATTLE_EVENTS2):
+//                 whose, the item id, and whether the mon still holds it. The
+//                 referee's own `msg` sentence follows it.
 const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
   chose: true, unchose: true, moves: true, exp: true, team: true,
+  held: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
@@ -171,6 +176,10 @@ const SHAPES = {
     mon: 'party index (0-5) of the mon banking this share; absent means the active one' },
   team: { slot: 'the seat whose roster this is', side: true,
     team: 'one token per party member, in party order: o / s / x' },
+  held: { slot: true, side: true,
+    mon: 'party index (0-5) of the mon whose item acted',
+    text: 'the item id (not prose: a client matches it against its own save)',
+    amount: '1 the mon still holds `text` (or now does: Thief), 0 it holds nothing' },
 };
 
 // ------------------------------------------------------------------

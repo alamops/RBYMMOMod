@@ -24,7 +24,9 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { damage, accuracy, crit, status, Rng, Effects } = require('./lib/battle2');
+const {
+  damage, accuracy, crit, status, Rng, Effects, Items,
+} = require('./lib/battle2');
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim2_vectors.json');
 const vectors = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -43,7 +45,7 @@ test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped — reread the notes before touching this');
   assert.strictEqual(vectors.generation, 2, 'this suite is Gen2-only');
   for (const group of ['damage', 'accuracy', 'crit', 'status', 'badgeStats', 'badgeTypes',
-    'stages', 'battleStats', 'truncate']) {
+    'stages', 'battleStats', 'truncate', 'items']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -279,6 +281,40 @@ test('truncate vectors', async (t) => {
   for (const v of vectors.truncate) {
     await t.test(v.id, () => {
       expectFields(damage.truncateStats(v.in.attack, v.in.defense, v.in.link), v.out, v.id);
+    });
+  }
+});
+
+// Gold held items and the obedience arithmetic (Items.js), one `kind` per rule
+// -- the same dispatch tests/battle_sim2_vectors.lua runs.
+const sheetOf = (input) => ({
+  heldItem: input.heldItem, holdEffect: input.holdEffect,
+  holdParam: input.holdParam, speciesId: input.speciesId,
+});
+const ITEM_RULES = {
+  typeBoost: (input) => ({ percent: Items.typeBoostPercent(sheetOf(input), input.typeId) }),
+  quickClaw: (input) => ({ fires: Items.quickClawFires(input.param, input.byte) }),
+  brightPowder: (input) => ({ effective: Items.brightPowder(input.effective, input.param) }),
+  speciesAttack: (input) => ({
+    attack: Items.speciesAttack(sheetOf(input), input.special, input.attack),
+  }),
+  metalPowder: (input) => Items.metalPowder(sheetOf(input), input.attack, input.defense),
+  focusBand: (input) => Items.focusBand(input.amount, input.hp),
+  sixteenth: (input) => ({ value: Items.sixteenth(input.maxHp) }),
+  berryWants: (input) => ({ wants: Items.berryWants(input.hp, input.maxHp) }),
+  obedienceCap: (input) => ({ cap: Items.obedienceCap(input.badges) }),
+  swap: (input) => ({ value: Items.swap(input.byte) }),
+  napTurns: (input) => ({ value: Items.napTurns(input.byte) }),
+  kingsRockMove: (input) => ({ rolls: Items.kingsRockMove(input.effectId, input.moveId) }),
+  critSpeciesItem: (input) => ({ set: Items.critSpeciesItem(input.species, input.itemId) }),
+};
+
+test('held item and obedience vectors', async (t) => {
+  for (const v of vectors.items) {
+    await t.test(v.id, () => {
+      const rule = ITEM_RULES[v.in.kind];
+      assert.ok(rule, `${v.id}: no handler for item rule ${v.in.kind}`);
+      expectFields(rule(v.in), v.out, v.id);
     });
   }
 });

@@ -2398,6 +2398,60 @@ do
         "...and still lit when the monster leans in")
 end
 
+-- A disobedient monster's own pick is said the cart's way -- "<MON> used
+-- instead, <MOVE>" (both Gen 1 / Gen 2 referees, pokered _UsedInsteadText /
+-- pokecrystal UsedInsteadText) -- and "instead," is the sentence, not the
+-- move: the shout reads the move, and keys the same as the anim row, so the
+-- attack is still one announcement.
+do
+  local parse = CoopBattle.moveNameFromBattleText
+  eq(parse("FIXMON A used FIX_TACKLE"), "FIX_TACKLE", "used-line: the plain line names its move")
+  eq(parse("FIXMON A used\nKARATE CHOP!"), "KARATE CHOP", "used-line: ...across the page break")
+  eq(parse("FIXMON A used instead, KARATE CHOP"), "KARATE CHOP",
+     "used-line: a disobedient pick names the move, not 'instead, ...'")
+  eq(parse("FIXMON A used instead,\nKARATE CHOP"), "KARATE CHOP",
+     "used-line: ...wherever the page broke the line")
+  eq(parse("FIXMON A used\ninstead, KARATE CHOP"), "KARATE CHOP", "used-line: ...on either side of it")
+  eq(parse("FIXMON A used instead,"), nil, "used-line: no move after it is no move")
+
+  local host = screen({ slots = npcSlots(), mine = 1, host = true,
+                        mode = "coop_npc", selfId = "ann" })
+  host:uploadMediated()
+  host:onBattleReady({ battle = "cb1", mode = "coop_npc",
+    sides = { a = { "ann", "bob" }, b = { "ann" } } })
+  host.game.input = { wasPressed = function() return false end }
+  local animLeft = 0
+  host.animPlayer = {
+    start = function() animLeft = 120 end,
+    update = function() animLeft = animLeft - 1 end,
+    isDone = function() return animLeft <= 0 end,
+    draw = function() end,
+  }
+  host.phase = "choose"
+  -- The Node half's order: the anim row, then the referee's sentence.
+  host:onBattleEvent({ battle = "cb1", seq = 1, t = "anim", slot = 0,
+                       side = "a", text = "FIX_TACKLE" })
+  host:onBattleEvent({ battle = "cb1", seq = 2, t = "msg",
+                       text = "FIXMON A used instead, FIX_TACKLE" })
+  host:onBattleEvent({ battle = "cb1", seq = 3, t = "damage", slot = 3, hp = 21 })
+  host:onBattleEvent({ battle = "cb1", seq = 4, t = "turn" })
+  local appearances, wasUp, said = 0, false, {}
+  for _ = 1, 400 do
+    host:update(1 / 60)
+    local ctx = host:battlefieldBubbleCtx()
+    local up = type(ctx) == "table" and #ctx > 0
+    if up and not wasUp then appearances = appearances + 1 end
+    if up then said[tostring(ctx[1].moveName)] = true end
+    wasUp = up
+  end
+  eq(appearances, 1, "used-line: the disobedient attack is still one shout")
+  local names = {}
+  for name in pairs(said) do names[#names + 1] = name end
+  table.sort(names)
+  eq(table.concat(names, "|"), "FIX TACKLE",
+     "used-line: ...and every bubble it put up names the move, never 'INSTEAD'")
+end
+
 -- ------------------------------------------------------------------
 -- 13. the post-battle ritual, extracted (TT4 — regression guard on I3)
 -- ------------------------------------------------------------------
@@ -2861,6 +2915,251 @@ do
       eq(sparRecord.sim.byId[ids[i]].badges, nil, label .. ": " .. names[i] .. "'s seat holds no badge")
     end
   end
+end
+
+-- ------------------------------------------------------------------
+-- 15. Gold's held items in a 2-on-2 (docs/plans/gen12-referee-fidelity.md)
+-- ------------------------------------------------------------------
+--
+-- The co-op half of the client contract: our own sheets carry `traded` (K1)
+-- and the K2 item fields against the computer; a Gold `held` event moves our
+-- own seat's item -- the fight sheet always, the save only in a fight against
+-- the computer, never a partner's, never one nobody uploaded; the host rolls
+-- the wild monster's item Gold's engine never gives it; and an AMULET COIN
+-- sent out doubles the prize on every path that pays one.  As in section 14
+-- the field is Gen 1's shell (CoopField.new refuses a Gold game), so the Gold
+-- game goes on the screen after the field exists.  Item rows are invented.
+
+do
+  local GOLD_ITEMS = {
+    BERRY       = { name = "BERRY", heldEffect = "HELD_BERRY", heldParameter = 6 },
+    NUGGET      = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+    AMULET_COIN = { name = "AMULET COIN", heldEffect = "HELD_AMULET_COIN", heldParameter = 2 },
+    MASTER_BALL = { name = "MASTER BALL" },
+  }
+  local goldDataT = setmetatable({ items = GOLD_ITEMS }, { __index = data })
+  local function goldGame()
+    local game = newGame()
+    game.generation = 2
+    game.data = goldDataT
+    game.save.generation = 2
+    game.save.player = { name = "ANN", id = 4321, money = 0 }
+    return game
+  end
+  local function holding(m, item, otId)
+    m.item, m.otId = item, otId
+    return m
+  end
+  -- ANN on seat 1 (BERRY, her own), BOB on seat 2 (BERRY), the trainer's two
+  -- on seats 3 / 4 holding NUGGET.  `mine` 2 makes this BOB's screen.
+  local function goldScreen(mode, mine)
+    local slots = mode == "coop_pvp" and pvpSlots() or npcSlots()
+    holding(slots[1].party[1], "BERRY", 4321)
+    holding(slots[2].party[1], "BERRY", 4321)
+    holding(slots[3].party[1], "NUGGET")
+    holding(slots[4].party[1], "NUGGET")
+    local sc = screen({ slots = slots, mine = mine or 1, host = (mine or 1) == 1, mode = mode,
+                        selfId = (mine or 1) == 1 and "ann" or "bob" })
+    sc.game = goldGame()
+    sc.gen2Mediated = true
+    -- A party-vs-wild host describes the wild seat from the engine's monster.
+    if mode == "coop_wild" then sc.wildCatchMon = slots[3].party[1] end
+    eq(sc:uploadMediated(), true, "gold " .. mode .. ": the upload goes out")
+    sc.mediated = true
+    sc.medSlots = { [0] = 1, [1] = 2, [2] = 3, [3] = 4 }
+    sc.medFields = { [1] = 0, [2] = 1, [3] = 2, [4] = 3 }
+    return sc, slots
+  end
+  local function heldAt(field, mon, item, amount)
+    return { battle = "cb1", seq = 1, t = "held", slot = field, side = field < 2 and "a" or "b",
+             mon = mon, text = item, amount = amount }
+  end
+  -- One event through the screen the way a batch goes: rows built at parse,
+  -- played (and so applied) in the stream's order.
+  local function play(screenIn, msg)
+    local rows = screenIn:medRows(msg)
+    screenIn:playEvents(rows)
+    return rows
+  end
+
+  -- K1 / K2 on the co-op upload.
+  local sc = goldScreen("coop_npc")
+  local up
+  for _, msg in ipairs(sc.sent) do
+    if msg.type == Wire.BATTLE_PARTY and msg.payload.side == "a" then up = msg.payload end
+  end
+  eq(up and up.mons[1].heldItem, "BERRY", "gold co-op: our sheet carries the item")
+  eq(up and up.mons[1].holdEffect, "HELD_BERRY", "gold co-op: ...its hold effect (K2)")
+  eq(up and up.mons[1].holdParam, 6, "gold co-op: ...and parameter")
+  eq(up and up.mons[1].traded, nil, "gold co-op: ANN's own mon is not traded")
+  local packed = up and Wire.battleParty(up, 2)
+  check(packed ~= nil and packed.mons[1].holdEffect == "HELD_BERRY",
+        "gold co-op: the upload survives Wire.battleParty")
+  local tradeSlots = npcSlots()
+  holding(tradeSlots[1].party[1], nil, 77)
+  local traded = screen({ slots = tradeSlots, mine = 1, host = true, mode = "coop_npc", selfId = "ann" })
+  traded.game = goldGame()
+  traded:uploadMediated()
+  local tradedUp
+  for _, msg in ipairs(traded.sent) do
+    if msg.type == Wire.BATTLE_PARTY and msg.payload.side == "a" then tradedUp = msg.payload end
+  end
+  eq(tradedUp and tradedUp.mons[1].traded, true, "gold co-op: a traded mon says so against the computer (K1)")
+  local pvpTrade = screen({ slots = (function()
+      local s = pvpSlots(); holding(s[1].party[1], nil, 77); return s end)(),
+    mine = 1, host = true, mode = "coop_pvp", selfId = "ann" })
+  pvpTrade.game = goldGame()
+  pvpTrade:uploadMediated()
+  for _, msg in ipairs(pvpTrade.sent) do
+    if msg.type == Wire.BATTLE_PARTY then
+      eq(msg.payload.mons[1].traded, nil, "gold co-op: ...and never in coop_pvp, a link battle")
+    end
+  end
+
+  -- A berry eaten on our own seat: the save mon (the seat's own party) and the
+  -- sheet, in the fights the cart keeps it from.
+  for _, mode in ipairs({ "coop_npc", "coop_wild" }) do
+    local s, slots = goldScreen(mode)
+    local rows = play(s, heldAt(0, 0, "BERRY", 0))
+    eq(slots[1].party[1].item, nil, "gold held (" .. mode .. "): our berry eaten is gone from the party")
+    eq(s.medMine[1].heldItem, nil, "gold held (" .. mode .. "): ...and from the sheet")
+    local said = false
+    for _, row in ipairs(rows) do
+      if row.kind == "msg" then said = true end
+    end
+    check(not said, "gold held (" .. mode .. "): the item's id is never printed as a line")
+  end
+  -- Applied where the stream puts it, when the batch is played -- the same
+  -- walk that pays an `exp` row -- not when the event is parsed.
+  local deferred, deferredSlots = goldScreen("coop_npc")
+  local pendingRows = deferred:medRows(heldAt(0, 0, "BERRY", 0))
+  eq(deferredSlots[1].party[1].item, "BERRY", "gold held: parsed, not yet played -- nothing has moved")
+  deferred:playEvents(pendingRows)
+  eq(deferredSlots[1].party[1].item, nil, "gold held: ...played in the stream's order, it lands")
+  -- A fight between players: the sheet follows, the save never does.
+  local pvp, pvpSlotsT = goldScreen("coop_pvp")
+  play(pvp, heldAt(0, 0, "BERRY", 0))
+  eq(pvpSlotsT[1].party[1].item, "BERRY", "gold held (coop_pvp): nothing written home")
+  eq(pvp.medMine[1].heldItem, nil, "gold held (coop_pvp): ...though the sheet follows the referee")
+  -- A partner's seat is the partner's to write.
+  local ann, annSlots = goldScreen("coop_npc")
+  play(ann, heldAt(1, 0, "BERRY", 0))
+  eq(annSlots[2].party[1].item, "BERRY", "gold held: BOB's berry is not written by ANN's client")
+  eq(annSlots[1].party[1].item, "BERRY", "gold held: ...nor does it touch ANN's own")
+
+  -- THIEF: the host described the trainer's team, so its NUGGET is one of her
+  -- own uploads and is kept; BOB (a joiner) never uploaded it, so his is not.
+  local host, hostSlots = goldScreen("coop_npc")
+  play(host, heldAt(2, 0, "NUGGET", 0))
+  play(host, heldAt(0, 0, "NUGGET", 1))
+  eq(hostSlots[1].party[1].item, "NUGGET", "gold thief: the host keeps an item from the team it described")
+  local bob, bobSlots = goldScreen("coop_npc", 2)
+  local mark = #warns
+  play(bob, heldAt(1, 0, "NUGGET", 1))
+  eq(bobSlots[2].party[1].item, "BERRY",
+     "gold thief: a joiner keeps nothing from host-described foes (anti-forgery, out of scope by design)")
+  check(#warns > mark, "gold thief: ...and is told why")
+  eq(bob.medMine[1].heldItem, "NUGGET", "gold thief: ...though its fight sheet shows what it holds now")
+  local forged = goldScreen("coop_npc")
+  play(forged, heldAt(0, 0, "MASTER_BALL", 1))
+  eq(forged.sim:slot(1).party[1].item, "BERRY", "gold held: an item nobody uploaded never enters the save")
+  local stray, straySlots = goldScreen("coop_npc")
+  straySlots[1].party[2] = holding(mon(60, 40), "BERRY", 4321)
+  play(stray, heldAt(0, 1, "BERRY", 0))
+  eq(straySlots[1].party[2].item, "BERRY", "gold held: a sheet index this client never uploaded writes nothing")
+  eq(straySlots[1].party[1].item, "BERRY", "gold held: ...not even onto whoever is out")
+
+  -- AMULET COIN: our own send-out with one latches it; a partner's does not.
+  local coin, coinSlots = goldScreen("coop_npc")
+  coinSlots[1].party[1].item = "AMULET_COIN"
+  coin.medMine[1].heldItem, coin.medMine[1].holdEffect = "AMULET_COIN", "HELD_AMULET_COIN"
+  coin.medMine[1].slot = 0
+  eq(coin:amuletCoin2(), false, "gold amulet: nothing out yet")
+  play(coin, { battle = "cb1", seq = 2, t = "send", slot = 1, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+  eq(coin:amuletCoin2(), false, "gold amulet: a partner's send-out is not ours")
+  play(coin, { battle = "cb1", seq = 3, t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+  eq(coin:amuletCoin2(), true, "gold amulet: ours, holding the coin, latches it")
+
+  -- ...and the prize it doubles, on every path that pays one.
+  local engine = { trainer = { baseMoney = 10 }, enemyParty = { { level = 20 } } }
+  local purse = { save = { generation = 2, player = { money = 0 } } }
+  eq(Coop.payTrainerPrize(engine, purse, "win"), 200, "gold prize: baseMoney x best level")
+  engine.amuletCoin = true
+  eq(Coop.payTrainerPrize(engine, purse, "win"), 400, "gold prize: doubled by an AMULET COIN sent out")
+  eq(purse.save.player.money, 600, "gold prize: into save.player.money")
+  eq(Coop.payTrainerPrize(engine, purse, "loss"), 0, "gold prize: a loss pays nothing, coin or not")
+
+  local finished
+  local walkIn = { trainer = { baseMoney = 10 }, enemyParty = { { level = 20 } },
+                   onFinish = function(o) finished = o end }
+  local walkGame = { save = { generation = 2, player = { money = 100 }, party = { mon(30, 10) } },
+                     data = { constants = {} } }
+  local walker = setmetatable({ engineBattle = walkIn, party = { count = function() return 2 end } },
+                              { __index = Coop })
+  walker:onBattleOver("win", walkGame, coin, nil)
+  eq(finished, "win", "gold prize (walk-in): the buried battle is told it was won")
+  eq(walkGame.save.player.money, 500, "gold prize (walk-in): 100 + 2 x 200, the screen's coin read")
+  local plain = setmetatable({ engineBattle = { trainer = { baseMoney = 10 }, enemyParty = { { level = 20 } },
+                                                onFinish = function() end },
+                               party = { count = function() return 2 end } }, { __index = Coop })
+  local plainGame = { save = { generation = 2, player = { money = 100 }, party = { mon(30, 10) } },
+                      data = { constants = {} } }
+  plain:onBattleOver("win", plainGame, ann, nil)
+  eq(plainGame.save.player.money, 300, "gold prize (walk-in): a fight with no coin out pays once")
+
+  -- The invite joiner's synthetic finish reads the same answer off the screen.
+  local ow = {
+    npcPool = { npc9 = { def = { trainerClass = "OPP_FIX", trainerParty = 1, index = 1 } } },
+    map = { def = { label = "FIX_TOWN" } },
+    afterBattle = function() end,
+  }
+  local joinerGame = { save = { generation = 2, player = { money = 0 } },
+                       data = setmetatable({ trainers = { OPP_FIX = { id = "OPP_FIX", baseMoney = 10,
+                         parties = { { { level = 20 } } } } } }, { __index = data }),
+                       stack = { states = { ow } } }
+  local joiner = setmetatable({}, { __index = Coop })
+  eq(joiner:syntheticFinish(joinerGame, { npcId = "npc9" }, coin), true, "gold prize (joiner): the finish runs")
+  eq(joinerGame.save.player.money, 400, "gold prize (joiner): doubled by the coin the screen saw")
+
+  -- The wild monster's item: rolled by the host at its upload, once, onto the
+  -- engine monster a catch keeps.
+  local rollSlots = {
+    { side = "a", owner = "ann", name = "ANN", party = { holding(mon(60, 40), nil, 4321) } },
+    { side = "a", owner = "bob", name = "BOB", party = { mon(60, 30) } },
+    { side = "b", owner = nil, name = "WILD", party = { mon(50, 20) } },
+  }
+  local wildMon = mon(50, 20)
+  local wildHost = screen({ slots = rollSlots, mine = 1, host = true, mode = "coop_wild", selfId = "ann" })
+  wildHost.game = goldGame()
+  wildHost.game.data = setmetatable({ pokemon = setmetatable({
+      [SPECIES] = setmetatable({ items = { "BERRY", "NUGGET" } }, { __index = data.pokemon[SPECIES] }),
+    }, { __index = data.pokemon }) }, { __index = goldDataT })
+  wildHost.gen2Mediated = true
+  wildHost.wildCatchMon = wildMon
+  local realByte = CoopBattle.randomByte
+  local draws = { 250, 99 }
+  local drawn = 0
+  CoopBattle.randomByte = function() drawn = drawn + 1; return draws[drawn] end
+  eq(wildHost:uploadMediated(), true, "gold wild: the host's upload goes out")
+  local wildUp
+  for _, msg in ipairs(wildHost.sent) do
+    if msg.type == Wire.BATTLE_PARTY and msg.payload.side == "b" then wildUp = msg.payload end
+  end
+  eq(wildMon.item, "BERRY", "gold wild: the host rolls the cart's item onto the engine monster")
+  eq(wildUp and wildUp.mons[1].heldItem, "BERRY", "gold wild: ...and the wild seat's sheet carries it")
+  eq(wildUp and wildUp.mons[1].holdEffect, "HELD_BERRY", "gold wild: ...with its K2 fields")
+  eq(drawn, 2, "gold wild: two draws, the cart's")
+  wildHost:wildMons()
+  eq(drawn, 2, "gold wild: rolled once, however often the seat is described")
+  CoopBattle.randomByte = realByte
+  -- The catch keeps what it still holds: THIEF took it, so nothing.
+  wildHost.mediated = true
+  wildHost.medSlots = { [0] = 1, [1] = 2, [2] = 3 }
+  play(wildHost, { battle = "cb1", seq = 1, t = "held", slot = 2, side = "b", mon = 0,
+                     text = "BERRY", amount = 0 })
+  eq(wildHost.foeHeld2 and wildHost.foeHeld2[0], false, "gold wild: the foe's loss is remembered")
+  wildHost:grantCatch({ caught = {} })
+  eq(wildMon.item, nil, "gold wild: a monster caught after losing its item holds none")
 end
 
 T.finish("coop_mediated")

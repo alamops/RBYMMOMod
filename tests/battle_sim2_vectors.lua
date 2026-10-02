@@ -67,7 +67,7 @@ end
 local BattleSim = need("BattleSim2/init")
 local Damage, Accuracy = BattleSim.Damage, BattleSim.Accuracy
 local Crit, Status, Rng = BattleSim.Crit, BattleSim.Status, BattleSim.Rng
-local Effects = BattleSim.Effects
+local Effects, Items = BattleSim.Effects, BattleSim.Items
 
 -- ------------------------------------------------------------------
 -- a JSON reader, just enough for the fixture
@@ -285,6 +285,7 @@ each("accuracy", function(input)
     accuracyMod = input.accuracyMod,
     evasionMod = input.evasionMod,
     alwaysHits = input.alwaysHits,
+    brightPowder = input.brightPowder,
   })
   return { hit = hit, effectiveAccuracy = effective }
 end)
@@ -388,6 +389,81 @@ end)
 each("truncate", function(input)
   local attack, defense = Damage.truncateStats(input.attack, input.defense, input.link)
   return { attack = attack, defense = defense }
+end)
+
+-- ------------------------------------------------------------------
+-- Gold held items and the obedience arithmetic (Items.lua): the static rules,
+-- one `kind` per rule, each worked from pokecrystal's routine before it was
+-- written down here
+-- ------------------------------------------------------------------
+
+local function sheet(input)
+  return {
+    heldItem = orNil(input.heldItem), holdEffect = orNil(input.holdEffect),
+    holdParam = orNil(input.holdParam), speciesId = orNil(input.speciesId),
+  }
+end
+
+local ITEMS = {}
+
+function ITEMS.typeBoost(input)
+  return { percent = Items.typeBoostPercent(sheet(input), orNil(input.typeId)) }
+end
+
+function ITEMS.quickClaw(input)
+  return { fires = Items.quickClawFires(input.param, input.byte) }
+end
+
+function ITEMS.brightPowder(input)
+  return { effective = Items.brightPowder(input.effective, input.param) }
+end
+
+function ITEMS.speciesAttack(input)
+  return { attack = Items.speciesAttack(sheet(input), input.special, input.attack) }
+end
+
+function ITEMS.metalPowder(input)
+  local attack, defense = Items.metalPowder(sheet(input), input.attack, input.defense)
+  return { attack = attack, defense = defense }
+end
+
+function ITEMS.focusBand(input)
+  local amount, held = Items.focusBand(input.amount, input.hp)
+  return { amount = amount, held = held }
+end
+
+function ITEMS.sixteenth(input)
+  return { value = Items.sixteenth(input.maxHp) }
+end
+
+function ITEMS.berryWants(input)
+  return { wants = Items.berryWants(input.hp, input.maxHp) }
+end
+
+function ITEMS.obedienceCap(input)
+  return { cap = Items.obedienceCap(orNil(input.badges)) }
+end
+
+function ITEMS.swap(input)
+  return { value = Items.swap(input.byte) }
+end
+
+function ITEMS.napTurns(input)
+  return { value = Items.napTurns(input.byte) }
+end
+
+function ITEMS.kingsRockMove(input)
+  return { rolls = Items.kingsRockMove(input.effectId, orNil(input.moveId)) }
+end
+
+function ITEMS.critSpeciesItem(input)
+  return { set = Items.critSpeciesItem(orNil(input.species), orNil(input.itemId)) }
+end
+
+each("items", function(input)
+  local handler = ITEMS[input.kind]
+  if not handler then error("no handler for item rule " .. tostring(input.kind), 0) end
+  return handler(input)
 end)
 
 -- ------------------------------------------------------------------

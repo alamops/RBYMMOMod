@@ -382,12 +382,15 @@ end
 --            battle and not on the next launch.
 --   seed     function() -> integer, for a suite that wants a reproducible
 --            fight. The default is the same love-then-math roll SoloBrain uses.
+--   random   function() -> 0..255, the byte source for the rolls the cart
+--            makes outside the referee (Gold's wild held item). Same default.
 function M.new(ui, opts)
   opts = opts or {}
   return setmetatable({
     ui = ui,
     enabled = opts.enabled,
     seedFn = opts.seed,
+    randomFn = opts.random,
 
     -- The live fight, or nothing. All five are set together and cleared
     -- together: half of a solo battle is not a state this file can be in.
@@ -530,6 +533,24 @@ function M:_seed()
   return 0
 end
 
+-- One byte (0..255) for a roll the cart makes outside the referee -- today
+-- Gold's wild held item (MediatedBattle.rollWildItem2).  The suite's `random`
+-- when it handed one in; otherwise the love-then-math roll `_seed` uses.  Never
+-- the referee's own stream, which belongs to the fight and is seeded after.
+function M:_randomByte()
+  local pick = self.randomFn
+  if type(pick) == "function" then
+    local ok, value = pcall(pick)
+    local n = ok and tonumber(value)
+    if n and n == n then return floor(n) % 256 end
+  end
+  local love_ = rawget(_G, "love")
+  local roll = love_ and love_.math and love_.math.random or math.random
+  local ok, value = pcall(roll, 0, 255)
+  if ok and tonumber(value) then return floor(value) % 256 end
+  return 0
+end
+
 -- The trainer's kit, as the side-"b" sheet this client just uploaded.
 --
 -- 1xNPC: the player sends the NPC items from their game data with the NPC
@@ -567,9 +588,31 @@ function M:_begin(game, state, mapId, kind)
   -- `enemy.mon` for a wild, both already rolled and built by the battle
   -- sitting underneath us.
   local wildMon, enemySheets
+  -- Gold's wild monster comes out of the engine holding nothing (its Mon.lua
+  -- does not roll one), so the cart's own roll is made here, onto the engine
+  -- monster -- the one a catch keeps -- before its sheet is cut
+  -- (MediatedBattle.rollWildItem2, pokecrystal LoadEnemyMon `.WildItem`).  Off
+  -- this file's own byte source (M:_randomByte), never the referee's: the
+  -- fight's seed is drawn below and must not move.  Undone if the divert
+  -- declines after all, so the engine's own battle starts exactly as the
+  -- engine built it -- "false means nothing at all has happened".
+  local rolledItem, itemBefore = false, nil
+  local function undoRoll()
+    if rolledItem and wildMon then wildMon.item = itemBefore end
+    rolledItem = false
+  end
   if kind == "wild" then
     wildMon = Coop.wildMonOf(state)
     if not wildMon then return false end
+    if generation == 2 then
+      itemBefore = wildMon.item
+      local inner = type(state.battle) == "table" and state.battle or nil
+      MediatedBattle.rollWildItem2(game, wildMon, {
+        battleType = (inner and inner.battleType) or state.battleType,
+        random = function() return self:_randomByte() end,
+      })
+      rolledItem = wildMon.item ~= itemBefore
+    end
     enemySheets = MediatedBattle.snapshotMons(game, { wildMon })
   else
     local party = enemyPartyOf(state)
@@ -577,6 +620,7 @@ function M:_begin(game, state, mapId, kind)
     enemySheets = MediatedBattle.snapshotMons(game, party)
   end
   if type(enemySheets) ~= "table" or #enemySheets == 0 then
+    undoRoll()
     self:warn("nofoe", "the opponent in this battle could not be described "
       .. "for the mod's battle system, so it is fought the ordinary way; "
       .. "report this with the trainer or the species you met")
@@ -641,6 +685,7 @@ function M:_begin(game, state, mapId, kind)
     -- `start` already said why (an empty or undescribable party) and finished
     -- the screen it never pushed. Nothing has been taken over, so the engine's
     -- own battle is still on the stack and still about to run.
+    undoRoll()
     return false
   end
 
@@ -658,6 +703,13 @@ function M:_begin(game, state, mapId, kind)
       -- silently missing from every solo fight -- a fight that runs, and runs
       -- wrong.
       badges = Wire.badges(mine.badges),
+      -- Gold's cart lineage (contract K6 of docs/plans/gen12-referee-fidelity
+      -- .md): the referee reads side a's first fighter for the rules Gold /
+      -- Silver and Crystal disagree on (TruncateHL_BC's loop).  A hub stamps it
+      -- from the hello it admitted; with no hub, this file is the one that
+      -- knows which cart is running.  Gen 1 carries none, and Gen 3 never
+      -- reaches this table (M:_begin3).
+      family = (generation == 2) and Gen.family(game) or nil,
     } },
     b = { {
       playerId = FOE_SEAT,
@@ -694,6 +746,7 @@ function M:_begin(game, state, mapId, kind)
     sides = sides,
   })
   if not sim then
+    undoRoll()
     self:warn("nosim", "the mod's battle system could not assemble this "
       .. "fight (%s), so it is fought the ordinary way; report this with the "
       .. "battle you were in", tostring(why))
@@ -716,7 +769,7 @@ function M:_begin(game, state, mapId, kind)
   self.wildMon = wildMon
   self.mapId = mapId
   self.settled, self.reason = false, nil
-  self.refuseRun, self.failedRun = nil, nil
+  self.refuseRun, self.failedRun, self.fledLine = nil, nil, nil
   self.runAttempts, self.faults = 0, 0
   self.clock, self.seq = 0, 0
   self.playerMoves, self.playerTurns = {}, 0
@@ -897,6 +950,14 @@ function M:_choose(payload)
       self.cantEscape = self:_cantEscapeText3(seat)
       return true
     end
+    -- Gold's SMOKE BALL: an escape with no roll and no attempt counted, its
+    -- line parked for the pump like the others here (see M:_smokeBall).
+    local fled = self.generation == 2 and self:_smokeBall() or nil
+    if fled then
+      local taken = sim:submitChoice(PLAYER_SEAT, payload) and true or false
+      if taken then self.fledLine = fled end
+      return taken
+    end
     if not self:_escapes() then
       self.failedRun = true
       return true
@@ -1005,6 +1066,46 @@ function M:_escapes()
   return roll <= odds
 end
 
+-- Gold's SMOKE BALL, before any of the above.
+--
+-- pokecrystal engine/battle/core.asm TryToRunAwayFromBattle: once the battle
+-- type, the trainer and the trap checks are through (SUBSTATUS_CANT_RUN, and
+-- wPlayerWrapCount -- a monster held by a binding move cannot use it either),
+-- the player's battle monster's item is asked its held effect, and HELD_ESCAPE
+-- prints BattleText_UserFledUsingAStringBuffer1 and jumps straight to
+-- `.can_escape` -- ahead of wNumFleeAttempts and the speed roll, so it neither
+-- counts an attempt nor draws a byte.  The fight then ends as any escape
+-- does (the referee's `run`, the screen's ending for it).
+--
+-- The item is the one the monster holds *now*: the screen's sheet for it, which
+-- `MediatedBattle:applyHeld2` keeps on every `held` event (a THIEF that took it
+-- took the escape with it), else the referee's own copy of the monster; its
+-- held effect is read from this client's item data (K2's `heldFields2`), the
+-- way the cart asks GetItemHeldEffect.  Answers the line to print, the item's
+-- name filled in, or nil when the run is the ordinary roll.
+M.HELD_ESCAPE2 = "HELD_ESCAPE"
+function M:_smokeBall()
+  local sim, fight = self.sim, self.fight
+  local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
+  local mine = activeOf(player)
+  if not mine then return nil end
+  if type(mine.trapped) == "table" and (tonumber(mine.trapped.turns) or 0) > 0 then
+    return nil
+  end
+  local sheet
+  local slot = tonumber(mine.slot)
+  for _, s in ipairs((fight and fight.mine) or {}) do
+    if type(s) == "table" and slot and tonumber(s.slot) == slot then sheet = s; break end
+  end
+  local item
+  if sheet then item = sheet.heldItem else item = mine.heldItem end
+  if type(item) ~= "string" or item == "" then return nil end
+  local fields = MediatedBattle.heldFields2(self.game, item)
+  if not (fields and fields.holdEffect == M.HELD_ESCAPE2) then return nil end
+  local name = (sheet and sheet.species) or mine.species or "POKéMON"
+  return ("%s\nfled using a\n%s!"):format(tostring(name), fields.itemName or item)
+end
+
 -- The turn a failed escape costs, spent without the referee being asked for a
 -- move the player did not make.
 --
@@ -1110,6 +1211,14 @@ function M:_pump()
     self.failedRun = nil
     self:_feed({ t = "msg", text = "Can't escape!" })
     self:_spendTurn()
+  end
+
+  -- Gold's SMOKE BALL line (M:_smokeBall), ahead of the escape the referee
+  -- already has filed -- the cart prints it before the escape's own ending.
+  if self.fledLine then
+    local text = self.fledLine
+    self.fledLine = nil
+    self:_feed({ t = "msg", text = text })
   end
 
   -- A Gen 3 trapped RUN: the line, then the window back, nothing spent.
@@ -1478,6 +1587,14 @@ function M:_ended(result, toLearn)
   -- answered (accept or cancel) must not be re-offered by checkParty, and
   -- `self.fight` is about to be nilled.
   local evoResolved = self.fight and self.fight.evoResolved
+  -- ...and whether an AMULET COIN came out on our seat (Gold's wAmuletCoin,
+  -- latched by the screen at each send-out -- MediatedBattle:noteAmulet2),
+  -- which the prize the ritual pays is doubled by (Coop.payTrainerPrize).
+  local amuletCoin = false
+  if self.fight and type(self.fight.amuletCoin2) == "function" then
+    local okAmulet, coin = pcall(self.fight.amuletCoin2, self.fight)
+    amuletCoin = okAmulet and coin == true
+  end
   -- Released before any of it runs. Everything below can push a screen, and a
   -- screen that pushes is a `screen.pushed` back into the divert -- which must
   -- find no fight in the slot rather than a half-finished one.
@@ -1485,6 +1602,7 @@ function M:_ended(result, toLearn)
   self.engine, self.game, self.wildMon = nil, nil, nil
   self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
   self.settled, self.refuseRun, self.failedRun = false, nil, nil
+  self.fledLine = nil
   self.generation, self.runAttempts, self.faults = nil, 0, 0
 
   if not (game and sim) then return false end
@@ -1495,6 +1613,7 @@ function M:_ended(result, toLearn)
   levelled = EvolveFx.withoutResolved(levelled, evoResolved)
   if engine and levelled then engine.leveledUp = levelled end
   if engine and evoResolved then engine.evoResolved = evoResolved end
+  if engine and amuletCoin then engine.amuletCoin = true end
 
   local outcome = M.engineResult(result, reason)
   local blackout = Coop.blacksOut(outcome, game)
@@ -1821,7 +1940,7 @@ function M:reset()
   self.engine, self.game, self.wildMon = nil, nil, nil
   self.kind, self.reason, self.save, self.levels = nil, nil, nil, nil
   self.settled, self.pendingWarp, self.refuseRun = false, nil, nil
-  self.failedRun, self.generation = nil, nil
+  self.failedRun, self.generation, self.fledLine = nil, nil, nil
   self.runAttempts, self.faults = 0, 0
   self.playerMoves, self.playerTurns = nil, 0
   self.playerMon, self.playerMove = nil, nil
