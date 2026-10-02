@@ -2228,6 +2228,85 @@ do
   eq(entries, 4, "family gen 1: all four seats were looked at")
 end
 
+-- ------- Gold's badge type boost: the ruleset's `typeIds` reaches the referee
+--
+-- BattleSim2 ports DoBadgeTypeBoosts (keyed by type), but a move row carries
+-- only its chart index; the ruleset's `typeIds` -- MediatedBattle.snapshotRuleset's
+-- chart axis by name -- is what names it.  The hub hands it to Turn.create, so
+-- a HIVE owner's BUG move hits harder in coop_npc; a badge for another type
+-- does nothing to it, and with no typeIds nothing can be named and nothing
+-- fires.  server/hub_battle.test.js pins the same on the Node twin.
+local function join2(hub, name)
+  local peer = fakePeer()
+  local client = hub:accept(peer)
+  if client then
+    hub:receive(client, { type = Wire.HELLO, proto = Config.PROTOCOL,
+      name = name, map = "NEW_BARK_TOWN", x = 5, y = 5, facing = "down",
+      generation = 2, version = "gold", playerId = testPlayerId(name) })
+  end
+  return client, peer
+end
+
+-- The type axis: 0 is a type no badge names, 1 is BUG (HIVE's), 2 is FIRE.
+local CHART2 = { { 100, 100, 100 }, { 100, 100, 100 }, { 100, 100, 100 } }
+local TYPE_IDS2 = { "DARK", "BUG", "FIRE" }
+
+local function sheet2(o)
+  return { species = o.species or "ALPHA", level = 50, hp = o.hp or 300, maxHp = o.hp or 300,
+           stats = { atk = o.atk or 100, def = o.def or 100, spe = o.spe or 50, spa = 50, spd = 100 },
+           moves = { { id = o.move or "thump", pp = 20, power = o.power or 1, accuracy = 255,
+                       type = o.type or 0, effect = 0, chance = 0 } } }
+end
+
+-- What ANN's BUG move dealt the NPC at field 3, the ruleset and her badges as
+-- given.  BOB aims at the other NPC, so field 3's only hit is hers.
+local function bugHit(badges, typeIds)
+  local hub = Hub.new({ maxPlayers = 4, generation = 2 })
+  hub.forceBattleSeed = 5
+  local seen = spyCreate(hub)
+  local ann, annPeer = join2(hub, "ANN")
+  local bob = join2(hub, "BOB")
+  hub:openCoopBattle("g2t", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["g2t"]
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g2t", chart = CHART2,
+                     typeIds = typeIds, specialTypes = { 2 } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g2t", side = "a", badges = badges,
+                     mons = { sheet2({ spe = 200, power = 50, type = 1, move = "bugbite" }) } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "g2t", side = "a",
+                     mons = { sheet2({ spe = 100 }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g2t", side = "b",
+                     mons = { sheet2({ species = "WALL", hp = 900, spe = 1 }),
+                              sheet2({ species = "WALL", hp = 900, spe = 1 }) } })
+  if not record.sim then return nil, record, seen end
+  annPeer.outbox = {}
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = "g2t", action = "fight", move = 0, target = 3 })
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = "g2t", action = "fight", move = 0, target = 4 })
+  for _, msg in ipairs(annPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and msg.t == "damage" and msg.slot == 3 then
+      return msg.amount, record, seen
+    end
+  end
+  return false, record, seen
+end
+
+do
+  local boosted, record, seen = bugHit({ "HIVE" }, TYPE_IDS2)
+  ok(record and record.sim ~= nil, "typeIds: the Gen 2 coop_npc field opens")
+  eq(table.concat(seen.opts and seen.opts.typeIds or {}, ","), "DARK,BUG,FIRE",
+     "typeIds: the hub hands the uploaded axis to Turn.create")
+  eq(table.concat(record.sim.typeIds or {}, ","), "DARK,BUG,FIRE", "typeIds: and the referee keeps it")
+  local annFighter = record.sim.byId[testPlayerId("ANN")]
+  ok(annFighter and annFighter.badges and annFighter.badges.HIVE == true,
+     "typeIds: ANN's fighter holds HIVE")
+  local plain = bugHit(nil, TYPE_IDS2)
+  ok(type(boosted) == "number" and type(plain) == "number", "typeIds: ANN's BUG move lands on field 3")
+  ok(boosted > plain, ("typeIds: HIVE boosts a BUG move (%s > %s)"):format(tostring(boosted), tostring(plain)))
+  -- FOG: GHOST's type badge, and none of Gold's stat badges (ZEPHYR would raise
+  -- Attack, BadgeStatBoosts).
+  eq(bugHit({ "FOG" }, TYPE_IDS2), plain, "typeIds: a badge for another type does nothing to it")
+  eq(bugHit({ "HIVE" }, nil), plain, "typeIds: with no typeIds the move's type has no name, and nothing fires")
+end
+
 -- ------- Gen 3 lists: what Json.decode hands over, and what is a list at all
 --
 -- lib/sanitize.js used to refuse what this side took (an object where a list

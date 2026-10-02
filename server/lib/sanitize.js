@@ -660,6 +660,12 @@ const POOL_ENTRY3_MAX = 128;
 const EVENT_STATS3 = new Set(['atk', 'def', 'spe', 'spa', 'spd', 'acc', 'eva']);
 const STAGE3_MAX = 6;
 const DELTA3_MAX = 12;
+// The outcome an `obey` event names (contract K3, docs/plans/gen3-battle-sheet.md
+// §7.2.1): one per branch of the engine's `disobedient`, the four loaf lines
+// among them. A closed set for the reason Wire.lua gives at M.OBEY_TOKENS3: the
+// screens look each one up as a line of the cart's.
+const OBEY_TOKENS3 = new Set(['ignores_asleep', 'uses_random_move', 'falls_asleep', 'hits_itself',
+  'loafing', 'wont_obey', 'turned_away', 'pretend_not_notice']);
 
 // The party a combatant may submit, and the moves one of them may carry.
 // Mirrors Config.BATTLE_MON_MAX, BATTLE_MOVE_MAX, and battle-bag caps.
@@ -1211,6 +1217,16 @@ function cleanBattleRuleset(raw, generation) {
       special.push(t);
     }
     ruleset.specialTypes = special;
+  }
+  // The chart's axis by name (`typeIds`): each chart index's type registry id,
+  // in order, which lib/battle2 resolves a move's type through for Gold's badge
+  // type boost. Present-but-unreadable refuses the ruleset, as specialTypes
+  // does; 1..BATTLE_TYPE_MAX ids (the chart's own width cap), each a cleanId.
+  // Twin of Wire.lua's typeIdsOf.
+  if (raw.typeIds !== undefined && raw.typeIds !== null) {
+    const typeIds = cleanIdList(raw.typeIds, BATTLE_TYPE_MAX);
+    if (!typeIds) return null;
+    ruleset.typeIds = typeIds;
   }
   // Read in the older dialect by name, never by sniffing a row's `num`: this is
   // a Gen 1 / Gen 2 ruleset. Twin of Wire.battleRuleset.
@@ -1995,9 +2011,12 @@ function cleanBattleEvent(raw, generation) {
   if (raw.text !== undefined && raw.text !== null) {
     // Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — cleanText strips `_`.
     // A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4").
-    const text = (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball')
-      ? cleanId(raw.text)
-      : cleanText(raw.text, MESSAGE_MAX);
+    // An `obey`'s is one of the eight outcome tokens or nothing (Wire.lua's
+    // reading): dropped like any mangled field, never refused whole.
+    let text;
+    if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball') text = cleanId(raw.text);
+    else if (raw.t === 'obey') text = OBEY_TOKENS3.has(raw.text) ? raw.text : null;
+    else text = cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
   }
   if (raw.amount !== undefined && raw.amount !== null) {
@@ -2407,4 +2426,5 @@ module.exports = {
   EVENT_STATS3,
   STAGE3_MAX,
   DELTA3_MAX,
+  OBEY_TOKENS3,
 };

@@ -1896,6 +1896,257 @@ do
   eq(f.expPaid, nil, "holders-only: ...and no gained line")
 end
 
+-- ------------------------------------------------------------------
+-- 9. a mon that would not obey (contract K3, docs/plans/gen3-badge-rules.md)
+-- ------------------------------------------------------------------
+--
+-- The referee says each outcome twice over: an `obey` event naming it, and its
+-- own English sentence straight behind (BattleSim3 Move.lua Bm:_obeyLine).  The
+-- screen says it once, in the cart's line out of the player's text pack.  The
+-- text pack here is a stand-in for the engine's (Gen3.battleText): the cart's
+-- line shapes, in capitals so a line it printed can be told from the referee's,
+-- and only for a mon named the way the engine's battle_text.lua needs one on
+-- the player's side (`atk`, side "player").
+do
+  local Gen3 = need("Gen3")
+  local Wire = need("Wire")
+  local CART = {
+    STRINGID_PKMNIGNORESASLEEP = "%s IGNORED\nORDERS WHILE ASLEEP!",
+    STRINGID_PKMNIGNOREDORDERS = "%s IGNORED\nORDERS!",
+    STRINGID_PKMNBEGANTONAP = "%s BEGAN TO NAP!",
+    STRINGID_PKMNLOAFING = "%s IS\nLOAFING AROUND!",
+    STRINGID_PKMNWONTOBEY = "%s WON'T\nOBEY!",
+    STRINGID_PKMNTURNEDAWAY = "%s TURNED AWAY!",
+    STRINGID_PKMNPRETENDNOTNOTICE = "%s PRETENDED\nNOT TO NOTICE!",
+  }
+  local realText = Gen3.battleText
+  local asked, packOff = {}, false
+  Gen3.battleText = function(id, fill)
+    local shape = CART[id]
+    if not shape then return realText(id, fill) end
+    asked[#asked + 1] = { id = id, fill = fill }
+    if packOff then return nil end
+    local atk = type(fill) == "table" and fill.atk or nil
+    if not (type(atk) == "table" and atk.side == "player" and type(atk.name) == "string") then return nil end
+    return shape:format(atk.name)
+  end
+  local function flat(s) return (tostring(s):gsub("\n", " ")) end
+  -- How many lines the screen said since `from` read `line`, newlines aside.
+  local function saidCount(f, line, from)
+    local n = 0
+    for i = (from or 0) + 1, #(f.textLog or {}) do
+      if flat(f.textLog[i]) == flat(line) then n = n + 1 end
+    end
+    return n
+  end
+  local function saidAt(f, line, from)
+    for i = (from or 0) + 1, #(f.textLog or {}) do
+      if flat(f.textLog[i]) == flat(line) then return i end
+    end
+    return nil
+  end
+  -- The first line since `from` that carries `needle`.
+  local function saidLike(f, needle, from)
+    for i = (from or 0) + 1, #(f.textLog or {}) do
+      if f.textLog[i]:find(needle, 1, true) then return i end
+    end
+    return nil
+  end
+  local function cartLine(token, name) return CART[Mediated.OBEY_STRINGS3[token]]:format(name) end
+
+  local ok, err = pcall(function()
+    -- The table the screens phrase from names exactly the tokens the sanitiser keeps.
+    local tokens, keyed = {}, {}
+    for token in pairs(Wire.OBEY_TOKENS3) do tokens[#tokens + 1] = token end
+    for token in pairs(Mediated.OBEY_STRINGS3) do keyed[#keyed + 1] = token end
+    table.sort(tokens)
+    table.sort(keyed)
+    eq(table.concat(keyed, ","), table.concat(tokens, ","), "obey: a cart line for each of Wire's eight tokens")
+    eq(Mediated.OBEY_STRINGS3.hits_itself, "STRINGID_PKMNWONTOBEY",
+       "obey: the self-hit opens with the cart's won't-obey line (BattleScript_IgnoresAndHitsItself)")
+
+    -- The sanitiser: a token survives, anything else is dropped from the event,
+    -- and an older reader never sees the kind at all.
+    local good = Wire.battleEvent({ battle = "b", seq = 1, t = "obey", slot = 0, side = "a", text = "loafing" })
+    eq(good and good.text, "loafing", "obey: Wire keeps an outcome token")
+    local bad = Wire.battleEvent({ battle = "b", seq = 2, t = "obey", slot = 0, side = "a", text = "LOAFING!" })
+    check(bad ~= nil and bad.text == nil, "obey: ...drops anything else, and keeps the event (and its seq)")
+    eq(Wire.battleEvent({ battle = "b", seq = 3, t = "obey", slot = 0, side = "a", text = "loafing" }, 2), nil,
+       "obey: a Gen 2 reader refuses the kind")
+
+    -- Every outcome by hand, in the referee's own order (each stream is what
+    -- BattleSim3 emits for that branch): the cart's line once, the referee's
+    -- sentence never, and whatever follows still plays.
+    local STREAMS = {
+      loafing = { { t = "msg", text = "CHARMANDER is loafing around!" } },
+      wont_obey = { { t = "msg", text = "CHARMANDER won't obey!" } },
+      turned_away = { { t = "msg", text = "CHARMANDER turned away!" } },
+      pretend_not_notice = { { t = "msg", text = "CHARMANDER pretended not to notice!" } },
+      ignores_asleep = { { t = "msg", text = "CHARMANDER ignored orders while asleep!" } },
+      uses_random_move = {
+        { t = "msg", text = "CHARMANDER ignored orders!" },
+        { t = "msg", text = "CHARMANDER used TACKLE!" },
+        { t = "anim", slot = 0, side = "a", text = "TACKLE", target = 3 },
+        { t = "damage", slot = 3, side = "b", hp = 20 },
+      },
+      falls_asleep = {
+        { t = "msg", text = "CHARMANDER began to nap!" },
+        { t = "status", slot = 0, side = "a", status = "SLP", text = "CHARMANDER fell asleep!" },
+        { t = "msg", text = "CHARMANDER fell asleep!" },
+      },
+      hits_itself = {
+        { t = "msg", text = "CHARMANDER won't obey!" },
+        { t = "msg", text = "It hurt itself in its confusion!" },
+        { t = "damage", slot = 0, side = "a", hp = 25 },
+      },
+    }
+    local order = {}
+    for token in pairs(STREAMS) do order[#order + 1] = token end
+    table.sort(order)
+    for _, token in ipairs(order) do
+      newGame()
+      SESSION.party = { monOf(4, 50) }
+      local f, ev = byHand("wild")
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 50, maxHp = 50, level = 9 })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 60, maxHp = 60,
+           level = 50, mon = 0 })
+      for _ = 1, 40 do f:update(2.0) end
+      local mark = #(f.textLog or {})
+      local was = #asked
+      ev({ t = "obey", slot = 0, side = "a", text = token })
+      local anims = 0
+      for _, e in ipairs(STREAMS[token]) do ev(e) end
+      for _, row in ipairs(f.lines) do if type(row) == "table" and row.anim then anims = anims + 1 end end
+      for _ = 1, 60 do f:update(2.0) end
+      local line = cartLine(token, "CHARMANDER")
+      eq(saidCount(f, line, mark), 1, "obey " .. token .. ": the cart's line, once")
+      eq(saidCount(f, STREAMS[token][1].text, mark), 0, "obey " .. token .. ": the referee's own sentence is not said")
+      eq(asked[was + 1] and asked[was + 1].id, Mediated.OBEY_STRINGS3[token],
+         "obey " .. token .. ": looked up by the cart's STRINGID")
+      local fill = asked[was + 1] and asked[was + 1].fill
+      check(fill and fill.atk and fill.atk.side == "player" and fill.atk.name == "CHARMANDER",
+            "obey " .. token .. ": the mon named on the player's side, the engine's `atk`")
+      local at = saidAt(f, line, mark)
+      if token == "uses_random_move" then
+        local used = saidAt(f, "CHARMANDER used TACKLE!", mark)
+        check(at and used and used > at, "obey uses_random_move: the called move's line follows")
+        eq(anims, 1, "obey uses_random_move: ...its animation is queued")
+        eq(f.slots[3].hp, 20, "obey uses_random_move: ...and its damage lands")
+      elseif token == "falls_asleep" then
+        local slept = saidAt(f, "CHARMANDER fell asleep!", mark)
+        check(at and slept and slept > at, "obey falls_asleep: the cart's second line (the sleep) follows")
+        eq(f.slots[0].status, "SLP", "obey falls_asleep: ...and the seat is asleep")
+      elseif token == "hits_itself" then
+        local hurt = saidAt(f, "It hurt itself in its confusion!", mark)
+        check(at and hurt and hurt > at, "obey hits_itself: the cart's second line (the self-hit) follows")
+        eq(f.slots[0].hp, 25, "obey hits_itself: ...and the self-hit's damage lands")
+        eq(f.slots[0].shownHp, 25, "obey hits_itself: ...the bar fell to it")
+      end
+    end
+
+    -- The fallbacks: each says the referee's sentence instead, still once.
+    local function fresh()
+      newGame()
+      SESSION.party = { monOf(4, 50) }
+      local f, ev = byHand("wild")
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 50, maxHp = 50, level = 9 })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 60, maxHp = 60,
+           level = 50, mon = 0 })
+      return f, ev, #(f.textLog or {})
+    end
+    local f, ev, mark = fresh()
+    packOff = true
+    ev({ t = "obey", slot = 0, side = "a", text = "loafing" })
+    ev({ t = "msg", text = "CHARMANDER is loafing around!" })
+    packOff = false
+    eq(saidCount(f, "CHARMANDER is loafing around!", mark), 1, "obey: no text pack -- the referee's sentence, once")
+    eq(saidCount(f, cartLine("loafing", "CHARMANDER"), mark), 0, "obey: ...and no line of the cart's")
+
+    f, ev, mark = fresh()
+    ev({ t = "obey", slot = 0, side = "a" })
+    ev({ t = "msg", text = "CHARMANDER turned away!" })
+    eq(saidCount(f, "CHARMANDER turned away!", mark), 1,
+       "obey: a token the sanitiser dropped -- the referee's sentence")
+
+    f, ev, mark = fresh()
+    ev({ t = "obey", slot = 3, side = "b", text = "wont_obey" })
+    ev({ t = "msg", text = "PIDGEY won't obey!" })
+    eq(saidCount(f, "PIDGEY won't obey!", mark), 1,
+       "obey: the foe's side (the cart never asks it) -- the referee's sentence")
+    eq(saidCount(f, cartLine("wont_obey", "PIDGEY"), mark), 0, "obey: ...never phrased as ours")
+
+    -- A lossy stream: the sentence behind the `obey` went missing, and the
+    -- line after it is still said.
+    f, ev, mark = fresh()
+    local seq0 = f.seq
+    f:onEvent({ battle = "rf", seq = seq0 + 1, t = "obey", slot = 0, side = "a", text = "hits_itself" })
+    f:onEvent({ battle = "rf", seq = seq0 + 3, t = "msg", text = "It hurt itself in its confusion!" })
+    eq(saidCount(f, cartLine("hits_itself", "CHARMANDER"), mark), 1, "obey gap: the cart's line")
+    eq(saidCount(f, "It hurt itself in its confusion!", mark), 1, "obey gap: ...and the line after the lost one")
+
+    -- The real referee: a traded L50 CHARMANDER with no badges (cap 10) in a
+    -- wild fight, over enough seeds to see every branch a plain fight reaches
+    -- (all but the asleep-and-SNORE one).  Each `obey` the referee sends is
+    -- read once, in the cart's line, and the turn plays on.
+    local seen, seeds = {}, {}
+    for seed = 1, 120 do
+      newGame()
+      local mine = monOf(4, 50, { otId = 999, moves = { 10, 33 }, pp = { 35, 35 }, maxPp = { 35, 35 } })
+      SESSION.party = { mine }
+      local foe = assert(Sheet3.mon(SESSION, monOf(16, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }),
+        0, { wild = true }))
+      local h = harness("wild", { foe }, { seed = seed, classicUi = true })
+      if seed == 1 then
+        eq(h.pending.party.mons[1].traded, true, "obey referee: the sheet says the mon is traded (K2)")
+        eq(h.pending.party.badges, nil, "obey referee: ...and the trainer has no badges")
+      end
+      local events = {}
+      h.fight.onEvent = function(self, e)
+        events[#events + 1] = e
+        return Mediated.onEvent(self, e)
+      end
+      h.pump()
+      local mark1 = #(h.fight.textLog or {})
+      h.fight:pickMove(1)
+      h.pump()
+      for i, e in ipairs(events) do
+        if e.t == "obey" and not seen[e.text] then
+          seen[e.text] = true
+          seeds[#seeds + 1] = e.text .. "@" .. seed
+          local nextEv = events[i + 1]
+          eq(nextEv and nextEv.t, "msg", "obey referee " .. e.text .. ": the referee's sentence follows the event")
+          eq(saidCount(h.fight, cartLine(e.text, "CHARMANDER"), mark1), 1,
+             "obey referee " .. e.text .. ": the cart's line, once")
+          eq(saidCount(h.fight, nextEv and nextEv.text, mark1), 0,
+             "obey referee " .. e.text .. ": the referee's sentence is not said")
+          check(h.fight.phase == "choose" or h.fight.finished,
+                "obey referee " .. e.text .. ": the turn played on to the next menu")
+          if e.text == "hits_itself" then
+            check(saidAt(h.fight, "It hurt itself in its confusion!", mark1) ~= nil,
+                  "obey referee hits_itself: the self-hit line plays")
+            check(h.fight.slots[0].hp < mine.maxHp, "obey referee hits_itself: ...and so does its damage")
+          elseif e.text == "falls_asleep" then
+            eq(h.fight.slots[0].status, "SLP", "obey referee falls_asleep: the nap's sleep lands")
+          elseif e.text == "uses_random_move" then
+            local at = saidAt(h.fight, cartLine(e.text, "CHARMANDER"), mark1)
+            local used = saidLike(h.fight, "CHARMANDER used", mark1)
+            check(at and used and used > at, "obey referee uses_random_move: the called move is used after it")
+          end
+        end
+      end
+      local count = 0
+      for _ in pairs(seen) do count = count + 1 end
+      if count >= 7 then break end
+    end
+    for _, token in ipairs({ "uses_random_move", "falls_asleep", "hits_itself", "loafing", "wont_obey",
+                             "turned_away", "pretend_not_notice" }) do
+      check(seen[token], "obey referee: the fight reached " .. token .. " (" .. table.concat(seeds, " ") .. ")")
+    end
+  end)
+  Gen3.battleText = realText
+  if not ok then check(false, "obey: the block raised -- " .. tostring(err)) end
+end
+
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.
 check(package.loaded["src.battle.BattleState"] == nil, "no Gen 1 BattleState on a Gen 3 boot")
 check(package.loaded["src.ui.PartyMenu"] == nil, "no Gen 1 PartyMenu on a Gen 3 boot")
@@ -1987,6 +2238,36 @@ else
       eq(own and own.stats.atk, deoxys.attack, "real cache: outside a link fight, its own forme's Attack")
     else
       print("[skip] this cache carries no Deoxys link row")
+    end
+  end
+
+  -- A mon that would not obey (K3): each outcome's line comes out of this
+  -- cart's own text pack through the fill the screens hand it (`atk`, the
+  -- player's side, so no prefix), the mon's name first as on the cart.  The
+  -- text pack's modules are required fresh over the mounted cache: Tier A,
+  -- with no cache, left the failed-require marker `require` stores while it
+  -- loads on the script space and the modules under it (LuaJIT's reads as an
+  -- odd number).  The marker is taken from a require made to fail here, so
+  -- only those entries go.
+  local PROBE = "rby_mmo.tests.failed_require_marker"
+  package.preload[PROBE] = function() error("marker", 0) end
+  pcall(require, PROBE)
+  local marker = package.loaded[PROBE]
+  package.loaded[PROBE], package.preload[PROBE] = nil, nil
+  local marked = {}
+  for name, value in pairs(package.loaded) do
+    if marker ~= nil and rawequal(value, marker) then marked[#marked + 1] = name end
+  end
+  for _, name in ipairs(marked) do package.loaded[name] = nil end
+  package.loaded["src.core.game3.rom_text"] = nil
+  package.loaded["src.core.game3.battle.battle_text"] = nil
+  local okM, MedB = pcall(needB, "MediatedBattle")
+  check(okM and type(MedB) == "table", "real cache: the screen loads over the real engine")
+  if okM and type(MedB) == "table" then
+    for token, id in pairs(MedB.OBEY_STRINGS3) do
+      local line = MedB.obeyText3(token, "ABRA")
+      check(type(line) == "string" and line:find("ABRA", 1, true) == 1 and not line:find("\\", 1, true),
+            "real cache: " .. token .. " is " .. id .. " in this cart's words (" .. tostring(line) .. ")")
     end
   end
   unstubAll()

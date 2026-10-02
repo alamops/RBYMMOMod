@@ -1220,6 +1220,84 @@ function gen12() {
 }
 
 /*
+ * The badge rules' wire (docs/plans/gen3-badge-rules.md K1-K3), each input read
+ * by lib/sanitize under the reader's generation (the third field): a Gen 3
+ * party's badge numbers, a Gen 3 sheet's traded / fateful, the `obey` event and
+ * its eight tokens, a Gold party's badge names, and the Gen 1 / Gen 2
+ * ruleset's typeIds. Twin of badgeRules in tests/drivers/hub_protocol_parity.lua.
+ */
+const OBEY_TOKENS = ['ignores_asleep', 'uses_random_move', 'falls_asleep', 'hits_itself',
+  'loafing', 'wont_obey', 'turned_away', 'pretend_not_notice'];
+
+function badgeRules() {
+  const flagged = (traded, fateful) => {
+    const sheet = mon3({ species: 'MEW', speciesNum: 151 });
+    if (traded !== undefined) sheet.traded = traded;
+    if (fateful !== undefined) sheet.fateful = fateful;
+    return sheet;
+  };
+  const gold = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  const wide = [];
+  for (let i = 1; i <= sanitize.BATTLE_TYPE_MAX + 1; i += 1) wide.push(`T${i}`);
+  const full = wide.slice(0, sanitize.BATTLE_TYPE_MAX);
+  const cases = [
+    ['party', { battle: 'b1', mons: [mon3()], badges: ['1', '3', '8'] }, 3],
+    ['party', {
+      battle: 'b1', mons: [mon3()], badges: ['1', '3', '8', '3', '9', 'bad id!', 5, true, ''],
+    }, 3],
+    ['party', { battle: 'b1', mons: [mon3()], badges: ['bad id!', 7] }, 3],
+    ['party', { battle: 'b1', mons: [flagged(true, true)], badges: ['2'] }, 3],
+    ['mon', flagged(true, true)],
+    ['mon', flagged(false, false)],
+    ['mon', flagged(true, undefined)],
+    ['mon', flagged('yes', undefined)],
+    ['mon', flagged(undefined, 1)],
+    ['party', {
+      battle: 'b1', mons: [gold], badges: ['ZEPHYR', 'MINERAL', 'RISING', 'BOULDER', 'EARTH'],
+    }, 2],
+    ['party', { battle: 'b1', mons: [gold], badges: ['ZEPHYR', 'ZEPHYR', 'bad id!'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'FIRE'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'PSYCHIC_TYPE'], specialTypes: [1] }, 1],
+    ['ruleset', { chart: CHART, typeIds: full }, 2],
+    ['ruleset', { chart: CHART, typeIds: wide }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 7] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'BAD TYPE'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'X'.repeat(41)] }, 2],
+    ['ruleset', { chart: CHART, typeIds: [] }, 2],
+    ['ruleset', { chart: CHART, typeIds: 'NORMAL' }, 2],
+    ['ruleset', { typeTable: CHART3, typeIds: ['NORMAL'] }, 3],
+  ];
+  OBEY_TOKENS.forEach((token, i) => {
+    cases.push(['event', {
+      battle: 'b1', seq: 21 + i, t: 'obey', slot: 0, side: 'a', text: token,
+    }, 3]);
+  });
+  ['LOAFING', 'loafing around', '', 7].forEach((text, i) => {
+    cases.push(['event', {
+      battle: 'b1', seq: 41 + i, t: 'obey', slot: 1, side: 'a', text,
+    }, 3]);
+  });
+  cases.push(['event', {
+    battle: 'b1', seq: 50, t: 'obey', slot: 0, side: 'a',
+  }, 3]);
+  cases.push(['event', {
+    battle: 'b1', seq: 51, t: 'obey', slot: 0, side: 'a', text: 'loafing',
+  }, 2]);
+  return cases;
+}
+
+/*
  * Gen 3 Pay Day coins and the holders-only exp fact, through the hub (sheet
  * doc §1 outcome, §7.1 exp). Twins of gen3_coop_wild_payday and
  * gen3_pvp_payday_absent in the Lua driver: a coop_wild field where ANN's
@@ -1584,6 +1662,20 @@ function runGen3() {
           else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, gen);
           else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
           else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, gen);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+    {
+      name: 'badge_rules_dialect',
+      result: (() => {
+        const cases = badgeRules().map(([kind, input, gen]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, gen);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
           return { kind, got: orNil(got) };
         });
         return { cases };

@@ -337,6 +337,61 @@ do
   eq(list(nil), "BOULDERBADGE,SOULBADGE", "badges: a caller naming no mode is not in a link battle")
   eq(Mediated.badgesOf(badgeGame, "1v1"), nil, "badges: a 1v1 is a link battle and sends none")
   eq(Mediated.badgesOf(badgeGame, "coop_pvp"), nil, "badges: ...nor does coop_pvp")
+  -- Gen 1 reads its own rows only: a Gold-shaped Kanto store is nothing to it.
+  badgeGame.save.player.kantoBadges = { BOULDER = true, [1] = true }
+  eq(list("wild"), "BOULDERBADGE,SOULBADGE", "badges: Gen 1 is unchanged by a kantoBadges store")
+end
+
+-- Gold: every badge the save holds, the eight Johto then the eight Kanto, by the
+-- Gold names BattleSim2's boosts are keyed on -- owned the way the Gold engine's
+-- own Battle:hasBadge (src/battle/gen2/Battle.lua) answers it: Johto in
+-- `player.badges`, Kanto in `player.kantoBadges`, each keyed by name or by its
+-- wJohtoBadges / wKantoBadges bit position.  Not the bag, and not Gen 1's
+-- badgeBoosts rows, both of which this save also carries.
+do
+  local function goldGame(player)
+    return {
+      generation = 2,
+      data = { constants = { badgeBoosts = { { badge = "BOULDERBADGE", stat = "attack" } } } },
+      save = { party = {}, player = player, inventory = { BOULDERBADGE = 1, ZEPHYR = 1, EARTH = 1 } },
+    }
+  end
+  local function list(game, mode) return table.concat(Mediated.badgesOf(game, mode) or {}, ",") end
+
+  local byName = goldGame({ name = "GOLD", badges = { ZEPHYR = true, MINERAL = true },
+                            kantoBadges = { BOULDER = true, EARTH = true } })
+  eq(list(byName, "wild"), "ZEPHYR,MINERAL,BOULDER,EARTH",
+     "Gold badges: Johto and Kanto by name, in the cart's walk order")
+  eq(list(byName, "coop_npc"), "ZEPHYR,MINERAL,BOULDER,EARTH", "Gold badges: ...in a trainer fight too")
+  eq(list(byName, nil), "ZEPHYR,MINERAL,BOULDER,EARTH", "Gold badges: ...and with no mode named")
+
+  local byBit = goldGame({ badges = { [1] = true, [3] = true, [8] = true },
+                           kantoBadges = { [2] = true, [7] = true } })
+  eq(list(byBit, "wild"), "ZEPHYR,PLAIN,RISING,CASCADE,VOLCANO",
+     "Gold badges: keyed by bit position, both stores")
+
+  local mixed = goldGame({ badges = { HIVE = true, [4] = true }, kantoBadges = { THUNDER = true, [8] = true } })
+  eq(list(mixed, "wild"), "HIVE,FOG,THUNDER,EARTH", "Gold badges: names and bit positions in one save")
+
+  local all = { badges = {}, kantoBadges = {} }
+  for i = 1, 8 do all.badges[i], all.kantoBadges[i] = true, true end
+  eq(list(goldGame(all), "wild"),
+     "ZEPHYR,HIVE,PLAIN,FOG,MINERAL,STORM,GLACIER,RISING,BOULDER,CASCADE,THUNDER,RAINBOW,"
+     .. "SOUL,MARSH,VOLCANO,EARTH", "Gold badges: all sixteen")
+
+  eq(Mediated.badgesOf(goldGame({ badges = { BOULDER = true }, kantoBadges = { ZEPHYR = true } }), "wild"), nil,
+     "Gold badges: a badge counts only in its own store")
+  eq(Mediated.badgesOf(goldGame({ badges = { ZEPHYR = false, [2] = 1 } }), "wild"), nil,
+     "Gold badges: a false name and a bit position that is not `true` own nothing (the engine's test)")
+  eq(Mediated.badgesOf(goldGame({ name = "GOLD" }), "wild"), nil,
+     "Gold badges: none earned is nil, whatever the bag and badgeBoosts rows say")
+  eq(Mediated.badgesOf(byName, "1v1"), nil, "Gold badges: a 1v1 is a link battle and sends none")
+  eq(Mediated.badgesOf(byName, "coop_pvp"), nil, "Gold badges: ...nor does coop_pvp")
+
+  -- ...and the list crosses the wire as the referee reads it: a set of Gold names.
+  local set = Wire.badges(Mediated.badgesOf(byName, "wild"))
+  check(set and set.ZEPHYR and set.MINERAL and set.BOULDER and set.EARTH and not set.BOULDERBADGE,
+        "Gold badges: Wire.badges keeps the Gold names as the referee's set")
 end
 
 -- Defaults, for a move this build has a slot for but no record of -- a modded
@@ -430,6 +485,18 @@ local specialSet = {}
 for _, idx in ipairs(ruleset.specialTypes or {}) do specialSet[idx] = true end
 check(specialSet[0] and specialSet[2], "FIRE and WATER indices are Special")
 check(not specialSet[1], "NORMAL is Physical")
+-- The chart's axis by name (`typeIds`): what Gold's badge type boost reads a
+-- move's type index through on the referee (BattleSim2 `_typeIdOf`).  The same
+-- order every row and move index on this upload uses, and it crosses the wire.
+eq(table.concat(ruleset.typeIds or {}, ","), "FIRE,NORMAL,WATER", "typeIds: the chart's axis by name, in order")
+local ruleWire = Wire.battleRuleset(ruleset, 2)
+eq(table.concat(ruleWire and ruleWire.typeIds or {}, ","), "FIRE,NORMAL,WATER",
+   "typeIds: Wire keeps them on a Gen 2 ruleset")
+if ruleset.typeIds then
+  ruleset.typeIds[1] = "SCRIBBLED"
+  eq(Mediated.typeOrder(DATA).ids[1], "FIRE", "typeIds: a copy -- the type order's cache is not written through it")
+  ruleset.typeIds[1] = "FIRE"
+end
 
 -- ------- the physical/special split comes off the chart's own records
 --
@@ -541,6 +608,7 @@ eq(#neutral.chart, Mediated.NEUTRAL_TYPES, "no type table falls back to NxN")
 eq(#neutral.chart[1], Mediated.NEUTRAL_TYPES, "square")
 eq(neutral.chart[4][9], Wire.EFF_NEUTRAL, "of nothing but neutral cells")
 check(Wire.battleRuleset(neutral) ~= nil, "and it sanitises too")
+eq(neutral.typeIds, nil, "typeIds: no chart, no axis to name")
 check(Mediated.NEUTRAL_TYPES <= Config.BATTLE_TYPE_MAX,
       "the fallback fits inside what the wire will carry")
 
@@ -553,6 +621,7 @@ end
 local cut = Mediated.snapshotRuleset(gameWith({}, wide))
 eq(#cut.chart, Config.BATTLE_TYPE_MAX, "a pack with too many types is trimmed")
 check(Wire.battleRuleset(cut) ~= nil, "so that the ruleset still sanitises")
+eq(#(cut.typeIds or {}), Config.BATTLE_TYPE_MAX, "typeIds: trimmed with the chart, so it still fits the wire")
 
 -- The ordering is a plain sort, and it has to be: nothing on the wire states
 -- it, so two clients whose tables iterated differently would read every one of

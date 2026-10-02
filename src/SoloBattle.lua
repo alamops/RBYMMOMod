@@ -677,6 +677,9 @@ function M:_begin(game, state, mapId, kind)
     seed = self:_seed(),
     chart = ruleset.chart,
     specialTypes = ruleset.specialTypes,
+    -- The chart's axis by name (MediatedBattle.snapshotRuleset), which Gold's
+    -- badge type boost reads a move's type through (BattleSim2 `_typeIdOf`).
+    typeIds = ruleset.typeIds,
     metronomePool = ruleset.metronomePool,
     -- Zero, which the referee reads as "no deadline at all". A solo fight has
     -- nobody to keep waiting and the vanilla battle menu waits forever.

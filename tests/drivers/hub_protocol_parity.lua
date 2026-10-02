@@ -1310,6 +1310,97 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- The badge rules' wire (docs/plans/gen3-badge-rules.md K1-K3), each input
+-- read by Wire.lua here and lib/sanitize.js there, under the reader's
+-- generation (the third field):
+--
+--   * a Gen 3 party's badge numbers ("1".."8"; the sanitisers keep any id and
+--     drop the rest, the referee reads 1..8);
+--   * a Gen 3 sheet's `traded` / `fateful` -- true kept, false dropped,
+--     anything else refuses the sheet;
+--   * the `obey` event: each of the eight outcome tokens kept, any other text
+--     dropped with the event kept, and the kind refused by a Gen 2 reader;
+--   * a Gold party's badge names, Johto and Kanto;
+--   * the Gen 1 / Gen 2 ruleset's `typeIds` (the chart's axis by name):
+--     1..BATTLE_TYPE_MAX ids, anything unreadable refusing the ruleset, and
+--     never read on Gen 3.
+-- ------------------------------------------------------------------
+
+local OBEY_TOKENS = { "ignores_asleep", "uses_random_move", "falls_asleep", "hits_itself",
+                      "loafing", "wont_obey", "turned_away", "pretend_not_notice" }
+
+local function badgeRules()
+  local function flagged(traded, fateful)
+    local sheet = mon3({ species = "MEW", speciesNum = 151 })
+    sheet.traded, sheet.fateful = traded, fateful
+    return sheet
+  end
+  local gold = { species = "ALPHA", level = 50, hp = 100, maxHp = 100,
+                 stats = { atk = 90, def = 90, spe = 90, spa = 90, spd = 90 },
+                 moves = { { id = "thump", pp = 20, power = 40, accuracy = 255, type = 0,
+                             effect = 0, chance = 0 } } }
+  local wide = {}
+  for i = 1, Config.BATTLE_TYPE_MAX + 1 do wide[i] = "T" .. i end
+  local full = {}
+  for i = 1, Config.BATTLE_TYPE_MAX do full[i] = "T" .. i end
+  local cases = {
+    { "party", { battle = "b1", mons = { mon3() }, badges = { "1", "3", "8" } }, 3 },
+    { "party", { battle = "b1", mons = { mon3() },
+                 badges = { "1", "3", "8", "3", "9", "bad id!", 5, true, "" } }, 3 },
+    { "party", { battle = "b1", mons = { mon3() }, badges = { "bad id!", 7 } }, 3 },
+    { "party", { battle = "b1", mons = { flagged(true, true) }, badges = { "2" } }, 3 },
+    { "mon", flagged(true, true) },
+    { "mon", flagged(false, false) },
+    { "mon", flagged(true, nil) },
+    { "mon", flagged("yes", nil) },
+    { "mon", flagged(nil, 1) },
+    { "party", { battle = "b1", mons = { gold },
+                 badges = { "ZEPHYR", "MINERAL", "RISING", "BOULDER", "EARTH" } }, 2 },
+    { "party", { battle = "b1", mons = { gold }, badges = { "ZEPHYR", "ZEPHYR", "bad id!" } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", "FIRE" } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", "PSYCHIC_TYPE" }, specialTypes = { 1 } }, 1 },
+    { "ruleset", { chart = CHART, typeIds = full }, 2 },
+    { "ruleset", { chart = CHART, typeIds = wide }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", 7 } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", "BAD TYPE" } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = { "NORMAL", string.rep("X", 41) } }, 2 },
+    { "ruleset", { chart = CHART, typeIds = {} }, 2 },
+    { "ruleset", { chart = CHART, typeIds = "NORMAL" }, 2 },
+    { "ruleset", { typeTable = CHART3, typeIds = { "NORMAL" } }, 3 },
+  }
+  for i, token in ipairs(OBEY_TOKENS) do
+    cases[#cases + 1] = { "event", { battle = "b1", seq = 20 + i, t = "obey", slot = 0, side = "a",
+                                     text = token }, 3 }
+  end
+  for i, text in ipairs({ "LOAFING", "loafing around", "", 7 }) do
+    cases[#cases + 1] = { "event", { battle = "b1", seq = 40 + i, t = "obey", slot = 1, side = "a",
+                                     text = text }, 3 }
+  end
+  cases[#cases + 1] = { "event", { battle = "b1", seq = 50, t = "obey", slot = 0, side = "a" }, 3 }
+  cases[#cases + 1] = { "event", { battle = "b1", seq = 51, t = "obey", slot = 0, side = "a",
+                                   text = "loafing" }, 2 }
+  return cases
+end
+
+scenarios[#scenarios + 1] = {
+  name = "badge_rules_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(badgeRules()) do
+      local kind, input, gen = case[1], case[2], case[3]
+      local got
+      if kind == "ruleset" then got = Wire.battleRuleset(input, gen)
+      elseif kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, gen)
+      elseif kind == "event" then got = Wire.battleEvent(input, gen)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return { cases = out }
+  end,
+}
+
+-- ------------------------------------------------------------------
 -- Gen 3 Pay Day coins and the holders-only exp fact, through the hub
 -- (docs/plans/gen3-battle-sheet.md §1 outcome, §7.1 exp).  A coop_wild field:
 -- ANN's PAYER scatters coins first, BOB's BOOMER blows itself up to take the

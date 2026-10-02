@@ -1302,6 +1302,29 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- the chart's axis by name reaches the solo referee
+-- ------------------------------------------------------------------
+--
+-- Gold's badge type boost (BattleSim2, DoBadgeTypeBoosts) names a move's type
+-- through the ruleset's `typeIds` -- MediatedBattle.snapshotRuleset's axis, the
+-- registry ids in chart order.  The solo divert builds its Gen 1 / Gen 2
+-- referee at one call site (`turnFor(generation)`), so what it hands Gen 1's
+-- here is what Gold's is handed.
+
+;(function()
+  local real, seen = Turn.create, nil
+  Turn.create = function(opts)
+    seen = opts
+    return real(opts)
+  end
+  local okFight, f = pcall(fightOf, "wild")
+  Turn.create = real
+  ok(okFight and f.started, "typeIds solo: the wild fight is taken over")
+  eq(table.concat(seen and seen.typeIds or {}, ","), "FIRE,NORM",
+     "typeIds solo: the referee is handed the chart's axis by name, in chart order")
+end)()
+
+-- ------------------------------------------------------------------
 -- Gen 3's statics, and that none of them reaches this generation's path
 -- ------------------------------------------------------------------
 --

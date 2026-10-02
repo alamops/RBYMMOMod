@@ -1254,6 +1254,16 @@ M.POOL_ENTRY3_MAX = 128
 M.EVENT_STATS3 = { atk = true, def = true, spe = true, spa = true, spd = true, acc = true, eva = true }
 M.STAGE3_MAX = 6
 M.DELTA3_MAX = 12
+-- The outcome an `obey` event names (contract K3, docs/plans/gen3-battle-sheet.md
+-- §7.2.1): one per branch of the engine's `disobedient` (battle/engine.lua:1291,
+-- pret IsMonDisobedient), the four loaf lines among them in the cart's
+-- gInobedientStringIds order.  A closed set because the screens look each one
+-- up as a line of the cart's (MediatedBattle.OBEY_STRINGS3); prose in its
+-- place would be a sentence no text pack holds.
+M.OBEY_TOKENS3 = {
+  ignores_asleep = true, uses_random_move = true, falls_asleep = true, hits_itself = true,
+  loafing = true, wont_obey = true, turned_away = true, pretend_not_notice = true,
+}
 
 -- Gen 1's status conditions, as three-letter tokens.
 --
@@ -1478,6 +1488,30 @@ local function battleRuleset3(raw)
   return out
 end
 
+-- The chart's axis by name (Gen 1 / Gen 2 `typeIds`): the type registry id of
+-- each chart index in order (MediatedBattle.typeOrder's), which BattleSim2
+-- resolves a move's type index through for Gold's badge type boost
+-- (DoBadgeTypeBoosts is keyed by type, a move row carries only the index).
+-- Present-but-unreadable refuses the ruleset, as `specialTypes` does: a stray
+-- entry would name the wrong type at its index.  Never longer than a chart may
+-- be wide (BATTLE_TYPE_MAX, the width `chartOf` refuses past), and an id past
+-- 40 characters is refused rather than cut -- the reading lib/sanitize.js's
+-- cleanId has, so the two twins answer one list the same way.
+local function typeIdsOf(raw)
+  if type(raw) ~= "table" then return nil end
+  local n = #raw
+  if n < 1 or n > Config.BATTLE_TYPE_MAX then return nil end
+  local out = {}
+  for i = 1, n do
+    local entry = raw[i]
+    if type(entry) ~= "string" or #entry > 40 then return nil end
+    local id = M.id(entry)
+    if not id then return nil end
+    out[i] = id
+  end
+  return out
+end
+
 -- `generation` (optional) is the hub's; see rulesetIsGen3.  Gen 1 / Gen 2
 -- rulesets are read exactly as before.
 function M.battleRuleset(raw, generation)
@@ -1502,6 +1536,12 @@ function M.battleRuleset(raw, generation)
       special[#special + 1] = t
     end
     out.specialTypes = special
+  end
+  -- Optional chart axis by name (typeIdsOf).  Absent = no move's type can be
+  -- named, so no badge type boost fires (BattleSim2 Turn.lua `_typeIdOf`).
+  if raw.typeIds ~= nil then
+    out.typeIds = typeIdsOf(raw.typeIds)
+    if not out.typeIds then return nil end
   end
   -- Optional Metronome pick pool: full move sheets from the host's decode.
   -- Read in the older dialect by name, never by sniffing a row's `num`: this
@@ -2440,9 +2480,14 @@ function M.battleEvent(raw, generation)
   local out = { battle = battle, seq = seq, t = raw.t }
   -- Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — M.text strips `_`.
   -- A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4").
+  -- An `obey`'s is one of the eight outcome tokens (M.OBEY_TOKENS3) or nothing:
+  -- dropped like any mangled field, so the screen falls back to the referee's
+  -- own sentence that follows it rather than phrasing a token it has no line for.
   if raw.text ~= nil then
     if raw.t == "item" or raw.t == "anim" or raw.t == "ball" then
       out.text = M.id(raw.text)
+    elseif raw.t == "obey" then
+      out.text = M.OBEY_TOKENS3[raw.text] and raw.text or nil
     else
       out.text = M.text(raw.text, Config.MESSAGE_MAX)
     end

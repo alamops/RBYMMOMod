@@ -591,6 +591,21 @@ test('Pay Day rides the outcome of the same fights on both hubs and both sims', 
   assert.deepStrictEqual(relayModes, ['coop_npc', 'coop_wild', 'wild'], 'never a player-vs-player mode');
 });
 
+test('Hub.lua and relay.js name a Gen 3 seat\'s cart family the same way', () => {
+  // The referee's obedience reads a fighter's `family` (Focus Punch is exempt
+  // on FireRed / LeafGreen, not on Emerald; gen3-battle-sheet.md §1.1), and
+  // each hub stamps it from the client's own hello version. A cart one hub
+  // maps and the other does not is a disobedience roll that differs by host.
+  const hub = read('src/Hub.lua').match(/local CART_FAMILY\s*=\s*\{([^}]*)\}/);
+  assert.ok(hub, 'Hub.lua must declare local CART_FAMILY');
+  const relay = read('server/lib/relay.js').match(/const CART_FAMILY\s*=\s*new Map\(\[([\s\S]*?)\]\);/);
+  assert.ok(relay, 'relay.js must declare const CART_FAMILY');
+  const hubPairs = [...hub[1].matchAll(/(\w+)\s*=\s*"(\w+)"/g)].map((x) => `${x[1]}=${x[2]}`).sort();
+  const relayPairs = [...relay[1].matchAll(/\['(\w+)',\s*'(\w+)'\]/g)].map((x) => `${x[1]}=${x[2]}`).sort();
+  assert.deepStrictEqual(hubPairs, relayPairs, 'one cart -> family table on both hubs');
+  assert.deepStrictEqual(hubPairs, ['emerald=rse', 'firered=frlg', 'leafgreen=frlg'], 'the three Gen 3 carts');
+});
+
 test('the Gen 3 badge rules are one rule on both sims', () => {
   // docs/plans/gen3-badge-rules.md K1-K3: the modes in which side a keeps its
   // trainers' badge boosts and obedience, the cart families whose obedience
@@ -622,6 +637,11 @@ test('the Gen 3 badge rules are one rule on both sims', () => {
   const luaLoaf = [...loaf[1].matchAll(/\{\s*"(\w+)"/g)].map((m) => m[1]);
   assert.deepStrictEqual(Battle3.Move.LOAF_LINES.map(([token]) => token), luaLoaf,
     'the four loaf lines, in the cart order the roll indexes');
+  // ...and the closed set the two sanitisers hold an `obey`'s text to.
+  assert.deepStrictEqual(luaSet(read('src/Wire.lua'), 'OBEY_TOKENS3'), OBEY_TOKENS,
+    'Wire.OBEY_TOKENS3 is the eight outcomes');
+  assert.deepStrictEqual([...sanitize.OBEY_TOKENS3].sort(), OBEY_TOKENS,
+    'and so is sanitize.js OBEY_TOKENS3');
   const luaTokens = new Set(luaLoaf);
   for (const m of move.matchAll(/_obeyLine\(user, "(\w+)"/g)) luaTokens.add(m[1]);
   const jsTokens = new Set(Battle3.Move.LOAF_LINES.map(([token]) => token));

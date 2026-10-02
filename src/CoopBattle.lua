@@ -3759,6 +3759,22 @@ function M:playEvents(events)
       self.messages[#self.messages + 1] = {
         act = function(battle) battle:applyState3(event) end,
       }
+    elseif event.kind == "obey3" then
+      -- A mon that would not obey (medRows3): the cart's line for the outcome,
+      -- naming the battler on that seat at this point in the batch, in the
+      -- player's own text pack -- and only for our side, which is the only
+      -- side the cart ever asks (pret IsMonDisobedient).  Anything else, or a
+      -- build with no text pack, says the referee's own sentence instead, so
+      -- the outcome is read exactly once either way.
+      local who = showing(event.slot)
+      local line = nil
+      if not self:foeSide(event.slot) then
+        line = Mediated.obeyText3(event.token, who and who.name)
+      end
+      line = line or event.fallback
+      if type(line) == "string" and line ~= "" then
+        self.messages[#self.messages + 1] = { text = line }
+      end
     elseif event.kind == "learn" then
       self:learnMove(event)
     elseif event.kind == "send" then
@@ -11897,6 +11913,36 @@ local EXP_PER_FAINT3 = 6
 -- shared branches of medRows.
 function M:medRows3(msg, rows, index, slot, say)
   local kind = msg.t
+  -- An `obey` row owns exactly the next event -- the referee's own sentence for
+  -- the same outcome, which it always emits straight behind (Move.lua
+  -- Bm:_obeyLine) -- and nothing after.  Matched on `seq` so a lossy stream
+  -- that dropped that sentence cannot swallow the line after it.  Kept on the
+  -- row rather than said: it is what the row prints when the player's text
+  -- pack has no line for the outcome (`playEvents`, obey3).
+  local obey = self.obeyRow3
+  self.obeyRow3 = nil
+  if kind == "msg" and obey and tonumber(msg.seq) == obey.seq + 1 then
+    obey.fallback = msg.text
+    return true
+  end
+  if kind == "obey" then
+    -- A traded mon over its badge cap disobeyed (contract K3): one line, the
+    -- cart's (MediatedBattle.obeyText3), phrased when its row plays so it
+    -- names whoever the screen is showing on that seat by then.  The engine
+    -- draws nothing for it; whatever the outcome does next -- the called
+    -- move's stream, the nap's `status`, the self-hit's line and `damage` --
+    -- arrives as its own events and plays as any other does.
+    if index then
+      local row = { kind = "obey3", slot = index, token = msg.text }
+      rows[#rows + 1] = row
+      local seq = tonumber(msg.seq)
+      if seq then
+        row.seq = seq
+        self.obeyRow3 = row
+      end
+    end
+    return true
+  end
   if kind == "faint" then
     -- A knockout on the other side is the only thing that can owe this client
     -- experience: banked here, spent by the `exp` shares that follow it.

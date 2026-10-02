@@ -3491,6 +3491,160 @@ block("solo re-armed foe", function()
 end)
 
 -- ------------------------------------------------------------------
+-- 14. a mon that would not obey (contract K3, docs/plans/gen3-badge-rules.md)
+-- ------------------------------------------------------------------
+--
+-- The referee says each outcome twice over: an `obey` event naming it, and its
+-- own English sentence straight behind (BattleSim3 Move.lua Bm:_obeyLine).  The
+-- double screen says it once, in the cart's line out of the player's text pack
+-- (CoopBattle medRows3 -> playEvents' obey3 row).  The text pack is a stand-in
+-- for the engine's (Gen3.battleText): the cart's line shapes, in capitals so a
+-- line it printed can be told from the referee's, and only for a mon named the
+-- way the engine's battle_text.lua needs one on the player's side.
+do
+  local Gen3 = need("Gen3")
+  local CART = {
+    STRINGID_PKMNIGNORESASLEEP = "%s IGNORED\nORDERS WHILE ASLEEP!",
+    STRINGID_PKMNIGNOREDORDERS = "%s IGNORED\nORDERS!",
+    STRINGID_PKMNBEGANTONAP = "%s BEGAN TO NAP!",
+    STRINGID_PKMNLOAFING = "%s IS\nLOAFING AROUND!",
+    STRINGID_PKMNWONTOBEY = "%s WON'T\nOBEY!",
+    STRINGID_PKMNTURNEDAWAY = "%s TURNED AWAY!",
+    STRINGID_PKMNPRETENDNOTNOTICE = "%s PRETENDED\nNOT TO NOTICE!",
+  }
+  local realText = Gen3.battleText
+  local packOff = false
+  local function cartLine(token, name) return CART[Mediated.OBEY_STRINGS3[token]]:format(name) end
+  -- How many times the box showed `line` (newlines aside) in `seen`.
+  local function shownCount(seen, line)
+    local n = 0
+    for _, shown in ipairs(seen) do
+      if flat(shown) == flat(line) then n = n + 1 end
+    end
+    return n
+  end
+  local function shownAt(seen, line)
+    for i, shown in ipairs(seen) do
+      if flat(shown) == flat(line) then return i end
+    end
+    return nil
+  end
+  -- Our lead (CHARMANDER, our own) and a traded L50 PIDGEY in seat 2: with no
+  -- badges its cap is 10, so the referee asks it every turn.
+  local function obeyParty()
+    return { mon(4, 20, { moves = { 33, 45 } }), mon(16, 50, { moves = { 33, 45 }, otId = 999 }),
+             mon(29, 18) }
+  end
+
+  Gen3.battleText = function(id, fill)
+    local shape = CART[id]
+    if not shape then return realText(id, fill) end
+    if packOff then return nil end
+    local atk = type(fill) == "table" and fill.atk or nil
+    if not (type(atk) == "table" and atk.side == "player" and type(atk.name) == "string") then return nil end
+    return shape:format(atk.name)
+  end
+
+  -- The rows by hand: what medRows makes of the pair, and what the queue says.
+  block("obey rows", function()
+    local f = makeFight({ party = obeyParty() })
+    local s = f.screen
+    eq(f.settle(), "choose", "obey rows: the first menu opens")
+    eq(f.pending.party.mons[2].traded, true, "obey rows: seat 2's sheet says it is traded (K2)")
+    local rows = s:medRows({ battle = "sd1", seq = 900, t = "obey", slot = 1, side = "a", text = "turned_away" })
+    eq(#rows, 1, "obey rows: the event is one row")
+    eq(rows[1] and rows[1].kind, "obey3", "obey rows: ...an obey3 row")
+    eq(#s:medRows({ battle = "sd1", seq = 901, t = "msg", text = "PIDGEY turned away!" }), 0,
+       "obey rows: the referee's sentence behind it is not a row of its own")
+    eq(rows[1] and rows[1].fallback, "PIDGEY turned away!", "obey rows: ...it is the row's fallback")
+    local before = #s.messages
+    s:playEvents(rows)
+    eq(#s.messages, before + 1, "obey rows: one line queued")
+    local queued = s.messages[#s.messages]
+    eq(type(queued) == "table" and queued.text, cartLine("turned_away", "PIDGEY"),
+       "obey rows: the cart's line, naming seat 2's PIDGEY")
+
+    -- No text pack: the referee's sentence, once.
+    rows = s:medRows({ battle = "sd1", seq = 902, t = "obey", slot = 1, side = "a", text = "loafing" })
+    s:medRows({ battle = "sd1", seq = 903, t = "msg", text = "PIDGEY is loafing around!" })
+    packOff = true
+    before = #s.messages
+    s:playEvents(rows)
+    packOff = false
+    eq(#s.messages, before + 1, "obey rows: no text pack -- one line")
+    eq(s.messages[#s.messages] and s.messages[#s.messages].text, "PIDGEY is loafing around!",
+       "obey rows: ...the referee's sentence")
+
+    -- The foe's side (the cart never asks it): the referee's sentence.
+    rows = s:medRows({ battle = "sd1", seq = 904, t = "obey", slot = 3, side = "b", text = "wont_obey" })
+    s:medRows({ battle = "sd1", seq = 905, t = "msg", text = "MEW won't obey!" })
+    before = #s.messages
+    s:playEvents(rows)
+    eq(s.messages[#s.messages] and s.messages[#s.messages].text, "MEW won't obey!",
+       "obey rows: a foe-side obey says the referee's sentence")
+    eq(#s.messages, before + 1, "obey rows: ...once")
+
+    -- A lossy stream: the sentence behind the `obey` went missing, and the line
+    -- after it is still a line.
+    rows = s:medRows({ battle = "sd1", seq = 906, t = "obey", slot = 1, side = "a", text = "hits_itself" })
+    local after = s:medRows({ battle = "sd1", seq = 908, t = "msg", text = "It hurt itself in its confusion!" })
+    eq(#after, 1, "obey rows: a msg that is not the next event is said")
+    eq(rows[1] and rows[1].fallback, nil, "obey rows: ...and is not taken for the obey's sentence")
+
+    -- The raw token is never a line (the shared fallback used to say `text`).
+    for _, line in ipairs(s.messages) do
+      local text = type(line) == "table" and line.text or line
+      check(not (type(text) == "string" and Wire.OBEY_TOKENS3[text]), "obey rows: no raw token on the box")
+    end
+  end)
+
+  -- The real referee: seat 2's traded PIDGEY disobeys on the first turn of
+  -- some seed; the cart's line shows once, the referee's sentence never, and
+  -- the turn plays on to the next menu with seat 1's move made.
+  block("obey referee", function()
+    local found = nil
+    for seed = 1, 60 do
+      local f = makeFight({ party = obeyParty(), seed = seed })
+      local s = f.screen
+      if f.settle() ~= "choose" then break end
+      fightWith(f, 2)   -- seat 1: GROWL (both foes, never aimed)
+      fightWith(f, 2)   -- seat 2: GROWL
+      local result = f.settle()
+      for i, ev in ipairs(f.events) do
+        if ev.t == "obey" and ev.slot == 1 then
+          found = { f = f, s = s, ev = ev, nextEv = f.events[i + 1], result = result, seed = seed }
+          break
+        end
+      end
+      if found then break end
+    end
+    check(found ~= nil, "obey referee: seat 2's traded PIDGEY disobeys on some seed's first turn")
+    if not found then return end
+    local f, token = found.f, found.ev.text
+    local tag = "obey referee " .. tostring(token) .. "@" .. found.seed
+    check(Wire.OBEY_TOKENS3[token] == true, tag .. ": the referee named an outcome")
+    eq(found.nextEv and found.nextEv.t, "msg", tag .. ": its sentence follows the event")
+    eq(shownCount(f.seen, cartLine(token, "PIDGEY")), 1, tag .. ": the cart's line, shown once")
+    eq(shownCount(f.seen, found.nextEv and found.nextEv.text), 0, tag .. ": the referee's sentence never")
+    check(found.result == "choose" or found.result == "finished", tag .. ": the turn played on (" ..
+          tostring(found.result) .. ")")
+    local seat1Moved = false
+    for _, ev in ipairs(f.events) do
+      if ev.t == "anim" and ev.slot == 0 then seat1Moved = true end
+    end
+    check(seat1Moved, tag .. ": seat 1's move was made in the same turn")
+    if token == "hits_itself" then
+      local at = shownAt(f.seen, cartLine(token, "PIDGEY"))
+      local hurt = lineIndex(f.seen, "hurt itself")
+      check(at and hurt and hurt > at, tag .. ": the self-hit line follows")
+    end
+    eq(f.err, nil, tag .. ": the referee took every choice without a throw")
+  end)
+
+  Gen3.battleText = realText
+end
+
+-- ------------------------------------------------------------------
 -- the whole run
 -- ------------------------------------------------------------------
 

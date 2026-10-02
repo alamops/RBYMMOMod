@@ -2424,6 +2424,115 @@ function testGen1NoFamily() {
   ok(entries === 4, 'family gen 1: all four seats were looked at');
 }
 
+// Gold's badge type boost: the ruleset's `typeIds` reaches the referee.
+//
+// lib/battle2 ports DoBadgeTypeBoosts (keyed by type), but a move row carries
+// only its chart index; the ruleset's typeIds -- MediatedBattle.snapshotRuleset's
+// chart axis by name -- is what names it. The hub hands it to Turn.attempt, so a
+// HIVE owner's BUG move hits harder in coop_npc; a badge for another type does
+// nothing to it, and with no typeIds nothing can be named and nothing fires.
+// tests/hub_battle.lua pins the same on the Lua twin.
+function dial2(relay, name) {
+  const peer = { outbox: [], remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => {};
+  const id = relay.accept(peer);
+  const playerId = testPlayerId(name);
+  relay.handle(id, {
+    type: 'mmo.hello',
+    proto: PROTOCOL,
+    name,
+    map: 'NEW_BARK_TOWN',
+    x: 5,
+    y: 5,
+    facing: 'down',
+    generation: 2,
+    version: 'gold',
+    playerId,
+  });
+  return { id: playerId, peer, name, ephemeralId: id };
+}
+
+// The type axis: 0 is a type no badge names, 1 is BUG (HIVE's), 2 is FIRE.
+const CHART2 = [[100, 100, 100], [100, 100, 100], [100, 100, 100]];
+const TYPE_IDS2 = ['DARK', 'BUG', 'FIRE'];
+
+function sheet2(o) {
+  return {
+    species: o.species || 'ALPHA',
+    level: 50,
+    hp: o.hp || 300,
+    maxHp: o.hp || 300,
+    stats: {
+      atk: o.atk || 100, def: o.def || 100, spe: o.spe || 50, spa: 50, spd: 100,
+    },
+    moves: [{
+      id: o.move || 'thump', pp: 20, power: o.power || 1, accuracy: 255, type: o.type || 0, effect: 0, chance: 0,
+    }],
+  };
+}
+
+// What ANN's BUG move dealt the NPC at field 3, the ruleset and her badges as
+// given. BOB aims at the other NPC, so field 3's only hit is hers.
+function bugHit(badges, typeIds) {
+  const relay = makeRelay(makeClock(), { generation: 2 });
+  relay.forceBattleSeed = 5;
+  const seen = spyAttempt(relay);
+  const a = dial2(relay, 'ANN');
+  const b = dial2(relay, 'BOB');
+  relay.openCoopBattle('g2t', [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  const record = relay.battles.get('g2t');
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', battle: 'g2t', chart: CHART2, typeIds, specialTypes: [2],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g2t',
+    side: 'a',
+    badges,
+    mons: [sheet2({
+      spe: 200, power: 50, type: 1, move: 'bugbite',
+    })],
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: 'g2t', side: 'a', mons: [sheet2({ spe: 100 })],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: 'g2t',
+    side: 'b',
+    mons: [sheet2({ species: 'WALL', hp: 900, spe: 1 }), sheet2({ species: 'WALL', hp: 900, spe: 1 })],
+  });
+  if (!record.sim) return { hit: null, record, seen };
+  a.peer.outbox = [];
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: 'g2t', action: 'fight', move: 0, target: 3,
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: 'g2t', action: 'fight', move: 0, target: 4,
+  });
+  const hit = a.peer.outbox.find((m) => m.type === 'mmo.battle_event' && m.t === 'damage' && m.slot === 3);
+  return { hit: hit ? hit.amount : false, record, seen };
+}
+
+function testGen2TypeIdsBoost() {
+  const boosted = bugHit(['HIVE'], TYPE_IDS2);
+  ok(boosted.record && boosted.record.sim, 'typeIds: the Gen 2 coop_npc field opens');
+  ok((boosted.seen.opts && boosted.seen.opts.typeIds || []).join(',') === 'DARK,BUG,FIRE',
+    'typeIds: the hub hands the uploaded axis to Turn.attempt');
+  ok((boosted.record.sim.typeIds || []).join(',') === 'DARK,BUG,FIRE', 'typeIds: and the referee keeps it');
+  const annFighter = boosted.record.sim.byId.get(testPlayerId('ANN'));
+  ok(annFighter && annFighter.badges && annFighter.badges.HIVE === true, "typeIds: ANN's fighter holds HIVE");
+  const plain = bugHit(undefined, TYPE_IDS2).hit;
+  ok(typeof boosted.hit === 'number' && typeof plain === 'number', "typeIds: ANN's BUG move lands on field 3");
+  ok(boosted.hit > plain, `typeIds: HIVE boosts a BUG move (${boosted.hit} > ${plain})`);
+  // FOG: GHOST's type badge, and none of Gold's stat badges (ZEPHYR would raise
+  // Attack, BadgeStatBoosts).
+  ok(bugHit(['FOG'], TYPE_IDS2).hit === plain, 'typeIds: a badge for another type does nothing to it');
+  ok(bugHit(['HIVE'], undefined).hit === plain,
+    "typeIds: with no typeIds the move's type has no name, and nothing fires");
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
@@ -2436,5 +2545,6 @@ testGen3FamilyMixedCarts();
 testGen3FamilyFocusPunch();
 testGen3FamilyLinkRules();
 testGen1NoFamily();
+testGen2TypeIdsBoost();
 
 console.log(`hub_battle: ${passed} checks passed`);

@@ -561,6 +561,17 @@ function M.snapshotRuleset(game, opts)
   local out = { chart = chart }
   if #specialTypes > 0 then out.specialTypes = specialTypes end
   if #metronomePool > 0 then out.metronomePool = metronomePool end
+  -- The chart's axis by name: `typeIds[i + 1]` is the registry id of the type
+  -- every row, column, move and monster on this upload calls `i`.  Gold's badge
+  -- type boost (DoBadgeTypeBoosts, keyed by type) is what reads it -- the
+  -- referee holds no type table and a move row carries only the index
+  -- (BattleSim2 `_typeIdOf`).  A copy, so nothing downstream can write into
+  -- `typeOrder`'s cache.
+  if order and #order.ids > 0 then
+    local ids = {}
+    for i, id in ipairs(order.ids) do ids[i] = id end
+    out.typeIds = ids
+  end
   return out
 end
 
@@ -976,6 +987,31 @@ function M.sendMoveset(transport, battle, monIndex0, moves, generation)
   return true
 end
 
+-- Gold's badges, as `M.badgesOf` sends them: each one the save holds, by the
+-- engine's own ownership test (src/battle/gen2/Battle.lua Battle:hasBadge),
+-- walked in the cart's bit order -- wJohtoBadges, then wKantoBadges.
+local function goldBadges(save)
+  if type(save) ~= "table" then return nil end
+  local ok, Battle = pcall(require, "src.battle.gen2.Battle")
+  if not (ok and type(Battle) == "table" and type(Battle.hasBadge) == "function") then
+    return nil
+  end
+  -- Battle:hasBadge reads `self.save` and nothing else of the battle.
+  local probe = { save = save }
+  local out = {}
+  for _, store in ipairs({
+    { "badges", Battle.JOHTO_BADGE_ORDER },
+    { "kantoBadges", Battle.KANTO_BADGE_ORDER },
+  }) do
+    for _, badge in ipairs(type(store[2]) == "table" and store[2] or {}) do
+      local okHas, has = pcall(Battle.hasBadge, probe, store[1], badge)
+      if okHas and has then out[#out + 1] = badge end
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
 -- The badges this player has earned, as a list for the wire -- or nil where
 -- they count for nothing.
 --
@@ -991,39 +1027,41 @@ end
 --
 -- Gen 3 reads the cart's badge flags (Gen3.badgeList: the badge numbers
 -- { "1", "3", ... }, contract K1), which BattleSim3 turns into the badge
--- boosts and the obedience caps.  Gen 1 / Gen 2 read the badge *rows* rather
--- than a list written down here, so a mod that adds a badge -- or retunes
--- which ones boost what -- is covered without this file knowing about it.
+-- boosts and the obedience caps.
 --
--- MK403: never hard-require Gen 1 `src.battle.Damage` on Gold. Prefer
--- `data.constants.badgeBoosts`, then a soft Gen 2 Damage/Battle module, then
--- Gen 1 Damage only on a Gen 1 boot; missing rows soft-degrade to no badges.
+-- Gen 2 sends every badge the save holds, the eight Johto then the eight
+-- Kanto, by the Gold names (ZEPHYR .. RISING, BOULDER .. EARTH) BattleSim2's
+-- boosts are keyed on.  Ownership is the Gold engine's own answer
+-- (src/battle/gen2/Battle.lua Battle:hasBadge, the reading FieldMoves.hasBadge
+-- also makes): `save.player.badges` for Johto and `save.player.kantoBadges`
+-- for Kanto, each keyed by name or by wJohtoBadges / wKantoBadges bit
+-- position.  Not the bag -- a Gold badge is never an item -- and not
+-- `data.constants.badgeBoosts`, which holds Gen 1's rows: Gold's
+-- BadgeStatBoosts never reads them.
+--
+-- Gen 1 reads the badge *rows* rather than a list written down here, so a mod
+-- that adds a badge -- or retunes which ones boost what -- is covered without
+-- this file knowing about it.
+--
+-- MK403: never hard-require Gen 1 `src.battle.Damage` on Gold.  Gold asks a
+-- soft-required Gen 2 Battle module and nothing else; Gen 1 prefers
+-- `data.constants.badgeBoosts`, then Gen 1 Damage.  Missing rows soft-degrade
+-- to no badges.
 function M.badgesOf(game, mode)
   if M.LINK_MODES[mode] then return nil end
-  if Gen.generation(game) == 3 then return Gen3.badgeList() end
+  local generation = Gen.generation(game)
+  if generation == 3 then return Gen3.badgeList() end
   local data = game and game.data
   local save = game and game.save
   if not (data and save) then return nil end
+  if generation == 2 then return goldBadges(save) end
 
   local rows = data.constants and data.constants.badgeBoosts
   if not rows then
-    local generation = Gen.generation(game)
-    if generation == 2 then
-      -- Gen 2 Damage has no BADGE_BOOSTS twin; Battle.BADGE_TYPE_BOOSTS names
-      -- every Johto/Kanto badge for ownership checks.
-      local ok, Battle = pcall(require, "src.battle.gen2.Battle")
-      if ok and Battle and type(Battle.BADGE_TYPE_BOOSTS) == "table" then
-        rows = Battle.BADGE_TYPE_BOOSTS
-      else
-        local okD, Damage = pcall(require, "src.battle.gen2.Damage")
-        rows = okD and Damage and Damage.BADGE_BOOSTS or nil
-      end
-    else
-      -- Concat so gen2check does not treat this as a hard Gen1 Damage site
-      -- on a Gold boot (MK403); this arm only runs when generation ~= 2.
-      local ok, Damage = pcall(require, table.concat({ "src", "battle", "Damage" }, "."))
-      rows = ok and Damage and Damage.BADGE_BOOSTS or nil
-    end
+    -- Concat so gen2check does not treat this as a hard Gen1 Damage site
+    -- on a Gold boot (MK403); this arm only runs on Gen 1.
+    local ok, Damage = pcall(require, table.concat({ "src", "battle", "Damage" }, "."))
+    rows = ok and Damage and Damage.BADGE_BOOSTS or nil
   end
   if not rows then return nil end
 
@@ -2690,6 +2728,64 @@ function M:onReady(msg)
   end
 end
 
+-- ------- a mon that would not obey (contract K3)
+--
+-- The cart's line for each outcome of the engine's `disobedient`
+-- (battle/engine.lua:1291, pret IsMonDisobedient; docs/plans/gen3-battle-sheet.md
+-- §7.2.1), keyed by the `obey` event's token (Wire.OBEY_TOKENS3).  The four
+-- loaf lines are pret gInobedientStringIds.  `hits_itself` opens with the same
+-- line as the `wont_obey` loaf (BattleScript_IgnoresAndHitsItself prints
+-- STRINGID_PKMNWONTOBEY); its second line, STRINGID_ITHURTCONFUSION, and the
+-- nap's STRINGID_PKMNFELLASLEEP are the referee's own `msg`s after it, said
+-- the way every confusion self-hit and every sleep is.
+M.OBEY_STRINGS3 = {
+  ignores_asleep     = "STRINGID_PKMNIGNORESASLEEP",
+  uses_random_move   = "STRINGID_PKMNIGNOREDORDERS",
+  falls_asleep       = "STRINGID_PKMNBEGANTONAP",
+  hits_itself        = "STRINGID_PKMNWONTOBEY",
+  loafing            = "STRINGID_PKMNLOAFING",
+  wont_obey          = "STRINGID_PKMNWONTOBEY",
+  turned_away        = "STRINGID_PKMNTURNEDAWAY",
+  pretend_not_notice = "STRINGID_PKMNPRETENDNOTNOTICE",
+}
+
+-- That line for a mon on the player's side, in the player's own text pack.
+--
+-- The referee narrates every outcome in a sentence of its own English right
+-- behind the `obey` event (Move.lua Bm:_obeyLine), and that sentence is the
+-- fallback rather than the line: the cart prints these from its own string
+-- table -- the engine says them with sayId and `{ atk = user }` -- so the
+-- player reads them in their cart's words and line breaks.  Only ever the
+-- player's side (pret IsMonDisobedient returns 0 for B_SIDE_OPPONENT), so the
+-- mon is named without a prefix (battle_text.lua withPrefix, `side`
+-- "player").  nil for a token with no line, a seat with no name, or no text
+-- pack -- and the caller then lets the referee's sentence through instead.
+function M.obeyText3(token, name)
+  local id = type(token) == "string" and M.OBEY_STRINGS3[token] or nil
+  if not id or type(name) ~= "string" or name == "" then return nil end
+  return Gen3.battleText(id, { atk = { side = "player", name = name } })
+end
+
+-- The `obey` event: the cart's line in place of the referee's sentence.
+--
+-- No sight goes with it -- the engine plays no animation for a disobedient mon
+-- (Engine.disobedient only says its lines; a nap's sleep is the `status`
+-- event that follows) -- so the whole of it is the one line.  Named after the
+-- seat's occupant as the referee sees it, which is the parked arrival when one
+-- is waiting (`noteSlot`).  True when the line went into the queue: the `msg`
+-- immediately behind it is then the same outcome in the referee's words and
+-- is not said (`onEvent`).
+function M:sayObey3(msg)
+  if self:generation() ~= 3 then return false end
+  if sideOfSlot(msg.slot) ~= (self.mySide or "a") then return false end
+  local seat = msg.slot ~= nil and self.slots[msg.slot] or nil
+  local on = seat and (seat.pending or seat)
+  local line = M.obeyText3(msg.text, on and on.species)
+  if not line then return false end
+  self:say(line)
+  return true
+end
+
 -- One thing to draw, in order.
 --
 -- `seq` is what makes the stream a stream: an event whose sequence is one this
@@ -2710,11 +2806,17 @@ function M:onEvent(msg)
   if self.phase == "setup" then self.phase = "play" end
 
   local kind = msg.t
+  -- An `obey` this screen phrased in the cart's words owns exactly the next
+  -- event -- the referee's own sentence for it, which it always emits straight
+  -- behind (Move.lua Bm:_obeyLine) -- and nothing after.  Matched on `seq` so a
+  -- lossy stream that dropped that sentence cannot swallow the line after it.
+  local obeyed = self.obeyed3
+  self.obeyed3 = nil
   -- Gen 3 prices a knockout whole (Exp3): the `exp` events of one faint are
   -- banked as they arrive and paid the moment anything else follows them.
   if kind ~= "exp" and self.expBatch then self:flushExp3() end
   if kind == "msg" then
-    self:say(msg.text)
+    if not (obeyed and msg.seq == obeyed + 1) then self:say(msg.text) end
 
   elseif kind == "anim" then
     -- Queued with the message stream so the flash lands in referee order.
@@ -3030,6 +3132,14 @@ function M:onEvent(msg)
     -- HIDEPIC, SHAKE, and POOF + SHOWPIC on a break-out) -- the rows Gen 1 and
     -- Gen 2's referees emit one by one, stated by Gen 3's in one event.
     self:queueBall3(msg)
+
+  elseif kind == "obey" then
+    -- A traded mon over its badge cap disobeyed (K3): the cart's line, and
+    -- the referee's sentence behind it is not said twice.  Whatever the
+    -- outcome does next -- the called move's stream, the nap's `status`, the
+    -- self-hit's line and `damage` -- arrives as its own events and plays as
+    -- any other does.
+    if self:sayObey3(msg) then self.obeyed3 = msg.seq end
 
   elseif kind == "turn" then
     -- Held rather than acted on: the lines this turn's events produced are
