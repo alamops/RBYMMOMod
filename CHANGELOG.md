@@ -100,7 +100,7 @@ here must match `manifest.version`.
     against party there are no boosts and no disobedience. The referee
     enforces this itself, so a modified client can't change it.
   - **How it works.** Badges travel in the existing `badges` field as
-    `"1".."8"`, and the Gen 3 sheet gains `traded` / `fateful` plus an
+    `"1".."8"`, and the Gen 3 sheet gains `traded` / `unfateful` plus an
     `obey` event (`docs/plans/gen3-battle-sheet.md` §6, §7.2.1). The plan is
     `docs/plans/gen3-badge-rules.md`.
 - **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends

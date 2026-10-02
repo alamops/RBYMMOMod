@@ -112,7 +112,7 @@ Done means:
   - It applies badges only on side a in `wild`, `coop_wild` and `coop_npc`.
 - **K2 (Gen 3 mon sheet).**
   - `traded = true | nil`: the OT id or OT name differs from this player's.
-  - `fateful = true | nil`: the mon's fateful-encounter bit. It is read only for Mew (151) and Deoxys (410).
+  - `unfateful = true | nil` (renamed from `fateful` in review, with the polarity flipped): set only when the engine mon's `fatefulEncounter` is explicitly false. It is read only for Mew (151) and Deoxys (410). Absent means the rule doesn't apply, exactly as the engine (`engine.lua:1299`) tests `== false`, so a dropped or unsent flag can never make a mon disobey.
 - **K3 (obedience event).** R3 defines it and documents it in the sheet doc §7. C3b renders it with the cart's own lines, in the cart's order.
 
 ## 4. Work breakdown — implementation tasks
@@ -185,3 +185,9 @@ After that: review (Phase 5), then TT-H and TT-E in parallel, then run, then fix
 | Gen 2 type boost needs the chart's `typeIds` in the ruleset (client → sanitisers → hubs → solo) | **in this run**: C3b follow-up |
 | Badge boost before vs after stat stages in BattleSim / BattleSim2 (the Gold engine port boosts before; pokecrystal `CalcPlayerStats` and the Gen 1 engine appear to boost after) | **out of scope**: pre-existing ordering in both Gen 1/2 sims, unverified against pret (no source here); a referee-fidelity ticket |
 | BattleSim2's confusion self-hit ignores stages and burn; no 255-stat truncation | **out of scope**: pre-existing Gen 2 referee fidelity, not badge rules; reported by R2b |
+| Review 1 #1: an absent `fateful` made Mew/Deoxys always disobey (the inverse of the engine's `== false` test) | **in this run**: FR + FC, contract K2' `unfateful` |
+| Review 1 #2: Gen 2 Struggle could pick up a badge type boost (type 0 maps to `typeIds[1]`) | **in this run**: FR |
+| Review 1 #3: Gen 1 confusion self-hit ignored badges (pokered reads the boosted stats) | **in this run**: FR |
+| Review 2 #2/#3: `typeIds` sent on every Gen 1/2 upload, and a modded type id refused the whole ruleset; JS read a null-holed list differently from Lua | **in this run**: FC (Gen 2 only, dropped not refused, nulls compacted on both hubs) |
+| Review 2 #5/#8: stale "six kinds" comments, the `LINK_MODES` comment, the dead `SoloBattle.gen3Badges` | **in this run**: FC |
+| Review 2 #1/#4/#6/#7: README edge list, MEW/DEOXYS wording, known-gaps §6, traded rule and TID disclosure | **in this run**: docs commit `2e64411` |

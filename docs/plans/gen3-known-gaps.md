@@ -144,7 +144,7 @@ another page or in another region (show them in the list, as today).
 obedience, on Gen 1 (boosts), Gen 2 (Gold's boosts and type badges) and Gen 3
 (boosts and obedience). Every generation's fights between players are link
 battles. Where it lives: the referees' `BADGE_MODES` gate, the Gen 3 sheet's
-`traded` / `fateful`, and the `obey` event (`docs/plans/gen3-battle-sheet.md`
+`traded` / `unfateful`, and the `obey` event (`docs/plans/gen3-battle-sheet.md`
 §6, §7.2.1).
 
 ## 7. A trainer draw with your team standing leaves the trainer unbeaten
