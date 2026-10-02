@@ -322,11 +322,13 @@ function copyMon(raw, fallback) {
     evs: copyNumbers(raw.evs),
     personality: int(raw.personality, null),
     otId: int(raw.otId, null),
-    // K2 (docs/plans/gen3-badge-rules.md): obedience's two facts about the mon,
-    // decided by its owner's client -- `traded` (pret IsOtherTrainer) and
-    // `fateful` (its fateful-encounter bit, read for Mew and Deoxys only).
+    // K2' (docs/plans/gen3-battle-sheet.md §2): obedience's two facts about the
+    // mon, decided by its owner's client -- `traded` (pret IsOtherTrainer) and
+    // `unfateful` (the engine mon's `fatefulEncounter` is explicitly false, the
+    // only value engine.lua:1299 acts on; read for Mew and Deoxys only). true or
+    // absent; absent never triggers the Mew / Deoxys rule.
     traded: raw.traded === true ? true : null,
-    fateful: raw.fateful === true ? true : null,
+    unfateful: raw.unfateful === true ? true : null,
   };
   if (out.heldItem === 0) {
     out.holdEffect = 0;

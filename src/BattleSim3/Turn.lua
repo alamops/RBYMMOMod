@@ -34,7 +34,7 @@
 --      roll(0,1) [+ self-hit roll(85,100) + Focus Band roll(0,99) when held];
 --      paralysis roll(0,3); infatuation roll(0,1)); obedience, after the PP
 --      check and only for a side-a mon against the computer that is traded and
---      over its badge cap, or a Mew / Deoxys without its fateful bit (none at or
+--      over its badge cap, or a Mew / Deoxys flagged `unfateful` (none at or
 --      under the cap): roll(0,255), then -- unless it is a sleeping Snore /
 --      Sleep Talk -- roll(0,255), then either roll(0,3) per pick until a usable
 --      slot (one roll(0,3) for the loaf line when none is) or roll(0,255) and
@@ -337,12 +337,14 @@ local function copyMon(raw, fallback)
     evs = copyNumbers(raw.evs),
     personality = int(raw.personality, nil),
     otId = int(raw.otId, nil),
-    -- K2 (docs/plans/gen3-badge-rules.md): obedience's two facts about the mon,
-    -- decided by its owner's client.  `traded`: the OT id or OT name is not this
-    -- player's (pret IsOtherTrainer, engine Engine.isTradedMon); `fateful`: its
-    -- fateful-encounter bit, read for Mew and Deoxys only.  true or absent.
+    -- K2' (docs/plans/gen3-battle-sheet.md §2): obedience's two facts about the
+    -- mon, decided by its owner's client.  `traded`: the OT id or OT name is not
+    -- this player's (pret IsOtherTrainer, engine Engine.isTradedMon);
+    -- `unfateful`: the engine mon's `fatefulEncounter` is explicitly false (the
+    -- only value engine.lua:1299 acts on), read for Mew and Deoxys only.  true or
+    -- absent; absent never triggers the Mew / Deoxys rule.
     traded = (raw.traded == true) or nil,
-    fateful = (raw.fateful == true) or nil,
+    unfateful = (raw.unfateful == true) or nil,
   }
   if out.heldItem == 0 then out.holdEffect, out.holdParam = 0, 0 end
   return out

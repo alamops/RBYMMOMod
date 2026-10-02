@@ -1172,7 +1172,10 @@ Bm._obeyLine = function _obeyLine(b, token, tail) {
 // ['stop'] (the action is spent) or ['called', slot] (that usable slot runs
 // instead). Only for a fighter with `badgeRules` (side a against the computer),
 // badges or none; the rest is the engine line for line, its draws in its order,
-// each only when reached. See the Lua twin for the prose.
+// each only when reached. The Mew / Deoxys rule fires only on `unfateful`
+// (K2': the engine mon's `fatefulEncounter` is explicitly false, engine.lua:1299),
+// so a sheet that says nothing obeys under the ordinary traded / cap rule. See
+// the Lua twin for the prose.
 Bm._disobey = function _disobey(C) {
   const { user } = C;
   if (!truthy(user.fighter.badgeRules)) return [null];
@@ -1180,7 +1183,7 @@ Bm._disobey = function _disobey(C) {
   // pret reads the party mon's species, which Transform leaves alone.
   const species = int(mon.speciesNum, 0);
   let ob = 0;
-  if (!((species === SPECIES_MEW || species === SPECIES_DEOXYS) && mon.fateful !== true)) {
+  if (!((species === SPECIES_MEW || species === SPECIES_DEOXYS) && mon.unfateful === true)) {
     if (mon.traded !== true || Damage.hasBadge(user, 8)) return [null];
     ob = 10;
     if (Damage.hasBadge(user, 2)) ob = 30;

@@ -1014,7 +1014,10 @@ end
 -- obedience is what badges lift.  The rest is the engine line for line, its draws
 -- in its order and each only when reached; a mon at or under its cap draws
 -- nothing.  The Mew / Deoxys rule (engine.lua:1299) is on every cart, as the
--- engine has it (docs/plans/gen3-badge-rules.md §8).  Focus Punch skips the
+-- engine has it (docs/plans/gen3-badge-rules.md §8), and fires as the engine's
+-- does: only on `unfateful` (K2', the engine mon's `fatefulEncounter` is
+-- explicitly false), so a sheet that says nothing obeys under the ordinary
+-- traded / cap rule, as the engine's nil field does.  Focus Punch skips the
 -- random-move branch on FireRed / LeafGreen only (BattleProfile
 -- `obedienceFocusPunchExempt`; the fighter's `family`).
 function Bm:_disobey(C)
@@ -1024,7 +1027,7 @@ function Bm:_disobey(C)
   -- pret reads the party mon's species, which Transform leaves alone.
   local species = int(mon.speciesNum, 0)
   local ob = 0
-  if not ((species == SPECIES_MEW or species == SPECIES_DEOXYS) and mon.fateful ~= true) then
+  if not ((species == SPECIES_MEW or species == SPECIES_DEOXYS) and mon.unfateful == true) then
     if mon.traded ~= true or Damage.hasBadge(user, 8) then return nil end
     ob = 10
     if Damage.hasBadge(user, 2) then ob = 30 end
