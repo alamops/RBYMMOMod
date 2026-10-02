@@ -34,7 +34,9 @@
  * pokecrystal rules both twins now share: the stage-then-badge stat order, the
  * crit stage comparison, TruncateHL_BC's loop and link wrap, per-side screens,
  * the confusion self-hit's quirks, typeless Struggle, a Metronome call made
- * with the last PP, and the move-priority brackets.
+ * with the last PP, and the move-priority brackets; the held-item, obedience
+ * and review-fix scenarios after them pin Gold's items, Thief's effectchance,
+ * CheckTurn's gate order, Bide, Leech Seed and Rage.
  *
  * The scenarios below are the JS half of that pair and have to stay a literal
  * mirror of the driver's: same seeds, same parties, same choices in the same
@@ -95,6 +97,14 @@ function mn(o) {
     statusTurns: o.statusTurns,
     traded: o.traded,
     disable: o.disable,
+    // What the review-fix scenarios add: a standing substitute, Bide, Leech
+    // Seed, rage and Transform carried on the sheet.
+    substitute: o.substitute,
+    bide: o.bide,
+    leechSeed: o.leechSeed,
+    raging: o.raging,
+    rageCounter: o.rageCounter,
+    transformed: o.transformed,
     ...(o.item ? {
       heldItem: o.item[0],
       holdEffect: o.item[1],
@@ -903,6 +913,10 @@ scenario('kings_rock', (events) => {
   }, rounds);
 });
 
+// Thief's row: its 100% effect chance (`percent 100`), which the script's
+// `effectchance` rolls before the hit.
+const thief = (power) => hm('THIEF', power, 0, 0, undefined, 100);
+
 scenario('thief', (events) => {
   const round = (b) => {
     b.submitChoice('p1', { action: 'fight', move: 0 });
@@ -912,9 +926,9 @@ scenario('thief', (events) => {
     id: 'th', mode: 'wild', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
-        moves: [hm('THIEF', 10)] })] }],
+        moves: [thief(10)] })] }],
       b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 320, spe: 10, types: [2],
-        item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [hm('THIEF', 10)] })] }],
+        item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [thief(10)] })] }],
     },
   }, repeat(round, 2));
 });
@@ -930,11 +944,11 @@ scenario('thief_refused', (events) => {
     id: 'tr', mode: 'coop_pvp', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
-        item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'], moves: [hm('THIEF', 10)] })] },
+        item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'], moves: [thief(10)] })] },
       { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 80, types: [2],
-        moves: [hm('THIEF', 10)] })] },
+        moves: [thief(10)] })] },
       { playerId: 'a3', name: 'Cal', mons: [mn({ species: 'Eta', maxHp: 300, atk: 200, spe: 70,
-        types: [2], moves: [hm('THIEF', 60)] })] }],
+        types: [2], moves: [thief(60)] })] }],
       b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 60, types: [2],
         item: ['CHARCOAL', 'HELD_FIRE_BOOST', 20, 'CHARCOAL'], moves: [hm('tap', 1)] })] },
       { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 300, spe: 50, types: [2],
@@ -1174,6 +1188,176 @@ function obeyNever(mode, id) {
 scenario('obey_link', obeyNever('1v1', 'ol'));
 scenario('obey_side_b', obeyNever('wild', 'osb'));
 
+// The review fixes (the Lua driver says what each one pins).
+const duelRound = (foe) => (b) => {
+  b.submitChoice('p1', { action: 'fight', move: 0 });
+  b.submitChoice(foe, { action: 'fight', move: 0 });
+};
+const pick = (a, bMove) => (battle) => {
+  battle.submitChoice('p1', { action: 'fight', move: a });
+  battle.submitChoice('p2', { action: 'fight', move: bMove });
+};
+
+scenario('thief_substitute', (events) => play(events, {
+  id: 'tsu', mode: 'wild', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+      moves: [thief(10)] })] }],
+    b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 320, spe: 10, types: [2],
+      substitute: 8, item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [hm('tap', 1)] })] }],
+  },
+}, repeat(duelRound('wild'), 4)));
+
+scenario('thief_chance_miss', (events) => play(events, {
+  id: 'tcm', mode: '1v1', seed: 26836, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+      moves: [thief(10)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 400, spe: 10, types: [2],
+      item: ['CHARCOAL', 'HELD_FIRE_BOOST', 20, 'CHARCOAL'], moves: [hm('tap', 1)] })] }],
+  },
+}, [duelRound('p2')]));
+
+scenario('obey_bide', (events) => {
+  const release = (b) => { b.submitChoice('wild', { action: 'fight', move: 0 }); };
+  return play(events, {
+    id: 'obb', mode: 'wild', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', level: 80, maxHp: 900, spe: 90,
+        types: [2], traded: true, bide: { turns: 0, stored: 40, moveIndex: 1, targetSlot: 3 },
+        moves: [hm('BIDE', 0, 0, 26, 10), hm('tap', 10)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2],
+        moves: [hm('tap', 1)] })] }],
+    },
+  }, [release, duelRound('wild'), duelRound('wild')]);
+});
+
+scenario('bide_slot0', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+  };
+  return play(events, {
+    id: 'bs0', mode: 'coop_pvp', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+        moves: [hm('tap', 1)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 80, types: [2],
+        moves: [hm('tap', 1)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10, types: [2],
+        bide: { turns: 0, stored: 30, moveIndex: 1, targetSlot: 0 },
+        moves: [hm('BIDE', 0, 0, 26, 10), hm('tap', 1)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 300, spe: 20, types: [2],
+        moves: [hm('tap', 1)] })] }],
+    },
+  }, [round]);
+});
+
+scenario('gate_para_confused', (events) => play(events, {
+  id: 'gpc', mode: '1v1', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+      status: 'PAR', confusion: 4, moves: [hm('thump', 10)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10, types: [2],
+      moves: [hm('tap', 1)] })] }],
+  },
+}, repeat(duelRound('p2'), 4)));
+
+scenario('gate_para_disabled', (events) => play(events, {
+  id: 'gpd', mode: '1v1', seed: 9, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 10, types: [2],
+      status: 'PAR', moves: [hm('thump', 10), hm('pound_two', 10)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 90, types: [2],
+      moves: [hm('DISABLE', 0, 0, 86), hm('tap', 1)] })] }],
+  },
+}, [pick(0, 1), pick(0, 0), pick(1, 1)]));
+
+scenario('mysteryberry_transformed', (events) => play(events, {
+  id: 'mbt', mode: 'wild', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Ditto', speciesId: 'DITTO', maxHp: 300,
+      spe: 90, types: [2], item: ['MYSTERYBERRY', 'HELD_RESTORE_PP', 0, 'MYSTERYBERRY'],
+      moves: [hm('TRANSFORM', 0, 0, 57, 10)] })] }],
+    b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10, types: [2],
+      moves: [hm('tap', 1, 0, 0, 1)] })] }],
+  },
+}, repeat(duelRound('wild'), 3)));
+
+scenario('leftovers_large', (events) => play(events, {
+  id: 'lol', mode: '1v1', seed: 4, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 1100, hp: 500, spe: 90,
+      types: [2], item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'], moves: [hm('tap', 1)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10, types: [2],
+      moves: [hm('tap', 1)] })] }],
+  },
+}, [duelRound('p2')]));
+
+scenario('leech_seed_ko', (events) => play(events, {
+  id: 'lsk', mode: '1v1', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, hp: 100, spe: 90,
+      types: [2], moves: [hm('tap', 1)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 320, hp: 10, spe: 10,
+      types: [2], leechSeed: { fromSlot: 0 }, moves: [hm('tap', 1)] })] }],
+  },
+}, repeat(duelRound('p2'), 2)));
+
+scenario('rage', (events) => play(events, {
+  id: 'rg', mode: '1v1', seed: 11, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 500, spe: 90, types: [2],
+      moves: [hm('RAGE', 20, 0, 81), hm('tap', 1)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2],
+      moves: [hm('pelt', 5, 0, 29), hm('tap', 1)] })] }],
+  },
+}, [pick(0, 0), pick(0, 1), pick(1, 0), pick(0, 0)]));
+
+scenario('rage_cap', (events) => play(events, {
+  id: 'rgc', mode: '1v1', seed: 21, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 500, spe: 10, types: [2],
+      raging: true, rageCounter: 254, substitute: 30,
+      moves: [hm('RAGE', 20, 0, 81), hm('tap', 1)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 999, spe: 90, types: [2],
+      moves: [hm('pelt', 5, 0, 29)] })] }],
+  },
+}, repeat(duelRound('p2'), 2)));
+
+scenario('rage_sources', (events) => play(events, {
+  id: 'rgs', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 500, spe: 90, types: [2],
+      status: 'PSN', confusion: 3, moves: [hm('RAGE', 20, 0, 81), hm('tap', 1)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2],
+      moves: [hm('thump', 10)] })] }],
+  },
+}, repeat(duelRound('p2'), 4)));
+
+scenario('side_effect_ko', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    b.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+  };
+  return play(events, {
+    id: 'sko', mode: 'coop_pvp', seed: 6, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
+        moves: [hm('ember_hit', 40, 0, 4, undefined, 100)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 80, types: [2],
+        moves: [hm('daze_hit', 40, 0, 76, undefined, 100)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, hp: 2, spe: 10,
+        types: [2], moves: [hm('tap', 1)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 300, hp: 2, spe: 20,
+        types: [2], moves: [hm('tap', 1)] })] }],
+    },
+  }, [round]);
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -1237,7 +1421,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 40, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 53, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -2517,12 +2701,16 @@ test('held items: Lucky Punch reads the battle species through Transform, Metal 
   assert.strictEqual(Crit2.level({ speciesItemBonus: true, focusEnergy: true, highCritMove: true, scopeLens: true }), 2);
 });
 
-test('held items: Thief both ways, never Mail, never into a full hand', () => {
-  const run = (bItem, aItem) => {
+test('held items: Thief both ways, never Mail, never into a full hand, never past effectchance', () => {
+  // Thief's row: a 100% effect chance (`percent 100`, $ff on the cart).
+  const thiefMove = () => ({ ...hit('THIEF', 10), chance: 100 });
+  const run = (bItem, aItem, seed = 4, substitute = undefined) => {
+    const b = held({ species: 'Beta', maxHp: 400, spe: 10, item: bItem, moves: [hit('tap', 1)] });
+    b.substitute = substitute;
     const { battle, foe } = fight({
-      seed: 4,
-      a: [held({ species: 'Alpha', spe: 90, item: aItem, moves: [hit('THIEF', 10)] })],
-      b: [held({ species: 'Beta', maxHp: 400, spe: 10, item: bItem, moves: [hit('tap', 1)] })],
+      seed,
+      a: [held({ species: 'Alpha', spe: 90, item: aItem, moves: [thiefMove()] })],
+      b: [b],
     });
     battle.drainEvents();
     return { events: roundOf(battle, foe), battle, foe };
@@ -2537,10 +2725,24 @@ test('held items: Thief both ways, never Mail, never into a full hand', () => {
   assert.ok(!sawHeld(run(['SURF_MAIL', null, 0, 'SURF MAIL']).events), 'Mail by id');
   assert.ok(!sawHeld(run(charcoal, ['BERRY', 'HELD_BERRY', 12, 'BERRY']).events), 'a full hand');
   assert.ok(!sawHeld(run(undefined).events), 'an empty foe');
+  const sub = run(charcoal, undefined, 4, 80);
+  assert.ok(!sawHeld(sub.events), 'a substitute at effectchance keeps the item');
+  assert.strictEqual(monOf(sub.battle, sub.foe).heldItem, 'CHARCOAL');
+  assert.ok(said(sub.events, 'Alpha used THIEF'));
+  const miss = run(charcoal, undefined, 26836);
+  assert.ok(!sawHeld(miss.events), 'the 1/256 byte of 255 against a 100% chance takes nothing');
+  assert.strictEqual(monOf(miss.battle, miss.foe).heldItem, 'CHARCOAL');
+  const zero = fight({
+    seed: 4,
+    a: [held({ species: 'Alpha', spe: 90, moves: [{ ...thiefMove(), chance: 0 }] })],
+    b: [held({ species: 'Beta', maxHp: 400, spe: 10, item: charcoal, moves: [hit('tap', 1)] })],
+  });
+  zero.battle.drainEvents();
+  assert.ok(!sawHeld(roundOf(zero.battle, zero.foe)), 'a sheet with a chance of 0 never steals');
   const { battle, foe } = fight({
     mode: 'wild', seed: 4,
     a: [held({ species: 'Alpha', spe: 90, item: LEFTOVERS, moves: [hit('tap', 0, 0, 85)] })],
-    b: [held({ species: 'Beta', spe: 10, moves: [hit('THIEF', 10)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [thiefMove()] })],
   });
   battle.drainEvents();
   assert.ok(said(roundOf(battle, foe), 'Beta stole LEFTOVERS from its foe!'), "the computer's Thief is not gated");
@@ -2723,4 +2925,116 @@ test('held items: Mysteryberry, the stat-up items, and the held vocabulary', () 
     assert.ok(fine, `held vocabulary: ${why}`);
   }
   assert.strictEqual(Events.KINDS.held, true);
+});
+
+// The wave-2 review fixes (docs/plans/gen12-referee-fidelity.md); the Lua
+// twin's block (p) cites the cart for each.
+test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leech Seed KO, Rage', () => {
+  const countSaid = (events, text) => events.filter((e) => e.t === 'msg' && e.text === text).length;
+
+  // A Bide's release skips checkobedience.
+  const bideRelease = (traded) => {
+    const alpha = held({ species: 'Alpha', level: 80, maxHp: 900, spe: 90, traded,
+      moves: [hit('BIDE', 0, 0, 26, 10), hit('tap', 10)] });
+    alpha.bide = { turns: 0, stored: 40, moveIndex: 1, targetSlot: 3 };
+    const { battle, foe } = fight({ mode: 'wild', seed: 2, a: [alpha],
+      b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('tap', 1)] })] });
+    battle.drainEvents();
+    battle.submitChoice(foe, { action: 'fight', move: 0 });
+    return { events: battle.drainEvents(), battle };
+  };
+  const traded = bideRelease(true);
+  assert.ok(said(traded.events, 'Alpha used BIDE'));
+  assert.strictEqual(damageOn(traded.events, 3), 80);
+  assert.strictEqual(rngOf(traded.battle), rngOf(bideRelease(undefined).battle), 'no obedience byte');
+
+  // CheckTurn: confusion, then the disabled move, then paralysis.
+  const confusedFight = (status) => {
+    const { battle, foe } = fight({ seed: 8,
+      a: [held({ species: 'Alpha', spe: 90, status, confusion: 4, moves: [hit('thump', 10)] })],
+      b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })] });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe), battle };
+  };
+  const pc = confusedFight('PAR');
+  assert.ok(said(pc.events, 'Alpha hurt itself in confusion'));
+  assert.strictEqual(rngOf(pc.battle), rngOf(confusedFight(undefined).battle), 'no paralysis byte after a self-hit');
+  const disabledFight = (status) => {
+    const alpha = held({ species: 'Alpha', spe: 10, status, moves: [hit('thump', 10), hit('pound_two', 10)] });
+    alpha.lastMoveIndex = 1;
+    const { battle, foe } = fight({ seed: 9, a: [alpha],
+      b: [held({ species: 'Beta', spe: 90, moves: [hit('DISABLE', 0, 0, 86), hit('tap', 1)] })] });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe), battle };
+  };
+  const pd = disabledFight('PAR');
+  assert.ok(said(pd.events, 'thump is disabled'));
+  assert.ok(!said(pd.events, 'Alpha is fully paralyzed'));
+  assert.strictEqual(rngOf(pd.battle), rngOf(disabledFight(undefined).battle), 'no paralysis byte for a disabled move');
+
+  // A transformed Mysteryberry holder keeps the berry.
+  const copy = held({ species: 'Alpha', spe: 90, item: ['MYSTERYBERRY', 'HELD_RESTORE_PP', 0, 'MYSTERYBERRY'],
+    moves: [hit('tap', 1), hit('spent', 40, 0, 0, 0)] });
+  copy.transformed = true;
+  const berry = fight({ seed: 2, a: [copy], b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })] });
+  berry.battle.drainEvents();
+  const berryEvents = roundOf(berry.battle, berry.foe);
+  assert.strictEqual(monOf(berry.battle, 'p1').heldItem, 'MYSTERYBERRY');
+  assert.strictEqual(monOf(berry.battle, 'p1').moves[1].pp, 0);
+  assert.ok(!sawHeld(berryEvents));
+
+  // GetSixteenthMaxHP over GetQuarterMaxHP.
+  assert.strictEqual(Items.sixteenth(1024), 257);
+  assert.strictEqual(Items.sixteenth(1100), 260);
+  assert.strictEqual(Items.sixteenth(999), 62);
+  assert.strictEqual(Items.sixteenth(15), 1);
+
+  // A Leech Seed sap that knocks the seeded monster out.
+  const seeded = held({ species: 'Beta', maxHp: 320, hp: 10, spe: 10, moves: [hit('tap', 1)] });
+  seeded.leechSeed = { fromSlot: 0 };
+  const leech = fight({ seed: 3, b: [seeded],
+    a: [held({ species: 'Alpha', maxHp: 300, hp: 100, spe: 90, moves: [hit('tap', 1)] })] });
+  leech.battle.drainEvents();
+  const leechEvents = roundOf(leech.battle, leech.foe);
+  assert.ok(said(leechEvents, 'Beta is seeded'));
+  assert.strictEqual(monOf(leech.battle, 'p1').hp, 119);
+  assert.strictEqual(leech.battle.outcome().reason, 'ko');
+
+  // Gold / Crystal Rage.
+  const rageFight = (o) => {
+    const alpha = held({ species: 'Alpha', maxHp: 500, spe: o.aSpe || 90, status: o.status,
+      confusion: o.confusion, moves: [hit('RAGE', 20, 0, 81), hit('tap', 1)] });
+    alpha.substitute = o.substitute;
+    alpha.raging = o.raging;
+    alpha.rageCounter = o.rageCounter;
+    return fight({ seed: o.seed, a: [alpha],
+      b: [held({ species: 'Beta', maxHp: o.bHp || 900, spe: o.bSpe || 10,
+        moves: [hit(o.bMove || 'pelt', 5, 0, o.bEffect === undefined ? 29 : o.bEffect), hit('tap', 1)] })] });
+  };
+  const r = rageFight({ seed: 11 });
+  r.battle.drainEvents();
+  const r1 = roundOf(r.battle, r.foe);
+  const ralpha = monOf(r.battle, 'p1');
+  const built = countSaid(r1, "Alpha's RAGE is building!");
+  assert.ok(built >= 2);
+  assert.strictEqual(ralpha.rageCounter, built);
+  assert.strictEqual(ralpha.stages.atk, 0);
+  assert.strictEqual(ralpha.raging, true);
+  assert.strictEqual(r.battle.byId.get('p1').choice, null, 'no lock-in');
+  assert.ok(!said(r1, "Alpha's RAGE is building"));
+  roundOf(r.battle, r.foe, { action: 'fight', move: 1 }, { action: 'fight', move: 1 });
+  assert.strictEqual(ralpha.raging, false);
+  assert.strictEqual(ralpha.rageCounter, 0);
+  const plain = { level: 20, attack: 40, defense: 40, power: 20, roll: 100 };
+  assert.strictEqual(Damage2.compute({ ...plain, rageCount: 4 }).damage, 5 * Damage2.compute(plain).damage);
+  assert.strictEqual(Damage2.compute({ ...plain, rageCount: 255 }).damage, 999);
+  const src = rageFight({ seed: 1, status: 'PSN', confusion: 3, bMove: 'thump', bEffect: 0 });
+  src.battle.drainEvents();
+  roundOf(src.battle, src.foe);
+  assert.ok(said(roundOf(src.battle, src.foe), 'Alpha hurt itself in confusion'));
+  assert.strictEqual(monOf(src.battle, 'p1').rageCounter, 2, 'self-hits and poison build nothing');
+  const cap = rageFight({ seed: 21, aSpe: 10, bSpe: 90, bHp: 999, raging: true, rageCounter: 254, substitute: 30 });
+  cap.battle.drainEvents();
+  assert.strictEqual(countSaid(roundOf(cap.battle, cap.foe), "Alpha's RAGE is building!"), 1);
+  assert.strictEqual(monOf(cap.battle, 'p1').rageCounter, 255);
 });

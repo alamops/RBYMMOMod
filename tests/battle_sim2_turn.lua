@@ -2564,12 +2564,21 @@ do
      "the species item sets the crit level to 2 outright")
 end
 
--- (i) Thief: Mail by flag or by id, a full hand, both ways
+-- (i) Thief: Mail by flag or by id, a full hand, both ways, and its
+--     `effectchance`: a substitute or a byte at or over the chance byte (the
+--     1/256 miss of Thief's 100%) leaves wEffectFailed set and nothing is taken
 do
-  local function thief(bItem, aItem, seed)
+  -- Thief's row: a 100% effect chance (`percent 100`, $ff on the cart).
+  local function thiefMove()
+    local move = hit("THIEF", 10)
+    move.chance = 100
+    return move
+  end
+  local function thief(bItem, aItem, seed, substitute)
     local battle, foe = fight({ seed = seed or 4,
-      a = { held({ species = "Alpha", spe = 90, item = aItem, moves = { hit("THIEF", 10) } }) },
-      b = { held({ species = "Beta", maxHp = 400, spe = 10, item = bItem, moves = { hit("tap", 1) } }) } })
+      a = { held({ species = "Alpha", spe = 90, item = aItem, moves = { thiefMove() } }) },
+      b = { held({ species = "Beta", maxHp = 400, spe = 10, item = bItem, substitute = substitute,
+                   moves = { hit("tap", 1) } }) } })
     drain(battle)
     return round(battle, foe), battle, foe
   end
@@ -2586,10 +2595,25 @@ do
   ok(not sawKind(fullEvents, "held"), "a thief already holding something takes nothing")
   local emptyEvents = thief(nil)
   ok(not sawKind(emptyEvents, "held"), "...and a foe holding nothing gives nothing")
+  local subEvents, subBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 4, 80)
+  ok(not sawKind(subEvents, "held"), "a substitute at `effectchance` keeps the item")
+  eq(subBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...which the foe still holds")
+  ok(said(subEvents, "Alpha used THIEF"), "...though the hit itself landed")
+  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 26836)
+  ok(not sawKind(missEvents, "held"), "the 1/256 byte of 255 against a 100% chance takes nothing")
+  eq(missBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...and the foe keeps its item")
+  local zero = thiefMove()
+  zero.chance = 0
+  local zBattle, zFoe = fight({ seed = 4,
+    a = { held({ species = "Alpha", spe = 90, moves = { zero } }) },
+    b = { held({ species = "Beta", maxHp = 400, spe = 10, item = { "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" },
+                 moves = { hit("tap", 1) } }) } })
+  drain(zBattle)
+  ok(not sawKind(round(zBattle, zFoe), "held"), "a sheet with a chance of 0 never steals (BattleRandom cp 0)")
   -- the computer's Thief is not gated (Gen 3's is): the wild monster robs the player
   local wild, wfoe = fight({ mode = "wild", seed = 4,
     a = { held({ species = "Alpha", spe = 90, item = LEFTOVERS, moves = { hit("tap", 0, 0, 85) } }) },
-    b = { held({ species = "Beta", spe = 10, moves = { hit("THIEF", 10) } }) } })
+    b = { held({ species = "Beta", spe = 10, moves = { thiefMove() } }) } })
   drain(wild)
   local wildEvents = round(wild, wfoe)
   ok(said(wildEvents, "Beta stole LEFTOVERS from its foe!"), "a wild Thief takes the player's item")
@@ -2779,6 +2803,140 @@ do
   end
   ok(good, "every event the held items emit passes the vocabulary check")
   ok(Events.KINDS.held == true, "`held` is a Gen 2 kind")
+end
+
+-- (p) the wave-2 review fixes (docs/plans/gen12-referee-fidelity.md)
+do
+  local Damage = BattleSim2.Damage
+  local function rngOf(battle) return battle:snapshot().rngState end
+  local function countSaid(events, text)
+    local n = 0
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == text then n = n + 1 end
+    end
+    return n
+  end
+
+  -- A Bide's release skips `checkobedience` (StoreEnergy's
+  -- SkipToBattleCommand): a traded level-80 monster draws exactly what an
+  -- untraded one does on that turn (seed 2 disobeyed here before).
+  local function bideRelease(traded)
+    local alpha = held({ species = "Alpha", level = 80, maxHp = 900, spe = 90, traded = traded,
+                         moves = { hit("BIDE", 0, 0, 26, 10), hit("tap", 10) } })
+    alpha.bide = { turns = 0, stored = 40, moveIndex = 1, targetSlot = 3 }
+    local battle, foe = fight({ mode = "wild", seed = 2, a = { alpha },
+      b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    battle:submitChoice(foe, { action = "fight", move = 0 })
+    return drain(battle), battle
+  end
+  local tEvents, tBattle = bideRelease(true)
+  local _, uBattle = bideRelease(nil)
+  ok(said(tEvents, "Alpha used BIDE"), "a traded monster's Bide is unleashed")
+  eq(damageOn(tEvents, 3), 80, "...at twice the energy stored")
+  eq(rngOf(tBattle), rngOf(uBattle), "...and its release draws no obedience byte")
+
+  -- CheckTurn's order: confusion, then the disabled move, then paralysis.
+  local function confusedFight(status)
+    local battle, foe = fight({ seed = 8,
+      a = { held({ species = "Alpha", spe = 90, status = status, confusion = 4, moves = { hit("thump", 10) } }) },
+      b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    return round(battle, foe), battle
+  end
+  local pcEvents, pcBattle = confusedFight("PAR")
+  local _, cBattle = confusedFight(nil)
+  ok(said(pcEvents, "Alpha hurt itself in confusion"), "a paralysed, confused monster rolls its confusion first")
+  eq(rngOf(pcBattle), rngOf(cBattle), "...and a self-hit leaves no paralysis byte drawn")
+  local function disabledFight(status)
+    local alpha = held({ species = "Alpha", spe = 10, status = status,
+                         moves = { hit("thump", 10), hit("pound_two", 10) } })
+    alpha.lastMoveIndex = 1
+    local battle, foe = fight({ seed = 9, a = { alpha },
+      b = { held({ species = "Beta", spe = 90, moves = { hit("DISABLE", 0, 0, 86), hit("tap", 1) } }) } })
+    drain(battle)
+    return round(battle, foe), battle
+  end
+  local pdEvents, pdBattle = disabledFight("PAR")
+  local _, dBattle = disabledFight(nil)
+  ok(said(pdEvents, "thump is disabled"), "the move a faster Disable just took is refused")
+  ok(not said(pdEvents, "Alpha is fully paralyzed"), "...before the paralysis gate")
+  eq(rngOf(pdBattle), rngOf(dBattle), "...which draws no byte for it")
+
+  -- HandleMysteryberry reads the party PP, which a transformed monster never
+  -- spends: the referee skips it and the berry is kept.
+  local copy = held({ species = "Alpha", spe = 90, item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 0, "MYSTERYBERRY" },
+                      moves = { hit("tap", 1), hit("spent", 40, 0, 0, 0) } })
+  copy.transformed = true
+  local mBattle, mFoe = fight({ seed = 2, a = { copy },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(mBattle)
+  local mEvents = round(mBattle, mFoe)
+  eq(mBattle.byId.p1.mons[1].heldItem, "MYSTERYBERRY", "a transformed holder keeps its Mysteryberry")
+  eq(mBattle.byId.p1.mons[1].moves[2].pp, 0, "...and its copied slot gains nothing")
+  ok(not sawKind(mEvents, "held"), "...and nothing is said about it")
+
+  -- GetSixteenthMaxHP over GetQuarterMaxHP, register for register.
+  eq(Items.sixteenth(1024), 257, "1024 HP: b = 1 rides through, c = 0 -> 1 -> 0 -> 1")
+  eq(Items.sixteenth(1100), 260, "1100 HP: 256 + (19 >> 2)")
+  eq(Items.sixteenth(999), 62, "under 1024 it is max(1, floor(maxHp / 16))")
+  eq(Items.sixteenth(15), 1, "...at least 1")
+
+  -- A Leech Seed sap that knocks the seeded monster out: no throw, and the
+  -- seeder is still healed.
+  local seeded = held({ species = "Beta", maxHp = 320, hp = 10, spe = 10, moves = { hit("tap", 1) } })
+  seeded.leechSeed = { fromSlot = 0 }
+  local lBattle, lFoe = fight({ seed = 3, b = { seeded },
+    a = { held({ species = "Alpha", maxHp = 300, hp = 100, spe = 90, moves = { hit("tap", 1) } }) } })
+  drain(lBattle)
+  local lok, lEvents = pcall(round, lBattle, lFoe)
+  ok(lok, "a sap that knocks the seeded monster out does not throw")
+  if lok then
+    ok(said(lEvents, "Beta is seeded"), "...the sap is announced")
+    eq(lBattle.byId.p1.mons[1].hp, 119, "...and the seeder is healed (99 + 20)")
+    eq(lBattle:outcome() and lBattle:outcome().reason, "ko", "...and the faint ends the fight")
+  end
+
+  -- Gold / Crystal Rage: a counter, not an Attack stage, and no lock-in.
+  local function rageFight(o)
+    local alpha = held({ species = "Alpha", maxHp = 500, spe = o.aSpe or 90, status = o.status,
+                         confusion = o.confusion, substitute = o.substitute,
+                         moves = { hit("RAGE", 20, 0, 81), hit("tap", 1) } })
+    alpha.raging, alpha.rageCounter = o.raging, o.rageCounter
+    local battle, foe = fight({ seed = o.seed, a = { alpha },
+      b = { held({ species = "Beta", maxHp = o.bHp or 900, spe = o.bSpe or 10,
+                   moves = { hit(o.bMove or "pelt", 5, 0, o.bEffect or 29), hit("tap", 1) } }) } })
+    drain(battle)
+    return battle, foe
+  end
+  local rBattle, rFoe = rageFight({ seed = 11 })
+  local r1 = round(rBattle, rFoe)
+  local ralpha = rBattle.byId.p1.mons[1]
+  local built = countSaid(r1, "Alpha's RAGE is building!")
+  ok(built >= 2, "every hit of a multi-hit move builds rage")
+  eq(ralpha.rageCounter, built, "...one counter step per line")
+  eq(ralpha.stages.atk, 0, "...and Gold's Rage raises no Attack stage")
+  ok(ralpha.raging, "Rage that connected leaves the user raging")
+  eq(rBattle.byId.p1.choice, nil, "...but not locked in: the seat is asked again")
+  ok(not said(r1, "Alpha's RAGE is building"), "...and no turn-open lock-in line")
+  round(rBattle, rFoe, { action = "fight", move = 1 }, { action = "fight", move = 1 })
+  eq(ralpha.raging, false, "choosing another move ends the rage")
+  eq(ralpha.rageCounter, 0, "...and zeroes the counter")
+  local base = Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 }, { roll = 100 }).damage
+  eq(Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 },
+                    { roll = 100, rageCount = 4 }).damage, 5 * base, "RageDamage: x(count + 1)")
+  eq(Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 },
+                    { roll = 100, rageCount = 255 }).damage, 999, "...pinned at $ffff, then the 999 tail")
+  local sBattle, sFoe = rageFight({ seed = 1, status = "PSN", confusion = 3, bMove = "thump", bEffect = 0 })
+  round(sBattle, sFoe)
+  local s2 = round(sBattle, sFoe)
+  ok(said(s2, "Alpha hurt itself in confusion"), "seed 1: a confusion self-hit while raging")
+  eq(sBattle.byId.p1.mons[1].rageCounter, 2, "...builds nothing, nor does poison: only Beta's two hits count")
+  local cBattle2, cFoe2 = rageFight({ seed = 21, aSpe = 10, bSpe = 90, bHp = 999, raging = true,
+                                      rageCounter = 254, substitute = 30 })
+  local c1 = round(cBattle2, cFoe2)
+  eq(countSaid(c1, "Alpha's RAGE is building!"), 1, "a hit into the substitute builds, and 255 holds silently")
+  eq(cBattle2.byId.p1.mons[1].rageCounter, 255, "...at 255")
 end
 
 -- ------------------------------------------------------------------

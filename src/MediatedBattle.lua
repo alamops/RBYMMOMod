@@ -946,10 +946,16 @@ end
 -- importer reads off the player's ROM; either may be absent -- NO_ITEM).
 --
 -- `opts.random` is a function answering one byte (0..255): the caller's own
--- source, never the referee's -- the fight's seed is drawn after this, and a
--- fight with no items must draw exactly what it drew before.  The cart spends
+-- source, never the referee's stream.  Where that source is the generator the
+-- fight's seed comes off too (SoloBattle's `_randomByte` and `_seed` both draw
+-- love.math.random when no suite hands either in), the caller draws the seed
+-- first (SoloBattle:_begin), so the roll never moves it: a fight's seed is the
+-- same draw whether its wild monster has item slots or not.  A co-op fight's
+-- seed is the hub's to deal (src/Hub.lua `battleSeed`, off its entropy pool;
+-- server/hub.js), never a draw this roll stands in front of.  The cart spends
 -- both draws even for a species with no items; a species with none spends
--- nothing here, since a byte from a source nobody else reads changes nothing.
+-- nothing here, since a byte from a source the referee does not read changes
+-- nothing it fights with.
 -- `opts.battleType` is the Gold battle's own (src/battle/gen2/Battle.lua
 -- BATTLETYPE_FORCEITEM = 10).
 --
@@ -4645,20 +4651,26 @@ function M:applyHeld2(msg)
   return true
 end
 
--- What a caught Gold monster holds leaving the fight: the foe's last `held`
--- event when there was one (a berry eaten, a THIEF suffered -- `false` is
--- nothing), else what the engine monster already holds (`current`: the item
--- `rollWildItem2` gave it, or nothing).  Only ever an item this client
--- described itself (`ownItem2`); a claim it did not make leaves the monster as
--- it was.  nil when there is nothing to say (no `held` about it).
-function M:caughtHolding2(index, current)
+-- What a caught Gold monster holds leaving the fight, by the foe's last `held`
+-- event: the item it names when this client described that item itself
+-- (`ownItem2`), else `false` -- nothing -- for a berry eaten, a THIEF suffered,
+-- and an item this client never described alike.  nil when there was no `held`
+-- about it, which leaves the engine monster holding what it already holds (the
+-- item `rollWildItem2` gave it, or nothing).  pokecrystal PokeBallEffect keeps
+-- wEnemyMonItem as the battle left it.
+--
+-- The foreign item is nothing and not "what the monster had": the wild monster
+-- only comes to hold an item it was not rolled by a THIEF of its own, and THIEF
+-- takes only when its user holds nothing (pokecrystal BattleCommand_Thief
+-- `.enemy`, BattleSim2 `_thief`), so the item it was rolled is already eaten
+-- or taken -- and the one it took is a claim this client cannot tell from a
+-- forgery, which never enters the save.
+function M:caughtHolding2(index)
   if not (type(self.foeHeld2) == "table" and index ~= nil) then return nil end
   local held = self.foeHeld2[index]
   if held == nil then return nil end
-  if held == false then return false end
-  if self:ownItem2(held) then return held end
-  return (type(current) == "table" and type(current.item) == "string" and current.item ~= "")
-    and current.item or false
+  if held ~= false and self:ownItem2(held) then return held end
+  return false
 end
 
 -- pokecrystal CheckAmuletCoin (engine/battle/core.asm), in SendOutPlayerMon:
@@ -5519,7 +5531,7 @@ function M:grantCatch(msg)
   -- Gold: the item the wild monster still holds at the throw (`caughtHolding2`
   -- -- the lone wild sheet is the referee's party index 0).
   if self:generation() == 2 then
-    local held = self:caughtHolding2(0, mon)
+    local held = self:caughtHolding2(0)
     if held == false then
       mon.item = nil
     elseif held ~= nil then

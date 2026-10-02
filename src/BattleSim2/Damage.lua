@@ -21,6 +21,7 @@
 --     eighth of the running damage, at least 1.
 --   * STAB is floor(d * 15/10); type rows are percents applied one at a
 --     time as floor(d * pct/100), with a non-immune floor of 1.
+--   * Rage's RageDamage (opts.rageCount) next: x(count + 1), 16-bit.
 --   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
 --     running damage ≥ 2; final clamp 1..999.
 --
@@ -151,7 +152,7 @@ end
 -- defender: { defense|def, spd|spc, ... }
 -- move:     { power }
 -- opts:     { crit, stab, typeEffect|typeEff, roll, physical,
---             itemBoostPercent, badgeTypeBoost }
+--             itemBoostPercent, badgeTypeBoost, rageCount }
 function M.compute(attacker, defender, move, opts)
   attacker, defender = attacker or {}, defender or {}
   move, opts = move or {}, opts or {}
@@ -225,6 +226,13 @@ function M.compute(attacker, defender, move, opts)
     d = floor(d * pct / 100)
     if d == 0 then d = 1 end
   end
+
+  -- BattleCommand_RageDamage (pokecrystal engine/battle/effect_commands.asm:
+  -- 2451-2474), between Stab and DamageVariation in Rage's script: the
+  -- damage added to itself once per rage-counter step, x(count + 1), a carry
+  -- out of the 16-bit sum pinning it at $ffff.
+  local rage = max(0, int(opts.rageCount, 0))
+  if rage > 0 then d = min(65535, d * (rage + 1)) end
 
   result.modified = d
   result.minDamage = M.applyRoll(d, M.ROLL_MIN)

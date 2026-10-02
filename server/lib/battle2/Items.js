@@ -263,12 +263,18 @@ function focusBand(amount, hp) {
   return { amount: Math.max(0, h - 1), held: true };
 }
 
-// GetSixteenthMaxHP: the quarter's low byte (at least 1), quartered again.
+// GetSixteenthMaxHP over GetQuarterMaxHP, register for register (the Lua twin
+// walks it): bc >> 2 as a pair, "at least 1" on c alone, then c alone >> 2 and
+// at least 1 again, b riding through -- 1024 HP heals 257.
 function sixteenth(maxHp) {
-  let quarter = Math.floor(Math.max(0, int(maxHp, 0)) / 4) % 256;
-  if (quarter === 0) quarter = 1;
-  const out = Math.floor(quarter / 4);
-  return out === 0 ? 1 : out;
+  const n = Math.max(0, int(maxHp, 0));
+  const quarter = Math.floor((n % 65536) / 4);
+  const b = Math.floor(quarter / 256);
+  let c = quarter % 256;
+  if (c === 0) c = 1;
+  c = Math.floor(c / 4);
+  if (c === 0) c = 1;
+  return b * 256 + c;
 }
 
 // HandleHPHealingItem: HP less than half the maximum.

@@ -11,7 +11,9 @@
  * ordered stream of events they draw. They are never asked what happened.
  *
  * Sheet stats are atk/def/spe/spa/spd (Sp.Def); legacy spd+spc still accepted
- * on ingest. Damage/crit/accuracy/status draws use Gen2 rules.
+ * on ingest. Damage/crit/accuracy/status draws use Gen2 rules, and the held
+ * items, obedience, Thief and Rage follow pokecrystal (the Lua header cites
+ * them).
  *
  * **The RNG order is the contract.** The Lua twin has to consume draws at
  * exactly the same points or the same seed produces a different fight, so every
@@ -23,11 +25,14 @@
  *      field order) until one fires, then
  *      a speed tie-break byte, one per group of actors in the same priority
  *      bracket, Quick Claw standing and speed;
- *   2. one gate byte per actor whose monster has a gating status;
- *   3. one gate byte per actor whose monster is confused;
- *   4. the obedience bytes of a traded monster over its badge cap, on a
+ *   2. the gate bytes of each actor, in CheckTurn's order (`_runGates`): one
+ *      for a sleeping or frozen monster, then one for a confused one, then
+ *      one for a paralysed one -- each only when the monster has that status
+ *      and no earlier gate (a flinch, a self-hit, the disabled move) stopped
+ *      it;
+ *   3. the obedience bytes of a traded monster over its badge cap, on a
  *      `badgeRules` seat (`_obey`, each only when reached);
- *   5. per move that is actually used: accuracy byte, multihit-count byte
+ *   4. per move that is actually used: accuracy byte, multihit-count byte
  *      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
  *      on a holder, side-chance byte (damaging hits only), the King's Rock
  *      byte, in that order, and none of them drawn when an earlier step ended
@@ -39,9 +44,13 @@
  * optimise away without desyncing the two runtimes on the next attack.
  *
  * Nothing else rolls. Residuals, switches, the bag, the between-turn held
- * items and the clock are all deterministic, so a battle replays from its seed
- * plus the choice log -- and a fight with no held item, no traded monster and
- * no priority move draws exactly what it drew before any of them existed.
+ * items, rage and the clock are all deterministic, so a battle replays from its
+ * seed plus the choice log -- and a fight with no held item, no traded monster
+ * and no priority move draws what it drew before any of them existed, but for
+ * three changes the cart's order made on purpose (the Lua header lists them):
+ * a flinched sleeper or freezer draws its status gate first, a called move no
+ * longer re-runs the gates, and the paralysis byte follows the confusion byte
+ * and the disabled-move check.
  *
  * **Policies chosen where Gen 1 had no answer** -- the whole list, and the
  * reasoning behind each, lives in the Lua header rather than being restated
@@ -53,8 +62,10 @@
  *     resolve before any move, and a seat whose turn is a forced skip rolls no
  *     Quick Claw.
  *   * *Held items* (Items.js: the static rules keyed on the sheet's hold
- *     effect), *obedience* (`_obey`) and the *flinch reset* (`_openTurn`)
- *     follow pokecrystal; the Lua header has the citations.
+ *     effect), *obedience* (`_obey`), the *flinch reset* (`_openTurn`) and
+ *     *Rage* (a counter the foe's hits build and Rage multiplies by, no
+ *     lock-in, no Attack stage: `_buildRage`, `_resetRage`) follow
+ *     pokecrystal; the Lua header has the citations.
  *   * *Speed ties* break on a single byte per tied group, below 128 leaving the
  *     side-a member first and otherwise reversing the group. A group is one
  *     bracket at one Speed.
@@ -567,7 +578,7 @@ function copyMon(raw, fallback) {
     trapping: null,
     thrashing,
     raging: raw.raging === true,
-    rageMove: Math.max(0, int(raw.rageMove, 0)),
+    rageCounter: Math.max(0, Math.min(255, int(raw.rageCounter, 0))),
     bide,
     lastMoveIndex: Math.max(0, int(raw.lastMoveIndex, 0)),
     substitute: Math.max(0, int(raw.substitute, 0)),
@@ -999,7 +1010,7 @@ class Battle {
     return true;
   }
 
-  // Inject forced choices for charge release, recharge skip, thrash/rage repeat,
+  // Inject forced choices for charge release, recharge skip, thrash repeat,
   // and trap lock-in. Gen1 trapping: victim can't move; user stays locked (no
   // menu) while residual damage (first-hit store) ticks — not a re-rolled fight.
   _fillForcedChoices() {
@@ -1035,7 +1046,9 @@ class Battle {
             fighter.choice = {
               action: 'fight',
               move: mon.bide.moveIndex,
-              target: mon.bide.targetSlot || foe.slot,
+              // Lua's `targetSlot or foe.slot`: seat 0 is a seat.
+              target: mon.bide.targetSlot !== null && mon.bide.targetSlot !== undefined
+                ? mon.bide.targetSlot : foe.slot,
               bideRelease: true,
             };
             this._emit('chose', {
@@ -1105,21 +1118,8 @@ class Battle {
         continue;
       }
 
-      if (mon.raging && mon.rageMove && mon.rageMove > 0) {
-        const foe = this._autoTarget(fighter);
-        if (foe) {
-          this._say(`${mon.species}'s RAGE is building`);
-          fighter.forced = true;
-          fighter.choice = {
-            action: 'fight',
-            move: mon.rageMove,
-            target: foe.slot,
-          };
-          this._emit('chose', {
-            slot: fighter.slot, side: fighter.side, text: fighter.name,
-          });
-        }
-      }
+      // Rage is not a lock-in on Gold / Crystal: the seat is asked like any
+      // other, and `_resetRage` ends the rage when it picks anything else.
     }
   }
 
@@ -1463,7 +1463,9 @@ class Battle {
         return {
           action: 'fight',
           move: mon.bide.moveIndex,
-          target: mon.bide.targetSlot || foe.slot,
+          // Lua's `targetSlot or foe.slot`: seat 0 is a seat.
+          target: mon.bide.targetSlot !== null && mon.bide.targetSlot !== undefined
+            ? mon.bide.targetSlot : foe.slot,
           bideRelease: true,
         };
       }
@@ -1484,13 +1486,6 @@ class Battle {
         };
       }
     }
-    if (mon.raging && mon.rageMove && mon.rageMove > 0) {
-      const foe = this._autoTarget(fighter);
-      if (foe) {
-        return { action: 'fight', move: mon.rageMove, target: foe.slot };
-      }
-    }
-
     let foe = this._autoTarget(fighter);
     if (!foe) {
       for (const f of this._foes(fighter)) {
@@ -2007,7 +2002,10 @@ class Battle {
     }
   }
 
-  // BattleCommand_Thief, both ways and in every mode.
+  // BattleCommand_Thief, both ways and in every mode. Its wEffectFailed
+  // return (a substitute at `effectchance`, or the chance byte not landing --
+  // the 1/256 miss of a 100% move) is the caller's: it asks this only when the
+  // side-chance byte `_useMove` drew landed with no substitute standing.
   _thief(fighter, mon, target, defender) {
     if (mon.heldItem || !defender.heldItem) return;
     if (Items.isMail(defender)) return;
@@ -2016,6 +2014,16 @@ class Battle {
     this._emitHeld(target, defender, item.heldItem, 0);
     this._emitHeld(fighter, mon, item.heldItem, 1);
     this._say(`${mon.species} stole ${Items.label(mon)} from its foe!`);
+  }
+
+  // BattleCommand_BuildOpponentRage, right after `checkfaint` in every
+  // damaging script: a raging target still standing gains a rage step (a hit
+  // into its substitute counts); nothing else builds rage. 255 holds, silently.
+  _buildRage(defender) {
+    if (defender.hp <= 0 || !defender.raging) return;
+    if (defender.rageCounter >= 255) return;
+    defender.rageCounter += 1;
+    this._say(`${defender.species}'s RAGE is building!`);
   }
 
   // BattleCommand_HeldFlinch (`kingsrock`).
@@ -2089,22 +2097,22 @@ class Battle {
     }
   }
 
-  // HandleMysteryberry: player then enemy.
+  // HandleMysteryberry: player then enemy. The cart scans the PARTY moves and
+  // PP, which a transformed monster never spends; the referee holds only the
+  // copied list, so a transformed holder is skipped and keeps the berry.
   _heldMysteryberry() {
     for (const fighter of this.fighters) {
       const mon = activeMon(fighter);
-      if (mon && Items.holds(mon, Items.RESTORE_PP)) {
+      if (mon && !mon.transformed && Items.holds(mon, Items.RESTORE_PP)) {
         let slot = null;
         for (let i = 1; i <= mon.moves.length; i += 1) {
           if (mon.moves[i - 1].pp <= 0) { slot = i; break; }
         }
         if (slot !== null) {
           const move = mon.moves[slot - 1];
-          if (!mon.transformed) {
-            move.pp += Effects.moveKey(move) === 'SKETCH' ? 1 : 5;
-            if (int(move.maxPp, 0) < move.pp) move.maxPp = move.pp;
-            this._emitMoves(fighter, mon, fighter.active);
-          }
+          move.pp += Effects.moveKey(move) === 'SKETCH' ? 1 : 5;
+          if (int(move.maxPp, 0) < move.pp) move.maxPp = move.pp;
+          this._emitMoves(fighter, mon, fighter.active);
           const name = Items.label(mon);
           const item = Items.take(mon);
           this._emitHeld(fighter, mon, item.heldItem, 0);
@@ -2186,7 +2194,6 @@ class Battle {
   // `.EndDisobedience`.
   _disobeyed(fighter, mon) {
     mon.lastMoveIndex = 0;
-    if (fighter.choice && fighter.choice.bideRelease) mon.bide = null;
     return 'stop';
   }
 
@@ -2197,8 +2204,11 @@ class Battle {
   }
 
   // null when the monster obeys, 'stop', or the 1-based slot it uses instead.
+  // Never asked for a Bide's release: StoreEnergy skips past checkobedience
+  // (`jp SkipToBattleCommand`), so only Bide's first use is checked.
   _obey(fighter, mon, move) {
     if (!fighter.badgeRules || mon.traded !== true) return null;
+    if (fighter.choice && fighter.choice.bideRelease) return null;
     if (mon.charging && Effects.isCharge(mon.charging.effect)) return null;
     if (mon.thrashing) return null;
     const cap = Items.obedienceCap(fighter.badges);
@@ -2216,10 +2226,7 @@ class Battle {
 
     if (this._obeyDraw(span, false) < cap) {
       const slot = this._obeyInstead(mon, fighter.choice ? fighter.choice.move : null);
-      if (slot !== null) {
-        if (fighter.choice && fighter.choice.bideRelease) mon.bide = null;
-        return slot;
-      }
+      if (slot !== null) return slot;
       return this._loaf(fighter, mon);
     }
 
@@ -2256,6 +2263,29 @@ class Battle {
     return this._disobeyed(fighter, mon);
   }
 
+  // ParsePlayerAction / ParseEnemyAction, as the turn's actions are read and
+  // before any runs: rage and its counter survive only on a seat choosing Rage
+  // again (no switch, item, run, lock-in or forced fill, no other move --
+  // Struggle, Metronome and Mirror Move included).
+  _resetRage() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && (mon.raging || mon.rageCounter > 0)) {
+        const choice = fighter.choice;
+        let keep = false;
+        if (choice && choice.action === 'fight' && !fighter.forced
+            && !allPpEmpty(mon)) {
+          const move = mon.moves[choice.move - 1];
+          keep = move !== undefined && move !== null && Effects.isRage(move.effect);
+        }
+        if (!keep) {
+          mon.raging = false;
+          mon.rageCounter = 0;
+        }
+      }
+    }
+  }
+
   _resolveTurn() {
     this.phase = 'resolving';
     // Armed for the rare case resolution does not leave this phase in the same
@@ -2264,6 +2294,7 @@ class Battle {
     this.resolveDeadline = this.resolveTimeout > 0
       ? this.now + this.resolveTimeout : null;
 
+    this._resetRage();
     if (this._resolveRuns()) return;
     this._resolveSwitches();
     this._resolveItems();
@@ -2338,7 +2369,7 @@ class Battle {
           mon.invulnerable = false;
           mon.thrashing = null;
           mon.raging = false;
-          mon.rageMove = 0;
+          mon.rageCounter = 0;
           mon.trapped = null;
           mon.trapping = null;
           mon.bide = null;
@@ -2859,10 +2890,10 @@ class Battle {
 
   // Returns false when a gate stopped the move. `selected` is the move the
   // monster is about to use (Struggle when every slot is empty): the sleep
-  // gate's Snore / Sleep Talk exception and the confusion self-hit read it the
-  // way the cart's CheckTurn and DamageCalc do. CheckTurn's order: sleep,
-  // freeze, then the flinch (`.not_frozen`); the referee's paralysis gate stays
-  // after the flinch and before confusion.
+  // gate's Snore / Sleep Talk exception, the confusion self-hit and the
+  // disabled-move check read it the way the cart's CheckTurn and DamageCalc
+  // do. CheckTurn's order (the Lua twin cites the lines): sleep, freeze, the
+  // flinch (`.not_frozen`), confusion, the disabled move, and paralysis last.
   _runGates(fighter, mon, selected) {
     if (mon.status === 'sleep' || mon.status === 'freeze') {
       const asleep = mon.status === 'sleep';
@@ -2880,10 +2911,6 @@ class Battle {
       mon.flinch = false;
       this._say(`${mon.species} flinched`);
       return false;
-    }
-
-    if (mon.status === 'paralysis') {
-      if (!this._statusGate(fighter, mon)) return false;
     }
 
     if (mon.confusion > 0) {
@@ -2920,6 +2947,18 @@ class Battle {
         }
         if (!gate.canMove) return false;
       }
+    }
+
+    // MoveDisabled: Struggle is no slot, so it is never the disabled move.
+    const choice = fighter.choice;
+    if (selected !== STRUGGLE && choice && mon.disable && mon.disable.turns > 0
+        && mon.disable.moveIndex === choice.move) {
+      this._say(`${moveLabel(mon.moves[choice.move - 1])} is disabled`);
+      return false;
+    }
+
+    if (mon.status === 'paralysis') {
+      if (!this._statusGate(fighter, mon)) return false;
     }
 
     return true;
@@ -2977,11 +3016,13 @@ class Battle {
     this._afterInfliction(targetFighter, targetMon, before);
   }
 
-  _applySide(fighter, mon, targetFighter, targetMon, effectId, chance) {
+  // The secondary effect of a damaging move whose `effectchance` byte has
+  // already been drawn (`hit`, see `_useMove`).
+  _applySide(fighter, mon, targetFighter, targetMon, effectId, hit) {
     const before = { status: targetMon.status, confusion: targetMon.confusion };
     const result = Effects.applySide({
       effectId,
-      chance,
+      hit: hit === true,
       rng: this.rng,
       userMon: mon,
       targetMon,
@@ -3033,13 +3074,6 @@ class Battle {
     // A move used in place of a disobeyed one runs no CheckTurn of its own.
     const disobeyed = opts.disobeyed === true;
     if (!called && !disobeyed && !this._runGates(fighter, mon, move)) return;
-
-    if (!struggling && !called && !disobeyed && mon.disable && mon.disable.turns > 0
-        && mon.disable.moveIndex === choice.move) {
-      const blocked = mon.moves[choice.move - 1];
-      this._say(`${moveLabel(blocked)} is disabled`);
-      return;
-    }
 
     // `checkobedience`, for the move the monster chose (`_obey`). A move it
     // uses instead is used in full under "used instead,", and then forgotten
@@ -3098,8 +3132,9 @@ class Battle {
         return;
       }
       // Bide's script releases through applydamage, so a Focus Band answers
-      // it, and ends in `kingsrock`.
+      // it, then `checkfaint`, `buildopponentrage` and `kingsrock`.
       this._strike(target, defender, 2 * stored);
+      this._buildRage(defender);
       this._kingsRock(mon, move, effectId, defender);
       this._markLastMove(mon, choice.move);
       return;
@@ -3372,6 +3407,10 @@ class Battle {
         // this is the cart's "player's turn only" without asking whose turn.
         badgeTypeBoost: !struggling
           && Effects.badgeTypeBoost(this._typeIdOf(move.type), fighter.badges),
+        // BattleCommand_RageDamage, Rage's own `ragedamage`: the user's rage
+        // counter (`_buildRage`) multiplies the damage, after STAB and before
+        // the variation.
+        rageCount: Effects.isRage(effectId) ? mon.rageCounter : 0,
       });
 
       if (result.immune) {
@@ -3396,16 +3435,28 @@ class Battle {
       this._say("It's not very effective");
     }
 
+    // `effectchance` reads the target's substitute before the hit can break
+    // it (CheckSubstituteOpp): Thief asks this below.
+    const subAtChance = (defender.substitute || 0) > 0;
+    // MultiHit / DoubleHit / PoisonMultiHit run `checkfaint` and
+    // `buildopponentrage` inside their loop, once per hit; every other script
+    // once, after its own post-damage command (below).
+    const multihit = Effects.isMultihit(effectId);
     let totalDealt = 0;
     for (let h = 0; h < hits; h += 1) {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
       this._strike(target, defender, damage);
       totalDealt += hpBefore - defender.hp;
+      if (multihit) this._buildRage(defender);
     }
 
+    // BattleCommand_EffectChance's byte, for a hit that reached the HP; what
+    // it decides is applied further down, after the script's post-damage
+    // command, `checkfaint` and `buildopponentrage`. Nothing in between draws.
+    let effectHit = false;
     if (totalDealt > 0) {
-      this._applySide(fighter, mon, target, defender, effectId, move.chance);
+      effectHit = Effects.sideChanceProc(this.rng, move.chance) === true;
 
       if (Effects.isDrain(effectId)) {
         const heal = Effects.drainAmount(totalDealt);
@@ -3417,8 +3468,10 @@ class Battle {
       }
     }
 
-    // The Thief script's `thief`, right after the damage (Items.THIEF).
-    if (Effects.moveKey(move) === Items.THIEF) {
+    // The Thief script's `thief`, right after the damage (Items.THIEF), when
+    // its `effectchance` left wEffectFailed clear: the chance byte landed and
+    // no substitute stood.
+    if (Effects.moveKey(move) === Items.THIEF && effectHit && !subAtChance) {
       this._thief(fighter, mon, target, defender);
     }
 
@@ -3426,6 +3479,14 @@ class Battle {
       const recoil = Effects.recoilAmount(totalDealt);
       this._say(`${mon.species} is hit with recoil`);
       this._damage(fighter, mon, recoil, null);
+    }
+
+    if (!multihit) this._buildRage(defender);
+
+    // The secondary effect, after `checkfaint` in every *Hit script: a target
+    // the hit knocked out is never burned, poisoned or confused.
+    if (totalDealt > 0 && defender.hp > 0) {
+      this._applySide(fighter, mon, target, defender, effectId, effectHit);
     }
 
     // A substitute absorbs HP (including the breaking hit), so totalDealt
@@ -3441,9 +3502,10 @@ class Battle {
       };
     }
 
+    // BattleCommand_Rage: SUBSTATUS_RAGE on the user of a Rage that connected.
+    // No lock-in: it lasts while the seat keeps choosing Rage (`_resetRage`).
     if (Effects.isRage(effectId)) {
       mon.raging = true;
-      mon.rageMove = choice.move;
     }
 
     if (Effects.isTrapping(effectId) && totalDealt > 0) {
@@ -3523,19 +3585,6 @@ class Battle {
     }
 
     if (amount > mon.hp) amount = mon.hp;
-
-    if (amount > 0 && mon.raging) {
-      const before = Effects.clampStage(mon.stages.atk);
-      const after = Effects.clampStage(before + 1);
-      if (after !== before) {
-        mon.stages.atk = after;
-        this._say(`${mon.species}'s ATTACK rose`);
-        this._emit('stat', {
-          slot: fighter.slot, side: fighter.side,
-          amount: after, text: `${mon.species}'s ATTACK rose`,
-        });
-      }
-    }
 
     mon.hp -= amount;
 
@@ -3744,7 +3793,7 @@ class Battle {
     mon.mustRecharge = false;
     mon.thrashing = null;
     mon.raging = false;
-    mon.rageMove = 0;
+    mon.rageCounter = 0;
     mon.trapped = null;
     mon.trapping = null;
     mon.bide = null;
@@ -3891,9 +3940,12 @@ class Battle {
       mon = activeMon(fighter);
       if (mon && mon.leechSeed) {
         const amount = Math.max(1, Math.floor(mon.maxHp / 16));
+        // Read before the sap: a sap that knocks the seeded monster out
+        // faints it, and `_faint` clears its leechSeed. The seeder is still
+        // healed (RestoreHP comes before HasUserFainted).
+        const from = mon.leechSeed.fromSlot;
         this._say(`${mon.species} is seeded`);
         this._damage(fighter, mon, amount, null);
-        const from = mon.leechSeed.fromSlot;
         const seeder = from !== null && from !== undefined
           ? this._fighterAtSlot(from) : null;
         const sMon = seeder && activeMon(seeder);

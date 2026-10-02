@@ -333,14 +333,23 @@ function M.focusBand(amount, hp)
   return held, true
 end
 
--- GetSixteenthMaxHP: the quarter's low byte (at least 1), quartered again (at
--- least 1) -- max(1, floor(maxHp / 16)) for every HP the cart can hold.
+-- GetSixteenthMaxHP (core.asm:1831-1842) over GetQuarterMaxHP (:1858-1875),
+-- register for register: the max HP in bc is shifted right twice as a 16-bit
+-- pair (`srl b / rr c`), the "at least 1" tests the low byte c alone, then the
+-- sixteenth shifts c alone right twice more -- b keeps the quarter's high byte
+-- -- and bumps c to 1 again when it is 0.  RestoreHP adds the whole of bc.
+-- Under 1024 HP that is max(1, floor(maxHp / 16)); from 1024 the high byte
+-- rides through, so 1024 HP heals 257 (b = 1, c = 0 -> 1 -> 0 -> 1) and 1100
+-- heals 260.  The max HP is the cart's 16-bit word.
 function M.sixteenth(maxHp)
-  local quarter = floor(math.max(0, int(maxHp, 0)) / 4) % 256
-  if quarter == 0 then quarter = 1 end
-  local out = floor(quarter / 4)
-  if out == 0 then out = 1 end
-  return out
+  local n = int(maxHp, 0)
+  if n < 0 then n = 0 end
+  local quarter = floor((n % 65536) / 4)
+  local b, c = floor(quarter / 256), quarter % 256
+  if c == 0 then c = 1 end
+  c = floor(c / 4)
+  if c == 0 then c = 1 end
+  return b * 256 + c
 end
 
 -- HandleHPHealingItem: "If, and only if, Pokemon's HP is less than half max".

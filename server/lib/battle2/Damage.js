@@ -29,6 +29,7 @@
  *     eighth of the running damage, at least 1.
  *   * STAB is floor(d * 15/10); type rows are percents applied one at a time
  *     as floor(d * pct/100), with a non-immune floor of 1.
+ *   * Rage's RageDamage (input.rageCount) next: x(count + 1), 16-bit.
  *   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
  *     running damage ≥ 2; final clamp 1..999.
  *
@@ -223,6 +224,11 @@ function compute(input) {
     d = idiv(d * pct, 100);
     if (d === 0) d = 1;
   }
+
+  // BattleCommand_RageDamage, between Stab and DamageVariation in Rage's
+  // script: x(count + 1), a carry out of the 16-bit sum pinning it at $ffff.
+  const rage = Math.max(0, int(src.rageCount, 0));
+  if (rage > 0) d = Math.min(65535, d * (rage + 1));
 
   result.modified = d;
   result.minDamage = applyRoll(d, ROLL_MIN);

@@ -2667,6 +2667,18 @@ function Battle:_faintUser(fighter, mon)
   if mon.hp > 0 then self:_damage(fighter, mon, mon.hp, nil) end
 end
 
+-- An Explosion / Self-Destruct that did not land.  EXPLODE_EFFECT is the one
+-- miss ExecutePlayerMove lets on to `.notDone` (core.asm :3222-3225; the
+-- enemy's `.handleExplosionMiss`, :5622-5624), so the user still goes down and
+-- HandleBuildingRage still runs on the target it missed -- which is alive, so
+-- `ret z` lets it through.  The rage is built before the faint the cart only
+-- announces after the move, and the re-penalty it gives the exploder is then
+-- wiped with the rest of its battle stats.
+function Battle:_explodeMissed(fighter, mon, target, defender)
+  self:_buildRage(target, defender, fighter)
+  self:_faintUser(fighter, mon)
+end
+
 function Battle:_concedeRun(fighter)
   self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
   if fighter.side == "a" then
@@ -2786,7 +2798,8 @@ function Battle:_useMove(fighter, mon, opts)
       self:_markLastMove(mon, usedSlot)
       return
     end
-    self:_damage(target, defender, 2 * stored, nil, fighter)
+    self:_damage(target, defender, 2 * stored, nil)
+    self:_buildRage(target, defender, fighter)
     self:_markLastMove(mon, usedSlot)
     return
   end
@@ -2817,7 +2830,7 @@ function Battle:_useMove(fighter, mon, opts)
     end
     if not Effects.hitsInvulnerable(chargeMoveId, move) then
       self:_say("But it failed")
-      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
       if Effects.isJumpKick(effectId) then
         self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
       end
@@ -2861,6 +2874,18 @@ function Battle:_useMove(fighter, mon, opts)
     return
   end
 
+  -- A power-0 move reaches HandleBuildingRage ahead of any hit test of its
+  -- own: CalculateDamage's `jp z` (core.asm :3145) goes round MoveHitTest, so
+  -- wMoveMissed is still clear when the no-op ApplyAttackToEnemyPokemon
+  -- (:4622) returns to the build.  ResidualEffects1 / 2 and the two calls have
+  -- left by then (`Effects.skipsBuildingRage`); what is left in Red is
+  -- Disable, whose own MoveHitTest -- the roll below -- comes after.  So a
+  -- raging target builds whether the Disable lands or not.
+  if move.power <= 0 and not Effects.isFixedDamage(effectId)
+     and not Effects.skipsBuildingRage(effectId) then
+    self:_buildRage(target, defender, fighter)
+  end
+
   local alwaysHits = effectId == Effects.idOf("SWIFT_EFFECT")
     or mon.xAccuracy == true
 
@@ -2871,7 +2896,7 @@ function Battle:_useMove(fighter, mon, opts)
   })
   if not hit then
     self:_say(mon.species .. " missed")
-    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+    if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
     if Effects.isJumpKick(effectId) then
       self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
     end
@@ -2882,7 +2907,7 @@ function Battle:_useMove(fighter, mon, opts)
   local isFixed = Effects.isFixedDamage(effectId)
   if effectId == 8 and defender.status ~= "sleep" then
     self:_say("But it failed")
-    if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+    if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
     self:_markLastMove(mon, usedSlot)
     return
   end
@@ -2925,7 +2950,7 @@ function Battle:_useMove(fighter, mon, opts)
   if effectId == 38 then
     if self:_speedOf(fighter, mon) <= self:_speedOf(target, defender) then
       self:_say("But it failed")
-      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
       self:_markLastMove(mon, usedSlot)
       return
     end
@@ -2953,7 +2978,7 @@ function Battle:_useMove(fighter, mon, opts)
     if immune then
       self.rng:damageRoll()
       self:_say("It doesn't affect " .. defender.species)
-      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
       if Effects.isJumpKick(effectId) then
         self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
       end
@@ -2971,7 +2996,7 @@ function Battle:_useMove(fighter, mon, opts)
     if fixed == nil then
       self.rng:damageRoll()
       self:_say("But it failed")
-      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
       self:_markLastMove(mon, usedSlot)
       return
     end
@@ -2986,7 +3011,12 @@ function Battle:_useMove(fighter, mon, opts)
     -- ends: the attacker's party struct (pre-Transform) and the defender's --
     -- the cart's GetEnemyMonStat reads the enemy's party struct in a link
     -- fight and recomputes it without stat exp against the computer, which
-    -- is the same number for every foe the cart fields (they carry none).
+    -- is the same number as its party stat for every foe the computer fields
+    -- (they carry none) -- until it Transforms: the recompute reads
+    -- wEnemyMonSpecies and wEnemyMonDVs, which TransformEffect_ overwrote,
+    -- so a transformed foe's crit stat is a CalcStat over the copied species
+    -- and DVs, which a sheet cannot say (docs/plans/gen12-referee-known-gaps.md,
+    -- gap 1).
     -- No stage, no badge, no burn, no screen.  The scaling, the Explosion
     -- halving and the 997 cap are Damage.compute's.
     local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
@@ -3019,7 +3049,7 @@ function Battle:_useMove(fighter, mon, opts)
 
     if result.immune then
       self:_say("It doesn't affect " .. defender.species)
-      if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
+      if Effects.isExplode(effectId) then self:_explodeMissed(fighter, mon, target, defender) end
       if Effects.isJumpKick(effectId) then
         self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
       end
@@ -3038,12 +3068,16 @@ function Battle:_useMove(fighter, mon, opts)
     self:_say("It's not very effective")
   end
 
+  -- Rage builds per hit, after it (the multi-hit loop jumps back to
+  -- GetPlayerAnimationType from below HandleBuildingRage), and before the
+  -- move's side effect, which `.executeOtherEffects` runs after the loop.
   local totalDealt = 0
   for _ = 1, hits do
     if defender.hp <= 0 then break end
     local hpBefore = defender.hp
-    self:_damage(target, defender, damage, nil, fighter)
+    self:_damage(target, defender, damage, nil)
     totalDealt = totalDealt + (hpBefore - defender.hp)
+    self:_buildRage(target, defender, fighter)
   end
 
   if totalDealt > 0 then
@@ -3128,9 +3162,9 @@ function Battle:_useMove(fighter, mon, opts)
 end
 
 -- One place where HP comes off, so the faint that follows can never be
--- forgotten at one of the call sites.  `source` is the seat whose move dealt
--- it, when one did (a strike, a Bide release): Rage reads it.
-function Battle:_damage(fighter, mon, amount, status, source)
+-- forgotten at one of the call sites.  Rage is not built here: what builds it
+-- is a move landing (`_buildRage`), not HP coming off.
+function Battle:_damage(fighter, mon, amount, status)
   amount = max(0, int(amount, 0))
 
   if amount > 0 and mon.bide and mon.bide.turns > 0 then
@@ -3154,33 +3188,6 @@ function Battle:_damage(fighter, mon, amount, status, source)
 
   if amount > mon.hp then amount = mon.hp end
 
-  if amount > 0 and mon.raging then
-    -- HandleBuildingRage (core.asm :4913-4950) flips hWhoseTurn and runs
-    -- StatModifierUpEffect, so the raging battler is the "user": its own
-    -- badges re-run (when it is the player's) and the re-penalty lands on the
-    -- battler whose turn it then is not -- the attacker.  Damage no move dealt
-    -- (a residual) names no attacker; the battler opposite stands in.  At +6
-    -- the cart returns before saying anything, as this does.
-    local attacker = source and activeMon(source) or nil
-    if not attacker then
-      local opposite = self:_oppositeFoe(fighter)
-      attacker = opposite and activeMon(opposite) or nil
-    end
-    local outcome, after = Effects.changeStat({
-      mon = mon, fighter = fighter, stat = "atk", delta = 1,
-      mover = fighter, nonMover = attacker,
-    })
-    if outcome == "rose" then
-      self:_say(mon.species .. "'s ATTACK rose")
-      self:_emit("stat", {
-        slot = fighter.slot, side = fighter.side,
-        amount = after, text = mon.species .. "'s ATTACK rose",
-      })
-    elseif outcome == "stuck" then
-      self:_say("Nothing happened")
-    end
-  end
-
   mon.hp = mon.hp - amount
 
   self:_emit("damage", {
@@ -3190,6 +3197,44 @@ function Battle:_damage(fighter, mon, amount, status, source)
   })
 
   if mon.hp <= 0 then self:_faint(fighter, mon) end
+end
+
+-- HandleBuildingRage (core.asm :4913-4950), for the monster `source`'s move
+-- was just aimed at.  The cart has two callers, ExecutePlayerMove (:3243) and
+-- ExecuteEnemyMove (:5643), both after ApplyAttackTo*Pokemon and both behind
+-- `ret z` on the target's HP -- so it runs once per hit of a move that lands,
+-- never for a hit that knocked the target out, and never for HP that no
+-- opponent's move took: a poison / burn / Leech Seed tick, a confusion or
+-- disobedience self-hit, recoil, a crash.  A Substitute that soaked the hit
+-- does not stop it (AttackSubstitute returns to the same caller, and the
+-- target's HP is untouched).  The paths that reach it here: every hit of the
+-- strike loop (fixed damage included), the Bide release (`.UnleashEnergy`
+-- jumps to HandleIfPlayerMoveMissed), a trap's later turns (`.MultiturnMoveCheck`
+-- jumps to GetPlayerAnimationType, `_resolveResiduals` here), an Explosion
+-- that did not land (EXPLODE_EFFECT is the one miss `.notDone` lets through),
+-- and a power-0 move outside both ResidualEffects lists, which CalculateDamage
+-- sends past MoveHitTest to a no-op ApplyAttack (Disable).
+--
+-- It flips hWhoseTurn and runs StatModifierUpEffect, so the raging battler is
+-- the "user": its own badges re-run (when it is the player's) and the
+-- re-penalty lands on the battler whose turn it then is not -- the attacker,
+-- `source`'s monster.  At +6 the cart returns before saying anything, as this
+-- does.
+function Battle:_buildRage(fighter, mon, source)
+  if not source or not mon or not mon.raging or mon.hp <= 0 then return end
+  local outcome, after = Effects.changeStat({
+    mon = mon, fighter = fighter, stat = "atk", delta = 1,
+    mover = fighter, nonMover = activeMon(source),
+  })
+  if outcome == "rose" then
+    self:_say(mon.species .. "'s ATTACK rose")
+    self:_emit("stat", {
+      slot = fighter.slot, side = fighter.side,
+      amount = after, text = mon.species .. "'s ATTACK rose",
+    })
+  elseif outcome == "stuck" then
+    self:_say("Nothing happened")
+  end
 end
 
 function Battle:_heal(fighter, mon, amount)
@@ -3546,6 +3591,14 @@ function Battle:_resolveResiduals()
       else
         self:_say(mon.species .. " is hurt by the trap")
         self:_damage(fighter, mon, trap.damage, nil)
+        -- On the cart this tick is the trapper's own turn: `.MultiturnMoveCheck`
+        -- jumps to GetPlayerAnimationType, the stored hit goes through
+        -- ApplyAttackToEnemyPokemon, and HandleBuildingRage follows it (a
+        -- trap that came on a sheet naming no trapper has nobody to build
+        -- against).  `trap` is still the table the faint just cleared off the
+        -- monster, so the counter below keeps working either way.
+        local trapper = trap.fromSlot and self:_fighterAtSlot(trap.fromSlot)
+        self:_buildRage(fighter, mon, trapper)
       end
       trap.turns = trap.turns - 1
       if trap.turns <= 0 then
@@ -3567,9 +3620,13 @@ function Battle:_resolveResiduals()
     mon = activeMon(fighter)
     if mon and mon.leechSeed then
       local amount = max(1, floor(mon.maxHp / 16))
+      -- Read before the damage: a tick that knocks the seeded monster out
+      -- runs `_faint`, which clears `leechSeed`.  The seeder is healed all
+      -- the same -- HandlePoisonBurnLeechSeed drains, then heals, and only
+      -- then is the faint looked at.
+      local from = mon.leechSeed.fromSlot
       self:_say(mon.species .. " is seeded")
       self:_damage(fighter, mon, amount, nil)
-      local from = mon.leechSeed.fromSlot
       local seeder = from and self:_fighterAtSlot(from)
       local sMon = seeder and activeMon(seeder)
       if sMon and sMon.hp > 0 then self:_heal(seeder, sMon, amount) end

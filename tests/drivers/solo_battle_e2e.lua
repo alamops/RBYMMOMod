@@ -45,6 +45,11 @@
 --      *defeated flag* is asserted against a live npcId rather than a staged
 --      battle that never had one.
 --   8. **a catch** in a solo wild fight adds the monster exactly once.
+--   9. **the carts' rules against the computer** (docs/plans/gen12-referee-
+--      fidelity.md): a traded monster's disobedience in the cart's lines and
+--      the badge that lifts it, QUICK ATTACK's priority, and on Gold the held
+--      items -- LEFTOVERS, a BERRY eaten, QUICK CLAW, the foe's THIEF, SMOKE
+--      BALL -- each read off the referee's own events and the save after.
 --
 -- ------- what is local here, and why
 --
@@ -79,15 +84,20 @@ if os.getenv("MMO_SOUND") ~= "1" and love and love.audio then
   love.audio.setVolume(0)
 end
 
--- Which Gen 3 legs a run drives, from SOLO_LEGS (a comma / space list;
--- unset, empty or "all" is every leg, which is what a default run does).  The
--- names are "singles" (the wild / trainer legs above the doubles) and the
--- lone-double legs, together as "double" or one by one: double-arena,
--- double-classic, double-ko, double-lastmon, double-refusal, double-handback,
--- double-real.  The badge-rule legs (docs/plans/gen3-badge-rules.md) are the
--- group "badge" (badge-boost, badge-guard, badge-trainer) and the group "obey"
--- (obey-arena, obey-classic, obey-badge8, obey-outcomes), likewise whole or
--- one by one.
+-- Which legs a run drives, from SOLO_LEGS (a comma / space list; unset,
+-- empty or "all" is every leg, which is what a default run does).  The names
+-- are "singles" (the wild / trainer legs above the doubles on Gen 3, legs 1-8
+-- on Red / Gold) and the lone-double legs, together as "double" or one by one:
+-- double-arena, double-classic, double-ko, double-lastmon, double-refusal,
+-- double-handback, double-real.  The badge-rule legs (docs/plans/gen3-badge-
+-- rules.md) are the group "badge" (badge-boost, badge-guard, badge-trainer),
+-- the group "obey" (obey-arena, obey-classic, obey-badge8, obey-outcomes,
+-- obey-asleep) and the group "theft" (theft-wild), likewise whole or one by
+-- one.  Red / Gold's rules legs (leg 9, `rulesLegs12`) are "obey"
+-- (obey-traded, obey-capless, obey-asleep), "priority" (priority-quick) and
+-- "held" (held-leftovers, held-berry, held-quickclaw, held-thief,
+-- held-smokeball); one list serves every cart, and a name a cart has no leg
+-- for is not driven there.
 -- A cart's run is minutes long, so iterating on one leg is worth a knob; it
 -- never changes what an unset run does.
 local SOLO_LEGS = (function()
@@ -1728,12 +1738,22 @@ local function runGen3(game, H, U, env)
   --   obey-outcomes  a seed run of two-move fights until the self-hit, the nap,
   --                  a called move and a loafing line have all been through
   --                  the screen, each said once in the cart's words
+  --   obey-asleep    a MEW met outside an event (`unfateful`), asleep, told to
+  --                  SNORE: the referee's `obey` is `ignores_asleep` on the
+  --                  first turn on every seed, said once in the cart's words
+  --                  (docs/plans/gen12-referee-fidelity.md §1 item 11)
+  --   theft-wild     a wild monster whose only move is THIEF, faster than the
+  --                  player's item holder: it hits and steals nothing -- no
+  --                  `held` event, no "stole" line, the item still on the party
+  --                  monster after the fight (§1 item 10; `wild` is a BADGE_MODES
+  --                  fight, so side b is the computer)
   --
   -- Numbers pinned on the monsters are synthetic fixture values; every number
   -- asserted is read off the live referee or computed by its own Damage.
   local function badgeLegs()
     local legs = { "badge-boost", "badge-guard", "badge-trainer",
-                   "obey-arena", "obey-classic", "obey-badge8", "obey-outcomes" }
+                   "obey-arena", "obey-classic", "obey-badge8", "obey-outcomes",
+                   "obey-asleep", "theft-wild" }
     local function wants(name) return legOn(name, name:match("^(%a+)%-")) end
     local any = false
     for _, name in ipairs(legs) do
@@ -2458,6 +2478,206 @@ local function runGen3(game, H, U, env)
       check(seen.ignored ~= nil, "obey outcomes: \"ignored orders!\" (a called move) was reached and said")
       check(seen.loafing ~= nil or seen.turned ~= nil or seen.pretend ~= nil,
             "obey outcomes: a loafing line (loafing / turned away / pretended) was reached and said")
+    end
+
+    -- ---- the asleep case, deterministically
+    --
+    -- pret IsMonDisobedient: a MEW (or DEOXYS) that is not event-legal skips the
+    -- traded / badge ladder and keeps an obedience level of 0, so the first roll,
+    -- `(level + 0) * rnd >> 8 < 0`, can never let it obey -- and with it asleep
+    -- and SNORE chosen, the next test is BattleScript_IgnoresWhileAsleep.  The
+    -- sleep check runs first (AtkCanceller_UnableToUseMove: the counter ticks,
+    -- 5 -> 4, and SNORE goes through asleep), so turn 1 reaches the token on any
+    -- seed: two seeds, the same token.  The OT is the player's own -- the
+    -- `unfateful` mark (the engine mon's `fatefulEncounter` explicitly false,
+    -- Sheet3 `unfatefulOf`) is the only fact that puts it under the rule.  Then
+    -- RUN: a monster that never obeys never ends a fight, and the MEW is the
+    -- faster, so the escape is certain.
+    if wants("obey-asleep") then
+      local SNORE, POUND = moveId("MOVE_SNORE"), moveId("MOVE_POUND")
+      local MEW = H.g3Species(game, "MEW")
+      if not (SNORE and POUND and MEW) then
+        skip("obey-asleep", "this cart's tables have no MEW / SNORE / POUND")
+      else
+        for i, seedValue in ipairs({ 7, 23 }) do
+          local L = ("obey asleep (seed %d)"):format(seedValue)
+          settle()
+          setBadges({})
+          setOption("classicui", false)
+          local mon = seed("MEW", 30)
+          if not check(mon ~= nil, L .. ": a MEW was seeded") then break end
+          pinMove(mon, { SNORE, POUND })
+          pinStats(mon, { atk = 80, def = 60, spe = 200, spa = 80, spd = 60, hp = 300 })
+          mon.fatefulEncounter = false
+          mon.status, mon.sleep = "SLP", 5
+          local foe = foeMon(5, { atk = 30, def = 30, spe = 20, spa = 30, spd = 30, hp = 30 }, TACKLE)
+          if not check(foe ~= nil, L .. ": the wild foe was built") then break end
+          local before = solo.seedFn
+          solo.seedFn = function() return seedValue end
+          local result
+          local took = solo:fromGen3Encounter(game, wildOf(WILD, 5),
+            { party = { foe }, done = function(r) result = r end })
+          solo.seedFn = before
+          if not check(took and solo.sim ~= nil and fight() ~= nil, L .. ": the fight was taken") then break end
+          local sim, f = solo.sim, fight()
+          local rec = watch(sim, f)
+          check(awaitChoose(60, "the asleep MEW's command grid"), L .. ": the command grid opens")
+          local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
+          local pb, fb = pf and pf.b, ff and ff.b
+          local facts = (pb and fb) and {
+            species = pb.mon.speciesNum, unfateful = pb.mon.unfateful, traded = pb.mon.traded,
+            status = pb.mon.status, sleepTurns = pb.mon.sleepTurns, rules = pf.badgeRules == true,
+            speedP = sim:_speedOf(pb), speedF = sim:_speedOf(fb), mode = sim.mode,
+          } or nil
+          check(facts ~= nil and facts.species == MEW and facts.unfateful == true,
+                L .. ": the referee's lead is the MEW, marked `unfateful`",
+                facts and ("species %s unfateful=%s"):format(tostring(facts.species), tostring(facts.unfateful)))
+          check(facts ~= nil and facts.traded == nil,
+                L .. ": and not traded -- its OT is the player's, so the Mew rule alone applies")
+          check(facts ~= nil and facts.status == "SLP" and (tonumber(facts.sleepTurns) or 0) > 1,
+                L .. ": and asleep with turns to go, as the save's party monster is",
+                facts and ("%s / %s"):format(tostring(facts.status), tostring(facts.sleepTurns)))
+          check(facts ~= nil and facts.rules and facts.mode == "wild",
+                L .. ": a wild fight, the badge rules on for the player's side",
+                facts and tostring(facts.mode))
+          check(facts ~= nil and facts.speedP > facts.speedF,
+                L .. ": the MEW is the faster (the RUN after is certain)",
+                facts and ("%s v %s"):format(tostring(facts.speedP), tostring(facts.speedF)))
+
+          -- turn 1: FIGHT, SNORE (slot 1); every menu after that: RUN
+          local commanded, shotDone = 0, false
+          H.waitSeconds(game, function()
+            local g = fight()
+            if not g then return true end
+            if not shotDone and #rec.obey > 0 and lineKey(g.shown or "") == "asleep" then
+              shotDone = true
+              rec.shownLine = flat(g.shown or "")
+              U.wait(30)
+              if i == 1 then shot("obey-asleep") end
+            end
+            if g.phase == "choose" then
+              commanded = commanded + 1
+              if commanded == 1 then fightWith(1) else command("RUN") end
+            else
+              nudge()
+            end
+            return fight() == nil
+          end, 240, "the asleep MEW's fight to end")
+          rec.result = result
+          settle()
+
+          local tokens = {}
+          for _, ob in ipairs(rec.obey) do tokens[#tokens + 1] = tostring(ob.side) .. ":" .. tostring(ob.token) end
+          check(#rec.obey == 1 and rec.obey[1].token == "ignores_asleep" and rec.obey[1].side == "a",
+                L .. ": the one `obey` of the fight is the player's `ignores_asleep`, on the SNORE turn",
+                table.concat(tokens, ","))
+          local same, said = linesMatch(rec)
+          check(same, L .. ": the screen said the cart's \"ignored orders while asleep\" once, and no other line", said)
+          check(shotDone, L .. ": the line was on the screen", rec.shownLine)
+          check(firstOf(rec.events, function(e)
+                  return e.t == "anim" and e.side == "a"
+                    and (e.text == "SNORE" or e.text == ("MOVE_" .. tostring(SNORE)) or tonumber(e.text) == SNORE)
+                end) == nil,
+                L .. ": and SNORE never ran -- the player's move did not play")
+          check(#rec.errors == 0, L .. ": no referee call failed under the watch", rec.errors[1])
+          check(rec.result == "run", L .. ": the fight then ends on the RUN", tostring(rec.result))
+        end
+      end
+    end
+
+    -- ---- the computer's THIEF takes nothing
+    --
+    -- pokeemerald Cmd_tryswapitems / MOVE_EFFECT_STEAL_ITEM and pokefirered's:
+    -- outside a link battle the opponent's side never steals (the item would
+    -- be gone from the player's party for good, so the cart forbids it).  The
+    -- foe here knows only THIEF and is the faster, so it hits before the
+    -- player's knockout can stop it: the hit lands, nothing changes hands.
+    if wants("theft-wild") then
+      local THIEF = moveId("MOVE_THIEF")
+      local NUGGET = H.g3ItemId(game, "NUGGET")
+      if not (THIEF and NUGGET) then
+        skip("theft-wild", "this cart's tables have no THIEF / NUGGET")
+      else
+        local L = "theft wild"
+        settle()
+        setBadges({})
+        setOption("classicui", false)
+        local mon = seed(STARTER, 30)
+        local foe = foeMon(5, { atk = 30, def = 30, spe = 150, spa = 30, spd = 30, hp = 60 }, THIEF)
+        if check(mon ~= nil and foe ~= nil, L .. ": the lead and the wild THIEF user were built") then
+          pinMove(mon, TACKLE)
+          pinStats(mon, { atk = 80, def = 60, spe = 50, spa = 80, spd = 60, hp = 300 })
+          -- both of the engine mon's spellings (Party.applyBattleFields keeps
+          -- `item` and `heldItem`; Sheet3 reads `heldItem` first)
+          mon.item, mon.heldItem = NUGGET, NUGGET
+          local before = solo.seedFn
+          solo.seedFn = function() return 4242 end
+          local result
+          local took = solo:fromGen3Encounter(game, wildOf(WILD, 5),
+            { party = { foe }, done = function(r) result = r end })
+          solo.seedFn = before
+          if check(took and solo.sim ~= nil and fight() ~= nil, L .. ": the fight was taken") then
+            local sim, f = solo.sim, fight()
+            local rec = watch(sim, f)
+            check(awaitChoose(60, "the THIEF fight's command grid"), L .. ": the command grid opens")
+            local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
+            local pb, fb = pf and pf.b, ff and ff.b
+            check(sim.mode == "wild" and pf and pf.badgeRules == true and ff and ff.badgeRules ~= true,
+                  L .. ": a wild fight -- side b is the computer", tostring(sim.mode))
+            check(pb ~= nil and tonumber(pb.mon.heldItem) == NUGGET and fb ~= nil
+                    and (tonumber(fb.mon.heldItem) or 0) == 0,
+                  L .. ": the player's battler holds the NUGGET, the foe holds nothing",
+                  pb and fb and ("%s / %s"):format(tostring(pb.mon.heldItem), tostring(fb.mon.heldItem)))
+            check(pb ~= nil and fb ~= nil and sim:_speedOf(fb) > sim:_speedOf(pb),
+                  L .. ": the foe is the faster, so its THIEF lands first")
+            local shotDone = false
+            play(function(g)
+              if not shotDone and flat(g.shown or ""):find("thief", 1, true) then
+                shotDone = true
+                U.wait(30)
+                shot("theft-wild")
+              end
+            end, 240, "the THIEF fight to end")
+            rec.result = result
+            settle()
+            -- An `anim` names the move by its sheet token (Sheet3.tokenFor:
+            -- the cart's MOVE_ constant without the prefix, else MOVE_<n>).
+            local function isThief(text)
+              return text == "THIEF" or text == ("MOVE_" .. tostring(THIEF)) or tonumber(text) == THIEF
+            end
+            local thiefs, hitAfter = 0, false
+            for idx, e in ipairs(rec.events) do
+              if e.t == "anim" and e.side == "b" and isThief(e.text) then
+                thiefs = thiefs + 1
+                for j = idx + 1, #rec.events do
+                  local n = rec.events[j]
+                  if n.t == "anim" then break end
+                  if n.t == "damage" and n.side == "a" then hitAfter = true end
+                end
+              end
+            end
+            check(thiefs >= 1, L .. ": the foe used THIEF", ("%d time(s)"):format(thiefs))
+            check(hitAfter, L .. ": and it hit the player's monster")
+            local helds = 0
+            for _, e in ipairs(rec.events) do
+              if e.t == "held" then helds = helds + 1 end
+            end
+            check(helds == 0, L .. ": the referee emitted no `held` event -- nothing was stolen",
+                  ("%d event(s)"):format(helds))
+            local stole = false
+            for _, line in ipairs(rec.said) do
+              if flat(line):find("stole", 1, true) then stole = true end
+            end
+            check(not stole, L .. ": and the screen said no \"stole\" line")
+            local after = lead()
+            check(after ~= nil and tonumber(after.heldItem) == NUGGET and tonumber(after.item) == NUGGET,
+                  L .. ": the party monster still holds the NUGGET after the fight",
+                  after and ("heldItem %s item %s"):format(tostring(after.heldItem), tostring(after.item)))
+            check(#rec.errors == 0, L .. ": no referee call failed under the watch", rec.errors[1])
+            check(rec.result == "win", L .. ": the fight ends in a win", tostring(rec.result))
+          end
+        end
+      end
     end
 
     setBadges({})
@@ -3739,7 +3959,14 @@ return function(game)
     return stored and stored[OPTION_KEY]
   end
 
-  do
+  -- Legs 1-8 below are the group "singles" of SOLO_LEGS (`legOn`), as on
+  -- Gen 3; the carts' rules against the computer (leg 9, `rulesLegs12`) are
+  -- the groups "obey", "priority" and "held".  A run that leaves "singles"
+  -- out turns the row on the way leg 3 leaves it, through the store
+  -- mod.options:get reads, since leg 3 is what normally flips it.
+  local SINGLES = legOn("singles")
+
+  if SINGLES then
     local mgr = openManager()
     check(mgr ~= nil, "F10's mod manager opens (Screens.push ManagerState)")
 
@@ -3790,7 +4017,7 @@ return function(game)
   -- untouched copy of this mod does not take the game's battles. The wrapper
   -- seeds the row OFF in options.lua rather than leaving the key absent, so
   -- this leg is the same leg on an identity a previous run left dirty.
-  do
+  if SINGLES then
     check(optionValue() ~= true, "the row is off for the default-OFF leg")
 
     freshParty()
@@ -3827,7 +4054,7 @@ return function(game)
   -- Mid-session and with no relaunch, which is the half of success criterion 1
   -- that a pre-seeded options.lua can never show: the very next encounter
   -- (leg 4) is the assertion that it took.
-  do
+  if SINGLES then
     local mgr = openManager()
     local soloRow = soloRowOf(mgr)
     check(soloRow ~= nil, "reopened the manager on the SOLO BATTLES row")
@@ -3847,7 +4074,7 @@ return function(game)
   -- ------------------------------------------------------------------
   -- 4. a solo wild fight, and the save afterwards
   -- ------------------------------------------------------------------
-  do
+  if SINGLES then
     freshParty()
     local before = lead()
     local expBefore, ppBefore = expOf(before), ppOf(before)
@@ -3947,7 +4174,7 @@ return function(game)
   -- come off the *save's* stat block through the real snapshot, the real
   -- referee and the real screen -- and each of those three could have been the
   -- one that lost them.
-  do
+  if SINGLES then
     local before = lead()
     local maxIn = tonumber(before and before.stats and before.stats.hp) or 0
     check(maxIn > 0, "the save monster states a maximum to check against")
@@ -4014,7 +4241,7 @@ return function(game)
   -- ------------------------------------------------------------------
   -- 5. a refused kind stays vanilla
   -- ------------------------------------------------------------------
-  do
+  if SINGLES then
     freshParty()
     local staged, how = stageRefusedWild(GEN == 2 and "SENTRET" or "GASTLY", 5)
     if staged == nil then
@@ -4036,7 +4263,7 @@ return function(game)
   -- ------------------------------------------------------------------
   -- 6. a solo trainer fight, and the payout
   -- ------------------------------------------------------------------
-  do
+  if SINGLES then
     freshParty()
     local class, total = H.coopTrainer(game.data)
     check(class ~= nil, "the dataset has a trainer with two POKeMON",
@@ -4175,7 +4402,7 @@ return function(game)
   -- plus a `range` cone); Gold spells NPC movement as numeric SPRITEMOVEDATA
   -- and has no such record, so `sightTrainerOn` answers nil there and this leg
   -- skips rather than failing for a shape it was never written against.
-  do
+  if SINGLES then
     local SIGHT_MAP = "ROUTE_3"
     local sightObj = H.sightTrainerOn(game.data, SIGHT_MAP)
     if sightObj == nil then
@@ -4263,7 +4490,7 @@ return function(game)
   -- Last, so the party growth it asserts is unambiguous: every earlier leg
   -- reseeds a one-member party, and this one deliberately does not run before
   -- anything that would.
-  do
+  if SINGLES then
     freshParty()
     check(H.giveItem(game, "MASTER_BALL", 1), "seeded a MASTER_BALL")
     local ballsBefore = (game.save.inventory
@@ -4306,6 +4533,924 @@ return function(game)
             .. "must not read back as a trainer beaten", tostring(finished))
     end
   end
+
+  -- ------------------------------------------------------------------
+  -- 9. the carts' own rules against the computer
+  -- ------------------------------------------------------------------
+  --
+  -- docs/plans/gen12-referee-fidelity.md (§1 items 7-9, test row TT-E): what
+  -- the referee does on Red and Gold now that it follows pokered / pokecrystal,
+  -- proved on the live solo path -- a real save monster, a real engine battle
+  -- staged and diverted, the real referee, the real screen, and the save after.
+  -- Every assertion reads the referee's own event stream (its `_emit`,
+  -- watched) or the save; the screen's lines (its `say`, watched) are checked
+  -- to carry the referee's words.  One screenshot per leg.
+  --
+  --   obey-traded     Red and Gold: a traded L50 lead (its OT id is not the
+  --                   save's player id -- `mon.otId` against `save.player.id`,
+  --                   MediatedBattle.tradedOf) with no badges, against a wild
+  --                   monster, disobeys in the cart's lines: "is loafing
+  --                   around." / "won't obey!" / "turned away!" / "ignored
+  --                   orders!", "began to nap!", "won't obey!" with the
+  --                   self-hit, "used instead, <move>" -- seeds are fought until
+  --                   each kind has been said; every one is the referee's msg,
+  --                   said on the screen, and every fight is still won
+  --   obey-capless    the same traded lead with EARTHBADGE (Red) / RISINGBADGE
+  --                   (Gold): no level cap, so it obeys -- not one line, and its
+  --                   move is the turn's first
+  --   obey-asleep     Gold: the traded lead put to sleep (the foe's SPORE) and
+  --                   told to SNORE: "ignored orders...sleeping!", said while the
+  --                   referee holds it asleep.  Red has neither SNORE nor SLEEP
+  --                   TALK; skipped there
+  --   priority-quick  Red and Gold: QUICK ATTACK moves before a foe the referee
+  --                   rates faster; the same fight with SCRATCH (same seed, same
+  --                   Speeds) moves second
+  --   held-leftovers  Gold: LEFTOVERS heals a sixteenth of the maximum at the
+  --                   end of the turn, and is still held on the save after
+  --   held-berry      Gold: a BERRY under half HP is eaten for its parameter's
+  --                   worth, and is gone from the save after the fight
+  --   held-quickclaw  Gold: QUICK CLAW moves its slower holder first (seeds are
+  --                   fought until it fires), and that seed without it does not
+  --   held-thief      Gold: a wild foe whose only move is THIEF takes the lead's
+  --                   item, and the save has lost it after the fight
+  --   held-smokeball  Gold: SMOKE BALL gets away on the first RUN, on a seed
+  --                   whose same RUN without it is refused ("Can't escape!")
+  --
+  -- Stats, levels and HP pinned on the monsters are synthetic fixture values;
+  -- move and item ids are pret names looked up in the player's own data, and
+  -- every number asserted is the referee's, the save's, or the player's own
+  -- item row's.
+  local function rulesLegs12()
+    local legs = { "obey-traded", "obey-capless", "obey-asleep", "priority-quick",
+                   "held-leftovers", "held-berry", "held-quickclaw", "held-thief",
+                   "held-smokeball" }
+    local function wants(name) return legOn(name, name:match("^(%a+)%-")) end
+    local any = false
+    for _, name in ipairs(legs) do
+      if wants(name) then any = true end
+    end
+    if not any then return end
+
+    local ctx = H.modCtx(game)
+    local solo = ctx and ctx.solo
+    if not check(type(solo) == "table" and type(solo.isOn) == "function",
+                 "the live SoloBattle instance is reachable for the rules legs") then
+      return
+    end
+    -- The row is on for these: leg 3 flips it, and a run without "singles"
+    -- sets it in the store mod.options:get reads.
+    if game.mods and game.mods.modOptions then
+      game.mods.modOptions[MOD_ID] = game.mods.modOptions[MOD_ID] or {}
+      game.mods.modOptions[MOD_ID][OPTION_KEY] = true
+    end
+    check(solo:isOn(), "SOLO BATTLES is on for the rules legs")
+
+    local data = game.data or {}
+    local GOLD = GEN == 2
+    local WILDS = GOLD and { "SENTRET", "RATTATA", "PIDGEY" } or { "PIDGEY", "RATTATA" }
+    local function haveMove(id) return type(data.moves) == "table" and data.moves[id] ~= nil end
+    local function itemRow(id) return type(data.items) == "table" and data.items[id] or nil end
+    local function flat12(text)
+      return (tostring(text or ""):gsub("\226\128\153", "'"):gsub("%s+", " "):lower())
+    end
+
+    -- ------- the monsters
+
+    -- `ids`, at full PP off the player's own move rows, in the shape each
+    -- engine keeps a party move ({ id, pp } -- Gold's carries maxPp too).
+    local function setMoves(mon, ids)
+      local list = {}
+      for i, id in ipairs(ids) do
+        local row = type(data.moves) == "table" and data.moves[id] or nil
+        local pp = tonumber(row and row.pp) or 10
+        list[i] = { id = id, pp = pp, maxPp = pp }
+      end
+      mon.moves = list
+    end
+
+    -- Speed, maximum HP, current HP, status and (Gold) the held item -- the
+    -- fields the battle sheet is cut from (MediatedBattle.snapshotMons:
+    -- `stats`, `hp`, `status`, `item`).
+    local function pin(mon, p)
+      mon.stats = mon.stats or {}
+      if p.speed then mon.stats.speed = p.speed end
+      if p.maxHp then
+        mon.stats.hp = p.maxHp
+        if mon.maxHp ~= nil or GOLD then mon.maxHp = p.maxHp end
+      end
+      local max = tonumber(mon.stats.hp) or tonumber(mon.maxHp) or 1
+      local hp = max
+      if p.hpAt then hp = p.hpAt(max) end
+      if p.hp then hp = p.hp end
+      mon.hp = math.max(1, math.min(max, math.floor(hp)))
+      mon.status = p.status
+      if GOLD then mon.item = p.item end
+    end
+
+    -- The save's player id, which the engines stamp on a new monster as its OT
+    -- id (BattleState.stampOT, Gold's Mon.stampOT) -- given a synthetic one on
+    -- a save that has not stamped one yet, exactly as those two would.
+    local function playerId()
+      local player = game.save and game.save.player
+      if type(player) ~= "table" then return nil end
+      if tonumber(player.id) == nil then player.id = 4321 end
+      return math.floor(tonumber(player.id)) % 65536
+    end
+
+    -- A one-monster party: the generation's L50 lead with exactly `spec.moves`.
+    -- `traded` gives it an OT id one off the player's (and an OT name that is
+    -- not theirs); otherwise its OT id is the player's own.
+    local function seedLead(spec)
+      local mon = H.seedParty(game, spec.species or partySpecies(), spec.level or 50)
+      if not mon then return nil end
+      setMoves(mon, spec.moves)
+      pin(mon, spec)
+      local pid = playerId()
+      if pid and spec.traded then
+        mon.otId = (pid + 1) % 65536
+        mon.ot, mon.otName = "TRADER", "TRADER"
+      elseif pid then
+        mon.otId = pid
+      end
+      return mon
+    end
+
+    local function tweakFoe(mon, foe)
+      if foe.moves then setMoves(mon, foe.moves) end
+      pin(mon, { speed = foe.speed, maxHp = foe.maxHp, hp = foe.hp, item = foe.item })
+    end
+
+    -- ------- badges
+
+    -- Gold keeps its badges in `save.player.badges` by name (Battle:hasBadge);
+    -- Red under each badge's inventory key (Badges.itemFor: the
+    -- `constants.badges` record's `item`, else its id).  Undone after the fight.
+    local undoBadges = nil
+    local function badgeKey1(id)
+      for _, entry in ipairs((data.constants and data.constants.badges) or {}) do
+        if type(entry) == "table" and entry.id == id then
+          return (type(entry.item) == "string" and entry.item ~= "") and entry.item or id
+        end
+      end
+      return id
+    end
+    local function setBadges12(list)
+      local save = game.save
+      if GOLD then
+        local player = save.player
+        local was = player.badges
+        player.badges = {}
+        for _, name in ipairs(list or {}) do player.badges[name] = true end
+        undoBadges = function() player.badges = was end
+      else
+        save.inventory = save.inventory or {}
+        local kept = {}
+        for _, id in ipairs(list or {}) do
+          local key = badgeKey1(id)
+          kept[#kept + 1] = { key = key, was = save.inventory[key] }
+          save.inventory[key] = 1
+        end
+        undoBadges = function()
+          for _, k in ipairs(kept) do save.inventory[k.key] = k.was end
+        end
+      end
+    end
+    local function clearBadges12()
+      if undoBadges then undoBadges() end
+      undoBadges = nil
+    end
+
+    -- ------- staging
+
+    -- A wild encounter built the way mmo_util's `stageWild` builds one, with
+    -- `tweak(mon)` run on the engine's own wild monster and `repin()` on the
+    -- player's lead *before* the push: the divert fires inside the push
+    -- (stageRefusedWild's reason), so a field set afterwards would never reach
+    -- the sheet.  On Gold both run after Battle.new as well, which recomputes
+    -- every monster's stats from its DVs and level (Mon.refreshStats, as the
+    -- cart's party struct does) and would otherwise undo a pinned Speed or HP.
+    -- Gold's callbacks are restamped to World:startBattle's popping shape
+    -- (likeWorldStartBattle).
+    local function stageTweakedWild(species, level, tweak, onFinish, repin)
+      if GOLD then
+        local okB, Battle = pcall(require, "src.battle.gen2.Battle")
+        local okM, Mon = pcall(require, "src.battle.gen2.Mon")
+        local okS, Screens = pcall(require, "src.ui.Screens")
+        if not (okB and Battle and okM and Mon and okS and Screens) then
+          return nil, "gen2 battle modules unavailable"
+        end
+        local wild = Mon.new(data, species, level)
+        if not wild then return nil, "no such species: " .. tostring(species) end
+        tweak(wild)
+        local okNew, battle = pcall(Battle.new, {
+          data = data, party = (game.save and game.save.party) or {}, wild = wild, save = game.save,
+        })
+        if not (okNew and battle) then return nil, tostring(battle) end
+        tweak(wild)
+        if repin then repin() end
+        local okPush, state = pcall(Screens.push, game, "Gen2BattleState",
+          { battle = battle, save = game.save })
+        if not (okPush and type(state) == "table") then
+          return nil, "Gen2BattleState never came up: " .. tostring(state)
+        end
+        state.kind = "wild"
+        state.enemyParty = battle.enemyParty or { wild }
+        return likeWorldStartBattle(state, onFinish)
+      end
+      local BattleState = require("src.battle.BattleState")
+      local ok, battle = pcall(BattleState.newWild, game, species, level)
+      if not (ok and battle and not battle.dead) then return nil, "newWild refused " .. tostring(species) end
+      local mon = battle.enemy and battle.enemy.mon
+      if not mon then return nil, "the wild battle has no enemy monster" end
+      tweak(mon)
+      if repin then repin() end
+      battle.onFinish = onFinish
+      game.stack:push(battle)
+      return battle
+    end
+
+    -- ------- watching
+
+    -- Everything the referee emits from here on, each with the turn it was
+    -- emitted in and what the player's monster then was (status, HP); and every
+    -- line the screen is handed to say.
+    local function watch12(sim, med)
+      local rec = { events = {}, said = {} }
+      local emit = sim._emit
+      sim._emit = function(self, kind, fields)
+        local ev = emit(self, kind, fields)
+        if ev then
+          local pf = self.byId and self.byId.solo_player
+          local pm = pf and pf.active and pf.mons and pf.mons[pf.active]
+          rec.events[#rec.events + 1] = {
+            t = ev.t, side = ev.side, slot = ev.slot, text = ev.text, amount = ev.amount,
+            hp = ev.hp, mon = ev.mon, turn = self.turn,
+            pStatus = pm and pm.status, pHp = pm and pm.hp,
+          }
+        end
+        return ev
+      end
+      local say, depth = med.say, 0
+      med.say = function(self, text, ...)
+        if depth == 0 and type(text) == "string" then rec.said[#rec.said + 1] = text end
+        depth = depth + 1
+        local ok, err = pcall(say, self, text, ...)
+        depth = depth - 1
+        if not ok then error(err, 0) end
+      end
+      return rec
+    end
+
+    local function msgsOf(rec)
+      local out = {}
+      for i, e in ipairs(rec.events) do
+        if e.t == "msg" then out[#out + 1] = { i = i, text = e.text, turn = e.turn, pStatus = e.pStatus } end
+      end
+      return out
+    end
+    local function screenSaid(rec, text)
+      for _, line in ipairs(rec.said) do
+        if line == text then return true end
+      end
+      return false
+    end
+    local function screenSaidLike(rec, needle)
+      for _, line in ipairs(rec.said) do
+        if flat12(line):find(needle, 1, true) then return true end
+      end
+      return false
+    end
+    -- The first move played this fight (an `anim` naming one of `ids`): its
+    -- side and move.
+    local function firstMove(rec, ids)
+      local want = {}
+      for _, id in ipairs(ids) do want[id] = true end
+      for _, e in ipairs(rec.events) do
+        if e.t == "anim" and want[e.text] then return e.side, e.text end
+      end
+      return nil
+    end
+    local function eventAfter(rec, from, pred)
+      for j = from + 1, #rec.events do
+        if pred(rec.events[j]) then return rec.events[j], j end
+      end
+      return nil
+    end
+
+    -- ------- driving
+
+    local function choose12(m, pick)
+      local want = pick.run and "RUN" or "FIGHT"
+      local list = (type(m.commandList) == "function" and m:commandList()) or {}
+      for i, c in ipairs(list) do
+        if c == want then m.commandIndex = i end
+      end
+      U.tap(game, "a"); U.wait(8)
+      if not pick.run and m.phase == "move" then
+        m.cursor = pick.move or 1
+        U.tap(game, "a"); U.wait(8)
+      end
+    end
+
+    -- One staged wild fight, driven to its end.  spec: label, seed, lead (for
+    -- seedLead), foe ({ species?, level?, moves, speed?, maxHp?, hp?, item? }),
+    -- badges, pick(turn, rec) -> { move = n } | { run = true } (default: move
+    -- 1 every turn), shotWhen(flatLine) -> bool and shotName (the one
+    -- screenshot, the first time the screen shows such a line).
+    local function rulesFight(spec)
+      local L = spec.label
+      backToOverworld(10)
+      local mon = seedLead(spec.lead)
+      if not check(mon ~= nil, L .. ": the lead was seeded") then return nil end
+      setBadges12(spec.badges)
+      local seedBefore, randomBefore = solo.seedFn, solo.randomFn
+      solo.seedFn = function() return spec.seed end
+      -- Gold's wild held-item roll (MediatedBattle.rollWildItem2) reads this
+      -- byte source: 0 is under its 192, "no item", so the foe holds exactly
+      -- what the leg gives it.
+      solo.randomFn = function() return 0 end
+      local finished
+      local staged, why, species
+      for _, name in ipairs(spec.foe.species or WILDS) do
+        staged, why = stageTweakedWild(name, spec.foe.level or 5,
+          function(m) tweakFoe(m, spec.foe) end,
+          function(result) finished = result end,
+          function() pin(mon, spec.lead) end)
+        if staged then species = name break end
+      end
+      solo.seedFn, solo.randomFn = seedBefore, randomBefore
+      local med, sim = medOnStack(), solo.sim
+      if not check(staged ~= nil and med ~= nil and sim ~= nil,
+                   L .. ": the staged wild fight was taken onto the mod's screen",
+                   staged and tostring(species) or tostring(why)) then
+        if staged and not med then dropStaged(staged) end
+        clearBadges12()
+        backToOverworld()
+        return nil
+      end
+      local rec = watch12(sim, med)
+      rec.label, rec.seed, rec.species = L, spec.seed, species
+      local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
+      local pm = pf and pf.mons and pf.active and pf.mons[pf.active]
+      local fm = ff and ff.mons and ff.active and ff.mons[ff.active]
+      local function speed(f, m)
+        local ok, v = pcall(sim._speedOf, sim, f, m)
+        return ok and tonumber(v) or nil
+      end
+      local function ids(m)
+        local out, labels = {}, {}
+        for i, mv in ipairs((m and m.moves) or {}) do
+          out[i] = mv.id
+          labels[i] = mv.name or mv.id
+        end
+        return out, labels
+      end
+      if pm and fm then
+        local moves, labels = ids(pm)
+        rec.facts = {
+          species = pm.species, level = pm.level, traded = pm.traded, rules = pf.badgeRules == true,
+          badges = pf.badges, foeTraded = fm.traded, foeSpecies = fm.species,
+          speedP = speed(pf, pm), speedF = speed(ff, fm), hp = pm.hp, maxHp = pm.maxHp,
+          heldItem = pm.heldItem, holdEffect = pm.holdEffect, holdParam = pm.holdParam,
+          itemName = pm.itemName, foeHeld = fm.heldItem, foeMoves = (ids(fm)),
+          moves = moves, moveLabels = labels, mode = sim.mode,
+        }
+      end
+      check(rec.facts ~= nil, L .. ": both monsters are on the referee's field")
+      check(awaitCommandMenu(L .. "'s command grid"), L .. ": the command grid opens")
+      local turn = 0
+      rec.over = H.waitSeconds(game, function()
+        local m = medOnStack()
+        if not m then return true end
+        if H.top(game) ~= m then
+          U.tap(game, "a"); U.wait(6)
+          return medOnStack() == nil
+        end
+        if spec.shotWhen and not rec.shot and type(m.shown) == "string"
+            and spec.shotWhen(flat12(m.shown)) then
+          rec.shot = true
+          rec.shownLine = flat12(m.shown)
+          U.wait(24)
+          shot(spec.shotName)
+        end
+        if m.phase == "choose" then
+          turn = turn + 1
+          choose12(m, (spec.pick and spec.pick(turn, rec)) or { move = 1 })
+        else
+          U.tap(game, "a"); U.wait(4)
+        end
+        return medOnStack() == nil
+      end, spec.seconds or 300, L .. " to end")
+      rec.turns = turn
+      check(rec.over, L .. ": the fight ran to its end", ("%d command(s)"):format(turn))
+      check(backToOverworld(), L .. ": and the overworld is back")
+      clearBadges12()
+      rec.result = finished
+      rec.after = lead()
+      return rec
+    end
+
+    -- ------- obedience
+
+    -- The cart's disobedience lines as the referee spells them after the
+    -- monster's name (pokered engine/battle/core.asm CheckForDisobedience and
+    -- text_2.asm; pokecrystal BattleCommand_CheckObedience and
+    -- data/text/battle.asm -- src/BattleSim/Turn.lua LOAF_TEXT / `_obey`,
+    -- src/BattleSim2/Turn.lua LOAF_LINES / `_obey`).
+    local OBEY_TAILS = {
+      { key = "loafing", tail = " is loafing around." },
+      { key = "wont", tail = " won't obey!" },
+      { key = "turned", tail = " turned away!" },
+      { key = "ignored", tail = " ignored orders!" },
+      { key = "nap", tail = " began to nap!" },
+      { key = "asleep", tail = " ignored orders...sleeping!" },
+    }
+    local INSTEAD = " used instead, "
+    local LOAF = { loafing = true, wont = true, turned = true, ignored = true }
+
+    -- Every disobedience line of the fight, keyed ("selfhit" is "won't obey!"
+    -- with the self-hit line right behind it), and any line that reads like
+    -- one but does not name the player's monster (a foe disobeying, a name
+    -- spelled otherwise) as strays.
+    local function obeyLines(rec)
+      local species = rec.facts and rec.facts.species or "?"
+      local found, strays = {}, {}
+      local msgs = msgsOf(rec)
+      for k, m in ipairs(msgs) do
+        local text, key = m.text, nil
+        if type(text) == "string" then
+          for _, row in ipairs(OBEY_TAILS) do
+            if text == species .. row.tail then key = row.key end
+          end
+          if not key and text:sub(1, #species + #INSTEAD) == species .. INSTEAD then key = "instead" end
+          if key == "wont" and msgs[k + 1] and msgs[k + 1].text == species .. " hurt itself in confusion" then
+            key = "selfhit"
+          end
+          if key then
+            found[#found + 1] = { key = key, text = text, i = m.i, turn = m.turn, pStatus = m.pStatus }
+          else
+            for _, row in ipairs(OBEY_TAILS) do
+              if text:sub(-#row.tail) == row.tail then strays[#strays + 1] = text end
+            end
+            if text:find(INSTEAD, 1, true) then strays[#strays + 1] = text end
+          end
+        end
+      end
+      return found, strays
+    end
+    local function anyObeyLine(line)
+      for _, row in ipairs(OBEY_TAILS) do
+        if line:find(row.tail:lower(), 1, true) then return true end
+      end
+      return line:find(INSTEAD, 1, true) ~= nil
+    end
+
+    local OBEY_MOVES = { "SCRATCH", "GROWL" }
+    local CAP_BADGE = GOLD and "RISING" or "EARTHBADGE"
+    local disobeyedSeed = nil
+
+    if wants("obey-traded") then
+      local seen, fights, lines = {}, 0, 0
+      local strays, unsaid, unwon, badNap, badInstead = {}, {}, {}, 0, 0
+      local first, photographed
+      for i = 1, 12 do
+        local seedValue = 300 + i * 41
+        local rec = rulesFight({
+          label = ("obey traded (seed %d)"):format(seedValue), seed = seedValue,
+          lead = { traded = true, moves = OBEY_MOVES, maxHp = 400, speed = 200 },
+          foe = { moves = { "SPLASH" }, speed = 10 },
+          badges = {},
+          shotWhen = (not photographed) and anyObeyLine or nil, shotName = "solo-rules-obey-traded",
+        })
+        if not rec then break end
+        fights = fights + 1
+        first = first or rec
+        if rec.shot then photographed = rec.shownLine end
+        local found, stray = obeyLines(rec)
+        for _, s in ipairs(stray) do strays[#strays + 1] = s end
+        if #found > 0 and not disobeyedSeed then disobeyedSeed = seedValue end
+        for _, ob in ipairs(found) do
+          lines = lines + 1
+          seen[ob.key] = (seen[ob.key] or 0) + 1
+          if not screenSaid(rec, ob.text) then unsaid[#unsaid + 1] = ob.text end
+          if ob.key == "nap" then
+            -- `.monNaps` / `.Nap`: the line is the status event's own text
+            if not eventAfter(rec, ob.i - 1, function(e)
+                  return e.t == "status" and e.side == "a" and e.text == ob.text end) then
+              badNap = badNap + 1
+            end
+          elseif ob.key == "instead" then
+            -- the called move is the lead's other one, named as the referee names it
+            local labels = rec.facts.moveLabels or {}
+            if ob.text ~= rec.facts.species .. INSTEAD .. tostring(labels[2]) then badInstead = badInstead + 1 end
+          end
+        end
+        if rec.result ~= "win" then unwon[#unwon + 1] = tostring(rec.seed) .. "=" .. tostring(rec.result) end
+        local loafed = seen.loafing or seen.wont or seen.turned or seen.ignored
+        if seen.nap and seen.selfhit and seen.instead and loafed then break end
+      end
+      local L = "obey traded"
+      local f = first and first.facts
+      check(f ~= nil and f.level == 50 and f.traded == true,
+            L .. ": the referee's lead is the L50 monster, marked traded (its OT id is not the player's)",
+            f and ("L%s traded=%s"):format(tostring(f.level), tostring(f.traded)))
+      check(f ~= nil and f.rules and next(f.badges or {}) == nil,
+            L .. ": with the badge rules on and no badge held", f and tostring(f.mode))
+      check(f ~= nil and f.foeTraded == nil, L .. ": the wild foe is not marked traded")
+      local parts = {}
+      for _, k in ipairs({ "loafing", "wont", "turned", "ignored", "nap", "selfhit", "instead" }) do
+        parts[#parts + 1] = k .. "=" .. tostring(seen[k] or 0)
+      end
+      log("obey traded:", lines, "line(s) in", fights, "fight(s):", table.concat(parts, " "))
+      check(lines > 0, L .. ": the traded lead disobeyed, in the cart's lines", table.concat(parts, " "))
+      check(seen.loafing or seen.wont or seen.turned or seen.ignored,
+            L .. ": a loafing line (\"is loafing around.\" / \"won't obey!\" / \"turned away!\" / \"ignored orders!\") was said")
+      check(seen.nap ~= nil, L .. ": \"began to nap!\" was said")
+      check(seen.selfhit ~= nil, L .. ": \"won't obey!\" with the self-hit was said")
+      check(seen.instead ~= nil, L .. ": \"used instead, <move>\" was said")
+      check(badNap == 0, L .. ": every nap's line is its sleep status event's own", tostring(badNap))
+      check(badInstead == 0, L .. ": every \"used instead,\" names the lead's other move", tostring(badInstead))
+      check(#strays == 0, L .. ": no disobedience line names anybody but the player's monster", strays[1])
+      check(#unsaid == 0, L .. ": the screen said every one of the referee's lines, word for word", unsaid[1])
+      check(#unwon == 0, L .. ": every fight still ends in a win", table.concat(unwon, ","))
+      check(photographed ~= nil, L .. ": a disobedience line was on the screen and photographed",
+            photographed)
+    end
+
+    if wants("obey-capless") then
+      local seeds = { disobeyedSeed or 341, 382, 423 }
+      local L = "obey capless (" .. CAP_BADGE .. ")"
+      for n, seedValue in ipairs(seeds) do
+        local rec = rulesFight({
+          label = ("%s (seed %d)"):format(L, seedValue), seed = seedValue,
+          lead = { traded = true, moves = OBEY_MOVES, maxHp = 400, speed = 200 },
+          foe = { moves = { "SPLASH" }, speed = 10 },
+          badges = { CAP_BADGE },
+          shotWhen = n == 1 and function(line) return line:find("used scratch", 1, true) ~= nil end or nil,
+          shotName = "solo-rules-obey-capless",
+        })
+        if not rec then break end
+        local f = rec.facts or {}
+        local found, stray = obeyLines(rec)
+        check(f.traded == true and f.level == 50,
+              rec.label .. ": the lead is still the traded L50 monster", tostring(f.traded))
+        check(type(f.badges) == "table" and f.badges[CAP_BADGE] ~= nil and f.rules,
+              rec.label .. ": and the referee's seat holds " .. CAP_BADGE)
+        check(#found == 0 and #stray == 0,
+              rec.label .. ": no level cap, so not one disobedience line",
+              found[1] and found[1].text or stray[1])
+        local side, move = firstMove(rec, { "SCRATCH", "GROWL", "SPLASH" })
+        check(side == "a" and move == "SCRATCH",
+              rec.label .. ": its SCRATCH is the turn's first move", tostring(side) .. " " .. tostring(move))
+        check(rec.result == "win", rec.label .. ": a win", tostring(rec.result))
+        if n == 1 and disobeyedSeed then
+          log(L .. ": seed " .. disobeyedSeed .. " disobeyed without the badge and obeyed with it")
+        end
+      end
+    end
+
+    if wants("obey-asleep") then
+      if not GOLD then
+        skip("obey-asleep", "Red has no SNORE or SLEEP TALK -- the asleep case is Gold's (and Gen 3's)")
+      elseif not (haveMove("SNORE") and haveMove("SPORE")) then
+        skip("obey-asleep", "this cart's move table has no SNORE / SPORE")
+      else
+        local L = "obey asleep"
+        local hit, fights, awake, unsaid = nil, 0, 0, {}
+        for i = 1, 10 do
+          local seedValue = 500 + i * 29
+          -- SPORE from a far faster foe puts the lead to sleep before it moves;
+          -- told SNORE, it passes the sleep gate (CheckTurn's Snore / Sleep Talk
+          -- exception) and meets IgnoreSleepOnly.  The foe on 1 HP: the first
+          -- move that lands (a SNORE that obeys, a SCRATCH used instead) ends it.
+          local rec = rulesFight({
+            label = ("%s (seed %d)"):format(L, seedValue), seed = seedValue,
+            lead = { traded = true, moves = { "SNORE", "SCRATCH" }, maxHp = 400, speed = 20 },
+            foe = { moves = { "SPORE" }, speed = 300, hp = 1 },
+            badges = {},
+            shotWhen = function(line) return line:find("ignored orders...sleeping", 1, true) ~= nil end,
+            shotName = "solo-rules-obey-asleep",
+          })
+          if not rec then break end
+          fights = fights + 1
+          local found = obeyLines(rec)
+          for _, ob in ipairs(found) do
+            if ob.key == "asleep" then
+              hit = hit or rec
+              if ob.pStatus ~= "sleep" then awake = awake + 1 end
+              if not screenSaid(rec, ob.text) then unsaid[#unsaid + 1] = ob.text end
+            end
+          end
+          if rec.result ~= "win" then unsaid[#unsaid + 1] = "result " .. tostring(rec.result) end
+          if hit then break end
+        end
+        log(L .. ": reached in", fights, "fight(s)")
+        check(hit ~= nil, L .. ": \"" .. "<lead> ignored orders...sleeping!\" was said by the referee",
+              hit and hit.label or "not in " .. fights .. " fight(s)")
+        check(hit ~= nil and hit.facts.traded == true, L .. ": by the traded lead")
+        check(awake == 0, L .. ": only ever while the referee holds the lead asleep", tostring(awake))
+        check(#unsaid == 0, L .. ": the screen said it word for word, and the fight was won", unsaid[1])
+        check(hit ~= nil and hit.shot == true, L .. ": the line was on the screen and photographed",
+              hit and hit.shownLine)
+      end
+    end
+
+    -- ------- move priority
+
+    if wants("priority-quick") then
+      if not (haveMove("QUICK_ATTACK") and haveMove("SCRATCH") and haveMove("TACKLE")) then
+        skip("priority-quick", "this cart's move table has no QUICK ATTACK / SCRATCH / TACKLE")
+      else
+        local function prioFight(label, move, shotName)
+          return rulesFight({
+            label = label, seed = 777,
+            lead = { moves = { move }, speed = 20 },
+            foe = { moves = { "TACKLE" }, speed = 300 },
+            badges = {},
+            shotWhen = shotName and function(line) return line:find("used quick attack", 1, true) ~= nil end or nil,
+            shotName = shotName,
+          })
+        end
+        local plain = prioFight("priority control (SCRATCH)", "SCRATCH")
+        local quick = prioFight("priority QUICK ATTACK", "QUICK_ATTACK", "solo-rules-priority-quick")
+        for _, rec in ipairs({ plain, quick }) do
+          local f = rec and rec.facts or {}
+          check(f.speedP ~= nil and f.speedF ~= nil and f.speedF > f.speedP,
+                (rec and rec.label or "priority") .. ": the referee rates the foe the faster",
+                ("%s v %s"):format(tostring(f.speedP), tostring(f.speedF)))
+          check(rec ~= nil and rec.result == "win", (rec and rec.label or "priority") .. ": a win",
+                tostring(rec and rec.result))
+        end
+        local ps, pm = firstMove(plain or { events = {} }, { "SCRATCH", "TACKLE" })
+        local qs, qm = firstMove(quick or { events = {} }, { "QUICK_ATTACK", "TACKLE" })
+        check(ps == "b" and pm == "TACKLE",
+              "priority: with SCRATCH (bracket 0 each) the faster foe moves first",
+              tostring(ps) .. " " .. tostring(pm))
+        check(qs == "a" and qm == "QUICK_ATTACK",
+              "priority: QUICK ATTACK's bracket moves the slower lead first, same seed and Speeds",
+              tostring(qs) .. " " .. tostring(qm))
+        check(quick ~= nil and quick.shot == true, "priority: the QUICK ATTACK line was photographed")
+      end
+    end
+
+    -- ------- Gold's held items
+
+    local heldLegs = { "held-leftovers", "held-berry", "held-quickclaw", "held-thief", "held-smokeball" }
+    if not GOLD then
+      for _, name in ipairs(heldLegs) do
+        if wants(name) then skip(name, "held items are Gold's; Red's monsters hold none") end
+      end
+      return
+    end
+
+    -- The lead's held-item facts on the referee's sheet are the player's own
+    -- item row's (contract K2: MediatedBattle.heldFields2).
+    local function itemFacts(L, rec, id)
+      local row = itemRow(id) or {}
+      local f = rec and rec.facts or {}
+      check(f.heldItem == id and f.holdEffect == row.heldEffect and f.itemName == row.name,
+            L .. ": the referee's lead holds " .. id .. ", with its item row's hold effect and name",
+            ("%s %s %s"):format(tostring(f.heldItem), tostring(f.holdEffect), tostring(f.itemName)))
+    end
+    -- the `held` event for side `side` holding (amount 1) or losing (0) `id`
+    local function heldEvent(rec, side, id, amount)
+      for i, e in ipairs(rec.events) do
+        if e.t == "held" and e.side == side and e.text == id and e.amount == amount then return e, i end
+      end
+      return nil
+    end
+    local function nextMsg(rec, i)
+      return eventAfter(rec, i, function(e) return e.t == "msg" end)
+    end
+    local function prevOf(rec, i, pred)
+      for j = i - 1, 1, -1 do
+        if pred(rec.events[j]) then return rec.events[j] end
+      end
+      return nil
+    end
+
+    if wants("held-leftovers") then
+      local L = "held LEFTOVERS"
+      if not (itemRow("LEFTOVERS") and haveMove("GROWL") and haveMove("SPLASH")) then
+        skip("held-leftovers", "this cart has no LEFTOVERS / GROWL / SPLASH")
+      else
+        -- Turn 1 does nothing to anybody (GROWL against SPLASH), so the end of
+        -- the turn is the only HP change; turn 2 is the knockout.
+        local rec = rulesFight({
+          label = L, seed = 611,
+          lead = { moves = { "GROWL", "SCRATCH" }, item = "LEFTOVERS", hpAt = function(max) return max / 2 end },
+          foe = { moves = { "SPLASH" }, speed = 10 },
+          badges = {},
+          pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+          shotWhen = function(line) return line:find("recovered with", 1, true) ~= nil end,
+          shotName = "solo-rules-held-leftovers",
+        })
+        if rec then
+          local f = rec.facts or {}
+          itemFacts(L, rec, "LEFTOVERS")
+          local ev, i = heldEvent(rec, "a", "LEFTOVERS", 1)
+          check(ev ~= nil and ev.turn == 1,
+                L .. ": the referee's `held` (side a, still held) at the end of turn 1",
+                ev and ("turn %s"):format(tostring(ev.turn)))
+          -- HandleLeftovers' sixteenth: max(1, floor(maxHp / 16)) under 1024 HP
+          local sixteenth = math.max(1, math.floor((tonumber(f.maxHp) or 0) / 16))
+          local drain = ev and prevOf(rec, i, function(e) return e.t == "drain" and e.side == "a" end)
+          check(drain ~= nil and drain.amount == sixteenth and drain.hp == (f.hp or 0) + sixteenth,
+                L .. ": it healed exactly a sixteenth of the maximum, onto the HP the lead walked in on",
+                drain and ("+%s -> %s (max %s, from %s)"):format(tostring(drain.amount), tostring(drain.hp),
+                  tostring(f.maxHp), tostring(f.hp)) or "no drain")
+          local line = ev and nextMsg(rec, i)
+          local want = tostring(f.species) .. " recovered with " .. tostring(f.itemName) .. "."
+          check(line ~= nil and line.text == want, L .. ": the cart's line right behind it",
+                line and line.text)
+          check(screenSaid(rec, want), L .. ": and the screen said it")
+          check(rec.result == "win", L .. ": a win", tostring(rec.result))
+          check(rec.after ~= nil and rec.after.item == "LEFTOVERS",
+                L .. ": LEFTOVERS is never used up -- still on the save's lead",
+                tostring(rec.after and rec.after.item))
+          check(rec.shot == true, L .. ": the line was photographed")
+        end
+      end
+    end
+
+    if wants("held-berry") then
+      local L = "held BERRY"
+      local row = itemRow("BERRY")
+      if not (row and haveMove("GROWL") and haveMove("SPLASH")) then
+        skip("held-berry", "this cart has no BERRY / GROWL / SPLASH")
+      else
+        local rec = rulesFight({
+          label = L, seed = 622,
+          lead = { moves = { "GROWL", "SCRATCH" }, item = "BERRY", hpAt = function(max) return max / 4 end },
+          foe = { moves = { "SPLASH" }, speed = 10 },
+          badges = {},
+          pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+          shotWhen = function(line) return line:find("recovered using a", 1, true) ~= nil end,
+          shotName = "solo-rules-held-berry",
+        })
+        if rec then
+          local f = rec.facts or {}
+          itemFacts(L, rec, "BERRY")
+          check(f.holdParam == tonumber(row.heldParameter),
+                L .. ": its parameter is the item row's", tostring(f.holdParam))
+          local ev, i = heldEvent(rec, "a", "BERRY", 0)
+          check(ev ~= nil, L .. ": the referee's `held` (side a, gone): the BERRY was eaten",
+                ev and ("turn %s"):format(tostring(ev.turn)))
+          local drain = ev and prevOf(rec, i, function(e) return e.t == "drain" and e.side == "a" end)
+          local heal = math.min(tonumber(f.holdParam) or 0, (tonumber(f.maxHp) or 0) - (tonumber(f.hp) or 0))
+          check(drain ~= nil and drain.amount == heal and drain.hp == (f.hp or 0) + heal,
+                L .. ": it restored its parameter's worth, from under half HP",
+                drain and ("+%s -> %s (from %s of %s)"):format(tostring(drain.amount), tostring(drain.hp),
+                  tostring(f.hp), tostring(f.maxHp)) or "no drain")
+          local line = ev and nextMsg(rec, i)
+          local want = tostring(f.species) .. " recovered using a " .. tostring(f.itemName) .. "!"
+          check(line ~= nil and line.text == want, L .. ": the cart's line right behind it", line and line.text)
+          check(screenSaid(rec, want), L .. ": and the screen said it")
+          check(rec.result == "win", L .. ": a win", tostring(rec.result))
+          check(rec.after ~= nil and (rec.after.item == nil or rec.after.item == ""),
+                L .. ": the save's lead holds nothing after the fight -- the eaten BERRY is gone",
+                tostring(rec.after and rec.after.item))
+          check(rec.shot == true, L .. ": the line was photographed")
+        end
+      end
+    end
+
+    if wants("held-quickclaw") then
+      local L = "held QUICK CLAW"
+      if not (itemRow("QUICK_CLAW") and haveMove("SCRATCH") and haveMove("TACKLE")) then
+        skip("held-quickclaw", "this cart has no QUICK CLAW / SCRATCH / TACKLE")
+      else
+        local function clawFight(seedValue, item, shotName)
+          return rulesFight({
+            label = ("%s %s (seed %d)"):format(L, item and "held" or "control", seedValue), seed = seedValue,
+            lead = { moves = { "SCRATCH" }, item = item, speed = 20 },
+            foe = { moves = { "TACKLE" }, speed = 300 },
+            badges = {},
+            shotWhen = shotName and function(line) return line:find("used scratch", 1, true) ~= nil end or nil,
+            shotName = shotName,
+          })
+        end
+        -- DetermineMoveOrder's `.equal_priority`: one BattleRandom against the
+        -- claw's parameter, so the seeds are fought until one fires.
+        local fired, tried, slower = nil, 0, true
+        for i = 1, 20 do
+          local rec = clawFight(900 + i * 13, "QUICK_CLAW", "solo-rules-held-quickclaw")
+          if not rec then break end
+          tried = tried + 1
+          local f = rec.facts or {}
+          if not (f.speedP and f.speedF and f.speedF > f.speedP) then slower = false end
+          if i == 1 then itemFacts(L, rec, "QUICK_CLAW") end
+          if firstMove(rec, { "SCRATCH", "TACKLE" }) == "a" then fired = rec break end
+        end
+        log(L .. ": fired on try", tostring(tried))
+        check(slower, L .. ": the referee rated the holder the slower in every fight")
+        check(fired ~= nil, L .. ": the slower holder's SCRATCH went first on a seed (the claw fired)",
+              fired and fired.label or ("not in %d fight(s)"):format(tried))
+        if fired then
+          check(fired.result == "win", L .. ": that fight is a win", tostring(fired.result))
+          local control = clawFight(fired.seed, nil)
+          check(control ~= nil and firstMove(control, { "SCRATCH", "TACKLE" }) == "b",
+                L .. ": the same seed with no claw: the faster foe goes first",
+                control and tostring((firstMove(control, { "SCRATCH", "TACKLE" }))))
+          check(control ~= nil and control.facts and control.facts.heldItem == nil,
+                L .. ": (and that lead held nothing)")
+          check(fired.shot == true, L .. ": the claw's turn was photographed")
+        end
+      end
+    end
+
+    if wants("held-thief") then
+      local L = "held THIEF"
+      if not (itemRow("NUGGET") and haveMove("THIEF") and haveMove("SCRATCH")) then
+        skip("held-thief", "this cart has no NUGGET / THIEF / SCRATCH")
+      else
+        -- The faster foe's THIEF lands before the lead's knockout; the lead's
+        -- NUGGET is an item no rule of the fight consumes.
+        local rec = rulesFight({
+          label = L, seed = 633,
+          lead = { moves = { "SCRATCH" }, item = "NUGGET", speed = 20, maxHp = 400 },
+          foe = { moves = { "THIEF" }, speed = 300 },
+          badges = {},
+          shotWhen = function(line) return line:find("stole", 1, true) ~= nil end,
+          shotName = "solo-rules-held-thief",
+        })
+        if rec then
+          local f = rec.facts or {}
+          itemFacts(L, rec, "NUGGET")
+          check(f.foeHeld == nil, L .. ": the wild foe holds nothing (THIEF needs an empty hand)",
+                tostring(f.foeHeld))
+          local lost, i = heldEvent(rec, "a", "NUGGET", 0)
+          local took = heldEvent(rec, "b", "NUGGET", 1)
+          check(lost ~= nil and took ~= nil,
+                L .. ": the referee's `held` pair: the lead's NUGGET gone, the foe holding it",
+                ("%s / %s"):format(tostring(lost ~= nil), tostring(took ~= nil)))
+          local line = lost and nextMsg(rec, i)
+          local want = tostring(f.foeSpecies) .. " stole " .. tostring(f.itemName) .. " from its foe!"
+          check(line ~= nil and line.text == want, L .. ": the cart's line behind them", line and line.text)
+          check(screenSaid(rec, want), L .. ": and the screen said it")
+          check(rec.result == "win", L .. ": a win", tostring(rec.result))
+          check(rec.after ~= nil and (rec.after.item == nil or rec.after.item == ""),
+                L .. ": the save's lead has lost the NUGGET after the fight",
+                tostring(rec.after and rec.after.item))
+          check(rec.shot == true, L .. ": the theft was photographed")
+        end
+      end
+    end
+
+    if wants("held-smokeball") then
+      local L = "held SMOKE BALL"
+      local row = itemRow("SMOKE_BALL")
+      if not (row and haveMove("SCRATCH") and haveMove("SPLASH")) then
+        skip("held-smokeball", "this cart has no SMOKE BALL / SCRATCH / SPLASH")
+      else
+        -- RUN first, then fight: the far faster foe makes the ordinary escape
+        -- a roll (SoloBattle's escapeOdds), which the control has to lose.
+        local function runFight(seedValue, item, shotName)
+          return rulesFight({
+            label = ("%s %s (seed %d)"):format(L, item and "held" or "control", seedValue), seed = seedValue,
+            lead = { moves = { "SCRATCH" }, item = item, speed = 10 },
+            foe = { moves = { "SPLASH" }, speed = 400 },
+            badges = {},
+            pick = function(turn) return (turn == 1) and { run = true } or { move = 1 } end,
+            shotWhen = shotName and function(line) return line:find("fled using a", 1, true) ~= nil end or nil,
+            shotName = shotName,
+          })
+        end
+        local refused = nil
+        for i = 1, 8 do
+          local rec = runFight(700 + i * 17, nil)
+          if not rec then break end
+          if screenSaid(rec, "Can't escape!") and rec.turns >= 2 then refused = rec break end
+        end
+        check(refused ~= nil, L .. ": a control seed whose first RUN is refused (\"Can't escape!\")",
+              refused and refused.label)
+        if refused then
+          local f = refused.facts or {}
+          check(f.speedP and f.speedF and f.speedP < f.speedF,
+                L .. ": the lead is the slower, so its escape is a roll",
+                ("%s v %s"):format(tostring(f.speedP), tostring(f.speedF)))
+          local rec = runFight(refused.seed, "SMOKE_BALL", "solo-rules-held-smokeball")
+          if rec then
+            local g = rec.facts or {}
+            itemFacts(L, rec, "SMOKE_BALL")
+            check(screenSaidLike(rec, "fled using a " .. flat12(row.name) .. "!"),
+                  L .. ": the screen said the cart's \"fled using a SMOKE BALL!\"")
+            check(not screenSaid(rec, "Can't escape!"), L .. ": and never \"Can't escape!\"")
+            check(rec.turns == 1, L .. ": the fight ended on that first RUN", ("%d command(s)"):format(rec.turns))
+            check(rec.result == "run", L .. ": as an escape", tostring(rec.result))
+            check(firstMove(rec, { "SCRATCH", "SPLASH" }) == nil, L .. ": before anybody moved")
+            check(rec.after ~= nil and rec.after.item == "SMOKE_BALL",
+                  L .. ": SMOKE BALL is never used up -- still on the save's lead",
+                  tostring(rec.after and rec.after.item))
+            check(rec.shot == true, L .. ": the line was photographed")
+            log(L .. ": " .. tostring(g.species) .. " fled on seed " .. tostring(refused.seed))
+          end
+        end
+      end
+    end
+  end
+
+  rulesLegs12()
 
   -- ------------------------------------------------------------------
 

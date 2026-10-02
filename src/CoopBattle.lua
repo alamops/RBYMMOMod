@@ -10985,13 +10985,18 @@ function M:grantCatch(msg)
   -- host rolled for it (`wildMons`), unless a `held` event said it was eaten or
   -- taken (`applyHeld2` keeps the foe's in `foeHeld2`; the lone wild sheet is
   -- party index 0).  pokecrystal PokeBallEffect keeps wEnemyMonItem as the
-  -- battle left it.  Only an item this client described (`ownItem2`).
+  -- battle left it.  Only an item this client described (`ownItem2`); a `held`
+  -- naming any other leaves the monster holding nothing, not the item it was
+  -- rolled -- the wild monster only took a foreign item with a THIEF of its
+  -- own, which takes only when its user holds nothing (pokecrystal
+  -- BattleCommand_Thief `.enemy`), so that roll was already eaten or taken
+  -- (MediatedBattle:caughtHolding2, the 1v1 screen's twin of this).
   if self.gen2Mediated and mon and type(self.foeHeld2) == "table" then
     local held = self.foeHeld2[0]
     if held == false then
       mon.item = nil
-    elseif held ~= nil and self:ownItem2(held) then
-      mon.item = held
+    elseif held ~= nil then
+      mon.item = self:ownItem2(held) and held or nil
     end
   end
   if not mon and msg and msg.caught then

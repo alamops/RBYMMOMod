@@ -56,6 +56,14 @@
 --     and obedience: `obey_traded` (use-instead, loafing, nap, self-hit),
 --     `obey_asleep` (Snore and Sleep Talk), `obey_badges`, `obey_fallbacks`,
 --     `obey_link` and `obey_side_b` (never).
+--   * the wave-2 review fixes: `thief_substitute` / `thief_chance_miss`
+--     (Thief's `effectchance`: a substitute, the 1/256), `obey_bide` (a Bide
+--     release skips obedience), `bide_slot0` (a release aimed at seat 0),
+--     `gate_para_confused` / `gate_para_disabled` (paralysis is CheckTurn's
+--     last gate), `mysteryberry_transformed`, `leftovers_large`
+--     (GetSixteenthMaxHP past 1024), `leech_seed_ko`, `rage` / `rage_cap` /
+--     `rage_sources` (Gold's Rage counter) and `side_effect_ko` (no secondary
+--     effect past `checkfaint`).
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -233,6 +241,10 @@ local function mn(o)
     -- parameter, name, mail } -- with synthetic parameters throughout.
     speciesId = o.speciesId, statusTurns = o.statusTurns, traded = o.traded,
     disable = o.disable,
+    -- What the review-fix scenarios add: a standing substitute, Bide, Leech
+    -- Seed, rage and Transform carried on the sheet.
+    substitute = o.substitute, bide = o.bide, leechSeed = o.leechSeed,
+    raging = o.raging, rageCounter = o.rageCounter, transformed = o.transformed,
   }
   if o.item then
     m.heldItem, m.holdEffect, m.holdParam = o.item[1], o.item[2], o.item[3]
@@ -1100,6 +1112,10 @@ scenario("kings_rock", function(events)
     } }, rounds)
 end)
 
+-- Thief's row: its 100% effect chance (`percent 100`), which the script's
+-- `effectchance` rolls before the hit.
+local function thief(power) return hm("THIEF", power, 0, 0, nil, 100) end
+
 -- Thief, both ways, against the computer: Ann takes the wild monster's
 -- Leftovers, the wild monster takes them straight back, and they heal it at the
 -- end of the turn; turn 2 is the same trade.
@@ -1111,9 +1127,9 @@ scenario("thief", function(events)
   return play(events, { id = "th", mode = "wild", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
-              moves = { hm("THIEF", 10) } }) } } },
+              moves = { thief(10) } }) } } },
       b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 320, spe = 10, types = { 2 },
-              item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("THIEF", 10) } }) } } },
+              item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { thief(10) } }) } } },
     } }, { round, round })
 end)
 
@@ -1130,11 +1146,11 @@ scenario("thief_refused", function(events)
   return play(events, { id = "tr", mode = "coop_pvp", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
-              item = { "BERRY", "HELD_BERRY", 12, "BERRY" }, moves = { hm("THIEF", 10) } }) } },
+              item = { "BERRY", "HELD_BERRY", 12, "BERRY" }, moves = { thief(10) } }) } },
             { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 80, types = { 2 },
-              moves = { hm("THIEF", 10) } }) } },
+              moves = { thief(10) } }) } },
             { playerId = "a3", name = "Cal", mons = { mn({ species = "Eta", maxHp = 300, atk = 200, spe = 70,
-              types = { 2 }, moves = { hm("THIEF", 60) } }) } } },
+              types = { 2 }, moves = { thief(60) } }) } } },
       b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 60, types = { 2 },
               item = { "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, moves = { hm("tap", 1) } }) } },
             { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, spe = 50, types = { 2 },
@@ -1387,6 +1403,246 @@ local function obeyNever(mode, id)
 end
 scenario("obey_link", obeyNever("1v1", "ol"))
 scenario("obey_side_b", obeyNever("wild", "osb"))
+
+-- The review fixes (docs/plans/gen12-referee-fidelity.md, wave-2 review).
+--
+-- Thief into a substitute: `effectchance` fails on CheckSubstituteOpp before
+-- any byte is drawn, so the three hits that land on the doll (the third breaks
+-- it) take nothing; the fourth reaches the HP and steals.
+scenario("thief_substitute", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("wild", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "tsu", mode = "wild", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              moves = { thief(10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 320, spe = 10, types = { 2 },
+              substitute = 8, item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round })
+end)
+
+-- The 1/256: on this seed the effect-chance byte is 255, not under Thief's
+-- $ff, so wEffectFailed stays set and Bob keeps his Charcoal.
+scenario("thief_chance_miss", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "tcm", mode = "1v1", seed = 26836, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              moves = { thief(10) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 400, spe = 10, types = { 2 },
+              item = { "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, moves = { hm("tap", 1) } }) } } },
+    } }, { round })
+end)
+
+-- A Bide's release skips `checkobedience` (StoreEnergy's SkipToBattleCommand):
+-- Ann's traded level-80 monster unleashes on turn 1 drawing no obedience byte
+-- (this seed's first draws are a "used instead" when they are drawn), and
+-- only Bide's next first use, turn 2, is asked.
+scenario("obey_bide", function(events)
+  local function release(b) b:submitChoice("wild", { action = "fight", move = 0 }) end
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("wild", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "obb", mode = "wild", seed = 2, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", level = 80, maxHp = 900, spe = 90,
+              types = { 2 }, traded = true, bide = { turns = 0, stored = 40, moveIndex = 1, targetSlot = 3 },
+              moves = { hm("BIDE", 0, 0, 26, 10), hm("tap", 10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 2 },
+              moves = { hm("tap", 1) } }) } } },
+    } }, { release, round, round })
+end)
+
+-- A Bide aimed at seat 0 releases on seat 0: on this seed the aim stream would
+-- pick seat 1, which is where `targetSlot || foe.slot` used to send it.
+scenario("bide_slot0", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+  end
+  return play(events, { id = "bs0", mode = "coop_pvp", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              moves = { hm("tap", 1) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 80, types = { 2 },
+              moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 10, types = { 2 },
+              bide = { turns = 0, stored = 30, moveIndex = 1, targetSlot = 0 },
+              moves = { hm("BIDE", 0, 0, 26, 10), hm("tap", 1) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, spe = 20, types = { 2 },
+              moves = { hm("tap", 1) } }) } } },
+    } }, { round })
+end)
+
+-- CheckTurn's order: confusion before paralysis.  A paralysed, confused
+-- monster rolls its confusion first; a self-hit ends the turn with no
+-- paralysis byte, and "snapped out" still meets the paralysis gate after it.
+scenario("gate_para_confused", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "gpc", mode = "1v1", seed = 5, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              status = "PAR", confusion = 4, moves = { hm("thump", 10) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 10, types = { 2 },
+              moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round, round })
+end)
+
+-- ...and the disabled move before paralysis: Bob (faster) disables the move
+-- Ann's paralysed monster chose, which stops it with no paralysis byte.
+scenario("gate_para_disabled", function(events)
+  local function pick(a, b)
+    return function(battle)
+      battle:submitChoice("p1", { action = "fight", move = a })
+      battle:submitChoice("p2", { action = "fight", move = b })
+    end
+  end
+  return play(events, { id = "gpd", mode = "1v1", seed = 9, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 10, types = { 2 },
+              status = "PAR", moves = { hm("thump", 10), hm("pound_two", 10) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 90, types = { 2 },
+              moves = { hm("DISABLE", 0, 0, 86), hm("tap", 1) } }) } } },
+    } }, { pick(0, 1), pick(0, 0), pick(1, 1) })
+end)
+
+-- A transformed Mysteryberry holder keeps the berry: the cart scans the party
+-- PP, which the copied moves never spend.  Ditto copies Wild's one-PP tap and
+-- empties it on turn 2.
+scenario("mysteryberry_transformed", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("wild", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "mbt", mode = "wild", seed = 5, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Ditto", speciesId = "DITTO", maxHp = 300,
+              spe = 90, types = { 2 }, item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 0, "MYSTERYBERRY" },
+              moves = { hm("TRANSFORM", 0, 0, 57, 10) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 300, spe = 10, types = { 2 },
+              moves = { hm("tap", 1, 0, 0, 1) } }) } } },
+    } }, { round, round, round })
+end)
+
+-- GetSixteenthMaxHP past 1024: the quarter's high byte rides through, so
+-- Leftovers on an 1100-HP holder heals 260.
+scenario("leftovers_large", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "lol", mode = "1v1", seed = 4, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 1100, hp = 500, spe = 90,
+              types = { 2 }, item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 10, types = { 2 },
+              moves = { hm("tap", 1) } }) } } },
+    } }, { round })
+end)
+
+-- A Leech Seed sap that knocks the seeded monster out: the seeder's seat is
+-- read before the faint clears the seed, and the seeder is healed.
+scenario("leech_seed_ko", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "lsk", mode = "1v1", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, hp = 100, spe = 90,
+              types = { 2 }, moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 320, hp = 10, spe = 10,
+              types = { 2 }, leechSeed = { fromSlot = 0 }, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round })
+end)
+
+-- Gold / Crystal Rage: no lock-in and no Attack stage.  Each hit that leaves
+-- the raging monster standing builds its counter (a multi-hit move once per
+-- hit, with the cart's line), Rage's damage is multiplied by the counter plus
+-- one, and choosing another move ends the rage and zeroes the counter.
+scenario("rage", function(events)
+  local function pick(a, b)
+    return function(battle)
+      battle:submitChoice("p1", { action = "fight", move = a })
+      battle:submitChoice("p2", { action = "fight", move = b })
+    end
+  end
+  return play(events, { id = "rg", mode = "1v1", seed = 11, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 500, spe = 90, types = { 2 },
+              moves = { hm("RAGE", 20, 0, 81), hm("tap", 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 2 },
+              moves = { hm("pelt", 5, 0, 29), hm("tap", 1) } }) } } },
+    } }, { pick(0, 0), pick(0, 1), pick(1, 0), pick(0, 0) })
+end)
+
+-- The counter's ceiling: a hit into the raging monster's substitute builds
+-- (it did not miss), 254 -> 255 says so once, and the later hits of the same
+-- move find it full and say nothing; Rage then multiplies by 256.
+scenario("rage_cap", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "rgc", mode = "1v1", seed = 21, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 500, spe = 10, types = { 2 },
+              raging = true, rageCounter = 254, substitute = 30,
+              moves = { hm("RAGE", 20, 0, 81), hm("tap", 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 999, spe = 90, types = { 2 },
+              moves = { hm("pelt", 5, 0, 29) } }) } } },
+    } }, { round, round })
+end)
+
+-- Only a foe's move builds rage: a confusion self-hit (turn 2) and poison
+-- between turns never do.
+scenario("rage_sources", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "rgs", mode = "1v1", seed = 1, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 500, spe = 90, types = { 2 },
+              status = "PSN", confusion = 3, moves = { hm("RAGE", 20, 0, 81), hm("tap", 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 2 },
+              moves = { hm("thump", 10) } }) } } },
+    } }, { round, round, round, round })
+end)
+
+-- A secondary effect never lands on a target the hit knocked out (`checkfaint`
+-- ends the script first): Ann's burning hit KOs Bob's first monster, Abe's
+-- confusing hit KOs the second, and neither says a word about it -- nor draws
+-- the confusion's turn count.
+scenario("side_effect_ko", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    b:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  end
+  return play(events, { id = "sko", mode = "coop_pvp", seed = 6, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
+              moves = { hm("ember_hit", 40, 0, 4, nil, 100) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 80, types = { 2 },
+              moves = { hm("daze_hit", 40, 0, 76, nil, 100) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, hp = 2, spe = 10,
+              types = { 2 }, moves = { hm("tap", 1) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, hp = 2, spe = 20,
+              types = { 2 }, moves = { hm("tap", 1) } }) } } },
+    } }, { round })
+end)
 
 -- ------------------------------------------------------------------
 

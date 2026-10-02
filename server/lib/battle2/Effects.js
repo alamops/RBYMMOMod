@@ -888,7 +888,12 @@ const SIDE_STAT_DOWN = {
   68: 'atk', 69: 'def', 70: 'spe', 71: 'spa',
 };
 
-// ctx: effectId, chance, rng, targetMon, targetFighter, statusToWire
+// ctx: effectId, chance, hit, rng, targetMon, targetFighter, statusToWire
+// Returns { proc, messages, events }. `hit` is BattleCommand_EffectChance's
+// verdict when the caller already drew it (Turn draws the byte where the
+// script's `effectchance` stands and applies the effect after
+// `buildopponentrage`); absent, the byte is drawn here. `rng` is still the
+// confusion side effect's turn count.
 function applySide(ctx) {
   const out = { proc: false, messages: [], events: [] };
   const c = ctx || {};
@@ -897,7 +902,9 @@ function applySide(ctx) {
   const { rng, targetMon, targetFighter } = c;
   const wire = c.statusToWire || {};
 
-  if (!sideChanceProc(rng, chance)) return out;
+  let hit = c.hit;
+  if (hit === undefined || hit === null) hit = sideChanceProc(rng, chance);
+  if (!hit) return out;
   out.proc = true;
 
   if (effectId === 2 || effectId === 33 || effectId === 77) {

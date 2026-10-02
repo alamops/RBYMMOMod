@@ -99,6 +99,20 @@ turn order of every fight where the computer uses an item.
   bracket.
 - The `stat` event leaves `amount` off a negative stage (the wire's `amount` is
   unsigned); a signed stage needs a field like Gen 3's `stage` / `delta`.
+- RAGE's text: the cart prints "<MON>'s RAGE is building!" at each build,
+  then "ATTACK rose!"; the referee says it when it injects the forced choice.
+- On drain, recoil, PAY DAY and EXPLOSION moves the cart runs
+  `AlwaysHappenSideEffects` before the Rage build; the referee builds inside
+  the hit loop, so its `stat` event comes first (the final state is the same).
+- A primary drop at −6 or raise at +6 prints "Nothing happened!" on the cart;
+  the referee prints "won't go any lower / higher".
+- DISABLE: the cart picks a random move slot with PP (`BattleRandom & 3`) for
+  1–8 turns, and a miss says "But it failed!"; the referee disables the
+  target's last move for 2–5 turns.
+- A hit that a 0.25× matchup drops to 0 is a miss on the cart
+  (`AdjustDamageForMoveType`); the referee floors it at 1 and it lands.
+- LEECH SEED's drain is multiplied by the TOXIC counter on the cart, and a mon
+  that faints to poison or burn still feeds the seeder in the same residual.
 - A hit that has already fallen to 0 or 1 damage still draws the random roll.
   pokered `RandomizeDamage` returns before drawing (`cp 2` / `ret c`), and so
   does pokecrystal `BattleCommand_DamageVariation`, so Gold has it too. The
@@ -123,6 +137,17 @@ turn order of every fight where the computer uses an item.
 - Bright Powder works in the referee's percent domain (100% becomes 93%; the
   cart gives 91.8%) and also touches the OHKO accuracy roll.
 - `HELD_PREVENT_*` effects aren't modelled; no Gold or Crystal item carries one.
+- LEECH SEED saps 1/16 of max HP, Red's amount; pokecrystal saps 1/8
+  (`GetEighthMaxHP`), and on a knockout heals the seeder only the HP actually
+  taken (`SubtractHP`).
+- A secondary stat drop at −6 prints "won't go any lower"; the cart prints
+  nothing (Red's was fixed in this release).
+- A move called by METRONOME that charges (FLY, DIG) stores the charge on the
+  METRONOME slot, so the next turn re-runs METRONOME and the called move never
+  lands (Red has the same, §7).
+- Final damage is capped at 999 after the roll; the cart doesn't cap after
+  STAB or RAGE's multiplier. Only BIDE and COUNTER can see the difference.
+- A wrapped POKéMON can't move (Red's rule); Gold lets it attack.
 
 ## 9. Pay Day pays nothing on Red or Gold
 

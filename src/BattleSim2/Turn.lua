@@ -5,8 +5,9 @@
 -- atk/def/spe/spa/spd (Sp.Def); legacy spd+spc still accepted on ingest.
 -- Damage/crit/accuracy/status draws use Gen2 rules.  Crystal EFFECT_* names
 -- map onto the shared Gen1 effect-id handlers in Effects.idOf (so Leer /
--- Hypnosis / Screech actually resolve); Gen2-only effects and the item
--- catalog are still a follow-up.
+-- Hypnosis / Screech actually resolve); the Gen2-only move effects without a
+-- Gen1 id are still a follow-up -- Thief, keyed on its move id, is the one
+-- the held items brought in.
 --
 -- Known gaps left for follow-up: Gen2-native effect jump table, weather
 -- inside Damage.compute from Turn, Gen2 sleep parity tests, and Wire spa/spd
@@ -18,7 +19,10 @@
 -- Struggle and move priority all follow pokecrystal (docs/plans/
 -- gen12-referee-fidelity.md); where the Gold engine port reads otherwise, the
 -- cart wins.  Nor are held items (Items.lua: the static rules, keyed on the
--- sheet's hold effect), obedience (`_obey`) or the flinch reset (`_openTurn`).
+-- sheet's hold effect), obedience (`_obey`) or the flinch reset (`_openTurn`),
+-- nor Rage: Gold's is a counter built by the foe's hits and multiplied into
+-- Rage's own damage (`_buildRage`, `_resetRage`, Damage `rageCount`), with no
+-- lock-in and no Attack stage -- Gen 1's rule is not the cart's here.
 --
 -- The formula modules beside this one each answer a single question with no
 -- memory.  This is the thing that holds the fight: it owns the field, the
@@ -35,21 +39,33 @@
 --      field order) until one fires, then
 --      a speed tie-break byte, one per group of actors in the same priority
 --      bracket, Quick Claw standing and speed;
---   2. one gate byte per actor whose monster has a gating status;
---   3. one gate byte per actor whose monster is confused;
---   4. the obedience bytes of a traded monster over its badge cap, on a
+--   2. the gate bytes of each actor, in CheckTurn's order (`_runGates`): one
+--      for a sleeping or frozen monster, then one for a confused one, then
+--      one for a paralysed one -- each only when the monster has that status
+--      and no earlier gate (a flinch, a self-hit, the disabled move) stopped
+--      it;
+--   3. the obedience bytes of a traded monster over its badge cap, on a
 --      `badgeRules` seat (`_obey`, BattleCommand_CheckObedience's own draws,
 --      each only when reached);
---   5. per move that is actually used: accuracy byte, multihit-count byte
+--   4. per move that is actually used: accuracy byte, multihit-count byte
 --      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
 --      on a holder, side-chance byte (damaging hits only), the King's Rock
 --      byte, in that order, and none of them drawn when an earlier step ended
 --      the move (a missed move draws no crit byte).
 --
 -- Nothing else rolls.  Residuals, switches, the bag, the between-turn held
--- items and the clock are all deterministic, so a battle replays from its seed
--- plus the choice log -- and a fight with no held item, no traded monster and
--- no priority move draws exactly what it drew before any of them existed.
+-- items, rage and the clock are all deterministic, so a battle replays from its
+-- seed plus the choice log -- and a fight with no held item, no traded monster
+-- and no priority move draws what it drew before any of them existed, but for
+-- three changes the cart's order made on purpose: a flinched sleeping or
+-- frozen monster now draws its status gate first (sleep and freeze come
+-- before the flinch in CheckTurn); a move Metronome or Mirror Move called no
+-- longer runs the gates a second time; and the paralysis byte now follows the
+-- confusion byte and the disabled-move check (CheckTurn's last gate), so a
+-- paralysed, confused monster draws them in the other order and draws no
+-- paralysis byte on a self-hit or on its disabled move.  A Thief sheet with
+-- its real 100% chance draws the side-chance byte it always drew; Thief now
+-- obeys it.
 --
 -- **Policies chosen where Gen 1 had no answer**, each one written down because
 -- the two runtimes have to pick the same one:
@@ -512,7 +528,7 @@ local function copyMon(raw, fallback)
     trapping = nil,
     thrashing = thrashing,
     raging = raw.raging == true,
-    rageMove = max(0, int(raw.rageMove, 0)),
+    rageCounter = max(0, min(255, int(raw.rageCounter, 0))),
     bide = bide,
     lastMoveIndex = max(0, int(raw.lastMoveIndex, 0)),
     substitute = max(0, int(raw.substitute, 0)),
@@ -1053,7 +1069,7 @@ function Battle:_owes(fighter)
   return true
 end
 
--- Inject forced choices for charge release, recharge skip, thrash/rage repeat,
+-- Inject forced choices for charge release, recharge skip, thrash repeat,
 -- and trap lock-in. Gen1 trapping: victim can't move; user stays locked (no
 -- menu) while residual damage (first-hit store) ticks — not a re-rolled fight.
 function Battle:_fillForcedChoices()
@@ -1159,21 +1175,8 @@ function Battle:_fillForcedChoices()
       goto continue
     end
 
-    if mon.raging and mon.rageMove and mon.rageMove > 0 then
-      local foe = self:_autoTarget(fighter)
-      if foe then
-        self:_say(mon.species .. "'s RAGE is building")
-        fighter.forced = true
-        fighter.choice = {
-          action = "fight",
-          move = mon.rageMove,
-          target = foe.slot,
-        }
-        self:_emit("chose", {
-          slot = fighter.slot, side = fighter.side, text = fighter.name,
-        })
-      end
-    end
+    -- Rage is not a lock-in on Gold / Crystal: the seat is asked like any
+    -- other, and `_resetRage` ends the rage when it picks anything else.
 
     ::continue::
   end
@@ -1583,13 +1586,6 @@ function Battle:_autoChoice(fighter)
       }
     end
   end
-  if mon.raging and mon.rageMove and mon.rageMove > 0 then
-    local foe = self:_autoTarget(fighter)
-    if foe then
-      return { action = "fight", move = mon.rageMove, target = foe.slot }
-    end
-  end
-
   local foe = self:_autoTarget(fighter)
   if not foe then
     for _, f in ipairs(self:_foes(fighter)) do
@@ -2128,11 +2124,15 @@ end
 -- a wild monster too (its link check only bars a wild fight over a cable), and
 -- the enemy branch has no gate at all -- an item the computer takes is gone.
 -- The user must hold nothing, the target must hold something, and Mail is
--- never taken (ItemIsMail).  Nothing is drawn, and nothing about the hit is
--- asked: the command sits after applydamage and before checkfaint, so a foe
--- the hit knocked out is still robbed, and wEffectFailed -- set only by an
--- effectchance this script does not run -- never stops it, a substitute
--- included.
+-- never taken (ItemIsMail).  Both branches then return on wEffectFailed, which
+-- the script's `effectchance` (ahead of applydamage) sets when the target has
+-- a substitute up (CheckSubstituteOpp, before any byte is drawn) or when
+-- BattleRandom is not under the chance byte -- the 1/256 miss of a 100% move,
+-- docs/bugs_and_glitches.md.  That byte is the side-chance byte `_useMove`
+-- already draws for the hit, so the caller asks this only when it landed with
+-- no substitute standing; nothing is drawn here.  The command sits after
+-- applydamage and before checkfaint, so a foe the hit knocked out is still
+-- robbed.
 function Battle:_thief(fighter, mon, target, defender)
   if mon.heldItem or not defender.heldItem then return end
   if Items.isMail(defender) then return end
@@ -2141,6 +2141,21 @@ function Battle:_thief(fighter, mon, target, defender)
   self:_emitHeld(target, defender, item.heldItem, 0)
   self:_emitHeld(fighter, mon, item.heldItem, 1)
   self:_say(mon.species .. " stole " .. Items.label(mon) .. " from its foe!")
+end
+
+-- BattleCommand_BuildOpponentRage (effect_commands.asm:2422-2449, pokegold
+-- the same), in every damaging move script right after `checkfaint`: a target
+-- still standing that is raging gains a step of rage -- the counter
+-- BattleCommand_RageDamage multiplies its own Rage by -- and the cart says so.
+-- A hit into its substitute counts (it did not miss); a missed or immune move
+-- never gets here, and nothing else builds rage: no residual, no confusion
+-- self-hit, no recoil.  At 255 the `inc a / ret z` leaves the counter where it
+-- is and says nothing.
+function Battle:_buildRage(defender)
+  if defender.hp <= 0 or not defender.raging then return end
+  if defender.rageCounter >= 255 then return end
+  defender.rageCounter = defender.rageCounter + 1
+  self:_say(defender.species .. "'s RAGE is building!")
 end
 
 -- BattleCommand_HeldFlinch, the `kingsrock` command at the end of the move
@@ -2235,24 +2250,27 @@ end
 -- HandleMysteryberry (core.asm:1328-1464): player then enemy.  The first move
 -- slot with no PP gets 5 back (1 for Sketch, the cart's "lousy hack") and the
 -- berry is eaten; a holder with PP in every slot keeps it.  The cart scans the
--- PARTY moves and only tops up the battle copy when the monster is not
--- transformed; the referee holds one move list, so a transformed monster
--- spends the berry on the slot its list shows and gains no PP from it.
+-- PARTY moves and PP (wPartyMon1PP / wOTPartyMon1PP / wWildMonPP), and only
+-- tops up the battle copy when the monster is not transformed.  A transformed
+-- monster's moves are the battle struct's copies -- the PP it spends comes off
+-- them, never off the party (BattleCommand_DoTurn's SUBSTATUS_TRANSFORMED
+-- check) -- and the referee holds only that copied list, not the party's, so
+-- it has no party slot to find empty: the routine is skipped and the berry is
+-- kept, which is the cart's answer whenever the party PP held up before the
+-- Transform.
 function Battle:_heldMysteryberry()
   for _, fighter in ipairs(self.fighters) do
     local mon = activeMon(fighter)
-    if mon and Items.holds(mon, Items.RESTORE_PP) then
+    if mon and not mon.transformed and Items.holds(mon, Items.RESTORE_PP) then
       local slot = nil
       for i = 1, #mon.moves do
         if mon.moves[i].pp <= 0 then slot = i; break end
       end
       if slot then
         local move = mon.moves[slot]
-        if not mon.transformed then
-          move.pp = move.pp + ((Effects.moveKey(move) == "SKETCH") and 1 or 5)
-          if int(move.maxPp, 0) < move.pp then move.maxPp = move.pp end
-          self:_emitMoves(fighter, mon, fighter.active)
-        end
+        move.pp = move.pp + ((Effects.moveKey(move) == "SKETCH") and 1 or 5)
+        if int(move.maxPp, 0) < move.pp then move.maxPp = move.pp end
+        self:_emitMoves(fighter, mon, fighter.active)
         local name = Items.label(mon)
         local item = Items.take(mon)
         self:_emitHeld(fighter, mon, item.heldItem, 0)
@@ -2313,8 +2331,12 @@ end
 -- Asked by `_useMove` after the gates, for the move the monster chose.  Only
 -- on a `badgeRules` seat (the cart returns for the enemy's turn and in a link
 -- battle), only for a `traded` monster (its OT id is not the player's), and
--- never for a charged move's release (CheckUserIsCharging) or a rampage's
--- continuation (CheckRampage skips past the command).  Returns nil when the
+-- never for a charged move's release (CheckUserIsCharging), a rampage's
+-- continuation (CheckRampage skips past the command) or a Bide's release
+-- (BattleCommand_StoreEnergy, the command ahead of it in Bide's script, ends
+-- with `ld b, unleashenergy_command / jp SkipToBattleCommand`; a storing turn
+-- ends in EndMoveEffect before it -- the referee's forced skip -- so only
+-- Bide's first use is ever checked).  Returns nil when the
 -- monster obeys, "stop" when the action is spent, or the 1-based slot of the
 -- move it uses instead.  Every draw is the cart's, in its order, and each is
 -- drawn only when reached: a monster at or under its cap draws nothing.
@@ -2349,12 +2371,9 @@ function Battle:_obeyInstead(mon, selected)
   return nil
 end
 
--- `.EndDisobedience`: the move a foe's Mirror Move would copy is forgotten,
--- and a Bide that was releasing has already spent its energy (StoreEnergy ran
--- before the check).
+-- `.EndDisobedience`: the move a foe's Mirror Move would copy is forgotten.
 function Battle:_disobeyed(fighter, mon)
   mon.lastMoveIndex = 0
-  if fighter.choice and fighter.choice.bideRelease then mon.bide = nil end
   return "stop"
 end
 
@@ -2369,6 +2388,7 @@ end
 
 function Battle:_obey(fighter, mon, move)
   if not fighter.badgeRules or mon.traded ~= true then return nil end
+  if fighter.choice and fighter.choice.bideRelease then return nil end
   if mon.charging and Effects.isCharge(mon.charging.effect) then return nil end
   if mon.thrashing then return nil end
   local cap = Items.obedienceCap(fighter.badges)
@@ -2387,10 +2407,7 @@ function Battle:_obey(fighter, mon, move)
 
   if self:_obeyDraw(span, false) < cap then
     local slot = self:_obeyInstead(mon, fighter.choice and fighter.choice.move)
-    if slot then
-      if fighter.choice and fighter.choice.bideRelease then mon.bide = nil end
-      return slot
-    end
+    if slot then return slot end
     return self:_loaf(fighter, mon)
   end
 
@@ -2427,6 +2444,33 @@ function Battle:_obey(fighter, mon, move)
   return self:_disobeyed(fighter, mon)
 end
 
+-- ParsePlayerAction / ParseEnemyAction (pokecrystal engine/battle/core.asm:
+-- 606-700 and the enemy's `.raging` / ResetVarsForSubstatusRage, :5795-5934;
+-- pokegold the same), as the turn's actions are read and before any of them
+-- runs: SUBSTATUS_RAGE and the rage counter survive only on a seat whose
+-- chosen move is Rage again.  Switching, an item, running, a lock-in
+-- (CheckPlayerLockedIn's recharge / charge / rampage, a Bide, the referee's
+-- other forced fills) and any other move -- Struggle, Metronome, Mirror Move
+-- included, since UpdateMoveData reads the selected move -- end both.
+function Battle:_resetRage()
+  for _, fighter in ipairs(self.fighters) do
+    local mon = activeMon(fighter)
+    if mon and (mon.raging or mon.rageCounter > 0) then
+      local choice = fighter.choice
+      local keep = false
+      if choice and choice.action == "fight" and not fighter.forced
+         and not allPpEmpty(mon) then
+        local move = mon.moves[choice.move]
+        keep = move ~= nil and Effects.isRage(move.effect)
+      end
+      if not keep then
+        mon.raging = false
+        mon.rageCounter = 0
+      end
+    end
+  end
+end
+
 function Battle:_resolveTurn()
   self.phase = "resolving"
   -- Armed for the rare case resolution does not leave this phase in the same
@@ -2435,6 +2479,7 @@ function Battle:_resolveTurn()
   self.resolveDeadline = (self.resolveTimeout > 0)
     and (self.now + self.resolveTimeout) or nil
 
+  self:_resetRage()
   if self:_resolveRuns() then return end
   self:_resolveSwitches()
   self:_resolveItems()
@@ -2512,7 +2557,7 @@ function Battle:_resolveSwitches()
         mon.invulnerable = false
         mon.thrashing = nil
         mon.raging = false
-        mon.rageMove = 0
+        mon.rageCounter = 0
         mon.trapped = nil
         mon.trapping = nil
         mon.bide = nil
@@ -3022,14 +3067,20 @@ end
 
 -- Returns false when a gate stopped the move.  `selected` is the move the
 -- monster is about to use (Struggle when every slot is empty): the sleep gate's
--- Snore / Sleep Talk exception and the confusion self-hit read it the way the
--- cart's CheckTurn and DamageCalc do.
+-- Snore / Sleep Talk exception, the confusion self-hit and the disabled-move
+-- check read it the way the cart's CheckTurn and DamageCalc do.
 --
--- CheckTurn's order (pokecrystal engine/battle/effect_commands.asm:110-331):
--- sleep, freeze, then SUBSTATUS_FLINCHED -- read and cleared at `.not_frozen`
--- -- so a sleeping or frozen monster spends its turn on its status, ticking its
--- counter, whatever flinched it; the referee's paralysis gate stays where it
--- always stood, after the flinch and before confusion.
+-- CheckTurn's order (pokecrystal engine/battle/effect_commands.asm:110-331,
+-- pokegold the same): recharge (the referee's forced skip), sleep, freeze,
+-- then SUBSTATUS_FLINCHED -- read and cleared at `.not_frozen` -- so a sleeping
+-- or frozen monster spends its turn on its status, ticking its counter,
+-- whatever flinched it; then confusion, then the disabled move (`.not_
+-- infatuated`: the selected move is wDisabledMove), and paralysis LAST
+-- (`.no_disabled_move`), so a confused paralysed monster rolls its confusion
+-- first and draws no paralysis byte on a self-hit, and one that chose its
+-- disabled move is stopped before any paralysis byte.  Attract is not in this
+-- referee, and the referee ticks the Disable counter between turns rather
+-- than here.
 function Battle:_runGates(fighter, mon, selected)
   if mon.status == "sleep" or mon.status == "freeze" then
     local asleep = mon.status == "sleep"
@@ -3047,10 +3098,6 @@ function Battle:_runGates(fighter, mon, selected)
     mon.flinch = false
     self:_say(mon.species .. " flinched")
     return false
-  end
-
-  if mon.status == "paralysis" then
-    if not self:_statusGate(fighter, mon) then return false end
   end
 
   if mon.confusion > 0 then
@@ -3088,6 +3135,18 @@ function Battle:_runGates(fighter, mon, selected)
       end
       if not gate.canMove then return false end
     end
+  end
+
+  -- MoveDisabled: Struggle is no slot, so it is never the disabled move.
+  local choice = fighter.choice
+  if selected ~= STRUGGLE and choice and mon.disable and mon.disable.turns > 0
+     and mon.disable.moveIndex == choice.move then
+    self:_say(moveLabel(mon.moves[choice.move]) .. " is disabled")
+    return false
+  end
+
+  if mon.status == "paralysis" then
+    if not self:_statusGate(fighter, mon) then return false end
   end
 
   return true
@@ -3146,11 +3205,13 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
   self:_afterInfliction(targetFighter, targetMon, before)
 end
 
-function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, chance)
+-- The secondary effect of a damaging move whose `effectchance` byte has
+-- already been drawn (`hit`, see `_useMove`).
+function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, hit)
   local before = { status = targetMon.status, confusion = targetMon.confusion }
   local result = Effects.applySide({
     effectId = effectId,
-    chance = chance,
+    hit = hit == true,
     rng = self.rng,
     userMon = mon,
     targetMon = targetMon,
@@ -3206,13 +3267,6 @@ function Battle:_useMove(fighter, mon, opts)
   -- cart calls DoMove for it from inside the check (`.UseInstead`).
   local disobeyed = opts.disobeyed == true
   if not called and not disobeyed and not self:_runGates(fighter, mon, move) then return end
-
-  if not struggling and not called and not disobeyed and mon.disable and mon.disable.turns > 0
-     and mon.disable.moveIndex == choice.move then
-    local blocked = mon.moves[choice.move]
-    self:_say(moveLabel(blocked) .. " is disabled")
-    return
-  end
 
   -- `checkobedience`, the first command of every move script, for the move
   -- the monster chose (`_obey`).  A move it uses instead is that move used
@@ -3273,8 +3327,9 @@ function Battle:_useMove(fighter, mon, opts)
       return
     end
     -- Bide's script releases through applydamage, so a Focus Band answers
-    -- it, and ends in `kingsrock`.
+    -- it, then `checkfaint`, `buildopponentrage` and `kingsrock`.
     self:_strike(target, defender, 2 * stored)
+    self:_buildRage(defender)
     self:_kingsRock(mon, move, effectId, defender)
     self:_markLastMove(mon, choice.move)
     return
@@ -3538,6 +3593,10 @@ function Battle:_useMove(fighter, mon, opts)
         -- this is the cart's "player's turn only" without asking whose turn.
         badgeTypeBoost = not struggling
           and Effects.badgeTypeBoost(self:_typeIdOf(move.type), fighter.badges),
+        -- BattleCommand_RageDamage, Rage's own `ragedamage`: the user's rage
+        -- counter (`_buildRage`) multiplies the damage, after STAB and
+        -- before the variation.
+        rageCount = Effects.isRage(effectId) and mon.rageCounter or 0,
       })
 
     if result.immune then
@@ -3561,16 +3620,31 @@ function Battle:_useMove(fighter, mon, opts)
     self:_say("It's not very effective")
   end
 
+  -- `effectchance` reads the target's substitute before the hit can break
+  -- it (CheckSubstituteOpp): Thief asks this below.
+  local subAtChance = (defender.substitute or 0) > 0
+  -- MultiHit / DoubleHit / PoisonMultiHit run `checkfaint` and
+  -- `buildopponentrage` inside their loop, once per hit; every other script
+  -- once, after its own post-damage command (below).
+  local multihit = Effects.isMultihit(effectId)
   local totalDealt = 0
   for _ = 1, hits do
     if defender.hp <= 0 then break end
     local hpBefore = defender.hp
     self:_strike(target, defender, damage)
     totalDealt = totalDealt + (hpBefore - defender.hp)
+    if multihit then self:_buildRage(defender) end
   end
 
+  -- BattleCommand_EffectChance's byte, for a hit that reached the HP (the
+  -- draw site is the RNG contract's: after the hits and their Focus Band
+  -- bytes).  What it decides is applied further down, where the scripts put
+  -- the secondary effect: after their post-damage command (draintarget,
+  -- payday, thief, recoil), `checkfaint` and `buildopponentrage`.  Nothing in
+  -- between draws.
+  local effectHit = false
   if totalDealt > 0 then
-    self:_applySide(fighter, mon, target, defender, effectId, move.chance)
+    effectHit = Effects.sideChanceProc(self.rng, move.chance) == true
 
     if Effects.isDrain(effectId) then
       local heal = Effects.drainAmount(totalDealt)
@@ -3583,8 +3657,9 @@ function Battle:_useMove(fighter, mon, opts)
   end
 
   -- The Thief script's `thief`, right after the damage (a Gold sheet names
-  -- the move, not EFFECT_THIEF; Items.THIEF).
-  if Effects.moveKey(move) == Items.THIEF then
+  -- the move, not EFFECT_THIEF; Items.THIEF), when its `effectchance` left
+  -- wEffectFailed clear: the chance byte landed and no substitute stood.
+  if Effects.moveKey(move) == Items.THIEF and effectHit and not subAtChance then
     self:_thief(fighter, mon, target, defender)
   end
 
@@ -3592,6 +3667,15 @@ function Battle:_useMove(fighter, mon, opts)
     local recoil = Effects.recoilAmount(totalDealt)
     self:_say(mon.species .. " is hit with recoil")
     self:_damage(fighter, mon, recoil, nil)
+  end
+
+  if not multihit then self:_buildRage(defender) end
+
+  -- The secondary effect, which every *Hit script puts after `checkfaint`:
+  -- a target the hit knocked out has ended the script there, so it is never
+  -- burned, poisoned or confused (nor its confusion's turns drawn).
+  if totalDealt > 0 and defender.hp > 0 then
+    self:_applySide(fighter, mon, target, defender, effectId, effectHit)
   end
 
   -- A substitute absorbs HP (including the breaking hit), so totalDealt stays
@@ -3607,9 +3691,11 @@ function Battle:_useMove(fighter, mon, opts)
     }
   end
 
+  -- BattleCommand_Rage (move_effects/rage.asm): SUBSTATUS_RAGE on the user of
+  -- a Rage that connected (`rage` sits after `failuretext`).  No lock-in: it
+  -- lasts while the seat keeps choosing Rage (`_resetRage`).
   if Effects.isRage(effectId) then
     mon.raging = true
-    mon.rageMove = choice.move
   end
 
   if Effects.isTrapping(effectId) and totalDealt > 0 then
@@ -3687,19 +3773,6 @@ function Battle:_damage(fighter, mon, amount, status, ignoreSubstitute)
   end
 
   if amount > mon.hp then amount = mon.hp end
-
-  if amount > 0 and mon.raging then
-    local before = Effects.clampStage(mon.stages.atk)
-    local after = Effects.clampStage(before + 1)
-    if after ~= before then
-      mon.stages.atk = after
-      self:_say(mon.species .. "'s ATTACK rose")
-      self:_emit("stat", {
-        slot = fighter.slot, side = fighter.side,
-        amount = after, text = mon.species .. "'s ATTACK rose",
-      })
-    end
-  end
 
   mon.hp = mon.hp - amount
 
@@ -3939,7 +4012,7 @@ function Battle:_faint(fighter, mon)
   mon.mustRecharge = false
   mon.thrashing = nil
   mon.raging = false
-  mon.rageMove = 0
+  mon.rageCounter = 0
   mon.trapped = nil
   mon.trapping = nil
   mon.bide = nil
@@ -4096,9 +4169,13 @@ function Battle:_residualDamage()
     mon = activeMon(fighter)
     if mon and mon.leechSeed then
       local amount = max(1, floor(mon.maxHp / 16))
+      -- The seeder's seat is read before the sap: a sap that knocks the
+      -- seeded monster out faints it, and `_faint` clears its leechSeed.  The
+      -- seeder is still healed (ResidualDamage's RestoreHP comes before its
+      -- HasUserFainted check).
+      local from = mon.leechSeed.fromSlot
       self:_say(mon.species .. " is seeded")
       self:_damage(fighter, mon, amount, nil)
-      local from = mon.leechSeed.fromSlot
       local seeder = from and self:_fighterAtSlot(from)
       local sMon = seeder and activeMon(seeder)
       if sMon and sMon.hp > 0 then self:_heal(seeder, sMon, amount) end

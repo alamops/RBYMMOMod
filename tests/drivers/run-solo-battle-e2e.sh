@@ -52,15 +52,24 @@
 #
 # Env knobs: SOLO_TIMEOUT (seconds per leg, default 900), SHOT_DIR (defaults
 # to a **run-specific** directory -- two concurrent runs must not overwrite
-# each other's screenshots), MMO_SOUND=1 to hear it, SOLO_LEGS (Gen 3 only: a
-# comma list of legs to drive -- singles, double, badge, obey, or one of
-# double-arena, double-classic, double-ko, double-lastmon, double-refusal,
-# double-handback, double-real, badge-boost, badge-guard, badge-trainer,
-# obey-arena, obey-classic, obey-badge8, obey-outcomes -- default every leg;
-# read by the driver, so it passes straight through).  The badge and obey legs
-# are the cart's badge rules against the computer (docs/plans/gen3-badge-rules.md):
-# the x110/100 stat boosts, in a with / without pair of fights on one seed, and
-# a traded monster over its level cap disobeying in the cart's own words.
+# each other's screenshots), MMO_SOUND=1 to hear it, SOLO_LEGS (a comma list
+# of legs to drive, default every leg; read by the driver, so it passes
+# straight through, and one list serves every cart in the run -- a name a cart
+# does not have is simply not driven there):
+#   every cart  singles (the wild / trainer / catch legs), obey (the group)
+#   Gen 3       double, badge, theft, or one of double-arena, double-classic,
+#               double-ko, double-lastmon, double-refusal, double-handback,
+#               double-real, badge-boost, badge-guard, badge-trainer,
+#               obey-arena, obey-classic, obey-badge8, obey-outcomes,
+#               obey-asleep, theft-wild
+#   Red / Gold  priority, held, or one of obey-traded, obey-capless,
+#               obey-asleep (Gold), priority-quick, held-leftovers, held-berry,
+#               held-quickclaw, held-thief, held-smokeball (the held ones Gold)
+# The badge and obey legs are the carts' rules against the computer
+# (docs/plans/gen3-badge-rules.md, docs/plans/gen12-referee-fidelity.md): the
+# x110/100 stat boosts, a traded monster over its level cap disobeying in the
+# cart's own words, a never-trusted MEW asleep, the foe's THIEF; on Red and
+# Gold move priority, and Gold's held items and the save after them.
 
 set -uo pipefail
 
@@ -122,7 +131,7 @@ for arg in "$@"; do
     -h|--help)
       # Absolute: this script has already cd'd to the engine root, so a
       # relative $0 no longer resolves.
-      sed -n '2,62p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
+      sed -n '2,72p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) fail "unknown argument: $arg (try --gen1, --gen2, --both, --gen3, --all)" ;;
   esac

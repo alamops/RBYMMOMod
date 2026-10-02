@@ -240,6 +240,32 @@ do
   eq(burned.cur.atk, 22, "a switch-in: 40 -> 20 -> +2 = 22")
 end
 
+-- CantLowerAnymore (pokered effects.asm): `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`
+-- -- a side-effect drop that finds the stage already at -6 fails without a
+-- word, as it does at a stat of 1; a primary at -6 still prints its line.
+do
+  local function floored()
+    local mon = dummyMon({ species = "Beta" })
+    Effects.ensureBattleStats(mon)
+    mon.stages.spd = -6
+    return mon
+  end
+  local sideTarget = floored()
+  local side = Effects.applySide({
+    effectId = 70, chance = 100, rng = { byte = function() return 0 end },
+    targetMon = sideTarget, targetFighter = dummyFighter(3, "b"),
+    userFighter = dummyFighter(0, "a"),
+  })
+  eq(side.proc, true, "the side effect procs")
+  eq(#side.messages, 0, "and says nothing at -6")
+  eq(#side.events, 0, "nor emits a stat event")
+  eq(sideTarget.stages.spd, -6, "the stage stays at -6")
+
+  local primary = apply(20, dummyMon(), floored())
+  eq(primary.messages[1], "Beta's SPEED won't go any lower", "the primary at -6 says so")
+  eq(#primary.messages, 1, "...once")
+end
+
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("POTION")), true,
    "Potion fails on a fainted mon")
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("ETHER")), true,

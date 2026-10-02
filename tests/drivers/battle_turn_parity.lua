@@ -1831,6 +1831,13 @@ scenario("g1_flinch_rage_link", rageFlinch("g1fl", "1v1"))
 -- A Hyper Beam user that a slower Stomp flinches keeps that flinch through the
 -- recharge turn's open (probe 1) -- the forced recharge reads no gate -- and
 -- the turn after resets it (probe 2): the beam goes again, unflinched.
+--
+-- KNOWN-GAP PIN, not a cart claim: the cart never reaches this state.
+-- FlinchSideEffect calls ClearHyperBeam, so a flinch that lands clears the
+-- recharge and the beam user acts (flinched) instead of recharging.  The
+-- referee keeps the recharge, and this scenario pins today's stream so the
+-- two twins stay together until the gap closes -- gap 4 in
+-- docs/plans/gen12-referee-known-gaps.md, where it is re-expected.
 scenario("g1_flinch_recharge", function(events)
   local battle = build({
     id = "g1fh", mode = "wild", seed = 6303, choiceTimeout = 60, reconnectGrace = 60,
@@ -1854,6 +1861,249 @@ scenario("g1_flinch_recharge", function(events)
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drainInto(battle, events)
+  return battle
+end)
+
+-- 59-66. The Gen 1 review fixes (task FX1).  tests/battle_sim_turn.lua
+--     (section 27) states the numbers behind each one.
+--
+-- A Leech Seed tick that knocks the seeded monster out.  `_faint` clears
+-- `leechSeed`, so the seeder is read before the damage -- and still healed by
+-- the whole 1/16 (HandlePoisonBurnLeechSeed drains, heals, and only then looks
+-- at the faint).  This used to throw out of the residual.
+scenario("g1_leech_ko", function(events)
+  local battle = build({
+    id = "g1ls", mode = "1v1", seed = 6501, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", hp = 50, maxHp = 100, spd = 90, baseSpd = 0,
+             moves = { fx("seed", 0, 84) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", hp = 3, maxHp = 100, spd = 10, baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- Rage builds only after an opponent's move lands (HandleBuildingRage's two
+-- callers, core.asm :3243 / :5643): the raging monster's own poison, the Leech
+-- Seed on it and its confusion self-hits build nothing (probes: ATTACK and
+-- its stage stay where they started).
+scenario("g1_rage_quiet", function(events)
+  local battle = build({
+    id = "g1rq", mode = "wild", seed = 6509, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", maxHp = 400, atk = 100, def = 80, spd = 90, spc = 50,
+             status = "PSN", confusion = 4, baseSpd = 0, moves = { fx("fury", 20, 81) },
+             extra = { raging = true, rageMove = 1, leechSeed = { fromSlot = 3 } } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  for turn = 1, 3 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- The hit that knocks the raging monster out builds nothing (`ret z` on the
+-- target's HP), so the burned attacker is not halved a second time by the
+-- re-penalty (probe 1: Beta's ATTACK is still 100).
+scenario("g1_rage_lethal", function(events)
+  local battle = build({
+    id = "g1rl", mode = "wild", seed = 6503, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", hp = 20, maxHp = 300, atk = 100, def = 80, spd = 90,
+             spc = 50, baseSpd = 0, moves = { fx("fury", 20, 81) } }),
+        mn({ species = "Gamma", maxHp = 300, baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 300, atk = 200, spd = 10, status = "BRN",
+             baseSpd = 0, moves = { fx("thump", 80, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  probe(battle, 1)
+  return battle
+end)
+
+-- A Substitute that soaks the hit does not stop the build (AttackSubstitute
+-- returns to the same caller), and a two-hit move builds once per hit: the
+-- first hit breaks the doll, the second lands on the raging monster -- +2.
+scenario("g1_rage_sub", function(events)
+  local battle = build({
+    id = "g1rs", mode = "1v1", seed = 6504, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("fury", 20, 81) },
+             extra = { raging = true, rageMove = 1, substitute = 5 } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
+             moves = { fx("kicks", 20, 44) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  probe(battle, 1)
+  return battle
+end)
+
+-- The two builds no hit carries.  A Disable reaches HandleBuildingRage before
+-- its own hit test (power 0: CalculateDamage goes round MoveHitTest), so a
+-- raging target builds though the Disable misses (probe 1); an Explosion that
+-- misses still runs its effect and then the build (`.notDone`), so the target
+-- builds again as the exploder goes down (probe 2).
+scenario("g1_rage_misses", function(events)
+  local function blind(id, power, effect)
+    local out = fx(id, power, effect)
+    out.accuracy = 0
+    return out
+  end
+  local battle = build({
+    id = "g1rm", mode = "1v1", seed = 6505, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("fury", 20, 81) },
+             extra = { raging = true, rageMove = 1, lastMoveIndex = 1 } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
+             moves = { blind("numb", 0, 86), blind("boom", 130, 7) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  for turn, move in ipairs({ 0, 1 }) do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = move })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- A trap's later turns are the trapper's own attack on the cart
+-- (`.MultiturnMoveCheck` -> GetPlayerAnimationType), so each tick builds the
+-- raging, trapped monster's Rage and the re-penalty finds the trapper -- Delta
+-- at slot 4, not Beta standing opposite at slot 3.  Both are burned, so the
+-- probes show whose ATTACK is halved again.
+scenario("g1_rage_trap", function(events)
+  local battle = build({
+    id = "g1rt", mode = "coop_pvp", seed = 6506, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+               moves = { fx("fury", 20, 81) },
+               extra = { raging = true, rageMove = 1 } }) } },
+        { playerId = "a2", name = "Amy", mons = {
+          mn({ species = "Gamma", maxHp = 400, spd = 80, baseSpd = 0,
+               moves = { fx("splash", 0, 85) } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 400, atk = 200, spd = 20, status = "BRN",
+               baseSpd = 0, moves = { fx("splash", 0, 85) } }) } },
+        { playerId = "b2", name = "Bea", mons = {
+          mn({ species = "Delta", maxHp = 400, atk = 200, spd = 10, status = "BRN",
+               baseSpd = 0, moves = { fx("wrap", 5, 42) } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  for turn = 1, 4 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+    for step = 1, 3 do battle:tick(turn * 10 + step) end
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- A Bide aimed at field slot 0 is released at slot 0.  Slot 0 is a real seat,
+-- and Turn.js once read it as "no aim" (`targetSlot || foe.slot`) and let the
+-- spread aim pick: on this seed the release went to slot 1 there and to slot 0
+-- here.
+scenario("g1_bide_slot0", function(events)
+  local battle = build({
+    id = "g1bz", mode = "coop_pvp", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+               moves = { fx("tap", 10, 0) } }) } },
+        { playerId = "a2", name = "Amy", mons = {
+          mn({ species = "Gamma", maxHp = 400, spd = 80, baseSpd = 0,
+               moves = { fx("splash", 0, 85) } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
+               moves = { fx("bide", 0, 26) } }) } },
+        { playerId = "b2", name = "Bea", mons = {
+          mn({ species = "Delta", maxHp = 400, spd = 5, baseSpd = 0,
+               moves = { fx("splash", 0, 85) } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for turn = 1, 4 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+    for step = 1, 3 do battle:tick(turn * 10 + step) end
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- A side-effect drop at -6 says nothing (CantLowerAnymore returns before its
+-- text for a side effect); only a primary prints the line.
+scenario("g1_side_min", function(events)
+  local battle = build({
+    id = "g1sm", mode = "1v1", seed = 6507, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("bubble", 10, 70, { chance = 100 }), fx("goo", 0, 20) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
+             moves = { fx("splash", 0, 85) },
+             extra = { stages = { atk = 0, def = 0, spd = -6, spc = 0, acc = 0, eva = 0 } } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _, move in ipairs({ 0, 1 }) do
+    battle:submitChoice("p1", { action = "fight", move = move })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
   return battle
 end)
 

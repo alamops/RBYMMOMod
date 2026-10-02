@@ -3160,6 +3160,23 @@ do
   eq(wildHost.foeHeld2 and wildHost.foeHeld2[0], false, "gold wild: the foe's loss is remembered")
   wildHost:grantCatch({ caught = {} })
   eq(wildMon.item, nil, "gold wild: a monster caught after losing its item holds none")
+  -- Its own THIEF of an item this client never described (a partner's): the
+  -- BERRY it was rolled is already gone -- THIEF takes only when its user holds
+  -- nothing (pokecrystal BattleCommand_Thief `.enemy`) -- and the item it took
+  -- is not this client's to write, so it is caught holding nothing, not with
+  -- the pre-fight roll handed back.
+  wildMon.item = "BERRY"
+  play(wildHost, { battle = "cb1", seq = 2, t = "held", slot = 2, side = "b", mon = 0,
+                     text = "MASTER_BALL", amount = 1 })
+  eq(wildHost.foeHeld2 and wildHost.foeHeld2[0], "MASTER_BALL", "gold wild: the foe's gain is remembered")
+  wildHost:grantCatch({ caught = {} })
+  eq(wildMon.item, nil, "gold wild: a foreign item it took is not caught, and its lost roll is not handed back")
+  -- One this client did describe, held at the throw: caught with it.
+  wildMon.item = nil
+  play(wildHost, { battle = "cb1", seq = 3, t = "held", slot = 2, side = "b", mon = 0,
+                     text = "BERRY", amount = 1 })
+  wildHost:grantCatch({ caught = {} })
+  eq(wildMon.item, "BERRY", "gold wild: an item this client described is caught with it")
 end
 
 T.finish("coop_mediated")

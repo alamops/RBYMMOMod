@@ -299,9 +299,11 @@ local function fightOf(kind, o)
     say = function(_, _, after) if after then after() end end,
   }
 
+  -- `unseeded`: no seed hook, so `_seed` draws the same love-then-math roll
+  -- `_randomByte` does when `random` is absent too -- the game's own shape.
   local solo = Solo.new(ui, {
     enabled = function() return o.enabled ~= false end,
-    seed = function() return o.seed or 4242 end,
+    seed = (not o.unseeded) and function() return o.seed or 4242 end or nil,
     random = o.random,
   })
   local started = (kind == "wild")
@@ -1630,6 +1632,36 @@ end)()
   end)
   seedSeen = seen and seen.seed
   eq(seedSeen, 99, "wild item: the referee's seed is the solo's, untouched by the roll")
+  -- ...and in the game's own shape, with no hook in: `_seed` and `_randomByte`
+  -- both draw the one love-then-math generator, so the seed is drawn ahead of
+  -- the roll and is the same draw whether the wild species has item slots
+  -- (BETA: BERRY / NUGGET, two draws) or none (ALPHA, no draw).
+  local function sharedDraws(wild)
+    local love_ = rawget(_G, "love")
+    local host = (love_ and love_.math and love_.math.random) and love_.math or math
+    local real, n = host.random, 0
+    host.random = function(lo, hi)
+      n = n + 1
+      if lo == nil then return 0.5 end
+      if hi == nil then lo, hi = 1, lo end
+      -- A byte answers 250 (an item, item 1); anything wider says which draw it was.
+      local v = (hi - lo == 255) and 250 or (1000 + n)
+      return math.max(lo, math.min(hi, lo + v))
+    end
+    local spied, fight, okRun = spyCreate(function()
+      return fightOf("wild", { cart2 = true, data = goldData, unseeded = true,
+                               wildMon = mon({ species = wild, spd = 10, maxHp = 40, atk = 20 }) })
+    end)
+    host.random = real
+    ok(okRun == true, "seed (" .. wild .. "): the fight opens with no hook in")
+    return spied and spied.seed, fight
+  end
+  local slotSeed, slotFight = sharedDraws("BETA")
+  local bareSeed, bareFight = sharedDraws("ALPHA")
+  eq(slotFight and slotFight.wildMon.item, "BERRY", "seed: the slotted species rolls its item off the shared generator")
+  eq(bareFight and bareFight.wildMon.item, nil, "seed: ...and the bare one holds none")
+  ok(slotSeed ~= nil, "seed: the referee is handed one")
+  eq(slotSeed, bareSeed, "seed: the same draw with item slots and without -- the roll never moves it")
 
   -- The catch keeps what the wild monster holds at the throw.
   f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
@@ -1639,6 +1671,14 @@ end)()
   f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
   f.fight:grantCatch({ caught = {} })
   eq(f.wildMon.item, "BERRY", "catch: ...and one that kept it is caught with it")
+  -- Its own THIEF of an item nobody here described: the BERRY it was rolled is
+  -- gone (THIEF takes only when its user holds nothing), and what it took is a
+  -- claim -- caught holding nothing, not the roll handed back.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "BERRY", amount = 0 })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "MASTER_BALL", amount = 1 })
+  f.fight:grantCatch({ caught = {} })
+  eq(f.wildMon.item, nil, "catch: a foreign item it took is not caught, and its lost BERRY is not handed back")
 
   -- `held` written home: a berry eaten, in a wild fight and against a trainer.
   for _, kind in ipairs({ "wild", "trainer" }) do

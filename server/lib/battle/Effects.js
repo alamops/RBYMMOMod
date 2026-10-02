@@ -581,6 +581,9 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
 // whose turn it is not, in the cart's one-opponent terms. `side` is a move's
 // side effect, which the cart lets fail silently where a primary prints
 // "Nothing happened!" (CantLowerAnymore: `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`).
+// Both of a drop's failures go through that label -- the stage already at -6
+// (`dec b; jp z, CantLowerAnymore`) and the stat already at 1 -- so a side
+// effect says nothing at either wall.
 function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) {
   if (delta < 0 && mon.mist) {
     out.messages.push('But it failed');
@@ -595,7 +598,7 @@ function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) 
     return;
   }
   if (outcome === 'min') {
-    out.messages.push(`${mon.species}'s ${label} won't go any lower`);
+    if (!side) out.messages.push(`${mon.species}'s ${label} won't go any lower`);
     return;
   }
   if (outcome === 'stuck') {
@@ -1161,6 +1164,35 @@ function isRage(effectId) {
   return int(effectId, 0) === 81;
 }
 
+// The effects ExecutePlayerMove / ExecuteEnemyMove hand to JumpMoveEffect
+// before the hit, so a move carrying one never reaches HandleBuildingRage:
+// ResidualEffects1 at PlayerCanExecuteMove (pokered
+// data/battle/residual_effects_1.asm), ResidualEffects2 at `.next`
+// (residual_effects_2.asm), and Mirror Move / Metronome, which jump back to
+// CheckIfPlayerNeedsToChargeUp with the move they call (core.asm :3198-3211).
+// Only a power-0 move asks (Turn's `_useMove`): one with power builds by
+// landing.
+const SKIPS_BUILDING_RAGE = new Set([
+  // ResidualEffects1
+  24, 25, 28, 46, 47,
+  49, 56, 57, 64, 65,
+  66, 67, 79, 82, 84,
+  85,
+  // ResidualEffects2
+  1, 10, 11, 12, 13,
+  14, 15, 18, 19, 20,
+  21, 22, 23, 26, 32,
+  50, 51, 52, 53, 54,
+  55, 58, 59, 60, 61,
+  62, 63,
+  // the two that call another move
+  9, 83,
+]);
+
+function skipsBuildingRage(effectId) {
+  return SKIPS_BUILDING_RAGE.has(int(effectId, 0));
+}
+
 // ------------------------------------------------------------------
 // move priority
 // ------------------------------------------------------------------
@@ -1527,6 +1559,7 @@ module.exports = {
   isThrash,
   thrashTurns,
   isRage,
+  skipsBuildingRage,
   BASE_PRIORITY,
   MOVE_PRIORITY,
   movePriority,

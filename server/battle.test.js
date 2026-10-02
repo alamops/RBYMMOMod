@@ -461,3 +461,29 @@ test('applyPrimary fails foe-targeting effects through a substitute', () => {
   assert.strictEqual(lands.nothing, false, 'SLEEP_EFFECT still lands with no substitute');
   assert.strictEqual(exposed.status, 'sleep', 'SLEEP_EFFECT sets sleep when the target is exposed');
 });
+
+// CantLowerAnymore (pokered effects.asm): `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`
+// -- a side-effect drop that finds the stage already at -6 fails without a
+// word, as it does at a stat of 1; a primary at -6 still prints its line.
+test('a side-effect drop at -6 is silent; a primary at -6 is not', () => {
+  const floored = () => {
+    const mon = dummyMon({ species: 'Beta' });
+    Effects.ensureBattleStats(mon);
+    mon.stages.spd = -6;
+    return mon;
+  };
+  const sideTarget = floored();
+  const side = Effects.applySide({
+    effectId: 70, chance: 100, rng: { byte() { return 0; } },
+    targetMon: sideTarget, targetFighter: { slot: 3, side: 'b' },
+    userFighter: { slot: 0, side: 'a' },
+  });
+  assert.strictEqual(side.proc, true, 'the side effect procs');
+  assert.deepStrictEqual(side.messages, [], 'and says nothing at -6');
+  assert.deepStrictEqual(side.events, [], 'nor emits a stat event');
+  assert.strictEqual(sideTarget.stages.spd, -6, 'the stage stays at -6');
+
+  const primary = applyPrimary(20, dummyMon(), floored());
+  assert.deepStrictEqual(primary.messages, ["Beta's SPEED won't go any lower"],
+    'the primary at -6 says so');
+});

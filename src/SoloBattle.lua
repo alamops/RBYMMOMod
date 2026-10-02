@@ -536,7 +536,9 @@ end
 -- One byte (0..255) for a roll the cart makes outside the referee -- today
 -- Gold's wild held item (MediatedBattle.rollWildItem2).  The suite's `random`
 -- when it handed one in; otherwise the love-then-math roll `_seed` uses.  Never
--- the referee's own stream, which belongs to the fight and is seeded after.
+-- the referee's own stream, which belongs to the fight -- and, sharing that
+-- roll with `_seed`, drawn only after the fight's seed (M:_begin), so no byte
+-- from here moves it.
 function M:_randomByte()
   local pick = self.randomFn
   if type(pick) == "function" then
@@ -592,10 +594,16 @@ function M:_begin(game, state, mapId, kind)
   -- does not roll one), so the cart's own roll is made here, onto the engine
   -- monster -- the one a catch keeps -- before its sheet is cut
   -- (MediatedBattle.rollWildItem2, pokecrystal LoadEnemyMon `.WildItem`).  Off
-  -- this file's own byte source (M:_randomByte), never the referee's: the
-  -- fight's seed is drawn below and must not move.  Undone if the divert
-  -- declines after all, so the engine's own battle starts exactly as the
-  -- engine built it -- "false means nothing at all has happened".
+  -- this file's own byte source (M:_randomByte), never the referee's stream --
+  -- and only once the fight's seed is drawn: with no suite hooks in,
+  -- `_randomByte` and `_seed` both draw love.math.random, so a roll ahead of
+  -- the seed would move it by one or two draws whenever the species has item
+  -- slots.  Drawn first (`seed`, handed to the referee below), it is the same
+  -- draw with slots or without.  Every other fight draws it where it always
+  -- has, at the referee.  The roll is undone if the divert declines after
+  -- all, so the engine's own battle starts exactly as the engine built it --
+  -- "false means nothing at all has happened".
+  local seed
   local rolledItem, itemBefore = false, nil
   local function undoRoll()
     if rolledItem and wildMon then wildMon.item = itemBefore end
@@ -605,6 +613,7 @@ function M:_begin(game, state, mapId, kind)
     wildMon = Coop.wildMonOf(state)
     if not wildMon then return false end
     if generation == 2 then
+      seed = self:_seed()
       itemBefore = wildMon.item
       local inner = type(state.battle) == "table" and state.battle or nil
       MediatedBattle.rollWildItem2(game, wildMon, {
@@ -726,7 +735,8 @@ function M:_begin(game, state, mapId, kind)
   local sim, why = Turn.create({
     id = battleId,
     mode = mode,
-    seed = self:_seed(),
+    -- A Gold wild fight's was drawn ahead of its item roll (above).
+    seed = seed or self:_seed(),
     chart = ruleset.chart,
     specialTypes = ruleset.specialTypes,
     -- The chart's axis by name (MediatedBattle.snapshotRuleset), which Gold's

@@ -133,7 +133,8 @@ here must match `manifest.version`.
     - LEFTOVERS and the healing, status and confusion berries;
     - MYSTERYBERRY, the stat-up items and BERSERK GENE.
   - **More items on Gold:**
-    - **THIEF** steals both ways (MAIL can't be stolen).
+    - **THIEF** steals both ways (MAIL can't be stolen), but not through a
+      SUBSTITUTE.
     - **Wild POKéMON** hold items at the cart's odds, and a catch keeps the
       item.
     - **SMOKE BALL** always gets you out of a wild fight.
@@ -297,6 +298,24 @@ here must match `manifest.version`.
     longer takes STRUGGLE's recoil.
   - **Gold flinches:** a flinch no longer carries over to a POKéMON that had
     already moved. A sleeping or frozen POKéMON checks that first.
+  - **RAGE builds only where the cart builds it:** after an opponent's move
+    hits, including a hit a SUBSTITUTE takes. It no longer builds from
+    poison, burn, LEECH SEED, recoil, a confusion self-hit, or the hit that
+    knocks it out.
+    - **Red:** each build raises Attack.
+    - **Gold:** each build adds to RAGE's own damage, as the cart's counter
+      does, instead of raising Attack. A raging POKéMON is no longer locked
+      into RAGE.
+  - **Gold's turn checks run in the cart's order.** Full paralysis is rolled
+    last, after confusion and a disabled move. A move's secondary effect no
+    longer lands on a POKéMON the hit knocked out.
+- **A LEECH SEED knockout froze Red and Gold fights.** When the drain fainted
+  the seeded POKéMON, the referee read the seed it had just cleared and
+  stopped mid-turn. The fight now goes on.
+- **The Node hub aimed a released BIDE at the wrong POKéMON in co-op.** A
+  BIDE stored against the first seat on the other side was released at the
+  second one, because the hub's copy of the referee read seat 0 as "no
+  target". The hub and the LAN host now agree.
 - **On Gen 3, a wild POKéMON or a trainer could steal your item.** THIEF and
   COVET used by the computer now steal nothing, and its TRICK fails, as on
   FireRed and Emerald outside link battles. THIEF used by you still keeps

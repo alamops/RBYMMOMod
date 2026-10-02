@@ -1008,7 +1008,8 @@ class Battle {
             fighter.choice = {
               action: 'fight',
               move: mon.bide.moveIndex,
-              target: mon.bide.targetSlot || foe.slot,
+              target: mon.bide.targetSlot !== null && mon.bide.targetSlot !== undefined
+                ? mon.bide.targetSlot : foe.slot,
               bideRelease: true,
             };
             this._emit('chose', {
@@ -1436,7 +1437,8 @@ class Battle {
         return {
           action: 'fight',
           move: mon.bide.moveIndex,
-          target: mon.bide.targetSlot || foe.slot,
+          target: mon.bide.targetSlot !== null && mon.bide.targetSlot !== undefined
+            ? mon.bide.targetSlot : foe.slot,
           bideRelease: true,
         };
       }
@@ -2622,6 +2624,18 @@ class Battle {
     if (mon.hp > 0) this._damage(fighter, mon, mon.hp, null);
   }
 
+  // An Explosion / Self-Destruct that did not land. EXPLODE_EFFECT is the one
+  // miss ExecutePlayerMove lets on to `.notDone` (core.asm :3222-3225; the
+  // enemy's `.handleExplosionMiss`, :5622-5624), so the user still goes down
+  // and HandleBuildingRage still runs on the target it missed -- which is
+  // alive, so `ret z` lets it through. The rage is built before the faint the
+  // cart only announces after the move, and the re-penalty it gives the
+  // exploder is then wiped with the rest of its battle stats.
+  _explodeMissed(fighter, mon, target, defender) {
+    this._buildRage(target, defender, fighter);
+    this._faintUser(fighter, mon);
+  }
+
   _concedeRun(fighter) {
     this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
     if (fighter.side === 'a') {
@@ -2658,7 +2672,7 @@ class Battle {
     // the *chosen* slot, wPlayerMoveListIndex, which `.chooseMove` never
     // rewrites: the PP spent (DecrementPP) and the slot Mimic writes over
     // (`_applyPrimary`).
-    let usedSlot = opts.slot || choice.move;
+    let usedSlot = opts.slot !== undefined && opts.slot !== null ? opts.slot : choice.move;
     let disobedient = opts.disobedient === true;
 
     if (!called && !this._runGates(fighter, mon)) return;
@@ -2738,7 +2752,8 @@ class Battle {
         this._markLastMove(mon, usedSlot);
         return;
       }
-      this._damage(target, defender, 2 * stored, null, fighter);
+      this._damage(target, defender, 2 * stored, null);
+      this._buildRage(target, defender, fighter);
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -2770,7 +2785,7 @@ class Battle {
       }
       if (!Effects.hitsInvulnerable(chargeMoveId, move)) {
         this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
         }
@@ -2814,6 +2829,18 @@ class Battle {
       return;
     }
 
+    // A power-0 move reaches HandleBuildingRage ahead of any hit test of its
+    // own: CalculateDamage's `jp z` (core.asm :3145) goes round MoveHitTest,
+    // so wMoveMissed is still clear when the no-op ApplyAttackToEnemyPokemon
+    // (:4622) returns to the build. ResidualEffects1 / 2 and the two calls
+    // have left by then (`Effects.skipsBuildingRage`); what is left in Red is
+    // Disable, whose own MoveHitTest -- the roll below -- comes after. So a
+    // raging target builds whether the Disable lands or not.
+    if (move.power <= 0 && !Effects.isFixedDamage(effectId)
+        && !Effects.skipsBuildingRage(effectId)) {
+      this._buildRage(target, defender, fighter);
+    }
+
     const alwaysHits = effectId === Effects.idOf('SWIFT_EFFECT')
       || mon.xAccuracy === true;
 
@@ -2826,7 +2853,7 @@ class Battle {
     });
     if (!shot.hit) {
       this._say(`${mon.species} missed`);
-      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
       if (Effects.isJumpKick(effectId)) {
         this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
       }
@@ -2837,7 +2864,7 @@ class Battle {
     const isFixed = Effects.isFixedDamage(effectId);
     if (effectId === 8 && defender.status !== 'sleep') {
       this._say('But it failed');
-      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -2880,7 +2907,7 @@ class Battle {
     if (effectId === 38) {
       if (this._speedOf(fighter, mon) <= this._speedOf(target, defender)) {
         this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -2910,7 +2937,7 @@ class Battle {
       if (immune) {
         this.rng.damageRoll();
         this._say(`It doesn't affect ${defender.species}`);
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
         }
@@ -2928,7 +2955,7 @@ class Battle {
       if (fixed === null) {
         this.rng.damageRoll();
         this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -2943,7 +2970,12 @@ class Battle {
       // ends: the attacker's party struct (pre-Transform) and the defender's
       // -- the cart's GetEnemyMonStat reads the enemy's party struct in a link
       // fight and recomputes it without stat exp against the computer, which
-      // is the same number for every foe the cart fields (they carry none).
+      // is the same number as its party stat for every foe the computer
+      // fields (they carry none) -- until it Transforms: the recompute reads
+      // wEnemyMonSpecies and wEnemyMonDVs, which TransformEffect_ overwrote,
+      // so a transformed foe's crit stat is a CalcStat over the copied species
+      // and DVs, which a sheet cannot say
+      // (docs/plans/gen12-referee-known-gaps.md, gap 1).
       // No stage, no badge, no burn, no screen. The scaling, the Explosion
       // halving and the 997 cap are Damage.compute's.
       const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
@@ -2978,7 +3010,7 @@ class Battle {
 
       if (result.immune) {
         this._say(`It doesn't affect ${defender.species}`);
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
         }
@@ -2998,12 +3030,16 @@ class Battle {
       this._say("It's not very effective");
     }
 
+    // Rage builds per hit, after it (the multi-hit loop jumps back to
+    // GetPlayerAnimationType from below HandleBuildingRage), and before the
+    // move's side effect, which `.executeOtherEffects` runs after the loop.
     let totalDealt = 0;
     for (let h = 0; h < hits; h += 1) {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
-      this._damage(target, defender, damage, null, fighter);
+      this._damage(target, defender, damage, null);
       totalDealt += hpBefore - defender.hp;
+      this._buildRage(target, defender, fighter);
     }
 
     if (totalDealt > 0) {
@@ -3088,9 +3124,9 @@ class Battle {
   }
 
   // One place where HP comes off, so the faint that follows can never be
-  // forgotten at one of the call sites. `source` is the seat whose move dealt
-  // it, when one did (a strike, a Bide release): Rage reads it.
-  _damage(fighter, mon, rawAmount, status, source) {
+  // forgotten at one of the call sites. Rage is not built here: what builds
+  // it is a move landing (`_buildRage`), not HP coming off.
+  _damage(fighter, mon, rawAmount, status) {
     let amount = Math.max(0, int(rawAmount, 0));
 
     if (amount > 0 && mon.bide && mon.bide.turns > 0) {
@@ -3116,33 +3152,6 @@ class Battle {
 
     if (amount > mon.hp) amount = mon.hp;
 
-    if (amount > 0 && mon.raging) {
-      // HandleBuildingRage (core.asm :4913-4950) flips hWhoseTurn and runs
-      // StatModifierUpEffect, so the raging battler is the "user": its own
-      // badges re-run (when it is the player's) and the re-penalty lands on
-      // the battler whose turn it then is not -- the attacker. Damage no move
-      // dealt (a residual) names no attacker; the battler opposite stands in.
-      // At +6 the cart returns before saying anything, as this does.
-      let attacker = source ? activeMon(source) : null;
-      if (!attacker) {
-        const opposite = this._oppositeFoe(fighter);
-        attacker = opposite ? activeMon(opposite) : null;
-      }
-      const { outcome, stage } = Effects.changeStat({
-        mon, fighter, stat: 'atk', delta: 1,
-        mover: fighter, nonMover: attacker,
-      });
-      if (outcome === 'rose') {
-        this._say(`${mon.species}'s ATTACK rose`);
-        this._emit('stat', {
-          slot: fighter.slot, side: fighter.side,
-          amount: stage, text: `${mon.species}'s ATTACK rose`,
-        });
-      } else if (outcome === 'stuck') {
-        this._say('Nothing happened');
-      }
-    }
-
     mon.hp -= amount;
 
     this._emit('damage', {
@@ -3154,6 +3163,45 @@ class Battle {
     });
 
     if (mon.hp <= 0) this._faint(fighter, mon);
+  }
+
+  // HandleBuildingRage (core.asm :4913-4950), for the monster `source`'s move
+  // was just aimed at. The cart has two callers, ExecutePlayerMove (:3243)
+  // and ExecuteEnemyMove (:5643), both after ApplyAttackTo*Pokemon and both
+  // behind `ret z` on the target's HP -- so it runs once per hit of a move
+  // that lands, never for a hit that knocked the target out, and never for HP
+  // that no opponent's move took: a poison / burn / Leech Seed tick, a
+  // confusion or disobedience self-hit, recoil, a crash. A Substitute that
+  // soaked the hit does not stop it (AttackSubstitute returns to the same
+  // caller, and the target's HP is untouched). The paths that reach it here:
+  // every hit of the strike loop (fixed damage included), the Bide release
+  // (`.UnleashEnergy` jumps to HandleIfPlayerMoveMissed), a trap's later
+  // turns (`.MultiturnMoveCheck` jumps to GetPlayerAnimationType,
+  // `_resolveResiduals` here), an Explosion that did not land (EXPLODE_EFFECT
+  // is the one miss `.notDone` lets through), and a power-0 move outside both
+  // ResidualEffects lists, which CalculateDamage sends past MoveHitTest to a
+  // no-op ApplyAttack (Disable).
+  //
+  // It flips hWhoseTurn and runs StatModifierUpEffect, so the raging battler
+  // is the "user": its own badges re-run (when it is the player's) and the
+  // re-penalty lands on the battler whose turn it then is not -- the
+  // attacker, `source`'s monster. At +6 the cart returns before saying
+  // anything, as this does.
+  _buildRage(fighter, mon, source) {
+    if (!source || !mon || !mon.raging || mon.hp <= 0) return;
+    const { outcome, stage } = Effects.changeStat({
+      mon, fighter, stat: 'atk', delta: 1,
+      mover: fighter, nonMover: activeMon(source),
+    });
+    if (outcome === 'rose') {
+      this._say(`${mon.species}'s ATTACK rose`);
+      this._emit('stat', {
+        slot: fighter.slot, side: fighter.side,
+        amount: stage, text: `${mon.species}'s ATTACK rose`,
+      });
+    } else if (outcome === 'stuck') {
+      this._say('Nothing happened');
+    }
   }
 
   _heal(fighter, mon, amount) {
@@ -3465,6 +3513,16 @@ class Battle {
         } else {
           this._say(`${mon.species} is hurt by the trap`);
           this._damage(fighter, mon, trap.damage, null);
+          // On the cart this tick is the trapper's own turn:
+          // `.MultiturnMoveCheck` jumps to GetPlayerAnimationType, the stored
+          // hit goes through ApplyAttackToEnemyPokemon, and HandleBuildingRage
+          // follows it (a trap that came on a sheet naming no trapper has
+          // nobody to build against). `trap` is still the table the faint
+          // just cleared off the monster, so the counter below keeps working
+          // either way.
+          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
+            ? this._fighterAtSlot(trap.fromSlot) : null;
+          this._buildRage(fighter, mon, trapper);
         }
         trap.turns -= 1;
         if (trap.turns <= 0) {
@@ -3488,9 +3546,13 @@ class Battle {
       mon = activeMon(fighter);
       if (mon && mon.leechSeed) {
         const amount = Math.max(1, Math.floor(mon.maxHp / 16));
+        // Read before the damage: a tick that knocks the seeded monster out
+        // runs `_faint`, which clears `leechSeed`. The seeder is healed all
+        // the same -- HandlePoisonBurnLeechSeed drains, then heals, and only
+        // then is the faint looked at.
+        const from = mon.leechSeed.fromSlot;
         this._say(`${mon.species} is seeded`);
         this._damage(fighter, mon, amount, null);
-        const from = mon.leechSeed.fromSlot;
         const seeder = from !== null && from !== undefined
           ? this._fighterAtSlot(from) : null;
         const sMon = seeder && activeMon(seeder);

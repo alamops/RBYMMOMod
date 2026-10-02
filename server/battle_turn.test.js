@@ -1669,6 +1669,10 @@ scenario('g1_flinch_rage_link', rageFlinch('g1fl', '1v1'));
 
 // A Hyper Beam user that a slower Stomp flinches keeps that flinch through the
 // recharge turn's open (probe 1) and loses it at the next (probe 2).
+//
+// KNOWN-GAP PIN, not a cart claim: FlinchSideEffect calls ClearHyperBeam, so
+// the cart never reaches this state. It pins today's stream until gap 4 in
+// docs/plans/gen12-referee-known-gaps.md closes and re-expects it.
 scenario('g1_flinch_recharge', (events) => {
   const battle = build({
     id: 'g1fh', mode: 'wild', seed: 6303, choiceTimeout: 60, reconnectGrace: 60,
@@ -1692,6 +1696,231 @@ scenario('g1_flinch_recharge', (events) => {
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   drainInto(battle, events);
+  return battle;
+});
+
+// The Gen 1 review fixes (task FX1); tests/battle_sim_turn.lua section 27
+// states the numbers behind each.
+//
+// A Leech Seed tick that knocks the seeded monster out: the seeder is read
+// before the damage, and still healed by the whole 1/16.
+scenario('g1_leech_ko', (events) => {
+  const battle = build({
+    id: 'g1ls', mode: '1v1', seed: 6501, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', hp: 50, maxHp: 100, spd: 90, baseSpd: 0,
+          moves: [fx('seed', 0, 84)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', hp: 3, maxHp: 100, spd: 10, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// Rage builds only after an opponent's move lands: the raging monster's own
+// poison, the Leech Seed on it and its confusion self-hits build nothing.
+scenario('g1_rage_quiet', (events) => {
+  const battle = build({
+    id: 'g1rq', mode: 'wild', seed: 6509, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 400, atk: 100, def: 80, spd: 90, spc: 50,
+          status: 'PSN', confusion: 4, baseSpd: 0, moves: [fx('fury', 20, 81)],
+          extra: { raging: true, rageMove: 1, leechSeed: { fromSlot: 3 } } })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  for (let turn = 1; turn <= 3; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// The hit that knocks the raging monster out builds nothing, so the burned
+// attacker is not halved a second time by the re-penalty.
+scenario('g1_rage_lethal', (events) => {
+  const battle = build({
+    id: 'g1rl', mode: 'wild', seed: 6503, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', hp: 20, maxHp: 300, atk: 100, def: 80, spd: 90,
+          spc: 50, baseSpd: 0, moves: [fx('fury', 20, 81)] }),
+        mn({ species: 'Gamma', maxHp: 300, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, atk: 200, spd: 10, status: 'BRN',
+          baseSpd: 0, moves: [fx('thump', 80, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  return battle;
+});
+
+// A Substitute that soaks the hit does not stop the build, and a two-hit move
+// builds once per hit: +2.
+scenario('g1_rage_sub', (events) => {
+  const battle = build({
+    id: 'g1rs', mode: '1v1', seed: 6504, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('fury', 20, 81)],
+          extra: { raging: true, rageMove: 1, substitute: 5 } })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [fx('kicks', 20, 44)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  return battle;
+});
+
+// The two builds no hit carries: a missed Disable (power 0: the build comes
+// before its own hit test) and a missed Explosion (`.notDone`).
+scenario('g1_rage_misses', (events) => {
+  const blind = (id, power, effect) => Object.assign(fx(id, power, effect), { accuracy: 0 });
+  const battle = build({
+    id: 'g1rm', mode: '1v1', seed: 6505, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('fury', 20, 81)],
+          extra: { raging: true, rageMove: 1, lastMoveIndex: 1 } })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [blind('numb', 0, 86), blind('boom', 130, 7)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 1].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// A trap's later turns are the trapper's own attack, so each tick builds the
+// trapped monster's Rage and the re-penalty finds the trapper (slot 4), not
+// the battler standing opposite (slot 3).
+scenario('g1_rage_trap', (events) => {
+  const battle = build({
+    id: 'g1rt', mode: 'coop_pvp', seed: 6506, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+            moves: [fx('fury', 20, 81)],
+            extra: { raging: true, rageMove: 1 } })] },
+        { playerId: 'a2', name: 'Amy', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 80, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', mons: [
+          mn({ species: 'Beta', maxHp: 400, atk: 200, spd: 20, status: 'BRN',
+            baseSpd: 0, moves: [fx('splash', 0, 85)] })] },
+        { playerId: 'b2', name: 'Bea', mons: [
+          mn({ species: 'Delta', maxHp: 400, atk: 200, spd: 10, status: 'BRN',
+            baseSpd: 0, moves: [fx('wrap', 5, 42)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  for (let turn = 1; turn <= 4; turn += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+    for (let step = 1; step <= 3; step += 1) battle.tick(turn * 10 + step);
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// A Bide aimed at field slot 0 is released at slot 0 -- slot 0 is a real seat,
+// not "no aim" (this file once read it with `||` and let the spread aim pick).
+scenario('g1_bide_slot0', (events) => {
+  const battle = build({
+    id: 'g1bz', mode: 'coop_pvp', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+            moves: [fx('tap', 10, 0)] })] },
+        { playerId: 'a2', name: 'Amy', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 80, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+            moves: [fx('bide', 0, 26)] })] },
+        { playerId: 'b2', name: 'Bea', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 5, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 4; turn += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+    for (let step = 1; step <= 3; step += 1) battle.tick(turn * 10 + step);
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// A side-effect drop at -6 says nothing; only a primary prints the line.
+scenario('g1_side_min', (events) => {
+  const battle = build({
+    id: 'g1sm', mode: '1v1', seed: 6507, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('bubble', 10, 70, { chance: 100 }), fx('goo', 0, 20)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [fx('splash', 0, 85)],
+          extra: { stages: { atk: 0, def: 0, spd: -6, spc: 0, acc: 0, eva: 0 } } })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (const move of [0, 1]) {
+    battle.submitChoice('p1', { action: 'fight', move });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
   return battle;
 });
 
@@ -3372,4 +3601,75 @@ test('Gen 1 badgeRules and traded: the player against the computer; true or abse
   assert.strictEqual(traded(true), true);
   assert.strictEqual(traded(false), undefined);
   assert.strictEqual(traded('yes'), undefined);
+});
+
+// ------------------------------------------------------------------
+// The Gen 1 review fixes (FX1), stated as claims (twin of
+// tests/battle_sim_turn.lua section 27, where the arithmetic is worked)
+// ------------------------------------------------------------------
+
+const stageAt = (name, at, slot) => {
+  const row = (jsRun(name).probes || []).find((p) => p.at === at && p.slot === slot);
+  return row ? row.sAtk : null;
+};
+const eventsOf = (name, kind) => jsRun(name).events.filter((event) => event.t === kind);
+
+test('a Leech Seed tick that knocks the seeded monster out still heals the seeder', () => {
+  const faint = eventsOf('g1_leech_ko', 'faint');
+  assert.deepStrictEqual(faint.map((e) => `${e.slot}:${e.text}`), ['3:Beta'], 'the seeded monster falls');
+  assert.deepStrictEqual(eventsOf('g1_leech_ko', 'drain').map((e) => `${e.slot}:${e.amount}:${e.hp}`),
+    ['0:6:56'], 'the whole 1/16 of 100, though only 3 HP came off');
+  assert.strictEqual(jsRun('g1_leech_ko').outcome.outcome, 'win');
+});
+
+test("Rage builds from no poison, Leech Seed or confusion self-hit", () => {
+  assert.ok(saidIn('g1_rage_quiet', 'Alpha hurt itself in confusion'), 'the seed does reach a self-hit');
+  for (const at of [1, 2, 3]) {
+    assert.strictEqual(stageAt('g1_rage_quiet', at, 0), 0, `turn ${at}: no build`);
+    assert.strictEqual(probeAt('g1_rage_quiet', at, 0), '112/90/101/56', `turn ${at}: the switch-in stats`);
+  }
+  assert.ok(!saidIn('g1_rage_quiet', "Alpha's ATTACK rose"));
+});
+
+test('the hit that knocks a raging monster out builds nothing and re-penalises nobody', () => {
+  assert.ok(!saidIn('g1_rage_lethal', "Alpha's ATTACK rose"));
+  assert.strictEqual(probeAt('g1_rage_lethal', 0, 3), '100/40/10/40', 'the burned attacker: 200 -> 100');
+  assert.strictEqual(probeAt('g1_rage_lethal', 1, 3), '100/40/10/40', 'not halved again to 50');
+});
+
+test('a Substitute that soaks the hit still builds, once per hit', () => {
+  assert.ok(saidIn('g1_rage_sub', "Alpha's substitute broke"));
+  assert.strictEqual(stageAt('g1_rage_sub', 1, 0), 2, 'the doll hit and the body hit: +2');
+  assert.strictEqual(probeAt('g1_rage_sub', 1, 0), '80/40/90/40', '40 x 200 / 100');
+  // The build follows the hit: each `stat` comes right after its `damage`.
+  const order = jsRun('g1_rage_sub').events
+    .filter((e) => e.slot === 0 && (e.t === 'damage' || e.t === 'stat')).map((e) => e.t);
+  assert.deepStrictEqual(order, ['damage', 'stat', 'damage', 'stat']);
+});
+
+test('a missed Disable and a missed Explosion both build the target', () => {
+  assert.strictEqual(stageAt('g1_rage_misses', 1, 0), 1, 'the Disable missed and the target built');
+  assert.strictEqual(stageAt('g1_rage_misses', 2, 0), 2, 'the Explosion missed and the target built');
+  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === 'Beta missed').length, 2);
+  assert.strictEqual(jsRun('g1_rage_misses').outcome.winners[0], 'p1', 'the exploder still went down');
+});
+
+test("a trap's later ticks build the trapped monster and re-penalise the trapper", () => {
+  assert.deepStrictEqual([1, 2, 3, 4].map((at) => stageAt('g1_rage_trap', at, 0)), [1, 2, 3, 4]);
+  assert.deepStrictEqual([1, 2, 3, 4].map((at) => probeAt('g1_rage_trap', at, 4)),
+    ['50/40/10/40', '25/40/10/40', '12/40/10/40', '6/40/10/40'], 'Delta, the trapper, halved each time');
+  assert.deepStrictEqual([1, 2, 3, 4].map((at) => probeAt('g1_rage_trap', at, 3)),
+    ['100/40/20/40', '100/40/20/40', '100/40/20/40', '100/40/20/40'], 'Beta, standing opposite, never');
+});
+
+test('a Bide aimed at field slot 0 is released at slot 0', () => {
+  const released = jsRun('g1_bide_slot0').events.filter((e) => e.t === 'damage' && e.side === 'a');
+  assert.deepStrictEqual(released.map((e) => `${e.slot}:${e.amount}`), ['0:10']);
+});
+
+test('a side-effect drop at -6 is silent; a primary at -6 says so', () => {
+  const lines = jsRun('g1_side_min').events.filter((e) => e.t === 'msg' && e.text === "Beta's SPEED won't go any lower");
+  assert.strictEqual(lines.length, 1, 'once, for the primary on turn 2');
+  const texts = jsRun('g1_side_min').events.filter((e) => e.t === 'msg').map((e) => e.text);
+  assert.ok(texts.indexOf("Beta's SPEED won't go any lower") > texts.indexOf('Alpha used goo'));
 });

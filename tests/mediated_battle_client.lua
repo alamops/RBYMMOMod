@@ -3341,13 +3341,28 @@ do
 
   -- The catch keeps what the wild monster still holds at the throw.
   fight = goldFight("wild", "NUGGET")
-  local wildMon = goldMon("SQUIRTLE", "NUGGET")
-  eq(fight:caughtHolding2(0, wildMon), nil, "catch: no `held` about it says nothing")
+  eq(fight:caughtHolding2(0), nil, "catch: no `held` about it says nothing")
   fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 0 })
-  eq(fight:caughtHolding2(0, wildMon), false, "catch: an item it lost is not caught with it")
+  eq(fight:caughtHolding2(0), false, "catch: an item it lost is not caught with it")
+  -- Its own THIEF of an item nobody here described: the NUGGET it was rolled
+  -- is gone (THIEF takes only when its user holds nothing), and the item it
+  -- took is a claim -- nothing, not the roll handed back.
   fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "MASTER_BALL", amount = 1 })
-  eq(fight:caughtHolding2(0, wildMon), "NUGGET",
-     "catch: an item this client never described leaves the monster as it was")
+  eq(fight:caughtHolding2(0), false,
+     "catch: an item this client never described is not caught, and the lost one is not handed back")
+  -- Taking back one this client described (its own monster's, by THIEF): kept.
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "LEFTOVERS", amount = 1 })
+  eq(fight:caughtHolding2(0), "LEFTOVERS", "catch: an item this client described is caught with it")
+
+  -- ...through grantCatch: the engine monster the catch keeps, rolled NUGGET,
+  -- caught after the foreign THIEF holds nothing.
+  fight = goldFight("wild", "NUGGET")
+  local wildMon = goldMon("SQUIRTLE", "NUGGET")
+  fight.wildCatchMon = wildMon
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 0 })
+  fight.feed({ t = "held", slot = 3, side = "b", mon = 0, text = "MASTER_BALL", amount = 1 })
+  fight:grantCatch({ caught = {} })
+  eq(wildMon.item, nil, "catch: grantCatch hands the wild monster back no item it already lost")
 
   -- AMULET COIN: our own monster coming out holding one, and only ours.
   local coinParty = { goldMon("CHARMANDER", "AMULET_COIN", 4321), goldMon("SQUIRTLE", nil, 4321) }

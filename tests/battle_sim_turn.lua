@@ -6669,6 +6669,315 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 27. Gen 1 review fixes: a Leech Seed KO, where Rage builds, a Bide aimed
+--     at slot 0, a side-effect drop at -6
+-- ------------------------------------------------------------------
+--
+-- Task FX1.  HandleBuildingRage (pokered core.asm :4913-4950) has two
+-- callers, ExecutePlayerMove :3243 and ExecuteEnemyMove :5643, both after
+-- ApplyAttackTo*Pokemon and both behind `ret z` on the target's HP: it runs
+-- once per hit of a move that lands -- a Substitute soaking it included --
+-- never for the hit that knocks the target out, and never for HP no
+-- opponent's move took.  The three ways in that carry no hit: a Bide
+-- release, a trap's later turns (the trapper's own attack on the cart), a
+-- missed Explosion (`.notDone`), and a power-0 move outside both
+-- ResidualEffects lists -- Disable -- whose build comes before its own hit
+-- test.  The g1_leech_ko / g1_rage_* / g1_bide_slot0 / g1_side_min parity
+-- scenarios hold lib/battle to the same streams.
+
+do
+  local Rng = BattleSim.Rng
+
+  -- BattleRandom, scripted: the listed bytes first, then a seeded generator.
+  local function script(battle, bytes)
+    local fallback = Rng.new(99)
+    local used = 0
+    battle.rng = {
+      byte = function()
+        used = used + 1
+        if bytes[used] ~= nil then return bytes[used] end
+        return fallback:byte()
+      end,
+      nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+      damageRoll = function() return fallback:damageRoll() end,
+      next = function() return fallback:next() end,
+      state = function() return fallback:state() end,
+    }
+  end
+
+  local function fxm(id, power, effect, o)
+    o = o or {}
+    return move({ id = id, power = power, effect = effect, chance = o.chance,
+                  accuracy = o.accuracy, pp = o.pp or 60 })
+  end
+  -- mon() plus the raw sheet fields it does not carry (raging, substitute,
+  -- leechSeed, bide, lastMoveIndex, ...); crits held off with baseSpd 0.
+  local function sheet(o)
+    local raw = mon(o)
+    raw.baseSpd = 0
+    if o.confusion then raw.confusion = o.confusion end
+    for key, value in pairs(o.extra or {}) do raw[key] = value end
+    return raw
+  end
+  local function duel(o)
+    local aMons, bMons = {}, {}
+    for i, opts in ipairs(o.a) do aMons[i] = sheet(opts) end
+    for i, opts in ipairs(o.b) do bMons[i] = sheet(opts) end
+    local battle = battleOf({
+      mode = o.mode or "1v1", seed = o.seed or 6601,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = aMons } },
+        b = { { playerId = "p2", name = "Bob", mons = bMons } },
+      },
+    })
+    drain(battle)
+    return battle
+  end
+  local function step(battle, aChoice, bChoice)
+    battle:submitChoice("p1", aChoice)
+    battle:submitChoice("p2", bChoice)
+    return drain(battle)
+  end
+  local function use(i) return { action = "fight", move = i } end
+  local function said(events, text)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == text then return true end
+    end
+    return false
+  end
+  local function count(events, pred)
+    local n = 0
+    for _, event in ipairs(events) do if pred(event) then n = n + 1 end end
+    return n
+  end
+  local fury = function() return fxm("fury", 20, 81) end
+  local splash = function() return fxm("splash", 0, 85) end
+  local raging = { raging = true, rageMove = 1 }
+  local function with(base, more)
+    local out = {}
+    for k, v in pairs(base) do out[k] = v end
+    for k, v in pairs(more or {}) do out[k] = v end
+    return out
+  end
+
+  -- (a) The Leech Seed tick that knocks the seeded monster out.  `_faint`
+  --     clears `leechSeed`, and the residual used to read it afterwards and
+  --     throw.  The seeder is healed the whole 1/16 -- floor(100 / 16) = 6,
+  --     50 -> 56 -- though Beta had only 3 HP to give: the cart's
+  --     HandlePoisonBurnLeechSeed drains, then heals by the same amount, and
+  --     only then looks at the faint.
+  do
+    local battle = duel({
+      a = { { species = "Alpha", hp = 50, maxHp = 100, spd = 90, moves = { fxm("seed", 0, 84) } } },
+      b = { { species = "Beta", hp = 3, maxHp = 100, spd = 10, moves = { splash() } } } })
+    local okStep, events = pcall(step, battle, use(0), use(0))
+    ok(okStep, "a Leech Seed KO resolves without throwing: " .. tostring(not okStep and events or ""))
+    if okStep then
+      eq(count(events, function(e) return e.t == "faint" and e.slot == 3 end), 1, "the seeded monster falls")
+      local healed = nil
+      for _, e in ipairs(events) do if e.t == "drain" and e.slot == 0 then healed = e.amount .. "/" .. e.hp end end
+      eq(healed, "6/56", "the seeder gets the whole 1/16")
+      eq(battle:outcome() and battle:outcome().outcome, "win", "and the fight is over")
+    end
+  end
+
+  -- (b) No build from HP no opponent's move took.  Alpha rages from its
+  --     sheet, poisoned and seeded by Beta, and confused; Beta only
+  --     Splashes.  Scripted: byte 1 is Alpha's confusion gate (0 < 128, a
+  --     self-hit) on turn 1.  Turn 2 the seeded generator decides; either way
+  --     poison (400 / 16 = 25) and the seed (25) tick twice and the stage
+  --     never moves -- it used to rise by one for every one of them.
+  do
+    local battle = duel({
+      a = { { species = "Alpha", maxHp = 400, atk = 100, def = 80, spd = 90, status = "PSN",
+              confusion = 4, moves = { fury() },
+              extra = with(raging, { leechSeed = { fromSlot = 3 } }) } },
+      b = { { species = "Beta", maxHp = 400, spd = 10, moves = { splash() } } } })
+    script(battle, { 0 })
+    local first = step(battle, use(0), use(0))
+    ok(said(first, "Alpha hurt itself in confusion"), "turn 1 is a self-hit")
+    ok(said(first, "Alpha is hurt by its poison") and said(first, "Alpha is seeded"),
+       "...and both residuals tick")
+    local second = step(battle, use(0), use(0))
+    local alpha = activeMonOf(battle, "p1")
+    eq(alpha.stages.atk, 0, "no self-hit, poison or seed tick builds Rage")
+    eq(alpha.cur.atk, 100, "ATTACK is where it started")
+    ok(not said(first, "Alpha's ATTACK rose") and not said(second, "Alpha's ATTACK rose"),
+       "and nothing says it rose")
+  end
+
+  -- (c) The hit that knocks the raging monster out builds nothing (`ret z`),
+  --     so the burned attacker keeps its 200 / 2 = 100 rather than being
+  --     re-penalised to 50 by a build that never happened.
+  do
+    local battle = duel({
+      a = { { species = "Alpha", hp = 20, maxHp = 300, spd = 90, moves = { fury() }, extra = raging },
+            { species = "Gamma", maxHp = 300, moves = { splash() } } },
+      b = { { species = "Beta", maxHp = 300, atk = 200, spd = 10, status = "BRN",
+              moves = { fxm("thump", 80, 0) } } } })
+    eq(activeMonOf(battle, "p2").cur.atk, 100, "the burned attacker: 200 -> 100")
+    local events = step(battle, use(0), use(0))
+    ok(count(events, function(e) return e.t == "faint" and e.slot == 0 end) == 1, "Alpha falls")
+    ok(not said(events, "Alpha's ATTACK rose"), "the knockout builds nothing")
+    eq(activeMonOf(battle, "p2").cur.atk, 100, "...and re-penalises nobody")
+  end
+
+  -- (d) A Substitute that soaks the hit still builds, and a two-hit move
+  --     builds once per hit, each after its hit: the doll (5 HP) breaks on
+  --     the first, the second lands on Alpha -- stage +2, 40 x 200 / 100 = 80.
+  do
+    local battle = duel({
+      a = { { species = "Alpha", maxHp = 400, spd = 90, moves = { fury() },
+              extra = with(raging, { substitute = 5 }) } },
+      b = { { species = "Beta", maxHp = 400, spd = 10, moves = { fxm("kicks", 20, 44) } } } })
+    local events = step(battle, use(0), use(0))
+    local alpha = activeMonOf(battle, "p1")
+    ok(said(events, "Alpha's substitute broke"), "the first hit breaks the doll")
+    eq(alpha.stages.atk, 2, "both hits build, the soaked one included")
+    eq(alpha.cur.atk, 80, "40 at +2")
+    local order = {}
+    for _, e in ipairs(events) do
+      if e.slot == 0 and (e.t == "damage" or e.t == "stat") then order[#order + 1] = e.t end
+    end
+    eq(table.concat(order, " "), "damage stat damage stat", "each build follows its hit")
+  end
+
+  -- (e) A Bide release is a hit: Beta's sheet holds 10 stored, released at
+  --     Alpha (slot 0) for 20, and the raging Alpha builds after it.  Both
+  --     seats are forced (Rage, the release), so the turn waits for a tick.
+  do
+    local battle = duel({
+      a = { { species = "Alpha", maxHp = 400, spd = 90, moves = { fury() }, extra = raging } },
+      b = { { species = "Beta", maxHp = 400, spd = 10, moves = { fxm("bide", 0, 26) },
+              extra = { bide = { turns = 0, stored = 10, moveIndex = 1, targetSlot = 0 } } } } })
+    battle:tick(1)
+    local events = drain(battle)
+    local order = {}
+    for _, e in ipairs(events) do
+      if e.slot == 0 and (e.t == "damage" or e.t == "stat") then order[#order + 1] = e.t .. ":" .. tostring(e.amount) end
+    end
+    eq(table.concat(order, " "), "damage:20 stat:1", "the release lands at slot 0, then the build")
+  end
+
+  -- (f) The two builds no hit carries.  Beta's Disable and Explosion both
+  --     have accuracy 0 (effective 1: they land only on a 0 byte), and both
+  --     miss here.  The Disable still built Alpha (+1): power 0 sends it round
+  --     MoveHitTest to a no-op ApplyAttack and the build, and Disable's own
+  --     hit test comes after.  The Explosion still ran (`.notDone`): Alpha
+  --     builds again (+2) and Beta goes down.
+  do
+    local battle = duel({
+      seed = 6505,
+      a = { { species = "Alpha", maxHp = 400, spd = 90, moves = { fury() },
+              extra = with(raging, { lastMoveIndex = 1 }) } },
+      b = { { species = "Beta", maxHp = 400, spd = 10,
+              moves = { fxm("numb", 0, 86, { accuracy = 0 }), fxm("boom", 130, 7, { accuracy = 0 }) } } } })
+    local first = step(battle, use(0), use(0))
+    ok(said(first, "Beta missed"), "the Disable missed")
+    eq(activeMonOf(battle, "p1").stages.atk, 1, "...and Alpha built all the same")
+    local second = step(battle, use(0), use(1))
+    ok(said(second, "Beta missed"), "the Explosion missed")
+    eq(activeMonOf(battle, "p1").stages.atk, 2, "...and Alpha built again")
+    eq(battle:outcome() and battle:outcome().winners[1], "p1", "the exploder went down")
+  end
+
+  -- (g) A trap's later turns are the trapper's own attack on the cart, so a
+  --     raging, trapped Alpha builds on every tick and the re-penalty finds
+  --     the trapper: Delta (slot 4, burned, 200 -> 100) is halved again on
+  --     the Wrap's hit and on its tick -- 50, then 25 -- while Beta, burned
+  --     and standing opposite at slot 3, keeps its 100.  (The residual used
+  --     to name the battler opposite.)
+  do
+    local battle = battleOf({
+      mode = "coop_pvp", seed = 6506,
+      sides = {
+        a = {
+          { playerId = "a1", name = "Ann", mons = { sheet({ species = "Alpha", maxHp = 400, spd = 90,
+              moves = { fury() }, extra = raging }) } },
+          { playerId = "a2", name = "Amy", mons = { sheet({ species = "Gamma", maxHp = 400, spd = 80,
+              moves = { splash() } }) } },
+        },
+        b = {
+          { playerId = "b1", name = "Bob", mons = { sheet({ species = "Beta", maxHp = 400, atk = 200,
+              spd = 20, status = "BRN", moves = { splash() } }) } },
+          { playerId = "b2", name = "Bea", mons = { sheet({ species = "Delta", maxHp = 400, atk = 200,
+              spd = 10, status = "BRN", moves = { fxm("wrap", 5, 42) } }) } },
+        },
+      },
+    })
+    drain(battle)
+    local function round(turn)
+      battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+      battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+      battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+      battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+      for s = 1, 3 do battle:tick(turn * 10 + s) end
+      return drain(battle)
+    end
+    round(1)
+    eq(activeMonOf(battle, "a1").stages.atk, 1, "the Wrap's hit builds")
+    eq(activeMonOf(battle, "b2").cur.atk, 50, "...and re-penalises the trapper")
+    local second = round(2)
+    ok(said(second, "Alpha is hurt by the trap"), "turn 2 is a trap tick")
+    eq(activeMonOf(battle, "a1").stages.atk, 2, "the tick builds")
+    eq(activeMonOf(battle, "b2").cur.atk, 25, "the trapper is re-penalised again")
+    eq(activeMonOf(battle, "b1").cur.atk, 100, "the battler opposite is not")
+  end
+
+  -- (h) A Bide aimed at field slot 0 releases at slot 0 in a 2v2, whatever
+  --     the spread aim would have picked -- slot 0 is a seat, not "no aim".
+  --     (lib/battle once read it with `||`; the g1_bide_slot0 scenario is the
+  --     seed on which that went to slot 1.)
+  do
+    local battle = battleOf({
+      mode = "coop_pvp", seed = 3,
+      sides = {
+        a = {
+          { playerId = "a1", name = "Ann", mons = { sheet({ species = "Alpha", maxHp = 400, spd = 90,
+              moves = { fxm("tap", 10, 0) } }) } },
+          { playerId = "a2", name = "Amy", mons = { sheet({ species = "Gamma", maxHp = 400, spd = 80,
+              moves = { splash() } }) } },
+        },
+        b = {
+          { playerId = "b1", name = "Bob", mons = { sheet({ species = "Beta", maxHp = 400, spd = 10,
+              moves = { fxm("bide", 0, 26) } }) } },
+          { playerId = "b2", name = "Bea", mons = { sheet({ species = "Delta", maxHp = 400, spd = 5,
+              moves = { splash() } }) } },
+        },
+      },
+    })
+    drain(battle)
+    local hitsOnA = {}
+    for turn = 1, 3 do
+      battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+      battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+      battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+      battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+      for s = 1, 3 do battle:tick(turn * 10 + s) end
+      for _, e in ipairs(drain(battle)) do
+        if e.t == "damage" and e.side == "a" then hitsOnA[#hitsOnA + 1] = e.slot .. ":" .. e.amount end
+      end
+    end
+    eq(table.concat(hitsOnA, " "), "0:10", "the release lands on slot 0")
+  end
+
+  -- (i) A side-effect drop at -6 says nothing (CantLowerAnymore:
+  --     `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`); the primary at -6 prints its
+  --     line.
+  do
+    local battle = duel({
+      a = { { species = "Alpha", maxHp = 400, spd = 90,
+              moves = { fxm("bubble", 10, 70, { chance = 100 }), fxm("goo", 0, 20) } } },
+      b = { { species = "Beta", maxHp = 400, spd = 10, moves = { splash() },
+              extra = { stages = { atk = 0, def = 0, spd = -6, spc = 0, acc = 0, eva = 0 } } } } })
+    local first = step(battle, use(0), use(0))
+    ok(not said(first, "Beta's SPEED won't go any lower"), "the side effect at -6 is silent")
+    local second = step(battle, use(1), use(0))
+    ok(said(second, "Beta's SPEED won't go any lower"), "the primary at -6 still says so")
+  end
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

@@ -625,6 +625,9 @@ end
 -- battler whose turn it is not, in the cart's one-opponent terms.  `side` is a
 -- move's side effect, which the cart lets fail silently where a primary prints
 -- "Nothing happened!" (CantLowerAnymore: `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`).
+-- Both of a drop's failures go through that label -- the stage already at -6
+-- (`dec b; jp z, CantLowerAnymore`) and the stat already at 1 -- so a side
+-- effect says nothing at either wall.
 local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side)
   if delta < 0 and mon.mist then
     out.messages[#out.messages + 1] = "But it failed"
@@ -641,8 +644,10 @@ local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, 
     return
   end
   if outcome == "min" then
-    out.messages[#out.messages + 1] =
-      mon.species .. "'s " .. label .. " won't go any lower"
+    if not side then
+      out.messages[#out.messages + 1] =
+        mon.species .. "'s " .. label .. " won't go any lower"
+    end
     return
   end
   if outcome == "stuck" then
@@ -1232,6 +1237,35 @@ end
 
 function M.isRage(effectId)
   return int(effectId, 0) == 81
+end
+
+-- The effects ExecutePlayerMove / ExecuteEnemyMove hand to JumpMoveEffect
+-- before the hit, so a move carrying one never reaches HandleBuildingRage:
+-- ResidualEffects1 at PlayerCanExecuteMove (pokered
+-- data/battle/residual_effects_1.asm), ResidualEffects2 at `.next`
+-- (residual_effects_2.asm), and Mirror Move / Metronome, which jump back to
+-- CheckIfPlayerNeedsToChargeUp with the move they call (core.asm :3198-3211).
+-- Only a power-0 move asks (Turn's `_useMove`): one with power builds by
+-- landing.
+local SKIPS_BUILDING_RAGE = {
+  -- ResidualEffects1
+  [24] = true, [25] = true, [28] = true, [46] = true, [47] = true,
+  [49] = true, [56] = true, [57] = true, [64] = true, [65] = true,
+  [66] = true, [67] = true, [79] = true, [82] = true, [84] = true,
+  [85] = true,
+  -- ResidualEffects2
+  [1] = true, [10] = true, [11] = true, [12] = true, [13] = true,
+  [14] = true, [15] = true, [18] = true, [19] = true, [20] = true,
+  [21] = true, [22] = true, [23] = true, [26] = true, [32] = true,
+  [50] = true, [51] = true, [52] = true, [53] = true, [54] = true,
+  [55] = true, [58] = true, [59] = true, [60] = true, [61] = true,
+  [62] = true, [63] = true,
+  -- the two that call another move
+  [9] = true, [83] = true,
+}
+
+function M.skipsBuildingRage(effectId)
+  return SKIPS_BUILDING_RAGE[int(effectId, 0)] == true
 end
 
 -- ------------------------------------------------------------------

@@ -954,8 +954,12 @@ local SIDE_STAT_DOWN = {
   [68] = "atk", [69] = "def", [70] = "spe", [71] = "spa",
 }
 
--- ctx: effectId, chance, rng, targetMon, targetFighter, statusToWire
--- Returns { proc, messages, events }.
+-- ctx: effectId, chance, hit, rng, targetMon, targetFighter, statusToWire
+-- Returns { proc, messages, events }.  `hit` is BattleCommand_EffectChance's
+-- verdict when the caller already drew it (Turn draws the byte where the
+-- script's `effectchance` stands and applies the effect after
+-- `buildopponentrage`); absent, the byte is drawn here.  `rng` is still the
+-- confusion side effect's turn count.
 function M.applySide(ctx)
   ctx = ctx or {}
   local out = { proc = false, messages = {}, events = {} }
@@ -966,7 +970,9 @@ function M.applySide(ctx)
   local targetFighter = ctx.targetFighter
   local wire = ctx.statusToWire or {}
 
-  if not M.sideChanceProc(rng, chance) then return out end
+  local hit = ctx.hit
+  if hit == nil then hit = M.sideChanceProc(rng, chance) end
+  if not hit then return out end
   out.proc = true
 
   if effectId == 2 or effectId == 33 or effectId == 77 then -- poison / twineedle

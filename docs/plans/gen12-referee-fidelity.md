@@ -226,4 +226,5 @@ These are differences in Gen1Recomp's own battle code (`src/battle/` and `src/ba
 - **Item lines:** the port prints "restored health!" and "ate the BERRY!"; the referee uses the cart's sentences.
 - **Amulet Coin:** the port tests the item id; pret's `CheckAmuletCoin` tests the HELD_AMULET_COIN effect.
 - **Wild held items:** the port gives wild mons none (`Mon.lua:525`); pret rolls them in `LoadEnemyMon .WildItem` (192/256, then 20/256).
+- **Rage:** the port gives the rager +1 Attack per hit (`src/battle/gen2/Battle.lua:1372-1375`); pokecrystal / pokegold build a counter (`BattleCommand_BuildOpponentRage`) that multiplies RAGE's damage (`BattleCommand_RageDamage`).
 - **Priority values:** the port uses relative values (+1 / +3 / −1) that order the same way; the referee uses the cart's raw `GetMovePriority` numbers.
