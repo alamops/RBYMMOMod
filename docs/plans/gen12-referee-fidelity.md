@@ -8,7 +8,7 @@
 | Flags | none |
 | Gates | grilled + approved by owner |
 | Branch | `feature/firered-and-emerald-support` (unpushed, 1.5.0, PROTOCOL 30 unreleased) |
-| Base SHA | `c8f5f13` (set in Phase 4) |
+| Base SHA | `99a4c9e` (wave 1 `3d356c2`, wave 2 `7aeae6c`) |
 
 **Rule source, decided by the owner:** the carts, read in pret (`pokered`, `pokecrystal`, `pokefirered`, `pokeemerald`). Copies are in `<scratchpad>/pret/`; fetch more with `curl -sfL https://raw.githubusercontent.com/pret/<repo>/master/<path>`. Documented cart quirks are reproduced. Where the engine ports disagree with pret, pret wins and the divergence is written down.
 
@@ -123,6 +123,7 @@ The pret evidence is in the five research briefs, summarised here with anchors t
   They come from the engine's item data at sheet-build time, and are absent when no item is held. Wire and sanitize accept them in the Gen 2 dialect only.
 - **K3 (Gen 2 event):** `held` as in decision 4. `BATTLE_EVENTS2 = { held = true }` (Wire) and `BATTLE_EVENT_TYPES2` (sanitize). Gen 2 readers accept it, and Gen 1 and Gen 3 readers don't. `twin_parity` pins it.
 - **K4 (Gen 1 badges):** `Mediated.badgesOf` also sends CASCADEBADGE, RAINBOWBADGE, MARSHBADGE and EARTHBADGE in the same id style as BOULDERBADGE. Non-link modes only, as today.
+- **K6 (Gen 2 cart lineage, added in wave 2):** a Gen 2 side entry may carry `family = "gs" | "crystal"`. Both hubs stamp it on human seats from the hello `version` they admitted (gold/silver → `gs`, crystal → `crystal`), as they already stamp Gen 3's `family`; it is never read off the wire. Solo stamps `Gen.family()`. The Gen 2 referee reads side a's first fighter (absent → `gs`) for the one rule the carts disagree on: `TruncateHL_BC` loops on Crystal outside link battles and folds once on Gold/Silver in every battle (pokegold `engine/battle/effect_commands.asm:2625` has no loop). Every held-item routine was diffed between pokegold and pokecrystal and is identical.
 - **K5 (obedience lines):** the referee's `msg` text, in the cart's English (pokered `text_2.asm`, pokecrystal `data/text/battle.asm`), with the mon's name filled in.
 
 ## 4. Work breakdown — implementation tasks
@@ -165,7 +166,7 @@ After that: review (3 reviewers: the Gen 1 referee, the Gen 2 referee, client/wi
 
 - **Gen 1/2 damage and turn order change in every fight, PvP included.** That is intended (cart rules). Existing parity expectations that move are listed per scenario. Known ones: Gen 1 `badges_npc` (the crit ignores badges), Gen 2 `badges_npc` and `badges_gold` (truncation and the crit rule), the Gen 1 Focus Energy vector (96 → 100), the Gen 2 Struggle damage tests (STAB removed), and the Reflect and badge tests (re-checked).
 - **Hubs:** they pass sheets through. The new fields reach the referee in co-op and PvP; held items act in PvP but are never written home.
-- **RNG draw order:** new draws happen only when an item, obedience or a bracket tie calls for them. Fights with no items, no traded mons and no priority moves draw exactly as before.
+- **RNG draw order:** new draws happen only when an item, obedience or a bracket tie calls for them. Fights with no items, no traded mons and no priority moves draw exactly as before, with three intended exceptions, all cart order: on Gold, a flinched sleeping or frozen mon now draws its status gate first; a move called by METRONOME or MIRROR MOVE no longer runs the gates a second time (both gens); and Gold's paralysis gate moves after confusion (review fix).
 - **Gold save write-back:** consumed and stolen items reach the save only in KEEPS_HELD_MODES and only for the client's own seats.
 
 ## 8. Open questions / assumptions
@@ -191,3 +192,38 @@ After that: review (3 reviewers: the Gen 1 referee, the Gen 2 referee, client/wi
 | Stale `wCriticalHit` (Gen 2 enemy confusion) | **out of scope**: unreachable on the cart's normal command lists |
 | A co-op joiner can't keep an item it steals from host-described NPCs (the `ownItem` guard) | **out of scope**: anti-forgery design; documented |
 | Engine-port divergences from pret (Gold badge order, crit rule, screens on crit, between-turn order, Focus Band, berries, Lucky Punch) | **in this run**, documented only (D). An upstream report, not a mod change |
+| Gold/Silver vs Crystal `TruncateHL_BC` (found by G2a) | **in this run**: K6, G2b + C |
+| Gen 1 flinch-reset skip while the player's mon rages or recharges (pokered MainInBattleLoop) | **in this run**: G1b, side a of BADGE_MODES; link modes reset unconditionally |
+| Co-op callouts parsed "used instead, X" as the move "instead, X" | **in this run**: C |
+| Pre-existing referee gaps found on the way (Transform on switch-out, Gen 1 Haze side effects, the computer's 25% stat-down miss, ClearHyperBeam, self-hit into a Substitute, item/switch turn slots, Pay Day on Gen 1/2, RNG low bits, modded Gold priority moves, and the smaller rows) | **out of scope**: each is its own ticket; listed with code pointers in `docs/plans/gen12-referee-known-gaps.md` |
+
+## 10. Where the referee follows pret over the engine ports
+
+These are differences in Gen1Recomp's own battle code (`src/battle/` and `src/battle/gen2/`), not in this mod. They are recorded here for an upstream report; the mod's referees follow pret.
+
+**Gen 1 (`src/battle/`):**
+
+- **Badge stacking:** the port counts re-applications (`badgeBoostReapplyBug`) and applies them at read time as stage → badges×n → penalty; the cart writes stored values in event order, so rounding differs (paralysed Speed 61: 15 → 16 on the cart, 68 → 17 in the port).
+- **Re-penalty:** the port counts `statusPenaltyStacks` and applies them after badges at read time; the cart writes them at each event.
+- **999/1 walls:** the port's `changeStage` has neither wall nor the one-step wind-back.
+- **Crit stats:** the port reads `curStats` at both ends; the cart reads the party struct for the attacker and `GetEnemyMonStat` for the defender.
+- **Stat scaling:** the port floors both scaled stats at 1 and never wraps; the cart keeps the low byte.
+- **Haze:** the port suppresses badges and penalties with a `hazeStatReset` flag; the cart copies the unmodified stats over.
+- **Obedience:** the port has no Gen 1 disobedience at all.
+
+**Gold (`src/battle/gen2/`):**
+
+- **Stat order:** the port boosts badges before stages; pokecrystal `CalcPlayerStats` applies stages, then badges.
+- **Crits:** the port uses Gen 3's rule (drops the attacker's negative and the defender's positive stages). The cart keeps both stages only when the defender's is strictly lower than the attacker's, and otherwise uses the raw stats.
+- **Screens:** the port drops screens on any crit; the cart keeps them on the boosted crit path.
+- **Between-turn order and berries:** the port's order differs from `HandleBetweenTurnEffects`, and its status berries cure only at end of turn (the cart also cures right after infliction). Its berry threshold is `2·HP ≤ max`; the cart's is strict `<`.
+- **Focus Band:** the port rolls only on lethal hits; the cart rolls on every hit.
+- **Lucky Punch / Stick:** the port adds 2 crit stages; the cart sets the level to 2.
+- **Bright Powder:** the port applies it before stages with a floor of 1; the cart applies it after, and it can reach 0%.
+- **Berserk Gene:** the port always uses 256 turns; the cart inherits the seat's leftover confusion count.
+- **Healing items:** the port asks side a first; the cart's routines act on the battler opposite the current turn, so side b goes first.
+- **Missing items and moves:** the port has no Light Ball, Thick Club, Metal Powder or Mysteryberry, and its Thief steals nothing.
+- **Item lines:** the port prints "restored health!" and "ate the BERRY!"; the referee uses the cart's sentences.
+- **Amulet Coin:** the port tests the item id; pret's `CheckAmuletCoin` tests the HELD_AMULET_COIN effect.
+- **Wild held items:** the port gives wild mons none (`Mon.lua:525`); pret rolls them in `LoadEnemyMon .WildItem` (192/256, then 20/256).
+- **Priority values:** the port uses relative values (+1 / +3 / −1) that order the same way; the referee uses the cart's raw `GetMovePriority` numbers.

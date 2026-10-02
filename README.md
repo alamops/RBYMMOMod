@@ -367,10 +367,20 @@ your partner drops your target before you swing. A side only loses when *both*
 its trainers are out of mons.
 
 The engine has no double battles, so the mod brings its own field
-(`src/CoopSim.lua`). What sits underneath it is still the engine's: damage,
-crits, type effectiveness, STAB, badge boosts, burn, screens, the random
-factor, status and turn speed all come from `src/battle/*`, so a POKéMON hits
-for exactly the same number here as it does in the grass.
+(`src/CoopSim.lua`) and its own referee (`src/BattleSim` on Red,
+`src/BattleSim2` on Gold, each with a Node twin for the hub). The referee
+follows the cartridge's own battle rules, read from the pret disassemblies:
+- damage, crits, type effectiveness and STAB;
+- badge boosts against the computer;
+- burn, screens and the random factor;
+- move priority and turn speed;
+- a traded POKéMON's obedience;
+- Gold's held items.
+
+The carts' known quirks are kept on purpose: Red's badge-stacking glitch, a
+confused Red POKéMON hitting itself through the *opponent's* REFLECT, and
+Gold's self-hit EXPLOSION halving. Where the engine's own port and the cart
+disagree, the referee sides with the cart.
 
 **Every move effect the game has works**, because none of them are
 reimplemented. `src/CoopField.lua` is a `BattleState`-shaped object over the
@@ -554,8 +564,17 @@ out the way you always did.
 **What happens between the first turn and the last is our simulation.** That
 is the row you turned on, so read the paragraph above for what it says: the
 *results* land on your save. It isn't a promise of turn-for-turn parity with
-the cartridge inside the fight — the referee is a hand-written twin of the
-engine's battle, and where it differs, it differs.
+the cartridge inside the fight. The referee is a hand-written twin of the
+cart's battle rules, read from the pret disassemblies. Where the engine's own
+battle disagrees with the cart, the referee sides with the cart. Where the
+referee still differs, the difference is written down in
+[`docs/plans/gen12-referee-known-gaps.md`](docs/plans/gen12-referee-known-gaps.md).
+
+Against the computer the cart's rules apply in full:
+- your badges boost your POKéMON's stats;
+- a traded POKéMON above your badges' level cap can disobey;
+- on Gold, held items work, from LEFTOVERS to a QUICK CLAW;
+- a berry eaten or an item stolen is gone from your save afterwards.
 
 **Three fights are left exactly where they are:** the **Safari Zone**, the
 **Marowak ghost** in Pokémon Tower and the **old man's catching demo** in

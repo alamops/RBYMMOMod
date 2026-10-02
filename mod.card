@@ -243,6 +243,19 @@ return {
         .. "(--generation 3, PROTOCOL 30) seats all three carts together; "
         .. "presence stays per region (Kanto and Sevii vs Hoenn), everything "
         .. "else crosses carts.",
+      "Red and Gold fights on the carts' own rules, read from the pret "
+        .. "disassemblies: move priority (QUICK ATTACK, COUNTER, Gold's "
+        .. "PROTECT / EXTREMESPEED table); badges boosting stats after stat "
+        .. "stages, Red's badge-stacking glitch included; crits, REFLECT and "
+        .. "LIGHT SCREEN, large-stat scaling and confusion self-hits the "
+        .. "carts' way; and, against the computer, a traded POKéMON over its "
+        .. "badge level cap disobeying in the cart's words. On Gold, held "
+        .. "items work in every fight (QUICK CLAW, LEFTOVERS, the berries, "
+        .. "FOCUS BAND, KING'S ROCK, the type boosters and the rest), THIEF "
+        .. "steals both ways, wild POKéMON hold items at the cart's odds, "
+        .. "SMOKE BALL always escapes a wild fight and AMULET COIN doubles a "
+        .. "prize. Items eaten or stolen against the computer are written "
+        .. "home; a fight between players never touches them.",
       "Particles and effects on the battle arena for every move, every "
         .. "attack and every item a bag can open in a fight: twenty-five "
         .. "vector particle styles over eighteen type palettes, drawn as "
@@ -404,6 +417,12 @@ return {
         .. "on the region map is a list rather than a figure on a city, and a "
         .. "remote player walking nearby can hold the VS Seeker's charge a "
         .. "moment, because the cart waits for every object to stop.",
+      "The Red and Gold referees still differ from the carts in a few "
+        .. "places (TRANSFORM isn't undone on switch-out, Red's HAZE only "
+        .. "resets stats and screens, PAY DAY pays nothing on Red or Gold, "
+        .. "and smaller ones), each listed in "
+        .. "docs/plans/gen12-referee-known-gaps.md. Gold trainers hold no "
+        .. "items: the engine's trainer data has no item field.",
       "On Gen 3, badges work the cart's way against the computer (solo, and "
         .. "co-op against a trainer or a wild mon): stat boosts from badges 1, "
         .. "3, 5 and 7, and a traded mon over its badge level cap can disobey. "

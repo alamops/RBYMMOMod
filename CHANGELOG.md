@@ -103,6 +103,53 @@ here must match `manifest.version`.
     `"1".."8"`, and the Gen 3 sheet gains `traded` / `unfateful` plus an
     `obey` event (`docs/plans/gen3-battle-sheet.md` §6, §7.2.1). The plan is
     `docs/plans/gen3-badge-rules.md`.
+- **Red and Gold fights play by more of the carts' rules.** Every fight the
+  mod referees on Red or Gold (solo, co-op, 1-on-1, party against party) gains
+  three of the carts' rules, read from the pret disassemblies.
+  - **Move priority, in every fight.**
+    - **Red:** QUICK ATTACK goes first and COUNTER last.
+    - **Gold:** follows the cart's table. PROTECT, DETECT and ENDURE go
+      first, then QUICK ATTACK, MACH PUNCH and EXTREMESPEED. ROAR, WHIRLWIND,
+      COUNTER, MIRROR COAT and VITAL THROW go last.
+    - **Ties:** within a bracket, the faster POKéMON goes first.
+  - **Obedience against the computer.** A traded POKéMON (its OT ID isn't
+    yours) above your badges' level cap may loaf around, ignore orders, use
+    another move, take a nap or hurt itself. It does so in the cart's own
+    sequence and words.
+    - **Red caps:** 10 with no badges; 30 with CASCADEBADGE, 50 with
+      RAINBOWBADGE, 70 with MARSHBADGE; none with EARTHBADGE.
+    - **Gold caps:** 10 with no badges; 30 with HIVEBADGE, 50 with FOGBADGE,
+      70 with STORMBADGE; none with RISINGBADGE.
+    - **Gold only:** a sleeping traded POKéMON told to SNORE or SLEEP TALK
+      can ignore orders too.
+    - **Between players:** everyone obeys, as in a link battle.
+  - **Held items on Gold.** Items held in a fight now do what they do on the
+    cart:
+    - QUICK CLAW, BRIGHTPOWDER and SCOPE LENS;
+    - the type-boosting items and the PINK and POLKADOT BOWs;
+    - LUCKY PUNCH, STICK, LIGHT BALL, THICK CLUB and METAL POWDER, each for
+      its own POKéMON;
+    - FOCUS BAND and KING'S ROCK;
+    - LEFTOVERS and the healing, status and confusion berries;
+    - MYSTERYBERRY, the stat-up items and BERSERK GENE.
+  - **More items on Gold:**
+    - **THIEF** steals both ways (MAIL can't be stolen).
+    - **Wild POKéMON** hold items at the cart's odds, and a catch keeps the
+      item.
+    - **SMOKE BALL** always gets you out of a wild fight.
+    - **AMULET COIN** doubles a trainer's prize.
+  - **What reaches your save.** In fights against the computer, an eaten
+    berry or a stolen item is gone afterwards, and an item you steal is
+    yours. A fight between players leaves every item where it was; the cart
+    reloads the party after a link battle.
+  - **How it works:**
+    - Red and Gold battle sheets carry `traded`, and Gold sheets carry the
+      held item's effect, parameter, name and a MAIL flag.
+    - Gold's referee gains a `held` event.
+    - The hubs tell the referee whether a Gold-family player is on Gold/Silver
+      or Crystal, because the two carts scale large stats differently.
+    - Red now uploads its four obedience badges.
+    - The plan is `docs/plans/gen12-referee-fidelity.md`.
 - **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
   out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
   referee instead of the cart's. That covers the Twins and couples on the
@@ -214,6 +261,46 @@ here must match `manifest.version`.
   - **Type badges are new:** owning a type's badge (Zephyr Flying, Hive Bug,
     … all sixteen) adds 1/8 to that type's damage, as Gold does.
   - **Red's boost gets its 999 cap.** It is now capped like pokered's.
+- **Red and Gold damage now follows the carts.** The referees had their own
+  order for several steps; each now follows pokered or pokecrystal,
+  including the carts' known quirks:
+  - **Badges and stat stages.**
+    - **Red** keeps its battle stats the way the cart does, including two
+      glitches. Every stat move re-applies every badge to your stats (the
+      badge-stacking glitch), and a burn or paralysis penalty lands again
+      on the other side.
+    - **Gold** applies stages, then badges, then burn or paralysis.
+    - **Both:** stat stages now reset when a POKéMON switches in or faints.
+  - **Critical hits.**
+    - **Red:** a crit ignores stages, badges, burn and screens. FOCUS ENERGY
+      with a high-crit move follows the cart's arithmetic.
+    - **Gold:** a crit ignores them unless the defender's stage is lower
+      than the attacker's.
+  - **REFLECT and LIGHT SCREEN** double the defending stat instead of halving
+    the damage afterwards. Casting one that is already up fails, and they
+    don't count on a crit.
+    - **Red:** a screen belongs to the POKéMON and leaves with it.
+    - **Gold:** a screen covers the side for five turns.
+  - **Big numbers:**
+    - **Red:** wraps large stats the way the cart does.
+    - **Gold:** halves them as Gold/Silver or Crystal does.
+    - **Both:** the base damage is capped at 997 + 2 before the type and
+      same-type multipliers, as on the cart. Explosion halves the defense at
+      the cart's step.
+  - **Confusion self-hits** use stages, badges and burn.
+    - **Red:** the self-hit uses the opponent's REFLECT.
+    - **Gold:** the self-hit uses your own side's REFLECT. It halves your
+      defense when the chosen move was EXPLOSION or SELFDESTRUCT. Both are
+      cart quirks.
+  - **Gold's STRUGGLE** has no type: no same-type bonus, and it hits GHOSTs.
+  - **METRONOME and MIRROR MOVE on the last PP:** the move they call no
+    longer takes STRUGGLE's recoil.
+  - **Gold flinches:** a flinch no longer carries over to a POKéMON that had
+    already moved. A sleeping or frozen POKéMON checks that first.
+- **On Gen 3, a wild POKéMON or a trainer could steal your item.** THIEF and
+  COVET used by the computer now steal nothing, and its TRICK fails, as on
+  FireRed and Emerald outside link battles. THIEF used by you still keeps
+  what it takes, and fights between players are unchanged.
 - **Gold: a mediated fight re-sent learned moves with the Gen 1 effect
   table.** `sheetMoves` dropped the generation, so a move learned mid-fight
   on Gold went to the referee with Red's effect id. It keeps the generation
@@ -302,11 +389,13 @@ version, but each was a real failure on a live boot or on the wire:
   co-op or solo fight opened under the overworld's weather, and nameplates
   never gave way to the corner roster under the TILT pipeline. Both read
   through the engine adapter now.
-- **Gen 1 / Gen 2 wire reads are byte-identical to 1.4.19 again.** A stray
-  Gen 3 field could change how a Gen 1 or Gen 2 sheet, choice or event was
-  read; both hubs read with the generation again (a 39,000-case differential
-  against 1.4.19: 0 mismatches), and the two hubs agree on
-  every crafted edge case.
+- **Gen 1 / Gen 2 wire reads match 1.4.19 again.** A stray Gen 3 field could
+  change how a Gen 1 or Gen 2 sheet, choice or event was read. Both hubs now
+  read with the generation again: a 39,000-case differential against 1.4.19
+  found 0 mismatches. The two hubs agree on every crafted edge case. This
+  release's own additions are the only Gen 1 / Gen 2 differences: `traded` on
+  Red and Gold sheets, Gold's held-item fields and Gold's `held` event (see
+  Added).
 
 ### Known
 
@@ -357,6 +446,14 @@ version, but each was a real failure on a live boot or on the wire:
 - **A fight taken over from the cart never raises `battle.started`** (the
   engine's battle never starts); a `SOLO BATTLES` fight raises `battle.ended`
   when it is over, as the engine's own does.
+- **The Red and Gold referees still differ from the carts in a few places.**
+  For example, TRANSFORM isn't undone on switch-out, Red's HAZE only resets
+  stats and screens, and PAY DAY pays nothing on Red or Gold. Each one is
+  listed, with where it lives in the code, in
+  `docs/plans/gen12-referee-known-gaps.md`.
+- **Gold trainers hold no items.** The engine's Gold trainer data has no item
+  field, so a trainer's POKéMON never holds anything, and your THIEF steals
+  nothing from one.
 - **Engine, not mod:** on a fresh Emerald save the heal point is still the
   moving truck, so a whiteout before the first POKéMON CENTER — the cart's
   or a mod-run fight's — respawns there.

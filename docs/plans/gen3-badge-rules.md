@@ -173,18 +173,18 @@ After that: review (Phase 5), then TT-H and TT-E in parallel, then run, then fix
 | A hostile side-b upload with badges | **in this run**: R3 / R12 gate side b |
 | Hub protocol parity for the new Gen 3 fields and event | **in this run**: C3b |
 | Stale comments and docs saying "link rules / badges ignored" (sheet doc :74/:105/:507/:735, `MediatedBattle.lua:53/985`, `SoloBattle.lua:2628`, `Turn.lua:86`, `Move.lua:21`, `Field.lua:99`, CHANGELOG Known, `mod.card`, the support plan :308/:642, known-gaps §6, the Config comment) | **in this run**: R3, C3a, D |
-| Gen 1/2 obedience | **out of scope**: owner chose obedience for Gen 3 (gap #6); Gen 1/2 never had it, and it's a different ticket |
+| Gen 1/2 obedience | **out of scope**: owner chose obedience for Gen 3 (gap #6); Gen 1/2 never had it, and it's a different ticket. **Resolved later** by `docs/plans/gen12-referee-fidelity.md` (`3d356c2`, `7aeae6c`). |
 | The legacy host-built co-op path (`Coop:buildField`) for Gen 3 | **out of scope**: Gen 3 co-op is always hub-mediated; that path is Gen 1/2 only |
 | Gen 2 computer fights never applied badge boosts (Gen 1 names; Gold's type boosts missing) | **in this run**: R2b (found by R12, owner approved) |
 | Gen 2 client never sent Kanto badges (it read only `player.badges`) | **in this run**: C3b (`badgesOf` reads both stores, as the engine's `hasBadge` does) |
 | The hubs build Gen 3 fighters without `family` (Emerald got FRLG's Focus Punch rule) | **in this run**: H |
 | `fateful` sent unless the engine mon's `fatefulEncounter` is explicitly false (the engine ignores nil and never reads `modernFatefulEncounter`) | **in this run** (C3a), documented in the sheet doc §9.1. It follows the engine; a save-imported Mew/Deoxys without the event bit obeys here, where pret may not |
-| Thief/Covet/Trick by side b in `wild` / `coop_npc` (pret may forbid an opponent-side steal outside link battles) | **out of scope**: item-theft rules, not badge rules. Unverified (no pret source); reported, a referee-fidelity ticket |
-| Gen 1/2 obedience | **out of scope**: unchanged from the plan |
+| Thief/Covet/Trick by side b in `wild` / `coop_npc` (pret may forbid an opponent-side steal outside link battles) | **out of scope**: item-theft rules, not badge rules. Unverified (no pret source); reported, a referee-fidelity ticket. **Resolved later** by `docs/plans/gen12-referee-fidelity.md` (`3d356c2`, `7aeae6c`). |
+| Gen 1/2 obedience | **out of scope**: unchanged from the plan. **Resolved later** by `docs/plans/gen12-referee-fidelity.md` (`3d356c2`, `7aeae6c`). |
 | Gen 1 referee's badge boost lacked pokered's 999 cap | **in this run**: R2b (both twins; no existing expectation moved) |
 | Gen 2 type boost needs the chart's `typeIds` in the ruleset (client → sanitisers → hubs → solo) | **in this run**: C3b follow-up |
-| Badge boost before vs after stat stages in BattleSim / BattleSim2 (the Gold engine port boosts before; pokecrystal `CalcPlayerStats` and the Gen 1 engine appear to boost after) | **out of scope**: pre-existing ordering in both Gen 1/2 sims, unverified against pret (no source here); a referee-fidelity ticket |
-| BattleSim2's confusion self-hit ignores stages and burn; no 255-stat truncation | **out of scope**: pre-existing Gen 2 referee fidelity, not badge rules; reported by R2b |
+| Badge boost before vs after stat stages in BattleSim / BattleSim2 (the Gold engine port boosts before; pokecrystal `CalcPlayerStats` and the Gen 1 engine appear to boost after) | **out of scope**: pre-existing ordering in both Gen 1/2 sims, unverified against pret (no source here); a referee-fidelity ticket. **Resolved later** by `docs/plans/gen12-referee-fidelity.md` (`3d356c2`, `7aeae6c`). |
+| BattleSim2's confusion self-hit ignores stages and burn; no 255-stat truncation | **out of scope**: pre-existing Gen 2 referee fidelity, not badge rules; reported by R2b. **Resolved later** by `docs/plans/gen12-referee-fidelity.md` (`3d356c2`, `7aeae6c`). |
 | Review 1 #1: an absent `fateful` made Mew/Deoxys always disobey (the inverse of the engine's `== false` test) | **in this run**: FR + FC, contract K2' `unfateful` |
 | Review 1 #2: Gen 2 Struggle could pick up a badge type boost (type 0 maps to `typeIds[1]`) | **in this run**: FR |
 | Review 1 #3: Gen 1 confusion self-hit ignored badges (pokered reads the boosted stats) | **in this run**: FR |
