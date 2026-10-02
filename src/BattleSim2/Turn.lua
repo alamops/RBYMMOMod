@@ -85,7 +85,9 @@
 --     does not end the battle -- the player who went to make a sandwich loses
 --     a turn, not the match.
 --   * *Struggle* when every move is out of PP: synthetic STRUGGLE (power 50,
---     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit.
+--     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit,
+--     and never a badge type boost (pokecrystal BattleCommand_Stab returns for
+--     Struggle before DoBadgeTypeBoosts).
 --   * The choice clock is *suspended while anybody is disconnected*, because
 --     the grace timer is already counting for that player and two deadlines
 --     racing would decide the match on whichever fired first.  `submitChoice`
@@ -2747,8 +2749,11 @@ function Battle:_useMove(fighter, mon, opts)
         physical = not isSpecial,
         -- The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
         -- this is the cart's "player's turn only" without asking whose turn.
-        badgeTypeBoost = Effects.badgeTypeBoost(self:_typeIdOf(move.type),
-          fighter.badges),
+        -- Never for Struggle: pokecrystal BattleCommand_Stab opens with
+        -- `cp STRUGGLE / ret z`, ahead of its DoBadgeTypeBoosts call, so the
+        -- synthetic move's placeholder type 0 must not name a badge's type.
+        badgeTypeBoost = move ~= STRUGGLE
+          and Effects.badgeTypeBoost(self:_typeIdOf(move.type), fighter.badges),
       })
 
     if result.immune then

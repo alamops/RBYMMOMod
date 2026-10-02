@@ -2722,8 +2722,11 @@ class Battle {
         physical: !isSpecial,
         // The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
         // this is the cart's "player's turn only" without asking whose turn.
-        badgeTypeBoost: Effects.badgeTypeBoost(this._typeIdOf(move.type),
-          fighter.badges),
+        // Never for Struggle: pokecrystal BattleCommand_Stab opens with
+        // `cp STRUGGLE / ret z`, ahead of its DoBadgeTypeBoosts call, so the
+        // synthetic move's placeholder type 0 must not name a badge's type.
+        badgeTypeBoost: move !== STRUGGLE
+          && Effects.badgeTypeBoost(this._typeIdOf(move.type), fighter.badges),
       });
 
       if (result.immune) {
