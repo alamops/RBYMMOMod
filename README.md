@@ -1020,6 +1020,12 @@ waits until it closes.
 <p align="center"><em>On CLASSIC BATTLE UI, the cart's own double screen — aiming, and START for the HP figures</em></p>
 
 <p align="center">
+  <img src="docs/screenshots/gen3/g3-fr-solo-obey-loafing.png" width="500" alt="A SOLO BATTLES fight on FireRed: a traded level-50 CHARMANDER against a wild PIDGEY, and CHARMANDER is loafing around! in the band">
+  <img src="docs/screenshots/gen3/g3-em-solo-obey-classic.png" width="260" alt="CLASSIC BATTLE UI on Emerald: a traded level-50 TORCHIC against a wild ZIGZAGOON, and TORCHIC pretended not to notice!">
+</p>
+<p align="center"><em>Badges count against the computer — a traded POKéMON over your badges' level cap may not listen, in the cart's own words</em></p>
+
+<p align="center">
   <img src="docs/screenshots/gen3/g3-em-arena-weather.png" width="760" alt="The arena on Emerald in the rain: rain streaks over the whole field, a Substitute doll on the foe's platform and Rain continues to fall. in the band">
 </p>
 <p align="center"><em>Weather and the Substitute doll on the arena</em></p>
