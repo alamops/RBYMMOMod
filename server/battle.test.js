@@ -126,6 +126,34 @@ test('either stat over 255 quarters both', () => {
   assert.strictEqual(damage.clampStats(256, 2).defense, 1, 'and a quartered stat floors at 1');
 });
 
+// .scaleStats keeps only the low byte of each scaled word (core.asm
+// :4107-4135): the cart divides by that byte, and hangs when it is 0, where the
+// referee holds the divisor at 1.
+test('the scaled stats are bytes: a wrap past 1023, and a divisor clamp', () => {
+  assert.deepStrictEqual(
+    damage.clampStats(200, 1100),
+    { attack: 50, defense: 19, statClamped: true },
+    '1100 / 4 = 275 wraps to 19',
+  );
+  assert.strictEqual(damage.clampStats(100, 1024).defense, 1,
+    '1024 / 4 = 256 wraps to 0, held at 1 instead of freezing');
+  assert.strictEqual(damage.clampStats(300, 3).defense, 1,
+    '3 / 4 = 0, held at 1 instead of freezing');
+  assert.strictEqual(damage.clampStats(2, 300).attack, 1,
+    'the attack word is bumped to 1 before its byte is taken');
+});
+
+test('Explosion halves the scaled defence, and 997 caps before the multipliers', () => {
+  const after = damage.compute({ level: 50, power: 170, attack: 100, defense: 300, explode: true, roll: 255 });
+  assert.strictEqual(after.defense, 37, '300 scales to 75, THEN halves to 37');
+  assert.strictEqual(after.base, 52, 'not the 51 a halve-then-scale order deals');
+  const capped = damage.compute({
+    level: 100, power: 200, attack: 250, defense: 10, stab: true, roll: 255,
+  });
+  assert.strictEqual(capped.base, 999, 'the quotient stops at 997, then +2');
+  assert.strictEqual(capped.damage, 1498, 'STAB still applies on top of the cap');
+});
+
 test('accuracy vectors', async (t) => {
   for (const v of vectors.accuracy) {
     await t.test(v.id, () => {
@@ -165,10 +193,14 @@ test('focus energy is kept as the bug it is', () => {
   const plain = crit.threshold(100, {});
   const focused = crit.threshold(100, { focusEnergy: true });
   assert.ok(focused < plain, 'Focus Energy makes crits rarer in Gen1');
+  // CriticalHitTest halves for Focus Energy BEFORE the high-crit doubling
+  // chain (core.asm :4478-4540): 50 -> 25 -> 50 -> 100. A "quarter it, then
+  // times eight" shortcut lands on 96 -- the number this asserted until the
+  // referee followed the cart's shifts.
   assert.strictEqual(
     crit.threshold(100, { focusEnergy: true, highCritMove: true }),
-    96,
-    'quartered first, multiplied after, clamped last',
+    100,
+    'halved by Focus Energy, then doubled twice by the high-crit chain',
   );
   assert.strictEqual(crit.threshold(1, {}), 0, 'a threshold of 0 can never beat a roll of 0');
 });

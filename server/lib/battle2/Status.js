@@ -12,7 +12,12 @@
  *   * Paralysis full-stops 1/4 of the time (roll % 4 === 0), not Gen1's 63/256;
  *     speed still quarters.
  *   * Sleep wakes *and acts* on the turn the counter hits zero.
- *   * Confusion self-hit still routes through Damage.compute (now Gen2).
+ *   * Confusion self-hit routes through Damage.compute as HitConfusion runs
+ *     BattleCommand_DamageCalc and nothing after it: power 40, no crit, no
+ *     STAB, no matchup, no variation. The caller hands in the attack /
+ *     defense HitSelfInConfusion builds and, as `itemBoostPercent`, the
+ *     type-boost item DamageCalc finds for the SELECTED move's type -- both
+ *     cart bugs; the Lua twin's header names them.
  */
 
 const Damage = require('./Damage.js');
@@ -112,6 +117,7 @@ function confusionTick(state, roll) {
     typeEffect: [100],
     roll: Damage.ROLL_MAX,
     physical: true,
+    itemBoostPercent: s.itemBoostPercent,
   });
 
   return {

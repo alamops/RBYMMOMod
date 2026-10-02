@@ -10,7 +10,13 @@
  * Phase 2: post-damage side-chance effects + flinch.
  * Phase 3: multi-hit, fixed damage, drain, recoil.
  * Phase 4: multi-turn charge, recharge, trap, thrash, rage.
+ * Stored battle stats: pokered's party / unmodified / battle stat sets, the
+ * stage-change door (`changeStat`) and both Gen 1 stat glitches.
  */
+
+// The two condition penalties are Status' formulas (and its vectors'); the
+// stat machinery below is where they are written into a battle stat.
+const Status = require('./Status.js');
 
 const NAMES = [
   'NO_ADDITIONAL_EFFECT',
@@ -187,8 +193,16 @@ function stageMult(stage) {
   return STAGE_MULT[clampStage(stage)];
 }
 
+// CalculateModifiedStat (engine/battle/core.asm :6376-6440): the unmodified
+// stat times its StatModifierRatios entry (data/battle/stat_modifiers.asm --
+// 15/10 and 150/100 truncate alike, so the table above is that one as
+// percents), held to 1..MAX_STAT_VALUE. The two stat-change effects clamp only
+// one end each; see `changeStat`.
 function applyStage(base, stage) {
-  return Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
+  const value = Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
+  if (value < 1) return 1;
+  if (value > MAX_STAT_VALUE) return MAX_STAT_VALUE;
+  return value;
 }
 
 // Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge,
@@ -215,6 +229,243 @@ function badgeBoost(statValue, wireStatKey, badges) {
   const badge = BADGE_FOR_STAT[wireStatKey];
   if (!badge || !badges[badge]) return base;
   return Math.min(MAX_STAT_VALUE, Math.floor((base * 9) / 8));
+}
+
+// ------------------------------------------------------------------
+// Stored battle stats (pokered's own data flow)
+// ------------------------------------------------------------------
+//
+// pokered does not derive a battle stat when it needs one. It keeps three
+// sets per battler and *writes* the battle one at a handful of moments, and
+// every Gen 1 stat glitch falls out of which moment forgot what. So the
+// referee keeps the same three, under the same rules, rather than a read-time
+// formula that would round and cap differently:
+//
+//   * `mon.partyStats` -- the party struct (wPartyMon1Attack...). The sheet's
+//     stats; only a vitamin moves them, and Transform never does. A critical
+//     hit reads these at both ends (GetDamageVarsForPlayerAttack, core.asm
+//     :4059-4072, :4091-4104).
+//   * `mon.stats` -- the unmodified stats (wPlayerMonUnmodifiedAttack...), the
+//     base every stage change and Haze rebuild from. Reloaded from the party
+//     at every switch-in (LoadBattleMonFromParty :1654-1657); Transform copies
+//     the target's over them (transform.asm .copyStats).
+//   * `mon.cur` -- the battle stats (wBattleMonAttack...): what turn order,
+//     damage and the confusion self-hit read, and nothing else adds to them at
+//     read time. Written by the switch-in seed (party -> burn/paralysis
+//     penalty -> badges), every stage change, a badge re-run, a condition's
+//     penalty, Haze and Transform -- every one of them below or in Turn.
+//
+// `changeStat` is the one door every stage change goes through, so a new
+// stat-changing source hooks in there and inherits both glitches for free.
+
+const BATTLE_STATS = ['atk', 'def', 'spd', 'spc'];
+const IS_BATTLE_STAT = { atk: true, def: true, spd: true, spc: true };
+
+// Lua's max(0, int(v, 1)): a missing value is 1 (JS's Number(null) is 0, so
+// absence is spelled out rather than left to `int`).
+function statValue(value) {
+  if (value === undefined || value === null) return 1;
+  return Math.max(0, int(value, 1));
+}
+
+function statBlock(src) {
+  const from = src && typeof src === 'object' ? src : {};
+  return {
+    atk: statValue(from.atk), def: statValue(from.def),
+    spd: statValue(from.spd), spc: statValue(from.spc),
+  };
+}
+
+function resetStages(mon) {
+  mon.stages.atk = 0;
+  mon.stages.def = 0;
+  mon.stages.spd = 0;
+  mon.stages.spc = 0;
+  mon.stages.acc = 0;
+  mon.stages.eva = 0;
+}
+
+// Turn.attempt builds all three sets. A monster object assembled anywhere else
+// (the Effects suite, a future caller) carries `stats` alone, and gets the
+// other two from it here rather than making every function below guard null.
+function ensureBattleStats(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  if (!mon.stats || typeof mon.stats !== 'object') mon.stats = statBlock(null);
+  if (!mon.partyStats || typeof mon.partyStats !== 'object') {
+    mon.partyStats = statBlock(mon.stats);
+  }
+  if (!mon.cur || typeof mon.cur !== 'object') mon.cur = statBlock(mon.stats);
+  if (!mon.stages || typeof mon.stages !== 'object') {
+    mon.stages = { atk: 0, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 };
+  }
+}
+
+// ApplyBadgeStatBoosts (core.asm :6454-6500): every badge-owned stat of the
+// battle mon gets +stat>>3 (the 9/8 above), held at 999 -- every one of them,
+// every time it runs, compounding on whatever is already there. `badges` is
+// null wherever the cart returns early (a link battle) or never looks (the
+// enemy's battler): Turn.attempt keeps a set only on side a of BADGE_MODES.
+function applyBadgeBoosts(mon, badges) {
+  if (!mon || typeof mon !== 'object' || !badges || typeof badges !== 'object') return;
+  ensureBattleStats(mon);
+  for (const key of BATTLE_STATS) {
+    if (badges[BADGE_FOR_STAT[key]]) {
+      mon.cur[key] = badgeBoost(mon.cur[key], key, badges);
+    }
+  }
+}
+
+// QuarterSpeedDueToParalysis / HalveAttackDueToBurn (core.asm :6283-6366),
+// written into the battle stat, minimum 1, and only for the condition the
+// monster actually has. It runs when the condition lands (effects.asm :236,
+// :243, :289, :294; paralyze.asm), when the monster is sent out
+// (LoadBattleMonFromParty :1658), and after every successful stat change on
+// whichever battler's turn it is NOT, whatever stat the change touched
+// (effects.asm :504-506, :694-698) -- the re-penalty glitch. Nothing lifts it
+// but a rebuild of that stat: a stage change, Haze, a switch, the player's
+// own status-cure item (`reloadPartyStats`).
+function applyStatusPenalty(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  if (mon.status === 'paralysis') {
+    mon.cur.spd = Status.paralysisSpeed(mon.cur.spd);
+  } else if (mon.status === 'burn') {
+    mon.cur.atk = Status.burnAttack(mon.cur.atk);
+  }
+}
+
+// CalculateModifiedStats + ApplyBurnAndParalysisPenalties +
+// ApplyBadgeStatBoosts: the battle stats rebuilt from the unmodified ones
+// through the current stages, the way a level-up mid-fight rebuilds them
+// (engine/battle/experience.asm :226-238). Turn.attempt seeds with it -- a
+// live sheet states no stages, so that is LoadBattleMonFromParty's own seed;
+// the suites' sheets state some -- and a vitamin on the fielded monster
+// re-runs it.
+function recalcBattleStats(mon, badges) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  for (const key of BATTLE_STATS) {
+    mon.cur[key] = applyStage(mon.stats[key], mon.stages[key]);
+  }
+  applyStatusPenalty(mon);
+  applyBadgeBoosts(mon, badges);
+}
+
+// LoadBattleMonFromParty (core.asm :1626-1667) / LoadEnemyMonFromParty: the
+// party stats become the unmodified ones (undoing a Transform), then the
+// battle ones, then the penalty, then the badges, and every stage goes back to
+// neutral. Turn runs it at every switch-in, and at a faint so nothing a fallen
+// monster carried survives to a revival.
+function loadBattleStats(mon, badges) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  mon.stats = statBlock(mon.partyStats);
+  resetStages(mon);
+  mon.cur = statBlock(mon.stats);
+  applyStatusPenalty(mon);
+  applyBadgeBoosts(mon, badges);
+}
+
+// ItemUseMedicine's .cureStatusAilment (engine/items/item_effects.asm
+// :868-913): curing the fielded monster copies its party stats over its
+// battle stats -- which drops the penalty, every badge boost and every stage's
+// effect (the stages themselves stay) -- and on a Transformed one, its own
+// stats come back. Turn calls it for the player's items only; the computer's
+// AICureStatus (engine/battle/trainer_ai.asm :625-636) touches no stat.
+function reloadPartyStats(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  mon.cur = statBlock(mon.partyStats);
+}
+
+// A copy of a battle-stat block, for the one caller that moves a whole set
+// between battlers (Transform).
+function copyStats(src) {
+  return statBlock(src);
+}
+
+// One stage change, the way StatModifierUpEffect / StatModifierDownEffect
+// (engine/battle/effects.asm :351-514 / :539-716) make it. Every stage change
+// in this referee goes through here: a move's primary or side effect
+// (applyPrimary / applySide below), an X item and Rage (Turn).
+//
+// ctx:
+//   mon, fighter -- the battler whose stage moves, and its seat
+//   stat, delta  -- 'atk' .. 'eva', +-1 / +-2
+//   mover        -- the seat whose turn it is (hWhoseTurn): the move's or the
+//                   item's user, or the raging battler for Rage, which
+//                   HandleBuildingRage makes the user (core.asm :4913-4950)
+//   nonMover     -- the battle mon "whose turn it is not", which the
+//                   re-penalty lands on: the action's target for a move, the
+//                   battler opposite for an item, the attacker for Rage. null
+//                   when nobody is standing there.
+//
+// Returns { outcome, stage }:
+//   'rose' / 'fell' -- the stage moved and the battle stat was rebuilt
+//   'max' / 'min'   -- already at +6 / -6: nothing moved (the cart's
+//                      "Nothing happened!" / CantLowerAnymore)
+//   'stuck'         -- the battle stat itself was already at 999 (a raise) or
+//                      1 (a drop). The stage is wound back ONE step whatever
+//                      the delta (RestoreOriginalStatModifier `dec [hl]`,
+//                      CantLowerAnymore_Pop `inc [hl]`), so a +2 move on a 999
+//                      stat still nets +1 -- the cart's quirk, kept.
+//
+// The rebuild is the changed stat alone: unmodified x the new stage's ratio,
+// held at 999 on a raise and at 1 on a drop, the one end each routine checks.
+// The other end is left open as the cart leaves it: a drop from a raised stage
+// can store more than 999 (a 458 Defense lowered from +4 to +3 is 1145), and a
+// raise out of -6 on a tiny stat can store 0; the damage step scales and
+// clamps what it is handed. Burn, paralysis and badges are not in the rebuild
+// -- which is why a stage change on a burned Attack lifts the burn until the
+// re-penalty puts it back.
+function changeStat(ctx) {
+  const { mon, fighter, stat } = ctx;
+  const delta = int(ctx.delta, 0);
+  ensureBattleStats(mon);
+  const before = clampStage(mon.stages[stat]);
+  if (delta > 0 && before >= STAGE_MAX) return { outcome: 'max', stage: before };
+  if (delta < 0 && before <= STAGE_MIN) return { outcome: 'min', stage: before };
+  const after = clampStage(before + delta);
+  mon.stages[stat] = after;
+
+  if (IS_BATTLE_STAT[stat]) {
+    const current = int(mon.cur[stat], 0);
+    if (delta > 0 && current === MAX_STAT_VALUE) {
+      mon.stages[stat] = after - 1;
+      return { outcome: 'stuck', stage: mon.stages[stat] };
+    }
+    if (delta < 0 && current === 1) {
+      mon.stages[stat] = after + 1;
+      return { outcome: 'stuck', stage: mon.stages[stat] };
+    }
+    let value = Math.floor(Math.max(0, int(mon.stats[stat], 0)) * stageMult(after) / 100);
+    if (delta > 0) {
+      value = Math.min(MAX_STAT_VALUE, value);
+    } else {
+      value = Math.max(1, value);
+    }
+    mon.cur[stat] = value;
+  }
+
+  // The badge-stacking glitch. ApplyBadgeStatBoosts runs again on the
+  // player's battle mon after the player's own raise (effects.asm :497-499)
+  // and after the enemy's drop (:687-689) -- accuracy and evasion included --
+  // over all four stats, so every badge stat compounds another 9/8. "The
+  // player" is the seat holding a badge set (Turn.attempt keeps one only on
+  // side a of a fight against the computer), so a raise re-runs the mover's
+  // own set and a drop re-runs the set of a target sitting across from it.
+  if (delta > 0) {
+    if (ctx.mover === fighter) applyBadgeBoosts(mon, fighter ? fighter.badges : null);
+  } else if (ctx.mover && fighter && ctx.mover.side !== fighter.side) {
+    applyBadgeBoosts(mon, fighter.badges);
+  }
+
+  // The re-penalty glitch: both routines end on QuarterSpeedDueToParalysis +
+  // HalveAttackDueToBurn for the battler whose turn it is not, whichever stat
+  // moved ("these shouldn't be here", effects.asm :504-506; :694-698).
+  if (ctx.nonMover) applyStatusPenalty(ctx.nonMover);
+
+  return { outcome: delta > 0 ? 'rose' : 'fell', stage: after };
 }
 
 // ------------------------------------------------------------------
@@ -324,39 +575,56 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
   out.events.push({ kind: 'status', fields });
 }
 
-function applyStatChange(out, fighter, mon, stat, delta) {
+// A move's stage change, narrated. `changeStat` does the arithmetic and both
+// glitches; this adds the sentences. `mover` is the move's user and
+// `nonMover` the battle mon of the seat the action was aimed at -- the battler
+// whose turn it is not, in the cart's one-opponent terms. `side` is a move's
+// side effect, which the cart lets fail silently where a primary prints
+// "Nothing happened!" (CantLowerAnymore: `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`).
+function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) {
   if (delta < 0 && mon.mist) {
     out.messages.push('But it failed');
     return;
   }
   const label = STAT_LABELS[stat] || stat;
-  const before = clampStage(mon.stages[stat]);
-  const after = clampStage(before + delta);
-  if (after === before) {
-    if (delta > 0) {
-      out.messages.push(`${mon.species}'s ${label} won't go any higher`);
-    } else {
-      out.messages.push(`${mon.species}'s ${label} won't go any lower`);
-    }
+  const { outcome, stage } = changeStat({
+    mon, fighter, stat, delta, mover, nonMover,
+  });
+  if (outcome === 'max') {
+    out.messages.push(`${mon.species}'s ${label} won't go any higher`);
     return;
   }
-  mon.stages[stat] = after;
-  const verb = delta > 0 ? 'rose' : 'fell';
-  const text = `${mon.species}'s ${label} ${verb}`;
+  if (outcome === 'min') {
+    out.messages.push(`${mon.species}'s ${label} won't go any lower`);
+    return;
+  }
+  if (outcome === 'stuck') {
+    if (!side) out.messages.push('Nothing happened');
+    return;
+  }
+  const text = `${mon.species}'s ${label} ${outcome}`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
-  fields.amount = after;
+  // The stage it now sits at -- when that is not below neutral. `amount` is
+  // unsigned on the wire (Wire.AMOUNT_MAX / lib/sanitize: the direction is the
+  // sentence's), so the sanitiser strips a negative one in transit; leaving it
+  // out here keeps the stream the referee emits the stream a client receives.
+  if (stage >= 0) fields.amount = stage;
   fields.text = text;
   out.events.push({ kind: 'stat', fields });
 }
 
-function resetStages(mon) {
-  mon.stages.atk = 0;
-  mon.stages.def = 0;
-  mon.stages.spd = 0;
-  mon.stages.spc = 0;
-  mon.stages.acc = 0;
-  mon.stages.eva = 0;
+// HazeEffect_ (engine/battle/move_effects/haze.asm) on one battler: every
+// stage back to neutral, the unmodified stats copied over the battle ones --
+// which lifts a burn or paralysis penalty and every badge boost until
+// something rebuilds them (ResetStats skips HP and nothing else) -- and its
+// Reflect and Light Screen gone (CureVolatileStatuses).
+function hazeReset(mon) {
+  ensureBattleStats(mon);
+  resetStages(mon);
+  mon.cur = statBlock(mon.stats);
+  mon.reflect = false;
+  mon.lightScreen = false;
 }
 
 // Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
@@ -404,8 +672,10 @@ function applyPrimary(ctx) {
   }
 
   if (effectId === 25) {
-    resetStages(userMon);
-    resetStages(targetMon);
+    // Both battlers of the action, as the cart's two: stages, battle stats
+    // and screens (see hazeReset).
+    hazeReset(userMon);
+    hazeReset(targetMon);
     out.messages.push('All stat changes were eliminated');
     return out;
   }
@@ -414,7 +684,8 @@ function applyPrimary(ctx) {
   if (statFx) {
     const mon = statFx.selfTarget ? userMon : targetMon;
     const fighter = statFx.selfTarget ? userFighter : targetFighter;
-    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta);
+    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
+      userFighter, targetMon, false);
     return out;
   }
 
@@ -458,6 +729,9 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.status = 'paralysis';
+    // ParalyzeEffect_ quarters the battle Speed the moment it lands
+    // (paralyze.asm `callfar QuarterSpeedDueToParalysis`).
+    applyStatusPenalty(targetMon);
     const token = wire.paralysis || 'PAR';
     const text = `${targetMon.species} is paralyzed`;
     out.messages.push(text);
@@ -520,13 +794,24 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // Reflect and Light Screen are per battler and do not stack: a second cast
+  // while the bit is up is "But it failed!" (ReflectLightScreenEffect_,
+  // engine/battle/move_effects/reflect_light_screen.asm `.moveFailed`).
   if (effectId === 64) {
+    if (userMon.lightScreen) {
+      out.messages.push('But it failed');
+      return out;
+    }
     userMon.lightScreen = true;
     out.messages.push(`${userMon.species} created a light screen`);
     return out;
   }
 
   if (effectId === 65) {
+    if (userMon.reflect) {
+      out.messages.push('But it failed');
+      return out;
+    }
     userMon.reflect = true;
     out.messages.push(`${userMon.species} created a reflect`);
     return out;
@@ -582,10 +867,16 @@ function applyPrimary(ctx) {
   }
 
   if (effectId === 57) {
+    // TransformEffect_ (transform.asm) copies the target's battle stats AND
+    // its unmodified ones, and its stat mods below; the user's party stats are
+    // untouched, which is what a later critical hit reads.
+    ensureBattleStats(userMon);
+    ensureBattleStats(targetMon);
     userMon.stats.atk = Math.max(1, int(targetMon.stats.atk, 1));
     userMon.stats.def = Math.max(1, int(targetMon.stats.def, 1));
     userMon.stats.spd = Math.max(1, int(targetMon.stats.spd, 1));
     userMon.stats.spc = Math.max(1, int(targetMon.stats.spc, 1));
+    userMon.cur = copyStats(targetMon.cur);
     userMon.types = targetMon.types.length ? [...targetMon.types] : [0];
     userMon.stages.atk = clampStage(targetMon.stages.atk);
     userMon.stages.def = clampStage(targetMon.stages.def);
@@ -633,7 +924,8 @@ const SIDE_STAT_DOWN = {
   68: 'atk', 69: 'def', 70: 'spd', 71: 'spc',
 };
 
-// ctx: effectId, chance, rng, targetMon, targetFighter, statusToWire
+// ctx: effectId, chance, rng, targetMon, targetFighter, userFighter,
+//      statusToWire
 function applySide(ctx) {
   const out = { proc: false, messages: [], events: [] };
   const c = ctx || {};
@@ -661,6 +953,9 @@ function applySide(ctx) {
   if (effectId === 4 || effectId === 34) {
     if (hasMajorStatus(targetMon)) return out;
     targetMon.status = 'burn';
+    // .burn1 / .burn2: HalveAttackDueToBurn the moment it lands
+    // (effects.asm :243, :294).
+    applyStatusPenalty(targetMon);
     const token = wire.burn || 'BRN';
     const text = `${targetMon.species} was burned`;
     out.messages.push(text);
@@ -687,6 +982,9 @@ function applySide(ctx) {
   if (effectId === 6 || effectId === 36) {
     if (hasMajorStatus(targetMon)) return out;
     targetMon.status = 'paralysis';
+    // paralyze1 / paralyze2: QuarterSpeedDueToParalysis the moment it lands
+    // (effects.asm :236, :289).
+    applyStatusPenalty(targetMon);
     const token = wire.paralysis || 'PAR';
     const text = `${targetMon.species} is paralyzed`;
     out.messages.push(text);
@@ -704,7 +1002,11 @@ function applySide(ctx) {
 
   const stat = SIDE_STAT_DOWN[effectId];
   if (stat) {
-    applyStatChange(out, targetFighter, targetMon, stat, -1);
+    // The same StatModifierDownEffect a primary drop runs, so a side-effect
+    // drop on the player's monster re-runs its badges too (the glitch's
+    // Psychic case).
+    applyStatChange(out, targetFighter, targetMon, stat, -1,
+      c.userFighter, targetMon, true);
     return out;
   }
 
@@ -859,17 +1161,6 @@ function isRage(effectId) {
   return int(effectId, 0) === 81;
 }
 
-// Gen1: Reflect halves physical, Light Screen halves special.
-function screenDamage(damage, defender, isSpecial) {
-  let d = Math.max(0, int(damage, 0));
-  if (isSpecial) {
-    if (defender.lightScreen) d = Math.floor(d / 2);
-  } else if (defender.reflect) {
-    d = Math.floor(d / 2);
-  }
-  return d;
-}
-
 // Gen1 category is type-based. specialTypes is a set of chart indices.
 function isSpecialType(typeId, specialTypes) {
   if (!specialTypes || typeof specialTypes !== 'object') return false;
@@ -979,8 +1270,15 @@ function applyVitamin(mon, itemId) {
     mon.maxHp = Math.max(1, int(mon.maxHp, 1) + delta);
     mon.hp = Math.min(mon.maxHp, int(mon.hp, 0) + delta);
   } else {
-    if (!mon.stats) mon.stats = {};
-    mon.stats[stat] = Math.max(1, int(mon.stats[stat], 1) + delta);
+    // A party stat moved: the party struct always, the unmodified stat only
+    // when no Transform has replaced it -- the rule a level-up mid-fight
+    // follows (experience.asm :226-232). The battle stat is Turn's to rebuild
+    // (recalcBattleStats), and only for the fielded monster.
+    ensureBattleStats(mon);
+    mon.partyStats[stat] = Math.max(1, int(mon.partyStats[stat], 1) + delta);
+    if (!mon.transformed) {
+      mon.stats[stat] = Math.max(1, int(mon.stats[stat], 1) + delta);
+    }
   }
   return { stat, delta, before, after };
 }
@@ -1164,6 +1462,15 @@ module.exports = {
   stageMult,
   applyStage,
   badgeBoost,
+  BATTLE_STATS,
+  ensureBattleStats,
+  applyBadgeBoosts,
+  applyStatusPenalty,
+  recalcBattleStats,
+  loadBattleStats,
+  reloadPartyStats,
+  copyStats,
+  changeStat,
   MAX_STAT_VALUE,
   isPhase1Primary,
   isPhase5Volatile,
@@ -1195,7 +1502,6 @@ module.exports = {
   isThrash,
   thrashTurns,
   isRage,
-  screenDamage,
   isSpecialType,
   itemEffect,
   itemFailsOnFainted,

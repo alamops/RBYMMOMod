@@ -197,6 +197,7 @@ local function mn(o)
   }
   if o.catchRate ~= nil then out.catchRate = o.catchRate end
   if o.evs then out.evs = o.evs end
+  if o.baseSpd ~= nil then out.baseSpd = o.baseSpd end
   return out
 end
 
@@ -227,6 +228,28 @@ local function drainInto(battle, events)
   local list = battle:drainEvents()
   for _, event in ipairs(list) do events[#events + 1] = event end
   batches[#batches + 1] = #list
+end
+
+-- The stored battle stats behind the stream (the g1_* scenarios): every
+-- standing seat's `cur` and stages, and its screens, at the point the scenario
+-- asks -- the numbers the stream only shows second-hand, through a damage
+-- figure or a turn order.  Only a scenario that calls this carries a `probes`
+-- key at all, so every scenario that predates it encodes exactly as it did.
+local probes = {}
+
+local function probe(battle, at)
+  for _, fighter in ipairs(battle.fighters) do
+    local mon = fighter.active and fighter.mons[fighter.active]
+    if mon and mon.hp > 0 then
+      probes[#probes + 1] = {
+        at = at, slot = fighter.slot,
+        atk = mon.cur.atk, def = mon.cur.def, spd = mon.cur.spd, spc = mon.cur.spc,
+        sAtk = mon.stages.atk, sDef = mon.stages.def, sSpd = mon.stages.spd,
+        sSpc = mon.stages.spc, sAcc = mon.stages.acc, sEva = mon.stages.eva,
+        reflect = mon.reflect == true, lightScreen = mon.lightScreen == true,
+      }
+    end
+  end
 end
 
 -- After a faint with bench left the seat owes a switch, not a fight.
@@ -1151,20 +1174,387 @@ scenario("badges_npc", function(events)
   return battle
 end)
 
+-- 30-41. Gen 1 stored battle stats (docs/plans/gen12-referee-fidelity.md §1
+--     items 1-5, task G1a): every trigger of the badge-stacking glitch, the
+--     re-penalty glitch, the resets, the 999 / 1 walls, critical hits on party
+--     stats, Reflect and Light Screen in the defence, the 8-bit scaling, the
+--     Explosion order, the 997 cap, the self-hit's borrowed Reflect and the
+--     flinch reset at turn open.  `probe` pins the battle stats themselves;
+--     tests/battle_sim_turn.lua (section 25) states the hand-checked numbers.
+--     `baseSpd = 0` holds a crit off where it would blur a number, 255 with a
+--     high-crit move forces one.
+local function fx(id, power, effect, o)
+  o = o or {}
+  local out = { id = id, pp = 60, power = power, accuracy = 255,
+                type = o.type or 0, effect = effect, chance = o.chance or 0 }
+  if o.highCrit then out.highCrit = true end
+  return out
+end
+
+-- The player's own raise (50 = ATTACK_UP2) and an accuracy raise (14) each
+-- re-run every badge; the wild monster's paralysis is re-quartered each time.
+scenario("g1_stack_up", function(events)
+  local battle = build({
+    id = "g1u", mode = "wild", seed = 6101, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", maxHp = 300, atk = 100, def = 80, spd = 60, spc = 50,
+             baseSpd = 0, moves = { fx("sharpen", 0, 50), fx("aim", 0, 14),
+                                    fx("thump", 40, 0) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 300, spd = 80, status = "PAR", baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  for turn, move in ipairs({ 0, 1, 2 }) do
+    battle:submitChoice("p1", { action = "fight", move = move })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- The enemy's drops on the player: a primary (18), a side-effect drop (71,
+-- Psychic's) and an accuracy drop (22) -- each re-runs the badges, and the
+-- re-penalty halves the burned target's Attack again every time.
+scenario("g1_stack_down", function(events)
+  local battle = build({
+    id = "g1d", mode = "wild", seed = 6102, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", maxHp = 300, atk = 100, def = 80, spd = 60, spc = 50,
+             status = "BRN", baseSpd = 0, moves = { fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 300, spd = 90, baseSpd = 0,
+             moves = { fx("growl", 0, 18), fx("psyray", 40, 71, { chance = 100 }),
+                       fx("sand", 0, 22) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  for turn, move in ipairs({ 0, 1, 2 }) do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = move })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- An X item and Rage: both are the player's raises, so both re-run the badges;
+-- the item's re-penalty lands on the battler opposite and Rage's on the
+-- attacker that built it.
+scenario("g1_rage_xitem", function(events)
+  local battle = build({
+    id = "g1r", mode = "wild", seed = 6103, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), bag = { X_SPEED = 1 },
+              mons = {
+        mn({ species = "Alpha", maxHp = 400, atk = 100, def = 80, spd = 60, spc = 50,
+             baseSpd = 0, moves = { fx("fury", 20, 81) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 400, atk = 80, spd = 50, status = "BRN",
+             baseSpd = 0, moves = { fx("thump", 10, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  battle:submitChoice("p1", { action = "item", item = "X_SPEED" })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  probe(battle, 1)
+  for turn = 2, 3 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- The resets: a switch-in reloads party -> badges with every stage at 0, and
+-- Haze copies the unmodified stats over both battlers -- badges and the foe's
+-- paralysis penalty lifted with the stages.
+scenario("g1_resets", function(events)
+  local battle = build({
+    id = "g1z", mode = "wild", seed = 6104, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", maxHp = 300, atk = 100, def = 80, spd = 60, spc = 50,
+             baseSpd = 0, moves = { fx("sharpen", 0, 50), fx("haze", 0, 25) } }),
+        mn({ species = "Gamma", maxHp = 300, baseSpd = 0, moves = { fx("splash", 0, 85) } }),
+      } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 300, spd = 80, status = "PAR", baseSpd = 0,
+             moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  local plan = {
+    { action = "fight", move = 0 },
+    { action = "switch", slot = 1 },
+    { action = "switch", slot = 0 },
+    { action = "fight", move = 0 },
+    { action = "fight", move = 1 },
+  }
+  for turn, choice in ipairs(plan) do
+    battle:submitChoice("p1", choice)
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- The walls, in a link fight (no badges; the re-penalty is unconditional): a
+-- raise past 999 stores 999, the next raise on that 999 fails with the stage
+-- wound back one step (+2 nets +1), and a drop on a stat already at 1 fails
+-- the same way (-2 nets -1).
+scenario("g1_walls", function(events)
+  local battle = build({
+    id = "g1w", mode = "1v1", seed = 6105, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 300, atk = 500, spd = 90, baseSpd = 0,
+             moves = { fx("sharpen", 0, 50), fx("soften", 0, 19),
+                       fx("crush", 0, 59) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 300, def = 1, spd = 60, status = "PAR",
+             baseSpd = 0, moves = { fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  for turn, move in ipairs({ 0, 0, 1, 2 }) do
+    battle:submitChoice("p1", { action = "fight", move = move })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- A critical hit reads both party stats: the raised, badged, burned Attack and
+-- the foe's Reflect all fall away.
+scenario("g1_crit_party", function(events)
+  local battle = build({
+    id = "g1c", mode = "wild", seed = 6106, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", maxHp = 300, atk = 100, def = 80, spd = 60, spc = 50,
+             status = "BRN", baseSpd = 255,
+             moves = { fx("sharpen", 0, 50), fx("slash", 70, 0, { highCrit = true }) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = {
+        mn({ species = "Beta", maxHp = 400, def = 100, spd = 30, baseSpd = 0,
+             moves = { fx("wall", 0, 65), fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  probe(battle, 0)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("wild", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  probe(battle, 1)
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice("wild", { action = "fight", move = 1 })
+  drainInto(battle, events)
+  probe(battle, 2)
+  return battle
+end)
+
+-- Transform copies the battle and unmodified stats, never the party ones: the
+-- transformed monster's crit swings with its own pre-Transform Attack, and a
+-- crit on it reads its own pre-Transform Defense.
+scenario("g1_transform_crit", function(events)
+  local battle = build({
+    id = "g1t", mode = "1v1", seed = 6107, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, atk = 30, def = 30, spd = 90, spc = 30,
+             baseSpd = 255, moves = { fx("mimicry", 0, 57) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, atk = 200, def = 100, spd = 40, spc = 100,
+             baseSpd = 255, moves = { fx("slash", 70, 0, { highCrit = true }) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for turn = 1, 2 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- Screens double the defence before the scaling: 512 x2 = 1024 wraps to a 0
+-- byte and divides as 1.  A second Reflect fails, a fixed-damage move ignores
+-- it, and Haze takes both screens down.
+scenario("g1_screens", function(events)
+  local battle = build({
+    id = "g1s", mode = "1v1", seed = 6109, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 900, def = 512, spd = 90, baseSpd = 0,
+             moves = { fx("wall", 0, 65), fx("glow", 0, 64), fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, atk = 100, spd = 30, baseSpd = 0,
+             moves = { fx("thump", 10, 0), fx("sonic", 20, 41), fx("haze", 0, 25) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for turn, pair in ipairs({ { 0, 0 }, { 0, 1 }, { 1, 2 }, { 2, 0 } }) do
+    battle:submitChoice("p1", { action = "fight", move = pair[1] })
+    battle:submitChoice("p2", { action = "fight", move = pair[2] })
+    drainInto(battle, events)
+    probe(battle, turn)
+  end
+  return battle
+end)
+
+-- The 997 cap sits before the type chart and the roll: 4200 is held to 997+2
+-- (a 999-HP target, so the event states the whole hit).
+scenario("g1_cap", function(events)
+  local battle = build({
+    id = "g1k", mode = "1v1", seed = 6109, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 999, def = 10, spd = 90, types = { 2 },
+             baseSpd = 0, moves = { fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", level = 100, maxHp = 400, atk = 250, spd = 30,
+             types = { 1 }, baseSpd = 0, moves = { fx("crush", 200, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- Explosion halves the defence after the scaling: 300 -> 75 -> 37, not
+-- 300 -> 150 unscaled.
+scenario("g1_explode_order", function(events)
+  local battle = build({
+    id = "g1x", mode = "1v1", seed = 6110, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 900, def = 300, spd = 90, types = { 2 },
+             baseSpd = 0, moves = { fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", level = 50, maxHp = 400, atk = 100, spd = 30,
+             types = { 1 }, baseSpd = 0, moves = { fx("blast", 170, 7) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- The confusion self-hit borrows the OPPONENT's Reflect for its own Defense:
+-- 160 against 9 x2 is 73 a hit rather than 144.
+scenario("g1_self_hit_reflect", function(events)
+  local battle = build({
+    id = "g1h", mode = "1v1", seed = 6111, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 900, atk = 160, def = 9, spd = 30, confusion = 6,
+             baseSpd = 0, moves = { fx("splash", 0, 85) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("wall", 0, 65), fx("splash", 0, 85) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for turn = 1, 5 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = turn == 1 and 0 or 1 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- ...and in a 2v2 the Reflect it borrows is the battler opposite's: Ann (seat
+-- 0) faces Bob's Reflect, Abe (seat 1) faces Bea, who has none.
+scenario("g1_opposite_reflect", function(events)
+  local battle = build({
+    id = "g1o", mode = "coop_pvp", seed = 6112, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 900, atk = 160, def = 9, spd = 30, confusion = 6,
+               baseSpd = 0, moves = { fx("splash", 0, 85) } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 900, atk = 160, def = 9, spd = 20, confusion = 6,
+               baseSpd = 0, moves = { fx("splash", 0, 85) } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 90, baseSpd = 0,
+               moves = { fx("wall", 0, 65), fx("splash", 0, 85) } }) } },
+        { playerId = "b2", name = "Bea", mons = {
+          mn({ species = "Delta", maxHp = 400, spd = 80, baseSpd = 0,
+               moves = { fx("splash", 0, 85) } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for turn = 1, 5 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    battle:submitChoice("b1", { action = "fight", move = turn == 1 and 0 or 1, target = 0 })
+    battle:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+    drainInto(battle, events)
+  end
+  probe(battle, 5)
+  return battle
+end)
+
+-- A flinch landed on a monster that already moved dies at the next turn's
+-- open (MainInBattleLoop) instead of costing it that turn.
+scenario("g1_flinch_reset", function(events)
+  local battle = build({
+    id = "g1f", mode = "1v1", seed = 6113, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+             moves = { fx("thump", 10, 0) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 400, spd = 30, baseSpd = 0,
+             moves = { fx("stomp", 10, 31, { chance = 100 }) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 3 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}
 for _, entry in ipairs(scenarios) do
   local events = {}
   batches = {}
+  probes = {}
   local battle = entry.run(events)
-  out[#out + 1] = "{"
+  local row = "{"
     .. '"name":' .. encString(entry.name) .. ","
     .. '"events":' .. encList(events, encObject) .. ","
     .. '"batches":' .. encList(batches, encNumber) .. ","
     .. '"outcome":' .. encOutcome(battle:outcome()) .. ","
     .. '"snapshot":' .. encSnapshot(battle)
-    .. "}"
+  if #probes > 0 then row = row .. ',"probes":' .. encList(probes, encObject) end
+  out[#out + 1] = row .. "}"
 end
 
 io.write("[" .. table.concat(out, ",") .. "]\n")

@@ -1265,6 +1265,31 @@ M.OBEY_TOKENS3 = {
   loafing = true, wont_obey = true, turned_away = true, pretend_not_notice = true,
 }
 
+-- The Gold sheet's held-item fields (contract K2 of
+-- docs/plans/gen12-referee-fidelity.md).  pokecrystal *names* its hold effects
+-- where pret's Gen 3 numbers them, and the engine's item rows carry that name
+-- (HELD_LEFTOVERS), so the Gen 2 effect is an identifier with a fixed prefix
+-- and the cart's own alphabet, bounded by length rather than by an enum width;
+-- the parameter is the u8 beside it in the cart's item attributes, and the
+-- display name is the cart's item name (ITEM_NAME_LENGTH 13, terminator
+-- included).  The hub holds no item table and never will -- the referee's
+-- rules key on the token, never on a value read from the player's ROM.
+M.HOLD_EFFECT2_MAX = 32       -- characters in a HELD_* token
+M.HOLD_PARAM2_MAX = 255
+M.ITEM_NAME2_MAX = 12
+
+-- One Gen 2 hold effect, or nil.  Refused rather than trimmed past
+-- HOLD_EFFECT2_MAX, on M.spriteId's argument: a cut token names no rule, and
+-- the referee looks its rule up by the whole token.  The prefix is part of the
+-- shape -- a bare LEFTOVERS or an item id in this field is a sheet built from
+-- the wrong column, and reading it as a rule's name would be guessing.
+function M.holdEffect2(value)
+  if type(value) ~= "string" then return nil end
+  if #value > M.HOLD_EFFECT2_MAX then return nil end
+  if not value:match("^HELD_[A-Z0-9_]+$") then return nil end
+  return value
+end
+
 -- Gen 1's status conditions, as three-letter tokens.
 --
 -- A closed set for the reason every closed set in this file is one: the sim
@@ -1776,6 +1801,21 @@ end
 -- Optional `generation` (1|2) selects the stats dialect; absent falls back to
 -- shape sniff on `stats` (see statsGeneration). Optional `heldItem` is a Gen 2
 -- item id string — cleaned like any other id, dropped when absent.
+--
+-- The referee-fidelity additions (docs/plans/gen12-referee-fidelity.md), each
+-- optional, so a sheet that carries none of them reads byte for byte as it did
+-- before they existed:
+--
+--   K1  `traded` (Gen 1 and Gen 2): the obedience check's one fact about a
+--       player's own monster -- its OT id is not the player's.  Gen 3's
+--       reading: `true` kept, `false` kept as absent, anything else refuses.
+--   K2  the Gold held item's data, next to `heldItem` (Gen 2 only -- a Gen 1
+--       sheet never carries an item, so a Gen 1 reader never copies these):
+--       `holdEffect` (a HELD_* token, M.holdEffect2), `holdParam` (0..255),
+--       `itemName` (display text, ITEM_NAME2_MAX) and `mail` (`true` or
+--       absent).  Each refuses the mon when present and unreadable, the
+--       posture `heldItem` and Gen 3's hold effect already have.
+--
 -- A Gen 3 stat-like block: every key of `keys` at the caller's width, and
 -- nothing else.  Refused whole when one is missing, for statsOf's reason.
 local function block3(raw, keys, min, max)
@@ -1934,8 +1974,10 @@ local function battleMon3(raw)
   -- whose fateful-encounter bit is explicitly clear (the engine's
   -- `fatefulEncounter == false`); its absence is the ordinary rules, so the
   -- retired `fateful` is not copied and a sheet still carrying one fights as
-  -- if it said nothing.  Gen 3 only: the Gen 1 / Gen 2 reader below builds its
-  -- sheet field by field and never copies either.
+  -- if it said nothing.  `unfateful` is Gen 3's alone (neither Kanto nor Johto
+  -- cart has an event-Mew rule): the Gen 1 / Gen 2 reader below builds its
+  -- sheet field by field and never copies it.  `traded` it does copy, in this
+  -- same reading (contract K1 of docs/plans/gen12-referee-fidelity.md).
   if raw.traded ~= nil then
     if type(raw.traded) ~= "boolean" then return nil end
     if raw.traded then out.traded = true end
@@ -1948,8 +1990,10 @@ local function battleMon3(raw)
 end
 
 -- `generation` 3 on the sheet selects the Gen 3 dialect above (M.battleParty
--- stamps it from the hub's generation); 1 / 2 / absent is read exactly as
--- before.
+-- stamps it from the hub's generation); 1 / 2 / absent is the older dialect
+-- below -- as it read before Gen 3 had one, plus the optional K1 / K2 fields
+-- (see the header above block3), so a sheet that states none of them reads
+-- exactly as it always did.
 function M.battleMon(raw)
   if type(raw) ~= "table" then return nil end
   if M.int(raw.generation, 3, 3) then return battleMon3(raw) end
@@ -2042,6 +2086,36 @@ function M.battleMon(raw)
     if not out.heldItem then return nil end
   end
 
+  -- What the Gold referee reads off that item (contract K2): the hub holds no
+  -- item table, so the effect token, its parameter, the name the box narrates
+  -- under and whether it is Mail (which Thief cannot take) ride the sheet the
+  -- way Gen 3's holdEffect / holdEffectParam do.  Absent when nothing is held.
+  -- Gen 2 only, by the dialect this sheet resolved to: a Gen 1 sheet has no
+  -- item to describe, and its reader copies none of these -- the field-by-field
+  -- whitelist that keeps Gen 3's `unfateful` off it.  Present and unreadable
+  -- refuses the mon, `heldItem`'s posture one field up: a hold effect the
+  -- referee cannot read is an item that silently does nothing on one side of
+  -- a fight its owner watches it work in.  `mail` is a boolean read the way
+  -- `traded` is (below): `true` kept, `false` kept as absent.
+  if generation == 2 then
+    if raw.holdEffect ~= nil then
+      out.holdEffect = M.holdEffect2(raw.holdEffect)
+      if not out.holdEffect then return nil end
+    end
+    if raw.holdParam ~= nil then
+      out.holdParam = M.int(raw.holdParam, 0, M.HOLD_PARAM2_MAX)
+      if out.holdParam == nil then return nil end
+    end
+    if raw.itemName ~= nil then
+      out.itemName = M.text(raw.itemName, M.ITEM_NAME2_MAX)
+      if not out.itemName then return nil end
+    end
+    if raw.mail ~= nil then
+      if type(raw.mail) ~= "boolean" then return nil end
+      if raw.mail then out.mail = true end
+    end
+  end
+
   -- Optional registry id for the species, alongside the prose `species` above.
   --
   -- `species` is what the fight is *narrated* under, which is the nickname when
@@ -2068,6 +2142,18 @@ function M.battleMon(raw)
   if raw.baseSpd ~= nil then
     out.baseSpd = M.int(raw.baseSpd, 0, 255)
     if out.baseSpd == nil then return nil end
+  end
+
+  -- The obedience check's one fact about a player's own monster (contract K1):
+  -- its 16-bit OT id is not the player's, so its badge cap applies.  Gen 1 and
+  -- Gen 2 alike, read exactly as battleMon3 reads Gen 3's -- `true` kept,
+  -- `false` kept as absent, anything that is not a boolean refuses the mon --
+  -- because the client stamps it the same way on all three and a hub that
+  -- read one generation's loosely would let the same typo fight on one cart
+  -- and refuse on the next.  No `unfateful` here: that is a Gen 3 rule.
+  if raw.traded ~= nil then
+    if type(raw.traded) ~= "boolean" then return nil end
+    if raw.traded then out.traded = true end
   end
 
   return out
@@ -2396,7 +2482,8 @@ M.BATTLE_EVENTS = {
 -- the two equal), and a Gen 1 referee has no ability, weather or held item to
 -- speak of.  M.battleEvent accepts a kind from either table -- a client
 -- sanitises whichever generation's stream it is drawing -- and BattleSim3's own
--- vocabulary is the union of the two (server/twin_parity.test.js).
+-- vocabulary is the union of the two (server/twin_parity.test.js).  Gold's
+-- `held` is M.BATTLE_EVENTS2 below: the same word, a different event.
 --
 --   ability    -- an ability visibly acted (amount = ability id, text = name)
 --   weather    -- weather started (1), continues (2) or ended (0); text = kind
@@ -2412,6 +2499,22 @@ M.BATTLE_EVENTS = {
 M.BATTLE_EVENTS3 = {
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
   obey = true,
+}
+
+-- Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
+-- in a table of its own for M.BATTLE_EVENTS3's reason: the Gen 1 sim's
+-- vocabulary is held equal to M.BATTLE_EVENTS, and a Kanto cart has no held
+-- item to speak of.  M.battleEvent accepts it for a generation 2 reader only;
+-- a Gen 3 reader keeps reading its own `held` (BATTLE_EVENTS3) as before.
+--
+--   held  -- a held item acted: `slot` / `side` / `mon` say whose, `text` is
+--            the item's id (an M.id, like an `item` event's -- not prose: the
+--            client matches it against the save's own held item), `amount`
+--            is 1 when the mon still holds it afterwards and 0 when it is gone
+--            (eaten, or taken by Thief).  The referee's own `msg` sentence
+--            follows it, so the screen never phrases one.
+M.BATTLE_EVENTS2 = {
+  held = true,
 }
 
 -- The three ball states a roster is spelled in, and the most of them a seat may
@@ -2475,17 +2578,23 @@ end
 -- absurdly large one sorts late and does nothing else -- whereas a cap would be a
 -- battle length nobody chose.
 --
--- `generation` (optional) is the reader's own.  1 or 2 reads an event exactly
--- as before Gen 3 had a stream: the older vocabulary only (none of Gen 3's
+-- `generation` (optional) is the reader's own.  1 or 2 reads an event as it
+-- did before Gen 3 had a stream: the older vocabulary only (none of Gen 3's
 -- seven kinds), none of its six fields (target, spread, stat, stage, delta,
 -- holding), and `moves` rows in the older dialect whatever `num` they carry.
--- 3, or none named, reads the union -- which is what a caller that does not
--- say needs in order to draw a Gen 3 referee's stream.
+-- The one addition since is Gold's own `held` (M.BATTLE_EVENTS2, contract
+-- K3), which a generation 2 reader alone accepts -- a Gen 1 reader's
+-- vocabulary is unchanged, and every event a Gold reader already accepted
+-- reads exactly as before.  3, or none named, reads the union of the older
+-- vocabulary and Gen 3's -- which is what a caller that does not say needs in
+-- order to draw a Gen 3 referee's stream, and so its `held` is Gen 3's.
 function M.battleEvent(raw, generation)
   if type(raw) ~= "table" then return nil end
   local gen = M.int(generation, 1, M.GENERATION_MAX)
   local older = gen == 1 or gen == 2
-  if not (M.BATTLE_EVENTS[raw.t] or (not older and M.BATTLE_EVENTS3[raw.t])) then
+  local gold = gen == 2
+  if not (M.BATTLE_EVENTS[raw.t] or (not older and M.BATTLE_EVENTS3[raw.t])
+          or (gold and M.BATTLE_EVENTS2[raw.t])) then
     return nil
   end
   local battle = M.id(raw.battle)
@@ -2493,13 +2602,17 @@ function M.battleEvent(raw, generation)
   if not (battle and seq) then return nil end
 
   local out = { battle = battle, seq = seq, t = raw.t }
+  -- A Gold `held` is the one kind whose shape depends on who reads it.
+  local held2 = gold and raw.t == "held"
   -- Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — M.text strips `_`.
-  -- A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4").
+  -- A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4"),
+  -- and so does a Gold `held` (LEFTOVERS): the client matches it against the
+  -- item its own save holds, where Gen 3's `held` text is the name it prints.
   -- An `obey`'s is one of the eight outcome tokens (M.OBEY_TOKENS3) or nothing:
   -- dropped like any mangled field, so the screen falls back to the referee's
   -- own sentence that follows it rather than phrasing a token it has no line for.
   if raw.text ~= nil then
-    if raw.t == "item" or raw.t == "anim" or raw.t == "ball" then
+    if raw.t == "item" or raw.t == "anim" or raw.t == "ball" or held2 then
       out.text = M.id(raw.text)
     elseif raw.t == "obey" then
       out.text = M.OBEY_TOKENS3[raw.text] and raw.text or nil
@@ -2507,7 +2620,19 @@ function M.battleEvent(raw, generation)
       out.text = M.text(raw.text, Config.MESSAGE_MAX)
     end
   end
-  if raw.amount ~= nil then out.amount = M.int(raw.amount, 0, M.AMOUNT_MAX) end
+  -- A Gold `held`'s `amount` is a flag, not a quantity: 1 the mon still holds
+  -- the item, 0 it is gone.  Anything else is dropped like any mangled field --
+  -- and a `held` with no `amount` changes nothing a client keeps, which is the
+  -- safe reading of an item nobody can say the fate of.  Read the way the
+  -- Gen 3 fields are (M.int on both twins: lib/sanitize's luaInt), because the
+  -- reading is new on both.
+  if raw.amount ~= nil then
+    if held2 then
+      out.amount = M.int(raw.amount, 0, 1)
+    else
+      out.amount = M.int(raw.amount, 0, M.AMOUNT_MAX)
+    end
+  end
   -- A field slot here, unlike the party index a choice carries under the same
   -- name: an event is about somebody who is out, not about a bench position.
   if raw.slot ~= nil then out.slot = M.int(raw.slot, 0, M.FIELD_MAX) end

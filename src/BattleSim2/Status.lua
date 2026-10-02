@@ -11,7 +11,15 @@
 --     not Gen 1's 63/256; speed still quarters.
 --   * **Sleep** wakes *and acts* on the turn the counter hits zero (Gen 1
 --     loses the waking turn).
---   * Confusion self-hit still routes through Damage.compute (now Gen 2).
+--   * Confusion self-hit routes through Damage.compute as HitConfusion runs
+--     BattleCommand_DamageCalc and nothing after it: power 40, no crit, no
+--     STAB, no matchup, no variation.  The caller hands in the attack /
+--     defense HitSelfInConfusion builds (the confused mon's own battle stats,
+--     its own side's Reflect, TruncateHL_BC, the selected move's Explosion
+--     halving) and, as `itemBoostPercent`, the type-boost item DamageCalc
+--     finds for the SELECTED move's type -- both cart bugs (pokecrystal
+--     docs/bugs_and_glitches.md, "Confusion damage is affected by
+--     type-boosting items and Explosion/Self-Destruct doubling").
 --
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
@@ -98,7 +106,8 @@ function M.confusionTick(state, roll)
     { defense = state.defense, def = state.def },
     { power = M.CONFUSION_POWER },
     { crit = false, stab = false, typeEffect = { 100 },
-      roll = Damage.ROLL_MAX, physical = true })
+      roll = Damage.ROLL_MAX, physical = true,
+      itemBoostPercent = state.itemBoostPercent })
 
   return { turnsRemaining = left, snappedOut = false, selfHit = true,
            canMove = false, selfDamage = hit.damage or 0 }

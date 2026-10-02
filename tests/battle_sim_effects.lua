@@ -188,6 +188,58 @@ do
   eq(Effects.applyVitamin(capped, "PROTEIN"), nil, "fails at Stat Exp ≥ 25600")
 end
 
+-- The stored-stat machinery (Effects' "Stored battle stats" note), on bare
+-- monster tables: CalculateModifiedStat's two clamps, StatModifierUp/Down's
+-- one each, the walls, the penalty, and the glitch re-runs.
+eq(Effects.applyStage(1, -6), 1, "applyStage floors at 1 (1 x 25/100 = 0)")
+eq(Effects.applyStage(500, 2), 999, "applyStage caps at 999")
+do
+  local mon = dummyMon()
+  Effects.ensureBattleStats(mon)
+  eq(mon.cur.atk, 40, "a bare monster gets battle stats from its stats")
+  eq(mon.partyStats.atk, 40, "...and a party struct")
+  local seat = dummyFighter(0, "a")
+  seat.badges = { BOULDERBADGE = true, SOULBADGE = true }
+  local outcome, stage = Effects.changeStat({ mon = mon, fighter = seat, stat = "atk",
+    delta = 1, mover = seat })
+  eq(outcome, "rose", "a raise rises")
+  eq(stage, 1, "...to +1")
+  -- 40 x 150/100 = 60 -> +7 = 67; Speed 40 -> +5 = 45 (the badge re-run).
+  eq(mon.cur.atk, 67, "the raised stat is rebuilt, then badge-boosted")
+  eq(mon.cur.spd, 45, "...and every other badge stat is boosted too")
+
+  local foe = dummyMon({ species = "Beta", status = "paralysis" })
+  Effects.ensureBattleStats(foe)
+  Effects.changeStat({ mon = mon, fighter = seat, stat = "acc", delta = 1,
+    mover = seat, nonMover = foe })
+  eq(foe.cur.spd, 10, "the re-penalty quarters the paralysed non-mover: 40 -> 10")
+
+  mon.cur.atk = 999
+  local before = mon.stages.atk
+  outcome, stage = Effects.changeStat({ mon = mon, fighter = seat, stat = "atk",
+    delta = 2, mover = seat })
+  eq(outcome, "stuck", "a raise on 999 fails")
+  eq(stage, before + 1, "...and a +2 nets +1")
+
+  local low = dummyMon({ species = "Gamma" })
+  Effects.ensureBattleStats(low)
+  low.cur.def = 1
+  outcome, stage = Effects.changeStat({ mon = low, fighter = dummyFighter(3, "b"),
+    stat = "def", delta = -1, mover = seat })
+  eq(outcome, "stuck", "a drop on 1 fails")
+  eq(stage, 0, "...the stage wound back")
+  low.stages.def = -6
+  eq((Effects.changeStat({ mon = low, fighter = dummyFighter(3, "b"), stat = "def",
+    delta = -1, mover = seat })), "min", "-6 cannot go lower")
+
+  local burned = dummyMon({ status = "burn" })
+  Effects.ensureBattleStats(burned)
+  Effects.applyStatusPenalty(burned)
+  eq(burned.cur.atk, 20, "a burn halves the stored Attack")
+  Effects.loadBattleStats(burned, { BOULDERBADGE = true })
+  eq(burned.cur.atk, 22, "a switch-in: 40 -> 20 -> +2 = 22")
+end
+
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("POTION")), true,
    "Potion fails on a fainted mon")
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("ETHER")), true,

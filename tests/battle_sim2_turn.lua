@@ -148,6 +148,9 @@ local function battleOf(o)
     choiceTimeout = o.choiceTimeout or 60,
     reconnectGrace = o.reconnectGrace or 60,
     metronomePool = o.metronomePool,
+    chart = o.chart,
+    specialTypes = o.specialTypes,
+    typeIds = o.typeIds,
     sides = o.sides,
   })
   if not battle then error("fixture battle refused: " .. tostring(err), 0) end
@@ -1927,7 +1930,10 @@ do
     -- Struggle never is: pokecrystal BattleCommand_Stab returns for it
     -- (`cp STRUGGLE / ret z`) before DoBadgeTypeBoosts.  On a chart whose
     -- index 0 is BUG, Ann's type-0 move takes HIVE's eighth; her Struggle,
-    -- whose placeholder type is that same 0, does not.
+    -- whose placeholder type is that same 0, does not -- and takes no STAB
+    -- either, though Ann is type 0 (the same early return): 10 x 50 x 88 /
+    -- 80 / 50 = 11, +2 = 13, and the roll leaves 12, where STAB used to make
+    -- it 19 and 18.
     local BUG_FIRST = { typeIds = { "BUG", "DARK", "FIRE" }, specialTypes = { 2 } }
     eq(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), 18,
        mode .. ": index 0 named BUG, Ann's type-0 move is 18 bare")
@@ -1939,9 +1945,9 @@ do
       if event.t == "anim" and event.text == "STRUGGLE" then struggledAnim = true end
     end
     ok(struggledAnim, mode .. ": with her one slot at 0 PP, Ann Struggles")
-    eq(hitOn(struggled, 3), 18, mode .. ": her Struggle, no badge, is 18")
-    eq(hitOn(exchange(mode, { pp = 0, badges = { HIVE = true } }, {}, BUG_FIRST), 3), 18,
-       mode .. ": HIVE leaves her Struggle at 18 (type 0 is BUG here, and still nothing fires)")
+    eq(hitOn(struggled, 3), 12, mode .. ": her Struggle, no badge and no STAB, is 12")
+    eq(hitOn(exchange(mode, { pp = 0, badges = { HIVE = true } }, {}, BUG_FIRST), 3), 12,
+       mode .. ": HIVE leaves her Struggle at 12 (type 0 is BUG here, and still nothing fires)")
 
     -- HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
     local bareSelf = selfHit(exchange(mode, { seed = confusedSeed, confusion = 3 }, {}))
@@ -1965,6 +1971,342 @@ do
   eq(streamOf(exchange("coop_npc", {}, { badges = ALL, power = 30, type = 1 }, RULES)),
      streamOf(exchange("coop_npc", {}, { power = 30, type = 1 }, RULES)),
      "coop_npc: side b's HIVE does not type-boost its BUG move")
+end
+
+-- ------------------------------------------------------------------
+-- 8. pokecrystal fidelity: stat order, crits, folding, screens, the
+--    self-hit, Struggle, a Metronome call and move priority
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-fidelity.md, Gen 2.  The parity driver
+-- (tests/drivers/battle2_turn_parity.lua) pins whole fights both runtimes
+-- agree on; this states the rules one at a time, each number worked from the
+-- cart's arithmetic.  server/battle2_turn.test.js holds the same claims.
+
+-- A sheet in one line: everything explicit, so the JS twin builds the same.
+local function sheet(o)
+  return {
+    species = o.species, level = o.level or 20, maxHp = o.maxHp or 300,
+    hp = o.hp, status = o.status, types = o.types or { 2 },
+    stats = { atk = o.atk or 40, def = o.def or 40, spe = o.spe or 40,
+              spa = o.spa or 40, spd = o.spd or 40 },
+    stages = o.stages, confusion = o.confusion, substitute = o.substitute,
+    moves = o.moves,
+  }
+end
+local function hit(id, power, ty, effect, pp)
+  return { id = id, pp = pp or 30, power = power, accuracy = 255,
+           type = ty or 0, effect = effect or 0, chance = 0 }
+end
+local function said(events, text)
+  for _, event in ipairs(events) do
+    if event.t == "msg" and event.text == text then return true end
+  end
+  return false
+end
+local function damageOn(events, slot)
+  for _, event in ipairs(events) do
+    if event.t == "damage" and event.slot == slot then return event.amount end
+  end
+  return nil
+end
+local function animOrder(events)
+  local out = {}
+  for _, event in ipairs(events) do
+    if event.t == "anim" then out[#out + 1] = event.text end
+  end
+  return table.concat(out, ",")
+end
+local function duel(o)
+  return battleOf({
+    mode = o.mode or "1v1", seed = o.seed or 4242, chart = o.chart,
+    specialTypes = o.specialTypes, typeIds = o.typeIds,
+    metronomePool = o.metronomePool,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = o.badges, mons = o.a } },
+      b = { { playerId = "p2", name = "Bob", mons = o.b } },
+    },
+  })
+end
+local function turn(battle, a, b)
+  battle:submitChoice("p1", a or { action = "fight", move = 0 })
+  battle:submitChoice("p2", b or { action = "fight", move = 0 })
+  return drain(battle)
+end
+
+-- (a) the formulas, alone
+do
+  local Damage = need("BattleSim2/Damage")
+  eq(Effects.applyStage(100, 1), 150, "CalcBattleStats: 100 at +1 is 150")
+  eq(Effects.applyStage(3, -6), 1, "...a quotient of 0 is raised to 1")
+  eq(Effects.applyStage(700, 2), 999, "...and one past MAX_STAT_VALUE is held at 999")
+
+  local m = { stats = { atk = 100, def = 40, spe = 100, spa = 152, spd = 100 },
+              stages = { atk = -1, spe = 2, spa = 1 } }
+  eq(Effects.battleStat(m, "atk", { ZEPHYR = true }), 74,
+     "the stage first (66), then ZEPHYR's eighth: 74 -- badge-then-stage was 73")
+  m.status = "burn"
+  eq(Effects.battleStat(m, "atk", { ZEPHYR = true }), 37,
+     "burn halves what the badge left: 37")
+  m.status = "paralysis"
+  eq(Effects.battleStat(m, "spe", { PLAIN = true }), 56,
+     "200 at +2, 225 under PLAIN, quartered by paralysis: 56")
+  eq(Effects.battleStat(m, "spd", { GLACIER = true }), 112,
+     "Glacier's tail reads the STAGED Sp. Atk: 228 boosts to 256, odd, so Sp. Def 100 -> 112")
+  m.stages.spa = 0
+  eq(Effects.battleStat(m, "spd", { GLACIER = true }), 100,
+     "unstaged, 152 boosts to 171, even, and Sp. Def stays 100")
+
+  local function fold(a, d, link)
+    local x, y = Damage.truncateStats(a, d, link)
+    return x .. "/" .. y
+  end
+  eq(fold(200, 100, false), "200/100", "TruncateHL_BC leaves two bytes alone")
+  eq(fold(950, 600, false), "237/150", "...folds both by four while either is past 255")
+  eq(fold(200, 1200, false), "12/75", "...as often as it takes outside a link battle")
+  eq(fold(200, 1200, true), "50/44", "...but once in one, keeping 300's low byte: the wrap")
+  eq(fold(3, 1000, false), "1/250", "...and a stat the shift empties becomes 1")
+  eq(fold(1024, 50, true), "0/12", "...while a wrapped attack stays 0 (DamageCalc only lifts defense)")
+
+  for id, want in pairs({
+    PROTECT = 3, DETECT = 3, ENDURE = 3,
+    QUICK_ATTACK = 2, MACH_PUNCH = 2, EXTREMESPEED = 2,
+    ROAR = 0, WHIRLWIND = 0, COUNTER = 0, MIRROR_COAT = 0, VITAL_THROW = 0,
+    STRUGGLE = 1, thump = 1,
+  }) do
+    eq(Effects.movePriority(id), want, "GetMovePriority: " .. id .. " is " .. want)
+  end
+  eq(Effects.movePriority({ id = "quick_attack" }), 2, "a move record answers by its id, any case")
+  eq(Effects.movePriority(nil), Effects.BASE_PRIORITY, "no move is BASE_PRIORITY")
+end
+
+-- (a2) CheckDamageStatsCritical: a crit keeps the staged pair only when the
+--      defender's stage is strictly lower than the attacker's
+do
+  local function critHit(atkStage, defStage)
+    for seed = 1, 400 do
+      local slash = hit("slash_hit", 40)
+      slash.highCrit = true
+      local battle = duel({
+        seed = seed,
+        a = { sheet({ species = "Alpha", spe = 90, stages = { atk = atkStage },
+                      moves = { slash } }) },
+        b = { sheet({ species = "Beta", spe = 10, stages = { def = defStage },
+                      moves = { hit("tap", 0, 0, 85) } }) },
+      })
+      drain(battle)
+      local events = turn(battle)
+      if said(events, "A critical hit") then return damageOn(events, 3) end
+    end
+    return nil
+  end
+  -- Defense +6 is not lower than Attack 0: the unmodified 40 against 40 --
+  -- 10 x 40 x 40 / 40 / 50 = 8, x2 = 16, +2 = 18, then the roll.
+  local plain = critHit(0, 6)
+  ok(plain and plain >= 15 and plain <= 18,
+     "a crit into Defense +6 reads the unmodified stats (15..18), not 160 Defense")
+  -- Defense +1 is lower than Attack +6: the staged 160 against 60 --
+  -- 10 x 40 x 160 / 60 / 50 = 21, x2 = 42, +2 = 44, then the roll.
+  local staged = critHit(6, 1)
+  ok(staged and staged >= 37 and staged <= 44,
+     "a crit from Attack +6 into Defense +1 keeps both stages (37..44)")
+end
+
+-- (b) stages do not survive a switch-in or a faint
+do
+  local battle = duel({
+    a = { sheet({ species = "Alpha", spe = 90,
+                  moves = { hit("sharpen", 0, 0, Effects.idOf("ATTACK_UP2_EFFECT")),
+                            hit("thump", 60) } }),
+          sheet({ species = "Gamma", spe = 90, moves = { hit("thump", 10) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 30, atk = 40,
+                  stages = { atk = 3, def = -2 }, moves = { hit("tap", 1) } }) },
+  })
+  drain(battle)
+  turn(battle)
+  eq(battle.byId.p1.mons[1].stages.atk, 2, "the +2 lands on Alpha")
+  turn(battle, { action = "switch", slot = 1 })
+  turn(battle, { action = "switch", slot = 0 })
+  eq(battle.byId.p1.mons[1].stages.atk, 0,
+     "Alpha comes back in at 0: a send-out brings no stage (ResetPlayerStatLevels)")
+  local beta = battle.byId.p2.mons[1]
+  for _ = 1, 6 do
+    if battle:outcome() then break end
+    turn(battle, { action = "fight", move = 1 })
+  end
+  eq(beta.hp, 0, "Beta goes down")
+  eq(beta.stages.atk, 0, "and its +3 Attack goes with it")
+  eq(beta.stages.def, 0, "and its -2 Defense")
+end
+
+-- (c) screens: per side, five ticks, a failed recast, special and fixed hits
+do
+  local battle = duel({
+    specialTypes = { 1 },
+    a = { sheet({ species = "Alpha", spe = 90,
+                  moves = { hit("glow_wall", 0, 1, 64, 20), hit("tap", 1) } }) },
+    b = { sheet({ species = "Beta", spe = 10, spa = 60,
+                  moves = { hit("zap", 40, 1), hit("sonic_ping", 20, 0, 41) } }) },
+  })
+  drain(battle)
+  local first = turn(battle)
+  eq(battle.screens.a.lightScreen, 4, "Light Screen goes up at 5 and the turn's tick takes one")
+  eq(battle.screens.b.lightScreen, 0, "...on Ann's side only")
+  local screened = damageOn(first, 0)
+  -- 10 x 40 x 60 / 80 (Sp. Def 40 doubled) / 50 = 6, +2 = 8, then the roll.
+  ok(screened and screened <= 8 and screened >= 6, "a special hit into it reads Sp. Def doubled (6..8)")
+  local again = turn(battle)
+  ok(said(again, "But it failed"), "a second Light Screen while one is up fails")
+  eq(battle.screens.a.lightScreen, 3, "...and does not refresh the count")
+  local fixed = turn(battle, { action = "fight", move = 1 }, { action = "fight", move = 1 })
+  eq(damageOn(fixed, 0), 20, "a fixed-damage hit is never screened: the post-hoc halving is gone")
+  turn(battle, { action = "fight", move = 1 })
+  local fade = turn(battle, { action = "fight", move = 1 })
+  ok(said(fade, "Ann's LIGHT SCREEN fell"), "it falls at the end of its fifth turn")
+  eq(battle.screens.a.lightScreen, 0, "...and is down")
+  local bare = turn(battle, { action = "fight", move = 1 })
+  local unscreened = damageOn(bare, 0)
+  -- 10 x 40 x 60 / 40 / 50 = 12, +2 = 14, then the roll.
+  ok(unscreened and unscreened >= 11 and unscreened <= 14, "the next special hit is whole again (11..14)")
+end
+
+-- (d) the confusion self-hit: no crit, no roll, and past the user's substitute
+do
+  local function confusedFight(seed)
+    return duel({
+      seed = seed,
+      a = { sheet({ species = "Alpha", spe = 90, atk = 60, def = 60, confusion = 4,
+                    substitute = 50, moves = { hit("tap", 1) } }) },
+      b = { sheet({ species = "Beta", spe = 10, moves = { hit("tap", 0, 0, 85) } }) },
+    })
+  end
+  local found
+  for seed = 1, 200 do
+    local battle = confusedFight(seed)
+    drain(battle)
+    if said(turn(battle), "Alpha hurt itself in confusion") then found = seed; break end
+  end
+  ok(found ~= nil, "a seed on which the confused Alpha hits itself")
+  local battle = confusedFight(found)
+  drain(battle)
+  local events = turn(battle)
+  -- 10 x 40 x 60 / 60 / 50 = 8, +2 = 10: DamageCalc's tail and nothing after.
+  eq(damageOn(events, 0), 10, "the self-hit is DamageCalc and nothing after: 10, every time")
+  eq(battle.byId.p1.mons[1].hp, 290, "...and it comes off the HP")
+  eq(battle.byId.p1.mons[1].substitute, 50, "...past the user's own substitute (`ld c, TRUE`)")
+end
+
+-- (e) typeless Struggle, its recoil, and a Metronome call with the last PP
+do
+  local GHOST_CHART = { { 100, 0 }, { 100, 100 } }
+  local function vsGhost(pp)
+    return duel({
+      chart = GHOST_CHART,
+      a = { sheet({ species = "Alpha", spe = 90, types = { 0 },
+                    moves = { hit("thump", 40, 0, 0, pp) } }) },
+      b = { sheet({ species = "Beta", spe = 10, types = { 1 }, moves = { hit("tap", 0, 0, 85) } }) },
+    })
+  end
+  local normal = vsGhost(10)
+  drain(normal)
+  ok(said(turn(normal), "It doesn't affect Beta"), "a NORMAL move cannot touch the GHOST on this chart")
+  local struggle = vsGhost(0)
+  drain(struggle)
+  local events = turn(struggle)
+  local dealt = damageOn(events, 3)
+  -- 10 x 50 x 40 / 40 / 50 = 10, +2 = 12, no STAB though Alpha is type 0.
+  ok(dealt and dealt >= 10 and dealt <= 12, "Struggle hits the GHOST anyway, with no STAB (10..12)")
+  ok(not said(events, "It doesn't affect Beta"), "...and no matchup line at all")
+  eq(damageOn(events, 0), math.max(1, math.floor(dealt / 4)), "recoil is a quarter of what it dealt")
+
+  local feeble = duel({
+    a = { sheet({ species = "Alpha", spe = 90, atk = 1, moves = { hit("thump", 40, 0, 0, 0) } }) },
+    b = { sheet({ species = "Beta", spe = 10, def = 255, moves = { hit("tap", 0, 0, 85) } }) },
+  })
+  drain(feeble)
+  local tiny = turn(feeble)
+  eq(damageOn(tiny, 0), 1, "a Struggle that deals 1 still costs 1 (BattleCommand_Recoil's minimum)")
+
+  local metronome = duel({
+    metronomePool = { hit("pool_hit", 60, 1, 0, 10) },
+    a = { sheet({ species = "Alpha", spe = 90,
+                  moves = { hit("wave_finger", 0, 0, Effects.idOf("EFFECT_METRONOME"), 1) } }) },
+    b = { sheet({ species = "Beta", spe = 10, moves = { hit("tap", 0, 0, 85) } }) },
+  })
+  drain(metronome)
+  local called = turn(metronome)
+  ok(animOrder(called):find("pool_hit", 1, true) ~= nil, "the last PP calls the pool move")
+  ok(not said(called, "Alpha is hit with recoil"), "...and the called move takes no Struggle recoil")
+  local after = turn(metronome)
+  ok(animOrder(after):find("STRUGGLE", 1, true) ~= nil, "the turn after, every slot is empty: Struggle")
+  ok(said(after, "Alpha is hit with recoil"), "...which does recoil")
+
+  -- ResetTurn re-enters DoMove past CheckTurn, so the called move is not gated
+  -- a second time: a confused caller spends one confusion turn, not two.
+  local function confusedCaller(seed)
+    return duel({
+      seed = seed, metronomePool = { hit("pool_hit", 60, 1, 0, 10) },
+      a = { sheet({ species = "Alpha", spe = 90, confusion = 5,
+                    moves = { hit("wave_finger", 0, 0, Effects.idOf("EFFECT_METRONOME"), 5) } }) },
+      b = { sheet({ species = "Beta", spe = 10, moves = { hit("tap", 0, 0, 85) } }) },
+    })
+  end
+  local clean
+  for seed = 1, 200 do
+    local battle = confusedCaller(seed)
+    drain(battle)
+    local events = turn(battle)
+    if animOrder(events):find("pool_hit", 1, true) then clean = battle; break end
+  end
+  ok(clean ~= nil, "a seed on which the confused caller gets its call off")
+  eq(clean and clean.byId.p1.mons[1].confusion, 4,
+     "...and the confusion counter ticked once: the called move ran no gate of its own")
+end
+
+-- (f) move priority: the bracket before the Speed
+do
+  local function order(aMove, aSpe, bMove, bSpe)
+    local battle = duel({
+      a = { sheet({ species = "Alpha", spe = aSpe, moves = { aMove } }) },
+      b = { sheet({ species = "Beta", spe = bSpe, moves = { bMove } }) },
+    })
+    drain(battle)
+    return animOrder(turn(battle))
+  end
+  eq(order(hit("QUICK_ATTACK", 40), 10, hit("thump", 40), 99), "QUICK_ATTACK,thump",
+     "QUICK_ATTACK (2) beats a far faster plain hit (1)")
+  eq(order(hit("QUICK_ATTACK", 40), 10, hit("EXTREMESPEED", 80), 99), "EXTREMESPEED,QUICK_ATTACK",
+     "EXTREMESPEED shares QUICK_ATTACK's bracket, so Speed decides")
+  eq(order(hit("thump", 40), 99, hit("PROTECT", 0), 1), "PROTECT,thump",
+     "PROTECT (3) moves first from the slowest seat")
+  eq(order(hit("VITAL_THROW", 70, 0, 17), 99, hit("thump", 40), 1), "thump,VITAL_THROW",
+     "VITAL_THROW (0) moves last from the fastest seat")
+  eq(order(hit("thump", 40, 0, 0, 0), 10, hit("VITAL_THROW", 70, 0, 17), 99), "STRUGGLE,VITAL_THROW",
+     "Struggle moves at BASE_PRIORITY, ahead of a bracket-0 move")
+end
+
+-- (g) an NPC never re-raises a screen that is already up
+do
+  local battle = battleOf({
+    mode = "coop_npc", seed = 77,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = {
+        sheet({ species = "Alpha", spe = 10, moves = { hit("tap", 1) } }) } } },
+      b = { { playerId = "npc", name = "Foe", mons = {
+        sheet({ species = "Beta", spe = 90,
+                moves = { hit("wall_up", 0, 1, 65, 20), hit("thump", 40) } }) } } },
+    },
+  })
+  drain(battle)
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:autoPick("npc")
+  local first = drain(battle)
+  ok(animOrder(first):find("wall_up", 1, true) ~= nil, "the NPC sets up Reflect on a level field")
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:autoPick("npc")
+  local second = drain(battle)
+  ok(animOrder(second):find("wall_up", 1, true) == nil, "...and does not cast it again while it is up")
+  ok(animOrder(second):find("thump", 1, true) ~= nil, "...it attacks instead")
 end
 
 -- ------------------------------------------------------------------

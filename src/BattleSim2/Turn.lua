@@ -10,10 +10,14 @@
 --
 -- Known gaps left for follow-up: Gen2-native effect jump table, held-item
 -- damage/accuracy hooks (type-boost, Bright Powder, Scope Lens mid-turn),
--- weather inside Damage.compute from Turn, Gen2 sleep/confusion parity tests,
--- and Wire spa/spd event fields (T2c).  Badge boosts are not a gap: Crystal's
--- stat and type rules apply to side a against the computer (BADGE_MODES,
--- Effects.badgeBoost / badgeTypeBoost).
+-- weather inside Damage.compute from Turn, Gen2 sleep parity tests, and Wire
+-- spa/spd event fields (T2c).  Badge boosts are not a gap: Crystal's stat and
+-- type rules apply to side a against the computer (BADGE_MODES,
+-- Effects.badgeBoost / badgeTypeBoost).  Nor is the damage step: the battle
+-- stats (stage, badge, burn / paralysis), the crit stage rule, TruncateHL_BC,
+-- per-side screens, the confusion self-hit, typeless Struggle and move
+-- priority all follow pokecrystal (docs/plans/gen12-referee-fidelity.md);
+-- where the Gold engine port reads otherwise, the cart wins.
 --
 -- The formula modules beside this one each answer a single question with no
 -- memory.  This is the thing that holds the fight: it owns the field, the
@@ -25,7 +29,8 @@
 -- different fight, so every draw site is spelled out here and every one of
 -- them is conditional in a way both runtimes can reproduce:
 --
---   1. a speed tie-break byte, one per group of equally fast actors;
+--   1. a speed tie-break byte, one per group of actors in the same priority
+--      bracket at the same speed;
 --   2. one gate byte per actor whose monster has a gating status;
 --   3. one gate byte per actor whose monster is confused;
 --   4. per move that is actually used: accuracy byte, multihit-count byte
@@ -39,10 +44,19 @@
 -- **Policies chosen where Gen 1 had no answer**, each one written down because
 -- the two runtimes have to pick the same one:
 --
+--   * *Turn order* is pokecrystal's DetermineMoveOrder widened to a field:
+--     the priority bracket first (Effects.movePriority, GetMovePriority's
+--     table), then Speed (the battle stat: stage, badge, paralysis), then the
+--     tie-break below.  Switches and items are not in it -- they resolve
+--     before any move, as the cart's `.use_move` puts a player who is not
+--     fighting first.  Quick Claw (`.equal_priority`) is the one thing that
+--     belongs between the bracket and the Speed compare, and it is where a
+--     held-item roll would go (`_orderActors`).
 --   * *Speed ties* break on a single RNG byte per tied group: below 128 the
 --     side-a member goes first, otherwise the group reverses.  One draw per
 --     group rather than per pair, so a 2v2 with four equal speeds costs one
---     byte on both runtimes.
+--     byte on both runtimes.  A group is one bracket at one Speed, so a fight
+--     with no priority move groups -- and draws -- exactly as Speed alone.
 --   * *Running* is mode-gated, the same way Teleport is.  wild / coop_wild
 --     flee (the runner loses with reason `run`); 1v1 / coop_pvp is a
 --     concession, same bookkeeping, and both sides running is a draw;
@@ -84,10 +98,17 @@
 --     heuristics — not a full TrainerAI port) -- and the fight continues.  It
 --     does not end the battle -- the player who went to make a sandwich loses
 --     a turn, not the match.
---   * *Struggle* when every move is out of PP: synthetic STRUGGLE (power 50,
---     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit,
---     and never a badge type boost (pokecrystal BattleCommand_Stab returns for
---     Struggle before DoBadgeTypeBoosts).
+--   * *Struggle* when every move is out of PP: synthetic STRUGGLE (power 50),
+--     no PP spent, recoil floor(damage/4) minimum 1 after a hit
+--     (BattleCommand_Recoil), and typeless: pokecrystal BattleCommand_Stab
+--     opens with `cp STRUGGLE / ret z`, so the weather step, DoBadgeTypeBoosts,
+--     STAB and the whole matchup loop are skipped -- it hits a Ghost, takes no
+--     STAB and no badge type boost, and says nothing about effectiveness.
+--     Its row in data/moves/moves.asm is still NORMAL, which is the type
+--     DamageCalc's type-boost item scan reads (STRUGGLE.typeId).  Struggle is
+--     the move a top-level `_useMove` resolves to when every slot is empty; a
+--     move Metronome or Mirror Move *calls* is never Struggle, so a call made
+--     with the last PP takes no recoil.
 --   * The choice clock is *suspended while anybody is disconnected*, because
 --     the grace timer is already counting for that player and two deadlines
 --     racing would decide the match on whichever fired first.  `submitChoice`
@@ -169,6 +190,12 @@ M.SIDES = { "a", "b" }
 M.BADGE_MODES = { wild = true, coop_wild = true, coop_npc = true }
 M.BADGE_SIDE = "a"
 
+-- The mod's link battles: the two modes where both seats are people, which
+-- the cart would have fought over the cable.  Read where pokecrystal reads
+-- `wLinkMode == LINK_COLOSSEUM` -- TruncateHL_BC's single pass
+-- (Damage.truncateStats) -- and nowhere else yet.
+M.LINK_MODES = { ["1v1"] = true, coop_pvp = true }
+
 -- Roster cap per side. coop_wild is humans vs one wild (up to FIGHTERS_PER_SIDE
 -- humans on a, wild on b); other modes keep a single per-side ceiling
 -- (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
@@ -215,9 +242,12 @@ local ACTIONS = {
 }
 
 -- Synthetic move used when every slot is out of PP.  Not in any move table.
+-- `type = 0` is a placeholder index that nothing reads (Struggle is
+-- typeless; see the policy note above); `typeId` is the cart row's NORMAL,
+-- the registry id a held type-boost item is matched against in DamageCalc.
 local STRUGGLE = {
   id = "STRUGGLE", power = 50, accuracy = 255,
-  type = 0, effect = 0, chance = 0,
+  type = 0, effect = 0, chance = 0, typeId = "NORMAL",
 }
 
 -- ------------------------------------------------------------------
@@ -452,8 +482,6 @@ local function copyMon(raw, fallback)
     bide = bide,
     lastMoveIndex = max(0, int(raw.lastMoveIndex, 0)),
     substitute = max(0, int(raw.substitute, 0)),
-    lightScreen = raw.lightScreen == true,
-    reflect = raw.reflect == true,
     mist = raw.mist == true,
     focusEnergy = raw.focusEnergy == true,
     transformed = raw.transformed == true,
@@ -627,6 +655,12 @@ function M.create(opts)
     fighters       = {},
     byId           = {},
     bySide         = { a = {}, b = {} },
+    -- Reflect / Light Screen, held per SIDE as pokecrystal holds them
+    -- (wPlayerScreens / wEnemyScreens and their counts): turns left, 0 when
+    -- down.  A side's seats share them, a switch or a faint leaves them up,
+    -- Haze does not touch them, and only `_tickScreens` takes them down.
+    screens        = { a = { lightScreen = 0, reflect = 0 },
+                       b = { lightScreen = 0, reflect = 0 } },
     result         = nil,
     resolveDeadline = nil,
   }, Battle)
@@ -1582,6 +1616,12 @@ function Battle:_autoChoice(fighter)
       local m = mon.moves[i]
       if m.pp > 0 and not disabled(i) and m.power == 0 then
         local kind = AUTO_SETUP[m.effect]
+        -- A screen already up on this side would only fail (BattleCommand_
+        -- Screen's second cast), so it is no setup at all.
+        if (m.effect == 64 and self.screens[fighter.side].lightScreen > 0)
+           or (m.effect == 65 and self.screens[fighter.side].reflect > 0) then
+          kind = nil
+        end
         if kind == true or (type(kind) == "string" and (mon.stages[kind] or 0) <= 0) then
           if not setupPick or i < setupPick then setupPick = i end
         end
@@ -1771,11 +1811,33 @@ function Battle:_closeReplace()
   self:_openTurn()
 end
 
+-- The battle stat a hit or the turn order reads (Effects.battleStat: stage,
+-- then the seat's badge boost, then burn / paralysis), with the seat's own
+-- badges -- nil wherever the cart would not have boosted (BADGE_MODES).
+function Battle:_battleStat(fighter, mon, key)
+  return Effects.battleStat(mon, key, fighter.badges)
+end
+
 function Battle:_speedOf(fighter, mon)
-  local spe = Effects.badgeBoost(mon.stats.spe, "spe", fighter.badges)
-  spe = Effects.applyStage(spe, mon.stages.spe)
-  if mon.status == "paralysis" then return Status.paralysisSpeed(spe) end
-  return spe
+  return self:_battleStat(fighter, mon, "spe")
+end
+
+-- The bracket an action moves in: the selected move's (Effects.movePriority),
+-- which is Struggle's when every slot is empty -- the move `_useMove` will
+-- resolve to -- and the slot's own otherwise, so a Metronome moves at
+-- Metronome's priority whatever it calls.
+function Battle:_priorityOf(fighter, mon)
+  local choice = fighter.choice
+  if allPpEmpty(mon) then return Effects.movePriority(STRUGGLE) end
+  return Effects.movePriority(mon.moves[choice and choice.move or 0])
+end
+
+-- Whether the screen that guards against this kind of hit is up on `side`.
+function Battle:_screenUp(side, isSpecial)
+  local screens = self.screens[side]
+  if not screens then return false end
+  if isSpecial then return screens.lightScreen > 0 end
+  return screens.reflect > 0
 end
 
 -- chart[atkType + 1][defType + 1], one percent per defender type, because
@@ -1891,6 +1953,10 @@ function Battle:_resolveSwitches()
         -- standing opposition re-marks into it, while the incoming monster
         -- joins the sets of the foes it is now in against.
         self:_refield(fighter)
+        -- A send-out brings no stage with it (ResetPlayerStatLevels): the
+        -- levels belong to the side's field position on the cart, and a
+        -- monster coming back in must not find the ones it left with.
+        Effects.resetStages(mon)
         mon.charging = nil
         mon.invulnerable = false
         mon.thrashing = nil
@@ -1900,8 +1966,6 @@ function Battle:_resolveSwitches()
         mon.trapping = nil
         mon.bide = nil
         mon.substitute = 0
-        mon.lightScreen = false
-        mon.reflect = false
         mon.mist = false
         mon.focusEnergy = false
         mon.transformed = false
@@ -1971,30 +2035,43 @@ function Battle:_resolveItems()
       end
     end
   end
-  self:_sortActorsBySpeed(balls)
+  self:_orderActors(balls)
   for _, actor in ipairs(balls) do
     if self.result then return end
     self:_resolveOneItem(actor.fighter)
   end
 end
 
--- Sort actors by active-mon speed (desc), then field order; tied groups flip on
--- one RNG byte >= TIE_BREAK_ROLL. Shared by fights and ball throws.
-function Battle:_sortActorsBySpeed(actors)
+-- Sort actors by priority bracket (desc), then active-mon speed (desc), then
+-- field order; tied groups flip on one RNG byte >= TIE_BREAK_ROLL.  Shared by
+-- fights and ball throws -- a ball carries no `priority`, so every thrower
+-- sits in one bracket and the order is Speed's, as it always was.
+--
+-- pokecrystal's DetermineMoveOrder for two battlers: CompareMovePriority,
+-- then (`.equal_priority`) each side's Quick Claw roll, then the Speed
+-- compare, then the coin flip.  A Quick Claw is a roll *inside* a bracket, so
+-- it belongs between the bracket key and the Speed key here, drawn before the
+-- tie-break bytes.
+function Battle:_orderActors(actors)
   if #actors <= 1 then return end
 
   table.sort(actors, function(x, y)
+    local xp, yp = x.priority or 0, y.priority or 0
+    if xp ~= yp then return xp > yp end
     if x.speed ~= y.speed then return x.speed > y.speed end
     return x.order < y.order          -- field order: side a, then side b
   end)
 
-  -- One byte per group of equally fast actors, spent only when the group is
-  -- actually tied, so an ordinary turn between two different speeds costs no
-  -- draw at all on either runtime.
+  -- One byte per group of actors in one bracket at one Speed, spent only when
+  -- the group is actually tied, so an ordinary turn between two different
+  -- speeds costs no draw at all on either runtime.
   local i = 1
   while i <= #actors do
     local j = i
-    while j < #actors and actors[j + 1].speed == actors[i].speed do j = j + 1 end
+    while j < #actors and actors[j + 1].speed == actors[i].speed
+          and (actors[j + 1].priority or 0) == (actors[i].priority or 0) do
+      j = j + 1
+    end
     if j > i and self.rng:byte() >= M.TIE_BREAK_ROLL then
       for lo = i, i + floor((j - i) / 2) do
         local hi = j - (lo - i)
@@ -2309,6 +2386,7 @@ function Battle:_resolveFights()
       actors[#actors + 1] = {
         fighter = fighter,
         mon = mon,                      -- pinned: see the skip in the loop
+        priority = self:_priorityOf(fighter, mon),
         speed = self:_speedOf(fighter, mon),
         order = #actors + 1,
       }
@@ -2316,7 +2394,7 @@ function Battle:_resolveFights()
   end
   if #actors == 0 then return end
 
-  self:_sortActorsBySpeed(actors)
+  self:_orderActors(actors)
 
   for _, actor in ipairs(actors) do
     if self.result then break end
@@ -2336,8 +2414,31 @@ function Battle:_resolveFights()
   end
 end
 
--- Returns false when a gate stopped the move.
-function Battle:_runGates(fighter, mon)
+-- HitSelfInConfusion (pokecrystal engine/battle/effect_commands.asm:
+-- 2864-2898) and the head of the BattleCommand_DamageCalc it falls into
+-- (:2900-2915): the confused monster's own battle Attack against its own
+-- battle Defense -- stage, badge and burn, as any hit reads them -- that
+-- Defense doubled by its OWN side's Reflect, both folded by TruncateHL_BC,
+-- and the Defense halved again when the move it SELECTED is Explosion /
+-- Self-Destruct, because DamageCalc's EFFECT_SELFDESTRUCT check reads
+-- BATTLE_VARS_MOVE_EFFECT and that is still the selected move (a cart bug,
+-- docs/bugs_and_glitches.md, kept).  No crit: HitConfusion clears
+-- wCriticalHit before it calls in.  Returns attack, defense.
+function Battle:_selfHitStats(fighter, mon, selected)
+  local attack = self:_battleStat(fighter, mon, "atk")
+  local defense = self:_battleStat(fighter, mon, "def")
+  if self:_screenUp(fighter.side, false) then defense = defense * 2 end
+  attack, defense = Damage.truncateStats(attack, defense, M.LINK_MODES[self.mode])
+  if selected and Effects.isExplode(selected.effect) then
+    defense = max(1, floor(defense / 2))
+  end
+  return attack, defense
+end
+
+-- Returns false when a gate stopped the move.  `selected` is the move the
+-- monster is about to use (Struggle when every slot is empty): the confusion
+-- self-hit reads it the way the cart's DamageCalc does.
+function Battle:_runGates(fighter, mon, selected)
   if mon.flinch then
     mon.flinch = false
     self:_say(mon.species .. " flinched")
@@ -2369,14 +2470,19 @@ function Battle:_runGates(fighter, mon)
   end
 
   if mon.confusion > 0 then
-    -- HitConfusion reads the battle stats, badge boosts included (engine
-    -- src/battle/gen2/Battle.lua:4133-4157 reads them through battleStat).
+    -- The self-hit's stats (`_selfHitStats`), built whether or not this
+    -- turn's byte lands on a self-hit: they draw nothing.  Status.confusionTick
+    -- also takes `itemBoostPercent` -- DamageCalc's type-boost item scan, run
+    -- for the SELECTED move's type (STRUGGLE.typeId for Struggle), the other
+    -- cart bug -- and none is passed because no sheet hands the referee a
+    -- held item.
+    local attack, defense = self:_selfHitStats(fighter, mon, selected)
     local gate = Status.beforeMove({
       status = "confusion",
       turnsRemaining = mon.confusion,
       level = mon.level,
-      attack = Effects.badgeBoost(mon.stats.atk, "atk", fighter.badges),
-      defense = Effects.badgeBoost(mon.stats.def, "def", fighter.badges),
+      attack = attack,
+      defense = defense,
     }, self.rng:byte())
     if gate then
       mon.confusion = int(gate.turnsRemaining, 0)
@@ -2388,7 +2494,9 @@ function Battle:_runGates(fighter, mon)
         })
       elseif gate.selfHit then
         self:_say(mon.species .. " hurt itself in confusion")
-        self:_damage(fighter, mon, gate.selfDamage or 0, nil)
+        -- `ld c, TRUE / call DoPlayerDamage`: the self-hit skips the user's
+        -- own substitute and comes off its HP.
+        self:_damage(fighter, mon, gate.selfDamage or 0, nil, true)
         return false
       end
       if not gate.canMove then return false end
@@ -2408,6 +2516,7 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
     targetFighter = targetFighter,
     moveIndex = moveIndex,
     statusToWire = M.STATUS_TO_WIRE,
+    userScreens = self.screens[fighter.side],
   })
   if result.nothing then self:_say("But nothing happened") end
   for _, text in ipairs(result.messages or {}) do self:_say(text) end
@@ -2466,14 +2575,26 @@ end
 function Battle:_useMove(fighter, mon, opts)
   opts = opts or {}
   local choice = fighter.choice
-  -- Empty sheet (`#moves == 0`) is Struggle. Returning here used to eat that
-  -- turn before `allPpEmpty` could pick the synthetic move.
-  local struggling = allPpEmpty(mon) or choice.struggle
-  if not struggling and not mon.moves[choice.move] then return end
+  -- A move Metronome or Mirror Move called is not the turn's own move.  The
+  -- gates already ran for the move that called it -- BattleCommand_Metronome
+  -- ends in ResetTurn, which re-enters DoMove past CheckTurn -- and it is
+  -- never Struggle, whatever PP the calling slot has left: Struggle is a
+  -- move, not a state of the user's PP, so the call that spent the last PP
+  -- takes no recoil.
+  local called = opts.moveOverride ~= nil
+  -- The move this action resolves to.  Every slot empty -- an empty sheet
+  -- (`#moves == 0`) included -- is the synthetic STRUGGLE; returning on the
+  -- missing slot used to eat that turn instead.
+  local move = opts.moveOverride
+  if not called then
+    if allPpEmpty(mon) then move = STRUGGLE else move = mon.moves[choice.move] end
+  end
+  if not move then return end
+  local struggling = move == STRUGGLE
 
-  if not self:_runGates(fighter, mon) then return end
+  if not called and not self:_runGates(fighter, mon, move) then return end
 
-  if not struggling and mon.disable and mon.disable.turns > 0
+  if not struggling and not called and mon.disable and mon.disable.turns > 0
      and mon.disable.moveIndex == choice.move then
     local blocked = mon.moves[choice.move]
     self:_say(moveLabel(blocked) .. " is disabled")
@@ -2493,7 +2614,6 @@ function Battle:_useMove(fighter, mon, opts)
   -- was already empty when it started.
   local targetSlot = target.slot
 
-  local move = opts.moveOverride or (struggling and STRUGGLE or mon.moves[choice.move])
   local effectId = int(move.effect, 0)
   local releasing = mon.charging ~= nil and Effects.isCharge(mon.charging.effect)
   local mirrorCopy = opts.mirrorCopy == true
@@ -2677,7 +2797,9 @@ function Battle:_useMove(fighter, mon, opts)
   local critLevel = Crit.level(critOpts)
   local critChance = Crit.chance(critLevel)
   local isCrit = select(1, Crit.check(critLevel, self.rng:below(critChance)))
-  local percents = self:_typePercents(move.type, defender)
+  -- Struggle skips BattleCommand_Stab's matchup loop with the rest of it, so
+  -- it is neutral against everything, a Ghost included.
+  local percents = struggling and { 100 } or self:_typePercents(move.type, defender)
 
   local immune = false
   for _, pct in ipairs(percents) do
@@ -2717,22 +2839,34 @@ function Battle:_useMove(fighter, mon, opts)
     local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
     local atkKey = isSpecial and "spa" or "atk"
     local defKey = isSpecial and "spd" or "def"
-    -- Both ends read the battle stat with its owner's badge boost; the
-    -- defender's Sp. Atk rides along for Glacier's Sp. Def tail.
-    local atkStat = Effects.badgeBoost(
-      isSpecial and mon.stats.spa or mon.stats.atk, atkKey, fighter.badges)
-    local atkStage = isSpecial and mon.stages.spa or mon.stages.atk
-    local defStat = Effects.badgeBoost(
-      isSpecial and defender.stats.spd or defender.stats.def, defKey, target.badges,
-      defender.stats.spa)
-    local defStage = isSpecial and defender.stages.spd or defender.stages.def
 
-    local attack = Effects.applyStage(atkStat, atkStage)
-    if (not isSpecial) and mon.status == "burn" then
-      attack = Status.burnAttack(attack)
+    -- PlayerAttackDamage / EnemyAttackDamage (pokecrystal engine/battle/
+    -- effect_commands.asm:2532-2612, 2777-2855), in the cart's order.
+    --
+    -- 1. The defender's battle stat (stage, its seat's badge), doubled when
+    --    its SIDE has the screen up -- Reflect for a physical hit, Light
+    --    Screen for a special one -- as a 16-bit value, before any fold.
+    local defense = self:_battleStat(target, defender, defKey)
+    if self:_screenUp(target.side, isSpecial) then defense = defense * 2 end
+    -- 2. The attacker's battle stat: stage, its seat's badge, burn.
+    local attack = self:_battleStat(fighter, mon, atkKey)
+    -- 3. CheckDamageStatsCritical (:2660-2700): a crit keeps the pair above
+    --    only when the defender's stage is strictly LOWER than the
+    --    attacker's; otherwise it reads the unmodified stats -- no stage, no
+    --    badge, no burn and no screen.
+    if isCrit and not (Effects.clampStage(defender.stages[defKey])
+                       < Effects.clampStage(mon.stages[atkKey])) then
+      attack = max(1, int(mon.stats[atkKey], 1))
+      defense = max(1, int(defender.stats[defKey], 1))
     end
-
-    local defense = Effects.applyStage(defStat, defStage)
+    -- 4. ThickClubBoost / LightBallBoost double the attack here, still
+    --    16-bit, which is why they can wrap past 1024 in a link battle; the
+    --    referee holds no held item, so neither fires.
+    -- 5. TruncateHL_BC: both folded into a byte (one pass in a link battle).
+    attack, defense = Damage.truncateStats(attack, defense, M.LINK_MODES[self.mode])
+    -- 6. DittoMetalPowder runs on the folded defense (the same no-item note
+    --    as 4), and then BattleCommand_DamageCalc halves it for Explosion /
+    --    Self-Destruct, at least 1 (:2904-2913).
     if Effects.isExplode(effectId) then
       defense = max(1, floor(defense / 2))
     end
@@ -2743,16 +2877,19 @@ function Battle:_useMove(fighter, mon, opts)
       { power = move.power },
       {
         crit = isCrit,
-        stab = hasType(mon, move.type),
+        -- Struggle takes none of BattleCommand_Stab: no STAB, no badge type
+        -- boost (its `cp STRUGGLE / ret z` comes before DoBadgeTypeBoosts),
+        -- and the neutral `percents` above.
+        stab = not struggling and hasType(mon, move.type),
         typeEffect = percents,
         roll = self.rng:damageRoll(),
         physical = not isSpecial,
+        -- DamageCalc's type-boost item scan (`itemBoostPercent`, ahead of the
+        -- crit x2) has no input: the referee holds no held item.
+        --
         -- The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
         -- this is the cart's "player's turn only" without asking whose turn.
-        -- Never for Struggle: pokecrystal BattleCommand_Stab opens with
-        -- `cp STRUGGLE / ret z`, ahead of its DoBadgeTypeBoosts call, so the
-        -- synthetic move's placeholder type 0 must not name a badge's type.
-        badgeTypeBoost = move ~= STRUGGLE
+        badgeTypeBoost = not struggling
           and Effects.badgeTypeBoost(self:_typeIdOf(move.type), fighter.badges),
       })
 
@@ -2767,9 +2904,6 @@ function Battle:_useMove(fighter, mon, opts)
     end
     damage = result.damage or 0
   end
-
-  local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
-  damage = Effects.screenDamage(damage, defender, isSpecial)
 
   local effectiveness = 1
   for _, pct in ipairs(percents) do effectiveness = effectiveness * pct / 100 end
@@ -2870,15 +3004,17 @@ function Battle:_useMove(fighter, mon, opts)
 end
 
 -- One place where HP comes off, so the faint that follows can never be
--- forgotten at one of the call sites.
-function Battle:_damage(fighter, mon, amount, status)
+-- forgotten at one of the call sites.  `ignoreSubstitute` is the cart's
+-- DoPlayerDamage / DoEnemyDamage `c` flag: the confusion self-hit sets it, so
+-- the damage reaches the HP behind the user's own substitute.
+function Battle:_damage(fighter, mon, amount, status, ignoreSubstitute)
   amount = max(0, int(amount, 0))
 
   if amount > 0 and mon.bide and mon.bide.turns > 0 then
     mon.bide.stored = mon.bide.stored + amount
   end
 
-  if amount > 0 and mon.substitute and mon.substitute > 0 then
+  if amount > 0 and not ignoreSubstitute and mon.substitute and mon.substitute > 0 then
     if amount >= mon.substitute then
       mon.substitute = 0
       self:_say(mon.species .. "'s substitute broke")
@@ -3151,14 +3287,14 @@ function Battle:_faint(fighter, mon)
   mon.trapping = nil
   mon.bide = nil
   mon.substitute = 0
-  mon.lightScreen = false
-  mon.reflect = false
   mon.mist = false
   mon.focusEnergy = false
   mon.transformed = false
   mon.xAccuracy = false
   mon.leechSeed = nil
   mon.disable = nil
+  -- The fallen monster's stages go with it; the side's screens stay up.
+  Effects.resetStages(mon)
   self:_clearTrapsFrom(fighter.slot)
 
   -- Living bench? Computed before clearing active; fainted mon already has hp 0.
@@ -3215,7 +3351,42 @@ function Battle:_faint(fighter, mon)
   end
 end
 
+-- The end of the turn.  pokecrystal's HandleBetweenTurnEffects (engine/
+-- battle/core.asm:250-296) runs, after its faint-checked block (Future Sight,
+-- weather, Wrap, Perish Song): Leftovers, Mysteryberry, Defrost, Safeguard,
+-- HandleScreens, the stat-boosting held items, the healing held items, then
+-- Encore.  This referee's per-seat residual walk (`_residualDamage`) stands
+-- where that first block and the cart's per-move ResidualDamage stand; of the
+-- rest, only the screens exist here, so they tick straight after it -- and a
+-- held item that acts between turns goes on the side of `_tickScreens` its
+-- row in that list puts it.
 function Battle:_resolveResiduals()
+  self:_residualDamage()
+  if self.result then return end
+  self:_tickScreens()
+end
+
+-- HandleScreens (core.asm:1620-1680): side a then side b (the non-link
+-- order: `.CheckPlayer`, then `.CheckEnemy`), Light Screen before Reflect
+-- within a side, one turn off each screen that is up, and the cart's line when
+-- one runs out.  The side is named by its first seat, as BattleSim3 names it.
+function Battle:_tickScreens()
+  for _, side in ipairs(M.SIDES) do
+    local screens = self.screens[side]
+    local first = self.bySide[side][1]
+    local name = first and first.name or ("side " .. side)
+    if screens.lightScreen > 0 then
+      screens.lightScreen = screens.lightScreen - 1
+      if screens.lightScreen == 0 then self:_say(name .. "'s LIGHT SCREEN fell") end
+    end
+    if screens.reflect > 0 then
+      screens.reflect = screens.reflect - 1
+      if screens.reflect == 0 then self:_say(name .. "'s REFLECT faded") end
+    end
+  end
+end
+
+function Battle:_residualDamage()
   for _, fighter in ipairs(self.fighters) do
     if self.result then return end
     local mon = activeMon(fighter)

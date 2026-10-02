@@ -305,18 +305,20 @@ check(Wire.battleMon({ species = "SHELLY", speciesId = "not a species!",
                                    accuracy = 255, type = 0, effect = 0,
                                    chance = 0 } } }) == nil,
       "an unreadable id refuses the battler, like every other id on the sheet")
--- The obedience check's `traded` / `unfateful` are Gen 3's (contract K2 of
--- docs/plans/gen3-badge-rules.md): the Gen 1 / Gen 2 reader never copies them.
+-- The obedience check's `traded` is every generation's now (contract K1 of
+-- docs/plans/gen12-referee-fidelity.md: the Gen 1 / Gen 2 carts check it too),
+-- while `unfateful` stays Gen 3's (contract K2 of docs/plans/gen3-badge-rules.md)
+-- and the Gen 1 / Gen 2 reader never copies it.
 do
-  local stripped = Wire.battleMon({
+  local sheet = Wire.battleMon({
     species = "CHARMANDER", level = 5, hp = 1, maxHp = 1,
     stats = { atk = 1, def = 1, spd = 1, spc = 1 },
     moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
                 type = 0, effect = 0, chance = 0 } },
     traded = true, unfateful = true,
   })
-  check(stripped ~= nil and stripped.traded == nil and stripped.unfateful == nil,
-        "Wire.battleMon (Gen 1) strips the Gen 3 obedience facts")
+  check(sheet ~= nil and sheet.traded == true and sheet.unfateful == nil,
+        "Wire.battleMon (Gen 1) keeps traded and strips the Gen 3-only unfateful")
 end
 
 -- Badges: the save's badge rows in a fight against the computer, none in a

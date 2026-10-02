@@ -42,7 +42,8 @@ function expectFields(actual, expected, label) {
 test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped — reread the notes before touching this');
   assert.strictEqual(vectors.generation, 2, 'this suite is Gen2-only');
-  for (const group of ['damage', 'accuracy', 'crit', 'status', 'badgeStats', 'badgeTypes']) {
+  for (const group of ['damage', 'accuracy', 'crit', 'status', 'badgeStats', 'badgeTypes',
+    'stages', 'battleStats', 'truncate']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -95,11 +96,14 @@ test('immunity short-circuits before the random roll', () => {
 });
 
 test('no Gen1 255-stat clamp', () => {
+  // compute() reads the pair it is handed; the cart's fold to a byte is
+  // TruncateHL_BC, which the referee runs first (truncateStats; see the
+  // truncate vectors below).
   const got = damage.compute({
     level: 50, power: 40, attack: 400, defense: 200,
     physical: true, stab: false, typeEffect: [100], crit: false, roll: 100,
   });
-  assert.strictEqual(got.statClamped, false, 'Gen2 never quarters overflow stats');
+  assert.strictEqual(got.statClamped, false, 'compute() never quarters overflow stats itself');
   assert.strictEqual(got.attack, 400);
   assert.strictEqual(got.defense, 200);
 });
@@ -247,6 +251,34 @@ test('badge type vectors', async (t) => {
     await t.test(v.id, () => {
       const got = { boosted: Effects.badgeTypeBoost(v.in.typeId, v.in.badges) };
       expectFields(got, v.out, v.id);
+    });
+  }
+});
+
+// The pokecrystal stat pipeline: CalcBattleStats' stage ratio and clamp,
+// CalcPlayerStats' order (stage, badge, burn / paralysis), and the
+// TruncateHL_BC fold the damage formula reads.
+test('stage vectors', async (t) => {
+  for (const v of vectors.stages) {
+    await t.test(v.id, () => {
+      expectFields({ value: Effects.applyStage(v.in.stat, v.in.stage) }, v.out, v.id);
+    });
+  }
+});
+
+test('battle stat vectors', async (t) => {
+  for (const v of vectors.battleStats) {
+    await t.test(v.id, () => {
+      const mon = { stats: v.in.stats, stages: v.in.stages, status: v.in.status };
+      expectFields({ value: Effects.battleStat(mon, v.in.key, v.in.badges) }, v.out, v.id);
+    });
+  }
+});
+
+test('truncate vectors', async (t) => {
+  for (const v of vectors.truncate) {
+    await t.test(v.id, () => {
+      expectFields(damage.truncateStats(v.in.attack, v.in.defense, v.in.link), v.out, v.id);
     });
   }
 });

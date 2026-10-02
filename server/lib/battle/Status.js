@@ -24,9 +24,12 @@
  *
  * The confusion self-hit is a typeless 40-power move using the confused side's
  * own attack against its own defence, with no STAB, no type effectiveness, no
- * crit and no random roll (the roll is pinned at maximum). It runs through the
- * same Damage.compute as everything else rather than getting its own
- * arithmetic, so it cannot drift away from the main formula.
+ * crit and no random roll (the roll is pinned at maximum). Those are the stored
+ * battle stats, and the defence arrives doubled when the *opponent* has Reflect
+ * up -- the cart's quirk, applied by Turn's `_runGates`. It runs through the
+ * same Damage.compute as everything else (scaling and 997 cap included) rather
+ * than getting its own arithmetic, so it cannot drift away from the main
+ * formula.
  *
  * Edge inputs match Lua: paralysisStop(undefined) coerces the roll to 255
  * (false), and confusionTick forwards atk/def aliases into Damage.compute.

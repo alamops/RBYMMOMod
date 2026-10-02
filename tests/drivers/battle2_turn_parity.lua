@@ -30,6 +30,14 @@
 --     against the computer, never a link battle and never side b), and what
 --     it does there: Crystal's stat boosts, Glacier's Sp. Def tail, the 999
 --     cap and DoBadgeTypeBoosts.
+--   * the pokecrystal fidelity pass (docs/plans/gen12-referee-fidelity.md):
+--     `stage_badge_order` (CalcPlayerStats: stage, then badge, rounding and
+--     the turn order it moves), `crit_stages` (CheckDamageStatsCritical both
+--     ways, screens included / ignored), `truncate_wild` / `truncate_link`
+--     (TruncateHL_BC's loop against its single link pass and wrap),
+--     `screens_side` (per side, five turns, a failed recast, surviving a
+--     switch and Haze), `self_hit` (own Reflect, the Explosion-selected
+--     halving), `struggle_typeless`, `metronome_last_pp` and `priority`.
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -200,7 +208,15 @@ local function mn(o)
     stats = { atk = o.atk or 40, def = o.def or 40,
               spe = o.spe or 40, spa = o.spa or 40, spd = o.spd or 40 },
     moves = o.moves,
+    stages = o.stages, confusion = o.confusion, focusEnergy = o.focusEnergy,
   }
+end
+
+-- A move with an effect id (src/BattleSim2/Effects.lua numbering), which `mv`
+-- leaves at 0.
+local function fx(id, power, ty, effect, pp)
+  return { id = id, pp = pp or 60, power = power, accuracy = 255,
+           type = ty, effect = effect, chance = 0 }
 end
 
 local function build(opts)
@@ -609,6 +625,296 @@ scenario("badges_gold", function(events)
     battle:submitChoice("n2", { action = "fight", move = 0, target = 1 })
     drainInto(battle, events)
   end
+  return battle
+end)
+
+-- CalcPlayerStats' order: the stage, then the badge.  Ann's Attack 100 at -1
+-- is 66, which ZEPHYR lifts to 74 (badge first would be 112 -> 73), and her
+-- Speed 100 at -1 is 66, which PLAIN lifts to 74 -- one point ahead of NpcA's
+-- 73, so she moves first where badge-then-stage tied them.  Abe's Sp. Atk 152
+-- at +1 is 228, which GLACIER lifts to 256: an odd tail, so his Sp. Def 100 is
+-- boosted too (the unstaged 152 -> 171 would have left it alone).
+scenario("stage_badge_order", function(events)
+  local slam = function() return mv("slam", 100, 255, 0) end
+  local zap = function() return mv("zap", 60, 255, 1) end
+  local battle = build({
+    id = "sb", mode = "coop_npc", seed = 4096, choiceTimeout = 60, reconnectGrace = 60,
+    -- Index 0 names DARK, a type no held badge boosts, so PLAIN moves Speed
+    -- and nothing else.
+    specialTypes = { 1 }, typeIds = { "DARK", "FIRE" },
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", badges = { ZEPHYR = true, PLAIN = true },
+          mons = { mn({ species = "Alpha", level = 50, maxHp = 400, atk = 100, spe = 100,
+                        types = { 2 }, stages = { atk = -1, spe = -1 },
+                        moves = { slam() } }) } },
+        { playerId = "a2", name = "Abe", badges = { GLACIER = true },
+          mons = { mn({ species = "Gamma", level = 50, maxHp = 400, spa = 152, spd = 100,
+                        spe = 30, types = { 2 }, stages = { spa = 1 },
+                        moves = { zap() } }) } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA", mons = {
+          mn({ species = "Beta", level = 50, maxHp = 400, def = 20, spe = 73,
+               types = { 2 }, moves = { slam() } }) } },
+        { playerId = "n2", name = "NpcB", mons = {
+          mn({ species = "Delta", level = 50, maxHp = 400, spa = 120, spe = 20,
+               types = { 2 }, moves = { zap() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+  battle:submitChoice("n1", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("n2", { action = "fight", move = 0, target = 1 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- CheckDamageStatsCritical, both ways, on a seed where each side crits once.
+-- Both raise Reflect on turn 1.  Ann (Attack +1, Defense +2) crits Bob on
+-- turn 3: Bob's Defense stage 0 is lower than her +1, so the boosted pair is
+-- kept -- 120 against Bob's Reflect-doubled 160.  Bob (focus energy, for a
+-- crit ladder that is not Ann's) crits Ann on turn 2: her +2 is not lower than
+-- his 0, so the hit reads the unmodified 80 against 80, no stage and no
+-- Reflect.
+scenario("crit_stages", function(events)
+  local slash = function()
+    local m = mv("slash_hit", 70, 255, 0, 30); m.highCrit = true; return m
+  end
+  local wall = function() return fx("wall_up", 0, 1, 65, 20) end
+  local battle = build({
+    id = "cr", mode = "1v1", seed = 2, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", level = 30, maxHp = 400, atk = 80, def = 80, spe = 60,
+             types = { 2 }, stages = { atk = 1, def = 2 }, moves = { slash(), wall() } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", level = 30, maxHp = 400, atk = 80, def = 80, spe = 50,
+             types = { 2 }, focusEnergy = true, moves = { slash(), wall() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice("p2", { action = "fight", move = 1 })
+  drainInto(battle, events)
+  for _ = 1, 3 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- TruncateHL_BC.  Bob's Defense 600 under his Reflect is 1200; Ann's Attack is
+-- 200.  Outside a link battle the loop folds twice: 12 against 75.  In one (the
+-- cart's LINK_COLOSSEUM exit) it folds once and keeps the low bytes: 50
+-- against 300 -> 44, the wrap bug.  Same sheets, same seed, only the mode.
+local function truncation(mode, id, foeId)
+  return function(events)
+    local thump = function() return mv("thump", 70, 255, 0) end
+    local wall = function() return fx("wall_up", 0, 1, 65, 20) end
+    local battle = build({
+      id = id, mode = mode, seed = 31337, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = {
+          mn({ species = "Alpha", level = 30, maxHp = 400, atk = 200, spe = 50,
+               types = { 2 }, moves = { thump() } }) } } },
+        b = { { playerId = foeId, name = "Bob", mons = {
+          mn({ species = "Beta", level = 30, maxHp = 400, def = 600, spe = 60,
+               types = { 2 }, moves = { wall(), thump() } }) } } },
+      },
+    })
+    drainInto(battle, events)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice(foeId, { action = "fight", move = 0 })
+    drainInto(battle, events)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice(foeId, { action = "fight", move = 1 })
+    drainInto(battle, events)
+    return battle
+  end
+end
+scenario("truncate_wild", truncation("wild", "tw", "wild"))
+scenario("truncate_link", truncation("1v1", "tl", "p2"))
+
+-- Screens belong to the SIDE.  Ann raises Reflect on turn 1 and her partner
+-- Abe is covered by it; her recast on turn 2 fails; she switches out on turn 3
+-- and Bob's Haze lands on turn 4, and neither takes it down; it fades at the
+-- end of turn 5 (cast turn included), so turn 6 is unscreened.
+scenario("screens_side", function(events)
+  local thump = function() return mv("thump", 50, 255, 0) end
+  local wall = function() return fx("wall_up", 0, 1, 65, 20) end
+  local haze = function() return fx("reset_fog", 0, 1, 25, 20) end
+  local battle = build({
+    id = "ss", mode = "coop_pvp", seed = 8080, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 999, spe = 90, types = { 2 },
+               moves = { wall(), thump() } }),
+          mn({ species = "Gamma", maxHp = 999, spe = 85, types = { 2 },
+               moves = { thump() } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Eta", maxHp = 999, spe = 80, types = { 2 },
+               moves = { thump() } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 999, atk = 60, spe = 50, types = { 2 },
+               moves = { thump(), haze() } }) } },
+        { playerId = "b2", name = "Bea", mons = {
+          mn({ species = "Delta", maxHp = 999, atk = 60, spe = 40, types = { 2 },
+               moves = { thump() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  -- Ann: Reflect, Reflect again, switch to Gamma, then Gamma's one hit.  Bob:
+  -- a hit on Abe every turn but the fourth, which is Haze.
+  for turn = 1, 6 do
+    if turn == 3 then
+      battle:submitChoice("a1", { action = "switch", slot = 1 })
+    else
+      battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    end
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    battle:submitChoice("b1", { action = "fight", move = (turn == 4) and 1 or 0, target = 1 })
+    battle:submitChoice("b2", { action = "fight", move = 0, target = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- HitConfusion on both sides, on a seed where both confused seats hit
+-- themselves on turn 1.  Abe (faster) raises Reflect first, so Ann's self-hit
+-- reads her OWN side's Reflect; Bob selected Explosion, so his self-hit reads
+-- his Defense halved (DamageCalc's EFFECT_SELFDESTRUCT check sees the
+-- selected move).
+scenario("self_hit", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local wall = function() return fx("wall_up", 0, 1, 65, 20) end
+  local boom = function() return fx("big_boom", 250, 0, 7, 5) end
+  local battle = build({
+    id = "sh", mode = "coop_pvp", seed = 5, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 300, atk = 60, def = 60, spe = 50,
+               types = { 2 }, confusion = 4, moves = { thump() } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 300, spe = 90, types = { 2 },
+               moves = { wall() } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 300, atk = 60, def = 60, spe = 40,
+               types = { 2 }, confusion = 4, moves = { boom() } }) } },
+        { playerId = "b2", name = "Bea", mons = {
+          mn({ species = "Delta", maxHp = 300, spe = 30, types = { 2 },
+               moves = { thump() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  drainInto(battle, events)
+  return battle
+end)
+
+-- Struggle is typeless.  Index 0 is NORMAL and NORMAL cannot touch a GHOST on
+-- this chart; Ann (NORMAL) is out of PP, so her Struggle hits Bob (GHOST) with
+-- no STAB, and its recoil is a quarter of what it dealt.
+scenario("struggle_typeless", function(events)
+  local battle = build({
+    id = "st", mode = "1v1", seed = 5555, choiceTimeout = 60, reconnectGrace = 60,
+    chart = { { 100, 0 }, { 100, 100 } },
+    typeIds = { "NORMAL", "GHOST" },
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", level = 30, maxHp = 300, atk = 80, spe = 60,
+             types = { 0 }, moves = { mv("thump", 40, 255, 0, 0) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", level = 30, maxHp = 300, def = 60, spe = 50,
+             types = { 1 }, moves = { mv("haunt", 40, 255, 1) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- Metronome with its last PP calls a plain hit: no recoil, because the called
+-- move is not Struggle.  The turn after, every slot is empty, so it is.
+scenario("metronome_last_pp", function(events)
+  local battle = build({
+    id = "mt", mode = "1v1", seed = 6060, choiceTimeout = 60, reconnectGrace = 60,
+    metronomePool = { mv("pool_hit", 60, 255, 1, 10) },
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = {
+        mn({ species = "Alpha", level = 30, maxHp = 300, atk = 80, spe = 60,
+             types = { 2 }, moves = { fx("wave_finger", 0, 0, 83, 1) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", level = 30, maxHp = 300, def = 60, spe = 50,
+             types = { 2 }, moves = { mv("thump", 40, 255, 0) } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- GetMovePriority's brackets on a four-seat field.  Turn 1: Bob's PROTECT (3)
+-- is slowest and moves first, Ann's QUICK_ATTACK (2) next though she is slow,
+-- Bea's plain hit (1), then Abe's VITAL_THROW (0) last though he is fastest.
+-- Turn 2: EXTREMESPEED and QUICK_ATTACK share a bracket, so Speed decides
+-- between them, and both still move before the faster plain hits.
+scenario("priority", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local battle = build({
+    id = "pr", mode = "coop_pvp", seed = 9090, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 300, spe = 10, types = { 2 },
+               moves = { mv("QUICK_ATTACK", 40, 255, 0) } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 300, spe = 99, types = { 2 },
+               moves = { fx("VITAL_THROW", 70, 0, 17), thump() } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 300, spe = 5, types = { 2 },
+               moves = { mv("PROTECT", 0, 255, 0), mv("EXTREMESPEED", 80, 255, 0) } }) } },
+        { playerId = "b2", name = "Bea", mons = {
+          mn({ species = "Delta", maxHp = 300, spe = 50, types = { 2 },
+               moves = { thump() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+  battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+  battle:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  drainInto(battle, events)
+  battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+  battle:submitChoice("a2", { action = "fight", move = 1, target = 4 })
+  battle:submitChoice("b1", { action = "fight", move = 1, target = 0 })
+  battle:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  drainInto(battle, events)
   return battle
 end)
 

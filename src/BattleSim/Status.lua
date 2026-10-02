@@ -21,7 +21,11 @@
 --     snaps out on is a free one -- unlike sleep.  Otherwise it self-hits on
 --     roll < 128, and the self-hit is a typeless 40-power physical hit using
 --     the confused side's *own* attack against its *own* defence, with no
---     STAB, no type chart, no crit, and a fixed max roll.
+--     STAB, no type chart, no crit, and a fixed max roll.  Those are the
+--     stored battle stats, and the defence arrives doubled when the
+--     *opponent* has Reflect up -- the cart's quirk, applied by Turn's
+--     `_runGates`, which knows who the opponent is.  The scaling and the 997
+--     cap are Damage.compute's, as for any hit.
 --   * **Paralysis** full-stops on roll < 63 (63/256, not the 25% the manual
 --     claims) and quarters speed.
 --

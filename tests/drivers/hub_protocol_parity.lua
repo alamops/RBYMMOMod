@@ -1557,6 +1557,150 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- The referee-fidelity wire (docs/plans/gen12-referee-fidelity.md K1-K3),
+-- each input read by Wire.lua here and lib/sanitize.js there, under the
+-- reader's generation (the third field; a mon is read with none, as the hub
+-- reads a caught sheet):
+--
+--   * K1 -- `traded` on a Gen 1 and a Gen 2 sheet: true kept, false and a
+--     JSON null (NULL) kept as absent, anything else refuses the sheet (and
+--     a party carrying it); `unfateful` still never copied off either;
+--   * K2 -- Gold's held-item data beside `heldItem`: each field at and past
+--     its bound, each wrong type, `mail` read like `traded`; the same fields
+--     on a Gen 1 sheet ignored, not refused; and a Gen 3 sheet untouched (its
+--     numeric hold effect, no holdParam or mail copied);
+--   * K3 -- Gold's `held` event: kept for a generation 2 reader, its `text`
+--     an id and its `amount` a 0 / 1 flag (anything else dropped with the
+--     event kept), refused by a Gen 1 reader, and Gen 3's `held` read as it
+--     always was by a Gen 3 reader or one that names none.
+-- ------------------------------------------------------------------
+
+local function sheet12(gen, extra)
+  local sheet = { species = "ALPHA", level = 50, hp = 100, maxHp = 100,
+                  moves = { { id = "thump", pp = 20, power = 40, accuracy = 255, type = 0,
+                              effect = 0, chance = 0 } } }
+  if gen == 2 then
+    sheet.stats = { atk = 90, def = 90, spe = 90, spa = 90, spd = 90 }
+  else
+    sheet.stats = { atk = 90, def = 90, spd = 90, spc = 90 }
+  end
+  for k, v in pairs(extra or {}) do sheet[k] = v end
+  return sheet
+end
+
+local function merged(base, extra)
+  local out = {}
+  for k, v in pairs(base) do out[k] = v end
+  for k, v in pairs(extra) do out[k] = v end
+  return out
+end
+
+local function fidelity()
+  local held = { heldItem = "LEFTOVERS", holdEffect = "HELD_LEFTOVERS", holdParam = 10,
+                 itemName = "LEFTOVERS" }
+  local gen3Held = { battle = "b1", seq = 80, t = "held", slot = 3, side = "b", mon = 0,
+                     amount = 139, holding = 0, text = "ORAN BERRY" }
+  local function held2(extra)
+    return merged({ battle = "b1", seq = 60, t = "held", slot = 0, side = "a", mon = 0,
+                    text = "LEFTOVERS", amount = 1 }, extra or {})
+  end
+  local gen3Extra = mon3({ heldItem = 139, holdEffect = 1, holdEffectParam = 10 })
+  gen3Extra.holdParam, gen3Extra.mail = 5, true
+  return {
+    -- K1
+    { "mon", sheet12(1, { traded = true }) },
+    { "mon", sheet12(1, { traded = false }) },
+    { "mon", sheet12(1, { traded = "yes" }) },
+    { "mon", sheet12(1, { traded = 1 }) },
+    { "mon", sheet12(1, { traded = NULL }) },
+    { "mon", sheet12(1, { traded = true, unfateful = true }) },
+    { "mon", sheet12(1, { generation = 1, traded = true }) },
+    { "mon", sheet12(2, { traded = true }) },
+    { "mon", sheet12(2, { traded = false }) },
+    { "mon", sheet12(2, { traded = "true" }) },
+    { "mon", sheet12(2, { traded = 0 }) },
+    { "mon", sheet12(2, { generation = 2, traded = true, unfateful = true }) },
+    { "party", { battle = "b1", mons = { sheet12(1, { traded = true }) } }, 1 },
+    { "party", { battle = "b1", mons = { sheet12(1, { traded = "yes" }) } }, 1 },
+    { "party", { battle = "b1", mons = { sheet12(2, { traded = true }) } }, 2 },
+    -- K2 on a Gold sheet
+    { "mon", sheet12(2, held) },
+    { "mon", sheet12(2, merged(held, { mail = true })) },
+    { "mon", sheet12(2, merged(held, { mail = false })) },
+    { "mon", sheet12(2, merged(held, { mail = "yes" })) },
+    { "mon", sheet12(2, merged(held, { mail = 1 })) },
+    { "mon", sheet12(2, merged(held, { mail = NULL })) },
+    { "mon", sheet12(2, { heldItem = "POLKADOT_BOW", holdEffect = "HELD_" .. string.rep("X", 27) }) },
+    { "mon", sheet12(2, { holdEffect = "HELD_" .. string.rep("X", 28) }) },
+    { "mon", sheet12(2, { holdEffect = "LEFTOVERS" }) },
+    { "mon", sheet12(2, { holdEffect = "HELD_leftovers" }) },
+    { "mon", sheet12(2, { holdEffect = "HELD_" }) },
+    { "mon", sheet12(2, { holdEffect = "HELD_LEFT OVERS" }) },
+    { "mon", sheet12(2, { holdEffect = 7 }) },
+    { "mon", sheet12(2, { holdParam = 0 }) },
+    { "mon", sheet12(2, { holdParam = 255 }) },
+    { "mon", sheet12(2, { holdParam = 256 }) },
+    { "mon", sheet12(2, { holdParam = -1 }) },
+    { "mon", sheet12(2, { holdParam = "12" }) },
+    { "mon", sheet12(2, { holdParam = 3.7 }) },
+    { "mon", sheet12(2, { holdParam = true }) },
+    { "mon", sheet12(2, { holdParam = "" }) },
+    { "mon", sheet12(2, { itemName = "MYSTERYBERRY" }) },
+    { "mon", sheet12(2, { itemName = "KINGS ROCK OF OLD" }) },
+    { "mon", sheet12(2, { itemName = "Pink*Bow" }) },
+    { "mon", sheet12(2, { itemName = "@@@" }) },
+    { "mon", sheet12(2, { itemName = 5 }) },
+    -- K2 on a Gen 1 sheet: not its dialect, so ignored rather than refused
+    { "mon", sheet12(1, merged(held, { mail = true })) },
+    { "mon", sheet12(1, { holdEffect = 7, holdParam = 999, itemName = 5, mail = "yes" }) },
+    { "mon", sheet12(1, { generation = 1, holdEffect = "HELD_LEFTOVERS", mail = true }) },
+    -- K2 never reaches a Gen 3 sheet
+    { "mon", gen3Extra },
+    { "mon", mon3({ holdEffect = "HELD_LEFTOVERS" }) },
+    -- K1 + K2 through a party, stamped by the hub's generation
+    { "party", { battle = "b1", mons = { sheet12(2, merged(held, { traded = true, mail = true })) } }, 2 },
+    { "party", { battle = "b1", mons = { sheet12(2, { holdEffect = "LEFTOVERS" }) } }, 2 },
+    { "party", { battle = "b1", mons = { sheet12(1, held) } }, 1 },
+    -- K3
+    { "event", held2(), 2 },
+    { "event", held2({ seq = 61, text = "BERRY", amount = 0 }), 2 },
+    { "event", held2({ seq = 62, amount = 2 }), 2 },
+    { "event", held2({ seq = 63, amount = -1 }), 2 },
+    { "event", held2({ seq = 64, amount = "1" }), 2 },
+    { "event", held2({ seq = 65, amount = true }), 2 },
+    { "event", held2({ seq = 66, amount = 0.5 }), 2 },
+    { "event", held2({ seq = 67, text = "bad id!" }), 2 },
+    { "event", held2({ seq = 68, text = 7 }), 2 },
+    { "event", held2({ seq = 69, text = "GOLD BERRY" }), 2 },
+    { "event", held2({ seq = 70, holding = 3, target = 1, mon = 6 }), 2 },
+    { "event", held2({ seq = 71 }), 1 },
+    { "event", gen3Held, 3 },
+    { "event", gen3Held },
+    { "event", gen3Held, 2 },
+    { "event", { battle = "b1", seq = 72, t = "item", slot = 0, side = "a", text = "POTION",
+                 amount = 5 }, 2 },
+    { "event", { battle = "b1", seq = 73, t = "ability", slot = 0, side = "a" }, 2 },
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "referee_fidelity_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(fidelity()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      local got
+      if kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, gen)
+      elseif kind == "event" then got = Wire.battleEvent(input, gen)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return { cases = out }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

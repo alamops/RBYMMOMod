@@ -2378,8 +2378,11 @@ do
   local afterSpec = fighterIn(battle:snapshot(), "p2").hp
   local specDealt = afterPhys - afterSpec
   ok(physDealt > 0 and specDealt > 0, "both categories still deal damage under Reflect")
+  -- Reflect doubles the physical defence before the damage formula (pokered
+  -- GetDamageVarsForPlayerAttack's `sla c / rl b`), where it used to halve the
+  -- finished damage; the comparison is the same either way.
   ok(physDealt < specDealt,
-     "Reflect halves physical but not Special damage")
+     "Reflect doubles the physical defence but not the Special one")
 end
 
 do
@@ -5767,6 +5770,418 @@ do
   ok(battle:submitChoice("p1", { action = "fight", move = 0 }),
      "FIGHT with nobody to aim at is accepted as a skip")
   ok(battle:outcome() ~= nil, "and the skip closes the fight")
+end
+
+-- ------------------------------------------------------------------
+-- 25. Gen 1 stored battle stats: the switch-in seed, both glitches, the
+--     walls, the resets, crits on party stats, screens, the self-hit
+-- ------------------------------------------------------------------
+--
+-- pokered keeps a battle stat it *writes* (src/BattleSim/Effects.lua's
+-- "Stored battle stats" note), and every number below is worked by hand from
+-- the routines that write it -- the arithmetic is in the comment beside each
+-- assertion.  The g1_* scenarios in tests/drivers/battle_turn_parity.lua hold
+-- lib/battle to the same streams and to the same stored stats (`probes`).
+
+do
+  local ALL = { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true,
+                VOLCANOBADGE = true }
+
+  local function fxm(id, power, effect, o)
+    o = o or {}
+    local out = move({ id = id, power = power, effect = effect,
+                       type = o.type, chance = o.chance })
+    if o.highCrit then out.highCrit = true end
+    return out
+  end
+
+  -- `a` / `b`: mon() options plus `extra` (raw sheet fields mon() does not
+  -- carry: stages, reflect); `aBadges`, `aBag`, `bBag` ride the seats.
+  local function g1(o)
+    local function sheet(opts)
+      local raw = mon(opts)
+      for key, value in pairs(opts.extra or {}) do raw[key] = value end
+      return raw
+    end
+    local aMons, bMons = {}, {}
+    for i, opts in ipairs(o.a) do aMons[i] = sheet(opts) end
+    for i, opts in ipairs(o.b) do bMons[i] = sheet(opts) end
+    local battle = battleOf({
+      mode = o.mode or "wild", seed = o.seed or 6201,
+      specialTypes = o.specialTypes,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", badges = o.aBadges,
+                bag = o.aBag, mons = aMons } },
+        b = { { playerId = "p2", name = "Bob", bag = o.bBag, mons = bMons } },
+      },
+    })
+    drain(battle)
+    return battle
+  end
+
+  local function step(battle, aChoice, bChoice)
+    battle:submitChoice("p1", aChoice)
+    battle:submitChoice("p2", bChoice)
+    return drain(battle)
+  end
+  local function use(i) return { action = "fight", move = i } end
+
+  local function cur4(battle, playerId)
+    local m = activeMonOf(battle, playerId)
+    if not m then return "none" end
+    return string.format("%d/%d/%d/%d", m.cur.atk, m.cur.def, m.cur.spd, m.cur.spc)
+  end
+  local function said(events, text)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == text then return true end
+    end
+    return false
+  end
+  local function hits(events, slot)
+    local out = {}
+    for _, event in ipairs(events) do
+      if event.t == "damage" and event.slot == slot then out[#out + 1] = event.amount end
+    end
+    return out
+  end
+
+  local ANN = { atk = 100, def = 80, spd = 60, spc = 50, maxHp = 300, baseSpd = 0 }
+  local function ann(o)
+    local out = {}
+    for k, v in pairs(ANN) do out[k] = v end
+    for k, v in pairs(o or {}) do out[k] = v end
+    return out
+  end
+  local splash = fxm("splash", 0, 85)
+
+  -- (a) The switch-in seed, in LoadBattleMonFromParty's order: party ->
+  --     penalty -> badges.  Speed 60 paralysed is 15, then SOULBADGE adds
+  --     15>>3 = 1 -> 16; the other three are x9/8: 112, 90, 56.  The foe gets
+  --     the penalty and never a badge: Attack 100 burned is 50.
+  do
+    local battle = g1({ aBadges = ALL,
+      a = { ann({ status = "PAR", moves = { splash } }) },
+      b = { { species = "Beta", atk = 100, status = "BRN", baseSpd = 0, moves = { splash } } } })
+    eq(cur4(battle, "p1"), "112/90/16/56", "seed: party -> paralysis -> badges")
+    eq(cur4(battle, "p2"), "50/40/40/40", "seed: the foe is penalised, never boosted")
+    local alpha = activeMonOf(battle, "p1")
+    eq(alpha.partyStats.spd, 60, "the party stats stay as the sheet stated them")
+    eq(alpha.stats.spd, 60, "...and so do the unmodified ones")
+    local link = g1({ mode = "1v1", aBadges = ALL,
+      a = { ann({ status = "PAR", moves = { splash } }) },
+      b = { { species = "Beta", baseSpd = 0, moves = { splash } } } })
+    eq(cur4(link, "p1"), "100/80/15/50", "seed in a link fight: the penalty, no badge")
+    eq(link:_speedOf(fighterById(link, "p1"), activeMonOf(link, "p1")), 15,
+       "turn order reads the stored Speed")
+  end
+
+  -- (b) The player's own raise.  ATTACK_UP2: 100 x 200/100 = 200 from the
+  --     unmodified stat (badge and stage both dropped), then ApplyBadgeStatBoosts
+  --     over all four: 200+25 = 225, 90+11 = 101, 67+8 = 75, 56+7 = 63.  An
+  --     accuracy raise runs the badges again: 253, 113, 84, 70.  Each one
+  --     re-quarters the paralysed foe: 80 -> 20 at the seed, then 5, then 1.
+  do
+    local battle = g1({ aBadges = ALL,
+      a = { ann({ moves = { fxm("sharpen", 0, 50), fxm("aim", 0, 14) } }) },
+      b = { { species = "Beta", spd = 80, status = "PAR", baseSpd = 0, moves = { splash } } } })
+    eq(cur4(battle, "p2"), "40/40/20/40", "the paralysed foe starts quartered")
+    step(battle, use(0), use(0))
+    eq(cur4(battle, "p1"), "225/101/75/63", "badge-stacking: a raise re-runs every badge")
+    eq(activeMonOf(battle, "p1").stages.atk, 2, "...over a +2 stage")
+    eq(activeMonOf(battle, "p2").cur.spd, 5, "re-penalty: the foe's 20 quartered again")
+    step(battle, use(1), use(0))
+    eq(cur4(battle, "p1"), "253/113/84/70", "an accuracy raise compounds them again")
+    eq(activeMonOf(battle, "p2").cur.spd, 1, "...and re-quarters the foe to its floor of 1")
+
+    -- A link fight: no badge ever, but the re-penalty is unconditional.
+    local link = g1({ mode = "1v1", aBadges = ALL,
+      a = { ann({ moves = { fxm("sharpen", 0, 50) } }) },
+      b = { { species = "Beta", spd = 80, status = "PAR", baseSpd = 0, moves = { splash } } } })
+    step(link, use(0), use(0))
+    eq(cur4(link, "p1"), "200/80/60/50", "a link fight rebuilds the stat and boosts nothing")
+    eq(activeMonOf(link, "p2").cur.spd, 5, "...and still re-penalises the foe")
+  end
+
+  -- (c) The enemy's drops on the player.  Burned, the seed Attack is
+  --     100/2 = 50 -> 56.  A Growl: 100 x 66/100 = 66 (the burn dropped), all
+  --     four badges (74, 101, 75, 63), then the re-penalty on the burned target
+  --     itself: 74/2 = 37.  A side-effect Special drop: 50 x 66/100 = 33, the
+  --     badges (41, 113, 84, 37), 41/2 = 20.  An accuracy drop: badges only
+  --     (22, 127, 94, 41), 22/2 = 11.
+  do
+    local battle = g1({ aBadges = ALL,
+      a = { ann({ status = "BRN", moves = { splash } }) },
+      b = { { species = "Beta", spd = 90, baseSpd = 0,
+              moves = { fxm("growl", 0, 18), fxm("psyray", 40, 71, { chance = 100 }),
+                        fxm("sand", 0, 22) } } } })
+    eq(cur4(battle, "p1"), "56/90/67/56", "a burned seed halves, then boosts")
+    step(battle, use(0), use(0))
+    eq(cur4(battle, "p1"), "37/101/75/63", "the enemy's drop re-runs the badges, then the burn")
+    step(battle, use(0), use(1))
+    eq(cur4(battle, "p1"), "20/113/84/37", "a side-effect drop does the same")
+    step(battle, use(0), use(2))
+    eq(cur4(battle, "p1"), "11/127/94/41", "and so does an accuracy drop")
+
+    -- The player's own drop on the enemy re-runs nothing of the player's.
+    local mine = g1({ aBadges = ALL,
+      a = { ann({ spd = 90, moves = { fxm("growl", 0, 18) } }) },
+      b = { { species = "Beta", baseSpd = 0, moves = { splash } } } })
+    local before = cur4(mine, "p1")
+    step(mine, use(0), use(0))
+    eq(cur4(mine, "p1"), before, "the player's drop leaves the player's badges alone")
+    eq(activeMonOf(mine, "p2").cur.atk, 26, "the foe's 40 x 66/100 = 26")
+  end
+
+  -- (d) An X item is the player's raise: X SPEED 60 x 150/100 = 90, badges
+  --     (126, 101, 101, 63); the battler opposite (burned, 80/2 = 40) is
+  --     halved again to 20.  At the 999 wall it fails, the stage back where
+  --     it was.
+  do
+    local battle = g1({ aBadges = ALL, aBag = { X_SPEED = 2 },
+      a = { ann({ moves = { splash } }) },
+      b = { { species = "Beta", atk = 80, status = "BRN", baseSpd = 0, moves = { splash } } } })
+    step(battle, { action = "item", item = "X_SPEED" }, use(0))
+    eq(cur4(battle, "p1"), "126/101/101/63", "an X item re-runs every badge")
+    eq(activeMonOf(battle, "p2").cur.atk, 20, "...and re-penalises the battler opposite")
+
+    local wall = g1({ mode = "1v1", aBag = { X_SPEED = 2 },
+      a = { ann({ spd = 700, moves = { splash } }) },
+      b = { { species = "Beta", baseSpd = 0, moves = { splash } } } })
+    step(wall, { action = "item", item = "X_SPEED" }, use(0))
+    eq(activeMonOf(wall, "p1").cur.spd, 999, "700 x 150/100 = 1050 is stored as 999")
+    local events = step(wall, { action = "item", item = "X_SPEED" }, use(0))
+    ok(said(events, "Nothing happened"), "an X item on a 999 stat fails")
+    eq(activeMonOf(wall, "p1").stages.spd, 1, "...and leaves the stage at +1")
+  end
+
+  -- (e) Rage: the raging battler is the user, so its badges re-run and the
+  --     attacker is re-penalised.  After the X SPEED above and one Rage build:
+  --     Attack 100 x 150/100 = 150 -> 168, the others 113 / 113 / 70; the
+  --     burned attacker 20 -> 10.
+  do
+    local battle = g1({ aBadges = ALL, aBag = { X_SPEED = 1 },
+      a = { ann({ maxHp = 400, moves = { fxm("fury", 20, 81) } }) },
+      b = { { species = "Beta", maxHp = 400, atk = 80, spd = 50, status = "BRN",
+              baseSpd = 0, moves = { fxm("thump", 10, 0) } } } })
+    step(battle, { action = "item", item = "X_SPEED" }, use(0))
+    step(battle, use(0), use(0))
+    eq(cur4(battle, "p1"), "168/113/113/70", "a Rage build re-runs every badge")
+    eq(activeMonOf(battle, "p2").cur.atk, 10, "...and re-penalises the attacker")
+  end
+
+  -- (f) The walls (link fight, no badges).  +2 on 500: 1000 -> 999.  +2 on
+  --     999: "Nothing happened", the stage wound back ONE step (+2 -> +4 ->
+  --     +3).  A drop on a Defense of 1: "Nothing happened", -1 -> 0; a -2 drop
+  --     nets -1.  A side-effect drop at the wall says nothing.
+  do
+    local battle = g1({ mode = "1v1",
+      a = { ann({ atk = 500, spd = 90, moves = { fxm("sharpen", 0, 50),
+        fxm("soften", 0, 19), fxm("crush", 0, 59), fxm("nip", 1, 69, { chance = 100 }) } }) },
+      b = { { species = "Beta", maxHp = 999, def = 1, baseSpd = 0, moves = { splash } } } })
+    step(battle, use(0), use(0))
+    eq(activeMonOf(battle, "p1").cur.atk, 999, "a raise past 999 stores 999")
+    local events = step(battle, use(0), use(0))
+    ok(said(events, "Nothing happened"), "a raise on a 999 stat fails")
+    eq(activeMonOf(battle, "p1").stages.atk, 3, "...and a +2 still nets +1")
+    events = step(battle, use(1), use(0))
+    ok(said(events, "Nothing happened"), "a drop on a stat of 1 fails")
+    eq(activeMonOf(battle, "p2").stages.def, 0, "...the -1 wound back")
+    step(battle, use(2), use(0))
+    eq(activeMonOf(battle, "p2").stages.def, -1, "a -2 drop at the wall nets -1")
+    events = step(battle, use(3), use(0))
+    ok(not said(events, "Nothing happened"), "a side-effect drop at the wall is silent")
+    eq(activeMonOf(battle, "p2").stages.def, -1, "...and moves nothing")
+  end
+
+  -- (g) The resets.  A switch-in reloads the party stats and zeroes every
+  --     stage (the raised 225 is 112 again); a faint does the same to the
+  --     fallen monster; Haze copies the unmodified stats over both battlers,
+  --     badges and the foe's paralysis lifted with the stages; and a
+  --     Transformed monster switched back in has its own stats back.
+  do
+    local battle = g1({ aBadges = ALL,
+      a = { ann({ moves = { fxm("sharpen", 0, 50), fxm("haze", 0, 25) } }),
+            { species = "Gamma", baseSpd = 0, moves = { splash } } },
+      b = { { species = "Beta", spd = 80, status = "PAR", baseSpd = 0, moves = { splash } } } })
+    step(battle, use(0), use(0))
+    step(battle, { action = "switch", slot = 1 }, use(0))
+    step(battle, { action = "switch", slot = 0 }, use(0))
+    eq(cur4(battle, "p1"), "112/90/67/56", "a switch-in reloads party -> badges")
+    eq(activeMonOf(battle, "p1").stages.atk, 0, "...with every stage back at 0")
+    step(battle, use(0), use(0))
+    step(battle, use(1), use(0))
+    eq(cur4(battle, "p1"), "100/80/60/50", "Haze: the unmodified stats, badges lifted")
+    eq(cur4(battle, "p2"), "40/40/80/40", "Haze lifts the foe's paralysis penalty too")
+
+    local fell = g1({ mode = "1v1",
+      a = { ann({ hp = 1, moves = { fxm("sharpen", 0, 50) } }),
+            { species = "Gamma", baseSpd = 0, moves = { splash } } },
+      b = { { species = "Beta", atk = 200, spd = 10, baseSpd = 0, moves = { fxm("thump", 40, 0) } } } })
+    step(fell, use(0), use(0))
+    local fallen = fighterById(fell, "p1").mons[1]
+    eq(fallen.hp, 0, "the raised monster fell")
+    eq(fallen.stages.atk, 0, "a faint zeroes its stages")
+    eq(fallen.cur.atk, 100, "...and reloads its battle stats from the party")
+
+    local mimic = g1({ mode = "1v1",
+      a = { ann({ atk = 30, spd = 90, moves = { fxm("mimicry", 0, 57) } }),
+            { species = "Gamma", baseSpd = 0, moves = { splash } } },
+      b = { { species = "Beta", atk = 200, baseSpd = 0, moves = { splash } } } })
+    step(mimic, use(0), use(0))
+    local alpha = activeMonOf(mimic, "p1")
+    eq(alpha.cur.atk, 200, "Transform copies the battle stats")
+    eq(alpha.stats.atk, 200, "...and the unmodified ones")
+    eq(alpha.partyStats.atk, 30, "...and never the party struct")
+    step(mimic, { action = "switch", slot = 1 }, use(0))
+    step(mimic, { action = "switch", slot = 0 }, use(0))
+    eq(activeMonOf(mimic, "p1").stats.atk, 30, "switched back in, its own stats return")
+  end
+
+  -- (h) A critical hit reads both party stats.  The same seed, the same draws:
+  --     a raised (+2), badged, burned Attack into a Reflect deals exactly what
+  --     a plain 100 into a plain 100 deals -- and at level 20 that is the
+  --     crit base 18 x 70 x 100 / 100 / 50 + 2 = 27, x1.5 STAB = 40, rolled
+  --     into 34..40.
+  do
+    local function critHit(dressed)
+      local battle = g1({ seed = 6202, aBadges = dressed and ALL or nil,
+        a = { ann({ baseSpd = 255, status = dressed and "BRN" or nil,
+                    extra = dressed and { stages = { atk = 2 } } or nil,
+                    moves = { fxm("slash", 70, 0, { highCrit = true }) } }) },
+        b = { { species = "Beta", maxHp = 400, def = 100, spd = 30, baseSpd = 0,
+                extra = dressed and { reflect = true } or nil, moves = { splash } } } })
+      local events = step(battle, use(0), use(0))
+      return said(events, "A critical hit"), hits(events, 3)[1]
+    end
+    local critA, dealtA = critHit(true)
+    local critB, dealtB = critHit(false)
+    ok(critA and critB, "base Speed 255 with a high-crit move crits")
+    eq(dealtA, dealtB, "a crit ignores the stage, the badges, the burn and the Reflect")
+    ok(dealtA >= 34 and dealtA <= 40, "...and lands in the party-stat band 34..40")
+
+    -- Transform + crit: the transformed monster swings with its own 30, not
+    -- the copied 200 -- a crit base of 18 x 70 x 30 / 100 / 50 + 2 = 9, x1.5
+    -- = 13 at most, where 200 would be 52 x 1.5 = 78.
+    local mimic = g1({ mode = "1v1", seed = 6107,
+      a = { ann({ atk = 30, def = 30, spd = 90, spc = 30, maxHp = 400, baseSpd = 255,
+                  moves = { fxm("mimicry", 0, 57) } }) },
+      b = { { species = "Beta", maxHp = 400, atk = 200, def = 100, spd = 40, spc = 100,
+              baseSpd = 255, moves = { fxm("slash", 70, 0, { highCrit = true }) } } } })
+    step(mimic, use(0), use(0))
+    local events = step(mimic, use(0), use(0))
+    local onBob = hits(events, 3)[1]
+    ok(onBob ~= nil and onBob <= 13, "a transformed crit reads its pre-Transform Attack")
+  end
+
+  -- (i) Screens double the defence before the scaling.  512 x2 = 1024 ->
+  --     1024/4 = 256, whose low byte 0 divides as 1: level 20, 10 power, 25
+  --     Attack: 10 x 10 x 25 / 1 / 50 + 2 = 52, x1.5 = 78, rolled 66..78 --
+  --     where the unscreened 512 (128 scaled) is 2, x1.5 = 3.  A second Reflect
+  --     fails, a fixed 20 is still 20, Haze takes both screens down.
+  do
+    local battle = g1({ mode = "1v1", seed = 6109,
+      a = { ann({ maxHp = 900, def = 512, spd = 90,
+                  moves = { fxm("wall", 0, 65), fxm("glow", 0, 64), splash } }) },
+      b = { { species = "Beta", maxHp = 400, atk = 100, spd = 30, baseSpd = 0,
+              moves = { fxm("thump", 10, 0), fxm("sonic", 20, 41), fxm("haze", 0, 25) } } } })
+    local dealt = hits(step(battle, use(0), use(0)), 0)[1]
+    ok(dealt and dealt >= 66 and dealt <= 78, "a Reflect that wraps the byte hits harder")
+    local events = step(battle, use(0), use(1))
+    ok(said(events, "But it failed"), "a second Reflect fails")
+    eq(hits(events, 0)[1], 20, "a fixed-damage move ignores the Reflect")
+    step(battle, use(1), use(2))
+    local alpha = activeMonOf(battle, "p1")
+    ok(not alpha.reflect and not alpha.lightScreen, "Haze takes both screens down")
+    dealt = hits(step(battle, use(2), use(0)), 0)[1]
+    ok(dealt and dealt <= 3, "unscreened, 512 (128 scaled) is a 3 at most")
+  end
+
+  -- (j) The confusion self-hit, 40 power at level 20 with no roll: 160 into
+  --     its own 9 is 10 x 40 x 160 / 9 / 50 + 2 = 144; into 9 x2 -- the
+  --     OPPONENT's Reflect -- 10 x 40 x 160 / 18 / 50 + 2 = 73.  Its own
+  --     Reflect does nothing.
+  do
+    local function selfHits(aExtra, bExtra)
+      local battle = g1({ mode = "1v1", seed = 6111,
+        a = { ann({ maxHp = 900, atk = 160, def = 9, spd = 30, confusion = 6,
+                    extra = aExtra, moves = { splash } }) },
+        b = { { species = "Beta", maxHp = 400, spd = 90, baseSpd = 0, extra = bExtra,
+                moves = { splash } } } })
+      local out = {}
+      for _ = 1, 5 do
+        for _, amount in ipairs(hits(step(battle, use(0), use(0)), 0)) do
+          out[#out + 1] = amount
+        end
+      end
+      return table.concat(out, ",")
+    end
+    local theirs = selfHits(nil, { reflect = true })
+    ok(theirs ~= "", "the confused monster hurt itself")
+    ok(not theirs:find("[^73,]"), "the opponent's Reflect doubles its Defense: 73 a hit")
+    local own = selfHits({ reflect = true }, nil)
+    ok(own ~= "" and not own:find("[^14,]") and own:find("144", 1, true),
+       "its own Reflect does not: 144 a hit")
+  end
+
+  -- (k) MainInBattleLoop clears a flinch at the turn's open: a slower Stomp
+  --     that lands on a monster that already moved costs it nothing.
+  do
+    local battle = g1({ mode = "1v1",
+      a = { ann({ maxHp = 400, spd = 90, moves = { fxm("thump", 10, 0) } }) },
+      b = { { species = "Beta", maxHp = 400, spd = 30, baseSpd = 0,
+              moves = { fxm("stomp", 10, 31, { chance = 100 }) } } } })
+    local flinched = false
+    for _ = 1, 3 do
+      if said(step(battle, use(0), use(0)), "Alpha flinched") then flinched = true end
+    end
+    ok(not flinched, "a stale flinch dies at the next turn's open")
+  end
+
+  -- (l) Curing the player's fielded monster rewrites its battle stats from the
+  --     party (ItemUseMedicine): the paralysis and every badge go, 60 Speed and
+  --     a bare 100 Attack.  A Full Restore that also healed takes the HP
+  --     branch and leaves the stats as they were; at full HP it is a Full
+  --     Heal.  The computer's cure never touches a stat.
+  do
+    local function cured(item, hp, mode, side)
+      local battle = g1({ mode = mode or "wild", aBadges = ALL,
+        aBag = { [item] = 1 }, bBag = { [item] = 1 },
+        a = { ann({ status = side == "b" and nil or "PAR", hp = hp, moves = { splash } }) },
+        b = { { species = "Beta", spd = 80, status = side == "b" and "PAR" or nil,
+                baseSpd = 0, moves = { splash } } } })
+      if side == "b" then
+        step(battle, use(0), { action = "item", item = item })
+        return activeMonOf(battle, "p2")
+      end
+      step(battle, { action = "item", item = item }, use(0))
+      return activeMonOf(battle, "p1")
+    end
+    local healed = cured("PARLYZ_HEAL")
+    eq(healed.status, nil, "Parlyz Heal cures")
+    eq(string.format("%d/%d", healed.cur.atk, healed.cur.spd), "100/60",
+       "...and copies the party stats over the battle ones")
+    local restored = cured("FULL_RESTORE", 100)
+    eq(restored.status, nil, "a Full Restore that heals cures too")
+    eq(restored.cur.spd, 16, "...but leaves the stored penalty")
+    local full = cured("FULL_RESTORE", nil)
+    eq(full.cur.spd, 60, "at full HP a Full Restore is a Full Heal")
+    local npc = cured("PARLYZ_HEAL", nil, "coop_npc", "b")
+    eq(npc.status, nil, "the computer cures its own monster")
+    eq(npc.cur.spd, 20, "...and AICureStatus leaves the quartered Speed")
+  end
+
+  -- (m) A vitamin on the fielded monster rebuilds its battle stats the way a
+  --     level-up does: PROTEIN at level 100 is +12 (floor(sqrt(2560)/4) = 12),
+  --     so 112 party -> 112 unmodified -> x9/8 = 126.
+  do
+    local battle = g1({ aBadges = ALL, aBag = { PROTEIN = 1 },
+      a = { ann({ level = 100, moves = { splash } }) },
+      b = { { species = "Beta", baseSpd = 0, moves = { splash } } } })
+    step(battle, { action = "item", item = "PROTEIN" }, use(0))
+    local alpha = activeMonOf(battle, "p1")
+    eq(alpha.partyStats.atk, 112, "PROTEIN raises the party Attack")
+    eq(alpha.cur.atk, 126, "...and the fielded battle stat is rebuilt through the badges")
+  end
 end
 
 -- ------------------------------------------------------------------

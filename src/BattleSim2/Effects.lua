@@ -8,6 +8,10 @@
 
 local need = ...
 
+-- For the burn / paralysis tail of `battleStat`, so the halving and the
+-- quartering are one rule with one owner rather than a second copy here.
+local Status = need("BattleSim2/Status")
+
 local M = {}
 
 local floor, max, min = math.floor, math.max, math.min
@@ -172,6 +176,10 @@ M.CATEGORIES = {
 M.STAGE_MIN = -6
 M.STAGE_MAX = 6
 
+-- BattleCommand_Screen's `ld a, 5`: a Reflect or Light Screen counts five
+-- between-turn ticks (HandleScreens), the turn it went up included.
+M.SCREEN_TURNS = 5
+
 -- Gen1 stage multipliers as percents (25/100 .. 400/100).
 M.STAGE_MULT = {
   [-6] = 25, [-5] = 28, [-4] = 33, [-3] = 40, [-2] = 50, [-1] = 66,
@@ -329,8 +337,17 @@ function M.stageMult(stage)
   return M.STAGE_MULT[M.clampStage(stage)]
 end
 
+-- CalcBattleStats (pokecrystal engine/battle/effect_commands.asm:4817-4875):
+-- the unmodified stat times the stage's ratio from data/battle/
+-- stat_multipliers.asm, then a quotient of 0 is raised to 1 and one at or past
+-- MAX_STAT_VALUE is held at 999.  The cart's ratios are num/den pairs (15/10,
+-- 2/1, 25/10 ...); each is the percent above over 100 exactly, so the floor
+-- lands on the same integer.
 function M.applyStage(base, stage)
-  return floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
+  local value = floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
+  if value < 1 then return 1 end
+  if value > M.MAX_STAT_VALUE then return M.MAX_STAT_VALUE end
+  return value
 end
 
 -- Crystal's badge rules, as gen1recomp ports them (src/battle/gen2/Battle.lua,
@@ -387,10 +404,10 @@ function M.glacierBoostsSpDef(boostedSpa)
   return a % 2 == 1
 end
 
--- The stat a hit or the turn order reads, plus the badge boost (port
--- Battle.lua:811-833, battleStat).  `wireStatKey` is atk/def/spe/spa/spd.
--- `spa` is the same monster's unboosted Sp. Atk, and is read only for `spd`:
--- it is what Glacier's tail is decided on.
+-- One stat plus its owner's badge boost.  `wireStatKey` is atk/def/spe/spa/
+-- spd.  `spa` is the same monster's Sp. Atk as BadgeStatBoosts finds it --
+-- already staged, because CalcPlayerStats runs CalcBattleStats first -- and
+-- is read only for `spd`: it is what Glacier's tail is decided on.
 function M.badgeBoost(statValue, wireStatKey, badges, spa)
   local base = max(0, int(statValue, 0))
   if type(badges) ~= "table" then return base end
@@ -404,6 +421,44 @@ function M.badgeBoost(statValue, wireStatKey, badges, spa)
     return M.boostStat(base)
   end
   return base
+end
+
+-- The stat a hit, the turn order or a confusion self-hit reads: the battle
+-- stat, rebuilt the way CalcPlayerStats does it (pokecrystal engine/battle/
+-- effect_commands.asm:4778-4797) --
+--
+--   1. CalcBattleStats: the unmodified stat x the stage ratio, 1..999
+--      (`applyStage`);
+--   2. BadgeStatBoosts (engine/battle/core.asm:6768): +1/8, held at 999, and
+--      Glacier's Sp. Def tail reading the staged-then-boosted Sp. Atk;
+--   3. ApplyPrzEffectOnSpeed / ApplyBrnEffectOnAttack (core.asm:6585-6669):
+--      paralysis quarters Speed and burn halves Attack, each at least 1.
+--
+-- Read-time rather than stored (docs/plans/gen12-referee-fidelity.md,
+-- decision 2): the cart rebuilds every stat from the raw one on each stage
+-- change and on a status-cure item (HealStatus farcalls CalcPlayerStats), and
+-- a status landing mid-fight cuts the stat it finds -- already staged and
+-- boosted -- so the order above is what a hit reads.  The one place the cart
+-- reads otherwise is written down rather than modelled: a switch-in loads the
+-- party stats and runs the status penalty BEFORE BadgeStatBoosts (core.asm:
+-- 3904-3906), so a burned or paralysed switch-in holding ZEPHYR / PLAIN can
+-- sit a point off this until its first stage change.
+--
+-- `mon` is a sheet: { stats, stages, status }.  `badges` is its seat's set
+-- (nil for every seat the cart would not boost; see Turn.BADGE_MODES).
+function M.battleStat(mon, key, badges)
+  mon = type(mon) == "table" and mon or {}
+  local stats = type(mon.stats) == "table" and mon.stats or {}
+  local stages = type(mon.stages) == "table" and mon.stages or {}
+  local value = M.applyStage(stats[key], stages[key])
+  local spa = nil
+  if key == "spd" then spa = M.applyStage(stats.spa, stages.spa) end
+  value = M.badgeBoost(value, key, badges, spa)
+  if key == "atk" and mon.status == "burn" then value = Status.burnAttack(value) end
+  if key == "spe" and mon.status == "paralysis" then
+    value = Status.paralysisSpeed(value)
+  end
+  return value
 end
 
 -- DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146; port
@@ -578,6 +633,12 @@ local function applyStatChange(out, fighter, mon, stat, delta)
   out.events[#out.events + 1] = { kind = "stat", fields = fields }
 end
 
+-- Every stage back to 0.  Haze, and the levels a monster leaves behind:
+-- pokecrystal keeps one set of stat levels per side (wPlayerStatLevels) and
+-- refills it on every send-out (ResetPlayerStatLevels, engine/battle/
+-- core.asm:3944), so a monster that switches in or faints brings no stage
+-- with it -- the referee keeps them per monster and clears them at those two
+-- points instead (Turn `_resolveSwitches` / `_faint`).
 local function resetStages(mon)
   mon.stages.atk = 0
   mon.stages.def = 0
@@ -587,6 +648,7 @@ local function resetStages(mon)
   mon.stages.acc = 0
   mon.stages.eva = 0
 end
+M.resetStages = resetStages
 
 -- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
 -- Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
@@ -603,7 +665,8 @@ local function blockedBySubstitute(effectId)
 end
 
 -- ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
---      moveIndex (1-based), statusToWire
+--      moveIndex (1-based), statusToWire, userScreens (the user's side's
+--      screen counts; see LIGHT_SCREEN_EFFECT below)
 -- Returns { nothing, messages, events, heals } where heals = { amount } for user.
 function M.applyPrimary(ctx)
   ctx = ctx or {}
@@ -751,17 +814,22 @@ function M.applyPrimary(ctx)
     return out
   end
 
-  if effectId == 64 then -- LIGHT_SCREEN_EFFECT
-    userMon.lightScreen = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " created a light screen"
-    return out
-  end
-
-  if effectId == 65 then -- REFLECT_EFFECT
-    userMon.reflect = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " created a reflect"
+  -- BattleCommand_Screen (pokecrystal engine/battle/effect_commands.asm:
+  -- 6147-6188): a screen belongs to the user's SIDE (wPlayerScreens), lasts
+  -- SCREEN_TURNS, and a second cast while it is up fails ("But it failed!")
+  -- rather than refreshing the count.  `ctx.userScreens` is the side's
+  -- { lightScreen, reflect } turn counts (Turn's `self.screens[side]`), which
+  -- the between-turn tick counts down; nothing else ever clears them.
+  if effectId == 64 or effectId == 65 then -- LIGHT_SCREEN_EFFECT / REFLECT_EFFECT
+    local key = effectId == 64 and "lightScreen" or "reflect"
+    local screens = ctx.userScreens
+    if type(screens) ~= "table" or int(screens[key], 0) > 0 then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
+    screens[key] = M.SCREEN_TURNS
+    out.messages[#out.messages + 1] = userMon.species
+      .. (effectId == 64 and " created a light screen" or " created a reflect")
     return out
   end
 
@@ -1114,16 +1182,41 @@ function M.isRage(effectId)
   return int(effectId, 0) == 81
 end
 
--- Gen1: Reflect halves physical, Light Screen halves special.  `isSpecial`
--- comes from Effects.isSpecialType(move.type, battle.specialTypes).
-function M.screenDamage(damage, defender, isSpecial)
-  local d = max(0, int(damage, 0))
-  if isSpecial then
-    if defender.lightScreen then d = floor(d / 2) end
-  else
-    if defender.reflect then d = floor(d / 2) end
-  end
-  return d
+-- ------------------------------------------------------------------
+-- move priority
+-- ------------------------------------------------------------------
+--
+-- GetMovePriority (pokecrystal engine/battle/core.asm:829-850): Vital Throw
+-- answers 0 by its move id, every other move by its effect's row in
+-- data/moves/effects_priorities.asm, and a move with no row is BASE_PRIORITY
+-- (constants/battle_constants.asm: 1).  DetermineMoveOrder compares the two
+-- numbers before anything else (CompareMovePriority), so a higher one moves
+-- first whatever the Speed.
+--
+-- The cart keys the table by effect; this keys it by the move ids that carry
+-- those effects (data/moves/moves.asm), because none of the five effects has
+-- an id in this file's table -- a Gold sheet names EFFECT_PROTECT /
+-- EFFECT_ENDURE / EFFECT_PRIORITY_HIT / EFFECT_COUNTER / EFFECT_MIRROR_COAT
+-- as effect 0 (GEN2_EFFECT_ID above), and EFFECT_FORCE_SWITCH shares 28 with
+-- Gen 1's Teleport row.  The selected move's id is what is read, as the cart
+-- reads wCurPlayerMove: Metronome and Mirror Move move at base priority
+-- whatever they call.
+M.BASE_PRIORITY = 1
+M.MOVE_PRIORITY = {
+  PROTECT = 3, DETECT = 3,                            -- EFFECT_PROTECT, 3
+  ENDURE = 3,                                         -- EFFECT_ENDURE, 3
+  QUICK_ATTACK = 2, MACH_PUNCH = 2, EXTREMESPEED = 2, -- EFFECT_PRIORITY_HIT, 2
+  WHIRLWIND = 0, ROAR = 0,                            -- EFFECT_FORCE_SWITCH, 0
+  COUNTER = 0,                                        -- EFFECT_COUNTER, 0
+  MIRROR_COAT = 0,                                    -- EFFECT_MIRROR_COAT, 0
+  VITAL_THROW = 0,                                    -- `cp VITAL_THROW / ld a, 0`
+}
+
+-- The priority bracket of a move (a move record or its id).
+function M.movePriority(moveOrId)
+  local priority = M.MOVE_PRIORITY[M.moveKey(moveOrId)]
+  if priority == nil then return M.BASE_PRIORITY end
+  return priority
 end
 
 -- Gen1 category is type-based (Fire/Water/…/Dragon → Special; else Physical).

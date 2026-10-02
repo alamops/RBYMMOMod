@@ -370,6 +370,27 @@ each("badgeTypes", function(input)
 end)
 
 -- ------------------------------------------------------------------
+-- the pokecrystal stat pipeline: CalcBattleStats' stage ratio and clamp,
+-- CalcPlayerStats' order (stage, badge, burn / paralysis), and the
+-- TruncateHL_BC fold the damage formula reads -- worked from the cart's own
+-- arithmetic before they were written down here
+-- ------------------------------------------------------------------
+
+each("stages", function(input)
+  return { value = Effects.applyStage(input.stat, input.stage) }
+end)
+
+each("battleStats", function(input)
+  local mon = { stats = input.stats, stages = input.stages, status = orNil(input.status) }
+  return { value = Effects.battleStat(mon, input.key, orNil(input.badges)) }
+end)
+
+each("truncate", function(input)
+  local attack, defense = Damage.truncateStats(input.attack, input.defense, input.link)
+  return { attack = attack, defense = defense }
+end)
+
+-- ------------------------------------------------------------------
 -- Rng: the one module the fixture cannot pin
 -- ------------------------------------------------------------------
 --

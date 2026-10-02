@@ -256,6 +256,9 @@ each("damage", function(input)
       stab = input.stab,
       typeEffect = input.typeEffect,
       roll = orNil(input.roll),
+      -- Absent on most cases, and an absent key decodes to nil: Explosion's
+      -- after-scaling halving is a step only the explode cases take.
+      explode = orNil(input.explode),
     })
 end)
 

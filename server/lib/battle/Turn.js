@@ -65,6 +65,14 @@
  *     otherwise keep resolving turns through the pause. `_maybeResolve`
  *     waits on the same flag, so a leftover or forced fill cannot complete
  *     the turn while anyone is away; `reconnect()` asks it again.
+ *   * *Battle stats are stored, not derived* (pokered's model): party,
+ *     unmodified and battle (`cur`) stats per monster, loaded at switch-in,
+ *     rebuilt per stage change through `Effects.changeStat` (both Gen 1
+ *     glitches live there), read as-is by speed, damage and the self-hit; a
+ *     crit reads the party stats and no screen.
+ *   * *"The enemy" in a 2v2*: a move's stage change re-penalises the aimed
+ *     seat, Rage the attacker, an X item and the self-hit's Reflect check the
+ *     battler opposite (`_oppositeFoe`).
  *
  * Two shape differences from the Lua, both forced by the language:
  *
@@ -204,6 +212,16 @@ const WILD_SIDE = 'b';
 
 function isWildSeat(mode, fighter) {
   return !!fighter && fighter.side === WILD_SIDE && Effects.isWildMode(mode);
+}
+
+// The computer's own seat: side b of a fight against the computer, the one
+// side BADGE_MODES never boosts. Where the cart runs one routine for the
+// player and another for its AI -- a status cure is the case: ItemUseMedicine
+// rewrites the battle stats, AICureStatus does not -- this is the seat that
+// takes the AI's. Every other seat (side a there, both sides of a link fight)
+// is a player on its own cartridge.
+function isComputerSeat(mode, fighter) {
+  return !!fighter && BADGE_MODES[mode] === true && fighter.side !== BADGE_SIDE;
 }
 
 // Auto-pick priorities (twin of Turn.lua AUTO_* tables).
@@ -491,6 +509,16 @@ function copyMon(raw, fallback) {
       spd: Math.max(1, int(stats.spd, 1)),
       spc: Math.max(1, int(stats.spc, 1)),
     },
+    // The party struct beside the unmodified stats above, and the battle
+    // stats (`cur`) seeded from both once the seat's badges are known
+    // (`attempt`). Effects' "Stored battle stats" note says who writes which.
+    partyStats: {
+      atk: Math.max(1, int(stats.atk, 1)),
+      def: Math.max(1, int(stats.def, 1)),
+      spd: Math.max(1, int(stats.spd, 1)),
+      spc: Math.max(1, int(stats.spc, 1)),
+    },
+    cur: null,
     types: copyTypes(raw.types),
     moves,
     stages,
@@ -1622,6 +1650,14 @@ class Battle {
     for (const fighter of this.fighters) {
       fighter.choice = null;
       fighter.forced = null;
+      // MainInBattleLoop resets both FLINCHED bits as a turn opens
+      // (core.asm :296-300), so a flinch landed on a monster that had already
+      // moved dies here instead of costing it the NEXT turn. The cart skips
+      // that reset while the player's own monster is raging or recharging;
+      // the referee does not model the skip -- see `_fillForcedChoices`,
+      // where recharge is a forced pass rather than a gate a flinch could
+      // pre-empt.
+      for (const mon of fighter.mons) mon.flinch = false;
     }
     this.deadline = this.choiceTimeout > 0 ? this.now + this.choiceTimeout : null;
     // Before the window opens, not after: a player deciding this turn is
@@ -1711,11 +1747,24 @@ class Battle {
     this._openTurn();
   }
 
+  // The battle Speed, as stored: the stage, the badge and a paralysis are
+  // already in it (Effects' stored-stat note), so reading it is the whole rule
+  // -- which is how the cart's turn order reads wBattleMonSpeed. `fighter` is
+  // kept for the callers' shape.
   _speedOf(fighter, mon) {
-    let spd = Effects.badgeBoost(mon.stats.spd, 'spd', fighter.badges);
-    spd = Effects.applyStage(spd, mon.stages.spd);
-    if (mon.status === 'paralysis') spd = Status.paralysisSpeed(spd);
-    return spd;
+    return mon.cur.spd;
+  }
+
+  // The battler opposite this one: the foe seat in the same position if it
+  // stands, else the nearest standing foe -- `_retarget` aimed at the mirror
+  // slot, which is battle3's oppositeFoe (src/BattleSim3/Move.lua:746-752) in
+  // this referee's terms. Gen 1 has exactly one opponent, so a cart rule that
+  // says "the enemy" with no target to read it off -- the Reflect the
+  // confusion self-hit checks, the battler an X item's re-penalty lands on --
+  // asks this in a 2v2. null when the other side has nobody standing.
+  _oppositeFoe(fighter) {
+    const other = fighter.side === 'a' ? 'b' : 'a';
+    return this._retarget(fighter, Events.fieldSlot(other, fighter.index));
   }
 
   /*
@@ -1840,6 +1889,9 @@ class Battle {
           mon.xAccuracy = false;
           mon.leechSeed = null;
           mon.disable = null;
+          // LoadBattleMonFromParty: party stats -> unmodified -> battle, the
+          // penalty, this seat's badges, and every stage back to neutral.
+          Effects.loadBattleStats(mon, fighter.badges);
           this._clearTrapsFrom(fighter.slot);
           // `mon` is the index the referee just fielded -- `choice.slot`,
           // already normalised to a party position by `_normaliseChoice`. This
@@ -1959,6 +2011,12 @@ class Battle {
           vitaminApplied = true;
           vitaminMon = mon;
           vitaminResult = result;
+          // The fielded monster's battle stats are rebuilt the way a level-up
+          // mid-fight rebuilds them (Effects.recalcBattleStats); a benched
+          // one is rebuilt by its next switch-in anyway.
+          if (partyIdx === fighter.active && result.stat !== 'hp') {
+            Effects.recalcBattleStats(mon, fighter.badges);
+          }
         }
       }
     }
@@ -2092,13 +2150,20 @@ class Battle {
           applied = true;
         }
         if (effect.stage) {
+          // ItemUseXStat runs StatModifierUpEffect on the player's turn
+          // (item_effects.asm :1638-1666), and the AI's X items run the same
+          // routine on its own (trainer_ai.asm AIIncreaseStat): so an X item
+          // is a stat-up move in everything but the menu -- the 999 wall, the
+          // badge re-run on the user and the re-penalty on the battler
+          // opposite, who has no aimed seat to be read off.
           const stat = effect.stage.stat;
-          const before = Effects.clampStage(mon.stages[stat]);
-          if (before >= Effects.STAGE_MAX) {
-            this._say('Nothing happened');
-          } else {
-            const after = Effects.clampStage(before + int(effect.stage.delta, 1));
-            mon.stages[stat] = after;
+          const foe = this._oppositeFoe(fighter);
+          const { outcome, stage } = Effects.changeStat({
+            mon, fighter, stat,
+            delta: int(effect.stage.delta, 1),
+            mover: fighter, nonMover: foe ? activeMon(foe) : null,
+          });
+          if (outcome === 'rose') {
             const label = ({
               atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
               spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVASION',
@@ -2106,8 +2171,10 @@ class Battle {
             this._say(`${mon.species}'s ${label} rose`);
             this._emit('stat', {
               slot: fighter.slot, side: fighter.side,
-              amount: after, text: `${mon.species}'s ${label} rose`,
+              amount: stage, text: `${mon.species}'s ${label} rose`,
             });
+          } else {
+            this._say('Nothing happened');
           }
           applied = true;
         }
@@ -2194,6 +2261,19 @@ class Battle {
           mon.status = null;
           mon.statusTurns = 0;
           cleared = true;
+        }
+        // A cure on the player's fielded monster takes ItemUseMedicine's
+        // .cureStatusAilment branch, which rewrites the battle stats from the
+        // party (Effects.reloadPartyStats) -- lifting the stored penalty along
+        // with every badge boost. A Full Restore that also restored HP takes
+        // the .healHP branch instead (item_effects.asm :1152-1176): the status
+        // goes, the stats stay as they were, penalty included; only at full HP
+        // does it turn into a Full Heal (:976-990). The computer's cure
+        // (AICureStatus) never touches a stat.
+        if (cleared && partyIdx === fighter.active
+            && !isComputerSeat(this.mode, fighter)
+            && !(effect.clearAllStatus && healed)) {
+          Effects.reloadPartyStats(mon);
         }
         if (cleared) {
           this._emit('status', {
@@ -2307,19 +2387,27 @@ class Battle {
     }
 
     if (mon.confusion > 0) {
-      // The self-hit reads the battle stats, badge boosts included: pokered's
-      // HandleSelfConfusionDamage takes wBattleMon's Attack and Defense, which
-      // ApplyBadgeStatBoosts already raised, and the engine port does the same
-      // (gen1recomp src/battle/BattleState.lua:4187 computeDamage(user, user)
-      // -> Damage.applyBadgeBoost). Attacker and defender are one seat, so its
-      // BOULDERBADGE and THUNDERBADGE both apply; `fighter.badges` is null
-      // outside BADGE_MODES' side a, as for every other hit.
+      // The self-hit reads the battle stats as stored: pokered's
+      // HandleSelfConfusionDamage (core.asm :3672-3710) puts wBattleMon's own
+      // Defense in the enemy's slot and runs GetDamageVarsForPlayerAttack, so
+      // the Attack and Defense are wBattleMon's -- stages, badges and a stored
+      // burn all in them -- through the same scaling and 997 cap as any hit,
+      // with no crit and no random factor (Status' fixed max roll). And the
+      // Reflect check in there still reads the ENEMY's status byte, so it is
+      // the opponent's Reflect that doubles the confused monster's own
+      // Defense -- the cart's quirk, kept. Gen 1 has one opponent; in a 2v2 it
+      // is the battler opposite (`_oppositeFoe`). The enemy's own self-hit is
+      // the mirror image (:5774-5805), so this is both seats' rule.
+      const opposite = this._oppositeFoe(fighter);
+      const opposed = opposite ? activeMon(opposite) : null;
+      let defense = mon.cur.def;
+      if (opposed && opposed.reflect) defense *= 2;
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
         level: mon.level,
-        attack: Effects.badgeBoost(mon.stats.atk, 'atk', fighter.badges),
-        defense: Effects.badgeBoost(mon.stats.def, 'def', fighter.badges),
+        attack: mon.cur.atk,
+        defense,
       }, this.rng.byte());
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
@@ -2465,7 +2553,7 @@ class Battle {
         this._markLastMove(mon, choice.move);
         return;
       }
-      this._damage(target, defender, 2 * stored, null);
+      this._damage(target, defender, 2 * stored, null, fighter);
       this._markLastMove(mon, choice.move);
       return;
     }
@@ -2613,7 +2701,7 @@ class Battle {
     const hits = Effects.hitCount(effectId, this.rng);
     // Species base Speed, not battle Speed: paralysis and the Speed badge must
     // not change the crit rate. Absent `baseSpd` (old sheet) falls back to the
-    // current stat still without a badge boost.
+    // unmodified stat, still without a stage, badge or penalty.
     const critSpd = mon.baseSpd !== undefined && mon.baseSpd !== null
       ? mon.baseSpd : mon.stats.spd;
     const isCrit = Crit.check({
@@ -2659,22 +2747,32 @@ class Battle {
       this.rng.damageRoll();
       damage = fixed;
     } else {
+      // GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255). An
+      // ordinary hit reads the stored battle stats -- stage, badges and a burn
+      // already in them -- and a screen on the defender doubles its stat
+      // (`sla c / rl b`, uncapped, so a big enough one wraps in the scaling).
+      // A critical hit throws all of that away for the party stats at both
+      // ends: the attacker's party struct (pre-Transform) and the defender's
+      // -- the cart's GetEnemyMonStat reads the enemy's party struct in a link
+      // fight and recomputes it without stat exp against the computer, which
+      // is the same number for every foe the cart fields (they carry none).
+      // No stage, no badge, no burn, no screen. The scaling, the Explosion
+      // halving and the 997 cap are Damage.compute's.
       const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
       const atkKey = isSpecial ? 'spc' : 'atk';
       const defKey = isSpecial ? 'spc' : 'def';
-      const atkStat = Effects.badgeBoost(
-        isSpecial ? mon.stats.spc : mon.stats.atk, atkKey, fighter.badges);
-      const atkStage = isSpecial ? mon.stages.spc : mon.stages.atk;
-      const defStat = Effects.badgeBoost(
-        isSpecial ? defender.stats.spc : defender.stats.def, defKey, target.badges);
-      const defStage = isSpecial ? defender.stages.spc : defender.stages.def;
-
-      let attack = Effects.applyStage(atkStat, atkStage);
-      if (!isSpecial && mon.status === 'burn') attack = Status.burnAttack(attack);
-
-      let defense = Effects.applyStage(defStat, defStage);
-      if (Effects.isExplode(effectId)) {
-        defense = Math.max(1, Math.floor(defense / 2));
+      let attack;
+      let defense;
+      if (isCrit) {
+        attack = mon.partyStats[atkKey];
+        defense = defender.partyStats[defKey];
+      } else {
+        attack = mon.cur[atkKey];
+        defense = defender.cur[defKey];
+        if ((isSpecial && defender.lightScreen)
+            || (!isSpecial && defender.reflect)) {
+          defense *= 2;
+        }
       }
 
       const roll = this.rng.damageRoll();
@@ -2687,6 +2785,7 @@ class Battle {
         stab: hasType(mon, move.type),
         typeEffect: percents,
         roll,
+        explode: Effects.isExplode(effectId),
       });
 
       if (result.immune) {
@@ -2702,9 +2801,6 @@ class Battle {
         ? 0 : result.damage;
     }
 
-    const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
-    damage = Effects.screenDamage(damage, defender, isSpecial);
-
     let effectiveness = 1;
     for (const pct of percents) effectiveness = (effectiveness * pct) / 100;
     if (isCrit && !isFixed) this._say('A critical hit');
@@ -2718,7 +2814,7 @@ class Battle {
     for (let h = 0; h < hits; h += 1) {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
-      this._damage(target, defender, damage, null);
+      this._damage(target, defender, damage, null, fighter);
       totalDealt += hpBefore - defender.hp;
     }
 
@@ -2804,8 +2900,9 @@ class Battle {
   }
 
   // One place where HP comes off, so the faint that follows can never be
-  // forgotten at one of the call sites.
-  _damage(fighter, mon, rawAmount, status) {
+  // forgotten at one of the call sites. `source` is the seat whose move dealt
+  // it, when one did (a strike, a Bide release): Rage reads it.
+  _damage(fighter, mon, rawAmount, status, source) {
     let amount = Math.max(0, int(rawAmount, 0));
 
     if (amount > 0 && mon.bide && mon.bide.turns > 0) {
@@ -2832,15 +2929,29 @@ class Battle {
     if (amount > mon.hp) amount = mon.hp;
 
     if (amount > 0 && mon.raging) {
-      const before = Effects.clampStage(mon.stages.atk);
-      const after = Effects.clampStage(before + 1);
-      if (after !== before) {
-        mon.stages.atk = after;
+      // HandleBuildingRage (core.asm :4913-4950) flips hWhoseTurn and runs
+      // StatModifierUpEffect, so the raging battler is the "user": its own
+      // badges re-run (when it is the player's) and the re-penalty lands on
+      // the battler whose turn it then is not -- the attacker. Damage no move
+      // dealt (a residual) names no attacker; the battler opposite stands in.
+      // At +6 the cart returns before saying anything, as this does.
+      let attacker = source ? activeMon(source) : null;
+      if (!attacker) {
+        const opposite = this._oppositeFoe(fighter);
+        attacker = opposite ? activeMon(opposite) : null;
+      }
+      const { outcome, stage } = Effects.changeStat({
+        mon, fighter, stat: 'atk', delta: 1,
+        mover: fighter, nonMover: attacker,
+      });
+      if (outcome === 'rose') {
         this._say(`${mon.species}'s ATTACK rose`);
         this._emit('stat', {
           slot: fighter.slot, side: fighter.side,
-          amount: after, text: `${mon.species}'s ATTACK rose`,
+          amount: stage, text: `${mon.species}'s ATTACK rose`,
         });
+      } else if (outcome === 'stuck') {
+        this._say('Nothing happened');
       }
     }
 
@@ -3079,6 +3190,9 @@ class Battle {
     mon.xAccuracy = false;
     mon.leechSeed = null;
     mon.disable = null;
+    // Stages and the battle stats go with it: a monster that comes back (a
+    // Revive, then a switch-in) is loaded from its party stats like any other.
+    Effects.loadBattleStats(mon, null);
     this._clearTrapsFrom(fighter.slot);
 
     // Living bench? Computed before clearing active; fainted mon already has hp 0.
@@ -3525,6 +3639,11 @@ function attempt(opts) {
         // Who has been in against THIS seat's current monster; see `_refield`.
         fought: Object.create(null),
       };
+      // Every monster's battle stats, seeded the way LoadBattleMonFromParty
+      // seeds them (the unmodified stats, the condition penalty, this seat's
+      // badges), so a bench monster is as ready as the fielded one; a
+      // switch-in re-runs the whole load anyway (`_resolveSwitches`).
+      for (const mon of mons) Effects.recalcBattleStats(mon, fighter.badges);
       self.fighters.push(fighter);
       self.byId.set(playerId, fighter);
       self.bySide[side].push(fighter);

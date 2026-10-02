@@ -11,10 +11,16 @@
 --          (conversion, transform).
 -- Phase 6: meta / flow (bide, explode, jump kick, teleport, pay day,
 --          mirror, mimic, metronome gap, no-op slots).
+-- Stored battle stats: pokered's party / unmodified / battle stat sets, the
+--          stage-change door (`changeStat`) and both Gen 1 stat glitches.
 --
 -- No love, no engine modules, no mod facade.
 
 local need = ...
+
+-- The two condition penalties are Status' formulas (and its vectors'); the
+-- stat machinery below is where they are written into a battle stat.
+local Status = need("BattleSim/Status")
 
 local M = {}
 
@@ -239,8 +245,16 @@ function M.stageMult(stage)
   return M.STAGE_MULT[M.clampStage(stage)]
 end
 
+-- CalculateModifiedStat (engine/battle/core.asm :6376-6440): the unmodified
+-- stat times its StatModifierRatios entry (data/battle/stat_modifiers.asm --
+-- 15/10 and 150/100 truncate alike, so the table above is that one as
+-- percents), held to 1..MAX_STAT_VALUE.  The two stat-change effects clamp
+-- only one end each; see `changeStat`.
 function M.applyStage(base, stage)
-  return floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
+  local value = floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
+  if value < 1 then return 1 end
+  if value > M.MAX_STAT_VALUE then return M.MAX_STAT_VALUE end
+  return value
 end
 
 -- Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge,
@@ -268,6 +282,234 @@ function M.badgeBoost(statValue, wireStatKey, badges)
   local badge = BADGE_FOR_STAT[wireStatKey]
   if not badge or not badges[badge] then return base end
   return min(M.MAX_STAT_VALUE, floor(base * 9 / 8))
+end
+
+-- ------------------------------------------------------------------
+-- Stored battle stats (pokered's own data flow)
+-- ------------------------------------------------------------------
+--
+-- pokered does not derive a battle stat when it needs one.  It keeps three
+-- sets per battler and *writes* the battle one at a handful of moments, and
+-- every Gen 1 stat glitch falls out of which moment forgot what.  So the
+-- referee keeps the same three, under the same rules, rather than a read-time
+-- formula that would round and cap differently:
+--
+--   * `mon.partyStats` -- the party struct (wPartyMon1Attack...).  The sheet's
+--     stats; only a vitamin moves them, and Transform never does.  A critical
+--     hit reads these at both ends (GetDamageVarsForPlayerAttack, core.asm
+--     :4059-4072, :4091-4104).
+--   * `mon.stats` -- the unmodified stats (wPlayerMonUnmodifiedAttack...), the
+--     base every stage change and Haze rebuild from.  Reloaded from the party
+--     at every switch-in (LoadBattleMonFromParty :1654-1657); Transform copies
+--     the target's over them (transform.asm .copyStats).
+--   * `mon.cur` -- the battle stats (wBattleMonAttack...): what turn order,
+--     damage and the confusion self-hit read, and nothing else adds to them at
+--     read time.  Written by the switch-in seed (party -> burn/paralysis
+--     penalty -> badges), every stage change, a badge re-run, a condition's
+--     penalty, Haze and Transform -- every one of them below or in Turn.
+--
+-- `changeStat` is the one door every stage change goes through, so a new
+-- stat-changing source hooks in there and inherits both glitches for free.
+
+M.BATTLE_STATS = { "atk", "def", "spd", "spc" }
+local IS_BATTLE_STAT = { atk = true, def = true, spd = true, spc = true }
+
+local function statBlock(src)
+  src = type(src) == "table" and src or {}
+  return {
+    atk = max(0, int(src.atk, 1)), def = max(0, int(src.def, 1)),
+    spd = max(0, int(src.spd, 1)), spc = max(0, int(src.spc, 1)),
+  }
+end
+
+local function resetStages(mon)
+  mon.stages.atk = 0
+  mon.stages.def = 0
+  mon.stages.spd = 0
+  mon.stages.spc = 0
+  mon.stages.acc = 0
+  mon.stages.eva = 0
+end
+
+-- Turn.create builds all three sets.  A monster table assembled anywhere else
+-- (the Effects suite, a future caller) carries `stats` alone, and gets the
+-- other two from it here rather than making every function below guard nil.
+function M.ensureBattleStats(mon)
+  if type(mon) ~= "table" then return end
+  if type(mon.stats) ~= "table" then mon.stats = statBlock(nil) end
+  if type(mon.partyStats) ~= "table" then mon.partyStats = statBlock(mon.stats) end
+  if type(mon.cur) ~= "table" then mon.cur = statBlock(mon.stats) end
+  if type(mon.stages) ~= "table" then
+    mon.stages = { atk = 0, def = 0, spd = 0, spc = 0, acc = 0, eva = 0 }
+  end
+end
+
+-- ApplyBadgeStatBoosts (core.asm :6454-6500): every badge-owned stat of the
+-- battle mon gets +stat>>3 (the 9/8 above), held at 999 -- every one of them,
+-- every time it runs, compounding on whatever is already there.  `badges` is
+-- nil wherever the cart returns early (a link battle) or never looks (the
+-- enemy's battler): Turn.create keeps a set only on side a of BADGE_MODES.
+function M.applyBadgeBoosts(mon, badges)
+  if type(mon) ~= "table" or type(badges) ~= "table" then return end
+  M.ensureBattleStats(mon)
+  for _, key in ipairs(M.BATTLE_STATS) do
+    if badges[BADGE_FOR_STAT[key]] then
+      mon.cur[key] = M.badgeBoost(mon.cur[key], key, badges)
+    end
+  end
+end
+
+-- QuarterSpeedDueToParalysis / HalveAttackDueToBurn (core.asm :6283-6366),
+-- written into the battle stat, minimum 1, and only for the condition the
+-- monster actually has.  It runs when the condition lands (effects.asm :236,
+-- :243, :289, :294; paralyze.asm), when the monster is sent out
+-- (LoadBattleMonFromParty :1658), and after every successful stat change on
+-- whichever battler's turn it is NOT, whatever stat the change touched
+-- (effects.asm :504-506, :694-698) -- the re-penalty glitch.  Nothing lifts it
+-- but a rebuild of that stat: a stage change, Haze, a switch, the player's
+-- own status-cure item (`reloadPartyStats`).
+function M.applyStatusPenalty(mon)
+  if type(mon) ~= "table" then return end
+  M.ensureBattleStats(mon)
+  if mon.status == "paralysis" then
+    mon.cur.spd = Status.paralysisSpeed(mon.cur.spd)
+  elseif mon.status == "burn" then
+    mon.cur.atk = Status.burnAttack(mon.cur.atk)
+  end
+end
+
+-- CalculateModifiedStats + ApplyBurnAndParalysisPenalties +
+-- ApplyBadgeStatBoosts: the battle stats rebuilt from the unmodified ones
+-- through the current stages, the way a level-up mid-fight rebuilds them
+-- (engine/battle/experience.asm :226-238).  Turn.create seeds with it -- a
+-- live sheet states no stages, so that is LoadBattleMonFromParty's own seed;
+-- the suites' sheets state some -- and a vitamin on the fielded monster
+-- re-runs it.
+function M.recalcBattleStats(mon, badges)
+  if type(mon) ~= "table" then return end
+  M.ensureBattleStats(mon)
+  for _, key in ipairs(M.BATTLE_STATS) do
+    mon.cur[key] = M.applyStage(mon.stats[key], mon.stages[key])
+  end
+  M.applyStatusPenalty(mon)
+  M.applyBadgeBoosts(mon, badges)
+end
+
+-- LoadBattleMonFromParty (core.asm :1626-1667) / LoadEnemyMonFromParty: the
+-- party stats become the unmodified ones (undoing a Transform), then the
+-- battle ones, then the penalty, then the badges, and every stage goes back to
+-- neutral.  Turn runs it at every switch-in, and at a faint so nothing a
+-- fallen monster carried survives to a revival.
+function M.loadBattleStats(mon, badges)
+  if type(mon) ~= "table" then return end
+  M.ensureBattleStats(mon)
+  mon.stats = statBlock(mon.partyStats)
+  resetStages(mon)
+  mon.cur = statBlock(mon.stats)
+  M.applyStatusPenalty(mon)
+  M.applyBadgeBoosts(mon, badges)
+end
+
+-- ItemUseMedicine's .cureStatusAilment (engine/items/item_effects.asm
+-- :868-913): curing the fielded monster copies its party stats over its
+-- battle stats -- which drops the penalty, every badge boost and every stage's
+-- effect (the stages themselves stay) -- and on a Transformed one, its own
+-- stats come back.  Turn calls it for the player's items only; the computer's
+-- AICureStatus (engine/battle/trainer_ai.asm :625-636) touches no stat.
+function M.reloadPartyStats(mon)
+  if type(mon) ~= "table" then return end
+  M.ensureBattleStats(mon)
+  mon.cur = statBlock(mon.partyStats)
+end
+
+-- A copy of a battle-stat block, for the one caller that moves a whole set
+-- between battlers (Transform).
+function M.copyStats(src)
+  return statBlock(src)
+end
+
+-- One stage change, the way StatModifierUpEffect / StatModifierDownEffect
+-- (engine/battle/effects.asm :351-514 / :539-716) make it.  Every stage change
+-- in this referee goes through here: a move's primary or side effect
+-- (applyPrimary / applySide below), an X item and Rage (Turn).
+--
+-- ctx:
+--   mon, fighter -- the battler whose stage moves, and its seat
+--   stat, delta  -- "atk" .. "eva", +-1 / +-2
+--   mover        -- the seat whose turn it is (hWhoseTurn): the move's or the
+--                   item's user, or the raging battler for Rage, which
+--                   HandleBuildingRage makes the user (core.asm :4913-4950)
+--   nonMover     -- the battle mon "whose turn it is not", which the
+--                   re-penalty lands on: the action's target for a move, the
+--                   battler opposite for an item, the attacker for Rage.  nil
+--                   when nobody is standing there.
+--
+-- Returns the outcome and the stage it left:
+--   "rose" / "fell" -- the stage moved and the battle stat was rebuilt
+--   "max" / "min"   -- already at +6 / -6: nothing moved (the cart's
+--                      "Nothing happened!" / CantLowerAnymore)
+--   "stuck"         -- the battle stat itself was already at 999 (a raise) or
+--                      1 (a drop).  The stage is wound back ONE step whatever
+--                      the delta (RestoreOriginalStatModifier `dec [hl]`,
+--                      CantLowerAnymore_Pop `inc [hl]`), so a +2 move on a 999
+--                      stat still nets +1 -- the cart's quirk, kept.
+--
+-- The rebuild is the changed stat alone: unmodified x the new stage's ratio,
+-- held at 999 on a raise and at 1 on a drop, the one end each routine checks.
+-- The other end is left open as the cart leaves it: a drop from a raised stage
+-- can store more than 999 (a 458 Defense lowered from +4 to +3 is 1145), and a
+-- raise out of -6 on a tiny stat can store 0; the damage step scales and
+-- clamps what it is handed.  Burn, paralysis and badges are not in the
+-- rebuild -- which is why a stage change on a burned Attack lifts the burn
+-- until the re-penalty puts it back.
+function M.changeStat(ctx)
+  local mon, fighter = ctx.mon, ctx.fighter
+  local stat, delta = ctx.stat, int(ctx.delta, 0)
+  M.ensureBattleStats(mon)
+  local before = M.clampStage(mon.stages[stat])
+  if delta > 0 and before >= M.STAGE_MAX then return "max", before end
+  if delta < 0 and before <= M.STAGE_MIN then return "min", before end
+  local after = M.clampStage(before + delta)
+  mon.stages[stat] = after
+
+  if IS_BATTLE_STAT[stat] then
+    local current = int(mon.cur[stat], 0)
+    if delta > 0 and current == M.MAX_STAT_VALUE then
+      mon.stages[stat] = after - 1
+      return "stuck", mon.stages[stat]
+    end
+    if delta < 0 and current == 1 then
+      mon.stages[stat] = after + 1
+      return "stuck", mon.stages[stat]
+    end
+    local value = floor(max(0, int(mon.stats[stat], 0)) * M.stageMult(after) / 100)
+    if delta > 0 then
+      value = min(M.MAX_STAT_VALUE, value)
+    else
+      value = max(1, value)
+    end
+    mon.cur[stat] = value
+  end
+
+  -- The badge-stacking glitch.  ApplyBadgeStatBoosts runs again on the
+  -- player's battle mon after the player's own raise (effects.asm :497-499)
+  -- and after the enemy's drop (:687-689) -- accuracy and evasion included --
+  -- over all four stats, so every badge stat compounds another 9/8.  "The
+  -- player" is the seat holding a badge set (Turn.create keeps one only on
+  -- side a of a fight against the computer), so a raise re-runs the mover's
+  -- own set and a drop re-runs the set of a target sitting across from it.
+  if delta > 0 then
+    if ctx.mover == fighter then M.applyBadgeBoosts(mon, fighter and fighter.badges) end
+  elseif ctx.mover and fighter and ctx.mover.side ~= fighter.side then
+    M.applyBadgeBoosts(mon, fighter.badges)
+  end
+
+  -- The re-penalty glitch: both routines end on QuarterSpeedDueToParalysis +
+  -- HalveAttackDueToBurn for the battler whose turn it is not, whichever stat
+  -- moved ("these shouldn't be here", effects.asm :504-506; :694-698).
+  if ctx.nonMover then M.applyStatusPenalty(ctx.nonMover) end
+
+  return delta > 0 and "rose" or "fell", after
 end
 
 -- ------------------------------------------------------------------
@@ -377,41 +619,59 @@ local function confuse(out, fighter, mon, rng, failIfAlready)
   out.events[#out.events + 1] = { kind = "status", fields = fields }
 end
 
-local function applyStatChange(out, fighter, mon, stat, delta)
+-- A move's stage change, narrated.  `changeStat` does the arithmetic and both
+-- glitches; this adds the sentences.  `mover` is the move's user and
+-- `nonMover` the battle mon of the seat the action was aimed at -- the
+-- battler whose turn it is not, in the cart's one-opponent terms.  `side` is a
+-- move's side effect, which the cart lets fail silently where a primary prints
+-- "Nothing happened!" (CantLowerAnymore: `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`).
+local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side)
   if delta < 0 and mon.mist then
     out.messages[#out.messages + 1] = "But it failed"
     return
   end
   local label = STAT_LABELS[stat] or stat
-  local before = M.clampStage(mon.stages[stat])
-  local after = M.clampStage(before + delta)
-  if after == before then
-    if delta > 0 then
-      out.messages[#out.messages + 1] =
-        mon.species .. "'s " .. label .. " won't go any higher"
-    else
-      out.messages[#out.messages + 1] =
-        mon.species .. "'s " .. label .. " won't go any lower"
-    end
+  local outcome, after = M.changeStat({
+    mon = mon, fighter = fighter, stat = stat, delta = delta,
+    mover = mover, nonMover = nonMover,
+  })
+  if outcome == "max" then
+    out.messages[#out.messages + 1] =
+      mon.species .. "'s " .. label .. " won't go any higher"
     return
   end
-  mon.stages[stat] = after
-  local verb = delta > 0 and "rose" or "fell"
-  local text = mon.species .. "'s " .. label .. " " .. verb
+  if outcome == "min" then
+    out.messages[#out.messages + 1] =
+      mon.species .. "'s " .. label .. " won't go any lower"
+    return
+  end
+  if outcome == "stuck" then
+    if not side then out.messages[#out.messages + 1] = "Nothing happened" end
+    return
+  end
+  local text = mon.species .. "'s " .. label .. " " .. outcome
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
-  fields.amount = after
+  -- The stage it now sits at -- when that is not below neutral.  `amount` is
+  -- unsigned on the wire (Wire.AMOUNT_MAX: the direction is the sentence's),
+  -- so Wire.battleEvent strips a negative one in transit; leaving it out here
+  -- keeps the stream the referee emits the stream a client receives.
+  if after >= 0 then fields.amount = after end
   fields.text = text
   out.events[#out.events + 1] = { kind = "stat", fields = fields }
 end
 
-local function resetStages(mon)
-  mon.stages.atk = 0
-  mon.stages.def = 0
-  mon.stages.spd = 0
-  mon.stages.spc = 0
-  mon.stages.acc = 0
-  mon.stages.eva = 0
+-- HazeEffect_ (engine/battle/move_effects/haze.asm) on one battler: every
+-- stage back to neutral, the unmodified stats copied over the battle ones --
+-- which lifts a burn or paralysis penalty and every badge boost until
+-- something rebuilds them (ResetStats skips HP and nothing else) -- and its
+-- Reflect and Light Screen gone (CureVolatileStatuses).
+local function hazeReset(mon)
+  M.ensureBattleStats(mon)
+  resetStages(mon)
+  mon.cur = statBlock(mon.stats)
+  mon.reflect = false
+  mon.lightScreen = false
 end
 
 -- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
@@ -459,8 +719,10 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 25 then -- HAZE_EFFECT
-    resetStages(userMon)
-    resetStages(targetMon)
+    -- Both battlers of the action, as the cart's two: stages, battle stats
+    -- and screens (see hazeReset).
+    hazeReset(userMon)
+    hazeReset(targetMon)
     out.messages[#out.messages + 1] = "All stat changes were eliminated"
     return out
   end
@@ -469,7 +731,8 @@ function M.applyPrimary(ctx)
   if statFx then
     local mon = statFx.selfTarget and userMon or targetMon
     local fighter = statFx.selfTarget and userFighter or targetFighter
-    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta)
+    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
+      userFighter, targetMon, false)
     return out
   end
 
@@ -513,6 +776,9 @@ function M.applyPrimary(ctx)
       return out
     end
     targetMon.status = "paralysis"
+    -- ParalyzeEffect_ quarters the battle Speed the moment it lands
+    -- (paralyze.asm `callfar QuarterSpeedDueToParalysis`).
+    M.applyStatusPenalty(targetMon)
     local token = wire.paralysis or "PAR"
     local text = targetMon.species .. " is paralyzed"
     out.messages[#out.messages + 1] = text
@@ -577,7 +843,14 @@ function M.applyPrimary(ctx)
     return out
   end
 
+  -- Reflect and Light Screen are per battler and do not stack: a second cast
+  -- while the bit is up is "But it failed!" (ReflectLightScreenEffect_,
+  -- engine/battle/move_effects/reflect_light_screen.asm `.moveFailed`).
   if effectId == 64 then -- LIGHT_SCREEN_EFFECT
+    if userMon.lightScreen then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
     userMon.lightScreen = true
     out.messages[#out.messages + 1] =
       userMon.species .. " created a light screen"
@@ -585,6 +858,10 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 65 then -- REFLECT_EFFECT
+    if userMon.reflect then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
     userMon.reflect = true
     out.messages[#out.messages + 1] =
       userMon.species .. " created a reflect"
@@ -645,10 +922,16 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 57 then -- TRANSFORM_EFFECT
+    -- TransformEffect_ (transform.asm) copies the target's battle stats AND
+    -- its unmodified ones, and its stat mods below; the user's party stats are
+    -- untouched, which is what a later critical hit reads.
+    M.ensureBattleStats(userMon)
+    M.ensureBattleStats(targetMon)
     userMon.stats.atk = max(1, int(targetMon.stats.atk, 1))
     userMon.stats.def = max(1, int(targetMon.stats.def, 1))
     userMon.stats.spd = max(1, int(targetMon.stats.spd, 1))
     userMon.stats.spc = max(1, int(targetMon.stats.spc, 1))
+    userMon.cur = M.copyStats(targetMon.cur)
     userMon.types = {}
     for i = 1, #targetMon.types do userMon.types[i] = targetMon.types[i] end
     if #userMon.types == 0 then userMon.types[1] = 0 end
@@ -704,7 +987,8 @@ local SIDE_STAT_DOWN = {
   [68] = "atk", [69] = "def", [70] = "spd", [71] = "spc",
 }
 
--- ctx: effectId, chance, rng, targetMon, targetFighter, statusToWire
+-- ctx: effectId, chance, rng, targetMon, targetFighter, userFighter,
+--      statusToWire
 -- Returns { proc, messages, events }.
 function M.applySide(ctx)
   ctx = ctx or {}
@@ -735,6 +1019,9 @@ function M.applySide(ctx)
   if effectId == 4 or effectId == 34 then -- burn
     if M.hasMajorStatus(targetMon) then return out end
     targetMon.status = "burn"
+    -- .burn1 / .burn2: HalveAttackDueToBurn the moment it lands
+    -- (effects.asm :243, :294).
+    M.applyStatusPenalty(targetMon)
     local token = wire.burn or "BRN"
     local text = targetMon.species .. " was burned"
     out.messages[#out.messages + 1] = text
@@ -761,6 +1048,9 @@ function M.applySide(ctx)
   if effectId == 6 or effectId == 36 then -- paralysis
     if M.hasMajorStatus(targetMon) then return out end
     targetMon.status = "paralysis"
+    -- paralyze1 / paralyze2: QuarterSpeedDueToParalysis the moment it lands
+    -- (effects.asm :236, :289).
+    M.applyStatusPenalty(targetMon)
     local token = wire.paralysis or "PAR"
     local text = targetMon.species .. " is paralyzed"
     out.messages[#out.messages + 1] = text
@@ -778,7 +1068,11 @@ function M.applySide(ctx)
 
   local stat = SIDE_STAT_DOWN[effectId]
   if stat then
-    applyStatChange(out, targetFighter, targetMon, stat, -1)
+    -- The same StatModifierDownEffect a primary drop runs, so a side-effect
+    -- drop on the player's monster re-runs its badges too (the glitch's
+    -- Psychic case).
+    applyStatChange(out, targetFighter, targetMon, stat, -1,
+      ctx.userFighter, targetMon, true)
     return out
   end
 
@@ -940,18 +1234,6 @@ function M.isRage(effectId)
   return int(effectId, 0) == 81
 end
 
--- Gen1: Reflect halves physical, Light Screen halves special.  `isSpecial`
--- comes from Effects.isSpecialType(move.type, battle.specialTypes).
-function M.screenDamage(damage, defender, isSpecial)
-  local d = max(0, int(damage, 0))
-  if isSpecial then
-    if defender.lightScreen then d = floor(d / 2) end
-  else
-    if defender.reflect then d = floor(d / 2) end
-  end
-  return d
-end
-
 -- Gen1 category is type-based (Fire/Water/…/Dragon → Special; else Physical).
 -- `specialTypes` is a set of chart indices uploaded with the ruleset; absent
 -- or empty means every damaging move stays Physical (atk/def).
@@ -1095,8 +1377,15 @@ function M.applyVitamin(mon, itemId)
     mon.maxHp = math.max(1, int(mon.maxHp, 1) + delta)
     mon.hp = math.min(mon.maxHp, int(mon.hp, 0) + delta)
   else
-    mon.stats = mon.stats or {}
-    mon.stats[stat] = math.max(1, int(mon.stats[stat], 1) + delta)
+    -- A party stat moved: the party struct always, the unmodified stat only
+    -- when no Transform has replaced it -- the rule a level-up mid-fight
+    -- follows (experience.asm :226-232).  The battle stat is Turn's to
+    -- rebuild (recalcBattleStats), and only for the fielded monster.
+    M.ensureBattleStats(mon)
+    mon.partyStats[stat] = math.max(1, int(mon.partyStats[stat], 1) + delta)
+    if not mon.transformed then
+      mon.stats[stat] = math.max(1, int(mon.stats[stat], 1) + delta)
+    end
   end
   return { stat = stat, delta = delta, before = before, after = after }
 end

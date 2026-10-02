@@ -76,6 +76,7 @@ function mn(o) {
   };
   if (o.catchRate !== undefined) out.catchRate = o.catchRate;
   if (o.evs) out.evs = o.evs;
+  if (o.baseSpd !== undefined) out.baseSpd = o.baseSpd;
   return out;
 }
 
@@ -96,6 +97,27 @@ function drainInto(battle, into) {
   const list = battle.drainEvents();
   for (const event of list) into.push(event);
   batches.push(list.length);
+}
+
+// The stored battle stats behind the stream (the g1_* scenarios): every
+// standing seat's `cur` and stages, and its screens, at the point the scenario
+// asks. Only a scenario that calls this carries a `probes` key at all, so every
+// scenario that predates it encodes exactly as it did.
+let probes = [];
+
+function probe(battle, at) {
+  for (const fighter of battle.fighters) {
+    const mon = fighter.active ? fighter.mons[fighter.active - 1] : null;
+    if (mon && mon.hp > 0) {
+      probes.push({
+        at, slot: fighter.slot,
+        atk: mon.cur.atk, def: mon.cur.def, spd: mon.cur.spd, spc: mon.cur.spc,
+        sAtk: mon.stages.atk, sDef: mon.stages.def, sSpd: mon.stages.spd,
+        sSpc: mon.stages.spc, sAcc: mon.stages.acc, sEva: mon.stages.eva,
+        reflect: mon.reflect === true, lightScreen: mon.lightScreen === true,
+      });
+    }
+  }
 }
 
 const SCENARIOS = [];
@@ -1009,6 +1031,374 @@ scenario('badges_npc', (events) => {
   return battle;
 });
 
+
+// 30-41. Gen 1 stored battle stats (docs/plans/gen12-referee-fidelity.md §1
+//     items 1-5, task G1a): every trigger of the badge-stacking glitch, the
+//     re-penalty glitch, the resets, the 999 / 1 walls, critical hits on party
+//     stats, Reflect and Light Screen in the defence, the 8-bit scaling, the
+//     Explosion order, the 997 cap, the self-hit's borrowed Reflect and the
+//     flinch reset at turn open. `probe` pins the battle stats themselves; the
+//     "Gen 1 stored battle stats" tests below state the hand-checked numbers.
+//     `baseSpd: 0` holds a crit off where it would blur a number, 255 with a
+//     high-crit move forces one.
+function fx(id, power, effect, o = {}) {
+  const out = {
+    id, pp: 60, power, accuracy: 255,
+    type: o.type === undefined ? 0 : o.type, effect,
+    chance: o.chance === undefined ? 0 : o.chance,
+  };
+  if (o.highCrit) out.highCrit = true;
+  return out;
+}
+
+// The player's own raise (50 = ATTACK_UP2) and an accuracy raise (14) each
+// re-run every badge; the wild monster's paralysis is re-quartered each time.
+scenario('g1_stack_up', (events) => {
+  const battle = build({
+    id: 'g1u', mode: 'wild', seed: 6101, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          baseSpd: 0, moves: [fx('sharpen', 0, 50), fx('aim', 0, 14),
+            fx('thump', 40, 0)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, spd: 80, status: 'PAR', baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 1, 2].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// The enemy's drops on the player: a primary (18), a side-effect drop (71,
+// Psychic's) and an accuracy drop (22) -- each re-runs the badges, and the
+// re-penalty halves the burned target's Attack again every time.
+scenario('g1_stack_down', (events) => {
+  const battle = build({
+    id: 'g1d', mode: 'wild', seed: 6102, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          status: 'BRN', baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, spd: 90, baseSpd: 0,
+          moves: [fx('growl', 0, 18), fx('psyray', 40, 71, { chance: 100 }),
+            fx('sand', 0, 22)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 1, 2].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// An X item and Rage: both are the player's raises, so both re-run the badges;
+// the item's re-penalty lands on the battler opposite and Rage's on the
+// attacker that built it.
+scenario('g1_rage_xitem', (events) => {
+  const battle = build({
+    id: 'g1r', mode: 'wild', seed: 6103, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), bag: { X_SPEED: 1 },
+        mons: [
+          mn({ species: 'Alpha', maxHp: 400, atk: 100, def: 80, spd: 60, spc: 50,
+            baseSpd: 0, moves: [fx('fury', 20, 81)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 400, atk: 80, spd: 50, status: 'BRN',
+          baseSpd: 0, moves: [fx('thump', 10, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'item', item: 'X_SPEED' });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  for (let turn = 2; turn <= 3; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// The resets: a switch-in reloads party -> badges with every stage at 0, and
+// Haze copies the unmodified stats over both battlers -- badges and the foe's
+// paralysis penalty lifted with the stages.
+scenario('g1_resets', (events) => {
+  const battle = build({
+    id: 'g1z', mode: 'wild', seed: 6104, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          baseSpd: 0, moves: [fx('sharpen', 0, 50), fx('haze', 0, 25)] }),
+        mn({ species: 'Gamma', maxHp: 300, baseSpd: 0, moves: [fx('splash', 0, 85)] }),
+      ] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, spd: 80, status: 'PAR', baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  const plan = [
+    { action: 'fight', move: 0 },
+    { action: 'switch', slot: 1 },
+    { action: 'switch', slot: 0 },
+    { action: 'fight', move: 0 },
+    { action: 'fight', move: 1 },
+  ];
+  plan.forEach((choice, i) => {
+    battle.submitChoice('p1', choice);
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// The walls, in a link fight (no badges; the re-penalty is unconditional): a
+// raise past 999 stores 999, the next raise on that 999 fails with the stage
+// wound back one step (+2 nets +1), and a drop on a stat already at 1 fails
+// the same way (-2 nets -1).
+scenario('g1_walls', (events) => {
+  const battle = build({
+    id: 'g1w', mode: '1v1', seed: 6105, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 500, spd: 90, baseSpd: 0,
+          moves: [fx('sharpen', 0, 50), fx('soften', 0, 19),
+            fx('crush', 0, 59)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 300, def: 1, spd: 60, status: 'PAR',
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 0, 1, 2].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// A critical hit reads both party stats: the raised, badged, burned Attack and
+// the foe's Reflect all fall away.
+scenario('g1_crit_party', (events) => {
+  const battle = build({
+    id: 'g1c', mode: 'wild', seed: 6106, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          status: 'BRN', baseSpd: 255,
+          moves: [fx('sharpen', 0, 50), fx('slash', 70, 0, { highCrit: true })] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 400, def: 100, spd: 30, baseSpd: 0,
+          moves: [fx('wall', 0, 65), fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  battle.submitChoice('p1', { action: 'fight', move: 1 });
+  battle.submitChoice('wild', { action: 'fight', move: 1 });
+  drainInto(battle, events);
+  probe(battle, 2);
+  return battle;
+});
+
+// Transform copies the battle and unmodified stats, never the party ones: the
+// transformed monster's crit swings with its own pre-Transform Attack, and a
+// crit on it reads its own pre-Transform Defense.
+scenario('g1_transform_crit', (events) => {
+  const battle = build({
+    id: 'g1t', mode: '1v1', seed: 6107, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, atk: 30, def: 30, spd: 90, spc: 30,
+          baseSpd: 255, moves: [fx('mimicry', 0, 57)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, atk: 200, def: 100, spd: 40, spc: 100,
+          baseSpd: 255, moves: [fx('slash', 70, 0, { highCrit: true })] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 2; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// Screens double the defence before the scaling: 512 x2 = 1024 wraps to a 0
+// byte and divides as 1. A second Reflect fails, a fixed-damage move ignores
+// it, and Haze takes both screens down.
+scenario('g1_screens', (events) => {
+  const battle = build({
+    id: 'g1s', mode: '1v1', seed: 6109, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 900, def: 512, spd: 90, baseSpd: 0,
+          moves: [fx('wall', 0, 65), fx('glow', 0, 64), fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, atk: 100, spd: 30, baseSpd: 0,
+          moves: [fx('thump', 10, 0), fx('sonic', 20, 41), fx('haze', 0, 25)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  [[0, 0], [0, 1], [1, 2], [2, 0]].forEach(([mine, theirs], i) => {
+    battle.submitChoice('p1', { action: 'fight', move: mine });
+    battle.submitChoice('p2', { action: 'fight', move: theirs });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// The 997 cap sits before the type chart and the roll: 4200 is held to 997+2
+// (a 999-HP target, so the event states the whole hit).
+scenario('g1_cap', (events) => {
+  const battle = build({
+    id: 'g1k', mode: '1v1', seed: 6109, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 999, def: 10, spd: 90, types: [2],
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', level: 100, maxHp: 400, atk: 250, spd: 30,
+          types: [1], baseSpd: 0, moves: [fx('crush', 200, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// Explosion halves the defence after the scaling: 300 -> 75 -> 37, not
+// 300 -> 150 unscaled.
+scenario('g1_explode_order', (events) => {
+  const battle = build({
+    id: 'g1x', mode: '1v1', seed: 6110, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 900, def: 300, spd: 90, types: [2],
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', level: 50, maxHp: 400, atk: 100, spd: 30,
+          types: [1], baseSpd: 0, moves: [fx('blast', 170, 7)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// The confusion self-hit borrows the OPPONENT's Reflect for its own Defense:
+// 160 against 9 x2 is 73 a hit rather than 144.
+scenario('g1_self_hit_reflect', (events) => {
+  const battle = build({
+    id: 'g1h', mode: '1v1', seed: 6111, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 900, atk: 160, def: 9, spd: 30, confusion: 6,
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('wall', 0, 65), fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 5; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: turn === 1 ? 0 : 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// ...and in a 2v2 the Reflect it borrows is the battler opposite's: Ann (seat
+// 0) faces Bob's Reflect, Abe (seat 1) faces Bea, who has none.
+scenario('g1_opposite_reflect', (events) => {
+  const battle = build({
+    id: 'g1o', mode: 'coop_pvp', seed: 6112, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 900, atk: 160, def: 9, spd: 30, confusion: 6,
+            baseSpd: 0, moves: [fx('splash', 0, 85)] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 900, atk: 160, def: 9, spd: 20, confusion: 6,
+            baseSpd: 0, moves: [fx('splash', 0, 85)] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0,
+            moves: [fx('wall', 0, 65), fx('splash', 0, 85)] })] },
+        { playerId: 'b2', name: 'Bea', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 80, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 5; turn += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('b1', { action: 'fight', move: turn === 1 ? 0 : 1, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  probe(battle, 5);
+  return battle;
+});
+
+// A flinch landed on a monster that already moved dies at the next turn's
+// open (MainInBattleLoop) instead of costing it that turn.
+scenario('g1_flinch_reset', (events) => {
+  const battle = build({
+    id: 'g1f', mode: '1v1', seed: 6113, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('thump', 10, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+          moves: [fx('stomp', 10, 31, { chance: 100 })] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -1059,6 +1449,7 @@ function runJs() {
   return SCENARIOS.map(({ name, run }) => {
     const events = [];
     batches = [];
+    probes = [];
     const battle = run(events);
     return canonical({
       name,
@@ -1066,6 +1457,7 @@ function runJs() {
       batches,
       outcome: slimOutcome(battle.outcome()),
       snapshot: snapshotDigest(battle),
+      probes: probes.length > 0 ? probes : undefined,
     });
   });
 }
@@ -1131,6 +1523,10 @@ test('JS matches the Lua turn machine, event for event', async (t) => {
         `${run.name}: snapshot digest differs -- an rngState mismatch means the `
         + 'two runtimes drew a different number of bytes',
       );
+      assert.deepStrictEqual(
+        run.probes, twin.probes,
+        `${run.name}: the stored battle stats differ under the same stream`,
+      );
     });
   }
 });
@@ -1149,6 +1545,7 @@ test('JS matches the committed Lua fixture', async (t) => {
       assert.deepStrictEqual(run.batches, twin.batches, `${run.name}: drain points differ`);
       assert.deepStrictEqual(run.outcome, twin.outcome, `${run.name}: outcome differs`);
       assert.deepStrictEqual(run.snapshot, twin.snapshot, `${run.name}: snapshot differs`);
+      assert.deepStrictEqual(run.probes, twin.probes, `${run.name}: probes differ`);
     });
   }
 });
@@ -2152,4 +2549,186 @@ test("the confusion self-hit reads side a's badge-boosted stats, in computer fig
   assert.strictEqual(confused('1v1'), 144, '1v1: the same unbadged 144');
   assert.strictEqual(confused('1v1', PAIR), 144,
     '1v1: the pair reaches no self-hit in a link battle');
+});
+
+// ------------------------------------------------------------------
+// Gen 1 stored battle stats, stated as claims (twin of tests/battle_sim_turn.lua
+// section 25; the arithmetic is worked there beside each assertion)
+// ------------------------------------------------------------------
+
+const jsRun = (name) => jsRuns.find((entry) => entry.name === name);
+const probeAt = (name, at, slot) => {
+  const row = (jsRun(name).probes || []).find((p) => p.at === at && p.slot === slot);
+  return row ? `${row.atk}/${row.def}/${row.spd}/${row.spc}` : null;
+};
+const damagesOn = (name, slot) => jsRun(name).events
+  .filter((event) => event.t === 'damage' && event.slot === slot)
+  .map((event) => event.amount);
+const saidIn = (name, text) => jsRun(name).events
+  .some((event) => event.t === 'msg' && event.text === text);
+
+test('the switch-in seed is party -> penalty -> badges, and a raise re-runs every badge', () => {
+  assert.strictEqual(probeAt('g1_stack_up', 0, 0), '112/90/67/56', 'x9/8 on all four');
+  assert.strictEqual(probeAt('g1_stack_up', 0, 3), '40/40/20/40', 'the foe quartered, never boosted');
+  assert.strictEqual(probeAt('g1_stack_up', 1, 0), '225/101/75/63',
+    'ATTACK_UP2: 100 x 2 = 200, then every badge again');
+  assert.strictEqual(probeAt('g1_stack_up', 1, 3), '40/40/5/40', 're-penalty: 20 quartered to 5');
+  assert.strictEqual(probeAt('g1_stack_up', 2, 0), '253/113/84/70',
+    'an accuracy raise compounds the badges again');
+  assert.strictEqual(probeAt('g1_stack_up', 2, 3), '40/40/1/40', '...and floors the foe at 1');
+});
+
+test("the enemy's drops on the player re-run the badges, then re-penalise the target", () => {
+  assert.strictEqual(probeAt('g1_stack_down', 0, 0), '56/90/67/56', 'burned seed: 50 -> 56');
+  assert.strictEqual(probeAt('g1_stack_down', 1, 0), '37/101/75/63', 'Growl: 66 -> 74 -> 37');
+  assert.strictEqual(probeAt('g1_stack_down', 2, 0), '20/113/84/37', 'a side-effect Special drop');
+  assert.strictEqual(probeAt('g1_stack_down', 3, 0), '11/127/94/41', 'an accuracy drop');
+  const fell = jsRun('g1_stack_down').events.find((event) => event.t === 'stat');
+  assert.strictEqual(fell.amount, undefined, 'a stage below 0 rides no (unsigned) amount');
+});
+
+test('an X item and Rage are the player\'s raises; the re-penalty finds the foe', () => {
+  assert.strictEqual(probeAt('g1_rage_xitem', 1, 0), '126/101/101/63', 'X SPEED: 90 -> 101');
+  assert.strictEqual(probeAt('g1_rage_xitem', 1, 3), '20/40/50/40', 'the battler opposite: 40 -> 20');
+  assert.strictEqual(probeAt('g1_rage_xitem', 2, 0), '168/113/113/70', 'a Rage build: 150 -> 168');
+  assert.strictEqual(probeAt('g1_rage_xitem', 2, 3), '10/40/50/40', 'the attacker: 20 -> 10');
+  assert.strictEqual(probeAt('g1_rage_xitem', 3, 0), '225/127/127/78', 'a second build');
+});
+
+test('a switch-in and Haze reset the stored stats', () => {
+  assert.strictEqual(probeAt('g1_resets', 3, 0), '112/90/67/56', 'back in: party -> badges, stages 0');
+  assert.strictEqual(probeAt('g1_resets', 5, 0), '100/80/60/50', 'Haze: the unmodified stats');
+  assert.strictEqual(probeAt('g1_resets', 5, 3), '40/40/80/40', "Haze lifts the foe's paralysis");
+});
+
+test('the 999 and 1 walls fail, winding the stage back one step', () => {
+  const stages = (at, slot) => {
+    const row = jsRun('g1_walls').probes.find((p) => p.at === at && p.slot === slot);
+    return [row.sAtk, row.sDef];
+  };
+  assert.strictEqual(probeAt('g1_walls', 1, 0), '999/40/90/40', '500 x 2 = 1000 is stored as 999');
+  assert.deepStrictEqual(stages(2, 0), [3, 0], 'a +2 on 999 fails and nets +1');
+  assert.deepStrictEqual(stages(3, 3), [0, 0], 'a -1 on a Defense of 1 fails, wound back');
+  assert.deepStrictEqual(stages(4, 3), [0, -1], 'a -2 on it nets -1');
+  assert.ok(saidIn('g1_walls', 'Nothing happened'), 'and says so');
+});
+
+test('a crit reads both party stats; Transform never copies them', () => {
+  const [crit] = damagesOn('g1_crit_party', 3);
+  assert.ok(crit >= 34 && crit <= 40,
+    `the crit is the party 100 vs 100 band 34..40, not the raised 225 into a Reflect (${crit})`);
+  const onBob = damagesOn('g1_transform_crit', 3);
+  assert.ok(onBob.length > 0 && onBob[0] <= 13,
+    'the transformed crit swings with its own 30 Attack, not the copied 200');
+});
+
+test('screens double the defence before the 8-bit scaling, and stack with nothing', () => {
+  const onAnn = damagesOn('g1_screens', 0);
+  assert.ok(onAnn[0] >= 66 && onAnn[0] <= 78, '512 x2 = 1024 wraps to a 0 byte: divides as 1');
+  assert.strictEqual(onAnn[1], 20, 'a fixed-damage move is not halved');
+  assert.ok(onAnn[2] <= 3, 'after Haze, the unscreened 512 is a 3 at most');
+  assert.ok(saidIn('g1_screens', 'But it failed'), 'a second Reflect fails');
+  const after = jsRun('g1_screens').probes.find((p) => p.at === 3 && p.slot === 0);
+  assert.strictEqual(after.reflect || after.lightScreen, false, 'Haze takes both screens down');
+});
+
+test('the 997 cap, the Explosion order and the self-hit\'s borrowed Reflect', () => {
+  const [capped] = damagesOn('g1_cap', 0);
+  assert.ok(capped >= 850 && capped <= 999, `4200 is held to 999 before the roll (${capped})`);
+  const [blast] = damagesOn('g1_explode_order', 0);
+  assert.ok(blast >= 44 && blast <= 52, 'the defence halves after the scaling: base 52');
+  const selfHits = damagesOn('g1_self_hit_reflect', 0);
+  assert.ok(selfHits.length > 0 && selfHits.every((d) => d === 73),
+    "160 into the opponent's-Reflect-doubled 9 is 73");
+  assert.ok(damagesOn('g1_opposite_reflect', 0).every((d) => d === 73),
+    'seat 0 faces the Reflect');
+  assert.ok(damagesOn('g1_opposite_reflect', 1).every((d) => d === 144),
+    'seat 1 faces a foe with none: 144');
+  assert.ok(!saidIn('g1_flinch_reset', 'Alpha flinched'), 'a stale flinch dies at turn open');
+});
+
+// The rest are battles of their own: what a cure, a vitamin and a faint do to
+// the stored stats.
+const g1Battle = (o) => build({
+  id: 'g1u', mode: o.mode || 'wild', seed: o.seed || 6201, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', badges: o.aBadges, bag: o.aBag, mons: o.a }],
+    b: [{ playerId: 'p2', name: 'Bob', bag: o.bBag, mons: o.b }],
+  },
+});
+const g1Mon = (o) => mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+  baseSpd: 0, moves: [fx('splash', 0, 85)], ...o });
+const g1Foe = (o) => mn({ species: 'Beta', baseSpd: 0, moves: [fx('splash', 0, 85)], ...o });
+const g1Active = (battle, playerId) => {
+  const fighter = battle.byId.get(playerId);
+  return fighter.mons[fighter.active - 1];
+};
+
+test("a player's cure reloads the party stats; a Full Restore that heals, or the computer's, does not", () => {
+  const cured = (item, hp, side) => {
+    const battle = g1Battle({
+      mode: side === 'b' ? 'coop_npc' : 'wild', aBadges: allBadges(),
+      aBag: { [item]: 1 }, bBag: { [item]: 1 },
+      a: [g1Mon({ status: side === 'b' ? undefined : 'PAR', hp })],
+      b: [g1Foe({ spd: 80, status: side === 'b' ? 'PAR' : undefined })],
+    });
+    if (side === 'b') {
+      battle.submitChoice('p1', { action: 'fight', move: 0 });
+      battle.submitChoice('p2', { action: 'item', item });
+      return g1Active(battle, 'p2');
+    }
+    battle.submitChoice('p1', { action: 'item', item });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    return g1Active(battle, 'p1');
+  };
+  const healed = cured('PARLYZ_HEAL');
+  assert.strictEqual(healed.status, null);
+  assert.strictEqual(`${healed.cur.atk}/${healed.cur.spd}`, '100/60',
+    'ItemUseMedicine copies the party stats: penalty and badges gone');
+  assert.strictEqual(cured('FULL_RESTORE', 100).cur.spd, 16,
+    'a Full Restore that also heals keeps the stored 15 -> 16');
+  assert.strictEqual(cured('FULL_RESTORE').cur.spd, 60, 'at full HP it is a Full Heal');
+  const npc = cured('PARLYZ_HEAL', undefined, 'b');
+  assert.strictEqual(npc.status, null);
+  assert.strictEqual(npc.cur.spd, 20, 'AICureStatus leaves the quartered Speed');
+});
+
+test('a vitamin rebuilds the fielded battle stats; a faint and a switch reload them', () => {
+  const vit = g1Battle({
+    aBadges: allBadges(), aBag: { PROTEIN: 1 },
+    a: [g1Mon({ level: 100 })], b: [g1Foe({})],
+  });
+  vit.submitChoice('p1', { action: 'item', item: 'PROTEIN' });
+  vit.submitChoice('p2', { action: 'fight', move: 0 });
+  const alpha = g1Active(vit, 'p1');
+  assert.strictEqual(alpha.partyStats.atk, 112, 'PROTEIN at level 100 is +12');
+  assert.strictEqual(alpha.cur.atk, 126, '112 through the badge: 126');
+
+  const fell = g1Battle({
+    mode: '1v1',
+    a: [g1Mon({ hp: 1, moves: [fx('sharpen', 0, 50)] }), g1Mon({ species: 'Gamma' })],
+    b: [g1Foe({ atk: 200, spd: 10, moves: [fx('thump', 40, 0)] })],
+  });
+  fell.submitChoice('p1', { action: 'fight', move: 0 });
+  fell.submitChoice('p2', { action: 'fight', move: 0 });
+  const fallen = fell.byId.get('p1').mons[0];
+  assert.strictEqual(fallen.hp, 0);
+  assert.strictEqual(fallen.stages.atk, 0, 'a faint zeroes the stages');
+  assert.strictEqual(fallen.cur.atk, 100, '...and reloads the battle stats');
+
+  const mimic = g1Battle({
+    mode: '1v1',
+    a: [g1Mon({ atk: 30, spd: 90, moves: [fx('mimicry', 0, 57)] }), g1Mon({ species: 'Gamma' })],
+    b: [g1Foe({ atk: 200 })],
+  });
+  mimic.submitChoice('p1', { action: 'fight', move: 0 });
+  mimic.submitChoice('p2', { action: 'fight', move: 0 });
+  const ditto = g1Active(mimic, 'p1');
+  assert.deepStrictEqual([ditto.cur.atk, ditto.stats.atk, ditto.partyStats.atk], [200, 200, 30],
+    'Transform copies battle and unmodified stats, never the party struct');
+  mimic.submitChoice('p1', { action: 'switch', slot: 1 });
+  mimic.submitChoice('p2', { action: 'fight', move: 0 });
+  mimic.submitChoice('p1', { action: 'switch', slot: 0 });
+  mimic.submitChoice('p2', { action: 'fight', move: 0 });
+  assert.strictEqual(g1Active(mimic, 'p1').stats.atk, 30, 'switched back in, its own stats return');
 });

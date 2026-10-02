@@ -13,6 +13,10 @@
  * Phase 4: multi-turn charge, recharge, trap, thrash, rage.
  */
 
+// For the burn / paralysis tail of `battleStat`, so the halving and the
+// quartering are one rule with one owner rather than a second copy here.
+const Status = require('./Status.js');
+
 const NAMES = [
   'NO_ADDITIONAL_EFFECT',
   'EFFECT_01',
@@ -127,6 +131,10 @@ const CATEGORIES = [
 
 const STAGE_MIN = -6;
 const STAGE_MAX = 6;
+
+// BattleCommand_Screen's `ld a, 5`: a Reflect or Light Screen counts five
+// between-turn ticks (HandleScreens), the turn it went up included.
+const SCREEN_TURNS = 5;
 
 // Gen1 stage multipliers as percents (25/100 .. 400/100).
 const STAGE_MULT = {
@@ -287,8 +295,17 @@ function stageMult(stage) {
   return STAGE_MULT[clampStage(stage)];
 }
 
+// CalcBattleStats (pokecrystal engine/battle/effect_commands.asm:4817-4875):
+// the unmodified stat times the stage's ratio from data/battle/
+// stat_multipliers.asm, then a quotient of 0 is raised to 1 and one at or past
+// MAX_STAT_VALUE is held at 999. The cart's ratios are num/den pairs (15/10,
+// 2/1, 25/10 ...); each is the percent above over 100 exactly, so the floor
+// lands on the same integer.
 function applyStage(base, stage) {
-  return Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
+  const value = Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
+  if (value < 1) return 1;
+  if (value > MAX_STAT_VALUE) return MAX_STAT_VALUE;
+  return value;
 }
 
 // Crystal's badge rules, as gen1recomp ports them (src/battle/gen2/Battle.lua,
@@ -344,10 +361,10 @@ function glacierBoostsSpDef(boostedSpa) {
   return a % 2 === 1;
 }
 
-// The stat a hit or the turn order reads, plus the badge boost (port
-// Battle.lua:811-833, battleStat). `wireStatKey` is atk/def/spe/spa/spd.
-// `spa` is the same monster's unboosted Sp. Atk, and is read only for `spd`:
-// it is what Glacier's tail is decided on.
+// One stat plus its owner's badge boost. `wireStatKey` is atk/def/spe/spa/
+// spd. `spa` is the same monster's Sp. Atk as BadgeStatBoosts finds it --
+// already staged, because CalcPlayerStats runs CalcBattleStats first -- and
+// is read only for `spd`: it is what Glacier's tail is decided on.
 function badgeBoost(statValue, wireStatKey, badges, spa) {
   const base = Math.max(0, int(statValue, 0));
   if (!badges || typeof badges !== 'object') return base;
@@ -362,6 +379,38 @@ function badgeBoost(statValue, wireStatKey, badges, spa) {
     return boostStat(base);
   }
   return base;
+}
+
+// The stat a hit, the turn order or a confusion self-hit reads: the battle
+// stat, rebuilt the way CalcPlayerStats does it (pokecrystal engine/battle/
+// effect_commands.asm:4778-4797) --
+//
+//   1. CalcBattleStats: the unmodified stat x the stage ratio, 1..999
+//      (`applyStage`);
+//   2. BadgeStatBoosts (engine/battle/core.asm:6768): +1/8, held at 999, and
+//      Glacier's Sp. Def tail reading the staged-then-boosted Sp. Atk;
+//   3. ApplyPrzEffectOnSpeed / ApplyBrnEffectOnAttack (core.asm:6585-6669):
+//      paralysis quarters Speed and burn halves Attack, each at least 1.
+//
+// Read-time rather than stored; the Lua twin's note says where the cart reads
+// otherwise (a switch-in's status penalty runs before BadgeStatBoosts) and
+// why that stays written down rather than modelled.
+//
+// `mon` is a sheet: { stats, stages, status }. `badges` is its seat's set
+// (null for every seat the cart would not boost; see Turn.BADGE_MODES).
+function battleStat(mon, key, badges) {
+  const m = mon && typeof mon === 'object' ? mon : {};
+  const stats = m.stats && typeof m.stats === 'object' ? m.stats : {};
+  const stages = m.stages && typeof m.stages === 'object' ? m.stages : {};
+  let value = applyStage(stats[key], stages[key]);
+  let spa;
+  if (key === 'spd') spa = applyStage(stats.spa, stages.spa);
+  value = badgeBoost(value, key, badges, spa);
+  if (key === 'atk' && m.status === 'burn') value = Status.burnAttack(value);
+  if (key === 'spe' && m.status === 'paralysis') {
+    value = Status.paralysisSpeed(value);
+  }
+  return value;
 }
 
 // DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146; port
@@ -534,6 +583,12 @@ function applyStatChange(out, fighter, mon, stat, delta) {
   out.events.push({ kind: 'stat', fields });
 }
 
+// Every stage back to 0. Haze, and the levels a monster leaves behind:
+// pokecrystal keeps one set of stat levels per side (wPlayerStatLevels) and
+// refills it on every send-out (ResetPlayerStatLevels, engine/battle/
+// core.asm:3944), so a monster that switches in or faints brings no stage
+// with it -- the referee keeps them per monster and clears them at those two
+// points instead (Turn `_resolveSwitches` / `_faint`).
 function resetStages(mon) {
   mon.stages.atk = 0;
   mon.stages.def = 0;
@@ -559,7 +614,8 @@ function blockedBySubstitute(effectId) {
 }
 
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
-//      moveIndex (1-based), statusToWire
+//      moveIndex (1-based), statusToWire, userScreens (the user's side's
+//      screen counts; see LIGHT_SCREEN_EFFECT below)
 function applyPrimary(ctx) {
   const out = {
     nothing: false, messages: [], events: [], heals: [], costs: [],
@@ -705,15 +761,22 @@ function applyPrimary(ctx) {
     return out;
   }
 
-  if (effectId === 64) {
-    userMon.lightScreen = true;
-    out.messages.push(`${userMon.species} created a light screen`);
-    return out;
-  }
-
-  if (effectId === 65) {
-    userMon.reflect = true;
-    out.messages.push(`${userMon.species} created a reflect`);
+  // BattleCommand_Screen (pokecrystal engine/battle/effect_commands.asm:
+  // 6147-6188): a screen belongs to the user's SIDE (wPlayerScreens), lasts
+  // SCREEN_TURNS, and a second cast while it is up fails ("But it failed!")
+  // rather than refreshing the count. `c.userScreens` is the side's
+  // { lightScreen, reflect } turn counts (Turn's `this.screens[side]`), which
+  // the between-turn tick counts down; nothing else ever clears them.
+  if (effectId === 64 || effectId === 65) {
+    const key = effectId === 64 ? 'lightScreen' : 'reflect';
+    const screens = c.userScreens;
+    if (!screens || typeof screens !== 'object' || int(screens[key], 0) > 0) {
+      out.messages.push('But it failed');
+      return out;
+    }
+    screens[key] = SCREEN_TURNS;
+    out.messages.push(`${userMon.species}`
+      + (effectId === 64 ? ' created a light screen' : ' created a reflect'));
     return out;
   }
 
@@ -1045,15 +1108,37 @@ function isRage(effectId) {
   return int(effectId, 0) === 81;
 }
 
-// Gen1: Reflect halves physical, Light Screen halves special.
-function screenDamage(damage, defender, isSpecial) {
-  let d = Math.max(0, int(damage, 0));
-  if (isSpecial) {
-    if (defender.lightScreen) d = Math.floor(d / 2);
-  } else if (defender.reflect) {
-    d = Math.floor(d / 2);
-  }
-  return d;
+// ------------------------------------------------------------------
+// move priority
+// ------------------------------------------------------------------
+//
+// GetMovePriority (pokecrystal engine/battle/core.asm:829-850): Vital Throw
+// answers 0 by its move id, every other move by its effect's row in
+// data/moves/effects_priorities.asm, and a move with no row is BASE_PRIORITY
+// (constants/battle_constants.asm: 1). DetermineMoveOrder compares the two
+// numbers before anything else (CompareMovePriority), so a higher one moves
+// first whatever the Speed.
+//
+// Keyed by the move ids that carry those effects (data/moves/moves.asm) rather
+// than by effect; the Lua twin says why (no effect id in this table names any
+// of the five, and EFFECT_FORCE_SWITCH shares 28 with Gen 1's Teleport row).
+// The selected move's id is what is read, as the cart reads wCurPlayerMove.
+const BASE_PRIORITY = 1;
+const MOVE_PRIORITY = {
+  PROTECT: 3, DETECT: 3, // EFFECT_PROTECT, 3
+  ENDURE: 3, // EFFECT_ENDURE, 3
+  QUICK_ATTACK: 2, MACH_PUNCH: 2, EXTREMESPEED: 2, // EFFECT_PRIORITY_HIT, 2
+  WHIRLWIND: 0, ROAR: 0, // EFFECT_FORCE_SWITCH, 0
+  COUNTER: 0, // EFFECT_COUNTER, 0
+  MIRROR_COAT: 0, // EFFECT_MIRROR_COAT, 0
+  VITAL_THROW: 0, // `cp VITAL_THROW / ld a, 0`
+};
+
+// The priority bracket of a move (a move record or its id).
+function movePriority(moveOrId) {
+  const key = moveKey(moveOrId);
+  if (!Object.prototype.hasOwnProperty.call(MOVE_PRIORITY, key)) return BASE_PRIORITY;
+  return MOVE_PRIORITY[key];
 }
 
 // Gen1 category is type-based. specialTypes is a set of chart indices.
@@ -1362,6 +1447,12 @@ module.exports = {
   clampStage,
   stageMult,
   applyStage,
+  battleStat,
+  resetStages,
+  SCREEN_TURNS,
+  BASE_PRIORITY,
+  MOVE_PRIORITY,
+  movePriority,
   badgeBoost,
   boostStat,
   glacierBoostsSpDef,
@@ -1400,7 +1491,6 @@ module.exports = {
   isThrash,
   thrashTurns,
   isRage,
-  screenDamage,
   isSpecialType,
   itemEffect,
   itemFailsOnFainted,

@@ -80,6 +80,22 @@
 --     a turn, not the match.
 --   * *Struggle* when every move is out of PP: synthetic STRUGGLE (power 50,
 --     type normal), no PP spent, recoil floor(damage/4) minimum 1 after a hit.
+--   * *Battle stats are stored, not derived* -- pokered's own model, kept so
+--     its rounding, caps and glitches come out exact.  Each monster carries
+--     its party stats, its unmodified stats and its battle stats (`cur`);
+--     Effects.lua's "Stored battle stats" note says who writes which.  A
+--     switch-in loads party -> burn/paralysis penalty -> badges and zeroes
+--     every stage, as does a faint; a stage change rebuilds one stat; the
+--     badge-stacking and re-penalty glitches ride `Effects.changeStat`, the
+--     one door every stage change goes through.  Speed, damage and the
+--     confusion self-hit read `cur` and add nothing at read time; a critical
+--     hit reads the party stats at both ends and no screen.
+--   * *"The enemy" in a 2v2.*  Gen 1 has one opponent, so where the cart
+--     reads "the battler whose turn it is not" the referee names one: a
+--     move's stage change re-penalises the seat the action was aimed at (for
+--     a drop, the lowered monster itself), Rage the attacker, an X item and
+--     the confusion self-hit's Reflect check the battler opposite
+--     (`_oppositeFoe`: the same position across, else the nearest).
 --   * The choice clock is *suspended while anybody is disconnected*, because
 --     the grace timer is already counting for that player and two deadlines
 --     racing would decide the match on whichever fired first.  `submitChoice`
@@ -181,6 +197,17 @@ local WILD_SIDE = "b"
 local function isWildSeat(mode, fighter)
   return fighter ~= nil and fighter.side == WILD_SIDE
     and Effects.isWildMode(mode)
+end
+
+-- The computer's own seat: side b of a fight against the computer, the one
+-- side M.BADGE_MODES never boosts.  Where the cart runs one routine for the
+-- player and another for its AI -- a status cure is the case: ItemUseMedicine
+-- rewrites the battle stats, AICureStatus does not -- this is the seat that
+-- takes the AI's.  Every other seat (side a there, both sides of a link
+-- fight) is a player on its own cartridge.
+local function isComputerSeat(mode, fighter)
+  return fighter ~= nil and M.BADGE_MODES[mode] == true
+    and fighter.side ~= M.BADGE_SIDE
 end
 
 -- Wire spells a condition as a three-letter token and Status.lua spells it as
@@ -403,6 +430,16 @@ local function copyMon(raw, fallback)
       spd = max(1, int(stats.spd, 1)),
       spc = max(1, int(stats.spc, 1)),
     },
+    -- The party struct beside the unmodified stats above, and the battle
+    -- stats (`cur`) seeded from both once the seat's badges are known
+    -- (`create`).  Effects' "Stored battle stats" note says who writes which.
+    partyStats = {
+      atk = max(1, int(stats.atk, 1)),
+      def = max(1, int(stats.def, 1)),
+      spd = max(1, int(stats.spd, 1)),
+      spc = max(1, int(stats.spc, 1)),
+    },
+    cur = nil,
     types = copyTypes(raw.types),
     moves = moves,
     stages = stages,
@@ -648,6 +685,11 @@ function M.create(opts)
         -- Who has been in against THIS seat's current monster; see `_refield`.
         fought    = {},
       }
+      -- Every monster's battle stats, seeded the way LoadBattleMonFromParty
+      -- seeds them (the unmodified stats, the condition penalty, this seat's
+      -- badges), so a bench monster is as ready as the fielded one; a switch-in
+      -- re-runs the whole load anyway (`_resolveSwitches`).
+      for i = 1, #mons do Effects.recalcBattleStats(mons[i], fighter.badges) end
       self.fighters[#self.fighters + 1] = fighter
       self.byId[playerId] = fighter
       local bucket = self.bySide[side]
@@ -1648,6 +1690,13 @@ function Battle:_openTurn()
   for _, fighter in ipairs(self.fighters) do
     fighter.choice = nil
     fighter.forced = nil
+    -- MainInBattleLoop resets both FLINCHED bits as a turn opens
+    -- (core.asm :296-300), so a flinch landed on a monster that had already
+    -- moved dies here instead of costing it the NEXT turn.  The cart skips
+    -- that reset while the player's own monster is raging or recharging; the
+    -- referee does not model the skip -- see `_fillForcedChoices`, where
+    -- recharge is a forced pass rather than a gate a flinch could pre-empt.
+    for i = 1, #fighter.mons do fighter.mons[i].flinch = false end
   end
   self.deadline = (self.choiceTimeout > 0) and (self.now + self.choiceTimeout) or nil
   -- Before the window opens, not after: a player deciding this turn is looking
@@ -1734,11 +1783,24 @@ function Battle:_closeReplace()
   self:_openTurn()
 end
 
+-- The battle Speed, as stored: the stage, the badge and a paralysis are
+-- already in it (Effects' stored-stat note), so reading it is the whole rule
+-- -- which is how the cart's turn order reads wBattleMonSpeed.  `fighter` is
+-- kept for the callers' shape.
 function Battle:_speedOf(fighter, mon)
-  local spd = Effects.badgeBoost(mon.stats.spd, "spd", fighter.badges)
-  spd = Effects.applyStage(spd, mon.stages.spd)
-  if mon.status == "paralysis" then return Status.paralysisSpeed(spd) end
-  return spd
+  return mon.cur.spd
+end
+
+-- The battler opposite this one: the foe seat in the same position if it
+-- stands, else the nearest standing foe -- `_retarget` aimed at the mirror
+-- slot, which is BattleSim3's oppositeFoe (Move.lua:746-752) in this
+-- referee's terms.  Gen 1 has exactly one opponent, so a cart rule that says
+-- "the enemy" with no target to read it off -- the Reflect the confusion
+-- self-hit checks, the battler an X item's re-penalty lands on -- asks this
+-- in a 2v2.  nil when the other side has nobody standing.
+function Battle:_oppositeFoe(fighter)
+  local other = (fighter.side == "a") and "b" or "a"
+  return self:_retarget(fighter, Events.fieldSlot(other, fighter.index))
 end
 
 -- chart[atkType + 1][defType + 1], one percent per defender type, because
@@ -1863,6 +1925,9 @@ function Battle:_resolveSwitches()
         mon.xAccuracy = false
         mon.leechSeed = nil
         mon.disable = nil
+        -- LoadBattleMonFromParty: party stats -> unmodified -> battle, the
+        -- penalty, this seat's badges, and every stage back to neutral.
+        Effects.loadBattleStats(mon, fighter.badges)
         self:_clearTrapsFrom(fighter.slot)
         -- `mon` is the index the referee just fielded -- `choice.slot`, already
         -- normalised to a party position by `_normaliseChoice`.  This is the
@@ -1976,6 +2041,12 @@ function Battle:_resolveOneItem(fighter)
       local result = Effects.applyVitamin(mon, choice.item)
       if result then
         vitaminApplied, vitaminMon, vitaminResult = true, mon, result
+        -- The fielded monster's battle stats are rebuilt the way a level-up
+        -- mid-fight rebuilds them (Effects.recalcBattleStats); a benched one
+        -- is rebuilt by its next switch-in anyway.
+        if partyIdx == fighter.active and result.stat ~= "hp" then
+          Effects.recalcBattleStats(mon, fighter.badges)
+        end
       end
     end
   end
@@ -2102,13 +2173,20 @@ function Battle:_resolveOneItem(fighter)
         applied = true
       end
       if effect.stage then
+        -- ItemUseXStat runs StatModifierUpEffect on the player's turn
+        -- (item_effects.asm :1638-1666), and the AI's X items run the same
+        -- routine on its own (trainer_ai.asm AIIncreaseStat): so an X item
+        -- is a stat-up move in everything but the menu -- the 999 wall, the
+        -- badge re-run on the user and the re-penalty on the battler
+        -- opposite, who has no aimed seat to be read off.
         local stat = effect.stage.stat
-        local before = Effects.clampStage(mon.stages[stat])
-        if before >= Effects.STAGE_MAX then
-          self:_say("Nothing happened")
-        else
-          local after = Effects.clampStage(before + int(effect.stage.delta, 1))
-          mon.stages[stat] = after
+        local foe = self:_oppositeFoe(fighter)
+        local outcome, after = Effects.changeStat({
+          mon = mon, fighter = fighter, stat = stat,
+          delta = int(effect.stage.delta, 1),
+          mover = fighter, nonMover = foe and activeMon(foe) or nil,
+        })
+        if outcome == "rose" then
           local label = ({
             atk = "ATTACK", def = "DEFENSE", spd = "SPEED",
             spc = "SPECIAL", acc = "ACCURACY", eva = "EVASION",
@@ -2118,6 +2196,8 @@ function Battle:_resolveOneItem(fighter)
             slot = fighter.slot, side = fighter.side,
             amount = after, text = mon.species .. "'s " .. label .. " rose",
           })
+        else
+          self:_say("Nothing happened")
         end
         applied = true
       end
@@ -2212,6 +2292,19 @@ function Battle:_resolveOneItem(fighter)
          and effect.clearStatuses[mon.status] then
         mon.status, mon.statusTurns = nil, 0
         cleared = true
+      end
+      -- A cure on the player's fielded monster takes ItemUseMedicine's
+      -- .cureStatusAilment branch, which rewrites the battle stats from the
+      -- party (Effects.reloadPartyStats) -- lifting the stored penalty along
+      -- with every badge boost.  A Full Restore that also restored HP takes
+      -- the .healHP branch instead (item_effects.asm :1152-1176): the status
+      -- goes, the stats stay as they were, penalty included; only at full HP
+      -- does it turn into a Full Heal (:976-990).  The computer's cure
+      -- (AICureStatus) never touches a stat.
+      if cleared and partyIdx == fighter.active
+         and not isComputerSeat(self.mode, fighter)
+         and not (effect.clearAllStatus and healed) then
+        Effects.reloadPartyStats(mon)
       end
       if cleared then
         self:_emit("status", {
@@ -2320,19 +2413,27 @@ function Battle:_runGates(fighter, mon)
   end
 
   if mon.confusion > 0 then
-    -- The self-hit reads the battle stats, badge boosts included: pokered's
-    -- HandleSelfConfusionDamage takes wBattleMon's Attack and Defense, which
-    -- ApplyBadgeStatBoosts already raised, and the engine port does the same
-    -- (gen1recomp src/battle/BattleState.lua:4187 computeDamage(user, user)
-    -- -> Damage.applyBadgeBoost).  Attacker and defender are one seat, so its
-    -- BOULDERBADGE and THUNDERBADGE both apply; `fighter.badges` is nil outside
-    -- BADGE_MODES' side a, as for every other hit.
+    -- The self-hit reads the battle stats as stored: pokered's
+    -- HandleSelfConfusionDamage (core.asm :3672-3710) puts wBattleMon's own
+    -- Defense in the enemy's slot and runs GetDamageVarsForPlayerAttack, so
+    -- the Attack and Defense are wBattleMon's -- stages, badges and a stored
+    -- burn all in them -- through the same scaling and 997 cap as any hit,
+    -- with no crit and no random factor (Status' fixed max roll).  And the
+    -- Reflect check in there still reads the ENEMY's status byte, so it is
+    -- the opponent's Reflect that doubles the confused monster's own Defense
+    -- -- the cart's quirk, kept.  Gen 1 has one opponent; in a 2v2 it is the
+    -- battler opposite (`_oppositeFoe`).  The enemy's own self-hit is the
+    -- mirror image (:5774-5805), so this is both seats' rule.
+    local opposite = self:_oppositeFoe(fighter)
+    local opposed = opposite and activeMon(opposite)
+    local defense = mon.cur.def
+    if opposed and opposed.reflect then defense = defense * 2 end
     local gate = Status.beforeMove({
       status = "confusion",
       turnsRemaining = mon.confusion,
       level = mon.level,
-      attack = Effects.badgeBoost(mon.stats.atk, "atk", fighter.badges),
-      defense = Effects.badgeBoost(mon.stats.def, "def", fighter.badges),
+      attack = mon.cur.atk,
+      defense = defense,
     }, self.rng:byte())
     if gate then
       mon.confusion = int(gate.turnsRemaining, 0)
@@ -2480,7 +2581,7 @@ function Battle:_useMove(fighter, mon, opts)
       self:_markLastMove(mon, choice.move)
       return
     end
-    self:_damage(target, defender, 2 * stored, nil)
+    self:_damage(target, defender, 2 * stored, nil, fighter)
     self:_markLastMove(mon, choice.move)
     return
   end
@@ -2625,7 +2726,7 @@ function Battle:_useMove(fighter, mon, opts)
   local hits = Effects.hitCount(effectId, self.rng)
   -- Species base Speed, not battle Speed: paralysis and the Speed badge must
   -- not change the crit rate. Absent `baseSpd` (old sheet) falls back to the
-  -- current stat still without a badge boost.
+  -- unmodified stat, still without a stage, badge or penalty.
   local critSpd = mon.baseSpd
   if critSpd == nil then critSpd = mon.stats.spd end
   local isCrit = Crit.check(critSpd, self.rng:byte(), {
@@ -2669,24 +2770,31 @@ function Battle:_useMove(fighter, mon, opts)
     self.rng:damageRoll()
     damage = fixed
   else
+    -- GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255).  An
+    -- ordinary hit reads the stored battle stats -- stage, badges and a burn
+    -- already in them -- and a screen on the defender doubles its stat
+    -- (`sla c / rl b`, uncapped, so a big enough one wraps in the scaling).
+    -- A critical hit throws all of that away for the party stats at both
+    -- ends: the attacker's party struct (pre-Transform) and the defender's --
+    -- the cart's GetEnemyMonStat reads the enemy's party struct in a link
+    -- fight and recomputes it without stat exp against the computer, which
+    -- is the same number for every foe the cart fields (they carry none).
+    -- No stage, no badge, no burn, no screen.  The scaling, the Explosion
+    -- halving and the 997 cap are Damage.compute's.
     local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
     local atkKey = isSpecial and "spc" or "atk"
     local defKey = isSpecial and "spc" or "def"
-    local atkStat = Effects.badgeBoost(
-      isSpecial and mon.stats.spc or mon.stats.atk, atkKey, fighter.badges)
-    local atkStage = isSpecial and mon.stages.spc or mon.stages.atk
-    local defStat = Effects.badgeBoost(
-      isSpecial and defender.stats.spc or defender.stats.def, defKey, target.badges)
-    local defStage = isSpecial and defender.stages.spc or defender.stages.def
-
-    local attack = Effects.applyStage(atkStat, atkStage)
-    if (not isSpecial) and mon.status == "burn" then
-      attack = Status.burnAttack(attack)
-    end
-
-    local defense = Effects.applyStage(defStat, defStage)
-    if Effects.isExplode(effectId) then
-      defense = max(1, floor(defense / 2))
+    local attack, defense
+    if isCrit then
+      attack = mon.partyStats[atkKey]
+      defense = defender.partyStats[defKey]
+    else
+      attack = mon.cur[atkKey]
+      defense = defender.cur[defKey]
+      if (isSpecial and defender.lightScreen)
+         or ((not isSpecial) and defender.reflect) then
+        defense = defense * 2
+      end
     end
 
     local result = Damage.compute(
@@ -2698,6 +2806,7 @@ function Battle:_useMove(fighter, mon, opts)
         stab = hasType(mon, move.type),
         typeEffect = percents,
         roll = self.rng:damageRoll(),
+        explode = Effects.isExplode(effectId),
       })
 
     if result.immune then
@@ -2712,9 +2821,6 @@ function Battle:_useMove(fighter, mon, opts)
     damage = result.damage or 0
   end
 
-  local isSpecial = Effects.isSpecialType(move.type, self.specialTypes)
-  damage = Effects.screenDamage(damage, defender, isSpecial)
-
   local effectiveness = 1
   for _, pct in ipairs(percents) do effectiveness = effectiveness * pct / 100 end
   if isCrit and not isFixed then self:_say("A critical hit") end
@@ -2728,7 +2834,7 @@ function Battle:_useMove(fighter, mon, opts)
   for _ = 1, hits do
     if defender.hp <= 0 then break end
     local hpBefore = defender.hp
-    self:_damage(target, defender, damage, nil)
+    self:_damage(target, defender, damage, nil, fighter)
     totalDealt = totalDealt + (hpBefore - defender.hp)
   end
 
@@ -2814,8 +2920,9 @@ function Battle:_useMove(fighter, mon, opts)
 end
 
 -- One place where HP comes off, so the faint that follows can never be
--- forgotten at one of the call sites.
-function Battle:_damage(fighter, mon, amount, status)
+-- forgotten at one of the call sites.  `source` is the seat whose move dealt
+-- it, when one did (a strike, a Bide release): Rage reads it.
+function Battle:_damage(fighter, mon, amount, status, source)
   amount = max(0, int(amount, 0))
 
   if amount > 0 and mon.bide and mon.bide.turns > 0 then
@@ -2840,15 +2947,29 @@ function Battle:_damage(fighter, mon, amount, status)
   if amount > mon.hp then amount = mon.hp end
 
   if amount > 0 and mon.raging then
-    local before = Effects.clampStage(mon.stages.atk)
-    local after = Effects.clampStage(before + 1)
-    if after ~= before then
-      mon.stages.atk = after
+    -- HandleBuildingRage (core.asm :4913-4950) flips hWhoseTurn and runs
+    -- StatModifierUpEffect, so the raging battler is the "user": its own
+    -- badges re-run (when it is the player's) and the re-penalty lands on the
+    -- battler whose turn it then is not -- the attacker.  Damage no move dealt
+    -- (a residual) names no attacker; the battler opposite stands in.  At +6
+    -- the cart returns before saying anything, as this does.
+    local attacker = source and activeMon(source) or nil
+    if not attacker then
+      local opposite = self:_oppositeFoe(fighter)
+      attacker = opposite and activeMon(opposite) or nil
+    end
+    local outcome, after = Effects.changeStat({
+      mon = mon, fighter = fighter, stat = "atk", delta = 1,
+      mover = fighter, nonMover = attacker,
+    })
+    if outcome == "rose" then
       self:_say(mon.species .. "'s ATTACK rose")
       self:_emit("stat", {
         slot = fighter.slot, side = fighter.side,
         amount = after, text = mon.species .. "'s ATTACK rose",
       })
+    elseif outcome == "stuck" then
+      self:_say("Nothing happened")
     end
   end
 
@@ -3127,6 +3248,9 @@ function Battle:_faint(fighter, mon)
   mon.xAccuracy = false
   mon.leechSeed = nil
   mon.disable = nil
+  -- Stages and the battle stats go with it: a monster that comes back (a
+  -- Revive, then a switch-in) is loaded from its party stats like any other.
+  Effects.loadBattleStats(mon, nil)
   self:_clearTrapsFrom(fighter.slot)
 
   -- Living bench? Computed before clearing active; fainted mon already has hp 0.

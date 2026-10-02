@@ -391,6 +391,22 @@ function nm(B, b) {
   return B.nameOf(b);
 }
 
+// The cart's "regular battle" rule for items (MOVE_EFFECT_STEAL_ITEM,
+// battle_script_commands.c:2619; Cmd_tryswapitems, :8801 -- pokeemerald's
+// same two): an attacker on the opponent side (B_SIDE_OPPONENT, side b) may not
+// take or swap the player's items unless the fight is link / recorded link /
+// e-reader / frontier (FRLG: battle tower) / secret base. None of those is a
+// fight against the computer here, so the bar is Turn.BADGE_MODES (wild /
+// coop_wild / coop_npc), read off side a's `badgeRules` -- true on its fighters
+// exactly there (Turn requires this module, so it cannot read the set). 1v1 /
+// coop_pvp are link fights: either side may. Trainer Hill / Trainer Tower,
+// which bar everyone, are never mediated.
+function foeItemsBarred(B, user) {
+  if (user.side !== 'b') return false;
+  const first = B.bySide && B.bySide.a && B.bySide.a[0];
+  return first != null && first.badgeRules === true;
+}
+
 // ------------------------------------------------------------------
 // stat changes (pokefirered/src/battle_script_commands.c:6655 ChangeStatBuffs)
 // ------------------------------------------------------------------
@@ -659,12 +675,16 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     return true;
   }
   if (eff === 'STEAL_ITEM') {
-    // src/battle_script_commands.c:2610 (a mediated fight is a link fight: either
-    // side may steal). A mon whose item was knocked off may not (:2628, pret
-    // knockedOffMons): it still owns that item after the fight (Knock Off keeps
-    // `mon.knockedOff` for the `holding` writeback), so a stolen item would
-    // vanish there. The cart skips this check only in link fights; this one
-    // writes items back like a non-link fight, so the check stands.
+    // src/battle_script_commands.c:2610. Against the computer the foe's Thief /
+    // Covet takes nothing and says nothing (:2619 skips the effect before Sticky
+    // Hold is asked; foeItemsBarred): the hit has landed, the player keeps the
+    // item. A link fight (1v1 / coop_pvp) lets either side steal. A mon whose
+    // item was knocked off may not (:2628, pret knockedOffMons): it still owns
+    // that item after the fight (Knock Off keeps `mon.knockedOff` for the
+    // `holding` writeback), so a stolen item would vanish there. The cart skips
+    // this check only in link fights; this one writes items back like a
+    // non-link fight, so the check stands.
+    if (foeItemsBarred(B, user)) return false;
     if (truthy(user.mon.knockedOff)) return false;
     const tItem = int(target.mon.heldItem, 0);
     if (tItem !== 0 && target.ability === 'STICKY_HOLD') {
@@ -2152,12 +2172,16 @@ H[E.FOLLOW_ME] = function effectFollowMe(C) {
   C.B.say(nm(C.B, C.user) + ' became the center of attention!');
 };
 
-// pokefirered/src/battle_script_commands.c:8798 (Trick: either side, link rules)
+// pokefirered/src/battle_script_commands.c:8798 (Cmd_tryswapitems, after the
+// Substitute and accuracy checks of BattleScript_EffectTrick). Against the
+// computer the foe's Trick fails before anything else is asked (:8801,
+// foeItemsBarred); a link fight (1v1 / coop_pvp) lets either side swap.
 H[E.TRICK] = function effectTrick(C) {
   const { B, user } = C;
   const t = C.target;
   if (sub(t)) return C.fail();
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
+  if (foeItemsBarred(B, user)) return C.fail();
   if (truthy(user.mon.knockedOff) || truthy(t.mon.knockedOff)) return C.fail();
   const ui = int(user.mon.heldItem, 0);
   const ti = int(t.mon.heldItem, 0);

@@ -1,16 +1,25 @@
 -- Gen1 critical hits, including the Focus Energy bug.
 --
---   threshold = floor(baseSpeed / 2)
---   Focus Energy:  threshold = floor(threshold / 4)
---   high-crit move: threshold = threshold * 8
---   clamp to 0..255, then isCrit = roll < threshold
+-- pokered's CriticalHitTest (engine/battle/core.asm :4478-4540), one shift at
+-- a time, every left shift held at 255:
 --
--- Focus Energy *quarters* the threshold instead of doubling it.  That is the
--- original's famous inverted shift and it is kept, for the same reason the
--- 1/256 miss is kept in Accuracy.lua: this sim has to resolve a fight the way
--- the game the players are playing would resolve it, not the way the manual
--- says it should.  A mod that silently corrected it would make every mediated
--- battle diverge from every offline one.
+--   b = floor(baseSpeed / 2)
+--   Focus Energy:   b = floor(b / 2)        (`srl b` -- the bug: it should
+--                                            have been a left shift)
+--   otherwise:      b = min(255, b * 2)
+--   high-crit move: b = min(255, b * 2), then min(255, b * 2) again
+--   otherwise:      b = floor(b / 2)
+--   isCrit = roll < b
+--
+-- So an ordinary move lands on floor(baseSpeed/2), a high-crit move on
+-- min(255, 8 * floor(baseSpeed/2)), Focus Energy alone on a quarter of the
+-- ordinary threshold -- the original's famous inverted shift, kept for the
+-- same reason the 1/256 miss is kept in Accuracy.lua: this sim has to resolve
+-- a fight the way the game the players are playing would resolve it, not the
+-- way the manual says it should.  Focus Energy *with* a high-crit move is the
+-- case a "quarter it, then times eight" shortcut gets wrong: the halving
+-- happens before the doubling chain, so the threshold is 4 * floor(b0 / 2)
+-- (b0 = floor(baseSpeed / 2)) -- 100 for a base Speed of 100, not 96.
 --
 -- The clamp gives the two ends their behaviour for free: a threshold of 0
 -- never crits (no roll is below 0) and a threshold of 255 still fails on roll
@@ -30,6 +39,8 @@ local floor, max, min = math.floor, math.max, math.min
 
 M.MIN = 0
 M.MAX = 255
+-- What the high-crit chain multiplies an unpumped threshold by, end to end
+-- (the x2 every move gets, then two more), kept as a named number for logs.
 M.HIGH_RATIO = 8
 
 local function int(value, fallback)
@@ -38,13 +49,26 @@ local function int(value, fallback)
   return floor(n)
 end
 
+-- One left shift of the 8-bit register: carry out means "cap at 255/256".
+local function sla(b)
+  return min(M.MAX, b * 2)
+end
+
 -- opts: { focusEnergy, highCritMove }
 function M.threshold(baseSpeed, opts)
   opts = opts or {}
-  local t = floor(max(0, int(baseSpeed, 0)) / 2)
-  if opts.focusEnergy then t = floor(t / 4) end
-  if opts.highCritMove then t = t * M.HIGH_RATIO end
-  return min(M.MAX, max(M.MIN, t))
+  local b = floor(min(M.MAX, max(0, int(baseSpeed, 0))) / 2)
+  if opts.focusEnergy then
+    b = floor(b / 2)
+  else
+    b = sla(b)
+  end
+  if opts.highCritMove then
+    b = sla(sla(b))
+  else
+    b = floor(b / 2)
+  end
+  return min(M.MAX, max(M.MIN, b))
 end
 
 -- Returns isCrit (boolean) and the threshold it was decided against, so a

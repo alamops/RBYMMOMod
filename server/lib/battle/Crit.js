@@ -15,9 +15,13 @@
  *   * The threshold is compared against a 256-value roll but clamps at 255, so
  *     even a high-crit-ratio move with a fast user cannot crit on roll 255.
  *
- * Order matters: Focus Energy divides first, the high-ratio multiplier
- * applies after, and only the final value is clamped -- so the two stack to
- * 96 rather than saturating at 255 and then being quartered to 63.
+ * Order matters, and it is pokered's CriticalHitTest (engine/battle/core.asm
+ * :4478-4540) one shift at a time, every left shift held at 255: b =
+ * floor(baseSpeed / 2); Focus Energy halves it (`srl b`, the bug) where every
+ * other move doubles it; a high-crit move then doubles it twice more where an
+ * ordinary one halves it. So Focus Energy with a high-crit move lands on
+ * 4 * floor(b0 / 2) -- 100 for a base Speed of 100 -- not on the 96 a
+ * "quarter it, then times eight" shortcut reaches.
  *
  * Edge inputs match Lua: missing roll defaults to MAX (255), so an omitted
  * roll almost never crits.
@@ -25,6 +29,8 @@
 
 const MIN = 0;
 const MAX = 255;
+// What the high-crit chain multiplies an unpumped threshold by, end to end
+// (the x2 every move gets, then two more), kept as a named number for logs.
 const HIGH_RATIO = 8;
 
 const idiv = (a, b) => Math.floor(a / b);
@@ -38,13 +44,26 @@ function int(value, fallback) {
   return Math.floor(n);
 }
 
+// One left shift of the 8-bit register: carry out means "cap at 255/256".
+function sla(b) {
+  return Math.min(MAX, b * 2);
+}
+
 // opts: { focusEnergy, highCritMove }
 function threshold(baseSpeed, opts) {
   const o = opts || {};
-  let t = idiv(Math.max(0, int(baseSpeed, 0)), 2);
-  if (o.focusEnergy) t = idiv(t, 4);
-  if (o.highCritMove) t = t * HIGH_RATIO;
-  return clamp(t, MIN, MAX);
+  let b = idiv(Math.min(MAX, Math.max(0, int(baseSpeed, 0))), 2);
+  if (o.focusEnergy) {
+    b = idiv(b, 2);
+  } else {
+    b = sla(b);
+  }
+  if (o.highCritMove) {
+    b = sla(sla(b));
+  } else {
+    b = idiv(b, 2);
+  }
+  return clamp(b, MIN, MAX);
 }
 
 /*

@@ -12,8 +12,17 @@
  * Differs from Gen1 (lib/battle/Damage.js) on purpose:
  *
  *   * Special is SpA vs SpD (sheet keys spa/spd; legacy spc fills both).
- *   * No 255-stat pair clamp.
- *   * Crit is a flat x2 after the base product (not a doubled level term).
+ *   * No 255-stat pair clamp inside compute(): the cart's own fold to a byte
+ *     is TruncateHL_BC, run by the caller on the stats it chose
+ *     (`truncateStats` below), and compute() takes the pair it hands back.
+ *   * Crit is a flat x2 after the base product and the type-boost item
+ *     (BattleCommand_DamageCalc's .CriticalMultiplier, pokecrystal engine/
+ *     battle/effect_commands.asm:3108), not a doubled level term. WHICH
+ *     stats a crit reads is not decided here: CheckDamageStatsCritical
+ *     (:2660) keeps the boosted pair only when the defender's stage is
+ *     strictly lower than the attacker's, and otherwise reads the unmodified
+ *     stats -- no stages, badges, burn, paralysis or screens. Turn makes that
+ *     choice before it calls in.
  *   * After base (+ optional item boost + crit): cap at 997 then +2
  *     (MIN_DAMAGE), so every non-immune damaging hit leaves DamageCalc ≥ 2.
  *   * DoBadgeTypeBoosts (input.badgeTypeBoost) next, ahead of STAB: an
@@ -96,6 +105,29 @@ function base(level, power, attack, defense) {
   value = idiv(value, def);
   value = idiv(value, 50);
   return value;
+}
+
+// TruncateHL_BC (pokecrystal engine/battle/effect_commands.asm:2614-2658):
+// fold the attack / defense pair the damage formula multiplies into a byte
+// each. While either is 255 or more, both are shifted right twice -- a value
+// the shift empties becomes 1 -- and what comes out are the low bytes.
+//
+// `link` is the cart's `wLinkMode == LINK_COLOSSEUM` early exit: one pass and
+// no re-check, so a stat still past 1023 after it keeps only its low byte --
+// the wrap bug docs/bugs_and_glitches.md names. A wrapped 0 is not repaired
+// here: a defense of 0 is lifted to 1 by DamageCalc (`compute` below) and an
+// attack of 0 leaves the base at 0. Returns { attack, defense }.
+function truncateStats(attack, defense, link) {
+  let a = Math.max(0, int(attack, 0));
+  let d = Math.max(0, int(defense, 0));
+  while (a > 255 || d > 255) {
+    d = Math.floor(d / 4);
+    if (d === 0) d = 1;
+    a = Math.floor(a / 4);
+    if (a === 0) a = 1;
+    if (link) break;
+  }
+  return { attack: a % 256, defense: d % 256 };
 }
 
 function applyRoll(modified, roll) {
@@ -212,6 +244,7 @@ module.exports = {
   hasStab,
   levelTerm,
   base,
+  truncateStats,
   applyRoll,
   idiv,
   int,

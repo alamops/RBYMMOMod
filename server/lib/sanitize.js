@@ -667,6 +667,27 @@ const DELTA3_MAX = 12;
 const OBEY_TOKENS3 = new Set(['ignores_asleep', 'uses_random_move', 'falls_asleep', 'hits_itself',
   'loafing', 'wont_obey', 'turned_away', 'pretend_not_notice']);
 
+/*
+ * The Gold sheet's held-item fields (contract K2 of
+ * docs/plans/gen12-referee-fidelity.md), named as Wire.lua names them.
+ * pokecrystal names its hold effects (HELD_LEFTOVERS) where pret's Gen 3
+ * numbers them, so the effect is a prefixed identifier bounded by length; the
+ * parameter is the u8 beside it in the cart's item attributes; the display
+ * name is the cart's item name (ITEM_NAME_LENGTH 13, terminator included).
+ */
+const HOLD_EFFECT2_MAX = 32; // characters in a HELD_* token
+const HOLD_PARAM2_MAX = 255;
+const ITEM_NAME2_MAX = 12;
+
+// One Gen 2 hold effect, or null. Refused rather than trimmed past
+// HOLD_EFFECT2_MAX (a cut token names no rule), and the HELD_ prefix is part of
+// the shape. Twin of Wire.holdEffect2.
+function cleanHoldEffect2(value) {
+  if (typeof value !== 'string') return null;
+  if (value.length > HOLD_EFFECT2_MAX) return null;
+  return /^HELD_[A-Z0-9_]+$/.test(value) ? value : null;
+}
+
 // The party a combatant may submit, and the moves one of them may carry.
 // Mirrors Config.BATTLE_MON_MAX, BATTLE_MOVE_MAX, and battle-bag caps.
 const BATTLE_MON_MAX = 6;
@@ -833,8 +854,18 @@ const BATTLE_EVENT_TYPES = new Set([
 // substitute doll, a ball's shakes, a disobedient mon (text = the §7.2.1
 // token). Their own set for the reason Wire.lua gives at M.BATTLE_EVENTS3 (the
 // Gen 1 sim mirrors the set above exactly); a kind in either set is an event
-// cleanBattleEvent reads.
+// cleanBattleEvent reads. Gold's `held` is BATTLE_EVENT_TYPES2 below: the same
+// word, a different event.
 const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey']);
+
+// Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
+// read by a generation 2 reader only. Wire.lua spells this M.BATTLE_EVENTS2.
+//
+//   held  a held item acted: slot / side / mon say whose, `text` is the item's
+//         id (cleanId, like an `item` event's), `amount` is 1 when the mon
+//         still holds it afterwards and 0 when it is gone. The referee's own
+//         `msg` sentence follows it.
+const BATTLE_EVENT_TYPES2 = new Set(['held']);
 
 /*
  * The three ball states a roster is spelled in. Wire.lua spells this
@@ -1397,6 +1428,18 @@ function cleanBattleMove(raw, generation) {
  *
  * Optional `generation` (1|2) selects the stats dialect; absent falls back to
  * shape sniff on `stats`. Optional `heldItem` is a Gen 2 item id.
+ *
+ * The referee-fidelity additions (docs/plans/gen12-referee-fidelity.md), each
+ * optional, so a sheet that carries none of them reads byte for byte as it did
+ * before they existed (twin of the header above Wire.lua's block3):
+ *
+ *   K1  `traded` (Gen 1 and Gen 2): the mon's OT id is not the player's. Gen
+ *       3's reading -- true kept, false kept as absent, anything else refuses.
+ *   K2  the Gold held item's data next to `heldItem` (Gen 2 only; a Gen 1
+ *       reader copies none of it): `holdEffect` (a HELD_* token,
+ *       cleanHoldEffect2), `holdParam` (0..255), `itemName` (display text,
+ *       ITEM_NAME2_MAX) and `mail` (true or absent). Each refuses the mon when
+ *       present and unreadable, as `heldItem` and Gen 3's hold effect do.
  */
 // A Gen 3 stat-like block: every key at the caller's width, nothing else.
 function cleanBlock3(value, keys, min, max) {
@@ -1559,8 +1602,10 @@ function cleanBattleMon3(raw) {
   // fateful-encounter bit is explicitly clear (the engine's
   // `fatefulEncounter == false`); its absence is the ordinary rules, so the
   // retired `fateful` is not copied and a sheet still carrying one fights as
-  // if it said nothing. Gen 3 only: the Gen 1 / Gen 2 reader builds its sheet
-  // field by field and never copies either.
+  // if it said nothing. `unfateful` is Gen 3's alone (neither Kanto nor Johto
+  // cart has an event-Mew rule): the Gen 1 / Gen 2 reader builds its sheet
+  // field by field and never copies it. `traded` it does copy, in this same
+  // reading (contract K1 of docs/plans/gen12-referee-fidelity.md).
   if (present(raw.traded)) {
     if (typeof raw.traded !== 'boolean') return null;
     if (raw.traded) mon.traded = true;
@@ -1575,7 +1620,10 @@ function cleanBattleMon3(raw) {
 function cleanBattleMon(raw) {
   if (raw === null || typeof raw !== 'object') return null;
   // `generation` 3 selects the Gen 3 dialect (cleanBattleParty stamps it from
-  // the hub's generation); 1 / 2 / absent is read exactly as before.
+  // the hub's generation); 1 / 2 / absent is the older dialect below -- as it
+  // read before Gen 3 had one, plus the optional K1 / K2 fields (see the header
+  // above cleanBlock3), so a sheet that states none of them reads exactly as it
+  // always did.
   if (luaInt(raw.generation, 3, 3) !== null) return cleanBattleMon3(raw);
 
   const generationHint = cleanInt(raw.generation, 1, 2);
@@ -1660,6 +1708,35 @@ function cleanBattleMon(raw) {
     mon.heldItem = heldItem;
   }
 
+  // What the Gold referee reads off that item (contract K2): the effect token,
+  // its parameter, the name the box narrates under and whether it is Mail
+  // (which Thief cannot take) -- the hub holds no item table. Gen 2 only, by
+  // the dialect this sheet resolved to; a Gen 1 reader copies none of them.
+  // Present and unreadable refuses the mon (`heldItem`'s posture); `mail` is
+  // read the way `traded` is (below). New on both twins, so the parameter is
+  // read the way Wire.int reads it (luaInt), not cleanInt.
+  if (generation === 2) {
+    if (raw.holdEffect !== undefined && raw.holdEffect !== null) {
+      const holdEffect = cleanHoldEffect2(raw.holdEffect);
+      if (!holdEffect) return null;
+      mon.holdEffect = holdEffect;
+    }
+    if (raw.holdParam !== undefined && raw.holdParam !== null) {
+      const holdParam = luaInt(raw.holdParam, 0, HOLD_PARAM2_MAX);
+      if (holdParam === null) return null;
+      mon.holdParam = holdParam;
+    }
+    if (raw.itemName !== undefined && raw.itemName !== null) {
+      const itemName = cleanText(raw.itemName, ITEM_NAME2_MAX);
+      if (!itemName) return null;
+      mon.itemName = itemName;
+    }
+    if (raw.mail !== undefined && raw.mail !== null) {
+      if (typeof raw.mail !== 'boolean') return null;
+      if (raw.mail) mon.mail = true;
+    }
+  }
+
   // Optional registry id for the species, alongside the prose `species` above.
   //
   // `species` is what the fight is *narrated* under, which is the nickname when
@@ -1687,6 +1764,15 @@ function cleanBattleMon(raw) {
     const baseSpd = cleanInt(raw.baseSpd, 0, 255);
     if (baseSpd === null) return null;
     mon.baseSpd = baseSpd;
+  }
+
+  // The obedience check's one fact about a player's own monster (contract K1):
+  // its 16-bit OT id is not the player's. Gen 1 and Gen 2 alike, read exactly as
+  // cleanBattleMon3 reads Gen 3's -- true kept, false kept as absent, anything
+  // that is not a boolean refuses the mon. No `unfateful` here: a Gen 3 rule.
+  if (raw.traded !== undefined && raw.traded !== null) {
+    if (typeof raw.traded !== 'boolean') return null;
+    if (raw.traded) mon.traded = true;
   }
 
   return mon;
@@ -2001,35 +2087,48 @@ function cleanBattleChoice(raw, generation) {
  * `text` borrows MESSAGE_MAX because it lands in the same box a chat line does
  * and is drawn by the same code, even though an intermediator wrote it.
  *
- * `generation` (optional) is the reader's own. 1 or 2 reads an event exactly as
+ * `generation` (optional) is the reader's own. 1 or 2 reads an event as it did
  * before Gen 3 had a stream: the older vocabulary only (none of Gen 3's seven
  * kinds), none of its six fields (target, spread, stat, stage, delta, holding),
- * and `moves` rows in the older dialect whatever `num` they carry. 3, or none
- * named, reads the union. Twin of Wire.battleEvent.
+ * and `moves` rows in the older dialect whatever `num` they carry. The one
+ * addition since is Gold's own `held` (BATTLE_EVENT_TYPES2, contract K3), which
+ * a generation 2 reader alone accepts -- a Gen 1 reader's vocabulary is
+ * unchanged, and every event a Gold reader already accepted reads exactly as
+ * before. 3, or none named, reads the union of the older vocabulary and Gen
+ * 3's, so its `held` is Gen 3's. Twin of Wire.battleEvent.
  */
 function cleanBattleEvent(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
   const gen = luaInt(generation, 1, GENERATION_MAX);
   const older = gen === 1 || gen === 2;
-  if (!BATTLE_EVENT_TYPES.has(raw.t) && !(!older && BATTLE_EVENT_TYPES3.has(raw.t))) return null;
+  const gold = gen === 2;
+  if (!BATTLE_EVENT_TYPES.has(raw.t) && !(!older && BATTLE_EVENT_TYPES3.has(raw.t))
+      && !(gold && BATTLE_EVENT_TYPES2.has(raw.t))) return null;
   const battle = cleanId(raw.battle);
   const seq = cleanInt(raw.seq, 0, SEQ_MAX);
   if (!battle || seq === null) return null;
 
   const event = { battle, seq, t: raw.t };
+  // A Gold `held` is the one kind whose shape depends on who reads it.
+  const held2 = gold && raw.t === 'held';
   if (raw.text !== undefined && raw.text !== null) {
     // Item / anim `text` is an id (POKE_BALL, TOSS_ANIM, move id) — cleanText strips `_`.
-    // A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4").
+    // A Gen 3 `ball` names its ball the way `item` does (the numeric id, "4"),
+    // and so does a Gold `held` (LEFTOVERS): the client matches it against the
+    // item its own save holds, where Gen 3's `held` text is the name it prints.
     // An `obey`'s is one of the eight outcome tokens or nothing (Wire.lua's
     // reading): dropped like any mangled field, never refused whole.
     let text;
-    if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball') text = cleanId(raw.text);
+    if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball' || held2) text = cleanId(raw.text);
     else if (raw.t === 'obey') text = OBEY_TOKENS3.has(raw.text) ? raw.text : null;
     else text = cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
   }
   if (raw.amount !== undefined && raw.amount !== null) {
-    const amount = cleanInt(raw.amount, 0, AMOUNT_MAX);
+    // A Gold `held`'s `amount` is a flag (1 still held, 0 gone), anything else
+    // dropped -- a `held` with no `amount` changes nothing a client keeps. New
+    // on both twins, so read the way Wire.int reads it (luaInt).
+    const amount = held2 ? luaInt(raw.amount, 0, 1) : cleanInt(raw.amount, 0, AMOUNT_MAX);
     if (amount !== null) event.amount = amount;
   }
   if (raw.slot !== undefined && raw.slot !== null) {
@@ -2399,6 +2498,13 @@ module.exports = {
   // The Gen 3 dialect (PROTOCOL 30): the cleaners the hub and suites reach
   // directly, and the bounds, named as Wire.lua names them.
   BATTLE_EVENT_TYPES3,
+  // Gold's held-item dialect (contracts K2 / K3 of
+  // docs/plans/gen12-referee-fidelity.md), named as Wire.lua names it.
+  BATTLE_EVENT_TYPES2,
+  cleanHoldEffect2,
+  HOLD_EFFECT2_MAX,
+  HOLD_PARAM2_MAX,
+  ITEM_NAME2_MAX,
   effectsFor,
   luaNumber,
   luaInt,

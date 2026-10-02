@@ -918,6 +918,7 @@ function runJs() {
     ...runGeneration(),
     ...runGen3(),
     ...runPayDay3(),
+    ...runFidelity(),
   ];
 }
 
@@ -1691,6 +1692,149 @@ function runGen3() {
           let got;
           if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, gen);
           else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+  ];
+}
+
+/*
+ * The referee-fidelity wire (docs/plans/gen12-referee-fidelity.md K1-K3), each
+ * input read by lib/sanitize under the reader's generation (the third field; a
+ * mon is read with none): K1 `traded` on Gen 1 and Gen 2 sheets (true kept,
+ * false and null absent, anything else refuses); K2 Gold's held-item data at
+ * and past each bound, ignored on a Gen 1 sheet and never reaching a Gen 3 one;
+ * K3 Gold's `held` event (id text, 0 / 1 amount, dropped fields keep the event),
+ * refused by a Gen 1 reader, with Gen 3's `held` unchanged. Twin of fidelity()
+ * in tests/drivers/hub_protocol_parity.lua -- same cases, same order.
+ */
+function sheet12(gen, extra) {
+  const sheet = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: gen === 2
+      ? {
+        atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+      }
+      : {
+        atk: 90, def: 90, spd: 90, spc: 90,
+      },
+    moves: [{
+      id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  return { ...sheet, ...(extra || {}) };
+}
+
+function fidelity() {
+  const held = {
+    heldItem: 'LEFTOVERS', holdEffect: 'HELD_LEFTOVERS', holdParam: 10, itemName: 'LEFTOVERS',
+  };
+  const gen3Held = {
+    battle: 'b1', seq: 80, t: 'held', slot: 3, side: 'b', mon: 0, amount: 139, holding: 0, text: 'ORAN BERRY',
+  };
+  const held2 = (extra) => ({
+    battle: 'b1', seq: 60, t: 'held', slot: 0, side: 'a', mon: 0, text: 'LEFTOVERS', amount: 1, ...(extra || {}),
+  });
+  const gen3Extra = { ...mon3({ heldItem: 139, holdEffect: 1, holdEffectParam: 10 }), holdParam: 5, mail: true };
+  return [
+    // K1
+    ['mon', sheet12(1, { traded: true })],
+    ['mon', sheet12(1, { traded: false })],
+    ['mon', sheet12(1, { traded: 'yes' })],
+    ['mon', sheet12(1, { traded: 1 })],
+    ['mon', sheet12(1, { traded: null })],
+    ['mon', sheet12(1, { traded: true, unfateful: true })],
+    ['mon', sheet12(1, { generation: 1, traded: true })],
+    ['mon', sheet12(2, { traded: true })],
+    ['mon', sheet12(2, { traded: false })],
+    ['mon', sheet12(2, { traded: 'true' })],
+    ['mon', sheet12(2, { traded: 0 })],
+    ['mon', sheet12(2, { generation: 2, traded: true, unfateful: true })],
+    ['party', { battle: 'b1', mons: [sheet12(1, { traded: true })] }, 1],
+    ['party', { battle: 'b1', mons: [sheet12(1, { traded: 'yes' })] }, 1],
+    ['party', { battle: 'b1', mons: [sheet12(2, { traded: true })] }, 2],
+    // K2 on a Gold sheet
+    ['mon', sheet12(2, held)],
+    ['mon', sheet12(2, { ...held, mail: true })],
+    ['mon', sheet12(2, { ...held, mail: false })],
+    ['mon', sheet12(2, { ...held, mail: 'yes' })],
+    ['mon', sheet12(2, { ...held, mail: 1 })],
+    ['mon', sheet12(2, { ...held, mail: null })],
+    ['mon', sheet12(2, { heldItem: 'POLKADOT_BOW', holdEffect: `HELD_${'X'.repeat(27)}` })],
+    ['mon', sheet12(2, { holdEffect: `HELD_${'X'.repeat(28)}` })],
+    ['mon', sheet12(2, { holdEffect: 'LEFTOVERS' })],
+    ['mon', sheet12(2, { holdEffect: 'HELD_leftovers' })],
+    ['mon', sheet12(2, { holdEffect: 'HELD_' })],
+    ['mon', sheet12(2, { holdEffect: 'HELD_LEFT OVERS' })],
+    ['mon', sheet12(2, { holdEffect: 7 })],
+    ['mon', sheet12(2, { holdParam: 0 })],
+    ['mon', sheet12(2, { holdParam: 255 })],
+    ['mon', sheet12(2, { holdParam: 256 })],
+    ['mon', sheet12(2, { holdParam: -1 })],
+    ['mon', sheet12(2, { holdParam: '12' })],
+    ['mon', sheet12(2, { holdParam: 3.7 })],
+    ['mon', sheet12(2, { holdParam: true })],
+    ['mon', sheet12(2, { holdParam: '' })],
+    ['mon', sheet12(2, { itemName: 'MYSTERYBERRY' })],
+    ['mon', sheet12(2, { itemName: 'KINGS ROCK OF OLD' })],
+    ['mon', sheet12(2, { itemName: 'Pink*Bow' })],
+    ['mon', sheet12(2, { itemName: '@@@' })],
+    ['mon', sheet12(2, { itemName: 5 })],
+    // K2 on a Gen 1 sheet: not its dialect, so ignored rather than refused
+    ['mon', sheet12(1, { ...held, mail: true })],
+    ['mon', sheet12(1, {
+      holdEffect: 7, holdParam: 999, itemName: 5, mail: 'yes',
+    })],
+    ['mon', sheet12(1, { generation: 1, holdEffect: 'HELD_LEFTOVERS', mail: true })],
+    // K2 never reaches a Gen 3 sheet
+    ['mon', gen3Extra],
+    ['mon', mon3({ holdEffect: 'HELD_LEFTOVERS' })],
+    // K1 + K2 through a party, stamped by the hub's generation
+    ['party', { battle: 'b1', mons: [sheet12(2, { ...held, traded: true, mail: true })] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(2, { holdEffect: 'LEFTOVERS' })] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(1, held)] }, 1],
+    // K3
+    ['event', held2(), 2],
+    ['event', held2({ seq: 61, text: 'BERRY', amount: 0 }), 2],
+    ['event', held2({ seq: 62, amount: 2 }), 2],
+    ['event', held2({ seq: 63, amount: -1 }), 2],
+    ['event', held2({ seq: 64, amount: '1' }), 2],
+    ['event', held2({ seq: 65, amount: true }), 2],
+    ['event', held2({ seq: 66, amount: 0.5 }), 2],
+    ['event', held2({ seq: 67, text: 'bad id!' }), 2],
+    ['event', held2({ seq: 68, text: 7 }), 2],
+    ['event', held2({ seq: 69, text: 'GOLD BERRY' }), 2],
+    ['event', held2({
+      seq: 70, holding: 3, target: 1, mon: 6,
+    }), 2],
+    ['event', held2({ seq: 71 }), 1],
+    ['event', gen3Held, 3],
+    ['event', gen3Held],
+    ['event', gen3Held, 2],
+    ['event', {
+      battle: 'b1', seq: 72, t: 'item', slot: 0, side: 'a', text: 'POTION', amount: 5,
+    }, 2],
+    ['event', {
+      battle: 'b1', seq: 73, t: 'ability', slot: 0, side: 'a',
+    }, 2],
+  ];
+}
+
+function runFidelity() {
+  return [
+    {
+      name: 'referee_fidelity_dialect',
+      result: (() => {
+        const cases = fidelity().map(([kind, input, gen]) => {
+          let got;
+          if (kind === 'mon') got = sanitize.cleanBattleMon(input);
           else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
           else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
           return { kind, got: orNil(got) };

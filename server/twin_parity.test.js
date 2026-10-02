@@ -239,10 +239,12 @@ test('highCrit and baseSpd ride the battle sheet as optional fields', () => {
     'absent baseSpd is not a refusal');
   assert.strictEqual(cleanBattleMon({ ...mon, baseSpd: 'fast' }), null,
     'an unreadable baseSpd refuses the battler');
-  // The Gen 3 obedience facts (contract K2) are not Gen 1's to read.
+  // `traded` is Gen 1's too from contract K1 of
+  // docs/plans/gen12-referee-fidelity.md (the cart's obedience check);
+  // `unfateful` stays a Gen 3 rule the Gen 1 reader never copies.
   const gen1 = cleanBattleMon({ ...mon, traded: true, unfateful: true });
-  assert.ok(gen1 && gen1.traded === undefined && gen1.unfateful === undefined,
-    'the Gen 1 dialect strips traded / unfateful');
+  assert.ok(gen1 && gen1.traded === true && gen1.unfateful === undefined,
+    'the Gen 1 dialect keeps traded and strips unfateful');
 });
 
 test('Gen 3 obedience facts: true or absent, twin of Wire.battleMon3', () => {
@@ -745,4 +747,154 @@ test("sanitize's luaNumber reads a string as LuaJIT's tonumber does", (t) => {
     if (js !== want) differ.push(`${JSON.stringify(s)} lua=${answers[i]} js=${js}`);
   });
   assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${list.length} strings read differently`);
+});
+
+// ---------------------------------------------------------------------------
+// Referee fidelity (docs/plans/gen12-referee-fidelity.md K1-K3): the Gen 1 /
+// Gen 2 sheet's `traded`, Gold's held-item data, and Gold's own `held` event.
+// The hub protocol parity driver (referee_fidelity_dialect) holds the two
+// sanitisers to one answer case by case; this pins the bounds and the
+// vocabulary they are written against, and the acceptance on the JS side.
+// ---------------------------------------------------------------------------
+
+test('the Gold held-item bounds match Wire.lua and sanitize.js', () => {
+  // A one-sided bound is a sheet one hosting path fights and the other refuses.
+  const wire = read('src/Wire.lua');
+  for (const name of ['HOLD_EFFECT2_MAX', 'HOLD_PARAM2_MAX', 'ITEM_NAME2_MAX']) {
+    assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name],
+      `Wire.${name} and sanitize.${name} must match`);
+  }
+  assert.strictEqual(sanitize.HOLD_PARAM2_MAX, 255, 'the u8 beside the effect in the cart\'s item attributes');
+  assert.strictEqual(sanitize.ITEM_NAME2_MAX, 12, 'pokecrystal ITEM_NAME_LENGTH 13, terminator included');
+});
+
+test('Gold\'s event vocabulary: BATTLE_EVENTS2 twins, and both Gen 2 sims speak inside it', () => {
+  // K3: a Gen 2-only table, so the Gen 1 sim's exact mirror of BATTLE_EVENTS
+  // (tests/battle_sim_turn.lua) never learns a kind its cart cannot produce.
+  const wire = read('src/Wire.lua');
+  const wireKinds2 = luaSet(wire, 'BATTLE_EVENTS2');
+  assert.deepStrictEqual([...sanitize.BATTLE_EVENT_TYPES2].sort(), wireKinds2,
+    'Wire.BATTLE_EVENTS2 and sanitize.js BATTLE_EVENT_TYPES2 name the same Gold kinds');
+  assert.deepStrictEqual(wireKinds2, ['held'], 'Gold adds exactly one kind, `held`');
+  const wireKinds = luaSet(wire, 'BATTLE_EVENTS');
+  for (const kind of wireKinds2) {
+    assert.ok(!wireKinds.includes(kind), `${kind} is not in the Gen 1 vocabulary`);
+    assert.ok(!luaSet(read('src/BattleSim/events.lua'), 'KINDS').includes(kind),
+      `the Gen 1 sim does not speak ${kind}`);
+  }
+  // The Gen 2 sims: the Lua and Node twins name the same kinds, and every one
+  // of them is a kind a Gold reader accepts -- BATTLE_EVENTS plus
+  // BATTLE_EVENTS2. A subset rather than an equality on purpose: the Gen 2 sim
+  // has never spoken every Wire kind (its own header says so), and `held` lands
+  // in it after the sanitisers learn it, so this holds before and after.
+  const sim2 = luaSet(read('src/BattleSim2/events.lua'), 'KINDS');
+  const Events2 = require('./lib/battle2/events.js');
+  assert.deepStrictEqual(Object.keys(Events2.KINDS).sort(), sim2,
+    'lib/battle2/events.js KINDS mirrors src/BattleSim2/events.lua');
+  const gold = new Set([...wireKinds, ...wireKinds2]);
+  for (const kind of sim2) {
+    assert.ok(gold.has(kind), `BattleSim2 speaks ${kind}, which a Gold reader would refuse`);
+  }
+});
+
+test('the Gen 1 / Gen 2 sheet: traded (K1) and Gold held-item data (K2)', () => {
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const red = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100,
+    stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move],
+  };
+  const gold = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100,
+    stats: { atk: 90, def: 90, spe: 90, spa: 90, spd: 90 }, moves: [move],
+  };
+  for (const [label, mon] of [['Gen 1', red], ['Gen 2', gold]]) {
+    assert.strictEqual(cleanBattleMon({ ...mon, traded: true }).traded, true,
+      `${label}: traded = true comes through`);
+    const off = cleanBattleMon({ ...mon, traded: false });
+    assert.ok(off && off.traded === undefined, `${label}: a false is kept as absent`);
+    assert.strictEqual(cleanBattleMon({ ...mon, traded: null }).traded, undefined,
+      `${label}: a null traded is absent, as Lua reads a JSON null`);
+    assert.strictEqual(cleanBattleMon({ ...mon, traded: 'yes' }), null,
+      `${label}: a non-boolean traded refuses the mon`);
+    assert.strictEqual(cleanBattleMon({ ...mon, traded: 1 }), null,
+      `${label}: ...a number included`);
+    assert.strictEqual(cleanBattleMon({ ...mon, unfateful: true }).unfateful, undefined,
+      `${label}: unfateful stays Gen 3's`);
+  }
+
+  const held = {
+    heldItem: 'LEFTOVERS', holdEffect: 'HELD_LEFTOVERS', holdParam: 10, itemName: 'LEFTOVERS',
+  };
+  const kept = cleanBattleMon({ ...gold, ...held, mail: true });
+  assert.deepStrictEqual(
+    {
+      heldItem: kept.heldItem,
+      holdEffect: kept.holdEffect,
+      holdParam: kept.holdParam,
+      itemName: kept.itemName,
+      mail: kept.mail,
+    },
+    { ...held, mail: true },
+    'a Gold sheet carries the item\'s effect, parameter, name and Mail flag',
+  );
+  assert.strictEqual(cleanBattleMon({ ...gold, ...held, mail: false }).mail, undefined,
+    'mail = false is kept as absent');
+  assert.strictEqual(cleanBattleMon({ ...gold, ...held, mail: 'yes' }), null,
+    'a non-boolean mail refuses the mon');
+  const bare = cleanBattleMon(gold);
+  for (const key of ['holdEffect', 'holdParam', 'itemName', 'mail', 'traded']) {
+    assert.strictEqual(bare[key], undefined, `no item, no ${key}: every K1 / K2 field is optional`);
+  }
+  for (const holdEffect of ['LEFTOVERS', 'HELD_leftovers', 'HELD_', 7,
+    `HELD_${'X'.repeat(sanitize.HOLD_EFFECT2_MAX - 4)}`]) {
+    assert.strictEqual(cleanBattleMon({ ...gold, holdEffect }), null,
+      `an unreadable hold effect (${JSON.stringify(holdEffect)}) refuses the mon`);
+  }
+  assert.strictEqual(
+    cleanBattleMon({ ...gold, holdEffect: `HELD_${'X'.repeat(sanitize.HOLD_EFFECT2_MAX - 5)}` }).holdEffect.length,
+    sanitize.HOLD_EFFECT2_MAX, 'a token exactly HOLD_EFFECT2_MAX long comes through',
+  );
+  assert.strictEqual(cleanBattleMon({ ...gold, holdParam: 256 }), null, 'holdParam past 255 refuses');
+  assert.strictEqual(cleanBattleMon({ ...gold, holdParam: true }), null,
+    'holdParam is read as Wire.int reads it: a boolean is not a number');
+  assert.strictEqual(cleanBattleMon({ ...gold, itemName: 'KINGS ROCK OF OLD' }).itemName,
+    'KINGS ROCK O', 'the display name is cut to ITEM_NAME2_MAX, as prose is');
+  assert.strictEqual(cleanBattleMon({ ...gold, itemName: '@@@' }), null,
+    'a name with nothing drawable left refuses the mon');
+
+  // Gen 1 has no held item to describe: its reader copies none of K2 and
+  // refuses nothing over it.
+  const redHeld = cleanBattleMon({
+    ...red, ...held, holdParam: 999, mail: 'yes',
+  });
+  assert.ok(redHeld, 'K2 fields on a Gen 1 sheet are ignored, not refused');
+  for (const key of ['holdEffect', 'holdParam', 'itemName', 'mail']) {
+    assert.strictEqual(redHeld[key], undefined, `the Gen 1 dialect does not copy ${key}`);
+  }
+});
+
+test('Gold\'s held event (K3): a Gen 2 reader only, id text and a 0 / 1 amount', () => {
+  const ev = {
+    battle: 'b1', seq: 4, t: 'held', slot: 0, side: 'a', mon: 0, text: 'LEFTOVERS', amount: 1,
+  };
+  const two = sanitize.cleanBattleEvent(ev, 2);
+  assert.ok(two && two.text === 'LEFTOVERS' && two.amount === 1 && two.mon === 0,
+    'a Gold reader keeps the item id and the still-held flag');
+  assert.strictEqual(sanitize.cleanBattleEvent({ ...ev, amount: 0 }, 2).amount, 0, '0 = the item is gone');
+  const bad = sanitize.cleanBattleEvent({
+    ...ev, amount: 2, text: 'GOLD BERRY', holding: 3,
+  }, 2);
+  assert.ok(bad && bad.amount === undefined && bad.text === undefined && bad.holding === undefined,
+    'an amount past 1, prose for an id and Gen 3\'s holding are dropped; the event is kept');
+  assert.strictEqual(sanitize.cleanBattleEvent(ev, 1), null, 'a Gen 1 reader refuses it');
+  const gen3 = {
+    battle: 'b1', seq: 5, t: 'held', slot: 3, side: 'b', mon: 0, amount: 139, holding: 0, text: 'ORAN BERRY',
+  };
+  for (const reader of [3, undefined]) {
+    const read3 = sanitize.cleanBattleEvent(gen3, reader);
+    assert.ok(read3 && read3.amount === 139 && read3.holding === 0 && read3.text === 'ORAN BERRY',
+      `Gen 3's held reads as it always did (reader ${reader})`);
+  }
 });

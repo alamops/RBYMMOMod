@@ -14,13 +14,22 @@
  * wrong because there is no fractional intermediate kept anywhere -- each
  * division truncates immediately, in the order the hardware did it.
  *
- * The Gen1 quirks that are load-bearing here, in the order they bite:
+ * The Gen1 quirks that are load-bearing here, in the order they bite -- every
+ * one of them pokered's GetDamageVarsFor{Player,Enemy}Attack .scaleStats and
+ * CalculateDamage (engine/battle/core.asm :4030-4143 / :4299-4470):
  *
  *   * A stat above 255 does not saturate, it is quartered -- and *both* stats
  *     are quartered when *either* one overflows, so a 400-attack mon hitting a
- *     200-defence one fights at 100 against 50.
+ *     200-defence one fights at 100 against 50. The attack is bumped to 1 if
+ *     that left it 0, and then only the LOW BYTE of each goes on, so a scaled
+ *     stat of 256+ wraps (an 1100 defence divides as 19). The cart freezes on a
+ *     zero divisor; the referee clamps it to 1 (plan §3.7: no cart freeze is
+ *     ever reproduced).
+ *   * Explosion halves the defence AFTER that scaling, on the byte, min 1.
  *   * A critical hit doubles the level going into the level term rather than
  *     doubling the finished number, so it is worth slightly less than 2x.
+ *   * The quotient is held at 997 before the +2 and before every multiplier,
+ *     so STAB and the type chart can still carry a hit past 999.
  *   * Type effectiveness is a list of percents applied one at a time, not one
  *     multiplier: 2x then 0.5x truncates in the middle and does not come back
  *     to where it started for every base value.
@@ -39,6 +48,10 @@
 const ROLL_MIN = 217;
 const ROLL_MAX = 255;
 const STAT_CAP = 255;
+// MAX_NEUTRAL_DAMAGE - MIN_NEUTRAL_DAMAGE (constants/battle_constants.asm):
+// CalculateDamage holds the quotient here and only then adds the 2 back.
+const DAMAGE_CAP = 997;
+const DAMAGE_FLOOR = 2;
 
 // Every division in this file. Values are small positive integers (the largest
 // intermediate is on the order of a few million), so this is exact.
@@ -75,16 +88,20 @@ function percents(effect) {
   return list;
 }
 
-// Both stats fall together when either overflows -- see the header. Defence
-// floors at 1 either way: it is a divisor, and a zero one would take the whole
-// turn machine down rather than dealing a big number.
+// Both stats fall together when either overflows -- see the header.
+// .scaleStats, line for line: either high byte set -> both words shifted right
+// twice; the attack word bumped to 1 if that left it 0; then each operand is
+// the low byte of its word. Defence floors at 1 either way: it is a divisor,
+// and the cart hangs on a zero one where the referee must deal a number.
 function clampStats(attack, defense) {
   const a = Math.max(0, int(attack, 0));
   const d = Math.max(0, int(defense, 1));
   if (a > STAT_CAP || d > STAT_CAP) {
+    let scaled = idiv(a, 4);
+    if (scaled === 0) scaled = 1;
     return {
-      attack: Math.max(1, idiv(a, 4)),
-      defense: Math.max(1, idiv(d, 4)),
+      attack: scaled % 256,
+      defense: Math.max(1, idiv(d, 4) % 256),
       statClamped: true,
     };
   }
@@ -100,7 +117,9 @@ function levelTerm(level, crit) {
 }
 
 function baseDamage(term, power, attack, defense) {
-  return idiv(idiv(term * power * attack, defense), 50) + 2;
+  let quotient = idiv(idiv(term * power * attack, defense), 50);
+  if (quotient > DAMAGE_CAP) quotient = DAMAGE_CAP;
+  return quotient + DAMAGE_FLOOR;
 }
 
 function applyStab(d) {
@@ -125,7 +144,11 @@ function applyRoll(d, roll) {
 
 /*
  * compute({ level, power, attack|atk, defense|def, stab, typeEffect|typeEff,
- *           crit, roll })
+ *           crit, roll, explode })
+ *
+ * `explode` is the attacker's EXPLODE_EFFECT: the defence it halves is the
+ * scaled byte, so it is a step of this pipeline rather than something the
+ * caller can do to the stat beforehand.
  *
  * Flat shape for the fixture / hub call sites; aliases and coercion match
  * Lua's Damage.compute(attacker, defender, move, opts).
@@ -143,6 +166,10 @@ function compute(input) {
   const rawAttack = stat(src, 'attack', 'atk', 0);
   const rawDefense = stat(src, 'defense', 'def', 1);
   const stats = clampStats(rawAttack, rawDefense);
+  if (src.explode) {
+    // CalculateDamage: `srl c` / `jr nz` / `inc c` -- halved, never below 1.
+    stats.defense = Math.max(1, idiv(stats.defense, 2));
+  }
   const term = levelTerm(src.level, crit);
   const power = Math.max(0, int(src.power, 0));
   const base = baseDamage(term, power, stats.attack, stats.defense);
@@ -206,4 +233,6 @@ module.exports = {
   ROLL_MIN,
   ROLL_MAX,
   STAT_CAP,
+  DAMAGE_CAP,
+  DAMAGE_FLOOR,
 };

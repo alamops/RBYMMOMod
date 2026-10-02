@@ -18,7 +18,8 @@
  * draw site is spelled out here and every one of them is conditional in a way
  * both runtimes can reproduce:
  *
- *   1. a speed tie-break byte, one per group of equally fast actors;
+ *   1. a speed tie-break byte, one per group of actors in the same priority
+ *      bracket at the same speed;
  *   2. one gate byte per actor whose monster has a gating status;
  *   3. one gate byte per actor whose monster is confused;
  *   4. per move that is actually used: accuracy byte, multihit-count byte
@@ -38,8 +39,16 @@
  * reasoning behind each, lives in the Lua header rather than being restated
  * here; what follows is only what the port has to keep true:
  *
+ *   * *Turn order* is the priority bracket (Effects.movePriority), then
+ *     Speed (the battle stat), then the tie-break; switches and items resolve
+ *     before any move. Quick Claw would roll between the bracket and Speed
+ *     (`_orderActors`).
  *   * *Speed ties* break on a single byte per tied group, below 128 leaving the
- *     side-a member first and otherwise reversing the group.
+ *     side-a member first and otherwise reversing the group. A group is one
+ *     bracket at one Speed.
+ *   * *Struggle* is typeless (no STAB, no matchup, no badge type boost) with
+ *     1/4 recoil, and is the move a top-level `_useMove` resolves to when every
+ *     slot is empty -- never a move Metronome or Mirror Move calls.
  *   * *Running* is mode-gated like Teleport: wild/coop_wild flee, 1v1/coop_pvp
  *     concede, coop_npc refuses without finishing.
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
@@ -135,6 +144,12 @@ const SIDES = ['a', 'b'];
 // no gate of its own.
 const BADGE_MODES = { wild: true, coop_wild: true, coop_npc: true };
 const BADGE_SIDE = 'a';
+
+// The mod's link battles: the two modes where both seats are people, which
+// the cart would have fought over the cable. Read where pokecrystal reads
+// `wLinkMode == LINK_COLOSSEUM` -- TruncateHL_BC's single pass
+// (Damage.truncateStats) -- and nowhere else yet.
+const LINK_MODES = { '1v1': true, coop_pvp: true };
 
 // The modes a faint pays experience in -- the ones vanilla awards it in. 1v1
 // and coop_pvp never do; see `_awardExp` for why the gate is the mode rather
@@ -261,9 +276,12 @@ const ACTIONS = {
 };
 
 // Synthetic move used when every slot is out of PP. Not in any move table.
+// `type: 0` is a placeholder index that nothing reads (Struggle is typeless);
+// `typeId` is the cart row's NORMAL, the registry id a held type-boost item is
+// matched against in DamageCalc.
 const STRUGGLE = {
   id: 'STRUGGLE', power: 50, accuracy: 255,
-  type: 0, effect: 0, chance: 0,
+  type: 0, effect: 0, chance: 0, typeId: 'NORMAL',
 };
 
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -522,8 +540,6 @@ function copyMon(raw, fallback) {
     bide,
     lastMoveIndex: Math.max(0, int(raw.lastMoveIndex, 0)),
     substitute: Math.max(0, int(raw.substitute, 0)),
-    lightScreen: raw.lightScreen === true,
-    reflect: raw.reflect === true,
     mist: raw.mist === true,
     focusEnergy: raw.focusEnergy === true,
     transformed: raw.transformed === true,
@@ -710,6 +726,14 @@ class Battle {
     // a perfectly legal string.
     this.byId = new Map();
     this.bySide = { a: [], b: [] };
+    // Reflect / Light Screen, held per SIDE as pokecrystal holds them
+    // (wPlayerScreens / wEnemyScreens and their counts): turns left, 0 when
+    // down. A side's seats share them, a switch or a faint leaves them up,
+    // Haze does not touch them, and only `_tickScreens` takes them down.
+    this.screens = {
+      a: { lightScreen: 0, reflect: 0 },
+      b: { lightScreen: 0, reflect: 0 },
+    };
     this.result = null;
   }
 
@@ -1521,7 +1545,13 @@ class Battle {
       for (let i = 1; i <= mon.moves.length; i += 1) {
         const m = mon.moves[i - 1];
         if (m.pp > 0 && !disabled(i) && m.power === 0) {
-          const kind = AUTO_SETUP[m.effect];
+          let kind = AUTO_SETUP[m.effect];
+          // A screen already up on this side would only fail (BattleCommand_
+          // Screen's second cast), so it is no setup at all.
+          if ((m.effect === 64 && this.screens[fighter.side].lightScreen > 0)
+              || (m.effect === 65 && this.screens[fighter.side].reflect > 0)) {
+            kind = undefined;
+          }
           if (kind === true
               || (typeof kind === 'string' && (mon.stages[kind] || 0) <= 0)) {
             if (setupPick === null || i < setupPick) setupPick = i;
@@ -1724,11 +1754,33 @@ class Battle {
     this._openTurn();
   }
 
+  // The battle stat a hit or the turn order reads (Effects.battleStat: stage,
+  // then the seat's badge boost, then burn / paralysis), with the seat's own
+  // badges -- null wherever the cart would not have boosted (BADGE_MODES).
+  _battleStat(fighter, mon, key) {
+    return Effects.battleStat(mon, key, fighter.badges);
+  }
+
   _speedOf(fighter, mon) {
-    let spe = Effects.badgeBoost(mon.stats.spe, 'spe', fighter.badges);
-    spe = Effects.applyStage(spe, mon.stages.spe);
-    if (mon.status === 'paralysis') spe = Status.paralysisSpeed(spe);
-    return spe;
+    return this._battleStat(fighter, mon, 'spe');
+  }
+
+  // The bracket an action moves in: the selected move's (Effects.movePriority),
+  // which is Struggle's when every slot is empty -- the move `_useMove` will
+  // resolve to -- and the slot's own otherwise, so a Metronome moves at
+  // Metronome's priority whatever it calls.
+  _priorityOf(fighter, mon) {
+    const choice = fighter.choice;
+    if (allPpEmpty(mon)) return Effects.movePriority(STRUGGLE);
+    return Effects.movePriority(mon.moves[(choice ? choice.move : 0) - 1]);
+  }
+
+  // Whether the screen that guards against this kind of hit is up on `side`.
+  _screenUp(side, isSpecial) {
+    const screens = this.screens[side];
+    if (!screens) return false;
+    if (isSpecial) return screens.lightScreen > 0;
+    return screens.reflect > 0;
   }
 
   /*
@@ -1844,6 +1896,10 @@ class Battle {
           // the standing opposition re-marks into it, while the incoming
           // monster joins the sets of the foes it is now in against.
           this._refield(fighter);
+          // A send-out brings no stage with it (ResetPlayerStatLevels): the
+          // levels belong to the side's field position on the cart, and a
+          // monster coming back in must not find the ones it left with.
+          Effects.resetStages(mon);
           mon.charging = null;
           mon.invulnerable = false;
           mon.thrashing = null;
@@ -1853,8 +1909,6 @@ class Battle {
           mon.trapping = null;
           mon.bide = null;
           mon.substitute = 0;
-          mon.lightScreen = false;
-          mon.reflect = false;
           mon.mist = false;
           mon.focusEnergy = false;
           mon.transformed = false;
@@ -1925,30 +1979,41 @@ class Battle {
         }
       }
     }
-    this._sortActorsBySpeed(balls);
+    this._orderActors(balls);
     for (const actor of balls) {
       if (this.result) return;
       this._resolveOneItem(actor.fighter);
     }
   }
 
-  // Sort actors by active-mon speed (desc), then field order; tied groups flip
-  // on one RNG byte >= TIE_BREAK_ROLL. Shared by fights and ball throws.
-  _sortActorsBySpeed(actors) {
+  // Sort actors by priority bracket (desc), then active-mon speed (desc), then
+  // field order; tied groups flip on one RNG byte >= TIE_BREAK_ROLL. Shared by
+  // fights and ball throws -- a ball carries no `priority`, so every thrower
+  // sits in one bracket and the order is Speed's, as it always was.
+  //
+  // pokecrystal's DetermineMoveOrder for two battlers: CompareMovePriority,
+  // then (`.equal_priority`) each side's Quick Claw roll, then the Speed
+  // compare, then the coin flip. A Quick Claw is a roll *inside* a bracket, so
+  // it belongs between the bracket key and the Speed key here, drawn before
+  // the tie-break bytes.
+  _orderActors(actors) {
     if (actors.length <= 1) return;
 
+    const bracket = (actor) => (actor.priority === undefined ? 0 : actor.priority);
     actors.sort((x, y) => {
+      if (bracket(x) !== bracket(y)) return bracket(y) - bracket(x);
       if (x.speed !== y.speed) return y.speed - x.speed;
       return x.order - y.order; // field order: side a, then side b
     });
 
-    // One byte per group of equally fast actors, spent only when the group is
-    // actually tied, so an ordinary turn between two different speeds costs no
-    // draw at all on either runtime.
+    // One byte per group of actors in one bracket at one Speed, spent only
+    // when the group is actually tied, so an ordinary turn between two
+    // different speeds costs no draw at all on either runtime.
     let i = 0;
     while (i < actors.length) {
       let j = i;
-      while (j < actors.length - 1 && actors[j + 1].speed === actors[i].speed) j += 1;
+      while (j < actors.length - 1 && actors[j + 1].speed === actors[i].speed
+             && bracket(actors[j + 1]) === bracket(actors[i])) j += 1;
       if (j > i && this.rng.byte() >= TIE_BREAK_ROLL) {
         for (let lo = i, hi = j; lo < hi; lo += 1, hi -= 1) {
           const swap = actors[lo];
@@ -2268,6 +2333,7 @@ class Battle {
         actors.push({
           fighter,
           mon, // pinned: see the skip in the loop
+          priority: this._priorityOf(fighter, mon),
           speed: this._speedOf(fighter, mon),
           order: actors.length + 1,
         });
@@ -2275,7 +2341,7 @@ class Battle {
     }
     if (actors.length === 0) return;
 
-    this._sortActorsBySpeed(actors);
+    this._orderActors(actors);
 
     for (const actor of actors) {
       if (this.result) break;
@@ -2295,8 +2361,31 @@ class Battle {
     }
   }
 
-  // Returns false when a gate stopped the move.
-  _runGates(fighter, mon) {
+  // HitSelfInConfusion (pokecrystal engine/battle/effect_commands.asm:
+  // 2864-2898) and the head of the BattleCommand_DamageCalc it falls into
+  // (:2900-2915): the confused monster's own battle Attack against its own
+  // battle Defense -- stage, badge and burn, as any hit reads them -- that
+  // Defense doubled by its OWN side's Reflect, both folded by TruncateHL_BC,
+  // and the Defense halved again when the move it SELECTED is Explosion /
+  // Self-Destruct, because DamageCalc's EFFECT_SELFDESTRUCT check reads
+  // BATTLE_VARS_MOVE_EFFECT and that is still the selected move (a cart bug,
+  // docs/bugs_and_glitches.md, kept). No crit: HitConfusion clears
+  // wCriticalHit before it calls in. Returns { attack, defense }.
+  _selfHitStats(fighter, mon, selected) {
+    const attack = this._battleStat(fighter, mon, 'atk');
+    let defense = this._battleStat(fighter, mon, 'def');
+    if (this._screenUp(fighter.side, false)) defense *= 2;
+    const folded = Damage.truncateStats(attack, defense, has(LINK_MODES, this.mode));
+    if (selected && Effects.isExplode(selected.effect)) {
+      folded.defense = Math.max(1, Math.floor(folded.defense / 2));
+    }
+    return folded;
+  }
+
+  // Returns false when a gate stopped the move. `selected` is the move the
+  // monster is about to use (Struggle when every slot is empty): the confusion
+  // self-hit reads it the way the cart's DamageCalc does.
+  _runGates(fighter, mon, selected) {
     if (mon.flinch) {
       mon.flinch = false;
       this._say(`${mon.species} flinched`);
@@ -2335,14 +2424,19 @@ class Battle {
     }
 
     if (mon.confusion > 0) {
-      // HitConfusion reads the battle stats, badge boosts included (engine
-      // src/battle/gen2/Battle.lua:4133-4157 reads them through battleStat).
+      // The self-hit's stats (`_selfHitStats`), built whether or not this
+      // turn's byte lands on a self-hit: they draw nothing. Status.confusionTick
+      // also takes `itemBoostPercent` -- DamageCalc's type-boost item scan, run
+      // for the SELECTED move's type (STRUGGLE.typeId for Struggle), the other
+      // cart bug -- and none is passed because no sheet hands the referee a
+      // held item.
+      const folded = this._selfHitStats(fighter, mon, selected);
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
         level: mon.level,
-        attack: Effects.badgeBoost(mon.stats.atk, 'atk', fighter.badges),
-        defense: Effects.badgeBoost(mon.stats.def, 'def', fighter.badges),
+        attack: folded.attack,
+        defense: folded.defense,
       }, this.rng.byte());
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
@@ -2354,7 +2448,9 @@ class Battle {
           });
         } else if (gate.selfHit) {
           this._say(`${mon.species} hurt itself in confusion`);
-          this._damage(fighter, mon, gate.selfDamage || 0, null);
+          // `ld c, TRUE / call DoPlayerDamage`: the self-hit skips the user's
+          // own substitute and comes off its HP.
+          this._damage(fighter, mon, gate.selfDamage || 0, null, true);
           return false;
         }
         if (!gate.canMove) return false;
@@ -2374,6 +2470,7 @@ class Battle {
       targetFighter,
       moveIndex,
       statusToWire: STATUS_TO_WIRE,
+      userScreens: this.screens[fighter.side],
     });
     if (result.nothing) this._say('But nothing happened');
     for (const text of result.messages || []) this._say(text);
@@ -2433,14 +2530,24 @@ class Battle {
 
   _useMove(fighter, mon, opts = {}) {
     const choice = fighter.choice;
-    // Empty sheet (`moves.length === 0`) is Struggle. Returning here used to
-    // eat that turn before `allPpEmpty` could pick the synthetic move.
-    const struggling = allPpEmpty(mon) || choice.struggle;
-    if (!struggling && !mon.moves[choice.move - 1]) return;
+    // A move Metronome or Mirror Move called is not the turn's own move. The
+    // gates already ran for the move that called it -- BattleCommand_Metronome
+    // ends in ResetTurn, which re-enters DoMove past CheckTurn -- and it is
+    // never Struggle, whatever PP the calling slot has left: Struggle is a
+    // move, not a state of the user's PP, so the call that spent the last PP
+    // takes no recoil.
+    const called = opts.moveOverride !== undefined && opts.moveOverride !== null;
+    // The move this action resolves to. Every slot empty -- an empty sheet
+    // (`moves.length === 0`) included -- is the synthetic STRUGGLE; returning
+    // on the missing slot used to eat that turn instead.
+    let move = opts.moveOverride;
+    if (!called) move = allPpEmpty(mon) ? STRUGGLE : mon.moves[choice.move - 1];
+    if (!move) return;
+    const struggling = move === STRUGGLE;
 
-    if (!this._runGates(fighter, mon)) return;
+    if (!called && !this._runGates(fighter, mon, move)) return;
 
-    if (!struggling && mon.disable && mon.disable.turns > 0
+    if (!struggling && !called && mon.disable && mon.disable.turns > 0
         && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
       this._say(`${moveLabel(blocked)} is disabled`);
@@ -2460,7 +2567,6 @@ class Battle {
     // was already empty when it started.
     const targetSlot = target.slot;
 
-    const move = opts.moveOverride || (struggling ? STRUGGLE : mon.moves[choice.move - 1]);
     const effectId = int(move.effect, 0);
     const releasing = mon.charging !== null && mon.charging !== undefined
       && Effects.isCharge(mon.charging.effect);
@@ -2649,7 +2755,9 @@ class Battle {
       criticalLevel: critLevel,
       roll: this.rng.below(critChance),
     }).isCrit;
-    const percents = this._typePercents(move.type, defender);
+    // Struggle skips BattleCommand_Stab's matchup loop with the rest of it, so
+    // it is neutral against everything, a Ghost included.
+    const percents = struggling ? [100] : this._typePercents(move.type, defender);
 
     let immune = false;
     for (const pct of percents) {
@@ -2689,20 +2797,36 @@ class Battle {
       const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
       const atkKey = isSpecial ? 'spa' : 'atk';
       const defKey = isSpecial ? 'spd' : 'def';
-      // Both ends read the battle stat with its owner's badge boost; the
-      // defender's Sp. Atk rides along for Glacier's Sp. Def tail.
-      const atkStat = Effects.badgeBoost(
-        isSpecial ? mon.stats.spa : mon.stats.atk, atkKey, fighter.badges);
-      const atkStage = isSpecial ? mon.stages.spa : mon.stages.atk;
-      const defStat = Effects.badgeBoost(
-        isSpecial ? defender.stats.spd : defender.stats.def, defKey, target.badges,
-        defender.stats.spa);
-      const defStage = isSpecial ? defender.stages.spd : defender.stages.def;
 
-      let attack = Effects.applyStage(atkStat, atkStage);
-      if (!isSpecial && mon.status === 'burn') attack = Status.burnAttack(attack);
-
-      let defense = Effects.applyStage(defStat, defStage);
+      // PlayerAttackDamage / EnemyAttackDamage (pokecrystal engine/battle/
+      // effect_commands.asm:2532-2612, 2777-2855), in the cart's order.
+      //
+      // 1. The defender's battle stat (stage, its seat's badge), doubled when
+      //    its SIDE has the screen up -- Reflect for a physical hit, Light
+      //    Screen for a special one -- as a 16-bit value, before any fold.
+      let defense = this._battleStat(target, defender, defKey);
+      if (this._screenUp(target.side, isSpecial)) defense *= 2;
+      // 2. The attacker's battle stat: stage, its seat's badge, burn.
+      let attack = this._battleStat(fighter, mon, atkKey);
+      // 3. CheckDamageStatsCritical (:2660-2700): a crit keeps the pair above
+      //    only when the defender's stage is strictly LOWER than the
+      //    attacker's; otherwise it reads the unmodified stats -- no stage, no
+      //    badge, no burn and no screen.
+      if (isCrit && !(Effects.clampStage(defender.stages[defKey])
+                      < Effects.clampStage(mon.stages[atkKey]))) {
+        attack = Math.max(1, int(mon.stats[atkKey], 1));
+        defense = Math.max(1, int(defender.stats[defKey], 1));
+      }
+      // 4. ThickClubBoost / LightBallBoost double the attack here, still
+      //    16-bit, which is why they can wrap past 1024 in a link battle; the
+      //    referee holds no held item, so neither fires.
+      // 5. TruncateHL_BC: both folded into a byte (one pass in a link battle).
+      const folded = Damage.truncateStats(attack, defense, has(LINK_MODES, this.mode));
+      attack = folded.attack;
+      defense = folded.defense;
+      // 6. DittoMetalPowder runs on the folded defense (the same no-item note
+      //    as 4), and then BattleCommand_DamageCalc halves it for Explosion /
+      //    Self-Destruct, at least 1 (:2904-2913).
       if (Effects.isExplode(effectId)) {
         defense = Math.max(1, Math.floor(defense / 2));
       }
@@ -2716,16 +2840,19 @@ class Battle {
         spd: defense,
         power: move.power,
         crit: isCrit,
-        stab: hasType(mon, move.type),
+        // Struggle takes none of BattleCommand_Stab: no STAB, no badge type
+        // boost (its `cp STRUGGLE / ret z` comes before DoBadgeTypeBoosts),
+        // and the neutral `percents` above.
+        stab: !struggling && hasType(mon, move.type),
         typeEffect: percents,
         roll,
         physical: !isSpecial,
+        // DamageCalc's type-boost item scan (`itemBoostPercent`, ahead of the
+        // crit x2) has no input: the referee holds no held item.
+        //
         // The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
         // this is the cart's "player's turn only" without asking whose turn.
-        // Never for Struggle: pokecrystal BattleCommand_Stab opens with
-        // `cp STRUGGLE / ret z`, ahead of its DoBadgeTypeBoosts call, so the
-        // synthetic move's placeholder type 0 must not name a badge's type.
-        badgeTypeBoost: move !== STRUGGLE
+        badgeTypeBoost: !struggling
           && Effects.badgeTypeBoost(this._typeIdOf(move.type), fighter.badges),
       });
 
@@ -2741,9 +2868,6 @@ class Battle {
       damage = result.damage === null || result.damage === undefined
         ? 0 : result.damage;
     }
-
-    const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
-    damage = Effects.screenDamage(damage, defender, isSpecial);
 
     let effectiveness = 1;
     for (const pct of percents) effectiveness = (effectiveness * pct) / 100;
@@ -2844,15 +2968,17 @@ class Battle {
   }
 
   // One place where HP comes off, so the faint that follows can never be
-  // forgotten at one of the call sites.
-  _damage(fighter, mon, rawAmount, status) {
+  // forgotten at one of the call sites. `ignoreSubstitute` is the cart's
+  // DoPlayerDamage / DoEnemyDamage `c` flag: the confusion self-hit sets it,
+  // so the damage reaches the HP behind the user's own substitute.
+  _damage(fighter, mon, rawAmount, status, ignoreSubstitute) {
     let amount = Math.max(0, int(rawAmount, 0));
 
     if (amount > 0 && mon.bide && mon.bide.turns > 0) {
       mon.bide.stored += amount;
     }
 
-    if (amount > 0 && mon.substitute && mon.substitute > 0) {
+    if (amount > 0 && !ignoreSubstitute && mon.substitute && mon.substitute > 0) {
       if (amount >= mon.substitute) {
         mon.substitute = 0;
         this._say(`${mon.species}'s substitute broke`);
@@ -3096,14 +3222,14 @@ class Battle {
     mon.trapping = null;
     mon.bide = null;
     mon.substitute = 0;
-    mon.lightScreen = false;
-    mon.reflect = false;
     mon.mist = false;
     mon.focusEnergy = false;
     mon.transformed = false;
     mon.xAccuracy = false;
     mon.leechSeed = null;
     mon.disable = null;
+    // The fallen monster's stages go with it; the side's screens stay up.
+    Effects.resetStages(mon);
     this._clearTrapsFrom(fighter.slot);
 
     // Living bench? Computed before clearing active; fainted mon already has hp 0.
@@ -3155,7 +3281,36 @@ class Battle {
     }
   }
 
+  // The end of the turn: pokecrystal's HandleBetweenTurnEffects order (core.asm
+  // :250-296), where the screens tick after Leftovers / Mysteryberry / Defrost
+  // / Safeguard and before the held stat-boost and healing items. The Lua
+  // twin's note maps that list onto this referee's two steps.
   _resolveResiduals() {
+    this._residualDamage();
+    if (this.result) return;
+    this._tickScreens();
+  }
+
+  // HandleScreens (core.asm:1620-1680): side a then side b, Light Screen before
+  // Reflect within a side, one turn off each screen that is up, and the cart's
+  // line when one runs out. The side is named by its first seat.
+  _tickScreens() {
+    for (const side of SIDES) {
+      const screens = this.screens[side];
+      const first = this.bySide[side][0];
+      const name = first ? first.name : `side ${side}`;
+      if (screens.lightScreen > 0) {
+        screens.lightScreen -= 1;
+        if (screens.lightScreen === 0) this._say(`${name}'s LIGHT SCREEN fell`);
+      }
+      if (screens.reflect > 0) {
+        screens.reflect -= 1;
+        if (screens.reflect === 0) this._say(`${name}'s REFLECT faded`);
+      }
+    }
+  }
+
+  _residualDamage() {
     for (const fighter of this.fighters) {
       if (this.result) return;
       let mon = activeMon(fighter);
@@ -3604,6 +3759,7 @@ module.exports = {
   SIDES,
   BADGE_MODES,
   BADGE_SIDE,
+  LINK_MODES,
   STATUS_FROM_WIRE,
   STATUS_TO_WIRE,
 };

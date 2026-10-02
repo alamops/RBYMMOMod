@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp: if attack > 255 or defense > 255 then both become max(1, floor(x/4)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = floor(floor(levelTerm * power * attack / defense) / 50) + 2. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. threshold = floor(baseSpeed / 2); focusEnergy quarters it (floor(t/4)) reproducing the Gen1 bug rather than raising it; a high-critical-ratio move multiplies by 8; the result is clamped to 0..255. isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense with no STAB, no type effectiveness and no crit, at a fixed roll of 255.",
+  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255.",
   "damage": [
     {
       "id": "dmg_neutral_basic",
@@ -457,6 +457,188 @@
         "immune": false,
         "damage": 1
       }
+    },
+    {
+      "id": "dmg_scaled_defense_wraps_low_byte",
+      "in": {
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ],
+        "level": 50,
+        "power": 40,
+        "attack": 200,
+        "defense": 1100
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 48,
+        "modified": 48,
+        "statClamped": true,
+        "immune": false,
+        "damage": 48
+      }
+    },
+    {
+      "id": "dmg_scaled_defense_1024_wraps_to_zero_clamped",
+      "in": {
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ],
+        "level": 10,
+        "power": 40,
+        "attack": 100,
+        "defense": 1024
+      },
+      "out": {
+        "levelTerm": 6,
+        "base": 122,
+        "modified": 122,
+        "statClamped": true,
+        "immune": false,
+        "damage": 122
+      }
+    },
+    {
+      "id": "dmg_scaled_defense_zero_clamped_and_capped_997",
+      "in": {
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ],
+        "level": 50,
+        "power": 40,
+        "attack": 300,
+        "defense": 3
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 999,
+        "modified": 999,
+        "statClamped": true,
+        "immune": false,
+        "damage": 999
+      }
+    },
+    {
+      "id": "dmg_cap_997_before_stab",
+      "in": {
+        "stab": true,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 1,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ],
+        "level": 100,
+        "power": 200,
+        "attack": 250,
+        "defense": 10
+      },
+      "out": {
+        "levelTerm": 42,
+        "base": 999,
+        "modified": 1498,
+        "statClamped": false,
+        "immune": false,
+        "damage": 1498
+      }
+    },
+    {
+      "id": "dmg_explode_halves_after_scaling",
+      "in": {
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ],
+        "level": 50,
+        "power": 170,
+        "attack": 100,
+        "defense": 300,
+        "explode": true
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 52,
+        "modified": 52,
+        "statClamped": true,
+        "immune": false,
+        "damage": 52
+      }
+    },
+    {
+      "id": "dmg_explode_unscaled_floor_one",
+      "in": {
+        "stab": false,
+        "typeEffect": [
+          100
+        ],
+        "crit": false,
+        "roll": 255,
+        "moveType": 0,
+        "attackerTypes": [
+          1
+        ],
+        "defenderTypes": [
+          1
+        ],
+        "level": 50,
+        "power": 170,
+        "attack": 10,
+        "defense": 1,
+        "explode": true
+      },
+      "out": {
+        "levelTerm": 22,
+        "base": 750,
+        "modified": 750,
+        "statClamped": false,
+        "immune": false,
+        "damage": 750
+      }
     }
   ],
   "accuracy": [
@@ -729,7 +911,7 @@
         "roll": 95
       },
       "out": {
-        "threshold": 96,
+        "threshold": 100,
         "isCrit": true
       }
     },
@@ -744,6 +926,45 @@
       "out": {
         "threshold": 0,
         "isCrit": false
+      }
+    },
+    {
+      "id": "crit_focus_energy_plus_high_ratio_misses_at_100",
+      "in": {
+        "baseSpeed": 100,
+        "focusEnergy": true,
+        "highCritMove": true,
+        "roll": 100
+      },
+      "out": {
+        "threshold": 100,
+        "isCrit": false
+      }
+    },
+    {
+      "id": "crit_focus_energy_plus_high_ratio_odd_half",
+      "in": {
+        "baseSpeed": 110,
+        "focusEnergy": true,
+        "highCritMove": true,
+        "roll": 107
+      },
+      "out": {
+        "threshold": 108,
+        "isCrit": true
+      }
+    },
+    {
+      "id": "crit_focus_energy_plus_high_ratio_speed_255",
+      "in": {
+        "baseSpeed": 255,
+        "focusEnergy": true,
+        "highCritMove": true,
+        "roll": 251
+      },
+      "out": {
+        "threshold": 252,
+        "isCrit": true
       }
     }
   ],
@@ -950,6 +1171,24 @@
         "selfHit": false,
         "canMove": true,
         "selfDamage": 0
+      }
+    },
+    {
+      "id": "status_confusion_self_hit_scaled_stats",
+      "in": {
+        "status": "confusion",
+        "turnsRemaining": 3,
+        "roll": 0,
+        "level": 50,
+        "attack": 300,
+        "defense": 600
+      },
+      "out": {
+        "turnsRemaining": 2,
+        "snappedOut": false,
+        "selfHit": true,
+        "canMove": false,
+        "selfDamage": 10
       }
     }
   ]
