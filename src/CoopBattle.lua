@@ -9915,10 +9915,12 @@ function M:uploadMediated()
   -- Gen 3: this player's own sheets, without the catch rate a wild seat's
   -- carry (MediatedBattle's snapshotParty makes the same cut). Player against
   -- player is a link battle, so Deoxys fights on its link stats there
-  -- (Sheet3's `link`); a trainer or a wild fight is the cart's own and does not.
+  -- (Sheet3's `link`); a trainer or a wild fight is the cart's own and does not,
+  -- and there the sheets are `own`, so each carries the obedience check's
+  -- `traded` / `fateful` (contract K2 of docs/plans/gen3-badge-rules.md).
   local mons = self.gen3
       and Sheet3.mons(self.game, mine.party,
-        { link = Mediated.LINK_MODES[self.mode] == true })
+        { link = Mediated.LINK_MODES[self.mode] == true, own = true })
     or Mediated.snapshotMons(self.game, mine.party)
   if #mons == 0 then
     -- Uploading nothing would leave the hub holding a seat open. Ending the
@@ -9945,8 +9947,11 @@ function M:uploadMediated()
     Mediated.sendRuleset(self.transport, self.game,
       (self.gen3 and self.mode == "coop_wild") and { wild = true } or nil)
   end
+  -- This player's own badges, for the referee's badge boosts and (Gen 3)
+  -- obedience caps against a trainer or a wild mon; coop_pvp is a link battle
+  -- and sends none (Mediated.badgesOf).
   Mediated.sendParty(self.transport, self.battleId, mons, mine.side, bag,
-    Mediated.badgesOf(self.game))
+    Mediated.badgesOf(self.game, self.mode))
 
   -- ...and the trainer's team, from the initiator alone. `Hub:battleSeat`
   -- maps a side-"b" party from the host of a coop_npc onto the synthetic npc
@@ -13745,8 +13750,10 @@ function M:start(game)
   Mediated.sendRuleset(self.transport, self.game, { wild = false })
   local bag = Mediated.snapshotBag(self.game)
   self.bagSheet = Mediated.bagCounts(bag)
+  -- The badges as a solo trainer fight sends them (coop_npc: the save's
+  -- badge numbers); the referee hands the one entry's set to both seats.
   Mediated.sendParty(self.transport, self.battleId, mons, nil, bag,
-    Mediated.badgesOf(self.game))
+    Mediated.badgesOf(self.game, self.mode))
   if type(self.npcParty) == "table" and #self.npcParty > 0 then
     self.medNpcSheets = self.npcParty
     Mediated.sendParty(self.transport, self.battleId, self.npcParty, "b",

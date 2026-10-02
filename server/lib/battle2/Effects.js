@@ -292,6 +292,10 @@ function applyStage(base, stage) {
 }
 
 // Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
+// A fighter only holds a set where the cart would have applied it -- side a
+// of a fight against the computer; Turn.attempt drops it in 1v1 / coop_pvp
+// (link battles, where Crystal's BadgeStatBoosts returns early) and on side b
+// (Turn.BADGE_MODES) -- so this never has to ask what kind of fight it is in.
 const BADGE_FOR_STAT = {
   atk: 'BOULDERBADGE',
   def: 'THUNDERBADGE',

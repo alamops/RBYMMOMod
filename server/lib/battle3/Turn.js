@@ -32,8 +32,10 @@
  *      roll(0,65535) (none for a Master Ball or odds > 254);
  *   6. moves, in speed order, each drawing only at the points it reaches (the
  *      full list is in the Lua header and docs/plans/gen3-battle-sheet.md §8;
- *      a multi-hit / Triple Kick / Beat Up strike runs its move end, contact
- *      abilities and King's Rock included, after every strike);
+ *      obedience draws after the PP check, for a side-a mon against the
+ *      computer over its badge cap; a multi-hit / Triple Kick / Beat Up strike
+ *      runs its move end, contact abilities and King's Rock included, after
+ *      every strike);
  *   7. end of turn: one roll(0,255) per tied group of the re-sort, then the
  *      phases in order (a Future Sight due on a seat emptied this turn draws
  *      in the replace phase instead, after the switch-ins).
@@ -48,6 +50,12 @@
  * earns EXP once per owner; outcomes, `waiting` and `team` name owners (the Lua
  * header's policy list, which also says the auto-pick files a Ghost's CURSE
  * unaimed).
+ *
+ * Badge rules (docs/plans/gen3-badge-rules.md K1-K3): against the computer
+ * (M.BADGE_MODES) side a's battlers carry their own trainer's badges -- the
+ * x1.1 stat boosts (Damage.js base, Field.js speed) -- and obey by the cart's
+ * rule (Move.js Bm._disobey). Link rules in 1v1 / coop_pvp and for side b
+ * everywhere, whatever an entry uploads.
  *
  * Shape differences from the Lua, all forced by the language:
  *
@@ -65,6 +73,7 @@
 
 const Rng = require('./Rng.js');
 const Types = require('./Types.js');
+const Damage = require('./Damage.js');
 const Status = require('./Status.js');
 const Abilities = require('./Abilities.js');
 const Items = require('./Items.js');
@@ -97,6 +106,18 @@ M.MODES = {
   '1v1': true, coop_npc: true, coop_pvp: true, wild: true, coop_wild: true,
 };
 M.SIDES = ['a', 'b'];
+
+// The fights against the computer -- the cart's non-link battles -- in which
+// side a keeps its trainers' badge rules (docs/plans/gen3-badge-rules.md K1):
+// the stat boosts and obedience. 1v1 / coop_pvp are link battles on the cart,
+// so neither applies there whatever an entry uploads, and side b is never the
+// player's side. The same three modes as EXP_MODES below.
+M.BADGE_MODES = { wild: true, coop_wild: true, coop_npc: true };
+
+// The cart families whose obedience rules differ (engine BattleProfile.family):
+// FireRed / LeafGreen exempt Focus Punch from the random-move branch, Emerald
+// does not. An entry without `family` plays by the engine's default, 'frlg'.
+M.FAMILIES = { frlg: true, rse: true };
 
 // Gen 3 statuses ride the wire in their own tokens, both ways.
 M.STATUS_FROM_WIRE = {
@@ -301,6 +322,11 @@ function copyMon(raw, fallback) {
     evs: copyNumbers(raw.evs),
     personality: int(raw.personality, null),
     otId: int(raw.otId, null),
+    // K2 (docs/plans/gen3-badge-rules.md): obedience's two facts about the mon,
+    // decided by its owner's client -- `traded` (pret IsOtherTrainer) and
+    // `fateful` (its fateful-encounter bit, read for Mew and Deoxys only).
+    traded: raw.traded === true ? true : null,
+    fateful: raw.fateful === true ? true : null,
   };
   if (out.heldItem === 0) {
     out.holdEffect = 0;
@@ -399,6 +425,8 @@ Battle.prototype._newBattler = function _newBattler(fighter, index) {
     },
     isFirstTurn: 2,
     toxicCounter: 0,
+    // K1: its trainer's badges (null off side a, in a link mode, or with none).
+    badges: fighter.badges,
   };
   return b;
 };
@@ -423,7 +451,12 @@ Battle.prototype._sendEvent = function _sendEvent(fighter) {
 // opts:
 //   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 //   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
-//   sides = { a: [{ playerId, name, mons, bag, seats? }], b: [...] }
+//   sides = { a: [{ playerId, name, mons, bag, seats?, badges?, family? }], b: [...] }
+//
+// `badges` (K1: a list of badge numbers, as strings or numbers, or a set) and
+// `family` ('frlg' | 'rse') are read only for side a in M.BADGE_MODES and
+// dropped everywhere else; each fighter keeps `badgeRules` (true there),
+// `badges` (Damage.badgeSet) and `family`.
 //
 // `seats = 2` makes one entry a shared team: two fighters over the same `mons`
 // and `bag` -- seat 1 keeps `playerId`, seat 2 is `playerId + '#2'`, both have
@@ -538,6 +571,18 @@ function attempt(opts) {
       if (mons.length === 0) return refuse(`${playerId} brought no monsters`);
       const [bag, names] = copyBag(entry.bag);
       const bagNames = names || {};
+      // K1: the cart's badge rules belong to the player's side of a fight
+      // against the computer and nowhere else -- a link mode or side b drops
+      // whatever the entry uploaded, silently. Both seats of a shared team are
+      // the one trainer's.
+      const badgeRules = side === 'a' && own(M.BADGE_MODES, mode);
+      let badges = null;
+      let family = null;
+      if (badgeRules) {
+        badges = Damage.badgeSet(entry.badges);
+        family = (typeof entry.family === 'string' && own(M.FAMILIES, entry.family))
+          ? entry.family : 'frlg';
+      }
       const party = [];
       let lead = null;
       for (let seat = 1; seat <= seats; seat += 1) {
@@ -568,6 +613,9 @@ function attempt(opts) {
           choice: null,
           team: null,
           fought: {},
+          badgeRules: badgeRules ? true : null,
+          badges,
+          family,
         };
         party.push(fighter);
         self.fighters.push(fighter);
@@ -2170,6 +2218,8 @@ Battle.prototype._unfield = function _unfield(fighter, index) {
   }
 };
 
+// The non-link fights, where the cart pays EXP (and Pay Day); M.BADGE_MODES is
+// the same set, gating the badge rules at create.
 const EXP_MODES = { wild: true, coop_wild: true, coop_npc: true };
 const EXP_OWNER_SIDE = 'a';
 

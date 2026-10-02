@@ -108,6 +108,28 @@ const MODES = {
 };
 const SIDES = ['a', 'b'];
 
+// The modes an uploaded `badges` set counts in, and the one side it counts on.
+//
+// The fights against the computer, on the player's seats, because that is the
+// only place the cart applies the x9/8 boosts at all: pokecrystal's
+// BadgeStatBoosts (engine/battle/core.asm) opens with `ld a, [wLinkMode] /
+// and a / ret nz`, returning before it reads a badge in any link battle, and
+// raises wBattleMon -- the player's monster -- and nothing else; the engine's
+// port says the same (gen1recomp src/battle/gen2/Battle.lua:811-815, "never
+// the enemy and never in link"). 1v1 and coop_pvp are link battles in
+// everything but the cable, so both sides fight them unboosted. Side b of the
+// other three is the synthetic wild / trainer seat (see EXP_MODES below),
+// which no cart boosts, so a set uploaded for it is a confused or a hostile
+// client and is dropped the same way.
+//
+// The referee is the gate rather than the client or the hub: a client can
+// forge an upload and a hub passes `badges` through untouched, and this is the
+// one place both hubs and solo share. It is applied once, in `attempt`, where a
+// seat's set is copied -- every reader after that (`_speedOf`, both ends of the
+// damage step) sees null and needs no gate of its own.
+const BADGE_MODES = { wild: true, coop_wild: true, coop_npc: true };
+const BADGE_SIDE = 'a';
+
 // The modes a faint pays experience in -- the ones vanilla awards it in. 1v1
 // and coop_pvp never do; see `_awardExp` for why the gate is the mode rather
 // than an owner flag. Side a is where the owners sit in all three; side b is
@@ -582,6 +604,13 @@ function copyBadges(raw) {
   }
   if (!any) return null;
   return out;
+}
+
+// The badges a seat fights with: its own upload where the cart would have
+// applied it (BADGE_MODES, BADGE_SIDE), and null everywhere else.
+function seatBadges(mode, side, raw) {
+  if (!has(BADGE_MODES, mode) || side !== BADGE_SIDE) return null;
+  return copyBadges(raw);
 }
 
 // Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
@@ -3397,7 +3426,11 @@ class Battle {
  *
  * opts:
  *   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
- *   sides = { a: [ { playerId, name, mons } ], b: [ ... ] }
+ *   sides = { a: [ { playerId, name, mons, bag, badges } ], b: [ ... ] }
+ *
+ * `badges` is kept only on side a of a BADGE_MODES fight and dropped
+ * everywhere else, silently: a PvP upload that carries one is a well-formed
+ * upload the cart would simply not have boosted.
  *
  * A reason and not a throw: the caller is a session handler that has a client
  * waiting to be told why. `create` is the same thing for a caller that only
@@ -3447,7 +3480,7 @@ function attempt(opts) {
         index,
         slot: Events.fieldSlot(side, index),
         mons,
-        badges: copyBadges(entry.badges),
+        badges: seatBadges(self.mode, side, entry.badges),
         bag: copyBag(entry.bag),
         active: firstLiving(mons),
         connected: true,
@@ -3519,6 +3552,8 @@ module.exports = {
   DEFAULT_NPC_BAG,
   MODES,
   SIDES,
+  BADGE_MODES,
+  BADGE_SIDE,
   STATUS_FROM_WIRE,
   STATUS_TO_WIRE,
 };

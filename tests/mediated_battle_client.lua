@@ -305,6 +305,39 @@ check(Wire.battleMon({ species = "SHELLY", speciesId = "not a species!",
                                    accuracy = 255, type = 0, effect = 0,
                                    chance = 0 } } }) == nil,
       "an unreadable id refuses the battler, like every other id on the sheet")
+-- The obedience check's `traded` / `fateful` are Gen 3's (contract K2 of
+-- docs/plans/gen3-badge-rules.md): the Gen 1 / Gen 2 reader never copies them.
+do
+  local stripped = Wire.battleMon({
+    species = "CHARMANDER", level = 5, hp = 1, maxHp = 1,
+    stats = { atk = 1, def = 1, spd = 1, spc = 1 },
+    moves = { { id = "EMBER", pp = 1, power = 1, accuracy = 255,
+                type = 0, effect = 0, chance = 0 } },
+    traded = true, fateful = true,
+  })
+  check(stripped ~= nil and stripped.traded == nil and stripped.fateful == nil,
+        "Wire.battleMon (Gen 1) strips the Gen 3 obedience facts")
+end
+
+-- Badges: the save's badge rows in a fight against the computer, none in a
+-- link battle -- no cart boosts there (Gen 1 skips the badge step in a link
+-- battle), and the referees ignore an uploaded set in 1v1 / coop_pvp too.
+do
+  local badgeData = setmetatable({ constants = { badgeBoosts = {
+    { badge = "BOULDERBADGE", stat = "attack" },
+    { badge = "THUNDERBADGE", stat = "defense" },
+    { badge = "SOULBADGE", stat = "speed" },
+  } } }, { __index = DATA })
+  local badgeGame = gameWith({ mon("CHARMANDER") }, badgeData)
+  badgeGame.save.inventory = { BOULDERBADGE = 1 }
+  badgeGame.save.player.badges = { SOULBADGE = true }
+  local function list(mode) return table.concat(Mediated.badgesOf(badgeGame, mode) or {}, ",") end
+  eq(list("wild"), "BOULDERBADGE,SOULBADGE", "badges: a wild fight sends the save's badges")
+  eq(list("coop_npc"), "BOULDERBADGE,SOULBADGE", "badges: ...as does a trainer fight")
+  eq(list(nil), "BOULDERBADGE,SOULBADGE", "badges: a caller naming no mode is not in a link battle")
+  eq(Mediated.badgesOf(badgeGame, "1v1"), nil, "badges: a 1v1 is a link battle and sends none")
+  eq(Mediated.badgesOf(badgeGame, "coop_pvp"), nil, "badges: ...nor does coop_pvp")
+end
 
 -- Defaults, for a move this build has a slot for but no record of -- a modded
 -- move whose definition did not survive. 40 power at full accuracy is a plain

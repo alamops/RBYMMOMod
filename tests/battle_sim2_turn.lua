@@ -1718,6 +1718,141 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 7. badge boosts: against the computer only
+-- ------------------------------------------------------------------
+--
+-- Crystal boosts the player's monster and only outside a link battle
+-- (BadgeStatBoosts opens with `ld a, [wLinkMode] / and a / ret nz`), so the
+-- referee keeps an uploaded set on side a of wild / coop_wild / coop_npc and
+-- drops it in 1v1, coop_pvp and on side b (Turn.BADGE_MODES, Turn.BADGE_SIDE).
+-- Three halves, the same three the Gen 1 suite states: a PvP fight with badges
+-- is the unbadged fight, damage and turn order alike; the same seats against
+-- the computer are boosted, so the gate is the mode and not a removal; and
+-- side b's upload is ignored even there.  server/battle2_turn.test.js builds
+-- the same sheets on the same seed and reaches the same numbers.
+
+do
+  local modes = {}
+  for mode in pairs(Turn.BADGE_MODES) do modes[#modes + 1] = mode end
+  table.sort(modes)
+  eq(table.concat(modes, ","), "coop_npc,coop_wild,wild",
+     "badges count in the three fights against the computer, and no other")
+  eq(Turn.BADGE_SIDE, "a", "...and only on the player's side of them")
+
+  local ALL = { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true,
+                VOLCANOBADGE = true, MARSHBADGE = true }
+
+  -- One exchange: Ann (side a) and Bob (side b) each swing once.  `a` / `b`
+  -- override the stats and carry each seat's upload.
+  local function exchange(mode, a, b)
+    local battle = battleOf({
+      mode = mode, seed = 777001,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", badges = a.badges,
+                mons = { mon({
+                  maxHp = 200, hp = 200, atk = a.atk or 88, def = 40,
+                  spe = a.spe or 40, moves = { move({ power = 50 }) },
+                }) } } },
+        b = { { playerId = "p2", name = "Bob", badges = b.badges,
+                mons = { mon({
+                  species = "Beta", maxHp = 200, hp = 200, atk = b.atk or 40,
+                  def = 80, spe = b.spe or 40, moves = { move({ power = b.power or 1 }) },
+                }) } } },
+      },
+    })
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    return drain(battle)
+  end
+  local function hitOn(events, slot)
+    for _, event in ipairs(events) do
+      if event.t == "damage" and event.slot == slot then return event.amount end
+    end
+    return nil
+  end
+  local function firstHit(events)
+    for _, event in ipairs(events) do
+      if event.t == "damage" then return event.slot end
+    end
+    return nil
+  end
+  -- The whole stream as one string, sorted keys, so two fights compare byte
+  -- for byte; a `moves` row prints as id/pp, which is all that event varies in.
+  local function streamOf(events)
+    local rows = {}
+    for i, event in ipairs(events) do
+      local keys = {}
+      for k in pairs(event) do keys[#keys + 1] = k end
+      table.sort(keys)
+      local parts = {}
+      for _, k in ipairs(keys) do
+        local v = event[k]
+        if type(v) == "table" then
+          local cells = {}
+          for j, row in ipairs(v) do
+            cells[j] = type(row) == "table"
+              and (tostring(row.id) .. "/" .. tostring(row.pp)) or tostring(row)
+          end
+          v = "[" .. table.concat(cells, ",") .. "]"
+        end
+        parts[#parts + 1] = k .. "=" .. tostring(v)
+      end
+      rows[i] = table.concat(parts, ",")
+    end
+    return table.concat(rows, "|")
+  end
+
+  -- Damage: BOULDERBADGE on Ann's physical hit.  Speed: Ann at 40 against Bob
+  -- at 42, so SOULBADGE (40 -> 45) is exactly what decides who swings first.
+  local hit = { badges = { BOULDERBADGE = true } }
+  local fast = { badges = { SOULBADGE = true }, spe = 40 }
+  local foe = { spe = 42 }
+
+  -- (a) the link modes: every byte of the badged fight is the unbadged one.
+  for _, mode in ipairs({ "1v1", "coop_pvp" }) do
+    local bare = exchange(mode, {}, {})
+    eq(hitOn(bare, 3), 18, mode .. ": the unbadged attack lands for 18")
+    eq(hitOn(exchange(mode, hit, {}), 3), 18,
+       mode .. ": BOULDERBADGE does not raise the damage -- a link battle")
+    -- One seat at a time: both at once would cancel here (each attack is
+    -- boosted by the same ninth its target's defence is) and prove nothing.
+    eq(streamOf(exchange(mode, { badges = ALL }, {})), streamOf(bare),
+       mode .. ": side a uploading every badge fights the unbadged fight")
+    eq(streamOf(exchange(mode, {}, { badges = ALL })), streamOf(bare),
+       mode .. ": so does side b uploading every badge")
+    eq(firstHit(exchange(mode, { spe = 40 }, foe)), 0,
+       mode .. ": unbadged, Bob (42) outspeeds Ann (40)")
+    eq(firstHit(exchange(mode, fast, foe)), 0,
+       mode .. ": SOULBADGE does not let Ann overtake him")
+  end
+
+  -- (b) the same seats against the computer: boosted, which is what makes the
+  --     gate the mode rather than a removal of the boost.
+  for _, mode in ipairs({ "coop_npc", "wild" }) do
+    eq(hitOn(exchange(mode, {}, {}), 3), 18, mode .. ": unbadged, the same 18")
+    -- 88 -> floor(88 * 9 / 8) = 99 Attack; lib/battle2 reaches the same 20.
+    eq(hitOn(exchange(mode, hit, {}), 3), 20,
+       mode .. ": BOULDERBADGE raises side a's physical damage to 20")
+    eq(firstHit(exchange(mode, { spe = 40 }, foe)), 0,
+       mode .. ": unbadged, the foe (42) still goes first")
+    eq(firstHit(exchange(mode, fast, foe)), 3,
+       mode .. ": SOULBADGE (40 -> 45) puts side a in front")
+  end
+
+  -- (c) side b's upload, ignored against the computer too.  Each of these
+  --     would have changed the fight had it counted: THUNDERBADGE would cut
+  --     Ann's hit, BOULDERBADGE would raise Bob's, and SOULBADGE (37 -> 41)
+  --     would put Bob ahead of Ann's 40.
+  local bare = exchange("coop_npc", {}, { power = 30 })
+  local hostile = exchange("coop_npc", {}, { badges = ALL, power = 30 })
+  eq(hitOn(hostile, 3), hitOn(bare, 3), "coop_npc: side b's THUNDERBADGE is ignored")
+  eq(hitOn(hostile, 0), hitOn(bare, 0), "coop_npc: side b's BOULDERBADGE is ignored")
+  eq(streamOf(hostile), streamOf(bare), "coop_npc: side b's upload changes nothing at all")
+  eq(firstHit(exchange("coop_npc", {}, { badges = ALL, spe = 37 })), 3,
+     "coop_npc: side b's SOULBADGE does not overtake side a")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

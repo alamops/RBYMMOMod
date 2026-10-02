@@ -226,6 +226,16 @@ section('items', (input, kind) => {
   throw new Error(`unknown items kind ${kind}`);
 });
 
+section('badges', (input) => {
+  const set = Damage.badgeSet(clean(input.raw));
+  if (!set) return { held: null };
+  const held = [];
+  for (let n = 1; n <= 8; n += 1) {
+    if (set[n] === true) held.push(n);
+  }
+  return { held };
+});
+
 section('effects', (input, kind) => {
   if (kind === 'forbidden') return { forbidden: Effects.forbidden(input.num, input.stopAtSentinel) };
   if (kind === 'handles') {
@@ -276,7 +286,7 @@ test('rng: a coin is not a rota', () => {
 test('every stated key was checked', () => {
   let expected = 0;
   for (const name of ['rng', 'types', 'damage', 'base', 'power', 'crit', 'accuracy', 'speed',
-    'order', 'status', 'catch', 'items', 'effects']) {
+    'order', 'status', 'catch', 'items', 'badges', 'effects']) {
     for (const c of vectors[name]) expected += Object.keys(c.out).length;
   }
   assert.strictEqual(checked, expected, 'a section skipped some of its cases');

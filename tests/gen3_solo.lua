@@ -2387,14 +2387,66 @@ do
   eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("run"), "doll: B_OUTCOME_RAN on the save")
 end
 
--- (s) The badges ride on our side for a referee that uses them (BattleSim3
---     does not: link rules, sheet doc §6).
+-- (s) The badges ride on our side, for the referee's badge boosts and
+--     obedience caps (docs/plans/gen3-badge-rules.md, contract K1): the save's
+--     badge flags as the badge numbers a hub upload carries.  Our own sheets
+--     carry the obedience check's `traded` / `fateful` (K2); the wild
+--     monster's never do.
 do
   newGame({ badges = { [1] = true, [3] = true } })
   local b = Solo.gen3Badges()
   check(b and b[1] and b[3] and not b[2], "badges: the save's badge flags, by number")
   newGame()
   eq(Solo.gen3Badges(), nil, "badges: none held, none sent")
+
+  -- The live flag store wins whenever it is a table, field or not -- the
+  -- engine's own order (Engine.hasBadge), and the moment of a divert.
+  local Gen3 = need("Gen3")
+  newGame({ badges = { [1] = true } })
+  FakeSpace.store = { badges = { [2] = true, [8] = true } }
+  GAME.phase = "battle"
+  eq(table.concat(Gen3.badgeList() or {}, ","), "2,8", "badges: the live flag store, mid-divert")
+  FakeSpace.store = nil
+  GAME.phase = "field"
+  eq(table.concat(Gen3.badgeList() or {}, ","), "1", "badges: ...else the session's flags")
+
+  local Turn = need("BattleSim3/Turn")
+  local realCreate = Turn.create
+  local seen
+  Turn.create = function(opts, ...)
+    seen = opts
+    return realCreate(opts, ...)
+  end
+  newGame({ badges = { [1] = true, [3] = true } })
+  SESSION.party = {
+    monOf(4, 20),                                         -- ANN's own catch
+    monOf(5, 20, { otId = 999 }),                         -- another trainer's id
+    monOf(4, 20, { otName = "BOB" }),                     -- ANN's id, another name
+    monOf(151, 20, { fatefulEncounter = true }),          -- an event MEW
+    monOf(151, 20, { fatefulEncounter = false }),         -- a MEW without the bit
+    monOf(151, 20),                                       -- the field never set
+  }
+  local solo = newSolo()
+  local took = solo:fromGen3Encounter(GAME, { species = 16, level = 3 }, {})
+  Turn.create = realCreate
+  check(took, "badges: the wild fight is taken")
+  local a = seen and seen.sides and seen.sides.a and seen.sides.a[1] or {}
+  eq(seen and seen.mode, "wild", "badges: ...as a wild fight")
+  eq(table.concat(a.badges or {}, ","), "1,3", "badges: side a carries the save's badge numbers")
+  eq(a.seats, nil, "badges: ...on a single's one-seat entry")
+  eq(a.family, "frlg", "badges: the entry names the cart family whose obedience rule applies")
+  local mons = a.mons or {}
+  eq(mons[1] and mons[1].traded, nil, "traded: ANN's own catch is not")
+  eq(mons[2] and mons[2].traded, true, "traded: another OT id is")
+  eq(mons[3] and mons[3].traded, true, "traded: ...as is ANN's id under another OT name")
+  eq(mons[1] and mons[1].fateful, nil, "fateful: only MEW and DEOXYS carry it")
+  eq(mons[4] and mons[4].fateful, true, "fateful: an event MEW")
+  eq(mons[5] and mons[5].fateful, nil, "fateful: ...not one whose bit is explicitly clear")
+  eq(mons[6] and mons[6].fateful, true, "fateful: ...but one that never had the field (the engine's reading)")
+  local wild = seen and seen.sides.b[1].mons[1] or {}
+  check(wild.traded == nil and wild.fateful == nil, "K2: the wild monster's sheet carries neither")
+  drive(solo, function(f) f:pickMove(1) end)
+  check(not solo:isRunning(), "badges: the fight still runs to its end")
 end
 
 -- ===================================================================
@@ -2654,6 +2706,33 @@ do
     eq(Solo.secondMon3(sim, SESSION.party), lead2, "leads: secondMon3 finds seat 2's engine monster")
     eq(table.concat(leads.fight.ready.sides.a, ","), PLAYER .. "," .. PLAYER2, "leads: both seats are announced")
     leads:reset()
+
+    -- badges (contract K1): the one entry behind both seats carries the
+    -- save's badge numbers, and the screen's upload sent the same list; the
+    -- shared team's sheets carry `traded` (K2), the trainer's do not
+    newGame({ badges = { [5] = true, [7] = true } })
+    SESSION.party = party2(monOf(4, 20), monOf(16, 20, { otId = 999 }))
+    local Turn = need("BattleSim3/Turn")
+    local realCreate = Turn.create
+    local seen
+    Turn.create = function(opts, ...)
+      seen = opts
+      return realCreate(opts, ...)
+    end
+    local badged = newSolo()
+    local tookDouble = badged:fromGen3Trainer(GAME, 902, {})
+    Turn.create = realCreate
+    check(tookDouble, "badges: the double is taken")
+    local entry = seen and seen.sides.a[1] or {}
+    eq(entry.seats, 2, "badges: ...one entry, two seats")
+    eq(table.concat(entry.badges or {}, ","), "5,7", "badges: the entry carries the save's badge numbers")
+    local upload = stubMade[#stubMade] and stubMade[#stubMade].med
+    eq(upload and upload.mode, "coop_npc", "badges: the double uploads as a trainer fight")
+    eq(entry.mons and entry.mons[2].traded, true, "traded: the shared team's traded monster says so")
+    eq(entry.mons and entry.mons[1].traded, nil, "traded: ...ANN's own does not")
+    local foeMons = seen and seen.sides.b[1].mons or {}
+    check(foeMons[1] and foeMons[1].traded == nil, "traded: the trainer's sheets never carry it")
+    badged:reset()
   end
 
   -- (b) the hand-backs: the caller fights the cart's own battle ----------

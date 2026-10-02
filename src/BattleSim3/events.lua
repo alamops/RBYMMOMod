@@ -2,12 +2,12 @@
 --
 -- Contract C5 (docs/plans/gen3-battle-sheet.md §7).  Every BattleSim2 kind is
 -- kept verbatim -- same name, same fields, same meaning -- so a client that
--- draws a Gen 2 stream already draws most of a Gen 3 one.  Gen 3 adds six kinds
--- (`ability weather held form sub ball`) and six fields (`target spread stat
--- stage delta holding`), each for a thing the cart shows that the older
+-- draws a Gen 2 stream already draws most of a Gen 3 one.  Gen 3 adds seven kinds
+-- (`ability weather held form sub ball obey`) and six fields (`target spread
+-- stat stage delta holding`), each for a thing the cart shows that the older
 -- vocabulary cannot say: an ability acting, the weather, a held item doing
 -- something (and what the mon is left holding), a picture change, the
--- substitute doll, a ball's shakes.
+-- substitute doll, a ball's shakes, a mon disobeying its trainer.
 --
 -- Mirrored, not imported, for the reason BattleSim2/events.lua gives: this
 -- directory runs with no Config, no Wire and no engine, because the same rules
@@ -31,7 +31,7 @@ local floor = math.floor
 -- the closed set
 -- ------------------------------------------------------------------
 --
--- BattleSim2's twenty, then Gen 3's six:
+-- BattleSim2's twenty, then Gen 3's seven:
 --
 --   ability  -- an ability visibly acted (amount = ability id, text = its name)
 --   weather  -- weather started (amount 1), continues (2) or ended (0);
@@ -43,12 +43,16 @@ local floor = math.floor
 --   sub      -- the substitute doll went up (amount 1) or faded (amount 0)
 --   ball     -- one throw: target = the wild slot, amount = shakes 0..3, or 4
 --               when caught; text = the ball's item id
+--   obey     -- a mon disobeyed (docs/plans/gen3-badge-rules.md K3): text = the
+--               outcome token (Move.lua Bm:_disobey; the sheet doc §7.2 maps
+--               each to its cart line), always followed by our `msg`
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
   chose = true, unchose = true, moves = true, exp = true, team = true,
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
+  obey = true,
 }
 
 -- Every key an event may carry, and its type.  `battle` / `seq` are stamped by
@@ -128,6 +132,7 @@ M.SHAPES = {
   sub       = { slot = true, side = true, amount = "1 made, 0 faded" },
   ball      = { slot = "thrower", side = true, target = "wild slot",
                 amount = "shakes 0..3, 4 = caught", text = "ball item id" },
+  obey      = { slot = true, side = true, text = "the outcome token" },
 }
 
 -- ------------------------------------------------------------------

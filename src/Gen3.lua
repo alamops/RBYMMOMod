@@ -52,6 +52,7 @@
 --   position()                      { mapId, x, y, facing, moving }
 --   money.get() / money.set(n)      session.money, 0..999999
 --   badgeCount()  dexCounts()       flags-backed badges; national seen / caught
+--   badgeList()                     the held badge numbers { "1", "3", ... } (K1)
 --   dexMark(sp, seen, caught, p)    HandleSetPokedexFlag; true when newly caught
 --   recordCatch(mon)                what Catching.storeCaught writes besides the slot
 --   party()  partyCount()           session.party (the live table) and its size
@@ -372,6 +373,46 @@ function M.badgeCount()
     if Space and type(Space.store) == "table" then store = Space.store end
   end
   return tonumber(try(Flags.countBadges, store)) or 0
+end
+
+-- The badges this save holds, as the badge numbers the referee's side entry
+-- carries ({ "1", "3", ... } in order -- contract K1 of
+-- docs/plans/gen3-badge-rules.md, the shape Wire.badges / sanitize.js
+-- cleanBadgeSet already pass), or nil for none or on a build that cannot say.
+--
+-- Read the way the engine's own battle reads them (battle/engine.lua:166
+-- Engine.hasBadge, pokefirered/src/pokemon.c:2381): an Emerald battle profile
+-- names its badge flags outright (`badgeFlags`, FLAG_BADGE01_GET + n - 1 off
+-- the cart's profile row; pokeemerald/src/battle_util.c:3930) and is asked
+-- flag by flag, FireRed / LeafGreen go through Flags.hasBadge.  The flag store
+-- is Space.store whenever it is a table, as there -- not only while the field
+-- is the top phase (badgeCount's gate), because the moment a fight is diverted
+-- is exactly the moment the field may have stepped aside -- and the session's
+-- serialised flags otherwise, which getFlag reads the same way.
+function M.badgeList()
+  local s = M.session()
+  if not s then return nil end
+  local Flags = engine("src.core.game3.scripting.flags")
+  if not Flags then return nil end
+  local Space = engine("src.core.game3.scripting.space")
+  local store = (Space and type(Space.store) == "table") and Space.store or s
+  local BP = engine("src.core.game3.battle.profile")
+  local prof = BP and try(BP.get, s)
+  local badgeFlags = type(prof) == "table" and type(prof.badgeFlags) == "table"
+    and prof.badgeFlags or nil
+  local out = {}
+  for n = 1, 8 do
+    local has
+    if badgeFlags then
+      local flag = badgeFlags[n]
+      has = flag ~= nil and try(Flags.getFlag, store, nil, flag) and true or false
+    else
+      has = try(Flags.hasBadge, store, n) == true
+    end
+    if has then out[#out + 1] = tostring(n) end
+  end
+  if #out == 0 then return nil end
+  return out
 end
 
 local function countTrue(t)

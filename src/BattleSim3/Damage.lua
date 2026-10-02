@@ -19,6 +19,8 @@
 --   b.speciesNum, and the volatiles this file reads: flashFire, charged,
 --   helpingHand, substituteHP, lastPhysDmg / lastPhysBy, lastSpecDmg /
 --   lastSpecBy (Counter, Mirror Coat, Revenge), identified (Foresight).
+--   b.badges   = { [n] = true } (n 1..8) or nil: its trainer's badges, set only
+--                on side a of a fight against the computer (Turn.BADGE_MODES).
 --
 -- Randomness is drawn from `opts.rng` (an Rng or Rng.scripted), in the engine's
 -- order: Magnitude, Psywave, critical hit, damage roll -- each only when reached.
@@ -129,6 +131,39 @@ local function hasType(b, t)
   return b ~= nil and (b.type1 == t or b.type2 == t)
 end
 
+-- The badges a trainer brings (docs/plans/gen3-badge-rules.md K1), as the set
+-- { [n] = true } over n = 1..8, or nil when none survive.  Accepts a list
+-- ({ "1", "3" } / { 1, 3 }: each value a badge) or a set ({ [1] = true } /
+-- { ["1"] = true }: each key whose value is true); anything that is not an
+-- integer 1..8 is dropped, never an error.  The turn machine calls it for side a
+-- of a fight against the computer only, so a battler carrying `badges` IS the
+-- cart's "the player's side, not a link battle" (Engine.hasBadge, engine.lua:166).
+function M.badgeSet(raw)
+  if type(raw) ~= "table" then return nil end
+  local out, any = {}, false
+  for k, v in pairs(raw) do
+    local n = nil
+    if v == true then
+      n = tonumber(k)
+    elseif type(k) == "number" then
+      n = tonumber(v)
+    end
+    if n and n == floor(n) and n >= 1 and n <= 8 then
+      out[n] = true
+      any = true
+    end
+  end
+  return any and out or nil
+end
+
+-- pokefirered/src/pokemon.c:2381 FlagGet(FLAG_BADGE0n_GET), read off the
+-- battler's own trainer (each human brings their own; the foe side has none).
+local function hasBadge(b, n)
+  local set = b and b.badges
+  return type(set) == "table" and set[n] == true
+end
+M.hasBadge = hasBadge
+
 -- A convenience for the vector pack and the cross-check: build the battler
 -- shape above from one flat spec.
 function M.battler(spec)
@@ -165,6 +200,7 @@ function M.battler(spec)
     identified = spec.identified == true,
     lastPhysDmg = int(spec.lastPhysDmg, 0), lastPhysBy = spec.lastPhysBy,
     lastSpecDmg = int(spec.lastSpecDmg, 0), lastSpecBy = spec.lastSpecBy,
+    badges = M.badgeSet(spec.badges),
   }
   local t2 = int(types[2], nil)
   if t2 ~= nil and t2 ~= b.type1 then b.type2 = t2 end
@@ -257,7 +293,19 @@ function M.base(attacker, defender, move, opts)
   local dAb = defender and defender.ability
   if aAb == "HUGE_POWER" or aAb == "PURE_POWER" then attack = attack * 2 end
 
-  -- Badge boosts (pokemon.c:2381) never apply: a mediated fight is a link fight.
+  -- pokefirered/src/pokemon.c:2381 badge boosts (engine damage.lua:205-217):
+  -- x110/100 floored, after Huge Power / Pure Power and before the held items and
+  -- the abilities below; the stat stages come later, in the formula.  Badge 1 the
+  -- attacker's Attack, 5 the defender's Defense, 7 the attacker's Sp. Atk and the
+  -- defender's Sp. Def -- each read off that battler's own trainer, so a self-hit
+  -- (confusion, disobedience: attacker and defender the same battler) carries
+  -- both of its own.  `b.badges` exists only on side a against the computer
+  -- (Turn.BADGE_MODES); Emerald's e-reader / secret base / frontier / recorded
+  -- exclusions (pokeemerald/src/pokemon.c:3407) are fights no referee hosts.
+  if hasBadge(attacker, 1) then attack = floor(110 * attack / 100) end
+  if hasBadge(defender, 5) then defense = floor(110 * defense / 100) end
+  if hasBadge(attacker, 7) then spAttack = floor(110 * spAttack / 100) end
+  if hasBadge(defender, 7) then spDefense = floor(110 * spDefense / 100) end
 
   local aHe, aParam = holdOf(attacker)
   local dHe = holdOf(defender)
@@ -580,7 +628,9 @@ end
 -- The confusion self-hit and disobedience self-hit: pret battle_util.c:1424,
 -- a typeless 40-power physical hit on itself (CalculateBaseDamage with the
 -- attacker as both sides), no crit, no STAB, no chart, then the 85..100 roll
--- (battle_scripts_1.s:3741) which the caller draws.
+-- (battle_scripts_1.s:3741) which the caller draws.  The battler's own badges
+-- boost it as on the cart (badge 1 its Attack, badge 5 its Defense: the engine's
+-- Damage.base(user, user, ...), engine.lua:668 / :1341).
 function M.selfHitBase(b)
   return M.base(b, b, { power = 40, type = 0, effect = 0 }, { power = 40, moveType = 0 })
 end

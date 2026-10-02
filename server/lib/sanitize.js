@@ -822,12 +822,13 @@ const BATTLE_EVENT_TYPES = new Set([
   'chose', 'unchose', 'moves', 'exp', 'team',
 ]);
 
-// Gen 3's six kinds (docs/plans/gen3-battle-sheet.md §7.2): an ability acting,
+// Gen 3's seven kinds (docs/plans/gen3-battle-sheet.md §7.2): an ability acting,
 // the weather, a held item (and what is left held), a picture change, the
-// substitute doll, a ball's shakes. Their own set for the reason Wire.lua gives
-// at M.BATTLE_EVENTS3 (the Gen 1 sim mirrors the set above exactly); a kind in
-// either set is an event cleanBattleEvent reads.
-const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball']);
+// substitute doll, a ball's shakes, a disobedient mon (text = the §7.2.1
+// token). Their own set for the reason Wire.lua gives at M.BATTLE_EVENTS3 (the
+// Gen 1 sim mirrors the set above exactly); a kind in either set is an event
+// cleanBattleEvent reads.
+const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey']);
 
 /*
  * The three ball states a roster is spelled in. Wire.lua spells this
@@ -1397,9 +1398,10 @@ const IV_KEYS3 = ['hp', 'atk', 'def', 'spe', 'spa', 'spd'];
  * the hub holds no species, item or ability table -- all required. Optional,
  * each refused when present and unreadable: display names, slot, status /
  * sleepTurns, catchRate, the passthrough ivs / evs / personality / otId, the
- * caught sheet's ball, and weight / hiddenPower / beatUp -- which are required
- * on an *upload* (cleanBattleParty checks them) but not on an outcome's caught
- * sheet. Twin of Wire.lua's battleMon3.
+ * caught sheet's ball, the obedience check's traded / fateful (booleans, a
+ * player's own sheet only), and weight / hiddenPower / beatUp -- which are
+ * required on an *upload* (cleanBattleParty checks them) but not on an
+ * outcome's caught sheet. Twin of Wire.lua's battleMon3.
  */
 function cleanBattleMon3(raw) {
   const stats = cleanBlock3(raw.stats, BATTLE_STATS_GEN2, 1, STAT_MAX);
@@ -1529,6 +1531,19 @@ function cleanBattleMon3(raw) {
     const ball = luaInt(raw.ball, 0, GEN3_ITEM_MAX);
     if (ball === null) return null;
     mon.ball = ball;
+  }
+  // The obedience check's facts about a player's own monster (contract K2,
+  // docs/plans/gen3-badge-rules.md): true or absent, so a false is kept as
+  // absent and anything that is not a boolean refuses the mon -- the ruleset's
+  // `underwater` posture. Gen 3 only: the Gen 1 / Gen 2 reader builds its sheet
+  // field by field and never copies either.
+  if (present(raw.traded)) {
+    if (typeof raw.traded !== 'boolean') return null;
+    if (raw.traded) mon.traded = true;
+  }
+  if (present(raw.fateful)) {
+    if (typeof raw.fateful !== 'boolean') return null;
+    if (raw.fateful) mon.fateful = true;
   }
   return mon;
 }

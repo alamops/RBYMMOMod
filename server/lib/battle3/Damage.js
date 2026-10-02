@@ -21,6 +21,8 @@
  *   b.speciesNum, and the volatiles read here: flashFire, charged,
  *   helpingHand, substituteHP, lastPhysDmg / lastPhysBy, lastSpecDmg /
  *   lastSpecBy, identified.
+ *   b.badges   = { [n]: true } (n 1..8) or null: its trainer's badges, set only
+ *                on side a of a fight against the computer (Turn.BADGE_MODES).
  *
  * Randomness is drawn from `opts.rng` in the engine's order: Magnitude,
  * Psywave, critical hit, damage roll -- each only when reached.
@@ -33,7 +35,9 @@
 
 const Types = require('./Types.js');
 const Crit = require('./Crit.js');
-const { int, isTable, truthy } = require('./lua.js');
+const {
+  int, isTable, truthy, toNumber,
+} = require('./lua.js');
 
 const ROLL_MIN = 85;
 const ROLL_MAX = 100;
@@ -176,6 +180,40 @@ function hasType(b, t) {
   return b !== undefined && b !== null && (b.type1 === t || b.type2 === t);
 }
 
+// The badges a trainer brings (docs/plans/gen3-badge-rules.md K1), as the set
+// { [n]: true } over n = 1..8, or null when none survive. Accepts a list
+// (['1', '3'] / [1, 3]: each value a badge) or a set ({ 1: true } /
+// { '1': true }: each key whose value is true); anything that is not an
+// integer 1..8 is dropped, never an error. The Lua twin walks one table with
+// pairs(); here a list's 1-based position is its index plus one, and an
+// object's keys are never positions (they are strings in Lua too).
+function badgeSet(raw) {
+  if (!isTable(raw)) return null;
+  const out = {};
+  let any = false;
+  const take = (n) => {
+    if (n !== null && Number.isInteger(n) && n >= 1 && n <= 8) {
+      out[n] = true;
+      any = true;
+    }
+  };
+  if (Array.isArray(raw)) {
+    raw.forEach((v, i) => take(v === true ? i + 1 : toNumber(v)));
+  } else {
+    for (const [k, v] of Object.entries(raw)) {
+      if (v === true) take(toNumber(k));
+    }
+  }
+  return any ? out : null;
+}
+
+// pokefirered/src/pokemon.c:2381 FlagGet(FLAG_BADGE0n_GET), read off the
+// battler's own trainer (each human brings their own; the foe side has none).
+function hasBadge(b, n) {
+  const set = b ? b.badges : null;
+  return isTable(set) && set[n] === true;
+}
+
 // A convenience for the vector pack and the cross-check: build the battler
 // shape above from one flat spec.
 function battler(specIn) {
@@ -227,6 +265,7 @@ function battler(specIn) {
     lastPhysBy: spec.lastPhysBy,
     lastSpecDmg: int(spec.lastSpecDmg, 0),
     lastSpecBy: spec.lastSpecBy,
+    badges: badgeSet(spec.badges),
   };
   const t2 = int(types[1], null);
   if (t2 !== null && t2 !== b.type1) b.type2 = t2;
@@ -326,7 +365,16 @@ function base(attacker, defender, moveIn, optsIn) {
   const dAb = defender ? defender.ability : null;
   if (aAb === 'HUGE_POWER' || aAb === 'PURE_POWER') attack *= 2;
 
-  // Badge boosts (pokemon.c:2381) never apply: a mediated fight is a link fight.
+  // pokefirered/src/pokemon.c:2381 badge boosts (engine damage.lua:205-217):
+  // x110/100 floored, after Huge Power / Pure Power and before the held items and
+  // the abilities below; the stat stages come later, in the formula. Badge 1 the
+  // attacker's Attack, 5 the defender's Defense, 7 the attacker's Sp. Atk and the
+  // defender's Sp. Def -- each read off that battler's own trainer, so a self-hit
+  // (confusion, disobedience) carries both of its own. See the Lua twin.
+  if (hasBadge(attacker, 1)) attack = Math.floor(110 * attack / 100);
+  if (hasBadge(defender, 5)) defense = Math.floor(110 * defense / 100);
+  if (hasBadge(attacker, 7)) spAttack = Math.floor(110 * spAttack / 100);
+  if (hasBadge(defender, 7)) spDefense = Math.floor(110 * spDefense / 100);
 
   const [aHe, aParam] = holdOf(attacker);
   const [dHe] = holdOf(defender);
@@ -682,9 +730,10 @@ function calc(attacker, defender, moveIn, optsIn) {
   }];
 }
 
-// The confusion self-hit: pret battle_util.c:1424, a typeless 40-power
-// physical hit on itself, no crit, no STAB, no chart; the caller draws the
-// 85..100 roll.
+// The confusion self-hit and disobedience self-hit: pret battle_util.c:1424, a
+// typeless 40-power physical hit on itself, no crit, no STAB, no chart; the
+// caller draws the 85..100 roll. The battler's own badges boost it as on the
+// cart (badge 1 its Attack, badge 5 its Defense: engine.lua:668 / :1341).
 function selfHitBase(b) {
   return base(b, b, { power: 40, type: 0, effect: 0 }, { power: 40, moveType: 0 });
 }
@@ -697,6 +746,8 @@ module.exports = {
   STAGE_RATIO,
   clampStage,
   applyStage,
+  badgeSet,
+  hasBadge,
   battler,
   hiddenPower,
   flailPower,

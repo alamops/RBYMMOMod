@@ -25,6 +25,9 @@
 --     `switch` / `send`.
 --   * `retarget` -- a stolen KO. The slower ally's action must land on the
 --     seat that is left, and it must land on it having drawn the same bytes.
+--   * `badges_link` / `badges_coop_pvp` / `badges_npc` -- where an uploaded
+--     badge set counts (Turn.BADGE_MODES): side a of a fight against the
+--     computer, never a link battle and never side b.
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -447,6 +450,103 @@ scenario("move_names", function(events)
   for _ = 1, 5 do
     battle:submitChoice("p1", { action = "fight", move = 2 })
     battle:submitChoice("p2", { action = "fight", move = 1 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+-- uploaded badge sets, and where the referee lets them count (Turn.BADGE_MODES
+-- / Turn.BADGE_SIDE: side a of a fight against the computer, never a link
+-- battle -- Crystal's BadgeStatBoosts returns early in one).  Speeds sit a step
+-- apart so a SOULBADGE that leaked would reorder the field rather than merely
+-- move a damage number, and the npc fight carries a special move so VOLCANO
+-- (Sp.Atk) and MARSH (Sp.Def) are both read.  `badges_link` and
+-- `badges_coop_pvp` fight as though nobody held a badge; `badges_npc` boosts
+-- side a and ignores side b's upload.
+local function allBadges()
+  return { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true,
+           VOLCANOBADGE = true, MARSHBADGE = true }
+end
+
+scenario("badges_link", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local battle = build({
+    id = "bl", mode = "1v1", seed = 2718, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", badges = allBadges(), mons = {
+        mn({ species = "Alpha", maxHp = 200, atk = 60, spe = 40, moves = { thump() } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = {
+        mn({ species = "Beta", maxHp = 200, atk = 60, spe = 42, moves = { thump() } }) } } },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 3 do
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+scenario("badges_coop_pvp", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local battle = build({
+    id = "bp", mode = "coop_pvp", seed = 3141, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", badges = allBadges(), mons = {
+          mn({ species = "Alpha", maxHp = 300, atk = 60, spe = 40, moves = { thump() } }) } },
+        { playerId = "a2", name = "Abe", badges = allBadges(), mons = {
+          mn({ species = "Gamma", maxHp = 300, atk = 55, spe = 30, moves = { thump() } }) } },
+      },
+      b = {
+        { playerId = "b1", name = "Bob", badges = allBadges(), mons = {
+          mn({ species = "Beta", maxHp = 300, atk = 60, spe = 42, moves = { thump() } }) } },
+        { playerId = "b2", name = "Bea", badges = allBadges(), mons = {
+          mn({ species = "Delta", maxHp = 300, atk = 55, spe = 34, moves = { thump() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    battle:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    battle:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+    drainInto(battle, events)
+  end
+  return battle
+end)
+
+scenario("badges_npc", function(events)
+  local thump = function() return mv("thump", 40, 255, 0) end
+  local zap = function() return mv("zap", 40, 255, 1) end
+  local battle = build({
+    id = "bn", mode = "coop_npc", seed = 1618, choiceTimeout = 60, reconnectGrace = 60,
+    specialTypes = { 1 },
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", badges = allBadges(), mons = {
+          mn({ species = "Alpha", maxHp = 300, atk = 60, spe = 40, moves = { thump() } }) } },
+        { playerId = "a2", name = "Abe", badges = allBadges(), mons = {
+          mn({ species = "Gamma", maxHp = 300, spa = 60, spd = 50, spe = 30,
+               moves = { zap() } }) } },
+      },
+      b = {
+        { playerId = "n1", name = "NpcA", badges = allBadges(), mons = {
+          mn({ species = "Beta", maxHp = 300, atk = 60, spe = 42, moves = { thump() } }) } },
+        { playerId = "n2", name = "NpcB", badges = allBadges(), mons = {
+          mn({ species = "Delta", maxHp = 300, spa = 60, spd = 50, spe = 37,
+               moves = { zap() } }) } },
+      },
+    },
+  })
+  drainInto(battle, events)
+  for _ = 1, 2 do
+    battle:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    battle:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    battle:submitChoice("n1", { action = "fight", move = 0, target = 0 })
+    battle:submitChoice("n2", { action = "fight", move = 0, target = 1 })
     drainInto(battle, events)
   end
   return battle

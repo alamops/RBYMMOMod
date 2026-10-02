@@ -25,6 +25,9 @@
  * retargeting -- because those are what is new in `lib/battle2/` and therefore
  * what can drift. Everything a Gen 2 fight shares with Gen 1 is already pinned
  * by battle_turn.test.js on the Gen 1 pair.
+ * The badge scenarios add one more referee rule both twins must apply alike:
+ * an uploaded badge set counts only on side a of a fight against the computer
+ * (Turn.BADGE_MODES), never in a link battle and never on side b.
  *
  * The scenarios below are the JS half of that pair and have to stay a literal
  * mirror of the driver's: same seeds, same parties, same choices in the same
@@ -307,6 +310,103 @@ scenario('move_names', (events) => {
   return battle;
 });
 
+// uploaded badge sets, and where the referee lets them count (Turn.BADGE_MODES
+// / Turn.BADGE_SIDE: side a of a fight against the computer, never a link
+// battle -- Crystal's BadgeStatBoosts returns early in one). Speeds sit a step
+// apart so a SOULBADGE that leaked would reorder the field rather than merely
+// move a damage number, and the npc fight carries a special move so VOLCANO
+// (Sp.Atk) and MARSH (Sp.Def) are both read. `badges_link` and
+// `badges_coop_pvp` fight as though nobody held a badge; `badges_npc` boosts
+// side a and ignores side b's upload.
+const allBadges = () => ({
+  BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true,
+  VOLCANOBADGE: true, MARSHBADGE: true,
+});
+
+scenario('badges_link', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'bl', mode: '1v1', seed: 2718, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 60, spe: 40, moves: [thump()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, atk: 60, spe: 42, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+scenario('badges_coop_pvp', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'bp', mode: 'coop_pvp', seed: 3141, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', badges: allBadges(), mons: [
+          mn({ species: 'Alpha', maxHp: 300, atk: 60, spe: 40, moves: [thump()] })] },
+        { playerId: 'a2', name: 'Abe', badges: allBadges(), mons: [
+          mn({ species: 'Gamma', maxHp: 300, atk: 55, spe: 30, moves: [thump()] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', badges: allBadges(), mons: [
+          mn({ species: 'Beta', maxHp: 300, atk: 60, spe: 42, moves: [thump()] })] },
+        { playerId: 'b2', name: 'Bea', badges: allBadges(), mons: [
+          mn({ species: 'Delta', maxHp: 300, atk: 55, spe: 34, moves: [thump()] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+scenario('badges_npc', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const zap = () => mv('zap', 40, 255, 1);
+  const battle = build({
+    id: 'bn', mode: 'coop_npc', seed: 1618, choiceTimeout: 60, reconnectGrace: 60,
+    specialTypes: [1],
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', badges: allBadges(), mons: [
+          mn({ species: 'Alpha', maxHp: 300, atk: 60, spe: 40, moves: [thump()] })] },
+        { playerId: 'a2', name: 'Abe', badges: allBadges(), mons: [
+          mn({ species: 'Gamma', maxHp: 300, spa: 60, spd: 50, spe: 30,
+               moves: [zap()] })] },
+      ],
+      b: [
+        { playerId: 'n1', name: 'NpcA', badges: allBadges(), mons: [
+          mn({ species: 'Beta', maxHp: 300, atk: 60, spe: 42, moves: [thump()] })] },
+        { playerId: 'n2', name: 'NpcB', badges: allBadges(), mons: [
+          mn({ species: 'Delta', maxHp: 300, spa: 60, spd: 50, spe: 37,
+               moves: [zap()] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('n1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('n2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -370,7 +470,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 6, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 9, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -870,4 +970,113 @@ test('a leftover choice does not resolve the turn until reconnect()', () => {
   battle.reconnect('p1');
   assert.strictEqual(battle.snapshot().turn, 2,
     'reconnect completes the already-answered turn without a second pick');
+});
+
+// ------------------------------------------------------------------
+// badges: against the computer only
+// ------------------------------------------------------------------
+
+// Twin of tests/battle_sim2_turn.lua's 7, same sheets and seed, so the numbers
+// are the same numbers. Crystal boosts the player's monster and only outside a
+// link battle (BadgeStatBoosts opens with `ld a, [wLinkMode] / and a / ret nz`),
+// so the referee keeps an uploaded set on side a of wild / coop_wild / coop_npc
+// and drops it in 1v1, coop_pvp and on side b. Three halves: a PvP fight with
+// badges is the unbadged fight, damage and turn order alike; the same seats
+// against the computer are boosted, so the gate is the mode and not a removal;
+// and side b's upload is ignored even there.
+
+const ALL_BADGES = {
+  BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true,
+  VOLCANOBADGE: true, MARSHBADGE: true,
+};
+
+// One exchange: Ann (side a) and Bob (side b) each swing once. `a` / `b`
+// override the stats and carry each seat's upload.
+const exchange = (mode, a, b) => {
+  const thump = (power) => ({
+    id: 'thump', pp: 20, power, accuracy: 255, type: 0, effect: 0, chance: 0,
+  });
+  const battle = build({
+    id: 'b1', mode, seed: 777001, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [{
+        species: 'Alpha', level: 20, hp: 200, maxHp: 200,
+        stats: { atk: a.atk || 88, def: 40, spe: a.spe || 40, spa: 40, spd: 40 },
+        moves: [thump(50)],
+      }] }],
+      b: [{ playerId: 'p2', name: 'Bob', badges: b.badges, mons: [{
+        species: 'Beta', level: 20, hp: 200, maxHp: 200,
+        stats: { atk: b.atk || 40, def: 80, spe: b.spe || 40, spa: 40, spd: 40 },
+        moves: [thump(b.power || 1)],
+      }] }],
+    },
+  });
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  return canonical(battle.drainEvents());
+};
+const hitOn = (events, slot) => {
+  const hit = events.find((event) => event.t === 'damage' && event.slot === slot);
+  return hit ? hit.amount : null;
+};
+const firstHit = (events) => {
+  const hit = events.find((event) => event.t === 'damage');
+  return hit ? hit.slot : null;
+};
+
+// Damage: BOULDERBADGE on Ann's physical hit. Speed: Ann at 40 against Bob at
+// 42, so SOULBADGE (40 -> 45) is exactly what decides who swings first.
+const HIT = { badges: { BOULDERBADGE: true } };
+const FAST = { badges: { SOULBADGE: true }, spe: 40 };
+const FOE = { spe: 42 };
+
+test('badges count in the three fights against the computer, on side a', () => {
+  assert.deepStrictEqual(Object.keys(Turn.BADGE_MODES).sort(),
+    ['coop_npc', 'coop_wild', 'wild'], 'and in no other mode');
+  assert.strictEqual(Turn.BADGE_SIDE, 'a', "and only on the player's side of them");
+});
+
+for (const mode of ['1v1', 'coop_pvp']) {
+  test(`${mode}: a link battle ignores every uploaded badge`, () => {
+    const bare = exchange(mode, {}, {});
+    assert.strictEqual(hitOn(bare, 3), 18, 'the unbadged attack lands for 18');
+    assert.strictEqual(hitOn(exchange(mode, HIT, {}), 3), 18,
+      'BOULDERBADGE does not raise the damage');
+    // One seat at a time: both at once would cancel here (each attack is
+    // boosted by the same ninth its target's defence is) and prove nothing.
+    assert.deepStrictEqual(exchange(mode, { badges: ALL_BADGES }, {}), bare,
+      'side a uploading every badge fights the unbadged fight');
+    assert.deepStrictEqual(exchange(mode, {}, { badges: ALL_BADGES }), bare,
+      'so does side b uploading every badge');
+    assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, FOE)), 0,
+      'unbadged, Bob (42) outspeeds Ann (40)');
+    assert.strictEqual(firstHit(exchange(mode, FAST, FOE)), 0,
+      'SOULBADGE does not let Ann overtake him');
+  });
+}
+
+for (const mode of ['coop_npc', 'wild']) {
+  test(`${mode}: side a's badges still boost against the computer`, () => {
+    assert.strictEqual(hitOn(exchange(mode, {}, {}), 3), 18, 'unbadged, the same 18');
+    // 88 -> floor(88 * 9 / 8) = 99 Attack; BattleSim2 reaches the same 20.
+    assert.strictEqual(hitOn(exchange(mode, HIT, {}), 3), 20,
+      "BOULDERBADGE raises side a's physical damage to 20");
+    assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, FOE)), 0,
+      'unbadged, the foe (42) still goes first');
+    assert.strictEqual(firstHit(exchange(mode, FAST, FOE)), 3,
+      'SOULBADGE (40 -> 45) puts side a in front');
+  });
+}
+
+test("coop_npc: side b's upload is ignored against the computer too", () => {
+  // Each of these would have changed the fight had it counted: THUNDERBADGE
+  // would cut Ann's hit, BOULDERBADGE would raise Bob's, and SOULBADGE
+  // (37 -> 41) would put Bob ahead of Ann's 40.
+  const bare = exchange('coop_npc', {}, { power: 30 });
+  const hostile = exchange('coop_npc', {}, { badges: ALL_BADGES, power: 30 });
+  assert.strictEqual(hitOn(hostile, 3), hitOn(bare, 3), "side b's THUNDERBADGE is ignored");
+  assert.strictEqual(hitOn(hostile, 0), hitOn(bare, 0), "side b's BOULDERBADGE is ignored");
+  assert.deepStrictEqual(hostile, bare, "side b's upload changes nothing at all");
+  assert.strictEqual(firstHit(exchange('coop_npc', {}, { badges: ALL_BADGES, spe: 37 })), 3,
+    "side b's SOULBADGE does not overtake side a");
 });

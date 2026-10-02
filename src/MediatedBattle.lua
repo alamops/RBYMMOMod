@@ -50,7 +50,11 @@
 --     with IVs / EVs / nature already in the stats, ability, held item and
 --     its hold effect, Hidden Power, the ordered type chart and the compact
 --     move pool, the §4 bag from the session's pockets (numeric ids);
---   * badge boosts are off and there are no vitamins (link rules, §6);
+--   * the badges ride only into a fight against the computer (wild, a
+--     trainer): the badge numbers off the cart's flags (Gen3.badgeList), for
+--     the referee's badge boosts and obedience caps, while a 1v1 is a link
+--     battle and sends none (`badgesOf`, docs/plans/gen3-badge-rules.md);
+--     there are no vitamins (§6);
 --   * the referee is BattleSim3, so the stream carries Gen 3's six extra
 --     kinds (ability weather held form sub ball, C5 §7.2) -- each has a place
 --     in the queue below, and `held` is the writeback of a consumed / stolen
@@ -972,19 +976,31 @@ function M.sendMoveset(transport, battle, monIndex0, moves, generation)
   return true
 end
 
--- The badges this player has earned, as a list for the wire.
+-- The badges this player has earned, as a list for the wire -- or nil where
+-- they count for nothing.
 --
--- Read off the badge *rows* rather than off a list written down here, so a mod
--- that adds a badge -- or retunes which ones boost what -- is covered without
--- this file knowing about it.
+-- `mode` is the fight's (`1v1`, `coop_pvp`, `wild`, `coop_npc`, ...).  A link
+-- mode (M.LINK_MODES) sends none on every generation: no cart boosts in a
+-- link battle (Gen 1 skips the badge step there, Gen 2's BadgeStatBoosts
+-- returns early, Gen 3's Engine.hasBadge answers false -- battle/engine.lua:167)
+-- and no cart runs its obedience check there either; the referees ignore a set
+-- in those modes anyway (docs/plans/gen3-badge-rules.md §3 decision 3: the
+-- referee owns the rule, this is the belt).  Any other mode, nil included --
+-- the host-built co-op path asks without one -- is a fight against the
+-- computer and sends what the save holds.
+--
+-- Gen 3 reads the cart's badge flags (Gen3.badgeList: the badge numbers
+-- { "1", "3", ... }, contract K1), which BattleSim3 turns into the badge
+-- boosts and the obedience caps.  Gen 1 / Gen 2 read the badge *rows* rather
+-- than a list written down here, so a mod that adds a badge -- or retunes
+-- which ones boost what -- is covered without this file knowing about it.
 --
 -- MK403: never hard-require Gen 1 `src.battle.Damage` on Gold. Prefer
 -- `data.constants.badgeBoosts`, then a soft Gen 2 Damage/Battle module, then
 -- Gen 1 Damage only on a Gen 1 boot; missing rows soft-degrade to no badges.
-function M.badgesOf(game)
-  -- Gen 3 mediated fights run under link rules: no badge boosts (the cart
-  -- turns them off in a link battle; docs/plans/gen3-battle-sheet.md §6).
-  if Gen.generation(game) == 3 then return nil end
+function M.badgesOf(game, mode)
+  if M.LINK_MODES[mode] then return nil end
+  if Gen.generation(game) == 3 then return Gen3.badgeList() end
   local data = game and game.data
   local save = game and game.save
   if not (data and save) then return nil end
@@ -2606,7 +2622,8 @@ function M:start(game)
   -- carries the kit from this game's data, for this fight only.
   local bag = M.snapshotBag(self.game)
   self.bagSheet = M.bagCounts(bag)
-  M.sendParty(self.transport, self.battle, mons, nil, bag, M.badgesOf(self.game))
+  -- The badges count only against the computer (`badgesOf`): a 1v1 sends none.
+  M.sendParty(self.transport, self.battle, mons, nil, bag, M.badgesOf(self.game, self.mode))
   if self.mode == "wild" and type(self.wildParty) == "table" and #self.wildParty > 0 then
     M.sendParty(self.transport, self.battle, self.wildParty, "b")
   elseif type(self.npcParty) == "table" and #self.npcParty > 0 then

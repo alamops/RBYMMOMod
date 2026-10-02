@@ -22,8 +22,10 @@
  * is a delayed attack even though it has power, Facade / Revenge /
  * SmellingSalt double, Struggle is not stopped by Wonder Guard, a cancelled
  * move clears the last *resulting* move too (Protect's streak), and there is no
- * disobedience, no badge boost and no Oak / Pokedude / ghost-battle branch
- * (link rules).
+ * Oak / Pokedude / ghost-battle branch. Disobedience (`Bm._disobey`,
+ * engine.lua:1291) and the badge boosts (Damage.js base, Field.js speed)
+ * follow the engine, for side a against the computer only (Turn.BADGE_MODES):
+ * link rules everywhere else.
  *
  * Multi-value returns as arrays: canInflict -> [ok, reason] (Status.canApply),
  * _adjustDamage -> [dmg, how], _actionMove -> [row, slot, why], and the local
@@ -1139,6 +1141,106 @@ Bm._selfHit = function _selfHit(C) {
   C.tryFaintUser();
 };
 
+// ------------------------------------------------------------------
+// obedience (pokefirered/src/battle_util.c:3143 IsMonDisobedient)
+// ------------------------------------------------------------------
+
+const SPECIES_MEW = 151;
+const SPECIES_DEOXYS = 410;
+
+// src/battle_message.c:1180 gInobedientStringIds, by MULTISTRING_CHOOSER
+// (`Random() & 3`): B_MSG_LOAFING, B_MSG_WONT_OBEY, B_MSG_TURNED_AWAY,
+// B_MSG_PRETEND_NOT_NOTICE -- the engine's LOAF_TEXT, in its order. Each pair is
+// the `obey` event's token and our sentence's tail.
+const LOAF_LINES = [
+  ['loafing', ' is loafing around!'],
+  ['wont_obey', " won't obey!"],
+  ['turned_away', ' turned away!'],
+  ['pretend_not_notice', ' pretended not to notice!'],
+];
+M.LOAF_LINES = LOAF_LINES;
+
+// One disobedience outcome: the `obey` event (K3, docs/plans/gen3-battle-sheet.md
+// §7.2), then our sentence.
+Bm._obeyLine = function _obeyLine(b, token, tail) {
+  this._emit('obey', { slot: b.slot, side: b.side, text: token });
+  this.say(this.nameOf(b) + tail);
+};
+
+// engine.lua:1291 `disobedient` (pret IsMonDisobedient), asked by `run` after
+// the PP check for a move not already locked in. Returns [null] (it obeys),
+// ['stop'] (the action is spent) or ['called', slot] (that usable slot runs
+// instead). Only for a fighter with `badgeRules` (side a against the computer),
+// badges or none; the rest is the engine line for line, its draws in its order,
+// each only when reached. See the Lua twin for the prose.
+Bm._disobey = function _disobey(C) {
+  const { user } = C;
+  if (!truthy(user.fighter.badgeRules)) return [null];
+  const { mon } = user;
+  // pret reads the party mon's species, which Transform leaves alone.
+  const species = int(mon.speciesNum, 0);
+  let ob = 0;
+  if (!((species === SPECIES_MEW || species === SPECIES_DEOXYS) && mon.fateful !== true)) {
+    if (mon.traded !== true || Damage.hasBadge(user, 8)) return [null];
+    ob = 10;
+    if (Damage.hasBadge(user, 2)) ob = 30;
+    if (Damage.hasBadge(user, 4)) ob = 50;
+    if (Damage.hasBadge(user, 6)) ob = 70;
+  }
+  const lvl = int(mon.level, 1);
+  if (lvl <= ob) return [null];
+  if (Math.floor((lvl + ob) * this.roll(0, 255) / 256) < ob) return [null];
+  if (C.mnum === MOVE.RAGE) delete user.rage;
+  if (Status.normalise(mon.status) === 'SLP' && (C.mnum === MOVE.SNORE || C.mnum === MOVE.SLEEP_TALK)) {
+    // BattleScript_IgnoresWhileAsleep
+    this._obeyLine(user, 'ignores_asleep', ' ignored orders while asleep!');
+    return ['stop'];
+  }
+  const exempt = user.fighter.family !== 'rse';
+  if (Math.floor((lvl + ob) * this.roll(0, 255) / 256) < ob
+      && (C.mnum !== MOVE.FOCUS_PUNCH || !exempt)) {
+    // CheckMoveLimitations over the four slots (an empty slot is unusable) plus
+    // the chosen one (gBitTable[gCurrMovePos]).
+    const bad = this.moveLimitations(user);
+    for (let i = user.moves.length + 1; i <= 4; i += 1) bad[i] = true;
+    if (truthy(C.slot)) bad[C.slot] = true;
+    if (truthy(bad[1]) && truthy(bad[2]) && truthy(bad[3]) && truthy(bad[4])) {
+      // BattleScript_MoveUsedLoafingAround
+      const line = LOAF_LINES[mod(this.roll(0, 3), 4)];
+      this._obeyLine(user, line[0], line[1]);
+      return ['stop'];
+    }
+    let slot;
+    do {
+      slot = mod(this.roll(0, 3), 4) + 1;
+    } while (truthy(bad[slot]));
+    // BattleScript_IgnoresAndUsesRandomMove
+    this._obeyLine(user, 'uses_random_move', ' ignored orders!');
+    return ['called', slot];
+  }
+  const diff = lvl - ob;
+  let r = this.roll(0, 255);
+  const ab = user.ability;
+  if (r < diff && !truthy(Status.normalise(mon.status)) && ab !== 'VITAL_SPIRIT' && ab !== 'INSOMNIA'
+      && !truthy(this.uproarActive())) {
+    // BattleScript_IgnoresAndFallsAsleep (the sleep counter rolls as any sleep's)
+    this._obeyLine(user, 'falls_asleep', ' began to nap!');
+    this.inflict(user, 'SLP', { source: user });
+    return ['stop'];
+  }
+  r -= diff;
+  if (r < diff) {
+    // BattleScript_IgnoresAndHitsItself: the typeless 40-power hit, as confusion's
+    this._obeyLine(user, 'hits_itself', " won't obey!");
+    this.cancelMultiTurn(user);
+    this._selfHit(C);
+    return ['stop'];
+  }
+  const line = LOAF_LINES[mod(this.roll(0, 3), 4)];
+  this._obeyLine(user, line[0], line[1]);
+  return ['stop'];
+};
+
 // The per-strike move end, defined with the move end below (forward).
 let strikeEnd = null;
 
@@ -2220,10 +2322,12 @@ function moveEndLite(C) {
 // "But it failed!".
 M.MAX_CALL_DEPTH = 3;
 
-// extra: noPP (Sleep Talk's HITMARKER_NO_PPDEDUCT for the called slot).
+// extra: noPP (Sleep Talk's HITMARKER_NO_PPDEDUCT for the called slot),
+// sameDepth (a disobedient pick: it replaces the chosen move, it is not called
+// from inside one, so it nests no deeper).
 function runCalled(C, row, slot, extra) {
   const { B } = C;
-  const depth = int(C.opts.callDepth, 0) + 1;
+  const depth = int(C.opts.callDepth, 0) + ((truthy(extra) && truthy(extra.sameDepth)) ? 0 : 1);
   if (!truthy(row) || depth > M.MAX_CALL_DEPTH) {
     C.failed = true;
     B.say('But it failed!');
@@ -2569,6 +2673,22 @@ function run(C) {
       C.attackString();
       B.say('But there was no PP left for the move!');
       return undefined;
+    }
+    // Cmd_attackcanceler's IsMonDisobedient (engine.lua:1476): not for a move
+    // already under way. A refusal ends the action as a canceller stop does; a
+    // random pick runs as a called move from its slot, in place of the choice
+    // (so it does not count against MAX_CALL_DEPTH).
+    if (!truthy(user.lockedNum)) {
+      const [d, slot] = B._disobey(C);
+      if (d === 'stop') {
+        delete user.lastMoveNum;
+        delete user.lastResultingNum;
+        moveEndLite(C);
+        return undefined;
+      }
+      if (d === 'called') {
+        return runCalled(C, at(user.moves, slot), slot, { sameDepth: true });
+      }
     }
   }
 

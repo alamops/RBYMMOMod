@@ -32,7 +32,14 @@
 --   6. moves, in speed order, each drawing only at the points it reaches:
 --      canceller (freeze roll(0,4); a sleeper with no counter roll(0,3); confusion
 --      roll(0,1) [+ self-hit roll(85,100) + Focus Band roll(0,99) when held];
---      paralysis roll(0,3); infatuation roll(0,1)); random target over two or
+--      paralysis roll(0,3); infatuation roll(0,1)); obedience, after the PP
+--      check and only for a side-a mon against the computer that is traded and
+--      over its badge cap, or a Mew / Deoxys without its fateful bit (none at or
+--      under the cap): roll(0,255), then -- unless it is a sleeping Snore /
+--      Sleep Talk -- roll(0,255), then either roll(0,3) per pick until a usable
+--      slot (one roll(0,3) for the loaf line when none is) or roll(0,255) and
+--      then sleep turns roll(0,3), the self-hit's roll(85,100) [+ Focus Band
+--      roll(0,99)] or one roll(0,3) for the loaf line; random target over two or
 --      more living foes roll(0,n-1); Metronome roll(1,511) until a pool move
 --      (or roll(1,n) after 64 misses); Sleep Talk / Assist roll(1,n); Protect
 --      streak roll(0,2^k-1); Magnitude roll(0,99); accuracy roll(1,100);
@@ -83,9 +90,15 @@
 --     are refused at submit.
 --   * Forced lock-in (no menu): recharge, a two-turn release, Bide, Thrash-type
 --     rampage, Uproar, Rollout.  A partial trap does not lock the victim.
---   * Link rules: no badge boosts, no disobedience, no exp and no Pay Day coins
---     in 1v1 / coop_pvp (a won wild / coop_npc fight reports side a's coins as
---     `outcome().payDay`).  King's Rock keeps the cart's battler-0 quirk.
+--   * Badge rules (docs/plans/gen3-badge-rules.md K1-K3): against the computer
+--     (M.BADGE_MODES: wild / coop_wild / coop_npc) side a's battlers carry their
+--     own trainer's badges -- the x1.1 stat boosts (Damage.base, Field.speed) --
+--     and obey by the cart's rule (Move.lua Bm:_disobey: a traded mon over the
+--     badge level cap may not).  Link rules in 1v1 / coop_pvp and for side b
+--     everywhere: no badge boosts, no disobedience, whatever an entry uploads;
+--     and no exp and no Pay Day coins in 1v1 / coop_pvp (a won wild / coop_npc
+--     fight reports side a's coins as `outcome().payDay`).  King's Rock keeps the
+--     cart's battler-0 quirk.
 --   * Timeout / NPC auto-pick: BattleSim2's heuristic on Gen 3 ids; a Ghost's
 --     CURSE goes unaimed, as the cart's AI files it.
 --
@@ -98,6 +111,7 @@ local need = ...
 
 local Rng       = need("BattleSim3/Rng")
 local Types     = need("BattleSim3/Types")
+local Damage    = need("BattleSim3/Damage")
 local Status    = need("BattleSim3/Status")
 local Abilities = need("BattleSim3/Abilities")
 local Items     = need("BattleSim3/Items")
@@ -129,6 +143,21 @@ M.MODES = {
   ["1v1"] = true, coop_npc = true, coop_pvp = true, wild = true, coop_wild = true,
 }
 M.SIDES = { "a", "b" }
+
+-- The fights against the computer -- the cart's non-link battles -- in which
+-- side a keeps its trainers' badge rules (docs/plans/gen3-badge-rules.md K1):
+-- the stat boosts and obedience.  1v1 / coop_pvp are link battles on the cart
+-- (Engine.hasBadge and IsMonDisobedient both return early under
+-- BATTLE_TYPE_LINK), so neither applies there whatever an entry uploads, and
+-- side b is never the player's side.  The same three modes as EXP_MODES below.
+M.BADGE_MODES = { wild = true, coop_wild = true, coop_npc = true }
+
+-- The cart families whose obedience rules differ (engine BattleProfile.family):
+-- FireRed / LeafGreen exempt Focus Punch from the random-move branch
+-- (`obedienceFocusPunchExempt`, battle/profile.lua:34), Emerald does not
+-- (profiles/emerald/battle.lua:39).  An entry without `family` plays by the
+-- engine's default profile, "frlg".
+M.FAMILIES = { frlg = true, rse = true }
 
 -- Gen 3 statuses ride the wire in their own tokens, both ways.
 M.STATUS_FROM_WIRE = { SLP = "SLP", PSN = "PSN", BRN = "BRN", FRZ = "FRZ", PAR = "PAR", TOX = "TOX" }
@@ -308,6 +337,12 @@ local function copyMon(raw, fallback)
     evs = copyNumbers(raw.evs),
     personality = int(raw.personality, nil),
     otId = int(raw.otId, nil),
+    -- K2 (docs/plans/gen3-badge-rules.md): obedience's two facts about the mon,
+    -- decided by its owner's client.  `traded`: the OT id or OT name is not this
+    -- player's (pret IsOtherTrainer, engine Engine.isTradedMon); `fateful`: its
+    -- fateful-encounter bit, read for Mew and Deoxys only.  true or absent.
+    traded = (raw.traded == true) or nil,
+    fateful = (raw.fateful == true) or nil,
   }
   if out.heldItem == 0 then out.holdEffect, out.holdParam = 0, 0 end
   return out
@@ -382,6 +417,8 @@ function Battle:_newBattler(fighter, index)
     stats = mon.stats, moves = mon.moves, overlay = false,
     stages = { atk = 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 },
     isFirstTurn = 2, toxicCounter = 0,
+    -- K1: its trainer's badges (nil off side a, in a link mode, or with none).
+    badges = fighter.badges,
   }
   return b
 end
@@ -400,7 +437,13 @@ end
 -- opts:
 --   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 --   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
---   sides = { a = { { playerId, name, mons, bag, seats? } }, b = { ... } }
+--   sides = { a = { { playerId, name, mons, bag, seats?, badges?, family? } },
+--             b = { ... } }
+--
+-- `badges` (K1: a list of badge numbers, as strings or numbers, or a set) and
+-- `family` ("frlg" | "rse") are read only for side a in M.BADGE_MODES and
+-- dropped everywhere else; each fighter keeps `badgeRules` (true there),
+-- `badges` (Damage.badgeSet) and `family`.
 --
 -- `seats = 2` makes one entry a shared team: two fighters over the same `mons`
 -- and `bag` tables -- seat 1 keeps `playerId`, seat 2 is `playerId .. "#2"`,
@@ -502,6 +545,16 @@ function M.create(opts)
       if #mons == 0 then return nil, playerId .. " brought no monsters" end
       local bag, bagNames = copyBag(entry.bag)
       bagNames = bagNames or {}
+      -- K1: the cart's badge rules belong to the player's side of a fight against
+      -- the computer and nowhere else -- a link mode or side b drops whatever the
+      -- entry uploaded, silently (bad badges are not a reason to refuse a fight).
+      -- Both seats of a shared team are the one trainer's.
+      local badgeRules = side == "a" and M.BADGE_MODES[mode] == true
+      local badges, family = nil, nil
+      if badgeRules then
+        badges = Damage.badgeSet(entry.badges)
+        family = M.FAMILIES[entry.family] and entry.family or "frlg"
+      end
       local party, lead = {}, nil
       for seat = 1, seats do
         -- The cart's leads: the first usable mon, then the next one after it
@@ -516,6 +569,7 @@ function M.create(opts)
           index = #bucket + 1, slot = Events.fieldSlot(side, #bucket + 1), mons = mons,
           bag = bag, bagNames = bagNames, active = active,
           connected = true, graceEndsAt = nil, choice = nil, team = nil, fought = {},
+          badgeRules = badgeRules or nil, badges = badges, family = family,
         }
         party[#party + 1] = fighter
         self.fighters[#self.fighters + 1] = fighter
@@ -1969,6 +2023,8 @@ function Battle:_unfield(fighter, index)
   end
 end
 
+-- The non-link fights, where the cart pays EXP (and Pay Day); M.BADGE_MODES is
+-- the same set, gating the badge rules at create.
 local EXP_MODES = { wild = true, coop_wild = true, coop_npc = true }
 local EXP_OWNER_SIDE = "a"
 

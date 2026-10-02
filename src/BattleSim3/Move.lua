@@ -18,8 +18,10 @@
 -- absorb abilities act before the accuracy roll (attackcanceler), Future Sight
 -- is a delayed attack even though it has power, Facade / Revenge / SmellingSalt
 -- double, Struggle is not stopped by Wonder Guard, a cancelled move clears the
--- last *resulting* move too (Protect's streak), and there is no disobedience,
--- no badge boost and no Oak / Pokedude / ghost-battle branch (link rules).
+-- last *resulting* move too (Protect's streak), and there is no Oak / Pokedude /
+-- ghost-battle branch.  Disobedience (`Bm:_disobey`, engine.lua:1291) and the
+-- badge boosts (Damage.base, Field.speed) follow the engine, for side a against
+-- the computer only (Turn.BADGE_MODES): link rules everywhere else.
 --
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
@@ -974,6 +976,112 @@ function Bm:_selfHit(C)
     Items.focusBandMessage(self, user)
   end
   C:tryFaintUser()
+end
+
+-- ------------------------------------------------------------------
+-- obedience (pokefirered/src/battle_util.c:3143 IsMonDisobedient)
+-- ------------------------------------------------------------------
+
+local SPECIES_MEW, SPECIES_DEOXYS = 151, 410
+
+-- src/battle_message.c:1180 gInobedientStringIds, by MULTISTRING_CHOOSER
+-- (`Random() & 3`): B_MSG_LOAFING, B_MSG_WONT_OBEY, B_MSG_TURNED_AWAY,
+-- B_MSG_PRETEND_NOT_NOTICE -- the engine's LOAF_TEXT, in its order.  Each pair is
+-- the `obey` event's token and our sentence's tail.
+local LOAF_LINES = {
+  { "loafing", " is loafing around!" },
+  { "wont_obey", " won't obey!" },
+  { "turned_away", " turned away!" },
+  { "pretend_not_notice", " pretended not to notice!" },
+}
+M.LOAF_LINES = LOAF_LINES
+
+-- One disobedience outcome: the `obey` event (K3, docs/plans/gen3-battle-sheet.md
+-- §7.2 -- `text` is the token the screens phrase in the cart's words), then our
+-- sentence.
+function Bm:_obeyLine(b, token, tail)
+  self:_emit("obey", { slot = b.slot, side = b.side, text = token })
+  self:say(self:nameOf(b) .. tail)
+end
+
+-- engine.lua:1291 `disobedient` (pret IsMonDisobedient), asked by `run` after the
+-- PP check for a move not already locked in.  Returns nil (it obeys), "stop" (the
+-- action is spent) or "called", slot (that usable slot runs instead).
+--
+-- Only on the player's side of a fight against the computer (the fighter's
+-- `badgeRules`, Turn.BADGE_MODES: pret returns 0 under BATTLE_TYPE_LINK and for
+-- B_SIDE_OPPONENT) -- and there for every trainer, badges or none, since
+-- obedience is what badges lift.  The rest is the engine line for line, its draws
+-- in its order and each only when reached; a mon at or under its cap draws
+-- nothing.  The Mew / Deoxys rule (engine.lua:1299) is on every cart, as the
+-- engine has it (docs/plans/gen3-badge-rules.md §8).  Focus Punch skips the
+-- random-move branch on FireRed / LeafGreen only (BattleProfile
+-- `obedienceFocusPunchExempt`; the fighter's `family`).
+function Bm:_disobey(C)
+  local user = C.user
+  if not user.fighter.badgeRules then return nil end
+  local mon = user.mon
+  -- pret reads the party mon's species, which Transform leaves alone.
+  local species = int(mon.speciesNum, 0)
+  local ob = 0
+  if not ((species == SPECIES_MEW or species == SPECIES_DEOXYS) and mon.fateful ~= true) then
+    if mon.traded ~= true or Damage.hasBadge(user, 8) then return nil end
+    ob = 10
+    if Damage.hasBadge(user, 2) then ob = 30 end
+    if Damage.hasBadge(user, 4) then ob = 50 end
+    if Damage.hasBadge(user, 6) then ob = 70 end
+  end
+  local lvl = int(mon.level, 1)
+  if lvl <= ob then return nil end
+  if floor((lvl + ob) * self:roll(0, 255) / 256) < ob then return nil end
+  if C.mnum == MOVE.RAGE then user.rage = nil end
+  if Status.normalise(mon.status) == "SLP"
+      and (C.mnum == MOVE.SNORE or C.mnum == MOVE.SLEEP_TALK) then
+    -- BattleScript_IgnoresWhileAsleep
+    self:_obeyLine(user, "ignores_asleep", " ignored orders while asleep!")
+    return "stop"
+  end
+  local exempt = user.fighter.family ~= "rse"
+  if floor((lvl + ob) * self:roll(0, 255) / 256) < ob
+      and (C.mnum ~= MOVE.FOCUS_PUNCH or not exempt) then
+    -- CheckMoveLimitations over the four slots (an empty slot is unusable) plus
+    -- the chosen one (gBitTable[gCurrMovePos]).
+    local bad = self:moveLimitations(user)
+    for i = #user.moves + 1, 4 do bad[i] = true end
+    if C.slot then bad[C.slot] = true end
+    if bad[1] and bad[2] and bad[3] and bad[4] then
+      -- BattleScript_MoveUsedLoafingAround
+      local line = LOAF_LINES[self:roll(0, 3) % 4 + 1]
+      self:_obeyLine(user, line[1], line[2])
+      return "stop"
+    end
+    local slot
+    repeat slot = self:roll(0, 3) % 4 + 1 until not bad[slot]
+    -- BattleScript_IgnoresAndUsesRandomMove
+    self:_obeyLine(user, "uses_random_move", " ignored orders!")
+    return "called", slot
+  end
+  local diff = lvl - ob
+  local r = self:roll(0, 255)
+  local ab = user.ability
+  if r < diff and not Status.normalise(mon.status) and ab ~= "VITAL_SPIRIT" and ab ~= "INSOMNIA"
+      and not self:uproarActive() then
+    -- BattleScript_IgnoresAndFallsAsleep (the sleep counter rolls as any sleep's)
+    self:_obeyLine(user, "falls_asleep", " began to nap!")
+    self:inflict(user, "SLP", { source = user })
+    return "stop"
+  end
+  r = r - diff
+  if r < diff then
+    -- BattleScript_IgnoresAndHitsItself: the typeless 40-power hit, as confusion's
+    self:_obeyLine(user, "hits_itself", " won't obey!")
+    self:cancelMultiTurn(user)
+    self:_selfHit(C)
+    return "stop"
+  end
+  local line = LOAF_LINES[self:roll(0, 3) % 4 + 1]
+  self:_obeyLine(user, line[1], line[2])
+  return "stop"
 end
 
 -- The per-strike move end, defined with the move end below (forward).
@@ -1968,10 +2076,12 @@ end
 -- "But it failed!".
 M.MAX_CALL_DEPTH = 3
 
--- opts: noPP (Sleep Talk's HITMARKER_NO_PPDEDUCT for the called slot).
+-- extra: noPP (Sleep Talk's HITMARKER_NO_PPDEDUCT for the called slot),
+-- sameDepth (a disobedient pick: it replaces the chosen move, it is not called
+-- from inside one, so it nests no deeper).
 local function runCalled(C, row, slot, extra)
   local B = C.B
-  local depth = int(C.opts.callDepth, 0) + 1
+  local depth = int(C.opts.callDepth, 0) + ((extra and extra.sameDepth) and 0 or 1)
   if not row or depth > M.MAX_CALL_DEPTH then
     C.failed = true
     B:say("But it failed!")
@@ -2290,6 +2400,22 @@ local function run(C)
       C:attackString()
       B:say("But there was no PP left for the move!")
       return
+    end
+    -- Cmd_attackcanceler's IsMonDisobedient (engine.lua:1476): not for a move
+    -- already under way (STATUS2_MULTIPLETURNS).  A refusal ends the action as a
+    -- canceller stop does; a random pick runs as a called move from its slot
+    -- (jumptocalledmove: no canceller, that slot's PP), in place of the choice
+    -- rather than nested in it, so it does not count against MAX_CALL_DEPTH.
+    if not user.lockedNum then
+      local d, slot = B:_disobey(C)
+      if d == "stop" then
+        user.lastMoveNum = nil
+        user.lastResultingNum = nil
+        moveEndLite(C)
+        return
+      elseif d == "called" then
+        return runCalled(C, user.moves[slot], slot, { sameDepth = true })
+      end
     end
   end
 

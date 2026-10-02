@@ -93,11 +93,14 @@ function weatherImmune(b, k) {
   return true;
 }
 
-// pokefirered/src/battle_main.c:3399 GetWhoStrikesFirst's speed: Swift Swim /
-// Chlorophyll x2 in their weather, the Speed stage, Macho Brace halves,
-// paralysis quarters, and Quick Claw makes it the maximum when this turn's
-// random number falls under 0xFFFF * param / 100. `quickClawNumber` is the
-// turn's roll(0, 65535), or null when none was drawn.
+// pokefirered/src/battle_main.c:3399 GetWhoStrikesFirst's speed (engine
+// speed_of, engine.lua:203): Swift Swim / Chlorophyll x2 in their weather, the
+// Speed stage, badge 3 x110/100 floored (the battler's own trainer's, which only
+// side a carries against the computer -- Turn.BADGE_MODES; engine.lua:221),
+// Macho Brace halves, paralysis quarters, and Quick Claw makes it the maximum
+// when this turn's random number falls under 0xFFFF * param / 100.
+// `quickClawNumber` is the turn's roll(0, 65535), or null when none was drawn.
+// Escape odds read the raw stat, not this (Turn.js's run).
 const HOLD_MACHO_BRACE = 24;
 const HOLD_QUICK_CLAW = 26;
 const QUICK_CLAW_SPEED = 0xFFFFFFFF;
@@ -110,6 +113,7 @@ function speed(b, weather, quickClawNumber) {
     mul = 2;
   }
   spe = Damage.applyStage(spe * mul, b.stages ? b.stages.spe : null);
+  if (Damage.hasBadge(b, 3)) spe = Math.floor(spe * 110 / 100);
   const mon = truthy(b.mon) ? b.mon : {};
   const he = (int(mon.heldItem, 0) !== 0) ? int(mon.holdEffect, 0) : 0;
   const param = int(mon.holdParam, 0);

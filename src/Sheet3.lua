@@ -55,7 +55,10 @@
 -- opts: { wild = true } stamps `catchRate` (the wild seat's sheet only);
 -- { link = true } gives Deoxys its link-battle stats -- a fight between two
 -- players' carts only (see `statsFor`); every other fight, and the default,
--- is the forme this cart's own battles use.
+-- is the forme this cart's own battles use.  { own = true } marks this
+-- player's own monsters (Sheet3.party sets it): off the link, their sheets
+-- carry the obedience check's `traded` / `fateful` (contract K2 of
+-- docs/plans/gen3-badge-rules.md).
 --
 -- Names that ride the wire are the cart's names spelled in the wire's
 -- alphabet (`M.wireName`: é is E, ♂ / ♀ are M / F); the cart's own spelling
@@ -86,6 +89,11 @@ M.SPECIES_DEOXYS = 410
 
 -- pret SPECIES_EGG.  An egg is not a fighter.
 local SPECIES_EGG = 412
+
+-- Mew and Deoxys: the two species the obedience check asks about their
+-- fateful-encounter bit (battle/engine.lua:1299, pret
+-- IsBattlerModernFatefulEncounter).
+local FATEFUL_SPECIES = { [151] = true, [M.SPECIES_DEOXYS] = true }
 
 local STAT_KEYS = { "hp", "atk", "def", "spe", "spa", "spd" }
 
@@ -426,6 +434,44 @@ local function abilityOf(mon, species, info)
   return a1
 end
 
+-- Contract K2's `traded` (docs/plans/gen3-badge-rules.md): the engine battle's
+-- own reading, the one its obedience check asks (battle/engine.lua:1276
+-- Engine.isTradedMon, pokefirered/src/pokemon.c:5965, called from
+-- Engine.disobedient) -- an OT id other than the player's, or an OT name other
+-- than theirs when both are known.  Not Exp3.traded: that asks
+-- Pokemon.isTradedMon (pret IsOtherTrainer), which compares the names only up
+-- to the end of the OT's and falls back to `mon.ot`, so where one name is a
+-- prefix of the other the two answer differently; this sheet feeds the
+-- obedience rule, so it takes that rule's reading.  The player is the
+-- session's trainer the way the engine resolves it; a session with no trainer
+-- id at all (where the engine falls back to a placeholder) is not a trade.
+local function tradedOf(mon)
+  if mon.otId == nil then return false end
+  local s = Gen3.session()
+  if type(s) ~= "table" then return false end
+  local pid = s.trainerId or s.id or s.playerId
+  if pid == nil then return false end
+  local pname = s.name or s.playerName
+  return tonumber(mon.otId) ~= tonumber(pid)
+    or (mon.otName ~= nil and pname ~= nil and tostring(mon.otName) ~= tostring(pname))
+end
+
+-- Contract K2's `fateful`: does the obedience check take this Mew / Deoxys as
+-- event-legal?  The engine reads one field for it and applies the
+-- always-disobey rule to an explicit false only (battle/engine.lua:1299,
+-- `mon.fatefulEncounter == false`): a link-traded monster carries the bit as a
+-- boolean (src/link/Protocol.lua unpackMon3), an event encounter sets it true
+-- (scripting/natives_events.lua, natives_event_islands.lua), and a monster
+-- that never had the field obeys the ordinary rules -- a save import keeps the
+-- cart's ribbon bit as `modernFatefulEncounter`, which that check does not
+-- read.  So `fateful` is set unless the field is false: the engine's verdict,
+-- which a referee reading "no `fateful`, no exemption" then reproduces.  Any
+-- other species never asks, and carries nothing.
+local function fatefulOf(mon, species)
+  if not FATEFUL_SPECIES[species] then return false end
+  return mon.fatefulEncounter ~= false
+end
+
 -- One C4 sheet.  `slot` is the 0-based party index the sheet was cut from
 -- (the address every `mon` field on the wire is stated in).  nil plus a
 -- reason for anything that cannot fight: an egg, an unknown species, a mon
@@ -519,6 +565,16 @@ function M.mon(session, mon, slot, opts)
   end
   if tonumber(mon.personality) then sheet.personality = int(mon.personality, 0) end
   if tonumber(mon.otId) then sheet.otId = int(mon.otId, 0) end
+  -- The obedience check's two facts about a monster (contract K2), `true` or
+  -- absent, on this player's own sheets (`own`) in a fight against the
+  -- computer only: the check asks the player's side alone
+  -- (Engine.disobedient: `user.side ~= "player"` obeys), so a trainer's or a
+  -- wild monster's sheet never carries them, and a link battle runs no check
+  -- at all (`link`; the referee ignores them there too).
+  if opts.own and not opts.link then
+    if tradedOf(mon) then sheet.traded = true end
+    if fatefulOf(mon, species) then sheet.fateful = true end
+  end
   return sheet
 end
 
@@ -537,13 +593,18 @@ function M.mons(game, party, opts)
 end
 
 -- This player's own team: the live session party (game.save on Gen 3 is a
--- snapshot rebuilt at save time and lags the party the player sees).
+-- snapshot rebuilt at save time and lags the party the player sees).  Its
+-- sheets are `own` (the K2 obedience facts, see M.mon).
 function M.party(game, opts)
   local party = Gen3.party()
   if not party and type(game) == "table" and type(game.session) == "table" then
     party = game.session.party
   end
-  return M.mons(game, party, opts)
+  local mine = { own = true }
+  for k, v in pairs(opts or {}) do
+    if k ~= "own" then mine[k] = v end
+  end
+  return M.mons(game, party, mine)
 end
 
 -- Write a referee's numbers onto a party mon (a solo or co-op fight's

@@ -18,16 +18,21 @@
 --   rng       Rng.new(seed) then roll(lo, hi) per draw -> values, state, count
 --   types     Types.typeCalc over the fixture's synthetic ordered chart
 --   damage    Damage.calc(Damage.battler(a), Damage.battler(d), move, opts)
---             (`opts.rolls` feed Rng.scripted in draw order)
---   base      Damage.base (CalculateBaseDamage, before crit/STAB/chart/roll)
+--             (`opts.rolls` feed Rng.scripted in draw order; a spec's `badges`
+--             is its trainer's, docs/plans/gen3-badge-rules.md K1)
+--   base      Damage.base (CalculateBaseDamage, before crit/STAB/chart/roll;
+--             the badge boosts' placement)
 --   power     hidden power, flail, low kick, magnitude, psywave
 --   crit      Crit.stage over a battler + move, Crit.check(stage, roll)
 --   accuracy  Accuracy.calc + Accuracy.hit
---   speed     Field.speed (Swift Swim, stages, paralysis, Macho Brace, Quick Claw)
+--   speed     Field.speed (Swift Swim, stages, badge 3, paralysis, Macho Brace,
+--             Quick Claw)
 --   order     Field.sortRows: priority, speed, one tie roll per tied group
 --   status    Status.chip / sleepTick / canApply
 --   catch     Catch.multiplier / odds / shakeThreshold / attempt
 --   items     Items.flavorRelation (confusion-berry dislikes from the nature)
+--   badges    Damage.badgeSet (a K1 badges value -> the badge numbers held, or
+--             null when none survive)
 --   effects   Effects.forbidden, and which EFFECT_* have a status handler
 --
 -- Synthetic numbers only: every stat, power and chart row is invented.
@@ -385,6 +390,16 @@ each("items", function(input, kind)
     return { relation = Items.flavorRelation(input.nature, input.flavor) }
   end
   error("unknown items kind " .. tostring(kind), 0)
+end)
+
+each("badges", function(input)
+  local set = Damage.badgeSet(clean(input.raw))
+  if not set then return { held = nil } end
+  local held = {}
+  for n = 1, 8 do
+    if set[n] == true then held[#held + 1] = n end
+  end
+  return { held = held }
 end)
 
 each("effects", function(input, kind)

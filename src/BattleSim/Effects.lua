@@ -245,6 +245,10 @@ end
 
 -- Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
 -- `wireStatKey` is atk/def/spd/spc; `badges` is a set of badge ids → true.
+-- A fighter only holds a set where the cart would have applied it -- side a
+-- of a fight against the computer; Turn.create drops it in 1v1 / coop_pvp
+-- (link battles, which the cart never boosts) and on side b (Turn.BADGE_MODES)
+-- -- so this never has to ask what kind of fight it is in.
 local BADGE_FOR_STAT = {
   atk = "BOULDERBADGE",
   def = "THUNDERBADGE",

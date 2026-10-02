@@ -239,6 +239,43 @@ test('highCrit and baseSpd ride the battle sheet as optional fields', () => {
     'absent baseSpd is not a refusal');
   assert.strictEqual(cleanBattleMon({ ...mon, baseSpd: 'fast' }), null,
     'an unreadable baseSpd refuses the battler');
+  // The Gen 3 obedience facts (contract K2) are not Gen 1's to read.
+  const gen1 = cleanBattleMon({ ...mon, traded: true, fateful: true });
+  assert.ok(gen1 && gen1.traded === undefined && gen1.fateful === undefined,
+    'the Gen 1 dialect strips traded / fateful');
+});
+
+test('Gen 3 obedience facts: true or absent, twin of Wire.battleMon3', () => {
+  // docs/plans/gen3-badge-rules.md contract K2: `traded` / `fateful` on a
+  // player's own Gen 3 sheet, read the way the ruleset's `underwater` is.
+  const move3 = {
+    num: 33, id: 'MOVE_33', pp: 35, maxPp: 35, power: 40, type: 0,
+    accuracy: 100, effect: 0, chance: 0, target: 0, priority: 0, flags: 0,
+  };
+  const mon3 = {
+    generation: 3, species: 'MEW', speciesNum: 151, level: 20, hp: 60, maxHp: 60,
+    stats: { atk: 40, def: 40, spe: 40, spa: 40, spd: 40 },
+    types: [14], ability: 28, heldItem: 0, holdEffect: 0, holdEffectParam: 0,
+    gender: 'U', friendship: 70, nature: 0, weight: 40,
+    hiddenPower: { type: 1, power: 50 }, beatUp: { atk: 20, def: 20 },
+    moves: [move3],
+  };
+  const base = cleanBattleMon(mon3);
+  assert.ok(base, '(a well-formed Gen 3 sheet on its own)');
+  assert.strictEqual(base.traded, undefined, 'absent traded stays absent');
+  assert.strictEqual(base.fateful, undefined, 'absent fateful stays absent');
+  const both = cleanBattleMon({ ...mon3, traded: true, fateful: true });
+  assert.strictEqual(both.traded, true, 'traded = true comes through');
+  assert.strictEqual(both.fateful, true, 'fateful = true comes through');
+  const off = cleanBattleMon({ ...mon3, traded: false, fateful: false });
+  assert.ok(off && off.traded === undefined && off.fateful === undefined,
+    'a false is kept as absent');
+  assert.strictEqual(cleanBattleMon({ ...mon3, traded: 'yes' }), null,
+    'a non-boolean traded refuses the mon');
+  assert.strictEqual(cleanBattleMon({ ...mon3, fateful: 1 }), null,
+    'a non-boolean fateful refuses the mon');
+  assert.strictEqual(cleanBattleMon({ ...mon3, traded: null }).traded, undefined,
+    'a null traded is absent, as Lua reads a JSON null');
 });
 
 test('shared hello refuse strings stay twin-worded', () => {
@@ -464,7 +501,7 @@ test('the Gen 3 event vocabulary is one vocabulary across Wire and both sims', (
     'lib/battle3/events.js KINDS mirrors src/BattleSim3/events.lua');
   assert.deepStrictEqual(simKinds, wireKinds,
     "BattleSim3 speaks exactly Wire's two tables: BATTLE_EVENTS plus BATTLE_EVENTS3");
-  for (const kind of ['ability', 'weather', 'held', 'form', 'sub', 'ball']) {
+  for (const kind of ['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey']) {
     assert.ok(simKinds.includes(kind), `BattleSim3 speaks ${kind} (C5)`);
   }
   const fields = luaTypedKeys(sim, /M\.FIELDS\s*=\s*\{([\s\S]*?)\}/);
@@ -552,6 +589,47 @@ test('Pay Day rides the outcome of the same fights on both hubs and both sims', 
   assert.deepStrictEqual(keys(hub[1]), keys(sim[1]), "and they are BattleSim3's EXP_MODES");
   assert.deepStrictEqual(simJsModes, keys(sim[1]), 'which the Node sim mirrors');
   assert.deepStrictEqual(relayModes, ['coop_npc', 'coop_wild', 'wild'], 'never a player-vs-player mode');
+});
+
+test('the Gen 3 badge rules are one rule on both sims', () => {
+  // docs/plans/gen3-badge-rules.md K1-K3: the modes in which side a keeps its
+  // trainers' badge boosts and obedience, the cart families whose obedience
+  // differs (Focus Punch), and the `obey` event's outcome tokens -- the text
+  // Wire / sanitize accept and both screens phrase. The turn fixture proves the
+  // two sims fight the same; this proves they name the same things.
+  const keys = (body) => [...body.matchAll(/(\w+)\s*=\s*true/g)].map((x) => x[1]).sort();
+  const turn = read('src/BattleSim3/Turn.lua');
+  const badgeModes = turn.match(/M\.BADGE_MODES\s*=\s*\{([^}]*)\}/);
+  assert.ok(badgeModes, 'src/BattleSim3/Turn.lua must assign M.BADGE_MODES');
+  assert.deepStrictEqual(Object.keys(Battle3.Turn.BADGE_MODES).sort(), keys(badgeModes[1]),
+    'lib/battle3 Turn.BADGE_MODES mirrors the Lua');
+  assert.deepStrictEqual(keys(badgeModes[1]), ['coop_npc', 'coop_wild', 'wild'],
+    'badge rules never reach a player-vs-player mode');
+  const expModes = turn.match(/local EXP_MODES\s*=\s*\{([^}]*)\}/);
+  assert.ok(expModes, 'src/BattleSim3/Turn.lua must declare local EXP_MODES');
+  assert.deepStrictEqual(keys(badgeModes[1]), keys(expModes[1]), 'the same non-link fights as EXP_MODES');
+  const families = turn.match(/M\.FAMILIES\s*=\s*\{([^}]*)\}/);
+  assert.ok(families, 'src/BattleSim3/Turn.lua must assign M.FAMILIES');
+  assert.deepStrictEqual(Object.keys(Battle3.Turn.FAMILIES).sort(), keys(families[1]),
+    'lib/battle3 Turn.FAMILIES mirrors the Lua');
+  assert.deepStrictEqual(keys(families[1]), ['frlg', 'rse'], 'the engine BattleProfile families');
+
+  const OBEY_TOKENS = ['falls_asleep', 'hits_itself', 'ignores_asleep', 'loafing',
+    'pretend_not_notice', 'turned_away', 'uses_random_move', 'wont_obey'];
+  const move = read('src/BattleSim3/Move.lua');
+  const loaf = move.match(/local LOAF_LINES\s*=\s*\{([\s\S]*?)\n\}/);
+  assert.ok(loaf, 'src/BattleSim3/Move.lua must declare local LOAF_LINES');
+  const luaLoaf = [...loaf[1].matchAll(/\{\s*"(\w+)"/g)].map((m) => m[1]);
+  assert.deepStrictEqual(Battle3.Move.LOAF_LINES.map(([token]) => token), luaLoaf,
+    'the four loaf lines, in the cart order the roll indexes');
+  const luaTokens = new Set(luaLoaf);
+  for (const m of move.matchAll(/_obeyLine\(user, "(\w+)"/g)) luaTokens.add(m[1]);
+  const jsTokens = new Set(Battle3.Move.LOAF_LINES.map(([token]) => token));
+  const moveJs = read('server/lib/battle3/Move.js');
+  for (const m of moveJs.matchAll(/_obeyLine\(user, '(\w+)'/g)) jsTokens.add(m[1]);
+  assert.deepStrictEqual([...luaTokens].sort(), OBEY_TOKENS, 'BattleSim3 says the eight outcomes');
+  assert.deepStrictEqual([...jsTokens].sort(), OBEY_TOKENS, 'and so does lib/battle3');
+  assert.ok(Battle3.Events.KINDS.obey === true, 'an outcome rides its own event kind, `obey`');
 });
 
 test("sanitize's luaNumber reads a string as LuaJIT's tonumber does", (t) => {

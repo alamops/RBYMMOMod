@@ -1758,7 +1758,8 @@ local IV_KEYS3 = { "hp", "atk", "def", "spe", "spa", "spd" }
 -- names, `slot`, `status` / `sleepTurns`, `catchRate` (the wild seat), the
 -- passthrough `ivs` / `evs` / `personality` / `otId` (never read by a formula;
 -- copied onto a caught sheet so the catcher rebuilds the exact mon), `ball`
--- (the caught sheet's), and the three formula inputs the sim's own caught
+-- (the caught sheet's), the obedience check's `traded` / `fateful` (booleans,
+-- a player's own sheet only), and the three formula inputs the sim's own caught
 -- sheet does not restate -- `weight`, `hiddenPower`, `beatUp`.  Those three
 -- ARE required on an upload: M.battleParty checks them, because an outcome's
 -- caught sheet goes through this same function and must not be refused for
@@ -1877,6 +1878,19 @@ local function battleMon3(raw)
   if raw.ball ~= nil then
     out.ball = M.int(raw.ball, 0, Config.GEN3_ITEM_MAX)
     if out.ball == nil then return nil end
+  end
+  -- The obedience check's facts about a player's own monster (contract K2,
+  -- docs/plans/gen3-badge-rules.md): `true` or absent, so a `false` is kept as
+  -- absent and anything that is not a boolean refuses the mon -- the same
+  -- posture as the ruleset's `underwater`.  Gen 3 only: the Gen 1 / Gen 2
+  -- reader below builds its sheet field by field and never copies either.
+  if raw.traded ~= nil then
+    if type(raw.traded) ~= "boolean" then return nil end
+    if raw.traded then out.traded = true end
+  end
+  if raw.fateful ~= nil then
+    if type(raw.fateful) ~= "boolean" then return nil end
+    if raw.fateful then out.fateful = true end
   end
   return out
 end
@@ -2338,8 +2352,12 @@ M.BATTLE_EVENTS = {
 --   sub        -- the substitute doll went up (1) or faded (0)
 --   ball       -- one throw: target = wild slot, amount = shakes (4 = caught),
 --                 text = the ball's item id
+--   obey       -- a traded mon over its badge cap disobeyed (text = the branch
+--                 token, gen3-battle-sheet.md §7.2.1); the referee's own `msg`
+--                 sentence follows it
 M.BATTLE_EVENTS3 = {
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
+  obey = true,
 }
 
 -- The three ball states a roster is spelled in, and the most of them a seat may

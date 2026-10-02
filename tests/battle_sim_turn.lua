@@ -3405,8 +3405,20 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 23. Gen1 badge boosts on mediated fighters
+-- 23. Gen1 badge boosts on mediated fighters: against the computer only
 -- ------------------------------------------------------------------
+--
+-- The cart boosts the player's monster and only outside a link battle
+-- (pokered's ApplyBadgeStatBoosts, "return if link battle"), so the referee
+-- keeps an uploaded set on side a of wild / coop_wild / coop_npc and drops it
+-- in 1v1, coop_pvp and on side b (Turn.BADGE_MODES, Turn.BADGE_SIDE).  This
+-- section used to assert a 1v1 boost -- the leak docs/plans/gen3-badge-rules.md
+-- §1 fixes -- and now states the three halves of the rule: a PvP fight with
+-- badges is the unbadged fight, damage and turn order alike; the same seats in
+-- a computer fight are boosted, so the gate is the mode and not a removal; and
+-- side b's upload is ignored even there.  server/battle_turn.test.js states
+-- the same three against lib/battle, and the badges_* parity scenarios hold
+-- the twins to the same streams.
 
 do
   local Effects = BattleSim.Effects
@@ -3416,56 +3428,109 @@ do
   eq(Effects.badgeBoost(64, "def", { THUNDERBADGE = true }), 72,
      "THUNDERBADGE boosts defense")
 
-  local function damageToFoe(battle)
+  local modes = {}
+  for mode in pairs(Turn.BADGE_MODES) do modes[#modes + 1] = mode end
+  table.sort(modes)
+  eq(table.concat(modes, ","), "coop_npc,coop_wild,wild",
+     "badges count in the three fights against the computer, and no other")
+  eq(Turn.BADGE_SIDE, "a", "...and only on the player's side of them")
+
+  local ALL = { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true,
+                VOLCANOBADGE = true }
+
+  -- One exchange: Ann (side a) and Bob (side b) each swing once.  `a` / `b`
+  -- override the stats and carry each seat's upload.
+  local function exchange(mode, a, b)
+    local battle = battleOf({
+      mode = mode, seed = 777001,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", badges = a.badges,
+                mons = { mon({
+                  maxHp = 200, hp = 200, atk = a.atk or 88, def = 40,
+                  spd = a.spd or 40, moves = { move({ power = 50 }) },
+                }) } } },
+        b = { { playerId = "p2", name = "Bob", badges = b.badges,
+                mons = { mon({
+                  species = "Beta", maxHp = 200, hp = 200, atk = b.atk or 40,
+                  def = 80, spd = b.spd or 40, moves = { move({ power = b.power or 1 }) },
+                }) } } },
+      },
+    })
     battle:submitChoice("p1", { action = "fight", move = 0 })
     battle:submitChoice("p2", { action = "fight", move = 0 })
-    local events = drain(battle)
+    return drain(battle)
+  end
+  local function hitOn(events, slot)
     for _, event in ipairs(events) do
-      if event.t == "damage" and event.slot == 3 then
-        return event.amount
-      end
+      if event.t == "damage" and event.slot == slot then return event.amount end
+    end
+    return nil
+  end
+  local function firstHit(events)
+    for _, event in ipairs(events) do
+      if event.t == "damage" then return event.slot end
     end
     return nil
   end
 
-  local function fighterSides(badges)
-    return {
-      a = { {
-        playerId = "p1", name = "Ann", badges = badges,
-        mons = { mon({
-          atk = 88, def = 40, spd = 40, spc = 40,
-          moves = { move({ power = 50 }) },
-        }) },
-      } },
-      b = { { playerId = "p2", name = "Bob",
-        mons = { mon({
-          species = "Beta", atk = 40, def = 80, hp = 200, maxHp = 200,
-          moves = { move({ power = 1 }) },
-        }) },
-      } },
-    }
+  -- Damage: BOULDERBADGE on Ann's physical hit.  Speed: Ann at 40 against Bob
+  -- at 42, so SOULBADGE (40 -> 45) is exactly what decides who swings first.
+  local hit = { badges = { BOULDERBADGE = true } }
+  local fast = { badges = { SOULBADGE = true }, spd = 40 }
+  local foe = { spd = 42 }
+
+  -- (a) the link modes: every byte of the badged fight is the unbadged one.
+  for _, mode in ipairs({ "1v1", "coop_pvp" }) do
+    local bare = exchange(mode, {}, {})
+    local plainDmg = hitOn(bare, 3)
+    eq(plainDmg, 17, mode .. ": the unbadged attack lands for 17")
+    eq(hitOn(exchange(mode, hit, {}), 3), plainDmg,
+       mode .. ": BOULDERBADGE does not raise the damage -- a link battle")
+    -- One seat at a time: both at once would cancel here (each attack is
+    -- boosted by the same ninth its target's defence is) and prove nothing.
+    eq(dumpAll(exchange(mode, { badges = ALL }, {})), dumpAll(bare),
+       mode .. ": side a uploading every badge fights the unbadged fight")
+    eq(dumpAll(exchange(mode, {}, { badges = ALL })), dumpAll(bare),
+       mode .. ": so does side b uploading every badge")
+    eq(firstHit(exchange(mode, { spd = 40 }, foe)), 0,
+       mode .. ": unbadged, Bob (42) outspeeds Ann (40)")
+    eq(firstHit(exchange(mode, fast, foe)), 0,
+       mode .. ": SOULBADGE does not let Ann overtake him")
   end
 
-  local bare = battleOf({ seed = 777001, sides = fighterSides(nil) })
-  local badged = battleOf({
-    seed = 777001,
-    sides = fighterSides({ BOULDERBADGE = true }),
-  })
+  -- (b) the same seats against the computer: boosted, which is what makes the
+  --     gate the mode rather than a removal of the boost.
+  for _, mode in ipairs({ "coop_npc", "wild" }) do
+    eq(hitOn(exchange(mode, {}, {}), 3), 17, mode .. ": unbadged, the same 17")
+    -- 88 -> floor(88 * 9 / 8) = 99 Attack; lib/battle reaches the same 19.
+    eq(hitOn(exchange(mode, hit, {}), 3), 19,
+       mode .. ": BOULDERBADGE raises side a's physical damage to 19")
+    eq(firstHit(exchange(mode, { spd = 40 }, foe)), 0,
+       mode .. ": unbadged, the foe (42) still goes first")
+    eq(firstHit(exchange(mode, fast, foe)), 3,
+       mode .. ": SOULBADGE (40 -> 45) puts side a in front")
+  end
 
-  local plainDmg = damageToFoe(bare)
-  local boostedDmg = damageToFoe(badged)
-  ok(plainDmg and plainDmg > 0, "the unbadged attack lands")
-  ok(boostedDmg and boostedDmg > plainDmg,
-     "BOULDERBADGE raises mediated physical damage")
+  -- (c) side b's upload, ignored against the computer too.  Each of these
+  --     would have changed the fight had it counted: THUNDERBADGE would cut
+  --     Ann's hit, BOULDERBADGE would raise Bob's, and SOULBADGE (37 -> 41)
+  --     would put Bob ahead of Ann's 40.
+  local bare = exchange("coop_npc", {}, { power = 30 })
+  local hostile = exchange("coop_npc", {}, { badges = ALL, power = 30 })
+  eq(hitOn(hostile, 3), hitOn(bare, 3), "coop_npc: side b's THUNDERBADGE is ignored")
+  eq(hitOn(hostile, 0), hitOn(bare, 0), "coop_npc: side b's BOULDERBADGE is ignored")
+  eq(dumpAll(hostile), dumpAll(bare), "coop_npc: side b's upload changes nothing at all")
+  eq(firstHit(exchange("coop_npc", {}, { badges = ALL, spd = 37 })), 3,
+     "coop_npc: side b's SOULBADGE does not overtake side a")
 end
 
 -- ------------------------------------------------------------------
 -- 12b2. Gen 1 crit uses species base Speed, not battle Speed; high-crit rides the move
 -- ------------------------------------------------------------------
 do
-  local function playCrit(seed, aOpts, badges)
+  local function playCrit(seed, aOpts, badges, mode)
     local battle = battleOf({
-      seed = seed,
+      seed = seed, mode = mode,
       sides = {
         a = { { playerId = "p1", name = "Ann", badges = badges,
                 mons = { mon({
@@ -3483,7 +3548,7 @@ do
     drain(battle)
     battle:submitChoice("p1", { action = "fight", move = 0 })
     battle:submitChoice("p2", { action = "fight", move = 0 })
-    return drain(battle)
+    return drain(battle), battle
   end
   local function sawCrit(events)
     for _, event in ipairs(events) do
@@ -3514,14 +3579,21 @@ do
   ok(sawCrit(playCrit(critSeed, { baseSpd = 100, highCrit = true })),
      "highCrit on the move sheet raises the Gen 1 threshold")
 
-  -- Soul Badge must not change crit (Alpha still outspeeds either way).
-  local bare = dumpAll(playCrit(777002, { baseSpd = 80 }))
-  local badged = dumpAll(playCrit(777002, { baseSpd = 80 }, { SOULBADGE = true }))
-  eq(bare, badged, "SOULBADGE does not change crit rate or this turn's resolution")
+  -- Soul Badge must not change crit (Alpha still outspeeds either way).  Played
+  -- against the computer, because that is the only fight the badge reaches the
+  -- battler in at all (Turn.BADGE_MODES, section 23): in the 1v1 above it is
+  -- dropped at create and this comparison would hold for the wrong reason.
+  local bare = dumpAll(playCrit(777002, { baseSpd = 80 }, nil, "coop_npc"))
+  local badgedEvents, badgedBattle =
+    playCrit(777002, { baseSpd = 80 }, { SOULBADGE = true }, "coop_npc")
+  eq(badgedBattle.byId.p1.badges and badgedBattle.byId.p1.badges.SOULBADGE, true,
+     "coop_npc: the badge really is on the battler for this comparison")
+  eq(bare, dumpAll(badgedEvents),
+     "SOULBADGE does not change crit rate or this turn's resolution")
 
   -- Old sheet: omitted baseSpd falls back to stats.spd, still without the badge.
-  local fallbackBare = dumpAll(playCrit(777002, {}))
-  local fallbackBadged = dumpAll(playCrit(777002, {}, { SOULBADGE = true }))
+  local fallbackBare = dumpAll(playCrit(777002, {}, nil, "coop_npc"))
+  local fallbackBadged = dumpAll(playCrit(777002, {}, { SOULBADGE = true }, "coop_npc"))
   eq(fallbackBare, fallbackBadged,
      "omitted baseSpd still ignores SOULBADGE")
 end

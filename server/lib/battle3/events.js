@@ -4,9 +4,9 @@
  * The event vocabulary a mediated Gen 3 battle speaks, frozen -- Node half.
  *
  * Twin of src/BattleSim3/events.lua, contract C5 (docs/plans/gen3-battle-sheet.md
- * §7). Every BattleSim2 kind is kept verbatim; Gen 3 adds six kinds (`ability
- * weather held form sub ball`) and six fields (`target spread stat stage delta
- * holding`). Mirrored, not imported, for the reason lib/battle2/events.js
+ * §7). Every BattleSim2 kind is kept verbatim; Gen 3 adds seven kinds (`ability
+ * weather held form sub ball obey`) and six fields (`target spread stat stage
+ * delta holding`). Mirrored, not imported, for the reason lib/battle2/events.js
  * gives: Wire pulls in Config, the Lua sim runs where Config does not, and this
  * file runs where Lua does not. server/twin_parity.test.js holds the copies
  * together.
@@ -21,7 +21,7 @@
 
 const { toNumber, isTable, own } = require('./lua.js');
 
-// BattleSim2's twenty, then Gen 3's six (see the Lua twin for the prose).
+// BattleSim2's twenty, then Gen 3's seven (see the Lua twin for the prose).
 const KINDS = {
   msg: true,
   anim: true,
@@ -49,6 +49,7 @@ const KINDS = {
   form: true,
   sub: true,
   ball: true,
+  obey: true,
 };
 
 // Every key an event may carry, and its type. `battle` / `seq` are stamped by
@@ -163,6 +164,7 @@ const SHAPES = {
   ball: {
     slot: 'thrower', side: true, target: 'wild slot', amount: 'shakes 0..3, 4 = caught', text: 'ball item id',
   },
+  obey: { slot: true, side: true, text: 'the outcome token' },
 };
 
 // ------------------------------------------------------------------

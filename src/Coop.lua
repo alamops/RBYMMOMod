@@ -2370,8 +2370,10 @@ function M:begin(game, plan)
   -- builds all four battlers and holds only its own save. A badge set read
   -- locally by the host would hand its own boosts to everybody and nobody
   -- else theirs -- and, worse, the four copies of the field would disagree
-  -- about how hard everyone hits.
-  local mine = M.badgesOf(game)
+  -- about how hard everyone hits.  A party battle is the hub's `coop_pvp` (the
+  -- same reading as the mediated screen's mode, below): a link battle, where
+  -- `buildField` hands nobody their badges, so none are sent for it either.
+  local mine = M.badgesOf(game, M.ranksPoints(plan) and "coop_pvp" or nil)
   self.battle.badges[self.party.selfId or "me"] = mine
   self.transport:send(Wire.COOP_RELAY,
     { payload = { t = "party", mons = packed, badges = mine } })
@@ -2407,9 +2409,10 @@ end
 -- The badges this player has earned, as a list for the wire.
 --
 -- Same dual-gen path as MediatedBattle.badgesOf (MK403): never hard-require
--- Gen 1 `src.battle.Damage` on Gold.
-function M.badgesOf(game)
-  return Mediated.badgesOf(game)
+-- Gen 1 `src.battle.Damage` on Gold.  `mode` as there: a link mode
+-- (`coop_pvp`) sends none, anything else -- nil included -- what the save holds.
+function M.badgesOf(game, mode)
+  return Mediated.badgesOf(game, mode)
 end
 
 -- Give up on a battle that cannot be assembled, without breaking rule 2: the

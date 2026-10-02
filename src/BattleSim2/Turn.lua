@@ -137,6 +137,28 @@ M.MODES = {
 }
 M.SIDES = { "a", "b" }
 
+-- The modes an uploaded `badges` set counts in, and the one side it counts on.
+--
+-- The fights against the computer, on the player's seats, because that is the
+-- only place the cart applies the x9/8 boosts at all: pokecrystal's
+-- BadgeStatBoosts (engine/battle/core.asm) opens with `ld a, [wLinkMode] /
+-- and a / ret nz`, returning before it reads a badge in any link battle, and
+-- raises wBattleMon -- the player's monster -- and nothing else; the engine's
+-- port says the same (gen1recomp src/battle/gen2/Battle.lua:811-815, "never
+-- the enemy and never in link").  1v1 and coop_pvp are link battles in
+-- everything but the cable, so both sides fight them unboosted.  Side b of the
+-- other three is the synthetic wild / trainer seat (see EXP_MODES on
+-- `_awardExp`), which no cart boosts, so a set uploaded for it is a confused
+-- or a hostile client and is dropped the same way.
+--
+-- The referee is the gate rather than the client or the hub: a client can
+-- forge an upload and a hub passes `badges` through untouched, and this is the
+-- one place both hubs and solo share.  It is applied once, in `create`, where a
+-- seat's set is copied -- every reader after that (`_speedOf`, both ends of the
+-- damage step) sees nil and needs no gate of its own.
+M.BADGE_MODES = { wild = true, coop_wild = true, coop_npc = true }
+M.BADGE_SIDE = "a"
+
 -- Roster cap per side. coop_wild is humans vs one wild (up to FIGHTERS_PER_SIDE
 -- humans on a, wild on b); other modes keep a single per-side ceiling
 -- (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
@@ -453,6 +475,13 @@ local function copyBadges(raw)
   return out
 end
 
+-- The badges a seat fights with: its own upload where the cart would have
+-- applied it (M.BADGE_MODES, M.BADGE_SIDE), and nil everywhere else.
+local function seatBadges(mode, side, raw)
+  if not M.BADGE_MODES[mode] or side ~= M.BADGE_SIDE then return nil end
+  return copyBadges(raw)
+end
+
 -- Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 -- shapes Wire.bag does: a list of {id,count} or a map.
 local function copyBag(raw)
@@ -529,7 +558,11 @@ end
 
 -- opts:
 --   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
---   sides = { a = { { playerId, name, mons } }, b = { ... } }
+--   sides = { a = { { playerId, name, mons, bag, badges } }, b = { ... } }
+--
+-- `badges` is kept only on side a of a BADGE_MODES fight and dropped
+-- everywhere else, silently: a PvP upload that carries one is a well-formed
+-- upload the cart would simply not have boosted.
 --
 -- Returns the battle, or nil plus a reason string.  A reason and not a raise:
 -- the caller is a session handler that has a client waiting to be told why.
@@ -619,7 +652,7 @@ function M.create(opts)
         index     = index,
         slot      = Events.fieldSlot(side, index),
         mons      = mons,
-        badges    = copyBadges(entry.badges),
+        badges    = seatBadges(mode, side, entry.badges),
         bag       = copyBag(entry.bag),
         active    = firstLiving(mons),
         connected = true,

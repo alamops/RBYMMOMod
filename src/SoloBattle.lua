@@ -2625,11 +2625,23 @@ function M:_begin3(game, kind, party, opts, extra)
         name = (player and player.name ~= nil and player.name ~= "") and player.name or "PLAYER",
         mons = mine.mons,
         bag = mine.bag,
-        -- The badges this save holds, for a referee that applies the cart's
-        -- badge boosts and obedience.  BattleSim3 accepts and ignores them
-        -- today (link rules, docs/plans/gen3-battle-sheet.md §6): a solo
-        -- fight has neither, which is a stated difference from the cart.
-        badges = M.gen3Badges(),
+        -- The badges this save holds (Gen3.badgeList, contract K1 of
+        -- docs/plans/gen3-badge-rules.md): BattleSim3 applies the cart's badge
+        -- boosts and obedience from them on side a of a wild / trainer fight,
+        -- as the engine's own battle does (battle/engine.lua Engine.hasBadge).
+        -- One entry for a single and for both seats of a lone double -- the
+        -- referee hands the entry's badges to each seat it expands, the
+        -- cart's one gSaveBlock behind battlers 0 and 2.  Read from the save
+        -- here rather than taken off `mine.badges` (the screen's upload, the
+        -- same list today), so the entry never depends on what either screen
+        -- chose to send.
+        badges = Gen3.badgeList(),
+        -- Which cart's obedience rule the referee plays (its `family`):
+        -- FireRed / LeafGreen exempt FOCUS PUNCH from the ignored-orders
+        -- branch, Emerald does not (the engine's battle profile rule
+        -- obedienceFocusPunchExempt, battle/profile.lua:34 and
+        -- profiles/emerald/battle.lua:39).
+        family = Gen3.family(),
       } },
       b = { {
         playerId = FOE_SEAT,
@@ -3039,23 +3051,20 @@ function M:_note3(event)
 end
 
 -- The badges this save holds, as the set of badge numbers (1..8) the cart's
--- FLAG_BADGE0n_GET flags say -- the live flag store while the field runs, the
--- session's serialised flags before that (src/Gen3.lua badgeCount's reading).
--- nil for none, or on a build that cannot say.
+-- FLAG_BADGE0n_GET flags say.  A view of src/Gen3.lua badgeList, the one
+-- reading every path shares (the engine's Engine.hasBadge order: the live
+-- flag store whenever there is one, the session's serialised flags
+-- otherwise); the side entry itself carries badgeList's list, as a hub
+-- upload does.  nil for none, or on a build that cannot say.
 function M.gen3Badges()
-  local session = Gen3.session()
-  local Flags = Gen3.engine("src.core.game3.scripting.flags")
-  if not (session and Flags and type(Flags.hasBadge) == "function") then return nil end
-  local store = session
-  if Gen3.inField() then
-    local Space = Gen3.engine("src.core.game3.scripting.space")
-    if Space and type(Space.store) == "table" then store = Space.store end
+  local list = Gen3.badgeList()
+  if not list then return nil end
+  local out = {}
+  for _, id in ipairs(list) do
+    local n = tonumber(id)
+    if n then out[n] = true end
   end
-  local out, any = {}, false
-  for n = 1, 8 do
-    if try3(Flags.hasBadge, store, n) == true then out[n] = true; any = true end
-  end
-  return any and out or nil
+  return out
 end
 
 -- A mid-fight learn, onto the referee's copy (the hub's applyBattleMoveset3,

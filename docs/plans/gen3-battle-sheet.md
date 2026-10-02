@@ -70,8 +70,23 @@ values as BattleSim2 — and `SEATS_PER_PARTY` (2, §1.3).
 | `choiceTimeout`, `reconnectGrace`, `resolveTimeout`, `now` | ints | same clock as BattleSim2 |
 | `sides` | `{ a = { fighter... }, b = { fighter... } }` | fighters, below |
 
-A **fighter** (one seat): `{ playerId, name, mons = { sheet... (≤ 6) }, bag = bag?, seats = 1|2? }`.
-`badges` is accepted and ignored (§6: badge boosts are off in mediated fights).
+A **fighter** (one seat): `{ playerId, name, mons = { sheet... (≤ 6) }, bag = bag?, seats = 1|2?, badges?, family? }`.
+
+* `badges` (contract K1 of [`gen3-badge-rules.md`](gen3-badge-rules.md)) is the
+  trainer's badges: a list of badge numbers as strings or numbers
+  (`{ "1", "3", "7" }`, the wire form) or a set (`{ [1] = true }` /
+  `{ ["1"] = true }`, the hub's sanitised form). `Damage.badgeSet` keeps the
+  integers 1..8 and drops everything else silently — a bad value never refuses
+  the battle.
+* `family` (`"frlg"` | `"rse"`, absent ⇒ `"frlg"`, the engine's default
+  `BattleProfile`) is the trainer's cart family; only obedience's Focus Punch
+  rule reads it (§6).
+* Both are read **only for side a in `wild`, `coop_wild` and `coop_npc`**
+  (`Turn.BADGE_MODES`, the cart's non-link fights) and dropped everywhere else —
+  in `1v1` / `coop_pvp` and on side b whatever an entry uploads (link rules,
+  §6). Each fighter keeps `badgeRules` (true exactly there), `badges` and
+  `family`; every battler it fields carries `b.badges`.
+
 `seats = 2` makes the entry a **shared team** (§1.3); absent or `1` is one seat,
 exactly as before. Anything else (`0`, `3`, …) refuses the battle with
 `"<playerId> has a bad seat count"`, and both seats count against the side's
@@ -102,7 +117,7 @@ behind battlers 0 and 2, gEnemyParty behind 1 and 3). A side entry with
 
 ```lua
 sides = {
-  a = { { playerId = "solo_player", seats = 2, name, mons, bag, badges } },
+  a = { { playerId = "solo_player", seats = 2, name, mons, bag, badges, family } },
   b = { { playerId = "solo_foe", seats = 2 --[[ or 1 ]], name, mons, bag } },
 }
 sim:submitChoice("solo_player#2", { action = "fight", move = 0, target = 3 })
@@ -176,6 +191,9 @@ sim:submitChoice("solo_player#2", { action = "fight", move = 0, target = 3 })
 * Heal Bell / Aromatherapy from a shared team reaches the partner through its
   battler (the ally pass, with its battle ability) and the rest of the party as
   the bench; a Soundproof partner is not cured behind its back.
+* **Badges** (K1): both seats are the one trainer's, so both carry the entry's
+  `badges` and `family` — the boosts and obedience (§6) apply from either seat,
+  per mon (a traded mon may disobey from seat 2 while seat 1's obeys).
 
 ---------------------------------------------------------------------------------------------------
 
@@ -212,6 +230,8 @@ read as the neutral value named below, never an error).
 | `sleepTurns` | 0..7 | opt | remaining sleep counter when `status == "SLP"` (absent ⇒ rolled 2..5 on the first sleep check, like the engine) |
 | `catchRate` | 0..255 | wild seat | species catch rate (the wild sheet only) |
 | `ivs`, `evs`, `personality`, `otId` | passthrough | opt | never read by a formula; copied onto the `caught` sheet so the catcher can rebuild the exact mon |
+| `traded` | `true` or absent | opt | contract K2: the OT id or OT name is not this player's (pret `IsOtherTrainer`, engine `Engine.isTradedMon`; the client decides it, `Exp3.traded`). Obedience (§6) reads it on side a against the computer |
+| `fateful` | `true` or absent | opt | contract K2: the mon's fateful-encounter bit. Read only for Mew (151) and Deoxys (410): without it they obey nobody (§6). Absent means the bit is clear, so a client must send it for every Mew / Deoxys that has it |
 | `moves` | 1..4 move rows (below) | yes | |
 
 **Move row** (same row shape in `moves`, the `moves` event and the pool):
@@ -504,8 +524,55 @@ where `turn` counts completed turns (0 during the first turn, pret
   damage, status/setup, SE bench switch) using Gen 3 effect ids, item ids and the
   ordered chart. A picked move is aimed at the foe the aim stream drew, except a
   Ghost's CURSE, which goes unaimed (below).
-* **Link rules**: no badge boosts, no disobedience, no EXP and no Pay Day coins in
-  1v1 / coop_pvp. `exp` events are facts (BattleSim2).
+* **Badge rules** (contracts K1–K3 of [`gen3-badge-rules.md`](gen3-badge-rules.md)).
+  Against the computer (`wild`, `coop_wild`, `coop_npc`: `Turn.BADGE_MODES`) side a's
+  battlers play by their own trainer's badges, as the engine does
+  (`Engine.hasBadge`, `engine.lua:166`, is false only in a link battle):
+  * **Boosts**, each ×110/100 floored and read off the battler's own trainer (each
+    human brings their own; side b has none). Badge 1 raises the attacker's Attack,
+    badge 5 the defender's Defense, badge 7 the attacker's Sp. Atk and the defender's
+    Sp. Def. They sit in `Damage.base` after Huge Power / Pure Power and before the
+    held items, the abilities and the stat stages (engine `damage.lua:205-217`), so
+    every damage path carries them: `calc`, the confusion and disobedience self-hits
+    (attacker and defender are one battler, so its badges 1 and 5 both apply),
+    Future Sight (fixed at use from the user's) and Spit Up. Badge 3 raises Speed in
+    `Field.speed` after the weather doubling and the stage, before Macho Brace and
+    paralysis (`engine.lua:221`); every turn-order read, and the auto-pick's speed
+    comparison, goes through it. Escape odds keep the raw stat (pret
+    `TryRunFromBattle` reads `gBattleMons[].speed`).
+  * **Obedience** (`Move.lua` `Bm:_disobey`, the engine's `disobedient`,
+    `engine.lua:1291-1349`, pret `IsMonDisobedient` `battle_util.c:3143`) is asked
+    after the PP check (`engine.lua:1476`) for a move not already under way — never
+    for a called move, a Pursuit on a switching seat or a recharge turn — and only on
+    side a against the computer, badges or none. A mon that is not `traded` obeys,
+    and so does every mon once its trainer has badge 8. Otherwise the level cap is 10,
+    or 30 with badge 2, 50 with badge 4, 70 with badge 6. A Mew (151) or Deoxys (410)
+    without `fateful` has cap 0 whoever owns it, badge 8 or not (the engine's rule on
+    every cart, §9.1). **At or under the cap it obeys and draws nothing.** Above it,
+    with `L` the level, the engine's sequence, each draw only when reached:
+    1. `roll(0,255)`: obeys when `floor((L + cap) · r / 256) < cap`. Otherwise Rage
+       ends, and an asleep mon using Snore / Sleep Talk stops: `ignores_asleep`.
+    2. A second `roll(0,255)` under the same test — Focus Punch exempt on FireRed /
+       LeafGreen (`family` ≠ `"rse"`, `obedienceFocusPunchExempt`) — picks another
+       usable slot (`CheckMoveLimitations`, an empty slot and the chosen slot count as
+       unusable; `roll(0,3)` per pick until a usable one). It runs as a called move
+       from that slot (`uses_random_move`): its own PP and target, no canceller, and it
+       does not count against `MAX_CALL_DEPTH` (it replaces the choice). With no
+       usable slot it is a loaf line instead (`roll(0,3)`).
+    3. Else a third `roll(0,255)` against `L − cap`. Below it, with no major status,
+       not Vital Spirit / Insomnia and no Uproar, the mon falls asleep
+       (`falls_asleep`; the sleep counter rolls as any sleep's). Below twice it, it
+       hits itself (`hits_itself`): multi-turn moves are cancelled, then confusion's
+       typeless 40-power self-hit with its `roll(85,100)` and Focus Band. Otherwise a
+       loaf line, one of four by `roll(0,3)`.
+
+    Every stop ends the action as a canceller stop does (the last move is cleared,
+    the light move end runs). Each outcome is one `obey` event (§7.2) followed by our
+    `msg`.
+* **Link rules**: in `1v1` / `coop_pvp`, and for side b in every mode, no badge boosts
+  and no disobedience, whatever an entry uploads (`badges`, `family`, `traded`,
+  `fateful` are dropped or never read). In `1v1` / `coop_pvp` no EXP and no Pay Day
+  coins either. `exp` events are facts (BattleSim2).
 * **Pay Day** adds `level × 5` to its side's tally (pret `gPaydayMoney`, a u16 that
   saturates at 65535) and always says "Coins scattered everywhere!". Only a battle
   side a **wins by KO** in `wild` / `coop_wild` / `coop_npc` pays (pret runs
@@ -639,6 +706,30 @@ stat switch item run turn over wait reconnect chose unchose moves exp team`);
 | `form` | `slot`, `side`, `amount` = Castform form (0 normal, 1 sunny, 2 rainy, 3 snowy) **or** `speciesId` + `text` = species (Transform) | the battler's picture changes |
 | `sub` | `slot`, `side`, `amount` = 1 made / 0 faded | draw / remove the substitute doll |
 | `ball` | `slot` (thrower), `side`, **`target`** (wild field slot), `amount` = shakes 0..3, or 4 caught, `text` = ball item id | one per throw, after the `item` event and before the narration ("Oh, no! The POKeMON broke free!" / "Aww! It appeared to be caught!" / "Aargh! Almost had it!" / "Shoot! It was so close, too!" / "Gotcha! X was caught!"). A caught fight ends `over` `catch` with `outcome().caught` = the wild sheet (with its `ball` id) |
+| `obey` | `slot`, `side` (the disobeying battler; always side a), `text` = the outcome token (§7.2.1) | contract K3: a side-a mon disobeyed against the computer (§6 badge rules), in its action's place, after the PP check. Always followed by the `msg` that narrates it in our words; the screens phrase the token with the cart's own line(s) instead. No new field: `slot`, `side` and `text` are BattleSim2's |
+
+#### 7.2.1 The `obey` outcome tokens (K3)
+
+One token per branch of the engine's `disobedient` (`engine.lua:1291-1349`, pret
+`IsMonDisobedient`), in the cart's words by `STRINGID` (both carts carry every one;
+the screens look them up through the engine's battle text, as for any other line).
+The four loaf lines are pret `gInobedientStringIds`, picked by `roll(0,3)` in this
+order (`Move.LOAF_LINES`, the engine's `LOAF_TEXT`, `engine.lua:1285`).
+
+| token | engine branch | pret script | the cart's line(s) | what follows the `obey` event and its `msg` |
+| --- | --- | --- | --- | --- |
+| `ignores_asleep` | asleep and the chosen move is Snore / Sleep Talk (`:1310`) | `BattleScript_IgnoresWhileAsleep` | `STRINGID_PKMNIGNORESASLEEP` | nothing: the action ends |
+| `uses_random_move` | the second roll under the cap with a usable slot (`:1314-1325`) | `BattleScript_IgnoresAndUsesRandomMove` | `STRINGID_PKMNIGNOREDORDERS` | the picked move as a called move: its "X used Y!" `msg`, the `moves` PP change at the picked slot, its `anim` / `damage` / effects |
+| `falls_asleep` | the third roll under `L − cap` (`:1330-1335`) | `BattleScript_IgnoresAndFallsAsleep` | `STRINGID_PKMNBEGANTONAP`, then `STRINGID_PKMNFELLASLEEP` | the `status` `SLP` event (text "X fell asleep!") and its `msg` — the second cart line |
+| `hits_itself` | the third roll's remainder under `L − cap` (`:1337-1345`) | `BattleScript_IgnoresAndHitsItself` | `STRINGID_PKMNWONTOBEY`, then `STRINGID_ITHURTCONFUSION` | the `msg` "It hurt itself in its confusion!" (the second cart line), the `damage` on itself, then any Endure / Focus Band line and `faint` |
+| `loafing` | loaf line 1: no usable slot on the second roll's branch (`:1319`), or the third roll's rest (`:1347`) | `BattleScript_MoveUsedLoafingAround`, `B_MSG_LOAFING` | `STRINGID_PKMNLOAFING` | nothing |
+| `wont_obey` | loaf line 2 (same two places) | the same, `B_MSG_WONT_OBEY` | `STRINGID_PKMNWONTOBEY` | nothing |
+| `turned_away` | loaf line 3 | the same, `B_MSG_TURNED_AWAY` | `STRINGID_PKMNTURNEDAWAY` | nothing |
+| `pretend_not_notice` | loaf line 4 | the same, `B_MSG_PRETEND_NOT_NOTICE` | `STRINGID_PKMNPRETENDNOTNOTICE` | nothing |
+
+`hits_itself` and the `wont_obey` loaf line open with the same cart line; only
+`hits_itself` is followed by the self-hit. `server/twin_parity.test.js` pins the
+eight tokens on both sims.
 
 **Deliberately not new kinds:** stat-change-prevented (a `msg`, plus `ability`
 when an ability prevented it), doubles retargeting (the resolved target is
@@ -649,10 +740,11 @@ side conditions (Reflect, Light Screen, Mist, Safeguard, Spikes — `msg`).
 
 `target` (number, field slot 0..FIELD_MAX), `spread` (0/1), `stat` (string, the
 seven keys), `stage` (number −6..6), `delta` (number −12..12), `holding`
-(number 0..376). The new kinds `ability weather held form sub ball` live in their
-own Gen 3 whitelist, `Wire.BATTLE_EVENTS3` (twin: `sanitize.BATTLE_EVENT_TYPES3`),
+(number 0..376). The new kinds `ability weather held form sub ball obey` live in
+their own Gen 3 whitelist, `Wire.BATTLE_EVENTS3` (twin: `sanitize.BATTLE_EVENT_TYPES3`),
 beside the unchanged Gen 1/2 `Wire.BATTLE_EVENTS`; `Wire.battleEvent` accepts a
-kind from either.
+kind from either. `obey` adds no field; its `text` is one of the eight tokens of
+§7.2.1, which a sanitiser may hold to that closed set.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -683,6 +775,13 @@ in this order, and nowhere else; the list in the header of
    canceller (freeze `roll(0,4)`, a sleeper with no counter `roll(0,3)`,
    confusion `roll(0,1)` [+ self-hit damage `roll(85,100)` + Focus Band
    `roll(0,99)` if held], paralysis `roll(0,3)`, infatuation `roll(0,1)`);
+   obedience after the PP check (side a against the computer only: a `traded`
+   mon over its badge cap, or a Mew / Deoxys without `fateful`; nothing at or
+   under the cap): `roll(0,255)`, then — unless it is a sleeper's Snore / Sleep
+   Talk — `roll(0,255)`, then either `roll(0,3)` per pick until a usable slot
+   (one `roll(0,3)` for the loaf line when none is) or `roll(0,255)` and then
+   the sleep turns `roll(0,3)`, the self-hit's `roll(85,100)` [+ Focus Band
+   `roll(0,99)`] or one `roll(0,3)` for the loaf line (§6);
    random target (`roll(0,n−1)` over ≥ 2 living foes for `RANDOM` moves);
    Metronome `roll(1,511)` until a pool move (`roll(1,n)` over the pool after 64
    misses), Sleep Talk / Assist `roll(1,n)`; Protect/Endure streak
@@ -732,7 +831,7 @@ The Node twin follows the sim, not the engine.
 | a cancelled move | keeps `lastResultingMove` | clears it too (Protect's streak resets) |
 | catch odds | float order, float square roots | integer order `floor(rate*mult/10)` first, integer `Sqrt` (§5.5) |
 | crit items | held item id | hold effect (identical on every cart item; the sheet carries the hold effect) |
-| disobedience, badge boosts, Oak / Pokédude / ghost branches | present | off (link rules) |
+| Oak / Pokédude / ghost branches | present | off (none of those fights is mediated) |
 | Pay Day money | present (the engine pays) | reported on a won wild / NPC outcome (`outcome().payDay`) and paid by the client (§9.1), none under link rules |
 
 **Corrected in RF5** (fidelity review R5; both twins, pinned by the turn fixture's
@@ -778,7 +877,12 @@ What the sim still does differently from pret, and why:
 | Magnet Pull in doubles | FRLG: foes only; Emerald (`ABILITYEFFECT_CHECK_FIELD_EXCEPT_BATTLER` with no side check): the holder's Steel partner is trapped too | foes only, for every fight | the sim carries no cart version per battle (a fight may mix FireRed and Emerald players) |
 | Roar / Whirlwind level check | applied in trainer fights too (`TryDoForceSwitchOut` runs in both branches of `Cmd_forcerandomswitch`, both carts) | the same | kept on purpose: it is the cart's rule, not a wild-only one |
 | Fury Cutter after another move | not reset (Gen 3 has no `TryClearRageAndFuryCutter`; `TryClearRageStatuses` clears Rage only) | the same | kept on purpose |
-| called-move depth | unbounded, but no cart row set nests deeper than 3 | "But it failed!" past 3 | robustness: crafted rows must not recurse |
+| called-move depth | unbounded, but no cart row set nests deeper than 3 | "But it failed!" past 3 (a disobedient random pick is not a call: it replaces the choice, so Metronome → Assist → Nature Power still reaches the terrain move after one) | robustness: crafted rows must not recurse |
+| whose badges a battler reads | the one player's badge flags, for the whole player side (and none in a link battle) | each battler's own trainer's `badges` (K1): each human's in co-op, the owner's on both seats of a shared team; none on side b or in `1v1` / `coop_pvp` | several humans stand on side a, each with their own save; with one trainer it is the cart's rule |
+| `traded` / `fateful` | the party struct: `IsOtherTrainer` on the OT id and name, the fateful-encounter bit | the client's flags on the sheet (K2) | the referee holds no save. A client can only make its own mons obey, and only against the computer (obedience never applies in PvP) |
+| a Mew / Deoxys without the fateful bit on FireRed / LeafGreen | pret's FRLG `IsMonDisobedient` may not have the check (unverified: no pret source is local) | cap 0 on every cart, as the engine has it (`engine.lua:1299`, not profile-gated); the engine tests `fatefulEncounter == false`, the referee an absent `fateful` | the engine is the port this follows ([`gen3-badge-rules.md`](gen3-badge-rules.md) §8); a client sends `fateful` whenever the bit is set |
+| the last move after a disobedient stop | pret's move-end bookkeeping for a disobedient action (unverified here) | cleared, as the engine's stop does (`engine.lua:1478-1484`) and as a canceller stop does here | follows the engine |
+| Emerald's boost exclusions | no damage boosts in e-reader / secret base / frontier / recorded battles, no badge-3 Speed in frontier / recorded ones | not modelled | no such fight is mediated |
 | where a called row comes from | `gBattleMoves` | the caller's own list, the pool, the caller's own party | the hub holds no move table; never another fighter's sheet |
 | Sleep Talk / Assist exclusions | by move number | by number and by calling effect | identical for cart rows; refuses crafted rows |
 | Conversion 2's draw | `Random() & 0x7F` rejection sampling (≤ 1000 tries), then a fixed scan | one `roll(1,n)` over the matching rows | the same set of results, a single draw |

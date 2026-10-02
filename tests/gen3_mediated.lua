@@ -611,7 +611,99 @@ do
   package.loaded["src.core.game3.weather"] = nil
   eq(Mediated.snapshotRuleset(GAME).typeTable ~= nil, true,
      "MediatedBattle's ruleset is Sheet3's on Gen 3")
-  eq(Mediated.badgesOf(GAME), nil, "link rules: no badge boosts on Gen 3")
+end
+
+-- ------------------------------------------------------------------
+-- 2b. badge rules (docs/plans/gen3-badge-rules.md): the badges and the
+--     obedience facts a client sends, and only where they count
+-- ------------------------------------------------------------------
+
+-- K1: the cart's own badge flags, as badge numbers, in a fight against the
+-- computer; none in a link battle.  Read through the engine's real flag and
+-- battle-profile modules (Engine.hasBadge's order), with FireRed's
+-- Flags.hasBadge answered off a `badges` set as the solo suite does -- its
+-- version table is not this fixture's to build.  This fixture has no live
+-- flag store (the real scripting.space does not load under its stand-ins),
+-- so the session's flags are read; the live store's precedence is
+-- tests/gen3_solo.lua's.
+do
+  newGame()
+  local Wire = need("Wire")
+  local Flags = require("src.core.game3.scripting.flags")
+  local realHas = Flags.hasBadge
+  Flags.hasBadge = function(store, n)
+    return type(store.badges) == "table" and store.badges[n] == true
+  end
+  local function list(mode) return table.concat(Mediated.badgesOf(GAME, mode) or {}, ",") end
+
+  eq(Mediated.badgesOf(GAME, "wild"), nil, "badges: none held, none sent")
+  SESSION.badges = { [1] = true, [3] = true }
+  eq(list("wild"), "1,3", "badges: a wild fight sends the save's badge numbers")
+  eq(list("coop_npc"), "1,3", "badges: ...as does a trainer fight")
+  eq(list("coop_wild"), "1,3", "badges: ...and a co-op wild one")
+  eq(list(nil), "1,3", "badges: a caller naming no mode is not in a link battle")
+  eq(Mediated.badgesOf(GAME, "1v1"), nil, "badges: a 1v1 is a link battle and sends none")
+  eq(Mediated.badgesOf(GAME, "coop_pvp"), nil, "badges: ...nor does coop_pvp")
+  check(Wire.badges(Mediated.badgesOf(GAME, "wild"))["3"] == true,
+        "badges: the badge numbers pass Wire.badges")
+
+  -- Emerald: the battle profile's own badge flags (FLAG_BADGE01_GET is 0x867
+  -- there), asked flag by flag -- never FireRed's 0x820, never Flags.hasBadge.
+  SESSION.version = "emerald"
+  SESSION.badges = { [4] = true }
+  SESSION.flags = { [0x820] = true, [0x867] = true, [0x86D] = true }
+  eq(list("coop_npc"), "1,7", "badges (rse): the profile's badge flags")
+  eq(Mediated.badgesOf(GAME, "1v1"), nil, "badges (rse): ...and none in a link battle")
+  Flags.hasBadge = realHas
+end
+
+-- K2: the obedience check's facts on this player's own sheets, off the link.
+do
+  newGame()
+  local Wire = need("Wire")
+  SESSION.party = {
+    monOf(16, 5),                                        -- ANN's own catch
+    monOf(16, 5, { otId = 999 }),                        -- another trainer's id
+    monOf(16, 5, { otName = "BOB" }),                    -- ANN's id, another name
+    monOf(151, 5, { fatefulEncounter = true }),          -- an event MEW
+    monOf(151, 5, { fatefulEncounter = false }),         -- a MEW without the bit
+    monOf(151, 5),                                       -- the field never set
+  }
+  local own = Mediated.snapshotParty(GAME, { link = false })
+  eq(#own, 6, "K2: every monster is described")
+  eq(own[1].traded, nil, "traded: ANN's own catch is not")
+  eq(own[2].traded, true, "traded: another OT id is (Engine.isTradedMon)")
+  eq(own[3].traded, true, "traded: ...as is ANN's id under another OT name")
+  eq(own[1].fateful, nil, "fateful: only MEW and DEOXYS carry it")
+  eq(own[4].fateful, true, "fateful: an event MEW")
+  eq(own[5].fateful, nil, "fateful: ...not one whose bit is explicitly clear (engine.lua:1299)")
+  eq(own[6].fateful, true, "fateful: ...but one that never had the field obeys as the engine's does")
+  local linked = Mediated.snapshotParty(GAME, { link = true })
+  eq(linked[2].traded, nil, "K2: a link battle's sheets carry no traded")
+  eq(linked[4].fateful, nil, "K2: ...and no fateful")
+  local foe = Mediated.snapshotMons(GAME, { monOf(16, 5, { otId = 999 }), monOf(151, 5) })
+  eq(foe[1].traded, nil, "K2: a wild or trainer monster's sheet never carries traded")
+  eq(foe[2].fateful, nil, "K2: ...or fateful")
+
+  -- Wire's Gen 3 dialect keeps them, as `true` or absent; a non-boolean
+  -- refuses the mon; the Gen 1 / Gen 2 reader never copies them.
+  local clean = Wire.battleMon(own[2])
+  eq(clean and clean.traded, true, "wire: traded survives the Gen 3 dialect")
+  clean = Wire.battleMon(own[4])
+  eq(clean and clean.fateful, true, "wire: ...as does fateful")
+  local copy = {}
+  for k, v in pairs(own[1]) do copy[k] = v end
+  copy.traded, copy.fateful = false, false
+  clean = Wire.battleMon(copy)
+  check(clean ~= nil and clean.traded == nil and clean.fateful == nil,
+        "wire: a false is read as absent")
+  copy.traded, copy.fateful = "yes", nil
+  eq(Wire.battleMon(copy), nil, "wire: a non-boolean traded refuses the mon")
+  copy.traded, copy.fateful = nil, 1
+  eq(Wire.battleMon(copy), nil, "wire: ...as does a non-boolean fateful")
+  local party = Wire.battleParty({ battle = "k2", mons = own }, 3)
+  eq(party and party.mons[2].traded, true, "wire: a Gen 3 party keeps traded")
+  eq(party and party.mons[4].fateful, true, "wire: ...and fateful")
 end
 
 -- ------------------------------------------------------------------
