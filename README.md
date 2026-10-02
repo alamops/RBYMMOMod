@@ -1074,9 +1074,11 @@ yet.`).
   the first battle, and the old man's and the POKé DUDE's tutorial fights.
   A lone double (one trainer, two of theirs out) is the mod's: you fight it
   with two of yours, from one team, as on the cart.
-- Every fight this mod referees is fought under link rules, the solo and
-  co-op ones against wild POKéMON and trainers included: no badge stat boosts,
-  and a traded POKéMON always obeys.
+- Badges work the cart's way against the computer, in solo and in co-op
+  against a trainer or a wild POKéMON: your badges boost your POKéMON's
+  stats, and a traded POKéMON above your badges' level cap can disobey. A
+  fight between players is a link battle, with no boosts and everyone
+  obeying.
 - A trainer fight that ends in a draw with your team still standing leaves
   the trainer unbeaten and its script stopped where it waited — no prize, no
   TM, no badge; the cart has no answer for that ending. A draw that leaves

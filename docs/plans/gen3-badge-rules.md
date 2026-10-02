@@ -181,3 +181,7 @@ After that: review (Phase 5), then TT-H and TT-E in parallel, then run, then fix
 | `fateful` sent unless the engine mon's `fatefulEncounter` is explicitly false (the engine ignores nil and never reads `modernFatefulEncounter`) | **in this run** (C3a), documented in the sheet doc §9.1. It follows the engine; a save-imported Mew/Deoxys without the event bit obeys here, where pret may not |
 | Thief/Covet/Trick by side b in `wild` / `coop_npc` (pret may forbid an opponent-side steal outside link battles) | **out of scope**: item-theft rules, not badge rules. Unverified (no pret source); reported, a referee-fidelity ticket |
 | Gen 1/2 obedience | **out of scope**: unchanged from the plan |
+| Gen 1 referee's badge boost lacked pokered's 999 cap | **in this run**: R2b (both twins; no existing expectation moved) |
+| Gen 2 type boost needs the chart's `typeIds` in the ruleset (client → sanitisers → hubs → solo) | **in this run**: C3b follow-up |
+| Badge boost before vs after stat stages in BattleSim / BattleSim2 (the Gold engine port boosts before; pokecrystal `CalcPlayerStats` and the Gen 1 engine appear to boost after) | **out of scope**: pre-existing ordering in both Gen 1/2 sims, unverified against pret (no source here); a referee-fidelity ticket |
+| BattleSim2's confusion self-hit ignores stages and burn; no 255-stat truncation | **out of scope**: pre-existing Gen 2 referee fidelity, not badge rules; reported by R2b |

@@ -82,6 +82,26 @@ here must match `manifest.version`.
   defeat lines, and its after-battle order. Trainers play with a Gen 3 brain
   ported from the carts' trainer AI scripts, enabled per trainer by its AI
   flags.
+- **Badges count on Gen 3 against the computer, as on the cart.** In solo
+  fights and in co-op against a trainer or a wild POKéMON, your badges boost
+  your POKéMON's stats the cart's way, and a traded POKéMON can disobey.
+  - **Stat boosts.** Badge 1 boosts Attack, badge 3 Speed, badge 5 Defense,
+    and badge 7 Sp. Atk and Sp. Def. Each is x1.1, applied at the cart's
+    point in damage and turn order. They count only for your side, and each
+    player brings their own badges.
+  - **Obedience.** A traded POKéMON above your badges' level cap may loaf
+    around, ignore orders, use a different move, nap or hurt itself, in the
+    cart's own sequence and words. The caps are 10 with no badges, 30, 50 and
+    70 with badges 2, 4 and 6, and none with badge 8. FireRed / LeafGreen
+    keep their Focus Punch exemption, and Emerald doesn't. Event MEW and
+    DEOXYS obey; others never do.
+  - **Fights between players stay link battles.** In 1-on-1 and party
+    against party there are no boosts and no disobedience. The referee
+    enforces this itself, so a modified client can't change it.
+  - **How it works.** Badges travel in the existing `badges` field as
+    `"1".."8"`, and the Gen 3 sheet gains `traded` / `fateful` plus an
+    `obey` event (`docs/plans/gen3-battle-sheet.md` §6, §7.2.1). The plan is
+    `docs/plans/gen3-badge-rules.md`.
 - **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
   out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
   referee instead of the cart's. That covers the Twins and couples on the
@@ -177,6 +197,22 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **Badges no longer boost fights between players on Red or Gold.** A
+  hub-refereed 1-on-1 or party-against-party fight applied each player's
+  badge boosts, so a player with more badges hit harder in ranked play. The
+  carts never do that in a link battle: Gen 1's ApplyBadgeStatBoosts and
+  Gen 2's BadgeStatBoosts return early. The Gen 1 / Gen 2 referees now ignore
+  badges in those modes and on the opponent's side. Fights against the
+  computer keep them.
+- **Gold's badges never counted against the computer.** The Gen 2 referee
+  looked up Red's badge names (BOULDERBADGE …), so a Gold player's badges
+  never matched. Gold clients also never sent their Kanto badges. Now:
+  - **Stat boosts follow Gold's rules:** Zephyr Attack, Mineral Defense,
+    Plain Speed, and Glacier Sp. Atk with the cart's quirky Sp. Def check,
+    capped at 999.
+  - **Type badges are new:** owning a type's badge (Zephyr Flying, Hive Bug,
+    … all sixteen) adds 1/8 to that type's damage, as Gold does.
+  - **Red's boost gets its 999 cap.** It is now capped like pokered's.
 - **Gold: a mediated fight re-sent learned moves with the Gen 1 effect
   table.** `sheetMoves` dropped the generation, so a move learned mid-fight
   on Gold went to the referee with Red's effect id. It keeps the generation
@@ -309,9 +345,6 @@ version, but each was a real failure on a live boot or on the wire:
 - **A remote player walking nearby can hold the VS Seeker's charge a
   moment**: the cart waits for every object to stop moving, avatars
   included.
-- **Every fight this mod referees on Gen 3 uses link rules**, solo and co-op
-  fights against wild POKéMON and trainers included: no badge stat boosts and
-  no disobedience.
 - **A trainer drawn with your team still standing stays unbeaten.** The
   trainerbattle opcode has no answer for that ending, so its script is halted
   where it waited: no prize, no flag, no TM or badge. An unbeaten trainer who

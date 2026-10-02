@@ -305,7 +305,7 @@ out-of-boundary remainder).
 - Owns: `src/MediatedBattle.lua`, `src/Sheet3.lua` (new), `src/Exp3.lua` (new),
   `src/LearnMove.lua`, `src/EvolveFx.lua`, `tests/mediated_battle_client.lua`.
 - Goal: Gen 3 arm end to end — sheets from `session.party` via `Sheet3`, bag upload from
-  `session.bag` pockets (numeric ids), badge boosts off (link rules), item use, catch/grant into
+  `session.bag` pockets (numeric ids), badge boosts off (link rules; superseded by `gen3-badge-rules.md`), item use, catch/grant into
   party/PC + dex + nickname prompt (Gen 3 naming), post-battle EXP/level-up/move-learn/evolution
   via `Exp3` on engine rules, music/SFX; existing Gold bug at `:852` fixed.
 
@@ -639,9 +639,9 @@ named here.
   `eo.frozen`). Minor.
 - No featured official Gen 3 hub (owner #7). LeafGreen not live-tested
   (owner #4). NIRE stays Gen 1 (A5).
-- Link rules everywhere: every mod-refereed Gen 3 fight, solo and co-op
-  against wild mons and trainers included, has no badge stat boosts and no
-  disobedience (BattleSim3 and its twin carry no per-fight exception).
+- Badge rules (since `docs/plans/gen3-badge-rules.md`): fights against the
+  computer apply the carts' badge stat boosts and obedience; fights between
+  players are link battles with neither. The referee enforces the split.
 - A trainer fight drawn with the player's team still standing leaves the
   trainer unbeaten and its script halted (no prize, flag, TM or badge): the
   `trainerbattle` opcode's `done` has no third answer. An unbeaten trainer

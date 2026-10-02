@@ -80,7 +80,10 @@ A **fighter** (one seat): `{ playerId, name, mons = { sheet... (≤ 6) }, bag = 
   the battle.
 * `family` (`"frlg"` | `"rse"`, absent ⇒ `"frlg"`, the engine's default
   `BattleProfile`) is the trainer's cart family; only obedience's Focus Punch
-  rule reads it (§6).
+  rule reads it (§6). **A client never sends it.** SoloBattle sets it from
+  the running cart, and both hubs set it per human seat from that client's
+  own hello `version` (`CART_FAMILY` in `src/Hub.lua` / `server/lib/relay.js`:
+  firered and leafgreen → frlg, emerald → rse).
 * Both are read **only for side a in `wild`, `coop_wild` and `coop_npc`**
   (`Turn.BADGE_MODES`, the cart's non-link fights) and dropped everywhere else —
   in `1v1` / `coop_pvp` and on side b whatever an entry uploads (link rules,

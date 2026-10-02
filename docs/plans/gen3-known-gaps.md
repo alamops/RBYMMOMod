@@ -11,7 +11,7 @@ where it lives in the code and what closing it would take.
 | 3 | Cross-region trades follow the post-game rule | cart-faithful, decision | S |
 | 4 | Players across a seamless map edge are not drawn | needs an engine seam | M |
 | 5 | Party-on-map is a list, not a marker | mod UI work | M |
-| 6 | Mod-refereed fights use link rules | design choice, both twins | M |
+| 6 | Mod-refereed fights use link rules (done) | design choice, both twins | M |
 | 7 | A trainer draw leaves the trainer unbeaten | engine limit | S / upstream |
 | 8 | Gen 3 reaches into engine internals | upstream RFC | L |
 
@@ -134,8 +134,12 @@ another page or in another region (show them in the list, as today).
 
 ## 6. Every fight the mod referees uses link rules
 
-- [ ] Decide whether solo and co-op fights against the computer should get
-      badge boosts and obedience.
+- [x] **Done** (`docs/plans/gen3-badge-rules.md`). Fights against the
+      computer get the carts' badge boosts and obedience on Gen 3, and every
+      generation's fights between players are link battles. On the way it
+      turned out Gen 2 had never applied badge boosts (the referee read Red's
+      badge names). That is fixed too, so the "Gen 1 and Gen 2 already apply"
+      line below was only ever true of Gen 1.
 
 **Current behaviour:** no badge stat boosts and no disobedience in any
 Gen 3 fight the mod runs, including solo and co-op against wild POKéMON and
