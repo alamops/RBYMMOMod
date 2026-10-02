@@ -234,7 +234,7 @@ read as the neutral value named below, never an error).
 | `catchRate` | 0..255 | wild seat | species catch rate (the wild sheet only) |
 | `ivs`, `evs`, `personality`, `otId` | passthrough | opt | never read by a formula; copied onto the `caught` sheet so the catcher can rebuild the exact mon |
 | `traded` | `true` or absent | opt | contract K2: the OT id or OT name is not this player's (pret `IsOtherTrainer`, engine `Engine.isTradedMon`; the client decides it in `Sheet3.tradedOf`, the engine's exact-name rule rather than `Exp3`'s prefix compare). Obedience (§6) reads it on side a against the computer |
-| `fateful` | `true` or absent | opt | contract K2: the mon's fateful-encounter bit. Read only for Mew (151) and Deoxys (410): without it they obey nobody (§6). Absent means the bit is clear, so a client must send it for every Mew / Deoxys that has it |
+| `unfateful` | `true` or absent | opt | contract K2' (it replaces K2's `fateful` of [`gen3-badge-rules.md`](gen3-badge-rules.md), PROTOCOL 30 being unreleased): the engine mon's `fatefulEncounter` is **explicitly** `false`, the one value the engine's Mew / Deoxys rule acts on (`engine.lua:1299`). Read only for Mew (151) and Deoxys (410): with it they obey nobody (§6). Absent means the rule does not apply, exactly as the engine's nil field: the mon obeys under the ordinary `traded` / badge-cap rule. A client sends it only when the field is `false`, never for a nil one |
 | `moves` | 1..4 move rows (below) | yes | |
 
 **Move row** (same row shape in `moves`, the `moves` event and the pool):
@@ -550,8 +550,10 @@ where `turn` counts completed turns (0 during the first turn, pret
     side a against the computer, badges or none. A mon that is not `traded` obeys,
     and so does every mon once its trainer has badge 8. Otherwise the level cap is 10,
     or 30 with badge 2, 50 with badge 4, 70 with badge 6. A Mew (151) or Deoxys (410)
-    without `fateful` has cap 0 whoever owns it, badge 8 or not (the engine's rule on
-    every cart, §9.1). **At or under the cap it obeys and draws nothing.** Above it,
+    flagged `unfateful` (§2, K2') has cap 0 whoever owns it, badge 8 or not (the
+    engine's rule on every cart, §9.1); one without the flag is any other mon to this
+    check, as the engine's nil `fatefulEncounter` is. **At or under the cap it obeys
+    and draws nothing.** Above it,
     with `L` the level, the engine's sequence, each draw only when reached:
     1. `roll(0,255)`: obeys when `floor((L + cap) · r / 256) < cap`. Otherwise Rage
        ends, and an asleep mon using Snore / Sleep Talk stops: `ignores_asleep`.
@@ -574,7 +576,7 @@ where `turn` counts completed turns (0 during the first turn, pret
     `msg`.
 * **Link rules**: in `1v1` / `coop_pvp`, and for side b in every mode, no badge boosts
   and no disobedience, whatever an entry uploads (`badges`, `family`, `traded`,
-  `fateful` are dropped or never read). In `1v1` / `coop_pvp` no EXP and no Pay Day
+  `unfateful` are dropped or never read). In `1v1` / `coop_pvp` no EXP and no Pay Day
   coins either. `exp` events are facts (BattleSim2).
 * **Pay Day** adds `level × 5` to its side's tally (pret `gPaydayMoney`, a u16 that
   saturates at 65535) and always says "Coins scattered everywhere!". Only a battle
@@ -779,7 +781,7 @@ in this order, and nowhere else; the list in the header of
    confusion `roll(0,1)` [+ self-hit damage `roll(85,100)` + Focus Band
    `roll(0,99)` if held], paralysis `roll(0,3)`, infatuation `roll(0,1)`);
    obedience after the PP check (side a against the computer only: a `traded`
-   mon over its badge cap, or a Mew / Deoxys without `fateful`; nothing at or
+   mon over its badge cap, or a Mew / Deoxys flagged `unfateful`; nothing at or
    under the cap): `roll(0,255)`, then — unless it is a sleeper's Snore / Sleep
    Talk — `roll(0,255)`, then either `roll(0,3)` per pick until a usable slot
    (one `roll(0,3)` for the loaf line when none is) or `roll(0,255)` and then
@@ -882,8 +884,9 @@ What the sim still does differently from pret, and why:
 | Fury Cutter after another move | not reset (Gen 3 has no `TryClearRageAndFuryCutter`; `TryClearRageStatuses` clears Rage only) | the same | kept on purpose |
 | called-move depth | unbounded, but no cart row set nests deeper than 3 | "But it failed!" past 3 (a disobedient random pick is not a call: it replaces the choice, so Metronome → Assist → Nature Power still reaches the terrain move after one) | robustness: crafted rows must not recurse |
 | whose badges a battler reads | the one player's badge flags, for the whole player side (and none in a link battle) | each battler's own trainer's `badges` (K1): each human's in co-op, the owner's on both seats of a shared team; none on side b or in `1v1` / `coop_pvp` | several humans stand on side a, each with their own save; with one trainer it is the cart's rule |
-| `traded` / `fateful` | the party struct: `IsOtherTrainer` on the OT id and name, the fateful-encounter bit | the client's flags on the sheet (K2) | the referee holds no save. A client can only make its own mons obey, and only against the computer (obedience never applies in PvP). The OT id compared is the 16-bit visible trainer id, as the engine reads it (`otSecretId` aside), where pret compares the full 32-bit id: a mon with the same TID and OT name but another secret id counts as not traded here |
-| a Mew / Deoxys without the fateful bit on FireRed / LeafGreen | pret's FRLG `IsMonDisobedient` may not have the check (unverified: no pret source is local) | cap 0 on every cart, as the engine has it (`engine.lua:1299`, not profile-gated); the engine tests `fatefulEncounter == false`, the referee an absent `fateful` | the engine is the port this follows ([`gen3-badge-rules.md`](gen3-badge-rules.md) §8); a client sends `fateful` whenever the bit is set |
+| `traded` / `unfateful` | the party struct: `IsOtherTrainer` on the OT id and name, the fateful-encounter bit | the client's flags on the sheet (K2, K2'), each `true` or absent | the referee holds no save. A client can only make its own mons obey, and only against the computer (obedience never applies in PvP). The OT id compared is the 16-bit visible trainer id, as the engine reads it (`otSecretId` aside), where pret compares the full 32-bit id: a mon with the same TID and OT name but another secret id counts as not traded here |
+| a Mew / Deoxys without the fateful bit on FireRed / LeafGreen | pret's FRLG `IsMonDisobedient` may not have the check (unverified: no pret source is local) | cap 0 on every cart, as the engine has it (`engine.lua:1299`, not profile-gated), and on the engine's own trigger: the referee tests `unfateful == true` where the engine tests `fatefulEncounter == false` | the engine is the port this follows ([`gen3-badge-rules.md`](gen3-badge-rules.md) §8); a client sends `unfateful` only for an explicit `false`, never for a nil field (the engine ignores nil and never reads `modernFatefulEncounter`) |
+| a Mew / Deoxys whose engine mon has no `fatefulEncounter` field (nil) | pret reads the bit itself: a clear bit is cap 0 | no `unfateful`: it obeys under the ordinary `traded` / badge-cap rule | the engine's reading (nil is not `false`); absent meaning "no rule" keeps a dropped or never-sent flag from turning an obedient mon disobedient |
 | the last move after a disobedient stop | pret's move-end bookkeeping for a disobedient action (unverified here) | cleared, as the engine's stop does (`engine.lua:1478-1484`) and as a canceller stop does here | follows the engine |
 | Emerald's boost exclusions | no damage boosts in e-reader / secret base / frontier / recorded battles, no badge-3 Speed in frontier / recorded ones | not modelled | no such fight is mediated |
 | where a called row comes from | `gBattleMoves` | the caller's own list, the pool, the caller's own party | the hub holds no move table; never another fighter's sheet |

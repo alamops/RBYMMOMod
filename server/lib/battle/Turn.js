@@ -2307,10 +2307,19 @@ class Battle {
     }
 
     if (mon.confusion > 0) {
+      // The self-hit reads the battle stats, badge boosts included: pokered's
+      // HandleSelfConfusionDamage takes wBattleMon's Attack and Defense, which
+      // ApplyBadgeStatBoosts already raised, and the engine port does the same
+      // (gen1recomp src/battle/BattleState.lua:4187 computeDamage(user, user)
+      // -> Damage.applyBadgeBoost). Attacker and defender are one seat, so its
+      // BOULDERBADGE and THUNDERBADGE both apply; `fighter.badges` is null
+      // outside BADGE_MODES' side a, as for every other hit.
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
-        level: mon.level, attack: mon.stats.atk, defense: mon.stats.def,
+        level: mon.level,
+        attack: Effects.badgeBoost(mon.stats.atk, 'atk', fighter.badges),
+        defense: Effects.badgeBoost(mon.stats.def, 'def', fighter.badges),
       }, this.rng.byte());
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);

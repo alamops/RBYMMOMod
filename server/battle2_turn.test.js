@@ -1057,16 +1057,17 @@ for (const row of Effects.BADGE_TYPE_BOOSTS) ALL_BADGES[row.badge] = true;
 const RULES = { typeIds: ['DARK', 'BUG', 'FIRE'], specialTypes: [2] };
 
 // One exchange: Ann (side a) and Bob (side b) each swing once. `a` / `b`
-// override the stats, the move's power and type, and carry each seat's upload;
-// `rules` is the ruleset (typeIds, specialTypes).
+// override the stats, the move's power and type, and carry each seat's upload
+// (`a.pp = 0` empties Ann's one slot, so she Struggles); `rules` is the ruleset
+// (typeIds, specialTypes).
 const exchange = (mode, a, b, rules = {}) => {
-  const move = (power, type) => ({
-    id: 'thump', pp: 20, power, accuracy: 255, type, effect: 0, chance: 0,
+  const move = (power, type, pp = 20) => ({
+    id: 'thump', pp, power, accuracy: 255, type, effect: 0, chance: 0,
   });
   const ann = {
     species: 'Alpha', level: 20, hp: 200, maxHp: 200,
     stats: { atk: a.atk || 88, def: a.def || 40, spe: a.spe || 40, spa: a.spa || 40, spd: 40 },
-    moves: [move(50, a.type || 0)],
+    moves: [move(50, a.type || 0, a.pp)],
   };
   if (a.confusion) ann.confusion = a.confusion;
   const battle = build({
@@ -1210,6 +1211,23 @@ for (const mode of ['coop_npc', 'wild']) {
       hitOn(exchange(mode, { badges: { HIVE: true } }, { power: 30, type: 1 }, RULES), 0),
       hitOn(exchange(mode, {}, { power: 30, type: 1 }, RULES), 0),
       "the foe's BUG move is not boosted by Ann's HIVE");
+
+    // Struggle never is: pokecrystal BattleCommand_Stab returns for it
+    // (`cp STRUGGLE / ret z`) before DoBadgeTypeBoosts. On a chart whose index
+    // 0 is BUG, Ann's type-0 move takes HIVE's eighth; her Struggle, whose
+    // placeholder type is that same 0, does not.
+    const BUG_FIRST = { typeIds: ['BUG', 'DARK', 'FIRE'], specialTypes: [2] };
+    assert.strictEqual(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), 18,
+      "index 0 named BUG, Ann's type-0 move is 18 bare");
+    assert.strictEqual(hitOn(exchange(mode, { badges: { HIVE: true } }, {}, BUG_FIRST), 3), 20,
+      '...and HIVE type-boosts it to 20');
+    const struggled = exchange(mode, { pp: 0 }, {}, BUG_FIRST);
+    assert.ok(struggled.some((event) => event.t === 'anim' && event.text === 'STRUGGLE'),
+      'with her one slot at 0 PP, Ann Struggles');
+    assert.strictEqual(hitOn(struggled, 3), 18, 'her Struggle, no badge, is 18');
+    assert.strictEqual(
+      hitOn(exchange(mode, { pp: 0, badges: { HIVE: true } }, {}, BUG_FIRST), 3), 18,
+      'HIVE leaves her Struggle at 18 (type 0 is BUG here, and still nothing fires)');
 
     // HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
     const bareSelf = selfHit(exchange(mode, { seed: confusedSeed, confusion: 3 }, {}));

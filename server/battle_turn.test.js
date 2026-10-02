@@ -2004,19 +2004,22 @@ const ALL_BADGES = {
 };
 
 // One exchange: Ann (side a) and Bob (side b) each swing once. `a` / `b`
-// override the stats and carry each seat's upload.
+// override the stats and carry each seat's upload; `a.seed` / `a.confusion`
+// set up a confused Ann on a chosen seed (the self-hit test below).
 const exchange = (mode, a, b) => {
   const thump = (power) => ({
     id: 'thump', pp: 20, power, accuracy: 255, type: 0, effect: 0, chance: 0,
   });
+  const ann = {
+    species: 'Alpha', level: 20, hp: 200, maxHp: 200,
+    stats: { atk: a.atk || 88, def: a.def || 40, spd: a.spd || 40, spc: 40 },
+    moves: [thump(50)],
+  };
+  if (a.confusion) ann.confusion = a.confusion;
   const battle = build({
-    id: 'b1', mode, seed: 777001, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'b1', mode, seed: a.seed || 777001, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
-      a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [{
-        species: 'Alpha', level: 20, hp: 200, maxHp: 200,
-        stats: { atk: a.atk || 88, def: 40, spd: a.spd || 40, spc: 40 },
-        moves: [thump(50)],
-      }] }],
+      a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [ann] }],
       b: [{ playerId: 'p2', name: 'Bob', badges: b.badges, mons: [{
         species: 'Beta', level: 20, hp: 200, maxHp: 200,
         stats: { atk: b.atk || 40, def: 80, spd: b.spd || 40, spc: 40 },
@@ -2107,4 +2110,46 @@ test("coop_npc: side b's upload is ignored against the computer too", () => {
   assert.deepStrictEqual(hostile, bare, "side b's upload changes nothing at all");
   assert.strictEqual(firstHit(exchange('coop_npc', {}, { badges: ALL_BADGES, spd: 37 })), 3,
     "side b's SOULBADGE does not overtake side a");
+});
+
+test("the confusion self-hit reads side a's badge-boosted stats, in computer fights only", () => {
+  // Twin of (d) in tests/battle_sim_turn.lua's 23: pokered's
+  // HandleSelfConfusionDamage takes wBattleMon's Attack and Defense, which
+  // ApplyBadgeStatBoosts raised, and the engine port's computeDamage(user, user)
+  // boosts both ends (src/battle/BattleState.lua:4187). Attack 160 and Defense
+  // 9 keep the two boosts from cancelling: 160 -> 180 and 9 -> 10 move the
+  // 40-power hit from 144 to 146.
+  const selfHit = (events) => {
+    let hurt = false;
+    for (const event of events) {
+      if (event.t === 'msg' && typeof event.text === 'string'
+          && event.text.includes('hurt itself')) {
+        hurt = true;
+      } else if (hurt && event.t === 'damage') {
+        return event.amount;
+      }
+    }
+    return null;
+  };
+  let confusedSeed = null;
+  for (let seed = 1; seed <= 200; seed += 1) {
+    if (selfHit(exchange('coop_npc', { seed, atk: 160, def: 9, confusion: 3 }, {})) !== null) {
+      confusedSeed = seed;
+      break;
+    }
+  }
+  assert.ok(confusedSeed !== null, 'found a seed where a confused Ann hits herself');
+  const confused = (mode, badges) => selfHit(exchange(mode,
+    { seed: confusedSeed, atk: 160, def: 9, confusion: 3, badges }, {}));
+  const PAIR = { BOULDERBADGE: true, THUNDERBADGE: true };
+  assert.strictEqual(confused('coop_npc'), 144, "coop_npc: unbadged, Ann's self-hit is 144");
+  assert.strictEqual(confused('coop_npc', PAIR), 146,
+    'coop_npc: BOULDERBADGE + THUNDERBADGE (180 / 10) make it 146');
+  assert.strictEqual(confused('coop_npc', { BOULDERBADGE: true }), 162,
+    'coop_npc: BOULDERBADGE alone (180 / 9) raises it to 162');
+  assert.strictEqual(confused('coop_npc', { THUNDERBADGE: true }), 130,
+    'coop_npc: THUNDERBADGE alone (160 / 10) cuts it to 130');
+  assert.strictEqual(confused('1v1'), 144, '1v1: the same unbadged 144');
+  assert.strictEqual(confused('1v1', PAIR), 144,
+    '1v1: the pair reaches no self-hit in a link battle');
 });

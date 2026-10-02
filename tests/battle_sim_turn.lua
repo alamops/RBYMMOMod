@@ -3448,15 +3448,17 @@ do
                 VOLCANOBADGE = true }
 
   -- One exchange: Ann (side a) and Bob (side b) each swing once.  `a` / `b`
-  -- override the stats and carry each seat's upload.
+  -- override the stats and carry each seat's upload; `a.seed` / `a.confusion`
+  -- set up a confused Ann on a chosen seed (section (d)).
   local function exchange(mode, a, b)
     local battle = battleOf({
-      mode = mode, seed = 777001,
+      mode = mode, seed = a.seed or 777001,
       sides = {
         a = { { playerId = "p1", name = "Ann", badges = a.badges,
                 mons = { mon({
-                  maxHp = 200, hp = 200, atk = a.atk or 88, def = 40,
-                  spd = a.spd or 40, moves = { move({ power = 50 }) },
+                  maxHp = 200, hp = 200, atk = a.atk or 88, def = a.def or 40,
+                  spd = a.spd or 40, confusion = a.confusion,
+                  moves = { move({ power = 50 }) },
                 }) } } },
         b = { { playerId = "p2", name = "Bob", badges = b.badges,
                 mons = { mon({
@@ -3531,6 +3533,46 @@ do
   eq(dumpAll(hostile), dumpAll(bare), "coop_npc: side b's upload changes nothing at all")
   eq(firstHit(exchange("coop_npc", {}, { badges = ALL, spd = 37 })), 3,
      "coop_npc: side b's SOULBADGE does not overtake side a")
+
+  -- (d) the confusion self-hit reads the badge-boosted stats as well: pokered's
+  --     HandleSelfConfusionDamage takes wBattleMon's Attack and Defense, which
+  --     ApplyBadgeStatBoosts raised, and the engine port's computeDamage(user,
+  --     user) boosts both ends (src/battle/BattleState.lua:4187).  Attack 160
+  --     and Defense 9 keep the two boosts from cancelling: 160 -> 180 and
+  --     9 -> 10 move the 40-power hit from 144 to 146.
+  local function selfHit(events)
+    local hurt = false
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text and event.text:find("hurt itself", 1, true) then
+        hurt = true
+      elseif hurt and event.t == "damage" then
+        return event.amount
+      end
+    end
+    return nil
+  end
+  local confusedSeed
+  for seed = 1, 200 do
+    if selfHit(exchange("coop_npc", { seed = seed, atk = 160, def = 9, confusion = 3 }, {})) then
+      confusedSeed = seed
+      break
+    end
+  end
+  ok(confusedSeed ~= nil, "found a seed where a confused Ann hits herself")
+  local function confused(mode, badges)
+    return selfHit(exchange(mode, { seed = confusedSeed, atk = 160, def = 9, confusion = 3,
+                                    badges = badges }, {}))
+  end
+  local PAIR = { BOULDERBADGE = true, THUNDERBADGE = true }
+  eq(confused("coop_npc", nil), 144, "coop_npc: unbadged, Ann's self-hit is 144")
+  eq(confused("coop_npc", PAIR), 146,
+     "coop_npc: BOULDERBADGE + THUNDERBADGE (180 / 10) make it 146")
+  eq(confused("coop_npc", { BOULDERBADGE = true }), 162,
+     "coop_npc: BOULDERBADGE alone (180 / 9) raises it to 162")
+  eq(confused("coop_npc", { THUNDERBADGE = true }), 130,
+     "coop_npc: THUNDERBADGE alone (160 / 10) cuts it to 130")
+  eq(confused("1v1", nil), 144, "1v1: the same unbadged 144")
+  eq(confused("1v1", PAIR), 144, "1v1: the pair reaches no self-hit in a link battle")
 end
 
 -- ------------------------------------------------------------------

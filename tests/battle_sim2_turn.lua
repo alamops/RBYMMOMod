@@ -1752,7 +1752,8 @@ do
 
   -- One exchange: Ann (side a) and Bob (side b) each swing once.  `a` / `b`
   -- override the stats, the move's power and type, and carry each seat's
-  -- upload; `rules` is the ruleset (typeIds, specialTypes).
+  -- upload (`a.pp = 0` empties Ann's one slot, so she Struggles); `rules` is
+  -- the ruleset (typeIds, specialTypes).
   local function exchange(mode, a, b, rules)
     rules = rules or {}
     local battle, err = Turn.create({
@@ -1765,7 +1766,7 @@ do
                   local m = mon({
                     maxHp = 200, hp = 200, atk = a.atk or 88, def = a.def or 40,
                     spe = a.spe or 40, spa = a.spa or 40,
-                    moves = { move({ power = 50, type = a.type or 0 }) },
+                    moves = { move({ power = 50, type = a.type or 0, pp = a.pp }) },
                   })
                   m.confusion = a.confusion
                   return m
@@ -1922,6 +1923,25 @@ do
     eq(hitOn(exchange(mode, { badges = { HIVE = true } }, { power = 30, type = 1 }, RULES), 0),
        hitOn(exchange(mode, {}, { power = 30, type = 1 }, RULES), 0),
        mode .. ": the foe's BUG move is not boosted by Ann's HIVE")
+
+    -- Struggle never is: pokecrystal BattleCommand_Stab returns for it
+    -- (`cp STRUGGLE / ret z`) before DoBadgeTypeBoosts.  On a chart whose
+    -- index 0 is BUG, Ann's type-0 move takes HIVE's eighth; her Struggle,
+    -- whose placeholder type is that same 0, does not.
+    local BUG_FIRST = { typeIds = { "BUG", "DARK", "FIRE" }, specialTypes = { 2 } }
+    eq(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), 18,
+       mode .. ": index 0 named BUG, Ann's type-0 move is 18 bare")
+    eq(hitOn(exchange(mode, { badges = { HIVE = true } }, {}, BUG_FIRST), 3), 20,
+       mode .. ": ...and HIVE type-boosts it to 20")
+    local struggled = exchange(mode, { pp = 0 }, {}, BUG_FIRST)
+    local struggledAnim = false
+    for _, event in ipairs(struggled) do
+      if event.t == "anim" and event.text == "STRUGGLE" then struggledAnim = true end
+    end
+    ok(struggledAnim, mode .. ": with her one slot at 0 PP, Ann Struggles")
+    eq(hitOn(struggled, 3), 18, mode .. ": her Struggle, no badge, is 18")
+    eq(hitOn(exchange(mode, { pp = 0, badges = { HIVE = true } }, {}, BUG_FIRST), 3), 18,
+       mode .. ": HIVE leaves her Struggle at 18 (type 0 is BUG here, and still nothing fires)")
 
     -- HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
     local bareSelf = selfHit(exchange(mode, { seed = confusedSeed, confusion = 3 }, {}))
