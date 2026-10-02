@@ -1220,13 +1220,17 @@ function cleanBattleRuleset(raw, generation) {
   }
   // The chart's axis by name (`typeIds`): each chart index's type registry id,
   // in order, which lib/battle2 resolves a move's type through for Gold's badge
-  // type boost. Present-but-unreadable refuses the ruleset, as specialTypes
-  // does; 1..BATTLE_TYPE_MAX ids (the chart's own width cap), each a cleanId.
-  // Twin of Wire.lua's typeIdsOf.
+  // type boost. 1..BATTLE_TYPE_MAX ids (the chart's own width cap), each a
+  // cleanId, all or nothing. Unreadable is DROPPED, not refused, unlike
+  // specialTypes: the list only names types for a boost, the chart stands
+  // without it, and a content mod's type id need not fit the wire's id
+  // alphabet ("mymod.FAIRY") -- refusing would cost a modded install every
+  // refereed fight to save a 1/8 boost. Nulls are closed up first (luaList), as
+  // Lua's JSON decoder does before Wire.lua ever sees the list. Twin of
+  // Wire.lua's typeIdsOf.
   if (raw.typeIds !== undefined && raw.typeIds !== null) {
-    const typeIds = cleanIdList(raw.typeIds, BATTLE_TYPE_MAX);
-    if (!typeIds) return null;
-    ruleset.typeIds = typeIds;
+    const typeIds = cleanIdList(luaList(raw.typeIds), BATTLE_TYPE_MAX);
+    if (typeIds) ruleset.typeIds = typeIds;
   }
   // Read in the older dialect by name, never by sniffing a row's `num`: this is
   // a Gen 1 / Gen 2 ruleset. Twin of Wire.battleRuleset.
@@ -1414,7 +1418,7 @@ const IV_KEYS3 = ['hp', 'atk', 'def', 'spe', 'spa', 'spd'];
  * the hub holds no species, item or ability table -- all required. Optional,
  * each refused when present and unreadable: display names, slot, status /
  * sleepTurns, catchRate, the passthrough ivs / evs / personality / otId, the
- * caught sheet's ball, the obedience check's traded / fateful (booleans, a
+ * caught sheet's ball, the obedience check's traded / unfateful (booleans, a
  * player's own sheet only), and weight / hiddenPower / beatUp -- which are
  * required on an *upload* (cleanBattleParty checks them) but not on an
  * outcome's caught sheet. Twin of Wire.lua's battleMon3.
@@ -1551,15 +1555,19 @@ function cleanBattleMon3(raw) {
   // The obedience check's facts about a player's own monster (contract K2,
   // docs/plans/gen3-badge-rules.md): true or absent, so a false is kept as
   // absent and anything that is not a boolean refuses the mon -- the ruleset's
-  // `underwater` posture. Gen 3 only: the Gen 1 / Gen 2 reader builds its sheet
+  // `underwater` posture. `unfateful` names a Mew / Deoxys whose
+  // fateful-encounter bit is explicitly clear (the engine's
+  // `fatefulEncounter == false`); its absence is the ordinary rules, so the
+  // retired `fateful` is not copied and a sheet still carrying one fights as
+  // if it said nothing. Gen 3 only: the Gen 1 / Gen 2 reader builds its sheet
   // field by field and never copies either.
   if (present(raw.traded)) {
     if (typeof raw.traded !== 'boolean') return null;
     if (raw.traded) mon.traded = true;
   }
-  if (present(raw.fateful)) {
-    if (typeof raw.fateful !== 'boolean') return null;
-    if (raw.fateful) mon.fateful = true;
+  if (present(raw.unfateful)) {
+    if (typeof raw.unfateful !== 'boolean') return null;
+    if (raw.unfateful) mon.unfateful = true;
   }
   return mon;
 }
@@ -1994,9 +2002,10 @@ function cleanBattleChoice(raw, generation) {
  * and is drawn by the same code, even though an intermediator wrote it.
  *
  * `generation` (optional) is the reader's own. 1 or 2 reads an event exactly as
- * before Gen 3 had a stream: the older vocabulary only, none of Gen 3's six
- * fields, and `moves` rows in the older dialect whatever `num` they carry. 3, or
- * none named, reads the union. Twin of Wire.battleEvent.
+ * before Gen 3 had a stream: the older vocabulary only (none of Gen 3's seven
+ * kinds), none of its six fields (target, spread, stat, stage, delta, holding),
+ * and `moves` rows in the older dialect whatever `num` they carry. 3, or none
+ * named, reads the union. Twin of Wire.battleEvent.
  */
 function cleanBattleEvent(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;

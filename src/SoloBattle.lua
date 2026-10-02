@@ -3053,23 +3053,6 @@ function M:_note3(event)
   end
 end
 
--- The badges this save holds, as the set of badge numbers (1..8) the cart's
--- FLAG_BADGE0n_GET flags say.  A view of src/Gen3.lua badgeList, the one
--- reading every path shares (the engine's Engine.hasBadge order: the live
--- flag store whenever there is one, the session's serialised flags
--- otherwise); the side entry itself carries badgeList's list, as a hub
--- upload does.  nil for none, or on a build that cannot say.
-function M.gen3Badges()
-  local list = Gen3.badgeList()
-  if not list then return nil end
-  local out = {}
-  for _, id in ipairs(list) do
-    local n = tonumber(id)
-    if n then out[n] = true end
-  end
-  return out
-end
-
 -- A mid-fight learn, onto the referee's copy (the hub's applyBattleMoveset3,
 -- src/Hub.lua): one slot added or one id changed; an unchanged id keeps the
 -- referee's PP and combat fields; the active battler takes the new list only

@@ -1307,9 +1307,12 @@ end)()
 --
 -- Gold's badge type boost (BattleSim2, DoBadgeTypeBoosts) names a move's type
 -- through the ruleset's `typeIds` -- MediatedBattle.snapshotRuleset's axis, the
--- registry ids in chart order.  The solo divert builds its Gen 1 / Gen 2
--- referee at one call site (`turnFor(generation)`), so what it hands Gen 1's
--- here is what Gold's is handed.
+-- registry ids in chart order -- and the solo divert hands its referee
+-- whatever the ruleset carries (`turnFor(generation)`, one call site for Gen 1
+-- and Gold).  The axis rides Gold's ruleset only: Gen 1's referee has no type
+-- boost to read it, so a Gen 1 fight is handed none (Gold's ruleset is held to
+-- carrying it in tests/mediated_battle_client.lua; this harness pins
+-- package.path empty, so every game here reads as Gen 1).
 
 ;(function()
   local real, seen = Turn.create, nil
@@ -1320,8 +1323,8 @@ end)()
   local okFight, f = pcall(fightOf, "wild")
   Turn.create = real
   ok(okFight and f.started, "typeIds solo: the wild fight is taken over")
-  eq(table.concat(seen and seen.typeIds or {}, ","), "FIRE,NORM",
-     "typeIds solo: the referee is handed the chart's axis by name, in chart order")
+  ok(seen ~= nil and seen.typeIds == nil,
+     "typeIds solo: Gen 1's referee is handed no axis -- it has no type boost")
 end)()
 
 -- ------------------------------------------------------------------

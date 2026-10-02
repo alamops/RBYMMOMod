@@ -1222,18 +1222,26 @@ function gen12() {
 /*
  * The badge rules' wire (docs/plans/gen3-badge-rules.md K1-K3), each input read
  * by lib/sanitize under the reader's generation (the third field): a Gen 3
- * party's badge numbers, a Gen 3 sheet's traded / fateful, the `obey` event and
- * its eight tokens, a Gold party's badge names, and the Gen 1 / Gen 2
- * ruleset's typeIds. Twin of badgeRules in tests/drivers/hub_protocol_parity.lua.
+ * party's badge numbers, a Gen 3 sheet's traded / unfateful (and the retired
+ * fateful, neither copied nor read), the `obey` event and its eight tokens, a
+ * Gold party's badge names, and the Gen 1 / Gen 2 ruleset's typeIds -- an
+ * unreadable list dropped with the ruleset kept, a JSON null closed up first
+ * (the Lua driver spells it NULL). Twin of badgeRules in
+ * tests/drivers/hub_protocol_parity.lua.
  */
 const OBEY_TOKENS = ['ignores_asleep', 'uses_random_move', 'falls_asleep', 'hits_itself',
   'loafing', 'wont_obey', 'turned_away', 'pretend_not_notice'];
 
 function badgeRules() {
-  const flagged = (traded, fateful) => {
+  const flagged = (traded, unfateful) => {
     const sheet = mon3({ species: 'MEW', speciesNum: 151 });
     if (traded !== undefined) sheet.traded = traded;
-    if (fateful !== undefined) sheet.fateful = fateful;
+    if (unfateful !== undefined) sheet.unfateful = unfateful;
+    return sheet;
+  };
+  const retired = (fateful) => {
+    const sheet = mon3({ species: 'MEW', speciesNum: 151 });
+    sheet.fateful = fateful;
     return sheet;
   };
   const gold = {
@@ -1263,6 +1271,9 @@ function badgeRules() {
     ['mon', flagged(true, undefined)],
     ['mon', flagged('yes', undefined)],
     ['mon', flagged(undefined, 1)],
+    ['mon', flagged(undefined, true)],
+    ['mon', retired(true)],
+    ['mon', retired(1)],
     ['party', {
       battle: 'b1', mons: [gold], badges: ['ZEPHYR', 'MINERAL', 'RISING', 'BOULDER', 'EARTH'],
     }, 2],
@@ -1276,6 +1287,12 @@ function badgeRules() {
     ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'X'.repeat(41)] }, 2],
     ['ruleset', { chart: CHART, typeIds: [] }, 2],
     ['ruleset', { chart: CHART, typeIds: 'NORMAL' }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'mymod.FAIRY'], specialTypes: [1] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', null, 'FIRE'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: [null, null] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', null, 'BAD TYPE'] }, 2],
+    ['ruleset', { chart: CHART, specialTypes: [1] }, 1],
+    ['ruleset', { chart: CHART }, 2],
     ['ruleset', { typeTable: CHART3, typeIds: ['NORMAL'] }, 3],
   ];
   OBEY_TOKENS.forEach((token, i) => {

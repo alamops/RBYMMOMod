@@ -2095,7 +2095,7 @@ do
   local record = hub.battles["g3f"]
   hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = "g3f", typeTable = CHART3 })
   local annMon = tradee3()
-  annMon.fateful = true
+  annMon.unfateful = true
   -- Each upload claims the other cart's family: no party field decides it.
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "g3f", side = "a", family = "frlg",
                      badges = { "1", "3" }, mons = { annMon } })
@@ -2112,11 +2112,11 @@ do
     ok(npc ~= nil and npc.family == nil, "family: an NPC seat's entry has none (" .. npcId .. ")")
   end
   -- What the hub was handed reaches the entry unchanged: the badges as the set
-  -- the sanitiser rebuilt, the sheet's traded / fateful on the mon itself.
+  -- the sanitiser rebuilt, the sheet's traded / unfateful on the mon itself.
   ok(annEntry and annEntry.badges and annEntry.badges["1"] == true and annEntry.badges["3"] == true,
      "family: the uploaded badges ride the entry")
   eq(annEntry and annEntry.mons[1].traded, true, "family: the mon's traded flag rides the entry")
-  eq(annEntry and annEntry.mons[1].fateful, true, "family: and its fateful flag")
+  eq(annEntry and annEntry.mons[1].unfateful, true, "family: and its unfateful flag")
   local annFighter, bobFighter = record.sim.byId[ann.id], record.sim.byId[bob.id]
   eq(annFighter.family, "rse", "family: the referee plays Emerald's rule for ANN")
   eq(bobFighter.family, "frlg", "family: and FireRed's for BOB")
@@ -2305,6 +2305,17 @@ do
   -- Attack, BadgeStatBoosts).
   eq(bugHit({ "FOG" }, TYPE_IDS2), plain, "typeIds: a badge for another type does nothing to it")
   eq(bugHit({ "HIVE" }, nil), plain, "typeIds: with no typeIds the move's type has no name, and nothing fires")
+  -- An axis the hub cannot read -- a content mod's type id off the wire's id
+  -- alphabet, since a registry id is any non-empty string -- is dropped, not
+  -- refused: the ruleset stands, the field opens, and it plays exactly as one
+  -- uploaded with no typeIds at all.
+  local modded, moddedRecord, moddedSeen = bugHit({ "HIVE" }, { "DARK", "mymod.BUG", "FIRE" })
+  ok(moddedRecord and moddedRecord.sim ~= nil, "typeIds (unreadable): the field still opens")
+  ok(moddedSeen.opts ~= nil and moddedSeen.opts.typeIds == nil,
+     "typeIds (unreadable): ...and Turn.create is handed no axis")
+  ok(moddedSeen.opts ~= nil and moddedSeen.opts.chart ~= nil and #moddedSeen.opts.specialTypes == 1,
+     "typeIds (unreadable): ...but the rest of the ruleset")
+  eq(modded, plain, "typeIds (unreadable): ...so nothing fires")
 end
 
 -- ------- Gen 3 lists: what Json.decode hands over, and what is a list at all
