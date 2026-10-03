@@ -1250,13 +1250,14 @@ function cleanBattleRuleset(raw, generation) {
     ruleset.specialTypes = special;
   }
   // The chart's axis by name (`typeIds`): each chart index's type registry id,
-  // in order, which lib/battle2 resolves a move's type through for Gold's badge
-  // type boost. 1..BATTLE_TYPE_MAX ids (the chart's own width cap), each a
-  // cleanId, all or nothing. Unreadable is DROPPED, not refused, unlike
-  // specialTypes: the list only names types for a boost, the chart stands
-  // without it, and a content mod's type id need not fit the wire's id
-  // alphabet ("mymod.FAIRY") -- refusing would cost a modded install every
-  // refereed fight to save a 1/8 boost. Nulls are closed up first (luaList), as
+  // in order, which a referee names a move's type through -- lib/battle2 for
+  // Gold's badge type boost and side-effect type checks, lib/battle for Red's
+  // POISON immunity and FIRE thaw. 1..BATTLE_TYPE_MAX ids (the chart's own width
+  // cap), each a cleanId, all or nothing. Unreadable is DROPPED, not refused,
+  // unlike specialTypes: the list only names types, the chart stands without
+  // it, and a content mod's type id need not fit the wire's id alphabet
+  // ("mymod.FAIRY") -- refusing would cost a modded install every refereed
+  // fight to keep those few rules. Nulls are closed up first (luaList), as
   // Lua's JSON decoder does before Wire.lua ever sees the list. Twin of
   // Wire.lua's typeIdsOf.
   if (raw.typeIds !== undefined && raw.typeIds !== null) {

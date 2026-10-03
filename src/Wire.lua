@@ -1513,10 +1513,12 @@ local function battleRuleset3(raw)
   return out
 end
 
--- The chart's axis by name (Gen 2 `typeIds`): the type registry id of each
--- chart index in order (MediatedBattle.typeOrder's), which BattleSim2 resolves
--- a move's type index through for Gold's badge type boost (DoBadgeTypeBoosts
--- is keyed by type, a move row carries only the index).  All or nothing: one
+-- The chart's axis by name (Gen 1 / Gen 2 `typeIds`): the type registry id of
+-- each chart index in order (MediatedBattle.typeOrder's).  A move row carries
+-- only the index, so this is how a referee names a type: BattleSim2 for Gold's
+-- badge type boost (DoBadgeTypeBoosts is keyed by type) and its side effects'
+-- type checks, BattleSim for Red's (PoisonEffect turns a POISON type away, a
+-- FIRE move thaws -- `typeIndexOf`).  All or nothing: one
 -- unreadable entry makes the whole list nil, since a stray entry would name the
 -- wrong type at its index.  Never longer than a chart may be wide
 -- (BATTLE_TYPE_MAX, the width `chartOf` refuses past), and an id past 40
@@ -1565,14 +1567,15 @@ function M.battleRuleset(raw, generation)
     out.specialTypes = special
   end
   -- Optional chart axis by name (typeIdsOf).  Absent = no move's type can be
-  -- named, so no badge type boost fires (BattleSim2 Turn.lua `_typeIdOf`).
-  -- Unreadable is DROPPED, not refused, unlike `specialTypes`: the list only
-  -- names types for a boost, the chart and every index on the upload stand
-  -- without it, and a content mod's type id need not fit the wire's id
-  -- alphabet (a registry id is any non-empty string -- "mymod.FAIRY") -- so
-  -- refusing would cost a modded install every refereed fight to save a 1/8
-  -- boost.  The fight goes on with no badge type boost, which is the
-  -- absent reading.
+  -- named: no badge type boost fires (BattleSim2 Turn.lua `_typeIdOf`), and no
+  -- side-effect rule that asks a type by name applies (Red's POISON immunity
+  -- and FIRE thaw, Gold's type checks).  Unreadable is DROPPED, not refused,
+  -- unlike `specialTypes`: the list only names types, the chart and every
+  -- index on the upload stand without it, and a content mod's type id need not
+  -- fit the wire's id alphabet (a registry id is any non-empty string --
+  -- "mymod.FAIRY") -- so refusing would cost a modded install every refereed
+  -- fight to keep those few rules.  The fight goes on without them, which is
+  -- the absent reading.
   if raw.typeIds ~= nil then
     out.typeIds = typeIdsOf(raw.typeIds)
   end

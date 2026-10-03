@@ -3602,8 +3602,10 @@ class Relay {
       seed,
       chart: rules.chart,
       specialTypes: rules.specialTypes,
-      // Gen 1 / Gen 2: the chart's axis by name, which Gold's badge type boost
-      // reads a move's type through (lib/battle2 `_typeIdOf`); never on Gen 3.
+      // Gen 1 / Gen 2: the chart's axis by name, which the referee names a
+      // move's type through -- Gold's badge type boost and side-effect type
+      // checks (lib/battle2 `_typeIdOf`), Red's POISON immunity and FIRE thaw
+      // (lib/battle `typeIndexOf`); never on Gen 3.
       typeIds: rules.typeIds,
       metronomePool: rules.metronomePool,
       choiceTimeout: BATTLE_CHOICE_TIMEOUT,

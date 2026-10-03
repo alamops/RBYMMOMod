@@ -2016,8 +2016,10 @@ function M:tryStartSim(record)
     seed = seed,
     chart = rules.chart,
     specialTypes = rules.specialTypes,
-    -- Gen 1 / Gen 2: the chart's axis by name, which Gold's badge type boost
-    -- reads a move's type through (BattleSim2 `_typeIdOf`); never on Gen 3.
+    -- Gen 1 / Gen 2: the chart's axis by name, which the referee names a move's
+    -- type through -- Gold's badge type boost and side-effect type checks
+    -- (BattleSim2 `_typeIdOf`), Red's POISON immunity and FIRE thaw (BattleSim
+    -- `typeIndexOf`); never on Gen 3.
     typeIds = rules.typeIds,
     metronomePool = rules.metronomePool,
     choiceTimeout = Config.BATTLE_CHOICE_TIMEOUT,
