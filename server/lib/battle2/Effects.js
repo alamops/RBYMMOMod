@@ -599,12 +599,59 @@ function resetStages(mon) {
   mon.stages.eva = 0;
 }
 
+// BattleCommand_StatDown's `.ComputerMiss` byte (pokecrystal engine/battle/
+// effect_commands.asm:4320-4440; pokegold the same but for Crystal's Battle
+// Tower exemption, which no fight here is): `cp 25 percent + 1`, and RGBDS
+// `percent` is `* $ff / 100` in integer arithmetic, so 63 + 1 -- the computer
+// misses on a byte under 64.
+const COMPUTER_DROP_MISS = 64;
+
+// The stat a primary stat-down move lowers (ATTACK_DOWN ... EVASION_DOWN and
+// the _2 rows), or null. The *DownHit side effects are SIDE_STAT_DOWN below.
+function primaryStatDown(effectId) {
+  const statFx = STAT_EFFECTS[int(effectId, -1)];
+  if (statFx && statFx.delta < 0 && !statFx.selfTarget) return statFx.stat;
+  return null;
+}
+
+// BattleCommand_StatDown up to `.DidntMiss`, the one routine a primary
+// stat-down move (`attackdown` after `checkhit`) and a *DownHit side effect
+// (`attackdown` after `buildopponentrage`) both run, in its order:
+//
+//   1. CheckMist: the target's SUBSTATUS_MIST -> `.Mist`;
+//   2. the stage already at -6 (`dec b / jp z, .CantLower`) -> `.CantLower`
+//      -- a -2 drop from -5 goes on, its `dec b / jr nz` / `inc b` stopping
+//      it at -6;
+//   3. `.ComputerMiss`: on the enemy's turn outside a link battle
+//      (`computerMover`, Turn's isComputerSeat) a BattleRandom under
+//      COMPUTER_DROP_MISS -> `.Failed`. The exemption it skips the byte for
+//      -- EFFECT_ACCURACY_DOWN_HIT, the attacking moves that lower accuracy --
+//      is not an effect this table maps (Gold's MUD-SLAP / OCTAZOOKA fold to
+//      0, known gaps), and neither is Lock-On, so every stat-down move here
+//      draws it.
+//
+// Nothing before the byte asks whether the move hit, whether a substitute
+// stands or whether the side effect's chance landed: `checkhit` only set
+// wAttackMissed, a substitute is CheckSubstituteOpp at `.DidntMiss`, and
+// wEffectFailed is read after that -- so the computer draws it for a missed
+// GROWL, for a hit into a substitute and for an AURORA BEAM whose chance
+// byte failed alike. Returns 'mist', 'floor' or 'missed' for the step that
+// stopped the drop, or null when it goes on to `.DidntMiss`.
+function statDownGate(rng, targetMon, stat, computerMover) {
+  if (targetMon.mist) return 'mist';
+  if (clampStage(targetMon.stages[stat]) <= STAGE_MIN) return 'floor';
+  if (computerMover && rng && rng.byte() < COMPUTER_DROP_MISS) return 'missed';
+  return null;
+}
+
 // Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
 // Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
 // Substitute) and field-wide Haze still run; Conversion copies onto the user.
+// A stat-down move meets the substitute later, inside BattleCommand_StatDown
+// (`applyPrimary` below), so it is not stopped here.
 function blockedBySubstitute(effectId) {
   const statFx = STAT_EFFECTS[effectId];
-  if (statFx) return !statFx.selfTarget;
+  if (statFx) return false;
   if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
       || effectId === 56 || effectId === 64 || effectId === 65
       || effectId === 79 || effectId === 85) {
@@ -615,7 +662,8 @@ function blockedBySubstitute(effectId) {
 
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 //      moveIndex (1-based), statusToWire, userScreens (the user's side's
-//      screen counts; see LIGHT_SCREEN_EFFECT below)
+//      screen counts; see LIGHT_SCREEN_EFFECT below), computerMover (the
+//      move is the computer's: BattleCommand_StatDown's extra miss)
 function applyPrimary(ctx) {
   const out = {
     nothing: false, messages: [], events: [], heals: [], costs: [],
@@ -655,6 +703,22 @@ function applyPrimary(ctx) {
   if (statFx) {
     const mon = statFx.selfTarget ? userMon : targetMon;
     const fighter = statFx.selfTarget ? userFighter : targetFighter;
+    if (!statFx.selfTarget) {
+      // BattleCommand_StatDown's own order (statDownGate): Mist and a stage
+      // at -6 first -- applyStatChange says their lines, "But it failed" and
+      // "won't go any lower", as before -- then the computer's byte, whose
+      // miss is `.Failed` ("But it failed!", TryPrintButItFailed), and only
+      // then the substitute (CheckSubstituteOpp at `.DidntMiss`).
+      const stop = statDownGate(rng, mon, statFx.stat, c.computerMover === true);
+      if (stop === 'missed') {
+        out.messages.push('But it failed');
+        return out;
+      }
+      if (stop === null && (mon.substitute || 0) > 0) {
+        out.nothing = true;
+        return out;
+      }
+    }
     applyStatChange(out, fighter, mon, statFx.stat, statFx.delta);
     return out;
   }
@@ -887,95 +951,192 @@ function sideChanceProc(rng, chance) {
 const SIDE_STAT_DOWN = {
   68: 'atk', 69: 'def', 70: 'spe', 71: 'spa',
 };
+const SIDE_POISON = { 2: true, 33: true, 77: true };
+const SIDE_BURN = { 4: true, 34: true };
+const SIDE_FREEZE = { 5: true, 35: true };
+const SIDE_PARALYZE = { 6: true, 36: true };
+const SIDE_FLINCH = { 31: true, 37: true };
 
-// ctx: effectId, chance, hit, rng, targetMon, targetFighter, statusToWire
+const SIDE_TEXT = {
+  poison: 'was poisoned', burn: 'was burned',
+  freeze: 'was frozen solid', paralysis: 'is paralyzed',
+};
+const SIDE_TOKEN = { poison: 'PSN', burn: 'BRN', freeze: 'FRZ', paralysis: 'PAR' };
+
+function inflict(out, fighter, mon, status, wire) {
+  mon.status = status;
+  const text = `${mon.species} ${SIDE_TEXT[status]}`;
+  out.messages.push(text);
+  const fields = fighterFields(fighter);
+  fields.status = wire[status] || SIDE_TOKEN[status];
+  fields.text = text;
+  out.events.push({ kind: 'status', fields });
+}
+
+function hasType(mon, typeIndex) {
+  if (typeIndex === null || typeIndex === undefined || !Array.isArray(mon.types)) return false;
+  for (let i = 0; i < mon.types.length; i += 1) {
+    if (mon.types[i] === typeIndex) return true;
+  }
+  return false;
+}
+
+// CheckMoveTypeMatchesTarget (effect_commands.asm:5909-5945, pokegold the
+// same): the move's type against both of the target's, "unless the move is
+// Normal (Tri Attack)" -- a NORMAL move never matches. `normalType` is
+// NORMAL's chart index off the ruleset's typeIds; a fight that names no types
+// compares the indices alone, which every burn and freeze move on the carts
+// (none of them Normal) answers the same way.
+function moveTypeMatchesTarget(targetMon, moveType, normalType) {
+  if (moveType === null || moveType === undefined) return false;
+  if (normalType !== null && normalType !== undefined && moveType === normalType) return false;
+  return hasType(targetMon, moveType);
+}
+
+// The secondary effect of a damaging hit, run where every *Hit script runs it:
+// after `checkfaint` (the caller never asks for a target the hit knocked out)
+// and `buildopponentrage`, whether the hit reached the HP or a substitute took
+// it -- `checkfaint` reads the monster's HP, not the doll's, so a hit into a
+// substitute goes on to the effect command, and each routine asks about the
+// substitute itself (CheckSubstituteOpp: the one standing NOW, so a hit that
+// broke it is past it).
+//
+// ctx: effectId, hit, rng, targetMon, targetFighter, userFighter,
+//      statusToWire, moveType (the move's chart index), poisonType /
+//      normalType (POISON's and NORMAL's chart indices off the ruleset's
+//      typeIds, null when it names none), computerMover (the move is the
+//      computer's: BattleCommand_StatDown's extra miss), chance (only when
+//      `hit` is absent).
 // Returns { proc, messages, events }. `hit` is BattleCommand_EffectChance's
-// verdict when the caller already drew it (Turn draws the byte where the
-// script's `effectchance` stands and applies the effect after
-// `buildopponentrage`); absent, the byte is drawn here. `rng` is still the
-// confusion side effect's turn count.
+// verdict, drawn by the caller where the script's `effectchance` stands --
+// false when a substitute stood at it (CheckSubstituteOpp, before the byte);
+// absent, the byte is drawn here first. `rng` is also the computer's
+// stat-down byte and the confusion side effect's turn count. Each routine
+// below runs in pokecrystal's order (engine/battle/effect_commands.asm,
+// diffed against pokegold); HELD_PREVENT_* (no item on either cart carries
+// one, data/items/attributes.asm), SafeCheckSafeguard and FreezeTarget's
+// WEATHER_SUN return are skipped because nothing here can set them.
 function applySide(ctx) {
   const out = { proc: false, messages: [], events: [] };
   const c = ctx || {};
   const effectId = int(c.effectId, 0);
-  const chance = int(c.chance, 0);
   const { rng, targetMon, targetFighter } = c;
   const wire = c.statusToWire || {};
+  if (!targetMon || typeof targetMon !== 'object') return out;
+  const behindSub = int(targetMon.substitute, 0) > 0;
+  const moveType = int(c.moveType, null);
 
   let hit = c.hit;
-  if (hit === undefined || hit === null) hit = sideChanceProc(rng, chance);
-  if (!hit) return out;
-  out.proc = true;
+  if (hit === undefined || hit === null) hit = !behindSub && sideChanceProc(rng, c.chance) === true;
 
-  if (effectId === 2 || effectId === 33 || effectId === 77) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'poison';
-    const token = wire.poison || 'PSN';
-    const text = `${targetMon.species} was poisoned`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
+  // BattleCommand_PoisonTarget (:3668-3700; Twineedle's `poisontarget` after
+  // its loop is the same command): a substitute, any status, a POISON-type
+  // target (CheckIfTargetIsPoisonType -- POISON alone, so a STEEL type a
+  // non-Poison move reaches, Twineedle's BUG, is poisoned), and only then
+  // wEffectFailed.
+  if (SIDE_POISON[effectId]) {
+    if (behindSub || hasMajorStatus(targetMon)) return out;
+    if (hasType(targetMon, c.poisonType)) return out;
+    if (!hit) return out;
+    out.proc = true;
+    inflict(out, targetFighter, targetMon, 'poison', wire);
     return out;
   }
 
-  if (effectId === 4 || effectId === 34) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'burn';
-    const token = wire.burn || 'BRN';
-    const text = `${targetMon.species} was burned`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
+  // BattleCommand_BurnTarget (:3930-3968): a substitute returns; a target
+  // with any status jumps to Defrost (:3969-3993) BEFORE wEffectFailed is
+  // read, so a frozen target is thawed by every burn-family hit that reaches
+  // the command, its chance byte landed or not ("<TARGET> was defrosted!"),
+  // and any other status ends it there; then a target sharing the move's type
+  // (CheckMoveTypeMatchesTarget: don't burn a Fire type), then wEffectFailed.
+  if (SIDE_BURN[effectId]) {
+    if (behindSub) return out;
+    if (hasMajorStatus(targetMon)) {
+      if (targetMon.status === 'freeze') {
+        targetMon.status = null;
+        targetMon.statusTurns = 0;
+        const text = `${targetMon.species} was defrosted`;
+        out.messages.push(text);
+        // No token: a `status` event without one is a cure (events.js).
+        const fields = fighterFields(targetFighter);
+        fields.text = text;
+        out.events.push({ kind: 'status', fields });
+        out.proc = true;
+      }
+      return out;
+    }
+    if (moveTypeMatchesTarget(targetMon, moveType, c.normalType)) return out;
+    if (!hit) return out;
+    out.proc = true;
+    inflict(out, targetFighter, targetMon, 'burn', wire);
     return out;
   }
 
-  if (effectId === 5 || effectId === 35) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'freeze';
-    const token = wire.freeze || 'FRZ';
-    const text = `${targetMon.species} was frozen solid`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
+  // BattleCommand_FreezeTarget (:3994-4044): a substitute, any status, a
+  // target sharing the move's type (don't freeze an Ice type), then
+  // wEffectFailed.
+  if (SIDE_FREEZE[effectId]) {
+    if (behindSub || hasMajorStatus(targetMon)) return out;
+    if (moveTypeMatchesTarget(targetMon, moveType, c.normalType)) return out;
+    if (!hit) return out;
+    out.proc = true;
+    inflict(out, targetFighter, targetMon, 'freeze', wire);
     return out;
   }
 
-  if (effectId === 6 || effectId === 36) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'paralysis';
-    const token = wire.paralysis || 'PAR';
-    const text = `${targetMon.species} is paralyzed`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
+  // BattleCommand_ParalyzeTarget (:4045-4078): a substitute, any status, then
+  // wEffectFailed. No type check at all -- an ELECTRIC move paralyses an
+  // Electric type and a NORMAL one a Normal type on both carts.
+  if (SIDE_PARALYZE[effectId]) {
+    if (behindSub || hasMajorStatus(targetMon)) return out;
+    if (!hit) return out;
+    out.proc = true;
+    inflict(out, targetFighter, targetMon, 'paralysis', wire);
     return out;
   }
 
-  if (effectId === 31 || effectId === 37) {
+  // BattleCommand_FlinchTarget (:5357-5374): a substitute, then a sleeping or
+  // frozen target (`and 1 << FRZ | SLP_MASK / ret nz`), then
+  // CheckOpponentWentFirst, then wEffectFailed. The went-first test is not
+  // asked here: a flag on a monster that has already moved is never read --
+  // `_openTurn` clears it before that monster's next CheckTurn -- so it
+  // changes nothing. Nor is EndRechargeOpp: a recharge the target owes this
+  // turn was turned into its skip when the turn's choices were filled.
+  if (SIDE_FLINCH[effectId]) {
+    if (behindSub) return out;
+    if (targetMon.status === 'sleep' || targetMon.status === 'freeze') return out;
+    if (!hit) return out;
+    out.proc = true;
     targetMon.flinch = true;
     return out;
   }
 
+  // BattleCommand_StatDown, the routine the primary moves share
+  // (statDownGate: Mist, -6, the computer's byte), then `.DidntMiss`: a
+  // substitute, wEffectFailed and CheckHiddenOpponent, each `.Failed`. A *Hit
+  // script has no `statdownfailtext` and `statdownmessage` speaks only when
+  // wFailedMessage is 0, so every one of those fails silently -- no "But it
+  // failed", no "won't go any lower".
   const stat = SIDE_STAT_DOWN[effectId];
   if (stat) {
+    if (statDownGate(rng, targetMon, stat, c.computerMover === true)) return out;
+    if (behindSub || !hit || targetMon.invulnerable) return out;
+    out.proc = true;
     applyStatChange(out, targetFighter, targetMon, stat, -1);
     return out;
   }
 
+  // BattleCommand_ConfuseTarget (:5732-5749): wEffectFailed, then a
+  // substitute, then a target already confused, all before
+  // FinishConfusingTarget draws the 2-5 turn byte.
   if (effectId === 76) {
+    if (!hit || behindSub) return out;
+    if (targetMon.confusion && targetMon.confusion > 0) return out;
+    out.proc = true;
     confuse(out, targetFighter, targetMon, rng, false);
     return out;
   }
 
-  out.proc = false;
   return out;
 }
 
@@ -1479,6 +1640,9 @@ module.exports = {
   handlesPrimary,
   hasMajorStatus,
   applyPrimary,
+  COMPUTER_DROP_MISS,
+  primaryStatDown,
+  statDownGate,
   sideChanceProc,
   applySide,
   isMultihit,

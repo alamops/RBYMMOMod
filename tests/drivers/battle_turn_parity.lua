@@ -1945,29 +1945,37 @@ scenario("g1_rage_lethal", function(events)
 end)
 
 -- A Substitute that soaks the hit does not stop the build (AttackSubstitute
--- returns to the same caller), and a two-hit move builds once per hit: the
--- first hit breaks the doll, the second lands on the raging monster -- +2.
-scenario("g1_rage_sub", function(events)
-  local battle = build({
-    id = "g1rs", mode = "1v1", seed = 6504, choiceTimeout = 60, reconnectGrace = 60,
-    sides = {
-      a = { { playerId = "p1", name = "Ann", mons = {
-        mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
-             moves = { fx("fury", 20, 81) },
-             extra = { raging = true, rageMove = 1, substitute = 5 } }) } } },
-      b = { { playerId = "p2", name = "Bob", mons = {
-        mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
-             moves = { fx("kicks", 20, 44) } }) } } },
-    },
-  })
-  drainInto(battle, events)
-  probe(battle, 0)
-  battle:submitChoice("p1", { action = "fight", move = 0 })
-  battle:submitChoice("p2", { action = "fight", move = 0 })
-  drainInto(battle, events)
-  probe(battle, 1)
-  return battle
-end)
+-- returns to the same caller), and a two-hit move builds once per hit.  The
+-- kicks hit for 7 to 9.  A 5-HP doll breaks on the first hit, which ends the
+-- move (`.nullifyEffect` zeroed the effect before TwoToFiveAttacksEffect
+-- could mark it multi-hit): one hit, one build -- +1, Alpha untouched.  A
+-- 12-HP doll (g1_rage_sub_late) soaks the first and breaks on the second:
+-- both thrown, both build -- +2.
+local function rageSub(id, seed, doll)
+  return function(events)
+    local battle = build({
+      id = id, mode = "1v1", seed = seed, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 400, spd = 90, baseSpd = 0,
+               moves = { fx("fury", 20, 81) },
+               extra = { raging = true, rageMove = 1, substitute = doll } }) } } },
+        b = { { playerId = "p2", name = "Bob", mons = {
+          mn({ species = "Beta", maxHp = 400, spd = 10, baseSpd = 0,
+               moves = { fx("kicks", 20, 44) } }) } } },
+      },
+    })
+    drainInto(battle, events)
+    probe(battle, 0)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    drainInto(battle, events)
+    probe(battle, 1)
+    return battle
+  end
+end
+scenario("g1_rage_sub", rageSub("g1rs", 6504, 5))
+scenario("g1_rage_sub_late", rageSub("g1rsl", 6504, 12))
 
 -- The two builds no hit carries.  A Disable reaches HandleBuildingRage before
 -- its own hit test (power 0: CalculateDamage goes round MoveHitTest), so a
@@ -2219,8 +2227,8 @@ scenario("g1_side_precedence", sideTurns("g1sp", {
 --   without typeIds, which draws and poisons; 6-9 burn / flinch / poison /
 --   a drop into a Substitute that holds; 10 confusion into the same
 --   Substitute draws and confuses the monster behind it; 11 a burn whose hit
---   breaks the Substitute and 12 a Twineedle whose first hit does (the
---   second lands, the poison does not); 13 a Fire burn move thaws a frozen
+--   breaks the Substitute and 12 a Twineedle whose first hit does (the move
+--   ends there: no second hit, no poison); 13 a Fire burn move thaws a frozen
 --   target, drawing nothing; 14 a drop into Mist lands (Mist stops primaries
 --   only); 15 / 16 a knockout with and without a burn effect end alike.
 local POISON_AXIS = { "NORMAL", "POISON" }
@@ -2245,6 +2253,35 @@ scenario("g1_side_gates", sideTurns("g1sg", {
   { seed = 21964, move = hit(71), bExtra = { mist = true } },
   { seed = 21964, move = hit(0), bHp = 1 },
   { seed = 21964, move = hit(4), bHp = 1 },
+}))
+
+-- Multi-hit moves after a broken Substitute.  The cart marks a move as
+-- hitting more than once only after its first hit (TwoToFiveAttacksEffect,
+-- from the AlwaysHappenSideEffects lookup at `.notDone`), and a first hit
+-- that breaks a Substitute has zeroed the effect first (`.nullifyEffect`): the
+-- move ends after that one hit.  A later break leaves the move going, its
+-- remaining hits on the monster, the effect still gone.  Power 40 hits for 8
+-- to 10, so a 5-HP doll breaks on hit 1 and a 15-HP doll on hit 2.
+--   1-3 two-to-five (29) on seed 29007, a five-hit draw: no doll (five hits
+--   on Beta), a 5-HP doll (one hit; the count byte drawn all the same, so
+--   the RNG state is battle 1's), a 15-HP doll (hits 3-5 on Beta);
+--   4-6 DOUBLE KICK (44): no doll, 5 HP (one hit), 15 HP (both on the doll);
+--   7-9 TWINEEDLE (77) on seed 11078, whose side byte is 51 and lands: no
+--   doll (poisoned), 5 HP (one hit, no poison), 15 HP (two hits, no poison)
+--   -- 8 and 9 end on battle 10's RNG state, a plain hit's: no side byte;
+--   10 a plain hit on the same seed.
+local function multi(effect) return fx("multi", 40, effect) end
+scenario("g1_multi_sub", sideTurns("g1ms", {
+  { seed = 29007, move = multi(29) },
+  { seed = 29007, move = multi(29), bExtra = { substitute = 5 } },
+  { seed = 29007, move = multi(29), bExtra = { substitute = 15 } },
+  { seed = 29007, move = multi(44) },
+  { seed = 29007, move = multi(44), bExtra = { substitute = 5 } },
+  { seed = 29007, move = multi(44), bExtra = { substitute = 15 } },
+  { seed = 11078, move = multi(77) },
+  { seed = 11078, move = multi(77), bExtra = { substitute = 5 } },
+  { seed = 11078, move = multi(77), bExtra = { substitute = 15 } },
+  { seed = 11078, move = multi(0) },
 }))
 
 -- ------------------------------------------------------------------

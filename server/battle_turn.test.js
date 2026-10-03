@@ -1775,15 +1775,17 @@ scenario('g1_rage_lethal', (events) => {
 });
 
 // A Substitute that soaks the hit does not stop the build, and a two-hit move
-// builds once per hit: +2.
-scenario('g1_rage_sub', (events) => {
+// builds once per hit. A 5-HP doll breaks on the first hit, which ends the
+// move: one build, +1. A 12-HP doll (g1_rage_sub_late) breaks on the second:
+// both thrown, both build, +2.
+const rageSub = (id, seed, doll) => (events) => {
   const battle = build({
-    id: 'g1rs', mode: '1v1', seed: 6504, choiceTimeout: 60, reconnectGrace: 60,
+    id, mode: '1v1', seed, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [
         mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
           moves: [fx('fury', 20, 81)],
-          extra: { raging: true, rageMove: 1, substitute: 5 } })] }],
+          extra: { raging: true, rageMove: 1, substitute: doll } })] }],
       b: [{ playerId: 'p2', name: 'Bob', mons: [
         mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
           moves: [fx('kicks', 20, 44)] })] }],
@@ -1796,7 +1798,9 @@ scenario('g1_rage_sub', (events) => {
   drainInto(battle, events);
   probe(battle, 1);
   return battle;
-});
+};
+scenario('g1_rage_sub', rageSub('g1rs', 6504, 5));
+scenario('g1_rage_sub_late', rageSub('g1rsl', 6504, 12));
 
 // The two builds no hit carries: a missed Disable (power 0: the build comes
 // before its own hit test) and a missed Explosion (`.notDone`).
@@ -2042,6 +2046,24 @@ scenario('g1_side_gates', sideTurns('g1sg', [
   { seed: 21964, move: hit(71), bExtra: { mist: true } },
   { seed: 21964, move: hit(0), bHp: 1 },
   { seed: 21964, move: hit(4), bHp: 1 },
+]));
+
+// Multi-hit moves after a broken Substitute: a first-hit break ends the move
+// (`.nullifyEffect` zeroed the effect before TwoToFiveAttacksEffect could mark
+// it multi-hit); a later break leaves it going, the effect still gone (the Lua
+// driver's comment numbers each battle).
+const multi = (effect) => fx('multi', 40, effect);
+scenario('g1_multi_sub', sideTurns('g1ms', [
+  { seed: 29007, move: multi(29) },
+  { seed: 29007, move: multi(29), bExtra: { substitute: 5 } },
+  { seed: 29007, move: multi(29), bExtra: { substitute: 15 } },
+  { seed: 29007, move: multi(44) },
+  { seed: 29007, move: multi(44), bExtra: { substitute: 5 } },
+  { seed: 29007, move: multi(44), bExtra: { substitute: 15 } },
+  { seed: 11078, move: multi(77) },
+  { seed: 11078, move: multi(77), bExtra: { substitute: 5 } },
+  { seed: 11078, move: multi(77), bExtra: { substitute: 15 } },
+  { seed: 11078, move: multi(0) },
 ]));
 
 // ------------------------------------------------------------------
@@ -3758,13 +3780,23 @@ test('the hit that knocks a raging monster out builds nothing and re-penalises n
 });
 
 test('a Substitute that soaks the hit still builds, once per hit', () => {
-  assert.ok(saidIn('g1_rage_sub', "Alpha's substitute broke"));
-  assert.strictEqual(stageAt('g1_rage_sub', 1, 0), 2, 'the doll hit and the body hit: +2');
-  assert.strictEqual(probeAt('g1_rage_sub', 1, 0), '80/40/90/40', '40 x 200 / 100');
   // The build follows the hit: each `stat` comes right after its `damage`.
-  const order = jsRun('g1_rage_sub').events
+  const order = (name) => jsRun(name).events
     .filter((e) => e.slot === 0 && (e.t === 'damage' || e.t === 'stat')).map((e) => e.t);
-  assert.deepStrictEqual(order, ['damage', 'stat', 'damage', 'stat']);
+  const alphaHp = (name) => jsRun(name).events
+    .filter((e) => e.t === 'damage' && e.slot === 0).map((e) => e.hp);
+  // A 5-HP doll: the first hit breaks it and ends the double kick.
+  assert.ok(saidIn('g1_rage_sub', "Alpha's substitute broke"));
+  assert.strictEqual(stageAt('g1_rage_sub', 1, 0), 1, 'one hit, one build: +1');
+  assert.strictEqual(probeAt('g1_rage_sub', 1, 0), '60/40/90/40', '40 x 150 / 100');
+  assert.deepStrictEqual(alphaHp('g1_rage_sub'), [400], 'the doll took it; no second hit');
+  assert.deepStrictEqual(order('g1_rage_sub'), ['damage', 'stat']);
+  // A 12-HP doll: soaked by the first, broken by the second -- both build.
+  assert.ok(saidIn('g1_rage_sub_late', "Alpha's substitute broke"));
+  assert.strictEqual(stageAt('g1_rage_sub_late', 1, 0), 2, 'the soaked hit and the breaking one: +2');
+  assert.strictEqual(probeAt('g1_rage_sub_late', 1, 0), '80/40/90/40', '40 x 200 / 100');
+  assert.deepStrictEqual(alphaHp('g1_rage_sub_late'), [400, 400], 'both on the doll');
+  assert.deepStrictEqual(order('g1_rage_sub_late'), ['damage', 'stat', 'damage', 'stat']);
 });
 
 test('a missed Disable and a missed Explosion both build the target', () => {
@@ -3807,6 +3839,14 @@ const seatOf = (name, at, slot) => jsRun(name).probes.find((p) => p.at === at &&
 const saidAt = (name, at, text) => {
   const battle = jsRun(name).events.find((e) => e.t === 'msg').battle.replace(/1$/, String(at));
   return jsRun(name).events.some((e) => e.battle === battle && e.t === 'msg' && e.text === text);
+};
+// The `damage` events the target (slot 3) took in battle `at`, as "amount:hp"
+// -- a doll's hit leaves hp where it was.
+const hitsAt = (name, at) => {
+  const battle = jsRun(name).events.find((e) => e.t === 'msg').battle.replace(/1$/, String(at));
+  return jsRun(name).events
+    .filter((e) => e.battle === battle && e.t === 'damage' && e.slot === 3)
+    .map((e) => `${e.amount}:${e.hp}`);
 };
 
 test("Red's side effects fire at chance 0: below each routine's threshold, not at it", () => {
@@ -3861,10 +3901,39 @@ test('each side-effect routine draws only where the cart does', () => {
   assert.ok(seatOf(g, 10, 3).confusion > 0, '...and confuses the monster behind it');
   assert.ok(saidAt(g, 11, "Beta's substitute broke") && seatOf(g, 11, 3).status === '');
   assert.ok(saidAt(g, 12, "Beta's substitute broke") && seatOf(g, 12, 3).status === '');
+  assert.deepStrictEqual(hitsAt(g, 12), ['3:400'], 'the Twineedle ends at the hit that broke the doll');
   assert.ok(saidAt(g, 13, 'Fire defrosted Beta'), 'a Fire move thaws a frozen target');
   assert.strictEqual(seatOf(g, 13, 3).status, '');
   assert.strictEqual(seatOf(g, 14, 3).sSpc, -1, 'Mist does not stop a side-effect drop');
   assert.ok(!saidAt(g, 14, 'But it failed'));
   assert.strictEqual(rngOf(g, 15), rngOf(g, 16), 'a knockout draws no side byte');
   assert.strictEqual(seatOf(g, 16, 3), undefined, 'the target is down');
+});
+
+test('a multi-hit move ends at a Substitute its first hit broke, and goes on past a later break', () => {
+  const g = 'g1_multi_sub';
+  // Two-to-five, a five-hit draw: 9 a hit on seed 29007.
+  assert.deepStrictEqual(hitsAt(g, 1), ['9:391', '9:382', '9:373', '9:364', '9:355'], 'no doll: five hits');
+  assert.deepStrictEqual(hitsAt(g, 2), ['9:400'], 'a 5-HP doll: the first hit breaks it, and the move ends');
+  assert.ok(saidAt(g, 2, "Beta's substitute broke"));
+  assert.strictEqual(rngOf(g, 2), rngOf(g, 1), '...the count byte drawn all the same (up front)');
+  assert.deepStrictEqual(hitsAt(g, 3), ['9:400', '9:400', '9:391', '9:382', '9:373'],
+    'a 15-HP doll: broken by the second hit, and hits 3 to 5 land on Beta');
+  assert.ok(saidAt(g, 3, "Beta's substitute broke"));
+  // DOUBLE KICK.
+  assert.deepStrictEqual(hitsAt(g, 4), ['9:391', '9:382'], 'no doll: two hits');
+  assert.deepStrictEqual(hitsAt(g, 5), ['9:400'], 'a 5-HP doll: the second hit is never thrown');
+  assert.deepStrictEqual(hitsAt(g, 6), ['9:400', '9:400'], 'a 15-HP doll: both hits, both on it');
+  assert.ok(saidAt(g, 5, "Beta's substitute broke") && saidAt(g, 6, "Beta's substitute broke"));
+  // TWINEEDLE, on a seed whose side byte (51) poisons.
+  assert.deepStrictEqual(hitsAt(g, 7), ['8:392', '8:384', '25:359'], 'no doll: two hits, then the tick');
+  assert.strictEqual(seatOf(g, 7, 3).status, 'poison');
+  assert.deepStrictEqual(hitsAt(g, 8), ['8:400'], 'a 5-HP doll: one hit');
+  assert.deepStrictEqual(hitsAt(g, 9), ['8:400', '8:400'], 'a 15-HP doll: two hits, both on it');
+  for (const at of [8, 9]) {
+    assert.ok(saidAt(g, at, "Beta's substitute broke"));
+    assert.strictEqual(seatOf(g, at, 3).status, '', `battle ${at}: no poison`);
+    assert.strictEqual(rngOf(g, at), rngOf(g, 10), `battle ${at}: no side byte, a plain hit's stream`);
+  }
+  assert.notStrictEqual(rngOf(g, 7), rngOf(g, 10), 'the poison that landed drew its byte');
 });

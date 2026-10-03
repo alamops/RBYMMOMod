@@ -6831,8 +6831,19 @@ do
   end
 
   -- (d) A Substitute that soaks the hit still builds, and a two-hit move
-  --     builds once per hit, each after its hit: the doll (5 HP) breaks on
-  --     the first, the second lands on Alpha -- stage +2, 40 x 200 / 100 = 80.
+  --     builds once per hit, each after its hit.  Beta's kicks hit for 7.  A
+  --     5-HP doll breaks on the first hit, and that ends the move (the
+  --     effect `.nullifyEffect` zeroed never reaches TwoToFiveAttacksEffect):
+  --     one hit, one build -- stage +1, 40 x 150 / 100 = 60 -- and Alpha's
+  --     own HP untouched.  A 12-HP doll soaks the first (5 left) and breaks
+  --     on the second: both hits thrown, both build -- +2, 40 x 200 / 100 = 80.
+  local function slotZero(events)
+    local order = {}
+    for _, e in ipairs(events) do
+      if e.slot == 0 and (e.t == "damage" or e.t == "stat") then order[#order + 1] = e.t end
+    end
+    return table.concat(order, " ")
+  end
   do
     local battle = duel({
       a = { { species = "Alpha", maxHp = 400, spd = 90, moves = { fury() },
@@ -6841,13 +6852,23 @@ do
     local events = step(battle, use(0), use(0))
     local alpha = activeMonOf(battle, "p1")
     ok(said(events, "Alpha's substitute broke"), "the first hit breaks the doll")
+    eq(alpha.stages.atk, 1, "...and the move ends there: one hit, one build")
+    eq(alpha.cur.atk, 60, "40 at +1")
+    eq(alpha.hp, 400, "no second hit reaches Alpha")
+    eq(slotZero(events), "damage stat", "the build follows its hit")
+  end
+  do
+    local battle = duel({
+      a = { { species = "Alpha", maxHp = 400, spd = 90, moves = { fury() },
+              extra = with(raging, { substitute = 12 }) } },
+      b = { { species = "Beta", maxHp = 400, spd = 10, moves = { fxm("kicks", 20, 44) } } } })
+    local events = step(battle, use(0), use(0))
+    local alpha = activeMonOf(battle, "p1")
+    ok(said(events, "Alpha's substitute broke"), "the second hit breaks the 12-HP doll")
     eq(alpha.stages.atk, 2, "both hits build, the soaked one included")
     eq(alpha.cur.atk, 80, "40 at +2")
-    local order = {}
-    for _, e in ipairs(events) do
-      if e.slot == 0 and (e.t == "damage" or e.t == "stat") then order[#order + 1] = e.t end
-    end
-    eq(table.concat(order, " "), "damage stat damage stat", "each build follows its hit")
+    eq(alpha.hp, 400, "...both on the doll")
+    eq(slotZero(events), "damage stat damage stat", "each build follows its hit")
   end
 
   -- (e) A Bide release is a hit: Beta's sheet holds 10 stored, released at
@@ -7065,6 +7086,16 @@ do
     end
     return false
   end
+  -- The `damage` events one side took, as "amount:hp".
+  local function hitsOn(events, side)
+    local out = {}
+    for _, event in ipairs(events) do
+      if event.t == "damage" and event.side == side then
+        out[#out + 1] = event.amount .. ":" .. event.hp
+      end
+    end
+    return out
+  end
   -- One turn on scripted bytes: how many it drew, what it said, the battle.
   local function turn(o, bytes)
     local battle = duel(o)
@@ -7173,7 +7204,8 @@ do
   eq(draws, plain, "...and the burn effect is gone with it: no draw")
   eq(beta(battle).status, nil, "...no burn")
   draws, events, battle = turn({ a = { moves = { hit(77) } }, b = DOLL })
-  eq(beta(battle).hp < 400, true, "Twineedle's second hit lands on the monster")
+  eq(beta(battle).hp, 400, "Twineedle stops at the hit that broke the Substitute")
+  eq(#hitsOn(events, "b"), 1, "...one hit, the doll's")
   eq(draws, plain, "...and its poison does not roll")
   eq(beta(battle).status, nil, "...no poison")
   local koPlain = turn({ b = { hp = 1 } })
@@ -7234,6 +7266,149 @@ do
   draws, events, battle = turn({ mode = "wild", a = { moves = { hit(70) } } }, { 0, 255, 84 })
   eq(beta(battle).stages.spd, -1, "the player's side-effect drop on the wild monster: no miss byte")
   eq(draws, 4, "...acc, crit, side, then the wild monster's acc")
+end
+
+-- ------------------------------------------------------------------
+-- 29. Gen 1 multi-hit moves after a broken Substitute
+-- ------------------------------------------------------------------
+--
+-- Task FX7.  pokered learns a move hits more than once only after its first
+-- hit: TwoToFiveAttacksEffect runs from the AlwaysHappenSideEffects lookup at
+-- `.notDone` (core.asm :3232-3237) and sets ATTACKING_MULTIPLE_TIMES there.
+-- A first hit that breaks a Substitute has already zeroed the move's effect
+-- (AttackSubstitute `.nullifyEffect`, :4899), so the lookup misses and the
+-- move ends after that one hit -- DOUBLE KICK (44), TWINEEDLE (77) and the
+-- two-to-five moves (29) alike.  A break on hit 2 or later finds the bit set
+-- and the move goes on, its later hits landing on the monster; the effect is
+-- gone all the same, so TWINEEDLE's poison never rolls.  Every byte is
+-- scripted and the damage roll held at 255, so each hit is exactly 10 (level
+-- 20, 40 / 40, power 40, no STAB): a 5-HP doll breaks on hit 1, a 15-HP doll
+-- on hit 2, a 25-HP one on hit 3.  The two-to-five count byte is the move's
+-- second draw (acc, count, crit; 2 + byte % 4, so 3 is five hits), and it is
+-- drawn even when the first hit ends the move -- the referee draws it up
+-- front, the cart at `.notDone` and not at all after a first-hit break: a
+-- stream-only difference.  The g1_multi_sub / g1_rage_sub* parity scenarios
+-- hold lib/battle to the same streams.
+
+do
+  local Rng = BattleSim.Rng
+
+  local function script(battle, bytes)
+    local fallback = Rng.new(99)
+    local log = {}
+    battle.rng = {
+      byte = function()
+        local b = bytes[#log + 1]
+        if b == nil then b = fallback:byte() end
+        log[#log + 1] = b
+        return b
+      end,
+      nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+      damageRoll = function() return 255 end,
+      next = function() return fallback:next() end,
+      state = function() return fallback:state() end,
+    }
+    return log
+  end
+  local function fxm(id, power, effect)
+    return move({ id = id, power = power, effect = effect, pp = 60 })
+  end
+  local function sheet(o)
+    local raw = mon(o)
+    raw.baseSpd = 0
+    return raw
+  end
+
+  -- Alpha (p1, fast, type 1) uses `effect` at power 40 on Beta (p2, slow,
+  -- type 1, 400 HP, a doll of `sub` HP, none at 0), who splashes.  Returns
+  -- the damage Beta's side took ("amount:hp" -- a doll's hit leaves hp at
+  -- 400), how many bytes the turn drew, whether the doll broke, whether Beta
+  -- was poisoned, and Beta.
+  local function turn(effect, sub, bytes)
+    local battle = assert(Turn.create({
+      id = "fx7", mode = "1v1", seed = 7, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = { sheet({ species = "Alpha",
+          maxHp = 400, spd = 90, types = { 1 }, moves = { fxm("multi", 40, effect) } }) } } },
+        b = { { playerId = "p2", name = "Bob", mons = { sheet({ species = "Beta",
+          maxHp = 400, spd = 10, types = { 1 }, substitute = sub > 0 and sub or nil,
+          moves = { fxm("splash", 0, 85) } }) } } },
+      },
+    }))
+    drain(battle)
+    local log = script(battle, bytes)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    local hits, broke, poisoned = {}, false, false
+    for _, e in ipairs(drain(battle)) do
+      if e.t == "damage" and e.side == "b" then hits[#hits + 1] = e.amount .. ":" .. e.hp end
+      if e.t == "msg" and e.text == "Beta's substitute broke" then broke = true end
+      if e.t == "msg" and e.text == "Beta was poisoned" then poisoned = true end
+    end
+    return table.concat(hits, " "), #log, broke, poisoned, activeMonOf(battle, "p2")
+  end
+
+  -- (a) Two-to-five (29) on a count byte of 3: five hits.
+  local FIVE = { 0, 3, 255 }
+  local hits, draws, broke, poisoned, beta = turn(29, 0, FIVE)
+  eq(hits, "10:390 10:380 10:370 10:360 10:350", "29, no doll: five hits on Beta")
+  eq(draws, 4, "...acc, count, crit, then Beta's acc")
+  hits, draws, broke, _, beta = turn(29, 5, FIVE)
+  ok(broke, "29, a 5-HP doll: the first hit breaks it")
+  eq(hits, "10:400", "...and the move ends there: the four hits left are never thrown")
+  eq(beta.hp, 400, "...Beta untouched")
+  eq(beta.substitute or 0, 0, "...the doll gone")
+  eq(draws, 4, "...the count byte drawn all the same (up front: a stream-only difference)")
+  hits, draws, broke, _, beta = turn(29, 15, FIVE)
+  ok(broke, "29, a 15-HP doll: the second hit breaks it")
+  eq(hits, "10:400 10:400 10:390 10:380 10:370",
+     "...and the move goes on: hits 3 to 5 land on Beta")
+  eq(beta.hp, 370, "...30 off Beta")
+  eq(draws, 4, "...the same four bytes")
+  hits, draws, broke = turn(29, 25, FIVE)
+  ok(broke, "29, a 25-HP doll: the third hit breaks it")
+  eq(hits, "10:400 10:400 10:400 10:390 10:380", "...and hits 4 and 5 land on Beta")
+  hits, draws, broke, _, beta = turn(29, 15, { 0, 0, 255 })
+  ok(broke, "29 on a count byte of 0, two hits: the second breaks the 15-HP doll")
+  eq(hits, "10:400 10:400", "...both on the doll, Beta untouched")
+  eq(beta.hp, 400, "...at 400")
+
+  -- (b) DOUBLE KICK (44): two hits, no count byte.
+  local TWO = { 0, 255 }
+  hits, draws = turn(44, 0, TWO)
+  eq(hits, "10:390 10:380", "44, no doll: two hits on Beta")
+  eq(draws, 3, "...acc, crit, then Beta's acc")
+  hits, draws, broke, _, beta = turn(44, 5, TWO)
+  ok(broke, "44, a 5-HP doll: the first hit breaks it")
+  eq(hits, "10:400", "...and the second is never thrown")
+  eq(beta.hp, 400, "...Beta untouched")
+  eq(draws, 3, "...the same three bytes")
+  hits, draws, broke, _, beta = turn(44, 15, TWO)
+  ok(broke, "44, a 15-HP doll: the second hit breaks it")
+  eq(hits, "10:400 10:400", "...both hits thrown, both on the doll")
+  eq(beta.hp, 400, "...Beta untouched")
+
+  -- (c) TWINEEDLE (77): two hits, then the poison byte -- 0 here, which
+  --     lands wherever it is drawn (PoisonEffect's 52).
+  local NEEDLE = { 0, 255, 0 }
+  hits, draws, broke, poisoned, beta = turn(77, 0, NEEDLE)
+  eq(hits, "10:390 10:380 25:355", "77, no doll: two hits, then the poison's tick")
+  ok(poisoned, "...the side byte 0 poisons")
+  eq(draws, 4, "...acc, crit, side, then Beta's acc")
+  hits, draws, broke, poisoned, beta = turn(77, 5, NEEDLE)
+  ok(broke, "77, a 5-HP doll: the first hit breaks it")
+  eq(hits, "10:400", "...and the move ends there: no second hit")
+  ok(not poisoned and beta.status == nil, "...no poison")
+  eq(draws, 3, "...and no side byte: acc, crit, then Beta's acc")
+  hits, draws, broke, poisoned, beta = turn(77, 15, NEEDLE)
+  ok(broke, "77, a 15-HP doll: the second hit breaks it")
+  eq(hits, "10:400 10:400", "...both hits on the doll")
+  ok(not poisoned and beta.status == nil, "...and the poison is gone with the effect")
+  eq(draws, 3, "...no side byte")
+  hits, draws, broke, poisoned, beta = turn(77, 30, NEEDLE)
+  ok(not broke and beta.substitute == 10, "77, a 30-HP doll soaks both hits and stands at 10")
+  ok(not poisoned and beta.status == nil, "...and PoisonEffect, reached, stops at it")
+  eq(draws, 3, "...before its byte")
 end
 
 -- ------------------------------------------------------------------

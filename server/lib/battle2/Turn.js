@@ -34,9 +34,15 @@
  *      `badgeRules` seat (`_obey`, each only when reached);
  *   4. per move that is actually used: accuracy byte, multihit-count byte
  *      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
- *      on a holder, side-chance byte (damaging hits only), the King's Rock
- *      byte, in that order, and none of them drawn when an earlier step ended
- *      the move (a missed move draws no crit byte).
+ *      on a holder, side-chance byte (a hit that reached the HP, or one no
+ *      substitute stood in front of), the computer's StatDown byte, the King's
+ *      Rock byte, in that order, and none of them drawn when an earlier step
+ *      ended the move (a missed move draws no crit byte). The StatDown byte
+ *      (BattleCommand_StatDown's `.ComputerMiss`, Effects.statDownGate) is a
+ *      side b seat's in a fight against the computer, for a stat-down move --
+ *      a primary one right after its accuracy byte, hit or missed
+ *      (`_statDownAfterMiss`), a *DownHit after its side-chance byte, through
+ *      a substitute too -- and never into Mist or at -6.
  *
  * The damage roll is drawn even when the hit turns out to be an immunity,
  * because in the Lua the roll is an argument to `Damage.compute` and arguments
@@ -50,7 +56,9 @@
  * three changes the cart's order made on purpose (the Lua header lists them):
  * a flinched sleeper or freezer draws its status gate first, a called move no
  * longer re-runs the gates, and the paralysis byte follows the confusion byte
- * and the disabled-move check.
+ * and the disabled-move check. The computer's stat-down moves draw the
+ * StatDown byte (item 4) on top: only a fight against the computer whose side
+ * b uses one moves.
  *
  * **Policies chosen where Gen 1 had no answer** -- the whole list, and the
  * reasoning behind each, lives in the Lua header rather than being restated
@@ -83,8 +91,12 @@
  *   * *Physical / Special* via host-uploaded specialTypes (Gen1 type categories).
  *   * *Type names* ride on the ruleset as `typeIds`, the chart's axis in
  *     order (`typeIds[i]` names type index i), because the badge type boost is
- *     keyed by type and a move only carries an index. Absent typeIds, no
- *     move's type can be named and no type boost fires.
+ *     keyed by type and a move only carries an index; the side effects read
+ *     it too, for POISON (a Poison type is never poisoned by one) and NORMAL
+ *     (a Normal move's burn or freeze never meets the same-type return).
+ *     Absent typeIds, no move's type can be named: no type boost fires, a side
+ *     effect poisons a Poison type, and burn and freeze compare the move's
+ *     type index with the target's alone.
  *   * A *faint sends the next living monster in party order*, immediately.
  *   * *Residuals* run in field order (side a, then side b), not speed order.
  *   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
@@ -249,6 +261,17 @@ const WILD_SIDE = 'b';
 
 function isWildSeat(mode, fighter) {
   return !!fighter && fighter.side === WILD_SIDE && Effects.isWildMode(mode);
+}
+
+// The computer's own seat: side b of a fight against the computer, the one
+// side BADGE_MODES never boosts -- the cart's enemy, whose turn is
+// `hBattleTurn` 1 with wLinkMode 0. Where the cart gives the enemy a rule of
+// its own outside a link battle -- BattleCommand_StatDown's `.ComputerMiss`
+// is the case -- this is the seat that takes it. Every other seat (side a
+// there, both sides of a link fight) is a player on its own cartridge. The
+// Gen 1 twin keeps the same test.
+function isComputerSeat(mode, fighter) {
+  return !!fighter && has(BADGE_MODES, mode) && fighter.side !== BADGE_SIDE;
 }
 
 // Auto-pick priorities (twin of Turn.lua AUTO_* tables).
@@ -711,6 +734,19 @@ function copyTypeIds(raw) {
   return out;
 }
 
+// The chart index `typeIds` (copied, above) gives the type registry id
+// `name`: zero-based, the axis every move and monster on the upload uses; null
+// when it names no such type, or names none at all. The side effects ask it
+// for POISON (CheckIfTargetIsPoisonType) and NORMAL (CheckMoveTypeMatchesTarget's
+// exemption), the way the Gen 1 twin asks for POISON and FIRE.
+function typeIndexOf(typeIds, name) {
+  if (!Array.isArray(typeIds)) return null;
+  for (let i = 0; i < typeIds.length; i += 1) {
+    if (typeIds[i] === name) return i;
+  }
+  return null;
+}
+
 // Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 // shapes Wire.bag does: a list of {id,count} or a map.
 function copyBag(raw) {
@@ -749,6 +785,8 @@ class Battle {
     this.chart = isTable(opts.chart) ? opts.chart : null;
     this.specialTypes = null;
     this.typeIds = copyTypeIds(opts.typeIds);
+    this.poisonType = typeIndexOf(opts.typeIds, 'POISON');
+    this.normalType = typeIndexOf(opts.typeIds, 'NORMAL');
     if (Array.isArray(opts.specialTypes)) {
       const set = Object.create(null);
       for (const t of opts.specialTypes) set[Math.max(0, int(t, 0))] = true;
@@ -2992,6 +3030,7 @@ class Battle {
       moveIndex,
       statusToWire: STATUS_TO_WIRE,
       userScreens: this.screens[fighter.side],
+      computerMover: isComputerSeat(this.mode, fighter),
     });
     if (result.nothing) this._say('But nothing happened');
     for (const text of result.messages || []) this._say(text);
@@ -3016,9 +3055,30 @@ class Battle {
     this._afterInfliction(targetFighter, targetMon, before);
   }
 
+  // A primary stat-down move whose `checkhit` missed -- its accuracy byte, or a
+  // target out of reach in the sky or underground (`.FlyDigMoves`) -- still
+  // runs its `attackdown`: the status scripts (AttackDown and the rest, data/
+  // moves/effects.asm) have no `failuretext` between the two, and checkhit only
+  // sets wAttackMissed, which BattleCommand_StatDown reads at `.DidntMiss`,
+  // after its `.ComputerMiss` byte. So the computer draws that byte for a
+  // missed stat-down move too, unless Mist or a stage at -6 stopped the routine
+  // first (Effects.statDownGate). Its verdict changes nothing -- the move has
+  // failed either way -- and the line stays the one the caller said. A *DownHit
+  // that misses never gets here: its `failuretext` ends the script first.
+  _statDownAfterMiss(fighter, defender, effectId) {
+    const stat = Effects.primaryStatDown(effectId);
+    if (!stat || !isComputerSeat(this.mode, fighter)) return;
+    Effects.statDownGate(this.rng, defender, stat, true);
+  }
+
   // The secondary effect of a damaging move whose `effectchance` byte has
-  // already been drawn (`hit`, see `_useMove`).
-  _applySide(fighter, mon, targetFighter, targetMon, effectId, hit) {
+  // already been drawn (`hit`, see `_useMove`). `move` is the sheet move that
+  // landed: its type goes to Effects.applySide with the two named types
+  // (CheckIfTargetIsPoisonType's POISON, CheckMoveTypeMatchesTarget's NORMAL
+  // exemption) and whether the move is the computer's -- BattleCommand_StatDown
+  // draws its extra miss on the enemy's turn outside a link battle, the seat
+  // isComputerSeat names.
+  _applySide(fighter, mon, targetFighter, targetMon, effectId, hit, move) {
     const before = { status: targetMon.status, confusion: targetMon.confusion };
     const result = Effects.applySide({
       effectId,
@@ -3029,6 +3089,10 @@ class Battle {
       userFighter: fighter,
       targetFighter,
       statusToWire: STATUS_TO_WIRE,
+      moveType: move ? move.type : undefined,
+      poisonType: this.poisonType,
+      normalType: this.normalType,
+      computerMover: isComputerSeat(this.mode, fighter),
     });
     for (const text of result.messages || []) this._say(text);
     for (const entry of result.events || []) {
@@ -3167,6 +3231,7 @@ class Battle {
       }
       if (!Effects.hitsInvulnerable(chargeMoveId, move)) {
         this._say('But it failed');
+        this._statDownAfterMiss(fighter, defender, effectId);
         if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
         if (Effects.isJumpKick(effectId)) {
           this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
@@ -3228,6 +3293,7 @@ class Battle {
     });
     if (!shot.hit) {
       this._say(`${mon.species} missed`);
+      this._statDownAfterMiss(fighter, defender, effectId);
       if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
       if (Effects.isJumpKick(effectId)) {
         this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
@@ -3454,10 +3520,15 @@ class Battle {
     // BattleCommand_EffectChance's byte, for a hit that reached the HP; what
     // it decides is applied further down, after the script's post-damage
     // command, `checkfaint` and `buildopponentrage`. Nothing in between draws.
+    // The byte is the script's, drawn before `applydamage`, and only a
+    // substitute standing at it skips it (CheckSubstituteOpp): so a hit a
+    // Focus Band held at 1 HP took nothing off -- a holder already at 1 --
+    // still draws it, and its effect can still land.
     let effectHit = false;
-    if (totalDealt > 0) {
+    if (totalDealt > 0 || !subAtChance) {
       effectHit = Effects.sideChanceProc(this.rng, move.chance) === true;
-
+    }
+    if (totalDealt > 0) {
       if (Effects.isDrain(effectId)) {
         const heal = Effects.drainAmount(totalDealt);
         if (heal > 0) this._heal(fighter, mon, heal);
@@ -3484,9 +3555,14 @@ class Battle {
     if (!multihit) this._buildRage(defender);
 
     // The secondary effect, after `checkfaint` in every *Hit script: a target
-    // the hit knocked out is never burned, poisoned or confused.
-    if (totalDealt > 0 && defender.hp > 0) {
-      this._applySide(fighter, mon, target, defender, effectId, effectHit);
+    // the hit knocked out is never burned, poisoned or confused. `checkfaint`
+    // reads the monster's HP and not its substitute's, so a hit the substitute
+    // took goes on to the effect command, which asks about the substitute
+    // itself (Effects.applySide) -- after BattleCommand_StatDown's
+    // `.ComputerMiss` byte, and after BattleCommand_BurnTarget's Defrost of a
+    // target whose substitute this hit broke.
+    if (defender.hp > 0) {
+      this._applySide(fighter, mon, target, defender, effectId, effectHit, move);
     }
 
     // A substitute absorbs HP (including the breaking hit), so totalDealt

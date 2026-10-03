@@ -316,6 +316,9 @@ here must match `manifest.version`.
   - **Gold's turn checks run in the cart's order.** Full paralysis is rolled
     last, after confusion and a disabled move. A move's secondary effect no
     longer lands on a POKéMON the hit knocked out.
+  - **Red's multi-hit moves and SUBSTITUTE:** DOUBLE KICK, TWINEEDLE, FURY
+    ATTACK and the rest stop when their first hit breaks a SUBSTITUTE, as on
+    the cart. A break on a later hit still lets the remaining hits land.
 - **Secondary effects never happened in Red and Gold fights the mod
   referees.** No EMBER ever burned, no BITE flinched, no BODY SLAM
   paralysed, and no AURORA BEAM lowered Attack, in solo, co-op and PvP
@@ -333,7 +336,14 @@ here must match `manifest.version`.
     - Nothing lands on a POKéMON the hit knocked out, or through a
       SUBSTITUTE the hit broke.
   - **Gold** keeps them per move as `effectChance`, which the client now
-    reads. THIEF steals live again because of it.
+    reads. THIEF steals live again because of it. Gold's own conditions
+    apply too:
+    - no poisoning a POISON type;
+    - no burning or freezing a POKéMON of the move's own type;
+    - a burn-family hit thaws a frozen target;
+    - no flinch on a sleeping or frozen target;
+    - the computer's stat drops, its GROWL and its AURORA BEAM alike, miss
+      a further 25% of the time.
 - **Gold's high-crit moves were never high-crit in a refereed fight.**
   Gold's high-crit list is now the cart's: KARATE CHOP, RAZOR WIND, RAZOR
   LEAF, CRABHAMMER, SLASH, AEROBLAST and CROSS CHOP.

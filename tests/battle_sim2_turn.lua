@@ -2940,6 +2940,307 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 10. Gold side effects: the carts' conditions (FX6)
+-- ------------------------------------------------------------------
+--
+-- Since Gold sheets carry the cart's `effectChance`, Gold secondary effects
+-- fire in refereed fights, so each routine must ask what pokecrystal's asks
+-- (engine/battle/effect_commands.asm, diffed against pokegold): the type
+-- immunities (PoisonTarget's POISON check, CheckMoveTypeMatchesTarget for burn
+-- and freeze, none for paralysis), BurnTarget's Defrost ahead of
+-- wEffectFailed, FlinchTarget's sleeping / frozen return, and
+-- BattleCommand_StatDown's `.ComputerMiss` byte -- shared by the primary and
+-- the side-effect drops -- with the side effect's silent failures.
+-- server/battle2_turn.test.js holds the same claims.
+
+do
+  -- Chart axis for the hand-built calls: NORMAL 0, FIRE 1, ICE 2, ELECTRIC 3,
+  -- POISON 4, BUG 5, STEEL 6.
+  local NORMAL, FIRE, ICE, ELECTRIC, POISON, BUG, STEEL = 0, 1, 2, 3, 4, 5, 6
+  local TYPE_IDS = { "NORMAL", "FIRE", "ICE", "ELECTRIC", "POISON", "BUG", "STEEL" }
+  local WIRE = { poison = "PSN", burn = "BRN", freeze = "FRZ", paralysis = "PAR" }
+  -- A scripted byte source that counts what it hands out.
+  local function bytes(list)
+    local r = { drawn = 0 }
+    function r:byte()
+      self.drawn = self.drawn + 1
+      return list[self.drawn] or 0
+    end
+    return r
+  end
+  local function tgt(o)
+    o = o or {}
+    return { species = "Tgt", types = o.types or { NORMAL }, status = o.status, statusTurns = 0,
+             substitute = o.substitute or 0, mist = o.mist, confusion = o.confusion or 0,
+             invulnerable = o.invulnerable,
+             stages = { atk = o.atk or 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 } }
+  end
+  local function side(effectId, target, o)
+    o = o or {}
+    return Effects.applySide({
+      effectId = effectId, hit = o.hit ~= false, rng = o.rng or bytes({}), targetMon = target,
+      targetFighter = { slot = 3, side = "b" }, userFighter = { slot = 0, side = "a" },
+      statusToWire = WIRE, moveType = o.moveType, poisonType = o.poisonType,
+      normalType = o.normalType, computerMover = o.computer,
+    })
+  end
+  local function primary(effectId, target, o)
+    o = o or {}
+    return Effects.applyPrimary({
+      effectId = effectId, rng = o.rng or bytes({}), targetMon = target,
+      userMon = tgt(), targetFighter = { slot = 3, side = "b" }, userFighter = { slot = 0, side = "a" },
+      statusToWire = WIRE, computerMover = o.computer,
+    })
+  end
+
+  -- (a) PoisonTarget: CheckIfTargetIsPoisonType, POISON alone.
+  local t = tgt({ types = { POISON } })
+  side(2, t, { moveType = POISON, poisonType = POISON })
+  eq(t.status, nil, "a POISON-type target is never poisoned by a side effect")
+  t = tgt({ types = { BUG, POISON } })
+  side(77, t, { moveType = BUG, poisonType = POISON })
+  eq(t.status, nil, "...its second type counts (Twineedle on a Bug / Poison)")
+  t = tgt({ types = { STEEL } })
+  local out = side(77, t, { moveType = BUG, poisonType = POISON })
+  eq(t.status, "poison", "a STEEL type a Bug move reaches is poisoned: the check is POISON alone")
+  eq(out.events[1] and out.events[1].fields.status, "PSN", "...with the PSN token")
+  t = tgt({ types = { POISON } })
+  side(2, t, { moveType = POISON })
+  eq(t.status, "poison", "a fight that names no types cannot tell POISON, and poisons")
+
+  -- (b) BurnTarget / FreezeTarget: CheckMoveTypeMatchesTarget; ParalyzeTarget
+  --     has no type check at all.
+  t = tgt({ types = { FIRE } })
+  side(4, t, { moveType = FIRE, normalType = NORMAL })
+  eq(t.status, nil, "a Fire move never burns a Fire type")
+  t = tgt({ types = { NORMAL, FIRE } })
+  side(4, t, { moveType = FIRE, normalType = NORMAL })
+  eq(t.status, nil, "...nor a dual type whose second type is Fire")
+  t = tgt({ types = { NORMAL } })
+  side(4, t, { moveType = FIRE, normalType = NORMAL })
+  eq(t.status, "burn", "a Fire move burns a Normal type")
+  t = tgt({ types = { NORMAL } })
+  side(4, t, { moveType = NORMAL, normalType = NORMAL })
+  eq(t.status, "burn", "a NORMAL move never matches (the Tri Attack exemption)")
+  t = tgt({ types = { NORMAL } })
+  side(4, t, { moveType = NORMAL })
+  eq(t.status, nil, "...which needs the names: without typeIds the indices alone decide")
+  t = tgt({ types = { ICE } })
+  side(5, t, { moveType = ICE, normalType = NORMAL })
+  eq(t.status, nil, "an Ice move never freezes an Ice type")
+  t = tgt({ types = { FIRE } })
+  side(5, t, { moveType = ICE, normalType = NORMAL })
+  eq(t.status, "freeze", "an Ice move freezes a Fire type")
+  t = tgt({ types = { ELECTRIC } })
+  side(6, t, { moveType = ELECTRIC, normalType = NORMAL })
+  eq(t.status, "paralysis", "an Electric move paralyses an Electric type: ParalyzeTarget asks no type")
+  t = tgt({ types = { NORMAL } })
+  side(36, t, { moveType = NORMAL, normalType = NORMAL })
+  eq(t.status, "paralysis", "...and a Normal one a Normal type")
+  for _, id in ipairs({ 2, 4, 5, 6 }) do
+    t = tgt({ types = { BUG }, substitute = 10 })
+    side(id, t, { moveType = NORMAL, normalType = NORMAL, poisonType = POISON })
+    eq(t.status, nil, "effect " .. id .. ": a substitute standing at the command stops it")
+  end
+
+  -- (c) BurnTarget's Defrost, ahead of wEffectFailed.
+  t = tgt({ status = "freeze" })
+  out = side(4, t, { hit = false, moveType = FIRE, normalType = NORMAL })
+  eq(t.status, nil, "a burn-family hit thaws a frozen target whatever its chance byte said")
+  eq(out.messages[1], "Tgt was defrosted", "...with the cart's line")
+  eq(out.events[1] and out.events[1].fields.status, nil, "...on a status event with no token (a cure)")
+  t = tgt({ status = "freeze", types = { FIRE } })
+  side(4, t, { hit = true, moveType = FIRE, normalType = NORMAL })
+  eq(t.status, nil, "...a Fire-type one too: Defrost comes before the type check")
+  t = tgt({ status = "freeze", substitute = 10 })
+  side(4, t, { hit = true, moveType = FIRE, normalType = NORMAL })
+  eq(t.status, "freeze", "a standing substitute returns before Defrost")
+  t = tgt({ status = "paralysis" })
+  out = side(4, t, { hit = true, moveType = FIRE, normalType = NORMAL })
+  eq(t.status, "paralysis", "any other status ends BurnTarget at Defrost's `ret z`")
+  eq(#out.messages, 0, "...silently")
+  t = tgt({ status = "freeze" })
+  side(5, t, { hit = true, moveType = ICE, normalType = NORMAL })
+  eq(t.status, "freeze", "only BurnTarget thaws")
+
+  -- (d) FlinchTarget: `and 1 << FRZ | SLP_MASK / ret nz`.
+  t = tgt({ status = "sleep" })
+  side(31, t)
+  eq(t.flinch, nil, "a sleeping target is never flinched")
+  t = tgt({ status = "freeze" })
+  side(37, t)
+  eq(t.flinch, nil, "...nor a frozen one")
+  t = tgt({ status = "paralysis" })
+  side(31, t)
+  eq(t.flinch, true, "a paralysed one is")
+  t = tgt({ substitute = 5 })
+  side(31, t)
+  eq(t.flinch, nil, "...and nothing behind a substitute")
+
+  -- (e) BattleCommand_StatDown for a side effect: the computer's byte, and
+  --     every failure silent.
+  eq(Effects.COMPUTER_DROP_MISS, 64, "`cp 25 percent + 1` is 64")
+  local r = bytes({ 63 })
+  t = tgt()
+  out = side(68, t, { rng = r, computer = true })
+  eq(r.drawn, 1, "the computer's side-effect drop draws its byte")
+  eq(t.stages.atk, 0, "...under 64 it misses")
+  eq(#out.messages, 0, "...silently")
+  r = bytes({ 64 })
+  t = tgt()
+  out = side(68, t, { rng = r, computer = true })
+  eq(t.stages.atk, -1, "64 and over goes on to the drop")
+  eq(out.messages[1], "Tgt's ATTACK fell", "...with its line")
+  r = bytes({ 200 })
+  t = tgt()
+  side(70, t, { rng = r, computer = true, hit = false })
+  eq(r.drawn, 1, "the byte is drawn even when the chance byte failed")
+  eq(t.stages.spe, 0, "...which then fails at wEffectFailed")
+  r = bytes({ 200 })
+  t = tgt({ substitute = 10 })
+  side(68, t, { rng = r, computer = true })
+  eq(r.drawn, 1, "...and for a hit into a substitute")
+  eq(t.stages.atk, 0, "...which then fails at CheckSubstituteOpp")
+  r = bytes({ 200 })
+  t = tgt({ mist = true })
+  out = side(68, t, { rng = r, computer = true })
+  eq(r.drawn, 0, "Mist stops the routine before the byte")
+  eq(#out.messages, 0, "...and a side effect says nothing about it (no \"But it failed\")")
+  r = bytes({ 200 })
+  t = tgt({ atk = -6 })
+  out = side(68, t, { rng = r, computer = true })
+  eq(r.drawn, 0, "a stage at -6 stops it before the byte")
+  eq(#out.messages, 0, "...silently (no \"won't go any lower\")")
+  r = bytes({})
+  t = tgt()
+  side(69, t, { rng = r })
+  eq(r.drawn, 0, "a player's side-effect drop draws no byte")
+  eq(t.stages.def, -1, "...and lands")
+  t = tgt({ invulnerable = true })
+  side(68, t)
+  eq(t.stages.atk, 0, "CheckHiddenOpponent: a target in the sky or underground is not lowered")
+  r = bytes({ 0 })
+  t = tgt({ substitute = 10 })
+  out = side(76, t, { rng = r })
+  eq(r.drawn, 0, "ConfuseTarget: a substitute returns before the turn byte")
+  eq(t.confusion, 0, "...and confuses nothing")
+
+  -- (f) ...and for a primary stat-down move: the same routine, in its order.
+  eq(Effects.primaryStatDown(18), "atk", "ATTACK_DOWN lowers atk")
+  eq(Effects.primaryStatDown(62), "acc", "ACCURACY_DOWN_2 lowers acc")
+  eq(Effects.primaryStatDown(10), nil, "a raise is no stat-down move")
+  eq(Effects.primaryStatDown(68), nil, "...and a *DownHit is the side effect's")
+  r = bytes({ 10 })
+  t = tgt()
+  out = primary(18, t, { rng = r, computer = true })
+  eq(out.messages[1], "But it failed", "the computer's GROWL misses on a byte under 64")
+  eq(t.stages.atk, 0, "...lowering nothing")
+  r = bytes({ 64 })
+  t = tgt()
+  primary(18, t, { rng = r, computer = true })
+  eq(t.stages.atk, -1, "...and lands at 64")
+  r = bytes({ 64 })
+  t = tgt({ substitute = 10 })
+  out = primary(18, t, { rng = r, computer = true })
+  eq(r.drawn, 1, "the byte comes before the substitute")
+  eq(out.nothing, true, "...which then stops the move")
+  r = bytes({ 64 })
+  t = tgt({ mist = true })
+  out = primary(18, t, { rng = r, computer = true })
+  eq(r.drawn, 0, "Mist comes before the byte")
+  eq(out.messages[1], "But it failed", "...with the Mist line it always had")
+  r = bytes({ 64 })
+  t = tgt({ atk = -6 })
+  out = primary(18, t, { rng = r, computer = true })
+  eq(r.drawn, 0, "so does a stage at -6")
+  eq(out.messages[1], "Tgt's ATTACK won't go any lower", "...with its line")
+  r = bytes({ 64 })
+  t = tgt({ atk = -5 })
+  primary(58, t, { rng = r, computer = true })
+  eq(r.drawn, 1, "a -2 drop from -5 goes on to the byte")
+  eq(t.stages.atk, -6, "...and stops at -6")
+  t = tgt({ mist = true, substitute = 10 })
+  out = primary(18, t)
+  eq(out.messages[1], "But it failed", "Mist is asked before the substitute, a player's move too")
+  eq(out.nothing, false, "...so the substitute's \"nothing happened\" is not the line")
+
+  -- (g) Through the turn machine.  Two seats on one seed: the wild fight is
+  --     the computer's, the 1v1 the same fight between two players.  Ann
+  --     waits (a 0-power no-op); Bob uses the move under test.
+  local function duelOf(mode, bMove, o)
+    o = o or {}
+    local battle, foe = fight({ mode = mode, seed = o.seed or 5, typeIds = TYPE_IDS,
+      a = { held({ species = "Alpha", maxHp = 300, spe = o.aSpe or 10, types = { NORMAL },
+                   status = o.aStatus, statusTurns = o.aTurns,
+                   moves = { o.aMove or hit("wait", 0, 0, 85) } }) },
+      b = { held({ species = "Beta", maxHp = 300, hp = o.bHp, spe = o.bSpe or 90, types = o.bTypes or { NORMAL },
+                   status = o.bStatus, statusTurns = o.bTurns, item = o.bItem, moves = { bMove } }) } })
+    local aMon = battle.byId.p1.mons[1]
+    if o.aSub then aMon.substitute = o.aSub end
+    if o.aAway then aMon.invulnerable = true end
+    drain(battle)
+    return battle, round(battle, foe)
+  end
+  local function oneByteAhead(link, wild, what)
+    local probe = link.rng:clone()
+    probe:byte()
+    eq(wild.rng:state(), probe:state(), what)
+  end
+  local growl = { id = "growl", pp = 30, power = 0, accuracy = 100, type = 0, effect = 18, chance = 0 }
+  local linkG = duelOf("1v1", growl)
+  local wildG, wildGEvents = duelOf("wild", growl)
+  oneByteAhead(linkG, wildG, "the computer's GROWL draws one byte the same move in a link fight does not")
+  ok(said(wildGEvents, "Beta used growl"), "...on Bob's turn")
+  local miss = { id = "growl", pp = 30, power = 0, accuracy = 1, type = 0, effect = 18, chance = 0 }
+  local linkM, linkMEvents = duelOf("1v1", miss)
+  local wildM = duelOf("wild", miss)
+  ok(said(linkMEvents, "Beta missed"), "a 1% GROWL misses on this seed")
+  oneByteAhead(linkM, wildM, "...and the computer's still draws its StatDown byte after the miss")
+  local linkF, linkFEvents = duelOf("1v1", growl, { aAway = true })
+  local wildF = duelOf("wild", growl, { aAway = true })
+  ok(said(linkFEvents, "But it failed"), "a GROWL at a target in the sky fails (`.FlyDigMoves`)")
+  oneByteAhead(linkF, wildF, "...and the computer's draws its StatDown byte there too")
+  local aurora = { id = "aurora", pp = 30, power = 10, accuracy = 100, type = 2, effect = 68, chance = 10 }
+  local linkS = duelOf("1v1", aurora, { aSub = 250 })
+  local wildS, wildSEvents = duelOf("wild", aurora, { aSub = 250 })
+  oneByteAhead(linkS, wildS, "the computer's AURORA BEAM into a substitute draws the StatDown byte, and only it")
+  eq(wildS.byId.p1.mons[1].stages.atk, 0, "...lowers nothing")
+  ok(not said(wildSEvents, "But it failed"), "...and says nothing about it")
+
+  -- The reviewer's BITE probe: a sleeper that wakes and acts is not flinched.
+  local bite = { id = "bite", pp = 30, power = 10, accuracy = 100, type = 0, effect = 31, chance = 100 }
+  local _, biteEvents = duelOf("1v1", hit("tap", 1), { aMove = bite, aSpe = 90, bSpe = 10,
+                                                       bStatus = "SLP", bTurns = 1 })
+  ok(not said(biteEvents, "Beta flinched"), "a flinch hit on a sleeping target sets nothing")
+  ok(said(biteEvents, "Beta used tap"), "...so the target that wakes this turn acts")
+
+  -- Type immunity through the machine: a 100% ember on a Fire type.
+  local ember = { id = "ember", pp = 30, power = 10, accuracy = 100, type = FIRE, effect = 4, chance = 100 }
+  local emberBattle, emberEvents = duelOf("1v1", hit("tap", 1), { aMove = ember, aSpe = 90, bSpe = 10,
+                                                                   bTypes = { FIRE } })
+  eq(emberBattle.byId.p2.mons[1].status, nil, "a Fire move at 100% never burns a Fire type")
+  ok(not said(emberEvents, "Beta was burned"), "...and says so nowhere")
+
+  -- Defrost through the machine: a 10% ember on a frozen target thaws it,
+  -- and the thawed target then takes its turn.
+  local ember10 = { id = "ember", pp = 30, power = 10, accuracy = 100, type = FIRE, effect = 4, chance = 10 }
+  local thawBattle, thawEvents = duelOf("1v1", hit("tap", 1), { aMove = ember10, aSpe = 90, bSpe = 10,
+                                                                 bStatus = "FRZ" })
+  ok(said(thawEvents, "Beta was defrosted"), "a burn-family hit thaws a frozen target")
+  eq(thawBattle.byId.p2.mons[1].status, nil, "...which is no longer frozen")
+  ok(said(thawEvents, "Beta used tap"), "...and moves this turn")
+
+  -- `effectchance` stands before `applydamage` and only a substitute skips
+  -- its byte: a Focus Band holder at 1 HP takes a hit for 0 and is still
+  -- burned by it.
+  local band = { "FOCUS_BAND", "HELD_FOCUS_BAND", 255, "FOCUS BAND" }
+  local bandBattle, bandEvents = duelOf("1v1", hit("tap", 1), { aMove = ember, aSpe = 90, bSpe = 10,
+                                                                 bHp = 1, bItem = band })
+  ok(said(bandEvents, "Beta hung on with FOCUS BAND!"), "the band holds a 1-HP holder at 1")
+  eq(bandBattle.byId.p2.mons[1].status, "burn", "...and the chance byte still draws and burns it")
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("battle_sim2_turn: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

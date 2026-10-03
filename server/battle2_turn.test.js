@@ -105,6 +105,8 @@ function mn(o) {
     raging: o.raging,
     rageCounter: o.rageCounter,
     transformed: o.transformed,
+    // What the side-effect scenarios add: a Mist the sheet carries.
+    mist: o.mist,
     ...(o.item ? {
       heldItem: o.item[0],
       holdEffect: o.item[1],
@@ -1358,6 +1360,107 @@ scenario('side_effect_ko', (events) => {
   }, [round]);
 });
 
+// The carts' side-effect conditions (FX6), on a named chart: NORMAL 0,
+// FIRE 1, ICE 2, ELECTRIC 3, POISON 4, BUG 5, STEEL 6.
+const SIDE_TYPES = ['NORMAL', 'FIRE', 'ICE', 'ELECTRIC', 'POISON', 'BUG', 'STEEL'];
+
+// Type immunities at 100%: Ann's Fire hit never burns Bob (Fire), Abe's Ice
+// hit never freezes Bea (Ice), Bob's Bug Twineedle poisons Ann (Steel), and
+// Bea's Electric hit paralyses Abe (Electric).
+scenario('side_immunity', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    b.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+  };
+  return play(events, {
+    id: 'sim', mode: 'coop_pvp', seed: 12, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: SIDE_TYPES,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [6],
+        moves: [hm('ember_hit', 10, 1, 4, undefined, 100)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 80, types: [3],
+        moves: [hm('chill_hit', 10, 2, 5, undefined, 100)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 20, types: [1],
+        moves: [hm('needles', 10, 5, 77, undefined, 100)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 300, spe: 10, types: [2],
+        moves: [hm('spark_hit', 10, 3, 6, undefined, 100)] })] }],
+    },
+  }, [round, round]);
+});
+
+// BurnTarget's Defrost: Ann's 10% Fire hit thaws Bob whatever its chance byte
+// says, and Bob then takes his turn.
+scenario('side_defrost', (events) => play(events, {
+  id: 'sdf', mode: '1v1', seed: 4, choiceTimeout: 60, reconnectGrace: 60,
+  typeIds: SIDE_TYPES,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [0],
+      moves: [hm('ember_hit', 10, 1, 4, undefined, 10)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10, types: [0],
+      status: 'FRZ', moves: [hm('tap', 1)] })] }],
+  },
+}, [duelRound('p2'), duelRound('p2')]));
+
+// FlinchTarget: Ann's 100% flinch hit sets nothing on sleeping Bob, so the
+// turn he wakes he acts; once awake he flinches.
+scenario('side_flinch_sleep', (events) => play(events, {
+  id: 'sfs', mode: '1v1', seed: 6, choiceTimeout: 60, reconnectGrace: 60,
+  typeIds: SIDE_TYPES,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [0],
+      moves: [hm('bite_hit', 10, 0, 31, undefined, 100)] })] }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 300, spe: 10, types: [0],
+      status: 'SLP', statusTurns: 2, moves: [hm('tap', 1)] })] }],
+  },
+}, repeat(duelRound('p2'), 3)));
+
+// BattleCommand_StatDown's `.ComputerMiss`, wild: into Ann's substitute, after
+// it breaks, and for GROWL; from -6 the routine stops before the byte.
+scenario('computer_drops', (events) => {
+  const pickWild = (move) => (b) => {
+    b.submitChoice('p1', { action: 'fight', move: 0 });
+    b.submitChoice('wild', { action: 'fight', move });
+  };
+  return play(events, {
+    id: 'cdr', mode: 'wild', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: SIDE_TYPES,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 400, spe: 10, types: [0],
+        substitute: 6, stages: { atk: -5 }, moves: [hm('wait', 0, 0, 85)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 400, spe: 90, types: [0],
+        moves: [hm('aurora_hit', 10, 2, 68, undefined, 30), hm('growl', 0, 0, 18)] })] }],
+    },
+  }, [0, 1, 0, 0, 0, 1, 0, 0, 0, 1].map(pickWild));
+});
+
+// ...and coop_npc, after a miss: Ann is under Mist (no byte), Abe is not (the
+// byte after the missed accuracy byte).
+scenario('computer_growl_miss', (events) => {
+  const round = (b) => {
+    b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    b.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    b.submitChoice('n1', { action: 'fight', move: 0, target: 0 });
+    b.submitChoice('n2', { action: 'fight', move: 0, target: 1 });
+  };
+  const growl = () => ({ id: 'growl', pp: 30, power: 0, accuracy: 1, type: 0, effect: 18, chance: 0 });
+  return play(events, {
+    id: 'cgm', mode: 'coop_npc', seed: 9, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: SIDE_TYPES,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 10, types: [0],
+        mist: true, moves: [hm('wait', 0, 0, 85)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 300, spe: 20, types: [0],
+        moves: [hm('wait', 0, 0, 85)] })] }],
+      b: [{ playerId: 'n1', name: 'Foe', mons: [mn({ species: 'Beta', maxHp: 300, spe: 90, types: [0],
+        moves: [growl()] })] },
+      { playerId: 'n2', name: 'Fay', mons: [mn({ species: 'Delta', maxHp: 300, spe: 80, types: [0],
+        moves: [growl()] })] }],
+    },
+  }, [round, round]);
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -1421,7 +1524,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 53, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 58, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -3037,4 +3140,266 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   cap.battle.drainEvents();
   assert.strictEqual(countSaid(roundOf(cap.battle, cap.foe), "Alpha's RAGE is building!"), 1);
   assert.strictEqual(monOf(cap.battle, 'p1').rageCounter, 255);
+});
+
+// ------------------------------------------------------------------
+// Gold side effects: the carts' conditions (FX6) -- the same claims as
+// section 10 of tests/battle_sim2_turn.lua: the type immunities, BurnTarget's
+// Defrost, FlinchTarget's sleeping / frozen return, and
+// BattleCommand_StatDown's `.ComputerMiss` byte with the side effect's silent
+// failures.
+// ------------------------------------------------------------------
+
+test('side effects: the carts\' type immunities, Defrost, the flinch return and the computer\'s StatDown byte', () => {
+  const [NORMAL, FIRE, ICE, ELECTRIC, POISON, BUG, STEEL] = [0, 1, 2, 3, 4, 5, 6];
+  const TYPE_IDS = ['NORMAL', 'FIRE', 'ICE', 'ELECTRIC', 'POISON', 'BUG', 'STEEL'];
+  const WIRE = { poison: 'PSN', burn: 'BRN', freeze: 'FRZ', paralysis: 'PAR' };
+  const bytes = (list) => {
+    const r = { drawn: 0 };
+    r.byte = () => { r.drawn += 1; return list[r.drawn - 1] === undefined ? 0 : list[r.drawn - 1]; };
+    return r;
+  };
+  const tgt = (o = {}) => ({
+    species: 'Tgt', types: o.types || [NORMAL], status: o.status, statusTurns: 0,
+    substitute: o.substitute || 0, mist: o.mist, confusion: o.confusion || 0,
+    invulnerable: o.invulnerable,
+    stages: { atk: o.atk || 0, def: 0, spe: 0, spa: 0, spd: 0, acc: 0, eva: 0 },
+  });
+  const side = (effectId, target, o = {}) => Effects.applySide({
+    effectId, hit: o.hit !== false, rng: o.rng || bytes([]), targetMon: target,
+    targetFighter: { slot: 3, side: 'b' }, userFighter: { slot: 0, side: 'a' },
+    statusToWire: WIRE, moveType: o.moveType, poisonType: o.poisonType,
+    normalType: o.normalType, computerMover: o.computer,
+  });
+  const primary = (effectId, target, o = {}) => Effects.applyPrimary({
+    effectId, rng: o.rng || bytes([]), targetMon: target,
+    userMon: tgt(), targetFighter: { slot: 3, side: 'b' }, userFighter: { slot: 0, side: 'a' },
+    statusToWire: WIRE, computerMover: o.computer,
+  });
+  const noStatus = (t) => t.status === undefined || t.status === null;
+
+  // (a) PoisonTarget: CheckIfTargetIsPoisonType, POISON alone.
+  let t = tgt({ types: [POISON] });
+  side(2, t, { moveType: POISON, poisonType: POISON });
+  assert.ok(noStatus(t), 'a POISON-type target is never poisoned by a side effect');
+  t = tgt({ types: [BUG, POISON] });
+  side(77, t, { moveType: BUG, poisonType: POISON });
+  assert.ok(noStatus(t), 'its second type counts');
+  t = tgt({ types: [STEEL] });
+  let out = side(77, t, { moveType: BUG, poisonType: POISON });
+  assert.strictEqual(t.status, 'poison', 'a STEEL type a Bug move reaches is poisoned');
+  assert.strictEqual(out.events[0].fields.status, 'PSN');
+  t = tgt({ types: [POISON] });
+  side(2, t, { moveType: POISON });
+  assert.strictEqual(t.status, 'poison', 'no typeIds: POISON cannot be told');
+
+  // (b) CheckMoveTypeMatchesTarget for burn and freeze; none for paralysis.
+  t = tgt({ types: [FIRE] });
+  side(4, t, { moveType: FIRE, normalType: NORMAL });
+  assert.ok(noStatus(t), 'a Fire move never burns a Fire type');
+  t = tgt({ types: [NORMAL, FIRE] });
+  side(4, t, { moveType: FIRE, normalType: NORMAL });
+  assert.ok(noStatus(t), 'nor a dual type whose second type is Fire');
+  t = tgt({ types: [NORMAL] });
+  side(4, t, { moveType: FIRE, normalType: NORMAL });
+  assert.strictEqual(t.status, 'burn');
+  t = tgt({ types: [NORMAL] });
+  side(4, t, { moveType: NORMAL, normalType: NORMAL });
+  assert.strictEqual(t.status, 'burn', 'a NORMAL move never matches');
+  t = tgt({ types: [NORMAL] });
+  side(4, t, { moveType: NORMAL });
+  assert.ok(noStatus(t), 'without typeIds the indices alone decide');
+  t = tgt({ types: [ICE] });
+  side(5, t, { moveType: ICE, normalType: NORMAL });
+  assert.ok(noStatus(t), 'an Ice move never freezes an Ice type');
+  t = tgt({ types: [FIRE] });
+  side(5, t, { moveType: ICE, normalType: NORMAL });
+  assert.strictEqual(t.status, 'freeze');
+  t = tgt({ types: [ELECTRIC] });
+  side(6, t, { moveType: ELECTRIC, normalType: NORMAL });
+  assert.strictEqual(t.status, 'paralysis', 'ParalyzeTarget asks no type');
+  t = tgt({ types: [NORMAL] });
+  side(36, t, { moveType: NORMAL, normalType: NORMAL });
+  assert.strictEqual(t.status, 'paralysis');
+  for (const id of [2, 4, 5, 6]) {
+    t = tgt({ types: [BUG], substitute: 10 });
+    side(id, t, { moveType: NORMAL, normalType: NORMAL, poisonType: POISON });
+    assert.ok(noStatus(t), `effect ${id}: a standing substitute stops it`);
+  }
+
+  // (c) BurnTarget's Defrost, ahead of wEffectFailed.
+  t = tgt({ status: 'freeze' });
+  out = side(4, t, { hit: false, moveType: FIRE, normalType: NORMAL });
+  assert.ok(noStatus(t), 'a burn-family hit thaws whatever its chance byte said');
+  assert.strictEqual(out.messages[0], 'Tgt was defrosted');
+  assert.strictEqual(out.events[0].fields.status, undefined, 'a cure: no token');
+  t = tgt({ status: 'freeze', types: [FIRE] });
+  side(4, t, { hit: true, moveType: FIRE, normalType: NORMAL });
+  assert.ok(noStatus(t), 'Defrost comes before the type check');
+  t = tgt({ status: 'freeze', substitute: 10 });
+  side(4, t, { hit: true, moveType: FIRE, normalType: NORMAL });
+  assert.strictEqual(t.status, 'freeze', 'a standing substitute returns before Defrost');
+  t = tgt({ status: 'paralysis' });
+  out = side(4, t, { hit: true, moveType: FIRE, normalType: NORMAL });
+  assert.strictEqual(t.status, 'paralysis');
+  assert.strictEqual(out.messages.length, 0);
+  t = tgt({ status: 'freeze' });
+  side(5, t, { hit: true, moveType: ICE, normalType: NORMAL });
+  assert.strictEqual(t.status, 'freeze', 'only BurnTarget thaws');
+
+  // (d) FlinchTarget: `and 1 << FRZ | SLP_MASK / ret nz`.
+  t = tgt({ status: 'sleep' });
+  side(31, t);
+  assert.strictEqual(t.flinch, undefined, 'a sleeping target is never flinched');
+  t = tgt({ status: 'freeze' });
+  side(37, t);
+  assert.strictEqual(t.flinch, undefined, 'nor a frozen one');
+  t = tgt({ status: 'paralysis' });
+  side(31, t);
+  assert.strictEqual(t.flinch, true);
+  t = tgt({ substitute: 5 });
+  side(31, t);
+  assert.strictEqual(t.flinch, undefined, 'nothing behind a substitute');
+
+  // (e) BattleCommand_StatDown for a side effect.
+  assert.strictEqual(Effects.COMPUTER_DROP_MISS, 64);
+  let r = bytes([63]);
+  t = tgt();
+  out = side(68, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 1);
+  assert.strictEqual(t.stages.atk, 0);
+  assert.strictEqual(out.messages.length, 0);
+  r = bytes([64]);
+  t = tgt();
+  out = side(68, t, { rng: r, computer: true });
+  assert.strictEqual(t.stages.atk, -1);
+  assert.strictEqual(out.messages[0], "Tgt's ATTACK fell");
+  r = bytes([200]);
+  t = tgt();
+  side(70, t, { rng: r, computer: true, hit: false });
+  assert.strictEqual(r.drawn, 1, 'drawn even when the chance byte failed');
+  assert.strictEqual(t.stages.spe, 0);
+  r = bytes([200]);
+  t = tgt({ substitute: 10 });
+  side(68, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 1, 'and for a hit into a substitute');
+  assert.strictEqual(t.stages.atk, 0);
+  r = bytes([200]);
+  t = tgt({ mist: true });
+  out = side(68, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 0);
+  assert.strictEqual(out.messages.length, 0, 'Mist fails a side effect silently');
+  r = bytes([200]);
+  t = tgt({ atk: -6 });
+  out = side(68, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 0);
+  assert.strictEqual(out.messages.length, 0, '-6 fails a side effect silently');
+  r = bytes([]);
+  t = tgt();
+  side(69, t, { rng: r });
+  assert.strictEqual(r.drawn, 0, "a player's drop draws no byte");
+  assert.strictEqual(t.stages.def, -1);
+  t = tgt({ invulnerable: true });
+  side(68, t);
+  assert.strictEqual(t.stages.atk, 0, 'CheckHiddenOpponent');
+  r = bytes([0]);
+  t = tgt({ substitute: 10 });
+  side(76, t, { rng: r });
+  assert.strictEqual(r.drawn, 0, 'ConfuseTarget: a substitute returns before the turn byte');
+  assert.strictEqual(t.confusion, 0);
+
+  // (f) ...and for a primary stat-down move.
+  assert.strictEqual(Effects.primaryStatDown(18), 'atk');
+  assert.strictEqual(Effects.primaryStatDown(62), 'acc');
+  assert.strictEqual(Effects.primaryStatDown(10), null);
+  assert.strictEqual(Effects.primaryStatDown(68), null);
+  r = bytes([10]);
+  t = tgt();
+  out = primary(18, t, { rng: r, computer: true });
+  assert.strictEqual(out.messages[0], 'But it failed');
+  assert.strictEqual(t.stages.atk, 0);
+  r = bytes([64]);
+  t = tgt();
+  primary(18, t, { rng: r, computer: true });
+  assert.strictEqual(t.stages.atk, -1);
+  r = bytes([64]);
+  t = tgt({ substitute: 10 });
+  out = primary(18, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 1, 'the byte comes before the substitute');
+  assert.strictEqual(out.nothing, true);
+  r = bytes([64]);
+  t = tgt({ mist: true });
+  out = primary(18, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 0);
+  assert.strictEqual(out.messages[0], 'But it failed');
+  r = bytes([64]);
+  t = tgt({ atk: -6 });
+  out = primary(18, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 0);
+  assert.strictEqual(out.messages[0], "Tgt's ATTACK won't go any lower");
+  r = bytes([64]);
+  t = tgt({ atk: -5 });
+  primary(58, t, { rng: r, computer: true });
+  assert.strictEqual(r.drawn, 1);
+  assert.strictEqual(t.stages.atk, -6);
+  t = tgt({ mist: true, substitute: 10 });
+  out = primary(18, t);
+  assert.strictEqual(out.messages[0], 'But it failed', 'Mist before the substitute');
+  assert.strictEqual(out.nothing, false);
+
+  // (g) Through the turn machine.
+  const duelOf = (mode, bMove, o = {}) => {
+    const { battle, foe } = fight({ mode, seed: o.seed === undefined ? 5 : o.seed, typeIds: TYPE_IDS,
+      a: [held({ species: 'Alpha', maxHp: 300, spe: o.aSpe || 10, types: [NORMAL],
+        status: o.aStatus, statusTurns: o.aTurns, moves: [o.aMove || hit('wait', 0, 0, 85)] })],
+      b: [held({ species: 'Beta', maxHp: 300, hp: o.bHp, spe: o.bSpe || 90, types: o.bTypes || [NORMAL],
+        status: o.bStatus, statusTurns: o.bTurns, item: o.bItem, moves: [bMove] })] });
+    if (o.aSub) monOf(battle, 'p1').substitute = o.aSub;
+    if (o.aAway) monOf(battle, 'p1').invulnerable = true;
+    battle.drainEvents();
+    return { battle, events: roundOf(battle, foe) };
+  };
+  const oneByteAhead = (link, wild, what) => {
+    const probe = link.rng.clone();
+    probe.byte();
+    assert.strictEqual(wild.rng.state(), probe.state(), what);
+  };
+  const growl = { id: 'growl', pp: 30, power: 0, accuracy: 100, type: 0, effect: 18, chance: 0 };
+  const wildG = duelOf('wild', growl);
+  oneByteAhead(duelOf('1v1', growl).battle, wildG.battle, "the computer's GROWL draws one more byte");
+  assert.ok(said(wildG.events, 'Beta used growl'));
+  const miss = { id: 'growl', pp: 30, power: 0, accuracy: 1, type: 0, effect: 18, chance: 0 };
+  const linkM = duelOf('1v1', miss);
+  assert.ok(said(linkM.events, 'Beta missed'));
+  oneByteAhead(linkM.battle, duelOf('wild', miss).battle, 'and after a miss');
+  const linkF = duelOf('1v1', growl, { aAway: true });
+  assert.ok(said(linkF.events, 'But it failed'), 'a GROWL at a target in the sky fails');
+  oneByteAhead(linkF.battle, duelOf('wild', growl, { aAway: true }).battle, 'and the computer draws there too');
+  const aurora = { id: 'aurora', pp: 30, power: 10, accuracy: 100, type: 2, effect: 68, chance: 10 };
+  const wildS = duelOf('wild', aurora, { aSub: 250 });
+  oneByteAhead(duelOf('1v1', aurora, { aSub: 250 }).battle, wildS.battle, 'and into a substitute');
+  assert.strictEqual(monOf(wildS.battle, 'p1').stages.atk, 0);
+  assert.ok(!said(wildS.events, 'But it failed'));
+
+  const bite = { id: 'bite', pp: 30, power: 10, accuracy: 100, type: 0, effect: 31, chance: 100 };
+  const biteRun = duelOf('1v1', hit('tap', 1), { aMove: bite, aSpe: 90, bSpe: 10, bStatus: 'SLP', bTurns: 1 });
+  assert.ok(!said(biteRun.events, 'Beta flinched'), 'a sleeping target is not flinched');
+  assert.ok(said(biteRun.events, 'Beta used tap'), 'so it wakes and acts');
+
+  const ember = { id: 'ember', pp: 30, power: 10, accuracy: 100, type: FIRE, effect: 4, chance: 100 };
+  const emberRun = duelOf('1v1', hit('tap', 1), { aMove: ember, aSpe: 90, bSpe: 10, bTypes: [FIRE] });
+  assert.ok(noStatus(monOf(emberRun.battle, 'p2')), 'a Fire move at 100% never burns a Fire type');
+  assert.ok(!said(emberRun.events, 'Beta was burned'));
+
+  const ember10 = { id: 'ember', pp: 30, power: 10, accuracy: 100, type: FIRE, effect: 4, chance: 10 };
+  const thaw = duelOf('1v1', hit('tap', 1), { aMove: ember10, aSpe: 90, bSpe: 10, bStatus: 'FRZ' });
+  assert.ok(said(thaw.events, 'Beta was defrosted'));
+  assert.ok(noStatus(monOf(thaw.battle, 'p2')));
+  assert.ok(said(thaw.events, 'Beta used tap'));
+
+  // A Focus Band holder at 1 HP takes the hit for 0 and is still burned.
+  const band = ['FOCUS_BAND', 'HELD_FOCUS_BAND', 255, 'FOCUS BAND'];
+  const banded = duelOf('1v1', hit('tap', 1), { aMove: ember, aSpe: 90, bSpe: 10, bHp: 1, bItem: band });
+  assert.ok(said(banded.events, 'Beta hung on with FOCUS BAND!'));
+  assert.strictEqual(monOf(banded.battle, 'p2').status, 'burn', 'the chance byte still draws');
 });

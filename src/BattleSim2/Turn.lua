@@ -49,9 +49,15 @@
 --      each only when reached);
 --   4. per move that is actually used: accuracy byte, multihit-count byte
 --      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
---      on a holder, side-chance byte (damaging hits only), the King's Rock
---      byte, in that order, and none of them drawn when an earlier step ended
---      the move (a missed move draws no crit byte).
+--      on a holder, side-chance byte (a hit that reached the HP, or one no
+--      substitute stood in front of), the computer's StatDown byte, the King's
+--      Rock byte, in that order, and none of them drawn when an earlier step
+--      ended the move (a missed move draws no crit byte).  The StatDown byte
+--      (BattleCommand_StatDown's `.ComputerMiss`, Effects.statDownGate) is a
+--      side b seat's in a fight against the computer, for a stat-down move --
+--      a primary one right after its accuracy byte, hit or missed
+--      (`_statDownAfterMiss`), a *DownHit after its side-chance byte, through
+--      a substitute too -- and never into Mist or at -6.
 --
 -- Nothing else rolls.  Residuals, switches, the bag, the between-turn held
 -- items, rage and the clock are all deterministic, so a battle replays from its
@@ -65,7 +71,8 @@
 -- paralysed, confused monster draws them in the other order and draws no
 -- paralysis byte on a self-hit or on its disabled move.  A Thief sheet with
 -- its real 100% chance draws the side-chance byte it always drew; Thief now
--- obeys it.
+-- obeys it.  The computer's stat-down moves draw the StatDown byte (item 4)
+-- on top: only a fight against the computer whose side b uses one moves.
 --
 -- **Policies chosen where Gen 1 had no answer**, each one written down because
 -- the two runtimes have to pick the same one:
@@ -109,8 +116,12 @@
 --     specialTypes keeps every damaging move on atk/def.
 --   * *Type names* ride on the ruleset as `typeIds`, the chart's axis in
 --     order (`typeIds[i + 1]` names type index i), because the badge type
---     boost is keyed by type and a move only carries an index.  Absent
---     typeIds, no move's type can be named and no type boost fires.
+--     boost is keyed by type and a move only carries an index; the side
+--     effects read it too, for POISON (a Poison type is never poisoned by
+--     one) and NORMAL (a Normal move's burn or freeze never meets the
+--     same-type return).  Absent typeIds, no move's type can be named: no type
+--     boost fires, a side effect poisons a Poison type, and burn and freeze
+--     compare the move's type index with the target's alone.
 --   * A *faint sends the next living monster in party order*, immediately and
 --     without asking.  The original stops and asks; asking here would mean a
 --     second kind of choice phase with its own deadline and its own forfeit
@@ -268,6 +279,18 @@ local WILD_SIDE = "b"
 local function isWildSeat(mode, fighter)
   return fighter ~= nil and fighter.side == WILD_SIDE
     and Effects.isWildMode(mode)
+end
+
+-- The computer's own seat: side b of a fight against the computer, the one
+-- side M.BADGE_MODES never boosts -- the cart's enemy, whose turn is
+-- `hBattleTurn` 1 with wLinkMode 0.  Where the cart gives the enemy a rule of
+-- its own outside a link battle -- BattleCommand_StatDown's `.ComputerMiss`
+-- is the case -- this is the seat that takes it.  Every other seat (side a
+-- there, both sides of a link fight) is a player on its own cartridge.  The
+-- Gen 1 twin keeps the same test.
+local function isComputerSeat(mode, fighter)
+  return fighter ~= nil and M.BADGE_MODES[mode] == true
+    and fighter.side ~= M.BADGE_SIDE
 end
 
 -- Wire spells a condition as a three-letter token and Status.lua spells it as
@@ -608,6 +631,19 @@ local function copyTypeIds(raw)
   return out
 end
 
+-- The chart index `typeIds` (copied, above) gives the type registry id
+-- `name`: zero-based, the axis every move and monster on the upload uses; nil
+-- when it names no such type, or names none at all.  The side effects ask it
+-- for POISON (CheckIfTargetIsPoisonType) and NORMAL (CheckMoveTypeMatchesTarget's
+-- exemption), the way BattleSim's twin asks for POISON and FIRE.
+local function typeIndexOf(typeIds, name)
+  if type(typeIds) ~= "table" then return nil end
+  for i = 1, #typeIds do
+    if typeIds[i] == name then return i - 1 end
+  end
+  return nil
+end
+
 -- Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 -- shapes Wire.bag does: a list of {id,count} or a map.
 local function copyBag(raw)
@@ -707,6 +743,8 @@ function M.create(opts)
     chart          = type(opts.chart) == "table" and opts.chart or nil,
     specialTypes   = nil,
     typeIds        = copyTypeIds(opts.typeIds),
+    poisonType     = typeIndexOf(opts.typeIds, "POISON"),
+    normalType     = typeIndexOf(opts.typeIds, "NORMAL"),
     metronomePool  = nil,
     choiceTimeout  = max(0, int(opts.choiceTimeout, M.CHOICE_TIMEOUT)),
     reconnectGrace = max(0, int(opts.reconnectGrace, M.RECONNECT_GRACE)),
@@ -3183,6 +3221,7 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
     moveIndex = moveIndex,
     statusToWire = M.STATUS_TO_WIRE,
     userScreens = self.screens[fighter.side],
+    computerMover = isComputerSeat(self.mode, fighter),
   })
   if result.nothing then self:_say("But nothing happened") end
   for _, text in ipairs(result.messages or {}) do self:_say(text) end
@@ -3205,9 +3244,30 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
   self:_afterInfliction(targetFighter, targetMon, before)
 end
 
+-- A primary stat-down move whose `checkhit` missed -- its accuracy byte, or a
+-- target out of reach in the sky or underground (`.FlyDigMoves`) -- still
+-- runs its `attackdown`: the status scripts (AttackDown and the rest, data/
+-- moves/effects.asm) have no `failuretext` between the two, and checkhit only
+-- sets wAttackMissed, which BattleCommand_StatDown reads at `.DidntMiss`,
+-- after its `.ComputerMiss` byte.  So the computer draws that byte for a
+-- missed stat-down move too, unless Mist or a stage at -6 stopped the routine
+-- first (Effects.statDownGate).  Its verdict changes nothing -- the move has
+-- failed either way -- and the line stays the one the caller said.  A *DownHit
+-- that misses never gets here: its `failuretext` ends the script first.
+function Battle:_statDownAfterMiss(fighter, defender, effectId)
+  local stat = Effects.primaryStatDown(effectId)
+  if not stat or not isComputerSeat(self.mode, fighter) then return end
+  Effects.statDownGate(self.rng, defender, stat, true)
+end
+
 -- The secondary effect of a damaging move whose `effectchance` byte has
--- already been drawn (`hit`, see `_useMove`).
-function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, hit)
+-- already been drawn (`hit`, see `_useMove`).  `move` is the sheet move that
+-- landed: its type goes to Effects.applySide with the two named types
+-- (CheckIfTargetIsPoisonType's POISON, CheckMoveTypeMatchesTarget's NORMAL
+-- exemption) and whether the move is the computer's -- BattleCommand_StatDown
+-- draws its extra miss on the enemy's turn outside a link battle, the seat
+-- isComputerSeat names.
+function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, hit, move)
   local before = { status = targetMon.status, confusion = targetMon.confusion }
   local result = Effects.applySide({
     effectId = effectId,
@@ -3218,6 +3278,10 @@ function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, hit
     userFighter = fighter,
     targetFighter = targetFighter,
     statusToWire = M.STATUS_TO_WIRE,
+    moveType = move and move.type,
+    poisonType = self.poisonType,
+    normalType = self.normalType,
+    computerMover = isComputerSeat(self.mode, fighter),
   })
   for _, text in ipairs(result.messages or {}) do self:_say(text) end
   for _, entry in ipairs(result.events or {}) do
@@ -3361,6 +3425,7 @@ function Battle:_useMove(fighter, mon, opts)
     end
     if not Effects.hitsInvulnerable(chargeMoveId, move) then
       self:_say("But it failed")
+      self:_statDownAfterMiss(fighter, defender, effectId)
       if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
       if Effects.isJumpKick(effectId) then
         self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
@@ -3420,6 +3485,7 @@ function Battle:_useMove(fighter, mon, opts)
   })
   if not hit then
     self:_say(mon.species .. " missed")
+    self:_statDownAfterMiss(fighter, defender, effectId)
     if Effects.isExplode(effectId) then self:_faintUser(fighter, mon) end
     if Effects.isJumpKick(effectId) then
       self:_damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), nil)
@@ -3641,11 +3707,15 @@ function Battle:_useMove(fighter, mon, opts)
   -- bytes).  What it decides is applied further down, where the scripts put
   -- the secondary effect: after their post-damage command (draintarget,
   -- payday, thief, recoil), `checkfaint` and `buildopponentrage`.  Nothing in
-  -- between draws.
+  -- between draws.  The byte is the script's, drawn before `applydamage`, and
+  -- only a substitute standing at it skips it (CheckSubstituteOpp): so a hit
+  -- a Focus Band held at 1 HP took nothing off -- a holder already at 1 --
+  -- still draws it, and its effect can still land.
   local effectHit = false
-  if totalDealt > 0 then
+  if totalDealt > 0 or not subAtChance then
     effectHit = Effects.sideChanceProc(self.rng, move.chance) == true
-
+  end
+  if totalDealt > 0 then
     if Effects.isDrain(effectId) then
       local heal = Effects.drainAmount(totalDealt)
       if heal > 0 then self:_heal(fighter, mon, heal) end
@@ -3674,8 +3744,13 @@ function Battle:_useMove(fighter, mon, opts)
   -- The secondary effect, which every *Hit script puts after `checkfaint`:
   -- a target the hit knocked out has ended the script there, so it is never
   -- burned, poisoned or confused (nor its confusion's turns drawn).
-  if totalDealt > 0 and defender.hp > 0 then
-    self:_applySide(fighter, mon, target, defender, effectId, effectHit)
+  -- `checkfaint` reads the monster's HP and not its substitute's, so a hit the
+  -- substitute took goes on to the effect command, which asks about the
+  -- substitute itself (Effects.applySide) -- after BattleCommand_StatDown's
+  -- `.ComputerMiss` byte, and after BattleCommand_BurnTarget's Defrost of a
+  -- target whose substitute this hit broke.
+  if defender.hp > 0 then
+    self:_applySide(fighter, mon, target, defender, effectId, effectHit, move)
   end
 
   -- A substitute absorbs HP (including the breaking hit), so totalDealt stays

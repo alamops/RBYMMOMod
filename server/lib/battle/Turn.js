@@ -3063,9 +3063,30 @@ class Battle {
     // Rage builds per hit, after it (the multi-hit loop jumps back to
     // GetPlayerAnimationType from below HandleBuildingRage), and before the
     // move's side effect, which `.executeOtherEffects` runs after the loop.
+    //
+    // A Substitute the *first* hit breaks ends a multi-hit move there. The
+    // cart only learns it is hitting more than once after that hit:
+    // TwoToFiveAttacksEffect sets ATTACKING_MULTIPLE_TIMES from the
+    // AlwaysHappenSideEffects lookup at `.notDone` (core.asm :3232-3237), and
+    // AttackSubstitute's `.nullifyEffect` (:4899) has already zeroed the
+    // move's effect, so the lookup misses, the bit stays clear, and the loop
+    // test (:3245-3247) goes straight to `.executeOtherEffects` -- which finds
+    // effect 0 and does nothing: no Twineedle poison, and not the "Hit the
+    // enemy N times!" line either (one the referee never says for any
+    // multi-hit move). The Rage build of that one hit still runs: it sits
+    // above the test. A break on hit 2 or later finds the bit already set, so
+    // the move goes on and the hits after it land on the monster. DOUBLE KICK
+    // (44), TWINEEDLE (77) and the two-to-five moves (29) alike. The
+    // two-to-five count was drawn up front, before the crit byte
+    // (Effects.hitCount); the cart draws it at that same `.notDone` -- after
+    // the first hit, and not at all when the first hit broke a Substitute.
+    // The referee keeps its up-front draw, a stream-only difference: a
+    // first-hit break spends one byte the cart would not, nothing on the
+    // field reads which byte it was, and every fight draws exactly the bytes
+    // it drew before this rule.
     let totalDealt = 0;
     let subBroke = false;
-    for (let h = 0; h < hits; h += 1) {
+    for (let h = 1; h <= hits; h += 1) {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
       const subUp = (defender.substitute || 0) > 0;
@@ -3073,15 +3094,18 @@ class Battle {
       if (subUp && (defender.substitute || 0) <= 0) subBroke = true;
       totalDealt += hpBefore - defender.hp;
       this._buildRage(target, defender, fighter);
+      if (subBroke && h === 1) break;
     }
 
     // `.executeOtherEffects` (core.asm :3258-3269) runs the side effect once,
     // after the last hit, and only if the move got that far: a hit that
     // knocked the target out returned at `ret z` (:3242), and a Substitute
-    // this move broke zeroed the move's effect (AttackSubstitute
-    // `.nullifyEffect`, :4899) -- the hits after it land on the monster, the
-    // effect does not. A Substitute that soaked every hit and still stands is
-    // the routine's to answer, so it is passed through (Effects.applySide).
+    // this move broke -- on any hit -- zeroed the move's effect
+    // (AttackSubstitute `.nullifyEffect`, :4899), so TWINEEDLE's poison
+    // (`.twineedle` rewrote the effect to POISON_SIDE_EFFECT1 on the first
+    // hit) is gone with it. A Substitute that soaked every hit and still
+    // stands is the routine's to answer, so it is passed through
+    // (Effects.applySide).
     if (defender.hp > 0 && !subBroke) {
       this._applySide(fighter, mon, target, defender, effectId, move);
     }

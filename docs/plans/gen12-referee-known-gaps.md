@@ -121,9 +121,23 @@ turn order of every fight where the computer uses an item.
 - The primary POISON move effect (POISONPOWDER, POISON GAS…) doesn't turn a
   Poison-type target away; the side-effect routine does.
 - A SUBSTITUTE hit for exactly its HP survives at 0 on the cart (`sub [hl]` /
-  `ret nc`); the referee breaks it (`amount >= mon.substitute`).
+  `ret nc`); the referee breaks it (`amount >= mon.substitute`). Since a first-hit break now
+  ends a multi-hit move, an exact-HP doll also changes that move's hit count.
 - A primary stat drop into MIST misses in the cart's `MoveHitTest` before the
   accuracy byte; the referee draws the accuracy byte, then fails.
+- The two-to-five hit count is uniform (`2 + byte % 4`); the cart gives 2, 3,
+  4 or 5 hits at 3/8, 3/8, 1/8, 1/8, sometimes with a second draw
+  (`effects.asm` TwoToFiveAttacksEffect). The referee also draws the count up
+  front; the cart draws it after the first hit. Fixing either moves draws.
+- EFFECT_1E (30) is a two-to-five move on the cart; the referee treats it as
+  one hit. No vanilla move uses it.
+- A hit that breaks a SUBSTITUTE cancels the rest of the move's
+  `AlwaysHappenSideEffects` on the cart: an EXPLOSION / SELFDESTRUCT user
+  survives, and a RAGE user never starts raging. The referee always faints the
+  exploder and always starts the rage.
+- Against a SUBSTITUTE that holds, the cart still drains, takes recoil
+  (STRUGGLE's too), scatters PAY DAY coins and recharges after HYPER BEAM; the
+  referee skips all four (it gates them on damage dealt to the mon).
 - A hit that has already fallen to 0 or 1 damage still draws the random roll.
   pokered `RandomizeDamage` returns before drawing (`cp 2` / `ret c`), and so
   does pokecrystal `BattleCommand_DamageVariation`, so Gold has it too. The
@@ -148,6 +162,14 @@ turn order of every fight where the computer uses an item.
 - Bright Powder works in the referee's percent domain (100% becomes 93%; the
   cart gives 91.8%) and also touches the OHKO accuracy roll.
 - `HELD_PREVENT_*` effects aren't modelled; no Gold or Crystal item carries one.
+- MultiHit / DoubleHit / PoisonMultiHit run `checkhit`, `critical`,
+  `damagevariation` and (TWINEEDLE) `effectchance` once per hit on the cart; the
+  referee draws them once per move. Fixing it moves every multi-hit fight's draws.
+- LOCK-ON and SAFEGUARD aren't mapped, so the stat-down miss's Lock-On exemption
+  and Safeguard's status block never apply.
+- Primary stat-down lines: the cart says "protected by MIST" and, against a
+  SUBSTITUTE, "But it failed!"; the referee says "But it failed" and "But
+  nothing happened".
 - LEECH SEED saps 1/16 of max HP, Red's amount; pokecrystal saps 1/8
   (`GetEighthMaxHP`), and on a knockout heals the seeder only the HP actually
   taken (`SubtractHP`).
@@ -198,8 +220,8 @@ OCTAZOOKA), ATTACK UP (METAL CLAW), DEFENSE UP (STEEL WING), ALL UP
 SNORE (flinch), THUNDER (paralysis) and TRI ATTACK, whose `tristatuschance`
 also draws a reroll loop. The fix is a Gen 2-native effect table in both twins.
 The cart also draws `effectchance` on a miss (only a SUBSTITUTE skips it);
-the referee draws only when the hit dealt damage — a stream difference, not an
-outcome one.
+the referee draws when the hit dealt damage or no SUBSTITUTE stood at
+`effectchance` — a stream difference, not an outcome one.
 
 ## 14. METRONOME's pool on Gold
 

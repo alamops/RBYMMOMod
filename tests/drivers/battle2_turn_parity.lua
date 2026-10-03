@@ -245,6 +245,8 @@ local function mn(o)
     -- Seed, rage and Transform carried on the sheet.
     substitute = o.substitute, bide = o.bide, leechSeed = o.leechSeed,
     raging = o.raging, rageCounter = o.rageCounter, transformed = o.transformed,
+    -- What the side-effect scenarios add: a Mist the sheet carries.
+    mist = o.mist,
   }
   if o.item then
     m.heldItem, m.holdEffect, m.holdParam = o.item[1], o.item[2], o.item[3]
@@ -1642,6 +1644,119 @@ scenario("side_effect_ko", function(events)
             { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, hp = 2, spe = 20,
               types = { 2 }, moves = { hm("tap", 1) } }) } } },
     } }, { round })
+end)
+
+-- The carts' side-effect conditions (FX6), on a named chart: NORMAL 0,
+-- FIRE 1, ICE 2, ELECTRIC 3, POISON 4, BUG 5, STEEL 6.
+local SIDE_TYPES = { "NORMAL", "FIRE", "ICE", "ELECTRIC", "POISON", "BUG", "STEEL" }
+
+-- Type immunities at 100%: Ann's Fire hit never burns Bob (Fire),
+-- Abe's Ice hit never freezes Bea (Ice), Bob's Bug Twineedle poisons Ann
+-- (Steel: CheckIfTargetIsPoisonType asks POISON alone), and Bea's Electric hit
+-- paralyses Abe (Electric: ParalyzeTarget asks no type).
+scenario("side_immunity", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("b1", { action = "fight", move = 0, target = 0 })
+    b:submitChoice("b2", { action = "fight", move = 0, target = 1 })
+  end
+  return play(events, { id = "sim", mode = "coop_pvp", seed = 12, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = SIDE_TYPES,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 6 },
+              moves = { hm("ember_hit", 10, 1, 4, nil, 100) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 80, types = { 3 },
+              moves = { hm("chill_hit", 10, 2, 5, nil, 100) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 20, types = { 1 },
+              moves = { hm("needles", 10, 5, 77, nil, 100) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 300, spe = 10, types = { 2 },
+              moves = { hm("spark_hit", 10, 3, 6, nil, 100) } }) } } },
+    } }, { round, round })
+end)
+
+-- BurnTarget's Defrost: Ann's 10% Fire hit thaws Bob whatever its chance byte
+-- says, and Bob then takes his turn.
+scenario("side_defrost", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "sdf", mode = "1v1", seed = 4, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = SIDE_TYPES,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 0 },
+              moves = { hm("ember_hit", 10, 1, 4, nil, 10) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 10, types = { 0 },
+              status = "FRZ", moves = { hm("tap", 1) } }) } } },
+    } }, { round, round })
+end)
+
+-- FlinchTarget's `and 1 << FRZ | SLP_MASK`: Ann's 100% flinch hit sets
+-- nothing on sleeping Bob, so the turn he wakes he acts; once awake he
+-- flinches.
+scenario("side_flinch_sleep", function(events)
+  local function round(b)
+    b:submitChoice("p1", { action = "fight", move = 0 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+  end
+  return play(events, { id = "sfs", mode = "1v1", seed = 6, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = SIDE_TYPES,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 0 },
+              moves = { hm("bite_hit", 10, 0, 31, nil, 100) } }) } } },
+      b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 300, spe = 10, types = { 0 },
+              status = "SLP", statusTurns = 2, moves = { hm("tap", 1) } }) } } },
+    } }, { round, round, round })
+end)
+
+-- BattleCommand_StatDown's `.ComputerMiss`, wild: the computer's 30% Attack-
+-- down hit draws its byte into Ann's substitute (silently), and after it
+-- breaks, whether or not the chance byte landed; its GROWL draws it too, and
+-- on this seed misses on it into the substitute (turn 2, "But it failed"
+-- rather than the substitute's "nothing happened").  Ann starts at -5, so
+-- once a drop lands (turn 5) she is at -6 and the routine stops before the
+-- byte -- silently for the hit, "won't go any lower" for GROWL.
+scenario("computer_drops", function(events)
+  local function pick(move)
+    return function(b)
+      b:submitChoice("p1", { action = "fight", move = 0 })
+      b:submitChoice("wild", { action = "fight", move = move })
+    end
+  end
+  return play(events, { id = "cdr", mode = "wild", seed = 3, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = SIDE_TYPES,
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 400, spe = 10, types = { 0 },
+              substitute = 6, stages = { atk = -5 }, moves = { hm("wait", 0, 0, 85) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 400, spe = 90, types = { 0 },
+              moves = { hm("aurora_hit", 10, 2, 68, nil, 30), hm("growl", 0, 0, 18) } }) } } },
+    } }, { pick(0), pick(1), pick(0), pick(0), pick(0), pick(1), pick(0), pick(0), pick(0), pick(1) })
+end)
+
+-- ...and coop_npc, after a miss: both NPC seats throw a 1% GROWL.  Ann is
+-- under Mist, so the routine stops before the byte; Abe is not, so the
+-- computer draws it after the accuracy byte missed.
+scenario("computer_growl_miss", function(events)
+  local function round(b)
+    b:submitChoice("a1", { action = "fight", move = 0, target = 3 })
+    b:submitChoice("a2", { action = "fight", move = 0, target = 4 })
+    b:submitChoice("n1", { action = "fight", move = 0, target = 0 })
+    b:submitChoice("n2", { action = "fight", move = 0, target = 1 })
+  end
+  local function growl() return { id = "growl", pp = 30, power = 0, accuracy = 1, type = 0, effect = 18, chance = 0 } end
+  return play(events, { id = "cgm", mode = "coop_npc", seed = 9, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = SIDE_TYPES,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 10, types = { 0 },
+              mist = true, moves = { hm("wait", 0, 0, 85) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 300, spe = 20, types = { 0 },
+              moves = { hm("wait", 0, 0, 85) } }) } } },
+      b = { { playerId = "n1", name = "Foe", mons = { mn({ species = "Beta", maxHp = 300, spe = 90, types = { 0 },
+              moves = { growl() } }) } },
+            { playerId = "n2", name = "Fay", mons = { mn({ species = "Delta", maxHp = 300, spe = 80, types = { 0 },
+              moves = { growl() } }) } } },
+    } }, { round, round })
 end)
 
 -- ------------------------------------------------------------------
