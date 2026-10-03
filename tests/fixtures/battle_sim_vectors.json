@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255. OBEDIENCE (pokered CheckForDisobedience, engine/battle/core.asm :3830-4007; every byte below is one BattleRandom, and `bytes` is the exact sequence drawn, `draws` how many of them were consumed). cap: the first of EARTHBADGE 101, MARSHBADGE 70, RAINBOWBADGE 50, CASCADEBADGE 30 the badge set holds, else 10. roll: c = cap, d = min(255, level); c >= d obeys without a draw; b = min(255, c + d) (the cart's add-with-carry capped at $ff); loop1 redraws swap(R) until it is below b and obeys if it is below c; loop2 redraws R until it is below b and answers random if below c; then b = d - c and r = swap(R): r < b naps, r - b >= b is nothing, anything else is selfhit. swap exchanges the two nibbles of a byte. nap: swap((2R) mod 256) mod 8, redrawn while it is 0, so 1..7 turns. loaf: R mod 4 picks loafing / wont_obey / turned_away / ignored_orders. random: null without a draw when fewer than two moves are known, any move is disabled, Struggle is selected, or no slot but the chosen one has PP; otherwise (R mod 4) + 1 is redrawn until it names a slot that exists, is not the chosen one and has PP.",
+  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = max(1, floor(d * roll / 255)) with roll in 217..255; the min-1 clamp is always applied (this fixture does not model the Gen1 \"skip the roll when damage is 1\" shortcut). Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255. OBEDIENCE (pokered CheckForDisobedience, engine/battle/core.asm :3830-4007; every byte below is one BattleRandom, and `bytes` is the exact sequence drawn, `draws` how many of them were consumed). cap: the first of EARTHBADGE 101, MARSHBADGE 70, RAINBOWBADGE 50, CASCADEBADGE 30 the badge set holds, else 10. roll: c = cap, d = min(255, level); c >= d obeys without a draw; b = min(255, c + d) (the cart's add-with-carry capped at $ff); loop1 redraws swap(R) until it is below b and obeys if it is below c; loop2 redraws R until it is below b and answers random if below c; then b = d - c and r = swap(R): r < b naps, r - b >= b is nothing, anything else is selfhit. swap exchanges the two nibbles of a byte. nap: swap((2R) mod 256) mod 8, redrawn while it is 0, so 1..7 turns. loaf: R mod 4 picks loafing / wont_obey / turned_away / ignored_orders. random: null without a draw when fewer than two moves are known, any move is disabled, Struggle is selected, or no slot but the chosen one has PP; otherwise (R mod 4) + 1 is redrawn until it names a slot that exists, is not the chosen one and has PP. SIDE (pokered engine/battle/effects.asm; every byte below is one BattleRandom). threshold: a move's side effect lands when the byte is below it. A chance above 0 is the sheet's explicit percent, clamped to 100, as floor(chance * 255 / 100); 0 (or below) reads the routine's own constant, `percent` being * $ff / 100: POISON_SIDE_EFFECT1 2 and TWINEEDLE 77 = 20 percent + 1 = 52, POISON_SIDE_EFFECT2 33 = 40 percent + 1 = 103, BURN / FREEZE / PARALYZE_SIDE_EFFECT1 4 / 5 / 6 and FLINCH_SIDE_EFFECT1 31 = 10 percent + 1 = 26, their SIDE_EFFECT2 34 / 35 / 36 and FLINCH_SIDE_EFFECT2 37 = 30 percent + 1 = 77, ATTACK..SPECIAL_DOWN_SIDE_EFFECT 68..71 = 33 percent + 1 = 85, CONFUSION_SIDE_EFFECT 76 = 10 percent = 25 (no + 1). Any other effect has no threshold (0) and never draws. computerMiss: StatModifierDownEffect on the enemy's turn outside a link battle misses when its first byte is below 25 percent + 1 = 64. apply: one side effect on a target (statuses as words, types as chart indices), fed `bytes` in order; `draws` is how many it took. Poison returns without a draw on a Substitute, any status, or a type equal to poisonType; burn / freeze / paralysis on a Substitute, then on any status (where a frozen target and moveType equal to fireType thaw instead), then on a type equal to moveType; flinch on a Substitute; a drop draws the computer's miss byte first when computerMover, then returns on a Substitute, and is never stopped by Mist and silent at -6; confusion draws first, ignores a Substitute, and an already-confused target fails silently without the 2..5 turn byte (byte % 4 + 2). poisonType / fireType null name no type.",
   "damage": [
     {
       "id": "dmg_neutral_basic",
@@ -1674,6 +1674,1707 @@
       "out": {
         "slot": 2,
         "draws": 4
+      }
+    }
+  ],
+  "side": [
+    {
+      "id": "side_threshold_2_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 2,
+        "chance": 0,
+        "roll": 51
+      },
+      "out": {
+        "threshold": 52,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_2_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 2,
+        "chance": 0,
+        "roll": 52
+      },
+      "out": {
+        "threshold": 52,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_4_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 0,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 26,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_4_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 0,
+        "roll": 26
+      },
+      "out": {
+        "threshold": 26,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_5_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 5,
+        "chance": 0,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 26,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_5_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 5,
+        "chance": 0,
+        "roll": 26
+      },
+      "out": {
+        "threshold": 26,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_6_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 6,
+        "chance": 0,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 26,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_6_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 6,
+        "chance": 0,
+        "roll": 26
+      },
+      "out": {
+        "threshold": 26,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_31_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 31,
+        "chance": 0,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 26,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_31_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 31,
+        "chance": 0,
+        "roll": 26
+      },
+      "out": {
+        "threshold": 26,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_33_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 33,
+        "chance": 0,
+        "roll": 102
+      },
+      "out": {
+        "threshold": 103,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_33_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 33,
+        "chance": 0,
+        "roll": 103
+      },
+      "out": {
+        "threshold": 103,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_34_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 34,
+        "chance": 0,
+        "roll": 76
+      },
+      "out": {
+        "threshold": 77,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_34_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 34,
+        "chance": 0,
+        "roll": 77
+      },
+      "out": {
+        "threshold": 77,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_35_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 35,
+        "chance": 0,
+        "roll": 76
+      },
+      "out": {
+        "threshold": 77,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_35_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 35,
+        "chance": 0,
+        "roll": 77
+      },
+      "out": {
+        "threshold": 77,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_36_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 36,
+        "chance": 0,
+        "roll": 76
+      },
+      "out": {
+        "threshold": 77,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_36_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 36,
+        "chance": 0,
+        "roll": 77
+      },
+      "out": {
+        "threshold": 77,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_37_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 37,
+        "chance": 0,
+        "roll": 76
+      },
+      "out": {
+        "threshold": 77,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_37_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 37,
+        "chance": 0,
+        "roll": 77
+      },
+      "out": {
+        "threshold": 77,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_68_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 68,
+        "chance": 0,
+        "roll": 84
+      },
+      "out": {
+        "threshold": 85,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_68_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 68,
+        "chance": 0,
+        "roll": 85
+      },
+      "out": {
+        "threshold": 85,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_69_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 69,
+        "chance": 0,
+        "roll": 84
+      },
+      "out": {
+        "threshold": 85,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_69_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 69,
+        "chance": 0,
+        "roll": 85
+      },
+      "out": {
+        "threshold": 85,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_70_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 70,
+        "chance": 0,
+        "roll": 84
+      },
+      "out": {
+        "threshold": 85,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_70_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 70,
+        "chance": 0,
+        "roll": 85
+      },
+      "out": {
+        "threshold": 85,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_71_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 71,
+        "chance": 0,
+        "roll": 84
+      },
+      "out": {
+        "threshold": 85,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_71_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 71,
+        "chance": 0,
+        "roll": 85
+      },
+      "out": {
+        "threshold": 85,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_76_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 76,
+        "chance": 0,
+        "roll": 24
+      },
+      "out": {
+        "threshold": 25,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_76_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 76,
+        "chance": 0,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 25,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_threshold_77_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 77,
+        "chance": 0,
+        "roll": 51
+      },
+      "out": {
+        "threshold": 52,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_threshold_77_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 77,
+        "chance": 0,
+        "roll": 52
+      },
+      "out": {
+        "threshold": 52,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_1_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 1,
+        "roll": 1
+      },
+      "out": {
+        "threshold": 2,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_1_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 1,
+        "roll": 2
+      },
+      "out": {
+        "threshold": 2,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_10_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 10,
+        "roll": 24
+      },
+      "out": {
+        "threshold": 25,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_10_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 10,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 25,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_20_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 20,
+        "roll": 50
+      },
+      "out": {
+        "threshold": 51,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_20_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 20,
+        "roll": 51
+      },
+      "out": {
+        "threshold": 51,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_30_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 30,
+        "roll": 75
+      },
+      "out": {
+        "threshold": 76,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_30_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 30,
+        "roll": 76
+      },
+      "out": {
+        "threshold": 76,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_33_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 33,
+        "roll": 83
+      },
+      "out": {
+        "threshold": 84,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_33_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 33,
+        "roll": 84
+      },
+      "out": {
+        "threshold": 84,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_100_below",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 100,
+        "roll": 254
+      },
+      "out": {
+        "threshold": 255,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_100_at",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 100,
+        "roll": 255
+      },
+      "out": {
+        "threshold": 255,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_override_clamped_150",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": 150,
+        "roll": 254
+      },
+      "out": {
+        "threshold": 255,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_negative_is_cart",
+      "in": {
+        "step": "threshold",
+        "effectId": 4,
+        "chance": -5,
+        "roll": 25
+      },
+      "out": {
+        "threshold": 26,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_override_confusion_10",
+      "in": {
+        "step": "threshold",
+        "effectId": 76,
+        "chance": 10,
+        "roll": 24
+      },
+      "out": {
+        "threshold": 25,
+        "proc": true
+      }
+    },
+    {
+      "id": "side_none_0",
+      "in": {
+        "step": "threshold",
+        "effectId": 0,
+        "chance": 100,
+        "roll": 0
+      },
+      "out": {
+        "threshold": 0,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_none_3",
+      "in": {
+        "step": "threshold",
+        "effectId": 3,
+        "chance": 50,
+        "roll": 0
+      },
+      "out": {
+        "threshold": 0,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_none_29",
+      "in": {
+        "step": "threshold",
+        "effectId": 29,
+        "chance": 30,
+        "roll": 0
+      },
+      "out": {
+        "threshold": 0,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_none_32",
+      "in": {
+        "step": "threshold",
+        "effectId": 32,
+        "chance": 100,
+        "roll": 0
+      },
+      "out": {
+        "threshold": 0,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_none_18",
+      "in": {
+        "step": "threshold",
+        "effectId": 18,
+        "chance": 100,
+        "roll": 0
+      },
+      "out": {
+        "threshold": 0,
+        "proc": false
+      }
+    },
+    {
+      "id": "side_computer_miss_0",
+      "in": {
+        "step": "computerMiss",
+        "roll": 0
+      },
+      "out": {
+        "miss": true
+      }
+    },
+    {
+      "id": "side_computer_miss_63",
+      "in": {
+        "step": "computerMiss",
+        "roll": 63
+      },
+      "out": {
+        "miss": true
+      }
+    },
+    {
+      "id": "side_computer_miss_64",
+      "in": {
+        "step": "computerMiss",
+        "roll": 64
+      },
+      "out": {
+        "miss": false
+      }
+    },
+    {
+      "id": "side_computer_miss_255",
+      "in": {
+        "step": "computerMiss",
+        "roll": 255
+      },
+      "out": {
+        "miss": false
+      }
+    },
+    {
+      "id": "side_apply_burn_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          25
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "burn",
+        "said": "Beta was burned"
+      }
+    },
+    {
+      "id": "side_apply_burn_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          26
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "status": null,
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_burn_statused",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "status": "poison"
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": "poison"
+      }
+    },
+    {
+      "id": "side_apply_burn_same_type1",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            0
+          ]
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_burn_same_type2",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            2,
+            0
+          ]
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_burn_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "substitute": 10
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_defrost",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 2,
+        "target": {
+          "types": [
+            0
+          ],
+          "status": "freeze"
+        },
+        "bytes": [
+          0
+        ],
+        "fireType": 2
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null,
+        "said": "Fire defrosted Beta"
+      }
+    },
+    {
+      "id": "side_apply_defrost_not_fire",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 1,
+        "target": {
+          "types": [
+            0
+          ],
+          "status": "freeze"
+        },
+        "bytes": [
+          0
+        ],
+        "fireType": 2
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": "freeze",
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_defrost_unnamed",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 2,
+        "target": {
+          "types": [
+            0
+          ],
+          "status": "freeze"
+        },
+        "bytes": [
+          0
+        ],
+        "fireType": null
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": "freeze",
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_defrost_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 2,
+        "target": {
+          "types": [
+            0
+          ],
+          "status": "freeze",
+          "substitute": 10
+        },
+        "bytes": [
+          0
+        ],
+        "fireType": 2
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": "freeze",
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_freeze2_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 35,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          76
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "freeze",
+        "said": "Beta was frozen solid"
+      }
+    },
+    {
+      "id": "side_apply_freeze2_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 35,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          77
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_paralyze1_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 6,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          25
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "paralysis",
+        "said": "Beta is paralyzed"
+      }
+    },
+    {
+      "id": "side_apply_override_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 20,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          50
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "burn"
+      }
+    },
+    {
+      "id": "side_apply_cart_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          50
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_override_same_type",
+      "in": {
+        "step": "apply",
+        "effectId": 4,
+        "chance": 100,
+        "moveType": 0,
+        "target": {
+          "types": [
+            0
+          ]
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_poison_poison_type",
+      "in": {
+        "step": "apply",
+        "effectId": 2,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            3
+          ]
+        },
+        "bytes": [
+          0
+        ],
+        "poisonType": 3
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_poison_poison_type2",
+      "in": {
+        "step": "apply",
+        "effectId": 2,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1,
+            3
+          ]
+        },
+        "bytes": [
+          0
+        ],
+        "poisonType": 3
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_poison_unnamed",
+      "in": {
+        "step": "apply",
+        "effectId": 2,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            3
+          ]
+        },
+        "bytes": [
+          0
+        ],
+        "poisonType": null
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "poison",
+        "said": "Beta was poisoned"
+      }
+    },
+    {
+      "id": "side_apply_poison_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 2,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "substitute": 10
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_poison_statused",
+      "in": {
+        "step": "apply",
+        "effectId": 2,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "status": "burn"
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "status": "burn"
+      }
+    },
+    {
+      "id": "side_apply_poison2_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 33,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          102
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "poison"
+      }
+    },
+    {
+      "id": "side_apply_poison2_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 33,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          103
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_twineedle_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 77,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          51
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "status": "poison"
+      }
+    },
+    {
+      "id": "side_apply_twineedle_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 77,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          52
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "status": null
+      }
+    },
+    {
+      "id": "side_apply_flinch1_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 31,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          25
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "flinch": true,
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_flinch1_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 31,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          26
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "flinch": false
+      }
+    },
+    {
+      "id": "side_apply_flinch2_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 37,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "substitute": 10
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "flinch": false
+      }
+    },
+    {
+      "id": "side_apply_drop_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          84
+        ],
+        "stat": "spc"
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "stage": -1,
+        "said": "Beta's SPECIAL fell"
+      }
+    },
+    {
+      "id": "side_apply_drop_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          85
+        ],
+        "stat": "spc"
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "stage": 0,
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_drop_computer_miss",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          63
+        ],
+        "stat": "spc",
+        "computerMover": true
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "stage": 0
+      }
+    },
+    {
+      "id": "side_apply_drop_computer_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          64,
+          84
+        ],
+        "stat": "spc",
+        "computerMover": true
+      },
+      "out": {
+        "proc": true,
+        "draws": 2,
+        "stage": -1
+      }
+    },
+    {
+      "id": "side_apply_drop_computer_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          64,
+          85
+        ],
+        "stat": "spc",
+        "computerMover": true
+      },
+      "out": {
+        "proc": false,
+        "draws": 2,
+        "stage": 0
+      }
+    },
+    {
+      "id": "side_apply_drop_computer_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "substitute": 10
+        },
+        "bytes": [
+          64
+        ],
+        "stat": "spc",
+        "computerMover": true
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "stage": 0
+      }
+    },
+    {
+      "id": "side_apply_drop_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "substitute": 10
+        },
+        "bytes": [
+          0
+        ],
+        "stat": "spc"
+      },
+      "out": {
+        "proc": false,
+        "draws": 0,
+        "stage": 0
+      }
+    },
+    {
+      "id": "side_apply_drop_mist",
+      "in": {
+        "step": "apply",
+        "effectId": 71,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "mist": true
+        },
+        "bytes": [
+          0
+        ],
+        "stat": "spc"
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "stage": -1,
+        "said": "Beta's SPECIAL fell"
+      }
+    },
+    {
+      "id": "side_apply_drop_floor",
+      "in": {
+        "step": "apply",
+        "effectId": 70,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "stages": {
+            "spd": -6
+          }
+        },
+        "bytes": [
+          0
+        ],
+        "stat": "spd"
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "stage": -6,
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_confuse_lands",
+      "in": {
+        "step": "apply",
+        "effectId": 76,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          24,
+          1
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 2,
+        "confused": true,
+        "said": "Beta became confused"
+      }
+    },
+    {
+      "id": "side_apply_confuse_misses",
+      "in": {
+        "step": "apply",
+        "effectId": 76,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          25
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 1,
+        "confused": false
+      }
+    },
+    {
+      "id": "side_apply_confuse_substitute",
+      "in": {
+        "step": "apply",
+        "effectId": 76,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "substitute": 10
+        },
+        "bytes": [
+          0,
+          1
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 2,
+        "confused": true
+      }
+    },
+    {
+      "id": "side_apply_confuse_already",
+      "in": {
+        "step": "apply",
+        "effectId": 76,
+        "chance": 0,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ],
+          "confusion": 2
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": true,
+        "draws": 1,
+        "confused": true,
+        "said": null
+      }
+    },
+    {
+      "id": "side_apply_none",
+      "in": {
+        "step": "apply",
+        "effectId": 0,
+        "chance": 100,
+        "moveType": 0,
+        "target": {
+          "types": [
+            1
+          ]
+        },
+        "bytes": [
+          0
+        ]
+      },
+      "out": {
+        "proc": false,
+        "draws": 0
       }
     }
   ]

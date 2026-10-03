@@ -25,7 +25,13 @@
 --   5. per move that is actually used: accuracy byte, multihit-count byte
 --      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
 --      (damaging hits only), in that order, and none of them drawn when an
---      earlier step ended the move (a missed move draws no crit byte).
+--      earlier step ended the move (a missed move draws no crit byte).  The
+--      side-chance byte is the effect's own pokered routine's, drawn where
+--      and when that routine draws it (Effects.applySide): never on a target
+--      that fainted or a Substitute the move broke, not by a poison / burn /
+--      freeze / paralysis / flinch / stat-drop routine whose target it
+--      already turned away (a Substitute, a status, a type), and behind the
+--      computer's extra stat-drop miss byte when the computer drops a stat.
 --
 -- Nothing else rolls.  Residuals, switches, items and the clock are all
 -- deterministic, so a battle replays from its seed plus the choice log.
@@ -621,9 +627,28 @@ local function partyIndexOf(fighter, wireSlot)
   return wireSlot + 1
 end
 
+-- The chart index the ruleset's `typeIds` gives the type registry id `name`
+-- (zero-based, the axis every move and monster on the upload uses), or nil
+-- when it names no such type -- or names none at all.
+local function typeIndexOf(typeIds, name)
+  if type(typeIds) ~= "table" then return nil end
+  for i = 1, #typeIds do
+    if typeIds[i] == name then return i - 1 end
+  end
+  return nil
+end
+
 -- opts:
---   id, mode, seed, chart, choiceTimeout, reconnectGrace, resolveTimeout, now
+--   id, mode, seed, chart, specialTypes, typeIds, metronomePool,
+--   choiceTimeout, reconnectGrace, resolveTimeout, now
 --   sides = { a = { { playerId, name, mons, bag, badges } }, b = { ... } }
+--
+-- `typeIds` is the chart's axis by name (MediatedBattle.snapshotRuleset:
+-- `typeIds[i + 1]` names chart index i).  Red's referee asks it two questions
+-- and keeps only the answers: which index is POISON (PoisonEffect turns a
+-- Poison-type target away) and which is FIRE (CheckDefrost thaws on a Fire
+-- move).  Without it neither type can be named -- a side effect can poison a
+-- Poison-type monster and nothing thaws -- and every other rule stands.
 --
 -- `badges` is kept only on side a of a BADGE_MODES fight and dropped
 -- everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -648,6 +673,9 @@ function M.create(opts)
     aim            = Rng.new(int(opts.seed, 0) + M.AIM_SEED_OFFSET),
     chart          = type(opts.chart) == "table" and opts.chart or nil,
     specialTypes   = nil,
+    -- The two types a side effect's routine asks about by name (above).
+    poisonType     = typeIndexOf(opts.typeIds, "POISON"),
+    fireType       = typeIndexOf(opts.typeIds, "FIRE"),
     metronomePool  = nil,
     choiceTimeout  = max(0, int(opts.choiceTimeout, M.CHOICE_TIMEOUT)),
     reconnectGrace = max(0, int(opts.reconnectGrace, M.RECONNECT_GRACE)),
@@ -2642,10 +2670,20 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
   if result.movesChanged then self:_emitMoves(fighter, mon) end
 end
 
-function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, chance)
+-- The move's side effect, after its last hit.  `move` is the sheet move that
+-- landed: its `chance` (an explicit override, or 0 for the cart's own odds) and
+-- its type (FreezeBurnParalyzeEffect's same-type return, CheckDefrost's Fire
+-- test) go to Effects.applySide with the two named types and whether the move
+-- is the computer's -- StatModifierDownEffect draws its extra miss on the
+-- enemy's turn outside a link battle, the seat isComputerSeat names.
+function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, move)
   local result = Effects.applySide({
     effectId = effectId,
-    chance = chance,
+    chance = move.chance,
+    moveType = move.type,
+    poisonType = self.poisonType,
+    fireType = self.fireType,
+    computerMover = isComputerSeat(self.mode, fighter),
     rng = self.rng,
     userMon = mon,
     targetMon = targetMon,
@@ -3072,17 +3110,29 @@ function Battle:_useMove(fighter, mon, opts)
   -- GetPlayerAnimationType from below HandleBuildingRage), and before the
   -- move's side effect, which `.executeOtherEffects` runs after the loop.
   local totalDealt = 0
+  local subBroke = false
   for _ = 1, hits do
     if defender.hp <= 0 then break end
     local hpBefore = defender.hp
+    local subUp = (defender.substitute or 0) > 0
     self:_damage(target, defender, damage, nil)
+    if subUp and (defender.substitute or 0) <= 0 then subBroke = true end
     totalDealt = totalDealt + (hpBefore - defender.hp)
     self:_buildRage(target, defender, fighter)
   end
 
-  if totalDealt > 0 then
-    self:_applySide(fighter, mon, target, defender, effectId, move.chance)
+  -- `.executeOtherEffects` (core.asm :3258-3269) runs the side effect once,
+  -- after the last hit, and only if the move got that far: a hit that knocked
+  -- the target out returned at `ret z` (:3242), and a Substitute this move
+  -- broke zeroed the move's effect (AttackSubstitute `.nullifyEffect`, :4899)
+  -- -- the hits after it land on the monster, the effect does not.  A
+  -- Substitute that soaked every hit and still stands is the routine's to
+  -- answer, so it is passed through (Effects.applySide).
+  if defender.hp > 0 and not subBroke then
+    self:_applySide(fighter, mon, target, defender, effectId, move)
+  end
 
+  if totalDealt > 0 then
     if Effects.isDrain(effectId) then
       local heal = Effects.drainAmount(totalDealt)
       if heal > 0 then self:_heal(fighter, mon, heal) end

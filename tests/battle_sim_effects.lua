@@ -266,6 +266,31 @@ do
   eq(#primary.messages, 1, "...once")
 end
 
+-- Red's side-effect odds, re-derived from the expressions pokered writes them
+-- as (engine/battle/effects.asm, RGBDS `percent` = `* $ff / 100`), so a typo in
+-- the table cannot hide behind a vector built from the same typo.
+do
+  local function percent(n) return math.floor(n * 255 / 100) end
+  local CART = {
+    [2] = percent(20) + 1, [77] = percent(20) + 1, [33] = percent(40) + 1,
+    [4] = percent(10) + 1, [5] = percent(10) + 1, [6] = percent(10) + 1,
+    [34] = percent(30) + 1, [35] = percent(30) + 1, [36] = percent(30) + 1,
+    [31] = percent(10) + 1, [37] = percent(30) + 1,
+    [68] = percent(33) + 1, [69] = percent(33) + 1, [70] = percent(33) + 1,
+    [71] = percent(33) + 1, [76] = percent(10),
+  }
+  local count = 0
+  for id, threshold in pairs(Effects.SIDE_THRESHOLD) do
+    count = count + 1
+    eq(threshold, CART[id], "SIDE_THRESHOLD[" .. id .. "] is the cart's expression")
+    eq(Effects.sideThreshold(id, 0), CART[id], "chance 0 reads it for effect " .. id)
+  end
+  eq(count, 16, "sixteen side-effect ids, no more")
+  eq(Effects.COMPUTER_DROP_MISS, percent(25) + 1, "the computer's drop miss is 25 percent + 1")
+  eq(Effects.sideThreshold(4, 30), percent(30), "an explicit percent has no + 1")
+  eq(Effects.sideThreshold(0, 100), 0, "no routine, no threshold")
+end
+
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("POTION")), true,
    "Potion fails on a fainted mon")
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("ETHER")), true,

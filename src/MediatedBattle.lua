@@ -526,9 +526,18 @@ function M.snapshotRuleset(game, opts)
   local moveCount = 0
   if type(data) == "table" and type(data.moves) == "table" then
     local ids = {}
-    for id in pairs(data.moves) do
-      moveCount = moveCount + 1
-      ids[#ids + 1] = id
+    -- Records only.  Gold's imported moves.lua carries two scalars beside its
+    -- 251 records -- `generation = 2` and `source` (src/import/
+    -- RomExtractorGen2.lua extractMoves seeds `out` with them) -- and either,
+    -- walked as a move, is a 40-power default the pool would offer Metronome
+    -- (or, for the number, a throw in `moveOf`).  They sort after every
+    -- capitalised id and the pool cap stops the walk first on a stock Gold
+    -- table, which is the only reason that never fired.
+    for id, record in pairs(data.moves) do
+      if type(record) == "table" then
+        moveCount = moveCount + 1
+        ids[#ids + 1] = id
+      end
     end
     table.sort(ids)
     -- Exclude Metronome itself (either generation's name) and Struggle so a
@@ -562,18 +571,21 @@ function M.snapshotRuleset(game, opts)
   if #specialTypes > 0 then out.specialTypes = specialTypes end
   if #metronomePool > 0 then out.metronomePool = metronomePool end
   -- The chart's axis by name: `typeIds[i + 1]` is the registry id of the type
-  -- every row, column, move and monster on this upload calls `i`.  Gold's badge
-  -- type boost (DoBadgeTypeBoosts, keyed by type) is what reads it -- the
-  -- referee holds no type table and a move row carries only the index
-  -- (BattleSim2 `_typeIdOf`) -- so it rides Gen 2 only: Gen 1's referee has no
-  -- type boost and never reads it.  Read through Wire.typeIds, the hub's own
+  -- every row, column, move and monster on this upload calls `i`.  The referee
+  -- holds no type table and a move row carries only the index, so this is how
+  -- it learns which index is which type: Gold's badge type boost
+  -- (DoBadgeTypeBoosts, keyed by type; BattleSim2 `_typeIdOf`), and Red's
+  -- side effects, which ask whether the target is POISON (PoisonEffect turns a
+  -- Poison type away) and whether a FIRE move thaws it (CheckDefrost) --
+  -- BattleSim `typeIndexOf`.  So it rides Gen 1 and Gen 2, never Gen 3 (whose
+  -- sheets name their types).  Read through Wire.typeIds, the hub's own
   -- question, which answers with a copy (nothing downstream can write into
   -- `typeOrder`'s cache) or nil when one id cannot ride the wire: a registry
   -- id is any non-empty string, and a content mod's type ("mymod.FAIRY") fails
   -- the wire's id alphabet.  Then the list is left off rather than sent for a
   -- hub to drop, and the fight -- solo too, which reads this same ruleset, so
-  -- both fight alike -- goes on without a badge type boost.
-  if order and #order.ids > 0 and Gen.generation(game) == 2 then
+  -- both fight alike -- goes on without the rules that read a type by name.
+  if order and #order.ids > 0 and Gen.generation(game) <= 2 then
     local ids = Wire.typeIds(order.ids)
     if ids then
       out.typeIds = ids
@@ -583,8 +595,10 @@ function M.snapshotRuleset(game, opts)
         if not Wire.typeIds({ id }) then bad[#bad + 1] = ("%q"):format(id) end
       end
       mod.log:warn("type chart id %s cannot ride the wire, so this fight has "
-        .. "no badge type boost (the type chart is unchanged). Give the type "
-        .. "a registry id made of letters, digits, _ and - (40 characters at most)",
+        .. "no rule that names a type (Gold's badge type boost; Red's POISON "
+        .. "and FIRE side-effect checks) -- the type chart is unchanged. Give "
+        .. "the type a registry id made of letters, digits, _ and - (40 "
+        .. "characters at most)",
         table.concat(bad, ", "))
     end
   end
@@ -612,8 +626,32 @@ end
 --
 -- `effect` and `chance` ride on the wire as integers.  The engine names an
 -- effect with a string id ("SLEEP_EFFECT"); `Effects.idOf` is the shared
--- numbering both runtimes agree on.  Turn.lua does not branch on them until
--- Phase 1+ handlers land.
+-- numbering both runtimes agree on.  `chance` is the secondary effect's odds
+-- in percent, which the referee turns back into the cart's byte.
+--
+-- **Read under the name each cart's record spells it.**  Red's records carry
+-- no odds at all (pokered folds them into the effect; the Gen 1 referee owns
+-- them), so Gen 1 reads `chance` -- a content mod's -- and nothing else.  Gold
+-- stores the odds per move, the `move` macro's effect-chance byte
+-- (pokegold data/moves/moves.asm), and the importer keeps it twice
+-- (src/import/RomExtractorGen2.lua extractMoves): `effectChance`, the percent,
+-- and `effectChanceRaw`, the byte.  The Gold engine fights on `effectChance`
+-- (src/battle/gen2/Battle.lua), and so must this.  The sheet used to read
+-- `def.chance` on both carts, a field no Gold record has, so every Gold move
+-- went out at chance 0: no burn, freeze, paralysis, flinch, poison, stat drop
+-- or confusion off a hit ever fired in a refereed Gold fight, and THIEF (100
+-- on the cart) never stole -- the referee only runs `thief` when the chance
+-- byte lands.  An explicit `chance` still wins on Gold, so a content mod that
+-- states one is heard.
+--
+-- The percent, not the byte, because the wire carries a percent
+-- (Wire.battleMove, 0..100) and `effectChance` is the field a content mod
+-- patches (src/link/Fingerprint.lua GEN2_MOVE_FIELDS) -- `effectChanceRaw`
+-- would go stale under one.  The round trip is exact for every value the cart
+-- uses: RGBDS `percent` is `* $ff / 100` in integer arithmetic, the importer's
+-- `percentOf` rounds that back to the nearest percent, and BattleSim2's
+-- `sideChanceProc` takes `floor(pct * 255 / 100)` -- 10, 20, 30, 40, 50 and
+-- 100 come back as 25, 51, 76, 102, 127 and 255, the bytes on the cart.
 --
 -- The defaults are what a client with no record for a move sends -- a modded
 -- move whose definition did not survive, most likely.  40 power at full
@@ -628,6 +666,21 @@ local HIGH_CRIT_MOVES = {
   KARATE_CHOP = true, RAZOR_LEAF = true, CRABHAMMER = true, SLASH = true,
 }
 
+-- Gold's own high-crit list: pokegold (and pokecrystal) data/moves/
+-- critical_hit_moves.asm, the `CriticalHitMoves` table BattleCommand_Critical's
+-- `.CheckCritical` looks the move id up in for its two extra levels.  Gen 2
+-- keys the rule on the move, not the effect, and an imported Gold record names
+-- nothing that says "high crit" -- no `highCrit`, and no EFFECT_ALWAYS_CRIT,
+-- which is not an effect either cart has (pokegold constants/
+-- move_effect_constants.asm).  The sheet used to stamp Gen 2 high-crit off
+-- that effect name alone, so no move in a refereed Gold fight ever rolled on
+-- the high-crit rung.  It is the Gen 1 list plus RAZOR_WIND, AEROBLAST and
+-- CROSS_CHOP.
+local HIGH_CRIT_MOVES2 = {
+  KARATE_CHOP = true, RAZOR_WIND = true, RAZOR_LEAF = true, CRABHAMMER = true,
+  SLASH = true, AEROBLAST = true, CROSS_CHOP = true,
+}
+
 moveOf = function(data, slot, order, generation)
   if type(slot) ~= "table" then return nil end
   local id = Wire.id(slot.id)
@@ -635,6 +688,10 @@ moveOf = function(data, slot, order, generation)
 
   local def = type(data) == "table" and type(data.moves) == "table"
     and data.moves[slot.id] or nil
+  -- A record, or nothing: Gold's moves table holds the scalars `generation`
+  -- and `source` beside its records (see the Metronome pool walk), and every
+  -- read below indexes `def`.
+  if type(def) ~= "table" then def = nil end
 
   local accuracy = 255
   if def and tonumber(def.accuracy) then
@@ -658,7 +715,11 @@ moveOf = function(data, slot, order, generation)
       end
       effect = pack.idOf(def.effect) or 0
     end
-    chance = clamp(intOr(def.chance, 0), 0, 100)
+    -- See the header: Gold's odds are `effectChance`, a `chance` a record
+    -- states wins, and Gen 1 reads `chance` alone.
+    local odds = def.chance
+    if odds == nil and generation == 2 then odds = def.effectChance end
+    chance = clamp(intOr(odds, 0), 0, 100)
   end
 
   local pp = clamp(intOr(slot.pp, 0), 0, 99)
@@ -666,14 +727,16 @@ moveOf = function(data, slot, order, generation)
   local highCrit = false
   if def and def.highCrit ~= nil then
     -- The move-record field wins, including an explicit false that opts a
-    -- vanilla high-crit id back to ordinary odds.
+    -- vanilla high-crit id back to ordinary odds -- on either cart.
     highCrit = def.highCrit == true
-  elseif generation ~= 2 and HIGH_CRIT_MOVES[id] then
-    highCrit = true
-  end
-  -- Gen 2 high-crit moves are EFFECT_ALWAYS_CRIT on the engine record; BattleSim2
-  -- reads `move.highCrit` the same way Gen 1 now does.
-  if generation == 2 and def and def.effect == "EFFECT_ALWAYS_CRIT" then
+  elseif generation == 2 then
+    -- Gold's CriticalHitMoves by id (BattleSim2 reads `move.highCrit` the way
+    -- Gen 1 does).  EFFECT_ALWAYS_CRIT is the Gold engine port's spelling
+    -- (src/battle/gen2/Battle.lua hitOnce) and is still honoured for a record
+    -- that names it; no imported record does.
+    highCrit = HIGH_CRIT_MOVES2[id] == true
+      or (def ~= nil and def.effect == "EFFECT_ALWAYS_CRIT")
+  elseif HIGH_CRIT_MOVES[id] then
     highCrit = true
   end
   local out = {

@@ -1348,6 +1348,8 @@ do
      "the flinched foe never lands its attack")
 end
 
+-- Beta is type 1: FreezeBurnParalyzeEffect returns before its draw on a
+-- target that shares the move's type (section 28), and the move is type 0.
 do
   local battle = battleOf({
     aMons = {
@@ -1356,7 +1358,7 @@ do
         moves = { move({ id = "ember", power = 40, effect = 4, chance = 100 }) },
       }),
     },
-    bMons = { mon({ species = "Beta", maxHp = 200, spd = 1 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, spd = 1, types = { 1 } }) },
   })
   drain(battle)
   battle:submitChoice("p1", { action = "fight", move = 0 })
@@ -1372,23 +1374,29 @@ do
      "burn side effect with chance 100 sets burn on foe")
 end
 
-do
+-- Chance 0 is what every Red move sends (its records carry no chance), and
+-- it reads the routine's own odds: BURN_SIDE_EFFECT1 is `10 percent + 1`,
+-- 26.  The side byte is this turn's fourth draw (accuracy, crit, damage
+-- roll, side): 25 on seed 18957 burns, 26 on seed 14106 does not.  Section 28
+-- forces every family's bytes with a scripted generator.
+for _, case in ipairs({ { seed = 18957, status = "BRN" }, { seed = 14106, status = nil } }) do
   local battle = battleOf({
+    seed = case.seed,
     aMons = {
       mon({
         species = "Alpha", maxHp = 200, spd = 120,
         moves = { move({ id = "ember", power = 40, effect = 4, chance = 0 }) },
       }),
     },
-    bMons = { mon({ species = "Beta", maxHp = 200, spd = 1 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, spd = 1, types = { 1 } }) },
   })
   drain(battle)
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drain(battle)
 
-  eq(fighterIn(battle:snapshot(), "p2").status, nil,
-     "burn side effect with chance 0 never inflicts burn")
+  eq(fighterIn(battle:snapshot(), "p2").status, case.status,
+     "burn side effect with chance 0 reads the cart's 26 (seed " .. case.seed .. ")")
 end
 
 -- ------------------------------------------------------------------
@@ -6975,6 +6983,257 @@ do
     local second = step(battle, use(1), use(0))
     ok(said(second, "Beta's SPEED won't go any lower"), "the primary at -6 still says so")
   end
+end
+
+-- ------------------------------------------------------------------
+-- 28. Gen 1 side-effect odds: the routines' own thresholds, the explicit
+--     override, and what each routine checks before it draws
+-- ------------------------------------------------------------------
+--
+-- Task FX4.  pokered keeps a side effect's odds in the routine, not the move
+-- record, so every Red move reaches the referee at chance 0 and reads
+-- Effects.SIDE_THRESHOLD: PoisonEffect 52 / 103 (TWINEEDLE rides 52),
+-- FreezeBurnParalyzeEffect 26 / 77, FlinchSideEffect 26 / 77,
+-- StatModifierDownEffect 85, ConfusionSideEffect 25 (engine/battle/
+-- effects.asm; the vector pack's `side` section pins the table).  Every
+-- byte below is forced, and every BattleRandom a turn draws is counted, so
+-- "draws nothing" is a number.  The g1_odds_* / g1_side_* parity scenarios
+-- hold lib/battle to the same streams.
+
+do
+  local Rng, Effects = BattleSim.Rng, BattleSim.Effects
+
+  -- BattleRandom, scripted and logged: the listed bytes first, then a seeded
+  -- generator.  The damage roll comes off the generator and is not logged, so
+  -- a plain turn of a hit and a splash logs three bytes: the hit's accuracy
+  -- and crit, the splash's accuracy.
+  local function script(battle, bytes)
+    local fallback = Rng.new(99)
+    local log = {}
+    battle.rng = {
+      byte = function()
+        local b = bytes[#log + 1]
+        if b == nil then b = fallback:byte() end
+        log[#log + 1] = b
+        return b
+      end,
+      nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+      damageRoll = function() return fallback:damageRoll() end,
+      next = function() return fallback:next() end,
+      state = function() return fallback:state() end,
+    }
+    return log
+  end
+
+  local function fxm(id, power, effect, o)
+    o = o or {}
+    return move({ id = id, power = power, effect = effect, chance = o.chance,
+                  type = o.type, pp = 60 })
+  end
+  local function hit(effect, o) return fxm("hit", 10, effect, o) end
+  local splash = function() return fxm("splash", 0, 85) end
+
+  -- Alpha (p1, fast) against Beta (p2, slow, type 1), crits held off with
+  -- baseSpd 0.  `a` / `b` add mon() options and raw sheet fields (`extra`);
+  -- `typeIds` is the ruleset's chart axis by name.
+  local function duel(o)
+    local function sheet(base, more)
+      local opts = {}
+      for k, v in pairs(base) do opts[k] = v end
+      for k, v in pairs(more or {}) do opts[k] = v end
+      local raw = mon(opts)
+      raw.baseSpd = 0
+      for key, value in pairs(opts.extra or {}) do raw[key] = value end
+      return raw
+    end
+    local battle = assert(Turn.create({
+      id = "fx4", mode = o.mode or "1v1", seed = 4, typeIds = o.typeIds,
+      choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = { sheet(
+          { species = "Alpha", maxHp = 400, spd = 90, types = { 1 }, moves = { hit(0) } }, o.a) } } },
+        b = { { playerId = "p2", name = "Bob", mons = { sheet(
+          { species = "Beta", maxHp = 400, spd = 10, types = { 1 }, moves = { splash() } }, o.b) } } },
+      },
+    }))
+    drain(battle)
+    return battle
+  end
+  local function said(events, text)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text == text then return true end
+    end
+    return false
+  end
+  -- One turn on scripted bytes: how many it drew, what it said, the battle.
+  local function turn(o, bytes)
+    local battle = duel(o)
+    local log = script(battle, bytes or { 0, 255 })
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    local events = drain(battle)
+    return #log, events, battle, log
+  end
+  local function beta(battle) return activeMonOf(battle, "p2") end
+
+  -- (a) Every family at chance 0: the byte one below the routine's threshold
+  --     lands, the threshold itself does not, and it is the move's third
+  --     byte (accuracy 0, crit 255, then the side byte).  Twineedle's two
+  --     hits draw nothing between them.
+  local FAMILIES = {
+    { 2, 52, "Beta was poisoned" }, { 33, 103, "Beta was poisoned" },
+    { 77, 52, "Beta was poisoned" },
+    { 4, 26, "Beta was burned" }, { 34, 77, "Beta was burned" },
+    { 5, 26, "Beta was frozen solid" }, { 35, 77, "Beta was frozen solid" },
+    { 6, 26, "Beta is paralyzed" }, { 36, 77, "Beta is paralyzed" },
+    { 31, 26, "Beta flinched" }, { 37, 77, "Beta flinched" },
+    { 68, 85, "Beta's ATTACK fell" }, { 69, 85, "Beta's DEFENSE fell" },
+    { 70, 85, "Beta's SPEED fell" }, { 71, 85, "Beta's SPECIAL fell" },
+    { 76, 25, "Beta became confused" },
+  }
+  for _, f in ipairs(FAMILIES) do
+    local effect, at, says = f[1], f[2], f[3]
+    for _, byte in ipairs({ at - 1, at }) do
+      local _, events, _, log = turn({ a = { moves = { hit(effect) } } }, { 0, 255, byte })
+      eq(log[3], byte, ("effect %d: the side byte is the move's third"):format(effect))
+      eq(said(events, says), byte < at,
+         ("effect %d at chance 0: byte %d %s"):format(effect, byte,
+           byte < at and "lands" or "does not"))
+    end
+  end
+  eq(Effects.SIDE_THRESHOLD[76], 25, "ConfusionSideEffect is `cp 10 percent`, the one with no + 1")
+
+  -- (b) The explicit override: a sheet percent is floor(pct * 255 / 100) and
+  --     wins over the cart's constant; an effect with no side routine draws
+  --     nothing whatever chance it states.
+  local plain = turn({})
+  eq(plain, 3, "a plain hit and a splash draw three bytes")
+  for _, c in ipairs({
+    { chance = 20, byte = 50, lands = true },   -- 51
+    { chance = 0, byte = 50, lands = false },   -- the cart's 26
+    { chance = 19, byte = 47, lands = true },   -- 48
+    { chance = 19, byte = 48, lands = false },
+    { chance = 100, byte = 254, lands = true }, -- 255
+    { chance = 100, byte = 255, lands = false },
+  }) do
+    local _, events = turn({ a = { moves = { hit(4, { chance = c.chance }) } } }, { 0, 255, c.byte })
+    eq(said(events, "Beta was burned"), c.lands,
+       ("burn at chance %d, byte %d"):format(c.chance, c.byte))
+  end
+  eq((turn({ a = { moves = { hit(0, { chance = 100 }) } } })), plain,
+     "chance 100 on effect 0 draws nothing")
+  eq((turn({ a = { moves = { hit(3, { chance = 100 }) } } })), plain,
+     "...nor on a drain")
+
+  -- (c) What each routine checks before its draw.  Byte 0 would land
+  --     anywhere, so a turn that draws no more than the plain one never
+  --     asked.
+  local draws, events, battle
+  draws = turn({ a = { moves = { hit(4) } }, b = { status = "PSN" } })
+  eq(draws, plain, "FreezeBurnParalyze: an already-statused target, no draw")
+  draws, events, battle = turn({ a = { moves = { hit(4) } }, b = { types = { 0 } } })
+  eq(draws, plain, "...a target of the move's own type, no draw")
+  eq(beta(battle).status, nil, "...and no burn")
+  draws, events, battle = turn({ a = { moves = { hit(2) } }, typeIds = { "NORMAL", "POISON" } })
+  eq(draws, plain, "PoisonEffect: a Poison-type target (typeIds names index 1), no draw")
+  eq(beta(battle).status, nil, "...and no poison")
+  draws, events, battle = turn({ a = { moves = { hit(2) } }, b = { types = { 0 } },
+                                 typeIds = { "NORMAL", "POISON" } })
+  eq(draws, plain + 1, "...a Normal-type one draws")
+  eq(beta(battle).status, "poison", "...and is poisoned")
+  draws, events, battle = turn({ a = { moves = { hit(2) } } })
+  eq(beta(battle).status, "poison", "without typeIds no index is POISON: type 1 is poisoned")
+  draws = turn({ a = { moves = { hit(2) } }, b = { status = "BRN" } })
+  eq(draws, plain, "PoisonEffect: an already-statused target, no draw")
+
+  local SUB = { extra = { substitute = 200 } }
+  for _, c in ipairs({ { 4, "burn" }, { 2, "poison" }, { 31, "flinch" }, { 71, "drop" } }) do
+    draws, events, battle = turn({ a = { moves = { hit(c[1]) } }, b = SUB })
+    eq(draws, plain, c[2] .. " into a Substitute that holds: no draw")
+    ok(beta(battle).substitute > 0 and beta(battle).status == nil
+       and beta(battle).stages.spc == 0, "...and nothing lands behind it")
+  end
+  draws, events, battle = turn({ a = { moves = { hit(76) } }, b = SUB }, { 0, 255, 0, 1 })
+  ok(said(events, "Beta became confused"),
+     "ConfusionSideEffect checks no Substitute: it confuses the monster behind one")
+  eq(beta(battle).substitute > 0, true, "...the Substitute still standing")
+  -- An already-confused target: the side byte is still drawn, and the
+  -- failure is silent and draws no turn count.  The control is the same
+  -- confused target taking a plain hit.
+  local confusedPlain = turn({ b = { confusion = 3 } }, { 0, 255, 200 })
+  draws, events = turn({ a = { moves = { hit(76) } }, b = { confusion = 3 } }, { 0, 255, 0, 200 })
+  eq(draws, confusedPlain + 1, "a confused target: the side byte, and nothing else")
+  ok(not said(events, "Beta became confused"), "...silently")
+
+  -- (d) Where the move never gets to its side effect: a Substitute it broke
+  --     (`.nullifyEffect`) and a knockout (`ret z`).
+  local DOLL = { extra = { substitute = 1 } }
+  draws, events, battle = turn({ a = { moves = { hit(4) } }, b = DOLL })
+  ok(said(events, "Beta's substitute broke"), "the hit breaks the Substitute")
+  eq(draws, plain, "...and the burn effect is gone with it: no draw")
+  eq(beta(battle).status, nil, "...no burn")
+  draws, events, battle = turn({ a = { moves = { hit(77) } }, b = DOLL })
+  eq(beta(battle).hp < 400, true, "Twineedle's second hit lands on the monster")
+  eq(draws, plain, "...and its poison does not roll")
+  eq(beta(battle).status, nil, "...no poison")
+  local koPlain = turn({ b = { hp = 1 } })
+  draws, events = turn({ a = { moves = { hit(4) } }, b = { hp = 1 } })
+  eq(draws, koPlain, "a knockout draws no side byte")
+  ok(not said(events, "Beta was burned"), "...and burns nobody")
+
+  -- (e) CheckDefrost: a Fire move into a frozen target thaws it and draws
+  --     nothing; any other burn-family move leaves it frozen.
+  local FIRE = { "NORMAL", "FIRE" }
+  draws, events, battle = turn({ a = { moves = { hit(4, { type = 1 }) } },
+    b = { status = "FRZ", types = { 0 } }, typeIds = FIRE })
+  ok(said(events, "Fire defrosted Beta"), "a Fire burn move thaws a frozen target")
+  eq(beta(battle).status, nil, "...the freeze is gone")
+  eq(draws, plain, "...and no draw: the thawed Beta moves as the plain turn's")
+  draws, events, battle = turn({ a = { moves = { hit(4) } },
+    b = { status = "FRZ", types = { 0 } }, typeIds = FIRE })
+  ok(not said(events, "Fire defrosted Beta"), "a Normal burn move does not thaw")
+  eq(beta(battle).status, "freeze", "...Beta stays frozen")
+  draws, events, battle = turn({ a = { moves = { hit(4, { type = 1 }) } },
+    b = { status = "FRZ", types = { 0 } } })
+  eq(beta(battle).status, "freeze", "without typeIds nothing is FIRE: nothing thaws")
+
+  -- (f) Mist stops a primary drop and never a side effect's.
+  draws, events, battle = turn({ a = { moves = { hit(71) } }, b = { extra = { mist = true } } })
+  ok(said(events, "Beta's SPECIAL fell"), "a side-effect drop goes through Mist")
+  ok(not said(events, "But it failed"), "...without a word of failure")
+  draws, events = turn({ a = { moves = { fxm("goo", 0, 21) } }, b = { extra = { mist = true } } })
+  ok(said(events, "But it failed"), "a primary drop into Mist still fails")
+
+  -- (g) The computer's side-effect drop: StatModifierDownEffect draws its
+  --     extra miss first on the enemy's turn outside a link battle (`cp 25
+  --     percent + 1`, 64), then the Substitute check, then the side byte.
+  --     Beta is the wild monster here, and the faster.
+  local function wildDrop(bytes, more)
+    local o = { mode = "wild", a = { spd = 10, moves = { splash() } },
+                b = { spd = 90, moves = { hit(70) } } }
+    for k, v in pairs(more or {}) do o.a[k] = v end
+    return turn(o, bytes)
+  end
+  local drew, said1, b1 = wildDrop({ 0, 255, 63 })
+  eq(activeMonOf(b1, "p1").stages.spd, 0, "the computer's miss byte 63 stops the drop")
+  eq(drew, 4, "...and no side byte follows it: acc, crit, miss, then Alpha's acc")
+  drew, said1, b1 = wildDrop({ 0, 255, 64, 84 })
+  eq(activeMonOf(b1, "p1").stages.spd, -1, "64 passes and the side byte 84 lands")
+  eq(drew, 5, "...acc, crit, miss, side, then Alpha's acc")
+  drew, said1, b1 = wildDrop({ 0, 255, 64, 85 })
+  eq(activeMonOf(b1, "p1").stages.spd, 0, "...and 85 does not")
+  drew, said1, b1 = wildDrop({ 0, 255, 64 }, { extra = { substitute = 200 } })
+  eq(drew, 4, "into a Substitute: the miss byte is drawn, the side byte is not")
+  eq(activeMonOf(b1, "p1").stages.spd, 0, "...and nothing falls")
+  -- The same move in a link fight never draws the miss byte.
+  draws, events, battle = turn({ a = { spd = 10, moves = { splash() } },
+    b = { spd = 90, moves = { hit(70) } } }, { 0, 255, 84 })
+  eq(activeMonOf(battle, "p1").stages.spd, -1, "a link fight: the side byte comes straight after the crit")
+  eq(draws, 4, "...acc, crit, side, then Alpha's acc")
+  -- The player's drop on the computer draws no miss byte either.
+  draws, events, battle = turn({ mode = "wild", a = { moves = { hit(70) } } }, { 0, 255, 84 })
+  eq(beta(battle).stages.spd, -1, "the player's side-effect drop on the wild monster: no miss byte")
+  eq(draws, 4, "...acc, crit, side, then the wild monster's acc")
 end
 
 -- ------------------------------------------------------------------

@@ -2107,6 +2107,146 @@ scenario("g1_side_min", function(events)
   return battle
 end)
 
+-- 67-80. Gen 1 side-effect odds (task FX4).  Red's move records carry no
+--     chance, so every Red move reaches the referee at chance 0 and the odds
+--     are each pokered routine's own constant (Effects.SIDE_THRESHOLD).  A
+--     g1_odds_* scenario fights one turn per seed -- a fast Alpha's
+--     side-effect move into a slow Beta, chance 0 -- with seeds a scan picked
+--     so the routine's byte is exactly threshold - 1 (it lands) and then
+--     exactly the threshold (it does not).  `probeSide` pins every battle's
+--     draw count (`rng`) and the target's condition.  tests/battle_sim_turn.lua
+--     (section 28) forces the same bytes with a scripted generator and counts
+--     the draws.
+
+-- After each battle's turn: its RNG state, then every standing seat's
+-- condition, confusion, flinch and the two stages a side-effect drop moves.
+local function probeSide(battle, at)
+  probes[#probes + 1] = { at = at, rng = battle.rng:state() }
+  for _, fighter in ipairs(battle.fighters) do
+    local mon = fighter.active and fighter.mons[fighter.active]
+    if mon and mon.hp > 0 then
+      probes[#probes + 1] = {
+        at = at, slot = fighter.slot, status = mon.status or "",
+        confusion = mon.confusion or 0, flinch = mon.flinch == true,
+        sSpd = mon.stages.spd, sSpc = mon.stages.spc,
+      }
+    end
+  end
+end
+
+-- One turn per entry, every battle's events into the one stream: Alpha (p1,
+-- fast) uses `move`, Beta (p2, slow) splashes.  An entry may swap either move
+-- (`aMove` / `bMove`), the speeds, the mode, the ruleset's `typeIds`, and
+-- Beta's HP, status, types and raw sheet fields (`bExtra`).
+local function sideTurns(id, entries)
+  return function(events)
+    local battle
+    for i, e in ipairs(entries) do
+      battle = build({
+        id = id .. i, mode = e.mode or "1v1", seed = e.seed, choiceTimeout = 60,
+        reconnectGrace = 60, typeIds = e.typeIds,
+        sides = {
+          a = { { playerId = "p1", name = "Ann", mons = {
+            mn({ species = "Alpha", maxHp = 400, spd = e.aSpd or 90, types = { 1 },
+                 baseSpd = 0, moves = { e.aMove or e.move } }) } } },
+          b = { { playerId = "p2", name = "Bob", mons = {
+            mn({ species = "Beta", hp = e.bHp, maxHp = 400, spd = e.bSpd or 10,
+                 baseSpd = 0, types = e.bTypes or { 1 }, status = e.bStatus,
+                 moves = { e.bMove or fx("splash", 0, 85) }, extra = e.bExtra }) } } },
+        },
+      })
+      drainInto(battle, events)
+      battle:submitChoice("p1", { action = "fight", move = 0 })
+      battle:submitChoice("p2", { action = "fight", move = 0 })
+      drainInto(battle, events)
+      probeSide(battle, i)
+    end
+    return battle
+  end
+end
+
+local function hit(effect, o)
+  o = o or {}
+  return fx("hit", 10, effect, { chance = o.chance, type = o.type })
+end
+
+-- Each pair: the byte at threshold - 1, then at the threshold.  The scan's
+-- seeds put the routine's byte at the same draw (acc, crit, roll, then the
+-- side byte), so one seed serves every family whose threshold it straddles.
+local function odds(id, effect, below, at)
+  return sideTurns(id, { { seed = below, move = hit(effect) },
+                         { seed = at, move = hit(effect) } })
+end
+scenario("g1_odds_poison1", odds("g1op1", 2, 11078, 6227))      -- 51 / 52
+scenario("g1_odds_poison2", odds("g1op2", 33, 192, 3))          -- 102 / 103
+scenario("g1_odds_twineedle", odds("g1otw", 77, 11078, 6227))   -- 51 / 52
+scenario("g1_odds_burn1", odds("g1ob1", 4, 18957, 14106))       -- 25 / 26
+scenario("g1_odds_freeze1", odds("g1of1", 5, 18957, 14106))     -- 25 / 26
+scenario("g1_odds_paralyze2", odds("g1op2p", 36, 8071, 3220))   -- 76 / 77
+scenario("g1_odds_flinch1", odds("g1ofl1", 31, 18957, 14106))   -- 25 / 26
+scenario("g1_odds_flinch2", odds("g1ofl2", 37, 8071, 3220))     -- 76 / 77
+scenario("g1_odds_drop", odds("g1odr", 71, 28460, 23588))       -- 84 / 85
+scenario("g1_odds_confuse", odds("g1ocf", 76, 23829, 18957))    -- 24 / 25
+
+-- The computer's drop (wild Beta, fast, lowers Alpha's Speed): the extra miss
+-- byte comes first -- 63 misses and draws nothing more; 64 passes, and the
+-- side byte 84 then lands.  g1_odds_drop is the link fight that never draws
+-- it.
+scenario("g1_odds_computer_drop", sideTurns("g1ocd", {
+  { seed = 12021, mode = "wild", aSpd = 10, bSpd = 90,
+    aMove = fx("splash", 0, 85), bMove = hit(70) },
+  { seed = 9921, mode = "wild", aSpd = 10, bSpd = 90,
+    aMove = fx("splash", 0, 85), bMove = hit(70) },
+}))
+
+-- Precedence on one seed (the side byte is 50): chance 0 is the cart's 26 and
+-- misses; an explicit 20 is floor(20 * 255 / 100) = 51 and lands; 19 is 48
+-- and misses.  A chance on an effect with no side routine draws nothing --
+-- the last two battles end on the same RNG state.
+scenario("g1_side_precedence", sideTurns("g1sp", {
+  { seed = 15950, move = hit(4) },
+  { seed = 15950, move = hit(4, { chance = 20 }) },
+  { seed = 15950, move = hit(4, { chance = 19 }) },
+  { seed = 15950, move = hit(0, { chance = 100 }) },
+  { seed = 15950, move = hit(0) },
+}))
+
+-- What each routine checks before it draws, on one seed whose side byte is 0
+-- -- any draw would land -- so a battle that ends on battle 1's RNG state
+-- (the plain hit) drew nothing:
+--   2 burn vs a poisoned target, 3 burn vs a target of the move's type,
+--   4 poison vs a Poison-type target (typeIds names it) -- and 5, the same
+--   without typeIds, which draws and poisons; 6-9 burn / flinch / poison /
+--   a drop into a Substitute that holds; 10 confusion into the same
+--   Substitute draws and confuses the monster behind it; 11 a burn whose hit
+--   breaks the Substitute and 12 a Twineedle whose first hit does (the
+--   second lands, the poison does not); 13 a Fire burn move thaws a frozen
+--   target, drawing nothing; 14 a drop into Mist lands (Mist stops primaries
+--   only); 15 / 16 a knockout with and without a burn effect end alike.
+local POISON_AXIS = { "NORMAL", "POISON" }
+local FIRE_AXIS = { "NORMAL", "FIRE" }
+local SUB = { substitute = 200 }
+local DOLL = { substitute = 1 }
+scenario("g1_side_gates", sideTurns("g1sg", {
+  { seed = 21964, move = hit(0) },
+  { seed = 21964, move = hit(4), bStatus = "PSN" },
+  { seed = 21964, move = hit(4), bTypes = { 0 } },
+  { seed = 21964, move = hit(2), typeIds = POISON_AXIS },
+  { seed = 21964, move = hit(2) },
+  { seed = 21964, move = hit(4), bExtra = SUB },
+  { seed = 21964, move = hit(31), bExtra = SUB },
+  { seed = 21964, move = hit(2), bExtra = SUB },
+  { seed = 21964, move = hit(71), bExtra = SUB },
+  { seed = 21964, move = hit(76), bExtra = SUB },
+  { seed = 21964, move = hit(4), bExtra = DOLL },
+  { seed = 21964, move = hit(77), bExtra = DOLL },
+  { seed = 21964, move = hit(4, { type = 1 }), typeIds = FIRE_AXIS,
+    bStatus = "FRZ", bTypes = { 0 } },
+  { seed = 21964, move = hit(71), bExtra = { mist = true } },
+  { seed = 21964, move = hit(0), bHp = 1 },
+  { seed = 21964, move = hit(4), bHp = 1 },
+}))
+
 -- ------------------------------------------------------------------
 
 local out = {}

@@ -1322,9 +1322,10 @@ end)()
 -- through the ruleset's `typeIds` -- MediatedBattle.snapshotRuleset's axis, the
 -- registry ids in chart order -- and the solo divert hands its referee
 -- whatever the ruleset carries (`turnFor(generation)`, one call site for Gen 1
--- and Gold).  The axis rides Gold's ruleset only: Gen 1's referee has no type
--- boost to read it, so a Gen 1 fight is handed none (Gold's ruleset is held to
--- carrying it in tests/mediated_battle_client.lua; this harness pins
+-- and Gold).  Red's referee reads it too, since this release's side effects:
+-- PoisonEffect turns a POISON type away and a FIRE move thaws (BattleSim
+-- `typeIndexOf`), so a Gen 1 fight is handed the axis as well (the ruleset is
+-- held to carrying it in tests/mediated_battle_client.lua; this harness pins
 -- package.path empty, so every game here reads as Gen 1).
 
 ;(function()
@@ -1336,8 +1337,8 @@ end)()
   local okFight, f = pcall(fightOf, "wild")
   Turn.create = real
   ok(okFight and f.started, "typeIds solo: the wild fight is taken over")
-  ok(seen ~= nil and seen.typeIds == nil,
-     "typeIds solo: Gen 1's referee is handed no axis -- it has no type boost")
+  ok(seen ~= nil and type(seen.typeIds) == "table" and #seen.typeIds > 0,
+     "typeIds solo: Gen 1's referee is handed the axis -- Red's POISON / FIRE side-effect checks read it")
 end)()
 
 -- ------------------------------------------------------------------
@@ -1761,6 +1762,60 @@ end)()
   eq(coinOut and coinOut.outcome, "win", "amulet: ...won holding the coin")
   eq(coinWin.state.amuletCoin, true, "amulet: the buried battle is told the coin came out")
   eq(coinWin.game.save.player.money, 3800, "amulet: the prize doubled (pokecrystal .DoubleReward)")
+
+  -- A Gold move record's secondary effect, end to end.  An imported Gold
+  -- record states its odds as `effectChance` (percent) and `effectChanceRaw`
+  -- (the cart's byte) and has no `chance` field at all; the sheet used to read
+  -- `chance`, so every Gold move reached the referee at 0 and no secondary
+  -- effect -- THIEF included -- ever fired.  The records below are in the
+  -- importer's shape with invented numbers; a 100 percent chance is the
+  -- referee's byte under 255, so the seed decides nothing here.
+  local goldMoveData = setmetatable({
+    moves = {
+      SCORCH = { id = "SCORCH", name = "SCORCH", power = 10, type = "FIRE", pp = 20,
+                 accuracy = 100, accuracyRaw = 255, effect = "EFFECT_BURN_HIT",
+                 effectId = 4, effectChance = 100, effectChanceRaw = 255 },
+      THIEF = { id = "THIEF", name = "THIEF", power = 10, type = "NORM", pp = 10,
+                accuracy = 100, accuracyRaw = 255, effect = "EFFECT_THIEF",
+                effectId = 105, effectChance = 100, effectChanceRaw = 255 },
+    },
+  }, { __index = goldData })
+  local function knowing(moveId, item)
+    local m = goldMon({ species = "ALPHA", spd = 90, atk = 20, maxHp = 200 }, item, 4321)
+    m.moves = { { id = moveId, pp = 10, maxPp = 10 } }
+    return m
+  end
+  local function firstTurn(fight)
+    fight.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do fight.solo:update(1 / 60, fight.game) end
+  end
+
+  -- The burn: SCORCH's effectChance rides the sheet and the referee rolls it.
+  f = fightOf("trainer", { cart2 = true, data = goldMoveData, seed = 7,
+                           party = { knowing("SCORCH") },
+                           foes = { mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 }) } })
+  eq(f.fight.mine[1].moves[1].chance, 100, "gold effectChance: the sheet carries the record's 100")
+  firstTurn(f)
+  local burned
+  for _, event in ipairs(f.events) do
+    if event.t == "status" and event.side == "b" and event.status == "BRN" then burned = event end
+  end
+  ok(burned ~= nil, "gold effectChance: SCORCH's burn procs on the foe (a `status` BRN event)")
+  local foeSeat = f.sim.byId[FOE]
+  eq(foeSeat and foeSeat.mons[1].status, "burn", "gold effectChance: ...and the referee's foe is burned")
+
+  -- THIEF: the wild monster's rolled BERRY comes away with the player's THIEF.
+  f = fightOf("wild", { cart2 = true, data = goldMoveData, seed = 7, random = bytes({ 250, 99 }),
+                        party = { knowing("THIEF") } })
+  eq(f.fight.wildParty[1].heldItem, "BERRY", "gold THIEF: the wild monster holds its rolled BERRY")
+  eq(f.fight.mine[1].moves[1].chance, 100, "gold THIEF: the sheet carries THIEF's 100")
+  firstTurn(f)
+  local took
+  for _, event in ipairs(f.events) do
+    if event.t == "held" and event.side == "a" and event.text == "BERRY" and event.amount == 1 then took = event end
+  end
+  ok(took ~= nil, "gold THIEF: the referee's `held` says the player took the BERRY")
+  eq(f.party[1].item, "BERRY", "gold THIEF: ...and the stolen BERRY is on the save")
 
   for name in pairs(stubs) do package.loaded[name] = saved[name] end
 end)()

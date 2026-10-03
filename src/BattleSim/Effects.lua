@@ -628,8 +628,15 @@ end
 -- Both of a drop's failures go through that label -- the stage already at -6
 -- (`dec b; jp z, CantLowerAnymore`) and the stat already at 1 -- so a side
 -- effect says nothing at either wall.
+--
+-- Mist stops a primary drop and never a side effect's.  The cart's only Mist
+-- check is MoveHitTest's (core.asm `.enemyMistCheck` / `.playerMistCheck`),
+-- which looks at effects ATTACK_DOWN1..HAZE and ATTACK_DOWN2..REFLECT alone;
+-- the side-effect drops (ATTACK_DOWN_SIDE_EFFECT..SPECIAL_DOWN_SIDE_EFFECT)
+-- are past that range, and StatModifierDownEffect's side branch never calls
+-- MoveHitTest -- so AURORA BEAM lowers a Mist user's Attack.
 local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side)
-  if delta < 0 and mon.mist then
+  if delta < 0 and mon.mist and not side then
     out.messages[#out.messages + 1] = "But it failed"
     return
   end
@@ -976,117 +983,235 @@ end
 -- ------------------------------------------------------------------
 -- Phase 2 side-chance handlers (post-damage, damaging hits only)
 -- ------------------------------------------------------------------
+--
+-- **Red keeps the odds on the effect, not on the move.**  pokered's move
+-- records carry no chance byte (data/moves/moves.asm: animation, effect,
+-- power, type, accuracy, PP), and the engine's imported Red records follow
+-- them -- EMBER is `effect = "BURN_SIDE_EFFECT1"` and nothing more -- so every
+-- Red move reaches the referee with `chance = 0` (MediatedBattle `moveOf`
+-- reads a `def.chance` no Red record has).  Each routine in
+-- engine/battle/effects.asm holds its own constant and compares one
+-- BattleRandom byte against it raw (`cp b` / `ret nc`: the effect lands when
+-- the byte is below it), RGBDS `percent` being `* $ff / 100` in integer
+-- arithmetic (macros/data.asm):
+--
+--   PoisonEffect          POISON_SIDE_EFFECT1   20 percent + 1 =  52  (:101)
+--                         POISON_SIDE_EFFECT2   40 percent + 1 = 103  (:104)
+--                         TWINEEDLE_EFFECT: TwoToFiveAttacksEffect's
+--                         `.twineedle` rewrites the move's effect to
+--                         POISON_SIDE_EFFECT1, so                  52
+--   FreezeBurnParalyzeEffect  BURN / FREEZE / PARALYZE_SIDE_EFFECT1
+--                                               10 percent + 1 =  26  (:215)
+--                         ..._SIDE_EFFECT2      30 percent + 1 =  77  (:218)
+--   FlinchSideEffect      FLINCH_SIDE_EFFECT1   10 percent + 1 =  26  (:984)
+--                         FLINCH_SIDE_EFFECT2   30 percent + 1 =  77  (:986)
+--   StatModifierDownEffect  ATTACK..SPECIAL_DOWN_SIDE_EFFECT
+--                                               33 percent + 1 =  85  (:562)
+--   ConfusionSideEffect   CONFUSION_SIDE_EFFECT 10 percent     =  25  (:1116)
+--                         -- the one constant without the + 1
+--
+-- A sheet `chance` above 0 is an explicit override in the percent the sheet
+-- has always spoken -- floor(chance * 255 / 100), so 100 is 255 and still
+-- fails on the byte 255, Accuracy.lua's quirk -- because the suites state one
+-- and a content mod's move record may carry one.  0 or absent reads the
+-- cart's constant: it is what every Red move sends.  The override moves the
+-- threshold and nothing else; when a routine draws, and what it checks before
+-- it does, stay the cart's (`applySide`).
+M.SIDE_THRESHOLD = {
+  [2] = 52, [33] = 103, [77] = 52,             -- PoisonEffect
+  [4] = 26, [5] = 26, [6] = 26,                -- FreezeBurnParalyzeEffect
+  [34] = 77, [35] = 77, [36] = 77,
+  [31] = 26, [37] = 77,                        -- FlinchSideEffect
+  [68] = 85, [69] = 85, [70] = 85, [71] = 85,  -- StatModifierDownEffect
+  [76] = 25,                                   -- ConfusionSideEffect
+}
 
--- Same 1/256 quirk as Accuracy.lua: byte is 0..255, threshold is
--- floor(chance * 255 / 100), proc when byte < threshold.  chance 0 never;
--- chance 100 is byte < 255 (always except the 1/256 roll of 255).
-function M.sideChanceProc(rng, chance)
-  chance = max(0, min(100, int(chance, 0)))
-  if chance <= 0 then return false end
-  local threshold = floor(chance * 255 / 100)
-  if threshold <= 0 then return false end
-  return rng and rng:byte() < threshold
+-- StatModifierDownEffect's extra miss on the enemy's turn outside a link
+-- battle (:549-554, `cp 25 percent + 1`), drawn before anything else the
+-- routine looks at -- and the side-effect drops go through that routine too,
+-- where `MoveMissed` is silent.
+M.COMPUTER_DROP_MISS = 64
+
+-- The byte a side effect's draw has to land below: the sheet's percent when it
+-- states one, else the cart's constant for the effect.  0 for an effect with
+-- no routine here, which never draws -- whatever chance its sheet states,
+-- because no Red routine would roll for it.
+function M.sideThreshold(effectId, chance)
+  local base = M.SIDE_THRESHOLD[int(effectId, 0)]
+  if not base then return 0 end
+  local pct = max(0, min(100, int(chance, 0)))
+  if pct > 0 then return floor(pct * 255 / 100) end
+  return base
 end
 
+-- One BattleRandom against a threshold: drawn whatever it is compared to.
+local function drawBelow(rng, threshold)
+  if not rng then return false end
+  return rng:byte() < threshold
+end
+
+local SIDE_POISON = { [2] = true, [33] = true, [77] = true }
+local SIDE_STATUS = {
+  [4] = "burn", [5] = "freeze", [6] = "paralysis",
+  [34] = "burn", [35] = "freeze", [36] = "paralysis",
+}
+local SIDE_FLINCH = { [31] = true, [37] = true }
 local SIDE_STAT_DOWN = {
   [68] = "atk", [69] = "def", [70] = "spd", [71] = "spc",
 }
 
+local INFLICTED = {
+  poison = { token = "PSN", says = " was poisoned" },
+  burn = { token = "BRN", says = " was burned" },
+  freeze = { token = "FRZ", says = " was frozen solid" },
+  paralysis = { token = "PAR", says = " is paralyzed" },
+}
+
+-- Whether chart index `typeIndex` is one of the monster's (wEnemyMonType1 /
+-- wEnemyMonType2: the battle types, so a Conversion or a Transform counts).
+-- nil names no type and matches nothing.
+local function hasType(mon, typeIndex)
+  if typeIndex == nil or type(mon.types) ~= "table" then return false end
+  for i = 1, #mon.types do
+    if mon.types[i] == typeIndex then return true end
+  end
+  return false
+end
+
+-- A side effect's condition landing.  The penalty is the routine's own:
+-- .burn1 / .burn2 run HalveAttackDueToBurn and paralyze1 / paralyze2
+-- QuarterSpeedDueToParalysis the moment it lands (:243, :294; :236, :289);
+-- poison and freeze have none, and applyStatusPenalty leaves them be.
+local function inflict(out, fighter, mon, status, wire)
+  mon.status = status
+  M.applyStatusPenalty(mon)
+  local entry = INFLICTED[status]
+  local text = mon.species .. entry.says
+  out.messages[#out.messages + 1] = text
+  local fields = fighterFields(fighter)
+  fields.status = wire[status] or entry.token
+  fields.text = text
+  out.events[#out.events + 1] = { kind = "status", fields = fields }
+end
+
+-- One move's side effect, the way its pokered routine runs it.  Turn calls
+-- this once per move, after the last hit (`.executeOtherEffects`), and only
+-- where the cart gets that far: a target that fainted returned at `ret z`
+-- (core.asm :3242), and a Substitute the move broke zeroed the move's effect
+-- (AttackSubstitute `.nullifyEffect`, :4899).  A Substitute still standing is
+-- read here, off `targetMon.substitute`, because each routine answers it
+-- differently.
+--
 -- ctx: effectId, chance, rng, targetMon, targetFighter, userFighter,
---      statusToWire
--- Returns { proc, messages, events }.
+--      statusToWire, plus what the routines look at before they draw:
+--   moveType       the move's chart index (FreezeBurnParalyzeEffect's
+--                  same-type return, CheckDefrost's Fire test)
+--   poisonType, fireType
+--                  the chart indices of POISON and FIRE (Turn reads them off
+--                  the ruleset's `typeIds`).  nil when it named none: then a
+--                  Poison-type target can be poisoned and nothing thaws,
+--                  because no index can be told to be either type.
+--   computerMover  the move is the computer's (StatModifierDownEffect's
+--                  extra miss)
+-- Returns { proc, messages, events }; `proc` is the routine's own draw
+-- landing (not the computer's miss byte).
 function M.applySide(ctx)
   ctx = ctx or {}
   local out = { proc = false, messages = {}, events = {} }
   local effectId = int(ctx.effectId, 0)
-  local chance = int(ctx.chance, 0)
   local rng = ctx.rng
   local targetMon = ctx.targetMon
   local targetFighter = ctx.targetFighter
   local wire = ctx.statusToWire or {}
+  local threshold = M.sideThreshold(effectId, ctx.chance)
+  if threshold <= 0 or type(targetMon) ~= "table" then return out end
+  local behindSub = int(targetMon.substitute, 0) > 0
+  local moveType = int(ctx.moveType, nil)
 
-  if not M.sideChanceProc(rng, chance) then return out end
-  out.proc = true
-
-  if effectId == 2 or effectId == 33 or effectId == 77 then -- poison / twineedle
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "poison"
-    local token = wire.poison or "PSN"
-    local text = targetMon.species .. " was poisoned"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
+  -- PoisonEffect (:78-162): a Substitute, any status at all and a
+  -- Poison-type target each leave through `.noEffect` -- silent for a side
+  -- effect -- before `.sideEffectTest` draws.
+  if SIDE_POISON[effectId] then
+    if behindSub or M.hasMajorStatus(targetMon)
+       or hasType(targetMon, ctx.poisonType) then
+      return out
+    end
+    if not drawBelow(rng, threshold) then return out end
+    out.proc = true
+    inflict(out, targetFighter, targetMon, "poison", wire)
     return out
   end
 
-  if effectId == 4 or effectId == 34 then -- burn
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "burn"
-    -- .burn1 / .burn2: HalveAttackDueToBurn the moment it lands
-    -- (effects.asm :243, :294).
-    M.applyStatusPenalty(targetMon)
-    local token = wire.burn or "BRN"
-    local text = targetMon.species .. " was burned"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
+  -- FreezeBurnParalyzeEffect (:194-302): a Substitute returns first; a target
+  -- that already has a status jumps to CheckDefrost (:312-345), where a Fire
+  -- move thaws a frozen one ("Fire defrosted <TARGET>!", text_3.asm) and
+  -- anything else does nothing; then a target sharing the move's type returns
+  -- ("an ice move can't freeze an ice-type, body slam can't paralyze a
+  -- normal-type").  None of them draws.
+  local status = SIDE_STATUS[effectId]
+  if status then
+    if behindSub then return out end
+    if M.hasMajorStatus(targetMon) then
+      if targetMon.status == "freeze" and ctx.fireType ~= nil
+         and moveType == ctx.fireType then
+        targetMon.status = nil
+        targetMon.statusTurns = 0
+        local text = "Fire defrosted " .. targetMon.species
+        out.messages[#out.messages + 1] = text
+        -- No token: a `status` event without one is a cure (Events.lua).
+        local fields = fighterFields(targetFighter)
+        fields.text = text
+        out.events[#out.events + 1] = { kind = "status", fields = fields }
+      end
+      return out
+    end
+    if hasType(targetMon, moveType) then return out end
+    if not drawBelow(rng, threshold) then return out end
+    out.proc = true
+    inflict(out, targetFighter, targetMon, status, wire)
     return out
   end
 
-  if effectId == 5 or effectId == 35 then -- freeze
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "freeze"
-    local token = wire.freeze or "FRZ"
-    local text = targetMon.species .. " was frozen solid"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
-    return out
-  end
-
-  if effectId == 6 or effectId == 36 then -- paralysis
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "paralysis"
-    -- paralyze1 / paralyze2: QuarterSpeedDueToParalysis the moment it lands
-    -- (effects.asm :236, :289).
-    M.applyStatusPenalty(targetMon)
-    local token = wire.paralysis or "PAR"
-    local text = targetMon.species .. " is paralyzed"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
-    return out
-  end
-
-  if effectId == 31 or effectId == 37 then -- flinch
+  -- FlinchSideEffect (:971-993): a Substitute returns before the draw.
+  if SIDE_FLINCH[effectId] then
+    if behindSub then return out end
+    if not drawBelow(rng, threshold) then return out end
+    out.proc = true
     targetMon.flinch = true
     return out
   end
 
+  -- StatModifierDownEffect (:539-562): the computer's extra miss draws first,
+  -- then a Substitute misses -- both through `MoveMissed`, silent for a side
+  -- effect -- and only then the side-effect byte.  The drop is the one a
+  -- primary drop makes, so a side-effect drop on the player's monster re-runs
+  -- its badges too (the glitch's Psychic case); Mist is never asked
+  -- (applyStatChange).
   local stat = SIDE_STAT_DOWN[effectId]
   if stat then
-    -- The same StatModifierDownEffect a primary drop runs, so a side-effect
-    -- drop on the player's monster re-runs its badges too (the glitch's
-    -- Psychic case).
+    if ctx.computerMover and drawBelow(rng, M.COMPUTER_DROP_MISS) then
+      return out
+    end
+    if behindSub then return out end
+    if not drawBelow(rng, threshold) then return out end
+    out.proc = true
     applyStatChange(out, targetFighter, targetMon, stat, -1,
       ctx.userFighter, targetMon, true)
     return out
   end
 
-  if effectId == 76 then -- confusion side
+  -- ConfusionSideEffect (:1114-1118) draws before it looks at anything, and
+  -- ConfusionSideEffectSuccess (:1128-1152) never asks about a Substitute, so
+  -- the side effect confuses the monster behind one.  A target already
+  -- confused fails silently (ConfusionEffectFailed: `cp
+  -- CONFUSION_SIDE_EFFECT; ret z`) without the 2-5 turn byte.
+  if effectId == 76 then
+    if not drawBelow(rng, threshold) then return out end
+    out.proc = true
     confuse(out, targetFighter, targetMon, rng, false)
     return out
   end
 
-  out.proc = false
   return out
 end
 

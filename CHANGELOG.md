@@ -309,6 +309,27 @@ here must match `manifest.version`.
   - **Gold's turn checks run in the cart's order.** Full paralysis is rolled
     last, after confusion and a disabled move. A move's secondary effect no
     longer lands on a POKéMON the hit knocked out.
+- **Secondary effects never happened in Red and Gold fights the mod
+  referees.** No EMBER ever burned, no BITE flinched, no BODY SLAM
+  paralysed, and no AURORA BEAM lowered Attack, in solo, co-op and PvP
+  alike. The client sent each move's effect chance from a field neither
+  cart's data has:
+  - **Red** keeps the odds per effect, not per move. The referee now uses
+    pokered's own: 26 or 77 in 256 for burn, freeze, paralysis and flinch,
+    52 or 103 for poison, 85 for a stat drop, and 25 for confusion. Each
+    effect also checks what the cart checks first: a SUBSTITUTE, a target
+    that already has a status, and a target of the move's own type.
+    - A FIRE move thaws a frozen target.
+    - MIST doesn't stop a side-effect stat drop.
+    - The computer's side-effect drops miss a further 25% of the time, as
+      on the cart.
+    - Nothing lands on a POKéMON the hit knocked out, or through a
+      SUBSTITUTE the hit broke.
+  - **Gold** keeps them per move as `effectChance`, which the client now
+    reads. THIEF steals live again because of it.
+- **Gold's high-crit moves were never high-crit in a refereed fight.**
+  Gold's high-crit list is now the cart's: KARATE CHOP, RAZOR WIND, RAZOR
+  LEAF, CRABHAMMER, SLASH, AEROBLAST and CROSS CHOP.
 - **A LEECH SEED knockout froze Red and Gold fights.** When the drain fainted
   the seeded POKéMON, the referee read the seed it had just cleared and
   stopped mid-turn. The fight now goes on.

@@ -13,7 +13,7 @@ rule.
 |---|-----|-----|-------------|------|
 | 1 | Transform isn't undone on switch-out | 1, 2 | no | M |
 | 2 | Haze only resets stats and screens | 1 | no | S |
-| 3 | The computer's stat-down moves skip the cart's extra miss | 1 | yes (side b only) | S |
+| 3 | The computer's primary stat-down moves skip the cart's extra miss | 1 | yes (side b only) | S |
 | 4 | A recharge isn't cleared by a flinch, freeze or trap | 1 | no | S |
 | 5 | Self-hits behind a Substitute | 1 | no | S |
 | 6 | Items and switches resolve before every move | 1 | yes | M |
@@ -23,6 +23,8 @@ rule.
 | 10 | The RNG's low bits repeat | 1, 2 | **every fixture** | M |
 | 11 | Modded Gold moves with a priority effect | 2 | no | S |
 | 12 | Gold trainers hold no items | 2 | — | upstream |
+| 13 | Gold-only secondary effects aren't implemented | 2 | no (already drawn) | L |
+| 14 | METRONOME's pool on Gold | 2 | yes | S |
 
 ---
 
@@ -45,12 +47,14 @@ or frozen target loses its move that turn) and clears confusion, X Accuracy,
 Mist, Focus Energy, Leech Seed, toxic and Disable for both sides. In a 2v2 the
 referee applies Haze to the user and the target only (policy, both gens).
 
-## 3. The computer's stat-down moves skip the cart's extra miss (Gen 1)
+## 3. The computer's primary stat-down moves skip the cart's extra miss (Gen 1)
 
 Outside link battles pokered gives the enemy's stat-down moves a further 25%
 miss (`StatModifierDownEffect`, the `BattleRandom` / `cp 25 percent + 1` before
-`CantLowerAnymore`). Adding it adds a draw to every side-b stat-down move in a
-fight against the computer, so those fixtures move.
+`CantLowerAnymore`). The referee draws it for the computer's *side-effect*
+drops (AURORA BEAM, ACID…) since this release, but not yet for its primary
+stat-down moves (GROWL, TAIL WHIP…); adding it there adds a draw to each, so
+those fixtures move.
 
 ## 4. A recharge isn't cleared by a flinch, freeze or trap (Gen 1)
 
@@ -62,6 +66,8 @@ fight needs a decision before it can be modelled.
 The parity scenario `g1_flinch_recharge` (`tests/drivers/battle_turn_parity.lua`)
 pins today's behaviour — a recharging mon that was flinched — which the cart
 never reaches; it is re-expected when this gap closes.
+Since side effects fire at the cart's odds (this release), a flinch or a
+freeze landing on a recharging POKéMON is reachable in ordinary fights.
 
 ## 5. Self-hits behind a Substitute (Gen 1)
 
@@ -77,7 +83,6 @@ turn order of every fight where the computer uses an item.
 
 ## 7. Smaller Gen 1 differences
 
-- Side effects still apply to a target that just fainted (the cart skips them).
 - A self-hit doesn't clear the other `BattleStatus1` bits.
 - A move called by METRONOME or MIRROR MOVE that lasts several turns (FLY, DIG,
   THRASH, RAGE, BIDE) is recorded under the calling slot, so the replay rolls
@@ -113,6 +118,12 @@ turn order of every fight where the computer uses an item.
   (`AdjustDamageForMoveType`); the referee floors it at 1 and it lands.
 - LEECH SEED's drain is multiplied by the TOXIC counter on the cart, and a mon
   that faints to poison or burn still feeds the seeder in the same residual.
+- The primary POISON move effect (POISONPOWDER, POISON GAS…) doesn't turn a
+  Poison-type target away; the side-effect routine does.
+- A SUBSTITUTE hit for exactly its HP survives at 0 on the cart (`sub [hl]` /
+  `ret nc`); the referee breaks it (`amount >= mon.substitute`).
+- A primary stat drop into MIST misses in the cart's `MoveHitTest` before the
+  accuracy byte; the referee draws the accuracy byte, then fails.
 - A hit that has already fallen to 0 or 1 damage still draws the random roll.
   pokered `RandomizeDamage` returns before drawing (`cp 2` / `ret c`), and so
   does pokecrystal `BattleCommand_DamageVariation`, so Gold has it too. The
@@ -176,6 +187,29 @@ The engine's Gold trainer data has no item field (`src/battle/gen2/Mon.lua`
 Thief against a trainer steals nothing. It needs the engine's importer to read
 the trainer item column — an upstream (Lane B) change.
 
+## 13. Gold-only secondary effects aren't implemented
+
+`src/BattleSim2/Effects.lua` folds Gold's `EFFECT_*` names onto the Gen 1
+handlers (`Effects.idOf`), and the Gold-only secondary effects fold to 0: their
+chance byte is drawn (as on the cart) and nothing is applied. That covers
+SP. DEF DOWN (CRUNCH, PSYCHIC, SHADOW BALL), ACCURACY DOWN (MUD-SLAP,
+OCTAZOOKA), ATTACK UP (METAL CLAW), DEFENSE UP (STEEL WING), ALL UP
+(ANCIENTPOWER), FLAME WHEEL and SACRED FIRE (burn and thaw), STOMP / TWISTER /
+SNORE (flinch), THUNDER (paralysis) and TRI ATTACK, whose `tristatuschance`
+also draws a reroll loop. The fix is a Gen 2-native effect table in both twins.
+The cart also draws `effectchance` on a miss (only a SUBSTITUTE skips it);
+the referee draws only when the hit dealt damage — a stream difference, not an
+outcome one.
+
+## 14. METRONOME's pool on Gold
+
+The pool the client uploads is capped at 200 moves (`Config.BATTLE_METRONOME_POOL_MAX`
+and its server twin), so Gold's moves that sort after roughly the 200th can
+never be called. The pool also doesn't exclude what the cart never lets
+METRONOME pick (SKETCH, MIMIC, COUNTER, MIRROR COAT, PROTECT, DETECT, ENDURE,
+DESTINY BOND, SLEEP TALK, THIEF — the engine port has the list at
+`src/battle/gen2/Effects.lua:710`).
+
 ## Smaller twin and client notes
 
 - `src/Sessions.lua` `beginWildMediated` builds a wild sheet without
@@ -184,3 +218,12 @@ the trainer item column — an upstream (Lane B) change.
   anti-forgery rule only lets a client keep an item it uploaded.
 - The Lua sanitiser truncates ids longer than 40 characters where the Node one
   refuses them.
+- In a Gold co-op 2-on-2, a 0-power status move whose Gold effect record is
+  "primary" skips the target picker and goes to the first living foe
+  (`src/CoopBattle.lua` `needsTarget` uses Gen 1 effect names and Gold records
+  have no `accuracyChecked`): HYPNOSIS, THUNDER WAVE, TOXIC, CONFUSE RAY, LEECH
+  SEED, ENCORE, MEAN LOOK, ATTRACT, ROAR and the rest. A client UI fix.
+- PP Ups add `floor(base/5)` each with no cap (`Coop.lua` `healParty`, and the
+  display fallback in `MediatedBattle.lua`); both carts cap the bonus at 7
+  (pokered `AddBonusPP`, pokegold `ComputeMaxPP`), so a 40-PP move gets 64
+  instead of 61.

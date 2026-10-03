@@ -420,6 +420,63 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- side effects
+-- ------------------------------------------------------------------
+--
+-- Red's side-effect odds (pokered engine/battle/effects.asm): the threshold
+-- table and its explicit override, the computer's extra stat-drop miss, and
+-- each routine run on one target with the exact bytes the case names -- the
+-- scripted generator above, so `draws` pins what a routine checks before it
+-- rolls as firmly as what it does after.
+
+local Effects = BattleSim.Effects
+
+local SIDE = {}
+
+function SIDE.threshold(input)
+  local threshold = Effects.sideThreshold(input.effectId, input.chance)
+  return { threshold = threshold, proc = input.roll < threshold }
+end
+
+function SIDE.computerMiss(input)
+  return { miss = input.roll < Effects.COMPUTER_DROP_MISS }
+end
+
+function SIDE.apply(input)
+  local t = input.target
+  local mon = {
+    species = "Beta", status = orNil(t.status), types = t.types,
+    substitute = orNil(t.substitute), confusion = orNil(t.confusion),
+    mist = orNil(t.mist) == true,
+    stats = { atk = 40, def = 40, spd = 40, spc = 40 },
+  }
+  Effects.ensureBattleStats(mon)
+  for key, value in pairs(type(t.stages) == "table" and t.stages or {}) do
+    mon.stages[key] = value
+  end
+  local rng = scripted(input.bytes)
+  local out = Effects.applySide({
+    effectId = input.effectId, chance = input.chance, rng = rng,
+    targetMon = mon, targetFighter = { slot = 3, side = "b" },
+    userFighter = { slot = 0, side = "a" },
+    moveType = orNil(input.moveType), poisonType = orNil(input.poisonType),
+    fireType = orNil(input.fireType), computerMover = orNil(input.computerMover) == true,
+  })
+  return {
+    proc = out.proc, draws = rng.used(), status = mon.status,
+    flinch = mon.flinch == true, confused = (mon.confusion or 0) > 0,
+    stage = input.stat and mon.stages[input.stat] or nil,
+    said = out.messages[1],
+  }
+end
+
+each("side", function(input)
+  local handler = SIDE[input.step]
+  if not handler then error("no handler for side step " .. tostring(input.step), 0) end
+  return handler(input)
+end)
+
+-- ------------------------------------------------------------------
 -- Rng: the one module the fixture cannot pin
 -- ------------------------------------------------------------------
 --

@@ -1924,6 +1924,126 @@ scenario('g1_side_min', (events) => {
   return battle;
 });
 
+// 67-80. Gen 1 side-effect odds (task FX4). Red's move records carry no
+// chance, so every Red move reaches the referee at chance 0 and the odds are
+// each pokered routine's own constant (Effects.SIDE_THRESHOLD). A g1_odds_*
+// scenario fights one turn per seed -- a fast Alpha's side-effect move into a
+// slow Beta, chance 0 -- with seeds a scan picked so the routine's byte is
+// exactly threshold - 1 (it lands) and then exactly the threshold (it does
+// not). `probeSide` pins every battle's draw count (`rng`) and the target's
+// condition.
+
+// After each battle's turn: its RNG state, then every standing seat's
+// condition, confusion, flinch and the two stages a side-effect drop moves.
+function probeSide(battle, at) {
+  probes.push({ at, rng: battle.rng.state() });
+  for (const fighter of battle.fighters) {
+    const mon = fighter.active ? fighter.mons[fighter.active - 1] : null;
+    if (mon && mon.hp > 0) {
+      probes.push({
+        at, slot: fighter.slot, status: mon.status || '',
+        confusion: mon.confusion || 0, flinch: mon.flinch === true,
+        sSpd: mon.stages.spd, sSpc: mon.stages.spc,
+      });
+    }
+  }
+}
+
+// One turn per entry, every battle's events into the one stream: Alpha (p1,
+// fast) uses `move`, Beta (p2, slow) splashes. An entry may swap either move
+// (`aMove` / `bMove`), the speeds, the mode, the ruleset's `typeIds`, and
+// Beta's HP, status, types and raw sheet fields (`bExtra`).
+function sideTurns(id, entries) {
+  return (events) => {
+    let battle = null;
+    entries.forEach((e, index) => {
+      battle = build({
+        id: `${id}${index + 1}`, mode: e.mode || '1v1', seed: e.seed, choiceTimeout: 60,
+        reconnectGrace: 60, typeIds: e.typeIds,
+        sides: {
+          a: [{ playerId: 'p1', name: 'Ann', mons: [
+            mn({ species: 'Alpha', maxHp: 400, spd: e.aSpd || 90, types: [1],
+              baseSpd: 0, moves: [e.aMove || e.move] })] }],
+          b: [{ playerId: 'p2', name: 'Bob', mons: [
+            mn({ species: 'Beta', hp: e.bHp, maxHp: 400, spd: e.bSpd || 10,
+              baseSpd: 0, types: e.bTypes || [1], status: e.bStatus,
+              moves: [e.bMove || fx('splash', 0, 85)], extra: e.bExtra })] }],
+        },
+      });
+      drainInto(battle, events);
+      battle.submitChoice('p1', { action: 'fight', move: 0 });
+      battle.submitChoice('p2', { action: 'fight', move: 0 });
+      drainInto(battle, events);
+      probeSide(battle, index + 1);
+    });
+    return battle;
+  };
+}
+
+const hit = (effect, o = {}) => fx('hit', 10, effect, { chance: o.chance, type: o.type });
+
+// Each pair: the byte at threshold - 1, then at the threshold. The scan's
+// seeds put the routine's byte at the same draw (acc, crit, roll, then the
+// side byte), so one seed serves every family whose threshold it straddles.
+const odds = (id, effect, below, at) => sideTurns(id, [
+  { seed: below, move: hit(effect) }, { seed: at, move: hit(effect) }]);
+scenario('g1_odds_poison1', odds('g1op1', 2, 11078, 6227)); // 51 / 52
+scenario('g1_odds_poison2', odds('g1op2', 33, 192, 3)); // 102 / 103
+scenario('g1_odds_twineedle', odds('g1otw', 77, 11078, 6227)); // 51 / 52
+scenario('g1_odds_burn1', odds('g1ob1', 4, 18957, 14106)); // 25 / 26
+scenario('g1_odds_freeze1', odds('g1of1', 5, 18957, 14106)); // 25 / 26
+scenario('g1_odds_paralyze2', odds('g1op2p', 36, 8071, 3220)); // 76 / 77
+scenario('g1_odds_flinch1', odds('g1ofl1', 31, 18957, 14106)); // 25 / 26
+scenario('g1_odds_flinch2', odds('g1ofl2', 37, 8071, 3220)); // 76 / 77
+scenario('g1_odds_drop', odds('g1odr', 71, 28460, 23588)); // 84 / 85
+scenario('g1_odds_confuse', odds('g1ocf', 76, 23829, 18957)); // 24 / 25
+
+// The computer's drop (wild Beta, fast, lowers Alpha's Speed): the extra miss
+// byte comes first -- 63 misses and draws nothing more; 64 passes, and the
+// side byte 84 then lands. g1_odds_drop is the link fight that never draws it.
+scenario('g1_odds_computer_drop', sideTurns('g1ocd', [
+  { seed: 12021, mode: 'wild', aSpd: 10, bSpd: 90, aMove: fx('splash', 0, 85), bMove: hit(70) },
+  { seed: 9921, mode: 'wild', aSpd: 10, bSpd: 90, aMove: fx('splash', 0, 85), bMove: hit(70) },
+]));
+
+// Precedence on one seed (the side byte is 50): chance 0 is the cart's 26 and
+// misses; an explicit 20 is floor(20 * 255 / 100) = 51 and lands; 19 is 48 and
+// misses. A chance on an effect with no side routine draws nothing -- the last
+// two battles end on the same RNG state.
+scenario('g1_side_precedence', sideTurns('g1sp', [
+  { seed: 15950, move: hit(4) },
+  { seed: 15950, move: hit(4, { chance: 20 }) },
+  { seed: 15950, move: hit(4, { chance: 19 }) },
+  { seed: 15950, move: hit(0, { chance: 100 }) },
+  { seed: 15950, move: hit(0) },
+]));
+
+// What each routine checks before it draws, on one seed whose side byte is 0
+// -- any draw would land -- so a battle that ends on battle 1's RNG state (the
+// plain hit) drew nothing (the Lua driver's comment numbers each battle).
+const POISON_AXIS = ['NORMAL', 'POISON'];
+const FIRE_AXIS = ['NORMAL', 'FIRE'];
+const SUB = { substitute: 200 };
+const DOLL = { substitute: 1 };
+scenario('g1_side_gates', sideTurns('g1sg', [
+  { seed: 21964, move: hit(0) },
+  { seed: 21964, move: hit(4), bStatus: 'PSN' },
+  { seed: 21964, move: hit(4), bTypes: [0] },
+  { seed: 21964, move: hit(2), typeIds: POISON_AXIS },
+  { seed: 21964, move: hit(2) },
+  { seed: 21964, move: hit(4), bExtra: SUB },
+  { seed: 21964, move: hit(31), bExtra: SUB },
+  { seed: 21964, move: hit(2), bExtra: SUB },
+  { seed: 21964, move: hit(71), bExtra: SUB },
+  { seed: 21964, move: hit(76), bExtra: SUB },
+  { seed: 21964, move: hit(4), bExtra: DOLL },
+  { seed: 21964, move: hit(77), bExtra: DOLL },
+  { seed: 21964, move: hit(4, { type: 1 }), typeIds: FIRE_AXIS, bStatus: 'FRZ', bTypes: [0] },
+  { seed: 21964, move: hit(71), bExtra: { mist: true } },
+  { seed: 21964, move: hit(0), bHp: 1 },
+  { seed: 21964, move: hit(4), bHp: 1 },
+]));
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -3672,4 +3792,79 @@ test('a side-effect drop at -6 is silent; a primary at -6 says so', () => {
   assert.strictEqual(lines.length, 1, 'once, for the primary on turn 2');
   const texts = jsRun('g1_side_min').events.filter((e) => e.t === 'msg').map((e) => e.text);
   assert.ok(texts.indexOf("Beta's SPEED won't go any lower") > texts.indexOf('Alpha used goo'));
+});
+
+// ------------------------------------------------------------------
+// Gen 1 side-effect odds (FX4), stated as claims (twin of
+// tests/battle_sim_turn.lua section 28, where the bytes are forced and the
+// draws counted)
+// ------------------------------------------------------------------
+
+// Battle `at` of a sideTurns scenario: its RNG state, the target's (slot 3)
+// or the user's (slot 0) probe row, and what was said in it.
+const rngOf = (name, at) => jsRun(name).probes.find((p) => p.at === at && p.slot === undefined).rng;
+const seatOf = (name, at, slot) => jsRun(name).probes.find((p) => p.at === at && p.slot === slot);
+const saidAt = (name, at, text) => {
+  const battle = jsRun(name).events.find((e) => e.t === 'msg').battle.replace(/1$/, String(at));
+  return jsRun(name).events.some((e) => e.battle === battle && e.t === 'msg' && e.text === text);
+};
+
+test("Red's side effects fire at chance 0: below each routine's threshold, not at it", () => {
+  for (const [name, landed] of [
+    ['g1_odds_poison1', 'poison'], ['g1_odds_poison2', 'poison'], ['g1_odds_twineedle', 'poison'],
+    ['g1_odds_burn1', 'burn'], ['g1_odds_freeze1', 'freeze'], ['g1_odds_paralyze2', 'paralysis'],
+  ]) {
+    assert.strictEqual(seatOf(name, 1, 3).status, landed, `${name}: threshold - 1 lands`);
+    assert.strictEqual(seatOf(name, 2, 3).status, '', `${name}: the threshold does not`);
+  }
+  for (const name of ['g1_odds_flinch1', 'g1_odds_flinch2']) {
+    assert.ok(saidAt(name, 1, 'Beta flinched'), `${name}: threshold - 1 flinches`);
+    assert.ok(!saidAt(name, 2, 'Beta flinched'), `${name}: the threshold does not`);
+  }
+  assert.strictEqual(seatOf('g1_odds_drop', 1, 3).sSpc, -1, '84 < 85 drops the Special');
+  assert.strictEqual(seatOf('g1_odds_drop', 2, 3).sSpc, 0, '85 does not');
+  assert.ok(seatOf('g1_odds_confuse', 1, 3).confusion > 0, '24 < 25 confuses');
+  assert.strictEqual(seatOf('g1_odds_confuse', 2, 3).confusion, 0, '25 does not (no + 1 here)');
+});
+
+test("the computer's side-effect drop draws its extra miss first", () => {
+  assert.strictEqual(seatOf('g1_odds_computer_drop', 1, 0).sSpd, 0, 'the miss byte 63 stops it');
+  assert.strictEqual(seatOf('g1_odds_computer_drop', 2, 0).sSpd, -1, '64 passes and 84 lands');
+});
+
+test('an explicit chance overrides the cart odds; a chance on no side routine draws nothing', () => {
+  assert.deepStrictEqual([1, 2, 3].map((at) => seatOf('g1_side_precedence', at, 3).status),
+    ['', 'burn', ''], 'byte 50: the cart 26 misses, 20% (51) lands, 19% (48) misses');
+  assert.strictEqual(rngOf('g1_side_precedence', 1), rngOf('g1_side_precedence', 2), 'one draw either way');
+  assert.strictEqual(rngOf('g1_side_precedence', 4), rngOf('g1_side_precedence', 5),
+    'effect 0 at chance 100 draws no more than effect 0 at chance 0');
+  assert.notStrictEqual(rngOf('g1_side_precedence', 1), rngOf('g1_side_precedence', 5));
+});
+
+test('each side-effect routine draws only where the cart does', () => {
+  const g = 'g1_side_gates';
+  const plain = rngOf(g, 1);
+  for (const [at, why] of [
+    [2, 'a burn into a poisoned target'], [3, 'a burn into a target of its own type'],
+    [4, 'a poison into a Poison-type target'], [6, 'a burn into a Substitute'],
+    [7, 'a flinch into a Substitute'], [8, 'a poison into a Substitute'],
+    [9, 'a drop into a Substitute'], [11, 'a burn whose hit broke the Substitute'],
+    [12, 'a Twineedle whose first hit broke the Substitute'], [13, 'a Fire thaw'],
+  ]) {
+    assert.strictEqual(rngOf(g, at), plain, `${why} draws nothing`);
+  }
+  assert.strictEqual(seatOf(g, 2, 3).status, 'poison', 'the poisoned target stays poisoned');
+  assert.strictEqual(seatOf(g, 3, 3).status, '', 'and the same-type one unburned');
+  assert.notStrictEqual(rngOf(g, 5), plain, 'without typeIds no type is POISON: it draws');
+  assert.strictEqual(seatOf(g, 5, 3).status, 'poison');
+  assert.notStrictEqual(rngOf(g, 10), plain, 'confusion draws through a Substitute');
+  assert.ok(seatOf(g, 10, 3).confusion > 0, '...and confuses the monster behind it');
+  assert.ok(saidAt(g, 11, "Beta's substitute broke") && seatOf(g, 11, 3).status === '');
+  assert.ok(saidAt(g, 12, "Beta's substitute broke") && seatOf(g, 12, 3).status === '');
+  assert.ok(saidAt(g, 13, 'Fire defrosted Beta'), 'a Fire move thaws a frozen target');
+  assert.strictEqual(seatOf(g, 13, 3).status, '');
+  assert.strictEqual(seatOf(g, 14, 3).sSpc, -1, 'Mist does not stop a side-effect drop');
+  assert.ok(!saidAt(g, 14, 'But it failed'));
+  assert.strictEqual(rngOf(g, 15), rngOf(g, 16), 'a knockout draws no side byte');
+  assert.strictEqual(seatOf(g, 16, 3), undefined, 'the target is down');
 });

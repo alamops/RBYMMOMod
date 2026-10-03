@@ -52,7 +52,7 @@ function expectFields(actual, expected, label) {
 
 test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped -- reread the notes before touching this');
-  for (const group of ['damage', 'accuracy', 'crit', 'status', 'obedience']) {
+  for (const group of ['damage', 'accuracy', 'crit', 'status', 'obedience', 'side']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -313,6 +313,78 @@ test('obedience vectors', async (t) => {
       expectFields(handler(v.in), v.out, v.id);
     });
   }
+});
+
+// Red's side-effect odds (pokered engine/battle/effects.asm): the threshold
+// table and its explicit override, the computer's extra stat-drop miss, and
+// each routine run on one target with the exact bytes the case names -- the
+// scripted generator above, so `draws` pins what a routine checks before it
+// rolls as firmly as what it does after.
+const orNull = (value) => (value === undefined ? null : value);
+
+const SIDE = {
+  threshold: (input) => {
+    const threshold = Effects.sideThreshold(input.effectId, input.chance);
+    return { threshold, proc: input.roll < threshold };
+  },
+  computerMiss: (input) => ({ miss: input.roll < Effects.COMPUTER_DROP_MISS }),
+  apply: (input) => {
+    const t = input.target;
+    const mon = {
+      species: 'Beta', status: orNull(t.status), types: t.types,
+      substitute: orNull(t.substitute), confusion: orNull(t.confusion),
+      mist: t.mist === true,
+      stats: { atk: 40, def: 40, spd: 40, spc: 40 },
+    };
+    Effects.ensureBattleStats(mon);
+    Object.assign(mon.stages, t.stages || {});
+    const rng = scripted(input.bytes);
+    const out = Effects.applySide({
+      effectId: input.effectId, chance: input.chance, rng,
+      targetMon: mon, targetFighter: { slot: 3, side: 'b' },
+      userFighter: { slot: 0, side: 'a' },
+      moveType: orNull(input.moveType), poisonType: orNull(input.poisonType),
+      fireType: orNull(input.fireType), computerMover: input.computerMover === true,
+    });
+    return {
+      proc: out.proc, draws: rng.used(), status: orNull(mon.status),
+      flinch: mon.flinch === true, confused: (mon.confusion || 0) > 0,
+      stage: input.stat ? mon.stages[input.stat] : null,
+      said: orNull(out.messages[0]),
+    };
+  },
+};
+
+test('side-effect vectors', async (t) => {
+  for (const v of vectors.side) {
+    await t.test(v.id, () => {
+      const handler = SIDE[v.in.step];
+      assert.ok(handler, `${v.id}: no handler for side step ${v.in.step}`);
+      expectFields(handler(v.in), v.out, v.id);
+    });
+  }
+});
+
+// Red's side-effect odds, re-derived from the expressions pokered writes them
+// as (engine/battle/effects.asm, RGBDS `percent` = `* $ff / 100`), so a typo
+// in the table cannot hide behind a vector built from the same typo.
+test("the side-effect table is the cart's expressions", () => {
+  const percent = (n) => Math.floor(n * 255 / 100);
+  const cart = {
+    2: percent(20) + 1, 77: percent(20) + 1, 33: percent(40) + 1,
+    4: percent(10) + 1, 5: percent(10) + 1, 6: percent(10) + 1,
+    34: percent(30) + 1, 35: percent(30) + 1, 36: percent(30) + 1,
+    31: percent(10) + 1, 37: percent(30) + 1,
+    68: percent(33) + 1, 69: percent(33) + 1, 70: percent(33) + 1,
+    71: percent(33) + 1, 76: percent(10),
+  };
+  assert.deepStrictEqual({ ...Effects.SIDE_THRESHOLD }, cart);
+  for (const id of Object.keys(cart)) {
+    assert.strictEqual(Effects.sideThreshold(Number(id), 0), cart[id], `chance 0 reads effect ${id}'s`);
+  }
+  assert.strictEqual(Effects.COMPUTER_DROP_MISS, percent(25) + 1);
+  assert.strictEqual(Effects.sideThreshold(4, 30), percent(30), 'an explicit percent has no + 1');
+  assert.strictEqual(Effects.sideThreshold(0, 100), 0, 'no routine, no threshold');
 });
 
 test('the nibble swap behind two of the rolls is a self-inverse bijection', () => {

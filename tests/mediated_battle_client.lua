@@ -435,12 +435,152 @@ do
      "Gold: a republished status move keeps its Crystal effect id")
   check(gold[1].effect ~= 0, "...which is a real effect, not the do-nothing 0")
   eq(gold[2].highCrit, true, "Gold: EFFECT_ALWAYS_CRIT still republishes as high-crit")
-  eq(gold[3].highCrit, nil,
-     "Gold: KARATE_CHOP takes no Gen 1 high-crit fallback on a Gen 2 resend")
+  -- KARATE_CHOP is on Gold's own CriticalHitMoves too (pokegold data/moves/
+  -- critical_hit_moves.asm), so the resend stamps it -- off Gold's list, not
+  -- Gen 1's (the lists differ in RAZOR_WIND / AEROBLAST / CROSS_CHOP, pinned
+  -- in the Gold-shaped record section below).
+  eq(gold[3].highCrit, true,
+     "Gold: KARATE_CHOP republishes high-crit, off Gold's CriticalHitMoves")
   -- ...and the Gen 1 resend is exactly what it was.
   local red = Mediated.sheetMoves({ data = DATA },
     { moves = { { id = "KARATE_CHOP", pp = 25 } } })
   eq(red[1].highCrit, true, "Gen 1: the resend keeps the HIGH_CRIT fallback")
+end
+
+-- Gold-shaped move records: the fields an imported Gold record really carries
+-- (src/import/RomExtractorGen2.lua extractMoves -- `effectChance` the percent,
+-- `effectChanceRaw` the byte, `accuracyRaw`, `effectId`; no `chance`, no
+-- `highCrit`).  The sheet used to read `def.chance`, which no Gold record has,
+-- so every Gold move went out at chance 0 -- no secondary effect ever fired in
+-- a refereed Gold fight, and THIEF never stole -- and it stamped Gen 2
+-- high-crit off EFFECT_ALWAYS_CRIT, an effect neither Gold nor Crystal has, so
+-- no Gold move ever rolled on the high-crit rung.  Gold's high-crit list is
+-- pokegold data/moves/critical_hit_moves.asm, keyed by move id.
+do
+  local function goldRecord(o)
+    return {
+      id = o.id, name = o.name or o.id, power = o.power or 40,
+      type = o.type or "NORMAL", pp = o.pp or 20,
+      accuracy = 100, accuracyRaw = 255,
+      effect = o.effect or "EFFECT_NORMAL_HIT", effectId = 0,
+      effectChance = o.effectChance or 0, effectChanceRaw = o.raw or 0,
+      chance = o.chance, highCrit = o.highCrit,
+    }
+  end
+  local recs = {
+    EMBER = goldRecord({ id = "EMBER", type = "FIRE", effect = "EFFECT_BURN_HIT",
+                         effectChance = 10, raw = 25 }),
+    THIEF = goldRecord({ id = "THIEF", effect = "EFFECT_THIEF",
+                         effectChance = 100, raw = 255 }),
+    -- A content mod that states `chance` is heard over the cart's field.
+    STATED = goldRecord({ id = "STATED", effect = "EFFECT_BURN_HIT",
+                          effectChance = 10, raw = 25, chance = 30 }),
+    OVER = goldRecord({ id = "OVER", effect = "EFFECT_BURN_HIT", effectChance = 250 }),
+    UNDER = goldRecord({ id = "UNDER", effect = "EFFECT_BURN_HIT", effectChance = -5 }),
+    TACKLE = goldRecord({ id = "TACKLE" }),
+    SLASH = goldRecord({ id = "SLASH" }),
+    KARATE_CHOP = goldRecord({ id = "KARATE_CHOP", type = "NORMAL" }),
+    RAZOR_WIND = goldRecord({ id = "RAZOR_WIND", effect = "EFFECT_RAZOR_WIND" }),
+    AEROBLAST = goldRecord({ id = "AEROBLAST" }),
+    CROSS_CHOP = goldRecord({ id = "CROSS_CHOP" }),
+    -- The record's own `highCrit` still wins on Gold, an explicit false too.
+    CRABHAMMER = goldRecord({ id = "CRABHAMMER", highCrit = false }),
+  }
+  local goldMoveData = { type_chart = DATA.type_chart, moves = recs,
+                         pokemon = DATA.pokemon }
+  local function ids(list)
+    local out = {}
+    for i, id in ipairs(list) do out[i] = { id = id, pp = 5 } end
+    return out
+  end
+  local function byId(sheets)
+    local out = {}
+    for _, sheet in ipairs(sheets) do out[sheet.id] = sheet end
+    return out
+  end
+  local gold = { generation = 2, data = goldMoveData }
+  local red = { data = goldMoveData }
+
+  -- The chance, through the opening upload on a Gold party.
+  local party = Mediated.snapshotParty({
+    generation = 2, data = goldMoveData,
+    save = { generation = 2, party = {
+      mon("CHARMANDER", { moves = ids({ "EMBER", "THIEF", "STATED", "TACKLE" }) }),
+      mon("SQUIRTLE", { moves = ids({ "OVER", "UNDER" }) }),
+    }, player = { name = "GOLD" } },
+  })
+  eq(#party, 2, "Gold-shaped records: the party is described")
+  local lead = byId(party[1] and party[1].moves or {})
+  eq(lead.EMBER and lead.EMBER.chance, 10,
+     "Gold: a record's effectChance (10) is the sheet's chance -- not 0")
+  eq(lead.THIEF and lead.THIEF.chance, 100,
+     "Gold: THIEF's effectChance 100 rides, so the referee's `thief` can run")
+  eq(lead.STATED and lead.STATED.chance, 30,
+     "Gold: a record that states `chance` still wins over effectChance")
+  eq(lead.TACKLE and lead.TACKLE.chance, 0, "Gold: a plain hit's 0 stays 0")
+  local bench = byId(party[2] and party[2].moves or {})
+  eq(bench.OVER and bench.OVER.chance, 100, "Gold: an out-of-range effectChance clamps to 100")
+  eq(bench.UNDER and bench.UNDER.chance, 0, "Gold: ...and a negative one to 0")
+  local packed = Wire.battleParty({ battle = "fx5", mons = party, generation = 2 })
+  local packedLead = byId(packed and packed.mons[1].moves or {})
+  eq(packedLead.EMBER and packedLead.EMBER.chance, 10,
+     "Gold: the chance survives Wire.battleParty")
+  eq(packedLead.THIEF and packedLead.THIEF.chance, 100,
+     "Gold: ...THIEF's 100 too")
+
+  -- The mid-fight resend (PROTOCOL 28) reads the same field.
+  local resend = byId(Mediated.sheetMoves(gold, { moves = ids({ "EMBER", "THIEF" }) }))
+  eq(resend.EMBER and resend.EMBER.chance, 10, "Gold: a republished moveset keeps effectChance")
+  eq(resend.THIEF and resend.THIEF.chance, 100, "Gold: ...THIEF's included")
+
+  -- ...and so does the Metronome pool the host uploads.
+  local pool = byId(Mediated.snapshotRuleset(gold).metronomePool or {})
+  eq(pool.EMBER and pool.EMBER.chance, 10, "Gold: a Metronome-called move carries its effectChance")
+
+  -- An imported Gold moves table also holds two scalars beside its records
+  -- (`generation = 2`, `source`).  A table short enough for the pool walk to
+  -- reach them -- a stock one is cut off by the pool cap first -- must neither
+  -- throw on the number nor offer either as a move.
+  local withScalars = { type_chart = DATA.type_chart, pokemon = DATA.pokemon,
+                        moves = { generation = 2, source = "ROM:Moves" } }
+  for id, rec in pairs(recs) do withScalars.moves[id] = rec end
+  local okRules, scalarRules = pcall(Mediated.snapshotRuleset,
+                                     { generation = 2, data = withScalars })
+  check(okRules, "Gold: a moves table carrying `generation` / `source` still builds a ruleset")
+  local scalarPool = byId(okRules and scalarRules.metronomePool or {})
+  eq(scalarPool.generation, nil, "Gold: ...`generation` is not a Metronome move")
+  eq(scalarPool.source, nil, "Gold: ...nor is `source`")
+  eq(scalarPool.EMBER and scalarPool.EMBER.chance, 10, "Gold: ...and the records are all still there")
+
+  -- Gen 1 reads `chance` alone: Red's records carry no odds (the Gen 1 referee
+  -- owns them), and the cart field is Gold's.
+  local redSheets = byId(Mediated.sheetMoves(red, { moves = ids({ "EMBER", "STATED" }) }))
+  eq(redSheets.EMBER and redSheets.EMBER.chance, 0,
+     "Gen 1: an effectChance on the record is not read -- still 0")
+  eq(redSheets.STATED and redSheets.STATED.chance, 30, "Gen 1: a stated `chance` still rides")
+
+  -- High crit: Gold's CriticalHitMoves, by id.
+  local crit = byId(Mediated.sheetMoves(gold, { moves = ids({
+    "SLASH", "KARATE_CHOP", "RAZOR_WIND", "AEROBLAST" }) }))
+  local crit2 = byId(Mediated.sheetMoves(gold, { moves = ids({
+    "CROSS_CHOP", "TACKLE", "CRABHAMMER" }) }))
+  eq(crit.SLASH and crit.SLASH.highCrit, true, "Gold: SLASH is high-crit off CriticalHitMoves")
+  eq(crit.KARATE_CHOP and crit.KARATE_CHOP.highCrit, true, "Gold: KARATE_CHOP too")
+  eq(crit.RAZOR_WIND and crit.RAZOR_WIND.highCrit, true,
+     "Gold: RAZOR_WIND, which only Gold's list names")
+  eq(crit.AEROBLAST and crit.AEROBLAST.highCrit, true, "Gold: AEROBLAST, likewise")
+  eq(crit2.CROSS_CHOP and crit2.CROSS_CHOP.highCrit, true,
+     "Gold: CROSS_CHOP with no EFFECT_ALWAYS_CRIT on its record")
+  eq(crit2.TACKLE and crit2.TACKLE.highCrit, nil, "Gold: a move off the list is ordinary")
+  eq(crit2.CRABHAMMER and crit2.CRABHAMMER.highCrit, nil,
+     "Gold: a record's explicit highCrit = false opts a listed move out")
+  local redCrit = byId(Mediated.sheetMoves(red, { moves = ids({
+    "SLASH", "RAZOR_WIND", "AEROBLAST", "CROSS_CHOP" }) }))
+  eq(redCrit.SLASH and redCrit.SLASH.highCrit, true, "Gen 1: SLASH keeps the Gen 1 list")
+  eq(redCrit.RAZOR_WIND and redCrit.RAZOR_WIND.highCrit, nil,
+     "Gen 1: RAZOR_WIND is not on Red's list")
+  eq(redCrit.AEROBLAST and redCrit.AEROBLAST.highCrit, nil, "Gen 1: nor AEROBLAST")
+  eq(redCrit.CROSS_CHOP and redCrit.CROSS_CHOP.highCrit, nil, "Gen 1: nor CROSS_CHOP")
 end
 
 -- The edges that must not throw, because every one of them is a real build.
@@ -488,15 +628,20 @@ for _, idx in ipairs(ruleset.specialTypes or {}) do specialSet[idx] = true end
 check(specialSet[0] and specialSet[2], "FIRE and WATER indices are Special")
 check(not specialSet[1], "NORMAL is Physical")
 -- The chart's axis by name (`typeIds`): what Gold's badge type boost reads a
--- move's type index through on the referee (BattleSim2 `_typeIdOf`).  The same
--- order every row and move index on this upload uses, and it crosses the wire
--- -- on Gold only: Gen 1's referee has no type boost and never reads it.
+-- move's type index through on the referee (BattleSim2 `_typeIdOf`), and what
+-- Red's side effects ask POISON / FIRE through (BattleSim `typeIndexOf`).  The
+-- same order every row and move index on this upload uses, and it crosses the
+-- wire on Gen 1 and Gen 2.
 local function goldWith(data)
   local game = gameWith({}, data)
   game.generation = 2
   return game
 end
-eq(ruleset.typeIds, nil, "typeIds: a Gen 1 ruleset carries none")
+eq(table.concat(ruleset.typeIds or {}, ","), "FIRE,NORMAL,WATER",
+   "typeIds: a Gen 1 ruleset names the chart's axis too (Red's POISON / FIRE side-effect checks)")
+local redWire = Wire.battleRuleset(ruleset, 1)
+eq(table.concat(redWire and redWire.typeIds or {}, ","), "FIRE,NORMAL,WATER",
+   "typeIds: Wire keeps them on a Gen 1 ruleset")
 local goldRules = Mediated.snapshotRuleset(goldWith(DATA))
 eq(table.concat(goldRules.typeIds or {}, ","), "FIRE,NORMAL,WATER",
    "typeIds: Gold's ruleset names the chart's axis, in order")
