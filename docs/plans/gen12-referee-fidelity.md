@@ -196,6 +196,10 @@ After that: review (3 reviewers: the Gen 1 referee, the Gen 2 referee, client/wi
 | Gen 1 flinch-reset skip while the player's mon rages or recharges (pokered MainInBattleLoop) | **in this run**: G1b, side a of BADGE_MODES; link modes reset unconditionally |
 | Co-op callouts parsed "used instead, X" as the move "instead, X" | **in this run**: C |
 | Pre-existing referee gaps found on the way (Transform on switch-out, Gen 1 Haze side effects, the computer's 25% stat-down miss, ClearHyperBeam, self-hit into a Substitute, item/switch turn slots, Pay Day on Gen 1/2, RNG low bits, modded Gold priority moves, and the smaller rows) | **out of scope**: each is its own ticket; listed with code pointers in `docs/plans/gen12-referee-known-gaps.md` |
+| Secondary effects never fired in mediated Red/Gold fights (sheet `chance` read from a field neither cart's data has; found in review) | **in this run**: FX4 (Red's per-effect odds in the referee) + FX5 (Gold `effectChance`, plus Gold's high-crit list and non-move table entries), `ad715c0` |
+| Gold-only secondary effects folded to effect 0 (CRUNCH's Sp. Def drop, THUNDER's paralysis, STOMP's flinch, TRI ATTACK, …), METRONOME's pool on Gold, the Gold co-op target picker, the PP Up cap | **out of scope**: pre-existing; `docs/plans/gen12-referee-known-gaps.md` §13-14 and the client notes |
+| TT-C (client tests) | **in this run**, written with the code: C, FX3, FX5 (`mediated_battle_client`, `coop_mediated`, `solo_battle`, `hub_battle` + Node twin) |
+| TT-E Gold co-op PvP leg (an eaten berry restored) | **skipped**: the Gen 2 MMO drivers have no `coop_pvp` leg; PvP never writing home is covered headless (`mediated_battle_client`, `coop_mediated`) |
 
 ## 10. Where the referee follows pret over the engine ports
 

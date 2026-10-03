@@ -150,6 +150,13 @@ here must match `manifest.version`.
     - The hubs tell the referee whether a Gold-family player is on Gold/Silver
       or Crystal, because the two carts scale large stats differently.
     - Red now uploads its four obedience badges.
+    - `run-solo-battle-e2e.sh` drives each rule live:
+      - on Red and Gold: `obey-traded`, `obey-capless`, `obey-asleep`
+        and `priority-quick`;
+      - on Gold only: the `held-*` legs (LEFTOVERS, a BERRY, QUICK CLAW,
+        a wild THIEF, SMOKE BALL);
+      - on FireRed and Emerald: `obey-asleep` and `theft-wild`.
+    - `SOLO_LEGS` now picks legs on every cart.
     - The plan is `docs/plans/gen12-referee-fidelity.md`.
 - **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
   out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
