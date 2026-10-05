@@ -152,6 +152,23 @@ function uploadAndReady(relay, a, b, session, opts) {
   return readyA;
 }
 
+// ANN alone against the hub's wild seat: a fight against the computer, the
+// only kind a mid-fight learn or level-up (`mmo.battle_moveset`) is heard in --
+// no cart levels or learns in a link battle (relay LEARN_MODES). Twin of
+// openWildFight in tests/hub_battle.lua.
+function openWild(relay, a, aMons, bMons) {
+  const id = 'wl';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: [[100]] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: aMons || [mon(90)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: bMons || [mon(20)],
+  });
+  return { id };
+}
+
 function testMediatedOneVOneKo() {
   const clock = makeClock();
   const relay = makeRelay(clock);
@@ -1088,17 +1105,13 @@ function testMidFightMoveset() {
   const clock = makeClock();
   const relay = makeRelay(clock);
   const a = dial(relay, 'LEARNA');
-  const b = dial(relay, 'LEARNB');
-  const session = openBattle(relay, a, b);
-  a.peer.outbox = [];
-  b.peer.outbox = [];
   const learner = {
     ...mon(40),
     moves: [
       { id: 'OLD', pp: 10, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 },
     ],
   };
-  uploadAndReady(relay, a, b, session, { aMons: [learner] });
+  const session = openWild(relay, a, [learner]);
   const record = relay.battles.get(session.id);
   ok(record && record.sim, 'the fight is live before the learn');
   const sheet = (moves) => ({
@@ -1147,6 +1160,39 @@ function testMidFightMoveset() {
   ]));
   ok(live.transformed && live.moves[1].id === before,
     'a transformed battler is left alone');
+}
+
+// ...and none of it in a fight between players. No cart learns a move in a
+// link battle (pokered GainExperience returns on LINK_STATE_BATTLING,
+// pokecrystal GiveExperiencePoints on wLinkMode, pokeemerald Cmd_getexp under
+// BATTLE_TYPE_LINK), so the PROTOCOL 28 learn a 1v1 used to take is a one-slot
+// rewrite of a monster the other player is fighting: the hub drops the message
+// whole (relay LEARN_MODES). Twin of the "pvp learn" block in
+// tests/hub_battle.lua.
+function testPvpMovesetDropped() {
+  const relay = makeRelay(makeClock());
+  const a = dial(relay, 'LEARNA');
+  const b = dial(relay, 'LEARNB');
+  const session = openBattle(relay, a, b);
+  uploadAndReady(relay, a, b, session);
+  const record = relay.battles.get(session.id);
+  const live = record.sim.byId.get(a.id).mons[0];
+  const before = live.moves;
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: session.id,
+    mon: 0,
+    moves: [{ id: 'SWAP', pp: 20, power: 250, accuracy: 255, type: 0, effect: 0, chance: 0 }],
+  });
+  ok(live.moves[0].id === 'm1', 'pvp learn: a one-id replace off the wire reaches nothing');
+  ok(relay.applyBattleMoveset(record, relay.get(a.id), {
+    mon: 0,
+    moves: [mon(90).moves[0], {
+      id: 'NEW', pp: 20, power: 250, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  }) === false, 'pvp learn: a one-slot learn in a 1v1 is refused');
+  ok(live.moves === before && live.moves.length === 1,
+    "pvp learn: ...and the referee's list is the one it had");
 }
 
 /*
@@ -1363,6 +1409,7 @@ function testRefusedCoopOpenLeavesNoPaperwork() {
 
 testBagProofs();
 testMidFightMoveset();
+testPvpMovesetDropped();
 testBusyNowMediatedFight();
 testHubBusyFields();
 testUnfightableFieldAborts();
@@ -1803,19 +1850,22 @@ function testGen3WildCatch() {
   ok(clean.caught.generation === 3, 'read in the Gen 3 dialect');
 }
 
+// A wild fight: the only kind a learn is heard in (relay LEARN_MODES --
+// pokeemerald / pokefirered Cmd_getexp gives no experience under
+// BATTLE_TYPE_LINK, so no Gen 3 cart learns in a link battle either).
 function testGen3MidFightMoveset() {
   const clock = makeClock();
   const relay = makeRelay(clock, { generation: 3 });
   const a = dial3(relay, 'ANN');
-  const b = dial3(relay, 'BOB');
-  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
-  relay.handle(b.id, {
-    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+  const id = 'g3l';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [mon3()],
   });
-  const { id } = take(a, 'mmo.session');
-  relay.handle(a.id, { type: 'mmo.battle_ruleset', typeTable: CHART3 });
-  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
-  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [mon3()],
+  });
   const record = relay.battles.get(id);
   const fighter = record.sim.byId.get(a.id);
   const learned = move3({
@@ -1830,6 +1880,36 @@ function testGen3MidFightMoveset() {
   ok(row.target === 16, 'and its target');
   ok(fighter.b.moves === fighter.mons[0].moves, 'the active battler fights with the new list');
   ok(fighter.mons[0].moves[0].pp === 20, "the unchanged slot keeps the hub's PP");
+}
+
+// ...while a Gen 3 1v1 hears none: a one-slot "learn" there would be any row
+// the sender liked (moveRow3 takes a new id's row whole) against another
+// player's monster.
+function testGen3PvpMovesetDropped() {
+  const relay = makeRelay(makeClock(), { generation: 3 });
+  const a = dial3(relay, 'ANN');
+  const b = dial3(relay, 'BOB');
+  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+  relay.handle(b.id, {
+    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+  });
+  const { id } = take(a, 'mmo.session');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  const record = relay.battles.get(id);
+  const fighter = record.sim.byId.get(a.id);
+  const before = fighter.mons[0].moves;
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [move3(), move3({
+      id: 'NUKE3', num: 120, power: 250, priority: 5,
+    })],
+  });
+  ok(fighter.mons[0].moves === before && before.length === 1, 'gen 3 pvp: a 1v1 learn reaches nothing');
+  ok(fighter.b.moves === before, 'gen 3 pvp: ...and the battler fights with the list it brought');
 }
 
 function testGen3DialectAndLimits() {
@@ -2734,14 +2814,13 @@ function row12(id, o) {
 // K9: a mid-fight level-up rides mmo.battle_moveset and the hub forwards its
 // level / stats / maxHp to the referee's levelUp(playerId, monIndex, level,
 // stats, maxHp) -- 1-based index -- whatever became of the move list, only when
-// the referee has the method. K8: a learn keeps an unchanged row's highCrit /
-// PP Ups and takes a new row's.
+// the referee has the method, and only in a fight against the computer (a wild
+// fight here; a link fight hears none, testPvpForgery). K8: a learn keeps an
+// unchanged row's highCrit / PP Ups and takes a new row's.
 function testGen12LevelUpForward() {
   const relay = makeRelay(makeClock());
   const a = dial(relay, 'LVLA');
-  const b = dial(relay, 'LVLB');
-  const session = openBattle(relay, a, b);
-  uploadAndReady(relay, a, b, session);
+  const session = openWild(relay, a);
   const record = relay.battles.get(session.id);
   ok(record && record.sim, 'level-up: the fight is live');
   const client = relay.get(a.id);
@@ -2830,6 +2909,11 @@ function testLearnRulesExported() {
   ok(next12[0].pp === 3, 'export: an unchanged row keeps the old PP');
   ok(next12[0].highCrit === true, 'export: ...and its high-crit flag');
   ok(next12[1].ppUps === 1, 'export: a new row takes its own PP Ups');
+  const based = nextMoves12([row12('A', { maxPp: 42, ppUps: 1, basePp: 35 })],
+    [row12('A', { pp: 99, basePp: 9 }), row12('B', { basePp: 9 })]);
+  ok(based[0].basePp === 35,
+    "export: an unchanged row keeps the referee's base PP (Red's stepPp re-reads GetMaxPP over it)");
+  ok(based[1].basePp === undefined, 'export: ...and a new row never takes one off the wire');
   const { learnTo } = require('./lib/relay.js');
   const held = { transformed: true, moves: [row12('COPY')], preTransform: { moves: [row12('A')] } };
   ok(learnTo(2, held, [row12('A'), row12('B')]) === true, 'export: learnTo lands a learn');
@@ -2841,15 +2925,13 @@ function testLearnRulesExported() {
 
 // Gold: the learn keeps the cart's priority byte (K8), and a Gold sheet's K7
 // blocks ride the hub's stored party into the referee's hands.
+// A wild fight, the kind a learn and a level-up are heard in (relay
+// LEARN_MODES); the sheet's K7 / K8 blocks are stored whatever the mode.
 function testGen2LevelUpAndSheet() {
   const relay = makeRelay(makeClock(), { generation: 2 });
   const a = dial2(relay, 'ANN');
-  const b = dial2(relay, 'BOB');
-  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
-  relay.handle(b.id, {
-    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
-  });
-  const { id } = take(a, 'mmo.session');
+  const id = 'g2k';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
   const gold = sheet2({});
   gold.base = {
     hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
@@ -2864,8 +2946,12 @@ function testGen2LevelUpAndSheet() {
   gold.moves[0].priority = 2;
   gold.moves[0].ppUps = 3;
   relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART2 });
-  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [gold] });
-  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [sheet2({})] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [gold],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet2({})],
+  });
   const record = relay.battles.get(id);
   ok(record && record.sim, 'gold K7/K8: the fight opens on a sheet carrying them');
   const parties = record.parties;
@@ -2912,6 +2998,142 @@ function testGen2LevelUpAndSheet() {
     },
   });
   ok(calls === 1, 'gold K9: Kanto-keyed stats refuse a Gold moveset');
+}
+
+// K9 and the PROTOCOL 28 learn in a fight between players, on the real
+// referees (the review's probe, RV-C probe_k9_pvp): a Gold 1v1 took a moveset
+// carrying 999 stats and a 999 max HP -- re-sendable every turn -- straight
+// into lib/battle2's levelUp, which judges no claim, and both referees took a
+// one-slot "learn" of any row. No cart levels or learns in a link battle
+// (pokered GainExperience returns on LINK_STATE_BATTLING, pokecrystal /
+// pokegold GiveExperiencePoints on wLinkMode), so the hubs drop the message
+// whole in a 1v1 and a coop_pvp (relay LEARN_MODES). Twin of pvpForgery in
+// tests/hub_battle.lua.
+function pvpForgery(generation, mode) {
+  const relay = makeRelay(makeClock(), { generation });
+  const join = (name) => (generation === 2 ? dial2(relay, name) : dial(relay, name));
+  const sheet = () => (generation === 2 ? sheet2({}) : {
+    species: 'ALPHA',
+    level: 50,
+    hp: 300,
+    maxHp: 300,
+    stats: {
+      atk: 100, def: 100, spd: 50, spc: 50,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 200, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  });
+  const chart = generation === 2 ? CHART2 : [[100, 100], [100, 100]];
+  const a = join('ANN');
+  const b = join('BOB');
+  let id;
+  if (mode === '1v1') {
+    relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+    relay.handle(b.id, {
+      type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+    });
+    id = take(a, 'mmo.session').id;
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart });
+    relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [sheet()] });
+    relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [sheet()] });
+  } else {
+    const c = join('CAL');
+    const d = join('DEE');
+    id = 'pf';
+    relay.openCoopBattle(id, [a.id, b.id, c.id, d.id], {
+      mode: 'coop_pvp', hostId: a.id, sides: { a: [a.id, b.id], b: [c.id, d.id] },
+    });
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart });
+    for (const who of [a, b, c, d]) {
+      relay.handle(who.id, { type: 'mmo.battle_party', battle: id, mons: [sheet()] });
+    }
+  }
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return null;
+  const live = record.sim.byId.get(a.id).mons[0];
+  const snap = () => {
+    const parts = [live.level, live.hp, live.maxHp];
+    for (const k of Object.keys(live.stats).sort()) parts.push(`${k}=${live.stats[k]}`);
+    for (const m of live.moves) parts.push(`${m.id}:${m.power}`);
+    return parts.join(',');
+  };
+  const forged = generation === 2
+    ? {
+      atk: 999, def: 999, spe: 999, spa: 999, spd: 999,
+    }
+    : {
+      atk: 999, def: 999, spd: 999, spc: 999,
+    };
+  const own = {
+    id: 'thump', pp: 20, power: generation === 2 ? 1 : 200, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const nuke = {
+    id: 'NUKE', pp: 20, power: 250, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const seen = { mode: record.mode, before: snap() };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [own], stats: forged, maxHp: 999,
+  });
+  seen.stats = snap();
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [own], level: 100, stats: forged, maxHp: 999,
+  });
+  seen.level = snap();
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [own, nuke],
+  });
+  seen.learn = snap();
+  seen.applied = relay.applyBattleMoveset(record, relay.get(a.id), {
+    mon: 0, moves: [own, nuke], level: 100, stats: forged, maxHp: 999,
+  });
+  seen.after = snap();
+  return seen;
+}
+
+function testPvpForgery() {
+  for (const generation of [2, 1]) {
+    for (const mode of ['1v1', 'coop_pvp']) {
+      const label = `${generation === 2 ? 'gold' : 'red'} ${mode}`;
+      const seen = pvpForgery(generation, mode);
+      ok(seen !== null, `k9 pvp (${label}): the fight opens`);
+      ok(seen.mode === mode, `k9 pvp (${label}): ...in that mode`);
+      ok(seen.stats === seen.before, `k9 pvp (${label}): 999 stats and max HP reach nothing`);
+      ok(seen.level === seen.before, `k9 pvp (${label}): ...nor with a level 100 claim`);
+      ok(seen.learn === seen.before, `k9 pvp (${label}): a one-slot learn reaches nothing`);
+      ok(seen.applied === false, `k9 pvp (${label}): applyBattleMoveset refuses all of it`);
+      ok(seen.after === seen.before, `k9 pvp (${label}): ...and the monster is the one it was given`);
+    }
+  }
+}
+
+// The Red referee's own `basePp` (copyMove reads it out of a stated maximum,
+// lib/battle Effects.basePpOf) survives a level-up's re-send and a learn on the
+// real referee: the kept rows are the hub's, and `basePp` is one of their
+// fields, never the wire's. Twin of the "base pp" block in tests/hub_battle.lua.
+function testBasePpKept() {
+  const relay = makeRelay(makeClock(), { generation: 1 });
+  const a = dial(relay, 'ANN');
+  const stated = row12('thump', { pp: 35, maxPp: 42, ppUps: 1 });
+  const session = openWild(relay, a, [{ ...mon(40), moves: [stated] }]);
+  const record = relay.battles.get(session.id);
+  ok(record && record.sim, 'base pp: a Red wild fight opens');
+  const live = record.sim.byId.get(a.id).mons[0];
+  ok(live.moves[0].basePp === 35, 'base pp: the referee read the base out of the stated maximum');
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: session.id, mon: 0, moves: [stated], level: 51,
+  });
+  ok(live.level === 51, 'base pp: the level-up reached the referee');
+  ok(live.moves[0].basePp === 35, 'base pp: ...and its re-sent row kept the base');
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: session.id,
+    mon: 0,
+    moves: [row12('thump'), row12('NEW', { pp: 10 })],
+  });
+  ok(live.moves[1] && live.moves[1].id === 'NEW', 'base pp: a learn lands');
+  ok(live.moves[0].basePp === 35, 'base pp: ...and the unchanged row keeps the base');
+  ok(live.moves[0].maxPp === 42, 'base pp: ...and its stated maximum');
 }
 
 // A learn on a transformed battler, real referees: written into the party list
@@ -3272,19 +3494,20 @@ function testMimicChoiceGen1Only() {
   ok(none && none.mimic === undefined, 'mimic: ...and a caller naming no generation');
 }
 
-// A Gen 3 hub reads no level-up, so a referee there is never called.
+// A Gen 3 hub reads no level-up, so a referee there is never called -- in a
+// wild fight, where a learn is heard at all (relay LEARN_MODES).
 function testGen3LevelUpNotRead() {
   const relay = makeRelay(makeClock(), { generation: 3 });
   const a = dial3(relay, 'ANN');
-  const b = dial3(relay, 'BOB');
-  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
-  relay.handle(b.id, {
-    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
-  });
-  const { id } = take(a, 'mmo.session');
+  const id = 'g3w';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
   relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
-  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
-  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [mon3()],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [mon3()],
+  });
   const record = relay.battles.get(id);
   let calls = 0;
   record.sim.levelUp = () => { calls += 1; };
@@ -3825,6 +4048,7 @@ testGen3OneVOne();
 testGen3CoopNpc();
 testGen3WildCatch();
 testGen3MidFightMoveset();
+testGen3PvpMovesetDropped();
 testGen3DialectAndLimits();
 testGen3PayDayAndHoldersOnly();
 testGen3PvpPaysNoPayDay();
@@ -3839,6 +4063,8 @@ testGen2FamilyPvp();
 testGen12LevelUpForward();
 testLearnRulesExported();
 testGen2LevelUpAndSheet();
+testPvpForgery();
+testBasePpKept();
 testTransformedLearn();
 testLearnUnderOverlays();
 testMimicLearnRealReferee();

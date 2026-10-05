@@ -2394,6 +2394,270 @@ scenario('r2d_perish_2v2', (events) => {
 });
 
 // ------------------------------------------------------------------
+// The referee-gaps run's wave 5 (R2e): the last Gold rows, mirrored from the
+// Lua driver (which says what each one pins) so the JS half replays them too.
+// ------------------------------------------------------------------
+
+const R2E_LEFTOVERS = ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'];
+const R2E_SMOKE_BALL = ['SMOKE_BALL', 'HELD_ESCAPE', 0, 'SMOKE BALL'];
+
+scenario('r2e_conversion', (events) => seq(events, duo4('r5cv', '1v1', 901,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, types: [0],
+    moves: [hm('CONVERSION', 0, 0, 24), hm('water_hit', 30, 3), hm('fire_hit', 30, 4)] }),
+  mn({ species: 'Gamma', maxHp: 900, spe: 90, types: [0],
+    moves: [hm('CONVERSION', 0, 0, 24), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(S(1), F(0)), both3(F(0), F(0)),
+  both3(S(0), F(0)), both3(F(1), F(0))]));
+
+scenario('r2e_heal_bell_toxic', (events) => seq(events, duo4('r5hb', '1v1', 902,
+  [mn({ species: 'Alpha', maxHp: 960, spe: 90, moves: [hm('HEAL_BELL', 0, 0, 141), hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('TOXIC', 0, 13, 105), hm('POISONPOWDER', 0, 13, 66), hm('wait', 0, 0, 85)] })]),
+[both3(F(1), F(0)), both3(F(1), F(2)), both3(F(1), F(2)), both3(F(0), F(1)), both3(F(1), F(2)),
+  both3(F(1), F(2))]));
+
+scenario('r2e_baton_toxic', (events) => seq(events, duo4('r5bt', '1v1', 903,
+  [mn({ species: 'Alpha', maxHp: 960, spe: 90, moves: [hm('BATON_PASS', 0, 0, 134), hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Gamma', maxHp: 960, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('TOXIC', 0, 13, 105), hm('ember', 1, 4, 4, 60, 255), hm('wait', 0, 0, 85)] })]),
+[both3(F(1), F(0)), both3(F(1), F(2)), both3(FP(0, 1), F(1)), both3(F(0), F(2)), both3(F(0), F(2))]));
+
+scenario('r2e_sketch_mimic', (events) => seq(events, duo4('r5sm', 'wild', 904,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('SLAM', 40, 0, 0, 35), hm('tap', 1)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 90, moves: [hm('SKETCH', 0, 0, 148, 1), hm('tap', 1)] })],
+  [mn({ species: 'Wild', maxHp: 900, spe: 10, moves: [hm('MIMIC', 0, 0, 82), hm('wait', 0, 0, 85)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(S(1), F(0), 'wild'), both3(F(0), F(1), 'wild'),
+  both3(F(1), F(1), 'wild')]));
+
+scenario('r2e_bond_recoil', (events) => seq(events, duo4('r5br', '1v1', 905,
+  [mn({ species: 'Alpha', maxHp: 400, hp: 10, atk: 200, spe: 10, moves: [hm('TAKE_DOWN', 200, 0, 48)] }),
+    mn({ species: 'Gamma', maxHp: 400, spe: 10, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 100, spe: 90, moves: [hm('DESTINY_BOND', 0, 0, 138)] }),
+    mn({ species: 'Delta', maxHp: 400, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), [['p1', S(1)], ['p2', S(1)]], both3(F(0), F(0))]));
+
+scenario('r2e_roar_link', (events) => {
+  const ann = (name) => mn({ species: name, maxHp: 800, spe: 90, moves: [hm('tap', 1), hm('ROAR', 0, 0, 28)] });
+  return seq(events, duo4('r5rl', '1v1', 906,
+    [ann('Alpha'), ann('Gamma'), ann('Delta')],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('SPIKES', 0, 0, 149), hm('ROAR', 0, 0, 28)] }),
+      mn({ species: 'Iota', maxHp: 900, spe: 10, moves: [hm('SPIKES', 0, 0, 149), hm('ROAR', 0, 0, 28)] })]),
+  [both3(F(0), F(0)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(1))]);
+});
+
+scenario('r2e_whirlwind_wild', (events) => seq(events, duo4('r5ww', 'wild', 907,
+  [mn({ species: 'Alpha', level: 30, maxHp: 900, spe: 90, moves: [hm('WHIRLWIND', 0, 0, 28)] })],
+  [mn({ species: 'Wild', level: 20, maxHp: 900, spe: 10, moves: [hm('tap', 1)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild')]));
+
+scenario('r2e_roar_wild_low', (events) => seq(events, duo4('r5rw', 'wild', 908,
+  [mn({ species: 'Alpha', level: 10, maxHp: 900, spe: 90, moves: [hm('ROAR', 0, 0, 28)] })],
+  [mn({ species: 'Wild', level: 90, maxHp: 900, spe: 10, moves: [hm('tap', 1)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'),
+  both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild')]));
+
+scenario('r2e_spikes_standing', (events) => seq(events, duo4('r5ss', '1v1', 909,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Gamma', maxHp: 100, hp: 5, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Iota', maxHp: 900, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('SPIKES', 0, 0, 149), hm('PERISH_SONG', 0, 0, 145), hm('tap', 1)] }),
+  mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0)),
+  [['p1', S(1)]], both3(F(0), F(0)), [['p1', S(2)]], both3(F(0), F(0))]));
+
+scenario('r2e_spikes_leftovers', (events) => seq(events, duo4('r5sl', '1v1', 910,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Gamma', maxHp: 160, hp: 5, spe: 90, item: R2E_LEFTOVERS, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('SPIKES', 0, 0, 149), hm('PERISH_SONG', 0, 0, 145), hm('tap', 1)] }),
+  mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0)),
+  [['p1', S(1)]], both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2e_spikes_early', (events) => seq(events, duo4('r5se', '1v1', 911,
+  [mn({ species: 'Alpha', maxHp: 50, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Gamma', maxHp: 100, hp: 5, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Iota', maxHp: 900, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, atk: 250, spe: 90,
+    moves: [hm('SPIKES', 0, 0, 149), hm('slam', 250)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), [['p1', S(1)]], [['p1', S(2)]], both3(F(0), F(0))]));
+
+scenario('r2e_ai_switch_slow', (events) => seq(events, duo4('r5as', 'coop_npc', 912,
+  [mn({ species: 'Alpha', maxHp: 800, spe: 50, status: 'PSN', moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 800, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 800, spe: 10, status: 'PSN', moves: [hm('tap', 1)] })]),
+[both3(F(0), S(1)), both3(F(0), F(0))]));
+
+scenario('r2e_ai_switch_fast', (events) => seq(events, duo4('r5af', 'coop_npc', 913,
+  [mn({ species: 'Alpha', maxHp: 800, spe: 50, status: 'PSN', moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 800, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 800, spe: 10, status: 'PSN', moves: [hm('tap', 1)] })]),
+[both3(F(0), S(1)), both3(F(0), F(0))]));
+
+scenario('r2e_pursuit_slot', (events) => {
+  const round = (a1, a2, b1, b2) => [['a1', a1], ['a2', a2], ['b1', b1], ['b2', b2]];
+  const T = (i, slot) => ({ action: 'fight', move: i, target: slot });
+  return seq(events, {
+    id: 'r5ps', mode: 'coop_pvp', seed: 914, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: R2D_TYPES, chart: R2D_CHART, specialTypes: R2D_SPECIAL,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 900, spe: 50,
+        moves: [hm('tap', 1)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 900, spe: 40,
+        moves: [hm('tap', 1)] }), mn({ species: 'Iota', maxHp: 900, spe: 40,
+        moves: [hm('tap', 1)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 900, spe: 30, status: 'PSN',
+        moves: [hm('PURSUIT', 40, 7, 117)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 900, spe: 70,
+        moves: [hm('tap', 1)] })] }],
+    },
+  },
+  [round(T(0, 3), { action: 'switch', slot: 1 }, T(0, 1), T(0, 0)), round(T(0, 3), T(0, 3), T(0, 0), T(0, 0))]);
+});
+
+scenario('r2e_run_coop_wild', (events) => seq(events, {
+  id: 'r5rc', mode: 'coop_wild', seed: 915, choiceTimeout: 60, reconnectGrace: 60,
+  typeIds: R2D_TYPES, chart: R2D_CHART, specialTypes: R2D_SPECIAL,
+  sides: {
+    a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 900, spe: 10,
+      moves: [hm('tap', 1)] })] },
+    { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 900, spe: 10,
+      item: R2E_SMOKE_BALL, moves: [hm('tap', 1)] })] }],
+    b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 900, spe: 200,
+      moves: [hm('tap', 1)] })] }],
+  },
+},
+[[['a1', { action: 'run' }], ['a2', { action: 'fight', move: 0, target: 3 }], ['wild', F(0)]],
+  [['a1', { action: 'fight', move: 0, target: 3 }], ['a2', { action: 'run' }], ['wild', F(0)]]]));
+
+scenario('r2e_pool_num', (events) => {
+  const pool = [];
+  for (let n = 1; n <= 40; n += 1) {
+    pool.push(hm(`move${n}`, 10));
+    pool[pool.length - 1].num = n;
+  }
+  pool.splice(1, 0, hm('MODDED', 250));
+  return seq(events, duo4('r5pn', '1v1', 916,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('METRONOME', 0, 0, 83)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+    { metronomePool: pool }),
+  [both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]);
+});
+
+scenario('r2e_confusion_lines', (events) => seq(events, duo4('r5cf', '1v1', 917,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, confusion: 1, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, confusion: 3, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2e_volatile_lines', (events) => seq(events, duo4('r5vl', '1v1', 918,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90,
+    moves: [hm('MIST', 0, 0, 46), hm('FOCUS_ENERGY', 0, 0, 47), hm('SUBSTITUTE', 0, 0, 79)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('slam', 30)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)),
+  both3(F(2), F(0))]));
+
+// ------------------------------------------------------------------
+// The review polish (RP2): the bag's lines and CheckTurn's status
+// animations (the Lua driver says what each scenario pins).
+// ------------------------------------------------------------------
+
+scenario('rp2_item_lines', (events) => {
+  const o = duo4('rp2i', 'coop_npc', 931,
+    [mn({ species: 'Alpha', maxHp: 999, hp: 500, spe: 90, stages: { spe: 5 },
+      moves: [hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 999, hp: 500, spe: 10, stages: { atk: 5 },
+      moves: [hm('wait', 0, 0, 85)] })]);
+  o.sides.b[0].name = 'COOLTRAINER♀ EMMA';
+  o.sides.b[0].bag = [{ id: 'X_ATTACK', count: 2 }, { id: 'DIRE_HIT', count: 1 },
+    { id: 'GUARD_SPEC', count: 1 }, { id: 'X_ACCURACY', count: 1 }, { id: 'POTION', count: 1 }];
+  return seq(events, o,
+    [both3(ITEM('X_ACCURACY'), ITEM('X_ATTACK')), both3(ITEM('GUARD_SPEC'), ITEM('X_ATTACK')),
+      both3(ITEM('X_SPEED'), ITEM('DIRE_HIT')), both3(ITEM('X_SPEED'), ITEM('GUARD_SPEC')),
+      both3(ITEM('POKE_BALL'), ITEM('X_ACCURACY')), both3(ITEM('POKE_DOLL'), ITEM('POTION')),
+      both3(ITEM('DIRE_HIT'), F(0)), both3(ITEM('POTION'), F(0))]);
+});
+
+scenario('rp2_ball_lines', (events) => {
+  const wild = mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] });
+  wild.catchRate = 200;
+  const o = duo4('rp2b', 'wild', 932,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('slam', 90)] })], [wild],
+    { foe: 'wild' });
+  const rounds = [];
+  for (const ball of ['POKE_BALL', 'POKE_BALL', 'GREAT_BALL', 'ULTRA_BALL']) {
+    rounds.push(both3(ITEM(ball), F(0), 'wild'));
+  }
+  for (let i = 0; i < 3; i += 1) rounds.push(both3(F(0), F(0), 'wild'));
+  for (const ball of ['POKE_BALL', 'GREAT_BALL', 'ULTRA_BALL', 'ULTRA_BALL']) {
+    rounds.push(both3(ITEM(ball), F(0), 'wild'));
+  }
+  rounds.push(both3(ITEM('MASTER_BALL'), F(0), 'wild'));
+  return seq(events, o, rounds);
+});
+
+scenario('rp2_ball_broke_free', (events) => {
+  const hard = mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] });
+  hard.catchRate = 3;
+  return seq(events, duo4('rp2e', 'wild', 938,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })], [hard],
+    { foe: 'wild' }),
+  [both3(ITEM('POKE_BALL'), F(0), 'wild'), both3(ITEM('POKE_BALL'), F(0), 'wild')]);
+});
+
+scenario('rp2_ball_so_close', (events) => {
+  const easy = mn({ species: 'Beta', maxHp: 900, hp: 700, spe: 10, moves: [hm('wait', 0, 0, 85)] });
+  easy.catchRate = 255;
+  const rounds = [];
+  for (let i = 0; i < 4; i += 1) rounds.push(both3(ITEM('ULTRA_BALL'), F(0), 'wild'));
+  return seq(events, duo4('rp2c', 'wild', 942,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })], [easy],
+    { foe: 'wild' }), rounds);
+});
+
+scenario('rp2_doll_wild', (events) => seq(events, duo4('rp2d', 'wild', 933,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('PAY_DAY', 40, 0, 16)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(ITEM('POKE_DOLL'), F(0), 'wild')]));
+
+scenario('rp2_flute', (events) => seq(events, duo4('rp2f', '1v1', 934,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, status: 'SLP', statusTurns: 4,
+    moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'SLP', statusTurns: 5,
+    moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(ITEM('POKE_FLUTE'), F(0)), both3(ITEM('POKE_FLUTE'), F(0))]));
+
+scenario('rp2_status_anims_npc', (events) => seq(events, duo4('rp2s', 'coop_npc', 935,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, status: 'SLP', statusTurns: 2, confusion: 3,
+    moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'SLP', statusTurns: 3, confusion: 4,
+    moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('rp2_status_anims_wild', (events) => seq(events, duo4('rp2w', 'wild', 936,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'SLP', statusTurns: 3, confusion: 3,
+    moves: [hm('wait', 0, 0, 85)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'),
+  both3(F(0), F(0), 'wild')]));
+
+scenario('rp2_pp_ups', (events) => {
+  const upped = hm('slam', 10);
+  upped.ppUps = 2;
+  return seq(events, duo4('rp2p', '1v1', 937,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [upped, hm('tap', 1)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+  [both3(F(0), F(0)), both3(F(1), F(0))]);
+});
+
+// ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
 
@@ -2459,7 +2723,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 160, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 187, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -3903,7 +4167,7 @@ test('obedience: Snore / Sleep Talk pass the sleep gate, and a disobedient sleep
   let ignored = null;
   for (let seed = 1; seed <= 40 && !ignored; seed += 1) {
     const events = sleeper(hit('SLEEP_TALK', 0), true, seed);
-    if (said(events, 'Alpha ignored orders...sleeping!')) ignored = events;
+    if (said(events, 'Alpha ignored orders…sleeping!')) ignored = events;
   }
   assert.ok(ignored, 'a disobedient sleeper using Sleep Talk ignores orders');
   assert.ok(!said(ignored, 'Alpha used SLEEP_TALK!'));
@@ -5216,4 +5480,164 @@ test('R2e: CONVERSION, HEAL BELL\'s toxic bit, SKETCH\'s base PP, the run odds, 
     if (said(turnOf(placed), 'Alpha used MODDED!')) called = true;
   }
   assert.ok(called, 'a pool with no `num` is numbered by place');
+});
+
+// ------------------------------------------------------------------
+// The review polish (RP2): the carts' glyphs, K8's PP Ups on `moves`, the
+// bag's lines and CheckTurn's status animations (the Lua twin's
+// tests/battle_sim2_turn.lua runs the same checks; the `rp2_*` parity
+// scenarios pin the streams).
+// ------------------------------------------------------------------
+
+const msgsOf = (events) => events.filter((e) => e.t === 'msg').map((e) => e.text);
+const msgIndex = (events, text) => events.findIndex((e) => e.t === 'msg' && e.text === text);
+const animIndex = (events, id, slot) => events.findIndex((e) => e.t === 'anim' && e.text === id
+  && e.slot === slot);
+
+test('RP2: NotVeryEffectiveText\'s ellipsis glyph, and K8\'s PP Ups on a `moves` row', () => {
+  const nve = duel({
+    seed: 1, chart: [[50]],
+    a: [sheet({ species: 'Alpha', spe: 90, types: [0], moves: [hit('thump', 40)] })],
+    b: [sheet({ species: 'Beta', spe: 10, types: [0], moves: [hit('tap', 0, 0, 85)] })],
+  });
+  nve.drainEvents();
+  const events = turnOf(nve);
+  assert.ok(said(events, "It's not very effective…"));
+  assert.ok(!said(events, "It's not very effective..."));
+
+  const upped = hit('slam', 10);
+  upped.ppUps = 2;
+  const ups = duel({
+    seed: 2,
+    a: [sheet({ species: 'Alpha', spe: 90, moves: [upped, hit('tap', 1)] })],
+    b: [sheet({ species: 'Beta', spe: 10, moves: [hit('tap', 0, 0, 85)] })],
+  });
+  ups.drainEvents();
+  const row = turnOf(ups).filter((e) => e.t === 'moves' && e.slot === 0).pop();
+  assert.strictEqual(row.moves[0].ppUps, 2, 'a `moves` row carries the slot\'s PP Ups');
+  assert.strictEqual(row.moves[1].ppUps, undefined, '...and a row with none carries none');
+});
+
+test('RP2: ItemUsedText / _EnemyUsedOnText, and nothing past them where the cart says nothing', () => {
+  const { battle, foe } = fight({
+    mode: 'coop_npc', seed: 3,
+    a: [held({ species: 'Alpha', spe: 90, stages: { spe: 5 }, moves: [hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.drainEvents();
+  let events = roundOf(battle, foe, ITEM('X_ACCURACY'), ITEM('X_ATTACK'));
+  assert.ok(said(events, 'Ann used the X ACCURACY.'));
+  assert.ok(said(events, 'Bob used X ATTACK on Beta!'));
+  assert.strictEqual(msgsOf(events).length, 2, 'no X ACCURACY line, no stat line for the computer');
+  const rose = events.find((e) => e.t === 'stat' && e.slot === 3);
+  assert.strictEqual(rose && rose.stage, 1, 'the computer\'s X ATTACK still raises its stage');
+  assert.strictEqual(monOf(battle, 'p1').xAccuracy, true);
+  events = roundOf(battle, foe, ITEM('GUARD_SPEC'), ITEM('DIRE_HIT'));
+  assert.ok(said(events, 'Ann used the GUARD SPEC..'), 'GUARD SPEC.\'s own stop, then the line\'s');
+  assert.ok(said(events, 'Bob used DIRE HIT on Beta!') && msgsOf(events).length === 2);
+  events = roundOf(battle, foe, ITEM('X_SPEED'), F(0));
+  assert.ok(said(events, 'Ann used the X SPEED.') && said(events, "Alpha's SPEED went up!"));
+  events = roundOf(battle, foe, ITEM('POTION'), F(0));
+  assert.ok(said(events, 'Ann used the POTION.') && !said(events, 'Ann used an item'));
+  events = roundOf(battle, foe, ITEM('POKE_BALL'), F(0));
+  assert.ok(said(events, 'The trainer blocked the BALL!') && said(events, "Don't be a thief!")
+    && !said(events, 'Ann used the POKé BALL.'), 'a ball in a trainer fight is blocked');
+  events = roundOf(battle, foe, ITEM('POKE_DOLL'), F(0));
+  assert.ok(said(events, "OAK: Ann! This isn't the time to use that!"));
+  assert.strictEqual(battle.outcome(), null, '...and the fight goes on');
+});
+
+test('RP2: the wobble lines by count, Text_BallCaught, and no "The ball shook"', () => {
+  const wildBall = (rate, hp, seed, ball) => {
+    const wildMon = held({ species: 'Beta', maxHp: 900, hp, spe: 10, moves: [hit('wait', 0, 0, 85)] });
+    wildMon.catchRate = rate;
+    const { battle, foe } = fight({
+      mode: 'wild', seed,
+      a: [held({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hit('wait', 0, 0, 85)] })],
+      b: [wildMon],
+    });
+    battle.drainEvents();
+    return { events: roundOf(battle, foe, ITEM(ball)), battle };
+  };
+  const hard = wildBall(3, undefined, 938, 'POKE_BALL').events;
+  assert.ok(said(hard, 'Ann used the POKé BALL.') && said(hard, 'Oh no! The POKéMON broke free!'));
+  const close = wildBall(255, 700, 942, 'ULTRA_BALL').events;
+  assert.ok(said(close, 'Shoot! It was so close too!'));
+  const mid = wildBall(200, undefined, 932, 'POKE_BALL').events;
+  assert.ok(said(mid, 'Aww! It appeared to be caught!'));
+  const two = wildBall(200, undefined, 932, 'GREAT_BALL').events;
+  assert.ok(said(two, 'Aargh! Almost had it!'));
+  const caught = wildBall(200, undefined, 1, 'MASTER_BALL');
+  assert.ok(said(caught.events, 'Gotcha! Beta was caught!'));
+  assert.strictEqual(caught.battle.outcome().reason, 'catch');
+  for (const list of [hard, close, mid, two, caught.events]) {
+    assert.ok(!said(list, 'The ball shook'), 'the cart has no "The ball shook"');
+  }
+});
+
+test('RP2: a wild POKé DOLL is its use line and a DRAW; the POKé FLUTE\'s lines', () => {
+  const { battle, foe } = fight({
+    mode: 'wild', seed: 6,
+    a: [held({ species: 'Alpha', level: 30, maxHp: 400, atk: 1, spe: 90, moves: [hit('PAY_DAY', 1, 0, 16)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.drainEvents();
+  roundOf(battle, foe);
+  const events = roundOf(battle, foe, ITEM('POKE_DOLL'));
+  assert.deepStrictEqual(msgsOf(events), ['Ann used the POKé DOLL.'], 'the use line is the whole of it');
+  const out = battle.outcome();
+  assert.strictEqual(out.outcome, 'draw', 'PokeDollEffect\'s DRAW, not a win');
+  assert.strictEqual(out.reason, 'run');
+  assert.strictEqual(out.payDay, undefined, 'CheckPayDay pays nothing on a DRAW');
+
+  const flute = duel({
+    seed: 7,
+    a: [sheet({ species: 'Alpha', spe: 90, status: 'SLP', moves: [hit('tap', 0, 0, 85)] })],
+    b: [sheet({ species: 'Beta', spe: 10, moves: [hit('tap', 0, 0, 85)] })],
+  });
+  flute.byId.get('p1').mons[0].statusTurns = 5;
+  flute.drainEvents();
+  let lines = turnOf(flute, ITEM('POKE_FLUTE'));
+  assert.ok(said(lines, 'Ann played the POKé FLUTE.') && said(lines, 'All sleeping POKéMON woke up.'));
+  lines = turnOf(flute, ITEM('POKE_FLUTE'));
+  assert.ok(said(lines, "Played the POKé FLUTE. Now, that's a catchy tune!"));
+});
+
+test('RP2: CheckTurn\'s ANIM_SLP and ANIM_CONFUSED, placed as the cart plays them', () => {
+  const { battle, foe } = fight({
+    mode: 'coop_npc', seed: 8,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, status: 'SLP', statusTurns: 3,
+      moves: [hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, status: 'SLP', statusTurns: 3,
+      moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.drainEvents();
+  let events = roundOf(battle, foe);
+  const mine = animIndex(events, 'SLP_PLAYER_ANIM', 0);
+  assert.ok(mine >= 0 && mine < msgIndex(events, 'Alpha is fast asleep!'), 'the player\'s clip leads');
+  const theirs = animIndex(events, 'SLP_ANIM', 3);
+  assert.ok(theirs > msgIndex(events, 'Beta is fast asleep!') && msgIndex(events, 'Beta is fast asleep!') >= 0,
+    'the computer\'s follows its line');
+
+  const conf = fight({
+    mode: '1v1', seed: 9,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, confusion: 3, moves: [hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, confusion: 3, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  conf.battle.drainEvents();
+  events = roundOf(conf.battle, conf.foe);
+  assert.strictEqual(animIndex(events, 'CONF_PLAYER_ANIM', 0), msgIndex(events, 'Alpha is confused!') + 1);
+  assert.strictEqual(animIndex(events, 'CONF_PLAYER_ANIM', 3), msgIndex(events, 'Beta is confused!') + 1,
+    'a link seat carries its own console\'s variant');
+
+  const woke = fight({
+    mode: '1v1', seed: 10,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, status: 'SLP', statusTurns: 1,
+      moves: [hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  woke.battle.drainEvents();
+  events = roundOf(woke.battle, woke.foe);
+  assert.ok(said(events, 'Alpha woke up!') && animIndex(events, 'SLP_PLAYER_ANIM', 0) < 0,
+    'no sleep clip on the turn it wakes');
 });

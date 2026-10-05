@@ -3174,20 +3174,50 @@ function M:lockedFightSlot()
   return nil
 end
 
--- What a filed choice says about a Bide (Gold; MediatedBattle's `bideFiled`):
--- a BIDE chosen, or a locked-in FIGHT, may be one going on; anything else is
--- not -- PACK and PKMN end one (pokecrystal `.reset_bide`).
+-- What a filed choice says about a Bide (MediatedBattle's `bideFiled`): a
+-- BIDE chosen, or a locked-in FIGHT, may be one going on; anything else is
+-- not -- PACK and PKMN end one (pokecrystal `.reset_bide`).  A METRONOME or
+-- a MIRROR MOVE is filed as a call (`callFiled`), a Bide only once the
+-- referee reports BIDE on our seat (`noteBideAnim`).  Red's reading takes
+-- its start through the same gate (`onBattleEvent`).
 function M:noteBideChoice(action)
   if self.ownSlots then return end
   local kind = action and action.kind
+  local move = kind == nil and self:liveMoves()[tonumber(action.move) or 0] or nil
+  self.callFiled = nil
   if kind == nil and action.locked and self.bideLocked then
     self.bideFiled = true
-  elseif kind == nil and Mediated.isBideMove(self:liveMoves()[tonumber(action.move) or 0], self.game) then
+  elseif kind == nil and Mediated.isBideMove(move, self.game) then
     self.bideFiled, self.bideSlot = true, math.floor(tonumber(action.move))
   else
     self.bideFiled = nil
+    if kind == nil and not self.gen3 and Mediated.isCallMove(move, self.game) then
+      self.callFiled = math.floor(tonumber(action.move))
+    end
   end
   self.bideLocked = nil
+end
+
+-- An `anim` on the mediated stream, for the Bide reading (MediatedBattle
+-- `noteBideAnim` has the rule): the seat the next used line is about, and a
+-- call this seat filed that the referee reports as BIDE on it.
+function M:noteBideAnim(msg)
+  local at = self:medSlotOf(msg)
+  self.medAnimSeq, self.medAnimAt = tonumber(msg.seq), at
+  if self.callFiled and at ~= nil and at == self.mine
+     and Mediated.isBideId(msg.text, self:liveMoves(), self.game) then
+    self.bideFiled, self.bideSlot = true, self.callFiled
+    self.callFiled = nil
+  end
+end
+
+-- False when the used line at `seq` follows straight on a move animation on
+-- another seat -- a co-op partner's or a foe's, whatever species it names
+-- (MediatedBattle `usedLineOurs`).
+function M:usedLineOurs(seq)
+  seq = tonumber(seq)
+  if not (seq and self.medAnimSeq and self.medAnimSeq == seq - 1) then return true end
+  return self.medAnimAt == nil or self.medAnimAt == self.mine
 end
 
 -- ------- Red's MIMIC pick (co-op)
@@ -5132,19 +5162,20 @@ function M.fitHudName(text, maxCols, widthOf)
       ell = "."
       if widthOf(ell) > maxW then return "" end
     end
-    -- Searched over glyphs (ClassicBattle.glyphs), never splitting one.
-    local glyphs = ClassicBattle.glyphs(text)
-    local lo, hi = 0, #glyphs
+    -- Searched over glyphs (ClassicBattle.glyphPrefix), never splitting one,
+    -- and cut in place: the HUD draws this name every frame.
+    local prefix = ClassicBattle.glyphPrefix
+    local lo, hi = 0, ClassicBattle.glyphCount(text)
     while lo < hi do
       local mid = math.floor((lo + hi + 1) / 2)
-      if widthOf(table.concat(glyphs, "", 1, mid) .. ell) <= maxW then
+      if widthOf(prefix(text, mid) .. ell) <= maxW then
         lo = mid
       else
         hi = mid - 1
       end
     end
     if lo <= 0 then return ell end
-    return table.concat(glyphs, "", 1, lo) .. ell
+    return prefix(text, lo) .. ell
   end
   maxCols = math.floor(tonumber(maxCols) or 0)
   if maxCols <= 0 then return "" end
@@ -5200,10 +5231,34 @@ local function loadBattleHudMetaFont()
 end
 
 -- Map a label onto the HUD sheet (uppercase; unknown → '.').
+--
+-- Drawn every frame, so a label with no byte past 0x7F -- nearly every one --
+-- is mapped by one `gsub` over the class of everything the sheet lacks
+-- (built once per glyph set), not through ClassicBattle.glyphs' table of
+-- one-byte strings.  A byte is a glyph there, so the two readings agree.
+local hudMissClass = {}
+local function hudMissPattern(glyphs)
+  local pattern = hudMissClass[glyphs]
+  if pattern == nil then
+    -- Every byte of the set taken literally inside the class (`%` before each
+    -- non-alphanumeric); a set with a NUL or a high byte is left to the walk.
+    if glyphs == "" or glyphs:find("[%z\128-\255]") then
+      pattern = false
+    else
+      pattern = "[^" .. glyphs:gsub("%W", "%%%0") .. "]"
+    end
+    hudMissClass[glyphs] = pattern
+  end
+  return pattern or nil
+end
 function M.hudSanitize(text)
   text = tostring(text or ""):upper()
   local glyphs = Config.BATTLE_HUD_GLYPHS
     or " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-'?!"
+  if not text:find("[\128-\255]") then
+    local pattern = hudMissPattern(glyphs)
+    if pattern then return (text:gsub(pattern, ".")) end
+  end
   local out = {}
   -- One "." per glyph the sheet lacks (ClassicBattle.glyphs), not per byte:
   -- an é is one character on the HUD as everywhere else.
@@ -6287,15 +6342,30 @@ local function moveNameFromBattleText(text)
   -- page broke the line (`%s` spans the newline), so the shout is the move and
   -- keys the same as the anim row's.
   text = text:gsub("([Uu]sed)%s+[Ii]nstead,%s*", "%1\n")
+  -- Gold's player item line is ItemUsedText, "<PLAYER> used the <ITEM>."
+  -- (pokegold data/text/common_3.asm _ItemUsedText; BattleSim2 Turn's item
+  -- branch): "the" and the closing "." are the sentence's, not the item's --
+  -- read past the one wherever the page broke the line, as "instead," is,
+  -- and drop the other below.  Lower-case "the" is the line's own word; no
+  -- move or item name starts with one.
+  local itemUsed = false
+  text = text:gsub("([Uu]sed)%s+the%s+", function(used)
+    itemUsed = true
+    return used .. "\n"
+  end)
   local move = text:match("[Uu]sed\n([^\n!]+)")
     or text:match("[Uu]sed%s+([^\n!]+)")
   if not move then return nil end
   -- The computer's item line names the monster it was used on (pokered
   -- AIBattleUseItemText, the Red referee's "<TRAINER> used <ITEM> on
-  -- <MON>!", wave 5): the shout is the item.  Lower-case "on" is the line's
-  -- own word -- no move or item name spells one.
+  -- <MON>!", wave 5; pokegold _EnemyUsedOnText, the Gold referee's the
+  -- same): the shout is the item.  Lower-case "on" is the line's own word --
+  -- no move or item name spells one.
   move = move:gsub("%s+on%s+.*$", "")
   move = move:gsub("^%s+", ""):gsub("%s+$", "")
+  -- ItemUsedText's own full stop: one, so GUARD SPEC.'s ("used the GUARD
+  -- SPEC..") keeps the item's.
+  if itemUsed then move = move:gsub("%.$", "") end
   if move == "" then return nil end
   return move
 end
@@ -9378,6 +9448,9 @@ function M:syncFightMoves(mon, grew)
     battler.curMoves = mon.moves
   end
   if not (self.mediated and self.transport and self.battleId) then return false end
+  -- Never in a fight between players (MediatedBattle `syncFightMoves` has
+  -- the carts' reason: no link battle learns or levels).
+  if Mediated.LINK_MODES[self.mode] then return false end
   local index = self:sheetIndexFor(mon)
   if not index then return false end
   local moves = Mediated.sheetMoves(self.game, mon)
@@ -10576,6 +10649,42 @@ local MED_REASONS = {
   agree      = "The battle was\ncalled off.",
 }
 
+-- ------- Gold's drag-out (MediatedBattle.draggedOutLine has the cart's rule)
+--
+-- pokecrystal BattleCommand_ForceSwitch fields the monster it drew with the
+-- send-out animation alone and says DraggedOutText, "<MON> was dragged out!",
+-- and nothing else -- no trainer's send-out pages, no "Go! <MON>!", no
+-- partner's line.  The Gold referee states the arrival as any send-out and
+-- that line straight behind it, so a send-out's line rows (`rows[from..]`,
+-- the `say` rows of that send) are remembered, and taken back out of the
+-- batch (`dropSendRows`) when the next event that reaches the rows is that
+-- line about the same monster.  The `send` row -- the arrival -- stays.
+function M:noteSendRows(msg, rows, from)
+  self.medSendHeld = nil
+  if self.gen3 or Gen.generation(self.game) ~= 2 then return end
+  local held = {}
+  for i = from or (#rows + 1), #rows do
+    if type(rows[i]) == "table" and rows[i].kind == "msg" then held[#held + 1] = rows[i] end
+  end
+  if #held == 0 then return end
+  self.medSendHeld = { species = tostring(msg.text), rows = held }
+end
+
+-- The held rows out of the batch still waiting for its `turn` (`medPending`),
+-- by identity.
+function M:dropSendRows(held)
+  local pending = self.medPending
+  if type(held) ~= "table" or type(pending) ~= "table" then return false end
+  local drop = {}
+  for _, row in ipairs(held.rows or {}) do drop[row] = true end
+  local kept, dropped = {}, false
+  for _, row in ipairs(pending) do
+    if drop[row] then dropped = true else kept[#kept + 1] = row end
+  end
+  if dropped then self.medPending = kept end
+  return dropped
+end
+
 -- One wire event, as rows `playEvents` understands.
 function M:medRows(msg)
   local rows = {}
@@ -10652,6 +10761,7 @@ function M:medRows(msg)
     -- a wild POKeMON is nobody's send-out at all and keeps the "Wild X
     -- appeared!" it was introduced with, because "TRAINER sent out X!" over a
     -- monster no trainer owns is simply untrue.
+    local lineFrom = #rows + 1
     if self:isMine(index) then
       say(("Go! %s!"):format(tostring(msg.text)))
     elseif self:sentByTrainer(index) then
@@ -10671,6 +10781,10 @@ function M:medRows(msg)
           tostring(msg.text)))
       end
     end
+    -- Gold: the send-out's line is held for the event behind it, and taken
+    -- back if that is a drag-out's "<MON> was dragged out!"
+    -- (MediatedBattle.draggedOutLine has the cart's rule; `noteSendRows`).
+    self:noteSendRows(msg, rows, lineFrom)
     if at then
       rows[#rows + 1] = {
         kind = "send", slot = index, index = at, confused = msg.confused,
@@ -10810,7 +10924,7 @@ function M:medRows(msg)
     -- Play via the existing AnimPlayer path; if mapping fails `startAnim`
     -- no-ops safely. The "X used MOVE" line rides in the `msg` beside this.
     -- `amount` is shake count on SHAKE_ANIM; ball id is stashed from `item`.
-    -- A Red status animation is this viewer's variant (Mediated.viewerAnim:
+    -- A Red / Gold status animation is this viewer's variant (Mediated.viewerAnim:
     -- a coop_pvp foe's sleep / confusion clip is the enemy's on this cart),
     -- worn on the arena in the condition's colours (Vfx.forStatusAnim); a
     -- foe's sleep clip is held behind the line it follows (`medAnimBehind`,
@@ -11272,10 +11386,18 @@ function M:onBattleEvent(msg)
     self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
     self.bideOn1 = nil
   end
+  -- Whose move the next used line is, and a call of ours that was a BIDE
+  -- (`noteBideAnim`).
+  if msg.t == "anim" and not self.ownSlots and not self.gen3 then
+    self:noteBideAnim(msg)
+  end
   -- Red's Bide (wave 5; MediatedBattle `bideLine1` has the rule): bounded by
   -- our monster's "used BIDE" line and its release -- or the confusion
   -- self-hit / full paralysis that clear STORING_ENERGY -- since a Red store
-  -- turn says nothing at all.
+  -- turn says nothing at all.  The start is ours only when this seat filed
+  -- the BIDE and the line is not another seat's (`usedLineOurs`): a partner
+  -- or a foe of our species says the same words (MediatedBattle's "Bide that
+  -- asks" note has why that gate, and not the others).
   if msg.t == "msg" and not self.ownSlots and not self.gen3
      and Gen.generation(self.game) == 1 then
     local who = type(msg.text) == "string" and msg.text:match("^(.-) is confused!?$") or nil
@@ -11283,7 +11405,7 @@ function M:onBattleEvent(msg)
     local said = Mediated.bideLine1(msg.text, self.medMineName,
       Mediated.bideLabels(self:liveMoves(), self.game), self.confusedNow)
     if said == "start" then
-      self.bideOn1 = true
+      if self.bideFiled and self:usedLineOurs(msg.seq) then self.bideOn1 = true end
     elseif said == "release" or said == "end" then
       self.bideOn1, self.bideFiled = nil, nil
     end
@@ -11291,23 +11413,26 @@ function M:onBattleEvent(msg)
   -- A Bide going on (Gold; MediatedBattle's `noteBideLine` has the rule):
   -- our monster's "used BIDE!" (the first turn's only line) or storing line,
   -- and the release that ends it...
-  if msg.t == "msg" and self.bideFiled and not self.ownSlots then
+  if msg.t == "msg" and self.bideFiled and not self.ownSlots
+     and Gen.generation(self.game) == 2 and not self.gen3 then
     local said = Mediated.bideLine(msg.text, self.medMineName,
       Mediated.bideLabels(self:liveMoves(), self.game))
-    if said == "store" or said == "start" then
+    if said == "store" or (said == "start" and self:usedLineOurs(msg.seq)) then
       self.bideStoring = true
     elseif said == "release" then
       self.bideFiled, self.bideStoring = nil, nil
     end
   end
   -- ...read as the next turn opens: its FIGHT is `.locked_in` only when the
-  -- turn just closed said our monster started or is storing energy.
+  -- turn just closed said our monster started or is storing energy.  A call
+  -- filed for that turn has said what it called by now.
   if msg.t == "turn" and msg.slot == nil and not self.ownSlots then
     self.bideLocked = (Gen.generation(self.game) == 2 and self.bideFiled == true
       and self.bideStoring == true)
       or (Gen.generation(self.game) == 1 and self.bideOn1 == true)
     self.bideStoring = nil
     self.confusedNow = nil
+    self.callFiled = nil
   end
 
   -- A foe's sleep clip held behind its line (`medRows`, Mediated.viewerAnim)
@@ -11318,6 +11443,14 @@ function M:onBattleEvent(msg)
     for _, row in ipairs(held or {}) do self.medPending[#self.medPending + 1] = row end
   end
   if msg.t ~= "msg" then flushBehind() end
+  -- A Gold send-out's line, held for this event (`noteSendRows`): a
+  -- drag-out's own line takes its place.  `moves` -- which a send-out may
+  -- state for the monster that left -- returned above, and is no answer.
+  local heldSend = self.medSendHeld
+  self.medSendHeld = nil
+  if heldSend and msg.t == "msg" and Mediated.draggedOutLine(msg.text, heldSend.species) then
+    self:dropSendRows(heldSend)
+  end
   for _, row in ipairs(self:medRows(msg)) do
     self.medPending[#self.medPending + 1] = row
   end
@@ -13392,6 +13525,7 @@ function M:syncFightMoves3(mon)
     end
   end
   if not (self.mediated and self.transport and self.battleId) then return false end
+  if Mediated.LINK_MODES[self.mode] then return false end
   local index = self:sheetIndexFor(mon)
   if not index then return false end
   local moves = Sheet3.moves(mon)

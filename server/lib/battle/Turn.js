@@ -412,11 +412,12 @@ const LOAF_TEXT = {
 };
 
 // ItemUseBall's misses by shake count (`.printMessage`, wPokeBallAnimData
-// $20 / $61 / $62 / $63: ItemUseBallText01..04) -- POKeMON spelled the way
-// every referee line spells it, since the wire carries no accent.
+// $20 / $61 / $62 / $63: ItemUseBallText01..04) -- the cart's "#MON" is its
+// charmap's "POKé" ($54) and ends in the é ($BA) a Red `msg` now carries
+// (sanitize cleanBattleText), so POKéMON is spelled as the cart prints it.
 const BALL_MISS_TEXT = {
-  0: 'You missed the POKeMON!',
-  1: 'Darn! The POKeMON broke free!',
+  0: 'You missed the POKéMON!',
+  1: 'Darn! The POKéMON broke free!',
   2: 'Aww! It appeared to be caught!',
   3: 'Shoot! It was so close too!',
 };
@@ -434,10 +435,11 @@ const CURE_TEXT = {
 };
 
 // An item's name in a sentence: its id's words, which are the cart's item
-// names -- POKe for the accent the wire cannot carry, GUARD SPEC.'s stop.
+// names (data/items/names.asm) -- "POKé BALL", "POKé DOLL", "POKé FLUTE" with
+// the é a Red `msg` carries (sanitize cleanBattleText), GUARD SPEC.'s stop.
 function itemLabel(id) {
   let label = String(id === undefined || id === null ? 'ITEM' : id).replace(/_/g, ' ');
-  label = label.replace(/^POKE /, 'POKe ');
+  label = label.replace(/^POKE /, 'POKé ');
   if (label === 'GUARD SPEC') label = 'GUARD SPEC.';
   return label;
 }
@@ -472,7 +474,15 @@ const isTable = (value) => typeof value === 'object' && value !== null;
 function copyMove(raw) {
   if (!isTable(raw)) return null;
   const pp = Math.max(0, int(raw.pp, 0));
-  const maxPp = Math.max(pp, int(raw.maxPp, pp));
+  const ppUps = Math.max(0, Math.min(3, int(raw.ppUps, 0)));
+  // The sheet's maximum as stated -- the cart's GetMaxPP over the move's base
+  // PP and its PP Ups -- even below `pp`: a slot past DecrementPP's wrap holds
+  // 63 PP over it, as the cart's byte does (the client uploads the byte the
+  // save holds), and raising the maximum to meet it hid GetMaxPP from every
+  // reader (Effects.restorePp's ETHER, the `moves` rows). A sheet that
+  // states none keeps the old reading, its PP.
+  const stated = int(raw.maxPp, null);
+  const maxPp = Math.max(0, stated !== null ? stated : pp);
   return {
     id: str(raw.id) || 'move',
     // Optional (PROTOCOL 26), and absence is a real answer rather than a gap
@@ -481,6 +491,10 @@ function copyMove(raw) {
     name: str(raw.name),
     pp,
     maxPp,
+    // ...and the base PP behind it, when the stated number is a GetMaxPP
+    // (Effects.basePpOf): what `stepPp` re-reads the maximum over once a wrap
+    // moves the PP Up bits. null keeps the stated maximum fixed.
+    basePp: stated !== null ? Effects.basePpOf(maxPp, ppUps) : null,
     power: Math.max(0, int(raw.power, 0)),
     accuracy: Math.max(0, int(raw.accuracy, 255)),
     type: Math.max(0, int(raw.type, 0)),
@@ -493,7 +507,7 @@ function copyMove(raw) {
     // Read where the cart reads the raw byte -- AnyMoveToSelect's disabled
     // branch (`mustStruggle`) and DisableEffect's slot pick -- and nowhere
     // else; 0 when the sheet states none.
-    ppUps: Math.max(0, Math.min(3, int(raw.ppUps, 0))),
+    ppUps,
   };
 }
 
@@ -772,6 +786,11 @@ function stepPp(move, delta) {
   const byte = (((int(move.ppUps, 0) % 4) * 64 + pp + delta) % 256 + 256) % 256;
   move.pp = byte % 64;
   move.ppUps = Math.floor(byte / 64);
+  // ...and GetMaxPP reads those bits: a borrow or a carry moves the maximum
+  // an ETHER caps at (Effects.getMaxPp; `copyMove`'s `basePp`).
+  if (move.basePp !== undefined && move.basePp !== null) {
+    move.maxPp = Effects.getMaxPp(move.basePp, move.ppUps);
+  }
 }
 
 // `mon.moves[slot]` in Lua's 1-based slot numbering.
@@ -1126,6 +1145,11 @@ class Battle {
       type: Math.max(0, int(m.type, 0)),
       effect: Math.max(0, int(m.effect, 0)),
       chance: Math.max(0, int(m.chance, 0)),
+      // K8's PP Ups beside the PP, the byte's top two bits as DecrementPP /
+      // IncrementMovePP left them (`stepPp`): the client writes them to the
+      // save as stated rather than inferring a wrap's borrow off the step
+      // (MediatedBattle ppByteStep1).
+      ppUps: Math.max(0, Math.min(3, int(m.ppUps, 0))),
     }));
     const fields = { slot: fighter.slot, side: fighter.side, moves };
     if (partyIndex != null) fields.mon = partyIndex - 1;
@@ -3086,12 +3110,12 @@ class Battle {
     // _AIBattleUseItemText). The player's is ItemUseText00, "<PLAYER> used
     // <ITEM>!", where its routine prints it: a ball (ItemUseBall, before the
     // throw -- not in a trainer fight, which blocks the ball first), X
-    // ACCURACY, GUARD SPEC., DIRE HIT, a POKe DOLL in a wild fight and the X
+    // ACCURACY, GUARD SPEC., DIRE HIT, a POKé DOLL in a wild fight and the X
     // stat items (PrintItemUseTextAndRemoveItem). A medicine, a PP restorer
-    // and the POKe FLUTE print only what they did.
+    // and the POKé FLUTE print only what they did.
     if (computer) {
       const onMon = activeMon(fighter);
-      this._say(`${fighter.name} used ${label} on ${onMon ? onMon.species : 'POKeMON'}!`);
+      this._say(`${fighter.name} used ${label} on ${onMon ? onMon.species : 'POKéMON'}!`);
     } else if (effect && ((effect.ball && wild) || effect.xAccuracy || effect.mist
         || effect.focusEnergy || (effect.pokeDoll && wild) || effect.stage)) {
       this._say(`${fighter.name} used ${label}!`);
@@ -3200,12 +3224,13 @@ class Battle {
         }
       }
       // ItemUsePokeFlute's `.inBattle`: PlayedFluteHadEffectText then
-      // FluteWokeUpText, or PlayedFluteNoEffectText.
+      // FluteWokeUpText, or PlayedFluteNoEffectText (data/text/text_6.asm
+      // "# FLUTE", "#MON woke up.": the charmap's POKé).
       if (woke) {
-        this._say(`${fighter.name} played the POKe FLUTE.`);
-        this._say('All sleeping POKeMON woke up.');
+        this._say(`${fighter.name} played the POKé FLUTE.`);
+        this._say('All sleeping POKéMON woke up.');
       } else {
-        this._say("Played the POKe FLUTE. Now, that's a catchy tune!");
+        this._say("Played the POKé FLUTE. Now, that's a catchy tune!");
       }
     } else {
       const partyIdx = choice.slot != null ? choice.slot : fighter.active;
@@ -3222,7 +3247,11 @@ class Battle {
       } else if (mon.hp <= 0 && Effects.itemFailsOnFainted(effect)) {
         this._say(NO_EFFECT);
       } else {
+        // `said`: a PP item's own ItemUseNoEffect line is already out, so the
+        // party menu's fallback below does not print it a second time (the
+        // cart's `.noEffect` prints it once).
         let applied = false;
+        let said = false;
         // X ACCURACY, DIRE HIT and GUARD SPEC. set their bit and say nothing
         // past the use's line (PrintItemUseTextAndRemoveItem; the AI's
         // AIPrintItemUse).
@@ -3292,30 +3321,27 @@ class Battle {
           const move = mon.moves[choice.move - 1];
           if (!move) {
             this._say(NO_EFFECT);
+            said = true;
           } else {
-            const maxPp = Math.max(int(move.maxPp, move.pp), move.pp, 1);
-            const before = move.pp;
-            if (effect.ppRestore === true) move.pp = maxPp;
-            else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestore, 0));
-            if (move.pp > before) {
+            // `.restorePP` against GetMaxPP (Effects.restorePp): a slot past
+            // its wrap comes down to the maximum, and a MAX ETHER on a full
+            // move with PP Ups still reads as restored -- both the cart's.
+            if (Effects.restorePp(move, effect.ppRestore)) {
               this._say('PP was restored.');
               applied = true;
               // Fielded mon only: a bench Ether must not redraw FIGHT.
               if (partyIdx === fighter.active) this._emitMoves(fighter, mon, partyIdx);
             } else {
               this._say(NO_EFFECT);
+              said = true;
             }
           }
         }
         if (effect.ppRestoreAll) {
           let any = false;
           for (const move of mon.moves || []) {
-            if (!move) continue;
-            const maxPp = Math.max(int(move.maxPp, move.pp), move.pp, 1);
-            const before = move.pp;
-            if (effect.ppRestoreAll === true) move.pp = maxPp;
-            else move.pp = Math.min(maxPp, move.pp + int(effect.ppRestoreAll, 0));
-            if (move.pp > before) any = true;
+            // `.elixirLoop`: `.restorePP` on every slot that holds a move.
+            if (move && Effects.restorePp(move, effect.ppRestoreAll)) any = true;
           }
           if (any) {
             this._say('PP was restored.');
@@ -3323,6 +3349,7 @@ class Battle {
             if (partyIdx === fighter.active) this._emitMoves(fighter, mon, partyIdx);
           } else {
             this._say(NO_EFFECT);
+            said = true;
           }
         }
         let healed = false;
@@ -3401,7 +3428,7 @@ class Battle {
             this._say(`${mon.species} recovered by ${healedBy}!`);
           } else if (cleared) {
             this._say(`${mon.species}${has(CURE_TEXT, choice.item) ? CURE_TEXT[choice.item] : CURE_TEXT.FULL_HEAL}`);
-          } else if (!applied) {
+          } else if (!applied && !said) {
             this._say(NO_EFFECT);
           }
         }
@@ -5230,7 +5257,7 @@ class Battle {
       this._heal(fighter, mon, heal);
       // DrainHPEffect_ ends on SuckedHealthText -- DreamWasEatenText for
       // DREAM EATER (move_effects/drain_hp.asm :85-96) -- full HP or not.
-      const name = defender ? defender.species : 'POKeMON';
+      const name = defender ? defender.species : 'POKéMON';
       if (int(effectId, 0) === 8) {
         this._say(`${name}'s dream was eaten!`);
       } else {

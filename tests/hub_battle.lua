@@ -272,6 +272,21 @@ local function openFight(hub, seed)
   }
 end
 
+-- ANN alone against the hub's wild seat: a fight against the computer, the
+-- only kind a mid-fight learn or level-up (`mmo.battle_moveset`) is heard in
+-- -- no cart levels or learns in a link battle (Hub LEARN_MODES).  The same
+-- two sheets as openFight's, ANN's on side a.
+local function openWildFight(hub, seed)
+  local ann, annPeer = join(hub, "ANN")
+  local id = "wl"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                     chart = CHART, seed = seed or 12345 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { bruiser() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { glassjaw() } })
+  return { id = id, ann = { client = ann, peer = annPeer, battle = id } }
+end
+
 do
   local hub = Hub.new({ maxPlayers = 4 })
   local ann, annPeer = join(hub, "ANN")
@@ -1333,7 +1348,7 @@ end
 
 do
   local hub = Hub.new({ maxPlayers = 4 })
-  local fight = openFight(hub)
+  local fight = openWildFight(hub)
   local record = hub.battles[fight.id]
   ok(record.sim ~= nil, "the fight is live before the learn")
   local live = record.sim.byId[fight.ann.client.id].mons[1]
@@ -1370,6 +1385,27 @@ do
     { id = "SWAP", pp = 15, power = 60, accuracy = 255, type = 0, effect = 0, chance = 0 },
     { id = "NEW", pp = 20, power = 80, accuracy = 255, type = 0, effect = 0, chance = 0 },
   })), false, "a transformed battler is left alone")
+end
+
+-- ...and none of it in a fight between players.  No cart learns a move in a
+-- link battle (pokered GainExperience returns on LINK_STATE_BATTLING,
+-- pokecrystal GiveExperiencePoints on wLinkMode, pokeemerald Cmd_getexp
+-- under BATTLE_TYPE_LINK), so the PROTOCOL 28 learn a 1v1 used to take is a
+-- one-slot rewrite of a monster the other player is fighting: the hub drops
+-- the message whole (Hub LEARN_MODES).
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local fight = openFight(hub)
+  local record = hub.battles[fight.id]
+  local live = record.sim.byId[fight.ann.client.id].mons[1]
+  local before = live.moves
+  hub:receive(fight.ann.client, { type = Wire.BATTLE_MOVESET, battle = fight.id, mon = 0,
+    moves = { { id = "SWAP", pp = 20, power = 250, accuracy = 255, type = 0, effect = 0, chance = 0 } } })
+  eq(live.moves[1].id, "thump", "pvp learn: a one-id replace off the wire reaches nothing")
+  eq(hub:applyBattleMoveset(record, fight.ann.client, { mon = 0, moves = {
+    move(), { id = "NEW", pp = 20, power = 250, accuracy = 255, type = 0, effect = 0, chance = 0 },
+  } }), false, "pvp learn: a one-slot learn in a 1v1 is refused")
+  ok(live.moves == before and #live.moves == 1, "pvp learn: ...and the referee's list is the one it had")
 end
 
 -- Co-op mediated fights set battleId / coopBattleId, not sessionId. Treating
@@ -1804,15 +1840,16 @@ end
 -- ------- mid-fight learn on Gen 3: the row keeps num / target / priority / flags
 
 do
+  -- A wild fight: the only kind a learn is heard in (Hub LEARN_MODES --
+  -- pokeemerald / pokefirered Cmd_getexp gives no experience under
+  -- BATTLE_TYPE_LINK, so no Gen 3 cart learns in a link battle either).
   local hub = Hub.new({ maxPlayers = 4, generation = 3 })
   local ann = join3(hub, "ANN")
-  local bob = join3(hub, "BOB")
-  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
-  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
-  local id = ann.sessionId
+  local id = "g3l"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
   hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
-  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
-  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { mon3() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { mon3() } })
   local record = hub.battles[id]
   local fighter = record.sim.byId[ann.id]
   local learned = move3({ id = "SHIELD3", num = 182, power = 0, accuracy = 0,
@@ -1825,6 +1862,28 @@ do
   eq(row and row.target, 16, "and its target")
   ok(fighter.b.moves == fighter.mons[1].moves, "the active battler fights with the new list")
   eq(fighter.mons[1].moves[1].pp, 20, "the unchanged slot keeps the hub's PP")
+end
+
+-- ...while a Gen 3 1v1 hears none: a one-slot "learn" there would be any row
+-- the sender liked (moveRow3 takes a new id's row whole) against another
+-- player's monster.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  local ann = join3(hub, "ANN")
+  local bob = join3(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  local record = hub.battles[id]
+  local fighter = record.sim.byId[ann.id]
+  local before = fighter.mons[1].moves
+  hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+                     moves = { move3(), move3({ id = "NUKE3", num = 120, power = 250, priority = 5 }) } })
+  ok(fighter.mons[1].moves == before and #before == 1, "gen 3 pvp: a 1v1 learn reaches nothing")
+  ok(fighter.b.moves == before, "gen 3 pvp: ...and the battler fights with the list it brought")
 end
 
 -- ------- the Gen 3 dialect at the boundary, and the limits a full upload meets
@@ -2505,7 +2564,8 @@ end
 -- K9: a mid-fight level-up rides mmo.battle_moveset, and the hub forwards its
 -- level / stats / maxHp to the referee's `levelUp(playerId, monIndex, level,
 -- stats, maxHp)` -- 1-based index -- whatever became of the move list, only
--- when the referee has the method.  The method is a stub recording each call
+-- when the referee has the method, and only in a fight against the computer
+-- (a wild fight here; a link fight hears none, below).  The method is a stub recording each call
 -- (the Gen 1 / Gen 2 referees' own rebuild is theirs to pin).  K8: a learn
 -- keeps an unchanged row's highCrit / PP Ups / Gold priority and takes a new
 -- row's.  server/hub_battle.test.js pins the same on the Node twin, and
@@ -2519,7 +2579,7 @@ end
 
 do
   local hub = Hub.new({ maxPlayers = 4 })
-  local fight = openFight(hub)
+  local fight = openWildFight(hub)
   local record = hub.battles[fight.id]
   local client = fight.ann.client
   ok(record.sim ~= nil, "level-up: the fight is live")
@@ -2602,6 +2662,10 @@ do
   eq(next12[1].pp, 3, "export: an unchanged row keeps the old PP")
   eq(next12[1].highCrit, true, "export: ...and its high-crit flag")
   eq(next12[2].ppUps, 1, "export: a new row takes its own PP Ups")
+  local based = Hub.nextMoves12({ row("A", { maxPp = 42, ppUps = 1, basePp = 35 }) },
+                                { row("A", { pp = 99, basePp = 9 }), row("B", { basePp = 9 }) })
+  eq(based[1].basePp, 35, "export: an unchanged row keeps the referee's base PP (Red's stepPp re-reads GetMaxPP over it)")
+  eq(based[2].basePp, nil, "export: ...and a new row never takes one off the wire")
   local held = { transformed = true, moves = { row("COPY") }, preTransform = { moves = { row("A") } } }
   eq(Hub.learnTo(2, held, { row("A"), row("B") }), true, "export: learnTo lands a learn")
   eq(#held.preTransform.moves, 2, "export: ...in the list a Transform put aside")
@@ -2610,15 +2674,47 @@ do
      "export: a transformed battler with nothing put aside is left alone")
 end
 
+-- The Red referee's own `basePp` (copyMove reads it out of a stated maximum,
+-- BattleSim Effects.basePpOf) survives a level-up's re-send and a learn on the
+-- real referee: the kept rows are the hub's, and `basePp` is one of their
+-- fields, never the wire's.  Dropped, the next 63-PP wrap (Turn stepPp's
+-- borrow of a PP Up) kept the old maximum instead of re-reading GetMaxPP.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 1 })
+  local ann = join(hub, "ANN")
+  local id = "bp"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  local mine = mon()
+  mine.moves = { row("thump", { pp = 35, maxPp = 42, ppUps = 1 }) }
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { mine } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { glassjaw() } })
+  local record = hub.battles[id]
+  ok(record and record.sim, "base pp: a Red wild fight opens")
+  if record and record.sim then
+    local live = record.sim.byId[ann.id].mons[1]
+    eq(live.moves[1].basePp, 35, "base pp: the referee read the base out of the stated maximum")
+    hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+      moves = { row("thump", { pp = 35, maxPp = 42, ppUps = 1 }) }, level = 51 })
+    eq(live.level, 51, "base pp: the level-up reached the referee")
+    eq(live.moves[1].basePp, 35, "base pp: ...and its re-sent row kept the base")
+    hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+      moves = { row("thump"), row("NEW", { pp = 10 }) } })
+    eq(live.moves[2] and live.moves[2].id, "NEW", "base pp: a learn lands")
+    eq(live.moves[1].basePp, 35, "base pp: ...and the unchanged row keeps the base")
+    eq(live.moves[1].maxPp, 42, "base pp: ...and its stated maximum")
+  end
+end
+
 -- Gold: the learn keeps the cart's priority byte (K8), and a Gold sheet's K7
 -- blocks ride the hub's stored party into the referee's hands.
 do
+  -- A wild fight, the kind a learn and a level-up are heard in (Hub
+  -- LEARN_MODES); the sheet's K7 / K8 blocks are stored whatever the mode.
   local hub = Hub.new({ maxPlayers = 4, generation = 2 })
   local ann = join2(hub, "ANN")
-  local bob = join2(hub, "BOB")
-  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
-  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
-  local id = ann.sessionId
+  local id = "g2k"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
   local gold = sheet2({})
   gold.base = { hp = 41, atk = 52, def = 63, spe = 74, spa = 85, spd = 96 }
   gold.dvs = { atk = 12, def = 7, spe = 15, spc = 3 }
@@ -2626,8 +2722,8 @@ do
   gold.happiness = 200
   gold.moves[1].priority, gold.moves[1].ppUps = 2, 3
   hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART2 })
-  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { gold } })
-  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { sheet2({}) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { gold } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { sheet2({}) } })
   local record = hub.battles[id]
   ok(record and record.sim ~= nil, "gold K7/K8: the fight opens on a sheet carrying them")
   local stored = record.parties[ann.id] and record.parties[ann.id].mons[1]
@@ -2654,6 +2750,95 @@ do
       moves = { row("thump"), row("quick") }, level = 52,
       stats = { atk = 1, def = 2, spd = 3, spc = 4 } })
     eq(calls, 1, "gold K9: Kanto-keyed stats refuse a Gold moveset")
+  end
+end
+
+-- K9 and the PROTOCOL 28 learn in a fight between players, on the real
+-- referees (the review's probe, RV-C probe_k9_pvp): a Gold 1v1 took a
+-- moveset carrying 999 stats and a 999 max HP -- re-sendable every turn --
+-- straight into BattleSim2's levelUp, which judges no claim, and both
+-- referees took a one-slot "learn" of any row.  No cart levels or learns in
+-- a link battle (pokered GainExperience returns on LINK_STATE_BATTLING,
+-- pokecrystal / pokegold GiveExperiencePoints on wLinkMode), so the hubs
+-- drop the message whole in a 1v1 and a coop_pvp (Hub LEARN_MODES), and the
+-- referee's monster is the one it was given.  server/hub_battle.test.js runs
+-- the same on the Node twin; tests/fixtures/hub_protocol_parity.json holds
+-- the two to one digest (k9_pvp_dropped).
+local function pvpForgery(generation, mode)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  local joinAs = generation == 2 and join2 or join
+  local function sheet()
+    if generation == 2 then return sheet2({}) end
+    return mon({ atk = 100, def = 100, spd = 50, spc = 50 })
+  end
+  local ann, bob = joinAs(hub, "ANN"), joinAs(hub, "BOB")
+  local id
+  if mode == "1v1" then
+    hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+    hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+    id = ann.sessionId
+    hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                       chart = generation == 2 and CHART2 or CHART })
+    hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { sheet() } })
+    hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { sheet() } })
+  else
+    local cal, dee = joinAs(hub, "CAL"), joinAs(hub, "DEE")
+    id = "pf"
+    hub:openCoopBattle(id, { ann.id, bob.id, cal.id, dee.id }, { mode = "coop_pvp", hostId = ann.id,
+                       sides = { a = { ann.id, bob.id }, b = { cal.id, dee.id } } })
+    hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                       chart = generation == 2 and CHART2 or CHART })
+    for _, c in ipairs({ ann, bob, cal, dee }) do
+      hub:receive(c, { type = Wire.BATTLE_PARTY, battle = id, mons = { sheet() } })
+    end
+  end
+  local record = hub.battles[id]
+  if not (record and record.sim) then return nil end
+  local live = record.sim.byId[ann.id].mons[1]
+  local function snap()
+    local keys = {}
+    for k in pairs(live.stats) do keys[#keys + 1] = k end
+    table.sort(keys)
+    local parts = { live.level, live.hp, live.maxHp }
+    for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. live.stats[k] end
+    for _, m in ipairs(live.moves) do parts[#parts + 1] = m.id .. ":" .. m.power end
+    return table.concat(parts, ",")
+  end
+  local forged = generation == 2 and { atk = 999, def = 999, spe = 999, spa = 999, spd = 999 }
+    or { atk = 999, def = 999, spd = 999, spc = 999 }
+  local own = { id = "thump", pp = 20, power = generation == 2 and 1 or 200, accuracy = 255,
+                type = 0, effect = 0, chance = 0 }
+  local nuke = { id = "NUKE", pp = 20, power = 250, accuracy = 255, type = 0, effect = 0, chance = 0 }
+  local seen = { mode = record.mode, before = snap() }
+  hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0, moves = { own },
+                     stats = forged, maxHp = 999 })
+  seen.stats = snap()
+  hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0, moves = { own },
+                     level = 100, stats = forged, maxHp = 999 })
+  seen.level = snap()
+  hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0, moves = { own, nuke } })
+  seen.learn = snap()
+  seen.applied = hub:applyBattleMoveset(record, ann, { mon = 0, moves = { own, nuke },
+                                                       level = 100, stats = forged, maxHp = 999 })
+  seen.after = snap()
+  return seen
+end
+
+do
+  for _, generation in ipairs({ 2, 1 }) do
+    for _, mode in ipairs({ "1v1", "coop_pvp" }) do
+      local label = (generation == 2 and "gold " or "red ") .. mode
+      local seen = pvpForgery(generation, mode)
+      ok(seen ~= nil, "k9 pvp (" .. label .. "): the fight opens")
+      if seen then
+        eq(seen.mode, mode, "k9 pvp (" .. label .. "): ...in that mode")
+        eq(seen.stats, seen.before, "k9 pvp (" .. label .. "): 999 stats and max HP reach nothing")
+        eq(seen.level, seen.before, "k9 pvp (" .. label .. "): ...nor with a level 100 claim")
+        eq(seen.learn, seen.before, "k9 pvp (" .. label .. "): a one-slot learn reaches nothing")
+        eq(seen.applied, false, "k9 pvp (" .. label .. "): applyBattleMoveset refuses all of it")
+        eq(seen.after, seen.before, "k9 pvp (" .. label .. "): ...and the monster is the one it was given")
+      end
+    end
   end
 end
 
@@ -2992,6 +3177,28 @@ do
   eq(red.simTime, nil, "time of day: ...and the Red referee is created without it")
 end
 
+-- A monster's own `generation`, stated and no generation, refuses its party
+-- with or without a hub generation.  Read with none, an unreadable tag (6,
+-- -6, "day") used to fall through to the stat-key sniff here while
+-- lib/sanitize refused the party -- one upload, two answers (the review's
+-- differential fuzzer); the stricter reading is both twins' now.  The hub
+-- parity driver (review_twin_readings) holds the two to one answer.
+do
+  local function tagged(g)
+    local sheet = mon()
+    sheet.generation = g
+    return { battle = "b1", mons = { sheet } }
+  end
+  for _, g in ipairs({ 6, -6, 0, 4, "day", true }) do
+    eq(Wire.battleParty(tagged(g)), nil, "mon generation " .. tostring(g) .. ": refused with no hub generation")
+    eq(Wire.battleParty(tagged(g), 1), nil, "mon generation " .. tostring(g) .. ": ...and on a Red hub")
+  end
+  ok(Wire.battleParty(tagged(1)) ~= nil, "mon generation: a real one is read")
+  ok(Wire.battleParty(tagged(nil)) ~= nil, "mon generation: ...and none is the sheet's own shape, as ever")
+  eq(Wire.battleMove({ id = "m", pp = 20, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0,
+                       maxPp = true }, 1), nil, "maxPp true: no number, the row refused (cleanInt's twin)")
+end
+
 -- Red's MIMIC pick on a choice: read on a Gen 1 hub, ignored on Gold's.
 do
   local fight = { battle = "b1", action = "fight", move = 0, mimic = 2 }
@@ -3013,17 +3220,16 @@ do
 end
 
 -- A Gen 3 hub reads no level-up (BattleSim3 rebuilds nothing from one), so a
--- referee there is never called, whatever the client sends.
+-- referee there is never called, whatever the client sends -- in a wild
+-- fight, where a learn is heard at all (Hub LEARN_MODES).
 do
   local hub = Hub.new({ maxPlayers = 4, generation = 3 })
   local ann = join3(hub, "ANN")
-  local bob = join3(hub, "BOB")
-  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
-  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
-  local id = ann.sessionId
+  local id = "g3w"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
   hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
-  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
-  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { mon3() } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { mon3() } })
   local record = hub.battles[id]
   local calls = 0
   record.sim.levelUp = function() calls = calls + 1 end

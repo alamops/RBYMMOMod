@@ -163,8 +163,8 @@ local function battleOf(o)
 end
 
 local function dumpMove(m)
-  return string.format("id=%s,pp=%d,power=%d,accuracy=%d,type=%d,effect=%d,chance=%d",
-    m.id, m.pp, m.power, m.accuracy, m.type, m.effect, m.chance)
+  return string.format("id=%s,pp=%d,maxPp=%s,ppUps=%s,power=%d,accuracy=%d,type=%d,effect=%d,chance=%d",
+    m.id, m.pp, tostring(m.maxPp), tostring(m.ppUps), m.power, m.accuracy, m.type, m.effect, m.chance)
 end
 
 local function dumpValue(v)
@@ -2696,7 +2696,7 @@ do
   for _, event in ipairs(events) do
     if event.t == "msg" and event.text == "The trainer blocked the BALL!" then blocked = true end
     if event.t == "msg" and event.text == "Don't be a thief!" then thief = true end
-    if event.t == "msg" and tostring(event.text):find("used POKe BALL", 1, true) then used = true end
+    if event.t == "msg" and tostring(event.text):find("used POKé BALL", 1, true) then used = true end
   end
   ok(blocked and thief, "balls fail outside wild mediated mode")
   ok(not used, "...with no \"used\" line: the trainer blocks the ball before ItemUseText00")
@@ -8897,6 +8897,139 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- RP1 (gen12-referee-gaps-fix polish): Red's `msg` lines in the cart's own
+-- glyphs (Wire.battleText carries é now: "POKé BALL", "POKéMON" -- charmap
+-- $54 / $BA), K8's PP Ups on every `moves` row, and GetMaxPP kept through
+-- DecrementPP's wrap -- the sheet's stated maximum, re-read over the PP Up
+-- bits a borrow leaves, and ItemUsePPRestore's `.restorePP` against it.  The
+-- g1_pp_max parity scenario holds lib/battle to the same streams.
+-- ------------------------------------------------------------------
+
+do
+  local function mv(id, o)
+    o = o or {}
+    local m = move({ id = id, power = o.power or 10, effect = o.effect or 0, pp = o.pp or 60,
+                     maxPp = o.maxPp })
+    if o.ppUps then m.ppUps = o.ppUps end
+    return m
+  end
+  local function duel(aMoves, o)
+    o = o or {}
+    local battle = battleOf({
+      id = "rp1", mode = o.mode or "1v1", seed = o.seed or 7,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = {
+          (function() local m = mon({ species = "Alpha", spd = 90, maxHp = 400, moves = aMoves })
+                      m.baseSpd = 0; return m end)() } } },
+        b = { { playerId = "p2", name = "Bob", mons = o.bMons or {
+          mon({ species = "Beta", spd = 10, maxHp = 400, catchRate = o.catchRate,
+                moves = { mv("splash", { power = 0, effect = 85 }) } }) } } },
+      },
+    })
+    drain(battle)
+    return battle
+  end
+  local function turn(battle, c1, c2)
+    battle:submitChoice("p1", c1)
+    battle:submitChoice("p2", c2 or { action = "fight", move = 0 })
+    return drain(battle)
+  end
+  local function texts(events)
+    local out = {}
+    for _, e in ipairs(events) do if e.t == "msg" then out[#out + 1] = e.text end end
+    return out
+  end
+  local function has(list, text)
+    for _, v in ipairs(list) do if v == text then return true end end
+    return false
+  end
+  local function count(list, text)
+    local n = 0
+    for _, v in ipairs(list) do if v == text then n = n + 1 end end
+    return n
+  end
+  -- Ann's last `moves` row in a batch: "pp/maxPp/ppUps" per slot.
+  local function row(events)
+    local out = nil
+    for _, e in ipairs(events) do
+      if e.t == "moves" and e.side == "a" then
+        local cells = {}
+        for i, m in ipairs(e.moves) do
+          cells[i] = tostring(m.pp) .. "/" .. tostring(m.maxPp) .. "/" .. tostring(m.ppUps)
+        end
+        out = table.concat(cells, ",")
+      end
+    end
+    return out
+  end
+  local FIGHT = { action = "fight", move = 0 }
+  local function item(id, slot) return { action = "item", item = id, move = slot } end
+
+  -- (1) The item lines in the cart's glyphs: data/items/names.asm's "POKé
+  --     BALL" / "POKé DOLL" / "POKé FLUTE", text_6.asm's "#MON".
+  local b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild", catchRate = 0 })
+  local t = texts(turn(b, item("POKE_BALL")))
+  ok(has(t, "Ann used POKé BALL!"), "ItemUseText00 names the POKé BALL")
+  ok(has(t, "You missed the POKéMON!"), "ItemUseBallText01, at a catch rate of 0")
+  b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild", catchRate = 100 })
+  t = texts(turn(b, item("POKE_BALL")))
+  ok(has(t, "Darn! The POKéMON broke free!"), "ItemUseBallText02: one shake at 100 and full HP")
+  b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild" })
+  t = texts(turn(b, item("POKE_FLUTE")))
+  ok(has(t, "Played the POKé FLUTE. Now, that's a catchy tune!"), "PlayedFluteNoEffectText")
+  b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild", bMons = {
+    mon({ species = "Beta", spd = 10, maxHp = 400, status = "SLP",
+          moves = { mv("splash", { power = 0, effect = 85 }) } }) } })
+  t = texts(turn(b, item("POKE_FLUTE")))
+  ok(has(t, "Ann played the POKé FLUTE.") and has(t, "All sleeping POKéMON woke up."),
+     "PlayedFluteHadEffectText, FluteWokeUpText")
+  b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild" })
+  t = texts(turn(b, item("POKE_DOLL")))
+  ok(has(t, "Ann used POKé DOLL!"), "the doll's use line")
+
+  -- (2) K8's PP Ups on every row: a spend states them beside the PP.
+  b = duel({ mv("thump", { pp = 30, ppUps = 2, maxPp = 49 }) })
+  eq(row(turn(b, FIGHT)), "29/49/2", "a spend's row: the PP, GetMaxPP, and the PP Ups")
+
+  -- (3) A slot that arrives past its wrap: 63 PP over a stated GetMaxPP of 35.
+  --     The maximum stays the sheet's (it was raised to 63); the ETHER
+  --     brings the slot DOWN to it, and a second is no effect, said once.
+  b = duel({ mv("thump", { pp = 63, maxPp = 35 }) })
+  eq(row(turn(b, FIGHT)), "62/35/0", "the spend from 63: the stated maximum kept")
+  local events = turn(b, item("ETHER", 0))
+  eq(row(events), "35/35/0", "ETHER past the wrap: down to GetMaxPP")
+  ok(has(texts(events), "PP was restored."), "...and that is a restore (`add b`: NZ)")
+  t = texts(turn(b, item("ETHER", 0)))
+  eq(count(t, "It won't have any effect."), 1, "ETHER at the maximum: no effect, said once")
+
+  -- (4) A wrap mid-fight: the freed trap's fresh run pays from 0 PP.  With a
+  --     PP Up: 63 PP and none, and GetMaxPP re-reads 15 (15 + 3 before).
+  local function wrapped(o)
+    local battle = duel({ mv("wrap", { power = 15, effect = 42, pp = 1, ppUps = o.ppUps,
+                                       maxPp = o.maxPp }) }, { bMons = {
+      mon({ species = "Beta", spd = 10, maxHp = 400, moves = { mv("thump") } }),
+      mon({ species = "Delta", spd = 10, maxHp = 400, moves = { mv("thump") } }) } })
+    turn(battle, FIGHT, FIGHT)
+    return row(turn(battle, FIGHT, { action = "switch", slot = 1 }))
+  end
+  eq(wrapped({ ppUps = 1, maxPp = 18 }), "63/15/0", "the borrow: one PP Up fewer, GetMaxPP over none")
+  eq(wrapped({ maxPp = 15 }), "63/24/3", "...none wraps to three: 15 + 3 x 3")
+  eq(wrapped({ ppUps = 1, maxPp = 17 }), "63/17/0", "a maximum no base gives (16, then 18) stays put")
+  eq(wrapped({ ppUps = 1 }), "63/1/0", "a sheet that states none keeps the old reading, its PP")
+
+  -- (5) MAX ETHER compares the whole byte (the cart's own bug): a full move
+  --     with a PP Up "restores"; one with none is no effect.
+  b = duel({ mv("thump", { pp = 20, ppUps = 1, maxPp = 20 }), mv("tap", { pp = 15, maxPp = 15 }) })
+  events = turn(b, item("MAX_ETHER", 0))
+  ok(has(texts(events), "PP was restored."), "MAX ETHER on a full move with a PP Up: restored")
+  eq(row(events), "20/20/1,15/15/0", "...to what it had")
+  t = texts(turn(b, item("MAX_ETHER", 1)))
+  eq(count(t, "It won't have any effect."), 1, "MAX ETHER on a full move with none: no effect, once")
+  ok(has(texts(turn(b, item("MAX_ELIXER"))), "PP was restored."),
+     "MAX ELIXER over the same list: restored through the first slot")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 
@@ -8934,9 +9067,13 @@ do
     eq(extra, nil, "the mirror invents no kind Wire has not got")
     eq(missing, nil, "and drops none of Wire's")
 
+    -- Read in the Red dialect (generation 1), the one a hub hands these
+    -- events to: a `msg` line keeps the cart's battle glyphs there
+    -- (Wire.battleText -- "POKé BALL", "POKéMON"), which the dialect-less
+    -- reading (M.text) strips.
     local mangled = nil
     for _, event in ipairs(everyEvent) do
-      local clean = Wire.battleEvent(event)
+      local clean = Wire.battleEvent(event, 1)
       if not clean or dump(clean) ~= dump(event) then
         mangled = mangled or (tostring(event.t) .. " -> " .. tostring(clean and dump(clean)))
       end

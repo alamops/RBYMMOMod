@@ -2040,7 +2040,9 @@ scenarios[#scenarios + 1] = {
 -- A mid-fight level-up reaches the referee (contract K9): both hubs forward a
 -- moveset's `level` / `stats` / `maxHp` to `sim:levelUp(playerId, monIndex,
 -- level, stats, maxHp)` -- the index 1-based -- whatever became of the move
--- list, and only when the referee has the method.  The sim's method is a stub
+-- list, and only when the referee has the method.  A wild fight: a fight
+-- against the computer is the only kind the message is heard in (Hub
+-- LEARN_MODES; k9_pvp_dropped has the link fights).  The sim's method is a stub
 -- that records each call, and the hub's own rows are set first so the digest
 -- never leans on how either sim's copyMove spells a field it was not given.
 -- Along the way the learn keeps highCrit, PP Ups and Gold priority on an
@@ -2061,9 +2063,11 @@ local function levelFight(generation)
   local hub = makeGenHub(generation)
   local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
   local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
-  local b = dialAs(hub, "BOB", ID_B, { generation = generation, sprite = sprite })
-  local sess = openFight(hub, a, b)
-  uploadReady(hub, a, b, sess.id, { sheet12(generation) }, { sheet12(generation) })
+  local sess = { id = "lv" }
+  hub:openCoopBattle(sess.id, { a.id }, { mode = "wild", hostId = a.id })
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id, chart = CHART })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, side = "a", mons = { sheet12(generation) } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, side = "b", mons = { sheet12(generation) } })
   local record = hub.battles[sess.id]
   if not (record and record.sim) then return { opened = false } end
   local calls = {}
@@ -2110,12 +2114,12 @@ local function levelFight3()
   local hub = makeGenHub(3)
   local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
     sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
-  local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "emerald",
-    sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN" })
-  local sess = openFight(hub, a, b)
+  local sess = { id = "lv3" }
+  hub:openCoopBattle(sess.id, { a.id }, { mode = "wild", hostId = a.id })
   hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id, typeTable = CHART3 })
-  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { mon3() } })
-  hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { mon3() } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, side = "a", mons = { mon3() } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, side = "b",
+                          mons = { mon3({ catchRate = 45 }) } })
   local record = hub.battles[sess.id]
   if not (record and record.sim) then return { opened = false } end
   local calls = 0
@@ -3151,6 +3155,214 @@ scenarios[#scenarios + 1] = {
       goldNamed = npcFight(2, "coop_npc", { name = "TWINS AMY & MAY", aiMods = { 1 }, bag = xItem }),
     }
   end,
+}
+
+-- ------------------------------------------------------------------
+-- The review's fixes (FX-W of docs/plans/gen12-referee-gaps-fix.md).
+--
+-- k9_pvp_dropped: `mmo.battle_moveset` in a fight between players, on the
+-- real referees.  No cart levels or learns in a link battle (pokered
+-- GainExperience returns on LINK_STATE_BATTLING, pokecrystal / pokegold
+-- GiveExperiencePoints on wLinkMode, pokeemerald / pokefirered Cmd_getexp
+-- under BATTLE_TYPE_LINK), so both hubs drop the message whole in a 1v1 and a
+-- coop_pvp (LEARN_MODES) -- a Gold 1v1 used to hand 999 stats and a 999 max
+-- HP to BattleSim2's levelUp, re-sendable every turn, and every generation
+-- took a one-slot "learn" of any row.  Each step is ANN's monster as the
+-- referee holds it: level, HP, max HP, stats, moves.
+--
+-- basepp_kept: the Red referee's own `basePp` (copyMove reads it out of a
+-- stated maximum) on a row a level-up re-sends or a learn keeps -- the kept
+-- row is the hub's (nextMoves12), so the base its next 63-PP wrap re-reads
+-- GetMaxPP over stays.  A wild fight, where the message is heard.
+--
+-- review_twin_readings: inputs the review's differential fuzzer found the
+-- twins reading two ways, read by Wire.lua here and lib/sanitize.js there --
+-- a monster's own `generation` outside 1..3 on a party read with no hub
+-- generation (refused by both now), and the values LuaJIT's tonumber says nil
+-- to and JavaScript's Number did not (true, false, null, "", a one-element
+-- list) on every older field cleanInt reads, plus the strings both read alike.
+-- ------------------------------------------------------------------
+
+local function pvpSnap(live)
+  local keys = {}
+  for k in pairs(live.stats or {}) do keys[#keys + 1] = k end
+  table.sort(keys)
+  local parts = { tostring(live.level), tostring(live.hp), tostring(live.maxHp) }
+  for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. tostring(live.stats[k]) end
+  for _, m in ipairs(live.moves or {}) do parts[#parts + 1] = m.id .. ":" .. tostring(m.power) end
+  return table.concat(parts, ",")
+end
+
+local function pvpForgery(generation, mode)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  local b = dialAs(hub, "BOB", ID_B, { generation = generation, sprite = sprite })
+  local id
+  if mode == "1v1" then
+    id = openFight(hub, a, b).id
+    uploadReady(hub, a, b, id, { sheet12(generation) }, { sheet12(generation) })
+  else
+    local c = dialAs(hub, "CAL", ID_C, { generation = generation, sprite = sprite })
+    local d = dialAs(hub, "DEE", ID_D, { generation = generation, sprite = sprite })
+    id = "kp"
+    hub:openCoopBattle(id, { a.id, b.id, c.id, d.id }, { mode = "coop_pvp", hostId = a.id,
+                       sides = { a = { a.id, b.id }, b = { c.id, d.id } } })
+    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+    for _, who in ipairs({ a, b, c, d }) do
+      hub:receive(who.client, { type = Wire.BATTLE_PARTY, battle = id, mons = { sheet12(generation) } })
+    end
+  end
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false } end
+  local live = record.sim.byId[a.id].mons[1]
+  local forged = generation == 2 and { atk = 999, def = 999, spe = 999, spa = 999, spd = 999 }
+    or { atk = 999, def = 999, spd = 999, spc = 999 }
+  local nuke = row12("NUKE", { power = 250 })
+  local steps = { pvpSnap(live) }
+  local function send(extra)
+    hub:receive(a.client, merged({ type = Wire.BATTLE_MOVESET, battle = id, mon = 0 }, extra))
+    steps[#steps + 1] = pvpSnap(live)
+  end
+  send({ moves = { row12("thump") }, stats = forged, maxHp = 999 })
+  send({ moves = { row12("thump") }, level = 100, stats = forged, maxHp = 999 })
+  send({ moves = { row12("thump"), nuke } })
+  send({ moves = { nuke } })
+  local applied = hub:applyBattleMoveset(record, a.client, { mon = 0, moves = { row12("thump"), nuke },
+                                                              level = 100, stats = forged, maxHp = 999 })
+  steps[#steps + 1] = pvpSnap(live)
+  return { opened = true, mode = record.mode, applied = applied, steps = steps }
+end
+
+local function pvpForgery3()
+  local hub = makeGenHub(3)
+  local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
+    sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+  local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "emerald",
+    sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN" })
+  local sess = openFight(hub, a, b)
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id, typeTable = CHART3 })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { mon3() } })
+  hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { mon3() } })
+  local record = hub.battles[sess.id]
+  if not (record and record.sim) then return { opened = false } end
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = sess.id, mon = 0,
+    moves = { move3(), move3({ id = "NUKE3", num = 120, power = 250, priority = 5 }) } })
+  local fighter = record.sim.byId[a.id]
+  local ids = {}
+  for i, m in ipairs(fighter.mons[1].moves) do ids[i] = m.id .. ":" .. tostring(m.power) end
+  return { opened = true, moves = ids, battlerKept = fighter.b.moves == fighter.mons[1].moves }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "k9_pvp_dropped",
+  run = function()
+    return {
+      red1v1 = pvpForgery(1, "1v1"), redCoopPvp = pvpForgery(1, "coop_pvp"),
+      gold1v1 = pvpForgery(2, "1v1"), goldCoopPvp = pvpForgery(2, "coop_pvp"),
+      gen31v1 = pvpForgery3(),
+    }
+  end,
+}
+
+local function basePpKept()
+  local hub = makeGenHub(1)
+  local a = dialAs(hub, "ANN", ID_A, { generation = 1, sprite = Config.DEFAULT_SPRITE })
+  local id = "bp"
+  hub:openCoopBattle(id, { a.id }, { mode = "wild", hostId = a.id })
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  local stated = row12("thump", { pp = 35, maxPp = 42, ppUps = 1 })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a",
+                          mons = { sheet12(1, { moves = { stated } }) } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { sheet12(1) } })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false } end
+  local live = record.sim.byId[a.id].mons[1]
+  local function look()
+    local rows = {}
+    for i, m in ipairs(live.moves) do
+      rows[i] = { id = m.id, pp = orNil(m.pp), maxPp = orNil(m.maxPp), basePp = orNil(m.basePp),
+                  ppUps = orNil(m.ppUps) }
+    end
+    return { level = live.level, rows = rows }
+  end
+  local steps = { look() }
+  -- a level-up that taught nothing: the same row again
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+                          moves = { stated }, level = 51 })
+  steps[#steps + 1] = look()
+  -- a learn: the kept row stays the hub's, the new one has no base of its own
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+                          moves = { row12("thump"), row12("NEW", { pp = 10, maxPp = 10 }) } })
+  steps[#steps + 1] = look()
+  return { opened = true, steps = steps }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "basepp_kept",
+  run = function() return basePpKept() end,
+}
+
+local function reviewReadings()
+  local function oneRow(extra) return { row12("m", extra) } end
+  local cases = {}
+  local function add(kind, input, gen) cases[#cases + 1] = { kind, input, gen } end
+  -- a monster's own generation, no hub generation
+  for _, g in ipairs({ 6, -6, 0, 4, "day", true, {}, { 2 }, 1.5, "2", 2, NULL }) do
+    add("party", { battle = "b1", mons = { sheet12(2, { generation = g }) } })
+    add("party", { battle = "b1", generation = 1, mons = { sheet12(1, { generation = g }) } })
+  end
+  -- the values Lua reads as no number, on every older numeric field
+  local odd = { true, false, NULL, "", " ", { 5 }, {}, "0x1p4", " 7 ", "0b11", "+9", "9.", 7.9, "1e1", "nan" }
+  for _, v in ipairs(odd) do
+    for _, gen in ipairs({ 1, 2 }) do
+      add("move", row12("m", { maxPp = v }), gen)
+    end
+    add("move", row12("m", { pp = v }), 1)
+    add("move", row12("m", { power = v }), 2)
+    add("move", row12("m", { accuracy = v }), 1)
+    add("move", row12("m", { type = v }), 2)
+    add("move", row12("m", { effect = v }), 1)
+    add("move", row12("m", { chance = v }), 2)
+    add("mon", sheet12(1, { level = v }))
+    add("mon", sheet12(2, { hp = v }))
+    add("mon", sheet12(1, { maxHp = v }))
+    add("mon", sheet12(2, { stats = { atk = v, def = 90, spe = 90, spa = 90, spd = 90 } }))
+    add("mon", sheet12(1, { slot = v }))
+    add("mon", sheet12(1, { baseSpd = v }))
+    add("mon", sheet12(2, { catchRate = v }))
+    add("moveset", { battle = "b1", mon = v, moves = oneRow() }, 1)
+    add("choice", { battle = "b1", action = "fight", move = v }, 2)
+    add("choice", { battle = "b1", action = "switch", slot = v }, 1)
+    add("event", { battle = "b1", seq = v, t = "msg", text = "HI" }, 1)
+    add("event", { battle = "b1", seq = 1, t = "damage", slot = v, amount = 3 }, 2)
+    add("event", { battle = "b1", seq = 1, t = "damage", slot = 0, amount = v }, 1)
+    add("event", { battle = "b1", seq = 1, t = "damage", slot = 0, hp = v, maxHp = 50 }, 2)
+    add("event", { battle = "b1", seq = 1, t = "exp", slot = 0, level = v }, 1)
+    add("ruleset", { chart = CHART, seed = v }, 1)
+    add("party", { battle = "b1", mons = { sheet12(1) }, bag = { { id = "POTION", count = v } } }, 1)
+    add("party", { battle = "b1", mons = { sheet12(2) }, badges = v }, 2)
+  end
+  local out = {}
+  for i, case in ipairs(cases) do
+    local kind, input, gen = case[1], decoded(case[2]), case[3]
+    local got
+    if kind == "mon" then got = Wire.battleMon(input)
+    elseif kind == "party" then got = Wire.battleParty(input, gen)
+    elseif kind == "move" then got = Wire.battleMove(input, gen)
+    elseif kind == "ruleset" then got = Wire.battleRuleset(input, gen)
+    elseif kind == "event" then got = Wire.battleEvent(input, gen)
+    elseif kind == "moveset" then got = Wire.battleMoveset(input, gen)
+    elseif kind == "choice" then got = Wire.battleChoice(input, gen)
+    end
+    out[i] = { kind = kind, got = orNil(got) }
+  end
+  return out
+end
+
+scenarios[#scenarios + 1] = {
+  name = "review_twin_readings",
+  run = function() return reviewReadings() end,
 }
 
 -- ------------------------------------------------------------------

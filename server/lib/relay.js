@@ -264,6 +264,21 @@ const battleSeconds = (ms) => Math.floor(ms / 1000);
 // hub's NPC seats. 1v1 / coop_pvp are link rules and pay none. Twin of Hub.lua
 // PAY_DAY_MODES.
 const PAY_DAY_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
+// The fights a mid-fight learn or level-up (`mmo.battle_moveset`) is heard in:
+// the fights against the computer, the referees' EXP_MODES again. No cart
+// gains experience in a link battle -- pokered GainExperience (engine/battle/
+// experience.asm) returns at once on LINK_STATE_BATTLING, pokecrystal /
+// pokegold GiveExperiencePoints (engine/battle/core.asm) on a non-zero
+// wLinkMode, pokeemerald / pokefirered Cmd_getexp (battle_script_commands.c)
+// skips to its last state under BATTLE_TYPE_LINK -- and a battle learns a move
+// only from a level-up's learnset or the evolution one brings, so in a 1v1 /
+// coop_pvp fight no monster's level, stats or moves ever change. An honest
+// client sends nothing there (the referees emit no `exp` in a link fight, and
+// the client's level-up path is the only sender); a message that arrives
+// anyway is a forgery -- 999 stats re-sent every turn, or a one-slot "learn"
+// of a move it never had -- against another player, and is dropped whole.
+// Twin of Hub.lua LEARN_MODES.
+const LEARN_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
 
 /*
  * Whether a referee's verdict carries its Pay Day coins onto the broadcast
@@ -1699,6 +1714,13 @@ function nextMoves12(old, incoming) {
         highCrit: prev.highCrit,
         ppUps: prev.ppUps != null ? prev.ppUps : nm.ppUps,
         priority: prev.priority != null ? prev.priority : nm.priority,
+        // The referee's own note, never the wire's: the base PP its maximum is
+        // a GetMaxPP over (Red's copyMove, lib/battle Effects.basePpOf), or the
+        // base a Gold MIMIC / TRANSFORM / SKETCH copy came from (lib/battle2
+        // Effects.basePp). Dropped, a level-up's re-send left a Red row whose
+        // next 63-PP wrap (stepPp's borrow) kept the old maximum instead of
+        // re-reading GetMaxPP over the moved PP Up bits.
+        basePp: prev.basePp,
       });
     } else {
       next.push({
@@ -3330,16 +3352,31 @@ class Relay {
    *
    * always forwarded whatever became of the moves -- a transformed mon still
    * grew, and a learn refused as a rewrite does not undo the level it came
-   * with. Whether the claim is plausible and
-   * what it rebuilds (the cart's in-battle CalcStats, badge boosts, the HP
-   * step) is the referee's to decide. Guarded on the method existing: the Gen
-   * 1 / Gen 2 referees implement it, lib/battle3 never does, and a hub whose
-   * sim predates it simply applies the moves as before.
+   * with. Guarded on the method existing: the Gen 1 / Gen 2 referees implement
+   * it, lib/battle3 never does, and a hub whose sim predates it simply applies
+   * the moves as before.
+   *
+   * Who judges what, layer by layer:
+   *
+   *   - cleanBattleMoveset (the sanitiser) checks shape and bounds alone: the
+   *     dialect's move rows, a level within 1..LEVEL_MAX, a `stats` block of
+   *     the dialect's keys within the sheet's stat bounds, a max HP within
+   *     1..HP_MAX. It judges no claim;
+   *   - this hub decides whether the message is heard at all -- only in the
+   *     fights against the computer (LEARN_MODES: no cart levels or learns in
+   *     a link battle, so in a 1v1 / coop_pvp fight it is dropped whole, on
+   *     every generation) and only for the sender's own seat -- and what a
+   *     move list may change (learnTo: one slot appended or replaced, every
+   *     unchanged row keeping the hub's PP and combat fields);
+   *   - the referee's levelUp decides what a level claim rebuilds (the cart's
+   *     in-battle CalcStats, the stages, badge boosts, the HP step) and which
+   *     claims it refuses -- lib/battle / lib/battle2 Turn `levelUp` say which.
    *
    * Returns whether anything reached the referee (a move list or a level-up).
    */
   applyBattleMoveset(record, client, payload) {
     if (!record || !record.sim || !payload) return false;
+    if (!LEARN_MODES.has(record.mode)) return false;
     const byId = record.sim.byId;
     const fighter = byId && (typeof byId.get === 'function'
       ? byId.get(client.id) : byId[client.id]);
@@ -3444,7 +3481,13 @@ class Relay {
   }
 
   // Gen 3's display names for one seat's bag, keyed like bagMap, so the
-  // referee can say "Ann used POTION!". Nothing on the older generations.
+  // referee can say "Ann used POTION!" rather than "Ann used an item!"
+  // (lib/battle3 Turn's fallback): a Gen 3 bag id is a pret number, which
+  // names nothing. Nothing on the older generations: a Red / Gold bag id is
+  // the item's own name in the cart's words, and their referees spell the line
+  // from it themselves (lib/battle / lib/battle2 Turn `itemLabel` --
+  // underscores as spaces, POKé, GUARD SPEC.'s stop), "TWINS AMY & MAY used
+  // X ATTACK on FOE!" on Gold, so there is no name for a hub to keep.
   // Twin of Hub:noteBagNames.
   noteBagNames(record, seat, entries) {
     if (this.generation !== 3) return;

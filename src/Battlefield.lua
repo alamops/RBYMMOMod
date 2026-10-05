@@ -2154,26 +2154,27 @@ end
 -- same number, and the output here has to be byte-identical to the walk.
 -- Width is non-decreasing in the cut, which is what makes the search legal.
 --
--- The cut is searched over glyphs (ClassicBattle.glyphs), not bytes: a
--- referee line carries é / … / ♂ / ♀ since wave 6, and a prefix ending inside
--- one is invalid UTF-8 -- which a LÖVE font will not measure or print.
+-- The cut is searched over glyphs (ClassicBattle.glyphCount / glyphPrefix),
+-- not bytes: a referee line carries é / … / ♂ / ♀ since wave 6, and a prefix
+-- ending inside one is invalid UTF-8 -- which a LÖVE font will not measure or
+-- print.  Cut in place rather than off a table of glyphs: a line that does
+-- not fit is cut again every frame it is drawn.
 local function fitLine(font, text, maxW)
   text = tostring(text or "")
   if widthWith(font, text) <= maxW then return text, false end
-  local glyphs = ClassicBattle.glyphs(text)
-  local function prefix(count) return table.concat(glyphs, "", 1, count) end
+  local prefix = ClassicBattle.glyphPrefix
   -- Floor of 1, as the walk had: something ellipsised beats an empty row.
-  local lo, hi, cut = 1, #glyphs, 1
+  local lo, hi, cut = 1, ClassicBattle.glyphCount(text), 1
   while lo <= hi do
     local mid = math.floor((lo + hi) / 2)
-    if widthWith(font, prefix(mid) .. "...") <= maxW then
+    if widthWith(font, prefix(text, mid) .. "...") <= maxW then
       cut = mid
       lo = mid + 1
     else
       hi = mid - 1
     end
   end
-  return prefix(cut) .. "...", true
+  return prefix(text, cut) .. "...", true
 end
 -- For the suites.
 M.fitLine = fitLine

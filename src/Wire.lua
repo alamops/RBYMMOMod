@@ -650,8 +650,9 @@ end
 --
 -- A JSON number only, the way server/lib/sanitize.js cleanGeneration reads
 -- the same bytes.  Every client sends a number, and the looser readings are
--- where two languages part: JavaScript's Number(true) is 1, Number([2]) is 2
--- and Number("0b11") is 3, where Lua's tonumber says nil to all three -- one
+-- where two languages part: JavaScript's Number(true) is 1 and Number([2])
+-- is 2, where Lua's tonumber says nil to both, and a string is a number to
+-- either only by its own rules ("0b11" is 3 to LuaJIT's tonumber) -- one
 -- hello, admitted by one hub and refused by its twin.
 M.GENERATION_MAX = 3
 
@@ -2810,10 +2811,17 @@ function M.battleParty(raw, generation)
   local mons = {}
   for _, entry in ipairs(raw.mons) do
     if #mons >= Config.BATTLE_MON_MAX then return nil end
+    -- A sheet's own `generation`, when it states one, is a generation or the
+    -- party is refused -- with or without a hub generation to hold it to.
+    -- Without one this used to let an unreadable tag (6, -6, "day") fall
+    -- through to battleMon's sniff of the stat keys, where sanitize.js
+    -- refused the party: one upload, two answers (the review's differential
+    -- fuzzer).  Every hub passes its generation, so no caller read the
+    -- fallback; the stricter reading is the twins' one now.
     local hadExplicit = type(entry) == "table" and entry.generation ~= nil
-    if hubGen and hadExplicit then
+    if hadExplicit then
       local monGen = M.int(entry.generation, 1, M.GENERATION_MAX)
-      if not monGen or monGen ~= hubGen then return nil end
+      if not monGen or (hubGen and monGen ~= hubGen) then return nil end
     end
     local sheet = entry
     if partyGen and type(entry) == "table" and entry.generation == nil then
@@ -3434,9 +3442,12 @@ end
 --           GainExperience), so the referee needs it as much as the stats
 --
 -- A payload whose moves are the hub's own with any of these is a level-up
--- that taught nothing, and is as valid as a learn.  Whether the claim is
--- plausible (a level that rises) is the referee's to judge: the hub forwards
--- it (M:applyBattleMoveset).
+-- that taught nothing, and is as valid as a learn.  This reader checks shape
+-- and bounds alone and judges no claim.  The hub decides whether the message
+-- is heard at all (only in a fight against the computer -- no cart levels or
+-- learns in a link battle, Hub LEARN_MODES) and what a move list may change
+-- (Hub learnTo); the referee's levelUp decides what a level claim rebuilds
+-- and which claims it refuses (Hub M:applyBattleMoveset has the layers).
 function M.battleMoveset(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)

@@ -624,6 +624,34 @@ local function moveLabel(move, fallback)
   return str(move.name) or str(move.id) or fallback
 end
 
+-- What an item is called in a sentence.  A bag sheet states ids alone, and
+-- every item a fight can use is named the way its id is spelled (pokegold
+-- data/items/names.asm against constants/item_constants.asm): the underscores
+-- as spaces, the cart's "POKé" for a POKE_ id (POKé BALL, POKé DOLL, POKé
+-- FLUTE -- the `#` glyph pair), and GUARD SPEC.'s full stop -- which
+-- ItemUsedText's own "." follows on the cart, "<PLAYER> used the GUARD
+-- SPEC..", and so here.
+local function itemLabel(id)
+  local label = ((type(id) == "string" and id ~= "") and id or "ITEM"):gsub("_", " ")
+  label = label:gsub("^POKE ", "POKé ")
+  if label == "GUARD SPEC" then label = "GUARD SPEC." end
+  return label
+end
+
+-- A ball that does not catch, by the wobbles it made (`shakes`, the SHAKE_ANIM
+-- count): PokeBallEffect reads wThrownBallWobbleCount, the times
+-- GetPokeBallWobble ran (engine/battle_anims/pokeball_wobble.asm) -- once
+-- more than the wobbles -- and prints BallBrokeFreeText at 1,
+-- BallAppearedCaughtText at 2, BallAlmostHadItText at 3 and BallSoCloseText
+-- at 4 (pokegold engine/items/item_effects.asm :414-429, data/text/
+-- common_3.asm).
+local BALL_MISS_TEXT = {
+  [0] = "Oh no! The POKéMON broke free!",
+  [1] = "Aww! It appeared to be caught!",
+  [2] = "Aargh! Almost had it!",
+  [3] = "Shoot! It was so close too!",
+}
+
 -- A defender with no stated types is type 0, which the chart lookup reads as
 -- "whatever row 1 says" and, absent a chart, as neutral.  That is the right
 -- default for a sim that must never refuse a party over a missing optional.
@@ -1241,6 +1269,10 @@ function Battle:_emitMoveList(fighter, list, partyIndex)
       type = max(0, int(m.type, 0)),
       effect = max(0, int(m.effect, 0)),
       chance = max(0, int(m.chance, 0)),
+      -- K8's PP Ups, as the row holds them (absent stays absent; a MIMIC /
+      -- TRANSFORM copy holds none): the bits a client writes back beside
+      -- the PP, so the event never strips what the sheet said.
+      ppUps = optInt(m.ppUps, 0, 3),
     }
   end
   local fields = { slot = fighter.slot, side = fighter.side, moves = moves }
@@ -1250,6 +1282,22 @@ end
 
 function Battle:_say(text)
   return self:_emit("msg", { text = text })
+end
+
+-- A status animation CheckTurn plays (pokecrystal / pokegold
+-- engine/battle/effect_commands.asm, CheckPlayerTurn and CheckEnemyTurn):
+-- ANIM_SLP for the sleeping monster, ANIM_CONFUSED for the confused one, as
+-- an `anim` event on the seat it plays over.  It goes by the Red referee's
+-- ids (BattleSim Turn `_statusAnim`) -- SLP_PLAYER_ANIM / SLP_ANIM,
+-- CONF_PLAYER_ANIM / CONF_ANIM -- because the two carts place them alike: the
+-- player's sleep clip ahead of FastAsleepText, the enemy's behind it, and
+-- either confusion clip behind IsConfusedText; the screens read the one
+-- vocabulary (MediatedBattle.viewerAnim swaps the variant for a monster that
+-- is not the viewer's own, Vfx.forStatusAnim dresses it).  "The player" is
+-- the owner's rule (`isPlayerSeat`): in a link fight each seat carries its
+-- own console's variant.
+function Battle:_statusAnim(fighter, id)
+  return self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = id })
 end
 
 -- Every seat's party roster, published when -- and only when -- it moved.
@@ -3001,11 +3049,12 @@ function Battle:_obey(fighter, mon, move)
   local span = min(255, cap + level)
   if self:_obeyDraw(span, true) < cap then return nil end
 
-  -- IgnoreSleepOnly: Snore or Sleep Talk, chosen while asleep.  The cart's
-  -- line has its one-glyph ellipsis; the wire's alphabet (Wire.text) has no
-  -- such glyph, so it is spelled with three dots.
+  -- IgnoreSleepOnly: Snore or Sleep Talk, chosen while asleep --
+  -- IgnoredSleepingText, "<MON> ignored orders…sleeping!" (pokegold
+  -- data/text/battle.asm), with the cart's one-glyph ellipsis: a battle line
+  -- carries it (Wire.battleText's glyphs).
   if mon.status == "sleep" and Items.SLEEP_BYPASS[Effects.moveKey(move)] then
-    self:_say(mon.species .. " ignored orders...sleeping!")
+    self:_say(mon.species .. " ignored orders…sleeping!")
     return "stop"
   end
 
@@ -3550,7 +3599,31 @@ function Battle:_resolveOneItem(fighter)
   local itemEv = { slot = fighter.slot, side = fighter.side, text = choice.item }
   if vitaminApplied then itemEv.amount = 1 end
   self:_emit("item", itemEv)
-  self:_say(fighter.name .. " used an item")
+  -- The line the use opens with.  The computer's every item is
+  -- PrintText_UsedItemOn's _EnemyUsedOnText, "<ENEMY> used <ITEM> on <MON>!"
+  -- (pokegold engine/battle/ai/items.asm, data/text/common_1.asm): <ENEMY>
+  -- is the trainer's class and name, which the seat's `name` carries
+  -- (Wire.npcName), and <MON> the monster it has out.  The player's is
+  -- ItemUsedText, "<PLAYER> used the <ITEM>." (data/text/common_3.asm), which
+  -- PokeBallEffect prints ahead of its throw and UseItemText behind X
+  -- ACCURACY, GUARD SPEC., DIRE HIT, the X items and a wild fight's POKé DOLL
+  -- (engine/items/item_effects.asm).  A medicine's own line on the cart is
+  -- the party menu's (RecoveredSomeHPText, CuredOfPoisonText, ...), which this
+  -- referee does not phrase (docs/plans/gen12-referee-known-gaps.md, "Bag
+  -- text"): the use line names the item in its place.  Three uses open on a
+  -- line of their own instead: the POKé FLUTE (PokeFluteEffect), a ball in a
+  -- trainer fight (UseBallInTrainerBattle) and a POKé DOLL outside a wild
+  -- fight (PokeDollEffect `.not_wild`, the pack's `.Oak`).
+  local label = itemLabel(choice.item)
+  local computerSeat = isComputerSeat(self.mode, fighter)
+  local wild = Effects.isWildMode(self.mode)
+  if computerSeat then
+    local onMon = activeMon(fighter)
+    self:_say(fighter.name .. " used " .. label .. " on "
+      .. (onMon and onMon.species or "POKéMON") .. "!")
+  elseif not (effect and (effect.pokeFlute or ((effect.ball or effect.pokeDoll) and not wild))) then
+    self:_say(fighter.name .. " used the " .. label .. ".")
+  end
   -- Spend after the announce, win or fail (Gen1 bag stack). noConsume
   -- (Poké Flute) and seats with no bag sheet are left alone.
   if not (effect and effect.noConsume) then
@@ -3559,8 +3632,11 @@ function Battle:_resolveOneItem(fighter)
   if not effect then
     self:_say("But it failed!")
   elseif effect.ball then
-    if not Effects.isWildMode(self.mode) then
-      self:_say("But it failed!")
+    if not wild then
+      -- UseBallInTrainerBattle: the trainer knocks the ball away, and it is
+      -- gone (UseDisposableItem) -- BallBlockedText, BallDontBeAThiefText.
+      self:_say("The trainer blocked the BALL!")
+      self:_say("Don't be a thief!")
     else
       -- Wild modes seat exactly one monster on side b, so "the first living
       -- foe" and "the only foe" are the same seat -- no aim to spread.
@@ -3572,11 +3648,10 @@ function Battle:_resolveOneItem(fighter)
         local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
         -- Gen1 TossBallAnimation chain before the catch text (engine ballChain).
         self:_emitBallChain(fighter, choice.item, caught, shakes)
-        if shakes and shakes > 0 and not caught then
-          self:_say("The ball shook")
-        end
         if caught then
-          self:_say("Gotcha")
+          -- Text_BallCaught, "Gotcha! <MON> was caught!" -- the only catch
+          -- line a screen prints (MediatedBattle REASONS has none).
+          self:_say("Gotcha! " .. target.species .. " was caught!")
           local finish = self:_finish("win", self:_sidePlayers(fighter.side),
             self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
           local sheet = Effects.caughtSheet(target)
@@ -3584,17 +3659,23 @@ function Battle:_resolveOneItem(fighter)
           if finish then finish.catcher = fighter.playerId end
           if fighter.side == M.BADGE_SIDE then self:_payDayOutcome(finish) end
         else
-          self:_say("It broke free")
+          -- One line by the wobbles (BALL_MISS_TEXT), and no other.
+          self:_say(BALL_MISS_TEXT[min(3, max(0, int(shakes, 0)))])
         end
       end
     end
   elseif effect.pokeDoll then
-    if Effects.isWildMode(self.mode) then
-      self:_say("The wild pokemon ran away")
-      self:_finish("win", self:_sidePlayers(fighter.side),
-        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run")
+    if wild then
+      -- PokeDollEffect: wForcedSwitch, wBattleResult DRAW, and UseItemText
+      -- -- the use line above is all it says.  A DRAW is no win: no fanfare,
+      -- and CheckPayDay (ExitBattle, WIN only) pays no PAY DAY coins.
+      self:_finish("draw", nil, nil, "run")
     else
-      self:_say("But it failed!")
+      -- `.not_wild` leaves wItemEffectSucceeded 0, and the pack answers with
+      -- ItemOakWarningText (pack.asm `.BattleOnly` -> `.Oak`).  A screen
+      -- refuses the doll at the bag; a crafted choice is spent here, with
+      -- the cart's line.  The computer never files one (`_autoItemChoice`).
+      self:_say("OAK: " .. fighter.name .. "! This isn't the time to use that!")
     end
   elseif effect.vitamin then
     if not vitaminApplied then
@@ -3637,10 +3718,15 @@ function Battle:_resolveOneItem(fighter)
         end
       end
     end
+    -- PokeFluteEffect's battle half: Text_PlayedPokeFlute, "<PLAYER> played
+    -- the POKé FLUTE.", then _FluteWakeUpText when it cured anyone, else
+    -- _PlayedFluteText alone (pokegold engine/items/item_effects.asm,
+    -- data/text/common_3.asm) -- the `#` glyph pair is "POKé".
     if woke then
-      self:_say("All sleeping POKeMON woke up")
-    else
-      self:_say("Now, that's a catchy tune")
+      if not computerSeat then self:_say(fighter.name .. " played the POKé FLUTE.") end
+      self:_say("All sleeping POKéMON woke up.")
+    elseif not computerSeat then
+      self:_say("Played the POKé FLUTE. Now, that's a catchy tune!")
     end
   else
     local partyIdx = choice.slot or fighter.active
@@ -3655,34 +3741,39 @@ function Battle:_resolveOneItem(fighter)
       self:_say("But it failed!")
     else
       local applied = false
+      -- X ACCURACY, DIRE HIT and GUARD SPEC. set their bit and say nothing
+      -- past the use's line: XAccuracyEffect / DireHitEffect /
+      -- GuardSpecEffect end on UseItemText, and the computer's
+      -- EnemyUsedXAccuracy / EnemyUsedDireHit / EnemyUsedGuardSpec on
+      -- PrintText_UsedItemOn.
       if effect.xAccuracy then
         mon.xAccuracy = true
-        self:_say(mon.species .. "'s hits will never miss")
         applied = true
       end
       if effect.focusEnergy then
         mon.focusEnergy = true
-        self:_say(mon.species .. " is getting pumped")
         applied = true
       end
       if effect.mist then
         mon.mist = true
-        self:_say(mon.species .. " is protected against stat changes")
         applied = true
       end
       if effect.stage then
         local stat = effect.stage.stat
         local before = Effects.clampStage(mon.stages[stat])
+        -- The player's XItemEffect follows RaiseStat with StatUpMessage /
+        -- StatUpFailText; the computer's EnemyUsedXItem runs RaiseStat
+        -- behind its use line and prints nothing more, a raise or a +6.
         if before >= Effects.STAGE_MAX then
           -- XItemEffect's RaiseStat at +6: StatUpFailText (wave 5).
-          self:_say(Effects.wontRiseLine(mon, stat))
+          if not computerSeat then self:_say(Effects.wontRiseLine(mon, stat)) end
         else
           local after = Effects.clampStage(before + int(effect.stage.delta, 1))
           mon.stages[stat] = after
           Effects.dropSnap(mon)
           -- XItemEffect's StatUpMessage (wave 5): "went up!".
           local text = Effects.statUpLine(mon, stat, int(effect.stage.delta, 1))
-          self:_say(text)
+          if not computerSeat then self:_say(text) end
           self:_emit("stat", {
             slot = fighter.slot, side = fighter.side,
             amount = after, stage = after, text = text,
@@ -4160,7 +4251,13 @@ function Battle:_statusGate(fighter, mon)
   elseif gate.fullyParalyzed then
     self:_say(mon.species .. "'s fully paralyzed!")
   elseif mon.status == "sleep" then
+    -- ANIM_SLP (`_statusAnim`): CheckPlayerTurn plays it ahead of
+    -- FastAsleepText (pokegold effect_commands.asm :171, :189),
+    -- CheckEnemyTurn behind it (:398, :402).
+    local player = isPlayerSeat(self.mode, fighter)
+    if player then self:_statusAnim(fighter, "SLP_PLAYER_ANIM") end
     self:_say(mon.species .. " is fast asleep!")
+    if not player then self:_statusAnim(fighter, "SLP_ANIM") end
   end
   return gate.canMove
 end
@@ -4232,6 +4329,11 @@ function Battle:_runGates(fighter, mon, selected)
     local roll = nil
     if mon.confusion > 1 then
       self:_say(mon.species .. " is confused!")
+      -- ANIM_CONFUSED behind IsConfusedText, ahead of the byte, on either
+      -- side's turn (`.confused`, pokegold effect_commands.asm :267-275,
+      -- :495-504).
+      self:_statusAnim(fighter, isPlayerSeat(self.mode, fighter)
+        and "CONF_PLAYER_ANIM" or "CONF_ANIM")
       roll = self.rng:byte()
     end
     local gate = Status.beforeMove({
@@ -5570,7 +5672,9 @@ function Battle:_damagingMove(fighter, mon, target, defender, move, effectId, ct
       if effectiveness > 1 then
         self:_say("It's super-effective!")
       elseif effectiveness < 1 then
-        self:_say("It's not very effective...")
+        -- NotVeryEffectiveText, "It's not very effective…" -- the cart's
+        -- ellipsis glyph (Wire.battleText carries it).
+        self:_say("It's not very effective…")
       end
     end
     local hpBefore = defender.hp

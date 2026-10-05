@@ -4075,6 +4075,8 @@ do
                   effect = "EFFECT_BATON_PASS" },
     FIX_BIDE = { name = "BIDE", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
                  effect = "BIDE_EFFECT" },
+    FIX_MIRROR = { name = "MIRROR MOVE", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+                   effect = "MIRROR_MOVE_EFFECT" },
   }, { __index = data.moves })
   local data5 = setmetatable({ moves = MOVES5 }, { __index = data })
   local seq = 9000
@@ -4515,6 +4517,117 @@ do
     eq(sc.result, nil, "failed run (Gold co-op): the fight is still on")
     eq(sc.escapeSaid, nil, "failed run (Gold co-op): no escape was read")
     eq(sc.phase, "choose", "failed run (Gold co-op): ...and the menu is back")
+  end
+
+  -- ------- review fixes (FX-C of docs/plans/gen12-referee-gaps-fix.md)
+  --
+  -- The Bide start in a mirror match (a foe or a partner of our species), a
+  -- MIRROR MOVE that copied a BIDE, Gold's drag-out line, no moveset message
+  -- in a fight between players, and Red's overlay maximum PP.
+  do
+    local function bider(moves)
+      local lead = mon(60, 40)
+      lead.moves = moves or { { id = "FIX_TACKLE", pp = 20 }, { id = "FIX_BIDE", pp = 10 } }
+      return lead
+    end
+    -- Red: we file TACKLE, the foe -- our species -- uses BIDE.
+    local sc = seat5(1, { bider() })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    sc:commit({ slot = 1, move = 1, target = 3 })
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "FIX_BIDE" })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " used BIDE!" })
+    ev(sc, { t = "turn", amount = 2 })
+    check(not sc.bideLocked, "Bide mirror (Red co-op): the foe's used line locks nothing (we filed no BIDE)")
+    -- We file BIDE, our partner -- our species -- says it first: still not ours.
+    sc:commit({ slot = 1, move = 2, target = 3 })
+    ev(sc, { t = "anim", slot = 1, side = "a", text = "FIX_BIDE" })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " used BIDE!" })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " flinched!" })
+    ev(sc, { t = "turn", amount = 3 })
+    check(not sc.bideLocked, "Bide mirror (Red co-op): a partner's line behind its own animation is the partner's")
+    sc:commit({ slot = 1, move = 2, target = 3 })
+    ev(sc, { t = "anim", slot = 0, side = "a", text = "FIX_BIDE" })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " used BIDE!" })
+    ev(sc, { t = "turn", amount = 4 })
+    check(sc.bideLocked == true, "Bide mirror (Red co-op): ...and our own animation and line start ours")
+    -- A MIRROR MOVE that copied a BIDE (reported on our seat) is ours too.
+    local mc = seat5(1, { bider({ { id = "FIX_MIRROR", pp = 20 } }) })
+    ev(mc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    mc:commit({ slot = 1, move = 1, target = 3 })
+    check(mc.callFiled == 1 and not mc.bideFiled, "Bide by MIRROR MOVE (Red co-op): filed as a call")
+    ev(mc, { t = "anim", slot = 0, side = "a", text = "FIX_MIRROR" })
+    ev(mc, { t = "msg", text = SPECIES_NAME .. " used MIRROR MOVE!" })
+    ev(mc, { t = "anim", slot = 0, side = "a", text = "FIX_BIDE" })
+    ev(mc, { t = "msg", text = SPECIES_NAME .. " used BIDE!" })
+    ev(mc, { t = "turn", amount = 2 })
+    check(mc.bideLocked == true, "Bide by MIRROR MOVE (Red co-op): the copied BIDE locks the next FIGHT")
+    -- Gold: our BIDE filed, the foe's line behind the foe's animation.
+    local gs = seat5(2, { bider({ { id = "FIX_TACKLE", pp = 20, maxPp = 35 },
+                                  { id = "FIX_BIDE", pp = 9, maxPp = 9 } }) })
+    ev(gs, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    gs:commit({ slot = 1, move = 2, target = 3 })
+    ev(gs, { t = "anim", slot = 3, side = "b", text = "FIX_BIDE" })
+    ev(gs, { t = "msg", text = SPECIES_NAME .. " used BIDE!" })
+    ev(gs, { t = "turn", amount = 2 })
+    check(not gs.bideLocked, "Bide seat (Gold co-op): the foe's line behind its own animation starts nothing")
+  end
+
+  -- Gold's drag-out: DraggedOutText alone -- no "Go!" for our monster, no
+  -- trainer's pages for theirs (pokecrystal BattleCommand_ForceSwitch).
+  do
+    local lead, bench = mon(60, 40), mon(60, 35)
+    local sc = seat5(2, { lead, bench })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    ev(sc, { t = "switch", slot = 0, side = "a", mon = 1, text = SPECIES_NAME })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 1, text = SPECIES_NAME, hp = 60 })
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 0, moves = { { id = "FIX_TACKLE", pp = 20 } } })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " was dragged out!" })
+    local said = texts(sc)
+    eq(count(said, "Go! " .. SPECIES_NAME .. "!"), 1, "drag-out (Gold co-op): only the opening \"Go!\" -- none for the dragged-out one")
+    eq(count(said, SPECIES_NAME .. " was dragged out!"), 1, "drag-out (Gold co-op): DraggedOutText is said")
+    eq(#rowsOf(sc, "send"), 2, "drag-out (Gold co-op): ...and both arrivals still play")
+    -- The foe's: the trainer's two pages go.
+    ev(sc, { t = "switch", slot = 2, side = "b", mon = 1, text = "DRAGGEE" })
+    ev(sc, { t = "send", slot = 2, side = "b", mon = 1, text = "DRAGGEE", hp = 50 })
+    ev(sc, { t = "msg", text = "DRAGGEE was dragged out!" })
+    local foeLine = 0
+    for _, t in ipairs(texts(sc)) do if t:find("DRAGGEE!", 1, true) then foeLine = foeLine + 1 end end
+    eq(foeLine, 0, "drag-out (Gold co-op): no \"sent out DRAGGEE!\" page for the foe's")
+    -- An ordinary send-out keeps its line.
+    ev(sc, { t = "send", slot = 3, side = "b", mon = 1, text = "PLAINSEND", hp = 50 })
+    ev(sc, { t = "msg", text = "PLAINSEND used FIX TACKLE!" })
+    local plain = 0
+    for _, t in ipairs(texts(sc)) do if t:find("PLAINSEND!", 1, true) then plain = plain + 1 end end
+    eq(plain, 1, "drag-out (Gold co-op): a send-out with no drag-out behind it keeps its page")
+  end
+
+  -- No `mmo.battle_moveset` in a fight between players: no cart learns or
+  -- levels in a link battle.
+  do
+    local sc, slots = seat5(1, nil, "coop_pvp", pvpSlots())
+    local lead = slots[1].party[1]
+    local before = 0
+    for _, m in ipairs(sc.sent) do if m.type == Wire.BATTLE_MOVESET then before = before + 1 end end
+    lead.moves[#lead.moves + 1] = { id = "FIX_CUT", pp = 30 }
+    eq(sc:syncFightMoves(lead, true), false, "link moveset (coop_pvp): a level-up sends nothing")
+    eq(sc:syncFightMoves(lead), false, "link moveset (coop_pvp): ...nor a learn")
+    local after = 0
+    for _, m in ipairs(sc.sent) do if m.type == Wire.BATTLE_MOVESET then after = after + 1 end end
+    eq(after - before, 0, "link moveset (coop_pvp): no mmo.battle_moveset went out")
+    local npc, nslots = seat5(1)
+    eq(npc:syncFightMoves(nslots[1].party[1], true), true,
+       "moveset (coop_npc): a level-up against the computer is still sent")
+  end
+
+  -- Red's overlay maximum: GetMaxPP over the battle struct -- a Transform
+  -- copy (5 PP, no PP Ups) reads its own move's base.
+  do
+    local sc = seat5(1)
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    ev(sc, { t = "moves", slot = 0, side = "a",
+             moves = { { id = "FIX_EMBERISH", pp = 5, maxPp = 5, ppUps = 0 } } })
+    local rows = sc:bandMoveRows()
+    eq(rows[1] and rows[1].right, "5/25", "Transform PP (Red co-op): a copy reads 5 over its own base")
   end
 end
 

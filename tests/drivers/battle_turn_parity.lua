@@ -2752,13 +2752,14 @@ local function fights(id, entries)
 end
 
 -- A move: 60 PP and accuracy 255 unless `o` says otherwise (`o.ppUps` is
--- contract K8's).
+-- contract K8's; `o.maxPp` the sheet's stated GetMaxPP).
 local function r1m(id, power, effect, o)
   o = o or {}
   local m = { id = id, pp = o.pp or 60, power = power, accuracy = o.accuracy or 255,
               type = o.type or 0, effect = effect, chance = o.chance or 0 }
   if o.highCrit then m.highCrit = true end
   if o.ppUps then m.ppUps = o.ppUps end
+  if o.maxPp then m.maxPp = o.maxPp end
   return m
 end
 
@@ -4118,8 +4119,8 @@ scenario("g1_heal", fights("g1hl", {
 -- The item lines (ItemUseText00 where the routine prints it, the party
 -- menu's message, AIPrintItemUse) and two mechanics with them:
 --   1 wild: a POTION ("recovered by 20!"), an ANTIDOTE ("was cured of
---     poison!"), an X ATTACK ("used X ATTACK!" + "ATTACK rose!"), the POKe
---     FLUTE over a sleeping Beta, then a POKe BALL;
+--     poison!"), an X ATTACK ("used X ATTACK!" + "ATTACK rose!"), the POKé
+--     FLUTE over a sleeping Beta, then a POKé BALL;
 --   2 wild: a FULL RESTORE on a badly poisoned, confused Alpha at half HP:
 --     `.healHP` -- HP and the status byte, the toxic bit lingering and the
 --     confusion untouched (no Red item cures it);
@@ -4148,6 +4149,57 @@ scenario("g1_conversion", fights("g1cv", {
   r1duo({ r1s("Alpha", { r1m("convert", 0, 24) }, { spd = 90 }) },
     { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 2, 3 } }) },
     { seed = 10061, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- RP1 (gen12-referee-gaps-fix polish): GetMaxPP through DecrementPP's wrap,
+-- ItemUsePPRestore's `.restorePP` against it, K8's PP Ups on every `moves`
+-- row, and the cart's POKé (charmap $54) in the item lines:
+--   1 a slot that arrives past its wrap -- 63 PP over a stated GetMaxPP of
+--     35 -- keeps the sheet's maximum (the spend reads 62 over 35), and an
+--     ETHER brings it DOWN to 35, "PP was restored."; a second is no effect;
+--   2 a wrap mid-fight (g1_pp_wrap's freeze-thaw, with a PP Up): 0 PP and one
+--     PP Up borrow to 63 and none, GetMaxPP re-reads 15 (it was 15 + 3), and
+--     the ETHER brings the slot to 15;
+--   3 MAX ETHER compares the whole byte: a full move with a PP Up is "PP was
+--     restored." (the cart's own bug), one with none is no effect; a MAX
+--     ELIXER on the same list is restored through the first;
+--   4 wild: "used POKé DOLL!"; 5 wild: the POKé FLUTE over nobody asleep;
+--   6 wild: a POKé BALL at a catch rate of 0, "You missed the POKéMON!";
+--   7 at a catch rate of 100 and full HP, one shake: "Darn! The POKéMON
+--     broke free!".
+scenario("g1_pp_max", fights("g1pm", {
+  r1duo({ r1s("Alpha", { r1m("thump", 10, 0, { pp = 63, maxPp = 35 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 10071,
+      turns = { { p1 = 0, p2 = 0 },
+                { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 0 },
+                { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("thump", 10, 0, { pp = 1, ppUps = 1, maxPp = 18 }), r1m("tap", 10, 0) },
+      { spd = 90 }) },
+    { r1s("Beta", { r1m("chill", 10, 5, { chance = 100 }), r1m("QUICK_ATTACK", 10, 4, { type = 1 }) },
+      { spd = 10 }) },
+    { seed = 9992, typeIds = FIRE_AXIS,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 1 },
+                { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 1 } } }),
+  r1duo({ r1s("Alpha", { r1m("thump", 10, 0, { pp = 20, ppUps = 1, maxPp = 20 }),
+                         r1m("tap", 10, 0, { pp = 15, maxPp = 15 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 10073,
+      turns = { { p1 = { action = "item", item = "MAX_ETHER", move = 0 }, p2 = 0 },
+                { p1 = { action = "item", item = "MAX_ETHER", move = 1 }, p2 = 0 },
+                { p1 = { action = "item", item = "MAX_ELIXER" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 10074, turns = { { p1 = { action = "item", item = "POKE_DOLL" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 10075, turns = { { p1 = { action = "item", item = "POKE_FLUTE" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, catchRate = 0 }) },
+    { mode = "wild", seed = 10076, turns = { { p1 = { action = "item", item = "POKE_BALL" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, catchRate = 100 }) },
+    { mode = "wild", seed = 10077, turns = { { p1 = { action = "item", item = "POKE_BALL" }, p2 = 0 } } }),
 }))
 
 -- ------------------------------------------------------------------

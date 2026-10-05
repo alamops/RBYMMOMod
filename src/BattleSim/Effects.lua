@@ -865,6 +865,61 @@ function M.hpDv(dvs)
 end
 
 -- ------------------------------------------------------------------
+-- A move's maximum PP, and the PP items that read it
+-- ------------------------------------------------------------------
+
+-- GetMaxPP (engine/items/item_effects.asm): the move's base PP plus, for each
+-- PP Up the PP byte's top two bits count *now*, AddBonusPP's fifth of the
+-- base capped at 7.  So a DecrementPP that wraps a slot at 0 (Turn `stepPp`:
+-- 63 PP and one PP Up fewer) moves the maximum with the bits, and the cart's
+-- ETHER reads that.  The client's sheet states the same number
+-- (MediatedBattle maxPpOf), which is what `basePpOf` reads the base back out
+-- of: the referee holds no move table.
+M.PP_UP_BONUS_MAX = 7
+M.PP_BASE_MAX = 63          -- PP_MASK: a base PP is the low six bits
+
+function M.getMaxPp(base, ups)
+  return base + ups * min(M.PP_UP_BONUS_MAX, floor(base / 5))
+end
+
+-- The base PP behind a stated maximum: the one `base` (0..PP_BASE_MAX) whose
+-- GetMaxPP over `ups` is `maxPp` -- strictly increasing in the base, so there
+-- is at most one -- or nil for a number no base gives (a sheet stating a
+-- maximum of its own), whose maximum then never moves.
+function M.basePpOf(maxPp, ups)
+  for base = min(maxPp, M.PP_BASE_MAX), 0, -1 do
+    local value = M.getMaxPp(base, ups)
+    if value == maxPp then return base end
+    if value < maxPp then return nil end
+  end
+  return nil
+end
+
+-- ItemUsePPRestore's `.restorePP` (item_effects.asm), on one move row, for an
+-- ETHER's 10 (`amount` a number) or a MAX ETHER (`amount` true; the ELIXERs
+-- run it on every slot).  `b` is GetMaxPP -- the row's `maxPp`, which the
+-- sheet states and a wrap re-reads.  ETHER: the PP's low six bits equal to
+-- `b` is no effect (`ret z`); otherwise +10, kept only below `b`.  MAX ETHER
+-- compares the WHOLE byte with `b` -- the cart's own bug ("doesn't mask out
+-- the upper two bits"), so a full move with PP Ups is restored to what it
+-- has.  Either writes the PP Ups beside `b`: a slot past its wrap -- 63 over
+-- a lower maximum -- is brought DOWN to it, and that is a restore.  True when
+-- the cart's flag says restored: `add b` left a byte other than 0.
+function M.restorePp(move, amount)
+  local pp, ups = max(0, int(move.pp, 0)), int(move.ppUps, 0) % 4
+  local b = max(0, int(move.maxPp, pp))
+  if amount == true then
+    if ups * 64 + pp == b then return false end
+  else
+    if pp == b then return false end
+    local new = pp + int(amount, 0)
+    if new < b then b = new end
+  end
+  move.pp = b
+  return (ups * 64 + b) % 256 ~= 0
+end
+
+-- ------------------------------------------------------------------
 -- Transform (engine/battle/move_effects/transform.asm), and undoing it
 -- ------------------------------------------------------------------
 
@@ -881,7 +936,7 @@ local function copyMoveRow(m)
     power = max(0, int(m.power, 0)), accuracy = max(0, int(m.accuracy, 255)),
     type = max(0, int(m.type, 0)), effect = max(0, int(m.effect, 0)),
     chance = max(0, int(m.chance, 0)), highCrit = m.highCrit == true,
-    ppUps = m.ppUps,
+    ppUps = m.ppUps, basePp = m.basePp,
   }
 end
 
@@ -933,8 +988,10 @@ function M.restoreMoves(mon)
       local back = copyMoveRow(row)
       back.pp = max(0, int(mon.moves[i].pp, back.pp))
       -- ...and its PP Ups: one byte, which a wrapping DecrementPP borrows
-      -- from in both copies alike (Turn `_decrementPp`).
+      -- from in both copies alike (Turn `_decrementPp`) -- and GetMaxPP over
+      -- MIMIC's base re-reads them (`M.getMaxPp`).
       if mon.moves[i].ppUps ~= nil then back.ppUps = mon.moves[i].ppUps end
+      if back.basePp then back.maxPp = M.getMaxPp(back.basePp, int(back.ppUps, 0)) end
       mon.moves[i] = back
     end
   end
@@ -1367,6 +1424,9 @@ function M.applyPrimary(ctx)
       pp = max(0, int(slotMove.pp, 0)),
       maxPp = slotMove.maxPp,
       ppUps = slotMove.ppUps,
+      -- The PP byte is still MIMIC's, and so is the GetMaxPP an ETHER reads
+      -- for the slot (the party's MIMIC, ItemUsePPRestore): its base rides on.
+      basePp = slotMove.basePp,
       power = max(0, int(source.power, 0)),
       accuracy = max(0, int(source.accuracy, 255)),
       type = max(0, int(source.type, 0)),

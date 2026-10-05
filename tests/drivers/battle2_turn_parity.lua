@@ -103,6 +103,18 @@
 --     `r2d_metronome_bytes`, `r2d_residual_order` (each seat's ResidualDamage
 --     after its own move) and `r2d_faint_moves` (the party moves after the
 --     faint).
+--   * the referee-gaps run's wave 5 (R2e): the `r2e_*` rows below (CONVERSION,
+--     HEAL BELL / BATON PASS and the toxic bit, SKETCH's base PP, ROAR /
+--     WHIRLWIND, the standing 0-HP successor, the computer's switch slot,
+--     PURSUIT's slot, the coop_wild RUN, METRONOME's numbered pool, the
+--     confusion and volatile lines).
+--   * the review polish (RP2): `rp2_item_lines` (ItemUsedText, the
+--     computer's _EnemyUsedOnText, the bits that say nothing more, a ball and
+--     a POKé DOLL in a trainer fight), `rp2_ball_lines` / `rp2_ball_broke_free`
+--     / `rp2_ball_so_close` (the wobble lines by count, Text_BallCaught),
+--     `rp2_doll_wild` (the use line and a DRAW), `rp2_flute`,
+--     `rp2_status_anims_npc` / `_wild` (CheckTurn's ANIM_SLP / ANIM_CONFUSED,
+--     each side's variant and place) and `rp2_pp_ups` (K8 on `moves`).
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -3486,6 +3498,134 @@ scenario("r2e_volatile_lines", function(events)
     { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("slam", 30) } }) }),
     { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)),
       both3(F(2), F(0)) })
+end)
+
+-- ------------------------------------------------------------------
+-- The review polish (RP2, docs/plans/gen12-referee-gaps-fix.md): the bag's
+-- lines and CheckTurn's status animations, each in the cart's words.
+-- ------------------------------------------------------------------
+
+-- Against the computer: the player's ItemUsedText ("<PLAYER> used the
+-- <ITEM>.") and the computer's _EnemyUsedOnText ("<ENEMY> used <ITEM> on
+-- <MON>!"); X ACCURACY / DIRE HIT / GUARD SPEC. say nothing more; the
+-- player's X item says how it went (a raise, then a +6), the computer's
+-- nothing (a raise, then a +6); a ball in a trainer fight is blocked, a POKé
+-- DOLL there is OAK's line; a medicine is named by the use line.
+scenario("rp2_item_lines", function(events)
+  local o = duo4("rp2i", "coop_npc", 931,
+    { mn({ species = "Alpha", maxHp = 999, hp = 500, spe = 90, stages = { spe = 5 },
+           moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 999, hp = 500, spe = 10, stages = { atk = 5 },
+           moves = { hm("wait", 0, 0, 85) } }) })
+  o.sides.b[1].name = "COOLTRAINER♀ EMMA"
+  o.sides.b[1].bag = { { id = "X_ATTACK", count = 2 }, { id = "DIRE_HIT", count = 1 },
+    { id = "GUARD_SPEC", count = 1 }, { id = "X_ACCURACY", count = 1 }, { id = "POTION", count = 1 } }
+  return seq(events, o,
+    { both3(ITEM("X_ACCURACY"), ITEM("X_ATTACK")), both3(ITEM("GUARD_SPEC"), ITEM("X_ATTACK")),
+      both3(ITEM("X_SPEED"), ITEM("DIRE_HIT")), both3(ITEM("X_SPEED"), ITEM("GUARD_SPEC")),
+      both3(ITEM("POKE_BALL"), ITEM("X_ACCURACY")), both3(ITEM("POKE_DOLL"), ITEM("POTION")),
+      both3(ITEM("DIRE_HIT"), F(0)), both3(ITEM("POTION"), F(0)) })
+end)
+
+-- A wild fight's balls: ItemUsedText ahead of every throw, one wobble line
+-- per miss by its count (BallBrokeFreeText .. BallSoCloseText) and no "The
+-- ball shook", then Text_BallCaught.
+scenario("rp2_ball_lines", function(events)
+  local wild = mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } })
+  wild.catchRate = 200
+  local o = duo4("rp2b", "wild", 932,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("slam", 90) } }) }, { wild },
+    { foe = "wild" })
+  local rounds = {}
+  for _, ball in ipairs({ "POKE_BALL", "POKE_BALL", "GREAT_BALL", "ULTRA_BALL" }) do
+    rounds[#rounds + 1] = both3(ITEM(ball), F(0), "wild")
+  end
+  for _ = 1, 3 do rounds[#rounds + 1] = both3(F(0), F(0), "wild") end
+  for _, ball in ipairs({ "POKE_BALL", "GREAT_BALL", "ULTRA_BALL", "ULTRA_BALL" }) do
+    rounds[#rounds + 1] = both3(ITEM(ball), F(0), "wild")
+  end
+  rounds[#rounds + 1] = both3(ITEM("MASTER_BALL"), F(0), "wild")
+  return seq(events, o, rounds)
+end)
+
+-- The wobble lines at either end: no wobble at all (BallBrokeFreeText) off a
+-- hard catch...
+scenario("rp2_ball_broke_free", function(events)
+  local hard = mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } })
+  hard.catchRate = 3
+  return seq(events, duo4("rp2e", "wild", 938,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) }, { hard },
+    { foe = "wild" }),
+    { both3(ITEM("POKE_BALL"), F(0), "wild"), both3(ITEM("POKE_BALL"), F(0), "wild") })
+end)
+
+-- ...and three wobbles that still fail (BallSoCloseText) off an easy one.
+scenario("rp2_ball_so_close", function(events)
+  local easy = mn({ species = "Beta", maxHp = 900, hp = 700, spe = 10, moves = { hm("wait", 0, 0, 85) } })
+  easy.catchRate = 255
+  local rounds = {}
+  for _ = 1, 4 do rounds[#rounds + 1] = both3(ITEM("ULTRA_BALL"), F(0), "wild") end
+  return seq(events, duo4("rp2c", "wild", 942,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) }, { easy },
+    { foe = "wild" }), rounds)
+end)
+
+-- A wild fight's POKé DOLL: the use line and nothing after it, and the
+-- fight ends a DRAW (PokeDollEffect) -- no win, no PAY DAY pot.
+scenario("rp2_doll_wild", function(events)
+  return seq(events, duo4("rp2d", "wild", 933,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("PAY_DAY", 40, 0, 16) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(ITEM("POKE_DOLL"), F(0), "wild") })
+end)
+
+-- The POKé FLUTE in a link fight (each side a player): Text_PlayedPokeFlute
+-- then _FluteWakeUpText while anyone sleeps, _PlayedFluteText after.  And
+-- the sleeping monster's ANIM_SLP ahead of its line on both sides.
+scenario("rp2_flute", function(events)
+  return seq(events, duo4("rp2f", "1v1", 934,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, status = "SLP", statusTurns = 4,
+           moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, status = "SLP", statusTurns = 5,
+           moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(ITEM("POKE_FLUTE"), F(0)), both3(ITEM("POKE_FLUTE"), F(0)) })
+end)
+
+-- CheckTurn's status animations against the computer: the player's ANIM_SLP
+-- ahead of FastAsleepText (SLP_PLAYER_ANIM), the computer's behind it
+-- (SLP_ANIM), and ANIM_CONFUSED behind IsConfusedText on each side
+-- (CONF_PLAYER_ANIM / CONF_ANIM); none on the turn a sleeper wakes or a
+-- confusion runs out.
+scenario("rp2_status_anims_npc", function(events)
+  return seq(events, duo4("rp2s", "coop_npc", 935,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, status = "SLP", statusTurns = 2, confusion = 3,
+           moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, status = "SLP", statusTurns = 3, confusion = 4,
+           moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- The same against a wild monster: the wild seat is the cart's enemy too.
+scenario("rp2_status_anims_wild", function(events)
+  return seq(events, duo4("rp2w", "wild", 936,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, status = "SLP", statusTurns = 3, confusion = 3,
+           moves = { hm("wait", 0, 0, 85) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"),
+      both3(F(0), F(0), "wild") })
+end)
+
+-- K8's PP Ups on the `moves` events: a row that states them carries them, a
+-- row that states none carries none.
+scenario("rp2_pp_ups", function(events)
+  local upped = hm("slam", 10)
+  upped.ppUps = 2
+  return seq(events, duo4("rp2p", "1v1", 937,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { upped, hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)) })
 end)
 
 -- ------------------------------------------------------------------

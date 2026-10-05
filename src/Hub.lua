@@ -1410,6 +1410,22 @@ end
 -- of relay.js PAY_DAY_MODES.
 local PAY_DAY_MODES = { wild = true, coop_wild = true, coop_npc = true }
 
+-- The fights a mid-fight learn or level-up (`mmo.battle_moveset`) is heard
+-- in: the fights against the computer, the referees' EXP_MODES again.  No
+-- cart gains experience in a link battle -- pokered GainExperience (engine/
+-- battle/experience.asm) returns at once on LINK_STATE_BATTLING, pokecrystal /
+-- pokegold GiveExperiencePoints (engine/battle/core.asm) on a non-zero
+-- wLinkMode, pokeemerald / pokefirered Cmd_getexp (battle_script_commands.c)
+-- skips to its last state under BATTLE_TYPE_LINK -- and a battle learns a
+-- move only from a level-up's learnset or the evolution one brings, so in a
+-- 1v1 / coop_pvp fight no monster's level, stats or moves ever change.  An
+-- honest client sends nothing there (the referees emit no `exp` in a link
+-- fight, and the client's level-up path is the only sender); a message that
+-- arrives anyway is a forgery -- 999 stats re-sent every turn, or a one-slot
+-- "learn" of a move it never had -- against another player, and is dropped
+-- whole.  Twin of relay.js LEARN_MODES.
+local LEARN_MODES = { wild = true, coop_wild = true, coop_npc = true }
+
 -- Whether a referee's verdict carries its Pay Day coins onto the broadcast
 -- (contract K11 of docs/plans/gen12-referee-gaps-fix.md).  Every generation's
 -- outcome -- a knockout, a catch, a run, a forfeit -- reaches one copy, in
@@ -1810,6 +1826,13 @@ local function nextMoves12(old, incoming)
         highCrit = prev.highCrit,
         ppUps = prev.ppUps ~= nil and prev.ppUps or nm.ppUps,
         priority = prev.priority ~= nil and prev.priority or nm.priority,
+        -- The referee's own note, never the wire's: the base PP its maximum
+        -- is a GetMaxPP over (Red's copyMove, BattleSim Effects.basePpOf), or
+        -- the base a Gold MIMIC / TRANSFORM / SKETCH copy came from
+        -- (BattleSim2 Effects.basePp).  Dropped, a level-up's re-send left a
+        -- Red row whose next 63-PP wrap (stepPp's borrow) kept the old
+        -- maximum instead of re-reading GetMaxPP over the moved PP Up bits.
+        basePp = prev.basePp,
       }
     else
       nextMoves[i] = {
@@ -1978,15 +2001,30 @@ M.learnTo = learnTo
 --
 -- always forwarded whatever became of the moves -- a transformed mon still
 -- grew, and a learn refused as a rewrite does not undo the level it came
--- with.  Whether the claim is plausible and
--- what it rebuilds (the cart's in-battle CalcStats, badge boosts, the HP
--- step) is the referee's to decide.  Guarded on the method existing: the
--- Gen 1 / Gen 2 referees implement it, BattleSim3 never does, and a hub
--- whose sim predates it simply applies the moves as before.
+-- with.  Guarded on the method existing: the Gen 1 / Gen 2 referees
+-- implement it, BattleSim3 never does, and a hub whose sim predates it
+-- simply applies the moves as before.
+--
+-- Who judges what, layer by layer:
+--
+--   * Wire.battleMoveset (the sanitiser) checks shape and bounds alone: the
+--     dialect's move rows, a level within 1..LEVEL_MAX, a `stats` block of
+--     the dialect's keys within the sheet's stat bounds, a max HP within
+--     1..HP_MAX.  It judges no claim;
+--   * this hub decides whether the message is heard at all -- only in the
+--     fights against the computer (LEARN_MODES: no cart levels or learns in
+--     a link battle, so in a 1v1 / coop_pvp fight it is dropped whole, on
+--     every generation) and only for the sender's own seat -- and what a
+--     move list may change (learnTo: one slot appended or replaced, every
+--     unchanged row keeping the hub's PP and combat fields);
+--   * the referee's levelUp decides what a level claim rebuilds (the cart's
+--     in-battle CalcStats, the stages, badge boosts, the HP step) and which
+--     claims it refuses -- BattleSim / BattleSim2 Turn `levelUp` say which.
 --
 -- Returns whether anything reached the referee (a move list or a level-up).
 function M:applyBattleMoveset(record, client, payload)
   if not (record and record.sim and payload) then return false end
+  if not LEARN_MODES[record.mode] then return false end
   local fighter = record.sim.byId and record.sim.byId[client.id]
   if not (fighter and type(fighter.mons) == "table") then return false end
   if self.generation == 3 then return applyBattleMoveset3(fighter, payload) end
@@ -2024,8 +2062,12 @@ end
 
 -- Gen 3's display names for one seat's bag (`name` on a Wire.battleBag entry),
 -- keyed like bagMap, so the referee can say "Ann used POTION!" rather than
--- "Ann used an item!".  Nothing on the older generations, whose sims narrate
--- the item id itself.
+-- "Ann used an item!" (BattleSim3 Turn's fallback): a Gen 3 bag id is a pret
+-- number, which names nothing.  Nothing on the older generations: a Red /
+-- Gold bag id is the item's own name in the cart's words, and their referees
+-- spell the line from it themselves (BattleSim / BattleSim2 Turn `itemLabel`
+-- -- underscores as spaces, POKé, GUARD SPEC.'s stop), "TWINS AMY & MAY used
+-- X ATTACK on FOE!" on Gold, so there is no name for a hub to keep.
 function M:noteBagNames(record, seat, entries)
   if self.generation ~= 3 then return end
   local names = {}

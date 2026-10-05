@@ -549,6 +549,26 @@ function moveLabel(move, fallback) {
   return str(move.name) || str(move.id) || back;
 }
 
+// What an item is called in a sentence: the id's underscores as spaces, the
+// cart's "POKé" for a POKE_ id and GUARD SPEC.'s full stop, which
+// ItemUsedText's own "." follows, as on the cart (the Lua twin cites the
+// names table).
+function itemLabel(id) {
+  let label = ((typeof id === 'string' && id !== '') ? id : 'ITEM').replace(/_/g, ' ');
+  label = label.replace(/^POKE /, 'POKé ');
+  if (label === 'GUARD SPEC') label = 'GUARD SPEC.';
+  return label;
+}
+
+// A ball that does not catch, by its wobbles: BallBrokeFreeText ..
+// BallSoCloseText (the Lua twin cites PokeBallEffect).
+const BALL_MISS_TEXT = [
+  'Oh no! The POKéMON broke free!',
+  'Aww! It appeared to be caught!',
+  'Aargh! Almost had it!',
+  'Shoot! It was so close too!',
+];
+
 // A defender with no stated types is type 0, which the chart lookup reads as
 // "whatever the first row says" and, absent a chart, as neutral. That is the
 // right default for a sim that must never refuse a party over a missing
@@ -1057,16 +1077,22 @@ class Battle {
 
   // The `moves` event for a list (the battle list, or the party's own).
   _emitMoveList(fighter, list, partyIndex) {
-    const moves = list.map((m) => ({
-      id: m.id || 'move',
-      pp: Math.max(0, int(m.pp, 0)),
-      maxPp: Math.max(0, int(m.maxPp, m.pp)),
-      power: Math.max(0, int(m.power, 0)),
-      accuracy: Math.max(0, int(m.accuracy, 255)),
-      type: Math.max(0, int(m.type, 0)),
-      effect: Math.max(0, int(m.effect, 0)),
-      chance: Math.max(0, int(m.chance, 0)),
-    }));
+    const moves = list.map((m) => {
+      const row = {
+        id: m.id || 'move',
+        pp: Math.max(0, int(m.pp, 0)),
+        maxPp: Math.max(0, int(m.maxPp, m.pp)),
+        power: Math.max(0, int(m.power, 0)),
+        accuracy: Math.max(0, int(m.accuracy, 255)),
+        type: Math.max(0, int(m.type, 0)),
+        effect: Math.max(0, int(m.effect, 0)),
+        chance: Math.max(0, int(m.chance, 0)),
+      };
+      // K8's PP Ups, as the row holds them (absent stays absent).
+      const ppUps = optInt(m.ppUps, 0, 3);
+      if (ppUps !== null) row.ppUps = ppUps;
+      return row;
+    });
     const fields = { slot: fighter.slot, side: fighter.side, moves };
     if (partyIndex != null) fields.mon = partyIndex - 1;
     return this._emit('moves', fields);
@@ -1074,6 +1100,13 @@ class Battle {
 
   _say(text) {
     return this._emit('msg', { text });
+  }
+
+  // A status animation CheckTurn plays (ANIM_SLP, ANIM_CONFUSED) as an `anim`
+  // event on the seat it plays over, by the Red referee's ids (the Lua twin
+  // explains the placement and the variants).
+  _statusAnim(fighter, id) {
+    return this._emit('anim', { slot: fighter.slot, side: fighter.side, text: id });
   }
 
   /*
@@ -2631,10 +2664,11 @@ class Battle {
     const span = Math.min(255, cap + level);
     if (this._obeyDraw(span, true) < cap) return null;
 
-    // IgnoreSleepOnly: Snore or Sleep Talk, chosen while asleep (the cart's
-    // ellipsis glyph is three dots here: Wire.text has no such glyph).
+    // IgnoreSleepOnly: Snore or Sleep Talk, chosen while asleep --
+    // IgnoredSleepingText, with the cart's one-glyph ellipsis (a battle line
+    // carries it: Wire.battleText's glyphs).
     if (mon.status === 'sleep' && has(Items.SLEEP_BYPASS, Effects.moveKey(move))) {
-      this._say(`${mon.species} ignored orders...sleeping!`);
+      this._say(`${mon.species} ignored orders…sleeping!`);
       return 'stop';
     }
 
@@ -3122,7 +3156,20 @@ class Battle {
     };
     if (vitaminApplied) itemEv.amount = 1;
     this._emit('item', itemEv);
-    this._say(`${fighter.name} used an item`);
+    // The line the use opens with (the Lua twin cites both routines): the
+    // computer's _EnemyUsedOnText on the monster it has out, the player's
+    // ItemUsedText -- in a medicine's party-menu line's place too -- and no
+    // use line for the POKé FLUTE, a ball in a trainer fight or a POKé DOLL
+    // outside a wild fight.
+    const label = itemLabel(choice.item);
+    const computerSeat = isComputerSeat(this.mode, fighter);
+    const wild = Effects.isWildMode(this.mode);
+    if (computerSeat) {
+      const onMon = activeMon(fighter);
+      this._say(`${fighter.name} used ${label} on ${onMon ? onMon.species : 'POKéMON'}!`);
+    } else if (!(effect && (effect.pokeFlute || ((effect.ball || effect.pokeDoll) && !wild)))) {
+      this._say(`${fighter.name} used the ${label}.`);
+    }
     // Spend after the announce, win or fail (Gen1 bag stack). noConsume
     // (Poké Flute) and seats with no bag sheet are left alone.
     if (!(effect && effect.noConsume)) {
@@ -3131,8 +3178,10 @@ class Battle {
     if (!effect) {
       this._say('But it failed!');
     } else if (effect.ball) {
-      if (!Effects.isWildMode(this.mode)) {
-        this._say('But it failed!');
+      if (!wild) {
+        // UseBallInTrainerBattle: BallBlockedText, BallDontBeAThiefText.
+        this._say('The trainer blocked the BALL!');
+        this._say("Don't be a thief!");
       } else {
         // Wild modes seat exactly one monster on side b, so "the first
         // living foe" and "the only foe" are the same seat -- no aim to
@@ -3145,9 +3194,9 @@ class Battle {
           const result = Effects.catchAttempt(choice.item, target, this.rng);
           // Gen1 TossBallAnimation chain before the catch text (engine ballChain).
           this._emitBallChain(fighter, choice.item, result.caught, result.shakes);
-          if (result.shakes > 0 && !result.caught) this._say('The ball shook');
           if (result.caught) {
-            this._say('Gotcha');
+            // Text_BallCaught, the only catch line a screen prints.
+            this._say(`Gotcha! ${target.species} was caught!`);
             const finish = this._finish(
               'win',
               this._sidePlayers(fighter.side),
@@ -3159,21 +3208,19 @@ class Battle {
             if (finish) finish.catcher = fighter.playerId;
             if (fighter.side === BADGE_SIDE) this._payDayOutcome(finish);
           } else {
-            this._say('It broke free');
+            // One line by the wobbles (BALL_MISS_TEXT), and no other.
+            this._say(BALL_MISS_TEXT[Math.min(3, Math.max(0, int(result.shakes, 0)))]);
           }
         }
       }
     } else if (effect.pokeDoll) {
-      if (Effects.isWildMode(this.mode)) {
-        this._say('The wild pokemon ran away');
-        this._finish(
-          'win',
-          this._sidePlayers(fighter.side),
-          this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'),
-          'run',
-        );
+      if (wild) {
+        // PokeDollEffect: wBattleResult DRAW behind the use line -- no win,
+        // so no fanfare and no PAY DAY coins (CheckPayDay is WIN only).
+        this._finish('draw', null, null, 'run');
       } else {
-        this._say('But it failed!');
+        // `.not_wild`: the pack's `.Oak` -- ItemOakWarningText.
+        this._say(`OAK: ${fighter.name}! This isn't the time to use that!`);
       }
     } else if (effect.vitamin) {
       if (!vitaminApplied) {
@@ -3217,8 +3264,14 @@ class Battle {
           }
         }
       }
-      if (woke) this._say('All sleeping POKeMON woke up');
-      else this._say("Now, that's a catchy tune");
+      // PokeFluteEffect's battle half: Text_PlayedPokeFlute then
+      // _FluteWakeUpText when it cured anyone, else _PlayedFluteText alone.
+      if (woke) {
+        if (!computerSeat) this._say(`${fighter.name} played the POKé FLUTE.`);
+        this._say('All sleeping POKéMON woke up.');
+      } else if (!computerSeat) {
+        this._say("Played the POKé FLUTE. Now, that's a catchy tune!");
+      }
     } else {
       const partyIdx = choice.slot != null ? choice.slot : fighter.active;
       const mon = monAt(fighter, partyIdx);
@@ -3232,34 +3285,36 @@ class Battle {
         this._say('But it failed!');
       } else {
         let applied = false;
+        // X ACCURACY, DIRE HIT and GUARD SPEC. set their bit and say nothing
+        // past the use's line (UseItemText; the computer's
+        // PrintText_UsedItemOn).
         if (effect.xAccuracy) {
           mon.xAccuracy = true;
-          this._say(`${mon.species}'s hits will never miss`);
           applied = true;
         }
         if (effect.focusEnergy) {
           mon.focusEnergy = true;
-          this._say(`${mon.species} is getting pumped`);
           applied = true;
         }
         if (effect.mist) {
           mon.mist = true;
-          this._say(`${mon.species} is protected against stat changes`);
           applied = true;
         }
         if (effect.stage) {
           const stat = effect.stage.stat;
           const before = Effects.clampStage(mon.stages[stat]);
+          // The computer's EnemyUsedXItem runs RaiseStat behind its use line
+          // and prints nothing more; the player's XItemEffect says how it went.
           if (before >= Effects.STAGE_MAX) {
             // XItemEffect's RaiseStat at +6: StatUpFailText (wave 5).
-            this._say(Effects.wontRiseLine(mon, stat));
+            if (!computerSeat) this._say(Effects.wontRiseLine(mon, stat));
           } else {
             const after = Effects.clampStage(before + int(effect.stage.delta, 1));
             mon.stages[stat] = after;
             Effects.dropSnap(mon);
             // XItemEffect's StatUpMessage (wave 5).
             const text = Effects.statUpLine(mon, stat, int(effect.stage.delta, 1));
-            this._say(text);
+            if (!computerSeat) this._say(text);
             this._emit('stat', {
               slot: fighter.slot, side: fighter.side,
               amount: after, stage: after, text,
@@ -3677,7 +3732,12 @@ class Battle {
     } else if (gate.fullyParalyzed) {
       this._say(`${mon.species}'s fully paralyzed!`);
     } else if (mon.status === 'sleep') {
+      // ANIM_SLP: ahead of FastAsleepText on the player's turn, behind it on
+      // the enemy's.
+      const player = isPlayerSeat(this.mode, fighter);
+      if (player) this._statusAnim(fighter, 'SLP_PLAYER_ANIM');
       this._say(`${mon.species} is fast asleep!`);
+      if (!player) this._statusAnim(fighter, 'SLP_ANIM');
     }
     return gate.canMove;
   }
@@ -3733,6 +3793,9 @@ class Battle {
       let roll = null;
       if (mon.confusion > 1) {
         this._say(`${mon.species} is confused!`);
+        // ANIM_CONFUSED behind IsConfusedText, ahead of the byte.
+        this._statusAnim(fighter, isPlayerSeat(this.mode, fighter)
+          ? 'CONF_PLAYER_ANIM' : 'CONF_ANIM');
         roll = this.rng.byte();
       }
       const gate = Status.beforeMove({
@@ -4881,7 +4944,8 @@ class Battle {
         if (effectiveness > 1) {
           this._say("It's super-effective!");
         } else if (effectiveness < 1) {
-          this._say("It's not very effective...");
+          // NotVeryEffectiveText, the cart's ellipsis glyph.
+          this._say("It's not very effective…");
         }
       }
       const hpBefore = defender.hp;

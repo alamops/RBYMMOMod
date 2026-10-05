@@ -2417,6 +2417,7 @@ function r1m(id, power, effect, o = {}) {
   };
   if (o.highCrit) m.highCrit = true;
   if (o.ppUps !== undefined) m.ppUps = o.ppUps;
+  if (o.maxPp !== undefined) m.maxPp = o.maxPp;
   return m;
 }
 
@@ -3624,6 +3625,45 @@ scenario('g1_conversion', fights('g1cv', [
   r1duo([r1s('Alpha', [r1m('convert', 0, 24)], { spd: 90 })],
     [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2, 3] })],
     { seed: 10061, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// RP1 (gen12-referee-gaps-fix polish): GetMaxPP through DecrementPP's wrap,
+// ItemUsePPRestore's `.restorePP` against it, K8's PP Ups on every `moves`
+// row, and the cart's POKé in the item lines -- the Lua driver's g1_pp_max,
+// literal for literal (its comment has the seven entries).
+scenario('g1_pp_max', fights('g1pm', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 63, maxPp: 35 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 10071,
+      turns: [{ p1: 0, p2: 0 },
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 1, ppUps: 1, maxPp: 18 }), r1m('tap', 10, 0)],
+    { spd: 90 })],
+    [r1s('Beta', [r1m('chill', 10, 5, { chance: 100 }), r1m('QUICK_ATTACK', 10, 4, { type: 1 })],
+      { spd: 10 })],
+    { seed: 9992, typeIds: FIRE_AXIS,
+      turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 1 },
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 1 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 20, ppUps: 1, maxPp: 20 }),
+    r1m('tap', 10, 0, { pp: 15, maxPp: 15 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 10073,
+      turns: [{ p1: { action: 'item', item: 'MAX_ETHER', move: 0 }, p2: 0 },
+        { p1: { action: 'item', item: 'MAX_ETHER', move: 1 }, p2: 0 },
+        { p1: { action: 'item', item: 'MAX_ELIXER' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 10074, turns: [{ p1: { action: 'item', item: 'POKE_DOLL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 10075, turns: [{ p1: { action: 'item', item: 'POKE_FLUTE' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 0 })],
+    { mode: 'wild', seed: 10076, turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 100 })],
+    { mode: 'wild', seed: 10077, turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
 ]));
 
 // ------------------------------------------------------------------
@@ -6268,8 +6308,8 @@ test('the item lines, and Full Restore leaves confusion and the toxic bit', () =
   const g = 'g1_item_lines';
   const t1 = duelTexts(g, 1);
   for (const line of ['Alpha recovered by 20!', 'Alpha was cured of poison!', 'p1 used X ATTACK!',
-    "Alpha's ATTACK rose!", 'p1 played the POKe FLUTE.', 'All sleeping POKeMON woke up.',
-    'p1 used POKe BALL!', 'All right! Beta was caught!']) {
+    "Alpha's ATTACK rose!", 'p1 played the POKé FLUTE.', 'All sleeping POKéMON woke up.',
+    'p1 used POKé BALL!', 'All right! Beta was caught!']) {
     assert.ok(t1.includes(line), line);
   }
   assert.ok(!t1.some((x) => x.includes('used POTION') || x.includes('used ANTIDOTE')),
@@ -6282,4 +6322,28 @@ test('the item lines, and Full Restore leaves confusion and the toxic bit', () =
 test('Conversion copies both of the target\'s types', () => {
   assert.strictEqual(r1Seat('g1_conversion', 1, 1, 0).types, '2,3');
   assert.ok(duelSaid('g1_conversion', 1, "Converted type to Beta's!"));
+});
+
+// RP1: the g1_pp_max streams, stated as claims (the parity tests hold the Lua
+// half to them).  Each `moves` row of Ann's: "pp/maxPp/ppUps" per slot.
+test('GetMaxPP through a wrap, .restorePP, K8 PP Ups on the moves rows, and POKé', () => {
+  const g = 'g1_pp_max';
+  const rows = (at) => duelEvents(g, at).filter((e) => e.t === 'moves' && e.side === 'a')
+    .map((e) => e.moves.map((m) => `${m.pp}/${m.maxPp}/${m.ppUps}`).join(','));
+  const NO_EFFECT = "It won't have any effect.";
+  assert.deepStrictEqual(rows(1), ['62/35/0', '35/35/0'],
+    'a slot past its wrap keeps the stated GetMaxPP; the ETHER brings it down to it');
+  assert.deepStrictEqual(duelTexts(g, 1).filter((x) => x === 'PP was restored.' || x === NO_EFFECT),
+    ['PP was restored.', NO_EFFECT], '...restored once, then no effect -- said once, as `.noEffect` does');
+  assert.deepStrictEqual(rows(2), ['0/18/1,60/60/0', '63/15/0,60/60/0', '15/15/0,60/60/0'],
+    'the borrow: one PP Up fewer on the row, GetMaxPP 15 over none, and the ETHER to 15');
+  assert.deepStrictEqual(rows(3), ['20/20/1,15/15/0', '20/20/1,15/15/0'],
+    'MAX ETHER and MAX ELIXER on a full move with a PP Up: the whole-byte compare restores');
+  assert.deepStrictEqual(duelTexts(g, 3).filter((x) => x === 'PP was restored.' || x === NO_EFFECT),
+    ['PP was restored.', NO_EFFECT, 'PP was restored.'], '...and a full move with none is no effect');
+  assert.ok(duelSaid(g, 4, 'p1 used POKé DOLL!'), 'the doll: data/items/names.asm "POKé DOLL"');
+  assert.ok(duelSaid(g, 5, "Played the POKé FLUTE. Now, that's a catchy tune!"), 'PlayedFluteNoEffectText');
+  assert.ok(duelSaid(g, 6, 'p1 used POKé BALL!') && duelSaid(g, 6, 'You missed the POKéMON!'),
+    'ItemUseBallText01');
+  assert.ok(duelSaid(g, 7, 'Darn! The POKéMON broke free!'), 'ItemUseBallText02');
 });

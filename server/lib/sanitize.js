@@ -105,10 +105,11 @@ function luaNumber(value) {
 }
 
 // Wire.int, spelled exactly: a JSON number or a string LuaJIT's tonumber reads
-// (luaNumber), floored, inside [min, max] -- and nothing else. cleanInt takes
-// Number(true) as 1 and '' as 0 where Lua says nil to both; the Gen 3 dialect
-// below is new on both twins, so it is written against the stricter reading
-// from the start.
+// (luaNumber), floored, inside [min, max] -- and nothing else. The Gen 3
+// dialect was written against it from the start; cleanInt, which every older
+// reading goes through, is this same reading since the review's differential
+// fuzzer caught its `Number(value)` taking true as 1 and '' as 0 where Lua says
+// nil to both (cleanInt's own note).
 function luaInt(value, min, max) {
   const n = luaNumber(value);
   if (n === null || !Number.isFinite(n)) return null;
@@ -208,11 +209,17 @@ function cleanMapId(value) {
   return /^[\w.-]{1,64}$/.test(value) ? value : null;
 }
 
+// Wire.int's reading, exactly: luaInt (below). This was `Number(value)`, which
+// takes true as 1, false / null / '' / [] as 0 and [5] as 5 where LuaJIT's
+// tonumber says nil to every one of them -- so a `maxPp: true` on a Gen 1 /
+// Gen 2 move row, or a `pp: null`, was a sheet this hub kept and the Lua hub
+// refused (the review's differential fuzzer). Every caller is a twin of a
+// Wire.int read (sheets, events, choices, hello, profile, rank, seed, the
+// hub's own generation option), so one reading closes the class at every
+// field rather than field by field. Kept as a name so those reads stay as
+// they were written.
 function cleanInt(value, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  const i = Math.floor(n);
-  return i >= min && i <= max ? i : null;
+  return luaInt(value, min, max);
 }
 
 // Boot generation claimed on mmo.hello (PROTOCOL 20; 3 from PROTOCOL 30). The
@@ -224,9 +231,10 @@ function cleanInt(value, min, max) {
 // admitted into a Red room under PROTOCOL 29, and the hello handler refuses
 // null in the same sentence it refuses a mismatch.
 //
-// A JSON number only. cleanInt alone would take Number(true) as 1, [2] as 2
-// and "0b11" as 3, where Lua's tonumber says nil to all three -- one hello
-// admitted by this hub and refused by its twin.
+// A JSON number only, as Wire.generation reads it (`type(value) ~= "number"`):
+// cleanInt alone would take the string "0b11" as 3 -- LuaJIT's tonumber
+// reads it -- where Wire.generation refuses every string, and back when
+// cleanInt was Number(value) it took true as 1 and [2] as 2 as well.
 const GENERATION_MAX = 3;
 
 function cleanGeneration(value) {
@@ -2205,7 +2213,8 @@ function cleanBattleParty(raw, hubGeneration) {
     return null;
   }
   // A Gen 3 hub reads the tags a sheet carries the way Wire.int does (luaInt:
-  // the dialect is new on both twins); Gen 1 / Gen 2 keep cleanInt as ever.
+  // the dialect is new on both twins); Gen 1 / Gen 2 keep cleanInt, which is
+  // the same reading now (cleanInt's note).
   const genInt = hubGen === 3 ? luaInt : cleanInt;
 
   let partyGen = genInt(raw.generation, 1, GENERATION_MAX);
@@ -2249,6 +2258,13 @@ function cleanBattleParty(raw, hubGeneration) {
   if (monList.length < 1 || monList.length > BATTLE_MON_MAX) return null;
   const mons = [];
   for (const entry of monList) {
+    // A sheet's own `generation`, when it states one, is a generation or the
+    // party is refused -- with or without a hub generation to hold it to.
+    // Wire.lua used to let an unreadable tag (6, -6, "day") fall through to
+    // its stat-key sniff when no hub generation was given, where this twin
+    // refused the party: one upload, two answers (the review's differential
+    // fuzzer). Every hub passes its generation, so no caller read the
+    // fallback; the stricter reading is the twins' one now.
     if (entry !== null && typeof entry === 'object'
         && entry.generation !== undefined && entry.generation !== null) {
       const monGen = genInt(entry.generation, 1, GENERATION_MAX);
@@ -2512,7 +2528,7 @@ function cleanBattleEvent(raw, generation) {
     // Gen 3 (or none named) also reads 0: BattleSim3's holders-only fact (sheet
     // doc §7.1), which carries no `mon` -- see PARTICIPANTS_MAX. Read there the
     // way Wire.int reads it (luaInt), like the rest of the Gen 3 fields; the
-    // older readings keep cleanInt, byte for byte.
+    // older readings keep cleanInt (the same reading now, cleanInt's note).
     const participants = older
       ? cleanInt(raw.participants, 1, PARTICIPANTS_MAX)
       : luaInt(raw.participants, 0, PARTICIPANTS_MAX);
@@ -2706,10 +2722,14 @@ function cleanBattleOutcome(raw, generation) {
 // `level` (1..LEVEL_MAX), `stats` (the sheet's `stats` block in the hub's
 // dialect) and `maxHp` (1..HP_MAX; the cart raises current HP by the step it
 // raises the maximum, GainExperience). Moves that are the hub's own plus any of
-// them is a level-up that taught nothing, as valid as a learn; plausibility is
-// the referee's to judge (Relay.applyBattleMoveset forwards it). Read the way
-// Wire.int reads them (luaInt, cleanBlock3): new on both twins. Twin of
-// Wire.battleMoveset.
+// them is a level-up that taught nothing, as valid as a learn. This reader
+// checks shape and bounds alone and judges no claim. The hub decides whether
+// the message is heard at all (only in a fight against the computer -- no cart
+// levels or learns in a link battle, relay LEARN_MODES) and what a move list
+// may change (relay learnTo); the referee's levelUp decides what a level claim
+// rebuilds and which claims it refuses (Relay.applyBattleMoveset has the
+// layers). Read the way Wire.int reads them (luaInt, cleanBlock3): new on both
+// twins. Twin of Wire.battleMoveset.
 function cleanBattleMoveset(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
   // Gen 3 reads its index and list the way Wire.lua is handed them (luaInt,

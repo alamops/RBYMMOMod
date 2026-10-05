@@ -594,3 +594,60 @@ test('DisableEffect reaches the monster behind a doll; CalcStat', () => {
   assert.strictEqual(Effects.calcStat(255, 15, 100, 65535, false), 608, 'full stat exp: + 255 / 4');
   assert.strictEqual(Effects.hpDv({ atk: 10, def: 9, spd: 12, spc: 15 }), 5, 'the HP DV from the low bits');
 });
+
+// RP1 (gen12-referee-gaps-fix polish): GetMaxPP over the PP Up bits the byte
+// holds now (Effects.getMaxPp; engine/items/item_effects.asm GetMaxPP /
+// AddBonusPP), the base behind a sheet's stated maximum (basePpOf),
+// ItemUsePPRestore's `.restorePP` (restorePp) -- a slot past its wrap brought
+// DOWN to the maximum, MAX ETHER's whole-byte compare -- and a MIMIC's
+// switch-out re-reading GetMaxPP over the bits its slot holds by then.
+// tests/battle_sim_effects.lua's twin.
+test('GetMaxPP, the base behind it, .restorePP and a MIMIC\'s switch-out', () => {
+  assert.strictEqual(Effects.getMaxPp(35, 0), 35, 'GetMaxPP: no PP Up is the base');
+  assert.strictEqual(Effects.getMaxPp(35, 3), 56, '...each PP Up adds a fifth of it');
+  assert.strictEqual(Effects.getMaxPp(40, 3), 61, '...capped at 7 a PP Up');
+  assert.strictEqual(Effects.getMaxPp(10, 1), 12, '...a fifth of 10 is 2');
+  assert.strictEqual(Effects.basePpOf(56, 3), 35, 'the base behind 56 with three PP Ups');
+  assert.strictEqual(Effects.basePpOf(61, 3), 40, '...behind 61');
+  assert.strictEqual(Effects.basePpOf(18, 0), 18, '...with none, the maximum itself');
+  assert.strictEqual(Effects.basePpOf(17, 1), null, '...and none behind 17 with one (16, then 18)');
+  assert.strictEqual(Effects.basePpOf(99, 0), null, '...nor past the six bits a base fits in');
+
+  let m = { pp: 63, ppUps: 0, maxPp: 35 };
+  assert.strictEqual(Effects.restorePp(m, 10), true, 'ETHER on a slot past its wrap: restored');
+  assert.strictEqual(m.pp, 35, '...brought down to GetMaxPP (63 + 10 is past it)');
+  assert.strictEqual(Effects.restorePp(m, 10), false, 'ETHER at the maximum: `ret z`, no effect');
+  m = { pp: 30, ppUps: 0, maxPp: 35 };
+  assert.strictEqual(Effects.restorePp(m, 10), true, 'ETHER: 10 more...');
+  assert.strictEqual(m.pp, 35, '...kept at the maximum');
+  m = { pp: 5, ppUps: 2, maxPp: 49 };
+  Effects.restorePp(m, 10);
+  assert.strictEqual(`${m.pp}/${m.ppUps}`, '15/2', 'ETHER below the maximum: +10, the PP Ups beside it');
+  m = { pp: 20, ppUps: 1, maxPp: 20 };
+  assert.strictEqual(Effects.restorePp(m, true), true,
+    'MAX ETHER on a full move with a PP Up: the whole byte is not the maximum -- restored');
+  assert.strictEqual(m.pp, 20, '...to what it had');
+  m = { pp: 20, ppUps: 0, maxPp: 20 };
+  assert.strictEqual(Effects.restorePp(m, true), false, 'MAX ETHER on a full move with none: no effect');
+  m = { pp: 63, ppUps: 3, maxPp: 56 };
+  assert.strictEqual(Effects.restorePp(m, true), true, 'MAX ETHER past a wrap: restored');
+  assert.strictEqual(m.pp, 56, '...down to the maximum');
+
+  const user = dummyMon({ moves: [{
+    id: 'MIMIC', name: 'MIMIC', pp: 1, maxPp: 12, basePp: 10, ppUps: 1, power: 0,
+    accuracy: 255, type: 0, effect: 82, chance: 0,
+  }] });
+  Effects.applyPrimary({
+    effectId: 82, rng: { byte() { return 0; } }, userMon: user,
+    targetMon: dummyMon({ species: 'Beta' }), userFighter: { slot: 1, side: 'a' },
+    targetFighter: { slot: 2, side: 'b' }, moveIndex: 1, mimicSlot: 1,
+  });
+  assert.strictEqual(`${user.moves[0].maxPp}/${user.moves[0].basePp}`, '12/10',
+    "MIMIC's copy keeps MIMIC's GetMaxPP and the base behind it (the ETHER reads the party's MIMIC)");
+  user.moves[0].pp = 63; // a borrow, as DecrementPP leaves it
+  user.moves[0].ppUps = 0;
+  Effects.restoreMoves(user);
+  const back = user.moves[0];
+  assert.strictEqual(`${back.id}:${back.pp}/${back.ppUps}/${back.maxPp}`, 'MIMIC:63/0/10',
+    "the switch-out's MIMIC: the slot's byte, and GetMaxPP over the PP Ups it holds now");
+});

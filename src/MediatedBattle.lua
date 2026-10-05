@@ -3539,6 +3539,68 @@ function M.sentOutPages(who, mon, generation)
   return { ("%s sent out\n%s!"):format(who, mon) }
 end
 
+-- ------- Gold's drag-out: the send-out line the cart never shows
+--
+-- pokecrystal BattleCommand_ForceSwitch (engine/battle/effect_commands.asm,
+-- pokegold the same), outside a wild fight: ForceEnemySwitch /
+-- SwitchPlayerMon field the monster it drew with the send-out animation
+-- alone (ShowSetEnemyMonAndSendOutAnimation, SendOutPlayerMon -- neither
+-- prints a line), and DraggedOutText, "<MON> was dragged out!", is the whole
+-- of what is said.  The Gold referee states the arrival as any send-out
+-- (`switch` + `send`, BattleSim2 Turn `_sendOut`) and the line straight
+-- behind it (`_forceSwitch`) -- with at most the departing monster's `moves`
+-- between them -- so this screen says a send-out's line as always and takes
+-- it back when the next event is that line about the same monster: neither
+-- the trainer's "<TRAINER> sent out <MON>!" pages nor our own "Go! <MON>!".
+-- The arrival (the throw, the burst) stays; the cart plays it.
+function M.draggedOutLine(text, species)
+  if type(text) ~= "string" then return false end
+  local who = text:match("^(.-) was dragged out!?$")
+  if not who or who == "" then return false end
+  return species == nil or who == species
+end
+
+-- The send-out just queued (`self.lines[from..to]`, the pages `say` put
+-- there, then `queueSpawnFx`'s rows), held for the event behind it.  Gold
+-- only: no other referee drags a monster out.
+function M:noteSendLine(msg, from, to)
+  self.sendHeld = nil
+  if self:generation() ~= 2 or type(msg.text) ~= "string" then return end
+  if not (from and to and to >= from) then return end
+  local row = self.lines[#self.lines]
+  if not (type(row) == "table" and row.spawnfx ~= nil) then return end
+  local pages = {}
+  for i = from, to do
+    if type(self.lines[i]) ~= "string" then return end
+    pages[#pages + 1] = self.lines[i]
+  end
+  self.sendHeld = { species = msg.text, pages = pages, row = row }
+end
+
+-- Takes a held send-out's pages back off the queue: found behind the arrival
+-- row they were queued ahead of (by identity, so a page string said elsewhere
+-- is never touched), skipping the ball's row between.  A page already shown
+-- is left -- the queue had moved past it.
+function M:dropSendLine(held)
+  local lines = self.lines
+  if type(held) ~= "table" or type(lines) ~= "table" or held.row == nil then return false end
+  local at = nil
+  for i = #lines, 1, -1 do
+    if lines[i] == held.row then at = i; break end
+  end
+  if not at then return false end
+  local j = at - 1
+  while type(lines[j]) == "table" and lines[j].sendball ~= nil do j = j - 1 end
+  local dropped = false
+  for k = #held.pages, 1, -1 do
+    if j < 1 or lines[j] ~= held.pages[k] then break end
+    table.remove(lines, j)
+    j = j - 1
+    dropped = true
+  end
+  return dropped
+end
+
 -- Who is on the other side, in the words the engine's own battle uses for a
 -- trainer: the record's `name` (src/battle/BattleState.lua's `self.trainer.name
 -- or self.opponentName`, src/ui/gen2/BattleState.lua's `battle.trainer.name`)
@@ -3635,6 +3697,15 @@ function M:onEvent(msg)
   if self.phase == "setup" then self.phase = "play" end
 
   local kind = msg.t
+  -- A Gold send-out's line, held for the event behind it (`noteSendLine`):
+  -- a ROAR / WHIRLWIND drag-out says "<MON> was dragged out!" there instead.
+  -- The `moves` a send-out may state for the monster that left rides between
+  -- the two and is no answer.
+  local heldSend = self.sendHeld
+  if heldSend and kind ~= "moves" then self.sendHeld = nil end
+  if heldSend and kind == "msg" and M.draggedOutLine(msg.text, heldSend.species) then
+    self:dropSendLine(heldSend)
+  end
   -- A foe's sleep clip held behind its line (`M.viewerAnim`) goes on the
   -- queue ahead of anything that is not that line.
   if kind ~= "msg" then self:flushAnimBehind() end
@@ -3658,15 +3729,17 @@ function M:onEvent(msg)
     end
     if not (obeyed and msg.seq == obeyed + 1) then self:say(msg.text) end
     self:flushAnimBehind()
-    self:noteBideLine(msg.text)
+    self:noteBideLine(msg.text, msg.seq)
     -- The referee has narrated an escape itself (M.escapeLine): the ending
     -- adds no second one (`finish`).
     if M.escapeLine(msg.text) then self.escapeSaid = true end
 
   elseif kind == "anim" then
+    -- Whose move the next used line is (`noteBideAnim`).
+    self:noteBideAnim(msg)
     -- Queued with the message stream so the flash lands in referee order.
     -- `amount` is shake count on SHAKE_ANIM; ball id is stashed from `item`.
-    -- A Red status animation is this viewer's variant (`M.viewerAnim`), and
+    -- A Red / Gold status animation is this viewer's variant (`M.viewerAnim`), and
     -- the arena wears it as the condition's look (Vfx.forStatusAnim); a
     -- foe's sleep clip waits behind the line it follows on this cart.
     if msg.text then
@@ -3783,6 +3856,8 @@ function M:onEvent(msg)
     -- monster already standing there. Only the two queue appends move; the
     -- seat record still follows the referee at parse (`noteSlot` above), which
     -- is what every rule on this screen is read from.
+    self.lines = self.lines or {}
+    local lineFrom = #self.lines + 1
     if msg.text then
       if msg.slot ~= self:mySlot() then
         -- A wild POKeMON is nobody's send-out: the cart's "Wild X\nappeared!"
@@ -3801,10 +3876,12 @@ function M:onEvent(msg)
         if not parked then self:arriveOnSeat(msg.slot, true) end
       end
     end
+    local lineTo = #self.lines
     -- ...and then the arrival itself: the throw, and the burst it comes out of
     -- (`queueSpawnFx`). Queued, like every other effect, so it plays where the
     -- stream put it rather than the instant the packet was parsed.
     self:queueSpawnFx(msg.slot, msg.side)
+    self:noteSendLine(msg, lineFrom, lineTo)
 
   elseif kind == "damage" or kind == "drain" then
     -- Truth first, then the bar. `syncMineHp` keeps the party sheet on the
@@ -4098,6 +4175,8 @@ function M:onEvent(msg)
         or (self:generation() == 1 and self.bideOn1 == true)
       self.bideStoring = nil
       self.confusedNow = nil
+      -- A call filed last turn said what it called there, or called no BIDE.
+      self.callFiled = nil
     end
     if owed == nil then
       self.pendingTurn = true
@@ -4220,7 +4299,7 @@ function M:onEvent(msg)
         self:sketchMine(index, wearing and self.liveMoves
           or (self.mine and self.mine[index] and self.mine[index].moves), msg.moves)
         if wearing then
-          self.liveMoves = msg.moves
+          self.liveMoves = self:overlayRows(msg.moves)
           -- A MIMIC's spends, onto the party's list by slot (M.mimicOverlay /
           -- M.slotPp): Red's mimicked slot pays MIMIC's PP; Gold's never does,
           -- though its other slots still pay theirs.
@@ -4239,7 +4318,7 @@ function M:onEvent(msg)
         local generation = self:generation()
         self.liveMovesMimic = generation ~= 3
           and M.mimicOverlay(self.game, sheet and sheet.moves, msg.moves, generation)
-        self.liveMoves = msg.moves
+        self.liveMoves = self:overlayRows(msg.moves)
       end
     end
 
@@ -4316,6 +4395,35 @@ function M.redMaxPp(game, row)
     and type(data.moves) == "table" and data.moves[row.id] or nil
   if type(def) ~= "table" or tonumber(def.pp) == nil then return nil end
   return M.maxPpOf(def.pp, row.ppUps)
+end
+
+-- The list a TRANSFORM or a MIMIC lays over the party's, as this screen
+-- shows it.  Red's move menu prints GetMaxPP over the battle struct
+-- (pokered PrintMenuItem: BATTLE_MON_DATA, so engine/items/item_effects.asm
+-- GetMaxPP reads wBattleMonMoves for the move id and wBattleMonPP's top two
+-- bits for the PP Ups), not the referee's working ceiling: a Transform copy
+-- holds 5 PP and no PP Ups (transform.asm `.copyPPLoop` writes the whole
+-- byte), so it reads "5/<the copied move's base PP>"; a mimicked slot keeps
+-- MIMIC's PP byte (MimicEffect writes the move id alone), so it reads the
+-- mimicked move's base with MIMIC's PP Ups.  The Red referee states each
+-- row's `ppUps` (BattleSim Turn `_emitMoves`), so the cart's number is
+-- `redMaxPp` over the row; a row with no move record keeps the stated
+-- maximum.  Copies, so the event's own rows are left as they came.  Gold and
+-- Gen 3 keep the list as stated.
+function M:overlayRows(moves)
+  if self:generation() ~= 1 or type(moves) ~= "table" then return moves end
+  local out = {}
+  for i, row in ipairs(moves) do
+    if type(row) == "table" then
+      local copy = {}
+      for k, v in pairs(row) do copy[k] = v end
+      copy.maxPp = M.redMaxPp(self.game, row) or row.maxPp
+      out[i] = copy
+    else
+      out[i] = row
+    end
+  end
+  return out
 end
 
 -- Keep `mine[index].moves[].pp` in step with the referee so the FIGHT menu
@@ -5324,6 +5432,13 @@ end
 -- `levelSent` so `syncLevelHp` knows the referee will fight on the levelled
 -- pair from its next batch on.
 function M:syncFightMoves(mon, grew)
+  -- Never in a fight between players (LINK_MODES): no cart learns a move or
+  -- gains a level in a link battle -- pokered GainExperience (engine/battle/
+  -- experience.asm) returns at once on LINK_STATE_BATTLING, pokecrystal
+  -- GiveExperiencePoints (engine/battle/core.asm) on wLinkMode, and nothing
+  -- else in a Cable Club fight reaches LearnMove -- and both hubs ignore the
+  -- message there.  A screen that got here anyway (a stray exp) sends nothing.
+  if LINK_MODES[self.mode] then return false end
   local index = self:sheetIndexFor(mon)
   if not index then return false end
   local sheet = self.mine and self.mine[index]
@@ -5863,14 +5978,17 @@ function M:queueBall3(msg)
   end
 end
 
--- ------- Red's status animations, as this viewer's cart plays them
+-- ------- Red's and Gold's status animations, as this viewer's cart plays them
 --
 -- The Red referee names the sleeping and the confused monster's clip from
 -- the cart's own branches (BattleSim Turn `_statusAnim`, wave 5): pokered
 -- CheckPlayerStatusConditions plays SLP_PLAYER_ANIM *ahead of* FastAsleepText
 -- and CONF_PLAYER_ANIM behind IsConfusedText; CheckEnemyStatusConditions
 -- plays SLP_ANIM *behind* FastAsleepText and CONF_ANIM behind IsConfused
--- Text (engine/battle/core.asm).  "The player" is the owner's rule
+-- Text (engine/battle/core.asm).  The Gold referee states its ANIM_SLP /
+-- ANIM_CONFUSED by the same four ids, placed alike (BattleSim2 Turn
+-- `_statusAnim`: pokegold CheckPlayerTurn / CheckEnemyTurn), so this reads
+-- both carts.  "The player" is the owner's rule
 -- (docs/plans/gen12-referee-gaps-fix.md): against the computer side a, and in
 -- a link fight *both* sides -- each seat carries its own console's variant.
 -- So the screen across swaps it for a monster that is not its own: on this
@@ -6813,11 +6931,12 @@ local ENDINGS = {
 -- deliberately silent rather than printed raw: the result is the part that
 -- matters and it has already landed.
 --
--- No `catch`: every referee says the catch itself, in its cart's words --
--- pokered ItemUseBall's ItemUseBallText05 "All right! <MON> was caught!"
--- (BattleSim Turn, wave 5), the Gold referee's "Gotcha" (pokecrystal
--- Text_BallCaught, "Gotcha! <MON> was caught!"), Gen 3's "Gotcha! <MON> was
--- caught!" -- so a "Gotcha!" of this screen's under it was a line said twice.
+-- No `catch`: every referee says the catch itself, in its cart's words, as
+-- one line -- pokered ItemUseBall's ItemUseBallText05 "All right! <MON> was
+-- caught!" (BattleSim Turn, wave 5), pokecrystal / pokegold Text_BallCaught
+-- "Gotcha! <MON> was caught!" (BattleSim2 Turn's ball branch), Gen 3's
+-- "Gotcha! <MON> was caught!" -- so a "Gotcha!" of this screen's under it was
+-- a line said twice.
 local REASONS = {
   timeout    = "Nobody answered\nin time.",
   disconnect = "The link was lost.",
@@ -6840,8 +6959,11 @@ local REASONS = {
 -- behind PrintItemUseTextAndRemoveItem's "<PLAYER> used POKé DOLL!" and the
 -- cart prints nothing after it (the referee's "<PLAYER> used POKe DOLL!",
 -- BattleSim Turn `_resolveOneItem`, printed only in a wild fight); Gold's
--- referee still says "The wild pokemon ran away" (the referees' spellings;
--- the doll's tail is read with the accent or without).  The Red referee says "Got
+-- ends on its own, ItemUsedText's "<PLAYER> used the POKé DOLL." --
+-- PokeDollEffect sets wForcedSwitch and a DRAW behind UseItemText and prints
+-- nothing more (pokegold engine/items/item_effects.asm; BattleSim2 Turn's
+-- doll branch).  Both tails are read with the accent or without (the
+-- referees' spellings).  The Red referee says "Got
 -- away safely!" itself for a coop_wild runner (BattleSim Turn `_tryRun`, the
 -- roll R1d added), Gold's too (wave 5); SoloBattle rolls a solo wild RUN on
 -- the client and says nothing on a success.  So the ending says it only when
@@ -6852,10 +6974,11 @@ M.GOT_AWAY = "Got away safely!"
 local ESCAPE_TAILS = {
   " ran from battle!", " ran away scared!", " was blown away!", " fled from battle!",
   " fled in fear!", " used POKe DOLL!", " used POKé DOLL!",
+  " used the POKe DOLL.", " used the POKé DOLL.",
 }
 function M.escapeLine(text)
   if type(text) ~= "string" then return false end
-  if text == M.GOT_AWAY or text == "The wild pokemon ran away" then return true end
+  if text == M.GOT_AWAY then return true end
   for _, tail in ipairs(ESCAPE_TAILS) do
     if #text > #tail and text:sub(-#tail) == tail then return true end
   end
@@ -7163,8 +7286,10 @@ function M:sendChoice(fields)
   self.answeredTurn = true
   -- Whatever went, it is not a Bide going on until `pickMove` / `sendLockedFight`
   -- says so: an item or a switch ends one (pokecrystal `.reset_bide`), and
-  -- another move is not one.
+  -- another move is not one -- nor a METRONOME / MIRROR MOVE, until the
+  -- referee reports what it called (`noteBideAnim`).
   self.bideFiled, self.bideLocked = nil, nil
+  self.callFiled = nil
   self.passMove = nil
   return true
 end
@@ -7279,8 +7404,12 @@ function M:pickMove(index, mimic, pass)
     self.moveMemory = self.moveMemory or {}
     self.moveMemory[self.active or 1] = index
     -- A BIDE chosen: the turns after it may be a Bide going on (`bideLocked`).
+    -- A METRONOME or a MIRROR MOVE may call one: filed as a call, and a Bide
+    -- only once the referee reports BIDE on our seat (`noteBideAnim`).
     if M.isBideMove(moves[index], self.game) then
       self.bideFiled, self.bideSlot = true, index
+    elseif self:generation() ~= 3 and M.isCallMove(moves[index], self.game) then
+      self.callFiled = index
     end
   end
   return sent
@@ -7427,12 +7556,13 @@ function M:confirmPendingItem(itemId, amount)
   -- The bag is still spent below -- the bag working in a fight between
   -- players is this mod's rule (the carts lock it), and it is the bag's.
   if effect and effect.vitamin and amount == 1 and not LINK_MODES[self.mode] then
-    -- The sheet index is what the wire is stated in (the hub indexes the
-    -- `mons` array it was uploaded), and it is *not* the save.party position:
+    -- `pendingItemSlot` is the sheet index `commitItem` was handed -- an
+    -- index into `mine`, which is *not* the save.party position:
     -- `snapshotMons` skips a monster it cannot describe and one skip shifts
-    -- every later index. The drift is closed through the party position the
-    -- snapshot stamps on each sheet -- see `savePartyIndex`, which the exp
-    -- writeback resolves through too.
+    -- every later index.  (The wire named the same monster by the party
+    -- position the snapshot stamped on that sheet, `wireSlotOf`.)  The
+    -- writeback resolves the sheet through that stamp too -- see
+    -- `savePartyIndex`, which the exp writeback reads as well.
     M.writebackVitamin(self.game, self:savePartyIndex(sheetIndex), id)
   end
   if effect and effect.noConsume then
@@ -7737,8 +7867,22 @@ end
 -- storing turn after it with StoringEnergyText, "<MON> is storing energy!"
 -- (the referee's `bideStore`).  A turn that said neither -- the release
 -- ("unleashed energy!"), or a CantMove that ended the Bide (sleep,
--- paralysis, a flinch, confusion) -- reopens the move list, so a wrong
--- reading can only cost a screen, never pick a move for the player.
+-- paralysis, a flinch, confusion) -- reopens the move list.
+--
+-- The two readings do not cost the same.  One that ends a Bide too early
+-- reopens the move list -- a screen the cart would not have shown, whose
+-- pick the referee overrides while the Bide holds.  One that starts a Bide
+-- that is not ours sends FIGHT with no move list: a move the player never
+-- picked.  And both referees name every monster by its bare species, so in
+-- a mirror match -- a foe or a co-op partner of our species -- "<MON> used
+-- BIDE!" can be the other one's.  So a start is taken only (a) when this
+-- client filed BIDE (`bideFiled`), or a METRONOME / MIRROR MOVE whose call
+-- the referee reported as BIDE on our seat (`noteBideAnim`), and (b) when
+-- the used line is not straight behind a move animation on another seat
+-- (`usedLineOurs`: both referees put the `anim` on the user's seat just
+-- ahead of its used line).  The release and the CantMove ends stay
+-- unconditional: wrong, they only cost the screen.  Red's reading
+-- (`bideLine1`) takes its start the same way.
 
 -- A sheet row by its effect number -- both referees number BIDE's 26
 -- (BattleSim Effects BIDE_EFFECT, BattleSim2 EFFECT_BIDE) -- and an engine
@@ -7752,6 +7896,43 @@ function M.isBideMove(move, game)
     and data.moves[move.id] or nil
   return type(def) == "table"
     and (def.effect == "EFFECT_BIDE" or def.effect == "BIDE_EFFECT")
+end
+
+-- A move an `anim` names (its `text`, the move's id) is a Bide: the row of
+-- that id on `moves` (the list the seat fights with), else the move record,
+-- else the id BIDE itself -- a METRONOME's call is off the pool, which no
+-- sheet of ours holds.
+function M.isBideId(id, moves, game)
+  if type(id) ~= "string" or id == "" then return false end
+  for _, move in ipairs(type(moves) == "table" and moves or {}) do
+    if type(move) == "table" and move.id == id then return M.isBideMove(move, game) end
+  end
+  if id:upper() == "BIDE" then return true end
+  return M.isBideMove({ id = id }, game)
+end
+
+-- A move that calls another: METRONOME and MIRROR MOVE, numbered alike by
+-- both referees (BattleSim Effects METRONOME_EFFECT / MIRROR_MOVE_EFFECT,
+-- BattleSim2 EFFECT_METRONOME / EFFECT_MIRROR_MOVE: 83 and 9), by the move
+-- record's effect name for an engine slot.  pokered MirrorMoveCheck /
+-- `.metronomeCheck` and pokecrystal BattleCommand_Metronome / MirrorMove run
+-- the called move as their own, its used line and all, so a call may be a
+-- BIDE.
+local CALL_EFFECT_NAMES = {
+  METRONOME_EFFECT = true, EFFECT_METRONOME = true,
+  MIRROR_MOVE_EFFECT = true, EFFECT_MIRROR_MOVE = true,
+}
+function M.isCallMove(move, game)
+  if type(move) ~= "table" then return false end
+  local effect = tonumber(move.effect)
+  if effect ~= nil then
+    return effect == Effects1.idOf("METRONOME_EFFECT")
+      or effect == Effects1.idOf("MIRROR_MOVE_EFFECT")
+  end
+  local data = game and game.data
+  local def = type(data) == "table" and type(data.moves) == "table"
+    and data.moves[move.id] or nil
+  return type(def) == "table" and CALL_EFFECT_NAMES[def.effect] == true
 end
 
 -- Gold's Bide, read off the referee's lines in pokecrystal's words (wave 5;
@@ -7841,8 +8022,11 @@ end
 
 -- This screen's half: a line about our monster's Bide.  Gold reads the
 -- storing line every turn (`bideLine`); Red the lines that bound it
--- (`bideLine1`, kept in `bideOn1` from the start to the end).
-function M:noteBideLine(text)
+-- (`bideLine1`, kept in `bideOn1` from the start to the end).  A start is
+-- ours only when this client filed the BIDE and the used line is not another
+-- seat's (`usedLineOurs`) -- the "Bide that asks" note above has why.
+-- `seq` is the line's own event number.
+function M:noteBideLine(text, seq)
   local sheet = self.mine and self.mine[self.active or 1]
   local species = sheet and sheet.species
   if self:generation() == 1 then
@@ -7853,7 +8037,7 @@ function M:noteBideLine(text)
     local said = M.bideLine1(text, species, M.bideLabels(sheet and sheet.moves, self.game),
       self.confusedNow)
     if said == "start" then
-      self.bideOn1 = true
+      if self.bideFiled and self:usedLineOurs(seq) then self.bideOn1 = true end
     elseif said == "release" or said == "end" then
       self.bideOn1, self.bideFiled = nil, nil
     end
@@ -7861,11 +8045,41 @@ function M:noteBideLine(text)
   end
   if not self.bideFiled then return end
   local said = M.bideLine(text, species, M.bideLabels(sheet and sheet.moves, self.game))
-  if said == "store" or said == "start" then
+  if said == "store" or (said == "start" and self:usedLineOurs(seq)) then
     self.bideStoring = true
   elseif said == "release" then
     self.bideFiled, self.bideStoring = nil, nil
   end
+end
+
+-- An `anim` event, for the Bide reading: which seat the next used line is
+-- about (both referees emit the move's animation on the user's seat straight
+-- ahead of its used line -- BattleSim / BattleSim2 Turn `_useMove`), and a
+-- METRONOME / MIRROR MOVE this client filed that called BIDE on our seat --
+-- pokered MetronomePickMove / MirrorMoveCopyMove and pokecrystal
+-- BattleCommand_Metronome / MirrorMove run the called move as their own, so
+-- the call's animation names it there -- a Bide filed as surely as one
+-- picked off the list.
+function M:noteBideAnim(msg)
+  self.animSeq, self.animSlot = tonumber(msg.seq), msg.slot
+  if self.callFiled and msg.slot ~= nil and msg.slot == self:mySlot() then
+    local sheet = self.mine and self.mine[self.active or 1]
+    local moves = self.liveMoves or (sheet and sheet.moves)
+    if M.isBideId(msg.text, moves, self.game) then
+      self.bideFiled, self.bideSlot = true, self.callFiled
+      self.callFiled = nil
+    end
+  end
+end
+
+-- False when the used line at `seq` follows straight on a move animation on
+-- another seat (`noteBideAnim`): that seat's line, whatever species it names.
+-- A stream with no animation ahead of the line (an older referee) is read as
+-- before.
+function M:usedLineOurs(seq)
+  seq = tonumber(seq)
+  if not (seq and self.animSeq and self.animSeq == seq - 1) then return true end
+  return self.animSlot == nil or self.animSlot == self:mySlot()
 end
 
 -- ...and Red's own: pokered MainInBattleLoop (engine/battle/core.asm) runs

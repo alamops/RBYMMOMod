@@ -602,6 +602,88 @@ test('Pay Day rides the outcome of the same fights on both hubs and both sims', 
   assert.deepStrictEqual(relayModes, ['coop_npc', 'coop_wild', 'wild'], 'never a player-vs-player mode');
 });
 
+test('a moveset is heard in the fights against the computer alone, on both hubs', () => {
+  // No cart levels or learns in a link battle (pokered GainExperience returns
+  // on LINK_STATE_BATTLING, pokecrystal / pokegold GiveExperiencePoints on
+  // wLinkMode, pokeemerald Cmd_getexp under BATTLE_TYPE_LINK), so both hubs
+  // drop `mmo.battle_moveset` whole outside LEARN_MODES -- a Gold 1v1 used to
+  // hand forged 999 stats to the referee's levelUp. The hub parity driver
+  // (k9_pvp_dropped) pins the behaviour on the real referees; this pins the
+  // one set and the one gate on each hub.
+  const keys = (body) => [...body.matchAll(/(\w+)\s*=\s*true/g)].map((x) => x[1]).sort();
+  const hubSrc = read('src/Hub.lua');
+  const relaySrc = read('server/lib/relay.js');
+  const hub = hubSrc.match(/local LEARN_MODES\s*=\s*\{([^}]*)\}/);
+  assert.ok(hub, 'Hub.lua must declare local LEARN_MODES');
+  const relay = relaySrc.match(/const LEARN_MODES\s*=\s*new Set\(\[([^\]]*)\]\)/);
+  assert.ok(relay, 'relay.js must declare const LEARN_MODES');
+  const relayModes = [...relay[1].matchAll(/'(\w+)'/g)].map((x) => x[1]).sort();
+  assert.deepStrictEqual(keys(hub[1]), relayModes, 'Hub.lua and relay.js hear a moveset in the same modes');
+  assert.deepStrictEqual(relayModes, ['coop_npc', 'coop_wild', 'wild'], 'never a player-vs-player mode');
+  const payDay = hubSrc.match(/local PAY_DAY_MODES\s*=\s*\{([^}]*)\}/);
+  assert.deepStrictEqual(keys(hub[1]), keys(payDay[1]), "the fights the referees give experience in, Pay Day's");
+  const hubFn = hubSrc.match(/function M:applyBattleMoveset\(record, client, payload\)\n([^\n]*)\n([^\n]*)\n/);
+  assert.ok(hubFn, 'Hub.lua must define M:applyBattleMoveset');
+  assert.strictEqual(hubFn[2].trim(), 'if not LEARN_MODES[record.mode] then return false end',
+    "Hub.lua: the mode gate is the method's first rule after its argument check");
+  const relayFn = relaySrc.match(/  applyBattleMoveset\(record, client, payload\) \{\n([^\n]*)\n([^\n]*)\n/);
+  assert.ok(relayFn, 'relay.js must define applyBattleMoveset');
+  assert.strictEqual(relayFn[2].trim(), 'if (!LEARN_MODES.has(record.mode)) return false;',
+    "relay.js: the same gate in the same place");
+});
+
+test('cleanInt is Wire.int\'s reading: what LuaJIT\'s tonumber refuses, it refuses', () => {
+  // cleanInt was Number(value): true read as 1, false / null / '' / [] as 0,
+  // [5] as 5, where Wire.int (tonumber) says nil to every one -- so a Gen 1 /
+  // Gen 2 `maxPp: true`, or a `pp: null`, was a sheet one hub kept and the
+  // other refused (the review's differential fuzzer). It is luaInt now; the hub
+  // parity driver (review_twin_readings) pins the fields, this the reading.
+  const values = [true, false, null, undefined, '', ' ', [], [5], {}, { a: 1 }, '0x1p4', ' 7 ',
+    '0b11', '+9', '9.', 7.9, -0.5, 'nan', 'Infinity', '1e1', '\u00a05', 0, 100, 101, -1];
+  for (const v of values) {
+    assert.strictEqual(sanitize.cleanInt(v, 0, 100), sanitize.luaInt(v, 0, 100),
+      `cleanInt(${JSON.stringify(v)}) reads as luaInt`);
+  }
+  for (const v of [true, false, null, '', [], [5], {}]) {
+    assert.strictEqual(sanitize.cleanInt(v, 0, 100), null, `${JSON.stringify(v)} is no number`);
+  }
+  const row = {
+    id: 'm', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  assert.strictEqual(sanitize.cleanBattleMove({ ...row, maxPp: true }, 1), null, 'maxPp: true refuses a Gen 1 row');
+  assert.strictEqual(sanitize.cleanBattleMove({ ...row, maxPp: true }, 2), null, '...and a Gold one');
+  assert.strictEqual(sanitize.cleanBattleMove({ ...row, pp: null }, 1), null, 'a null PP is no PP');
+  assert.ok(sanitize.cleanBattleMove({ ...row, maxPp: ' 30 ' }, 1), 'while a string tonumber reads is a number');
+});
+
+test('a monster\'s own generation refuses the party when it is no generation, hub or none', () => {
+  // Wire.battleParty let an unreadable tag (6, -6, "day") fall through to its
+  // stat-key sniff when no hub generation was given, where cleanBattleParty
+  // refused -- one upload, two answers. Both refuse now (the stricter reading;
+  // every hub passes its generation, so no caller read the fallback).
+  const lua = read('src/Wire.lua');
+  assert.ok(/if hadExplicit then\n\s*local monGen = M\.int\(entry\.generation, 1, M\.GENERATION_MAX\)\n\s*if not monGen or \(hubGen and monGen ~= hubGen\) then return nil end/
+    .test(lua), 'Wire.battleParty: an explicit tag is a generation or the party is refused');
+  const sheet = (generation) => ({
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    generation,
+    stats: {
+      atk: 90, def: 90, spd: 90, spc: 90,
+    },
+    moves: [{
+      id: 'm', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  });
+  for (const g of [6, -6, 0, 'day', true]) {
+    assert.strictEqual(sanitize.cleanBattleParty({ battle: 'b1', mons: [sheet(g)] }), null,
+      `a sheet tagged ${JSON.stringify(g)} refuses the party`);
+  }
+  assert.ok(sanitize.cleanBattleParty({ battle: 'b1', mons: [sheet(1)] }), 'a real one is read');
+});
+
 test('Hub.lua and relay.js name a seat\'s cart family the same way', () => {
   // The referees read a fighter's `family` -- Gen 3's obedience (Focus Punch
   // is exempt on FireRed / LeafGreen, not on Emerald; gen3-battle-sheet.md

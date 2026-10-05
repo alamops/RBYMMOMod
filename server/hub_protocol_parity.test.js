@@ -924,6 +924,7 @@ function runJs() {
     ...runWave4(),
     ...runWave5(),
     ...runWave6(),
+    ...runReview(),
   ];
 }
 
@@ -2260,7 +2261,9 @@ function readGap(kind, input, gen) {
 /*
  * A mid-fight level-up reaches the referee (contract K9), and a learn keeps
  * highCrit / PP Ups / Gold priority (K8): twin of levelFight / levelFight3 in
- * the Lua driver, whose header argues each step. The sim's levelUp is a stub
+ * the Lua driver, whose header argues each step. A wild fight: a fight against
+ * the computer is the only kind the message is heard in (relay LEARN_MODES;
+ * k9_pvp_dropped has the link fights). The sim's levelUp is a stub
  * recording each call; the hub's own rows are set first so the digest never
  * leans on how either sim's copyMove spells a field it was not given.
  */
@@ -2279,9 +2282,15 @@ function levelFight(generation) {
   const relay = makeGenRelay(makeClock(), generation);
   const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
   const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
-  const b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
-  const sess = openFight(relay, a, b);
-  uploadReady(relay, a, b, sess.id, [sheet12(generation)], [sheet12(generation)]);
+  const sess = { id: 'lv' };
+  relay.openCoopBattle(sess.id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, chart: CHART });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'a', mons: [sheet12(generation)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'b', mons: [sheet12(generation)],
+  });
   const record = relay.battles.get(sess.id);
   if (!record || !record.sim) return { opened: false };
   const calls = [];
@@ -2333,13 +2342,15 @@ function levelFight3() {
   const a = dialAs(relay, 'ANN', ID_A, {
     generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
   });
-  const b = dialAs(relay, 'BOB', ID_B, {
-    generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
-  });
-  const sess = openFight(relay, a, b);
+  const sess = { id: 'lv3' };
+  relay.openCoopBattle(sess.id, [a.id], { mode: 'wild', hostId: a.id });
   relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
-  relay.handle(a.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
-  relay.handle(b.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'a', mons: [mon3()],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'b', mons: [mon3({ catchRate: 45 })],
+  });
   const record = relay.battles.get(sess.id);
   if (!record || !record.sim) return { opened: false };
   let calls = 0;
@@ -3391,6 +3402,218 @@ function runWave6() {
         goldNamed: npcFight(2, 'coop_npc', { name: 'TWINS AMY & MAY', aiMods: [1], bag: xItem }),
       },
     },
+  ];
+}
+
+/*
+ * The review's fixes (FX-W of docs/plans/gen12-referee-gaps-fix.md): twins of
+ * k9_pvp_dropped, basepp_kept and review_twin_readings in the Lua driver,
+ * whose header argues each. In short: no cart levels or learns in a link
+ * battle, so both hubs drop `mmo.battle_moveset` whole in a 1v1 and a
+ * coop_pvp (LEARN_MODES); a kept row keeps the Red referee's `basePp`
+ * (nextMoves12); and the twins read a monster's out-of-range `generation`
+ * and every value LuaJIT's tonumber says nil to alike (cleanInt is luaInt).
+ */
+function pvpSnap(live) {
+  const keys = Object.keys(live.stats || {}).sort();
+  const parts = [String(live.level), String(live.hp), String(live.maxHp)];
+  for (const k of keys) parts.push(`${k}=${live.stats[k]}`);
+  for (const m of live.moves || []) parts.push(`${m.id}:${m.power}`);
+  return parts.join(',');
+}
+
+function pvpForgery(generation, mode) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  let id;
+  if (mode === '1v1') {
+    id = openFight(relay, a, b).id;
+    uploadReady(relay, a, b, id, [sheet12(generation)], [sheet12(generation)]);
+  } else {
+    const c = dialAs(relay, 'CAL', ID_C, { generation, sprite });
+    const d = dialAs(relay, 'DEE', ID_D, { generation, sprite });
+    id = 'kp';
+    relay.openCoopBattle(id, [a.id, b.id, c.id, d.id], {
+      mode: 'coop_pvp', hostId: a.id, sides: { a: [a.id, b.id], b: [c.id, d.id] },
+    });
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+    for (const who of [a, b, c, d]) {
+      relay.handle(who.id, { type: 'mmo.battle_party', battle: id, mons: [sheet12(generation)] });
+    }
+  }
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  const live = record.sim.byId.get(a.id).mons[0];
+  const forged = generation === 2
+    ? {
+      atk: 999, def: 999, spe: 999, spa: 999, spd: 999,
+    }
+    : {
+      atk: 999, def: 999, spd: 999, spc: 999,
+    };
+  const nuke = row12('NUKE', { power: 250 });
+  const steps = [pvpSnap(live)];
+  const send = (extra) => {
+    relay.handle(a.id, {
+      type: 'mmo.battle_moveset', battle: id, mon: 0, ...extra,
+    });
+    steps.push(pvpSnap(live));
+  };
+  send({ moves: [row12('thump')], stats: forged, maxHp: 999 });
+  send({
+    moves: [row12('thump')], level: 100, stats: forged, maxHp: 999,
+  });
+  send({ moves: [row12('thump'), nuke] });
+  send({ moves: [nuke] });
+  const applied = relay.applyBattleMoveset(record, { id: a.id }, {
+    mon: 0, moves: [row12('thump'), nuke], level: 100, stats: forged, maxHp: 999,
+  });
+  steps.push(pvpSnap(live));
+  return {
+    opened: true, mode: record.mode, applied, steps,
+  };
+}
+
+function pvpForgery3() {
+  const relay = makeGenRelay(makeClock(), 3);
+  const a = dialAs(relay, 'ANN', ID_A, {
+    generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+  });
+  const b = dialAs(relay, 'BOB', ID_B, {
+    generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+  });
+  const sess = openFight(relay, a, b);
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  const record = relay.battles.get(sess.id);
+  if (!record || !record.sim) return { opened: false };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: sess.id,
+    mon: 0,
+    moves: [move3(), move3({
+      id: 'NUKE3', num: 120, power: 250, priority: 5,
+    })],
+  });
+  const fighter = record.sim.byId.get(a.id);
+  return {
+    opened: true,
+    moves: fighter.mons[0].moves.map((m) => `${m.id}:${m.power}`),
+    battlerKept: fighter.b.moves === fighter.mons[0].moves,
+  };
+}
+
+function basePpKept() {
+  const relay = makeGenRelay(makeClock(), 1);
+  const a = dialAs(relay, 'ANN', ID_A, { generation: 1, sprite: DEFAULT_SPRITE });
+  const id = 'bp';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  const stated = row12('thump', { pp: 35, maxPp: 42, ppUps: 1 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet12(1, { moves: [stated] })],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet12(1)],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  const live = record.sim.byId.get(a.id).mons[0];
+  const look = () => ({
+    level: live.level,
+    rows: live.moves.map((m) => ({
+      id: m.id,
+      pp: orNil(m.pp),
+      maxPp: orNil(m.maxPp),
+      basePp: orNil(m.basePp),
+      ppUps: orNil(m.ppUps),
+    })),
+  });
+  const steps = [look()];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [stated], level: 51,
+  });
+  steps.push(look());
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [row12('thump'), row12('NEW', { pp: 10, maxPp: 10 })],
+  });
+  steps.push(look());
+  return { opened: true, steps };
+}
+
+function reviewReadings() {
+  const oneRow = (extra) => [row12('m', extra)];
+  const cases = [];
+  const add = (kind, input, gen) => cases.push([kind, input, gen]);
+  for (const g of [6, -6, 0, 4, 'day', true, {}, [2], 1.5, '2', 2, null]) {
+    add('party', { battle: 'b1', mons: [sheet12(2, { generation: g })] });
+    add('party', { battle: 'b1', generation: 1, mons: [sheet12(1, { generation: g })] });
+  }
+  const odd = [true, false, null, '', ' ', [5], {}, '0x1p4', ' 7 ', '0b11', '+9', '9.', 7.9, '1e1', 'nan'];
+  for (const v of odd) {
+    for (const gen of [1, 2]) add('move', row12('m', { maxPp: v }), gen);
+    add('move', row12('m', { pp: v }), 1);
+    add('move', row12('m', { power: v }), 2);
+    add('move', row12('m', { accuracy: v }), 1);
+    add('move', row12('m', { type: v }), 2);
+    add('move', row12('m', { effect: v }), 1);
+    add('move', row12('m', { chance: v }), 2);
+    add('mon', sheet12(1, { level: v }));
+    add('mon', sheet12(2, { hp: v }));
+    add('mon', sheet12(1, { maxHp: v }));
+    add('mon', sheet12(2, {
+      stats: {
+        atk: v, def: 90, spe: 90, spa: 90, spd: 90,
+      },
+    }));
+    add('mon', sheet12(1, { slot: v }));
+    add('mon', sheet12(1, { baseSpd: v }));
+    add('mon', sheet12(2, { catchRate: v }));
+    add('moveset', { battle: 'b1', mon: v, moves: oneRow() }, 1);
+    add('choice', { battle: 'b1', action: 'fight', move: v }, 2);
+    add('choice', { battle: 'b1', action: 'switch', slot: v }, 1);
+    add('event', {
+      battle: 'b1', seq: v, t: 'msg', text: 'HI',
+    }, 1);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'damage', slot: v, amount: 3,
+    }, 2);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'damage', slot: 0, amount: v,
+    }, 1);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'damage', slot: 0, hp: v, maxHp: 50,
+    }, 2);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'exp', slot: 0, level: v,
+    }, 1);
+    add('ruleset', { chart: CHART, seed: v }, 1);
+    add('party', { battle: 'b1', mons: [sheet12(1)], bag: [{ id: 'POTION', count: v }] }, 1);
+    add('party', { battle: 'b1', mons: [sheet12(2)], badges: v }, 2);
+  }
+  return cases.map(([kind, input, gen]) => ({ kind, got: orNil(readGap(kind, input, gen)) }));
+}
+
+function runReview() {
+  return [
+    {
+      name: 'k9_pvp_dropped',
+      result: {
+        red1v1: pvpForgery(1, '1v1'),
+        redCoopPvp: pvpForgery(1, 'coop_pvp'),
+        gold1v1: pvpForgery(2, '1v1'),
+        goldCoopPvp: pvpForgery(2, 'coop_pvp'),
+        gen31v1: pvpForgery3(),
+      },
+    },
+    { name: 'basepp_kept', result: basePpKept() },
+    { name: 'review_twin_readings', result: reviewReadings() },
   ];
 }
 

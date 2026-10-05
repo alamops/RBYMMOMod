@@ -333,6 +333,57 @@ eq(Effects.itemFailsOnFainted(Effects.itemEffect("REVIVE")), false,
    "Revive is faintedOnly, not a fail-on-fainted")
 eq(Effects.itemFailsOnFainted(nil), false, "nil effect is not fail-on-fainted")
 
+-- RP1 (gen12-referee-gaps-fix polish): GetMaxPP over the PP Up bits the byte
+-- holds now (Effects.getMaxPp; engine/items/item_effects.asm GetMaxPP /
+-- AddBonusPP), the base behind a sheet's stated maximum (basePpOf),
+-- ItemUsePPRestore's `.restorePP` (restorePp) -- a slot past its wrap brought
+-- DOWN to the maximum, MAX ETHER's whole-byte compare -- and a MIMIC's
+-- switch-out re-reading GetMaxPP over the bits its slot holds by then.
+do
+  eq(Effects.getMaxPp(35, 0), 35, "GetMaxPP: no PP Up is the base")
+  eq(Effects.getMaxPp(35, 3), 56, "...each PP Up adds a fifth of it")
+  eq(Effects.getMaxPp(40, 3), 61, "...capped at 7 a PP Up")
+  eq(Effects.getMaxPp(10, 1), 12, "...a fifth of 10 is 2")
+  eq(Effects.basePpOf(56, 3), 35, "the base behind 56 with three PP Ups")
+  eq(Effects.basePpOf(61, 3), 40, "...behind 61")
+  eq(Effects.basePpOf(18, 0), 18, "...with none, the maximum itself")
+  eq(Effects.basePpOf(17, 1), nil, "...and none behind 17 with one (16, then 18)")
+  eq(Effects.basePpOf(99, 0), nil, "...nor past the six bits a base fits in")
+
+  local m = { pp = 63, ppUps = 0, maxPp = 35 }
+  eq(Effects.restorePp(m, 10), true, "ETHER on a slot past its wrap: restored")
+  eq(m.pp, 35, "...brought down to GetMaxPP (63 + 10 is past it)")
+  eq(Effects.restorePp(m, 10), false, "ETHER at the maximum: `ret z`, no effect")
+  m = { pp = 30, ppUps = 0, maxPp = 35 }
+  eq(Effects.restorePp(m, 10), true, "ETHER: 10 more...")
+  eq(m.pp, 35, "...kept at the maximum")
+  m = { pp = 5, ppUps = 2, maxPp = 49 }
+  Effects.restorePp(m, 10)
+  eq(m.pp .. "/" .. m.ppUps, "15/2", "ETHER below the maximum: +10, the PP Ups beside it")
+  m = { pp = 20, ppUps = 1, maxPp = 20 }
+  eq(Effects.restorePp(m, true), true,
+     "MAX ETHER on a full move with a PP Up: the whole byte is not the maximum -- restored")
+  eq(m.pp, 20, "...to what it had")
+  m = { pp = 20, ppUps = 0, maxPp = 20 }
+  eq(Effects.restorePp(m, true), false, "MAX ETHER on a full move with none: no effect")
+  m = { pp = 63, ppUps = 3, maxPp = 56 }
+  eq(Effects.restorePp(m, true), true, "MAX ETHER past a wrap: restored")
+  eq(m.pp, 56, "...down to the maximum")
+
+  local user = dummyMon({ moves = {
+    { id = "MIMIC", name = "MIMIC", pp = 1, maxPp = 12, basePp = 10, ppUps = 1, power = 0,
+      accuracy = 255, type = 0, effect = 82, chance = 0 },
+  } })
+  apply(82, user, dummyMon({ species = "Beta" }), { mimicSlot = 1 })
+  eq(user.moves[1].maxPp .. "/" .. tostring(user.moves[1].basePp), "12/10",
+     "MIMIC's copy keeps MIMIC's GetMaxPP and the base behind it (the ETHER reads the party's MIMIC)")
+  user.moves[1].pp, user.moves[1].ppUps = 63, 0      -- a borrow, as DecrementPP leaves it
+  Effects.restoreMoves(user)
+  local back = user.moves[1]
+  eq(back.id .. ":" .. back.pp .. "/" .. back.ppUps .. "/" .. back.maxPp, "MIMIC:63/0/10",
+     "the switch-out's MIMIC: the slot's byte, and GetMaxPP over the PP Ups it holds now")
+end
+
 if failures > 0 then
   io.stderr:write(failures .. " failure(s)\n")
   os.exit(1)

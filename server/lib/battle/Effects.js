@@ -820,6 +820,62 @@ function hpDv(dvs) {
 }
 
 // ------------------------------------------------------------------
+// A move's maximum PP, and the PP items that read it
+// ------------------------------------------------------------------
+
+// GetMaxPP (engine/items/item_effects.asm): the move's base PP plus, for each
+// PP Up the PP byte's top two bits count *now*, AddBonusPP's fifth of the
+// base capped at 7. So a DecrementPP that wraps a slot at 0 (Turn `stepPp`:
+// 63 PP and one PP Up fewer) moves the maximum with the bits, and the cart's
+// ETHER reads that. The client's sheet states the same number
+// (MediatedBattle maxPpOf), which is what `basePpOf` reads the base back out
+// of: the referee holds no move table.
+const PP_UP_BONUS_MAX = 7;
+const PP_BASE_MAX = 63; // PP_MASK: a base PP is the low six bits
+
+function getMaxPp(base, ups) {
+  return base + ups * Math.min(PP_UP_BONUS_MAX, Math.floor(base / 5));
+}
+
+// The base PP behind a stated maximum: the one `base` (0..PP_BASE_MAX) whose
+// GetMaxPP over `ups` is `maxPp` -- strictly increasing in the base, so there
+// is at most one -- or null for a number no base gives (a sheet stating a
+// maximum of its own), whose maximum then never moves.
+function basePpOf(maxPp, ups) {
+  for (let base = Math.min(maxPp, PP_BASE_MAX); base >= 0; base -= 1) {
+    const value = getMaxPp(base, ups);
+    if (value === maxPp) return base;
+    if (value < maxPp) return null;
+  }
+  return null;
+}
+
+// ItemUsePPRestore's `.restorePP` (item_effects.asm), on one move row, for an
+// ETHER's 10 (`amount` a number) or a MAX ETHER (`amount` true; the ELIXERs
+// run it on every slot). `b` is GetMaxPP -- the row's `maxPp`, which the
+// sheet states and a wrap re-reads. ETHER: the PP's low six bits equal to
+// `b` is no effect (`ret z`); otherwise +10, kept only below `b`. MAX ETHER
+// compares the WHOLE byte with `b` -- the cart's own bug ("doesn't mask out
+// the upper two bits"), so a full move with PP Ups is restored to what it
+// has. Either writes the PP Ups beside `b`: a slot past its wrap -- 63 over
+// a lower maximum -- is brought DOWN to it, and that is a restore. True when
+// the cart's flag says restored: `add b` left a byte other than 0.
+function restorePp(move, amount) {
+  const pp = Math.max(0, int(move.pp, 0));
+  const ups = int(move.ppUps, 0) % 4;
+  let b = Math.max(0, int(move.maxPp, pp));
+  if (amount === true) {
+    if (ups * 64 + pp === b) return false;
+  } else {
+    if (pp === b) return false;
+    const next = pp + int(amount, 0);
+    if (next < b) b = next;
+  }
+  move.pp = b;
+  return (ups * 64 + b) % 256 !== 0;
+}
+
+// ------------------------------------------------------------------
 // Transform (engine/battle/move_effects/transform.asm), and undoing it
 // ------------------------------------------------------------------
 
@@ -830,7 +886,7 @@ function copyMoveRow(m) {
     power: Math.max(0, int(m.power, 0)), accuracy: Math.max(0, int(m.accuracy, 255)),
     type: Math.max(0, int(m.type, 0)), effect: Math.max(0, int(m.effect, 0)),
     chance: Math.max(0, int(m.chance, 0)), highCrit: m.highCrit === true,
-    ppUps: m.ppUps,
+    ppUps: m.ppUps, basePp: m.basePp,
   };
 }
 
@@ -880,9 +936,13 @@ function restoreMoves(mon) {
       const back = copyMoveRow(row);
       back.pp = Math.max(0, int(mon.moves[i - 1].pp, back.pp));
       // ...and its PP Ups: one byte, which a wrapping DecrementPP borrows
-      // from in both copies alike (Turn `_decrementPp`).
+      // from in both copies alike (Turn `_decrementPp`) -- and GetMaxPP over
+      // MIMIC's base re-reads them (`getMaxPp`).
       if (mon.moves[i - 1].ppUps !== undefined && mon.moves[i - 1].ppUps !== null) {
         back.ppUps = mon.moves[i - 1].ppUps;
+      }
+      if (back.basePp !== undefined && back.basePp !== null) {
+        back.maxPp = getMaxPp(back.basePp, int(back.ppUps, 0));
       }
       mon.moves[i - 1] = back;
     }
@@ -1313,6 +1373,9 @@ function applyPrimary(ctx) {
       pp: Math.max(0, int(slotMove.pp, 0)),
       maxPp: slotMove.maxPp,
       ppUps: slotMove.ppUps,
+      // The PP byte is still MIMIC's, and so is the GetMaxPP an ETHER reads
+      // for the slot (the party's MIMIC, ItemUsePPRestore): its base rides on.
+      basePp: slotMove.basePp,
       power: Math.max(0, int(source.power, 0)),
       accuracy: Math.max(0, int(source.accuracy, 255)),
       type: Math.max(0, int(source.type, 0)),
@@ -2313,6 +2376,11 @@ module.exports = {
   statExpBonus,
   calcStat,
   hpDv,
+  PP_UP_BONUS_MAX,
+  PP_BASE_MAX,
+  getMaxPp,
+  basePpOf,
+  restorePp,
   untransform,
   restoreMoves,
   sleepTurns,

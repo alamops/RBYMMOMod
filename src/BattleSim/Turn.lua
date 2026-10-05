@@ -380,11 +380,12 @@ local LOAF_TEXT = {
 }
 
 -- ItemUseBall's misses by shake count (`.printMessage`, wPokeBallAnimData
--- $20 / $61 / $62 / $63: ItemUseBallText01..04) -- POKeMON spelled the way
--- every referee line spells it, since the wire carries no accent.
+-- $20 / $61 / $62 / $63: ItemUseBallText01..04) -- the cart's "#MON" is its
+-- charmap's "POKé" ($54) and ends in the é ($BA) a Red `msg` now carries
+-- (Wire.battleText), so POKéMON is spelled as the cart prints it.
 local BALL_MISS_TEXT = {
-  [0] = "You missed the POKeMON!",
-  [1] = "Darn! The POKeMON broke free!",
+  [0] = "You missed the POKéMON!",
+  [1] = "Darn! The POKéMON broke free!",
   [2] = "Aww! It appeared to be caught!",
   [3] = "Shoot! It was so close too!",
 }
@@ -402,10 +403,11 @@ local CURE_TEXT = {
 }
 
 -- An item's name in a sentence: its id's words, which are the cart's item
--- names -- POKe for the accent the wire cannot carry, GUARD SPEC.'s stop.
+-- names (data/items/names.asm) -- "POKé BALL", "POKé DOLL", "POKé FLUTE" with
+-- the é a Red `msg` carries (Wire.battleText), GUARD SPEC.'s stop.
 local function itemLabel(id)
   local label = tostring(id or "ITEM"):gsub("_", " ")
-  label = label:gsub("^POKE ", "POKe ")
+  label = label:gsub("^POKE ", "POKé ")
   if label == "GUARD SPEC" then label = "GUARD SPEC." end
   return label
 end
@@ -428,7 +430,15 @@ end
 local function copyMove(raw)
   if type(raw) ~= "table" then return nil end
   local pp = max(0, int(raw.pp, 0))
-  local maxPp = max(pp, int(raw.maxPp, pp))
+  local ppUps = max(0, min(3, int(raw.ppUps, 0)))
+  -- The sheet's maximum as stated -- the cart's GetMaxPP over the move's base
+  -- PP and its PP Ups -- even below `pp`: a slot past DecrementPP's wrap holds
+  -- 63 PP over it, as the cart's byte does (the client uploads the byte the
+  -- save holds), and raising the maximum to meet it hid GetMaxPP from every
+  -- reader (Effects.restorePp's ETHER, the `moves` rows).  A sheet that
+  -- states none keeps the old reading, its PP.
+  local stated = int(raw.maxPp, nil)
+  local maxPp = max(0, stated or pp)
   return {
     id       = str(raw.id) or "move",
     -- Optional (PROTOCOL 26), and absence is a real answer rather than a gap
@@ -437,6 +447,10 @@ local function copyMove(raw)
     name     = str(raw.name),
     pp       = pp,
     maxPp    = maxPp,
+    -- ...and the base PP behind it, when the stated number is a GetMaxPP
+    -- (Effects.basePpOf): what `stepPp` re-reads the maximum over once a wrap
+    -- moves the PP Up bits.  nil keeps the stated maximum fixed.
+    basePp   = stated and Effects.basePpOf(maxPp, ppUps) or nil,
     power    = max(0, int(raw.power, 0)),
     accuracy = max(0, int(raw.accuracy, 255)),
     type     = max(0, int(raw.type, 0)),
@@ -449,7 +463,7 @@ local function copyMove(raw)
     -- Read where the cart reads the raw byte -- AnyMoveToSelect's disabled
     -- branch (`mustStruggle`) and DisableEffect's slot pick -- and nowhere
     -- else; 0 when the sheet states none.
-    ppUps = max(0, min(3, int(raw.ppUps, 0))),
+    ppUps = ppUps,
   }
 end
 
@@ -1136,6 +1150,11 @@ function Battle:_emitMoves(fighter, mon, partyIndex)
       type = max(0, int(m.type, 0)),
       effect = max(0, int(m.effect, 0)),
       chance = max(0, int(m.chance, 0)),
+      -- K8's PP Ups beside the PP, the byte's top two bits as DecrementPP /
+      -- IncrementMovePP left them (`stepPp`): the client writes them to the
+      -- save as stated rather than inferring a wrap's borrow off the step
+      -- (MediatedBattle ppByteStep1).
+      ppUps = max(0, min(3, int(m.ppUps, 0))),
     }
   end
   local fields = { slot = fighter.slot, side = fighter.side, moves = moves }
@@ -3149,13 +3168,13 @@ function Battle:_resolveOneItem(fighter)
   -- _AIBattleUseItemText).  The player's is ItemUseText00, "<PLAYER> used
   -- <ITEM>!", where its routine prints it: a ball (ItemUseBall, before the
   -- throw -- not in a trainer fight, which blocks the ball first), X
-  -- ACCURACY, GUARD SPEC., DIRE HIT, a POKe DOLL in a wild fight and the X
+  -- ACCURACY, GUARD SPEC., DIRE HIT, a POKé DOLL in a wild fight and the X
   -- stat items (PrintItemUseTextAndRemoveItem).  A medicine, a PP restorer
-  -- and the POKe FLUTE print only what they did.
+  -- and the POKé FLUTE print only what they did.
   if computer then
     local onMon = activeMon(fighter)
     self:_say(fighter.name .. " used " .. label .. " on "
-      .. (onMon and onMon.species or "POKeMON") .. "!")
+      .. (onMon and onMon.species or "POKéMON") .. "!")
   elseif effect and ((effect.ball and wild) or effect.xAccuracy or effect.mist
       or effect.focusEnergy or (effect.pokeDoll and wild) or effect.stage) then
     self:_say(fighter.name .. " used " .. label .. "!")
@@ -3254,12 +3273,13 @@ function Battle:_resolveOneItem(fighter)
       end
     end
     -- ItemUsePokeFlute's `.inBattle`: PlayedFluteHadEffectText then
-    -- FluteWokeUpText, or PlayedFluteNoEffectText.
+    -- FluteWokeUpText, or PlayedFluteNoEffectText (data/text/text_6.asm
+    -- "# FLUTE", "#MON woke up.": the charmap's POKé).
     if woke then
-      self:_say(fighter.name .. " played the POKe FLUTE.")
-      self:_say("All sleeping POKeMON woke up.")
+      self:_say(fighter.name .. " played the POKé FLUTE.")
+      self:_say("All sleeping POKéMON woke up.")
     else
-      self:_say("Played the POKe FLUTE. Now, that's a catchy tune!")
+      self:_say("Played the POKé FLUTE. Now, that's a catchy tune!")
     end
   else
     local partyIdx = choice.slot or fighter.active
@@ -3276,7 +3296,10 @@ function Battle:_resolveOneItem(fighter)
     elseif mon.hp <= 0 and Effects.itemFailsOnFainted(effect) then
       self:_say(NO_EFFECT)
     else
-      local applied = false
+      -- `said`: a PP item's own ItemUseNoEffect line is already out, so the
+      -- party menu's fallback below does not print it a second time (the
+      -- cart's `.noEffect` prints it once).
+      local applied, said = false, false
       -- X ACCURACY, DIRE HIT and GUARD SPEC. set their bit and say nothing
       -- past the use's line (PrintItemUseTextAndRemoveItem; the AI's
       -- AIPrintItemUse).
@@ -3344,15 +3367,12 @@ function Battle:_resolveOneItem(fighter)
         local move = mon.moves[choice.move]
         if not move then
           self:_say(NO_EFFECT)
+          said = true
         else
-          local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
-          local before = move.pp
-          if effect.ppRestore == true then
-            move.pp = maxPp
-          else
-            move.pp = min(maxPp, move.pp + int(effect.ppRestore, 0))
-          end
-          if move.pp > before then
+          -- `.restorePP` against GetMaxPP (Effects.restorePp): a slot past
+          -- its wrap comes down to the maximum, and a MAX ETHER on a full
+          -- move with PP Ups still reads as restored -- both the cart's.
+          if Effects.restorePp(move, effect.ppRestore) then
             self:_say("PP was restored.")
             applied = true
             -- Fielded mon only: a bench Ether must not redraw FIGHT.
@@ -3361,6 +3381,7 @@ function Battle:_resolveOneItem(fighter)
             end
           else
             self:_say(NO_EFFECT)
+            said = true
           end
         end
       end
@@ -3368,16 +3389,8 @@ function Battle:_resolveOneItem(fighter)
         local any = false
         for i = 1, #(mon.moves or {}) do
           local move = mon.moves[i]
-          if move then
-            local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
-            local before = move.pp
-            if effect.ppRestoreAll == true then
-              move.pp = maxPp
-            else
-              move.pp = min(maxPp, move.pp + int(effect.ppRestoreAll, 0))
-            end
-            if move.pp > before then any = true end
-          end
+          -- `.elixirLoop`: `.restorePP` on every slot that holds a move.
+          if move and Effects.restorePp(move, effect.ppRestoreAll) then any = true end
         end
         if any then
           self:_say("PP was restored.")
@@ -3387,6 +3400,7 @@ function Battle:_resolveOneItem(fighter)
           end
         else
           self:_say(NO_EFFECT)
+          said = true
         end
       end
       local healed, healedBy = false, 0
@@ -3460,7 +3474,7 @@ function Battle:_resolveOneItem(fighter)
           self:_say(mon.species .. " recovered by " .. healedBy .. "!")
         elseif cleared then
           self:_say(mon.species .. (CURE_TEXT[choice.item] or CURE_TEXT.FULL_HEAL))
-        elseif not applied then
+        elseif not applied and not said then
           self:_say(NO_EFFECT)
         end
       end
@@ -4078,6 +4092,9 @@ local function stepPp(move, delta)
   local byte = ((int(move.ppUps, 0) % 4) * 64 + pp + delta) % 256
   move.pp = byte % 64
   move.ppUps = floor(byte / 64)
+  -- ...and GetMaxPP reads those bits: a borrow or a carry moves the maximum
+  -- an ETHER caps at (Effects.getMaxPp; `copyMove`'s `basePp`).
+  if move.basePp then move.maxPp = Effects.getMaxPp(move.basePp, move.ppUps) end
 end
 
 -- DecrementPP (engine/battle/decrement_pp.asm) on the list index's slot of the
@@ -5258,7 +5275,7 @@ function Battle:_alwaysHappen(fighter, mon, effectId, struggling, usedSlot, call
     self:_heal(fighter, mon, heal)
     -- DrainHPEffect_ ends on SuckedHealthText -- DreamWasEatenText for
     -- DREAM EATER (move_effects/drain_hp.asm :85-96) -- full HP or not.
-    local name = defender and defender.species or "POKeMON"
+    local name = defender and defender.species or "POKéMON"
     if int(effectId, 0) == 8 then
       self:_say(name .. "'s dream was eaten!")
     else

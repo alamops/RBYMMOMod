@@ -2777,7 +2777,7 @@ do
   local ignored
   for seed = 1, 40 do
     local events = sleeper(hit("SLEEP_TALK", 0), true, seed)
-    if said(events, "Alpha ignored orders...sleeping!") then ignored = events; break end
+    if said(events, "Alpha ignored orders…sleeping!") then ignored = events; break end
   end
   ok(ignored ~= nil, "a disobedient sleeper using Sleep Talk ignores orders")
   ok(ignored and not said(ignored, "Alpha used SLEEP_TALK!"), "...and the move is not used")
@@ -4300,6 +4300,192 @@ do
     end
   end
   ok(called, "R2e: a pool with no `num` is numbered by place")
+end
+
+-- ------------------------------------------------------------------
+-- The review polish (RP2, docs/plans/gen12-referee-gaps-fix.md): the carts'
+-- glyphs, K8's PP Ups on `moves`, the bag's lines and CheckTurn's status
+-- animations.  The parity scenarios `rp2_*` pin the streams; these name the
+-- rules.  server/battle2_turn.test.js holds the same claims.
+-- ------------------------------------------------------------------
+
+local function msgs(events)
+  local out = {}
+  for _, event in ipairs(events) do
+    if event.t == "msg" then out[#out + 1] = event.text end
+  end
+  return out
+end
+local function indexOf(events, pred)
+  for i, event in ipairs(events) do
+    if pred(event) then return i end
+  end
+  return nil
+end
+local function msgAt(events, text)
+  return indexOf(events, function(e) return e.t == "msg" and e.text == text end)
+end
+local function animAt(events, id, slot)
+  return indexOf(events, function(e) return e.t == "anim" and e.text == id and e.slot == slot end)
+end
+
+-- (a) the glyphs: NotVeryEffectiveText's ellipsis (IgnoredSleepingText's is
+--     the obedience test's, above)
+do
+  local battle = duel({ seed = 1, chart = { { 50 } },
+    a = { sheet({ species = "Alpha", spe = 90, types = { 0 }, moves = { hit("thump", 40) } }) },
+    b = { sheet({ species = "Beta", spe = 10, types = { 0 }, moves = { hit("tap", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  ok(said(events, "It's not very effective…"), "RP2: NotVeryEffectiveText ends on the cart's … glyph")
+  ok(not said(events, "It's not very effective..."), "RP2: ...not on three dots")
+end
+
+-- (b) K8's PP Ups ride the `moves` event's rows, absent where the row has none
+do
+  local upped = hit("slam", 10)
+  upped.ppUps = 2
+  local battle = duel({ seed = 2,
+    a = { sheet({ species = "Alpha", spe = 90, moves = { upped, hit("tap", 1) } }) },
+    b = { sheet({ species = "Beta", spe = 10, moves = { hit("tap", 0, 0, 85) } }) } })
+  drain(battle)
+  local row = nil
+  for _, event in ipairs(turn(battle)) do
+    if event.t == "moves" and event.slot == 0 then row = event end
+  end
+  eq(row and row.moves[1].ppUps, 2, "RP2: a `moves` row carries the slot's PP Ups")
+  eq(row and row.moves[2].ppUps, nil, "RP2: ...and a row with none carries none")
+end
+
+-- (c) the bag's lines: ItemUsedText / _EnemyUsedOnText, nothing past them for
+--     X ACCURACY / DIRE HIT / GUARD SPEC., the computer's silent X item
+do
+  local battle, foe = fight({ mode = "coop_npc", seed = 3,
+    a = { held({ species = "Alpha", spe = 90, stages = { spe = 5 }, moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe, { action = "item", item = "X_ACCURACY" }, { action = "item", item = "X_ATTACK" })
+  ok(said(events, "Ann used the X ACCURACY."), "RP2: the player's ItemUsedText names the item")
+  ok(said(events, "Bob used X ATTACK on Beta!"), "RP2: the computer's _EnemyUsedOnText names item and monster")
+  eq(#msgs(events), 2, "RP2: ...and nothing more: no X ACCURACY line, no stat line for the computer")
+  local rose = nil
+  for _, event in ipairs(events) do if event.t == "stat" and event.slot == 3 then rose = event end end
+  eq(rose and rose.stage, 1, "RP2: the computer's X ATTACK still raises its stage (RaiseStat)")
+  ok(battle.byId.p1.mons[1].xAccuracy == true, "RP2: X ACCURACY still sets its bit")
+  events = round(battle, foe, { action = "item", item = "GUARD_SPEC" }, { action = "item", item = "DIRE_HIT" })
+  ok(said(events, "Ann used the GUARD SPEC.."), "RP2: GUARD SPEC.'s own stop, then the line's (the cart's two)")
+  ok(said(events, "Bob used DIRE HIT on Beta!") and #msgs(events) == 2, "RP2: DIRE HIT says no more")
+  events = round(battle, foe, { action = "item", item = "X_SPEED" }, { action = "fight", move = 0 })
+  ok(said(events, "Ann used the X SPEED.") and said(events, "Alpha's SPEED went up!"),
+     "RP2: the player's X item says how it went (XItemEffect's StatUpMessage)")
+  events = round(battle, foe, { action = "item", item = "POTION" }, { action = "fight", move = 0 })
+  ok(said(events, "Ann used the POTION."), "RP2: a medicine is named by the use line")
+  ok(not said(events, "Ann used an item"), "RP2: ...never \"used an item\"")
+  events = round(battle, foe, { action = "item", item = "POKE_BALL" }, { action = "fight", move = 0 })
+  ok(said(events, "The trainer blocked the BALL!") and said(events, "Don't be a thief!")
+     and not said(events, "Ann used the POKé BALL."), "RP2: a ball in a trainer fight is blocked, no use line")
+  events = round(battle, foe, { action = "item", item = "POKE_DOLL" }, { action = "fight", move = 0 })
+  ok(said(events, "OAK: Ann! This isn't the time to use that!"), "RP2: a POKé DOLL outside a wild fight: OAK")
+  eq(battle:outcome(), nil, "RP2: ...and the fight goes on")
+end
+
+-- (d) the balls: the wobble lines by count, Text_BallCaught, no "The ball shook"
+do
+  local function wildBall(rate, hp, seed, ball, rounds)
+    local wildMon = held({ species = "Beta", maxHp = 900, hp = hp, spe = 10, moves = { hit("wait", 0, 0, 85) } })
+    wildMon.catchRate = rate
+    local battle, foe = fight({ mode = "wild", seed = seed,
+      a = { held({ species = "Alpha", maxHp = 900, spe = 90, moves = { hit("wait", 0, 0, 85) } }) },
+      b = { wildMon } })
+    drain(battle)
+    local all = {}
+    for _ = 1, rounds do
+      if battle:outcome() then break end
+      for _, event in ipairs(round(battle, foe, { action = "item", item = ball })) do all[#all + 1] = event end
+    end
+    return all, battle
+  end
+  local hard = wildBall(3, nil, 938, "POKE_BALL", 1)
+  ok(said(hard, "Ann used the POKé BALL.") and said(hard, "Oh no! The POKéMON broke free!"),
+     "RP2: no wobble: BallBrokeFreeText")
+  local close = wildBall(255, 700, 942, "ULTRA_BALL", 1)
+  ok(said(close, "Shoot! It was so close too!"), "RP2: three wobbles and free: BallSoCloseText")
+  local mid = wildBall(200, nil, 932, "POKE_BALL", 1)
+  ok(said(mid, "Aww! It appeared to be caught!"), "RP2: one wobble: BallAppearedCaughtText")
+  local two = wildBall(200, nil, 932, "GREAT_BALL", 1)
+  ok(said(two, "Aargh! Almost had it!"), "RP2: two wobbles: BallAlmostHadItText")
+  local caught, battle = wildBall(200, nil, 1, "MASTER_BALL", 1)
+  ok(said(caught, "Gotcha! Beta was caught!"), "RP2: Text_BallCaught names the monster")
+  eq(battle:outcome() and battle:outcome().reason, "catch", "RP2: ...and ends the fight a catch")
+  for _, list in ipairs({ hard, close, mid, two, caught }) do
+    ok(not said(list, "The ball shook"), "RP2: no \"The ball shook\" (the cart has none)")
+  end
+end
+
+-- (e) a wild fight's POKé DOLL: the use line alone, and a DRAW with no pot
+do
+  local battle, foe = fight({ mode = "wild", seed = 6,
+    a = { held({ species = "Alpha", level = 30, maxHp = 400, atk = 1, spe = 90,
+                 moves = { hit("PAY_DAY", 1, 0, 16) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  round(battle, foe)
+  local events = round(battle, foe, { action = "item", item = "POKE_DOLL" })
+  local lines = msgs(events)
+  eq(#lines, 1, "RP2: the doll's use line is the whole of it")
+  eq(lines[1], "Ann used the POKé DOLL.", "RP2: ...ItemUsedText")
+  local out = battle:outcome()
+  eq(out and out.outcome, "draw", "RP2: PokeDollEffect's DRAW, not a win")
+  eq(out and out.reason, "run", "RP2: ...ended as an escape")
+  eq(out and out.payDay, nil, "RP2: ...and CheckPayDay pays nothing on a DRAW")
+end
+
+-- (f) the POKé FLUTE: Text_PlayedPokeFlute and _FluteWakeUpText, then
+--     _PlayedFluteText once nobody sleeps
+do
+  local battle = duel({ seed = 7,
+    a = { sheet({ species = "Alpha", spe = 90, status = "SLP", moves = { hit("tap", 0, 0, 85) } }) },
+    b = { sheet({ species = "Beta", spe = 10, moves = { hit("tap", 0, 0, 85) } }) } })
+  battle.byId.p1.mons[1].statusTurns = 5
+  drain(battle)
+  local events = turn(battle, { action = "item", item = "POKE_FLUTE" })
+  ok(said(events, "Ann played the POKé FLUTE.") and said(events, "All sleeping POKéMON woke up."),
+     "RP2: the flute's two lines, with the cart's POKé")
+  events = turn(battle, { action = "item", item = "POKE_FLUTE" })
+  ok(said(events, "Played the POKé FLUTE. Now, that's a catchy tune!"), "RP2: ...and its tune when nobody sleeps")
+end
+
+-- (g) CheckTurn's status animations: the player's sleep clip ahead of its
+--     line, the computer's behind it; the confusion clip behind its line
+do
+  local battle, foe = fight({ mode = "coop_npc", seed = 8,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90, status = "SLP", statusTurns = 3,
+                 moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, status = "SLP", statusTurns = 3,
+                 moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  local mine, line = animAt(events, "SLP_PLAYER_ANIM", 0), msgAt(events, "Alpha is fast asleep!")
+  ok(mine and line and mine < line, "RP2: the player's ANIM_SLP plays ahead of FastAsleepText")
+  local theirs, theirLine = animAt(events, "SLP_ANIM", 3), msgAt(events, "Beta is fast asleep!")
+  ok(theirs and theirLine and theirs > theirLine, "RP2: the computer's plays behind it")
+  local confused, cf = fight({ mode = "1v1", seed = 9,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90, confusion = 3, moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, confusion = 3, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(confused)
+  events = round(confused, cf)
+  local a, aLine = animAt(events, "CONF_PLAYER_ANIM", 0), msgAt(events, "Alpha is confused!")
+  local b, bLine = animAt(events, "CONF_PLAYER_ANIM", 3), msgAt(events, "Beta is confused!")
+  ok(a and aLine and a == aLine + 1, "RP2: ANIM_CONFUSED straight behind IsConfusedText")
+  ok(b and bLine and b == bLine + 1, "RP2: ...on a link seat its own console's (the player's) variant")
+  local woke, wf = fight({ mode = "1v1", seed = 10,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90, status = "SLP", statusTurns = 1,
+                 moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(woke)
+  events = round(woke, wf)
+  ok(said(events, "Alpha woke up!") and not animAt(events, "SLP_PLAYER_ANIM", 0),
+     "RP2: no sleep clip on the turn it wakes (`.woke_up`)")
 end
 
 -- ------------------------------------------------------------------

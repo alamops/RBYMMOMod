@@ -61,36 +61,60 @@ M.BOX_ROWS = 2
 -- A lead byte takes the continuation bytes that follow it (0x80..0xBF, up to
 -- its length), so a stray byte is a glyph of its own and nothing is lost.
 
+-- Where the glyph starting at byte `i` of `text` (length `n`) ends: the byte
+-- after it.  The one walk `glyphs`, `glyphCount` and `glyphPrefix` share.
+local function glyphEnd(text, i, n)
+  local b = text:byte(i)
+  local len = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 1
+  local j = i + 1
+  while j < i + len and j <= n do
+    local c = text:byte(j)
+    if c < 0x80 or c > 0xBF then break end
+    j = j + 1
+  end
+  return j
+end
+
 -- The glyphs of `text`, in order, each a whole UTF-8 sequence.
 function M.glyphs(text)
   text = tostring(text or "")
   local out, i, n = {}, 1, #text
   while i <= n do
-    local b = text:byte(i)
-    local len = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 1
-    local j = i + 1
-    while j < i + len and j <= n do
-      local c = text:byte(j)
-      if c < 0x80 or c > 0xBF then break end
-      j = j + 1
-    end
+    local j = glyphEnd(text, i, n)
     out[#out + 1] = text:sub(i, j - 1)
     i = j
   end
   return out
 end
 
--- How many glyphs `text` is.
+-- How many glyphs `text` is.  Counted in place, never through `glyphs`'
+-- table: the arena measures its plates and bubbles every frame
+-- (Battlefield's `truncate`, CoopBattle's wait line), and a line with no byte
+-- past 0x7F -- nearly every one -- is its own length.
 function M.glyphCount(text)
-  return #M.glyphs(text)
+  text = tostring(text or "")
+  if not text:find("[\128-\255]") then return #text end
+  local count, i, n = 0, 1, #text
+  while i <= n do
+    i = glyphEnd(text, i, n)
+    count = count + 1
+  end
+  return count
 end
 
--- The first `count` glyphs of `text` (all of it when it has no more).
+-- The first `count` glyphs of `text` (all of it when it has no more): one
+-- `sub` at the last whole glyph, so a cut never splits one and nothing is
+-- built to find it.
 function M.glyphPrefix(text, count)
-  local g = M.glyphs(text)
+  text = tostring(text or "")
   count = math.max(0, math.floor(tonumber(count) or 0))
-  if count >= #g then return table.concat(g) end
-  return table.concat(g, "", 1, count)
+  if not text:find("[\128-\255]") then return text:sub(1, count) end
+  local i, n = 1, #text
+  while count > 0 and i <= n do
+    i = glyphEnd(text, i, n)
+    count = count - 1
+  end
+  return text:sub(1, i - 1)
 end
 
 -- Soft-wrap one string into lines that fit the bottom box.
@@ -1189,14 +1213,15 @@ end
 local function fitText(F, text, px, opts)
   text = tostring(text or "")
   if measure(F, text, opts) <= px then return text end
-  -- Whole glyphs off the end (M.glyphs): dropping continuation bytes alone
-  -- left the lead byte of "é" behind, half a UTF-8 sequence.
-  local glyphs = M.glyphs(text)
-  local n = #glyphs
+  -- Whole glyphs off the end (M.glyphPrefix): dropping continuation bytes
+  -- alone left the lead byte of "é" behind, half a UTF-8 sequence.  Cut in
+  -- place, with no table of glyphs: a label that does not fit is cut again
+  -- every frame it is drawn.
+  local n = M.glyphCount(text)
   local cut = text
   while n > 1 and measure(F, cut, opts) > px do
     n = n - 1
-    cut = table.concat(glyphs, "", 1, n)
+    cut = M.glyphPrefix(text, n)
   end
   return cut
 end

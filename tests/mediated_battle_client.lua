@@ -5303,8 +5303,13 @@ do
     battle:submitChoice("npc", F())
     for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
     fight:onOutcome(battle:outcome())
-    eq(shown(fight, "Gotcha") + shown(fight, "was caught"), 1,
+    -- One line on either cart: Red's "All right! <MON> was caught!", Gold's
+    -- "Gotcha! <MON> was caught!" (pokegold Text_BallCaught) -- and no
+    -- "Gotcha!" of this screen's beside it.
+    eq(shown(fight, "was caught!"), 1,
        "catch (" .. cart[1] .. "): the catch is said once, in the referee's words")
+    eq(shown(fight, "Gotcha"), cart[1] == "Gold" and 1 or 0,
+       "catch (" .. cart[1] .. "): ...and no \"Gotcha!\" of the screen's own")
   end
 
   -- POKe DOLL (row 3): a Red doll's escape ends on its use line -- no "Got
@@ -5317,7 +5322,7 @@ do
     battle:submitChoice("npc", F())
     for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
     fight:onOutcome(battle:outcome())
-    eq(shown(fight, "used POKe DOLL!"), 1, "doll (Red): the use line is said")
+    eq(shown(fight, "used POKé DOLL!"), 1, "doll (Red): the use line is said")
     eq(shown(fight, "Got away safely"), 0, "doll (Red): ...and nothing after it (ItemUsePokeDoll)")
     local dollRow = { id = "POKE_DOLL", name = "POKe DOLL", count = 1, effect = E1.itemEffect("POKE_DOLL") }
     local function tryDoll(game, mode, tag)
@@ -5550,6 +5555,262 @@ do
   local Coop2 = need("CoopBattle")
   eq(Coop2.fitHudName("POKéDOLLS", 5), "POKé.", "glyph cut (co-op HUD): by glyph")
   eq(Coop2.hudSanitize("é"), ".", "co-op HUD sheet: an é it lacks is one '.'")
+
+  -- ------- review fixes (FX-C of docs/plans/gen12-referee-gaps-fix.md)
+  --
+  -- Red's Bide start in a mirror match; Gold's ROAR / WHIRLWIND drag-out
+  -- line; the glyph helpers' per-frame allocations; Red's overlay maximum PP;
+  -- no `mmo.battle_moveset` in a link fight; Gold's doll and catch lines.
+  -- Synthetic monsters and moves throughout.
+  local FX_RED = setmetatable({ moves = setmetatable({
+    MIRROR_MOVE = { name = "MIRROR MOVE", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+                    effect = "MIRROR_MOVE_EFFECT" },
+    TRANSFORM = { name = "TRANSFORM", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+                  effect = "TRANSFORM_EFFECT" },
+    MIMIC = { name = "MIMIC", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+              effect = "MIMIC_EFFECT" },
+    BIDE = BP_DATA.moves.BIDE,
+  }, { __index = K_RED.moves }) }, { __index = K_RED })
+
+  -- Red's Bide in a mirror match (row 1): the referee names both sides by
+  -- bare species, so the foe's "CHARMANDER used BIDE!" is not ours -- our
+  -- FIGHT keeps its move list.
+  do
+    local ours = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 30 }, { id = "BIDE", pp = 10 } } })
+    local fight, _, turn = refereed(Red.Turn, gameWith({ ours }, FX_RED), "1v1",
+      { red("CHARMANDER", { mv("BIDE", E1.idOf("BIDE_EFFECT")) }) })
+    check(fight:pickMove(1), "Bide mirror (Red): TACKLE is chosen")
+    turn(F())
+    eq(shown(fight, "CHARMANDER used BIDE!"), 1, "Bide mirror (Red): the foe's used line was said")
+    check(not fight.bideLocked, "Bide mirror (Red): ...and does not lock our FIGHT (we filed no BIDE)")
+    pressFight(fight)
+    eq(fight.phase, "move", "Bide mirror (Red): FIGHT opens the move list")
+  end
+  -- ...and a BIDE we filed is not started by the foe's line either: the used
+  -- line straight behind a move animation on the other seat is that seat's.
+  for _, cart in ipairs({ { "Red", gameWith({ mon("CHARMANDER", { moves = {
+      { id = "TACKLE", pp = 30 }, { id = "BIDE", pp = 10 } } }) }, FX_RED) },
+    { "Gold", goldGame((function()
+      local g = goldMon("CHARMANDER", nil, 4321)
+      g.moves = { { id = "TACKLE", pp = 30, maxPp = 30 }, { id = "BIDE", pp = 9, maxPp = 9 } }
+      return { g }
+    end)(), SKETCH_DATA) } }) do
+    local tag = cart[1]
+    local fight, ev = screenFor(cart[2], "1v1", "fxbide" .. tag)
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    check(fight:pickMove(2), "Bide seat (" .. tag .. "): BIDE is chosen")
+    local foe = Config.COOP_SIDE
+    -- Ours could not move (pokered FlinchedText); the foe's BIDE is next.
+    ev({ t = "msg", text = "CHARMANDER flinched!" })
+    ev({ t = "anim", slot = foe, side = "b", text = "BIDE" })
+    ev({ t = "msg", text = "CHARMANDER used BIDE!" })
+    ev({ t = "turn", amount = 2 })
+    check(not fight.bideLocked, "Bide seat (" .. tag .. "): the foe's line behind its own animation starts nothing")
+    -- Our own: the animation on our seat, then the line.
+    fight:pickMove(2)
+    ev({ t = "anim", slot = 0, side = "a", text = "BIDE" })
+    ev({ t = "msg", text = "CHARMANDER used BIDE!" })
+    ev({ t = "turn", amount = 3 })
+    check(fight.bideLocked == true, "Bide seat (" .. tag .. "): our animation, our line -- the Bide is ours")
+  end
+  -- A MIRROR MOVE that copies the foe's BIDE is a Bide we filed (pokered
+  -- MirrorMoveCopyMove runs the copy as our own move): the referee reports
+  -- it on our seat, and the next FIGHT goes at once.
+  do
+    local ours = mon("CHARMANDER", { moves = { { id = "MIRROR_MOVE", pp = 20 } } })
+    local fight, _, turn, transport = refereed(Red.Turn, gameWith({ ours }, FX_RED), "1v1",
+      { red("SQUIRTLE", { mv("BIDE", E1.idOf("BIDE_EFFECT")) }, { spd = 250 }) })
+    check(fight:pickMove(1), "Bide by MIRROR MOVE (Red): MIRROR MOVE is chosen")
+    turn(F())
+    eq(shown(fight, "CHARMANDER used BIDE!"), 1, "Bide by MIRROR MOVE (Red): the copy was used")
+    check(fight.bideLocked == true, "Bide by MIRROR MOVE (Red): ...and locks our next FIGHT")
+    local before = #choicesOf(transport)
+    pressFight(fight)
+    eq(#choicesOf(transport), before + 1, "Bide by MIRROR MOVE (Red): FIGHT sends at once")
+    -- A call that copied something else is no Bide.
+    local plain = mon("CHARMANDER", { moves = { { id = "MIRROR_MOVE", pp = 20 } } })
+    local pf, _, pturn = refereed(Red.Turn, gameWith({ plain }, FX_RED), "1v1",
+      { red("CHARMANDER", { mv("THUMP", 0, { power = 1 }) }, { spd = 250 }) })
+    pf:pickMove(1)
+    pturn(F())
+    check(not pf.bideLocked, "Bide by MIRROR MOVE (Red): a copy of anything else locks nothing")
+    check(Mediated.isCallMove({ id = "METRONOME", effect = E1.idOf("METRONOME_EFFECT") })
+          and Mediated.isCallMove({ id = "X", effect = E2.idOf("EFFECT_MIRROR_MOVE") })
+          and not Mediated.isCallMove({ id = "BIDE", effect = E1.idOf("BIDE_EFFECT") }),
+          "isCallMove: METRONOME and MIRROR MOVE on both referees' numbers, nothing else")
+  end
+
+  -- Gold's ROAR / WHIRLWIND drag-out (row 2): pokecrystal ForceSwitch fields
+  -- the monster with the send-out animation alone and says DraggedOutText --
+  -- no "<TRAINER> sent out" pages, no "Go!".
+  do
+    local data = setmetatable({ moves = {
+      ROAR = { name = "ROAR", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+               effect = "EFFECT_FORCE_SWITCH" },
+      TACKLE = SKETCH_DATA.moves.TACKLE,
+    } }, { __index = SKETCH_DATA })
+    -- Ours drags theirs out.
+    local roarer = goldMon("CHARMANDER", nil, 4321)
+    roarer.moves = { { id = "ROAR", pp = 20, maxPp = 20 } }
+    local fight, _, turn = refereed(Gold.Turn, goldGame({ roarer }, data), "1v1",
+      { gold("BETA", { mv("THUMP", 0, { power = 1 }) }, { spe = 250 }),
+        gold("GAMMA", { mv("THUMP", 0, { power = 1 }) }) })
+    eq(shown(fight, "sent out BETA!"), 1, "drag-out (Gold): an ordinary send-out keeps its line")
+    check(fight:pickMove(1), "drag-out (Gold): ROAR is chosen")
+    turn(F())
+    eq(shown(fight, "GAMMA was dragged out!"), 1, "drag-out (Gold): DraggedOutText is said")
+    eq(shown(fight, "sent out GAMMA"), 0, "drag-out (Gold): ...and no send-out line before it")
+    local seat = fight.slots[Config.COOP_SIDE]
+    eq(seat and (seat.pending or seat).species, "GAMMA",
+       "drag-out (Gold): the seat is the dragged-out monster's (its arrival still plays)")
+    -- Theirs drags ours out: no "Go!".
+    local lead = goldMon("CHARMANDER", nil, 4321)
+    lead.moves = { { id = "TACKLE", pp = 30, maxPp = 30 } }
+    local bench = goldMon("SQUIRTLE", nil, 4321)
+    bench.moves = { { id = "TACKLE", pp = 30, maxPp = 30 } }
+    local f2, _, turn2 = refereed(Gold.Turn, goldGame({ lead, bench }, data), "1v1",
+      { gold("BETA", { mv("ROAR", E2.idOf("EFFECT_FORCE_SWITCH")) }) })
+    f2:pickMove(1)
+    turn2(F())
+    eq(shown(f2, "SQUIRTLE was dragged out!"), 1, "drag-out (Gold, ours): DraggedOutText is said")
+    eq(shown(f2, "Go! SQUIRTLE"), 0, "drag-out (Gold, ours): ...and no \"Go!\" for it")
+    eq(shown(f2, "Go! CHARMANDER"), 1, "drag-out (Gold, ours): the opening \"Go!\" stands")
+    check(Mediated.draggedOutLine("GAMMA was dragged out!", "GAMMA")
+          and not Mediated.draggedOutLine("GAMMA was dragged out!", "BETA")
+          and not Mediated.draggedOutLine("GAMMA fled in fear!", "GAMMA"),
+          "draggedOutLine: DraggedOutText about that monster, and nothing else")
+  end
+
+  -- Red's overlay maximum (row 5): the cart's move menu prints GetMaxPP over
+  -- the battle struct -- a Transform copy (5 PP, no PP Ups) reads its own
+  -- base, a mimicked slot the mimicked move's base with MIMIC's PP Ups.
+  do
+    local copycat = mon("CHARMANDER", { moves = { { id = "MIMIC", pp = 12, ppUps = 1 },
+                                                  { id = "TACKLE", pp = 30 } } })
+    local fight, ev = screenFor(gameWith({ copycat }, FX_RED), "wild", "fxpp")
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    local transformed = { { id = "TACKLE", pp = 5, maxPp = 5, ppUps = 0 },
+                          { id = "EMBER", pp = 5, maxPp = 5, ppUps = 0 } }
+    ev({ t = "moves", slot = 0, side = "a", moves = transformed })
+    local rows = fight:bandMoveRows()
+    eq(rows[1] and rows[1].right, "5/35", "Transform PP (Red): a copy reads 5 over its own base (GetMaxPP)")
+    eq(rows[2] and rows[2].right, "5/25", "Transform PP (Red): ...each copy its own")
+    eq(transformed[1].maxPp, 5, "Transform PP (Red): the event's own rows are left as they came")
+    ev({ t = "moves", slot = 0, side = "a",
+         moves = { { id = "EMBER", pp = 11, maxPp = 12, ppUps = 1 }, { id = "TACKLE", pp = 30, maxPp = 35, ppUps = 0 } } })
+    rows = fight:bandMoveRows()
+    eq(rows[1] and rows[1].right, "11/30", "MIMIC PP (Red): the mimicked slot reads EMBER's base with MIMIC's PP Up")
+    eq(rows[2] and rows[2].right, "30/35", "MIMIC PP (Red): ...the other slot its own")
+    -- Through the real referee: a TRANSFORM against a TACKLE.
+    local tr = mon("CHARMANDER", { moves = { { id = "TRANSFORM", pp = 10 } } })
+    local tf, _, tturn = refereed(Red.Turn, gameWith({ tr }, FX_RED), "1v1",
+      { red("BETA", { mv("TACKLE", 0, { power = 1, pp = 12 }) }) })
+    tf:pickMove(1)
+    tturn(F())
+    local trows = tf:bandMoveRows()
+    eq(trows[1] and trows[1].right, "5/35", "Transform PP (Red, refereed): the copy reads 5/35")
+  end
+
+  -- No `mmo.battle_moveset` in a fight between players (row 6): no cart
+  -- learns or levels in a link battle.
+  do
+    local function movesetsOf(transport)
+      local n = 0
+      for _, m in ipairs(transport.sent) do if m.t == Wire.BATTLE_MOVESET then n = n + 1 end end
+      return n
+    end
+    for _, mode in ipairs({ "1v1", "coop_pvp" }) do
+      local m = mon("CHARMANDER")
+      local fight, _, transport = screenFor(gameWith({ m }, K_RED), mode, "fxls" .. mode)
+      m.level = 13
+      m.stats = { hp = 33, attack = 15, defense = 14, speed = 17, special = 16 }
+      eq(fight:syncFightMoves(m, true), false, "link moveset (" .. mode .. "): a level-up sends nothing")
+      eq(fight:syncFightMoves(m), false, "link moveset (" .. mode .. "): ...nor a learn")
+      eq(movesetsOf(transport), 0, "link moveset (" .. mode .. "): no mmo.battle_moveset went out")
+    end
+    local m = mon("CHARMANDER")
+    local fight, _, transport = screenFor(gameWith({ m }, K_RED), "wild", "fxlsw")
+    eq(fight:syncFightMoves(m, true), true, "moveset (wild): a level-up against the computer is still sent")
+    eq(movesetsOf(transport), 1, "moveset (wild): ...once")
+  end
+
+  -- Gold's doll ends on its own use line (pokegold PokeDollEffect: UseItemText
+  -- alone), no "Got away safely!" under it.
+  do
+    local fight, battle = refereed(Gold.Turn, goldGame({ goldMon("CHARMANDER", nil, 4321) }), "wild",
+      { gold("BETA", { mv("THUMP", 0, { power = 1 }) }) }, { bag = { POKE_DOLL = 1 } })
+    battle:submitChoice("me", { action = "item", item = "POKE_DOLL" })
+    battle:submitChoice("npc", F())
+    for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+    fight:onOutcome(battle:outcome())
+    eq(shown(fight, "used the POKé DOLL%."), 1, "doll (Gold): ItemUsedText is said")
+    eq(shown(fight, "Got away safely"), 0, "doll (Gold): ...and nothing after it")
+    eq(Mediated.escapeLine("The wild pokemon ran away"), false,
+       "escapeLine: the old Gold doll line is no referee's any more")
+  end
+
+  -- Gold's player item line names the item for the callout (CoopBattle
+  -- moveNameFromBattleText): ItemUsedText's "the" and full stop are not it.
+  do
+    local _, gStep, gAll = fightOf(Gold.Turn, "wild", { gold("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+      { gold("BETA", { mv("THUMP", 0, { power = 1 }) }) }, { bag = { POTION = 1 } })
+    gStep({ action = "item", item = "POTION" }, F())
+    local line = find(said(gAll), " used the POTION")
+    check(line ~= nil, "real lines (Gold player item): \"<PLAYER> used the POTION.\"")
+    local Coop3 = need("CoopBattle")
+    eq(Coop3.moveNameFromBattleText(line or ""), "POTION", "moveNameFromBattleText: Gold's item line shouts the item")
+    eq(Coop3.moveNameFromBattleText("ANN used the\nGUARD SPEC.."), "GUARD SPEC.",
+       "moveNameFromBattleText: ...across a page break, the item's own full stop kept")
+    eq(Coop3.moveNameFromBattleText("ALPHA used THUMP!"), "THUMP", "moveNameFromBattleText: a move line as before")
+  end
+
+  -- The glyph helpers on the arena's per-frame path (row 3): same answers,
+  -- and an ASCII line costs no table.
+  do
+    for _, text in ipairs({ "", "CHARMANDER used TACKLE!", "POKéMON", "COOLTRAINER♂ X",
+                            "\128stray", "é\128\128\128", string.rep("A", 30) }) do
+      eq(Classic.glyphCount(text), #Classic.glyphs(text), "glyphCount: \"" .. text .. "\" as the glyph walk counts it")
+      for n = 0, 9 do
+        eq(Classic.glyphPrefix(text, n), table.concat(Classic.glyphs(text), "", 1, math.min(n, #Classic.glyphs(text))),
+           "glyphPrefix: \"" .. text .. "\" cut at " .. n .. " glyphs as the walk cuts it")
+      end
+    end
+    eq(Coop2.hudSanitize("pikachu.lv5 #1"), "PIKACHU.LV5 .1", "co-op HUD sheet (ASCII): mapped by the class")
+    eq(Coop2.hudSanitize("POKéMON?"), "POK.MON?", "co-op HUD sheet: an é is still one '.'")
+    -- Warmed first, so the JIT's own traces (which LuaJIT counts in the same
+    -- heap) are built before the window opens.  A table per call was 600 KB
+    -- and up over the 2000 calls; in place it is a few KB of trace residue,
+    -- so the bound is 32 KB.
+    local function grown(fn)
+      for _ = 1, 1000 do fn() end
+      collectgarbage("collect")
+      collectgarbage("stop")
+      local before = collectgarbage("count")
+      for _ = 1, 2000 do fn() end
+      local kb = collectgarbage("count") - before
+      collectgarbage("restart")
+      return kb
+    end
+    local line = "CHARMANDER used TACKLE!"
+    check(grown(function() Classic.glyphCount(line) end) < 32,
+          "glyphCount: an ASCII line is counted without building anything")
+    check(grown(function() Field.truncateText(line, 30) end) < 32,
+          "truncate (arena): a line that fits costs nothing per frame")
+    check(grown(function() Field.truncateText(line, 12) end) < 32,
+          "truncate (arena): ...nor does one cut to fit")
+    check(grown(function() Coop2.hudSanitize("CHARMANDER") end) < 32,
+          "co-op HUD sheet: an ASCII label is mapped without a table")
+    -- The cuts that run every frame a line overflows: same answers, no table.
+    local cool = "COOLTRAINER♂ used X ATTACK"
+    eq(Field.fitLine(nil, line, 12 * 6), "CHARMANDE...", "glyph fit (arena, ASCII): the cut the walk made")
+    check(grown(function() Field.fitLine(nil, cool, 15 * 6) end) < 32,
+          "glyph fit (arena): an overflowing line is cut without a table of glyphs")
+    local w4 = function(s) return Classic.glyphCount(s) * 4 end
+    eq(Coop2.fitHudName("COOLTRAINER♂ JOE", 40, w4), "COOLTRA...", "co-op HUD name (measured): the glyph cut")
+    eq(Coop2.fitHudName("POKéMON TRAINER", 44, w4), "POKéMON ...", "co-op HUD name (measured): ...whole é kept")
+    check(grown(function() Coop2.fitHudName("COOLTRAINER♂ JOE", 40, w4) end) < 32,
+          "co-op HUD name (measured): cut without a table of glyphs")
+  end
 end
 
 T.finish("mediated_battle_client")
