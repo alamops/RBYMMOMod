@@ -8,11 +8,13 @@
 | Flags | none |
 | Gates | grilled (one owner decision, below) + awaiting approval |
 | Branch | `feature/firered-and-emerald-support` (unpushed, 1.5.0, PROTOCOL 30 unreleased — no bump) |
-| Base SHA | `6a6764b` |
+| Base SHA | `24af23a` (plan); wave 1 `e51c48d` |
 
 **Rule source:** the carts in pret (`pokered`, `pokecrystal`, `pokegold` where it differs), quirks reproduced, freezes never, both twins line for line, a parity scenario per rule. Copies in `<scratchpad>/pret/`.
 
 **Owner decision (grill):** cart rules that touch only the *player's* side apply to **both sides in a link fight** (1v1, coop_pvp), as each player's own cart shows it for their own mon. In fights against the computer, side a is the player. This covers `ClearHyperBeam` on a freeze and Red's turn-open flinch-reset skip, and changes today's link behaviour for the latter (it resets unconditionally).
+
+**Scope widened by the owner after wave 1:** the Gold referee implements none of ~40 Gold-only move effects and has no weather. Wave 1 found this; the owner chose to **include it now** (the Gold track, waves 3–4 below).
 
 **Found while grilling (no owner decision needed):**
 - **Gold trainer items already ride the sheets.** The engine gives trainer mons their item (`src/world/gen2/Trainers.lua:87`), and `MediatedBattle.snapshotMons` stamps it (`:1141`). The 1.5.0 "Known" line saying otherwise is wrong. Gap #12 becomes: prove it (a test and an e2e leg) and correct the docs.
@@ -57,11 +59,17 @@ Every row of `docs/plans/gen12-referee-known-gaps.md` is fixed, or shown to be a
    - PP Ups are capped at the cart's 7 per move.
    - `Sessions:beginWildMediated` rolls the wild item.
    - Lua's `Wire.id` refuses ids over 40 characters, as Node does.
-4. **The docs say so:**
+4. **Gold move effects and weather (owner, after wave 1).** Every Gold `EFFECT_*` the referee maps to nothing gets the cart's implementation, in both twins, with a parity scenario each:
+   - **Damage formulas:** RETURN and FRUSTRATION (happiness, K14), HIDDEN POWER (DVs, K7), FLAIL and REVERSAL, MAGNITUDE, PRESENT, TRIPLE KICK, FURY CUTTER, ROLLOUT, BEAT UP (the party's base Attack and level, K7), PURSUIT, FALSE SWIPE, FUTURE SIGHT, COUNTER and MIRROR COAT.
+   - **Protection:** PROTECT, DETECT, ENDURE.
+   - **Weather:** RAIN DANCE, SUNNY DAY, SANDSTORM, with their damage, accuracy (THUNDER), SOLARBEAM, MORNING SUN / SYNTHESIS / MOONLIGHT and sandstorm-damage rules.
+   - **Status and field:** ATTRACT, BATON PASS, BELLY DRUM, CONVERSION2, CURSE, DESTINY BOND, ENCORE, FORESIGHT, HEAL BELL, MEAN LOOK / SPIDER WEB, NIGHTMARE, PAIN SPLIT, PERISH SONG, PSYCH UP, RAPID SPIN, SKETCH (written home in fights against the computer), SPIKES, SPITE, AMNESIA (SP. DEF +2), SWAGGER, TELEPORT.
+   - **Output:** the referee's own `msg` lines in the cart's English (no new event kind), plus the existing `moves` / `status` / `stat` / `damage` events.
+5. **The docs say so:**
    - `gen12-referee-known-gaps.md` is rewritten: every row resolved, or kept with the reason it can't be.
    - CHANGELOG 1.5.0 is updated, and the wrong "Gold trainers hold no items" line is corrected.
    - The plan ledgers are updated.
-5. **Everything passes:**
+6. **Everything passes:**
    - All headless suites and both hubs.
    - The parity fixtures reproduce byte for byte.
    - Lua↔JS fuzzers show 0 mismatches.
@@ -93,6 +101,7 @@ Every row of `docs/plans/gen12-referee-known-gaps.md` is fixed, or shown to be a
 - **K10 (Gen 1/2 `stat` event):** gains a signed `stage` (−6..6), so a negative stage is no longer stripped. `twin_parity` pins it.
 - **K11 (Gen 1/2 outcome):** `payDay` (coins, ≥ 0) on a won fight against the computer, side a only. The client pays it in KEEPS_HELD_MODES; Gold doubles it under `amuletCoin2()`.
 - **K12 (Gen 1/2 RNG):** `below(n)` and `nextInt` take the high bits (`floor(next() / 65536) % n`, or a multiply-shift; the agent picks the one exact in both twins). This moves every Red/Gold fixture, and the run regenerates them once in wave 1.
+- **K14 (Gold mon sheet, added after wave 1):** `happiness` 0..255, from the engine mon. RETURN and FRUSTRATION read it. Wire and sanitize accept it in the Gen 2 dialect only; `copyMon` keeps it.
 - **K13 (wire hygiene):**
   - Lua `Wire.id` refuses an id over 40 characters (Node's `cleanId`), with the hub parity fixture extended.
   - `BATTLE_METRONOME_POOL_MAX` rises to cover 251 moves, on both twins, after a measured wire-size check.
@@ -107,7 +116,11 @@ Every row of `docs/plans/gen12-referee-known-gaps.md` is fixed, or shown to be a
 | C | 2 | `src/MediatedBattle.lua`, `src/CoopBattle.lua`, `src/SoloBattle.lua`, `src/Coop.lua`, `src/Sessions.lua`, `src/Exp2.lua`, `tests/mediated_battle_client.lua`, `tests/coop_mediated.lua`, `tests/solo_battle.lua`, `tests/rby_mmo_test.lua` | K7 / K8 stamped; K9 sent on a mid-fight level-up (Gen 1 and Gold, own seats); K10 read where the screen shows stages; K11 paid (fights against the computer, own side, Amulet Coin on Gold); Metronome pool exclusions and the full Gold pool; co-op joiner item validation; Gold co-op target picker; PP Up cap; `beginWildMediated` wild item; Gold trainer item proven by a test |
 | R1b | 2 | Gen 1 referee files and tests (as R1a) | Transform (K7); full Haze, all four in a 2v2; the computer's primary stat-down miss; ClearHyperBeam on flinch / freeze / trap with the owner's link rule, and the flinch-skip link rule; the computer's item / switch turn slot; asleep or frozen selects last turn's move; PP Ups in `.chooseMove` (K8); toxic outlives a nap; primary ±6 "Nothing happened!"; DISABLE (random slot with PP, 1–8 turns, "But it failed!"); primary POISON vs a Poison type; a primary drop into MIST misses before the accuracy byte; signed `stat` stage (K10); level-up rebuild (K9) |
 | R2b | 2 | Gen 2 referee files and tests (as R2a) | Transform; Haze in a 2v2; switch-in status-before-badge; SLEEP TALK and SNORE; MYSTERYBERRY scans the party moves under Transform; a replacement gets that turn's between-turn items; forced-skip seats roll QUICK CLAW; Bright Powder in the byte domain, OHKO included; `HELD_PREVENT_*`; LOCK-ON and SAFEGUARD; primary stat-down lines; modded priority (K8); signed `stat` stage (K10); level-up rebuild (K9) |
-| D | 3 (me) | `CHANGELOG.md`, `README.md`, `mod.card`, `docs/plans/*`, referee header notes | Docs per §1 item 4 |
+| W2 | 2 | `src/Wire.lua`, `server/lib/sanitize.js`, `src/Hub.lua`, `server/lib/relay.js`, `server/twin_parity.test.js`, hub parity driver / fixture / Node twin, `tests/hub_battle.lua`, `server/hub_battle.test.js` | K14; `Wire.mapId` refuses past 64 like Node (K13's twin); a Gen 1 `run` outcome carries `payDay` (Red pays on a flee) |
+| R2c | 3 | Gold referee files and tests | Gold move effects, part 1: the damage formulas, protection, COUNTER / MIRROR COAT, FUTURE SIGHT, PURSUIT, and weather |
+| R2d | 4 | Gold referee files and tests | Gold move effects, part 2: the status and field effects, SKETCH included |
+| C2 | 4 | client files (as C) | SKETCH written home (fights against the computer, own seats), plus any client follow-ups from waves 2–3 |
+| D | 5 (me) | `CHANGELOG.md`, `README.md`, `mod.card`, `docs/plans/*`, referee header notes | Docs per §1 item 4 |
 
 ## 5. Tests
 
@@ -125,9 +138,11 @@ Every row of `docs/plans/gen12-referee-known-gaps.md` is fixed, or shown to be a
 
 ## 6. Waves
 
-1. **Wave 1:** W ∥ R1a ∥ R2a. Then a barrier and a commit.
-2. **Wave 2:** C ∥ R1b ∥ R2b. Then a barrier and a commit.
-3. **Wave 3:** D.
+1. **Wave 1:** W ∥ R1a ∥ R2a. Then a barrier and a commit (`e51c48d`).
+2. **Wave 2:** C ∥ R1b ∥ R2b ∥ W2. Then a barrier and a commit.
+3. **Wave 3:** R2c. Then a barrier and a commit.
+4. **Wave 4:** R2d ∥ C2. Then a barrier and a commit.
+5. **Wave 5:** D.
 
 After that: review (Gen 1 referee, Gen 2 referee, client/wire), fixes, TT-E, the full matrix, and fixes again.
 
@@ -165,3 +180,8 @@ After that: review (Gen 1 referee, Gen 2 referee, client/wire), fixes, TT-E, the
 | The link-fight player-only quirks | **owner decision**: both sides |
 | Engine-port divergences from pret (plan `gen12-referee-fidelity.md` §10) | **out of scope**: the engine's own code; an upstream report, not a mod change |
 | Gen 3 "Wild PIDGEY used THIEF!" prefix (TT-E observation, unverified) | **out of scope**: Gen 3 text, not a Red/Gold referee gap; noted for a Gen 3 ticket |
+| ~40 Gold-only move effects and weather the referee never implemented (found in wave 1) | **in this run** (owner): R2c, R2d, C2, K14 |
+| Red cart differences found in wave 1 (JUMP KICK's 1-HP crash; fixed-damage moves ignore immunity and draw no crit or roll; OHKO on a Speed tie; confusion before paralysis; full paralysis vs FLY; trap before the hit; MIRROR MOVE after a called move; BIDE on wDamage; Pay Day on a flee; power-0 multi-hit; effect-less moves vs a vanished target; the "Hit N times!" line) | **in this run**: R1b, W2, C |
+| Gold differences found in wave 1 (the freeze thaw point; DRAIN / DREAM EATER misses and SapHealth's minimum; TOXIC; LEECH SEED vs Grass; the 999 stat-up failure for primaries; a storing BIDE vs CantMove; MIRROR MOVE's failure line; the "Hit N times!" line) | **in this run**: R2b |
+| THUNDER's rain / sun accuracy | **in this run**: R2c (with weather) |
+| Co-op Pay Day: the referee reports one pot | **decision (owner's link-quirk rule applied)**: every human seat on side a is paid the pot, as each player's own cart would pay its player |
