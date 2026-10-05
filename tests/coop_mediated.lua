@@ -3367,4 +3367,337 @@ do
   eq(aims("TACKLE"), true, "Gold picker: anything with power keeps it")
 end
 
+-- ------------------------------------------------------------------
+-- 16. closing the Red / Gold referee gaps, wave 3 (task C2a)
+-- ------------------------------------------------------------------
+--
+-- The Gold picker for the referee's wave-2 ids (102-105); the Transform
+-- overlay through a learn (Red drops it, Gold keeps it -- each cart's
+-- LearnMove) and at the faint; the party list a referee states behind a
+-- switch-out or a faint (Gold's MYSTERYBERRY restored under Transform) written
+-- onto that party monster; Red's paying escape; a foe's Gold happiness; and an
+-- invite joiner's Gold trainer, looked up by class and member.  Trainer,
+-- class and item names here are invented.
+
+do
+  local Gen = need("Gen")
+  local Effects2 = need("BattleSim2/Effects")
+  local GOLD_ITEMS = {
+    NUGGET = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+    FIX_POTION = { name = "FIX POTION" },
+  }
+  -- The joiner's own copy of the Gold trainer table (the importer's shape,
+  -- src/import/RomExtractorGen2.lua: classes by constant, each with its
+  -- numeric `index`, its attribute row and its members).
+  local function goldTrainers()
+    return { classes = {
+      FIXCLASS = { id = "FIXCLASS", index = 7, name = "FIX CLASS", baseMoney = 9,
+                   attributes = { 0, 0, 9, 0, 0, 0, 0 }, items = { "FIX_POTION" },
+                   trainers = {
+                     { id = "FIX1", name = "ABE", trainerType = "TRAINERTYPE_ITEM",
+                       party = { { species = SPECIES, level = 5, item = "NUGGET" } } },
+                     { id = "FIX2", name = "BEA", party = { { species = SPECIES, level = 7 } } },
+                   } },
+      RIVAL1 = { id = "RIVAL1", index = 9, name = "RIVAL", baseMoney = 1, items = {},
+                 trainers = { { id = "RIVAL1_1_FIX", name = "?", party = { { species = SPECIES, level = 5 } } } } },
+    } }
+  end
+  local function goldGame(withTrainers)
+    local game = newGame()
+    game.generation = 2
+    game.data = setmetatable({ items = GOLD_ITEMS, trainers = withTrainers and goldTrainers() or nil },
+                             { __index = data })
+    game.save.generation = 2
+    game.save.player = { name = "BOB", id = 4321, money = 0 }
+    return game
+  end
+  local function redGame()
+    local game = newGame()
+    game.save.money = 0
+    return game
+  end
+  local function play(screenIn, msg)
+    local rows = screenIn:medRows(msg)
+    screenIn:playEvents(rows)
+    return rows
+  end
+  local function idsOf(list)
+    local out = {}
+    for i, m in ipairs(list or {}) do out[i] = m.id end
+    return table.concat(out, ",")
+  end
+  local seq = 100
+  local function ev(sc, fields)
+    seq = seq + 1
+    fields.battle, fields.seq = "cb1", seq
+    return sc:onBattleEvent(fields)
+  end
+  -- ANN's screen on seat 1 (the host), a bench monster behind her lead; the
+  -- game is Red or Gold.
+  local function seatScreen(gen)
+    local slots = npcSlots()
+    slots[1].party[2] = mon(60, 35)
+    slots[1].party[2].moves = { { id = "FIX_SCRATCH", pp = 1 } }
+    local sc = screen({ slots = slots, mine = 1, host = true, mode = "coop_npc", selfId = "ann" })
+    if gen == 2 then
+      sc.game = goldGame()
+      sc.gen2Mediated = true
+    else
+      sc.game = redGame()
+    end
+    eq(sc:uploadMediated(), true, "wave 3: the upload goes out (gen " .. gen .. ")")
+    sc.mediated = true
+    sc.medSlots = { [0] = 1, [1] = 2, [2] = 3, [3] = 4 }
+    sc.medFields = { [1] = 0, [2] = 1, [3] = 2, [4] = 3 }
+    seq = seq + 1000
+    return sc, slots
+  end
+  local COPIED = { { id = "FIX_EMBERISH", pp = 5, maxPp = 5 } }
+
+  -- ------- the Gold picker for the referee's wave-2 ids, by their own names
+  do
+    local byId = {}
+    for id = 102, 105 do byId[id] = Effects2.NAMES[id] end
+    eq(byId[102], "EFFECT_SLEEP_TALK", "Gold picker: the referee's 102 is SLEEP TALK")
+    eq(byId[103], "EFFECT_LOCK_ON", "Gold picker: ...103 LOCK-ON")
+    eq(byId[104], "EFFECT_SAFEGUARD", "Gold picker: ...104 SAFEGUARD")
+    eq(byId[105], "EFFECT_TOXIC", "Gold picker: ...105 TOXIC")
+    local moves = {}
+    for id, name in pairs(byId) do moves["MOVE_" .. id] = { power = 0, effect = name } end
+    local picker = setmetatable({ game = { generation = 2, data = { moves = moves } } },
+                                { __index = CoopBattle })
+    local function aims(id) return picker:needsTarget({ id = "MOVE_" .. id }) end
+    eq(aims(103), true, "Gold picker: LOCK-ON asks whom (its checkhit is on a foe)")
+    eq(aims(105), true, "Gold picker: TOXIC asks whom")
+    eq(aims(104), false, "Gold picker: SAFEGUARD is the user's side, aimed at nobody")
+    eq(aims(102), true,
+       "Gold picker: SLEEP TALK asks, as METRONOME does -- the referee aims the called move at the chosen seat")
+    eq(CoopBattle.SELF_EFFECTS2.EFFECT_SAFEGUARD, true, "Gold picker: SAFEGUARD is the table's one entry")
+  end
+
+  -- ------- the Transform overlay through a learn
+  do
+    -- Red: pokered LearnMove copies the party's list over the battle monster's.
+    local sc, slots = seatScreen(1)
+    local lead = slots[1].party[1]
+    sc.medMoveList = COPIED
+    lead.moves[#lead.moves + 1] = { id = "FIX_CUT", pp = 30 }
+    eq(sc:syncFightMoves(lead), true, "learn under Transform (Red co-op): the learn goes to the referee")
+    eq(sc.medMoveList, nil, "learn under Transform (Red co-op): ...and the overlay goes with LearnMove's copy")
+    eq(idsOf(sc:liveMoves()), "FIX_TACKLE,FIX_CUT", "learn under Transform (Red co-op): FIGHT reads its own list")
+    -- A level-up that taught nothing resends the list unchanged: no LearnMove.
+    sc.medMoveList = COPIED
+    eq(sc:syncFightMoves(lead, true), true, "level-up under Transform (Red co-op): the level goes to the referee")
+    eq(sc.medMoveList, COPIED, "level-up under Transform (Red co-op): ...and the overlay stays up")
+
+    -- Gold: LearnMove skips the copy under SUBSTATUS_TRANSFORMED.
+    local gs, gslots = seatScreen(2)
+    local glead = gslots[1].party[1]
+    gs.medMoveList = COPIED
+    glead.moves[#glead.moves + 1] = { id = "FIX_CUT", pp = 30 }
+    eq(gs:syncFightMoves(glead), true, "learn under Transform (Gold co-op): the learn goes to the referee")
+    eq(gs.medMoveList, COPIED, "learn under Transform (Gold co-op): the overlay stays -- the referee fights on with the copies")
+    eq(idsOf(gs.medMine[1].moves), "FIX_TACKLE,FIX_CUT", "learn under Transform (Gold co-op): ...while the sheet learns")
+  end
+
+  -- ------- the party list behind a faint or a switch-out (Gold's MYSTERYBERRY)
+  do
+    -- The faint: the overlay goes, and the list stated behind it is the
+    -- fallen monster's own.
+    local sc, slots = seatScreen(2)
+    local lead = slots[1].party[1]
+    lead.moves[1].pp = 0
+    ev(sc, { t = "moves", slot = 0, side = "a", moves = COPIED })
+    eq(sc.medMoveList and sc.medMoveList[1].id, "FIX_EMBERISH", "overlay (co-op): Transform's copies are up")
+    ev(sc, { t = "faint", slot = 0, side = "a", text = SPECIES_NAME, amount = 1 })
+    eq(sc.medMoveList, nil, "overlay (co-op): the faint ends it")
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 0, moves = { { id = "FIX_TACKLE", pp = 5, maxPp = 20 } } })
+    eq(lead.moves[1].pp, 5, "MYSTERYBERRY under Transform (co-op faint): the restored PP reaches the party monster")
+    eq(sc.medMoveList, nil, "MYSTERYBERRY under Transform (co-op faint): ...and is no new overlay")
+
+    -- The switch-out, with the newcomer already standing: the list names the
+    -- monster that left, and lands on it rather than on the newcomer.
+    sc, slots = seatScreen(2)
+    lead = slots[1].party[1]
+    local bench = slots[1].party[2]
+    lead.moves[1].pp = 0
+    ev(sc, { t = "moves", slot = 0, side = "a", moves = COPIED })
+    play(sc, { battle = "cb1", seq = 1, t = "send", slot = 0, side = "a", mon = 1, text = SPECIES_NAME, hp = 60 })
+    sc.medMoveList = nil
+    check(sc:mySlot().battler and sc:mySlot().battler.mon == bench, "switch-out (co-op): the bench monster stands")
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 0, moves = { { id = "FIX_TACKLE", pp = 5, maxPp = 20 } } })
+    eq(lead.moves[1].pp, 5, "MYSTERYBERRY under Transform (co-op switch-out): the PP lands on the monster that left")
+    eq(bench.moves[1].pp, 1, "MYSTERYBERRY under Transform (co-op switch-out): ...never on the newcomer")
+
+    -- A benched monster's list while the one standing wears an overlay.
+    sc, slots = seatScreen(2)
+    ev(sc, { t = "moves", slot = 0, side = "a", moves = COPIED })
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 1, moves = { { id = "FIX_SCRATCH", pp = 9, maxPp = 35 } } })
+    eq(slots[1].party[2].moves[1].pp, 9, "overlay (co-op): a benched monster's list writes that monster")
+    eq(sc.medMoveList and sc.medMoveList[1].id, "FIX_EMBERISH", "overlay (co-op): ...and the overlay stands")
+    -- The wearer's own spend still refreshes it.
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 0, moves = { { id = "FIX_EMBERISH", pp = 4, maxPp = 5 } } })
+    eq(sc.medMoveList and sc.medMoveList[1].pp, 4, "overlay (co-op): the wearer's spend refreshes the overlay")
+    eq(slots[1].party[1].moves[1].id, "FIX_TACKLE", "overlay (co-op): ...and never writes its own moves")
+  end
+
+  -- ------- Red Pay Day: what the referee states on a run, and nothing more
+  do
+    local function outcome(sc, fields)
+      fields.battle, fields.outcome = "cb1", "win"
+      sc:onBattleOutcome(fields)
+    end
+    -- Our TELEPORT: side a in `losers`, still paid.
+    local fled = screen({ slots = npcSlots(), mine = 1, host = true, mode = "coop_npc", selfId = "ann" })
+    fled.mediated, fled.game.save.money = true, 0
+    outcome(fled, { winners = { "npc1" }, losers = { "ann", "bob" }, reason = "run", payDay = 30 })
+    eq(fled.game.save.money, 30, "Pay Day (co-op, Red escape): a TELEPORT of ours still pays side a")
+    -- The player's RUN: no pot stated, nothing paid.
+    local ran = screen({ slots = npcSlots(), mine = 1, host = true, mode = "coop_npc", selfId = "ann" })
+    ran.mediated, ran.game.save.money = true, 0
+    outcome(ran, { winners = { "npc1" }, losers = { "ann", "bob" }, reason = "run" })
+    eq(ran.game.save.money, 0, "Pay Day (co-op, Red RUN): an outcome stating no pot pays nothing")
+    -- Gold: a foe's flight is a DRAW too, even with side a named the winner.
+    local goldRun = seatScreen(2)
+    outcome(goldRun, { winners = { "ann", "bob" }, losers = { "npc1" }, reason = "run", payDay = 30 })
+    eq(goldRun.game.save.player.money, 0, "Pay Day (co-op, Gold escape): a run pays nothing, whoever is the winner")
+  end
+
+  -- ------- K14: the host describes the trainer's and the wild's at BASE_HAPPINESS
+  do
+    local sc, slots = seatScreen(2)
+    local npcUp, ownUp
+    for _, msg in ipairs(sc.sent) do
+      if msg.type == Wire.BATTLE_PARTY and msg.payload.side == "b" then npcUp = msg.payload end
+      if msg.type == Wire.BATTLE_PARTY and msg.payload.side == "a" then ownUp = msg.payload end
+    end
+    eq(npcUp and npcUp.mons[1].happiness, 70, "K14 foe (co-op): the trainer's sheet is at BASE_HAPPINESS")
+    local fond = slots[3].party[1]
+    fond.happiness = 255
+    local again = sc:npcMons()
+    eq(again and again[1].happiness, 70, "K14 foe (co-op): ...whatever its engine record says")
+    slots[1].party[1].happiness = 222
+    local mine = Mediated.snapshotMons(sc.game, slots[1].party, { own = true })
+    eq(mine[1].happiness, 222, "K14 own (co-op): our own monster keeps its own")
+    check(ownUp ~= nil, "K14 own (co-op): the own upload went out")
+    sc.wildCatchMon = fond
+    sc.wildParty = nil
+    eq(sc:wildMons()[1].happiness, 70, "K14 foe (co-op): a wild seat's sheet too")
+  end
+
+  -- ------- an invite joiner's Gold trainer
+  do
+    -- The host's half: the engine's record (World:startScriptedBattle's
+    -- shape: numeric class, its constant, the member constant, no `id`).
+    local walkedInto = { class = 7, classId = "FIXCLASS", memberId = "FIX1", name = "FIX CLASS ABE",
+                         trainerName = "ABE", className = "FIX CLASS" }
+    local host = goldGame(true)
+    eq(Coop.trainerToken2(host, walkedInto), "7-FIX1", "Gold trainer: the field names the class and member")
+    eq(Coop.trainerToken2(host, { classId = "FIXCLASS", memberId = "FIX2" }), "7-FIX2",
+       "Gold trainer: ...the class row's index when the record names only the constant")
+    eq(Coop.trainerToken2(host, { class = 7 }), nil, "Gold trainer: no member, no token")
+    eq(Coop.trainerToken2(host, { class = 7, memberId = "BAD-ID" }), nil,
+       "Gold trainer: a member that would break the token's split names nobody")
+    eq(Coop.trainerToken2(host, { class = 7, memberId = string.rep("M", 39) }), nil,
+       "Gold trainer: ...nor one past Wire.id's 40 characters (the joiner fights faceless, as before)")
+    -- buildField on Gold, through the real assembler (parties packed as given).
+    local realPack, realUnpack = CoopBattle.packParty, CoopBattle.unpackParty
+    CoopBattle.packParty = function(party) return party end
+    CoopBattle.unpackParty = function(_, packed) return packed end
+    local assembler = setmetatable({}, { __index = Coop })
+    local battle = {
+      parties = { ann = { mon(60, 40) }, bob = { mon(60, 30) } },
+      plan = { hostId = "ann", label = "FIX CLASS",
+               allies = { { id = "ann", name = "ANN" }, { id = "bob", name = "BOB" } },
+               engine = { enemyParty = { mon(50, 20), mon(50, 18) }, trainer = walkedInto } },
+    }
+    local field = assembler:buildField(host, battle, battle.plan.allies)
+    eq(field and field.trainer, "7-FIX1", "Gold trainer: buildField sends the token")
+    local wired = field and Wire.coopField(field)
+    eq(wired and wired.trainer, "7-FIX1", "Gold trainer: ...which the wire keeps (Wire.id-shaped)")
+
+    -- The joiner's half: its own record, off its own data.
+    local joiner = goldGame(true)
+    local record = Coop.trainerFor(joiner, wired, nil)
+    check(type(record) == "table", "Gold trainer: a joiner who never met the trainer resolves it")
+    record = record or {}
+    eq(record.class, 7, "Gold trainer: ...its class number")
+    eq(record.classId, "FIXCLASS", "Gold trainer: ...its class constant (the music ladder's key)")
+    eq(record.memberId, "FIX1", "Gold trainer: ...its member")
+    eq(record.name, "FIX CLASS ABE", "Gold trainer: ...named as the walk-in's is (class, then name)")
+    eq(record.trainerName, "ABE", "Gold trainer: ...its bare name")
+    eq(record.baseMoney, 9, "Gold trainer: ...the class's reward byte")
+    eq(record.items and record.items[1], "FIX_POTION", "Gold trainer: ...its TRNATTR items")
+    eq(record.roster and record.roster[1] and record.roster[1].item, "NUGGET", "Gold trainer: ...the member's party rows")
+    eq(record.id, nil, "Gold trainer: ...and no Gen 1 id, as the walk-in's record has none")
+    check(record.items ~= joiner.data.trainers.classes.FIXCLASS.items,
+          "Gold trainer: the item list is a copy (Trainers.lookup), not the class record's")
+    local own = { classId = "FIXCLASS" }
+    eq(Coop.trainerFor(joiner, wired, { trainer = own }), own, "Gold trainer: the walk-in keeps its own record")
+    eq(Coop.trainerFor(joiner, { trainer = "7-NOPE" }, nil), nil, "Gold trainer: a member this build lacks names nobody")
+    eq(Coop.trainerFor(joiner, { trainer = "8-FIX1" }, nil), nil, "Gold trainer: ...nor a class it lacks")
+    eq(Coop.trainerFor(joiner, { trainer = "classes" }, nil), nil,
+       "Gold trainer: a token naming a key of the class table is no trainer (never the Gen 1 lookup)")
+    eq(Coop.trainerFor(joiner, { trainer = "FIX1" }, nil), nil, "Gold trainer: ...nor a bare member")
+    eq(Coop.trainerFor(goldGame(false), wired, nil), nil, "Gold trainer: a build with no trainer table names nobody")
+    -- A rival is this player's own rival's name (PlaceEnemysName).
+    joiner.save.rival = { name = "SILVO" }
+    local rival = Coop.trainerFor(joiner, { trainer = "9-RIVAL1_1_FIX" }, nil) or {}
+    eq(rival.name, "SILVO", "Gold trainer: a rival is named as this player's cart names its rival")
+    joiner.save.rival = nil
+    eq((Coop.trainerFor(joiner, { trainer = "9-RIVAL1_1_FIX" }, nil) or {}).name, "???",
+       "Gold trainer: ...or ??? before the rival was named")
+
+    -- startBattle on the joiner: the record and its class reach the screen.
+    local realNew = CoopBattle.new
+    local handed
+    CoopBattle.new = function(_, opts) handed = opts; return nil, "stub" end
+    local coop = setmetatable({
+      battle = { plan = { hostId = "ann", allies = battle.plan.allies, id = "cb1" }, ready = false },
+      party = { isSelf = function(_, id) return id == "bob" end, selfId = "bob" },
+      transport = { send = function() end },
+      ui = {},
+      abandon = function() return false end,
+    }, { __index = Coop })
+    joiner.save.party = { mon(60, 30) }
+    coop:startBattle(joiner, wired)
+    CoopBattle.new = realNew
+    CoopBattle.packParty, CoopBattle.unpackParty = realPack, realUnpack
+    eq(handed and handed.trainer and handed.trainer.memberId, "FIX1",
+       "Gold trainer (joiner's startBattle): the screen is handed the record")
+    eq(handed and handed.oppClass, "FIXCLASS",
+       "Gold trainer (joiner's startBattle): ...and the class the walk-in's battle names (the Client's Gold alias)")
+
+    -- What the joiner's screen does with it.
+    local bobT, bobSlots = seatScreen(2)
+    bobT.mine, bobT.selfId, bobT.host = 2, "bob", false
+    bobT.trainer, bobT.oppClass = record, "FIXCLASS"
+    local foeFigure = bobT:battlefieldFoeHumans()[1]
+    eq(foeFigure and foeFigure.name, "FIX CLASS ABE", "Gold trainer (joiner): the trainer stands on the field by name")
+    check(bobT:trainerIntroName():find("FIX CLASS", 1, true) == 1,
+          "Gold trainer (joiner): ...and the intro line names the trainer's record, not the seat's label")
+    eq(table.concat(bobT:trainerItems2(), ","), "NUGGET",
+       "Gold trainer (joiner): ...its own data vouches for the item the trainer's party row holds")
+    eq(bobT:musicKind(), "trainer", "Gold trainer (joiner): ...a trainer fight's theme, not the two-parties cue")
+    local noRecord = seatScreen(2)
+    noRecord.mine = 2
+    eq(noRecord:musicKind(), "link", "Gold trainer (joiner): before the lookup it was the two-parties cue")
+    -- The song: the class and member reach Gold's PlayBattleMusic ladder.
+    local savedMusic = package.loaded["src.battle.gen2.BattleMusic"]
+    local asked
+    package.loaded["src.battle.gen2.BattleMusic"] = {
+      battleSong = function(opts) asked = opts; return "SONG" end,
+      victorySong = function() return "WIN" end,
+      isKanto = function() return false end,
+    }
+    local song = Gen.gen2BattleSong(bobT.game, { kind = bobT:musicKind(), mode = bobT.mode,
+                                                 trainer = bobT.trainer, oppClass = bobT.oppClass })
+    package.loaded["src.battle.gen2.BattleMusic"] = savedMusic
+    eq(song, "SONG", "Gold trainer (joiner): the trainer's song is asked for")
+    eq(asked and asked.class, "FIXCLASS", "Gold trainer (joiner): ...by its class")
+    eq(asked and asked.member, "FIX1", "Gold trainer (joiner): ...and member (RIVAL2's ladder reads it)")
+    check(bobSlots ~= nil, "Gold trainer (joiner): the screen was built")
+  end
+end
+
 T.finish("coop_mediated")

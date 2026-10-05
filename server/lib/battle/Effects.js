@@ -510,6 +510,12 @@ const TRANSFORM_PP = 5;
 // DisableEffect's slot draw is a loop the cart never needs to bound; the
 // referee bounds it (applyPrimary) so a malformed sheet cannot hang a hub.
 const DISABLE_PICK_GUARD = 4096;
+// The same bound on every other redraw loop the referee runs for a cart
+// routine that loops until a byte suits it (SleepEffect's counter,
+// SwitchAndTeleportEffect's level roll, MimicEffect's `.getRandomMove`): a
+// generator that never yields one is a frozen cart, and the referee answers
+// the loop's fallback instead (quirks reproduced, freezes never).
+const REDRAW_GUARD = 4096;
 
 // The primary stat drops, StatModifierDownEffect's non-side branch.
 function isPrimaryStatDown(effectId) {
@@ -542,8 +548,19 @@ function mistBlocks(effectId, targetMon) {
 //   'poison'   -- PoisonEffect: a Substitute, a status, a Poison type, then
 //                 MoveHitTest.
 //   'disable'  -- DisableEffect: MoveHitTest, "But it failed!" on a miss.
-//   'test'     -- MoveHitTest first, the effect's own checks after (Sleep,
-//                 Confusion, Paralyze, Mimic, Leech Seed) -- kept as before.
+//   'sleep'    -- SleepEffect (effects.asm :26-68): a recharging target skips
+//                 every check and the hit test; else already asleep, any
+//                 status, then MoveHitTest -- no byte before the last.
+//   'paralyze' -- ParalyzeEffect_ (move_effects/paralyze.asm): any status, an
+//                 ELECTRIC move into a GROUND type, then MoveHitTest.
+//   'confusion' -- ConfusionEffect (effects.asm :1120-1126): a Substitute,
+//                 then MoveHitTest, then already confused.
+//   'mimic'    -- MimicEffect (effects.asm :1203-1273): MoveHitTest, then
+//                 the pick (the player's menu, or `BattleRandom & 3`).
+//   'leechseed' -- LeechSeedEffect_ (move_effects/leech_seed.asm):
+//                 MoveHitTest, then a GRASS type, then already seeded.
+// None of the last five asks CheckTargetSubstitute but Confusion, so a doll
+// stops none of the others (`blockedBySubstitute`).
 const STATUS_PLAN = {
   0: 'none', 1: 'none', 9: 'none', 83: 'none',
   10: 'none', 11: 'none', 12: 'none', 13: 'none', 14: 'none', 15: 'none',
@@ -555,7 +572,8 @@ const STATUS_PLAN = {
   22: 'statdown', 23: 'statdown', 58: 'statdown', 59: 'statdown',
   60: 'statdown', 61: 'statdown', 62: 'statdown', 63: 'statdown',
   66: 'poison', 86: 'disable',
-  32: 'test', 49: 'test', 67: 'test', 82: 'test', 84: 'test',
+  32: 'sleep', 49: 'confusion', 67: 'paralyze', 82: 'mimic',
+  84: 'leechseed',
 };
 
 // An effect outside the table is a power-0 move whose routine is a damaging
@@ -637,7 +655,11 @@ function fighterFields(fighter) {
 // the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
 function confuse(out, fighter, mon, rng, failIfAlready) {
   if (mon.confusion && mon.confusion > 0) {
-    if (failIfAlready) out.nothing = true;
+    // ConfusionEffectFailed (effects.asm :1158-1163): the primary's
+    // ConditionalPrintButItFailed prints (wMoveDidntMiss is clear on a
+    // power-0 move); the side effect's `cp CONFUSION_SIDE_EFFECT / ret z`
+    // says nothing.
+    if (failIfAlready) out.messages.push('But it failed');
     return;
   }
   const turns = (rng ? rng.byte() : 0) % 4 + 2;
@@ -735,21 +757,22 @@ function hasSubstitute(mon) {
   return int(mon.substitute, 0) > 0 || mon.subAtZero === true;
 }
 
-// Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
-// Transform, Mimic). Self-targeting (Recover, Swords Dance, Substitute) and
-// field-wide Haze still run; Conversion copies onto the user. DisableEffect
-// (effects.asm :1286-1367) never asks CheckTargetSubstitute -- its only test
-// is MoveHitTest, whose Substitute check is the broken drain one -- so
-// DISABLE reaches the monster behind a doll.
+// The primaries a doll stops are the routines that ask CheckTargetSubstitute
+// (effects.asm :1436-1446): StatModifierDownEffect (:551), PoisonEffect
+// (:86) and ConfusionEffect (:1121) -- and no other. SleepEffect,
+// ParalyzeEffect_, LeechSeedEffect_, TransformEffect_ (whose only
+// HAS_SUBSTITUTE_UP test is the user's own, for its animation), MimicEffect
+// and DisableEffect never ask, and MoveHitTest's own Substitute check is the
+// broken drain one (core.asm :5251-5256), so SLEEP POWDER, THUNDER WAVE,
+// LEECH SEED, TRANSFORM, MIMIC and DISABLE all reach the monster behind a
+// doll. The self and field effects never had a target to stop. Turn runs
+// each of the three where its routine does (the 'statdown', 'poison' and
+// 'confusion' plans), before the hit test; this is the backstop for a caller
+// that skipped them.
 function blockedBySubstitute(effectId) {
   const statFx = STAT_EFFECTS[effectId];
   if (statFx) return !statFx.selfTarget;
-  if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
-      || effectId === 56 || effectId === 64 || effectId === 65
-      || effectId === 79 || effectId === 85 || effectId === 86) {
-    return false;
-  }
-  return true;
+  return effectId === 49 || effectId === 66;
 }
 
 // ------------------------------------------------------------------
@@ -830,6 +853,62 @@ function untransform(mon) {
   mon.dvs = saved.dvs;
 }
 
+// Everything a switch-out or a faint gives back of the battle struct's move
+// list (LoadBattleMonFromParty reloads it from the party): the Transform's
+// (`untransform`), then every slot a MIMIC wrote while the monster was itself
+// -- the party's own move again, at the slot's PP, which DecrementPP kept in
+// step with the party's. A MIMIC used while TRANSFORMed wrote over a copy the
+// party never had, and `untransform` already threw it away. Walked in slot
+// order so both runtimes rebuild the same list.
+function restoreMoves(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  untransform(mon);
+  const saved = mon.preMimic;
+  mon.preMimic = null;
+  if (!saved || typeof saved !== 'object' || !Array.isArray(mon.moves)) return;
+  for (let i = 1; i <= mon.moves.length; i += 1) {
+    const row = saved[i];
+    if (row) {
+      const back = copyMoveRow(row);
+      back.pp = Math.max(0, int(mon.moves[i - 1].pp, back.pp));
+      mon.moves[i - 1] = back;
+    }
+  }
+}
+
+// `.setSleepCounter` (effects.asm :55-59): `BattleRandom / and SLP_MASK`,
+// redrawn while it comes out 0 -- 1..7 turns. No generator draws nothing and
+// answers 1 (a caller that cannot roll still gets an honest sleep).
+function sleepTurns(rng) {
+  if (!rng) return 1;
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const turns = rng.byte() % 8;
+    if (turns !== 0) return turns;
+  }
+  return 1;
+}
+
+// SwitchAndTeleportEffect's level roll (effects.asm :810-846, and the
+// enemy's mirror :856-880), for a wild fight: a user at or above the
+// target's level always gets away, with no draw. Otherwise `add b / inc c`
+// -- c is the two levels plus one, an 8-bit sum -- and `BattleRandom` is
+// redrawn until it is below c, then compared with the target's level / 4
+// (`srl b / srl b`): at or above it, the escape works. A c that wrapped to 0
+// has no byte below it and freezes the cart; the referee draws nothing there
+// and the escape fails (quirks reproduced, freezes never).
+function teleportEscapes(userLevel, targetLevel, rng) {
+  const a = Math.max(0, int(userLevel, 1)) % 256;
+  const b = Math.max(0, int(targetLevel, 1)) % 256;
+  if (a >= b) return true;
+  const c = (a + b + 1) % 256;
+  if (c === 0 || !rng) return false;
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const r = rng.byte();
+    if (r < c) return r >= Math.floor(b / 4);
+  }
+  return false;
+}
+
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 //      moveIndex (1-based), statusToWire, plus
 //   moveId       the move's id (PoisonEffect's `cp TOXIC`)
@@ -857,8 +936,10 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // SplashEffect (effects.asm :1282-1284): its animation, then
+  // PrintNoEffectText -- "No effect!".
   if (effectId === 85) {
-    out.nothing = true;
+    out.messages.push('No effect!');
     return out;
   }
 
@@ -913,11 +994,21 @@ function applyPrimary(ctx) {
   }
 
   if (effectId === 32) {
-    if (hasMajorStatus(targetMon)) {
+    // SleepEffect (effects.asm :26-68), past the checks Turn ran first (the
+    // 'sleep' plan). `c.overwrite` is its recharging target, which skips
+    // them all: `.setSleepCounter` writes the counter over the whole status
+    // byte, so a poison, a burn or a paralysis is simply gone (their stored
+    // penalties stay -- nothing recomputes them) and a TOXIC's BADLY_POISONED
+    // bit, which lives in BattleStatus3, outlives it (`toxicLinger`), as it
+    // does a disobedience nap.
+    if (hasMajorStatus(targetMon) && !c.overwrite) {
       out.nothing = true;
       return out;
     }
-    const turns = (rng ? rng.byte() : 0) % 7 + 1;
+    if (targetMon.status === 'toxic') targetMon.toxicLinger = true;
+    // `.setSleepCounter`: `BattleRandom / and SLP_MASK`, redrawn while it is
+    // 0 -- 1..7, uniform, one draw or more.
+    const turns = sleepTurns(rng);
     targetMon.status = 'sleep';
     targetMon.statusTurns = turns;
     const token = wire.sleep || 'SLP';
@@ -1102,13 +1193,24 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // MistEffect_ / FocusEnergyEffect_ (move_effects/mist.asm,
+  // focus_energy.asm): a bit already set is `.mistAlreadyInUse` /
+  // `.alreadyUsing`, PrintButItFailedText_ -- "But it failed!".
   if (effectId === 46) {
+    if (userMon.mist) {
+      out.messages.push('But it failed');
+      return out;
+    }
     userMon.mist = true;
     out.messages.push(`${userMon.species} is shrouded in mist`);
     return out;
   }
 
   if (effectId === 47) {
+    if (userMon.focusEnergy) {
+      out.messages.push('But it failed');
+      return out;
+    }
     userMon.focusEnergy = true;
     out.messages.push(`${userMon.species} is getting pumped`);
     return out;
@@ -1122,23 +1224,38 @@ function applyPrimary(ctx) {
   }
 
   if (effectId === 82) {
+    // MimicEffect (effects.asm :1203-1273), past its MoveHitTest and its
+    // pick, which Turn makes (`c.mimicSlot`: the player's menu, or
+    // `BattleRandom & 3`). `.playerTurn`'s `ld [hl], a` writes the picked
+    // move's id over the user's slot at wPlayerMoveListIndex -- the chosen
+    // slot (`c.moveIndex`) -- and nothing else: the slot keeps the PP and
+    // the PP Ups MIMIC had, this turn's spend included. It is the battle
+    // struct's alone; the party keeps MIMIC, and a switch-out or a faint
+    // brings it back (`restoreMoves`) with the PP the two shared --
+    // DecrementPP writes both while the monster is not TRANSFORMed.
     const moveIndex = int(c.moveIndex, 0);
-    const lastIdx = int(targetMon.lastMoveIndex, 0);
-    if (lastIdx < 1 || lastIdx > targetMon.moves.length) {
-      out.nothing = true;
+    const pick = int(c.mimicSlot, 0);
+    const source = Array.isArray(targetMon.moves) && pick >= 1
+      ? targetMon.moves[pick - 1] : undefined;
+    const slotMove = moveIndex >= 1 ? userMon.moves[moveIndex - 1] : undefined;
+    if (!(source && slotMove)) {
+      out.messages.push('But it failed');
       return out;
     }
-    const source = targetMon.moves[lastIdx - 1];
-    if (!source) {
-      out.nothing = true;
-      return out;
+    if (!userMon.transformed) {
+      if (!userMon.preMimic) userMon.preMimic = {};
+      if (!userMon.preMimic[moveIndex]) {
+        userMon.preMimic[moveIndex] = copyMoveRow(slotMove);
+      }
     }
     userMon.moves[moveIndex - 1] = {
       id: source.id || 'move',
       // The copy is narrated under the same name the original was, so a
       // mimicked move does not revert to its slug on the learner's screen.
       name: source.name,
-      pp: Math.max(0, int(source.pp, 0)),
+      pp: Math.max(0, int(slotMove.pp, 0)),
+      maxPp: slotMove.maxPp,
+      ppUps: slotMove.ppUps,
       power: Math.max(0, int(source.power, 0)),
       accuracy: Math.max(0, int(source.accuracy, 255)),
       type: Math.max(0, int(source.type, 0)),
@@ -1653,16 +1770,17 @@ function chargeMessage(mon, effectId, moveOrId) {
   return `${species} is glowing`;
 }
 
-// Gen 1 cartridge: Swift skips the invuln check; Thunder reaches Fly;
-// Earthquake / Fissure miss Dig.
+// MoveHitTest (core.asm :5228-5262): SWIFT's `ret z` comes before the
+// INVULNERABLE test, so SWIFT reaches a FLY or DIG user, and nothing else
+// does -- `bit INVULNERABLE / jp nz, .moveMissed` has no exception. (THUNDER
+// reaching FLY, EARTHQUAKE reaching DIG are Gold's, not Red's.)
+// `chargeMoveId` is kept for the callers' shape.
 function hitsInvulnerable(chargeMoveId, attackerMove) {
-  const charge = moveKey(chargeMoveId);
   const id = moveKey(attackerMove);
   if (id === 'SWIFT') return true;
   if (attackerMove && typeof attackerMove === 'object' && isSwift(attackerMove.effect)) {
     return true;
   }
-  if (charge === 'FLY' && id === 'THUNDER') return true;
   return false;
 }
 
@@ -2116,8 +2234,12 @@ module.exports = {
   calcStat,
   hpDv,
   untransform,
+  restoreMoves,
+  sleepTurns,
+  teleportEscapes,
   TRANSFORM_PP,
   DISABLE_PICK_GUARD,
+  REDRAW_GUARD,
   isPrimaryStatDown,
   mistBlocks,
   statusPlan,

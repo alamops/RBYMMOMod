@@ -1255,6 +1255,10 @@ end
 M.WILD_ITEM_NONE_BELOW2 = 192   -- 75 percent + 1
 M.WILD_ITEM2_BELOW2 = 20        -- 8 percent
 M.BATTLETYPE_FORCEITEM2 = 10
+-- pokecrystal / pokegold constants/pokemon_data_constants.asm BASE_HAPPINESS:
+-- what LoadEnemyMon `.Happiness` gives every wild and trainer monster
+-- (`snapshotMons`, contract K14 on a foe's sheet).
+M.BASE_HAPPINESS2 = 70
 function M.rollWildItem2(game, mon, opts)
   if type(mon) ~= "table" then return nil end
   if Gen.generation(game) ~= 2 then return nil end
@@ -1309,7 +1313,8 @@ end
 -- unless `link` is set too -- a link battle runs no obedience check on either
 -- cart, and a sheet built for one states none.  A foe's sheet (a wild monster,
 -- a trainer's) is never `own`: the cart asks the question of the player's
--- battle monster alone.
+-- battle monster alone.  `own` also picks a Gold sheet's happiness (K14): the
+-- monster's own byte, or for a foe the cart's BASE_HAPPINESS.
 function M.snapshotMons(game, party, opts)
   if type(party) ~= "table" then return {} end
   -- Gen 3: the C4 sheet.  Every sheet built here carries its species' catch
@@ -1322,7 +1327,8 @@ function M.snapshotMons(game, party, opts)
   local data = game and game.data
   local order = typeOrder(data)
   local generation = Gen.generation(game)
-  local stampTraded = type(opts) == "table" and opts.own == true and opts.link ~= true
+  local own = type(opts) == "table" and opts.own == true
+  local stampTraded = own and opts.link ~= true
 
   local out = {}
   for index = 1, #party do
@@ -1393,14 +1399,27 @@ function M.snapshotMons(game, party, opts)
           M.stampK7(sheet, def, mon, generation)
           -- Contract K14: Gold's happiness (MON_HAPPINESS, 0..255), which
           -- RETURN and FRUSTRATION read (pokecrystal BattleCommand_
-          -- HappinessPower / FrustrationPower).  The engine keeps it on the
-          -- monster (src/battle/gen2/Mon.lua: 70 for a caught one, 120 for a
-          -- gift or a hatchling); a monster that states none sends none.  Red
-          -- has no happiness byte, and its dialect never carries one.
+          -- HappinessPower / FrustrationPower).  This player's own monster
+          -- sends its own: the engine keeps it on the monster
+          -- (src/battle/gen2/Mon.lua: 70 for a caught one, 120 for a gift or
+          -- a hatchling), and one that states none sends none.  A foe this
+          -- client describes -- a wild monster, a trainer's -- fights on the
+          -- cart's constant whatever its engine record says: LoadEnemyMon
+          -- `.Happiness` (pokecrystal engine/battle/core.asm, pokegold the
+          -- same) writes BASE_HAPPINESS into wEnemyMonHappiness for every
+          -- wild and trainer monster, and the computer's RETURN and
+          -- FRUSTRATION read that byte.  A link opponent's sheet is its own
+          -- client's `own` one, as InitEnemyMon copies the other cart's party
+          -- struct.  Red has no happiness byte, and its dialect never carries
+          -- one.
           if generation == 2 then
-            local happy = tonumber(mon.happiness)
-            if happy and happy == happy then
-              sheet.happiness = clamp(floor(happy), 0, 255)
+            if not own then
+              sheet.happiness = M.BASE_HAPPINESS2
+            else
+              local happy = tonumber(mon.happiness)
+              if happy and happy == happy then
+                sheet.happiness = clamp(floor(happy), 0, 255)
+              end
             end
           end
         end
@@ -3549,6 +3568,19 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() then
       local mon = self.mine and self.mine[self.active]
       if mon then mon.hp = 0 end
+      -- The Transform / Mimic overlay ends with the monster wearing it: both
+      -- referees give a fallen monster its own list back at the faint
+      -- (BattleSim Effects.untransform, BattleSim2 `_clearSubstatus` -- the
+      -- cart's party struct is what LoadBattleMonFromParty / InitBattleMon
+      -- reads next).  Dropped at parse, as the send-out drops it, so a
+      -- `moves` the referee states for this party slot behind the faint --
+      -- Gold's party PP a MYSTERYBERRY restored under Transform, which it
+      -- cannot send through the overlay -- lands on the sheet (`syncMinePp`)
+      -- rather than becoming a new overlay for a monster that is down.  Red
+      -- and Gold only: a Gen 3 screen still names a copied move's type off
+      -- the overlay (`gen3MoveRow`) for rows queued ahead of the faint, and
+      -- its send-out drops it as before.
+      if self:generation() ~= 3 then self.liveMoves = nil end
       -- Authoritative: hub/sim sets amount=1 when a living bench remains.
       -- Absent amount (older stream) falls back to local party HP.
       if msg.amount == 1 then
@@ -3867,12 +3899,17 @@ function M:onEvent(msg)
       -- `mon` (0-based party index) is the PP-spend/restore discriminator.
       -- Transform/Mimic omit it -- overlay only, even when the copied ids
       -- match the upload (a mirror match). A present `mon` writes that
-      -- sheet unless a transform overlay is already up, in which case the
-      -- overlay is refreshed so FIGHT tracks the copied PP.
+      -- sheet unless a transform overlay is up on that monster -- the one
+      -- standing here -- in which case the overlay is refreshed so FIGHT
+      -- tracks the copied PP.  The overlay is gone once its wearer leaves --
+      -- a send-out on this seat and its faint both drop it -- so the party
+      -- list a referee states behind either (Gold's MYSTERYBERRY restore
+      -- under Transform) writes its sheet; and a benched monster's list is
+      -- its sheet's whatever the one standing here wears.
       if msg.mon ~= nil then
         local index = (tonumber(msg.mon) or 0) + 1
-        if self.liveMoves then
-          if index == (self.active or 1) then self.liveMoves = msg.moves end
+        if self.liveMoves and index == (self.active or 1) then
+          self.liveMoves = msg.moves
         else
           self:syncMinePp(msg.moves, index)
         end
@@ -4624,9 +4661,36 @@ function M:sheetIndexFor(mon)
   return nil
 end
 
--- Rebuild this sheet from the save mon and tell the referee. Transform's
--- `liveMoves` overlay is left alone: the real sheet still updates so the
--- new move is there when the transform ends.
+-- Do two move lists name the same moves in the same slots?  What tells a
+-- learn (a slot added or replaced) from a list resent unchanged beside a
+-- level-up (contract K9).  Shared with src/CoopBattle.lua.
+function M.sameMoveIds(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    local x, y = a[i], b[i]
+    if not (type(x) == "table" and type(y) == "table" and x.id == y.id) then
+      return false
+    end
+  end
+  return true
+end
+
+-- Rebuild this sheet from the save mon and tell the referee.  The real sheet
+-- always updates, so the new move is there when a Transform ends.  What the
+-- `liveMoves` overlay does is the cart's LearnMove, which the referee's learn
+-- follows (src/Hub.lua `learnTo`):
+--
+--   * Red: pokered LearnMove (engine/pokemon/learn_move.asm) copies the
+--     party's moves and PP over wBattleMonMoves / wBattleMonPP for the
+--     monster standing in battle whatever its substatus, so a transformed (or
+--     MIMICking) monster that learns fights on with its own list -- the
+--     overlay goes, and FIGHT reads the sheet.  Only on a learn: a level-up
+--     that taught nothing never reaches LearnMove (LearnMoveFromLevelUp finds
+--     no move for the level), and its resent list leaves the overlay up.
+--   * Gold: pokecrystal LearnMove (engine/pokemon/learn.asm) skips that copy
+--     under SUBSTATUS_TRANSFORMED, so the copied moves stay in the fight and
+--     the overlay stays with them.
 --
 -- `grew` (Gen 1 / Gen 2): the monster just levelled, so the message carries
 -- its new level, stats and max HP too (contract K9; `M.growthOf`), and the
@@ -4640,6 +4704,7 @@ function M:syncFightMoves(mon, grew)
   if type(sheet) ~= "table" then return false end
   local moves = M.sheetMoves(self.game, mon)
   if #moves == 0 then return false end
+  local learned = not M.sameMoveIds(sheet.moves, moves)
   sheet.moves = moves
   local growth = nil
   if grew and self:generation() ~= 3 then
@@ -4651,6 +4716,12 @@ function M:syncFightMoves(mon, grew)
   if sent and growth then
     self.levelSent = self.levelSent or {}
     self.levelSent[mon] = true
+  end
+  -- Red's LearnMove copy (above): the referee was told, so the monster
+  -- standing here fights on with its own list.
+  if sent and learned and self.liveMoves and index == (self.active or 1)
+     and self:generation() == 1 then
+    self.liveMoves = nil
   end
   return sent
 end
@@ -5913,9 +5984,16 @@ end
 --         money (AddBCD, which saturates the three BCD bytes at 999999) and
 --         "<PLAYER> picked up ¥N!" is printed (_PickUpPayDayMoneyText,
 --         text_bcd LEADING_ZEROES | LEFT_ALIGN: the number as it is).
---         wBattleResult is 0 on a win and also on a flee -- running never
---         sets it -- so Red pays a run as well (the referee's Gen 1 `run`
---         outcome carries the pot; for side a it reads as a loss here).
+--         wBattleResult is 0 on a win and on the escapes that never write
+--         it -- a TELEPORT / ROAR / WHIRLWIND by either side
+--         (SwitchAndTeleportEffect sets wEscapedFromBattle only), a wild
+--         monster's flight, a POKé DOLL -- so Red pays those too.  The
+--         player's own RUN writes 2 (TryRunningFromBattle `.canEscape`) and
+--         a catch writes 2, so neither pays.  The referee tells them apart
+--         (BattleSim Turn `_payDayOn`): a `run` outcome carries `payDay` only
+--         for an escape that pays, and this pays whatever it carries,
+--         whichever side the escape leaves in `losers` -- the player who
+--         TELEPORTs away fled, and is still the one who picks the coins up.
 --   Gold  ExitBattle -> CheckPayDay (engine/battle/core.asm, pokecrystal and
 --         pokegold): on a WIN only (a flee is a DRAW), the pot is doubled
 --         under wAmuletCoin (`sla` / `rl`, saturating at $ffffff), paid with
@@ -5939,8 +6017,13 @@ function M:payDay12(msg)
   if not KEEPS_HELD_MODES[self.mode] or self.mySide ~= "a" then return 0 end
   local generation = self:generation()
   local won = self.result == "win"
-  -- Red's flee keeps wBattleResult at 0; Gold's is a DRAW and pays nothing.
-  local ran = generation == 1 and type(msg) == "table" and msg.reason == "run"
+  -- Red's paying escape keeps wBattleResult at 0 (the referee states the pot
+  -- only for one).  Gold's every escape -- ours, or a foe that fled with
+  -- side a left the winner -- is a DRAW (SetBattleDraw) and ExitBattle skips
+  -- CheckPayDay on one, so a Gold `run` pays nothing whatever it carries;
+  -- its referee states no pot on one either.
+  local ran = type(msg) == "table" and msg.reason == "run"
+  if ran and generation ~= 1 then return 0 end
   if not (won or ran) then return 0 end
   self.payDayPaid = 0
   local save = self.game and self.game.save

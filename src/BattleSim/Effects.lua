@@ -554,6 +554,12 @@ M.TRANSFORM_PP = 5
 -- DisableEffect's slot draw is a loop the cart never needs to bound; the
 -- referee bounds it (applyPrimary) so a malformed sheet cannot hang a hub.
 M.DISABLE_PICK_GUARD = 4096
+-- The same bound on every other redraw loop the referee runs for a cart
+-- routine that loops until a byte suits it (SleepEffect's counter,
+-- SwitchAndTeleportEffect's level roll, MimicEffect's `.getRandomMove`): a
+-- generator that never yields one is a frozen cart, and the referee answers
+-- the loop's fallback instead (quirks reproduced, freezes never).
+M.REDRAW_GUARD = 4096
 
 -- The primary stat drops, StatModifierDownEffect's non-side branch.
 function M.isPrimaryStatDown(effectId)
@@ -586,8 +592,19 @@ end
 --   "poison"   -- PoisonEffect: a Substitute, a status, a Poison type, then
 --                 MoveHitTest.
 --   "disable"  -- DisableEffect: MoveHitTest, "But it failed!" on a miss.
---   "test"     -- MoveHitTest first, the effect's own checks after (Sleep,
---                 Confusion, Paralyze, Mimic, Leech Seed) -- kept as before.
+--   "sleep"    -- SleepEffect (effects.asm :26-68): a recharging target skips
+--                 every check and the hit test; else already asleep, any
+--                 status, then MoveHitTest -- no byte before the last.
+--   "paralyze" -- ParalyzeEffect_ (move_effects/paralyze.asm): any status, an
+--                 ELECTRIC move into a GROUND type, then MoveHitTest.
+--   "confusion" -- ConfusionEffect (effects.asm :1120-1126): a Substitute,
+--                 then MoveHitTest, then already confused.
+--   "mimic"    -- MimicEffect (effects.asm :1203-1273): MoveHitTest, then
+--                 the pick (the player's menu, or `BattleRandom & 3`).
+--   "leechseed" -- LeechSeedEffect_ (move_effects/leech_seed.asm):
+--                 MoveHitTest, then a GRASS type, then already seeded.
+-- None of the last five asks CheckTargetSubstitute but Confusion, so a doll
+-- stops none of the others (`blockedBySubstitute`).
 local STATUS_PLAN = {
   [0] = "none", [1] = "none", [9] = "none", [83] = "none",
   [10] = "none", [11] = "none", [12] = "none", [13] = "none", [14] = "none", [15] = "none",
@@ -599,7 +616,8 @@ local STATUS_PLAN = {
   [22] = "statdown", [23] = "statdown", [58] = "statdown", [59] = "statdown",
   [60] = "statdown", [61] = "statdown", [62] = "statdown", [63] = "statdown",
   [66] = "poison", [86] = "disable",
-  [32] = "test", [49] = "test", [67] = "test", [82] = "test", [84] = "test",
+  [32] = "sleep", [49] = "confusion", [67] = "paralyze", [82] = "mimic",
+  [84] = "leechseed",
 }
 
 -- An effect outside the table is a power-0 move whose routine is a damaging
@@ -681,7 +699,11 @@ end
 -- the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
 local function confuse(out, fighter, mon, rng, failIfAlready)
   if mon.confusion and mon.confusion > 0 then
-    if failIfAlready then out.nothing = true end
+    -- ConfusionEffectFailed (effects.asm :1158-1163): the primary's
+    -- ConditionalPrintButItFailed prints (wMoveDidntMiss is clear on a
+    -- power-0 move); the side effect's `cp CONFUSION_SIDE_EFFECT / ret z`
+    -- says nothing.
+    if failIfAlready then out.messages[#out.messages + 1] = "But it failed" end
     return
   end
   local turns = (rng and rng:byte() or 0) % 4 + 2
@@ -780,21 +802,22 @@ function M.hasSubstitute(mon)
   return int(mon.substitute, 0) > 0 or mon.subAtZero == true
 end
 
--- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
--- Transform, Mimic). Self-targeting (Recover, Swords Dance, Substitute) and
--- field-wide Haze still run; Conversion copies onto the user.  DisableEffect
--- (effects.asm :1286-1367) never asks CheckTargetSubstitute -- its only test
--- is MoveHitTest, whose Substitute check is the broken drain one -- so
--- DISABLE reaches the monster behind a doll.
+-- The primaries a doll stops are the routines that ask CheckTargetSubstitute
+-- (effects.asm :1436-1446): StatModifierDownEffect (:551), PoisonEffect
+-- (:86) and ConfusionEffect (:1121) -- and no other.  SleepEffect,
+-- ParalyzeEffect_, LeechSeedEffect_, TransformEffect_ (whose only
+-- HAS_SUBSTITUTE_UP test is the user's own, for its animation), MimicEffect
+-- and DisableEffect never ask, and MoveHitTest's own Substitute check is the
+-- broken drain one (core.asm :5251-5256), so SLEEP POWDER, THUNDER WAVE,
+-- LEECH SEED, TRANSFORM, MIMIC and DISABLE all reach the monster behind a
+-- doll.  The self and field effects never had a target to stop.  Turn runs
+-- each of the three where its routine does (the "statdown", "poison" and
+-- "confusion" plans), before the hit test; this is the backstop for a caller
+-- that skipped them.
 local function blockedBySubstitute(effectId)
   local statFx = STAT_EFFECTS[effectId]
   if statFx then return not statFx.selfTarget end
-  if effectId == 24 or effectId == 25 or effectId == 46 or effectId == 47
-      or effectId == 56 or effectId == 64 or effectId == 65
-      or effectId == 79 or effectId == 85 or effectId == 86 then
-    return false
-  end
-  return true
+  return effectId == 49 or effectId == 66
 end
 
 -- ------------------------------------------------------------------
@@ -883,6 +906,62 @@ function M.untransform(mon)
   mon.dvs = saved.dvs
 end
 
+-- Everything a switch-out or a faint gives back of the battle struct's move
+-- list (LoadBattleMonFromParty reloads it from the party): the Transform's
+-- (`untransform`), then every slot a MIMIC wrote while the monster was itself
+-- -- the party's own move again, at the slot's PP, which DecrementPP kept in
+-- step with the party's.  A MIMIC used while TRANSFORMed wrote over a copy the
+-- party never had, and `untransform` already threw it away.  Walked in slot
+-- order so both runtimes rebuild the same list.
+function M.restoreMoves(mon)
+  if type(mon) ~= "table" then return end
+  M.untransform(mon)
+  local saved = mon.preMimic
+  mon.preMimic = nil
+  if type(saved) ~= "table" or type(mon.moves) ~= "table" then return end
+  for i = 1, #mon.moves do
+    local row = saved[i]
+    if row then
+      local back = copyMoveRow(row)
+      back.pp = max(0, int(mon.moves[i].pp, back.pp))
+      mon.moves[i] = back
+    end
+  end
+end
+
+-- `.setSleepCounter` (effects.asm :55-59): `BattleRandom / and SLP_MASK`,
+-- redrawn while it comes out 0 -- 1..7 turns.  No generator draws nothing and
+-- answers 1 (a caller that cannot roll still gets an honest sleep).
+function M.sleepTurns(rng)
+  if not rng then return 1 end
+  for _ = 1, M.REDRAW_GUARD do
+    local turns = rng:byte() % 8
+    if turns ~= 0 then return turns end
+  end
+  return 1
+end
+
+-- SwitchAndTeleportEffect's level roll (effects.asm :810-846, and the
+-- enemy's mirror :856-880), for a wild fight: a user at or above the
+-- target's level always gets away, with no draw.  Otherwise `add b / inc c`
+-- -- c is the two levels plus one, an 8-bit sum -- and `BattleRandom` is
+-- redrawn until it is below c, then compared with the target's level / 4
+-- (`srl b / srl b`): at or above it, the escape works.  A c that wrapped to 0
+-- has no byte below it and freezes the cart; the referee draws nothing there
+-- and the escape fails (quirks reproduced, freezes never).
+function M.teleportEscapes(userLevel, targetLevel, rng)
+  local a = max(0, int(userLevel, 1)) % 256
+  local b = max(0, int(targetLevel, 1)) % 256
+  if a >= b then return true end
+  local c = (a + b + 1) % 256
+  if c == 0 or not rng then return false end
+  for _ = 1, M.REDRAW_GUARD do
+    local r = rng:byte()
+    if r < c then return r >= floor(b / 4) end
+  end
+  return false
+end
+
 -- ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 --      moveIndex (1-based), statusToWire, plus
 --   moveId       the move's id (PoisonEffect's `cp TOXIC`)
@@ -909,8 +988,10 @@ function M.applyPrimary(ctx)
     return out
   end
 
+  -- SplashEffect (effects.asm :1282-1284): its animation, then
+  -- PrintNoEffectText -- "No effect!".
   if effectId == 85 then -- SPLASH_EFFECT
-    out.nothing = true
+    out.messages[#out.messages + 1] = "No effect!"
     return out
   end
 
@@ -966,11 +1047,21 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 32 then -- SLEEP_EFFECT
-    if M.hasMajorStatus(targetMon) then
+    -- SleepEffect (effects.asm :26-68), past the checks Turn ran first (the
+    -- "sleep" plan).  `ctx.overwrite` is its recharging target, which skips
+    -- them all: `.setSleepCounter` writes the counter over the whole status
+    -- byte, so a poison, a burn or a paralysis is simply gone (their stored
+    -- penalties stay -- nothing recomputes them) and a TOXIC's BADLY_POISONED
+    -- bit, which lives in BattleStatus3, outlives it (`toxicLinger`), as it
+    -- does a disobedience nap.
+    if M.hasMajorStatus(targetMon) and not ctx.overwrite then
       out.nothing = true
       return out
     end
-    local turns = (rng and rng:byte() or 0) % 7 + 1
+    if targetMon.status == "toxic" then targetMon.toxicLinger = true end
+    -- `.setSleepCounter`: `BattleRandom / and SLP_MASK`, redrawn while it is
+    -- 0 -- 1..7, uniform, one draw or more.
+    local turns = M.sleepTurns(rng)
     targetMon.status = "sleep"
     targetMon.statusTurns = turns
     local token = wire.sleep or "SLP"
@@ -1158,7 +1249,14 @@ function M.applyPrimary(ctx)
     return out
   end
 
+  -- MistEffect_ / FocusEnergyEffect_ (move_effects/mist.asm,
+  -- focus_energy.asm): a bit already set is `.mistAlreadyInUse` /
+  -- `.alreadyUsing`, PrintButItFailedText_ -- "But it failed!".
   if effectId == 46 then -- MIST_EFFECT
+    if userMon.mist then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
     userMon.mist = true
     out.messages[#out.messages + 1] =
       userMon.species .. " is shrouded in mist"
@@ -1166,6 +1264,10 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 47 then -- FOCUS_ENERGY_EFFECT
+    if userMon.focusEnergy then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
     userMon.focusEnergy = true
     out.messages[#out.messages + 1] =
       userMon.species .. " is getting pumped"
@@ -1181,23 +1283,37 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 82 then -- MIMIC_EFFECT
+    -- MimicEffect (effects.asm :1203-1273), past its MoveHitTest and its
+    -- pick, which Turn makes (`ctx.mimicSlot`: the player's menu, or
+    -- `BattleRandom & 3`).  `.playerTurn`'s `ld [hl], a` writes the picked
+    -- move's id over the user's slot at wPlayerMoveListIndex -- the chosen
+    -- slot (`ctx.moveIndex`) -- and nothing else: the slot keeps the PP and
+    -- the PP Ups MIMIC had, this turn's spend included.  It is the battle
+    -- struct's alone; the party keeps MIMIC, and a switch-out or a faint
+    -- brings it back (`M.restoreMoves`) with the PP the two shared --
+    -- DecrementPP writes both while the monster is not TRANSFORMed.
     local moveIndex = int(ctx.moveIndex, 0)
-    local lastIdx = int(targetMon.lastMoveIndex, 0)
-    if lastIdx < 1 or lastIdx > #targetMon.moves then
-      out.nothing = true
+    local source = type(targetMon.moves) == "table"
+      and targetMon.moves[int(ctx.mimicSlot, 0)] or nil
+    local slotMove = userMon.moves[moveIndex]
+    if not (source and slotMove) then
+      out.messages[#out.messages + 1] = "But it failed"
       return out
     end
-    local source = targetMon.moves[lastIdx]
-    if not source then
-      out.nothing = true
-      return out
+    if not userMon.transformed then
+      userMon.preMimic = userMon.preMimic or {}
+      if not userMon.preMimic[moveIndex] then
+        userMon.preMimic[moveIndex] = copyMoveRow(slotMove)
+      end
     end
     userMon.moves[moveIndex] = {
       id = source.id or "move",
       -- The copy is narrated under the same name the original was, so a
       -- mimicked move does not revert to its slug on the learner's screen.
       name = source.name,
-      pp = max(0, int(source.pp, 0)),
+      pp = max(0, int(slotMove.pp, 0)),
+      maxPp = slotMove.maxPp,
+      ppUps = slotMove.ppUps,
       power = max(0, int(source.power, 0)),
       accuracy = max(0, int(source.accuracy, 255)),
       type = max(0, int(source.type, 0)),
@@ -1724,16 +1840,17 @@ function M.chargeMessage(mon, effectId, moveOrId)
   return species .. " is glowing"
 end
 
--- Gen 1 cartridge: Swift skips the invuln check; Thunder reaches Fly;
--- Earthquake / Fissure miss Dig (Stadium is the other rule).
+-- MoveHitTest (core.asm :5228-5262): SWIFT's `ret z` comes before the
+-- INVULNERABLE test, so SWIFT reaches a FLY or DIG user, and nothing else
+-- does -- `bit INVULNERABLE / jp nz, .moveMissed` has no exception.  (THUNDER
+-- reaching FLY, EARTHQUAKE reaching DIG are Gold's, not Red's.)
+-- `chargeMoveId` is kept for the callers' shape.
 function M.hitsInvulnerable(chargeMoveId, attackerMove)
-  local charge = M.moveKey(chargeMoveId)
   local id = M.moveKey(attackerMove)
   if id == "SWIFT" then return true end
   if type(attackerMove) == "table" and M.isSwift(attackerMove.effect) then
     return true
   end
-  if charge == "FLY" and id == "THUNDER" then return true end
   return false
 end
 

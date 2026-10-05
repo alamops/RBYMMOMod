@@ -282,12 +282,13 @@ each("accuracy", function(input)
   local hit, effective = Accuracy.hit(input.accuracy, input.roll, {
     accuracyStage = input.accuracyStage,
     evasionStage = input.evasionStage,
-    accuracyMod = input.accuracyMod,
-    evasionMod = input.evasionMod,
     alwaysHits = input.alwaysHits,
     brightPowder = input.brightPowder,
+    identified = input.identified,
   })
-  return { hit = hit, effectiveAccuracy = effective }
+  local draws = nil
+  if effective ~= nil then draws = Accuracy.draws(effective) end
+  return { hit = hit, effectiveAccuracy = effective, draws = draws }
 end)
 
 -- ------------------------------------------------------------------
@@ -471,6 +472,90 @@ end
 each("items", function(input)
   local handler = ITEMS[input.kind]
   if not handler then error("no handler for item rule " .. tostring(input.kind), 0) end
+  return handler(input)
+end)
+
+-- ------------------------------------------------------------------
+-- gold: the wave-3 (R2c) formulas, one `kind` per rule
+-- ------------------------------------------------------------------
+
+-- A byte stream for the rules that draw: the fixture's `bytes`, in order.
+local function byteStream(list)
+  local i = 0
+  return { byte = function()
+    i = i + 1
+    return list[i] or 0
+  end, drawn = function() return i end }
+end
+
+local GOLD = {}
+
+function GOLD.happinessPower(input) return { power = Effects.happinessPower(orNil(input.happiness)) } end
+function GOLD.frustrationPower(input) return { power = Effects.frustrationPower(orNil(input.happiness)) } end
+function GOLD.hiddenPower(input)
+  local power, typeName = Effects.hiddenPower(orNil(input.dvs))
+  return { power = power, type = typeName }
+end
+function GOLD.reversalPower(input) return { power = Effects.reversalPower(input.hp, input.maxHp) } end
+function GOLD.magnitude(input)
+  local power, magnitude = Effects.magnitude(input.byte)
+  return { power = power, magnitude = magnitude }
+end
+function GOLD.presentPower(input) return { power = Effects.presentPower(input.byte) } end
+function GOLD.typeConstant(input) return { value = Effects.typeConstant(orNil(input.name)) } end
+function GOLD.protectChance(input)
+  local r = byteStream(input.bytes)
+  return { ok = Effects.protectChance(r, input.count), drawn = r.drawn() }
+end
+function GOLD.tripleKickCount(input)
+  local r = byteStream(input.bytes)
+  return { hits = Effects.tripleKickCount(r), drawn = r.drawn() }
+end
+function GOLD.psywave(input)
+  local r = byteStream(input.bytes)
+  local damage = Effects.fixedDamage({ effectId = Effects.PSYWAVE, userMon = { level = input.level }, rng = r })
+  return { damage = damage, drawn = r.drawn() }
+end
+function GOLD.levelDamage(input)
+  return { damage = Effects.fixedDamage({ effectId = Effects.LEVEL_DAMAGE, userMon = { level = input.level } }) }
+end
+function GOLD.weatherTenths(input)
+  return { tenths = Effects.weatherTenths(orNil(input.weather), orNil(input.typeName), input.effectId) }
+end
+function GOLD.timeHealAmount(input)
+  return { value = Effects.timeHealAmount(input.maxHp, input.timeMatches, orNil(input.weather)) }
+end
+function GOLD.calc(input)
+  return { damage = Damage.calc(input.level, input.power, input.attack, input.defense, {
+    crit = input.crit, itemBoostPercent = orNil(input.itemBoostPercent), carry = orNil(input.carry),
+  }) }
+end
+function GOLD.stab(input)
+  local d, immune, cReg = Damage.stab(input.damage, {
+    weatherTenths = orNil(input.weatherTenths), badgeTypeBoost = input.badgeTypeBoost,
+    stab = input.stab, typeEffect = orNil(input.typeEffect),
+  })
+  return { damage = d, immune = immune, cReg = cReg }
+end
+function GOLD.multiply(input) return { damage = Damage.multiply(input.damage, input.times) } end
+function GOLD.doubleTimes(input) return { damage = Damage.doubleTimes(input.damage, input.count) } end
+function GOLD.applyRoll(input) return { damage = Damage.applyRoll(input.damage, input.roll), varies = Damage.varies(input.damage) } end
+function GOLD.quarter(input) return { value = Items.quarter(input.maxHp) } end
+function GOLD.half(input) return { value = Items.half(input.maxHp) } end
+function GOLD.sleepCount(input)
+  local r = byteStream(input.bytes)
+  local target = { species = "T", hp = 10, maxHp = 10, stages = {}, types = { 0 }, substitute = 0 }
+  Effects.applyPrimary({ effectId = 32, rng = r, userMon = { species = "U", maxHp = 10, stages = {} },
+    targetMon = target, userFighter = { slot = 0, side = "a" }, targetFighter = { slot = 3, side = "b" } })
+  return { turns = target.statusTurns, drawn = r.drawn() }
+end
+function GOLD.movePriority(input)
+  return { priority = Effects.movePriority({ id = input.id, effect = input.effect, priority = orNil(input.priority) }) }
+end
+
+each("gold", function(input)
+  local handler = GOLD[input.kind]
+  if not handler then error("no handler for gold rule " .. tostring(input.kind), 0) end
   return handler(input)
 end)
 

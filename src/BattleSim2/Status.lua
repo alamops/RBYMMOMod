@@ -15,8 +15,12 @@
 --     burnAttack — SpA is untouched.
 --   * **Toxic** ramps as GetSixteenthMaxHP (Items.sixteenth) times the count,
 --     a 16-bit sum (ResidualDamage's `.add` loop, core.asm:1038-1052).
---   * **Paralysis** full-stops 1/4 of the time (roll in 0..3, stop when 0),
---     not Gen 1's 63/256; speed still quarters.
+--   * **Paralysis** full-stops on a BattleRandom byte under `25 percent` --
+--     63, so 63/256 (CheckTurn's `cp 25 percent / ret nc`, effect_commands.asm:
+--     323-331; RGBDS `percent` is `* $ff / 100`) -- not the 1/4 the referee
+--     used to roll; speed still quarters.
+--   * **Sleep** draws no byte in CheckTurn: the counter ticks and that is all
+--     (the caller draws for paralysis alone).
 --   * **Sleep** wakes *and acts* on the turn the counter hits zero (Gen 1
 --     loses the waking turn).
 --   * Confusion self-hit routes through Damage.compute as HitConfusion runs
@@ -40,7 +44,8 @@ local M = {}
 
 local floor, max = math.floor, math.max
 
-M.PARALYSIS_SKIP_CHANCE = 4
+-- CheckTurn's `cp 25 percent`: a byte under 63 is a full paralysis.
+M.PARALYSIS_STOP_BYTE = 63
 -- HandleDefrost's `cp 10 percent`: RGBDS `percent` is `* $ff / 100`, so 25 --
 -- a byte under it thaws (25/256).
 M.DEFROST_BYTE = 25
@@ -89,9 +94,9 @@ function M.freezeCanMove(roll)
   return M.freezeTick(roll).canMove
 end
 
--- roll: 0..PARALYSIS_SKIP_CHANCE-1; stop when 0.
+-- roll: the BattleRandom byte; stop under PARALYSIS_STOP_BYTE.
 function M.paralysisStop(roll)
-  return int(roll, 1) % M.PARALYSIS_SKIP_CHANCE == 0
+  return int(roll, 255) < M.PARALYSIS_STOP_BYTE
 end
 
 function M.paralysisTick(roll)

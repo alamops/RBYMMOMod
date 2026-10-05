@@ -1060,7 +1060,7 @@ scenario("move_names", function(events)
   -- No `name` at all: the protocol-25 sheet, narrated under its id.
   local nudge = function() return mv("nudge", 10, 255, 0) end
   local battle = build({
-    id = "mn", mode = "1v1", seed = 4243, choiceTimeout = 60, reconnectGrace = 60,
+    id = "mn", mode = "wild", seed = 4243, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = {
         mn({ species = "Alpha", maxHp = 400, spd = 90,
@@ -1082,8 +1082,11 @@ scenario("move_names", function(events)
   battle:submitChoice("p1", { action = "fight", move = 1 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drainInto(battle, events)
-  -- 3: Mimic copies Bob's last move.  The copy has to carry the name across
-  --    with it, or "Alpha learned THUMP HIT" reverts to the slug here and on
+  -- 3: Mimic copies Bob's first move -- the player's menu in a fight against
+  --    the computer (R1c: MimicEffect `.letPlayerChooseMove`, its cursor on the
+  --    first row; a link fight's pick is `BattleRandom & 3`), hence `wild`.
+  --    The copy has to carry the name across with it, or "Alpha learned
+  --    THUMP HIT" reverts to the slug here and on
   --    every turn the copy is used afterwards.  Bob falls back to the move
   --    that carries no name at all.
   battle:submitChoice("p1", { action = "fight", move = 2 })
@@ -2400,9 +2403,10 @@ end
 -- a base 2.  1 its type step halves to 1 (0.5x): it lands for 1 and draws no
 -- roll; 2 halved twice (0.5x against each of Beta's two types) it reaches 0 -- "missed", no roll; 3 neutral,
 -- it rolls; 4 an immunity draws no roll either ("doesn't affect").  1, 2 and
--- 4 end on one RNG state (acc + crit, then Beta's acc); 3 is a byte past it.
--- 5 a doll of exactly the hit's HP takes it and stands at 0 (`ret nc`); the
--- second turn's hit breaks it.
+-- 4 end on one RNG state (crit + acc -- the 0.25x zero and the immunity still
+-- draw MoveHitTest's byte, R1c -- then Beta's); 3 is a roll past it.
+-- 5 a doll of exactly the hit's HP (8 on this seed, R1c's draw order) takes
+-- it and stands at 0 (`ret nc`); the second turn's hit breaks it.
 local TAIL_CHART = { { 100, 100, 100 }, { 100, 50, 100 }, { 100, 50, 50 }, { 100, 0, 100 } }
 local TAIL_TYPES = { 1, 2 }
 local function tail(ty) return fx("tap", 10, 0, { type = ty }) end
@@ -2413,7 +2417,7 @@ scenario("g1_damage_tails", duels("g1dt", {
   { seed = 7101, chart = TAIL_CHART, a = weak({ tail(2) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
   { seed = 7101, chart = TAIL_CHART, a = weak({ tail(0) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
   { seed = 7101, chart = TAIL_CHART, a = weak({ tail(3) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
-  { seed = 7101, a = fast({ fx("thump", 40, 0) }), b = slow(nil, { substitute = 9 }),
+  { seed = 7101, a = fast({ fx("thump", 40, 0) }), b = slow(nil, { substitute = 8 }),
     turns = { { 0, 0 }, { 0, 0 } } },
 }))
 
@@ -3059,7 +3063,9 @@ scenario("g1_asleep_selection", fights("g1as", {
       r1s("Beta", { r1m("lull", 0, 32), r1m("thump", 10, 0), r1m("MIRROR_MOVE", 0, 9) },
         { spd = 90 }),
     },
-    { seed = 8601, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 1 }, { p1 = 1, p2 = 2 } } }),
+    -- (8606: SleepEffect's counter is R1c's `and SLP_MASK` redraw, and this
+    -- seed sleeps Alpha past turn 3.)
+    { seed = 8606, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 1 }, { p1 = 1, p2 = 2 } } }),
 }))
 
 -- AnyMoveToSelect (core.asm :2713-2753) with a move disabled ORs the other
@@ -3410,6 +3416,270 @@ scenario("g1_no_hit_test", fights("g1nh", {
       seed = 9701,
       turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 }, { p1 = 3, p2 = 0 }, { p1 = 2, p2 = 0 } },
     }),
+}))
+
+-- R1c (gen12-referee-gaps-fix wave 3): the Red cart differences waves 1-2 left
+-- open, each against pokered.
+--
+-- PlayerCalcMoveDamage's draw order (core.asm :3134-3149): the crit byte,
+-- the damage roll, and only then MoveHitTest's accuracy byte -- so a miss has
+-- drawn all three -- and CheckPlayerStatusConditions' sleep / freeze checks
+-- draw nothing, the confusion check nothing on its snap-out turn:
+--   1 a tap of accuracy 0 misses having drawn crit, roll and accuracy;
+--   2 the same tap at 255 lands, on the same three draws;
+--   3 DREAM EATER into a waking Beta: crit and roll, then MoveHitTest's sleep
+--     check misses before its byte;
+--   4 an asleep and a frozen battler draw nothing for their gates;
+--   5 a confusion counter of 1 snaps out with no byte; 6 one of 3 draws it;
+--   7 COUNTER draws its crit byte before HandleCounterMove refuses a Fire hit;
+--   8 an OHKO into a faster Beta: its crit byte, then "Beta's unaffected!".
+scenario("g1_draw_order", fights("g1do", {
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0, { accuracy = 0 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("dream", 40, 8) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90, status = "SLP", statusTurns = 3 }) },
+    { r1s("Beta", { r1m("tap", 10, 0) }, { spd = 10, status = "FRZ" }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90, confusion = 1 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90, confusion = 3 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("COUNTER", 1, 0, { type = 1 }) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("flame", 10, 0, { type = 2 }) }, { spd = 90 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("drill", 1, 38) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { seed = 9801, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- The computer never reads or spends its PP (SelectEnemyMove :2915-3005,
+-- ExecuteEnemyMove has no DecrementPP); a link foe keeps its PP:
+--   1 wild: the computer's 1-PP thump three turns running, at 1 PP still;
+--   2 wild: a 0-PP thump is picked and used, never STRUGGLE;
+--   3 wild: its only move disabled -- STRUGGLE (`wEnemyMonMoves + 1` is 0);
+--   4 1v1: the same 1-PP thump, then STRUGGLE.
+scenario("g1_computer_pp", fights("g1cp", {
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0, { pp = 1 }) }, { spd = 10 }) },
+    { mode = "wild", seed = 9811, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0, { pp = 0 }), r1m("chop", 10, 0, { pp = 0 }) }, { spd = 10 }) },
+    { mode = "wild", seed = 9811, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, disable = { moveIndex = 1, turns = 5 } }) },
+    { mode = "wild", seed = 9811, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0, { pp = 1 }) }, { spd = 10 }) },
+    { seed = 9811, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- CheckTargetSubstitute is asked by the stat drops, PoisonEffect and
+-- ConfusionEffect only: behind Beta's 50-HP doll
+--   1 SLEEP lands; 2 THUNDER WAVE paralyses; 3 LEECH SEED seeds;
+--   4 TRANSFORM copies; 5 MIMIC copies (a fight against the computer: the
+--   menu's first row); 6 CONFUSE RAY fails with no byte drawn.
+local DOLL50 = { spd = 10, substitute = 50 }
+scenario("g1_doll_status", fights("g1ds", {
+  r1duo({ r1s("Alpha", { r1m("lull", 0, 32) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, DOLL50) }, { seed = 9821, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("zap", 0, 67) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, DOLL50) }, { seed = 9821, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("seed", 0, 84) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, DOLL50) }, { seed = 9821, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("morph", 0, 57) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, DOLL50) }, { seed = 9821, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("copy", 0, 82) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, DOLL50) },
+    { mode = "wild", seed = 9821, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("daze", 0, 49) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, DOLL50) }, { seed = 9821, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- SleepEffect (effects.asm :26-68): a target that must recharge loses it and
+-- falls asleep past every check -- a POISON overwritten, no hit test (the
+-- move's accuracy is 0); one already asleep is "already asleep!", any other
+-- status "It didn't affect", neither drawing a byte; a missed hit test is
+-- "It didn't affect" too.  ParalyzeEffect_ turns an ELECTRIC move away from a
+-- GROUND type, LeechSeedEffect_ a GRASS one ("evaded attack!"):
+--   1 Beta beams, then Alpha's accuracy-0 SLEEP puts the poisoned, recharging
+--     Beta to sleep; 2 Beta already asleep; 3 Beta poisoned; 4 THUNDER WAVE
+--     (ELECTRIC, index 2) into a GROUND (index 3) Beta; 5 LEECH SEED into a
+--     GRASS (index 4) Beta.
+local R1C_TYPES = { "NORMAL", "FIGHTING", "ELECTRIC", "GROUND", "GRASS" }
+scenario("g1_sleep_effect", fights("g1se", {
+  r1duo({ r1s("Alpha", { r1m("lull", 0, 32, { accuracy = 0 }) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("beam", 20, 80) }, { spd = 90, status = "PSN" }) },
+    { mode = "wild", seed = 9831, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("lull", 0, 32) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, status = "SLP", statusTurns = 5 }) },
+    { seed = 9831, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("lull", 0, 32) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, status = "PSN" }) },
+    { seed = 9831, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("zap", 0, 67, { type = 2 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 3 } }) },
+    { seed = 9831, typeIds = R1C_TYPES, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("seed", 0, 84) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 4 } }) },
+    { seed = 9831, typeIds = R1C_TYPES, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- MimicEffect (effects.asm :1203-1273): against the computer the player's
+-- menu picks (the seat's `mimic`, or the cursor's first row) and the
+-- computer's turn draws `BattleRandom & 3`; a link fight draws on both sides.
+-- The copy keeps MIMIC's PP, and a switch-out gives the party's MIMIC back:
+--   1 wild: Alpha mimics Beta's second move (pick 1), uses it, switches out
+--     and back: MIMIC again, at the PP the slot was spent to;
+--   2 wild: no pick -- the first row;
+--   3 wild: the computer's MIMIC copies one of Alpha's moves at random;
+--   4 1v1: Alpha's pick is not asked -- the random draw.
+local function mimicker(spd) return r1s("Alpha", { r1m("copy", 0, 82, { pp = 10 }), r1m("tap", 10, 0) },
+  { spd = spd }) end
+local MIMIC_FOE = { r1m("thump", 10, 0), r1m("chop", 10, 0), r1m("slam", 10, 0) }
+scenario("g1_mimic", fights("g1mi", {
+  r1duo({ mimicker(90), r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", MIMIC_FOE, { spd = 10 }) },
+    { mode = "wild", seed = 9841, turns = {
+      { p1 = { action = "fight", move = 0, mimic = 1 }, p2 = 0 },
+      { p1 = 0, p2 = 0 },
+      { p1 = { action = "switch", slot = 1 }, p2 = 0 },
+      { p1 = { action = "switch", slot = 0 }, p2 = 0 },
+    } }),
+  r1duo({ mimicker(90) }, { r1s("Beta", MIMIC_FOE, { spd = 10 }) },
+    { mode = "wild", seed = 9841, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0), r1m("chop", 10, 0) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("copy", 0, 82) }, { spd = 90 }) },
+    { mode = "wild", seed = 9841, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ mimicker(90) }, { r1s("Beta", MIMIC_FOE, { spd = 10 }) },
+    { seed = 9842, turns = { { p1 = { action = "fight", move = 0, mimic = 1 }, p2 = 0 } } }),
+}))
+
+-- FOCUS ENERGY / MIST a second time: "But it failed!" (`.alreadyUsing`,
+-- `.mistAlreadyInUse`).  SPLASH: "No effect!".
+scenario("g1_already_up", fights("g1au", {
+  r1duo({ r1s("Alpha", { r1m("pump", 0, 47), r1m("fog", 0, 46), r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9851, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 },
+                             { p1 = 1, p2 = 0 }, { p1 = 2, p2 = 0 } } }),
+}))
+
+-- SwitchAndTeleportEffect (effects.asm :810-911): a wild fight rolls the
+-- levels, a trainer or link fight fails:
+--   1 wild: a level-60 Alpha's TELEPORT from a level-20 Beta -- no roll;
+--   2 wild: a level-5 Alpha's TELEPORT from a level-90 Beta: the roll, turn
+--     after turn, until it lets Alpha go;
+--   3 wild: the level-5 computer's ROAR at a level-90 Alpha: "It didn't
+--     affect" until its roll lands, "ran away scared!";
+--   4 coop_npc: the trainer's ROAR -- "Alpha is unaffected!" -- and Alpha's
+--     TELEPORT -- "But it failed!";
+--   5 wild: WHIRLWIND, "was blown away!".
+scenario("g1_teleport", fights("g1tp", {
+  r1duo({ r1s("Alpha", { r1m("TELEPORT", 0, 28) }, { spd = 90, level = 60 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 9861, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("TELEPORT", 0, 28) }, { spd = 90, level = 5 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, level = 90 }) },
+    { mode = "wild", seed = 9864, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 },
+                                            { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 10, level = 90 }) },
+    { r1s("Beta", { r1m("ROAR", 0, 28) }, { spd = 90, level = 5 }) },
+    { mode = "wild", seed = 9864, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 },
+                                            { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("TELEPORT", 0, 28) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("ROAR", 0, 28) }, { spd = 90 }) },
+    { mode = "coop_npc", seed = 9863, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("WHIRLWIND", 0, 28) }, { spd = 90, level = 50 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, level = 20 }) },
+    { mode = "wild", seed = 9864, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- The trap is the trapper's (USING_TRAPPING_MOVE and its counter):
+--   1 a slower Beta is held on the trap's first turn (`.HeldInPlaceCheck`:
+--     "can't move"); every later turn is "Alpha's attack continues!" in
+--     Alpha's slot and Beta's CANNOT_MOVE says nothing;
+--   2 a faster Beta moves before the Wrap starts;
+--   3 a Wrap into an immunity holds at 0: the later turns are the continues
+--     line and a 0 hit, nothing else;
+--   4 a sleeping Beta is not CANNOT_MOVE: its sleep ticks in its slot, its
+--     menu is open, and its switch to Delta lets the trap go -- Alpha's slot
+--     then runs WRAP fresh at Delta (used line, PP, a new counter);
+--   5 a recharging Beta put to sleep keeps the recharge (sheet): asleep it
+--     ticks, and recharges the turn after it wakes;
+--   6 Alpha's later hit knocks Beta out: Delta comes out free.
+scenario("g1_trap_turns", fights("g1tt", {
+  r1duo({ r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10 }) },
+    { seed = 9871, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 },
+                             { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 90 }) },
+    { seed = 9871, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, types = { 2 } }) },
+    { seed = 9872, chart = { { 100, 100, 0 }, { 100, 100, 100 }, { 100, 100, 100 } },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, status = "SLP", statusTurns = 4 }),
+      r1s("Delta", { r1m("thump", 10, 0) }, { spd = 10 }) },
+    { seed = 9873, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = { action = "switch", slot = 1 } },
+                             { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, status = "SLP", statusTurns = 2,
+                                             mustRecharge = true }) },
+    { seed = 9874, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 },
+                             { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("wrap", 40, 42) }, { spd = 90, atk = 120 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, hp = 30 }),
+      r1s("Delta", { r1m("thump", 10, 0) }, { spd = 10 }) },
+    { seed = 9875, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p2 = { action = "switch", slot = 1 } },
+                             { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- MainInBattleLoop compares the two Speeds on every turn (:395-412) -- a
+-- switch, an item or a recharge too -- and draws the tie byte on a tie:
+--   1 40 against 40: a switch and an unknown item, one byte;
+--   2 90 against 10: the same, no byte;
+--   3 40 against 40: Alpha's HYPER BEAM, then its recharge turn against
+--     Beta's tap -- a byte each turn.
+scenario("g1_tie_actions", fights("g1ta", {
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }), r1s("Gamma", { r1m("tap", 10, 0) }) },
+    { r1s("Beta", { r1m("tap", 10, 0) }) },
+    { seed = 9881, turns = { { p1 = { action = "switch", slot = 1 }, p2 = { action = "item", item = "restore" } } } }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }), r1s("Gamma", { r1m("tap", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("tap", 10, 0) }, { spd = 10 }) },
+    { seed = 9881, turns = { { p1 = { action = "switch", slot = 1 }, p2 = { action = "item", item = "restore" } } } }),
+  r1duo({ r1s("Alpha", { r1m("beam", 20, 80) }) },
+    { r1s("Beta", { r1m("tap", 10, 0) }) },
+    { seed = 9882, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- BADLY_POISONED is a battle bit: the bench holds plain PSN (SendOutMon
+-- clears the bit), so a TOXIC'd Alpha comes back poisoned at a sixteenth.
+scenario("g1_toxic_bench", fights("g1tb", {
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90, status = "TOX", toxicCounter = 3 }),
+          r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9891, turns = { { p1 = 0, p2 = 0 }, { p1 = { action = "switch", slot = 1 }, p2 = 0 },
+                             { p1 = { action = "switch", slot = 0 }, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- RemoveFaintedPlayerMon writes wBattleResult 1 on any faint of the
+-- player's, and only an enemy faint writes 0 back: Alpha's PAY DAY, Alpha
+-- knocked out, Gamma sent in and TELEPORTed away -- nothing picked up.
+scenario("g1_pay_day_faint", fights("g1pf", {
+  r1duo({ r1s("Alpha", { r1m("coins", 20, 16) }, { spd = 90, hp = 5 }),
+          r1s("Gamma", { r1m("TELEPORT", 0, 28) }, { spd = 90, level = 40 }) },
+    { r1s("Beta", { r1m("slam", 60, 0) }, { spd = 10, atk = 200 }) },
+    { mode = "wild", seed = 9901, turns = { { p1 = 0, p2 = 0 }, { p1 = { action = "switch", slot = 1 } },
+                                            { p1 = 0, p2 = 0 } } }),
 }))
 
 -- ------------------------------------------------------------------

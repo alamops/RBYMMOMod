@@ -16,23 +16,34 @@
  * both runtimes can reproduce:
  *
  *   1. a speed tie-break byte, one per group of actors in one priority
- *      bracket at one Speed;
- *   2. one gate byte per actor whose monster has a gating status;
- *   3. one gate byte per actor whose monster is confused;
+ *      bracket at one Speed -- and every battler on the field is an actor
+ *      there, whatever its seat chose (a switch, an item, a recharge, a held
+ *      monster's CANNOT_MOVE all take part in MainInBattleLoop's compare);
+ *   2. the gates (`_runGates`): sleep and freeze draw nothing; a confused
+ *      monster draws its self-hit byte only when still confused after the
+ *      counter's step (the snap-out turn draws none); paralysis its byte;
+ *   3. a Bide store or unleash, and a trap's later turns, draw nothing; a
+ *      thrash's last turn draws its confusion length;
  *   4. the obedience rolls of a traded monster over its trainer's badge cap
  *      (`_obey`, Status' obedience section: CheckForDisobedience's loops, the
  *      instead-move, nap and loaf draws) -- a fight with no traded monster on
  *      the player's side draws none of them;
- *   5. per move that is actually used: accuracy byte, crit byte, damage
- *      roll -- only for a damage of 2 or more after the type chart
- *      (RandomizeDamage's `cp 2` / `ret c`: an immunity or a hit already at 0
- *      or 1 draws none) -- then, after the first hit, the two-to-five count
- *      byte(s) (TwoToFiveAttacksEffect: one, or two when the first is a 2 or
- *      3; none when that hit broke a Substitute), then the side-chance byte
- *      (damaging hits only), in that order, and none of them drawn when an
- *      earlier step ended the move (a missed move draws no crit byte).
- *      COUNTER draws its accuracy byte alone, and nothing when its
- *      conditions fail (`_counterDamage`). The
+ *   5. per move that is actually used, PlayerCalcMoveDamage's order:
+ *      THRASH's or a trapping move's counter, then the crit byte (none at
+ *      power 0), the damage roll -- only for a damage of 2 or more after the
+ *      type chart (RandomizeDamage's `cp 2` / `ret c`: an immunity or a hit
+ *      already at 0 or 1 draws none) -- and only then MoveHitTest's accuracy
+ *      byte (none for DREAM EATER into a waking target, SWIFT, an
+ *      invulnerable or a Misted target, X Accuracy; drawn for an immunity or a
+ *      0.25x zero too), so a missed move has spent its crit byte and its roll;
+ *      then, after the first hit, the two-to-five count byte(s)
+ *      (TwoToFiveAttacksEffect: one, or two when the first is a 2 or 3; none
+ *      when that hit broke a Substitute), then the side-chance byte (damaging
+ *      hits only). An OHKO move into a faster target misses after its crit
+ *      byte. COUNTER draws its crit byte, then -- when its conditions hold
+ *      (`_counterDamage`) -- its accuracy byte. A power-0 move draws only what
+ *      its own routine draws (Effects.statusPlan), its turn-aways before its
+ *      accuracy byte. The
  *      side-chance byte is the effect's own pokered routine's, drawn where
  *      and when that routine draws it (Effects.applySide): never on a target
  *      that fainted or a Substitute the move broke, not by a poison / burn /
@@ -49,9 +60,9 @@
  *
  *   * *Turn order* is the priority bracket (Effects.movePriority: QUICK_ATTACK
  *     +1, COUNTER -1, off the selected move), then the stored Speed, then the
- *     tie-break (`_orderActors`); every seat's switch and item resolve before
- *     any move -- the cart's player's do, and its TrainerAI's in-order item
- *     or switch is the one thing not copied.
+ *     tie-break (`_orderActors`); a player's switch and item resolve before
+ *     any move but the seat still takes part in the compare, and the
+ *     computer's item or switch is spent in its own slot of the order.
  *   * *Speed ties* break on a single byte per tied group -- one bracket at one
  *     Speed -- below 128 leaving the side-a member first and otherwise
  *     reversing the group.
@@ -60,8 +71,9 @@
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
  *     ItemEffects); unknown ids say "But it failed" and still spend the turn.
  *     Bags are client claims (sheet trust locked). Forced lock-in injects on
- *     openTurn (trapper continue anim + residual; no menu); forced-only turns
- *     defer to the next tick.
+ *     openTurn (no menu) and plays in the monster's own slot, past the gates:
+ *     a recharge (`_rechargeTurn`), a trap's later hit (`_trapTurn`), a held
+ *     monster's silent CANNOT_MOVE; forced-only turns defer to the next tick.
  *   * *Metronome* picks from host-uploaded metronomePool on the ruleset. A
  *     called move runs no gate and is never Struggle: a call made with the
  *     last PP takes no recoil.
@@ -747,6 +759,20 @@ function mustStruggle(mon) {
   return true;
 }
 
+// SelectEnemyMove (core.asm :2915-3005) outside a link battle: the
+// computer never reads its PP -- ExecuteEnemyMove never calls DecrementPP
+// either, so it never runs out -- and STRUGGLE only when its monster knows
+// one move (`wEnemyMonMoves + 1` is 0) and that move is disabled
+// (`wEnemyDisabledMove` set). With two or more `.chooseRandomMove` redraws
+// past the disabled slot. An empty sheet is STRUGGLE here too (the cart's
+// loop would spin forever on it).
+function computerMustStruggle(mon) {
+  if (mon.moves.length === 0) return true;
+  if (mon.moves.length > 1) return false;
+  return !!mon.disable && int(mon.disable.turns, 0) > 0
+    && int(mon.disable.moveIndex, 0) === 1;
+}
+
 function copyBadges(raw) {
   if (!isTable(raw)) return null;
   const out = Object.create(null);
@@ -823,6 +849,13 @@ class Battle {
     // The two types a side effect's routine asks about by name (attempt).
     this.poisonType = typeIndexOf(opts.typeIds, 'POISON');
     this.fireType = typeIndexOf(opts.typeIds, 'FIRE');
+    // ...and the three a primary's routine does: ParalyzeEffect_'s
+    // `cp ELECTRIC` on the move and `cp GROUND` on the target, and
+    // LeechSeedEffect_'s `cp GRASS` (`_statusMove`). null when the ruleset
+    // named none, and then nothing is turned away for its type.
+    this.electricType = typeIndexOf(opts.typeIds, 'ELECTRIC');
+    this.groundType = typeIndexOf(opts.typeIds, 'GROUND');
+    this.grassType = typeIndexOf(opts.typeIds, 'GRASS');
     // The two COUNTER answers (attempt).
     this.normalType = counterType(opts.typeIds, 'NORMAL', 0);
     this.fightingType = counterType(opts.typeIds, 'FIGHTING', 1);
@@ -838,6 +871,14 @@ class Battle {
     // level x 2 to wTotalPayDayMoney on either side's turn, and EndOfBattle
     // pays the whole pile (`_checkOver`).
     this.payDay = { a: 0, b: 0 };
+    // wBattleResult as the cart leaves it mid-fight, which is what EndOfBattle
+    // reads before it pays that pile on an escape (`_payDayOn`): 0 at the
+    // start, 1 from RemoveFaintedPlayerMon on ANY of the player's monsters
+    // fainting (core.asm :1030-1031) -- a send-out follows and the fight goes
+    // on with it still 1 -- and 0 again from FaintEnemyPokemon (:816-817)
+    // whenever an enemy faints with a player's monster still standing.
+    // "The player" is side a, the side a fight against the computer pays.
+    this.battleResult = 0;
     if (Array.isArray(opts.specialTypes)) {
       const set = Object.create(null);
       for (const t of opts.specialTypes) set[Math.max(0, int(t, 0))] = true;
@@ -1104,25 +1145,37 @@ class Battle {
     return true;
   }
 
-  // Inject forced choices for charge release, recharge skip, thrash/rage repeat,
-  // and trap lock-in. Gen1 trapping: victim can't move; user stays locked (no
-  // menu) while residual damage (first-hit store) ticks — not a re-rolled fight.
+  // Inject forced choices for charge release, recharge, thrash/rage repeat, a
+  // trap's continuation and the monster it holds. The cart skips the move
+  // menu for all of them (MainInBattleLoop :293-321, SelectEnemyMove
+  // :2938-2955), and every one of them is then the monster's own turn-order
+  // slot: ExecutePlayerMove runs CheckPlayerStatusConditions over it, so the
+  // sleep and freeze checks, the trapped check and the flinch come first, and
+  // only a monster that gets past them recharges (`.HyperBeamCheck`), stores
+  // its Bide, thrashes or keeps its trap going (`.MultiturnMoveCheck`).
+  // Nothing is said here; the slot says it (`_rechargeTurn`, `_useMove`).
+  _fileForced(fighter, choice) {
+    fighter.forced = true;
+    fighter.choice = choice;
+    this._emit('chose', {
+      slot: fighter.slot, side: fighter.side, text: fighter.name,
+    });
+  }
+
   _fillForcedChoices() {
     for (const fighter of this.fighters) {
       if (fighter.choice !== null && fighter.choice !== undefined) continue;
       const mon = activeMon(fighter);
       if (!mon) continue;
 
+      // NEEDS_TO_RECHARGE: no menu (:293-295). The recharge itself is the
+      // slot's (`_rechargeTurn`): a monster asleep or frozen there keeps the
+      // bit, as the cart's sleep and freeze checks return before
+      // `.HyperBeamCheck`. `skip` is the forced turn's kind, which
+      // `_resolveFights` reads, as `_selectionOf` does for the selected move
+      // the cart leaves standing.
       if (mon.mustRecharge) {
-        mon.mustRecharge = false;
-        this._say(`${mon.species} must recharge`);
-        fighter.forced = true;
-        // `skip` is the forced skip's kind, which `_resolveFights` reads for
-        // the selected move the cart leaves standing (`_selectionOf`).
-        fighter.choice = { action: 'skip', skip: 'recharge' };
-        this._emit('chose', {
-          slot: fighter.slot, side: fighter.side, text: fighter.name,
-        });
+        this._fileForced(fighter, { action: 'skip', skip: 'recharge' });
         continue;
       }
 
@@ -1133,80 +1186,55 @@ class Battle {
       // (`bideStore`), not a skip (`_useMove`'s Bide branch).
       if (mon.bide) {
         const choice = this._bideChoice(fighter, mon);
-        if (choice) {
-          fighter.forced = true;
-          fighter.choice = choice;
-          this._emit('chose', {
-            slot: fighter.slot, side: fighter.side, text: fighter.name,
-          });
-        }
+        if (choice) this._fileForced(fighter, choice);
         continue;
       }
 
-      if (mon.trapped && mon.trapped.turns > 0) {
-        this._say(`${mon.species} can't move`);
-        fighter.forced = true;
-        fighter.choice = { action: 'skip', skip: 'trapped' };
-        this._emit('chose', {
-          slot: fighter.slot, side: fighter.side, text: fighter.name,
-        });
-        continue;
-      }
-
-      if (mon.trapping && mon.trapping.turns > 0) {
-        // Cartridge lock-in: no menu, residual still deals stored damage. Emit
-        // continue narration + anim so the screen shows the trap going on —
-        // do not re-enter _useMove (that would re-roll damage).
-        const { move } = forcedMoveOf(mon, mon.trapping.move, mon.trapping.moveIndex);
-        const moveId = (move && move.id) || 'attack';
-        // `.MultiturnMoveCheck` comes after `.AnyMoveDisabledCheck` in
-        // CheckPlayerStatusConditions, so the trapper's Disable ticks on these
-        // turns too (`_tickDisable`).
-        this._tickDisable(mon);
-        this._say(`${mon.species}'s ${moveLabel(move, 'attack')} continues`);
-        this._emit('anim', {
-          slot: fighter.slot, side: fighter.side, text: moveId,
-        });
-        fighter.forced = true;
-        fighter.choice = { action: 'skip', skip: 'trapping' };
-        this._emit('chose', {
-          slot: fighter.slot, side: fighter.side, text: fighter.name,
+      // USING_TRAPPING_MOVE: no move menu (:311-313), and the selection is
+      // the trapping move still. `.MultiturnMoveCheck` hits again in the
+      // trapper's slot, past every gate (`_trapTurn`) -- not a residual at
+      // the turn's end, and not a re-rolled move. `trapContinue` says so; a
+      // trap that a switch or a faint let go before the slot leaves the move
+      // to run fresh, as the cart's stale selection does (`_useMove`).
+      if (mon.trapping && int(mon.trapping.turns, 0) > 0) {
+        const t = mon.trapping;
+        const forced = forcedMoveOf(mon, t.move, t.moveIndex);
+        this._fileForced(fighter, {
+          action: 'fight',
+          move: t.moveIndex,
+          target: t.targetSlot,
+          forcedMove: forced.move,
+          called: forced.called,
+          trapContinue: true,
         });
         continue;
       }
 
       if (mon.charging) {
         const c = mon.charging;
-        fighter.forced = true;
         const forced = forcedMoveOf(mon, c.move, c.moveIndex);
-        fighter.choice = {
+        this._fileForced(fighter, {
           action: 'fight',
           move: c.moveIndex,
           target: c.targetSlot,
           forcedMove: forced.move,
           called: forced.called,
-        };
-        this._emit('chose', {
-          slot: fighter.slot, side: fighter.side, text: fighter.name,
         });
         continue;
       }
 
+      // "<MON>'s thrashing about!" is the slot's (`.ThrashingAboutCheck`,
+      // past the gates), not the turn's opening.
       if (mon.thrashing && mon.thrashing.turns > 0) {
         const foe = this._autoTarget(fighter);
         if (foe) {
-          this._say(`${mon.species} thrashing about`);
-          fighter.forced = true;
           const forced = forcedMoveOf(mon, mon.thrashing.move, mon.thrashing.moveIndex);
-          fighter.choice = {
+          this._fileForced(fighter, {
             action: 'fight',
             move: mon.thrashing.moveIndex,
             target: foe.slot,
             forcedMove: forced.move,
             called: forced.called,
-          };
-          this._emit('chose', {
-            slot: fighter.slot, side: fighter.side, text: fighter.name,
           });
         }
         continue;
@@ -1219,19 +1247,28 @@ class Battle {
       if (mon.raging && mon.rageMove && mon.rageMove > 0) {
         const foe = this._autoTarget(fighter);
         if (foe) {
-          fighter.forced = true;
           const forced = forcedMoveOf(mon, mon.rageCall, mon.rageMove);
-          fighter.choice = {
+          this._fileForced(fighter, {
             action: 'fight',
             move: mon.rageMove,
             target: foe.slot,
             forcedMove: forced.move,
             called: forced.called,
-          };
-          this._emit('chose', {
-            slot: fighter.slot, side: fighter.side, text: fighter.name,
           });
+          continue;
         }
+      }
+
+      // Held by a foe's trap: CANNOT_MOVE (MainInBattleLoop :316-321,
+      // SelectEnemyMove :2953-2955), and ExecutePlayerMove's `inc a / jp z`
+      // then skips the whole turn without a word -- no gate, no line. Only a
+      // monster that reaches this point of the menu logic gets it: one asleep
+      // or frozen jumps to `.selectEnemyMove` first (:308-310) and keeps its
+      // selection and its menu, so its sleep ticks in its slot; and every
+      // forced turn above was filed first, to meet `.HeldInPlaceCheck`'s
+      // "can't move" there instead (`_runGates`).
+      if (this._isHeld(fighter, mon) && mon.status !== 'sleep' && mon.status !== 'freeze') {
+        this._fileForced(fighter, { action: 'skip', skip: 'trapped' });
       }
     }
   }
@@ -1363,11 +1400,12 @@ class Battle {
       if (index === null) return null;
       const move = mon.moves[index];
       if (!move) return null;
-      // Struggle (AnyMoveToSelect, `mustStruggle`) takes any index. Otherwise
+      // Struggle (AnyMoveToSelect, `_struggles`) takes any index. Otherwise
       // `.chooseMove` refuses a slot whose PP -- masked, so PP Ups do not count
-      // here -- is 0, and the disabled slot.
-      if (!mustStruggle(mon)) {
-        if (move.pp <= 0) return null;
+      // here -- is 0, and the disabled slot. The computer's SelectEnemyMove
+      // refuses the disabled slot and never reads PP (`_hasPp`).
+      if (!this._struggles(fighter, mon)) {
+        if (!this._hasPp(fighter, move)) return null;
         if (mon.disable && mon.disable.turns > 0
             && mon.disable.moveIndex === index + 1) {
           return null;
@@ -1405,7 +1443,19 @@ class Battle {
           return { action: 'skip' };
         }
       }
-      return { action: 'fight', move: index + 1, target: targetFighter.slot };
+      const out = { action: 'fight', move: index + 1, target: targetFighter.slot };
+      // MIMIC's pick, asked up front the way Gen 3 asks BATON PASS's
+      // destination: the cart opens the foe's move list as the move runs
+      // (MimicEffect `.letPlayerChooseMove`), which a mediated fight cannot do
+      // mid-turn. Zero-based into the target's moves; `_mimicPick` reads it
+      // only where the cart asks the player, and checks it against the moves
+      // the target holds when MIMIC lands. Absent or malformed, the menu's
+      // cursor answers (its first row).
+      if (choice.mimic !== undefined && choice.mimic !== null) {
+        const pick = int(choice.mimic, null);
+        if (pick !== null && pick >= 0 && pick < 4) out.mimic = pick + 1;
+      }
+      return out;
     }
 
     return null;
@@ -1527,7 +1577,7 @@ class Battle {
           let maxEff = 1;
           for (let j = 0; j < bench.moves.length; j += 1) {
             const m = bench.moves[j];
-            if (m.pp > 0 && m.power > 0) {
+            if (this._hasPp(fighter, m) && m.power > 0) {
               const eff = this._effectivenessProduct(m.type, defender);
               if (eff > maxEff) maxEff = eff;
             }
@@ -1625,11 +1675,18 @@ class Battle {
       const choice = this._bideChoice(fighter, mon);
       if (choice) return choice;
     }
-    if (mon.trapped && mon.trapped.turns > 0) {
-      return { action: 'skip', skip: 'trapped' };
+    if (mon.trapping && int(mon.trapping.turns, 0) > 0) {
+      const t = mon.trapping;
+      const forced = forcedMoveOf(mon, t.move, t.moveIndex);
+      return {
+        action: 'fight', move: t.moveIndex, target: t.targetSlot,
+        forcedMove: forced.move, called: forced.called, trapContinue: true,
+      };
     }
-    if (mon.trapping && mon.trapping.turns > 0) {
-      return { action: 'skip', skip: 'trapping' };
+    if (this._isHeld(fighter, mon) && mon.status !== 'sleep' && mon.status !== 'freeze'
+        && !(mon.thrashing && mon.thrashing.turns > 0)
+        && !(mon.raging && mon.rageMove && mon.rageMove > 0)) {
+      return { action: 'skip', skip: 'trapped' };
     }
     if (mon.thrashing && mon.thrashing.turns > 0) {
       const foe = this._autoTarget(fighter);
@@ -1666,7 +1723,7 @@ class Battle {
     if (!defender) {
       let pick = 1;
       for (let i = 1; i <= mon.moves.length; i += 1) {
-        if (mon.moves[i - 1].pp > 0) { pick = i; break; }
+        if (this._hasPp(fighter, mon.moves[i - 1])) { pick = i; break; }
       }
       return { action: 'fight', move: pick, target: foe.slot };
     }
@@ -1702,7 +1759,7 @@ class Battle {
     let pickPow = -1;
     for (let i = 1; i <= mon.moves.length; i += 1) {
       const m = mon.moves[i - 1];
-      if (m.pp > 0 && m.power > 0 && !disabled(i)) {
+      if (this._hasPp(fighter, m) && m.power > 0 && !disabled(i)) {
         const eff = this._effectivenessProduct(m.type, defender);
         if (!pick || eff > pickEff
             || (eff === pickEff && m.power > pickPow)
@@ -1729,7 +1786,7 @@ class Battle {
       let statusPri = -1;
       for (let i = 1; i <= mon.moves.length; i += 1) {
         const m = mon.moves[i - 1];
-        if (m.pp > 0 && !disabled(i) && m.power === 0) {
+        if (this._hasPp(fighter, m) && !disabled(i) && m.power === 0) {
           const pri = AUTO_STATUS_PRI[m.effect];
           if (pri !== undefined && (pri > statusPri
               || (pri === statusPri && (statusPick === null || i < statusPick)))) {
@@ -1753,7 +1810,7 @@ class Battle {
       let setupPick = null;
       for (let i = 1; i <= mon.moves.length; i += 1) {
         const m = mon.moves[i - 1];
-        if (m.pp > 0 && !disabled(i) && m.power === 0) {
+        if (this._hasPp(fighter, m) && !disabled(i) && m.power === 0) {
           const kind = AUTO_SETUP[m.effect];
           if (kind === true
               || (typeof kind === 'string' && (mon.stages[kind] || 0) <= 0)) {
@@ -1771,7 +1828,7 @@ class Battle {
       pickPow = -1;
       for (let i = 1; i <= mon.moves.length; i += 1) {
         const m = mon.moves[i - 1];
-        if (m.pp > 0 && !disabled(i)) {
+        if (this._hasPp(fighter, m) && !disabled(i)) {
           if (!pick || m.power > pickPow
               || (m.power === pickPow && i < pick)) {
             pick = i;
@@ -2011,10 +2068,25 @@ class Battle {
     return Effects.movePriority(fighter.selectedMove);
   }
 
+  // Whether this seat's menu hands it STRUGGLE: the player's AnyMoveToSelect
+  // (`mustStruggle`), or the computer's SelectEnemyMove, which never reads PP
+  // (`computerMustStruggle`). A link foe is a player on its own cart and keeps
+  // its PP.
+  _struggles(fighter, mon) {
+    if (isComputerSeat(this.mode, fighter)) return computerMustStruggle(mon);
+    return mustStruggle(mon);
+  }
+
+  // A move the seat may pick for its PP: any, for the computer
+  // (`computerMustStruggle`'s note); one with PP left for a player.
+  _hasPp(fighter, move) {
+    return isComputerSeat(this.mode, fighter) || int(move.pp, 0) > 0;
+  }
+
   // What this turn leaves in wPlayerSelectedMove / wEnemySelectedMove, before
   // anything runs -- read for the priority bracket and by COUNTER
   // (`_counterDamage`). A forced replay's move; STRUGGLE when the menu would
-  // hand it out (`mustStruggle`); else the chosen slot's. Two cart rules keep
+  // hand it out (`_struggles`); else the chosen slot's. Two cart rules keep
   // LAST turn's selection standing instead, because no menu is opened:
   //   * asleep or frozen, MainInBattleLoop jumps past MoveSelectionMenu
   //     (core.asm :308-311) and SelectEnemyMove returns before writing
@@ -2035,7 +2107,7 @@ class Battle {
     if (choice.action !== 'fight') return null;
     if (choice.forcedMove) return choice.forcedMove;
     if (mon.status === 'sleep' || mon.status === 'freeze') return last;
-    if (mustStruggle(mon)) return STRUGGLE;
+    if (this._struggles(fighter, mon)) return STRUGGLE;
     const move = mon.moves[(choice.move || 0) - 1];
     return move === undefined ? null : move;
   }
@@ -2099,6 +2171,9 @@ class Battle {
     this._resolveItems();
     this._resolveFights();
     if (!this.result) this._resolveResiduals();
+    // CheckNumAttacksLeft, the last thing a cart turn does (core.asm :409,
+    // :460): a trap whose counter ran out lets go.
+    if (!this.result) this._checkNumAttacksLeft();
     // The residual batch settles the same way an action's does: every flag is
     // off before the first share is counted. Unconditional, because a queue
     // nobody drains is exp that silently never happened.
@@ -2179,10 +2254,18 @@ class Battle {
     const mon = monAt(fighter, slot);
     if (!(mon && mon.hp > 0)) return;
     // The monster going back keeps nothing of the battle struct: a Transform
-    // is undone the moment it leaves (`Effects.untransform`), so a bench
-    // monster's moves, types and species are its own again.
+    // and a MIMIC are undone the moment it leaves (`Effects.restoreMoves`), so
+    // a bench monster's moves, types and species are its own again. And a
+    // TOXIC is plain poison on the bench: BADLY_POISONED is a BattleStatus3
+    // bit, which the next send-out clears (SendOutMon, core.asm :1747-1752),
+    // while the party's status byte only ever held PSN -- so it comes back
+    // poisoned at a sixteenth a turn, its counter forgotten.
     const leaving = fighter.active ? monAt(fighter, fighter.active) : null;
-    if (leaving && leaving !== mon) Effects.untransform(leaving);
+    if (leaving && leaving !== mon) {
+      Effects.restoreMoves(leaving);
+      if (leaving.status === 'toxic') leaving.status = 'poison';
+      leaving.toxicLinger = null;
+    }
     fighter.active = slot;
     fighter.mustReplace = null;
     // The seat's monster changed: its own participation set resets and the
@@ -2195,7 +2278,7 @@ class Battle {
     for (const seat of this.fighters) {
       for (const each of seat.mons) each.lastUsedMove = null;
     }
-    Effects.untransform(mon);
+    Effects.restoreMoves(mon);
     mon.toxicLinger = null;
     mon.charging = null;
     mon.invulnerable = false;
@@ -2665,6 +2748,25 @@ class Battle {
   }
 
   _resolveFights() {
+    // Every battler on the field takes part in MainInBattleLoop's compare
+    // (core.asm :369-412), whatever its seat chose: the cart reaches
+    // `.compareSpeed` -- and on a tie draws the byte -- on a turn the player
+    // switched or used an item (DisplayBattleMenu has run it, and the order is
+    // still asked), on a recharge, a held monster's CANNOT_MOVE, and the
+    // computer's TrainerAI turn alike. So every seat with a monster out and a
+    // choice is an actor in the order (`_orderActors`), at the Speed it has
+    // now -- a switch-in's own, an X SPEED's raised one -- and in the bracket
+    // its selection names (`_priorityOf`: a switch, an item or a run name none
+    // and sit in the base one). What an actor then does in its slot:
+    //   * a fight: the move (`_useMove`);
+    //   * the computer's item or switch: spent there (`_computerTurnAction`);
+    //   * a recharge: the gates and "must recharge" (`_rechargeTurn`);
+    //   * a held monster's CANNOT_MOVE, a player's switch or item (already
+    //     done before the order: `_resolveSwitches`, `_resolveItems`), a run
+    //     refused: nothing -- they were in the compare and nowhere else.
+    // A ball that caught, or a POKé DOLL, ended the fight inside
+    // DisplayBattleMenu: the order is never asked.
+    if (this.result) return;
     const actors = [];
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
@@ -2674,13 +2776,7 @@ class Battle {
       // (`_priorityOf`): `_selectionOf`, rewritten by `_useMove` with a move
       // its METRONOME / MIRROR MOVE called or its disobedience picked instead.
       fighter.selectedMove = mon ? this._selectionOf(fighter, mon) : null;
-      // The computer's item or switch takes its slot of the order like a move
-      // (`_computerTurnAction`): MainInBattleLoop has compared the two
-      // selections and Speeds -- the tie byte included -- before TrainerAI
-      // decides to spend the turn on something else.
-      const acts = choice && mon && (choice.action === 'fight'
-        || this._computerTurnAction(fighter));
-      if (acts) {
+      if (choice && mon) {
         actors.push({
           fighter,
           mon, // pinned: see the skip in the loop
@@ -2700,16 +2796,23 @@ class Battle {
       // The monster that chose is the only one allowed to act: if it fainted to
       // a faster attacker, the replacement that came in behind it does not
       // inherit the turn -- nor spend the AI's item or switch for it.
-      if (activeMon(actor.fighter) === actor.mon) {
-        if (actor.action === 'item') {
-          this._resolveOneItem(actor.fighter);
-        } else if (actor.action === 'switch') {
-          this._switchIn(actor.fighter, actor.fighter.choice.slot);
-        } else if (!actor.fighter.cannotMove) {
-          // `cannotMove` is Haze's CANNOT_MOVE on a target it woke or thawed
-          // (ExecutePlayerMove's `inc a / jp z, ExecutePlayerMoveDone`): the
-          // turn is gone, silently.
-          this._useMove(actor.fighter, actor.mon);
+      const fighter = actor.fighter;
+      if (activeMon(fighter) === actor.mon) {
+        const choice = fighter.choice;
+        if (this._computerTurnAction(fighter)) {
+          if (actor.action === 'item') {
+            this._resolveOneItem(fighter);
+          } else {
+            this._switchIn(fighter, choice.slot);
+          }
+        } else if (fighter.cannotMove) {
+          // Haze's CANNOT_MOVE on a target it woke or thawed (ExecutePlayerMove's
+          // `inc a / jp z, ExecutePlayerMoveDone`): the turn is gone, silently
+          // -- a recharge's included.
+        } else if (actor.action === 'fight') {
+          this._useMove(fighter, actor.mon);
+        } else if (actor.action === 'skip' && choice.skip === 'recharge') {
+          this._rechargeTurn(fighter, actor.mon);
         }
       }
       // Finalize after each action (not inside `_faint`) so KO + recoil / explode
@@ -2719,6 +2822,20 @@ class Battle {
       // without paying a monster the same action was still killing (`_drainExp`).
       this._drainExp();
       if (!this.result) this._checkOver();
+    }
+  }
+
+  // A recharge turn, in the monster's own slot: CheckPlayerStatusConditions
+  // runs its sleep, freeze, trapped and flinch checks first (`_firstGates`) --
+  // a monster stopped by one keeps NEEDS_TO_RECHARGE, and recharges on a
+  // later turn -- and then `.HyperBeamCheck` spends the bit, "<MON> must
+  // recharge". A bit that something cleared before this slot (a flinch, a
+  // SLEEP move, a trap starting: ClearHyperBeam) leaves nothing to say.
+  _rechargeTurn(fighter, mon) {
+    if (!this._firstGates(fighter, mon)) return;
+    if (mon.mustRecharge) {
+      mon.mustRecharge = false;
+      this._say(`${mon.species} must recharge`);
     }
   }
 
@@ -2765,21 +2882,72 @@ class Battle {
     }
   }
 
-  // CheckPlayerStatusConditions (core.asm :3328-3573), in its order: sleep,
-  // freeze, [held by a trap and recharge: forced skips, `_fillForcedChoices`],
-  // flinch, the Disable step, confusion, the disabled move, paralysis. So a
-  // sleeping or frozen monster's flinch is never reached (the bit waits for
-  // the turn's reset), and confusion rolls before paralysis. Sleep and freeze
-  // draw the gate byte the referee has always drawn for a gating status (a
-  // byte the cart's two checks do not read; paralysis is the one that does),
+  // The seat and monster whose trap holds this one, or null. On the cart the
+  // trap is the trapper's alone -- USING_TRAPPING_MOVE and its counter in the
+  // trapper's battle struct; the held monster has no bit of its own, it is
+  // "the enemy" of a trapper (HeldInPlaceCheck reads wEnemyBattleStatus1, and
+  // MainInBattleLoop / SelectEnemyMove the other side's bit) -- so a hold is
+  // real only while the seat it names still fields a monster trapping this
+  // slot. A `trapped` record without one (a sheet's, or one a send-out
+  // orphaned) holds nothing, and `_checkNumAttacksLeft` clears it.
+  _trapperOf(fighter, mon) {
+    const held = mon ? mon.trapped : null;
+    if (!held || held.fromSlot === null || held.fromSlot === undefined) return null;
+    const seat = this._fighterAtSlot(held.fromSlot);
+    const trapperMon = seat ? activeMon(seat) : null;
+    if (trapperMon && trapperMon.trapping
+        && trapperMon.trapping.targetSlot === fighter.slot) {
+      return { seat, mon: trapperMon };
+    }
+    return null;
+  }
+
+  _isHeld(fighter, mon) {
+    return this._trapperOf(fighter, mon) !== null;
+  }
+
+  // CheckNumAttacksLeft (core.asm :683-697), after the turn's moves and
+  // residuals: a trapper whose counter `.MultiturnMoveCheck` took to 0 lets
+  // go now -- not on the hit that spent it, so the monster it held stays held
+  // for the rest of that turn -- and a hold whose trapper is gone is let go
+  // too.
+  _checkNumAttacksLeft() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && mon.trapping && int(mon.trapping.turns, 0) <= 0) {
+        this._dropTrap(fighter, mon);
+      }
+    }
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && mon.trapped && !this._isHeld(fighter, mon)) {
+        mon.trapped = null;
+      }
+    }
+  }
+
+  // CheckPlayerStatusConditions up to `.HyperBeamCheck` (core.asm
+  // :3328-3383) -- the part every turn of a monster on the field meets, a
+  // recharge's too:
+  //   * sleep (`.sleepDone`): the counter comes down a step and the turn is
+  //     gone, "<MON> is fast asleep" or "woke up" -- the waking turn is lost
+  //     too;
+  //   * freeze (`.FrozenCheck`): "<MON> is frozen solid";
+  //   * `.HeldInPlaceCheck`: a foe's trap holds it -- "<MON> can't move". The
+  //     monster that chose CANNOT_MOVE never gets here (`_fillForcedChoices`);
+  //     this is the one that chose before the trap began -- slower than the
+  //     trapper on the trap's first turn -- or a forced turn (a recharge,
+  //     Rage, a thrash, a charge, a Bide) the trap caught: none of their
+  //     counters moves;
+  //   * the flinch (`.FlinchedCheck`), which spends the bit.
+  // Neither sleep nor freeze reads a byte (neither check calls BattleRandom),
   // and both zero wPlayerUsedMove / wEnemyUsedMove (`.sleepDone`,
-  // `.FrozenCheck`), so MIRROR MOVE finds nothing to copy. `move` is the
-  // selected move (the disabled-move check's). Returns false when a gate
-  // stopped the move.
-  _runGates(fighter, mon, move) {
+  // `.FrozenCheck`), so MIRROR MOVE finds nothing to copy. Returns false when
+  // one of them stopped the monster.
+  _firstGates(fighter, mon) {
     if (mon.status === 'sleep' || mon.status === 'freeze') {
       const gate = Status.beforeMove(
-        { status: mon.status, turnsRemaining: mon.statusTurns }, this.rng.byte(),
+        { status: mon.status, turnsRemaining: mon.statusTurns }, null,
       );
       if (gate) {
         mon.statusTurns = int(gate.turnsRemaining, mon.statusTurns);
@@ -2802,23 +2970,44 @@ class Battle {
       }
     }
 
+    if (this._isHeld(fighter, mon)) {
+      this._say(`${mon.species} can't move`);
+      return false;
+    }
+
     if (mon.flinch) {
       mon.flinch = false;
       this._say(`${mon.species} flinched`);
       return false;
     }
+    return true;
+  }
+
+  // CheckPlayerStatusConditions (core.asm :3328-3573), in its order: sleep,
+  // freeze, held by a foe's trap, flinch [the recharge: `_rechargeTurn`], the
+  // Disable step, confusion, the disabled move, paralysis. So a sleeping or
+  // frozen monster's flinch is never reached (the bit waits for the turn's
+  // reset), and confusion rolls before paralysis. `move` is the selected move
+  // (the disabled-move check's). Returns false when a gate stopped the move.
+  _runGates(fighter, mon, move) {
+    if (!this._firstGates(fighter, mon)) return false;
 
     this._tickDisable(mon);
 
     if (mon.confusion > 0) {
       const hit = this._selfHitState(fighter, mon);
+      // `.ConfusedCheck` takes the counter down first (`dec [hl] / jr nz`),
+      // and only a monster still confused after it draws the self-hit byte:
+      // the turn it snaps out on draws none.
+      let roll = null;
+      if (mon.confusion > 1) roll = this.rng.byte();
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
         level: hit.level,
         attack: hit.attack,
         defense: hit.defense,
-      }, this.rng.byte());
+      }, roll);
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
         if (gate.snappedOut) {
@@ -2992,9 +3181,12 @@ class Battle {
     return field;
   }
 
-  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId, moveId) {
+  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId, moveId, extra) {
+    const x = extra || {};
     const result = Effects.applyPrimary({
       effectId,
+      overwrite: x.overwrite === true,
+      mimicSlot: x.mimicSlot,
       rng: this.rng,
       userMon: mon,
       targetMon,
@@ -3104,14 +3296,31 @@ class Battle {
     this._markLastMove(mon, usedSlot);
   }
 
-  // MoveHitTest (core.asm :5228-5345) for a move that reaches it: an
-  // invulnerable target misses (bar the moves that reach FLY / DIG,
-  // Effects.hitsInvulnerable), a primary stat drop into Mist misses, SWIFT
-  // (`.swiftCheck`'s `ret z`) and X Accuracy (`ret nz`) hit without drawing,
-  // and only then is the accuracy byte drawn. DREAM EATER's check is the
-  // damage path's own (`_useMove`). Returns { hit: true }, or { hit: false,
-  // why } with why 'invulnerable', 'mist' or 'accuracy'.
+  // What PrintMoveFailureText (core.asm :3718-3735) says for a damaging move
+  // that missed, whichever test it was: wDamageMultipliers at 0 -- an
+  // immunity -- is "It doesn't affect <TARGET>!"; else an OHKO's $ff in
+  // wCriticalHitOrOHKO (a target faster than the user) is "<TARGET>'s
+  // unaffected!"; else "<USER>'s attack missed!" -- the accuracy byte, DREAM
+  // EATER's sleep check, an invulnerable or a Misted target, a 0.25x zero
+  // all alike.
+  _damageMissText(mon, defender, immune, ohko) {
+    if (immune) return `It doesn't affect ${defender.species}`;
+    if (ohko) return `${defender.species}'s unaffected!`;
+    return `${mon.species} missed`;
+  }
+
+  // MoveHitTest (core.asm :5228-5345) for a move that reaches it, in its
+  // order: DREAM EATER against a target that is not asleep misses first
+  // (`.dreamEaterCheck`), then an invulnerable target misses (bar SWIFT,
+  // whose `ret z` comes first, Effects.hitsInvulnerable), a primary stat drop
+  // into Mist misses, X Accuracy hits without drawing (`ret nz`), and only
+  // then is the accuracy byte drawn. None of the four before it draws.
+  // Returns { hit: true }, or { hit: false, why } with why 'dreameater',
+  // 'invulnerable', 'mist' or 'accuracy'.
   _hitTest(mon, defender, move, effectId) {
+    if (int(effectId, 0) === 8 && defender.status !== 'sleep') {
+      return { hit: false, why: 'dreameater' };
+    }
     if (defender.invulnerable) {
       let chargeMoveId = defender.charging ? defender.charging.moveId : null;
       if (!chargeMoveId && defender.charging) {
@@ -3160,8 +3369,9 @@ class Battle {
   }
 
   // A TELEPORT, ROAR or WHIRLWIND that ends a wild fight: either side's
-  // (SwitchAndTeleportEffect sets wEscapedFromBattle and leaves wBattleResult
-  // at 0), so EndOfBattle still pays the Pay Day pile (`_payDayOn`).
+  // (SwitchAndTeleportEffect sets wEscapedFromBattle and never writes
+  // wBattleResult), so EndOfBattle pays the Pay Day pile while that is still
+  // 0 (`_payDayOn`).
   _concedeRun(fighter) {
     this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
     let result;
@@ -3171,6 +3381,70 @@ class Battle {
       result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run');
     }
     this._payDayOn(result);
+  }
+
+  // SwitchAndTeleportEffect (effects.asm :810-911), either side's. Outside a
+  // wild fight (wIsInBattle 2: a trainer or a link fight) it fails: TELEPORT
+  // "But it failed!", ROAR / WHIRLWIND "<TARGET> is unaffected!". In one, the
+  // level roll (Effects.teleportEscapes) -- a user at or above its target's
+  // level always escapes -- and a roll that fails is TELEPORT's "But it
+  // failed!" or the others' "It didn't affect <TARGET>!". An escape sets
+  // wEscapedFromBattle and says TELEPORT's "<USER> ran from battle!", ROAR's
+  // "<TARGET> ran away scared!" or WHIRLWIND's "<TARGET> was blown away!"
+  // (`.playAnimAndPrintText`, keyed by the move id), and the fight is over
+  // (`_concedeRun`). "Its target" is the monster the move was aimed at -- the
+  // cart's one opponent.
+  _switchAndTeleport(fighter, mon, defender, move) {
+    const key = Effects.moveKey(move);
+    const teleport = key === 'TELEPORT';
+    if (!Effects.teleportRunAllowed(this.mode)) {
+      if (teleport) {
+        this._say('But it failed');
+      } else {
+        this._say(`${defender.species} is unaffected!`);
+      }
+      return;
+    }
+    if (!Effects.teleportEscapes(mon.level, defender.level, this.rng)) {
+      if (teleport) {
+        this._say('But it failed');
+      } else {
+        this._say(`It didn't affect ${defender.species}`);
+      }
+      return;
+    }
+    if (teleport) {
+      this._say(`${mon.species} ran from battle!`);
+    } else if (key === 'ROAR') {
+      this._say(`${defender.species} ran away scared!`);
+    } else {
+      this._say(`${defender.species} was blown away!`);
+    }
+    this._concedeRun(fighter);
+  }
+
+  // MimicEffect's pick (effects.asm :1210-1259): the slot of the target's
+  // move list it copies, 1-based. Outside a link battle the player's turn
+  // opens that list (`.letPlayerChooseMove`): the seat's own pick
+  // (`choice.mimic`, `_normaliseChoice`), and with none -- or one naming no
+  // move the target holds now -- the row the menu's cursor starts on, the
+  // first (`.selectedmoveknown`). The computer's turn, and both sides of a
+  // link fight, take `.getRandomMove`: `BattleRandom & 3`, redrawn until the
+  // slot holds a move. A target with no moves would spin the cart forever;
+  // the referee fails it there, with no draw.
+  _mimicPick(fighter, defender, choice) {
+    const moves = Array.isArray(defender.moves) ? defender.moves : [];
+    if (moves.length === 0) return null;
+    if (isPlayerSeat(this.mode, fighter) && has(BADGE_MODES, this.mode)) {
+      const pick = int(choice ? choice.mimic : null, null);
+      if (pick !== null && pick >= 1 && moves[pick - 1] !== undefined) return pick;
+      return 1;
+    }
+    for (let i = 0; i < Effects.REDRAW_GUARD; i += 1) {
+      const slot = this.rng.byte() % 4 + 1;
+      if (moves[slot - 1] !== undefined) return slot;
+    }
+    return 1;
   }
 
   // The stat a critical hit reads at one end (GetDamageVarsFor{Player,Enemy}
@@ -3246,6 +3520,9 @@ class Battle {
     }
 
     const plan = Effects.statusPlan(effectId);
+    // What a routine's checks hand on to its effect (Effects.applyPrimary):
+    // SleepEffect's recharge overwrite, MimicEffect's pick.
+    let extra = null;
     if (plan === 'statdown') {
       // StatModifierDownEffect (effects.asm :539-562): outside a link battle
       // the computer's drop draws its extra 25% miss first, then a Substitute
@@ -3289,17 +3566,99 @@ class Battle {
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
-    } else if (plan === 'test') {
-      const test = this._hitTest(mon, defender, move, effectId);
-      if (!test.hit) {
-        if (test.why === 'accuracy') {
-          this._say(`${mon.species} missed`);
-        } else {
-          this._say('But it failed');
-        }
+    } else if (plan === 'sleep') {
+      // SleepEffect (effects.asm :26-68). A target that must recharge loses
+      // the recharge and falls asleep past every check -- no status check, no
+      // MoveHitTest, no byte but the counter's (the cart's own comment: "all
+      // hit tests will be skipped including the event where the target
+      // already has another status"), so the counter overwrites whatever
+      // status it had (`overwrite`). Otherwise "<TARGET>'s already asleep!",
+      // then any other status, then MoveHitTest's miss -- both "It didn't
+      // affect <TARGET>!" -- and no byte before the hit test's. No Substitute
+      // check: SLEEP POWDER reaches the monster behind a doll.
+      if (defender.mustRecharge) {
+        defender.mustRecharge = false;
+        extra = { overwrite: true };
+      } else if (defender.status === 'sleep') {
+        this._say(`${defender.species}'s already asleep!`);
+        this._markLastMove(mon, usedSlot);
+        return;
+      } else if (Effects.hasMajorStatus(defender)) {
+        this._say(`It didn't affect ${defender.species}`);
+        this._markLastMove(mon, usedSlot);
+        return;
+      } else if (!this._hitTest(mon, defender, move, effectId).hit) {
+        this._say(`It didn't affect ${defender.species}`);
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
+    } else if (plan === 'paralyze') {
+      // ParalyzeEffect_ (move_effects/paralyze.asm): any status ("It didn't
+      // affect"), then an ELECTRIC move into a GROUND type (`cp ELECTRIC` on
+      // the move, `cp GROUND` on both target types: "It doesn't affect"),
+      // both before MoveHitTest, whose miss is "It didn't affect" again. No
+      // Substitute check: THUNDER WAVE reaches the monster behind a doll.
+      if (Effects.hasMajorStatus(defender)) {
+        this._say(`It didn't affect ${defender.species}`);
+        this._markLastMove(mon, usedSlot);
+        return;
+      }
+      if (this.electricType !== null && int(move.type, -1) === this.electricType
+          && hasType(defender, this.groundType)) {
+        this._say(`It doesn't affect ${defender.species}`);
+        this._markLastMove(mon, usedSlot);
+        return;
+      }
+      if (!this._hitTest(mon, defender, move, effectId).hit) {
+        this._say(`It didn't affect ${defender.species}`);
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+        return;
+      }
+    } else if (plan === 'confusion') {
+      // ConfusionEffect (effects.asm :1120-1126): CheckTargetSubstitute, then
+      // MoveHitTest -- either one ConfusionEffectFailed's "But it failed!" --
+      // and an already confused target fails the same way (Effects).
+      if (Effects.hasSubstitute(defender)) {
+        this._say('But it failed');
+        this._markLastMove(mon, usedSlot);
+        return;
+      }
+      if (!this._hitTest(mon, defender, move, effectId).hit) {
+        this._say('But it failed');
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+        return;
+      }
+    } else if (plan === 'leechseed') {
+      // LeechSeedEffect_ (move_effects/leech_seed.asm): MoveHitTest first,
+      // then a GRASS type, then a target already SEEDED -- all three
+      // "<TARGET> evaded attack!". No Substitute check: LEECH SEED reaches the
+      // monster behind a doll.
+      if (!this._hitTest(mon, defender, move, effectId).hit) {
+        this._say(`${defender.species} evaded attack!`);
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+        return;
+      }
+      if (hasType(defender, this.grassType) || defender.leechSeed) {
+        this._say(`${defender.species} evaded attack!`);
+        this._markLastMove(mon, usedSlot);
+        return;
+      }
+    } else if (plan === 'mimic') {
+      // MimicEffect (effects.asm :1203-1273): MoveHitTest, "But it failed!"
+      // on a miss (its INVULNERABLE re-check after it can never fire), then
+      // the pick (`_mimicPick`). No Substitute check.
+      if (!this._hitTest(mon, defender, move, effectId).hit) {
+        this._say('But it failed');
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+        return;
+      }
+      const pick = this._mimicPick(fighter, defender, choice);
+      if (pick === null) {
+        this._say('But it failed');
+        this._markLastMove(mon, usedSlot);
+        return;
+      }
+      extra = { mimicSlot: pick };
     } else if (plan === 'conversion') {
       // ConversionEffect_'s own INVULNERABLE test on the target, no byte.
       if (defender.invulnerable) {
@@ -3323,11 +3682,7 @@ class Battle {
       return;
     }
     if (Effects.isSwitchAndTeleport(effectId)) {
-      if (Effects.teleportRunAllowed(this.mode)) {
-        this._concedeRun(fighter);
-      } else {
-        this._say('But it failed');
-      }
+      this._switchAndTeleport(fighter, mon, defender, move);
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -3337,32 +3692,65 @@ class Battle {
       return;
     }
     if (Effects.handlesPrimary(effectId)) {
-      this._applyPrimary(fighter, mon, target, defender, choice.move, effectId, move.id);
+      this._applyPrimary(fighter, mon, target, defender, choice.move, effectId, move.id, extra);
     } else {
       this._say('But nothing happened');
     }
     this._markLastMove(mon, usedSlot);
   }
 
-  // The trap a TRAPPING_EFFECT move starts, `turns` attacks in all, the first
-  // being this one (`fresh`: the residual at the end of this turn ticks the
-  // counter without dealing it twice; a 2-turn Wrap hits twice). `damage` is
-  // what each later turn deals -- wDamage after the hit, the whole hit against
-  // a doll (AttackSubstitute leaves wDamage alone), 0 after an immunity --
-  // which the caller writes once the hit is in.
-  _startTrap(fighter, mon, target, defender, turns, usedSlot, recordMove, damage) {
+  // The trap a TRAPPING_EFFECT move starts. `count` is TrappingEffect's
+  // counter (wPlayerNumAttacksLeft): the attacks after this one, which
+  // `.MultiturnMoveCheck` spends one a turn in the trapper's slot
+  // (`_trapTurn`) and CheckNumAttacksLeft ends on at 0
+  // (`_checkNumAttacksLeft`) -- so a count of 1 is a two-turn Wrap. The trap
+  // is the trapper's record; the held monster's mirrors it (`turns`,
+  // `damage`) so a sheet reader sees the hold. `damage` is what each later
+  // turn deals -- wDamage after the hit, the whole hit against a doll
+  // (AttackSubstitute leaves wDamage alone), 0 after an immunity -- which the
+  // caller writes once the hit is in.
+  _startTrap(fighter, mon, target, defender, count, usedSlot, recordMove, damage) {
     defender.trapped = {
-      turns,
+      turns: count,
       damage: Math.max(0, int(damage, 0)),
       fromSlot: fighter.slot,
-      fresh: true,
     };
     mon.trapping = {
-      turns,
+      turns: count,
       moveIndex: usedSlot,
       targetSlot: target.slot,
       move: recordMove,
+      damage: Math.max(0, int(damage, 0)),
     };
+  }
+
+  // `.MultiturnMoveCheck` (core.asm :3549-3560) and where it jumps: "<MON>'s
+  // attack continues!", the counter down a step, and GetPlayerAnimationType
+  // -- the move's animation, then ApplyAttackToEnemyPokemon with wDamage as
+  // the trap's first hit left it (AttackSubstitute against a doll), and
+  // HandleBuildingRage on a target still standing. No "used" line, no
+  // DecrementPP, no crit, roll or hit test, and nothing else is said: a hit
+  // for 0 (an immunity's trap, a 0.25x zero) is the continues line and an
+  // empty hit. It lands in the trapper's own slot of the turn order, after
+  // the trapper's gates (`_runGates`: asleep, frozen, flinched, its WRAP
+  // disabled -- none of them spends the counter, and the held monster stays
+  // held; fully paralysed or hurting itself, the trap is gone).
+  _trapTurn(fighter, mon, move, usedSlot) {
+    const trap = mon.trapping;
+    this._say(`${mon.species}'s attack continues!`);
+    trap.turns = Math.max(0, int(trap.turns, 0) - 1);
+    const target = this._fighterAtSlot(trap.targetSlot);
+    const defender = target ? activeMon(target) : null;
+    const held = defender ? defender.trapped : null;
+    if (held && held.fromSlot === fighter.slot) held.turns = trap.turns;
+    this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
+    if (defender) {
+      let damage = int(trap.damage, 0);
+      if (held && held.fromSlot === fighter.slot) damage = int(held.damage, 0);
+      this.lastDamage = this._damage(target, defender, Math.max(0, damage), null);
+      this._buildRage(target, defender, fighter);
+    }
+    this._markLastMove(mon, usedSlot);
   }
 
   // "Hit the enemy N times!" (_MultiHitText, the player's) and "Hit N times!"
@@ -3394,7 +3782,7 @@ class Battle {
     if (!called) {
       if (choice.forcedMove) {
         move = choice.forcedMove;
-      } else if (mustStruggle(mon)) {
+      } else if (this._struggles(fighter, mon)) {
         move = STRUGGLE;
       } else {
         move = mon.moves[choice.move - 1];
@@ -3432,22 +3820,37 @@ class Battle {
     }
 
     // `.ThrashingAboutCheck` (core.asm :3526-3547), the turns after the first:
-    // the counter comes down a step past every gate, and the step that takes
-    // it to 0 ends the thrash in confusion -- 2..5 turns, a draw -- and the
-    // move still lands this turn (`pop hl` keeps PlayerCalcMoveDamage). These
-    // turns spend no PP and never start a new thrash.
+    // "<MON>'s thrashing about!", then the counter comes down a step past every
+    // gate, and the step that takes it to 0 ends the thrash in confusion --
+    // 2..5 turns, a draw, and not a word: `set CONFUSED` prints nothing there
+    // (the `status` chip says it) -- and the move still lands this turn (`pop
+    // hl` keeps PlayerCalcMoveDamage). These turns go straight to
+    // PlayerCalcMoveDamage, past PlayerCanExecuteMove: no "used" line, no
+    // DecrementPP, no DisplayUsedMoveText writing wPlayerUsedMove, and never a
+    // new thrash.
     const thrashTurn = !called && !!choice.forcedMove && !!mon.thrashing;
     if (thrashTurn) {
+      this._say(`${mon.species}'s thrashing about!`);
       mon.thrashing.turns -= 1;
       if (mon.thrashing.turns <= 0) {
         mon.thrashing = null;
         mon.confusion = this.rng.byte() % 4 + 2;
-        this._say(`${mon.species} became confused`);
         this._emit('status', {
           slot: fighter.slot, side: fighter.side, confused: 1,
           text: `${mon.species} became confused`,
         });
       }
+    }
+
+    // `.MultiturnMoveCheck` (core.asm :3549-3560): a trap's later turns, past
+    // every gate (`_trapTurn`). A trap a switch or a faint let go before this
+    // slot has no bit left to find, and the selection the cart left standing
+    // -- the trapping move -- runs fresh below: the used line, DecrementPP and
+    // a new TrappingEffect, at whoever is there now (the link-battle glitch,
+    // and what a released trapper does).
+    if (!called && choice.trapContinue && mon.trapping) {
+      this._trapTurn(fighter, mon, move, usedSlot);
+      return;
     }
 
     // CheckForDisobedience: a traded monster of the player's, on the turn's
@@ -3486,10 +3889,13 @@ class Battle {
     // thrash or a Rage spend nothing -- the thrash's own continuation even
     // skips the call (`.ThrashingAboutCheck` goes to PlayerCalcMoveDamage) --
     // and a charge's release and a Bide's unleash are the turns the cart's
-    // PP accounting already settled (below).
+    // PP accounting already settled (below). The computer never pays at all:
+    // ExecuteEnemyMove has no DecrementPP (core.asm :5510-5521), so outside a
+    // link battle its PP is the sheet's for the whole fight (`_hasPp`).
     const paying = disobedient && !called ? mon.moves[choice.move - 1] : move;
     if (!struggling && paying.pp > 0 && !releasing
-        && !thrashTurn && !mon.raging) {
+        && !thrashTurn && !mon.raging
+        && !isComputerSeat(this.mode, fighter)) {
       paying.pp -= 1;
       // FIGHT reads the uploaded sheet. Publish whenever PP actually moved
       // (Transform/Mimic already emit via movesChanged). Skip an override
@@ -3506,8 +3912,12 @@ class Battle {
     // _UsedInsteadText): "<MON> used instead, <MOVE>", in this file's shape of
     // the used line. A Metronome call keeps the flag (MetronomePickMove leaves
     // it), a Mirror Move copy clears it (MirrorMoveCheck's `xor a`), and the
-    // calls below pass it on accordingly.
-    if (disobedient) {
+    // calls below pass it on accordingly. A thrash's continuation never gets
+    // to DisplayUsedMoveText (`.ThrashingAboutCheck` jumps to
+    // PlayerCalcMoveDamage): its line was "thrashing about!" (above).
+    if (thrashTurn) {
+      // nothing: see above
+    } else if (disobedient) {
       this._say(`${mon.species} used instead, ${moveLabel(move)}`);
     } else {
       this._say(`${mon.species} used ${moveLabel(move)}`);
@@ -3542,8 +3952,9 @@ class Battle {
     // caller's. A charge's first turn never runs it -- ChargeEffect is reached
     // from CheckIfPlayerNeedsToChargeUp, before PlayerCanExecuteMove, and
     // prints only "<MON> flew up high!" -- so a FLY in the air has not been
-    // "used" yet; its release has.
-    mon.lastUsedMove = move;
+    // "used" yet; its release has. Nor does a thrash's continuation (above),
+    // which leaves the first turn's THRASH there -- or the 0 a send-out wrote.
+    if (!thrashTurn) mon.lastUsedMove = move;
 
     // SpecialEffectsCont (Effects.startsBeforeHit): PlayerCanExecuteMove runs
     // THRASH / PETAL DANCE's and the trapping moves' routines before damage
@@ -3561,10 +3972,12 @@ class Battle {
         move: recordMove,
       };
     }
-    let trapTurns = null;
+    // TrappingEffect's counter, wPlayerNumAttacksLeft: the attacks after this
+    // one, 1..4 (Effects.trapTurns is the 2..5 total).
+    let trapCount = null;
     if (Effects.isTrapping(effectId) && !mon.trapping) {
       defender.mustRecharge = false;
-      trapTurns = Effects.trapTurns(this.rng);
+      trapCount = Effects.trapTurns(this.rng) - 1;
     }
 
     if (Effects.isMirrorMove(effectId) && !mirrorCopy) {
@@ -3572,10 +3985,11 @@ class Battle {
       // wPlayerUsedMove -- the move the target last printed a "used" line
       // for, so after its METRONOME called THRASH it is THRASH -- and fails
       // when there is none (zeroed at a send-out, a fast-asleep or a
-      // frozen-solid turn) or it is MIRROR MOVE itself.
+      // frozen-solid turn) or it is MIRROR MOVE itself -- MirrorMoveFailedText,
+      // "The MIRROR MOVE failed!" (`.mirrorMoveFailed`, :4983-4986).
       const last = defender.lastUsedMove;
       if (!isTable(last) || Effects.isMirrorMove(last.effect)) {
-        this._say('But it failed');
+        this._say('The MIRROR MOVE failed!');
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -3619,71 +4033,42 @@ class Battle {
       return;
     }
 
-    // COUNTER names its own damage before anything else would
-    // (`_counterDamage`): PlayerCalcMoveDamage calls HandleCounterMove right
-    // after CriticalHitTest, before CalculateDamage could look at its power.
-    // A COUNTER whose conditions fail misses there and then -- wMoveMissed
-    // set, no hit test drawn, wDamage left as it was -- and one that passes
-    // goes on to MoveHitTest, the accuracy byte below, with its damage already
-    // fixed.
-    let counter = null;
-    if (isCounter) {
-      counter = this._counterDamage(target);
-      if (!counter) {
-        this._say(`${mon.species} missed`);
-        this._markLastMove(mon, usedSlot);
-        return;
-      }
-    }
-
-    const test = this._hitTest(mon, defender, move, effectId);
-    if (!test.hit) {
-      if (test.why === 'accuracy') {
-        this._say(`${mon.species} missed`);
-      } else {
-        this._say('But it failed');
-      }
-      this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
-      return;
-    }
-
-    if (effectId === 8 && defender.status !== 'sleep') {
-      this._say('But it failed');
-      this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
-      return;
-    }
-
-    if (Effects.isOhko(effectId)
-        && !Effects.ohkoLands(this._speedOf(fighter, mon), this._speedOf(target, defender))) {
-      this._say('But it failed');
-      this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
-      return;
-    }
-
     // An immunity or a 0.25x zero leaves a trap that already started standing
-    // (above), at 0 a turn.
+    // (above), at 0 a turn -- when MoveHitTest's own byte let it through.
     const trapAfterZero = () => {
-      if (trapTurns !== null) {
-        this._startTrap(fighter, mon, target, defender, trapTurns, usedSlot, recordMove, 0);
+      if (trapCount !== null) {
+        this._startTrap(fighter, mon, target, defender, trapCount, usedSlot, recordMove, 0);
       }
     };
 
-    // COUNTER takes none of the draws below: HandleCounterMove has already
-    // named the damage, and the cart goes from it straight to the hit test it
-    // just ran, round CalculateDamage, AdjustDamageForMoveType (no type, so it
-    // reaches a Ghost; no "super effective") and RandomizeDamage. (Its
-    // CriticalHitTest came first on the cart and can still print "Critical
-    // hit!" over a number it never touched; the referee draws no byte for a
-    // line that changes nothing.) The set-damage effects take none of them
-    // either (Effects.isSetDamage): no crit, no chart, no roll -- only
-    // PSYWAVE's own loop.
+    // PlayerCalcMoveDamage / EnemyCalcMoveDamage (core.asm :3134-3149,
+    // :5524-5542), in the cart's order -- the draws included:
+    //   * SetDamageEffects (SUPER FANG, the SPECIAL_DAMAGE moves) jump straight
+    //     to MoveHitTest: no crit byte, no chart, no roll -- only PSYWAVE's
+    //     own loop, once the hit test passed (ApplyAttackToEnemyPokemon);
+    //   * CriticalHitTest's byte (none at power 0: `ret z`), every other move,
+    //     COUNTER and the OHKO moves included;
+    //   * HandleCounterMove: COUNTER's conditions, then MoveHitTest, and
+    //     nothing else (`_counterDamage`);
+    //   * CalculateDamage -- for an OHKO move OneHitKOEffect_, which misses a
+    //     faster target there and then (`jp z`: no chart, no roll, no hit
+    //     test) -- AdjustDamageForMoveType (an immunity, or a 0.25x that leaves
+    //     0, sets wMoveMissed and goes on), RandomizeDamage's roll (a 2 and
+    //     up), and only then MoveHitTest: DREAM EATER's sleep check, SWIFT,
+    //     INVULNERABLE, Mist and X Accuracy before its accuracy byte
+    //     (`_hitTest`). So a move that misses has already drawn its crit byte
+    //     and its roll, and an immune target still costs the accuracy byte.
+    // A miss prints PrintMoveFailureText's line (`_damageMissText`).
     const isOhko = Effects.isOhko(effectId);
     let isCrit = false;
     let percents = null;
     let damage = 0;
-    if (counter) {
-      damage = counter;
-    } else if (Effects.isSetDamage(effectId)) {
+    if (Effects.isSetDamage(effectId)) {
+      if (!this._hitTest(mon, defender, move, effectId).hit) {
+        this._say(this._damageMissText(mon, defender, false, false));
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+        return;
+      }
       damage = Effects.setDamage({
         effectId, moveId: move.id, userMon: mon, targetMon: defender,
         power: move.power, rng: this.rng,
@@ -3707,85 +4092,111 @@ class Battle {
           highCritMove: move.highCrit === true,
         }).isCrit;
       }
-      percents = this._typePercents(move.type, defender);
 
-      if (isOhko) {
-        // OneHitKOEffect_ puts 65535 in wDamage; AdjustDamageForMoveType
-        // zeroes it against an immunity -- "doesn't affect", no roll (`cp 2`)
-        // -- and otherwise RandomizeDamage draws over a number no roll can
-        // bring under the target's HP.
-        let immune = false;
-        for (const pct of percents) {
-          if (pct <= 0) { immune = true; break; }
+      if (isCounter) {
+        // HandleCounterMove (`_counterDamage`): a COUNTER whose conditions
+        // fail misses there -- wMoveMissed set, no hit test, wDamage as it was
+        // -- and one that passes takes MoveHitTest with its damage fixed. No
+        // chart (it reaches a Ghost, says nothing of effectiveness), no roll.
+        // The crit byte it drew still prints "Critical hit!" over the number
+        // (PrintCriticalOHKOText), as the cart's does.
+        const counter = this._counterDamage(target);
+        if (!counter) {
+          this._say(`${mon.species} missed`);
+          this._markLastMove(mon, usedSlot);
+          return;
         }
-        if (immune) {
-          this._say(`It doesn't affect ${defender.species}`);
-          trapAfterZero();
+        if (!this._hitTest(mon, defender, move, effectId).hit) {
+          this._say(this._damageMissText(mon, defender, false, false));
           this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
           return;
         }
-        this.rng.damageRoll();
-        damage = Math.max(1, defender.hp);
+        damage = counter;
       } else {
-        // GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255). An
-        // ordinary hit reads the stored battle stats -- stage, badges and a
-        // burn already in them -- and a screen on the defender doubles its
-        // stat (`sla c / rl b`, uncapped, so a big enough one wraps in the
-        // scaling). A critical hit throws all of that away for the party
-        // stats at both ends (`_critStat`): the player's party struct
-        // (pre-Transform) and GetEnemyMonStat for the computer's. No stage, no
-        // badge, no burn, no screen. The scaling, the Explosion halving and
-        // the 997 cap are Damage.compute's.
-        const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
-        const atkKey = isSpecial ? 'spc' : 'atk';
-        const defKey = isSpecial ? 'spc' : 'def';
-        let attack;
-        let defense;
-        if (isCrit) {
-          attack = this._critStat(fighter, mon, atkKey);
-          defense = this._critStat(target, defender, defKey);
+        percents = this._typePercents(move.type, defender);
+        let immune = false;
+        let zeroed = false;
+        if (isOhko) {
+          // OneHitKOEffect_: a user slower than its target misses before the
+          // chart and the hit test, and wCriticalHitOrOHKO's $ff makes it
+          // "<TARGET>'s unaffected!". Otherwise 65535 goes through
+          // AdjustDamageForMoveType -- an immunity zeroes it, no roll (`cp 2`)
+          // -- and RandomizeDamage rolls over a number no roll can bring under
+          // the target's HP.
+          if (!Effects.ohkoLands(this._speedOf(fighter, mon), this._speedOf(target, defender))) {
+            this._say(this._damageMissText(mon, defender, false, true));
+            this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+            return;
+          }
+          for (const pct of percents) {
+            if (pct <= 0) { immune = true; break; }
+          }
+          if (!immune) {
+            this.rng.damageRoll();
+            damage = Math.max(1, defender.hp);
+          }
         } else {
-          attack = mon.cur[atkKey];
-          defense = defender.cur[defKey];
-          if ((isSpecial && defender.lightScreen)
-              || (!isSpecial && defender.reflect)) {
-            defense *= 2;
+          // GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255). An
+          // ordinary hit reads the stored battle stats -- stage, badges and a
+          // burn already in them -- and a screen on the defender doubles its
+          // stat (`sla c / rl b`, uncapped, so a big enough one wraps in the
+          // scaling). A critical hit throws all of that away for the party
+          // stats at both ends (`_critStat`): the player's party struct
+          // (pre-Transform) and GetEnemyMonStat for the computer's. No stage,
+          // no badge, no burn, no screen. The scaling, the Explosion halving
+          // and the 997 cap are Damage.compute's.
+          const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
+          const atkKey = isSpecial ? 'spc' : 'atk';
+          const defKey = isSpecial ? 'spc' : 'def';
+          let attack;
+          let defense;
+          if (isCrit) {
+            attack = this._critStat(fighter, mon, atkKey);
+            defense = this._critStat(target, defender, defKey);
+          } else {
+            attack = mon.cur[atkKey];
+            defense = defender.cur[defKey];
+            if ((isSpecial && defender.lightScreen)
+                || (!isSpecial && defender.reflect)) {
+              defense *= 2;
+            }
+          }
+
+          const result = Damage.compute({
+            level: mon.level,
+            attack,
+            defense,
+            power: move.power,
+            crit: isCrit,
+            stab: hasType(mon, move.type),
+            typeEffect: percents,
+            explode: Effects.isExplode(effectId),
+          });
+
+          // An immunity is a 0 (AdjustDamageForMoveType's multiply by 0), and
+          // so is a 0.25x matchup that leaves a 2 or a 3 at 0 (:5173-5177):
+          // both set wMoveMissed and draw no roll. RandomizeDamage draws only
+          // for a 2 and up (`cp 2` / `ret c`): a hit already at 1 lands for 1.
+          if (result.immune) {
+            immune = true;
+          } else if (result.modified <= 0) {
+            zeroed = true;
+          } else {
+            damage = result.modified;
+            if (result.rolls) damage = Damage.applyRoll(damage, this.rng.damageRoll());
           }
         }
 
-        const result = Damage.compute({
-          level: mon.level,
-          attack,
-          defense,
-          power: move.power,
-          crit: isCrit,
-          stab: hasType(mon, move.type),
-          typeEffect: percents,
-          explode: Effects.isExplode(effectId),
-        });
-
-        // An immunity is a 0 too (AdjustDamageForMoveType's multiply by 0), so
-        // it draws no roll either -- "doesn't affect" is PrintMoveFailureText
-        // reading the 0 multiplier.
-        if (result.immune) {
-          this._say(`It doesn't affect ${defender.species}`);
-          trapAfterZero();
+        // MoveHitTest runs whatever AdjustDamageForMoveType decided -- it never
+        // clears wMoveMissed, and its own miss is the only one that takes a
+        // trap back (`.moveMissed`'s `res USING_TRAPPING_MOVE`).
+        const hit = this._hitTest(mon, defender, move, effectId).hit;
+        if (immune || zeroed || !hit) {
+          this._say(this._damageMissText(mon, defender, immune, false));
+          if (hit) trapAfterZero();
           this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
           return;
         }
-        // A 0.25x matchup that leaves a 2 or a 3 at 0 is a miss
-        // (AdjustDamageForMoveType :5173-5177 sets wMoveMissed): "<MON>'s
-        // attack missed!", an EXPLOSION still goes down, a JUMP KICK crashes.
-        if (result.modified <= 0) {
-          this._say(`${mon.species} missed`);
-          trapAfterZero();
-          this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
-          return;
-        }
-        // RandomizeDamage draws only for a 2 and up (`cp 2` / `ret c`): a hit
-        // already at 1 lands for 1 with no roll.
-        damage = result.modified;
-        if (result.rolls) damage = Damage.applyRoll(damage, this.rng.damageRoll());
       }
     }
 
@@ -3800,8 +4211,8 @@ class Battle {
 
     // The trap, standing before the hit lands (a knockout's `_faint` takes it
     // back off the field).
-    if (trapTurns !== null) {
-      this._startTrap(fighter, mon, target, defender, trapTurns, usedSlot, recordMove, 0);
+    if (trapCount !== null) {
+      this._startTrap(fighter, mon, target, defender, trapCount, usedSlot, recordMove, 0);
     }
 
     // The hits, each in the cart's order (ExecutePlayerMove :3226-3256):
@@ -3860,9 +4271,10 @@ class Battle {
       this._say(this._hitTimesText(fighter, hits));
     }
 
-    // What each later turn of a trap deals: wDamage now.
-    if (trapTurns !== null && defender.trapped && defender.trapped.fromSlot === fighter.slot) {
+    // What each later turn of a trap deals: wDamage now (`_trapTurn`).
+    if (trapCount !== null && defender.trapped && defender.trapped.fromSlot === fighter.slot) {
       defender.trapped.damage = Math.max(0, int(this.lastDamage, 0));
+      if (mon.trapping) mon.trapping.damage = defender.trapped.damage;
     }
 
     // `.executeOtherEffects` (core.asm :3258-3269) runs the side effect once,
@@ -4243,6 +4655,14 @@ class Battle {
     for (let index = 1; index <= fighter.mons.length; index += 1) {
       if (fighter.mons[index - 1] === mon) { this._unfield(fighter, index); break; }
     }
+    // wBattleResult (`_payDayOn`): RemoveFaintedPlayerMon's 1 for the player's
+    // side, FaintEnemyPokemon's 0 for the other while the player still has a
+    // monster standing (AnyPartyAlive; with none it returns before the write).
+    if (fighter.side === EXP_OWNER_SIDE) {
+      this.battleResult = 1;
+    } else if (this._sideAlive(EXP_OWNER_SIDE)) {
+      this.battleResult = 0;
+    }
     mon.charging = null;
     mon.invulnerable = false;
     mon.mustRecharge = false;
@@ -4259,8 +4679,9 @@ class Battle {
     mon.reflect = false;
     mon.mist = false;
     mon.focusEnergy = false;
-    // A Transform goes with it too: a revived monster has its own moves.
-    Effects.untransform(mon);
+    // A Transform goes with it too, and a MIMIC: a revived monster has its own
+    // moves (`Effects.restoreMoves`).
+    Effects.restoreMoves(mon);
     mon.toxicLinger = null;
     mon.xAccuracy = false;
     mon.leechSeed = null;
@@ -4358,48 +4779,10 @@ class Battle {
         }
       }
       if (this.result) return;
-      mon = activeMon(fighter);
-      if (mon && mon.trapped && mon.trapped.turns > 0) {
-        const trap = mon.trapped;
-        // The turn the trap landed on already paid its damage through the move
-        // itself: spend that attack off the counter here and say nothing.
-        // Every later turn is a real residual.  A trap that arrived on a sheet
-        // rather than from a move carries no `fresh` mark and ticks at once.
-        if (trap.fresh) {
-          trap.fresh = null;
-        } else {
-          this._say(`${mon.species} is hurt by the trap`);
-          this.lastDamage = this._damage(fighter, mon, trap.damage, null);
-          // On the cart this tick is the trapper's own turn:
-          // `.MultiturnMoveCheck` jumps to GetPlayerAnimationType, the stored
-          // hit goes through ApplyAttackToEnemyPokemon, and HandleBuildingRage
-          // follows it (a trap that came on a sheet naming no trapper has
-          // nobody to build against). `trap` is still the table the faint
-          // just cleared off the monster, so the counter below keeps working
-          // either way.
-          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
-            ? this._fighterAtSlot(trap.fromSlot) : null;
-          this._buildRage(fighter, mon, trapper);
-        }
-        trap.turns -= 1;
-        if (trap.turns <= 0) {
-          mon.trapped = null;
-          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
-            ? this._fighterAtSlot(trap.fromSlot) : null;
-          const tMon = trapper && activeMon(trapper);
-          if (tMon) tMon.trapping = null;
-        } else {
-          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
-            ? this._fighterAtSlot(trap.fromSlot) : null;
-          const tMon = trapper && activeMon(trapper);
-          if (tMon && tMon.trapping) tMon.trapping.turns = trap.turns;
-        }
-      }
-      if (this.result) return;
       // The Leech Seed tick, on the monster seeded when the residual began:
       // the one still standing, or the one its own poison or burn just knocked
-      // out (`poisonKo`; a trap's tick between is the trapper's hit on the
-      // cart, not part of this pass, so a monster it fells feeds nobody).
+      // out (`poisonKo`). A trap's later hits are not part of this pass: they
+      // are the trapper's own slot on the cart (`_trapTurn`).
       // HandlePoisonBurnLeechSeed_DecreaseOwnHP takes 1/16 of the max HP (at
       // least 1) and multiplies it by the toxic counter -- incremented again,
       // so a badly poisoned, seeded monster's counter climbs twice a turn (the
@@ -4444,8 +4827,17 @@ class Battle {
   // player in the three fights against the computer; a link fight pays
   // nothing. The wallet (and Gold's Amulet Coin) is the client's (K11), on a
   // `ko` or a `run` outcome alike.
+  //
+  // An escape pays only while wBattleResult is still 0 (`battleResult`): any
+  // of the player's monsters fainting wrote 1 (RemoveFaintedPlayerMon), and
+  // nothing but an enemy's faint writes 0 back (FaintEnemyPokemon) -- so a
+  // TELEPORT, a ROAR or a POKé DOLL after an earlier faint of the player's
+  // picks up nothing, though the fight went on. A won fight always pays: the
+  // enemy faint that won it wrote the 0, after any faint of the player's the
+  // same action caused (FaintEnemyPokemon calls RemoveFaintedPlayerMon first).
   _payDayOn(result) {
     if (!result) return;
+    if (result.reason === 'run' && this.battleResult !== 0) return;
     const coins = Math.min(PAY_DAY_MAX, this.payDay.a + this.payDay.b);
     if (EXP_MODES[this.mode] && coins > 0) result.payDay = coins;
   }

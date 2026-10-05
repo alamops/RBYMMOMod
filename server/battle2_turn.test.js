@@ -110,6 +110,8 @@ function mn(o) {
     // What the R2b scenarios add: the K7 blocks a level-up reads.
     base: o.base,
     dvs: o.dvs,
+    // What the R2c scenarios add: the K14 happiness byte.
+    happiness: o.happiness,
     ...(o.item ? {
       heldItem: o.item[0],
       holdEffect: o.item[1],
@@ -676,7 +678,7 @@ scenario('self_hit', (events) => {
   const wall = () => fx('wall_up', 0, 1, 65, 20);
   const boom = () => fx('big_boom', 250, 0, 7, 5);
   const battle = build({
-    id: 'sh', mode: 'coop_pvp', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'sh', mode: 'coop_pvp', seed: 9, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [
         { playerId: 'a1', name: 'Ann', mons: [
@@ -891,7 +893,7 @@ scenario('focus_band', (events) => {
     b.submitChoice('p2', { action: 'fight', move: 0 });
   };
   return play(events, {
-    id: 'fb', mode: '1v1', seed: 11, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'fb', mode: '1v1', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, atk: 60, spe: 90,
         types: [2], moves: [hm('thump', 40)] })] }],
@@ -981,7 +983,7 @@ scenario('berserk_gene', (events) => {
     },
   ];
   return play(events, {
-    id: 'bg2', mode: 'wild', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'bg2', mode: 'wild', seed: 14, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [
         mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2], moves: [hm('tap', 1)] }),
@@ -1079,7 +1081,7 @@ scenario('bright_powder', (events) => {
     b.submitChoice('p2', { action: 'fight', move: 0 });
   });
   return play(events, {
-    id: 'bp', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'bp', mode: '1v1', seed: 4, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 900, spe: 90, types: [2],
         moves: [hm('thump', 10), hm('star_dart', 10, 0, 17)] })] }],
@@ -1095,7 +1097,7 @@ scenario('obey_traded', (events) => {
     b.submitChoice('wild', { action: 'fight', move: 0 });
   };
   return play(events, {
-    id: 'ob', mode: 'wild', seed: 660, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'ob', mode: 'wild', seed: 511, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', level: 80, maxHp: 900, atk: 60,
         def: 200, spe: 90, types: [2], traded: true,
@@ -1138,7 +1140,7 @@ scenario('obey_badges', (events) => {
       moves: [hm('thump', 10), hm('pound_two', 10)] })],
   });
   return play(events, {
-    id: 'obb', mode: 'coop_wild', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'obb', mode: 'coop_wild', seed: 16, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [seat('a1', 'Ann', 'Alpha', 100, 88, { RISING: true }),
         seat('a2', 'Abe', 'Gamma', 70, 90, { STORM: true, FOG: true, HIVE: true }),
@@ -1214,7 +1216,7 @@ scenario('thief_substitute', (events) => play(events, {
 }, repeat(duelRound('wild'), 4)));
 
 scenario('thief_chance_miss', (events) => play(events, {
-  id: 'tcm', mode: '1v1', seed: 153, choiceTimeout: 60, reconnectGrace: 60,
+  id: 'tcm', mode: '1v1', seed: 218, choiceTimeout: 60, reconnectGrace: 60,
   sides: {
     a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
       moves: [thief(10)] })] }],
@@ -1224,7 +1226,6 @@ scenario('thief_chance_miss', (events) => play(events, {
 }, [duelRound('p2')]));
 
 scenario('obey_bide', (events) => {
-  const release = (b) => { b.submitChoice('wild', { action: 'fight', move: 0 }); };
   return play(events, {
     id: 'obb', mode: 'wild', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
@@ -1234,11 +1235,12 @@ scenario('obey_bide', (events) => {
       b: [{ playerId: 'wild', name: 'Wild', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2],
         moves: [hm('tap', 1)] })] }],
     },
-  }, [release, duelRound('wild'), duelRound('wild')]);
+  }, [duelRound('wild'), duelRound('wild'), duelRound('wild')]);
 });
 
 scenario('bide_slot0', (events) => {
   const round = (b) => {
+    b.submitChoice('b1', { action: 'fight', move: 0, target: 1 });
     b.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
     b.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
     b.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
@@ -1260,7 +1262,7 @@ scenario('bide_slot0', (events) => {
 });
 
 scenario('gate_para_confused', (events) => play(events, {
-  id: 'gpc', mode: '1v1', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
+  id: 'gpc', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
   sides: {
     a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
       status: 'PAR', confusion: 4, moves: [hm('thump', 10)] })] }],
@@ -1332,7 +1334,7 @@ scenario('rage_cap', (events) => play(events, {
 }, repeat(duelRound('p2'), 2)));
 
 scenario('rage_sources', (events) => play(events, {
-  id: 'rgs', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+  id: 'rgs', mode: '1v1', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
   sides: {
     a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 500, spe: 90, types: [2],
       status: 'PSN', confusion: 3, moves: [hm('RAGE', 20, 0, 81), hm('tap', 1)] })] }],
@@ -1536,7 +1538,7 @@ scenario('snore_sky_attack', (events) => seq(events, duo('ssa', '1v1', 505,
 
 scenario('tri_attack', (events) => {
   const quiet = hm('wait', 0, 0, 85);
-  return seq(events, duo('tri', '1v1', 506,
+  return seq(events, duo('tri', '1v1', 12,
     [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [0],
       moves: [hm('TRI_ATTACK', 10, 0, 98, 60, 100)] })],
     [mn({ species: 'Beta', maxHp: 999, spe: 10, status: 'FRZ', types: [2], moves: [quiet] })],
@@ -1589,7 +1591,7 @@ scenario('recoil_substitute', (events) => seq(events, duo('rcs', '1v1', 512,
   [mn({ species: 'Beta', maxHp: 400, spe: 10, substitute: 200, moves: [hm('wait', 0, 0, 85)] })]),
 [both(F(0), F(0)), both(F(0), F(0))]));
 
-scenario('rampage_zero_pp', (events) => seq(events, duo('rzp', '1v1', 513,
+scenario('rampage_zero_pp', (events) => seq(events, duo('rzp', '1v1', 8,
   [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('THRASH', 20, 0, 27, 1)] }),
     mn({ species: 'Gamma', maxHp: 900, spe: 90, status: 'PAR', moves: [hm('THRASH', 20, 0, 27, 5)] })],
   [mn({ species: 'Beta', maxHp: 999, spe: 10, moves: [hm('tap', 1)] })]),
@@ -1613,7 +1615,7 @@ scenario('metronome_bide', (events) => seq(events, duo('mtb', '1v1', 518,
   [mn({ species: 'Alpha', maxHp: 600, spe: 90, moves: [hm('METRONOME', 0, 0, 83)] })],
   [mn({ species: 'Beta', maxHp: 600, atk: 90, spe: 10, moves: [hm('thump', 40)] })],
   { metronomePool: [hm('BIDE', 0, 0, 26)] }),
-[both(F(0), F(0)), [['p2', F(0)]], [['p2', F(0)]], [['p2', F(0)]], both(F(0), F(0))]));
+[both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0))]));
 
 const payDayFight = (id, mode) => (events) => seq(events, duo(id, mode, 516,
   [mn({ species: 'Alpha', level: 30, maxHp: 400, atk: 90, spe: 90, moves: [hm('PAY_DAY', 40, 0, 16)] })],
@@ -1674,7 +1676,7 @@ scenario('r2b_haze_2v2', (events) => {
   }, [round(0), round(1)]);
 });
 
-scenario('r2b_switch_in_stats', (events) => seq(events, duo2('r2s', 'wild', 603,
+scenario('r2b_switch_in_stats', (events) => seq(events, duo2('r2s', 'wild', 21,
   [mn({ species: 'Alpha', maxHp: 400, spe: 10, moves: [hm('tap', 1)] }),
     mn({ species: 'Gamma', maxHp: 400, spe: 15, status: 'PAR',
       moves: [hm('tap', 1), hm('GROWTH', 0, 0, 10)] })],
@@ -1682,7 +1684,7 @@ scenario('r2b_switch_in_stats', (events) => seq(events, duo2('r2s', 'wild', 603,
   { badges: { PLAIN: true } }),
 [both(S(1), F(0)), both(F(0), F(0)), both(F(1), F(0)), both(F(0), F(0)), both(F(0), F(0))]));
 
-scenario('r2b_switch_in_computer', (events) => seq(events, duo2('r2c', 'coop_npc', 604,
+scenario('r2b_switch_in_computer', (events) => seq(events, duo2('r2c', 'coop_npc', 2,
   [mn({ species: 'Alpha', maxHp: 400, atk: 120, spe: 30, moves: [hm('slam', 40)] })],
   [mn({ species: 'Beta', maxHp: 400, hp: 1, spe: 10, moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 400, spe: 80, status: 'PAR', moves: [hm('tap', 1)] })]),
@@ -1726,15 +1728,15 @@ scenario('r2b_quick_claw_forced', (events) => seq(events, duo2('r2q', '1v1', 609
     item: ['QUICK_CLAW', 'HELD_QUICK_CLAW', 200, 'QUICK CLAW'],
     moves: [hm('HYPER_BEAM', 150, 0, 80), hm('BIDE', 0, 0, 26)] })],
   [mn({ species: 'Beta', maxHp: 900, spe: 50, moves: [hm('tap', 1)] })]),
-[both(F(0), F(0)), [['p2', F(0)]], both(F(1), F(0)), [['p2', F(0)]], [['p2', F(0)]],
-  [['p2', F(0)]]]));
+[both(F(0), F(0)), [['p2', F(0)]], both(F(1), F(0)), both(F(1), F(0)), both(F(1), F(0)),
+  both(F(1), F(0))]));
 
-scenario('r2b_bright_powder', (events) => seq(events, duo2('r2p', '1v1', 610,
+scenario('r2b_bright_powder', (events) => seq(events, duo2('r2p', '1v1', 2,
   [mn({ species: 'Alpha', level: 50, maxHp: 400, spe: 90,
-    moves: [am('tap', 10, 0, 0, 100), am('GUILLOTINE', 0, 0, 38, 30)] })],
+    moves: [am('tap', 10, 0, 0, 255), am('GUILLOTINE', 0, 0, 38, 76)] })],
   [mn({ species: 'Beta', level: 40, maxHp: 900, spe: 10,
     item: ['BRIGHTPOWDER', 'HELD_BRIGHTPOWDER', 20, 'BRIGHTPOWDER'],
-    moves: [am('tap', 1, 0, 0, 100), am('GUILLOTINE', 0, 0, 38, 30)] })]),
+    moves: [am('tap', 1, 0, 0, 255), am('GUILLOTINE', 0, 0, 38, 76)] })]),
 [both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(1), F(1)), both(F(1), F(1)),
   both(F(1), F(1)), both(F(1), F(1))]));
 
@@ -1752,8 +1754,8 @@ scenario('r2b_held_prevent', (events) => seq(events, duo2('r2v', '1v1', 611,
 
 scenario('r2b_lock_on', (events) => seq(events, duo2('r2o', '1v1', 612,
   [mn({ species: 'Alpha', maxHp: 600, spe: 10,
-    moves: [am('LOCK_ON', 0, 0, 103, 100), am('wild_hit', 20, 0, 0, 1),
-      am('EARTHQUAKE', 30, 0, 100, 100), am('tap', 1, 0, 0, 100)] })],
+    moves: [am('LOCK_ON', 0, 0, 103, 255), am('wild_hit', 20, 0, 0, 1),
+      am('EARTHQUAKE', 30, 0, 100, 255), am('tap', 1, 0, 0, 255)] })],
   [mn({ species: 'Beta', maxHp: 900, spe: 90,
     moves: [hm('tap', 1), hm('FLY', 30, 0, 43), hm('SUBSTITUTE', 0, 0, 79)] })]),
 [both(F(0), F(0)), both(F(1), F(0)), both(F(1), F(0)), both(F(0), F(0)), both(F(2), F(1)),
@@ -1770,25 +1772,25 @@ scenario('r2b_safeguard', (events) => seq(events, duo2('r2g', '1v1', 613,
 
 scenario('r2b_stat_down_lines', (events) => seq(events, duo2('r2d', '1v1', 614,
   [mn({ species: 'Alpha', maxHp: 400, spe: 90,
-    moves: [am('GROWL', 0, 0, 18, 100), am('faint_growl', 0, 0, 18, 1)] })],
+    moves: [am('GROWL', 0, 0, 18, 255), am('faint_growl', 0, 0, 18, 1)] })],
   [mn({ species: 'Beta', maxHp: 400, spe: 10, mist: true, moves: [hm('tap', 1)] }),
     mn({ species: 'Zeta', maxHp: 400, atk: 1, spe: 10, moves: [hm('tap', 1)] })]),
 [both(F(0), F(0)), both(F(1), F(0)), both(F(0), S(1)), both(F(1), F(0))]));
 
 scenario('r2b_stat_down_sub', (events) => seq(events, duo2('r2d2', '1v1', 624,
-  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('GROWL', 0, 0, 18, 100)] })],
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('GROWL', 0, 0, 18, 255)] })],
   [mn({ species: 'Delta', maxHp: 400, spe: 10, substitute: 50, moves: [hm('tap', 1)] })]),
 [both(F(0), F(0))]));
 
 scenario('r2b_stat_down_floor', (events) => seq(events, duo2('r2d3', '1v1', 625,
-  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('GROWL', 0, 0, 18, 100)] })],
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('GROWL', 0, 0, 18, 255)] })],
   [mn({ species: 'Eps', maxHp: 400, spe: 10, substitute: 50, stages: { atk: -6 },
     moves: [hm('tap', 1)] })]),
 [both(F(0), F(0))]));
 
 scenario('r2b_priority_sheet', (events) => seq(events, duo2('r2y', '1v1', 615,
   [mn({ species: 'Alpha', maxHp: 400, spe: 10,
-    moves: [am('jab', 10, 0, 0, 100, 0, 2), am('QUICK_ATTACK', 10, 0, 0, 100, 0, 1)] })],
+    moves: [am('jab', 10, 0, 0, 255, 0, 2), am('QUICK_ATTACK', 10, 0, 0, 255, 0, 1)] })],
   [mn({ species: 'Beta', maxHp: 400, spe: 90, moves: [hm('tap', 1)] })]),
 [both(F(0), F(0)), both(F(1), F(0))]));
 
@@ -1822,7 +1824,7 @@ scenario('r2b_drain', (events) => seq(events, duo2('r2e', '1v1', 618,
 [both(F(0), F(0)), both(F(1), F(0)), both(F(0), S(1))]));
 
 scenario('r2b_toxic', (events) => seq(events, duo2('r2x', '1v1', 619,
-  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('TOXIC', 0, 4, 105, 100)] })],
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('TOXIC', 0, 4, 105, 255)] })],
   [mn({ species: 'Beta', maxHp: 160, spe: 10, types: [0], moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 400, spe: 10, types: [4], moves: [hm('tap', 1)] }),
     mn({ species: 'Eps', maxHp: 400, spe: 10, types: [6], moves: [hm('tap', 1)] })],
@@ -1846,8 +1848,8 @@ scenario('r2b_bide_gates', (events) => seq(events, duo2('r2b', '1v1', 622,
   [mn({ species: 'Alpha', maxHp: 600, spe: 90, moves: [hm('BIDE', 0, 0, 26)] })],
   [mn({ species: 'Beta', maxHp: 600, atk: 90, spe: 10,
     moves: [hm('thump', 40), hm('CONFUSE_RAY', 0, 0, 49)] })]),
-[both(F(0), F(1)), [['p2', F(0)]], [['p2', F(0)]], both(F(0), F(0)), [['p2', F(0)]],
-  [['p2', F(0)]]]));
+[both(F(0), F(1)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)),
+  both(F(0), F(0))]));
 
 scenario('r2b_hit_ko', (events) => seq(events, duo2('r2k', '1v1', 623,
   [mn({ species: 'Alpha', maxHp: 400, atk: 90, spe: 90, moves: [hm('DOUBLE_KICK', 30, 0, 44)] })],
@@ -1862,6 +1864,245 @@ scenario('r2b_metronome_known', (events) => seq(events, duo2('r2w', '1v1', 626,
   [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })],
   { metronomePool: [hm('tap', 1), hm('kick', 20)] }),
 [both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(S(1), F(0)), both(F(0), F(0))]));
+
+// ------------------------------------------------------------------
+// the referee-gaps run's wave 3 (R2c): mirrored line for line from the Lua
+// driver, which carries the notes.
+// ------------------------------------------------------------------
+
+const R2C_TYPES = ['NORMAL', 'FIGHTING', 'GHOST', 'WATER', 'FIRE', 'ROCK', 'STEEL',
+  'DARK', 'PSYCHIC_TYPE', 'GRASS', 'ELECTRIC', 'GROUND'];
+const R2C_CHART = [];
+for (let i = 0; i < 12; i += 1) R2C_CHART.push(new Array(12).fill(100));
+R2C_CHART[0][2] = 0;
+R2C_CHART[1][2] = 0;
+R2C_CHART[2][0] = 0;
+R2C_CHART[8][7] = 0;
+R2C_CHART[10][11] = 0;
+R2C_CHART[3][4] = 200;
+R2C_CHART[4][9] = 200;
+const R2C_SPECIAL = [3, 4, 7, 8, 9, 10];
+const duo3 = (id, mode, seed, aMons, bMons, extra = {}) => {
+  const o = duo2(id, mode, seed, aMons, bMons, {
+    typeIds: R2C_TYPES, chart: R2C_CHART, metronomePool: extra.metronomePool,
+  });
+  o.specialTypes = R2C_SPECIAL;
+  o.timeOfDay = extra.timeOfDay;
+  if (extra.family) {
+    o.sides.a[0].family = extra.family;
+    o.sides.b[0].family = extra.family;
+  }
+  if (extra.foe) o.sides.b[0].playerId = extra.foe;
+  return o;
+};
+const both3 = (a, b, foe) => [['p1', a], [foe || 'p2', b]];
+const ITEM = (id) => ({ action: 'item', item: id });
+
+scenario('r2c_happiness', (events) => seq(events, duo3('r3h', '1v1', 701,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, happiness: 255,
+    moves: [hm('RETURN', 1, 0, 106), hm('FRUSTRATION', 1, 0, 107)] }),
+  mn({ species: 'Gamma', maxHp: 400, spe: 90, moves: [hm('RETURN', 1, 0, 106)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(S(1), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_hidden_power', (events) => seq(events, duo3('r3p', '1v1', 702,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [1],
+    dvs: { atk: 8, def: 12, spe: 0, spc: 0 }, moves: [hm('HIDDEN_POWER', 1, 0, 108)] }),
+  mn({ species: 'Gamma', maxHp: 400, spe: 90, dvs: { atk: 10, def: 5, spe: 1, spc: 2 },
+    moves: [hm('HIDDEN_POWER', 1, 0, 108)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2], moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, types: [4], moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), S(1)), both3(S(1), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_reversal_false_swipe', (events) => seq(events, duo3('r3r', '1v1', 703,
+  [mn({ species: 'Alpha', maxHp: 300, hp: 12, spe: 90, moves: [hm('FLAIL', 1, 0, 109)] })],
+  [mn({ species: 'Beta', maxHp: 900, atk: 200, spe: 10, moves: [hm('FALSE_SWIPE', 40, 0, 118)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_magnitude', (events) => seq(events, duo3('r3m', '1v1', 704,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 10, moves: [hm('MAGNITUDE', 1, 11, 110)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 90, moves: [hm('DIG', 30, 11, 43), hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(1))]));
+
+scenario('r2c_present_gold', (events) => seq(events, duo3('r3g', '1v1', 705,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [0],
+    moves: [am('PRESENT', 1, 0, 111, 229)] })],
+  [mn({ species: 'Beta', maxHp: 900, hp: 700, spe: 10, types: [5, 7], moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+  both3(F(0), F(0))]));
+
+scenario('r2c_present_crystal', (events) => seq(events, duo3('r3c', 'wild', 706,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [0],
+    moves: [am('PRESENT', 1, 0, 111, 229)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [5, 7], moves: [hm('tap', 1)] })],
+  { family: 'crystal', foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'),
+  both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild')]));
+
+scenario('r2c_triple_kick', (events) => seq(events, duo3('r3k', '1v1', 707,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [am('TRIPLE_KICK', 10, 1, 112, 229)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_fury_cutter', (events) => seq(events, duo3('r3f', '1v1', 708,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90,
+    moves: [am('FURY_CUTTER', 10, 0, 113, 242), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+  both3(F(0), F(0)), both3(F(1), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_rollout', (events) => seq(events, duo3('r3o', '1v1', 709,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90,
+    moves: [hm('DEFENSE_CURL', 0, 0, 115), am('ROLLOUT', 30, 5, 114, 229), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 999, def: 200, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), [['p2', F(0)]], [['p2', F(0)]], [['p2', F(0)]],
+  [['p2', F(0)]], both3(F(1), F(0)), [['p2', F(0)]]]));
+
+scenario('r2c_beat_up', (events) => seq(events, duo3('r3b', '1v1', 710,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [0], base: { atk: 100 },
+    item: ['KINGS_ROCK', 'HELD_FLINCH', 30, "KING'S ROCK"],
+    moves: [hm('BEAT_UP', 10, 7, 116)] }),
+  mn({ species: 'Gamma', level: 30, maxHp: 100, base: { atk: 60 }, moves: [hm('tap', 1)] }),
+  mn({ species: 'Eta', maxHp: 100, hp: 0, base: { atk: 120 }, moves: [hm('tap', 1)] }),
+  mn({ species: 'Theta', maxHp: 100, status: 'PSN', base: { atk: 120 }, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2], base: { def: 50 },
+    moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_beat_up_wild', (events) => seq(events, duo3('r3w', 'wild', 711,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, base: { atk: 100 },
+    moves: [hm('BEAT_UP', 10, 7, 116)] })],
+  [mn({ species: 'Wild', maxHp: 900, spe: 10, base: { def: 50 }, moves: [hm('BEAT_UP', 10, 7, 116)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild')]));
+
+scenario('r2c_pursuit_link', (events) => seq(events, duo3('r3u', '1v1', 712,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [hm('PURSUIT', 40, 7, 117)] }),
+    mn({ species: 'Gamma', maxHp: 400, spe: 90, moves: [hm('PURSUIT', 40, 7, 117)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 10, moves: [hm('PURSUIT', 40, 7, 117)] }),
+    mn({ species: 'Delta', maxHp: 400, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(S(1), F(0)), both3(F(0), S(1)), both3(F(0), F(0))]));
+
+scenario('r2c_pursuit_computer', (events) => seq(events, duo3('r3v', 'coop_npc', 713,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 10, moves: [hm('PURSUIT', 40, 7, 117)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 400, spe: 90, moves: [hm('tap', 1)] })]),
+[both3(F(0), S(1)), both3(F(0), F(0))]));
+
+scenario('r2c_future_sight', (events) => seq(events, duo3('r3s', '1v1', 714,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90,
+    moves: [am('FUTURE_SIGHT', 80, 8, 119, 229), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [7], moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), S(1)), both3(F(1), F(0)), both3(F(0), F(0)),
+  both3(F(1), F(0)), both3(F(1), F(0))]));
+
+scenario('r2c_protect', (events) => seq(events, duo3('r3t', '1v1', 715,
+  [mn({ species: 'Alpha', maxHp: 400, hp: 150, spe: 90,
+    item: ['FOCUS_BAND', 'HELD_FOCUS_BAND', 30, 'FOCUS BAND'],
+    moves: [hm('PROTECT', 0, 0, 120), hm('DETECT', 0, 1, 120), hm('ENDURE', 0, 0, 121),
+      hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, atk: 250, spe: 10,
+    moves: [hm('slam', 120), hm('HYPNOSIS', 0, 8, 32), hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(1)), both3(F(3), F(2)), both3(F(2), F(0)), both3(F(2), F(0)),
+  both3(F(2), F(0))]));
+
+scenario('r2c_protect_slow', (events) => seq(events, duo3('r3l', '1v1', 716,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 10, moves: [hm('PROTECT', 0, 0, 120)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 90, moves: [hm('tap', 1)] })]),
+[both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_counter', (events) => seq(events, duo3('r3n', '1v1', 717,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 10,
+    moves: [hm('COUNTER', 1, 1, 122), hm('MIRROR_COAT', 1, 8, 123)] }),
+  mn({ species: 'Gamma', maxHp: 600, spe: 200, moves: [hm('COUNTER', 1, 1, 122)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 90, moves: [hm('slam', 40), hm('SURF', 40, 3)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 90, types: [2], moves: [hm('slam', 40)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(0)),
+  both3(S(1), F(0)), both3(F(0), F(0)), both3(F(0), S(1)), both3(F(0), F(0))]));
+
+scenario('r2c_rain', (events) => seq(events, duo3('r3a', '1v1', 718,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [am('RAIN_DANCE', 0, 3, 124, 229), am('THUNDER', 60, 10, 97, 1, 30)] }),
+  mn({ species: 'Gamma', maxHp: 900, spe: 90,
+    moves: [hm('SOLARBEAM', 60, 9, 127), hm('SURF', 40, 3), hm('EMBER', 40, 4),
+      am('RAIN_DANCE', 0, 3, 124, 229)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(S(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+  both3(F(3), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(1), F(0))]));
+
+scenario('r2c_sun', (events) => seq(events, duo3('r3y', 'wild', 719,
+  [mn({ species: 'Alpha', maxHp: 900, hp: 300, spe: 90,
+    moves: [hm('SUNNY_DAY', 0, 4, 125), hm('SOLARBEAM', 60, 9, 127),
+      am('THUNDER', 60, 10, 97, 178, 0), hm('ICE_BEAM', 40, 3, 5, 60, 100)] }),
+  mn({ species: 'Gamma', maxHp: 900, hp: 300, spe: 90,
+    moves: [hm('SUNNY_DAY', 0, 4, 125), hm('MORNING_SUN', 0, 0, 128), hm('EMBER', 40, 4),
+      hm('SURF', 40, 3)] })],
+  [mn({ species: 'Wild', maxHp: 999, spe: 10, types: [9], moves: [hm('tap', 1)] })],
+  { foe: 'wild', timeOfDay: 'nite' }),
+[both3(F(0), F(0), 'wild'), both3(F(1), F(0), 'wild'), both3(F(2), F(0), 'wild'),
+  both3(F(3), F(0), 'wild'), both3(S(1), F(0), 'wild'), both3(F(0), F(0), 'wild'),
+  both3(F(1), F(0), 'wild'), both3(F(2), F(0), 'wild'), both3(F(3), F(0), 'wild')]));
+
+scenario('r2c_sandstorm', (events) => seq(events, duo3('r3d', '1v1', 720,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [0],
+    moves: [hm('SANDSTORM', 0, 5, 126), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 10, types: [6, 0],
+    moves: [hm('tap', 1), hm('DIG', 30, 11, 43)] }),
+  mn({ species: 'Delta', maxHp: 400, spe: 10, types: [0], moves: [hm('DIG', 30, 11, 43)] })]),
+[both3(F(0), F(0)), both3(F(0), S(1)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)),
+  both3(F(1), F(0))]));
+
+scenario('r2c_time_heal', (events) => seq(events, duo3('r3e', 'wild', 721,
+  [mn({ species: 'Alpha', maxHp: 400, hp: 50, spe: 90,
+    moves: [hm('MORNING_SUN', 0, 0, 128), hm('MOONLIGHT', 0, 0, 130),
+      hm('SYNTHESIS', 0, 9, 129), hm('RAIN_DANCE', 0, 3, 124)] })],
+  [mn({ species: 'Wild', maxHp: 400, spe: 10, moves: [hm('splash', 0, 0, 85)] })],
+  { foe: 'wild', timeOfDay: 'nite' }),
+[both3(F(0), F(0), 'wild'), both3(F(1), F(0), 'wild'), both3(F(3), F(0), 'wild'),
+  both3(F(2), F(0), 'wild'), both3(F(1), F(0), 'wild'), both3(F(1), F(0), 'wild'),
+  both3(F(1), F(0), 'wild')]));
+
+scenario('r2c_fixed_damage', (events) => seq(events, duo3('r3x', '1v1', 722,
+  [mn({ species: 'Alpha', level: 37, maxHp: 400, spe: 90,
+    moves: [hm('SEISMIC_TOSS', 1, 1, 131), am('PSYWAVE', 1, 8, 132, 204),
+      am('SONICBOOM', 20, 0, 41, 229), hm('NIGHT_SHADE', 1, 2, 131)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, types: [0], moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0))]));
+
+scenario('r2c_checkhit', (events) => seq(events, duo3('r3i', '1v1', 723,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, stages: { acc: 1 },
+    moves: [am('wide_hit', 40, 0, 0, 178), am('JUMP_KICK', 70, 1, 45, 76),
+      hm('tap', 1), am('HI_JUMP_KICK', 85, 1, 45, 229)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, stages: { eva: 2 }, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, types: [2], moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), S(1)),
+  both3(F(3), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_checkturn', (events) => seq(events, duo3('r3j', '1v1', 724,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 90,
+    moves: [hm('tap', 1), hm('DISABLE', 0, 0, 86), am('HYPNOSIS', 0, 8, 32, 255)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'PAR',
+    moves: [hm('thump', 10), hm('tap', 1)] }),
+  mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('thump', 10), hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(1)), both3(F(0), F(1)), both3(F(0), F(1)), both3(F(0), F(1)),
+  both3(F(0), F(1)), both3(F(0), F(1)), both3(F(0), F(0)), both3(F(0), S(1)), both3(F(2), F(0)),
+  both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2c_bide', (events) => seq(events, duo3('r3q', '1v1', 725,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 90, moves: [hm('BIDE', 0, 0, 26), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('slam', 40)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, types: [2], moves: [hm('slam', 40)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(0), S(1)),
+  both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0)),
+  both3(ITEM('POTION'), F(0)), both3(F(1), F(0))]));
+
+scenario('r2c_flinch', (events) => seq(events, duo3('r3z', '1v1', 726,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 10, moves: [hm('BITE', 20, 7, 31, 60, 100)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 200, moves: [hm('BITE', 20, 7, 31, 60, 100)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 90, moves: [hm('tap', 1), hm('HYPER_BEAM', 50, 0, 80)] })]),
+[both3(F(0), F(0)), both3(S(1), F(1)), both3(F(0), F(0)), both3(F(0), F(0))]));
 
 // ------------------------------------------------------------------
 // running both halves
@@ -1928,7 +2169,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 103, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 129, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -2214,7 +2455,8 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
   assert.ok(said.includes('THUMP HIT was disabled'), 'Disable landing names the move');
   assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
-  assert.ok(said.includes('THUMP HIT is no longer disabled'), 'and so does it wearing off');
+  // R2c: the count ticks in CheckTurn and wears off with DisabledNoMoreText.
+  assert.ok(said.includes("Beta's disabled no more!"), 'and so does it wearing off');
   assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
   assert.ok(said.includes('Alpha used THUMP HIT'), 'and the copy keeps the name');
   assert.ok(said.includes('Beta used nudge'),
@@ -2563,10 +2805,12 @@ for (const mode of ['coop_npc', 'wild']) {
       'unbadged, the foe (42) still goes first');
     assert.strictEqual(firstHit(exchange(mode, { spe: 40, badges: { PLAIN: true } }, { spe: 42 })), 3,
       'PLAIN (40 -> 45) puts side a in front');
-    assert.strictEqual(hitOn(exchange(mode, {}, { power: 30 }), 0), 11,
-      "Bob's 30-power hit on an unbadged Ann is 11");
-    assert.strictEqual(hitOn(exchange(mode, { badges: { MINERAL: true } }, { power: 30 }), 0), 9,
-      'MINERAL (Defense 40 -> 45) cuts it to 9');
+    // R2c moved Bob's roll (crit and roll before the accuracy check, no byte
+    // at 255): 10 and 8 on this seed, the same eighth apart.
+    assert.strictEqual(hitOn(exchange(mode, {}, { power: 30 }), 0), 10,
+      "Bob's 30-power hit on an unbadged Ann is 10");
+    assert.strictEqual(hitOn(exchange(mode, { badges: { MINERAL: true } }, { power: 30 }), 0), 8,
+      'MINERAL (Defense 40 -> 45) cuts it to 8');
     assert.strictEqual(hitOn(exchange(mode, { type: 2, spa: 88 }, {}, RULES), 3), 23,
       "Ann's Special hit, unbadged, is 23");
     assert.strictEqual(
@@ -2577,14 +2821,14 @@ for (const mode of ['coop_npc', 'wild']) {
     // boosts to 255, which the tail reads as odd (Sp. Def boosted); 200 boosts
     // to 225, even, and Sp. Def stays as it was.
     const special = { power: 30, type: 2, spa: 60 };
-    assert.strictEqual(hitOn(exchange(mode, { spa: 227 }, special, RULES), 0), 10,
-      "Bob's Special hit on an unbadged Ann is 10");
+    assert.strictEqual(hitOn(exchange(mode, { spa: 227 }, special, RULES), 0), 9,
+      "Bob's Special hit on an unbadged Ann is 9");
     assert.strictEqual(
-      hitOn(exchange(mode, { spa: 227, badges: { GLACIER: true } }, special, RULES), 0), 9,
-      'GLACIER with Sp. Atk 227 (-> 255) boosts Sp. Def too: 9');
+      hitOn(exchange(mode, { spa: 227, badges: { GLACIER: true } }, special, RULES), 0), 8,
+      'GLACIER with Sp. Atk 227 (-> 255) boosts Sp. Def too: 8');
     assert.strictEqual(
-      hitOn(exchange(mode, { spa: 200, badges: { GLACIER: true } }, special, RULES), 0), 10,
-      'GLACIER with Sp. Atk 200 (-> 225) leaves Sp. Def alone: 10');
+      hitOn(exchange(mode, { spa: 200, badges: { GLACIER: true } }, special, RULES), 0), 9,
+      'GLACIER with Sp. Atk 200 (-> 225) leaves Sp. Def alone: 9');
 
     // The 999 cap: 950 + floor(950 / 8) = 1068 is held at 999, so a badged 950
     // hits exactly as an unbadged 999 does, and harder than a bare 950.
@@ -2870,7 +3114,9 @@ test('fidelity: the confusion self-hit is DamageCalc alone, past the user\'s sub
 
 test('fidelity: Struggle is typeless with a quarter recoil, and a last-PP Metronome call is not Struggle', () => {
   const GHOST_CHART = [[100, 0], [100, 100]];
+  // Seed 1: no crit on Struggle's swing (R2c moved the stream off 4242's).
   const vsGhost = (pp) => duel({
+    seed: 1,
     chart: GHOST_CHART,
     a: [sheet({ species: 'Alpha', spe: 90, types: [0], moves: [hit('thump', 40, 0, 0, pp)] })],
     b: [sheet({ species: 'Beta', spe: 10, types: [1], moves: [hit('tap', 0, 0, 85)] })],
@@ -3261,7 +3507,8 @@ test('held items: Thief both ways, never Mail, never into a full hand, never pas
   assert.ok(!sawHeld(sub.events), 'a substitute at effectchance keeps the item');
   assert.strictEqual(monOf(sub.battle, sub.foe).heldItem, 'CHARCOAL');
   assert.ok(said(sub.events, 'Alpha used THIEF'));
-  const miss = run(charcoal, undefined, 153);
+  // Seed 218 draws the 255 at `effectchance` (R2c moved it off 153).
+  const miss = run(charcoal, undefined, 218);
   assert.ok(!sawHeld(miss.events), 'the 1/256 byte of 255 against a 100% chance takes nothing');
   assert.strictEqual(monOf(miss.battle, miss.foe).heldItem, 'CHARCOAL');
   const zero = fight({
@@ -3472,6 +3719,9 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
     const { battle, foe } = fight({ mode: 'wild', seed: 2, a: [alpha],
       b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('tap', 1)] })] });
     battle.drainEvents();
+    // A player's Bide is asked (R2b's finding (h), R2c): its FIGHT is the
+    // release, whatever slot it names.
+    battle.submitChoice('p1', { action: 'fight', move: 1 });
     battle.submitChoice(foe, { action: 'fight', move: 0 });
     return { events: battle.drainEvents(), battle };
   };
@@ -3567,7 +3817,8 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   assert.strictEqual(Damage2.compute({
     level: 100, attack: 255, defense: 1, power: 250, roll: 100, rageCount: 255,
   }).damage, 65535, 'pinned at $ffff when the sum carries');
-  const src = rageFight({ seed: 1, status: 'PSN', confusion: 3, bMove: 'thump', bEffect: 0 });
+  // Seed 2 (R2c's draw order moved it off 1).
+  const src = rageFight({ seed: 2, status: 'PSN', confusion: 3, bMove: 'thump', bEffect: 0 });
   src.battle.drainEvents();
   roundOf(src.battle, src.foe);
   assert.ok(said(roundOf(src.battle, src.foe), 'Alpha hurt itself in confusion'));
@@ -3894,11 +4145,12 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
     assert.strictEqual(Effects.idOf(name), id, `${name} has its own id`);
     assert.strictEqual(Effects.nameOf(id), name);
   }
-  assert.strictEqual(Effects.MAX_EFFECT_ID, 105);
-  assert.strictEqual(Effects.nameOf(106), null);
+  assert.strictEqual(Effects.MAX_EFFECT_ID, 132);
+  assert.strictEqual(Effects.nameOf(133), null);
   assert.strictEqual(Effects.category(101), 'charge');
   assert.ok(Effects.isCharge(Effects.SKY_ATTACK));
-  assert.strictEqual(Effects.idOf('EFFECT_SOLARBEAM'), 39);
+  assert.strictEqual(Effects.idOf('EFFECT_RAZOR_WIND'), 39);
+  assert.strictEqual(Effects.idOf('EFFECT_SOLARBEAM'), 127);
 
   // (b) BattleCommand_EffectChance
   let r = bytes([254]);
@@ -3986,7 +4238,8 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
   assert.strictEqual(user.stages.spe, 0);
 
   // (g) CantMove
-  const thrasher = withMove(hit('THRASH', 20, 0, 27, 10), { seed: 7 });
+  // Seed 3 (R2c: the 63/256 paralysis byte and the draw order moved it off 7).
+  const thrasher = withMove(hit('THRASH', 20, 0, 27, 10), { seed: 3 });
   roundOf(thrasher, 'p2');
   const alpha = monOf(thrasher, 'p1');
   assert.ok(alpha.thrashing);
@@ -3996,7 +4249,7 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
     if (!alpha.thrashing) break;
     if (said(roundOf(thrasher, 'p2'), 'Alpha is fully paralyzed')) { stopped = true; break; }
   }
-  assert.ok(stopped, 'seed 7: a full paralysis lands while the rampage runs');
+  assert.ok(stopped, 'seed 3: a full paralysis lands while the rampage runs');
   assert.strictEqual(alpha.thrashing, null, 'CantMove ends the rampage');
   assert.strictEqual(alpha.confusion, 0);
   const flier = withMove(hit('FLY', 30, 0, 43), { seed: 3 });
@@ -4248,4 +4501,126 @@ test('R2b: Transform undone, SLEEP TALK, LOCK-ON, a recharge actor, Haze, TOXIC,
   fa.justFrozen = null;
   fz._heldDefrost();
   assert.notStrictEqual(rngOf(fz), before, "the next turn's defrost rolls");
+});
+
+// ------------------------------------------------------------------
+// the referee-gaps run's wave 3 (R2c): what each parity scenario pins, read
+// off the JS run (the Lua one is the same, event for event, above). The Lua
+// suite asserts the same rules on its own fights.
+// ------------------------------------------------------------------
+
+test('R2c: the Gold move effects, weather and R2b\'s found cart differences', () => {
+  const runs = byName(jsRuns);
+  const lines = (name) => runs.get(name).events.filter((e) => e.t === 'msg').map((e) => e.text);
+  const hits = (name, slot) => runs.get(name).events
+    .filter((e) => e.t === 'damage' && e.slot === slot).map((e) => e.amount);
+  const has = (name, text) => lines(name).includes(text);
+  const after = (name, text) => {
+    const events = runs.get(name).events;
+    const i = events.findIndex((e) => e.t === 'msg' && e.text === text);
+    return i < 0 ? [] : events.slice(i + 1);
+  };
+
+  // RETURN / FRUSTRATION (K14): 102 power at 255, 0 for FRUSTRATION (no
+  // damage event), BASE_HAPPINESS 70 without the byte.
+  const happiness = after('r2c_happiness', 'Alpha used FRUSTRATION')
+    .filter((e) => e.t === 'msg' || e.t === 'damage');
+  assert.ok(happiness[0].t === 'msg' && happiness[0].text === 'Beta used tap',
+    'FRUSTRATION at 255 takes nothing and says nothing');
+  assert.ok(hits('r2c_happiness', 3)[0] > hits('r2c_happiness', 3)[1],
+    'RETURN at 255 outhits RETURN at the base 70');
+
+  // HIDDEN POWER: the DVs' FIGHTING meets a GHOST; WATER on a FIRE type.
+  assert.ok(has('r2c_hidden_power', "It doesn't affect Beta"));
+  assert.ok(has('r2c_hidden_power', "It's super effective"));
+
+  // FLAIL / FALSE SWIPE.
+  assert.ok(hits('r2c_reversal_false_swipe', 0).includes(11), 'FALSE SWIPE cut to the HP less one');
+  assert.strictEqual(hits('r2c_reversal_false_swipe', 0).length, 1, '...and nothing more at 1 HP');
+  assert.ok(!has('r2c_reversal_false_swipe', 'A critical hit'), 'FLAIL draws no crit');
+
+  // MAGNITUDE: its line and the x2 underground.
+  assert.ok(lines('r2c_magnitude').some((t) => /^Magnitude \d+!$/.test(t)));
+  const mag = hits('r2c_magnitude', 3);
+  assert.strictEqual(mag[0], 22, 'Magnitude 6 doubled against the dug foe');
+  assert.strictEqual(mag[1], 11, '...and plain once it is up');
+
+  // PRESENT: Gold's registers (a DARK second type: the level is 27) and the
+  // heal; Crystal's own registers outside a link fight.
+  assert.ok(has('r2c_present_gold', 'Beta regained health!'));
+  assert.ok(hits('r2c_present_gold', 3).some((d) => d > 100), "Gold's Present hits far past its power");
+  assert.ok(hits('r2c_present_crystal', 3).every((d) => d < 60), "Crystal's is the ordinary formula");
+
+  // TRIPLE KICK, FURY CUTTER, ROLLOUT.
+  assert.ok(has('r2c_triple_kick', 'Hit 3 times!'));
+  const kicks = hits('r2c_triple_kick', 3).slice(0, 3);
+  assert.ok(kicks[0] < kicks[1] && kicks[1] < kicks[2], 'each kick heavier');
+  assert.deepStrictEqual(hits('r2c_fury_cutter', 3), [5, 11, 22, 40, 81, 84, 2, 5],
+    'FURY CUTTER doubles to 16x, and another move resets it');
+  assert.deepStrictEqual(hits('r2c_rollout', 3).slice(0, 5), [5, 10, 23, 45, 86],
+    'CURLED ROLLOUT rolls five times, doubling from x2');
+
+  // BEAT UP.
+  assert.ok(has('r2c_beat_up', "Alpha's attack!") && has('r2c_beat_up', "Gamma's attack!"));
+  assert.ok(!has('r2c_beat_up', "Eta's attack!") && !has('r2c_beat_up', "Theta's attack!"),
+    'the fainted and the statused member are skipped');
+  assert.ok(!lines('r2c_beat_up').some((t) => t.startsWith('Hit ')), 'no "Hit N times!"');
+  assert.ok(has('r2c_beat_up_wild', "Wild's attack!") && has('r2c_beat_up_wild', 'But it failed'));
+
+  // PURSUIT: a player's switch is chased first, doubled; the computer's is not.
+  const pl = runs.get('r2c_pursuit_link').events;
+  const firstHit = pl.findIndex((e) => e.t === 'damage');
+  const firstSwitch = pl.findIndex((e) => e.t === 'switch');
+  assert.ok(firstHit < firstSwitch, 'the PURSUIT lands before the switch');
+  assert.strictEqual(hits('r2c_pursuit_link', 0)[0], 16, 'doubled on the way out');
+  const pc = runs.get('r2c_pursuit_computer').events;
+  assert.ok(pc.findIndex((e) => e.t === 'switch') < pc.findIndex((e) => e.t === 'damage'),
+    "the computer's switch goes first");
+  assert.deepStrictEqual(hits('r2c_pursuit_computer', 3), [18, 9], '...doubled on the incoming');
+
+  // FUTURE SIGHT.
+  assert.ok(has('r2c_future_sight', 'Alpha foresaw an attack!'));
+  assert.ok(has('r2c_future_sight', 'Delta was hit by FUTURE SIGHT!'));
+  assert.ok(after('r2c_future_sight', 'Alpha foresaw an attack!')
+    .some((e) => e.t === 'msg' && e.text === 'But it failed'), 'a second use while it runs fails');
+
+  // PROTECT / DETECT / ENDURE.
+  assert.strictEqual(lines('r2c_protect').filter((t) => t === "Alpha's PROTECTING itself!").length, 2);
+  assert.ok(has('r2c_protect', 'Alpha ENDURED the hit!'));
+  assert.ok(!has('r2c_protect', 'Alpha hung on with FOCUS BAND!'), 'ENDURE draws no band');
+  assert.strictEqual(lines('r2c_protect_slow')[1], 'But it failed', 'after a foe\'s switch it fails');
+
+  // COUNTER / MIRROR COAT.
+  const counter = runs.get('r2c_counter').events.filter((e) => e.t === 'damage').map((e) => e.amount);
+  assert.strictEqual(counter[1], 2 * counter[0], 'COUNTER returns twice the slam');
+  assert.ok(has('r2c_counter', "It doesn't affect Delta"));
+
+  // The weather.
+  assert.ok(has('r2c_rain', 'A downpour started!') && has('r2c_rain', 'The rain stopped.'));
+  assert.ok(!has('r2c_rain', 'Alpha missed'), "THUNDER's 1 byte never misses in the rain");
+  assert.ok(!lines('r2c_sun').some((t) => t.includes('took in sunlight')), 'SOLARBEAM fires at once');
+  assert.ok(!lines('r2c_sun').some((t) => t.includes('frozen')), 'nothing freezes in the sun');
+  assert.ok(runs.get('r2c_sun').events.some((e) => e.t === 'drain' && e.amount === 450),
+    'MORNING SUN in the sun, off its time: half');
+  assert.ok(has('r2c_sandstorm', 'The SANDSTORM hits Alpha!'));
+  assert.ok(!has('r2c_sandstorm', 'The SANDSTORM hits Beta!'), 'STEEL is spared');
+  assert.ok(has('r2c_sandstorm', 'The SANDSTORM subsided.'));
+  assert.deepStrictEqual(
+    runs.get('r2c_time_heal').events.filter((e) => e.t === 'drain').map((e) => e.amount),
+    [100, 200, 50], 'off-time quarter, on-time half, rain off-time eighth',
+  );
+  assert.ok(has('r2c_time_heal', "Alpha's HP is full!"));
+
+  // The ConstantDamage rows.
+  assert.deepStrictEqual(hits('r2c_fixed_damage', 3).filter((d, i) => i !== 1), [37, 20]);
+  assert.ok(has('r2c_fixed_damage', "It doesn't affect Beta"));
+
+  // R2b's findings.
+  assert.strictEqual(lines('r2c_checkhit').filter((t) => t.includes('crashed')).length, 1,
+    'JUMP KICK crashes on a miss, not against a GHOST');
+  assert.ok(has('r2c_checkturn', "Beta's disabled no more!"));
+  assert.ok(has('r2c_checkturn', 'Delta fell asleep'));
+  assert.ok(after('r2c_bide', 'Alpha unleashed energy')
+    .some((e) => e.t === 'msg' && e.text === "It doesn't affect Delta"));
+  assert.ok(has('r2c_flinch', 'Beta flinched') && !has('r2c_flinch', 'Beta must recharge'));
 });

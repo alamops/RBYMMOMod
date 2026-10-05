@@ -179,11 +179,26 @@ M.THIEF = "THIEF"
 -- runs no `kingsrock` and is named by move id; every other one does (Thief,
 -- Quick Attack, Rollout, Return, Hidden Power, Counter, Triple Kick, Beat Up
 -- ...).
+--
+-- From the referee-gaps run's wave 3 (R2c) the Gold-only scripts have ids of
+-- their own (Effects.lua 106..), and these run `kingsrock`: Return (106),
+-- Frustration (107), HiddenPower (108), Reversal (109 -- FLAIL too), Magnitude
+-- (110), Present (111), TripleKick (112), FuryCutter (113), Rollout (114),
+-- BeatUp (116), Pursuit (117), FalseSwipe (118), Counter (122), MirrorCoat
+-- (123), Solarbeam (127) and StaticDamage (131 LEVEL_DAMAGE, 132 PSYWAVE).
+-- FutureSight (119), Protect / Endure (120, 121), the weather moves
+-- (124..126), the time-of-day heals (128..130) and DefenseCurl (115) run none.
+-- FUTURE SIGHT has its own id now, so it no longer needs naming by move id;
+-- the row stays for a sheet that still folds it to 0.
 M.KINGS_ROCK_EFFECTS = {
   [0] = true, [3] = true, [7] = true, [16] = true, [17] = true, [26] = true,
   [27] = true, [29] = true, [39] = true, [40] = true, [41] = true, [43] = true,
   [44] = true, [45] = true, [48] = true, [77] = true, [81] = true,
   [96] = true, [101] = true,
+  [106] = true, [107] = true, [108] = true, [109] = true, [110] = true,
+  [111] = true, [112] = true, [113] = true, [114] = true, [116] = true,
+  [117] = true, [118] = true, [122] = true, [123] = true, [127] = true,
+  [131] = true, [132] = true,
 }
 M.KINGS_ROCK_FOLDED_EXCEPTIONS = {
   FUTURE_SIGHT = true,
@@ -386,6 +401,28 @@ function M.eighth(maxHp)
   c = floor(c / 2)
   if c == 0 then c = 1 end
   return b * 256 + c
+end
+
+-- GetQuarterMaxHP (core.asm:1802-1817): the max HP shifted right twice as a
+-- 16-bit pair, its low byte bumped to 1 when it is 0 -- the high byte riding
+-- through untouched ("assumes nothing can have 1024 or more hp").  PRESENT's
+-- heal and the time-of-day heals' quarter read this.
+function M.quarter(maxHp)
+  local n = int(maxHp, 0)
+  if n < 0 then n = 0 end
+  local quarter = floor((n % 65536) / 4)
+  local b, c = floor(quarter / 256), quarter % 256
+  if c == 0 then c = 1 end
+  return b * 256 + c
+end
+
+-- GetHalfMaxHP (:1819-1832): the max HP halved, 1 when the whole pair is 0.
+function M.half(maxHp)
+  local n = int(maxHp, 0)
+  if n < 0 then n = 0 end
+  local half = floor((n % 65536) / 2)
+  if half == 0 then half = 1 end
+  return half
 end
 
 -- HandleHPHealingItem: "If, and only if, Pokemon's HP is less than half max".

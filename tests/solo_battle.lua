@@ -1969,6 +1969,216 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: wave 3 (task C2a), the solo half
+-- ------------------------------------------------------------------
+--
+-- A learn on a transformed monster lands where the hubs land it (src/Hub.lua
+-- `learnTo`): in the party list the referee put aside at Transform, and on Red
+-- in the battle list too (pokered LearnMove copies over wBattleMonMoves; Gold's
+-- skips that under SUBSTATUS_TRANSFORMED) -- so the switch-out gives back the
+-- learned list.  Driven through the real referees: their own TransformEffect_ /
+-- BattleCommand_Transform makes the monster transformed, their own untransform
+-- gives it back.  Red's paying escape (TELEPORT) through the real Gen 1
+-- referee, and the player's own RUN that pays nothing; the foe's Gold
+-- happiness is the cart's BASE_HAPPINESS.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local Wire = need("Wire")
+  local Gen = need("Gen")
+  local Effects1 = need("BattleSim/Effects")
+  local Effects2 = need("BattleSim2/Effects")
+  local goldData = setmetatable({
+    items = {},
+    moves = {
+      THUMP = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "EFFECT_NORMAL_HIT" },
+      SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30, effect = "EFFECT_NORMAL_HIT" },
+    },
+  }, { __index = data })
+  local function moveset(f, fields)
+    fields.battle = f.fight.battle
+    return f.fight.transport:send(Wire.BATTLE_MOVESET, fields)
+  end
+  local function row(id, pp)
+    return { id = id, pp = pp, maxPp = pp, power = 40, accuracy = 255, type = 0,
+             effect = 0, chance = 0 }
+  end
+  local function idsOf(list)
+    local out = {}
+    for i, m in ipairs(list or {}) do out[i] = m.id end
+    return table.concat(out, ",")
+  end
+  -- A wild BETA that knows only SWIPE, so a Transform is visible in the ids.
+  local function swiper()
+    local w = mon({ species = "BETA", spd = 10, maxHp = 40, atk = 20 })
+    w.moves = { { id = "SWIPE", pp = 30 } }
+    return w
+  end
+
+  -- ------- Red: a learn under Transform
+  data.moves.SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30 }
+  local f = fightOf("wild", { wildMon = swiper() })
+  local seat, foe = f.sim.byId[PLAYER], f.sim.byId[FOE]
+  local own = seat.mons[1]
+  own.moves[1].pp = 12
+  Effects1.applyPrimary({ effectId = 57, userMon = own, targetMon = foe.mons[1],
+                          userFighter = seat, targetFighter = foe })
+  eq(own.transformed, true, "learn under Transform (Red solo): the referee's TransformEffect_ ran")
+  eq(idsOf(own.moves), "SWIPE", "learn under Transform (Red solo): ...the copied list is fighting")
+  eq(own.preTransform and idsOf(own.preTransform.moves), "THUMP",
+     "learn under Transform (Red solo): ...and the party list is put aside")
+  local took = moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30) } })
+  eq(took, true, "learn under Transform (Red solo): the learn reaches the referee -- it used to be dropped")
+  eq(idsOf(own.preTransform.moves), "THUMP,SWIPE",
+     "learn under Transform (Red solo): the learn lands in the party list put aside (learnTo)")
+  eq(own.preTransform.moves[1].pp, 12,
+     "learn under Transform (Red solo): ...an unchanged slot keeps the party's PP")
+  eq(idsOf(own.moves), "THUMP,SWIPE",
+     "learn under Transform (Red solo): ...and in the battle list (pokered LearnMove's wBattleMonMoves copy)")
+  ok(own.moves ~= own.preTransform.moves,
+     "learn under Transform (Red solo): ...as its own copy (DecrementPP never reaches the party while transformed)")
+  Effects1.untransform(own)
+  eq(own.transformed, false, "learn under Transform (Red solo): the switch-out's untransform")
+  eq(idsOf(own.moves), "THUMP,SWIPE", "learn under Transform (Red solo): ...gives back the learned list")
+  -- A rewrite of two slots is still refused while transformed (movesetDeltaOk).
+  f = fightOf("wild", { wildMon = swiper() })
+  seat, foe = f.sim.byId[PLAYER], f.sim.byId[FOE]
+  own = seat.mons[1]
+  Effects1.applyPrimary({ effectId = 57, userMon = own, targetMon = foe.mons[1],
+                          userFighter = seat, targetFighter = foe })
+  eq(moveset(f, { mon = 0, moves = { row("SWIPE", 30), row("THUMP", 20), row("SWIPE", 1) } }), false,
+     "learn under Transform (Red solo): a rewrite the hub refuses is refused here too")
+  eq(idsOf(own.moves), "SWIPE", "learn under Transform (Red solo): ...and the copies stand")
+
+  -- The screen's half on Red: a learn it sends drops the Transform overlay,
+  -- because the referee's battle list is the monster's own again.
+  f = fightOf("wild", { wildMon = swiper() })
+  seat, foe = f.sim.byId[PLAYER], f.sim.byId[FOE]
+  own = seat.mons[1]
+  Effects1.applyPrimary({ effectId = 57, userMon = own, targetMon = foe.mons[1],
+                          userFighter = seat, targetFighter = foe })
+  f.fight.liveMoves = { { id = "SWIPE", pp = 5, maxPp = 5 } }
+  f.fight.active = 1
+  f.fight:teach(f.party[1], "ALPHA", "SWIPE")
+  eq(idsOf(own.moves), "THUMP,SWIPE", "learn under Transform (Red screen): the referee fights on its own list")
+  eq(f.fight.liveMoves, nil, "learn under Transform (Red screen): ...so FIGHT drops the overlay")
+  eq(idsOf(f.fight:activeMon().moves), "THUMP,SWIPE", "learn under Transform (Red screen): ...and reads the sheet")
+  -- A level-up that taught nothing resends the list unchanged: no LearnMove on
+  -- the cart, so the overlay stays.
+  f.fight.liveMoves = { { id = "SWIPE", pp = 5, maxPp = 5 } }
+  f.fight:syncFightMoves(f.party[1], true)
+  eq(f.fight.liveMoves and f.fight.liveMoves[1].id, "SWIPE",
+     "learn under Transform (Red screen): a level-up with no learn leaves the overlay up")
+  data.moves.SWIPE = nil
+
+  -- ------- Gold: a learn under Transform
+  local g = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                              wildMon = swiper() })
+  local seat2, foe2 = g.sim.byId[PLAYER], g.sim.byId[FOE]
+  local own2 = seat2.mons[1]
+  own2.moves[1].pp = 12
+  Effects2.applyPrimary({ effectId = 57, userMon = own2, targetMon = foe2.mons[1],
+                          userFighter = seat2, targetFighter = foe2 })
+  eq(own2.transformed, true, "learn under Transform (Gold solo): BattleCommand_Transform ran")
+  eq(idsOf(own2.moves), "SWIPE", "learn under Transform (Gold solo): ...the copied list is fighting")
+  eq(moveset(g, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30) } }), true,
+     "learn under Transform (Gold solo): the learn reaches the referee")
+  eq(idsOf(own2.preTransform.moves), "THUMP,SWIPE",
+     "learn under Transform (Gold solo): the learn lands in the party list put aside")
+  eq(own2.preTransform.moves[1].pp, 12, "learn under Transform (Gold solo): ...keeping the party's PP")
+  eq(idsOf(own2.moves), "SWIPE",
+     "learn under Transform (Gold solo): the copies fight on (LearnMove skips the copy under SUBSTATUS_TRANSFORMED)")
+  eq(own2.moves[1].pp, Effects2.TRANSFORM_PP, "learn under Transform (Gold solo): ...with their 5 PP")
+  g.sim:_undoTransform(own2)
+  eq(idsOf(own2.moves), "THUMP,SWIPE", "learn under Transform (Gold solo): the switch-out gives back the learned list")
+  eq(own2.moves[1].pp, 12, "learn under Transform (Gold solo): ...with the party's PP")
+  -- The Gold screen keeps its overlay through a learn: the referee kept the copies.
+  g = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        wildMon = swiper() })
+  seat2, foe2 = g.sim.byId[PLAYER], g.sim.byId[FOE]
+  own2 = seat2.mons[1]
+  Effects2.applyPrimary({ effectId = 57, userMon = own2, targetMon = foe2.mons[1],
+                          userFighter = seat2, targetFighter = foe2 })
+  g.fight.liveMoves = { { id = "SWIPE", pp = 5, maxPp = 5 } }
+  g.fight.active = 1
+  g.fight:teach(g.party[1], "ALPHA", "SWIPE")
+  eq(idsOf(own2.preTransform.moves), "THUMP,SWIPE", "learn under Transform (Gold screen): the learn reached the referee")
+  eq(g.fight.liveMoves and g.fight.liveMoves[1].id, "SWIPE",
+     "learn under Transform (Gold screen): FIGHT keeps the copies the referee fights with")
+
+  -- ------- Red Pay Day on an escape, through the real Gen 1 referee
+  -- PAY DAY scatters the coins (PayDayEffect_: twice the user's level), then
+  -- TELEPORT gets away; the player's own RUN, after the same PAY DAY, pays
+  -- nothing.  Level 30 against 20, so the cart's escape never rolls.
+  data.moves.PAYDAY = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "PAY_DAY_EFFECT" }
+  data.moves.TELEPORT = { power = 0, accuracy = 100, type = "NORM", pp = 20,
+                          effect = "SWITCH_AND_TELEPORT_EFFECT" }
+  local function payDayThen(second)
+    local user = mon({ species = "ALPHA", spd = 90, maxHp = 200, level = 30 })
+    user.moves = { { id = "PAYDAY", pp = 20 }, { id = "TELEPORT", pp = 20 } }
+    local fight = fightOf("wild", { party = { user },
+                                    wildMon = mon({ species = "BETA", spd = 10, maxHp = 400, atk = 5 }) })
+    fight.game.save.player = { name = "PLAYER" }
+    fight.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do fight.solo:update(1 / 60, fight.game) end
+    fight.fight:sendChoice(second)
+    for _ = 1, 4 do fight.solo:update(1 / 60, fight.game) end
+    return fight, fight.sim:outcome()
+  end
+  local out
+  f, out = payDayThen({ action = "fight", move = 1 })
+  eq(out and out.reason, "run", "Pay Day (Red escape): our TELEPORT ends the wild fight as a run")
+  eq(out and out.payDay, 60, "Pay Day (Red escape): ...and the referee states the pot (wBattleResult stays 0)")
+  ok(out and out.losers and out.losers[1] == PLAYER, "Pay Day (Red escape): ...with us in `losers` -- we fled")
+  eq(Gen.money.get(f.game.save), 3060, "Pay Day (Red escape): the fleeing player is still the payee")
+  eq(f.fight.payDayPaid, 60, "Pay Day (Red escape): ...once")
+  -- The player's own RUN writes wBattleResult 2: the referee states no pot.
+  f, out = payDayThen({ action = "run" })
+  eq(out and out.reason, "run", "Pay Day (Red RUN): the player's own RUN gets away")
+  eq(out and out.payDay, nil, "Pay Day (Red RUN): ...with no pot stated (TryRunningFromBattle writes 2)")
+  eq(Gen.money.get(f.game.save), 3000, "Pay Day (Red RUN): ...so nothing is paid")
+  data.moves.PAYDAY, data.moves.TELEPORT = nil, nil
+
+  -- ------- Gold: a foe's happiness is the cart's BASE_HAPPINESS
+  local fond = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+  fond.happiness = 255
+  local tr = fightOf("trainer", { cart2 = true, data = goldData, foes = { fond },
+                                   party = { (function()
+                                     local m = mon({ species = "ALPHA", spd = 90, maxHp = 200 })
+                                     m.happiness = 200
+                                     return m
+                                   end)() } })
+  eq(tr.fight.npcParty and tr.fight.npcParty[1].happiness, 70,
+     "K14 foe (Gold solo): a trainer's monster is described at BASE_HAPPINESS (LoadEnemyMon .Happiness)")
+  eq(tr.sim.byId[FOE].mons[1].happiness, 70, "K14 foe (Gold solo): ...and the referee fights with it")
+  eq(tr.fight.mine[1].happiness, 200, "K14 own (Gold solo): the player's own monster keeps its own")
+  local wildFond = swiper()
+  wildFond.happiness = 3
+  local wf = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                               wildMon = wildFond })
+  eq(wf.sim.byId[FOE].mons[1].happiness, 70, "K14 foe (Gold solo): a wild monster too")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

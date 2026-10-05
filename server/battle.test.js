@@ -508,12 +508,21 @@ function applyPrimary(effectId, user, target) {
   });
 }
 
-test('applyPrimary fails foe-targeting effects through a substitute', () => {
+// R1c: only the routines that ask CheckTargetSubstitute -- the primary stat
+// drops, PoisonEffect, ConfusionEffect -- stop at a doll (effects.asm
+// :1436-1446); SleepEffect never asks, so SLEEP lands behind one. (A
+// generator stuck on 0 would spin `.setSleepCounter` forever; REDRAW_GUARD
+// answers 1 turn.)
+test('applyPrimary stops only the CheckTargetSubstitute routines at a doll', () => {
   const user = dummyMon();
   const target = dummyMon({ species: 'Beta', substitute: 40 });
   const sleep = applyPrimary(32, user, target);
-  assert.strictEqual(sleep.nothing, true, 'SLEEP_EFFECT vs substitute is nothing');
-  assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
+  assert.strictEqual(sleep.nothing, false, 'SLEEP_EFFECT reaches the monster behind a substitute');
+  assert.strictEqual(target.status, 'sleep', 'SLEEP_EFFECT lands through a substitute');
+  assert.strictEqual(target.statusTurns, 1, 'a stream of zero bytes is the guard\'s 1 turn');
+
+  const confuse = applyPrimary(49, dummyMon(), dummyMon({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(confuse.nothing, true, 'CONFUSION_EFFECT vs substitute is nothing');
 
   const growl = applyPrimary(18, dummyMon(), dummyMon({ species: 'Beta', substitute: 40 }));
   assert.strictEqual(growl.nothing, true, 'Growl vs substitute is nothing');

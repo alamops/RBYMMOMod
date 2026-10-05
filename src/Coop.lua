@@ -2737,9 +2737,116 @@ function M:buildField(game, battle, humans)
   -- thing about the NPC side that is not already in the slots, and every
   -- client needs it to show the same face and play the same theme. A client
   -- that joined by answering an invitation never walked into this trainer and
-  -- so has no other way to know.
+  -- so has no other way to know.  Gold's record carries no `id` (the engine
+  -- names a trainer by its class and member, src/world/gen2/World.lua
+  -- startScriptedBattle), so there the id is the pair (`M.trainerToken2`).
   local trainer = plan.engine and plan.engine.trainer
-  return { slots = slots, host = plan.hostId, trainer = trainer and trainer.id }
+  local named = trainer and trainer.id
+  if Gen.generation(game) == 2 then named = M.trainerToken2(game, trainer) end
+  return { slots = slots, host = plan.hostId, trainer = named }
+end
+
+-- ------- Gold: a trainer by its class and member
+--
+-- The cart names a trainer by the two bytes its `trainer` struct carries
+-- (macros/scripts/maps.asm `trainer`): the class constant and the member's
+-- number inside it -- `loadtrainer` takes the same pair -- and the engine's
+-- battle record keeps both (src/world/gen2/World.lua startScriptedBattle:
+-- `class`, the numeric constant; `classId`, its name; `memberId`, the member
+-- row's own constant out of trainer_constants.asm).  No `id`: so before this a
+-- Gold co-op field named no trainer, and an invite joiner fought one with no
+-- record -- no name on the field, the "two parties" theme for a gym leader,
+-- and nothing to vouch for a held item a THIEF took off the trainer.
+--
+-- On the wire the pair is one Wire.id-shaped token, `<class>-<memberId>`: the
+-- class number (digits) and the member constant (`[%w_]`), so the one hyphen
+-- splits it unambiguously and no new field is needed.  nil when either half
+-- is missing or the token would not survive Wire.id (a modded member past 40
+-- characters) -- the joiner then fights faceless, as before.
+function M.trainerToken2(game, trainer)
+  if type(trainer) ~= "table" then return nil end
+  local member = trainer.memberId
+  if type(member) ~= "string" or not member:match("^[%w_]+$") then return nil end
+  local class = tonumber(trainer.class)
+  if not class then
+    -- A record that names its class only by constant: the class row's index.
+    local data = game and game.data
+    local classes = type(data) == "table" and type(data.trainers) == "table"
+      and data.trainers.classes or nil
+    local row = type(classes) == "table" and type(trainer.classId) == "string"
+      and classes[trainer.classId] or nil
+    class = type(row) == "table" and tonumber(row.index) or nil
+  end
+  if not class or class < 0 or class ~= math.floor(class) then return nil end
+  return Wire.id(("%d-%s"):format(class, member))
+end
+
+-- The joiner's half: this client's own record for the trainer a Gold field's
+-- token names, built from its own copy of the data the way the engine builds
+-- the walk-in's -- Trainers.lookup over the class's members (engine data, read
+-- only; the Gold engine's module, required lazily behind the generation the
+-- caller checked) -- and shaped like World:startScriptedBattle's `opts.trainer`
+-- so everything that reads a walk-in's record reads this one alike:
+--
+--   class / classId / memberId   the pair, and the class constant (the music
+--                                 ladder's key, Gen.gen2BattleSong)
+--   name / trainerName / className   "YOUNGSTER JOEY", "JOEY", "YOUNGSTER" --
+--                                 a rival is wRivalName alone, this player's
+--                                 own (PlaceEnemysName's RIVAL1 / RIVAL2 arm)
+--   roster                        the member's party rows, whose held items
+--                                 CoopBattle:trainerItems2 vouches for
+--   items / attributes / baseMoney   the class's attribute row
+--
+-- No `party` (the engine-built monsters: the trainer's side is the field's
+-- own, packed by whoever walked in) and no `id` -- exactly as the walk-in's
+-- record has none, so nothing keyed on a Gen 1 id (Coop:syntheticFinish's
+-- class bind) reads a Gold record differently on the two clients.  nil for a
+-- token this build has no member for.
+function M.trainerRecord2(game, token)
+  if type(token) ~= "string" then return nil end
+  local classText, member = token:match("^(%d+)%-([%w_]+)$")
+  local class = tonumber(classText)
+  if not (class and member) then return nil end
+  local data = game and game.data
+  if not (type(data) == "table" and type(data.trainers) == "table") then return nil end
+  local ok, Trainers = pcall(require, "src.world.gen2.Trainers")
+  if not (ok and type(Trainers) == "table" and type(Trainers.classIndex) == "function"
+          and type(Trainers.lookup) == "function") then
+    return nil
+  end
+  local okIndex, byClass = pcall(Trainers.classIndex, data.trainers)
+  local entry = okIndex and type(byClass) == "table" and byClass[class] or nil
+  local rows = type(entry) == "table" and type(entry.trainers) == "table" and entry.trainers or nil
+  local number
+  for i, row in ipairs(rows or {}) do
+    if type(row) == "table" and row.id == member then number = i; break end
+  end
+  if not number then return nil end
+  local okLook, record = pcall(Trainers.lookup, data.trainers, class, number)
+  if not (okLook and type(record) == "table") then return nil end
+  local display = record.name
+  if type(record.className) == "string" and record.className ~= "" then
+    display = record.className .. " " .. (record.name or "")
+  end
+  local bareName = record.name
+  if record.classId == "RIVAL1" or record.classId == "RIVAL2" then
+    local save = game.save
+    display = (type(save) == "table" and type(save.rival) == "table"
+      and save.rival.name) or "???"
+    bareName = display
+  end
+  return {
+    class = record.class,
+    classId = record.classId,
+    memberId = record.id,
+    name = display,
+    trainerName = bareName,
+    className = record.className,
+    roster = record.roster,
+    baseMoney = record.baseMoney,
+    attributes = record.attributes,
+    items = record.items,
+  }
 end
 
 -- The NPC side, taken from the battle the engine already built.
@@ -2814,6 +2921,12 @@ function M.trainerFor(game, field, engine)
   -- client's own copy of that trainer row.
   if id and onGen3() then return CoopField.trainerRecord3(tonumber(id)) end
   if not (id and game and game.data) then return nil end
+  -- Gold: the field names the class and member (`M.trainerToken2`), and the
+  -- record is built off this client's own data.  Never the Gen 1 lookup
+  -- below: Gold's `data.trainers` is the class table (`classes`,
+  -- `battleTower`), and a token that happened to name one of its keys would
+  -- hand the screen that table as a trainer.
+  if Gen.generation(game) == 2 then return M.trainerRecord2(game, id) end
   return (game.data.trainers or {})[id]
 end
 
@@ -3075,7 +3188,13 @@ function M:startBattle(game, field)
     partyIndex = partyIndex or pidx
   end
   if not oppClass and trainer then
+    -- Gold's record names its class by constant (`classId`) and has no `id`;
+    -- the walk-in's engine battle carries the same reading
+    -- (src/Client.lua's Gold aliases: `oppClass = classId or class`).
     oppClass = trainer.id
+    if oppClass == nil and Gen.generation(game) == 2 then
+      oppClass = trainer.classId or trainer.class
+    end
   end
   partyIndex = tonumber(partyIndex) or 1
   -- The picture, unlike the record, is not re-derived. The engine loads a pic

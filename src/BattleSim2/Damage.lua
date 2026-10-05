@@ -30,6 +30,16 @@
 --     999 -- which only HP-free readers see (Bide's store, Counter).
 --   * `double` is DoubleDamage / DoubleMinimizeDamage, run by the caller after
 --     the variation: a 16-bit shift whose carry pins $ffff.
+--   * The referee-gaps run's wave 3 (R2c) splits `compute` into the cart's own
+--     commands, because the Gold-only scripts run them apart: `calc`
+--     (BattleCommand_DamageCalc, with the wCurDamage it adds to -- 0 but for
+--     Gold's PRESENT), `stab` (BattleCommand_Stab: DoWeatherModifiers, the
+--     badge type boost, STAB, the matchup -- and the c register it leaves,
+--     which PRESENT's own `stab` call hands DamageCalc on Gold), `applyRoll`
+--     (DamageVariation: no draw and no change under 2 damage), and the
+--     scripts' word multipliers (`multiply` -- TRIPLE KICK's added kicks --
+--     and `doubleTimes`, ROLLOUT's and FURY CUTTER's doublings).  `compute` is
+--     the NormalHit chain over them and keeps its old shape.
 --
 -- Physical vs special: opts.physical (default true).  When false, attacker
 -- reads spa (or spc) and defender reads spd (or spc).
@@ -150,12 +160,17 @@ function M.truncateStats(attack, defense, onePass)
 end
 
 -- BattleCommand_DamageVariation: nothing for 0 or 1 ("No point in reducing
--- 1 or 0 damage"), otherwise floor(d * roll / 100), at least 1 and NOT capped
--- (see the header) -- `modified` is a 16-bit value already, and roll <= 100
--- keeps the product's quotient inside it.
+-- 1 or 0 damage" -- `ret c` before the BattleRandom, so the caller draws no
+-- roll for them either: `varies`), otherwise floor(d * roll / 100), at least 1
+-- and NOT capped (see the header) -- `modified` is a 16-bit value already, and
+-- roll <= 100 keeps the product's quotient inside it.
+function M.varies(modified)
+  return max(0, int(modified, 0)) >= 2
+end
+
 function M.applyRoll(modified, roll)
   local d = max(0, int(modified, 0))
-  if d < 2 then return max(1, d) end
+  if d < 2 then return d end
   local r = int(roll, M.ROLL_MAX)
   if r < M.ROLL_MIN then r = M.ROLL_MIN end
   if r > M.ROLL_MAX then r = M.ROLL_MAX end
@@ -169,11 +184,117 @@ function M.double(damage)
   return min(M.WORD_MAX, max(0, int(damage, 0)) * 2)
 end
 
+-- `count` of those shifts in a row: BattleCommand_RolloutPower's and
+-- BattleCommand_FuryCutter's `.loop` / `.checkdouble`, each a `sla` / `rl` that
+-- pins $ffff on a carry (move_effects/rollout.asm, fury_cutter.asm).
+function M.doubleTimes(damage, count)
+  local d = max(0, int(damage, 0))
+  for _ = 1, max(0, int(count, 0)) do
+    d = M.double(d)
+    if d >= M.WORD_MAX then return M.WORD_MAX end
+  end
+  return d
+end
+
+-- BattleCommand_TripleKick (move_effects/triple_kick.asm): wCurDamage plus
+-- itself `times - 1` more times, a 16-bit add whose carry pins $ffff -- the
+-- second kick doubles DamageCalc's result, the third triples it.
+function M.multiply(damage, times)
+  local base = max(0, int(damage, 0))
+  local d = base
+  for _ = 2, max(1, int(times, 1)) do
+    d = d + base
+    if d > M.WORD_MAX then return M.WORD_MAX end
+  end
+  return d
+end
+
+-- BattleCommand_DamageCalc (effect_commands.asm:2900-3131) on the stats the
+-- caller hands it -- `level`, `power`, `attack`, `defense` as the d / e / b / c
+-- registers -- with opts { crit, itemBoostPercent, carry }:
+--
+--   * power 0 is `ret z` ("No damage if move power is 0"): nil, wCurDamage
+--     left as it was (`carry`);
+--   * a defense of 0 is 1; floor(2L/5) + 2, times power, times attack, over
+--     defense, over 50;
+--   * the type-boost item's (100 + parameter) / 100, then the crit's x2 (a
+--     16-bit shift pinned at $ffff);
+--   * added to wCurDamage -- `carry`, 0 everywhere but Gold's PRESENT, whose
+--     own `stab` call can leave a 1 there (its high byte is also added into the
+--     quotient's low byte first, as the cart's cap check does) -- held at
+--     997, then MIN_DAMAGE.
+function M.calc(level, power, attack, defense, opts)
+  opts = opts or {}
+  local p = max(0, int(power, 0))
+  if p <= 0 then return nil end
+  local d = M.base(level, p, attack, max(1, int(defense, 1)))
+  if opts.itemBoostPercent and int(opts.itemBoostPercent, 0) ~= 0 then
+    d = floor(d * (100 + int(opts.itemBoostPercent, 0)) / 100)
+  end
+  if opts.crit then d = min(M.WORD_MAX, d * 2) end
+  local carry = max(0, int(opts.carry, 0)) % (M.WORD_MAX + 1)
+  local q = d + floor(carry / 256)
+  local sum = q + carry
+  if q > M.MAX_DAMAGE - M.MIN_DAMAGE or sum > M.MAX_DAMAGE - M.MIN_DAMAGE then
+    sum = M.MAX_DAMAGE - M.MIN_DAMAGE
+  end
+  return sum + M.MIN_DAMAGE
+end
+
+-- BattleCommand_Stab (effect_commands.asm:1214-1396) on wCurDamage `d`, past
+-- its STRUGGLE return (the caller skips the whole command for Struggle):
+--
+--   * DoWeatherModifiers (engine/battle/misc.asm:49-131): `weatherTenths`
+--     (15 or 5, the matching WeatherTypeModifiers / WeatherMoveModifiers row)
+--     -- d x tenths / 10, a quotient past 16 bits pinned at $ffff and one of 0
+--     raised to 1;
+--   * DoBadgeTypeBoosts: an eighth of d, at least 1, pinned at $ffff;
+--   * STAB: hl + hl >> 1 (`add hl, bc`, no carry kept), the c register left
+--     holding the low byte of hl >> 1 -- `cReg`;
+--   * the matchup rows, one percent per row: a product of 0 stays 0 (the
+--     `jr z, .ok` -- a 0 damage is never raised), otherwise floor(d x pct /
+--     100) raised to 1; a row of 0 is the immunity (wAttackMissed).
+--
+-- opts { weatherTenths, badgeTypeBoost, stab, typeEffect }.  Returns d,
+-- immune, cReg (nil without STAB: the c register is the user's second type
+-- then, which the caller knows).
+function M.stab(d, opts)
+  opts = opts or {}
+  d = max(0, int(d, 0))
+  local tenths = int(opts.weatherTenths, nil)
+  if tenths then
+    d = floor(d * tenths / 10)
+    if d > M.WORD_MAX then d = M.WORD_MAX end
+    if d == 0 then d = 1 end
+  end
+  if opts.badgeTypeBoost then d = min(M.WORD_MAX, d + max(1, floor(d / 8))) end
+  local cReg = nil
+  if opts.stab then
+    local half = floor(d / 2)
+    cReg = half % 256
+    d = (d + half) % (M.WORD_MAX + 1)
+  end
+  local immune = false
+  local effect = opts.typeEffect
+  if effect == nil then effect = opts.typeEff end
+  for _, pct in ipairs(percents(effect)) do
+    if pct <= 0 then
+      immune = true
+      d = 0
+    elseif d > 0 then
+      d = floor(d * pct / 100)
+      if d == 0 then d = 1 end
+    end
+  end
+  return d, immune, cReg
+end
+
 -- attacker: { level, attack|atk, spa|spc, ... }
 -- defender: { defense|def, spd|spc, ... }
 -- move:     { power }
 -- opts:     { crit, stab, typeEffect|typeEff, roll, physical,
---             itemBoostPercent, badgeTypeBoost, rageCount }
+--             itemBoostPercent, badgeTypeBoost, rageCount, weatherTenths,
+--             carry, kicks }
 function M.compute(attacker, defender, move, opts)
   attacker, defender = attacker or {}, defender or {}
   move, opts = move or {}, opts or {}
@@ -208,44 +329,27 @@ function M.compute(attacker, defender, move, opts)
     return result
   end
 
-  local d = base
-
-  -- DamageCalc .DoneItem: the type-boost item's (100 + parameter) out of 100.
-  -- The sum is a byte on the cart (Items.typeBoostPercent), so a parameter past
-  -- 155 arrives here as a negative percent and is applied all the same.
-  if opts.itemBoostPercent and int(opts.itemBoostPercent, 0) ~= 0 then
-    d = floor(d * (100 + int(opts.itemBoostPercent, 0)) / 100)
-  end
-
-  if opts.crit then d = d * 2 end
-
-  -- Cap at DAMAGE_CAP then add MIN_DAMAGE (engine DamageCalc tail).
-  d = min(d, M.MAX_DAMAGE - M.MIN_DAMAGE) + M.MIN_DAMAGE
-
-  -- DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146), farcalled by
-  -- BattleCommand_Stab ahead of the STAB multiply: the player owns the badge
-  -- whose row names the move's type, and the running damage gains an eighth
-  -- of itself, at least 1 (engine src/battle/gen2/Damage.lua:269-274).  The
-  -- engine runs DoWeatherModifiers just before it; this sim has no weather,
-  -- so nothing sits between the DamageCalc tail and here.
-  if opts.badgeTypeBoost then d = d + max(1, floor(d / 8)) end
-
-  if opts.stab then d = floor(d * 15 / 10) end
-
+  -- BattleCommand_DamageCalc (`calc`), the TRIPLE KICK multiplier its script
+  -- puts before `stab` (`kicks`), then BattleCommand_Stab (`stab`): the
+  -- weather, the badge type boost, STAB and the matchup rows.
+  local d = M.calc(attacker.level, power, attack, defense, {
+    crit = opts.crit, itemBoostPercent = opts.itemBoostPercent, carry = opts.carry,
+  })
+  if opts.kicks then d = M.multiply(d, opts.kicks) end
   local effect = opts.typeEffect
   if effect == nil then effect = opts.typeEff end
-
-  for _, pct in ipairs(percents(effect)) do
-    if pct <= 0 then
-      result.modified = 0
-      result.immune = true
-      result.damage = 0
-      result.minDamage = 0
-      result.maxDamage = 0
-      return result
-    end
-    d = floor(d * pct / 100)
-    if d == 0 then d = 1 end
+  local immune
+  d, immune = M.stab(d, {
+    weatherTenths = opts.weatherTenths, badgeTypeBoost = opts.badgeTypeBoost,
+    stab = opts.stab, typeEffect = effect,
+  })
+  if immune then
+    result.modified = 0
+    result.immune = true
+    result.damage = 0
+    result.minDamage = 0
+    result.maxDamage = 0
+    return result
   end
 
   -- BattleCommand_RageDamage (pokecrystal engine/battle/effect_commands.asm:

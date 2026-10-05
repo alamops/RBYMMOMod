@@ -8,7 +8,9 @@
 -- SNORE, THUNDER, TRI ATTACK, GUST, EARTHQUAKE and SKY ATTACK
 -- (docs/plans/gen12-referee-known-gaps.md section 13) -- and, from the
 -- referee-gaps run's wave 2, SLEEP TALK, LOCK-ON, SAFEGUARD and TOXIC
--- (102..105).  Stage and sheet keys
+-- (102..105), and from its wave 3 the Gold-only damage formulas, protection,
+-- COUNTER / MIRROR COAT, FUTURE SIGHT, PURSUIT, the weather moves and the
+-- fixed-damage scripts Gold names apart (106..132).  Stage and sheet keys
 -- are Gen2: atk/def/spe/spa/spd (Sp.Def). Calcium / X_SPECIAL write spa.
 --
 -- No love, no engine modules, no mod facade.
@@ -143,11 +145,41 @@ M.NAMES = {
   [103] = "EFFECT_LOCK_ON",
   [104] = "EFFECT_SAFEGUARD",
   [105] = "EFFECT_TOXIC",
+  -- The referee-gaps run's wave 3 (R2c): every Gold script the referee used to
+  -- fold onto a Gen 1 handler or onto 0, whose own commands it runs now (Turn
+  -- `_useMove`; the move scripts are data/moves/effects.asm's).
+  [106] = "EFFECT_RETURN",          -- BattleCommand_HappinessPower
+  [107] = "EFFECT_FRUSTRATION",     -- BattleCommand_FrustrationPower
+  [108] = "EFFECT_HIDDEN_POWER",    -- HiddenPowerDamage
+  [109] = "EFFECT_REVERSAL",        -- FLAIL, REVERSAL: ConstantDamage's .reversal
+  [110] = "EFFECT_MAGNITUDE",       -- BattleCommand_GetMagnitude
+  [111] = "EFFECT_PRESENT",         -- BattleCommand_Present
+  [112] = "EFFECT_TRIPLE_KICK",     -- TripleKick / KickCounter / EndLoop
+  [113] = "EFFECT_FURY_CUTTER",     -- BattleCommand_FuryCutter
+  [114] = "EFFECT_ROLLOUT",         -- CheckRollout / RolloutPower
+  [115] = "EFFECT_DEFENSE_CURL",    -- DefenseUp + BattleCommand_Curl
+  [116] = "EFFECT_BEAT_UP",         -- BattleCommand_BeatUp / EndLoop
+  [117] = "EFFECT_PURSUIT",         -- BattleCommand_Pursuit / PursuitSwitch
+  [118] = "EFFECT_FALSE_SWIPE",     -- BattleCommand_FalseSwipe
+  [119] = "EFFECT_FUTURE_SIGHT",    -- CheckFutureSight / FutureSight
+  [120] = "EFFECT_PROTECT",         -- PROTECT, DETECT: BattleCommand_Protect
+  [121] = "EFFECT_ENDURE",          -- BattleCommand_Endure
+  [122] = "EFFECT_COUNTER",         -- BattleCommand_Counter
+  [123] = "EFFECT_MIRROR_COAT",     -- BattleCommand_MirrorCoat
+  [124] = "EFFECT_RAIN_DANCE",      -- BattleCommand_StartRain
+  [125] = "EFFECT_SUNNY_DAY",       -- BattleCommand_StartSun
+  [126] = "EFFECT_SANDSTORM",       -- BattleCommand_StartSandstorm
+  [127] = "EFFECT_SOLARBEAM",       -- SkipSunCharge + Charge; rain's x0.5
+  [128] = "EFFECT_MORNING_SUN",     -- BattleCommand_HealMorn
+  [129] = "EFFECT_SYNTHESIS",       -- BattleCommand_HealDay
+  [130] = "EFFECT_MOONLIGHT",       -- BattleCommand_HealNite
+  [131] = "EFFECT_LEVEL_DAMAGE",    -- SEISMIC TOSS, NIGHT SHADE: ConstantDamage
+  [132] = "EFFECT_PSYWAVE",         -- ConstantDamage's .psywave
 }
 
 -- The last id either table numbers.  The wire carries a Gen 1/2 move's effect
 -- as a byte (Wire.battleMove, sanitize EFFECT_MAX), so this may grow to 255.
-M.MAX_EFFECT_ID = 105
+M.MAX_EFFECT_ID = 132
 
 -- The Gold-native ids by name, for the call sites that branch on one.
 M.SP_DEF_DOWN_HIT = 87
@@ -169,6 +201,33 @@ M.SLEEP_TALK = 102
 M.LOCK_ON = 103
 M.SAFEGUARD = 104
 M.TOXIC = 105
+M.RETURN = 106
+M.FRUSTRATION = 107
+M.HIDDEN_POWER = 108
+M.REVERSAL = 109
+M.MAGNITUDE = 110
+M.PRESENT = 111
+M.TRIPLE_KICK = 112
+M.FURY_CUTTER = 113
+M.ROLLOUT = 114
+M.DEFENSE_CURL = 115
+M.BEAT_UP = 116
+M.PURSUIT = 117
+M.FALSE_SWIPE = 118
+M.FUTURE_SIGHT = 119
+M.PROTECT = 120
+M.ENDURE = 121
+M.COUNTER = 122
+M.MIRROR_COAT = 123
+M.RAIN_DANCE = 124
+M.SUNNY_DAY = 125
+M.SANDSTORM = 126
+M.SOLARBEAM = 127
+M.MORNING_SUN = 128
+M.SYNTHESIS = 129
+M.MOONLIGHT = 130
+M.LEVEL_DAMAGE = 131
+M.PSYWAVE = 132
 
 M.CATEGORIES = {
   [0] = "none",
@@ -243,6 +302,13 @@ M.CATEGORIES = {
   [101] = "charge",
   [102] = "meta", [103] = "volatile", [104] = "volatile",
   [105] = "status_primary",
+  [106] = "other", [107] = "other", [108] = "other", [109] = "fixed",
+  [110] = "other", [111] = "other", [112] = "multihit", [113] = "other",
+  [114] = "other", [115] = "stat", [116] = "multihit", [117] = "other",
+  [118] = "other", [119] = "other", [120] = "volatile", [121] = "volatile",
+  [122] = "fixed", [123] = "fixed", [124] = "field", [125] = "field",
+  [126] = "field", [127] = "charge", [128] = "heal", [129] = "heal",
+  [130] = "heal", [131] = "fixed", [132] = "fixed",
 }
 
 M.STAGE_MIN = -6
@@ -280,9 +346,13 @@ end
 -- Map every EFFECT_* that already has a handler onto that handler.  The
 -- Gold-native rows above answer under their own names (BY_NAME), SKY ATTACK
 -- among them: its script is RazorWind's plus `effectchance` / `flinchtarget`,
--- which CHARGE_EFFECT does not run.  Gen 2 only moves (Protect, Spikes, …)
--- stay unmapped and still no-op honestly.  Charge / vanish aliases keep the
--- same ids as before.
+-- which CHARGE_EFFECT does not run.  Gen 2 only moves (Spikes, …) stay
+-- unmapped and still no-op honestly.  Charge / vanish aliases keep the same ids
+-- as before.  Wave 3 (R2c) moved SOLARBEAM (its sun skip and rain halving),
+-- LEVEL_DAMAGE and PSYWAVE (SEISMIC TOSS and NIGHT SHADE deal the user's
+-- level, PSYWAVE its own roll -- as 41 they dealt their sheet power, 1), the
+-- three time-of-day heals (as 56 they healed half whatever the weather) and
+-- DEFENSE_CURL (as 11 it never curled) off these folds onto ids of their own.
 local GEN2_EFFECT_ID = {
   EFFECT_NORMAL_HIT = 0,
   EFFECT_SLEEP = 32,
@@ -296,7 +366,6 @@ local GEN2_EFFECT_ID = {
   EFFECT_MIRROR_MOVE = 9,
   EFFECT_ATTACK_UP = 10,
   EFFECT_DEFENSE_UP = 11,
-  EFFECT_DEFENSE_CURL = 11,
   EFFECT_SPEED_UP = 12,
   EFFECT_SP_ATK_UP = 13,
   EFFECT_ACCURACY_UP = 14,
@@ -318,12 +387,9 @@ local GEN2_EFFECT_ID = {
   EFFECT_PAY_DAY = 16,
   EFFECT_OHKO = 38,
   EFFECT_RAZOR_WIND = 39,
-  EFFECT_SOLARBEAM = 39,
   EFFECT_SKULL_BASH = 39,
   EFFECT_SUPER_FANG = 40,
   EFFECT_STATIC_DAMAGE = 41,
-  EFFECT_LEVEL_DAMAGE = 41,
-  EFFECT_PSYWAVE = 41,
   EFFECT_TRAP_TARGET = 42,
   EFFECT_FLY = 43,
   EFFECT_DOUBLE_HIT = 44,
@@ -339,9 +405,6 @@ local GEN2_EFFECT_ID = {
   EFFECT_ACCURACY_UP_2 = 54,
   EFFECT_EVASION_UP_2 = 55,
   EFFECT_HEAL = 56,
-  EFFECT_MORNING_SUN = 56,
-  EFFECT_SYNTHESIS = 56,
-  EFFECT_MOONLIGHT = 56,
   EFFECT_TRANSFORM = 57,
   EFFECT_ATTACK_DOWN_2 = 58,
   EFFECT_DEFENSE_DOWN_2 = 59,
@@ -762,21 +825,40 @@ local PHASE1_PRIMARY = {
   [60] = true, [61] = true, [62] = true, [63] = true, [66] = true, [67] = true,
   [84] = true, [85] = true, [86] = true,
   [103] = true, [104] = true, [105] = true, -- LOCK_ON, SAFEGUARD, TOXIC
+  [115] = true,                             -- DEFENSE_CURL
+}
+
+-- The 0-power Gold scripts whose command works on the field or the user's
+-- own record, which Turn runs itself (it holds the turn order, the weather
+-- and the clock): PROTECT / DETECT and ENDURE (`_protect`), RAIN DANCE, SUNNY
+-- DAY and SANDSTORM (`_startWeather`), MORNING SUN, SYNTHESIS and MOONLIGHT
+-- (`_timeHeal`).  None of them runs `checkhit`.
+M.FIELD_MOVES = {
+  [120] = true, [121] = true, [124] = true, [125] = true, [126] = true,
+  [128] = true, [129] = true, [130] = true,
 }
 
 -- The referee-numbered move scripts with no `checkhit` (data/moves/
 -- effects.asm): MIRROR MOVE, the stat-raising moves, CONVERSION, HAZE,
 -- BIDE's first use (`unleashenergy` ends it before its `checkhit`), MIST,
 -- FOCUS ENERGY, the heals, TRANSFORM, the screens, SUBSTITUTE, METRONOME,
--- SPLASH, SLEEP TALK and SAFEGUARD.  They still reach this referee's
--- accuracy roll, but no CheckHit of the cart's ever runs for them, so none
--- of them spends the target's LOCK-ON (Turn `_checkHit`).
+-- SPLASH, SLEEP TALK and SAFEGUARD -- and from wave 3 DEFENSE CURL,
+-- FUTURE SIGHT's use (its `checkhit` stands after `futuresight`, which ends
+-- the move on the turn it is used), PROTECT / DETECT, ENDURE, COUNTER and
+-- MIRROR COAT (their own commands set wAttackMissed), the weather moves and
+-- the time-of-day heals.  No CheckHit of the cart's runs for them, so Turn
+-- runs none either (`_useMove`): no accuracy byte, no `.Protect`, and none of
+-- them spends the target's LOCK-ON -- RAIN DANCE's and SUNNY DAY's 90% never
+-- misses.
 M.NO_CHECKHIT = {
   [9] = true, [10] = true, [11] = true, [12] = true, [13] = true, [14] = true,
   [15] = true, [24] = true, [25] = true, [26] = true, [46] = true, [47] = true,
   [50] = true, [51] = true, [52] = true, [53] = true, [54] = true, [55] = true,
   [56] = true, [57] = true, [64] = true, [65] = true, [79] = true, [83] = true,
   [85] = true, [102] = true, [104] = true,
+  [115] = true, [119] = true, [120] = true, [121] = true, [122] = true,
+  [123] = true, [124] = true, [125] = true, [126] = true, [128] = true,
+  [129] = true, [130] = true,
 }
 
 -- CheckHit's `.LockOn`: a locked-on target in the sky is still missed by
@@ -785,9 +867,11 @@ M.NO_CHECKHIT = {
 M.LOCK_ON_SKY_MISS = { EARTHQUAKE = true, FISSURE = true, MAGNITUDE = true }
 
 -- SLEEP TALK's `.check_two_turn_move` (move_effects/sleep_talk.asm): the
--- effects it never calls -- SKULL BASH / RAZOR WIND / SOLARBEAM (39), FLY /
--- DIG (43), SKY ATTACK and BIDE.
-M.SLEEP_TALK_EXCLUDED = { [26] = true, [39] = true, [43] = true, [101] = true }
+-- effects it never calls -- SKULL BASH / RAZOR WIND (39), FLY / DIG (43), SKY
+-- ATTACK, BIDE and SOLARBEAM (127 from wave 3).
+M.SLEEP_TALK_EXCLUDED = {
+  [26] = true, [39] = true, [43] = true, [101] = true, [127] = true,
+}
 
 -- The scripts with `checksafeguard` after their `checkhit` (DoSleep, DoConfuse,
 -- DoPoison -- TOXIC's too -- and DoParalyze).
@@ -1070,7 +1154,8 @@ local function blockedBySubstitute(effectId)
       or effectId == 56 or effectId == 57 or effectId == 64 or effectId == 65
       or effectId == 79 or effectId == 85 or effectId == M.SAFEGUARD
       or effectId == 32 or effectId == 49 or effectId == 66 or effectId == 67
-      or effectId == 84 or effectId == M.TOXIC or effectId == M.LOCK_ON then
+      or effectId == 84 or effectId == M.TOXIC or effectId == M.LOCK_ON
+      or effectId == M.DEFENSE_CURL then
     return false
   end
   return true
@@ -1199,6 +1284,16 @@ function M.applyPrimary(ctx)
     return out
   end
 
+  -- DefenseCurl's script (data/moves/effects.asm): `defenseup` -- RaiseStat
+  -- and its message as DEFENSE UP's -- then BattleCommand_Curl, which sets
+  -- SUBSTATUS_CURLED whatever the raise did (ROLLOUT's extra doubling reads
+  -- it; a send-out clears it, Turn `_clearSubstatus`).
+  if effectId == M.DEFENSE_CURL then
+    raisePrimary(out, userFighter, userMon, "def", 1)
+    userMon.curled = true
+    return out
+  end
+
   local statFx = STAT_EFFECTS[effectId]
   if statFx then
     if statFx.selfTarget then
@@ -1223,7 +1318,15 @@ function M.applyPrimary(ctx)
       out.nothing = true
       return out
     end
-    local turns = (rng and rng:byte() or 0) % 7 + 1
+    -- `.random_loop`: BattleRandom & SLP_MASK, drawn again on 0 and on 7, plus
+    -- 1 -- a counter of 2..7, which CheckTurn's `dec` runs down to the turn it
+    -- wakes and moves on: 1..6 turns asleep (statusTurns is that counter).
+    local turns = 0
+    for _ = 1, M.REDRAW_LIMIT do
+      local r = (rng and rng:byte() or 0) % 8
+      if r ~= 0 and r ~= 7 then turns = r + 1; break end
+    end
+    if turns == 0 then turns = 2 end
     M.setStatus(targetMon, targetBadges, "sleep")
     targetMon.statusTurns = turns
     local token = wire.sleep or "SLP"
@@ -1564,6 +1667,9 @@ function M.applyPrimary(ctx)
     -- Stick check reads; the party species -- `speciesId`, untouched -- is what
     -- Light Ball, Thick Club and Metal Powder read (Items.lua).
     userMon.transformSpecies = targetMon.speciesId
+    -- ...and the copied species' base stats (K7), which BEAT UP reads off
+    -- wEnemyMonSpecies' base data for a transformed target's Defense.
+    userMon.transformBase = targetMon.transformBase or targetMon.base
     M.snapStats(userMon, userFighter and userFighter.badges or nil, battleStats)
     out.messages[#out.messages + 1] =
       userMon.species .. " transformed into " .. targetMon.species
@@ -1736,13 +1842,15 @@ local function burnTarget(out, s, hit)
   inflict(out, s.fighter, targetMon, "burn", s.wire)
 end
 
--- BattleCommand_FreezeTarget (:3994-4044): a substitute, any status, a
--- target sharing the move's type (don't freeze an Ice type),
+-- BattleCommand_FreezeTarget (:3994-4044): a substitute, any status, the
+-- sun (`cp WEATHER_SUN / ret z`: nothing freezes under SUNNY DAY -- `s.sunny`),
+-- a target sharing the move's type (don't freeze an Ice type),
 -- HELD_PREVENT_FREEZE, wEffectFailed, then Safeguard.  What a landed freeze
 -- does after its berry check -- OpponentCantMove, EndRechargeOpp and
 -- wEnemyJustGotFrozen -- is Turn's `_applySide`, which asks the berry.
 local function freezeTarget(out, s, hit)
   if s.behindSub or M.hasMajorStatus(s.target) then return end
+  if s.sunny then return end
   if moveTypeMatchesTarget(s.target, s.moveType, s.normalType) then return end
   if Items.prevents(s.target, "freeze") then return end
   if not hit or s.safeguard then return end
@@ -1836,8 +1944,8 @@ end
 -- effect_commands.asm, diffed against pokegold), HELD_PREVENT_* (no item on
 -- either cart carries one, data/items/attributes.asm, but the rule is keyed
 -- on the token) and SafeCheckSafeguard (`targetSafeguard`: the target's side
--- has SAFEGUARD up) included; FreezeTarget's WEATHER_SUN return is weather's
--- (wave 3).
+-- has SAFEGUARD up) included, FreezeTarget's WEATHER_SUN return (`sunny`,
+-- wave 3) and FlinchTarget's CheckOpponentWentFirst (`targetWentFirst`).
 function M.applySide(ctx)
   ctx = ctx or {}
   local out = { proc = false, messages = {}, events = {} }
@@ -1851,7 +1959,7 @@ function M.applySide(ctx)
     target = targetMon, fighter = targetFighter, wire = ctx.statusToWire or {},
     behindSub = behindSub, moveType = int(ctx.moveType, nil),
     normalType = ctx.normalType, poisonType = ctx.poisonType,
-    safeguard = ctx.targetSafeguard == true,
+    safeguard = ctx.targetSafeguard == true, sunny = ctx.sunny == true,
   }
 
   if effectId == M.TRI_ATTACK then
@@ -1869,21 +1977,20 @@ function M.applySide(ctx)
 
   -- BattleCommand_FlinchTarget (:5357-5374): a substitute, then a sleeping or
   -- frozen target (`and 1 << FRZ | SLP_MASK / ret nz`), then
-  -- CheckOpponentWentFirst, then wEffectFailed.  The went-first test is not
-  -- asked here: a flag on a monster that has already moved is never read --
-  -- `_openTurn` clears it before that monster's next CheckTurn -- so it
-  -- changes nothing.  Nor is EndRechargeOpp, which only a target that has
-  -- not moved yet would feel -- and one that owes a recharge loses the turn
-  -- either way: the referee says "must recharge" at its slot where the cart
-  -- says "flinched" (`_rechargeTurn`); telling the two apart needs the
-  -- went-first test.  STOMP, TWISTER, SNORE and SKY ATTACK end in this same
-  -- command.
+  -- CheckOpponentWentFirst -- a target that already moved this turn
+  -- (`targetWentFirst`, Turn `_wentFirst`) is not flinched -- then
+  -- wEffectFailed, and FlinchTarget: SUBSTATUS_FLINCHED and EndRechargeOpp, so
+  -- a target that owes a recharge loses its turn to "flinched" (CheckTurn's
+  -- flinch, its gates run) instead of "must recharge" (R2b's finding (i)).
+  -- STOMP, TWISTER, SNORE and SKY ATTACK end in this same command.
   if SIDE_FLINCH[effectId] then
     if behindSub then return out end
     if targetMon.status == "sleep" or targetMon.status == "freeze" then return out end
+    if ctx.targetWentFirst then return out end
     if not hit then return out end
     out.proc = true
     targetMon.flinch = true
+    targetMon.mustRecharge = false
     return out
   end
 
@@ -1949,10 +2056,29 @@ end
 -- Phase 3 multi-hit, fixed damage, drain, recoil
 -- ------------------------------------------------------------------
 
-local MULTIHIT = { [29] = true, [44] = true, [77] = true }
-local FIXED_DAMAGE = { [38] = true, [40] = true, [41] = true }
+-- The looping scripts that hit through `startloop` / `endloop` -- MultiHit,
+-- DoubleHit, PoisonMultiHit and (wave 3) TripleKick -- every hit its own
+-- `critical` and `damagevariation`.  BeatUp loops too, over its party, and is
+-- Turn's own (`_beatUp`).
+local MULTIHIT = { [29] = true, [44] = true, [77] = true, [112] = true }
+-- The ConstantDamage scripts (SuperFang / StaticDamage / Psywave, the
+-- LEVEL_DAMAGE row sharing them): `constantdamage`, `checkhit`,
+-- `resettypematchup` -- no `critical`, no `damagevariation` (R2b's finding
+-- (g)).  REVERSAL runs `constantdamage` too but into DamageCalc and `stab`;
+-- Turn runs it apart.
+local FIXED_DAMAGE = { [38] = true, [40] = true, [41] = true, [131] = true, [132] = true }
 local DRAIN = { [3] = true, [8] = true }
 local RECOIL = { [48] = true }
+
+-- The damaging scripts whose `checkhit` comes before `critical` and
+-- `damagevariation` (data/moves/effects.asm): Rampage (THRASH), TrapTarget
+-- and Present -- the looping scripts too (`isMultihit`, BEAT UP).
+M.HIT_FIRST = { [27] = true, [42] = true, [111] = true }
+-- ...and the ones whose `critical` comes before `checkhit` but whose
+-- `damagevariation` comes after it: Rage, FuryCutter, Rollout, Thunder.
+M.ROLL_AFTER_CHECKHIT = { [81] = true, [97] = true, [113] = true, [114] = true }
+-- RolloutPower's MAX_ROLLOUT_COUNT.
+M.ROLLOUT_MAX = 5
 
 function M.isMultihit(effectId)
   return MULTIHIT[int(effectId, 0)] == true
@@ -1979,6 +2105,17 @@ function M.multiHitCount(rng)
   local a = (rng and rng:byte() or 0) % 4
   if a >= 2 then a = (rng and rng:byte() or 0) % 4 end
   return a + 2
+end
+
+-- EndLoop's `.reject_triple_kick_sample` for TRIPLE KICK, drawn after its
+-- first kick the same way: BattleRandom & 3, drawn again on 0 -- the kicks in
+-- all, 1, 2 or 3 alike (`dec a / jr nz, .double_hit`; 1 is `.done_loop`).
+function M.tripleKickCount(rng)
+  for _ = 1, M.REDRAW_LIMIT do
+    local a = (rng and rng:byte() or 0) % 4
+    if a ~= 0 then return a end
+  end
+  return 1
 end
 
 function M.isFixedDamage(effectId)
@@ -2018,10 +2155,17 @@ function M.payDayCoins(level)
   return (max(0, int(level, 0)) * 2) % 256
 end
 
--- ctx: effectId, userMon, targetMon, power
+-- ctx: effectId, userMon, targetMon, power, rng
 -- Returns fixed damage, or nil when the effect fails.  EFFECT_OHKO is not
 -- here: Gold's is BattleCommand_OHKO -- a level gate and a raised accuracy,
 -- not Red's Speed test -- and Turn resolves it whole (`isOhko`).
+--
+-- BattleCommand_ConstantDamage (effect_commands.asm:3133-3240): SUPER FANG
+-- halves the target's HP (`srl` / `rr` over the 16-bit HP, 1 when that is 0);
+-- LEVEL_DAMAGE (SEISMIC TOSS, NIGHT SHADE) is the user's level; PSYWAVE's
+-- `.psywave_loop` draws BattleRandom until it is neither 0 nor at or past
+-- level + level / 2 (a byte add) -- the only draws these scripts make; every
+-- other (STATIC_DAMAGE: SONICBOOM, DRAGON RAGE) is the move's power.
 function M.fixedDamage(ctx)
   ctx = ctx or {}
   local effectId = int(ctx.effectId, 0)
@@ -2032,6 +2176,22 @@ function M.fixedDamage(ctx)
   if effectId == 40 then
     return max(1, floor(int(targetMon.hp, 0) / 2))
   end
+  if effectId == M.LEVEL_DAMAGE then
+    return max(0, int(userMon.level, 1)) % 256
+  end
+  if effectId == M.PSYWAVE then
+    local level = max(0, int(userMon.level, 1)) % 256
+    local cap = (level + floor(level / 2)) % 256
+    -- A cap of 0 or 1 has no byte in range: the cart's loop never ends (a
+    -- level-0 or level-1 user).  Freezes are never kept -- the guard ends it
+    -- at the smallest damage the loop could give.
+    for _ = 1, M.REDRAW_LIMIT do
+      local r = ctx.rng and ctx.rng:byte() or 1
+      if r ~= 0 and r < cap then return r end
+      if cap <= 1 then break end
+    end
+    return 1
+  end
   if effectId == 41 then
     if movePower >= 1 then return movePower end
     return max(1, int(userMon.level, 1))
@@ -2040,12 +2200,208 @@ function M.fixedDamage(ctx)
 end
 
 -- ------------------------------------------------------------------
+-- the Gold-only damage formulas (wave 3, R2c)
+-- ------------------------------------------------------------------
+
+-- BASE_HAPPINESS (constants/pokemon_data_constants.asm): what LoadEnemyMon
+-- gives every wild and trainer monster, and what a sheet that states no
+-- `happiness` (contract K14) reads as.
+M.BASE_HAPPINESS = 70
+
+-- BattleCommand_HappinessPower / FrustrationPower (move_effects/return.asm,
+-- frustration.asm): happiness (or 255 - happiness) x 10 / 25, the quotient's
+-- low byte -- 0 at the extremes (docs/bugs_and_glitches.md, "Return and
+-- Frustration deal no damage when the user's happiness is low or high").
+function M.happinessPower(happiness)
+  local h = max(0, min(255, int(happiness, M.BASE_HAPPINESS)))
+  return floor(h * 10 / 25) % 256
+end
+function M.frustrationPower(happiness)
+  local h = max(0, min(255, int(happiness, M.BASE_HAPPINESS)))
+  return floor((255 - h) * 10 / 25) % 256
+end
+
+-- HiddenPowerDamage's types (engine/battle/hidden_power.asm): (Atk DV & 3) << 2
+-- | (Def DV & 3), plus 1 to skip NORMAL, then past BIRD and the unused types --
+-- FIGHTING .. STEEL, then FIRE .. DARK -- as the registry ids a ruleset's
+-- `typeIds` names them by.
+M.HIDDEN_POWER_TYPES = {
+  "FIGHTING", "FLYING", "POISON", "GROUND", "ROCK", "BUG", "GHOST", "STEEL",
+  "FIRE", "WATER", "GRASS", "ELECTRIC", "PSYCHIC_TYPE", "ICE", "DRAGON", "DARK",
+}
+
+-- The power and the type name HiddenPowerDamage computes from the four DVs
+-- (K7 `dvs`, 0..15 each): the top bit of Atk, Def, Speed and Special as a
+-- nibble, x 5, plus Special & 3, halved, plus 31 -- 31..70.  nil without DVs.
+function M.hiddenPower(dvs)
+  if type(dvs) ~= "table" then return nil end
+  local atk, def = max(0, int(dvs.atk, 0)) % 16, max(0, int(dvs.def, 0)) % 16
+  local spe, spc = max(0, int(dvs.spe, 0)) % 16, max(0, int(dvs.spc, 0)) % 16
+  local top = floor(atk / 8) * 8 + floor(def / 8) * 4 + floor(spe / 8) * 2 + floor(spc / 8)
+  local power = floor((top * 5 + spc % 4) / 2) + 31
+  local index = (atk % 4) * 4 + def % 4
+  return power, M.HIDDEN_POWER_TYPES[index + 1]
+end
+
+-- FlailReversalPower (data/moves/flail_reversal_power.asm), HP_BAR_LENGTH_PX
+-- 48: the HP-bar pixels at or under each row's, and the power it gives.
+M.REVERSAL_POWER = {
+  { 1, 200 }, { 4, 150 }, { 9, 100 }, { 16, 80 }, { 32, 40 }, { 48, 20 },
+}
+
+-- ConstantDamage's `.reversal`: the user's HP x 48 over its max HP -- with a
+-- max HP past a byte both sides shifted right twice first (the divisor's low
+-- byte, the product's low word; a 0 divisor, which the cart divides by and no
+-- 999-HP monster reaches, is read as 1) -- the quotient's low byte, then the
+-- first FlailReversalPower row at or past it.
+function M.reversalPower(hp, maxHp)
+  local h = max(0, int(hp, 0)) % 65536
+  local m = max(1, int(maxHp, 1)) % 65536
+  local product = h * 48
+  local q
+  if m < 256 then
+    q = floor(product / max(1, m))
+  else
+    local divisor = floor(m / 4) % 256
+    if divisor == 0 then divisor = 1 end
+    local dividend = floor(product / 65536) * 65536 + floor((product % 65536) / 4)
+    q = floor(dividend / divisor)
+  end
+  q = q % 256
+  for _, row in ipairs(M.REVERSAL_POWER) do
+    if row[1] >= q then return row[2] end
+  end
+  return M.REVERSAL_POWER[#M.REVERSAL_POWER][2]
+end
+
+-- MagnitudePower (data/moves/magnitude_power.asm): the first row whose byte is
+-- at or past BattleRandom's -- `5 percent + 1` .. `100 percent` -- gives the
+-- power and the magnitude its line names.
+M.MAGNITUDE_ROWS = {
+  { 13, 10, 4 }, { 38, 30, 5 }, { 89, 50, 6 }, { 166, 70, 7 },
+  { 217, 90, 8 }, { 242, 110, 9 }, { 255, 150, 10 },
+}
+function M.magnitude(byte)
+  local b = max(0, min(255, int(byte, 0)))
+  for _, row in ipairs(M.MAGNITUDE_ROWS) do
+    if row[1] >= b then return row[2], row[3] end
+  end
+  return 150, 10
+end
+
+-- PresentPower (data/moves/present_power.asm): 40 / 80 / 120 at or under
+-- `40 percent` / `70 percent + 1` / `80 percent`, a heal past that (nil).
+M.PRESENT_ROWS = { { 102, 40 }, { 179, 80 }, { 204, 120 } }
+function M.presentPower(byte)
+  local b = max(0, min(255, int(byte, 0)))
+  for _, row in ipairs(M.PRESENT_ROWS) do
+    if row[1] >= b then return row[2] end
+  end
+  return nil
+end
+
+-- The cart's own type constants (constants/type_constants.asm), by the
+-- registry id a ruleset's `typeIds` names them: what Gold's PRESENT hands
+-- DamageCalc as a level and a defense (`present` below) and what CheckTypeMatchup
+-- compares.  A type this table does not name reads as NORMAL's 0.
+M.TYPE_CONSTANTS = {
+  NORMAL = 0, FIGHTING = 1, FLYING = 2, POISON = 3, GROUND = 4, ROCK = 5,
+  BIRD = 6, BUG = 7, GHOST = 8, STEEL = 9, CURSE_TYPE = 19, FIRE = 20,
+  WATER = 21, GRASS = 22, ELECTRIC = 23, PSYCHIC_TYPE = 24, ICE = 25,
+  DRAGON = 26, DARK = 27,
+}
+function M.typeConstant(name)
+  if type(name) ~= "string" then return 0 end
+  return M.TYPE_CONSTANTS[name] or 0
+end
+
+-- ProtectChance (move_effects/protect.asm), after its went-first and
+-- substitute checks: b starts at $ff and halves once per consecutive use
+-- before this one (a b of 0 fails with no draw), then BattleRandom is drawn
+-- again while it is 0 and the use succeeds when (byte - 1) is under b -- the
+-- first use always does, still drawing its byte.
+function M.protectChance(rng, count)
+  local b = 255
+  for _ = 1, max(0, int(count, 0)) do
+    b = floor(b / 2)
+    if b == 0 then return false end
+  end
+  local r = 0
+  for _ = 1, M.REDRAW_LIMIT do
+    r = rng and rng:byte() or 1
+    if r ~= 0 then break end
+  end
+  if r == 0 then r = 1 end
+  return (r - 1) < b
+end
+
+-- BattleCommand_StartRain / StartSun / StartSandstorm: five turns of weather
+-- (wWeatherCount), the count HandleWeather runs down between turns.
+M.WEATHER_TURNS = 5
+M.WEATHER_OF = { [124] = "rain", [125] = "sun", [126] = "sandstorm" }
+
+-- DoWeatherModifiers (engine/battle/misc.asm:49-131, data/battle/
+-- weather_modifiers.asm): the first WeatherTypeModifiers row naming the
+-- weather and the move's type -- WATER x1.5 / FIRE x0.5 in rain, FIRE x1.5 /
+-- WATER x0.5 in sun -- and only when none does, the WeatherMoveModifiers row:
+-- SOLARBEAM x0.5 in rain.  Returns the tenths (15, 5) or nil.  `typeName` is
+-- the move's type registry id (the ruleset's `typeIds`); with none, no type
+-- row can match.
+function M.weatherTenths(weather, typeName, effectId)
+  if weather == "rain" then
+    if typeName == "WATER" then return 15 end
+    if typeName == "FIRE" then return 5 end
+  elseif weather == "sun" then
+    if typeName == "FIRE" then return 15 end
+    if typeName == "WATER" then return 5 end
+  end
+  if weather == "rain" and int(effectId, 0) == M.SOLARBEAM then return 5 end
+  return nil
+end
+
+-- HandleWeather's sandstorm: the types it never hits (`cp ROCK / GROUND /
+-- STEEL` against both of the battle types).
+M.SANDSTORM_IMMUNE = { ROCK = true, GROUND = true, STEEL = true }
+
+-- The weather lines (data/text/battle.asm): the start, the between-turn
+-- continuation and the end, per weather.
+M.WEATHER_LINES = {
+  rain = { start = "A downpour started!", continues = "Rain continues to fall.",
+           ended = "The rain stopped." },
+  sun = { start = "The sunlight got bright!", continues = "The sunlight is strong.",
+          ended = "The sunlight faded." },
+  sandstorm = { start = "A SANDSTORM brewed!", continues = "The SANDSTORM rages.",
+                ended = "The SANDSTORM subsided." },
+}
+
+-- BattleCommand_TimeBasedHealContinue (effect_commands.asm:6421-6513): the
+-- heal's row in .Multipliers -- GetEighthMaxHP, GetQuarterMaxHP, GetHalfMaxHP,
+-- GetMaxHP (0..3) -- starts at the half; a time of day that is not the
+-- move's own (MORNING SUN the morning, SYNTHESIS the day, MOONLIGHT the
+-- night; never asked in a link battle -- `timeMatches` true) takes it down
+-- one; then any weather takes it up one, and anything but the sun down two
+-- more.  Returns the HP it restores.
+M.HEAL_TIME = { [128] = "morn", [129] = "day", [130] = "nite" }
+function M.timeHealAmount(maxHp, timeMatches, weather)
+  local c = 2
+  if not timeMatches then c = c - 1 end
+  if weather ~= nil then
+    c = c + 1
+    if weather ~= "sun" then c = c - 2 end
+  end
+  if c <= 0 then return Items.eighth(maxHp) end
+  if c == 1 then return Items.quarter(maxHp) end
+  if c == 2 then return Items.half(maxHp) end
+  return max(0, int(maxHp, 0)) % 65536
+end
+
+-- ------------------------------------------------------------------
 -- Phase 4 multi-turn / charge handlers
 -- ------------------------------------------------------------------
 
 function M.isCharge(effectId)
   local id = int(effectId, 0)
-  return id == 39 or id == 43 or id == M.SKY_ATTACK
+  return id == 39 or id == 43 or id == M.SKY_ATTACK or id == M.SOLARBEAM
 end
 
 function M.isFly(effectId)
@@ -2142,7 +2498,8 @@ M.FREEZE_BYPASS = { FLAME_WHEEL = true, SACRED_FIRE = true }
 -- (`doubleundergrounddamage`) against one underground, STOMP
 -- (`doubleminimizedamage`) against one that used MINIMIZE.
 M.DOUBLE_VS_FLYING = { [95] = true, [99] = true }
-M.DOUBLE_VS_UNDERGROUND = { [100] = true }
+-- ...and MAGNITUDE's `doubleundergrounddamage` after its `checkhit` (wave 3).
+M.DOUBLE_VS_UNDERGROUND = { [100] = true, [110] = true }
 M.DOUBLE_VS_MINIMIZED = { [94] = true }
 
 function M.isRage(effectId)
@@ -2179,16 +2536,27 @@ M.MOVE_PRIORITY = {
   VITAL_THROW = 0,                                    -- `cp VITAL_THROW / ld a, 0`
 }
 
+-- From wave 3 four of those effects have ids of their own, so a sheet that
+-- states no `priority` is ordered by them as the cart orders by the effect
+-- (data/moves/effects_priorities.asm): PROTECT / ENDURE 3, COUNTER / MIRROR
+-- COAT 0 -- after VITAL THROW's move-id row, which the cart asks first.
+M.EFFECT_PRIORITY = { [120] = 3, [121] = 3, [122] = 0, [123] = 0 }
+
 -- The priority bracket of a move (a move record or its id).  A record's own
 -- `priority` (contract K8: the cart's raw GetMovePriority number, 0..255,
 -- which the client stamps from the move's effect -- or a content mod's move
 -- states) wins over the table, so a modded move with a priority effect moves
--- in its bracket; the table answers for a sheet that states none.
+-- in its bracket; the tables answer for a sheet that states none.
 function M.movePriority(moveOrId)
   if type(moveOrId) == "table" and type(moveOrId.priority) == "number" then
     return moveOrId.priority
   end
-  local priority = M.MOVE_PRIORITY[M.moveKey(moveOrId)]
+  local key = M.moveKey(moveOrId)
+  if key ~= "VITAL_THROW" and type(moveOrId) == "table" then
+    local byEffect = M.EFFECT_PRIORITY[int(moveOrId.effect, -1)]
+    if byEffect ~= nil then return byEffect end
+  end
+  local priority = M.MOVE_PRIORITY[key]
   if priority == nil then return M.BASE_PRIORITY end
   return priority
 end

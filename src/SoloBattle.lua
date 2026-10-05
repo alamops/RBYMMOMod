@@ -3209,20 +3209,29 @@ local function movesetDeltaOk(old, incoming)
   return false
 end
 
--- Red and Gold's: the hub's own two rules (src/Hub.lua `movesetDeltaOk` /
--- `nextMoves12`, exported for exactly this caller so a solo fight and a hub
--- fight apply a learn alike), then the referee's level-up (contract K9 of
--- docs/plans/gen12-referee-gaps-fix.md, `sim:levelUp(playerId, monIndex1,
--- level, stats, maxHp)` -- the call both hubs make after the moves).  The
--- payload is read through the wire's own reader first, as a hub reads it, so
--- the referee is never handed a field a hub would have refused.  Before K9
--- this path dropped the message whole: a solo Red or Gold fight never heard
--- of a move learned mid-fight, nor of a level.
+-- Red and Gold's: the hub's own learn (src/Hub.lua `learnTo`, exported for
+-- exactly this caller so a solo fight and a hub fight land a learn in the same
+-- place by the same two rules, `movesetDeltaOk` / `nextMoves12`), then the
+-- referee's level-up (contract K9 of docs/plans/gen12-referee-gaps-fix.md,
+-- `sim:levelUp(playerId, monIndex1, level, stats, maxHp)` -- the call both
+-- hubs make after the moves).  The payload is read through the wire's own
+-- reader first, as a hub reads it, so the referee is never handed a field a
+-- hub would have refused.  Before K9 this path dropped the message whole: a
+-- solo Red or Gold fight never heard of a move learned mid-fight, nor of a
+-- level.
 --
--- A transformed battler keeps its copied list (the hub's rule: a learn must
--- not end Transform a turn early); the level-up still lands, as on the hub --
--- the monster grew whatever it is wearing.  Answers whether anything reached
--- the referee.
+-- A transformed battler learns where the cart's LearnMove writes: into the
+-- party list its referee put aside at Transform (`preTransform.moves`, which
+-- a switch-out or a faint gives back), and on Red into the battle list as
+-- well -- pokered LearnMove (engine/pokemon/learn_move.asm, the
+-- `wPlayerMonNumber` check) copies the party's moves and PP over
+-- wBattleMonMoves / wBattleMonPP whatever the substatus, while pokecrystal
+-- LearnMove (engine/pokemon/learn.asm) skips that copy under
+-- SUBSTATUS_TRANSFORMED, so on Gold the copied moves fight on.  `learnTo` has
+-- the rule; until wave 3 this path kept a transformed battler's list whole
+-- and the learn was lost at the switch-out.  The level-up lands either way,
+-- as on the hub -- the monster grew whatever it is wearing.  Answers whether
+-- anything reached the referee.
 function M:_applyMoveset12(payload)
   local sim = self.sim
   local fighter = sim and sim.byId and sim.byId[PLAYER_SEAT]
@@ -3232,15 +3241,7 @@ function M:_applyMoveset12(payload)
   local mon = fighter.mons[clean.mon + 1]
   if type(mon) ~= "table" then return false end
   local Hub = need("Hub")
-  local applied = false
-  local incoming = clean.moves
-  if not mon.transformed and type(incoming) == "table" and #incoming > 0 then
-    local old = type(mon.moves) == "table" and mon.moves or {}
-    if Hub.movesetDeltaOk(old, incoming) then
-      mon.moves = Hub.nextMoves12(old, incoming)
-      applied = true
-    end
-  end
+  local applied = Hub.learnTo(self.generation, mon, clean.moves)
   local grew = clean.level ~= nil or clean.stats ~= nil or clean.maxHp ~= nil
   if grew and type(sim.levelUp) == "function" then
     local ok, err = pcall(sim.levelUp, sim, PLAYER_SEAT, clean.mon + 1,

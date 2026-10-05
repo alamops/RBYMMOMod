@@ -1146,7 +1146,8 @@ do
   ok(spoke("Alpha used SLOW SWIPE"), "gen2: an attack prints the display name")
   ok(spoke("THUMP HIT was disabled"), "gen2: Disable landing names the move")
   ok(spoke("THUMP HIT is disabled"), "gen2: and so does the refusal it causes")
-  ok(spoke("THUMP HIT is no longer disabled"), "gen2: and so does it wearing off")
+  -- R2c: the count ticks in CheckTurn and wears off with DisabledNoMoreText.
+  ok(spoke("Beta's disabled no more!"), "gen2: and so does it wearing off")
   ok(spoke("Alpha learned THUMP HIT"), "gen2: Mimic names what it copied")
   ok(spoke("Alpha used THUMP HIT"), "gen2: and the copy keeps the name")
   ok(spoke("Beta used nudge"), "gen2: a move with no name is narrated under its id")
@@ -1261,7 +1262,9 @@ end
 do
   local Effects = need("BattleSim2/Effects")
   eq(Effects.idOf("EFFECT_FLY"), 43, "gen2: EFFECT_FLY maps onto FLY_EFFECT")
-  eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "gen2: EFFECT_SOLARBEAM maps onto CHARGE")
+  -- R2c: SOLARBEAM has its own id (its sun skip and rain halving), a charge.
+  eq(Effects.idOf("EFFECT_SOLARBEAM"), 127, "gen2: EFFECT_SOLARBEAM has its own id")
+  ok(Effects.isCharge(127), "gen2: ...a charge move all the same")
   eq(Effects.idOf("EFFECT_SKULL_BASH"), 39, "gen2: EFFECT_SKULL_BASH maps onto CHARGE")
   eq(Effects.idOf("FLY_EFFECT"), 43, "gen2: Gen1 FLY_EFFECT name still resolves")
   -- Crystal status / stat-down names.  Before these aliases, moveOf stored 0
@@ -1274,7 +1277,7 @@ do
   eq(Effects.idOf("EFFECT_ATTACK_DOWN"), 18, "gen2: EFFECT_ATTACK_DOWN is Growl")
   eq(Effects.idOf("EFFECT_PARALYZE"), 67, "gen2: EFFECT_PARALYZE is Thunder Wave")
   eq(Effects.idOf("EFFECT_METRONOME"), 83, "gen2: EFFECT_METRONOME is Metronome")
-  eq(Effects.idOf("EFFECT_PROTECT"), nil, "gen2: Protect stays unmapped (no handler)")
+  eq(Effects.idOf("EFFECT_PROTECT"), 120, "gen2: Protect has its own id from R2c")
   ok(Effects.hitsInvulnerable("FLY", { id = "GUST" }), "gen2: Gust reaches Fly")
   ok(Effects.hitsInvulnerable("FLY", { id = "TWISTER" }), "gen2: Twister reaches Fly")
   ok(Effects.hitsInvulnerable("FLY", { id = "WHIRLWIND" }), "gen2: Whirlwind reaches Fly")
@@ -1603,13 +1606,15 @@ do
         { playerId = "a1", name = "Ann",
           mons = { mon({
             species = "Alpha", maxHp = 200, spe = 90,
-            moves = { move({ id = "leer", power = 0, accuracy = 0,
+            -- The wire's accuracy byte: 255 never draws (R2c, the cart's
+            -- CheckHit), where 0 was the percent domain's "never misses".
+            moves = { move({ id = "leer", power = 0, accuracy = 255,
                              effect = leer }) },
           }) } },
         { playerId = "a2", name = "Abe",
           mons = { mon({
             species = "Gamma", maxHp = 200, spe = 80,
-            moves = { move({ id = "hypno", power = 0, accuracy = 0,
+            moves = { move({ id = "hypno", power = 0, accuracy = 255,
                              effect = sleep }) },
           }) } },
       },
@@ -1901,10 +1906,13 @@ do
        mode .. ": unbadged, the foe (42) still goes first")
     eq(firstHit(exchange(mode, { spe = 40, badges = { PLAIN = true } }, { spe = 42 })), 3,
        mode .. ": PLAIN (40 -> 45) puts side a in front")
-    eq(hitOn(exchange(mode, {}, { power = 30 }), 0), 11,
-       mode .. ": Bob's 30-power hit on an unbadged Ann is 11")
-    eq(hitOn(exchange(mode, { badges = { MINERAL = true } }, { power = 30 }), 0), 9,
-       mode .. ": MINERAL (Defense 40 -> 45) cuts it to 9")
+    -- R2c moved Bob's roll (the crit byte and the roll now come before the
+    -- accuracy check, and a 255 accuracy byte draws nothing): 10 and 8 on
+    -- this seed, the same eighth apart.
+    eq(hitOn(exchange(mode, {}, { power = 30 }), 0), 10,
+       mode .. ": Bob's 30-power hit on an unbadged Ann is 10")
+    eq(hitOn(exchange(mode, { badges = { MINERAL = true } }, { power = 30 }), 0), 8,
+       mode .. ": MINERAL (Defense 40 -> 45) cuts it to 8")
     eq(hitOn(exchange(mode, { type = 2, spa = 88 }, {}, RULES), 3), 23,
        mode .. ": Ann's Special hit, unbadged, is 23")
     eq(hitOn(exchange(mode, { type = 2, spa = 88, badges = { GLACIER = true } }, {}, RULES), 3), 25,
@@ -1914,12 +1922,12 @@ do
     -- 227 boosts to 255, which the tail reads as odd (Sp. Def boosted); 200
     -- boosts to 225, even, and Sp. Def stays as it was.
     local special = { power = 30, type = 2, spa = 60 }
-    eq(hitOn(exchange(mode, { spa = 227 }, special, RULES), 0), 10,
-       mode .. ": Bob's Special hit on an unbadged Ann is 10")
-    eq(hitOn(exchange(mode, { spa = 227, badges = { GLACIER = true } }, special, RULES), 0), 9,
-       mode .. ": GLACIER with Sp. Atk 227 (-> 255) boosts Sp. Def too: 9")
-    eq(hitOn(exchange(mode, { spa = 200, badges = { GLACIER = true } }, special, RULES), 0), 10,
-       mode .. ": GLACIER with Sp. Atk 200 (-> 225) leaves Sp. Def alone: 10")
+    eq(hitOn(exchange(mode, { spa = 227 }, special, RULES), 0), 9,
+       mode .. ": Bob's Special hit on an unbadged Ann is 9")
+    eq(hitOn(exchange(mode, { spa = 227, badges = { GLACIER = true } }, special, RULES), 0), 8,
+       mode .. ": GLACIER with Sp. Atk 227 (-> 255) boosts Sp. Def too: 8")
+    eq(hitOn(exchange(mode, { spa = 200, badges = { GLACIER = true } }, special, RULES), 0), 9,
+       mode .. ": GLACIER with Sp. Atk 200 (-> 225) leaves Sp. Def alone: 9")
 
     -- The 999 cap: 950 + floor(950 / 8) = 1068 is held at 999, so a badged
     -- 950 hits exactly as an unbadged 999 does, and harder than a bare 950.
@@ -2219,7 +2227,9 @@ end
 do
   local GHOST_CHART = { { 100, 0 }, { 100, 100 } }
   local function vsGhost(pp)
+    -- Seed 1: no crit on Struggle's swing (R2c moved the stream off 4242's).
     return duel({
+      seed = 1,
       chart = GHOST_CHART,
       a = { sheet({ species = "Alpha", spe = 90, types = { 0 },
                     moves = { hit("thump", 40, 0, 0, pp) } }) },
@@ -2634,7 +2644,8 @@ do
   ok(not sawKind(subEvents, "held"), "a substitute at `effectchance` keeps the item")
   eq(subBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...which the foe still holds")
   ok(said(subEvents, "Alpha used THIEF"), "...though the hit itself landed")
-  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 153)
+  -- Seed 218 draws the 255 at `effectchance` (R2c's draw order moved it off 153).
+  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 218)
   ok(not sawKind(missEvents, "held"), "the 1/256 byte of 255 against a 100% chance takes nothing")
   eq(missBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...and the foe keeps its item")
   local zero = thiefMove()
@@ -2862,6 +2873,9 @@ do
     local battle, foe = fight({ mode = "wild", seed = 2, a = { alpha },
       b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
     drain(battle)
+    -- A player's Bide is asked (R2b's finding (h), R2c): its FIGHT is the
+    -- release, whatever slot it names.
+    battle:submitChoice("p1", { action = "fight", move = 1 })
     battle:submitChoice(foe, { action = "fight", move = 0 })
     return drain(battle), battle
   end
@@ -2971,10 +2985,11 @@ do
   eq(Damage.compute({ level = 100, attack = 255 }, { defense = 1 }, { power = 250 },
                     { roll = 100, rageCount = 255 }).damage, 65535,
      "...pinned at $ffff when the sum carries")
-  local sBattle, sFoe = rageFight({ seed = 1, status = "PSN", confusion = 3, bMove = "thump", bEffect = 0 })
+  -- Seed 2 (R2c's draw order moved it off 1).
+  local sBattle, sFoe = rageFight({ seed = 2, status = "PSN", confusion = 3, bMove = "thump", bEffect = 0 })
   round(sBattle, sFoe)
   local s2 = round(sBattle, sFoe)
-  ok(said(s2, "Alpha hurt itself in confusion"), "seed 1: a confusion self-hit while raging")
+  ok(said(s2, "Alpha hurt itself in confusion"), "seed 2: a confusion self-hit while raging")
   eq(sBattle.byId.p1.mons[1].rageCounter, 2, "...builds nothing, nor does poison: only Beta's two hits count")
   local cBattle2, cFoe2 = rageFight({ seed = 21, aSpe = 10, bSpe = 90, bHp = 999, raging = true,
                                       rageCounter = 254, substitute = 30 })
@@ -3349,11 +3364,11 @@ do
     eq(Effects.idOf(name), id, name .. " has its own id")
     eq(Effects.nameOf(id), name, "...and the id names it back")
   end
-  eq(Effects.MAX_EFFECT_ID, 105, "the table ends at EFFECT_TOXIC")
-  eq(Effects.nameOf(106), nil, "nothing past it")
+  eq(Effects.MAX_EFFECT_ID, 132, "the table ends at EFFECT_PSYWAVE (R2c)")
+  eq(Effects.nameOf(133), nil, "nothing past it")
   eq(Effects.category(101), "charge", "SKY ATTACK still charges")
   ok(Effects.isCharge(Effects.SKY_ATTACK), "...as a charge move")
-  eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "the other charge moves keep CHARGE_EFFECT")
+  eq(Effects.idOf("EFFECT_RAZOR_WIND"), 39, "the other charge moves keep CHARGE_EFFECT")
 
   -- (b) BattleCommand_EffectChance: a byte at chance 0, none behind a substitute
   local r = bytes({ 254 })
@@ -3453,7 +3468,8 @@ do
   eq(user.stages.spe, 0, "a failed effectchance raises nothing")
 
   -- (g) CantMove: a stopped rampage or charge is over
-  local thrasher = withMove(hit("THRASH", 20, 0, 27, 10), { seed = 7 })
+  -- Seed 3 (R2c: the 63/256 paralysis byte and the draw order moved it off 7).
+  local thrasher = withMove(hit("THRASH", 20, 0, 27, 10), { seed = 3 })
   round(thrasher, "p2")
   local alpha = thrasher.byId.p1.mons[1]
   ok(alpha.thrashing ~= nil, "THRASH starts a rampage")
@@ -3464,7 +3480,7 @@ do
     local ev = round(thrasher, "p2")
     if said(ev, "Alpha is fully paralyzed") then stopped = true; break end
   end
-  ok(stopped, "seed 7: a full paralysis lands while the rampage runs")
+  ok(stopped, "seed 3: a full paralysis lands while the rampage runs")
   eq(alpha.thrashing, nil, "a full paralysis (CantMove) ends the rampage")
   eq(alpha.confusion, 0, "...with no confusion")
   local flier = withMove(hit("FLY", 30, 0, 43), { seed = 3 })
@@ -3785,6 +3801,174 @@ do
   a.justFrozen = nil
   b:_heldDefrost()
   ok(b.rng:state() ~= before, "the next turn's defrost rolls")
+end
+
+-- ------------------------------------------------------------------
+-- 12. the referee-gaps run's wave 3 (R2c): the Gold move effects, weather and
+--     R2b's found cart differences (the parity driver's r2c_* scenarios pin
+--     the same rules across the twins)
+-- ------------------------------------------------------------------
+do
+  local Status2 = need("BattleSim2/Status")
+  local Rng2 = need("BattleSim2/Rng")
+  local function stream(list)
+    local i = 0
+    return { byte = function() i = i + 1; return list[i] or 0 end }
+  end
+  local TYPES = { "NORMAL", "FIGHTING", "GHOST", "WATER", "FIRE", "ROCK", "STEEL", "GROUND" }
+  local function f3(o)
+    local battle, foe = fight(o)
+    drain(battle)
+    return battle, foe
+  end
+  local function am(id, power, ty, effect, acc, chance)
+    local m = hit(id, power, ty, effect)
+    m.accuracy, m.chance = acc or 255, chance or 0
+    return m
+  end
+  local function dmgs(events, slot)
+    local out = {}
+    for _, e in ipairs(events) do
+      if e.t == "damage" and e.slot == slot then out[#out + 1] = e.amount end
+    end
+    return out
+  end
+
+  -- (a) + (b): a 255 accuracy byte draws nothing, and a NormalHit draws its
+  -- crit and roll whatever happens -- two draws for the turn, a splash none.
+  local b = f3({ seed = 41, a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 20) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("splash", 0, 0, 85) } }) } })
+  local probe = Rng2.new(0):setState(b.rng:state())
+  probe:next(); probe:next()
+  round(b, "p2")
+  eq(b.rng:state(), probe:state(), "(a)+(b): a hit at byte 255 draws the crit and the roll only")
+
+  -- (c) no sleep byte in CheckTurn; (d) 63/256; (e) SleepTarget's 2..7.
+  local s = f3({ seed = 42, a = { held({ species = "Alpha", spe = 90, status = "SLP", statusTurns = 4,
+                                          moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  local sa = s.byId.p1.mons[1]
+  local before = s.rng:state()
+  s:_runGates(s.byId.p1, sa, sa.moves[1])
+  eq(s.rng:state(), before, "(c): a sleeping monster's CheckTurn draws nothing")
+  ok(Status2.paralysisStop(62) and not Status2.paralysisStop(63), "(d): full paralysis under 63")
+  local target = { species = "T", hp = 10, maxHp = 10, stages = {}, types = { 0 }, substitute = 0 }
+  Effects.applyPrimary({ effectId = 32, rng = stream({ 0, 7, 8, 3 }), userMon = { species = "U", maxHp = 10, stages = {} },
+    targetMon = target, userFighter = { slot = 0, side = "a" }, targetFighter = { slot = 3, side = "b" } })
+  eq(target.statusTurns, 4, "(e): 0 and 7 are drawn again, then 3 + 1")
+
+  -- (f) the Disable count ticks in CheckTurn.
+  local d = f3({ seed = 43, a = { held({ species = "Alpha", spe = 90, disable = { moveIndex = 2, turns = 1 },
+                                          moves = { hit("tap", 1), hit("thump", 10) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  local dev = round(d, "p2")
+  ok(said(dev, "Alpha's disabled no more!"), "(f): the count runs out at CheckTurn")
+  eq(d.byId.p1.mons[1].disable, nil, "...and the move is free again")
+
+  -- (h) a player's Bide is asked (and an item ends it); the computer's is filled.
+  local bd = f3({ seed = 44, a = { held({ species = "Alpha", spe = 90, moves = { hit("BIDE", 0, 0, 26), hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 5) } }) } })
+  round(bd, "p2")
+  ok(bd.byId.p1.mons[1].bide ~= nil, "BIDE begins")
+  eq(bd.byId.p1.choice, nil, "(h): the player is asked during a Bide")
+  round(bd, "p2", { action = "item", item = "POTION" })
+  eq(bd.byId.p1.mons[1].bide, nil, "...and an item ends it")
+  local cb = f3({ mode = "wild", seed = 45,
+    a = { held({ species = "Alpha", spe = 10, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Wild", spe = 90, moves = { hit("BIDE", 0, 0, 26) } }) } })
+  round(cb, "wild")
+  ok(cb.byId.wild.choice ~= nil and cb.byId.wild.forced, "...the wild monster's Bide is filled")
+
+  -- (i) FlinchTarget: a target that went first is not flinched; a landing
+  -- flinch cancels a recharge.
+  local victim = { species = "V", hp = 10, maxHp = 10, stages = {}, substitute = 0, mustRecharge = true }
+  Effects.applySide({ effectId = 31, hit = true, targetMon = victim, targetWentFirst = true,
+    targetFighter = { slot = 3, side = "b" } })
+  ok(not victim.flinch, "(i): a target that went first is not flinched")
+  Effects.applySide({ effectId = 31, hit = true, targetMon = victim, targetWentFirst = false,
+    targetFighter = { slot = 3, side = "b" } })
+  ok(victim.flinch and not victim.mustRecharge, "...and a flinch cancels its recharge")
+
+  -- PROTECT and COUNTER.
+  local p = f3({ seed = 46, a = { held({ species = "Alpha", maxHp = 400, spe = 90,
+                                          moves = { hit("PROTECT", 0, 0, Effects.PROTECT) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("slam", 40) } }) } })
+  local pev = round(p, "p2")
+  ok(said(pev, "Alpha's PROTECTING itself!") and damageOn(pev, 0) == nil, "PROTECT blocks the slam")
+  eq(p.byId.p1.mons[1].protect, nil, "...and is down once the turn's moves are done")
+  local c = f3({ seed = 47, a = { held({ species = "Alpha", maxHp = 600, spe = 10,
+                                          moves = { hit("COUNTER", 1, 0, Effects.COUNTER) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 90, moves = { hit("slam", 40) } }) } })
+  local cev = round(c, "p2")
+  eq(damageOn(cev, 3), 2 * damageOn(cev, 0), "COUNTER returns twice what the slam took")
+
+  -- FUTURE SIGHT hits at the end of the turn after next.
+  local fsb = f3({ seed = 48, a = { held({ species = "Alpha", spe = 90,
+      moves = { hit("FUTURE_SIGHT", 80, 0, Effects.FUTURE_SIGHT), hit("splash", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("splash", 0, 0, 85) } }) } })
+  ok(said(round(fsb, "p2"), "Alpha foresaw an attack!"), "FUTURE SIGHT is foreseen")
+  ok(not said(round(fsb, "p2", { action = "fight", move = 1 }), "Beta was hit by FUTURE SIGHT!"), "...not yet")
+  ok(said(round(fsb, "p2", { action = "fight", move = 1 }), "Beta was hit by FUTURE SIGHT!"),
+     "...it lands at the second turn's end")
+
+  -- PURSUIT chases a player's switch, doubled, before it.
+  local pu = f3({ seed = 49,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 1) } }),
+          held({ species = "Gamma", spe = 90, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("PURSUIT", 40, 0, Effects.PURSUIT) } }) } })
+  local puev = round(pu, "p2", { action = "switch", slot = 1 })
+  local hitAt, switchAt
+  for i, e in ipairs(puev) do
+    if e.t == "damage" and not hitAt then hitAt = i end
+    if e.t == "switch" and not switchAt then switchAt = i end
+  end
+  ok(hitAt and switchAt and hitAt < switchAt, "PURSUIT lands before the player's switch")
+
+  -- The weather: THUNDER at a 1 byte never misses in the rain; SANDSTORM
+  -- spares STEEL; the time-of-day heal reads the clock outside a link fight.
+  local w = f3({ seed = 50, typeIds = TYPES,
+    a = { held({ species = "Alpha", maxHp = 400, spe = 90,
+                 moves = { hit("RAIN_DANCE", 0, 3, Effects.RAIN_DANCE), am("THUNDER", 60, 0, Effects.THUNDER, 1),
+                           hit("SANDSTORM", 0, 5, Effects.SANDSTORM) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, types = { 6 }, moves = { hit("splash", 0, 0, 85) } }) } })
+  ok(said(round(w, "p2"), "A downpour started!"), "RAIN DANCE")
+  local tev = round(w, "p2", { action = "fight", move = 1 })
+  ok(damageOn(tev, 3) ~= nil, "THUNDER's 1 byte never misses in the rain")
+  local sev = round(w, "p2", { action = "fight", move = 2 })
+  ok(said(sev, "The SANDSTORM hits Alpha!") and not said(sev, "The SANDSTORM hits Beta!"),
+     "SANDSTORM hits the NORMAL type and spares the STEEL one")
+  local th = f3({ mode = "wild", seed = 51,
+    a = { held({ species = "Alpha", maxHp = 400, hp = 50, spe = 90,
+                 moves = { hit("MORNING_SUN", 0, 0, Effects.MORNING_SUN), hit("MOONLIGHT", 0, 0, Effects.MOONLIGHT) } }) },
+    b = { held({ species = "Wild", spe = 10, moves = { hit("splash", 0, 0, 85) } }) } })
+  th.timeOfDay = "nite"
+  local function drained(events)
+    for _, e in ipairs(events) do if e.t == "drain" then return e.amount end end
+    return nil
+  end
+  eq(drained(round(th, "wild")), 100, "MORNING SUN at night: a quarter")
+  eq(drained(round(th, "wild", { action = "fight", move = 1 })), 200, "MOONLIGHT at night: a half")
+
+  -- The fixed-damage rows draw no crit and no roll: SEISMIC TOSS into a
+  -- SPLASH leaves the stream where it was.
+  local fx = f3({ seed = 52, a = { held({ species = "Alpha", level = 37, spe = 90,
+                                           moves = { hit("SEISMIC_TOSS", 1, 1, Effects.LEVEL_DAMAGE) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("splash", 0, 0, 85) } }) } })
+  local fxBefore = fx.rng:state()
+  eq(damageOn(round(fx, "p2"), 3), 37, "(g): SEISMIC TOSS deals the level")
+  eq(fx.rng:state(), fxBefore, "...with nothing drawn")
+
+  -- ROLLOUT locks the seat in; BEAT UP from a wild monster "fails".
+  local ro = f3({ seed = 53, a = { held({ species = "Alpha", spe = 90,
+      moves = { hit("ROLLOUT", 30, 0, Effects.ROLLOUT), hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 999, spe = 10, moves = { hit("tap", 1) } }) } })
+  round(ro, "p2")
+  ok(ro.byId.p1.choice ~= nil and ro.byId.p1.forced, "ROLLOUT's next roll is filled")
+  local bu = f3({ mode = "wild", seed = 54,
+    a = { held({ species = "Alpha", maxHp = 400, spe = 10, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Wild", spe = 90, moves = { hit("BEAT_UP", 10, 0, Effects.BEAT_UP) } }) } })
+  local buev = round(bu, "wild")
+  ok(said(buev, "Wild's attack!") and said(buev, "But it failed"), "a wild BEAT UP hits once and fails")
 end
 
 -- ------------------------------------------------------------------

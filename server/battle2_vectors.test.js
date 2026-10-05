@@ -45,7 +45,7 @@ test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped — reread the notes before touching this');
   assert.strictEqual(vectors.generation, 2, 'this suite is Gen2-only');
   for (const group of ['damage', 'accuracy', 'crit', 'status', 'badgeStats', 'badgeTypes',
-    'stages', 'battleStats', 'truncate', 'items']) {
+    'stages', 'battleStats', 'truncate', 'items', 'gold']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -113,30 +113,31 @@ test('no Gen1 255-stat clamp', () => {
 test('accuracy vectors', async (t) => {
   for (const v of vectors.accuracy) {
     await t.test(v.id, () => {
-      expectFields(accuracy.hit(v.in), v.out, v.id);
+      const got = accuracy.hit(v.in);
+      got.draws = got.effectiveAccuracy === null ? undefined : accuracy.draws(got.effectiveAccuracy);
+      expectFields(got, v.out, v.id);
     });
   }
 });
 
-test('a 100% move hits every roll 0..99 (no Gen1 1/256 quirk)', () => {
+test("a 255 byte hits every roll and draws none; any lower byte rolls (R2c's byte domain)", () => {
   let hits = 0;
-  for (let roll = 0; roll <= accuracy.ROLL_MAX; roll++) {
-    if (accuracy.hit({
-      accuracy: 100, accuracyStage: 0, evasionStage: 0, roll,
-    }).hit) hits++;
+  for (let roll = 0; roll <= 255; roll++) {
+    if (accuracy.hit({ accuracy: 255, accuracyStage: 0, evasionStage: 0, roll }).hit) hits++;
   }
-  assert.strictEqual(hits, 100, 'roll 0..99 all hit a neutral 100% move');
-
+  assert.strictEqual(hits, 256, 'every byte hits a neutral 100% move');
+  assert.strictEqual(accuracy.draws(255), false, '...and the cart draws no byte for it');
+  assert.strictEqual(accuracy.draws(254), true, 'a byte of 254 is rolled');
   let always = 0;
-  for (let roll = 0; roll <= accuracy.ROLL_MAX; roll++) {
-    if (accuracy.hit({ accuracy: 100, alwaysHits: true, roll }).hit) always++;
+  for (let roll = 0; roll <= 255; roll++) {
+    if (accuracy.hit({ accuracy: 1, alwaysHits: true, roll }).hit) always++;
   }
-  assert.strictEqual(always, 100, 'a move that cannot miss does not consult the roll');
+  assert.strictEqual(always, 256, 'a move that cannot miss does not consult the roll');
 });
 
 test('accuracy clamps at both ends', () => {
-  assert.strictEqual(accuracy.effective(100, 6, 0), 100, 'boosts cannot exceed 100');
-  assert.strictEqual(accuracy.effective(10, -6, 6), 1, 'stacked drops floor at 1, never 0');
+  assert.strictEqual(accuracy.effectiveByte(200, 6, 0), 255, 'a byte past $ff is held at $ff');
+  assert.strictEqual(accuracy.effectiveByte(10, -6, 6), 1, 'stacked drops floor at 1, never 0');
 });
 
 test('crit vectors', async (t) => {
@@ -192,12 +193,12 @@ test('freeze never thaws in CheckTurn; HandleDefrost thaws under 25', () => {
   assert.strictEqual(defrosts, status.DEFROST_BYTE, '`cp 10 percent`: 25 of 256');
 });
 
-test('paralysis stops exactly when roll % 4 === 0', () => {
+test('paralysis stops on a byte under 63 (`cp 25 percent`)', () => {
   let stopped = 0;
-  for (let roll = 0; roll < 16; roll++) {
+  for (let roll = 0; roll <= 255; roll++) {
     if (status.paralysisTick(roll).fullyParalyzed) stopped++;
   }
-  assert.strictEqual(stopped, 4, '0,4,8,12 of 0..15 — 1/4');
+  assert.strictEqual(stopped, 63, '63 of 256 bytes');
 });
 
 test('confusion self-hits exactly half the time and shares Gen2 damage', () => {
@@ -322,6 +323,94 @@ test('held item and obedience vectors', async (t) => {
       const rule = ITEM_RULES[v.in.kind];
       assert.ok(rule, `${v.id}: no handler for item rule ${v.in.kind}`);
       expectFields(rule(v.in), v.out, v.id);
+    });
+  }
+});
+
+// The wave-3 (R2c) Gold formulas, one `kind` per rule -- the same dispatch
+// tests/battle_sim2_vectors.lua runs.
+const byteStream = (list) => {
+  let i = 0;
+  return { byte: () => { i += 1; return list[i - 1] === undefined ? 0 : list[i - 1]; }, drawn: () => i };
+};
+const nul = (v) => (v === null || v === undefined ? undefined : v);
+const GOLD_RULES = {
+  happinessPower: (input) => ({ power: Effects.happinessPower(nul(input.happiness)) }),
+  frustrationPower: (input) => ({ power: Effects.frustrationPower(nul(input.happiness)) }),
+  hiddenPower: (input) => {
+    const hp = Effects.hiddenPower(nul(input.dvs));
+    return { power: hp ? hp.power : undefined, type: hp ? hp.type : undefined };
+  },
+  reversalPower: (input) => ({ power: Effects.reversalPower(input.hp, input.maxHp) }),
+  magnitude: (input) => Effects.magnitude(input.byte),
+  presentPower: (input) => ({ power: nul(Effects.presentPower(input.byte)) }),
+  typeConstant: (input) => ({ value: Effects.typeConstant(nul(input.name)) }),
+  protectChance: (input) => {
+    const r = byteStream(input.bytes);
+    return { ok: Effects.protectChance(r, input.count), drawn: r.drawn() };
+  },
+  tripleKickCount: (input) => {
+    const r = byteStream(input.bytes);
+    return { hits: Effects.tripleKickCount(r), drawn: r.drawn() };
+  },
+  psywave: (input) => {
+    const r = byteStream(input.bytes);
+    const damage = Effects.fixedDamage({ effectId: Effects.PSYWAVE, userMon: { level: input.level }, rng: r });
+    return { damage, drawn: r.drawn() };
+  },
+  levelDamage: (input) => ({
+    damage: Effects.fixedDamage({ effectId: Effects.LEVEL_DAMAGE, userMon: { level: input.level } }),
+  }),
+  weatherTenths: (input) => ({
+    tenths: nul(Effects.weatherTenths(nul(input.weather), nul(input.typeName), input.effectId)),
+  }),
+  timeHealAmount: (input) => ({
+    value: Effects.timeHealAmount(input.maxHp, input.timeMatches, nul(input.weather)),
+  }),
+  calc: (input) => ({
+    damage: nul(damage.calc(input.level, input.power, input.attack, input.defense, {
+      crit: input.crit, itemBoostPercent: nul(input.itemBoostPercent), carry: nul(input.carry),
+    })),
+  }),
+  stab: (input) => {
+    const got = damage.stab(input.damage, {
+      weatherTenths: nul(input.weatherTenths), badgeTypeBoost: input.badgeTypeBoost,
+      stab: input.stab, typeEffect: nul(input.typeEffect),
+    });
+    return { damage: got.damage, immune: got.immune, cReg: nul(got.cReg) };
+  },
+  multiply: (input) => ({ damage: damage.multiply(input.damage, input.times) }),
+  doubleTimes: (input) => ({ damage: damage.doubleTimes(input.damage, input.count) }),
+  applyRoll: (input) => ({
+    damage: damage.applyRoll(input.damage, input.roll), varies: damage.varies(input.damage),
+  }),
+  quarter: (input) => ({ value: Items.quarter(input.maxHp) }),
+  half: (input) => ({ value: Items.half(input.maxHp) }),
+  sleepCount: (input) => {
+    const r = byteStream(input.bytes);
+    const target = { species: 'T', hp: 10, maxHp: 10, stages: {}, types: [0], substitute: 0 };
+    Effects.applyPrimary({
+      effectId: 32, rng: r, userMon: { species: 'U', maxHp: 10, stages: {} },
+      targetMon: target, userFighter: { slot: 0, side: 'a' }, targetFighter: { slot: 3, side: 'b' },
+    });
+    return { turns: target.statusTurns, drawn: r.drawn() };
+  },
+  movePriority: (input) => ({
+    priority: Effects.movePriority({ id: input.id, effect: input.effect, priority: nul(input.priority) }),
+  }),
+};
+
+test('Gold move-effect formula vectors (R2c)', async (t) => {
+  for (const v of vectors.gold) {
+    await t.test(v.id, () => {
+      const rule = GOLD_RULES[v.in.kind];
+      assert.ok(rule, `${v.id}: no handler for gold rule ${v.in.kind}`);
+      const got = rule(v.in);
+      for (const key of Object.keys(v.out)) {
+        const want = v.out[key];
+        assert.strictEqual(got[key] === undefined ? null : got[key], want,
+          `${v.id}: ${key} expected ${JSON.stringify(want)}, got ${JSON.stringify(got[key])}`);
+      }
     });
   }
 });

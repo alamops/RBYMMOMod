@@ -78,8 +78,8 @@ local function dummyFighter(slot, side)
   return { slot = slot or 1, side = side or "a" }
 end
 
-local function apply(effectId, user, target)
-  return Effects.applyPrimary({
+local function apply(effectId, user, target, extra)
+  local ctx = {
     effectId = effectId,
     rng = { byte = function() return 0 end },
     userMon = user,
@@ -87,15 +87,32 @@ local function apply(effectId, user, target)
     userFighter = dummyFighter(1, "a"),
     targetFighter = dummyFighter(2, "b"),
     moveIndex = 1,
-  })
+  }
+  for k, v in pairs(extra or {}) do ctx[k] = v end
+  return Effects.applyPrimary(ctx)
+end
+
+-- R1c: only the routines that ask CheckTargetSubstitute -- the primary
+-- stat drops, PoisonEffect, ConfusionEffect -- stop at a doll (effects.asm
+-- :1436-1446).  SleepEffect, TransformEffect_ and MimicEffect never ask.
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  -- A generator stuck on 0 would spin `.setSleepCounter` forever on the
+  -- cart; the referee's REDRAW_GUARD answers 1 instead.
+  local out = apply(32, user, target)
+  eq(out.nothing, false, "SLEEP_EFFECT reaches the monster behind a substitute")
+  eq(target.status, "sleep", "SLEEP_EFFECT lands through a substitute")
+  eq(target.statusTurns, 1, "a stream of zero bytes is the guard's 1 turn, not a hang")
+  eq(target.substitute, 40, "...and the doll stands")
 end
 
 do
   local user = dummyMon()
   local target = dummyMon({ species = "Beta", substitute = 40 })
-  local out = apply(32, user, target)
-  eq(out.nothing, true, "SLEEP_EFFECT vs substitute is nothing")
-  eq(target.status, nil, "SLEEP_EFFECT does not land through a substitute")
+  local out = apply(49, user, target)
+  eq(out.nothing, true, "CONFUSION_EFFECT vs substitute is nothing (CheckTargetSubstitute)")
+  eq(target.confusion, nil, "CONFUSION_EFFECT does not confuse through a substitute")
 end
 
 do
@@ -121,16 +138,25 @@ do
   local user = dummyMon()
   local target = dummyMon({ species = "Beta", substitute = 40 })
   local out = apply(57, user, target)
-  eq(out.nothing, true, "TRANSFORM_EFFECT vs substitute is nothing")
-  eq(user.transformed, nil, "TRANSFORM_EFFECT does not copy through a substitute")
+  eq(out.nothing, false, "TRANSFORM_EFFECT goes through a substitute")
+  eq(user.transformed, true, "TRANSFORM_EFFECT copies the monster behind a substitute")
 end
 
 do
-  local user = dummyMon()
-  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
-  local out = apply(82, user, target)
-  eq(out.nothing, true, "MIMIC_EFFECT vs substitute is nothing")
-  eq(user.moves[1] and user.moves[1].id, "thump", "MIMIC_EFFECT does not copy through a substitute")
+  local user = dummyMon({ moves = {
+    { id = "MIMIC", name = "MIMIC", pp = 7, maxPp = 10, ppUps = 0, power = 0,
+      accuracy = 255, type = 0, effect = 82, chance = 0 },
+  } })
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(82, user, target, { mimicSlot = 1 })
+  eq(out.nothing, false, "MIMIC_EFFECT goes through a substitute")
+  eq(user.moves[1] and user.moves[1].id, "thump", "MIMIC_EFFECT copies the picked move behind a doll")
+  eq(user.moves[1] and user.moves[1].pp, 7, "...and the slot keeps MIMIC's PP (`ld [hl], a` writes the id alone)")
+  Effects.restoreMoves(user)
+  eq(user.moves[1] and user.moves[1].id .. ":" .. user.moves[1].pp, "MIMIC:7",
+     "a switch-out gives the party's MIMIC back, at the slot's PP")
+  local missed = apply(82, user, target, {})
+  eq(missed.messages[1], "But it failed", "MIMIC with no pick fails")
 end
 
 do

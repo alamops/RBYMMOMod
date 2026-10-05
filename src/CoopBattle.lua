@@ -2460,8 +2460,21 @@ local READS_ITS_TARGET = {
 --
 -- Kept off it on purpose: TRANSFORM, MIMIC, SKETCH, PSYCH_UP, CONVERSION2,
 -- MIRROR_MOVE and PAIN_SPLIT read the target; CURSE does when its user is a
--- Ghost; METRONOME and SLEEP_TALK call a move that may need one; BIDE
--- unleashes on a foe.
+-- Ghost; METRONOME and SLEEP_TALK call a move that may need one -- the Gold
+-- referee uses the called move through the caller's own choice, target and
+-- all (src/BattleSim2/Turn.lua `_useMove`'s `moveOverride`, which resolves
+-- `choice.target` once for the whole action), so skipping the picker would
+-- aim a called TACKLE at the first living foe without asking; BIDE unleashes
+-- on a foe.
+--
+-- One table, keyed by the cart's EFFECT_* constant -- the name a Gold move
+-- record's `effect` carries and the name the referee numbers it under
+-- (src/BattleSim2/Effects.lua NAMES / `idOf`) -- so a self or field effect the
+-- referee grows is one entry here, and a targeted one is none.  The referee's
+-- own Gold-native ids so far: 87-101 all have power (the picker by the rule
+-- below); 102 EFFECT_SLEEP_TALK (off the list, above); 103 EFFECT_LOCK_ON
+-- (LOCK-ON / MIND READER: `checkhit` on a foe, off); 104 EFFECT_SAFEGUARD
+-- (the user's side, on); 105 EFFECT_TOXIC (`checkhit` on a foe, off).
 local SELF_EFFECTS2 = {
   EFFECT_ATTACK_UP = true, EFFECT_DEFENSE_UP = true, EFFECT_SPEED_UP = true,
   EFFECT_SP_ATK_UP = true, EFFECT_SP_DEF_UP = true, EFFECT_ACCURACY_UP = true,
@@ -9058,8 +9071,19 @@ function M:sheetIndexFor(mon)
 end
 
 -- Host-sim: `curMoves` is the same table as `mon.moves`, so the free-slot
--- write is already live. Mediated: rebuild the overlay the FIGHT menu reads
--- and publish PROTOCOL 28 so the referee executes the new move.
+-- write is already live. Mediated: rebuild the sheet and publish PROTOCOL 28
+-- so the referee executes the new move.
+--
+-- The referee's Transform / Mimic overlay (`medMoveList`) follows the cart's
+-- LearnMove, as the referee's learn does (src/Hub.lua `learnTo`;
+-- MediatedBattle:syncFightMoves states both carts): on Red a learn copies the
+-- party's moves over the battle monster's whatever it wears, so the overlay
+-- goes and FIGHT reads the monster's own list; on Gold a transformed monster
+-- keeps fighting with its copies, so the overlay stays.  Only on a learn -- a
+-- level-up that taught nothing resends the list unchanged and never reached
+-- LearnMove.  Before wave 3 every call dropped it, so a Gold monster that
+-- levelled under Transform showed its own moves while the referee fought on
+-- with the copies (and read the chosen slot off those).
 --
 -- `grew`: the monster just levelled, so the same message carries its new
 -- level, stats and max HP (contract K9; Mediated.growthOf) and the uploaded
@@ -9072,14 +9096,13 @@ function M:syncFightMoves(mon, grew)
      and battler.curMoves ~= mon.moves then
     battler.curMoves = mon.moves
   end
-  if self.medMoveList and battler and battler.mon == mon then
-    self.medMoveList = nil
-  end
   if not (self.mediated and self.transport and self.battleId) then return false end
   local index = self:sheetIndexFor(mon)
   if not index then return false end
   local moves = Mediated.sheetMoves(self.game, mon)
   if #moves == 0 then return false end
+  local before = self.medMine and self.medMine[index] and self.medMine[index].moves
+  local learned = not Mediated.sameMoveIds(before, moves)
   local growth = grew and Mediated.growthOf(self.game, mon) or nil
   if self.medMine and self.medMine[index] then
     self.medMine[index].moves = moves
@@ -9088,8 +9111,14 @@ function M:syncFightMoves(mon, grew)
       sheet.stats, sheet.level, sheet.maxHp = growth.stats, growth.level, growth.maxHp
     end
   end
-  return Mediated.sendMoveset(self.transport, self.battleId, index - 1, moves,
-    Gen.generation(self.game), growth)
+  local generation = Gen.generation(self.game)
+  local sent = Mediated.sendMoveset(self.transport, self.battleId, index - 1, moves,
+    generation, growth)
+  if sent and learned and generation == 1 and self.medMoveList
+     and battler and battler.mon == mon then
+    self.medMoveList = nil
+  end
+  return sent
 end
 
 -- ------- nobody is saying anything
@@ -10788,7 +10817,18 @@ function M:onBattleEvent(msg)
     if ours and type(msg.moves) == "table" then
       -- `mon` marks a PP spend/restore. Absent is Transform/Mimic -- replace
       -- the overlay even when the copied ids match the current list.
-      if msg.mon ~= nil then
+      --
+      -- On Red / Gold a co-op seat's `mon` is read for whose list it is
+      -- (`medMovesMon`): the overlay is the monster on the seat's, so a list
+      -- for a benched monster -- or for the one that just left, which the
+      -- referee states behind the send-out (Gold's party PP a MYSTERYBERRY
+      -- restored under Transform) -- is written onto that party monster, never
+      -- onto the overlay nor onto whoever stands here now.  Gen 3 and a solo
+      -- double keep their own reading below.
+      local named, onSeat = self:medMovesMon(index, msg.mon)
+      if msg.mon ~= nil and named and not onSeat then
+        self:syncPartyPp(named, msg.moves)
+      elseif msg.mon ~= nil then
         if self:overlayAt(index) then
           self:setOverlayAt(index, msg.moves)
         else
@@ -10819,6 +10859,13 @@ function M:onBattleEvent(msg)
     self.medMoveList = nil
     self.medMustReplace = nil
     if self.replacing then self.replacing = nil end
+  -- ...and so does a faint on it (Red / Gold): both referees hand a fallen
+  -- monster its own list back there (BattleSim Effects.untransform, BattleSim2
+  -- `_clearSubstatus`), so a list the referee states for it behind the faint
+  -- is its party list, not a new overlay for a monster that is down.  Gen 3
+  -- keeps its overlay to the send-out, as before.
+  elseif msg.t == "faint" and not self.gen3 and self:medSlotOf(msg) == self.mine then
+    self.medMoveList = nil
   end
 
   for _, row in ipairs(self:medRows(msg)) do
@@ -12384,9 +12431,12 @@ end
 --              TRAINERTYPE_ITEM column -- MakeTrainerPartyMon's wOTPartyMon
 --              items): the party the engine built for the trainer this client
 --              resolved itself (`self.trainer`), or its rows looked up by the
---              class and member the record names.  A trainer this client never
---              resolved (an invite joiner on Gold, whose field names none)
---              vouches for nothing, and the item is not kept -- as before.
+--              class and member the record names -- an invite joiner's record
+--              is its own data's, looked up by the class and member the
+--              field names (src/Coop.lua `trainerRecord2`, its `roster`).  A
+--              trainer this client never resolved (a field that names none,
+--              a member its data lacks) vouches for nothing, and the item is
+--              not kept -- as before.
 --
 -- Every other mode answers false: a fight between players keeps no item at
 -- all (KEEPS_HELD_MODES), and a partner's item is the partner's.
@@ -13460,10 +13510,14 @@ end
 -- picked up its coins for its own player, so each client pays its own save
 -- the whole of it rather than a share nobody's cart ever computes.  Paid only
 -- where the cart keeps a fight's spoils (Mediated.KEEPS_HELD_MODES -- never
--- coop_pvp), to a seat on side a, on a win -- and on Red on a flee too (pokered
--- EndOfBattle pays while wBattleResult is 0, which a run never moves; the
--- referee's Gen 1 `run` outcome carries the pot and reads as a loss to side
--- a); Gold's flee is a DRAW and pays nothing (CheckPayDay).  Gold doubles it
+-- coop_pvp), to a seat on side a, on a win -- and on Red on the escapes that
+-- pay too (pokered EndOfBattle pays while wBattleResult is 0, which a
+-- TELEPORT / ROAR / WHIRLWIND by either side, a wild monster's flight and a
+-- POKé DOLL never write, while the player's own RUN writes 2 and pays
+-- nothing; the referee states the pot on a `run` outcome only for the former,
+-- and a TELEPORT of ours leaves side a in `losers`, still the payee).  Gold's
+-- flee is a DRAW and pays nothing (CheckPayDay), and its referee states no pot
+-- on one.  Gold doubles it
 -- under an AMULET COIN this player fielded (`amuletCoin2`, pokecrystal
 -- CheckPayDay's wAmuletCoin).  The money lands now, through the shared wallet
 -- (Mediated.addMoney, capped at 999999), and the cart's line is queued behind
@@ -13475,7 +13529,10 @@ function M:payDay12(msg, result, mySide)
   coins = math.min(floor(coins), Wire.PAYDAY12_MAX)
   if not Mediated.KEEPS_HELD_MODES[self.mode] or mySide ~= "a" then return 0 end
   local generation = Gen.generation(self.game)
-  local ran = generation == 1 and msg.reason == "run"
+  -- Gold's every escape is a DRAW, whoever is left the winner (MediatedBattle
+  -- :payDay12 has the carts' reasons): a Gold `run` pays nothing.
+  local ran = msg.reason == "run"
+  if ran and generation ~= 1 then return 0 end
   if not (result == "win" or ran) then return 0 end
   self.payDayPaid = 0
   local save = self.game and self.game.save
@@ -13598,6 +13655,47 @@ function M:setOverlayAt(index, list)
     return
   end
   self.medMoveList = list
+end
+
+-- Whose move list a Red / Gold `moves` event with a `mon` names on our co-op
+-- seat: the party monster behind that uploaded sheet (`medPartySlot`, the
+-- translation every party-addressed field takes), and whether it is the one
+-- standing on the seat (`battler.mon`).  nil for anything this screen does
+-- not translate -- Gen 3, a solo double's seats, an event with no `mon`, a
+-- seat that is not ours, an index the upload has nothing at -- which keeps
+-- the caller on the reading it always had.
+function M:medMovesMon(index, mon0)
+  if self.gen3 or self.ownSlots then return nil end
+  if index == nil or index ~= self.mine then return nil end
+  local at = tonumber(mon0)
+  if not at or at ~= at then return nil end
+  at = math.floor(at) + 1
+  if at < 1 then return nil end
+  local partyIndex = self:medPartySlot(at)
+  local slot = self:mySlot()
+  local named = partyIndex and slot and type(slot.party) == "table" and slot.party[partyIndex] or nil
+  if type(named) ~= "table" then return nil end
+  local battler = slot.battler
+  return named, battler ~= nil and battler.mon == named
+end
+
+-- The referee's PP for one party monster that is not the one standing on the
+-- seat, written onto its own moves -- the save monster on our seat (co-op
+-- hands the live party in), which is what the FIGHT list reads once it is
+-- back out.  `syncLivePp`'s rule: same length, same ids, or nothing.
+function M:syncPartyPp(mon, moves)
+  local current = type(mon) == "table" and mon.moves or nil
+  if type(current) ~= "table" or type(moves) ~= "table" then return false end
+  if #moves ~= #current or #current == 0 then return false end
+  for i, row in ipairs(current) do
+    local incoming = moves[i]
+    if not (type(incoming) == "table" and incoming.id == row.id) then return false end
+  end
+  for i, row in ipairs(current) do
+    local pp = tonumber(moves[i].pp)
+    if pp then row.pp = pp end
+  end
+  return true
 end
 
 -- `liveMoves` for a named seat: its overlay, else its battler's own rows.

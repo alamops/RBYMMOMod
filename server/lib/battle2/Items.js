@@ -116,11 +116,18 @@ const THIEF = 'THIEF';
 // (the Lua header lists the Crystal names behind each) -- SNORE (96) and SKY
 // ATTACK (101) among the Gold-native ones -- and the damaging moves whose
 // effect still folds to 0 on a Gold sheet but runs no `kingsrock`.
+// Wave 3 (R2c): the Gold-only scripts' own ids that run `kingsrock` (the Lua
+// twin lists them by name); FUTURE SIGHT (119), PROTECT / ENDURE, the weather
+// moves, the time-of-day heals and DEFENSE CURL run none.
 const KINGS_ROCK_EFFECTS = {
   0: true, 3: true, 7: true, 16: true, 17: true, 26: true,
   27: true, 29: true, 39: true, 40: true, 41: true, 43: true,
   44: true, 45: true, 48: true, 77: true, 81: true,
   96: true, 101: true,
+  106: true, 107: true, 108: true, 109: true, 110: true,
+  111: true, 112: true, 113: true, 114: true, 116: true,
+  117: true, 118: true, 122: true, 123: true, 127: true,
+  131: true, 132: true,
 };
 const KINGS_ROCK_FOLDED_EXCEPTIONS = {
   FUTURE_SIGHT: true,
@@ -302,6 +309,25 @@ function eighth(maxHp) {
   return b * 256 + c;
 }
 
+// GetQuarterMaxHP: the max HP shifted right twice as a 16-bit pair, its low
+// byte bumped to 1 when it is 0 (the high byte riding through).
+function quarter(maxHp) {
+  const n = Math.max(0, int(maxHp, 0));
+  const q = Math.floor((n % 65536) / 4);
+  const b = Math.floor(q / 256);
+  let c = q % 256;
+  if (c === 0) c = 1;
+  return b * 256 + c;
+}
+
+// GetHalfMaxHP: the max HP halved, 1 when the whole pair is 0.
+function half(maxHp) {
+  const n = Math.max(0, int(maxHp, 0));
+  let h = Math.floor((n % 65536) / 2);
+  if (h === 0) h = 1;
+  return h;
+}
+
 // HandleHPHealingItem: HP less than half the maximum.
 function berryWants(hp, maxHp) {
   return int(hp, 0) * 2 < int(maxHp, 0);
@@ -365,5 +391,7 @@ module.exports = {
   sixteenth,
   eighth,
   berryWants,
+  quarter,
+  half,
   kingsRockMove,
 };

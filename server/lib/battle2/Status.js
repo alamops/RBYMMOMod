@@ -12,8 +12,10 @@
  *     SpA is untouched.
  *   * Toxic ramps as GetSixteenthMaxHP (Items.sixteenth) times the count, a
  *     16-bit sum.
- *   * Paralysis full-stops 1/4 of the time (roll % 4 === 0), not Gen1's 63/256;
- *     speed still quarters.
+ *   * Paralysis full-stops on a BattleRandom byte under `25 percent` -- 63,
+ *     so 63/256 (CheckTurn's `cp 25 percent / ret nc`) -- not the 1/4 the
+ *     referee used to roll; speed still quarters.
+ *   * Sleep draws no byte in CheckTurn (the caller draws for paralysis alone).
  *   * Sleep wakes *and acts* on the turn the counter hits zero.
  *   * Confusion self-hit routes through Damage.compute as HitConfusion runs
  *     BattleCommand_DamageCalc and nothing after it: power 40, no crit, no
@@ -29,7 +31,8 @@ const Items = require('./Items.js');
 
 const idiv = (a, b) => Math.floor(a / b);
 
-const PARALYSIS_SKIP_CHANCE = 4;
+// CheckTurn's `cp 25 percent`: a byte under 63 is a full paralysis.
+const PARALYSIS_STOP_BYTE = 63;
 // HandleDefrost's `cp 10 percent`: 25 (a byte under it thaws).
 const DEFROST_BYTE = 25;
 const CONFUSION_HIT_ROLL = 128;
@@ -77,9 +80,9 @@ function freezeCanMove(roll) {
   return freezeTick(roll).canMove;
 }
 
-// Missing roll → 1: 1 % 4 !== 0 → not stopped.
+// roll: the BattleRandom byte; stop under PARALYSIS_STOP_BYTE.
 function paralysisStop(roll) {
-  return int(roll, 1) % PARALYSIS_SKIP_CHANCE === 0;
+  return int(roll, 255) < PARALYSIS_STOP_BYTE;
 }
 
 function paralysisTick(roll) {
@@ -241,7 +244,7 @@ module.exports = {
   residualToxic,
   burnAttack,
   int,
-  PARALYSIS_SKIP_CHANCE,
+  PARALYSIS_STOP_BYTE,
   DEFROST_BYTE,
   CONFUSION_HIT_ROLL,
   CONFUSION_POWER,

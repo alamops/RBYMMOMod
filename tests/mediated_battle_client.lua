@@ -3991,4 +3991,152 @@ do
   eq(redWild.item, nil, "wild item: a Red wild monster holds nothing")
 end
 
+-- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: wave 3 (task C2a)
+-- ------------------------------------------------------------------
+--
+-- Red's Pay Day on the escapes that pay (the referee states the pot on a
+-- `run` only for a TELEPORT / ROAR / WHIRLWIND / POKé DOLL escape; the
+-- player's own RUN writes wBattleResult 2 and states none); a foe's Gold
+-- happiness is the cart's BASE_HAPPINESS; and the Transform overlay ends with
+-- its wearer -- at the send-out and at the faint -- so the party list a Gold
+-- referee states behind it (a MYSTERYBERRY restored under Transform) reaches
+-- the sheet, as does a benched monster's list.  Numbers invented.
+
+-- ------- Pay Day on a Red escape
+do
+  local function payFight(game, opts)
+    local fight = Mediated.new({ transport = { send = function() return true end },
+      game = game, battle = "pe", role = "host", mode = opts.mode or "wild", peerId = "npc" })
+    fight:start(game)
+    return fight
+  end
+  local function fresh()
+    local game = gameWith({ mon("CHARMANDER") }, K_RED)
+    game.save.money = 0
+    return game
+  end
+  -- The foe's TELEPORT / ROAR, or our POKé DOLL: side a is the winner.
+  local foeFled = fresh()
+  payFight(foeFled, {}):onOutcome({ battle = "pe", outcome = "win", winners = { "me" },
+                                    losers = { "npc" }, reason = "run", payDay = 30 })
+  eq(Gen.money.get(foeFled.save), 30, "Pay Day (Red escape): a foe that flees leaves the pot to pick up")
+  -- Our TELEPORT: side a fled, and is still the one the pot is counted for.
+  local weFled = fresh()
+  local wf = payFight(weFled, {})
+  wf:onOutcome({ battle = "pe", outcome = "win", winners = { "npc" },
+                 losers = { "me" }, reason = "run", payDay = 30 })
+  eq(Gen.money.get(weFled.save), 30, "Pay Day (Red escape): our own TELEPORT pays too, though we are in `losers`")
+  eq(wf.payDayLine, "ANN picked up\n¥30!", "Pay Day (Red escape): ...with the cart's line")
+  -- The player's RUN: the referee states no pot, and nothing is paid.
+  local ran = fresh()
+  payFight(ran, {}):onOutcome({ battle = "pe", outcome = "win", winners = { "npc" },
+                                losers = { "me" }, reason = "run" })
+  eq(Gen.money.get(ran.save), 0, "Pay Day (Red RUN): an outcome stating no pot pays nothing")
+  -- Never in a link fight, whatever the outcome carries.
+  local linked = fresh()
+  payFight(linked, { mode = "1v1" }):onOutcome({ battle = "pe", outcome = "win", winners = { "npc" },
+                                                 losers = { "me" }, reason = "run", payDay = 30 })
+  eq(Gen.money.get(linked.save), 0, "Pay Day (Red escape): a link fight pays nothing")
+  -- Gold: every escape is a DRAW (ExitBattle skips CheckPayDay), even a foe's
+  -- that leaves side a named the winner -- whatever a run carries.
+  local goldFled = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  local gf = Mediated.new({ transport = { send = function() return true end },
+    game = goldFled, battle = "pe", role = "host", mode = "wild", peerId = "npc" })
+  gf:start(goldFled)
+  gf:onOutcome({ battle = "pe", outcome = "win", winners = { "me" },
+                 losers = { "npc" }, reason = "run", payDay = 30 })
+  eq(Gen.money.get(goldFled.save), 0, "Pay Day (Gold escape): a foe's flight pays nothing, even with side a the winner")
+  eq(gf.payDayLine, nil, "Pay Day (Gold escape): ...and owes no line")
+  -- Through Sessions: the outcome is read through the wire, which keeps a
+  -- Red run's pot.
+  local h = harness("host", { mon("CHARMANDER") })
+  h.game.save.money = 0
+  check(h.sessions:beginWildMediated(h.game, "pr", { mon = mon("SQUIRTLE") }), "Pay Day (Red escape): a wild fight opens")
+  h.sessions.fight:onReady({ battle = "pr", sides = { a = { "me" }, b = { "npc" } } })
+  h.sessions:onBattleOutcome({ battle = "pr", outcome = "win", winners = { "npc" },
+                               losers = { "me" }, reason = "run", payDay = 25 })
+  eq(Gen.money.get(h.game.save), 25, "Pay Day (Red escape): Sessions pays a run's pot read off the wire")
+end
+
+-- ------- K14 on a foe's Gold sheet: BASE_HAPPINESS
+do
+  local fond = goldMon("CHARMANDER", nil, 4321)
+  fond.happiness = 200
+  local game = goldGame({ fond })
+  eq(Mediated.BASE_HAPPINESS2, 70, "K14 foe: BASE_HAPPINESS is 70 (pokecrystal pokemon_data_constants.asm)")
+  eq(Mediated.snapshotParty(game)[1].happiness, 200, "K14 own: the player's own monster sends its own")
+  eq(Mediated.snapshotParty(game, { link = true })[1].happiness, 200,
+     "K14 own: ...in a link fight too (InitEnemyMon copies the other cart's party struct)")
+  local wild = goldMon("SQUIRTLE")
+  wild.happiness = 255
+  eq(Mediated.snapshotMons(game, { wild })[1].happiness, 70,
+     "K14 foe: a wild monster is described at BASE_HAPPINESS (LoadEnemyMon .Happiness)")
+  local plain = goldMon("SQUIRTLE")
+  plain.happiness = nil
+  eq(Mediated.snapshotMons(game, { plain })[1].happiness, 70,
+     "K14 foe: ...as is one whose engine record states none")
+  local trainerMon = goldMon("SQUIRTLE", "BERRY")
+  trainerMon.happiness = 0
+  local foeSheet = Mediated.snapshotMons(game, { trainerMon })[1]
+  eq(foeSheet.happiness, 70, "K14 foe: ...and a trainer's (the same .Happiness, every trainer battle)")
+  local packed = Wire.battleParty({ battle = "k14f", mons = { foeSheet }, generation = 2 })
+  eq(packed and packed.mons[1].happiness, 70, "K14 foe: ...which the wire carries")
+  eq(Mediated.snapshotMons(gameWith({}, K_RED), { mon("CHARMANDER") })[1].happiness, nil,
+     "K14 foe: a Red foe states none (Red has no happiness byte)")
+end
+
+-- ------- the Transform overlay ends with its wearer (Gold's MYSTERYBERRY)
+do
+  local function overlayFight()
+    local holder = goldMon("CHARMANDER", "MYSTERYBERRY", 4321)
+    holder.moves = { { id = "EMBER", pp = 0 }, { id = "GROWL", pp = 40 } }
+    local bench = goldMon("SQUIRTLE", nil, 4321)
+    bench.moves = { { id = "HYDRO", pp = 1 } }
+    local game = goldGame({ holder, bench })
+    local fight = Mediated.new({ transport = { send = function() return true end },
+      game = game, battle = "ov", role = "host", mode = "wild", peerId = "npc" })
+    fight:start(game)
+    local seq = 0
+    local function ev(fields)
+      seq = seq + 1
+      fields.battle, fields.seq = "ov", seq
+      fight:onEvent(fields)
+    end
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    -- TRANSFORM: the referee's copied list, stated with no `mon`.
+    ev({ t = "moves", slot = 0, side = "a", moves = { { id = "TACKLE", pp = 5, maxPp = 5 } } })
+    return fight, ev
+  end
+  local party = { { id = "EMBER", pp = 5, maxPp = 25 }, { id = "GROWL", pp = 40, maxPp = 40 } }
+
+  -- The faint: the overlay goes, and the party list stated behind it is the sheet's.
+  local fight, ev = overlayFight()
+  eq(fight.liveMoves and fight.liveMoves[1].id, "TACKLE", "overlay: Transform's copies are what FIGHT reads")
+  ev({ t = "faint", slot = 0, side = "a", text = "CHARMANDER", amount = 1 })
+  eq(fight.liveMoves, nil, "overlay: the faint ends it (the referee gives the fallen monster its own list back)")
+  ev({ t = "moves", slot = 0, side = "a", mon = 0, moves = party })
+  eq(fight.mine[1].moves[1].pp, 5,
+     "MYSTERYBERRY under Transform (faint): the party PP the referee states lands on the sheet")
+  eq(fight.liveMoves, nil, "MYSTERYBERRY under Transform (faint): ...and is no new overlay")
+
+  -- The send-out: the same list, stated behind the switch.
+  fight, ev = overlayFight()
+  ev({ t = "switch", slot = 0, side = "a", mon = 1, text = "SQUIRTLE" })
+  ev({ t = "send", slot = 0, side = "a", mon = 1, text = "SQUIRTLE", hp = 30 })
+  ev({ t = "moves", slot = 0, side = "a", mon = 0, moves = party })
+  eq(fight.mine[1].moves[1].pp, 5, "MYSTERYBERRY under Transform (switch-out): the party PP lands on the sheet")
+  eq(fight.liveMoves, nil, "MYSTERYBERRY under Transform (switch-out): ...with no overlay up")
+
+  -- A benched monster's list, while the one standing here wears an overlay.
+  fight, ev = overlayFight()
+  ev({ t = "moves", slot = 0, side = "a", mon = 1, moves = { { id = "HYDRO", pp = 4, maxPp = 5 } } })
+  eq(fight.mine[2].moves[1].pp, 4, "overlay: a benched monster's list writes its own sheet")
+  eq(fight.liveMoves and fight.liveMoves[1].id, "TACKLE", "overlay: ...and the overlay stands")
+  -- The one standing here: its PP spend still refreshes the overlay.
+  ev({ t = "moves", slot = 0, side = "a", mon = 0, moves = { { id = "TACKLE", pp = 4, maxPp = 5 } } })
+  eq(fight.liveMoves and fight.liveMoves[1].pp, 4, "overlay: the wearer's own spend refreshes it")
+  eq(fight.mine[1].moves[1].id, "EMBER", "overlay: ...and never writes the sheet")
+end
+
 T.finish("mediated_battle_client")

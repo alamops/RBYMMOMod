@@ -95,14 +95,19 @@ test('gen1 DIG: dug a hole, invulnerable, Earthquake fails', () => {
   const events = battle.drainEvents();
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('dug a hole')));
   assert.ok(events.some((e) => e.t === 'anim' && e.text === 'DIG' && e.amount === 1));
-  assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('But it failed')));
+  // MoveHitTest's INVULNERABLE miss is PrintMoveFailureText's "<USER>'s attack
+  // missed!" (R1c), not "But it failed".
+  assert.ok(events.some((e) => e.t === 'msg' && e.text === 'Beta missed'));
   assert.ok(!events.some((e) => e.t === 'damage'));
   const p1 = battle.byId.get('p1');
   const alpha = p1.mons[p1.active - 1];
   assert.strictEqual(alpha.invulnerable, true);
 });
 
-test('gen1 Thunder reaches Fly', () => {
+// Red's MoveHitTest has no THUNDER exception: `bit INVULNERABLE / jp nz,
+// .moveMissed` (core.asm :5258-5260), SWIFT's `ret z` alone comes before it.
+// THUNDER reaching FLY is Gold's (R1c).
+test('gen1 Thunder does not reach Fly', () => {
   const battle = fight(Battle1.Turn, {
     seed: 4343,
     sides: gen1Sides(
@@ -114,8 +119,8 @@ test('gen1 Thunder reaches Fly', () => {
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   const events = battle.drainEvents();
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('flew up high')));
-  assert.ok(events.some((e) => e.t === 'damage' && e.slot === 0));
-  assert.ok(!events.some((e) => e.t === 'msg' && e.text.includes('But it failed')));
+  assert.ok(!events.some((e) => e.t === 'damage' && e.slot === 0));
+  assert.ok(events.some((e) => e.t === 'msg' && e.text === 'Beta missed'));
 });
 
 test('gen1 charge-family texts and DIG turn two', () => {
@@ -146,13 +151,18 @@ test('gen1 charge-family texts and DIG turn two', () => {
 
 test('gen2 EFFECT_* aliases and Earthquake reaches Dig', () => {
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_FLY'), 43);
-  assert.strictEqual(Battle2.Effects.idOf('EFFECT_SOLARBEAM'), 39);
+  // The referee-gaps run's wave 3 (R2c): SOLARBEAM has its own id (its sun
+  // skip and rain halving), still a charge move; RAZOR WIND keeps CHARGE.
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_RAZOR_WIND'), 39);
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_SOLARBEAM'), Battle2.Effects.SOLARBEAM);
+  assert.ok(Battle2.Effects.isCharge(Battle2.Effects.SOLARBEAM));
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_DEFENSE_DOWN'), 19);
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_DEFENSE_DOWN_2'), 59);
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_SLEEP'), 32);
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_PARALYZE_HIT'), 6);
   assert.strictEqual(Battle2.Effects.idOf('EFFECT_METRONOME'), 83);
-  assert.strictEqual(Battle2.Effects.idOf('EFFECT_PROTECT'), null);
+  // ...and PROTECT is handled (R2c's BattleCommand_Protect).
+  assert.strictEqual(Battle2.Effects.idOf('EFFECT_PROTECT'), Battle2.Effects.PROTECT);
   const battle = fight(Battle2.Turn, {
     seed: 5151,
     sides: gen2Sides(
@@ -183,7 +193,9 @@ test('gen2 2v2 Crystal status names actually apply', () => {
           mons: [{
             species: 'Alpha', level: 20, maxHp: 200, hp: 200,
             stats: { atk: 40, def: 40, spe: 90, spa: 40, spd: 40 },
-            moves: [mv({ id: 'leer', power: 0, accuracy: 0, effect: leer })],
+            // The wire's accuracy byte: 255 never draws (R2c's CheckHit); 0
+            // was the old percent domain's "never misses".
+            moves: [mv({ id: 'leer', power: 0, accuracy: 255, effect: leer })],
           }],
         },
         {
@@ -191,7 +203,7 @@ test('gen2 2v2 Crystal status names actually apply', () => {
           mons: [{
             species: 'Gamma', level: 20, maxHp: 200, hp: 200,
             stats: { atk: 40, def: 40, spe: 80, spa: 40, spd: 40 },
-            moves: [mv({ id: 'hypno', power: 0, accuracy: 0, effect: sleep })],
+            moves: [mv({ id: 'hypno', power: 0, accuracy: 255, effect: sleep })],
           }],
         },
       ],

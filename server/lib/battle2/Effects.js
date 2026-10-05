@@ -132,11 +132,39 @@ const NAMES = [
   'EFFECT_LOCK_ON', // 103
   'EFFECT_SAFEGUARD', // 104
   'EFFECT_TOXIC', // 105
+  // The referee-gaps run's wave 3 (R2c; the Lua twin names each command).
+  'EFFECT_RETURN', // 106
+  'EFFECT_FRUSTRATION', // 107
+  'EFFECT_HIDDEN_POWER', // 108
+  'EFFECT_REVERSAL', // 109
+  'EFFECT_MAGNITUDE', // 110
+  'EFFECT_PRESENT', // 111
+  'EFFECT_TRIPLE_KICK', // 112
+  'EFFECT_FURY_CUTTER', // 113
+  'EFFECT_ROLLOUT', // 114
+  'EFFECT_DEFENSE_CURL', // 115
+  'EFFECT_BEAT_UP', // 116
+  'EFFECT_PURSUIT', // 117
+  'EFFECT_FALSE_SWIPE', // 118
+  'EFFECT_FUTURE_SIGHT', // 119
+  'EFFECT_PROTECT', // 120
+  'EFFECT_ENDURE', // 121
+  'EFFECT_COUNTER', // 122
+  'EFFECT_MIRROR_COAT', // 123
+  'EFFECT_RAIN_DANCE', // 124
+  'EFFECT_SUNNY_DAY', // 125
+  'EFFECT_SANDSTORM', // 126
+  'EFFECT_SOLARBEAM', // 127
+  'EFFECT_MORNING_SUN', // 128
+  'EFFECT_SYNTHESIS', // 129
+  'EFFECT_MOONLIGHT', // 130
+  'EFFECT_LEVEL_DAMAGE', // 131
+  'EFFECT_PSYWAVE', // 132
 ];
 
 // The last id either table numbers. The wire carries a Gen 1/2 move's effect
 // as a byte (Wire.battleMove, sanitize EFFECT_MAX), so this may grow to 255.
-const MAX_EFFECT_ID = 105;
+const MAX_EFFECT_ID = 132;
 
 // The Gold-native ids by name, for the call sites that branch on one.
 const SP_DEF_DOWN_HIT = 87;
@@ -158,6 +186,33 @@ const SLEEP_TALK = 102;
 const LOCK_ON = 103;
 const SAFEGUARD = 104;
 const TOXIC = 105;
+const RETURN = 106;
+const FRUSTRATION = 107;
+const HIDDEN_POWER = 108;
+const REVERSAL = 109;
+const MAGNITUDE = 110;
+const PRESENT = 111;
+const TRIPLE_KICK = 112;
+const FURY_CUTTER = 113;
+const ROLLOUT = 114;
+const DEFENSE_CURL = 115;
+const BEAT_UP = 116;
+const PURSUIT = 117;
+const FALSE_SWIPE = 118;
+const FUTURE_SIGHT = 119;
+const PROTECT = 120;
+const ENDURE = 121;
+const COUNTER = 122;
+const MIRROR_COAT = 123;
+const RAIN_DANCE = 124;
+const SUNNY_DAY = 125;
+const SANDSTORM = 126;
+const SOLARBEAM = 127;
+const MORNING_SUN = 128;
+const SYNTHESIS = 129;
+const MOONLIGHT = 130;
+const LEVEL_DAMAGE = 131;
+const PSYWAVE = 132;
 
 const CATEGORIES = [
   'none', 'other', 'status_side', 'drain', 'status_side', 'status_side',
@@ -188,6 +243,13 @@ const CATEGORIES = [
   'charge',
   'meta', 'volatile', 'volatile',
   'status_primary',
+  'other', 'other', 'other', 'fixed',
+  'other', 'other', 'multihit', 'other',
+  'other', 'stat', 'multihit', 'other',
+  'other', 'other', 'volatile', 'volatile',
+  'fixed', 'fixed', 'field', 'field',
+  'field', 'charge', 'heal', 'heal',
+  'heal', 'fixed', 'fixed',
 ];
 
 const STAGE_MIN = -6;
@@ -225,8 +287,10 @@ function int(value, fallback) {
 // Map every EFFECT_* that already has a handler onto that handler. The
 // Gold-native rows answer under their own names (BY_NAME), SKY ATTACK among
 // them: its script is RazorWind's plus `effectchance` / `flinchtarget`, which
-// CHARGE_EFFECT does not run. Gen 2 only moves (Protect, Spikes, …) stay
-// unmapped and still no-op honestly.
+// CHARGE_EFFECT does not run. Gen 2 only moves (Spikes, …) stay unmapped and
+// still no-op honestly. Wave 3 moved SOLARBEAM, LEVEL_DAMAGE, PSYWAVE, the
+// three time-of-day heals and DEFENSE_CURL off these folds onto ids of their
+// own (the Lua twin says why).
 const GEN2_EFFECT_ID = {
   EFFECT_NORMAL_HIT: 0,
   EFFECT_SLEEP: 32,
@@ -240,7 +304,6 @@ const GEN2_EFFECT_ID = {
   EFFECT_MIRROR_MOVE: 9,
   EFFECT_ATTACK_UP: 10,
   EFFECT_DEFENSE_UP: 11,
-  EFFECT_DEFENSE_CURL: 11,
   EFFECT_SPEED_UP: 12,
   EFFECT_SP_ATK_UP: 13,
   EFFECT_ACCURACY_UP: 14,
@@ -262,12 +325,9 @@ const GEN2_EFFECT_ID = {
   EFFECT_PAY_DAY: 16,
   EFFECT_OHKO: 38,
   EFFECT_RAZOR_WIND: 39,
-  EFFECT_SOLARBEAM: 39,
   EFFECT_SKULL_BASH: 39,
   EFFECT_SUPER_FANG: 40,
   EFFECT_STATIC_DAMAGE: 41,
-  EFFECT_LEVEL_DAMAGE: 41,
-  EFFECT_PSYWAVE: 41,
   EFFECT_TRAP_TARGET: 42,
   EFFECT_FLY: 43,
   EFFECT_DOUBLE_HIT: 44,
@@ -283,9 +343,6 @@ const GEN2_EFFECT_ID = {
   EFFECT_ACCURACY_UP_2: 54,
   EFFECT_EVASION_UP_2: 55,
   EFFECT_HEAL: 56,
-  EFFECT_MORNING_SUN: 56,
-  EFFECT_SYNTHESIS: 56,
-  EFFECT_MOONLIGHT: 56,
   EFFECT_TRANSFORM: 57,
   EFFECT_ATTACK_DOWN_2: 58,
   EFFECT_DEFENSE_DOWN_2: 59,
@@ -671,6 +728,14 @@ const PHASE1_PRIMARY = {
   60: true, 61: true, 62: true, 63: true, 66: true, 67: true,
   84: true, 85: true, 86: true,
   103: true, 104: true, 105: true, // LOCK_ON, SAFEGUARD, TOXIC
+  115: true, // DEFENSE_CURL
+};
+
+// The 0-power Gold scripts Turn runs itself (PROTECT / ENDURE, the weather
+// moves, the time-of-day heals); none runs `checkhit`.
+const FIELD_MOVES = {
+  120: true, 121: true, 124: true, 125: true, 126: true,
+  128: true, 129: true, 130: true,
 };
 
 // The referee-numbered move scripts with no `checkhit` (the Lua twin lists
@@ -681,6 +746,9 @@ const NO_CHECKHIT = {
   50: true, 51: true, 52: true, 53: true, 54: true, 55: true,
   56: true, 57: true, 64: true, 65: true, 79: true, 83: true,
   85: true, 102: true, 104: true,
+  115: true, 119: true, 120: true, 121: true, 122: true,
+  123: true, 124: true, 125: true, 126: true, 128: true,
+  129: true, 130: true,
 };
 
 // CheckHit's `.LockOn`: a locked-on target in the sky is still missed by these.
@@ -688,7 +756,7 @@ const LOCK_ON_SKY_MISS = { EARTHQUAKE: true, FISSURE: true, MAGNITUDE: true };
 
 // SLEEP TALK's `.check_two_turn_move`: the effects it never calls.
 const SLEEP_TALK_EXCLUDED = {
-  26: true, 39: true, 43: true, 101: true,
+  26: true, 39: true, 43: true, 101: true, 127: true,
 };
 
 // The scripts with `checksafeguard` after their `checkhit`.
@@ -915,7 +983,8 @@ function blockedBySubstitute(effectId) {
       || effectId === 56 || effectId === 57 || effectId === 64 || effectId === 65
       || effectId === 79 || effectId === 85 || effectId === SAFEGUARD
       || effectId === 32 || effectId === 49 || effectId === 66 || effectId === 67
-      || effectId === 84 || effectId === TOXIC || effectId === LOCK_ON) {
+      || effectId === 84 || effectId === TOXIC || effectId === LOCK_ON
+      || effectId === DEFENSE_CURL) {
     return false;
   }
   return true;
@@ -1017,6 +1086,14 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // DefenseCurl's script: `defenseup`, then BattleCommand_Curl whatever the
+  // raise did (ROLLOUT's extra doubling reads SUBSTATUS_CURLED).
+  if (effectId === DEFENSE_CURL) {
+    raisePrimary(out, userFighter, userMon, 'def', 1);
+    userMon.curled = true;
+    return out;
+  }
+
   const statFx = STAT_EFFECTS[effectId];
   if (statFx) {
     if (statFx.selfTarget) {
@@ -1036,7 +1113,14 @@ function applyPrimary(ctx) {
       out.nothing = true;
       return out;
     }
-    const turns = (rng ? rng.byte() : 0) % 7 + 1;
+    // `.random_loop`: BattleRandom & SLP_MASK, drawn again on 0 and 7, plus 1:
+    // a counter of 2..7 (1..6 turns asleep).
+    let turns = 0;
+    for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+      const r = (rng ? rng.byte() : 0) % 8;
+      if (r !== 0 && r !== 7) { turns = r + 1; break; }
+    }
+    if (turns === 0) turns = 2;
     setStatus(targetMon, targetBadges, 'sleep');
     targetMon.statusTurns = turns;
     const token = wire.sleep || 'SLP';
@@ -1324,6 +1408,8 @@ function applyPrimary(ctx) {
     // species -- `speciesId`, untouched -- is what Light Ball, Thick Club and
     // Metal Powder read (Items.js).
     userMon.transformSpecies = targetMon.speciesId === undefined ? null : targetMon.speciesId;
+    // ...and the copied species' base stats (K7), BEAT UP's target Defense.
+    userMon.transformBase = targetMon.transformBase || targetMon.base || null;
     snapStats(userMon, userFighter ? userFighter.badges : null, battleStats);
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
     out.movesChanged = true;
@@ -1486,6 +1572,8 @@ function burnTarget(out, s, hit) {
 // Safeguard. A landed freeze's tail is Turn's `_applySide`.
 function freezeTarget(out, s, hit) {
   if (s.behindSub || hasMajorStatus(s.target)) return;
+  // `cp WEATHER_SUN / ret z`: nothing freezes under SUNNY DAY (wave 3).
+  if (s.sunny) return;
   if (moveTypeMatchesTarget(s.target, s.moveType, s.normalType)) return;
   if (Items.prevents(s.target, 'freeze')) return;
   if (!hit || s.safeguard) return;
@@ -1567,6 +1655,7 @@ function applySide(ctx) {
     normalType: c.normalType,
     poisonType: c.poisonType,
     safeguard: c.targetSafeguard === true,
+    sunny: c.sunny === true,
   };
 
   if (effectId === TRI_ATTACK) {
@@ -1583,14 +1672,17 @@ function applySide(ctx) {
   if (SIDE_PARALYZE[effectId]) { paralyzeTarget(out, s, hit); return out; }
 
   // BattleCommand_FlinchTarget (:5357-5374): a substitute, then a sleeping or
-  // frozen target, then wEffectFailed. STOMP, TWISTER, SNORE and SKY ATTACK
-  // end in this same command.
+  // frozen target, then CheckOpponentWentFirst (`targetWentFirst`), then
+  // wEffectFailed; FlinchTarget's EndRechargeOpp cancels a recharge (R2b's
+  // finding (i)). STOMP, TWISTER, SNORE and SKY ATTACK end in this command.
   if (SIDE_FLINCH[effectId]) {
     if (behindSub) return out;
     if (targetMon.status === 'sleep' || targetMon.status === 'freeze') return out;
+    if (c.targetWentFirst) return out;
     if (!hit) return out;
     out.proc = true;
     targetMon.flinch = true;
+    targetMon.mustRecharge = false;
     return out;
   }
 
@@ -1642,8 +1734,16 @@ function applySide(ctx) {
 // Phase 3 multi-hit, fixed damage, drain, recoil
 // ------------------------------------------------------------------
 
-const MULTIHIT = { 29: true, 44: true, 77: true };
-const FIXED_DAMAGE = { 38: true, 40: true, 41: true };
+// The looping scripts (wave 3 adds TRIPLE KICK); BEAT UP is Turn's own.
+const MULTIHIT = { 29: true, 44: true, 77: true, 112: true };
+// The ConstantDamage rows: no crit, no roll (R2b's finding (g)).
+const FIXED_DAMAGE = { 38: true, 40: true, 41: true, 131: true, 132: true };
+// The damaging scripts whose `checkhit` comes before `critical`, and those
+// whose roll comes after it (the Lua twin names them).
+const HIT_FIRST = { 27: true, 42: true, 111: true };
+const ROLL_AFTER_CHECKHIT = { 81: true, 97: true, 113: true, 114: true };
+// RolloutPower's MAX_ROLLOUT_COUNT.
+const ROLLOUT_MAX = 5;
 const DRAIN = { 3: true, 8: true };
 const RECOIL = { 48: true };
 
@@ -1667,6 +1767,16 @@ function multiHitCount(rng) {
   let a = (rng ? rng.byte() : 0) % 4;
   if (a >= 2) a = (rng ? rng.byte() : 0) % 4;
   return a + 2;
+}
+
+// EndLoop's `.reject_triple_kick_sample`: BattleRandom & 3, again on 0 --
+// the kicks in all, 1..3.
+function tripleKickCount(rng) {
+  for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+    const a = (rng ? rng.byte() : 0) % 4;
+    if (a !== 0) return a;
+  }
+  return 1;
 }
 
 function isFixedDamage(effectId) {
@@ -1698,7 +1808,10 @@ function payDayCoins(level) {
 }
 
 // EFFECT_OHKO is not here: Gold's is BattleCommand_OHKO, resolved whole by
-// Turn (`isOhko`).
+// Turn (`isOhko`). BattleCommand_ConstantDamage: SUPER FANG halves the HP,
+// LEVEL_DAMAGE is the level, PSYWAVE draws until 0 < byte < level + level / 2
+// (a byte add; a cap of 0 or 1 never ends on the cart -- guarded to 1), every
+// other row is the power.
 function fixedDamage(ctx) {
   const c = ctx || {};
   const effectId = int(c.effectId, 0);
@@ -1707,6 +1820,19 @@ function fixedDamage(ctx) {
 
   if (effectId === 40) {
     return Math.max(1, Math.floor(int(targetMon.hp, 0) / 2));
+  }
+  if (effectId === LEVEL_DAMAGE) {
+    return Math.max(0, int(userMon.level, 1)) % 256;
+  }
+  if (effectId === PSYWAVE) {
+    const level = Math.max(0, int(userMon.level, 1)) % 256;
+    const cap = (level + Math.floor(level / 2)) % 256;
+    for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+      const r = c.rng ? c.rng.byte() : 1;
+      if (r !== 0 && r < cap) return r;
+      if (cap <= 1) break;
+    }
+    return 1;
   }
   if (effectId === 41) {
     if (movePower >= 1) return movePower;
@@ -1721,12 +1847,161 @@ function isOhko(effectId) {
 }
 
 // ------------------------------------------------------------------
+// the Gold-only damage formulas (wave 3, R2c; the Lua twin carries the notes)
+// ------------------------------------------------------------------
+
+const BASE_HAPPINESS = 70;
+
+function happinessPower(happiness) {
+  const h = Math.max(0, Math.min(255, int(happiness, BASE_HAPPINESS)));
+  return Math.floor(h * 10 / 25) % 256;
+}
+function frustrationPower(happiness) {
+  const h = Math.max(0, Math.min(255, int(happiness, BASE_HAPPINESS)));
+  return Math.floor((255 - h) * 10 / 25) % 256;
+}
+
+const HIDDEN_POWER_TYPES = [
+  'FIGHTING', 'FLYING', 'POISON', 'GROUND', 'ROCK', 'BUG', 'GHOST', 'STEEL',
+  'FIRE', 'WATER', 'GRASS', 'ELECTRIC', 'PSYCHIC_TYPE', 'ICE', 'DRAGON', 'DARK',
+];
+
+// HiddenPowerDamage over the K7 DVs: { power, type } or null without DVs.
+function hiddenPower(dvs) {
+  if (!dvs || typeof dvs !== 'object') return null;
+  const atk = Math.max(0, int(dvs.atk, 0)) % 16;
+  const def = Math.max(0, int(dvs.def, 0)) % 16;
+  const spe = Math.max(0, int(dvs.spe, 0)) % 16;
+  const spc = Math.max(0, int(dvs.spc, 0)) % 16;
+  const top = Math.floor(atk / 8) * 8 + Math.floor(def / 8) * 4
+    + Math.floor(spe / 8) * 2 + Math.floor(spc / 8);
+  const power = Math.floor((top * 5 + spc % 4) / 2) + 31;
+  const index = (atk % 4) * 4 + def % 4;
+  return { power, type: HIDDEN_POWER_TYPES[index] };
+}
+
+const REVERSAL_POWER = [[1, 200], [4, 150], [9, 100], [16, 80], [32, 40], [48, 20]];
+
+// ConstantDamage's `.reversal`: the HP-bar pixels and FlailReversalPower.
+function reversalPower(hp, maxHp) {
+  const h = Math.max(0, int(hp, 0)) % 65536;
+  const m = Math.max(1, int(maxHp, 1)) % 65536;
+  const product = h * 48;
+  let q;
+  if (m < 256) {
+    q = Math.floor(product / Math.max(1, m));
+  } else {
+    let divisor = Math.floor(m / 4) % 256;
+    if (divisor === 0) divisor = 1;
+    const dividend = Math.floor(product / 65536) * 65536 + Math.floor((product % 65536) / 4);
+    q = Math.floor(dividend / divisor);
+  }
+  q %= 256;
+  for (const row of REVERSAL_POWER) {
+    if (row[0] >= q) return row[1];
+  }
+  return REVERSAL_POWER[REVERSAL_POWER.length - 1][1];
+}
+
+const MAGNITUDE_ROWS = [
+  [13, 10, 4], [38, 30, 5], [89, 50, 6], [166, 70, 7],
+  [217, 90, 8], [242, 110, 9], [255, 150, 10],
+];
+// BattleCommand_GetMagnitude: { power, magnitude }.
+function magnitude(byte) {
+  const b = Math.max(0, Math.min(255, int(byte, 0)));
+  for (const row of MAGNITUDE_ROWS) {
+    if (row[0] >= b) return { power: row[1], magnitude: row[2] };
+  }
+  return { power: 150, magnitude: 10 };
+}
+
+const PRESENT_ROWS = [[102, 40], [179, 80], [204, 120]];
+// PresentPower: the power, or null for the heal.
+function presentPower(byte) {
+  const b = Math.max(0, Math.min(255, int(byte, 0)));
+  for (const row of PRESENT_ROWS) {
+    if (row[0] >= b) return row[1];
+  }
+  return null;
+}
+
+const TYPE_CONSTANTS = {
+  NORMAL: 0, FIGHTING: 1, FLYING: 2, POISON: 3, GROUND: 4, ROCK: 5,
+  BIRD: 6, BUG: 7, GHOST: 8, STEEL: 9, CURSE_TYPE: 19, FIRE: 20,
+  WATER: 21, GRASS: 22, ELECTRIC: 23, PSYCHIC_TYPE: 24, ICE: 25,
+  DRAGON: 26, DARK: 27,
+};
+function typeConstant(name) {
+  if (typeof name !== 'string') return 0;
+  return Object.prototype.hasOwnProperty.call(TYPE_CONSTANTS, name) ? TYPE_CONSTANTS[name] : 0;
+}
+
+// ProtectChance after its went-first and substitute checks.
+function protectChance(rng, count) {
+  let b = 255;
+  for (let i = 0; i < Math.max(0, int(count, 0)); i += 1) {
+    b = Math.floor(b / 2);
+    if (b === 0) return false;
+  }
+  let r = 0;
+  for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+    r = rng ? rng.byte() : 1;
+    if (r !== 0) break;
+  }
+  if (r === 0) r = 1;
+  return (r - 1) < b;
+}
+
+const WEATHER_TURNS = 5;
+const WEATHER_OF = { 124: 'rain', 125: 'sun', 126: 'sandstorm' };
+
+// DoWeatherModifiers: the type rows first, then rain's SOLARBEAM row; tenths.
+function weatherTenths(weather, typeName, effectId) {
+  if (weather === 'rain') {
+    if (typeName === 'WATER') return 15;
+    if (typeName === 'FIRE') return 5;
+  } else if (weather === 'sun') {
+    if (typeName === 'FIRE') return 15;
+    if (typeName === 'WATER') return 5;
+  }
+  if (weather === 'rain' && int(effectId, 0) === SOLARBEAM) return 5;
+  return null;
+}
+
+const SANDSTORM_IMMUNE = { ROCK: true, GROUND: true, STEEL: true };
+
+const WEATHER_LINES = {
+  rain: { start: 'A downpour started!', continues: 'Rain continues to fall.',
+    ended: 'The rain stopped.' },
+  sun: { start: 'The sunlight got bright!', continues: 'The sunlight is strong.',
+    ended: 'The sunlight faded.' },
+  sandstorm: { start: 'A SANDSTORM brewed!', continues: 'The SANDSTORM rages.',
+    ended: 'The SANDSTORM subsided.' },
+};
+
+const HEAL_TIME = { 128: 'morn', 129: 'day', 130: 'nite' };
+// BattleCommand_TimeBasedHealContinue's .Multipliers row and its HP.
+function timeHealAmount(maxHp, timeMatches, weather) {
+  let c = 2;
+  if (!timeMatches) c -= 1;
+  if (weather !== null && weather !== undefined) {
+    c += 1;
+    if (weather !== 'sun') c -= 2;
+  }
+  if (c <= 0) return Items.eighth(maxHp);
+  if (c === 1) return Items.quarter(maxHp);
+  if (c === 2) return Items.half(maxHp);
+  return Math.max(0, int(maxHp, 0)) % 65536;
+}
+
+// ------------------------------------------------------------------
 // Phase 4 multi-turn / charge handlers
 // ------------------------------------------------------------------
 
 function isCharge(effectId) {
   const id = int(effectId, 0);
-  return id === 39 || id === 43 || id === SKY_ATTACK;
+  return id === 39 || id === 43 || id === SKY_ATTACK || id === SOLARBEAM;
 }
 
 function isFly(effectId) {
@@ -1813,7 +2088,8 @@ const FREEZE_BYPASS = { FLAME_WHEEL: true, SACRED_FIRE: true };
 // The doublings after `damagevariation`: TWISTER / GUST on a target in the
 // sky, EARTHQUAKE on one underground, STOMP on one that used MINIMIZE.
 const DOUBLE_VS_FLYING = { 95: true, 99: true };
-const DOUBLE_VS_UNDERGROUND = { 100: true };
+// ...and MAGNITUDE's `doubleundergrounddamage` (wave 3).
+const DOUBLE_VS_UNDERGROUND = { 100: true, 110: true };
 const DOUBLE_VS_MINIMIZED = { 94: true };
 
 function isRage(effectId) {
@@ -1846,13 +2122,21 @@ const MOVE_PRIORITY = {
   VITAL_THROW: 0, // `cp VITAL_THROW / ld a, 0`
 };
 
+// The effect rows that have ids of their own from wave 3 (PROTECT / ENDURE 3,
+// COUNTER / MIRROR COAT 0), read after VITAL THROW's move-id row.
+const EFFECT_PRIORITY = { 120: 3, 121: 3, 122: 0, 123: 0 };
+
 // The priority bracket of a move (a move record or its id). A record's own
-// `priority` (contract K8) wins over the table.
+// `priority` (contract K8) wins over the tables.
 function movePriority(moveOrId) {
   if (moveOrId && typeof moveOrId === 'object' && typeof moveOrId.priority === 'number') {
     return moveOrId.priority;
   }
   const key = moveKey(moveOrId);
+  if (key !== 'VITAL_THROW' && moveOrId && typeof moveOrId === 'object') {
+    const byEffect = EFFECT_PRIORITY[int(moveOrId.effect, -1)];
+    if (byEffect !== undefined) return byEffect;
+  }
   if (!Object.prototype.hasOwnProperty.call(MOVE_PRIORITY, key)) return BASE_PRIORITY;
   return MOVE_PRIORITY[key];
 }
@@ -2263,6 +2547,18 @@ module.exports = {
   FREEZE_BYPASS,
   DOUBLE_VS_FLYING,
   DOUBLE_VS_UNDERGROUND,
+  RETURN, FRUSTRATION, HIDDEN_POWER, REVERSAL, MAGNITUDE, PRESENT,
+  TRIPLE_KICK, FURY_CUTTER, ROLLOUT, DEFENSE_CURL, BEAT_UP, PURSUIT,
+  FALSE_SWIPE, FUTURE_SIGHT, PROTECT, ENDURE, COUNTER, MIRROR_COAT,
+  RAIN_DANCE, SUNNY_DAY, SANDSTORM, SOLARBEAM, MORNING_SUN, SYNTHESIS,
+  MOONLIGHT, LEVEL_DAMAGE, PSYWAVE,
+  FIELD_MOVES, HIT_FIRST, ROLL_AFTER_CHECKHIT, ROLLOUT_MAX,
+  BASE_HAPPINESS, happinessPower, frustrationPower,
+  HIDDEN_POWER_TYPES, hiddenPower, REVERSAL_POWER, reversalPower,
+  MAGNITUDE_ROWS, magnitude, PRESENT_ROWS, presentPower,
+  TYPE_CONSTANTS, typeConstant, protectChance, tripleKickCount,
+  WEATHER_TURNS, WEATHER_OF, weatherTenths, SANDSTORM_IMMUNE, WEATHER_LINES,
+  HEAL_TIME, timeHealAmount, EFFECT_PRIORITY,
   DOUBLE_VS_MINIMIZED,
   isRage,
   isSpecialType,
