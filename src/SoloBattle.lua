@@ -745,6 +745,13 @@ function M:_begin(game, state, mapId, kind)
     -- and FIRE thaw (BattleSim `typeIndexOf`).
     typeIds = ruleset.typeIds,
     metronomePool = ruleset.metronomePool,
+    -- Red's TypeEffects order (MediatedBattle.snapshotRuleset's `chartOrder`):
+    -- AdjustDamageForMoveType walks the rows in table order and leaves the
+    -- LAST one's multiplier for the effectiveness line and "doesn't affect" /
+    -- "missed" (BattleSim Turn `_typeRows`).  Handed over raw like the rest,
+    -- so the Gen 1 gate a hub's Wire.battleRuleset applies is this line's;
+    -- Gold's walk keeps the product and reads none.
+    chartOrder = (generation == 1) and ruleset.chartOrder or nil,
     -- Gold's wTimeOfDay, which MORNING SUN / SYNTHESIS / MOONLIGHT compare
     -- (MediatedBattle.timeOfDay2, stamped on the ruleset as a hub reads it);
     -- the screen's upload is handed over raw here, so the generation gate a

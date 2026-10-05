@@ -2442,7 +2442,8 @@ function runJs() {
 }
 
 function runLua() {
-  const luajit = spawnSync('luajit', [DRIVER, ROOT], { encoding: 'utf8' });
+  const luajit = spawnSync('luajit', [DRIVER, ROOT],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (luajit.error || luajit.status !== 0) return null;
   return JSON.parse(luajit.stdout);
 }
@@ -2741,15 +2742,15 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   const run = byName(jsRuns).get('move_names');
   const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
 
-  assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
+  assert.ok(said.includes('Alpha used SLOW SWIPE!'), 'an attack prints the display name');
   // R2d: Gold's own DISABLE line, WasDisabledText.
   assert.ok(said.includes("Beta's THUMP HIT was DISABLED!"), 'Disable landing names the move');
-  assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
+  assert.ok(said.includes("Beta's THUMP HIT is DISABLED!"), 'and so does the refusal it causes');
   // R2c: the count ticks in CheckTurn and wears off with DisabledNoMoreText.
   assert.ok(said.includes("Beta's disabled no more!"), 'and so does it wearing off');
   assert.ok(said.includes('Alpha learned THUMP HIT!'), 'Mimic names what it copied');
-  assert.ok(said.includes('Alpha used THUMP HIT'), 'and the copy keeps the name');
-  assert.ok(said.includes('Beta used nudge'),
+  assert.ok(said.includes('Alpha used THUMP HIT!'), 'and the copy keeps the name');
+  assert.ok(said.includes('Beta used nudge!'),
     'a move with no name -- a protocol-25 sheet -- is narrated under its id');
 
   const anims = run.events.filter((event) => event.t === 'anim').map((event) => event.text);
@@ -3312,7 +3313,7 @@ test('fidelity: a crit keeps the staged pair only when the defender\'s stage is 
       });
       battle.drainEvents();
       const events = turnOf(battle);
-      if (said(events, 'A critical hit')) return damageOn(events, 3);
+      if (said(events, 'A critical hit!')) return damageOn(events, 3);
     }
     return null;
   };
@@ -3366,13 +3367,13 @@ test('fidelity: screens are per side, tick five times, fail on a recast and skip
   assert.ok(screened !== null && screened >= 6 && screened <= 8,
     'a special hit into it reads Sp. Def doubled (6..8)');
   const again = turnOf(battle);
-  assert.ok(said(again, 'But it failed'), 'a second Light Screen while one is up fails');
+  assert.ok(said(again, 'But it failed!'), 'a second Light Screen while one is up fails');
   assert.strictEqual(battle.screens.a.lightScreen, 3, 'and does not refresh the count');
   const fixed = turnOf(battle, { action: 'fight', move: 1 }, { action: 'fight', move: 1 });
   assert.strictEqual(damageOn(fixed, 0), 20, 'a fixed-damage hit is never screened: the post-hoc halving is gone');
   turnOf(battle, { action: 'fight', move: 1 });
   const fade = turnOf(battle, { action: 'fight', move: 1 });
-  assert.ok(said(fade, "Ann's LIGHT SCREEN fell"), 'it falls at the end of its fifth turn');
+  assert.ok(said(fade, "Ann's POKéMON's LIGHT SCREEN fell!"), 'it falls at the end of its fifth turn');
   assert.strictEqual(battle.screens.a.lightScreen, 0, 'and is down');
   const bare = turnOf(battle, { action: 'fight', move: 1 });
   const unscreened = damageOn(bare, 0);
@@ -3391,7 +3392,7 @@ test('fidelity: the confusion self-hit is DamageCalc alone, past the user\'s sub
   for (let seed = 1; seed <= 200 && found === null; seed += 1) {
     const battle = confusedFight(seed);
     battle.drainEvents();
-    if (said(turnOf(battle), 'Alpha hurt itself in confusion')) found = seed;
+    if (said(turnOf(battle), 'It hurt itself in its confusion!')) found = seed;
   }
   assert.ok(found !== null, 'a seed on which the confused Alpha hits itself');
   const battle = confusedFight(found);
@@ -3414,14 +3415,14 @@ test('fidelity: Struggle is typeless with a quarter recoil, and a last-PP Metron
   });
   const normal = vsGhost(10);
   normal.drainEvents();
-  assert.ok(said(turnOf(normal), "It doesn't affect Beta"), 'a NORMAL move cannot touch the GHOST on this chart');
+  assert.ok(said(turnOf(normal), "It doesn't affect Beta!"), 'a NORMAL move cannot touch the GHOST on this chart');
   const struggle = vsGhost(0);
   struggle.drainEvents();
   const events = turnOf(struggle);
   const dealt = damageOn(events, 3);
   assert.ok(dealt !== null && dealt >= 10 && dealt <= 12,
     'Struggle hits the GHOST anyway, with no STAB (10..12)');
-  assert.ok(!said(events, "It doesn't affect Beta"), 'and no matchup line at all');
+  assert.ok(!said(events, "It doesn't affect Beta!"), 'and no matchup line at all');
   assert.strictEqual(damageOn(events, 0), Math.max(1, Math.floor(dealt / 4)),
     'recoil is a quarter of what it dealt');
 
@@ -3442,10 +3443,10 @@ test('fidelity: Struggle is typeless with a quarter recoil, and a last-PP Metron
   metronome.drainEvents();
   const called = turnOf(metronome);
   assert.ok(animOrder(called).includes('pool_hit'), 'the last PP calls the pool move');
-  assert.ok(!said(called, 'Alpha is hit with recoil'), 'and the called move takes no Struggle recoil');
+  assert.ok(!said(called, "Alpha's hit with recoil!"), 'and the called move takes no Struggle recoil');
   const after = turnOf(metronome);
   assert.ok(animOrder(after).includes('STRUGGLE'), 'the turn after, every slot is empty: Struggle');
-  assert.ok(said(after, 'Alpha is hit with recoil'), 'which does recoil');
+  assert.ok(said(after, "Alpha's hit with recoil!"), 'which does recoil');
 
   // ResetTurn re-enters DoMove past CheckTurn, so the called move is not gated
   // a second time: a confused caller spends one confusion turn, not two.
@@ -3678,10 +3679,10 @@ test('held items: a status berry right after infliction, and only the matching o
     return { events: roundOf(battle, foe), battle, foe };
   };
   const mint = run(['MINT_BERRY', 'HELD_HEAL_SLEEP', 0, 'MINT BERRY']);
-  assert.ok(said(mint.events, 'Beta fell asleep'));
+  assert.ok(said(mint.events, 'Beta fell asleep!'));
   assert.ok(said(mint.events, 'Beta recovered using a MINT BERRY!'));
   assert.strictEqual(monOf(mint.battle, mint.foe).status, null);
-  assert.ok(said(mint.events, 'Beta used tap'), 'the target moves this very turn');
+  assert.ok(said(mint.events, 'Beta used tap!'), 'the target moves this very turn');
   const ice = run(['ICE_BERRY', 'HELD_HEAL_BURN', 0, 'ICE BERRY']);
   assert.ok(!sawHeld(ice.events), 'a berry for another status does nothing');
   assert.strictEqual(monOf(ice.battle, ice.foe).heldItem, 'ICE_BERRY');
@@ -3719,7 +3720,7 @@ test("held items: King's Rock -- eligible scripts only, never through a standing
     battle.drainEvents();
     return { events: roundOf(battle, foe), battle };
   };
-  assert.ok(said(run(hit('thump', 10), rock).events, 'Beta flinched'));
+  assert.ok(said(run(hit('thump', 10), rock).events, 'Beta flinched!'));
   assert.strictEqual(rngOf(run(hit('thump', 10)).battle), rngOf(run(hit('FUTURE_SIGHT', 10), rock).battle),
     'a folded-0 move without `kingsrock` draws nothing');
   // THUNDER has its own id now (Effects.THUNDER), whose script has no
@@ -3747,7 +3748,7 @@ test("held items: King's Rock -- eligible scripts only, never through a standing
     rngOf(run(hit('ember_hit', 10, 0, 4)).battle), 'nor does a status hit');
   const subbed = () => held({ species: 'Beta', maxHp: 400, spe: 10, substitute: 300, moves: [hit('tap', 1)] });
   const sub = run(hit('thump', 10), rock, subbed());
-  assert.ok(!said(sub.events, 'Beta flinched'));
+  assert.ok(!said(sub.events, 'Beta flinched!'));
   assert.strictEqual(rngOf(sub.battle), rngOf(run(hit('thump', 10), undefined, subbed()).battle));
   assert.strictEqual(Items.kingsRockMove(Effects.idOf('TWO_TO_FIVE_ATTACKS_EFFECT'), 'fury_hits'), true);
 });
@@ -3797,7 +3798,7 @@ test('held items: Thief both ways, never Mail, never into a full hand, never pas
   const sub = run(charcoal, undefined, 4, 80);
   assert.ok(!sawHeld(sub.events), 'a substitute at effectchance keeps the item');
   assert.strictEqual(monOf(sub.battle, sub.foe).heldItem, 'CHARCOAL');
-  assert.ok(said(sub.events, 'Alpha used THIEF'));
+  assert.ok(said(sub.events, 'Alpha used THIEF!'));
   // Seed 163 draws the 255 at `effectchance` (R2c moved it off 153, R2d off 218).
   const miss = run(charcoal, undefined, 163);
   assert.ok(!sawHeld(miss.events), 'the 1/256 byte of 255 against a 100% chance takes nothing');
@@ -3840,8 +3841,8 @@ test('held items: Berserk Gene -- 256, an already-confused holder, Attack at +6'
   const second = fight({ a: [maxed], b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1)] })] });
   const events2 = second.battle.drainEvents();
   assert.strictEqual(monOf(second.battle, 'p1').confusion, 3);
-  assert.ok(!said(events2, 'Alpha became confused'));
-  assert.ok(!said(events2, "Alpha's ATTACK rose"));
+  assert.ok(!said(events2, 'Alpha became confused!'));
+  assert.ok(!said(events2, "Alpha's ATTACK went way up!"));
 });
 
 test('obedience: who is asked, and when nothing is drawn', () => {
@@ -3879,7 +3880,7 @@ test('obedience: who is asked, and when nothing is drawn', () => {
   const tradedCharge = locked(true, 'charging', charged());
   assert.strictEqual(tradedCharge.rng, locked(undefined, 'charging', charged()).rng,
     "a charged move's release is never asked");
-  assert.ok(said(tradedCharge.events, 'Alpha used beam_up'), 'and goes off');
+  assert.ok(said(tradedCharge.events, 'Alpha used beam_up!'), 'and goes off');
   assert.strictEqual(locked(true, 'thrashing', { turns: 1, moveIndex: 2 }).rng,
     locked(undefined, 'thrashing', { turns: 1, moveIndex: 2 }).rng, "nor is a rampage's continuation");
 });
@@ -3896,16 +3897,16 @@ test('obedience: Snore / Sleep Talk pass the sleep gate, and a disobedient sleep
     return roundOf(battle, foe);
   };
   const snore = sleeper(hit('SNORE', 10), undefined, 3);
-  assert.ok(said(snore, 'Alpha is fast asleep') && said(snore, 'Alpha used SNORE'));
+  assert.ok(said(snore, 'Alpha is fast asleep!') && said(snore, 'Alpha used SNORE!'));
   const other = sleeper(hit('thump', 10), undefined, 3);
-  assert.ok(said(other, 'Alpha is fast asleep') && !said(other, 'Alpha used thump'));
+  assert.ok(said(other, 'Alpha is fast asleep!') && !said(other, 'Alpha used thump!'));
   let ignored = null;
   for (let seed = 1; seed <= 40 && !ignored; seed += 1) {
     const events = sleeper(hit('SLEEP_TALK', 0), true, seed);
     if (said(events, 'Alpha ignored orders...sleeping!')) ignored = events;
   }
   assert.ok(ignored, 'a disobedient sleeper using Sleep Talk ignores orders');
-  assert.ok(!said(ignored, 'Alpha used SLEEP_TALK'));
+  assert.ok(!said(ignored, 'Alpha used SLEEP_TALK!'));
 });
 
 test('obedience: `.UseInstead` spends the other move and forgets the last move', () => {
@@ -3918,7 +3919,7 @@ test('obedience: `.UseInstead` spends the other move and forgets the last move',
       b: [held({ species: 'Beta', level: 80, maxHp: 900, spe: 10, moves: [hit('tap', 1)] })],
     });
     battle.drainEvents();
-    if (said(roundOf(battle, foe), 'Alpha used instead, pound_two')) found = battle;
+    if (said(roundOf(battle, foe), 'Alpha used instead, pound_two!')) found = battle;
   }
   assert.ok(found);
   const alpha = monOf(found, 'p1');
@@ -3948,7 +3949,7 @@ test('the flinch reset at turn open, and the recharge exception', () => {
   }
   assert.strictEqual(seen, true, "the slower holder's roll lands on a target that already moved");
   assert.strictEqual(monOf(battle, 'p1').flinch, false, "the turn's open clears it");
-  assert.ok(said(roundOf(battle, foe), 'Alpha used tap'));
+  assert.ok(said(roundOf(battle, foe), 'Alpha used tap!'));
   const kept = fight({
     mode: 'wild', seed: 3,
     a: [held({ species: 'Alpha', spe: 90, moves: [hit('tap', 1)] })],
@@ -4018,7 +4019,7 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   };
   const traded = bideRelease(true);
   // StoreEnergy's release: "unleashed energy", no `usedmovetext` (R2b).
-  assert.ok(said(traded.events, 'Alpha unleashed energy') && !said(traded.events, 'Alpha used BIDE'));
+  assert.ok(said(traded.events, 'Alpha unleashed energy!') && !said(traded.events, 'Alpha used BIDE!'));
   assert.strictEqual(damageOn(traded.events, 3), 80);
   assert.strictEqual(rngOf(traded.battle), rngOf(bideRelease(undefined).battle), 'no obedience byte');
 
@@ -4031,7 +4032,7 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
     return { events: roundOf(battle, foe), battle };
   };
   const pc = confusedFight('PAR');
-  assert.ok(said(pc.events, 'Alpha hurt itself in confusion'));
+  assert.ok(said(pc.events, 'It hurt itself in its confusion!'));
   assert.strictEqual(rngOf(pc.battle), rngOf(confusedFight(undefined).battle), 'no paralysis byte after a self-hit');
   // Gold's DISABLE reads LAST_COUNTER_MOVE (R2d): thump is used once first,
   // and the paralysis put on after that turn (the Lua twin).
@@ -4045,8 +4046,8 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
     return { events: roundOf(battle, foe), battle };
   };
   const pd = disabledFight('PAR');
-  assert.ok(said(pd.events, 'thump is disabled'));
-  assert.ok(!said(pd.events, 'Alpha is fully paralyzed'));
+  assert.ok(said(pd.events, "Alpha's thump is DISABLED!"));
+  assert.ok(!said(pd.events, "Alpha's fully paralyzed!"));
   assert.strictEqual(rngOf(pd.battle), rngOf(disabledFight(undefined).battle), 'no paralysis byte for a disabled move');
 
   // A transformed Mysteryberry holder keeps the berry.
@@ -4073,7 +4074,7 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
     a: [held({ species: 'Alpha', maxHp: 300, hp: 100, spe: 90, moves: [hit('tap', 1)] })] });
   leech.battle.drainEvents();
   const leechEvents = roundOf(leech.battle, leech.foe);
-  assert.ok(said(leechEvents, 'Beta is seeded'));
+  assert.ok(said(leechEvents, 'LEECH SEED saps Beta!'));
   // GetEighthMaxHP of 320 is 40, but SubtractHP hands back the 9 HP Beta had
   // left, and that is what RestoreHP gives the seeder.
   assert.strictEqual(monOf(leech.battle, 'p1').hp, 108, 'the seeder is healed the HP taken');
@@ -4116,7 +4117,7 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   const src = rageFight({ seed: 2, status: 'PSN', confusion: 3, bMove: 'thump', bEffect: 0 });
   src.battle.drainEvents();
   roundOf(src.battle, src.foe);
-  assert.ok(said(roundOf(src.battle, src.foe), 'Alpha hurt itself in confusion'));
+  assert.ok(said(roundOf(src.battle, src.foe), 'It hurt itself in its confusion!'));
   assert.strictEqual(monOf(src.battle, 'p1').rageCounter, 2, 'self-hits and poison build nothing');
   const cap = rageFight({ seed: 21, aSpe: 10, bSpe: 90, bHp: 999, raging: true, rageCounter: 254, substitute: 30 });
   cap.battle.drainEvents();
@@ -4215,7 +4216,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   t = tgt({ status: 'freeze' });
   out = side(4, t, { hit: false, moveType: FIRE, normalType: NORMAL });
   assert.ok(noStatus(t), 'a burn-family hit thaws whatever its chance byte said');
-  assert.strictEqual(out.messages[0], 'Tgt was defrosted');
+  assert.strictEqual(out.messages[0], 'Tgt was defrosted!');
   assert.strictEqual(out.events[0].fields.status, undefined, 'a cure: no token');
   t = tgt({ status: 'freeze', types: [FIRE] });
   side(4, t, { hit: true, moveType: FIRE, normalType: NORMAL });
@@ -4257,7 +4258,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   t = tgt();
   out = side(68, t, { rng: r, computer: true });
   assert.strictEqual(t.stages.atk, -1);
-  assert.strictEqual(out.messages[0], "Tgt's ATTACK fell");
+  assert.strictEqual(out.messages[0], "Tgt's ATTACK fell!");
   r = bytes([200]);
   t = tgt();
   side(70, t, { rng: r, computer: true, hit: false });
@@ -4319,7 +4320,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   r = bytes([10]);
   t = tgt();
   out = primary(18, t, { rng: r, computer: true });
-  assert.strictEqual(out.messages[0], 'But it failed');
+  assert.strictEqual(out.messages[0], 'But it failed!');
   assert.strictEqual(t.stages.atk, 0);
   r = bytes([64]);
   t = tgt();
@@ -4329,7 +4330,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   t = tgt({ substitute: 10 });
   out = primary(18, t, { rng: r, computer: true });
   assert.strictEqual(r.drawn, 1, 'the byte comes before the substitute');
-  assert.strictEqual(out.messages[0], 'But it failed', '...which then stops the move (`.Failed`, R2b)');
+  assert.strictEqual(out.messages[0], 'But it failed!', '...which then stops the move (`.Failed`, R2b)');
   r = bytes([64]);
   t = tgt({ mist: true });
   out = primary(18, t, { rng: r, computer: true });
@@ -4370,36 +4371,36 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   const growl = { id: 'growl', pp: 30, power: 0, accuracy: 100, type: 0, effect: 18, chance: 0 };
   const wildG = duelOf('wild', growl);
   oneByteAhead(duelOf('1v1', growl).battle, wildG.battle, "the computer's GROWL draws one more byte");
-  assert.ok(said(wildG.events, 'Beta used growl'));
+  assert.ok(said(wildG.events, 'Beta used growl!'));
   const miss = { id: 'growl', pp: 30, power: 0, accuracy: 1, type: 0, effect: 18, chance: 0 };
   const linkM = duelOf('1v1', miss);
   // StatDownFailText's line, not a miss line (R2b).
-  assert.ok(said(linkM.events, 'But it failed') && !said(linkM.events, 'Beta missed'));
+  assert.ok(said(linkM.events, 'But it failed!') && !said(linkM.events, "Beta's attack missed!"));
   oneByteAhead(linkM.battle, duelOf('wild', miss).battle, 'and after a miss');
   const linkF = duelOf('1v1', growl, { aAway: true });
-  assert.ok(said(linkF.events, 'But it failed'), 'a GROWL at a target in the sky fails');
+  assert.ok(said(linkF.events, 'But it failed!'), 'a GROWL at a target in the sky fails');
   oneByteAhead(linkF.battle, duelOf('wild', growl, { aAway: true }).battle, 'and the computer draws there too');
   const aurora = { id: 'aurora', pp: 30, power: 10, accuracy: 100, type: 2, effect: 68, chance: 10 };
   const wildS = duelOf('wild', aurora, { aSub: 250 });
   oneByteAhead(duelOf('1v1', aurora, { aSub: 250 }).battle, wildS.battle, 'and into a substitute');
   assert.strictEqual(monOf(wildS.battle, 'p1').stages.atk, 0);
-  assert.ok(!said(wildS.events, 'But it failed'));
+  assert.ok(!said(wildS.events, 'But it failed!'));
 
   const bite = { id: 'bite', pp: 30, power: 10, accuracy: 100, type: 0, effect: 31, chance: 100 };
   const biteRun = duelOf('1v1', hit('tap', 1), { aMove: bite, aSpe: 90, bSpe: 10, bStatus: 'SLP', bTurns: 1 });
-  assert.ok(!said(biteRun.events, 'Beta flinched'), 'a sleeping target is not flinched');
-  assert.ok(said(biteRun.events, 'Beta used tap'), 'so it wakes and acts');
+  assert.ok(!said(biteRun.events, 'Beta flinched!'), 'a sleeping target is not flinched');
+  assert.ok(said(biteRun.events, 'Beta used tap!'), 'so it wakes and acts');
 
   const ember = { id: 'ember', pp: 30, power: 10, accuracy: 100, type: FIRE, effect: 4, chance: 100 };
   const emberRun = duelOf('1v1', hit('tap', 1), { aMove: ember, aSpe: 90, bSpe: 10, bTypes: [FIRE] });
   assert.ok(noStatus(monOf(emberRun.battle, 'p2')), 'a Fire move at 100% never burns a Fire type');
-  assert.ok(!said(emberRun.events, 'Beta was burned'));
+  assert.ok(!said(emberRun.events, 'Beta was burned!'));
 
   const ember10 = { id: 'ember', pp: 30, power: 10, accuracy: 100, type: FIRE, effect: 4, chance: 10 };
   const thaw = duelOf('1v1', hit('tap', 1), { aMove: ember10, aSpe: 90, bSpe: 10, bStatus: 'FRZ' });
-  assert.ok(said(thaw.events, 'Beta was defrosted'));
+  assert.ok(said(thaw.events, 'Beta was defrosted!'));
   assert.ok(noStatus(monOf(thaw.battle, 'p2')));
-  assert.ok(said(thaw.events, 'Beta used tap'));
+  assert.ok(said(thaw.events, 'Beta used tap!'));
 
   // A Focus Band holder at 1 HP takes the hit for 0 and is still burned.
   const band = ['FOCUS_BAND', 'HELD_FOCUS_BAND', 255, 'FOCUS BAND'];
@@ -4471,7 +4472,7 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
   let missSeed = null;
   for (let seed = 1; seed <= 400; seed += 1) {
     const b = withMove(wild(0), { seed });
-    if (said(roundOf(b, 'p2'), 'Alpha missed')) { missSeed = seed; break; }
+    if (said(roundOf(b, 'p2'), "Alpha's attack missed!")) { missSeed = seed; break; }
   }
   assert.ok(missSeed !== null);
   const plainMiss = withMove(wild(0), { seed: missSeed });
@@ -4542,7 +4543,7 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
   let stopped = false;
   for (let i = 0; i < 30; i += 1) {
     if (!alpha.thrashing) break;
-    if (said(roundOf(thrasher, 'p2'), 'Alpha is fully paralyzed')) { stopped = true; break; }
+    if (said(roundOf(thrasher, 'p2'), "Alpha's fully paralyzed!")) { stopped = true; break; }
   }
   assert.ok(stopped, 'seed 3: a full paralysis lands while the rampage runs');
   assert.strictEqual(alpha.thrashing, null, 'CantMove ends the rampage');
@@ -4552,7 +4553,7 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
   const fa = monOf(flier, 'p1');
   assert.ok(fa.charging && fa.invulnerable);
   fa.flinch = true;
-  assert.ok(said(roundOf(flier, 'p2'), 'Alpha flinched'));
+  assert.ok(said(roundOf(flier, 'p2'), 'Alpha flinched!'));
   assert.strictEqual(fa.charging, null, 'CantMove ends the charge');
   assert.strictEqual(fa.invulnerable, false);
 
@@ -4562,8 +4563,8 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
   const la = monOf(last, 'p1');
   assert.strictEqual(la.moves[0].pp, 0);
   const nextTurn = roundOf(last, 'p2');
-  assert.ok(said(nextTurn, 'Alpha used THRASH'));
-  assert.ok(!said(nextTurn, 'Alpha used STRUGGLE'));
+  assert.ok(said(nextTurn, 'Alpha used THRASH!'));
+  assert.ok(!said(nextTurn, 'Alpha used STRUGGLE!'));
   assert.strictEqual(la.moves[0].pp, 0);
 
   // (i) HYPER BEAM into a substitute
@@ -4571,8 +4572,8 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
   const beamTurn = roundOf(beam, 'p2');
   assert.strictEqual(monOf(beam, 'p2').hp, 900);
   // The recharge is the next turn's, said at its slot there (R2b).
-  assert.ok(!said(beamTurn, 'Alpha must recharge'));
-  assert.ok(said(roundOf(beam, 'p2'), 'Alpha must recharge'));
+  assert.ok(!said(beamTurn, 'Alpha must recharge!'));
+  assert.ok(said(roundOf(beam, 'p2'), 'Alpha must recharge!'));
 
   // (j) PAY DAY
   const payFight = (mode) => {
@@ -4761,7 +4762,7 @@ test('R2b: Transform undone, SLEEP TALK, LOCK-ON, a recharge actor, Haze, TOXIC,
   const bare = beam();
   const clawed = beam(['QUICK_CLAW', 'HELD_QUICK_CLAW', 255, 'QUICK CLAW']);
   assert.strictEqual(clawed.n, bare.n + 1, "the recharging seat's claw rolls");
-  assert.ok(said(clawed.events, 'Alpha must recharge'));
+  assert.ok(said(clawed.events, 'Alpha must recharge!'));
   assert.strictEqual(clawed.events[clawed.events.length - 1].t, 'turn');
 
   const mons = [1, 2, 3, 4].map((i) => ({
@@ -4819,16 +4820,16 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
 
   // RETURN / FRUSTRATION (K14): 102 power at 255, 0 for FRUSTRATION (no
   // damage event), BASE_HAPPINESS 70 without the byte.
-  const happiness = after('r2c_happiness', 'Alpha used FRUSTRATION')
+  const happiness = after('r2c_happiness', 'Alpha used FRUSTRATION!')
     .filter((e) => e.t === 'msg' || e.t === 'damage');
-  assert.ok(happiness[0].t === 'msg' && happiness[0].text === 'Beta used tap',
+  assert.ok(happiness[0].t === 'msg' && happiness[0].text === 'Beta used tap!',
     'FRUSTRATION at 255 takes nothing and says nothing');
   assert.ok(hits('r2c_happiness', 3)[0] > hits('r2c_happiness', 3)[1],
     'RETURN at 255 outhits RETURN at the base 70');
 
   // HIDDEN POWER: the DVs' FIGHTING meets a GHOST; WATER on a FIRE type.
-  assert.ok(has('r2c_hidden_power', "It doesn't affect Beta"));
-  assert.ok(has('r2c_hidden_power', "It's super effective"));
+  assert.ok(has('r2c_hidden_power', "It doesn't affect Beta!"));
+  assert.ok(has('r2c_hidden_power', "It's super-effective!"));
 
   // FLAIL / FALSE SWIPE.
   assert.ok(hits('r2c_reversal_false_swipe', 0).includes(11), 'FALSE SWIPE cut to the HP less one');
@@ -4838,8 +4839,8 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   let flailing = false;
   let flailCrit = false;
   for (const e of flail) {
-    if (/ used /.test(e.text)) flailing = e.text === 'Alpha used FLAIL';
-    else if (flailing && e.text === 'A critical hit') flailCrit = true;
+    if (/ used /.test(e.text)) flailing = e.text === 'Alpha used FLAIL!';
+    else if (flailing && e.text === 'A critical hit!') flailCrit = true;
   }
   assert.ok(!flailCrit, 'FLAIL draws no crit');
 
@@ -4873,7 +4874,7 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(!has('r2c_beat_up', "Eta's attack!") && !has('r2c_beat_up', "Theta's attack!"),
     'the fainted and the statused member are skipped');
   assert.ok(!lines('r2c_beat_up').some((t) => t.startsWith('Hit ')), 'no "Hit N times!"');
-  assert.ok(has('r2c_beat_up_wild', "Wild's attack!") && has('r2c_beat_up_wild', 'But it failed'));
+  assert.ok(has('r2c_beat_up_wild', "Wild's attack!") && has('r2c_beat_up_wild', 'But it failed!'));
 
   // PURSUIT: a player's switch is chased first, doubled; the computer's is not.
   const pl = runs.get('r2c_pursuit_link').events;
@@ -4890,22 +4891,22 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(has('r2c_future_sight', 'Alpha foresaw an attack!'));
   assert.ok(has('r2c_future_sight', 'Delta was hit by FUTURE SIGHT!'));
   assert.ok(after('r2c_future_sight', 'Alpha foresaw an attack!')
-    .some((e) => e.t === 'msg' && e.text === 'But it failed'), 'a second use while it runs fails');
+    .some((e) => e.t === 'msg' && e.text === 'But it failed!'), 'a second use while it runs fails');
 
   // PROTECT / DETECT / ENDURE.
   assert.strictEqual(lines('r2c_protect').filter((t) => t === "Alpha's PROTECTING itself!").length, 2);
   assert.ok(has('r2c_protect', 'Alpha ENDURED the hit!'));
   assert.ok(!has('r2c_protect', 'Alpha hung on with FOCUS BAND!'), 'ENDURE draws no band');
-  assert.strictEqual(lines('r2c_protect_slow')[1], 'But it failed', 'after a foe\'s switch it fails');
+  assert.strictEqual(lines('r2c_protect_slow')[1], 'But it failed!', 'after a foe\'s switch it fails');
 
   // COUNTER / MIRROR COAT.
   const counter = runs.get('r2c_counter').events.filter((e) => e.t === 'damage').map((e) => e.amount);
   assert.strictEqual(counter[1], 2 * counter[0], 'COUNTER returns twice the slam');
-  assert.ok(has('r2c_counter', "It doesn't affect Delta"));
+  assert.ok(has('r2c_counter', "It doesn't affect Delta!"));
 
   // The weather.
   assert.ok(has('r2c_rain', 'A downpour started!') && has('r2c_rain', 'The rain stopped.'));
-  assert.ok(!has('r2c_rain', 'Alpha missed'), "THUNDER's 1 byte never misses in the rain");
+  assert.ok(!has('r2c_rain', "Alpha's attack missed!"), "THUNDER's 1 byte never misses in the rain");
   assert.ok(!lines('r2c_sun').some((t) => t.includes('took in sunlight')), 'SOLARBEAM fires at once');
   assert.ok(!lines('r2c_sun').some((t) => t.includes('frozen')), 'nothing freezes in the sun');
   assert.ok(runs.get('r2c_sun').events.some((e) => e.t === 'drain' && e.amount === 450),
@@ -4921,16 +4922,16 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
 
   // The ConstantDamage rows.
   assert.deepStrictEqual(hits('r2c_fixed_damage', 3).filter((d, i) => i !== 1), [37, 20]);
-  assert.ok(has('r2c_fixed_damage', "It doesn't affect Beta"));
+  assert.ok(has('r2c_fixed_damage', "It doesn't affect Beta!"));
 
   // R2b's findings.
   assert.strictEqual(lines('r2c_checkhit').filter((t) => t.includes('crashed')).length, 1,
     'JUMP KICK crashes on a miss, not against a GHOST');
   assert.ok(has('r2c_checkturn', "Beta's disabled no more!"));
-  assert.ok(has('r2c_checkturn', 'Delta fell asleep'));
-  assert.ok(after('r2c_bide', 'Alpha unleashed energy')
-    .some((e) => e.t === 'msg' && e.text === "It doesn't affect Delta"));
-  assert.ok(has('r2c_flinch', 'Beta flinched') && !has('r2c_flinch', 'Beta must recharge'));
+  assert.ok(has('r2c_checkturn', 'Delta fell asleep!'));
+  assert.ok(after('r2c_bide', 'Alpha unleashed energy!')
+    .some((e) => e.t === 'msg' && e.text === "It doesn't affect Delta!"));
+  assert.ok(has('r2c_flinch', 'Beta flinched!') && !has('r2c_flinch', 'Beta must recharge!'));
 });
 
 // ------------------------------------------------------------------
@@ -4951,7 +4952,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   // breaking it, and no gender ratio on the sheet -- no attraction.
   assert.ok(has('r2d_attract', 'Beta fell in love!'));
   assert.ok(has('r2d_attract', "Beta's infatuation kept it from attacking!"));
-  assert.ok(count('r2d_attract', 'But it failed') >= 2, 'a second ATTRACT and a genderless one fail');
+  assert.ok(count('r2d_attract', 'But it failed!') >= 2, 'a second ATTRACT and a genderless one fail');
   const sent = index('r2d_attract', (e) => e.t === 'send' && e.text === 'Gamma');
   assert.ok(!events('r2d_attract').slice(sent).some((e) => e.t === 'msg' && /in love/.test(e.text)),
     'the send-out broke the love');
@@ -4970,7 +4971,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   assert.ok(has('r2d_belly_drum', 'Gamma cut its HP and maximized ATTACK!'));
 
   // CURSE both ways.
-  assert.ok(has('r2d_curse', "Gamma's SPEED fell") && has('r2d_curse', "Gamma's ABILITY won't rise anymore!"));
+  assert.ok(has('r2d_curse', "Gamma's SPEED fell!") && has('r2d_curse', "Gamma's ABILITY won't rise anymore!"));
   assert.ok(has('r2d_curse', 'Alpha cut its own HP and put a CURSE on Beta!'));
   assert.ok(count('r2d_curse', "Beta's hurt by the CURSE!") >= 2);
 
@@ -4983,18 +4984,18 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   assert.ok(has('r2d_encore', "It didn't affect Beta!"));
   const encored = msgAt('r2d_encore', 'Beta got an ENCORE!');
   assert.strictEqual(events('r2d_encore').slice(encored).find((e) => e.t === 'msg' && / used /.test(e.text)).text,
-    'Beta used GROWL', 'the TAP Beta chose became GROWL');
+    'Beta used GROWL!', 'the TAP Beta chose became GROWL');
   assert.ok(has('r2d_encore', "Beta's ENCORE ended!"));
 
   // FORESIGHT, HEAL BELL.
-  assert.ok(has('r2d_foresight', "It doesn't affect Beta") && has('r2d_foresight', 'Alpha identified Beta!'));
+  assert.ok(has('r2d_foresight', "It doesn't affect Beta!") && has('r2d_foresight', 'Alpha identified Beta!'));
   assert.ok(events('r2d_foresight').some((e) => e.t === 'damage' && e.slot === 3), 'the identified GHOST is hit');
   assert.deepStrictEqual(events('r2d_heal_bell').filter((e) => e.t === 'status').map((e) => e.mon), [0, 1]);
   assert.ok(has('r2d_heal_bell', 'A bell chimed!'));
 
   // MEAN LOOK / TELEPORT.
   assert.ok(has('r2d_mean_look', "Wild can't escape now!"));
-  assert.ok(count('r2d_mean_look', 'But it failed') >= 2, "the held wild's TELEPORT and a second MEAN LOOK fail");
+  assert.ok(count('r2d_mean_look', 'But it failed!') >= 2, "the held wild's TELEPORT and a second MEAN LOOK fail");
   assert.ok(has('r2d_teleport', 'Wild fled from battle!'));
 
   // NIGHTMARE until the wake.
@@ -5005,7 +5006,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   // PAIN SPLIT, PERISH SONG, PSYCH UP.
   assert.ok(events('r2d_pain_split').some((e) => e.t === 'drain' && e.hp === 200));
   assert.ok(has('r2d_pain_split', "It didn't affect Beta!"));
-  assert.ok(has('r2d_perish_song', "Alpha's PERISH count is 0!") && has('r2d_perish_song', 'But it failed'));
+  assert.ok(has('r2d_perish_song', "Alpha's PERISH count is 0!") && has('r2d_perish_song', 'But it failed!'));
   assert.strictEqual(lines('r2d_perish_2v2').filter((t) => / count is 3!$/.test(t)).length, 4, 'all four sing along');
   assert.ok(has('r2d_perish_2v2', "Iota's PERISH count is 2!"), 'BATON PASS hands the count on');
   assert.ok(has('r2d_psych_up', 'Alpha copied the stat changes of Beta!'));
@@ -5020,7 +5021,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   const sketched = events('r2d_sketch').find((e) => e.t === 'moves' && e.moves[2] && e.moves[2].id === 'EMBER');
   assert.strictEqual(sketched.mon, 0);
   assert.strictEqual(sketched.moves[2].pp, 25);
-  assert.ok(has('r2d_sketch_link', 'But nothing happened'));
+  assert.ok(has('r2d_sketch_link', 'But nothing happened.'));
   const end = events('r2d_sketch_transformed_end');
   const over = end.findIndex((e) => e.t === 'over');
   const last = end.slice(0, over).filter((e) => e.t !== 'team').pop();
@@ -5030,9 +5031,9 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
 
   // SPITE, AMNESIA, SWAGGER.
   assert.ok(has('r2d_spite', "Beta's thump was reduced by 3!"));
-  assert.ok(events('r2d_amnesia').some((e) => e.t === 'stat' && e.stage === 2 && /SP.DEF rose/.test(e.text)));
-  assert.ok(has('r2d_swagger', 'Alpha missed'), 'SWAGGER at +6 is a miss');
-  assert.strictEqual(count('r2d_swagger', 'Delta became confused'), 1);
+  assert.ok(events('r2d_amnesia').some((e) => e.t === 'stat' && e.stage === 2 && /SPCL\.DEF went way up!/.test(e.text)));
+  assert.ok(has('r2d_swagger', "Alpha's attack missed!"), 'SWAGGER at +6 is a miss');
+  assert.strictEqual(count('r2d_swagger', 'Delta became confused!'), 1);
 
   // The status commands' own lines.
   for (const text of ['Beta evaded the attack!', "Alpha's already asleep!", "It didn't affect Gamma!",
@@ -5053,19 +5054,19 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
 
   // DISABLE, SKULL BASH / REST.
   assert.ok(has('r2d_disable', "Beta's slam was DISABLED!") && has('r2d_disable', "Beta's disabled no more!"));
-  assert.strictEqual(count('r2d_skull_bash_rest', "Alpha's DEFENSE rose"), 1, 'the charge turn only');
+  assert.strictEqual(count('r2d_skull_bash_rest', "Alpha's DEFENSE went up!"), 1, 'the charge turn only');
   assert.ok(has('r2d_skull_bash_rest', "Alpha's HP is full!") && has('r2d_skull_bash_rest', 'Alpha went to sleep!'));
-  assert.ok(count('r2d_skull_bash_rest', 'Alpha is fast asleep') >= 2, 'REST sleeps two turns');
+  assert.ok(count('r2d_skull_bash_rest', 'Alpha is fast asleep!') >= 2, 'REST sleeps two turns');
 
   // CONVERSION2.
   assert.ok(has('r2d_conversion2', 'Alpha transformed into the ROCK-type!'));
 
   // ResidualDamage after each seat's turn; a KO ends a one-seat turn.
   const ro = lines('r2d_residual_order');
-  assert.ok(ro.indexOf('Alpha is hurt by its poison') < ro.indexOf('Beta used tap'));
+  assert.ok(ro.indexOf('Alpha is hurt by poison!') < ro.indexOf('Beta used tap!'));
   const ko = events('r2d_residual_order').findIndex((e) => e.t === 'faint');
   const before = events('r2d_residual_order').slice(0, ko).filter((e) => e.t === 'msg');
-  assert.strictEqual(before[before.length - 1].text, 'Alpha used slam', 'no poison on the KO turn');
+  assert.strictEqual(before[before.length - 1].text, 'Alpha used slam!', 'no poison on the KO turn');
 
   // A faint's party `moves`, after the faint.
   const fm = events('r2d_faint_moves');
@@ -5110,4 +5111,109 @@ test('R2d: the new effect ids, their tables, GetGender and SKETCH base PP', () =
   assert.strictEqual(Effects.basePp({ maxPp: 61, ppUps: 3 }), 40);
   assert.strictEqual(Effects.basePp({ maxPp: 32, ppUps: 3 }), 20);
   assert.strictEqual(Effects.basePp({ maxPp: 35 }), 35);
+});
+
+// ------------------------------------------------------------------
+// The referee-gaps run's wave 5 (R2e): the last Gold rows (the Lua twin's
+// tests/battle_sim2_turn.lua runs the same checks).
+// ------------------------------------------------------------------
+
+test('R2e: CONVERSION, HEAL BELL\'s toxic bit, SKETCH\'s base PP, the run odds, ETHER under Transform, the pool numbers', () => {
+  const types = ['NORMAL', 'FIRE', 'CURSE_TYPE'];
+  const conv = fight({
+    mode: '1v1', seed: 7, typeIds: types,
+    a: [held({ species: 'Alpha', spe: 90, types: [0],
+      moves: [hit('CONVERSION', 0, 0, 24), hit('curse_ish', 0, 2), hit('fire_hit', 20, 1)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  conv.battle.drainEvents();
+  let events = roundOf(conv.battle, conv.foe);
+  assert.ok(said(events, 'Alpha transformed into the FIRE-type!'), 'CONVERSION takes a move\'s type, never ???');
+  assert.strictEqual(monOf(conv.battle, 'p1').types[0], 1);
+  events = roundOf(conv.battle, conv.foe);
+  assert.ok(said(events, 'Alpha transformed into the NORMAL-type!'), 'the user\'s type is skipped');
+  const only = fight({
+    mode: '1v1', seed: 7, typeIds: types,
+    a: [held({ species: 'Alpha', spe: 90, types: [0], moves: [hit('CONVERSION', 0, 0, 24), hit('curse_ish', 0, 2)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  only.battle.drainEvents();
+  const state = rngOf(only.battle);
+  events = roundOf(only.battle, only.foe);
+  assert.ok(said(events, 'But it failed!'));
+  assert.strictEqual(rngOf(only.battle), state, 'drawing nothing');
+
+  const bell = fight({
+    mode: '1v1',
+    a: [held({ species: 'Alpha', maxHp: 960, spe: 90, moves: [hit('HEAL_BELL', 0, 0, 141), hit('REST', 0, 0, 56)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  bell.battle.drainEvents();
+  const alpha = monOf(bell.battle, 'p1');
+  alpha.status = 'toxic';
+  alpha.toxicCounter = 3;
+  roundOf(bell.battle, bell.foe);
+  assert.strictEqual(alpha.status, null);
+  assert.strictEqual(alpha.toxicLatent, true, 'HEAL BELL leaves SUBSTATUS_TOXIC');
+  assert.strictEqual(alpha.toxicCounter, 3);
+  alpha.status = 'burn';
+  alpha.hp = 500;
+  events = roundOf(bell.battle, bell.foe, { action: 'fight', move: 1 });
+  assert.ok(said(events, 'Alpha fell asleep and became healthy!'));
+  assert.ok(alpha.toxicLatent === null || alpha.toxicLatent === undefined, 'REST clears it');
+
+  const copy = Effects.copyMoveRow({ id: 'SLAM', pp: 5, maxPp: 5, basePp: 35 });
+  assert.strictEqual(Effects.basePp(copy), 35, 'a copy states its base PP');
+  assert.strictEqual(Effects.basePp({ id: 'SLAM', pp: 20, maxPp: 42, ppUps: 1 }), 35);
+
+  assert.strictEqual(Effects.runOdds(100, 100, 1), null);
+  assert.strictEqual(Effects.runOdds(10, 200, 1), 6);
+  assert.strictEqual(Effects.runOdds(10, 200, 2), 36);
+  assert.strictEqual(Effects.runOdds(10, 3, 1), null);
+  assert.strictEqual(Effects.runOdds(1, 2, 1), null);
+  assert.strictEqual(Effects.runOdds(100, 1028, 1), null);
+  assert.strictEqual(Effects.runOdds(50, 60, 1), 106);
+
+  const tf = fight({
+    mode: '1v1',
+    a: [held({ species: 'Alpha', spe: 90, moves: [hit('TRANSFORM', 0, 0, 57),
+      { id: 'thump', pp: 0, maxPp: 30, power: 10, accuracy: 255, type: 0, effect: 0, chance: 0 }] }),
+    held({ species: 'Gamma', spe: 90, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', spe: 10, moves: [hit('tap', 1), hit('slam', 10)] })],
+  });
+  tf.battle.drainEvents();
+  roundOf(tf.battle, tf.foe);
+  const t = monOf(tf.battle, 'p1');
+  assert.ok(t.transformed);
+  events = roundOf(tf.battle, tf.foe, { action: 'item', item: 'ETHER', move: 1 });
+  assert.strictEqual(t.preTransform.moves[1].pp, 10, 'the ETHER restores the party\'s slot');
+  assert.strictEqual(t.moves[1].pp, 5, 'not the copy');
+  assert.ok(!events.some((e) => e.t === 'moves' && e.slot === 0 && e.mon !== undefined));
+  events = roundOf(tf.battle, tf.foe, { action: 'fight', move: 1 });
+  const overlay = events.filter((e) => e.t === 'moves' && e.slot === 0).pop();
+  assert.ok(overlay && overlay.mon === undefined, 'a transformed PP spend carries no `mon`');
+  events = roundOf(tf.battle, tf.foe, { action: 'switch', slot: 1 });
+  const told = events.find((e) => e.t === 'moves' && e.slot === 0 && e.mon === 0);
+  assert.ok(told && told.moves[1].pp === 10, 'the party list is told at the undo');
+
+  const poolBattle = (pool) => duel({
+    seed: 99, metronomePool: pool,
+    a: [sheet({ species: 'Alpha', spe: 90, moves: [hit('METRONOME', 0, 0, 83)] })],
+    b: [sheet({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  const numbered = poolBattle([{ id: 'POUND', pp: 5, power: 40, type: 0, effect: 0, num: 1 },
+    { id: 'MODDED', pp: 5, power: 40, type: 0, effect: 0 }]);
+  numbered.drainEvents();
+  let modded = 0;
+  for (let i = 0; i < 3; i += 1) {
+    modded += turnOf(numbered).filter((e) => e.t === 'msg' && e.text.includes('used MODDED')).length;
+  }
+  assert.strictEqual(modded, 0, 'an unnumbered row in a numbered pool is never called');
+  const placed = poolBattle([{ id: 'MODDED', pp: 5, power: 40, type: 0, effect: 0 }]);
+  placed.drainEvents();
+  let called = false;
+  for (let i = 0; i < 3; i += 1) {
+    if (said(turnOf(placed), 'Alpha used MODDED!')) called = true;
+  }
+  assert.ok(called, 'a pool with no `num` is numbered by place');
 });

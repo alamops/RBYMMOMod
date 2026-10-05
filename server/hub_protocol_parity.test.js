@@ -922,6 +922,7 @@ function runJs() {
     ...runFamily2(),
     ...runGaps(),
     ...runWave4(),
+    ...runWave5(),
   ];
 }
 
@@ -1186,7 +1187,10 @@ function edges3() {
 // `num` on an older row, and Gen 3's choice fields on an older choice, are
 // ignored rather than read -- on both hosting paths. The `stat` case's signed
 // `stage` is the one Gen 3 field an older reader keeps (contract K10 of
-// docs/plans/gen12-referee-gaps-fix.md). Twin of gen12 in the Lua driver.
+// docs/plans/gen12-referee-gaps-fix.md). Since that plan's wave 5 a Gen 2 hub
+// reads a Metronome pool row's `num` and a choice's `pass` as Gold's own (the
+// Gen 2 pool case keeps its 7, the Gen 2 choice's "far" refuses it). Twin of
+// gen12 in the Lua driver.
 function gen12() {
   const stray = {
     id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, num: 7,
@@ -2840,8 +2844,308 @@ function runWave4() {
   ];
 }
 
+// ------------------------------------------------------------------
+// Wave 5 of docs/plans/gen12-referee-gaps-fix.md, the wire: Red's `chartOrder`
+// on a Gen 1 ruleset, Gold's K15 `base.gender`, Gold's BATON PASS `pass` on a
+// Gen 2 choice, a Gold Metronome pool row's `num`. Twin of
+// referee_gaps_wave5_dialect in the Lua driver, whose header argues each case;
+// the Lua driver's NULL is a real null here, and `orderLen` reports a long
+// list by its length.
+// ------------------------------------------------------------------
+
+function wave5() {
+  const rules = (extra) => ({ chart: CHART, ...extra });
+  const fight = (extra) => ({
+    battle: 'b1', action: 'fight', move: 0, ...extra,
+  });
+  const B2 = {
+    hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
+  };
+  const B1 = {
+    hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+  };
+  const gold = (gender) => sheet12(2, { base: { ...B2, gender } });
+  const pooled = (extra) => rules({ metronomePool: [row12('m', extra)] });
+  const long = [];
+  for (let i = 1; i <= 514; i += 1) long.push(i % 20);
+  const first = (n) => long.slice(0, n);
+  return [
+    // chartOrder
+    ['ruleset', rules({ chartOrder: [0, 1, 1, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [19, 19] }), 1],
+    ['ruleset', rules({ chartOrder: [1, 0, 1, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [20, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [-1, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [0, 1, 1] }), 1],
+    ['ruleset', rules({ chartOrder: [] }), 1],
+    ['ruleset', rules({ chartOrder: [0, null, 1] }), 1],
+    ['ruleset', rules({ chartOrder: [0, null, 1, 1] }), 1],
+    ['ruleset', rules({ chartOrder: [null, null] }), 1],
+    ['ruleset', rules({ chartOrder: ['1', 0] }), 1],
+    ['ruleset', rules({ chartOrder: [' 1 ', 0] }), 1],
+    ['ruleset', rules({ chartOrder: ['0x1', 0] }), 1],
+    ['ruleset', rules({ chartOrder: [1.5, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [true, 0] }), 1],
+    ['ruleset', rules({ chartOrder: ['one', 0] }), 1],
+    ['ruleset', rules({ chartOrder: [[1], 0] }), 1],
+    ['ruleset', rules({ chartOrder: { a: 1 } }), 1],
+    ['ruleset', rules({ chartOrder: '0,1' }), 1],
+    ['ruleset', rules({ chartOrder: 7 }), 1],
+    ['ruleset', rules({ chartOrder: null }), 1],
+    ['ruleset', rules({
+      chartOrder: [0, 1], metronomePool: [row12('m', { num: 7 })], typeIds: ['NORMAL', 'FIGHTING'],
+    }), 1],
+    ['ruleset', rules({ chartOrder: [0, 1] }), 2],
+    ['ruleset', rules({ chartOrder: [0, 1, 1] }), 2],
+    ['ruleset', rules({ chartOrder: [0, 1] })],
+    ['ruleset', rules({ chartOrder: 'bad' })],
+    ['ruleset', { typeTable: CHART3, chartOrder: [0, 1] }, 3],
+    ['ruleset', { typeTable: CHART3, chartOrder: 'bad' }, 3],
+    ['orderLen', rules({ chartOrder: first(512) }), 1],
+    ['orderLen', rules({ chartOrder: first(513) }), 1],
+    ['orderLen', rules({ chartOrder: first(514) }), 1],
+    ['orderLen', rules({ chartOrder: first(164) }), 1],
+    // K15 base.gender
+    ['mon', gold(0)],
+    ['mon', gold(127)],
+    ['mon', gold(254)],
+    ['mon', gold(255)],
+    ['mon', gold(256)],
+    ['mon', gold(-1)],
+    ['mon', gold('31')],
+    ['mon', gold(' 9 ')],
+    ['mon', gold('0x1f')],
+    ['mon', gold(31.9)],
+    ['mon', gold(true)],
+    ['mon', gold('male')],
+    ['mon', gold([31])],
+    ['mon', gold(null)],
+    ['mon', sheet12(2, { ...k7(2), base: { ...B2, gender: 31 }, generation: 2 })],
+    ['mon', sheet12(2, { base: { gender: 31 } })],
+    ['mon', sheet12(1, { base: { ...B1, gender: 254 } })],
+    ['mon', sheet12(1, { base: { ...B1, gender: 'male' } })],
+    ['mon', { ...mon3(), base: { ...B2, gender: 31 } }],
+    ['party', { battle: 'b1', mons: [gold(31)] }, 2],
+    ['party', { battle: 'b1', mons: [gold(300)] }, 2],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: gold(31),
+    }, 2],
+    // Gold's BATON PASS successor
+    ['choice', fight({ pass: 0 }), 2],
+    ['choice', fight({ pass: 5 }), 2],
+    ['choice', fight({ pass: 6 }), 2],
+    ['choice', fight({ pass: -1 }), 2],
+    ['choice', fight({ pass: '2' }), 2],
+    ['choice', fight({ pass: ' 1 ' }), 2],
+    ['choice', fight({ pass: 1.5 }), 2],
+    ['choice', fight({ pass: true }), 2],
+    ['choice', fight({ pass: 'two' }), 2],
+    ['choice', fight({ pass: [1] }), 2],
+    ['choice', fight({ pass: null }), 2],
+    ['choice', fight({ pass: 2, dexCaught: true }), 2],
+    ['choice', {
+      battle: 'b1', action: 'switch', slot: 1, pass: 2,
+    }, 2],
+    ['choice', fight({ pass: 2 }), 1],
+    ['choice', fight({ pass: 9 }), 1],
+    ['choice', fight({ pass: 2, mimic: 1 }), 1],
+    ['choice', fight({ pass: 2 }), 3],
+    ['choice', fight({ pass: 9 }), 3],
+    ['choice', fight({ pass: 2 })],
+    ['choice', fight({ pass: 9 })],
+    // Gold Metronome pool `num`
+    ['ruleset', pooled({ num: 1 }), 2],
+    ['ruleset', pooled({ num: 251 }), 2],
+    ['ruleset', pooled({ num: 252 }), 2],
+    ['ruleset', pooled({ num: 0 }), 2],
+    ['ruleset', pooled({ num: -1 }), 2],
+    ['ruleset', pooled({ num: '7' }), 2],
+    ['ruleset', pooled({ num: 7.5 }), 2],
+    ['ruleset', pooled({ num: true }), 2],
+    ['ruleset', pooled({ num: 'x' }), 2],
+    ['ruleset', pooled({ num: [7] }), 2],
+    ['ruleset', pooled({ num: null }), 2],
+    ['ruleset', pooled({ num: 7, priority: 2, ppUps: 1 }), 2],
+    ['ruleset', rules({ metronomePool: [row12('a', { num: 3 }), row12('b')] }), 2],
+    ['ruleset', pooled({ num: 7 }), 1],
+    ['ruleset', pooled({ num: 999 }), 1],
+    ['ruleset', pooled({ num: 7 })],
+    ['ruleset', pooled({ num: 999 })],
+    // the Gen 1 / Gen 2 pool read as a list on both twins
+    ['ruleset', rules({ metronomePool: [row12('a', { num: 3 }), null, row12('b')] }), 2],
+    ['ruleset', rules({ metronomePool: [null] }), 1],
+    ['ruleset', rules({ metronomePool: [] }), 1],
+    ['ruleset', rules({ metronomePool: { a: row12('a') } }), 2],
+    ['ruleset', rules({ metronomePool: 'rows' }), 1],
+  ];
+}
+
+function readWave5(kind, input, gen) {
+  if (kind === 'orderLen') {
+    const read = sanitize.cleanBattleRuleset(input, gen);
+    if (!read) return '(refused)';
+    return read.chartOrder ? read.chartOrder.length : '(no order)';
+  }
+  return readGap(kind, input, gen);
+}
+
+/*
+ * Wave 5, the hubs and the real referees: Red's chartOrder decides "doesn't
+ * affect" vs "missed" (a Gen 2 hub keeps none), Gold's `pass` picks BATON
+ * PASS's successor, K15's gender decides ATTRACT, and a pool row's `num`
+ * decides what METRONOME calls. Twin of wave5_hub_fields in the Lua driver,
+ * whose header argues each step.
+ */
+function wave5Hub(generation, id, rules, aMons, bMons) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, ...rules });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: aMons,
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: bMons,
+  });
+  a.peer.outbox.length = 0;
+  return { relay, a, record: relay.battles.get(id) };
+}
+
+// The lines of `user`'s own move, from its "<USER> used" line up to the next
+// "used" line (the Lua driver's msgTexts).
+function msgTexts(player, user) {
+  const out = [];
+  let on = false;
+  for (const msg of takeAll(player, 'mmo.battle_event')) {
+    if (msg.t === 'msg') {
+      if (msg.text.includes(' used ')) on = msg.text.startsWith(`${user} `);
+      if (on) out.push(msg.text);
+    }
+  }
+  return out;
+}
+
+const IMMUNE_CHART = [[0, 200], [100, 100]];
+
+function foeHp(sim) {
+  for (const fighter of sim.fighters) {
+    if (fighter.side === 'b') {
+      const live = fighter.active ? fighter.mons[fighter.active - 1] : null;
+      return orNil(live && live.hp);
+    }
+  }
+  return '(no foe)';
+}
+
+function redOrder(generation, order) {
+  const id = 'co';
+  const { relay, a, record } = wave5Hub(generation, id, { chart: IMMUNE_CHART, chartOrder: order }, [
+    sheet12(generation, { species: 'TAPPER', moves: [row12('TAP', { pp: 10, power: 40 })] }),
+  ], [
+    sheet12(generation, { species: 'DUO', types: [0, 1], moves: [row12('HUSH', { pp: 10, power: 0 })] }),
+  ]);
+  const kept = record && record.ruleset ? orNil(record.ruleset.chartOrder) : '(no ruleset)';
+  if (!record || !record.sim) return { opened: false, kept };
+  const rows = record.sim.chartRows ? record.sim.chartRows.length : 0;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return {
+    opened: true, kept, rows, texts: msgTexts(a, 'TAPPER'), foeHp: foeHp(record.sim),
+  };
+}
+
+function goldPass(pass) {
+  const id = 'bp';
+  const sheet = (species, moves) => sheet12(2, { species, moves });
+  const { relay, a, record } = wave5Hub(2, id, { chart: CHART }, [
+    sheet('PASSER', [row12('BATON_PASS', { pp: 10, power: 0, effect: 134 })]),
+    sheet('BENCH1', [row12('TAP', { pp: 10, power: 1 })]),
+    sheet('BENCH2', [row12('TAP', { pp: 10, power: 1 })]),
+  ], [sheet('FOE', [row12('HUSH', { pp: 10, power: 0 })])]);
+  if (!record || !record.sim) return { opened: false };
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, pass,
+  });
+  const fighter = record.sim.byId.get(a.id);
+  return {
+    opened: true,
+    turn: record.sim.turn,
+    active: fighter.mons[fighter.active - 1].species,
+    texts: msgTexts(a, 'PASSER'),
+  };
+}
+
+function goldAttract(mine, theirs) {
+  const id = 'at';
+  const sheet = (species, gender, moves) => {
+    const extra = k7(2);
+    if (gender !== undefined) extra.base = { ...extra.base, gender };
+    return sheet12(2, { ...extra, species, moves });
+  };
+  const { relay, a, record } = wave5Hub(2, id, { chart: CHART }, [
+    sheet('CHARMER', mine, [row12('ATTRACT', { pp: 15, power: 0, effect: 133 })]),
+  ], [sheet('FOE', theirs, [row12('HUSH', { pp: 10, power: 0 })])]);
+  if (!record || !record.sim) return { opened: false };
+  const live = record.sim.byId.get(a.id).mons[0];
+  const held = live.base ? orNil(live.base.gender) : '(no base)';
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return { opened: true, gender: held, texts: msgTexts(a, 'CHARMER') };
+}
+
+function goldMetronome(numbered) {
+  const id = 'mt';
+  const poolRow = (moveId, num) => row12(moveId, { pp: 10, power: 0, num: numbered ? num : undefined });
+  const { relay, a, record } = wave5Hub(2, id, {
+    chart: CHART,
+    metronomePool: [poolRow('CALLED_A', 200), poolRow('CALLED_B', 7)],
+  }, [
+    sheet12(2, { species: 'WAGGLER', moves: [row12('METRONOME', { pp: 10, power: 0, effect: 83 })] }),
+  ], [
+    sheet12(2, { species: 'FOE', moves: [row12('HUSH', { pp: 10, power: 0 })] }),
+  ]);
+  if (!record || !record.sim) return { opened: false };
+  const nums = (record.ruleset.metronomePool || []).map((entry) => orNil(entry.num));
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return { opened: true, nums, texts: msgTexts(a, 'WAGGLER') };
+}
+
+function runWave5() {
+  return [
+    {
+      name: 'referee_gaps_wave5_dialect',
+      result: wave5().map(([kind, input, gen]) => ({ kind, got: orNil(readWave5(kind, input, gen)) })),
+    },
+    {
+      name: 'wave5_hub_fields',
+      result: {
+        redImmuneLast: redOrder(1, [0, 1, 0, 0]),
+        redSuperLast: redOrder(1, [0, 0, 0, 1]),
+        redNoOrder: redOrder(1, undefined),
+        redBadOrder: redOrder(1, [0, 0, 0]),
+        goldOrderIgnored: redOrder(2, [0, 0, 0, 1]),
+        goldPassBench2: goldPass(2),
+        goldPassNone: goldPass(undefined),
+        goldPassNobody: goldPass(4),
+        goldPassPastMax: goldPass(6),
+        goldAttractMF: goldAttract(0, 254),
+        goldAttractMM: goldAttract(0, 0),
+        goldAttractNone: goldAttract(undefined, undefined),
+        goldMetronomeNum: goldMetronome(true),
+        goldMetronomePlace: goldMetronome(false),
+      },
+    },
+  ];
+}
+
 function runLua() {
-  const luajit = spawnSync('luajit', [DRIVER, ROOT], { encoding: 'utf8' });
+  const luajit = spawnSync('luajit', [DRIVER, ROOT],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (luajit.error || luajit.status !== 0) return null;
   return JSON.parse(luajit.stdout);
 }

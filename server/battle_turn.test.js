@@ -930,7 +930,7 @@ scenario('move_names', (events) => {
     },
   });
   drainInto(battle, events);
-  // 1: both swing. "Alpha used SLOW SWIPE" and "Beta used THUMP HIT" are the
+  // 1: both swing. "Alpha used SLOW SWIPE!" and "Beta used THUMP HIT!" are the
   //    line this whole field exists for; before it they read "slow_swipe".
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
@@ -2286,15 +2286,15 @@ scenario('g1_leech_toxic', duels('g1lt', [
 
 const dizzy = (extra, moves) => fast(moves || [SPLASH], extra, { confusion: 4 });
 scenario('g1_self_hit', duels('g1sh', [
-  { seed: 7304, a: dizzy({ substitute: 30 }), b: slow(undefined, { substitute: 10 }) },
-  { seed: 7304, a: dizzy({ substitute: 30 }), b: slow(undefined, { substitute: 5 }) },
-  { seed: 7304, a: dizzy({ substitute: 30 }), b: slow() },
-  { seed: 7304, a: dizzy(undefined), b: slow(undefined, { substitute: 10 }) },
-  { seed: 7304, a: dizzy({ charging: { moveIndex: 1, effect: 43, targetSlot: 3, moveId: 'FLY' },
+  { seed: 7309, a: dizzy({ substitute: 30 }), b: slow(undefined, { substitute: 10 }) },
+  { seed: 7309, a: dizzy({ substitute: 30 }), b: slow(undefined, { substitute: 5 }) },
+  { seed: 7309, a: dizzy({ substitute: 30 }), b: slow() },
+  { seed: 7309, a: dizzy(undefined), b: slow(undefined, { substitute: 10 }) },
+  { seed: 7309, a: dizzy({ charging: { moveIndex: 1, effect: 43, targetSlot: 3, moveId: 'FLY' },
     invulnerable: true }, [fx('FLY', 90, 43)]), b: slow(), turns: [[0, 0], [0, 0]] },
-  { seed: 7304, a: dizzy({ thrashing: { turns: 1, moveIndex: 1 } }, [fx('THRASH', 30, 27)]),
+  { seed: 7309, a: dizzy({ thrashing: { turns: 1, moveIndex: 1 } }, [fx('THRASH', 30, 27)]),
     b: slow(), turns: [[0, 0], [0, 0]] },
-  { seed: 7304, a: dizzy({ bide: { turns: 0, stored: 30, moveIndex: 1, targetSlot: 3 } },
+  { seed: 7309, a: dizzy({ bide: { turns: 0, stored: 30, moveIndex: 1, targetSlot: 3 } },
     [fx('BIDE', 0, 26)]), b: slow(), turns: [[0, 0], [0, 0]] },
 ]));
 
@@ -2307,6 +2307,17 @@ scenario('g1_self_hit', duels('g1sh', [
 // monster of every seat with the state these rows move.
 function probeR1b(battle, at, turn) {
   probes.push({ at, turn, rng: battle.rng.state(), last: battle.lastDamage });
+  // R1e's seat state: wPlayerMoveListIndex, wAILayer2Encouragement and the
+  // move struct COUNTER reads (power / type, -1 when nothing was loaded).
+  for (const fighter of battle.fighters) {
+    const struct = fighter.moveStruct;
+    probes.push({
+      at, turn, seat: fighter.slot,
+      li: fighter.moveListIndex || 0, ai: fighter.aiLayer2 || 0,
+      sp: struct ? struct.power : -1,
+      st: struct ? struct.type : -1,
+    });
+  }
   for (const fighter of battle.fighters) {
     fighter.mons.forEach((mon, i) => {
       const st = mon.stages;
@@ -2350,7 +2361,7 @@ function fights(id, entries) {
       for (const seat of e.seats) {
         sides[seat.side].push({
           playerId: seat.pid, name: seat.pid, mons: seat.mons,
-          bag: seat.bag, badges: seat.badges,
+          bag: seat.bag, badges: seat.badges, aiMods: seat.aiMods,
         });
       }
       battle = build({
@@ -2372,8 +2383,12 @@ function fights(id, entries) {
         for (const seat of e.seats) {
           let c = row[seat.pid];
           if (c !== undefined && c !== null && battle.turn === turnNo && battle.phase === phase) {
-            if (typeof c === 'number') c = { action: 'fight', move: c };
-            battle.submitChoice(seat.pid, c);
+            if (c === 'auto') {
+              battle.autoPick(seat.pid);
+            } else {
+              if (typeof c === 'number') c = { action: 'fight', move: c };
+              battle.submitChoice(seat.pid, c);
+            }
           }
         }
         if (battle.forcedPending) battle.tick(battle.now);
@@ -2433,7 +2448,8 @@ function r1duo(a, b, o) {
   const e = {
     seats: [
       { pid: 'p1', side: 'a', mons: a, bag: aSeat.bag, badges: aSeat.badges },
-      { pid: 'p2', side: 'b', mons: b, bag: bSeat.bag, badges: bSeat.badges },
+      { pid: 'p2', side: 'b', mons: b, bag: bSeat.bag, badges: bSeat.badges,
+        aiMods: bSeat.aiMods },
     ],
   };
   for (const [key, value] of Object.entries(o)) {
@@ -3277,7 +3293,9 @@ scenario('g1_menu_lockin', fights('g1ml', [
   r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 10 }),
     r1s('Gamma', [r1m('thump', 10, 0)], { spd: 10 })],
   [r1s('Beta', [r1m('wrap', 15, 42), r1m('slam', 40, 0)], { spd: 90 })],
-  { mode: 'wild', seed: 9913,
+  // (R1e: the re-pick is `.chooseRandomMove`'s; on this seed it lands on
+  // SLAM, the second slot.)
+  { mode: 'wild', seed: 9915,
     turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
       { p1: 0, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 })],
@@ -3298,7 +3316,7 @@ scenario('g1_menu_lockin', fights('g1ml', [
 // A charge's first turn is ChargeEffect alone (CheckIfPlayerNeedsToChargeUp
 // jumps there ahead of PlayerCanExecuteMove): its line, no used line, no PP;
 // the release is PlayerCanExecuteMove's used line and DecrementPP:
-//   1 FLY at 10 PP: "flew up high", then "used FLY" with the PP spent;
+//   1 FLY at 10 PP: "flew up high!", then "used FLY" with the PP spent;
 //   2 a paralysed SOLARBEAM user fully paralysed on its release turn: the
 //     charge is gone and no PP was ever spent;
 //   3 the computer's FLY: the same lines, its PP never spent.
@@ -3325,8 +3343,8 @@ scenario('g1_thrash_anim', fights('g1th', [
 
 // PrintCriticalOHKOText and DisplayEffectiveness come after the hit is
 // applied, each hit; the crit flag is cleared once printed:
-//   1 a two-hit move, super effective, critical: hit, "A critical hit",
-//     "It's super effective", hit, "It's super effective";
+//   1 a two-hit move, super effective, critical: hit, "Critical hit!",
+//     "It's super effective!", hit, "It's super effective!";
 //   2 a super-effective knockout: the line, then the faint;
 //   3 a landed OHKO into a super-effective type: "One-hit KO!", the line,
 //     then the faint.
@@ -3400,13 +3418,13 @@ scenario('g1_haze_lock', fights('g1hz', [
 // LAST TypeEffects row applied, and the rows apply in table order. Beta is
 // types 1 and 2; Alpha's type-0 THUMP meets the rows (0,1) and (0,2):
 //   1 (0,1) = 0 then (0,2) = 200: the damage is 0, the last row 200 --
-//     "Alpha missed";
-//   2 the same rows the other way round: "It doesn't affect Beta";
+//     "Alpha's attack missed!";
+//   2 the same rows the other way round: "It doesn't affect Beta!";
 //   3 no order uploaded: any immunity, "doesn't affect" (as before);
 //   4 (0,1) = 200 then (0,2) = 50: the product is neutral, the last row 50
-//     -- "not very effective", the odd damage doubled then halved, whole:
+//     -- "not very effective...", the odd damage doubled then halved, whole:
 //     8 after the roll;
-//   5 the other way round, on the same seed: "super effective", the damage
+//   5 the other way round, on the same seed: "super effective!", the damage
 //     halved first, losing its odd point: 7 after the same roll;
 //   6 no order: the product, no line, the chart per defender type (8).
 function chartRun(seed, row, order) {
@@ -3422,6 +3440,190 @@ scenario('g1_chart_order', fights('g1co', [
   chartRun(9974, [100, 200, 50], [0, 1, 0, 2]),
   chartRun(9974, [100, 200, 50], [0, 2, 0, 1]),
   chartRun(9974, [100, 200, 50], undefined),
+]));
+
+// ------------------------------------------------------------------
+// R1e (gen12-referee-gaps-fix wave 5): AttackSubstitute's line on every
+// hit, DecrementPP's wrap and IncrementMovePP, the trainer RUN refused at the
+// menu, COUNTER off the move struct, the status animations, the computer's
+// move choice, HealEffect_, Conversion and the item lines -- the Lua
+// driver's scenarios, literal for literal.
+// ------------------------------------------------------------------
+
+function autoRows(n, p1 = 0) {
+  const rows = [];
+  for (let i = 0; i < n; i += 1) rows.push({ p1, p2: 'auto' });
+  return rows;
+}
+
+scenario('g1_sub_lines', fights('g1sl', [
+  r1duo([r1s('Alpha', [r1m('kick', 30, 44)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, substitute: 10 })],
+    { seed: 9981, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, confusion: 5, substitute: 50 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, substitute: 50 })],
+    { seed: 9982, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('smash', 250, 0)], { spd: 90, atk: 250, level: 70 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, def: 10, substitute: 100 })],
+    { seed: 9983, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_pp_wrap', fights('g1pw', [
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42, { pp: 1, ppUps: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9991, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 1 }), r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('chill', 10, 5, { chance: 100 }),
+      r1m('QUICK_ATTACK', 10, 4, { type: 1 })], { spd: 10 })],
+    { seed: 9992, typeIds: FIRE_AXIS,
+      turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 1 }, { p1: 1, p2: 1 }] }),
+  r1duo([r1s('Alpha', [r1m('METRONOME', 0, 83)], { spd: 90, status: 'PAR' })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9997, pool: [r1m('FLY', 90, 43)],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('morph', 0, 57, { pp: 10 }), r1m('splash', 0, 85)], { spd: 90 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('METRONOME', 0, 83)], { spd: 10 })],
+    { seed: 9994, pool: [r1m('tap', 10, 0)],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+        { p1: { action: 'switch', slot: 0 }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('METRONOME', 0, 83)], { spd: 10 })],
+    { mode: 'wild', seed: 9995, pool: [r1m('tap', 10, 0)], turns: autoRows(2) }),
+]));
+
+scenario('g1_npc_run', fights('g1nr', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 10001,
+      turns: [{ p1: { action: 'run' }, p2: 'auto' }, { p1: 0 }, { p1: 0, p2: 'auto' }] }),
+]));
+
+scenario('g1_counter_struct', fights('g1cs', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0), r1m('COUNTER', 1, 0, { type: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 10011, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: { action: 'switch', slot: 1 } }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0), r1m('COUNTER', 1, 0, { type: 1 })], { spd: 10 })],
+    [r1s('Beta', [r1m('BIDE', 0, 26)], { spd: 90 })],
+    { seed: 10012, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 1, p2: 0 },
+      { p1: 1, p2: 0 }] }),
+  {
+    mode: 'coop_pvp',
+    seed: 10013,
+    seats: [
+      { pid: 'p1', side: 'a', mons: [r1s('Alpha', [r1m('wrap', 15, 42), r1m('splash', 0, 85)], { spd: 90 })] },
+      { pid: 'p3', side: 'a', mons: [r1s('Gamma', [r1m('thump', 10, 0),
+        r1m('COUNTER', 1, 0, { type: 1 })], { spd: 50 })] },
+      { pid: 'p2', side: 'b', mons: [r1s('Beta', [r1m('thump', 10, 0)], { spd: 70 })] },
+      { pid: 'p4', side: 'b', mons: [r1s('Delta', [r1m('splash', 0, 85)], { spd: 5 })] },
+    ],
+    turns: [
+      { p1: 1, p3: { action: 'fight', move: 0, target: 3 },
+        p2: { action: 'fight', move: 0, target: 1 }, p4: 0 },
+      { p1: { action: 'fight', move: 0, target: 3 }, p3: { action: 'fight', move: 1, target: 3 },
+        p2: { action: 'fight', move: 0, target: 1 }, p4: 0 },
+      { p1: 0, p3: { action: 'fight', move: 1, target: 3 }, p2: 0, p4: 0 },
+    ],
+  },
+  r1duo([r1s('Alpha', [r1m('COUNTER', 1, 0, { type: 1 }), r1m('thump', 10, 0)], { spd: 10, status: 'PAR' })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('lull', 0, 32), r1m('karate', 50, 0, { type: 1 })],
+      { spd: 90, status: 'PAR' })],
+    { mode: 'coop_npc', seed: 10014, bSeat: { aiMods: [1] }, turns: autoRows(5) }),
+]));
+
+scenario('g1_status_anims', fights('g1sa', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, status: 'SLP', statusTurns: 3 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'SLP', statusTurns: 3 })],
+    { mode: 'wild', seed: 10021, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, confusion: 4 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, confusion: 4, status: 'BRN' })],
+    { mode: 'wild', seed: 10022, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, status: 'SLP', statusTurns: 3, confusion: 4 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, confusion: 4 })],
+    { seed: 10023, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_cart_pick', fights('g1cp', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { mode: 'wild', seed: 10031, turns: autoRows(3) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('chop', 10, 0), r1m('slam', 10, 0)],
+      { spd: 10, disable: { moveIndex: 2, turns: 6 } })],
+    { mode: 'wild', seed: 10032, turns: autoRows(4) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, status: 'PAR' })],
+    [r1s('Beta', [r1m('lull', 0, 32), r1m('thump', 10, 0), r1m('toxin', 0, 66), r1m('chop', 10, 0)],
+      { spd: 10 })],
+    { mode: 'coop_npc', seed: 10033, bSeat: { aiMods: [1] }, turns: autoRows(4) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, types: [1] })],
+    [r1s('Beta', [r1m('grow', 0, 10), r1m('zap', 10, 0, { type: 1 }), r1m('nip', 10, 0, { type: 0 }),
+      r1m('fang', 1, 40)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 10034, bSeat: { aiMods: [1, 2, 3] },
+      chart: [[100, 50, 100], [100, 100, 100], [100, 100, 100]], turns: autoRows(4) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('chop', 10, 0)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 10035, bSeat: { aiMods: [] }, turns: autoRows(3) }),
+  {
+    mode: 'coop_npc',
+    seed: 10036,
+    seats: [
+      { pid: 'p1', side: 'a', mons: [r1s('Alpha', [r1m('smash', 120, 0)], { spd: 90, atk: 120 })] },
+      { pid: 'p3', side: 'a', mons: [r1s('Gamma', [r1m('splash', 0, 85)], { spd: 80 })] },
+      { pid: 'n1', side: 'b', aiMods: [2],
+        mons: [r1s('Beta', [r1m('grow', 0, 10), r1m('thump', 10, 0)], { spd: 10, hp: 30 }),
+          r1s('Delta', [r1m('grow', 0, 10), r1m('thump', 10, 0)], { spd: 10 })] },
+      { pid: 'n2', side: 'b', aiMods: [2],
+        mons: [r1s('Kappa', [r1m('grow', 0, 10), r1m('thump', 10, 0)], { spd: 5 })] },
+    ],
+    turns: [
+      { p1: { action: 'fight', move: 0, target: 3 }, p3: 0, n1: 'auto', n2: 'auto' },
+      { n1: 'auto' },
+      { p1: { action: 'fight', move: 0, target: 3 }, p3: 0, n1: 'auto', n2: 'auto' },
+      { p1: { action: 'fight', move: 0, target: 4 }, p3: 0, n1: 'auto', n2: 'auto' },
+    ],
+  },
+]));
+
+scenario('g1_heal', fights('g1hl', [
+  r1duo([r1s('Alpha', [r1m('REST', 0, 56), r1m('thump', 10, 0)], { spd: 90, hp: 200, status: 'PSN' })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 10041, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('RECOVER', 0, 56)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10042, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('RECOVER', 0, 56)], { spd: 90, hp: 145 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10043, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('RECOVER', 0, 56)], { spd: 90, hp: 144 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10044, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('REST', 0, 56)], { spd: 90, hp: 100 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10045, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_item_lines', fights('g1il', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 300, status: 'PSN' })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, status: 'SLP', statusTurns: 7 })],
+    { mode: 'wild', seed: 10051,
+      turns: [{ p1: { action: 'item', item: 'POTION' }, p2: 0 },
+        { p1: { action: 'item', item: 'ANTIDOTE' }, p2: 0 },
+        { p1: { action: 'item', item: 'X_ATTACK' }, p2: 0 },
+        { p1: { action: 'item', item: 'POKE_FLUTE' }, p2: 0 },
+        { p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 200, status: 'TOX', toxicCounter: 2,
+    confusion: 5 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 10052,
+      turns: [{ p1: { action: 'item', item: 'FULL_RESTORE' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, hp: 100 })],
+    { mode: 'coop_npc', seed: 10053, bSeat: { bag: { POTION: 1 } }, turns: autoRows(2) }),
+]));
+
+scenario('g1_conversion', fights('g1cv', [
+  r1duo([r1s('Alpha', [r1m('convert', 0, 24)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2, 3] })],
+    { seed: 10061, turns: [{ p1: 0, p2: 0 }] }),
 ]));
 
 // ------------------------------------------------------------------
@@ -3490,7 +3692,10 @@ function runJs() {
 }
 
 function runLua() {
-  const luajit = spawnSync('luajit', [DRIVER, ROOT], { encoding: 'utf8' });
+  // The driver's stream is past spawnSync's 1 MiB default buffer (R1e's
+  // scenarios and seat probes): an overflow is ENOBUFS, read as "no luajit".
+  const luajit = spawnSync('luajit', [DRIVER, ROOT],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (luajit.error || luajit.status !== 0) return null;
   return JSON.parse(luajit.stdout);
 }
@@ -3610,6 +3815,9 @@ test('the KO fight ends, and names who won', () => {
 });
 
 test('coop_npc RUN refuses without finishing the fight', () => {
+  // R1e: TryRunningFromBattle's `.trainerBattle` leaves the turn unspent and
+  // BattleMenu_RunWasSelected asks again -- the choice is refused, the seat
+  // still owes, and the refusal line is the client's own.
   const battle = build({
     id: 'npc-run', mode: 'coop_npc', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
@@ -3622,21 +3830,28 @@ test('coop_npc RUN refuses without finishing the fight', () => {
   battle.drainEvents();
   const turnBefore = battle.snapshot().turn;
   const hpBefore = battle.snapshot().field.find((f) => f.playerId === 'p1').hp;
-  battle.submitChoice('p1', { action: 'run' });
+  assert.strictEqual(battle.submitChoice('p1', { action: 'run' }), false,
+    'coop_npc RUN is refused at the menu');
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   const events = battle.drainEvents();
   assert.strictEqual(battle.outcome(), null, 'the gym is not forfeited');
   assert.ok(
-    events.some((event) => event.t === 'msg'
+    !events.some((event) => event.t === 'msg'
       && event.text === "No! There's no running from a trainer battle!"),
-    'the trainer refusal is in the turn stream, Wire-safe',
+    'the refusal line is the client\'s, not the referee\'s',
   );
   assert.ok(!events.some((event) => event.t === 'over'), 'with no over event');
   assert.ok(!events.some((event) => event.t === 'run'), 'and no run event');
-  assert.strictEqual(battle.snapshot().turn, turnBefore + 1, 'the turn was still spent');
+  assert.strictEqual(battle.snapshot().turn, turnBefore, 'the turn is not spent');
+  assert.strictEqual(battle.byId.get('p1').choice, null, '...and the runner still owes');
+  assert.strictEqual(battle.snapshot().field.find((f) => f.playerId === 'p1').hp, hpBefore,
+    'so the foe has not attacked yet');
+  assert.ok(battle.submitChoice('p1', { action: 'fight', move: 0 }), 'the re-asked FIGHT is taken');
+  battle.drainEvents();
+  assert.strictEqual(battle.snapshot().turn, turnBefore + 1, 'and the turn resolves');
   assert.ok(
     battle.snapshot().field.find((f) => f.playerId === 'p1').hp < hpBefore,
-    'so the foe still got its attack',
+    'with the foe\'s attack in it',
   );
 });
 
@@ -3725,24 +3940,24 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
 
   // The line the whole field exists for. Before PROTOCOL 26 this read
-  // "Alpha used slow_swipe" -- the id, in the one place a player reads the
+  // "Alpha used slow_swipe!" -- the id, in the one place a player reads the
   // fight.
-  assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
+  assert.ok(said.includes('Alpha used SLOW SWIPE!'), 'an attack prints the display name');
 
   // Every other sentence that names a move, all three of them, because they
   // are separate call sites and each one used to spell the id. (Disable
   // wearing off names the monster -- the cart's DisabledNoMoreText, R1b.)
-  assert.ok(said.includes('THUMP HIT was disabled'), 'Disable landing names the move');
-  assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
+  assert.ok(said.includes("Beta's THUMP HIT was disabled!"), 'Disable landing names the move');
+  assert.ok(said.includes("Beta's THUMP HIT is disabled!"), 'and so does the refusal it causes');
   assert.ok(said.includes("Beta's disabled no more!"), 'and it wearing off names the monster');
-  assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
-  assert.ok(said.includes('Alpha used THUMP HIT'),
+  assert.ok(said.includes('Alpha learned THUMP HIT!'), 'Mimic names what it copied');
+  assert.ok(said.includes('Alpha used THUMP HIT!'),
     'and the copy keeps the name -- a copy that dropped it would revert to the '
     + 'slug on every turn afterwards');
 
   // The fallback is not a defensive branch: a protocol-25 client uploads moves
   // with no name at all, and half the fights on a mixed hub narrate under this.
-  assert.ok(said.includes('Beta used nudge'), 'a move with no name is narrated under its id');
+  assert.ok(said.includes('Beta used nudge!'), 'a move with no name is narrated under its id');
 
   // The id has to keep travelling on `anim` regardless -- that is what a client
   // looks the move animation and the move-menu label up by, and a referee that
@@ -3894,9 +4109,10 @@ test('a switch resolves before an item, and neither spends a roll', () => {
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
     ['send', 'send', 'team', 'team', 'turn', 'chose', 'chose',
-     'switch', 'send', 'item', 'msg', 'msg', 'turn'],
+     'switch', 'send', 'item', 'msg', 'turn'],
   );
-  // 'restore' is an unknown id: announce + "But it failed", and neither the
+  // 'restore' is an unknown id: ItemUseNoEffect's line alone (R1e: the
+  // party menu's items print no "used" line), and neither the
   // switch nor the item draws. Both seats still meet MainInBattleLoop's
   // compare at one Speed (40 and 40), so the tie byte is the turn's one draw
   // (R1c: the cart compares on a switch or an item turn too).
@@ -3910,7 +4126,7 @@ test('sleep with no counter costs exactly the turn it wakes on', () => {
   const run = byName(jsRuns).get('sleep_default');
   const cleared = run.events.find((event) => event.t === 'status');
   assert.ok(cleared, 'the sleeper woke');
-  assert.strictEqual(cleared.text, 'Alpha woke up');
+  assert.strictEqual(cleared.text, 'Alpha woke up!');
   assert.strictEqual(cleared.status, undefined, 'a status event with no status means cleared');
   assert.ok(
     run.events.findIndex((event) => event.t === 'anim' && event.side === 'a')
@@ -4646,7 +4862,7 @@ test('the 999 and 1 walls fail, winding the stage back one step', () => {
   assert.deepStrictEqual(stages(2, 0), [3, 0], 'a +2 on 999 fails and nets +1');
   assert.deepStrictEqual(stages(3, 3), [0, 0], 'a -1 on a Defense of 1 fails, wound back');
   assert.deepStrictEqual(stages(4, 3), [0, -1], 'a -2 on it nets -1');
-  assert.ok(saidIn('g1_walls', 'Nothing happened'), 'and says so');
+  assert.ok(saidIn('g1_walls', 'Nothing happened!'), 'and says so');
 });
 
 test('a crit reads both party stats; Transform never copies them', () => {
@@ -4663,7 +4879,7 @@ test('screens double the defence before the 8-bit scaling, and stack with nothin
   assert.ok(onAnn[0] >= 66 && onAnn[0] <= 78, '512 x2 = 1024 wraps to a 0 byte: divides as 1');
   assert.strictEqual(onAnn[1], 20, 'a fixed-damage move is not halved');
   assert.ok(onAnn[2] <= 3, 'after Haze, the unscreened 512 is a 3 at most');
-  assert.ok(saidIn('g1_screens', 'But it failed'), 'a second Reflect fails');
+  assert.ok(saidIn('g1_screens', 'But, it failed!'), 'a second Reflect fails');
   const after = jsRun('g1_screens').probes.find((p) => p.at === 3 && p.slot === 0);
   assert.strictEqual(after.reflect || after.lightScreen, false, 'Haze takes both screens down');
 });
@@ -4680,7 +4896,7 @@ test('the 997 cap, the Explosion order and the self-hit\'s borrowed Reflect', ()
     'seat 0 faces the Reflect');
   assert.ok(damagesOn('g1_opposite_reflect', 1).every((d) => d === 144),
     'seat 1 faces a foe with none: 144');
-  assert.ok(!saidIn('g1_flinch_reset', 'Alpha flinched'), 'a stale flinch dies at turn open');
+  assert.ok(!saidIn('g1_flinch_reset', 'Alpha flinched!'), 'a stale flinch dies at turn open');
 });
 
 // The rest are battles of their own: what a cure, a vitamin and a faint do to
@@ -4921,13 +5137,13 @@ test('Gen 1 obedience: who never rolls plays out exactly as untraded', () => {
 test('Gen 1 obedience: the R1 pass and the move used instead', () => {
   const pass = g1bArena({ a: [g1bRogue()], b: [g1bBob()] });
   g1bScript(pass, [0x20]);
-  assert.ok(g1bSaid(g1bStep(pass, g1bUse(0), g1bUse(0)), 'Alpha used thump'), 'an R1 pass');
+  assert.ok(g1bSaid(g1bStep(pass, g1bUse(0), g1bUse(0)), 'Alpha used thump!'), 'an R1 pass');
   assert.strictEqual(g1bActive(pass, 'p1').moves[0].pp, 19);
 
   const battle = g1bArena({ a: [g1bRogue()], b: [g1bBob()] });
   g1bScript(battle, [0x05, 0x02, 0x00, 0x01]);
   const events = g1bStep(battle, g1bUse(0), g1bUse(0));
-  assert.ok(g1bSaid(events, 'Alpha used instead, chop'), '"used instead,"');
+  assert.ok(g1bSaid(events, 'Alpha used instead, chop!'), '"used instead,"');
   assert.strictEqual(g1bOrder(events), '0:chop 3:splash');
   const alpha = g1bActive(battle, 'p1');
   assert.deepStrictEqual([alpha.moves[0].pp, alpha.moves[1].pp, alpha.lastMoveIndex], [19, 20, 2],
@@ -4971,7 +5187,7 @@ test('Gen 1 obedience: the nap overwrites the status and keeps the stored penalt
   g1bScript(brn, [0x05, 50, 0x24, 0x18]);
   g1bStep(brn, g1bUse(0), g1bUse(0));
   assert.deepStrictEqual([g1bActive(brn, 'p1').status, g1bActive(brn, 'p1').cur.atk], ['sleep', 15]);
-  assert.ok(g1bSaid(g1bStep(brn, g1bUse(0), g1bUse(0)), 'Alpha is fast asleep'));
+  assert.ok(g1bSaid(g1bStep(brn, g1bUse(0), g1bUse(0)), 'Alpha is fast asleep!'));
 });
 
 test("Gen 1 obedience: won't obey + the self-hit, and the four loaf lines", () => {
@@ -4980,7 +5196,7 @@ test("Gen 1 obedience: won't obey + the self-hit, and the four loaf lines", () =
       b: [g1bBob({ extra: reflect ? { reflect: true } : undefined })] });
     g1bScript(battle, [0x05, 50, 0xA5]);
     const events = g1bStep(battle, g1bUse(0), g1bUse(0));
-    assert.ok(g1bSaid(events, "Alpha won't obey!") && g1bSaid(events, 'Alpha hurt itself in confusion'));
+    assert.ok(g1bSaid(events, "Alpha won't obey!") && g1bSaid(events, 'It hurt itself in its confusion!'));
     return g1bHits(events, 0)[0];
   };
   assert.strictEqual(selfHit(true), 10, "the foe's Reflect doubles the self-hit's Defense");
@@ -5000,7 +5216,7 @@ test('Gen 1 obedience: a Metronome instead keeps the flag, a Mirror Move clears 
     a: [g1bRogue({ moves: [g1bMove('thump', 10, 0), g1bMove('metronome', 0, 83)] })], b: [g1bBob()] });
   g1bScript(metro, [0x05, 0x02, 0x01]);
   const events = g1bStep(metro, g1bUse(0), g1bUse(0));
-  assert.ok(g1bSaid(events, 'Alpha used instead, metronome') && g1bSaid(events, 'Alpha used instead, chop'));
+  assert.ok(g1bSaid(events, 'Alpha used instead, metronome!') && g1bSaid(events, 'Alpha used instead, chop!'));
   assert.strictEqual(g1bActive(metro, 'p1').moves[0].pp, 19);
 
   const mirror = g1bArena({
@@ -5009,7 +5225,7 @@ test('Gen 1 obedience: a Metronome instead keeps the flag, a Mirror Move clears 
   g1bStep(mirror, g1bUse(0), g1bUse(0));
   g1bScript(mirror, [0x05, 0x02, 0x01]);
   const copied = g1bStep(mirror, g1bUse(0), g1bUse(0));
-  assert.ok(g1bSaid(copied, 'Alpha used instead, mirror') && g1bSaid(copied, 'Alpha used splash'));
+  assert.ok(g1bSaid(copied, 'Alpha used instead, mirror!') && g1bSaid(copied, 'Alpha used splash!'));
 });
 
 test('Gen 1 called moves: no Struggle recoil off the last PP, and no second gate', () => {
@@ -5017,24 +5233,25 @@ test('Gen 1 called moves: no Struggle recoil off the last PP, and no second gate
     a: [{ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0, moves: [g1bMove('metronome', 0, 83, { pp: 1 })] }],
     b: [g1bBob()] });
   let events = g1bStep(metro, g1bUse(0), g1bUse(0));
-  assert.ok(g1bSaid(events, 'Alpha used thump') && !g1bSaid(events, 'Alpha is hit with recoil'),
+  assert.ok(g1bSaid(events, 'Alpha used thump!') && !g1bSaid(events, "Alpha's hit with recoil!"),
     'a Metronome on its last PP takes no recoil');
   events = g1bStep(metro, g1bUse(0), g1bUse(0));
-  assert.ok(g1bSaid(events, 'Alpha used STRUGGLE') && g1bSaid(events, 'Alpha is hit with recoil'),
+  assert.ok(g1bSaid(events, 'Alpha used STRUGGLE!') && g1bSaid(events, "Alpha's hit with recoil!"),
     'the Struggle after it does');
 
   const mirror = g1bArena({
     a: [{ species: 'Alpha', maxHp: 400, spd: 10, baseSpd: 0, moves: [g1bMove('mirror', 0, 9, { pp: 1 })] }],
     b: [g1bBob({ moves: [g1bMove('thump', 10, 0)] })] });
   events = g1bStep(mirror, g1bUse(0), g1bUse(0));
-  assert.ok(g1bSaid(events, 'Alpha used thump') && !g1bSaid(events, 'Alpha is hit with recoil'),
+  assert.ok(g1bSaid(events, 'Alpha used thump!') && !g1bSaid(events, "Alpha's hit with recoil!"),
     'a Mirror Move on its last PP takes no recoil');
 
   const dizzy = g1bArena({ pool: [g1bMove('thump', 10, 0)],
     a: [{ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0, confusion: 6,
       moves: [g1bMove('metronome', 0, 83)] }], b: [g1bBob()] });
-  g1bScript(dizzy, [200]);
-  assert.ok(g1bSaid(g1bStep(dizzy, g1bUse(0), g1bUse(0)), 'Alpha used thump'));
+  // (R1e: a confusion byte below 128 is the one that keeps its head.)
+  g1bScript(dizzy, [100]);
+  assert.ok(g1bSaid(g1bStep(dizzy, g1bUse(0), g1bUse(0)), 'Alpha used thump!'));
   assert.strictEqual(g1bActive(dizzy, 'p1').confusion, 5, 'the call runs no second confusion gate');
 });
 
@@ -5048,10 +5265,10 @@ test('Gen 1 flinch-reset skip: the player\'s raging or recharging monster keeps 
     g1bStep(battle, g1bUse(0), g1bUse(0));
     return g1bStep(battle, g1bUse(0), g1bUse(0));
   };
-  assert.ok(g1bSaid(rage('wild'), 'Alpha flinched'), "the player's raging monster keeps it");
+  assert.ok(g1bSaid(rage('wild'), 'Alpha flinched!'), "the player's raging monster keeps it");
   // The owner's rule (R1b): both sides of a link fight are "the player".
-  assert.ok(g1bSaid(rage('1v1'), 'Alpha flinched'), 'a link fight keeps it too');
-  assert.ok(!g1bSaid(rage('wild', 'b'), 'Beta flinched'), "the computer's raging monster is reset");
+  assert.ok(g1bSaid(rage('1v1'), 'Alpha flinched!'), 'a link fight keeps it too');
+  assert.ok(!g1bSaid(rage('wild', 'b'), 'Beta flinched!'), "the computer's raging monster is reset");
 
   const beam = g1bArena({
     a: [{ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0, moves: [g1bMove('beam', 20, 80)] }],
@@ -5062,7 +5279,7 @@ test('Gen 1 flinch-reset skip: the player\'s raging or recharging monster keeps 
   g1bStep(beam, g1bUse(0), g1bUse(0));
   assert.strictEqual(g1bActive(beam, 'p1').mustRecharge, false, 'the flinch cleared the recharge');
   assert.strictEqual(g1bActive(beam, 'p1').flinch, false, '...so the open reset the flinch');
-  assert.ok(g1bSaid(g1bStep(beam, g1bUse(0), g1bUse(0)), 'Alpha used beam'), '...and it fires again');
+  assert.ok(g1bSaid(g1bStep(beam, g1bUse(0), g1bUse(0)), 'Alpha used beam!'), '...and it fires again');
 
   const coop = build({ id: 'b1', mode: 'coop_wild', seed: 6403, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
@@ -5083,9 +5300,9 @@ test('Gen 1 flinch-reset skip: the player\'s raging or recharging monster keeps 
     return coop.drainEvents();
   };
   round(0);
-  assert.ok(g1bSaid(round(1), 'Alpha flinched'), 'co-op: the raging seat keeps its flinch');
+  assert.ok(g1bSaid(round(1), 'Alpha flinched!'), 'co-op: the raging seat keeps its flinch');
   const third = round(1);
-  assert.ok(!g1bSaid(third, 'Gamma flinched') && g1bSaid(third, 'Gamma used thump'),
+  assert.ok(!g1bSaid(third, 'Gamma flinched!') && g1bSaid(third, 'Gamma used thump!'),
     "co-op: the partner's flinch is reset");
 });
 
@@ -5137,16 +5354,16 @@ test('a Leech Seed tick that knocks the seeded monster out still heals the seede
 });
 
 test("Rage builds from no poison, Leech Seed or confusion self-hit", () => {
-  assert.ok(saidIn('g1_rage_quiet', 'Alpha hurt itself in confusion'), 'the seed does reach a self-hit');
+  assert.ok(saidIn('g1_rage_quiet', 'It hurt itself in its confusion!'), 'the seed does reach a self-hit');
   for (const at of [1, 2, 3]) {
     assert.strictEqual(stageAt('g1_rage_quiet', at, 0), 0, `turn ${at}: no build`);
     assert.strictEqual(probeAt('g1_rage_quiet', at, 0), '112/90/101/56', `turn ${at}: the switch-in stats`);
   }
-  assert.ok(!saidIn('g1_rage_quiet', "Alpha's ATTACK rose"));
+  assert.ok(!saidIn('g1_rage_quiet', "Alpha's ATTACK rose!"));
 });
 
 test('the hit that knocks a raging monster out builds nothing and re-penalises nobody', () => {
-  assert.ok(!saidIn('g1_rage_lethal', "Alpha's ATTACK rose"));
+  assert.ok(!saidIn('g1_rage_lethal', "Alpha's ATTACK rose!"));
   assert.strictEqual(probeAt('g1_rage_lethal', 0, 3), '100/40/10/40', 'the burned attacker: 200 -> 100');
   assert.strictEqual(probeAt('g1_rage_lethal', 1, 3), '100/40/10/40', 'not halved again to 50');
 });
@@ -5158,13 +5375,13 @@ test('a Substitute that soaks the hit still builds, once per hit', () => {
   const alphaHp = (name) => jsRun(name).events
     .filter((e) => e.t === 'damage' && e.slot === 0).map((e) => e.hp);
   // A 5-HP doll: the first hit breaks it and ends the double kick.
-  assert.ok(saidIn('g1_rage_sub', "Alpha's substitute broke"));
+  assert.ok(saidIn('g1_rage_sub', "Alpha's SUBSTITUTE broke!"));
   assert.strictEqual(stageAt('g1_rage_sub', 1, 0), 1, 'one hit, one build: +1');
   assert.strictEqual(probeAt('g1_rage_sub', 1, 0), '60/40/90/40', '40 x 150 / 100');
   assert.deepStrictEqual(alphaHp('g1_rage_sub'), [400], 'the doll took it; no second hit');
   assert.deepStrictEqual(order('g1_rage_sub'), ['damage', 'stat']);
   // A 12-HP doll: soaked by the first, broken by the second -- both build.
-  assert.ok(saidIn('g1_rage_sub_late', "Alpha's substitute broke"));
+  assert.ok(saidIn('g1_rage_sub_late', "Alpha's SUBSTITUTE broke!"));
   assert.strictEqual(stageAt('g1_rage_sub_late', 1, 0), 2, 'the soaked hit and the breaking one: +2');
   assert.strictEqual(probeAt('g1_rage_sub_late', 1, 0), '80/40/90/40', '40 x 200 / 100');
   assert.deepStrictEqual(alphaHp('g1_rage_sub_late'), [400, 400], 'both on the doll');
@@ -5176,8 +5393,8 @@ test('a missed Disable and a missed Explosion both build the target', () => {
   assert.strictEqual(stageAt('g1_rage_misses', 2, 0), 2, 'the Explosion missed and the target built');
   // The Disable's miss is DisableEffect's "But it failed!" (R1b); the
   // Explosion's is the attack's.
-  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === 'Beta missed').length, 1);
-  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === 'But it failed').length, 1);
+  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === "Beta's attack missed!").length, 1);
+  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === 'But, it failed!').length, 1);
   assert.strictEqual(jsRun('g1_rage_misses').outcome.winners[0], 'p1', 'the exploder still went down');
 });
 
@@ -5198,10 +5415,10 @@ test('a Bide aimed at field slot 0 is released at slot 0', () => {
 
 test('a side-effect drop at -6 is silent; a primary at -6 says so', () => {
   // CantLowerAnymore's NothingHappenedText (R1b).
-  const lines = jsRun('g1_side_min').events.filter((e) => e.t === 'msg' && e.text === 'Nothing happened');
+  const lines = jsRun('g1_side_min').events.filter((e) => e.t === 'msg' && e.text === 'Nothing happened!');
   assert.strictEqual(lines.length, 1, 'once, for the primary on turn 2');
   const texts = jsRun('g1_side_min').events.filter((e) => e.t === 'msg').map((e) => e.text);
-  assert.ok(texts.indexOf('Nothing happened') > texts.indexOf('Alpha used goo'));
+  assert.ok(texts.indexOf('Nothing happened!') > texts.indexOf('Alpha used goo!'));
 });
 
 // ------------------------------------------------------------------
@@ -5236,8 +5453,8 @@ test("Red's side effects fire at chance 0: below each routine's threshold, not a
     assert.strictEqual(seatOf(name, 2, 3).status, '', `${name}: the threshold does not`);
   }
   for (const name of ['g1_odds_flinch1', 'g1_odds_flinch2']) {
-    assert.ok(saidAt(name, 1, 'Beta flinched'), `${name}: threshold - 1 flinches`);
-    assert.ok(!saidAt(name, 2, 'Beta flinched'), `${name}: the threshold does not`);
+    assert.ok(saidAt(name, 1, 'Beta flinched!'), `${name}: threshold - 1 flinches`);
+    assert.ok(!saidAt(name, 2, 'Beta flinched!'), `${name}: the threshold does not`);
   }
   assert.strictEqual(seatOf('g1_odds_drop', 1, 3).sSpc, -1, '84 < 85 drops the Special');
   assert.strictEqual(seatOf('g1_odds_drop', 2, 3).sSpc, 0, '85 does not');
@@ -5277,13 +5494,13 @@ test('each side-effect routine draws only where the cart does', () => {
   assert.strictEqual(seatOf(g, 5, 3).status, 'poison');
   assert.notStrictEqual(rngOf(g, 10), plain, 'confusion draws through a Substitute');
   assert.ok(seatOf(g, 10, 3).confusion > 0, '...and confuses the monster behind it');
-  assert.ok(saidAt(g, 11, "Beta's substitute broke") && seatOf(g, 11, 3).status === '');
-  assert.ok(saidAt(g, 12, "Beta's substitute broke") && seatOf(g, 12, 3).status === '');
+  assert.ok(saidAt(g, 11, "Beta's SUBSTITUTE broke!") && seatOf(g, 11, 3).status === '');
+  assert.ok(saidAt(g, 12, "Beta's SUBSTITUTE broke!") && seatOf(g, 12, 3).status === '');
   assert.deepStrictEqual(hitsAt(g, 12), ['3:400'], 'the Twineedle ends at the hit that broke the doll');
-  assert.ok(saidAt(g, 13, 'Fire defrosted Beta'), 'a Fire move thaws a frozen target');
+  assert.ok(saidAt(g, 13, 'Fire defrosted Beta!'), 'a Fire move thaws a frozen target');
   assert.strictEqual(seatOf(g, 13, 3).status, '');
   assert.strictEqual(seatOf(g, 14, 3).sSpc, -1, 'Mist does not stop a side-effect drop');
-  assert.ok(!saidAt(g, 14, 'But it failed'));
+  assert.ok(!saidAt(g, 14, 'But, it failed!'));
   assert.strictEqual(rngOf(g, 15), rngOf(g, 16), 'a knockout draws no side byte');
   assert.strictEqual(seatOf(g, 16, 3), undefined, 'the target is down');
 });
@@ -5294,24 +5511,24 @@ test('a multi-hit move ends at a Substitute its first hit broke, and goes on pas
   // (2, so TwoToFiveAttacksEffect draws again) and 151 (3): five hits.
   assert.deepStrictEqual(hitsAt(g, 1), ['9:391', '9:382', '9:373', '9:364', '9:355'], 'no doll: five hits');
   assert.deepStrictEqual(hitsAt(g, 2), ['9:400'], 'a 5-HP doll: the first hit breaks it, and the move ends');
-  assert.ok(saidAt(g, 2, "Beta's substitute broke"));
+  assert.ok(saidAt(g, 2, "Beta's SUBSTITUTE broke!"));
   assert.notStrictEqual(rngOf(g, 2), rngOf(g, 1), '...and no count byte is drawn after a first-hit break');
   assert.strictEqual(rngOf(g, 3), rngOf(g, 1), 'a doll that holds hit 1: the count is drawn as with none');
   assert.deepStrictEqual(hitsAt(g, 3), ['9:400', '9:400', '9:391', '9:382', '9:373'],
     'a 15-HP doll: broken by the second hit, and hits 3 to 5 land on Beta');
-  assert.ok(saidAt(g, 3, "Beta's substitute broke"));
+  assert.ok(saidAt(g, 3, "Beta's SUBSTITUTE broke!"));
   // DOUBLE KICK (8 a hit since K12's high-bits damage roll; 9 before).
   assert.deepStrictEqual(hitsAt(g, 4), ['8:392', '8:384'], 'no doll: two hits');
   assert.deepStrictEqual(hitsAt(g, 5), ['8:400'], 'a 5-HP doll: the second hit is never thrown');
   assert.deepStrictEqual(hitsAt(g, 6), ['8:400', '8:400'], 'a 15-HP doll: both hits, both on it');
-  assert.ok(saidAt(g, 5, "Beta's substitute broke") && saidAt(g, 6, "Beta's substitute broke"));
+  assert.ok(saidAt(g, 5, "Beta's SUBSTITUTE broke!") && saidAt(g, 6, "Beta's SUBSTITUTE broke!"));
   // TWINEEDLE, on a seed whose side byte (51) poisons (9 a hit since K12; 8 before).
   assert.deepStrictEqual(hitsAt(g, 7), ['9:391', '9:382', '25:357'], 'no doll: two hits, then the tick');
   assert.strictEqual(seatOf(g, 7, 3).status, 'poison');
   assert.deepStrictEqual(hitsAt(g, 8), ['9:400'], 'a 5-HP doll: one hit');
   assert.deepStrictEqual(hitsAt(g, 9), ['9:400', '9:400'], 'a 15-HP doll: two hits, both on it');
   for (const at of [8, 9]) {
-    assert.ok(saidAt(g, at, "Beta's substitute broke"));
+    assert.ok(saidAt(g, at, "Beta's SUBSTITUTE broke!"));
     assert.strictEqual(seatOf(g, at, 3).status, '', `battle ${at}: no poison`);
     assert.strictEqual(rngOf(g, at), rngOf(g, 10), `battle ${at}: no side byte, a plain hit's stream`);
   }
@@ -5321,9 +5538,9 @@ test('a multi-hit move ends at a Substitute its first hit broke, and goes on pas
   assert.deepStrictEqual(hitsAt(g, 11), ['9:400', '9:400', '9:391', '9:382', '9:373'],
     'a 9-HP doll hit for 9 stands at 0; hit 2 breaks it, hits 3-5 land');
   assert.strictEqual(rngOf(g, 11), rngOf(g, 1), '...the count drawn, as the doll held hit 1');
-  assert.ok(saidAt(g, 11, "Beta's substitute broke"));
+  assert.ok(saidAt(g, 11, "Beta's SUBSTITUTE broke!"));
   assert.deepStrictEqual(hitsAt(g, 12), ['8:400', '8:400'], 'DOUBLE KICK: an 8-HP doll hit for 8 stands, hit 2 breaks it');
-  assert.ok(saidAt(g, 12, "Beta's substitute broke"));
+  assert.ok(saidAt(g, 12, "Beta's SUBSTITUTE broke!"));
 });
 
 // ------------------------------------------------------------------
@@ -5350,9 +5567,9 @@ test('Red damage tails: no roll at 0 or 1, a 0.25x zero misses, an exact-HP doll
   const g = 'g1_damage_tails';
   // A base-2 hit (level 2, Attack 5, Defense 200).
   assert.deepStrictEqual(duelHits(g, 1), ['3:1:399'], '0.5x: 1 damage, as RandomizeDamage leaves it');
-  assert.ok(duelSaid(g, 2, 'Alpha missed') && duelHits(g, 2).length === 0,
+  assert.ok(duelSaid(g, 2, "Alpha's attack missed!") && duelHits(g, 2).length === 0,
     '0.25x: 0 is a miss (AdjustDamageForMoveType sets wMoveMissed)');
-  assert.ok(duelSaid(g, 4, "It doesn't affect Beta"));
+  assert.ok(duelSaid(g, 4, "It doesn't affect Beta!"));
   assert.strictEqual(duelRow(g, 1, 1).rng, duelRow(g, 2, 1).rng, 'the 1 and the 0 draw no roll');
   assert.strictEqual(duelRow(g, 4, 1).rng, duelRow(g, 1, 1).rng, 'nor does an immunity');
   assert.notStrictEqual(duelRow(g, 3, 1).rng, duelRow(g, 1, 1).rng, 'a 2 and up rolls');
@@ -5360,7 +5577,7 @@ test('Red damage tails: no roll at 0 or 1, a 0.25x zero misses, an exact-HP doll
   // Battle 5: an 8-HP doll hit for 8 (R1c's draw order moved the roll).
   assert.deepStrictEqual([duelSeat(g, 5, 1, 3).sub, duelSeat(g, 5, 1, 3).zero], [0, true],
     'the doll stands at 0 HP (AttackSubstitute `sub [hl]` / `ret nc`)');
-  assert.strictEqual(duelTexts(g, 5).filter((t) => t === "Beta's substitute broke").length, 1);
+  assert.strictEqual(duelTexts(g, 5).filter((t) => t === "Beta's SUBSTITUTE broke!").length, 1);
   assert.strictEqual(duelSeat(g, 5, 2, 3).zero, false, 'turn 2: the next hit breaks it');
   assert.strictEqual(duelSeat(g, 5, 2, 3).hp, 400, '...and Beta is untouched by either');
 });
@@ -5374,11 +5591,11 @@ test('AlwaysHappenSideEffects: a doll that holds still drains, recoils, recharge
   assert.strictEqual(alpha(2).hp, 300, 'a doll the drain broke: no heal');
   assert.strictEqual(alpha(3).hp, 298, 'recoil off a holding doll: a quarter of 9');
   assert.strictEqual(alpha(4).hp, 300, 'recoil after a break: none');
-  assert.ok(duelSaid(g, 5, 'Alpha used STRUGGLE'));
+  assert.ok(duelSaid(g, 5, 'Alpha used STRUGGLE!'));
   assert.strictEqual(alpha(5).hp, 295, "STRUGGLE's recoil is HALF of 11 (RecoilEffect_ `cp STRUGGLE`)");
   assert.strictEqual(alpha(6).hp, 300, '...and none after a break');
-  assert.ok(duelSaid(g, 7, 'Alpha must recharge'), 'HYPER BEAM into a holding doll still recharges');
-  assert.strictEqual(duelTexts(g, 8).filter((t) => t === 'Alpha used beam').length, 2,
+  assert.ok(duelSaid(g, 7, 'Alpha must recharge!'), 'HYPER BEAM into a holding doll still recharges');
+  assert.strictEqual(duelTexts(g, 8).filter((t) => t === 'Alpha used beam!').length, 2,
     'one that broke the doll: no recharge, Alpha fires again on turn 2');
   assert.strictEqual(duelEnd(g, 9).winner, 'p2', 'EXPLOSION into a holding doll: Alpha goes down');
   assert.strictEqual(duelEnd(g, 10), undefined, 'EXPLOSION that broke the doll: Alpha lives');
@@ -5408,27 +5625,27 @@ test('Pay Day: the whole pile on a won fight against the computer, nothing in a 
 test('COUNTER: twice wDamage against a Normal or Fighting move, else a miss', () => {
   const g = 'g1_counter';
   assert.deepStrictEqual(duelHits(g, 1), ['0:8:392', '3:16:384'], 'twice the thump');
-  assert.ok(duelSaid(g, 2, 'Alpha missed'), 'a Fire hit is not countered');
+  assert.ok(duelSaid(g, 2, "Alpha's attack missed!"), 'a Fire hit is not countered');
   assert.notStrictEqual(duelRow(g, 2, 1).rng, duelRow(g, 1, 1).rng, '...with no hit test drawn');
-  assert.ok(duelSaid(g, 3, 'Beta missed') && duelSaid(g, 3, 'Alpha missed'), 'COUNTER against COUNTER');
-  assert.ok(duelSaid(g, 4, 'Alpha missed'), 'a missed thump leaves wDamage at 0');
+  assert.ok(duelSaid(g, 3, "Beta's attack missed!") && duelSaid(g, 3, "Alpha's attack missed!"), 'COUNTER against COUNTER');
+  assert.ok(duelSaid(g, 4, "Alpha's attack missed!"), 'a missed thump leaves wDamage at 0');
   assert.deepStrictEqual(duelHits(g, 5), ['0:8:400', '3:16:384'], 'the hit on the doll counts whole');
   assert.deepStrictEqual(duelHits(g, 6), ['0:8:392', '3:16:384'], 'untyped: it reaches a Ghost');
   assert.strictEqual(duelRow(g, 7, 2).last, 16, 'turn 2: wDamage still holds the counter');
-  assert.ok(duelTexts(g, 7).slice(-1)[0] === 'Alpha missed', '...but a 0-power move is not countered');
+  assert.ok(duelTexts(g, 7).slice(-1)[0] === "Alpha's attack missed!", '...but a 0-power move is not countered');
   assert.deepStrictEqual(duelHits(g, 8), ['0:12:388', '3:24:376'], 'a Fighting hit is countered');
-  assert.ok(duelSaid(g, 9, 'Alpha missed'), 'typeIds decides which index is NORMAL');
+  assert.ok(duelSaid(g, 9, "Alpha's attack missed!"), 'typeIds decides which index is NORMAL');
 });
 
 test('RAGE and THRASH spend PP once; RAGE at 0 PP stays RAGE; the build line per build', () => {
   const g = 'g1_rage_thrash_pp';
   assert.deepStrictEqual([1, 2, 3].map((t) => duelSeat(g, 1, t, 0).pp), ['0', '0', '0']);
-  assert.strictEqual(duelTexts(g, 1).filter((t) => t === 'Alpha used RAGE').length, 3,
+  assert.strictEqual(duelTexts(g, 1).filter((t) => t === 'Alpha used RAGE!').length, 3,
     'RAGE every turn at 0 PP, never STRUGGLE');
-  assert.ok(!duelSaid(g, 1, 'Alpha used STRUGGLE'));
+  assert.ok(!duelSaid(g, 1, 'Alpha used STRUGGLE!'));
   assert.strictEqual(duelTexts(g, 1).filter((t) => t === "Alpha's RAGE is building!").length, 3);
   const t1 = duelTexts(g, 1);
-  assert.strictEqual(t1[t1.indexOf("Alpha's RAGE is building!") + 1], "Alpha's ATTACK rose");
+  assert.strictEqual(t1[t1.indexOf("Alpha's RAGE is building!") + 1], "Alpha's ATTACK rose!");
   assert.deepStrictEqual([1, 2, 3].map((t) => duelSeat(g, 2, t, 0).pp), ['0', '0', '0'],
     'THRASH pays on its first turn only');
   // ThrashPetalDanceEffect's counter is the turns AFTER the first (R1b):
@@ -5445,34 +5662,39 @@ test('METRONOME / MIRROR MOVE: a called multi-turn move is the one replayed', ()
     assert.strictEqual(duelSeat(g, at, 1, 0).invuln, true, `${id}: up on turn 1`);
     // The charge turn is ChargeEffect alone -- no used line (R1d); the
     // release is PlayerCanExecuteMove's, and DecrementPP pays METRONOME's slot
-    // (wPlayerMoveListIndex) a second time.
+    // (wPlayerMoveListIndex) a second time -- but the call gave one back
+    // (R1e: ReloadMoveData's IncrementMovePP, which ChargeEffect never spends
+    // again), so the charge turn ends where it began and the call costs one.
     assert.deepStrictEqual(duelTexts(g, at).slice(0, 6).filter((t) => t.startsWith('Alpha used')),
-      ['Alpha used METRONOME', `Alpha used ${id}`], `${id} lands on turn 2`);
-    assert.strictEqual(duelSeat(g, at, 1, 0).pp, '59', 'METRONOME spent at the call');
-    assert.strictEqual(duelSeat(g, at, 2, 0).pp, '58', '...and again at the release');
+      ['Alpha used METRONOME!', `Alpha used ${id}!`], `${id} lands on turn 2`);
+    assert.strictEqual(duelSeat(g, at, 1, 0).pp, '60', 'METRONOME spent at the call and refunded');
+    assert.strictEqual(duelSeat(g, at, 2, 0).pp, '59', '...and spent again at the release');
   }
   // 1 + the counter (3 on this seed): ThrashPetalDanceEffect counts the turns
   // after the first (R1b).
   // The continuation turns print "thrashing about!" and no used line (R1c:
   // `.ThrashingAboutCheck` jumps past PlayerCanExecuteMove).
-  assert.strictEqual(duelTexts(g, 3).filter((t) => t === 'Alpha used THRASH').length, 1);
+  assert.strictEqual(duelTexts(g, 3).filter((t) => t === 'Alpha used THRASH!').length, 1);
   assert.strictEqual(duelTexts(g, 3).filter((t) => t === "Alpha's thrashing about!").length, 3);
-  assert.strictEqual(duelTexts(g, 3).filter((t) => t === 'Alpha used METRONOME').length, 1);
-  assert.strictEqual(duelTexts(g, 4).filter((t) => t === 'Alpha used RAGE').length, 4,
+  assert.strictEqual(duelTexts(g, 3).filter((t) => t === 'Alpha used METRONOME!').length, 1);
+  assert.strictEqual(duelTexts(g, 4).filter((t) => t === 'Alpha used RAGE!').length, 4,
     'a called RAGE rages on as RAGE');
-  assert.strictEqual(duelTexts(g, 4).filter((t) => t === 'Alpha used METRONOME').length, 1);
-  assert.ok(duelSaid(g, 5, 'Alpha unleashed energy'));
+  assert.strictEqual(duelTexts(g, 4).filter((t) => t === 'Alpha used METRONOME!').length, 1);
+  assert.ok(duelSaid(g, 5, 'Alpha unleashed energy!'));
   // `.UnleashEnergy` prints no used-move line (R1b): the animation names it.
   const e5 = duelEvents(g, 5);
-  const at5 = e5.findIndex((e) => e.t === 'msg' && e.text === 'Alpha unleashed energy');
+  const at5 = e5.findIndex((e) => e.t === 'msg' && e.text === 'Alpha unleashed energy!');
   assert.deepStrictEqual([e5[at5 + 1].t, e5[at5 + 1].text], ['anim', 'BIDE'],
     'the called BIDE unleashes as BIDE, not METRONOME');
   const t6 = duelTexts(g, 6);
-  assert.strictEqual(t6.filter((t) => t === 'Alpha used MIRROR_MOVE').length, 2);
-  assert.strictEqual(t6[t6.length - 1], 'Alpha used FLY', 'turn 3: the mirrored FLY, not MIRROR MOVE');
+  assert.strictEqual(t6.filter((t) => t === 'Alpha used MIRROR_MOVE!').length, 2);
+  assert.strictEqual(t6[t6.length - 1], 'Alpha used FLY!', 'turn 3: the mirrored FLY, not MIRROR MOVE');
   assert.strictEqual(duelSeat(g, 6, 3, 3).hp, 381, '...and it lands');
-  assert.strictEqual(duelSeat(g, 6, 3, 0).pp, '57',
-    'MIRROR MOVE spent on turns 1 and 2, and by the mirrored FLY\'s release');
+  // R1e: turn 2's copy is refunded (ReloadMoveData's IncrementMovePP) and
+  // the FLY it starts never spends it again; turn 1's failed copy reloads
+  // nothing, so its PP stays spent.
+  assert.strictEqual(duelSeat(g, 6, 3, 0).pp, '58',
+    'MIRROR MOVE spent on turn 1, spent and refunded on turn 2, and by the mirrored FLY\'s release');
 });
 
 test('LEECH SEED: times the toxic counter, and a poison or burn knockout still feeds', () => {
@@ -5494,16 +5716,19 @@ test('a confusion self-hit behind a doll hits the opposing doll, and clears Batt
   const seat = (at, turn, slot) => duelSeat(g, at, turn, slot);
   assert.deepStrictEqual([seat(1, 1, 0).hp, seat(1, 1, 0).sub], [400, 30], 'Alpha and its doll untouched');
   assert.deepStrictEqual([seat(1, 1, 3).sub, seat(1, 1, 3).zero], [0, true], "Beta's 10 doll takes the 10, at 0");
-  assert.ok(duelSaid(g, 2, "Beta's substitute broke"), 'a 5 doll breaks');
+  assert.ok(duelSaid(g, 2, "Beta's SUBSTITUTE broke!"), 'a 5 doll breaks');
   assert.deepStrictEqual(duelHits(g, 3), [], 'no doll across: nothing moves');
   assert.strictEqual(seat(3, 1, 0).hp, 400);
   assert.deepStrictEqual([seat(4, 1, 0).hp, seat(4, 1, 3).sub], [390, 10], 'no own doll: Alpha takes it');
   assert.deepStrictEqual([seat(5, 1, 0).charging, seat(5, 1, 0).invuln], [false, false],
     'the charge and the vanish are gone');
-  assert.strictEqual(seat(5, 2, 0).charging, false, 'turn 2 is no forced release');
+  // R1e's seed (7309): turn 2's confusion byte keeps Alpha's head, and its
+  // FIGHT is a fresh FLY -- the charge line, not a release.
+  assert.ok(duelSaid(g, 5, 'Alpha flew up high!') && !duelSaid(g, 5, 'Alpha used FLY!'),
+    'turn 2 is no forced release: FLY starts afresh');
   assert.ok(!duelHits(g, 5).some((h) => h.startsWith('3:')), '...no FLY lands on Beta');
   assert.strictEqual(seat(6, 1, 0).thrash, false, 'the thrash is gone');
-  assert.ok(!duelSaid(g, 6, 'Alpha became confused'), '...so it never ends in confusion');
+  assert.ok(!duelSaid(g, 6, 'Alpha became confused!'), '...so it never ends in confusion');
   assert.strictEqual(seat(7, 1, 0).bide, false, 'the Bide is gone');
   assert.strictEqual(seat(7, 1, 3).hp, 400, 'nothing unleashed');
 });
@@ -5519,6 +5744,9 @@ const r1Seat = (name, at, turn, slot, mon = 1) => jsRun(name).probes
 const r1Row = (name, at, turn) => jsRun(name).probes
   .find((p) => p.at === at && p.turn === turn && p.rng !== undefined);
 const r1End = (name, at) => jsRun(name).probes.find((p) => p.at === at && p.outcome !== undefined);
+// R1e's seat row: list index, wAILayer2Encouragement, the move struct.
+const duelRowSeat = (name, at, turn, seat) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.seat === seat);
 const r1Level = (name, at, turn) => jsRun(name).probes
   .find((p) => p.at === at && p.turn === turn && p.levelUp !== undefined).levelUp;
 
@@ -5528,14 +5756,14 @@ test('Transform: 5 PP copies, undone at the switch-out, and the species byte beh
     "Beta's moves at 5 PP each, Beta's type");
   assert.deepStrictEqual([r1Seat(g, 1, 2, 0).moves, r1Seat(g, 1, 2, 0).types, r1Seat(g, 1, 2, 0).transformed],
     ['morph:59,tap:60', '1', false], 'switched out: its own moves, PP and type back');
-  assert.ok(duelSaid(g, 1, 'Alpha used tap'), 'and back in, its own move');
+  assert.ok(duelSaid(g, 1, 'Alpha used tap!'), 'and back in, its own move');
   // Alpha's crits on the transformed wild Beta: GetEnemyMonStat, a CalcStat
   // over Alpha's base Defense 70 and DV 9 at Beta's level 30 (52), against
   // the party stat 40 without K7.
   // (The rolls are R1c's draw order's: crit, roll, then the accuracy byte.)
   assert.deepStrictEqual([duelHits(g, 2)[1], duelHits(g, 3)[1]], ['3:19:356', '3:25:350'],
     'the CalcStat Defense 52 against the party 40');
-  assert.ok(duelSaid(g, 2, 'Beta used slash') && duelHits(g, 2)[2] === '0:55:345',
+  assert.ok(duelSaid(g, 2, 'Beta used slash!') && duelHits(g, 2)[2] === '0:55:345',
     "the copied slash, critting off Alpha's base Speed, with the CalcStat Attack");
 });
 
@@ -5548,9 +5776,9 @@ test('Haze: every battler reset, the target cured and its move gone', () => {
   assert.deepStrictEqual([b.status, b.conf, b.flags, b.disable, b.stages], ['', 0, '', '', '0/0/0/0/0/0'],
     'the target: cured, unconfused, no Mist / X Accuracy / seed / Disable');
   // Two turns each: the thump comes on turn 2 only.
-  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Beta used thump').length, 1,
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Beta used thump!').length, 1,
     'the sleeping target woke and lost its turn-1 move');
-  assert.strictEqual(duelTexts(g, 2).filter((x) => x === 'Beta used thump').length, 1,
+  assert.strictEqual(duelTexts(g, 2).filter((x) => x === 'Beta used thump!').length, 1,
     'the frozen one likewise');
   assert.deepStrictEqual([r1Seat(g, 3, 1, 1).conf, r1Seat(g, 3, 1, 1).stages], [0, '0/0/0/0/0/0'],
     'a 2v2: the partner of the user too');
@@ -5561,24 +5789,24 @@ test('Haze: every battler reset, the target cured and its move gone', () => {
 
 test("StatModifierDownEffect's primary: the computer's miss byte, then Mist and a doll before the accuracy byte", () => {
   const g = 'g1_stat_drop_primary';
-  assert.ok(duelSaid(g, 1, 'But it failed'), "the computer's growl misses on its own byte");
+  assert.ok(duelSaid(g, 1, 'But, it failed!'), "the computer's growl misses on its own byte");
   assert.strictEqual(r1Seat(g, 2, 4, 0).stages.split('/')[0], '-4', 'a link fight: four growls, four drops');
   assert.strictEqual(r1Row(g, 4, 1).rng, 8303, 'into a doll: no byte at all (the seed untouched)');
   assert.strictEqual(r1Row(g, 6, 1).rng, 8305, 'SWORDS DANCE at +6: Nothing happened, no byte');
-  assert.ok(duelSaid(g, 6, 'Nothing happened'));
+  assert.ok(duelSaid(g, 6, 'Nothing happened!'));
 });
 
 test('ClearHyperBeam: a freeze on the player\'s turn and a trap that starts', () => {
   const g = 'g1_clear_recharge';
-  assert.ok(!duelSaid(g, 1, 'Beta must recharge'), "the player's freeze clears the wild beam's recharge");
+  assert.ok(!duelSaid(g, 1, 'Beta must recharge!'), "the player's freeze clears the wild beam's recharge");
   // R1c: a recharge is the monster's own slot, behind the freeze check
   // (CheckPlayerStatusConditions `.FrozenCheck` before `.HyperBeamCheck`), so
-  // a frozen Alpha says "frozen solid" and keeps the bit for its thaw.
-  assert.ok(duelSaid(g, 2, 'Alpha is frozen solid') && duelSeat(g, 2, 2, 0).recharge === true,
+  // a frozen Alpha says "frozen solid!" and keeps the bit for its thaw.
+  assert.ok(duelSaid(g, 2, 'Alpha is frozen solid!') && duelSeat(g, 2, 2, 0).recharge === true,
     "the computer's freeze does not: still frozen, Alpha keeps NEEDS_TO_RECHARGE");
-  assert.ok(!duelSaid(g, 3, 'Alpha must recharge') && duelSeat(g, 3, 2, 0).recharge === false,
+  assert.ok(!duelSaid(g, 3, 'Alpha must recharge!') && duelSeat(g, 3, 2, 0).recharge === false,
     'a link fight: both sides are the player');
-  assert.ok(!duelSaid(g, 4, 'Alpha must recharge') && duelSaid(g, 4, 'Beta missed'),
+  assert.ok(!duelSaid(g, 4, 'Alpha must recharge!') && duelSaid(g, 4, "Beta's attack missed!"),
     'a Wrap that misses has cleared it already');
 });
 
@@ -5596,31 +5824,31 @@ test("the computer's item and switch in its own turn slot", () => {
 test('asleep, the selection is last turn\'s, and MIRROR MOVE finds a used move zeroed', () => {
   const g = 'g1_asleep_selection';
   const t = duelTexts(g, 1);
-  const second = t.indexOf('Beta used thump');
-  assert.ok(second > 0 && t.indexOf('Alpha is fast asleep', second) > second,
+  const second = t.indexOf('Beta used thump!');
+  assert.ok(second > 0 && t.indexOf('Alpha is fast asleep!', second) > second,
     "turn 2: the sleeping Alpha's QUICK ATTACK moves in tap's bracket, after Beta");
   assert.ok(t.includes('The MIRROR MOVE failed!'), 'turn 3: Beta mirrors nothing (MirrorMoveFailedText)');
 });
 
 test('Struggle with a move disabled reads the raw PP bytes', () => {
-  assert.strictEqual(duelTexts('g1_struggle_disabled', 1).filter((x) => x === 'Alpha used STRUGGLE').length, 2);
+  assert.strictEqual(duelTexts('g1_struggle_disabled', 1).filter((x) => x === 'Alpha used STRUGGLE!').length, 2);
 });
 
 test('DISABLE: a random slot, 1-8 steps in its own turn, a miss fails, a doll does not stop it', () => {
   const g = 'g1_disable';
-  assert.ok(duelSaid(g, 1, 'chop was disabled') && duelSaid(g, 1, "Beta's disabled no more!"));
-  assert.ok(duelSaid(g, 3, 'chop was disabled'), "the wild target's 0-PP move is pickable");
-  assert.deepStrictEqual(duelTexts(g, 4).slice(0, 2), ['Alpha used lock', 'But it failed']);
-  assert.ok(duelSaid(g, 4, 'thump was disabled'), '...and the doll lets the second through');
+  assert.ok(duelSaid(g, 1, "Beta's chop was disabled!") && duelSaid(g, 1, "Beta's disabled no more!"));
+  assert.ok(duelSaid(g, 3, "Beta's chop was disabled!"), "the wild target's 0-PP move is pickable");
+  assert.deepStrictEqual(duelTexts(g, 4).slice(0, 2), ['Alpha used lock!', 'But, it failed!']);
+  assert.ok(duelSaid(g, 4, "Beta's thump was disabled!"), '...and the doll lets the second through');
 });
 
 test('PoisonEffect turns a Poison type away; TOXIC badly poisons', () => {
   const g = 'g1_poison_primary';
-  assert.ok(duelSaid(g, 1, "It didn't affect Beta"));
+  assert.ok(duelSaid(g, 1, "It didn't affect Beta!"));
   assert.strictEqual(r1Seat(g, 2, 1, 3).status, 'poison');
   assert.deepStrictEqual([r1Seat(g, 3, 3, 3).status, r1Seat(g, 3, 3, 3).hp], ['toxic', 250],
     '25, 50, 75: the counter climbs');
-  assert.ok(duelSaid(g, 4, "It didn't affect Beta"), 'a doll');
+  assert.ok(duelSaid(g, 4, "It didn't affect Beta!"), 'a doll');
 });
 
 test('the multi-hit lines, by seat', () => {
@@ -5647,7 +5875,7 @@ test('the crash, and the set-damage moves', () => {
   const g = 'g1_crash_and_set_damage';
   assert.strictEqual(duelHits(g, 1)[0], '0:1:399', 'a 1 HP crash');
   assert.strictEqual(duelHits(g, 2)[0], '3:1:400', "behind its own doll: the opposing doll takes it");
-  assert.ok(duelSaid(g, 3, "It doesn't affect Beta") && duelHits(g, 3)[0] === '0:1:399');
+  assert.ok(duelSaid(g, 3, "It doesn't affect Beta!") && duelHits(g, 3)[0] === '0:1:399');
   assert.deepStrictEqual(duelHits(g, 4).filter((h) => h.startsWith('3:')), ['3:30:370', '3:20:350'],
     'SEISMIC TOSS and SONICBOOM through a 0x chart');
   assert.deepStrictEqual(duelHits(g, 5).filter((h) => h.startsWith('3:')), ['3:40:360', '3:180:180']);
@@ -5659,7 +5887,7 @@ test('OHKO on a tie; full paralysis keeps the vanish', () => {
   assert.deepStrictEqual([s.charging, s.invuln], [false, true]);
   // (R1c: MoveHitTest's INVULNERABLE miss is PrintMoveFailureText's
   // "<USER>'s attack missed!".)
-  assert.ok(duelSaid('g1_ohko_paralysis', 2, 'Beta missed'), "Beta's thump finds nobody");
+  assert.ok(duelSaid('g1_ohko_paralysis', 2, "Beta's attack missed!"), "Beta's thump finds nobody");
 });
 
 test('the trap starts before the hit', () => {
@@ -5671,7 +5899,7 @@ test('the trap starts before the hit', () => {
 });
 
 test('MIRROR MOVE copies the move used, not the caller', () => {
-  assert.ok(duelSaid('g1_mirror_used', 1, 'Alpha used THRASH'));
+  assert.ok(duelSaid('g1_mirror_used', 1, 'Alpha used THRASH!'));
   assert.strictEqual(r1Seat('g1_mirror_used', 1, 1, 0).used, 'THRASH');
 });
 
@@ -5685,7 +5913,8 @@ test('no hit test for a power-0 routine that has none', () => {
   const g = 'g1_no_hit_test';
   assert.strictEqual(r1Row(g, 1, 1).rng, 9701, 'turn 1: nothing drawn');
   assert.strictEqual(r1Row(g, 1, 3).rng, r1Row(g, 1, 2).rng, 'turn 3: the GROWL fails before a byte');
-  assert.ok(duelSaid(g, 1, "Alpha's ATTACK rose"), 'SWORDS DANCE lands');
+  // MonsStatsRoseText's "greatly" for an UP2 effect (R1e).
+  assert.ok(duelSaid(g, 1, "Alpha's ATTACK greatly rose!"), 'SWORDS DANCE lands');
 });
 
 // ------------------------------------------------------------------
@@ -5694,16 +5923,16 @@ test('no hit test for a power-0 routine that has none', () => {
 
 test("PlayerCalcMoveDamage's draw order: crit, roll, then the accuracy byte; no gate byte for sleep", () => {
   const g = 'g1_draw_order';
-  assert.ok(duelSaid(g, 1, 'Alpha missed'), 'an accuracy-0 tap misses');
+  assert.ok(duelSaid(g, 1, "Alpha's attack missed!"), 'an accuracy-0 tap misses');
   assert.strictEqual(r1Row(g, 1, 1).rng, r1Row(g, 2, 1).rng,
     '...having drawn the crit byte and the roll before its accuracy byte, as the hit does');
-  assert.ok(duelSaid(g, 3, 'Alpha missed') && r1Row(g, 3, 1).rng !== r1Row(g, 2, 1).rng,
+  assert.ok(duelSaid(g, 3, "Alpha's attack missed!") && r1Row(g, 3, 1).rng !== r1Row(g, 2, 1).rng,
     'DREAM EATER into a waking target misses on MoveHitTest\'s sleep check, before its byte');
   assert.strictEqual(r1Row(g, 4, 1).rng, 9801, 'the asleep and frozen gates draw nothing');
-  assert.ok(duelSaid(g, 4, 'Alpha is fast asleep') && duelSaid(g, 4, 'Beta is frozen solid'));
+  assert.ok(duelSaid(g, 4, 'Alpha is fast asleep!') && duelSaid(g, 4, 'Beta is frozen solid!'));
   assert.strictEqual(r1Row(g, 5, 1).rng, 9801, 'a confusion counter of 1 snaps out with no byte');
   assert.notStrictEqual(r1Row(g, 6, 1).rng, 9801, 'one still confused draws its self-hit byte');
-  assert.ok(duelSaid(g, 7, 'Alpha missed'), 'COUNTER refuses a Fire hit...');
+  assert.ok(duelSaid(g, 7, "Alpha's attack missed!"), 'COUNTER refuses a Fire hit...');
   assert.ok(duelSaid(g, 8, "Beta's unaffected!"), "an OHKO into a faster target: UnaffectedText");
   assert.strictEqual(r1Row(g, 8, 1).rng, r1Row(g, 6, 1).rng, '...after its one crit byte');
 });
@@ -5711,12 +5940,12 @@ test("PlayerCalcMoveDamage's draw order: crit, roll, then the accuracy byte; no 
 test("the computer never spends or reads its PP; a link foe does", () => {
   const g = 'g1_computer_pp';
   assert.deepStrictEqual([1, 2, 3].map((t) => r1Seat(g, 1, t, 3).moves), ['thump:1', 'thump:1', 'thump:1']);
-  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Beta used thump').length, 3);
-  assert.ok(duelSaid(g, 2, 'Beta used thump') && !duelSaid(g, 2, 'Beta used STRUGGLE'),
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Beta used thump!').length, 3);
+  assert.ok(duelSaid(g, 2, 'Beta used thump!') && !duelSaid(g, 2, 'Beta used STRUGGLE!'),
     'a 0-PP move is picked and used, never STRUGGLE');
-  assert.ok(duelSaid(g, 3, 'Beta used STRUGGLE'), 'one move, disabled: STRUGGLE');
+  assert.ok(duelSaid(g, 3, 'Beta used STRUGGLE!'), 'one move, disabled: STRUGGLE');
   assert.deepStrictEqual(duelTexts(g, 4).filter((x) => x.startsWith('Beta used')),
-    ['Beta used thump', 'Beta used STRUGGLE'], 'a link foe spends its PP and Struggles');
+    ['Beta used thump!', 'Beta used STRUGGLE!'], 'a link foe spends its PP and Struggles');
 });
 
 test('a doll stops only the stat drops, PoisonEffect and ConfusionEffect', () => {
@@ -5725,22 +5954,22 @@ test('a doll stops only the stat drops, PoisonEffect and ConfusionEffect', () =>
   assert.strictEqual(r1Seat(g, 2, 1, 3).status, 'paralysis', 'THUNDER WAVE lands');
   assert.ok(r1Seat(g, 3, 1, 3).flags.includes('s'), 'LEECH SEED lands');
   assert.strictEqual(r1Seat(g, 4, 1, 0).transformed, true, 'TRANSFORM copies');
-  assert.ok(duelSaid(g, 5, 'Alpha learned splash'), 'MIMIC copies');
-  assert.ok(duelSaid(g, 6, 'But it failed') && r1Row(g, 6, 1).rng === 9821,
+  assert.ok(duelSaid(g, 5, 'Alpha learned splash!'), 'MIMIC copies');
+  assert.ok(duelSaid(g, 6, 'But, it failed!') && r1Row(g, 6, 1).rng === 9821,
     'CONFUSE RAY fails on CheckTargetSubstitute, before its accuracy byte');
 });
 
 test('SleepEffect: a recharging target sleeps past every check; Paralyze / Leech Seed turn types away', () => {
   const g = 'g1_sleep_effect';
-  assert.ok(duelSaid(g, 1, 'Beta fell asleep'), 'an accuracy-0 SLEEP lands on the recharging Beta');
+  assert.ok(duelSaid(g, 1, 'Beta fell asleep!'), 'an accuracy-0 SLEEP lands on the recharging Beta');
   assert.deepStrictEqual([r1Seat(g, 1, 1, 3).status, r1Seat(g, 1, 1, 3).recharge], ['sleep', false],
     '...its POISON overwritten and its recharge gone');
   assert.ok(duelSaid(g, 1, "Beta's already asleep!"), 'turn 2: already asleep');
   assert.strictEqual(r1Row(g, 1, 2).rng, r1Row(g, 1, 1).rng, '...with no byte');
   assert.ok(duelSaid(g, 2, "Beta's already asleep!") && r1Row(g, 2, 1).rng === 9831);
-  assert.ok(duelSaid(g, 3, "It didn't affect Beta") && r1Row(g, 3, 1).rng === 9831,
+  assert.ok(duelSaid(g, 3, "It didn't affect Beta!") && r1Row(g, 3, 1).rng === 9831,
     'a poisoned target: no byte');
-  assert.ok(duelSaid(g, 4, "It doesn't affect Beta") && r1Row(g, 4, 1).rng === 9831,
+  assert.ok(duelSaid(g, 4, "It doesn't affect Beta!") && r1Row(g, 4, 1).rng === 9831,
     'an ELECTRIC THUNDER WAVE into a GROUND type, before its byte');
   assert.ok(duelSaid(g, 5, 'Beta evaded attack!') && !r1Seat(g, 5, 1, 3).flags.includes('s'),
     'LEECH SEED into a GRASS type evades, after its byte');
@@ -5748,21 +5977,21 @@ test('SleepEffect: a recharging target sleeps past every check; Paralyze / Leech
 
 test("MIMIC: the player's pick against the computer, a random one otherwise, MIMIC back at the switch-out", () => {
   const g = 'g1_mimic';
-  assert.ok(duelSaid(g, 1, 'Alpha learned chop'), 'the pick, row 2');
+  assert.ok(duelSaid(g, 1, 'Alpha learned chop!'), 'the pick, row 2');
   assert.deepStrictEqual([1, 2, 3, 4].map((t) => r1Seat(g, 1, t, 0).moves),
     ['chop:9,tap:60', 'chop:8,tap:60', 'copy:8,tap:60', 'copy:8,tap:60'],
     "the copy keeps MIMIC's PP, and the party's MIMIC comes back at the slot's PP");
-  assert.ok(duelSaid(g, 2, 'Alpha learned thump'), 'no pick: the cursor\'s first row');
+  assert.ok(duelSaid(g, 2, 'Alpha learned thump!'), 'no pick: the cursor\'s first row');
   assert.strictEqual(r1Row(g, 2, 1).rng, r1Row(g, 1, 1).rng, '...no draw but its accuracy byte');
-  assert.ok(duelSaid(g, 3, 'Beta learned tap'), "the computer's MIMIC draws");
-  assert.ok(duelSaid(g, 4, 'Alpha learned slam'), 'a link fight draws whatever the seat asked');
+  assert.ok(duelSaid(g, 3, 'Beta learned tap!'), "the computer's MIMIC draws");
+  assert.ok(duelSaid(g, 4, 'Alpha learned slam!'), 'a link fight draws whatever the seat asked');
 });
 
 test('FOCUS ENERGY and MIST fail when already up; SPLASH says No effect!', () => {
   const t = duelTexts('g1_already_up', 1);
   assert.deepStrictEqual(t.filter((x) => x.startsWith('Alpha')).slice(0, 2),
-    ['Alpha used pump', 'Alpha is getting pumped']);
-  assert.strictEqual(t.filter((x) => x === 'But it failed').length, 2, 'the second of each fails');
+    ['Alpha used pump!', "Alpha's getting pumped!"]);
+  assert.strictEqual(t.filter((x) => x === 'But, it failed!').length, 2, 'the second of each fails');
   assert.ok(t.includes('No effect!') && !t.includes('But nothing happened'));
 });
 
@@ -5770,13 +5999,13 @@ test("SwitchAndTeleportEffect: the level roll in a wild fight, the trainer's ref
   const g = 'g1_teleport';
   assert.ok(duelSaid(g, 1, 'Alpha ran from battle!') && r1Row(g, 1, 1).rng === 9861,
     'a user at or above its target\'s level escapes with no roll');
-  assert.strictEqual(duelTexts(g, 2).filter((x) => x === 'But it failed').length, 2,
+  assert.strictEqual(duelTexts(g, 2).filter((x) => x === 'But, it failed!').length, 2,
     'a level-5 TELEPORT from a level-90 Beta fails its roll twice');
   assert.ok(duelSaid(g, 2, 'Alpha ran from battle!'), '...and then gets away');
-  assert.strictEqual(duelTexts(g, 3).filter((x) => x === "It didn't affect Alpha").length, 2);
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === "It didn't affect Alpha!").length, 2);
   assert.ok(duelSaid(g, 3, 'Alpha ran away scared!'));
   assert.deepStrictEqual([r1End(g, 2).reason, r1End(g, 3).winner], ['run', 'p1']);
-  assert.ok(duelSaid(g, 4, 'Alpha is unaffected!') && duelSaid(g, 4, 'But it failed')
+  assert.ok(duelSaid(g, 4, 'Alpha is unaffected!') && duelSaid(g, 4, 'But, it failed!')
     && r1Row(g, 4, 1).rng === 9863, 'a trainer fight: ROAR and TELEPORT fail, no roll');
   assert.ok(duelSaid(g, 5, 'Beta was blown away!'));
 });
@@ -5784,30 +6013,30 @@ test("SwitchAndTeleportEffect: the level roll in a wild fight, the trainer's ref
 test("the trap is the trapper's: held on the first turn, its later hits in its slot", () => {
   const g = 'g1_trap_turns';
   const t1 = duelTexts(g, 1);
-  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap', "Beta can't move", "Alpha's attack continues!"],
+  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap!', "Beta can't move!", "Alpha's attack continues!"],
     'the slower Beta is held on the first turn, then CANNOT_MOVE without a word');
-  assert.ok(!t1.includes('Beta used thump'), 'Beta never moves while held');
-  assert.ok(duelSaid(g, 2, 'Beta used thump'), 'a faster Beta moves before the Wrap starts');
+  assert.ok(!t1.includes('Beta used thump!'), 'Beta never moves while held');
+  assert.ok(duelSaid(g, 2, 'Beta used thump!'), 'a faster Beta moves before the Wrap starts');
   const e3 = duelEvents(g, 3).filter((e) => e.t === 'damage');
   assert.ok(duelSaid(g, 3, "Alpha's attack continues!") && e3.every((e) => e.amount === 0),
     "an immunity's trap: the continues line and a 0 hit, nothing more");
   assert.ok(!duelTexts(g, 3).some((x) => x.includes('trap')), 'no "hurt by the trap"');
   const t4 = duelTexts(g, 4);
-  assert.ok(t4.includes('Beta is fast asleep') && !t4.includes("Beta can't move"),
+  assert.ok(t4.includes('Beta is fast asleep!') && !t4.includes("Beta can't move!"),
     'a sleeping held Beta ticks its sleep in its slot');
-  assert.strictEqual(t4.filter((x) => x === 'Alpha used wrap').length, 2,
+  assert.strictEqual(t4.filter((x) => x === 'Alpha used wrap!').length, 2,
     'its switch to Delta lets the trap go: Alpha uses WRAP fresh');
-  assert.ok(duelSaid(g, 5, 'Beta is fast asleep') && duelSaid(g, 5, 'Beta must recharge'),
+  assert.ok(duelSaid(g, 5, 'Beta is fast asleep!') && duelSaid(g, 5, 'Beta must recharge!'),
     'asleep, the recharge waits; it recharges after it wakes');
   assert.strictEqual(r1Seat(g, 5, 2, 3).recharge, true, '...still pending on the waking turn');
-  assert.ok(duelSaid(g, 6, "Delta can't move"), 'Delta comes out free and is wrapped afresh');
+  assert.ok(duelSaid(g, 6, "Delta can't move!"), 'Delta comes out free and is wrapped afresh');
 });
 
 test('a switch, an item and a recharge still meet the Speed compare', () => {
   const g = 'g1_tie_actions';
   assert.notStrictEqual(r1Row(g, 1, 1).rng, 9881, '40 against 40: the tie byte');
   assert.strictEqual(r1Row(g, 2, 1).rng, 9881, '90 against 10: none');
-  assert.ok(duelSaid(g, 3, 'Alpha must recharge'), 'the recharge turn is in the order');
+  assert.ok(duelSaid(g, 3, 'Alpha must recharge!'), 'the recharge turn is in the order');
 });
 
 test('TOXIC is plain poison on the bench', () => {
@@ -5819,7 +6048,7 @@ test('TOXIC is plain poison on the bench', () => {
 
 test('an escape after a faint of the player\'s pays no Pay Day', () => {
   const g = 'g1_pay_day_faint';
-  assert.ok(duelSaid(g, 1, 'Coins scattered') && duelSaid(g, 1, 'Gamma ran from battle!'));
+  assert.ok(duelSaid(g, 1, 'Coins scattered everywhere!') && duelSaid(g, 1, 'Gamma ran from battle!'));
   assert.deepStrictEqual([r1End(g, 1).reason, r1End(g, 1).payDay], ['run', 0]);
 });
 
@@ -5832,48 +6061,49 @@ test('an escape after a faint of the player\'s pays no Pay Day', () => {
 test("a player's Bide, trap and hold keep the battle menu; the computer re-picks", () => {
   const g = 'g1_menu_lockin';
   const t1 = duelTexts(g, 1);
-  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap', "Beta can't move", "Alpha's attack continues!"],
+  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap!', "Beta can't move!", "Alpha's attack continues!"],
     'FIGHT naming no slot: the continuation, and the held Beta silent');
-  assert.strictEqual(t1.filter((x) => x === 'Alpha used wrap').length, 2,
+  assert.strictEqual(t1.filter((x) => x === 'Alpha used wrap!').length, 2,
     "Beta's switch to Delta lets the trap go: Alpha's slot runs WRAP fresh at Delta");
-  assert.ok(!t1.includes('Beta used thump') && !t1.includes('Delta used thump'), 'nobody held moves');
+  assert.ok(!t1.includes('Beta used thump!') && !t1.includes('Delta used thump!'), 'nobody held moves');
   const t2 = duelTexts(g, 2);
-  assert.strictEqual(t2.filter((x) => x === 'p1 used an item').length, 4, 'four items');
+  // ItemUseText00 names the item (R1e): "<PLAYER> used <ITEM>!".
+  assert.strictEqual(t2.filter((x) => x === 'p1 used X ATTACK!').length, 4, 'four items');
   assert.strictEqual(t2.filter((x) => x === "Alpha's attack continues!").length, 0,
     'an item turn is not a continuation');
   assert.deepStrictEqual([1, 2, 3, 4].map((t) => r1Seat(g, 2, t, 0).trapping), ['4', '3', '2', '1'],
     'each item takes a step off the counter');
-  assert.ok(t2.includes('Beta used thump'),
+  assert.ok(t2.includes('Beta used thump!'),
     'the turn the step reaches 0 the held wild Beta is free, re-picks and moves');
   assert.strictEqual(r1Seat(g, 2, 5, 3).trapped, '', '...and is held by nothing');
   const t3 = duelTexts(g, 3);
-  assert.deepStrictEqual(t3.slice(0, 3), ['Beta used wrap', "Alpha can't move", 'Beta used slam'],
+  assert.deepStrictEqual(t3.slice(0, 3), ['Beta used wrap!', "Alpha can't move!", 'Beta used slam!'],
     "Alpha's switch lets the wild trap go: SelectEnemyMove picks SLAM, not WRAP run fresh");
   const t4 = duelTexts(g, 4);
-  assert.ok(!t4.some((x) => x.includes('energy') && x !== 'Alpha unleashed energy'),
+  assert.ok(!t4.some((x) => x.includes('energy') && x !== 'Alpha unleashed energy!'),
     'BIDE says nothing past its used line, and the store turns nothing at all');
   assert.strictEqual(r1Seat(g, 4, 2, 0).bide, r1Seat(g, 4, 1, 0).bide, 'an item stalls the Bide');
-  assert.ok(duelSaid(g, 4, 'Alpha unleashed energy'), '...which still unleashes');
-  assert.strictEqual(duelTexts(g, 5).filter((x) => x === 'Alpha used BIDE').length, 2,
+  assert.ok(duelSaid(g, 4, 'Alpha unleashed energy!'), '...which still unleashes');
+  assert.strictEqual(duelTexts(g, 5).filter((x) => x === 'Alpha used BIDE!').length, 2,
     'a switch drops the Bide; back out, Alpha uses BIDE afresh');
   assert.strictEqual(r1Seat(g, 5, 3, 0, 1).bide, '', '...Alpha comes back with no Bide');
-  assert.strictEqual(duelTexts(g, 6).filter((x) => x === 'Beta is fast asleep').length, 2,
+  assert.strictEqual(duelTexts(g, 6).filter((x) => x === 'Beta is fast asleep!').length, 2,
     'asleep, FIGHT naming a 0-PP slot is taken: the gate stops it every turn');
 });
 
 test('a charge turn is the charge line alone; the release says "used" and pays', () => {
   const g = 'g1_charge_turn';
   const e1 = duelEvents(g, 1);
-  assert.ok(!duelSaid(g, 1, 'Alpha used FLY') || duelTexts(g, 1).indexOf('Alpha used FLY')
-    > duelTexts(g, 1).indexOf('Alpha flew up high'), 'no used line before the charge line');
-  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used FLY').length, 1, 'one used line, the release');
+  assert.ok(!duelSaid(g, 1, 'Alpha used FLY!') || duelTexts(g, 1).indexOf('Alpha used FLY!')
+    > duelTexts(g, 1).indexOf('Alpha flew up high!'), 'no used line before the charge line!');
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used FLY!').length, 1, 'one used line, the release');
   assert.strictEqual(r1Seat(g, 1, 1, 0).moves, 'FLY:10', 'no PP on the charge turn');
   assert.strictEqual(r1Seat(g, 1, 2, 0).moves, 'FLY:9', 'the release pays');
   assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'FLY' && e.amount === 1), 'the vanish beat');
-  assert.ok(duelSaid(g, 2, 'Alpha is fully paralyzed'), 'battle 2: paralysed on the release');
+  assert.ok(duelSaid(g, 2, "Alpha's fully paralyzed!"), 'battle 2: paralysed on the release');
   assert.deepStrictEqual([r1Seat(g, 2, 2, 0).moves, r1Seat(g, 2, 2, 0).charging], ['SOLARBEAM:10', false],
     '...the charge is gone and nothing was paid');
-  assert.strictEqual(duelTexts(g, 3).filter((x) => x === 'Beta used FLY').length, 1);
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === 'Beta used FLY!').length, 1);
   assert.strictEqual(r1Seat(g, 3, 2, 3).moves, 'FLY:10', "the computer's PP is never spent");
 });
 
@@ -5888,10 +6118,10 @@ test('the crit and effectiveness lines follow the hit; One-hit KO!', () => {
   const lines = (at) => duelEvents(g, at).filter((e) => (e.t === 'damage' && e.slot === 3)
     || e.t === 'faint' || (e.t === 'msg' && !e.text.includes(' used ') && !e.text.includes('No effect')))
     .map((e) => (e.t === 'msg' ? e.text : e.t));
-  assert.deepStrictEqual(lines(1), ['damage', 'A critical hit', "It's super effective", 'damage',
-    "It's super effective", 'Hit the enemy 2 times!'], 'crit once, effectiveness every hit');
-  assert.deepStrictEqual(lines(2), ['damage', "It's super effective", 'faint'], 'the line before the faint');
-  assert.deepStrictEqual(lines(3), ['damage', 'One-hit KO!', "It's super effective", 'faint']);
+  assert.deepStrictEqual(lines(1), ['damage', 'Critical hit!', "It's super effective!", 'damage',
+    "It's super effective!", 'Hit the enemy 2 times!'], 'crit once, effectiveness every hit');
+  assert.deepStrictEqual(lines(2), ['damage', "It's super effective!", 'faint'], 'the line before the faint');
+  assert.deepStrictEqual(lines(3), ['damage', 'One-hit KO!', "It's super effective!", 'faint']);
 });
 
 test('coop_wild RUN rolls the cart\'s odds; solo wild is the client\'s', () => {
@@ -5899,7 +6129,7 @@ test('coop_wild RUN rolls the cart\'s odds; solo wild is the client\'s', () => {
   const t1 = duelTexts(g, 1);
   assert.strictEqual(t1.filter((x) => x === "Can't escape!").length, 3, 'odds 12, 42, 72 fail on this seed');
   assert.strictEqual(t1[t1.length - 1], 'Got away safely!', '...102 gets away');
-  assert.ok(t1.includes('Gamma used tap'), 'a failed try spends only the runner\'s turn');
+  assert.ok(t1.includes('Gamma used tap!'), 'a failed try spends only the runner\'s turn');
   assert.deepStrictEqual([r1End(g, 1).reason, r1End(g, 1).outcome], ['run', 'win']);
   assert.ok(duelSaid(g, 2, 'Got away safely!') && r1Row(g, 2, 1).rng === 9952, 'faster: no byte');
   assert.ok(duelSaid(g, 3, 'Got away safely!') && r1Row(g, 3, 1).rng === 9953, 'divisor 0: no byte');
@@ -5911,19 +6141,145 @@ test("Haze's CANNOT_MOVE stands until a move menu writes over it", () => {
   const g = 'g1_haze_lock';
   assert.ok(!duelTexts(g, 1).some((x) => x.startsWith('Beta')), 'the thawed recharger never acts again');
   assert.strictEqual(r1Seat(g, 1, 3, 3).recharge, true, '...and never recharges');
-  assert.ok(duelSaid(g, 2, 'Beta used tap'), 'a thawed Beta with nothing forced picks afresh');
+  assert.ok(duelSaid(g, 2, 'Beta used tap!'), 'a thawed Beta with nothing forced picks afresh');
   assert.ok(!duelTexts(g, 3).some((x) => x.startsWith('Beta')), 'a thawed raging player never acts again');
 });
 
 test("the chart's row order: the last row's line, the rows' rounding", () => {
   const g = 'g1_chart_order';
-  assert.ok(duelSaid(g, 1, 'Alpha missed') && !duelSaid(g, 1, "It doesn't affect Beta"),
-    'immunity row first, a 2x after it: "attack missed"');
-  assert.ok(duelSaid(g, 2, "It doesn't affect Beta"), 'the immunity row last');
-  assert.ok(duelSaid(g, 3, "It doesn't affect Beta"), 'no order: any immunity');
-  assert.ok(duelSaid(g, 4, "It's not very effective"), '2x then 0.5x: the last row');
-  assert.ok(duelSaid(g, 5, "It's super effective"), '0.5x then 2x: the last row');
+  assert.ok(duelSaid(g, 1, "Alpha's attack missed!") && !duelSaid(g, 1, "It doesn't affect Beta!"),
+    "immunity row first, a 2x after it: \"<USER>'s attack missed!\"");
+  assert.ok(duelSaid(g, 2, "It doesn't affect Beta!"), 'the immunity row last');
+  assert.ok(duelSaid(g, 3, "It doesn't affect Beta!"), 'no order: any immunity');
+  assert.ok(duelSaid(g, 4, "It's not very effective..."), '2x then 0.5x: the last row');
+  assert.ok(duelSaid(g, 5, "It's super effective!"), '0.5x then 2x: the last row');
   assert.ok(!duelTexts(g, 6).some((x) => x.includes('effective')), 'no order: the product, no line');
   assert.deepStrictEqual([4, 5, 6].map((at) => duelHits(g, at)[0]), ['3:8:392', '3:7:393', '3:8:392'],
     'halving first loses the odd point');
+});
+
+// ------------------------------------------------------------------
+// R1e: each rule against pokered, on the JS half of the R1e scenarios (the
+// parity tests above hold the Lua half to the same streams;
+// tests/battle_sim_turn.lua's R1e section forces the bytes).
+// ------------------------------------------------------------------
+
+test("AttackSubstitute: SubstituteTookDamageText on every hit, naming the doll's owner", () => {
+  const g = 'g1_sub_lines';
+  const t1 = duelTexts(g, 1);
+  assert.strictEqual(t1.filter((x) => x === 'The SUBSTITUTE took damage for Beta!').length, 2,
+    'both DOUBLE KICK hits');
+  assert.ok(t1.indexOf("Beta's SUBSTITUTE broke!") > t1.lastIndexOf('The SUBSTITUTE took damage for Beta!'),
+    'the line, then the break');
+  const t2 = duelTexts(g, 2);
+  const hurt = t2.indexOf('It hurt itself in its confusion!');
+  assert.ok(hurt >= 0 && t2[hurt + 1] === 'The SUBSTITUTE took damage for Beta!',
+    "a self-hit behind Alpha's doll: the line names Beta, whose doll takes it");
+  assert.deepStrictEqual(duelTexts(g, 3).slice(1, 3),
+    ['The SUBSTITUTE took damage for Beta!', "Beta's SUBSTITUTE broke!"], 'past 255: the line, then the break');
+});
+
+test("DecrementPP wraps at 0; IncrementMovePP refunds a call", () => {
+  const g = 'g1_pp_wrap';
+  assert.strictEqual(r1Seat(g, 1, 2, 0).moves, 'wrap:63', "a released trap's fresh run at 0 PP: 63");
+  assert.strictEqual(r1Seat(g, 1, 3, 0).moves, 'wrap:63', '...the next WRAP is the trap\'s continuation, no spend');
+  assert.ok(duelSaid(g, 2, 'Fire defrosted Alpha!') && duelSaid(g, 2, 'Alpha used thump!'),
+    'thawed before its slot, Alpha runs last turn\'s selection');
+  assert.strictEqual(r1Seat(g, 2, 2, 0).moves, 'thump:63,tap:60', '...at 0 PP: 63, the menu\'s TAP untouched');
+  assert.strictEqual(r1Seat(g, 3, 1, 0).moves, 'METRONOME:60', 'the called FLY refunds the call');
+  assert.ok(duelSaid(g, 3, "Alpha's fully paralyzed!"), 'the release is cancelled');
+  assert.strictEqual(r1Seat(g, 3, 2, 0).moves, 'METRONOME:60', '...and the refund stands');
+  assert.strictEqual(r1Seat(g, 3, 4, 0).moves, 'METRONOME:59', 'a release that lands pays it');
+  assert.strictEqual(r1Seat(g, 4, 2, 0).moves, 'METRONOME:4', "the copied METRONOME nets one spent");
+  assert.strictEqual(r1Seat(g, 4, 3, 0).moves, 'morph:10,splash:60',
+    "the party's own slot 1 gained the refund (9 + 1), shown once it is itself");
+  assert.deepStrictEqual([1, 2].map((t) => r1Seat(g, 5, t, 3).moves), ['METRONOME:61', 'METRONOME:62'],
+    "the computer's METRONOME is refunded every call and never spent");
+});
+
+test('a trainer RUN files nothing and the turn waits for the real answer', () => {
+  const g = 'g1_npc_run';
+  assert.strictEqual(r1Row(g, 1, 1).rng, 10001, 'the refused RUN draws nothing, resolves nothing');
+  assert.ok(!duelSaid(g, 1, "No! There's no running from a trainer battle!"), 'no line from the referee');
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used thump!').length, 2,
+    'the second row\'s FIGHT resolves turn 1, the third turn 2');
+});
+
+test('COUNTER reads the selection for COUNTER and the move struct for power and type', () => {
+  const g = 'g1_counter_struct';
+  assert.deepStrictEqual(duelHits(g, 1).slice(-1), ['3:6:394'],
+    'Beta switched: its struct is still THUMP, so COUNTER hits Delta for twice wDamage');
+  assert.deepStrictEqual(duelHits(g, 2).slice(2, 4), ['0:12:388', '3:24:370'],
+    "a Bide's unleash (power 1, BIDE's Normal type) is countered");
+  assert.ok(duelTexts(g, 2).slice(-1)[0] === "Alpha's attack missed!",
+    '...and a fresh BIDE (power 0) is not');
+  assert.deepStrictEqual(duelHits(g, 3).slice(-1), ['3:8:373'],
+    'a held Beta (CANNOT_MOVE) is countered off its struct and the wrap\'s wDamage');
+  assert.ok(duelHits(g, 4).includes('3:30:364'), "the trainer's KARATE (type 1, 50) is countered");
+  assert.deepStrictEqual([duelRowSeat(g, 1, 1, 3).sp, duelRowSeat(g, 1, 1, 3).st], [10, 0],
+    "Beta's struct after its switch: THUMP's power and type");
+});
+
+test('the status animations: SLP / CONF, the PLAYER variant on a player seat, and BURN_PSN_ANIM', () => {
+  const g = 'g1_status_anims';
+  const anims = (at) => duelEvents(g, at).filter((e) => e.t === 'anim' || e.t === 'msg')
+    .map((e) => (e.t === 'anim' ? `@${e.text}:${e.slot}` : e.text));
+  const a1 = anims(1);
+  assert.deepStrictEqual(a1.slice(0, 4), ['@SLP_PLAYER_ANIM:0', 'Alpha is fast asleep!',
+    'Beta is fast asleep!', '@SLP_ANIM:3'], "the player's before its line, the computer's after");
+  const a2 = anims(2);
+  assert.deepStrictEqual(a2.slice(0, 2), ['Alpha is confused!', '@CONF_PLAYER_ANIM:0']);
+  assert.ok(a2.includes('@CONF_ANIM:3'), "the computer's confusion");
+  const burn = a2.indexOf("Beta's hurt by the burn!");
+  assert.strictEqual(a2[burn + 1], '@BURN_PSN_ANIM:3', 'BURN_PSN_ANIM after the line');
+  const a3 = anims(3);
+  assert.ok(a3.includes('@SLP_PLAYER_ANIM:0') && a3.includes('@CONF_PLAYER_ANIM:3'),
+    'a link fight: both seats are players');
+});
+
+test("the computer's move choice: .chooseRandomMove and AIEnemyTrainerChooseMoves", () => {
+  const g = 'g1_cart_pick';
+  assert.ok(r1Row(g, 1, 1).rng !== 10031, 'the wild pick draws');
+  assert.ok(!duelTexts(g, 2).includes('Beta used chop!'), 'the disabled slot is redrawn past');
+  assert.ok(!duelTexts(g, 3).some((x) => x === 'Beta used lull!' || x === 'Beta used toxin!'),
+    'layer 1 against a statused target: the status moves never picked');
+  assert.deepStrictEqual(duelTexts(g, 4).filter((x) => x.startsWith('Beta used')),
+    ['Beta used zap!', 'Beta used grow!', 'Beta used zap!', 'Beta used zap!'],
+    'layer 3 leaves ZAP alone; layer 2 lets GROW tie it on the second selection only');
+  assert.deepStrictEqual([1, 2, 3].map((t) => duelRowSeat(g, 1, t, 3).ai), [1, 2, 3],
+    'wAILayer2Encouragement counts the executed turns');
+  assert.strictEqual(duelRowSeat(g, 6, 2, 3).ai, 0, "ReplaceFaintedEnemyMon zeroes it");
+  assert.ok(duelSaid(g, 6, 'Kappa used grow!'), 'the second selection of n2 encourages GROW');
+});
+
+test('HealEffect_: REST, RECOVER, and the compare that fails 255 short', () => {
+  const g = 'g1_heal';
+  assert.deepStrictEqual(duelTexts(g, 1).slice(0, 3),
+    ['Alpha used REST!', 'Alpha fell asleep and became healthy!', 'Alpha regained health!']);
+  assert.strictEqual(r1Seat(g, 1, 1, 0).hp, 400, 'REST heals to the full');
+  assert.ok(duelSaid(g, 1, 'Alpha woke up!') && r1Seat(g, 1, 3, 0).status === '', 'two turns asleep');
+  assert.ok(duelSaid(g, 2, 'But, it failed!'), 'RECOVER at full HP fails');
+  assert.ok(duelSaid(g, 3, 'But, it failed!') && r1Seat(g, 3, 1, 0).hp === 145, '255 short fails too');
+  assert.strictEqual(r1Seat(g, 4, 1, 0).hp, 344, '256 short heals half the maximum');
+  assert.ok(duelSaid(g, 5, 'Alpha started sleeping!'), 'REST with no status');
+});
+
+test('the item lines, and Full Restore leaves confusion and the toxic bit', () => {
+  const g = 'g1_item_lines';
+  const t1 = duelTexts(g, 1);
+  for (const line of ['Alpha recovered by 20!', 'Alpha was cured of poison!', 'p1 used X ATTACK!',
+    "Alpha's ATTACK rose!", 'p1 played the POKe FLUTE.', 'All sleeping POKeMON woke up.',
+    'p1 used POKe BALL!', 'All right! Beta was caught!']) {
+    assert.ok(t1.includes(line), line);
+  }
+  assert.ok(!t1.some((x) => x.includes('used POTION') || x.includes('used ANTIDOTE')),
+    'the party menu items print no "used" line');
+  assert.deepStrictEqual([r1Seat(g, 2, 1, 0).linger, r1Seat(g, 2, 1, 0).conf], [true, 5],
+    "FULL RESTORE's `.healHP`: the toxic bit lingers, the confusion stays");
+  assert.ok(duelSaid(g, 3, 'p2 used POTION on Beta!'), "the trainer's item: AIPrintItemUse");
+});
+
+test('Conversion copies both of the target\'s types', () => {
+  assert.strictEqual(r1Seat('g1_conversion', 1, 1, 0).types, '2,3');
+  assert.ok(duelSaid('g1_conversion', 1, "Converted type to Beta's!"));
 });

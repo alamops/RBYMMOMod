@@ -510,7 +510,7 @@ test('gen2 applyPrimary fails foe-targeting effects through a substitute', () =>
   const growl = applyPrimary2(18, dummyMon2(), growlTarget);
   // BattleCommand_StatDown's `.DidntMiss`: a substitute is `.Failed`, whose
   // StatDownFailText is "But it failed!" (R2b), not "But nothing happened".
-  assert.deepStrictEqual(growl.messages, ['But it failed'], 'Growl vs substitute fails');
+  assert.deepStrictEqual(growl.messages, ['But it failed!'], 'Growl vs substitute fails');
   assert.strictEqual(growlTarget.stages.atk, 0, 'Growl does not drop atk behind a substitute');
 
   const swordsUser = dummyMon2();

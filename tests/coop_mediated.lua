@@ -803,7 +803,9 @@ do
   sendScreen:onBattleEvent({ battle = "cb1", seq = 1, t = "send", slot = 3,
                              text = otherName, hp = 50 })
   sendScreen:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
-  check(said(sendScreen, "sent out"), "a send-out is narrated")
+  -- A Red trainer's send-out is the cart's own line (pokered
+  -- _TrainerSentOutText "<TRAINER> sent\nout <MON>!", Mediated.sentOutPages).
+  check(said(sendScreen, "sent\nout " .. otherName .. "!"), "a send-out is narrated (Red: \"X sent\\nout Y!\")")
   eq(sendScreen.sim:slot(3).active, 2,
      "and the monster the referee named is the one that walks on")
 
@@ -818,7 +820,7 @@ do
   unknown:onBattleEvent({ battle = "cb1", seq = 1, t = "send", slot = 3,
                           text = "NOBODY", hp = 50 })
   unknown:onBattleEvent({ battle = "cb1", seq = 2, t = "turn" })
-  check(said(unknown, "sent out"), "an unmatched send-out is still narrated")
+  check(said(unknown, "sent\nout NOBODY!"), "an unmatched send-out is still narrated")
   eq(unknown.sim:slot(3).active, 1, "with the field left where it was")
 
   -- Out-of-order and duplicate events are read exactly as the 1v1 reads them:
@@ -3475,6 +3477,49 @@ do
     eq(CoopBattle.SELF_EFFECTS2.EFFECT_SAFEGUARD, true, "Gold picker: SAFEGUARD is the table's one entry")
   end
 
+  -- ------- the Gold picker for the referee's wave-4 ids (R2d), each pinned by
+  -- its own number and name: pokecrystal data/moves/effects.asm -- a script
+  -- that runs `checkhit` or reads the foe it was used on asks whom; one that
+  -- acts on the user, the user's side, the foe's side or everybody does not.
+  do
+    local AIMED = {
+      [133] = "EFFECT_ATTRACT", [136] = "EFFECT_CONVERSION2", [139] = "EFFECT_ENCORE",
+      [140] = "EFFECT_FORESIGHT", [142] = "EFFECT_MEAN_LOOK", [143] = "EFFECT_NIGHTMARE",
+      [144] = "EFFECT_PAIN_SPLIT", [146] = "EFFECT_PSYCH_UP", [148] = "EFFECT_SKETCH",
+      [150] = "EFFECT_SPITE", [152] = "EFFECT_SWAGGER", [155] = "EFFECT_SP_DEF_DOWN",
+      [156] = "EFFECT_SP_DEF_DOWN_2",
+    }
+    local UNAIMED = {
+      [134] = "EFFECT_BATON_PASS", [135] = "EFFECT_BELLY_DRUM", [138] = "EFFECT_DESTINY_BOND",
+      [141] = "EFFECT_HEAL_BELL", [145] = "EFFECT_PERISH_SONG", [149] = "EFFECT_SPIKES",
+      [151] = "EFFECT_SP_DEF_UP_2", [153] = "EFFECT_TELEPORT", [154] = "EFFECT_SP_DEF_UP",
+    }
+    local moves = {}
+    for _, list in ipairs({ AIMED, UNAIMED }) do
+      for id, name in pairs(list) do
+        eq(Effects2.NAMES[id], name, "Gold picker (wave 4): the referee's " .. id .. " is " .. name)
+        moves["MOVE_" .. id] = { power = 0, effect = name }
+      end
+    end
+    moves.MOVE_137 = { power = 0, effect = "EFFECT_CURSE" }
+    eq(Effects2.NAMES[137], "EFFECT_CURSE", "Gold picker (wave 4): the referee's 137 is EFFECT_CURSE")
+    local picker = setmetatable({ game = { generation = 2, data = { moves = moves } } },
+                                { __index = CoopBattle })
+    for id, name in pairs(AIMED) do
+      eq(picker:needsTarget({ id = "MOVE_" .. id }), true,
+         "Gold picker (wave 4): " .. name .. " (" .. id .. ") asks whom")
+      eq(CoopBattle.SELF_EFFECTS2[name], nil, "Gold picker (wave 4): " .. name .. " is off the self table")
+    end
+    for id, name in pairs(UNAIMED) do
+      eq(picker:needsTarget({ id = "MOVE_" .. id }), false,
+         "Gold picker (wave 4): " .. name .. " (" .. id .. ") is aimed at nobody")
+    end
+    -- CURSE (137): the user's type decides (BattleCommand_Curse `.ghost`); a
+    -- seat this picker cannot read keeps the picker.
+    eq(picker:needsTarget({ id = "MOVE_137" }), true,
+       "Gold picker (wave 4): CURSE with no readable user asks whom (the safe side)")
+  end
+
   -- ------- the Transform overlay through a learn
   do
     -- Red: pokered LearnMove copies the party's list over the battle monster's.
@@ -4004,6 +4049,287 @@ do
     rs.phase, rs.commandIndex = "choose", 1
     rs:updateCommand(inputOf("a"))
     eq(rs.phase, "move", "asleep (Red co-op): awake, the move list")
+  end
+end
+
+-- ------------------------------------------------------------------
+-- wave 5 of docs/plans/gen12-referee-gaps-fix.md (C3): the co-op rows
+-- ------------------------------------------------------------------
+--
+-- HEAL BELL onto the party; a fight between players fights copies and writes
+-- nothing home (Red and Gold, as Gen 3); Gold's BATON PASS successor; a foe's
+-- send-out in the cart's words; the escape said once; Red's Bide lock-in.
+-- Every move row, name and number is invented.
+
+do
+  local Gen = need("Gen")
+  local Coop = need("Coop")
+  local MOVES5 = setmetatable({
+    FIX_BATON = { name = "BATON PASS", power = 0, accuracy = 100, type = "NORMAL", pp = 40,
+                  effect = "EFFECT_BATON_PASS" },
+    FIX_BIDE = { name = "BIDE", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+                 effect = "BIDE_EFFECT" },
+  }, { __index = data.moves })
+  local data5 = setmetatable({ moves = MOVES5 }, { __index = data })
+  local seq = 9000
+  local function ev(sc, fields)
+    seq = seq + 1
+    fields.battle, fields.seq = "cb1", seq
+    return sc:onBattleEvent(fields)
+  end
+  local function inputOf(...)
+    local pressed = {}
+    for _, k in ipairs({ ... }) do pressed[k] = true end
+    return { wasPressed = function(_, k)
+      if pressed[k] then pressed[k] = nil; return true end
+      return false
+    end, isDown = function() return false end }
+  end
+  local function choices(sc)
+    local out = {}
+    for _, m in ipairs(sc.sent) do
+      if m.type == Wire.BATTLE_CHOICE then out[#out + 1] = m.payload end
+    end
+    return out
+  end
+  local function texts(sc, rows)
+    local out = {}
+    for _, m in ipairs(sc.messages or {}) do
+      if type(m) == "string" then out[#out + 1] = m
+      elseif type(m) == "table" and type(m.text) == "string" then out[#out + 1] = m.text end
+    end
+    for _, r in ipairs(rows or sc.medPending or {}) do
+      if type(r) == "table" and r.kind == "msg" and type(r.text) == "string" then out[#out + 1] = r.text end
+    end
+    return out
+  end
+  local function count(list, text)
+    local n = 0
+    for _, t in ipairs(list) do if t == text then n = n + 1 end end
+    return n
+  end
+  -- ANN's seat (1) on Red or Gold, her party `party` (the save's), in `mode`.
+  local function seat5(gen, party, mode, slots)
+    slots = slots or npcSlots()
+    if party then slots[1].party = party end
+    local game = newGame()
+    game.data = data5
+    game.save.money = 0
+    game.save.party = slots[1].party
+    if gen == 2 then
+      game.generation = 2
+      game.save.generation = 2
+      game.save.player = { name = "ANN", id = 4321, money = 0 }
+    end
+    local sc = screen({ slots = slots, mine = 1, host = true, mode = mode or "coop_npc",
+                        selfId = "ann" })
+    sc.game = game
+    if gen == 2 then sc.gen2Mediated = true end
+    local uploaded = sc:uploadMediated()
+    -- A coop_wild host also owes the wild side's sheet, which these sections
+    -- never read; the party upload is what they stand on.
+    if mode ~= "coop_wild" then
+      eq(uploaded, true, "wave 5: the upload goes out (gen " .. gen .. ", " .. tostring(mode) .. ")")
+    end
+    sc.mediated = true
+    sc.medSlots = { [0] = 1, [1] = 2, [2] = 3, [3] = 4 }
+    sc.medFields = { [1] = 0, [2] = 1, [3] = 2, [4] = 3 }
+    return sc, slots
+  end
+
+  -- ------- HEAL BELL (Gold): every party member's status, benched ones too
+  do
+    local lead, bench = mon(60, 40), mon(60, 35)
+    lead.status, bench.status = "PAR", "SLP"
+    local sc, slots = seat5(2, { lead, bench })
+    ev(sc, { t = "status", slot = 0, side = "a", mon = 1, text = "X's status was healed" })
+    ev(sc, { t = "turn", amount = 2 })
+    eq(bench.status, nil, "HEAL BELL (Gold co-op): the benched member's status is cleared in the save")
+    eq(lead.status, "PAR", "HEAL BELL (Gold co-op): ...the standing one is not touched by its cure")
+    ev(sc, { t = "status", slot = 0, side = "a", mon = 0, text = "X's status was healed" })
+    ev(sc, { t = "turn", amount = 3 })
+    eq(lead.status, nil, "HEAL BELL (Gold co-op): the standing one's own cure is written home")
+    -- A partner's bell cures the partner's party, on this screen's copy of it.
+    slots[2].party[1].status = "PSN"
+    ev(sc, { t = "status", slot = 1, side = "a", mon = 0, text = "Y's status was healed" })
+    ev(sc, { t = "turn", amount = 4 })
+    eq(slots[2].party[1].status, nil, "HEAL BELL (Gold co-op): a partner's party member is cured too")
+    -- A member the seat does not hold: nothing.
+    local rows = sc:medRows({ battle = "cb1", t = "status", slot = 0, side = "a", mon = 5 })
+    eq(#rows, 0, "HEAL BELL (Gold co-op): a `mon` the seat does not hold files nothing")
+  end
+
+  -- ------- a fight between players fights copies (Red and Gold)
+  do
+    for _, gen in ipairs({ 1, 2 }) do
+      local slots = pvpSlots()
+      local saved = slots[1].party[1]
+      saved.status = nil
+      local opts = CoopBattle.sparOpts({ slots = slots, mine = 1, mode = "coop_pvp" })
+      check(opts.slots[1].party[1] ~= saved,
+            "PvP (gen " .. gen .. " co-op): our own seat fights a copy of the save's monster")
+      eq(opts.slots[1].party[1].hp, saved.hp, "PvP (gen " .. gen .. " co-op): ...an exact one")
+      check(opts.slots[3] == slots[3], "PvP (gen " .. gen .. " co-op): the other seats are handed on as they were")
+      local sc = seat5(gen, nil, "coop_pvp", opts.slots)
+      sc.game.save.party = { saved }
+      ev(sc, { t = "damage", slot = 0, side = "a", hp = 7, amount = 53 })
+      ev(sc, { t = "status", slot = 0, side = "a", status = "PAR" })
+      ev(sc, { t = "turn", amount = 2 })
+      eq(saved.hp, 60, "PvP (gen " .. gen .. " co-op): the save's HP is untouched")
+      eq(saved.status, nil, "PvP (gen " .. gen .. " co-op): ...and its status")
+      eq(opts.slots[1].party[1].hp, 7, "PvP (gen " .. gen .. " co-op): the fight's copy took the hit")
+      ev(sc, { t = "faint", slot = 0, side = "a", text = SPECIES_NAME, amount = 0 })
+      ev(sc, { t = "turn", amount = 3 })
+      eq(saved.hp, 60, "PvP (gen " .. gen .. " co-op): ...nor a faint")
+      -- A vitamin's Stat Exp stays the fight's; the bag is still spent.
+      sc.game.save.inventory.PROTEIN = 1
+      local before = saved.statExp.attack
+      sc.pendingItem, sc.pendingItemSlot = "PROTEIN", 1
+      sc:confirmMediatedItem("PROTEIN", 1)
+      eq(saved.statExp.attack, before, "PvP (gen " .. gen .. " co-op): a vitamin writes no Stat Exp home")
+      eq(sc.game.save.inventory.PROTEIN, nil, "PvP (gen " .. gen .. " co-op): ...the bag is still spent")
+      -- No EXP, whatever a hub sends.
+      local copy = opts.slots[1].party[1]
+      local exp0 = copy.exp
+      sc:gainExp({ slot = 1, mon = 0, med = true, species = SPECIES, level = 20, participants = 1 })
+      eq(copy.exp, exp0, "PvP (gen " .. gen .. " co-op): no EXP is banked in a fight between players")
+    end
+    -- ...and against the computer the vitamin is the save's (KEEPS_HELD_MODES).
+    local keep = mon(60, 40)
+    local sc = seat5(1, { keep })
+    sc.game.save.inventory.PROTEIN = 1
+    local before = keep.statExp.attack
+    sc.pendingItem, sc.pendingItemSlot = "PROTEIN", 1
+    sc:confirmMediatedItem("PROTEIN", 1)
+    check(keep.statExp.attack > before, "coop_npc: a vitamin's Stat Exp is written home")
+    -- CoopBattle.new hands a coop_pvp fight to `sparOpts` on Red and Gold.
+    for _, gen in ipairs({ 1, 2 }) do
+      local realSpar, handed = CoopBattle.sparOpts, nil
+      CoopBattle.sparOpts = function(o) handed = o; return realSpar(o) end
+      local game = newGame()
+      if gen == 2 then game.generation = 2; game.save.generation = 2 end
+      pcall(CoopBattle.new, game, { slots = pvpSlots(), mine = 1, mode = "coop_pvp" })
+      CoopBattle.sparOpts = realSpar
+      check(handed ~= nil, "PvP (gen " .. gen .. "): CoopBattle.new fights copies of our own seat")
+    end
+  end
+
+  -- ------- a lost fight between players is no whiteout (Red and Gold)
+  do
+    for _, gen in ipairs({ 1, 2 }) do
+      local game = { save = { money = 100, party = { mon(0, 10) }, generation = gen },
+                     data = { constants = {} }, generation = gen }
+      local coop = setmetatable({ party = { count = function() return 4 end },
+        battle = { plan = { allies = { { id = "ann" }, { id = "bob" } },
+                            foes = { { id = "cal" }, { id = "dee" } } } } }, { __index = Coop })
+      local blackedOut = false
+      coop.blackout = function() blackedOut = true end
+      coop:onBattleOver("loss", game, { mode = "coop_pvp", mediated = true }, nil)
+      eq(blackedOut, false, "PvP loss (gen " .. gen .. "): nobody whites out (a link battle)")
+      eq(game.save.money, 100, "PvP loss (gen " .. gen .. "): ...and the wallet is untouched")
+    end
+    -- Against the computer a wiped party still does.
+    local game = { save = { money = 100, party = { mon(0, 10) } }, data = { constants = {} } }
+    local coop = setmetatable({ party = { count = function() return 2 end },
+      battle = { plan = { allies = { { id = "ann" }, { id = "bob" } } } } }, { __index = Coop })
+    local blackedOut = false
+    coop.blackout = function() blackedOut = true end
+    coop:onBattleOver("loss", game, { mode = "coop_npc", mediated = true }, nil)
+    eq(blackedOut, true, "coop_npc loss: the whiteout still runs")
+  end
+
+  -- ------- Gold's BATON PASS asks its successor (co-op)
+  do
+    local lead, fainted, bench = mon(60, 40), mon(0, 30), mon(60, 30)
+    lead.moves = { { id = "FIX_TACKLE", pp = 20 }, { id = "FIX_BATON", pp = 40 } }
+    local sc = seat5(2, { lead, fainted, bench })
+    sc.phase, sc.moveIndex = "move", 2
+    sc:updateMove(inputOf("a"))
+    eq(sc.phase, "switch", "BATON PASS (Gold co-op): choosing it opens the party picker")
+    eq(#choices(sc), 0, "BATON PASS (Gold co-op): ...with nothing filed yet")
+    sc:updateSwitch(inputOf("b"))
+    eq(sc.phase, "move", "BATON PASS (Gold co-op): B goes back to the move list")
+    sc.phase, sc.moveIndex = "move", 2
+    sc:updateMove(inputOf("a"))
+    sc:updateSwitch(inputOf("a"))
+    local sent = choices(sc)
+    eq(#sent, 1, "BATON PASS (Gold co-op): A files the move")
+    eq(sent[1] and sent[1].move, 1, "BATON PASS (Gold co-op): ...BATON PASS's slot")
+    eq(sent[1] and sent[1].pass, 2,
+       "BATON PASS (Gold co-op): ...naming the living bench member's party position")
+    -- No bench: no menu, the move is filed at once.
+    local alone = mon(60, 40)
+    alone.moves = { { id = "FIX_TACKLE", pp = 20 }, { id = "FIX_BATON", pp = 40 } }
+    local as = seat5(2, { alone })
+    as.phase, as.moveIndex = "move", 2
+    as:updateMove(inputOf("a"))
+    local asent = choices(as)
+    eq(#asent, 1, "BATON PASS (Gold co-op): with nobody to pass to it is filed at once")
+    eq(asent[1] and asent[1].pass, nil, "BATON PASS (Gold co-op): ...naming nobody")
+    -- Red has none.
+    local rs = seat5(1, { lead, bench })
+    eq(rs:asksPass({ id = "FIX_BATON" }), false, "BATON PASS: Red's co-op never asks")
+  end
+
+  -- ------- a foe's send-out is the cart's line; a partner's keeps this screen's
+  do
+    local sc = seat5(2)
+    local rows = sc:medRows({ battle = "cb1", t = "send", slot = 2, side = "b", text = "FOEMON" })
+    local said = texts(sc, rows)
+    eq(count(said, "TRAINER\nsent out"), 1, "send-out (Gold co-op): BattleText_EnemySentOut's first screen")
+    eq(count(said, "sent out\nFOEMON!"), 1, "send-out (Gold co-op): ...and its `cont` screen")
+    local prow = sc:medRows({ battle = "cb1", t = "send", slot = 1, side = "a", text = "PALMON" })
+    eq(count(texts(sc, prow), "BOB sent out\nPALMON!"), 1, "send-out (co-op): a partner's line is this screen's")
+  end
+
+  -- ------- coop_wild: an escape is "Got away safely!", once
+  do
+    local function wildScreen()
+      local slots = {
+        { side = "a", owner = "ann", name = "ANN", party = { mon(60, 40) } },
+        { side = "a", owner = "bob", name = "BOB", party = { mon(60, 30) } },
+        { side = "b", owner = nil, name = "WILD", party = { mon(50, 20) } },
+      }
+      return seat5(1, nil, "coop_wild", slots)
+    end
+    local function outcome(sc)
+      sc:onBattleOutcome({ battle = "cb1", winners = { "npc" }, losers = { "ann", "bob" }, reason = "run" })
+    end
+    local said = wildScreen()
+    ev(said, { t = "msg", text = "Got away safely!" })
+    outcome(said)
+    local lines = texts(said)
+    eq(count(lines, "Got away safely!"), 1, "escape (coop_wild): the referee's line, once")
+    eq(count(lines, "Someone ran away!"), 0, "escape (coop_wild): ...and no \"Someone ran away!\" after it")
+    local silent = wildScreen()
+    outcome(silent)
+    eq(count(texts(silent), "Got away safely!"), 1, "escape (coop_wild): said by the ending when the stream did not")
+    local npc = seat5(1)
+    npc:onBattleOutcome({ battle = "cb1", winners = { "ann", "bob" }, losers = { "npc" }, reason = "run" })
+    eq(count(texts(npc), "Someone ran away!"), 1, "run (coop_npc): the reason line as before")
+  end
+
+  -- ------- Red's Bide (co-op): FIGHT files at once while one is going on
+  do
+    local lead = mon(60, 40)
+    lead.moves = { { id = "FIX_TACKLE", pp = 20 }, { id = "FIX_BIDE", pp = 10 } }
+    local sc = seat5(1, { lead })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    sc:commit({ slot = 1, move = 2, target = 3 })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " used BIDE" })
+    ev(sc, { t = "turn", amount = 2 })
+    check(sc.bideLocked == true, "Bide (Red co-op): the turn after \"used BIDE\" is a Bide going on")
+    local before = #choices(sc)
+    sc.phase, sc.commandIndex = "choose", 1
+    sc:updateCommand(inputOf("a"))
+    local sent = choices(sc)
+    eq(#sent, before + 1, "Bide (Red co-op): FIGHT files at once (MainInBattleLoop's STORING_ENERGY skip)")
+    eq(sent[#sent] and sent[#sent].move, 1, "Bide (Red co-op): ...the Bide's slot")
+    ev(sc, { t = "turn", amount = 3 })
+    check(sc.bideLocked == true, "Bide (Red co-op): a silent store turn keeps it")
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " unleashed energy" })
+    ev(sc, { t = "turn", amount = 4 })
+    check(not sc.bideLocked, "Bide (Red co-op): the release ends it")
   end
 end
 

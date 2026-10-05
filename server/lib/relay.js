@@ -1440,8 +1440,9 @@ handlers['mmo.battle_choice'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || !record.sim) return;
 
-  // The hub's generation, so only a Gen 3 hub reads Gen 3's `pass` /
-  // `dexCaught` (a Gen 1 / Gen 2 choice is read exactly as it always was).
+  // The hub's generation, so each field is read where its cart has it: Gen
+  // 3's `dexCaught` on a Gen 3 hub, BATON PASS's `pass` on a Gen 2 or Gen 3
+  // hub (wave 5: Gold's too), Red's MIMIC pick `mimic` on a Gen 1 hub.
   const choice = cleanBattleChoice(msg, relay.generation);
   if (!choice || choice.battle !== record.id) return;
   // Item choices are proved against the bag uploaded with the party
@@ -3790,6 +3791,14 @@ class Relay {
     // Turn.create's `opts.timeOfDay`; absent is its link reading).
     if (this.generation === 2) {
       createOpts.timeOfDay = rules.timeOfDay;
+    }
+    // Red's TypeEffects order (cleanBattleRuleset reads `chartOrder` on a Gen 1
+    // hub alone, wave 5), which decides a dual type's effectiveness line and
+    // its "doesn't affect" / "missed" -- the last row AdjustDamageForMoveType
+    // applied (lib/battle Turn.create's `opts.chartOrder`; absent is its
+    // product reading).
+    if (this.generation === 1) {
+      createOpts.chartOrder = rules.chartOrder;
     }
     const created = this.Turn.attempt(createOpts);
     if (!created.battle) {

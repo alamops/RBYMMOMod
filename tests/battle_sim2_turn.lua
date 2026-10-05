@@ -1026,8 +1026,8 @@ do
   ok(saw(first, "Beta was WRAPPED by Alpha"), "TrapTarget says the cart's WRAP line")
   ok(beta.trapped ~= nil and beta.trapped.turns >= 2 and beta.trapped.turns <= 5,
      "a 3..6 count, already one tick down at the end of the turn it landed on")
-  ok(saw(first, "Beta is hurt by wrap"), "HandleWrap deals its residual that same turn")
-  ok(saw(first, "Beta used tap"), "the wrapped monster still moved that turn")
+  ok(saw(first, "Beta's hurt by wrap!"), "HandleWrap deals its residual that same turn")
+  ok(saw(first, "Beta used tap!"), "the wrapped monster still moved that turn")
 
   -- The next turn forces nobody: both seats are asked, and a deadline runs.
   ok(battle.deadline ~= nil, "a wrap forces no seat, so the turn opens with a deadline")
@@ -1040,7 +1040,7 @@ do
   local before = beta.hp
   battle:submitChoice("p2", { action = "fight", move = 0 })
   local second = drain(battle)
-  ok(saw(second, "Beta is hurt by wrap") or saw(second, "Beta was released from wrap"),
+  ok(saw(second, "Beta's hurt by wrap!") or saw(second, "Beta was released from wrap!"),
      "each later turn ticks the count")
   ok(beta.hp < before, "...and the residual is a sixteenth of max HP off the HP")
 
@@ -1049,7 +1049,7 @@ do
     if released or battle:outcome() then break end
     battle:submitChoice("p1", { action = "fight", move = 1 })
     battle:submitChoice("p2", { action = "fight", move = 0 })
-    released = saw(drain(battle), "Beta was released from wrap")
+    released = saw(drain(battle), "Beta was released from wrap!")
   end
   ok(released, "the count runs out with the cart's release line")
   eq(beta.trapped, nil, "...and the wrap is gone")
@@ -1143,15 +1143,15 @@ do
     return false
   end
 
-  ok(spoke("Alpha used SLOW SWIPE"), "gen2: an attack prints the display name")
+  ok(spoke("Alpha used SLOW SWIPE!"), "gen2: an attack prints the display name")
   -- R2d: Gold's own DISABLE line, WasDisabledText.
   ok(spoke("Beta's THUMP HIT was DISABLED!"), "gen2: Disable landing names the move")
-  ok(spoke("THUMP HIT is disabled"), "gen2: and so does the refusal it causes")
+  ok(spoke("Beta's THUMP HIT is DISABLED!"), "gen2: and so does the refusal it causes")
   -- R2c: the count ticks in CheckTurn and wears off with DisabledNoMoreText.
   ok(spoke("Beta's disabled no more!"), "gen2: and so does it wearing off")
   ok(spoke("Alpha learned THUMP HIT!"), "gen2: Mimic names what it copied")
-  ok(spoke("Alpha used THUMP HIT"), "gen2: and the copy keeps the name")
-  ok(spoke("Beta used nudge"), "gen2: a move with no name is narrated under its id")
+  ok(spoke("Alpha used THUMP HIT!"), "gen2: and the copy keeps the name")
+  ok(spoke("Beta used nudge!"), "gen2: a move with no name is narrated under its id")
 
   local sawId, sawName = false, false
   for _, text in ipairs(animated) do
@@ -1290,9 +1290,9 @@ do
   ok(not Effects.hitsInvulnerable("FLY", { id = "SWIFT" }), "gen2: Swift misses Fly")
   ok(not Effects.hitsInvulnerable("DIG", { id = "TACKLE" }), "gen2: Tackle misses Dig")
   local mon = { species = "Alpha" }
-  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight")
-  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head")
-  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind")
+  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight!")
+  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head!")
+  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind!")
 end
 
 do
@@ -1318,7 +1318,7 @@ do
   local dug, failed, damaged = false, false, false
   for _, event in ipairs(turn1) do
     if event.t == "msg" and event.text:find("dug a hole", 1, true) then dug = true end
-    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    if event.t == "msg" and event.text:find("But it failed!", 1, true) then failed = true end
     if event.t == "damage" and event.slot == 0 then damaged = true end
   end
   ok(dug, "gen2: DIG announces dug a hole")
@@ -1360,7 +1360,8 @@ do
   local turn1 = drain(battle)
   local failed, damaged = false, false
   for _, event in ipairs(turn1) do
-    if event.t == "msg" and event.text:find("But it failed", 1, true) then failed = true end
+    -- CheckHit's `.FlyDigMoves` miss: AttackMissedText (wave 5).
+    if event.t == "msg" and event.text:find("attack missed!", 1, true) then failed = true end
     if event.t == "damage" and event.slot == 0 then damaged = true end
   end
   ok(failed, "gen2: Swift misses a flying target")
@@ -1467,7 +1468,7 @@ do
   -- BattleCommand_StatDown's `.DidntMiss`: a substitute is `.Failed`, whose
   -- StatDownFailText is "But it failed!" (R2b), not "But nothing happened".
   eq(out.nothing, false, "gen2: Growl vs substitute is no \"nothing\"")
-  eq(out.messages[1], "But it failed", "gen2: ...it fails")
+  eq(out.messages[1], "But it failed!", "gen2: ...it fails")
   eq(target.stages.atk, 0, "gen2: Growl does not drop atk behind a substitute")
 end
 
@@ -1693,7 +1694,7 @@ do
   local events = drain(battle)
   local nothing = false
   for _, event in ipairs(events) do
-    if event.t == "msg" and event.text == "But nothing happened" then
+    if event.t == "msg" and event.text == "But nothing happened." then
       nothing = true
     end
   end
@@ -2135,7 +2136,7 @@ do
       })
       drain(battle)
       local events = turn(battle)
-      if said(events, "A critical hit") then return damageOn(events, 3) end
+      if said(events, "A critical hit!") then return damageOn(events, 3) end
     end
     return nil
   end
@@ -2197,13 +2198,15 @@ do
   -- 10 x 40 x 60 / 80 (Sp. Def 40 doubled) / 50 = 6, +2 = 8, then the roll.
   ok(screened and screened <= 8 and screened >= 6, "a special hit into it reads Sp. Def doubled (6..8)")
   local again = turn(battle)
-  ok(said(again, "But it failed"), "a second Light Screen while one is up fails")
+  ok(said(again, "But it failed!"), "a second Light Screen while one is up fails")
   eq(battle.screens.a.lightScreen, 3, "...and does not refresh the count")
   local fixed = turn(battle, { action = "fight", move = 1 }, { action = "fight", move = 1 })
   eq(damageOn(fixed, 0), 20, "a fixed-damage hit is never screened: the post-hoc halving is gone")
   turn(battle, { action = "fight", move = 1 })
   local fade = turn(battle, { action = "fight", move = 1 })
-  ok(said(fade, "Ann's LIGHT SCREEN fell"), "it falls at the end of its fifth turn")
+  -- BattleText_MonsLightScreenFell; a link fight names the side's trainer
+  -- where each cart says "Your" (wave 5, `_screenOwner`).
+  ok(said(fade, "Ann's POKéMON's LIGHT SCREEN fell!"), "it falls at the end of its fifth turn")
   eq(battle.screens.a.lightScreen, 0, "...and is down")
   local bare = turn(battle, { action = "fight", move = 1 })
   local unscreened = damageOn(bare, 0)
@@ -2225,7 +2228,7 @@ do
   for seed = 1, 200 do
     local battle = confusedFight(seed)
     drain(battle)
-    if said(turn(battle), "Alpha hurt itself in confusion") then found = seed; break end
+    if said(turn(battle), "It hurt itself in its confusion!") then found = seed; break end
   end
   ok(found ~= nil, "a seed on which the confused Alpha hits itself")
   local battle = confusedFight(found)
@@ -2252,14 +2255,14 @@ do
   end
   local normal = vsGhost(10)
   drain(normal)
-  ok(said(turn(normal), "It doesn't affect Beta"), "a NORMAL move cannot touch the GHOST on this chart")
+  ok(said(turn(normal), "It doesn't affect Beta!"), "a NORMAL move cannot touch the GHOST on this chart")
   local struggle = vsGhost(0)
   drain(struggle)
   local events = turn(struggle)
   local dealt = damageOn(events, 3)
   -- 10 x 50 x 40 / 40 / 50 = 10, +2 = 12, no STAB though Alpha is type 0.
   ok(dealt and dealt >= 10 and dealt <= 12, "Struggle hits the GHOST anyway, with no STAB (10..12)")
-  ok(not said(events, "It doesn't affect Beta"), "...and no matchup line at all")
+  ok(not said(events, "It doesn't affect Beta!"), "...and no matchup line at all")
   eq(damageOn(events, 0), math.max(1, math.floor(dealt / 4)), "recoil is a quarter of what it dealt")
 
   local feeble = duel({
@@ -2279,10 +2282,10 @@ do
   drain(metronome)
   local called = turn(metronome)
   ok(animOrder(called):find("pool_hit", 1, true) ~= nil, "the last PP calls the pool move")
-  ok(not said(called, "Alpha is hit with recoil"), "...and the called move takes no Struggle recoil")
+  ok(not said(called, "Alpha's hit with recoil!"), "...and the called move takes no Struggle recoil")
   local after = turn(metronome)
   ok(animOrder(after):find("STRUGGLE", 1, true) ~= nil, "the turn after, every slot is empty: Struggle")
-  ok(said(after, "Alpha is hit with recoil"), "...which does recoil")
+  ok(said(after, "Alpha's hit with recoil!"), "...which does recoil")
 
   -- ResetTurn re-enters DoMove past CheckTurn, so the called move is not gated
   -- a second time: a confused caller spends one confusion turn, not two.
@@ -2521,10 +2524,10 @@ do
                 moves = { hit("tap", 1) } }) } })
   drain(battle)
   local events = round(battle, foe)
-  ok(said(events, "Beta fell asleep"), "the sleep lands")
+  ok(said(events, "Beta fell asleep!"), "the sleep lands")
   ok(said(events, "Beta recovered using a MINT BERRY!"), "...and the Mint Berry takes it straight away")
   eq(battle.byId[foe].mons[1].status, nil, "...so the target is awake")
-  ok(said(events, "Beta used tap"), "...and moves this very turn")
+  ok(said(events, "Beta used tap!"), "...and moves this very turn")
   local wrong, wfoe = fight({ seed = 11,
     a = { held({ species = "Alpha", spe = 90, moves = { hit("doze_dust", 0, 0, 32) } }) },
     b = { held({ species = "Beta", spe = 10, item = { "ICE_BERRY", "HELD_HEAL_BURN", 0, "ICE BERRY" },
@@ -2567,7 +2570,7 @@ do
     return round(battle, foe), battle
   end
   local events = kr(hit("thump", 10), rock)
-  ok(said(events, "Beta flinched"), "a plain hit with King's Rock flinches a slower target")
+  ok(said(events, "Beta flinched!"), "a plain hit with King's Rock flinches a slower target")
   local _, plain = kr(hit("thump", 10), nil)
   local _, rocked = kr(hit("FUTURE_SIGHT", 10), rock)
   eq(plain.rng:state(), rocked.rng:state(), "a folded-0 move whose script has no `kingsrock` draws nothing")
@@ -2595,7 +2598,7 @@ do
   local subbed = held({ species = "Beta", maxHp = 400, spe = 10, moves = { hit("tap", 1) } })
   subbed.substitute = 300
   local subEvents, subBattle = kr(hit("thump", 10), rock, subbed)
-  ok(not said(subEvents, "Beta flinched"), "a substitute still standing shields the target")
+  ok(not said(subEvents, "Beta flinched!"), "a substitute still standing shields the target")
   local _, subPlain = kr(hit("thump", 10), nil, held({ species = "Beta", maxHp = 400, spe = 10, substitute = 300,
                                                         moves = { hit("tap", 1) } }))
   eq(subBattle.rng:state(), subPlain.rng:state(), "...and no byte is drawn for it")
@@ -2657,7 +2660,7 @@ do
   local subEvents, subBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 4, 80)
   ok(not sawKind(subEvents, "held"), "a substitute at `effectchance` keeps the item")
   eq(subBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...which the foe still holds")
-  ok(said(subEvents, "Alpha used THIEF"), "...though the hit itself landed")
+  ok(said(subEvents, "Alpha used THIEF!"), "...though the hit itself landed")
   -- Seed 163 draws the 255 at `effectchance` (R2c's draw order moved it off
   -- 153, R2d's crit byte and DamageVariation loop off 218).
   local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 163)
@@ -2705,8 +2708,8 @@ do
   local battle2 = fight({ a = { maxed }, b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
   local events2 = drain(battle2)
   eq(battle2.byId.p1.mons[1].confusion, 3, "an already-confused holder keeps its count")
-  ok(not said(events2, "Alpha became confused"), "...and is not told again")
-  ok(not said(events2, "Alpha's ATTACK rose"), "Attack at +6 says nothing")
+  ok(not said(events2, "Alpha became confused!"), "...and is not told again")
+  ok(not said(events2, "Alpha's ATTACK went way up!"), "Attack at +6 says nothing")
 end
 
 -- (k) obedience gates: who is asked, and when nothing is drawn
@@ -2752,7 +2755,7 @@ do
   local tradedCharge, chargeEvents = locked(true, "charging", charged)
   eq(tradedCharge, (locked(nil, "charging", { moveIndex = 1, effect = 39, moveId = "beam_up", targetSlot = 3 })),
      "a charged move's release is never asked")
-  ok(said(chargeEvents, "Alpha used beam_up"), "...and goes off")
+  ok(said(chargeEvents, "Alpha used beam_up!"), "...and goes off")
   eq((locked(true, "thrashing", { turns = 1, moveIndex = 2 })),
      (locked(nil, "thrashing", { turns = 1, moveIndex = 2 })), "nor is a rampage's continuation")
 end
@@ -2768,16 +2771,16 @@ do
     return round(battle, foe)
   end
   local snore = sleeper(hit("SNORE", 10), nil, 3)
-  ok(said(snore, "Alpha is fast asleep") and said(snore, "Alpha used SNORE"), "Snore gets past the sleep gate")
+  ok(said(snore, "Alpha is fast asleep!") and said(snore, "Alpha used SNORE!"), "Snore gets past the sleep gate")
   local other = sleeper(hit("thump", 10), nil, 3)
-  ok(said(other, "Alpha is fast asleep") and not said(other, "Alpha used thump"), "...any other move does not")
+  ok(said(other, "Alpha is fast asleep!") and not said(other, "Alpha used thump!"), "...any other move does not")
   local ignored
   for seed = 1, 40 do
     local events = sleeper(hit("SLEEP_TALK", 0), true, seed)
     if said(events, "Alpha ignored orders...sleeping!") then ignored = events; break end
   end
   ok(ignored ~= nil, "a disobedient sleeper using Sleep Talk ignores orders")
-  ok(ignored and not said(ignored, "Alpha used SLEEP_TALK"), "...and the move is not used")
+  ok(ignored and not said(ignored, "Alpha used SLEEP_TALK!"), "...and the move is not used")
 end
 
 -- (m) `.UseInstead` spends the other move's PP and forgets the last move
@@ -2790,7 +2793,7 @@ do
       b = { held({ species = "Beta", level = 80, maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
     drain(battle)
     local events = round(battle, foe)
-    if said(events, "Alpha used instead, pound_two") then found = battle; break end
+    if said(events, "Alpha used instead, pound_two!") then found = battle; break end
   end
   ok(found ~= nil, "a disobedient monster uses another move instead")
   if found then
@@ -2816,7 +2819,7 @@ do
   B._openTurn = orig
   eq(seen, true, "the slower holder's roll lands on a target that already moved")
   eq(battle.byId.p1.mons[1].flinch, false, "...and the turn's open clears it")
-  ok(said(round(battle, foe), "Alpha used tap"), "...so it acts next turn")
+  ok(said(round(battle, foe), "Alpha used tap!"), "...so it acts next turn")
   -- a badge-rules seat whose monster must recharge keeps its own flag
   local kept = fight({ mode = "wild", seed = 3,
     a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 1) } }) },
@@ -2898,7 +2901,7 @@ do
   local _, uBattle = bideRelease(nil)
   -- StoreEnergy's release says "unleashed energy" and runs no `usedmovetext`
   -- (R2b), at its slot rather than at the turn's open.
-  ok(said(tEvents, "Alpha unleashed energy") and not said(tEvents, "Alpha used BIDE"),
+  ok(said(tEvents, "Alpha unleashed energy!") and not said(tEvents, "Alpha used BIDE!"),
      "a traded monster's Bide is unleashed")
   eq(damageOn(tEvents, 3), 80, "...at twice the energy stored")
   eq(rngOf(tBattle), rngOf(uBattle), "...and its release draws no obedience byte")
@@ -2913,7 +2916,7 @@ do
   end
   local pcEvents, pcBattle = confusedFight("PAR")
   local _, cBattle = confusedFight(nil)
-  ok(said(pcEvents, "Alpha hurt itself in confusion"), "a paralysed, confused monster rolls its confusion first")
+  ok(said(pcEvents, "It hurt itself in its confusion!"), "a paralysed, confused monster rolls its confusion first")
   eq(rngOf(pcBattle), rngOf(cBattle), "...and a self-hit leaves no paralysis byte drawn")
   -- Gold's DISABLE reads the target's LAST_COUNTER_MOVE (R2d), so Alpha
   -- uses thump once first; its paralysis is put on after that turn, so both
@@ -2930,8 +2933,8 @@ do
   end
   local pdEvents, pdBattle = disabledFight("PAR")
   local _, dBattle = disabledFight(nil)
-  ok(said(pdEvents, "thump is disabled"), "the move a faster Disable just took is refused")
-  ok(not said(pdEvents, "Alpha is fully paralyzed"), "...before the paralysis gate")
+  ok(said(pdEvents, "Alpha's thump is DISABLED!"), "the move a faster Disable just took is refused")
+  ok(not said(pdEvents, "Alpha's fully paralyzed!"), "...before the paralysis gate")
   eq(rngOf(pdBattle), rngOf(dBattle), "...which draws no byte for it")
 
   -- HandleMysteryberry reads the party PP, which a transformed monster never
@@ -2963,7 +2966,7 @@ do
   local lok, lEvents = pcall(round, lBattle, lFoe)
   ok(lok, "a sap that knocks the seeded monster out does not throw")
   if lok then
-    ok(said(lEvents, "Beta is seeded"), "...the sap is announced")
+    ok(said(lEvents, "LEECH SEED saps Beta!"), "...the sap is announced")
     -- GetEighthMaxHP of 320 is 40, but SubtractHP hands back the 9 HP Beta
     -- had left, and that is what RestoreHP gives the seeder.
     eq(lBattle.byId.p1.mons[1].hp, 108, "...and the seeder is healed the HP taken (99 + 9)")
@@ -3011,7 +3014,7 @@ do
   local sBattle, sFoe = rageFight({ seed = 2, status = "PSN", confusion = 3, bMove = "thump", bEffect = 0 })
   round(sBattle, sFoe)
   local s2 = round(sBattle, sFoe)
-  ok(said(s2, "Alpha hurt itself in confusion"), "seed 2: a confusion self-hit while raging")
+  ok(said(s2, "It hurt itself in its confusion!"), "seed 2: a confusion self-hit while raging")
   eq(sBattle.byId.p1.mons[1].rageCounter, 2, "...builds nothing, nor does poison: only Beta's two hits count")
   local cBattle2, cFoe2 = rageFight({ seed = 21, aSpe = 10, bSpe = 90, bHp = 999, raging = true,
                                       rageCounter = 254, substitute = 30 })
@@ -3131,7 +3134,7 @@ do
   t = tgt({ status = "freeze" })
   out = side(4, t, { hit = false, moveType = FIRE, normalType = NORMAL })
   eq(t.status, nil, "a burn-family hit thaws a frozen target whatever its chance byte said")
-  eq(out.messages[1], "Tgt was defrosted", "...with the cart's line")
+  eq(out.messages[1], "Tgt was defrosted!", "...with the cart's line")
   eq(out.events[1] and out.events[1].fields.status, nil, "...on a status event with no token (a cure)")
   t = tgt({ status = "freeze", types = { FIRE } })
   side(4, t, { hit = true, moveType = FIRE, normalType = NORMAL })
@@ -3174,7 +3177,7 @@ do
   t = tgt()
   out = side(68, t, { rng = r, computer = true })
   eq(t.stages.atk, -1, "64 and over goes on to the drop")
-  eq(out.messages[1], "Tgt's ATTACK fell", "...with its line")
+  eq(out.messages[1], "Tgt's ATTACK fell!", "...with its line")
   r = bytes({ 200 })
   t = tgt()
   side(70, t, { rng = r, computer = true, hit = false })
@@ -3236,7 +3239,7 @@ do
   r = bytes({ 10 })
   t = tgt()
   out = primary(18, t, { rng = r, computer = true })
-  eq(out.messages[1], "But it failed", "the computer's GROWL misses on a byte under 64")
+  eq(out.messages[1], "But it failed!", "the computer's GROWL misses on a byte under 64")
   eq(t.stages.atk, 0, "...lowering nothing")
   r = bytes({ 64 })
   t = tgt()
@@ -3246,7 +3249,7 @@ do
   t = tgt({ substitute = 10 })
   out = primary(18, t, { rng = r, computer = true })
   eq(r.drawn, 1, "the byte comes before the substitute")
-  eq(out.messages[1], "But it failed", "...which then stops the move (`.Failed`, R2b)")
+  eq(out.messages[1], "But it failed!", "...which then stops the move (`.Failed`, R2b)")
   r = bytes({ 64 })
   t = tgt({ mist = true })
   out = primary(18, t, { rng = r, computer = true })
@@ -3293,48 +3296,48 @@ do
   local linkG = duelOf("1v1", growl)
   local wildG, wildGEvents = duelOf("wild", growl)
   oneByteAhead(linkG, wildG, "the computer's GROWL draws one byte the same move in a link fight does not")
-  ok(said(wildGEvents, "Beta used growl"), "...on Bob's turn")
+  ok(said(wildGEvents, "Beta used growl!"), "...on Bob's turn")
   local miss = { id = "growl", pp = 30, power = 0, accuracy = 1, type = 0, effect = 18, chance = 0 }
   local linkM, linkMEvents = duelOf("1v1", miss)
   local wildM = duelOf("wild", miss)
   -- A missed primary stat-down move says StatDownFailText's line -- `.Failed`
   -- on wAttackMissed is "But it failed" -- not a miss line (R2b).
-  ok(said(linkMEvents, "But it failed") and not said(linkMEvents, "Beta missed"),
+  ok(said(linkMEvents, "But it failed!") and not said(linkMEvents, "Beta's attack missed!"),
      "a 1% GROWL misses on this seed, with StatDownFailText's line")
   oneByteAhead(linkM, wildM, "...and the computer's still draws its StatDown byte after the miss")
   local linkF, linkFEvents = duelOf("1v1", growl, { aAway = true })
   local wildF = duelOf("wild", growl, { aAway = true })
-  ok(said(linkFEvents, "But it failed"), "a GROWL at a target in the sky fails (`.FlyDigMoves`)")
+  ok(said(linkFEvents, "But it failed!"), "a GROWL at a target in the sky fails (`.FlyDigMoves`)")
   oneByteAhead(linkF, wildF, "...and the computer's draws its StatDown byte there too")
   local aurora = { id = "aurora", pp = 30, power = 10, accuracy = 100, type = 2, effect = 68, chance = 10 }
   local linkS = duelOf("1v1", aurora, { aSub = 250 })
   local wildS, wildSEvents = duelOf("wild", aurora, { aSub = 250 })
   oneByteAhead(linkS, wildS, "the computer's AURORA BEAM into a substitute draws the StatDown byte, and only it")
   eq(wildS.byId.p1.mons[1].stages.atk, 0, "...lowers nothing")
-  ok(not said(wildSEvents, "But it failed"), "...and says nothing about it")
+  ok(not said(wildSEvents, "But it failed!"), "...and says nothing about it")
 
   -- The reviewer's BITE probe: a sleeper that wakes and acts is not flinched.
   local bite = { id = "bite", pp = 30, power = 10, accuracy = 100, type = 0, effect = 31, chance = 100 }
   local _, biteEvents = duelOf("1v1", hit("tap", 1), { aMove = bite, aSpe = 90, bSpe = 10,
                                                        bStatus = "SLP", bTurns = 1 })
-  ok(not said(biteEvents, "Beta flinched"), "a flinch hit on a sleeping target sets nothing")
-  ok(said(biteEvents, "Beta used tap"), "...so the target that wakes this turn acts")
+  ok(not said(biteEvents, "Beta flinched!"), "a flinch hit on a sleeping target sets nothing")
+  ok(said(biteEvents, "Beta used tap!"), "...so the target that wakes this turn acts")
 
   -- Type immunity through the machine: a 100% ember on a Fire type.
   local ember = { id = "ember", pp = 30, power = 10, accuracy = 100, type = FIRE, effect = 4, chance = 100 }
   local emberBattle, emberEvents = duelOf("1v1", hit("tap", 1), { aMove = ember, aSpe = 90, bSpe = 10,
                                                                    bTypes = { FIRE } })
   eq(emberBattle.byId.p2.mons[1].status, nil, "a Fire move at 100% never burns a Fire type")
-  ok(not said(emberEvents, "Beta was burned"), "...and says so nowhere")
+  ok(not said(emberEvents, "Beta was burned!"), "...and says so nowhere")
 
   -- Defrost through the machine: a 10% ember on a frozen target thaws it,
   -- and the thawed target then takes its turn.
   local ember10 = { id = "ember", pp = 30, power = 10, accuracy = 100, type = FIRE, effect = 4, chance = 10 }
   local thawBattle, thawEvents = duelOf("1v1", hit("tap", 1), { aMove = ember10, aSpe = 90, bSpe = 10,
                                                                  bStatus = "FRZ" })
-  ok(said(thawEvents, "Beta was defrosted"), "a burn-family hit thaws a frozen target")
+  ok(said(thawEvents, "Beta was defrosted!"), "a burn-family hit thaws a frozen target")
   eq(thawBattle.byId.p2.mons[1].status, nil, "...which is no longer frozen")
-  ok(said(thawEvents, "Beta used tap"), "...and moves this turn")
+  ok(said(thawEvents, "Beta used tap!"), "...and moves this turn")
 
   -- `effectchance` stands before `applydamage` and only a substitute skips
   -- its byte: a Focus Band holder at 1 HP takes a hit for 0 and is still
@@ -3423,7 +3426,7 @@ do
   local missSeed
   for seed = 1, 400 do
     local b = withMove(wild(0), { seed = seed })
-    if said(round(b, "p2"), "Alpha missed") then missSeed = seed; break end
+    if said(round(b, "p2"), "Alpha's attack missed!") then missSeed = seed; break end
   end
   ok(missSeed ~= nil, "found a seed where the 1% move misses")
   local plainMiss, burnMiss = withMove(wild(0), { seed = missSeed }), withMove(wild(4), { seed = missSeed })
@@ -3500,7 +3503,7 @@ do
   for _ = 1, 30 do
     if not alpha.thrashing then break end
     local ev = round(thrasher, "p2")
-    if said(ev, "Alpha is fully paralyzed") then stopped = true; break end
+    if said(ev, "Alpha's fully paralyzed!") then stopped = true; break end
   end
   ok(stopped, "seed 3: a full paralysis lands while the rampage runs")
   eq(alpha.thrashing, nil, "a full paralysis (CantMove) ends the rampage")
@@ -3511,7 +3514,7 @@ do
   ok(fa.charging ~= nil and fa.invulnerable, "FLY charges and vanishes")
   fa.flinch = true
   local fev = round(flier, "p2")
-  ok(said(fev, "Alpha flinched"), "a flinch stops the release")
+  ok(said(fev, "Alpha flinched!"), "a flinch stops the release")
   eq(fa.charging, nil, "...and CantMove ends the charge")
   eq(fa.invulnerable, false, "...bringing the flier back down")
 
@@ -3521,8 +3524,8 @@ do
   local la = last.byId.p1.mons[1]
   eq(la.moves[1].pp, 0, "the first turn spends the last PP")
   local nextTurn = round(last, "p2")
-  ok(said(nextTurn, "Alpha used THRASH"), "the rampage's next turn is THRASH...")
-  ok(not said(nextTurn, "Alpha used STRUGGLE"), "...not Struggle")
+  ok(said(nextTurn, "Alpha used THRASH!"), "the rampage's next turn is THRASH...")
+  ok(not said(nextTurn, "Alpha used STRUGGLE!"), "...not Struggle")
   eq(la.moves[1].pp, 0, "...and spends no PP")
 
   -- (i) HYPER BEAM recharges after a hit into a substitute
@@ -3531,8 +3534,8 @@ do
   eq(beam.byId.p2.mons[1].hp, 900, "the substitute took the HYPER BEAM")
   -- The recharge is the next turn's: said at its slot in that turn (R2b,
   -- CheckTurn's first test), not at the open of it.
-  ok(not said(beamTurn, "Alpha must recharge"), "...the line is not the HYPER BEAM turn's")
-  ok(said(round(beam, "p2"), "Alpha must recharge"), "...and it still recharges (the next turn)")
+  ok(not said(beamTurn, "Alpha must recharge!"), "...the line is not the HYPER BEAM turn's")
+  ok(said(round(beam, "p2"), "Alpha must recharge!"), "...and it still recharges (the next turn)")
 
   -- (j) PAY DAY: the pot on a win against the computer, a catch included;
   --     none in a link fight
@@ -3779,7 +3782,7 @@ do
   local bare = beam(nil)
   local clawed, events = beam({ "QUICK_CLAW", "HELD_QUICK_CLAW", 255, "QUICK CLAW" })
   eq(clawed, bare + 1, "the recharging seat's claw rolls one byte on its forced turn")
-  ok(said(events, "Alpha must recharge"), "...and the recharge is said at its slot")
+  ok(said(events, "Alpha must recharge!"), "...and the recharge is said at its slot")
   eq(events[#events].t, "turn", "...the turn then opens")
 end
 
@@ -3994,7 +3997,7 @@ do
     a = { held({ species = "Alpha", maxHp = 400, spe = 10, moves = { hit("tap", 1) } }) },
     b = { held({ species = "Wild", spe = 90, moves = { hit("BEAT_UP", 10, 0, Effects.BEAT_UP) } }) } })
   local buev = round(bu, "wild")
-  ok(said(buev, "Wild's attack!") and said(buev, "But it failed"), "a wild BEAT UP hits once and fails")
+  ok(said(buev, "Wild's attack!") and said(buev, "But it failed!"), "a wild BEAT UP hits once and fails")
 end
 
 -- ------------------------------------------------------------------
@@ -4130,7 +4133,7 @@ do
   battle:submitChoice("p1", { action = "fight", move = 1 })
   battle:submitChoice(foe, { action = "fight", move = 0 })
   local events = drain(battle)
-  ok(said(events, "Beta used thump"), "R2d: Beta's tap is thump")
+  ok(said(events, "Beta used thump!"), "R2d: Beta's tap is thump")
 end
 
 do
@@ -4154,6 +4157,149 @@ do
   local _, b2, bOne = sleepRng("coop_npc")
   eq(a1, a2, "R2d: a link foe's HYPNOSIS into a status draws nothing")
   eq(b2, bOne, "R2d: the computer's draws exactly its AI byte")
+end
+
+-- ------------------------------------------------------------------
+-- The referee-gaps run's wave 5 (R2e): the last Gold rows.
+-- ------------------------------------------------------------------
+
+do
+  -- CONVERSION (move_effects/conversion.asm): a CURSE_TYPE move and the
+  -- user's own types are never a pick; none left -- "But it failed!", no byte.
+  local types = { "NORMAL", "FIRE", "CURSE_TYPE" }
+  local battle, foe = fight({ mode = "1v1", seed = 7, typeIds = types,
+    a = { held({ species = "Alpha", spe = 90, types = { 0 },
+                 moves = { hit("CONVERSION", 0, 0, 24), hit("curse_ish", 0, 2), hit("fire_hit", 20, 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  ok(said(events, "Alpha transformed into the FIRE-type!"), "R2e: CONVERSION takes a move's type, never ???")
+  eq(battle.byId.p1.mons[1].types[1], 1, "R2e: ...and both type bytes become it")
+  local before = battle.rng:state()
+  events = round(battle, foe)
+  -- Now FIRE: NORMAL (CONVERSION's own) is left.
+  ok(said(events, "Alpha transformed into the NORMAL-type!"), "R2e: the user's type is skipped")
+  local only, foe2 = fight({ mode = "1v1", seed = 7, typeIds = types,
+    a = { held({ species = "Alpha", spe = 90, types = { 0 },
+                 moves = { hit("CONVERSION", 0, 0, 24), hit("curse_ish", 0, 2) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(only)
+  local state = only.rng:state()
+  events = round(only, foe2)
+  ok(said(events, "But it failed!"), "R2e: nothing but its own and ??? -- it fails")
+  eq(only.rng:state(), state, "R2e: ...drawing nothing")
+  ok(before ~= nil, "R2e: (the pick draws)")
+end
+
+do
+  -- HEAL BELL leaves SUBSTATUS_TOXIC; REST and a cure clear it.
+  local battle, foe = fight({ mode = "1v1",
+    a = { held({ species = "Alpha", maxHp = 960, spe = 90, moves = { hit("HEAL_BELL", 0, 0, 141), hit("REST", 0, 0, 56) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local alpha = battle.byId.p1.mons[1]
+  alpha.status, alpha.toxicCounter = "toxic", 3
+  round(battle, foe)
+  eq(alpha.status, nil, "R2e: HEAL BELL cures the badly poisoned user")
+  eq(alpha.toxicLatent, true, "R2e: ...and leaves SUBSTATUS_TOXIC")
+  eq(alpha.toxicCounter, 3, "R2e: ...with its count")
+  alpha.status = "burn"
+  local events = round(battle, foe, { action = "fight", move = 0 })
+  -- The bell cured the burn again; set it after the move, as a foe's would.
+  alpha.status = "burn"
+  alpha.hp = 500
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice(foe, { action = "fight", move = 0 })
+  events = drain(battle)
+  ok(said(events, "Alpha went to sleep!") or said(events, "Alpha fell asleep and became healthy!"),
+     "R2e: REST")
+  eq(alpha.toxicLatent, nil, "R2e: REST clears SUBSTATUS_TOXIC")
+  ok(events ~= nil, "R2e: (the round ran)")
+end
+
+do
+  -- SKETCH reads a MIMIC copy's base PP (Effects.basePp's `basePp`).
+  local copy = Effects.copyMoveRow({ id = "SLAM", pp = 5, maxPp = 5, basePp = 35 })
+  eq(Effects.basePp(copy), 35, "R2e: a copy states the base PP it was copied from")
+  eq(Effects.basePp({ id = "SLAM", pp = 20, maxPp = 42, ppUps = 1 }), 35, "R2e: an own row derives it")
+end
+
+do
+  -- TryToRunAwayFromBattle's odds (Effects.runOdds).
+  eq(Effects.runOdds(100, 100, 1), nil, "R2e: as fast gets away, no byte")
+  eq(Effects.runOdds(10, 200, 1), 6, "R2e: 320 / 50")
+  eq(Effects.runOdds(10, 200, 2), 36, "R2e: +30 a try past the first")
+  eq(Effects.runOdds(10, 3, 1), nil, "R2e: faster")
+  eq(Effects.runOdds(1, 2, 1), nil, "R2e: a divisor of 0 gets away")
+  eq(Effects.runOdds(100, 1028, 1), nil, "R2e: a quotient over 255 gets away (the divisor's low byte)")
+  eq(Effects.runOdds(50, 60, 1), 106, "R2e: 1600 / 15")
+end
+
+do
+  -- An ETHER on a transformed monster restores the PARTY's PP
+  -- (BattleRestorePP skips the battle struct): the overlay is untouched and
+  -- the party list is told at the undo.
+  local battle, foe = fight({ mode = "1v1",
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("TRANSFORM", 0, 0, 57),
+                 { id = "thump", pp = 0, maxPp = 30, power = 10, accuracy = 255, type = 0, effect = 0, chance = 0 } } }),
+          held({ species = "Gamma", spe = 90, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1), hit("slam", 10) } }) } })
+  drain(battle)
+  round(battle, foe)
+  local alpha = battle.byId.p1.mons[1]
+  ok(alpha.transformed, "R2e: Alpha transformed")
+  local events = round(battle, foe, { action = "item", item = "ETHER", move = 1 })
+  eq(alpha.preTransform.moves[2].pp, 10, "R2e: the ETHER restores the party's slot")
+  eq(alpha.moves[2].pp, 5, "R2e: ...not the copy")
+  local partyMoves = false
+  for _, event in ipairs(events) do
+    if event.t == "moves" and event.slot == 0 and event.mon ~= nil then partyMoves = true end
+  end
+  ok(not partyMoves, "R2e: ...and no party list is published under the overlay")
+  -- A transformed spend publishes the overlay only.
+  events = round(battle, foe, { action = "fight", move = 1 })
+  local overlay = nil
+  for _, event in ipairs(events) do
+    if event.t == "moves" and event.slot == 0 then overlay = event end
+  end
+  ok(overlay ~= nil and overlay.mon == nil, "R2e: a transformed PP spend carries no `mon`")
+  events = round(battle, foe, { action = "switch", slot = 1 })
+  local told = nil
+  for _, event in ipairs(events) do
+    if event.t == "moves" and event.slot == 0 and event.mon == 0 then told = event end
+  end
+  ok(told ~= nil and told.moves[2].pp == 10, "R2e: the party list is told at the undo")
+end
+
+do
+  -- METRONOME's pool: a row without `num` is unreachable when any row
+  -- states one, and numbered by its place when none does.
+  local function poolBattle(pool)
+    return duel({ seed = 99, metronomePool = pool,
+      a = { sheet({ species = "Alpha", spe = 90, moves = { hit("METRONOME", 0, 0, 83) } }) },
+      b = { sheet({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  end
+  local mixed = poolBattle({ hit("MODDED", 10) })
+  mixed.metronomePool[1].num = nil
+  local numbered = { { id = "POUND", pp = 5, power = 40, type = 0, effect = 0, num = 1 },
+                     { id = "MODDED", pp = 5, power = 40, type = 0, effect = 0 } }
+  local b2 = poolBattle(numbered)
+  drain(b2)
+  local hits = {}
+  for _ = 1, 3 do
+    for _, event in ipairs(turn(b2)) do
+      if event.t == "msg" and event.text:find("used MODDED", 1, true) then hits[#hits + 1] = event.text end
+    end
+  end
+  eq(#hits, 0, "R2e: an unnumbered row in a numbered pool is never called")
+  drain(mixed)
+  local called = false
+  for _ = 1, 3 do
+    for _, event in ipairs(turn(mixed)) do
+      if event.t == "msg" and event.text == "Alpha used MODDED!" then called = true end
+    end
+  end
+  ok(called, "R2e: a pool with no `num` is numbered by place")
 end
 
 -- ------------------------------------------------------------------

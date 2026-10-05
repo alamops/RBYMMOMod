@@ -632,12 +632,19 @@ function M.new(game, opts)
       .. "resolve is disabled on this boot")
   end
 
-  -- Gen 3 link rules: a fight between players is a link battle, and the cart
-  -- reloads the party after one (pokefirered cable_club.c
-  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty) -- so this player's own
-  -- seat fights with copies of the session's monsters and nothing the fight
-  -- does to them (HP, status, a faint, PP, a held item) reaches the save.
-  if gen3 and Mediated.LINK_MODES[opts.mode] then opts = M.sparOpts3(opts) end
+  -- Link rules: a fight between players is a link battle, and no cart lets
+  -- one change the party -- Gen 3 reloads it (pokefirered cable_club.c
+  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty), Gold reloads the party
+  -- it saved before the Colosseum (pokecrystal engine/link/link.asm `farcall
+  -- LoadPokemonData` after StartBattle), and Red heals it (pokered
+  -- engine/link/cable_club.asm CableClub_DoBattleOrTradeAgain `predef
+  -- HealParty`) -- so this player's own seat fights with copies of its
+  -- monsters and nothing the fight does to them (HP, status, a faint, PP, a
+  -- held item) reaches the save.  Every generation since wave 5 of
+  -- docs/plans/gen12-referee-gaps-fix.md (Red and Gold used to fight the live
+  -- party, so a spar left its HP, status and PP in the save and a lost one
+  -- whited out).
+  if Mediated.LINK_MODES[opts.mode] then opts = M.sparOpts(opts) end
 
   local ruleset
   if gen3 then
@@ -2396,6 +2403,7 @@ function M:updateCommand(input)
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
+      self.passAction = nil
       self.phase = "switch"
     elseif command == "ITEM" then
       self.itemIndex = 1
@@ -2686,6 +2694,14 @@ function M:updateMove(input)
     end
     if pick and hasPP and not self:needsTarget(pick) then
       local first = targets[1]
+      -- Gold's BATON PASS asks its successor first (`asksPass`): the party
+      -- picker, then the move goes naming the pick (`updateSwitch`).
+      if self:asksPass(pick) then
+        self.passAction = { slot = self.mine, move = self.moveIndex, target = first.index }
+        self.switchIndex = 1
+        self.phase = "switch"
+        return
+      end
       return self:commit({ slot = self.mine, move = self.moveIndex,
                            target = first.index })
     end
@@ -2764,18 +2780,45 @@ function M:updateSwitch(input)
     -- like a broken screen, and gives a player mashing A no way out.
     self:say("There's no one\nelse to send out!")
     self.phase = "messages"
-    self.after = "choose"
+    self.after = self.passAction and "move" or "choose"
+    self.passAction = nil
     return
   end
   local moved = listPress(self.switchIndex or 1, #bench, input)
   if moved then
     self.switchIndex = moved
   elseif input:wasPressed("b") then
-    self.phase = "choose"
+    -- Out of BATON PASS's picker is back to the move list it came from.
+    self.phase = self.passAction and "move" or "choose"
+    self.passAction = nil
   elseif input:wasPressed("a") then
-    self:commit({ slot = self.mine, kind = "switch",
-                  index = bench[self.switchIndex].index })
+    local pass = self.passAction
+    self.passAction = nil
+    if pass then
+      -- BATON PASS, naming its successor (`asksPass`): the seat's party
+      -- position, the switch's own reading of a bench row.
+      pass.pass = bench[self.switchIndex].index
+      self:commit(pass)
+    else
+      self:commit({ slot = self.mine, kind = "switch",
+                    index = bench[self.switchIndex].index })
+    end
   end
+end
+
+-- Gold's BATON PASS successor (MediatedBattle `asksPass` has the cart's
+-- rule: pokecrystal BattleCommand_BatonPass opens the party menu for the
+-- player's side once CheckAnyOtherAlivePartyMons finds somebody, in every
+-- kind of battle).  Asked up front, as the move is chosen, and carried on
+-- the choice as `pass` -- the party position the referee's `partyIndexOf`
+-- matches, as a switch's `slot`.  Co-op's one mediated seat, Gold only; with
+-- nobody on the bench nothing is asked (the referee's "But it failed!").
+function M:asksPass(move)
+  if self.gen3 or self.ownSlots or not self.mediated then return false end
+  if Gen.generation(self.game) ~= 2 then return false end
+  if not Mediated.isBatonPass2(move, self.game) then return false end
+  local seat = self.sim and self:mySlot()
+  return seat ~= nil and #self:benchOf(seat) > 0
 end
 
 -- What is in the bag that can be used in a battle at all.
@@ -3076,8 +3119,10 @@ function M:updateTarget(input)
 end
 
 -- The move slot a FIGHT sends with no move list, or nil for the list
--- (MediatedBattle `lockedFightSlot`): a Gold Bide going on, or -- Red -- our
--- monster asleep or frozen.  Co-op's one mediated seat only.
+-- (MediatedBattle `lockedFightSlot`): a Bide going on (Gold's storing line,
+-- Red's used-line-to-release reading), or -- Red -- our monster asleep or
+-- frozen.  A Red trapper or held monster keeps the list (MediatedBattle has
+-- why).  Co-op's one mediated seat only.
 function M:lockedFightSlot()
   if not self.mediated or self.ownSlots or self.gen3 then return nil end
   if self.bideLocked then return self.bideSlot or 1 end
@@ -3837,7 +3882,28 @@ function M:playEvents(events)
       -- standing token on `mon.status` -- a confused-only event must not
       -- wipe PSN, and CNF must not land on the save sheet.
       local slot = self.sim:slot(event.slot)
-      if slot and slot.battler and self:replaying() then
+      -- A party member the referee named (`partyAt`, `medRows`): its own
+      -- status byte, the battler's only through it -- the seat's battler
+      -- holds its monster by reference, so the one standing follows.  Our
+      -- seat writes the save that way in KEEPS_HELD_MODES; a fight between
+      -- players fights copies (`sparOpts`) and writes nothing home.
+      local member = event.partyAt and slot and slot.party and slot.party[event.partyAt] or nil
+      if member and self:replaying() then
+        local status = event.status
+        if type(status) ~= "string" or status == "" then
+          member.status = nil
+        else
+          if self.mediated and event.slot == self.mine and not self.gen3 then
+            status = Mediated.partyStatus12(status, Gen.generation(self.game))
+          end
+          member.status = status
+        end
+        -- ...and the standing one's battler, should it hold a copy.
+        local standing = slot.battler and slot.battler.mon
+        if type(standing) == "table" and standing ~= member and slot.active == event.partyAt then
+          standing.status = member.status
+        end
+      elseif slot and slot.battler and self:replaying() then
         if event.confused ~= nil then
           if event.confused == 1 then
             slot.battler.confusedTurns = slot.battler.confusedTurns or 2
@@ -4166,6 +4232,8 @@ function M:playEvents(events)
   -- `send` branch is what clears it, on the event that answers it.
   self.phase = "messages"
   self.after = self.result and "over" or "choose"
+  -- A BATON PASS successor being picked belongs to the turn this batch closed.
+  self.passAction = nil
   -- ...and any run consent still standing comes down with the same batch, on
   -- both ends of it. A turn that has been decided is a turn whose ask can no
   -- longer be answered: the asker's wait and the partner's prompt both belong
@@ -5397,7 +5465,9 @@ local function statusTag(battler)
   local mon = battler and battler.mon
   local status = mon and mon.status
   if type(status) == "string" and status ~= "" then
-    return status:sub(1, 3)
+    -- A Red / Gold TOX reads PSN, as both carts' HUDs print it
+    -- (ClassicBattle.statusLabel); Gen 3 keeps its own.
+    return ClassicBattle.statusLabel(status)
   end
   -- Confusion is a volatile on the battler, not on the save sheet.
   if battler and (battler.confusedTurns or 0) > 0 then
@@ -8809,6 +8879,10 @@ end
 
 function M:gainExp(event)
   if event.slot ~= self.mine then return end
+  -- No EXP in a fight between players (Mediated.LINK_MODES): pokered
+  -- GainExperience returns in a link battle and Gold reloads the party after
+  -- one; neither referee pays any there, and a hub that did is refused.
+  if Mediated.LINK_MODES[self.mode] then return end
   local slot = self.sim:slot(self.mine)
   local battler = slot and slot.battler
 
@@ -10518,6 +10592,9 @@ function M:medRows(msg)
       end
     end
     say(msg.text)
+    -- An escape the referee narrated itself (Mediated.escapeLine): the
+    -- outcome adds no second one (`onBattleOutcome`).
+    if Mediated.escapeLine(msg.text) then self.escapeSaid = true end
 
   elseif kind == "send" then
     -- Which of that seat's party is coming out, because the row `playEvents`
@@ -10562,8 +10639,21 @@ function M:medRows(msg)
     if self:isMine(index) then
       say(("Go! %s!"):format(tostring(msg.text)))
     elseif self:sentByTrainer(index) then
-      say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
-        tostring(msg.text)))
+      -- A foe's send-out -- the trainer's, or another player's in a party
+      -- fight -- is the cart's own line on Red and Gold
+      -- (Mediated.sentOutPages: pokered "X sent\nout Y!", pokecrystal's two
+      -- screens); a partner's has no cart line and keeps this screen's.
+      local own = self:mySlot()
+      local foe = slot and own and slot.side ~= nil and slot.side ~= own.side
+      if foe and not self.gen3 then
+        for _, page in ipairs(Mediated.sentOutPages(slot and slot.name or "Someone",
+            tostring(msg.text), Gen.generation(self.game))) do
+          say(page)
+        end
+      else
+        say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
+          tostring(msg.text)))
+      end
     end
     if at then
       rows[#rows + 1] = {
@@ -10747,17 +10837,24 @@ function M:medRows(msg)
     -- VFX row still only draws -- a lift is a sentence rather than a sight.
     -- `confused` rides beside it: 1 inflicted, 0 snapped out, never a
     -- standing token.
-    if index then
+    --
+    -- A `status` naming a party member (`mon`: Gold's HEAL BELL, one per
+    -- cured monster -- pokecrystal BattleCommand_HealBell zeroes every
+    -- wPartyMon status byte of the user's side, benched ones too) lands on
+    -- that member (`partyAt`, `medStatusAt`), and only on the seat's battler
+    -- when it is the one standing.
+    local partyAt = (msg.mon ~= nil and index) and self:medStatusAt(index, slot, msg.mon) or nil
+    if index and not (msg.mon ~= nil and partyAt == nil) then
       rows[#rows + 1] = {
         kind = "status", slot = index, status = msg.status,
-        confused = msg.confused,
+        confused = msg.confused, partyAt = partyAt,
       }
     end
     local look = Vfx.forStatus(msg.status)
     if not look and msg.confused == 1 then
       look = Vfx.forStatus("confusion")
     end
-    if look and index then
+    if look and index and partyAt == nil then
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index }
     end
 
@@ -10945,6 +11042,20 @@ function M:medStampIndex(index, slot, mon)
   return at
 end
 
+-- The party position a `status` event's `mon` names on seat `index` (the
+-- 0-based uploaded index; ours through `medPartySlot`, anybody else's as the
+-- party they described), fainted or not -- a cure reaches the whole party.
+-- nil for a member the seat does not hold.
+function M:medStatusAt(index, slot, mon)
+  local at = tonumber(mon)
+  if not (slot and at) then return nil end
+  at = math.floor(at) + 1
+  if at < 1 then return nil end
+  if self:isMine(index) then at = self:medPartySlot(at) end
+  if not (at and (slot.party or {})[at]) then return nil end
+  return at
+end
+
 -- The referee's stamp first, its word second.
 function M:medSendIndex(index, slot, msg)
   return self:medStampIndex(index, slot, msg and msg.mon)
@@ -11102,6 +11213,7 @@ function M:onBattleEvent(msg)
     -- ...and any Bide of the one that left; the name the referee narrates
     -- the newcomer under is the one its Bide lines will carry.
     self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
+    self.bideOn1 = nil
     if msg.t == "send" and type(msg.text) == "string" then self.medMineName = msg.text end
   -- ...and so does a faint on it (Red / Gold): both referees hand a fallen
   -- monster its own list back there (BattleSim Effects.untransform, BattleSim2
@@ -11111,6 +11223,23 @@ function M:onBattleEvent(msg)
   elseif msg.t == "faint" and not self.gen3 and self:medSlotOf(msg) == self.mine then
     self.medMoveList = nil
     self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
+    self.bideOn1 = nil
+  end
+  -- Red's Bide (wave 5; MediatedBattle `bideLine1` has the rule): bounded by
+  -- our monster's "used BIDE" line and its release -- or the confusion
+  -- self-hit / full paralysis that clear STORING_ENERGY -- since a Red store
+  -- turn says nothing at all.
+  if msg.t == "msg" and not self.ownSlots and not self.gen3
+     and Gen.generation(self.game) == 1 then
+    local who = type(msg.text) == "string" and msg.text:match("^(.-) is confused!?$") or nil
+    if who then self.confusedNow = who end
+    local said = Mediated.bideLine1(msg.text, self.medMineName,
+      Mediated.bideLabels(self:liveMoves(), self.game), self.confusedNow)
+    if said == "start" then
+      self.bideOn1 = true
+    elseif said == "release" or said == "end" then
+      self.bideOn1, self.bideFiled = nil, nil
+    end
   end
   -- A Bide going on (Gold; MediatedBattle's `noteBideLine` has the rule):
   -- our monster's storing line, and the release that ends it...
@@ -11125,9 +11254,11 @@ function M:onBattleEvent(msg)
   -- ...read as the next turn opens: its FIGHT is `.locked_in` only when the
   -- turn just closed said our monster is storing energy.
   if msg.t == "turn" and msg.slot == nil and not self.ownSlots then
-    self.bideLocked = Gen.generation(self.game) == 2 and self.bideFiled == true
-      and self.bideStoring == true
+    self.bideLocked = (Gen.generation(self.game) == 2 and self.bideFiled == true
+      and self.bideStoring == true)
+      or (Gen.generation(self.game) == 1 and self.bideOn1 == true)
     self.bideStoring = nil
+    self.confusedNow = nil
   end
 
   for _, row in ipairs(self:medRows(msg)) do
@@ -11279,7 +11410,10 @@ function M:confirmMediatedItem(itemId, amount)
   -- BattleSim2's, and Gen 1's table has no berry or Kurt ball at all.
   local Effects = effectsFor(self.game)
   local effect = Effects.itemEffect(id)
-  if effect and effect.vitamin and amount == 1 then
+  -- Not in a fight between players (Mediated.LINK_MODES, wave 5): a spar
+  -- writes nothing home (MediatedBattle `syncMineStatus` has the carts'
+  -- reasons); the bag is still spent, the bag being this mod's rule.
+  if effect and effect.vitamin and amount == 1 and not Mediated.LINK_MODES[self.mode] then
     local partyIndex = Mediated.vitaminPartyIndex(self.game, self:mySlot(), seatSlot)
     Mediated.writebackVitamin(self.game, partyIndex, id)
   end
@@ -11352,6 +11486,14 @@ function M:onBattleOutcome(msg)
 
   self.medPending[#self.medPending + 1] = { kind = "over", winner = winner }
   local why = MED_REASONS[msg.reason]
+  -- A party's escape from a wild fight is the cart's "Got away safely!" and
+  -- nothing more (Mediated.GOT_AWAY): said here only when the stream did not
+  -- narrate the escape itself -- the Red referee's coop_wild roll says it, a
+  -- TELEPORT / ROAR / WHIRLWIND says its own line -- so "Someone ran away!"
+  -- no longer follows the line it repeated.
+  if msg.reason == "run" and self.mode == "coop_wild" and not self.gen3 then
+    why = (not self.escapeSaid) and Mediated.GOT_AWAY or nil
+  end
   if why then
     self.medPending[#self.medPending + 1] = { kind = "msg", text = why }
   end
@@ -11584,6 +11726,10 @@ function M:sendMediatedChoice(action)
                target = self:medFieldOf(action.target) }
     -- Red's MIMIC pick (`updateMimic`), 0-based into the target's moves.
     if tonumber(action.mimic) then fields.mimic = math.floor(action.mimic) - 1 end
+    -- Gold's BATON PASS successor (`asksPass`), the seat's 1-based party
+    -- position on the wire 0-based -- the save position its sheet's `slot`
+    -- stamps, which the referee matches (as a switch's `slot` is sent).
+    if tonumber(action.pass) then fields.pass = math.floor(action.pass) - 1 end
   end
   if seatAt then
     fields.seat = self:medFieldOf(seatAt)
@@ -12246,13 +12392,14 @@ local function copyData3(value, depth)
   return out
 end
 
--- CoopBattle.new's opts for a Gen 3 fight between players, with this
--- player's own seat fighting copies of its party (see the note in M.new).
+-- CoopBattle.new's opts for a fight between players, with this player's own
+-- seat fighting copies of its party (see the note in M.new) -- the session's
+-- monsters on Gen 3, the save's on Red and Gold, both plain data.
 -- Everything else in the opts -- the other seats, which are already copies
 -- unpacked off the wire -- is handed on as it was.  The copies keep the
 -- party's order, so every party-addressed field on the wire (`mon`, a sheet's
 -- `slot`) still names the same position.
-function M.sparOpts3(opts)
+function M.sparOpts(opts)
   local slots = type(opts) == "table" and opts.slots or nil
   local mine = type(opts) == "table" and (opts.mine or 1) or nil
   local own = type(slots) == "table" and slots[mine] or nil
@@ -12270,6 +12417,8 @@ function M.sparOpts3(opts)
   out.slots = seats
   return out
 end
+-- The Gen 3 name it was born under (tests/gen3_coop.lua).
+M.sparOpts3 = M.sparOpts
 
 -- ------- a seat
 

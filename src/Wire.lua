@@ -1341,6 +1341,27 @@ M.PRIORITY2_MAX = 255
 M.STAGE12_MAX = 6
 M.HAPPINESS2_MAX = 255
 
+-- Wave 5 of docs/plans/gen12-referee-gaps-fix.md, Gen 1 / Gen 2 only:
+--
+--   CHART_ORDER_MAX  integers in a Red ruleset's `chartOrder`: pokered's
+--                    TypeEffects (data/types/type_matchups.asm) as chart-index
+--                    pairs in table order, two per row.  The Red referee
+--                    takes at most its CHART_ORDER_MAX rows (BattleSim Turn,
+--                    256: a 16-type chart's every cell), so twice that.  The
+--                    cart's table is 82 rows -- 164 integers.
+--   NUM_ATTACKS2     a Gold Metronome pool row's `num`: pokecrystal /
+--                    pokegold constants/move_constants.asm NUM_ATTACKS, the
+--                    251 BattleCommand_Metronome's `.GetMove` compares its
+--                    byte with (`cp NUM_ATTACKS + 1` / `jr nc, .GetMove`) --
+--                    a number past it is never picked, so a row naming one
+--                    is not a row the cart could call.  The Gold referee's
+--                    Turn.NUM_ATTACKS.
+--
+-- K15's `base.gender` (pokecrystal BASE_GENDER) is a byte of the same
+-- base-stats row as the K7 `base` block, so BASE_STAT_MAX bounds it.
+M.CHART_ORDER_MAX = 512
+M.NUM_ATTACKS2 = 251
+
 -- Gold's wTimeOfDay as a Gen 2 ruleset spells it (`timeOfDay`, wave 4 of
 -- docs/plans/gen12-referee-gaps-fix.md): pokecrystal / pokegold
 -- constants/ram_constants.asm `shift_const MORN / DAY / NITE` -- MORN_F 0,
@@ -1617,6 +1638,43 @@ local function typeIdsOf(raw)
 end
 M.typeIds = typeIdsOf
 
+-- Red's type chart as the cart walks it (`chartOrder`, wave 5 of
+-- docs/plans/gen12-referee-gaps-fix.md): pokered's TypeEffects rows
+-- (data/types/type_matchups.asm) in table order, each row's attacker and
+-- defender as chart indices -- a flat { atk1, def1, atk2, def2, ... }, the
+-- shape the Red referee's `chartRowsOf` reads (BattleSim Turn.create's
+-- `opts.chartOrder`).  AdjustDamageForMoveType (engine/battle/core.asm) walks
+-- the table top to bottom, applying every row whose attacker is the move's
+-- type and whose defender is either of the target's, and leaves the LAST
+-- row's multiplier in wDamageMultipliers -- which DisplayEffectiveness and
+-- PrintMoveFailureText read -- so the order is a rule, not a layout: it is
+-- what makes a dual type's immunity "It doesn't affect" or "<USER>'s attack
+-- missed!".
+--
+-- Read as typeTable3 reads Gen 3's ordered chart, and refused WHOLE rather
+-- than trimmed: a list (isList), of an even, non-zero length no longer than
+-- CHART_ORDER_MAX, each entry a chart index 0..BATTLE_TYPE_MAX - 1 (the
+-- width `chartOf` refuses past).  A row dropped from the middle moves every
+-- later row up and changes which one is last; a cut pair pairs every later
+-- attacker with the wrong defender; and an empty list names no row, which
+-- the referee reads as no order at all -- so each is a different chart from
+-- the one uploaded, not a shorter copy of it.  A row may repeat, as the cart
+-- would apply it twice.  A JSON null inside the list never reaches here (the
+-- engine's decoder closes it up), and lib/sanitize.js closes its list the
+-- same way first (luaList), so both twins judge one list.
+local function chartOrderOf(raw)
+  if not isList(raw) then return nil end
+  local n = #raw
+  if n == 0 or n % 2 ~= 0 or n > M.CHART_ORDER_MAX then return nil end
+  local out = {}
+  for i = 1, n do
+    local index = M.int(raw[i], 0, Config.BATTLE_TYPE_MAX - 1)
+    if index == nil then return nil end
+    out[i] = index
+  end
+  return out
+end
+
 -- `generation` (optional) is the hub's; see rulesetIsGen3.  Gen 1 / Gen 2
 -- rulesets are read exactly as before.
 function M.battleRuleset(raw, generation)
@@ -1659,17 +1717,59 @@ function M.battleRuleset(raw, generation)
   -- Read in the older dialect by name, never by sniffing a row's `num`: this
   -- is a Gen 1 / Gen 2 ruleset, and a stray `num` on one of its rows is
   -- ignored exactly as it was before Gen 3 had a row of its own.
+  --
+  -- A Gold row may state its cart move number (`num`, wave 5): pokecrystal's
+  -- BattleCommand_Metronome draws a BattleRandom byte that IS a move number
+  -- (`.GetMove`: redrawn past NUM_ATTACKS, on MetronomeExcepts, on a move the
+  -- user knows), and the Gold referee looks the pick up by it (BattleSim2
+  -- Turn `byNumber[entry.num or i]`) -- without it, by the row's place in the
+  -- pool, which is the cart's number only while the pool skips nothing.
+  -- 1..NUM_ATTACKS2: 0 is NO_MOVE, which `.GetMove` never keeps, and a number
+  -- past NUM_ATTACKS is one it redraws.  Read on a Gen 2 hub alone, by the
+  -- hub's generation as the rows' dialect is: the Red referee picks a pool
+  -- row by its place (BattleSim Turn, `rng:byte() % #pool`) and reads no
+  -- number, so a Gen 1 reader neither copies nor refuses one.  Optional,
+  -- and refused with the ruleset when present and unreadable -- K8's posture
+  -- for a row field, and a pool row that does not read already refuses it: a
+  -- dropped number would have METRONOME call a different move than the
+  -- host's cart.  Read the way Wire.int reads it on both twins (luaInt).
+  -- The pool itself is read as a list (isList, wave 5): a non-empty object
+  -- where the list belongs is refused, as lib/sanitize.js always refused it,
+  -- where ipairs used to read it as the empty pool; and lib/sanitize.js closes a
+  -- JSON null row up first (luaList), as the engine's decoder does before
+  -- this line ever sees the list -- so the twins judge one pool.
   if raw.metronomePool ~= nil then
-    if type(raw.metronomePool) ~= "table" then return nil end
+    if not isList(raw.metronomePool) then return nil end
     local rowGeneration = M.int(generation, 1, 2) or 1
     local pool = {}
     for _, entry in ipairs(raw.metronomePool) do
       if #pool >= Config.BATTLE_METRONOME_POOL_MAX then break end
       local move = M.battleMove(entry, rowGeneration)
       if not move then return nil end
+      if rowGeneration == 2 and entry.num ~= nil then
+        move.num = M.int(entry.num, 1, M.NUM_ATTACKS2)
+        if move.num == nil then return nil end
+      end
       pool[#pool + 1] = move
     end
     out.metronomePool = pool
+  end
+  -- Red's TypeEffects order (chartOrderOf), which decides a dual type's
+  -- effectiveness line and its "doesn't affect" / "missed" (the last row
+  -- AdjustDamageForMoveType applied).  Read on a Gen 1 hub alone, by the
+  -- hub's generation as `mimic` is: Gold's walk (pokegold / pokecrystal
+  -- effect_commands.asm BattleCommand_Stab) sets wAttackMissed on any
+  -- immunity row and its `.end` writes BattleCheckTypeMatchup's product over
+  -- wTypeModifier, so no row is "the last" there, and Gen 3 uploads its
+  -- ordered chart as `typeTable` -- a Gen 2 / Gen 3 reader (or a caller
+  -- naming no generation) neither copies nor refuses one.  Present and
+  -- unreadable refuses the ruleset, as `specialTypes` and Gen 3's
+  -- `typeTable` do: an order half-read is a different chart, and a dropped
+  -- one would have the referee read the product where the host's cart reads
+  -- the last row.  Absent stays absent -- the referee's product reading.
+  if M.int(generation, 1, 1) and raw.chartOrder ~= nil then
+    out.chartOrder = chartOrderOf(raw.chartOrder)
+    if out.chartOrder == nil then return nil end
   end
   -- Gold's wTimeOfDay (wave 4 of docs/plans/gen12-referee-gaps-fix.md), which
   -- MORNING SUN / SYNTHESIS / MOONLIGHT compare (BattleCommand_HealMorn /
@@ -2323,6 +2423,27 @@ function M.battleMon(raw)
   if raw.base ~= nil then
     out.base = block3(raw.base, keys.base, 0, M.BASE_STAT_MAX)
     if not out.base then return nil end
+    -- Contract K15 (wave 5): Gold's `base` block may carry the species'
+    -- BASE_GENDER byte (`gender`) -- a byte of the same base-stats row
+    -- (pokecrystal / pokegold data/pokemon/base_stats/*.asm `db GENDER_*`),
+    -- which GetGender (engine/pokemon/mon_stats.asm) compares with the
+    -- Attack and Speed DVs: GENDER_F0 0 always male, GENDER_F100 254 always
+    -- female, GENDER_UNKNOWN 255 genderless.  ATTRACT's CheckOppositeGender
+    -- reads it (BattleSim2 Effects.gender, `mon.base.gender`), and the hub
+    -- holds no species table, so it rides the sheet as the base stats do.
+    -- Not a K7 key: a block stating the base stats and no ratio is the K7
+    -- sheet the client already sends, read as before (the referee then
+    -- places no gender, so ATTRACT fails -- `.genderless_samegender`).
+    -- Present and unreadable refuses the sheet, K7's posture for its own
+    -- fields: a dropped ratio would make a monster genderless that the cart
+    -- calls male or female.  Gen 2 only, by the dialect this sheet resolved
+    -- to: Red has no genders, so a Gen 1 reader neither copies nor refuses
+    -- one (block3 keeps only its keys).  Read the way Wire.int reads it on
+    -- both twins (lib/sanitize's luaInt).
+    if generation == 2 and raw.base.gender ~= nil then
+      out.base.gender = M.int(raw.base.gender, 0, M.BASE_STAT_MAX)
+      if out.base.gender == nil then return nil end
+    end
   end
   if raw.dvs ~= nil then
     out.dvs = block3(raw.dvs, keys.dvs, 0, M.DV_MAX)
@@ -2587,7 +2708,8 @@ M.BATTLE_ACTIONS = {
 -- `generation` (optional) is the hub's.  Only 3 reads Gen 3's two extra fields
 -- below; a Gen 1 / Gen 2 hub -- and a caller that names none -- reads a choice
 -- exactly as it did before Gen 3 existed, ignoring them whatever they hold.
--- Likewise only 1 reads Gen 1's `mimic` (wave 4), ignored everywhere else.
+-- Likewise only 1 reads Gen 1's `mimic` (wave 4), ignored everywhere else,
+-- and since wave 5 a Gen 2 hub reads `pass` too (Gold's BATON PASS).
 function M.battleChoice(raw, generation)
   if type(raw) ~= "table" then return nil end
   local needs = M.BATTLE_ACTIONS[raw.action]
@@ -2618,14 +2740,24 @@ function M.battleChoice(raw, generation)
   -- cannot open the party menu mid-move -- and `dexCaught` is the thrower's
   -- word that its dex already has the wild species caught (Repeat Ball).  A
   -- Gen 3 item rides in `item` as its numeric pret id spelled as a string
-  -- ("13"), which M.id already takes.  Neither field exists in Gen 1 / Gen 2,
-  -- so neither is read there: a stray `pass` on a Gen 1 choice is ignored,
-  -- as it always was, rather than refusing the turn.
+  -- ("13"), which M.id already takes.  Neither field exists in Gen 1, so
+  -- neither is read there: a stray `pass` on a Gen 1 choice is ignored, as
+  -- it always was, rather than refusing the turn.
+  --
+  -- Gold has BATON PASS too (wave 5 of docs/plans/gen12-referee-gaps-fix.md):
+  -- pokecrystal / pokegold BattleCommand_BatonPass opens the party menu
+  -- mid-move (`ForcePickSwitchMonInBattle`), so its successor is asked up
+  -- front exactly as Gen 3's is -- the same zero-based party index, the same
+  -- bounds, refused when out of range -- and the Gold referee reads it where
+  -- the cart asks the player (BattleSim2 Turn `_batonPass`, after
+  -- `_normaliseChoice` maps it to its party place).  `dexCaught` stays Gen
+  -- 3's: Gold has no Repeat Ball.  Red has no BATON PASS, so a Gen 1 hub --
+  -- and a caller naming no generation -- still ignores a `pass`.
+  if M.int(generation, 2, 3) and raw.pass ~= nil then
+    out.pass = M.int(raw.pass, 0, M.SLOT_MAX)
+    if out.pass == nil then return nil end
+  end
   if M.int(generation, 3, 3) then
-    if raw.pass ~= nil then
-      out.pass = M.int(raw.pass, 0, M.SLOT_MAX)
-      if out.pass == nil then return nil end
-    end
     if raw.dexCaught ~= nil then
       if type(raw.dexCaught) ~= "boolean" then return nil end
       out.dexCaught = raw.dexCaught

@@ -4585,4 +4585,367 @@ do
   eq(gsf.phase, "move", "asleep (Gold): the move list opens")
 end
 
+-- ==================================================================
+-- wave 5 of docs/plans/gen12-referee-gaps-fix.md (C3): the client rows
+-- ==================================================================
+-- Every species, move and number below is invented for this file.
+
+-- ------- Red's TypeEffects order on the ruleset (`chartOrder`)
+do
+  local CH = setmetatable({
+    type_chart = {
+      types = { GRND = { name = "GRND" }, ROCK = { name = "ROCK" }, BIRD = { name = "BIRD" } },
+      matchups = {
+        { attacker = "GRND", defender = "ROCK", multiplier = 20 },
+        { attacker = "GRND", defender = "BIRD", multiplier = 0 },
+        -- no multiplier: writes no cell, so it is no row either
+        { attacker = "ROCK", defender = "BIRD" },
+        { attacker = "BIRD", defender = "GRND", multiplier = 5 },
+      },
+    },
+  }, { __index = DATA })
+  -- Sorted axis: BIRD 0, GRND 1, ROCK 2.
+  local red = Mediated.snapshotRuleset(gameWith({}, CH))
+  eq(table.concat(red.chartOrder or {}, ","), "1,2,1,0,0,1",
+     "chartOrder (Red): TypeEffects' rows in table order, as chart-index pairs")
+  eq(red.chart[2][1], 0, "chartOrder (Red): ...each row's multiplier still its chart cell")
+  local packed = Wire.battleRuleset(red, 1)
+  eq(table.concat(packed and packed.chartOrder or {}, ","), "1,2,1,0,0,1",
+     "chartOrder (Red): a Red hub keeps it")
+  eq(Mediated.snapshotRuleset(goldWith(CH)).chartOrder, nil,
+     "chartOrder: Gold uploads none (its walk leaves the product, not the last row)")
+  local empty = setmetatable({ type_chart = { types = { BIRD = {} }, matchups = {} } }, { __index = DATA })
+  eq(Mediated.snapshotRuleset(gameWith({}, empty)).chartOrder, nil,
+     "chartOrder (Red): a chart with no rows states none (the referee's product reading)")
+end
+
+-- ------- K15: Gold's BASE_GENDER byte in the `base` block
+do
+  local function species(ratio)
+    return { name = "GENDERMON", types = { "FIRE" }, genderRatio = ratio,
+             baseStats = { hp = 39, attack = 52, defense = 43, speed = 65,
+                           specialAttack = 60, specialDefense = 50 } }
+  end
+  local GD = setmetatable({
+    pokemon = { CHARMANDER = species(31), SQUIRTLE = species(255),
+                PIDGEY = species(nil) },
+    items = GOLD_ITEMS,
+  }, { __index = DATA })
+  local game = goldGame({ goldMon("CHARMANDER", nil, 4321) }, GD)
+  local own = Mediated.snapshotParty(game)[1]
+  eq(own and own.base and own.base.gender, 31,
+     "K15: our own Gold sheet states the species' gender ratio in `base`")
+  local foes = Mediated.snapshotMons(game, { goldMon("SQUIRTLE"), goldMon("PIDGEY") })
+  eq(foes[1] and foes[1].base and foes[1].base.gender, 255,
+     "K15: ...so does a foe this client describes (GENDER_UNKNOWN 255)")
+  check(foes[2] and foes[2].base ~= nil and foes[2].base.gender == nil,
+        "K15: a species with no ratio keeps its base block and states no gender")
+  local wired = Wire.battleMon(own, 2)
+  eq(wired and wired.base and wired.base.gender, 31, "K15: ...which a Gold hub keeps")
+  local redSheet = Mediated.snapshotParty(gameWith({ mon("CHARMANDER") },
+    setmetatable({ pokemon = { CHARMANDER = species(31) } }, { __index = K_RED })))[1]
+  eq(redSheet and redSheet.base and redSheet.base.gender, nil, "K15: Red has no genders")
+end
+
+-- ------- Gold's Metronome pool rows state their cart number (`num`)
+do
+  local PD = setmetatable({
+    moves = {
+      POUND = { name = "POUND", power = 40, accuracy = 100, type = "NORMAL", pp = 35, index = 1 },
+      KARATE_CHOP = { name = "KARATE CHOP", power = 50, accuracy = 100, type = "NORMAL",
+                      pp = 25, index = 2 },
+      MODMOVE = { name = "MODMOVE", power = 60, accuracy = 100, type = "NORMAL", pp = 10,
+                  index = 300 },
+      NOINDEX = { name = "NOINDEX", power = 30, accuracy = 100, type = "NORMAL", pp = 10 },
+    },
+  }, { __index = DATA })
+  local rules = Mediated.snapshotRuleset(goldWith(PD))
+  local byId = {}
+  for _, row in ipairs(rules.metronomePool or {}) do byId[row.id] = row end
+  eq(byId.POUND and byId.POUND.num, 1, "pool num (Gold): POUND's row is move 1 (the record's `index`)")
+  eq(byId.KARATE_CHOP and byId.KARATE_CHOP.num, 2, "pool num (Gold): ...KARATE CHOP move 2")
+  check(byId.MODMOVE ~= nil and byId.MODMOVE.num == nil,
+        "pool num (Gold): a number past NUM_ATTACKS is not stated (the wire would refuse it)")
+  check(byId.NOINDEX ~= nil and byId.NOINDEX.num == nil, "pool num (Gold): no index states none")
+  local packed = Wire.battleRuleset(rules, 2)
+  local kept = {}
+  for _, row in ipairs(packed and packed.metronomePool or {}) do kept[row.id] = row.num end
+  eq(kept.POUND, 1, "pool num (Gold): a Gold hub keeps it")
+  local red = Mediated.snapshotRuleset(gameWith({}, PD))
+  local anyNum = false
+  for _, row in ipairs(red.metronomePool or {}) do if row.num ~= nil then anyNum = true end end
+  eq(anyNum, false, "pool num: Red's pool states none (its pick is the row's place)")
+end
+
+-- ------- Gold's BATON PASS asks its successor (1v1 / wild / solo screen)
+local BP_DATA = setmetatable({
+  moves = {
+    TACKLE = { name = "TACKLE", power = 35, accuracy = 95, type = "NORMAL", pp = 30 },
+    BATON_PASS = { name = "BATON PASS", power = 0, accuracy = 100, type = "NORMAL", pp = 40,
+                   effect = "EFFECT_BATON_PASS" },
+    BIDE = { name = "BIDE", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+             effect = "BIDE_EFFECT" },
+  },
+  items = GOLD_ITEMS,
+  pokemon = { CHARMANDER = DATA.pokemon.CHARMANDER, SQUIRTLE = DATA.pokemon.SQUIRTLE },
+}, { __index = DATA })
+local function passer(species, hp)
+  local m = goldMon(species, nil, 4321)
+  m.hp = hp or 30
+  m.moves = { { id = "TACKLE", pp = 30, maxPp = 30 }, { id = "BATON_PASS", pp = 40, maxPp = 40 } }
+  return m
+end
+do
+  local input = fakeInput()
+  local game = goldGame({ passer("CHARMANDER"), passer("SQUIRTLE", 0), passer("SQUIRTLE") }, BP_DATA)
+  local fight, ev, transport = screenFor(game, "1v1", "bp")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  eq(fight:pickMove(2), false, "BATON PASS (Gold): choosing it sends nothing yet")
+  eq(fight.phase, "switch", "BATON PASS (Gold): ...the party picker opens (ForcePickSwitchMonInBattle)")
+  eq(#choicesOf(transport), 0, "BATON PASS (Gold): ...and nothing is on the wire")
+  input.press("b")
+  fight:updateSwitch(input)
+  eq(fight.phase, "move", "BATON PASS (Gold): B goes back to the move list")
+  eq(fight.passMove, nil, "BATON PASS (Gold): ...and drops the pick")
+  fight:pickMove(2)
+  input.press("a")
+  fight:updateSwitch(input)
+  local sent = choicesOf(transport)
+  eq(#sent, 1, "BATON PASS (Gold): A on a successor sends the move")
+  eq(sent[1] and sent[1].move, 1, "BATON PASS (Gold): ...BATON PASS's slot")
+  eq(sent[1] and sent[1].pass, 2,
+     "BATON PASS (Gold): ...naming the living bench member's party position (the fainted one is not offered)")
+  local wired = Wire.battleChoice(sent[1], 2)
+  eq(wired and wired.pass, 2, "BATON PASS (Gold): a Gold hub reads `pass`")
+  -- Nobody else able to fight: no menu (FailedBatonPass), the move goes as it is.
+  local lone = goldGame({ passer("CHARMANDER"), passer("SQUIRTLE", 0) }, BP_DATA)
+  local lf, lev, lt = screenFor(lone, "wild", "bp2")
+  lev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  check(lf:pickMove(2), "BATON PASS (Gold): with no one to pass to it is sent at once")
+  eq(choicesOf(lt)[1] and choicesOf(lt)[1].pass, nil, "BATON PASS (Gold): ...naming nobody")
+  -- A switch names the party position the referee matches (`wireSlotOf`):
+  -- the sheet's own stamp, not its place in the upload.
+  fight.mine[3].slot = 4
+  eq(fight:wireSlotOf(3), 4, "wireSlotOf: the sheet's party stamp")
+  fight.mine[3].slot = nil
+  eq(fight:wireSlotOf(3), 2, "wireSlotOf: ...else its place in the upload")
+  -- Red has no BATON PASS to ask about.
+  local rf = screenFor(gameWith({ mon("CHARMANDER"), mon("SQUIRTLE") }, K_RED), "wild", "bp3")
+  eq(rf:asksPass({ id = "BATON_PASS", effect = 134 }), false, "BATON PASS: Red never asks")
+end
+
+-- ------- HEAL BELL written home (Gold), and not in a fight between players
+do
+  local lead = goldMon("CHARMANDER", nil, 4321)
+  local bench = goldMon("SQUIRTLE", nil, 4321)
+  bench.status = "SLP"
+  local game = goldGame({ lead, bench })
+  local fight, ev = screenFor(game, "wild", "hb")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  ev({ t = "status", slot = 0, side = "a", status = "PAR" })
+  eq(lead.status, "PAR", "HEAL BELL: (the lead is paralysed)")
+  -- The benched member's cure first: the party's, never the standing seat's chip.
+  ev({ t = "status", slot = 0, side = "a", mon = 1, text = "SQUIRTLE's status was healed" })
+  eq(bench.status, nil, "HEAL BELL (Gold wild): a benched member's status is cleared in the save")
+  eq(fight.mine[2].status, nil, "HEAL BELL (Gold wild): ...and on its sheet")
+  eq(fight.slots[0].status, "PAR", "HEAL BELL (Gold wild): ...the standing monster's chip is not touched by it")
+  ev({ t = "status", slot = 0, side = "a", mon = 0, text = "CHARMANDER's status was healed" })
+  eq(lead.status, nil, "HEAL BELL (Gold wild): the standing monster's cure is written home")
+  eq(fight.slots[0].status, nil, "HEAL BELL (Gold wild): ...and clears its chip")
+  -- A party member this client never uploaded is nobody's.
+  ev({ t = "status", slot = 0, side = "a", mon = 5, status = "PSN" })
+  eq(lead.status, nil, "HEAL BELL: a `mon` past the upload writes nothing")
+  -- A fight between players: the sheets follow, the save does not.
+  local pl, pb = goldMon("CHARMANDER", nil, 4321), goldMon("SQUIRTLE", nil, 4321)
+  pl.status, pb.status = "BRN", "SLP"
+  local pgame = goldGame({ pl, pb })
+  local pf, pev = screenFor(pgame, "1v1", "hb2")
+  pev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  pev({ t = "status", slot = 0, side = "a", mon = 1, text = "SQUIRTLE's status was healed" })
+  pev({ t = "status", slot = 0, side = "a", mon = 0, text = "CHARMANDER's status was healed" })
+  eq(pb.status, "SLP", "HEAL BELL (Gold 1v1): the save's benched member keeps its status")
+  eq(pl.status, "BRN", "HEAL BELL (Gold 1v1): ...so does the lead")
+  eq(pf.mine[2].status, nil, "HEAL BELL (Gold 1v1): ...while the fight's sheets are cured")
+end
+
+-- ------- a fight between players writes nothing home (Red and Gold)
+do
+  for _, gen in ipairs({ 1, 2 }) do
+    local m = (gen == 2) and goldMon("CHARMANDER", nil, 4321) or mon("CHARMANDER")
+    local game = (gen == 2) and goldGame({ m }) or gameWith({ m }, K_RED)
+    local fight, ev = screenFor(game, "1v1", "pv" .. gen)
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    ev({ t = "status", slot = 0, side = "a", status = "PAR" })
+    eq(m.status, nil, "PvP (gen " .. gen .. "): a paralysis does not reach the save")
+    eq(fight.mine[1].status, "PAR", "PvP (gen " .. gen .. "): ...the fight's own sheet holds it")
+    eq(fight.slots[0].status, "PAR", "PvP (gen " .. gen .. "): ...and the seat shows it")
+    -- ...against the computer it does (KEEPS_HELD_MODES).
+    local w = (gen == 2) and goldMon("CHARMANDER", nil, 4321) or mon("CHARMANDER")
+    local wgame = (gen == 2) and goldGame({ w }) or gameWith({ w }, K_RED)
+    local _, wev = screenFor(wgame, "wild", "pw" .. gen)
+    wev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    wev({ t = "status", slot = 0, side = "a", status = "PAR" })
+    eq(w.status, "PAR", "wild (gen " .. gen .. "): the paralysis is the save's")
+  end
+end
+
+-- ------- TOX shows PSN on a Red / Gold seat (both carts' HUDs print PSN)
+do
+  local ClassicBattle = need("ClassicBattle")
+  local Battlefield = need("Battlefield")
+  eq(ClassicBattle.statusLabel("TOX", false), "PSN", "status glyph: a Red / Gold TOX reads PSN")
+  eq(ClassicBattle.statusLabel("TOX", true), "TOX", "status glyph: Gen 3 keeps TOX")
+  eq(ClassicBattle.statusLabel("PAR", false), "PAR", "status glyph: every other token as it was")
+  eq(ClassicBattle.statusLabel(nil, false), nil, "status glyph: none is none")
+  eq(ClassicBattle.statusGlyph({ hp = 5, status = "TOX" }), "PSN",
+     "status glyph: the classic party picker prints PSN for TOX off Gen 3")
+  eq(Battlefield.cardModel({ hp = 5, maxHp = 9, status = "TOX" }).status, "PSN",
+     "status glyph: ...and so does the arena's chip")
+end
+
+-- ------- the cart's send-out line (Red: "X sent\nout Y!"; Gold: two screens)
+do
+  local function lines(fight)
+    local out = {}
+    for _, l in ipairs(fight.lines or {}) do if type(l) == "string" then out[#out + 1] = l end end
+    return out
+  end
+  local function has(fight, text)
+    for _, l in ipairs(lines(fight)) do if l == text then return true end end
+    return false
+  end
+  local rf, rev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "so1", { peerName = "BLUE" })
+  rev({ t = "send", slot = 3, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+  check(has(rf, "BLUE sent\nout SQUIRTLE!"), "send-out (Red): pokered _TrainerSentOutText's break")
+  local gf, gev = screenFor(goldGame({ goldMon("CHARMANDER", nil, 4321) }), "1v1", "so2",
+    { peerName = "SILVER" })
+  gev({ t = "send", slot = 3, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+  check(has(gf, "SILVER\nsent out"), "send-out (Gold): BattleText_EnemySentOut's first screen")
+  check(has(gf, "sent out\nSQUIRTLE!"), "send-out (Gold): ...and the screen its `cont` scrolls to")
+  eq(table.concat(Mediated.sentOutPages("X", "Y", 3), "|"), "X sent out\nY!",
+     "send-out: Gen 3 keeps this screen's line")
+  -- A wild monster is nobody's send-out: "Wild X\nappeared!" introduces it.
+  local wf, wev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "so3",
+    { wildParty = Mediated.snapshotMons(gameWith({}, K_RED), { mon("SQUIRTLE") }) })
+  wf:onReady({ battle = "so3", mode = "wild", sides = { a = { "me" }, b = { "npc" } } })
+  wev({ t = "send", slot = 3, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+  check(has(wf, "Wild SQUIRTLE\nappeared!"), "wild (Red): the cart's opening line names the monster")
+  local said = false
+  for _, l in ipairs(lines(wf)) do if l:find("sent", 1, true) then said = true end end
+  eq(said, false, "wild (Red): ...and no trainer sends it out")
+end
+
+-- ------- an escape is the cart's "Got away safely!", once
+do
+  local function count(fight, text)
+    local n = 0
+    for _, l in ipairs(fight.lines or {}) do if l == text then n = n + 1 end end
+    return n
+  end
+  -- Nobody said it (SoloBattle's own roll): the ending does.
+  local f1, ev1 = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "ga1")
+  ev1({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  ev1({ t = "run", slot = 0, side = "a", text = "ANN" })
+  f1:onOutcome({ battle = "ga1", winners = { "npc" }, losers = { "me" }, reason = "run" })
+  eq(count(f1, "Got away safely!"), 1, "escape (wild): \"Got away safely!\" is said")
+  eq(count(f1, "Someone ran away!") + count(f1, "You lost!"), 0,
+     "escape (wild): ...and no win / loss line or second reason follows it")
+  -- The referee said it (the Red coop_wild roll): not again.
+  local f2, ev2 = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "ga2")
+  ev2({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  ev2({ t = "msg", text = "Got away safely!" })
+  ev2({ t = "run", slot = 0, side = "a", text = "ANN" })
+  f2:onOutcome({ battle = "ga2", winners = { "npc" }, losers = { "me" }, reason = "run" })
+  eq(count(f2, "Got away safely!"), 1, "escape (wild): the referee's line is not repeated")
+  -- A TELEPORT said its own.
+  local f3, ev3 = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "ga3")
+  ev3({ t = "msg", text = "CHARMANDER ran from battle!" })
+  f3:onOutcome({ battle = "ga3", winners = { "npc" }, losers = { "me" }, reason = "run" })
+  eq(count(f3, "Got away safely!"), 0, "escape (wild): a TELEPORT's own line is the whole of it")
+  -- A fight between players keeps its concession line.
+  local f4 = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "ga4")
+  f4:onOutcome({ battle = "ga4", winners = { "me" }, losers = { "npc" }, reason = "run" })
+  eq(count(f4, "Someone ran away!"), 1, "escape (1v1): the concession keeps \"Someone ran away!\"")
+  check(Mediated.escapeLine("BETA fled from battle!") and not Mediated.escapeLine("BETA fled"),
+        "escapeLine: the referees' escape lines, and nothing else")
+end
+
+-- ------- Red's Bide: FIGHT sends at once while one is going on
+do
+  local input = fakeInput()
+  local bider = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 30 }, { id = "BIDE", pp = 10 } } })
+  local game = gameWith({ bider }, setmetatable({ moves = BP_DATA.moves }, { __index = K_RED }))
+  local fight, ev, transport = screenFor(game, "wild", "rb")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  check(fight:pickMove(2), "Bide (Red): BIDE is chosen")
+  ev({ t = "msg", text = "CHARMANDER used BIDE" })
+  ev({ t = "turn", amount = 2 })
+  check(fight.bideLocked == true, "Bide (Red): the turn after \"used BIDE\" is a Bide going on")
+  fight.phase, fight.commandIndex = "choose", 1
+  input.press("a")
+  fight:updateCommand(input)
+  local sent = choicesOf(transport)
+  eq(#sent, 2, "Bide (Red): FIGHT sends at once (MainInBattleLoop's STORING_ENERGY skip)")
+  eq(sent[2] and sent[2].move, 1, "Bide (Red): ...the Bide's slot")
+  -- A store turn says nothing (SavingEnergyText is never referenced): still on.
+  ev({ t = "turn", amount = 3 })
+  check(fight.bideLocked == true, "Bide (Red): a silent store turn keeps it")
+  -- An item does not end a Red Bide.
+  fight:sendChoice({ action = "item", item = "POTION" })
+  ev({ t = "turn", amount = 4 })
+  check(fight.bideLocked == true, "Bide (Red): ...nor does an item (wPlayerBattleStatus1 untouched)")
+  ev({ t = "msg", text = "CHARMANDER unleashed energy" })
+  ev({ t = "turn", amount = 5 })
+  check(not fight.bideLocked, "Bide (Red): the release ends it")
+  -- Full paralysis clears STORING_ENERGY (`.ParalysisCheck`).
+  fight:pickMove(2)
+  ev({ t = "msg", text = "CHARMANDER used BIDE" })
+  ev({ t = "turn", amount = 6 })
+  check(fight.bideLocked == true, "Bide (Red): (a second Bide)")
+  ev({ t = "msg", text = "CHARMANDER is fully paralyzed" })
+  ev({ t = "turn", amount = 7 })
+  check(not fight.bideLocked, "Bide (Red): full paralysis ends it")
+  -- ...and the cart's confusion self-hit, named by the line before it.
+  fight:pickMove(2)
+  ev({ t = "msg", text = "CHARMANDER used BIDE" })
+  ev({ t = "turn", amount = 8 })
+  ev({ t = "msg", text = "CHARMANDER is confused!" })
+  ev({ t = "msg", text = "It hurt itself in its confusion!" })
+  ev({ t = "turn", amount = 9 })
+  check(not fight.bideLocked, "Bide (Red): a confusion self-hit ends it")
+  -- Another monster's lines are not ours.
+  eq(Mediated.bideLine1("SQUIRTLE unleashed energy", "CHARMANDER"), nil,
+     "bideLine1: a line about another monster is nothing")
+  -- A trap's later turns are the referee's to know: the move list stays.
+  ev({ t = "msg", text = "CHARMANDER's attack continues!" })
+  ev({ t = "turn", amount = 10 })
+  eq(fight:lockedFightSlot(), nil, "trap (Red): no lock is guessed from a continuation")
+end
+
+-- ------- Gold's wTimeOfDay reaches the evolution check (src/EvolveFx.lua)
+do
+  local EvolveFx = need("EvolveFx")
+  local saved = stubMod.world
+  local ow = { timeOfDayId = function() return 2 end }
+  stubMod.world = { overworld = function() return ow end }
+  local gold = goldGame({})
+  eq(EvolveFx.timeOfDay2(gold), "NITE", "EvolveFx: the overworld's wTimeOfDay (NITE_F)")
+  eq(Mediated.timeOfDay2(gold), "nite", "...the same reading the ruleset states, in the referee's case")
+  local seen, planned
+  local savedEvo = package.loaded["src.core.gen2.Evolution"]
+  package.loaded["src.core.gen2.Evolution"] = {
+    checkMon = function(_, _, ctx) seen = ctx and ctx.timeOfDay; return nil end,
+    plan = function(_, _, _, ctx) planned = ctx and ctx.timeOfDay; return {} end,
+  }
+  local m = goldMon("CHARMANDER", nil, 4321)
+  EvolveFx.pending(gold, m)
+  eq(seen, "NITE", "EvolveFx: a level-up's evolution check is handed the time of day")
+  gold.save.party = { m }
+  EvolveFx.offerEvolutions(gold, { [m] = true }, "win", nil, { ui = { push = function() end } })
+  eq(planned, "NITE", "EvolveFx: ...and so is the after-battle plan")
+  package.loaded["src.core.gen2.Evolution"] = savedEvo
+  eq(EvolveFx.timeOfDay2(gameWith({}, DATA)), nil, "EvolveFx: Red has no clock")
+  stubMod.world = saved
+end
+
 T.finish("mediated_battle_client")

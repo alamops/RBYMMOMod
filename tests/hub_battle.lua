@@ -1464,7 +1464,13 @@ end
 -- Gen 2 row is ignored as it always was -- rather than sending the row to the
 -- Gen 3 reader, which refuses it for want of target / priority / flags -- and a
 -- stray `pass` on an older choice is ignored rather than refusing the turn.
--- server/hub_battle.test.js pins the same on the Node twin.
+-- Two of those reads are no longer stray on Gold since wave 5 of
+-- docs/plans/gen12-referee-gaps-fix.md: a Gen 2 Metronome pool row's `num` is
+-- the cart's move number BattleCommand_Metronome's byte names (kept when
+-- 1..NUM_ATTACKS2), and a Gen 2 choice's `pass` is Gold's BATON PASS
+-- successor (read as Gen 3's, so an unreadable one refuses the choice).  A
+-- sheet's own move rows still leave `num` behind on both, and Red still
+-- ignores both.  server/hub_battle.test.js pins the same on the Node twin.
 do
   local stray = move()
   stray.num = 7
@@ -1482,21 +1488,29 @@ do
   eq(goldClean and goldClean.moves[1].num, nil, "in the older dialect")
   ok(Wire.battleParty({ battle = "b1", mons = { sheet } }, 1) ~= nil,
      "and a Gen 1 hub takes the party it sits in")
-  for _, gen in ipairs({ 1, 2 }) do
-    local rules = Wire.battleRuleset({ chart = CHART, metronomePool = { stray } }, gen)
-    ok(rules ~= nil, "a Gen " .. gen .. " metronome pool row with a stray num reads")
-    eq(rules and rules.metronomePool[1].num, nil, "as the older row on Gen " .. gen)
-  end
-  ok(Wire.battleRuleset({ chart = CHART, metronomePool = { stray } }) ~= nil,
-     "and on a ruleset that names no hub generation")
+  local rules1 = Wire.battleRuleset({ chart = CHART, metronomePool = { stray } }, 1)
+  ok(rules1 ~= nil, "a Gen 1 metronome pool row with a stray num reads")
+  eq(rules1 and rules1.metronomePool[1].num, nil, "as the older row on Gen 1")
+  local rules2 = Wire.battleRuleset({ chart = CHART, metronomePool = { stray } }, 2)
+  ok(rules2 ~= nil, "a Gen 2 metronome pool row with a num reads")
+  eq(rules2 and rules2.metronomePool[1].num, 7,
+     "wave 5: ...and keeps it on Gen 2 (the cart's move number METRONOME's byte names)")
+  local rulesNone = Wire.battleRuleset({ chart = CHART, metronomePool = { stray } })
+  ok(rulesNone ~= nil, "and on a ruleset that names no hub generation")
+  eq(rulesNone and rulesNone.metronomePool[1].num, nil, "...which reads it as the older row")
 
   local asked = { battle = "b1", action = "fight", move = 0, pass = "far", dexCaught = 1 }
-  for _, gen in ipairs({ 1, 2, "none" }) do
+  for _, gen in ipairs({ 1, "none" }) do
     local c = Wire.battleChoice(asked, gen ~= "none" and gen or nil)
     ok(c ~= nil, "a choice with Gen 3 fields in it is still a choice (" .. gen .. ")")
     eq(c and c.pass, nil, "whose stray pass is not read (" .. gen .. ")")
     eq(c and c.dexCaught, nil, "nor its dex word (" .. gen .. ")")
   end
+  eq(Wire.battleChoice(asked, 2), nil,
+     "wave 5: a Gen 2 hub reads Gold's BATON PASS `pass`, so an unreadable one refuses the choice")
+  local passed = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, pass = 2, dexCaught = 1 }, 2)
+  eq(passed and passed.pass, 2, "wave 5: ...a readable one is kept on Gen 2")
+  eq(passed and passed.dexCaught, nil, "wave 5: ...while the dex word stays Gen 3's")
   eq(Wire.battleChoice(asked, 3), nil, "while a Gen 3 hub refuses the same fields unread")
 
   -- On the hub: a Gen 1 fight files a turn whose choice carries a stray pass.
@@ -3179,6 +3193,238 @@ do
   eq((Wire.battleMon(gold) or {}).happiness, 255, "happiness: a Gold sheet carries it")
   gold.happiness = 256
   eq(Wire.battleMon(gold), nil, "happiness: past one byte refuses the Gold sheet")
+end
+
+-- ------------------------------------------------------------------
+-- Wave 5 of docs/plans/gen12-referee-gaps-fix.md: the four new wire fields
+-- reach their referees through the hub and change the fight the cart's way.
+-- Red's `chartOrder` (pokered TypeEffects order: the last row
+-- AdjustDamageForMoveType applied is what PrintMoveFailureText reads), Gold's
+-- BATON PASS `pass` (BattleCommand_BatonPass's party menu, asked up front),
+-- Gold's K15 `base.gender` (GetGender's BASE_GENDER, for ATTRACT) and a Gold
+-- pool row's `num` (BattleCommand_Metronome's byte is a move number).
+-- server/hub_battle.test.js pins the same on the Node twin.
+-- ------------------------------------------------------------------
+
+local function msgTexts(peer)
+  local out = {}
+  for _ = 1, 64 do
+    local msg = take(peer, Wire.BATTLE_EVENT)
+    if not msg then break end
+    if msg.t == "msg" then out[#out + 1] = msg.text end
+  end
+  return out
+end
+
+-- A line containing `part` (the wording of a line is the referee's; which line
+-- it is, is what these checks are about).
+local function hasPart(list, part)
+  for _, v in ipairs(list or {}) do
+    if v:find(part, 1, true) then return true end
+  end
+  return false
+end
+
+-- A one-seat wild fight on a fresh hub: the ruleset, ANN's party and the
+-- foe's, then ANN's FIGHT (`choice` merged in).  What the client was told,
+-- and the record.
+local function wave5Fight(generation, rules, aMons, bMons, choice)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  hub.forceBattleSeed = 1
+  local ann, annPeer = (generation == 2 and join2 or join)(hub, "ANN")
+  local id = "w5"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  local ruleset = { type = Wire.BATTLE_RULESET, battle = id }
+  for k, v in pairs(rules) do ruleset[k] = v end
+  hub:receive(ann, ruleset)
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = aMons })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = bMons })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false, record = record } end
+  annPeer.outbox = {}
+  local fight = { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 }
+  for k, v in pairs(choice or {}) do fight[k] = v end
+  hub:receive(ann, fight)
+  return { opened = true, record = record, fighter = record.sim.byId[ann.id], texts = msgTexts(annPeer) }
+end
+
+local function sheetOf(generation, species, moves, extra)
+  local out = generation == 2 and sheet2({ species = species }) or mon({ species = species })
+  out.moves = moves
+  for k, v in pairs(extra or {}) do out[k] = v end
+  return out
+end
+
+-- Red's chartOrder: a type-0 move into a type-0 / type-1 foe, where 0 -> 0 is
+-- NO_EFFECT and 0 -> 1 SUPER_EFFECTIVE.
+local function orderFight(generation, order)
+  return wave5Fight(generation, { chart = { { 0, 200 }, { 100, 100 } }, chartOrder = order },
+    { sheetOf(generation, "TAPPER", { row("TAP", { pp = 10, power = 40 }) }) },
+    { sheetOf(generation, "DUO", { row("HUSH", { pp = 10, power = 0 }) }, { types = { 0, 1 } }) })
+end
+
+do
+  local immuneLast = orderFight(1, { 0, 1, 0, 0 })
+  ok(immuneLast.opened, "wave 5 chartOrder: a Red fight opens on an ordered ruleset")
+  local rows = immuneLast.opened and immuneLast.record.sim.chartRows
+  eq(rows and #rows, 2, "wave 5 chartOrder: ...the referee holds its two rows")
+  ok(hasPart(immuneLast.texts, "affect DUO"),
+     "wave 5 chartOrder: the immunity row last -- \"It doesn't affect\" (PrintMoveFailureText)")
+  local superLast = orderFight(1, { 0, 0, 0, 1 })
+  ok(hasPart(superLast.texts, "missed"),
+     "wave 5 chartOrder: the super-effective row last -- \"<USER>'s attack missed!\", the same immunity")
+  ok(not hasPart(superLast.texts, "affect DUO"), "wave 5 chartOrder: ...and not \"doesn't affect\"")
+  local unordered = orderFight(1, nil)
+  ok(hasPart(unordered.texts, "affect DUO"), "wave 5 chartOrder: no order is the product, an immunity")
+  eq(unordered.opened and unordered.record.sim.chartRows, nil, "wave 5 chartOrder: ...with no rows held")
+  local broken = orderFight(1, { 0, 0, 0 })
+  eq(broken.opened, false, "wave 5 chartOrder: an odd-length order refuses the ruleset, so nothing opens")
+  eq(broken.record and broken.record.ruleset, nil, "wave 5 chartOrder: ...and no ruleset is kept")
+  local gold = orderFight(2, { 0, 0, 0, 1 })
+  ok(gold.opened, "wave 5 chartOrder: a Gold hub takes the same ruleset")
+  eq(gold.opened and gold.record.ruleset.chartOrder, nil, "wave 5 chartOrder: ...without the order (Red's alone)")
+end
+
+-- Gold's BATON PASS successor off the wire: party index 2 is the second
+-- bench; none, the referee's pick (the first living); a pass naming nobody is
+-- refused by the referee and one past SLOT_MAX by the wire -- no turn either way.
+local function passFight(pass)
+  return wave5Fight(2, { chart = CHART2 }, {
+    sheetOf(2, "PASSER", { row("BATON_PASS", { pp = 10, power = 0, effect = 134 }) }),
+    sheetOf(2, "BENCH1", { row("TAP", { pp = 10, power = 1 }) }),
+    sheetOf(2, "BENCH2", { row("TAP", { pp = 10, power = 1 }) }) },
+    { sheetOf(2, "FOE", { row("HUSH", { pp = 10, power = 0 }) }) },
+    { pass = pass })
+end
+
+do
+  local named = passFight(2)
+  ok(named.opened, "wave 5 pass: a Gold wild fight opens")
+  eq(named.opened and named.fighter.mons[named.fighter.active].species, "BENCH2",
+     "wave 5 pass: the wire's successor comes in (BattleCommand_BatonPass's menu pick)")
+  eq(named.opened and named.record.sim.turn, 2, "wave 5 pass: ...and the turn resolved")
+  ok(hasPart(named.texts, "BATON_PASS"), "wave 5 pass: ...after BATON PASS was used")
+  local unnamed = passFight(nil)
+  eq(unnamed.opened and unnamed.fighter.mons[unnamed.fighter.active].species, "BENCH1",
+     "wave 5 pass: none named is the referee's pick")
+  for _, pass in ipairs({ 4, 6 }) do
+    local refused = passFight(pass)
+    eq(refused.opened and refused.record.sim.turn, 1, "wave 5 pass: pass " .. pass .. " files no turn")
+    eq(refused.opened and refused.fighter.mons[refused.fighter.active].species, "PASSER",
+       "wave 5 pass: ...and PASSER stays out (" .. pass .. ")")
+    eq(refused.opened and refused.fighter.choice, nil, "wave 5 pass: ...with no choice held (" .. pass .. ")")
+  end
+end
+
+-- K15: Gold's BASE_GENDER rides the base block to the referee, and ATTRACT
+-- reads it with the DVs (GetGender): male into female lands, male into male
+-- and a sheet with no ratio fail.
+local function attractFight(mine, theirs)
+  local function charm(species, gender, moves)
+    local out = sheetOf(2, species, moves)
+    out.base = { hp = 41, atk = 52, def = 63, spe = 74, spa = 85, spd = 96, gender = gender }
+    out.dvs = { atk = 12, def = 7, spe = 15, spc = 3 }
+    return out
+  end
+  return wave5Fight(2, { chart = CHART2 },
+    { charm("CHARMER", mine, { row("ATTRACT", { pp = 15, power = 0, effect = 133 }) }) },
+    { charm("FOE", theirs, { row("HUSH", { pp = 10, power = 0 }) }) })
+end
+
+do
+  local lands = attractFight(0, 254)
+  ok(lands.opened, "wave 5 gender: a Gold fight with a ratio on both sheets opens")
+  eq(lands.opened and lands.fighter.mons[1].base.gender, 0, "wave 5 gender: ...the ratio reaches the referee")
+  ok(hasPart(lands.texts, "fell in love"), "wave 5 gender: ATTRACT lands, male into female")
+  ok(hasPart(attractFight(0, 0).texts, "failed"), "wave 5 gender: ...fails male into male")
+  local none = attractFight(nil, nil)
+  eq(none.opened and none.fighter.mons[1].base.gender, nil, "wave 5 gender: a sheet with no ratio has none")
+  ok(hasPart(none.texts, "failed"), "wave 5 gender: ...and ATTRACT fails (genderless)")
+  eq(attractFight(300, 254).opened, false, "wave 5 gender: a ratio past a byte refuses the party, so nothing opens")
+end
+
+-- A Gold pool row's cart number reaches the referee, and METRONOME's byte
+-- names a move by it -- the same two rows call another move once numbered.
+-- A Red hub keeps no number.
+local function metronomeFight(generation, numbered)
+  local function poolRow(moveId, num)
+    return row(moveId, { pp = 10, power = 0, num = numbered and num or nil })
+  end
+  return wave5Fight(generation, { chart = generation == 2 and CHART2 or CHART,
+                                   metronomePool = { poolRow("CALLED_A", 200), poolRow("CALLED_B", 7) } },
+    { sheetOf(generation, "WAGGLER", { row("METRONOME", { pp = 10, power = 0, effect = 83 }) }) },
+    { sheetOf(generation, "FOE", { row("HUSH", { pp = 10, power = 0 }) }) })
+end
+
+do
+  local numbered = metronomeFight(2, true)
+  ok(numbered.opened, "wave 5 num: a Gold fight opens on a numbered pool")
+  eq(numbered.opened and numbered.record.sim.metronomePool[1].num, 200, "wave 5 num: ...the number reaches the referee")
+  local placed = metronomeFight(2, false)
+  eq(placed.opened and placed.record.sim.metronomePool[1].num, nil, "wave 5 num: an unnumbered pool has none")
+  local called = function(run)
+    for _, text in ipairs(run.texts or {}) do
+      local moveId = text:match("^WAGGLER used (CALLED_%u)")
+      if moveId then return moveId end
+    end
+    return nil
+  end
+  ok(called(numbered) ~= nil and called(placed) ~= nil, "wave 5 num: METRONOME calls a pool move both ways")
+  ok(called(numbered) ~= called(placed), "wave 5 num: ...a different one once the rows state their numbers")
+  local red = metronomeFight(1, true)
+  ok(red.opened, "wave 5 num: a Red hub takes a numbered pool")
+  eq(red.opened and red.record.ruleset.metronomePool[1].num, nil, "wave 5 num: ...without the numbers")
+end
+
+-- The line budget with the new fields at every cap: a Red ruleset with a
+-- 20-type chart of 3-digit cells, a full CHART_ORDER_MAX order, 20 ids at 40
+-- characters and a full pool of 40-character ids, MOVE_NAME_MAX names and
+-- every number at its widest; a Gold one the same, every pool row with
+-- `priority` and `num`, and a time of day.  Both stay inside the 64 KiB line
+-- both hubs close a connection past (HostServer.MAX_LINE, server.js
+-- MAX_LINE), as the client's encoder writes them, and read back whole.
+local function wave5Worst(generation)
+  local chart, ids, order, pool = {}, {}, {}, {}
+  for a = 1, Config.BATTLE_TYPE_MAX do
+    chart[a] = {}
+    for d = 1, Config.BATTLE_TYPE_MAX do chart[a][d] = Wire.CHART_MAX end
+    ids[a] = string.rep("T", 38) .. string.format("%02d", a)
+  end
+  for i = 1, Wire.CHART_ORDER_MAX do order[i] = 10 + i % 10 end
+  for i = 1, Config.BATTLE_METRONOME_POOL_MAX do
+    local entry = { id = string.rep("M", 37) .. string.format("%03d", i),
+                    name = string.rep("N", Config.MOVE_NAME_MAX), pp = 99, maxPp = 99, power = 999,
+                    accuracy = 255, type = 31, effect = 255, chance = 100, ppUps = 3, highCrit = true }
+    if generation == 2 then entry.priority = 255; entry.num = 100 + i % 152 end
+    pool[i] = entry
+  end
+  local rules = { type = Wire.BATTLE_RULESET, battle = string.rep("b", 40), seed = Wire.SEED_MAX,
+                  chart = chart, typeIds = ids, specialTypes = { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 },
+                  metronomePool = pool }
+  if generation == 1 then rules.chartOrder = order else rules.timeOfDay = "nite" end
+  return rules
+end
+
+do
+  local okJson, Json = pcall(require, "src.link.Json")
+  if okJson and type(Json) == "table" and type(Json.encode) == "function" then
+    for _, generation in ipairs({ 1, 2 }) do
+      local line = Json.encode(wave5Worst(generation))
+      ok(#line < 64 * 1024, "wave 5 size: a worst-case Gen " .. generation .. " ruleset is one line inside "
+         .. "MAX_LINE (" .. #line .. " bytes)")
+      local clean = Wire.battleRuleset(Json.decode(line), generation)
+      eq(clean and #clean.metronomePool, Config.BATTLE_METRONOME_POOL_MAX,
+         "wave 5 size: ...and reads back with its whole pool (Gen " .. generation .. ")")
+      if generation == 1 then
+        eq(clean and #clean.chartOrder, Wire.CHART_ORDER_MAX, "wave 5 size: ...and its whole chartOrder")
+      else
+        eq(clean and clean.metronomePool[1].num, 101, "wave 5 size: ...each row with its number")
+      end
+    end
+  else
+    io.write("hub_battle: src.link.Json not reachable from here (run from the engine root); "
+      .. "wave 5 size checks skipped\n")
+  end
 end
 
 -- ------------------------------------------------------------------

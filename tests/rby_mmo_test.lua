@@ -25541,6 +25541,35 @@ end
           "...it landed on the monster the sheet actually describes")
   end
 
+  -- ------- a fight between players writes nothing home (wave 5 of
+  -- docs/plans/gen12-referee-gaps-fix.md): no cart pays EXP in a link battle
+  -- (pokered GainExperience returns on LINK_STATE_BATTLING; Gold and Gen 3
+  -- reload the party after one), so a 1-on-1's `exp` is refused whatever a hub
+  -- sends, and a vitamin's Stat Exp stays the fight's while the bag -- this
+  -- mod's rule -- is still spent.  The same award in a wild fight is paid.
+  do
+    local function fightOver(mode, battleId, party, inventory)
+      local screen = newScreen({ party = party, mode = mode, battle = battleId, inventory = inventory })
+      send(screen, battleId, { t = "faint", slot = 3, side = "b", text = "FOE" })
+      send(screen, battleId, { t = "exp", slot = 0, side = "a", mon = 0, species = foeSpecies,
+                               level = 30, participants = 1 })
+      return screen
+    end
+    local mine = monAt(12)
+    local before = mine.exp
+    local pvp = fightOver("1v1", "b-pvp", { mine }, { PROTEIN = 1 })
+    eq(mine.exp, before, "1v1: no EXP is banked in a fight between players")
+    local ev0 = mine.statExp.attack or 0
+    pvp.pendingItem, pvp.pendingItemSlot = "PROTEIN", 1
+    pvp:confirmPendingItem("PROTEIN", 1)
+    eq(mine.statExp.attack or 0, ev0, "1v1: a vitamin's Stat Exp is not written home")
+    eq(pvp.game.save.inventory.PROTEIN, nil, "1v1: ...while the bag is still spent")
+    local wild = monAt(12)
+    local wildBefore = wild.exp
+    fightOver("wild", "b-pvw", { wild })
+    check(wild.exp > wildBefore, "wild: the same award is paid against the computer")
+  end
+
   -- ------- round 6: participation-based exp on the mediated client
   --
   -- Vanilla pays every party member that was ever in against the fallen foe

@@ -1186,3 +1186,199 @@ test('Red\'s MIMIC pick rides a Gen 1 choice only, 0..3, and refuses the choice 
   assert.ok(/choice\.mimic ~= nil/.test(read('src/BattleSim/Turn.lua')), 'BattleSim reads choice.mimic');
   assert.ok(/choice\.mimic/.test(read('server/lib/battle/Turn.js')), 'lib/battle reads choice.mimic');
 });
+
+// ---------------------------------------------------------------------------
+// Wave 5 of docs/plans/gen12-referee-gaps-fix.md: Red's TypeEffects order on a
+// Gen 1 ruleset (`chartOrder`), Gold's BASE_GENDER in a Gen 2 sheet's `base`
+// (K15), Gold's BATON PASS successor on a Gen 2 choice (`pass`) and a Gold
+// Metronome pool row's cart number (`num`). The hub protocol parity driver
+// (referee_gaps_wave5_dialect, wave5_hub_fields) holds the twins to one answer
+// case by case; this pins the numbers, the generation gates and the hand-off
+// to each referee.
+// ---------------------------------------------------------------------------
+
+test('wave 5 bounds: chartOrder and the Gold pool number match Wire, sanitize and both referees', () => {
+  const wire = read('src/Wire.lua');
+  assert.strictEqual(luaNumber(wire, 'CHART_ORDER_MAX', 'Wire.lua'), sanitize.CHART_ORDER_MAX,
+    'Wire.CHART_ORDER_MAX and sanitize.CHART_ORDER_MAX must match');
+  assert.strictEqual(luaNumber(wire, 'NUM_ATTACKS2', 'Wire.lua'), sanitize.NUM_ATTACKS2,
+    'Wire.NUM_ATTACKS2 and sanitize.NUM_ATTACKS2 must match');
+  // Two integers a TypeEffects row: the wire takes exactly the rows the Red
+  // referee's chartRowsOf takes, on both twins.
+  const rows1 = luaNumber(read('src/BattleSim/Turn.lua'), 'CHART_ORDER_MAX', 'BattleSim/Turn.lua');
+  assert.strictEqual(sanitize.CHART_ORDER_MAX, 2 * rows1, 'twice BattleSim Turn.CHART_ORDER_MAX');
+  assert.strictEqual(sanitize.CHART_ORDER_MAX, 2 * require('./lib/battle/Turn.js').CHART_ORDER_MAX,
+    'twice lib/battle Turn CHART_ORDER_MAX');
+  assert.ok(sanitize.CHART_ORDER_MAX >= 164, 'pokered TypeEffects (82 rows) fits');
+  // pokecrystal / pokegold NUM_ATTACKS, which `.GetMove` compares its byte with.
+  assert.strictEqual(sanitize.NUM_ATTACKS2, 251, 'Gold has 251 moves');
+  assert.strictEqual(luaNumber(read('src/BattleSim2/Turn.lua'), 'NUM_ATTACKS', 'BattleSim2/Turn.lua'),
+    sanitize.NUM_ATTACKS2, 'the Lua Gold referee redraws past the same number');
+  const js2 = read('server/lib/battle2/Turn.js').match(/const NUM_ATTACKS = (\d+);/);
+  assert.ok(js2, 'lib/battle2 Turn.js must declare NUM_ATTACKS');
+  assert.strictEqual(Number(js2[1]), sanitize.NUM_ATTACKS2, 'and so does the Node one');
+  assert.ok(sanitize.NUM_ATTACKS2 <= sanitize.METRONOME_POOL_MAX, 'every numbered Gold move fits the pool');
+});
+
+test('Red\'s chartOrder rides a Gen 1 ruleset only, refused whole when unreadable', () => {
+  const chart = [[100, 100], [100, 100]];
+  const read1 = (chartOrder) => sanitize.cleanBattleRuleset({ chart, chartOrder }, 1);
+  assert.deepStrictEqual(read1([0, 1, 1, 0]).chartOrder, [0, 1, 1, 0], 'a Red ruleset carries its order');
+  assert.deepStrictEqual(read1([0, null, 1]).chartOrder, [0, 1], 'a JSON null is closed up, as Lua decodes it');
+  assert.deepStrictEqual(read1(['3', 2]).chartOrder, [3, 2], 'a numeric string reads as Wire.int reads it');
+  assert.strictEqual(read1(null).chartOrder, undefined, 'a null is absent');
+  assert.strictEqual(read1(undefined).chartOrder, undefined, 'absent stays absent');
+  for (const bad of [[0, 1, 1], [], [null], [sanitize.BATTLE_TYPE_MAX, 0], [-1, 0], [true, 0], ['x', 0],
+    [[1], 0], { a: 1 }, '0,1', 7, new Array(sanitize.CHART_ORDER_MAX + 2).fill(0)]) {
+    assert.strictEqual(read1(bad), null, `an unreadable order (${JSON.stringify(bad).slice(0, 30)}) refuses the ruleset`);
+  }
+  assert.strictEqual(read1(new Array(sanitize.CHART_ORDER_MAX).fill(1)).chartOrder.length,
+    sanitize.CHART_ORDER_MAX, 'an order at the cap is taken whole');
+  for (const gen of [2, undefined]) {
+    for (const order of [[0, 1], 'bad']) {
+      const got = sanitize.cleanBattleRuleset({ chart, chartOrder: order }, gen);
+      assert.ok(got && got.chartOrder === undefined,
+        `a ruleset read for generation ${gen} neither keeps nor refuses ${JSON.stringify(order)}`);
+    }
+  }
+  const wire = read('src/Wire.lua');
+  assert.ok(/if M\.int\(generation, 1, 1\) and raw\.chartOrder ~= nil then/.test(wire),
+    'Wire.battleRuleset reads chartOrder on a Gen 1 hub only');
+  assert.ok(/out\.chartOrder = chartOrderOf\(raw\.chartOrder\)\s+if out\.chartOrder == nil then return nil end/
+    .test(wire), '...and refuses the ruleset on an unreadable one');
+  // Both hubs hand it to the Red referee's create, and only there.
+  assert.ok(/if self\.generation == 1 then\s+createOpts\.chartOrder = rules\.chartOrder\s+end/
+    .test(read('src/Hub.lua')), 'Hub.lua passes chartOrder into Turn.create on a Gen 1 hub');
+  assert.ok(/if \(this\.generation === 1\) \{\s+createOpts\.chartOrder = rules\.chartOrder;\s+\}/
+    .test(read('server/lib/relay.js')), 'relay.js passes chartOrder into Turn.attempt on a Gen 1 hub');
+  assert.ok(/chartRowsOf\(opts\.chartOrder\)/.test(read('src/BattleSim/Turn.lua')), 'BattleSim reads opts.chartOrder');
+  assert.ok(/chartRowsOf\(opts\.chartOrder\)/.test(read('server/lib/battle/Turn.js')),
+    'lib/battle reads opts.chartOrder');
+});
+
+test('K15: Gold\'s BASE_GENDER rides a Gen 2 sheet\'s base block, refusing the sheet when unreadable', () => {
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const B1 = {
+    hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+  };
+  const B2 = {
+    hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
+  };
+  const red = (base) => ({
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100, stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move], base,
+  });
+  const gold = (base) => ({
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+    },
+    moves: [move],
+    base,
+  });
+  for (const gender of [0, 31, 254, 255]) {
+    assert.strictEqual(cleanBattleMon(gold({ ...B2, gender })).base.gender, gender,
+      `a Gold sheet carries ratio ${gender}`);
+  }
+  assert.deepStrictEqual(cleanBattleMon(gold(B2)).base, B2, 'a base block with no ratio reads as before (K7)');
+  assert.strictEqual(cleanBattleMon(gold({ ...B2, gender: null })).base.gender, undefined, 'a null is absent');
+  for (const gender of [256, -1, true, 'male', [31]]) {
+    assert.strictEqual(cleanBattleMon(gold({ ...B2, gender })), null,
+      `an unreadable ratio (${JSON.stringify(gender)}) refuses the sheet, K7's posture`);
+  }
+  assert.strictEqual(cleanBattleMon(gold({ gender: 31 })), null, 'a ratio is no base block without the base stats');
+  for (const gender of [254, 'male']) {
+    const got = cleanBattleMon(red({ ...B1, gender }));
+    assert.ok(got && got.base.gender === undefined, `a Red sheet ignores ratio ${JSON.stringify(gender)}`);
+  }
+  assert.ok(!sanitize.K7_KEYS2.base.includes('gender'), 'the ratio is optional: not a K7 key the block needs');
+  const wire = read('src/Wire.lua');
+  assert.ok(/if generation == 2 and raw\.base\.gender ~= nil then/.test(wire),
+    'Wire.battleMon reads base.gender on a Gen 2 sheet only');
+  assert.ok(/out\.base\.gender = M\.int\(raw\.base\.gender, 0, M\.BASE_STAT_MAX\)/.test(wire),
+    '...bounded by BASE_STAT_MAX');
+  // Both Gold referees copy it with the base block, for Effects.gender.
+  assert.ok(/base = \{ keys = \{[^}]*"gender" \}/.test(read('src/BattleSim2/Turn.lua')),
+    'BattleSim2 keeps base.gender');
+  assert.ok(require('./lib/battle2/Turn.js').SHEET_BLOCKS.base.keys.includes('gender'), 'lib/battle2 keeps base.gender');
+});
+
+test('Gold\'s BATON PASS `pass` rides a Gen 2 choice as Gen 3\'s, and a Gen 1 hub ignores it', () => {
+  const fight = (pass) => ({
+    battle: 'b1', action: 'fight', move: 0, pass,
+  });
+  for (const pass of [0, 2, sanitize.SLOT_MAX]) {
+    assert.strictEqual(sanitize.cleanBattleChoice(fight(pass), 2).pass, pass, `a Gold choice carries ${pass}`);
+  }
+  assert.strictEqual(sanitize.cleanBattleChoice(fight('2'), 2).pass, 2, 'a numeric string reads as Lua reads it');
+  assert.strictEqual(sanitize.cleanBattleChoice(fight(null), 2).pass, undefined, 'a null is absent');
+  for (const pass of [sanitize.SLOT_MAX + 1, -1, true, 'two', [1]]) {
+    for (const gen of [2, 3]) {
+      assert.strictEqual(sanitize.cleanBattleChoice(fight(pass), gen), null,
+        `an unreadable pass (${JSON.stringify(pass)}) refuses the generation ${gen} choice`);
+    }
+  }
+  for (const gen of [1, undefined]) {
+    const got = sanitize.cleanBattleChoice(fight(9), gen);
+    assert.ok(got && got.pass === undefined, `a choice read for generation ${gen} ignores pass`);
+  }
+  assert.strictEqual(sanitize.cleanBattleChoice({ ...fight(2), dexCaught: true }, 2).dexCaught, undefined,
+    'the dex word stays Gen 3\'s');
+  const wire = read('src/Wire.lua');
+  assert.ok(/if M\.int\(generation, 2, 3\) and raw\.pass ~= nil then/.test(wire),
+    'Wire.battleChoice reads pass on a Gen 2 or Gen 3 hub');
+  assert.ok(/out\.pass = M\.int\(raw\.pass, 0, M\.SLOT_MAX\)/.test(wire), '...bounded by SLOT_MAX');
+  assert.ok(/choice\.pass/.test(read('src/BattleSim2/Turn.lua')), 'BattleSim2 reads choice.pass');
+  assert.ok(/choice\.pass/.test(read('server/lib/battle2/Turn.js')), 'lib/battle2 reads choice.pass');
+});
+
+test('a Gold Metronome pool row\'s `num` rides a Gen 2 ruleset only, refusing it when unreadable', () => {
+  const chart = [[100, 100], [100, 100]];
+  const row = (num) => ({
+    id: 'm', pp: 10, power: 0, accuracy: 255, type: 0, effect: 0, chance: 0, num,
+  });
+  const read2 = (num) => sanitize.cleanBattleRuleset({ chart, metronomePool: [row(num)] }, 2);
+  for (const num of [1, 7, sanitize.NUM_ATTACKS2]) {
+    assert.strictEqual(read2(num).metronomePool[0].num, num, `a Gold pool row carries ${num}`);
+  }
+  assert.strictEqual(read2('7').metronomePool[0].num, 7, 'a numeric string reads as Wire.int reads it');
+  assert.strictEqual(read2(null).metronomePool[0].num, undefined, 'a null is absent');
+  for (const num of [0, -1, sanitize.NUM_ATTACKS2 + 1, true, 'x', [7]]) {
+    assert.strictEqual(read2(num), null, `an unreadable number (${JSON.stringify(num)}) refuses the Gold ruleset`);
+  }
+  for (const gen of [1, undefined]) {
+    for (const num of [7, 999]) {
+      const got = sanitize.cleanBattleRuleset({ chart, metronomePool: [row(num)] }, gen);
+      assert.ok(got && got.metronomePool[0].num === undefined,
+        `a ruleset read for generation ${gen} neither keeps nor refuses pool num ${num}`);
+    }
+  }
+  const sheet = cleanBattleMon({
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+    },
+    moves: [row(7)],
+  });
+  assert.ok(sheet && sheet.moves[0].num === undefined, 'a Gold sheet\'s own move rows still leave num behind');
+  // The pool is one list on both twins: a JSON null row closed up (the engine's
+  // decoder does it before Wire.lua sees the list), a non-empty object refused.
+  assert.strictEqual(sanitize.cleanBattleRuleset({ chart, metronomePool: [row(3), null, row(4)] }, 2)
+    .metronomePool.length, 2, 'a null pool row is closed up, as Lua decodes it');
+  assert.strictEqual(sanitize.cleanBattleRuleset({ chart, metronomePool: { a: row(3) } }, 2), null,
+    'an object where the pool belongs is refused');
+  const wire = read('src/Wire.lua');
+  assert.ok(/if not isList\(raw\.metronomePool\) then return nil end/.test(wire),
+    'Wire.battleRuleset reads the Gen 1 / Gen 2 pool as a list');
+  assert.ok(/if rowGeneration == 2 and entry\.num ~= nil then\s+move\.num = M\.int\(entry\.num, 1, M\.NUM_ATTACKS2\)/
+    .test(wire), 'Wire.battleRuleset reads a pool row\'s num on a Gen 2 hub only, bounded by NUM_ATTACKS2');
+  assert.ok(/opts\.metronomePool\[i\]\.num/.test(read('src/BattleSim2/Turn.lua')), 'BattleSim2 reads the pool num');
+  assert.ok(/\.num/.test(read('server/lib/battle2/Turn.js')), 'lib/battle2 reads it too');
+});

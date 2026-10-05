@@ -40,6 +40,7 @@ const BERRY = 'HELD_BERRY'; // HandleHPHealingItem
 const RESTORE_PP = 'HELD_RESTORE_PP'; // HandleMysteryberry
 const HEAL_CONFUSION = 'HELD_HEAL_CONFUSION'; // UseConfusionHealingItem
 const HEAL_STATUS = 'HELD_HEAL_STATUS'; // both status routines
+const ESCAPE = 'HELD_ESCAPE'; // TryToRunAwayFromBattle (SMOKE BALL)
 
 // The HELD_PREVENT_* effects, by what each keeps off its holder (the Lua
 // twin explains: no cart item carries one, the checks key on the token).
@@ -355,6 +356,7 @@ module.exports = {
   RESTORE_PP,
   HEAL_CONFUSION,
   HEAL_STATUS,
+  ESCAPE,
   PREVENT,
   TYPE_BOOST,
   STATUS_CURE,

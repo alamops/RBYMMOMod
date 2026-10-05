@@ -250,7 +250,8 @@ test('confusion self-hits exactly half the time and shares the damage formula', 
   }
   assert.strictEqual(selfHits, status.CONFUSION_HIT_ROLL, '128/256');
 
-  const viaStatus = status.confusionTick(state, 0).selfDamage;
+  // `.IsConfused` hurts on 128..255 (R1e).
+  const viaStatus = status.confusionTick(state, 255).selfDamage;
   const viaDamage = damage.compute({
     level: 50, power: status.CONFUSION_POWER, attack: 100, defense: 100,
     stab: false, typeEffect: [100], crit: false, roll: 255,
@@ -475,11 +476,15 @@ test('JS formula edge inputs match Lua coercion', () => {
     'null paralysis roll coerces the same way');
 
   // confusionTick forwards atk/def aliases into Damage.compute.
+  // `.IsConfused` hurts on 128..255 (R1e); below it, and with no byte, not.
+  assert.strictEqual(status.confusionTick({ turnsRemaining: 3 }, 0).selfHit, false, 'roll 0 keeps its head');
+  assert.strictEqual(status.confusionTick({ turnsRemaining: 3 }, undefined).selfHit, false,
+    'no byte is no self-hit');
   const selfHit = status.confusionTick(
     { turnsRemaining: 3, level: 50, atk: 100, def: 100 },
-    0,
+    255,
   );
-  assert.strictEqual(selfHit.selfHit, true, 'roll 0 self-hits');
+  assert.strictEqual(selfHit.selfHit, true, 'roll 255 self-hits');
   assert.ok(selfHit.selfDamage > 0, 'atk/def aliases produce self-hit damage');
 });
 
@@ -572,7 +577,7 @@ test('a side-effect drop at -6 is silent; a primary at -6 is not', () => {
 
   const primary = applyPrimary(20, dummyMon(), floored());
   // CantLowerAnymore's NothingHappenedText (R1b, effects.asm :705-710).
-  assert.deepStrictEqual(primary.messages, ['Nothing happened'],
+  assert.deepStrictEqual(primary.messages, ['Nothing happened!'],
     'the primary at -6 says so');
 });
 

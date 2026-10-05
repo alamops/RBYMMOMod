@@ -435,47 +435,18 @@ M.METRONOME_EXCEPT = {
 -- .asm) doubles a MORNING SUN / SYNTHESIS / MOONLIGHT heal when it is the
 -- move's own time.  The engine's Gold battle is handed the same reading as
 -- it opens (src/world/gen2/World.lua startScriptedBattle's `timeOfDay =
--- self:timeOfDayId()`), off the overworld's clock word -- `World:timeOfDay`
--- over `World:hour`, the save's RTC base included, through the world.tod
--- hook -- so this asks the overworld the same question, in this order:
---
---   1. `World:timeOfDayId()`, the engine battle's own number (0 / 1 / 2);
---   2. the overworld's clock word (`tod`), should a build lack (1);
---   3. the clock src/EvolveFx.lua's time-of-day evolutions read
---      (`Palettes.clockDaytime`, src/world/gen2/Palettes.lua), at the
---      overworld's hour when it has one.
+-- self:timeOfDayId()`), off the overworld's clock word.  The reading itself
+-- is src/EvolveFx.lua's `timeOfDay2` -- the one place the client asks the
+-- overworld for wTimeOfDay, which EvolveAfterBattle's happiness evolutions
+-- read too -- spelled here in the referee's lower case.
 --
 -- Nothing answers (no overworld: a headless run, the title screen) -> nil,
 -- which the referee reads as the move's own time.  Read once, as the
 -- ruleset is cut: the cart's wTimeOfDay is only rewritten by the overworld's
 -- clock tick, which a battle does not run.
-local TIME_IDS2 = { [0] = "morn", [1] = "day", [2] = "nite" }
-local TIME_WORDS2 = { MORN = "morn", DAY = "day", NITE = "nite" }
 function M.timeOfDay2(game)
-  if Gen.generation(game) ~= 2 then return nil end
-  local found = nil
-  pcall(function()
-    local world = mod.world
-    local ow = type(world) == "table" and type(world.overworld) == "function"
-      and world:overworld() or nil
-    if type(ow) ~= "table" then return end
-    if type(ow.timeOfDayId) == "function" then
-      local id = tonumber(ow:timeOfDayId())
-      found = id and TIME_IDS2[floor(id)] or nil
-      if found then return end
-    end
-    if type(ow.tod) == "string" then
-      found = TIME_WORDS2[ow.tod:upper()]
-      if found then return end
-    end
-    local ok, Palettes = pcall(require, "src.world.gen2.Palettes")
-    if ok and type(Palettes) == "table" and type(Palettes.clockDaytime) == "function" then
-      local hour = type(ow.hour) == "function" and tonumber(ow:hour()) or nil
-      local word = Palettes.clockDaytime(hour)
-      found = type(word) == "string" and TIME_WORDS2[word:upper()] or nil
-    end
-  end)
-  return found
+  local word = EvolveFx.timeOfDay2(game)
+  return type(word) == "string" and word:lower() or nil
 end
 
 -- The ephemeral rules for one match: the type chart, as integer percent.
@@ -504,6 +475,25 @@ function M.snapshotRuleset(game, opts)
     chart[i] = row
   end
 
+  -- Red's TypeEffects order (`chartOrder`, wave 5 of docs/plans/
+  -- gen12-referee-gaps-fix.md): the same rows, in the table's own order, as
+  -- the flat chart-index pairs { atk1, def1, atk2, def2, ... } the Red referee
+  -- walks (BattleSim Turn `chartRowsOf` / `_typeRows`).  pokered
+  -- AdjustDamageForMoveType (engine/battle/core.asm) applies every
+  -- TypeEffects row whose attacker is the move's type and whose defender is
+  -- either of the target's, top to bottom, flooring after each, and leaves
+  -- the LAST row's multiplier in wDamageMultipliers -- which
+  -- DisplayEffectiveness and PrintMoveFailureText read -- so the order is a
+  -- rule: a dual type whose immunity row comes before another row of the
+  -- move's type is "<USER>'s attack missed!", not "It doesn't affect".  The
+  -- engine keeps the rows ROM-ordered (src/battle/TypeChart.lua `matchups`),
+  -- which is this walk's order.  A row naming a type the chart's axis does
+  -- not carry (cut past BATTLE_TYPE_MAX) is left out: no move and no monster
+  -- can name that index, so the row could never match -- and one with no
+  -- multiplier writes no cell, so the referee would apply the neutral cell
+  -- the cart never had.
+  local chartOrder = (Gen.generation(game) == 1) and {} or nil
+
   if order and type(data.type_chart.matchups) == "table" then
     for _, entry in ipairs(data.type_chart.matchups) do
       if type(entry) == "table" then
@@ -513,6 +503,10 @@ function M.snapshotRuleset(game, opts)
         if attacker and defender and mult then
           chart[attacker + 1][defender + 1] =
             min(Wire.CHART_MAX, max(0, floor(mult * 10)))
+          if chartOrder then
+            chartOrder[#chartOrder + 1] = attacker
+            chartOrder[#chartOrder + 1] = defender
+          end
         end
       end
     end
@@ -638,6 +632,23 @@ function M.snapshotRuleset(game, opts)
       if not except[idKey] then
         local sheet = moveOf(data, { id = id, pp = 5 }, order, generation)
         if sheet and sheet.effect ~= metroEffect then
+          -- Gold's cart number (wave 5): pokecrystal BattleCommand_Metronome
+          -- `.GetMove` draws a BattleRandom byte that IS a move number, and
+          -- the referee finds the pick by it (BattleSim2 Turn
+          -- `byNumber[entry.num or i]`).  The engine's Gold move record keeps
+          -- it as `index` (src/import/RomExtractorGen2.lua extractMoves: its
+          -- place in moveOrder, POUND 1).  1..NUM_ATTACKS only -- the wire
+          -- refuses the whole ruleset past it, and `.GetMove` redraws a byte
+          -- there anyway -- so a content mod's move numbered past the cart's
+          -- table states none and is found by its pool place.
+          if generation == 2 then
+            local record = data.moves[id]
+            local num = type(record) == "table" and tonumber(record.index) or nil
+            local top = tonumber(Wire.NUM_ATTACKS2) or 251
+            if num and num == floor(num) and num >= 1 and num <= top then
+              sheet.num = num
+            end
+          end
           metronomePool[#metronomePool + 1] = sheet
         end
       end
@@ -656,6 +667,23 @@ function M.snapshotRuleset(game, opts)
   local out = { chart = chart }
   if #specialTypes > 0 then out.specialTypes = specialTypes end
   if #metronomePool > 0 then out.metronomePool = metronomePool end
+  -- Red's TypeEffects order (built with the chart, above).  Whole or not at
+  -- all, on the wire's rule (Wire.battleRuleset refuses a list longer than
+  -- CHART_ORDER_MAX, and with it the ruleset): a content pack whose chart
+  -- outgrows it fights on the referee's product reading -- what every
+  -- fight read before the order was uploaded -- rather than not at all.
+  if chartOrder and #chartOrder > 0 then
+    local cap = tonumber(Wire.CHART_ORDER_MAX) or 512
+    if #chartOrder <= cap then
+      out.chartOrder = chartOrder
+    else
+      mod.log:warn("type chart has %d matchup rows, more than the %d a Red "
+        .. "ruleset can carry, so this fight reads a dual type's matchups as "
+        .. "their product (its effectiveness line and \"doesn't affect\" may "
+        .. "differ from the cart's). Trim the type_chart registry's matchups",
+        #chartOrder / 2, cap / 2)
+    end
+  end
   -- Gold's wTimeOfDay, which MORNING SUN / SYNTHESIS / MOONLIGHT compare
   -- outside a link fight (`M.timeOfDay2`).  The referee ignores it in a link
   -- fight itself (BattleCommand_TimeBasedHealContinue's `wLinkMode` check), so
@@ -1122,6 +1150,23 @@ function M.stampK7(sheet, def, mon, generation)
   sheet.base = k7Block(base, "base", generation)
   sheet.dvs = k7Block(mon.dvs, "dvs", generation)
   sheet.statExp = k7Block(mon.statExp, "statExp", generation)
+  -- Contract K15 (wave 5): Gold's BASE_GENDER byte inside the `base` block --
+  -- the next byte of the same base-stats row (pokecrystal data/pokemon/
+  -- base_stats/*.asm `db GENDER_*`), which the engine imports as the species'
+  -- `genderRatio` (src/import/RomExtractorGen2.lua: 0 GENDER_F0 male-only,
+  -- 254 GENDER_F100 female-only, 255 GENDER_UNKNOWN).  ATTRACT's
+  -- CheckOppositeGender runs GetGender over it with the Attack and Speed DVs
+  -- (BattleSim2 Effects.gender), on every monster -- this player's own and
+  -- every foe it describes -- since the hub holds no species table.  Only
+  -- with a `base` block to ride in, and only when the record states one: a
+  -- sheet with no ratio is read as genderless, and ATTRACT fails on it rather
+  -- than inventing a gender.  Red has no genders, and its dialect none.
+  if generation == 2 and sheet.base and type(def) == "table" then
+    local ratio = tonumber(def.genderRatio)
+    if ratio and ratio == ratio then
+      sheet.base.gender = clamp(floor(ratio), 0, 255)
+    end
+  end
   return sheet
 end
 
@@ -3394,7 +3439,11 @@ function M:onReady(msg)
           M.trainerLabel3(self.trainer) or tostring(self.peerName or "?")))
       end
     elseif self.mode == "wild" then
-      self:say("A wild pokemon\nappeared!")
+      -- pokered _WildMonAppearedText / pokecrystal WildPokemonAppearedText:
+      -- "Wild <MON>\nappeared!" -- and nothing more when it comes out (the
+      -- send-out below says nothing for a wild seat).
+      local wild = type(self.wildParty) == "table" and self.wildParty[1] or nil
+      self:say(("Wild %s\nappeared!"):format(tostring(wild and wild.species or "POKéMON")))
     elseif self:generation() == 2 then
       -- pokecrystal WantsToBattleText: "<ENEMY>\nwants to battle!"
       self:say(("%s\nwants to battle!"):format(self:foeTrainerName()))
@@ -3403,6 +3452,29 @@ function M:onReady(msg)
       self:say(("%s wants\nto fight!"):format(self:foeTrainerName()))
     end
   end
+end
+
+-- A trainer's send-out line, in each cart's words, as the pages it is read
+-- in (one `say` each).
+--
+--   Red    pokered _TrainerSentOutText (data/text/text_2.asm): "<TRAINER>
+--          sent" / line "out <MON>!" -- "X sent\nout Y!".
+--   Gold   pokecrystal BattleText_EnemySentOut (data/text/battle.asm):
+--          "<ENEMY>" / line "sent out" / cont "<MON>!".  `cont` waits for the
+--          button and scrolls one line (home/text.asm _ContText), so the box
+--          is read twice: "X\nsent out", then "sent out\nY!".  <ENEMY> is
+--          the trainer's class and name (PlaceEnemysName), or a link
+--          opponent's name.
+--   Gen 3  this screen's own "X sent out\nY!", as before.
+--
+-- Shared with src/CoopBattle.lua for a foe seat's send-out.
+function M.sentOutPages(who, mon, generation)
+  who, mon = tostring(who or "?"), tostring(mon or "?")
+  if generation == 1 then return { ("%s sent\nout %s!"):format(who, mon) } end
+  if generation == 2 then
+    return { ("%s\nsent out"):format(who), ("sent out\n%s!"):format(mon) }
+  end
+  return { ("%s sent out\n%s!"):format(who, mon) }
 end
 
 -- Who is on the other side, in the words the engine's own battle uses for a
@@ -3521,6 +3593,9 @@ function M:onEvent(msg)
     end
     if not (obeyed and msg.seq == obeyed + 1) then self:say(msg.text) end
     self:noteBideLine(msg.text)
+    -- The referee has narrated an escape itself (M.escapeLine): the ending
+    -- adds no second one (`finish`).
+    if M.escapeLine(msg.text) then self.escapeSaid = true end
 
   elseif kind == "anim" then
     -- Queued with the message stream so the flash lands in referee order.
@@ -3588,6 +3663,7 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() then
       self.liveMoves = nil
       self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
+      self.bideOn1 = nil
       self.mustReplace = false
       if self.replaceOnly then
         self.replaceOnly = false
@@ -3628,7 +3704,15 @@ function M:onEvent(msg)
     -- is what every rule on this screen is read from.
     if msg.text then
       if msg.slot ~= self:mySlot() then
-        self:say(("%s sent out\n%s!"):format(self:foeTrainerName(), msg.text))
+        -- A wild POKeMON is nobody's send-out: the cart's "Wild X\nappeared!"
+        -- (`onReady`) is its whole introduction, on both carts.  A trainer's --
+        -- or the other player's -- is the cart's own line (M.sentOutPages).
+        if not (self.mode == "wild" and self:generation() ~= 3) then
+          for _, page in ipairs(M.sentOutPages(self:foeTrainerName(), msg.text,
+              self:generation())) do
+            self:say(page)
+          end
+        end
         if not parked then self:refreshSlotSprite(msg.slot, false) end
       else
         self:say(("Go! %s!"):format(msg.text))
@@ -3680,6 +3764,7 @@ function M:onEvent(msg)
       -- its send-out drops it as before.
       if self:generation() ~= 3 then self.liveMoves = nil end
       self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
+      self.bideOn1 = nil
       -- Authoritative: hub/sim sets amount=1 when a living bench remains.
       -- Absent amount (older stream) falls back to local party HP.
       if msg.amount == 1 then
@@ -3766,7 +3851,15 @@ function M:onEvent(msg)
     -- trade the rest of this handler makes for a dropped event, and it is the
     -- right way round -- a missing knockout should cost one payout, not open
     -- the save file to a stream nobody can account for.
-    if msg.slot == self:mySlot() then
+    -- And never in a fight between players (LINK_MODES): no cart pays EXP in
+    -- a link battle (pokered GainExperience's `cp LINK_STATE_BATTLING / ret
+    -- z`; pokecrystal and Gen 3 reload the party after one), and neither
+    -- referee emits any there (their EXP_MODES) -- refused here as well, so
+    -- a hub that sent one could not level a party in a spar.
+    if msg.slot == self:mySlot() and LINK_MODES[self.mode] then
+      self:warnNoExp("the referee paid experience in a fight between players, "
+        .. "which no cart does; nothing was banked")
+    elseif msg.slot == self:mySlot() then
       if (self.expCredit or 0) <= 0 then
         self:warnNoExp("the referee paid experience with no knockout ahead of "
           .. "it, which is not a payout this client can account for")
@@ -3782,13 +3875,20 @@ function M:onEvent(msg)
     -- none -- wake, thaw, and every status-heal item travel that way. The
     -- sheet and the save mon stay in step so a party card and the fight after
     -- this one do not keep a condition the referee already lifted.
-    self:noteSlot(msg)
+    --
+    -- A `status` naming a party member (`mon`, Gold's HEAL BELL: one per
+    -- cured monster, benched ones too) is the seat's chip only when that
+    -- member is the one standing there (`standsOn`); the rest is the party's.
+    local standing = msg.mon == nil or self:standsOn(msg)
+    if standing then self:noteSlot(msg) end
     self:syncMineStatus(msg)
     -- A condition lifting is a sentence rather than a sight: the catalogue
     -- answers nil for the token that is not there, so nothing is filed.
     -- Anchored on the seat that took it, in that condition's colours.
-    self:queueVfx(Vfx.forStatus(msg.status)
-      or (msg.confused == 1 and Vfx.forStatus("confusion") or nil), msg.slot)
+    if standing then
+      self:queueVfx(Vfx.forStatus(msg.status)
+        or (msg.confused == 1 and Vfx.forStatus("confusion") or nil), msg.slot)
+    end
 
   elseif kind == "stat" then
     -- Arrows on the seat, and the direction comes off the sentence rather than
@@ -3899,6 +3999,7 @@ function M:onEvent(msg)
     local owed = msg.slot
     self.replaceWait = owed
     self.answeredTurn = false
+    self.passMove = nil
     -- A level-up the referee was told of (contract K9, `syncLevelHp`) is in
     -- its numbers from the next batch on, and this slot-less `turn` closes the
     -- one it came in: the climb stops being added to its packets.
@@ -3909,9 +4010,13 @@ function M:onEvent(msg)
       -- A Bide going on (Gold, `noteBideLine`): the turn just closed said our
       -- monster is storing energy, so this one's FIGHT is `.locked_in`.  Read
       -- afresh every turn -- a turn that did not say so ends it.
-      self.bideLocked = self:generation() == 2 and self.bideFiled == true
-        and self.bideStoring == true
+      -- Red reads its own (`bideOn1`): a Bide that started and has not been
+      -- released or ended since.
+      self.bideLocked = (self:generation() == 2 and self.bideFiled == true
+        and self.bideStoring == true)
+        or (self:generation() == 1 and self.bideOn1 == true)
       self.bideStoring = nil
+      self.confusedNow = nil
     end
     if owed == nil then
       self.pendingTurn = true
@@ -3979,13 +4084,20 @@ function M:onEvent(msg)
     self.awaitingReconnect = false
     if msg.text then self:say(("%s is back!"):format(msg.text)) end
 
+  elseif kind == "run" then
+    -- Whose side left: an escape this side made is the cart's "Got away
+    -- safely!" at the end (`finish`), one the foe made is its own line.
+    self.ranSide = msg.side
+
   elseif kind == "chose" or kind == "unchose" then
     if msg.slot == self:mySlot() then
       if kind == "chose" then
         -- Forced skip / our filed answer: do not open (or keep) the command
-        -- menu for a turn the hub has already spent.
+        -- menu for a turn the hub has already spent -- nor a BATON PASS
+        -- successor still being picked for it.
         self.answeredTurn = true
         self.pendingTurn = false
+        self.passMove = nil
         if self.phase == "choose" or self.phase == "move"
            or self.phase == "target" or self.phase == "mimic"
            or self.phase == "item" or self.phase == "item_party"
@@ -4178,6 +4290,19 @@ function M.partyStatus12(status, generation)
   return status
 end
 
+-- Is the party member a `status` event names (`mon`, 0-based into the
+-- uploaded party) the one standing on its seat?  Ours by the sheet index
+-- this screen fields (`active`), the foe's by the one its last send-out
+-- named (`foeMon`); a seat this screen tracks no index for answers yes.
+function M:standsOn(msg)
+  local at = tonumber(msg and msg.mon)
+  if not at then return true end
+  at = floor(at)
+  if msg.slot == self:mySlot() then return at + 1 == (self.active or 1) end
+  if msg.slot == self:foeSlot() and self.foeMon ~= nil then return at == self.foeMon end
+  return true
+end
+
 -- Keep the fight sheet -- and the save mon behind it -- on the referee's
 -- condition. `noteSlot` owns the seat chip; this is the party copy the
 -- POKéMON panel and the next fight both read. A `status` event with no
@@ -4192,15 +4317,34 @@ function M:syncMineStatus(msg)
   end
   local status = msg.status
   if type(status) ~= "string" or status == "" then status = nil end
-  local sheet = self.mine and self.mine[self.active]
+  -- Which of our monsters: the one standing, or the party member the event
+  -- names.  Gold's HEAL BELL (pokecrystal BattleCommand_HealBell) zeroes
+  -- every wPartyMon status byte of the user's side, PARTY_LENGTH of them --
+  -- the benched ones as well as the battle monster's -- and the Gold referee
+  -- states each cure with that member's `mon` (BattleSim2 Turn `_healBell`).
+  -- A `mon` the uploaded party has no sheet at is a monster this client never
+  -- sent, and nothing is written for it (`gainExp`'s rule).
+  local index = self.active
+  if msg.mon ~= nil then
+    index = self:paidSheetIndex(msg)
+    if type(self.mine) == "table" and #self.mine > 0 and self.mine[index] == nil then
+      return
+    end
+  end
+  local sheet = self.mine and self.mine[index]
   if sheet then sheet.status = status end
-  -- A Gen 3 link fight leaves the save alone: the cart reloads the party
-  -- after a Cable Club battle (pokefirered cable_club.c
-  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty), so a paralysis from a
-  -- spar is gone on the way out -- the same rule applyHeld keeps for items.
-  -- Gen 1/2 keep their established write.
-  if Gen3.active() and LINK_MODES[self.mode] then return end
-  local save = self:saveMon()
+  -- A link fight leaves the save alone, on every generation (M.LINK_MODES,
+  -- wave 5 -- Red and Gold used to write it): no cart lets a Cable Club
+  -- battle's status outlast it.  Gold reloads the party it saved before the
+  -- Colosseum (pokecrystal engine/link/link.asm: `farcall LoadPokemonData`
+  -- after StartBattle), Gen 3 likewise (pokefirered cable_club.c
+  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty), and Red heals it
+  -- (pokered engine/link/cable_club.asm CableClub_DoBattleOrTradeAgain:
+  -- `predef HealParty` after the battle) -- so a paralysis from a spar is
+  -- gone on the way out, the rule applyHeld keeps for items.  The fight's own
+  -- sheet above still follows the referee.
+  if LINK_MODES[self.mode] then return end
+  local save = self:saveMon(index)
   if save then
     -- Red / Gold: the party holds PSN for a TOXIC (`M.partyStatus12`).  The
     -- sheet above keeps the referee's TOX, which is the fight's own.
@@ -6500,6 +6644,34 @@ local REASONS = {
   catch      = "Gotcha!",
 }
 
+-- An escape from a wild fight, in the carts' words, said once.
+--
+-- The player's own RUN ends on GotAwayText, "Got away safely!" (pokered
+-- TryRunningFromBattle `.canEscape`; pokecrystal TryToRunAwayFromBattle
+-- `.fled`, after a SMOKE BALL's own line too), and nothing else -- no win or
+-- loss line.  A move's escape ends on the move's line instead: pokered
+-- SwitchAndTeleportEffect's "<USER> ran from battle!" / "<TARGET> ran away
+-- scared!" / "<TARGET> was blown away!", pokecrystal BattleCommand_Teleport's
+-- "<USER> fled from battle!", and a POKé DOLL's "The wild pokemon ran away"
+-- (the referees' spellings).  The Red referee says "Got away safely!" itself
+-- for a coop_wild runner (BattleSim Turn `_tryRun`, the roll R1d added);
+-- SoloBattle rolls a solo wild RUN on the client and says nothing on a
+-- success.  So the ending says it only when the stream did not, and the old
+-- "Someone ran away!" no longer follows an escape the referee had already
+-- narrated.  A fight between players keeps its concession lines.
+M.GOT_AWAY = "Got away safely!"
+local ESCAPE_TAILS = {
+  " ran from battle!", " ran away scared!", " was blown away!", " fled from battle!",
+}
+function M.escapeLine(text)
+  if type(text) ~= "string" then return false end
+  if text == M.GOT_AWAY or text == "The wild pokemon ran away" then return true end
+  for _, tail in ipairs(ESCAPE_TAILS) do
+    if #text > #tail and text:sub(-#tail) == tail then return true end
+  end
+  return false
+end
+
 function M:grantCatch(msg)
   if self:generation() == 3 then return self:grantCatch3(msg) end
   local mon = self.wildCatchMon
@@ -6687,6 +6859,13 @@ function M:finish(result, reason, msg)
     self:grantCatch(msg)
   elseif self:generation() == 3 then
     self:sayEnding3(reason)
+  elseif reason == "run" and self.mode == "wild" then
+    -- An escape (M.GOT_AWAY): the cart's one line, never a win or a loss
+    -- line, and never twice.  The foe's own escape said its line already.
+    local mine = self.mySide or "a"
+    if not self.escapeSaid and (self.ranSide == nil or self.ranSide == mine) then
+      self:say(M.GOT_AWAY)
+    end
   else
     self:say(ENDINGS[self.result] or ENDINGS.draw)
     local why = REASONS[reason]
@@ -6796,15 +6975,71 @@ function M:sendChoice(fields)
   -- says so: an item or a switch ends one (pokecrystal `.reset_bide`), and
   -- another move is not one.
   self.bideFiled, self.bideLocked = nil, nil
+  self.passMove = nil
   return true
+end
+
+-- ------- Gold's BATON PASS successor
+--
+-- pokecrystal BattleCommand_BatonPass (engine/battle/move_effects/
+-- baton_pass.asm, pokegold the same): the player's side, once
+-- CheckAnyOtherAlivePartyMons has found somebody to pass to, opens the party
+-- menu after the move (SetUpBattlePartyMenu / ForcePickSwitchMonInBattle) --
+-- in a wild fight, a trainer's and a link battle alike -- and the monster
+-- picked comes in.  A mediated fight cannot open a menu mid-move, so the pick
+-- is asked as BATON PASS is chosen and rides the FIGHT choice (`pass`, the
+-- party position the referee's `partyIndexOf` reads, as a switch's `slot`;
+-- Wire.battleChoice reads it on a Gen 2 hub since wave 5), the way Red's MIMIC
+-- asks its pick up front.  With nobody else able to fight, nothing is asked:
+-- the cart fails before the menu ("But it failed!", FailedBatonPass) and so
+-- does the referee.  Without a pick -- a BATON PASS called by METRONOME or
+-- SLEEP TALK, which no menu could have asked for -- the referee chooses as
+-- it chooses a fainted monster's successor (BattleSim2 Turn `_batonPass`:
+-- the best super-effective bench, else the first living).  B goes back to
+-- the move list: a choice not yet sent is the player's to take back.
+
+-- Is this row Gold's BATON PASS?  By the sheet's effect number (BattleSim2
+-- Effects.BATON_PASS), else the move record's effect name.
+function M.isBatonPass2(move, game)
+  if type(move) ~= "table" then return false end
+  if not Effects2 then Effects2 = need("BattleSim2/Effects") end
+  local effect = tonumber(move.effect)
+  if effect ~= nil then return effect == Effects2.BATON_PASS end
+  local data = game and game.data
+  local def = type(data) == "table" and type(data.moves) == "table"
+    and data.moves[move.id] or nil
+  return type(def) == "table" and def.effect == "EFFECT_BATON_PASS"
+end
+
+-- Does choosing this move ask for BATON PASS's successor here?
+function M:asksPass(move)
+  if self:generation() ~= 2 or not M.isBatonPass2(move, self.game) then return false end
+  for _, row in ipairs(self:partyRows()) do
+    if not row.fainted and not row.active then return true end
+  end
+  return false
+end
+
+-- A party sheet's position on the wire: the save-party position the snapshot
+-- stamped on it (`slot`, 0-based -- what the referee's `partyIndexOf` matches
+-- first), else its place in the upload.  A switch, an item's party pick and
+-- BATON PASS's successor all name a monster this way; the sheet's own index
+-- named the wrong one whenever `snapshotMons` had skipped a party member
+-- ahead of it (an EGG), since the referee matched it against the stamps.
+function M:wireSlotOf(sheetIndex)
+  local sheet = self.mine and self.mine[sheetIndex]
+  local slot = type(sheet) == "table" and tonumber(sheet.slot) or nil
+  if slot and slot >= 0 then return floor(slot) end
+  return (sheetIndex or 1) - 1
 end
 
 -- FIGHT with the move at `index` (1-based here, zero-based on the wire).  No
 -- target: a 1v1 has exactly one thing to hit, and the sim picks the first
 -- living foe when none is named -- naming one would be a field slot this
 -- screen would have to keep in step for no gain.  `mimic` (1-based) is a Red
--- MIMIC's pick off the foe's list, which the move asks for first.
-function M:pickMove(index, mimic)
+-- MIMIC's pick off the foe's list, which the move asks for first; `pass`
+-- (a sheet index) is Gold's BATON PASS successor, likewise (`asksPass`).
+function M:pickMove(index, mimic, pass)
   local mon = self:activeMon()
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
@@ -6837,8 +7072,16 @@ function M:pickMove(index, mimic)
     self.phase = "mimic"
     return false
   end
+  -- Gold's BATON PASS: the successor, in the party picker (`updateSwitch`).
+  if pass == nil and self:asksPass(moves[index]) then
+    self.passMove = index
+    self.switchIndex = 1
+    self.phase = "switch"
+    return false
+  end
   local sent = self:sendChoice({ action = "fight", move = index - 1,
-                                 mimic = mimic and (mimic - 1) or nil })
+                                 mimic = mimic and (mimic - 1) or nil,
+                                 pass = pass and self:wireSlotOf(pass) or nil })
   -- Remembered only once the choice is really on the wire: a refused send
   -- leaves the turn unspent, and moving the cursor for it would be the menu
   -- reporting a decision that was not taken.
@@ -6988,7 +7231,12 @@ function M:confirmPendingItem(itemId, amount)
   self.pendingItem = nil
   self.pendingItemSlot = nil
   local effect = effectsFor(self.game).itemEffect(id)
-  if effect and effect.vitamin and amount == 1 then
+  -- Never in a fight between players (LINK_MODES, wave 5): the Stat Exp a
+  -- vitamin gave there is the fight's alone, as everything else a link
+  -- battle does to the party is (`syncMineStatus` has the carts' reasons).
+  -- The bag is still spent below -- the bag working in a fight between
+  -- players is this mod's rule (the carts lock it), and it is the bag's.
+  if effect and effect.vitamin and amount == 1 and not LINK_MODES[self.mode] then
     -- The sheet index is what the wire is stated in (the hub indexes the
     -- `mons` array it was uploaded), and it is *not* the save.party position:
     -- `snapshotMons` skips a monster it cannot describe and one skip shifts
@@ -7175,7 +7423,8 @@ function M:commitItem(partyIndex, moveIndex)
   -- Ball's x3 (docs/plans/gen3-battle-sheet.md §1.2).
   local fields = { action = "item", item = gen3 and tostring(pick.id) or pick.id }
   if gen3 and effect.ball then fields.dexCaught = self:wildDexCaught() end
-  if partyIndex then fields.slot = partyIndex - 1 end
+  -- The party position the referee matches (`wireSlotOf`), as a switch names it.
+  if partyIndex then fields.slot = self:wireSlotOf(partyIndex) end
   if moveIndex then fields.move = moveIndex - 1 end
   self.itemPick = nil
   if not self:sendChoice(fields) then
@@ -7235,6 +7484,7 @@ function M:updateCommand(input)
       self.phase = "move"
     elseif command == "SWITCH" then
       self.switchIndex = 1
+      self.passMove = nil
       self.phase = "switch"
     elseif command == "ITEM" then
       self.itemIndex = 1
@@ -7324,11 +7574,89 @@ function M.bideLine(text, species)
   return nil
 end
 
--- This screen's half: a line about our monster's Bide.
+-- Red's Bide, read off the lines that bound it (wave 5).  pokered BideEffect
+-- (engine/battle/effects.asm) prints nothing past "<MON> used BIDE!" and a
+-- store turn prints nothing at all (CheckPlayerStatusConditions `.BideCheck`
+-- jumps straight to ExecutePlayerMoveDone; SavingEnergyText is never
+-- referenced), so there is no per-turn "storing" line to read, as Gold's
+-- reading has.  But the Bide is bounded by lines that do exist: it starts on
+-- the used line, lasts 2..3 more turns, and ends on UnleashedEnergyText --
+-- or, early, on the two gates that clear STORING_ENERGY: a confusion
+-- self-hit (`.ConfusedCheck`: `and 1 << CONFUSED` keeps nothing else) and
+-- full paralysis (`.ParalysisCheck`'s mask).  A switch-out or a faint ends it
+-- too (the send-out / faint branches clear it); an item does not -- the cart
+-- leaves wPlayerBattleStatus1 alone and the next FIGHT goes on storing.
+--
+--   "start"    "<MON> used BIDE" (the referee's used line; `labels` holds the
+--              upper-case names a Bide row goes by on this sheet, BIDE
+--              itself always)
+--   "release"  "<MON> unleashed energy"
+--   "end"      "<MON> hurt itself in confusion", "<MON> is fully paralyzed"
+--              / "<MON>'s fully paralyzed!" (the cart's spelling), or the
+--              cart's "It hurt itself in its confusion!" right after
+--              "<MON> is confused!" (`confusedNow`: the species the last
+--              confusion line named)
+--
+-- nil for anything else, and for a line about another monster.
+function M.bideLine1(text, species, labels, confusedNow)
+  if type(text) ~= "string" or type(species) ~= "string" or species == "" then
+    return nil
+  end
+  local line = text:gsub("!+$", "")
+  if line == species .. " unleashed energy" then return "release" end
+  if line == species .. " hurt itself in confusion"
+     or line == species .. " is fully paralyzed"
+     or line == species .. "'s fully paralyzed" then
+    return "end"
+  end
+  if line == "It hurt itself in its confusion" and confusedNow == species then
+    return "end"
+  end
+  local prefix = species .. " used "
+  if line:sub(1, #prefix) == prefix then
+    local label = line:sub(#prefix + 1):upper()
+    if label == "BIDE" or (type(labels) == "table" and labels[label]) then
+      return "start"
+    end
+  end
+  return nil
+end
+
+-- The upper-case names this sheet's Bide rows go by (the used line's label:
+-- the move's `name`, else its id), for `bideLine1`.
+function M.bideLabels(moves, game)
+  local out = {}
+  for _, move in ipairs(type(moves) == "table" and moves or {}) do
+    if M.isBideMove(move, game) then
+      if type(move.name) == "string" then out[move.name:upper()] = true end
+      if type(move.id) == "string" then out[move.id:upper()] = true end
+    end
+  end
+  return out
+end
+
+-- This screen's half: a line about our monster's Bide.  Gold reads the
+-- storing line every turn (`bideLine`); Red the lines that bound it
+-- (`bideLine1`, kept in `bideOn1` from the start to the end).
 function M:noteBideLine(text)
-  if not self.bideFiled then return end
   local sheet = self.mine and self.mine[self.active or 1]
-  local said = M.bideLine(text, sheet and sheet.species)
+  local species = sheet and sheet.species
+  if self:generation() == 1 then
+    if type(text) == "string" and type(species) == "string" then
+      local who = text:match("^(.-) is confused!?$")
+      if who then self.confusedNow = who end
+    end
+    local said = M.bideLine1(text, species, M.bideLabels(sheet and sheet.moves, self.game),
+      self.confusedNow)
+    if said == "start" then
+      self.bideOn1 = true
+    elseif said == "release" or said == "end" then
+      self.bideOn1, self.bideFiled = nil, nil
+    end
+    return
+  end
+  if not self.bideFiled then return end
+  local said = M.bideLine(text, species)
   if said == "store" then
     self.bideStoring = true
   elseif said == "release" then
@@ -7343,12 +7671,16 @@ end
 -- storing energy, using a trapping move, or held by the enemy's.  The Red
 -- referee asks those seats and reads their FIGHT as the lock-in whatever slot
 -- it names (BattleSim Turn `_menuFight`; asleep or frozen, any slot holding a
--- move, no PP or Disable test).  Of the five, this client can be sure of the
--- first two -- the seat's status is the referee's, event by event -- and
--- skips the move list for them; a Red Bide stores in silence (SavingEnergyText
--- is never referenced) and a trap's last turn is the referee's to know, so
--- those keep the move list, whose pick the referee overrides.  That costs a
--- screen; skipping it on a guess could send a move the player never chose.
+-- move, no PP or Disable test).  Of the five, this client can be sure of
+-- three -- the seat's status is the referee's, event by event, and a Bide is
+-- bounded by its used line and its release (`bideLine1`, wave 5) -- and skips
+-- the move list for them.  A trap's last turn is the referee's to know (the
+-- trapper's counter -- TrappingEffect's 1..4 continuations -- and the foe's
+-- that holds us ride no event, and CheckNumAttacksLeft lets go in silence),
+-- so those two keep the move list, whose pick the referee overrides while the
+-- lock holds.  That costs a screen; skipping it on a guess would send the
+-- trapping move -- or last turn's -- for a player whose cart had reopened the
+-- move menu.
 
 -- The move slot a FIGHT sends with no move list, or nil for the list.
 function M:lockedFightSlot()
@@ -7559,7 +7891,8 @@ function M:updateSwitch(input)
   end
   if #choices == 0 then
     self:say("There's no one\nto switch to!")
-    if not self.replaceOnly then self.phase = "choose" end
+    if not self.replaceOnly then self.phase = self.passMove and "move" or "choose" end
+    self.passMove = nil
     return
   end
   if self.switchIndex > #choices then self.switchIndex = #choices end
@@ -7568,11 +7901,20 @@ function M:updateSwitch(input)
   elseif input:wasPressed("down") then
     self.switchIndex = self.switchIndex < #choices and self.switchIndex + 1 or 1
   elseif input:wasPressed("b") then
-    if not self.replaceOnly then self.phase = "choose" end
+    -- Out of BATON PASS's picker is back to the move list it came from.
+    if self.passMove then
+      self.passMove = nil
+      self.phase = "move"
+    elseif not self.replaceOnly then
+      self.phase = "choose"
+    end
   elseif input:wasPressed("a") then
     local row = choices[self.switchIndex]
-    if row then
-      self:sendChoice({ action = "switch", slot = row.index - 1 })
+    if row and self.passMove then
+      -- BATON PASS's successor (`asksPass`): the move goes, naming it.
+      self:pickMove(self.passMove, nil, row.index)
+    elseif row then
+      self:sendChoice({ action = "switch", slot = self:wireSlotOf(row.index) })
     end
   end
 end
@@ -9627,7 +9969,7 @@ function M:update(dt)
         local rows = self:partyRows()
         for _, row in ipairs(rows) do
           if not row.fainted then
-            self:sendChoice({ action = "switch", slot = row.index - 1 })
+            self:sendChoice({ action = "switch", slot = self:wireSlotOf(row.index) })
             return
           end
         end
@@ -9838,7 +10180,8 @@ function M:drawEnemyHUD(Font, HudTiles)
   -- Classic Gen 1 / engine BattleState: status replaces Lxx. Group battles
   -- put status on the HP bar instead (CoopBattle.drawReadout).
   if slot.status then
-    Font.draw(tostring(slot.status):sub(1, 3), 40, 8)
+    -- A Red / Gold TOX is the PSN the cart's HUD prints (ClassicBattle.statusLabel).
+    Font.draw(ClassicBattle.statusLabel(tostring(slot.status)) or "", 40, 8)
   elseif slot.confused then
     Font.draw("CNF", 40, 8)
   elseif slot.level then
@@ -9872,7 +10215,7 @@ function M:drawPlayerHUD(Font, HudTiles)
   love.graphics.setColor(0, 0, 0, 1)
   Font.draw(name, nameX(Font, 10, name), 56)
   if slot.status then
-    Font.draw(tostring(slot.status):sub(1, 3), 120, 64)
+    Font.draw(ClassicBattle.statusLabel(tostring(slot.status)) or "", 120, 64)
   elseif slot.confused then
     Font.draw("CNF", 120, 64)
   else

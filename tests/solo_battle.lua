@@ -215,6 +215,9 @@ local function fightOf(kind, o)
           maxHp = o.pHp or 200, level = 20 }),
   })
   for id, count in pairs(o.inventory or {}) do game.save.inventory[id] = count end
+  -- A dataset of the section's own (a fresh table: MediatedBattle memoises the
+  -- type order per data table, so the shared one cannot be edited in place).
+  if o.data then game.data = o.data end
   -- `cart2`: a Gold game (the referee-fidelity section at the end of this file
   -- installs what reads it as one) -- the cart's data, and the player's id and
   -- purse where Gold keeps them.
@@ -489,8 +492,9 @@ end)()
 -- Gen 1 charges for a ball thrown at a trainer's monster -- the ball is gone
 -- and the turn is spent (`BattleState:throwBall`'s non-wild arm) -- and
 -- `coop_npc` gets that for free, because the referee's refusal costs exactly
--- the same two things. What it does *not* get is the cart's wording; that
--- divergence is written down in Config rather than asserted here.
+-- the same two things.  Since wave 5 the referee says it in the cart's words
+-- too (pokered ThrowBallAtTrainerMon: "The trainer blocked the BALL!" /
+-- "Don't be a thief!"; BattleSim Turn), where it used to say "But it failed".
 
 ;(function()
   local f = fightOf("trainer", { inventory = { POKE_BALL = 3 } })
@@ -508,7 +512,8 @@ end)()
   f.solo:update(1 / 60, f.game)
 
   eq(countKind(f.events, "catch"), 0, "nothing is caught off a trainer")
-  eq(saidTimes(fight, "But it failed"), 1, "the throw is refused")
+  eq(saidTimes(fight, "blocked the BALL!"), 1, "the throw is refused, in the cart's words")
+  eq(saidTimes(fight, "Don't be a thief!"), 1, "...both of its lines")
   eq(sim.byId[PLAYER].bag.POKE_BALL, 2, "the ball is spent all the same")
   eq(f.game.save.inventory.POKE_BALL, 2, "and debited from the real bag")
   eq(sim.turn, turnBefore + 1, "and the turn goes with it")
@@ -2340,6 +2345,139 @@ end)()
   eq(tgt.moves[2].pp, 11, "reconcile: a move the party does not hold no longer ends the walk")
   eq(tgt.moves[1].pp, 10, "reconcile: ...and writes nothing itself")
 
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
+-- wave 5 of docs/plans/gen12-referee-gaps-fix.md (C3), end to end in solo
+-- ------------------------------------------------------------------
+
+-- Lines the screen queued that start with `who` and say `what`.
+local function saidBy(fight, who, what)
+  local n = 0
+  for _, line in ipairs(fight.lines or {}) do
+    if type(line) == "string" and line:sub(1, #who) == who and line:find(what, 1, true) then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- ------- Red's TypeEffects order decides "doesn't affect" against "missed"
+--
+-- pokered AdjustDamageForMoveType walks TypeEffects top to bottom, floors after
+-- every matching row, and leaves the LAST row's multiplier for
+-- PrintMoveFailureText: a GROUND move into a FLYING/ROCK dual type is "It
+-- doesn't affect" only when the immunity row is the last one it applied, and
+-- "<USER>'s attack missed!" when a 2x row follows it (the damage is 0 either
+-- way).  The ruleset uploads the engine's rows in their order (`chartOrder`)
+-- and solo hands it to the referee.  Invented types and moves.
+;(function()
+  local function fightWith(matchups, seed)
+    local chartData = setmetatable({
+      type_chart = { types = { GRND = {}, ROCK = {}, BIRD = {} }, matchups = matchups },
+      moves = {
+        QUAKE = { name = "QUAKE", power = 100, accuracy = 100, type = "GRND", pp = 10 },
+        THUMP = { name = "THUMP", power = 40, accuracy = 100, type = "BIRD", pp = 20 },
+      },
+      pokemon = {
+        ALPHA = { name = "ALPHA", types = { "GRND" }, catchRate = 200 },
+        BETA  = { name = "BETA", types = { "BIRD", "ROCK" }, catchRate = 200 },
+      },
+    }, { __index = data })
+    local player = mon({ species = "ALPHA", spd = 90, maxHp = 200 })
+    player.moves = { { id = "QUAKE", pp = 10 } }
+    local foe = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+    foe.moves = { { id = "THUMP", pp = 20 } }
+    local f = fightOf("wild", { seed = seed or 11, party = { player }, wildMon = foe,
+                                data = chartData })
+    f.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+    return f
+  end
+  local immuneLast = {
+    { attacker = "GRND", defender = "ROCK", multiplier = 20 },
+    { attacker = "GRND", defender = "BIRD", multiplier = 0 },
+  }
+  local f = fightWith(immuneLast)
+  ok(f.started, "chartOrder (solo Red): the fight is taken over")
+  eq(f.sim.chartRows and #f.sim.chartRows, 2, "chartOrder (solo Red): the referee holds the rows, in order")
+  eq(saidTimes(f.fight, "doesn't affect"), 1,
+     "chartOrder (solo Red): the immunity row applied last -- \"It doesn't affect\"")
+  eq(saidBy(f.fight, "ALPHA", "missed"), 0, "chartOrder (solo Red): ...and no \"missed\"")
+  local immuneFirst = {
+    { attacker = "GRND", defender = "BIRD", multiplier = 0 },
+    { attacker = "GRND", defender = "ROCK", multiplier = 20 },
+  }
+  f = fightWith(immuneFirst)
+  eq(saidTimes(f.fight, "doesn't affect"), 0,
+     "chartOrder (solo Red): a 2x row after the immunity -- no \"doesn't affect\"")
+  eq(saidBy(f.fight, "ALPHA", "missed"), 1,
+     "chartOrder (solo Red): ...\"<USER>'s attack missed!\", the last row's reading")
+end)()
+
+-- ------- the escape is said once: "Got away safely!"
+;(function()
+  local f = fightOf("wild", { seed = 1, pSpd = 200, eSpd = 10, eHp = 9999, eAtk = 3 })
+  f.fight:sendChoice({ action = "run" })
+  for _ = 1, 5 do f.solo:update(1 / 60, f.game) end
+  local out = f.sim:outcome()
+  eq(out and out.reason, "run", "escape (solo Red): the fight ends in an escape")
+  eq(saidTimes(f.fight, "Got away safely!"), 1, "escape (solo Red): \"Got away safely!\", once")
+  eq(saidTimes(f.fight, "Someone ran away!") + saidTimes(f.fight, "You lost!"), 0,
+     "escape (solo Red): ...with no loss line or second reason after it")
+end)()
+
+-- ------- Gold's BATON PASS: the successor the player picked comes in
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = { heldItemFor = function() return nil end },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local goldData = setmetatable({
+    items = {},
+    moves = {
+      THUMP = { name = "THUMP", power = 40, accuracy = 100, type = "NORM", pp = 20,
+                effect = "EFFECT_NORMAL_HIT" },
+      BATON_PASS = { name = "BATON PASS", power = 0, accuracy = 100, type = "NORM", pp = 40,
+                     effect = "EFFECT_BATON_PASS" },
+    },
+  }, { __index = data })
+  local function passer(level)
+    local m = mon({ species = "ALPHA", spd = 90, maxHp = 200, level = level })
+    m.moves = { { id = "THUMP", pp = 20, maxPp = 20 }, { id = "BATON_PASS", pp = 40, maxPp = 40 } }
+    m.otId = 4321
+    return m
+  end
+  local lead, second, third = passer(20), passer(21), passer(22)
+  local f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+    party = { lead, second, third },
+    wildMon = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 }) })
+  ok(f.started, "BATON PASS (solo Gold): the fight is taken over")
+  local fight = f.fight
+  eq(fight:pickMove(2), false, "BATON PASS (solo Gold): choosing it opens the party menu first")
+  eq(fight.phase, "switch", "BATON PASS (solo Gold): ...the picker")
+  local pressed = {}
+  local input = { wasPressed = function(_, k) local was = pressed[k]; pressed[k] = nil; return was == true end }
+  pressed.down = true
+  fight:updateSwitch(input)   -- the second bench member, party position 3
+  pressed.a = true
+  fight:updateSwitch(input)
+  for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+  local came
+  for _, event in ipairs(f.events) do
+    if event.t == "send" and event.side == "a" and tonumber(event.mon) ~= 0 then came = tonumber(event.mon) end
+  end
+  eq(came, 2, "BATON PASS (solo Gold): the monster picked comes in (choice.pass), not the referee's default")
+  eq(f.sim.byId[PLAYER].active, 3, "BATON PASS (solo Gold): ...the seat fields party member 3")
   for name in pairs(stubs) do package.loaded[name] = saved[name] end
 end)()
 

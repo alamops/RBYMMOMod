@@ -156,7 +156,7 @@ do
   eq(user.moves[1] and user.moves[1].id .. ":" .. user.moves[1].pp, "MIMIC:7",
      "a switch-out gives the party's MIMIC back, at the slot's PP")
   local missed = apply(82, user, target, {})
-  eq(missed.messages[1], "But it failed", "MIMIC with no pick fails")
+  eq(missed.messages[1], "But, it failed!", "MIMIC with no pick fails")
 end
 
 do
@@ -292,7 +292,7 @@ do
 
   local primary = apply(20, dummyMon(), floored())
   -- CantLowerAnymore's NothingHappenedText (R1b, effects.asm :705-710).
-  eq(primary.messages[1], "Nothing happened", "the primary at -6 says so")
+  eq(primary.messages[1], "Nothing happened!", "the primary at -6 says so")
   eq(#primary.messages, 1, "...once")
 end
 

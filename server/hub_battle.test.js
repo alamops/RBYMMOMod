@@ -1392,7 +1392,11 @@ testRefusedCoopOpenLeavesNoPaperwork();
  * reach an older read. A stray `num` on a Gen 1 / Gen 2 row is ignored as it
  * always was -- rather than sending the row to the Gen 3 reader, which refuses
  * it for want of target / priority / flags -- and a stray `pass` on an older
- * choice is ignored rather than refusing the turn. Twin of the same section in
+ * choice is ignored rather than refusing the turn. Since wave 5 of
+ * docs/plans/gen12-referee-gaps-fix.md a Gen 2 Metronome pool row's `num` (the
+ * cart's move number, 1..NUM_ATTACKS2) and a Gen 2 choice's `pass` (Gold's
+ * BATON PASS successor, read as Gen 3's) are read on Gold; a sheet's own rows
+ * still leave `num` behind and Red ignores both. Twin of the same section in
  * tests/hub_battle.lua.
  */
 function testGen12ReadPathsUnchanged() {
@@ -1411,23 +1415,33 @@ function testGen12ReadPathsUnchanged() {
   ok(goldClean && goldClean.moves[0].num === undefined, 'in the older dialect');
   ok(sanitize.cleanBattleParty({ battle: 'b1', mons: [sheet] }, 1),
     'and a Gen 1 hub takes the party it sits in');
-  for (const gen of [1, 2]) {
-    const rules = sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] }, gen);
-    ok(rules, `a Gen ${gen} metronome pool row with a stray num reads`);
-    ok(rules && rules.metronomePool[0].num === undefined, `as the older row on Gen ${gen}`);
-  }
-  ok(sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] }),
-    'and on a ruleset that names no hub generation');
+  const rules1 = sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] }, 1);
+  ok(rules1, 'a Gen 1 metronome pool row with a stray num reads');
+  ok(rules1 && rules1.metronomePool[0].num === undefined, 'as the older row on Gen 1');
+  const rules2 = sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] }, 2);
+  ok(rules2, 'a Gen 2 metronome pool row with a num reads');
+  ok(rules2 && rules2.metronomePool[0].num === 7,
+    "wave 5: ...and keeps it on Gen 2 (the cart's move number METRONOME's byte names)");
+  const rulesNone = sanitize.cleanBattleRuleset({ chart: [[100]], metronomePool: [sheet.moves[0]] });
+  ok(rulesNone, 'and on a ruleset that names no hub generation');
+  ok(rulesNone && rulesNone.metronomePool[0].num === undefined, '...which reads it as the older row');
 
   const asked = {
     battle: 'b1', action: 'fight', move: 0, pass: 'far', dexCaught: 1,
   };
-  for (const gen of [1, 2, undefined]) {
+  for (const gen of [1, undefined]) {
     const c = sanitize.cleanBattleChoice(asked, gen);
     ok(c, `a choice with Gen 3 fields in it is still a choice (${gen})`);
     ok(c && c.pass === undefined, `whose stray pass is not read (${gen})`);
     ok(c && c.dexCaught === undefined, `nor its dex word (${gen})`);
   }
+  ok(sanitize.cleanBattleChoice(asked, 2) === null,
+    "wave 5: a Gen 2 hub reads Gold's BATON PASS `pass`, so an unreadable one refuses the choice");
+  const passed = sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'fight', move: 0, pass: 2, dexCaught: 1,
+  }, 2);
+  ok(passed && passed.pass === 2, 'wave 5: ...a readable one is kept on Gen 2');
+  ok(passed && passed.dexCaught === undefined, "wave 5: ...while the dex word stays Gen 3's");
   ok(sanitize.cleanBattleChoice(asked, 3) === null,
     'while a Gen 3 hub refuses the same fields unread');
 
@@ -3460,6 +3474,228 @@ function testHappinessGen2Only() {
     'happiness: past one byte refuses the Gold sheet');
 }
 
+// ---------------------------------------------------------------------------
+// Wave 5 of docs/plans/gen12-referee-gaps-fix.md: the four new wire fields reach
+// their referees through the hub and change the fight the cart's way -- Red's
+// `chartOrder`, Gold's BATON PASS `pass`, Gold's K15 `base.gender` and a Gold
+// pool row's `num`. Twin of the same block in tests/hub_battle.lua, which
+// argues each case.
+// ---------------------------------------------------------------------------
+
+function msgTexts5(player) {
+  return takeAll(player, 'mmo.battle_event').filter((msg) => msg.t === 'msg').map((msg) => msg.text);
+}
+
+function wave5Fight(generation, rules, aMons, bMons, choice) {
+  const relay = makeRelay(makeClock(), { generation });
+  const a = generation === 2 ? dial2(relay, 'ANN') : dial(relay, 'ANN');
+  const id = 'w5';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, ...rules });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: aMons,
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: bMons,
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false, record };
+  a.peer.outbox.length = 0;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, ...(choice || {}),
+  });
+  const fighter = record.sim.byId.get(a.id);
+  return {
+    opened: true, record, fighter, texts: msgTexts5(a),
+  };
+}
+
+function sheetOf(generation, species, moves, extra) {
+  const base = generation === 2 ? sheet2({ species }) : { ...mon(1), species };
+  return { ...base, moves, ...(extra || {}) };
+}
+
+const activeSpecies = (run) => run.fighter.mons[run.fighter.active - 1].species;
+// A line containing `part` (the wording is the referee's; which line it is, is
+// what these checks are about).
+const hasPart = (texts, part) => (texts || []).some((text) => text.includes(part));
+
+function orderFight(generation, order) {
+  return wave5Fight(generation, { chart: [[0, 200], [100, 100]], chartOrder: order },
+    [sheetOf(generation, 'TAPPER', [row12('TAP', { pp: 10, power: 40 })])],
+    [sheetOf(generation, 'DUO', [row12('HUSH', { pp: 10, power: 0 })], { types: [0, 1] })]);
+}
+
+function testWave5ChartOrder() {
+  const immuneLast = orderFight(1, [0, 1, 0, 0]);
+  ok(immuneLast.opened, 'wave 5 chartOrder: a Red fight opens on an ordered ruleset');
+  const rows = immuneLast.opened && immuneLast.record.sim.chartRows;
+  ok(rows && rows.length === 2, 'wave 5 chartOrder: ...the referee holds its two rows');
+  ok(hasPart(immuneLast.texts, 'affect DUO'),
+    'wave 5 chartOrder: the immunity row last -- "It doesn\'t affect" (PrintMoveFailureText)');
+  const superLast = orderFight(1, [0, 0, 0, 1]);
+  ok(hasPart(superLast.texts, 'missed'),
+    'wave 5 chartOrder: the super-effective row last -- "<USER>\'s attack missed!", the same immunity');
+  ok(!hasPart(superLast.texts, 'affect DUO'), 'wave 5 chartOrder: ...and not "doesn\'t affect"');
+  const unordered = orderFight(1, undefined);
+  ok(hasPart(unordered.texts, 'affect DUO'), 'wave 5 chartOrder: no order is the product, an immunity');
+  ok(unordered.opened && unordered.record.sim.chartRows == null, 'wave 5 chartOrder: ...with no rows held');
+  const broken = orderFight(1, [0, 0, 0]);
+  ok(broken.opened === false, 'wave 5 chartOrder: an odd-length order refuses the ruleset, so nothing opens');
+  ok(broken.record && broken.record.ruleset == null, 'wave 5 chartOrder: ...and no ruleset is kept');
+  const gold = orderFight(2, [0, 0, 0, 1]);
+  ok(gold.opened, 'wave 5 chartOrder: a Gold hub takes the same ruleset');
+  ok(gold.opened && gold.record.ruleset.chartOrder === undefined,
+    "wave 5 chartOrder: ...without the order (Red's alone)");
+}
+
+function passFight(pass) {
+  return wave5Fight(2, { chart: CHART2 }, [
+    sheetOf(2, 'PASSER', [row12('BATON_PASS', { pp: 10, power: 0, effect: 134 })]),
+    sheetOf(2, 'BENCH1', [row12('TAP', { pp: 10, power: 1 })]),
+    sheetOf(2, 'BENCH2', [row12('TAP', { pp: 10, power: 1 })]),
+  ], [sheetOf(2, 'FOE', [row12('HUSH', { pp: 10, power: 0 })])], { pass });
+}
+
+function testWave5BatonPass() {
+  const named = passFight(2);
+  ok(named.opened, 'wave 5 pass: a Gold wild fight opens');
+  ok(named.opened && activeSpecies(named) === 'BENCH2',
+    "wave 5 pass: the wire's successor comes in (BattleCommand_BatonPass's menu pick)");
+  ok(named.opened && named.record.sim.turn === 2, 'wave 5 pass: ...and the turn resolved');
+  ok(hasPart(named.texts, 'BATON_PASS'), 'wave 5 pass: ...after BATON PASS was used');
+  const unnamed = passFight(undefined);
+  ok(unnamed.opened && activeSpecies(unnamed) === 'BENCH1', "wave 5 pass: none named is the referee's pick");
+  for (const pass of [4, 6]) {
+    const refused = passFight(pass);
+    ok(refused.opened && refused.record.sim.turn === 1, `wave 5 pass: pass ${pass} files no turn`);
+    ok(refused.opened && activeSpecies(refused) === 'PASSER', `wave 5 pass: ...and PASSER stays out (${pass})`);
+    ok(refused.opened && refused.fighter.choice == null, `wave 5 pass: ...with no choice held (${pass})`);
+  }
+}
+
+function attractFight(mine, theirs) {
+  const charm = (species, gender, moves) => ({
+    ...sheetOf(2, species, moves),
+    base: {
+      hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96, gender,
+    },
+    dvs: {
+      atk: 12, def: 7, spe: 15, spc: 3,
+    },
+  });
+  return wave5Fight(2, { chart: CHART2 },
+    [charm('CHARMER', mine, [row12('ATTRACT', { pp: 15, power: 0, effect: 133 })])],
+    [charm('FOE', theirs, [row12('HUSH', { pp: 10, power: 0 })])]);
+}
+
+function testWave5Gender() {
+  const lands = attractFight(0, 254);
+  ok(lands.opened, 'wave 5 gender: a Gold fight with a ratio on both sheets opens');
+  ok(lands.opened && lands.fighter.mons[0].base.gender === 0, 'wave 5 gender: ...the ratio reaches the referee');
+  ok(hasPart(lands.texts, 'fell in love'), 'wave 5 gender: ATTRACT lands, male into female');
+  ok(hasPart(attractFight(0, 0).texts, 'failed'), 'wave 5 gender: ...fails male into male');
+  const none = attractFight(undefined, undefined);
+  ok(none.opened && none.fighter.mons[0].base.gender === undefined, 'wave 5 gender: a sheet with no ratio has none');
+  ok(hasPart(none.texts, 'failed'), 'wave 5 gender: ...and ATTRACT fails (genderless)');
+  ok(attractFight(300, 254).opened === false,
+    'wave 5 gender: a ratio past a byte refuses the party, so nothing opens');
+}
+
+function metronomeFight(generation, numbered) {
+  const poolRow = (moveId, num) => row12(moveId, { pp: 10, power: 0, num: numbered ? num : undefined });
+  return wave5Fight(generation, {
+    chart: generation === 2 ? CHART2 : [[100, 100], [100, 100]],
+    metronomePool: [poolRow('CALLED_A', 200), poolRow('CALLED_B', 7)],
+  }, [sheetOf(generation, 'WAGGLER', [row12('METRONOME', { pp: 10, power: 0, effect: 83 })])],
+  [sheetOf(generation, 'FOE', [row12('HUSH', { pp: 10, power: 0 })])]);
+}
+
+function testWave5PoolNum() {
+  const numbered = metronomeFight(2, true);
+  ok(numbered.opened, 'wave 5 num: a Gold fight opens on a numbered pool');
+  ok(numbered.opened && numbered.record.sim.metronomePool[0].num === 200,
+    'wave 5 num: ...the number reaches the referee');
+  const placed = metronomeFight(2, false);
+  ok(placed.opened && placed.record.sim.metronomePool[0].num == null, 'wave 5 num: an unnumbered pool has none');
+  const called = (run) => {
+    for (const text of run.texts || []) {
+      const m = /^WAGGLER used (CALLED_[A-Z])/.exec(text);
+      if (m) return m[1];
+    }
+    return null;
+  };
+  ok(called(numbered) && called(placed), 'wave 5 num: METRONOME calls a pool move both ways');
+  ok(called(numbered) !== called(placed), 'wave 5 num: ...a different one once the rows state their numbers');
+  const red = metronomeFight(1, true);
+  ok(red.opened, 'wave 5 num: a Red hub takes a numbered pool');
+  ok(red.opened && red.record.ruleset.metronomePool[0].num === undefined, 'wave 5 num: ...without the numbers');
+}
+
+// The line budget with the new fields at every cap (twin of the same block in
+// tests/hub_battle.lua): a worst-case Red ruleset with a full CHART_ORDER_MAX
+// order and a worst-case Gold one with `priority` and `num` on every pool row
+// stay inside MAX_LINE and sanitise whole.
+function wave5Worst(generation) {
+  const chart = [];
+  const ids = [];
+  for (let a = 1; a <= sanitize.BATTLE_TYPE_MAX; a += 1) {
+    chart.push(new Array(sanitize.BATTLE_TYPE_MAX).fill(400));
+    ids.push('T'.repeat(38) + String(a).padStart(2, '0'));
+  }
+  const order = [];
+  for (let i = 1; i <= sanitize.CHART_ORDER_MAX; i += 1) order.push(10 + (i % 10));
+  const pool = [];
+  for (let i = 1; i <= sanitize.METRONOME_POOL_MAX; i += 1) {
+    const entry = {
+      id: 'M'.repeat(37) + String(i).padStart(3, '0'),
+      name: 'N'.repeat(16),
+      pp: 99,
+      maxPp: 99,
+      power: 999,
+      accuracy: 255,
+      type: 31,
+      effect: 255,
+      chance: 100,
+      ppUps: 3,
+      highCrit: true,
+    };
+    if (generation === 2) {
+      entry.priority = 255;
+      entry.num = 100 + (i % 152);
+    }
+    pool.push(entry);
+  }
+  const rules = {
+    type: 'mmo.battle_ruleset',
+    battle: 'b'.repeat(40),
+    seed: 1073741824,
+    chart,
+    typeIds: ids,
+    specialTypes: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    metronomePool: pool,
+  };
+  if (generation === 1) rules.chartOrder = order;
+  else rules.timeOfDay = 'nite';
+  return rules;
+}
+
+function testWave5LineBudget() {
+  for (const generation of [1, 2]) {
+    const line = JSON.stringify(wave5Worst(generation));
+    ok(line.length < sanitize.MAX_LINE,
+      `wave 5 size: a worst-case Gen ${generation} ruleset is one line inside MAX_LINE (${line.length} bytes)`);
+    const clean = sanitize.cleanBattleRuleset(JSON.parse(line), generation);
+    ok(clean && clean.metronomePool.length === sanitize.METRONOME_POOL_MAX,
+      `wave 5 size: ...and reads back with its whole pool (Gen ${generation})`);
+    if (generation === 1) {
+      ok(clean.chartOrder.length === sanitize.CHART_ORDER_MAX, 'wave 5 size: ...and its whole chartOrder');
+    } else {
+      ok(clean.metronomePool[0].num === 101, 'wave 5 size: ...each row with its number');
+    }
+  }
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
@@ -3491,5 +3727,10 @@ testGen12PayDayOnRun();
 testIdRefusedPastForty();
 testMapIdRefusedPastSixtyFour();
 testHappinessGen2Only();
+testWave5ChartOrder();
+testWave5BatonPass();
+testWave5Gender();
+testWave5PoolNum();
+testWave5LineBudget();
 
 console.log(`hub_battle: ${passed} checks passed`);

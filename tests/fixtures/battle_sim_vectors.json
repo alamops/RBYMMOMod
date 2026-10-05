@@ -1158,11 +1158,11 @@
       }
     },
     {
-      "id": "status_confusion_self_hit_below_128",
+      "id": "status_confusion_self_hit_at_128",
       "in": {
         "status": "confusion",
         "turnsRemaining": 3,
-        "roll": 127,
+        "roll": 128,
         "level": 50,
         "attack": 100,
         "defense": 100
@@ -1176,11 +1176,11 @@
       }
     },
     {
-      "id": "status_confusion_acts_at_128",
+      "id": "status_confusion_acts_below_128",
       "in": {
         "status": "confusion",
         "turnsRemaining": 3,
-        "roll": 128,
+        "roll": 127,
         "level": 50,
         "attack": 100,
         "defense": 100
@@ -1216,7 +1216,7 @@
       "in": {
         "status": "confusion",
         "turnsRemaining": 3,
-        "roll": 0,
+        "roll": 255,
         "level": 50,
         "attack": 300,
         "defense": 600
@@ -2452,7 +2452,7 @@
         "proc": true,
         "draws": 1,
         "status": "burn",
-        "said": "Beta was burned"
+        "said": "Beta was burned!"
       }
     },
     {
@@ -2591,7 +2591,7 @@
         "proc": false,
         "draws": 0,
         "status": null,
-        "said": "Fire defrosted Beta"
+        "said": "Fire defrosted Beta!"
       }
     },
     {
@@ -2690,7 +2690,7 @@
         "proc": true,
         "draws": 1,
         "status": "freeze",
-        "said": "Beta was frozen solid"
+        "said": "Beta was frozen solid!"
       }
     },
     {
@@ -2735,7 +2735,7 @@
         "proc": true,
         "draws": 1,
         "status": "paralysis",
-        "said": "Beta is paralyzed"
+        "said": "Beta's paralyzed! It may not attack!"
       }
     },
     {
@@ -2872,7 +2872,7 @@
         "proc": true,
         "draws": 1,
         "status": "poison",
-        "said": "Beta was poisoned"
+        "said": "Beta was poisoned!"
       }
     },
     {
@@ -3098,7 +3098,7 @@
         "proc": true,
         "draws": 1,
         "stage": -1,
-        "said": "Beta's SPECIAL fell"
+        "said": "Beta's SPECIAL fell!"
       }
     },
     {
@@ -3270,7 +3270,7 @@
         "proc": true,
         "draws": 1,
         "stage": -1,
-        "said": "Beta's SPECIAL fell"
+        "said": "Beta's SPECIAL fell!"
       }
     },
     {
@@ -3321,7 +3321,7 @@
         "proc": true,
         "draws": 2,
         "confused": true,
-        "said": "Beta became confused"
+        "said": "Beta became confused!"
       }
     },
     {

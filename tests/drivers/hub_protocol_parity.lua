@@ -1269,6 +1269,11 @@ scenarios[#scenarios + 1] = {
 -- field an older reader does keep since contract K10 of
 -- docs/plans/gen12-referee-gaps-fix.md is `stage` (the signed stage of a
 -- `stat` event), so the Gen 2 read of the `stat` case below carries it.
+-- Since that plan's wave 5 two more are Gold's own on a Gen 2 hub: a
+-- Metronome pool row's `num` (the cart's move number, so the Gen 2 pool case
+-- keeps its 7) and a choice's `pass` (BATON PASS's successor, so the Gen 2
+-- choice's unreadable "far" refuses it) -- referee_gaps_wave5_dialect has
+-- the rest of their cases.
 local function gen12()
   local stray = { id = "thump", pp = 20, power = 40, accuracy = 255, type = 0, effect = 0,
                   chance = 0, num = 7 }
@@ -2569,6 +2574,304 @@ scenarios[#scenarios + 1] = {
       goldBad = timeHeal(2, "evening"),
       redNite = timeHeal(1, "nite"),
       redBad = timeHeal(1, "evening"),
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- Wave 5 of docs/plans/gen12-referee-gaps-fix.md, the wire: Red's
+-- TypeEffects order on a Gen 1 ruleset (`chartOrder`, an even list of chart
+-- indices 0..BATTLE_TYPE_MAX - 1, at most CHART_ORDER_MAX; refused whole when
+-- unreadable, ignored by Gen 2 / Gen 3 / a reader naming none); Gold's
+-- BASE_GENDER in a Gen 2 sheet's `base` (K15, 0..255, refusing the sheet when
+-- unreadable, ignored on Red); Gold's BATON PASS successor on a Gen 2 choice
+-- (`pass`, Gen 3's index and bounds; a Gen 1 hub ignores it); a Gold
+-- Metronome pool row's cart number (`num`, 1..NUM_ATTACKS2, refusing the
+-- ruleset when unreadable; Red ignores it).  Wire.battleRuleset /
+-- battleMon / battleChoice and their sanitize twins.  `orderLen` reports a
+-- long list by its length, so the fixture holds the verdict, not the list.
+-- ------------------------------------------------------------------
+
+local function wave5()
+  local function rules(extra) return merged({ chart = CHART }, extra) end
+  local function fight(extra) return merged({ battle = "b1", action = "fight", move = 0 }, extra) end
+  local B2 = { hp = 41, atk = 52, def = 63, spe = 74, spa = 85, spd = 96 }
+  local B1 = { hp = 41, atk = 52, def = 63, spd = 74, spc = 85 }
+  local function gold(gender) return sheet12(2, { base = merged(B2, { gender = gender }) }) end
+  local function pooled(extra) return rules({ metronomePool = { row12("m", extra) } }) end
+  local long = {}
+  for i = 1, 514 do long[i] = i % 20 end
+  local function first(n)
+    local out = {}
+    for i = 1, n do out[i] = long[i] end
+    return out
+  end
+  return {
+    -- chartOrder
+    { "ruleset", rules({ chartOrder = { 0, 1, 1, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { 19, 19 } }), 1 },
+    { "ruleset", rules({ chartOrder = { 1, 0, 1, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { 20, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { -1, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { 0, 1, 1 } }), 1 },
+    { "ruleset", rules({ chartOrder = {} }), 1 },
+    { "ruleset", rules({ chartOrder = { 0, NULL, 1 } }), 1 },
+    { "ruleset", rules({ chartOrder = { 0, NULL, 1, 1 } }), 1 },
+    { "ruleset", rules({ chartOrder = { NULL, NULL } }), 1 },
+    { "ruleset", rules({ chartOrder = { "1", 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { " 1 ", 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { "0x1", 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { 1.5, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { true, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { "one", 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { { 1 }, 0 } }), 1 },
+    { "ruleset", rules({ chartOrder = { a = 1 } }), 1 },
+    { "ruleset", rules({ chartOrder = "0,1" }), 1 },
+    { "ruleset", rules({ chartOrder = 7 }), 1 },
+    { "ruleset", rules({ chartOrder = NULL }), 1 },
+    { "ruleset", rules({ chartOrder = { 0, 1 }, metronomePool = { row12("m", { num = 7 }) },
+                         typeIds = { "NORMAL", "FIGHTING" } }), 1 },
+    { "ruleset", rules({ chartOrder = { 0, 1 } }), 2 },
+    { "ruleset", rules({ chartOrder = { 0, 1, 1 } }), 2 },
+    { "ruleset", rules({ chartOrder = { 0, 1 } }) },
+    { "ruleset", rules({ chartOrder = "bad" }) },
+    { "ruleset", { typeTable = CHART3, chartOrder = { 0, 1 } }, 3 },
+    { "ruleset", { typeTable = CHART3, chartOrder = "bad" }, 3 },
+    { "orderLen", rules({ chartOrder = first(512) }), 1 },
+    { "orderLen", rules({ chartOrder = first(513) }), 1 },
+    { "orderLen", rules({ chartOrder = first(514) }), 1 },
+    { "orderLen", rules({ chartOrder = first(164) }), 1 },
+    -- K15 base.gender
+    { "mon", gold(0) },
+    { "mon", gold(127) },
+    { "mon", gold(254) },
+    { "mon", gold(255) },
+    { "mon", gold(256) },
+    { "mon", gold(-1) },
+    { "mon", gold("31") },
+    { "mon", gold(" 9 ") },
+    { "mon", gold("0x1f") },
+    { "mon", gold(31.9) },
+    { "mon", gold(true) },
+    { "mon", gold("male") },
+    { "mon", gold({ 31 }) },
+    { "mon", gold(NULL) },
+    { "mon", sheet12(2, merged(k7(2), { base = merged(B2, { gender = 31 }), generation = 2 })) },
+    { "mon", sheet12(2, { base = { gender = 31 } }) },
+    { "mon", sheet12(1, { base = merged(B1, { gender = 254 }) }) },
+    { "mon", sheet12(1, { base = merged(B1, { gender = "male" }) }) },
+    { "mon", merged(mon3(), { base = merged(B2, { gender = 31 }) }) },
+    { "party", { battle = "b1", mons = { gold(31) } }, 2 },
+    { "party", { battle = "b1", mons = { gold(300) } }, 2 },
+    { "outcome", { battle = "b1", outcome = "win", reason = "catch", caught = gold(31) }, 2 },
+    -- Gold's BATON PASS successor
+    { "choice", fight({ pass = 0 }), 2 },
+    { "choice", fight({ pass = 5 }), 2 },
+    { "choice", fight({ pass = 6 }), 2 },
+    { "choice", fight({ pass = -1 }), 2 },
+    { "choice", fight({ pass = "2" }), 2 },
+    { "choice", fight({ pass = " 1 " }), 2 },
+    { "choice", fight({ pass = 1.5 }), 2 },
+    { "choice", fight({ pass = true }), 2 },
+    { "choice", fight({ pass = "two" }), 2 },
+    { "choice", fight({ pass = { 1 } }), 2 },
+    { "choice", fight({ pass = NULL }), 2 },
+    { "choice", fight({ pass = 2, dexCaught = true }), 2 },
+    { "choice", { battle = "b1", action = "switch", slot = 1, pass = 2 }, 2 },
+    { "choice", fight({ pass = 2 }), 1 },
+    { "choice", fight({ pass = 9 }), 1 },
+    { "choice", fight({ pass = 2, mimic = 1 }), 1 },
+    { "choice", fight({ pass = 2 }), 3 },
+    { "choice", fight({ pass = 9 }), 3 },
+    { "choice", fight({ pass = 2 }) },
+    { "choice", fight({ pass = 9 }) },
+    -- Gold Metronome pool `num`
+    { "ruleset", pooled({ num = 1 }), 2 },
+    { "ruleset", pooled({ num = 251 }), 2 },
+    { "ruleset", pooled({ num = 252 }), 2 },
+    { "ruleset", pooled({ num = 0 }), 2 },
+    { "ruleset", pooled({ num = -1 }), 2 },
+    { "ruleset", pooled({ num = "7" }), 2 },
+    { "ruleset", pooled({ num = 7.5 }), 2 },
+    { "ruleset", pooled({ num = true }), 2 },
+    { "ruleset", pooled({ num = "x" }), 2 },
+    { "ruleset", pooled({ num = { 7 } }), 2 },
+    { "ruleset", pooled({ num = NULL }), 2 },
+    { "ruleset", pooled({ num = 7, priority = 2, ppUps = 1 }), 2 },
+    { "ruleset", rules({ metronomePool = { row12("a", { num = 3 }), row12("b") } }), 2 },
+    { "ruleset", pooled({ num = 7 }), 1 },
+    { "ruleset", pooled({ num = 999 }), 1 },
+    { "ruleset", pooled({ num = 7 }) },
+    { "ruleset", pooled({ num = 999 }) },
+    -- the Gen 1 / Gen 2 pool read as a list on both twins (a null row closed
+    -- up, an object refused)
+    { "ruleset", rules({ metronomePool = { row12("a", { num = 3 }), NULL, row12("b") } }), 2 },
+    { "ruleset", rules({ metronomePool = { NULL } }), 1 },
+    { "ruleset", rules({ metronomePool = {} }), 1 },
+    { "ruleset", rules({ metronomePool = { a = row12("a") } }), 2 },
+    { "ruleset", rules({ metronomePool = "rows" }), 1 },
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "referee_gaps_wave5_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(wave5()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      local got
+      if kind == "ruleset" then got = Wire.battleRuleset(input, gen)
+      elseif kind == "orderLen" then
+        local read = Wire.battleRuleset(input, gen)
+        got = read and (read.chartOrder and #read.chartOrder or "(no order)") or "(refused)"
+      elseif kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, gen)
+      elseif kind == "outcome" then got = Wire.battleOutcome(input, gen)
+      elseif kind == "choice" then got = Wire.battleChoice(input, gen)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return out
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- Wave 5, the hubs and the real referees: each new field reaches its
+-- referee off the wire and changes the fight the cart's way.
+--
+--   * Red's chartOrder: a type-0 move into a type-0 / type-1 foe on a chart
+--     where 0 -> 0 is NO_EFFECT and 0 -> 1 SUPER_EFFECTIVE.  The last row
+--     AdjustDamageForMoveType applied decides PrintMoveFailureText's line:
+--     the immunity last is "It doesn't affect", the super-effective row last
+--     is "<USER>'s attack missed!", no order is the product (an immunity).
+--     A Gen 2 hub keeps none.
+--   * Gold's `pass`: BATON PASS names the second bench (party index 2); with
+--     none the referee picks the first living; a `pass` naming nobody is
+--     refused by the referee and one past SLOT_MAX by the wire (no turn).
+--   * Gold's K15 gender: ATTRACT male into female lands, male into male and a
+--     sheet with no ratio fail (`.genderless_samegender`).
+--   * Gold's pool `num`: METRONOME's byte is a move number, so the same
+--     two-row pool calls a different move once its rows state their numbers.
+-- ------------------------------------------------------------------
+
+local function wave5Hub(generation, id, rules, aMons, bMons)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  hub:openCoopBattle(id, { a.id }, { mode = "wild", hostId = a.id })
+  hub:receive(a.client, merged({ type = Wire.BATTLE_RULESET, battle = id }, rules))
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = aMons })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = bMons })
+  a.peer.outbox = {}
+  return hub, a, hub.battles[id]
+end
+
+-- The lines of `user`'s own move: from its "<USER> used" line up to the next
+-- "used" line.  Only those are what each field decides; the foe's turn is the
+-- referees' business (their own fixtures pin it), so it stays out of this
+-- digest.
+local function msgTexts(peer, user)
+  local out, on = {}, false
+  for _, msg in ipairs(takeAll(peer, Wire.BATTLE_EVENT)) do
+    if msg.t == "msg" then
+      if msg.text:find(" used ", 1, true) then on = msg.text:sub(1, #user + 1) == user .. " " end
+      if on then out[#out + 1] = msg.text end
+    end
+  end
+  return out
+end
+
+local IMMUNE_CHART = { { 0, 200 }, { 100, 100 } }
+
+-- The computer's monster on the field (side b's seat), its HP.
+local function foeHp(sim)
+  for _, fighter in ipairs(sim.fighters) do
+    if fighter.side == "b" then
+      local live = fighter.active and fighter.mons[fighter.active]
+      return orNil(live and live.hp)
+    end
+  end
+  return "(no foe)"
+end
+
+local function redOrder(generation, order)
+  local id = "co"
+  local hub, a, record = wave5Hub(generation, id, { chart = IMMUNE_CHART, chartOrder = order }, {
+    sheet12(generation, { species = "TAPPER", moves = { row12("TAP", { pp = 10, power = 40 }) } }) }, {
+    sheet12(generation, { species = "DUO", types = { 0, 1 }, moves = { row12("HUSH", { pp = 10, power = 0 }) } }) })
+  local kept = record and record.ruleset and orNil(record.ruleset.chartOrder) or "(no ruleset)"
+  if not (record and record.sim) then return { opened = false, kept = kept } end
+  local rows = record.sim.chartRows and #record.sim.chartRows or 0
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  return { opened = true, kept = kept, rows = rows, texts = msgTexts(a.peer, "TAPPER"), foeHp = foeHp(record.sim) }
+end
+
+local function goldPass(pass)
+  local id = "bp"
+  local function sheet(species, moves) return sheet12(2, { species = species, moves = moves }) end
+  local hub, a, record = wave5Hub(2, id, { chart = CHART }, {
+    sheet("PASSER", { row12("BATON_PASS", { pp = 10, power = 0, effect = 134 }) }),
+    sheet("BENCH1", { row12("TAP", { pp = 10, power = 1 }) }),
+    sheet("BENCH2", { row12("TAP", { pp = 10, power = 1 }) }) }, {
+    sheet("FOE", { row12("HUSH", { pp = 10, power = 0 }) }) })
+  if not (record and record.sim) then return { opened = false } end
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0, pass = pass })
+  local fighter = record.sim.byId[a.id]
+  return { opened = true, turn = record.sim.turn, active = fighter.mons[fighter.active].species,
+           texts = msgTexts(a.peer, "PASSER") }
+end
+
+local function goldAttract(mine, theirs)
+  local id = "at"
+  local function sheet(species, gender, moves)
+    local extra = k7(2)
+    if gender ~= nil then extra.base = merged(extra.base, { gender = gender }) end
+    return sheet12(2, merged(extra, { species = species, moves = moves }))
+  end
+  local hub, a, record = wave5Hub(2, id, { chart = CHART }, {
+    sheet("CHARMER", mine, { row12("ATTRACT", { pp = 15, power = 0, effect = 133 }) }) }, {
+    sheet("FOE", theirs, { row12("HUSH", { pp = 10, power = 0 }) }) })
+  if not (record and record.sim) then return { opened = false } end
+  local live = record.sim.byId[a.id].mons[1]
+  local held = live.base and orNil(live.base.gender) or "(no base)"
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  return { opened = true, gender = held, texts = msgTexts(a.peer, "CHARMER") }
+end
+
+local function goldMetronome(numbered)
+  local id = "mt"
+  local function poolRow(moveId, num)
+    return row12(moveId, { pp = 10, power = 0, num = numbered and num or nil })
+  end
+  local hub, a, record = wave5Hub(2, id, { chart = CHART,
+    metronomePool = { poolRow("CALLED_A", 200), poolRow("CALLED_B", 7) } }, {
+    sheet12(2, { species = "WAGGLER", moves = { row12("METRONOME", { pp = 10, power = 0, effect = 83 }) } }) }, {
+    sheet12(2, { species = "FOE", moves = { row12("HUSH", { pp = 10, power = 0 }) } }) })
+  if not (record and record.sim) then return { opened = false } end
+  local nums = {}
+  for i, entry in ipairs(record.ruleset.metronomePool or {}) do nums[i] = orNil(entry.num) end
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  return { opened = true, nums = nums, texts = msgTexts(a.peer, "WAGGLER") }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "wave5_hub_fields",
+  run = function()
+    return {
+      redImmuneLast = redOrder(1, { 0, 1, 0, 0 }),
+      redSuperLast = redOrder(1, { 0, 0, 0, 1 }),
+      redNoOrder = redOrder(1, nil),
+      redBadOrder = redOrder(1, { 0, 0, 0 }),
+      goldOrderIgnored = redOrder(2, { 0, 0, 0, 1 }),
+      goldPassBench2 = goldPass(2),
+      goldPassNone = goldPass(nil),
+      goldPassNobody = goldPass(4),
+      goldPassPastMax = goldPass(6),
+      goldAttractMF = goldAttract(0, 254),
+      goldAttractMM = goldAttract(0, 0),
+      goldAttractNone = goldAttract(nil, nil),
+      goldMetronomeNum = goldMetronome(true),
+      goldMetronomePlace = goldMetronome(false),
     }
   end,
 }

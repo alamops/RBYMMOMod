@@ -3447,15 +3447,17 @@ function M:onBattleOver(result, game, state, toLearn)
   self:note(("The %s ended in a %s."):format(
     partyFightNoun(self.party:count()), tostring(result)))
 
-  -- Gen 3: a fight between players is a link battle, and the cart ends one by
-  -- reloading the party it started with (pokefirered cable_club.c
-  -- CB2_ReturnFromCableClubBattle -> LoadPlayerParty): no whiteout for a
-  -- loss -- no money taken, no trip to a POKeMON CENTER -- and nothing owed
-  -- after it. The screen fought with copies of this player's monsters
-  -- (CoopBattle.sparOpts3), so the save already stands as it did before.
-  -- Gen 1 / Gen 2 keep their established ending below.
-  if onGen3() and (M.ranksPoints(plan)
-      or (state ~= nil and Mediated.LINK_MODES[state.mode] == true)) then
+  -- A fight between players is a link battle, and no cart ends one with a
+  -- whiteout: Gen 3 reloads the party it started with (pokefirered
+  -- cable_club.c CB2_ReturnFromCableClubBattle -> LoadPlayerParty), Gold the
+  -- party it saved before the Colosseum (pokecrystal engine/link/link.asm
+  -- `farcall LoadPokemonData`), and Red heals it in the Cable Club
+  -- (pokered CableClub_DoBattleOrTradeAgain `predef HealParty`) -- no money
+  -- taken, no trip to a POKeMON CENTER, and nothing owed after it.  The
+  -- screen fought with copies of this player's monsters
+  -- (CoopBattle.sparOpts), so the save already stands as it did before.
+  -- Every generation since wave 5 (Red and Gold used to white out the loser).
+  if M.ranksPoints(plan) or (state ~= nil and Mediated.LINK_MODES[state.mode] == true) then
     return
   end
 

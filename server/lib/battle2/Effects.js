@@ -193,7 +193,11 @@ const NAMES = [
 // as a byte (Wire.battleMove, sanitize EFFECT_MAX), so this may grow to 255.
 const MAX_EFFECT_ID = 157;
 
-// The Gold-native ids by name, for the call sites that branch on one.
+// The Gold-native ids by name, for the call sites that branch on one --
+// and the shared rows whose command Gold rewrote (wave 5): CONVERSION and
+// EFFECT_FORCE_SWITCH (ROAR, WHIRLWIND).
+const CONVERSION = 24;
+const FORCE_SWITCH = 28;
 const SP_DEF_DOWN_HIT = 87;
 const ACCURACY_DOWN_HIT = 88;
 const ATTACK_UP_HIT = 89;
@@ -757,7 +761,7 @@ function badgeTypeBoost(typeId, badges) {
 
 const STAT_LABELS = {
   atk: 'ATTACK', def: 'DEFENSE', spe: 'SPEED',
-  spa: 'SP.ATK', spd: 'SP.DEF', acc: 'ACCURACY', eva: 'EVASION',
+  spa: 'SPCL.ATK', spd: 'SPCL.DEF', acc: 'ACCURACY', eva: 'EVASION',
 };
 
 // effect id -> { stat, delta, selfTarget }
@@ -817,16 +821,19 @@ const FIELD_MOVES = {
   128: true, 129: true, 130: true,
   134: true, 141: true, 145: true, 148: true, 149: true,
   153: true,
+  // Wave 5: Gold's CONVERSION (`_conversion`).
+  24: true,
 };
 
 // The `checkhit` scripts whose command Turn runs after it (wave 4):
-// CONVERSION2, ENCORE, PAIN SPLIT.
-const TURN_COMMANDS = { 136: true, 139: true, 144: true };
+// CONVERSION2, ENCORE, PAIN SPLIT; from wave 5 ROAR / WHIRLWIND's
+// ForceSwitch.
+const TURN_COMMANDS = { 28: true, 136: true, 139: true, 144: true };
 
 // The commands that read wAttackMissed themselves and say their own failure
 // line (the Lua twin lists them).
 const READS_MISS = {
-  32: true, 49: true, 66: true, 67: true, 82: true, 84: true,
+  28: true, 32: true, 49: true, 66: true, 67: true, 82: true, 84: true,
   86: true, 103: true, 105: true, 133: true, 136: true,
   139: true, 140: true, 144: true, 150: true, 152: true,
 };
@@ -869,7 +876,7 @@ function isPhase1Primary(effectId) {
 }
 
 const PHASE5_VOLATILE = {
-  24: true, 46: true, 47: true, 57: true,
+  46: true, 47: true, 57: true,
   64: true, 65: true, 79: true,
 };
 
@@ -947,12 +954,17 @@ function copyMoveRow(m) {
     highCrit: m.highCrit === true,
     priority: m.priority,
     ppUps: m.ppUps,
+    basePp: m.basePp,
   };
 }
 
 // A move's base PP, as SKETCH copies it (the Lua twin explains): the smallest
 // base whose PP Ups (floor(base / 5), held at 7, each) reach the row's max.
+// A MIMIC / TRANSFORM copy states the base it was copied from (wave 5).
 function basePp(move) {
+  const stated = (move.basePp === null || move.basePp === undefined)
+    ? null : int(move.basePp, null);
+  if (stated !== null && stated >= 0) return stated;
   const top = Math.max(0, int(move.maxPp, int(move.pp, 0)));
   const ups = int(move.ppUps, 0);
   if (ups <= 0) return top;
@@ -972,7 +984,7 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
   }
   const turns = (rng ? rng.byte() : 0) % 4 + 2;
   mon.confusion = turns;
-  const text = `${mon.species} became confused`;
+  const text = `${mon.species} became confused!`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.confused = 1;
@@ -1018,6 +1030,16 @@ function itemLabel(mon) {
 
 // The `stat` event for a stage that moved: `amount` as it always rode and the
 // signed `stage` beside it (contract K10).
+// StatUpMessage / StatDownMessage in Gen 2's words (wave 5; the Lua twin
+// cites them): "went up!" / "went way up!" (a +2 command), "fell!" /
+// "sharply fell!".
+function statUpLine(mon, stat, delta) {
+  return `${mon.species}'s ${STAT_LABELS[stat] || stat}${int(delta, 1) >= 2 ? ' went way up!' : ' went up!'}`;
+}
+function statDownLine(mon, stat, delta) {
+  return `${mon.species}'s ${STAT_LABELS[stat] || stat}${int(delta, -1) <= -2 ? ' sharply fell!' : ' fell!'}`;
+}
+
 function statEvent(out, fighter, stage, text) {
   const fields = fighterFields(fighter);
   fields.amount = stage;
@@ -1029,13 +1051,11 @@ function statEvent(out, fighter, stage, text) {
 // One stage written and announced: the battle stats are rebuilt (the
 // snapshot drops) and the line is StatUpMessage / StatDownMessage's.
 function applyStatChange(out, fighter, mon, stat, delta) {
-  const label = STAT_LABELS[stat] || stat;
   const before = clampStage(mon.stages[stat]);
   const after = clampStage(before + delta);
   mon.stages[stat] = after;
   dropSnap(mon);
-  const verb = delta > 0 ? 'rose' : 'fell';
-  const text = `${mon.species}'s ${label} ${verb}`;
+  const text = delta > 0 ? statUpLine(mon, stat, delta) : statDownLine(mon, stat, delta);
   out.messages.push(text);
   statEvent(out, fighter, after, text);
   return true;
@@ -1109,7 +1129,7 @@ function wontRiseLine(mon, stat) {
 function statDownMissLine(targetMon, stat) {
   if (targetMon.mist) return mistLine(targetMon);
   if (clampStage(targetMon.stages[stat]) <= STAGE_MIN) return wontDropLine(targetMon, stat);
-  return 'But it failed';
+  return 'But it failed!';
 }
 
 // No generic substitute gate (wave 4): every Gold status command asks the
@@ -1118,7 +1138,7 @@ function statDownMissLine(targetMon, stat) {
 
 // The cart's failure lines: FailMove / PrintButItFailed, PrintDidntAffect(2).
 function butItFailed(out) {
-  out.messages.push('But it failed');
+  out.messages.push('But it failed!');
   return out;
 }
 function didntAffect(out, targetMon) {
@@ -1127,9 +1147,14 @@ function didntAffect(out, targetMon) {
 }
 // FailMove / FailMimic: "But it failed!", or "It failed!" while the target
 // is PROTECTing (FailText_CheckOpponentProtect).
+// AttackMissedText, a move's miss line (wave 5).
+function missLine(userMon) {
+  return `${userMon.species}'s attack missed!`;
+}
+
 function failMoveLine(targetMon) {
   if (targetMon && targetMon.protect) return 'It failed!';
-  return 'But it failed';
+  return 'But it failed!';
 }
 function failMove(out, targetMon) {
   out.messages.push(failMoveLine(targetMon));
@@ -1195,7 +1220,7 @@ function raisePrimary(out, fighter, mon, stat, delta) {
   const before = clampStage(mon.stages[stat]);
   const r = raiseStat(mon, fighter ? fighter.badges : null, stat, delta);
   if (r.raised) {
-    const text = `${mon.species}'s ${STAT_LABELS[stat] || stat} rose`;
+    const text = statUpLine(mon, stat, delta);
     out.messages.push(text);
     statEvent(out, fighter, r.stage, text);
     return true;
@@ -1219,7 +1244,7 @@ function lowerPrimary(out, c, fighter, mon, stat, delta) {
     return out;
   }
   if (stop === 'missed' || int(mon.substitute, 0) > 0) {
-    out.messages.push('But it failed');
+    out.messages.push('But it failed!');
     return out;
   }
   if (statAtFloor(mon, stat, fighter ? fighter.badges : null)) {
@@ -1268,6 +1293,8 @@ function applyPrimary(ctx) {
       const had = Boolean(userMon.status);
       userMon.status = 'sleep';
       userMon.statusTurns = REST_SLEEP_COUNT;
+      // `res SUBSTATUS_TOXIC`: the bit with no PSN too (wave 5).
+      userMon.toxicLatent = null;
       dropSnap(userMon);
       const text = `${userMon.species}`
         + (had ? ' fell asleep and became healthy!' : ' went to sleep!');
@@ -1287,7 +1314,7 @@ function applyPrimary(ctx) {
   if (effectId === 25) {
     const field = Array.isArray(c.fieldMons) ? c.fieldMons : [userMon, targetMon];
     for (const mon of field) resetStages(mon);
-    out.messages.push('All stat changes were eliminated');
+    out.messages.push('All stat changes were eliminated!');
     return out;
   }
 
@@ -1335,7 +1362,7 @@ function applyPrimary(ctx) {
     setStatus(targetMon, targetBadges, 'sleep');
     targetMon.statusTurns = turns;
     const token = wire.sleep || 'SLP';
-    const text = `${targetMon.species} fell asleep`;
+    const text = `${targetMon.species} fell asleep!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
@@ -1347,7 +1374,7 @@ function applyPrimary(ctx) {
   // BattleCommand_Poison, POISONPOWDER's and TOXIC's one command.
   if (effectId === 66 || effectId === TOXIC) {
     if (c.moveImmune || hasType(targetMon, c.poisonType)) {
-      out.messages.push(`It doesn't affect ${targetMon.species}`);
+      out.messages.push(`It doesn't affect ${targetMon.species}!`);
       return out;
     }
     if (targetMon.status === 'poison' || targetMon.status === 'toxic') {
@@ -1365,9 +1392,11 @@ function applyPrimary(ctx) {
     let text;
     if (toxic) {
       targetMon.toxicCounter = 1;
+      // The bit a HEAL BELL / BATON PASS left is the status's now.
+      targetMon.toxicLatent = null;
       text = `${targetMon.species}'s badly poisoned!`;
     } else {
-      text = `${targetMon.species} was poisoned`;
+      text = `${targetMon.species} was poisoned!`;
     }
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
@@ -1385,7 +1414,7 @@ function applyPrimary(ctx) {
       return out;
     }
     if (c.moveImmune) {
-      out.messages.push(`It doesn't affect ${targetMon.species}`);
+      out.messages.push(`It doesn't affect ${targetMon.species}!`);
       return out;
     }
     if (Items.prevents(targetMon, 'paralysis')) return protectedBy(out, targetMon);
@@ -1395,7 +1424,7 @@ function applyPrimary(ctx) {
     }
     setStatus(targetMon, targetBadges, 'paralysis');
     const token = wire.paralysis || 'PAR';
-    const text = `${targetMon.species} is paralyzed`;
+    const text = `${targetMon.species}'s paralyzed! Maybe it can't attack!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
@@ -1426,7 +1455,7 @@ function applyPrimary(ctx) {
       return out;
     }
     if (hasType(targetMon, c.grassType)) {
-      out.messages.push(`It doesn't affect ${targetMon.species}`);
+      out.messages.push(`It doesn't affect ${targetMon.species}!`);
       return out;
     }
     if (targetMon.leechSeed) {
@@ -1434,7 +1463,7 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
-    const text = `${targetMon.species} was seeded`;
+    const text = `${targetMon.species} was seeded!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.text = text;
@@ -1470,20 +1499,24 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_Substitute (the Lua twin cites it, wave 5's lines): one up
+  // already, the HP not above a quarter, else the doll and the user's wrap
+  // released.
   if (effectId === 79) {
     const cost = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 4);
     if (userMon.substitute && userMon.substitute > 0) {
-      out.nothing = true;
+      out.messages.push(`${userMon.species} has a SUBSTITUTE!`);
       return out;
     }
     if (userMon.hp <= cost) {
-      out.nothing = true;
+      out.messages.push('Too weak to make a SUBSTITUTE!');
       return out;
     }
     userMon.hp -= cost;
     userMon.substitute = cost;
+    userMon.trapped = null;
     out.directDamage = [{ amount: cost }];
-    out.messages.push(`${userMon.species} created a substitute`);
+    out.messages.push(`${userMon.species} made a SUBSTITUTE!`);
     return out;
   }
 
@@ -1497,12 +1530,13 @@ function applyPrimary(ctx) {
     const key = effectId === 64 ? 'lightScreen' : 'reflect';
     const screens = c.userScreens;
     if (!screens || typeof screens !== 'object' || int(screens[key], 0) > 0) {
-      out.messages.push('But it failed');
+      out.messages.push('But it failed!');
       return out;
     }
     screens[key] = SCREEN_TURNS;
+    // LightScreenEffectText / ReflectEffectText (wave 5).
     out.messages.push(`${userMon.species}`
-      + (effectId === 64 ? ' created a light screen' : ' created a reflect'));
+      + (effectId === 64 ? "'s SPCL.DEF rose!" : "'s DEFENSE rose!"));
     return out;
   }
 
@@ -1510,7 +1544,7 @@ function applyPrimary(ctx) {
   if (effectId === SAFEGUARD) {
     const screens = c.userScreens;
     if (!screens || typeof screens !== 'object' || int(screens.safeguard, 0) > 0) {
-      out.messages.push('But it failed');
+      out.messages.push('But it failed!');
       return out;
     }
     screens.safeguard = SAFEGUARD_TURNS;
@@ -1527,22 +1561,18 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_Mist / _FocusEnergy (wave 5): the bit already set fails.
   if (effectId === 46) {
+    if (userMon.mist) return butItFailed(out);
     userMon.mist = true;
-    out.messages.push(`${userMon.species} is shrouded in mist`);
+    out.messages.push(`${userMon.species}'s shrouded in MIST!`);
     return out;
   }
 
   if (effectId === 47) {
+    if (userMon.focusEnergy) return butItFailed(out);
     userMon.focusEnergy = true;
-    out.messages.push(`${userMon.species} is getting pumped`);
-    return out;
-  }
-
-  if (effectId === 24) {
-    const foeType = targetMon.types[0] || 0;
-    userMon.types = [foeType];
-    out.messages.push(`${userMon.species} converted type`);
+    out.messages.push(`${userMon.species}'s getting pumped!`);
     return out;
   }
 
@@ -1574,6 +1604,7 @@ function applyPrimary(ctx) {
       if (!userMon.preMimic[slot]) userMon.preMimic[slot] = copyMoveRow(userMon.moves[slot - 1]);
     }
     const copy = copyMoveRow(last);
+    copy.basePp = basePp(last);
     copy.pp = MIMIC_PP;
     copy.maxPp = MIMIC_PP;
     copy.ppUps = undefined;
@@ -1584,7 +1615,7 @@ function applyPrimary(ctx) {
   }
 
   // BattleCommand_Transform (the Lua twin carries the notes): ClearLastMove,
-  // "But it failed" against a transformed or hidden target, no substitute
+  // "But it failed!" against a transformed or hidden target, no substitute
   // asked; the copy with 5 PP a move (SKETCH 1), the DVs, the unmodified
   // stats, the target's battle stats as they stand, the types and the
   // levels; what the user was kept in `preTransform`.
@@ -1593,7 +1624,7 @@ function applyPrimary(ctx) {
     userMon.lastMove = null;
     out.clearLastMove = true;
     if (targetMon.transformed || targetMon.invulnerable) {
-      out.messages.push('But it failed');
+      out.messages.push('But it failed!');
       return out;
     }
     if (!userMon.preTransform) {
@@ -1634,6 +1665,8 @@ function applyPrimary(ctx) {
         chance: Math.max(0, int(m.chance, 0)),
         highCrit: m.highCrit === true,
         priority: m.priority,
+        // SKETCH's base PP for the copy (wave 5).
+        basePp: basePp(m),
       };
     });
     userMon.transformed = true;
@@ -1646,7 +1679,7 @@ function applyPrimary(ctx) {
     // ...and the copied species' base stats (K7), BEAT UP's target Defense.
     userMon.transformBase = targetMon.transformBase || targetMon.base || null;
     snapStats(userMon, userFighter ? userFighter.badges : null, battleStats);
-    out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
+    out.messages.push(`${userMon.species} TRANSFORMED into ${targetMon.species}!`);
     out.movesChanged = true;
     return out;
   }
@@ -1715,14 +1748,14 @@ function applyPrimary(ctx) {
       userMon.stages.spe = speed - 1;
       dropSnap(targetMon);
       dropSnap(userMon);
-      const text = `${userMon.species}'s SPEED fell`;
+      const text = statDownLine(userMon, 'spe', -1);
       out.messages.push(text);
       statEvent(out, userFighter, speed - 1, text);
     }
     for (const stat of ['atk', 'def']) {
       const r = raiseStat(userMon, badges, stat, 1);
       if (r.raised) {
-        const text = `${userMon.species}'s ${STAT_LABELS[stat]} rose`;
+        const text = statUpLine(userMon, stat, 1);
         out.messages.push(text);
         statEvent(out, userFighter, r.stage, text);
       }
@@ -1811,7 +1844,7 @@ function applyPrimary(ctx) {
       out.failureText = true;
       return out;
     }
-    const text = `${targetMon.species}'s ATTACK rose`;
+    const text = statUpLine(targetMon, 'atk', 2);
     out.messages.push(text);
     statEvent(out, targetFighter, r.stage, text);
     if (Items.prevents(targetMon, 'confusion') || c.targetSafeguard
@@ -1895,8 +1928,8 @@ const SIDE_FLINCH = {
 };
 
 const SIDE_TEXT = {
-  poison: 'was poisoned', burn: 'was burned',
-  freeze: 'was frozen solid', paralysis: 'is paralyzed',
+  poison: ' was poisoned!', burn: ' was burned!',
+  freeze: ' was frozen solid!', paralysis: "'s paralyzed! Maybe it can't attack!",
 };
 const SIDE_TOKEN = { poison: 'PSN', burn: 'BRN', freeze: 'FRZ', paralysis: 'PAR' };
 
@@ -1904,7 +1937,7 @@ const SIDE_TOKEN = { poison: 'PSN', burn: 'BRN', freeze: 'FRZ', paralysis: 'PAR'
 // seat's badges.
 function inflict(out, fighter, mon, status, wire) {
   setStatusOn(mon, fighter, status);
-  const text = `${mon.species} ${SIDE_TEXT[status]}`;
+  const text = `${mon.species}${SIDE_TEXT[status]}`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.status = wire[status] || SIDE_TOKEN[status];
@@ -1956,7 +1989,7 @@ function burnTarget(out, s, hit) {
     if (targetMon.status === 'freeze') {
       setStatusOn(targetMon, s.fighter, null);
       targetMon.statusTurns = 0;
-      const text = `${targetMon.species} was defrosted`;
+      const text = `${targetMon.species} was defrosted!`;
       out.messages.push(text);
       // No token: a `status` event without one is a cure (events.js).
       const fields = fighterFields(s.fighter);
@@ -2437,12 +2470,12 @@ function vanishes(effectId, moveOrId) {
 function chargeMessage(mon, effectId, moveOrId) {
   const key = moveKey(moveOrId);
   const species = (mon && mon.species) || 'POKéMON';
-  if (key === 'DIG') return `${species} dug a hole`;
-  if (key === 'SOLARBEAM') return `${species} took in sunlight`;
-  if (key === 'SKULL_BASH') return `${species} lowered its head`;
-  if (key === 'RAZOR_WIND') return `${species} made a whirlwind`;
-  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high`;
-  return `${species} is glowing`;
+  if (key === 'DIG') return `${species} dug a hole!`;
+  if (key === 'SOLARBEAM') return `${species} took in sunlight!`;
+  if (key === 'SKULL_BASH') return `${species} lowered its head!`;
+  if (key === 'RAZOR_WIND') return `${species} made a whirlwind!`;
+  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high!`;
+  return `${species} is glowing!`;
 }
 
 const FLY_DIG_EXCEPTIONS = {
@@ -2594,7 +2627,7 @@ const ITEM_BALL = {
   FAST_BALL: true, HEAVY_BALL: true, LOVE_BALL: true, PARK_BALL: true,
 };
 
-// Deliberately absent from itemEffect (unknown → "But it failed", still spend
+// Deliberately absent from itemEffect (unknown → "But it failed!", still spend
 // the turn; bag upload also omits them): PP_UP / PP_UP_2, evolutionary stones,
 // RARE_CANDY, HM/TM, Repel family, Escape Rope, and other field-only ids.
 // In-battle catalog: heals, status cures, Revive/Ether/Elixer, X-items /
@@ -2808,14 +2841,27 @@ function jumpKickCrash(maxHp) {
   return Math.max(1, Math.floor(Math.max(1, int(maxHp, 1)) / 8));
 }
 
-function isSwitchAndTeleport(effectId) {
-  return int(effectId, 0) === 28;
-}
-
 // Mediated modes (1v1, coop_*) have no wild flee; only modes whose name
 // contains "wild" may treat Teleport as a successful run.
 function teleportRunAllowed(mode) {
   return typeof mode === 'string' && mode.includes('wild');
+}
+
+// TryToRunAwayFromBattle's wild odds (wave 5; the Lua twin cites it): null
+// for a getaway with no byte, else what a BattleRandom byte must not exceed.
+function runOdds(playerSpeed, enemySpeed, attempts) {
+  const p = Math.max(0, int(playerSpeed, 0)) % 65536;
+  const e = Math.max(0, int(enemySpeed, 0)) % 65536;
+  if (p >= e) return null;
+  const divisor = Math.floor(e / 4) % 256;
+  if (divisor === 0) return null;
+  let quotient = Math.floor(((p * 32) % 65536) / divisor);
+  if (quotient > 255) return null;
+  for (let i = 2; i <= Math.max(1, int(attempts, 1)); i += 1) {
+    quotient += 30;
+    if (quotient > 255) return null;
+  }
+  return quotient;
 }
 
 // RUN finishes the fight in wild/coop_wild (flee) and 1v1/coop_pvp
@@ -2846,6 +2892,8 @@ module.exports = {
   NAMES,
   CATEGORIES,
   MAX_EFFECT_ID,
+  CONVERSION,
+  FORCE_SWITCH,
   SP_DEF_DOWN_HIT,
   ACCURACY_DOWN_HIT,
   ATTACK_UP_HIT,
@@ -2881,6 +2929,9 @@ module.exports = {
   setStatus,
   setStatusOn,
   statEvent,
+  statUpLine,
+  statDownLine,
+  missLine,
   didntAffectLine,
   failMoveLine,
   mistLine,
@@ -2988,9 +3039,9 @@ module.exports = {
   isExplode,
   isJumpKick,
   jumpKickCrash,
-  isSwitchAndTeleport,
   teleportRunAllowed,
   runEndsBattle,
+  runOdds,
   isPayDay,
   isMirrorMove,
   isMimic,

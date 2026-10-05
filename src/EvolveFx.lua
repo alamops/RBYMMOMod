@@ -34,7 +34,7 @@
 -- (pokefirered/src/battle_main.c FreeResetData_ReturnToOvOrDoEvolutions) --
 -- only after a fight that was won.
 
-local need = ...
+local need, mod = ...
 local Gen = need("Gen")
 local Gen3 = need("Gen3")
 local Exp2 = need("Exp2")
@@ -250,15 +250,58 @@ function M.advance(movie, dt, pressedB)
   return movie
 end
 
-local function gen2Daytime()
-  local ok, Palettes = pcall(require, "src.render.Palettes")
-  if not (ok and type(Palettes) == "table"
-      and type(Palettes.clockDaytime) == "function") then
-    return nil
-  end
-  local good, tod = pcall(Palettes.clockDaytime)
-  if good then return tod end
-  return nil
+-- Gold's wTimeOfDay as the engine's evolution check spells it ("MORN" |
+-- "DAY" | "NITE"; src/core/gen2/Evolution.lua compares NITE), or nil.
+--
+-- pokecrystal EvolveAfterBattle (engine/pokemon/evolve.asm) reads wTimeOfDay
+-- for a happiness evolution's time (`.happiness`: TR_MORNDAY / TR_NITE against
+-- NITE_F) -- GetTimeOfDay's MORN_F / DAY_F / NITE_F off the RTC hour
+-- (engine/rtc/rtc.asm), never the palette's DARKNESS_F.  This used to require
+-- `src.render.Palettes`, which does not exist, so the pcall always failed and a
+-- Gold ESPEON / UMBREON after a mediated fight never had a time to evolve by.
+-- The overworld is asked what the engine's own battle is handed
+-- (src/world/gen2/World.lua startScriptedBattle's `timeOfDay =
+-- self:timeOfDayId()`), in this order -- MediatedBattle.timeOfDay2, which cuts
+-- the referee's ruleset, reads the same answer through here:
+--
+--   1. `World:timeOfDayId()`, the engine battle's own number (0 / 1 / 2);
+--   2. the overworld's clock word (`tod`), should a build lack (1);
+--   3. `Palettes.clockDaytime` (src/world/gen2/Palettes.lua, required lazily
+--      and only on a Gold boot) at the overworld's hour.
+--
+-- Nothing answers (no overworld: a headless run, the title screen) -> nil, the
+-- engine's own reading of an absent time (not night).
+local TIME_IDS2 = { [0] = "MORN", [1] = "DAY", [2] = "NITE" }
+local TIME_WORDS2 = { MORN = "MORN", DAY = "DAY", NITE = "NITE" }
+function M.timeOfDay2(game)
+  if Gen.generation(game) ~= 2 then return nil end
+  local found = nil
+  pcall(function()
+    local world = type(mod) == "table" and mod.world or nil
+    local ow = type(world) == "table" and type(world.overworld) == "function"
+      and world:overworld() or nil
+    if type(ow) ~= "table" then return end
+    if type(ow.timeOfDayId) == "function" then
+      local id = tonumber(ow:timeOfDayId())
+      found = id and TIME_IDS2[math.floor(id)] or nil
+      if found then return end
+    end
+    if type(ow.tod) == "string" then
+      found = TIME_WORDS2[ow.tod:upper()]
+      if found then return end
+    end
+    local ok, Palettes = pcall(require, "src.world.gen2.Palettes")
+    if ok and type(Palettes) == "table" and type(Palettes.clockDaytime) == "function" then
+      local hour = type(ow.hour) == "function" and tonumber(ow:hour()) or nil
+      local word = Palettes.clockDaytime(hour)
+      found = type(word) == "string" and TIME_WORDS2[word:upper()] or nil
+    end
+  end)
+  return found
+end
+
+local function gen2Daytime(game)
+  return M.timeOfDay2(game)
 end
 
 -- Does this mon now qualify for a *level-up* evolution? Nil if not, or if
@@ -285,7 +328,7 @@ function M.pending(game, mon)
     end
     local entry
     local ran = pcall(function()
-      entry = Evolution.checkMon(game.data, mon, { timeOfDay = gen2Daytime() })
+      entry = Evolution.checkMon(game.data, mon, { timeOfDay = gen2Daytime(game) })
     end)
     if ran and type(entry) == "table" and entry.into then
       return {
@@ -655,7 +698,7 @@ offerEvolutionsGen2 = function(game, leveledUp, ui, note)
   end
   if not flagged then return false end
   local planned = Evolution.plan(game.data, party, flags,
-    { timeOfDay = gen2Daytime() })
+    { timeOfDay = gen2Daytime(game) })
   if type(planned) ~= "table" or #planned == 0 then return false end
   if not (ui and type(ui.push) == "function") then
     note("could not open the evolution screen, so POKéMON that "

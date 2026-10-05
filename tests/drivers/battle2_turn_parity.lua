@@ -3247,6 +3247,248 @@ scenario("r2d_perish_2v2", function(events)
 end)
 
 -- ------------------------------------------------------------------
+-- The referee-gaps run's wave 5 (R2e): the last Gold rows.
+-- ------------------------------------------------------------------
+
+local LEFTOVERS = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }
+local SMOKE_BALL = { "SMOKE_BALL", "HELD_ESCAPE", 0, "SMOKE BALL" }
+
+-- CONVERSION (move_effects/conversion.asm): a type of one of the user's own
+-- moves it does not have -- WATER or FIRE, then the other or NORMAL -- off
+-- the `and 3` loop; a send-out gives the species' types back (InitBattleMon:
+-- Alpha's WATER hit is no STAB on its return); Gamma, whose moves are all
+-- its own NORMAL, fails ("But it failed!").
+scenario("r2e_conversion", function(events)
+  return seq(events, duo4("r5cv", "1v1", 901,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, types = { 0 },
+           moves = { hm("CONVERSION", 0, 0, 24), hm("water_hit", 30, 3), hm("fire_hit", 30, 4) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, types = { 0 },
+           moves = { hm("CONVERSION", 0, 0, 24), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(S(1), F(0)), both3(F(0), F(0)),
+      both3(S(0), F(0)), both3(F(1), F(0)) })
+end)
+
+-- HEAL BELL leaves SUBSTATUS_TOXIC (heal_bell.asm): Alpha's badly poisoned
+-- count (60, 120 off 960) goes on under the PSN POISONPOWDER gives it
+-- after the bell -- 180, not the eighth (120) a plain poison would take.
+scenario("r2e_heal_bell_toxic", function(events)
+  return seq(events, duo4("r5hb", "1v1", 902,
+    { mn({ species = "Alpha", maxHp = 960, spe = 90, moves = { hm("HEAL_BELL", 0, 0, 141), hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("TOXIC", 0, 13, 105), hm("POISONPOWDER", 0, 13, 66), hm("wait", 0, 0, 85) } }) }),
+    { both3(F(1), F(0)), both3(F(1), F(2)), both3(F(1), F(2)), both3(F(0), F(1)), both3(F(1), F(2)),
+      both3(F(1), F(2)) })
+end)
+
+-- BATON PASS hands SUBSTATUS_TOXIC and the count on to a successor that is
+-- not poisoned (baton_pass.asm keeps SubStatus5): Gamma, burned after it, is
+-- hurt by its burn on the passed count (2/16, then 3/16), not the eighth.
+scenario("r2e_baton_toxic", function(events)
+  return seq(events, duo4("r5bt", "1v1", 903,
+    { mn({ species = "Alpha", maxHp = 960, spe = 90, moves = { hm("BATON_PASS", 0, 0, 134), hm("wait", 0, 0, 85) } }),
+      mn({ species = "Gamma", maxHp = 960, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("TOXIC", 0, 13, 105), hm("ember", 1, 4, 4, 60, 255), hm("wait", 0, 0, 85) } }) }),
+    { both3(F(1), F(0)), both3(F(1), F(2)), both3(FP(0, 1), F(1)), both3(F(0), F(2)), both3(F(0), F(2)) })
+end)
+
+-- SKETCH copies the move's base PP (`Moves + MOVE_PP` by id): the wild
+-- monster's MIMIC'd SLAM (a 5-PP copy) is sketched by Gamma with SLAM's own
+-- 35.
+scenario("r2e_sketch_mimic", function(events)
+  return seq(events, duo4("r5sm", "wild", 904,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("SLAM", 40, 0, 0, 35), hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, moves = { hm("SKETCH", 0, 0, 148, 1), hm("tap", 1) } }) },
+    { mn({ species = "Wild", maxHp = 900, spe = 10, moves = { hm("MIMIC", 0, 0, 82), hm("wait", 0, 0, 85) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(S(1), F(0), "wild"), both3(F(0), F(1), "wild"),
+      both3(F(1), F(1), "wild") })
+end)
+
+-- DESTINY BOND against a recoil knockout: the target's faint and the user's
+-- (its recoil left it at 0) both wait for `checkfaint`'s line, the target's
+-- first.
+scenario("r2e_bond_recoil", function(events)
+  return seq(events, duo4("r5br", "1v1", 905,
+    { mn({ species = "Alpha", maxHp = 400, hp = 10, atk = 200, spe = 10, moves = { hm("TAKE_DOWN", 200, 0, 48) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 100, spe = 90, moves = { hm("DESTINY_BOND", 0, 0, 138) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), { { "p1", S(1) }, { "p2", S(1) } }, both3(F(0), F(0)) })
+end)
+
+-- ROAR / WHIRLWIND in a trainer (link) fight (BattleCommand_ForceSwitch):
+-- Bob's ROAR, last, drags a random living member of Ann's party out into the
+-- SPIKES; used first (Ann's, both ROARing) it fails.
+scenario("r2e_roar_link", function(events)
+  local ann = function(name)
+    return mn({ species = name, maxHp = 800, spe = 90, moves = { hm("tap", 1), hm("ROAR", 0, 0, 28) } })
+  end
+  return seq(events, duo4("r5rl", "1v1", 906,
+    { ann("Alpha"), ann("Gamma"), ann("Delta") },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("SPIKES", 0, 0, 149), hm("ROAR", 0, 0, 28) } }),
+      mn({ species = "Iota", maxHp = 900, spe = 10, moves = { hm("SPIKES", 0, 0, 149), hm("ROAR", 0, 0, 28) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(1)) })
+end)
+
+-- WHIRLWIND against a lower-level wild monster: no byte, "was blown away!",
+-- and the fight ends as an escape.
+scenario("r2e_whirlwind_wild", function(events)
+  return seq(events, duo4("r5ww", "wild", 907,
+    { mn({ species = "Alpha", level = 30, maxHp = 900, spe = 90, moves = { hm("WHIRLWIND", 0, 0, 28) } }) },
+    { mn({ species = "Wild", level = 20, maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild") })
+end)
+
+-- ROAR from below the wild monster's level: the level loop's byte, against
+-- its level / 4 -- "But it failed!" or "fled in fear!".
+scenario("r2e_roar_wild_low", function(events)
+  return seq(events, duo4("r5rw", "wild", 908,
+    { mn({ species = "Alpha", level = 10, maxHp = 900, spe = 90, moves = { hm("ROAR", 0, 0, 28) } }) },
+    { mn({ species = "Wild", level = 90, maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"),
+      both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild") })
+end)
+
+-- PERISH SONG and SPIKES leave a monster at 0 HP and not fainted (the cart's
+-- bug): Alpha perishes at the turn's last check, so Gamma -- whose SPIKES
+-- take it to 0 at the send-out -- stands into the next turn, moves first,
+-- and faints at the check after its move.
+scenario("r2e_spikes_standing", function(events)
+  return seq(events, duo4("r5ss", "1v1", 909,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 100, hp = 5, spe = 90, moves = { hm("tap", 1) } }),
+      mn({ species = "Iota", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("SPIKES", 0, 0, 149), hm("PERISH_SONG", 0, 0, 145), hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0)),
+      { { "p1", S(1) } }, both3(F(0), F(0)), { { "p1", S(2) } }, both3(F(0), F(0)) })
+end)
+
+-- ...and with LEFTOVERS the standing successor is lifted off 0 by the held
+-- items of the turn's end (HandleLeftovers checks no faint): it fights on.
+scenario("r2e_spikes_leftovers", function(events)
+  return seq(events, duo4("r5sl", "1v1", 910,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 160, hp = 5, spe = 90, item = LEFTOVERS, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("SPIKES", 0, 0, 149), hm("PERISH_SONG", 0, 0, 145), hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0)),
+      { { "p1", S(1) } }, both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- ...and a successor that comes in after a move's knockout (the turn's own
+-- check) is found by the next check at once: it faints before anything.
+scenario("r2e_spikes_early", function(events)
+  return seq(events, duo4("r5se", "1v1", 911,
+    { mn({ species = "Alpha", maxHp = 50, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 100, hp = 5, spe = 90, moves = { hm("tap", 1) } }),
+      mn({ species = "Iota", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, atk = 250, spe = 90,
+           moves = { hm("SPIKES", 0, 0, 149), hm("slam", 250) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), { { "p1", S(1) } }, { { "p1", S(2) } }, both3(F(0), F(0)) })
+end)
+
+-- The computer's switch keeps its move-order slot (DetermineMoveOrder runs
+-- before AI_SwitchOrTryItem): slower than Ann, its poisoned successor's
+-- ResidualDamage follows Ann's move and residual; faster, it comes first.
+scenario("r2e_ai_switch_slow", function(events)
+  return seq(events, duo4("r5as", "coop_npc", 912,
+    { mn({ species = "Alpha", maxHp = 800, spe = 50, status = "PSN", moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 800, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 800, spe = 10, status = "PSN", moves = { hm("tap", 1) } }) }),
+    { both3(F(0), S(1)), both3(F(0), F(0)) })
+end)
+scenario("r2e_ai_switch_fast", function(events)
+  return seq(events, duo4("r5af", "coop_npc", 913,
+    { mn({ species = "Alpha", maxHp = 800, spe = 50, status = "PSN", moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 800, spe = 90, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 800, spe = 10, status = "PSN", moves = { hm("tap", 1) } }) }),
+    { both3(F(0), S(1)), both3(F(0), F(0)) })
+end)
+
+-- A PURSUIT spent chasing a switch keeps its slot in a 2v2 (coop_pvp): Bob's
+-- poisoned Beta takes its residual after the faster Delta's and Alpha's
+-- moves, not ahead of them.
+scenario("r2e_pursuit_slot", function(events)
+  local function round(a1, a2, b1, b2)
+    return { { "a1", a1 }, { "a2", a2 }, { "b1", b1 }, { "b2", b2 } }
+  end
+  local T = function(i, slot) return { action = "fight", move = i, target = slot } end
+  return seq(events, { id = "r5ps", mode = "coop_pvp", seed = 914, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = R2D_TYPES, chart = R2D_CHART, specialTypes = R2D_SPECIAL,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 900, spe = 50,
+              moves = { hm("tap", 1) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 900, spe = 40,
+              moves = { hm("tap", 1) } }), mn({ species = "Iota", maxHp = 900, spe = 40,
+              moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 900, spe = 30, status = "PSN",
+              moves = { hm("PURSUIT", 40, 7, 117) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 900, spe = 70,
+              moves = { hm("tap", 1) } }) } } },
+    } },
+    { round(T(0, 3), { action = "switch", slot = 1 }, T(0, 1), T(0, 0)), round(T(0, 3), T(0, 3), T(0, 0), T(0, 0)) })
+end)
+
+-- A coop_wild RUN rolls TryToRunAwayFromBattle's odds: slow Ann can't
+-- escape (her try counted, the turn spent); Abe's SMOKE BALL gets away.
+scenario("r2e_run_coop_wild", function(events)
+  return seq(events, { id = "r5rc", mode = "coop_wild", seed = 915, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = R2D_TYPES, chart = R2D_CHART, specialTypes = R2D_SPECIAL,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 900, spe = 10,
+              moves = { hm("tap", 1) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 900, spe = 10,
+              item = SMOKE_BALL, moves = { hm("tap", 1) } }) } } },
+      b = { { playerId = "wild", name = "Wild", mons = { mn({ species = "Beta", maxHp = 900, spe = 200,
+              moves = { hm("tap", 1) } }) } } },
+    } },
+    { { { "a1", { action = "run" } }, { "a2", { action = "fight", move = 0, target = 3 } }, { "wild", F(0) } },
+      { { "a1", { action = "fight", move = 0, target = 3 } }, { "a2", { action = "run" } }, { "wild", F(0) } } })
+end)
+
+-- METRONOME's pool, numbered: a row with no `num` (a modded move) never
+-- takes a place a vanilla number owns -- it is unreachable.
+scenario("r2e_pool_num", function(events)
+  local pool = {}
+  for n = 1, 40 do
+    pool[#pool + 1] = hm("move" .. n, 10)
+    pool[#pool].num = n
+  end
+  table.insert(pool, 2, hm("MODDED", 250))
+  return seq(events, duo4("r5pn", "1v1", 916,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("METRONOME", 0, 0, 83) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { metronomePool = pool }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- CheckTurn's confusion (wave 5): a count running out snaps out with no
+-- byte; one going on says "is confused!" and draws its byte.
+scenario("r2e_confusion_lines", function(events)
+  return seq(events, duo4("r5cf", "1v1", 917,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, confusion = 1, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, confusion = 3, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- MIST and FOCUS ENERGY fail while already up; SUBSTITUTE's own lines.
+scenario("r2e_volatile_lines", function(events)
+  return seq(events, duo4("r5vl", "1v1", 918,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90,
+           moves = { hm("MIST", 0, 0, 46), hm("FOCUS_ENERGY", 0, 0, 47), hm("SUBSTITUTE", 0, 0, 79) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("slam", 30) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)),
+      both3(F(2), F(0)) })
+end)
+
+-- ------------------------------------------------------------------
 
 local out = {}
 for _, entry in ipairs(scenarios) do

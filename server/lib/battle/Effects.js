@@ -472,9 +472,11 @@ function changeStat(ctx) {
 // Phase 1 primary handlers
 // ------------------------------------------------------------------
 
+// StatModTextStrings (data/battle/stat_mod_names.asm): the evasion stat is
+// "EVADE" in the cart's sentences.
 const STAT_LABELS = {
   atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
-  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVASION',
+  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVADE',
 };
 
 // effect id -> { stat, delta, selfTarget }
@@ -659,12 +661,12 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
     // ConditionalPrintButItFailed prints (wMoveDidntMiss is clear on a
     // power-0 move); the side effect's `cp CONFUSION_SIDE_EFFECT / ret z`
     // says nothing.
-    if (failIfAlready) out.messages.push('But it failed');
+    if (failIfAlready) out.messages.push('But, it failed!');
     return;
   }
   const turns = (rng ? rng.byte() : 0) % 4 + 2;
   mon.confusion = turns;
-  const text = `${mon.species} became confused`;
+  const text = `${mon.species} became confused!`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.confused = 1;
@@ -701,10 +703,16 @@ function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) 
     mon, fighter, stat, delta, mover, nonMover,
   });
   if (outcome === 'max' || outcome === 'min' || outcome === 'stuck') {
-    if (!side) out.messages.push('Nothing happened');
+    if (!side) out.messages.push('Nothing happened!');
     return;
   }
-  const text = `${mon.species}'s ${label} ${outcome}`;
+  // MonsStatsRoseText / MonsStatsFellText (effects.asm :516-536, :718-742):
+  // "<USER>'s <STAT> rose!" and "<TARGET>'s <STAT> fell!", with "greatly"
+  // for the two-stage effects (an UP2 effect: `cp ATTACK_DOWN1_EFFECT / ret
+  // nc`; a DOWN2 one: BIDE_EFFECT up to ATTACK_DOWN_SIDE_EFFECT). A side
+  // effect's one stage is plain "fell!".
+  const text = `${mon.species}'s ${label}`
+    + `${(delta >= 2 || delta <= -2) ? ' greatly ' : ' '}${outcome}!`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   // The stage it now sits at -- when that is not below neutral. `amount` is
@@ -871,6 +879,11 @@ function restoreMoves(mon) {
     if (row) {
       const back = copyMoveRow(row);
       back.pp = Math.max(0, int(mon.moves[i - 1].pp, back.pp));
+      // ...and its PP Ups: one byte, which a wrapping DecrementPP borrows
+      // from in both copies alike (Turn `_decrementPp`).
+      if (mon.moves[i - 1].ppUps !== undefined && mon.moves[i - 1].ppUps !== null) {
+        back.ppUps = mon.moves[i - 1].ppUps;
+      }
       mon.moves[i - 1] = back;
     }
   }
@@ -944,8 +957,41 @@ function applyPrimary(ctx) {
   }
 
   if (effectId === 56) {
-    const amount = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 2);
+    // HealEffect_ (move_effects/heal.asm). Full HP fails it, through a
+    // compare that is the cart's own bug: `cp [hl]` on the high bytes only
+    // sets the carry and `sbc [hl]` on the low ones decides, so a monster
+    // 255 or 511 HP short of its maximum fails too -- "But, it failed!".
+    // REST then writes 2 over the whole status byte -- asleep for two turns,
+    // any poison, burn, freeze or paralysis gone (their stored penalties
+    // stay: nothing recomputes the stats) and a TOXIC's BADLY_POISONED bit,
+    // which lives in BattleStatus3, left lingering -- says "started
+    // sleeping!" or, when it had a status, "fell asleep and became
+    // healthy!", and heals to the full; RECOVER and SOFTBOILED heal half the
+    // maximum. RegainedHealthText follows the HP (`afterHeals`).
+    const hp = Math.max(0, int(userMon.hp, 0));
+    const maxHp = Math.max(1, int(userMon.maxHp, 1));
+    const carry = ((Math.floor(hp / 256) % 256) < (Math.floor(maxHp / 256) % 256)) ? 1 : 0;
+    if (((((hp % 256) - (maxHp % 256) - carry) % 256) + 256) % 256 === 0) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
+    let amount = Math.floor(maxHp / 2);
+    if (moveKey(c.moveId) === 'REST') {
+      const had = hasMajorStatus(userMon);
+      if (userMon.status === 'toxic') userMon.toxicLinger = true;
+      userMon.status = 'sleep';
+      userMon.statusTurns = 2;
+      const text = had ? `${userMon.species} fell asleep and became healthy!`
+        : `${userMon.species} started sleeping!`;
+      out.messages.push(text);
+      const fields = fighterFields(userFighter);
+      fields.status = wire.sleep || 'SLP';
+      fields.text = text;
+      out.events.push({ kind: 'status', fields });
+      amount = maxHp;
+    }
     out.heals.push({ amount });
+    out.afterHeals = [`${userMon.species} regained health!`];
     return out;
   }
 
@@ -980,7 +1026,7 @@ function applyPrimary(ctx) {
       fields.text = `${seat.mon.species} snapped out of confusion`;
       out.events.push({ kind: 'status', fields });
     }
-    out.messages.push('All stat changes were eliminated');
+    out.messages.push('All STATUS changes are eliminated!');
     return out;
   }
 
@@ -1012,7 +1058,7 @@ function applyPrimary(ctx) {
     targetMon.status = 'sleep';
     targetMon.statusTurns = turns;
     const token = wire.sleep || 'SLP';
-    const text = `${targetMon.species} fell asleep`;
+    const text = `${targetMon.species} fell asleep!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
@@ -1037,7 +1083,7 @@ function applyPrimary(ctx) {
     targetMon.toxicLinger = null;
     if (toxic) targetMon.toxicCounter = 1;
     const token = toxic ? (wire.toxic || 'TOX') : (wire.poison || 'PSN');
-    const text = `${targetMon.species}${toxic ? "'s badly poisoned" : ' was poisoned'}`;
+    const text = `${targetMon.species}${toxic ? "'s badly poisoned!" : ' was poisoned!'}`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
@@ -1056,7 +1102,8 @@ function applyPrimary(ctx) {
     // (paralyze.asm `callfar QuarterSpeedDueToParalysis`).
     applyStatusPenalty(targetMon);
     const token = wire.paralysis || 'PAR';
-    const text = `${targetMon.species} is paralyzed`;
+    // PrintMayNotAttackText (paralyze.asm :39).
+    const text = `${targetMon.species}'s paralyzed! It may not attack!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
@@ -1076,7 +1123,7 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
-    const text = `${targetMon.species} was seeded`;
+    const text = `${targetMon.species} was seeded!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.text = text;
@@ -1097,12 +1144,12 @@ function applyPrimary(ctx) {
     // PP outside a link battle (`c.unlimitedPp`) and are taken as found.
     // Then `BattleRandom & 7` + 1 turns: 1..8.
     if (targetMon.disable && int(targetMon.disable.turns, 0) > 0) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     const moves = targetMon.moves || [];
     if (moves.length === 0 || !rng) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     let slot = null;
@@ -1133,7 +1180,7 @@ function applyPrimary(ctx) {
             if (int(moves[i - 1].pp, 0) > 0) anyPp = true;
           }
           if (!anyPp) {
-            out.messages.push('But it failed');
+            out.messages.push('But, it failed!');
             return out;
           }
           if (int(m.pp, 0) > 0 || int(m.ppUps, 0) > 0) slot = pick;
@@ -1141,32 +1188,37 @@ function applyPrimary(ctx) {
       }
     }
     if (slot === null) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     const turns = rng.byte() % 8 + 1;
     // The slot (the menu's wPlayerDisabledMove nibble) and the move's id
     // (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
     targetMon.disable = { moveIndex: slot, turns, moveId: moves[slot - 1].id };
-    out.messages.push(`${moveLabel(moves[slot - 1])} was disabled`);
+    out.messages.push(`${targetMon.species}'s ${moveLabel(moves[slot - 1])} was disabled!`);
     return out;
   }
 
   if (effectId === 79) {
+    // SubstituteEffect_ (move_effects/substitute.asm): HasSubstituteText
+    // for a doll already up, TooWeakSubstituteText for HP the quarter would
+    // not leave standing. (The cart's own bug lets a monster at exactly a
+    // quarter make one and sit at 0 HP; the referee does not field a 0-HP
+    // monster, and keeps the `<=`.)
     const cost = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 4);
     if (hasSubstitute(userMon)) {
-      out.nothing = true;
+      out.messages.push(`${userMon.species} has a SUBSTITUTE!`);
       return out;
     }
     if (userMon.hp <= cost) {
-      out.nothing = true;
+      out.messages.push('Too weak to make a SUBSTITUTE!');
       return out;
     }
     userMon.hp -= cost;
     userMon.substitute = cost;
     userMon.subAtZero = null;
     out.directDamage = [{ amount: cost }];
-    out.messages.push(`${userMon.species} created a substitute`);
+    out.messages.push('It created a SUBSTITUTE!');
     return out;
   }
 
@@ -1175,21 +1227,21 @@ function applyPrimary(ctx) {
   // engine/battle/move_effects/reflect_light_screen.asm `.moveFailed`).
   if (effectId === 64) {
     if (userMon.lightScreen) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     userMon.lightScreen = true;
-    out.messages.push(`${userMon.species} created a light screen`);
+    out.messages.push(`${userMon.species}'s protected against special attacks!`);
     return out;
   }
 
   if (effectId === 65) {
     if (userMon.reflect) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     userMon.reflect = true;
-    out.messages.push(`${userMon.species} created a reflect`);
+    out.messages.push(`${userMon.species} gained armor!`);
     return out;
   }
 
@@ -1198,28 +1250,33 @@ function applyPrimary(ctx) {
   // `.alreadyUsing`, PrintButItFailedText_ -- "But it failed!".
   if (effectId === 46) {
     if (userMon.mist) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     userMon.mist = true;
-    out.messages.push(`${userMon.species} is shrouded in mist`);
+    out.messages.push(`${userMon.species}'s shrouded in mist!`);
     return out;
   }
 
   if (effectId === 47) {
     if (userMon.focusEnergy) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     userMon.focusEnergy = true;
-    out.messages.push(`${userMon.species} is getting pumped`);
+    out.messages.push(`${userMon.species}'s getting pumped!`);
     return out;
   }
 
   if (effectId === 24) {
-    const foeType = targetMon.types[0] || 0;
-    userMon.types = [foeType];
-    out.messages.push(`${userMon.species} converted type`);
+    // ConversionEffect_ (move_effects/conversion.asm) copies BOTH of the
+    // target's type bytes over the user's (`ld a, [hli] / ld [de], a`
+    // twice), then ConvertedTypeText.
+    const types = [];
+    for (let i = 0; i < (targetMon.types || []).length; i += 1) types.push(targetMon.types[i]);
+    if (types.length === 0) types.push(0);
+    userMon.types = types;
+    out.messages.push(`Converted type to ${targetMon.species}'s!`);
     return out;
   }
 
@@ -1239,7 +1296,7 @@ function applyPrimary(ctx) {
       ? targetMon.moves[pick - 1] : undefined;
     const slotMove = moveIndex >= 1 ? userMon.moves[moveIndex - 1] : undefined;
     if (!(source && slotMove)) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     if (!userMon.transformed) {
@@ -1263,7 +1320,7 @@ function applyPrimary(ctx) {
       chance: Math.max(0, int(source.chance, 0)),
       highCrit: source.highCrit === true,
     };
-    out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
+    out.messages.push(`${userMon.species} learned ${moveLabel(source)}!`);
     out.movesChanged = true;
     return out;
   }
@@ -1279,7 +1336,7 @@ function applyPrimary(ctx) {
     // so nothing fails. `c.playerMover` is the owner's rule for "the player"
     // (Turn: side a against the computer, both sides of a link).
     if (c.playerMover && userMon.invulnerable) {
-      out.messages.push('But it failed');
+      out.messages.push('But, it failed!');
       return out;
     }
     ensureBattleStats(userMon);
@@ -1333,7 +1390,7 @@ function applyPrimary(ctx) {
       highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
-    out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
+    out.messages.push(`${userMon.species} transformed into ${targetMon.species}!`);
     out.movesChanged = true;
     return out;
   }
@@ -1423,10 +1480,10 @@ const SIDE_STAT_DOWN = {
 };
 
 const INFLICTED = {
-  poison: { token: 'PSN', says: ' was poisoned' },
-  burn: { token: 'BRN', says: ' was burned' },
-  freeze: { token: 'FRZ', says: ' was frozen solid' },
-  paralysis: { token: 'PAR', says: ' is paralyzed' },
+  poison: { token: 'PSN', says: ' was poisoned!' },
+  burn: { token: 'BRN', says: ' was burned!' },
+  freeze: { token: 'FRZ', says: ' was frozen solid!' },
+  paralysis: { token: 'PAR', says: "'s paralyzed! It may not attack!" },
 };
 
 // Whether chart index `typeIndex` is one of the monster's (wEnemyMonType1 /
@@ -1520,7 +1577,7 @@ function applySide(ctx) {
         && moveType === c.fireType) {
         targetMon.status = null;
         targetMon.statusTurns = 0;
-        const text = `Fire defrosted ${targetMon.species}`;
+        const text = `Fire defrosted ${targetMon.species}!`;
         out.messages.push(text);
         // No token: a `status` event without one is a cure (events.js).
         const fields = fighterFields(targetFighter);
@@ -1762,12 +1819,12 @@ function vanishes(effectId, moveOrId) {
 function chargeMessage(mon, effectId, moveOrId) {
   const key = moveKey(moveOrId);
   const species = (mon && mon.species) || 'POKéMON';
-  if (key === 'DIG') return `${species} dug a hole`;
-  if (key === 'SOLARBEAM') return `${species} took in sunlight`;
-  if (key === 'SKULL_BASH') return `${species} lowered its head`;
-  if (key === 'RAZOR_WIND') return `${species} made a whirlwind`;
-  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high`;
-  return `${species} is glowing`;
+  if (key === 'DIG') return `${species} dug a hole!`;
+  if (key === 'SOLARBEAM') return `${species} took in sunlight!`;
+  if (key === 'SKULL_BASH') return `${species} lowered its head!`;
+  if (key === 'RAZOR_WIND') return `${species} made a whirlwind!`;
+  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high!`;
+  return `${species} is glowing!`;
 }
 
 // MoveHitTest (core.asm :5228-5262): SWIFT's `ret z` comes before the

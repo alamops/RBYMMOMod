@@ -2250,6 +2250,14 @@ function M:tryStartSim(record)
   if self.generation == 2 then
     createOpts.timeOfDay = rules.timeOfDay
   end
+  -- Red's TypeEffects order (Wire.battleRuleset reads `chartOrder` on a Gen 1
+  -- hub alone, wave 5), which decides a dual type's effectiveness line and
+  -- its "doesn't affect" / "missed" -- the last row AdjustDamageForMoveType
+  -- applied (BattleSim Turn.create's `opts.chartOrder`; absent is its
+  -- product reading).
+  if self.generation == 1 then
+    createOpts.chartOrder = rules.chartOrder
+  end
   local battle, why = self.Turn.create(createOpts)
   if not battle then
     -- Turn.create answers a reason rather than raising, and this file owns no
@@ -3712,8 +3720,9 @@ handlers[Wire.BATTLE_CHOICE] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end
 
-  -- The hub's generation, so only a Gen 3 hub reads Gen 3's `pass` /
-  -- `dexCaught` (a Gen 1 / Gen 2 choice is read exactly as it always was).
+  -- The hub's generation, so each field is read where its cart has it: Gen
+  -- 3's `dexCaught` on a Gen 3 hub, BATON PASS's `pass` on a Gen 2 or Gen 3
+  -- hub (wave 5: Gold's too), Red's MIMIC pick `mimic` on a Gen 1 hub.
   local choice = Wire.battleChoice(msg, self.generation)
   if not choice or choice.battle ~= record.id then return end
   -- Item choices are proved against the bag uploaded with the party

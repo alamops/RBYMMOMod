@@ -17,6 +17,14 @@
 --   0. a coop_wild RUN's escape byte, before anything else in the turn
 --      (TryRunningFromBattle runs in DisplayBattleMenu: `_tryRun`) -- none
 --      for a runner at least as fast as the wild monster, or past the odds;
+--      then the players' switches and items (a ball's catch bytes);
+--   0b. the computer's move choice, where MainInBattleLoop's
+--      `.selectEnemyMove` runs SelectEnemyMove (`_selectComputerMoves`), per
+--      computer seat in field order: `.chooseRandomMove`'s byte(s), redrawn
+--      past an empty or disabled slot -- after a trainer's AI layers
+--      (`_aiTrainerMoves`), which draw nothing -- and none at all for a
+--      forced turn, a monster asleep or frozen, or one knowing a single
+--      disabled move (STRUGGLE);
 --   1. a speed tie-break byte, one per group of actors in one priority
 --      bracket at one Speed -- and every battler on the field is an actor
 --      there, whatever its seat chose: a switch, an item, a recharge, a held
@@ -80,7 +88,8 @@
 --     (its selection is the menu cursor's, which the referee cannot name).
 --     The computer's item or switch is spent in its own slot of the order:
 --     TrainerAI runs at `.enemyMovesFirst` / `.playerMovesFirst`, so it is an
---     actor there, in the base bracket (`_computerTurnAction`).
+--     actor there (`_computerTurnAction`), in the bracket of the move
+--     SelectEnemyMove picked before TrainerAI threw it away (`picked`).
 --   * *Speed ties* break on a single RNG byte per tied group: below 128 the
 --     side-a member goes first, otherwise the group reverses.  One draw per
 --     group rather than per pair, so a 2v2 with four equal speeds costs one
@@ -90,9 +99,12 @@
 --   * *Running* is mode-gated, the same way Teleport is.  wild / coop_wild
 --     flee (the runner loses with reason `run`); 1v1 / coop_pvp is a
 --     concession, same bookkeeping, and both sides running is a draw;
---     coop_npc -- and any other non-wild non-pvp mode -- emits the trainer
---     refusal and does not finish, so a gym cannot be forfeited by pressing
---     RUN.  Mirrored: the policy reads the same from either seat.  A
+--     coop_npc -- and any other non-wild non-pvp mode -- refuses the RUN at
+--     the menu, as the cart's `.trainerBattle` sends it back to
+--     DisplayBattleMenu with the turn unspent: nothing is filed, the seat
+--     still owes, and the NoRunningText line is the client's own
+--     (`_normaliseChoice`).  Mirrored: the policy reads the same from either
+--     seat.  A
 --     coop_wild runner rolls TryRunningFromBattle's odds first (`_tryRun`,
 --     M.RUN_ROLL_MODES): its own attempt counter, one byte, "Can't escape!"
 --     and the turn spent on a miss.  Solo's `wild` is rolled by its client
@@ -100,8 +112,8 @@
 --     referee does not roll it a second time.
 --   * *Items* apply a hand-authored Gen1 heal/status table by id (Potion,
 --     Full Restore, Revive, Ether, …) — locked twin of public amounts, not a
---     port of engine ItemEffects. Unknown ids announce "But it failed" and
---     still spend the turn. Bags are client claims (sheet trust locked; hub
+--     port of engine ItemEffects. Unknown ids say ItemUseNoEffect's "It won't
+--     have any effect." and still spend the turn. Bags are client claims (sheet trust locked; hub
 --     has no ROM inventory truth); PROTOCOL 15 holds/spends mid-fight only.
 --   * *Forced lock-in* (recharge, Rage, thrash, a charge's release) fills
 --     choices on `_openTurn` so the mediated path never opens a menu the
@@ -144,6 +156,11 @@
 --     order the moves used.  Only the order two burns tick in is at stake, and
 --     field order is the one both runtimes can reproduce without carrying the
 --     turn's sort into the end-of-turn step.
+--   * The computer's MOVE is the cart's (`_computerChoice`): a wild monster's
+--     `.chooseRandomMove`, a trainer's AIEnemyTrainerChooseMoves over the
+--     layers its seat's `aiMods` names (none: the original move set) -- the
+--     referee holds no class table; the client sends the class's layers.
+--     Its item or switch, and a player's timeout, stay the heuristic below.
 --   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
 --     SE damage, status / setup reading, and SE bench switches (deterministic
 --     heuristics — not a full TrainerAI port) -- and the fight continues.  It
@@ -361,6 +378,37 @@ local LOAF_TEXT = {
   turned_away    = " turned away!",
   ignored_orders = " ignored orders!",
 }
+
+-- ItemUseBall's misses by shake count (`.printMessage`, wPokeBallAnimData
+-- $20 / $61 / $62 / $63: ItemUseBallText01..04) -- POKeMON spelled the way
+-- every referee line spells it, since the wire carries no accent.
+local BALL_MISS_TEXT = {
+  [0] = "You missed the POKeMON!",
+  [1] = "Darn! The POKeMON broke free!",
+  [2] = "Aww! It appeared to be caught!",
+  [3] = "Shoot! It was so close too!",
+}
+
+-- The party menu's line for a status cure, by item (ItemUseMedicine's
+-- `lb bc, <ITEM>_MSG, ...`, party_menu.asm's AntidoteText .. FullHealText),
+-- after the monster's name.  FULL RESTORE at full HP is a FULL HEAL.
+local CURE_TEXT = {
+  ANTIDOTE    = " was cured of poison!",
+  BURN_HEAL   = "'s burn was healed!",
+  ICE_HEAL    = " was defrosted!",
+  AWAKENING   = " woke up!",
+  PARLYZ_HEAL = "'s rid of paralysis!",
+  FULL_HEAL   = "'s health returned!",
+}
+
+-- An item's name in a sentence: its id's words, which are the cart's item
+-- names -- POKe for the accent the wire cannot carry, GUARD SPEC.'s stop.
+local function itemLabel(id)
+  local label = tostring(id or "ITEM"):gsub("_", " ")
+  label = label:gsub("^POKE ", "POKe ")
+  if label == "GUARD SPEC" then label = "GUARD SPEC." end
+  return label
+end
 
 -- ------------------------------------------------------------------
 -- coercion
@@ -666,6 +714,27 @@ end
 
 -- Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 -- shapes Wire.bag does: a list of {id,count} or a map.
+-- A trainer seat's move-choice layers, AIEnemyTrainerChooseMoves'
+-- TrainerClassMoveChoiceModifications row for its class: the numbers of the
+-- AIMoveChoiceModification routines it runs, in order (1..4; 4 does
+-- nothing).  The client reads them off its own engine trainer record
+-- (`aiMods`, which the engine extracts from the player's ROM): the class ->
+-- layers table is the cart's data and the mod ships none of it, so a class
+-- number alone would name nothing here.  Present and empty is a class with
+-- no layer (YOUNGSTER's `.useOriginalMoveSet`); a value off the cart's four
+-- pointers is dropped, and so is a list past MAX_AI_MODS.
+M.MAX_AI_MODS = 8
+local function copyAiMods(raw)
+  if type(raw) ~= "table" then return nil end
+  local out = {}
+  for i = 1, #raw do
+    if #out >= M.MAX_AI_MODS then break end
+    local n = int(raw[i], nil)
+    if n ~= nil and n >= 1 and n <= 4 then out[#out + 1] = n end
+  end
+  return out
+end
+
 local function copyBag(raw)
   if type(raw) ~= "table" then return nil end
   local out, any = {}, false
@@ -989,6 +1058,13 @@ function M.create(opts)
         team      = nil,
         -- Who has been in against THIS seat's current monster; see `_refield`.
         fought    = {},
+        -- The trainer's move-choice layers (`_cartMovePick`), the computer's
+        -- trainer seat only; nil is no layer at all.
+        aiMods    = (isComputerSeat(mode, { side = side })
+                     and not Effects.isWildMode(mode)) and copyAiMods(entry.aiMods) or nil,
+        -- wAILayer2Encouragement (`_cartMovePick`, `_resolveFights`), the
+        -- computer's seats: 0 at InitBattleVariables.
+        aiLayer2  = 0,
       }
       -- Every monster's battle stats, seeded the way LoadBattleMonFromParty
       -- seeds them (the unmodified stats, the condition penalty, this seat's
@@ -1069,6 +1145,18 @@ end
 
 function Battle:_say(text)
   return self:_emit("msg", { text = text })
+end
+
+-- A status animation the cart plays from CheckPlayerStatusConditions /
+-- CheckEnemyStatusConditions (the sleeping and the confused monster's), as an
+-- `anim` event on the seat it plays over: its battle_anims id, the
+-- `_ANIM` kind a client looks up the way it looks up the ball chain's.  The
+-- cart picks the PLAYER variant on the player's turn and the plain one on the
+-- enemy's; "the player" is the owner's rule (`isPlayerSeat`), so in a link
+-- fight each seat carries its own console's variant and the screen across
+-- swaps it for a monster that is not its own.
+function Battle:_statusAnim(fighter, id)
+  return self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = id })
 end
 
 -- Every seat's party roster, published when -- and only when -- it moved.
@@ -1526,7 +1614,16 @@ function Battle:_normaliseChoice(fighter, choice)
   local mon = activeMon(fighter)
   if not mon then return nil end
 
-  if action == "run" then return { action = "run" } end
+  -- RUN in a trainer fight: TryRunningFromBattle's `.trainerBattle` prints
+  -- NoRunningText and leaves wActionResultOrTookBattleTurn at 0, so
+  -- BattleMenu_RunWasSelected goes back to DisplayBattleMenu (core.asm
+  -- :2446-2457) -- the turn is not spent and the menu asks again.  So the
+  -- choice is refused here and the seat still owes one; the line is the
+  -- client's own, said where it declines to send the RUN (Effects.runEndsBattle).
+  if action == "run" then
+    if not Effects.runEndsBattle(self.mode) then return nil end
+    return { action = "run" }
+  end
 
   if action == "item" then
     local item = str(choice.item)
@@ -1634,6 +1731,10 @@ function Battle:_normaliseChoice(fighter, choice)
       end
     end
     local out = { action = "fight", move = index + 1, target = targetFighter.slot }
+    -- Asleep or frozen, no move menu ran: the move this turn would use is
+    -- last turn's selection, at last turn's list index (`_useMove`, for a
+    -- monster a Fire hit thaws before its slot).
+    if asleep then out.stale = true end
     -- MIMIC's pick, asked up front the way Gen 3 asks BATON PASS's
     -- destination: the cart opens the foe's move list as the move runs
     -- (MimicEffect `.letPlayerChooseMove`), which a mediated fight cannot do
@@ -1741,7 +1842,9 @@ end
 
 -- timeout/NPC pick: bag cures/heals/X-items when present, else SE / status /
 -- setup / switch. Deterministic twin of server/lib/battle/Turn.js — richer
--- than a strongest-move heuristic, still not a full TrainerAI port.
+-- than a strongest-move heuristic, still not a full TrainerAI port.  For the
+-- computer's seats only its item, its switch and its forced answers stand:
+-- the move it would fight with is SelectEnemyMove's (`_computerChoice`).
 local AUTO_STATUS_PRI = {
   [32] = 4, -- SLEEP_EFFECT
   [67] = 3, -- PARALYZE_EFFECT
@@ -2056,6 +2159,32 @@ function Battle:_autoChoice(fighter)
   return { action = "fight", move = pick, target = foe.slot }
 end
 
+-- The computer's answer, as SelectEnemyMove gives it (core.asm :2915-3005).
+-- Its forced turns stand as `_autoChoice` filed them -- SelectEnemyMove
+-- returns before `.canSelectMove` for every one of them, drawing nothing --
+-- and so does a send-out owed after a faint.  Every other answer is a move
+-- chosen at `.canSelectMove`, which is not chosen here: it is drawn from the
+-- battle's own stream where the cart draws it, after the players' menus --
+-- their RUN rolls, their switches, their balls -- and before the speed
+-- compare (`_selectComputerMoves`), so `cartPick` files the seat and names no
+-- slot yet.  The heuristic's item or switch (the stand-in for TrainerAI, which
+-- the referee does not port: its class routine and uses are not on the
+-- sheet) keeps its action and is marked the same way: on the cart the move is
+-- selected first and TrainerAI then spends the turn on something else in the
+-- seat's slot, so the draws -- and the selection the priority bracket and
+-- COUNTER read -- happen all the same.
+function Battle:_computerChoice(fighter, auto)
+  if fighter.mustReplace then return auto end
+  if auto.action == "fight" then
+    if auto.forcedMove ~= nil or auto.bideStore or auto.trapContinue then return auto end
+    return { action = "fight", target = auto.target, cartPick = true }
+  end
+  if auto.action == "item" or auto.action == "switch" then
+    auto.cartPick = true
+  end
+  return auto
+end
+
 -- What autoPick / the timeout sweep files when `_autoChoice` has no answer.
 --
 -- A living seat in the choice phase that `_autoChoice` cannot describe (empty
@@ -2073,6 +2202,9 @@ end
 -- `_checkOver` should have ended the fight.
 function Battle:_autoChoiceOrSkip(fighter)
   local auto = self:_autoChoice(fighter)
+  if auto and isComputerSeat(self.mode, fighter) then
+    auto = self:_computerChoice(fighter, auto)
+  end
   if auto then return auto end
   if self.phase == "choice" and activeMon(fighter) then
     return { action = "skip" }
@@ -2261,9 +2393,9 @@ end
 -- Metronome's priority whatever it calls, and a disobedient monster at the
 -- priority of the move it was told to use, whatever it does instead.  A
 -- forced replay is the move it replays (`forcedMoveOf`), never Struggle.
--- A computer seat's item or switch has no selection the referee can know
--- (SelectEnemyMove picked one the TrainerAI then threw away) and moves in
--- the base bracket.
+-- A computer seat's item or switch moves in the bracket of the move
+-- SelectEnemyMove picked before TrainerAI threw it away (`picked`,
+-- `_selectionOf`).
 function Battle:_priorityOf(fighter, mon)
   return Effects.movePriority(fighter.selectedMove)
 end
@@ -2296,8 +2428,10 @@ end
 -- A monster held by a trap selects CANNOT_MOVE (:318-321, :2953-2955): nil.
 -- So does a seat whose CANNOT_MOVE Haze wrote and no menu has written over
 -- since (`cannotMove`, `_selectsAnew`).
--- A seat that switched, used an item or ran selected nothing the referee
--- can name (the cart answers from its menu cursor): nil.
+-- A player's seat that switched, used an item or ran selected nothing the
+-- referee can name (the cart answers from its menu cursor): nil.  The
+-- computer's item or switch is TrainerAI's, made after SelectEnemyMove had
+-- selected a move (`_cartMovePick`'s `picked`): that move.
 function Battle:_selectionOf(fighter, mon)
   local choice = fighter.choice
   if not choice or not mon then return nil end
@@ -2306,9 +2440,17 @@ function Battle:_selectionOf(fighter, mon)
     if choice.skip and choice.skip ~= "trapped" then return fighter.selectedMove end
     return nil
   end
-  if choice.action ~= "fight" then return nil end
+  if choice.action ~= "fight" then
+    if choice.picked and isComputerSeat(self.mode, fighter) then
+      if self:_struggles(fighter, mon) then return STRUGGLE end
+      return mon.moves[choice.picked]
+    end
+    return nil
+  end
   if choice.forcedMove then return choice.forcedMove end
-  if mon.status == "sleep" or mon.status == "freeze" then return fighter.selectedMove end
+  if choice.stale or mon.status == "sleep" or mon.status == "freeze" then
+    return fighter.selectedMove
+  end
   if self:_struggles(fighter, mon) then return STRUGGLE end
   return mon.moves[choice.move or 0]
 end
@@ -2339,6 +2481,7 @@ function Battle:_selectsAnew(fighter, mon)
     return not fighter.forced and not asleep
   end
   return choice.action == "fight" and choice.forcedMove == nil and not asleep
+    and not choice.stale
 end
 
 -- The battler opposite this one: the foe seat in the same position if it
@@ -2417,8 +2560,8 @@ local function typeLine(percents, last)
     effectiveness = 100
     for _, pct in ipairs(percents or {}) do effectiveness = effectiveness * pct / 100 end
   end
-  if effectiveness > 100 then return "It's super effective" end
-  if effectiveness < 100 then return "It's not very effective" end
+  if effectiveness > 100 then return "It's super effective!" end
+  if effectiveness < 100 then return "It's not very effective..." end
   return nil
 end
 
@@ -2438,6 +2581,7 @@ function Battle:_resolveTurn()
   self:_resolveSwitches(true)
   self:_resolveItems()
   if not self.result then self:_reselectComputer() end
+  if not self.result then self:_selectComputerMoves() end
   self:_resolveFights()
   if not self.result then self:_resolveResiduals() end
   -- CheckNumAttacksLeft, the last thing a cart turn does (core.asm :409,
@@ -2488,6 +2632,208 @@ function Battle:_reselectComputer()
   end
 end
 
+-- AIMoveChoiceModification1's StatusAilmentMoveEffects (trainer_ai.asm):
+-- EFFECT_01 (the unused sleep), SLEEP_EFFECT, POISON_EFFECT, PARALYZE_EFFECT.
+local AI_STATUS_EFFECTS = { [1] = true, [32] = true, [66] = true, [67] = true }
+-- AIMoveChoiceModification3's `.betterMoveFound` effects: SUPER_FANG_EFFECT,
+-- SPECIAL_DAMAGE_EFFECT, FLY_EFFECT.
+local AI_BETTER_EFFECTS = { [40] = true, [41] = true, [43] = true }
+-- AIGetTypeEffectiveness' starting value, $10 (the cart's own comment: it
+-- should have been EFFECTIVE, 10): what no matching row leaves.
+local AI_NEUTRAL = 16
+
+-- SelectEnemyMove past its forced returns (core.asm :2956-3005), for every
+-- computer seat `_computerChoice` filed, in field order, where the cart runs
+-- it: `.selectEnemyMove`, after the players' menus and before the speed
+-- compare.  A monster asleep or frozen returns before `.canSelectMove`
+-- (`and (1 << FRZ) | SLP_MASK / ret nz`) -- no draw, last turn's selection
+-- stands (`stale`, `_selectionOf`) -- and so does one the players' items or
+-- switches left there; every other one is picked (`_cartMovePick`).
+function Battle:_selectComputerMoves()
+  for _, fighter in ipairs(self.fighters) do
+    local choice = fighter.choice
+    local mon = activeMon(fighter)
+    if choice and choice.cartPick and mon then
+      choice.cartPick = nil
+      if mon.status == "sleep" or mon.status == "freeze" then
+        if choice.action == "fight" then
+          choice.stale = true
+          choice.move = choice.move or 1
+        end
+      else
+        self:_cartMovePick(fighter, mon, choice)
+      end
+    end
+  end
+end
+
+-- `.canSelectMove` and `.chooseRandomMove` (core.asm :2956-3005).  A monster
+-- whose second slot is empty and whose one move is disabled selects STRUGGLE
+-- with no draw (`computerMustStruggle`, read again by `_struggles`).  A trainer
+-- runs AIEnemyTrainerChooseMoves first (`_aiTrainerMoves`, its seat's
+-- `aiMods`); a wild monster does not (`wIsInBattle` 1 jumps straight to
+-- `.chooseRandomMove`).  Then one BattleRandom byte per try names a slot --
+-- below 25 percent (63) the first, below 50 percent (127) the second, below
+-- 75 percent - 1 (190) the third, else the fourth -- and a try that lands on
+-- the disabled slot (wEnemyDisabledMove's high nibble) or on an empty one
+-- (no move there, or one the AI's list zeroed) draws again.  PP is never read
+-- (`computerMustStruggle`'s note).  The slot is wEnemyMoveListIndex
+-- (`moveListIndex`); a fight takes it as its move, an item or a switch keeps
+-- it as the selection TrainerAI then threw away (`picked`, `_selectionOf`).
+function Battle:_cartMovePick(fighter, mon, choice)
+  if computerMustStruggle(mon) then
+    if choice.action == "fight" then choice.move = 1 else choice.picked = 1 end
+    return
+  end
+  local usable = nil
+  if fighter.aiMods and not isWildSeat(self.mode, fighter) then
+    usable = self:_aiTrainerMoves(fighter, mon, choice)
+  end
+  local disabled = (mon.disable and int(mon.disable.turns, 0) > 0)
+    and int(mon.disable.moveIndex, 0) or 0
+  local slot = nil
+  for _ = 1, Effects.REDRAW_GUARD do
+    local roll = self.rng:byte()
+    local b = (roll < 63 and 1) or (roll < 127 and 2) or (roll < 190 and 3) or 4
+    if b ~= disabled and mon.moves[b] ~= nil and (usable == nil or usable[b]) then
+      slot = b
+      break
+    end
+  end
+  slot = slot or 1
+  fighter.moveListIndex = slot
+  if choice.action == "fight" then
+    choice.move = slot
+  else
+    choice.picked = slot
+  end
+end
+
+-- AIGetTypeEffectiveness (core.asm): the FIRST TypeEffects row whose
+-- attacker is the move's type and whose defender is either of the target's
+-- types -- no product, no second row -- or $10 when none matches.  With the
+-- ruleset's `chartOrder` (`chartRows`) that is the cart's walk; without it
+-- the order is unknowable, and the target's first type is asked before its
+-- second.  The cell's percent stands in for the row's 0 / 5 / 20: above 100
+-- is super effective, below it not effective (an immunity included), and a
+-- cell of 100 is no row at all.  Answers above / below / at AI_NEUTRAL.
+function Battle:_aiTypeEffectiveness(moveType, target)
+  local row = self.chart and self.chart[int(moveType, 0) + 1] or nil
+  local function cellOf(defType)
+    local cell = type(row) == "table" and tonumber(row[defType + 1]) or nil
+    return cell and floor(cell) or 100
+  end
+  local function judged(cell)
+    if cell > 100 then return AI_NEUTRAL + 1 end
+    if cell < 100 then return AI_NEUTRAL - 1 end
+    return AI_NEUTRAL
+  end
+  if self.chartRows then
+    for _, pair in ipairs(self.chartRows) do
+      if pair[1] == int(moveType, 0) and hasType(target, pair[2]) then
+        return judged(cellOf(pair[2]))
+      end
+    end
+    return AI_NEUTRAL
+  end
+  for i = 1, #(target.types or {}) do
+    local cell = cellOf(target.types[i])
+    if cell ~= 100 then return judged(cell) end
+  end
+  return AI_NEUTRAL
+end
+
+-- AIEnemyTrainerChooseMoves (engine/battle/trainer_ai.asm :3-115): every
+-- move starts at 10, the disabled slot at $50; the seat's layers run in the
+-- class's order, each over the moves in slot order --
+--   1: the target has a status: +5 to a power-0 StatusAilmentMoveEffects move;
+--   2: only while wAILayer2Encouragement is exactly 1 (`aiLayer2`, the second
+--      selection after a send-out): -1 to an effect from ATTACK_UP1_EFFECT up
+--      to BIDE_EFFECT, or from ATTACK_UP2_EFFECT up to POISON_EFFECT;
+--   3: -1 to a move whose type the target takes super-effectively
+--      (`_aiTypeEffectiveness`, power 0 included); +1 to one it takes not
+--      very effectively or not at all when the monster knows a "better move"
+--      -- SUPER FANG, a SPECIAL_DAMAGE move, FLY, or any damaging move of
+--      another type (the scan includes the move judged);
+--   4: nothing --
+-- and the slots left at the lowest score are the ones `.chooseRandomMove` may
+-- land on (the decrement loop and `.filterMinimalEntries` keep exactly the
+-- minima).  Each layer reads the moves it looks at with ReadMove, which
+-- copies them over wEnemyMoveNum.., the computer's move struct: the last one
+-- read is what COUNTER finds there until the monster's own move reloads it
+-- (`moveStruct`, `_counterDamage`).  "The target" is the seat the computer
+-- is aimed at (Gen 1's one opponent).
+function Battle:_aiTrainerMoves(fighter, mon, choice)
+  local moves = mon.moves
+  local n = min(4, #moves)
+  local score = {}
+  for i = 1, n do score[i] = 10 end
+  local disabled = (mon.disable and int(mon.disable.turns, 0) > 0)
+    and int(mon.disable.moveIndex, 0) or 0
+  if disabled >= 1 and disabled <= n then score[disabled] = 0x50 end
+  local target = choice.target ~= nil and self:_retarget(fighter, choice.target) or nil
+  if not target then target = self:_oppositeFoe(fighter) end
+  local targetMon = target and activeMon(target)
+  local lastRead = nil
+  for _, layer in ipairs(fighter.aiMods or {}) do
+    if layer == 1 then
+      if targetMon and targetMon.status then
+        for i = 1, n do
+          local m = moves[i]
+          lastRead = m
+          if int(m.power, 0) == 0 and AI_STATUS_EFFECTS[int(m.effect, 0)] then
+            score[i] = score[i] + 5
+          end
+        end
+      end
+    elseif layer == 2 then
+      if fighter.aiLayer2 == 1 then
+        for i = 1, n do
+          local m = moves[i]
+          lastRead = m
+          local effect = int(m.effect, 0)
+          if (effect >= 10 and effect < 26) or (effect >= 50 and effect < 66) then
+            score[i] = score[i] - 1
+          end
+        end
+      end
+    elseif layer == 3 then
+      for i = 1, n do
+        local m = moves[i]
+        lastRead = m
+        local eff = targetMon and self:_aiTypeEffectiveness(m.type, targetMon) or AI_NEUTRAL
+        if eff > AI_NEUTRAL then
+          score[i] = score[i] - 1
+        elseif eff < AI_NEUTRAL then
+          local better = false
+          for j = 1, n do
+            local other = moves[j]
+            lastRead = other
+            if AI_BETTER_EFFECTS[int(other.effect, 0)] then better = true; break end
+            if int(other.type, 0) ~= int(m.type, 0) and int(other.power, 0) > 0 then
+              better = true
+              break
+            end
+          end
+          if better then score[i] = score[i] + 1 end
+        end
+      end
+    end
+  end
+  if lastRead then
+    fighter.moveStruct = { power = int(lastRead.power, 0), type = int(lastRead.type, 0) }
+  end
+  local best = nil
+  for i = 1, n do
+    if best == nil or score[i] < best then best = score[i] end
+  end
+  local usable = {}
+  for i = 1, n do
+    if score[i] == best then usable[i] = true end
+  end
+  return usable
+end
+
 -- TryRunningFromBattle (core.asm :1496-1576), the wild arm, for a coop_wild
 -- runner (M.RUN_ROLL_MODES): wNumRunAttempts counts every try -- each
 -- player's own, as each console keeps its own -- and a runner at least as
@@ -2515,10 +2861,11 @@ function Battle:_tryRun(fighter)
   return escaped
 end
 
--- Fleeing is a concession in 1v1/coop_pvp, a wild escape in *wild modes,
--- and a trainer refusal (no finish) everywhere else; see Effects.runEndsBattle.
--- A coop_wild runner rolls first (`_tryRun`), in field order, and the first
--- one to get away ends the fight.
+-- Fleeing is a concession in 1v1/coop_pvp and a wild escape in *wild modes;
+-- see Effects.runEndsBattle.  A trainer fight never gets here: its RUN is
+-- refused at the menu (`_normaliseChoice`), as the cart sends it back to
+-- DisplayBattleMenu.  A coop_wild runner rolls first (`_tryRun`), in field
+-- order, and the first one to get away ends the fight.
 function Battle:_resolveRuns()
   local running = {}
   for _, fighter in ipairs(self.fighters) do
@@ -2527,11 +2874,6 @@ function Battle:_resolveRuns()
     end
   end
   if #running == 0 then return false end
-
-  if not Effects.runEndsBattle(self.mode) then
-    self:_say("No! There's no running from a trainer battle!")
-    return false
-  end
 
   if M.RUN_ROLL_MODES[self.mode] then
     local away = nil
@@ -2579,6 +2921,9 @@ function Battle:_resolveSwitches(inTurn)
     local choice = fighter.choice
     if choice and choice.action == "switch"
        and not (inTurn and self:_computerTurnAction(fighter)) then
+      -- ReplaceFaintedEnemyMon zeroes wAILayer2Encouragement after the
+      -- send-out (core.asm :906-911); TrainerAI's own switch does not.
+      if not inTurn and fighter.mustReplace then fighter.aiLayer2 = 0 end
       self:_switchIn(fighter, choice.slot)
     end
   end
@@ -2796,59 +3141,84 @@ function Battle:_resolveOneItem(fighter)
   local itemEv = { slot = fighter.slot, side = fighter.side, text = choice.item }
   if vitaminApplied then itemEv.amount = 1 end
   self:_emit("item", itemEv)
-  self:_say(fighter.name .. " used an item")
+  local label = itemLabel(choice.item)
+  local computer = isComputerSeat(self.mode, fighter)
+  local wild = Effects.isWildMode(self.mode)
+  -- The line the use opens with.  The computer's every item is
+  -- AIPrintItemUse's "<TRAINER> used <ITEM> on <MON>!" (trainer_ai.asm,
+  -- _AIBattleUseItemText).  The player's is ItemUseText00, "<PLAYER> used
+  -- <ITEM>!", where its routine prints it: a ball (ItemUseBall, before the
+  -- throw -- not in a trainer fight, which blocks the ball first), X
+  -- ACCURACY, GUARD SPEC., DIRE HIT, a POKe DOLL in a wild fight and the X
+  -- stat items (PrintItemUseTextAndRemoveItem).  A medicine, a PP restorer
+  -- and the POKe FLUTE print only what they did.
+  if computer then
+    local onMon = activeMon(fighter)
+    self:_say(fighter.name .. " used " .. label .. " on "
+      .. (onMon and onMon.species or "POKeMON") .. "!")
+  elseif effect and ((effect.ball and wild) or effect.xAccuracy or effect.mist
+      or effect.focusEnergy or (effect.pokeDoll and wild) or effect.stage) then
+    self:_say(fighter.name .. " used " .. label .. "!")
+  end
   -- Spend after the announce, win or fail (Gen1 bag stack). noConsume
   -- (Poké Flute) and seats with no bag sheet are left alone.
   if not (effect and effect.noConsume) then
     self:_spendBag(fighter, choice.item)
   end
   if not effect then
-    self:_say("But it failed")
+    -- An item the referee has no table row for: ItemUseNoEffect's line.
+    self:_say("It won't have any effect.")
   elseif effect.ball then
-    if not Effects.isWildMode(self.mode) then
-      self:_say("But it failed")
+    if not wild then
+      -- ThrowBallAtTrainerMon (item_effects.asm): the trainer knocks it
+      -- away, and the ball is gone.
+      self:_say("The trainer blocked the BALL!")
+      self:_say("Don't be a thief!")
     else
       -- Wild modes seat exactly one monster on side b, so "the first living
       -- foe" and "the only foe" are the same seat -- no aim to spread.
       local foe = self:_firstLivingFoe(fighter)
       local target = foe and activeMon(foe)
       if not target then
-        self:_say("But it failed")
+        self:_say("But, it failed!")
       else
         local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
         -- Gen1 TossBallAnimation chain before the catch text (engine ballChain).
         self:_emitBallChain(fighter, choice.item, caught, shakes)
-        if shakes and shakes > 0 and not caught then
-          self:_say("The ball shook")
-        end
+        -- ItemUseBall's `.printMessage` off wPokeBallAnimData: the shake
+        -- count picks ItemUseBallText01..04; a catch is ItemUseBallText05.
         if caught then
-          self:_say("Gotcha")
+          self:_say("All right! " .. target.species .. " was caught!")
           local finish = self:_finish("win", self:_sidePlayers(fighter.side),
             self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
           local sheet = Effects.caughtSheet(target)
           if finish and sheet then finish.caught = sheet end
           if finish then finish.catcher = fighter.playerId end
         else
-          self:_say("It broke free")
+          self:_say(BALL_MISS_TEXT[int(shakes, 0)] or BALL_MISS_TEXT[0])
         end
       end
     end
   elseif effect.pokeDoll then
-    if Effects.isWildMode(self.mode) then
-      self:_say("The wild pokemon ran away")
+    if wild then
+      -- wEscapedFromBattle, and the fight is over: no line past the use's.
       -- A POKé DOLL escape leaves wBattleResult at 0 too: Pay Day is paid.
       self:_payDayOn(self:_finish("win", self:_sidePlayers(fighter.side),
         self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run"))
     else
-      self:_say("But it failed")
+      -- ItemUsePokeDoll outside a wild fight is ItemUseNotTime.
+      self:_say("OAK: " .. fighter.name .. "! This isn't the time to use that!")
     end
   elseif effect.vitamin then
     if not vitaminApplied then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
     else
       local mon, result = vitaminMon, vitaminResult
+      -- VitaminStatRoseText, "<MON>'s <STAT> rose." -- the cart's line for a
+      -- vitamin, which it only takes outside a fight (ItemUseVitamin is
+      -- ItemUseNotTime in one); the referee lets it in and says the same.
       local label = ({
-        hp = "HEALTH POINTS", atk = "ATTACK", def = "DEFENSE",
+        hp = "HEALTH", atk = "ATTACK", def = "DEFENSE",
         spd = "SPEED", spc = "SPECIAL",
       })[result.stat] or "STAT"
       if result.stat == "hp" and result.delta > 0 then
@@ -2863,10 +3233,10 @@ function Battle:_resolveOneItem(fighter)
         self:_emit("stat", {
           slot = fighter.slot, side = fighter.side,
           amount = mon.stats[result.stat],
-          text = mon.species .. "'s " .. label .. " rose",
+          text = mon.species .. "'s " .. label .. " rose.",
         })
       end
-      self:_say(mon.species .. "'s " .. label .. " rose")
+      self:_say(mon.species .. "'s " .. label .. " rose.")
     end
   elseif effect.pokeFlute then
     local woke = false
@@ -2878,42 +3248,48 @@ function Battle:_resolveOneItem(fighter)
           woke = true
           self:_emit("status", {
             slot = seat.slot, side = seat.side,
-            text = mon.species .. " woke up",
+            text = mon.species .. " woke up!",
           })
         end
       end
     end
+    -- ItemUsePokeFlute's `.inBattle`: PlayedFluteHadEffectText then
+    -- FluteWokeUpText, or PlayedFluteNoEffectText.
     if woke then
-      self:_say("All sleeping POKeMON woke up")
+      self:_say(fighter.name .. " played the POKe FLUTE.")
+      self:_say("All sleeping POKeMON woke up.")
     else
-      self:_say("Now, that's a catchy tune")
+      self:_say("Played the POKe FLUTE. Now, that's a catchy tune!")
     end
   else
     local partyIdx = choice.slot or fighter.active
     local mon = fighter.mons[partyIdx]
+    -- ItemUseNoEffect, "It won't have any effect.", for every use the
+    -- party menu turns down (`.healingItemNoEffect` and the PP menus').
+    local NO_EFFECT = "It won't have any effect."
     if not mon then
-      self:_say("But it failed")
+      self:_say(NO_EFFECT)
     elseif effect.activeOnly and partyIdx ~= fighter.active then
-      self:_say("But it failed")
+      self:_say(NO_EFFECT)
     elseif effect.faintedOnly and mon.hp > 0 then
-      self:_say("But it failed")
+      self:_say(NO_EFFECT)
     elseif mon.hp <= 0 and Effects.itemFailsOnFainted(effect) then
-      self:_say("But it failed")
+      self:_say(NO_EFFECT)
     else
       local applied = false
+      -- X ACCURACY, DIRE HIT and GUARD SPEC. set their bit and say nothing
+      -- past the use's line (PrintItemUseTextAndRemoveItem; the AI's
+      -- AIPrintItemUse).
       if effect.xAccuracy then
         mon.xAccuracy = true
-        self:_say(mon.species .. "'s hits will never miss")
         applied = true
       end
       if effect.focusEnergy then
         mon.focusEnergy = true
-        self:_say(mon.species .. " is getting pumped")
         applied = true
       end
       if effect.mist then
         mon.mist = true
-        self:_say(mon.species .. " is protected against stat changes")
         applied = true
       end
       if effect.stage then
@@ -2933,16 +3309,17 @@ function Battle:_resolveOneItem(fighter)
         if outcome == "rose" then
           local label = ({
             atk = "ATTACK", def = "DEFENSE", spd = "SPEED",
-            spc = "SPECIAL", acc = "ACCURACY", eva = "EVASION",
+            spc = "SPECIAL", acc = "ACCURACY", eva = "EVADE",
           })[stat] or "STAT"
-          self:_say(mon.species .. "'s " .. label .. " rose")
+          -- StatModifierUpEffect's MonsStatsRoseText (an UP1 effect).
+          self:_say(mon.species .. "'s " .. label .. " rose!")
           self:_emit("stat", {
             slot = fighter.slot, side = fighter.side,
             amount = after, stage = after,
-            text = mon.species .. "'s " .. label .. " rose",
+            text = mon.species .. "'s " .. label .. " rose!",
           })
         else
-          self:_say("Nothing happened")
+          self:_say("Nothing happened!")
         end
         applied = true
       end
@@ -2955,13 +3332,18 @@ function Battle:_resolveOneItem(fighter)
           slot = fighter.slot, side = fighter.side,
           amount = hp, hp = mon.hp,
         })
-        self:_say(mon.species .. " was revived")
+        self:_say(mon.species .. " is revitalized!")
         applied = true
       end
       if effect.ppRestore then
+        -- ItemUsePPRestore's move menu leaves wPlayerMoveListIndex at 0 --
+        -- `ld a, 0 / ld [wPlayerMoveListIndex], a` after MoveSelectionMenu
+        -- (item_effects.asm :1981-1984) -- whatever it restored: the first
+        -- slot is the one a later forced or stale turn pays from (`_listIndex`).
+        if not isComputerSeat(self.mode, fighter) then fighter.moveListIndex = 1 end
         local move = mon.moves[choice.move]
         if not move then
-          self:_say("But it failed")
+          self:_say(NO_EFFECT)
         else
           local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
           local before = move.pp
@@ -2971,14 +3353,14 @@ function Battle:_resolveOneItem(fighter)
             move.pp = min(maxPp, move.pp + int(effect.ppRestore, 0))
           end
           if move.pp > before then
-            self:_say(mon.species .. "'s PP was restored")
+            self:_say("PP was restored.")
             applied = true
             -- Fielded mon only: a bench Ether must not redraw FIGHT.
             if partyIdx == fighter.active then
               self:_emitMoves(fighter, mon, partyIdx)
             end
           else
-            self:_say("But it failed")
+            self:_say(NO_EFFECT)
           end
         end
       end
@@ -2998,16 +3380,16 @@ function Battle:_resolveOneItem(fighter)
           end
         end
         if any then
-          self:_say(mon.species .. "'s PP was restored")
+          self:_say("PP was restored.")
           applied = true
           if partyIdx == fighter.active then
             self:_emitMoves(fighter, mon, partyIdx)
           end
         else
-          self:_say("But it failed")
+          self:_say(NO_EFFECT)
         end
       end
-      local healed = false
+      local healed, healedBy = false, 0
       if effect.healFull then
         local before = mon.hp
         mon.hp = mon.maxHp
@@ -3016,32 +3398,41 @@ function Battle:_resolveOneItem(fighter)
             slot = fighter.slot, side = fighter.side,
             amount = mon.hp - before, hp = mon.hp,
           })
-          healed = true
+          healed, healedBy = true, mon.hp - before
         end
       elseif effect.heal and effect.heal > 0 and mon.hp < mon.maxHp then
+        local before = mon.hp
         self:_heal(fighter, mon, effect.heal)
-        healed = true
+        healed, healedBy = true, mon.hp - before
       end
+      -- No item cures confusion in Red: ItemUseMedicine and AICureStatus
+      -- write the status byte and BADLY_POISONED, never CONFUSED.
+      local wasToxic = mon.status == "toxic"
       local cleared = false
-      local clearedConfusion = false
       if effect.clearAllStatus then
         if mon.status then
           mon.status, mon.statusTurns = nil, 0
           cleared = true
-        end
-        if mon.confusion and mon.confusion > 0 then
-          mon.confusion = 0
-          clearedConfusion = true
         end
       elseif effect.clearStatuses and mon.status
          and effect.clearStatuses[mon.status] then
         mon.status, mon.statusTurns = nil, 0
         cleared = true
       end
-      -- A cure that cured something takes the Bad Poison bit with it
-      -- (ItemUseMedicine's `res BADLY_POISONED`, item_effects.asm :903-905;
-      -- AICureStatus, trainer_ai.asm :633-635), a lingering one included.
-      if cleared then mon.toxicLinger = nil end
+      -- The Bad Poison bit goes with a cure (ItemUseMedicine's
+      -- `.cureStatusAilment` -- `res BADLY_POISONED`, item_effects.asm
+      -- :903-905 -- and AICureStatus, trainer_ai.asm :633-635), a lingering
+      -- one included.  The player's FULL RESTORE that restored HP takes the
+      -- `.healHP` branch instead (:1152-1176), which zeroes the status byte
+      -- and leaves BattleStatus3 alone: a TOXIC it cured lingers.
+      local healBranch = effect.clearAllStatus and healed and not computer
+      if cleared then
+        if healBranch then
+          if wasToxic then mon.toxicLinger = true end
+        else
+          mon.toxicLinger = nil
+        end
+      end
       -- A cure on the player's fielded monster takes ItemUseMedicine's
       -- .cureStatusAilment branch, which rewrites the battle stats from the
       -- party (Effects.reloadPartyStats) -- lifting the stored penalty along
@@ -3050,9 +3441,7 @@ function Battle:_resolveOneItem(fighter)
       -- goes, the stats stay as they were, penalty included; only at full HP
       -- does it turn into a Full Heal (:976-990).  The computer's cure
       -- (AICureStatus) never touches a stat.
-      if cleared and partyIdx == fighter.active
-         and not isComputerSeat(self.mode, fighter)
-         and not (effect.clearAllStatus and healed) then
+      if cleared and partyIdx == fighter.active and not computer and not healBranch then
         Effects.reloadPartyStats(mon)
       end
       if cleared then
@@ -3061,14 +3450,19 @@ function Battle:_resolveOneItem(fighter)
           text = mon.species .. " recovered",
         })
       end
-      if clearedConfusion then
-        self:_emit("status", {
-          slot = fighter.slot, side = fighter.side, confused = 0,
-          text = mon.species .. " recovered",
-        })
-      end
-      if not applied and not healed and not cleared and not clearedConfusion then
-        self:_say("But it failed")
+      -- The party menu's message for the player's medicine
+      -- (engine/menus/party_menu.asm): PotionText's "<MON> recovered by <N>!"
+      -- for HP, the cure's own line for a status (FULL RESTORE at full HP is
+      -- a FULL HEAL), ItemUseNoEffect's when it did nothing.  The computer's
+      -- AIPrintItemUse line is all it says.
+      if not computer then
+        if healed then
+          self:_say(mon.species .. " recovered by " .. healedBy .. "!")
+        elseif cleared then
+          self:_say(mon.species .. (CURE_TEXT[choice.item] or CURE_TEXT.FULL_HEAL))
+        elseif not applied then
+          self:_say(NO_EFFECT)
+        end
       end
     end
   end
@@ -3123,7 +3517,23 @@ function Battle:_resolveFights()
     local mon = activeMon(fighter)
     -- A move menu writes over a CANNOT_MOVE left from an earlier turn
     -- (`_selectsAnew`); nothing else does.
-    if self:_selectsAnew(fighter, mon) then fighter.cannotMove = nil end
+    if self:_selectsAnew(fighter, mon) then
+      fighter.cannotMove = nil
+      -- A player's MoveSelectionMenu also leaves the move under its cursor
+      -- in wPlayerMoveListIndex (the slot DecrementPP spends and MIMIC
+      -- overwrites, `_listIndex`) and, through PrintMenuItem's
+      -- GetCurrentMove, in the move struct COUNTER reads (`moveStruct`).
+      -- STRUGGLE opens no menu (AnyMoveToSelect).  The computer's index is
+      -- `.moveChosen`'s (`_cartMovePick` -- or the slot a solo trainer's
+      -- brain submitted); its struct is only ever the AI's and its own move's.
+      if choice.action == "fight" and not self:_struggles(fighter, mon)
+         and mon.moves[choice.move] then
+        fighter.moveListIndex = choice.move
+        if isPlayerSeat(self.mode, fighter) then
+          self:_loadMoveStruct(fighter, mon.moves[choice.move])
+        end
+      end
+    end
     -- wEnemySelectedMove / wPlayerSelectedMove for this turn, which COUNTER
     -- reads off the seat it strikes (`_counterDamage`) and the bracket reads
     -- (`_priorityOf`): `_selectionOf`, rewritten by `_useMove` with a move
@@ -3152,6 +3562,16 @@ function Battle:_resolveFights()
     local fighter = actor.fighter
     if activeMon(fighter) == actor.mon then
       local choice = fighter.choice
+      -- ExecuteEnemyMove's `inc [hl]` on wAILayer2Encouragement (core.asm
+      -- :5474), past its CANNOT_MOVE return and never reached when TrainerAI
+      -- spent the slot: every turn the computer's monster takes its slot to
+      -- move -- asleep, recharging or locked in included.  A byte.
+      if isComputerSeat(self.mode, fighter) and not self:_computerTurnAction(fighter)
+         and not fighter.cannotMove
+         and (actor.action == "fight"
+              or (actor.action == "skip" and choice.skip == "recharge")) then
+        fighter.aiLayer2 = (int(fighter.aiLayer2, 0) + 1) % 256
+      end
       if self:_computerTurnAction(fighter) then
         if actor.action == "item" then
           self:_resolveOneItem(fighter)
@@ -3189,7 +3609,7 @@ function Battle:_rechargeTurn(fighter, mon)
   if not self:_firstGates(fighter, mon) then return end
   if mon.mustRecharge then
     mon.mustRecharge = false
-    self:_say(mon.species .. " must recharge")
+    self:_say(mon.species .. " must recharge!")
   end
 end
 
@@ -3304,12 +3724,21 @@ function Battle:_firstGates(fighter, mon)
       mon.statusTurns = int(gate.turnsRemaining, mon.statusTurns)
       if gate.wokeUp then
         mon.status, mon.statusTurns = nil, 0
+        -- WokeUpText (core.asm :3346-3347), the line; the chip's cure rides
+        -- the `status` event.
+        self:_say(mon.species .. " woke up!")
         self:_emit("status", { slot = fighter.slot, side = fighter.side,
-                               text = mon.species .. " woke up" })
+                               text = mon.species .. " woke up!" })
       elseif mon.status == "sleep" then
-        self:_say(mon.species .. " is fast asleep")
+        -- The sleeping monster's animation: SLP_PLAYER_ANIM ahead of
+        -- FastAsleepText on the player's turn (core.asm :3339-3344),
+        -- SLP_ANIM behind it on the enemy's (:5686-5691).
+        local player = isPlayerSeat(self.mode, fighter)
+        if player then self:_statusAnim(fighter, "SLP_PLAYER_ANIM") end
+        self:_say(mon.species .. " is fast asleep!")
+        if not player then self:_statusAnim(fighter, "SLP_ANIM") end
       elseif mon.status == "freeze" then
-        self:_say(mon.species .. " is frozen solid")
+        self:_say(mon.species .. " is frozen solid!")
       end
       if not gate.canMove then
         mon.lastUsedMove = nil
@@ -3319,13 +3748,13 @@ function Battle:_firstGates(fighter, mon)
   end
 
   if self:_isHeld(fighter, mon) then
-    self:_say(mon.species .. " can't move")
+    self:_say(mon.species .. " can't move!")
     return false
   end
 
   if mon.flinch then
     mon.flinch = false
-    self:_say(mon.species .. " flinched")
+    self:_say(mon.species .. " flinched!")
     return false
   end
   return true
@@ -3352,6 +3781,10 @@ function Battle:_runGates(fighter, mon, move)
     local roll = nil
     if mon.confusion > 1 then
       self:_say(mon.species .. " is confused!")
+      -- CONF_PLAYER_ANIM / CONF_ANIM behind IsConfusedText, before the
+      -- byte, on either side's turn (core.asm :3422-3426, :5762-5767).
+      self:_statusAnim(fighter, isPlayerSeat(self.mode, fighter)
+        and "CONF_PLAYER_ANIM" or "CONF_ANIM")
       roll = self.rng:byte()
     end
     local gate = Status.beforeMove({
@@ -3364,14 +3797,14 @@ function Battle:_runGates(fighter, mon, move)
     if gate then
       mon.confusion = int(gate.turnsRemaining, 0)
       if gate.snappedOut then
-        self:_say(mon.species .. " snapped out of confusion")
+        self:_say(mon.species .. "'s confused no more!")
         self:_emit("status", {
           slot = fighter.slot, side = fighter.side, confused = 0,
-          text = mon.species .. " snapped out of confusion",
+          text = mon.species .. "'s confused no more!",
         })
       elseif gate.selfHit then
         self:_selfHitClears(fighter, mon)
-        self:_say(mon.species .. " hurt itself in confusion")
+        self:_say("It hurt itself in its confusion!")
         self:_selfHit(fighter, mon, gate.selfDamage or 0)
         return false
       end
@@ -3380,14 +3813,14 @@ function Battle:_runGates(fighter, mon, move)
   end
 
   if self:_isDisabledMove(mon, move) then
-    self:_say(moveLabel(move) .. " is disabled")
+    self:_say(mon.species .. "'s " .. moveLabel(move) .. " is disabled!")
     return false
   end
 
   if mon.status == "paralysis" then
     local gate = Status.beforeMove({ status = "paralysis" }, self.rng:byte())
     if gate and gate.fullyParalyzed then
-      self:_say(mon.species .. " is fully paralyzed")
+      self:_say(mon.species .. "'s fully paralyzed!")
       self:_paralysisClears(fighter, mon)
       return false
     end
@@ -3512,7 +3945,7 @@ function Battle:_obey(fighter, mon, struggling)
 
   if verdict == "selfhit" then
     self:_say(mon.species .. " won't obey!")
-    self:_say(mon.species .. " hurt itself in confusion")
+    self:_say("It hurt itself in its confusion!")
     self:_selfHit(fighter, mon, Status.selfHitDamage(self:_selfHitState(fighter, mon)))
     return false
   end
@@ -3564,6 +3997,7 @@ function Battle:_applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex,
   for _, heal in ipairs(result.heals or {}) do
     self:_heal(fighter, mon, heal.amount)
   end
+  for _, text in ipairs(result.afterHeals or {}) do self:_say(text) end
   for _, cost in ipairs(result.costs or {}) do
     self:_damage(fighter, mon, cost.amount, nil)
   end
@@ -3609,6 +4043,64 @@ function Battle:_markLastMove(mon, moveIndex)
   if moveIndex and moveIndex >= 1 then mon.lastMoveIndex = moveIndex end
 end
 
+-- wPlayerMoveListIndex / wEnemyMoveListIndex, 1-based: the slot the last
+-- move menu (or `.moveChosen`) named (`_resolveFights`, `_cartMovePick`),
+-- rewritten to the first by a player's TRANSFORM and a PP-restoring item's
+-- menu, and never by a forced turn -- so a released trap's fresh run, a
+-- stale selection and a disobedient monster's instead-move all pay from it.
+-- The seat's own choice before any menu has named one.
+function Battle:_listIndex(fighter, choice)
+  return fighter.moveListIndex or (choice and choice.move) or 1
+end
+
+-- The move struct COUNTER reads off the seat it strikes (wPlayerMoveNum ..
+-- wPlayerMoveMaxPP / the enemy's): power and type of the move GetCurrentMove,
+-- ReloadMoveData or the trainer AI's ReadMove last copied there.  One per
+-- seat, as the cart keeps one per side; nothing clears it (a send-out zeroes
+-- the number byte alone, which COUNTER never reads).
+function Battle:_loadMoveStruct(fighter, move)
+  if type(move) ~= "table" then return end
+  fighter.moveStruct = { power = int(move.power, 0), type = int(move.type, 0) }
+end
+
+-- DecrementPP's `dec [hl]` and IncrementMovePP's `inc [hl]` on the whole PP
+-- byte: PP in the low six bits, the PP Ups (K8 `ppUps`) in the top two.  So a
+-- slot at 0 PP borrows -- 63 PP and one PP Up fewer (none wraps to three) --
+-- and one at 63 carries the other way.  A sheet past the cart's six bits
+-- (a modded move) is plain arithmetic, held at 0.
+local PP_MASK = 63
+local function stepPp(move, delta)
+  local pp = int(move.pp, 0)
+  if pp > PP_MASK then
+    move.pp = max(0, pp + delta)
+    return
+  end
+  local byte = ((int(move.ppUps, 0) % 4) * 64 + pp + delta) % 256
+  move.pp = byte % 64
+  move.ppUps = floor(byte / 64)
+end
+
+-- DecrementPP (engine/battle/decrement_pp.asm) on the list index's slot of the
+-- battle struct, which is the party's own while the monster is itself; a
+-- TRANSFORMed one's party copy is left alone (`ret nz` on TRANSFORMED) -- the
+-- copies are the battle struct's alone (`preTransform` keeps the party's).
+function Battle:_decrementPp(mon, index)
+  local move = mon.moves[index]
+  if move then stepPp(move, -1) end
+end
+
+-- IncrementMovePP (core.asm :5039-5066), ReloadMoveData's: the list index's
+-- slot in the battle struct AND in the party struct, the latter even while
+-- TRANSFORMed -- so a transformed monster's own move in that slot gains a PP
+-- (`preTransform`) that DecrementPP never takes back.  Either side's.
+function Battle:_incrementPp(fighter, mon, index)
+  local move = mon.moves[index]
+  if move then stepPp(move, 1) end
+  local saved = mon.transformed and mon.preTransform
+  local own = saved and saved.moves and saved.moves[index]
+  if own then stepPp(own, 1) end
+end
+
 -- ExplodeEffect zeroes the user's HP word itself -- never its own doll.
 function Battle:_faintUser(fighter, mon)
   if mon.hp > 0 then self:_damage(fighter, mon, mon.hp, nil, true) end
@@ -3652,9 +4144,9 @@ end
 -- EATER's sleep check, an invulnerable or a Misted target, a 0.25x zero all
 -- alike.
 function Battle:_damageMissText(mon, defender, immune, ohko)
-  if immune then return "It doesn't affect " .. defender.species end
+  if immune then return "It doesn't affect " .. defender.species .. "!" end
   if ohko then return defender.species .. "'s unaffected!" end
-  return mon.species .. " missed"
+  return mon.species .. "'s attack missed!"
 end
 
 -- MoveHitTest (core.asm :5228-5345) for a move that reaches it, in its
@@ -3688,13 +4180,20 @@ end
 
 -- HandleCounterMove (core.asm :4547-4610): COUNTER's damage, or nil for a
 -- miss.  It reads the seat it strikes -- the one opponent on the cart, the
--- target here -- through wEnemySelectedMove and that move's data
--- (`selectedMove`, `_resolveFights`), and wDamage (`lastDamage`):
---   * a target whose selected move is COUNTER, has 0 power, or is neither
---     Normal nor Fighting makes it miss -- whether or not that move was ever
---     used this turn (a sleeping, frozen or fully paralysed foe still
---     selected it; a seat that switched or used an item selected none, which
---     the cart answers from its move-menu cursor and the referee cannot);
+-- target here -- through two different things, and wDamage (`lastDamage`):
+--   * wEnemySelectedMove (`selectedMove`, `_resolveFights`): a target whose
+--     selection is COUNTER makes it miss.  CANNOT_MOVE ($ff, a held or a
+--     Hazed seat: nil) is not COUNTER, and neither is the nothing a player's
+--     switch, item or run named;
+--   * the target's move struct, wEnemyMovePower / wEnemyMoveType
+--     (`moveStruct`): power 0, or a type neither Normal nor Fighting, makes
+--     it miss.  The struct is whatever was last copied there -- the move
+--     the target used this turn when it got past its gates, else an older
+--     one: last turn's, the one its player's move menu last pointed at, the
+--     last move a trainer AI layer read (`_aiTrainerMoves`), a Bide's power
+--     of 1 -- so a target that never moved this turn (held, fully
+--     paralysed, asleep, switched) is countered off that.  Nothing loaded
+--     yet is power 0;
 --   * so does a wDamage of 0.  wDamage is one word both sides share and
 --     nothing resets between turns, so it is the LAST damage anyone dealt --
 --     usually the target's hit this turn, but a miss zeroed it and it may be
@@ -3702,11 +4201,12 @@ end
 --   * otherwise the damage is wDamage doubled, held at $ffff.  It is not
 --     typed (it reaches a Ghost) and not rolled, and a hit test follows.
 function Battle:_counterDamage(target)
-  local foeMove = target and target.selectedMove
-  if type(foeMove) ~= "table" then return nil end
-  if Effects.isCounter(foeMove) then return nil end
-  if int(foeMove.power, 0) <= 0 then return nil end
-  local moveType = int(foeMove.type, -1)
+  if not target then return nil end
+  local selected = target.selectedMove
+  if type(selected) == "table" and Effects.isCounter(selected) then return nil end
+  local struct = target.moveStruct
+  if type(struct) ~= "table" or int(struct.power, 0) <= 0 then return nil end
+  local moveType = int(struct.type, -1)
   if moveType ~= self.normalType and moveType ~= self.fightingType then return nil end
   if self.lastDamage <= 0 then return nil end
   return min(65535, self.lastDamage * 2)
@@ -3743,7 +4243,7 @@ function Battle:_switchAndTeleport(fighter, mon, defender, move)
   local teleport = key == "TELEPORT"
   if not Effects.teleportRunAllowed(self.mode) then
     if teleport then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
     else
       self:_say(defender.species .. " is unaffected!")
     end
@@ -3751,9 +4251,9 @@ function Battle:_switchAndTeleport(fighter, mon, defender, move)
   end
   if not Effects.teleportEscapes(mon.level, defender.level, self.rng) then
     if teleport then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
     else
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
     end
     return
   end
@@ -3824,7 +4324,11 @@ function Battle:_bideTurn(fighter, mon, move, usedSlot)
   if bide.turns > 0 then return end
   local stored = bide.stored
   mon.bide = nil
-  self:_say(mon.species .. " unleashed energy")
+  -- `.UnleashEnergy` writes 1 into wPlayerMovePower (core.asm :3508-3509),
+  -- leaving the struct's type as GetCurrentMove last left it: a COUNTER can
+  -- answer a Bide.
+  if type(fighter.moveStruct) == "table" then fighter.moveStruct.power = 1 end
+  self:_say(mon.species .. " unleashed energy!")
   local target = fighter.choice.target ~= nil and self:_retarget(fighter, fighter.choice.target) or nil
   local defender = target and activeMon(target)
   if not defender then
@@ -3835,7 +4339,7 @@ function Battle:_bideTurn(fighter, mon, move, usedSlot)
   local damage = (2 * stored) % 65536
   if damage <= 0 then
     self.lastDamage = 0
-    self:_say(mon.species .. " missed")
+    self:_say(mon.species .. "'s attack missed!")
     self:_markLastMove(mon, usedSlot)
     return
   end
@@ -3872,17 +4376,17 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     -- every one of them is MoveMissed's "But it failed!".
     if isComputerSeat(self.mode, fighter)
        and self.rng:byte() < Effects.COMPUTER_DROP_MISS then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       self:_markLastMove(mon, usedSlot)
       return
     end
     if Effects.hasSubstitute(defender) then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       self:_markLastMove(mon, usedSlot)
       return
     end
     if not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
   elseif plan == "poison" then
@@ -3890,19 +4394,19 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     -- turn it away before its MoveHitTest, and a miss says the same thing --
     -- "It didn't affect <TARGET>!" (`.noEffect` / `.didntAffect`).
     if Effects.poisonTurnsAway(defender, self.poisonType) then
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
       self:_markLastMove(mon, usedSlot)
       return
     end
     if not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
   elseif plan == "disable" then
     -- DisableEffect (effects.asm :1286-1293): its MoveHitTest first, and a
     -- miss is "But it failed!" (`.moveMissed`).
     if not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
   elseif plan == "sleep" then
@@ -3923,11 +4427,11 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
       self:_markLastMove(mon, usedSlot)
       return
     elseif Effects.hasMajorStatus(defender) then
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
       self:_markLastMove(mon, usedSlot)
       return
     elseif not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
   elseif plan == "paralyze" then
@@ -3937,18 +4441,18 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     -- before MoveHitTest, whose miss is "It didn't affect" again.  No
     -- Substitute check: THUNDER WAVE reaches the monster behind a doll.
     if Effects.hasMajorStatus(defender) then
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
       self:_markLastMove(mon, usedSlot)
       return
     end
     if self.electricType ~= nil and int(move.type, -1) == self.electricType
        and hasType(defender, self.groundType) then
-      self:_say("It doesn't affect " .. defender.species)
+      self:_say("It doesn't affect " .. defender.species .. "!")
       self:_markLastMove(mon, usedSlot)
       return
     end
     if not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("It didn't affect " .. defender.species)
+      self:_say("It didn't affect " .. defender.species .. "!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
   elseif plan == "confusion" then
@@ -3956,12 +4460,12 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     -- MoveHitTest -- either one ConfusionEffectFailed's "But it failed!" --
     -- and an already confused target fails the same way (Effects).
     if Effects.hasSubstitute(defender) then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       self:_markLastMove(mon, usedSlot)
       return
     end
     if not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
   elseif plan == "leechseed" then
@@ -3983,12 +4487,12 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     -- a miss (its INVULNERABLE re-check after it can never fire), then the
     -- pick (`_mimicPick`).  No Substitute check.
     if not self:_hitTest(mon, defender, move, effectId) then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
     end
     local pick = self:_mimicPick(fighter, defender, choice)
     if not pick then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       self:_markLastMove(mon, usedSlot)
       return
     end
@@ -3996,7 +4500,7 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
   elseif plan == "conversion" then
     -- ConversionEffect_'s own INVULNERABLE test on the target, no byte.
     if defender.invulnerable then
-      self:_say("But it failed")
+      self:_say("But, it failed!")
       self:_markLastMove(mon, usedSlot)
       return
     end
@@ -4027,7 +4531,16 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     return
   end
   if Effects.handlesPrimary(effectId) then
-    self:_applyPrimary(fighter, mon, target, defender, choice.move, effectId, move.id, extra)
+    -- TransformEffect_ on the player's turn writes `a` -- hWhoseTurn, 0 --
+    -- into wPlayerMoveListIndex before anything else (transform.asm :15),
+    -- whether the copy then lands or not: the first slot from here on.
+    if effectId == 57 and isPlayerSeat(self.mode, fighter) then
+      fighter.moveListIndex = 1
+    end
+    -- MIMIC overwrites the list index's slot (`.letPlayerChooseMove` reads
+    -- wPlayerMoveListIndex, effects.asm :1238).
+    self:_applyPrimary(fighter, mon, target, defender, self:_listIndex(fighter, choice),
+      effectId, move.id, extra)
   else
     self:_say("But nothing happened")
   end
@@ -4115,10 +4628,22 @@ function Battle:_useMove(fighter, mon, opts)
   -- answer (`mustStruggle`) -- an empty sheet (`#moves == 0`) included -- is
   -- the synthetic STRUGGLE; returning on the missing slot used to eat that
   -- turn instead.
+  -- wPlayerMoveListIndex / wEnemyMoveListIndex (`_listIndex`): the slot
+  -- DecrementPP spends, IncrementMovePP refunds and MIMIC overwrites.
+  local listIndex = self:_listIndex(fighter, choice)
+  -- A monster asleep or frozen at the menu opened no move menu, so the move
+  -- its slot runs is wPlayerSelectedMove as last turn left it -- reached only
+  -- when a Fire hit thawed it before its slot (sleep's waking turn is lost).
+  -- That is the move last turn USED: the one a METRONOME or MIRROR MOVE
+  -- called, if it called one, and not the calling move.
+  local stale = not called and choice.stale and choice.forcedMove == nil
+    and type(fighter.selectedMove) == "table"
   local move = opts.moveOverride
   if not called then
     if choice.forcedMove then
       move = choice.forcedMove
+    elseif stale then
+      move = fighter.selectedMove
     elseif self:_struggles(fighter, mon) then
       move = STRUGGLE
     else
@@ -4130,11 +4655,6 @@ function Battle:_useMove(fighter, mon, opts)
   -- MetronomePickMove / MirrorMoveCopyMove write the called move into
   -- wPlayerSelectedMove, where COUNTER reads it (`_counterDamage`).
   if called then fighter.selectedMove = move end
-  -- What a record this action starts keeps for its forced turns: the move
-  -- itself when it is a called one -- this call, or a forced replay of one
-  -- (`choice.called`) -- and nothing for the slot's own move, which the
-  -- record's slot already names.
-  local recordMove = (called or choice.called) and move or nil
   -- The slot this action is *using*: the chosen one, or the one a disobedient
   -- monster picked instead (below), carried into a Metronome / Mirror Move
   -- call.  Whatever the action records for a later turn -- a charge, a
@@ -4142,9 +4662,28 @@ function Battle:_useMove(fighter, mon, opts)
   -- recorded against it, because the cart overwrote wPlayerSelectedMove with
   -- the move it used.  Two things still answer to the *chosen* slot,
   -- wPlayerMoveListIndex, which `.chooseMove` never rewrites: the PP spent
-  -- (DecrementPP) and the slot Mimic writes over (`_applyPrimary`).
-  local usedSlot = opts.slot or choice.move
+  -- (DecrementPP) and the slot Mimic writes over (`_applyPrimary`).  A stale
+  -- selection's slot is that index too.
+  local usedSlot = opts.slot or (stale and listIndex) or choice.move
+  -- What a record this action starts keeps for its forced turns: the move
+  -- itself when it is a called one -- this call, or a forced replay of one
+  -- (`choice.called`), or a stale selection that is not its slot's own move
+  -- -- and nothing for the slot's own move, which the record's slot already
+  -- names.
+  local recordMove = (called or choice.called) and move or nil
+  if stale and move ~= mon.moves[usedSlot] then recordMove = move end
   local disobedient = opts.disobedient == true
+  -- ReloadMoveData (core.asm :4996-5010), on the way into the called move:
+  -- IncrementMovePP gives the list index's PP back -- "to prevent moves that
+  -- run another move within the same turn ... from losing 2 PP" -- before the
+  -- called move's own PlayerCanExecuteMove spends it again (below).  A called
+  -- charge stops at ChargeEffect without that second DecrementPP, so its call
+  -- refunds the slot for the turn (the release pays it, `payIndex`).  The
+  -- computer's slot is refunded too, and never spent: its PP climbs.
+  if called then
+    self:_incrementPp(fighter, mon, listIndex)
+    self:_loadMoveStruct(fighter, move)
+  end
 
   -- The gates, the disabled-move check among them (`_runGates`).
   if not called and not self:_runGates(fighter, mon, move) then return end
@@ -4172,7 +4711,7 @@ function Battle:_useMove(fighter, mon, opts)
       mon.confusion = self.rng:byte() % 4 + 2
       self:_emit("status", {
         slot = fighter.slot, side = fighter.side, confused = 1,
-        text = mon.species .. " became confused",
+        text = mon.species .. " became confused!",
       })
     end
   end
@@ -4187,6 +4726,17 @@ function Battle:_useMove(fighter, mon, opts)
     return self:_trapTurn(fighter, mon, move, usedSlot)
   end
 
+  -- `.playerHasNoSpecialCondition`'s GetCurrentMove (core.asm :3095): the
+  -- selected move into the move struct, which COUNTER reads off this seat
+  -- (`_counterDamage`).  A Bide's turns, a thrash's and a trap's
+  -- continuations and a Rage's (`.RageCheck` goes straight to
+  -- PlayerCanExecuteMove) leave CheckPlayerStatusConditions without it; a
+  -- called move loaded its own (ReloadMoveData, above).
+  local rageTurn = not called and mon.raging and choice.forcedMove ~= nil
+  if not called and not thrashTurn and not rageTurn then
+    self:_loadMoveStruct(fighter, move)
+  end
+
   -- CheckForDisobedience: a traded monster of the player's, on the turn's own
   -- move.  A forced action never asks -- Bide, a thrash, a Rage and a charge's
   -- release all leave CheckPlayerStatusConditions (or the CHARGING_UP branch)
@@ -4197,6 +4747,8 @@ function Battle:_useMove(fighter, mon, opts)
     if instead then
       usedSlot, move, disobedient = instead, mon.moves[instead], true
       fighter.selectedMove = move
+      -- `.useRandomMove` ends on GetCurrentMove (core.asm :4000).
+      self:_loadMoveStruct(fighter, move)
     end
   end
 
@@ -4227,25 +4779,31 @@ function Battle:_useMove(fighter, mon, opts)
   -- (:3111-3124), DisplayUsedMoveText and then DecrementPP, on the slot
   -- wPlayerMoveListIndex still names -- the one chosen the turn it started
   -- (`payIndex`), no menu having been opened since.  So a METRONOME or MIRROR
-  -- MOVE that called a charge move pays a second time from its own slot, and
-  -- a charge a full paralysis or a self-hit cancelled paid nothing.  (A slot
-  -- already at 0 pays nothing here: the cart's `dec [hl]` would wrap it.)
-  -- The computer never pays at all: ExecuteEnemyMove has no DecrementPP
-  -- (core.asm :5510-5521), so outside a link battle its PP is the sheet's
-  -- for the whole fight (`_hasPp`).
-  local paying = move
-  if disobedient and not called then paying = mon.moves[choice.move] end
-  if releasing then paying = mon.moves[mon.charging.payIndex or choice.move] or move end
-  if not struggling and paying.pp > 0 and not chargingUp
+  -- MOVE that called a charge move pays its call's refund back there, and a
+  -- charge a full paralysis or a self-hit cancelled keeps it.  A called move
+  -- that is not a charge pays the refund back at once: one PP a call, net.
+  -- The slot is the list index whatever move runs -- a stale selection's, a
+  -- released trap's fresh run, a disobedient monster's instead-move -- and
+  -- DecrementPP never looks at what is left: a slot at 0 wraps
+  -- (`_decrementPp`), to 63 PP and one PP Up fewer.  The computer never pays
+  -- at all: ExecuteEnemyMove has no DecrementPP (core.asm :5510-5521), so
+  -- outside a link battle its PP never falls (`_hasPp`).
+  local payIndex = listIndex
+  if releasing then payIndex = mon.charging.payIndex or listIndex end
+  local paying = mon.moves[payIndex]
+  if paying and not struggling and not chargingUp
      and not thrashTurn and not mon.raging
      and not isComputerSeat(self.mode, fighter) then
-    paying.pp = paying.pp - 1
-    -- FIGHT reads the uploaded sheet. Publish whenever PP actually moved
-    -- (Transform/Mimic already emit via movesChanged). Skip an override
-    -- copy -- Metronome/Mirror already spent the real slot on the first call.
+    self:_decrementPp(mon, payIndex)
+    -- FIGHT reads the uploaded sheet: publish the spend.  A called move's
+    -- spend only paid back the call's refund, so the list is as the
+    -- calling move left it (published there).
     if not called then
       self:_emitMoves(fighter, mon, fighter.active)
     end
+  elseif called and chargingUp and paying and not isComputerSeat(self.mode, fighter) then
+    -- The refund a called charge keeps for its charge turn.
+    self:_emitMoves(fighter, mon, fighter.active)
   end
   -- amount=1 is the charge/vanish setup beat (release omits it). SHAKE_ANIM
   -- already uses amount for rock count; DIG/FLY/SOLARBEAM are never shakes.
@@ -4270,9 +4828,9 @@ function Battle:_useMove(fighter, mon, opts)
   if thrashTurn or chargingUp then
     -- nothing: see above
   elseif disobedient then
-    self:_say(mon.species .. " used instead, " .. moveLabel(move))
+    self:_say(mon.species .. " used instead, " .. moveLabel(move) .. "!")
   else
-    self:_say(mon.species .. " used " .. moveLabel(move))
+    self:_say(mon.species .. " used " .. moveLabel(move) .. "!")
   end
 
   if chargingUp then
@@ -4454,7 +5012,7 @@ function Battle:_useMove(fighter, mon, opts)
       -- (PrintCriticalOHKOText), as the cart's does.
       local counter = self:_counterDamage(target)
       if not counter then
-        self:_say(mon.species .. " missed")
+        self:_say(mon.species .. "'s attack missed!")
         self:_markLastMove(mon, usedSlot)
         return
       end
@@ -4615,7 +5173,7 @@ function Battle:_useMove(fighter, mon, opts)
       if isOhko then
         self:_say("One-hit KO!")
       elseif isCrit then
-        self:_say("A critical hit")
+        self:_say("Critical hit!")
       end
     end
     if effectLine then self:_say(effectLine) end
@@ -4627,7 +5185,7 @@ function Battle:_useMove(fighter, mon, opts)
         hits = Effects.hitCount(effectId, self.rng)
         counted = true
       end
-      self:_alwaysHappen(fighter, mon, effectId, struggling, usedSlot, recordMove)
+      self:_alwaysHappen(fighter, mon, effectId, struggling, usedSlot, recordMove, defender)
     end
     if defender.hp <= 0 then break end
     self:_buildRage(target, defender, fighter)
@@ -4656,7 +5214,8 @@ function Battle:_useMove(fighter, mon, opts)
   -- A substitute absorbs HP (including the breaking hit), so totalDealt stays
   -- 0. Do not then apply a foe primary onto the mon behind it.
   if Effects.handlesPrimary(effectId) and totalDealt > 0 then
-    self:_applyPrimary(fighter, mon, target, defender, choice.move, effectId, move.id)
+    self:_applyPrimary(fighter, mon, target, defender, self:_listIndex(fighter, choice),
+      effectId, move.id)
   end
 
   -- HYPER_BEAM_EFFECT is one of `.executeOtherEffects`' (a knockout returned
@@ -4692,17 +5251,25 @@ end
 --   * RageEffect sets USING_RAGE; `calledMove` is the move a METRONOME /
 --     MIRROR MOVE called, which the forced turns replay.
 --   * ExplodeEffect's faint is `_useMove`'s, said after the move.
-function Battle:_alwaysHappen(fighter, mon, effectId, struggling, usedSlot, calledMove)
+function Battle:_alwaysHappen(fighter, mon, effectId, struggling, usedSlot, calledMove, defender)
   if Effects.isDrain(effectId) then
     local heal = Effects.drainAmount(self.lastDamage)
     self.lastDamage = heal
     self:_heal(fighter, mon, heal)
+    -- DrainHPEffect_ ends on SuckedHealthText -- DreamWasEatenText for
+    -- DREAM EATER (move_effects/drain_hp.asm :85-96) -- full HP or not.
+    local name = defender and defender.species or "POKeMON"
+    if int(effectId, 0) == 8 then
+      self:_say(name .. "'s dream was eaten!")
+    else
+      self:_say("Sucked health from " .. name .. "!")
+    end
   elseif Effects.isPayDay(effectId) then
     self.payDay[fighter.side] = self.payDay[fighter.side] + Effects.payDayCoins(mon.level)
-    self:_say("Coins scattered")
+    self:_say("Coins scattered everywhere!")
   elseif struggling or Effects.isRecoil(effectId) then
     local recoil = Effects.recoilAmount(self.lastDamage, struggling)
-    self:_say(mon.species .. " is hit with recoil")
+    self:_say(mon.species .. "'s hit with recoil!")
     self:_damage(fighter, mon, recoil, nil, true)
   elseif Effects.isRage(effectId) then
     mon.raging = true
@@ -4736,11 +5303,16 @@ function Battle:_damage(fighter, mon, amount, status, direct, holdFaint)
   -- `ret nc`, so a hit for exactly the doll's HP leaves it standing at 0
   -- (`subAtZero`), and only a hit for more breaks it.
   if amount > 0 and not direct and Effects.hasSubstitute(mon) then
+    -- SubstituteTookDamageText first, every hit (AttackSubstitute's own
+    -- opening line, core.asm :4857-4858): <TARGET> is the doll's owner --
+    -- the other side's, on a self-hit or a crash -- then
+    -- SubstituteBrokeText if it went.
+    self:_say("The SUBSTITUTE took damage for " .. mon.species .. "!")
     local dollHp = max(0, int(mon.substitute, 0))
     if amount > 255 or amount > dollHp then
       mon.substitute = 0
       mon.subAtZero = nil
-      self:_say(mon.species .. "'s substitute broke")
+      self:_say(mon.species .. "'s SUBSTITUTE broke!")
     else
       mon.substitute = dollHp - amount
       mon.subAtZero = (mon.substitute == 0) or nil
@@ -4802,13 +5374,13 @@ function Battle:_buildRage(fighter, mon, source)
     mover = fighter, nonMover = activeMon(source),
   })
   if outcome == "rose" then
-    self:_say(mon.species .. "'s ATTACK rose")
+    self:_say(mon.species .. "'s ATTACK rose!")
     self:_emit("stat", {
       slot = fighter.slot, side = fighter.side,
-      amount = after, stage = after, text = mon.species .. "'s ATTACK rose",
+      amount = after, stage = after, text = mon.species .. "'s ATTACK rose!",
     })
   elseif outcome == "stuck" then
-    self:_say("Nothing happened")
+    self:_say("Nothing happened!")
   end
 end
 
@@ -5177,8 +5749,18 @@ function Battle:_resolveResiduals()
           amount = amount * max(1, int(mon.toxicCounter, 1))
           mon.toxicCounter = max(1, int(mon.toxicCounter, 1)) + 1
         end
-        self:_say(mon.species .. " is hurt by its " .. mon.status)
-        self:_damage(fighter, mon, amount, mon.status, true)
+        -- HurtByBurnText for a burn, HurtByPoisonText for a poison --
+        -- PSN on the status byte, a toxic included (core.asm :484-489).
+        if mon.status == "burn" then
+          self:_say(mon.species .. "'s hurt by the burn!")
+        else
+          self:_say(mon.species .. "'s hurt by poison!")
+        end
+        -- ...then BURN_PSN_ANIM, then the HP (:490-495).
+        self:_statusAnim(fighter, "BURN_PSN_ANIM")
+        -- The knockout is the main loop's, once the whole pass is done
+        -- (`ret nz` on the HP, :526-528): its faint waits for the seed's tick.
+        self:_damage(fighter, mon, amount, mon.status, true, true)
         poisonKo = mon.hp <= 0
       end
     end
@@ -5203,11 +5785,17 @@ function Battle:_resolveResiduals()
         seeded.toxicCounter = max(1, int(seeded.toxicCounter, 1)) + 1
       end
       local from = seed.fromSlot
-      self:_say(seeded.species .. " is seeded")
-      if mon == seeded then self:_damage(fighter, mon, amount, nil, true) end
+      -- The HP goes both ways first and HurtByLeechSeedText follows
+      -- (:519-524).  (The cart's ABSORB animation from the seeder is not
+      -- sent: a move id on an `anim` reads as that monster using ABSORB.)
+      if mon == seeded then self:_damage(fighter, mon, amount, nil, true, true) end
       local seeder = from and self:_fighterAtSlot(from)
       local sMon = seeder and activeMon(seeder)
       if sMon and sMon.hp > 0 then self:_heal(seeder, sMon, amount) end
+      self:_say("LEECH SEED saps " .. seeded.species .. "!")
+    end
+    if seeded and seeded.hp <= 0 and fighter.mons[fighter.active] == seeded then
+      self:_faint(fighter, seeded)
     end
     -- (Disable does not count down here: its counter steps in the disabled
     -- monster's own turn, `_tickDisable`.)

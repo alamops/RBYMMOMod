@@ -97,7 +97,7 @@ test('gen1 DIG: dug a hole, invulnerable, Earthquake fails', () => {
   assert.ok(events.some((e) => e.t === 'anim' && e.text === 'DIG' && e.amount === 1));
   // MoveHitTest's INVULNERABLE miss is PrintMoveFailureText's "<USER>'s attack
   // missed!" (R1c), not "But it failed".
-  assert.ok(events.some((e) => e.t === 'msg' && e.text === 'Beta missed'));
+  assert.ok(events.some((e) => e.t === 'msg' && e.text === "Beta's attack missed!"));
   assert.ok(!events.some((e) => e.t === 'damage'));
   const p1 = battle.byId.get('p1');
   const alpha = p1.mons[p1.active - 1];
@@ -120,18 +120,18 @@ test('gen1 Thunder does not reach Fly', () => {
   const events = battle.drainEvents();
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('flew up high')));
   assert.ok(!events.some((e) => e.t === 'damage' && e.slot === 0));
-  assert.ok(events.some((e) => e.t === 'msg' && e.text === 'Beta missed'));
+  assert.ok(events.some((e) => e.t === 'msg' && e.text === "Beta's attack missed!"));
 });
 
 test('gen1 charge-family texts and DIG turn two', () => {
   const Effects = Battle1.Effects;
   assert.strictEqual(
     Effects.chargeMessage({ species: 'Alpha' }, 39, 'SOLARBEAM'),
-    'Alpha took in sunlight',
+    'Alpha took in sunlight!',
   );
   assert.strictEqual(
     Effects.chargeMessage({ species: 'Alpha' }, 39, 'SKULL_BASH'),
-    'Alpha lowered its head',
+    'Alpha lowered its head!',
   );
   const battle = fight(Battle1.Turn, {
     seed: 4242,

@@ -34,6 +34,9 @@ local Toast = need("Toast")
 -- only thing in the mod that touches a canvas -- and it requires nothing, so
 -- the suite can assert a frame's worth of particles with no LOVE in process.
 local Vfx = need("Vfx")
+-- The status token's three letters, the carts' way (ClassicBattle.statusLabel:
+-- a Red / Gold TOX shows PSN).  ClassicBattle requires nothing of this file.
+local ClassicBattle = need("ClassicBattle")
 
 local M = {}
 
@@ -693,12 +696,9 @@ function M.cardModel(seat)
   local hp = math.max(0, math.floor(num(seat.hp, 0)))
   local maxHp = math.max(1, math.floor(num(seat.maxHp, hp > 0 and hp or 1)))
   if hp > maxHp then hp = maxHp end
-  local status = seat.status
-  if type(status) ~= "string" or status == "" then
-    status = nil
-  else
-    status = status:sub(1, 3)
-  end
+  -- A Red / Gold seat's TOX is the PSN both carts' HUDs print (the badly
+  -- poisoned flag sits beside the status byte); Gen 3 keeps its own TOX chip.
+  local status = ClassicBattle.statusLabel(seat.status, onGen3())
   local confused = seat.confused == true
       or (type(seat.confused) == "number" and seat.confused > 0)
   local species = seat.species

@@ -710,6 +710,18 @@ const HAPPINESS2_MAX = 255;
 // which `create` reads as `opts.timeOfDay`. A closed set, like WEATHERS3. Twin
 // of Wire.TIMES_OF_DAY2.
 const TIMES_OF_DAY2 = new Set(['morn', 'day', 'nite']);
+// Wave 5, Gen 1 / Gen 2 only. CHART_ORDER_MAX: integers in a Red ruleset's
+// `chartOrder` -- pokered's TypeEffects (data/types/type_matchups.asm) as
+// chart-index pairs in table order, two per row; the Red referee takes at most
+// its CHART_ORDER_MAX rows (lib/battle Turn, 256), so twice that (the cart's
+// table is 82 rows, 164 integers). NUM_ATTACKS2: a Gold Metronome pool row's
+// `num` -- pokecrystal / pokegold move_constants.asm NUM_ATTACKS, the 251
+// BattleCommand_Metronome's `.GetMove` compares its byte with (`cp NUM_ATTACKS
+// + 1`); the Gold referee's Turn NUM_ATTACKS. K15's `base.gender` (BASE_GENDER)
+// is a byte of the same base-stats row as `base`, so BASE_STAT_MAX bounds it.
+// Twins of Wire.CHART_ORDER_MAX / Wire.NUM_ATTACKS2.
+const CHART_ORDER_MAX = 512;
+const NUM_ATTACKS2 = 251;
 
 // Contract K7's three blocks per dialect: `base` keyed like `stats` plus `hp`,
 // `dvs` the cart's four DVs (Gold's one Special DV feeds both special stats),
@@ -1278,6 +1290,32 @@ function cleanBattleRuleset3(raw) {
   return out;
 }
 
+/*
+ * Red's type chart as the cart walks it (`chartOrder`, wave 5): pokered's
+ * TypeEffects rows in table order as a flat [atk1, def1, atk2, def2, ...] of
+ * chart indices -- the shape lib/battle Turn's chartRowsOf reads. Refused WHOLE
+ * rather than trimmed, as cleanTypeTable3 refuses Gen 3's ordered chart: a list
+ * (luaList, so a JSON null is closed up first exactly as the engine's decoder
+ * closes it before Wire.lua sees the list), of an even, non-zero length no
+ * longer than CHART_ORDER_MAX, each entry a chart index 0..BATTLE_TYPE_MAX - 1
+ * read as Wire.int reads it (luaInt). A dropped row moves the last one, a cut
+ * pair mispairs every later row, and an empty list names no row. Twin of
+ * Wire.lua's chartOrderOf.
+ */
+function cleanChartOrder(value) {
+  const list = luaList(value);
+  if (!list) return null;
+  const n = list.length;
+  if (n === 0 || n % 2 !== 0 || n > CHART_ORDER_MAX) return null;
+  const out = [];
+  for (const entry of list) {
+    const index = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
+    if (index === null) return null;
+    out.push(index);
+  }
+  return out;
+}
+
 // `generation` (optional) is the hub's; Gen 1 / Gen 2 rulesets are read
 // exactly as before.
 function cleanBattleRuleset(raw, generation) {
@@ -1318,18 +1356,51 @@ function cleanBattleRuleset(raw, generation) {
     if (typeIds) ruleset.typeIds = typeIds;
   }
   // Read in the older dialect by name, never by sniffing a row's `num`: this is
-  // a Gen 1 / Gen 2 ruleset. Twin of Wire.battleRuleset.
+  // a Gen 1 / Gen 2 ruleset. A Gold row may state its cart move number (`num`,
+  // wave 5), which BattleCommand_Metronome's `.GetMove` byte names a move by
+  // and the Gold referee looks its pick up by (lib/battle2 Turn
+  // `byNumber[entry.num || i]`): 1..NUM_ATTACKS2, read on a Gen 2 hub alone (the
+  // Red referee picks by a row's place and reads none), refused with the ruleset
+  // when present and unreadable -- K8's posture for a row field. Twin of
+  // Wire.battleRuleset.
+  // The pool is read as Wire.lua's isList reads it (wave 5): a JSON null row
+  // closed up first (luaList), as the engine's decoder closes it before the Lua
+  // hub sees the list -- where this line used to refuse the ruleset over it --
+  // and a non-empty object where the list belongs refused (`{}` is the empty
+  // list, as the two decode alike in Lua).
   if (raw.metronomePool !== undefined && raw.metronomePool !== null) {
-    if (!Array.isArray(raw.metronomePool)) return null;
+    const list = luaList(raw.metronomePool);
+    if (!list) return null;
     const rowGeneration = luaInt(generation, 1, 2) ?? 1;
     const pool = [];
-    for (const entry of raw.metronomePool) {
+    for (const entry of list) {
       if (pool.length >= METRONOME_POOL_MAX) break;
       const move = cleanBattleMove(entry, rowGeneration);
       if (!move) return null;
+      if (rowGeneration === 2 && entry.num !== undefined && entry.num !== null) {
+        const num = luaInt(entry.num, 1, NUM_ATTACKS2);
+        if (num === null) return null;
+        move.num = num;
+      }
       pool.push(move);
     }
     ruleset.metronomePool = pool;
+  }
+  // Red's TypeEffects order (`chartOrder`, wave 5): the cart's rows in table
+  // order as chart-index pairs, which AdjustDamageForMoveType walks and whose
+  // LAST applied row is the wDamageMultipliers DisplayEffectiveness and
+  // PrintMoveFailureText read -- a dual type's "doesn't affect" or "missed".
+  // Read on a Gen 1 hub alone, by the hub's generation (Gold's
+  // BattleCommand_Stab writes the product over wTypeModifier at its `.end`;
+  // Gen 3 uploads `typeTable`): a Gen 2 / Gen 3 reader, or one naming none,
+  // neither copies nor refuses one. Present and unreadable refuses the ruleset
+  // (cleanChartOrder). Absent stays absent -- the referee's product reading.
+  // Twin of Wire.battleRuleset.
+  if (luaInt(generation, 1, 1) !== null
+      && raw.chartOrder !== undefined && raw.chartOrder !== null) {
+    const chartOrder = cleanChartOrder(raw.chartOrder);
+    if (!chartOrder) return null;
+    ruleset.chartOrder = chartOrder;
   }
   // Gold's wTimeOfDay, which MORNING SUN / SYNTHESIS / MOONLIGHT compare
   // (BattleCommand_HealMorn / _HealDay / _HealNite) -- the host's cart clock.
@@ -1870,6 +1941,21 @@ function cleanBattleMon(raw) {
   if (raw.base !== undefined && raw.base !== null) {
     const base = cleanBlock3(raw.base, keys.base, 0, BASE_STAT_MAX);
     if (!base) return null;
+    // Contract K15 (wave 5): Gold's `base` may carry the species' BASE_GENDER
+    // byte (`gender`; pokecrystal / pokegold base_stats `db GENDER_*`: F0 0
+    // male, F100 254 female, UNKNOWN 255 genderless), which GetGender compares
+    // with the Attack and Speed DVs and ATTRACT's CheckOppositeGender reads
+    // (lib/battle2 Effects.gender, `mon.base.gender`). Not a K7 key: a block
+    // with the base stats and no ratio is read as before. Present and
+    // unreadable refuses the sheet (K7's posture); Gen 2 only, by the dialect
+    // this sheet resolved to -- a Gen 1 reader neither copies nor refuses one
+    // (cleanBlock3 keeps only its keys). luaInt, as Wire.int. Twin of
+    // Wire.battleMon.
+    if (generation === 2 && raw.base.gender !== undefined && raw.base.gender !== null) {
+      const gender = luaInt(raw.base.gender, 0, BASE_STAT_MAX);
+      if (gender === null) return null;
+      base.gender = gender;
+    }
     mon.base = base;
   }
   if (raw.dvs !== undefined && raw.dvs !== null) {
@@ -2136,7 +2222,8 @@ function cleanBattleReady(raw) {
  * and reads every index the way Wire.int does (luaInt); a Gen 1 / Gen 2 hub --
  * and a caller that names none -- reads a choice exactly as it did before Gen 3
  * existed, ignoring them whatever they hold. Likewise only 1 reads Gen 1's
- * `mimic` (wave 4), ignored everywhere else. Twin of Wire.battleChoice.
+ * `mimic` (wave 4), ignored everywhere else, and since wave 5 a Gen 2 hub reads
+ * `pass` too (Gold's BATON PASS). Twin of Wire.battleChoice.
  */
 function cleanBattleChoice(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
@@ -2173,14 +2260,19 @@ function cleanBattleChoice(raw, generation) {
   // Gen 3 (docs/plans/gen3-battle-sheet.md §1.2): Baton Pass's destination (a
   // *party* index, asked up front) and the thrower's word that its dex has the
   // wild species caught (Repeat Ball). A Gen 3 item rides in `item` as its
-  // numeric id spelled as a string. Neither field exists in Gen 1 / Gen 2, so
-  // neither is read there. Twin of Wire.battleChoice.
+  // numeric id spelled as a string. Neither field exists in Gen 1, so neither
+  // is read there. Gold has BATON PASS too (wave 5): BattleCommand_BatonPass
+  // opens the party menu mid-move (ForcePickSwitchMonInBattle), so a Gen 2 hub
+  // reads `pass` exactly as Gen 3's -- same index, same bounds, refused out of
+  // range -- for the Gold referee's `_batonPass`; `dexCaught` stays Gen 3's.
+  // Red has no BATON PASS: a Gen 1 hub, or a caller naming none, ignores a
+  // `pass`. Twin of Wire.battleChoice.
+  if (luaInt(generation, 2, 3) !== null && raw.pass !== undefined && raw.pass !== null) {
+    const pass = luaInt(raw.pass, 0, SLOT_MAX);
+    if (pass === null) return null;
+    choice.pass = pass;
+  }
   if (gen3) {
-    if (raw.pass !== undefined && raw.pass !== null) {
-      const pass = luaInt(raw.pass, 0, SLOT_MAX);
-      if (pass === null) return null;
-      choice.pass = pass;
-    }
     if (raw.dexCaught !== undefined && raw.dexCaught !== null) {
       if (typeof raw.dexCaught !== 'boolean') return null;
       choice.dexCaught = raw.dexCaught;
@@ -2703,6 +2795,9 @@ module.exports = {
   PAYDAY12_MAX,
   HAPPINESS2_MAX,
   TIMES_OF_DAY2,
+  CHART_ORDER_MAX,
+  NUM_ATTACKS2,
+  cleanChartOrder,
   K7_KEYS1,
   K7_KEYS2,
   METRONOME_POOL_MAX,

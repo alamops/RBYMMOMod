@@ -646,16 +646,43 @@ function M.drawPartyIcon(game, modules, row, x, y, selected, counter)
   return pcall(g.draw, img, x, y) == true
 end
 
+-- The three letters a status token is shown as, or nil for none.
+--
+-- Red and Gold have no badly-poisoned status of their own: TOXIC is a battle
+-- flag beside the status byte's PSN bit (pokered BADLY_POISONED in
+-- wPlayerBattleStatus3 / wEnemyBattleStatus3, pokecrystal SUBSTATUS_TOXIC in
+-- the SubStatus5 bytes), and both carts' HUDs read the byte alone -- pokered
+-- PrintStatusConditionNotFainted (called by core.asm's DrawPlayerHUDAndHPBar /
+-- DrawEnemyHUDAndHPBar) and pokecrystal PlaceStatusString
+-- (engine/pokemon/mon_stats.asm, PsnString) print "PSN" for it.  The
+-- referee's TOX token (Wire.STATUSES) is that flag, so a Gen 1 / Gen 2 seat
+-- shows PSN, as MediatedBattle.partyStatus12 already writes PSN into the
+-- party.  Gen 3 keeps TOX: its status word holds STATUS1_TOXIC_POISON itself.
+-- `gen3` is the caller's answer when it has one (else Gen3.active()).
+-- Shared by every Gen 1 / Gen 2 status readout: this file's party picker, the
+-- classic HUD plates (src/MediatedBattle.lua, src/CoopBattle.lua) and the
+-- arena's chip (src/Battlefield.lua cardModel).
+function M.statusLabel(status, gen3)
+  if type(status) ~= "string" or status == "" then return nil end
+  if gen3 == nil then
+    gen3 = type(Gen3) == "table" and type(Gen3.active) == "function"
+      and Gen3.active() == true
+  end
+  if status == "TOX" and not gen3 then return "PSN" end
+  return status:sub(1, 3)
+end
+
 -- Healthy mons stay blank; only a real status (or FNT) is printed.
 local function statusGlyph(row)
   if not row then return "" end
   if row.fainted or (tonumber(row.hp) or 1) <= 0 then return "FNT" end
   local status = row.status
   if type(status) == "string" and status ~= "" and status ~= "OK" then
-    return status:sub(1, 3)
+    return M.statusLabel(status) or ""
   end
   return ""
 end
+M.statusGlyph = statusGlyph
 
 -- Opaque 160×144 party picker. `spec.rows` is the same ordered list the
 -- input handler indexes (`switchIndex`); drawing a different set would

@@ -46,6 +46,7 @@ M.BERRY          = "HELD_BERRY"           -- HandleHPHealingItem
 M.RESTORE_PP     = "HELD_RESTORE_PP"      -- HandleMysteryberry
 M.HEAL_CONFUSION = "HELD_HEAL_CONFUSION"  -- UseConfusionHealingItem
 M.HEAL_STATUS    = "HELD_HEAL_STATUS"     -- both status routines
+M.ESCAPE         = "HELD_ESCAPE"          -- TryToRunAwayFromBattle (SMOKE BALL)
 
 -- The HELD_PREVENT_* effects (constants/item_data_constants.asm), by what
 -- each keeps off its holder, in the referee's spelling.  The status commands

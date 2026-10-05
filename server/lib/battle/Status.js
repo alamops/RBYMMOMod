@@ -114,8 +114,13 @@ function paralysisSpeed(speed) {
   return Math.max(1, idiv(Math.max(0, int(speed, 1)), 4));
 }
 
+// `.IsConfused` (core.asm :3426-3428; the enemy's `cp $80`, :5767-5768):
+// `call BattleRandom / cp 50 percent + 1 / jr c, .TriedToUseDisabledMoveCheck`
+// -- a byte below 128 jumps PAST the self-hit, so the monster hurts itself on
+// 128..255. No byte (nothing was drawn) is no self-hit.
 function confusionSelfHit(roll) {
-  return int(roll, 255) < CONFUSION_HIT_ROLL;
+  const r = int(roll, null);
+  return r !== null && r >= CONFUSION_HIT_ROLL;
 }
 
 // state: { turnsRemaining, level, attack | atk, defense | def }

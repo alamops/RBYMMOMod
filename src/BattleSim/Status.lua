@@ -50,7 +50,8 @@ local M = {}
 
 local floor, max, min = math.floor, math.max, math.min
 
--- 63/256 before the move; 128/256 for a confusion self-hit.
+-- 63/256 before the move (bytes 0..62); 128/256 for a confusion self-hit
+-- (bytes 128..255, `confusionSelfHit`).
 M.PARALYSIS_STOP_ROLL = 63
 M.CONFUSION_HIT_ROLL = 128
 M.CONFUSION_POWER = 40
@@ -149,8 +150,13 @@ function M.confusionTick(state, roll)
            canMove = false, selfDamage = M.selfHitDamage(state) }
 end
 
+-- `.IsConfused` (core.asm :3426-3428; the enemy's `cp $80`, :5767-5768):
+-- `call BattleRandom / cp 50 percent + 1 / jr c, .TriedToUseDisabledMoveCheck`
+-- -- a byte below 128 jumps PAST the self-hit, so the monster hurts itself on
+-- 128..255.  No byte (nothing was drawn) is no self-hit.
 function M.confusionSelfHit(roll)
-  return int(roll, 255) < M.CONFUSION_HIT_ROLL
+  local r = int(roll, nil)
+  return r ~= nil and r >= M.CONFUSION_HIT_ROLL
 end
 
 -- HandleSelfConfusionDamage (core.asm :3672-3710): a typeless 40-power hit of
