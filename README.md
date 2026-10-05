@@ -478,12 +478,18 @@ rather than being handed a menu that answers nothing. A side only falls when
 </p>
 
 **And losing sends you home, the way the game always did.** Every player
-whose party lost — or who walked out of any co-op battle with nothing left
-able to fight, even on the winning side — gets the whole vanilla ritual:
-party healed, money halved, and the warp to *their own* last POKéMON CENTER.
-Nobody is left standing in the tall grass at 0 HP, which also means a party
-with nothing able to fight is never wandering around to be challenged — and
-if one ever were, the battle refuses to start rather than starting broken.
+whose party lost a co-op battle against a trainer or a wild POKéMON — or who
+walked out of one with nothing left able to fight, even on the winning side
+— gets the whole vanilla ritual: party healed, money halved, and the warp to
+*their own* last POKéMON CENTER. Nobody is left standing in the tall grass at
+0 HP, which also means a party with nothing able to fight is never wandering
+around to be challenged — and if one ever were, the battle refuses to start
+rather than starting broken.
+
+**A fight between players is a link battle, and it leaves your save alone.**
+Party against party works like the carts' Cable Club: no damage, status, PP,
+EXP or item change is written home, and nobody whites out after a spar. This
+holds on every cart.
 
 **And nobody can hold four people hostage.** Every turn has one 60-second
 clock, the same honest number on every screen, the host's own turn included.

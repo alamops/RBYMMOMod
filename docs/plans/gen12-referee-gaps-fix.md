@@ -185,3 +185,29 @@ After that: review (Gen 1 referee, Gen 2 referee, client/wire), fixes, TT-E, the
 | Gold differences found in wave 1 (the freeze thaw point; DRAIN / DREAM EATER misses and SapHealth's minimum; TOXIC; LEECH SEED vs Grass; the 999 stat-up failure for primaries; a storing BIDE vs CantMove; MIRROR MOVE's failure line; the "Hit N times!" line) | **in this run**: R2b |
 | THUNDER's rain / sun accuracy | **in this run**: R2c (with weather) |
 | Co-op Pay Day: the referee reports one pot | **decision (owner's link-quirk rule applied)**: every human seat on side a is paid the pot, as each player's own cart would pay its player |
+| Cart differences found in waves 1–5 beyond the original backlog (about a hundred rows across both referees, the wire and the client) | **in this run**: routed into the next wave each time (R1b–R1e, R2b–R2e, C, C2a, C2b, C3, C4, W2–W5) |
+| Differences found after wave 5 | **out of scope by run policy** (the owner's "fix all" was bounded at the start of wave 5: later findings go to the known-gaps doc unless review marks them must-fix); listed in `docs/plans/gen12-referee-known-gaps.md` |
+
+## 10. Engine-port divergences found in this run
+
+These are differences in Gen1Recomp's own battle code from pret, recorded for an upstream report. The mod's referees follow pret.
+
+**Gen 1 (`src/battle/`, `src/pokemon/`, `src/core/`, `src/inventory/`, `src/ui/`):**
+- **Max PP:** computed uncapped (`base + ups·floor(base/5)`) in `Pokemon.lua:98`, `BattleState.lua:6919`, `WideBattle.lua:255`, `BattleAPI.lua:121`, `ui/SummaryMenu.lua:234`, `inventory/ItemEffects.lua:383` and `core/SaveData.lua:2755`. pokered `AddBonusPP` caps each PP Up's bonus at 7.
+- **Draw order:**
+  - `EffectRegistry.runDamaging` draws accuracy before crit and damage; pokered draws crit and the roll before `MoveHitTest`.
+  - `BattleState` (~4404-4416) runs the accuracy roll before a status move's own turn-aways.
+- **Confusion:** `Status.lua:370-371`'s self-hit side is inverted (the comment says ≥128, the code hurts on <128).
+- **Trainer AI:** `TrainerAI.lua:276-321` picks uniformly; pret maps one byte at 63/127/190. It also excludes 0-PP moves (`SelectEnemyMove` never reads PP), and its layer 2 counts selections, not executed turns.
+- **Multi-hit vs a doll:** `EffectRegistry.lua:313` stops a multi-hit move at a doll broken on any hit; pret stops only on hit 1. It also prints "Hit the enemy N times!" after a knockout.
+- **Side effects:** `MoveEffects.lua` `statusSide` thaws before the Substitute check and draws before its own checks; `CONFUSION_SIDE_EFFECT` skips the draw on a confused target; `TWINEEDLE_EFFECT` skips PoisonEffect's checks.
+- **Fixed damage:** JUMP KICK's crash is floor(maxHp/8) (pret: 1 HP, wDamage=0); the FIXED_DAMAGE tables differ; SEISMIC TOSS / SONICBOOM's power-1 records dealt 1 HP to the old referee.
+
+**Gold (`src/battle/gen2/`, `src/world/gen2/`):**
+- **Freeze:** `Battle.lua:61-62,3268` thaws 1-in-5 when the mon tries to move; pokecrystal thaws 10% between turns in `HandleDefrost`.
+- **Accuracy:** `Damage.lua:339` `rollHit` works in a percent domain (clamped 1..100, `random(100)`); the cart works on bytes and draws nothing at 255.
+- **Gender:** `Mon.lua:613-620` `vanillaGender` compares the Attack DV alone with floor(ratio/16); pokecrystal `GetGender` combines the Attack and Speed nybbles and special-cases F0 / F100 / UNKNOWN.
+- **ForceSwitch:** the trainer branch (~2933) sets `forcedSwitch`, skipping the between-turn effects (pret sets it only in the wild arm), and picks uniformly instead of the `& 7` reject loop.
+- **Baton Pass:** (~2660) prints "%s passed the baton!", a line pret doesn't have, and passes to the first living member.
+- **Curse:** the can't-raise line reads "ATTACK" where pret prints "ABILITY".
+- **Time of day:** `BattleState.startEvolutions` / `Game2:729` call `Palettes.clockDaytime()` with no hour, reading the host clock without the save's RTC base (the engine's own comment says callers should pass the hour).

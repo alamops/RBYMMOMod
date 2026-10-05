@@ -158,6 +158,71 @@ here must match `manifest.version`.
       - on FireRed and Emerald: `obey-asleep` and `theft-wild`.
     - `SOLO_LEGS` now picks legs on every cart.
     - The plan is `docs/plans/gen12-referee-fidelity.md`.
+- **Every Red and Gold move now works the cart's way.** The Red and Gold
+  referees were hand-written approximations; every difference from pokered
+  and pokecrystal found along the way is now closed, in the hub's copy and
+  the LAN host's alike. The Lua and Node copies were fuzzed against each
+  other over tens of thousands of fights with no mismatch.
+  - **Gold's own moves.** About sixty Gold moves now do what they do on the
+    cart, where they used to be a plain hit or nothing at all:
+    - RETURN, FRUSTRATION, HIDDEN POWER, FLAIL, REVERSAL, MAGNITUDE,
+      PRESENT, TRIPLE KICK, FURY CUTTER, ROLLOUT, BEAT UP, PURSUIT, FALSE
+      SWIPE and FUTURE SIGHT;
+    - PROTECT, DETECT, ENDURE, COUNTER and MIRROR COAT;
+    - BATON PASS (you pick who comes in), SPIKES, CURSE, BELLY DRUM, PERISH
+      SONG, DESTINY BOND, ENCORE, ATTRACT, MEAN LOOK, NIGHTMARE, PAIN SPLIT,
+      PSYCH UP, RAPID SPIN, SPITE, SWAGGER, CONVERSION and CONVERSION2,
+      FORESIGHT, HEAL BELL, AMNESIA, TELEPORT, ROAR and WHIRLWIND;
+    - SKETCH, which is written to your save after a fight against the
+      computer;
+    - SLEEP TALK, SNORE, TOXIC, SAFEGUARD, LOCK-ON, MIMIC, TRANSFORM, REST
+      and the time- and weather-based heals.
+  - **Weather on Gold.** RAIN DANCE, SUNNY DAY and SANDSTORM, with their
+    damage changes, THUNDER and SOLARBEAM's rules and sandstorm damage. The
+    battle screens show it.
+  - **The secondary effects of Gold-only moves:** CRUNCH, MUD-SLAP, METAL
+    CLAW, ANCIENTPOWER, FLAME WHEEL, STOMP, TWISTER, THUNDER, TRI ATTACK and
+    the rest.
+  - **Red's remaining rules.** TRANSFORM undone on switch-out, the whole of
+    HAZE, MIMIC (you pick the move to copy), DISABLE, COUNTER's damage,
+    TELEPORT and ROAR's level roll, JUMP KICK's crash, the fixed-damage
+    moves past immunities, OHKO on a Speed tie, multi-hit odds, the trapping
+    moves as the cart runs them, and the cart's quirks (the 0-PP wrap,
+    MIRROR MOVE after a called move, and the Hyper Beam recharge a flinch or
+    freeze clears).
+  - **Turn order and draws.** Both referees draw their random numbers at the
+    carts' points: crit, then the damage roll, then accuracy, with the
+    carts' byte arithmetic for accuracy, crits, full paralysis, sleep length
+    and damage variation. The computer's own items and switches resolve in
+    its turn slot.
+  - **The computer's choices.** A wild POKéMON picks its move at random as
+    the cart does. A co-op trainer uses the cart's move-choice layers, and on
+    Gold the computer's status moves miss 25% of the time.
+  - **The carts' own words.** Every line the Red and Gold referees print is
+    now pokered's or pokecrystal's text, from "It's super effective!" to
+    "The SUBSTITUTE took damage for …!", along with the cart's sleep and
+    confusion animations.
+  - **Outside the fight:**
+    - PAY DAY pays out on Red and Gold (doubled under AMULET COIN on Gold),
+      including Red's escapes that pay on the cart.
+    - A level-up in the middle of a fight reaches the referee's stats.
+    - HEAL BELL's cures are written to your save.
+    - Gold time-of-day evolutions after a refereed fight see the clock
+      again.
+    - A co-op joiner keeps an item it steals or catches when its own game
+      data says that foe can hold it.
+    - The move list shows each cart's PP Up cap.
+  - **Running in co-op.** A wild fight in co-op now rolls the cart's escape
+    odds, so "Can't escape!" can happen.
+  - **How it works.**
+    - The referees' random numbers take the generator's high bits.
+    - Sheets carry each mon's base stats, DVs, stat exp, PP Ups and (on Gold)
+      happiness and gender.
+    - Move rows carry Gold's priority; Red rulesets carry the type chart's
+      row order.
+    - A mid-fight level-up rides the existing moveset message; outcomes
+      carry Pay Day coins.
+    - The plan is `docs/plans/gen12-referee-gaps-fix.md`.
 - **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
   out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
   referee instead of the cart's. That covers the Twins and couples on the
@@ -411,8 +476,10 @@ version, but each was a real failure on a live boot or on the wire:
   player-trainer graphics; NPC walkers on the arena draw as themselves.
 - **A fight between players changed the saves.** A PvP spar moved held items
   between saves, left a THUNDER WAVE's paralysis in the save, and a party
-  against party banked EXP and could white out the loser. Every Gen 3 PvP
-  mode now leaves both saves as the cart does.
+  against party banked EXP and could white out the loser. Every PvP mode,
+  on Red and Gold as well as Gen 3, now leaves both saves as the carts'
+  Cable Club does: no status, HP, PP, EXP or vitamin is written home, and
+  nobody whites out after a spar.
 - **The co-op divert could freeze or loop.** A trainer wait that ended with
   no partner froze the field (the cart's own fight now starts at once); a
   wild fight handed back to be fought alone was re-diverted forever; a stand-in
@@ -503,14 +570,16 @@ version, but each was a real failure on a live boot or on the wire:
 - **A fight taken over from the cart never raises `battle.started`** (the
   engine's battle never starts); a `SOLO BATTLES` fight raises `battle.ended`
   when it is over, as the engine's own does.
-- **The Red and Gold referees still differ from the carts in a few places.**
-  For example, TRANSFORM isn't undone on switch-out, Red's HAZE only resets
-  stats and screens, and PAY DAY pays nothing on Red or Gold. Each one is
+- **What the Red and Gold referees still do differently from the carts** is
   listed, with where it lives in the code, in
-  `docs/plans/gen12-referee-known-gaps.md`.
-- **Gold trainers hold no items.** The engine's Gold trainer data has no item
-  field, so a trainer's POKéMON never holds anything, and your THIEF steals
-  nothing from one.
+  `docs/plans/gen12-referee-known-gaps.md`. The main items:
+  - the computer's item and switch choices use the mod's own logic, not the
+    carts' trainer AI;
+  - lines that depend on the viewer, such as the "Enemy" prefix, are not
+    printed;
+  - a few animations are not shown;
+  - the referee's random-number generator is its own, though it draws at
+    the carts' points.
 - **Engine, not mod:** on a fresh Emerald save the heal point is still the
   moving truck, so a whiteout before the first POKéMON CENTER — the cart's
   or a mod-run fight's — respawns there.

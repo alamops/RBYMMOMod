@@ -243,6 +243,15 @@ return {
         .. "(--generation 3, PROTOCOL 30) seats all three carts together; "
         .. "presence stays per region (Kanto and Sevii vs Hoenn), everything "
         .. "else crosses carts.",
+      "Every Red and Gold move the carts' way: about sixty Gold-only "
+        .. "moves (RETURN, HIDDEN POWER, PROTECT, BATON PASS, SPIKES, CURSE, "
+        .. "PERISH SONG, SKETCH, SLEEP TALK and the rest) and weather (RAIN "
+        .. "DANCE, SUNNY DAY, SANDSTORM); Red's TRANSFORM, HAZE, MIMIC, "
+        .. "DISABLE, COUNTER and trapping moves as pokered runs them; the "
+        .. "carts' draw order, byte arithmetic and exact battle text; the "
+        .. "computer picking moves as the carts do; PAY DAY paid; mid-fight "
+        .. "level-ups reaching the referee. The Lua and Node referees are "
+        .. "fuzzed against each other with no mismatch.",
       "Red and Gold fights on the carts' own rules, read from the pret "
         .. "disassemblies: move priority (QUICK ATTACK, COUNTER, Gold's "
         .. "PROTECT / EXTREMESPEED table); badges boosting stats after stat "
@@ -417,12 +426,12 @@ return {
         .. "on the region map is a list rather than a figure on a city, and a "
         .. "remote player walking nearby can hold the VS Seeker's charge a "
         .. "moment, because the cart waits for every object to stop.",
-      "The Red and Gold referees still differ from the carts in a few "
-        .. "places (TRANSFORM isn't undone on switch-out, Red's HAZE only "
-        .. "resets stats and screens, PAY DAY pays nothing on Red or Gold, "
-        .. "and smaller ones), each listed in "
-        .. "docs/plans/gen12-referee-known-gaps.md. Gold trainers hold no "
-        .. "items: the engine's trainer data has no item field.",
+      "What the Red and Gold referees still do differently from the carts "
+        .. "(the computer's item and switch choices, lines that depend on "
+        .. "the viewer such as the Enemy prefix, a few animations) is listed "
+        .. "in docs/plans/gen12-referee-known-gaps.md. On every cart a fight "
+        .. "between players leaves both saves exactly as they were, as the "
+        .. "carts' Cable Club does.",
       "On Gen 3, badges work the cart's way against the computer (solo, and "
         .. "co-op against a trainer or a wild mon): stat boosts from badges 1, "
         .. "3, 5 and 7, and a traded mon over its badge level cap can disobey. "
