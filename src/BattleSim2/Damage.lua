@@ -22,7 +22,8 @@
 --   * STAB is floor(d * 15/10); type rows are percents applied one at a
 --     time as floor(d * pct/100), with a non-immune floor of 1.
 --   * Rage's RageDamage (opts.rageCount) next: x(count + 1), 16-bit.
---   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
+--   * Variation last: floor(d * roll / 255) for roll in 217..255 (the
+--     cart's rotated byte; wave 4), only when
 --     running damage ≥ 2, at least 1.  NO cap after it: DamageCalc's 997 + 2
 --     is the only one, and STAB, the matchup, RageDamage and the variation each
 --     keep their own 16-bit result (BattleCommand_Stab's `add hl, bc`, the
@@ -57,8 +58,13 @@ local M = {}
 
 local floor, max, min = math.floor, math.max, math.min
 
-M.ROLL_MIN = 85
-M.ROLL_MAX = 100
+-- BattleCommand_DamageVariation's multiplier (effect_commands.asm:1500-
+-- 1550): a BattleRandom byte rotated right (`rrca`), redrawn below
+-- `85 percent + 1` (217), so 217..255; the damage is x/255 of it (`100
+-- percent` is 255).  The referee-gaps run's wave 4 (R2d) moved it here from
+-- a uniform 85..100 percent (Rng:damageRoll draws the cart's loop).
+M.ROLL_MIN = 217
+M.ROLL_MAX = 255
 -- DamageCalc's tail: the base is held at MAX_DAMAGE - MIN_DAMAGE (997) and
 -- MIN_DAMAGE added -- the one cap Gold's damage has.
 M.MAX_DAMAGE = 999
@@ -161,9 +167,10 @@ end
 
 -- BattleCommand_DamageVariation: nothing for 0 or 1 ("No point in reducing
 -- 1 or 0 damage" -- `ret c` before the BattleRandom, so the caller draws no
--- roll for them either: `varies`), otherwise floor(d * roll / 100), at least 1
--- and NOT capped (see the header) -- `modified` is a 16-bit value already, and
--- roll <= 100 keeps the product's quotient inside it.
+-- roll for them either: `varies`), otherwise floor(d * roll / 255) -- roll
+-- 217..255, M.ROLL_MIN / ROLL_MAX -- at least 1 and NOT capped (see the
+-- header): `modified` is a 16-bit value already, and roll <= 255 keeps the
+-- product's quotient inside it.
 function M.varies(modified)
   return max(0, int(modified, 0)) >= 2
 end
@@ -174,7 +181,7 @@ function M.applyRoll(modified, roll)
   local r = int(roll, M.ROLL_MAX)
   if r < M.ROLL_MIN then r = M.ROLL_MIN end
   if r > M.ROLL_MAX then r = M.ROLL_MAX end
-  return max(1, floor(d * r / 100))
+  return max(1, floor(d * r / M.ROLL_MAX))
 end
 
 -- DoubleDamage / BattleCommand_DoubleMinimizeDamage (effect_commands.asm:

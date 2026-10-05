@@ -1109,15 +1109,25 @@ function M:trainerIntroName()
     if type(t.name) == "string" and t.name ~= "" then parts[#parts + 1] = t.name end
     if #parts > 0 then return table.concat(parts, " ") end
   end
+  -- The record's own `name`, whole: the text the engine's battle prints for
+  -- this trainer (src/battle/BattleState.lua `self.trainer.name`,
+  -- src/ui/gen2/BattleState.lua `battle.trainer.name`) -- Gold's "YOUNGSTER
+  -- JOEY", Red's class names past ten letters.  Both clients hold one: the
+  -- walk-in the engine's, an invite joiner its own data's (Coop.trainerFor,
+  -- Gold's `trainerRecord2`), so the name never has to cross the wire.  It
+  -- used to go through Wire.name -- the player-name sanitiser, cut at
+  -- Config.NAME_MAX (10) -- which printed "YOUNGSTER  wants to battle!".
   if type(t) == "table" and type(t.name) == "string" and t.name ~= "" then
-    return Wire.name(t.name) or t.name
+    return t.name
   end
+  -- No record: the field's label for the NPC seat (Coop:npcSide), which did
+  -- cross the wire and is Wire.label's, the class it was built from.
   if self.sim then
     for _, slot in ipairs(self.sim.slots or {}) do
       if slot.owner == nil and self:foeSide(slot.index) then
         local raw = slot.name
         if type(raw) == "string" and raw ~= "" then
-          return Wire.name(raw) or raw
+          return Wire.label(raw) or raw
         end
       end
     end
@@ -1399,6 +1409,9 @@ function M:enter()
     if self.gen3 then
       -- The cart's own opening: "BUG CATCHER RICK would like to battle!".
       self:say(("%s\nwould like to battle!"):format(self:trainerIntroName()))
+    elseif Gen.generation(self.game) == 2 then
+      -- pokecrystal WantsToBattleText: "<ENEMY>\nwants to battle!".
+      self:say(("%s\nwants to battle!"):format(self:trainerIntroName()))
     else
       self:say(("%s wants\nto fight!"):format(self:trainerIntroName()))
     end
@@ -1991,7 +2004,7 @@ function M:update(dt)
   -- Your own monster comes back to the front the moment the turn is yours to
   -- decide, which is when you need to see it.
   if self.phase == "choose" or self.phase == "move"
-     or self.phase == "target" then
+     or self.phase == "target" or self.phase == "mimic" then
     self.acting = nil
     self.hitSlot = nil
   end
@@ -2037,6 +2050,7 @@ function M:update(dt)
   if self.phase == "choose" then return self:updateCommand(input) end
   if self.phase == "move" then return self:updateMove(input) end
   if self.phase == "target" then return self:updateTarget(input) end
+  if self.phase == "mimic" then return self:updateMimic(input) end
   if self.phase == "switch" then return self:updateSwitch(input) end
   if self.phase == "item" then return self:updateItem(input) end
   if self.phase == "item_party" then return self:updateItemParty(input) end
@@ -2368,7 +2382,16 @@ function M:updateCommand(input)
     self.commandIndex = moved
   elseif input:wasPressed("a") then
     local command = commands[self.commandIndex]
-    if command == "FIGHT" then
+    local locked = command == "FIGHT" and self:lockedFightSlot() or nil
+    if locked then
+      -- A Bide going on (Gold's `.locked_in`), or Red's monster asleep or
+      -- frozen (MediatedBattle `lockedFightSlot` has both carts' rule): no
+      -- move list -- the slot, past its PP, at the first foe, which the
+      -- referee's lock-in does not read (a Bide keeps its own targetSlot).
+      local targets = self:targetChoices()
+      self:commit({ slot = self.mine, move = locked,
+                    target = targets[1] and targets[1].index or nil, locked = true })
+    elseif command == "FIGHT" then
       self.moveIndex = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
@@ -2474,7 +2497,17 @@ local READS_ITS_TARGET = {
 -- own Gold-native ids so far: 87-101 all have power (the picker by the rule
 -- below); 102 EFFECT_SLEEP_TALK (off the list, above); 103 EFFECT_LOCK_ON
 -- (LOCK-ON / MIND READER: `checkhit` on a foe, off); 104 EFFECT_SAFEGUARD
--- (the user's side, on); 105 EFFECT_TOXIC (`checkhit` on a foe, off).
+-- (the user's side, on); 105 EFFECT_TOXIC (`checkhit` on a foe, off).  Wave 3
+-- (R2c, 106-132): the damaging ones (RETURN ... TRIPLE KICK, FURY CUTTER,
+-- ROLLOUT, BEAT UP, PURSUIT, FALSE SWIPE, FUTURE SIGHT -- whose hit lands on
+-- the foe it was aimed at two turns on -- COUNTER, MIRROR COAT, SOLARBEAM,
+-- the fixed-damage three) keep the picker by power; DEFENSE_CURL, PROTECT /
+-- ENDURE, the three weathers and MORNING_SUN / SYNTHESIS / MOONLIGHT are on.
+-- Wave 4 (R2d): BATON_PASS, BELLY_DRUM, DESTINY_BOND, HEAL_BELL, PERISH_SONG,
+-- SPIKES, TELEPORT and AMNESIA (EFFECT_SP_DEF_UP_2) on; CONVERSION2, PSYCH_UP,
+-- SKETCH, SPITE, ENCORE, ATTRACT, MEAN_LOOK, NIGHTMARE, FORESIGHT, PAIN_SPLIT
+-- and SWAGGER aim at a foe and stay off; RAPID_SPIN has power.  CURSE is the
+-- one the user's type decides (`needsTarget`).
 local SELF_EFFECTS2 = {
   EFFECT_ATTACK_UP = true, EFFECT_DEFENSE_UP = true, EFFECT_SPEED_UP = true,
   EFFECT_SP_ATK_UP = true, EFFECT_SP_DEF_UP = true, EFFECT_ACCURACY_UP = true,
@@ -2494,6 +2527,29 @@ local SELF_EFFECTS2 = {
   EFFECT_RAIN_DANCE = true, EFFECT_SUNNY_DAY = true, EFFECT_SANDSTORM = true,
 }
 M.SELF_EFFECTS2 = SELF_EFFECTS2
+
+-- Is the monster on this seat a Ghost, by the types this screen knows for it
+-- -- its battler's (the species' own; Gold's CONVERSION / CONVERSION2 and a
+-- TRANSFORM move the cart's battle types and are not on the wire), else its
+-- species record's.  CURSE's target rule (`needsTarget`); a seat this screen
+-- cannot read answers true, which keeps the picker -- the side a wrong guess
+-- costs least on.
+function M:seatIsGhost2(slot)
+  local battler = type(slot) == "table" and slot.battler or nil
+  local types = battler and battler.curTypes
+  if type(types) ~= "table" then
+    local mon = battler and battler.mon
+    local data = self.game and self.game.data
+    local def = type(mon) == "table" and type(data) == "table"
+      and type(data.pokemon) == "table" and data.pokemon[mon.species] or nil
+    types = type(def) == "table" and def.types or nil
+  end
+  if type(types) ~= "table" then return true end
+  for _, t in ipairs(types) do
+    if type(t) == "string" and t:upper() == "GHOST" then return true end
+  end
+  return false
+end
 
 -- Does this move have to be aimed at somebody?
 --
@@ -2538,6 +2594,14 @@ function M:needsTarget(moveInst)
   -- question round: every move keeps the picker unless its effect is on the
   -- explicit list of the ones aimed at nobody (SELF_EFFECTS2).
   if Gen.generation(self.game) == 2 then
+    -- CURSE reads its target only for a Ghost: BattleCommand_Curse (pokecrystal
+    -- engine/battle/move_effects/curse.asm) tests the user's wBattleMonType1 /
+    -- Type2 for GHOST -- `.ghost` halves the user's HP and curses the
+    -- opponent; anything else raises its own Attack and Defense and lowers its
+    -- Speed, aimed at nobody.
+    if def.effect == "EFFECT_CURSE" then
+      return self:seatIsGhost2(self.sim and self:mySlot() or nil)
+    end
     return not SELF_EFFECTS2[def.effect]
   end
   local record = (data.move_effects or {})[def.effect]
@@ -2999,7 +3063,113 @@ function M:updateTarget(input)
     self.phase = self.ownSlots and "move" or "choose"
   elseif input:wasPressed("a") then
     local target = targets[self.targetIndex]
-    self:commit({ slot = self.mine, move = self.moveIndex, target = target.index })
+    local action = { slot = self.mine, move = self.moveIndex, target = target.index }
+    -- Red's MIMIC against the computer: that target's moves first.
+    if self:asksMimic(self:liveMoves()[self.moveIndex], target.index) then
+      self.mimicAction = action
+      self.mimicIndex = 1
+      self.phase = "mimic"
+      return
+    end
+    self:commit(action)
+  end
+end
+
+-- The move slot a FIGHT sends with no move list, or nil for the list
+-- (MediatedBattle `lockedFightSlot`): a Gold Bide going on, or -- Red -- our
+-- monster asleep or frozen.  Co-op's one mediated seat only.
+function M:lockedFightSlot()
+  if not self.mediated or self.ownSlots or self.gen3 then return nil end
+  if self.bideLocked then return self.bideSlot or 1 end
+  if Gen.generation(self.game) == 1 then
+    local seat = self:mySlot()
+    local mon = seat and seat.battler and seat.battler.mon
+    local status = type(mon) == "table" and mon.status or nil
+    if status == "SLP" or status == "FRZ" then return self:rememberedMove() end
+  end
+  return nil
+end
+
+-- What a filed choice says about a Bide (Gold; MediatedBattle's `bideFiled`):
+-- a BIDE chosen, or a locked-in FIGHT, may be one going on; anything else is
+-- not -- PACK and PKMN end one (pokecrystal `.reset_bide`).
+function M:noteBideChoice(action)
+  if self.ownSlots then return end
+  local kind = action and action.kind
+  if kind == nil and action.locked and self.bideLocked then
+    self.bideFiled = true
+  elseif kind == nil and Mediated.isBideMove(self:liveMoves()[tonumber(action.move) or 0], self.game) then
+    self.bideFiled, self.bideSlot = true, math.floor(tonumber(action.move))
+  else
+    self.bideFiled = nil
+  end
+  self.bideLocked = nil
+end
+
+-- ------- Red's MIMIC pick (co-op)
+--
+-- MediatedBattle's `asksMimic` has the rule (pokered MimicEffect
+-- `.letPlayerChooseMove`: outside a link battle the player picks off the
+-- enemy's move list), asked here once the target is chosen -- the monster
+-- whose list the cart would open -- and carried on the choice as `mimic`
+-- (0-based).  coop_wild and coop_npc only: a fight between players is a link
+-- battle, which takes `.getRandomMove` on both sides.  B goes back to the
+-- target.
+
+function M:asksMimic(move, targetIndex)
+  if self.gen3 or self.ownSlots or not self.mediated then return false end
+  if Gen.generation(self.game) ~= 1 then return false end
+  if not Mediated.KEEPS_HELD_MODES[self.mode] then return false end
+  if type(move) ~= "table" then return false end
+  local data = self.game and self.game.data
+  local def = type(data) == "table" and type(data.moves) == "table"
+    and data.moves[move.id] or nil
+  local mimic = move.id == "MIMIC" or (type(def) == "table" and def.effect == "MIMIC_EFFECT")
+  if not mimic then return false end
+  return #self:seatMoveList(targetIndex) > 0
+end
+
+-- The battle list of the monster on a seat, as this screen knows it: the
+-- referee's TRANSFORM / MIMIC list for it (`medSeatMoves`), else its
+-- battler's own rows.
+function M:seatMoveList(index)
+  local shown = self.medSeatMoves and self.medSeatMoves[index]
+  if type(shown) == "table" and #shown > 0 then return shown end
+  local slot = index and self.sim and self.sim:slot(index)
+  local battler = slot and slot.battler
+  local moves = battler and (battler.curMoves or (battler.mon and battler.mon.moves))
+  return type(moves) == "table" and moves or {}
+end
+
+function M:mimicRows()
+  local rows = {}
+  local target = self.mimicAction and self.mimicAction.target
+  for _, move in ipairs(self:seatMoveList(target)) do
+    if #rows >= Config.BATTLE_MOVE_MAX then break end
+    rows[#rows + 1] = { label = self:moveLabel(move.id) or tostring(move.id or "-") }
+  end
+  return rows
+end
+
+function M:updateMimic(input)
+  local rows = self:mimicRows()
+  if #rows == 0 or not self.mimicAction then
+    self.phase = "target"
+    return
+  end
+  local at = self.mimicIndex or 1
+  if at < 1 or at > #rows then at = 1 end
+  local moved = listPress(at, #rows, input, true)
+  if moved then
+    self.mimicIndex = moved
+  elseif input:wasPressed("b") then
+    self.phase = "target"
+  elseif input:wasPressed("a") then
+    local action = {}
+    for k, v in pairs(self.mimicAction) do action[k] = v end
+    action.mimic = at
+    self.mimicAction = nil
+    self:commit(action)
   end
 end
 
@@ -3432,6 +3602,7 @@ function M:commit(action)
   -- opinion about this turn on a wire that has already cut it.
   if self.mediated then
     local ok = self:sendMediatedChoice(action)
+    if ok then self:noteBideChoice(action) end
     if not ok then
       if action.kind == "item" then
         self.pendingItem = nil
@@ -3681,6 +3852,13 @@ function M:playEvents(events)
               slot.battler.mon.status = nil
             end
           else
+            -- Our own seat's monster is the save's (co-op fights the live
+            -- party): on Red / Gold its status byte can only hold PSN for a
+            -- TOXIC (Mediated.partyStatus12) -- the cart's own HUD reads the
+            -- same PSN bit.  Every other seat keeps the referee's token.
+            if self.mediated and event.slot == self.mine and not self.gen3 then
+              status = Mediated.partyStatus12(status, Gen.generation(self.game))
+            end
             slot.battler.mon.status = status
           end
         end
@@ -5040,7 +5218,7 @@ end
 function M:desiredAllyFocus()
   local phase = self.phase
   if phase == "choose" or phase == "move" or phase == "switch"
-     or phase == "target" or phase == "item" or phase == "item_party"
+     or phase == "target" or phase == "mimic" or phase == "item" or phase == "item_party"
      or phase == "item_move" then
     return self.mine
   end
@@ -5061,6 +5239,10 @@ function M:desiredFoeFocus()
     local pick = targets[self.targetIndex or 1]
     -- A Gen 3 pick can be the partner; the foe pair stays where it was then.
     focus = pick and self:foeSide(pick.index) and pick.index or nil
+  elseif self.phase == "mimic" then
+    -- ...and Red's MIMIC pick reads the monster it was aimed at.
+    local at = self.mimicAction and self.mimicAction.target
+    focus = at and self:foeSide(at) and at or nil
   elseif self.phase == "messages" or self.anim or self.draining or self.faintFx then
     local acting = self.acting
     if acting and self:foeSide(acting) then
@@ -5597,7 +5779,7 @@ end
 -- paints last: hovered foe while targeting, otherwise the spotlight slot.
 function M:paintOrder()
   local top = self:spotlight()
-  if self.phase == "target" and self.sim then
+  if (self.phase == "target" or self.phase == "mimic") and self.sim then
     local targets = self:targetChoices()
     local hovered = targets[self.targetIndex or 1]
     if hovered then top = hovered.index end
@@ -5821,6 +6003,13 @@ function M:drawField()
     love.graphics.setColor(1, 1, 1, 1)
     local ok = pcall(love.graphics.draw, self.trainerPic, 100, 0)
     if not ok then self.trainerPic = nil end
+  end
+  -- Gold's sky (MediatedBattle.weatherOfLine2) over the stage and under the
+  -- strips and readouts, by the arena's painter at the page's scale -- the
+  -- 1v1 classic page's reading.  The arena paints its own (Battlefield.draw).
+  if self.weatherShown and not self.gen3 and Gen.generation(self.game) == 2 then
+    pcall(Battlefield.drawWeather, self.weatherShown, 0, 0, 160, 96,
+      self.frame or 0, 0.4)
   end
   -- Strips after stage pics so a wide foe/ally sprite cannot cover an icon
   -- or its focus arrow when they share the edge. Every living seat, with
@@ -7700,12 +7889,14 @@ function M:battlefieldCtx()
     -- Bench / EXP.ALL movie: no plate to flash, so a front pic in the middle.
     evolveCenter = self:evolveCenterCtx(),
     -- Arrow/card only during target pick; Battlefield honors this flag.
-    showTarget = (self.phase == "target"),
-    -- Gen 3 weather over the field ("RAIN" | "SUN" | "SAND" | "HAIL"), as of
-    -- the queue's own position; nil when the sky is clear (always off Gen 3).
+    -- ...and through Red's MIMIC pick, which reads the monster it was aimed at.
+    showTarget = (self.phase == "target" or self.phase == "mimic"),
+    -- The weather over the field ("RAIN" | "SUN" | "SAND" | "HAIL"), as of
+    -- the queue's own position: Gen 3's `weather` events, Gold's weather lines
+    -- (`medRows`); nil when the sky is clear, and always on Red.
     weather = self.weatherShown,
   }
-  if self.phase == "target" and self.sim then
+  if (self.phase == "target" or self.phase == "mimic") and self.sim then
     local targets = self:targetChoices()
     ctx.targets = targets
     ctx.targetIndex = self.targetIndex or 1
@@ -8022,6 +8213,10 @@ function M:drawBandWidgets()
     list(self:bandTargetRows(), self.targetIndex or 1, { title = "ATTACK WHO?" })
     return true
   end
+  if self.phase == "mimic" then
+    list(self:mimicRows(), self.mimicIndex or 1, { title = "MIMIC" })
+    return true
+  end
   if self.phase == "switch" then
     local mine = self:mySlot()
     local bench = mine and self:benchOf(mine) or {}
@@ -8142,6 +8337,10 @@ function M:drawMenusClassic()
   elseif self.phase == "target" then
     -- Slim hint in the menu band; field cursor + card live on the arena.
     self:drawTarget()
+  elseif self.phase == "mimic" then
+    local rows = {}
+    for i, row in ipairs(self:mimicRows()) do rows[i] = row.label end
+    self:drawColumn(rows, self.mimicIndex or 1, "MIMIC")
   elseif self.phase == "switch" then
     self:drawSwitch()
   elseif self.phase == "item" then
@@ -9518,7 +9717,7 @@ end
 function M:closePickers()
   local open = self.runAsk ~= nil
     or self.phase == "choose" or self.phase == "move"
-    or self.phase == "target" or self.phase == "switch"
+    or self.phase == "target" or self.phase == "mimic" or self.phase == "switch"
     or self.phase == "item" or self.phase == "item_party"
     or self.phase == "item_move"
   if not open then return false end
@@ -10309,6 +10508,15 @@ function M:medRows(msg)
   end
 
   if kind == "msg" then
+    -- Gold's weather rides its lines (MediatedBattle.weatherOfLine2): the sky
+    -- is a state row ahead of the line, applied when the line plays -- the
+    -- row Gen 3's `weather` event files (`applyState3`).
+    if Gen.generation(self.game) == 2 then
+      local sky = Mediated.weatherOfLine2(msg.text)
+      if sky ~= nil then
+        rows[#rows + 1] = { kind = "state3", what = "weather", value = sky }
+      end
+    end
     say(msg.text)
 
   elseif kind == "send" then
@@ -10826,11 +11034,26 @@ function M:onBattleEvent(msg)
       -- onto the overlay nor onto whoever stands here now.  Gen 3 and a solo
       -- double keep their own reading below.
       local named, onSeat = self:medMovesMon(index, msg.mon)
+      -- Gold's SKETCH, written home first (Mediated.sketchHome): onto the
+      -- party monster on our seat -- the live save monster, whose list is the
+      -- FIGHT list when no overlay is up -- so the spend below matches it.
+      if msg.mon ~= nil and named then
+        local prior = (onSeat and self:overlayAt(index)) or named.moves
+        if Mediated.sketchHome(self.game, self.mode, prior, msg.moves, named) then
+          self:resheetMine(msg.mon, named)
+        end
+      end
       if msg.mon ~= nil and named and not onSeat then
         self:syncPartyPp(named, msg.moves)
       elseif msg.mon ~= nil then
         if self:overlayAt(index) then
           self:setOverlayAt(index, msg.moves)
+          -- A MIMIC's spends, onto the party's list by slot
+          -- (Mediated.mimicOverlay / slotPp): Red's mimicked slot pays MIMIC's
+          -- PP; Gold's never does, though its other slots still pay theirs.
+          if named and onSeat and self.medOverlayMimic then
+            Mediated.slotPp(named.moves, msg.moves, Gen.generation(self.game))
+          end
         else
           self:syncLivePp(msg.moves, index)
         end
@@ -10838,11 +11061,28 @@ function M:onBattleEvent(msg)
         -- be written onto the session mon itself to reach the save.
         if self.gen3 then self:savePp3(msg) end
       else
+        -- A TRANSFORM or a MIMIC overlay; which one decides whether the
+        -- referee's later PP for it is also the party's (Mediated.mimicOverlay).
+        -- Co-op's one Red / Gold seat: a solo double is Gen 3's alone.
+        if not self.ownSlots and not self.gen3 then
+          local seat = self:mySlot()
+          local own = seat and seat.battler and seat.battler.curMoves
+          self.medOverlayMimic = Mediated.mimicOverlay(self.game, own, msg.moves,
+            Gen.generation(self.game))
+        end
         self:setOverlayAt(index, msg.moves)
       end
+    elseif index and type(msg.moves) == "table" and msg.mon == nil then
+      -- Another seat's TRANSFORM / MIMIC list: its battle list now, which a
+      -- Red MIMIC aimed at it lists (`seatMoveList`).
+      self.medSeatMoves = self.medSeatMoves or {}
+      self.medSeatMoves[index] = msg.moves
     end
     return true
   end
+  -- Whoever comes out on a seat brings no list the last one wore.
+  local outAt = (msg.t == "send" or msg.t == "switch") and self:medSlotOf(msg) or nil
+  if outAt and self.medSeatMoves then self.medSeatMoves[outAt] = nil end
   -- A send-out on one of a solo double's seats: that seat's overlay goes, its
   -- replacement claim is spent, and its picker (if the referee answered for
   -- it) comes down. The co-op arm below is the one-seat original.
@@ -10859,6 +11099,10 @@ function M:onBattleEvent(msg)
     self.medMoveList = nil
     self.medMustReplace = nil
     if self.replacing then self.replacing = nil end
+    -- ...and any Bide of the one that left; the name the referee narrates
+    -- the newcomer under is the one its Bide lines will carry.
+    self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
+    if msg.t == "send" and type(msg.text) == "string" then self.medMineName = msg.text end
   -- ...and so does a faint on it (Red / Gold): both referees hand a fallen
   -- monster its own list back there (BattleSim Effects.untransform, BattleSim2
   -- `_clearSubstatus`), so a list the referee states for it behind the faint
@@ -10866,6 +11110,24 @@ function M:onBattleEvent(msg)
   -- keeps its overlay to the send-out, as before.
   elseif msg.t == "faint" and not self.gen3 and self:medSlotOf(msg) == self.mine then
     self.medMoveList = nil
+    self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
+  end
+  -- A Bide going on (Gold; MediatedBattle's `noteBideLine` has the rule):
+  -- our monster's storing line, and the release that ends it...
+  if msg.t == "msg" and self.bideFiled and not self.ownSlots then
+    local said = Mediated.bideLine(msg.text, self.medMineName)
+    if said == "store" then
+      self.bideStoring = true
+    elseif said == "release" then
+      self.bideFiled, self.bideStoring = nil, nil
+    end
+  end
+  -- ...read as the next turn opens: its FIGHT is `.locked_in` only when the
+  -- turn just closed said our monster is storing energy.
+  if msg.t == "turn" and msg.slot == nil and not self.ownSlots then
+    self.bideLocked = Gen.generation(self.game) == 2 and self.bideFiled == true
+      and self.bideStoring == true
+    self.bideStoring = nil
   end
 
   for _, row in ipairs(self:medRows(msg)) do
@@ -11309,7 +11571,7 @@ function M:sendMediatedChoice(action)
     else
       pick, hasPP = self:liveMoves()[moveIndex], self:hasLivePP()
     end
-    if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 then
+    if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 and not action.locked then
       -- Same sentence and phase as updateMove. A call site that skipped the
       -- menu (target-picker commit) must still show why the choice did not
       -- go -- otherwise commit returns the seat to choose with a blank box.
@@ -11320,6 +11582,8 @@ function M:sendMediatedChoice(action)
     end
     fields = { action = "fight", move = (action.move or 1) - 1,
                target = self:medFieldOf(action.target) }
+    -- Red's MIMIC pick (`updateMimic`), 0-based into the target's moves.
+    if tonumber(action.mimic) then fields.mimic = math.floor(action.mimic) - 1 end
   end
   if seatAt then
     fields.seat = self:medFieldOf(seatAt)
@@ -13695,6 +13959,20 @@ function M:syncPartyPp(mon, moves)
     local pp = tonumber(moves[i].pp)
     if pp then row.pp = pp end
   end
+  return true
+end
+
+-- The uploaded sheet behind party monster `mon0` (0-based, the referee's
+-- `mon`), rebuilt off that monster's moves after a SKETCH rewrote them -- the
+-- list `syncFightMoves` compares a later level-up's against, so the sketched
+-- move is not taken for a learn.
+function M:resheetMine(mon0, mon)
+  local at = tonumber(mon0)
+  local sheet = at and self.medMine and self.medMine[math.floor(at) + 1]
+  if type(sheet) ~= "table" then return false end
+  local moves = Mediated.sheetMoves(self.game, mon)
+  if #moves == 0 then return false end
+  sheet.moves = moves
   return true
 end
 

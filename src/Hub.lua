@@ -1823,49 +1823,123 @@ end
 M.movesetDeltaOk = movesetDeltaOk
 M.nextMoves12 = nextMoves12
 
+-- Every id the same, in the same slots: nothing for the carts' LearnMove to
+-- do.  A level-up with no new move at that level still re-sends the list the
+-- client already had (contract K9 rides the moveset), and LearnMove runs only
+-- for a new move -- pokered LearnMoveFromLevelUp (evos_moves.asm) and
+-- pokecrystal LearnLevelMoves (evolve.asm) call it only on a learnset row of
+-- the new level -- so such a re-send is no learn at all.
+local function sameIds12(old, incoming)
+  if #old ~= #incoming then return false end
+  for i = 1, #incoming do
+    local prev = old[i]
+    if not (prev and prev.id == incoming[i].id) then return false end
+  end
+  return true
+end
+
+-- The party's own move list beneath a live battler's MIMIC: `base` (the
+-- battle list, or the one put aside at a Transform) with every slot a MIMIC
+-- wrote while the monster was itself given back the row it held
+-- (`mon.preMimic`, keyed by the 1-based slot -- BattleSim Effects'
+-- MIMIC_EFFECT keeps it and `restoreMoves` gives it back at a switch-out).
+-- The carts' MIMIC writes the battle struct alone (pokered MimicEffect,
+-- pokecrystal BattleCommand_Mimic), so the party slot still holds MIMIC, and
+-- its PP is the cart's:
+--
+--   * Red: DecrementPP writes the battle and the party PP alike while the
+--     monster is not TRANSFORMed, so the party's MIMIC has the slot's PP --
+--     the one the copy is spending (`restoreMoves` reads it the same way);
+--   * Gold: CheckMimicUsed stops BattleCommand_DoTurn's party spend on a
+--     slot whose party move is MIMIC (the copy has its own 5 PP), so the
+--     party's MIMIC keeps the PP the saved row was taken with.
+--
+-- No saved rows: `base` itself.  Twin of partyMoves12 in server/lib/relay.js.
+local function partyMoves12(generation, base, mimic)
+  if type(mimic) ~= "table" then return base end
+  local out = {}
+  for i, row in ipairs(base) do
+    local own = mimic[i]
+    if type(own) == "table" then
+      local back = {}
+      for k, v in pairs(own) do back[k] = v end
+      if generation == 1 and row.pp ~= nil then back.pp = row.pp end
+      out[i] = back
+    else
+      out[i] = row
+    end
+  end
+  return out
+end
+
 -- Where a Gen 1 / Gen 2 learn lands on a live battler, and whether it did.
 --
--- Untransformed, the battle list is the party list: the learn is judged
--- against it (movesetDeltaOk) and rewrites it (nextMoves12).
+-- A learn is judged against the PARTY list, the one the client's sheet is --
+-- never the battle list a Transform or a MIMIC laid over it, against which an
+-- honest learn reads as two changes and was refused:
 --
--- Transformed, the party list is the one the referee put aside at Transform
--- -- `mon.preTransform.moves` (BattleSim2 Effects TRANSFORM_EFFECT, BattleSim
--- Effects.applyPrimary's TransformEffect_) -- and gives back at a switch-out
--- or a faint (BattleSim2 Turn `_undoTransform`, BattleSim
--- Effects.untransform), the way the carts reload the battle struct from the
--- party (InitBattleMon / LoadBattleMonFromParty).  The learn is judged
--- against that list and written there, so the switch-out restores the
--- learned list rather than the one from before it.  What the battle struct
--- does meanwhile is the cart's:
+--   * Transformed, the party list is the one the referee put aside at
+--     Transform -- `mon.preTransform.moves` (BattleSim2 Effects
+--     TRANSFORM_EFFECT, BattleSim Effects.applyPrimary's TransformEffect_) --
+--     which a switch-out or a faint gives back (BattleSim2 Turn
+--     `_undoTransform`, BattleSim Effects.untransform), the way the carts
+--     reload the battle struct from the party (InitBattleMon /
+--     LoadBattleMonFromParty);
+--   * under a MIMIC used while the monster was itself, the slots it wrote
+--     are given back their own rows (`partyMoves12`).
 --
---   * Gold: pokecrystal LearnMove skips the wBattleMonMoves / wBattleMonPP
---     copy while SUBSTATUS_TRANSFORMED is set, so the copied moves stay in
---     the fight until the switch-out;
---   * Red: pokered LearnMove has no such check -- the active monster's
---     wBattleMonMoves / wBattleMonPP are overwritten with the party's, so a
---     transformed monster fights on with its own (learned) moves and their
---     party PP under the copied types and stats.  Reproduced: the battle
---     list becomes a copy of its own, and the PP it spends from there never
---     reaches the party list (DecrementPP stops before the party copy while
---     TRANSFORMED is set), so the two are separate tables.
+-- The learn is written into the party list -- the one put aside when there
+-- is one, so the switch-out restores the learned list rather than the one
+-- from before it; a Mimic'd slot's saved row is folded into it then, so
+-- nothing gives the old row back over the learned list.  What the battle
+-- struct does is the cart's LearnMove, which runs only for a new move
+-- (`sameIds12`: a re-send of the same ids leaves the fight as it is):
 --
--- A transformed battler with no list put aside (a referee that keeps none)
--- is left alone, as before: replacing its copies would end the Transform a
--- turn early.  Twin of learnTo in server/lib/relay.js.
+--   * Red: pokered LearnMove (learn_move.asm) copies the whole party list
+--     and its PP over wBattleMonMoves / wBattleMonPP whenever the learner is
+--     the monster out -- no TRANSFORMED check -- so a transformed monster
+--     fights on with its own (learned) moves and their party PP under the
+--     copied types and stats, and a MIMIC's copy is gone.  Reproduced: the
+--     battle list becomes a copy of the party's, and while TRANSFORMed the
+--     PP it spends never reaches the party list (DecrementPP stops before the
+--     party copy), so the two are separate tables;
+--   * Gold: pokecrystal / pokegold LearnMove (learn.asm) makes the same copy
+--     only when SUBSTATUS_TRANSFORMED is clear: an untransformed monster's
+--     MIMIC copy is gone too, while a transformed one's copied moves stay in
+--     the fight until the switch-out.
+--
+-- Before wave 4 a Red re-send overwrote a transformed battler's copied moves
+-- (a level-up with no new move ended the Transform's moveset), and a learn
+-- under a MIMIC was refused.  A transformed battler with no list put aside
+-- (a referee that keeps none) is left alone: replacing its copies would end
+-- the Transform a turn early.  Twin of learnTo in server/lib/relay.js.
 local function learnTo(generation, mon, incoming)
   if type(incoming) ~= "table" or #incoming == 0 then return false end
-  if not mon.transformed then
-    local old = type(mon.moves) == "table" and mon.moves or {}
-    if not movesetDeltaOk(old, incoming) then return false end
-    mon.moves = nextMoves12(old, incoming)
+  local saved = nil
+  if mon.transformed then
+    saved = mon.preTransform
+    if type(saved) ~= "table" then return false end
+  end
+  local list = mon.moves
+  if saved then list = saved.moves end
+  local base = type(list) == "table" and list or {}
+  local mimic = type(mon.preMimic) == "table" and mon.preMimic or nil
+  local party = partyMoves12(generation, base, mimic)
+  if not movesetDeltaOk(party, incoming) then return false end
+  local learnt = not sameIds12(party, incoming)
+  if saved then
+    saved.moves = nextMoves12(party, incoming)
+    if mimic then mon.preMimic = nil end
+    if generation == 1 and learnt then mon.moves = nextMoves12(party, incoming) end
     return true
   end
-  local saved = mon.preTransform
-  if type(saved) ~= "table" then return false end
-  local old = type(saved.moves) == "table" and saved.moves or {}
-  if not movesetDeltaOk(old, incoming) then return false end
-  saved.moves = nextMoves12(old, incoming)
-  if generation == 1 then mon.moves = nextMoves12(old, incoming) end
+  -- Itself, the battle list is the party list but for a MIMIC's slots: with
+  -- none, the re-send rewrites it as it always did (unchanged ids keep the
+  -- hub's rows, nextMoves12); with one, only a learn replaces it.
+  if learnt or not mimic then
+    mon.moves = nextMoves12(party, incoming)
+    if mimic then mon.preMimic = nil end
+  end
   return true
 end
 -- Exported beside the two rules it is built from, for the same caller: a
@@ -1876,9 +1950,11 @@ M.learnTo = learnTo
 -- docs/plans/gen12-referee-gaps-fix.md). Twin of Relay.applyBattleMoveset.
 --
 -- Moves: unchanged ids keep the hub's PP and combat fields (nextMoves12); a
--- transformed battler's learn lands in the party list its referee put aside
--- (`preTransform.moves`), and on Red in the battle list too -- learnTo has
--- the rule and the carts' reasons.
+-- learn is judged against, and lands in, the party list -- the one a
+-- Transform put aside (`preTransform.moves`), a MIMIC's slots given back
+-- (`preMimic`) -- and reaches the battle list only as the cart's LearnMove
+-- does: for a new move alone, on Red whatever the Transform, on Gold only
+-- untransformed.  learnTo has the rule and the carts' reasons.
 --
 -- Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
 -- Gen 2 only -- Wire.battleMoveset reads none on Gen 3), the hub forwards
@@ -2167,6 +2243,12 @@ function M:tryStartSim(record)
     createOpts.terrain = rules.terrain
     createOpts.weather = rules.weather
     createOpts.underwater = rules.underwater
+  end
+  -- Gold's wTimeOfDay, the host's cart clock (Wire.battleRuleset reads it on
+  -- a Gen 2 hub alone), for MORNING SUN / SYNTHESIS / MOONLIGHT
+  -- (BattleSim2 Turn.create's `opts.timeOfDay`; absent is its link reading).
+  if self.generation == 2 then
+    createOpts.timeOfDay = rules.timeOfDay
   end
   local battle, why = self.Turn.create(createOpts)
   if not battle then

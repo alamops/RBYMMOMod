@@ -1627,7 +1627,14 @@ do
   ok(not damaged, "DIG charge turn deals no damage")
   local alpha = activeMonOf(battle, "p1")
   ok(alpha and alpha.invulnerable == true, "DIG sets invulnerable")
-  eq(alpha and alpha.moves[1].pp, 9, "DIG spends PP only on the charge turn")
+  -- ChargeEffect is reached ahead of PlayerCanExecuteMove: no used line and
+  -- no DecrementPP on the charge turn (R1d); the release pays.
+  eq(alpha and alpha.moves[1].pp, 10, "DIG spends no PP on the charge turn")
+  local usedLine = false
+  for _, event in ipairs(turn1) do
+    if event.t == "msg" and event.text == "Alpha used DIG" then usedLine = true end
+  end
+  ok(not usedLine, "DIG's charge turn prints no used line")
 
   battle:submitChoice("p2", { action = "fight", move = 0 })
   local turn2 = drain(battle)
@@ -1640,7 +1647,13 @@ do
   end
   ok(released, "DIG turn two auto-releases without amount=1")
   ok(foeDamaged, "DIG turn two deals damage")
+  local releaseLine = false
+  for _, event in ipairs(turn2) do
+    if event.t == "msg" and event.text == "Alpha used DIG" then releaseLine = true end
+  end
+  ok(releaseLine, "DIG's release prints the used line")
   alpha = activeMonOf(battle, "p1")
+  eq(alpha and alpha.moves[1].pp, 9, "DIG spends its PP on the release")
   ok(alpha and alpha.invulnerable ~= true, "DIG release clears invulnerable")
   ok(alpha and alpha.charging == nil, "DIG release clears charging")
 end
@@ -1799,10 +1812,15 @@ do
   local afterHit = fighterIn(battle:snapshot(), "p2").hp
   ok(afterHit < 200, "the trapping move itself damages the victim")
 
-  -- The turn after is forced on both seats, so it waits for a tick.  The
-  -- later hits are the trapper's own slot (`.MultiturnMoveCheck`): "<MON>'s
-  -- attack continues!" and the stored hit, not a residual (R1c).
-  battle:tick(battle.now + 1)
+  -- The turn after: both are players, and each gets the battle menu (R1d),
+  -- so each answers FIGHT -- the trapper's continuation, the held monster's
+  -- CANNOT_MOVE.  The later hits are the trapper's own slot
+  -- (`.MultiturnMoveCheck`): "<MON>'s attack continues!" and the stored hit,
+  -- not a residual (R1c).
+  ok(battle.byId.p1.choice == nil and battle.byId.p2.choice == nil,
+     "a link fight's trapper and held monster are both asked")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "the trapper's FIGHT files")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }), "the held monster's FIGHT files")
   local residual = drain(battle)
   local residualMsg = false
   for _, event in ipairs(residual) do
@@ -1827,12 +1845,38 @@ do
   alpha.trapping = { turns = 2, moveIndex = 1, targetSlot = 3 }
   beta.trapped = { turns = 2, damage = 10, fromSlot = 0 }
   battle:_fillForcedChoices()
-  eq(battle.byId.p1.choice and battle.byId.p1.choice.action, "fight",
-     "trapping locks the attacker into its move")
-  ok(battle.byId.p1.choice and battle.byId.p1.choice.trapContinue,
-     "...as the trap's continuation")
-  eq(battle.byId.p2.choice and battle.byId.p2.choice.action, "skip",
-     "trapped locks the victim into a skip")
+  -- Both are players (1v1): the cart's battle menu is open to both (R1d),
+  -- and FIGHT -- whatever slot comes with it -- is the lock-in.
+  eq(battle.byId.p1.choice, nil, "a player's trapper is not filled")
+  eq(battle.byId.p2.choice, nil, "a player's held monster is not filled")
+  local lock = battle:_normaliseChoice(battle.byId.p1, { action = "fight", move = 3 })
+  eq(lock and lock.action, "fight", "the trapper's FIGHT locks it into its move")
+  ok(lock and lock.trapContinue, "...as the trap's continuation")
+  local held = battle:_normaliseChoice(battle.byId.p2, { action = "fight" })
+  eq(held and held.action, "skip", "the held monster's FIGHT is CANNOT_MOVE")
+  eq(held and held.skip, "trapped", "...the trapped skip")
+  local out = battle:_normaliseChoice(battle.byId.p2, { action = "item", item = "X_ATTACK" })
+  eq(out and out.action, "item", "the held monster may use an item instead")
+end
+
+-- The computer's seats are filled, as SelectEnemyMove fills them.
+do
+  local battle = battleOf({
+    mode = "wild",
+    aMons = { mon({ species = "Alpha", maxHp = 200 }) },
+    bMons = { mon({ species = "Beta", maxHp = 200 }) },
+  })
+  drain(battle)
+  local alpha = activeMonOf(battle, "p1")
+  local beta = activeMonOf(battle, "p2")
+  beta.trapping = { turns = 2, moveIndex = 1, targetSlot = 0 }
+  alpha.trapped = { turns = 2, damage = 10, fromSlot = 3 }
+  battle.byId.p1.choice, battle.byId.p2.choice = nil, nil
+  battle:_fillForcedChoices()
+  ok(battle.byId.p2.choice and battle.byId.p2.choice.trapContinue,
+     "the computer's trapper is filled with its continuation")
+  ok(battle.byId.p2.forced, "...a referee-filled answer")
+  eq(battle.byId.p1.choice, nil, "the player it holds is asked")
 end
 
 -- A trapping move is worth `trapTurns` attacks in total, not one more than
@@ -1851,19 +1895,18 @@ do
                       moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
     })
     drain(battle)
-    battle:submitChoice("p1", { action = "fight", move = 0 })
-    battle:submitChoice("p2", { action = "fight", move = 0 })
 
     -- Every attack after the first is "attack continues!" in Alpha's slot,
     -- and the slower Beta loses the trap's first turn too (`.HeldInPlaceCheck`:
     -- "can't move") and every continuation turn, silently (CANNOT_MOVE) --
     -- so it loses one turn per attack (R1c; it used to move on the first).
+    -- Both answer FIGHT every turn (R1d: the battle menu, then the lock-in),
+    -- and the chain is over once neither holds the trap at a turn's end.
     local hits, skipped = 0, 0
     for _ = 1, 30 do
-      for _ = 1, 8 do
-        if battle:outcome() then break end
-        if not battle:tick(battle.now + 1) then break end
-      end
+      if battle:outcome() then break end
+      battle:submitChoice("p1", { action = "fight", move = 0 })
+      battle:submitChoice("p2", { action = "fight", move = 0 })
       for _, event in ipairs(drain(battle)) do
         if event.t == "msg" then
           if event.text == "Alpha used wrap" then hits = hits + 1 end
@@ -1874,10 +1917,8 @@ do
           if event.text:find("can't move", 1, true) then skipped = skipped + 1 end
         end
       end
-      -- The chain is over the moment the victim is asked for a choice again.
-      -- (`skip` is the referee's word, not a submittable action, so the probe
-      -- has to be a real one.)
-      if battle:submitChoice("p2", { action = "fight", move = 0 }) then break end
+      local a, b = activeMonOf(battle, "p1"), activeMonOf(battle, "p2")
+      if not (a and a.trapping) and not (b and b.trapped) then break end
     end
     attacks[hits] = (attacks[hits] or 0) + 1
     lost[skipped] = (lost[skipped] or 0) + 1
@@ -1897,39 +1938,42 @@ do
   ok(attacks[2] and attacks[5], "both ends of the 2..5 roll are reached")
 end
 
--- A referee-filled answer is not the player's to take back.  A trap forces
--- *both* seats, so `_openTurn` leaves that turn without a deadline -- a cancel
--- that cleared one of those choices would hang the fight outright.
+-- A referee-filled answer is not the player's to take back: the computer's
+-- trap continuation (wild Beta's) is filed at the turn's open and a cancel
+-- from its seat is refused.  The player it holds is asked (R1d: the battle
+-- menu), so the turn keeps its deadline, and the player's own lock-in -- its
+-- FIGHT, CANNOT_MOVE -- can be taken back like any answer.
 do
   local battle = battleOf({
-    seed = 9999,
-    aMons = { mon({ species = "Alpha", maxHp = 999, spd = 120,
-                    moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) },
-    bMons = { mon({ species = "Beta", maxHp = 999, def = 200, spd = 1,
+    mode = "wild", seed = 9999,
+    aMons = { mon({ species = "Alpha", maxHp = 999, def = 200, spd = 1,
                     moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    bMons = { mon({ species = "Beta", maxHp = 999, spd = 120,
+                    moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) },
   })
   drain(battle)
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drain(battle)
 
-  eq(battle.deadline, nil, "a turn forced on every seat opens without a deadline")
-  ok(battle.byId.p2.forced, "the trapped seat is marked as answered by the referee")
+  ok(battle.deadline ~= nil, "a turn the held player answers keeps its deadline")
+  ok(battle.byId.p2.forced, "the computer's trap continuation is the referee's answer")
   ok(battle:submitChoice("p2", { action = "cancel" }) == false,
      "cancel cannot clear a forced trap answer")
-  ok(battle:submitChoice("p2", { action = "switch", slot = 0 }) == false,
-     "and the victim still cannot switch out of the trap")
   ok(battle.byId.p2.choice ~= nil, "the forced answer survived the cancel")
+  local lock = battle:_normaliseChoice(battle.byId.p1, { action = "fight", move = 0 })
+  eq(lock and lock.skip, "trapped", "the held player's FIGHT is CANNOT_MOVE")
 
-  -- The refusal is what keeps the clock alive: the chain still runs to its end.
-  local ticked = false
+  -- The chain still runs to its end on the player's answers.
+  local free = false
   for _ = 1, 40 do
     if battle:outcome() then break end
-    if battle:submitChoice("p2", { action = "fight", move = 0 }) then ticked = true; break end
-    if not battle:tick(battle.now + 1) then break end
+    battle:submitChoice("p1", { action = "fight", move = 0 })
     drain(battle)
+    local a = activeMonOf(battle, "p1")
+    if a and not a.trapped and not battle.byId.p2.forced then free = true; break end
   end
-  ok(ticked, "the trap chain still ends after a refused cancel")
+  ok(free, "the trap chain still ends after a refused cancel")
 end
 
 -- An ordinary answer stays cancellable -- the guard is about forced fills only.
@@ -2192,32 +2236,39 @@ do
   battle:submitChoice("p2", { action = "fight", move = 0 })
   local turn1 = drain(battle)
 
+  -- BideEffect prints nothing past "used BIDE" (R1d): no "storing energy".
   local storing = false
   for _, event in ipairs(turn1) do
-    if event.t == "msg" and event.text:find("storing energy", 1, true) then
+    if event.t == "msg" and event.text:find("energy", 1, true) then
       storing = true
     end
   end
-  ok(storing, "BIDE_EFFECT announces storing energy on turn one")
+  ok(not storing, "BIDE_EFFECT says nothing on turn one past its used line")
 
   local alpha = activeMonOf(battle, "p1")
   ok(alpha and alpha.bide ~= nil, "BIDE_EFFECT sets bide state")
 
-  -- Every turn after this one is a forced Bide turn (the store, then the
-  -- unleash on the turn its counter reaches 0), so only Bob answers.
+  -- Every turn after this one is a Bide turn (the store, then the unleash on
+  -- the turn its counter reaches 0).  Ann is a player: the cart gives her the
+  -- battle menu, and her FIGHT -- no move menu -- is the Bide (`_menuFight`).
   local foeHpBefore = fighterIn(battle:snapshot(), "p2").hp
   local released = false
+  local silent = true
   for _ = 1, 6 do
     if not alpha or not alpha.bide then break end
+    ok(battle.byId.p1.choice == nil, "the Bide user is asked, not filled")
+    battle:submitChoice("p1", { action = "fight", move = 0 })
     battle:submitChoice("p2", { action = "fight", move = 0 })
     for _, event in ipairs(drain(battle)) do
       if event.t == "damage" and event.slot == 3 and event.amount > 0 then
         released = true
       end
+      if event.t == "msg" and event.text:find("storing energy", 1, true) then silent = false end
     end
     alpha = activeMonOf(battle, "p1")
   end
 
+  ok(silent, "a store turn says nothing (SavingEnergyText is unreferenced)")
   ok(released, "BIDE_EFFECT release deals damage to the foe")
   ok(alpha and alpha.bide == nil, "BIDE_EFFECT clears bide after release")
   ok(fighterIn(battle:snapshot(), "p2").hp < foeHpBefore,
@@ -3252,21 +3303,21 @@ do
 end
 
 do
+  -- Both seats HYPER BEAM, so the next turn is a recharge on both -- no menu
+  -- on either cart (MainInBattleLoop :293-295), every seat forced.  (A trap
+  -- no longer forces a player's seat: the battle menu stays open, R1d.)
   local battle = battleOf({
     aMons = { mon({ species = "Alpha", maxHp = 200, spd = 50,
-      moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+      moves = { move({ id = "beam", power = 10, effect = 80 }) } }) },
     bMons = { mon({ species = "Beta", maxHp = 200, spd = 50,
-      moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+      moves = { move({ id = "beam", power = 10, effect = 80 }) } }) },
   })
   drain(battle)
-  local alpha = activeMonOf(battle, "p1")
-  local beta = activeMonOf(battle, "p2")
-  -- Beta's real slot (3): a hold is the trapper's record naming its seat.
-  alpha.trapping = { turns = 2, moveIndex = 1, targetSlot = 3 }
-  beta.trapped = { turns = 2, damage = 10, fromSlot = 0 }
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drain(battle)
+  ok(activeMonOf(battle, "p1").mustRecharge and activeMonOf(battle, "p2").mustRecharge,
+     "both beams landed, both must recharge")
   ok(battle.forcedPending == true, "both-sides forced defers resolve to tick")
   eq(battle.phase, "choice", "and leaves the paced turn open")
   local turn = battle.turn
@@ -4092,17 +4143,21 @@ end
 -- `.MultiturnMoveCheck`'s "<MON>'s attack continues!".  Nothing is said when
 -- the forced turn is filed; the slot says it.
 
+-- The computer's seats are the filled ones (SelectEnemyMove :2949-2955); a
+-- player's held monster or trapper gets the battle menu and answers it
+-- (R1d, `_menuFight`), so these run in a wild fight.
 do
   local battle = battleOf({
-    aMons = { mon({ species = "Alpha", maxHp = 200, spd = 10 }) },
-    bMons = { mon({ species = "Beta", maxHp = 200, spd = 90,
+    mode = "wild",
+    aMons = { mon({ species = "Alpha", maxHp = 200, spd = 90,
       moves = { move({ id = "WRAP", power = 15, effect = 42 }) } }) },
+    bMons = { mon({ species = "Beta", maxHp = 200, spd = 10 }) },
   })
   drain(battle)
   local a = battle.fighters[1]
   local b = battle.fighters[2]
-  a.mons[1].trapped = { turns = 2, damage = 10, fromSlot = 3 }
-  b.mons[1].trapping = { turns = 2, moveIndex = 1, targetSlot = 0 }
+  b.mons[1].trapped = { turns = 2, damage = 10, fromSlot = 0 }
+  a.mons[1].trapping = { turns = 2, moveIndex = 1, targetSlot = 3 }
   a.choice, b.choice = nil, nil
   battle:_fillForcedChoices()
   local events = drain(battle)
@@ -4113,24 +4168,26 @@ do
     end
   end
   ok(not said, "trap immobilize files CANNOT_MOVE without a word")
-  ok(a.choice and a.choice.action == "skip", "and files a skip")
+  ok(b.choice and b.choice.action == "skip", "and files the computer's skip")
+  ok(a.choice == nil, "the player's trapper is asked instead")
 end
 
 do
   local battle = battleOf({
-    aMons = {
+    mode = "wild",
+    aMons = { mon({ species = "Alpha", maxHp = 200, spd = 10 }) },
+    bMons = {
       mon({
-        species = "Alpha", maxHp = 200, spd = 10,
+        species = "Beta", maxHp = 200, spd = 90,
         moves = { move({ id = "WRAP", power = 15, effect = 42 }) },
       }),
     },
-    bMons = { mon({ species = "Beta", maxHp = 200, spd = 90 }) },
   })
   drain(battle)
   local a = battle.fighters[1]
   local b = battle.fighters[2]
-  a.mons[1].trapping = { turns = 2, moveIndex = 1, targetSlot = 3 }
-  b.mons[1].trapped = { turns = 2, damage = 10, fromSlot = 0 }
+  b.mons[1].trapping = { turns = 2, moveIndex = 1, targetSlot = 0 }
+  a.mons[1].trapped = { turns = 2, damage = 10, fromSlot = 3 }
   a.choice = nil
   b.choice = nil
   battle:_fillForcedChoices()
@@ -4139,30 +4196,30 @@ do
     if event.t == "msg" then early = true end
   end
   ok(not early, "filing the forced trap turns says nothing")
-  ok(a.choice and a.choice.action == "fight" and a.choice.trapContinue,
+  ok(b.choice and b.choice.action == "fight" and b.choice.trapContinue,
      "trapper files its move's continuation")
-  ok(b.choice and b.choice.action == "skip", "victim files skip")
-  battle:_resolveTurn()
+  ok(a.choice == nil, "the held player is asked")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "and its FIGHT is CANNOT_MOVE")
   local events = drain(battle)
   local continued, animed, victimCant, ppSpent = false, false, false, false
   for _, event in ipairs(events) do
-    if event.t == "msg" and event.text == "Alpha's attack continues!" then
+    if event.t == "msg" and event.text == "Beta's attack continues!" then
       continued = true
     end
-    if event.t == "anim" and event.slot == 0 and event.text == "WRAP" then
+    if event.t == "anim" and event.slot == 3 and event.text == "WRAP" then
       animed = true
     end
     if event.t == "msg" and tostring(event.text):find("can't move", 1, true) then
       victimCant = true
     end
-    if event.t == "msg" and event.text == "Alpha used WRAP" then ppSpent = true end
+    if event.t == "msg" and event.text == "Beta used WRAP" then ppSpent = true end
   end
   ok(continued, "trapper narrates the attack continues, in its slot")
   ok(animed, "trapper emits a continue anim (no re-roll)")
   ok(not victimCant, "the held victim's CANNOT_MOVE says nothing")
   ok(not ppSpent, "no used line: the continuation skips PlayerCanExecuteMove")
-  eq(b.mons[1].hp, 190, "the stored 10 lands on the victim")
-  eq(a.mons[1].trapping and a.mons[1].trapping.turns, 1, "one attack spent off the counter")
+  eq(a.mons[1].hp, 190, "the stored 10 lands on the victim")
+  eq(b.mons[1].trapping and b.mons[1].trapping.turns, 1, "one attack spent off the counter")
 end
 
 -- ------------------------------------------------------------------
@@ -5358,6 +5415,10 @@ do
   for _ = 1, 6 do
     if landedOnSlot4 then break end
     battle:submitChoice("fast", { action = "fight", move = 0, target = 4 })
+    -- The Bide user is a player: its FIGHT, with no move menu behind it, is
+    -- the Bide's forced turn (R1d `_menuFight`) -- the aim it names is not
+    -- read; the stored one is.
+    battle:submitChoice("bider", { action = "fight", move = 0, target = 3 })
     battle:submitChoice("foeB", { action = "fight", move = 0, target = 1 })
     local events = drain(battle)
     for _, e in ipairs(events) do
@@ -6947,14 +7008,15 @@ do
   -- (e) A Bide release is a hit: Beta's sheet holds 10 stored and its
   --     counter is spent, so this forced turn unleashes at Alpha (slot 0) --
   --     after `.BideCheck` adds wDamage, which is Alpha's faster Rage hit (8)
-  --     -- for 2 x 18 = 36, and the raging Alpha builds after it.  Both seats
-  --     are forced (Rage, the release), so the turn waits for a tick.
+  --     -- for 2 x 18 = 36, and the raging Alpha builds after it.  Alpha's
+  --     Rage is forced; Beta, a player, answers the battle menu, and its
+  --     FIGHT is the Bide's turn (R1d `_menuFight`).
   do
     local battle = duel({
       a = { { species = "Alpha", maxHp = 400, spd = 90, moves = { fury() }, extra = raging } },
       b = { { species = "Beta", maxHp = 400, spd = 10, moves = { fxm("bide", 0, 26) },
               extra = { bide = { turns = 0, stored = 10, moveIndex = 1, targetSlot = 0 } } } } })
-    battle:tick(1)
+    battle:submitChoice("p2", { action = "fight" })
     local events = drain(battle)
     local order = {}
     for _, e in ipairs(events) do
@@ -7720,7 +7782,9 @@ do
   ok(saidIt(events, "Alpha used FLY") and not saidIt(events, "Alpha used METRONOME"),
      "the release is FLY, not a second METRONOME")
   eq(hitsOn(events, 3) ~= "", true, "...and it lands")
-  eq(activeMonOf(battle, "p1").moves[1].pp, 19, "METRONOME paid once (20 -> 19)")
+  -- The release is PlayerCanExecuteMove's: DecrementPP on wPlayerMoveListIndex
+  -- -- METRONOME's slot -- a second time (R1d).
+  eq(activeMonOf(battle, "p1").moves[1].pp, 18, "METRONOME paid at the call and the release (20 -> 18)")
 end
 
 -- ------------------------------------------------------------------
@@ -7985,8 +8049,11 @@ do
   b = duel({ a = sh({ species = "Alpha", spd = 90, moves = { mv("wrap", 15, 42) } }),
              b = sh({ species = "Beta", spd = 10, moves = { SPL() } }) })
   play(b, { 2, 3, 255, 0 })
+  -- The next turn: both players answer the battle menu's FIGHT (R1d), the
+  -- continuation and CANNOT_MOVE.
+  play(b, {})
   eq(beta(b).trapped and beta(b).trapped.turns, 3,
-     "a count byte of 2 redraws: 3 & 3 is 3, 5 attacks -- this one and the next (all forced, resolved on the tick), then 3")
+     "a count byte of 2 redraws: 3 & 3 is 3, 5 attacks -- this one and the next, then 3")
 
   -- (f) OneHitKOEffect_ lands on a Speed tie; the set-damage moves draw no
   --     crit and no roll and pass the chart; JUMP KICK crashes for 1.
@@ -8276,7 +8343,9 @@ do
   events, log = play(b, { 0, 255, 0 })
   ok(said(events, "Beta can't move"), "`.HeldInPlaceCheck`: the slower Beta loses the trap's first turn")
   eq(alpha(b).trapping and alpha(b).trapping.turns, 1, "a count byte of 0: one attack after this one")
-  events, log = play(b, {}, false, false)
+  -- Both are players: each answers the battle menu's FIGHT (R1d), the
+  -- continuation and CANNOT_MOVE.
+  events, log = play(b, {}, 0, 0)
   ok(said(events, "Alpha's attack continues!") and not said(events, "Beta can't move"),
      "the continuation, in Alpha's slot; Beta's CANNOT_MOVE silent")
   eq(log.bytes .. "/" .. log.rolls, "0/0", "...and drawing nothing")
@@ -8308,6 +8377,192 @@ do
              b = { sheet({ species = "Beta", spd = 10, moves = { SPL() } }) } })
   events = play(b, {})
   ok(said(events, "The MIRROR MOVE failed!"), "MIRROR MOVE with nothing to copy: MirrorMoveFailedText")
+end
+
+-- ------------------------------------------------------------------
+-- R1d (gen12-referee-gaps-fix wave 4): the battle menu a player keeps
+-- through a Bide, a trap and a hold; the computer's re-pick; the cart's
+-- message order; the charge's PP; a coop_wild RUN; Haze's lasting
+-- CANNOT_MOVE; the chart's row order.  The g1_menu_lockin, g1_charge_turn,
+-- g1_thrash_anim, g1_hit_lines, g1_coop_run, g1_haze_lock and g1_chart_order
+-- parity scenarios (tests/drivers/battle_turn_parity.lua) hold lib/battle to
+-- the same streams.
+-- ------------------------------------------------------------------
+
+do
+  local function sheet(o)
+    local raw = mon(o)
+    raw.baseSpd = o.baseSpd or 0
+    for k, v in pairs(o.extra or {}) do raw[k] = v end
+    return raw
+  end
+  local function duel(o)
+    local battle = assert(Turn.create({
+      id = "r1d", mode = o.mode or "1v1", seed = o.seed or 7, choiceTimeout = 60,
+      reconnectGrace = 60, chart = o.chart, chartOrder = o.chartOrder,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = o.a } },
+        b = { { playerId = "p2", name = "Bob", mons = o.b } },
+      },
+    }))
+    drain(battle)
+    return battle
+  end
+  local function said(events, text)
+    for _, e in ipairs(events) do if e.t == "msg" and e.text == text then return true end end
+    return false
+  end
+
+  -- (a) `_menuFight`: a player's FIGHT with no move menu behind it.
+  local b = duel({ a = { sheet({ species = "Alpha", moves = { move({ id = "bide", power = 0, effect = 26 }) },
+                                 extra = { bide = { turns = 2, stored = 0, moveIndex = 1, targetSlot = 3 } } }) },
+                   b = { sheet({ species = "Beta" }) } })
+  eq(b.byId.p1.choice, nil, "a player's Bide user is asked (DisplayBattleMenu runs first)")
+  local c = b:_normaliseChoice(b.byId.p1, { action = "fight", move = 3 })
+  ok(c and c.bideStore and c.target == 3, "...and its FIGHT, naming no slot, is the Bide's turn")
+  c = b:_normaliseChoice(b.byId.p1, { action = "fight" })
+  ok(c and c.bideStore, "...with no slot at all, too")
+  eq(b:_normaliseChoice(b.byId.p1, { action = "switch", slot = 0 }), nil,
+     "a switch to the monster already out is still refused")
+
+  -- (b) Asleep, a 0-PP or disabled slot is taken: no move menu, the gate stops it.
+  b = duel({ a = { sheet({ species = "Alpha", status = "SLP",
+                           moves = { move({ id = "dry", pp = 0 }), move({ id = "wet" }) },
+                           extra = { statusTurns = 3, disable = { moveIndex = 2, turns = 3 } } }) },
+             b = { sheet({ species = "Beta" }) } })
+  c = b:_normaliseChoice(b.byId.p1, { action = "fight", move = 0 })
+  eq(c and c.move, 1, "asleep: a 0-PP slot is taken")
+  c = b:_normaliseChoice(b.byId.p1, { action = "fight", move = 1 })
+  eq(c and c.move, 2, "...so is the disabled one")
+  c = b:_normaliseChoice(b.byId.p1, { action = "fight", move = 3 })
+  eq(c and c.move, 1, "...and a slot naming nothing is the first")
+
+  -- (c) SelectEnemyMove after the player's switch: the computer's trap let go
+  --     re-picks (`_reselectComputer`); a player's trapper whose item ran its
+  --     counter out frees the computer it held.
+  b = duel({ mode = "wild",
+             a = { sheet({ species = "Alpha", spd = 10 }), sheet({ species = "Gamma", spd = 10 }) },
+             b = { sheet({ species = "Beta", spd = 90, moves = { move({ id = "wrap", power = 15, effect = 42 }),
+                                                                  move({ id = "slam", power = 40 }) } }) } })
+  local beta = activeMonOf(b, "p2")
+  local alpha = activeMonOf(b, "p1")
+  beta.trapping = { turns = 2, moveIndex = 1, targetSlot = 0, damage = 4 }
+  alpha.trapped = { turns = 2, damage = 4, fromSlot = 3 }
+  b.byId.p2.choice = nil
+  b:_fillForcedChoices()
+  ok(b.byId.p2.choice and b.byId.p2.choice.trapContinue, "the wild trapper's continuation is filed")
+  ok(b:submitChoice("p1", { action = "switch", slot = 1 }), "the held player switches")
+  local events = drain(b)
+  ok(said(events, "Beta used slam") and not said(events, "Beta used wrap"),
+     "the trap let go, the computer picks afresh: SLAM, not WRAP run fresh")
+
+  b = duel({ mode = "wild",
+             a = { sheet({ species = "Alpha", spd = 90, moves = { move({ id = "wrap", power = 15, effect = 42 }) } }) },
+             b = { sheet({ species = "Beta", spd = 10, moves = { move({ id = "thump", power = 10 }) } }) } })
+  alpha, beta = activeMonOf(b, "p1"), activeMonOf(b, "p2")
+  alpha.trapping = { turns = 1, moveIndex = 1, targetSlot = 3, damage = 4 }
+  beta.trapped = { turns = 1, damage = 4, fromSlot = 0 }
+  b.byId.p2.choice = nil
+  b:_fillForcedChoices()
+  eq(b.byId.p2.choice and b.byId.p2.choice.skip, "trapped", "the held wild Beta: CANNOT_MOVE")
+  ok(b:submitChoice("p1", { action = "item", item = "X_ATTACK" }), "the trapper uses an item")
+  events = drain(b)
+  ok(alpha.trapping == nil and beta.trapped == nil, "UseBagItem's step took the counter to 0: let go")
+  ok(said(events, "Beta used thump"), "...before SelectEnemyMove, so Beta picks and moves")
+
+  -- (d) The message order: "is confused!" every confused turn, ahead of its byte.
+  b = duel({ a = { sheet({ species = "Alpha", spd = 90, confusion = 3, moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+             b = { sheet({ species = "Beta", spd = 10, moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+  b:submitChoice("p1", { action = "fight", move = 0 })
+  b:submitChoice("p2", { action = "fight", move = 0 })
+  events = drain(b)
+  eq(events[1] and events[1].t, "chose", "(the turn's answers first)")
+  ok(said(events, "Alpha is confused!"), "IsConfusedText on a turn the counter does not reach 0")
+  b:submitChoice("p1", { action = "fight", move = 0 })
+  b:submitChoice("p2", { action = "fight", move = 0 })
+  b:submitChoice("p1", { action = "fight", move = 0 })
+  b:submitChoice("p2", { action = "fight", move = 0 })
+  events = drain(b)
+  ok(not said(events, "Alpha is confused!") or said(events, "Alpha snapped out of confusion"),
+     "the snap-out turn says ConfusedNoMoreText instead")
+
+  -- (e) chartOrder: all or nothing.
+  b = duel({ chartOrder = { 0, 1, 0 }, a = { sheet({ species = "Alpha" }) }, b = { sheet({ species = "Beta" }) } })
+  eq(b.chartRows, nil, "an odd-length order is refused whole")
+  b = duel({ chartOrder = { 0, 1, -1, 2 }, a = { sheet({ species = "Alpha" }) }, b = { sheet({ species = "Beta" }) } })
+  eq(b.chartRows, nil, "a negative index refuses it whole")
+  b = duel({ chartOrder = { 0, 1.5 }, a = { sheet({ species = "Alpha" }) }, b = { sheet({ species = "Beta" }) } })
+  eq(b.chartRows, nil, "so does a fraction")
+  b = duel({ chart = { { 100, 200, 50 }, { 100, 100, 100 }, { 100, 100, 100 } },
+             chartOrder = { 0, 2, 0, 1, 1, 1 },
+             a = { sheet({ species = "Alpha" }) }, b = { sheet({ species = "Beta", types = { 1, 2 } }) } })
+  local percents, last = b:_typeRows(0, activeMonOf(b, "p2"))
+  eq(table.concat(percents, ","), "50,200", "the rows of the move's type that name a defender type, in order")
+  eq(last, 200, "wDamageMultipliers: the last of them")
+  percents, last = b:_typeRows(2, activeMonOf(b, "p2"))
+  eq(#percents .. ":" .. last, "0:100", "no row: EFFECTIVE, nothing applied")
+
+  -- (e2) A thrash's continuation is THRASH in wPlayerMoveNum: the animation,
+  --      and CriticalHitTest's HighCriticalMoves lookup -- a high-crit
+  --      thrashing move crits at the ordinary rate on those turns.
+  local Crit = BattleSim.Crit
+  local byte = nil
+  for candidate = 0, 255 do
+    if Crit.check(60, candidate, { highCritMove = true })
+       and not Crit.check(60, candidate, {}) then byte = candidate; break end
+  end
+  ok(byte ~= nil, "(a byte the high-crit rate crits on and the ordinary one does not)")
+  b = duel({ a = { sheet({ species = "Alpha", spd = 90, baseSpd = 60,
+                           moves = { (function() local m = move({ id = "PETAL_DANCE", power = 20, effect = 27 })
+                                                 m.highCrit = true; return m end)() },
+                           extra = { thrashing = { turns = 2, moveIndex = 1 } } }) },
+             b = { sheet({ species = "Beta", spd = 10, maxHp = 400,
+                           moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+  ok(b.byId.p1.choice and b.byId.p1.choice.forcedMove, "the thrash is forced")
+  local fallback = BattleSim.Rng.new(5)
+  b.rng = {
+    byte = function(self) local v = byte; byte = nil; if v then return v end return fallback:byte() end,
+    nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+    damageRoll = function() return 255 end,
+    next = function() return fallback:next() end,
+    state = function() return fallback:state() end,
+  }
+  b:submitChoice("p2", { action = "fight", move = 0 })
+  events = drain(b)
+  local anim = nil
+  for _, e in ipairs(events) do if e.t == "anim" and e.slot == 0 then anim = e.text end end
+  eq(anim, "THRASH", "the continuation animates THRASH")
+  ok(said(events, "Alpha's thrashing about!") and not said(events, "A critical hit"),
+     "...and crits at the ordinary rate: no crit on a byte only the high-crit rate takes")
+
+  -- (f) `_selectsAnew`: only a move menu lifts Haze's CANNOT_MOVE.  The wild
+  --     Beta, frozen while it owed a HYPER BEAM recharge (the enemy side
+  --     keeps it), is thawed by HAZE: its forced recharge turns never select
+  --     anew, so it never acts -- not even to recharge.
+  b = duel({ mode = "wild",
+             a = { sheet({ species = "Alpha", spd = 90, moves = { move({ id = "haze", power = 0, effect = 25 }),
+                                                                  move({ id = "splash", power = 0, effect = 85 }) } }) },
+             b = { sheet({ species = "Beta", spd = 10, status = "FRZ", extra = { mustRecharge = true } }) } })
+  local lines = {}
+  for turn = 1, 3 do
+    b:submitChoice("p1", { action = "fight", move = turn == 1 and 0 or 1 })
+    b:submitChoice("p2", { action = "fight", move = 0 })
+    for _, e in ipairs(drain(b)) do if e.t == "msg" then lines[#lines + 1] = e.text end end
+  end
+  local betaActed = false
+  for _, text in ipairs(lines) do if text:find("^Beta") then betaActed = true end end
+  ok(not betaActed, "Haze's CANNOT_MOVE outlasts the turn while no menu writes a new selection")
+  eq(activeMonOf(b, "p2").mustRecharge, true, "...the recharge never spent")
+  ok(b.byId.p2.cannotMove, "...the seat still selecting CANNOT_MOVE")
+
+  b = duel({ a = { sheet({ species = "Alpha" }) }, b = { sheet({ species = "Beta" }) } })
+  local f1 = b.byId.p1
+  f1.choice = { action = "fight", move = 1 }
+  ok(b:_selectsAnew(f1, activeMonOf(b, "p1")), "an awake player's FIGHT opens the move menu")
+  f1.choice = { action = "switch", slot = 1 }
+  ok(not b:_selectsAnew(f1, activeMonOf(b, "p1")), "a switch leaves the selection")
+  f1.choice = { action = "fight", move = 1, forcedMove = activeMonOf(b, "p1").moves[1] }
+  ok(not b:_selectsAnew(f1, activeMonOf(b, "p1")), "a forced replay leaves it")
 end
 
 -- ------------------------------------------------------------------

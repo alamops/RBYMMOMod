@@ -159,14 +159,18 @@ test('focus energy raises crit level (no Gen1 bug)', () => {
   );
 });
 
-test('crit roll 0 is the only crit in the ladder window', () => {
+// R2d: `.Tally` compares one BattleRandom byte with the level's
+// CriticalHitChances row (`1 out_of N` = floor(256 / N)) -- the bytes under it
+// crit, every other does not.
+test('the bytes under the CriticalHitChances row are the crits', () => {
   for (let level = 0; level <= 6; level++) {
-    const ch = crit.chance(level);
+    const th = crit.threshold(level);
+    assert.strictEqual(th, Math.floor(256 / crit.chance(level)), `level ${level}: 1 out_of N`);
     let crits = 0;
-    for (let roll = 0; roll < ch; roll++) {
+    for (let roll = 0; roll <= 255; roll++) {
       if (crit.check({ criticalLevel: level, roll }).isCrit) crits++;
     }
-    assert.strictEqual(crits, 1, `level ${level}: exactly one of 0..${ch - 1} is a crit`);
+    assert.strictEqual(crits, th, `level ${level}: ${th} of the 256 bytes are a crit`);
   }
 });
 
@@ -450,7 +454,8 @@ test('Rng LCG matches the Lua twin for a known seed stream', () => {
   };
   assert.strictEqual(stream(12345, 8, (r) => r.below(4)), '1,0,0,1,3,2,2,0', 'K12 below(4)');
   assert.strictEqual(stream(12345, 8, (r) => r.below(17)), '11,13,15,10,3,9,11,15', 'K12 below(17)');
-  assert.strictEqual(stream(12345, 8, (r) => r.damageRoll()), '94,97,97,94,92,95,87,85',
+  // R2d: DamageVariation's loop (a rotated byte, redrawn under 217).
+  assert.strictEqual(stream(12345, 8, (r) => r.damageRoll()), '251,237,234,251,253,240,224,220',
     'K12 damage roll');
   assert.strictEqual(stream(12345, 8, (r) => r.nextInt(0, 99)), '37,84,96,9,39,70,98,36',
     'K12 accuracy roll');
@@ -497,7 +502,8 @@ function applyPrimary2(effectId, user, target) {
 test('gen2 applyPrimary fails foe-targeting effects through a substitute', () => {
   const target = dummyMon2({ species: 'Beta', substitute: 40 });
   const sleep = applyPrimary2(32, dummyMon2(), target);
-  assert.strictEqual(sleep.nothing, true, 'SLEEP_EFFECT vs substitute is nothing');
+  // R2d: SleepTarget's own line, DidntAffect1Text.
+  assert.deepStrictEqual(sleep.messages, ["It didn't affect Beta!"], 'SLEEP_EFFECT vs substitute didn\'t affect');
   assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
 
   const growlTarget = dummyMon2({ species: 'Beta', substitute: 40 });

@@ -328,6 +328,12 @@ const SIDE = {
     return { threshold, proc: input.roll < threshold };
   },
   computerMiss: (input) => ({ miss: input.roll < Effects.COMPUTER_DROP_MISS }),
+  // TryRunningFromBattle's wild odds (Effects.runOdds; the referee's `_tryRun`):
+  // null for a getaway that draws no byte, else a byte at or under them escapes.
+  runOdds: (input) => {
+    const odds = Effects.runOdds(input.playerSpeed, input.enemySpeed, input.attempts);
+    return { odds, escaped: odds === null || input.roll <= odds };
+  },
   apply: (input) => {
     const t = input.target;
     const mon = {

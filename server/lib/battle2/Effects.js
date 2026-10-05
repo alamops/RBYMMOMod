@@ -160,11 +160,38 @@ const NAMES = [
   'EFFECT_MOONLIGHT', // 130
   'EFFECT_LEVEL_DAMAGE', // 131
   'EFFECT_PSYWAVE', // 132
+  // The referee-gaps run's wave 4 (R2d): the status and field scripts and
+  // the SP. DEF stat rows (the Lua twin names each command).
+  'EFFECT_ATTRACT', // 133
+  'EFFECT_BATON_PASS', // 134
+  'EFFECT_BELLY_DRUM', // 135
+  'EFFECT_CONVERSION2', // 136
+  'EFFECT_CURSE', // 137
+  'EFFECT_DESTINY_BOND', // 138
+  'EFFECT_ENCORE', // 139
+  'EFFECT_FORESIGHT', // 140
+  'EFFECT_HEAL_BELL', // 141
+  'EFFECT_MEAN_LOOK', // 142
+  'EFFECT_NIGHTMARE', // 143
+  'EFFECT_PAIN_SPLIT', // 144
+  'EFFECT_PERISH_SONG', // 145
+  'EFFECT_PSYCH_UP', // 146
+  'EFFECT_RAPID_SPIN', // 147
+  'EFFECT_SKETCH', // 148
+  'EFFECT_SPIKES', // 149
+  'EFFECT_SPITE', // 150
+  'EFFECT_SP_DEF_UP_2', // 151
+  'EFFECT_SWAGGER', // 152
+  'EFFECT_TELEPORT', // 153
+  'EFFECT_SP_DEF_UP', // 154
+  'EFFECT_SP_DEF_DOWN', // 155
+  'EFFECT_SP_DEF_DOWN_2', // 156
+  'EFFECT_SKULL_BASH', // 157
 ];
 
 // The last id either table numbers. The wire carries a Gen 1/2 move's effect
 // as a byte (Wire.battleMove, sanitize EFFECT_MAX), so this may grow to 255.
-const MAX_EFFECT_ID = 132;
+const MAX_EFFECT_ID = 157;
 
 // The Gold-native ids by name, for the call sites that branch on one.
 const SP_DEF_DOWN_HIT = 87;
@@ -213,6 +240,31 @@ const SYNTHESIS = 129;
 const MOONLIGHT = 130;
 const LEVEL_DAMAGE = 131;
 const PSYWAVE = 132;
+const ATTRACT = 133;
+const BATON_PASS = 134;
+const BELLY_DRUM = 135;
+const CONVERSION2 = 136;
+const CURSE = 137;
+const DESTINY_BOND = 138;
+const ENCORE = 139;
+const FORESIGHT = 140;
+const HEAL_BELL = 141;
+const MEAN_LOOK = 142;
+const NIGHTMARE = 143;
+const PAIN_SPLIT = 144;
+const PERISH_SONG = 145;
+const PSYCH_UP = 146;
+const RAPID_SPIN = 147;
+const SKETCH = 148;
+const SPIKES = 149;
+const SPITE = 150;
+const SP_DEF_UP_2 = 151;
+const SWAGGER = 152;
+const TELEPORT = 153;
+const SP_DEF_UP = 154;
+const SP_DEF_DOWN = 155;
+const SP_DEF_DOWN_2 = 156;
+const SKULL_BASH = 157;
 
 const CATEGORIES = [
   'none', 'other', 'status_side', 'drain', 'status_side', 'status_side',
@@ -250,6 +302,13 @@ const CATEGORIES = [
   'fixed', 'fixed', 'field', 'field',
   'field', 'charge', 'heal', 'heal',
   'heal', 'fixed', 'fixed',
+  'volatile', 'flow', 'stat', 'meta',
+  'stat', 'volatile', 'volatile', 'volatile',
+  'heal', 'volatile', 'volatile', 'heal',
+  'field', 'stat', 'other', 'meta',
+  'field', 'volatile', 'stat', 'status_primary',
+  'flow', 'stat', 'stat', 'stat',
+  'charge',
 ];
 
 const STAGE_MIN = -6;
@@ -290,7 +349,8 @@ function int(value, fallback) {
 // CHARGE_EFFECT does not run. Gen 2 only moves (Spikes, …) stay unmapped and
 // still no-op honestly. Wave 3 moved SOLARBEAM, LEVEL_DAMAGE, PSYWAVE, the
 // three time-of-day heals and DEFENSE_CURL off these folds onto ids of their
-// own (the Lua twin says why).
+// own (the Lua twin says why). Wave 4 moved SKULL BASH off 39 onto 157 and
+// gave every status / field script a row of its own (133..156), BY_NAME's.
 const GEN2_EFFECT_ID = {
   EFFECT_NORMAL_HIT: 0,
   EFFECT_SLEEP: 32,
@@ -325,7 +385,6 @@ const GEN2_EFFECT_ID = {
   EFFECT_PAY_DAY: 16,
   EFFECT_OHKO: 38,
   EFFECT_RAZOR_WIND: 39,
-  EFFECT_SKULL_BASH: 39,
   EFFECT_SUPER_FANG: 40,
   EFFECT_STATIC_DAMAGE: 41,
   EFFECT_TRAP_TARGET: 42,
@@ -540,9 +599,18 @@ function battleStat(mon, key, badges) {
 const STAT_KEYS = ['atk', 'def', 'spe', 'spa', 'spd'];
 const STAGE_KEYS = ['atk', 'def', 'spe', 'spa', 'spd', 'acc', 'eva'];
 
+// From wave 4, the "pass" order (BATON PASS's PassedBattleMonEntrance, the
+// Lua twin explains): InitBattleMon's status and badge, then the levels.
 function orderedStat(mon, key, badges, order) {
   const stats = mon.stats && typeof mon.stats === 'object' ? mon.stats : {};
   const stages = mon.stages && typeof mon.stages === 'object' ? mon.stages : {};
+  if (order === 'pass') {
+    let base = Math.max(1, int(stats[key], 1));
+    if (key === 'atk' && mon.status === 'burn') base = Status.burnAttack(base);
+    if (key === 'spe' && mon.status === 'paralysis') base = Status.paralysisSpeed(base);
+    base = badgeBoost(base, key, badges, stats.spa);
+    return applyStage(base, stages[key]);
+  }
   let value = applyStage(stats[key], stages[key]);
   if (order === 'load') return value;
   if (key === 'atk' && mon.status === 'burn') value = Status.burnAttack(value);
@@ -718,6 +786,11 @@ const STAT_EFFECTS = {
   61: { stat: 'spa', delta: -2, selfTarget: false },
   62: { stat: 'acc', delta: -2, selfTarget: false },
   63: { stat: 'eva', delta: -2, selfTarget: false },
+  // Gold's SP. DEF rows (wave 4); AMNESIA is the Up2.
+  151: { stat: 'spd', delta: 2, selfTarget: true },
+  154: { stat: 'spd', delta: 1, selfTarget: true },
+  155: { stat: 'spd', delta: -1, selfTarget: false },
+  156: { stat: 'spd', delta: -2, selfTarget: false },
 };
 
 const PHASE1_PRIMARY = {
@@ -729,13 +802,33 @@ const PHASE1_PRIMARY = {
   84: true, 85: true, 86: true,
   103: true, 104: true, 105: true, // LOCK_ON, SAFEGUARD, TOXIC
   115: true, // DEFENSE_CURL
+  // Wave 4: the status scripts on the user and its target alone (the Lua
+  // twin names them).
+  133: true, 135: true, 137: true, 138: true, 140: true,
+  142: true, 143: true, 146: true, 150: true, 151: true,
+  152: true, 154: true, 155: true, 156: true,
 };
 
 // The 0-power Gold scripts Turn runs itself (PROTECT / ENDURE, the weather
-// moves, the time-of-day heals); none runs `checkhit`.
+// moves, the time-of-day heals; from wave 4 BATON PASS, HEAL BELL, PERISH
+// SONG, SKETCH, SPIKES and TELEPORT); none runs `checkhit`.
 const FIELD_MOVES = {
   120: true, 121: true, 124: true, 125: true, 126: true,
   128: true, 129: true, 130: true,
+  134: true, 141: true, 145: true, 148: true, 149: true,
+  153: true,
+};
+
+// The `checkhit` scripts whose command Turn runs after it (wave 4):
+// CONVERSION2, ENCORE, PAIN SPLIT.
+const TURN_COMMANDS = { 136: true, 139: true, 144: true };
+
+// The commands that read wAttackMissed themselves and say their own failure
+// line (the Lua twin lists them).
+const READS_MISS = {
+  32: true, 49: true, 66: true, 67: true, 82: true, 84: true,
+  86: true, 103: true, 105: true, 133: true, 136: true,
+  139: true, 140: true, 144: true, 150: true, 152: true,
 };
 
 // The referee-numbered move scripts with no `checkhit` (the Lua twin lists
@@ -749,14 +842,19 @@ const NO_CHECKHIT = {
   115: true, 119: true, 120: true, 121: true, 122: true,
   123: true, 124: true, 125: true, 126: true, 128: true,
   129: true, 130: true,
+  134: true, 135: true, 137: true, 138: true, 141: true,
+  142: true, 143: true, 145: true, 146: true, 148: true,
+  149: true, 151: true, 153: true, 154: true,
 };
 
 // CheckHit's `.LockOn`: a locked-on target in the sky is still missed by these.
 const LOCK_ON_SKY_MISS = { EARTHQUAKE: true, FISSURE: true, MAGNITUDE: true };
 
-// SLEEP TALK's `.check_two_turn_move`: the effects it never calls.
+// SLEEP TALK's `.check_two_turn_move`: the effects it never calls (SKULL
+// BASH's 157 from wave 4).
 const SLEEP_TALK_EXCLUDED = {
   26: true, 39: true, 43: true, 101: true, 127: true,
+  157: true,
 };
 
 // The scripts with `checksafeguard` after their `checkhit`.
@@ -823,6 +921,46 @@ const SAFEGUARD_TURNS = 5;
 
 // BattleCommand_Transform's `.pp_loop`: 5 PP a copied move (SKETCH 1).
 const TRANSFORM_PP = 5;
+
+// BattleCommand_Mimic's `ld [hl], 5`.
+const MIMIC_PP = 5;
+
+// BattleCommand_Heal's REST: REST_SLEEP_TURNS + 1.
+const REST_SLEEP_COUNT = 3;
+
+// BattleCommand_BellyDrum's AttackUp2s after the first.
+const BELLY_DRUM_CLIMB = 5;
+
+// One move row copied whole (K8's `priority` and `ppUps` with it), the shape
+// MIMIC puts aside (`preMimic`) and Red's twin keeps.
+function copyMoveRow(m) {
+  return {
+    id: m.id || 'move',
+    name: m.name,
+    pp: Math.max(0, int(m.pp, 0)),
+    maxPp: m.maxPp,
+    power: Math.max(0, int(m.power, 0)),
+    accuracy: Math.max(0, int(m.accuracy, 255)),
+    type: Math.max(0, int(m.type, 0)),
+    effect: Math.max(0, int(m.effect, 0)),
+    chance: Math.max(0, int(m.chance, 0)),
+    highCrit: m.highCrit === true,
+    priority: m.priority,
+    ppUps: m.ppUps,
+  };
+}
+
+// A move's base PP, as SKETCH copies it (the Lua twin explains): the smallest
+// base whose PP Ups (floor(base / 5), held at 7, each) reach the row's max.
+function basePp(move) {
+  const top = Math.max(0, int(move.maxPp, int(move.pp, 0)));
+  const ups = int(move.ppUps, 0);
+  if (ups <= 0) return top;
+  for (let base = 1; base <= top; base += 1) {
+    if (base + ups * Math.min(7, Math.floor(base / 5)) === top) return base;
+  }
+  return top;
+}
 
 // Confusion is a volatile, not a major status: it does not occupy `mon.status`
 // and does not persist on the party sheet. The chip is a `confused` flag on
@@ -974,20 +1112,74 @@ function statDownMissLine(targetMon, stat) {
   return 'But it failed';
 }
 
-// Cartridge Substitute blocks foe-targeting primaries (Disable, Mimic, Lock-On
-// ...); the Lua twin lists what it leaves to the commands themselves.
-function blockedBySubstitute(effectId) {
-  const statFx = STAT_EFFECTS[effectId];
-  if (statFx) return false;
-  if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
-      || effectId === 56 || effectId === 57 || effectId === 64 || effectId === 65
-      || effectId === 79 || effectId === 85 || effectId === SAFEGUARD
-      || effectId === 32 || effectId === 49 || effectId === 66 || effectId === 67
-      || effectId === 84 || effectId === TOXIC || effectId === LOCK_ON
-      || effectId === DEFENSE_CURL) {
-    return false;
+// No generic substitute gate (wave 4): every Gold status command asks the
+// substitute itself, where its own code puts the check (the Lua twin lists
+// them).
+
+// The cart's failure lines: FailMove / PrintButItFailed, PrintDidntAffect(2).
+function butItFailed(out) {
+  out.messages.push('But it failed');
+  return out;
+}
+function didntAffect(out, targetMon) {
+  out.messages.push(didntAffectLine(targetMon));
+  return out;
+}
+// FailMove / FailMimic: "But it failed!", or "It failed!" while the target
+// is PROTECTing (FailText_CheckOpponentProtect).
+function failMoveLine(targetMon) {
+  if (targetMon && targetMon.protect) return 'It failed!';
+  return 'But it failed';
+}
+function failMove(out, targetMon) {
+  out.messages.push(failMoveLine(targetMon));
+  return out;
+}
+
+// `.CheckAIRandomFail` and its inlined twins in Poison / Paralyze (the Lua
+// twin cites them): the computer's seat, the target not locked on, one byte
+// under 64 fails.
+function aiRandomFail(c, targetMon) {
+  if (!c.computerMover || targetMon.lockOn) return false;
+  return Boolean(c.rng) && c.rng.byte() < COMPUTER_DROP_MISS;
+}
+
+// RaiseStat with none of its messages (the Lua twin explains). Returns
+// { raised, stage }.
+function raiseStat(mon, badges, stat, delta) {
+  const before = clampStage(mon.stages[stat]);
+  if (before >= STAGE_MAX) return { raised: false, stage: before };
+  let after = Math.min(STAGE_MAX, before + delta);
+  if (stat !== 'acc' && stat !== 'eva'
+      && storedStat(mon, stat, badges) >= MAX_STAT_VALUE) {
+    after -= 1;
+    if (after !== before) setStageKeep(mon, badges, stat, after);
+    return { raised: false, stage: after };
   }
-  return true;
+  mon.stages[stat] = after;
+  dropSnap(mon);
+  return { raised: true, stage: after };
+}
+
+// GetGender for CheckOppositeGender (the Lua twin explains): the Attack and
+// Speed DVs as a byte against the species' BASE_GENDER (`base.gender`,
+// proposed K15), the monster's own under Transform. 'M', 'F' or null.
+const GENDER_F0 = 0;
+const GENDER_F100 = 254;
+const GENDER_UNKNOWN = 255;
+function gender(mon) {
+  if (!mon || !mon.base || typeof mon.base !== 'object') return null;
+  const ratio = int(mon.base.gender, null);
+  if (ratio === null) return null;
+  let dvs = mon.dvs;
+  if (mon.preTransform) dvs = mon.preTransform.dvs;
+  if (!dvs || typeof dvs !== 'object') return null;
+  if (ratio === GENDER_UNKNOWN) return null;
+  if (ratio === GENDER_F0) return 'M';
+  if (ratio === GENDER_F100) return 'F';
+  const byte = (int(dvs.atk, 0) % 16) * 16 + int(dvs.spe, 0) % 16;
+  if (ratio < byte) return 'M';
+  return 'F';
 }
 
 // The HELD_PREVENT_* item's line ("<TARGET>'s protected by <ITEM>!").
@@ -1001,24 +1193,17 @@ function protectedBy(out, targetMon) {
 // rebuild, both "won't rise anymore!". Returns whether the stat rose.
 function raisePrimary(out, fighter, mon, stat, delta) {
   const before = clampStage(mon.stages[stat]);
-  if (before >= STAGE_MAX) {
-    out.messages.push(wontRiseLine(mon, stat));
-    return false;
-  }
-  let after = Math.min(STAGE_MAX, before + delta);
-  const badges = fighter ? fighter.badges : null;
-  if (stat !== 'acc' && stat !== 'eva'
-      && storedStat(mon, stat, badges) >= MAX_STAT_VALUE) {
-    after -= 1;
-    const text = wontRiseLine(mon, stat);
-    if (after !== before) {
-      setStageKeep(mon, badges, stat, after);
-      statEvent(out, fighter, after, text);
-    }
+  const r = raiseStat(mon, fighter ? fighter.badges : null, stat, delta);
+  if (r.raised) {
+    const text = `${mon.species}'s ${STAT_LABELS[stat] || stat} rose`;
     out.messages.push(text);
-    return false;
+    statEvent(out, fighter, r.stage, text);
+    return true;
   }
-  return applyStatChange(out, fighter, mon, stat, after - before);
+  const text = wontRiseLine(mon, stat);
+  if (r.stage !== before) statEvent(out, fighter, r.stage, text);
+  out.messages.push(text);
+  return false;
 }
 
 // BattleCommand_StatDown and its lines for a primary stat-down move that hit.
@@ -1047,12 +1232,14 @@ function lowerPrimary(out, c, fighter, mon, stat, delta) {
 
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
 //      moveIndex (1-based), statusToWire, userScreens, computerMover,
-//      moveKey, moveImmune, poisonType / grassType, fieldMons (the Lua twin
-//      describes each).
+//      moveKey, moveImmune, poisonType / grassType, fieldMons; from wave 4
+//      missed, ghostType, targetSafeguard (the Lua twin describes each, and
+//      the result's `selfDamage`, `trailing`, `failureText` and
+//      `targetMovesChanged`).
 function applyPrimary(ctx) {
   const out = {
     nothing: false, messages: [], events: [], heals: [], costs: [],
-    directDamage: [],
+    directDamage: [], trailing: [],
   };
   const c = ctx || {};
   const effectId = int(c.effectId, 0);
@@ -1062,19 +1249,37 @@ function applyPrimary(ctx) {
   const wire = c.statusToWire || {};
   const targetBadges = targetFighter ? targetFighter.badges : null;
 
-  if (targetMon && (targetMon.substitute || 0) > 0 && blockedBySubstitute(effectId)) {
-    out.nothing = true;
-    return out;
-  }
-
   if (effectId === 85) {
     out.nothing = true;
     return out;
   }
 
+  // BattleCommand_Heal (the Lua twin cites it): "HP is full!" at full HP;
+  // REST sleeps the user (REST_SLEEP_COUNT, toxic gone, stats rebuilt) and
+  // restores the whole max HP, the rest GetHalfMaxHP; "regained health!".
   if (effectId === 56) {
-    const amount = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 2);
+    const maxHp = Math.max(1, int(userMon.maxHp, 1));
+    if (userMon.hp >= maxHp) {
+      out.messages.push(`${userMon.species}'s HP is full!`);
+      return out;
+    }
+    let amount = Math.max(1, Math.floor(maxHp / 2));
+    if (c.moveKey === 'REST') {
+      const had = Boolean(userMon.status);
+      userMon.status = 'sleep';
+      userMon.statusTurns = REST_SLEEP_COUNT;
+      dropSnap(userMon);
+      const text = `${userMon.species}`
+        + (had ? ' fell asleep and became healthy!' : ' went to sleep!');
+      out.messages.push(text);
+      const fields = fighterFields(userFighter);
+      fields.status = wire.sleep || 'SLP';
+      fields.text = text;
+      out.events.push({ kind: 'status', fields });
+      amount = maxHp;
+    }
     out.heals.push({ amount });
+    out.trailing.push(`${userMon.species} regained health!`);
     return out;
   }
 
@@ -1106,12 +1311,18 @@ function applyPrimary(ctx) {
     return lowerPrimary(out, c, targetFighter, targetMon, statFx.stat, statFx.delta);
   }
 
-  // BattleCommand_SleepTarget: HELD_PREVENT_SLEEP first, then the rest.
+  // BattleCommand_SleepTarget, in its order (the Lua twin cites it):
+  // HELD_PREVENT_SLEEP, already asleep, wAttackMissed, the computer's byte,
+  // any other status, a substitute.
   if (effectId === 32) {
     if (Items.prevents(targetMon, 'sleep')) return protectedBy(out, targetMon);
-    if (hasMajorStatus(targetMon) || int(targetMon.substitute, 0) > 0) {
-      out.nothing = true;
+    if (targetMon.status === 'sleep') {
+      out.messages.push(`${targetMon.species}'s already asleep!`);
       return out;
+    }
+    if (c.missed || aiRandomFail(c, targetMon) || hasMajorStatus(targetMon)
+        || int(targetMon.substitute, 0) > 0) {
+      return didntAffect(out, targetMon);
     }
     // `.random_loop`: BattleRandom & SLP_MASK, drawn again on 0 and 7, plus 1:
     // a counter of 2..7 (1..6 turns asleep).
@@ -1140,13 +1351,14 @@ function applyPrimary(ctx) {
       return out;
     }
     if (targetMon.status === 'poison' || targetMon.status === 'toxic') {
-      out.nothing = true;
+      out.messages.push(`${targetMon.species}'s already poisoned!`);
       return out;
     }
     if (Items.prevents(targetMon, 'poison')) return protectedBy(out, targetMon);
-    if (hasMajorStatus(targetMon) || int(targetMon.substitute, 0) > 0) {
-      out.nothing = true;
-      return out;
+    // Any other status, the computer's byte, a substitute, wAttackMissed.
+    if (hasMajorStatus(targetMon) || aiRandomFail(c, targetMon)
+        || int(targetMon.substitute, 0) > 0 || c.missed) {
+      return didntAffect(out, targetMon);
     }
     const toxic = effectId === TOXIC;
     setStatus(targetMon, targetBadges, toxic ? 'toxic' : 'poison');
@@ -1165,10 +1377,11 @@ function applyPrimary(ctx) {
     return out;
   }
 
-  // BattleCommand_Paralyze.
+  // BattleCommand_Paralyze: already paralyzed, a matchup of 0, the item,
+  // then the computer's byte, any other status, wAttackMissed, a substitute.
   if (effectId === 67) {
     if (targetMon.status === 'paralysis') {
-      out.nothing = true;
+      out.messages.push(`${targetMon.species}'s already paralyzed!`);
       return out;
     }
     if (c.moveImmune) {
@@ -1176,9 +1389,9 @@ function applyPrimary(ctx) {
       return out;
     }
     if (Items.prevents(targetMon, 'paralysis')) return protectedBy(out, targetMon);
-    if (hasMajorStatus(targetMon) || int(targetMon.substitute, 0) > 0) {
-      out.nothing = true;
-      return out;
+    if (aiRandomFail(c, targetMon) || hasMajorStatus(targetMon) || c.missed
+        || int(targetMon.substitute, 0) > 0) {
+      return didntAffect(out, targetMon);
     }
     setStatus(targetMon, targetBadges, 'paralysis');
     const token = wire.paralysis || 'PAR';
@@ -1191,21 +1404,25 @@ function applyPrimary(ctx) {
     return out;
   }
 
-  // BattleCommand_Confuse.
+  // BattleCommand_Confuse: the item, already confused, then a substitute or
+  // wAttackMissed (PrintDidntAffect2).
   if (effectId === 49) {
     if (Items.prevents(targetMon, 'confusion')) return protectedBy(out, targetMon);
-    if ((targetMon.confusion || 0) > 0 || int(targetMon.substitute, 0) > 0) {
-      out.nothing = true;
+    if ((targetMon.confusion || 0) > 0) {
+      out.messages.push(`${targetMon.species}'s already confused!`);
       return out;
     }
+    if (int(targetMon.substitute, 0) > 0 || c.missed) return didntAffect(out, targetMon);
     confuse(out, targetFighter, targetMon, rng, true);
     return out;
   }
 
-  // BattleCommand_LeechSeed: a substitute, a Grass type, one already seeded.
+  // BattleCommand_LeechSeed: wAttackMissed or a substitute ("evaded the
+  // attack!"), a Grass type, one already seeded ("evaded" again).
   if (effectId === 84) {
-    if (int(targetMon.substitute, 0) > 0) {
-      out.nothing = true;
+    const evaded = `${targetMon.species} evaded the attack!`;
+    if (c.missed || int(targetMon.substitute, 0) > 0) {
+      out.messages.push(evaded);
       return out;
     }
     if (hasType(targetMon, c.grassType)) {
@@ -1213,7 +1430,7 @@ function applyPrimary(ctx) {
       return out;
     }
     if (targetMon.leechSeed) {
-      out.nothing = true;
+      out.messages.push(evaded);
       return out;
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
@@ -1225,19 +1442,31 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_Disable (the Lua twin cites it): wAttackMissed, a count
+  // running, no LAST_COUNTER_MOVE or STRUGGLE, a slot whose raw PP byte is 0
+  // -- "But it failed!"; else `.loop2`'s 2..8 count.
   if (effectId === 86) {
-    const lastIdx = int(targetMon.lastMoveIndex, 0);
-    if (lastIdx < 1 || !targetMon.moves[lastIdx - 1]) {
-      out.nothing = true;
-      return out;
+    const last = targetMon.lastCounterMove;
+    const running = targetMon.disable && int(targetMon.disable.turns, 0) > 0;
+    if (c.missed || running || !last || moveKey(last) === 'STRUGGLE') {
+      return failMove(out, targetMon);
     }
-    if (targetMon.disable && targetMon.disable.turns && targetMon.disable.turns > 0) {
-      out.nothing = true;
-      return out;
+    let index = null;
+    for (let i = 1; i <= targetMon.moves.length; i += 1) {
+      if (moveKey(targetMon.moves[i - 1]) === moveKey(last)) { index = i; break; }
     }
-    const turns = (rng ? rng.byte() : 0) % 4 + 2;
-    targetMon.disable = { moveIndex: lastIdx, turns };
-    out.messages.push(`${moveLabel(targetMon.moves[lastIdx - 1])} was disabled`);
+    const slotMove = index !== null ? targetMon.moves[index - 1] : null;
+    if (!slotMove || (int(slotMove.pp, 0) <= 0 && int(slotMove.ppUps, 0) <= 0)) {
+      return failMove(out, targetMon);
+    }
+    let count = 0;
+    for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+      const r = (rng ? rng.byte() : 0) % 8;
+      if (r !== 0) { count = r + 1; break; }
+    }
+    if (count === 0) count = 2;
+    targetMon.disable = { moveIndex: index, turns: count };
+    out.messages.push(`${targetMon.species}'s ${moveLabel(slotMove)} was DISABLED!`);
     return out;
   }
 
@@ -1289,12 +1518,10 @@ function applyPrimary(ctx) {
     return out;
   }
 
-  // BattleCommand_LockOn: a substitute fails it, else the TARGET is locked on.
+  // BattleCommand_LockOn: a substitute, then wAttackMissed, fail it, else
+  // the TARGET is locked on.
   if (effectId === LOCK_ON) {
-    if (int(targetMon.substitute, 0) > 0) {
-      out.messages.push(didntAffectLine(targetMon));
-      return out;
-    }
+    if (int(targetMon.substitute, 0) > 0 || c.missed) return didntAffect(out, targetMon);
     targetMon.lockOn = true;
     out.messages.push(`${userMon.species} took aim!`);
     return out;
@@ -1319,32 +1546,39 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_Mimic (the Lua twin cites it): ClearLastMove; wAttackMissed,
+  // a hidden target, no LAST_COUNTER_MOVE or STRUGGLE, a move the user knows
+  // -- "But it failed!"; the copy with 5 PP into the slot holding MIMIC, the
+  // untransformed user's party row put aside (`preMimic`, 1-based slot).
   if (effectId === 82) {
-    const moveIndex = int(c.moveIndex, 0);
-    const lastIdx = int(targetMon.lastMoveIndex, 0);
-    if (lastIdx < 1 || lastIdx > targetMon.moves.length) {
-      out.nothing = true;
-      return out;
+    userMon.lastCounterMove = null;
+    userMon.lastMove = null;
+    out.clearLastMove = true;
+    const last = targetMon.lastCounterMove;
+    if (c.missed || targetMon.invulnerable || !last || moveKey(last) === 'STRUGGLE') {
+      return failMove(out, targetMon);
     }
-    const source = targetMon.moves[lastIdx - 1];
-    if (!source) {
-      out.nothing = true;
-      return out;
+    const key = moveKey(last);
+    let slot = null;
+    for (let i = 1; i <= userMon.moves.length; i += 1) {
+      if (moveKey(userMon.moves[i - 1]) === key) return failMove(out, targetMon);
     }
-    userMon.moves[moveIndex - 1] = {
-      id: source.id || 'move',
-      // The copy is narrated under the same name the original was, so a
-      // mimicked move does not revert to its slug on the learner's screen.
-      name: source.name,
-      pp: Math.max(0, int(source.pp, 0)),
-      power: Math.max(0, int(source.power, 0)),
-      accuracy: Math.max(0, int(source.accuracy, 255)),
-      type: Math.max(0, int(source.type, 0)),
-      effect: Math.max(0, int(source.effect, 0)),
-      chance: Math.max(0, int(source.chance, 0)),
-      highCrit: source.highCrit === true,
-    };
-    out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
+    // `cp MIMIC` by id, or a modded move with Mimic's own command.
+    for (let i = userMon.moves.length; i >= 1; i -= 1) {
+      const m = userMon.moves[i - 1];
+      if (moveKey(m) === 'MIMIC' || int(m.effect, 0) === 82) { slot = i; break; }
+    }
+    if (slot === null) return failMove(out, targetMon);
+    if (!userMon.transformed) {
+      userMon.preMimic = userMon.preMimic || {};
+      if (!userMon.preMimic[slot]) userMon.preMimic[slot] = copyMoveRow(userMon.moves[slot - 1]);
+    }
+    const copy = copyMoveRow(last);
+    copy.pp = MIMIC_PP;
+    copy.maxPp = MIMIC_PP;
+    copy.ppUps = undefined;
+    userMon.moves[slot - 1] = copy;
+    out.messages.push(`${userMon.species} learned ${moveLabel(last)}!`);
     out.movesChanged = true;
     return out;
   }
@@ -1356,6 +1590,7 @@ function applyPrimary(ctx) {
   // levels; what the user was kept in `preTransform`.
   if (effectId === 57) {
     userMon.lastCounterMove = null;
+    userMon.lastMove = null;
     out.clearLastMove = true;
     if (targetMon.transformed || targetMon.invulnerable) {
       out.messages.push('But it failed');
@@ -1413,6 +1648,177 @@ function applyPrimary(ctx) {
     snapStats(userMon, userFighter ? userFighter.badges : null, battleStats);
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
     out.movesChanged = true;
+    return out;
+  }
+
+  // BattleCommand_Attract (the Lua twin cites it): wAttackMissed, the
+  // genders (`gender`), a hidden target, one already in love -- "But it
+  // failed!"; else in love with the user's seat.
+  if (effectId === ATTRACT) {
+    const mine = gender(userMon);
+    const theirs = gender(targetMon);
+    if (c.missed || !mine || !theirs || mine === theirs
+        || targetMon.invulnerable || targetMon.inLove) {
+      return failMove(out, targetMon);
+    }
+    targetMon.inLove = { fromSlot: userFighter ? userFighter.slot : null };
+    out.messages.push(`${targetMon.species} fell in love!`);
+    return out;
+  }
+
+  // BattleCommand_BellyDrum, the cart's bug kept (the Lua twin explains):
+  // AttackUp2 first, then the HP check keeping the two stages, then the half
+  // off the HP and five more AttackUp2s.
+  if (effectId === BELLY_DRUM) {
+    const badges = userFighter ? userFighter.badges : null;
+    const before = clampStage(userMon.stages.atk);
+    const first = raiseStat(userMon, badges, 'atk', 2);
+    let after = first.stage;
+    const half = Math.max(1, Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 2));
+    if (!first.raised || userMon.hp <= half) {
+      if (after !== before) statEvent(out, userFighter, after, undefined);
+      return butItFailed(out);
+    }
+    out.selfDamage = half;
+    for (let i = 0; i < BELLY_DRUM_CLIMB; i += 1) {
+      const r = raiseStat(userMon, badges, 'atk', 2);
+      after = r.stage;
+      if (!r.raised) break;
+    }
+    const text = `${userMon.species} cut its HP and maximized ATTACK!`;
+    statEvent(out, userFighter, after, text);
+    out.trailing.push(text);
+    return out;
+  }
+
+  // BattleCommand_Curse (the Lua twin cites it): a GHOST user curses the
+  // target for half its own max HP; any other trades a Speed stage (whose
+  // TryLowerStat rebuilds the OPPONENT's battle stats) for Attack and Defense.
+  if (effectId === CURSE) {
+    if (hasType(userMon, c.ghostType)) {
+      if (targetMon.invulnerable || int(targetMon.substitute, 0) > 0 || targetMon.cursed) {
+        return butItFailed(out);
+      }
+      targetMon.cursed = true;
+      out.selfDamage = Math.max(1, Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 2));
+      out.trailing.push(`${userMon.species} cut its own HP and put a CURSE on ${targetMon.species}!`);
+      return out;
+    }
+    if (clampStage(userMon.stages.atk) >= STAGE_MAX
+        && clampStage(userMon.stages.def) >= STAGE_MAX) {
+      out.messages.push(`${userMon.species}'s ABILITY won't rise anymore!`);
+      return out;
+    }
+    const badges = userFighter ? userFighter.badges : null;
+    const speed = clampStage(userMon.stages.spe);
+    if (speed > STAGE_MIN && storedStat(userMon, 'spe', badges) > 1) {
+      userMon.stages.spe = speed - 1;
+      dropSnap(targetMon);
+      dropSnap(userMon);
+      const text = `${userMon.species}'s SPEED fell`;
+      out.messages.push(text);
+      statEvent(out, userFighter, speed - 1, text);
+    }
+    for (const stat of ['atk', 'def']) {
+      const r = raiseStat(userMon, badges, stat, 1);
+      if (r.raised) {
+        const text = `${userMon.species}'s ${STAT_LABELS[stat]} rose`;
+        out.messages.push(text);
+        statEvent(out, userFighter, r.stage, text);
+      }
+    }
+    return out;
+  }
+
+  // BattleCommand_DestinyBond: no check at all.
+  if (effectId === DESTINY_BOND) {
+    userMon.destinyBond = true;
+    out.messages.push(`${userMon.species}'s trying to take its opponent with it!`);
+    return out;
+  }
+
+  // BattleCommand_Foresight: wAttackMissed, a hidden target, one identified.
+  if (effectId === FORESIGHT) {
+    if (c.missed || targetMon.invulnerable || targetMon.identified) return failMove(out, targetMon);
+    targetMon.identified = true;
+    out.messages.push(`${userMon.species} identified ${targetMon.species}!`);
+    return out;
+  }
+
+  // BattleCommand_ArenaTrap: a hidden target, a user already holding a foe.
+  if (effectId === MEAN_LOOK) {
+    if (targetMon.invulnerable || userMon.meanLook) return butItFailed(out);
+    userMon.meanLook = { slot: targetFighter ? targetFighter.slot : null };
+    out.messages.push(`${targetMon.species} can't escape now!`);
+    return out;
+  }
+
+  // BattleCommand_Nightmare: hidden, a substitute, awake, already one.
+  if (effectId === NIGHTMARE) {
+    if (targetMon.invulnerable || int(targetMon.substitute, 0) > 0
+        || targetMon.status !== 'sleep' || targetMon.nightmare) {
+      return butItFailed(out);
+    }
+    targetMon.nightmare = true;
+    out.messages.push(`${targetMon.species} started to have a NIGHTMARE!`);
+    return out;
+  }
+
+  // BattleCommand_PsychUp: a target at every base level fails; else the
+  // levels copied and the user's stats rebuilt.
+  if (effectId === PSYCH_UP) {
+    let any = false;
+    for (const key of STAGE_KEYS) {
+      if (clampStage(targetMon.stages[key]) !== 0) any = true;
+    }
+    if (!any) return butItFailed(out);
+    for (const key of STAGE_KEYS) userMon.stages[key] = clampStage(targetMon.stages[key]);
+    dropSnap(userMon);
+    out.messages.push(`${userMon.species} copied the stat changes of ${targetMon.species}!`);
+    return out;
+  }
+
+  // BattleCommand_Spite: wAttackMissed, no LAST_COUNTER_MOVE or STRUGGLE, a
+  // slot with no PP -- PrintDidntAffect2; else 2..5 PP off it.
+  if (effectId === SPITE) {
+    const last = targetMon.lastCounterMove;
+    if (c.missed || !last || moveKey(last) === 'STRUGGLE') return didntAffect(out, targetMon);
+    let slotMove = null;
+    for (const m of targetMon.moves) {
+      if (moveKey(m) === moveKey(last)) { slotMove = m; break; }
+    }
+    if (!slotMove || int(slotMove.pp, 0) <= 0) return didntAffect(out, targetMon);
+    let amount = (rng ? rng.byte() : 0) % 4 + 2;
+    if (slotMove.pp < amount) amount = slotMove.pp;
+    slotMove.pp -= amount;
+    out.targetMovesChanged = true;
+    out.messages.push(`${targetMon.species}'s ${moveLabel(slotMove)} was reduced by ${amount}!`);
+    return out;
+  }
+
+  // SWAGGER: attackup2 on the target, whose failure (+6, 999) is the
+  // script's `failuretext` (no confusion); else `confusetarget`, silent on
+  // the item, the target's SAFEGUARD, a substitute and a confusion.
+  if (effectId === SWAGGER) {
+    if (c.missed) {
+      out.failureText = true;
+      return out;
+    }
+    const before = clampStage(targetMon.stages.atk);
+    const r = raiseStat(targetMon, targetBadges, 'atk', 2);
+    if (!r.raised) {
+      if (r.stage !== before) statEvent(out, targetFighter, r.stage, undefined);
+      out.failureText = true;
+      return out;
+    }
+    const text = `${targetMon.species}'s ATTACK rose`;
+    out.messages.push(text);
+    statEvent(out, targetFighter, r.stage, text);
+    if (Items.prevents(targetMon, 'confusion') || c.targetSafeguard
+        || int(targetMon.substitute, 0) > 0 || int(targetMon.confusion, 0) > 0) {
+      return out;
+    }
+    confuse(out, targetFighter, targetMon, rng, false);
     return out;
   }
 
@@ -2001,7 +2407,8 @@ function timeHealAmount(maxHp, timeMatches, weather) {
 
 function isCharge(effectId) {
   const id = int(effectId, 0);
-  return id === 39 || id === 43 || id === SKY_ATTACK || id === SOLARBEAM;
+  return id === 39 || id === 43 || id === SKY_ATTACK || id === SOLARBEAM
+    || id === SKULL_BASH;
 }
 
 function isFly(effectId) {
@@ -2475,6 +2882,7 @@ module.exports = {
   setStatusOn,
   statEvent,
   didntAffectLine,
+  failMoveLine,
   mistLine,
   wontDropLine,
   wontRiseLine,
@@ -2552,6 +2960,12 @@ module.exports = {
   FALSE_SWIPE, FUTURE_SIGHT, PROTECT, ENDURE, COUNTER, MIRROR_COAT,
   RAIN_DANCE, SUNNY_DAY, SANDSTORM, SOLARBEAM, MORNING_SUN, SYNTHESIS,
   MOONLIGHT, LEVEL_DAMAGE, PSYWAVE,
+  ATTRACT, BATON_PASS, BELLY_DRUM, CONVERSION2, CURSE, DESTINY_BOND, ENCORE,
+  FORESIGHT, HEAL_BELL, MEAN_LOOK, NIGHTMARE, PAIN_SPLIT, PERISH_SONG,
+  PSYCH_UP, RAPID_SPIN, SKETCH, SPIKES, SPITE, SP_DEF_UP_2, SWAGGER, TELEPORT,
+  SP_DEF_UP, SP_DEF_DOWN, SP_DEF_DOWN_2, SKULL_BASH,
+  TURN_COMMANDS, READS_MISS, MIMIC_PP, REST_SLEEP_COUNT, BELLY_DRUM_CLIMB,
+  GENDER_F0, GENDER_F100, GENDER_UNKNOWN, gender, raiseStat, copyMoveRow, basePp,
   FIELD_MOVES, HIT_FIRST, ROLL_AFTER_CHECKHIT, ROLLOUT_MAX,
   BASE_HAPPINESS, happinessPower, frustrationPower,
   HIDDEN_POWER_TYPES, hiddenPower, REVERSAL_POWER, reversalPower,

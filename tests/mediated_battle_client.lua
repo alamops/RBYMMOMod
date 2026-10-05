@@ -4139,4 +4139,450 @@ do
   eq(fight.mine[1].moves[1].id, "EMBER", "overlay: ...and never writes the sheet")
 end
 
+-- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: wave 4 (task C2b)
+-- ------------------------------------------------------------------
+--
+-- Gold's SKETCH written home (fights against the computer, our own seat);
+-- Red's MIMIC pick off the foe's list and its slot's PP; a TOXIC saved as
+-- PSN; Gold's wTimeOfDay on the ruleset; Gold's weather off its lines; the
+-- trainer's whole name; FIGHT with no move list during a Gold Bide and a Red
+-- monster asleep.  Every number and move row here is invented.
+
+-- A recording transport the screen can send on.
+local function recorder()
+  local sent = {}
+  return {
+    sent = sent,
+    isReady = function() return true end,
+    send = function(_, msgType, payload)
+      sent[#sent + 1] = { t = msgType, p = payload }
+      return true
+    end,
+  }
+end
+local function choicesOf(transport)
+  local out = {}
+  for _, m in ipairs(transport.sent) do
+    if m.t == Wire.BATTLE_CHOICE then out[#out + 1] = m.p end
+  end
+  return out
+end
+local function screenFor(game, mode, battle, opts)
+  opts = opts or {}
+  local transport = recorder()
+  local fight = Mediated.new({ transport = transport, game = game, battle = battle,
+    role = "host", mode = mode, peerId = "npc", trainer = opts.trainer,
+    wildParty = opts.wildParty, npcParty = opts.npcParty, peerName = opts.peerName })
+  fight:start(game)
+  local seq = 0
+  local function ev(fields)
+    seq = seq + 1
+    fields.battle, fields.seq = battle, seq
+    fight:onEvent(fields)
+  end
+  return fight, ev, transport
+end
+
+-- An invented Gold move table with a SKETCH in it.
+local SKETCH_DATA = setmetatable({
+  moves = {
+    SKETCH = { name = "SKETCH", power = 0, accuracy = 100, type = "NORMAL", pp = 1,
+               effect = "EFFECT_SKETCH" },
+    TACKLE = { name = "TACKLE", power = 35, accuracy = 95, type = "NORMAL", pp = 30 },
+    SPORE = { name = "SPORE", power = 0, accuracy = 100, type = "NORMAL", pp = 13,
+              effect = "EFFECT_SLEEP" },
+    GROWL = { name = "GROWL", power = 0, accuracy = 100, type = "NORMAL", pp = 40 },
+    BIDE = { name = "BIDE", power = 0, accuracy = 100, type = "NORMAL", pp = 9,
+             effect = "EFFECT_BIDE" },
+  },
+  items = GOLD_ITEMS,
+  pokemon = { CHARMANDER = DATA.pokemon.CHARMANDER, SQUIRTLE = DATA.pokemon.SQUIRTLE },
+}, { __index = DATA })
+
+local function painter()
+  local m = goldMon("CHARMANDER", nil, 4321)
+  m.moves = { { id = "TACKLE", pp = 20, maxPp = 30 },
+              { id = "SKETCH", pp = 1, maxPp = 1, ppUps = 2 } }
+  return m
+end
+local TACKLE20 = { id = "TACKLE", pp = 20, maxPp = 30 }
+
+-- ------- SKETCH, written home (Gold, 1v1 screen)
+do
+  local m = painter()
+  local game = goldGame({ m }, SKETCH_DATA)
+  local fight, ev = screenFor(game, "wild", "sk")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  -- SKETCH's own PP spend first (ids unchanged), then the sketch.
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { TACKLE20, { id = "SKETCH", pp = 0, maxPp = 1 } } })
+  eq(m.moves[2].id, "SKETCH", "SKETCH home: a PP spend is not a sketch")
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { TACKLE20, { id = "SPORE", pp = 13, maxPp = 13 } } })
+  eq(m.moves[2].id, "SPORE", "SKETCH home: the party monster's SKETCH slot takes the move (BattleCommand_Sketch .user_trainer)")
+  eq(m.moves[2].pp, 13, "SKETCH home: ...at the referee's PP, the move's base")
+  eq(m.moves[2].maxPp, 13, "SKETCH home: ...out of the move's base PP")
+  eq(m.moves[2].ppUps, nil, "SKETCH home: ...and the slot's PP Ups are gone (the bare base PP byte)")
+  eq(m.moves[1].id, "TACKLE", "SKETCH home: every other slot is untouched")
+  eq(fight.mine[1].moves[2].id, "SPORE", "SKETCH home: the sheet takes the move too")
+  eq(fight.mine[1].moves[2].effect, need("BattleSim2/Effects").idOf("EFFECT_SLEEP"),
+     "SKETCH home: ...rebuilt off the record (its effect), as the upload described every move")
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { TACKLE20, { id = "SPORE", pp = 12, maxPp = 13 } } })
+  eq(fight.mine[1].moves[2].pp, 12, "SKETCH home: a later spend of the sketched move lands on the sheet")
+
+  -- A link fight never writes home (the cart refuses SKETCH there).
+  local linked = painter()
+  local lgame = goldGame({ linked }, SKETCH_DATA)
+  local _, lev = screenFor(lgame, "1v1", "skl")
+  lev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  lev({ t = "moves", slot = 0, side = "a", mon = 0,
+        moves = { TACKLE20, { id = "SPORE", pp = 13, maxPp = 13 } } })
+  eq(linked.moves[2].id, "SKETCH", "SKETCH home: a fight between players writes nothing home")
+
+  -- A TRANSFORM (no `mon`) is an overlay, never written home -- even one
+  -- whose list differs from the party only in the SKETCH slot.
+  local worn = painter()
+  local wgame = goldGame({ worn }, SKETCH_DATA)
+  local wf, wev = screenFor(wgame, "wild", "skt")
+  wev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  wev({ t = "moves", slot = 0, side = "a",
+        moves = { { id = "TACKLE", pp = 5, maxPp = 5 }, { id = "GROWL", pp = 5, maxPp = 5 } } })
+  eq(worn.moves[2].id, "SKETCH", "SKETCH home: a TRANSFORM overlay is not written home")
+  eq(wf.liveMoves and wf.liveMoves[2].id, "GROWL", "SKETCH home: ...it is what FIGHT reads")
+  -- ...and a PP spend under it (ids unchanged against the overlay) neither.
+  wev({ t = "moves", slot = 0, side = "a", mon = 0,
+        moves = { { id = "TACKLE", pp = 4, maxPp = 5 }, { id = "GROWL", pp = 5, maxPp = 5 } } })
+  eq(worn.moves[1].pp, 20, "SKETCH home: a spend under the overlay leaves the party alone")
+
+  -- The cart's bug: a TRANSFORMed user that copied a SKETCH may use it, and
+  -- the party's slot it writes is the battle list's SKETCH slot.
+  local bug = painter()
+  bug.moves[1] = { id = "GROWL", pp = 40, maxPp = 40 }
+  bug.moves[2] = { id = "TACKLE", pp = 30, maxPp = 30 }
+  local bgame = goldGame({ bug }, SKETCH_DATA)
+  local _, bev = screenFor(bgame, "wild", "skb")
+  bev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  bev({ t = "moves", slot = 0, side = "a",
+        moves = { { id = "SKETCH", pp = 1, maxPp = 1 }, { id = "TACKLE", pp = 5, maxPp = 5 } } })
+  bev({ t = "moves", slot = 0, side = "a", mon = 0,
+        moves = { { id = "SPORE", pp = 13, maxPp = 13 }, { id = "TACKLE", pp = 5, maxPp = 5 } } })
+  eq(bug.moves[1].id, "SPORE", "SKETCH home (the TRANSFORM bug): the party slot under the copied SKETCH takes it")
+  eq(bug.moves[2].pp, 30, "SKETCH home (the TRANSFORM bug): ...and nothing else of the copies")
+
+  -- The referee's own reading of that bug (BattleSim2 Turn `_sketch`): the
+  -- copies are stated as an overlay (no `mon`), and the party list Transform
+  -- put aside -- the sketched move in it -- once Transform is undone, behind
+  -- the faint: that list is the one written home.
+  local bug2 = painter()
+  local b2game = goldGame({ bug2 }, SKETCH_DATA)
+  local b2f, b2ev = screenFor(b2game, "wild", "skb2")
+  b2ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  b2ev({ t = "moves", slot = 0, side = "a",
+         moves = { { id = "GROWL", pp = 5, maxPp = 5 }, { id = "SPORE", pp = 13, maxPp = 13 } } })
+  eq(bug2.moves[2].id, "SKETCH", "SKETCH home (TRANSFORMed): the overlay alone writes nothing")
+  b2ev({ t = "faint", slot = 0, side = "a", text = "CHARMANDER", amount = 0 })
+  b2ev({ t = "moves", slot = 0, side = "a", mon = 0,
+         moves = { TACKLE20, { id = "SPORE", pp = 13, maxPp = 13 } } })
+  eq(bug2.moves[2].id, "SPORE", "SKETCH home (TRANSFORMed): the party list stated behind the faint is written home")
+  eq(b2f.mine[1].moves[2].id, "SPORE", "SKETCH home (TRANSFORMed): ...and the sheet")
+
+  -- Red has no SKETCH to write.
+  eq(Mediated.sketchHome(gameWith({}, K_RED), "wild", { { id = "SKETCH" } },
+       { { id = "TACKLE" } }, { moves = { { id = "SKETCH" } } }), nil,
+     "SKETCH home: Red never writes one")
+  -- Two slots changed is not a sketch.
+  eq(Mediated.sketchedSlots(game, { { id = "SKETCH" }, { id = "GROWL" } },
+       { { id = "SPORE" }, { id = "TACKLE" } }), nil,
+     "SKETCH home: a list that differs past the SKETCH slot is not one")
+end
+
+-- ------- Red's MIMIC: its slot's PP is MIMIC's own
+local K_MIMIC = setmetatable({ moves = setmetatable({
+  MIMIC = { name = "MIMIC", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+            effect = "MIMIC_EFFECT" },
+}, { __index = K_RED.moves }) }, { __index = K_RED })
+do
+  local copycat = mon("CHARMANDER", { moves = { { id = "MIMIC", pp = 10 }, { id = "TACKLE", pp = 30 } } })
+  local game = gameWith({ copycat }, K_MIMIC)
+  local fight, ev = screenFor(game, "wild", "mp")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { { id = "MIMIC", pp = 9, maxPp = 10 }, { id = "TACKLE", pp = 30, maxPp = 35 } } })
+  ev({ t = "moves", slot = 0, side = "a",
+       moves = { { id = "EMBER", pp = 9, maxPp = 10 }, { id = "TACKLE", pp = 30, maxPp = 35 } } })
+  check(fight.liveMovesMimic == true, "MIMIC PP (Red): the overlay is read as a MIMIC")
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { { id = "EMBER", pp = 8, maxPp = 10 }, { id = "TACKLE", pp = 30, maxPp = 35 } } })
+  eq(fight.liveMoves[1].pp, 8, "MIMIC PP (Red): FIGHT shows the mimicked move's PP")
+  eq(fight.mine[1].moves[1].id, "MIMIC", "MIMIC PP (Red): the sheet keeps MIMIC")
+  eq(fight.mine[1].moves[1].pp, 8, "MIMIC PP (Red): ...and pays its PP (pokered DecrementPP spends the party's slot)")
+  -- A TRANSFORM spends none of the party's (DecrementPP returns while TRANSFORMED).
+  ev({ t = "moves", slot = 0, side = "a",
+       moves = { { id = "GROWL", pp = 5, maxPp = 5 }, { id = "EMBER", pp = 5, maxPp = 5 } } })
+  check(fight.liveMovesMimic == false, "MIMIC PP (Red): a TRANSFORM overlay is not a MIMIC")
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { { id = "GROWL", pp = 4, maxPp = 5 }, { id = "EMBER", pp = 5, maxPp = 5 } } })
+  eq(fight.mine[1].moves[1].pp, 8, "MIMIC PP (Red): a spend under TRANSFORM leaves the sheet alone")
+  -- A TRANSFORM whose copies differ from the party only in the MIMIC slot
+  -- (a mirror match through METRONOME) is still no MIMIC: its PP are the
+  -- copies' 5, not the party's.
+  eq(Mediated.mimicOverlay(game, { { id = "MIMIC", pp = 9 }, { id = "TACKLE", pp = 30 } },
+       { { id = "EMBER", pp = 5 }, { id = "TACKLE", pp = 5 } }), false,
+     "MIMIC PP (Red): a TRANSFORM matching all but the MIMIC slot is told apart by its PP")
+  eq(Mediated.mimicOverlay(game, { { id = "GROWL", pp = 9 }, { id = "TACKLE", pp = 30 } },
+       { { id = "EMBER", pp = 9 }, { id = "TACKLE", pp = 30 } }), false,
+     "MIMIC PP (Red): a slot that was not MIMIC changing is no MIMIC")
+  -- Gold's party never pays for a mimicked move (CheckMimicUsed).
+  local gm = goldMon("CHARMANDER", nil, 4321)
+  gm.moves = { { id = "MIMIC", pp = 10, maxPp = 10 }, { id = "TACKLE", pp = 30, maxPp = 30 } }
+  local ggame = goldGame({ gm }, setmetatable({ moves = K_MIMIC.moves }, { __index = SKETCH_DATA }))
+  local gf, gev = screenFor(ggame, "wild", "mpg")
+  gev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  gev({ t = "moves", slot = 0, side = "a",
+        moves = { { id = "EMBER", pp = 5, maxPp = 5 }, { id = "TACKLE", pp = 30, maxPp = 30 } } })
+  check(gf.liveMovesMimic == true, "MIMIC PP (Gold): the overlay is read as a MIMIC (the copy at 5 PP)")
+  gev({ t = "moves", slot = 0, side = "a", mon = 0,
+        moves = { { id = "EMBER", pp = 4, maxPp = 5 }, { id = "TACKLE", pp = 30, maxPp = 30 } } })
+  eq(gf.mine[1].moves[1].pp, 10, "MIMIC PP (Gold): the party's MIMIC pays nothing for the mimicked move (CheckMimicUsed)")
+  gev({ t = "moves", slot = 0, side = "a", mon = 0,
+        moves = { { id = "EMBER", pp = 4, maxPp = 5 }, { id = "TACKLE", pp = 29, maxPp = 30 } } })
+  eq(gf.mine[1].moves[2].pp, 29, "MIMIC PP (Gold): ...while its other slots' spends still reach the party")
+  eq(gf.mine[1].moves[1].pp, 10, "MIMIC PP (Gold): ...and MIMIC's stays")
+end
+
+-- ------- Red's MIMIC pick
+do
+  local copycat = mon("CHARMANDER", { moves = { { id = "MIMIC", pp = 10 }, { id = "TACKLE", pp = 30 } } })
+  local game = gameWith({ copycat }, K_MIMIC)
+  local foe = Mediated.snapshotMons(game, { mon("SQUIRTLE", { moves = {
+    { id = "GROWL", pp = 40 }, { id = "EMBER", pp = 25 } } }) })
+  local fight, ev, transport = screenFor(game, "wild", "mk", { wildParty = foe })
+  local FOE = Config.COOP_SIDE
+  ev({ t = "send", slot = FOE, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  local input = fakeInput()
+  fight.lines, fight.shown, fight.anim = {}, nil, nil
+  fight.phase = "move"
+  fight.cursor = 1
+  input.press("a")
+  fight:updateMoveMenu(input)
+  eq(fight.phase, "mimic", "MIMIC pick (Red): MIMIC opens the foe's move list first")
+  eq(#choicesOf(transport), 0, "MIMIC pick (Red): ...and sends nothing yet")
+  local rows = fight:mimicRows()
+  eq(#rows, 2, "MIMIC pick (Red): the list is the foe's moves")
+  eq(rows[2] and rows[2].label, "EMBER", "MIMIC pick (Red): ...by name")
+  input.press("b")
+  fight:updateMimic(input)
+  eq(fight.phase, "move", "MIMIC pick (Red): B goes back to the move list")
+  input.press("a")
+  fight:updateMoveMenu(input)
+  input.press("down")
+  fight:updateMimic(input)
+  input.press("a")
+  fight:updateMimic(input)
+  local sent = choicesOf(transport)
+  eq(#sent, 1, "MIMIC pick (Red): the pick sends the choice")
+  eq(sent[1] and sent[1].move, 0, "MIMIC pick (Red): ...MIMIC's slot")
+  eq(sent[1] and sent[1].mimic, 1, "MIMIC pick (Red): ...with the foe's second move, 0-based (choice.mimic)")
+  check(sent[1] and Wire.battleChoice(sent[1], 1) ~= nil, "MIMIC pick (Red): ...which a Red hub reads")
+  -- The foe's own TRANSFORM / MIMIC list is the one listed.
+  ev({ t = "moves", slot = FOE, side = "b", moves = { { id = "TACKLE", pp = 5 } } })
+  eq(fight:mimicRows()[1].label, "TACKLE", "MIMIC pick (Red): a foe's TRANSFORM list is what it holds now")
+  -- A link fight asks nothing (the cart picks at random for both sides).
+  local lgame = gameWith({ mon("CHARMANDER", { moves = { { id = "MIMIC", pp = 10 } } }) }, K_MIMIC)
+  local lf, lev, lt = screenFor(lgame, "1v1", "mkl", { wildParty = foe })
+  lev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  check(lf:pickMove(1), "MIMIC pick (Red link): MIMIC sends at once")
+  eq(choicesOf(lt)[1] and choicesOf(lt)[1].mimic, nil, "MIMIC pick (Red link): ...with no pick")
+  -- Gold's MIMIC copies the last move with no menu.
+  local gm = goldMon("CHARMANDER", nil, 4321)
+  gm.moves = { { id = "MIMIC", pp = 10, maxPp = 10 } }
+  local gg = goldGame({ gm }, setmetatable({ moves = K_MIMIC.moves }, { __index = SKETCH_DATA }))
+  local gf, gev = screenFor(gg, "wild", "mkg", { wildParty = foe })
+  gev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  check(gf:pickMove(1), "MIMIC pick (Gold): no pick is asked")
+end
+
+-- ------- a TOXIC is saved as PSN (Red / Gold)
+do
+  local red = mon("CHARMANDER")
+  local game = gameWith({ red }, K_RED)
+  local fight, ev = screenFor(game, "wild", "tx")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  ev({ t = "status", slot = 0, side = "a", status = "TOX" })
+  eq(red.status, "PSN", "TOX (Red): the party's status byte holds PSN (BADLY_POISONED is a battle flag)")
+  eq(fight.mine[1].status, "TOX", "TOX (Red): ...the fight's own sheet keeps the referee's TOX")
+  local gold = goldMon("CHARMANDER", nil, 4321)
+  local ggame = goldGame({ gold })
+  local _, gev = screenFor(ggame, "wild", "txg")
+  gev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  gev({ t = "status", slot = 0, side = "a", status = "TOX" })
+  eq(gold.status, "PSN", "TOX (Gold): PSN too (SUBSTATUS_TOXIC is a battle flag)")
+  eq(Mediated.partyStatus12("TOX", 3), "TOX", "TOX: Gen 3 keeps its own (STATUS1_TOXIC_POISON)")
+  eq(Mediated.partyStatus12("BRN", 1), "BRN", "TOX: every other token passes through")
+end
+
+-- ------- Gold's wTimeOfDay on the ruleset
+do
+  local saved = stubMod.world
+  local ow = { timeOfDayId = function() return 2 end }
+  stubMod.world = { overworld = function() return ow end }
+  local gold = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  local ruleset = Mediated.snapshotRuleset(gold)
+  eq(ruleset.timeOfDay, "nite", "timeOfDay: the engine battle's wTimeOfDay (World:timeOfDayId 2 = NITE_F)")
+  local packed = Wire.battleRuleset(ruleset, 2)
+  eq(packed and packed.timeOfDay, "nite", "timeOfDay: ...which a Gold hub reads")
+  ow = { tod = "MORN" }
+  eq(Mediated.timeOfDay2(gold), "morn", "timeOfDay: the overworld's clock word when it has no id")
+  ow = { hour = function() return 12 end }
+  local okP, Palettes = pcall(require, "src.world.gen2.Palettes")
+  if okP and type(Palettes) == "table" and Palettes.clockDaytime then
+    eq(Mediated.timeOfDay2(gold), (Palettes.clockDaytime(12)):lower(),
+       "timeOfDay: ...else the clock EvolveFx reads, at the overworld's hour")
+  end
+  ow = nil
+  eq(Mediated.timeOfDay2(gold), nil, "timeOfDay: no overworld states none (the referee's own-time reading)")
+  ow = { timeOfDayId = function() return 2 end }
+  eq(Mediated.snapshotRuleset(gameWith({}, K_RED)).timeOfDay, nil, "timeOfDay: Red has no clock")
+  stubMod.world = saved
+end
+
+-- ------- Gold's weather, off the referee's lines
+do
+  local Effects2 = need("BattleSim2/Effects")
+  local game = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  local fight, ev = screenFor(game, "wild", "wx")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  local function drain() for _ = 1, 40 do fight:update(2.0) end end
+  drain()
+  ev({ t = "msg", text = Effects2.WEATHER_LINES.rain.start })
+  eq(fight.weatherShown, nil, "weather (Gold): the sky waits for its line")
+  drain()
+  eq(fight.weatherShown, "RAIN", "weather (Gold): RAIN DANCE's line brings the rain")
+  ev({ t = "msg", text = Effects2.WEATHER_LINES.sandstorm.continues })
+  drain()
+  eq(fight.weatherShown, "SAND", "weather (Gold): a continuation names the sky too")
+  ev({ t = "msg", text = Effects2.WEATHER_LINES.sandstorm.ended })
+  drain()
+  eq(fight.weatherShown, nil, "weather (Gold): the end clears it")
+  eq(Mediated.weatherOfLine2("CHARMANDER used TACKLE"), nil, "weather (Gold): any other line names nothing")
+  -- Red never reads one, whatever the line.
+  local red = gameWith({ mon("CHARMANDER") }, K_RED)
+  local rf, rev = screenFor(red, "wild", "wxr")
+  rev({ t = "msg", text = Effects2.WEATHER_LINES.rain.start })
+  for _ = 1, 40 do rf:update(2.0) end
+  eq(rf.weatherShown, nil, "weather (Red): no sky")
+  -- The arena paints Gold's (the Gen 3 painter, ungated for Gold).
+  local Battlefield = need("Battlefield")
+  eq(Battlefield.layout({ weather = "RAIN" }).weather, "RAIN", "weather: the arena's layout carries it")
+end
+
+-- ------- the trainer's whole name (Red / Gold 1v1)
+do
+  local game = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  local fight = screenFor(game, "coop_npc", "tn", { peerName = "YOUNGSTER",
+    trainer = { name = "YOUNGSTER JOEY", classId = "YOUNGSTER" } })
+  fight:onReady({ battle = "tn", mode = "coop_npc", sides = { a = { "me" }, b = { "npc" } } })
+  local said = table.concat(fight.lines, "|")
+  check(said:find("YOUNGSTER JOEY\nwants to battle!", 1, true) ~= nil,
+        "trainer name (Gold): the record's whole name, in WantsToBattleText")
+  eq(fight:foeTrainerName(), "YOUNGSTER JOEY", "trainer name (Gold): ...and on the send-out line")
+  local red = gameWith({ mon("CHARMANDER") }, K_RED)
+  local rf = screenFor(red, "coop_npc", "tnr", { peerName = "BIRD",
+    trainer = { name = "BIRD KEEPER" } })
+  rf:onReady({ battle = "tnr", mode = "coop_npc", sides = { a = { "me" }, b = { "npc" } } })
+  local redSaid = {}
+  for _, line in ipairs(rf.lines) do
+    if type(line) == "string" then redSaid[#redSaid + 1] = line end
+  end
+  check(table.concat(redSaid, "|"):find("BIRD KEEPER wants\nto fight!", 1, true) ~= nil,
+        "trainer name (Red): a class name past ten letters, whole (pokered _TrainerWantsToFightText)")
+  local pvp = screenFor(red, "1v1", "tnp", { peerName = "BOB" })
+  eq(pvp:foeTrainerName(), "BOB", "trainer name: a fight between players names the peer")
+end
+
+-- ------- FIGHT with no move list: a Gold Bide, a Red monster asleep
+do
+  local bider = goldMon("CHARMANDER", nil, 4321)
+  bider.moves = { { id = "TACKLE", pp = 20, maxPp = 30 }, { id = "BIDE", pp = 1, maxPp = 9 } }
+  local game = goldGame({ bider }, SKETCH_DATA)
+  local fight, ev, transport = screenFor(game, "wild", "bd")
+  ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  ev({ t = "turn", amount = 1 })
+  check(fight:pickMove(2), "Bide (Gold): BIDE is chosen")
+  ev({ t = "msg", text = "CHARMANDER began storing energy" })
+  ev({ t = "moves", slot = 0, side = "a", mon = 0,
+       moves = { { id = "TACKLE", pp = 20, maxPp = 30 }, { id = "BIDE", pp = 0, maxPp = 9 } } })
+  ev({ t = "turn", amount = 2 })
+  check(fight.bideLocked == true, "Bide (Gold): the next turn is a Bide going on")
+  local input = fakeInput()
+  fight.phase, fight.commandIndex = "choose", 1
+  input.press("a")
+  fight:updateCommand(input)
+  local sent = choicesOf(transport)
+  eq(#sent, 2, "Bide (Gold): FIGHT sends at once, no move list (ParsePlayerAction .locked_in)")
+  eq(sent[2] and sent[2].move, 1, "Bide (Gold): ...the Bide's slot, past its spent PP")
+  eq(fight.phase, "play", "Bide (Gold): ...and the menu closes")
+  ev({ t = "msg", text = "CHARMANDER is storing energy" })
+  ev({ t = "turn", amount = 3 })
+  check(fight.bideLocked == true, "Bide (Gold): each storing turn keeps it")
+  -- The release ends it; so does a turn that never said it stored (a CantMove).
+  fight.phase, fight.commandIndex = "choose", 1
+  input.press("a")
+  fight:updateCommand(input)
+  ev({ t = "msg", text = "CHARMANDER unleashed energy" })
+  ev({ t = "turn", amount = 4 })
+  check(not fight.bideLocked, "Bide (Gold): the release ends it")
+  fight.phase, fight.commandIndex = "choose", 1
+  input.press("a")
+  fight:updateCommand(input)
+  eq(fight.phase, "move", "Bide (Gold): ...and FIGHT opens the move list again")
+  local f2, ev2 = screenFor(goldGame({ (function()
+    local m = goldMon("CHARMANDER", nil, 4321)
+    m.moves = { { id = "BIDE", pp = 9, maxPp = 9 } }
+    return m end)() }, SKETCH_DATA), "wild", "bd2")
+  ev2({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  f2:pickMove(1)
+  ev2({ t = "msg", text = "CHARMANDER began storing energy" })
+  ev2({ t = "turn", amount = 2 })
+  f2:sendLockedFight(1)
+  ev2({ t = "msg", text = "CHARMANDER is fully paralyzed" })
+  ev2({ t = "turn", amount = 3 })
+  check(not f2.bideLocked, "Bide (Gold): a turn with no storing line (a CantMove) ends it")
+  -- An item ends one (pokecrystal .reset_bide).
+  f2.bideFiled, f2.bideLocked = true, true
+  f2:sendChoice({ action = "item", item = "POTION" })
+  check(not f2.bideFiled, "Bide (Gold): an item ends it")
+
+  -- Red, asleep: FIGHT opens no move menu (MainInBattleLoop's SLP / FRZ check).
+  local sleeper = mon("CHARMANDER", { moves = { { id = "EMBER", pp = 0 }, { id = "TACKLE", pp = 30 } } })
+  local rgame = gameWith({ sleeper }, K_RED)
+  local rf, rev, rt = screenFor(rgame, "wild", "sl")
+  rev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  rev({ t = "status", slot = 0, side = "a", status = "SLP" })
+  rf.phase, rf.commandIndex = "choose", 1
+  input.press("a")
+  rf:updateCommand(input)
+  local rs = choicesOf(rt)
+  eq(#rs, 1, "asleep (Red): FIGHT sends at once")
+  eq(rs[1] and rs[1].move, 0, "asleep (Red): ...last turn's selection, whatever its PP")
+  rev({ t = "status", slot = 0, side = "a" })
+  rf.phase, rf.commandIndex = "choose", 1
+  input.press("a")
+  rf:updateCommand(input)
+  eq(rf.phase, "move", "asleep (Red): awake, FIGHT opens the move list")
+  -- Gold asleep keeps the move list (SLEEP TALK is picked off it).
+  local gs = goldMon("CHARMANDER", nil, 4321)
+  local gsg = goldGame({ gs })
+  local gsf, gsev = screenFor(gsg, "wild", "slg")
+  gsev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  gsev({ t = "status", slot = 0, side = "a", status = "SLP" })
+  gsf.phase, gsf.commandIndex = "choose", 1
+  input.press("a")
+  gsf:updateCommand(input)
+  eq(gsf.phase, "move", "asleep (Gold): the move list opens")
+end
+
 T.finish("mediated_battle_client")

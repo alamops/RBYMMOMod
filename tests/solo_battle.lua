@@ -2179,6 +2179,171 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: wave 4 (task C2b), the solo half
+-- ------------------------------------------------------------------
+--
+-- Gold's wTimeOfDay reaches the solo referee; a SKETCH the Gold referee runs
+-- is written home and its PP brought back at the end; Red's MIMIC pick rides
+-- the choice and its slot's PP comes home as MIMIC's; the end-of-fight
+-- reconcile reads the party's own list under a TRANSFORM or a MIMIC and saves
+-- a TOXIC as PSN.  Through the real referees; moves and numbers invented.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local Turn2 = need("BattleSim2/Turn")
+  local goldData = setmetatable({
+    items = {},
+    moves = {
+      THUMP = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "EFFECT_NORMAL_HIT" },
+      SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30, effect = "EFFECT_NORMAL_HIT" },
+      SKETCH = { power = 0, accuracy = 100, type = "NORM", pp = 1, effect = "EFFECT_SKETCH" },
+    },
+  }, { __index = data })
+  local function goldMon(o)
+    local m = mon(o)
+    m.otId = 4321
+    return m
+  end
+  local function settle(f, n) for _ = 1, n or 6 do f.solo:update(1 / 60, f.game) end end
+
+  -- ------- Gold's wTimeOfDay reaches the referee
+  local savedWorld = stubMod.world
+  stubMod.world = { overworld = function()
+    return { timeOfDayId = function() return 0 end }
+  end }
+  local real, seen = Turn2.create, nil
+  Turn2.create = function(opts) seen = opts; return real(opts) end
+  local f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  Turn2.create = real
+  eq(seen and seen.timeOfDay, "morn", "timeOfDay (Gold solo): the overworld's wTimeOfDay is handed to the referee")
+  eq(f.sim and f.sim.timeOfDay, "morn", "timeOfDay (Gold solo): ...which keeps it for MORNING SUN and its kin")
+  local realOne, seenOne = Turn.create, nil
+  Turn.create = function(opts) seenOne = opts; return realOne(opts) end
+  pcall(fightOf, "wild")
+  Turn.create = realOne
+  ok(seenOne ~= nil and seenOne.timeOfDay == nil, "timeOfDay (Red solo): Red's referee is handed none")
+  stubMod.world = savedWorld
+
+  -- ------- SKETCH through the Gold referee, written home
+  local painter = goldMon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200 })
+  painter.moves = { { id = "THUMP", pp = 20, maxPp = 20 }, { id = "SKETCH", pp = 1, maxPp = 1 } }
+  local foe = mon({ species = "BETA", spd = 10, maxHp = 300, atk = 1 })
+  foe.moves = { { id = "SWIPE", pp = 30 } }
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { painter }, wildMon = foe })
+  ok(f.started, "SKETCH (Gold solo): the fight is taken over")
+  f.fight:sendChoice({ action = "fight", move = 0 })
+  settle(f)
+  f.fight:sendChoice({ action = "fight", move = 1 })
+  settle(f)
+  local sketched = false
+  for _, event in ipairs(f.events) do
+    if event.t == "moves" and event.side == "a" and event.mon == 0 and type(event.moves) == "table"
+       and event.moves[2] and event.moves[2].id == "SWIPE" then sketched = true end
+  end
+  ok(sketched, "SKETCH (Gold solo): the referee states the sketch as a party list (`moves` with `mon`)")
+  eq(painter.moves[2].id, "SWIPE", "SKETCH (Gold solo): the save monster's SKETCH slot holds the sketched move")
+  eq(painter.moves[2].maxPp, 30, "SKETCH (Gold solo): ...out of its base PP")
+  eq(f.fight.mine[1].moves[2].id, "SWIPE", "SKETCH (Gold solo): ...and FIGHT lists it")
+  f.fight:sendChoice({ action = "fight", move = 1 })
+  settle(f)
+  local simPp = f.sim.byId[PLAYER].mons[1].moves[2].pp
+  eq(f.fight.mine[1].moves[2].pp, simPp, "SKETCH (Gold solo): a spend of the sketched move reaches the sheet")
+  -- The end brings its PP home by id (the reconcile), past the spend.
+  f.solo:_reconcile(f.sim, f.game, f.game.save)
+  eq(painter.moves[2].pp, simPp, "SKETCH (Gold solo): the end of the fight brings the sketched move's PP home")
+
+  -- A TRANSFORMed sketcher (the cart's bug) the fight ends on: the referee's
+  -- party list put aside holds the sketch, and the end writes it home.
+  local worn = goldMon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200 })
+  worn.moves = { { id = "THUMP", pp = 20, maxPp = 20 }, { id = "SKETCH", pp = 1, maxPp = 1 } }
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { worn }, wildMon = foe })
+  local wornMon = f.sim.byId[PLAYER].mons[1]
+  wornMon.transformed = true
+  wornMon.preTransform = { moves = { { id = "THUMP", pp = 17 }, { id = "SWIPE", pp = 30, maxPp = 30 } } }
+  wornMon.moves = { { id = "SWIPE", pp = 5 }, { id = "SKETCH", pp = 1 } }
+  f.solo:_reconcile(f.sim, f.game, f.game.save)
+  eq(worn.moves[2].id, "SWIPE", "SKETCH (Gold solo, TRANSFORMed at the end): the reconcile writes the sketch home")
+  eq(worn.moves[2].pp, 30, "SKETCH (Gold solo, TRANSFORMed at the end): ...at the party list's PP")
+  eq(worn.moves[1].pp, 17, "SKETCH (Gold solo, TRANSFORMed at the end): ...and the party's own PP, not the copies'")
+
+  -- ------- Red: MIMIC's pick rides the choice, and its slot's PP comes home
+  data.moves.MIMIC = { power = 0, accuracy = 100, type = "NORM", pp = 10, effect = "MIMIC_EFFECT" }
+  data.moves.SWIPE = data.moves.SWIPE or { power = 30, accuracy = 100, type = "NORM", pp = 30 }
+  local copycat = mon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200 })
+  copycat.moves = { { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } }
+  local red = mon({ species = "BETA", spd = 10, maxHp = 300, atk = 1 })
+  red.moves = { { id = "THUMP", pp = 20 }, { id = "SWIPE", pp = 30 } }
+  f = fightOf("wild", { party = { copycat }, wildMon = red })
+  ok(f.started, "MIMIC (Red solo): the fight is taken over")
+  f.fight:sendChoice({ action = "fight", move = 0, mimic = 1 })
+  settle(f)
+  local own = f.sim.byId[PLAYER].mons[1]
+  eq(own.moves[1].id, "SWIPE", "MIMIC (Red solo): the pick sent with the choice is the move copied (`.letPlayerChooseMove`)")
+  f.fight:sendChoice({ action = "fight", move = 0 })
+  settle(f)
+  eq(f.fight.mine[1].moves[1].id, "MIMIC", "MIMIC (Red solo): the sheet keeps MIMIC")
+  eq(f.fight.mine[1].moves[1].pp, own.moves[1].pp, "MIMIC (Red solo): ...at the slot's PP (DecrementPP by slot)")
+  f.solo:_reconcile(f.sim, f.game, f.game.save)
+  eq(copycat.moves[1].id, "MIMIC", "MIMIC (Red solo): the party keeps MIMIC at the end")
+  eq(copycat.moves[1].pp, own.moves[1].pp, "MIMIC (Red solo): ...and pays for the mimicked uses")
+  eq(copycat.moves[2].pp, 20, "MIMIC (Red solo): ...and the walk goes on past that slot")
+  data.moves.MIMIC = nil
+
+  -- ------- the reconcile's reading, by hand
+  local solo = Solo.new({ say = function() end }, { enabled = function() return true end })
+  local function target(list)
+    local t = mon({})
+    t.moves = list
+    return t
+  end
+  local tgt = target({ { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60, status = "toxic",
+    moves = { { id = "SWIPE", pp = 7 }, { id = "THUMP", pp = 18 } },
+    preMimic = { [1] = { id = "MIMIC", pp = 10 } } }, 1)
+  eq(tgt.moves[1].pp, 7, "reconcile (Red): MIMIC comes home at the mimicked slot's PP")
+  eq(tgt.moves[2].pp, 18, "reconcile (Red): ...and the next slot still comes home")
+  eq(tgt.status, "PSN", "reconcile (Red): a TOXIC is saved as PSN")
+  tgt = target({ { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60, status = "toxic",
+    moves = { { id = "SWIPE", pp = 3 }, { id = "THUMP", pp = 18 } },
+    preMimic = { [1] = { id = "MIMIC", pp = 9 } } }, 2)
+  eq(tgt.moves[1].pp, 9, "reconcile (Gold): MIMIC keeps its own PP (CheckMimicUsed)")
+  eq(tgt.status, "PSN", "reconcile (Gold): a TOXIC is saved as PSN")
+  tgt = target({ { id = "THUMP", pp = 20 }, { id = "SWIPE", pp = 30 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60,
+    moves = { { id = "GLARE", pp = 5 }, { id = "SWIPE", pp = 5 } },
+    preTransform = { moves = { { id = "THUMP", pp = 12 }, { id = "SWIPE", pp = 4 } } } }, 1)
+  eq(tgt.moves[1].pp, 12, "reconcile (TRANSFORM): the party's own list comes home, not the copies")
+  eq(tgt.moves[2].pp, 4, "reconcile (TRANSFORM): ...a copied id the party also knows is not the copy's 5")
+  tgt = target({ { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60,
+    moves = { { id = "GLARE", pp = 5 }, { id = "THUMP", pp = 11 } } }, 2)
+  eq(tgt.moves[2].pp, 11, "reconcile: a move the party does not hold no longer ends the walk")
+  eq(tgt.moves[1].pp, 10, "reconcile: ...and writes nothing itself")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -1341,6 +1341,19 @@ M.PRIORITY2_MAX = 255
 M.STAGE12_MAX = 6
 M.HAPPINESS2_MAX = 255
 
+-- Gold's wTimeOfDay as a Gen 2 ruleset spells it (`timeOfDay`, wave 4 of
+-- docs/plans/gen12-referee-gaps-fix.md): pokecrystal / pokegold
+-- constants/ram_constants.asm `shift_const MORN / DAY / NITE` -- MORN_F 0,
+-- DAY_F 1, NITE_F 2 -- the three readings BattleCommand_HealMorn /
+-- _HealDay / _HealNite compare it with (`ld b, MORN_F` ... `cp b`).
+-- GetTimeOfDay (engine/rtc/rtc.asm) writes wTimeOfDay from its TimesOfDay
+-- table, which holds those three alone; DARKNESS_F only ever names a palette
+-- (DARKNESS_PALSET, a dark map's), so it is not one of them.  Spelled as the
+-- Gold referee's `Turn.TIMES` keys (src/BattleSim2/Turn.lua, lib/battle2
+-- Turn.js), which `create` reads as `opts.timeOfDay`.  A closed set, like
+-- Gen 3's WEATHERS3.
+M.TIMES_OF_DAY2 = { morn = true, day = true, nite = true }
+
 -- One Gen 2 hold effect, or nil.  Refused rather than trimmed past
 -- HOLD_EFFECT2_MAX, on M.spriteId's argument: a cut token names no rule, and
 -- the referee looks its rule up by the whole token.  The prefix is part of the
@@ -1657,6 +1670,21 @@ function M.battleRuleset(raw, generation)
       pool[#pool + 1] = move
     end
     out.metronomePool = pool
+  end
+  -- Gold's wTimeOfDay (wave 4 of docs/plans/gen12-referee-gaps-fix.md), which
+  -- MORNING SUN / SYNTHESIS / MOONLIGHT compare (BattleCommand_HealMorn /
+  -- _HealDay / _HealNite: double the heal when it is the move's own time) --
+  -- the host's cart clock, which only the host can state.  Read on a Gen 2
+  -- hub alone, by the hub's generation as `metronomePool`'s rows are: Red has
+  -- no clock, so a Gen 1 reader (or a caller naming no generation) neither
+  -- copies nor refuses one, the posture K14's happiness takes.  One of
+  -- TIMES_OF_DAY2 or the ruleset is refused, as Gen 3's `weather` is: it is
+  -- an input to a heal, and a dropped one would have the referee read the
+  -- move's own time (its link reading) where the host's cart reads another.
+  -- Absent stays absent -- the referee's link reading.
+  if M.int(generation, 2, 2) and raw.timeOfDay ~= nil then
+    if not M.TIMES_OF_DAY2[raw.timeOfDay] then return nil end
+    out.timeOfDay = raw.timeOfDay
   end
   return out
 end
@@ -2559,6 +2587,7 @@ M.BATTLE_ACTIONS = {
 -- `generation` (optional) is the hub's.  Only 3 reads Gen 3's two extra fields
 -- below; a Gen 1 / Gen 2 hub -- and a caller that names none -- reads a choice
 -- exactly as it did before Gen 3 existed, ignoring them whatever they hold.
+-- Likewise only 1 reads Gen 1's `mimic` (wave 4), ignored everywhere else.
 function M.battleChoice(raw, generation)
   if type(raw) ~= "table" then return nil end
   local needs = M.BATTLE_ACTIONS[raw.action]
@@ -2601,6 +2630,23 @@ function M.battleChoice(raw, generation)
       if type(raw.dexCaught) ~= "boolean" then return nil end
       out.dexCaught = raw.dexCaught
     end
+  end
+  -- Gen 1 (wave 4 of docs/plans/gen12-referee-gaps-fix.md): MIMIC's pick --
+  -- the 0-based index into the TARGET's move list -- asked up front, as
+  -- `pass` is above, because pokered MimicEffect opens the foe's move menu
+  -- mid-move (`.letPlayerChooseMove`), which a mediated fight cannot.  The
+  -- Red referee reads it where the cart asks the player (BattleSim Turn
+  -- `_mimicPick`, a player seat against the computer) and checks it against
+  -- the moves the target holds when MIMIC lands.  Bounded by the move list's
+  -- own width, as `move` is.  Gold's MIMIC copies the target's last move with
+  -- no menu (BattleCommand_Mimic) and Gen 3's has none either, so only a
+  -- Gen 1 hub reads it -- a caller naming no generation reads a choice as it
+  -- always did -- and a stray one elsewhere is ignored rather than refusing
+  -- the turn.  Present and out of range refuses the choice, `pass`'s
+  -- posture: a dropped pick would be the menu's first row, a different move.
+  if M.int(generation, 1, 1) and raw.mimic ~= nil then
+    out.mimic = M.int(raw.mimic, 0, Config.BATTLE_MOVE_MAX - 1)
+    if out.mimic == nil then return nil end
   end
 
   if needs ~= true and out[needs] == nil then return nil end

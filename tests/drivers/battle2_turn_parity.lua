@@ -90,6 +90,19 @@
 --     `r2c_sun`, `r2c_sandstorm`, `r2c_time_heal`, `r2c_fixed_damage`, and
 --     R2b's findings: `r2c_checkhit` (a, b), `r2c_checkturn` (c-f), `r2c_bide`
 --     (h), `r2c_flinch` (i).
+--   * the referee-gaps run's wave 4 (R2d), Gold's status and field moves:
+--     `r2d_attract` (K15's gender), `r2d_baton_pass`, `r2d_belly_drum`,
+--     `r2d_curse`, `r2d_destiny_bond`, `r2d_encore`, `r2d_foresight`,
+--     `r2d_heal_bell`, `r2d_mean_look`, `r2d_teleport`, `r2d_nightmare`,
+--     `r2d_pain_split`, `r2d_perish_song` / `r2d_perish_2v2`, `r2d_psych_up`,
+--     `r2d_rapid_spin`, `r2d_sketch` / `_link` / `_transformed_end`,
+--     `r2d_spite`, `r2d_amnesia`, `r2d_swagger`, `r2d_conversion2`; and the
+--     rest of Gold's cart differences: `r2d_status_lines` (the AI's random
+--     fail, the miss and failure lines), `r2d_full_heal_ai`,
+--     `r2d_mysteryberry_mimic`, `r2d_disable`, `r2d_skull_bash_rest`,
+--     `r2d_metronome_bytes`, `r2d_residual_order` (each seat's ResidualDamage
+--     after its own move) and `r2d_faint_moves` (the party moves after the
+--     faint).
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -2750,7 +2763,9 @@ end)
 -- matchup of 0 "doesn't affect" whatever the accuracy did, and JUMP KICK's
 -- crash -- an eighth of the damage it rolled, none against a GHOST.
 scenario("r2c_checkhit", function(events)
-  return seq(events, duo3("r3i", "1v1", 723,
+  -- Seed 724 since R2d's crit byte and DamageVariation loop (723 no longer
+  -- missed a JUMP KICK).
+  return seq(events, duo3("r3i", "1v1", 724,
     { mn({ species = "Alpha", maxHp = 400, spe = 90, stages = { acc = 1 },
            moves = { am("wide_hit", 40, 0, 0, 178), am("JUMP_KICK", 70, 1, 45, 76),
                      hm("tap", 1), am("HI_JUMP_KICK", 85, 1, 45, 229) } }) },
@@ -2764,7 +2779,9 @@ end)
 -- of 2..7, full paralysis under 63, the Disable count ticking in CheckTurn
 -- ("disabled no more!").
 scenario("r2c_checkturn", function(events)
-  return seq(events, duo3("r3j", "1v1", 724,
+  -- Seed 725 since R2d (Gold's DISABLE needs Beta's thump to have landed
+  -- first: LAST_COUNTER_MOVE).
+  return seq(events, duo3("r3j", "1v1", 725,
     { mn({ species = "Alpha", maxHp = 600, spe = 90,
            moves = { hm("tap", 1), hm("DISABLE", 0, 0, 86), am("HYPNOSIS", 0, 8, 32, 255) } }) },
     { mn({ species = "Beta", maxHp = 900, spe = 10, status = "PAR",
@@ -2797,6 +2814,436 @@ scenario("r2c_flinch", function(events)
       mn({ species = "Gamma", maxHp = 900, spe = 200, moves = { hm("BITE", 20, 7, 31, 60, 100) } }) },
     { mn({ species = "Beta", maxHp = 999, spe = 90, moves = { hm("tap", 1), hm("HYPER_BEAM", 50, 0, 80) } }) }),
     { both3(F(0), F(0)), both3(S(1), F(1)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- ------------------------------------------------------------------
+-- the referee-gaps run's wave 4 (R2d): the Gold status and field scripts,
+-- each command's own failure lines, SKULL BASH / REST / DISABLE / MIMIC as
+-- the cart runs them, the computer's status cures, ResidualDamage after each
+-- seat's own turn, and a faint's party `moves`.  The ruleset adds FLYING and
+-- POISON to R2c's (SPIKES spare a FLYING type); every number is synthetic, and
+-- `base.gender` is the proposed K15 byte.
+-- ------------------------------------------------------------------
+
+local R2D_TYPES = { "NORMAL", "FIGHTING", "GHOST", "WATER", "FIRE", "ROCK", "STEEL",
+                    "DARK", "PSYCHIC_TYPE", "GRASS", "ELECTRIC", "GROUND", "FLYING", "POISON" }
+local R2D_CHART = {}
+for i = 1, 14 do
+  R2D_CHART[i] = {}
+  for j = 1, 14 do R2D_CHART[i][j] = 100 end
+end
+R2D_CHART[1][3] = 0
+R2D_CHART[2][3] = 0
+R2D_CHART[3][1] = 0
+R2D_CHART[11][12] = 0
+R2D_CHART[4][5] = 200
+R2D_CHART[5][4] = 50
+R2D_CHART[5][5] = 50
+R2D_CHART[5][6] = 50
+local R2D_SPECIAL = { 3, 4, 7, 8, 9, 10 }
+local function duo4(id, mode, seed, aMons, bMons, extra)
+  extra = extra or {}
+  local o = duo(id, mode, seed, aMons, bMons, { typeIds = R2D_TYPES, chart = R2D_CHART,
+    metronomePool = extra.metronomePool })
+  o.specialTypes = R2D_SPECIAL
+  if extra.foe then o.sides.b[1].playerId = extra.foe end
+  return o
+end
+local function FP(i, pass) return { action = "fight", move = i, pass = pass } end
+local MALE = { base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50, gender = 127 },
+               dvs = { atk = 15, def = 8, spe = 15, spc = 8 } }
+local FEMALE = { base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50, gender = 127 },
+                 dvs = { atk = 2, def = 8, spe = 2, spc = 8 } }
+local function sexed(o, sex)
+  o.base, o.dvs = sex.base, sex.dvs
+  return mn(o)
+end
+
+-- ATTRACT (BattleCommand_Attract, CheckOppositeGender over K15's
+-- BASE_GENDER): Beta falls in love, CheckTurn's infatuation byte stops it
+-- some turns, a second ATTRACT fails, a send-out breaks the love
+-- (BreakAttraction), and Gamma -- whose sheet states no gender ratio --
+-- cannot attract at all.
+scenario("r2d_attract", function(events)
+  return seq(events, duo4("r4a", "1v1", 801,
+    { sexed({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("ATTRACT", 0, 0, 133), hm("tap", 1) } }, MALE),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, moves = { hm("ATTRACT", 0, 0, 133), hm("tap", 1) } }) },
+    { sexed({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }, FEMALE) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0)),
+      both3(S(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0)) })
+end)
+
+-- BATON PASS: Beta's +2 Attack and SUBSTITUTE go to the successor the FIGHT's
+-- `pass` named, past Alpha's MEAN LOOK (the hold stays on the seat), and the
+-- SPIKES on its side hurt it; the passed SUBSTITUTE takes Alpha's taps.
+scenario("r2d_baton_pass", function(events)
+  return seq(events, duo4("r4b", "1v1", 802,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("SPIKES", 0, 0, 149), hm("MEAN_LOOK", 0, 0, 142), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10,
+           moves = { hm("SWORDS_DANCE", 0, 0, 50), hm("SUBSTITUTE", 0, 0, 79), hm("BATON_PASS", 0, 0, 134) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Eps", maxHp = 400, spe = 10, moves = { hm("thump", 20) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(1)), both3(F(2), FP(2, 2)), both3(F(2), F(0)), both3(F(0), F(0)),
+      both3(F(2), F(0)) })
+end)
+
+-- BELLY DRUM: at 50 of 400 HP the AttackUp2 lands and the HP check fails it
+-- -- the cart's bug, +2 kept -- twice; Gamma at full HP pays half and climbs
+-- to +6; a third use at +6 fails at its first AttackUp2.
+scenario("r2d_belly_drum", function(events)
+  return seq(events, duo4("r4c", "1v1", 803,
+    { mn({ species = "Alpha", maxHp = 400, hp = 50, spe = 90, moves = { hm("BELLY_DRUM", 0, 0, 135) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 90, moves = { hm("BELLY_DRUM", 0, 0, 135), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(S(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+      both3(F(1), F(0)) })
+end)
+
+-- CURSE: a NORMAL user trades a Speed stage for Attack and Defense (each
+-- silent when it cannot rise), and at +6 / +6 says ABILITY; a GHOST user cuts
+-- half its HP and curses the foe (a quarter after the foe's own turn,
+-- ResidualDamage); a second curse fails.
+scenario("r2d_curse", function(events)
+  return seq(events, duo4("r4d", "1v1", 804,
+    { mn({ species = "Gamma", maxHp = 400, spe = 90, types = { 0 }, stages = { atk = 5, def = 6 },
+           moves = { hm("CURSE", 0, 2, 137) } }),
+      mn({ species = "Alpha", maxHp = 400, spe = 90, types = { 2 }, moves = { hm("CURSE", 0, 2, 137), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(S(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+      both3(F(1), F(0)) })
+end)
+
+-- DESTINY BOND: Beta's bond, made last in a turn, holds through Alpha's next
+-- move -- its KO takes Alpha down with it; Delta's, made first in a turn, is
+-- gone once Gamma has moved (EndOpponentProtectEndureDestinyBond), so
+-- Gamma's priority KO the turn after takes nobody.
+scenario("r2d_destiny_bond", function(events)
+  return seq(events, duo4("r4e", "1v1", 805,
+    { mn({ species = "Alpha", maxHp = 400, atk = 300, spe = 90, moves = { hm("slam", 120), hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 400, atk = 300, spe = 10,
+           moves = { hm("slam", 120), hm("tap", 1), am("QUICK_SLAM", 120, 0, 0, 255, 0, 2) } }) },
+    { mn({ species = "Beta", maxHp = 200, spe = 10, moves = { hm("DESTINY_BOND", 0, 2, 138) } }),
+      mn({ species = "Delta", maxHp = 200, spe = 50, moves = { hm("DESTINY_BOND", 0, 2, 138), hm("tap", 1) } }) }),
+    { both3(F(1), F(0)), both3(F(0), F(0)), { { "p1", S(1) }, { "p2", S(1) } },
+      both3(F(1), F(0)), both3(F(2), F(1)) })
+end)
+
+-- ENCORE: Beta has used GROWL; Alpha (faster) encores it, so Beta's TAP this
+-- turn becomes GROWL; every FIGHT after is GROWL until the count runs out or
+-- its 3 PP do ("ENCORE ended!").  A miss, or a target that has used nothing,
+-- "didn't affect".
+scenario("r2d_encore", function(events)
+  return seq(events, duo4("r4f", "1v1", 806,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("ENCORE", 0, 0, 139), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("GROWL", 0, 0, 18, 3), hm("tap", 1) } }) }),
+    { both3(F(0), F(1)), both3(F(1), F(0)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(1)),
+      both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1)) })
+end)
+
+-- FORESIGHT: a NORMAL hit "doesn't affect" the GHOST until it is identified,
+-- then lands (the Foresight rows); a second FORESIGHT fails.
+scenario("r2d_foresight", function(events)
+  return seq(events, duo4("r4g", "1v1", 807,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("tap", 10), hm("FORESIGHT", 0, 0, 140) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 2 }, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(0), F(0)), both3(F(1), F(0)) })
+end)
+
+-- HEAL BELL: every status on Ann's side is cleared -- the field's and the
+-- bench's, each a `status` event naming its party index -- "A bell chimed!".
+scenario("r2d_heal_bell", function(events)
+  return seq(events, duo4("r4h", "1v1", 808,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, status = "PAR", moves = { hm("HEAL_BELL", 0, 0, 141) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 90, status = "PSN", moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- MEAN LOOK and TELEPORT in a wild fight: the held wild monster's TELEPORT
+-- fails; Ann's own TELEPORT at a lower level draws its byte loop.
+scenario("r2d_mean_look", function(events)
+  return seq(events, duo4("r4i", "wild", 809,
+    { mn({ species = "Alpha", level = 10, maxHp = 900, spe = 90,
+           moves = { hm("MEAN_LOOK", 0, 0, 142), hm("TELEPORT", 0, 0, 153), hm("tap", 1) } }) },
+    { mn({ species = "Wild", level = 40, maxHp = 900, spe = 10, moves = { hm("TELEPORT", 0, 0, 153) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"), both3(F(1), F(0), "wild"),
+      both3(F(1), F(0), "wild"), both3(F(1), F(0), "wild"), both3(F(1), F(0), "wild") })
+end)
+
+-- TELEPORT against a trainer fails; the wild monster's always escapes.
+scenario("r2d_teleport", function(events)
+  local t = seq(events, duo4("r4j", "coop_npc", 810,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("TELEPORT", 0, 0, 153) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("TELEPORT", 0, 0, 153) } }) }),
+    { both3(F(0), F(0)) })
+  t = seq(events, duo4("r4k", "wild", 811,
+    { mn({ species = "Alpha", level = 60, maxHp = 900, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Wild", level = 5, maxHp = 900, spe = 10, moves = { hm("TELEPORT", 0, 0, 153) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild") })
+  return t
+end)
+
+-- NIGHTMARE: only on a sleeper; a quarter after its turn (ResidualDamage)
+-- until it wakes, which clears it (CheckTurn's `.woke_up`).
+scenario("r2d_nightmare", function(events)
+  return seq(events, duo4("r4l", "1v1", 812,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("NIGHTMARE", 0, 2, 143), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 10, status = "SLP", statusTurns = 3, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0)) })
+end)
+
+-- PAIN SPLIT: both bars to the halved sum (side a's first), a substitute
+-- "didn't affect".
+scenario("r2d_pain_split", function(events)
+  return seq(events, duo4("r4m", "1v1", 813,
+    { mn({ species = "Alpha", maxHp = 400, hp = 20, spe = 90, moves = { am("PAIN_SPLIT", 0, 0, 144, 255) } }) },
+    { mn({ species = "Beta", maxHp = 400, hp = 380, spe = 10,
+           moves = { hm("wait", 0, 0, 85), hm("SUBSTITUTE", 0, 0, 79) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(0)) })
+end)
+
+-- PERISH SONG: both counts, "3", "2", "1", "0" and both faint; a second song
+-- while both run fails; the successors start clean.
+scenario("r2d_perish_song", function(events)
+  return seq(events, duo4("r4n", "1v1", 814,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("PERISH_SONG", 0, 0, 145), hm("wait", 0, 0, 85) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
+      mn({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)),
+      { { "p1", S(1) }, { "p2", S(1) } }, both3(F(0), F(0)) })
+end)
+
+-- PSYCH UP: a foe at every base level fails it; after SWORDS DANCE it copies.
+scenario("r2d_psych_up", function(events)
+  return seq(events, duo4("r4o", "1v1", 815,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("PSYCH_UP", 0, 0, 146), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("SWORDS_DANCE", 0, 0, 50) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)) })
+end)
+
+-- RAPID SPIN: SPIKES on Ann's side, LEECH SEED and a WRAP on Alpha -- the hit
+-- sheds all three; the SPIKES then spare nobody on Gamma's way in... because
+-- they are gone.
+scenario("r2d_rapid_spin", function(events)
+  return seq(events, duo4("r4p", "1v1", 816,
+    { mn({ species = "Alpha", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85), hm("RAPID_SPIN", 20, 0, 147) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 90,
+           moves = { hm("SPIKES", 0, 0, 149), hm("LEECH_SEED", 0, 9, 84), hm("WRAP", 15, 0, 42), hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(2)), both3(F(1), F(3)), both3(S(1), F(3)),
+      both3(F(0), F(0)), both3(S(0), F(3)) })
+end)
+
+-- SKETCH: with nothing to copy it "didn't affect"; then the wild monster's
+-- last move goes into the LAST slot holding SKETCH (`.find_sketch` scans
+-- from the end) with its base PP, battle and party alike -- a `moves` event
+-- naming the party index; a SKETCH of a move it knows now "didn't affect".
+scenario("r2d_sketch", function(events)
+  return seq(events, duo4("r4q", "wild", 817,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("SKETCH", 0, 0, 148, 5), hm("tap", 1), hm("SKETCH", 0, 0, 148) } }) },
+    { mn({ species = "Wild", maxHp = 900, spe = 10, moves = { hm("EMBER", 20, 4, 4, 25) } }) },
+    { foe = "wild" }),
+    { both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"), both3(F(0), F(0), "wild"),
+      both3(F(2), F(0), "wild") })
+end)
+
+-- SKETCH in a link battle: "But nothing happened".
+scenario("r2d_sketch_link", function(events)
+  return seq(events, duo4("r4r", "1v1", 818,
+    { mn({ species = "Alpha", maxHp = 900, spe = 10, moves = { hm("SKETCH", 0, 0, 148) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)) })
+end)
+
+-- SPITE: 2..5 PP off the foe's last move (a `moves` event for Bob's party
+-- slot); against nothing used, or a move with no PP left, "didn't affect".
+scenario("r2d_spite", function(events)
+  return seq(events, duo4("r4s", "1v1", 819,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { am("SPITE", 0, 2, 150, 255), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("thump", 10, 0, 0, 4), hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(1)) })
+end)
+
+-- AMNESIA and the SP. DEF rows: +2 a use to +6, then "won't rise"; SP. DEF
+-- DOWN lowers the foe (the computer's StatDown byte on its own).
+scenario("r2d_amnesia", function(events)
+  return seq(events, duo4("r4t", "coop_npc", 820,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("AMNESIA", 0, 9, 151), hm("SP_DEF_UP", 0, 9, 154) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { am("SPDEF_DROP", 0, 9, 155, 255), am("SPDEF_DROP2", 0, 9, 156, 255) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(0)), both3(F(1), F(1)), both3(F(1), F(0)) })
+end)
+
+-- SWAGGER: the foe's Attack +2 and its confusion; again while confused (no
+-- second confusion byte); at +6 the RaiseStat fails and `failuretext` ends
+-- the move -- no confusion.
+scenario("r2d_swagger", function(events)
+  return seq(events, duo4("r4u", "1v1", 821,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { am("SWAGGER", 0, 0, 152, 255) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, stages = { atk = 6 }, moves = { hm("wait", 0, 0, 85) } }),
+      mn({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- The status commands' own lines and the computer's `.CheckAIRandomFail`
+-- (coop_npc: Bob is the computer): HYPNOSIS, POISONPOWDER and THUNDER WAVE
+-- each draw the AI byte -- "It didn't affect" when it lands under 64 --
+-- then "already asleep / poisoned / paralyzed"; Ann's LEECH SEED into a
+-- substitute "evaded the attack!".
+scenario("r2d_status_lines", function(events)
+  return seq(events, duo4("r4v", "coop_npc", 822,
+    { mn({ species = "Alpha", maxHp = 999, spe = 90, moves = { hm("LEECH_SEED", 0, 9, 84), hm("wait", 0, 0, 85) } }),
+      mn({ species = "Gamma", maxHp = 999, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
+      mn({ species = "Delta", maxHp = 999, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 50, substitute = 50,
+           moves = { am("HYPNOSIS", 0, 8, 32, 255), am("POISONPOWDER", 0, 13, 66, 255),
+                     am("THUNDER_WAVE", 0, 10, 67, 255) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(S(1), F(1)), both3(F(0), F(1)),
+      both3(F(0), F(1)), both3(S(2), F(2)), both3(F(0), F(2)), both3(F(0), F(2)) })
+end)
+
+-- The computer's FULL HEAL / FULL RESTORE (AI_HealStatus): Bob's burned Beta
+-- is cured but its Attack stays halved (no CalcEnemyStats) -- its taps hit as
+-- hard as before -- and FULL HEAL leaves its confusion; Ann's FULL HEAL clears
+-- hers (HealStatus's %11111111).
+scenario("r2d_full_heal_ai", function(events)
+  local o = duo4("r4w", "coop_npc", 823,
+    { mn({ species = "Alpha", maxHp = 999, spe = 90, confusion = 5, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 999, atk = 200, spe = 10, status = "BRN", confusion = 6,
+           moves = { hm("slam", 40) } }) })
+  o.sides.b[1].bag = { { id = "FULL_HEAL", count = 1 }, { id = "FULL_RESTORE", count = 1 } }
+  return seq(events, o,
+    { both3(F(0), F(0)), both3(ITEM("FULL_HEAL"), ITEM("FULL_HEAL")), both3(F(0), F(0)),
+      both3(F(0), ITEM("FULL_RESTORE")), both3(F(0), F(0)) })
+end)
+
+-- MYSTERYBERRY against a MIMIC'd slot: MIMIC spends its last PP and copies
+-- Beta's move; the berry finds the party's MIMIC at 0 and restores it there
+-- alone (`.restore`'s id compare), and the party list is told once the copy
+-- is undone at the switch-out.
+scenario("r2d_mysteryberry_mimic", function(events)
+  return seq(events, duo4("r4x", "1v1", 824,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 5, "MYSTERYBERRY" },
+           moves = { hm("MIMIC", 0, 0, 82, 1), hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("thump", 10) } }) }),
+    { both3(F(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(S(1), F(0)) })
+end)
+
+-- Gold's DISABLE: the foe's last move (LAST_COUNTER_MOVE) for `.loop2`'s
+-- 2..8 count -- a slot at 0 PP with PP Ups is not empty to it -- counted down
+-- in CheckTurn ("disabled no more!"); a count still running "But it failed!".
+scenario("r2d_disable", function(events)
+  local slam = hm("slam", 10, 0, 0, 1)
+  slam.ppUps = 1
+  return seq(events, duo4("r4y", "1v1", 825,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { am("DISABLE", 0, 0, 86, 255), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { slam, hm("tap", 1) } }) }),
+    { both3(F(1), F(0)), both3(F(0), F(1)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(1)),
+      both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1)) })
+end)
+
+-- SKULL BASH raises Defense on its charge turn only; REST at full HP is "HP
+-- is full!", hurt it sleeps two turns and restores it all; RECOVER halves.
+scenario("r2d_skull_bash_rest", function(events)
+  return seq(events, duo4("r4z", "1v1", 826,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90,
+           moves = { hm("SKULL_BASH", 50, 0, 157), hm("REST", 0, 9, 56), hm("RECOVER", 0, 0, 56) } }) },
+    { mn({ species = "Beta", maxHp = 900, atk = 200, spe = 10, moves = { hm("slam", 40) } }) }),
+    { both3(F(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)),
+      both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)) })
+end)
+
+-- METRONOME's `.GetMove`: a byte is a move number -- the pool's `num` where
+-- it states one, its place where it does not -- redrawn on 0, past 251, on a
+-- number the pool lacks and on a move the user knows.
+scenario("r2d_metronome_bytes", function(events)
+  local pool = { hm("pound", 10), hm("tap", 1), hm("scratch", 15) }
+  pool[1].num = 200
+  pool[3].num = 3
+  return seq(events, duo4("r4m2", "1v1", 827,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("METRONOME", 0, 0, 83), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { metronomePool = pool }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- ResidualDamage after each seat's own turn: Alpha's poison right after its
+-- move, before Beta's; in a fight of one seat a side a KO ends the turn -- the
+-- KO'ing Alpha takes no poison then (Battle_PlayerFirst's `jp z`).
+scenario("r2d_residual_order", function(events)
+  return seq(events, duo4("r4o2", "1v1", 828,
+    { mn({ species = "Alpha", maxHp = 400, atk = 120, spe = 90, status = "PSN", moves = { hm("tap", 5), hm("slam", 80) } }) },
+    { mn({ species = "Beta", maxHp = 150, spe = 10, status = "BRN", moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 200, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), { { "p2", S(1) } }, both3(F(0), F(0)) })
+end)
+
+-- A faint's party `moves` (C2a): a transformed MYSTERYBERRY holder with a
+-- 0-PP party slot eats the berry (the party PP the overlay hides), then
+-- faints -- the party list follows the `faint`.
+scenario("r2d_faint_moves", function(events)
+  return seq(events, duo4("r4fm", "1v1", 829,
+    { mn({ species = "Alpha", maxHp = 130, spe = 90, item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 5, "MYSTERYBERRY" },
+           moves = { hm("TRANSFORM", 0, 0, 57), hm("spent", 10, 0, 0, 0) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, atk = 120, spe = 10, moves = { hm("slam", 90) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), { { "p1", S(1) } },
+      both3(F(0), F(0)) })
+end)
+
+-- SKETCH under TRANSFORM, the fight ending before it is undone: the copies
+-- hold the foe's own moves, so the move sketched is one its METRONOME
+-- called; the cart's bug writes it into the PARTY struct at the copied SKETCH
+-- slot's index (TRANSFORM's own slot here), and that party list is emitted
+-- before `over`.
+scenario("r2d_sketch_transformed_end", function(events)
+  local pool = { hm("pound", 10) }
+  pool[1].num = 1
+  return seq(events, duo4("r4st", "wild", 830,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("TRANSFORM", 0, 0, 57), hm("tap", 1) } }) },
+    { mn({ species = "Wild", maxHp = 900, spe = 10, moves = { hm("SKETCH", 0, 0, 148), hm("METRONOME", 0, 0, 83) } }) },
+    { foe = "wild", metronomePool = pool }),
+    { both3(F(0), F(1), "wild"), both3(F(0), F(1), "wild"), both3({ action = "run" }, F(1), "wild") })
+end)
+
+-- CONVERSION2: a type that resists the foe's last move -- FIRE's, here,
+-- which WATER, FIRE and ROCK resist -- off the byte loop; with nothing to
+-- read, "But it failed!".
+scenario("r2d_conversion2", function(events)
+  return seq(events, duo4("r4cv", "1v1", 831,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { am("CONVERSION2", 0, 0, 136, 255), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("EMBER", 20, 4) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)) })
+end)
+
+-- PERISH SONG, MEAN LOOK and BATON PASS in a 2v2 (coop_pvp): the song reaches
+-- all four; a passed count goes on in the successor.
+scenario("r2d_perish_2v2", function(events)
+  local function round(a1, a2, b1, b2)
+    return { { "a1", a1 }, { "a2", a2 }, { "b1", b1 }, { "b2", b2 } }
+  end
+  local T = function(i, slot) return { action = "fight", move = i, target = slot } end
+  return seq(events, { id = "r4pp", mode = "coop_pvp", seed = 832, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = R2D_TYPES, chart = R2D_CHART, specialTypes = R2D_SPECIAL,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 900, spe = 90,
+              moves = { hm("PERISH_SONG", 0, 0, 145), hm("BATON_PASS", 0, 0, 134), hm("wait", 0, 0, 85) } }),
+              mn({ species = "Iota", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) } },
+            { playerId = "a2", name = "Abe", mons = { mn({ species = "Gamma", maxHp = 900, spe = 80,
+              moves = { hm("wait", 0, 0, 85) } }) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { mn({ species = "Beta", maxHp = 900, spe = 10,
+              moves = { hm("wait", 0, 0, 85) } }) } },
+            { playerId = "b2", name = "Bea", mons = { mn({ species = "Delta", maxHp = 900, spe = 20,
+              moves = { hm("PERISH_SONG", 0, 0, 145), hm("wait", 0, 0, 85) } }) } } },
+    } },
+    { round(T(0, 3), T(0, 3), T(0, 0), T(0, 0)), round({ action = "fight", move = 1, target = 3, pass = 1 }, T(0, 3), T(0, 0), T(1, 0)),
+      round(T(0, 3), T(0, 3), T(0, 0), T(1, 0)), round(T(0, 3), T(0, 3), T(0, 0), T(1, 0)),
+      round(T(0, 3), T(0, 3), T(0, 0), T(1, 0)) })
 end)
 
 -- ------------------------------------------------------------------

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generation": 2,
-  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: every number is synthetic; ITEMS names only the item and species ids the carts' id-keyed rules compare against (pret labels, not ROM bytes) and the HELD_* effect names, never a value read from an item row. All arithmetic is integer. DAMAGE (pokecrystal BattleCommand_DamageCalc): no 255-stat clamp inside compute(), which takes the byte pair TruncateHL_BC hands it (see TRUNCATE). levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,floor(d*roll/100)) for roll in 85..100, with NO cap after it: the 997+2 tail is the one cap, and STAB, the matchup, RageDamage (x(count+1), pinned at 65535) and the variation keep 16-bit results (dmg_cap_997_then_no_cap: 999 x1.5 x2 = 2996). Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: ladder 1-in-{15,8,4,3,2,2,2} by critical level 0..6; isCrit when roll==0 for roll in 0..chance-1. Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), capped at 6; speciesItemBonus (Lucky Punch / Stick) SETS the level to 2, past the others (BattleCommand_Critical's jump to .Tally). ACCURACY (pokecrystal BattleCommand_CheckHit from .StatModifiers; the referee-gaps run's wave 3): the cart's byte domain throughout. accuracy is the move's byte (the wire's, 0..255); the user's accuracyStage then the negated evasionStage scale it through AccuracyLevelMultipliers (33/100, 36/100, 43/100, 50/100, 60/100, 75/100, 1/1, 133/100, 166/100, 2/1, 233/100, 133/50, 3/1 for -6..+6), the product kept wide between the passes, each pass at least 1, the result held at 255; identified (FORESIGHT) with evasionStage >= accuracyStage skips that step; brightPowder (the defender's HELD_BRIGHTPOWDER parameter) comes off it, at least 0. effectiveAccuracy is that byte; draws is false only at 255 (`cp -1 / jr z, .Hit`: no BattleRandom), and hit = byte == 255 or roll < byte for a BattleRandom roll in 0..255. alwaysHits returns hit true, effectiveAccuracy null. STATUS: freeze never thaws before a move (CheckTurn: thawed false, canMove false, whatever the roll); a freeze case with defrostByte is HandleDefrost's roll, defrosted when defrostByte < 25 (cp 10 percent); burn/poison residual GetEighthMaxHP (ITEMS eighth); burn halves physical attack; toxic GetSixteenthMaxHP(maxHp)*counter mod 65536; paralysis stops on a BattleRandom roll under 63 (`cp 25 percent`, 63/256); sleep wakes and can move when the counter hits 0. BADGES (Crystal, as gen1recomp src/battle/gen2/Battle.lua ports it): badgeStats is Effects.badgeBoost(stat, key, badges, spa) -> value, badges a set of Gold ids. ZEPHYR->atk, MINERAL->def, PLAIN->spe, GLACIER->spa, each boostStat = min(999, v + floor(v/8)); Kanto ids boost no stat; spd only when GLACIER is held and glacierBoostsSpDef(boostStat(spa)): true at >= 999, else a = (floor(v/256) - 3 - (v%256 < 231 ? 1 : 0)) mod 256 and boosted when a is odd. badgeTypes is Effects.badgeTypeBoost(typeId, badges) -> boosted: the first of the 16 DoBadgeTypeBoosts rows naming typeId (registry id, PSYCHIC_TYPE for Psychic) answers whether its badge is held. Damage's badgeTypeBoost adds max(1, floor(d/8)) right after the 997+2 tail and before STAB. STAGES (pokecrystal CalcBattleStats): stages is Effects.applyStage(stat, stage) -> value = floor(stat*pct/100) for the stage percent (25,28,33,40,50,66,100,150,200,250,300,350,400), then 0 -> 1 and anything past 999 -> 999. BATTLESTATS (CalcPlayerStats): battleStats is Effects.battleStat({stats, stages, status}, key, badges) -> value: applyStage, then the badge boost (spd's Glacier tail reads boostStat of the STAGED spa), then burn halves atk / paralysis quarters spe, each at least 1. TRUNCATE (TruncateHL_BC): truncate is Damage.truncateStats(attack, defense, link) -> attack, defense: while either is over 255, defense = floor(defense/4) and attack = floor(attack/4), each 0 -> 1; link stops after one pass; both come out mod 256 (the wrap bug). STATUS confusion: a self-hit is Damage.compute at power 40 with no crit, STAB or matchup and roll 100 (no variation) on the attack/defense given, plus itemBoostPercent when given. ITEMS (src/BattleSim2/Items.lua, pokecrystal == pokegold for every rule): `kind` picks the rule. typeBoost: Items.typeBoostPercent(sheet, typeId) -> percent = (100 + holdParam) mod 256 - 100 when the HELD_<TYPE>_BOOST names typeId, else null; Damage's itemBoostPercent applies any non-zero percent as floor(d*(100+percent)/100). quickClaw: byte < param. brightPowder: Items.brightPowder(byte, param) -> max(0, byte - param), the byte ACCURACY describes. speciesAttack (SpeciesItemBoost): LIGHT_BALL on PIKACHU doubles a special attack, THICK_CLUB on CUBONE/MAROWAK a physical one, mod 65536. metalPowder (DittoMetalPowder, folded pair): defender DITTO holding METAL_POWDER: s = def + floor(def/2); s < 256 -> def = s; else attack = max(1, floor(attack/2)), def = floor(s/2). focusBand (FalseSwipe): amount >= hp -> hp - 1 (at least 0), held true. sixteenth (GetSixteenthMaxHP): q = floor(maxHp/4) mod 256 (0 -> 1), then floor(q/4) (0 -> 1), the quarter's high byte riding through (x256). eighth (GetEighthMaxHP, LEECH SEED's sap): the same with floor(q/2). berryWants: 2*hp < maxHp. obedienceCap: first of RISING 101, STORM 70, FOG 50, HIVE 30, else 10. swap: nibble swap. napTurns: swap((2*byte) mod 256) mod 8 (0 means redraw). kingsRockMove: the referee effect ids whose script runs `kingsrock` {0,3,7,16,17,26,27,29,39,40,41,43,44,45,48,77,81,96 SNORE,101 SKY_ATTACK, and wave 3's 106..114,116,117,118,122,123,127,131,132}, minus the effect-0 moves named in Items.KINGS_ROCK_FOLDED_EXCEPTIONS (FUTURE_SIGHT, which has its own id 119 now); the Gold-native ids 87..100 but SNORE run none, nor do 115, 119..121, 124..126, 128..130. critSpeciesItem: LUCKY_PUNCH on CHANSEY, STICK on FARFETCH_D (the battle species). GOLD (the referee-gaps run's wave 3, R2c: src/BattleSim2/Effects.lua / Damage.lua / Items.lua), `kind` picks the rule: happinessPower / frustrationPower: floor(h*10/25) / floor((255-h)*10/25) mod 256, h 70 (BASE_HAPPINESS) when null. hiddenPower (HiddenPowerDamage): the DVs' top bits as atk 8 / def 4 / spe 2 / spc 1, power floor((5*that + spc%4)/2)+31, type (atk%4)*4 + def%4 into FIGHTING FLYING POISON GROUND ROCK BUG GHOST STEEL FIRE WATER GRASS ELECTRIC PSYCHIC_TYPE ICE DRAGON DARK; null with no DVs. reversalPower: q = floor(hp*48/maxHp) (maxHp >= 256: floor(floor(hp*48)/4 / (floor(maxHp/4) mod 256))) mod 256, then the first of 1:200 4:150 9:100 16:80 32:40 48:20 at or past q. magnitude: the first of 13:10/4 38:30/5 89:50/6 166:70/7 217:90/8 242:110/9 255:150/10 at or past the byte (power/magnitude). presentPower: 102:40 179:80 204:120 at or past the byte, else null (the heal). typeConstant: the cart's type constants by registry id (NORMAL 0 .. STEEL 9, CURSE_TYPE 19, FIRE 20 .. DARK 27), 0 for one it does not name. protectChance(bytes, count): b = 255 halved count times (0 fails with nothing drawn), then bytes drawn until not 0, ok when byte-1 < b; drawn is how many. tripleKickCount: bytes & 3 until not 0. psywave: bytes until 0 < byte < (level + floor(level/2)) mod 256, guarded to 1 when no byte can be. levelDamage: the level. weatherTenths: rain WATER 15 / FIRE 5, sun FIRE 15 / WATER 5, else rain + SOLARBEAM (127) 5, else null. timeHealAmount: row 2 (half), -1 off-time, then a weather +1 and -2 more unless sun; rows eighth (ITEMS eighth), quarter (GetQuarterMaxHP), half (GetHalfMaxHP), max HP. calc (DamageCalc): null at power 0; base, item, crit x2 pinned at 65535, plus carry (and carry's high byte), held at 997, plus 2. stab (BattleCommand_Stab): weatherTenths (a 0 raised to 1, past 65535 pinned), badge +max(1, floor(d/8)), STAB d + floor(d/2) mod 65536 with cReg = floor(d/2) mod 256, then the matchup percents (0 stays 0, else at least 1; a 0 percent is immune, damage 0). multiply: damage times `times`, pinned at 65535. doubleTimes: doubled count times, pinned at 65535. applyRoll: damage under 2 stands and varies false. quarter / half: GetQuarterMaxHP / GetHalfMaxHP. sleepCount: SleepTarget's bytes & 7 until neither 0 nor 7, plus 1 (a counter of 2..7). movePriority: the sheet's priority, else VITAL_THROW 0 by id, else the effect rows 120/121 -> 3 and 122/123 -> 0, else the move-id table, else 1.",
+  "notes": "Synthetic Gen2 mechanic vectors for Lua/JS BattleSim2 parity. No ROM data: every number is synthetic; ITEMS names only the item and species ids the carts' id-keyed rules compare against (pret labels, not ROM bytes) and the HELD_* effect names, never a value read from an item row. All arithmetic is integer. DAMAGE (pokecrystal BattleCommand_DamageCalc): no 255-stat clamp inside compute(), which takes the byte pair TruncateHL_BC hands it (see TRUNCATE). levelTerm = floor(2L/5)+2 (crit does NOT double L). base = floor(floor(levelTerm*power*attack/defense)/50). Then optional item boost, crit x2, then min(d,997)+2. STAB floor(d*15/10). Type effectiveness is a list of percents applied one at a time as floor(d*pct/100) with a non-immune floor of 1. Variation last: when modified>=2, damage=max(1,floor(d*roll/255)) for roll in 217..255 (DamageVariation's rotated BattleRandom byte, redrawn under `85 percent + 1`; the referee-gaps run's wave 4), with NO cap after it: the 997+2 tail is the one cap, and STAB, the matchup, RageDamage (x(count+1), pinned at 65535) and the variation keep 16-bit results (dmg_cap_997_then_no_cap: 999 x1.5 x2 = 2996). Physical reads attack/atk; special (physical:false) reads spa (legacy spc) vs spd (legacy spc). CRIT: data/battle/critical_hit_chances.asm by critical level 0..6, `1 out_of N` = 17, 32, 64, 85, 128, 128, 128 (chance); isCrit when the BattleRandom byte roll (0..255) is under it (`.Tally`'s `cp [hl] / ret nc`; wave 4). Level += focusEnergy(+1), highCritMove(+2), scopeLens(+1), capped at 6; speciesItemBonus (Lucky Punch / Stick) SETS the level to 2, past the others (BattleCommand_Critical's jump to .Tally). ACCURACY (pokecrystal BattleCommand_CheckHit from .StatModifiers; the referee-gaps run's wave 3): the cart's byte domain throughout. accuracy is the move's byte (the wire's, 0..255); the user's accuracyStage then the negated evasionStage scale it through AccuracyLevelMultipliers (33/100, 36/100, 43/100, 50/100, 60/100, 75/100, 1/1, 133/100, 166/100, 2/1, 233/100, 133/50, 3/1 for -6..+6), the product kept wide between the passes, each pass at least 1, the result held at 255; identified (FORESIGHT) with evasionStage >= accuracyStage skips that step; brightPowder (the defender's HELD_BRIGHTPOWDER parameter) comes off it, at least 0. effectiveAccuracy is that byte; draws is false only at 255 (`cp -1 / jr z, .Hit`: no BattleRandom), and hit = byte == 255 or roll < byte for a BattleRandom roll in 0..255. alwaysHits returns hit true, effectiveAccuracy null. STATUS: freeze never thaws before a move (CheckTurn: thawed false, canMove false, whatever the roll); a freeze case with defrostByte is HandleDefrost's roll, defrosted when defrostByte < 25 (cp 10 percent); burn/poison residual GetEighthMaxHP (ITEMS eighth); burn halves physical attack; toxic GetSixteenthMaxHP(maxHp)*counter mod 65536; paralysis stops on a BattleRandom roll under 63 (`cp 25 percent`, 63/256); sleep wakes and can move when the counter hits 0. BADGES (Crystal, as gen1recomp src/battle/gen2/Battle.lua ports it): badgeStats is Effects.badgeBoost(stat, key, badges, spa) -> value, badges a set of Gold ids. ZEPHYR->atk, MINERAL->def, PLAIN->spe, GLACIER->spa, each boostStat = min(999, v + floor(v/8)); Kanto ids boost no stat; spd only when GLACIER is held and glacierBoostsSpDef(boostStat(spa)): true at >= 999, else a = (floor(v/256) - 3 - (v%256 < 231 ? 1 : 0)) mod 256 and boosted when a is odd. badgeTypes is Effects.badgeTypeBoost(typeId, badges) -> boosted: the first of the 16 DoBadgeTypeBoosts rows naming typeId (registry id, PSYCHIC_TYPE for Psychic) answers whether its badge is held. Damage's badgeTypeBoost adds max(1, floor(d/8)) right after the 997+2 tail and before STAB. STAGES (pokecrystal CalcBattleStats): stages is Effects.applyStage(stat, stage) -> value = floor(stat*pct/100) for the stage percent (25,28,33,40,50,66,100,150,200,250,300,350,400), then 0 -> 1 and anything past 999 -> 999. BATTLESTATS (CalcPlayerStats): battleStats is Effects.battleStat({stats, stages, status}, key, badges) -> value: applyStage, then the badge boost (spd's Glacier tail reads boostStat of the STAGED spa), then burn halves atk / paralysis quarters spe, each at least 1. TRUNCATE (TruncateHL_BC): truncate is Damage.truncateStats(attack, defense, link) -> attack, defense: while either is over 255, defense = floor(defense/4) and attack = floor(attack/4), each 0 -> 1; link stops after one pass; both come out mod 256 (the wrap bug). STATUS confusion: a self-hit is Damage.compute at power 40 with no crit, STAB or matchup and roll 100 (no variation) on the attack/defense given, plus itemBoostPercent when given. ITEMS (src/BattleSim2/Items.lua, pokecrystal == pokegold for every rule): `kind` picks the rule. typeBoost: Items.typeBoostPercent(sheet, typeId) -> percent = (100 + holdParam) mod 256 - 100 when the HELD_<TYPE>_BOOST names typeId, else null; Damage's itemBoostPercent applies any non-zero percent as floor(d*(100+percent)/100). quickClaw: byte < param. brightPowder: Items.brightPowder(byte, param) -> max(0, byte - param), the byte ACCURACY describes. speciesAttack (SpeciesItemBoost): LIGHT_BALL on PIKACHU doubles a special attack, THICK_CLUB on CUBONE/MAROWAK a physical one, mod 65536. metalPowder (DittoMetalPowder, folded pair): defender DITTO holding METAL_POWDER: s = def + floor(def/2); s < 256 -> def = s; else attack = max(1, floor(attack/2)), def = floor(s/2). focusBand (FalseSwipe): amount >= hp -> hp - 1 (at least 0), held true. sixteenth (GetSixteenthMaxHP): q = floor(maxHp/4) mod 256 (0 -> 1), then floor(q/4) (0 -> 1), the quarter's high byte riding through (x256). eighth (GetEighthMaxHP, LEECH SEED's sap): the same with floor(q/2). berryWants: 2*hp < maxHp. obedienceCap: first of RISING 101, STORM 70, FOG 50, HIVE 30, else 10. swap: nibble swap. napTurns: swap((2*byte) mod 256) mod 8 (0 means redraw). kingsRockMove: the referee effect ids whose script runs `kingsrock` {0,3,7,16,17,26,27,29,39,40,41,43,44,45,48,77,81,96 SNORE,101 SKY_ATTACK, and wave 3's 106..114,116,117,118,122,123,127,131,132}, minus the effect-0 moves named in Items.KINGS_ROCK_FOLDED_EXCEPTIONS (FUTURE_SIGHT, which has its own id 119 now); the Gold-native ids 87..100 but SNORE run none, nor do 115, 119..121, 124..126, 128..130. critSpeciesItem: LUCKY_PUNCH on CHANSEY, STICK on FARFETCH_D (the battle species). GOLD (the referee-gaps run's wave 3, R2c: src/BattleSim2/Effects.lua / Damage.lua / Items.lua), `kind` picks the rule: happinessPower / frustrationPower: floor(h*10/25) / floor((255-h)*10/25) mod 256, h 70 (BASE_HAPPINESS) when null. hiddenPower (HiddenPowerDamage): the DVs' top bits as atk 8 / def 4 / spe 2 / spc 1, power floor((5*that + spc%4)/2)+31, type (atk%4)*4 + def%4 into FIGHTING FLYING POISON GROUND ROCK BUG GHOST STEEL FIRE WATER GRASS ELECTRIC PSYCHIC_TYPE ICE DRAGON DARK; null with no DVs. reversalPower: q = floor(hp*48/maxHp) (maxHp >= 256: floor(floor(hp*48)/4 / (floor(maxHp/4) mod 256))) mod 256, then the first of 1:200 4:150 9:100 16:80 32:40 48:20 at or past q. magnitude: the first of 13:10/4 38:30/5 89:50/6 166:70/7 217:90/8 242:110/9 255:150/10 at or past the byte (power/magnitude). presentPower: 102:40 179:80 204:120 at or past the byte, else null (the heal). typeConstant: the cart's type constants by registry id (NORMAL 0 .. STEEL 9, CURSE_TYPE 19, FIRE 20 .. DARK 27), 0 for one it does not name. protectChance(bytes, count): b = 255 halved count times (0 fails with nothing drawn), then bytes drawn until not 0, ok when byte-1 < b; drawn is how many. tripleKickCount: bytes & 3 until not 0. psywave: bytes until 0 < byte < (level + floor(level/2)) mod 256, guarded to 1 when no byte can be. levelDamage: the level. weatherTenths: rain WATER 15 / FIRE 5, sun FIRE 15 / WATER 5, else rain + SOLARBEAM (127) 5, else null. timeHealAmount: row 2 (half), -1 off-time, then a weather +1 and -2 more unless sun; rows eighth (ITEMS eighth), quarter (GetQuarterMaxHP), half (GetHalfMaxHP), max HP. calc (DamageCalc): null at power 0; base, item, crit x2 pinned at 65535, plus carry (and carry's high byte), held at 997, plus 2. stab (BattleCommand_Stab): weatherTenths (a 0 raised to 1, past 65535 pinned), badge +max(1, floor(d/8)), STAB d + floor(d/2) mod 65536 with cReg = floor(d/2) mod 256, then the matchup percents (0 stays 0, else at least 1; a 0 percent is immune, damage 0). multiply: damage times `times`, pinned at 65535. doubleTimes: doubled count times, pinned at 65535. applyRoll: damage under 2 stands and varies false. quarter / half: GetQuarterMaxHP / GetHalfMaxHP. sleepCount: SleepTarget's bytes & 7 until neither 0 nor 7, plus 1 (a counter of 2..7). movePriority: the sheet's priority, else VITAL_THROW 0 by id, else the effect rows 120/121 -> 3 and 122/123 -> 0, else the move-id table, else 1.",
   "damage": [
     {
       "id": "dmg_physical_basic",
@@ -14,7 +14,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -37,7 +37,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -60,7 +60,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -84,7 +84,7 @@
         "stab": true,
         "typeEffect": [100],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -105,7 +105,7 @@
         "stab": false,
         "typeEffect": [200],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -126,7 +126,7 @@
         "stab": false,
         "typeEffect": [50],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -147,7 +147,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": true,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 22,
@@ -169,7 +169,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": false,
-        "roll": 85
+        "roll": 217
       },
       "out": {
         "levelTerm": 22,
@@ -213,7 +213,7 @@
         "stab": true,
         "typeEffect": [200],
         "crit": true,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "levelTerm": 42,
@@ -234,7 +234,7 @@
         "stab": false,
         "typeEffect": [0],
         "crit": false,
-        "roll": 100
+        "roll": 255
       },
       "out": {
         "modified": 0,
@@ -255,7 +255,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": false,
-        "roll": 100,
+        "roll": 255,
         "badgeTypeBoost": true
       },
       "out": {
@@ -275,7 +275,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": false,
-        "roll": 100,
+        "roll": 255,
         "badgeTypeBoost": true
       },
       "out": {
@@ -295,7 +295,7 @@
         "stab": true,
         "typeEffect": [200],
         "crit": false,
-        "roll": 100,
+        "roll": 255,
         "badgeTypeBoost": true
       },
       "out": {
@@ -315,7 +315,7 @@
         "stab": false,
         "typeEffect": [100],
         "crit": true,
-        "roll": 100,
+        "roll": 255,
         "badgeTypeBoost": true
       },
       "out": {
@@ -346,9 +346,9 @@
         "damage": null
       }
     },
-    { "id": "dmg_crit_after_item_boost", "in": { "level": 50, "power": 40, "attack": 100, "defense": 100, "physical": true, "stab": false, "typeEffect": [100], "crit": true, "roll": 100, "itemBoostPercent": 10 }, "out": { "base": 17, "modified": 38, "damage": 38 } },
-    { "id": "dmg_after_link_wrap", "in": { "level": 30, "power": 70, "attack": 50, "defense": 44, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 100 }, "out": { "base": 22, "modified": 24, "damage": 24 } },
-    { "id": "dmg_item_boost_byte_wraps", "in": { "level": 50, "power": 40, "attack": 100, "defense": 100, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 100, "itemBoostPercent": -56 }, "out": { "base": 17, "modified": 9, "damage": 9 } }
+    { "id": "dmg_crit_after_item_boost", "in": { "level": 50, "power": 40, "attack": 100, "defense": 100, "physical": true, "stab": false, "typeEffect": [100], "crit": true, "roll": 255, "itemBoostPercent": 10 }, "out": { "base": 17, "modified": 38, "damage": 38 } },
+    { "id": "dmg_after_link_wrap", "in": { "level": 30, "power": 70, "attack": 50, "defense": 44, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 255 }, "out": { "base": 22, "modified": 24, "damage": 24 } },
+    { "id": "dmg_item_boost_byte_wraps", "in": { "level": 50, "power": 40, "attack": 100, "defense": 100, "physical": true, "stab": false, "typeEffect": [100], "crit": false, "roll": 255, "itemBoostPercent": -56 }, "out": { "base": 17, "modified": 9, "damage": 9 } }
   ],
   "accuracy": [
     { "id": "acc_255_hits_and_draws_nothing", "in": { "accuracy": 255, "roll": 255, "accuracyStage": 0, "evasionStage": 0 }, "out": { "hit": true, "effectiveAccuracy": 255, "draws": false } },
@@ -375,31 +375,32 @@
   "crit": [
     {
       "id": "crit_level0_hit",
-      "in": { "criticalLevel": 0, "roll": 0 },
-      "out": { "isCrit": true, "chance": 15, "level": 0 }
+      "in": { "criticalLevel": 0, "roll": 16 },
+      "out": { "isCrit": true, "chance": 17, "level": 0 }
     },
     {
       "id": "crit_level0_miss",
-      "in": { "criticalLevel": 0, "roll": 1 },
-      "out": { "isCrit": false, "chance": 15, "level": 0 }
+      "in": { "criticalLevel": 0, "roll": 17 },
+      "out": { "isCrit": false, "chance": 17, "level": 0 }
     },
     {
       "id": "crit_focus_energy_level1",
       "in": { "criticalLevel": 0, "roll": 0, "focusEnergy": true },
-      "out": { "isCrit": true, "chance": 8, "level": 1 }
+      "out": { "isCrit": true, "chance": 32, "level": 1 }
     },
     {
       "id": "crit_high_crit_move_level2",
       "in": { "criticalLevel": 0, "roll": 0, "highCritMove": true },
-      "out": { "isCrit": true, "chance": 4, "level": 2 }
+      "out": { "isCrit": true, "chance": 64, "level": 2 }
     },
     {
       "id": "crit_ladder_level3",
-      "in": { "criticalLevel": 3, "roll": 2 },
-      "out": { "isCrit": false, "chance": 3, "level": 3 }
+      "in": { "criticalLevel": 3, "roll": 85 },
+      "out": { "isCrit": false, "chance": 85, "level": 3 }
     },
-    { "id": "crit_species_item_sets_level2", "in": { "criticalLevel": 0, "roll": 0, "speciesItemBonus": true, "focusEnergy": true, "highCritMove": true, "scopeLens": true }, "out": { "isCrit": true, "chance": 4, "level": 2 } },
-    { "id": "crit_scope_lens_level1", "in": { "criticalLevel": 0, "roll": 1, "scopeLens": true }, "out": { "isCrit": false, "chance": 8, "level": 1 } }
+    { "id": "crit_species_item_sets_level2", "in": { "criticalLevel": 0, "roll": 63, "speciesItemBonus": true, "focusEnergy": true, "highCritMove": true, "scopeLens": true }, "out": { "isCrit": true, "chance": 64, "level": 2 } },
+    { "id": "crit_scope_lens_level1", "in": { "criticalLevel": 0, "roll": 32, "scopeLens": true }, "out": { "isCrit": false, "chance": 32, "level": 1 } },
+    { "id": "crit_level6_byte_128", "in": { "criticalLevel": 6, "roll": 127 }, "out": { "isCrit": true, "chance": 128, "level": 6 } }
   ],
   "status": [
     {
@@ -762,9 +763,9 @@
     { "id": "triple_kick_pins", "in": { "kind": "multiply", "damage": 40000, "times": 2 }, "out": { "damage": 65535 } },
     { "id": "rollout_x16", "in": { "kind": "doubleTimes", "damage": 30, "count": 4 }, "out": { "damage": 480 } },
     { "id": "rollout_pins", "in": { "kind": "doubleTimes", "damage": 999, "count": 8 }, "out": { "damage": 65535 } },
-    { "id": "roll_skips_one", "in": { "kind": "applyRoll", "damage": 1, "roll": 85 }, "out": { "damage": 1, "varies": false } },
-    { "id": "roll_skips_zero", "in": { "kind": "applyRoll", "damage": 0, "roll": 85 }, "out": { "damage": 0, "varies": false } },
-    { "id": "roll_two", "in": { "kind": "applyRoll", "damage": 2, "roll": 85 }, "out": { "damage": 1, "varies": true } },
+    { "id": "roll_skips_one", "in": { "kind": "applyRoll", "damage": 1, "roll": 217 }, "out": { "damage": 1, "varies": false } },
+    { "id": "roll_skips_zero", "in": { "kind": "applyRoll", "damage": 0, "roll": 217 }, "out": { "damage": 0, "varies": false } },
+    { "id": "roll_two", "in": { "kind": "applyRoll", "damage": 2, "roll": 217 }, "out": { "damage": 1, "varies": true } },
     { "id": "quarter_small", "in": { "kind": "quarter", "maxHp": 3 }, "out": { "value": 1 } },
     { "id": "quarter_1024", "in": { "kind": "quarter", "maxHp": 1024 }, "out": { "value": 257 } },
     { "id": "half_one", "in": { "kind": "half", "maxHp": 1 }, "out": { "value": 1 } },

@@ -2336,6 +2336,244 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- Wave 4 of docs/plans/gen12-referee-gaps-fix.md, the wire: Red's MIMIC
+-- pick rides a Gen 1 choice (`mimic`, 0..3 into the target's moves; Gold and
+-- Gen 3 ignore it, a bad one refuses the choice), and Gold's wTimeOfDay a
+-- Gen 2 ruleset (`timeOfDay`, morn / day / nite; Red and Gen 3 ignore it, a
+-- bad one refuses the ruleset).  Wire.battleChoice / Wire.battleRuleset and
+-- their sanitize twins.
+-- ------------------------------------------------------------------
+
+local function wave4()
+  local function fight(extra) return merged({ battle = "b1", action = "fight", move = 0 }, extra) end
+  local function rules(extra) return merged({ chart = CHART }, extra) end
+  return {
+    { "choice", fight({ mimic = 0 }), 1 },
+    { "choice", fight({ mimic = 3 }), 1 },
+    { "choice", fight({ mimic = 4 }), 1 },
+    { "choice", fight({ mimic = -1 }), 1 },
+    { "choice", fight({ mimic = "2" }), 1 },
+    { "choice", fight({ mimic = " 1 " }), 1 },
+    { "choice", fight({ mimic = "0x1" }), 1 },
+    { "choice", fight({ mimic = 1.5 }), 1 },
+    { "choice", fight({ mimic = true }), 1 },
+    { "choice", fight({ mimic = "one" }), 1 },
+    { "choice", fight({ mimic = { 1 } }), 1 },
+    { "choice", fight({ mimic = NULL }), 1 },
+    { "choice", { battle = "b1", action = "switch", slot = 1, mimic = 2 }, 1 },
+    { "choice", { battle = "b1", action = "run", mimic = 7 }, 1 },
+    { "choice", fight({ mimic = 2 }), 2 },
+    { "choice", fight({ mimic = 9 }), 2 },
+    { "choice", fight({ mimic = 2 }), 3 },
+    { "choice", fight({ mimic = 9 }), 3 },
+    { "choice", fight({ mimic = 2 }) },
+    { "choice", fight({ mimic = 9 }) },
+    { "ruleset", rules({ timeOfDay = "morn" }), 2 },
+    { "ruleset", rules({ timeOfDay = "day" }), 2 },
+    { "ruleset", rules({ timeOfDay = "nite" }), 2 },
+    { "ruleset", rules({ timeOfDay = "NITE" }), 2 },
+    { "ruleset", rules({ timeOfDay = "night" }), 2 },
+    { "ruleset", rules({ timeOfDay = "eve" }), 2 },
+    { "ruleset", rules({ timeOfDay = "darkness" }), 2 },
+    { "ruleset", rules({ timeOfDay = "" }), 2 },
+    { "ruleset", rules({ timeOfDay = 2 }), 2 },
+    { "ruleset", rules({ timeOfDay = true }), 2 },
+    { "ruleset", rules({ timeOfDay = { "nite" } }), 2 },
+    { "ruleset", rules({ timeOfDay = NULL }), 2 },
+    { "ruleset", rules({ timeOfDay = "day", metronomePool = { row12("m", { priority = 1 }) } }), 2 },
+    { "ruleset", rules({ timeOfDay = "nite" }), 1 },
+    { "ruleset", rules({ timeOfDay = "evening" }), 1 },
+    { "ruleset", rules({ timeOfDay = "nite" }) },
+    { "ruleset", rules({ timeOfDay = "evening" }) },
+    { "ruleset", { typeTable = CHART3, timeOfDay = "nite" }, 3 },
+    { "ruleset", { typeTable = CHART3, timeOfDay = "evening" }, 3 },
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "referee_gaps_wave4_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(wave4()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      local got
+      if kind == "choice" then got = Wire.battleChoice(input, gen)
+      elseif kind == "ruleset" then got = Wire.battleRuleset(input, gen)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    return out
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- Wave 4, the hubs and the real referees: a learn is judged against the
+-- PARTY list and reaches the battle list only as the cart's LearnMove does
+-- (`learnTo`).  Red's MIMIC pick reaches the referee off the wire (`mimic`
+-- 1 copies the foe's second move; none, its first); a re-send of the same
+-- ids (a level-up with no new move) leaves the copy in the fight; the copy
+-- sent back as a learn is refused; a real learn lands (Red's LearnMove
+-- copies the party list over the copy), and the switch-out gives back the
+-- learned list.  Red and Gold: a re-send on a transformed battler leaves the
+-- copied moves (on Red it used to replace them), and a MIMIC used before the
+-- Transform is folded into the list put aside.  Gold's referee keeps no
+-- saved MIMIC row yet, so its MIMIC run is pinned as each hub plays it, and
+-- the Gold rules are driven through the exported `learnTo` on synthetic
+-- state.  Last, Gold's wTimeOfDay reaches the referee off a Gen 2 ruleset
+-- (MOONLIGHT heals half at night, a quarter by day, half with no clock) and
+-- a Red hub reads none.
+-- ------------------------------------------------------------------
+
+local function overlayHub(generation, id, aMoves)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  hub:openCoopBattle(id, { a.id }, { mode = "wild", hostId = a.id })
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet12(generation, { species = "COPYCAT", moves = aMoves }),
+    sheet12(generation, { species = "BENCH", moves = { row12("TACKLE", { pp = 10, power = 1 }) } }) } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet12(generation, { species = "FOE", moves = { row12("GROWL", { pp = 10, power = 0 }),
+                                                     row12("HUSH", { pp = 10, power = 0 }) } }) } })
+  return hub, a, hub.battles[id]
+end
+
+local function ovMove(moveId, effect, power)
+  return row12(moveId, { pp = 10, power = power or 0, effect = effect or 0 })
+end
+
+local function lookOverlay(live)
+  local saved = live.preTransform
+  local mimic = live.preMimic
+  local kept = {}
+  if type(mimic) == "table" then
+    for i = 1, 4 do kept[#kept + 1] = mimic[i] and (i .. ":" .. mimic[i].id) or nil end
+  end
+  return {
+    transformed = live.transformed == true,
+    battle = slimRows(live.moves),
+    party = saved and slimRows(saved.moves) or "(none)",
+    mimic = kept,
+  }
+end
+
+local function mimicLearn(generation, pick)
+  local id = "m1"
+  local hub, a, record = overlayHub(generation, id, { ovMove("MIMIC", 82), ovMove("TACKLE", 0, 1) })
+  if not (record and record.sim) then return { opened = false } end
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0,
+                          mimic = pick })
+  local live = record.sim.byId[a.id].mons[1]
+  local steps = { lookOverlay(live) }
+  local function send(moves)
+    hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0, moves = moves })
+    steps[#steps + 1] = lookOverlay(live)
+  end
+  -- a level-up with no new move: the party's ids again
+  send({ ovMove("MIMIC", 82), ovMove("TACKLE", 0, 1) })
+  -- the battle list sent back as a learn
+  send({ ovMove(live.moves[1].id), ovMove("TACKLE", 0, 1), ovMove("LEARNT", 0, 40) })
+  -- a learn
+  send({ ovMove("MIMIC", 82), ovMove("TACKLE", 0, 1), ovMove("LEARNT", 0, 40) })
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "switch", slot = 1 })
+  steps[#steps + 1] = lookOverlay(live)
+  return { opened = true, steps = steps }
+end
+
+local function transformResend(generation, mimicFirst)
+  local id = "t2"
+  local moves = { ovMove("TRANSFORM", 57), ovMove("TACKLE", 0, 1) }
+  if mimicFirst then moves = { ovMove("MIMIC", 82), ovMove("TRANSFORM", 57), ovMove("TACKLE", 0, 1) } end
+  local hub, a, record = overlayHub(generation, id, moves)
+  if not (record and record.sim) then return { opened = false } end
+  if mimicFirst then
+    hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0, mimic = 1 })
+  end
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight",
+                          move = mimicFirst and 1 or 0 })
+  local live = record.sim.byId[a.id].mons[1]
+  local steps = { lookOverlay(live) }
+  local own = {}
+  for i, m in ipairs(moves) do own[i] = m end
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0, moves = own })
+  steps[#steps + 1] = lookOverlay(live)
+  own[#own + 1] = ovMove("LEARNT", 0, 40)
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0, moves = own })
+  steps[#steps + 1] = lookOverlay(live)
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "switch", slot = 1 })
+  steps[#steps + 1] = lookOverlay(live)
+  return { opened = true, steps = steps }
+end
+
+-- The exported rule on synthetic state: a MIMIC's copy in slot 1 (`pp` its
+-- PP), the party's MIMIC saved at 9 PP, and optionally a Transform over it.
+local function synthLearn(generation, transformed)
+  local function own() return { [1] = ovMove("MIMIC", 82) } end
+  local mon
+  if transformed then
+    mon = { transformed = true, moves = { ovMove("COPY") },
+            preTransform = { moves = { row12("HUSH", { pp = 4 }), ovMove("TACKLE", 0, 1) } } }
+  else
+    mon = { moves = { row12("HUSH", { pp = 4 }), ovMove("TACKLE", 0, 1) } }
+  end
+  mon.preMimic = own()
+  mon.preMimic[1].pp = 9
+  local steps = {}
+  local function try(moves)
+    steps[#steps + 1] = { applied = Hub.learnTo(generation, mon, moves), state = lookOverlay(mon) }
+  end
+  try({ ovMove("MIMIC", 82), ovMove("TACKLE", 0, 1) })
+  try({ ovMove("NEW"), ovMove("BBB") })
+  try({ ovMove("MIMIC", 82), ovMove("TACKLE", 0, 1), ovMove("LEARNT", 0, 40) })
+  return steps
+end
+
+local function timeHeal(generation, timeOfDay)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  local id = "h1"
+  hub:openCoopBattle(id, { a.id }, { mode = "wild", hostId = a.id })
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART, timeOfDay = timeOfDay })
+  local record = hub.battles[id]
+  local kept = record and record.ruleset and orNil(record.ruleset.timeOfDay) or "(no ruleset)"
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet12(generation, { species = "MOTH", hp = 40, moves = { ovMove("MOONLIGHT", 130) } }) } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet12(generation, { species = "FOE", moves = { ovMove("HUSH") } }) } })
+  if not (record and record.sim) then return { opened = false, kept = kept } end
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  return { opened = true, kept = kept, simTime = orNil(record.sim.timeOfDay),
+           hp = record.sim.byId[a.id].mons[1].hp }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "overlay_learn_and_time",
+  run = function()
+    return {
+      redMimicPick = mimicLearn(1, 1),
+      redMimicNone = mimicLearn(1, nil),
+      goldMimic = mimicLearn(2, 1),
+      redTransform = transformResend(1, false),
+      goldTransform = transformResend(2, false),
+      redMimicTransform = transformResend(1, true),
+      redSynth = synthLearn(1, false),
+      goldSynth = synthLearn(2, false),
+      redSynthT = synthLearn(1, true),
+      goldSynthT = synthLearn(2, true),
+      goldNite = timeHeal(2, "nite"),
+      goldDay = timeHeal(2, "day"),
+      goldMorn = timeHeal(2, "morn"),
+      goldNone = timeHeal(2, nil),
+      goldBad = timeHeal(2, "evening"),
+      redNite = timeHeal(1, "nite"),
+      redBad = timeHeal(1, "evening"),
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

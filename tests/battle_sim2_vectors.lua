@@ -623,7 +623,9 @@ do
     stream(12345, 8, function(r) return r:below(4) end))
   rngCheck("k12_below_17", "11,13,15,10,3,9,11,15",
     stream(12345, 8, function(r) return r:below(17) end))
-  rngCheck("k12_damage_roll", "94,97,97,94,92,95,87,85",
+  -- R2d: DamageVariation's loop -- a rotated byte, redrawn under 217 -- so
+  -- a roll is 217..255 and takes as many draws as the loop does.
+  rngCheck("k12_damage_roll", "251,237,234,251,253,240,224,220",
     stream(12345, 8, function(r) return r:damageRoll() end))
   rngCheck("k12_accuracy_roll", "37,84,96,9,39,70,98,36",
     stream(12345, 8, function(r) return r:nextInt(0, 99) end))

@@ -1930,8 +1930,8 @@ function M.layout(ctx)
       foe = pendingCount(ctx.pendingSeats, "foe"),
     },
     frame = num(ctx.frame, 0),
-    -- Gen 3's weather over the field ("RAIN" | "SUN" | "SAND" | "HAIL"), nil
-    -- when the sky is clear. Only a Gen 3 draw paints it (M.draw).
+    -- The weather over the field ("RAIN" | "SUN" | "SAND" | "HAIL"), nil
+    -- when the sky is clear. A Gen 3 or a Gold draw paints it (M.draw).
     weather = M.weatherKey(ctx.weather),
     -- Bench evolution movie: a front pic in the middle of the field, with
     -- the same white pulse the on-plate `evolve` fx uses.
@@ -6074,9 +6074,11 @@ function M.draw(battle, ctx, eng)
       -- Balls / poofs sit above the mons (a ball occludes the seat it lands
       -- on) but under the HUD, which never yields the field.
       if hasFx then pcall(drawFieldFx, layout) end
-      -- Gen 3's weather, over the field and under the HUD, the order the
-      -- cart layers its own rain and sandstorm in.
-      if drawGen3 and layout.weather then
+      -- The weather, over the field and under the HUD, the order the cart
+      -- layers its own rain and sandstorm in: Gen 3's `weather` events, and
+      -- Gold's RAIN DANCE / SUNNY DAY / SANDSTORM, read off the referee's
+      -- lines (MediatedBattle.weatherOfLine2).  Red has none to state.
+      if (drawGen3 or drawGen2) and layout.weather then
         pcall(M.drawWeather, layout.weather, 0, M.FIELD_TOP, M.WIDTH,
           M.FIELD_HEIGHT, layout.frame, 1)
       end

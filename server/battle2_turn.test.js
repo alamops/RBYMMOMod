@@ -2071,7 +2071,8 @@ scenario('r2c_fixed_damage', (events) => seq(events, duo3('r3x', '1v1', 722,
   [mn({ species: 'Beta', maxHp: 999, spe: 10, types: [0], moves: [hm('tap', 1)] })]),
 [both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0))]));
 
-scenario('r2c_checkhit', (events) => seq(events, duo3('r3i', '1v1', 723,
+// Seed 724 since R2d's crit byte and DamageVariation loop (the Lua driver).
+scenario('r2c_checkhit', (events) => seq(events, duo3('r3i', '1v1', 724,
   [mn({ species: 'Alpha', maxHp: 400, spe: 90, stages: { acc: 1 },
     moves: [am('wide_hit', 40, 0, 0, 178), am('JUMP_KICK', 70, 1, 45, 76),
       hm('tap', 1), am('HI_JUMP_KICK', 85, 1, 45, 229)] })],
@@ -2080,7 +2081,8 @@ scenario('r2c_checkhit', (events) => seq(events, duo3('r3i', '1v1', 723,
 [both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), S(1)),
   both3(F(3), F(0)), both3(F(0), F(0))]));
 
-scenario('r2c_checkturn', (events) => seq(events, duo3('r3j', '1v1', 724,
+// Seed 725 since R2d: Gold's DISABLE needs Beta's thump to land first (the Lua driver).
+scenario('r2c_checkturn', (events) => seq(events, duo3('r3j', '1v1', 725,
   [mn({ species: 'Alpha', maxHp: 600, spe: 90,
     moves: [hm('tap', 1), hm('DISABLE', 0, 0, 86), am('HYPNOSIS', 0, 8, 32, 255)] })],
   [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'PAR',
@@ -2103,6 +2105,293 @@ scenario('r2c_flinch', (events) => seq(events, duo3('r3z', '1v1', 726,
     mn({ species: 'Gamma', maxHp: 900, spe: 200, moves: [hm('BITE', 20, 7, 31, 60, 100)] })],
   [mn({ species: 'Beta', maxHp: 999, spe: 90, moves: [hm('tap', 1), hm('HYPER_BEAM', 50, 0, 80)] })]),
 [both3(F(0), F(0)), both3(S(1), F(1)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+// ------------------------------------------------------------------
+// the referee-gaps run's wave 4 (R2d): the Gold status and field scripts and
+// the rest of R2b's / R2c's cart differences -- the Lua driver carries what
+// each scenario pins. The ruleset adds FLYING and POISON to R2c's; `base.gender`
+// is the proposed K15 byte.
+// ------------------------------------------------------------------
+
+const R2D_TYPES = ['NORMAL', 'FIGHTING', 'GHOST', 'WATER', 'FIRE', 'ROCK', 'STEEL',
+  'DARK', 'PSYCHIC_TYPE', 'GRASS', 'ELECTRIC', 'GROUND', 'FLYING', 'POISON'];
+const R2D_CHART = [];
+for (let i = 0; i < 14; i += 1) R2D_CHART.push(new Array(14).fill(100));
+R2D_CHART[0][2] = 0;
+R2D_CHART[1][2] = 0;
+R2D_CHART[2][0] = 0;
+R2D_CHART[10][11] = 0;
+R2D_CHART[3][4] = 200;
+R2D_CHART[4][3] = 50;
+R2D_CHART[4][4] = 50;
+R2D_CHART[4][5] = 50;
+const R2D_SPECIAL = [3, 4, 7, 8, 9, 10];
+const duo4 = (id, mode, seed, aMons, bMons, extra = {}) => {
+  const o = duo(id, mode, seed, aMons, bMons, {
+    typeIds: R2D_TYPES, metronomePool: extra.metronomePool,
+  });
+  o.chart = R2D_CHART;
+  o.specialTypes = R2D_SPECIAL;
+  if (extra.foe) o.sides.b[0].playerId = extra.foe;
+  return o;
+};
+const FP = (i, pass) => ({ action: 'fight', move: i, pass });
+const MALE = { base: { hp: 50, atk: 50, def: 50, spe: 50, spa: 50, spd: 50, gender: 127 },
+  dvs: { atk: 15, def: 8, spe: 15, spc: 8 } };
+const FEMALE = { base: { hp: 50, atk: 50, def: 50, spe: 50, spa: 50, spd: 50, gender: 127 },
+  dvs: { atk: 2, def: 8, spe: 2, spc: 8 } };
+const sexed = (o, sex) => mn({ ...o, base: sex.base, dvs: sex.dvs });
+
+scenario('r2d_attract', (events) => seq(events, duo4('r4a', '1v1', 801,
+  [sexed({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('ATTRACT', 0, 0, 133), hm('tap', 1)] }, MALE),
+    mn({ species: 'Gamma', maxHp: 900, spe: 90, moves: [hm('ATTRACT', 0, 0, 133), hm('tap', 1)] })],
+  [sexed({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] }, FEMALE)]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0)),
+  both3(S(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0))]));
+
+scenario('r2d_baton_pass', (events) => seq(events, duo4('r4b', '1v1', 802,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [hm('SPIKES', 0, 0, 149), hm('MEAN_LOOK', 0, 0, 142), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 10,
+    moves: [hm('SWORDS_DANCE', 0, 0, 50), hm('SUBSTITUTE', 0, 0, 79), hm('BATON_PASS', 0, 0, 134)] }),
+  mn({ species: 'Delta', maxHp: 400, spe: 10, moves: [hm('tap', 1)] }),
+  mn({ species: 'Eps', maxHp: 400, spe: 10, moves: [hm('thump', 20)] })]),
+[both3(F(0), F(0)), both3(F(1), F(1)), both3(F(2), FP(2, 2)), both3(F(2), F(0)), both3(F(0), F(0)),
+  both3(F(2), F(0))]));
+
+scenario('r2d_belly_drum', (events) => seq(events, duo4('r4c', '1v1', 803,
+  [mn({ species: 'Alpha', maxHp: 400, hp: 50, spe: 90, moves: [hm('BELLY_DRUM', 0, 0, 135)] }),
+    mn({ species: 'Gamma', maxHp: 400, spe: 90, moves: [hm('BELLY_DRUM', 0, 0, 135), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(S(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+  both3(F(1), F(0))]));
+
+scenario('r2d_curse', (events) => seq(events, duo4('r4d', '1v1', 804,
+  [mn({ species: 'Gamma', maxHp: 400, spe: 90, types: [0], stages: { atk: 5, def: 6 },
+    moves: [hm('CURSE', 0, 2, 137)] }),
+  mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [2], moves: [hm('CURSE', 0, 2, 137), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(S(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+  both3(F(1), F(0))]));
+
+scenario('r2d_destiny_bond', (events) => seq(events, duo4('r4e', '1v1', 805,
+  [mn({ species: 'Alpha', maxHp: 400, atk: 300, spe: 90, moves: [hm('slam', 120), hm('tap', 1)] }),
+    mn({ species: 'Gamma', maxHp: 400, atk: 300, spe: 10,
+      moves: [hm('slam', 120), hm('tap', 1), am('QUICK_SLAM', 120, 0, 0, 255, 0, 2)] })],
+  [mn({ species: 'Beta', maxHp: 200, spe: 10, moves: [hm('DESTINY_BOND', 0, 2, 138)] }),
+    mn({ species: 'Delta', maxHp: 200, spe: 50, moves: [hm('DESTINY_BOND', 0, 2, 138), hm('tap', 1)] })]),
+[both3(F(1), F(0)), both3(F(0), F(0)), [['p1', S(1)], ['p2', S(1)]],
+  both3(F(1), F(0)), both3(F(2), F(1))]));
+
+scenario('r2d_encore', (events) => seq(events, duo4('r4f', '1v1', 806,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('ENCORE', 0, 0, 139), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('GROWL', 0, 0, 18, 3), hm('tap', 1)] })]),
+[both3(F(0), F(1)), both3(F(1), F(0)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(1)),
+  both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1))]));
+
+scenario('r2d_foresight', (events) => seq(events, duo4('r4g', '1v1', 807,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('tap', 10), hm('FORESIGHT', 0, 0, 140)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [2], moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(0), F(0)), both3(F(1), F(0))]));
+
+scenario('r2d_heal_bell', (events) => seq(events, duo4('r4h', '1v1', 808,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, status: 'PAR', moves: [hm('HEAL_BELL', 0, 0, 141)] }),
+    mn({ species: 'Gamma', maxHp: 400, spe: 90, status: 'PSN', moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 400, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2d_mean_look', (events) => seq(events, duo4('r4i', 'wild', 809,
+  [mn({ species: 'Alpha', level: 10, maxHp: 900, spe: 90,
+    moves: [hm('MEAN_LOOK', 0, 0, 142), hm('TELEPORT', 0, 0, 153), hm('tap', 1)] })],
+  [mn({ species: 'Wild', level: 40, maxHp: 900, spe: 10, moves: [hm('TELEPORT', 0, 0, 153)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(1), F(0), 'wild'),
+  both3(F(1), F(0), 'wild'), both3(F(1), F(0), 'wild'), both3(F(1), F(0), 'wild')]));
+
+scenario('r2d_teleport', (events) => {
+  let t = seq(events, duo4('r4j', 'coop_npc', 810,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('TELEPORT', 0, 0, 153)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('TELEPORT', 0, 0, 153)] })]),
+  [both3(F(0), F(0))]);
+  t = seq(events, duo4('r4k', 'wild', 811,
+    [mn({ species: 'Alpha', level: 60, maxHp: 900, spe: 90, moves: [hm('tap', 1)] })],
+    [mn({ species: 'Wild', level: 5, maxHp: 900, spe: 10, moves: [hm('TELEPORT', 0, 0, 153)] })],
+    { foe: 'wild' }),
+  [both3(F(0), F(0), 'wild')]);
+  return t;
+});
+
+scenario('r2d_nightmare', (events) => seq(events, duo4('r4l', '1v1', 812,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('NIGHTMARE', 0, 2, 143), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, status: 'SLP', statusTurns: 3, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(0), F(0))]));
+
+scenario('r2d_pain_split', (events) => seq(events, duo4('r4m', '1v1', 813,
+  [mn({ species: 'Alpha', maxHp: 400, hp: 20, spe: 90, moves: [am('PAIN_SPLIT', 0, 0, 144, 255)] })],
+  [mn({ species: 'Beta', maxHp: 400, hp: 380, spe: 10,
+    moves: [hm('wait', 0, 0, 85), hm('SUBSTITUTE', 0, 0, 79)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(0))]));
+
+scenario('r2d_perish_song', (events) => seq(events, duo4('r4n', '1v1', 814,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('PERISH_SONG', 0, 0, 145), hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)),
+  [['p1', S(1)], ['p2', S(1)]], both3(F(0), F(0))]));
+
+scenario('r2d_psych_up', (events) => seq(events, duo4('r4o', '1v1', 815,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('PSYCH_UP', 0, 0, 146), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('SWORDS_DANCE', 0, 0, 50)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0))]));
+
+scenario('r2d_rapid_spin', (events) => seq(events, duo4('r4p', '1v1', 816,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85), hm('RAPID_SPIN', 20, 0, 147)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 90,
+    moves: [hm('SPIKES', 0, 0, 149), hm('LEECH_SEED', 0, 9, 84), hm('WRAP', 15, 0, 42), hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(2)), both3(F(1), F(3)), both3(S(1), F(3)),
+  both3(F(0), F(0)), both3(S(0), F(3))]));
+
+scenario('r2d_sketch', (events) => seq(events, duo4('r4q', 'wild', 817,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [hm('SKETCH', 0, 0, 148, 5), hm('tap', 1), hm('SKETCH', 0, 0, 148)] })],
+  [mn({ species: 'Wild', maxHp: 900, spe: 10, moves: [hm('EMBER', 20, 4, 4, 25)] })],
+  { foe: 'wild' }),
+[both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'), both3(F(0), F(0), 'wild'),
+  both3(F(2), F(0), 'wild')]));
+
+scenario('r2d_sketch_link', (events) => seq(events, duo4('r4r', '1v1', 818,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 10, moves: [hm('SKETCH', 0, 0, 148)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 90, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0))]));
+
+scenario('r2d_spite', (events) => seq(events, duo4('r4s', '1v1', 819,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [am('SPITE', 0, 2, 150, 255), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('thump', 10, 0, 0, 4), hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(1))]));
+
+scenario('r2d_amnesia', (events) => seq(events, duo4('r4t', 'coop_npc', 820,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('AMNESIA', 0, 9, 151), hm('SP_DEF_UP', 0, 9, 154)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [am('SPDEF_DROP', 0, 9, 155, 255), am('SPDEF_DROP2', 0, 9, 156, 255)] })]),
+[both3(F(0), F(0)), both3(F(0), F(1)), both3(F(0), F(0)), both3(F(1), F(1)), both3(F(1), F(0))]));
+
+scenario('r2d_swagger', (events) => seq(events, duo4('r4u', '1v1', 821,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [am('SWAGGER', 0, 0, 152, 255)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, stages: { atk: 6 }, moves: [hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+scenario('r2d_status_lines', (events) => seq(events, duo4('r4v', 'coop_npc', 822,
+  [mn({ species: 'Alpha', maxHp: 999, spe: 90, moves: [hm('LEECH_SEED', 0, 9, 84), hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Gamma', maxHp: 999, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Delta', maxHp: 999, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 50, substitute: 50,
+    moves: [am('HYPNOSIS', 0, 8, 32, 255), am('POISONPOWDER', 0, 13, 66, 255),
+      am('THUNDER_WAVE', 0, 10, 67, 255)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(S(1), F(1)), both3(F(0), F(1)),
+  both3(F(0), F(1)), both3(S(2), F(2)), both3(F(0), F(2)), both3(F(0), F(2))]));
+
+scenario('r2d_full_heal_ai', (events) => {
+  const o = duo4('r4w', 'coop_npc', 823,
+    [mn({ species: 'Alpha', maxHp: 999, spe: 90, confusion: 5, moves: [hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 999, atk: 200, spe: 10, status: 'BRN', confusion: 6,
+      moves: [hm('slam', 40)] })]);
+  o.sides.b[0].bag = [{ id: 'FULL_HEAL', count: 1 }, { id: 'FULL_RESTORE', count: 1 }];
+  return seq(events, o,
+    [both3(F(0), F(0)), both3(ITEM('FULL_HEAL'), ITEM('FULL_HEAL')), both3(F(0), F(0)),
+      both3(F(0), ITEM('FULL_RESTORE')), both3(F(0), F(0))]);
+});
+
+scenario('r2d_mysteryberry_mimic', (events) => seq(events, duo4('r4x', '1v1', 824,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, item: ['MYSTERYBERRY', 'HELD_RESTORE_PP', 5, 'MYSTERYBERRY'],
+    moves: [hm('MIMIC', 0, 0, 82, 1), hm('tap', 1)] }),
+  mn({ species: 'Gamma', maxHp: 900, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('thump', 10)] })]),
+[both3(F(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(S(1), F(0))]));
+
+scenario('r2d_disable', (events) => {
+  const slam = hm('slam', 10, 0, 0, 1);
+  slam.ppUps = 1;
+  return seq(events, duo4('r4y', '1v1', 825,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [am('DISABLE', 0, 0, 86, 255), hm('tap', 1)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [slam, hm('tap', 1)] })]),
+  [both3(F(1), F(0)), both3(F(0), F(1)), both3(F(0), F(1)), both3(F(1), F(1)), both3(F(1), F(1)),
+    both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(1), F(1))]);
+});
+
+scenario('r2d_skull_bash_rest', (events) => seq(events, duo4('r4z', '1v1', 826,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90,
+    moves: [hm('SKULL_BASH', 50, 0, 157), hm('REST', 0, 9, 56), hm('RECOVER', 0, 0, 56)] })],
+  [mn({ species: 'Beta', maxHp: 900, atk: 200, spe: 10, moves: [hm('slam', 40)] })]),
+[both3(F(1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)),
+  both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0))]));
+
+scenario('r2d_metronome_bytes', (events) => {
+  const pool = [hm('pound', 10), hm('tap', 1), hm('scratch', 15)];
+  pool[0].num = 200;
+  pool[2].num = 3;
+  return seq(events, duo4('r4m2', '1v1', 827,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('METRONOME', 0, 0, 83), hm('tap', 1)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+    { metronomePool: pool }),
+  [both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]);
+});
+
+scenario('r2d_residual_order', (events) => seq(events, duo4('r4o2', '1v1', 828,
+  [mn({ species: 'Alpha', maxHp: 400, atk: 120, spe: 90, status: 'PSN', moves: [hm('tap', 5), hm('slam', 80)] })],
+  [mn({ species: 'Beta', maxHp: 150, spe: 10, status: 'BRN', moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 200, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), [['p2', S(1)]], both3(F(0), F(0))]));
+
+scenario('r2d_faint_moves', (events) => seq(events, duo4('r4fm', '1v1', 829,
+  [mn({ species: 'Alpha', maxHp: 130, spe: 90, item: ['MYSTERYBERRY', 'HELD_RESTORE_PP', 5, 'MYSTERYBERRY'],
+    moves: [hm('TRANSFORM', 0, 0, 57), hm('spent', 10, 0, 0, 0)] }),
+  mn({ species: 'Gamma', maxHp: 900, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, atk: 120, spe: 10, moves: [hm('slam', 90)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), [['p1', S(1)]],
+  both3(F(0), F(0))]));
+
+scenario('r2d_sketch_transformed_end', (events) => {
+  const pool = [hm('pound', 10)];
+  pool[0].num = 1;
+  return seq(events, duo4('r4st', 'wild', 830,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('TRANSFORM', 0, 0, 57), hm('tap', 1)] })],
+    [mn({ species: 'Wild', maxHp: 900, spe: 10, moves: [hm('SKETCH', 0, 0, 148), hm('METRONOME', 0, 0, 83)] })],
+    { foe: 'wild', metronomePool: pool }),
+  [both3(F(0), F(1), 'wild'), both3(F(0), F(1), 'wild'), both3({ action: 'run' }, F(1), 'wild')]);
+});
+
+scenario('r2d_conversion2', (events) => seq(events, duo4('r4cv', '1v1', 831,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [am('CONVERSION2', 0, 0, 136, 255), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('EMBER', 20, 4)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0))]));
+
+scenario('r2d_perish_2v2', (events) => {
+  const round = (a1, a2, b1, b2) => [['a1', a1], ['a2', a2], ['b1', b1], ['b2', b2]];
+  const T = (i, slot) => ({ action: 'fight', move: i, target: slot });
+  return seq(events, {
+    id: 'r4pp', mode: 'coop_pvp', seed: 832, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: R2D_TYPES, chart: R2D_CHART, specialTypes: R2D_SPECIAL,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+        moves: [hm('PERISH_SONG', 0, 0, 145), hm('BATON_PASS', 0, 0, 134), hm('wait', 0, 0, 85)] }),
+      mn({ species: 'Iota', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [mn({ species: 'Gamma', maxHp: 900, spe: 80,
+        moves: [hm('wait', 0, 0, 85)] })] }],
+      b: [{ playerId: 'b1', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 900, spe: 10,
+        moves: [hm('wait', 0, 0, 85)] })] },
+      { playerId: 'b2', name: 'Bea', mons: [mn({ species: 'Delta', maxHp: 900, spe: 20,
+        moves: [hm('PERISH_SONG', 0, 0, 145), hm('wait', 0, 0, 85)] })] }],
+    },
+  },
+  [round(T(0, 3), T(0, 3), T(0, 0), T(0, 0)),
+    round({ action: 'fight', move: 1, target: 3, pass: 1 }, T(0, 3), T(0, 0), T(1, 0)),
+    round(T(0, 3), T(0, 3), T(0, 0), T(1, 0)), round(T(0, 3), T(0, 3), T(0, 0), T(1, 0)),
+    round(T(0, 3), T(0, 3), T(0, 0), T(1, 0))]);
+});
 
 // ------------------------------------------------------------------
 // running both halves
@@ -2169,7 +2458,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 129, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 160, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -2453,11 +2742,12 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
 
   assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
-  assert.ok(said.includes('THUMP HIT was disabled'), 'Disable landing names the move');
+  // R2d: Gold's own DISABLE line, WasDisabledText.
+  assert.ok(said.includes("Beta's THUMP HIT was DISABLED!"), 'Disable landing names the move');
   assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
   // R2c: the count ticks in CheckTurn and wears off with DisabledNoMoreText.
   assert.ok(said.includes("Beta's disabled no more!"), 'and so does it wearing off');
-  assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
+  assert.ok(said.includes('Alpha learned THUMP HIT!'), 'Mimic names what it copied');
   assert.ok(said.includes('Alpha used THUMP HIT'), 'and the copy keeps the name');
   assert.ok(said.includes('Beta used nudge'),
     'a move with no name -- a protocol-25 sheet -- is narrated under its id');
@@ -2713,7 +3003,8 @@ const exchange = (mode, a, b, rules = {}) => {
   };
   if (a.confusion) ann.confusion = a.confusion;
   const battle = build({
-    id: 'b1', mode, seed: a.seed || 777002, choiceTimeout: 60, reconnectGrace: 60,
+    // 777019 since R2d's crit byte and DamageVariation loop (the Lua twin).
+    id: 'b1', mode, seed: a.seed || 777019, choiceTimeout: 60, reconnectGrace: 60,
     typeIds: rules.typeIds, specialTypes: rules.specialTypes,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [ann] }],
@@ -3507,8 +3798,8 @@ test('held items: Thief both ways, never Mail, never into a full hand, never pas
   assert.ok(!sawHeld(sub.events), 'a substitute at effectchance keeps the item');
   assert.strictEqual(monOf(sub.battle, sub.foe).heldItem, 'CHARCOAL');
   assert.ok(said(sub.events, 'Alpha used THIEF'));
-  // Seed 218 draws the 255 at `effectchance` (R2c moved it off 153).
-  const miss = run(charcoal, undefined, 218);
+  // Seed 163 draws the 255 at `effectchance` (R2c moved it off 153, R2d off 218).
+  const miss = run(charcoal, undefined, 163);
   assert.ok(!sawHeld(miss.events), 'the 1/256 byte of 255 against a 100% chance takes nothing');
   assert.strictEqual(monOf(miss.battle, miss.foe).heldItem, 'CHARCOAL');
   const zero = fight({
@@ -3742,12 +4033,15 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   const pc = confusedFight('PAR');
   assert.ok(said(pc.events, 'Alpha hurt itself in confusion'));
   assert.strictEqual(rngOf(pc.battle), rngOf(confusedFight(undefined).battle), 'no paralysis byte after a self-hit');
+  // Gold's DISABLE reads LAST_COUNTER_MOVE (R2d): thump is used once first,
+  // and the paralysis put on after that turn (the Lua twin).
   const disabledFight = (status) => {
-    const alpha = held({ species: 'Alpha', spe: 10, status, moves: [hit('thump', 10), hit('pound_two', 10)] });
-    alpha.lastMoveIndex = 1;
+    const alpha = held({ species: 'Alpha', spe: 10, moves: [hit('thump', 10), hit('pound_two', 10)] });
     const { battle, foe } = fight({ seed: 9, a: [alpha],
       b: [held({ species: 'Beta', spe: 90, moves: [hit('DISABLE', 0, 0, 86), hit('tap', 1)] })] });
     battle.drainEvents();
+    roundOf(battle, foe, undefined, { action: 'fight', move: 1 });
+    battle.fighters[0].mons[0].status = status ? 'paralysis' : null;
     return { events: roundOf(battle, foe), battle };
   };
   const pd = disabledFight('PAR');
@@ -3810,12 +4104,13 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   roundOf(r.battle, r.foe, { action: 'fight', move: 1 }, { action: 'fight', move: 1 });
   assert.strictEqual(ralpha.raging, false);
   assert.strictEqual(ralpha.rageCounter, 0);
-  const plain = { level: 20, attack: 40, defense: 40, power: 20, roll: 100 };
+  // The top roll, x255/255 (R2d's DamageVariation byte).
+  const plain = { level: 20, attack: 40, defense: 40, power: 20, roll: Damage2.ROLL_MAX };
   assert.strictEqual(Damage2.compute({ ...plain, rageCount: 4 }).damage, 5 * Damage2.compute(plain).damage);
   assert.strictEqual(Damage2.compute({ ...plain, rageCount: 255 }).damage,
     256 * Damage2.compute(plain).damage, 'x256 at 255, with no 999 tail after it');
   assert.strictEqual(Damage2.compute({
-    level: 100, attack: 255, defense: 1, power: 250, roll: 100, rageCount: 255,
+    level: 100, attack: 255, defense: 1, power: 250, roll: Damage2.ROLL_MAX, rageCount: 255,
   }).damage, 65535, 'pinned at $ffff when the sum carries');
   // Seed 2 (R2c's draw order moved it off 1).
   const src = rageFight({ seed: 2, status: 'PSN', confusion: 3, bMove: 'thump', bEffect: 0 });
@@ -4145,8 +4440,8 @@ test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, r
     assert.strictEqual(Effects.idOf(name), id, `${name} has its own id`);
     assert.strictEqual(Effects.nameOf(id), name);
   }
-  assert.strictEqual(Effects.MAX_EFFECT_ID, 132);
-  assert.strictEqual(Effects.nameOf(133), null);
+  assert.strictEqual(Effects.MAX_EFFECT_ID, 157);
+  assert.strictEqual(Effects.nameOf(158), null);
   assert.strictEqual(Effects.category(101), 'charge');
   assert.ok(Effects.isCharge(Effects.SKY_ATTACK));
   assert.strictEqual(Effects.idOf('EFFECT_RAZOR_WIND'), 39);
@@ -4454,11 +4749,12 @@ test('R2b: Transform undone, SLEEP TALK, LOCK-ON, a recharge actor, Haze, TOXIC,
   const beam = (item) => {
     const { battle } = fight({ seed: 8,
       a: [held({ species: 'Alpha', spe: 10, item, moves: [hit('HYPER_BEAM', 150, 0, 80)] })],
-      b: [held({ species: 'Beta', maxHp: 900, spe: 50, moves: [hit('tap', 1)] })] });
+      b: [held({ species: 'Beta', maxHp: 900, spe: 50, moves: [hit('tap', 1), hit('SPLASH', 0, 0, 85)] })] });
     battle.drainEvents();
     roundOf(battle, 'p2');
     const before = rngOf(battle);
-    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    // SPLASH draws nothing: the claw's byte alone (R2d's roll loop varies).
+    battle.submitChoice('p2', { action: 'fight', move: 1 });
     const events = battle.drainEvents();
     return { n: steps(before, rngOf(battle)), events };
   };
@@ -4537,13 +4833,23 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   // FLAIL / FALSE SWIPE.
   assert.ok(hits('r2c_reversal_false_swipe', 0).includes(11), 'FALSE SWIPE cut to the HP less one');
   assert.strictEqual(hits('r2c_reversal_false_swipe', 0).length, 1, '...and nothing more at 1 HP');
-  assert.ok(!has('r2c_reversal_false_swipe', 'A critical hit'), 'FLAIL draws no crit');
+  // FLAIL's own hits (FALSE SWIPE's may crit since R2d's crit byte).
+  const flail = runs.get('r2c_reversal_false_swipe').events.filter((e) => e.t === 'msg');
+  let flailing = false;
+  let flailCrit = false;
+  for (const e of flail) {
+    if (/ used /.test(e.text)) flailing = e.text === 'Alpha used FLAIL';
+    else if (flailing && e.text === 'A critical hit') flailCrit = true;
+  }
+  assert.ok(!flailCrit, 'FLAIL draws no crit');
 
   // MAGNITUDE: its line and the x2 underground.
   assert.ok(lines('r2c_magnitude').some((t) => /^Magnitude \d+!$/.test(t)));
   const mag = hits('r2c_magnitude', 3);
   assert.strictEqual(mag[0], 22, 'Magnitude 6 doubled against the dug foe');
-  assert.strictEqual(mag[1], 11, '...and plain once it is up');
+  // Magnitude 5 on the second use since R2d's crit byte moved the stream.
+  assert.ok(lines('r2c_magnitude').includes('Magnitude 5!'));
+  assert.strictEqual(mag[1], 7, '...and plain once it is up');
 
   // PRESENT: Gold's registers (a DARK second type: the level is 27) and the
   // heal; Crystal's own registers outside a link fight.
@@ -4555,9 +4861,11 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(has('r2c_triple_kick', 'Hit 3 times!'));
   const kicks = hits('r2c_triple_kick', 3).slice(0, 3);
   assert.ok(kicks[0] < kicks[1] && kicks[1] < kicks[2], 'each kick heavier');
-  assert.deepStrictEqual(hits('r2c_fury_cutter', 3), [5, 11, 22, 40, 81, 84, 2, 5],
+  // R2d's DamageVariation byte (x/255 of 217..255) moved each roll; the 5th
+  // ROLLOUT is a crit on this stream.
+  assert.deepStrictEqual(hits('r2c_fury_cutter', 3), [5, 10, 21, 45, 92, 82, 2, 5],
     'FURY CUTTER doubles to 16x, and another move resets it');
-  assert.deepStrictEqual(hits('r2c_rollout', 3).slice(0, 5), [5, 10, 23, 45, 86],
+  assert.deepStrictEqual(hits('r2c_rollout', 3).slice(0, 5), [5, 10, 22, 46, 120],
     'CURLED ROLLOUT rolls five times, doubling from x2');
 
   // BEAT UP.
@@ -4572,11 +4880,11 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   const firstHit = pl.findIndex((e) => e.t === 'damage');
   const firstSwitch = pl.findIndex((e) => e.t === 'switch');
   assert.ok(firstHit < firstSwitch, 'the PURSUIT lands before the switch');
-  assert.strictEqual(hits('r2c_pursuit_link', 0)[0], 16, 'doubled on the way out');
+  assert.strictEqual(hits('r2c_pursuit_link', 0)[0], 18, 'doubled on the way out');
   const pc = runs.get('r2c_pursuit_computer').events;
   assert.ok(pc.findIndex((e) => e.t === 'switch') < pc.findIndex((e) => e.t === 'damage'),
     "the computer's switch goes first");
-  assert.deepStrictEqual(hits('r2c_pursuit_computer', 3), [18, 9], '...doubled on the incoming');
+  assert.deepStrictEqual(hits('r2c_pursuit_computer', 3), [16, 8], '...doubled on the incoming');
 
   // FUTURE SIGHT.
   assert.ok(has('r2c_future_sight', 'Alpha foresaw an attack!'));
@@ -4623,4 +4931,183 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(after('r2c_bide', 'Alpha unleashed energy')
     .some((e) => e.t === 'msg' && e.text === "It doesn't affect Delta"));
   assert.ok(has('r2c_flinch', 'Beta flinched') && !has('r2c_flinch', 'Beta must recharge'));
+});
+
+// ------------------------------------------------------------------
+// the referee-gaps run's wave 4 (R2d): what each parity scenario pins, read
+// off the JS run (the Lua one is the same, event for event, above).
+// ------------------------------------------------------------------
+
+test('R2d: the Gold status and field scripts, their failure lines, the residual order', () => {
+  const runs = byName(jsRuns);
+  const events = (name) => runs.get(name).events;
+  const lines = (name) => events(name).filter((e) => e.t === 'msg').map((e) => e.text);
+  const has = (name, text) => lines(name).includes(text);
+  const count = (name, text) => lines(name).filter((t) => t === text).length;
+  const index = (name, pred) => events(name).findIndex(pred);
+  const msgAt = (name, text) => index(name, (e) => e.t === 'msg' && e.text === text);
+
+  // ATTRACT: love, the infatuation gate, a failed second ATTRACT, the switch
+  // breaking it, and no gender ratio on the sheet -- no attraction.
+  assert.ok(has('r2d_attract', 'Beta fell in love!'));
+  assert.ok(has('r2d_attract', "Beta's infatuation kept it from attacking!"));
+  assert.ok(count('r2d_attract', 'But it failed') >= 2, 'a second ATTRACT and a genderless one fail');
+  const sent = index('r2d_attract', (e) => e.t === 'send' && e.text === 'Gamma');
+  assert.ok(!events('r2d_attract').slice(sent).some((e) => e.t === 'msg' && /in love/.test(e.text)),
+    'the send-out broke the love');
+
+  // BATON PASS: the named successor, the SPIKES on its way in, the passed
+  // SUBSTITUTE taking Alpha's hit.
+  assert.ok(events('r2d_baton_pass').some((e) => e.t === 'switch' && e.text === 'Eps' && e.mon === 2));
+  assert.ok(has('r2d_baton_pass', "Eps's hurt by SPIKES!"));
+  const afterPass = events('r2d_baton_pass').slice(msgAt('r2d_baton_pass', "Eps's hurt by SPIKES!") + 2);
+  const nextHit = afterPass.find((e) => e.t === 'damage' && e.slot === 3);
+  assert.strictEqual(nextHit.hp, 350, 'the passed SUBSTITUTE took the hit');
+
+  // BELLY DRUM's bug, then the climb.
+  const drums = events('r2d_belly_drum').filter((e) => e.t === 'stat').map((e) => e.stage);
+  assert.deepStrictEqual(drums, [2, 4, 6], '+2 kept on each failure, then +6');
+  assert.ok(has('r2d_belly_drum', 'Gamma cut its HP and maximized ATTACK!'));
+
+  // CURSE both ways.
+  assert.ok(has('r2d_curse', "Gamma's SPEED fell") && has('r2d_curse', "Gamma's ABILITY won't rise anymore!"));
+  assert.ok(has('r2d_curse', 'Alpha cut its own HP and put a CURSE on Beta!'));
+  assert.ok(count('r2d_curse', "Beta's hurt by the CURSE!") >= 2);
+
+  // DESTINY BOND: once taken down, once spent.
+  assert.strictEqual(count('r2d_destiny_bond', 'Beta took down with it, Alpha!'), 1);
+  assert.ok(!lines('r2d_destiny_bond').some((t) => t.startsWith('Delta took down')),
+    "a foe's turn ended Delta's bond");
+
+  // ENCORE: the rewrite this turn and the end on its PP.
+  assert.ok(has('r2d_encore', "It didn't affect Beta!"));
+  const encored = msgAt('r2d_encore', 'Beta got an ENCORE!');
+  assert.strictEqual(events('r2d_encore').slice(encored).find((e) => e.t === 'msg' && / used /.test(e.text)).text,
+    'Beta used GROWL', 'the TAP Beta chose became GROWL');
+  assert.ok(has('r2d_encore', "Beta's ENCORE ended!"));
+
+  // FORESIGHT, HEAL BELL.
+  assert.ok(has('r2d_foresight', "It doesn't affect Beta") && has('r2d_foresight', 'Alpha identified Beta!'));
+  assert.ok(events('r2d_foresight').some((e) => e.t === 'damage' && e.slot === 3), 'the identified GHOST is hit');
+  assert.deepStrictEqual(events('r2d_heal_bell').filter((e) => e.t === 'status').map((e) => e.mon), [0, 1]);
+  assert.ok(has('r2d_heal_bell', 'A bell chimed!'));
+
+  // MEAN LOOK / TELEPORT.
+  assert.ok(has('r2d_mean_look', "Wild can't escape now!"));
+  assert.ok(count('r2d_mean_look', 'But it failed') >= 2, "the held wild's TELEPORT and a second MEAN LOOK fail");
+  assert.ok(has('r2d_teleport', 'Wild fled from battle!'));
+
+  // NIGHTMARE until the wake.
+  assert.strictEqual(count('r2d_nightmare', 'Beta has a NIGHTMARE!'), 2);
+  const woke = index('r2d_nightmare', (e) => e.t === 'status' && e.text === 'Beta woke up');
+  assert.ok(!events('r2d_nightmare').slice(woke).some((e) => e.t === 'msg' && e.text === 'Beta has a NIGHTMARE!'));
+
+  // PAIN SPLIT, PERISH SONG, PSYCH UP.
+  assert.ok(events('r2d_pain_split').some((e) => e.t === 'drain' && e.hp === 200));
+  assert.ok(has('r2d_pain_split', "It didn't affect Beta!"));
+  assert.ok(has('r2d_perish_song', "Alpha's PERISH count is 0!") && has('r2d_perish_song', 'But it failed'));
+  assert.strictEqual(lines('r2d_perish_2v2').filter((t) => / count is 3!$/.test(t)).length, 4, 'all four sing along');
+  assert.ok(has('r2d_perish_2v2', "Iota's PERISH count is 2!"), 'BATON PASS hands the count on');
+  assert.ok(has('r2d_psych_up', 'Alpha copied the stat changes of Beta!'));
+
+  // RAPID SPIN.
+  for (const text of ['Alpha shed LEECH SEED!', 'Alpha blew away SPIKES!', 'Alpha was released by Beta!']) {
+    assert.ok(has('r2d_rapid_spin', text), text);
+  }
+
+  // SKETCH: the last SKETCH slot, its base PP, the party index; link; the
+  // transformed sketch's party list before `over`.
+  const sketched = events('r2d_sketch').find((e) => e.t === 'moves' && e.moves[2] && e.moves[2].id === 'EMBER');
+  assert.strictEqual(sketched.mon, 0);
+  assert.strictEqual(sketched.moves[2].pp, 25);
+  assert.ok(has('r2d_sketch_link', 'But nothing happened'));
+  const end = events('r2d_sketch_transformed_end');
+  const over = end.findIndex((e) => e.t === 'over');
+  const last = end.slice(0, over).filter((e) => e.t !== 'team').pop();
+  assert.strictEqual(last.t, 'moves');
+  assert.strictEqual(last.mon, 0);
+  assert.deepStrictEqual(last.moves.map((m) => m.id), ['pound', 'tap']);
+
+  // SPITE, AMNESIA, SWAGGER.
+  assert.ok(has('r2d_spite', "Beta's thump was reduced by 3!"));
+  assert.ok(events('r2d_amnesia').some((e) => e.t === 'stat' && e.stage === 2 && /SP.DEF rose/.test(e.text)));
+  assert.ok(has('r2d_swagger', 'Alpha missed'), 'SWAGGER at +6 is a miss');
+  assert.strictEqual(count('r2d_swagger', 'Delta became confused'), 1);
+
+  // The status commands' own lines.
+  for (const text of ['Beta evaded the attack!', "Alpha's already asleep!", "It didn't affect Gamma!",
+    "Gamma's already poisoned!", "Delta's already paralyzed!"]) {
+    assert.ok(has('r2d_status_lines', text), text);
+  }
+
+  // The computer's FULL HEAL leaves its confusion; FULL RESTORE and Ann's
+  // FULL HEAL clear theirs.
+  const conf = events('r2d_full_heal_ai').filter((e) => e.t === 'status' && e.confused === 0).map((e) => e.slot);
+  assert.deepStrictEqual(conf, [0, 3]);
+
+  // MYSTERYBERRY on the MIMIC'd slot: the party's MIMIC told at the switch-out.
+  const mm = events('r2d_mysteryberry_mimic');
+  const out = mm.findIndex((e) => e.t === 'send' && e.text === 'Gamma');
+  const told = mm.slice(out + 1).find((e) => e.t === 'moves');
+  assert.deepStrictEqual(told.moves.map((m) => [m.id, m.pp]), [['MIMIC', 5], ['tap', 59]]);
+
+  // DISABLE, SKULL BASH / REST.
+  assert.ok(has('r2d_disable', "Beta's slam was DISABLED!") && has('r2d_disable', "Beta's disabled no more!"));
+  assert.strictEqual(count('r2d_skull_bash_rest', "Alpha's DEFENSE rose"), 1, 'the charge turn only');
+  assert.ok(has('r2d_skull_bash_rest', "Alpha's HP is full!") && has('r2d_skull_bash_rest', 'Alpha went to sleep!'));
+  assert.ok(count('r2d_skull_bash_rest', 'Alpha is fast asleep') >= 2, 'REST sleeps two turns');
+
+  // CONVERSION2.
+  assert.ok(has('r2d_conversion2', 'Alpha transformed into the ROCK-type!'));
+
+  // ResidualDamage after each seat's turn; a KO ends a one-seat turn.
+  const ro = lines('r2d_residual_order');
+  assert.ok(ro.indexOf('Alpha is hurt by its poison') < ro.indexOf('Beta used tap'));
+  const ko = events('r2d_residual_order').findIndex((e) => e.t === 'faint');
+  const before = events('r2d_residual_order').slice(0, ko).filter((e) => e.t === 'msg');
+  assert.strictEqual(before[before.length - 1].text, 'Alpha used slam', 'no poison on the KO turn');
+
+  // A faint's party `moves`, after the faint.
+  const fm = events('r2d_faint_moves');
+  const faint = fm.findIndex((e) => e.t === 'faint');
+  const party = fm.slice(faint + 1).find((e) => e.t !== 'team');
+  assert.strictEqual(party.t, 'moves', 'the party list right after the faint');
+  assert.deepStrictEqual(party.moves.map((m) => [m.id, m.pp]), [['TRANSFORM', 59], ['spent', 5]]);
+});
+
+// R2d's ids and pure helpers, twin of tests/battle_sim2_turn.lua's block.
+test('R2d: the new effect ids, their tables, GetGender and SKETCH base PP', () => {
+  const names = {
+    EFFECT_ATTRACT: 133, EFFECT_BATON_PASS: 134, EFFECT_BELLY_DRUM: 135,
+    EFFECT_CONVERSION2: 136, EFFECT_CURSE: 137, EFFECT_DESTINY_BOND: 138,
+    EFFECT_ENCORE: 139, EFFECT_FORESIGHT: 140, EFFECT_HEAL_BELL: 141,
+    EFFECT_MEAN_LOOK: 142, EFFECT_NIGHTMARE: 143, EFFECT_PAIN_SPLIT: 144,
+    EFFECT_PERISH_SONG: 145, EFFECT_PSYCH_UP: 146, EFFECT_RAPID_SPIN: 147,
+    EFFECT_SKETCH: 148, EFFECT_SPIKES: 149, EFFECT_SPITE: 150,
+    EFFECT_SP_DEF_UP_2: 151, EFFECT_SWAGGER: 152, EFFECT_TELEPORT: 153,
+    EFFECT_SP_DEF_UP: 154, EFFECT_SP_DEF_DOWN: 155, EFFECT_SP_DEF_DOWN_2: 156,
+    EFFECT_SKULL_BASH: 157,
+  };
+  for (const [name, id] of Object.entries(names)) assert.strictEqual(Effects.idOf(name), id, name);
+  assert.ok(Effects.NO_CHECKHIT[134] && Effects.NO_CHECKHIT[151] && !Effects.NO_CHECKHIT[139]);
+  assert.ok(Effects.READS_MISS[32] && Effects.READS_MISS[84] && !Effects.READS_MISS[18]);
+  assert.ok(Items.kingsRockMove(147) && Items.kingsRockMove(157) && !Items.kingsRockMove(133));
+  assert.ok(Effects.SLEEP_TALK_EXCLUDED[157]);
+  assert.strictEqual(Effects.primaryStatDown(156), 'spd');
+
+  const g = (ratio, atk, spe, extra = {}) => Effects.gender({
+    base: { gender: ratio }, dvs: { atk, def: 0, spe, spc: 0 }, ...extra,
+  });
+  assert.strictEqual(g(255, 15, 15), null, 'GENDER_UNKNOWN');
+  assert.strictEqual(g(0, 0, 0), 'M', 'GENDER_F0');
+  assert.strictEqual(g(254, 15, 15), 'F', 'GENDER_F100');
+  assert.strictEqual(g(127, 7, 15), 'F', 'byte 127 is not above F50');
+  assert.strictEqual(g(127, 8, 0), 'M', 'byte 128 is');
+  assert.strictEqual(Effects.gender({ dvs: { atk: 15, spe: 15 } }), null, 'no ratio on the sheet');
+  assert.strictEqual(g(127, 0, 0, { preTransform: { dvs: { atk: 15, spe: 15 } } }), 'M',
+    'a transformed monster keeps its own DVs');
+
+  assert.strictEqual(Effects.basePp({ maxPp: 61, ppUps: 3 }), 40);
+  assert.strictEqual(Effects.basePp({ maxPp: 32, ppUps: 3 }), 20);
+  assert.strictEqual(Effects.basePp({ maxPp: 35 }), 35);
 });

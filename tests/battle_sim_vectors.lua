@@ -442,6 +442,13 @@ function SIDE.computerMiss(input)
   return { miss = input.roll < Effects.COMPUTER_DROP_MISS }
 end
 
+-- TryRunningFromBattle's wild odds (Effects.runOdds; the referee's `_tryRun`):
+-- nil for a getaway that draws no byte, else a byte at or under them escapes.
+function SIDE.runOdds(input)
+  local odds = Effects.runOdds(input.playerSpeed, input.enemySpeed, input.attempts)
+  return { odds = odds, escaped = odds == nil or input.roll <= odds }
+end
+
 function SIDE.apply(input)
   local t = input.target
   local mon = {

@@ -921,6 +921,7 @@ function runJs() {
     ...runFidelity(),
     ...runFamily2(),
     ...runGaps(),
+    ...runWave4(),
   ];
 }
 
@@ -2579,6 +2580,263 @@ function runGaps() {
     },
     { name: 'map_id_bound', result: mapIdBound() },
     { name: 'transformed_learn', result: { red: transformLearn(1), gold: transformLearn(2) } },
+  ];
+}
+
+/*
+ * Wave 4 of docs/plans/gen12-referee-gaps-fix.md, the wire: Red's MIMIC pick on
+ * a Gen 1 choice (`mimic`) and Gold's wTimeOfDay on a Gen 2 ruleset
+ * (`timeOfDay`). Twin of wave4 in the Lua driver.
+ */
+function wave4() {
+  const fight = (extra) => ({ battle: 'b1', action: 'fight', move: 0, ...extra });
+  const rules = (extra) => ({ chart: CHART, ...extra });
+  return [
+    ['choice', fight({ mimic: 0 }), 1],
+    ['choice', fight({ mimic: 3 }), 1],
+    ['choice', fight({ mimic: 4 }), 1],
+    ['choice', fight({ mimic: -1 }), 1],
+    ['choice', fight({ mimic: '2' }), 1],
+    ['choice', fight({ mimic: ' 1 ' }), 1],
+    ['choice', fight({ mimic: '0x1' }), 1],
+    ['choice', fight({ mimic: 1.5 }), 1],
+    ['choice', fight({ mimic: true }), 1],
+    ['choice', fight({ mimic: 'one' }), 1],
+    ['choice', fight({ mimic: [1] }), 1],
+    ['choice', fight({ mimic: null }), 1],
+    ['choice', {
+      battle: 'b1', action: 'switch', slot: 1, mimic: 2,
+    }, 1],
+    ['choice', { battle: 'b1', action: 'run', mimic: 7 }, 1],
+    ['choice', fight({ mimic: 2 }), 2],
+    ['choice', fight({ mimic: 9 }), 2],
+    ['choice', fight({ mimic: 2 }), 3],
+    ['choice', fight({ mimic: 9 }), 3],
+    ['choice', fight({ mimic: 2 })],
+    ['choice', fight({ mimic: 9 })],
+    ['ruleset', rules({ timeOfDay: 'morn' }), 2],
+    ['ruleset', rules({ timeOfDay: 'day' }), 2],
+    ['ruleset', rules({ timeOfDay: 'nite' }), 2],
+    ['ruleset', rules({ timeOfDay: 'NITE' }), 2],
+    ['ruleset', rules({ timeOfDay: 'night' }), 2],
+    ['ruleset', rules({ timeOfDay: 'eve' }), 2],
+    ['ruleset', rules({ timeOfDay: 'darkness' }), 2],
+    ['ruleset', rules({ timeOfDay: '' }), 2],
+    ['ruleset', rules({ timeOfDay: 2 }), 2],
+    ['ruleset', rules({ timeOfDay: true }), 2],
+    ['ruleset', rules({ timeOfDay: ['nite'] }), 2],
+    ['ruleset', rules({ timeOfDay: null }), 2],
+    ['ruleset', rules({ timeOfDay: 'day', metronomePool: [row12('m', { priority: 1 })] }), 2],
+    ['ruleset', rules({ timeOfDay: 'nite' }), 1],
+    ['ruleset', rules({ timeOfDay: 'evening' }), 1],
+    ['ruleset', rules({ timeOfDay: 'nite' })],
+    ['ruleset', rules({ timeOfDay: 'evening' })],
+    ['ruleset', { typeTable: CHART3, timeOfDay: 'nite' }, 3],
+    ['ruleset', { typeTable: CHART3, timeOfDay: 'evening' }, 3],
+  ];
+}
+
+/*
+ * Wave 4, the hubs and the real referees: a learn is judged against the PARTY
+ * list and reaches the battle list only as the cart's LearnMove does
+ * (learnTo); Red's MIMIC pick reaches the referee off the wire; Gold's
+ * wTimeOfDay reaches its referee off a Gen 2 ruleset. Twin of
+ * overlay_learn_and_time in the Lua driver, whose header argues each step.
+ */
+function overlayHub(generation, id, aMoves) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [
+      sheet12(generation, { species: 'COPYCAT', moves: aMoves }),
+      sheet12(generation, { species: 'BENCH', moves: [row12('TACKLE', { pp: 10, power: 1 })] }),
+    ],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, {
+      species: 'FOE',
+      moves: [row12('GROWL', { pp: 10, power: 0 }), row12('HUSH', { pp: 10, power: 0 })],
+    })],
+  });
+  return { relay, a, record: relay.battles.get(id) };
+}
+
+function ovMove(moveId, effect, power) {
+  return row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+}
+
+function lookOverlay(live) {
+  const saved = live.preTransform;
+  const mimic = live.preMimic;
+  const kept = [];
+  if (mimic && typeof mimic === 'object') {
+    for (let i = 1; i <= 4; i += 1) {
+      if (mimic[i]) kept.push(`${i}:${mimic[i].id}`);
+    }
+  }
+  return {
+    transformed: live.transformed === true,
+    battle: slimRows(live.moves),
+    party: saved ? slimRows(saved.moves) : '(none)',
+    mimic: kept,
+  };
+}
+
+function mimicLearn(generation, pick) {
+  const id = 'm1';
+  const { relay, a, record } = overlayHub(generation, id,
+    [ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1)]);
+  if (!record || !record.sim) return { opened: false };
+  const choice = {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  };
+  if (pick !== undefined) choice.mimic = pick;
+  relay.handle(a.id, choice);
+  const live = record.sim.byId.get(a.id).mons[0];
+  const steps = [lookOverlay(live)];
+  const send = (moves) => {
+    relay.handle(a.id, {
+      type: 'mmo.battle_moveset', battle: id, mon: 0, moves,
+    });
+    steps.push(lookOverlay(live));
+  };
+  send([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1)]);
+  send([ovMove(live.moves[0].id), ovMove('TACKLE', 0, 1), ovMove('LEARNT', 0, 40)]);
+  send([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1), ovMove('LEARNT', 0, 40)]);
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  steps.push(lookOverlay(live));
+  return { opened: true, steps };
+}
+
+function transformResend(generation, mimicFirst) {
+  const id = 't2';
+  const moves = mimicFirst
+    ? [ovMove('MIMIC', 82), ovMove('TRANSFORM', 57), ovMove('TACKLE', 0, 1)]
+    : [ovMove('TRANSFORM', 57), ovMove('TACKLE', 0, 1)];
+  const { relay, a, record } = overlayHub(generation, id, moves);
+  if (!record || !record.sim) return { opened: false };
+  if (mimicFirst) {
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, mimic: 1,
+    });
+  }
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: mimicFirst ? 1 : 0,
+  });
+  const live = record.sim.byId.get(a.id).mons[0];
+  const steps = [lookOverlay(live)];
+  const own = [...moves];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: own,
+  });
+  steps.push(lookOverlay(live));
+  own.push(ovMove('LEARNT', 0, 40));
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: own,
+  });
+  steps.push(lookOverlay(live));
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  steps.push(lookOverlay(live));
+  return { opened: true, steps };
+}
+
+function synthLearn(generation, transformed) {
+  const { learnTo } = require('./lib/relay.js');
+  const mon = transformed
+    ? {
+      transformed: true,
+      moves: [ovMove('COPY')],
+      preTransform: { moves: [row12('HUSH', { pp: 4 }), ovMove('TACKLE', 0, 1)] },
+    }
+    : { moves: [row12('HUSH', { pp: 4 }), ovMove('TACKLE', 0, 1)] };
+  mon.preMimic = { 1: ovMove('MIMIC', 82) };
+  mon.preMimic[1].pp = 9;
+  const steps = [];
+  const tryLearn = (moves) => {
+    steps.push({ applied: learnTo(generation, mon, moves), state: lookOverlay(mon) });
+  };
+  tryLearn([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1)]);
+  tryLearn([ovMove('NEW'), ovMove('BBB')]);
+  tryLearn([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1), ovMove('LEARNT', 0, 40)]);
+  return steps;
+}
+
+function timeHeal(generation, timeOfDay) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const id = 'h1';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', battle: id, chart: CHART, timeOfDay,
+  });
+  const record = relay.battles.get(id);
+  const kept = record && record.ruleset ? orNil(record.ruleset.timeOfDay) : '(no ruleset)';
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [sheet12(generation, { species: 'MOTH', hp: 40, moves: [ovMove('MOONLIGHT', 130)] })],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE', moves: [ovMove('HUSH')] })],
+  });
+  if (!record || !record.sim) return { opened: false, kept };
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return {
+    opened: true,
+    kept,
+    simTime: orNil(record.sim.timeOfDay),
+    hp: record.sim.byId.get(a.id).mons[0].hp,
+  };
+}
+
+function runWave4() {
+  return [
+    {
+      name: 'referee_gaps_wave4_dialect',
+      result: wave4().map(([kind, input, gen]) => ({ kind, got: orNil(readGap(kind, input, gen)) })),
+    },
+    {
+      name: 'overlay_learn_and_time',
+      result: {
+        redMimicPick: mimicLearn(1, 1),
+        redMimicNone: mimicLearn(1, undefined),
+        goldMimic: mimicLearn(2, 1),
+        redTransform: transformResend(1, false),
+        goldTransform: transformResend(2, false),
+        redMimicTransform: transformResend(1, true),
+        redSynth: synthLearn(1, false),
+        goldSynth: synthLearn(2, false),
+        redSynthT: synthLearn(1, true),
+        goldSynthT: synthLearn(2, true),
+        goldNite: timeHeal(2, 'nite'),
+        goldDay: timeHeal(2, 'day'),
+        goldMorn: timeHeal(2, 'morn'),
+        goldNone: timeHeal(2, undefined),
+        goldBad: timeHeal(2, 'evening'),
+        redNite: timeHeal(1, 'nite'),
+        redBad: timeHeal(1, 'evening'),
+      },
+    },
   ];
 }
 

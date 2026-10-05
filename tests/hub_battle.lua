@@ -2725,6 +2725,279 @@ do
   end
 end
 
+-- ------------------------------------------------------------------
+-- Wave 4 of docs/plans/gen12-referee-gaps-fix.md: a learn is judged against
+-- the PARTY list -- the one a Transform put aside, a MIMIC's slots given back
+-- (`preMimic`) -- and reaches the battle list only as the cart's LearnMove
+-- does: for a new move alone (pokered LearnMoveFromLevelUp / pokecrystal
+-- LearnLevelMoves call it only then), on Red whatever the Transform
+-- (pokered LearnMove copies wPartyMon*Moves / PP over wBattleMon*), on Gold
+-- only untransformed (pokecrystal LearnMove's SUBSTATUS_TRANSFORMED check).
+-- Hub.learnTo; server/hub_battle.test.js pins the same on the Node twin.
+-- ------------------------------------------------------------------
+
+do
+  -- Red, transformed: a level-up with no new move re-sends the same ids, and
+  -- that is no LearnMove -- the copied moves stay (they used to be replaced).
+  local red = { transformed = true, moves = { row("COPY1", { pp = 5 }), row("COPY2", { pp = 5 }) },
+                preTransform = { moves = { row("A", { pp = 7 }), row("B") } } }
+  eq(Hub.learnTo(1, red, { row("A", { pp = 99 }), row("B") }), true, "wave 4: a Red re-send while transformed is taken")
+  eq(red.moves[1].id, "COPY1", "wave 4: ...and the copied moves stay in the fight")
+  eq(#red.moves, 2, "wave 4: ...all of them")
+  eq(red.preTransform.moves[1].pp, 7, "wave 4: ...the list put aside keeps its PP")
+  eq(Hub.learnTo(1, red, { row("A"), row("B"), row("C") }), true, "wave 4: a Red learn while transformed")
+  eq(red.moves[3] and red.moves[3].id, "C", "wave 4: ...copies the party list over the copies (pokered LearnMove)")
+  eq(red.moves[1].pp, 7, "wave 4: ...with the party's PP")
+  ok(red.moves[1] ~= red.preTransform.moves[1], "wave 4: ...as a list of its own")
+
+  -- Under a MIMIC used while the monster was itself: slot 1 holds the copy
+  -- (HUSH, at the PP it shares with the party on Red), the party's MIMIC
+  -- saved as the Red referee keeps it.
+  local function mimicked(generation, copyPp)
+    local mon = { moves = { row("HUSH", { pp = copyPp }), row("B") },
+                  preMimic = { [1] = row("MIMIC", { pp = 9, effect = 82 }) } }
+    return mon
+  end
+  local m = mimicked(1, 6)
+  eq(Hub.learnTo(1, m, { row("MIMIC"), row("B") }), true, "wave 4: a re-send under MIMIC is taken")
+  eq(m.moves[1].id, "HUSH", "wave 4: ...and the copy stays in the fight")
+  ok(m.preMimic and m.preMimic[1] and m.preMimic[1].id == "MIMIC", "wave 4: ...its saved row kept for the switch-out")
+  eq(Hub.learnTo(1, m, { row("HUSH"), row("B"), row("C") }), false,
+     "wave 4: the battle list is not the party list -- the copy sent back as a learn is refused")
+  eq(Hub.learnTo(1, m, { row("MIMIC"), row("B"), row("C") }), true,
+     "wave 4: a learn under MIMIC is judged against the party list (it used to be refused)")
+  eq(m.moves[1].id, "MIMIC", "wave 4: ...Red's LearnMove copies the party list over the copy")
+  eq(m.moves[1].pp, 6, "wave 4: ...MIMIC at the slot's PP (DecrementPP wrote both)")
+  eq(m.moves[3] and m.moves[3].id, "C", "wave 4: ...the learned move among them")
+  eq(m.preMimic, nil, "wave 4: ...and no saved row is left to give back over the learned list")
+  local forget = mimicked(1, 6)
+  eq(Hub.learnTo(1, forget, { row("NEW"), row("B") }), true, "wave 4: forgetting MIMIC itself for a new move")
+  eq(forget.moves[1].id, "NEW", "wave 4: ...lands in its slot")
+  eq(forget.preMimic, nil, "wave 4: ...and the saved MIMIC goes with it")
+  eq(Hub.learnTo(1, mimicked(1, 6), { row("X"), row("Y") }), false, "wave 4: a rewrite under MIMIC is refused")
+
+  -- Gold: the same learn ends the copy too (untransformed), MIMIC at the PP
+  -- the party kept -- CheckMimicUsed stops the party spend on its slot.
+  local g = mimicked(2, 5)
+  eq(Hub.learnTo(2, g, { row("MIMIC"), row("B") }), true, "wave 4 (gold): a re-send under MIMIC is taken")
+  eq(g.moves[1].id, "HUSH", "wave 4 (gold): ...and the copy stays")
+  eq(Hub.learnTo(2, g, { row("MIMIC"), row("B"), row("C") }), true, "wave 4 (gold): a learn under MIMIC")
+  eq(g.moves[1].id, "MIMIC", "wave 4 (gold): ...pokecrystal LearnMove copies the party list over the copy")
+  eq(g.moves[1].pp, 9, "wave 4 (gold): ...MIMIC at the party's own PP")
+  eq(g.preMimic, nil, "wave 4 (gold): ...nothing left to give back")
+
+  -- A MIMIC before a Transform: the list put aside holds the copy, the
+  -- saved row the party's MIMIC.  A learn folds it in.
+  local function both(copyPp)
+    return { transformed = true, moves = { row("COPY", { pp = 5 }) },
+             preTransform = { moves = { row("HUSH", { pp = copyPp }), row("B") } },
+             preMimic = { [1] = row("MIMIC", { pp = 9 }) } }
+  end
+  local gt = both(4)
+  eq(Hub.learnTo(2, gt, { row("MIMIC"), row("B"), row("C") }), true, "wave 4 (gold): a learn under MIMIC and Transform")
+  eq(gt.moves[1].id, "COPY", "wave 4 (gold): ...leaves the copied moves in the fight")
+  eq(gt.preTransform.moves[1].id, "MIMIC", "wave 4 (gold): ...writes the party list put aside")
+  eq(gt.preTransform.moves[1].pp, 9, "wave 4 (gold): ...MIMIC at the party's PP")
+  eq(#gt.preTransform.moves, 3, "wave 4 (gold): ...with the learned move")
+  eq(gt.preMimic, nil, "wave 4 (gold): ...and folds the saved row into it")
+  local rt = both(4)
+  eq(Hub.learnTo(1, rt, { row("MIMIC"), row("B") }), true, "wave 4: a Red re-send under MIMIC and Transform")
+  eq(rt.moves[1].id, "COPY", "wave 4: ...leaves the copied moves")
+  eq(rt.preTransform.moves[1].id, "MIMIC", "wave 4: ...the saved row folded into the list put aside")
+  eq(rt.preTransform.moves[1].pp, 4, "wave 4: ...at the PP the slot shared with the party")
+  eq(rt.preMimic, nil, "wave 4: ...so the switch-out has one list to give back")
+end
+
+-- The same on the real Red referee, MIMIC's pick off the wire (`mimic`, the
+-- 0-based index into the foe's moves; absent, the menu's first row).
+local function mimicLearn(pick)
+  local hub = Hub.new({ maxPlayers = 4, generation = 1 })
+  hub.forceBattleSeed = 1
+  local ann = join(hub, "ANN")
+  local id = "ml"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  local function mv(moveId, effect, power)
+    return row(moveId, { pp = 10, power = power or 0, effect = effect or 0 })
+  end
+  local function sheet(species, moves)
+    local out = mon({ species = species })
+    out.moves = moves
+    return out
+  end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet("COPYCAT", { mv("MIMIC", 82), mv("TACKLE", 0, 1) }), sheet("BENCH", { mv("TACKLE", 0, 1) }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet("FOE", { mv("GROWL"), mv("HUSH") }) } })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return nil end
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0, mimic = pick })
+  local live = record.sim.byId[ann.id].mons[1]
+  local seen = { copy = live.moves[1].id, copyPp = live.moves[1].pp,
+                 saved = live.preMimic and live.preMimic[1] and live.preMimic[1].id }
+  seen.resend = hub:applyBattleMoveset(record, ann, { mon = 0, moves = { mv("MIMIC", 82), mv("TACKLE", 0, 1) } })
+  seen.afterResend = live.moves[1].id
+  seen.copyBack = hub:applyBattleMoveset(record, ann, { mon = 0,
+    moves = { mv(live.moves[1].id), mv("TACKLE", 0, 1), mv("LEARNT", 0, 40) } })
+  seen.learnt = hub:applyBattleMoveset(record, ann, { mon = 0,
+    moves = { mv("MIMIC", 82), mv("TACKLE", 0, 1), mv("LEARNT", 0, 40) } })
+  seen.battle = {}
+  for i, m in ipairs(live.moves) do seen.battle[i] = m.id .. ":" .. m.pp end
+  seen.savedAfter = live.preMimic
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "switch", slot = 1 })
+  seen.restored = {}
+  for i, m in ipairs(live.moves) do seen.restored[i] = m.id end
+  return seen
+end
+
+do
+  local picked = mimicLearn(1)
+  ok(picked ~= nil, "wave 4 mimic: a Red wild fight opens")
+  if picked then
+    eq(picked.copy, "HUSH", "wave 4 mimic: the wire's pick reaches the referee (the foe's second move)")
+    eq(picked.copyPp, 9, "wave 4 mimic: ...in MIMIC's slot, at its PP")
+    eq(picked.saved, "MIMIC", "wave 4 mimic: ...the party's MIMIC saved")
+    eq(picked.resend, true, "wave 4 mimic: a re-send of the party's ids is taken")
+    eq(picked.afterResend, "HUSH", "wave 4 mimic: ...and leaves the copy in the fight")
+    eq(picked.copyBack, false, "wave 4 mimic: the copy sent back as a learn is refused")
+    eq(picked.learnt, true, "wave 4 mimic: a learn under MIMIC lands")
+    eq(table.concat(picked.battle, ","), "MIMIC:9,TACKLE:10,LEARNT:10",
+       "wave 4 mimic: ...the party list over the copy, MIMIC at the PP it shared")
+    eq(picked.savedAfter, nil, "wave 4 mimic: ...no saved row left")
+    eq(table.concat(picked.restored, ","), "MIMIC,TACKLE,LEARNT",
+       "wave 4 mimic: the switch-out keeps the learned list")
+  end
+  local unpicked = mimicLearn(nil)
+  eq(unpicked and unpicked.copy, "GROWL", "wave 4 mimic: no pick on the wire is the menu's first row")
+end
+
+-- A transformed battler's re-send on the real referees: the copies stay on
+-- both carts (Red's used to be replaced by its own list).
+local function transformResend(generation)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  hub.forceBattleSeed = 1
+  local ann = (generation == 2 and join2 or join)(hub, "ANN")
+  local id = "tr"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                     chart = generation == 2 and CHART2 or CHART })
+  local function sheet(species, moves)
+    local out = generation == 2 and sheet2({ species = species }) or mon({ species = species })
+    out.moves = moves
+    return out
+  end
+  local function mv(moveId, effect, power)
+    return row(moveId, { pp = 10, power = power or 0, effect = effect or 0 })
+  end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet("COPYCAT", { mv("TRANSFORM", 57), mv("TACKLE", 0, 1) }), sheet("BENCH", { mv("TACKLE", 0, 1) }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet("FOE", { mv("GROWL"), mv("HUSH") }) } })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return nil end
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  local live = record.sim.byId[ann.id].mons[1]
+  local seen = { transformed = live.transformed == true }
+  seen.resend = hub:applyBattleMoveset(record, ann, { mon = 0,
+    moves = { mv("TRANSFORM", 57), mv("TACKLE", 0, 1) }, level = 51 })
+  seen.battle = live.moves[1] and live.moves[1].id
+  seen.battlePp = live.moves[1] and live.moves[1].pp
+  seen.party = live.preTransform and live.preTransform.moves[1].id
+  return seen
+end
+
+do
+  for _, generation in ipairs({ 1, 2 }) do
+    local label = generation == 2 and "gold" or "red"
+    local seen = transformResend(generation)
+    ok(seen and seen.transformed, "wave 4 resend (" .. label .. "): TRANSFORM lands")
+    if seen then
+      eq(seen.resend, true, "wave 4 resend (" .. label .. "): a level-up re-sending the same ids is taken")
+      eq(seen.battle, "GROWL", "wave 4 resend (" .. label .. "): ...and the copied moves stay in the fight")
+      eq(seen.battlePp, 5, "wave 4 resend (" .. label .. "): ...at their 5 PP")
+      eq(seen.party, "TRANSFORM", "wave 4 resend (" .. label .. "): ...the party list put aside unchanged")
+    end
+  end
+end
+
+-- Gold's wTimeOfDay off a Gen 2 ruleset (`timeOfDay`): the hub keeps it,
+-- hands it to the referee's create, and MOONLIGHT heals by it -- half at
+-- night, a quarter at any other time, half with no clock stated (the link
+-- reading); an unknown one refuses the ruleset.  A Red hub reads none.
+local function moonlight(generation, timeOfDay)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  hub.forceBattleSeed = 1
+  local ann = (generation == 2 and join2 or join)(hub, "ANN")
+  local id = "tod"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                     chart = generation == 2 and CHART2 or CHART, timeOfDay = timeOfDay })
+  local record = hub.battles[id]
+  local seen = { ruleset = record and record.ruleset ~= nil,
+                 kept = record and record.ruleset and record.ruleset.timeOfDay }
+  local function sheet(species, moves, hp)
+    local out = generation == 2 and sheet2({ species = species, hp = 100 }) or mon({ species = species, hp = 100 })
+    out.hp = hp or out.hp
+    out.moves = moves
+    return out
+  end
+  local function mv(moveId, effect)
+    return row(moveId, { pp = 10, power = 0, effect = effect or 0 })
+  end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet("MOTH", { mv("MOONLIGHT", 130) }, 40) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet("FOE", { mv("HUSH") }) } })
+  seen.opened = record ~= nil and record.sim ~= nil
+  if not seen.opened then return seen end
+  seen.simTime = record.sim.timeOfDay
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  seen.hp = record.sim.byId[ann.id].mons[1].hp
+  return seen
+end
+
+do
+  local nite = moonlight(2, "nite")
+  eq(nite.kept, "nite", "time of day: a Gold ruleset keeps it")
+  eq(nite.simTime, "nite", "time of day: ...and the referee is created with it")
+  eq(nite.hp, 90, "time of day: MOONLIGHT at night heals half (BattleCommand_HealNite)")
+  local day = moonlight(2, "day")
+  eq(day.simTime, "day", "time of day: day reaches the referee")
+  eq(day.hp, 65, "time of day: ...and MOONLIGHT by day heals a quarter")
+  eq(moonlight(2, "morn").hp, 65, "time of day: ...in the morning too")
+  local none = moonlight(2, nil)
+  eq(none.simTime, nil, "time of day: none stated is none")
+  eq(none.hp, 90, "time of day: ...the link reading (half)")
+  local bad = moonlight(2, "evening")
+  eq(bad.ruleset, false, "time of day: an unknown time refuses the Gold ruleset")
+  eq(bad.opened, false, "time of day: ...so no fight is assembled on it")
+  eq(moonlight(2, "NITE").ruleset, false, "time of day: ...the spelling is the referee's, lower case")
+  local red = moonlight(1, "nite")
+  ok(red.ruleset and red.kept == nil, "time of day: a Red ruleset neither keeps one")
+  ok(moonlight(1, "evening").ruleset, "time of day: ...nor refuses one")
+  eq(red.simTime, nil, "time of day: ...and the Red referee is created without it")
+end
+
+-- Red's MIMIC pick on a choice: read on a Gen 1 hub, ignored on Gold's.
+do
+  local fight = { battle = "b1", action = "fight", move = 0, mimic = 2 }
+  eq(Wire.battleChoice(fight, 1).mimic, 2, "mimic: a Gen 1 choice carries the pick")
+  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = 3 }, 1).mimic, 3,
+     "mimic: ...up to the fourth move")
+  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = 4 }, 1), nil,
+     "mimic: past the fourth move refuses the choice")
+  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = -1 }, 1), nil,
+     "mimic: ...as does a negative pick")
+  eq(Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = true }, 1), nil,
+     "mimic: ...or one that is no number")
+  local gold = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = 9 }, 2)
+  ok(gold and gold.mimic == nil, "mimic: Gold ignores it, whatever it holds")
+  local gen3 = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = 9 }, 3)
+  ok(gen3 and gen3.mimic == nil, "mimic: ...as does Gen 3")
+  local none = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, mimic = 9 })
+  ok(none and none.mimic == nil, "mimic: ...and a caller naming no generation")
+end
+
 -- A Gen 3 hub reads no level-up (BattleSim3 rebuilds nothing from one), so a
 -- referee there is never called, whatever the client sends.
 do

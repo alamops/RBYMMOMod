@@ -4,8 +4,8 @@
  * Deterministic RNG for the Gen2 mediated battle sim.
  *
  * Twin of src/BattleSim2/Rng.lua. Same LCG as Gen1 BattleSim/Rng so Lua and
- * Node share one sequence. Only the damage-variance band differs: Gen2 draws
- * 85..100 inclusive.
+ * Node share one sequence. Only the damage roll differs: Gen2 draws the
+ * cart's DamageVariation loop (`damageRoll`), a rotated byte in 217..255.
  *
  * 32-bit LCG: state = (1664525 * state + 1013904223) >>> 0
  * (Numerical Recipes constants). Every draw comes off the high half of the
@@ -16,8 +16,11 @@ const TWO32 = 4294967296;
 const MULT = 1664525;
 const INCR = 1013904223;
 
-const DAMAGE_ROLL_MIN = 85;
-const DAMAGE_ROLL_MAX = 100;
+const DAMAGE_ROLL_MIN = 217;
+const DAMAGE_ROLL_MAX = 255;
+
+// The guard on the rejection loop below (the Lua twin explains).
+const REDRAW_LIMIT = 1024;
 
 function normaliseSeed(seed) {
   let n = Number(seed);
@@ -86,8 +89,15 @@ function create(seed) {
     byte,
     below,
     nextInt,
+    // BattleCommand_DamageVariation's `.loop` (the Lua twin cites it):
+    // BattleRandom, `rrca`, redrawn while under 217.
     damageRoll() {
-      return nextInt(DAMAGE_ROLL_MIN, DAMAGE_ROLL_MAX);
+      for (let i = 0; i < REDRAW_LIMIT; i++) {
+        const b = byte();
+        const r = Math.floor(b / 2) + (b % 2) * 128;
+        if (r >= DAMAGE_ROLL_MIN) return r;
+      }
+      return DAMAGE_ROLL_MAX;
     },
     state() {
       return s;
@@ -106,6 +116,7 @@ module.exports = {
   create,
   DAMAGE_ROLL_MIN,
   DAMAGE_ROLL_MAX,
+  REDRAW_LIMIT,
   MULT,
   INCR,
 };

@@ -30,7 +30,8 @@
  *   * STAB is floor(d * 15/10); type rows are percents applied one at a time
  *     as floor(d * pct/100), with a non-immune floor of 1.
  *   * Rage's RageDamage (input.rageCount) next: x(count + 1), 16-bit.
- *   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
+ *   * Variation last: floor(d * roll / 255) for roll in 217..255 (the
+ *     cart's rotated byte; wave 4), only when
  *     running damage ≥ 2, at least 1. NO cap after it: DamageCalc's 997 + 2
  *     is the only one; STAB, the matchup, RageDamage and the variation keep
  *     their own 16-bit results, so a hit can pass 999 (Bide's store, Counter).
@@ -47,8 +48,10 @@
  * (default true). When false, reads spa (or spc) vs spd (or spc).
  */
 
-const ROLL_MIN = 85;
-const ROLL_MAX = 100;
+// BattleCommand_DamageVariation's multiplier: a rotated BattleRandom byte,
+// 217..255, and the damage is x/255 of it (wave 4; the Lua twin cites it).
+const ROLL_MIN = 217;
+const ROLL_MAX = 255;
 // DamageCalc's tail: the base held at MAX_DAMAGE - MIN_DAMAGE (997) and
 // MIN_DAMAGE added -- the one cap Gold's damage has.
 const MAX_DAMAGE = 999;
@@ -149,8 +152,8 @@ function truncateStats(attack, defense, onePass) {
 }
 
 // BattleCommand_DamageVariation: nothing for 0 or 1 (no roll is drawn for
-// them: `varies`), otherwise floor(d * roll / 100), at least 1 and NOT capped
-// (see the header).
+// them: `varies`), otherwise floor(d * roll / 255) -- roll 217..255 -- at
+// least 1 and NOT capped (see the header).
 function varies(modified) {
   return Math.max(0, int(modified, 0)) >= 2;
 }
@@ -161,7 +164,7 @@ function applyRoll(modified, roll) {
   let r = int(roll, ROLL_MAX);
   if (r < ROLL_MIN) r = ROLL_MIN;
   if (r > ROLL_MAX) r = ROLL_MAX;
-  return Math.max(1, idiv(d * r, 100));
+  return Math.max(1, idiv(d * r, ROLL_MAX));
 }
 
 // DoubleDamage / BattleCommand_DoubleMinimizeDamage: wCurDamage shifted left

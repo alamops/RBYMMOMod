@@ -702,6 +702,14 @@ const STAGE12_MAX = 6;
 // MON_HAPPINESS that pokecrystal's BattleCommand_HappinessPower /
 // _FrustrationPower read. Gold only. Twin of Wire.HAPPINESS2_MAX.
 const HAPPINESS2_MAX = 255;
+// Gold's wTimeOfDay as a Gen 2 ruleset spells it (`timeOfDay`): pokecrystal /
+// pokegold constants/ram_constants.asm MORN_F 0, DAY_F 1, NITE_F 2 -- the three
+// readings BattleCommand_HealMorn / _HealDay / _HealNite compare it with, and
+// all GetTimeOfDay's TimesOfDay table writes (DARKNESS_F only ever names a
+// palette, DARKNESS_PALSET). Spelled as the Gold referee's Turn TIMES keys,
+// which `create` reads as `opts.timeOfDay`. A closed set, like WEATHERS3. Twin
+// of Wire.TIMES_OF_DAY2.
+const TIMES_OF_DAY2 = new Set(['morn', 'day', 'nite']);
 
 // Contract K7's three blocks per dialect: `base` keyed like `stats` plus `hp`,
 // `dvs` the cart's four DVs (Gold's one Special DV feeds both special stats),
@@ -1322,6 +1330,17 @@ function cleanBattleRuleset(raw, generation) {
       pool.push(move);
     }
     ruleset.metronomePool = pool;
+  }
+  // Gold's wTimeOfDay, which MORNING SUN / SYNTHESIS / MOONLIGHT compare
+  // (BattleCommand_HealMorn / _HealDay / _HealNite) -- the host's cart clock.
+  // Read on a Gen 2 hub alone, by the hub's generation: a Gen 1 reader (or a
+  // caller naming none) neither copies nor refuses one. One of TIMES_OF_DAY2 or
+  // the ruleset is refused, as Gen 3's `weather` is -- it is an input to a heal.
+  // Absent stays absent. Twin of Wire.battleRuleset.
+  if (luaInt(generation, 2, 2) !== null
+      && raw.timeOfDay !== undefined && raw.timeOfDay !== null) {
+    if (!TIMES_OF_DAY2.has(raw.timeOfDay)) return null;
+    ruleset.timeOfDay = raw.timeOfDay;
   }
   return ruleset;
 }
@@ -2116,7 +2135,8 @@ function cleanBattleReady(raw) {
  * `generation` (optional) is the hub's. Only 3 reads Gen 3's two extra fields,
  * and reads every index the way Wire.int does (luaInt); a Gen 1 / Gen 2 hub --
  * and a caller that names none -- reads a choice exactly as it did before Gen 3
- * existed, ignoring them whatever they hold. Twin of Wire.battleChoice.
+ * existed, ignoring them whatever they hold. Likewise only 1 reads Gen 1's
+ * `mimic` (wave 4), ignored everywhere else. Twin of Wire.battleChoice.
  */
 function cleanBattleChoice(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
@@ -2165,6 +2185,19 @@ function cleanBattleChoice(raw, generation) {
       if (typeof raw.dexCaught !== 'boolean') return null;
       choice.dexCaught = raw.dexCaught;
     }
+  }
+  // Gen 1: MIMIC's pick, the 0-based index into the TARGET's move list, asked
+  // up front because pokered MimicEffect opens the foe's move menu mid-move
+  // (`.letPlayerChooseMove`). The Red referee reads it where the cart asks the
+  // player (lib/battle Turn `_mimicPick`). Gold's MIMIC has no menu and Gen 3's
+  // none either, so only a Gen 1 hub reads it -- a caller naming no generation
+  // reads a choice as it always did -- and a stray one elsewhere is ignored.
+  // Present and out of range refuses the choice, `pass`'s posture. Read the way
+  // Wire.int reads it (luaInt), new on both twins. Twin of Wire.battleChoice.
+  if (luaInt(generation, 1, 1) !== null && raw.mimic !== undefined && raw.mimic !== null) {
+    const mimic = luaInt(raw.mimic, 0, BATTLE_MOVE_MAX - 1);
+    if (mimic === null) return null;
+    choice.mimic = mimic;
   }
 
   if (needs !== true && choice[needs] === undefined) return null;
@@ -2669,6 +2702,7 @@ module.exports = {
   STAGE12_MAX,
   PAYDAY12_MAX,
   HAPPINESS2_MAX,
+  TIMES_OF_DAY2,
   K7_KEYS1,
   K7_KEYS2,
   METRONOME_POOL_MAX,

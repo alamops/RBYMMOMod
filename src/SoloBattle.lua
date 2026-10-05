@@ -745,6 +745,12 @@ function M:_begin(game, state, mapId, kind)
     -- and FIRE thaw (BattleSim `typeIndexOf`).
     typeIds = ruleset.typeIds,
     metronomePool = ruleset.metronomePool,
+    -- Gold's wTimeOfDay, which MORNING SUN / SYNTHESIS / MOONLIGHT compare
+    -- (MediatedBattle.timeOfDay2, stamped on the ruleset as a hub reads it);
+    -- the screen's upload is handed over raw here, so the generation gate a
+    -- hub's Wire.battleRuleset applies is this line's.  Red has no clock, and
+    -- Gen 3 builds its fight in `_begin3` (no wTimeOfDay in a GBA battle).
+    timeOfDay = (generation == 2) and ruleset.timeOfDay or nil,
     -- Zero, which the referee reads as "no deadline at all". A solo fight has
     -- nobody to keep waiting and the vanilla battle menu waits forever.
     choiceTimeout = Config.SOLO_CHOICE_TIMEOUT,
@@ -1821,6 +1827,37 @@ function M.levelledSince(game, save, levels)
   return out
 end
 
+-- The referee's copy of one monster's moves as its party struct holds them:
+-- the list a TRANSFORM put aside (`preTransform.moves`, both referees), with
+-- every slot a MIMIC wrote given back its own MIMIC (`preMimic`) -- what a
+-- switch-out would have reloaded, read without moving the copy.  The PP of
+-- such a slot is the carts' difference: Red's party MIMIC paid for every use
+-- of the mimicked move (pokered DecrementPP spends the party's PP at the slot,
+-- BattleSim Effects.restoreMoves keeps the slot's), Gold's paid for none of
+-- them (pokecrystal BattleCommand_DoTurn's CheckMimicUsed skips the party's
+-- spend on a MIMIC slot holding another move), so its saved row's own PP is
+-- the party's.  Rows are { id, pp }.
+local function partyMoves12(mon, generation)
+  local list = mon.moves
+  local saved = type(mon.preTransform) == "table" and mon.preTransform.moves or nil
+  if type(saved) == "table" then list = saved end
+  if type(list) ~= "table" then return nil end
+  local mimicked = type(mon.preMimic) == "table" and mon.preMimic or nil
+  local out = {}
+  for i, row in ipairs(list) do
+    if type(row) == "table" then
+      local own = mimicked and mimicked[i]
+      if type(own) == "table" and own.id ~= nil then
+        local pp = (generation == 2 and own.pp ~= nil) and own.pp or row.pp
+        out[#out + 1] = { id = own.id, pp = pp }
+      else
+        out[#out + 1] = { id = row.id, pp = row.pp }
+      end
+    end
+  end
+  return out
+end
+
 -- HP, PP and status, from the referee's copy back onto the player's own party.
 --
 -- **This is the only thing this file writes to the save**, and the reason it
@@ -1850,13 +1887,27 @@ function M:_reconcile(sim, game, save)
   end
   local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
   if not (player and type(player.mons) == "table") then return false end
+  -- Read off the game rather than `self.generation`: `_ended` has already let
+  -- the fight go (and the generation with it) by the time this runs.
+  local generation = Gen.generation(game)
 
   local applied = 0
   for _, mon in ipairs(player.mons) do
     local index = (tonumber(mon.slot) or 0) + 1
     local target = party[index]
     if type(target) == "table" then
-      self:_applyMon(target, mon)
+      -- Gold's SKETCH, should the fight have ended before the screen heard of
+      -- it: the referee states a TRANSFORMed user's sketch only when the
+      -- Transform is undone (BattleSim2 Turn `_sketch`, `ppTouched`), and a
+      -- fight that ends first undoes nothing.  The party's own list is right
+      -- here, so the screen's rule (MediatedBattle.sketchHome) runs on it --
+      -- a no-op once the screen has written it.  A solo fight is always one
+      -- against the computer, the mode the cart writes home in.
+      if generation == 2 then
+        MediatedBattle.sketchHome(game, Config.SOLO_WILD_MODE, target.moves,
+          partyMoves12(mon, generation), target)
+      end
+      self:_applyMon(target, mon, generation)
       applied = applied + 1
     end
   end
@@ -1879,17 +1930,27 @@ end
 --
 -- **PP is matched by move id, never by slot**, and that is not caution: the
 -- sheet skips a move it cannot describe, so the two lists are the same length
--- only by luck -- and a Mimic or a Transform rewrites the referee's copy
--- outright. Matching by id makes both harmless: a move the referee is no longer
--- holding simply finds nothing to write to, which is also vanilla's rule (the
--- battle's copy is discarded and the original ids come back).
+-- only by luck. What is matched is the referee's copy *as the party sees it*
+-- (`partyMoves12`): a TRANSFORMed monster's own list put aside at the
+-- Transform -- both carts' DoTurn / DecrementPP leave the party's PP alone
+-- while it is transformed, so those are its numbers -- and each slot a MIMIC
+-- wrote back to MIMIC (on Red at the slot's PP, the PP the two shared; on
+-- Gold at the PP it had, `partyMoves12`).  A move the copy holds and the
+-- party does not (a referee that kept no `preMimic`) finds nothing to write to
+-- and is passed over -- before wave 4 it *ended* the walk, so a fight that
+-- ended under a MIMIC or a TRANSFORM brought no PP home at all past that
+-- slot.
+--
+-- `generation` (1 or 2) is the game's: a TOXIC comes home as PSN on both
+-- (MediatedBattle.partyStatus12).
 --
 -- Status is the engine's own three-letter token in both places, so it passes
 -- through. There is no counter to carry: the engine keeps sleep's on the
 -- battler and throws it away with the battle, so a monster that leaves asleep
 -- leaves asleep and nothing more.
-function M:_applyMon(target, mon)
+function M:_applyMon(target, mon, generation)
   if not (type(target) == "table" and type(mon) == "table") then return false end
+  generation = generation or self.generation
 
   local simMax = max(1, tonumber(mon.maxHp) or 1)
   local saveMax = tonumber(target.stats and target.stats.hp) or simMax
@@ -1902,19 +1963,26 @@ function M:_applyMon(target, mon)
   end
 
   -- nil is healthy and is what the engine stores for it, so the absence is
-  -- written as an absence rather than as a token nothing branches on.
-  target.status = statusToken(mon.status)
+  -- written as an absence rather than as a token nothing branches on.  A
+  -- TOXIC comes home as the PSN the party's status byte holds
+  -- (MediatedBattle.partyStatus12: badly poisoned is a battle-only flag on
+  -- both carts); this path reconciles Red and Gold only (`_applyMon3` is
+  -- Gen 3's).
+  target.status = MediatedBattle.partyStatus12(statusToken(mon.status),
+    generation)
 
   local moves = type(target.moves) == "table" and target.moves or nil
-  local simMoves = type(mon.moves) == "table" and mon.moves or nil
+  local simMoves = partyMoves12(mon, generation)
   if moves and simMoves then
     local at = 1
     for _, simMove in ipairs(simMoves) do
       local id = simMove.id
-      while at <= #moves and moves[at].id ~= id do at = at + 1 end
-      if at > #moves then break end
-      moves[at].pp = max(0, tonumber(simMove.pp) or 0)
-      at = at + 1
+      local found = at
+      while found <= #moves and moves[found].id ~= id do found = found + 1 end
+      if found <= #moves then
+        moves[found].pp = max(0, tonumber(simMove.pp) or 0)
+        at = found + 1
+      end
     end
   end
   return true

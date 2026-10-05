@@ -1144,11 +1144,12 @@ do
   end
 
   ok(spoke("Alpha used SLOW SWIPE"), "gen2: an attack prints the display name")
-  ok(spoke("THUMP HIT was disabled"), "gen2: Disable landing names the move")
+  -- R2d: Gold's own DISABLE line, WasDisabledText.
+  ok(spoke("Beta's THUMP HIT was DISABLED!"), "gen2: Disable landing names the move")
   ok(spoke("THUMP HIT is disabled"), "gen2: and so does the refusal it causes")
   -- R2c: the count ticks in CheckTurn and wears off with DisabledNoMoreText.
   ok(spoke("Beta's disabled no more!"), "gen2: and so does it wearing off")
-  ok(spoke("Alpha learned THUMP HIT"), "gen2: Mimic names what it copied")
+  ok(spoke("Alpha learned THUMP HIT!"), "gen2: Mimic names what it copied")
   ok(spoke("Alpha used THUMP HIT"), "gen2: and the copy keeps the name")
   ok(spoke("Beta used nudge"), "gen2: a move with no name is narrated under its id")
 
@@ -1265,7 +1266,9 @@ do
   -- R2c: SOLARBEAM has its own id (its sun skip and rain halving), a charge.
   eq(Effects.idOf("EFFECT_SOLARBEAM"), 127, "gen2: EFFECT_SOLARBEAM has its own id")
   ok(Effects.isCharge(127), "gen2: ...a charge move all the same")
-  eq(Effects.idOf("EFFECT_SKULL_BASH"), 39, "gen2: EFFECT_SKULL_BASH maps onto CHARGE")
+  -- R2d: SKULL BASH has its own id (its charge turn's Defense raise), a charge.
+  eq(Effects.idOf("EFFECT_SKULL_BASH"), 157, "gen2: EFFECT_SKULL_BASH has its own id")
+  ok(Effects.isCharge(157), "gen2: ...a charge move all the same")
   eq(Effects.idOf("FLY_EFFECT"), 43, "gen2: Gen1 FLY_EFFECT name still resolves")
   -- Crystal status / stat-down names.  Before these aliases, moveOf stored 0
   -- and every 0-power status move in a BattleSim2 fight (2v2 especially)
@@ -1453,7 +1456,8 @@ end
 do
   local target = dummyMon({ species = "Beta", substitute = 40 })
   local out = applyPrimary(32, dummyMon(), target)
-  eq(out.nothing, true, "gen2: SLEEP_EFFECT vs substitute is nothing")
+  -- R2d: SleepTarget's own line, DidntAffect1Text.
+  eq(out.messages[1], "It didn't affect Beta!", "gen2: SLEEP_EFFECT vs substitute didn't affect")
   eq(target.status, nil, "gen2: SLEEP_EFFECT does not land through a substitute")
 end
 
@@ -1468,9 +1472,17 @@ do
 end
 
 do
-  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
-  eq(applyPrimary(86, dummyMon(), target).nothing, true,
-     "gen2: DISABLE_EFFECT vs substitute is nothing")
+  -- R2d: Gold's BattleCommand_Disable asks no substitute at all -- the
+  -- target's LAST_COUNTER_MOVE is disabled behind one.
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  target.lastCounterMove = target.moves[1]
+  local out = Effects.applyPrimary({
+    effectId = 86, rng = { byte = function() return 3 end },
+    userMon = dummyMon(), targetMon = target,
+    userFighter = { slot = 1, side = "a" }, targetFighter = { slot = 2, side = "b" },
+  })
+  eq(out.messages[1], "Beta's THUMP was DISABLED!", "gen2: DISABLE_EFFECT lands behind a substitute")
+  eq(target.disable and target.disable.turns, 4, "gen2: ...for `.loop2`'s byte & 7, plus 1")
 end
 
 do
@@ -1778,11 +1790,13 @@ do
   -- upload (`a.pp = 0` empties Ann's one slot, so she Struggles); `rules` is
   -- the ruleset (typeIds, specialTypes).  The default seed is the one the
   -- numbers below were pinned on, re-chosen (from 777001) when K12 moved the
-  -- stream onto the RNG's high bits, so every exchange rolls what it did.
+  -- stream onto the RNG's high bits, and again (777019) when wave 4 put the
+  -- crit on CriticalHitChances' byte and the roll on DamageVariation's loop
+  -- (R2d), so every exchange rolls what it did.
   local function exchange(mode, a, b, rules)
     rules = rules or {}
     local battle, err = Turn.create({
-      id = "b1", mode = mode, seed = a.seed or 777002,
+      id = "b1", mode = mode, seed = a.seed or 777019,
       choiceTimeout = 60, reconnectGrace = 60,
       typeIds = rules.typeIds, specialTypes = rules.specialTypes,
       sides = {
@@ -2644,8 +2658,9 @@ do
   ok(not sawKind(subEvents, "held"), "a substitute at `effectchance` keeps the item")
   eq(subBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...which the foe still holds")
   ok(said(subEvents, "Alpha used THIEF"), "...though the hit itself landed")
-  -- Seed 218 draws the 255 at `effectchance` (R2c's draw order moved it off 153).
-  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 218)
+  -- Seed 163 draws the 255 at `effectchance` (R2c's draw order moved it off
+  -- 153, R2d's crit byte and DamageVariation loop off 218).
+  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 163)
   ok(not sawKind(missEvents, "held"), "the 1/256 byte of 255 against a 100% chance takes nothing")
   eq(missBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...and the foe keeps its item")
   local zero = thiefMove()
@@ -2854,7 +2869,7 @@ end
 -- (p) the wave-2 review fixes (docs/plans/gen12-referee-fidelity.md)
 do
   local Damage = BattleSim2.Damage
-  local function rngOf(battle) return battle:snapshot().rngState end
+  local function rngOf(battle) return battle.rng:state() end
   local function countSaid(events, text)
     local n = 0
     for _, event in ipairs(events) do
@@ -2900,13 +2915,17 @@ do
   local _, cBattle = confusedFight(nil)
   ok(said(pcEvents, "Alpha hurt itself in confusion"), "a paralysed, confused monster rolls its confusion first")
   eq(rngOf(pcBattle), rngOf(cBattle), "...and a self-hit leaves no paralysis byte drawn")
+  -- Gold's DISABLE reads the target's LAST_COUNTER_MOVE (R2d), so Alpha
+  -- uses thump once first; its paralysis is put on after that turn, so both
+  -- fights reach the second one with the same stream.
   local function disabledFight(status)
-    local alpha = held({ species = "Alpha", spe = 10, status = status,
+    local alpha = held({ species = "Alpha", spe = 10,
                          moves = { hit("thump", 10), hit("pound_two", 10) } })
-    alpha.lastMoveIndex = 1
     local battle, foe = fight({ seed = 9, a = { alpha },
       b = { held({ species = "Beta", spe = 90, moves = { hit("DISABLE", 0, 0, 86), hit("tap", 1) } }) } })
     drain(battle)
+    round(battle, foe, nil, { action = "fight", move = 1 })
+    battle.fighters[1].mons[1].status = status and "paralysis" or nil
     return round(battle, foe), battle
   end
   local pdEvents, pdBattle = disabledFight("PAR")
@@ -2976,14 +2995,17 @@ do
   round(rBattle, rFoe, { action = "fight", move = 1 }, { action = "fight", move = 1 })
   eq(ralpha.raging, false, "choosing another move ends the rage")
   eq(ralpha.rageCounter, 0, "...and zeroes the counter")
-  local base = Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 }, { roll = 100 }).damage
+  -- The top roll (Damage.ROLL_MAX: 255 since R2d's DamageVariation byte) is
+  -- x255/255, the damage as it stands.
+  local top = Damage.ROLL_MAX
+  local base = Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 }, { roll = top }).damage
   eq(Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 },
-                    { roll = 100, rageCount = 4 }).damage, 5 * base, "RageDamage: x(count + 1)")
+                    { roll = top, rageCount = 4 }).damage, 5 * base, "RageDamage: x(count + 1)")
   eq(Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 },
-                    { roll = 100, rageCount = 255 }).damage, 256 * base,
+                    { roll = top, rageCount = 255 }).damage, 256 * base,
      "...x256 at 255, with no 999 tail after it")
   eq(Damage.compute({ level = 100, attack = 255 }, { defense = 1 }, { power = 250 },
-                    { roll = 100, rageCount = 255 }).damage, 65535,
+                    { roll = top, rageCount = 255 }).damage, 65535,
      "...pinned at $ffff when the sum carries")
   -- Seed 2 (R2c's draw order moved it off 1).
   local sBattle, sFoe = rageFight({ seed = 2, status = "PSN", confusion = 3, bMove = "thump", bEffect = 0 })
@@ -3364,8 +3386,8 @@ do
     eq(Effects.idOf(name), id, name .. " has its own id")
     eq(Effects.nameOf(id), name, "...and the id names it back")
   end
-  eq(Effects.MAX_EFFECT_ID, 132, "the table ends at EFFECT_PSYWAVE (R2c)")
-  eq(Effects.nameOf(133), nil, "nothing past it")
+  eq(Effects.MAX_EFFECT_ID, 157, "the table ends at EFFECT_SKULL_BASH (R2d)")
+  eq(Effects.nameOf(158), nil, "nothing past it")
   eq(Effects.category(101), "charge", "SKY ATTACK still charges")
   ok(Effects.isCharge(Effects.SKY_ATTACK), "...as a charge move")
   eq(Effects.idOf("EFFECT_RAZOR_WIND"), 39, "the other charge moves keep CHARGE_EFFECT")
@@ -3743,11 +3765,14 @@ do
   local function beam(item)
     local b = fight({ seed = 8,
       a = { held({ species = "Alpha", spe = 10, item = item, moves = { hit("HYPER_BEAM", 150, 0, 80) } }) },
-      b = { held({ species = "Beta", maxHp = 900, spe = 50, moves = { hit("tap", 1) } }) } })
+      b = { held({ species = "Beta", maxHp = 900, spe = 50,
+                   moves = { hit("tap", 1), hit("SPLASH", 0, 0, 85) } }) } })
     drain(b)
     round(b, "p2")
     local before = b.rng:state()
-    b:submitChoice("p2", { action = "fight", move = 0 })
+    -- SPLASH draws nothing, so the forced turn's bytes are the claw's alone
+    -- (R2d: a hit's DamageVariation loop draws a varying count).
+    b:submitChoice("p2", { action = "fight", move = 1 })
     local events = drain(b)
     return steps(before, b.rng:state()), events
   end
@@ -3835,11 +3860,12 @@ do
   end
 
   -- (a) + (b): a 255 accuracy byte draws nothing, and a NormalHit draws its
-  -- crit and roll whatever happens -- two draws for the turn, a splash none.
+  -- crit and roll whatever happens -- the crit byte and DamageVariation's
+  -- loop (R2d: as many bytes as it takes) for the turn, a splash none.
   local b = f3({ seed = 41, a = { held({ species = "Alpha", spe = 90, moves = { hit("tap", 20) } }) },
     b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("splash", 0, 0, 85) } }) } })
   local probe = Rng2.new(0):setState(b.rng:state())
-  probe:next(); probe:next()
+  probe:byte(); probe:damageRoll()
   round(b, "p2")
   eq(b.rng:state(), probe:state(), "(a)+(b): a hit at byte 255 draws the crit and the roll only")
 
@@ -3969,6 +3995,165 @@ do
     b = { held({ species = "Wild", spe = 90, moves = { hit("BEAT_UP", 10, 0, Effects.BEAT_UP) } }) } })
   local buev = round(bu, "wild")
   ok(said(buev, "Wild's attack!") and said(buev, "But it failed"), "a wild BEAT UP hits once and fails")
+end
+
+-- ------------------------------------------------------------------
+-- the referee-gaps run's wave 4 (R2d): the rules the parity scenarios
+-- (tests/drivers/battle2_turn_parity.lua, r2d_*) do not state on their own
+-- ------------------------------------------------------------------
+
+do
+  local Effects = BattleSim2.Effects
+  -- The ids and tables (Effects.lua 133..157).
+  local names = {
+    EFFECT_ATTRACT = 133, EFFECT_BATON_PASS = 134, EFFECT_BELLY_DRUM = 135,
+    EFFECT_CONVERSION2 = 136, EFFECT_CURSE = 137, EFFECT_DESTINY_BOND = 138,
+    EFFECT_ENCORE = 139, EFFECT_FORESIGHT = 140, EFFECT_HEAL_BELL = 141,
+    EFFECT_MEAN_LOOK = 142, EFFECT_NIGHTMARE = 143, EFFECT_PAIN_SPLIT = 144,
+    EFFECT_PERISH_SONG = 145, EFFECT_PSYCH_UP = 146, EFFECT_RAPID_SPIN = 147,
+    EFFECT_SKETCH = 148, EFFECT_SPIKES = 149, EFFECT_SPITE = 150,
+    EFFECT_SP_DEF_UP_2 = 151, EFFECT_SWAGGER = 152, EFFECT_TELEPORT = 153,
+    EFFECT_SP_DEF_UP = 154, EFFECT_SP_DEF_DOWN = 155, EFFECT_SP_DEF_DOWN_2 = 156,
+    EFFECT_SKULL_BASH = 157,
+  }
+  for name, id in pairs(names) do
+    eq(Effects.idOf(name), id, "R2d: " .. name .. " has its own id")
+  end
+  ok(Effects.NO_CHECKHIT[134] and Effects.NO_CHECKHIT[151] and not Effects.NO_CHECKHIT[139],
+     "R2d: BATON PASS and AMNESIA run no `checkhit`; ENCORE does")
+  ok(Effects.READS_MISS[32] and Effects.READS_MISS[84] and not Effects.READS_MISS[18],
+     "R2d: SleepTarget and LeechSeed read wAttackMissed; a stat-down's miss is StatDown's")
+  ok(Items.kingsRockMove(147) and Items.kingsRockMove(157) and not Items.kingsRockMove(133),
+     "R2d: RAPID SPIN and SKULL BASH run `kingsrock`, ATTRACT does not")
+  ok(Effects.SLEEP_TALK_EXCLUDED[157], "R2d: SLEEP TALK never calls SKULL BASH")
+  eq(Effects.primaryStatDown(156), "spd", "R2d: SP. DEF DOWN 2 is a primary stat-down")
+
+  -- GetGender over K15's BASE_GENDER and the Attack / Speed DVs.
+  local function g(ratio, atk, spe, extra)
+    local m = { base = { gender = ratio }, dvs = { atk = atk, def = 0, spe = spe, spc = 0 } }
+    for k, v in pairs(extra or {}) do m[k] = v end
+    return Effects.gender(m)
+  end
+  eq(g(255, 15, 15), nil, "R2d: GENDER_UNKNOWN is genderless")
+  eq(g(0, 0, 0), "M", "R2d: GENDER_F0 is male whatever the DVs")
+  eq(g(254, 15, 15), "F", "R2d: GENDER_F100 is female whatever the DVs")
+  eq(g(127, 7, 15), "F", "R2d: Attack DV 7 / Speed 15 (byte 127) is not above F50's 127: female")
+  eq(g(127, 8, 0), "M", "R2d: ...byte 128 is: male")
+  eq(Effects.gender({ dvs = { atk = 15, spe = 15 } }), nil, "R2d: no ratio on the sheet: no gender")
+  eq(g(127, 0, 0, { preTransform = { dvs = { atk = 15, spe = 15 } } }), "M",
+     "R2d: a transformed monster keeps its own DVs' gender")
+
+  -- SKETCH's base PP off a row's max and its PP Ups (ComputeMaxPP).
+  eq(Effects.basePp({ maxPp = 61, ppUps = 3 }), 40, "R2d: 40 + 3 x 7 = 61")
+  eq(Effects.basePp({ maxPp = 32, ppUps = 3 }), 20, "R2d: 20 + 3 x 4 = 32")
+  eq(Effects.basePp({ maxPp = 35 }), 35, "R2d: no PP Ups: the max")
+end
+
+do
+  -- MEAN LOOK closes switching and running (BattleMenu_PKMN's `.check_trapped`,
+  -- TryRunningFromBattle) to the seat it holds; BATON PASS is still open.
+  local battle, foe = fight({ mode = "wild",
+    a = { held({ species = "Alpha", spe = 10, moves = { hit("wait", 0, 0, 85) } }),
+          held({ species = "Gamma", spe = 10, moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Wild", spe = 90, moves = { hit("MEAN_LOOK", 0, 0, 142) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  ok(said(events, "Alpha can't escape now!"), "R2d: the wild monster holds Alpha")
+  ok(not battle:submitChoice("p1", { action = "switch", slot = 1 }), "R2d: ...no switch")
+  ok(not battle:submitChoice("p1", { action = "run" }), "R2d: ...no run")
+  ok(battle:submitChoice("p1", { action = "fight", move = 0 }), "R2d: ...a move is still chosen")
+end
+
+do
+  -- The computer's FULL HEAL (AI_HealStatus): the burn goes and its Attack
+  -- stays halved -- no CalcEnemyStats; the player's rebuilds it.  The burn
+  -- lands in the fight (setStatus, BurnTarget's ApplyBrnEffectOnAttack): a
+  -- computer's monster SENT OUT burned keeps its full Attack (LoadEnemyMon),
+  -- which would hide the bug.
+  local function healed(side)
+    local burned = held({ species = "Burnt", atk = 100, spe = 10, moves = { hit("wait", 0, 0, 85) } })
+    local other = held({ species = "Other", spe = 90, moves = { hit("wait", 0, 0, 85) } })
+    local o = { mode = "coop_npc", a = { side == "a" and burned or other }, b = { side == "b" and burned or other } }
+    local battle, foe = fight(o)
+    drain(battle)
+    local seat = side == "a" and battle.byId.p1 or battle.byId[foe]
+    local mon = seat.mons[1]
+    Effects.setStatusOn(mon, seat, "burn")
+    eq(Effects.storedStat(mon, "atk", seat.badges), 50, "R2d: side " .. side .. "'s burn halves its Attack")
+    if side == "a" then
+      round(battle, foe, { action = "item", item = "FULL_HEAL" }, nil)
+    else
+      round(battle, foe, nil, { action = "item", item = "FULL_HEAL" })
+    end
+    return mon.status, Effects.storedStat(mon, "atk", seat.badges)
+  end
+  local aStatus, aAtk = healed("a")
+  local bStatus, bAtk = healed("b")
+  eq(aStatus, nil, "R2d: the player's FULL HEAL cures the burn")
+  eq(aAtk, 100, "R2d: ...and CalcPlayerStats gives the Attack back")
+  eq(bStatus, nil, "R2d: the computer's FULL HEAL cures it too")
+  eq(bAtk, 50, "R2d: ...but its Attack stays halved (the cart's bug)")
+end
+
+do
+  -- BATON PASS's successor: InitBattleMon's burn THEN the passed stages
+  -- ("pass"), the stage on the halved Attack -- and a FLYING successor takes
+  -- no SPIKES.
+  local typeIds = { "NORMAL", "FLYING" }
+  local battle, foe = fight({ typeIds = typeIds,
+    a = { held({ species = "Alpha", spe = 90, types = { 0 },
+                 moves = { hit("SWORDS_DANCE", 0, 0, 50), hit("BATON_PASS", 0, 0, 134) } }),
+          held({ species = "Gamma", atk = 101, spe = 90, types = { 1 }, status = "BRN",
+                 moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("SPIKES", 0, 0, 149) } }) } })
+  drain(battle)
+  round(battle, foe)
+  local events = round(battle, foe, { action = "fight", move = 1, pass = 1 })
+  local gamma = battle.byId.p1.mons[2]
+  eq(battle.byId.p1.active, 2, "R2d: BATON PASS sends the named successor")
+  eq(gamma.stages.atk, 2, "R2d: ...with the passed +2")
+  eq(Effects.storedStat(gamma, "atk", nil), 100, "R2d: ...on the burn-halved Attack: floor(101/2) x 2")
+  ok(battle.screens.a.spikes, "R2d: SPIKES lie on Ann's side")
+  ok(not said(events, "Gamma's hurt by SPIKES!"), "R2d: a FLYING successor takes no SPIKES")
+end
+
+do
+  -- ENCORE: an encored seat's FIGHT is the encored slot whatever it names.
+  local battle, foe = fight({
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("ENCORE", 0, 0, 139), hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("tap", 1), hit("thump", 5) } }) } })
+  drain(battle)
+  round(battle, foe, { action = "fight", move = 1 }, { action = "fight", move = 1 })
+  round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 1 })
+  local beta = battle.byId[foe].mons[1]
+  ok(beta.encore ~= nil and beta.encore.moveIndex == 2, "R2d: Beta is encored into thump")
+  battle:submitChoice("p1", { action = "fight", move = 1 })
+  battle:submitChoice(foe, { action = "fight", move = 0 })
+  local events = drain(battle)
+  ok(said(events, "Beta used thump"), "R2d: Beta's tap is thump")
+end
+
+do
+  -- The computer's `.CheckAIRandomFail` is the computer's alone: a link
+  -- fight's side b draws no byte for its HYPNOSIS.
+  local function sleepRng(mode)
+    local battle, foe = fight({ mode = mode, seed = 3,
+      a = { held({ species = "Alpha", spe = 10, moves = { hit("wait", 0, 0, 85) } }) },
+      b = { held({ species = "Beta", spe = 90, moves = { hit("HYPNOSIS", 0, 0, 32) } }) } })
+    drain(battle)
+    local before = battle.rng:state()
+    battle.byId.p1.mons[1].status = "poison"
+    local events = round(battle, foe)
+    ok(said(events, "It didn't affect Alpha!"), "R2d: " .. mode .. ": HYPNOSIS into a status fails")
+    local oneByte = battle.rng:clone()
+    oneByte:setState(before)
+    oneByte:byte()
+    return before, battle.rng:state(), oneByte:state()
+  end
+  local a1, a2 = sleepRng("1v1")
+  local _, b2, bOne = sleepRng("coop_npc")
+  eq(a1, a2, "R2d: a link foe's HYPNOSIS into a status draws nothing")
+  eq(b2, bOne, "R2d: the computer's draws exactly its AI byte")
 end
 
 -- ------------------------------------------------------------------

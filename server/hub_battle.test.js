@@ -2978,6 +2978,286 @@ function testTransformedLearn() {
   ok(red.restored === 'TRANSFORM,TACKLE,LEARNT', 'transformed learn (red): ...and gives back the learned list');
 }
 
+// ---------------------------------------------------------------------------
+// Wave 4 of docs/plans/gen12-referee-gaps-fix.md: a learn is judged against the
+// PARTY list (a Transform's list put aside, a MIMIC's slots given back) and
+// reaches the battle list only as the cart's LearnMove does -- for a new move
+// alone, on Red whatever the Transform, on Gold only untransformed. Twin of the
+// same block in tests/hub_battle.lua, which argues each case.
+// ---------------------------------------------------------------------------
+
+function testLearnUnderOverlays() {
+  const { learnTo } = require('./lib/relay.js');
+  const red = {
+    transformed: true,
+    moves: [row12('COPY1', { pp: 5 }), row12('COPY2', { pp: 5 })],
+    preTransform: { moves: [row12('A', { pp: 7 }), row12('B')] },
+  };
+  ok(learnTo(1, red, [row12('A', { pp: 99 }), row12('B')]) === true, 'wave 4: a Red re-send while transformed is taken');
+  ok(red.moves[0].id === 'COPY1', 'wave 4: ...and the copied moves stay in the fight');
+  ok(red.moves.length === 2, 'wave 4: ...all of them');
+  ok(red.preTransform.moves[0].pp === 7, 'wave 4: ...the list put aside keeps its PP');
+  ok(learnTo(1, red, [row12('A'), row12('B'), row12('C')]) === true, 'wave 4: a Red learn while transformed');
+  ok(red.moves[2] && red.moves[2].id === 'C',
+    'wave 4: ...copies the party list over the copies (pokered LearnMove)');
+  ok(red.moves[0].pp === 7, "wave 4: ...with the party's PP");
+  ok(red.moves[0] !== red.preTransform.moves[0], 'wave 4: ...as a list of its own');
+
+  const mimicked = (copyPp) => ({
+    moves: [row12('HUSH', { pp: copyPp }), row12('B')],
+    preMimic: { 1: row12('MIMIC', { pp: 9, effect: 82 }) },
+  });
+  const m = mimicked(6);
+  ok(learnTo(1, m, [row12('MIMIC'), row12('B')]) === true, 'wave 4: a re-send under MIMIC is taken');
+  ok(m.moves[0].id === 'HUSH', 'wave 4: ...and the copy stays in the fight');
+  ok(m.preMimic && m.preMimic[1] && m.preMimic[1].id === 'MIMIC',
+    'wave 4: ...its saved row kept for the switch-out');
+  ok(learnTo(1, m, [row12('HUSH'), row12('B'), row12('C')]) === false,
+    'wave 4: the battle list is not the party list -- the copy sent back as a learn is refused');
+  ok(learnTo(1, m, [row12('MIMIC'), row12('B'), row12('C')]) === true,
+    'wave 4: a learn under MIMIC is judged against the party list (it used to be refused)');
+  ok(m.moves[0].id === 'MIMIC', "wave 4: ...Red's LearnMove copies the party list over the copy");
+  ok(m.moves[0].pp === 6, "wave 4: ...MIMIC at the slot's PP (DecrementPP wrote both)");
+  ok(m.moves[2] && m.moves[2].id === 'C', 'wave 4: ...the learned move among them');
+  ok(m.preMimic === null, 'wave 4: ...and no saved row is left to give back over the learned list');
+  const forget = mimicked(6);
+  ok(learnTo(1, forget, [row12('NEW'), row12('B')]) === true, 'wave 4: forgetting MIMIC itself for a new move');
+  ok(forget.moves[0].id === 'NEW', 'wave 4: ...lands in its slot');
+  ok(forget.preMimic === null, 'wave 4: ...and the saved MIMIC goes with it');
+  ok(learnTo(1, mimicked(6), [row12('X'), row12('Y')]) === false, 'wave 4: a rewrite under MIMIC is refused');
+
+  const g = mimicked(5);
+  ok(learnTo(2, g, [row12('MIMIC'), row12('B')]) === true, 'wave 4 (gold): a re-send under MIMIC is taken');
+  ok(g.moves[0].id === 'HUSH', 'wave 4 (gold): ...and the copy stays');
+  ok(learnTo(2, g, [row12('MIMIC'), row12('B'), row12('C')]) === true, 'wave 4 (gold): a learn under MIMIC');
+  ok(g.moves[0].id === 'MIMIC', 'wave 4 (gold): ...pokecrystal LearnMove copies the party list over the copy');
+  ok(g.moves[0].pp === 9, "wave 4 (gold): ...MIMIC at the party's own PP");
+  ok(g.preMimic === null, 'wave 4 (gold): ...nothing left to give back');
+
+  const both = (copyPp) => ({
+    transformed: true,
+    moves: [row12('COPY', { pp: 5 })],
+    preTransform: { moves: [row12('HUSH', { pp: copyPp }), row12('B')] },
+    preMimic: { 1: row12('MIMIC', { pp: 9 }) },
+  });
+  const gt = both(4);
+  ok(learnTo(2, gt, [row12('MIMIC'), row12('B'), row12('C')]) === true,
+    'wave 4 (gold): a learn under MIMIC and Transform');
+  ok(gt.moves[0].id === 'COPY', 'wave 4 (gold): ...leaves the copied moves in the fight');
+  ok(gt.preTransform.moves[0].id === 'MIMIC', 'wave 4 (gold): ...writes the party list put aside');
+  ok(gt.preTransform.moves[0].pp === 9, "wave 4 (gold): ...MIMIC at the party's PP");
+  ok(gt.preTransform.moves.length === 3, 'wave 4 (gold): ...with the learned move');
+  ok(gt.preMimic === null, 'wave 4 (gold): ...and folds the saved row into it');
+  const rt = both(4);
+  ok(learnTo(1, rt, [row12('MIMIC'), row12('B')]) === true, 'wave 4: a Red re-send under MIMIC and Transform');
+  ok(rt.moves[0].id === 'COPY', 'wave 4: ...leaves the copied moves');
+  ok(rt.preTransform.moves[0].id === 'MIMIC', 'wave 4: ...the saved row folded into the list put aside');
+  ok(rt.preTransform.moves[0].pp === 4, 'wave 4: ...at the PP the slot shared with the party');
+  ok(rt.preMimic === null, 'wave 4: ...so the switch-out has one list to give back');
+}
+
+// The same on the real Red referee, MIMIC's pick off the wire.
+function mimicLearn12(pick) {
+  const relay = makeRelay(makeClock(), { generation: 1 });
+  const a = dial(relay, 'ANN');
+  const id = 'ml';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: [[100, 100], [100, 100]] });
+  const mv = (moveId, effect, power) => row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+  const sheet = (species, moves) => ({ ...mon(1), species, moves });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [sheet('COPYCAT', [mv('MIMIC', 82), mv('TACKLE', 0, 1)]), sheet('BENCH', [mv('TACKLE', 0, 1)])],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet('FOE', [mv('GROWL'), mv('HUSH')])],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return null;
+  const choice = {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  };
+  if (pick !== undefined) choice.mimic = pick;
+  relay.handle(a.id, choice);
+  const live = record.sim.byId.get(a.id).mons[0];
+  const client = relay.clients.get(a.id);
+  const seen = {
+    copy: live.moves[0].id,
+    copyPp: live.moves[0].pp,
+    saved: live.preMimic && live.preMimic[1] && live.preMimic[1].id,
+  };
+  seen.resend = relay.applyBattleMoveset(record, client, { mon: 0, moves: [mv('MIMIC', 82), mv('TACKLE', 0, 1)] });
+  seen.afterResend = live.moves[0].id;
+  seen.copyBack = relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [mv(live.moves[0].id), mv('TACKLE', 0, 1), mv('LEARNT', 0, 40)],
+  });
+  seen.learnt = relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [mv('MIMIC', 82), mv('TACKLE', 0, 1), mv('LEARNT', 0, 40)],
+  });
+  seen.battle = live.moves.map((m) => `${m.id}:${m.pp}`).join(',');
+  seen.savedAfter = live.preMimic;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  seen.restored = live.moves.map((m) => m.id).join(',');
+  return seen;
+}
+
+function testMimicLearnRealReferee() {
+  const picked = mimicLearn12(1);
+  ok(picked, 'wave 4 mimic: a Red wild fight opens');
+  ok(picked.copy === 'HUSH', "wave 4 mimic: the wire's pick reaches the referee (the foe's second move)");
+  ok(picked.copyPp === 9, "wave 4 mimic: ...in MIMIC's slot, at its PP");
+  ok(picked.saved === 'MIMIC', "wave 4 mimic: ...the party's MIMIC saved");
+  ok(picked.resend === true, "wave 4 mimic: a re-send of the party's ids is taken");
+  ok(picked.afterResend === 'HUSH', 'wave 4 mimic: ...and leaves the copy in the fight');
+  ok(picked.copyBack === false, 'wave 4 mimic: the copy sent back as a learn is refused');
+  ok(picked.learnt === true, 'wave 4 mimic: a learn under MIMIC lands');
+  ok(picked.battle === 'MIMIC:9,TACKLE:10,LEARNT:10',
+    'wave 4 mimic: ...the party list over the copy, MIMIC at the PP it shared');
+  ok(picked.savedAfter == null, 'wave 4 mimic: ...no saved row left');
+  ok(picked.restored === 'MIMIC,TACKLE,LEARNT', 'wave 4 mimic: the switch-out keeps the learned list');
+  const unpicked = mimicLearn12(undefined);
+  ok(unpicked && unpicked.copy === 'GROWL', "wave 4 mimic: no pick on the wire is the menu's first row");
+}
+
+// A transformed battler's re-send on the real referees: the copies stay on both
+// carts (Red's used to be replaced by its own list).
+function transformResend12(generation) {
+  const relay = makeRelay(makeClock(), { generation });
+  const a = generation === 2 ? dial2(relay, 'ANN') : dial(relay, 'ANN');
+  const id = 'tr';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', battle: id, chart: generation === 2 ? CHART2 : [[100, 100], [100, 100]],
+  });
+  const sheet = (species, moves) => ({
+    ...(generation === 2 ? sheet2({ species }) : { ...mon(1), species }), moves,
+  });
+  const mv = (moveId, effect, power) => row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [sheet('COPYCAT', [mv('TRANSFORM', 57), mv('TACKLE', 0, 1)]), sheet('BENCH', [mv('TACKLE', 0, 1)])],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet('FOE', [mv('GROWL'), mv('HUSH')])],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return null;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  const live = record.sim.byId.get(a.id).mons[0];
+  const client = relay.clients.get(a.id);
+  const seen = { transformed: live.transformed === true };
+  seen.resend = relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [mv('TRANSFORM', 57), mv('TACKLE', 0, 1)], level: 51,
+  });
+  seen.battle = live.moves[0] && live.moves[0].id;
+  seen.battlePp = live.moves[0] && live.moves[0].pp;
+  seen.party = live.preTransform && live.preTransform.moves[0].id;
+  return seen;
+}
+
+function testTransformResend() {
+  for (const generation of [1, 2]) {
+    const label = generation === 2 ? 'gold' : 'red';
+    const seen = transformResend12(generation);
+    ok(seen && seen.transformed, `wave 4 resend (${label}): TRANSFORM lands`);
+    ok(seen.resend === true, `wave 4 resend (${label}): a level-up re-sending the same ids is taken`);
+    ok(seen.battle === 'GROWL', `wave 4 resend (${label}): ...and the copied moves stay in the fight`);
+    ok(seen.battlePp === 5, `wave 4 resend (${label}): ...at their 5 PP`);
+    ok(seen.party === 'TRANSFORM', `wave 4 resend (${label}): ...the party list put aside unchanged`);
+  }
+}
+
+// Gold's wTimeOfDay off a Gen 2 ruleset: kept, handed to the referee's create,
+// and MOONLIGHT heals by it; an unknown one refuses the ruleset; a Red hub reads
+// none. Twin of `moonlight` in tests/hub_battle.lua.
+function moonlight12(generation, timeOfDay) {
+  const relay = makeRelay(makeClock(), { generation });
+  const a = generation === 2 ? dial2(relay, 'ANN') : dial(relay, 'ANN');
+  const id = 'tod';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset',
+    battle: id,
+    chart: generation === 2 ? CHART2 : [[100, 100], [100, 100]],
+    timeOfDay,
+  });
+  const record = relay.battles.get(id);
+  const seen = {
+    ruleset: !!(record && record.ruleset),
+    kept: record && record.ruleset ? record.ruleset.timeOfDay : undefined,
+  };
+  const sheet = (species, moves, hp) => {
+    const out = generation === 2 ? sheet2({ species, hp: 100 }) : { ...mon(1, 100), species };
+    out.hp = hp || out.hp;
+    out.moves = moves;
+    return out;
+  };
+  const mv = (moveId, effect) => row12(moveId, { pp: 10, power: 0, effect: effect || 0 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet('MOTH', [mv('MOONLIGHT', 130)], 40)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet('FOE', [mv('HUSH')])],
+  });
+  seen.opened = !!(record && record.sim);
+  if (!seen.opened) return seen;
+  seen.simTime = record.sim.timeOfDay;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  seen.hp = record.sim.byId.get(a.id).mons[0].hp;
+  return seen;
+}
+
+function testTimeOfDay() {
+  const nite = moonlight12(2, 'nite');
+  ok(nite.kept === 'nite', 'time of day: a Gold ruleset keeps it');
+  ok(nite.simTime === 'nite', 'time of day: ...and the referee is created with it');
+  ok(nite.hp === 90, 'time of day: MOONLIGHT at night heals half (BattleCommand_HealNite)');
+  const day = moonlight12(2, 'day');
+  ok(day.simTime === 'day', 'time of day: day reaches the referee');
+  ok(day.hp === 65, 'time of day: ...and MOONLIGHT by day heals a quarter');
+  ok(moonlight12(2, 'morn').hp === 65, 'time of day: ...in the morning too');
+  const none = moonlight12(2, undefined);
+  ok(none.simTime == null, 'time of day: none stated is none');
+  ok(none.hp === 90, 'time of day: ...the link reading (half)');
+  const bad = moonlight12(2, 'evening');
+  ok(bad.ruleset === false, 'time of day: an unknown time refuses the Gold ruleset');
+  ok(bad.opened === false, 'time of day: ...so no fight is assembled on it');
+  ok(moonlight12(2, 'NITE').ruleset === false, "time of day: ...the spelling is the referee's, lower case");
+  const red = moonlight12(1, 'nite');
+  ok(red.ruleset && red.kept === undefined, 'time of day: a Red ruleset neither keeps one');
+  ok(moonlight12(1, 'evening').ruleset, 'time of day: ...nor refuses one');
+  ok(red.simTime == null, 'time of day: ...and the Red referee is created without it');
+}
+
+// Red's MIMIC pick on a choice: read on a Gen 1 hub, ignored on Gold's.
+function testMimicChoiceGen1Only() {
+  const { cleanBattleChoice } = require('./lib/sanitize.js');
+  const fight = (mimic) => ({
+    battle: 'b1', action: 'fight', move: 0, mimic,
+  });
+  ok(cleanBattleChoice(fight(2), 1).mimic === 2, 'mimic: a Gen 1 choice carries the pick');
+  ok(cleanBattleChoice(fight(3), 1).mimic === 3, 'mimic: ...up to the fourth move');
+  ok(cleanBattleChoice(fight(4), 1) === null, 'mimic: past the fourth move refuses the choice');
+  ok(cleanBattleChoice(fight(-1), 1) === null, 'mimic: ...as does a negative pick');
+  ok(cleanBattleChoice(fight(true), 1) === null, 'mimic: ...or one that is no number');
+  const gold = cleanBattleChoice(fight(9), 2);
+  ok(gold && gold.mimic === undefined, 'mimic: Gold ignores it, whatever it holds');
+  const gen3 = cleanBattleChoice(fight(9), 3);
+  ok(gen3 && gen3.mimic === undefined, 'mimic: ...as does Gen 3');
+  const none = cleanBattleChoice(fight(9));
+  ok(none && none.mimic === undefined, 'mimic: ...and a caller naming no generation');
+}
+
 // A Gen 3 hub reads no level-up, so a referee there is never called.
 function testGen3LevelUpNotRead() {
   const relay = makeRelay(makeClock(), { generation: 3 });
@@ -3200,6 +3480,11 @@ testGen12LevelUpForward();
 testLearnRulesExported();
 testGen2LevelUpAndSheet();
 testTransformedLearn();
+testLearnUnderOverlays();
+testMimicLearnRealReferee();
+testTransformResend();
+testTimeOfDay();
+testMimicChoiceGen1Only();
 testGen3LevelUpNotRead();
 testGen12PayDayForward();
 testGen12PayDayOnRun();

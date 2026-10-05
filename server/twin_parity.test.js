@@ -1099,3 +1099,90 @@ test('K11 on an escape: both hubs carry Pay Day on a run on Red alone', () => {
   assert.ok(/paysDay\(this\.generation, record\.mode, outcome\)/.test(read('server/lib/relay.js')),
     'relay.js settles through it');
 });
+
+// ---------------------------------------------------------------------------
+// Wave 4 of docs/plans/gen12-referee-gaps-fix.md: Red's MIMIC pick on a Gen 1
+// choice (`mimic`) and Gold's wTimeOfDay on a Gen 2 ruleset (`timeOfDay`). The
+// hub protocol parity driver (referee_gaps_wave4_dialect, overlay_learn_and_time)
+// holds the twins to one answer case by case; this pins the vocabulary, the
+// generation gates and the hand-off to the Gold referee's create.
+// ---------------------------------------------------------------------------
+
+test('Gold\'s time of day: one closed set on Wire, sanitize and both Gold referees', () => {
+  // pokecrystal / pokegold ram_constants MORN_F / DAY_F / NITE_F, spelled as the
+  // Gold referee's Turn TIMES keys (what `create` reads as opts.timeOfDay). A
+  // spelling one side takes and the other refuses is a ruleset one hosting path
+  // fights under and the other refuses.
+  const wire = read('src/Wire.lua');
+  const times = luaSet(wire, 'TIMES_OF_DAY2');
+  assert.deepStrictEqual([...sanitize.TIMES_OF_DAY2].sort(), times, 'Wire and sanitize name the same times');
+  assert.deepStrictEqual(times, ['day', 'morn', 'nite'], 'MORN_F, DAY_F and NITE_F -- no DARKNESS_F palette');
+  assert.deepStrictEqual(luaSet(read('src/BattleSim2/Turn.lua'), 'TIMES'), times,
+    'the Lua Gold referee reads the same spellings');
+  const js = read('server/lib/battle2/Turn.js').match(/const TIMES = \{([^}]*)\}/);
+  assert.ok(js, 'lib/battle2 Turn.js must declare TIMES');
+  assert.deepStrictEqual([...js[1].matchAll(/(\w+):\s*true/g)].map((x) => x[1]).sort(), times,
+    'and so does the Node one');
+});
+
+test('Gold\'s time of day rides a Gen 2 ruleset only, and refuses it when unknown', () => {
+  const chart = [[100, 100], [100, 100]];
+  for (const time of ['morn', 'day', 'nite']) {
+    assert.strictEqual(sanitize.cleanBattleRuleset({ chart, timeOfDay: time }, 2).timeOfDay, time,
+      `a Gold ruleset carries ${time}`);
+  }
+  assert.strictEqual(sanitize.cleanBattleRuleset({ chart }, 2).timeOfDay, undefined, 'absent stays absent');
+  assert.strictEqual(sanitize.cleanBattleRuleset({ chart, timeOfDay: null }, 2).timeOfDay, undefined,
+    'a null is absent, as Lua reads a JSON null');
+  for (const time of ['NITE', 'night', 'eve', 'darkness', '', 2, true, ['nite']]) {
+    assert.strictEqual(sanitize.cleanBattleRuleset({ chart, timeOfDay: time }, 2), null,
+      `an unknown time (${JSON.stringify(time)}) refuses the Gold ruleset`);
+  }
+  for (const gen of [1, undefined]) {
+    for (const time of ['nite', 'evening']) {
+      const read1 = sanitize.cleanBattleRuleset({ chart, timeOfDay: time }, gen);
+      assert.ok(read1 && read1.timeOfDay === undefined,
+        `a ruleset read for generation ${gen} neither keeps nor refuses ${time}`);
+    }
+  }
+  const wire = read('src/Wire.lua');
+  assert.ok(/if M\.int\(generation, 2, 2\) and raw\.timeOfDay ~= nil then/.test(wire),
+    'Wire.battleRuleset reads timeOfDay on a Gen 2 hub only');
+  assert.ok(/if not M\.TIMES_OF_DAY2\[raw\.timeOfDay\] then return nil end/.test(wire),
+    '...and refuses the ruleset on an unknown one');
+  // Both hubs hand it to the Gold referee's create, and only there.
+  const hub = read('src/Hub.lua');
+  assert.ok(/if self\.generation == 2 then\s+createOpts\.timeOfDay = rules\.timeOfDay\s+end/.test(hub),
+    'Hub.lua passes timeOfDay into Turn.create on a Gen 2 hub');
+  const relay = read('server/lib/relay.js');
+  assert.ok(/if \(this\.generation === 2\) \{\s+createOpts\.timeOfDay = rules\.timeOfDay;\s+\}/.test(relay),
+    'relay.js passes timeOfDay into Turn.attempt on a Gen 2 hub');
+});
+
+test('Red\'s MIMIC pick rides a Gen 1 choice only, 0..3, and refuses the choice out of range', () => {
+  const fight = (mimic) => ({
+    battle: 'b1', action: 'fight', move: 0, mimic,
+  });
+  for (const pick of [0, 1, 2, 3]) {
+    assert.strictEqual(sanitize.cleanBattleChoice(fight(pick), 1).mimic, pick, `a Gen 1 choice carries ${pick}`);
+  }
+  assert.strictEqual(sanitize.cleanBattleChoice(fight('2'), 1).mimic, 2, 'a numeric string reads as Lua reads it');
+  assert.strictEqual(sanitize.cleanBattleChoice(fight(null), 1).mimic, undefined, 'a null is absent');
+  for (const pick of [4, -1, true, 'one', [1]]) {
+    assert.strictEqual(sanitize.cleanBattleChoice(fight(pick), 1), null,
+      `an unreadable pick (${JSON.stringify(pick)}) refuses the Gen 1 choice`);
+  }
+  for (const gen of [2, 3, undefined]) {
+    const read2 = sanitize.cleanBattleChoice(fight(9), gen);
+    assert.ok(read2 && read2.mimic === undefined, `a choice read for generation ${gen} ignores mimic`);
+  }
+  assert.strictEqual(sanitize.BATTLE_MOVE_MAX - 1, 3, 'the pick is bounded by the move list\'s own width');
+  const wire = read('src/Wire.lua');
+  assert.ok(/if M\.int\(generation, 1, 1\) and raw\.mimic ~= nil then/.test(wire),
+    'Wire.battleChoice reads mimic on a Gen 1 hub only');
+  assert.ok(/out\.mimic = M\.int\(raw\.mimic, 0, Config\.BATTLE_MOVE_MAX - 1\)/.test(wire),
+    '...bounded by BATTLE_MOVE_MAX - 1');
+  // The Red referee is what reads it (`_normaliseChoice`, then `_mimicPick`).
+  assert.ok(/choice\.mimic ~= nil/.test(read('src/BattleSim/Turn.lua')), 'BattleSim reads choice.mimic');
+  assert.ok(/choice\.mimic/.test(read('server/lib/battle/Turn.js')), 'lib/battle reads choice.mimic');
+});

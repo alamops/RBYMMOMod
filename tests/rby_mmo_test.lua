@@ -30771,4 +30771,44 @@ end)()
      "a fractional origin still reaches the far edge's partial pixel")
 end)()
 
+-- ------------------------------------------------------------------
+-- Gold's weather on the arena (wave 4 of docs/plans/gen12-referee-gaps-fix.md)
+-- ------------------------------------------------------------------
+--
+-- The arena's sky painter was Gen 3's alone; Gold's RAIN DANCE / SUNNY DAY /
+-- SANDSTORM now reach it (MediatedBattle.weatherOfLine2), so a Gold frame
+-- with a sky draws its particles and a Red frame never does.
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- Gold weather draw skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local polys = 0
+  local gfx = setmetatable({
+    polygon = function() polys = polys + 1 end,
+    getLineWidth = function() return 1 end,
+    getFont = function() return nil end,
+    getWidth = function() return 640 end,
+    getHeight = function() return 360 end,
+  }, { __index = function() return function() end end })
+  local savedLove = _G.love
+  _G.love = { graphics = gfx }
+  local function rainDrops(generation, weather)
+    polys = 0
+    Battlefield.draw({ game = { generation = generation, data = {} } }, {
+      mode = "mmo",
+      allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+      foeSeats = { { index = 3, name = "RATT", hp = 18, maxHp = 18 } },
+      weather = weather,
+    }, nil)
+    return polys
+  end
+  local goldClear = rainDrops(2, nil)
+  local goldRain = rainDrops(2, "RAIN")
+  check(goldRain > goldClear + 3, "Gold weather: the arena paints Gold's rain", goldRain - goldClear)
+  eq(rainDrops(1, "RAIN"), rainDrops(1, nil), "Gold weather: a Red frame paints no sky")
+  _G.love = savedLove
+end)()
+
 T.finish("rby_mmo")

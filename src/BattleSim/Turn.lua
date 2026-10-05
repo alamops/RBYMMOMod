@@ -14,6 +14,9 @@
 -- different fight, so every draw site is spelled out here and every one of
 -- them is conditional in a way both runtimes can reproduce:
 --
+--   0. a coop_wild RUN's escape byte, before anything else in the turn
+--      (TryRunningFromBattle runs in DisplayBattleMenu: `_tryRun`) -- none
+--      for a runner at least as fast as the wild monster, or past the odds;
 --   1. a speed tie-break byte, one per group of actors in one priority
 --      bracket at one Speed -- and every battler on the field is an actor
 --      there, whatever its seat chose: a switch, an item, a recharge, a held
@@ -89,22 +92,34 @@
 --     concession, same bookkeeping, and both sides running is a draw;
 --     coop_npc -- and any other non-wild non-pvp mode -- emits the trainer
 --     refusal and does not finish, so a gym cannot be forfeited by pressing
---     RUN.  Mirrored: the policy reads the same from either seat.
+--     RUN.  Mirrored: the policy reads the same from either seat.  A
+--     coop_wild runner rolls TryRunningFromBattle's odds first (`_tryRun`,
+--     M.RUN_ROLL_MODES): its own attempt counter, one byte, "Can't escape!"
+--     and the turn spent on a miss.  Solo's `wild` is rolled by its client
+--     (src/SoloBattle.lua `_escapes`) before the run is filed, so the
+--     referee does not roll it a second time.
 --   * *Items* apply a hand-authored Gen1 heal/status table by id (Potion,
 --     Full Restore, Revive, Ether, …) — locked twin of public amounts, not a
 --     port of engine ItemEffects. Unknown ids announce "But it failed" and
 --     still spend the turn. Bags are client claims (sheet trust locked; hub
 --     has no ROM inventory truth); PROTOCOL 15 holds/spends mid-fight only.
---   * *Forced lock-in* (recharge, trap, thrash, …) fills choices on `_openTurn`
---     so the mediated path never opens a menu the cartridge would withhold; a
---     turn where *nobody* still owes waits for the next `tick` before resolving
---     so clients see a turn boundary for wait-lines / anim pacing.  Each forced
---     turn then plays in the monster's own slot of the order, past the gates
---     CheckPlayerStatusConditions puts first: a recharge (`_rechargeTurn`), a
---     trap's later hits (`_trapTurn`: the first hit's wDamage again, no
---     re-rolled `_useMove`), a held monster's CANNOT_MOVE (nothing at all).
---     The cart also offers its battle menu -- switch, item, run -- to a Bide
---     user, a trapper and a held monster; the referee withholds it there.
+--   * *Forced lock-in* (recharge, Rage, thrash, a charge's release) fills
+--     choices on `_openTurn` so the mediated path never opens a menu the
+--     cartridge would withhold; a turn where *nobody* still owes waits for
+--     the next `tick` before resolving so clients see a turn boundary for
+--     wait-lines / anim pacing.  Each forced turn then plays in the monster's
+--     own slot of the order, past the gates CheckPlayerStatusConditions puts
+--     first: a recharge (`_rechargeTurn`), a trap's later hits (`_trapTurn`:
+--     the first hit's wDamage again, no re-rolled `_useMove`), a held
+--     monster's CANNOT_MOVE (nothing at all).  A Bide user, a trapper and a
+--     held monster get the battle menu on the cart (MainInBattleLoop runs
+--     DisplayBattleMenu before it looks at STORING_ENERGY, USING_TRAPPING_MOVE
+--     or the foe's trap), so a *player's* seat is asked there like any other
+--     and its FIGHT -- which opens no move menu -- is the lock-in
+--     (`_menuFight`); a switch, an item or a RUN is taken as it would be on
+--     any turn.  The computer's seats are filled, as SelectEnemyMove fills
+--     them, and re-pick once a player's switch or item let their trap go
+--     (`_reselectComputer`).
 --   * *Status moves* run through Effects.lua. Metronome picks from host-uploaded
 --     `metronomePool` on the ruleset (from MediatedBattle.snapshotRuleset);
 --     without a pool it says "But nothing happened".
@@ -250,6 +265,16 @@ M.BADGE_SIDE = "a"
 -- (engine/math/bcd.asm).  `_checkOver`.
 M.PAY_DAY_MAX = 999999
 
+-- The modes whose RUN the referee rolls (`_tryRun`, TryRunningFromBattle).
+-- coop_wild only: a solo `wild` RUN is rolled by its client before it is
+-- filed (src/SoloBattle.lua `_escapes`, off this battle's own RNG), and a
+-- second roll here would halve the odds the cart gives.
+M.RUN_ROLL_MODES = { coop_wild = true }
+
+-- How many TypeEffects rows a ruleset's `chartOrder` may name (pokered's
+-- table has 82; a chart is at most 16 types wide, so 256 cells).
+M.CHART_ORDER_MAX = 256
+
 -- Roster cap per side. coop_wild is humans vs one wild (up to FIGHTERS_PER_SIDE
 -- humans on a, wild on b); other modes keep a single per-side ceiling
 -- (1 for 1v1/wild, FIGHTERS_PER_SIDE otherwise).
@@ -321,6 +346,11 @@ local STRUGGLE = {
   id = "STRUGGLE", power = 50, accuracy = 255,
   type = 0, effect = 0, chance = 0,
 }
+
+-- The move a thrash's continuation animates (`.ThrashingAboutCheck` writes
+-- THRASH into wPlayerMoveNum, core.asm :3529-3530): the `anim` event's id,
+-- the move registry's own, as STRUGGLE's is above.
+local THRASH_ANIM = "THRASH"
 
 -- The sentences `.monDoesNothing` prints (pokered data/text/text_2.asm
 -- _LoafingAroundText .. _IgnoredOrdersText), keyed by Status.LOAF_LINES, with
@@ -761,8 +791,33 @@ local function counterType(typeIds, name, fallback)
   return typeIndexOf(typeIds, name)
 end
 
+-- The TypeEffects rows of a ruleset's `chartOrder` (M.create's note), as
+-- { atk, def } pairs in order.  All or nothing, as `typeIds` is: an odd
+-- length, an index that is not a whole number 0..255, or more than
+-- CHART_ORDER_MAX rows makes the whole order nil -- a row dropped from the
+-- middle would move every later one up and change what the last row says.
+-- A row may repeat, since the cart would apply it twice.
+local function chartIndex(value)
+  if type(value) ~= "number" or value ~= floor(value) then return nil end
+  if value < 0 or value > 255 then return nil end
+  return value
+end
+
+local function chartRowsOf(raw)
+  if type(raw) ~= "table" then return nil end
+  local n = #raw
+  if n == 0 or n % 2 ~= 0 or n > M.CHART_ORDER_MAX * 2 then return nil end
+  local rows = {}
+  for i = 1, n, 2 do
+    local a, d = chartIndex(raw[i]), chartIndex(raw[i + 1])
+    if a == nil or d == nil then return nil end
+    rows[#rows + 1] = { a, d }
+  end
+  return rows
+end
+
 -- opts:
---   id, mode, seed, chart, specialTypes, typeIds, metronomePool,
+--   id, mode, seed, chart, chartOrder, specialTypes, typeIds, metronomePool,
 --   choiceTimeout, reconnectGrace, resolveTimeout, now
 --   sides = { a = { { playerId, name, mons, bag, badges } }, b = { ... } }
 --
@@ -775,6 +830,19 @@ end
 -- effect can poison a Poison-type monster and nothing thaws -- and NORMAL and
 -- FIGHTING fall back to pokered's own indices, 0 and 1 (constants/type_constants.asm),
 -- the axis the synthetic STRUGGLE's type 0 already assumes.
+--
+-- `chartOrder` is the type chart as the cart walks it: TypeEffects' rows in
+-- table order, a flat list of chart-index pairs { atk1, def1, atk2, def2,
+-- ... } (`chartRowsOf`), each row's multiplier the `chart` cell it names.
+-- AdjustDamageForMoveType (core.asm :5121-5175) applies every row whose
+-- attacker is the move's type and whose defender is either of the target's
+-- types, one at a time, flooring after each -- so the order is the rounding
+-- order -- and leaves the LAST row's multiplier in wDamageMultipliers, which
+-- is what DisplayEffectiveness and PrintMoveFailureText read (`_typeRows`):
+-- a dual type's "It's super effective" / "not very effective", and its
+-- "doesn't affect" over "attack missed", are the last row's, not the
+-- product's.  Absent or unreadable it is nil and the referee reads the chart
+-- per defender type and states the product, as it always did.
 --
 -- `badges` is kept only on side a of a BADGE_MODES fight and dropped
 -- everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -798,6 +866,7 @@ function M.create(opts)
     rng            = Rng.new(int(opts.seed, 0)),
     aim            = Rng.new(int(opts.seed, 0) + M.AIM_SEED_OFFSET),
     chart          = type(opts.chart) == "table" and opts.chart or nil,
+    chartRows      = chartRowsOf(opts.chartOrder),
     specialTypes   = nil,
     -- The two types a side effect's routine asks about by name (above).
     poisonType     = typeIndexOf(opts.typeIds, "POISON"),
@@ -1193,10 +1262,13 @@ function Battle:_owes(fighter)
   return true
 end
 
--- Inject forced choices for charge release, recharge, thrash/rage repeat, a
--- trap's continuation and the monster it holds.  The cart skips the move menu
--- for all of them (MainInBattleLoop :293-321, SelectEnemyMove :2938-2955),
--- and every one of them is then the monster's own turn-order slot:
+-- Inject forced choices for charge release, recharge, thrash/rage repeat --
+-- and, for the computer's seats, a Bide, a trap's continuation and the
+-- monster it holds.  The cart skips the move menu for all of them
+-- (MainInBattleLoop :293-321, SelectEnemyMove :2938-2955), and the whole
+-- battle menu for the first four (:293-303): a player's Bide user, trapper
+-- or held monster is asked instead (`_menuFight`).  Every one of them is
+-- then the monster's own turn-order slot:
 -- ExecutePlayerMove runs CheckPlayerStatusConditions over it, so the sleep
 -- and freeze checks, the trapped check and the flinch come first, and only a
 -- monster that gets past them recharges (`.HyperBeamCheck`), stores its Bide,
@@ -1214,6 +1286,20 @@ end
 local function forcedMoveOf(mon, calledMove, slot)
   if calledMove then return calledMove, true end
   return mon.moves[slot], nil
+end
+
+-- A trap's continuation: the trapping move, at the monster it holds.
+local function trapChoice(mon)
+  local t = mon.trapping
+  local forced, called = forcedMoveOf(mon, t.move, t.moveIndex)
+  return {
+    action = "fight",
+    move = t.moveIndex,
+    target = t.targetSlot,
+    forcedMove = forced,
+    called = called,
+    trapContinue = true,
+  }
 end
 
 function Battle:_fileForced(fighter, choice)
@@ -1245,10 +1331,14 @@ function Battle:_fillForcedChoices()
     -- (CheckPlayerStatusConditions `.BideCheck`, core.asm :3482-3524): every
     -- gate runs first, then the store takes wDamage and the counter a step,
     -- and the turn it reaches 0 unleashes -- so each one is a forced fight
-    -- (`bideStore`), not a skip (`_useMove`'s Bide branch).
+    -- (`bideStore`), not a skip (`_useMove`'s Bide branch).  The computer's
+    -- (SelectEnemyMove :2949-2950 keeps its selection); a player's seat gets
+    -- the battle menu first and is asked (`_menuFight`).
     if mon.bide then
-      local choice = self:_bideChoice(fighter, mon)
-      if choice then self:_fileForced(fighter, choice) end
+      if not isPlayerSeat(self.mode, fighter) then
+        local choice = self:_bideChoice(fighter, mon)
+        if choice then self:_fileForced(fighter, choice) end
+      end
       goto continue
     end
 
@@ -1257,18 +1347,13 @@ function Battle:_fillForcedChoices()
     -- trapper's slot, past every gate (`_trapTurn`) -- not a residual at the
     -- turn's end, and not a re-rolled move.  `trapContinue` says so; a trap
     -- that a switch or a faint let go before the slot leaves the move to run
-    -- fresh, as the cart's stale selection does (`_useMove`).
+    -- fresh, as the cart's stale selection does (`_useMove`) -- the
+    -- computer's re-picks instead (`_reselectComputer`).  Filed for the
+    -- computer; a player's trapper gets the battle menu (`_menuFight`).
     if mon.trapping and int(mon.trapping.turns, 0) > 0 then
-      local t = mon.trapping
-      local forced, called = forcedMoveOf(mon, t.move, t.moveIndex)
-      self:_fileForced(fighter, {
-        action = "fight",
-        move = t.moveIndex,
-        target = t.targetSlot,
-        forcedMove = forced,
-        called = called,
-        trapContinue = true,
-      })
+      if not isPlayerSeat(self.mode, fighter) then
+        self:_fileForced(fighter, trapChoice(mon))
+      end
       goto continue
     end
 
@@ -1328,8 +1413,10 @@ function Battle:_fillForcedChoices()
     -- or frozen jumps to `.selectEnemyMove` first (:308-310) and keeps its
     -- selection and its menu, so its sleep ticks in its slot; and every
     -- forced turn above was filed first, to meet `.HeldInPlaceCheck`'s
-    -- "can't move" there instead (`_runGates`).
-    if self:_isHeld(fighter, mon) and mon.status ~= "sleep" and mon.status ~= "freeze" then
+    -- "can't move" there instead (`_runGates`).  The computer's seat; a
+    -- player's held monster gets the battle menu first (`_menuFight`).
+    if self:_isHeld(fighter, mon) and mon.status ~= "sleep" and mon.status ~= "freeze"
+       and not isPlayerSeat(self.mode, fighter) then
       self:_fileForced(fighter, { action = "skip", skip = "trapped" })
     end
 
@@ -1362,6 +1449,31 @@ function Battle:_bideChoice(fighter, mon)
     forcedMove = forced,
     called = called,
   }
+end
+
+-- What a player's FIGHT selects where the cart opens the battle menu but no
+-- move menu behind it (MainInBattleLoop, core.asm :303-321): DisplayBattleMenu
+-- has run -- a switch, an item or a RUN there is the seat's answer, taken as
+-- on any turn -- and FIGHT returns to a loop that jumps to `.selectEnemyMove`
+-- for a monster asleep or frozen (:308-310), one storing energy or using a
+-- trapping move (:311-313), and writes CANNOT_MOVE for one a foe's trap
+-- holds (:314-321).  So the move index a client sends with it names nothing:
+--   * a Bide: its forced turn (`_bideChoice`, `.BideCheck` in its slot);
+--   * a trap of its own, its counter not spent: the continuation
+--     (`trapChoice`, `.MultiturnMoveCheck`);
+--   * held by a foe's trap and awake: CANNOT_MOVE, the turn gone in silence
+--     -- and decided now, against the trap standing at the menu, so a
+--     trapper that switches out later in the turn does not give it back.
+-- nil for every other monster.  (Asleep or frozen, last turn's selection
+-- stands and the gate stops the monster: `_normaliseChoice` takes any slot
+-- that holds a move, with no PP or Disable test, since no menu applied one.)
+function Battle:_menuFight(fighter, mon)
+  if mon.bide then return self:_bideChoice(fighter, mon) end
+  if mon.trapping and int(mon.trapping.turns, 0) > 0 then return trapChoice(mon) end
+  if self:_isHeld(fighter, mon) and mon.status ~= "sleep" and mon.status ~= "freeze" then
+    return { action = "skip", skip = "trapped" }
+  end
+  return nil
 end
 
 -- `.AnyMoveDisabledCheck` (core.asm :3394-3407): the Disable counter comes
@@ -1462,7 +1574,16 @@ function Battle:_normaliseChoice(fighter, choice)
   end
 
   if action == "fight" then
+    -- FIGHT with no move menu behind it (`_menuFight`): the lock-in itself,
+    -- whatever slot -- or none -- came with it.
+    local locked = self:_menuFight(fighter, mon)
+    if locked then return locked end
+    -- Asleep or frozen, FIGHT opens no move menu either (MainInBattleLoop
+    -- :308-310): the slot is a placeholder the gate never gets past, so any
+    -- slot holding a move stands and none at all is the first.
+    local asleep = mon.status == "sleep" or mon.status == "freeze"
     local index = int(choice.move, nil)
+    if asleep and (index == nil or mon.moves[index + 1] == nil) then index = 0 end
     if index == nil then return nil end
     local move = mon.moves[index + 1]
     if not move then return nil end
@@ -1470,7 +1591,7 @@ function Battle:_normaliseChoice(fighter, choice)
     -- `.chooseMove` refuses a slot whose PP -- masked, so PP Ups do not count
     -- here -- is 0, and the disabled slot.  The computer's SelectEnemyMove
     -- refuses the disabled slot and never reads PP (`_hasPp`).
-    if not self:_struggles(fighter, mon) then
+    if not asleep and not self:_struggles(fighter, mon) then
       if not self:_hasPp(fighter, move) then return nil end
       if mon.disable and mon.disable.turns > 0
          and mon.disable.moveIndex == index + 1 then
@@ -1559,12 +1680,13 @@ function Battle:submitChoice(playerId, choice)
     -- hand the seat a second way to hold the fight open.
     if self.phase == "replace" then return false end
     if fighter.choice == nil then return false end
-    -- A referee-filled answer is not the player's to take back.  Trap lock-in,
-    -- recharge, Bide, thrash and a charge release all fill the seat at
-    -- `_openTurn`; without this a client could cancel out of a Wrap and switch
-    -- away, and on a turn where *every* seat is forced -- which is exactly what
-    -- a trap looks like -- `_openTurn` left no deadline, so the cleared choice
-    -- would hang the fight with nothing left to time it out.
+    -- A referee-filled answer is not the player's to take back.  A recharge,
+    -- Rage, a thrash and a charge's release -- and the computer's Bide, trap
+    -- and hold -- fill the seat at `_openTurn`; on a turn where *every* seat
+    -- is forced `_openTurn` leaves no deadline, so a cleared choice would hang
+    -- the fight with nothing left to time it out.  A player's own lock-in --
+    -- the FIGHT it answers a Bide, a trap or a hold with (`_menuFight`) -- is
+    -- its answer like any other, and the cart's B backs out of it too.
     if fighter.forced then return false end
     self:_emit("unchose", {
       slot = fighter.slot, side = fighter.side, text = fighter.name,
@@ -1765,7 +1887,9 @@ function Battle:_autoChoice(fighter)
   if not mon then return nil end
 
   -- The forced turns, the same answers `_fillForcedChoices` files (that pass
-  -- runs first, so these are reached only when it could not file one).
+  -- runs first, so these are reached only when it could not file one) -- and
+  -- a player's Bide, trap and hold, which it leaves to the player: an
+  -- unanswered one is the FIGHT `_menuFight` would make of it.
   if mon.charging then
     local c = mon.charging
     local forced, called = forcedMoveOf(mon, c.move, c.moveIndex)
@@ -1780,10 +1904,7 @@ function Battle:_autoChoice(fighter)
     if choice then return choice end
   end
   if mon.trapping and int(mon.trapping.turns, 0) > 0 then
-    local t = mon.trapping
-    local forced, called = forcedMoveOf(mon, t.move, t.moveIndex)
-    return { action = "fight", move = t.moveIndex, target = t.targetSlot,
-             forcedMove = forced, called = called, trapContinue = true }
+    return trapChoice(mon)
   end
   if self:_isHeld(fighter, mon) and mon.status ~= "sleep" and mon.status ~= "freeze"
      and not (mon.thrashing and mon.thrashing.turns > 0)
@@ -2009,7 +2130,8 @@ function Battle:_openTurn()
   for _, fighter in ipairs(self.fighters) do
     fighter.choice = nil
     fighter.forced = nil
-    fighter.cannotMove = nil
+    -- (`cannotMove` stays: Haze's CANNOT_MOVE is the seat's selection until
+    -- a move menu writes another one -- `_selectsAnew`.)
     -- MainInBattleLoop resets both FLINCHED bits as a turn opens
     -- (core.asm :293-300), so a flinch landed on a monster that had already
     -- moved dies here instead of costing it the NEXT turn -- unless the
@@ -2172,11 +2294,14 @@ end
 --   * a recharge, a Bide's store or a trap's continuation skips the menu
 --     the same way (:293-295, :311-313).
 -- A monster held by a trap selects CANNOT_MOVE (:318-321, :2953-2955): nil.
+-- So does a seat whose CANNOT_MOVE Haze wrote and no menu has written over
+-- since (`cannotMove`, `_selectsAnew`).
 -- A seat that switched, used an item or ran selected nothing the referee
 -- can name (the cart answers from its menu cursor): nil.
 function Battle:_selectionOf(fighter, mon)
   local choice = fighter.choice
   if not choice or not mon then return nil end
+  if fighter.cannotMove then return nil end
   if choice.action == "skip" then
     if choice.skip and choice.skip ~= "trapped" then return fighter.selectedMove end
     return nil
@@ -2186,6 +2311,34 @@ function Battle:_selectionOf(fighter, mon)
   if mon.status == "sleep" or mon.status == "freeze" then return fighter.selectedMove end
   if self:_struggles(fighter, mon) then return STRUGGLE end
   return mon.moves[choice.move or 0]
+end
+
+-- Whether this turn writes a new selection over the seat's
+-- wPlayerSelectedMove / wEnemySelectedMove -- the only thing that lifts the
+-- CANNOT_MOVE HazeEffect_ wrote there (move_effects/haze.asm :24-31,
+-- `cannotMove`).  Nothing resets it at a turn's open, a send-out or a faint:
+-- it is the side's selection byte, and it stands until
+--   * the player's MoveSelectionMenu runs -- an ordinary FIGHT of an awake
+--     monster (MainInBattleLoop `.selectPlayerMove`).  A recharge, Rage, a
+--     thrash or a charge skips every menu (:293-303); asleep, frozen, a Bide
+--     or a trap of its own skips the move menu (:308-313); a held monster
+--     writes CANNOT_MOVE again (:314-321); a switch, an item or a RUN leaves
+--     the byte alone (`.selectPlayerMove`'s wActionResultOrTookBattleTurn);
+--   * the computer's SelectEnemyMove reaches `.canSelectMove`: none of its
+--     forced turns (:2938-2955, `_fillForcedChoices`) and not asleep or
+--     frozen (:2946-2948).
+-- So a target Haze woke that then recharges, rages, thrashes, charges,
+-- stores energy or keeps a trap going loses every one of those turns in
+-- silence (`_resolveFights`) for as long as the state lasts -- the cart's
+-- own lock, kept.  Every side of a link fight is a player on its own cart.
+function Battle:_selectsAnew(fighter, mon)
+  local choice = fighter.choice
+  if not choice or not mon then return false end
+  local asleep = mon.status == "sleep" or mon.status == "freeze"
+  if isComputerSeat(self.mode, fighter) then
+    return not fighter.forced and not asleep
+  end
+  return choice.action == "fight" and choice.forcedMove == nil and not asleep
 end
 
 -- The battler opposite this one: the foe seat in the same position if it
@@ -2228,6 +2381,47 @@ local function hasType(mon, typeId)
   return false
 end
 
+-- AdjustDamageForMoveType's walk (core.asm :5121-5175), for a hit's damage
+-- and its lines: the percents to apply, in order, and the percent the walk
+-- leaves in wDamageMultipliers.  With the ruleset's `chartOrder` (`chartRows`)
+-- that is every TypeEffects row whose attacker is the move's type and whose
+-- defender is either of the target's types -- once per row, a mono type
+-- matching it once -- in table order, each row's multiplier its `chart`
+-- cell, and the last one applied is the one left (EFFECTIVE, 100, when no
+-- row matched).  Without the order the cart's rounding order and its last
+-- row are unknowable: the chart's cells are applied per defender type and
+-- the second value is nil, which `_typeLine` / the miss text read as the
+-- product -- the referee's reading before the order was uploaded.
+function Battle:_typeRows(moveType, defender)
+  if not self.chartRows then return self:_typePercents(moveType, defender), nil end
+  local row = self.chart and self.chart[moveType + 1] or nil
+  local out, last = {}, 100
+  for _, pair in ipairs(self.chartRows) do
+    if pair[1] == moveType and hasType(defender, pair[2]) then
+      local cell = type(row) == "table" and tonumber(row[pair[2] + 1]) or nil
+      -- A negative cell is an immunity, as Damage.compute reads one.
+      last = cell and max(0, floor(cell)) or 100
+      out[#out + 1] = last
+    end
+  end
+  return out, last
+end
+
+-- DisplayEffectiveness (engine/battle/display_effectiveness.asm): the
+-- multiplier AdjustDamageForMoveType left -- the last row's with the order
+-- (`_typeRows`), else the product -- over EFFECTIVE is "It's super
+-- effective", under it "It's not very effective", and nothing at it.
+local function typeLine(percents, last)
+  local effectiveness = last
+  if effectiveness == nil then
+    effectiveness = 100
+    for _, pct in ipairs(percents or {}) do effectiveness = effectiveness * pct / 100 end
+  end
+  if effectiveness > 100 then return "It's super effective" end
+  if effectiveness < 100 then return "It's not very effective" end
+  return nil
+end
+
 function Battle:_resolveTurn()
   self.phase = "resolving"
   -- Armed for the rare case resolution does not leave this phase in the same
@@ -2239,9 +2433,11 @@ function Battle:_resolveTurn()
   if self:_resolveRuns() then return end
   -- The players' switches and items first (DisplayBattleMenu runs them
   -- before the order is asked); the computer's wait for its own slot of the
-  -- order, inside `_resolveFights`.
+  -- order, inside `_resolveFights`.  SelectEnemyMove runs after them, so it
+  -- sees what they did to a trap (`_reselectComputer`).
   self:_resolveSwitches(true)
   self:_resolveItems()
+  if not self.result then self:_reselectComputer() end
   self:_resolveFights()
   if not self.result then self:_resolveResiduals() end
   -- CheckNumAttacksLeft, the last thing a cart turn does (core.asm :409,
@@ -2267,8 +2463,62 @@ function Battle:_resolveTurn()
   end
 end
 
+-- SelectEnemyMove (core.asm :2915-2955) runs after the player's menu, so
+-- the computer's selection is made against the field the player's switch
+-- and item left: a trap the computer was keeping going that a switch let go
+-- (SendOutMon's `res USING_TRAPPING_MOVE` on the enemy, :1754-1755), and a
+-- hold on it that the player's trapper switching out or spending its last
+-- turn on an item let go (`_itemTrapStep`), both leave nothing for
+-- `.noLinkBattle` to keep -- it reaches `.canSelectMove` and picks afresh.
+-- The forced fill `_fillForcedChoices` made at the turn's open is replaced
+-- by the computer's pick (`_autoChoiceOrSkip`, the same one `autoPick` files)
+-- -- not the stale trapping move run fresh, which is the player's cart's.
+function Battle:_reselectComputer()
+  for _, fighter in ipairs(self.fighters) do
+    local choice = fighter.choice
+    local mon = activeMon(fighter)
+    if fighter.forced and choice and mon and isComputerSeat(self.mode, fighter) then
+      local released = (choice.trapContinue and not mon.trapping)
+        or (choice.skip == "trapped" and not self:_isHeld(fighter, mon))
+      if released then
+        fighter.forced = nil
+        fighter.choice = self:_autoChoiceOrSkip(fighter)
+      end
+    end
+  end
+end
+
+-- TryRunningFromBattle (core.asm :1496-1576), the wild arm, for a coop_wild
+-- runner (M.RUN_ROLL_MODES): wNumRunAttempts counts every try -- each
+-- player's own, as each console keeps its own -- and a runner at least as
+-- fast as the wild monster gets away, as does one whose odds pass 255
+-- (Effects.runOdds); otherwise one BattleRandom byte at or under the odds
+-- does.  "Got away safely!" or "Can't escape!" -- and a failed try has spent
+-- the turn (wActionResultOrTookBattleTurn): the seat is in the order and
+-- does nothing in its slot.
+function Battle:_tryRun(fighter)
+  local mon = activeMon(fighter)
+  local foe = self:_oppositeFoe(fighter)
+  local wild = foe and activeMon(foe)
+  local escaped = true
+  if mon and wild then
+    fighter.runAttempts = int(fighter.runAttempts, 0) + 1
+    local odds = Effects.runOdds(self:_speedOf(fighter, mon), self:_speedOf(foe, wild),
+      fighter.runAttempts)
+    if odds ~= nil then escaped = self.rng:byte() <= odds end
+  end
+  if escaped then
+    self:_say("Got away safely!")
+  else
+    self:_say("Can't escape!")
+  end
+  return escaped
+end
+
 -- Fleeing is a concession in 1v1/coop_pvp, a wild escape in *wild modes,
 -- and a trainer refusal (no finish) everywhere else; see Effects.runEndsBattle.
+-- A coop_wild runner rolls first (`_tryRun`), in field order, and the first
+-- one to get away ends the fight.
 function Battle:_resolveRuns()
   local running = {}
   for _, fighter in ipairs(self.fighters) do
@@ -2281,6 +2531,15 @@ function Battle:_resolveRuns()
   if not Effects.runEndsBattle(self.mode) then
     self:_say("No! There's no running from a trainer battle!")
     return false
+  end
+
+  if M.RUN_ROLL_MODES[self.mode] then
+    local away = nil
+    for _, fighter in ipairs(running) do
+      if self:_tryRun(fighter) then away = fighter; break end
+    end
+    if not away then return false end
+    running = { away }
   end
 
   local sides = {}
@@ -2421,6 +2680,7 @@ function Battle:_resolveItems()
       local effect = Effects.itemEffect(choice.item)
       if not (effect and effect.ball) then
         self:_resolveOneItem(fighter)
+        if not self.result then self:_itemTrapStep(fighter) end
       end
     end
   end
@@ -2444,7 +2704,27 @@ function Battle:_resolveItems()
   for _, actor in ipairs(balls) do
     if self.result then return end
     self:_resolveOneItem(actor.fighter)
+    if not self.result then self:_itemTrapStep(actor.fighter) end
   end
+end
+
+-- UseBagItem (core.asm :2261-2268): an item a player's trapper uses takes
+-- the turn its trap would have hit in, and still spends a step of the trap's
+-- counter (wPlayerNumAttacksLeft) -- the step that reaches 0 lets go there
+-- and then, before SelectEnemyMove looks (`_reselectComputer`).  The held
+-- monster's mirror follows (`_trapTurn`'s).  The computer's items are
+-- TrainerAI's, which never touch the counter.
+function Battle:_itemTrapStep(fighter)
+  local mon = activeMon(fighter)
+  local trap = mon and mon.trapping
+  if not trap or int(trap.turns, 0) <= 0 then return end
+  trap.turns = int(trap.turns, 0) - 1
+  local held = self:_fighterAtSlot(trap.targetSlot)
+  local heldMon = held and activeMon(held)
+  if heldMon and heldMon.trapped and heldMon.trapped.fromSlot == fighter.slot then
+    heldMon.trapped.turns = trap.turns
+  end
+  if trap.turns <= 0 then self:_dropTrap(fighter, mon) end
 end
 
 -- Sort actors by priority bracket (desc), then active-mon speed (desc), then
@@ -2841,6 +3121,9 @@ function Battle:_resolveFights()
   for _, fighter in ipairs(self.fighters) do
     local choice = fighter.choice
     local mon = activeMon(fighter)
+    -- A move menu writes over a CANNOT_MOVE left from an earlier turn
+    -- (`_selectsAnew`); nothing else does.
+    if self:_selectsAnew(fighter, mon) then fighter.cannotMove = nil end
     -- wEnemySelectedMove / wPlayerSelectedMove for this turn, which COUNTER
     -- reads off the seat it strikes (`_counterDamage`) and the bracket reads
     -- (`_priorityOf`): `_selectionOf`, rewritten by `_useMove` with a move
@@ -2878,7 +3161,8 @@ function Battle:_resolveFights()
       elseif fighter.cannotMove then
         -- Haze's CANNOT_MOVE on a target it woke or thawed (ExecutePlayerMove's
         -- `inc a / jp z, ExecutePlayerMoveDone`): the turn is gone, silently
-        -- -- a recharge's included.
+        -- -- a recharge's included, and every later turn's until a move menu
+        -- writes a new selection (`_selectsAnew`).
       elseif actor.action == "fight" then
         self:_useMove(fighter, actor.mon)
       elseif actor.action == "skip" and choice.skip == "recharge" then
@@ -3062,9 +3346,14 @@ function Battle:_runGates(fighter, mon, move)
     local hit = self:_selfHitState(fighter, mon)
     -- `.ConfusedCheck` takes the counter down first (`dec [hl] / jr nz`), and
     -- only a monster still confused after it draws the self-hit byte: the
-    -- turn it snaps out on draws none.
+    -- turn it snaps out on draws none.  `.IsConfused` prints IsConfusedText,
+    -- "<MON> is confused!", every such turn, ahead of the byte (core.asm
+    -- :3418-3424), whether or not it then hurts itself.
     local roll = nil
-    if mon.confusion > 1 then roll = self.rng:byte() end
+    if mon.confusion > 1 then
+      self:_say(mon.species .. " is confused!")
+      roll = self.rng:byte()
+    end
     local gate = Status.beforeMove({
       status = "confusion",
       turnsRemaining = mon.confusion,
@@ -3525,15 +3814,14 @@ end
 -- wrote it, not the HP this monster lost -- and the counter a step; the
 -- turn it reaches 0 unleashes twice the store (two bytes, both wrapping),
 -- skipping DecrementPP, the used-move line and MoveHitTest -- so it reaches
--- a FLY or DIG user -- and a store of 0 is "<MON>'s attack missed!".
+-- a FLY or DIG user -- and a store of 0 is "<MON>'s attack missed!".  A store
+-- turn says nothing at all: it jumps straight to ExecutePlayerMoveDone, and
+-- SavingEnergyText (:3630) is never referenced.
 function Battle:_bideTurn(fighter, mon, move, usedSlot)
   local bide = mon.bide
   bide.stored = (int(bide.stored, 0) + max(0, int(self.lastDamage, 0))) % 65536
   bide.turns = int(bide.turns, 0) - 1
-  if bide.turns > 0 then
-    self:_say(mon.species .. " is storing energy")
-    return
-  end
+  if bide.turns > 0 then return end
   local stored = bide.stored
   mon.bide = nil
   self:_say(mon.species .. " unleashed energy")
@@ -3715,6 +4003,8 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
   end
 
   -- `targetSlot` the seat actually swung at, which a Bide records.
+  -- BideEffect (effects.asm :764-789) sets STORING_ENERGY, draws its 2..3
+  -- and plays an animation: no line past "used BIDE!".
   if Effects.isBide(effectId) and not mon.bide then
     mon.bide = {
       turns = Effects.bideTurns(self.rng),
@@ -3723,7 +4013,6 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
       targetSlot = target.slot,
       move = recordMove,
     }
-    self:_say(mon.species .. " began storing energy")
     self:_markLastMove(mon, usedSlot)
     return
   end
@@ -3922,6 +4211,10 @@ function Battle:_useMove(fighter, mon, opts)
   local effectId = int(move.effect, 0)
   local releasing = mon.charging ~= nil and Effects.isCharge(mon.charging.effect)
   local mirrorCopy = opts.mirrorCopy == true
+  -- A charge's first turn: CheckIfPlayerNeedsToChargeUp jumps to ChargeEffect
+  -- (core.asm :3102-3109) ahead of PlayerCanExecuteMove, so it prints no
+  -- used line and spends no PP -- only the charge line and its animation.
+  local chargingUp = Effects.isCharge(effectId) and not mon.charging
 
   -- DecrementPP spends wPlayerMoveListIndex's PP -- the chosen slot -- even
   -- when a disobedient monster used another move (`usedSlot` above).  It
@@ -3929,13 +4222,21 @@ function Battle:_useMove(fighter, mon, opts)
   -- (engine/battle/decrement_pp.asm), so the turns after the first of a
   -- thrash or a Rage spend nothing -- the thrash's own continuation even
   -- skips the call (`.ThrashingAboutCheck` goes to PlayerCalcMoveDamage) --
-  -- and a charge's release and a Bide's unleash are the turns the cart's
-  -- PP accounting already settled (below).  The computer never pays at all:
-  -- ExecuteEnemyMove has no DecrementPP (core.asm :5510-5521), so outside a
-  -- link battle its PP is the sheet's for the whole fight (`_hasPp`).
+  -- and a Bide's unleash skips it too.  A charge pays on its RELEASE:
+  -- PlayerCanExecuteChargingMove falls into PlayerCanExecuteMove
+  -- (:3111-3124), DisplayUsedMoveText and then DecrementPP, on the slot
+  -- wPlayerMoveListIndex still names -- the one chosen the turn it started
+  -- (`payIndex`), no menu having been opened since.  So a METRONOME or MIRROR
+  -- MOVE that called a charge move pays a second time from its own slot, and
+  -- a charge a full paralysis or a self-hit cancelled paid nothing.  (A slot
+  -- already at 0 pays nothing here: the cart's `dec [hl]` would wrap it.)
+  -- The computer never pays at all: ExecuteEnemyMove has no DecrementPP
+  -- (core.asm :5510-5521), so outside a link battle its PP is the sheet's
+  -- for the whole fight (`_hasPp`).
   local paying = move
   if disobedient and not called then paying = mon.moves[choice.move] end
-  if not struggling and paying.pp > 0 and not releasing
+  if releasing then paying = mon.moves[mon.charging.payIndex or choice.move] or move end
+  if not struggling and paying.pp > 0 and not chargingUp
      and not thrashTurn and not mon.raging
      and not isComputerSeat(self.mode, fighter) then
     paying.pp = paying.pp - 1
@@ -3948,9 +4249,13 @@ function Battle:_useMove(fighter, mon, opts)
   end
   -- amount=1 is the charge/vanish setup beat (release omits it). SHAKE_ANIM
   -- already uses amount for rock count; DIG/FLY/SOLARBEAM are never shakes.
-  local chargingUp = Effects.isCharge(effectId) and not mon.charging
+  -- A thrash's continuation animates THRASH whatever the move: the
+  -- `.ThrashingAboutCheck` writes THRASH into wPlayerMoveNum (core.asm
+  -- :3529-3530), the number PlayPlayerMoveAnimation plays -- so a PETAL
+  -- DANCE's later turns look like THRASH's.
   self:_emit("anim", {
-    slot = fighter.slot, side = fighter.side, text = move.id,
+    slot = fighter.slot, side = fighter.side,
+    text = thrashTurn and THRASH_ANIM or move.id,
     amount = chargingUp and 1 or nil,
   })
   -- DisplayUsedMoveText with wMonIsDisobedient set takes UsedMove2Text and
@@ -3960,8 +4265,9 @@ function Battle:_useMove(fighter, mon, opts)
   -- it), a Mirror Move copy clears it (MirrorMoveCheck's `xor a`), and the
   -- calls below pass it on accordingly.  A thrash's continuation never gets
   -- to DisplayUsedMoveText (`.ThrashingAboutCheck` jumps to
-  -- PlayerCalcMoveDamage): its line was "thrashing about!" (above).
-  if thrashTurn then
+  -- PlayerCalcMoveDamage): its line was "thrashing about!" (above).  Nor
+  -- does a charge's first turn (`chargingUp`): its line is the charge's.
+  if thrashTurn or chargingUp then
     -- nothing: see above
   elseif disobedient then
     self:_say(mon.species .. " used instead, " .. moveLabel(move))
@@ -3969,11 +4275,13 @@ function Battle:_useMove(fighter, mon, opts)
     self:_say(mon.species .. " used " .. moveLabel(move))
   end
 
-  if Effects.isCharge(effectId) and not mon.charging then
+  if chargingUp then
     -- `move` is kept when METRONOME / MIRROR MOVE called it: the release
-    -- replays it (`_fillForcedChoices`), not the calling slot.
+    -- replays it (`_fillForcedChoices`), not the calling slot.  `payIndex`
+    -- is wPlayerMoveListIndex, which the release pays from (above).
     mon.charging = {
       moveIndex = usedSlot,
+      payIndex = choice.move,
       effect = effectId,
       targetSlot = target.slot,
       moveId = move.id,
@@ -4103,7 +4411,7 @@ function Battle:_useMove(fighter, mon, opts)
   --     and its roll, and an immune target still costs the accuracy byte.
   -- A miss prints PrintMoveFailureText's line (`_damageMissText`).
   local isOhko = Effects.isOhko(effectId)
-  local isCrit, percents = false, nil
+  local isCrit, percents, lastPct = false, nil, nil
   local damage = 0
   if Effects.isSetDamage(effectId) then
     local hit = self:_hitTest(mon, defender, move, effectId)
@@ -4122,14 +4430,18 @@ function Battle:_useMove(fighter, mon, opts)
     -- target's `baseSpd` / K7 `base.spd`).  Absent both (old sheet) it falls
     -- back to the unmodified stat, still without a stage, badge or penalty.
     -- A power-0 hit (the two-to-five pair) draws no crit byte at all
-    -- (`ret z` on the power, :4501-4503).
+    -- (`ret z` on the power, :4501-4503).  HighCriticalMoves is matched
+    -- against wPlayerMoveNum (`dec hl / ld c, [hl]`, :4503-4504), which a
+    -- thrash's continuation set to THRASH (`THRASH_ANIM`'s note) -- not on
+    -- that table -- so those turns crit at the ordinary rate whatever the
+    -- move's own flag says.
     if move.power > 0 then
       local critSpd = mon.baseSpd
       if critSpd == nil and type(mon.base) == "table" then critSpd = mon.base.spd end
       if critSpd == nil then critSpd = mon.stats.spd end
       isCrit = Crit.check(critSpd, self.rng:byte(), {
         focusEnergy = mon.focusEnergy,
-        highCritMove = move.highCrit == true,
+        highCritMove = move.highCrit == true and not thrashTurn,
       })
     end
 
@@ -4152,7 +4464,7 @@ function Battle:_useMove(fighter, mon, opts)
       end
       damage = counter
     else
-      percents = self:_typePercents(move.type, defender)
+      percents, lastPct = self:_typeRows(move.type, defender)
       local immune, zeroed = false, false
       if isOhko then
         -- OneHitKOEffect_: a user slower than its target misses before the
@@ -4225,24 +4537,32 @@ function Battle:_useMove(fighter, mon, opts)
 
       -- MoveHitTest runs whatever AdjustDamageForMoveType decided -- it never
       -- clears wMoveMissed, and its own miss is the only one that takes a
-      -- trap back (`.moveMissed`'s `res USING_TRAPPING_MOVE`).
+      -- trap back (`.moveMissed`'s `res USING_TRAPPING_MOVE`).  Which line
+      -- the miss gets is wDamageMultipliers' (PrintMoveFailureText): with the
+      -- chart's order, "doesn't affect" only when the LAST row the walk
+      -- applied was the 0 -- a dual type whose immunity row comes before
+      -- another row of the move's type is "<USER>'s attack missed!" -- and
+      -- without it, any immunity (`_typeRows`).
       local hit = self:_hitTest(mon, defender, move, effectId)
       if immune or zeroed or not hit then
-        self:_say(self:_damageMissText(mon, defender, immune, false))
+        local noEffect = immune
+        if lastPct ~= nil then noEffect = lastPct == 0 end
+        self:_say(self:_damageMissText(mon, defender, noEffect, false))
         if hit then trapAfterZero() end
         return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
       end
     end
   end
 
-  local effectiveness = 1
-  for _, pct in ipairs(percents or {}) do effectiveness = effectiveness * pct / 100 end
-  if isCrit and not isOhko then self:_say("A critical hit") end
-  if effectiveness > 1 then
-    self:_say("It's super effective")
-  elseif effectiveness < 1 then
-    self:_say("It's not very effective")
-  end
+  -- PrintCriticalOHKOText and DisplayEffectiveness come after the hit is
+  -- applied (ExecutePlayerMove `.moveDidNotMiss`, core.asm :3226-3229), each
+  -- hit of a multi-hit move: wCriticalHitOrOHKO is cleared once printed, so
+  -- "Critical hit!" -- or a landed OHKO's "One-hit KO!", which OneHitKOEffect_
+  -- wrote over the crit -- follows the first hit only, while wDamageMultipliers
+  -- stands for the whole move and its line follows every hit (`typeLine`).
+  -- A COUNTER, a set-damage move, a trap's later turns and a Bide's unleash
+  -- never ran AdjustDamageForMoveType that turn, so they have no line.
+  local effectLine = typeLine(percents, lastPct)
 
   -- The trap, standing before the hit lands (a knockout's `_faint` takes it
   -- back off the field).
@@ -4289,7 +4609,17 @@ function Battle:_useMove(fighter, mon, opts)
     if defender.hp <= 0 then break end
     local hpBefore = defender.hp
     local subUp = Effects.hasSubstitute(defender)
-    self.lastDamage = self:_damage(target, defender, damage, nil)
+    -- The knockout's `faint` waits for the hit's lines (`holdFaint`).
+    self.lastDamage = self:_damage(target, defender, damage, nil, nil, true)
+    if h == 1 then
+      if isOhko then
+        self:_say("One-hit KO!")
+      elseif isCrit then
+        self:_say("A critical hit")
+      end
+    end
+    if effectLine then self:_say(effectLine) end
+    if defender.hp <= 0 then self:_faint(target, defender) end
     totalDealt = totalDealt + (hpBefore - defender.hp)
     if subUp and not Effects.hasSubstitute(defender) then effectLive = false end
     if effectLive then
@@ -4395,7 +4725,7 @@ end
 -- whole amount against a doll -- AttackSubstitute takes it off the doll's
 -- own byte and leaves wDamage alone -- and on a monster the HP it actually
 -- took, ApplyDamageTo*Pokemon writing the old HP back over a knockout.
-function Battle:_damage(fighter, mon, amount, status, direct)
+function Battle:_damage(fighter, mon, amount, status, direct, holdFaint)
   amount = max(0, int(amount, 0))
 
   -- (A Bide does not store here: `.BideCheck` adds wDamage on the storing
@@ -4433,7 +4763,9 @@ function Battle:_damage(fighter, mon, amount, status, direct)
     status = status and M.STATUS_TO_WIRE[status] or nil,
   })
 
-  if mon.hp <= 0 then self:_faint(fighter, mon) end
+  -- `holdFaint`: the caller runs `_faint` itself, after the lines the cart
+  -- prints between the hit and the knockout (`_useMove`'s strike loop).
+  if mon.hp <= 0 and not holdFaint then self:_faint(fighter, mon) end
   return amount
 end
 

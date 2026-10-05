@@ -866,13 +866,21 @@ scenario('trap_chain', (events) => {
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   drainInto(battle, events);
-  // The forced turns resolve one tick at a time; ten is past the longest roll.
+  // Both are players (a link fight), and the cart gives both the battle menu
+  // while the trap runs (MainInBattleLoop: DisplayBattleMenu before the
+  // USING_TRAPPING_MOVE checks): FIGHT is the trapper's continuation and the
+  // held monster's CANNOT_MOVE (`_menuFight`), each turn resolving on the last
+  // answer. Ten turns is past the longest roll.
   for (let step = 1; step <= 10; step += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
     battle.tick(step);
     drainInto(battle, events);
   }
-  // A referee-filled answer cannot be taken back -- the refusal is silent, so
-  // what this pins is that neither runtime emits an `unchose` for it.
+  // A player's lock-in is the player's own answer: it can be taken back --
+  // an `unchose` -- and the seat owes again (a switch to the monster already
+  // out is refused).
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'cancel' });
   battle.submitChoice('p2', { action: 'switch', slot: 0 });
   drainInto(battle, events);
@@ -2348,7 +2356,7 @@ function fights(id, entries) {
       battle = build({
         id: `${id}${at}`, mode: e.mode || '1v1', seed: e.seed, choiceTimeout: 60,
         reconnectGrace: 60, typeIds: e.typeIds, chart: e.chart,
-        metronomePool: e.pool, sides,
+        chartOrder: e.chartOrder, metronomePool: e.pool, sides,
       });
       drainInto(battle, events);
       e.turns.forEach((row, t) => {
@@ -2978,7 +2986,8 @@ scenario('g1_trap_start', fights('g1ts', [
   r1duo(
     [r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, substitute: 50 })],
-    { seed: 9401, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+    { seed: 9401, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
   r1duo(
     [r1s('Alpha', [r1m('wrap', 15, 42, { accuracy: 0 })], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
@@ -2989,12 +2998,12 @@ scenario('g1_trap_start', fights('g1ts', [
     {
       seed: 9403,
       chart: [[100, 100, 0], [100, 100, 100], [100, 100, 100]],
-      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }],
     }),
   r1duo(
     [r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, substitute: 3 })],
-    { seed: 9404, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+    { seed: 9404, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
 ]));
 
 // MIRROR MOVE copies wEnemyUsedMove -- the last move the target printed a
@@ -3179,19 +3188,20 @@ scenario('g1_teleport', fights('g1tp', [
 scenario('g1_trap_turns', fights('g1tt', [
   r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
-    { seed: 9871, turns: SIX() }),
+    { seed: 9871, turns: [...SIX(), { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 10 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 90 })],
-    { seed: 9871, turns: [{ p1: 0, p2: 0 }] }),
+    { seed: 9871, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, types: [2] })],
     { seed: 9872, chart: [[100, 100, 0], [100, 100, 100], [100, 100, 100]],
-      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'SLP', statusTurns: 4 }),
       r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
     { seed: 9873, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: { action: 'switch', slot: 1 } },
-      { p1: 0, p2: 0 }] }),
+      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'SLP', statusTurns: 2,
       mustRecharge: true })],
@@ -3201,7 +3211,7 @@ scenario('g1_trap_turns', fights('g1tt', [
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, hp: 30 }),
       r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
     { seed: 9875, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p2: { action: 'switch', slot: 1 } },
-      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
 ]));
 
 scenario('g1_tie_actions', fights('g1ta', [
@@ -3230,6 +3240,188 @@ scenario('g1_pay_day_faint', fights('g1pf', [
   [r1s('Beta', [r1m('slam', 60, 0)], { spd: 10, atk: 200 })],
   { mode: 'wild', seed: 9901, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 } },
     { p1: 0, p2: 0 }] }),
+]));
+
+// R1d (wave 4): the battle menu a player keeps through a lock-in
+// (MainInBattleLoop runs DisplayBattleMenu before it looks at STORING_ENERGY,
+// USING_TRAPPING_MOVE or the foe's trap; `_menuFight`), and the computer's
+// selection after the player's switch or item (`_reselectComputer`):
+//   1 1v1: the held Beta's FIGHT -- its slot index naming nothing -- is
+//     CANNOT_MOVE and Alpha's is the continuation; then Beta switches to
+//     Delta, the trap goes with it, and Alpha's slot runs WRAP fresh at Delta
+//     (the link glitch: used line, PP, a new counter);
+//   2 wild: Alpha's items each take a step off its trap's counter (UseBagItem);
+//     the turn the step reaches 0 the wild Beta is free, re-picks, and moves;
+//   3 wild: the wild Beta's trap is let go by Alpha's switch to Gamma, and
+//     SelectEnemyMove picks again -- SLAM, not WRAP run fresh;
+//   4 1v1: Alpha's BIDE says nothing past "used BIDE" (BideEffect, and the
+//     store turns' ExecutePlayerMoveDone); an item stalls it, the counter
+//     where it was, and a FIGHT naming no slot stores;
+//   5 1v1: a switch drops the Bide (SendOutMon clears the battle status), and
+//     the monster that comes back uses BIDE afresh;
+//   6 1v1: asleep, FIGHT opens no move menu, so a 0-PP slot is taken -- the
+//     gate stops the monster before the move matters.
+const XATK = () => ({ action: 'item', item: 'X_ATTACK' });
+scenario('g1_menu_lockin', fights('g1ml', [
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9911, turns: [{ p1: 0, p2: 0 }, { p1: 3, p2: 3 },
+      { p1: 0, p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { mode: 'wild', seed: 9912,
+      turns: [{ p1: 0, p2: 0 }, { p1: XATK(), p2: 0 }, { p1: XATK(), p2: 0 },
+        { p1: XATK(), p2: 0 }, { p1: XATK(), p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 10 }),
+    r1s('Gamma', [r1m('thump', 10, 0)], { spd: 10 })],
+  [r1s('Beta', [r1m('wrap', 15, 42), r1m('slam', 40, 0)], { spd: 90 })],
+  { mode: 'wild', seed: 9913,
+    turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9914, turns: [{ p1: 0, p2: 0 }, { p1: XATK(), p2: 0 },
+      { p1: 2, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 }),
+    r1s('Gamma', [r1m('thump', 10, 0)], { spd: 90 })],
+  [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+  { seed: 9915, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+    { p1: { action: 'switch', slot: 0 }, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 0 }), r1m('tap', 10, 0)],
+      { spd: 10, status: 'SLP', statusTurns: 3 })],
+    { seed: 9916, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// A charge's first turn is ChargeEffect alone (CheckIfPlayerNeedsToChargeUp
+// jumps there ahead of PlayerCanExecuteMove): its line, no used line, no PP;
+// the release is PlayerCanExecuteMove's used line and DecrementPP:
+//   1 FLY at 10 PP: "flew up high", then "used FLY" with the PP spent;
+//   2 a paralysed SOLARBEAM user fully paralysed on its release turn: the
+//     charge is gone and no PP was ever spent;
+//   3 the computer's FLY: the same lines, its PP never spent.
+scenario('g1_charge_turn', fights('g1ct', [
+  r1duo([r1s('Alpha', [r1m('FLY', 90, 43, { pp: 10 })], { spd: 90 })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10 })],
+    { seed: 9921, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('SOLARBEAM', 120, 39, { pp: 10 })], { spd: 90, status: 'PAR' })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10 })],
+    { seed: 9927, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('FLY', 90, 43, { pp: 10 })], { spd: 90 })],
+    { mode: 'wild', seed: 9923, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// `.ThrashingAboutCheck` writes THRASH into wPlayerMoveNum: a PETAL DANCE's
+// later turns animate as THRASH; its first is its own.
+scenario('g1_thrash_anim', fights('g1th', [
+  r1duo([r1s('Alpha', [r1m('PETAL_DANCE', 20, 27)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9931, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+]));
+
+// PrintCriticalOHKOText and DisplayEffectiveness come after the hit is
+// applied, each hit; the crit flag is cleared once printed:
+//   1 a two-hit move, super effective, critical: hit, "A critical hit",
+//     "It's super effective", hit, "It's super effective";
+//   2 a super-effective knockout: the line, then the faint;
+//   3 a landed OHKO into a super-effective type: "One-hit KO!", the line,
+//     then the faint.
+const SE_CHART = () => [[100, 100, 200], [100, 100, 100], [100, 100, 100]];
+scenario('g1_hit_lines', fights('g1hl', [
+  r1duo([r1s('Alpha', [r1m('kick', 30, 44, { highCrit: true })], { spd: 90, baseSpd: 255 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2] })],
+    { seed: 9941, chart: SE_CHART(), turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 40, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 5, types: [2] })],
+    { seed: 9942, chart: SE_CHART(), turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('drill', 1, 38)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2] })],
+    { seed: 9943, chart: SE_CHART(), turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// TryRunningFromBattle for a coop_wild runner (the referee rolls; solo's
+// `wild` is its client's):
+//   1 Ann at Speed 10 against the wild 100: odds 10 x 32 / 25 = 12, then +30
+//     an attempt, one byte each -- "Can't escape!" and the turn spent (the
+//     others still fight), until one gets away;
+//   2 Abe at least as fast: "Got away safely!", no byte;
+//   3 a wild Speed under 4: the divisor's 0, away with no byte;
+//   4 solo `wild`: no roll here at all.
+function coopRun(seed, annSpd, abeSpd, wildSpd, turns) {
+  return {
+    mode: 'coop_wild', seed, turns,
+    seats: [
+      { pid: 'a1', side: 'a', mons: [r1s('Alpha', [r1m('tap', 10, 0)], { spd: annSpd })] },
+      { pid: 'a2', side: 'a', mons: [r1s('Gamma', [r1m('tap', 10, 0)], { spd: abeSpd })] },
+      { pid: 'w', side: 'b', mons: [r1s('Beta', [r1m('tap', 10, 0)], { spd: wildSpd })] },
+    ],
+  };
+}
+const RUN = () => ({ action: 'run' });
+const RUN_ROW = () => ({ a1: RUN(), a2: 0, w: 0 });
+scenario('g1_coop_run', fights('g1cr', [
+  coopRun(9951, 10, 50, 100, [RUN_ROW(), RUN_ROW(), RUN_ROW(), RUN_ROW(), RUN_ROW(),
+    RUN_ROW(), RUN_ROW(), RUN_ROW()]),
+  coopRun(9952, 10, 200, 100, [{ a1: 0, a2: RUN(), w: 0 }]),
+  coopRun(9953, 1, 2, 3, [RUN_ROW()]),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 100 })],
+    { mode: 'wild', seed: 9954, turns: [{ p1: RUN(), p2: 0 }] }),
+]));
+
+// HazeEffect_ writes CANNOT_MOVE over the selection of a target it woke or
+// thawed, and nothing but a move menu writes over it (`_selectsAnew`):
+//   1 wild: the frozen wild Beta still owes its HYPER BEAM recharge (the
+//     enemy side keeps it through a freeze); thawed by Alpha's HAZE, its
+//     forced recharge turns -- SelectEnemyMove keeps the selection -- are
+//     lost in silence, and it never recharges;
+//   2 wild: a frozen Beta with nothing forced picks afresh the turn after,
+//     and moves;
+//   3 1v1: a frozen, raging Beta (a player: Rage skips every menu) thawed
+//     by HAZE never moves again while it rages.
+const HAZER = () => [r1s('Alpha', [r1m('HAZE', 0, 25), r1m('splash', 0, 85)], { spd: 90 })];
+scenario('g1_haze_lock', fights('g1hz', [
+  r1duo(HAZER(),
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10, status: 'FRZ', mustRecharge: true })],
+    { mode: 'wild', seed: 9961, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo(HAZER(),
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10, status: 'FRZ' })],
+    { mode: 'wild', seed: 9962, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo(HAZER(),
+    [r1s('Beta', [r1m('fury', 20, 81)], { spd: 10, status: 'FRZ', raging: true, rageMove: 1 })],
+    { seed: 9963, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }] }),
+]));
+
+// The chart as the cart walks it (`chartOrder`): wDamageMultipliers is the
+// LAST TypeEffects row applied, and the rows apply in table order. Beta is
+// types 1 and 2; Alpha's type-0 THUMP meets the rows (0,1) and (0,2):
+//   1 (0,1) = 0 then (0,2) = 200: the damage is 0, the last row 200 --
+//     "Alpha missed";
+//   2 the same rows the other way round: "It doesn't affect Beta";
+//   3 no order uploaded: any immunity, "doesn't affect" (as before);
+//   4 (0,1) = 200 then (0,2) = 50: the product is neutral, the last row 50
+//     -- "not very effective", the odd damage doubled then halved, whole:
+//     8 after the roll;
+//   5 the other way round, on the same seed: "super effective", the damage
+//     halved first, losing its odd point: 7 after the same roll;
+//   6 no order: the product, no line, the chart per defender type (8).
+function chartRun(seed, row, order) {
+  return r1duo([r1s('Alpha', [r1m('thump', 35, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [1, 2] })],
+    { seed, chart: [row, [100, 100, 100], [100, 100, 100]], chartOrder: order,
+      turns: [{ p1: 0, p2: 0 }] });
+}
+scenario('g1_chart_order', fights('g1co', [
+  chartRun(9971, [100, 0, 200], [0, 1, 0, 2]),
+  chartRun(9972, [100, 0, 200], [0, 2, 0, 1]),
+  chartRun(9973, [100, 0, 200], undefined),
+  chartRun(9974, [100, 200, 50], [0, 1, 0, 2]),
+  chartRun(9974, [100, 200, 50], [0, 2, 0, 1]),
+  chartRun(9974, [100, 200, 50], undefined),
 ]));
 
 // ------------------------------------------------------------------
@@ -5251,9 +5443,13 @@ test('METRONOME / MIRROR MOVE: a called multi-turn move is the one replayed', ()
   const g = 'g1_called_multiturn';
   for (const [at, id] of [[1, 'FLY'], [2, 'DIG']]) {
     assert.strictEqual(duelSeat(g, at, 1, 0).invuln, true, `${id}: up on turn 1`);
+    // The charge turn is ChargeEffect alone -- no used line (R1d); the
+    // release is PlayerCanExecuteMove's, and DecrementPP pays METRONOME's slot
+    // (wPlayerMoveListIndex) a second time.
     assert.deepStrictEqual(duelTexts(g, at).slice(0, 6).filter((t) => t.startsWith('Alpha used')),
-      ['Alpha used METRONOME', `Alpha used ${id}`, `Alpha used ${id}`], `${id} lands on turn 2`);
-    assert.strictEqual(duelSeat(g, at, 2, 0).pp, '59', 'METRONOME spent once for both turns');
+      ['Alpha used METRONOME', `Alpha used ${id}`], `${id} lands on turn 2`);
+    assert.strictEqual(duelSeat(g, at, 1, 0).pp, '59', 'METRONOME spent at the call');
+    assert.strictEqual(duelSeat(g, at, 2, 0).pp, '58', '...and again at the release');
   }
   // 1 + the counter (3 on this seed): ThrashPetalDanceEffect counts the turns
   // after the first (R1b).
@@ -5275,7 +5471,8 @@ test('METRONOME / MIRROR MOVE: a called multi-turn move is the one replayed', ()
   assert.strictEqual(t6.filter((t) => t === 'Alpha used MIRROR_MOVE').length, 2);
   assert.strictEqual(t6[t6.length - 1], 'Alpha used FLY', 'turn 3: the mirrored FLY, not MIRROR MOVE');
   assert.strictEqual(duelSeat(g, 6, 3, 3).hp, 381, '...and it lands');
-  assert.strictEqual(duelSeat(g, 6, 3, 0).pp, '58', 'MIRROR MOVE spent on turns 1 and 2 only');
+  assert.strictEqual(duelSeat(g, 6, 3, 0).pp, '57',
+    'MIRROR MOVE spent on turns 1 and 2, and by the mirrored FLY\'s release');
 });
 
 test('LEECH SEED: times the toxic counter, and a poison or burn knockout still feeds', () => {
@@ -5624,4 +5821,109 @@ test('an escape after a faint of the player\'s pays no Pay Day', () => {
   const g = 'g1_pay_day_faint';
   assert.ok(duelSaid(g, 1, 'Coins scattered') && duelSaid(g, 1, 'Gamma ran from battle!'));
   assert.deepStrictEqual([r1End(g, 1).reason, r1End(g, 1).payDay], ['run', 0]);
+});
+
+// ------------------------------------------------------------------
+// R1d (wave 4): the battle menu through a lock-in, the cart's message order,
+// the charge's PP, a coop_wild RUN, Haze's lasting CANNOT_MOVE and the chart's
+// row order -- asserted off the JS half of the parity scenarios above.
+// ------------------------------------------------------------------
+
+test("a player's Bide, trap and hold keep the battle menu; the computer re-picks", () => {
+  const g = 'g1_menu_lockin';
+  const t1 = duelTexts(g, 1);
+  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap', "Beta can't move", "Alpha's attack continues!"],
+    'FIGHT naming no slot: the continuation, and the held Beta silent');
+  assert.strictEqual(t1.filter((x) => x === 'Alpha used wrap').length, 2,
+    "Beta's switch to Delta lets the trap go: Alpha's slot runs WRAP fresh at Delta");
+  assert.ok(!t1.includes('Beta used thump') && !t1.includes('Delta used thump'), 'nobody held moves');
+  const t2 = duelTexts(g, 2);
+  assert.strictEqual(t2.filter((x) => x === 'p1 used an item').length, 4, 'four items');
+  assert.strictEqual(t2.filter((x) => x === "Alpha's attack continues!").length, 0,
+    'an item turn is not a continuation');
+  assert.deepStrictEqual([1, 2, 3, 4].map((t) => r1Seat(g, 2, t, 0).trapping), ['4', '3', '2', '1'],
+    'each item takes a step off the counter');
+  assert.ok(t2.includes('Beta used thump'),
+    'the turn the step reaches 0 the held wild Beta is free, re-picks and moves');
+  assert.strictEqual(r1Seat(g, 2, 5, 3).trapped, '', '...and is held by nothing');
+  const t3 = duelTexts(g, 3);
+  assert.deepStrictEqual(t3.slice(0, 3), ['Beta used wrap', "Alpha can't move", 'Beta used slam'],
+    "Alpha's switch lets the wild trap go: SelectEnemyMove picks SLAM, not WRAP run fresh");
+  const t4 = duelTexts(g, 4);
+  assert.ok(!t4.some((x) => x.includes('energy') && x !== 'Alpha unleashed energy'),
+    'BIDE says nothing past its used line, and the store turns nothing at all');
+  assert.strictEqual(r1Seat(g, 4, 2, 0).bide, r1Seat(g, 4, 1, 0).bide, 'an item stalls the Bide');
+  assert.ok(duelSaid(g, 4, 'Alpha unleashed energy'), '...which still unleashes');
+  assert.strictEqual(duelTexts(g, 5).filter((x) => x === 'Alpha used BIDE').length, 2,
+    'a switch drops the Bide; back out, Alpha uses BIDE afresh');
+  assert.strictEqual(r1Seat(g, 5, 3, 0, 1).bide, '', '...Alpha comes back with no Bide');
+  assert.strictEqual(duelTexts(g, 6).filter((x) => x === 'Beta is fast asleep').length, 2,
+    'asleep, FIGHT naming a 0-PP slot is taken: the gate stops it every turn');
+});
+
+test('a charge turn is the charge line alone; the release says "used" and pays', () => {
+  const g = 'g1_charge_turn';
+  const e1 = duelEvents(g, 1);
+  assert.ok(!duelSaid(g, 1, 'Alpha used FLY') || duelTexts(g, 1).indexOf('Alpha used FLY')
+    > duelTexts(g, 1).indexOf('Alpha flew up high'), 'no used line before the charge line');
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used FLY').length, 1, 'one used line, the release');
+  assert.strictEqual(r1Seat(g, 1, 1, 0).moves, 'FLY:10', 'no PP on the charge turn');
+  assert.strictEqual(r1Seat(g, 1, 2, 0).moves, 'FLY:9', 'the release pays');
+  assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'FLY' && e.amount === 1), 'the vanish beat');
+  assert.ok(duelSaid(g, 2, 'Alpha is fully paralyzed'), 'battle 2: paralysed on the release');
+  assert.deepStrictEqual([r1Seat(g, 2, 2, 0).moves, r1Seat(g, 2, 2, 0).charging], ['SOLARBEAM:10', false],
+    '...the charge is gone and nothing was paid');
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === 'Beta used FLY').length, 1);
+  assert.strictEqual(r1Seat(g, 3, 2, 3).moves, 'FLY:10', "the computer's PP is never spent");
+});
+
+test('a PETAL DANCE continuation animates as THRASH', () => {
+  const anims = duelEvents('g1_thrash_anim', 1).filter((e) => e.t === 'anim' && e.slot === 0)
+    .map((e) => e.text);
+  assert.deepStrictEqual(anims.slice(0, 3), ['PETAL_DANCE', 'THRASH', 'THRASH']);
+});
+
+test('the crit and effectiveness lines follow the hit; One-hit KO!', () => {
+  const g = 'g1_hit_lines';
+  const lines = (at) => duelEvents(g, at).filter((e) => (e.t === 'damage' && e.slot === 3)
+    || e.t === 'faint' || (e.t === 'msg' && !e.text.includes(' used ') && !e.text.includes('No effect')))
+    .map((e) => (e.t === 'msg' ? e.text : e.t));
+  assert.deepStrictEqual(lines(1), ['damage', 'A critical hit', "It's super effective", 'damage',
+    "It's super effective", 'Hit the enemy 2 times!'], 'crit once, effectiveness every hit');
+  assert.deepStrictEqual(lines(2), ['damage', "It's super effective", 'faint'], 'the line before the faint');
+  assert.deepStrictEqual(lines(3), ['damage', 'One-hit KO!', "It's super effective", 'faint']);
+});
+
+test('coop_wild RUN rolls the cart\'s odds; solo wild is the client\'s', () => {
+  const g = 'g1_coop_run';
+  const t1 = duelTexts(g, 1);
+  assert.strictEqual(t1.filter((x) => x === "Can't escape!").length, 3, 'odds 12, 42, 72 fail on this seed');
+  assert.strictEqual(t1[t1.length - 1], 'Got away safely!', '...102 gets away');
+  assert.ok(t1.includes('Gamma used tap'), 'a failed try spends only the runner\'s turn');
+  assert.deepStrictEqual([r1End(g, 1).reason, r1End(g, 1).outcome], ['run', 'win']);
+  assert.ok(duelSaid(g, 2, 'Got away safely!') && r1Row(g, 2, 1).rng === 9952, 'faster: no byte');
+  assert.ok(duelSaid(g, 3, 'Got away safely!') && r1Row(g, 3, 1).rng === 9953, 'divisor 0: no byte');
+  assert.deepStrictEqual(duelTexts(g, 4), [], "solo wild: the referee says nothing, the client rolled");
+  assert.strictEqual(r1End(g, 4).reason, 'run');
+});
+
+test("Haze's CANNOT_MOVE stands until a move menu writes over it", () => {
+  const g = 'g1_haze_lock';
+  assert.ok(!duelTexts(g, 1).some((x) => x.startsWith('Beta')), 'the thawed recharger never acts again');
+  assert.strictEqual(r1Seat(g, 1, 3, 3).recharge, true, '...and never recharges');
+  assert.ok(duelSaid(g, 2, 'Beta used tap'), 'a thawed Beta with nothing forced picks afresh');
+  assert.ok(!duelTexts(g, 3).some((x) => x.startsWith('Beta')), 'a thawed raging player never acts again');
+});
+
+test("the chart's row order: the last row's line, the rows' rounding", () => {
+  const g = 'g1_chart_order';
+  assert.ok(duelSaid(g, 1, 'Alpha missed') && !duelSaid(g, 1, "It doesn't affect Beta"),
+    'immunity row first, a 2x after it: "attack missed"');
+  assert.ok(duelSaid(g, 2, "It doesn't affect Beta"), 'the immunity row last');
+  assert.ok(duelSaid(g, 3, "It doesn't affect Beta"), 'no order: any immunity');
+  assert.ok(duelSaid(g, 4, "It's not very effective"), '2x then 0.5x: the last row');
+  assert.ok(duelSaid(g, 5, "It's super effective"), '0.5x then 2x: the last row');
+  assert.ok(!duelTexts(g, 6).some((x) => x.includes('effective')), 'no order: the product, no line');
+  assert.deepStrictEqual([4, 5, 6].map((at) => duelHits(g, at)[0]), ['3:8:392', '3:7:393', '3:8:392'],
+    'halving first loses the odd point');
 });

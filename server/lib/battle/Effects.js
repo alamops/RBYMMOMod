@@ -2153,6 +2153,29 @@ function runEndsBattle(mode) {
   return mode === '1v1' || mode === 'coop_pvp';
 }
 
+// TryRunningFromBattle's wild odds (engine/battle/core.asm :1508-1567): null
+// for a getaway that draws no byte, else the number a BattleRandom byte must
+// not exceed (`cp b` / `jr nc`). The runner's 16-bit Speed at or over the
+// wild one's gets away (StringCmp); so does a divisor of 0 -- the wild Speed
+// / 4 taken to its low byte, `srl b / rr a` twice and only `a` kept -- and a
+// quotient of the runner's Speed x 32 (the product's low word, hDividend) by
+// it over 255 (hQuotient + 2 nonzero). Each attempt past the first adds 30
+// (`attempts` counts this one), and a sum that carries past 255 gets away too.
+function runOdds(playerSpeed, enemySpeed, attempts) {
+  const p = Math.max(0, int(playerSpeed, 0)) % 65536;
+  const e = Math.max(0, int(enemySpeed, 0)) % 65536;
+  if (p >= e) return null;
+  const divisor = Math.floor(e / 4) % 256;
+  if (divisor === 0) return null;
+  let quotient = Math.floor(((p * 32) % 65536) / divisor);
+  if (quotient > 255) return null;
+  for (let i = 2; i <= Math.max(1, int(attempts, 1)); i += 1) {
+    quotient += 30;
+    if (quotient > 255) return null;
+  }
+  return quotient;
+}
+
 function isPayDay(effectId) {
   return int(effectId, 0) === 16;
 }
@@ -2279,6 +2302,7 @@ module.exports = {
   isSwitchAndTeleport,
   teleportRunAllowed,
   runEndsBattle,
+  runOdds,
   isPayDay,
   payDayCoins,
   isCounter,

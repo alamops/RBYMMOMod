@@ -1720,29 +1720,81 @@ function nextMoves12(old, incoming) {
 }
 
 /*
+ * Every id the same, in the same slots: nothing for the carts' LearnMove to
+ * do. A level-up with no new move at that level still re-sends the list the
+ * client already had (K9), and LearnMove runs only for a new move (pokered
+ * LearnMoveFromLevelUp, pokecrystal LearnLevelMoves). Twin of Hub.lua's
+ * sameIds12.
+ */
+function sameIds12(old, incoming) {
+  if (old.length !== incoming.length) return false;
+  for (let i = 0; i < incoming.length; i += 1) {
+    const prev = old[i];
+    if (!prev || prev.id !== incoming[i].id) return false;
+  }
+  return true;
+}
+
+/*
+ * The party's own move list beneath a live battler's MIMIC: `base` (the battle
+ * list, or the one put aside at a Transform) with every slot a MIMIC wrote
+ * while the monster was itself given back the row it held (`mon.preMimic`,
+ * keyed by the 1-based slot -- lib/battle Effects' MIMIC_EFFECT keeps it and
+ * `restoreMoves` gives it back). The party's MIMIC PP is the cart's: on Red
+ * the slot's (DecrementPP writes both while not TRANSFORMed), on Gold the
+ * saved row's (CheckMimicUsed stops the party spend). No saved rows: `base`
+ * itself. Twin of Hub.lua's partyMoves12, which carries the carts' reasons.
+ */
+function partyMoves12(generation, base, mimic) {
+  if (!mimic || typeof mimic !== 'object') return base;
+  return base.map((row, i) => {
+    const own = mimic[i + 1];
+    if (!own || typeof own !== 'object') return row;
+    const back = { ...own };
+    if (generation === 1 && row.pp != null) back.pp = row.pp;
+    return back;
+  });
+}
+
+/*
  * Where a Gen 1 / Gen 2 learn lands on a live battler, and whether it did.
- * Twin of learnTo in src/Hub.lua, which carries the carts' reasons:
- * untransformed, the battle list is the party list and the learn rewrites it;
- * transformed, the learn is judged against and written into the party list the
- * referee put aside (`mon.preTransform.moves`), which the switch-out or faint
- * restores -- and on Red (pokered LearnMove has no TRANSFORMED check, unlike
- * pokecrystal's) the battle list becomes its own copy of the learned list too.
- * A transformed battler with no list put aside is left alone, as before.
+ * Twin of learnTo in src/Hub.lua, which carries the carts' reasons: the learn
+ * is judged against the PARTY list -- the one put aside at Transform
+ * (`mon.preTransform.moves`) when transformed, with a MIMIC's slots given back
+ * their own rows (partyMoves12) -- never the battle list laid over it, and is
+ * written there (a Mimic'd slot's saved row folded in). The battle struct is
+ * the cart's LearnMove, which runs only for a new move (sameIds12): Red copies
+ * the party list over it whatever the Transform (pokered LearnMove has no
+ * TRANSFORMED check), Gold only when not transformed (pokecrystal's does) -- a
+ * MIMIC's copy is gone either way. A transformed battler with no list put
+ * aside is left alone, as before.
  */
 function learnTo(generation, mon, incoming) {
   if (!Array.isArray(incoming) || incoming.length === 0) return false;
-  if (!mon.transformed) {
-    const old = Array.isArray(mon.moves) ? mon.moves : [];
-    if (!movesetDeltaOk(old, incoming)) return false;
-    mon.moves = nextMoves12(old, incoming);
+  let saved = null;
+  if (mon.transformed) {
+    saved = mon.preTransform;
+    if (!saved || typeof saved !== 'object') return false;
+  }
+  const list = saved ? saved.moves : mon.moves;
+  const base = Array.isArray(list) ? list : [];
+  const mimic = mon.preMimic && typeof mon.preMimic === 'object' ? mon.preMimic : null;
+  const party = partyMoves12(generation, base, mimic);
+  if (!movesetDeltaOk(party, incoming)) return false;
+  const learnt = !sameIds12(party, incoming);
+  if (saved) {
+    saved.moves = nextMoves12(party, incoming);
+    if (mimic) mon.preMimic = null;
+    if (generation === 1 && learnt) mon.moves = nextMoves12(party, incoming);
     return true;
   }
-  const saved = mon.preTransform;
-  if (!saved || typeof saved !== 'object') return false;
-  const old = Array.isArray(saved.moves) ? saved.moves : [];
-  if (!movesetDeltaOk(old, incoming)) return false;
-  saved.moves = nextMoves12(old, incoming);
-  if (generation === 1) mon.moves = nextMoves12(old, incoming);
+  // Itself, the battle list is the party list but for a MIMIC's slots: with
+  // none, the re-send rewrites it as it always did; with one, only a learn
+  // replaces it.
+  if (learnt || !mimic) {
+    mon.moves = nextMoves12(party, incoming);
+    if (mimic) mon.preMimic = null;
+  }
   return true;
 }
 
@@ -3255,9 +3307,11 @@ class Relay {
    * or a single-id replace is applied -- a full rewrite after seeing the
    * foe is not a learn. Unchanged ids keep the hub's PP *and* power /
    * accuracy / effect, so this is not a free Ether or a live stat editor
-   * (nextMoves12). A transformed battler's learn lands in the party list its
-   * referee put aside (`preTransform.moves`), and on Red in the battle list
-   * too -- learnTo has the rule and the carts' reasons.
+   * (nextMoves12). A learn is judged against, and lands in, the party list --
+   * the one a Transform put aside (`preTransform.moves`), a MIMIC's slots
+   * given back (`preMimic`) -- and reaches the battle list only as the cart's
+   * LearnMove does: for a new move alone, on Red whatever the Transform, on
+   * Gold only untransformed. learnTo has the rule and the carts' reasons.
    *
    * Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
    * Gen 2 only -- cleanBattleMoveset reads none on Gen 3), the hub forwards
@@ -3730,6 +3784,12 @@ class Relay {
       createOpts.terrain = rules.terrain;
       createOpts.weather = rules.weather;
       createOpts.underwater = rules.underwater;
+    }
+    // Gold's wTimeOfDay, the host's cart clock (cleanBattleRuleset reads it on
+    // a Gen 2 hub alone), for MORNING SUN / SYNTHESIS / MOONLIGHT (lib/battle2
+    // Turn.create's `opts.timeOfDay`; absent is its link reading).
+    if (this.generation === 2) {
+      createOpts.timeOfDay = rules.timeOfDay;
     }
     const created = this.Turn.attempt(createOpts);
     if (!created.battle) {

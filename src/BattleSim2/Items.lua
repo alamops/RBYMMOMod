@@ -162,8 +162,8 @@ M.THIEF = "THIEF"
 --
 --    0 EFFECT_NORMAL_HIT (and every unmapped hit, below)   3 LEECH_HIT
 --    7 SELFDESTRUCT   16 PAY_DAY        17 ALWAYS_HIT       26 BIDE
---   27 RAMPAGE        29 MULTI_HIT      39 RAZOR_WIND / SOLARBEAM /
---   SKULL_BASH                           40 SUPER_FANG       41 STATIC_DAMAGE /
+--   27 RAMPAGE        29 MULTI_HIT      39 RAZOR_WIND (SOLARBEAM and
+--   SKULL_BASH have ids of their own)    40 SUPER_FANG       41 STATIC_DAMAGE /
 --   LEVEL_DAMAGE / PSYWAVE               43 FLY              44 DOUBLE_HIT
 --   45 JUMP_KICK      48 RECOIL_HIT     77 POISON_MULTI_HIT  81 RAGE
 --   96 SNORE (`flinchtarget`, then `kingsrock`)              101 SKY_ATTACK
@@ -189,7 +189,9 @@ M.THIEF = "THIEF"
 -- FutureSight (119), Protect / Endure (120, 121), the weather moves
 -- (124..126), the time-of-day heals (128..130) and DefenseCurl (115) run none.
 -- FUTURE SIGHT has its own id now, so it no longer needs naming by move id;
--- the row stays for a sheet that still folds it to 0.
+-- the row stays for a sheet that still folds it to 0.  Wave 4 (R2d) adds
+-- RapidSpin (147) and SkullBash (157, off 39: `kingsrock` before its
+-- `endturn`); its status and field scripts (133..146, 148..156) run none.
 M.KINGS_ROCK_EFFECTS = {
   [0] = true, [3] = true, [7] = true, [16] = true, [17] = true, [26] = true,
   [27] = true, [29] = true, [39] = true, [40] = true, [41] = true, [43] = true,
@@ -198,7 +200,7 @@ M.KINGS_ROCK_EFFECTS = {
   [106] = true, [107] = true, [108] = true, [109] = true, [110] = true,
   [111] = true, [112] = true, [113] = true, [114] = true, [116] = true,
   [117] = true, [118] = true, [122] = true, [123] = true, [127] = true,
-  [131] = true, [132] = true,
+  [131] = true, [132] = true, [147] = true, [157] = true,
 }
 M.KINGS_ROCK_FOLDED_EXCEPTIONS = {
   FUTURE_SIGHT = true,

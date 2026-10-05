@@ -1,8 +1,8 @@
 -- Deterministic RNG for the Gen 2 mediated battle sim.
 --
--- Same LCG as Gen 1 BattleSim/Rng.lua so Lua and the future Node twin share
--- one sequence.  Only the damage-variance band differs: Gen 2 draws 85..100
--- inclusive (engine Damage.MIN_VARIATION / MAX_VARIATION).
+-- Same LCG as Gen 1 BattleSim/Rng.lua so Lua and the Node twin share one
+-- sequence.  Only the damage roll differs: Gen 2 draws the cart's
+-- DamageVariation loop (`damageRoll` below), a rotated byte in 217..255.
 --
 -- No love, no engine modules, no mod facade.
 
@@ -16,8 +16,13 @@ local floor = math.floor
 local TWO32 = 4294967296
 local MULT, INCR = 1664525, 1013904223
 
-M.DAMAGE_ROLL_MIN = 85
-M.DAMAGE_ROLL_MAX = 100
+M.DAMAGE_ROLL_MIN = 217
+M.DAMAGE_ROLL_MAX = 255
+
+-- The guard on the rejection loop below: the cart redraws until a byte lands
+-- (about one in six does); a referee must never hang on trusting that, and
+-- both runtimes stop at the same count.  Turn.REDRAW_LIMIT's number.
+M.REDRAW_LIMIT = 1024
 
 local function normaliseSeed(seed)
   local n = tonumber(seed)
@@ -78,8 +83,19 @@ function M:nextInt(min, max)
   return lo + scaled(self, span)
 end
 
+-- BattleCommand_DamageVariation's `.loop` (pokecrystal engine/battle/
+-- effect_commands.asm:1500-1550, pokegold the same): BattleRandom, `rrca`
+-- (bit 0 into bit 7), redrawn while it is under `85 percent + 1` (217) -- the
+-- multiplier Damage.applyRoll divides by 255.  The referee-gaps run's wave 4
+-- (R2d): a uniform 85..100 off `nextInt` before, one draw a roll; now as
+-- many bytes as the loop takes.
 function M:damageRoll()
-  return self:nextInt(M.DAMAGE_ROLL_MIN, M.DAMAGE_ROLL_MAX)
+  for _ = 1, M.REDRAW_LIMIT do
+    local b = self:byte()
+    local r = floor(b / 2) + (b % 2) * 128
+    if r >= M.DAMAGE_ROLL_MIN then return r end
+  end
+  return M.DAMAGE_ROLL_MAX
 end
 
 function M:state()

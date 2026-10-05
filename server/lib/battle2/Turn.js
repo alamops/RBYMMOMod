@@ -68,6 +68,14 @@
  * did not land on that turn (`_heldDefrost`) -- a successor's too, at the
  * replace phase's close.
  *
+ * The referee-gaps run's wave 4 (R2d) put more draws at the cart's points (the
+ * Lua header lists them): the crit byte against CriticalHitChances, the
+ * damage roll's rejection loop, METRONOME's move-number byte, the status
+ * commands' own bytes (the computer's AI fail, DISABLE, ENCORE, SPITE,
+ * CONVERSION2, TELEPORT, SWAGGER's confusion), CheckTurn's infatuation byte;
+ * ResidualDamage right after each seat's turn, and in a fight of one seat a
+ * side a faint ends the turn's moves and residuals (`_sequenceOver`).
+ *
  * Nothing else rolls. Residuals, switches, the bag, the between-turn held
  * items, rage and the clock are all deterministic, so a battle replays from its
  * seed plus the choice log -- and a fight with no held item, no traded monster
@@ -234,8 +242,39 @@ const REDRAW_LIMIT = 1024;
 // The highest level a K9 level-up may report (Wire.LEVEL_MAX, MAX_LEVEL).
 const LEVEL_MAX = 100;
 
-// wTimeOfDay's readings the time-of-day heals compare (a create option).
+// wTimeOfDay's readings the time-of-day heals compare -- a create option the
+// Gen 2 ruleset's `timeOfDay` carries (wave 4); null reads as matching.
 const TIMES = { morn: true, day: true, nite: true };
+
+// The bag's status cures whose healing action is %11111111 (data/items/
+// heal_status.asm): HealStatus clears the player's confusion with them.
+const CURES_CONFUSION = { FULL_HEAL: true, HEAL_POWDER: true, MIRACLEBERRY: true };
+
+// NUM_ATTACKS: METRONOME's `.GetMove` redraws a byte past it.
+const NUM_ATTACKS = 251;
+
+// PERISH SONG's `ld a, 4`; HandlePerishSong faints the monster at 0.
+const PERISH_COUNT = 4;
+
+// BattleCommand_Encore's 3..6.
+const ENCORE_MIN = 3;
+
+// CheckTurn's infatuation byte: under `50 percent + 1` the monster moves.
+const LOVE_MOVES_BELOW = 128;
+
+// The cart's type constants by number, for CONVERSION2's byte loop (the Lua
+// twin explains), and the names TransformedTypeText prints.
+const CART_TYPES = {
+  0: 'NORMAL', 1: 'FIGHTING', 2: 'FLYING', 3: 'POISON',
+  4: 'GROUND', 5: 'ROCK', 6: 'BIRD', 7: 'BUG', 8: 'GHOST',
+  9: 'STEEL', 19: 'CURSE_TYPE', 20: 'FIRE', 21: 'WATER',
+  22: 'GRASS', 23: 'ELECTRIC', 24: 'PSYCHIC_TYPE', 25: 'ICE',
+  26: 'DRAGON', 27: 'DARK',
+};
+const CART_TYPE_NAMES = { PSYCHIC_TYPE: 'PSYCHIC', CURSE_TYPE: '???' };
+const UNUSED_TYPES = 10;
+const UNUSED_TYPES_END = 20;
+const TYPES_END = 28;
 
 // BattleCommand_FutureSight's `ld a, 4`: hits when HandleFutureSight's count
 // reaches 1 -- two turns after the use.
@@ -457,7 +496,8 @@ function copyMove(raw) {
 // Contract K7 / K14 on a Gold sheet: the base stats, DVs, stat exp and
 // happiness, each kept only when stated (the Lua twin explains).
 const SHEET_BLOCKS = {
-  base: { keys: ['hp', 'atk', 'def', 'spe', 'spa', 'spd'], max: 255 },
+  // `gender`: the species' BASE_GENDER byte (proposed K15, Effects.gender).
+  base: { keys: ['hp', 'atk', 'def', 'spe', 'spa', 'spd', 'gender'], max: 255 },
   dvs: { keys: ['atk', 'def', 'spe', 'spc'], max: 15 },
   statExp: { keys: ['hp', 'atk', 'def', 'spe', 'spc'], max: 65535 },
 };
@@ -897,6 +937,9 @@ class Battle {
     this.normalType = typeIndexOf(opts.typeIds, 'NORMAL');
     // BattleCommand_LeechSeed's `cp GRASS` (a Grass type is never seeded).
     this.grassType = typeIndexOf(opts.typeIds, 'GRASS');
+    // BattleCommand_Curse's `cp GHOST` and SpikesDamage's `cp FLYING` (wave 4).
+    this.ghostType = typeIndexOf(opts.typeIds, 'GHOST');
+    this.flyingType = typeIndexOf(opts.typeIds, 'FLYING');
     if (Array.isArray(opts.specialTypes)) {
       const set = Object.create(null);
       for (const t of opts.specialTypes) set[Math.max(0, int(t, 0))] = true;
@@ -907,7 +950,11 @@ class Battle {
       const pool = [];
       for (const entry of opts.metronomePool) {
         const move = copyMove(entry);
-        if (move) pool.push(move);
+        if (move) {
+          // The cart's move number, when stated (wave 4; `_useMove`).
+          move.num = optInt(entry.num, 1, 255);
+          pool.push(move);
+        }
       }
       if (pool.length > 0) this.metronomePool = pool;
     }
@@ -934,9 +981,10 @@ class Battle {
     // holds them: turns left, 0 when down. A side's seats share them, a
     // switch or a faint leaves them up, Haze does not touch them, and only the
     // between-turn ticks (`_tickSafeguard`, `_tickScreens`) take them down.
+    // SCREENS_SPIKES too (wave 4): `spikes` on the side they were scattered.
     this.screens = {
-      a: { lightScreen: 0, reflect: 0, safeguard: 0 },
-      b: { lightScreen: 0, reflect: 0, safeguard: 0 },
+      a: { lightScreen: 0, reflect: 0, safeguard: 0, spikes: false },
+      b: { lightScreen: 0, reflect: 0, safeguard: 0, spikes: false },
     };
     // wPayDayMoney: the coins every PAY DAY that landed scattered, whoever
     // used it (BattleCommand_PayDay); see `_payDayOutcome`.
@@ -950,6 +998,10 @@ class Battle {
     this.timeOfDay = has(TIMES, opts.timeOfDay) ? opts.timeOfDay : null;
     // This turn's action order (`_wentFirst`): seat -> position.
     this.actionOrder = new Map();
+    // Wave 4: the faints while this turn resolved (`_sequenceOver`), and a
+    // DESTINY BOND left for its script's `checkfaint` (`_settleBond`).
+    this.turnFaints = 0;
+    this.bondPending = null;
     this.result = null;
   }
 
@@ -971,7 +1023,12 @@ class Battle {
   // spend/restore so the client can write that sheet; absent on
   // Transform/Mimic so the overlay is not mistaken for the real set.
   _emitMoves(fighter, mon, partyIndex) {
-    const moves = mon.moves.map((m) => ({
+    return this._emitMoveList(fighter, mon.moves, partyIndex);
+  }
+
+  // The `moves` event for a list (the battle list, or the party's own).
+  _emitMoveList(fighter, list, partyIndex) {
+    const moves = list.map((m) => ({
       id: m.id || 'move',
       pp: Math.max(0, int(m.pp, 0)),
       maxPp: Math.max(0, int(m.maxPp, m.pp)),
@@ -1318,9 +1375,11 @@ class Battle {
     // Refused rather than filed, as the menu refuses it; conceding a link
     // fight is the mod's, not a run.
     const wrapped = !!(mon.trapped && mon.trapped.turns > 0);
+    // A foe's MEAN LOOK closes the same two doors (wave 4, `_heldBy`).
+    const held = this._heldBy(fighter);
 
     if (action === 'run') {
-      if (wrapped && Effects.teleportRunAllowed(this.mode)) return null;
+      if ((wrapped || held) && Effects.teleportRunAllowed(this.mode)) return null;
       return { action: 'run' };
     }
 
@@ -1369,7 +1428,7 @@ class Battle {
     }
 
     if (action === 'switch') {
-      if (wrapped) return null;
+      if (wrapped || held) return null;
       const slot = int(choice.slot, null);
       if (slot === null) return null;
       const target = partyIndexOf(fighter, slot);
@@ -1379,15 +1438,28 @@ class Battle {
     }
 
     if (action === 'fight') {
-      const index = int(choice.move, null);
+      let index = int(choice.move, null);
       if (index === null) return null;
+      // ParsePlayerAction's `.encored` (wave 4): an ENCOREd monster's FIGHT is
+      // its LAST_MOVE whatever was named; CheckTurn answers a Disable on it.
+      const encored = !!mon.encore && !!mon.moves[mon.encore.moveIndex - 1];
+      if (encored) index = mon.encore.moveIndex - 1;
       const move = mon.moves[index];
       if (!move) return null;
       // One empty slot is refused; every slot empty means Struggle on any index.
-      if (move.pp <= 0 && !allPpEmpty(mon)) return null;
-      if (mon.disable && mon.disable.turns > 0
+      if (!encored && move.pp <= 0 && !allPpEmpty(mon)) return null;
+      if (!encored && mon.disable && mon.disable.turns > 0
           && mon.disable.moveIndex === index + 1) {
         return null;
+      }
+      // BATON PASS's successor (wave 4), Gen 3's `pass`: a zero-based party
+      // position, refused when it names nobody.
+      let pass = null;
+      if (choice.pass !== undefined && choice.pass !== null) {
+        const named = int(choice.pass, null);
+        if (named === null) return null;
+        pass = partyIndexOf(fighter, named);
+        if (!monAt(fighter, pass)) return null;
       }
 
       let targetFighter;
@@ -1421,7 +1493,7 @@ class Battle {
           return { action: 'skip' };
         }
       }
-      return { action: 'fight', move: index + 1, target: targetFighter.slot };
+      return { action: 'fight', move: index + 1, target: targetFighter.slot, pass };
     }
 
     return null;
@@ -1632,8 +1704,9 @@ class Battle {
       if (locked) return locked;
     }
     // A wrapped monster fights on but cannot switch (`_normaliseChoice`), so
-    // none of the retreats below is open to it.
-    const canSwitch = !(mon.trapped && mon.trapped.turns > 0);
+    // none of the retreats below is open to it -- nor to one a foe's MEAN
+    // LOOK holds (wave 4).
+    const canSwitch = !(mon.trapped && mon.trapped.turns > 0) && !this._heldBy(fighter);
     if (mon.thrashing && mon.thrashing.turns > 0) {
       const foe = this._autoTarget(fighter);
       if (foe) {
@@ -1801,6 +1874,14 @@ class Battle {
    */
   _autoChoiceOrSkip(fighter) {
     const auto = this._autoChoice(fighter);
+    // The computer's ENCOREd monster (wave 4): its FIGHT is the encored slot.
+    const mon = activeMon(fighter);
+    if (auto && auto.action === 'fight' && mon && mon.encore
+        && !auto.bideStore && !auto.bideRelease && !mon.charging
+        && !(mon.thrashing && mon.thrashing.turns > 0)
+        && mon.moves[mon.encore.moveIndex - 1]) {
+      auto.move = mon.encore.moveIndex;
+    }
     if (auto) return auto;
     if (this.phase === 'choice' && activeMon(fighter)) {
       return { action: 'skip' };
@@ -1979,6 +2060,12 @@ class Battle {
     this._heldDefrost(filled);
     this._heldStatBoosts(filled);
     this._heldHealing(filled);
+    // A successor SPIKES knocked out owes a successor of its own (wave 4).
+    if (this.result) return;
+    if (this._anyMustReplace()) {
+      this._openReplace();
+      return;
+    }
     this.turn += 1;
     this._openTurn();
   }
@@ -2040,14 +2127,9 @@ class Battle {
    * the two runtimes unchanged.
    */
   _typePercents(moveType, defender) {
-    const row = this.chart ? this.chart[moveType] : null;
     const out = [];
     for (const defType of defender.types) {
-      let pct = 100;
-      if (isTable(row)) {
-        const cell = toNumber(row[defType]);
-        if (cell !== null) pct = Math.floor(cell);
-      }
+      const pct = this._matchupCell(moveType, defType, defender);
       // The Lua's Damage.compute treats any percent <= 0 as immunity; this
       // one short-circuits on exactly 0. Folding a negative cell down to 0
       // here is how a chart nobody should have written still resolves the
@@ -2056,6 +2138,23 @@ class Battle {
     }
     if (out.length === 0) out.push(100);
     return out;
+  }
+
+  // One chart cell, 100 with none -- and (wave 4) CheckTypeMatchup's
+  // Foresight rows skipped for an identified defender: NORMAL and FIGHTING
+  // against GHOST read neutral (the Lua twin cites the table).
+  _matchupCell(moveType, defType, defender) {
+    const row = this.chart ? this.chart[moveType] : null;
+    let pct = 100;
+    if (isTable(row)) {
+      const cell = toNumber(row[defType]);
+      if (cell !== null) pct = Math.floor(cell);
+    }
+    if (defender && defender.identified && this._typeIdOf(defType) === 'GHOST') {
+      const attack = this._typeIdOf(moveType);
+      if (attack === 'NORMAL' || attack === 'FIGHTING') pct = 100;
+    }
+    return pct;
   }
 
   // The registry id of chart index `typeIndex` (`typeIds`), or null when the
@@ -2183,7 +2282,10 @@ class Battle {
   // clamp and "ENDURED the hit!", no Focus Band byte. A hit of 0 takes and
   // shows nothing. wCurDamage (`curDamage`) keeps the HP the hit took -- 0
   // when a substitute took it.
-  _strike(fighter, mon, rawAmount) {
+  // `by` (wave 4): the striking seat, for a DESTINY BOND the knocked-out
+  // target had up -- left for the script's `checkfaint` (`_settleBond`).
+  _strike(fighter, mon, rawAmount, by) {
+    const bonded = mon.destinyBond === true;
     let amount = rawAmount;
     let banded = false;
     let endured = false;
@@ -2219,6 +2321,20 @@ class Battle {
       this._emitHeld(fighter, mon, mon.heldItem, 1);
       this._say(`${mon.species} hung on with ${Items.label(mon)}!`);
     }
+    if (bonded && by && mon.hp <= 0) this.bondPending = { by, fallen: mon };
+  }
+
+  // BattleCommand_CheckFaint's DESTINY BOND arm (the Lua twin cites it): "<TARGET>
+  // took down with it, <USER>!" and the user's HP to 0, at each script's
+  // `checkfaint`.
+  _settleBond() {
+    const pending = this.bondPending;
+    this.bondPending = null;
+    if (!pending) return;
+    const user = activeMon(pending.by);
+    if (!user || user.hp <= 0) return;
+    this._say(`${pending.fallen.species} took down with it, ${user.species}!`);
+    this._damage(pending.by, user, user.hp, null, true);
   }
 
   // BattleCommand_Thief, both ways and in every mode. Its wEffectFailed
@@ -2267,6 +2383,8 @@ class Battle {
     const text = `${mon.species} recovered using a ${name}!`;
     mon.status = null;
     mon.statusTurns = 0;
+    // `res SUBSTATUS_NIGHTMARE` with the cure (wave 4).
+    mon.nightmare = null;
     this._emit('status', { slot: fighter.slot, side: fighter.side, text });
     if (held.effect === Items.HEAL_STATUS && mon.confusion > 0) {
       mon.confusion = 0;
@@ -2328,17 +2446,23 @@ class Battle {
       const mon = inSet(only, fighter) ? activeMon(fighter) : null;
       const saved = mon && mon.transformed && mon.preTransform ? mon.preTransform : null;
       if (mon && (saved || !mon.transformed) && Items.holds(mon, Items.RESTORE_PP)) {
-        const party = saved ? saved.moves : mon.moves;
+        // The party's list, MIMIC's slot as the party keeps it (`preMimic`,
+        // wave 4): a MIMIC'd slot's PP lands on the party row alone.
+        const base = saved ? saved.moves : mon.moves;
+        const mimic = mon.preMimic && typeof mon.preMimic === 'object' ? mon.preMimic : {};
         let slot = null;
-        for (let i = 1; i <= party.length; i += 1) {
-          if (party[i - 1].pp <= 0) { slot = i; break; }
+        let move = null;
+        for (let i = 1; i <= base.length; i += 1) {
+          const row = mimic[i] || base[i - 1];
+          if (row.pp <= 0) { slot = i; move = row; break; }
         }
         if (slot !== null) {
-          const move = party[slot - 1];
           move.pp += Effects.moveKey(move) === 'SKETCH' ? 1 : 5;
           if (int(move.maxPp, 0) < move.pp) move.maxPp = move.pp;
           if (saved) {
             saved.ppTouched = true;
+          } else if (mimic[slot]) {
+            move.ppTouched = true;
           } else {
             this._emitMoves(fighter, mon, fighter.active);
           }
@@ -2537,6 +2661,8 @@ class Battle {
       ? this.now + this.resolveTimeout : null;
 
     this._resetRage();
+    // The faints while this turn resolves (`_sequenceOver`).
+    this.turnFaints = 0;
     // The actions that are not a move went first (`_wentFirst`).
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
@@ -2547,6 +2673,7 @@ class Battle {
     if (this._resolveRuns()) return;
     this._resolveSwitches();
     this._resolveItems();
+    this._idleResiduals();
     this._resolveFights();
     if (!this.result) this._resolveResiduals();
     // The residual batch settles the same way an action's does: every flag is
@@ -2616,10 +2743,29 @@ class Battle {
     return saved.ppTouched === true;
   }
 
+  // MIMIC undone (wave 4; the Lua twin explains): `preMimic`'s rows back in
+  // their slots with their own PP, after the Transform undo. Returns whether a
+  // berry restored that PP.
+  _undoMimic(mon) {
+    const saved = mon.preMimic;
+    mon.preMimic = null;
+    if (!saved || typeof saved !== 'object') return false;
+    let touched = false;
+    for (let i = 1; i <= mon.moves.length; i += 1) {
+      const row = saved[i];
+      if (row) {
+        mon.moves[i - 1] = row;
+        if (row.ppTouched) { touched = true; row.ppTouched = undefined; }
+      }
+    }
+    return touched;
+  }
+
   // What NewBattleMonStatus clears that this referee keeps on the monster (the
   // Lua twin explains): Transform, confusion, SUBSTATUS_TOXIC, a foe's
   // lock-on -- and from wave 3 PROTECT / ENDURE, ROLLOUT, DEFENSE CURL and the
-  // FURY CUTTER and PROTECT counts. Returns `_undoTransform`'s answer.
+  // FURY CUTTER and PROTECT counts; from wave 4 the status scripts' bits and
+  // MIMIC's slot. Returns whether a berry touched party PP an overlay hid.
   _clearSubstatus(mon) {
     mon.confusion = 0;
     if (mon.status === 'toxic') mon.status = 'poison';
@@ -2631,7 +2777,18 @@ class Battle {
     mon.furyCutter = 0;
     mon.rollout = null;
     mon.curled = null;
-    return this._undoTransform(mon);
+    mon.nightmare = null;
+    mon.cursed = null;
+    mon.identified = null;
+    mon.perish = null;
+    mon.inLove = null;
+    mon.encore = null;
+    mon.destinyBond = null;
+    mon.meanLook = null;
+    mon.lastMove = null;
+    let touched = this._undoTransform(mon);
+    if (this._undoMimic(mon)) touched = true;
+    return touched;
   }
 
   // PursuitSwitch as a player withdraws a monster (the Lua twin explains):
@@ -2649,7 +2806,9 @@ class Battle {
         if (move && int(move.effect, 0) === Effects.PURSUIT) {
           choice.pursued = true;
           this.actionOrder.set(foe, 0);
+          foeMon.destinyBond = null;
           this._useMove(foe, foeMon);
+          this._endFoesBonds(foe);
           this._drainExp();
         }
       }
@@ -2723,6 +2882,11 @@ class Battle {
           });
           // The party PP a Mysteryberry restored under Transform.
           if (touched) this._emitMoves(fighter, outgoing, outIndex);
+          // NewBattleMonStatus's hold release and BreakAttraction, then
+          // SpikesDamage on the one sent out (wave 4).
+          this._releaseHolds(fighter.slot);
+          this._breakAttraction(fighter.slot);
+          this._spikesDamage(fighter, mon);
         }
       }
     }
@@ -3070,21 +3234,37 @@ class Battle {
         }
         let cleared = false;
         let clearedConfusion = false;
-        if (effect.clearAllStatus) {
-          if (mon.status) {
+        // Whose status cure (wave 4; the Lua twin cites both routines): the
+        // player's HealStatus rebuilds the stats and clears NIGHTMARE (and,
+        // for a %11111111 item, confusion); the computer's AI_HealStatus
+        // keeps the burn / paralysis cut and the nightmare, and its FULL HEAL
+        // leaves a confusion its FULL RESTORE clears.
+        const onField = partyIdx === fighter.active;
+        const computer = isComputerSeat(this.mode, fighter) && onField;
+        const cure = () => {
+          if (computer) {
+            Effects.setStatusOn(mon, fighter, null);
+          } else {
             mon.status = null;
-            mon.statusTurns = 0;
-            cleared = true;
+            if (onField) mon.nightmare = null;
           }
+          mon.statusTurns = 0;
+          cleared = true;
+        };
+        if (effect.clearAllStatus) {
+          if (mon.status) cure();
           if (mon.confusion && mon.confusion > 0) {
             mon.confusion = 0;
             clearedConfusion = true;
           }
         } else if (effect.clearStatuses && mon.status
                    && effect.clearStatuses[mon.status]) {
-          mon.status = null;
-          mon.statusTurns = 0;
-          cleared = true;
+          cure();
+        }
+        if (has(CURES_CONFUSION, choice.item) && onField && !computer
+            && mon.confusion && mon.confusion > 0) {
+          mon.confusion = 0;
+          clearedConfusion = true;
         }
         if (cleared) {
           this._emit('status', {
@@ -3169,16 +3349,20 @@ class Battle {
     actors.forEach((actor, i) => this.actionOrder.set(actor.fighter, i + 1));
 
     for (const actor of actors) {
-      if (this.result) break;
+      if (this._sequenceOver()) break;
       // The monster that chose is the only one allowed to act: if it fainted to
       // a faster attacker, the replacement that came in behind it does not
       // inherit the turn.
       if (activeMon(actor.fighter) === actor.mon) {
+        // EndUserDestinyBond as the turn starts, every foe's bond once it is
+        // done (wave 4; the Lua twin cites the routines).
+        actor.mon.destinyBond = null;
         if (actor.fighter.choice.recharge) {
           this._rechargeTurn(actor.fighter, actor.mon);
         } else {
           this._useMove(actor.fighter, actor.mon);
         }
+        this._endFoesBonds(actor.fighter);
       }
       // Finalize after each action (not inside `_faint`) so KO + recoil / explode
       // on the same move can still mutual-faint into a draw, while an empty-bench
@@ -3187,8 +3371,52 @@ class Battle {
       // without paying a monster the same action was still killing (`_drainExp`).
       this._drainExp();
       if (!this.result) this._checkOver();
+      // ResidualDamage right after the seat's own turn (wave 4), unless the
+      // turn ended on a faint (`_sequenceOver`).
+      if (!this._sequenceOver()) {
+        this._residualFor(actor.fighter);
+        this._drainExp();
+        if (!this.result) this._checkOver();
+      }
     }
     this._endProtection();
+  }
+
+  // Whether this turn's moves and residuals are over (the Lua twin explains):
+  // the fight is decided, or -- one seat a side -- a monster fainted while the
+  // turn resolved.
+  _sequenceOver() {
+    if (this.result) return true;
+    return this.bySide.a.length === 1 && this.bySide.b.length === 1 && this.turnFaints > 0;
+  }
+
+  // EndOpponentProtectEndureDestinyBond's DESTINY BOND half for the seat whose
+  // turn just ended: every foe's bond is over.
+  _endFoesBonds(fighter) {
+    for (const foe of this._foes(fighter)) {
+      const mon = activeMon(foe);
+      if (mon) mon.destinyBond = null;
+    }
+  }
+
+  // The seats whose action was not a move take their turn first and their
+  // ResidualDamage there, in field order (wave 4; the Lua twin explains); a
+  // player seat's turn also ends its foes' DESTINY BOND.
+  _idleResiduals() {
+    for (const fighter of this.fighters) {
+      if (this._sequenceOver()) return;
+      const choice = fighter.choice;
+      const mon = activeMon(fighter);
+      if (choice && mon && (choice.pursued || (choice.action !== 'fight' && !choice.recharge))) {
+        if (!choice.pursued && isPlayerSeat(this.mode, fighter)) {
+          mon.destinyBond = null;
+          this._endFoesBonds(fighter);
+        }
+        this._residualFor(fighter);
+        this._drainExp();
+        if (!this.result) this._checkOver();
+      }
+    }
   }
 
   // CheckOpponentWentFirst widened to a field (the Lua twin explains): seat
@@ -3251,6 +3479,8 @@ class Battle {
     if (gate.wokeUp) {
       Effects.setStatusOn(mon, fighter, null);
       mon.statusTurns = 0;
+      // `.woke_up`'s `res SUBSTATUS_NIGHTMARE` (wave 4).
+      mon.nightmare = null;
       this._emit('status', {
         slot: fighter.slot, side: fighter.side,
         text: `${mon.species} woke up`,
@@ -3338,6 +3568,19 @@ class Battle {
       }
     }
 
+    // CheckTurn's `.not_confused` (wave 4): a monster in love draws a byte,
+    // and from `50 percent + 1` up its infatuation stops it.
+    if (mon.inLove) {
+      const from = mon.inLove.fromSlot !== null && mon.inLove.fromSlot !== undefined
+        ? this._fighterAtSlot(mon.inLove.fromSlot) : null;
+      const beloved = from ? activeMon(from) : null;
+      this._say(`${mon.species} is in love with ${beloved ? beloved.species : 'its foe'}!`);
+      if (this.rng.byte() >= LOVE_MOVES_BELOW) {
+        this._say(`${mon.species}'s infatuation kept it from attacking!`);
+        return false;
+      }
+    }
+
     // MoveDisabled: Struggle is no slot, so it is never the disabled move.
     const choice = fighter.choice;
     if (selected !== STRUGGLE && choice && mon.disable && mon.disable.turns > 0
@@ -3391,7 +3634,7 @@ class Battle {
 
   // `move` is the sheet move in use: its id is MinimizeDropSub's `cp MINIMIZE`.
   // Returns Effects.applyPrimary's result.
-  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId, move) {
+  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId, move, missed) {
     const before = { status: targetMon.status, confusion: targetMon.confusion };
     const result = Effects.applyPrimary({
       effectId,
@@ -3409,6 +3652,9 @@ class Battle {
       poisonType: this.poisonType,
       grassType: this.grassType,
       fieldMons: this._fieldMons(),
+      missed: missed === true,
+      ghostType: this.ghostType,
+      targetSafeguard: this._safeguarded(targetFighter),
     });
     if (result.nothing) this._say('But nothing happened');
     for (const text of result.messages || []) this._say(text);
@@ -3429,7 +3675,15 @@ class Battle {
         hp: mon.hp,
       });
     }
+    // SubtractHPFromUser (BELLY DRUM, CURSE's GHOST arm), past the substitute.
+    if (result.selfDamage) this._damage(fighter, mon, result.selfDamage, null, true);
+    for (const text of result.trailing || []) this._say(text);
     if (result.movesChanged) this._emitMoves(fighter, mon);
+    // SPITE's PP off the target's slot: its party list unless transformed.
+    if (result.targetMovesChanged) {
+      const index = !targetMon.transformed ? this._partyIndex(targetFighter, targetMon) : null;
+      this._emitMoves(targetFighter, targetMon, index);
+    }
     this._afterInfliction(targetFighter, targetMon, before);
     return result;
   }
@@ -3529,6 +3783,8 @@ class Battle {
   // twin carries the long note.
   _recordLastMove(mon, move) {
     mon.lastCounterMove = move === STRUGGLE ? STRUGGLE : copyMove(move);
+    // BATTLE_VARS_LAST_MOVE beside it (wave 4): ENCORE's.
+    mon.lastMove = mon.lastCounterMove;
   }
 
   // The move a lock-in resolves to (CheckPlayerLockedIn's `.quit`): a charge's
@@ -3683,9 +3939,10 @@ class Battle {
       scopeLens: Items.holds(mon, Items.CRITICAL_UP),
       speciesItemBonus: Items.critSpeciesItem(this._battleSpecies(mon), mon.heldItem),
     });
+    // `.Tally`: one byte against the level's CriticalHitChances row (wave 4).
     return Crit.check({
       criticalLevel: critLevel,
-      roll: this.rng.below(Crit.chance(critLevel)),
+      roll: this.rng.byte(),
     }).isCrit;
   }
 
@@ -3877,6 +4134,9 @@ class Battle {
         fighter.choice = saved;
         mon.lastMoveIndex = 0;
         mon.lastCounterMove = null;
+        // `.EndDisobedience` clears LAST_MOVE and breaks an ENCORE (wave 4).
+        mon.lastMove = null;
+        mon.encore = null;
         return;
       }
     }
@@ -3978,7 +4238,8 @@ class Battle {
       // The damage taken doubled as a 16-bit pair, a carry pinning $ffff,
       // through applydamage, then `checkfaint`, `buildopponentrage` and
       // `kingsrock`.
-      this._strike(target, defender, Math.min(Damage.WORD_MAX, 2 * stored));
+      this._strike(target, defender, Math.min(Damage.WORD_MAX, 2 * stored), fighter);
+      this._settleBond();
       this._buildRage(defender);
       this._kingsRock(mon, move, effectId, defender);
       this._markLastMove(mon, choice.move);
@@ -3991,6 +4252,7 @@ class Battle {
     // through ResetTurn.
     if (Effects.isMirrorMove(effectId) && !mirrorCopy) {
       mon.lastCounterMove = null;
+      mon.lastMove = null;
       const copied = defender.lastCounterMove;
       if (!copied || knowsMove(mon, copied)) {
         this._say('The MIRROR MOVE failed!');
@@ -4011,13 +4273,23 @@ class Battle {
     const metronomeCall = opts.metronomeCall === true;
     if (Effects.isMetronome(effectId) && !metronomeCall) {
       mon.lastCounterMove = null;
+      mon.lastMove = null;
       const pool = this.metronomePool;
-      const open = (pool || []).some((entry) => !knowsMove(mon, entry));
+      // `.GetMove` (wave 4): a byte IS a move number -- redrawn at 0, past
+      // NUM_ATTACKS, on a number the pool does not hold and on a known move.
+      // An entry's number is its `num`, else its place in the pool.
+      const byNumber = new Map();
+      let open = false;
+      (pool || []).forEach((entry, i) => {
+        byNumber.set(entry.num !== null && entry.num !== undefined ? entry.num : i + 1, entry);
+        if (!knowsMove(mon, entry)) open = true;
+      });
       let pick = null;
       if (open) {
         for (let n = 0; n < REDRAW_LIMIT; n += 1) {
-          const entry = pool[this.rng.byte() % pool.length];
-          if (!knowsMove(mon, entry)) { pick = entry; break; }
+          const number = this.rng.byte();
+          const entry = number >= 1 && number <= NUM_ATTACKS ? byNumber.get(number) : undefined;
+          if (entry && !knowsMove(mon, entry)) { pick = entry; break; }
         }
       }
       this._markLastMove(mon, choice.move);
@@ -4036,6 +4308,7 @@ class Battle {
     // used through ResetTurn like a METRONOME call.
     if (effectId === Effects.SLEEP_TALK && !opts.sleepTalkCall) {
       mon.lastCounterMove = null;
+      mon.lastMove = null;
       const pick = this._sleepTalkPick(mon, move);
       this._markLastMove(mon, choice.move);
       if (!pick) {
@@ -4062,6 +4335,18 @@ class Battle {
       };
       if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
       this._say(Effects.chargeMessage(mon, effectId, move.id));
+      // SKULL BASH (wave 4): `defenseup` / `statupmessage` on the charge turn.
+      if (effectId === Effects.SKULL_BASH) {
+        const r = Effects.raiseStat(mon, fighter.badges, 'def', 1);
+        if (r.raised) {
+          const text = `${mon.species}'s DEFENSE rose`;
+          this._say(text);
+          this._emit('stat', {
+            slot: fighter.slot, side: fighter.side,
+            amount: r.stage, stage: r.stage, text,
+          });
+        }
+      }
       this._markLastMove(mon, choice.move);
       return;
     }
@@ -4120,7 +4405,9 @@ class Battle {
 
   // A 0-power move after `usedmovetext` (the Lua twin explains): the field
   // moves Turn runs itself, or `checkhit` (none for Effects.NO_CHECKHIT), then
-  // the script's own command.
+  // the script's own command -- on a miss too for the commands that read
+  // wAttackMissed (Effects.READS_MISS, wave 4) and the `checkhit` scripts Turn
+  // runs (Effects.TURN_COMMANDS).
   _statusMove(fighter, mon, target, defender, move, effectId, targetSlot, called) {
     const choice = fighter.choice;
     if (Effects.FIELD_MOVES[effectId]) {
@@ -4128,6 +4415,21 @@ class Battle {
         this._protect(fighter, mon, effectId);
       } else if (Effects.WEATHER_OF[effectId]) {
         this._startWeather(effectId);
+      } else if (effectId === Effects.BATON_PASS) {
+        this._batonPass(fighter, mon);
+        return;
+      } else if (effectId === Effects.HEAL_BELL) {
+        this._healBell(fighter, mon);
+      } else if (effectId === Effects.PERISH_SONG) {
+        this._perishSong();
+      } else if (effectId === Effects.SKETCH) {
+        this._sketch(fighter, mon, target, defender);
+        return;
+      } else if (effectId === Effects.SPIKES) {
+        this._spikes(fighter, defender);
+      } else if (effectId === Effects.TELEPORT) {
+        this._teleport(fighter, mon, defender);
+        if (this.result) return;
       } else {
         this._timeHeal(fighter, mon, effectId);
       }
@@ -4147,18 +4449,26 @@ class Battle {
       return;
     }
 
-    if (verdict !== 'hit') {
-      // The line a miss ends on: LOCK-ON's own, a primary stat-down's
-      // StatDownFailText after the computer's byte, else this referee's.
-      let line;
-      if (effectId === Effects.LOCK_ON) {
-        line = Effects.didntAffectLine(defender);
-      } else {
-        line = this._statDownAfterMiss(fighter, defender, effectId);
-      }
+    const missed = verdict !== 'hit';
+    if (missed) this.curDamage = 0;
+    if (missed && !Effects.READS_MISS[effectId]) {
+      // The line a miss ends on: a primary stat-down's StatDownFailText after
+      // the computer's byte, else this referee's.
+      let line = this._statDownAfterMiss(fighter, defender, effectId);
       if (!line) line = verdict === 'vanished' ? 'But it failed' : `${mon.species} missed`;
       this._say(line);
-      this.curDamage = 0;
+      this._markLastMove(mon, choice.move);
+      return;
+    }
+
+    if (Effects.TURN_COMMANDS[effectId]) {
+      if (effectId === Effects.CONVERSION2) {
+        this._conversion2(fighter, mon, defender, missed);
+      } else if (effectId === Effects.ENCORE) {
+        this._encore(fighter, target, defender, missed);
+      } else {
+        this._painSplit(fighter, mon, target, defender, missed);
+      }
       this._markLastMove(mon, choice.move);
       return;
     }
@@ -4193,12 +4503,16 @@ class Battle {
     let cleared = false;
     if (Effects.handlesPrimary(effectId)) {
       const result = this._applyPrimary(fighter, mon, target, defender, choice.move,
-        effectId, move);
+        effectId, move, missed);
       cleared = result.clearLastMove === true;
+      // SWAGGER's `failuretext` after a RaiseStat that failed.
+      if (result.failureText) {
+        this._say(verdict === 'vanished' ? 'But it failed' : `${mon.species} missed`);
+      }
     } else {
       this._say('But nothing happened');
     }
-    // Transform's ClearLastMove forgets the slot as well.
+    // Transform's / Mimic's ClearLastMove forgets the slot as well.
     if (cleared) {
       mon.lastMoveIndex = 0;
     } else {
@@ -4366,7 +4680,7 @@ class Battle {
         }
       }
       const hpBefore = defender.hp;
-      this._strike(target, defender, struck.damage);
+      this._strike(target, defender, struck.damage, fighter);
       curDamage = hpBefore - defender.hp;
       totalDealt += curDamage;
       if (multihit) this._buildRage(defender);
@@ -4385,6 +4699,9 @@ class Battle {
     if (multihit && defender.hp > 0) {
       this._say(`Hit ${made} times!`);
     }
+
+    // RAPID SPIN's `clearhazards`, before `checkfaint` (wave 4).
+    if (effectId === Effects.RAPID_SPIN) this._clearHazards(fighter, mon, defender);
 
     // FLAME WHEEL's and SACRED FIRE's `defrost`, before `checkfaint`: a frozen
     // user thaws, the status byte with no rebuild.
@@ -4425,6 +4742,9 @@ class Battle {
       this._damage(fighter, mon, recoil, null, true);
     }
 
+    // `checkfaint`: DESTINY BOND, after the drain / PAY DAY / THIEF / recoil.
+    this._settleBond();
+
     if (!multihit) this._buildRage(defender);
 
     // The secondary effect, after `checkfaint` in every *Hit script: a target
@@ -4444,7 +4764,7 @@ class Battle {
 
     // BattleCommand_Rage: SUBSTATUS_RAGE on the user of a Rage that connected.
     // No lock-in: it lasts while the seat keeps choosing Rage (`_resetRage`).
-    if (Effects.isRage(effectId)) {
+    if (Effects.isRage(effectId) && mon.hp > 0) {
       mon.raging = true;
     }
 
@@ -4464,7 +4784,8 @@ class Battle {
     // BattleCommand_RechargeNextTurn, before `checkfaint`: every hit that did
     // not miss -- a knockout and a substitute's included -- costs the user its
     // next turn on Gold, the move staying its wCurPlayerMove (`_priorityOf`).
-    if (Effects.isHyperBeam(effectId)) {
+    // (A user DESTINY BOND took down is past it: `_faint` cleared it.)
+    if (Effects.isHyperBeam(effectId) && mon.hp > 0) {
       mon.mustRecharge = true;
       mon.rechargeMove = move;
     }
@@ -4504,7 +4825,8 @@ class Battle {
       this._markLastMove(mon, choice.move);
       return;
     }
-    this._strike(target, defender, Math.min(Damage.WORD_MAX, this.curDamage * 2));
+    this._strike(target, defender, Math.min(Damage.WORD_MAX, this.curDamage * 2), fighter);
+    this._settleBond();
     this._buildRage(defender);
     this._kingsRock(mon, move, effectId, defender);
     this._markLastMove(mon, choice.move);
@@ -4553,7 +4875,8 @@ class Battle {
         return;
       }
       if (struck.crit) this._say('A critical hit');
-      this._strike(target, defender, damage);
+      this._strike(target, defender, damage, fighter);
+      this._settleBond();
       if (defender.hp > 0) {
         this._buildRage(defender);
         this._say('But it failed');
@@ -4593,7 +4916,8 @@ class Battle {
           return;
         }
         if (isCrit) this._say('A critical hit');
-        this._strike(target, defender, d);
+        this._strike(target, defender, d, fighter);
+        this._settleBond();
         if (defender.hp <= 0) {
           this._markLastMove(mon, choice.move);
           return;
@@ -4719,6 +5043,446 @@ class Battle {
       || this.timeOfDay === Effects.HEAL_TIME[effectId];
     this._heal(fighter, mon, Effects.timeHealAmount(mon.maxHp, timeMatches, this._weatherKind()));
     this._say(`${mon.species} regained health!`);
+  }
+
+  // ------------------------------------------------------------------
+  // the status and field scripts Turn runs itself (wave 4; the Lua twin
+  // cites each routine)
+  // ------------------------------------------------------------------
+
+  // A foe's MEAN LOOK holds this seat (the foe's SUBSTATUS_CANT_RUN, widened
+  // to a field by the seat it aimed at).
+  _heldBy(fighter) {
+    for (const foe of this._foes(fighter)) {
+      const mon = activeMon(foe);
+      if (mon && mon.meanLook && mon.meanLook.slot === fighter.slot) return true;
+    }
+    return false;
+  }
+
+  // NewBattleMonStatus's `res SUBSTATUS_CANT_RUN` on the opponent: a send-out
+  // at `slot` ends every hold aimed there.
+  _releaseHolds(slot) {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      if (mon && mon.meanLook && mon.meanLook.slot === slot) mon.meanLook = null;
+    }
+  }
+
+  // BreakAttraction: every monster in love with the seat at `slot`.
+  _breakAttraction(slot) {
+    for (const fighter of this.fighters) {
+      for (const mon of fighter.mons) {
+        if (mon.inLove && mon.inLove.fromSlot === slot) mon.inLove = null;
+      }
+    }
+  }
+
+  // SpikesDamage after every send-out: the side's SPIKES, no FLYING type,
+  // "<USER>'s hurt by SPIKES!" and GetEighthMaxHP off the HP.
+  _spikesDamage(fighter, mon) {
+    if (!this.screens[fighter.side].spikes || !mon || mon.hp <= 0) return;
+    if (this.flyingType !== null && hasType(mon, this.flyingType)) return;
+    this._say(`${mon.species}'s hurt by SPIKES!`);
+    this._damage(fighter, mon, Items.eighth(mon.maxHp), null, true);
+  }
+
+  // BattleCommand_Spikes: SPIKES already down on the foe's side fail.
+  _spikes(fighter, defender) {
+    const screens = this.screens[fighter.side === 'a' ? 'b' : 'a'];
+    if (screens.spikes) {
+      this._say(Effects.failMoveLine(defender));
+      return;
+    }
+    screens.spikes = true;
+    this._say(`SPIKES scattered all around ${defender.species}!`);
+  }
+
+  // BattleCommand_ClearHazards, RAPID SPIN's: LEECH SEED, its side's SPIKES,
+  // the wrap holding it.
+  _clearHazards(fighter, mon, defender) {
+    if (mon.hp <= 0) return;
+    if (mon.leechSeed) {
+      mon.leechSeed = null;
+      this._say(`${mon.species} shed LEECH SEED!`);
+    }
+    const screens = this.screens[fighter.side];
+    if (screens.spikes) {
+      screens.spikes = false;
+      this._say(`${mon.species} blew away SPIKES!`);
+    }
+    if (mon.trapped && int(mon.trapped.turns, 0) > 0) {
+      const from = mon.trapped.fromSlot !== null && mon.trapped.fromSlot !== undefined
+        ? this._fighterAtSlot(mon.trapped.fromSlot) : null;
+      const by = (from && activeMon(from)) || defender;
+      mon.trapped = null;
+      this._say(`${mon.species} was released by ${by.species}!`);
+    }
+  }
+
+  // BattleCommand_HealBell: the user's NIGHTMARE off, every party status on
+  // its side cleared (each a token-less `status` with its party index), "A
+  // bell chimed!", the rebuild.
+  _healBell(fighter, mon) {
+    mon.nightmare = null;
+    fighter.mons.forEach((member, i) => {
+      if (member.status) {
+        member.status = null;
+        member.statusTurns = 0;
+        this._emit('status', {
+          slot: fighter.slot, side: fighter.side, mon: i,
+          text: `${member.species}'s status was healed`,
+        });
+      }
+    });
+    Effects.dropSnap(mon);
+    this._say('A bell chimed!');
+  }
+
+  // BattleCommand_PerishSong: every monster on the field with no count gets
+  // PERISH_COUNT; every one with one already fails.
+  _perishSong() {
+    const field = this._fieldMons();
+    let fresh = false;
+    for (const member of field) {
+      if (!member.perish) fresh = true;
+    }
+    if (!fresh) {
+      this._say('But it failed');
+      return;
+    }
+    for (const member of field) {
+      if (!member.perish) member.perish = PERISH_COUNT;
+    }
+    this._say('Both POKéMON will faint in 3 turns!');
+  }
+
+  // HandlePerishSong: every seat in field order, one off the count, and the
+  // monster's HP to 0 at 0.
+  _perishTick() {
+    for (const fighter of this.fighters) {
+      if (this.result) return;
+      const mon = activeMon(fighter);
+      if (mon && mon.perish) {
+        mon.perish -= 1;
+        this._say(`${mon.species}'s PERISH count is ${mon.perish}!`);
+        if (mon.perish <= 0) {
+          mon.perish = null;
+          this._damage(fighter, mon, mon.hp, null, true);
+        }
+      }
+    }
+  }
+
+  // HandleEncore: one off each encored count; the ENCORE ends at 0 or when
+  // the move has no PP left.
+  _encoreTick() {
+    for (const fighter of this.fighters) {
+      const mon = activeMon(fighter);
+      const encore = mon ? mon.encore : null;
+      if (encore) {
+        encore.turns -= 1;
+        const slot = mon.moves[encore.moveIndex - 1];
+        if (encore.turns <= 0 || !slot || int(slot.pp, 0) <= 0) {
+          mon.encore = null;
+          this._say(`${mon.species}'s ENCORE ended!`);
+        }
+      }
+    }
+  }
+
+  // BattleCommand_Encore: the target's LAST_MOVE (missing, STRUGGLE, ENCORE,
+  // MIRROR MOVE, no slot, no PP), wAttackMissed, an ENCORE running fail; else
+  // 3..6 turns, and a target that has not moved yet uses it now.
+  _encore(fighter, target, defender, missed) {
+    const last = defender.lastMove;
+    const key = last ? Effects.moveKey(last) : null;
+    let index = null;
+    if (key) {
+      for (let i = 1; i <= defender.moves.length; i += 1) {
+        if (Effects.moveKey(defender.moves[i - 1]) === key) { index = i; break; }
+      }
+    }
+    if (missed || !key || key === 'STRUGGLE' || key === 'ENCORE' || key === 'MIRROR_MOVE'
+        || index === null || int(defender.moves[index - 1].pp, 0) <= 0 || defender.encore) {
+      this._say(Effects.didntAffectLine(defender));
+      return;
+    }
+    defender.encore = { moveIndex: index, turns: ENCORE_MIN + this.rng.byte() % 4 };
+    const choice = target.choice;
+    if (!this._wentFirst(target, fighter) && choice && choice.action === 'fight'
+        && !target.forced && !choice.bideStore && !choice.bideRelease) {
+      choice.move = index;
+    }
+    this._say(`${defender.species} got an ENCORE!`);
+  }
+
+  // BattleCommand_PainSplit: wAttackMissed or a substitute fail; else both
+  // HPs to their halved sum, each held at its own max -- side a's first.
+  _painSplit(fighter, mon, target, defender, missed) {
+    if (missed || int(defender.substitute, 0) > 0) {
+      this._say(Effects.didntAffectLine(defender));
+      return;
+    }
+    const share = Math.floor((mon.hp + defender.hp) / 2);
+    let order = [[fighter, mon], [target, defender]];
+    if (fighter.side !== 'a') order = [[target, defender], [fighter, mon]];
+    for (const [seat, member] of order) {
+      const want = Math.min(share, member.maxHp);
+      if (want < member.hp) {
+        this._damage(seat, member, member.hp - want, null, true);
+      } else if (want > member.hp) {
+        this._heal(seat, member, want - member.hp);
+      }
+    }
+    this.curDamage = 0;
+    this._say('The battlers shared pain!');
+  }
+
+  // BattleCommand_Conversion2: wAttackMissed, no LAST_COUNTER_MOVE, CURSE_TYPE
+  // fail; else a type-number byte loop until a type that resists the move.
+  _conversion2(fighter, mon, defender, missed) {
+    const last = defender.lastCounterMove;
+    let moveType = null;
+    if (last === STRUGGLE) {
+      moveType = this.normalType;
+    } else if (last) {
+      moveType = Math.max(0, int(last.type, 0));
+    }
+    const resisting = (number) => {
+      if (number >= UNUSED_TYPES && number < UNUSED_TYPES_END) return null;
+      const name = has(CART_TYPES, String(number)) ? CART_TYPES[number] : null;
+      const index = name ? typeIndexOf(this.typeIds, name) : null;
+      if (index === null) return null;
+      if (this._matchupCell(moveType, index, mon) < 100) return index;
+      return null;
+    };
+    let possible = false;
+    if (!missed && moveType !== null && this._typeIdOf(moveType) !== 'CURSE_TYPE') {
+      for (let number = 0; number < TYPES_END; number += 1) {
+        if (resisting(number) !== null) { possible = true; break; }
+      }
+    }
+    if (!possible) {
+      this._say(Effects.failMoveLine(defender));
+      return;
+    }
+    let pick = null;
+    let picked = null;
+    for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+      const number = this.rng.byte() % 32;
+      if (number < TYPES_END) {
+        const index = resisting(number);
+        if (index !== null) { pick = index; picked = CART_TYPES[number]; break; }
+      }
+    }
+    if (pick === null) {
+      this._say(Effects.failMoveLine(defender));
+      return;
+    }
+    mon.types = [pick];
+    this._say(`${mon.species} transformed into the ${CART_TYPE_NAMES[picked] || picked}-type!`);
+  }
+
+  // BattleCommand_Teleport: held or not a wild fight fails; a lower level
+  // draws the byte loop, the player's monster then fleeing at its foe's
+  // level / 4 or more and the wild one always (the cart's bug).
+  _teleport(fighter, mon, defender) {
+    if (this._heldBy(fighter) || !Effects.isWildMode(this.mode)) {
+      this._say('But it failed');
+      return;
+    }
+    let escapes = true;
+    if (mon.level < defender.level) {
+      const cap = mon.level + defender.level + 1;
+      let byte = 0;
+      for (let i = 0; i < REDRAW_LIMIT; i += 1) {
+        byte = this.rng.byte();
+        if (byte < cap) break;
+      }
+      if (!isWildSeat(this.mode, fighter)) {
+        escapes = byte >= Math.floor(defender.level / 4);
+      }
+    }
+    if (!escapes) {
+      this._say('But it failed');
+      return;
+    }
+    this._say(`${mon.species} fled from battle!`);
+    this._concedeRun(fighter);
+  }
+
+  // BattleCommand_Sketch: ClearLastMove; a link battle "But nothing happened";
+  // a substitute, a TRANSFORMED target (the cart's bug), no LAST_COUNTER_MOVE
+  // or STRUGGLE, a known move fail; else the SKETCH slot takes the move with
+  // its base PP, battle and party alike (a transformed user's party list
+  // the one Transform put aside, told when it is undone).
+  _sketch(fighter, mon, target, defender) {
+    mon.lastCounterMove = null;
+    mon.lastMove = null;
+    mon.lastMoveIndex = 0;
+    if (has(LINK_MODES, this.mode)) {
+      this._say('But nothing happened');
+      return;
+    }
+    const last = defender.lastCounterMove;
+    const key = last ? Effects.moveKey(last) : null;
+    let slot = null;
+    let ok = int(defender.substitute, 0) <= 0 && !defender.transformed
+      && key !== null && key !== 'STRUGGLE';
+    if (ok) {
+      for (const m of mon.moves) {
+        if (Effects.moveKey(m) === key) ok = false;
+      }
+    }
+    if (ok) {
+      // `cp SKETCH` by id, or a modded move with Sketch's own command.
+      for (let i = mon.moves.length; i >= 1; i -= 1) {
+        const m = mon.moves[i - 1];
+        if (Effects.moveKey(m) === 'SKETCH' || int(m.effect, 0) === Effects.SKETCH) {
+          slot = i;
+          break;
+        }
+      }
+    }
+    if (slot === null) {
+      this._say(Effects.didntAffectLine(defender));
+      return;
+    }
+    const row = Effects.copyMoveRow(last);
+    const pp = Effects.basePp(last);
+    row.pp = pp;
+    row.maxPp = pp;
+    row.ppUps = undefined;
+    mon.moves[slot - 1] = row;
+    const saved = mon.transformed ? mon.preTransform : null;
+    if (saved) {
+      saved.moves[Math.min(slot, saved.moves.length + 1) - 1] = Effects.copyMoveRow(row);
+      saved.ppTouched = true;
+      this._emitMoves(fighter, mon);
+    } else {
+      this._emitMoves(fighter, mon, this._partyIndex(fighter, mon));
+    }
+    this._say(`${mon.species} SKETCHED ${moveLabel(row)}!`);
+  }
+
+  // BattleCommand_BatonPass (the Lua twin carries the whole note): a wild
+  // monster or a seat with nobody else able to fight fails; the successor is
+  // the FIGHT's `pass` or the referee's pick; PassedBattleMonEntrance keeps
+  // the side's levels, substitute and substatus, ResetBatonPassStatus takes
+  // Disable, love, Transform, Encore, LAST_MOVE and the wraps.
+  _batonPass(fighter, mon) {
+    const choice = fighter.choice;
+    const outIndex = fighter.active;
+    let dest = null;
+    if (!isWildSeat(this.mode, fighter)) {
+      const named = choice ? choice.pass : null;
+      const pick = named !== null && named !== undefined ? monAt(fighter, named) : null;
+      if (pick && pick.hp > 0 && named !== outIndex) dest = named;
+      if (dest === null) {
+        const foe = this._firstLivingFoe(fighter);
+        dest = this._bestSeBench(fighter, foe ? activeMon(foe) : null);
+        if (dest === null || dest === undefined) dest = firstLiving(fighter.mons, outIndex);
+      }
+    }
+    this._markLastMove(mon, choice ? choice.move : null);
+    if (dest === null || dest === undefined) {
+      this._say('But it failed');
+      return;
+    }
+    const incoming = monAt(fighter, dest);
+    const passed = {
+      stages: { ...mon.stages },
+      substitute: mon.substitute,
+      confusion: mon.confusion,
+      focusEnergy: mon.focusEnergy,
+      mist: mon.mist,
+      xAccuracy: mon.xAccuracy,
+      leechSeed: mon.leechSeed,
+      cursed: mon.cursed,
+      meanLook: mon.meanLook,
+      perish: mon.perish,
+      lockOn: mon.lockOn,
+      identified: mon.identified,
+      curled: mon.curled,
+      minimized: mon.minimized,
+      raging: mon.raging,
+      rageCounter: mon.rageCounter,
+      nightmare: mon.nightmare,
+      toxic: mon.status === 'toxic' ? mon.toxicCounter : null,
+      // wLastPlayerCounterMove stays the field position's.
+      lastCounterMove: mon.lastCounterMove,
+    };
+    // The one leaving goes back to the party with nothing of the field on it.
+    const touched = this._clearSubstatus(mon);
+    Effects.resetStages(mon);
+    mon.substitute = 0;
+    mon.mist = false;
+    mon.focusEnergy = false;
+    mon.xAccuracy = false;
+    mon.leechSeed = null;
+    mon.disable = null;
+    mon.trapped = null;
+    mon.minimized = false;
+    mon.raging = false;
+    mon.rageCounter = 0;
+    mon.charging = null;
+    mon.invulnerable = false;
+    mon.thrashing = null;
+    mon.bide = null;
+    fighter.active = dest;
+    this._refield(fighter);
+    // The one arriving starts clean, then takes what the side passed.
+    incoming.charging = null;
+    incoming.invulnerable = false;
+    incoming.thrashing = null;
+    incoming.bide = null;
+    incoming.trapped = null;
+    incoming.disable = null;
+    this._clearSubstatus(incoming);
+    incoming.lastCounterMove = passed.lastCounterMove;
+    incoming.stages = passed.stages;
+    incoming.substitute = passed.substitute;
+    incoming.confusion = passed.confusion;
+    incoming.focusEnergy = passed.focusEnergy;
+    incoming.mist = passed.mist;
+    incoming.xAccuracy = passed.xAccuracy;
+    incoming.leechSeed = passed.leechSeed;
+    incoming.cursed = passed.cursed;
+    incoming.meanLook = passed.meanLook;
+    incoming.perish = passed.perish;
+    incoming.lockOn = passed.lockOn;
+    incoming.identified = passed.identified;
+    incoming.curled = passed.curled;
+    incoming.minimized = passed.minimized;
+    incoming.raging = passed.raging;
+    incoming.rageCounter = passed.rageCounter;
+    if (passed.toxic && incoming.status === 'poison') {
+      incoming.status = 'toxic';
+      incoming.toxicCounter = passed.toxic;
+    }
+    if (incoming.status === 'sleep') incoming.nightmare = passed.nightmare;
+    this._breakAttraction(fighter.slot);
+    this._clearTrapsFrom(fighter.slot);
+    const order = isComputerSeat(this.mode, fighter) ? 'load' : 'pass';
+    Effects.snapStats(incoming, fighter.badges, Effects.calcStats(incoming, fighter.badges, order));
+    this._emit('switch', {
+      slot: fighter.slot, side: fighter.side,
+      text: incoming.species, speciesId: incoming.speciesId,
+      level: incoming.level, mon: dest - 1,
+    });
+    this._emit('send', {
+      slot: fighter.slot, side: fighter.side,
+      hp: incoming.hp, maxHp: incoming.maxHp,
+      text: incoming.species,
+      speciesId: incoming.speciesId, level: incoming.level,
+      mon: dest - 1,
+      status: incoming.status && has(STATUS_TO_WIRE, incoming.status)
+        ? STATUS_TO_WIRE[incoming.status] : undefined,
+      confused: (incoming.confusion && incoming.confusion > 0) ? 1 : undefined,
+    });
+    if (touched) this._emitMoves(fighter, mon, outIndex);
+    this._spikesDamage(fighter, incoming);
   }
 
   // BattleCommand_RolloutPower: nothing asleep; a miss ends the roll; a hit
@@ -4976,8 +5740,13 @@ class Battle {
     // before anything below can pay anybody, so a mon that died on the way to
     // the KO is not in the divisor. Keyed off the seat's own party position
     // rather than `active`, which the recoil path has not cleared yet.
+    let partyIndex = null;
     for (let index = 1; index <= fighter.mons.length; index += 1) {
-      if (fighter.mons[index - 1] === mon) { this._unfield(fighter, index); break; }
+      if (fighter.mons[index - 1] === mon) {
+        this._unfield(fighter, index);
+        partyIndex = index;
+        break;
+      }
     }
     mon.charging = null;
     mon.invulnerable = false;
@@ -4995,8 +5764,10 @@ class Battle {
     mon.xAccuracy = false;
     mon.leechSeed = null;
     mon.disable = null;
-    // The fallen monster's substatus and Transform go with it.
-    this._clearSubstatus(mon);
+    // The fallen monster's substatus and Transform go with it -- and, from
+    // wave 4, every love it held a foe in.
+    const touched = this._clearSubstatus(mon);
+    this._breakAttraction(fighter.slot);
     // The fallen monster's stages go with it; the side's screens stay up.
     Effects.resetStages(mon);
     this._clearTrapsFrom(fighter.slot);
@@ -5011,6 +5782,8 @@ class Battle {
     // Inside the faint batch, so the ball goes dark in the same beat the
     // monster goes down -- and so a fight that ends here still said it.
     this._syncTeams();
+    // The party PP an overlay hid, told after the `faint` (C2a's contract).
+    if (touched && partyIndex !== null) this._emitMoves(fighter, mon, partyIndex);
 
     // Owed here, paid at the end of the action (`_drainExp`), with the fallen
     // sheet held in the queue so the payout still names the monster that fell
@@ -5019,6 +5792,8 @@ class Battle {
     // the action that fells two: every one of them is out of the sets before
     // the first share is counted.
     this.pendingExp.push({ fallen: fighter, mon });
+    // `_sequenceOver`'s count (wave 4).
+    if (this.phase === 'resolving') this.turnFaints += 1;
 
     fighter.active = null;
     if (next) {
@@ -5051,20 +5826,21 @@ class Battle {
   }
 
   // The end of the turn: pokecrystal's HandleBetweenTurnEffects order (core.asm
-  // :250-296, pokegold the same) -- the residual walk, Leftovers,
-  // Mysteryberry, Defrost, Safeguard, the screens, the stat-boosting held
-  // items, the healing held items -- a successor's share at the replace
-  // phase's close (`_closeReplace`). The Lua twin's note has the rest.
+  // :250-296, pokegold the same) -- Leftovers, Mysteryberry, Defrost,
+  // Safeguard, the screens, the stat-boosting held items, the healing held
+  // items, HandleEncore -- a successor's share at the replace phase's close
+  // (`_closeReplace`). ResidualDamage is each seat's own, after its action
+  // since wave 4 (`_residualFor`). The Lua twin's note has the rest.
   _resolveResiduals() {
-    this._residualDamage();
-    if (this.result) return;
     // The faint-checked block in the cart's order: FUTURE SIGHT, the
-    // weather, HandleWrap (Perish Song is wave 4's).
+    // weather, HandleWrap, HandlePerishSong.
     this._futureSightTick();
     if (this.result) return;
     this._weatherTick();
     if (this.result) return;
     this._wrapTick();
+    if (this.result) return;
+    this._perishTick();
     if (this.result) return;
     this._heldLeftovers();
     this._heldMysteryberry();
@@ -5073,6 +5849,7 @@ class Battle {
     this._tickScreens();
     this._heldStatBoosts();
     this._heldHealing();
+    this._encoreTick();
   }
 
   // HandleDefrost: player then enemy, a frozen monster the freeze did not land
@@ -5128,44 +5905,54 @@ class Battle {
     }
   }
 
-  // Per seat, in field order: ResidualDamage's poison / burn and LEECH SEED,
-  // each a SubtractHPFromUser -- straight off the HP, a substitute never asked.
-  // (HandleWrap and the Bide counter are `_wrapTick`'s; the Disable count is
-  // CheckTurn's.)
-  _residualDamage() {
-    for (const fighter of this.fighters) {
-      if (this.result) return;
-      let mon = activeMon(fighter);
-      if (mon && mon.status) {
-        const amount = Status.residual({
-          status: mon.status, maxHp: mon.maxHp, toxicCounter: mon.toxicCounter,
-        });
-        if (amount !== null && amount !== undefined) {
-          // HurtByPoisonText for PSN and badly poisoned alike.
-          const label = mon.status === 'toxic' ? 'poison' : mon.status;
-          if (mon.status === 'toxic') mon.toxicCounter += 1;
-          this._say(`${mon.species} is hurt by its ${label}`);
-          this._damage(fighter, mon, amount, mon.status, true);
-        }
+  // ResidualDamage for one seat, right after its own turn (wave 4; the Lua
+  // twin cites it): nothing for a fainted monster, then poison / burn, LEECH
+  // SEED, NIGHTMARE and CURSE, each straight off the HP and each behind
+  // HasUserFainted.
+  _residualFor(fighter) {
+    if (this.result) return;
+    let mon = activeMon(fighter);
+    if (mon && mon.status) {
+      const amount = Status.residual({
+        status: mon.status, maxHp: mon.maxHp, toxicCounter: mon.toxicCounter,
+      });
+      if (amount !== null && amount !== undefined) {
+        // HurtByPoisonText for PSN and badly poisoned alike.
+        const label = mon.status === 'toxic' ? 'poison' : mon.status;
+        if (mon.status === 'toxic') mon.toxicCounter += 1;
+        this._say(`${mon.species} is hurt by its ${label}`);
+        this._damage(fighter, mon, amount, mon.status, true);
       }
-      if (this.result) return;
-      mon = activeMon(fighter);
-      if (mon && mon.leechSeed) {
-        // GetEighthMaxHP through SubtractHPFromUser, then RestoreHP on the seat
-        // opposite with what SubtractHP hands back: the whole eighth, or just
-        // the HP that was left. Read before the sap: a sap that knocks the
-        // seeded monster out faints it, and `_faint` clears its leechSeed. The
-        // seeder is still healed (RestoreHP comes before HasUserFainted).
-        const amount = Items.eighth(mon.maxHp);
-        const taken = Math.min(amount, mon.hp);
-        const from = mon.leechSeed.fromSlot;
-        this._say(`${mon.species} is seeded`);
-        this._damage(fighter, mon, amount, null, true);
-        const seeder = from !== null && from !== undefined
-          ? this._fighterAtSlot(from) : null;
-        const sMon = seeder && activeMon(seeder);
-        if (sMon && sMon.hp > 0) this._heal(seeder, sMon, taken);
-      }
+    }
+    if (this.result) return;
+    mon = activeMon(fighter);
+    if (mon && mon.leechSeed) {
+      // GetEighthMaxHP through SubtractHPFromUser, then RestoreHP on the seat
+      // opposite with what SubtractHP hands back: the whole eighth, or just
+      // the HP that was left. Read before the sap: a sap that knocks the
+      // seeded monster out faints it, and `_faint` clears its leechSeed. The
+      // seeder is still healed (RestoreHP comes before HasUserFainted).
+      const amount = Items.eighth(mon.maxHp);
+      const taken = Math.min(amount, mon.hp);
+      const from = mon.leechSeed.fromSlot;
+      this._say(`${mon.species} is seeded`);
+      this._damage(fighter, mon, amount, null, true);
+      const seeder = from !== null && from !== undefined
+        ? this._fighterAtSlot(from) : null;
+      const sMon = seeder && activeMon(seeder);
+      if (sMon && sMon.hp > 0) this._heal(seeder, sMon, taken);
+    }
+    if (this.result) return;
+    mon = activeMon(fighter);
+    if (mon && mon.nightmare) {
+      this._damage(fighter, mon, Items.quarter(mon.maxHp), null, true);
+      this._say(`${mon.species} has a NIGHTMARE!`);
+    }
+    if (this.result) return;
+    mon = activeMon(fighter);
+    if (mon && mon.cursed) {
+      this._damage(fighter, mon, Items.quarter(mon.maxHp), null, true);
+      this._say(`${mon.species}'s hurt by the CURSE!`);
     }
   }
 
@@ -5216,7 +6003,8 @@ class Battle {
             if (this._checkHit(user, defender, fs.move, Effects.FUTURE_SIGHT) !== 'hit') {
               this._say('But it failed');
             } else {
-              this._strike(target, defender, damage);
+              this._strike(target, defender, damage, fighter);
+              this._settleBond();
               this._buildRage(defender);
             }
           }
@@ -5317,8 +6105,31 @@ class Battle {
     this.phase = 'over';
     this.deadline = null;
     this.resolveDeadline = null;
+    this._emitPendingParty();
     this._emit('over', { text: reason });
     return this.result;
+  }
+
+  // The party lists an overlay still hides when the fight ends (wave 4; the
+  // Lua twin explains): Transform's or MIMIC's `ppTouched`, with the party
+  // index, before `over`.
+  _emitPendingParty() {
+    for (const fighter of this.fighters) {
+      fighter.mons.forEach((mon, i) => {
+        const saved = mon.preTransform;
+        const base = saved ? saved.moves : mon.moves;
+        const mimic = mon.preMimic && typeof mon.preMimic === 'object' ? mon.preMimic : {};
+        let touched = !!saved && saved.ppTouched === true;
+        const view = [];
+        for (let k = 1; k <= base.length; k += 1) {
+          const row = mimic[k];
+          if (row && row.ppTouched) { touched = true; row.ppTouched = undefined; }
+          view.push(row || base[k - 1]);
+        }
+        if (saved) saved.ppTouched = undefined;
+        if (touched) this._emitMoveList(fighter, view, i + 1);
+      });
+    }
   }
 
   // null until the fight is done, so `if (battle.outcome())` is the whole test.

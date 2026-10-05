@@ -15,6 +15,9 @@
  * draw site is spelled out here and every one of them is conditional in a way
  * both runtimes can reproduce:
  *
+ *   0. a coop_wild RUN's escape byte, before anything else in the turn
+ *      (TryRunningFromBattle, `_tryRun`) -- none for a runner at least as
+ *      fast as the wild monster, or past the odds;
  *   1. a speed tie-break byte, one per group of actors in one priority
  *      bracket at one Speed -- and every battler on the field is an actor
  *      there, whatever its seat chose (a switch, an item, a recharge, a held
@@ -67,13 +70,20 @@
  *     Speed -- below 128 leaving the side-a member first and otherwise
  *     reversing the group.
  *   * *Running* is mode-gated like Teleport: wild/coop_wild flee, 1v1/coop_pvp
- *     concede, coop_npc refuses without finishing.
+ *     concede, coop_npc refuses without finishing. A coop_wild runner rolls
+ *     TryRunningFromBattle's odds first (`_tryRun`, RUN_ROLL_MODES); solo's
+ *     `wild` is rolled by its client before the run is filed.
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
  *     ItemEffects); unknown ids say "But it failed" and still spend the turn.
- *     Bags are client claims (sheet trust locked). Forced lock-in injects on
- *     openTurn (no menu) and plays in the monster's own slot, past the gates:
- *     a recharge (`_rechargeTurn`), a trap's later hit (`_trapTurn`), a held
- *     monster's silent CANNOT_MOVE; forced-only turns defer to the next tick.
+ *     Bags are client claims (sheet trust locked). Forced lock-in (recharge,
+ *     Rage, thrash, a charge's release) injects on openTurn (no menu) and
+ *     plays in the monster's own slot, past the gates: a recharge
+ *     (`_rechargeTurn`), a trap's later hit (`_trapTurn`), a held monster's
+ *     silent CANNOT_MOVE; forced-only turns defer to the next tick. A
+ *     player's Bide user, trapper or held monster gets the battle menu, and
+ *     its FIGHT is the lock-in (`_menuFight`); the computer's are filled and
+ *     re-pick once a player's switch or item let their trap go
+ *     (`_reselectComputer`).
  *   * *Metronome* picks from host-uploaded metronomePool on the ruleset. A
  *     called move runs no gate and is never Struggle: a call made with the
  *     last PP takes no recoil.
@@ -183,6 +193,16 @@ const BADGE_SIDE = 'a';
 // wTotalPayDayMoney is three BCD bytes, and AddBCD saturates at 999999
 // (engine/math/bcd.asm). `_checkOver`.
 const PAY_DAY_MAX = 999999;
+
+// The modes whose RUN the referee rolls (`_tryRun`, TryRunningFromBattle).
+// coop_wild only: a solo `wild` RUN is rolled by its client before it is
+// filed (src/SoloBattle.lua `_escapes`, off this battle's own RNG), and a
+// second roll here would halve the odds the cart gives.
+const RUN_ROLL_MODES = { coop_wild: true };
+
+// How many TypeEffects rows a ruleset's `chartOrder` may name (pokered's
+// table has 82; a chart is at most 16 types wide, so 256 cells).
+const CHART_ORDER_MAX = 256;
 
 // The modes a faint pays experience in -- the ones vanilla awards it in. 1v1
 // and coop_pvp never do; see `_awardExp` for why the gate is the mode rather
@@ -350,6 +370,11 @@ const STRUGGLE = {
   id: 'STRUGGLE', power: 50, accuracy: 255,
   type: 0, effect: 0, chance: 0,
 };
+
+// The move a thrash's continuation animates (`.ThrashingAboutCheck` writes
+// THRASH into wPlayerMoveNum, core.asm :3529-3530): the `anim` event's id,
+// the move registry's own, as STRUGGLE's is above.
+const THRASH_ANIM = 'THRASH';
 
 // The sentences `.monDoesNothing` prints (pokered data/text/text_2.asm
 // _LoafingAroundText .. _IgnoredOrdersText), keyed by Status.LOAF_LINES, with
@@ -726,8 +751,49 @@ function counterType(typeIds, name, fallback) {
   return typeIndexOf(typeIds, name);
 }
 
+// The TypeEffects rows of a ruleset's `chartOrder` (attempt's note), as
+// [atk, def] pairs in order. All or nothing, as `typeIds` is: an odd length,
+// an index that is not a whole number 0..255, or more than CHART_ORDER_MAX
+// rows makes the whole order null -- a row dropped from the middle would move
+// every later one up and change what the last row says. A row may repeat,
+// since the cart would apply it twice.
+function chartIndex(value) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null;
+  if (value < 0 || value > 255) return null;
+  return value;
+}
+
+function chartRowsOf(raw) {
+  if (!Array.isArray(raw)) return null;
+  const n = raw.length;
+  if (n === 0 || n % 2 !== 0 || n > CHART_ORDER_MAX * 2) return null;
+  const rows = [];
+  for (let i = 0; i < n; i += 2) {
+    const a = chartIndex(raw[i]);
+    const d = chartIndex(raw[i + 1]);
+    if (a === null || d === null) return null;
+    rows.push([a, d]);
+  }
+  return rows;
+}
+
 function hasType(mon, typeId) {
   return mon.types.includes(typeId);
+}
+
+// DisplayEffectiveness (engine/battle/display_effectiveness.asm): the
+// multiplier AdjustDamageForMoveType left -- the last row's with the order
+// (`_typeRows`), else the product -- over EFFECTIVE is "It's super
+// effective", under it "It's not very effective", and nothing at it.
+function typeLine(percents, last) {
+  let effectiveness = last;
+  if (effectiveness === null || effectiveness === undefined) {
+    effectiveness = 100;
+    for (const pct of percents || []) effectiveness = effectiveness * pct / 100;
+  }
+  if (effectiveness > 100) return "It's super effective";
+  if (effectiveness < 100) return "It's not very effective";
+  return null;
 }
 
 function allPpEmpty(mon) {
@@ -833,6 +899,20 @@ function forcedMoveOf(mon, calledMove, slot) {
   return { move: mon.moves[slot - 1], called: null };
 }
 
+// A trap's continuation: the trapping move, at the monster it holds.
+function trapChoice(mon) {
+  const t = mon.trapping;
+  const forced = forcedMoveOf(mon, t.move, t.moveIndex);
+  return {
+    action: 'fight',
+    move: t.moveIndex,
+    target: t.targetSlot,
+    forcedMove: forced.move,
+    called: forced.called,
+    trapContinue: true,
+  };
+}
+
 // ------------------------------------------------------------------
 // the battle
 // ------------------------------------------------------------------
@@ -845,6 +925,7 @@ class Battle {
     this.rng = Rng.create(int(opts.seed, 0));
     this.aim = Rng.create(int(opts.seed, 0) + AIM_SEED_OFFSET);
     this.chart = isTable(opts.chart) ? opts.chart : null;
+    this.chartRows = chartRowsOf(opts.chartOrder);
     this.specialTypes = null;
     // The two types a side effect's routine asks about by name (attempt).
     this.poisonType = typeIndexOf(opts.typeIds, 'POISON');
@@ -1145,10 +1226,13 @@ class Battle {
     return true;
   }
 
-  // Inject forced choices for charge release, recharge, thrash/rage repeat, a
-  // trap's continuation and the monster it holds. The cart skips the move
-  // menu for all of them (MainInBattleLoop :293-321, SelectEnemyMove
-  // :2938-2955), and every one of them is then the monster's own turn-order
+  // Inject forced choices for charge release, recharge, thrash/rage repeat --
+  // and, for the computer's seats, a Bide, a trap's continuation and the
+  // monster it holds. The cart skips the move menu for all of them
+  // (MainInBattleLoop :293-321, SelectEnemyMove :2938-2955), and the whole
+  // battle menu for the first four (:293-303): a player's Bide user, trapper
+  // or held monster is asked instead (`_menuFight`). Every one of them is
+  // then the monster's own turn-order
   // slot: ExecutePlayerMove runs CheckPlayerStatusConditions over it, so the
   // sleep and freeze checks, the trapped check and the flinch come first, and
   // only a monster that gets past them recharges (`.HyperBeamCheck`), stores
@@ -1183,10 +1267,14 @@ class Battle {
       // (CheckPlayerStatusConditions `.BideCheck`, core.asm :3482-3524): every
       // gate runs first, then the store takes wDamage and the counter a step,
       // and the turn it reaches 0 unleashes -- so each one is a forced fight
-      // (`bideStore`), not a skip (`_useMove`'s Bide branch).
+      // (`bideStore`), not a skip (`_useMove`'s Bide branch). The computer's
+      // (SelectEnemyMove :2949-2950 keeps its selection); a player's seat gets
+      // the battle menu first and is asked (`_menuFight`).
       if (mon.bide) {
-        const choice = this._bideChoice(fighter, mon);
-        if (choice) this._fileForced(fighter, choice);
+        if (!isPlayerSeat(this.mode, fighter)) {
+          const choice = this._bideChoice(fighter, mon);
+          if (choice) this._fileForced(fighter, choice);
+        }
         continue;
       }
 
@@ -1195,18 +1283,13 @@ class Battle {
       // trapper's slot, past every gate (`_trapTurn`) -- not a residual at
       // the turn's end, and not a re-rolled move. `trapContinue` says so; a
       // trap that a switch or a faint let go before the slot leaves the move
-      // to run fresh, as the cart's stale selection does (`_useMove`).
+      // to run fresh, as the cart's stale selection does (`_useMove`) -- the
+      // computer's re-picks instead (`_reselectComputer`). Filed for the
+      // computer; a player's trapper gets the battle menu (`_menuFight`).
       if (mon.trapping && int(mon.trapping.turns, 0) > 0) {
-        const t = mon.trapping;
-        const forced = forcedMoveOf(mon, t.move, t.moveIndex);
-        this._fileForced(fighter, {
-          action: 'fight',
-          move: t.moveIndex,
-          target: t.targetSlot,
-          forcedMove: forced.move,
-          called: forced.called,
-          trapContinue: true,
-        });
+        if (!isPlayerSeat(this.mode, fighter)) {
+          this._fileForced(fighter, trapChoice(mon));
+        }
         continue;
       }
 
@@ -1266,8 +1349,10 @@ class Battle {
       // or frozen jumps to `.selectEnemyMove` first (:308-310) and keeps its
       // selection and its menu, so its sleep ticks in its slot; and every
       // forced turn above was filed first, to meet `.HeldInPlaceCheck`'s
-      // "can't move" there instead (`_runGates`).
-      if (this._isHeld(fighter, mon) && mon.status !== 'sleep' && mon.status !== 'freeze') {
+      // "can't move" there instead (`_runGates`). The computer's seat; a
+      // player's held monster gets the battle menu first (`_menuFight`).
+      if (this._isHeld(fighter, mon) && mon.status !== 'sleep' && mon.status !== 'freeze'
+          && !isPlayerSeat(this.mode, fighter)) {
         this._fileForced(fighter, { action: 'skip', skip: 'trapped' });
       }
     }
@@ -1299,6 +1384,31 @@ class Battle {
       forcedMove: forced.move,
       called: forced.called,
     };
+  }
+
+  // What a player's FIGHT selects where the cart opens the battle menu but no
+  // move menu behind it (MainInBattleLoop, core.asm :303-321): DisplayBattleMenu
+  // has run -- a switch, an item or a RUN there is the seat's answer, taken as
+  // on any turn -- and FIGHT returns to a loop that jumps to `.selectEnemyMove`
+  // for a monster asleep or frozen (:308-310), one storing energy or using a
+  // trapping move (:311-313), and writes CANNOT_MOVE for one a foe's trap holds
+  // (:314-321). So the move index a client sends with it names nothing:
+  //   * a Bide: its forced turn (`_bideChoice`, `.BideCheck` in its slot);
+  //   * a trap of its own, its counter not spent: the continuation
+  //     (`trapChoice`, `.MultiturnMoveCheck`);
+  //   * held by a foe's trap and awake: CANNOT_MOVE, the turn gone in silence
+  //     -- and decided now, against the trap standing at the menu, so a
+  //     trapper that switches out later in the turn does not give it back.
+  // null for every other monster. (Asleep or frozen, last turn's selection
+  // stands and the gate stops the monster: `_normaliseChoice` takes any slot
+  // that holds a move, with no PP or Disable test, since no menu applied one.)
+  _menuFight(fighter, mon) {
+    if (mon.bide) return this._bideChoice(fighter, mon);
+    if (mon.trapping && int(mon.trapping.turns, 0) > 0) return trapChoice(mon);
+    if (this._isHeld(fighter, mon) && mon.status !== 'sleep' && mon.status !== 'freeze') {
+      return { action: 'skip', skip: 'trapped' };
+    }
+    return null;
   }
 
   // `.AnyMoveDisabledCheck` (core.asm :3394-3407): the Disable counter comes
@@ -1396,7 +1506,16 @@ class Battle {
     }
 
     if (action === 'fight') {
-      const index = int(choice.move, null);
+      // FIGHT with no move menu behind it (`_menuFight`): the lock-in itself,
+      // whatever slot -- or none -- came with it.
+      const locked = this._menuFight(fighter, mon);
+      if (locked) return locked;
+      // Asleep or frozen, FIGHT opens no move menu either (MainInBattleLoop
+      // :308-310): the slot is a placeholder the gate never gets past, so any
+      // slot holding a move stands and none at all is the first.
+      const asleep = mon.status === 'sleep' || mon.status === 'freeze';
+      let index = int(choice.move, null);
+      if (asleep && (index === null || !mon.moves[index])) index = 0;
       if (index === null) return null;
       const move = mon.moves[index];
       if (!move) return null;
@@ -1404,7 +1523,7 @@ class Battle {
       // `.chooseMove` refuses a slot whose PP -- masked, so PP Ups do not count
       // here -- is 0, and the disabled slot. The computer's SelectEnemyMove
       // refuses the disabled slot and never reads PP (`_hasPp`).
-      if (!this._struggles(fighter, mon)) {
+      if (!asleep && !this._struggles(fighter, mon)) {
         if (!this._hasPp(fighter, move)) return null;
         if (mon.disable && mon.disable.turns > 0
             && mon.disable.moveIndex === index + 1) {
@@ -1493,12 +1612,14 @@ class Battle {
       // only hand the seat a second way to hold the fight open.
       if (this.phase === 'replace') return false;
       if (fighter.choice === null) return false;
-      // A referee-filled answer is not the player's to take back.  Trap
-      // lock-in, recharge, Bide, thrash and a charge release all fill the seat
-      // at `_openTurn`; without this a client could cancel out of a Wrap and
-      // switch away, and on a turn where *every* seat is forced -- which is
-      // exactly what a trap looks like -- `_openTurn` left no deadline, so the
-      // cleared choice would hang the fight with nothing to time it out.
+      // A referee-filled answer is not the player's to take back. A recharge,
+      // Rage, a thrash and a charge's release -- and the computer's Bide, trap
+      // and hold -- fill the seat at `_openTurn`; on a turn where *every* seat
+      // is forced `_openTurn` leaves no deadline, so a cleared choice would
+      // hang the fight with nothing left to time it out. A player's own
+      // lock-in -- the FIGHT it answers a Bide, a trap or a hold with
+      // (`_menuFight`) -- is its answer like any other, and the cart's B backs
+      // out of it too.
       if (fighter.forced) return false;
       this._emit('unchose', {
         slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -1659,7 +1780,9 @@ class Battle {
     if (!mon) return null;
 
     // The forced turns, the same answers `_fillForcedChoices` files (that
-    // pass runs first, so these are reached only when it could not file one).
+    // pass runs first, so these are reached only when it could not file one)
+    // -- and a player's Bide, trap and hold, which it leaves to the player: an
+    // unanswered one is the FIGHT `_menuFight` would make of it.
     if (mon.charging) {
       const c = mon.charging;
       const forced = forcedMoveOf(mon, c.move, c.moveIndex);
@@ -1676,12 +1799,7 @@ class Battle {
       if (choice) return choice;
     }
     if (mon.trapping && int(mon.trapping.turns, 0) > 0) {
-      const t = mon.trapping;
-      const forced = forcedMoveOf(mon, t.move, t.moveIndex);
-      return {
-        action: 'fight', move: t.moveIndex, target: t.targetSlot,
-        forcedMove: forced.move, called: forced.called, trapContinue: true,
-      };
+      return trapChoice(mon);
     }
     if (this._isHeld(fighter, mon) && mon.status !== 'sleep' && mon.status !== 'freeze'
         && !(mon.thrashing && mon.thrashing.turns > 0)
@@ -1930,7 +2048,8 @@ class Battle {
     for (const fighter of this.fighters) {
       fighter.choice = null;
       fighter.forced = null;
-      fighter.cannotMove = null;
+      // (`cannotMove` stays: Haze's CANNOT_MOVE is the seat's selection until
+      // a move menu writes another one -- `_selectsAnew`.)
       // MainInBattleLoop resets both FLINCHED bits as a turn opens
       // (core.asm :293-300), so a flinch landed on a monster that had already
       // moved dies here instead of costing it the NEXT turn -- unless the
@@ -2094,11 +2213,14 @@ class Battle {
   //   * a recharge, a Bide's store or a trap's continuation skips the menu
   //     the same way (:293-295, :311-313).
   // A monster held by a trap selects CANNOT_MOVE (:318-321, :2953-2955): null.
+  // So does a seat whose CANNOT_MOVE Haze wrote and no menu has written over
+  // since (`cannotMove`, `_selectsAnew`).
   // A seat that switched, used an item or ran selected nothing the referee
   // can name (the cart answers from its menu cursor): null.
   _selectionOf(fighter, mon) {
     const choice = fighter.choice;
     if (!choice || !mon) return null;
+    if (fighter.cannotMove) return null;
     const last = fighter.selectedMove === undefined ? null : fighter.selectedMove;
     if (choice.action === 'skip') {
       if (choice.skip && choice.skip !== 'trapped') return last;
@@ -2110,6 +2232,35 @@ class Battle {
     if (this._struggles(fighter, mon)) return STRUGGLE;
     const move = mon.moves[(choice.move || 0) - 1];
     return move === undefined ? null : move;
+  }
+
+  // Whether this turn writes a new selection over the seat's
+  // wPlayerSelectedMove / wEnemySelectedMove -- the only thing that lifts the
+  // CANNOT_MOVE HazeEffect_ wrote there (move_effects/haze.asm :24-31,
+  // `cannotMove`). Nothing resets it at a turn's open, a send-out or a faint:
+  // it is the side's selection byte, and it stands until
+  //   * the player's MoveSelectionMenu runs -- an ordinary FIGHT of an awake
+  //     monster (MainInBattleLoop `.selectPlayerMove`). A recharge, Rage, a
+  //     thrash or a charge skips every menu (:293-303); asleep, frozen, a Bide
+  //     or a trap of its own skips the move menu (:308-313); a held monster
+  //     writes CANNOT_MOVE again (:314-321); a switch, an item or a RUN leaves
+  //     the byte alone (`.selectPlayerMove`'s wActionResultOrTookBattleTurn);
+  //   * the computer's SelectEnemyMove reaches `.canSelectMove`: none of its
+  //     forced turns (:2938-2955, `_fillForcedChoices`) and not asleep or
+  //     frozen (:2946-2948).
+  // So a target Haze woke that then recharges, rages, thrashes, charges,
+  // stores energy or keeps a trap going loses every one of those turns in
+  // silence (`_resolveFights`) for as long as the state lasts -- the cart's
+  // own lock, kept. Every side of a link fight is a player on its own cart.
+  _selectsAnew(fighter, mon) {
+    const choice = fighter.choice;
+    if (!choice || !mon) return false;
+    const asleep = mon.status === 'sleep' || mon.status === 'freeze';
+    if (isComputerSeat(this.mode, fighter)) {
+      return !fighter.forced && !asleep;
+    }
+    return choice.action === 'fight' && (choice.forcedMove === null || choice.forcedMove === undefined)
+      && !asleep;
   }
 
   // The battler opposite this one: the foe seat in the same position if it
@@ -2155,6 +2306,32 @@ class Battle {
     return out;
   }
 
+  // AdjustDamageForMoveType's walk (core.asm :5121-5175), for a hit's damage
+  // and its lines: the percents to apply, in order, and the percent the walk
+  // leaves in wDamageMultipliers. With the ruleset's `chartOrder`
+  // (`chartRows`) that is every TypeEffects row whose attacker is the move's
+  // type and whose defender is either of the target's types -- once per row,
+  // a mono type matching it once -- in table order, each row's multiplier its
+  // `chart` cell, and the last one applied is the one left (EFFECTIVE, 100,
+  // when no row matched). Without the order the chart's cells are applied per
+  // defender type and the second value is null, which `typeLine` / the miss
+  // text read as the product.
+  _typeRows(moveType, defender) {
+    if (!this.chartRows) return { percents: this._typePercents(moveType, defender), last: null };
+    const row = this.chart ? this.chart[moveType] : null;
+    const out = [];
+    let last = 100;
+    for (const pair of this.chartRows) {
+      if (pair[0] === moveType && hasType(defender, pair[1])) {
+        const cell = isTable(row) ? toNumber(row[pair[1]]) : null;
+        // A negative cell is an immunity, as Damage.compute reads one.
+        last = cell !== null ? Math.max(0, Math.floor(cell)) : 100;
+        out.push(last);
+      }
+    }
+    return { percents: out, last };
+  }
+
   _resolveTurn() {
     this.phase = 'resolving';
     // Armed for the rare case resolution does not leave this phase in the same
@@ -2166,9 +2343,11 @@ class Battle {
     if (this._resolveRuns()) return;
     // The players' switches and items first (DisplayBattleMenu runs them
     // before the order is asked); the computer's wait for its own slot of the
-    // order, inside `_resolveFights`.
+    // order, inside `_resolveFights`. SelectEnemyMove runs after them, so it
+    // sees what they did to a trap (`_reselectComputer`).
     this._resolveSwitches(true);
     this._resolveItems();
+    if (!this.result) this._reselectComputer();
     this._resolveFights();
     if (!this.result) this._resolveResiduals();
     // CheckNumAttacksLeft, the last thing a cart turn does (core.asm :409,
@@ -2194,10 +2373,65 @@ class Battle {
     }
   }
 
+  // SelectEnemyMove (core.asm :2915-2955) runs after the player's menu, so
+  // the computer's selection is made against the field the player's switch
+  // and item left: a trap the computer was keeping going that a switch let go
+  // (SendOutMon's `res USING_TRAPPING_MOVE` on the enemy, :1754-1755), and a
+  // hold on it that the player's trapper switching out or spending its last
+  // turn on an item let go (`_itemTrapStep`), both leave nothing for
+  // `.noLinkBattle` to keep -- it reaches `.canSelectMove` and picks afresh.
+  // The forced fill `_fillForcedChoices` made at the turn's open is replaced
+  // by the computer's pick (`_autoChoiceOrSkip`, the same one `autoPick`
+  // files) -- not the stale trapping move run fresh, which is the player's
+  // cart's.
+  _reselectComputer() {
+    for (const fighter of this.fighters) {
+      const choice = fighter.choice;
+      const mon = activeMon(fighter);
+      if (fighter.forced && choice && mon && isComputerSeat(this.mode, fighter)) {
+        const released = (choice.trapContinue && !mon.trapping)
+          || (choice.skip === 'trapped' && !this._isHeld(fighter, mon));
+        if (released) {
+          fighter.forced = null;
+          fighter.choice = this._autoChoiceOrSkip(fighter);
+        }
+      }
+    }
+  }
+
+  // TryRunningFromBattle (core.asm :1496-1576), the wild arm, for a coop_wild
+  // runner (RUN_ROLL_MODES): wNumRunAttempts counts every try -- each
+  // player's own, as each console keeps its own -- and a runner at least as
+  // fast as the wild monster gets away, as does one whose odds pass 255
+  // (Effects.runOdds); otherwise one BattleRandom byte at or under the odds
+  // does. "Got away safely!" or "Can't escape!" -- and a failed try has spent
+  // the turn (wActionResultOrTookBattleTurn): the seat is in the order and
+  // does nothing in its slot.
+  _tryRun(fighter) {
+    const mon = activeMon(fighter);
+    const foe = this._oppositeFoe(fighter);
+    const wild = foe ? activeMon(foe) : null;
+    let escaped = true;
+    if (mon && wild) {
+      fighter.runAttempts = int(fighter.runAttempts, 0) + 1;
+      const odds = Effects.runOdds(this._speedOf(fighter, mon), this._speedOf(foe, wild),
+        fighter.runAttempts);
+      if (odds !== null) escaped = this.rng.byte() <= odds;
+    }
+    if (escaped) {
+      this._say('Got away safely!');
+    } else {
+      this._say("Can't escape!");
+    }
+    return escaped;
+  }
+
   // Fleeing is a concession in 1v1/coop_pvp, a wild escape in *wild modes,
   // and a trainer refusal (no finish) everywhere else; see Effects.runEndsBattle.
+  // A coop_wild runner rolls first (`_tryRun`), in field order, and the first
+  // one to get away ends the fight.
   _resolveRuns() {
-    const running = this.fighters.filter(
+    let running = this.fighters.filter(
       (fighter) => fighter.choice && fighter.choice.action === 'run',
     );
     if (running.length === 0) return false;
@@ -2205,6 +2439,15 @@ class Battle {
     if (!Effects.runEndsBattle(this.mode)) {
       this._say("No! There's no running from a trainer battle!");
       return false;
+    }
+
+    if (RUN_ROLL_MODES[this.mode]) {
+      let away = null;
+      for (const fighter of running) {
+        if (this._tryRun(fighter)) { away = fighter; break; }
+      }
+      if (!away) return false;
+      running = [away];
     }
 
     const sides = { a: false, b: false };
@@ -2345,6 +2588,7 @@ class Battle {
         const effect = Effects.itemEffect(choice.item);
         if (!(effect && effect.ball)) {
           this._resolveOneItem(fighter);
+          if (!this.result) this._itemTrapStep(fighter);
         }
       }
     }
@@ -2368,7 +2612,27 @@ class Battle {
     for (const actor of balls) {
       if (this.result) return;
       this._resolveOneItem(actor.fighter);
+      if (!this.result) this._itemTrapStep(actor.fighter);
     }
+  }
+
+  // UseBagItem (core.asm :2261-2268): an item a player's trapper uses takes
+  // the turn its trap would have hit in, and still spends a step of the trap's
+  // counter (wPlayerNumAttacksLeft) -- the step that reaches 0 lets go there
+  // and then, before SelectEnemyMove looks (`_reselectComputer`). The held
+  // monster's mirror follows (`_trapTurn`'s). The computer's items are
+  // TrainerAI's, which never touch the counter.
+  _itemTrapStep(fighter) {
+    const mon = activeMon(fighter);
+    const trap = mon ? mon.trapping : null;
+    if (!trap || int(trap.turns, 0) <= 0) return;
+    trap.turns = int(trap.turns, 0) - 1;
+    const held = this._fighterAtSlot(trap.targetSlot);
+    const heldMon = held ? activeMon(held) : null;
+    if (heldMon && heldMon.trapped && heldMon.trapped.fromSlot === fighter.slot) {
+      heldMon.trapped.turns = trap.turns;
+    }
+    if (trap.turns <= 0) this._dropTrap(fighter, mon);
   }
 
   // Sort actors by priority bracket (desc), then active-mon speed (desc), then
@@ -2771,6 +3035,9 @@ class Battle {
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
       const mon = activeMon(fighter);
+      // A move menu writes over a CANNOT_MOVE left from an earlier turn
+      // (`_selectsAnew`); nothing else does.
+      if (this._selectsAnew(fighter, mon)) fighter.cannotMove = null;
       // wEnemySelectedMove / wPlayerSelectedMove for this turn, which COUNTER
       // reads off the seat it strikes (`_counterDamage`) and the bracket reads
       // (`_priorityOf`): `_selectionOf`, rewritten by `_useMove` with a move
@@ -2808,7 +3075,8 @@ class Battle {
         } else if (fighter.cannotMove) {
           // Haze's CANNOT_MOVE on a target it woke or thawed (ExecutePlayerMove's
           // `inc a / jp z, ExecutePlayerMoveDone`): the turn is gone, silently
-          // -- a recharge's included.
+          // -- a recharge's included, and every later turn's until a move menu
+          // writes a new selection (`_selectsAnew`).
         } else if (actor.action === 'fight') {
           this._useMove(fighter, actor.mon);
         } else if (actor.action === 'skip' && choice.skip === 'recharge') {
@@ -2998,9 +3266,14 @@ class Battle {
       const hit = this._selfHitState(fighter, mon);
       // `.ConfusedCheck` takes the counter down first (`dec [hl] / jr nz`),
       // and only a monster still confused after it draws the self-hit byte:
-      // the turn it snaps out on draws none.
+      // the turn it snaps out on draws none. `.IsConfused` prints
+      // IsConfusedText, "<MON> is confused!", every such turn, ahead of the
+      // byte (core.asm :3418-3424), whether or not it then hurts itself.
       let roll = null;
-      if (mon.confusion > 1) roll = this.rng.byte();
+      if (mon.confusion > 1) {
+        this._say(`${mon.species} is confused!`);
+        roll = this.rng.byte();
+      }
       const gate = Status.beforeMove({
         status: 'confusion',
         turnsRemaining: mon.confusion,
@@ -3470,15 +3743,14 @@ class Battle {
   // wrote it, not the HP this monster lost -- and the counter a step; the turn
   // it reaches 0 unleashes twice the store (two bytes, both wrapping),
   // skipping DecrementPP, the used-move line and MoveHitTest -- so it reaches
-  // a FLY or DIG user -- and a store of 0 is "<MON>'s attack missed!".
+  // a FLY or DIG user -- and a store of 0 is "<MON>'s attack missed!". A store
+  // turn says nothing at all: it jumps straight to ExecutePlayerMoveDone, and
+  // SavingEnergyText (:3630) is never referenced.
   _bideTurn(fighter, mon, move, usedSlot) {
     const bide = mon.bide;
     bide.stored = (int(bide.stored, 0) + Math.max(0, int(this.lastDamage, 0))) % 65536;
     bide.turns = int(bide.turns, 0) - 1;
-    if (bide.turns > 0) {
-      this._say(`${mon.species} is storing energy`);
-      return;
-    }
+    if (bide.turns > 0) return;
     const stored = bide.stored;
     mon.bide = null;
     this._say(`${mon.species} unleashed energy`);
@@ -3669,6 +3941,8 @@ class Battle {
     }
 
     // `targetSlot` the seat actually swung at, which a Bide records.
+    // BideEffect (effects.asm :764-789) sets STORING_ENERGY, draws its 2..3
+    // and plays an animation: no line past "used BIDE!".
     if (Effects.isBide(effectId) && !mon.bide) {
       mon.bide = {
         turns: Effects.bideTurns(this.rng),
@@ -3677,7 +3951,6 @@ class Battle {
         targetSlot: target.slot,
         move: recordMove,
       };
-      this._say(`${mon.species} began storing energy`);
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -3881,6 +4154,11 @@ class Battle {
     const releasing = mon.charging !== null && mon.charging !== undefined
       && Effects.isCharge(mon.charging.effect);
     const mirrorCopy = opts.mirrorCopy === true;
+    // A charge's first turn: CheckIfPlayerNeedsToChargeUp jumps to
+    // ChargeEffect (core.asm :3102-3109) ahead of PlayerCanExecuteMove, so it
+    // prints no used line and spends no PP -- only the charge line and its
+    // animation.
+    const chargingUp = Effects.isCharge(effectId) && !mon.charging;
 
     // DecrementPP spends wPlayerMoveListIndex's PP -- the chosen slot -- even
     // when a disobedient monster used another move (`usedSlot` above). It
@@ -3888,12 +4166,24 @@ class Battle {
     // (engine/battle/decrement_pp.asm), so the turns after the first of a
     // thrash or a Rage spend nothing -- the thrash's own continuation even
     // skips the call (`.ThrashingAboutCheck` goes to PlayerCalcMoveDamage) --
-    // and a charge's release and a Bide's unleash are the turns the cart's
-    // PP accounting already settled (below). The computer never pays at all:
-    // ExecuteEnemyMove has no DecrementPP (core.asm :5510-5521), so outside a
-    // link battle its PP is the sheet's for the whole fight (`_hasPp`).
-    const paying = disobedient && !called ? mon.moves[choice.move - 1] : move;
-    if (!struggling && paying.pp > 0 && !releasing
+    // and a Bide's unleash skips it too. A charge pays on its RELEASE:
+    // PlayerCanExecuteChargingMove falls into PlayerCanExecuteMove
+    // (:3111-3124), DisplayUsedMoveText and then DecrementPP, on the slot
+    // wPlayerMoveListIndex still names -- the one chosen the turn it started
+    // (`payIndex`), no menu having been opened since. So a METRONOME or MIRROR
+    // MOVE that called a charge move pays a second time from its own slot,
+    // and a charge a full paralysis or a self-hit cancelled paid nothing. (A
+    // slot already at 0 pays nothing here: the cart's `dec [hl]` would wrap
+    // it.) The computer never pays at all: ExecuteEnemyMove has no
+    // DecrementPP (core.asm :5510-5521), so outside a link battle its PP is
+    // the sheet's for the whole fight (`_hasPp`).
+    let paying = disobedient && !called ? mon.moves[choice.move - 1] : move;
+    if (releasing) {
+      const payIndex = mon.charging.payIndex !== null && mon.charging.payIndex !== undefined
+        ? mon.charging.payIndex : choice.move;
+      paying = mon.moves[payIndex - 1] || move;
+    }
+    if (!struggling && paying.pp > 0 && !chargingUp
         && !thrashTurn && !mon.raging
         && !isComputerSeat(this.mode, fighter)) {
       paying.pp -= 1;
@@ -3902,9 +4192,14 @@ class Battle {
       // copy -- Metronome/Mirror already spent the real slot on the first call.
       if (!called) this._emitMoves(fighter, mon, fighter.active);
     }
-    const chargingUp = Effects.isCharge(effectId) && !mon.charging;
+    // amount=1 is the charge/vanish setup beat (release omits it). A thrash's
+    // continuation animates THRASH whatever the move: `.ThrashingAboutCheck`
+    // writes THRASH into wPlayerMoveNum (core.asm :3529-3530), the number
+    // PlayPlayerMoveAnimation plays -- so a PETAL DANCE's later turns look
+    // like THRASH's.
     this._emit('anim', {
-      slot: fighter.slot, side: fighter.side, text: move.id,
+      slot: fighter.slot, side: fighter.side,
+      text: thrashTurn ? THRASH_ANIM : move.id,
       amount: chargingUp ? 1 : undefined,
     });
     // DisplayUsedMoveText with wMonIsDisobedient set takes UsedMove2Text and
@@ -3914,8 +4209,9 @@ class Battle {
     // it), a Mirror Move copy clears it (MirrorMoveCheck's `xor a`), and the
     // calls below pass it on accordingly. A thrash's continuation never gets
     // to DisplayUsedMoveText (`.ThrashingAboutCheck` jumps to
-    // PlayerCalcMoveDamage): its line was "thrashing about!" (above).
-    if (thrashTurn) {
+    // PlayerCalcMoveDamage): its line was "thrashing about!" (above). Nor
+    // does a charge's first turn (`chargingUp`): its line is the charge's.
+    if (thrashTurn || chargingUp) {
       // nothing: see above
     } else if (disobedient) {
       this._say(`${mon.species} used instead, ${moveLabel(move)}`);
@@ -3924,11 +4220,13 @@ class Battle {
     }
 
     // Charge / Fly: first turn sets state and ends; second turn releases.
-    if (Effects.isCharge(effectId) && !mon.charging) {
+    if (chargingUp) {
       // `move` is kept when METRONOME / MIRROR MOVE called it: the release
-      // replays it (`_fillForcedChoices`), not the calling slot.
+      // replays it (`_fillForcedChoices`), not the calling slot. `payIndex`
+      // is wPlayerMoveListIndex, which the release pays from (above).
       mon.charging = {
         moveIndex: usedSlot,
+        payIndex: choice.move,
         effect: effectId,
         targetSlot: target.slot,
         moveId: move.id,
@@ -4062,6 +4360,7 @@ class Battle {
     const isOhko = Effects.isOhko(effectId);
     let isCrit = false;
     let percents = null;
+    let lastPct = null;
     let damage = 0;
     if (Effects.isSetDamage(effectId)) {
       if (!this._hitTest(mon, defender, move, effectId).hit) {
@@ -4080,7 +4379,11 @@ class Battle {
       // target's `baseSpd` / K7 `base.spd`). Absent both (old sheet) it falls
       // back to the unmodified stat, still without a stage, badge or penalty.
       // A power-0 hit (the two-to-five pair) draws no crit byte at all (`ret z`
-      // on the power, :4501-4503).
+      // on the power, :4501-4503). HighCriticalMoves is matched against
+      // wPlayerMoveNum (`dec hl / ld c, [hl]`, :4503-4504), which a thrash's
+      // continuation set to THRASH (`THRASH_ANIM`'s note) -- not on that table
+      // -- so those turns crit at the ordinary rate whatever the move's own
+      // flag says.
       if (move.power > 0) {
         let critSpd = mon.baseSpd !== undefined && mon.baseSpd !== null ? mon.baseSpd : null;
         if (critSpd === null && isTable(mon.base)) critSpd = mon.base.spd;
@@ -4089,7 +4392,7 @@ class Battle {
           baseSpeed: critSpd,
           roll: this.rng.byte(),
           focusEnergy: mon.focusEnergy,
-          highCritMove: move.highCrit === true,
+          highCritMove: move.highCrit === true && !thrashTurn,
         }).isCrit;
       }
 
@@ -4113,7 +4416,7 @@ class Battle {
         }
         damage = counter;
       } else {
-        percents = this._typePercents(move.type, defender);
+        ({ percents, last: lastPct } = this._typeRows(move.type, defender));
         let immune = false;
         let zeroed = false;
         if (isOhko) {
@@ -4189,10 +4492,16 @@ class Battle {
 
         // MoveHitTest runs whatever AdjustDamageForMoveType decided -- it never
         // clears wMoveMissed, and its own miss is the only one that takes a
-        // trap back (`.moveMissed`'s `res USING_TRAPPING_MOVE`).
+        // trap back (`.moveMissed`'s `res USING_TRAPPING_MOVE`). Which line the
+        // miss gets is wDamageMultipliers' (PrintMoveFailureText): with the
+        // chart's order, "doesn't affect" only when the LAST row the walk
+        // applied was the 0 -- a dual type whose immunity row comes before
+        // another row of the move's type is "<USER>'s attack missed!" -- and
+        // without it, any immunity (`_typeRows`).
         const hit = this._hitTest(mon, defender, move, effectId).hit;
         if (immune || zeroed || !hit) {
-          this._say(this._damageMissText(mon, defender, immune, false));
+          const noEffect = lastPct !== null ? lastPct === 0 : immune;
+          this._say(this._damageMissText(mon, defender, noEffect, false));
           if (hit) trapAfterZero();
           this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
           return;
@@ -4200,14 +4509,16 @@ class Battle {
       }
     }
 
-    let effectiveness = 1;
-    for (const pct of percents || []) effectiveness = (effectiveness * pct) / 100;
-    if (isCrit && !isOhko) this._say('A critical hit');
-    if (effectiveness > 1) {
-      this._say("It's super effective");
-    } else if (effectiveness < 1) {
-      this._say("It's not very effective");
-    }
+    // PrintCriticalOHKOText and DisplayEffectiveness come after the hit is
+    // applied (ExecutePlayerMove `.moveDidNotMiss`, core.asm :3226-3229), each
+    // hit of a multi-hit move: wCriticalHitOrOHKO is cleared once printed, so
+    // "Critical hit!" -- or a landed OHKO's "One-hit KO!", which
+    // OneHitKOEffect_ wrote over the crit -- follows the first hit only, while
+    // wDamageMultipliers stands for the whole move and its line follows every
+    // hit (`typeLine`). A COUNTER, a set-damage move, a trap's later turns and
+    // a Bide's unleash never ran AdjustDamageForMoveType that turn, so they
+    // have no line.
+    const effectLine = typeLine(percents, lastPct);
 
     // The trap, standing before the hit lands (a knockout's `_faint` takes it
     // back off the field).
@@ -4254,7 +4565,17 @@ class Battle {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
       const subUp = Effects.hasSubstitute(defender);
-      this.lastDamage = this._damage(target, defender, damage, null);
+      // The knockout's `faint` waits for the hit's lines (`holdFaint`).
+      this.lastDamage = this._damage(target, defender, damage, null, false, true);
+      if (h === 1) {
+        if (isOhko) {
+          this._say('One-hit KO!');
+        } else if (isCrit) {
+          this._say('A critical hit');
+        }
+      }
+      if (effectLine) this._say(effectLine);
+      if (defender.hp <= 0) this._faint(target, defender);
       totalDealt += hpBefore - defender.hp;
       if (subUp && !Effects.hasSubstitute(defender)) effectLive = false;
       if (effectLive) {
@@ -4361,7 +4682,7 @@ class Battle {
   // whole amount against a doll -- AttackSubstitute takes it off the doll's
   // own byte and leaves wDamage alone -- and on a monster the HP it actually
   // took, ApplyDamageTo*Pokemon writing the old HP back over a knockout.
-  _damage(fighter, mon, rawAmount, status, direct) {
+  _damage(fighter, mon, rawAmount, status, direct, holdFaint) {
     let amount = Math.max(0, int(rawAmount, 0));
 
     // (A Bide does not store here: `.BideCheck` adds wDamage on the storing
@@ -4403,7 +4724,9 @@ class Battle {
       status: status && has(STATUS_TO_WIRE, status) ? STATUS_TO_WIRE[status] : undefined,
     });
 
-    if (mon.hp <= 0) this._faint(fighter, mon);
+    // `holdFaint`: the caller runs `_faint` itself, after the lines the cart
+    // prints between the hit and the knockout (`_useMove`'s strike loop).
+    if (mon.hp <= 0 && !holdFaint) this._faint(fighter, mon);
     return amount;
   }
 
@@ -5208,7 +5531,7 @@ class Battle {
  * attempt(opts) -> { battle, reason }
  *
  * opts:
- *   id, mode, seed, chart, specialTypes, typeIds, metronomePool,
+ *   id, mode, seed, chart, chartOrder, specialTypes, typeIds, metronomePool,
  *   choiceTimeout, reconnectGrace, resolveTimeout, now
  *   sides = { a: [ { playerId, name, mons, bag, badges } ], b: [ ... ] }
  *
@@ -5222,6 +5545,15 @@ class Battle {
  * FIGHTING fall back to pokered's own indices, 0 and 1
  * (constants/type_constants.asm), the axis the synthetic STRUGGLE's type 0
  * already assumes.
+ *
+ * `chartOrder` is the type chart as the cart walks it: TypeEffects' rows in
+ * table order, a flat list of chart-index pairs [atk1, def1, atk2, def2, ...]
+ * (`chartRowsOf`), each row's multiplier the `chart` cell it names.
+ * AdjustDamageForMoveType applies the matching rows in order, flooring after
+ * each, and leaves the LAST one's multiplier in wDamageMultipliers -- what
+ * DisplayEffectiveness and PrintMoveFailureText read (`_typeRows`). Absent or
+ * unreadable it is null and the chart is read per defender type, the product
+ * stated, as it always was.
  *
  * `badges` is kept only on side a of a BADGE_MODES fight and dropped
  * everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -5357,6 +5689,8 @@ module.exports = {
   BADGE_MODES,
   BADGE_SIDE,
   PAY_DAY_MAX,
+  RUN_ROLL_MODES,
+  CHART_ORDER_MAX,
   LEVEL_MAX,
   STATUS_FROM_WIRE,
   STATUS_TO_WIRE,

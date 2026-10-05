@@ -118,7 +118,8 @@ const THIEF = 'THIEF';
 // effect still folds to 0 on a Gold sheet but runs no `kingsrock`.
 // Wave 3 (R2c): the Gold-only scripts' own ids that run `kingsrock` (the Lua
 // twin lists them by name); FUTURE SIGHT (119), PROTECT / ENDURE, the weather
-// moves, the time-of-day heals and DEFENSE CURL run none.
+// moves, the time-of-day heals and DEFENSE CURL run none.  Wave 4 adds RAPID
+// SPIN (147) and SKULL BASH (157); its status and field scripts run none.
 const KINGS_ROCK_EFFECTS = {
   0: true, 3: true, 7: true, 16: true, 17: true, 26: true,
   27: true, 29: true, 39: true, 40: true, 41: true, 43: true,
@@ -127,7 +128,7 @@ const KINGS_ROCK_EFFECTS = {
   106: true, 107: true, 108: true, 109: true, 110: true,
   111: true, 112: true, 113: true, 114: true, 116: true,
   117: true, 118: true, 122: true, 123: true, 127: true,
-  131: true, 132: true,
+  131: true, 132: true, 147: true, 157: true,
 };
 const KINGS_ROCK_FOLDED_EXCEPTIONS = {
   FUTURE_SIGHT: true,
