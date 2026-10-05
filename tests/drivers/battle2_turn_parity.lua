@@ -72,6 +72,16 @@
 --     `no_999_cap`, `recoil_substitute`, `rampage_zero_pp`,
 --     `mirror_move_last_used`, `metronome_charge`, `metronome_bide`, `pay_day_wild` /
 --     `pay_day_link` and `hyper_beam_recharge`; `trap_chain` is Gold's wrap.
+--   * the referee-gaps run's wave 2 (R2b): `r2b_transform`, `r2b_haze_2v2`,
+--     `r2b_switch_in_stats` / `r2b_switch_in_computer` (InitBattleMon /
+--     LoadEnemyMon), `r2b_sleep_talk`, `r2b_snore_asleep`,
+--     `r2b_mysteryberry_party`, `r2b_replace_items`, `r2b_quick_claw_forced`,
+--     `r2b_bright_powder` (with the one-hit KO's own accuracy),
+--     `r2b_held_prevent`, `r2b_lock_on`, `r2b_safeguard`,
+--     `r2b_stat_down_lines` / `_sub` / `_floor`, `r2b_priority_sheet` (K8),
+--     `r2b_level_up` (K9), `r2b_defrost`, `r2b_drain`, `r2b_toxic`,
+--     `r2b_leech_grass`, `r2b_stat_up_999`, `r2b_bide_gates`, `r2b_hit_ko` and
+--     `r2b_metronome_known`.
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -259,6 +269,9 @@ local function mn(o)
     raging = o.raging, rageCounter = o.rageCounter, transformed = o.transformed,
     -- What the side-effect scenarios add: a Mist the sheet carries.
     mist = o.mist,
+    -- What the R2b scenarios add: the K7 blocks a level-up's CalcMonStats
+    -- reads (synthetic numbers).
+    base = o.base, dvs = o.dvs,
   }
   if o.item then
     m.heldItem, m.holdEffect, m.holdParam = o.item[1], o.item[2], o.item[3]
@@ -1533,8 +1546,9 @@ scenario("gate_para_disabled", function(events)
 end)
 
 -- A transformed Mysteryberry holder keeps the berry: the cart scans the party
--- PP, which the copied moves never spend.  Ditto copies Wild's one-PP tap and
--- empties it on turn 2.
+-- PP, which the copied moves never spend.  Ditto copies Wild's tap -- 5 PP,
+-- BattleCommand_Transform's own count (R2b) -- and the party's TRANSFORM
+-- never empties.
 scenario("mysteryberry_transformed", function(events)
   local function round(b)
     b:submitChoice("p1", { action = "fight", move = 0 })
@@ -1792,13 +1806,20 @@ local function duo(id, mode, seed, aMons, bMons, extra)
   if extra then
     o.typeIds = extra.typeIds
     o.metronomePool = extra.metronomePool
+    -- R2b's: a chart (type immunities) and side a's badges.
+    o.chart = extra.chart
+    o.sides.a[1].badges = extra.badges
   end
   return o
 end
+-- A round is a list of { playerId, choice } pairs, "tick", or a function of
+-- the battle (R2b: a level-up between turns).
 local function seq(events, opts, rounds)
   local fns = {}
   for i, list in ipairs(rounds) do
-    if list == "tick" then
+    if type(list) == "function" then
+      fns[i] = function(b) list(b, events) end
+    elseif list == "tick" then
       fns[i] = function(b) b:tick(b.now + 1) end
     else
       fns[i] = function(b)
@@ -1864,6 +1885,8 @@ scenario("twister_fly", function(events)
 end)
 
 -- SNORE (96) and SKY ATTACK (101) end in FlinchTarget and `kingsrock`.
+-- Alpha is awake, so its SNORE fails (BattleCommand_Snore, R2b); the
+-- sleeping one is `r2b_snore_asleep`.
 scenario("snore_sky_attack", function(events)
   return seq(events, duo("ssa", "1v1", 505,
     { mn({ species = "Alpha", maxHp = 400, spe = 90, item = { "KINGS_ROCK", "HELD_FLINCH", 30, "KING'S ROCK" },
@@ -2017,6 +2040,381 @@ scenario("hyper_beam_recharge", function(events)
     { mn({ species = "Beta", maxHp = 20, spe = 10, moves = { hm("tap", 1) } }),
       mn({ species = "Delta", maxHp = 600, spe = 10, moves = { hm("SUBSTITUTE", 0, 0, 79), hm("wait", 0, 0, 85) } }) }),
     { both(F(0), F(0)), { { "p2", S(1) } }, { { "p2", F(0) } }, both(F(0), F(1)), { { "p2", F(1) } } })
+end)
+
+-- ------------------------------------------------------------------
+-- the referee-gaps run's wave 2 (docs/plans/gen12-referee-gaps-fix.md, R2b):
+-- Transform undone, Haze in a 2v2, the switch-in stat order, SLEEP TALK and
+-- SNORE, MYSTERYBERRY under Transform, a replacement's between-turn items,
+-- Quick Claw on a forced turn, Bright Powder's bytes and the one-hit KO,
+-- HELD_PREVENT_*, LOCK-ON, SAFEGUARD, the stat-down lines, the sheet's
+-- priority (K8), the level-up (K9), the freeze thaw point, the drain misses,
+-- TOXIC, LEECH SEED on a Grass type, RaiseStat at 999, a storing BIDE's gates
+-- and "Hit N times!".  Every number synthetic.
+-- ------------------------------------------------------------------
+
+-- R2b's chart: NORMAL 0, FIRE 1, ICE 2, ELECTRIC 3, POISON 4, GRASS 5,
+-- STEEL 6, GROUND 7; POISON can't touch STEEL, ELECTRIC can't touch GROUND.
+local R2B_TYPES = { "NORMAL", "FIRE", "ICE", "ELECTRIC", "POISON", "GRASS", "STEEL", "GROUND" }
+local R2B_CHART = {}
+for i = 1, 8 do
+  R2B_CHART[i] = {}
+  for j = 1, 8 do R2B_CHART[i][j] = 100 end
+end
+R2B_CHART[5][7] = 0
+R2B_CHART[4][8] = 0
+local R2B = { typeIds = R2B_TYPES, chart = R2B_CHART }
+
+-- A move with its own accuracy (and, optionally, a stated priority).
+local function am(id, power, ty, effect, acc, chance, priority)
+  return { id = id, pp = 60, power = power, accuracy = acc, type = ty or 0,
+           effect = effect or 0, chance = chance or 0, priority = priority }
+end
+local function both2(a, b) return { { "p1", a }, { "p2", b } } end
+
+-- Transform (BattleCommand_Transform): through a substitute, 5 PP a copied
+-- move and SKETCH 1, the copied stats; Beta confuses it; a switch-out gives
+-- back the moves and clears the confusion; a TRANSFORM at a transformed
+-- target fails.
+scenario("r2b_transform", function(events)
+  return seq(events, duo("r2t", "1v1", 601,
+    { mn({ species = "Alpha", maxHp = 400, atk = 50, spe = 90, types = { 0 },
+           moves = { hm("TRANSFORM", 0, 0, 57, 10), hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 20, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 600, atk = 120, def = 70, spe = 60, types = { 1 },
+           substitute = 40, stages = { atk = 2 },
+           moves = { hm("SKETCH", 0, 0, 0), hm("slam", 40, 1, 0), hm("TRANSFORM", 0, 0, 57),
+                     hm("CONFUSE_RAY", 0, 0, 49) } }) },
+    R2B),
+    { both2(F(0), F(3)), both2(F(1), F(1)), both2(S(1), F(1)), both2(S(0), F(1)),
+      both2(F(0), F(2)) })
+end)
+
+-- Haze resets all four battlers of a 2v2 (BattleCommand_ResetStats): each one
+-- raised from +2 says +1 after it.
+scenario("r2b_haze_2v2", function(events)
+  local function staged(name, spe, first)
+    return mn({ species = name, maxHp = 400, spe = spe, stages = { atk = 2, def = -1 },
+                moves = { first, hm("GROWTH", 0, 0, 10) } })
+  end
+  local round1 = function(b)
+    b:submitChoice("a1", F(0)); b:submitChoice("a2", F(0))
+    b:submitChoice("b1", F(0)); b:submitChoice("b2", F(0))
+  end
+  local round2 = function(b)
+    b:submitChoice("a1", F(1)); b:submitChoice("a2", F(1))
+    b:submitChoice("b1", F(1)); b:submitChoice("b2", F(1))
+  end
+  return play(events, { id = "r2h", mode = "coop_pvp", seed = 602, choiceTimeout = 60, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = "a1", name = "Ann", mons = { staged("Alpha", 90, hm("HAZE", 0, 0, 25)) } },
+            { playerId = "a2", name = "Abe", mons = { staged("Gamma", 70, hm("wait", 0, 0, 85)) } } },
+      b = { { playerId = "b1", name = "Bob", mons = { staged("Beta", 60, hm("wait", 0, 0, 85)) } },
+            { playerId = "b2", name = "Bea", mons = { staged("Delta", 50, hm("wait", 0, 0, 85)) } } },
+    } }, { round1, round2 })
+end)
+
+-- The switch-in order (InitBattleMon): a paralysed switch-in with PLAIN is
+-- boost(quarter(15)) = 3 and Beta's 4 moves first; a stat change rebuilds it
+-- as CalcPlayerStats does, quarter(boost(15)) = 4, and the two tie.
+scenario("r2b_switch_in_stats", function(events)
+  return seq(events, duo("r2s", "wild", 603,
+    { mn({ species = "Alpha", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 15, status = "PAR",
+           moves = { hm("tap", 1), hm("GROWTH", 0, 0, 10) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 4, moves = { hm("tap", 1) } }) },
+    { badges = { PLAIN = true } }),
+    { both2(S(1), F(0)), both2(F(0), F(0)), both2(F(1), F(0)), both2(F(0), F(0)),
+      both2(F(0), F(0)) })
+end)
+
+-- ...and the computer's switch-in outside a link fight (LoadEnemyMon): a
+-- paralysed Delta comes in at its full 80 and outruns Alpha's 30.
+scenario("r2b_switch_in_computer", function(events)
+  return seq(events, duo("r2c", "coop_npc", 604,
+    { mn({ species = "Alpha", maxHp = 400, atk = 120, spe = 30, moves = { hm("slam", 40) } }) },
+    { mn({ species = "Beta", maxHp = 400, hp = 1, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 80, status = "PAR", moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), { { "p2", S(1) } }, both2(F(0), F(0)), both2(F(0), F(0)) })
+end)
+
+-- SLEEP TALK (BattleCommand_SleepTalk): asleep it calls a move other than
+-- itself, the disabled one and the two-turn ones (here only kick); awake it
+-- fails, and so does a user with one move.
+scenario("r2b_sleep_talk", function(events)
+  return seq(events, duo("r2l", "1v1", 605,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, status = "SLP", statusTurns = 6,
+           disable = { moveIndex = 3, turns = 8 },
+           moves = { hm("SLEEP_TALK", 0, 0, 102), hm("FLY", 30, 0, 43), hm("thump", 40),
+                     hm("kick", 20) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 90, moves = { hm("SLEEP_TALK", 0, 0, 102), hm("tap", 1) } }),
+      mn({ species = "Eps", maxHp = 400, spe = 90, status = "SLP", statusTurns = 6,
+           moves = { hm("SLEEP_TALK", 0, 0, 102) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), both2(F(0), F(0)), both2(S(1), F(0)), both2(F(0), F(0)),
+      both2(S(2), F(0)), both2(F(0), F(0)) })
+end)
+
+-- SNORE asleep: the hit, its flinch byte and King's Rock (BattleCommand_Snore
+-- passes a sleeping user; `snore_sky_attack` above is the awake one failing).
+scenario("r2b_snore_asleep", function(events)
+  return seq(events, duo("r2n", "1v1", 606,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, status = "SLP", statusTurns = 7,
+           item = { "KINGS_ROCK", "HELD_FLINCH", 128, "KING'S ROCK" },
+           moves = { hm("SNORE", 20, 0, 96, 60, 30) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), both2(F(0), F(0)), both2(F(0), F(0)), both2(F(0), F(0)) })
+end)
+
+-- MYSTERYBERRY under Transform (HandleMysteryberry): the party's empty tap is
+-- found behind the copies and gets 5, the copies untouched; the owner hears
+-- of it when Transform is undone at the switch-out.
+scenario("r2b_mysteryberry_party", function(events)
+  return seq(events, duo("r2m", "1v1", 607,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90,
+           item = { "MYSTERYBERRY", "HELD_RESTORE_PP", 5, "MYSTERYBERRY" },
+           moves = { hm("TRANSFORM", 0, 0, 57, 10), hm("tap", 1, 0, 0, 0) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 20, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 600, spe = 60, moves = { hm("slam", 40, 0, 0, 30) } }) }),
+    { both2(F(0), F(0)), both2(S(1), F(0)), both2(S(0), F(0)) })
+end)
+
+-- A replacement's between-turn items (HandleBetweenTurnEffects after the
+-- cart's mid-turn send-out): Delta's Leftovers and its defrost roll, at the
+-- close of the replace phase.
+scenario("r2b_replace_items", function(events)
+  return seq(events, duo("r2r", "1v1", 608,
+    { mn({ species = "Alpha", maxHp = 400, atk = 200, spe = 90, moves = { hm("slam", 80) } }) },
+    { mn({ species = "Beta", maxHp = 400, hp = 5, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, hp = 40, spe = 10, status = "FRZ",
+           item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" }, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), { { "p2", S(1) } }, both2(F(0), F(0)), both2(F(0), F(0)) })
+end)
+
+-- Quick Claw on a forced turn (DetermineMoveOrder compares wCurPlayerMove):
+-- the recharging Alpha's claw rolls, and so does a storing Bide's.
+scenario("r2b_quick_claw_forced", function(events)
+  return seq(events, duo("r2q", "1v1", 609,
+    { mn({ species = "Alpha", maxHp = 600, atk = 60, spe = 10,
+           item = { "QUICK_CLAW", "HELD_QUICK_CLAW", 200, "QUICK CLAW" },
+           moves = { hm("HYPER_BEAM", 150, 0, 80), hm("BIDE", 0, 0, 26) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 50, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), { { "p2", F(0) } }, both2(F(1), F(0)), { { "p2", F(0) } },
+      { { "p2", F(0) } }, { { "p2", F(0) } } })
+end)
+
+-- Bright Powder in the byte domain (BattleCommand_CheckHit .BrightPowder) and
+-- the one-hit KO's own accuracy (BattleCommand_OHKO): Alpha's taps roll a byte
+-- against 235, its GUILLOTINE against 30%'s 76 + 2 x 10 levels - 20; Beta's
+-- GUILLOTINE meets a higher level ("unaffected!") and draws nothing.
+scenario("r2b_bright_powder", function(events)
+  return seq(events, duo("r2p", "1v1", 610,
+    { mn({ species = "Alpha", level = 50, maxHp = 400, spe = 90,
+           moves = { am("tap", 10, 0, 0, 100), am("GUILLOTINE", 0, 0, 38, 30) } }) },
+    { mn({ species = "Beta", level = 40, maxHp = 900, spe = 10,
+           item = { "BRIGHTPOWDER", "HELD_BRIGHTPOWDER", 20, "BRIGHTPOWDER" },
+           moves = { am("tap", 1, 0, 0, 100), am("GUILLOTINE", 0, 0, 38, 30) } }) }),
+    { both2(F(0), F(0)), both2(F(0), F(0)), both2(F(0), F(0)), both2(F(1), F(1)),
+      both2(F(1), F(1)), both2(F(1), F(1)), both2(F(1), F(1)) })
+end)
+
+-- HELD_PREVENT_*: the primary commands' "protected by" line (SleepTarget,
+-- Confuse), a side effect's silent stop (BurnTarget).
+scenario("r2b_held_prevent", function(events)
+  return seq(events, duo("r2v", "1v1", 611,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, types = { 0 },
+           moves = { hm("HYPNOSIS", 0, 0, 32), hm("EMBER", 10, 1, 4, 60, 100),
+                     hm("CONFUSE_RAY", 0, 0, 49) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, item = { "GUARD_A", "HELD_PREVENT_SLEEP", 0, "GUARD A" },
+           moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, item = { "GUARD_B", "HELD_PREVENT_BURN", 0, "GUARD B" },
+           moves = { hm("tap", 1) } }),
+      mn({ species = "Eps", maxHp = 400, spe = 10, item = { "GUARD_C", "HELD_PREVENT_CONFUSE", 0, "GUARD C" },
+           moves = { hm("tap", 1) } }) },
+    R2B),
+    { both2(F(0), F(0)), both2(F(1), S(1)), both2(F(2), S(2)) })
+end)
+
+-- LOCK-ON (BattleCommand_LockOn, CheckHit .LockOn): the next move against the
+-- target cannot miss (a 1% hit lands), the lock is spent by it; EARTHQUAKE
+-- still misses a flier; a substitute "didn't affect".
+scenario("r2b_lock_on", function(events)
+  return seq(events, duo("r2o", "1v1", 612,
+    { mn({ species = "Alpha", maxHp = 600, spe = 10,
+           moves = { am("LOCK_ON", 0, 0, 103, 100), am("wild_hit", 20, 0, 0, 1),
+                     am("EARTHQUAKE", 30, 0, 100, 100), am("tap", 1, 0, 0, 100) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 90,
+           moves = { hm("tap", 1), hm("FLY", 30, 0, 43), hm("SUBSTITUTE", 0, 0, 79) } }) }),
+    { both2(F(0), F(0)), both2(F(1), F(0)), both2(F(1), F(0)), both2(F(0), F(0)),
+      both2(F(2), F(1)), { { "p1", F(3) } }, both2(F(0), F(2)) })
+end)
+
+-- SAFEGUARD (BattleCommand_Safeguard): a sleep move into it is "protected by
+-- SAFEGUARD!", a burn hit's side effect stops, a second cast fails, the
+-- rampage's own confusion is spared, and it fades after five ticks.
+scenario("r2b_safeguard", function(events)
+  return seq(events, duo("r2g", "1v1", 613,
+    { mn({ species = "Alpha", maxHp = 600, spe = 90, types = { 0 },
+           moves = { hm("SAFEGUARD", 0, 0, 104), hm("THRASH", 20, 0, 27), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("HYPNOSIS", 0, 0, 32), hm("EMBER", 10, 1, 4, 60, 100), hm("tap", 1) } }) },
+    R2B),
+    { both2(F(0), F(0)), both2(F(0), F(1)), both2(F(1), F(2)), { { "p2", F(2) } },
+      { { "p2", F(2) } }, both2(F(2), F(2)), both2(F(2), F(0)) })
+end)
+
+-- The primary stat-down lines (StatDownFailText): Mist's, before and on a
+-- miss; TryLowerStat's at a battle stat of 1; a missed GROWL's "But it
+-- failed".  A send-out clears a sheet's Mist, substitute and stages, so each
+-- of those is a lead of its own below.
+scenario("r2b_stat_down_lines", function(events)
+  return seq(events, duo("r2d", "1v1", 614,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90,
+           moves = { am("GROWL", 0, 0, 18, 100), am("faint_growl", 0, 0, 18, 1) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, mist = true, moves = { hm("tap", 1) } }),
+      mn({ species = "Zeta", maxHp = 400, atk = 1, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), both2(F(1), F(0)), both2(F(0), S(1)), both2(F(1), F(0)) })
+end)
+
+-- ...a substitute's "But it failed" (`.DidntMiss`), and the -6 floor's
+-- "won't drop anymore!", which comes first.
+scenario("r2b_stat_down_sub", function(events)
+  return seq(events, duo("r2d2", "1v1", 624,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { am("GROWL", 0, 0, 18, 100) } }) },
+    { mn({ species = "Delta", maxHp = 400, spe = 10, substitute = 50, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)) })
+end)
+scenario("r2b_stat_down_floor", function(events)
+  return seq(events, duo("r2d3", "1v1", 625,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { am("GROWL", 0, 0, 18, 100) } }) },
+    { mn({ species = "Eps", maxHp = 400, spe = 10, substitute = 50, stages = { atk = -6 },
+           moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)) })
+end)
+
+-- The sheet's priority (K8) wins over the move-id table.
+scenario("r2b_priority_sheet", function(events)
+  return seq(events, duo("r2y", "1v1", 615,
+    { mn({ species = "Alpha", maxHp = 400, spe = 10,
+           moves = { am("jab", 10, 0, 0, 100, 0, 2), am("QUICK_ATTACK", 10, 0, 0, 100, 0, 1) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 90, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), both2(F(1), F(0)) })
+end)
+
+-- The level-up (K9): Alpha's new stats come in boosted by PLAIN and outrun
+-- Beta, its HP rises by the max-HP step; a bench level-up from the K7 blocks
+-- (CalcMonStats) is what Gamma brings in; a level below the current one is
+-- refused.
+scenario("r2b_level_up", function(events)
+  local function up(...)
+    local args = { ... }
+    return function(b, list)
+      local ok = b:levelUp(args[1], args[2], args[3], args[4], args[5])
+      list[#list + 1] = { t = "levelUp", text = tostring(ok) }
+    end
+  end
+  return seq(events, duo("r2u", "wild", 616,
+    { mn({ species = "Alpha", level = 20, maxHp = 100, hp = 60, spe = 40, moves = { hm("tap", 1) } }),
+      mn({ species = "Gamma", level = 10, maxHp = 50, spe = 5, moves = { hm("tap", 1) },
+           base = { hp = 60, atk = 60, def = 60, spe = 90, spa = 60, spd = 60 },
+           dvs = { atk = 15, def = 14, spe = 13, spc = 12 } }) },
+    { mn({ species = "Beta", level = 20, maxHp = 900, spe = 50, moves = { hm("tap", 1) } }) },
+    { badges = { PLAIN = true } }),
+    { both2(F(0), F(0)), up("p1", 1, 21, { atk = 45, def = 45, spe = 60, spa = 45, spd = 45 }, 110),
+      both2(F(0), F(0)), up("p1", 2, 30), up("p1", 1, 5), both2(S(1), F(0)), both2(F(0), F(0)) })
+end)
+
+-- The freeze thaw point: CheckTurn never thaws ("frozen solid", no byte);
+-- HandleDefrost rolls 10% between turns, never on the turn the freeze landed.
+scenario("r2b_defrost", function(events)
+  local rounds = {}
+  for i = 1, 10 do rounds[i] = both2(F(0), F(0)) end
+  return seq(events, duo("r2f", "1v1", 617,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, status = "FRZ", types = { 0 },
+           moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("ice_hit", 5, 2, 5, 60, 100) } }) },
+    R2B), rounds)
+end)
+
+-- `.DrainSub` / `.DreamEater`: LEECH LIFE at a substitute and DREAM EATER at
+-- an awake target miss before the accuracy byte; SapHealth heals at least 1.
+scenario("r2b_drain", function(events)
+  return seq(events, duo("r2e", "1v1", 618,
+    { mn({ species = "Alpha", maxHp = 400, hp = 100, spe = 90,
+           moves = { hm("LEECH_LIFE", 20, 0, 3), hm("DREAM_EATER", 100, 0, 8) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, substitute = 100, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, hp = 1, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), both2(F(1), F(0)), both2(F(0), S(1)) })
+end)
+
+-- TOXIC (BattleCommand_Poison's `.check_toxic`): badly poisoned, 1/16 x n;
+-- a Poison type and a Steel one (the matchup's 0) are not affected; the
+-- switch-out leaves plain poison (1/8).
+scenario("r2b_toxic", function(events)
+  return seq(events, duo("r2x", "1v1", 619,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { am("TOXIC", 0, 4, 105, 100) } }) },
+    { mn({ species = "Beta", maxHp = 160, spe = 10, types = { 0 }, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, types = { 4 }, moves = { hm("tap", 1) } }),
+      mn({ species = "Eps", maxHp = 400, spe = 10, types = { 6 }, moves = { hm("tap", 1) } }) },
+    R2B),
+    { both2(F(0), F(0)), both2(F(0), F(0)), both2(F(0), S(1)), both2(F(0), S(0)),
+      both2(F(0), S(2)) })
+end)
+
+-- LEECH SEED doesn't affect a Grass type (BattleCommand_LeechSeed).
+scenario("r2b_leech_grass", function(events)
+  return seq(events, duo("r2s2", "1v1", 620,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { hm("LEECH_SEED", 0, 5, 84) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, types = { 5 }, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, types = { 0 }, moves = { hm("tap", 1) } }) },
+    R2B),
+    { both2(F(0), F(0)), both2(F(0), S(1)) })
+end)
+
+-- RaiseStat at 999 for a primary move (`.stats_already_max`): SWORDS DANCE
+-- keeps one stage of its two and says "won't rise anymore!"; MEDITATE then
+-- changes nothing.
+scenario("r2b_stat_up_999", function(events)
+  return seq(events, duo("r2z", "1v1", 621,
+    { mn({ species = "Alpha", maxHp = 400, atk = 999, spe = 90,
+           moves = { hm("SWORDS_DANCE", 0, 0, 50), hm("MEDITATE", 0, 0, 10) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), both2(F(1), F(0)) })
+end)
+
+-- A storing BIDE runs CheckTurn's gates: confused after it began, a storing
+-- turn that hits itself ends the Bide (CantMove), and the next turn asks for
+-- a move again.
+scenario("r2b_bide_gates", function(events)
+  return seq(events, duo("r2b", "1v1", 622,
+    { mn({ species = "Alpha", maxHp = 600, spe = 90, moves = { hm("BIDE", 0, 0, 26) } }) },
+    { mn({ species = "Beta", maxHp = 600, atk = 90, spe = 10,
+           moves = { hm("thump", 40), hm("CONFUSE_RAY", 0, 0, 49) } }) }),
+    { both2(F(0), F(1)), { { "p2", F(0) } }, { { "p2", F(0) } }, both2(F(0), F(0)),
+      { { "p2", F(0) } }, { { "p2", F(0) } } })
+end)
+
+-- "Hit N times!" only when the loop ran out with the target standing: a
+-- DOUBLE KICK whose second hit knocks Beta out says nothing.
+scenario("r2b_hit_ko", function(events)
+  return seq(events, duo("r2k", "1v1", 623,
+    { mn({ species = "Alpha", maxHp = 400, atk = 90, spe = 90, moves = { hm("DOUBLE_KICK", 30, 0, 44) } }) },
+    { mn({ species = "Beta", maxHp = 400, hp = 30, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both2(F(0), F(0)), { { "p2", S(1) } }, both2(F(0), F(0)) })
+end)
+
+-- METRONOME's `.GetMove` redraws a move the user knows (CheckUserMove):
+-- Alpha, knowing tap, only ever calls kick; Gamma knows the whole pool.
+scenario("r2b_metronome_known", function(events)
+  return seq(events, duo("r2w", "1v1", 626,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { hm("METRONOME", 0, 0, 83), hm("tap", 1) } }),
+      mn({ species = "Gamma", maxHp = 400, spe = 90,
+           moves = { hm("METRONOME", 0, 0, 83), hm("tap", 1), hm("kick", 20) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) },
+    { metronomePool = { hm("tap", 1), hm("kick", 20) } }),
+    { both2(F(0), F(0)), both2(F(0), F(0)), both2(F(0), F(0)), both2(S(1), F(0)),
+      both2(F(0), F(0)) })
 end)
 
 -- ------------------------------------------------------------------

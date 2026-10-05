@@ -3533,4 +3533,462 @@ do
   eq(stolen:amuletCoin2(), false, "amulet: a coin taken before the send-out counts for nothing")
 end
 
+-- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: the client half
+-- (docs/plans/gen12-referee-gaps-fix.md, wave 2 task C)
+-- ------------------------------------------------------------------
+--
+-- K7 (base / dvs / statExp) and K8 (ppUps, Gold priority) on every Red and
+-- Gold sheet; K14 (Gold happiness); K9 (a level-up rides mmo.battle_moveset);
+-- K10 (a stat event's signed stage as the arrows' tie-break); K11 (Pay Day
+-- paid); the cart's PP-Up cap; the Metronome pool per cart; and the wild item
+-- `beginWildMediated` used to skip.  Every number here is invented for this
+-- file -- no base stat, PP or item row is a ROM's.
+
+-- A Red world with whole species rows and a 40-PP move, the case the PP-Up
+-- cap moves (pokered AddBonusPP: a fifth of the base, capped at 7, per PP Up).
+local K_RED = {
+  type_chart = DATA.type_chart,
+  moves = {
+    EMBER = { name = "EMBER", power = 40, accuracy = 100, type = "FIRE", pp = 25 },
+    GROWL = { name = "GROWL", power = 0, accuracy = 100, type = "NORMAL", pp = 40 },
+    TACKLE = { name = "TACKLE", power = 35, accuracy = 95, type = "NORMAL", pp = 35 },
+    METRONOME = { name = "METRONOME", power = 0, accuracy = 100, type = "NORMAL",
+                  pp = 10, effect = "METRONOME_EFFECT" },
+    STRUGGLE = { name = "STRUGGLE", power = 50, accuracy = 100, type = "NORMAL", pp = 10 },
+  },
+  pokemon = {
+    CHARMANDER = { name = "CHARMANDER", types = { "FIRE" },
+                   baseStats = { hp = 39, attack = 52, defense = 43, speed = 65, special = 50 } },
+    SQUIRTLE = { name = "SQUIRTLE", types = { "WATER" } },
+  },
+}
+
+-- ------- K7 / K8 on a Red sheet
+do
+  local m = mon("CHARMANDER", { moves = {
+    { id = "GROWL", pp = 30, ppUps = 3 },  -- 40 base: 40 + 3 x 7 = 61, not 64
+    { id = "TACKLE", pp = 35, ppUps = 3 }, -- 35 base: 35 + 3 x 7 = 56 (the cap's edge)
+    { id = "EMBER", pp = 3 },              -- 25 base, no PP Ups: 25
+  } })
+  local sheet = Mediated.snapshotParty(gameWith({ m }, K_RED))[1]
+  check(sheet ~= nil, "K7 (Gen 1): the sheet is built")
+  local b = sheet.base or {}
+  eq(table.concat({ b.hp or "-", b.atk or "-", b.def or "-", b.spd or "-", b.spc or "-" }, ","),
+     "39,52,43,65,50", "K7 (Gen 1): base is the species row, keyed hp atk def spd spc")
+  local d = sheet.dvs or {}
+  eq(table.concat({ d.atk or "-", d.def or "-", d.spd or "-", d.spc or "-" }, ","), "1,2,3,4",
+     "K7 (Gen 1): dvs are the four the cart stores (no HP DV)")
+  eq(d.hp, nil, "K7 (Gen 1): ...the HP DV is derived, never a key")
+  local x = sheet.statExp or {}
+  eq(table.concat({ x.hp or "-", x.atk or "-", x.def or "-", x.spd or "-", x.spc or "-" }, ","),
+     "0,100,0,0,0", "K7 (Gen 1): statExp is the five words")
+  eq(sheet.happiness, nil, "K14: Red has no happiness byte")
+  local growl, tackle, ember = sheet.moves[1], sheet.moves[2], sheet.moves[3]
+  eq(growl.ppUps, 3, "K8 (Gen 1): a move's PP Ups ride the row")
+  eq(growl.maxPp, 61, "PP cap (Gen 1): a 40-PP move with three PP Ups tops out at 61 (AddBonusPP)")
+  eq(tackle.maxPp, 56, "PP cap (Gen 1): a 35-PP move's bonus is exactly 7 per PP Up")
+  eq(ember.ppUps, 0, "K8 (Gen 1): a move with none states 0")
+  eq(ember.maxPp, 25, "maxPp (Gen 1): no stated maximum is the record's base, not the PP left")
+  eq(growl.priority, nil, "K8: a Red row states no priority (Red has none)")
+  -- Through the real sanitiser, the far end's reading.
+  local packedRed = Wire.battleParty({ battle = "k7r", mons = { sheet }, generation = 1 })
+  local pm = packedRed and packedRed.mons[1]
+  check(pm ~= nil, "K7 (Gen 1): the sheet survives Wire.battleParty")
+  eq(pm and pm.base and pm.base.spc, 50, "K7 (Gen 1): base survives the wire")
+  eq(pm and pm.dvs and pm.dvs.spd, 3, "K7 (Gen 1): dvs survive the wire")
+  eq(pm and pm.statExp and pm.statExp.atk, 100, "K7 (Gen 1): statExp survives the wire")
+  eq(pm and pm.moves[1].ppUps, 3, "K8 (Gen 1): ppUps survive the wire")
+  local one = Wire.battleMon(sheet)
+  eq(one and one.base and one.base.hp, 39, "K7 (Gen 1): Wire.battleMon round-trips it too")
+  -- A species row this client cannot read whole states no block, rather than
+  -- one the far end would refuse the monster (and the party) over.
+  local partial = Mediated.snapshotParty(gameWith({ mon("CHARMANDER") }, DATA))[1]
+  eq(partial.base, nil, "K7: a species row with a hole (speed only) states no base")
+  check(partial.dvs ~= nil and partial.statExp ~= nil, "K7: ...while the monster's own blocks still ride")
+  local bare = mon("SQUIRTLE"); bare.statExp = nil; bare.dvs = { attack = 9 }
+  local noBlocks = Mediated.snapshotParty(gameWith({ bare }, K_RED))[1]
+  eq(noBlocks.statExp, nil, "K7: a monster with no stat exp (a trainer's) states none")
+  eq(noBlocks.dvs, nil, "K7: ...and a DV block with a hole states none")
+  check(Wire.battleParty({ battle = "k7p", mons = { noBlocks }, generation = 1 }) ~= nil,
+        "K7: ...and such a sheet is still a party the far end accepts")
+  -- A foe's sheet (a wild monster, a trainer's) carries them too.
+  local foe = Mediated.snapshotMons(gameWith({}, K_RED), { mon("CHARMANDER") })[1]
+  eq(foe and foe.dvs and foe.dvs.atk, 1, "K7: a described foe's sheet carries its DVs")
+end
+
+-- ------- K7 / K8 / K14 on a Gold sheet
+do
+  local goldK = setmetatable({
+    moves = {
+      PROTECT = { name = "PROTECT", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+                  effect = "EFFECT_PROTECT" },
+      QUICK_ATTACK = { name = "QUICK ATTACK", power = 40, accuracy = 100, type = "NORMAL",
+                       pp = 30, effect = "EFFECT_PRIORITY_HIT" },
+      COUNTER = { name = "COUNTER", power = 1, accuracy = 100, type = "NORMAL", pp = 20,
+                  effect = "EFFECT_COUNTER" },
+      VITAL_THROW = { name = "VITAL THROW", power = 70, accuracy = 100, type = "NORMAL",
+                      pp = 10, effect = "EFFECT_ALWAYS_HIT" },
+      TACKLE = { name = "TACKLE", power = 35, accuracy = 95, type = "NORMAL", pp = 35,
+                 effect = "EFFECT_NORMAL_HIT" },
+      -- A content mod's move that states its own priority, which wins.
+      ZIP = { name = "ZIP", power = 30, accuracy = 100, type = "NORMAL", pp = 40,
+              effect = "EFFECT_NORMAL_HIT", priority = 2 },
+    },
+    pokemon = {
+      SQUIRTLE = { name = "SQUIRTLE", types = { "WATER" },
+                   baseStats = { hp = 44, attack = 48, defense = 65, speed = 43,
+                                 specialAttack = 50, specialDefense = 64 } },
+    },
+  }, { __index = goldData() })
+  local m = goldMon("SQUIRTLE", nil, 4321)
+  m.stats = { hp = 30, attack = 14, defense = 13, speed = 16, specialAttack = 15,
+              specialDefense = 17 }
+  m.dvs = { hp = 5, attack = 1, defense = 2, speed = 3, special = 4 }
+  m.statExp = { hp = 7, attack = 100, defense = 0, speed = 9, special = 11 }
+  m.happiness = 200
+  m.moves = {
+    { id = "PROTECT", pp = 10 }, { id = "QUICK_ATTACK", pp = 30 },
+    { id = "COUNTER", pp = 20 }, { id = "VITAL_THROW", pp = 10 },
+  }
+  local game = goldGame({ m }, goldK)
+  local sheet = Mediated.snapshotParty(game)[1]
+  check(sheet ~= nil, "K7 (Gold): the sheet is built")
+  local b = sheet.base or {}
+  eq(table.concat({ b.hp or "-", b.atk or "-", b.def or "-", b.spe or "-", b.spa or "-", b.spd or "-" }, ","),
+     "44,48,65,43,50,64", "K7 (Gold): base splits Special, keyed like `stats` plus hp")
+  local d = sheet.dvs or {}
+  eq(table.concat({ d.atk or "-", d.def or "-", d.spe or "-", d.spc or "-" }, ","), "1,2,3,4",
+     "K7 (Gold): dvs keep one Special DV (atk def spe spc)")
+  local x = sheet.statExp or {}
+  eq(table.concat({ x.hp or "-", x.atk or "-", x.def or "-", x.spe or "-", x.spc or "-" }, ","),
+     "7,100,0,9,11", "K7 (Gold): statExp keeps one Special word")
+  eq(sheet.happiness, 200, "K14 (Gold): happiness rides the sheet")
+  local pr = {}
+  for _, row in ipairs(sheet.moves) do pr[row.id] = row.priority end
+  eq(pr.PROTECT, 3, "K8 (Gold): EFFECT_PROTECT is MoveEffectPriorities' 3")
+  eq(pr.QUICK_ATTACK, 2, "K8 (Gold): EFFECT_PRIORITY_HIT is 2")
+  eq(pr.COUNTER, 0, "K8 (Gold): EFFECT_COUNTER is 0")
+  eq(pr.VITAL_THROW, 0, "K8 (Gold): VITAL_THROW is 0 by its id (GetMovePriority)")
+  local more = Mediated.sheetMoves(game, { moves = { { id = "TACKLE", pp = 35 }, { id = "ZIP", pp = 40 } } })
+  eq(more[1].priority, Mediated.GOLD_BASE_PRIORITY, "K8 (Gold): a move with no row is BASE_PRIORITY (1)")
+  eq(more[2].priority, 2, "K8 (Gold): a record's own priority wins (a content mod's move)")
+  -- The numbers agree with the Gold referee's own table for every vanilla id.
+  local Effects2 = need("BattleSim2/Effects")
+  for id, n in pairs(pr) do
+    eq(n, Effects2.movePriority(id), "K8 (Gold): " .. id .. "'s byte is the referee's own")
+  end
+  -- Gold's engine slot may state only its raised maximum (Mon.ppUpsOf).
+  local raised = Mediated.sheetMoves(game, { moves = { { id = "ZIP", pp = 12, maxPp = 61 } } })[1]
+  eq(raised.ppUps, 3, "K8 (Gold): PP Ups recovered off a stated 61 over a base of 40")
+  eq(raised.maxPp, 61, "K8 (Gold): ...and the stated maximum kept")
+  local packedGold = Wire.battleParty({ battle = "k7g", mons = { sheet }, generation = 2 })
+  local pm = packedGold and packedGold.mons[1]
+  check(pm ~= nil, "K7 (Gold): the sheet survives Wire.battleParty")
+  eq(pm and pm.base and pm.base.spd, 64, "K7 (Gold): base survives the wire")
+  eq(pm and pm.dvs and pm.dvs.spc, 4, "K7 (Gold): dvs survive the wire")
+  eq(pm and pm.statExp and pm.statExp.spc, 11, "K7 (Gold): statExp survives the wire")
+  eq(pm and pm.happiness, 200, "K14 (Gold): happiness survives the wire")
+  eq(pm and pm.moves[1].priority, 3, "K8 (Gold): priority survives the wire")
+  eq(pm and pm.moves[1].ppUps, 0, "K8 (Gold): ppUps survive the wire")
+  local one = Wire.battleMon(sheet)
+  eq(one and one.happiness, 200, "K14 (Gold): Wire.battleMon round-trips happiness")
+  eq(one and one.base and one.base.spe, 43, "K7 (Gold): ...and the K7 blocks")
+end
+
+-- ------- the PP-Up rule itself
+eq(Mediated.maxPpOf(40, 3), 61, "PP cap: 40 base, three PP Ups -> 61 (both carts)")
+eq(Mediated.maxPpOf(35, 3), 56, "PP cap: 35 base -> 7 per PP Up, 56")
+eq(Mediated.maxPpOf(10, 3), 16, "PP cap: 10 base -> 2 per PP Up, 16")
+eq(Mediated.maxPpOf(40, 0), 40, "PP cap: no PP Ups is the base")
+eq(Mediated.maxPpOf(40, 9), 61, "PP cap: a count past 3 reads as the cart's 3")
+eq(Mediated.ppUpBonus(64), 7, "PP cap: the bonus never passes 7")
+
+-- ------- the Metronome pool, per cart
+do
+  local function poolIds(game)
+    local out = {}
+    for _, row in ipairs(Mediated.snapshotRuleset(game).metronomePool or {}) do out[row.id] = true end
+    return out
+  end
+  local red = poolIds(gameWith({}, K_RED))
+  check(red.TACKLE and red.EMBER, "Metronome (Red): ordinary moves are in the pool")
+  eq(red.METRONOME, nil, "Metronome (Red): METRONOME is not (MetronomePickMove)")
+  eq(red.STRUGGLE, nil, "Metronome (Red): nor STRUGGLE")
+
+  -- Gold: the full 251-move table, the twelve MetronomeExcepts ids among it.
+  local goldMoves = {}
+  local excepts = { "METRONOME", "STRUGGLE", "SKETCH", "MIMIC", "COUNTER", "MIRROR_COAT",
+                    "PROTECT", "DETECT", "ENDURE", "DESTINY_BOND", "SLEEP_TALK", "THIEF" }
+  for _, id in ipairs(excepts) do
+    goldMoves[id] = { name = id, power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+                      effect = id == "METRONOME" and "EFFECT_METRONOME" or "EFFECT_NORMAL_HIT" }
+  end
+  for i = 1, 251 - #excepts do
+    local id = ("ZZ%03d"):format(i)  -- sorts after every name above
+    goldMoves[id] = { name = id, power = 40, accuracy = 100, type = "NORMAL", pp = 20,
+                      effect = "EFFECT_NORMAL_HIT" }
+  end
+  local goldGameFull = goldWith({ type_chart = DATA.type_chart, moves = goldMoves })
+  local pool = Mediated.snapshotRuleset(goldGameFull).metronomePool or {}
+  eq(#pool, 251 - #excepts, "Metronome (Gold): every move but the cart's twelve exceptions -- past the old 200")
+  local inPool = {}
+  for _, row in ipairs(pool) do inPool[row.id] = true end
+  for _, id in ipairs(excepts) do
+    eq(inPool[id], nil, "Metronome (Gold): " .. id .. " is never called (MetronomeExcepts)")
+  end
+  check(inPool.ZZ239, "Metronome (Gold): the table's last id is reachable")
+  check(#pool <= Config.BATTLE_METRONOME_POOL_MAX, "Metronome (Gold): ...within the wire's cap")
+  check(Wire.battleRuleset(Mediated.snapshotRuleset(goldGameFull), 2) ~= nil,
+        "Metronome (Gold): the full pool survives Wire.battleRuleset")
+end
+
+-- ------- K10: the arrows read a signed stage only where the words say nothing
+eq(Mediated.statFell({ text = "ATTACK fell!", stage = 1 }), true, "K10: the sentence wins (a drop to +1)")
+eq(Mediated.statFell({ text = "ATTACK rose!", stage = -1 }), false, "K10: ...both ways (a rise to -1)")
+eq(Mediated.statFell({ stage = -2 }), true, "K10: no words: a stage below zero reads as a drop")
+eq(Mediated.statFell({ stage = 2 }), false, "K10: ...and one above it as a rise")
+eq(Mediated.statFell({ text = "X's RAGE is building!", amount = 3 }), false,
+   "K10: no words and no stage: a rise, as before")
+eq(Mediated.statFell({ text = "fell", delta = 1 }), false, "K10: Gen 3's delta still beats a sentence")
+
+-- ------- K9: a level-up rides mmo.battle_moveset, once, with the new move list
+do
+  -- Gold: SQUIRTLE learns GROWL at 13 (Exp2.movesLearnedAt reads levelMoves).
+  local data9 = setmetatable({
+    pokemon = { SQUIRTLE = { name = "SQUIRTLE", types = { "WATER" },
+                             levelMoves = { { level = 13, move = "GROWL" } } },
+                CHARMANDER = DATA.pokemon.CHARMANDER },
+  }, { __index = goldData() })
+  local m = goldMon("SQUIRTLE", nil, 4321)
+  m.stats = { hp = 30, attack = 14, defense = 13, speed = 16, specialAttack = 15, specialDefense = 17 }
+  local bench = goldMon("CHARMANDER", nil, 4321)
+  local game = goldGame({ m, bench }, data9)
+  local sent = {}
+  local fight = Mediated.new({
+    transport = { send = function(_, t, p) sent[#sent + 1] = { type = t, payload = p }; return true end },
+    game = game, battle = "lv", role = "host", mode = "wild", peerId = "npc",
+  })
+  fight:start(game)
+  local function movesets()
+    local out = {}
+    for _, e in ipairs(sent) do if e.type == Wire.BATTLE_MOVESET then out[#out + 1] = e.payload end end
+    return out
+  end
+  -- The award has already written the save monster (Exp2.apply's job).
+  m.level = 13
+  m.stats = { hp = 34, attack = 16, defense = 15, speed = 18, specialAttack = 17, specialDefense = 19 }
+  fight:levelled(m, nil, { 13 })
+  local ms = movesets()
+  eq(#ms, 1, "K9: one message for a level that also taught a move -- not one per move")
+  local msg = ms[1] or {}
+  eq(msg.mon, 0, "K9: ...for the uploaded sheet the monster sits behind")
+  eq(msg.level, 13, "K9: ...carrying the new level")
+  eq(msg.maxHp, 34, "K9: ...the new max HP")
+  eq(msg.stats and table.concat({ msg.stats.atk, msg.stats.def, msg.stats.spe, msg.stats.spa, msg.stats.spd }, ","),
+     "16,15,18,17,19", "K9: ...and the new stats in the sheet's (Gold) dialect")
+  eq(msg.moves and #msg.moves, 2, "K9: ...beside the move list, the learned move in it")
+  eq(msg.moves and msg.moves[2] and msg.moves[2].id, "GROWL", "K9: ...GROWL in the free slot")
+  local clean = Wire.battleMoveset(msg, 2)
+  check(clean ~= nil and clean.level == 13 and clean.maxHp == 34 and clean.stats ~= nil,
+        "K9: the hub's own reader keeps level, stats and maxHp")
+  eq(fight.mine[1].stats.spe, 18, "K9: the uploaded sheet takes the new stats")
+  check(fight.levelSent and fight.levelSent[m], "K9: the send is noted for the plate's HP")
+
+  -- A bench monster's level-up (EXP.SHARE) is told too, with or without a move.
+  bench.level = 13
+  bench.stats = { hp = 40, attack = 20, defense = 20, speed = 20, specialAttack = 20, specialDefense = 20 }
+  fight:levelled(bench, nil, { 13 })
+  ms = movesets()
+  eq(#ms, 2, "K9: a benched monster's level-up is sent as well")
+  eq(ms[2].mon, 1, "K9: ...for its own sheet")
+  eq(ms[2].moves and #ms[2].moves, 1, "K9: ...a level that taught nothing sends the unchanged list")
+
+  -- A learn outside a level-up is still the plain PROTOCOL 28 message.
+  fight:teach(bench, "BENCH", "GROWL")
+  ms = movesets()
+  eq(#ms, 3, "K9: a learn on its own still goes out on its own")
+  eq(ms[3].level, nil, "K9: ...with no level-up fields")
+
+  -- Red: the stats in the Gen 1 dialect, and nothing on Gen 3.
+  local redM = mon("CHARMANDER")
+  local redGame = gameWith({ redM }, K_RED)
+  local redSent = {}
+  local red = Mediated.new({
+    transport = { send = function(_, t, p) redSent[#redSent + 1] = { type = t, payload = p }; return true end },
+    game = redGame, battle = "lr", role = "host", mode = "wild", peerId = "npc",
+  })
+  red:start(redGame)
+  redM.level = 13
+  redM.stats = { hp = 33, attack = 15, defense = 14, speed = 17, special = 16 }
+  red:levelled(redM, nil, { 13 })
+  local redMsg
+  for _, e in ipairs(redSent) do if e.type == Wire.BATTLE_MOVESET then redMsg = e.payload end end
+  eq(redMsg and redMsg.stats and table.concat({ redMsg.stats.atk, redMsg.stats.def, redMsg.stats.spd, redMsg.stats.spc }, ","),
+     "15,14,17,16", "K9 (Gen 1): the stats ride in Red's dialect")
+  eq(redMsg and redMsg.level, 13, "K9 (Gen 1): ...with the level")
+  check(redMsg and Wire.battleMoveset(redMsg, 1) ~= nil, "K9 (Gen 1): ...which the hub reads")
+  eq(Mediated.growthOf({ generation = 3 }, redM), nil, "K9: Gen 3 builds no growth (its referee rebuilds nothing)")
+  check(Mediated.sendMoveset({ send = function() return true end }, "b", 0, { { id = "EMBER", pp = 1,
+    power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 } }, 2,
+    { level = 0 }) == false, "K9: a growth the wire would refuse sends nothing")
+end
+
+-- ------- K9 and the plate: the referee's numbers hold the climb from its next batch
+do
+  local m = mon("CHARMANDER")
+  local game = gameWith({ m }, K_RED)
+  local fight = Mediated.new({ transport = { send = function() return true end },
+    game = game, battle = "hp", role = "host", mode = "wild", peerId = "npc" })
+  fight:start(game)
+  local seat = fight:mySlot()
+  fight.slots[seat] = { species = "CHARMANDER", hp = 20, maxHp = 30, shownHp = 20 }
+  fight.active = 1
+  m.level = 13
+  m.stats = { hp = 34, attack = 15, defense = 14, speed = 17, special = 16 }
+  fight:levelled(m, nil, { 13 })
+  fight:syncLevelHp(1, 30, m, true)
+  eq(fight.slots[seat].hp, 24, "plate: the level's 4 HP climb lands")
+  eq(Mediated.levelHpOwed(fight.slots[seat]), 4, "plate: ...and is owed while this batch plays")
+  -- The rest of this batch was resolved before the referee heard: pre-level.
+  fight:noteSlot({ t = "damage", slot = seat, hp = 15, amount = 5 })
+  eq(fight.slots[seat].hp, 19, "plate: a packet in the same batch keeps the climb (15 + 4)")
+  -- The batch closes; from the next one the referee states the levelled pair.
+  fight:onEvent({ battle = "hp", seq = 50, t = "turn" })
+  eq(Mediated.levelHpOwed(fight.slots[seat]), 0, "plate: the slot-less turn drops a climb the referee holds")
+  fight:noteSlot({ t = "damage", slot = seat, hp = 12, amount = 7 })
+  eq(fight.slots[seat].hp, 12, "plate: ...so the next batch's packet is read as stated, not +4 again")
+
+  -- A send the transport refused: the referee never heard, so the climb stays.
+  local m2 = mon("CHARMANDER")
+  local game2 = gameWith({ m2 }, K_RED)
+  local deaf = Mediated.new({ transport = { send = function() return false end },
+    game = game2, battle = "hq", role = "host", mode = "wild", peerId = "npc" })
+  deaf:start(game2)
+  local seat2 = deaf:mySlot()
+  deaf.slots[seat2] = { species = "CHARMANDER", hp = 20, maxHp = 30, shownHp = 20 }
+  deaf.active = 1
+  m2.level = 13
+  m2.stats = { hp = 34, attack = 15, defense = 14, speed = 17, special = 16 }
+  deaf:levelled(m2, nil, { 13 })
+  deaf:syncLevelHp(1, 30, m2, true)
+  deaf:onEvent({ battle = "hq", seq = 50, t = "turn" })
+  deaf:noteSlot({ t = "damage", slot = seat2, hp = 12, amount = 8 })
+  eq(deaf.slots[seat2].hp, 16, "plate: an unheard level-up keeps its climb past the turn (12 + 4)")
+
+  -- A newcomer installed off a park never inherits the climb.
+  deaf.slots[seat2].pending = { species = "SQUIRTLE", hp = 10, shownHp = 10, maxHp = 10 }
+  deaf:applySwap({ spawnfx = seat2, arrive = deaf.slots[seat2].pending })
+  eq(Mediated.levelHpOwed(deaf.slots[seat2]), 0, "plate: a parked arrival drops the leaver's climb")
+end
+
+-- ------- K11: Pay Day, on Red and Gold
+do
+  local function payFight(game, opts)
+    local fight = Mediated.new({ transport = { send = function() return true end },
+      game = game, battle = opts.battle or "pd", role = opts.role or "host",
+      mode = opts.mode or "wild", peerId = "npc" })
+    fight:start(game)
+    return fight
+  end
+  local function moneyOf(game) return Gen.money.get(game.save) end
+  local function won(fight, coins, reason)
+    fight:onOutcome({ battle = fight.battle, outcome = "win", winners = { "me" },
+                      losers = { "npc" }, reason = reason or "ko", payDay = coins })
+  end
+  local function lost(fight, coins, reason)
+    fight:onOutcome({ battle = fight.battle, outcome = "win", winners = { "npc" },
+                      losers = { "me" }, reason = reason, payDay = coins })
+  end
+
+  -- Red, a won wild fight: the pot into the wallet, and the cart's line owed.
+  local redGame = gameWith({ mon("CHARMANDER") }, K_RED)
+  redGame.save.money = 1000
+  local f = payFight(redGame, {})
+  won(f, 120)
+  eq(moneyOf(redGame), 1120, "Pay Day (Red): a won wild fight pays the pot")
+  eq(f.payDayPaid, 120, "Pay Day (Red): ...and says what it paid")
+  eq(f.payDayLine, "ANN picked up\n¥120!", "Pay Day (Red): the cart's line (_PickUpPayDayMoneyText)")
+  check(f:sayPayDay3(), "Pay Day: the line is said once the ending has printed")
+  eq(f.payDayLine, nil, "Pay Day: ...once")
+  won(f, 120)
+  eq(moneyOf(redGame), 1120, "Pay Day: a second outcome pays nothing more")
+
+  -- Red pays a flee too (wBattleResult stays 0); Gold does not (a DRAW).
+  local fleeGame = gameWith({ mon("CHARMANDER") }, K_RED)
+  fleeGame.save.money = 0
+  lost(payFight(fleeGame, {}), 40, "run")
+  eq(moneyOf(fleeGame), 40, "Pay Day (Red): a flee picks the coins up too")
+  local lossGame = gameWith({ mon("CHARMANDER") }, K_RED)
+  lossGame.save.money = 0
+  lost(payFight(lossGame, {}), 40, "ko")
+  eq(moneyOf(lossGame), 0, "Pay Day (Red): a lost fight pays nothing")
+  local goldFlee = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  lost(payFight(goldFlee, {}), 40, "run")
+  eq(moneyOf(goldFlee), 0, "Pay Day (Gold): a flee is a DRAW and pays nothing (CheckPayDay)")
+
+  -- Gold: doubled under an AMULET COIN this player fielded.
+  local coinGame = goldGame({ goldMon("CHARMANDER", "AMULET_COIN", 4321) })
+  local coin = payFight(coinGame, { mode = "coop_npc" })
+  coin:onEvent({ battle = coin.battle, seq = 1, t = "send", slot = 0, side = "a", mon = 0,
+                 text = "CHARMANDER", hp = 30 })
+  won(coin, 50)
+  eq(moneyOf(coinGame), 100, "Pay Day (Gold): an AMULET COIN doubles the pot (CheckPayDay)")
+  eq(coin.payDayLine, "GOLD picked up\n¥100!", "Pay Day (Gold): ...and the line names the doubled pot")
+  local plainGold = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  won(payFight(plainGold, {}), 50)
+  eq(moneyOf(plainGold), 50, "Pay Day (Gold): no coin, the pot as it is")
+
+  -- Never between players, never to side b, and the wallet's cap.
+  local linkGame = gameWith({ mon("CHARMANDER") }, K_RED)
+  linkGame.save.money = 0
+  won(payFight(linkGame, { mode = "1v1" }), 120)
+  eq(moneyOf(linkGame), 0, "Pay Day: a link fight pays nothing")
+  local sideB = gameWith({ mon("CHARMANDER") }, K_RED)
+  sideB.save.money = 0
+  local bFight = payFight(sideB, { role = "guest", mode = "coop_npc" })
+  bFight:onOutcome({ battle = bFight.battle, outcome = "win", winners = { "me" },
+                     losers = { "npc" }, reason = "ko", payDay = 120 })
+  eq(moneyOf(sideB), 0, "Pay Day: a player on side b is not paid side a's pot")
+  local rich = gameWith({ mon("CHARMANDER") }, K_RED)
+  rich.save.money = 999990
+  won(payFight(rich, {}), 120)
+  eq(moneyOf(rich), 999999, "Pay Day: the wallet stops at 999999 (AddBCD / MAX_MONEY)")
+
+  -- Through Sessions: the outcome is read in the boot's dialect, so a Red
+  -- pot past Gen 3's u16 still arrives.
+  local h = harness("host", { mon("CHARMANDER") })
+  h.game.save.money = 0
+  check(h.sessions:beginWildMediated(h.game, "pw", { mon = mon("SQUIRTLE") }), "Pay Day: a wild fight opens")
+  h.sessions.fight:onReady({ battle = "pw", sides = { a = { "me" }, b = { "npc" } } })
+  h.sessions:onBattleOutcome({ battle = "pw", outcome = "win", winners = { "me" },
+                               losers = { "npc" }, reason = "ko", payDay = 70000 })
+  eq(Gen.money.get(h.game.save), 70000, "Pay Day: Sessions reads a Red pot past 65535 (K11's bound)")
+end
+
+-- ------- beginWildMediated rolls Gold's wild item
+do
+  local wildData = goldData()
+  wildData.pokemon = { SQUIRTLE = { name = "SQUIRTLE", types = { "WATER" }, items = { "BERRY", "NUGGET" } },
+                       CHARMANDER = DATA.pokemon.CHARMANDER }
+  local h = harness("host", {})
+  h.game = goldGame({ goldMon("CHARMANDER", nil, 4321) }, wildData)
+  local wild = goldMon("SQUIRTLE")
+  local draws = { 255, 19 }
+  local i = 0
+  check(h.sessions:beginWildMediated(h.game, "wi", { mon = wild,
+          random = function() i = i + 1; return draws[i] end }), "wild item: the fight opens")
+  eq(wild.item, "NUGGET", "wild item: beginWildMediated rolls it onto the engine monster (rollWildItem2)")
+  local foe
+  for _, e in ipairs(h.sent) do
+    if e.type == Wire.BATTLE_PARTY and e.payload.side == "b" then foe = e.payload end
+  end
+  eq(foe and foe.mons[1] and foe.mons[1].heldItem, "NUGGET", "wild item: ...and the uploaded foe sheet holds it")
+  -- Red rolls nothing.
+  local r = harness("host")
+  local redWild = mon("SQUIRTLE")
+  r.sessions:beginWildMediated(r.game, "wr", { mon = redWild, random = function() return 255 end })
+  eq(redWild.item, nil, "wild item: a Red wild monster holds nothing")
+end
+
 T.finish("mediated_battle_client")

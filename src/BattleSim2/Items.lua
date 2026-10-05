@@ -47,6 +47,20 @@ M.RESTORE_PP     = "HELD_RESTORE_PP"      -- HandleMysteryberry
 M.HEAL_CONFUSION = "HELD_HEAL_CONFUSION"  -- UseConfusionHealingItem
 M.HEAL_STATUS    = "HELD_HEAL_STATUS"     -- both status routines
 
+-- The HELD_PREVENT_* effects (constants/item_data_constants.asm), by what
+-- each keeps off its holder, in the referee's spelling.  The status commands
+-- ask the TARGET's (GetOpponentItem): SleepTarget, Poison / PoisonTarget,
+-- BurnTarget, FreezeTarget, Paralyze / ParalyzeTarget, Confuse /
+-- ConfuseTarget (Effects.applyPrimary / applySide).  No item row on either
+-- cart carries one (data/items/attributes.asm), but the checks are the
+-- cart's code keyed on the effect, so a sheet whose item states one is
+-- protected exactly as the cart would protect it.
+M.PREVENT = {
+  poison = "HELD_PREVENT_POISON", burn = "HELD_PREVENT_BURN",
+  freeze = "HELD_PREVENT_FREEZE", sleep = "HELD_PREVENT_SLEEP",
+  paralysis = "HELD_PREVENT_PARALYZE", confusion = "HELD_PREVENT_CONFUSE",
+}
+
 -- data/types/type_boost_items.asm: the seventeen HELD_<TYPE>_BOOST names and
 -- the type each one boosts, as the type's registry id (Psychic's is
 -- PSYCHIC_TYPE, because PSYCHIC is a move).  Pink Bow and Polkadot Bow are
@@ -274,19 +288,23 @@ function M.quickClawFires(param, byte)
   return int(byte, 255) < int(param, 0)
 end
 
--- `.BrightPowder`, in the referee's percent domain.  The cart subtracts the
--- parameter from the 0..255 accuracy byte it already scaled by the stages and
--- rolls BattleRandom against what is left (0 -> always a miss; 255 -> the
--- `cp -1` that never misses).  Here the scaled accuracy is a percent and the
--- roll is 0..99, so the byte is rebuilt from the percent, the parameter comes
--- off it, and the percent the same roll is compared against is the smallest
--- one that hits exactly where `roll * 255 < byte * 100` does.
-function M.brightPowder(effective, param)
-  local percent = int(effective, 0)
-  local byte = floor(percent * 255 / 100) - int(param, 0)
+-- `.BrightPowder` (BattleCommand_CheckHit, effect_commands.asm:1584-1598),
+-- in the cart's byte domain: the parameter comes off the 0..255 accuracy byte
+-- `.StatModifiers` left, `sub c / jr nc` holding it at 0 -- which then misses
+-- on every BattleRandom, while 255 is the `cp -1` that never draws.  The
+-- caller rolls a byte against what is returned (Accuracy.hitByte): a 100%
+-- move behind a 20 holds 235/256, the cart's 91.8%.
+function M.brightPowder(byteAccuracy, param)
+  local byte = int(byteAccuracy, 0) - int(param, 0)
   if byte < 0 then byte = 0 end
-  if byte >= 255 then return percent end
-  return floor((byte * 100 + 254) / 255)
+  return byte
+end
+
+-- Whether the holder's HELD_PREVENT_* item keeps `what` (a key of PREVENT)
+-- off it.
+function M.prevents(mon, what)
+  local token = M.PREVENT[what]
+  return token ~= nil and M.holds(mon, token)
 end
 
 -- SpeciesItemBoost: `sla l / rl h`, the stat doubled as a 16-bit value (which

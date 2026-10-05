@@ -1821,6 +1821,154 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: the solo half
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-gaps-fix.md, wave 2 task C: a mid-fight learn or
+-- level-up reaches the solo referee on Red and Gold (it used to be dropped),
+-- by the hub's own two rules and the referee's K9 `levelUp`; Pay Day paid; a
+-- Gold trainer's held item rides the foe's sheet.  The same engine stand-ins
+-- as the Gold section above, installed and taken away again.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local Wire = need("Wire")
+  local Gen = need("Gen")
+  local goldData = setmetatable({
+    items = {
+      NUGGET = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+      BERRY  = { name = "BERRY", heldEffect = "HELD_BERRY", heldParameter = 5 },
+    },
+    moves = {
+      THUMP = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "EFFECT_NORMAL_HIT" },
+      SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30, effect = "EFFECT_NORMAL_HIT" },
+    },
+  }, { __index = data })
+
+  -- A spy standing in for the referee's K9 `levelUp` (the Gen 1 / Gen 2
+  -- referees grow it this wave): what the solo transport hands it.
+  local function spyLevelUp(sim)
+    local calls = {}
+    sim.levelUp = function(_, playerId, index, level, stats, maxHp)
+      calls[#calls + 1] = { id = playerId, index = index, level = level, stats = stats, maxHp = maxHp }
+    end
+    return calls
+  end
+  local function moveset(f, fields)
+    fields.battle = f.fight.battle
+    return f.fight.transport:send(Wire.BATTLE_MOVESET, fields)
+  end
+  local function row(id, pp)
+    return { id = id, pp = pp, maxPp = pp, power = 40, accuracy = 255, type = 0,
+             effect = 0, chance = 0 }
+  end
+
+  -- Red: a learn (one slot added) lands on the referee's copy, keeping the old
+  -- slot's PP; the level-up goes to `levelUp` with the seat and a 1-based index.
+  local f = fightOf("wild")
+  local calls = spyLevelUp(f.sim)
+  local seatMon = f.sim.byId[PLAYER].mons[1]
+  seatMon.moves[1].pp = 7
+  local took = moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30) },
+                            level = 21, maxHp = 210,
+                            stats = { atk = 41, def = 41, spd = 91, spc = 41 } })
+  eq(took, true, "moveset (Red solo): the message reaches the referee -- it used to be dropped")
+  eq(#seatMon.moves, 2, "moveset (Red solo): the learned move is on the referee's copy")
+  eq(seatMon.moves[2].id, "SWIPE", "moveset (Red solo): ...in the new slot")
+  eq(seatMon.moves[1].pp, 7, "moveset (Red solo): an unchanged slot keeps the referee's PP (nextMoves12)")
+  eq(#calls, 1, "K9 (Red solo): the level-up is handed to the referee")
+  eq(calls[1] and calls[1].id, PLAYER, "K9 (Red solo): ...for the player's seat")
+  eq(calls[1] and calls[1].index, 1, "K9 (Red solo): ...1-based, as the hubs call it")
+  eq(calls[1] and calls[1].level, 21, "K9 (Red solo): ...the new level")
+  eq(calls[1] and calls[1].maxHp, 210, "K9 (Red solo): ...max HP")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spd, 91, "K9 (Red solo): ...and the stats")
+  -- A rewrite of two slots is refused (movesetDeltaOk), the level still lands.
+  moveset(f, { mon = 0, moves = { row("SWIPE", 30), row("THUMP", 20) }, level = 22 })
+  eq(seatMon.moves[1].id, "THUMP", "moveset (Red solo): a two-slot rewrite is refused, as on the hub")
+  eq(#calls, 2, "K9 (Red solo): ...though the level-up beside it still lands")
+  -- A transformed battler keeps its copied list; the level still lands.
+  seatMon.transformed = true
+  moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30), row("THUMP", 1) }, level = 23 })
+  eq(#seatMon.moves, 2, "moveset (Red solo): a transformed battler's list is left alone")
+  eq(#calls, 3, "K9 (Red solo): ...its level-up is not")
+  seatMon.transformed = nil
+  -- Nothing the wire would refuse reaches the referee.
+  eq(moveset(f, { mon = 0, moves = { row("THUMP", 20) }, level = 0 }), false,
+     "moveset (Red solo): a level the wire refuses is refused here too")
+  eq(#calls, 3, "K9 (Red solo): ...and never reaches levelUp")
+  -- A referee with no levelUp yet applies the moves and nothing else.
+  f.sim.levelUp = nil
+  local before = #calls
+  eq(moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30), row("THUMP", 5) }, level = 24 }), true,
+     "K9 (Red solo): a referee without levelUp still takes the learn")
+  eq(#seatMon.moves, 3, "K9 (Red solo): ...onto its copy")
+  eq(#calls, before, "K9 (Red solo): ...and is asked nothing it cannot answer")
+
+  -- End to end through the screen: a level-up the save monster just made.
+  f = fightOf("wild")
+  calls = spyLevelUp(f.sim)
+  local saveMon = f.party[1]
+  saveMon.level = 21
+  saveMon.stats = { hp = 210, attack = 41, defense = 41, speed = 91, special = 41 }
+  f.fight:levelled(saveMon, nil, { 21 })
+  eq(#calls, 1, "K9 (Red solo): the screen's level-up reaches the referee")
+  eq(calls[1] and calls[1].maxHp, 210, "K9 (Red solo): ...with the save monster's new max HP")
+  eq(calls[1] and calls[1].stats and calls[1].stats.atk, 41, "K9 (Red solo): ...and its stats")
+
+  -- Gold: the same route, in Gold's dialect.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  calls = spyLevelUp(f.sim)
+  local gm = f.party[1]
+  gm.level = 21
+  gm.stats = { hp = 210, attack = 41, defense = 41, speed = 91, specialAttack = 43, specialDefense = 44 }
+  f.fight:levelled(gm, nil, { 21 })
+  eq(#calls, 1, "K9 (Gold solo): the level-up reaches the Gold referee")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spe, 91, "K9 (Gold solo): ...stats in Gold's dialect")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spd, 44, "K9 (Gold solo): ...Sp. Def split from Sp. Atk")
+
+  -- Gold trainer items ride the foe's sheet (gap #12, proven on the solo path):
+  -- the trainer's engine party mon holding an item.
+  local holder = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+  holder.item = "NUGGET"
+  f = fightOf("trainer", { cart2 = true, data = goldData, foes = { holder } })
+  local foeSheet = f.fight.npcParty and f.fight.npcParty[1]
+  eq(foeSheet and foeSheet.heldItem, "NUGGET", "gold trainer item (solo): the foe sheet holds the item")
+  eq(foeSheet and foeSheet.holdEffect, "HELD_NONE", "gold trainer item (solo): ...with its K2 hold effect")
+  eq(foeSheet and foeSheet.itemName, "NUGGET", "gold trainer item (solo): ...and its name")
+  local foeSeat = f.sim.byId[FOE]
+  eq(foeSeat and foeSeat.mons[1].heldItem, "NUGGET", "gold trainer item (solo): ...and the referee fights with it")
+  eq(foeSheet and foeSheet.dvs and foeSheet.dvs.spe, 8, "K7 (solo): the trainer's sheet carries its DVs")
+
+  -- Pay Day: a won Red wild fight pays the pot the referee reports.
+  f = fightOf("wild")
+  f.game.save.money = 3000
+  f.game.save.player = { name = "PLAYER" }
+  f.fight:onOutcome({ battle = f.fight.battle, outcome = "win", winners = { PLAYER },
+                      losers = { FOE }, reason = "ko", payDay = 44 })
+  eq(Gen.money.get(f.game.save), 3044, "Pay Day (Red solo): the pot is paid")
+  eq(f.fight.payDayLine, "PLAYER picked up\n¥44!", "Pay Day (Red solo): ...and the cart's line is owed")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

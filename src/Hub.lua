@@ -1410,6 +1410,36 @@ end
 -- of relay.js PAY_DAY_MODES.
 local PAY_DAY_MODES = { wild = true, coop_wild = true, coop_npc = true }
 
+-- Whether a referee's verdict carries its Pay Day coins onto the broadcast
+-- (contract K11 of docs/plans/gen12-referee-gaps-fix.md).  Every generation's
+-- outcome -- a knockout, a catch, a run, a forfeit -- reaches one copy, in
+-- M:settleMediated, so this is the whole rule:
+--
+--   * a positive count only: Lua reads a 0 as true where the JS twin reads it
+--     as false, so "no coins" is spelled as the field's absence on both
+--     (every reader reads a 0 as absent anyway);
+--   * a fight against the computer only (PAY_DAY_MODES): the mode test keeps
+--     the field off a player-vs-player fight even if a sim ever set it;
+--   * an escape (reason `run`) pays on Red alone.  pokered's EndOfBattle adds
+--     wTotalPayDayMoney whenever wBattleResult is still 0, and a Teleport /
+--     Whirlwind / Roar (SwitchAndTeleportEffect) or POKE DOLL escape only
+--     sets wEscapedFromBattle -- so the Gen 1 referee reports coins on those.
+--     Gold calls every escape a DRAW (SetBattleDraw from Teleport and
+--     Whirlwind / Roar, PokeDollEffect's own, the run command's in
+--     TryToRunAwayFromBattle, WildFled_EnemyFled_LinkBattleCanceled), and
+--     ExitBattle skips CheckPayDay unless wBattleResult is WIN; Gen 3 gives
+--     the money only from HandleEndTurn_BattleWon.  Their referees never
+--     report coins on a run, and this keeps the field off one even if a sim
+--     ever set it.
+--
+-- `generation` is the hub's own.  Twin of paysDay in server/lib/relay.js.
+local function paysDay(generation, mode, outcome)
+  local coins = tonumber(outcome.payDay)
+  if not (coins and coins > 0 and PAY_DAY_MODES[mode]) then return false end
+  if outcome.reason == "run" then return generation == 1 end
+  return true
+end
+
 -- The cart family a fighter entry's `family` names, keyed by the cart the
 -- player's hello named (Wire.VERSIONS).  Gen 3 (BattleSim3 Turn.FAMILIES,
 -- docs/plans/gen3-battle-sheet.md §1.1): obedience reads it for one rule --
@@ -1793,12 +1823,62 @@ end
 M.movesetDeltaOk = movesetDeltaOk
 M.nextMoves12 = nextMoves12
 
+-- Where a Gen 1 / Gen 2 learn lands on a live battler, and whether it did.
+--
+-- Untransformed, the battle list is the party list: the learn is judged
+-- against it (movesetDeltaOk) and rewrites it (nextMoves12).
+--
+-- Transformed, the party list is the one the referee put aside at Transform
+-- -- `mon.preTransform.moves` (BattleSim2 Effects TRANSFORM_EFFECT, BattleSim
+-- Effects.applyPrimary's TransformEffect_) -- and gives back at a switch-out
+-- or a faint (BattleSim2 Turn `_undoTransform`, BattleSim
+-- Effects.untransform), the way the carts reload the battle struct from the
+-- party (InitBattleMon / LoadBattleMonFromParty).  The learn is judged
+-- against that list and written there, so the switch-out restores the
+-- learned list rather than the one from before it.  What the battle struct
+-- does meanwhile is the cart's:
+--
+--   * Gold: pokecrystal LearnMove skips the wBattleMonMoves / wBattleMonPP
+--     copy while SUBSTATUS_TRANSFORMED is set, so the copied moves stay in
+--     the fight until the switch-out;
+--   * Red: pokered LearnMove has no such check -- the active monster's
+--     wBattleMonMoves / wBattleMonPP are overwritten with the party's, so a
+--     transformed monster fights on with its own (learned) moves and their
+--     party PP under the copied types and stats.  Reproduced: the battle
+--     list becomes a copy of its own, and the PP it spends from there never
+--     reaches the party list (DecrementPP stops before the party copy while
+--     TRANSFORMED is set), so the two are separate tables.
+--
+-- A transformed battler with no list put aside (a referee that keeps none)
+-- is left alone, as before: replacing its copies would end the Transform a
+-- turn early.  Twin of learnTo in server/lib/relay.js.
+local function learnTo(generation, mon, incoming)
+  if type(incoming) ~= "table" or #incoming == 0 then return false end
+  if not mon.transformed then
+    local old = type(mon.moves) == "table" and mon.moves or {}
+    if not movesetDeltaOk(old, incoming) then return false end
+    mon.moves = nextMoves12(old, incoming)
+    return true
+  end
+  local saved = mon.preTransform
+  if type(saved) ~= "table" then return false end
+  local old = type(saved.moves) == "table" and saved.moves or {}
+  if not movesetDeltaOk(old, incoming) then return false end
+  saved.moves = nextMoves12(old, incoming)
+  if generation == 1 then mon.moves = nextMoves12(old, incoming) end
+  return true
+end
+-- Exported beside the two rules it is built from, for the same caller: a
+-- referee with no hub (src/SoloBattle.lua) lands a learn where a hub would.
+M.learnTo = learnTo
+
 -- Mid-fight learn / replace (PROTOCOL 28) and level-up (contract K9 of
 -- docs/plans/gen12-referee-gaps-fix.md). Twin of Relay.applyBattleMoveset.
 --
 -- Moves: unchanged ids keep the hub's PP and combat fields (nextMoves12); a
--- transformed battler's list is left alone so this does not end Transform a
--- turn early.
+-- transformed battler's learn lands in the party list its referee put aside
+-- (`preTransform.moves`), and on Red in the battle list too -- learnTo has
+-- the rule and the carts' reasons.
 --
 -- Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
 -- Gen 2 only -- Wire.battleMoveset reads none on Gen 3), the hub forwards
@@ -1815,8 +1895,8 @@ M.nextMoves12 = nextMoves12
 --     maxHp     1..HP_MAX, or nil
 --
 -- always forwarded whatever became of the moves -- a transformed mon still
--- grew (only its move list is protected), and a learn refused as a rewrite
--- does not undo the level it came with.  Whether the claim is plausible and
+-- grew, and a learn refused as a rewrite does not undo the level it came
+-- with.  Whether the claim is plausible and
 -- what it rebuilds (the cart's in-battle CalcStats, badge boosts, the HP
 -- step) is the referee's to decide.  Guarded on the method existing: the
 -- Gen 1 / Gen 2 referees implement it, BattleSim3 never does, and a hub
@@ -1830,15 +1910,7 @@ function M:applyBattleMoveset(record, client, payload)
   if self.generation == 3 then return applyBattleMoveset3(fighter, payload) end
   local mon = fighter.mons[payload.mon + 1]
   if not mon then return false end
-  local applied = false
-  local incoming = payload.moves
-  if not mon.transformed and type(incoming) == "table" and #incoming > 0 then
-    local old = type(mon.moves) == "table" and mon.moves or {}
-    if movesetDeltaOk(old, incoming) then
-      mon.moves = nextMoves12(old, incoming)
-      applied = true
-    end
-  end
+  local applied = learnTo(self.generation, mon, payload.moves)
   local grew = payload.level ~= nil or payload.stats ~= nil or payload.maxHp ~= nil
   if grew and type(record.sim.levelUp) == "function" then
     record.sim:levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp)
@@ -2393,16 +2465,13 @@ function M:settleMediated(record, outcome)
   if outcome.catcher then payload.catcher = outcome.catcher end
   -- Pay Day coins: side a's total on a knockout win (BattleSim3 `_checkOver`;
   -- the Gen 1 / Gen 2 referees' `outcome().payDay` from contract K11 of
-  -- docs/plans/gen12-referee-gaps-fix.md; none under link rules).  A
-  -- broadcast is already side a only here: in the three NPC modes every
-  -- member is a human seated on side a (`openMediatedBattle` puts the npc
-  -- seats alone on side b), and each client still checks the winners list
-  -- before it pays.  The mode test keeps the field off a player-vs-player
-  -- fight even if a sim ever set it.  A positive number only: Lua reads a 0
-  -- as true where the JS twin reads it as false, so "no coins" is spelled as
-  -- the field's absence on both (every reader reads a 0 as absent anyway).
-  local coins = tonumber(outcome.payDay)
-  if coins and coins > 0 and PAY_DAY_MODES[record.mode] then payload.payDay = outcome.payDay end
+  -- docs/plans/gen12-referee-gaps-fix.md; none under link rules), and on Red
+  -- on an escape too -- `paysDay` has the rule.  A broadcast is already side
+  -- a only here: in the three NPC modes every member is a human seated on
+  -- side a (`openMediatedBattle` puts the npc seats alone on side b).  On a
+  -- run, side a may be the losers list (the referee calls the side that fled
+  -- the loser) and is still the side the coins are for.
+  if paysDay(self.generation, record.mode, outcome) then payload.payDay = outcome.payDay end
   self:broadcastBattle(record, Wire.BATTLE_OUTCOME, payload)
 
   local match = self.matches[record.id]

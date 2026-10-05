@@ -781,11 +781,19 @@ function M.healParty(game)
     mon.status = nil
     for _, mv in ipairs(mon.moves or {}) do
       local def = moves and moves[mv.id]
-      -- RestoreBonusPP adds maxPP/5 per PP UP, floored -- and a move this
-      -- build has no record of is left exactly as it was rather than given a
-      -- PP figure invented from nothing.
+      -- The cart's maximum: a fifth of the base per PP UP, floored and
+      -- capped at 7 (pokered AddBonusPP, pokecrystal / pokegold ComputeMaxPP
+      -- -- so a 40-PP move with three PP Ups heals to 61, not 64;
+      -- Mediated.maxPpOf) -- and a move this build has no record of is left
+      -- exactly as it was rather than given a PP figure invented from nothing.
+      -- A Gold slot may state only its raised `maxPp` (the engine's
+      -- Mon.ppUpsOf recovers the count from it), so the count is read the way
+      -- the sheet reads it, and a stated maximum is kept in step, as the
+      -- engine's own Mon.restoreAllPp keeps it.
       if def and def.pp then
-        mv.pp = def.pp + (tonumber(mv.ppUps) or 0) * math.floor(def.pp / 5)
+        local ups = Mediated.slotPpUps(mv, def, Gen.generation(game))
+        mv.pp = Mediated.maxPpOf(def.pp, ups) or def.pp
+        if mv.maxPp ~= nil then mv.maxPp = mv.pp end
       end
     end
   end
@@ -2556,8 +2564,9 @@ function M:onBattleEvent(msg)
   if event and state then state:onBattleEvent(event) end
 end
 
--- In this boot's own vocabulary too: a Gen 3 outcome's `payDay` is read by a
--- Gen 3 client only (Wire.battleOutcome's `generation`).
+-- In this boot's own vocabulary too: an outcome's `payDay` is bounded by the
+-- reader's cart (Wire.battleOutcome's `generation` -- Red and Gold's 999999
+-- from contract K11, Gen 3's u16).
 --
 -- **The one message that does matter before the screen is up.** An outcome
 -- that arrives while this client is still assembling can only be the hub

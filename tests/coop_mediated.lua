@@ -3057,7 +3057,7 @@ do
   local mark = #warns
   play(bob, heldAt(1, 0, "NUGGET", 1))
   eq(bobSlots[2].party[1].item, "BERRY",
-     "gold thief: a joiner keeps nothing from host-described foes (anti-forgery, out of scope by design)")
+     "gold thief: a joiner keeps no gain no foe's loss stands behind (anti-forgery)")
   check(#warns > mark, "gold thief: ...and is told why")
   eq(bob.medMine[1].heldItem, "NUGGET", "gold thief: ...though its fight sheet shows what it holds now")
   local forged = goldScreen("coop_npc")
@@ -3177,6 +3177,194 @@ do
                      text = "BERRY", amount = 1 })
   wildHost:grantCatch({ caught = {} })
   eq(wildMon.item, "BERRY", "gold wild: an item this client described is caught with it")
+
+  -- ------- closing the referee gaps, the 2-on-2's half
+  -- (docs/plans/gen12-referee-gaps-fix.md, wave 2 task C)
+
+  -- Gold trainer items ride the host's npc sheets (gap #12, proven): the
+  -- trainer's engine party mons hold items (src/world/gen2/Trainers.lua
+  -- Trainers.party), and the host describes them with the K2 fields.
+  local npcHost = goldScreen("coop_npc")
+  local npcUp
+  for _, msg in ipairs(npcHost.sent) do
+    if msg.type == Wire.BATTLE_PARTY and msg.payload.side == "b" then npcUp = msg.payload end
+  end
+  eq(npcUp and npcUp.mons[1].heldItem, "NUGGET", "gold trainer item: the host's npc sheet carries the item")
+  eq(npcUp and npcUp.mons[1].holdEffect, "HELD_NONE", "gold trainer item: ...with its K2 hold effect")
+  eq(npcUp and npcUp.mons[1].itemName, "NUGGET", "gold trainer item: ...and the name the cart prints")
+  local npcPacked = npcUp and Wire.battleParty(npcUp, 2)
+  eq(npcPacked and npcPacked.mons[1].heldItem, "NUGGET", "gold trainer item: ...which the wire keeps")
+  -- K7 / K8 / K14 on the same uploads.
+  eq(npcUp and npcUp.mons[1].dvs and npcUp.mons[1].dvs.spe, 8, "K7 (co-op): the trainer's sheet carries its DVs")
+  eq(npcUp and npcUp.mons[1].moves[1].priority, 1, "K8 (co-op): a Gold row states its priority byte")
+
+  -- The joiner's THIEF from a trainer: kept only when the trainer this client
+  -- resolved itself holds that item in its party rows.
+  local bobT, bobTSlots = goldScreen("coop_npc", 2)
+  bobT.trainer = { party = { { item = "NUGGET" }, { item = nil } } }
+  play(bobT, heldAt(2, 0, "NUGGET", 0))
+  play(bobT, heldAt(1, 0, "NUGGET", 1))
+  eq(bobTSlots[2].party[1].item, "NUGGET",
+     "gold thief (joiner): an item the named trainer's own party row holds is kept")
+  local bobF, bobFSlots = goldScreen("coop_npc", 2)
+  bobF.trainer = { party = { { item = "BERRY" } } }
+  play(bobF, heldAt(2, 0, "NUGGET", 0))
+  play(bobF, heldAt(1, 0, "NUGGET", 1))
+  eq(bobFSlots[2].party[1].item, "BERRY",
+     "gold thief (joiner): ...not one this client's data says that trainer never held")
+  local bobN, bobNSlots = goldScreen("coop_npc", 2)
+  play(bobN, heldAt(2, 0, "NUGGET", 0))
+  play(bobN, heldAt(1, 0, "NUGGET", 1))
+  eq(bobNSlots[2].party[1].item, "BERRY",
+     "gold thief (joiner): ...nor any, when this client resolved no trainer at all")
+  local bobS, bobSSlots = goldScreen("coop_npc", 2)
+  bobS.trainer = { party = { { item = "NUGGET" } } }
+  play(bobS, heldAt(2, 0, "NUGGET", 0))
+  play(bobS, heldAt(0, 0, "BERRY", 0))  -- something else in between
+  play(bobS, heldAt(1, 0, "NUGGET", 1))
+  eq(bobSSlots[2].party[1].item, "BERRY",
+     "gold thief (joiner): a loss vouches only for the gain right behind it")
+  -- The rows the engine data names, by class and member, when the record
+  -- carries no built party (Trainers.classIndex over data.trainers).
+  local looked = goldScreen("coop_npc", 2)
+  looked.game.data = setmetatable({ trainers = { classes = { FIXCLASS = { index = 7,
+    trainers = { { id = "FIX1", party = { { species = SPECIES, level = 5, item = "NUGGET" } } } } } } } },
+    { __index = goldDataT })
+  looked.trainer = { class = 7, memberId = "FIX1" }
+  eq(table.concat(looked:trainerItems2(), ","), "NUGGET",
+     "gold thief (joiner): the named trainer's rows, looked up in the engine's own data")
+
+  -- The joiner's THIEF from a wild monster, and its catch: the species' own
+  -- wild item slots in this client's data.
+  local wildData = setmetatable({ pokemon = setmetatable({
+      [SPECIES] = setmetatable({ items = { "BERRY", "NUGGET" } }, { __index = data.pokemon[SPECIES] }),
+    }, { __index = data.pokemon }) }, { __index = goldDataT })
+  local joinSlots = {
+    { side = "a", owner = "ann", name = "ANN", party = { holding(mon(60, 40), nil, 4321) } },
+    { side = "a", owner = "bob", name = "BOB", party = { holding(mon(60, 30), nil, 4321) } },
+    { side = "b", owner = nil, name = "WILD", party = { holding(mon(50, 20), "NUGGET") } },
+  }
+  local joinW = screen({ slots = joinSlots, mine = 2, host = false, mode = "coop_wild", selfId = "bob" })
+  joinW.game = goldGame()
+  joinW.game.data = wildData
+  joinW.gen2Mediated = true
+  eq(joinW:uploadMediated(), true, "gold wild (joiner): the joiner's upload goes out")
+  joinW.mediated = true
+  joinW.medSlots = { [0] = 1, [1] = 2, [2] = 3 }
+  joinW.sim:sendOut(joinW.sim:slot(3), 1, true)
+  play(joinW, heldAt(2, 0, "NUGGET", 0))
+  play(joinW, heldAt(1, 0, "NUGGET", 1))
+  eq(joinSlots[2].party[1].item, "NUGGET",
+     "gold thief (joiner, wild): an item in the species' own item slots is kept")
+  play(joinW, heldAt(2, 0, "MASTER_BALL", 0))
+  play(joinW, heldAt(1, 0, "MASTER_BALL", 1))
+  eq(joinSlots[2].party[1].item, "NUGGET",
+     "gold thief (joiner, wild): ...one off its slots is not, whoever says the foe held it")
+  -- The catch: rebuilt off the outcome's sheet, its item checked the same way.
+  local caught = Mediated.snapshotMons(joinW.game, { holding(mon(50, 20), "BERRY") })[1]
+  joinW.game.save.party = {}
+  joinW.foeHeld2 = nil
+  joinW:grantCatch({ caught = caught })
+  local got = joinW.game.save.party[1]
+  check(got ~= nil, "gold catch (joiner): the monster is rebuilt into the party")
+  eq(got and got.item, "BERRY", "gold catch (joiner): ...holding an item its species can carry")
+  local forgedCatch = Mediated.snapshotMons(joinW.game, { holding(mon(50, 20), "MASTER_BALL") })[1]
+  joinW.game.save.party = {}
+  joinW:grantCatch({ caught = forgedCatch })
+  got = joinW.game.save.party[1]
+  eq(got and got.item, nil, "gold catch (joiner): ...and nothing its species never carries")
+
+  -- K9: our own seat's level-up, once, with the move list (2-on-2).
+  local lv, lvSlots = goldScreen("coop_npc")
+  local own = lvSlots[1].party[1]
+  local before = lv.countSent(Wire.BATTLE_MOVESET)
+  own.level = 21
+  own.stats = { hp = 64, attack = 32, defense = 31, special = 33, speed = 41 }
+  lv:levelled(own, nil, { 21 })
+  eq(lv.countSent(Wire.BATTLE_MOVESET) - before, 1, "K9 (co-op): a level-up of our own mon goes out once")
+  local lvMsg
+  for _, msg in ipairs(lv.sent) do if msg.type == Wire.BATTLE_MOVESET then lvMsg = msg.payload end end
+  eq(lvMsg and lvMsg.level, 21, "K9 (co-op): ...with the new level")
+  eq(lvMsg and lvMsg.maxHp, 64, "K9 (co-op): ...max HP")
+  eq(lvMsg and lvMsg.stats and lvMsg.stats.spe, 41, "K9 (co-op): ...and Gold-dialect stats")
+  check(lvMsg and Wire.battleMoveset(lvMsg, 2) ~= nil, "K9 (co-op): ...which the hub reads")
+  local partner = lvSlots[2].party[1]
+  partner.level = 21
+  lv:levelled(partner, nil, { 21 })
+  eq(lv.countSent(Wire.BATTLE_MOVESET) - before, 1, "K9 (co-op): a partner's monster is the partner's to report")
+
+  -- K11: PAY DAY, every human on side a picks the pot up.
+  local function outcome(sc, coins, winners, losers, reason)
+    sc:onBattleOutcome({ battle = "cb1", outcome = "win", winners = winners, losers = losers,
+                         reason = reason or "ko", payDay = coins })
+  end
+  local function lines(sc)
+    local out = {}
+    for _, list in ipairs({ sc.messages or {}, sc.medPending or {} }) do
+      for _, row in ipairs(list) do
+        local text = type(row) == "string" and row or (type(row) == "table" and row.text)
+        if type(text) == "string" then out[#out + 1] = text end
+      end
+    end
+    return table.concat(out, "|")
+  end
+  local payA = goldScreen("coop_npc")
+  outcome(payA, 50, { "ann", "bob" }, { "npc1", "npc2" })
+  eq(payA.game.save.player.money, 50, "Pay Day (co-op): ANN is paid the pot")
+  check(lines(payA):find("ANN picked up\n¥50!", 1, true) ~= nil, "Pay Day (co-op): ...and reads the cart's line")
+  local payB = goldScreen("coop_npc", 2)
+  outcome(payB, 50, { "ann", "bob" }, { "npc1", "npc2" })
+  eq(payB.game.save.player.money, 50, "Pay Day (co-op): BOB is paid the same whole pot (plan §9)")
+  local payCoin, payCoinSlots = goldScreen("coop_npc")
+  payCoinSlots[1].party[1].item = "AMULET_COIN"
+  payCoin.medMine[1].heldItem, payCoin.medMine[1].holdEffect = "AMULET_COIN", "HELD_AMULET_COIN"
+  play(payCoin, { battle = "cb1", seq = 3, t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+  outcome(payCoin, 50, { "ann", "bob" }, { "npc1", "npc2" })
+  eq(payCoin.game.save.player.money, 100, "Pay Day (co-op, Gold): doubled by our AMULET COIN")
+  local payPvp = goldScreen("coop_pvp")
+  outcome(payPvp, 50, { "ann", "bob" }, { "cal", "dee" })
+  eq(payPvp.game.save.player.money, 0, "Pay Day (co-op): never between players")
+  local payLost = goldScreen("coop_npc")
+  outcome(payLost, 50, { "npc1", "npc2" }, { "ann", "bob" }, "run")
+  eq(payLost.game.save.player.money, 0, "Pay Day (co-op, Gold): a flee is a DRAW on Gold -- nothing")
+  -- Red pays a flee (EndOfBattle while wBattleResult is 0).
+  local redRun = screen({ slots = npcSlots(), mine = 1, host = true, mode = "coop_wild", selfId = "ann" })
+  redRun.mediated = true
+  redRun.game.save.money = 10
+  outcome(redRun, 30, { "npc1" }, { "ann", "bob" }, "run")
+  eq(redRun.game.save.money, 40, "Pay Day (co-op, Red): a flee picks the pot up")
+end
+
+-- ------- the Gold target picker asks for every move aimed at somebody
+do
+  local goldPick = setmetatable({
+    game = { generation = 2, data = { moves = {
+      HYPNOSIS = { power = 0, effect = "EFFECT_SLEEP" },
+      THUNDER_WAVE = { power = 0, effect = "EFFECT_PARALYZE" },
+      MEAN_LOOK = { power = 0, effect = "EFFECT_MEAN_LOOK" },
+      SWORDS_DANCE = { power = 0, effect = "EFFECT_ATTACK_UP_2" },
+      PROTECT = { power = 0, effect = "EFFECT_PROTECT" },
+      HAZE = { power = 0, effect = "EFFECT_RESET_STATS" },
+      SPIKES = { power = 0, effect = "EFFECT_SPIKES" },
+      TRANSFORM = { power = 0, effect = "EFFECT_TRANSFORM" },
+      CURSE = { power = 0, effect = "EFFECT_CURSE" },
+      ZAP = { power = 0, effect = "EFFECT_SOMETHING_NEW" },
+      TACKLE = { power = 35, effect = "EFFECT_NORMAL_HIT" },
+    }, move_effects = { EFFECT_SLEEP = { kind = "primary" }, EFFECT_PARALYZE = { kind = "primary" },
+                        EFFECT_MEAN_LOOK = { kind = "primary" } } } },
+  }, { __index = CoopBattle })
+  local function aims(id) return goldPick:needsTarget({ id = id }) end
+  eq(aims("HYPNOSIS"), true, "Gold picker: HYPNOSIS (a primary status record) asks whom")
+  eq(aims("THUNDER_WAVE"), true, "Gold picker: THUNDER WAVE too")
+  eq(aims("MEAN_LOOK"), true, "Gold picker: MEAN LOOK too")
+  eq(aims("SWORDS_DANCE"), false, "Gold picker: a stat raise is aimed at nobody")
+  eq(aims("PROTECT"), false, "Gold picker: PROTECT likewise")
+  eq(aims("HAZE"), false, "Gold picker: HAZE resets every battler")
+  eq(aims("SPIKES"), false, "Gold picker: SPIKES lands on the foe's side, not a foe")
+  eq(aims("TRANSFORM"), true, "Gold picker: TRANSFORM reads its target")
+  eq(aims("CURSE"), true, "Gold picker: CURSE reads one when its user is a Ghost")
+  eq(aims("ZAP"), true, "Gold picker: an effect off the list keeps the picker")
+  eq(aims("TACKLE"), true, "Gold picker: anything with power keeps it")
 end
 
 T.finish("coop_mediated")

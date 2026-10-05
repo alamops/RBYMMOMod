@@ -549,6 +549,81 @@ local STAT_EFFECTS = {
   [63] = { stat = "eva", delta = -2, selfTarget = false },
 }
 
+-- TransformEffect_'s `.copyPPLoop`: every copied move gets 5 PP.
+M.TRANSFORM_PP = 5
+-- DisableEffect's slot draw is a loop the cart never needs to bound; the
+-- referee bounds it (applyPrimary) so a malformed sheet cannot hang a hub.
+M.DISABLE_PICK_GUARD = 4096
+
+-- The primary stat drops, StatModifierDownEffect's non-side branch.
+function M.isPrimaryStatDown(effectId)
+  local fx = STAT_EFFECTS[int(effectId, 0)]
+  return fx ~= nil and fx.delta < 0
+end
+
+-- MoveHitTest's Mist check (core.asm :5262-5299): the mover's effect in
+-- ATTACK_DOWN1..HAZE or ATTACK_DOWN2..REFLECT against a target PROTECTED_BY_
+-- MIST misses, before the accuracy byte.  Of those, only the stat drops ever
+-- call MoveHitTest (Conversion, Haze and the screens are ResidualEffects1 and
+-- never do), so the drops are the whole of it.
+function M.mistBlocks(effectId, targetMon)
+  return M.isPrimaryStatDown(effectId) and type(targetMon) == "table"
+    and targetMon.mist == true
+end
+
+-- How a power-0 move meets MoveHitTest, by its pokered routine.  The cart
+-- never runs MoveHitTest for a power-0 move on the way in (CalculateDamage's
+-- `jp z, PlayerCheckIfFlyOrChargeEffect`, core.asm :3145; ResidualEffects1
+-- jumps past it, :3125), so each effect's routine decides:
+--   "none"     -- no hit test at all: no INVULNERABLE miss, no accuracy byte.
+--                 The self and field effects, Bide, Teleport (its own level
+--                 roll), Transform (its own broken check), Splash, Mirror
+--                 Move / Metronome (the called move tests), and an
+--                 effect-less move (`.executeOtherEffects` finds nothing).
+--   "conversion" -- ConversionEffect_'s own INVULNERABLE check, no byte.
+--   "statdown" -- StatModifierDownEffect: the computer's extra miss byte, a
+--                 Substitute, then MoveHitTest (Mist inside it).
+--   "poison"   -- PoisonEffect: a Substitute, a status, a Poison type, then
+--                 MoveHitTest.
+--   "disable"  -- DisableEffect: MoveHitTest, "But it failed!" on a miss.
+--   "test"     -- MoveHitTest first, the effect's own checks after (Sleep,
+--                 Confusion, Paralyze, Mimic, Leech Seed) -- kept as before.
+local STATUS_PLAN = {
+  [0] = "none", [1] = "none", [9] = "none", [83] = "none",
+  [10] = "none", [11] = "none", [12] = "none", [13] = "none", [14] = "none", [15] = "none",
+  [50] = "none", [51] = "none", [52] = "none", [53] = "none", [54] = "none", [55] = "none",
+  [25] = "none", [26] = "none", [28] = "none", [46] = "none", [47] = "none",
+  [56] = "none", [57] = "none", [64] = "none", [65] = "none", [79] = "none", [85] = "none",
+  [24] = "conversion",
+  [18] = "statdown", [19] = "statdown", [20] = "statdown", [21] = "statdown",
+  [22] = "statdown", [23] = "statdown", [58] = "statdown", [59] = "statdown",
+  [60] = "statdown", [61] = "statdown", [62] = "statdown", [63] = "statdown",
+  [66] = "poison", [86] = "disable",
+  [32] = "test", [49] = "test", [67] = "test", [82] = "test", [84] = "test",
+}
+
+-- An effect outside the table is a power-0 move whose routine is a damaging
+-- one (a modded sheet): CalculateDamage returned before the hit test, so it
+-- is "none" too.
+function M.statusPlan(effectId)
+  return STATUS_PLAN[int(effectId, 0)] or "none"
+end
+
+-- PoisonEffect's turn-aways (effects.asm :78-96), checked before its
+-- MoveHitTest: a Substitute, any status at all, a Poison type (`cp POISON`
+-- on both type bytes; `poisonType` is the ruleset's index, nil when it named
+-- none).  The primary routine says "It didn't affect" for all three.
+function M.poisonTurnsAway(targetMon, poisonType)
+  if type(targetMon) ~= "table" then return true end
+  if M.hasSubstitute(targetMon) or M.hasMajorStatus(targetMon) then return true end
+  if poisonType ~= nil and type(targetMon.types) == "table" then
+    for i = 1, #targetMon.types do
+      if targetMon.types[i] == poisonType then return true end
+    end
+  end
+  return false
+end
+
 local PHASE1_PRIMARY = {
   [10] = true, [11] = true, [12] = true, [13] = true, [14] = true, [15] = true,
   [18] = true, [19] = true, [20] = true, [21] = true, [22] = true, [23] = true,
@@ -635,29 +710,20 @@ end
 -- the side-effect drops (ATTACK_DOWN_SIDE_EFFECT..SPECIAL_DOWN_SIDE_EFFECT)
 -- are past that range, and StatModifierDownEffect's side branch never calls
 -- MoveHitTest -- so AURORA BEAM lowers a Mist user's Attack.
+--
+-- The walls a primary hits say what the cart's routines say: a raise at +6
+-- is StatModifierUpEffect's `jp c, PrintNothingHappenedText` (effects.asm
+-- :368-370) and a drop at -6 is CantLowerAnymore (:705-710), both "Nothing
+-- happened!" -- the same line the 999 / 1 walls print.  Mist is no longer
+-- asked here: it is MoveHitTest's (core.asm :5262-5283), and Turn runs that
+-- before the accuracy byte (`_statusHitTest`).
 local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side)
-  if delta < 0 and mon.mist and not side then
-    out.messages[#out.messages + 1] = "But it failed"
-    return
-  end
   local label = STAT_LABELS[stat] or stat
   local outcome, after = M.changeStat({
     mon = mon, fighter = fighter, stat = stat, delta = delta,
     mover = mover, nonMover = nonMover,
   })
-  if outcome == "max" then
-    out.messages[#out.messages + 1] =
-      mon.species .. "'s " .. label .. " won't go any higher"
-    return
-  end
-  if outcome == "min" then
-    if not side then
-      out.messages[#out.messages + 1] =
-        mon.species .. "'s " .. label .. " won't go any lower"
-    end
-    return
-  end
-  if outcome == "stuck" then
+  if outcome == "max" or outcome == "min" or outcome == "stuck" then
     if not side then out.messages[#out.messages + 1] = "Nothing happened" end
     return
   end
@@ -669,21 +735,39 @@ local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, 
   -- so Wire.battleEvent strips a negative one in transit; leaving it out here
   -- keeps the stream the referee emits the stream a client receives.
   if after >= 0 then fields.amount = after end
+  -- ...and `stage` says it signed, -6..6, every time (contract K10).
+  fields.stage = after
   fields.text = text
   out.events[#out.events + 1] = { kind = "stat", fields = fields }
 end
 
 -- HazeEffect_ (engine/battle/move_effects/haze.asm) on one battler: every
--- stage back to neutral, the unmodified stats copied over the battle ones --
--- which lifts a burn or paralysis penalty and every badge boost until
--- something rebuilds them (ResetStats skips HP and nothing else) -- and its
--- Reflect and Light Screen gone (CureVolatileStatuses).
+-- stage back to neutral (ResetStatMods), the unmodified stats copied over the
+-- battle ones -- which lifts a burn or paralysis penalty and every badge boost
+-- until something rebuilds them (ResetStats skips HP and nothing else) -- its
+-- Disable gone, and CureVolatileStatuses: confusion, X Accuracy, Mist, Focus
+-- Energy, Leech Seed, and BattleStatus3's Bad Poison, Reflect and Light
+-- Screen (`and %11110000 | 1 << TRANSFORMED` keeps the Transform).  The Bad
+-- Poison bit going leaves a TOXIC monster plain poisoned -- its PSN bit is in
+-- the status byte, which Haze cures on the target alone (`applyPrimary`) --
+-- and takes a lingering bit (`toxicLinger`) with it.  Returns whether the
+-- battler was confused, for the snap-out chip.
 local function hazeReset(mon)
   M.ensureBattleStats(mon)
   resetStages(mon)
   mon.cur = statBlock(mon.stats)
   mon.reflect = false
   mon.lightScreen = false
+  mon.disable = nil
+  mon.xAccuracy = false
+  mon.mist = false
+  mon.focusEnergy = false
+  mon.leechSeed = nil
+  if mon.status == "toxic" then mon.status = "poison" end
+  mon.toxicLinger = nil
+  local confused = int(mon.confusion, 0) > 0
+  mon.confusion = 0
+  return confused
 end
 
 -- Whether a Substitute stands in front of `mon`.  The doll's HP is
@@ -697,22 +781,118 @@ function M.hasSubstitute(mon)
 end
 
 -- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
--- Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
--- Substitute) and field-wide Haze still run; Conversion copies onto the user.
+-- Transform, Mimic). Self-targeting (Recover, Swords Dance, Substitute) and
+-- field-wide Haze still run; Conversion copies onto the user.  DisableEffect
+-- (effects.asm :1286-1367) never asks CheckTargetSubstitute -- its only test
+-- is MoveHitTest, whose Substitute check is the broken drain one -- so
+-- DISABLE reaches the monster behind a doll.
 local function blockedBySubstitute(effectId)
   local statFx = STAT_EFFECTS[effectId]
   if statFx then return not statFx.selfTarget end
   if effectId == 24 or effectId == 25 or effectId == 46 or effectId == 47
       or effectId == 56 or effectId == 64 or effectId == 65
-      or effectId == 79 or effectId == 85 then
+      or effectId == 79 or effectId == 85 or effectId == 86 then
     return false
   end
   return true
 end
 
+-- ------------------------------------------------------------------
+-- CalcStat (home/move_mon.asm :54-229)
+-- ------------------------------------------------------------------
+--
+-- One stat from its base, its DV, the level and (when `statExp` is not nil)
+-- the stat exp: floor(((base + DV) * 2 + floor(b / 4)) * level / 100) + 5,
+-- and + level + 10 for HP, held at 999.  `b` is `.statExpLoop`'s: the least
+-- b >= 1 with b * b >= stat exp, at most 255 -- so a stat exp of 0 still
+-- counts 1, which floors to 0.  `statExp` nil is CalcStat called with `b = 0`
+-- ("consider stat exp?" no): the term is 0.  GetEnemyMonStat (core.asm
+-- :4258-4297) is the second; a level-up's CalcStats (experience.asm) the
+-- first.
+function M.statExpBonus(statExp)
+  local se = max(0, int(statExp, 0))
+  local b = 1
+  while b < 255 and b * b < se do b = b + 1 end
+  return b
+end
+
+function M.calcStat(base, dv, level, statExp, isHp)
+  local term = 0
+  if statExp ~= nil then term = floor(M.statExpBonus(statExp) / 4) end
+  local L = max(0, int(level, 1))
+  local value = floor(((max(0, int(base, 0)) + max(0, int(dv, 0))) * 2 + term) * L / 100)
+  if isHp then value = value + L + 10 else value = value + 5 end
+  if value > M.MAX_STAT_VALUE then value = M.MAX_STAT_VALUE end
+  return value
+end
+
+-- The HP DV CalcStat builds out of the other four's low bits (`.getHPIV`).
+function M.hpDv(dvs)
+  if type(dvs) ~= "table" then return 0 end
+  return (int(dvs.atk, 0) % 2) * 8 + (int(dvs.def, 0) % 2) * 4
+    + (int(dvs.spd, 0) % 2) * 2 + (int(dvs.spc, 0) % 2)
+end
+
+-- ------------------------------------------------------------------
+-- Transform (engine/battle/move_effects/transform.asm), and undoing it
+-- ------------------------------------------------------------------
+
+local function copyList(list)
+  local out = {}
+  if type(list) == "table" then for i = 1, #list do out[i] = list[i] end end
+  return out
+end
+
+local function copyMoveRow(m)
+  return {
+    id = m.id or "move", name = m.name,
+    pp = max(0, int(m.pp, 0)), maxPp = m.maxPp,
+    power = max(0, int(m.power, 0)), accuracy = max(0, int(m.accuracy, 255)),
+    type = max(0, int(m.type, 0)), effect = max(0, int(m.effect, 0)),
+    chance = max(0, int(m.chance, 0)), highCrit = m.highCrit == true,
+    ppUps = m.ppUps,
+  }
+end
+
+local function copyKeyed(t)
+  if type(t) ~= "table" then return nil end
+  local out = {}
+  for k, v in pairs(t) do out[k] = v end
+  return out
+end
+
+-- What a switch-out gives back.  TransformEffect_ rewrites the battle
+-- struct only (wBattleMon / wEnemyMon); the party struct keeps the
+-- monster's own species, types, moves and PP -- DecrementPP returns before
+-- the party copy while TRANSFORMED is set -- so LoadBattleMonFromParty
+-- (core.asm :1626-1667) brings all of it back.  The referee keeps the
+-- pre-Transform copy on the monster (`preTransform`, the first Transform's
+-- only: a second one copies over a battle struct the party never saw) and
+-- restores it here, at a switch-in and at a faint.  The stats are
+-- `loadBattleStats`'.
+function M.untransform(mon)
+  if type(mon) ~= "table" then return end
+  local saved = mon.preTransform
+  mon.preTransform = nil
+  mon.transformed = false
+  if not saved then return end
+  mon.types = saved.types
+  mon.moves = saved.moves
+  mon.baseSpd = saved.baseSpd
+  mon.base = saved.base
+  mon.dvs = saved.dvs
+end
+
 -- ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
---      moveIndex (1-based), statusToWire
--- Returns { nothing, messages, events, heals } where heals = { amount } for user.
+--      moveIndex (1-based), statusToWire, plus
+--   moveId       the move's id (PoisonEffect's `cp TOXIC`)
+--   field        every standing battler, { fighter, mon } in field order
+--                (Haze's reach)
+--   playerMover  the user is "the player" (Transform's broken check)
+--   unlimitedPp  the target is the computer's, whose PP DisableEffect never
+--                reads outside a link battle
+-- Returns { nothing, messages, events, heals, cannotMove } where heals =
+-- { amount } for user and `cannotMove` is Haze's CANNOT_MOVE on the target.
 function M.applyPrimary(ctx)
   ctx = ctx or {}
   local out = { nothing = false, messages = {}, events = {}, heals = {}, costs = {}, directDamage = {} }
@@ -741,10 +921,37 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 25 then -- HAZE_EFFECT
-    -- Both battlers of the action, as the cart's two: stages, battle stats
-    -- and screens (see hazeReset).
-    hazeReset(userMon)
-    hazeReset(targetMon)
+    -- Every battler on the field gets hazeReset -- the cart's two, every
+    -- standing one of a 2v2 (`ctx.field`, field order; the user and the
+    -- target when a caller names none) -- and only the TARGET's status byte
+    -- is cured (`.cureStatuses`), whatever it held.  A target that was
+    -- asleep or frozen loses the move it has not used yet: `ld a, $ff /
+    -- ld [de], a` writes CANNOT_MOVE over its selected move (`cannotMove`,
+    -- Turn's to honour).
+    local field = ctx.field
+    if type(field) ~= "table" or #field == 0 then
+      field = { { fighter = userFighter, mon = userMon },
+                { fighter = targetFighter, mon = targetMon } }
+    end
+    local snapped = {}
+    for _, seat in ipairs(field) do
+      if hazeReset(seat.mon) then snapped[#snapped + 1] = seat end
+    end
+    local cured = targetMon.status
+    if cured then
+      targetMon.status = nil
+      targetMon.statusTurns = 0
+      if cured == "sleep" or cured == "freeze" then out.cannotMove = true end
+      local fields = fighterFields(targetFighter)
+      fields.text = targetMon.species .. " recovered"
+      out.events[#out.events + 1] = { kind = "status", fields = fields }
+    end
+    for _, seat in ipairs(snapped) do
+      local fields = fighterFields(seat.fighter)
+      fields.confused = 0
+      fields.text = seat.mon.species .. " snapped out of confusion"
+      out.events[#out.events + 1] = { kind = "status", fields = fields }
+    end
     out.messages[#out.messages + 1] = "All stat changes were eliminated"
     return out
   end
@@ -777,13 +984,22 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 66 then -- POISON_EFFECT
+    -- PoisonEffect's turn-aways (a doll, any status, a Poison type) ran in
+    -- Turn before the hit test (`M.poisonTurnsAway`); this is what is left
+    -- for a target that has none.  `.inflictPoison`: TOXIC -- the move, by
+    -- its id (`cp TOXIC` on wPlayerMoveNum) -- sets BADLY_POISONED and zeroes
+    -- the counter (the referee's counter is the cart's plus one, so 1), and
+    -- says "<TARGET>'s badly poisoned!"; anything else is plain PSN.
     if M.hasMajorStatus(targetMon) then
       out.nothing = true
       return out
     end
-    targetMon.status = "poison"
-    local token = wire.poison or "PSN"
-    local text = targetMon.species .. " was poisoned"
+    local toxic = M.moveKey(ctx.moveId) == "TOXIC"
+    targetMon.status = toxic and "toxic" or "poison"
+    targetMon.toxicLinger = nil
+    if toxic then targetMon.toxicCounter = 1 end
+    local token = toxic and (wire.toxic or "TOX") or (wire.poison or "PSN")
+    local text = targetMon.species .. (toxic and "'s badly poisoned" or " was poisoned")
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
@@ -831,19 +1047,70 @@ function M.applyPrimary(ctx)
   end
 
   if effectId == 86 then -- DISABLE_EFFECT
-    local lastIdx = int(targetMon.lastMoveIndex, 0)
-    if lastIdx < 1 or not targetMon.moves[lastIdx] then
-      out.nothing = true
+    -- DisableEffect (effects.asm :1286-1367), after its MoveHitTest (Turn):
+    -- a target with a move already disabled fails; otherwise `BattleRandom
+    -- & 3` picks a slot, redrawn until it holds a move.  When the target is
+    -- the player's monster (the enemy's turn, or a link battle -- both sides
+    -- of one here, the owner's rule), the slot must also have PP: every PP
+    -- at 0 (masked) is "But it failed!" -- after the draw that found a
+    -- move -- and a slot whose raw PP byte is 0 is redrawn.  The raw byte
+    -- holds the PP Ups in its top two bits, so a 0-PP move with PP Ups
+    -- (K8 `ppUps`) can be the one disabled.  The computer's moves have
+    -- unlimited PP outside a link battle (`ctx.unlimitedPp`) and are taken
+    -- as found.  Then `BattleRandom & 7` + 1 turns: 1..8.
+    if targetMon.disable and int(targetMon.disable.turns, 0) > 0 then
+      out.messages[#out.messages + 1] = "But it failed"
       return out
     end
-    if targetMon.disable and targetMon.disable.turns and targetMon.disable.turns > 0 then
-      out.nothing = true
+    local moves = targetMon.moves or {}
+    if #moves == 0 or not rng then
+      out.messages[#out.messages + 1] = "But it failed"
       return out
     end
-    local turns = (rng and rng:byte() or 0) % 4 + 2
-    targetMon.disable = { moveIndex = lastIdx, turns = turns }
+    local slot, tries = nil, 0
+    while not slot do
+      tries = tries + 1
+      -- A freeze guard the cart does not need (a target always holds a move
+      -- with PP by the time this loops); `byte % 4` reaches every slot long
+      -- before it.
+      if tries > M.DISABLE_PICK_GUARD then
+        for i = 1, #moves do
+          if ctx.unlimitedPp or int(moves[i].pp, 0) > 0
+             or int(moves[i].ppUps, 0) > 0 then
+            slot = i
+            break
+          end
+        end
+        break
+      end
+      local pick = rng:byte() % 4 + 1
+      local m = moves[pick]
+      if m then
+        if ctx.unlimitedPp then
+          slot = pick
+        else
+          local anyPp = false
+          for i = 1, #moves do
+            if int(moves[i].pp, 0) > 0 then anyPp = true end
+          end
+          if not anyPp then
+            out.messages[#out.messages + 1] = "But it failed"
+            return out
+          end
+          if int(m.pp, 0) > 0 or int(m.ppUps, 0) > 0 then slot = pick end
+        end
+      end
+    end
+    if not slot then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
+    local turns = rng:byte() % 8 + 1
+    -- The slot (the menu's wPlayerDisabledMove nibble) and the move's id
+    -- (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
+    targetMon.disable = { moveIndex = slot, turns = turns, moveId = moves[slot].id }
     out.messages[#out.messages + 1] =
-      moveLabel(targetMon.moves[lastIdx]) .. " was disabled"
+      moveLabel(moves[slot]) .. " was disabled"
     return out
   end
 
@@ -947,9 +1214,38 @@ function M.applyPrimary(ctx)
   if effectId == 57 then -- TRANSFORM_EFFECT
     -- TransformEffect_ (transform.asm) copies the target's battle stats AND
     -- its unmodified ones, and its stat mods below; the user's party stats are
-    -- untouched, which is what a later critical hit reads.
+    -- untouched, which is what a later critical hit reads.  Its INVULNERABLE
+    -- check is the cart's bug: on the player's turn it tests the USER's own
+    -- BattleStatus1 (`ld a, [wPlayerBattleStatus1]`), so only a player's
+    -- monster still flagged INVULNERABLE (the full-paralysis FLY glitch)
+    -- fails; on the enemy's turn `a` is hWhoseTurn (1) and bit 6 is clear,
+    -- so nothing fails.  `ctx.playerMover` is the owner's rule for "the
+    -- player" (Turn: side a against the computer, both sides of a link).
+    if ctx.playerMover and userMon.invulnerable then
+      out.messages[#out.messages + 1] = "But it failed"
+      return out
+    end
     M.ensureBattleStats(userMon)
     M.ensureBattleStats(targetMon)
+    -- The party struct's view, kept for the switch-out (`M.untransform`).
+    if not userMon.preTransform then
+      local moves = {}
+      for i = 1, #(userMon.moves or {}) do moves[i] = copyMoveRow(userMon.moves[i]) end
+      userMon.preTransform = {
+        types = copyList(userMon.types), moves = moves, baseSpd = userMon.baseSpd,
+        base = copyKeyed(userMon.base), dvs = copyKeyed(userMon.dvs),
+      }
+    end
+    -- The species byte (wBattleMonSpecies), which CriticalHitTest reads its
+    -- base Speed off, and GetEnemyMonStat its base stats: the target's sheet
+    -- names them (`baseSpd`, K7 `base`).  The DVs come along too (`.next`
+    -- copies two bytes of the target's), which GetEnemyMonStat reads as well.
+    userMon.baseSpd = targetMon.baseSpd
+    if userMon.baseSpd == nil and type(targetMon.base) == "table" then
+      userMon.baseSpd = targetMon.base.spd
+    end
+    userMon.base = copyKeyed(targetMon.base)
+    userMon.dvs = copyKeyed(targetMon.dvs)
     userMon.stats.atk = max(1, int(targetMon.stats.atk, 1))
     userMon.stats.def = max(1, int(targetMon.stats.def, 1))
     userMon.stats.spd = max(1, int(targetMon.stats.spd, 1))
@@ -964,13 +1260,17 @@ function M.applyPrimary(ctx)
     userMon.stages.spc = M.clampStage(targetMon.stages.spc)
     userMon.stages.acc = M.clampStage(targetMon.stages.acc)
     userMon.stages.eva = M.clampStage(targetMon.stages.eva)
+    -- `.copyPPLoop`: 5 PP for every move copied (the whole PP byte, so no
+    -- PP Ups), whatever the target had left.
     local copied = {}
     for i = 1, #targetMon.moves do
       local m = targetMon.moves[i]
       copied[#copied + 1] = {
         id = m.id or "move",
         name = m.name,
-        pp = max(0, int(m.pp, 0)),
+        pp = M.TRANSFORM_PP,
+        maxPp = M.TRANSFORM_PP,
+        ppUps = 0,
         power = max(0, int(m.power, 0)),
         accuracy = max(0, int(m.accuracy, 255)),
         type = max(0, int(m.type, 0)),
@@ -1125,6 +1425,8 @@ end
 --                  because no index can be told to be either type.
 --   computerMover  the move is the computer's (StatModifierDownEffect's
 --                  extra miss)
+--   playerMover    the move is the player's (FreezeBurnParalyzeEffect's
+--                  ClearHyperBeam on a freeze)
 -- Returns { proc, messages, events }; `proc` is the routine's own draw
 -- landing (not the computer's miss byte).
 function M.applySide(ctx)
@@ -1180,16 +1482,25 @@ function M.applySide(ctx)
     if hasType(targetMon, moveType) then return out end
     if not drawBelow(rng, threshold) then return out end
     out.proc = true
+    -- `.freeze1` -- the player's turn -- calls ClearHyperBeam on the target
+    -- before writing FRZ; `.freeze2` does not ("hyper beam bits aren't reset
+    -- for opponent's side").  `playerMover` is the owner's reading of "the
+    -- player": side a against the computer, both sides of a link fight.
+    if status == "freeze" and ctx.playerMover then targetMon.mustRecharge = false end
     inflict(out, targetFighter, targetMon, status, wire)
     return out
   end
 
-  -- FlinchSideEffect (:971-993): a Substitute returns before the draw.
+  -- FlinchSideEffect (:971-993): a Substitute returns before the draw; a
+  -- flinch that lands runs ClearHyperBeam on its target (:991), on either
+  -- side's turn -- so a HYPER BEAM user a slower foe flinches never
+  -- recharges.
   if SIDE_FLINCH[effectId] then
     if behindSub then return out end
     if not drawBelow(rng, threshold) then return out end
     out.proc = true
     targetMon.flinch = true
+    targetMon.mustRecharge = false
     return out
   end
 
@@ -1245,6 +1556,15 @@ function M.isMultihit(effectId)
   return MULTIHIT[int(effectId, 0)] == true
 end
 
+-- CalculateDamage (core.asm :4321-4325) jumps past its power-0 return for
+-- the two-to-five pair, so a 0-power TWO_TO_FIVE / EFFECT_1E move still
+-- computes a hit: a 0 quotient plus the 2 floor, then STAB, the chart and
+-- the roll (a 2 rolls).
+function M.hitsAtPowerZero(effectId)
+  local id = int(effectId, 0)
+  return id == 29 or id == 30
+end
+
 -- TwoToFiveAttacksEffect (effects.asm :925-969): ATTACK_TWICE and TWINEEDLE
 -- are 2 with no draw; the two-to-five pair draws `BattleRandom & 3`, keeps a
 -- 0 or 1 (2 or 3 hits), and on a 2 or 3 draws `& 3` again and keeps that --
@@ -1289,29 +1609,73 @@ function M.recoilAmount(damage, struggle)
   return max(1, floor(d / 4))
 end
 
--- ctx: effectId, userMon, targetMon, power, userSpeed, foeSpeed
--- Returns fixed damage, or nil when the effect fails (OHKO speed gate).
-function M.fixedDamage(ctx)
+-- SetDamageEffects (data/battle/set_damage_effects.asm): SUPER FANG and
+-- SPECIAL_DAMAGE skip CriticalHitTest, HandleCounterMove, CalculateDamage,
+-- AdjustDamageForMoveType and RandomizeDamage (core.asm :3137-3140) and go
+-- straight to MoveHitTest, so they draw no crit byte and no roll and reach a
+-- Ghost or a Normal type the chart would wall; their number is
+-- ApplyAttackToEnemyPokemon's (:4612-4672).  OHKO is not one of them: it
+-- runs the ordinary path with OneHitKOEffect_ in CalculateDamage's place.
+local SET_DAMAGE = { [40] = true, [41] = true }
+
+function M.isSetDamage(effectId)
+  return SET_DAMAGE[int(effectId, 0)] == true
+end
+
+function M.isOhko(effectId)
+  return int(effectId, 0) == 38
+end
+
+-- OneHitKOEffect_ (move_effects/one_hit_ko.asm): `sub b / sbc b / jr c,
+-- .userIsSlower` -- the move fails only when the user's current Speed is
+-- below the target's, so a tie lands.
+function M.ohkoLands(userSpeed, foeSpeed)
+  return int(userSpeed, 0) >= int(foeSpeed, 0)
+end
+
+-- `.specialDamage` reads wPlayerMoveNum, not the move's power (every one of
+-- these is power 1 on the cart): SEISMIC TOSS and NIGHT SHADE deal the
+-- user's level, SONICBOOM 20, DRAGON RAGE 40, and anything else is PSYWAVE.
+-- Keyed by the move id the way COUNTER and QUICK ATTACK are.
+M.SPECIAL_DAMAGE = {
+  SEISMIC_TOSS = "level", NIGHT_SHADE = "level",
+  SONICBOOM = 20, DRAGON_RAGE = 40, PSYWAVE = "psywave",
+}
+
+-- PSYWAVE's damage: b = level + level / 2 (an 8-bit `add`, so a level over
+-- 170 wraps), then `BattleRandom` redrawn until it is in [1, b).  A b of 0
+-- or 1 has no such byte and freezes the cart; the referee deals 1 there and
+-- draws nothing (quirks reproduced, freezes never).
+function M.psywaveDamage(level, rng)
+  local L = max(0, int(level, 1)) % 256
+  local b = (L + floor(L / 2)) % 256
+  if b <= 1 or not rng then return 1 end
+  local r
+  repeat r = rng:byte() until r ~= 0 and r < b
+  return r
+end
+
+-- ctx: effectId, moveId, userMon, targetMon, power, rng
+-- The damage a SetDamageEffects move deals, drawn where the cart draws it
+-- (PSYWAVE's loop, after the hit test).  A SPECIAL_DAMAGE move whose id the
+-- cart's table does not name is a modded one with no cart rule to follow:
+-- it keeps the referee's older reading, its power when above 1 and the
+-- user's level otherwise.
+function M.setDamage(ctx)
   ctx = ctx or {}
   local effectId = int(ctx.effectId, 0)
-  local userMon = ctx.userMon
-  local targetMon = ctx.targetMon
-  local movePower = int(ctx.power, 0)
-  local userSpeed = int(ctx.userSpeed, 0)
-  local foeSpeed = int(ctx.foeSpeed, 0)
-
-  if effectId == 38 then
-    if userSpeed <= foeSpeed then return nil end
-    return max(1, int(targetMon.hp, 0))
-  end
+  local userMon = ctx.userMon or {}
+  local targetMon = ctx.targetMon or {}
   if effectId == 40 then
     return max(1, floor(int(targetMon.hp, 0) / 2))
   end
-  if effectId == 41 then
-    if movePower >= 1 then return movePower end
-    return max(1, int(userMon.level, 1))
-  end
-  return nil
+  local rule = M.SPECIAL_DAMAGE[M.moveKey(ctx.moveId)]
+  if rule == "level" then return max(0, int(userMon.level, 1)) end
+  if rule == "psywave" then return M.psywaveDamage(userMon.level, ctx.rng) end
+  if type(rule) == "number" then return rule end
+  local power = int(ctx.power, 0)
+  if power > 1 then return power end
+  return max(1, int(userMon.level, 1))
 end
 
 -- ------------------------------------------------------------------
@@ -1377,8 +1741,23 @@ function M.isTrapping(effectId)
   return int(effectId, 0) == 42
 end
 
+-- TrappingEffect (effects.asm :1080-1103): `BattleRandom & 3`, kept when
+-- 0 or 1, else drawn again -- the counter is that plus one, the attacks
+-- after the first, so 2..5 attacks in all at 3/8, 3/8, 1/8, 1/8 (the
+-- two-to-five odds).  The referee's `turns` is the total.
 function M.trapTurns(rng)
-  return 2 + (rng and rng:byte() or 0) % 4
+  local n = (rng and rng:byte() or 0) % 4
+  if n >= 2 then n = (rng and rng:byte() or 0) % 4 end
+  return 2 + n
+end
+
+-- The two SpecialEffectsCont routines (data/battle/special_effects.asm):
+-- PlayerCanExecuteMove runs them before damage calculation and every hit
+-- test (core.asm :3131-3133), so their counters are drawn first and
+-- TrappingEffect's ClearHyperBeam lands even when the move then misses.
+function M.startsBeforeHit(effectId)
+  local id = int(effectId, 0)
+  return id == 27 or id == 42
 end
 
 function M.isHyperBeam(effectId)
@@ -1740,8 +2119,12 @@ function M.isJumpKick(effectId)
   return int(effectId, 0) == 45
 end
 
-function M.jumpKickCrash(maxHp)
-  return max(1, floor(max(1, int(maxHp, 1)) / 8))
+-- PrintMoveFailureText (core.asm :3718-3768): the crash is wDamage / 8,
+-- bumped to 1 -- and wDamage is always 0 by then ("since the move missed,
+-- wDamage will always contain 0 at this point"), so it is 1, whatever the
+-- monster's HP.  `wDamage` is taken for the cart's own reading.
+function M.jumpKickCrash(wDamage)
+  return max(1, floor(max(0, int(wDamage, 0)) / 8))
 end
 
 function M.isSwitchAndTeleport(effectId)

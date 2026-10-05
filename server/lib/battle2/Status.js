@@ -5,10 +5,13 @@
  *
  * Node twin of src/BattleSim2/Status.lua. Differs from Gen1 Status.js:
  *
- *   * Freeze thaws 1/5 (roll % 5 === 0).
- *   * Burn and poison tick 1/8 max HP (not 1/16). Burn still halves physical
- *     Attack via burnAttack — SpA is untouched.
- *   * Toxic still ramps as max(1, floor(maxHp * counter / 16)).
+ *   * Freeze never thaws before a move (CheckTurn draws nothing for it);
+ *     HandleDefrost thaws between turns under DEFROST_BYTE (`defrosts`).
+ *   * Burn and poison tick 1/8 max HP (not 1/16), GetEighthMaxHP's bytes
+ *     (Items.eighth). Burn still halves physical Attack via burnAttack —
+ *     SpA is untouched.
+ *   * Toxic ramps as GetSixteenthMaxHP (Items.sixteenth) times the count, a
+ *     16-bit sum.
  *   * Paralysis full-stops 1/4 of the time (roll % 4 === 0), not Gen1's 63/256;
  *     speed still quarters.
  *   * Sleep wakes *and acts* on the turn the counter hits zero.
@@ -21,11 +24,14 @@
  */
 
 const Damage = require('./Damage.js');
+// GetEighthMaxHP / GetSixteenthMaxHP, the residuals' HP arithmetic.
+const Items = require('./Items.js');
 
 const idiv = (a, b) => Math.floor(a / b);
 
 const PARALYSIS_SKIP_CHANCE = 4;
-const THAW_CHANCE = 5;
+// HandleDefrost's `cp 10 percent`: 25 (a byte under it thaws).
+const DEFROST_BYTE = 25;
 const CONFUSION_HIT_ROLL = 128;
 const CONFUSION_POWER = 40;
 const RESIDUAL_DIVISOR = 8;
@@ -57,11 +63,14 @@ function sleepCanMove(turnsRemaining) {
   return sleepTick(turnsRemaining).canMove;
 }
 
-// roll: 0..THAW_CHANCE-1 conceptually; thaw when roll % 5 === 0.
-// Missing roll → 1 (Lua int(roll, 1)): not thawed.
-function freezeTick(roll) {
-  const thawed = int(roll, 1) % THAW_CHANCE === 0;
-  return { thawed, canMove: thawed };
+// CheckTurn's freeze gate: frozen solid, whatever the roll (none is drawn).
+function freezeTick() {
+  return { thawed: false, canMove: false };
+}
+
+// HandleDefrost's roll for one frozen battler.
+function defrosts(byte) {
+  return int(byte, 255) < DEFROST_BYTE;
 }
 
 function freezeCanMove(roll) {
@@ -140,7 +149,7 @@ function selfHitDamage(state) {
 // ------- residuals
 
 function eighth(maxHp) {
-  return Math.max(1, idiv(Math.max(0, int(maxHp, 0)), RESIDUAL_DIVISOR));
+  return Items.eighth(maxHp);
 }
 
 function residualBurn(maxHp) {
@@ -153,7 +162,7 @@ function residualPoison(maxHp) {
 
 function residualToxic(maxHp, toxicCounter) {
   const counter = Math.max(1, int(toxicCounter, 1));
-  return Math.max(1, idiv(Math.max(0, int(maxHp, 0)) * counter, TOXIC_DIVISOR));
+  return (Items.sixteenth(maxHp) * counter) % 65536;
 }
 
 function burnAttack(attack) {
@@ -188,6 +197,11 @@ function residual(state) {
 function evaluate(record) {
   const r = record || {};
   switch (r.status) {
+    case 'freeze':
+      if (r.defrostByte !== undefined && r.defrostByte !== null) {
+        return { defrosted: defrosts(r.defrostByte) };
+      }
+      return beforeMove(r, r.roll);
     case 'paralysis':
       if (r.speed !== undefined && r.speed !== null) {
         return { speed: paralysisSpeed(r.speed) };
@@ -215,6 +229,7 @@ module.exports = {
   sleepCanMove,
   freezeTick,
   freezeCanMove,
+  defrosts,
   paralysisStop,
   paralysisTick,
   paralysisSpeed,
@@ -227,7 +242,7 @@ module.exports = {
   burnAttack,
   int,
   PARALYSIS_SKIP_CHANCE,
-  THAW_CHANCE,
+  DEFROST_BYTE,
   CONFUSION_HIT_ROLL,
   CONFUSION_POWER,
   RESIDUAL_DIVISOR,

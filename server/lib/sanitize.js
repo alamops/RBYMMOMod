@@ -164,6 +164,9 @@ function cleanSpriteId(value) {
   return /^\w{1,40}$/.test(value) ? value : null;
 }
 
+// A map id: refused past 64 characters, never cut. Twin of Wire.mapId, which
+// cut a long one to 64 until K13's twin (docs/plans/gen12-referee-gaps-fix.md)
+// -- a player this hub left unplaced stood on a truncated map on the LAN host.
 function cleanMapId(value) {
   if (typeof value !== 'string') return null;
   return /^[\w.-]{1,64}$/.test(value) ? value : null;
@@ -695,6 +698,10 @@ const STAT_EXP_MAX = 65535;
 const PP_UPS_MAX = 3;
 const PRIORITY2_MAX = 255;
 const STAGE12_MAX = 6;
+// A Gold monster's happiness (contract K14, added after wave 1): the one byte
+// MON_HAPPINESS that pokecrystal's BattleCommand_HappinessPower /
+// _FrustrationPower read. Gold only. Twin of Wire.HAPPINESS2_MAX.
+const HAPPINESS2_MAX = 255;
 
 // Contract K7's three blocks per dialect: `base` keyed like `stats` plus `hp`,
 // `dvs` the cart's four DVs (Gold's one Special DV feeds both special stats),
@@ -1857,6 +1864,22 @@ function cleanBattleMon(raw) {
     mon.statExp = statExp;
   }
 
+  // Contract K14 (docs/plans/gen12-referee-gaps-fix.md, added after wave 1):
+  // the monster's happiness, 0..HAPPINESS2_MAX, which Gold's RETURN and
+  // FRUSTRATION turn into power (pokecrystal BattleCommand_HappinessPower /
+  // _FrustrationPower read w*MonHappiness, never a species value). Gen 2 only,
+  // by the dialect this sheet resolved to: a Gen 1 reader neither copies nor
+  // refuses one (Red has no such byte), and cleanBattleMon3 reads Gen 3's own
+  // `friendship`. Optional, and refused with the sheet when present and
+  // unreadable -- K7's posture and holdParam's, for their reason: a dropped one
+  // would have the referee fight with a number the owner never had. Read the
+  // way Wire.int reads it (luaInt). Twin of Wire.battleMon.
+  if (generation === 2 && raw.happiness !== undefined && raw.happiness !== null) {
+    const happiness = luaInt(raw.happiness, 0, HAPPINESS2_MAX);
+    if (happiness === null) return null;
+    mon.happiness = happiness;
+  }
+
   return mon;
 }
 
@@ -2425,13 +2448,21 @@ function cleanBattleOutcome(raw, generation) {
   }
   // Pay Day coins (Gen 3: sheet doc §1, §6; Gen 1 / Gen 2: contract K11): side
   // a's total, present only on a knockout win in a wild / coop_wild / coop_npc
-  // fight. **Dropped rather than fatal**, unlike the fields above: a wrong
+  // fight -- and, on Red alone, on a wild fight that ended in an escape (reason
+  // `run`: pokered's EndOfBattle pays whenever wBattleResult is still 0, and a
+  // Teleport / Whirlwind / Roar / POKE DOLL escape never writes it; Gold calls
+  // every escape a DRAW and Gen 3 pays only from HandleEndTurn_BattleWon, so
+  // both hubs keep the field off those -- Relay.settleMediated). Read on every
+  // outcome alike, whatever the reason: which endings pay is the referee's to
+  // say, and on a run the payees are side a's players whichever list names
+  // them. **Dropped rather than fatal**, unlike the fields above: a wrong
   // winner or catcher moves a rating or a monster to the wrong player, where a
-  // mangled coin count has no recipient of its own (the winners list decides
-  // who is paid), and refusing the whole outcome over it would strand a
-  // finished fight on a screen with no way out to protect a bonus. Read the way
-  // Wire.int reads it (luaInt). The Amulet Coin doubling is the reader's, never
-  // the wire's. A zero is no coins, read as absent on every cart.
+  // mangled coin count has no recipient of its own (side a of a fight against
+  // the computer is every player in it), and refusing the whole outcome over
+  // it would strand a finished fight on a screen with no way out to protect a
+  // bonus. Read the way Wire.int reads it (luaInt). The Amulet Coin doubling is
+  // the reader's, never the wire's. A zero is no coins, read as absent on every
+  // cart. Twin of Wire.battleOutcome.
   if (raw.payDay !== undefined && raw.payDay !== null) {
     const payDay = luaInt(raw.payDay, 1, older ? PAYDAY12_MAX : PAYDAY3_MAX);
     if (payDay !== null) result.payDay = payDay;
@@ -2637,6 +2668,7 @@ module.exports = {
   PRIORITY2_MAX,
   STAGE12_MAX,
   PAYDAY12_MAX,
+  HAPPINESS2_MAX,
   K7_KEYS1,
   K7_KEYS2,
   METRONOME_POOL_MAX,

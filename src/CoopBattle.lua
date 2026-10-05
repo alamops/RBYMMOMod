@@ -2437,6 +2437,51 @@ local READS_ITS_TARGET = {
   HAZE_EFFECT = true, CONVERSION_EFFECT = true, TRANSFORM_EFFECT = true,
 }
 
+-- Gold's 0-power effects that are aimed at nobody, by the cart's own move
+-- scripts (pokecrystal data/moves/effects.asm, the same in pokegold): none of
+-- them runs `checkhit` and none reads the foe it was "used on" -- they act on
+-- the user, the user's side, the foe's side as a whole, or every battler.
+-- Gen 2 has no per-move target byte to read, so this is the list, kept
+-- explicit and conservative: an effect missing from it keeps the picker,
+-- which costs a button press where a wrong skip costs a turn.
+--
+--   the user          the stat raises (+1 and +2), HEAL (Recover, Rest,
+--                     Softboiled, Milk Drink), FOCUS_ENERGY, SUBSTITUTE,
+--                     SPLASH, PROTECT (Protect, Detect), ENDURE,
+--                     BELLY_DRUM, MORNING_SUN / SYNTHESIS / MOONLIGHT,
+--                     DEFENSE_CURL, DESTINY_BOND, CONVERSION (Gold's picks a
+--                     type off the user's own moves -- BattleCommand_
+--                     Conversion -- unlike Red's, which copies the target's),
+--                     BATON_PASS, TELEPORT
+--   the user's side   LIGHT_SCREEN, REFLECT, MIST, SAFEGUARD, HEAL_BELL
+--   the foe's side    SPIKES
+--   everybody         RESET_STATS (Haze: every battler's stat levels),
+--                     PERISH_SONG, RAIN_DANCE / SUNNY_DAY / SANDSTORM
+--
+-- Kept off it on purpose: TRANSFORM, MIMIC, SKETCH, PSYCH_UP, CONVERSION2,
+-- MIRROR_MOVE and PAIN_SPLIT read the target; CURSE does when its user is a
+-- Ghost; METRONOME and SLEEP_TALK call a move that may need one; BIDE
+-- unleashes on a foe.
+local SELF_EFFECTS2 = {
+  EFFECT_ATTACK_UP = true, EFFECT_DEFENSE_UP = true, EFFECT_SPEED_UP = true,
+  EFFECT_SP_ATK_UP = true, EFFECT_SP_DEF_UP = true, EFFECT_ACCURACY_UP = true,
+  EFFECT_EVASION_UP = true,
+  EFFECT_ATTACK_UP_2 = true, EFFECT_DEFENSE_UP_2 = true, EFFECT_SPEED_UP_2 = true,
+  EFFECT_SP_ATK_UP_2 = true, EFFECT_SP_DEF_UP_2 = true,
+  EFFECT_ACCURACY_UP_2 = true, EFFECT_EVASION_UP_2 = true,
+  EFFECT_HEAL = true, EFFECT_FOCUS_ENERGY = true, EFFECT_SUBSTITUTE = true,
+  EFFECT_SPLASH = true, EFFECT_PROTECT = true, EFFECT_ENDURE = true,
+  EFFECT_BELLY_DRUM = true, EFFECT_MORNING_SUN = true, EFFECT_SYNTHESIS = true,
+  EFFECT_MOONLIGHT = true, EFFECT_DEFENSE_CURL = true, EFFECT_DESTINY_BOND = true,
+  EFFECT_CONVERSION = true, EFFECT_BATON_PASS = true, EFFECT_TELEPORT = true,
+  EFFECT_LIGHT_SCREEN = true, EFFECT_REFLECT = true, EFFECT_MIST = true,
+  EFFECT_SAFEGUARD = true, EFFECT_HEAL_BELL = true,
+  EFFECT_SPIKES = true,
+  EFFECT_RESET_STATS = true, EFFECT_PERISH_SONG = true,
+  EFFECT_RAIN_DANCE = true, EFFECT_SUNNY_DAY = true, EFFECT_SANDSTORM = true,
+}
+M.SELF_EFFECTS2 = SELF_EFFECTS2
+
 -- Does this move have to be aimed at somebody?
 --
 -- The question the move menu is really asking, and the reason "Attack who?"
@@ -2471,6 +2516,17 @@ function M:needsTarget(moveInst)
   local def = moveInst and (data.moves or {})[moveInst.id]
   if not def then return true end
   if (def.power or 0) > 0 then return true end
+  -- Gold: the reading below does not hold there.  A Gold `move_effects`
+  -- record carries no `accuracyChecked` (that set is pokered's), and
+  -- READS_ITS_TARGET is spelled in Red's effect names, so every 0-power
+  -- status move whose Gold record is "primary" -- HYPNOSIS, THUNDER WAVE,
+  -- TOXIC, CONFUSE RAY, LEECH SEED, ENCORE, MEAN LOOK, ATTRACT, ROAR... --
+  -- skipped the picker and went to the first living foe.  So Gold turns the
+  -- question round: every move keeps the picker unless its effect is on the
+  -- explicit list of the ones aimed at nobody (SELF_EFFECTS2).
+  if Gen.generation(self.game) == 2 then
+    return not SELF_EFFECTS2[def.effect]
+  end
   local record = (data.move_effects or {})[def.effect]
   if not record then return true end
   if record.kind ~= "primary" then return true end
@@ -7768,10 +7824,12 @@ function M:bandMoveRows()
       -- A C4 row carries its own ceiling (PP Ups already in it).
       row.right = ("%d/%d"):format(pp or 0, tonumber(moveInst.maxPp))
     elseif def and tonumber(def.pp) then
-      -- The classic strip's own arithmetic: PP Ups add a fifth of the base
-      -- each, rounded down, exactly as `drawMoves` computes it.
+      -- The classic strip's own arithmetic, the cart's GetMaxPP: PP Ups add
+      -- a fifth of the base each, rounded down and capped at 7 (pokered
+      -- AddBonusPP, pokecrystal ComputeMaxPP; Mediated.maxPpOf), exactly as
+      -- `drawMoves` computes it.
       local base = tonumber(def.pp) or 0
-      local maxPP = base + (tonumber(moveInst.ppUps) or 0) * math.floor(base / 5)
+      local maxPP = Mediated.maxPpOf(base, moveInst.ppUps) or base
       row.right = ("%d/%d"):format(pp or 0, maxPP)
     elseif pp then
       row.right = tostring(math.floor(pp))
@@ -8886,6 +8944,11 @@ function M:levelled(mon, fallbackName, levels)
   local learnedAt = def and (
     (Gen.generation(self.game) == 2) and Exp2.movesLearnedAt
     or (eng and eng.Experience and eng.Experience.movesLearnedAt))
+  -- A move learned into a free slot below reaches the referee once, with the
+  -- level-up, after the loop (contract K9) -- not once per move and then again
+  -- for the level.
+  local deferred, deferredLearned = self.deferMoveset, self.deferredLearned
+  self.deferMoveset, self.deferredLearned = true, false
   for _, newLevel in ipairs(levels) do
     self:say(name .. " grew to\nlevel " .. tostring(newLevel) .. "!")
     -- Levelled here, so the moves it learns are decided here too -- the host
@@ -8905,6 +8968,20 @@ function M:levelled(mon, fallbackName, levels)
       self:teach(mon, name, moveId)
     end
   end
+  local learned = self.deferredLearned
+  self.deferMoveset, self.deferredLearned = deferred, deferredLearned
+  -- Contract K9 (docs/plans/gen12-referee-gaps-fix.md): every level-up of a
+  -- monster this client uploaded -- this player's own seat, fielded or
+  -- benched, with or without a new move -- tells the referee its new level,
+  -- stats and max HP beside the current move list, so the referee rebuilds
+  -- the battle stats as the cart does after a level-up in battle (pokered /
+  -- pokecrystal GainExperience).  Mediated fights only (`syncFightMoves`);
+  -- the host-sim path levels its own copy, and Gen 3 never reaches here.
+  -- A partner's monsters are the partner's to report: `sheetIndexFor` only
+  -- finds this player's own.  Also where a free-slot learn deferred above
+  -- refreshes the host-sim FIGHT overlay -- the one other reason to call it,
+  -- exactly as `teach` used to.
+  if self.mediated or learned then self:syncFightMoves(mon, true) end
   self.leveledUp = self.leveledUp or {}
   self.leveledUp[mon] = true
   -- After the grew-to / teach lines for this award: queue the movie if this
@@ -8943,7 +9020,12 @@ function M:teach(mon, name, moveId)
 
   if status == "learned" then
     self:say(name .. " learned\n" .. ((def and def.name) or moveId) .. "!")
-    self:syncFightMoves(mon)
+    -- Inside a level-up `levelled` sends the list once, with the level (K9).
+    if self.deferMoveset then
+      self.deferredLearned = true
+    else
+      self:syncFightMoves(mon)
+    end
     return
   end
 
@@ -8978,7 +9060,11 @@ end
 -- Host-sim: `curMoves` is the same table as `mon.moves`, so the free-slot
 -- write is already live. Mediated: rebuild the overlay the FIGHT menu reads
 -- and publish PROTOCOL 28 so the referee executes the new move.
-function M:syncFightMoves(mon)
+--
+-- `grew`: the monster just levelled, so the same message carries its new
+-- level, stats and max HP (contract K9; Mediated.growthOf) and the uploaded
+-- sheet takes the stats.
+function M:syncFightMoves(mon, grew)
   if self.gen3 then return self:syncFightMoves3(mon) end
   local slot = self:mySlot()
   local battler = slot and slot.battler
@@ -8994,11 +9080,16 @@ function M:syncFightMoves(mon)
   if not index then return false end
   local moves = Mediated.sheetMoves(self.game, mon)
   if #moves == 0 then return false end
+  local growth = grew and Mediated.growthOf(self.game, mon) or nil
   if self.medMine and self.medMine[index] then
     self.medMine[index].moves = moves
+    if growth then
+      local sheet = self.medMine[index]
+      sheet.stats, sheet.level, sheet.maxHp = growth.stats, growth.level, growth.maxHp
+    end
   end
   return Mediated.sendMoveset(self.transport, self.battleId, index - 1, moves,
-    Gen.generation(self.game))
+    Gen.generation(self.game), growth)
 end
 
 -- ------- nobody is saying anything
@@ -10437,12 +10528,10 @@ function M:medRows(msg)
     -- Arrows on the seat, and the direction comes off the sentence rather than
     -- off `amount`: the referee sends the resulting *stage*, not the change,
     -- so the number alone cannot say which way it went. Same reading as
-    -- MediatedBattle's twin.
-    local down = type(msg.text) == "string"
-      and msg.text:lower():find("fell", 1, true) ~= nil
-    -- Gen 3 states the change itself (`delta`, C5 §7.1), which beats any
-    -- reading of a sentence.
-    if tonumber(msg.delta) then down = tonumber(msg.delta) < 0 end
+    -- MediatedBattle's twin, and the same function: Gen 3's `delta` first,
+    -- then the sentence, then the signed `stage` (contract K10) as the
+    -- tie-break a sentence naming no direction leaves.
+    local down = Mediated.statFell(msg)
     local look = Vfx.forStat(down and -1 or 1)
     if look and index then
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index }
@@ -10957,8 +11046,13 @@ function M:onBattleOutcome(msg)
   if why then
     self.medPending[#self.medPending + 1] = { kind = "msg", text = why }
   end
-  -- Gen 3: the coins PAY DAY scattered, picked up by the winners.
-  if self.gen3 then self:payDay3(msg, result) end
+  -- The coins PAY DAY scattered, picked up by the winners (Gen 3) or by
+  -- every human on side a (Red / Gold, contract K11).
+  if self.gen3 then
+    self:payDay3(msg, result)
+  else
+    self:payDay12(msg, result, mySide)
+  end
   self:medFlush()
   -- Catcher-only grant: everyone sees Gotcha; only msg.catcher adds the mon.
   if msg.reason == "catch" then
@@ -10996,7 +11090,8 @@ function M:grantCatch(msg)
     if held == false then
       mon.item = nil
     elseif held ~= nil then
-      mon.item = self:ownItem2(held) and held or nil
+      mon.item = (self:ownItem2(held) or self:foeCanHold2(held, mon.species))
+        and held or nil
     end
   end
   if not mon and msg and msg.caught then
@@ -11004,6 +11099,21 @@ function M:grantCatch(msg)
     if not mon then
       self:say("Caught, but could not\nadd to the party.")
       return
+    end
+    -- A catcher who never held the encounter (the joiner) rebuilt it off the
+    -- referee's sheet, which carries the item the monster held at the throw
+    -- (or, after a `held` event, what `foeHeld2` says it holds now).  The
+    -- sheet is the host's claim, so it is kept on this client's own data's
+    -- word only (`foeCanHold2`: the caught species' own item slots), or as an
+    -- item this client itself brought (`ownItem2` -- a THIEF of its own the
+    -- wild monster answered).  Otherwise the monster arrives holding nothing,
+    -- as every joiner's catch did before.
+    if self.gen2Mediated then
+      local held = type(self.foeHeld2) == "table" and self.foeHeld2[0] or nil
+      if held == nil then held = Wire.id(msg.caught.heldItem) end
+      if held and (self:ownItem2(held) or self:foeCanHold2(held, mon.species)) then
+        mon.item = held
+      end
     end
   end
   if not mon then return end
@@ -11533,8 +11643,8 @@ function M:drawMoves()
         end
       end
       Font.draw(tostring(typeName):sub(1, 6), 104, M.MOVE_TYPE_NAME_Y)
-      local maxPP = (def.pp or 0)
-        + (pick.ppUps or 0) * math.floor((def.pp or 0) / 5)
+      -- GetMaxPP: a fifth of the base per PP Up, capped at 7 (Mediated.maxPpOf).
+      local maxPP = Mediated.maxPpOf(def.pp or 0, pick.ppUps) or (def.pp or 0)
       Font.draw(("%2d/%2d"):format(pick.pp or 0, maxPP), 104, M.MOVE_PP_Y)
     else
       Font.draw(("PP %2d"):format(pick.pp or 0), 104, M.MOVE_PP_Y)
@@ -12239,15 +12349,133 @@ function M:ownItemSet2()
   return set
 end
 
--- May this item enter this player's save?  Only one this client's own uploads
--- held -- the anti-forgery rule `ownItem3` keeps.  A joiner who THIEFs from a
--- trainer or a wild monster the host described keeps nothing: the item is a
--- claim another client wrote, and this client cannot tell it from a forgery
--- (out of scope by design, docs/plans/gen12-referee-fidelity.md §9).
+-- May this item enter this player's save on its own say-so?  Only one this
+-- client's own uploads held -- the anti-forgery rule `ownItem3` keeps.  An item
+-- from a foe the host described is a claim another client wrote; a joiner
+-- keeps one only when its own data vouches for that foe holding it
+-- (`foeCanHold2` below -- docs/plans/gen12-referee-gaps-fix.md closes the
+-- "smaller client notes" gap docs/plans/gen12-referee-fidelity.md §9 left).
 function M:ownItem2(id)
   id = Wire.id(id)
   if not id then return false end
   return self:ownItemSet2()[id] == true
+end
+
+-- ------- an item from a foe this client did not describe (the joiner's)
+--
+-- `ownItem2` alone left a joiner with nothing whenever the foe was the
+-- host's to describe: a wild POKeMON caught still holding its item, or an
+-- item THIEF took off a trainer's monster, was a claim another client wrote,
+-- and this client could not tell it from a forgery.  It still cannot tell
+-- the *claim* apart -- the anti-forgery rule stands -- but it can check it
+-- against its OWN data, which is what this does: a foe-sourced item is kept
+-- only when this client's own copy of the game says that foe could be holding
+-- it.  A hostile host can then hand a joiner only an item the joiner's own
+-- cart would have let that very foe carry -- never an arbitrary one.
+--
+--   coop_wild  the species' two wild item slots (BaseData item1 / item2, the
+--              engine's `data.pokemon[id].items`) -- what pokecrystal
+--              LoadEnemyMon `.WildItem` can roll for it.  The species is the
+--              foe's as this client knows it (the robbed seat's monster, or
+--              the caught monster rebuilt off the outcome's sheet); with none
+--              named, any foe on the field.
+--   coop_npc   the named trainer's own party rows (src/world/gen2/
+--              Trainers.lua, the engine's read of data/trainers/parties.asm's
+--              TRAINERTYPE_ITEM column -- MakeTrainerPartyMon's wOTPartyMon
+--              items): the party the engine built for the trainer this client
+--              resolved itself (`self.trainer`), or its rows looked up by the
+--              class and member the record names.  A trainer this client never
+--              resolved (an invite joiner on Gold, whose field names none)
+--              vouches for nothing, and the item is not kept -- as before.
+--
+-- Every other mode answers false: a fight between players keeps no item at
+-- all (KEEPS_HELD_MODES), and a partner's item is the partner's.
+
+-- The registry ids this client's own trainer record says the trainer's party
+-- holds.  Gold only (the require is the Gold engine's, and the loader refuses
+-- one across generations).
+function M:trainerItems2()
+  local trainer = self.trainer
+  if type(trainer) ~= "table" or Gen.generation(self.game) ~= 2 then return {} end
+  local out = {}
+  local function add(id)
+    id = Wire.id(id)
+    if id and id ~= "NO_ITEM" then out[#out + 1] = id end
+  end
+  local rows = type(trainer.party) == "table" and trainer.party
+    or type(trainer.roster) == "table" and trainer.roster or nil
+  if not rows then
+    local data = self.game and self.game.data
+    local ok, Trainers = pcall(require, "src.world.gen2.Trainers")
+    if ok and type(Trainers) == "table" and type(Trainers.classIndex) == "function"
+       and type(data) == "table" and type(data.trainers) == "table" then
+      local okIndex, byClass = pcall(Trainers.classIndex, data.trainers)
+      local entry = okIndex and type(byClass) == "table" and byClass[trainer.class] or nil
+      for _, row in ipairs(type(entry) == "table" and entry.trainers or {}) do
+        if type(row) == "table" and row.id ~= nil and row.id == trainer.memberId then
+          rows = row.party
+          break
+        end
+      end
+    end
+  end
+  for _, row in ipairs(rows or {}) do
+    if type(row) == "table" then add(row.item) end
+  end
+  return out
+end
+
+-- The species registry id of the monster standing on one field seat, or nil.
+function M:seatSpecies2(index)
+  local seat = index ~= nil and self.sim and self.sim:slot(index) or nil
+  local mon = seat and seat.battler and seat.battler.mon
+  local species = type(mon) == "table" and mon.species or nil
+  if type(species) == "string" and species ~= "" then return species end
+  return nil
+end
+
+-- Every foe species this client knows of on the field: the ownerless seats'
+-- standing monsters and parties.
+function M:foeSpecies2()
+  local out, seen = {}, {}
+  local function add(mon)
+    local species = type(mon) == "table" and mon.species or nil
+    if type(species) == "string" and species ~= "" and not seen[species] then
+      seen[species] = true
+      out[#out + 1] = species
+    end
+  end
+  for _, seat in ipairs(self.sim and self.sim.slots or {}) do
+    if type(seat) == "table" and seat.owner == nil then
+      add(seat.battler and seat.battler.mon)
+      for _, mon in ipairs(type(seat.party) == "table" and seat.party or {}) do add(mon) end
+    end
+  end
+  return out
+end
+
+-- May this item, taken from (or caught on) a foe, enter this player's save on
+-- this client's own data's say-so?  `species` names the foe when known.
+function M:foeCanHold2(id, species)
+  id = Wire.id(id)
+  if not id then return false end
+  if self.mode == "coop_wild" then
+    local data = self.game and self.game.data
+    local dex = type(data) == "table" and type(data.pokemon) == "table" and data.pokemon or {}
+    local list = species and { species } or self:foeSpecies2()
+    for _, key in ipairs(list) do
+      local def = dex[key]
+      local slots = type(def) == "table" and type(def.items) == "table" and def.items or {}
+      if slots[1] == id or slots[2] == id then return true end
+    end
+    return false
+  end
+  if self.mode == "coop_npc" then
+    for _, item in ipairs(self:trainerItems2()) do
+      if item == id then return true end
+    end
+  end
+  return false
 end
 
 -- The medMine sheet for one of our party positions (1-based), or nil.
@@ -12278,10 +12506,19 @@ function M:applyHeld2(msg, index)
   if holding == false then return false end
   local mon = tonumber(msg.mon)
   mon = mon and mon >= 0 and floor(mon) or nil
+  -- What a foe seat just lost, for the gain that may follow it: the referee
+  -- emits a THIEF as the foe's loss and then the thief's gain, back to back
+  -- (BattleSim2 `_thief`).  Consumed by the very next `held` event, whoever
+  -- it is for, so a loss can vouch only for the gain it was paired with.
+  local lost = self.foeLost2
+  self.foeLost2 = nil
   if not self:isMine(index) then
     if index and self:foeSide(index) and mon then
       self.foeHeld2 = self.foeHeld2 or {}
       self.foeHeld2[mon] = holding or false
+      if holding == nil then
+        self.foeLost2 = { item = Wire.id(msg.text), seat = index }
+      end
     end
     return false
   end
@@ -12301,7 +12538,13 @@ function M:applyHeld2(msg, index)
   if type(party) ~= "table" then return false end
   local had = (type(party.item) == "string" and party.item ~= "") and party.item or nil
   if holding == had then return true end
-  if holding ~= nil and not self:ownItem2(holding) then
+  -- A gained item this client never uploaded is kept only when it is the one
+  -- the foe just lost and this client's own data says that foe could hold it
+  -- (`foeCanHold2`: a wild species' item slots, the named trainer's rows).
+  local fromFoe = holding ~= nil and lost ~= nil and lost.item == holding
+    and self:foeCanHold2(holding, self.mode == "coop_wild"
+      and self:seatSpecies2(lost.seat) or nil)
+  if holding ~= nil and not self:ownItem2(holding) and not fromFoe then
     if not self.heldWarned2 then
       self.heldWarned2 = true
       mod.log:warn("the battle referee handed one of your POKeMON a %s, which "
@@ -13205,6 +13448,54 @@ function M:payDay3(msg, result)
   end
   self.medPending[#self.medPending + 1] = { kind = "msg", text = line }
   return paid
+end
+
+-- Red and Gold's PAY DAY (contract K11 of docs/plans/gen12-referee-gaps-fix.md;
+-- MediatedBattle:payDay12 is the 1v1's twin and states the carts' rules).
+--
+-- The referee reports one pot -- side a's whole pile, the computer's own PAY
+-- DAY coins included on Red -- on a fight against the computer only.  In a
+-- 2-on-2 **every human seat on side a is paid that pot** (plan §9, the owner's
+-- link-quirk rule applied): each partner's own cart would have scattered and
+-- picked up its coins for its own player, so each client pays its own save
+-- the whole of it rather than a share nobody's cart ever computes.  Paid only
+-- where the cart keeps a fight's spoils (Mediated.KEEPS_HELD_MODES -- never
+-- coop_pvp), to a seat on side a, on a win -- and on Red on a flee too (pokered
+-- EndOfBattle pays while wBattleResult is 0, which a run never moves; the
+-- referee's Gen 1 `run` outcome carries the pot and reads as a loss to side
+-- a); Gold's flee is a DRAW and pays nothing (CheckPayDay).  Gold doubles it
+-- under an AMULET COIN this player fielded (`amuletCoin2`, pokecrystal
+-- CheckPayDay's wAmuletCoin).  The money lands now, through the shared wallet
+-- (Mediated.addMoney, capped at 999999), and the cart's line is queued behind
+-- the ending's rows.  Once per fight.
+function M:payDay12(msg, result, mySide)
+  if self.payDayPaid ~= nil then return 0 end
+  local coins = tonumber(type(msg) == "table" and msg.payDay or nil)
+  if not coins or coins ~= coins or coins < 1 then return 0 end
+  coins = math.min(floor(coins), Wire.PAYDAY12_MAX)
+  if not Mediated.KEEPS_HELD_MODES[self.mode] or mySide ~= "a" then return 0 end
+  local generation = Gen.generation(self.game)
+  local ran = generation == 1 and msg.reason == "run"
+  if not (result == "win" or ran) then return 0 end
+  self.payDayPaid = 0
+  local save = self.game and self.game.save
+  if type(save) ~= "table" then
+    mod.log:warn("this fight's Pay Day coins could not be paid because no save "
+      .. "is loaded -- start or continue a game before battling; the fight's "
+      .. "result still counts")
+    return 0
+  end
+  local pot = coins
+  if generation == 2 and self:amuletCoin2() then pot = coins * 2 end
+  Mediated.addMoney(save, pot)
+  self.payDayPaid = pot
+  local player = save.player
+  local name = type(player) == "table" and type(player.name) == "string"
+    and player.name ~= "" and player.name or "YOU"
+  self.medPending[#self.medPending + 1] = {
+    kind = "msg", text = Mediated.payDayText(name, pot),
+  }
+  return pot
 end
 
 -- The plain 240x160 page when the cart's chrome is not reachable (a headless

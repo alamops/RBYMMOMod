@@ -2816,6 +2816,13 @@ function testLearnRulesExported() {
   ok(next12[0].pp === 3, 'export: an unchanged row keeps the old PP');
   ok(next12[0].highCrit === true, 'export: ...and its high-crit flag');
   ok(next12[1].ppUps === 1, 'export: a new row takes its own PP Ups');
+  const { learnTo } = require('./lib/relay.js');
+  const held = { transformed: true, moves: [row12('COPY')], preTransform: { moves: [row12('A')] } };
+  ok(learnTo(2, held, [row12('A'), row12('B')]) === true, 'export: learnTo lands a learn');
+  ok(held.preTransform.moves.length === 2, 'export: ...in the list a Transform put aside');
+  ok(held.moves[0].id === 'COPY', "export: ...leaving Gold's copied moves be");
+  ok(learnTo(2, { transformed: true, moves: [row12('COPY')] }, [row12('COPY'), row12('B')]) === false,
+    'export: a transformed battler with nothing put aside is left alone');
 }
 
 // Gold: the learn keeps the cart's priority byte (K8), and a Gold sheet's K7
@@ -2839,6 +2846,7 @@ function testGen2LevelUpAndSheet() {
   gold.statExp = {
     hp: 1, atk: 2, def: 3, spe: 4, spc: 5,
   };
+  gold.happiness = 200;
   gold.moves[0].priority = 2;
   gold.moves[0].ppUps = 3;
   relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART2 });
@@ -2852,6 +2860,7 @@ function testGen2LevelUpAndSheet() {
   ok(stored && stored.dvs && stored.dvs.spc === 3, "gold K7: the stored sheet keeps the cart's DVs");
   ok(stored.base && stored.base.spd === 96, 'gold K7: ...the species base stats');
   ok(stored.statExp && stored.statExp.spc === 5, 'gold K7: ...and the stat exp');
+  ok(stored.happiness === 200, 'gold K14: ...and the happiness RETURN reads');
   ok(stored.moves[0].priority === 2, "gold K8: ...and the move's priority byte");
   ok(stored.moves[0].ppUps === 3, 'gold K8: ...and its PP Ups');
   const live = record.sim.byId.get(a.id).mons[0];
@@ -2889,6 +2898,84 @@ function testGen2LevelUpAndSheet() {
     },
   });
   ok(calls === 1, 'gold K9: Kanto-keyed stats refuse a Gold moveset');
+}
+
+// A learn on a transformed battler, real referees: written into the party list
+// put aside at Transform (`preTransform.moves`) so the switch-out gives it back;
+// Gold leaves the copied moves (pokecrystal LearnMove), Red overwrites them with
+// a copy of its own (pokered LearnMove). Twin of transformLearn in
+// tests/hub_battle.lua.
+function transformLearn12(generation) {
+  const relay = makeRelay(makeClock(), { generation });
+  const a = generation === 2 ? dial2(relay, 'ANN') : dial(relay, 'ANN');
+  const id = 'tl';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', battle: id, chart: generation === 2 ? CHART2 : [[100, 100], [100, 100]],
+  });
+  const sheet = (species, moves) => ({
+    ...(generation === 2 ? sheet2({ species }) : { ...mon(1), species }), moves,
+  });
+  const mv = (moveId, effect, power) => row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [sheet('COPYCAT', [mv('TRANSFORM', 57), mv('TACKLE', 0, 1)]), sheet('BENCH', [mv('TACKLE', 0, 1)])],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet('FOE', [mv('GROWL'), mv('HUSH')])],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return null;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  const live = record.sim.byId.get(a.id).mons[0];
+  const client = relay.clients.get(a.id);
+  const seen = { transformed: live.transformed === true, put: !!live.preTransform };
+  seen.learnt = relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [mv('TRANSFORM', 57), mv('TACKLE', 0, 1), mv('LEARNT', 0, 40)],
+  });
+  seen.battle = live.moves[0] && live.moves[0].id;
+  seen.battleCount = live.moves.length;
+  seen.party = live.preTransform && live.preTransform.moves.length;
+  seen.partyPp = live.preTransform && live.preTransform.moves[0].pp;
+  seen.separate = live.preTransform && live.preTransform.moves[0] !== live.moves[0];
+  seen.rewrite = relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [mv('AAA'), mv('BBB'), mv('CCC')],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  seen.after = live.transformed === true;
+  seen.restored = live.moves.map((m) => m.id).join(',');
+  return seen;
+}
+
+function testTransformedLearn() {
+  const gold = transformLearn12(2);
+  ok(gold, 'transformed learn: a Gold wild fight opens');
+  ok(gold.transformed && gold.put, 'transformed learn (gold): TRANSFORM put the party list aside');
+  ok(gold.learnt === true, 'transformed learn (gold): the learn is applied');
+  ok(gold.party === 3, 'transformed learn (gold): ...to the list put aside');
+  ok(gold.partyPp === 9, "transformed learn (gold): ...which keeps the party's PP");
+  ok(gold.battle === 'GROWL', 'transformed learn (gold): the copied moves stay in the fight');
+  ok(gold.battleCount === 2, 'transformed learn (gold): ...all of them (pokecrystal LearnMove)');
+  ok(gold.rewrite === false, 'transformed learn (gold): a rewrite is still refused');
+  ok(gold.after === false, 'transformed learn (gold): the switch-out undoes the Transform');
+  ok(gold.restored === 'TRANSFORM,TACKLE,LEARNT', 'transformed learn (gold): ...and gives back the learned list');
+  const red = transformLearn12(1);
+  ok(red, 'transformed learn: a Red wild fight opens');
+  ok(red.transformed && red.put, 'transformed learn (red): TRANSFORM put the party list aside');
+  ok(red.learnt === true, 'transformed learn (red): the learn is applied');
+  ok(red.party === 3, 'transformed learn (red): ...to the list put aside');
+  ok(red.battle === 'TRANSFORM', "transformed learn (red): the fight's moves become its own (pokered LearnMove)");
+  ok(red.battleCount === 3, 'transformed learn (red): ...the learned move among them');
+  ok(red.separate === true, "transformed learn (red): ...as a copy the fight's PP cannot reach the party through");
+  ok(red.rewrite === false, 'transformed learn (red): a rewrite is still refused');
+  ok(red.after === false, 'transformed learn (red): the switch-out undoes the Transform');
+  ok(red.restored === 'TRANSFORM,TACKLE,LEARNT', 'transformed learn (red): ...and gives back the learned list');
 }
 
 // A Gen 3 hub reads no level-up, so a referee there is never called.
@@ -2966,6 +3053,85 @@ function testGen12PayDayForward() {
   ok(none.payDay === undefined, "pay day 1/2: a 0 is the field's absence, as on the Lua twin");
 }
 
+// K11 on an escape: pokered pays wTotalPayDayMoney after a Teleport / Whirlwind
+// / Roar / POKE DOLL escape (wBattleResult left at 0, EndOfBattle), so Red's
+// coins ride a `run` outcome; Gold calls every escape a DRAW and Gen 3 pays only
+// from HandleEndTurn_BattleWon, so those hubs keep the field off a run even when
+// the (stubbed) referee carries one. The stub names side a the losers, as a
+// referee does when the players fled. Twin of fled() in tests/hub_battle.lua.
+function fled12(generation, mode, coins, reason) {
+  const relay = makeRelay(makeClock(), { generation });
+  let dialAs = (r, name) => dial(r, name);
+  if (generation === 2) dialAs = dial2;
+  if (generation === 3) dialAs = (r, name) => dial3(r, name);
+  const a = dialAs(relay, 'ANN');
+  const b = dialAs(relay, 'BOB');
+  const sheet = () => {
+    if (generation === 2) return sheet2({});
+    if (generation === 3) return mon3();
+    return mon(90);
+  };
+  const members = mode === 'coop_wild' ? [a.id, b.id] : [a.id];
+  const id = 'fw';
+  relay.openCoopBattle(id, members, { mode, hostId: a.id });
+  if (generation === 3) {
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+  } else {
+    relay.handle(a.id, {
+      type: 'mmo.battle_ruleset', battle: id, chart: generation === 2 ? CHART2 : [[100]],
+    });
+  }
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet()],
+  });
+  if (mode === 'coop_wild') {
+    relay.handle(b.id, {
+      type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet()],
+    });
+  }
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet()],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return [null, null];
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  const wild = record.npcIds[0];
+  record.sim.outcome = () => (reason === 'ko'
+    ? {
+      outcome: 'win', winners: members, losers: [wild], reason: 'ko', payDay: coins,
+    }
+    : {
+      outcome: 'win', winners: [wild], losers: members, reason: 'run', payDay: coins,
+    });
+  relay.flushBattle(record);
+  return [take(a, 'mmo.battle_outcome'), take(b, 'mmo.battle_outcome')];
+}
+
+function testGen12PayDayOnRun() {
+  const [red] = fled12(1, 'wild', 350);
+  ok(red, 'pay day on a run: a Red wild escape settles');
+  ok(red.reason === 'run', 'pay day on a run: ...as a run');
+  ok(red.winners && red.winners[0] === 'nfwa', 'pay day on a run: ...the wild seat named the winner');
+  ok(red.losers && red.losers.length === 1, 'pay day on a run: ...and the player who fled the loser');
+  ok(red.payDay === 350, "pay day on a run: Red's coins ride the escape (pokered EndOfBattle)");
+  ok(sanitize.cleanBattleOutcome(red, 1).payDay === 350, 'pay day on a run: ...and a Gen 1 reader keeps them');
+  const [atA, atB] = fled12(1, 'coop_wild', 350);
+  ok(atA && atA.payDay === 350, 'pay day on a run: a Red co-op escape pays the first player');
+  ok(atB && atB.payDay === 350, 'pay day on a run: ...and the second (both seats on side a)');
+  ok((fled12(1, 'wild', 0)[0] || {}).payDay === undefined, "pay day on a run: a 0 is still the field's absence");
+  const [gold] = fled12(2, 'wild', 350);
+  ok(gold, 'pay day on a run: a Gold wild escape settles');
+  ok(gold.payDay === undefined, 'pay day on a run: Gold pays none (every escape is a DRAW)');
+  const [gold2] = fled12(2, 'coop_wild', 350);
+  ok(gold2 && gold2.payDay === undefined, 'pay day on a run: ...in co-op neither');
+  ok((fled12(2, 'wild', 350, 'ko')[0] || {}).payDay === 350, "pay day on a run: Gold's knockout still pays");
+  const [g3] = fled12(3, 'wild', 350);
+  ok(g3, 'pay day on a run: a Gen 3 wild escape settles');
+  ok(g3.payDay === undefined, 'pay day on a run: Gen 3 pays none (HandleEndTurn_BattleWon only)');
+  ok((fled12(3, 'wild', 350, 'ko')[0] || {}).payDay === 350, "pay day on a run: Gen 3's knockout still pays");
+}
+
 // K13: an id is refused past 40 characters on both twins.
 function testIdRefusedPastForty() {
   ok(sanitize.cleanId('i'.repeat(40)) === 'i'.repeat(40), 'id: 40 characters is an id');
@@ -2975,6 +3141,43 @@ function testIdRefusedPastForty() {
   const long = mon(40);
   long.moves[0].id = 'm'.repeat(41);
   ok(sanitize.cleanBattleMon(long) === null, 'id: a long move id refuses the monster');
+}
+
+// K13's twin: a map id is refused past 64 characters (cleanMapId always has;
+// Wire.mapId now does too), so a step there leaves its player unplaced.
+function testMapIdRefusedPastSixtyFour() {
+  ok(sanitize.cleanMapId('M'.repeat(64)) === 'M'.repeat(64), 'map id: 64 characters is a map id');
+  ok(sanitize.cleanMapId('M'.repeat(65)) === null, 'map id: 65 is refused, not cut to 64');
+  const relay = makeRelay(makeClock());
+  const a = dial(relay, 'ANN');
+  const b = dial(relay, 'BOB');
+  b.peer.outbox = [];
+  relay.handle(a.id, {
+    type: 'mmo.move', map: 'M'.repeat(65), x: 3, y: 4, facing: 'up',
+  });
+  let step = take(b, 'mmo.move');
+  ok(step, 'map id: a step with a long map still reaches the room');
+  ok(step && step.map == null, 'map id: ...with its player unplaced');
+  ok(relay.clients.get(a.id).map == null, "map id: ...and nowhere on the hub's own roster");
+  relay.handle(a.id, {
+    type: 'mmo.move', map: 'M'.repeat(64), x: 3, y: 4, facing: 'up',
+  });
+  step = take(b, 'mmo.move');
+  ok(step && step.map === 'M'.repeat(64), 'map id: a 64-character map places them');
+  ok(relay.clients.get(b.id).map === 'PALLET', '(the onlooker stays where it was)');
+}
+
+// K14: Gold's happiness rides a Gen 2 sheet; a Gen 1 reader neither copies nor
+// refuses one, and a Gen 2 sheet with an unreadable one is refused whole.
+function testHappinessGen2Only() {
+  const red = { ...mon(40), happiness: 70 };
+  const read = sanitize.cleanBattleMon(red);
+  ok(read, 'happiness: a Red sheet stating one is still read');
+  ok(read && read.happiness === undefined, 'happiness: ...without it (Red has no happiness byte)');
+  ok((sanitize.cleanBattleMon({ ...sheet2({}), happiness: 255 }) || {}).happiness === 255,
+    'happiness: a Gold sheet carries it');
+  ok(sanitize.cleanBattleMon({ ...sheet2({}), happiness: 256 }) === null,
+    'happiness: past one byte refuses the Gold sheet');
 }
 
 testGen3SimSelection();
@@ -2996,8 +3199,12 @@ testGen2FamilyPvp();
 testGen12LevelUpForward();
 testLearnRulesExported();
 testGen2LevelUpAndSheet();
+testTransformedLearn();
 testGen3LevelUpNotRead();
 testGen12PayDayForward();
+testGen12PayDayOnRun();
 testIdRefusedPastForty();
+testMapIdRefusedPastSixtyFour();
+testHappinessGen2Only();
 
 console.log(`hub_battle: ${passed} checks passed`);

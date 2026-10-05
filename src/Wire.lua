@@ -653,10 +653,20 @@ end
 -- shape the engine's own ids use.  An unknown-but-well-formed id is fine:
 -- the avatar layer simply never places it, which is what a modded map the
 -- local player does not have should do.
+--
+-- Refused past 64 characters, never cut -- M.id's K13 argument, made for the
+-- map (docs/plans/gen12-referee-gaps-fix.md, K13's twin): lib/sanitize.js's
+-- cleanMapId is /^[\w.-]{1,64}$/ and has always thrown a longer one away, so
+-- a player the node hub left unplaced stood on a map here -- one whose name
+-- was the first 64 characters of theirs, which is no map they are on.  Every
+-- caller (a hello, a step, a presence, a co-op offer, the client's inbound
+-- step) already reads nil as "not in the world" or "no map", so a refused id
+-- costs the player their cell and nothing else -- what it cost on Node.
 function M.mapId(value)
   if type(value) ~= "string" then return nil end
+  if #value > 64 then return nil end
   if not value:match("^[%w_%.%-]+$") then return nil end
-  return value:sub(1, 64)
+  return value
 end
 
 -- Overworld NPC id (`ROUTE_3_obj_2`) or an event-flag id from a trainer
@@ -1318,12 +1328,18 @@ M.ITEM_NAME2_MAX = 12
 --   STAGE12_MAX    a `stat` event's signed stage (K10): a stat level is 1..13
 --                  around 7 on both carts (wPlayerMonStatMods), so -6..6 --
 --                  Gen 3's STAGE3_MAX, named for the older dialect.
+--   HAPPINESS2_MAX a Gold monster's happiness (K14, added after wave 1): the
+--                  one byte MON_HAPPINESS (pokecrystal constants/
+--                  pokemon_data_constants.asm) that BattleCommand_HappinessPower
+--                  / _FrustrationPower read through w*MonHappiness.  Gold
+--                  only -- Red has no such byte.
 M.BASE_STAT_MAX = 255
 M.DV_MAX = 15
 M.STAT_EXP_MAX = 65535
 M.PP_UPS_MAX = 3
 M.PRIORITY2_MAX = 255
 M.STAGE12_MAX = 6
+M.HAPPINESS2_MAX = 255
 
 -- One Gen 2 hold effect, or nil.  Refused rather than trimmed past
 -- HOLD_EFFECT2_MAX, on M.spriteId's argument: a cut token names no rule, and
@@ -2289,6 +2305,30 @@ function M.battleMon(raw)
     if not out.statExp then return nil end
   end
 
+  -- Contract K14 (docs/plans/gen12-referee-gaps-fix.md, added after wave 1):
+  -- the monster's happiness, 0..HAPPINESS2_MAX, which Gold's RETURN and
+  -- FRUSTRATION turn into power (pokecrystal BattleCommand_HappinessPower /
+  -- _FrustrationPower read wBattleMonHappiness or wEnemyMonHappiness, never
+  -- a species value) -- so it rides the sheet, as nothing else could tell
+  -- the hub.  Gen 2 only, by the dialect this sheet resolved to: Red has no
+  -- happiness byte, so a Gen 1 reader neither copies nor refuses one (the
+  -- posture it takes to Gold's held-item fields above), and battleMon3
+  -- builds Gen 3's sheet field by field with its own `friendship`.
+  --
+  -- Optional, and **refused with the sheet** when present and unreadable --
+  -- K7's posture and `holdParam`'s (the other Gold byte on this sheet), for
+  -- their reason: it is an input to a damage formula, and a dropped one
+  -- would have the referee fight with a number the owner never had, so the
+  -- same RETURN would hit for one amount on the cart and another here.  The
+  -- refusal lands at the party upload, before any turn is played; K11's coin
+  -- count is dropped instead only because it arrives after the last one.
+  -- Read the way Wire.int reads it on both twins (lib/sanitize's luaInt),
+  -- new on both like the K7 blocks.
+  if generation == 2 and raw.happiness ~= nil then
+    out.happiness = M.int(raw.happiness, 0, M.HAPPINESS2_MAX)
+    if out.happiness == nil then return nil end
+  end
+
   return out
 end
 
@@ -2975,15 +3015,27 @@ function M.battleOutcome(raw, generation)
   end
   -- Pay Day coins (Gen 3: sheet doc §1, §6; Gen 1 / Gen 2: contract K11):
   -- side a's total, present only on a knockout win in a wild / coop_wild /
-  -- coop_npc fight.  **Dropped rather than fatal**, unlike the fields above,
-  -- and the difference is who a bad value can hurt.  A wrong winner or
-  -- catcher moves a rating or a monster to the wrong player, so refusing is
-  -- the safe failure; a mangled coin count has no recipient of its own (the
-  -- winners list above decides who is paid), and refusing the whole outcome
-  -- over it would leave a finished fight on a screen with no way out --
-  -- M.battleReason's argument -- to protect a bonus.  The Amulet Coin
-  -- doubling is the reader's, never the wire's.  A zero is no coins, read as
-  -- absent on every cart.
+  -- coop_npc fight -- and, on Red alone, on a wild fight that ended in an
+  -- escape (reason `run`): pokered's EndOfBattle pays wTotalPayDayMoney
+  -- whenever wBattleResult is still 0, and a Teleport / Whirlwind / Roar /
+  -- POKE DOLL escape never writes it.  Gold's every escape is a DRAW
+  -- (SetBattleDraw, WildFled_EnemyFled_LinkBattleCanceled, the run command)
+  -- and ExitBattle skips CheckPayDay on one; Gen 3 pays only from
+  -- HandleEndTurn_BattleWon -- so both hubs keep the field off a Gold or
+  -- Gen 3 run (Hub:settleMediated, Relay.settleMediated).  This reader reads
+  -- it on every outcome alike, whatever the reason: which endings pay is the
+  -- referee's to say and the hub's to forward, and on a run the payees are
+  -- side a's players whichever list names them.
+  --
+  -- **Dropped rather than fatal**, unlike the fields above, and the
+  -- difference is who a bad value can hurt.  A wrong winner or catcher moves
+  -- a rating or a monster to the wrong player, so refusing is the safe
+  -- failure; a mangled coin count has no recipient of its own (side a of a
+  -- fight against the computer is every player in it), and refusing the
+  -- whole outcome over it would leave a finished fight on a screen with no
+  -- way out -- M.battleReason's argument -- to protect a bonus.  The Amulet
+  -- Coin doubling is the reader's, never the wire's.  A zero is no coins,
+  -- read as absent on every cart.
   if raw.payDay ~= nil then
     out.payDay = M.int(raw.payDay, 1, older and M.PAYDAY12_MAX or M.PAYDAY3_MAX)
   end

@@ -909,13 +909,15 @@ test('Gold\'s held event (K3): a Gen 2 reader only, id text and a 0 / 1 amount',
 });
 
 // ---------------------------------------------------------------------------
-// Referee gaps (docs/plans/gen12-referee-gaps-fix.md K7-K11, K13): the Gen 1 /
-// Gen 2 sheet's base / dvs / statExp, a move row's ppUps and Gold priority, the
-// moveset's level-up, the older `stat` event's signed stage, the Gen 1 / Gen 2
-// Pay Day bound, the 40-character id and the Metronome pool cap. The hub
-// protocol parity driver (referee_gaps_dialect, levelup_moveset_forward,
-// gen12_payday_forward) holds the twins to one answer case by case; this pins
-// the numbers, the key lists and the event field set they are written against.
+// Referee gaps (docs/plans/gen12-referee-gaps-fix.md K7-K11, K13, K14): the
+// Gen 1 / Gen 2 sheet's base / dvs / statExp, a move row's ppUps and Gold
+// priority, the moveset's level-up, the older `stat` event's signed stage, the
+// Gen 1 / Gen 2 Pay Day bound and Red's Pay Day on an escape, the 40-character
+// id and the 64-character map id, the Metronome pool cap and Gold's happiness.
+// The hub protocol parity driver (referee_gaps_dialect, levelup_moveset_forward,
+// gen12_payday_forward, map_id_bound) holds the twins to one answer case by
+// case; this pins the numbers, the key lists and the event field set they are
+// written against.
 // ---------------------------------------------------------------------------
 
 test('the referee-gap bounds and the Metronome pool cap match Config / Wire / sanitize', () => {
@@ -923,7 +925,7 @@ test('the referee-gap bounds and the Metronome pool cap match Config / Wire / sa
   // takes and the other refuses.
   const wire = read('src/Wire.lua');
   for (const name of ['BASE_STAT_MAX', 'DV_MAX', 'STAT_EXP_MAX', 'PP_UPS_MAX', 'PRIORITY2_MAX',
-    'STAGE12_MAX', 'PAYDAY12_MAX']) {
+    'STAGE12_MAX', 'PAYDAY12_MAX', 'HAPPINESS2_MAX']) {
     assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name],
       `Wire.${name} and sanitize.${name} must match`);
   }
@@ -935,6 +937,7 @@ test('the referee-gap bounds and the Metronome pool cap match Config / Wire / sa
   assert.strictEqual(sanitize.PAYDAY12_MAX, 999999,
     'Red\'s three BCD bytes saturate there, and Gold pays into a MAX_MONEY 999999 wallet');
   assert.ok(sanitize.PAYDAY12_MAX > sanitize.PAYDAY3_MAX, 'the Kanto / Johto bound is the wider one');
+  assert.strictEqual(sanitize.HAPPINESS2_MAX, 255, 'MON_HAPPINESS is one byte (K14)');
 
   const config = read('src/Config.lua');
   assert.strictEqual(luaAssignNumber(config, 'BATTLE_METRONOME_POOL_MAX'), sanitize.METRONOME_POOL_MAX,
@@ -1027,4 +1030,72 @@ test('K13: an id is refused past 40 characters on both twins, never cut', () => 
   assert.ok(!/sub\(1, 40\)/.test(body[1]), 'and no longer cuts');
   assert.strictEqual(sanitize.cleanId('i'.repeat(40)), 'i'.repeat(40));
   assert.strictEqual(sanitize.cleanId('i'.repeat(41)), null);
+});
+
+test('K13\'s twin: a map id is refused past 64 characters on both twins, never cut', () => {
+  // Lua's Wire.mapId used to cut a long map id to 64 where cleanMapId refused
+  // it -- a player the node hub left unplaced stood on a truncated map on the
+  // LAN host.
+  const wire = read('src/Wire.lua');
+  const body = wire.match(/function M\.mapId\(value\)([\s\S]*?)\nend/);
+  assert.ok(body, 'Wire.lua must define M.mapId(value)');
+  assert.ok(/#value > 64 then return nil/.test(body[1]), 'Wire.mapId refuses past 64');
+  assert.ok(!/sub\(1, 64\)/.test(body[1]), 'and no longer cuts');
+  assert.strictEqual(sanitize.cleanMapId('m'.repeat(64)), 'm'.repeat(64));
+  assert.strictEqual(sanitize.cleanMapId('m'.repeat(65)), null);
+});
+
+test('K14: Gold\'s happiness rides a Gen 2 sheet only, and refuses the sheet when unreadable', () => {
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const red = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100,
+    stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move],
+  };
+  const gold = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100,
+    stats: { atk: 90, def: 90, spe: 90, spa: 90, spd: 90 }, moves: [move],
+  };
+  for (const happiness of [0, 70, 255]) {
+    assert.strictEqual(cleanBattleMon({ ...gold, happiness }).happiness, happiness,
+      `a Gold sheet carries happiness ${happiness}`);
+  }
+  assert.strictEqual(cleanBattleMon(gold).happiness, undefined, 'absent stays absent');
+  assert.strictEqual(cleanBattleMon({ ...gold, happiness: null }).happiness, undefined,
+    'a null is absent, as Lua reads a JSON null');
+  for (const happiness of [256, -1, true, 'fond', [70]]) {
+    assert.strictEqual(cleanBattleMon({ ...gold, happiness }), null,
+      `an unreadable happiness (${JSON.stringify(happiness)}) refuses the sheet, K7's posture`);
+  }
+  // Red has no happiness byte: its reader neither copies nor refuses one.
+  for (const happiness of [70, 999, 'fond']) {
+    const read = cleanBattleMon({ ...red, happiness });
+    assert.ok(read && read.happiness === undefined,
+      `a Gen 1 sheet ignores happiness ${JSON.stringify(happiness)}`);
+  }
+  // Wire.lua reads it under the same gate, by the same bound.
+  const wire = read('src/Wire.lua');
+  assert.ok(/if generation == 2 and raw\.happiness ~= nil then/.test(wire),
+    'Wire.battleMon reads happiness on a Gen 2 sheet only');
+  assert.ok(/M\.int\(raw\.happiness, 0, M\.HAPPINESS2_MAX\)/.test(wire), '...bounded by HAPPINESS2_MAX');
+});
+
+test('K11 on an escape: both hubs carry Pay Day on a run on Red alone', () => {
+  // pokered pays wTotalPayDayMoney on a Teleport / Whirlwind / Roar / POKE DOLL
+  // escape (wBattleResult stays 0); Gold calls every escape a DRAW and Gen 3
+  // pays only on a win. The hub parity driver pins the behaviour
+  // (gen12_payday_forward); this pins that each hub has the one gate.
+  const hub = read('src/Hub.lua').match(/local function paysDay\(generation, mode, outcome\)([\s\S]*?)\nend/);
+  assert.ok(hub, 'Hub.lua must define paysDay(generation, mode, outcome)');
+  assert.ok(/if outcome\.reason == "run" then return generation == 1 end/.test(hub[1]),
+    'Hub.lua: a run pays on generation 1 alone');
+  const relay = read('server/lib/relay.js').match(/function paysDay\(generation, mode, outcome\) \{([\s\S]*?)\n\}/);
+  assert.ok(relay, 'relay.js must define paysDay(generation, mode, outcome)');
+  assert.ok(/if \(outcome\.reason === 'run'\) return generation === 1;/.test(relay[1]),
+    'relay.js: a run pays on generation 1 alone');
+  assert.ok(/paysDay\(self\.generation, record\.mode, outcome\)/.test(read('src/Hub.lua')),
+    'Hub.lua settles through it');
+  assert.ok(/paysDay\(this\.generation, record\.mode, outcome\)/.test(read('server/lib/relay.js')),
+    'relay.js settles through it');
 });

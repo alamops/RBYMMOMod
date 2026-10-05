@@ -16,6 +16,10 @@
  * Callers may pass stages (-6..+6) or legacy percent mods (100 = neutral);
  * stages win when present. Flat `hit(input)` matches the Gen1 JS twin; Lua
  * takes (moveAccuracy, roll, opts).
+ *
+ * Two checks are the cart's byte domain instead (the Lua twin explains): a
+ * BRIGHTPOWDER on the target and a one-hit KO move roll a BattleRandom byte
+ * against the cart's accuracy byte (`hitBytes`).
  */
 
 const Items = require('./Items.js');
@@ -61,6 +65,44 @@ function effective(accuracy, accuracyStage, evasionStage) {
   return clamp(value, MIN, MAX);
 }
 
+// The cart's accuracy byte for a sheet's accuracy (RGBDS `percent`), a byte
+// a Gen 1 sheet still carries as it is.
+function moveByte(accuracy) {
+  const acc = Math.max(0, int(accuracy, MAX));
+  if (acc > MAX) return Math.min(255, acc);
+  return idiv(acc * 255, 100);
+}
+
+// `.StatModifiers` on a byte: each pass at least 1, held at 255 past a byte.
+function effectiveByte(byte, accuracyStage, evasionStage) {
+  let [num, den] = stageMul(accuracyStage);
+  let value = idiv(Math.max(0, int(byte, 0)) * num, den);
+  if (value < 1) value = 1;
+  [num, den] = stageMul(-(int(evasionStage, 0)));
+  value = idiv(value * num, den);
+  if (value < 1) value = 1;
+  if (value > 255) value = 255;
+  return value;
+}
+
+// `cp -1 / jr z, .Hit`, then `BattleRandom / cp b / jr nc, .Miss`.
+function hitByte(byteAccuracy, roll) {
+  const b = int(byteAccuracy, 0);
+  if (b >= 255) return true;
+  return int(roll, 255) < b;
+}
+
+// The byte-domain tail of CheckHit from a base byte: `.StatModifiers`,
+// `.BrightPowder` and the roll. Returns { hit, effectiveAccuracy } (a byte).
+function hitBytes(byte, roll, opts) {
+  const src = opts || {};
+  let b = effectiveByte(byte, src.accuracyStage, src.evasionStage);
+  if (src.brightPowder !== undefined && src.brightPowder !== null) {
+    b = Items.brightPowder(b, src.brightPowder);
+  }
+  return { effectiveAccuracy: b, hit: hitByte(b, roll) };
+}
+
 // Percent-mod path for fixtures that do not carry stages.
 function effectiveFromMods(accuracy, accuracyMod, evasionMod) {
   const acc = Math.max(0, int(accuracy, MAX));
@@ -76,9 +118,9 @@ function effectiveFromMods(accuracy, accuracyMod, evasionMod) {
  *
  * `alwaysHits` (or accuracy 0) skips the roll and reports null effective
  * accuracy. Missing `roll` defaults to 0. `brightPowder` is the DEFENDER's
- * HELD_BRIGHTPOWDER parameter: `.BrightPowder` takes it off the stage-scaled
- * accuracy before the roll (Items.brightPowder), and an always-hit move never
- * meets it.
+ * HELD_BRIGHTPOWDER parameter: with it the check is `hitBytes` over the
+ * move's byte, `roll` a BattleRandom byte and the effective accuracy a byte;
+ * an always-hit move never meets it.
  */
 function hit(input) {
   const src = input || {};
@@ -89,6 +131,9 @@ function hit(input) {
   if (acc <= 0) {
     return { effectiveAccuracy: null, hit: true };
   }
+  if (src.brightPowder !== undefined && src.brightPowder !== null) {
+    return hitBytes(moveByte(acc), src.roll, src);
+  }
 
   let effectiveAccuracy;
   if (src.accuracyStage !== undefined && src.accuracyStage !== null
@@ -96,9 +141,6 @@ function hit(input) {
     effectiveAccuracy = effective(acc, src.accuracyStage, src.evasionStage);
   } else {
     effectiveAccuracy = effectiveFromMods(acc, src.accuracyMod, src.evasionMod);
-  }
-  if (src.brightPowder !== undefined && src.brightPowder !== null) {
-    effectiveAccuracy = Items.brightPowder(effectiveAccuracy, src.brightPowder);
   }
   return {
     effectiveAccuracy,
@@ -108,6 +150,10 @@ function hit(input) {
 
 module.exports = {
   hit,
+  hitBytes,
+  hitByte,
+  moveByte,
+  effectiveByte,
   effective,
   effectiveFromMods,
   int,

@@ -556,6 +556,21 @@ test('a side-effect drop at -6 is silent; a primary at -6 is not', () => {
   assert.strictEqual(sideTarget.stages.spd, -6, 'the stage stays at -6');
 
   const primary = applyPrimary(20, dummyMon(), floored());
-  assert.deepStrictEqual(primary.messages, ["Beta's SPEED won't go any lower"],
+  // CantLowerAnymore's NothingHappenedText (R1b, effects.asm :705-710).
+  assert.deepStrictEqual(primary.messages, ['Nothing happened'],
     'the primary at -6 says so');
+});
+
+// R1b: DisableEffect never asks CheckTargetSubstitute (effects.asm
+// :1286-1367), so it reaches the monster behind a doll; CalcStat
+// (home/move_mon.asm) is what GetEnemyMonStat and a K9 level-up compute.
+test('DisableEffect reaches the monster behind a doll; CalcStat', () => {
+  const target = dummyMon({ species: 'Beta', substitute: 40 });
+  const out = applyPrimary(86, dummyMon(), target);
+  assert.strictEqual(out.nothing, false, 'DISABLE_EFFECT is not stopped by a substitute');
+  assert.ok(target.disable, 'DISABLE_EFFECT locks a move behind a substitute');
+  assert.strictEqual(Effects.calcStat(70, 9, 30, null, false), 52, 'no stat exp');
+  assert.strictEqual(Effects.calcStat(45, 0, 16, 0, true), 40, 'HP: + level + 10');
+  assert.strictEqual(Effects.calcStat(255, 15, 100, 65535, false), 608, 'full stat exp: + 255 / 4');
+  assert.strictEqual(Effects.hpDv({ atk: 10, def: 9, spd: 12, spc: 15 }), 5, 'the HP DV from the low bits');
 });

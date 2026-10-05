@@ -1035,7 +1035,8 @@ end)
 --     Mimic's "learned".  A protocol-25 client uploads moves with no `name` at
 --     all, so the fallback is not a defensive branch -- it is what half the
 --     fights on a mixed hub narrate under, and the two runtimes have to agree
---     on it word for word.
+--     on it word for word.  DISABLE picks its slot at random (DisableEffect's
+--     `BattleRandom & 3`, R1b): seed 4243 picks THUMP HIT.
 scenario("move_names", function(events)
   -- `mv` writes effect=0, so the two effect moves are built by hand the way
   -- `explode_double_ko` builds EXPLODE.  86 is DISABLE_EFFECT and 82 is
@@ -1059,7 +1060,7 @@ scenario("move_names", function(events)
   -- No `name` at all: the protocol-25 sheet, narrated under its id.
   local nudge = function() return mv("nudge", 10, 255, 0) end
   local battle = build({
-    id = "mn", mode = "1v1", seed = 4242, choiceTimeout = 60, reconnectGrace = 60,
+    id = "mn", mode = "1v1", seed = 4243, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = {
         mn({ species = "Alpha", maxHp = 400, spd = 90,
@@ -1833,19 +1834,17 @@ local function rageFlinch(id, mode)
   end
 end
 scenario("g1_flinch_rage", rageFlinch("g1fr", "wild"))
--- ...and in a link fight the reset is unconditional: the Rage goes on.
+-- ...and in a link fight too: both sides are "the player" by the owner's rule
+-- (R1b), each console skipping the reset for its own raging monster.
 scenario("g1_flinch_rage_link", rageFlinch("g1fl", "1v1"))
 
--- A Hyper Beam user that a slower Stomp flinches keeps that flinch through the
--- recharge turn's open (probe 1) -- the forced recharge reads no gate -- and
--- the turn after resets it (probe 2): the beam goes again, unflinched.
---
--- KNOWN-GAP PIN, not a cart claim: the cart never reaches this state.
--- FlinchSideEffect calls ClearHyperBeam, so a flinch that lands clears the
--- recharge and the beam user acts (flinched) instead of recharging.  The
--- referee keeps the recharge, and this scenario pins today's stream so the
--- two twins stay together until the gap closes -- gap 4 in
--- docs/plans/gen12-referee-known-gaps.md, where it is re-expected.
+-- A Hyper Beam user that a slower Stomp flinches does not recharge:
+-- FlinchSideEffect calls ClearHyperBeam on its target (effects.asm :991), so
+-- at the next open the beam user is neither recharging nor raging, the reset
+-- takes the flinch (probe 1), and it fires again -- to be flinched again
+-- (probe 2), turn after turn.  (Gap 4 of
+-- docs/plans/gen12-referee-known-gaps.md, closed by R1b; this scenario used
+-- to pin the referee's kept recharge.)
 scenario("g1_flinch_recharge", function(events)
   local battle = build({
     id = "g1fh", mode = "wild", seed = 6303, choiceTimeout = 60, reconnectGrace = 60,
@@ -1863,6 +1862,7 @@ scenario("g1_flinch_recharge", function(events)
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drainInto(battle, events)
   probeFlinch(battle, 1)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drainInto(battle, events)
   probeFlinch(battle, 2)
@@ -2100,7 +2100,8 @@ scenario("g1_bide_slot0", function(events)
 end)
 
 -- A side-effect drop at -6 says nothing (CantLowerAnymore returns before its
--- text for a side effect); only a primary prints the line.
+-- text for a side effect); only a primary prints the line -- "Nothing
+-- happened!" (R1b: CantLowerAnymore's NothingHappenedText).
 scenario("g1_side_min", function(events)
   local battle = build({
     id = "g1sm", mode = "1v1", seed = 6507, choiceTimeout = 60, reconnectGrace = 60,
@@ -2614,6 +2615,801 @@ scenario("g1_self_hit", duels("g1sh", {
     b = slow(), turns = { { 0, 0 }, { 0, 0 } } },
   { seed = 7304, a = dizzy({ bide = { turns = 0, stored = 30, moveIndex = 1, targetSlot = 3 } },
       { fx("BIDE", 0, 26) }), b = slow(), turns = { { 0, 0 }, { 0, 0 } } },
+}))
+
+-- ------------------------------------------------------------------
+-- R1b (gen12-referee-gaps-fix wave 2): Transform, Haze, the computer's
+-- stat-drop miss and turn slot, ClearHyperBeam, DISABLE, PoisonEffect,
+-- the gate order, Bide, the trap's start, MIRROR MOVE, the set-damage
+-- moves, Pay Day on an escape and the K9 level-up -- each against pokered,
+-- one battle per entry.  Every sheet is written out whole (the Node twin
+-- carries the same literals).
+-- ------------------------------------------------------------------
+
+-- After each row of a `fights` battle: the RNG state and wDamage, then every
+-- monster of every seat with the state these rows move.
+local function probeR1b(battle, at, turn)
+  probes[#probes + 1] = { at = at, turn = turn, rng = battle.rng:state(),
+                          last = battle.lastDamage }
+  for _, fighter in ipairs(battle.fighters) do
+    for index, mon in ipairs(fighter.mons) do
+      local moves, types = {}, {}
+      for i = 1, #mon.moves do moves[i] = mon.moves[i].id .. ":" .. mon.moves[i].pp end
+      for i = 1, #mon.types do types[i] = tostring(mon.types[i]) end
+      local st = mon.stages
+      probes[#probes + 1] = {
+        at = at, turn = turn, slot = fighter.slot, mon = index,
+        hp = mon.hp, maxHp = mon.maxHp, level = mon.level,
+        status = mon.status or "", tox = mon.toxicCounter or 0,
+        linger = mon.toxicLinger == true, conf = mon.confusion or 0,
+        moves = table.concat(moves, ","), types = table.concat(types, ","),
+        transformed = mon.transformed == true, recharge = mon.mustRecharge == true,
+        invuln = mon.invulnerable == true, charging = mon.charging ~= nil,
+        disable = mon.disable and (mon.disable.moveIndex .. "/" .. mon.disable.turns) or "",
+        used = mon.lastUsedMove and mon.lastUsedMove.id or "",
+        cur = mon.cur.atk .. "/" .. mon.cur.def .. "/" .. mon.cur.spd .. "/" .. mon.cur.spc,
+        party = mon.partyStats.atk .. "/" .. mon.partyStats.def .. "/"
+          .. mon.partyStats.spd .. "/" .. mon.partyStats.spc,
+        stages = st.atk .. "/" .. st.def .. "/" .. st.spd .. "/" .. st.spc .. "/"
+          .. st.acc .. "/" .. st.eva,
+        flags = (mon.mist and "m" or "") .. (mon.xAccuracy and "x" or "")
+          .. (mon.focusEnergy and "f" or "") .. (mon.leechSeed and "s" or "")
+          .. (mon.reflect and "r" or "") .. (mon.lightScreen and "l" or ""),
+        sub = mon.substitute or 0,
+        trapped = mon.trapped and (mon.trapped.turns .. "/" .. mon.trapped.damage) or "",
+        trapping = mon.trapping and tostring(mon.trapping.turns) or "",
+        thrash = mon.thrashing and mon.thrashing.turns or -1,
+        bide = mon.bide and (mon.bide.turns .. "/" .. mon.bide.stored) or "",
+      }
+    end
+  end
+end
+
+-- One battle per entry, every battle's events into the one stream.  An
+-- entry names its seats ({ pid, side, mons, bag, badges }, field order) and
+-- its rows: each row maps a pid to a choice (a number is a FIGHT slot) and
+-- may carry `lv`, a K9 level-up ({ pid, monIndex, level, stats, maxHp })
+-- the referee is handed before the row's choices.  A seat's choice is filed
+-- only while the turn it was written for is still open; a row with every
+-- seat forced resolves on the clock.  `probeR1b` after each row, and the
+-- outcome (Pay Day included) at the end.
+local function fights(id, entries)
+  return function(events)
+    local battle
+    for i, e in ipairs(entries) do
+      local sides = { a = {}, b = {} }
+      for _, seat in ipairs(e.seats) do
+        local list = sides[seat.side]
+        list[#list + 1] = { playerId = seat.pid, name = seat.pid, mons = seat.mons,
+                            bag = seat.bag, badges = seat.badges }
+      end
+      battle = build({
+        id = id .. i, mode = e.mode or "1v1", seed = e.seed, choiceTimeout = 60,
+        reconnectGrace = 60, typeIds = e.typeIds, chart = e.chart,
+        metronomePool = e.pool, sides = sides,
+      })
+      drainInto(battle, events)
+      for t, row in ipairs(e.turns) do
+        if battle:outcome() then break end
+        if row.lv then
+          local lv = row.lv
+          probes[#probes + 1] = { at = i, turn = t,
+            levelUp = battle:levelUp(lv[1], lv[2], lv[3], lv[4], lv[5]) }
+          drainInto(battle, events)
+        end
+        local turnNo, phase = battle.turn, battle.phase
+        for _, seat in ipairs(e.seats) do
+          local c = row[seat.pid]
+          if c ~= nil and battle.turn == turnNo and battle.phase == phase then
+            if type(c) == "number" then c = { action = "fight", move = c } end
+            battle:submitChoice(seat.pid, c)
+          end
+        end
+        if battle.forcedPending then battle:tick(battle.now) end
+        drainInto(battle, events)
+        probeR1b(battle, i, t)
+      end
+      local o = battle:outcome()
+      if o then
+        probes[#probes + 1] = { at = i, outcome = o.outcome, reason = o.reason,
+                                winner = o.winners and o.winners[1] or "",
+                                payDay = o.payDay or 0 }
+      end
+    end
+    return battle
+  end
+end
+
+-- A move: 60 PP and accuracy 255 unless `o` says otherwise (`o.ppUps` is
+-- contract K8's).
+local function r1m(id, power, effect, o)
+  o = o or {}
+  local m = { id = id, pp = o.pp or 60, power = power, accuracy = o.accuracy or 255,
+              type = o.type or 0, effect = effect, chance = o.chance or 0 }
+  if o.highCrit then m.highCrit = true end
+  if o.ppUps then m.ppUps = o.ppUps end
+  return m
+end
+
+-- A sheet: level 20, 400 HP, 40 across, type 1 and base Speed 0 (no crits)
+-- unless `o` says otherwise; every other key of `o` is a raw sheet field
+-- (status, stages, K7's base / dvs, a Substitute, ...).
+local R1S_SHORT = { level = true, maxHp = true, hp = true, atk = true, def = true,
+                    spd = true, spc = true, types = true, baseSpd = true }
+local function r1s(species, moves, o)
+  o = o or {}
+  local out = { species = species, level = o.level or 20, hp = o.hp, maxHp = o.maxHp or 400,
+                stats = { atk = o.atk or 40, def = o.def or 40, spd = o.spd or 40,
+                          spc = o.spc or 40 },
+                types = o.types or { 1 }, baseSpd = o.baseSpd or 0, moves = moves }
+  for key, value in pairs(o) do
+    if not R1S_SHORT[key] then out[key] = value end
+  end
+  return out
+end
+
+-- The 1v1 shape of a `fights` entry: Ann (p1) on side a, Bob (p2) on side b,
+-- `o.aSeat` / `o.bSeat` their bag and badges, the rest of `o` the entry's.
+local function r1duo(a, b, o)
+  local aSeat, bSeat = o.aSeat or {}, o.bSeat or {}
+  local e = { seats = {
+    { pid = "p1", side = "a", mons = a, bag = aSeat.bag, badges = aSeat.badges },
+    { pid = "p2", side = "b", mons = b, bag = bSeat.bag, badges = bSeat.badges },
+  } }
+  for key, value in pairs(o) do
+    if key ~= "aSeat" and key ~= "bSeat" then e[key] = value end
+  end
+  return e
+end
+
+-- TRANSFORM (transform.asm) and the switch-out that undoes it:
+--   1 1v1: Alpha transforms into Beta -- Beta's moves at 5 PP each
+--     (`.copyPPLoop`), Beta's types -- then switches out and back in: its
+--     own moves (the PP it had), its own types (LoadBattleMonFromParty);
+--   2 wild: the wild Beta transforms into Alpha and takes Alpha's K7 base
+--     stats, DVs and base Speed with the species byte; Alpha's crits on it
+--     read GetEnemyMonStat -- a CalcStat over Alpha's base Defense and DVs at
+--     Beta's level 30, no stat exp -- and Beta's own crits Alpha's base Speed;
+--   3 the same without K7: the party stats, as before.
+scenario("g1_transform_restore", fights("g1tf", {
+  r1duo(
+    {
+      r1s("Alpha", { r1m("morph", 0, 57), r1m("tap", 10, 0) }, { spd = 90, types = { 1 } }),
+      r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 90 }),
+    },
+    {
+      r1s("Beta", { r1m("thump", 10, 0, { pp = 12 }), r1m("chop", 10, 0, { pp = 3 }) },
+        { spd = 10, types = { 2 } }),
+    },
+    {
+      seed = 8101,
+      turns = {
+        { p1 = 0, p2 = 0 },
+        { p1 = { action = "switch", slot = 1 }, p2 = 0 },
+        { p1 = { action = "switch", slot = 0 }, p2 = 0 },
+        { p1 = 1, p2 = 0 },
+      },
+    }),
+  r1duo(
+    {
+      r1s("Alpha", { r1m("slash", 70, 0, { highCrit = true }) },
+        {
+          spd = 90,
+          baseSpd = 255,
+          base = { hp = 60, atk = 80, def = 70, spd = 120, spc = 90 },
+          dvs = { atk = 12, def = 9, spd = 15, spc = 6 },
+        }),
+    },
+    {
+      r1s("Beta", { r1m("morph", 0, 57) },
+        {
+          level = 30,
+          spd = 10,
+          base = { hp = 48, atk = 48, def = 48, spd = 48, spc = 48 },
+          dvs = { atk = 3, def = 4, spd = 5, spc = 6 },
+        }),
+    },
+    {
+      mode = "wild",
+      seed = 8102,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("slash", 70, 0, { highCrit = true }) }, { spd = 90, baseSpd = 255 }) },
+    { r1s("Beta", { r1m("morph", 0, 57) }, { level = 30, spd = 10 }) },
+    {
+      mode = "wild",
+      seed = 8102,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+}))
+
+-- HazeEffect_ (move_effects/haze.asm): every stage and battle stat reset,
+-- confusion, X Accuracy, Mist, Focus Energy, Leech Seed, Bad Poison, Reflect,
+-- Light Screen and Disable gone on both battlers, and the TARGET's status
+-- cured -- a sleeping or frozen target loses the move it has not used yet
+-- (CANNOT_MOVE in its selected move):
+--   1 1v1: Alpha (badly poisoned, staged, behind Reflect) hazes a sleeping,
+--     confused, Misted, pumped, seeded, disabled Beta: Alpha is left plainly
+--     poisoned, Beta wakes and does not move;
+--   2 1v1: a frozen Beta is thawed and loses its move;
+--   3 coop_pvp: all four battlers -- Gamma's confusion and stages, Delta's
+--     Bad Poison and seed -- and only Beta, the target, is cured.
+scenario("g1_haze_full", fights("g1hz", {
+  r1duo(
+    {
+      r1s("Alpha", { r1m("haze", 0, 25) },
+        {
+          spd = 90,
+          status = "TOX",
+          toxicCounter = 3,
+          stages = { atk = 2, def = -1, spd = 0, spc = 0, acc = 1, eva = 0 },
+          reflect = true,
+          focusEnergy = true,
+        }),
+    },
+    {
+      r1s("Beta", { r1m("thump", 10, 0) },
+        {
+          spd = 10,
+          status = "SLP",
+          statusTurns = 5,
+          confusion = 4,
+          mist = true,
+          focusEnergy = true,
+          xAccuracy = true,
+          leechSeed = { fromSlot = 0 },
+          disable = { moveIndex = 1, turns = 4 },
+          stages = { atk = -2, def = 3, spd = 0, spc = 0, acc = 0, eva = 2 },
+        }),
+    },
+    { seed = 8201, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("haze", 0, 25) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, status = "FRZ" }) },
+    { seed = 8202, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  {
+    mode = "coop_pvp",
+    seed = 8203,
+    seats = {
+      { pid = "a1", side = "a", mons = { r1s("Alpha", { r1m("haze", 0, 25) }, { spd = 90 }) } },
+      {
+        pid = "a2",
+        side = "a",
+        mons = {
+          r1s("Gamma", { r1m("splash", 0, 85) },
+            {
+              spd = 80,
+              confusion = 3,
+              stages = { atk = 0, def = 0, spd = 4, spc = 0, acc = 0, eva = 0 },
+            }),
+        },
+      },
+      {
+        pid = "b1",
+        side = "b",
+        mons = { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, status = "PAR", mist = true }) },
+      },
+      {
+        pid = "b2",
+        side = "b",
+        mons = {
+          r1s("Delta", { r1m("splash", 0, 85) },
+            {
+              spd = 5,
+              status = "TOX",
+              toxicCounter = 2,
+              leechSeed = { fromSlot = 0 },
+              stages = { atk = -3, def = 0, spd = 0, spc = 0, acc = 0, eva = 0 },
+            }),
+        },
+      },
+    },
+    turns = {
+      {
+        a1 = { action = "fight", move = 0, target = 3 },
+        a2 = { action = "fight", move = 0, target = 3 },
+        b1 = { action = "fight", move = 0, target = 0 },
+        b2 = { action = "fight", move = 0, target = 0 },
+      },
+    },
+  },
+}))
+
+-- StatModifierDownEffect's primary branch (effects.asm :539-716), in its
+-- order: the computer's extra 25% miss byte (outside a link battle), a
+-- Substitute, then MoveHitTest -- Mist before its accuracy byte, X Accuracy
+-- with none -- each "But it failed!", and a stage at -6 "Nothing happened!":
+--   1 wild: the wild Beta growls four times (the miss byte every turn);
+--   2 1v1: the same growls, no miss byte;
+--   3 wild: into Alpha's Mist -- no accuracy byte;
+--   4 1v1: Alpha growls at Beta's doll -- no accuracy byte;
+--   5 1v1: Alpha at -6 Attack; Alpha (X Accuracy) growls with no byte;
+--   6 1v1: a SWORDS DANCE at +6 says "Nothing happened!", and draws nothing.
+scenario("g1_stat_drop_primary", fights("g1sd", {
+  r1duo(
+    { r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    {
+      mode = "wild",
+      seed = 8301,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    {
+      seed = 8301,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 10, mist = true }) },
+    { r1s("Beta", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    { mode = "wild", seed = 8302, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, substitute = 30 }) },
+    { seed = 8303, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("growl", 0, 18) }, { spd = 90, xAccuracy = true }) },
+    {
+      r1s("Beta", { r1m("growl", 0, 18) },
+        { spd = 10, stages = { atk = 0, def = 0, spd = 0, spc = 0, acc = 0, eva = 0 } }),
+    },
+    { seed = 8304, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    {
+      r1s("Alpha", { r1m("dance", 0, 50) },
+        { spd = 90, stages = { atk = 6, def = 0, spd = 0, spc = 0, acc = 0, eva = 0 } }),
+    },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 8305, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- ClearHyperBeam (effects.asm :1181-1191), beyond the flinch
+-- (g1_flinch_recharge): a freeze on the player's turn (`.freeze1`; the
+-- computer's `.freeze2` leaves it) and a trap that starts -- before its hit
+-- test, so even one that misses:
+--   1 wild: the wild Beta beams, Alpha (the player) freezes it: no recharge;
+--   2 wild: Alpha beams, the wild Beta freezes it: Alpha still recharges;
+--   3 1v1: the same, a link fight: both sides are the player, it is cleared;
+--   4 wild: Alpha beams, the wild Beta's Wrap misses: no recharge.
+scenario("g1_clear_recharge", fights("g1cr", {
+  r1duo(
+    { r1s("Alpha", { r1m("chill", 10, 35, { chance = 100 }) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("beam", 20, 80) }, { spd = 90 }) },
+    { mode = "wild", seed = 8401, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("beam", 20, 80) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("chill", 10, 35, { chance = 100 }) }, { spd = 10 }) },
+    { mode = "wild", seed = 8401, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("beam", 20, 80) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("chill", 10, 35, { chance = 100 }) }, { spd = 10 }) },
+    { seed = 8401, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("beam", 20, 80) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("wrap", 10, 42, { accuracy = 0 }) }, { spd = 10 }) },
+    { mode = "wild", seed = 8402, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- The computer's item and switch in its own slot of the order
+-- (MainInBattleLoop -> TrainerAI at `.enemyMovesFirst` / after
+-- ExecutePlayerMove), a coop_npc trainer on side b:
+--   1 a slower Beta's SUPER POTION lands after Alpha's hit;
+--   2 a faster Beta switches to Delta before Alpha moves: the hit finds Delta;
+--   3 a slower Beta that Alpha knocks out never switches (the AI's turn is
+--     gone with it); its send-out follows;
+--   4 the same Speed: the tie byte is drawn for the item as for a move.
+scenario("g1_computer_turn_slot", fights("g1ct", {
+  r1duo(
+    { r1s("Alpha", { r1m("tap", 20, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 100 }) },
+    {
+      mode = "coop_npc",
+      seed = 8501,
+      bSeat = { bag = { SUPER_POTION = 1 } },
+      turns = { { p1 = 0, p2 = { action = "item", item = "SUPER_POTION" } } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("tap", 20, 0) }, { spd = 10 }) },
+    {
+      r1s("Beta", { r1m("splash", 0, 85) }, { spd = 90 }),
+      r1s("Delta", { r1m("splash", 0, 85) }, { spd = 5 }),
+    },
+    {
+      mode = "coop_npc",
+      seed = 8502,
+      turns = { { p1 = 0, p2 = { action = "switch", slot = 1 } } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("tap", 200, 0) }, { spd = 90, atk = 200 }) },
+    {
+      r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 5 }),
+      r1s("Delta", { r1m("splash", 0, 85) }, { spd = 5 }),
+    },
+    {
+      mode = "coop_npc",
+      seed = 8503,
+      turns = {
+        { p1 = 0, p2 = { action = "switch", slot = 1 } },
+        { p2 = { action = "switch", slot = 1 } },
+      },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("tap", 20, 0) }, { spd = 40 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 40, hp = 100 }) },
+    {
+      mode = "coop_npc",
+      seed = 8504,
+      bSeat = { bag = { SUPER_POTION = 1 } },
+      turns = { { p1 = 0, p2 = { action = "item", item = "SUPER_POTION" } } },
+    }),
+}))
+
+-- Asleep or frozen, the move menu is skipped (MainInBattleLoop :308-311,
+-- SelectEnemyMove :2946-2948): last turn's selection stands and the bracket
+-- reads it.  Alpha (slow) taps on turn 1 and is put to sleep; on turn 2 its
+-- QUICK ATTACK choice still moves in tap's bracket, after Beta.  MIRROR MOVE
+-- then finds Alpha's used move zeroed by the fast-asleep turn.
+scenario("g1_asleep_selection", fights("g1as", {
+  r1duo(
+    { r1s("Alpha", { r1m("tap", 10, 0), r1m("QUICK_ATTACK", 10, 0) }, { spd = 10 }) },
+    {
+      r1s("Beta", { r1m("lull", 0, 32), r1m("thump", 10, 0), r1m("MIRROR_MOVE", 0, 9) },
+        { spd = 90 }),
+    },
+    { seed = 8601, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 1 }, { p1 = 1, p2 = 2 } } }),
+}))
+
+-- AnyMoveToSelect (core.asm :2713-2753) with a move disabled ORs the other
+-- slots' raw PP bytes: a 0-PP move with no PP Ups leaves nothing -- STRUGGLE
+-- -- even with the disabled move's PP full.
+scenario("g1_struggle_disabled", fights("g1sg", {
+  r1duo(
+    {
+      r1s("Alpha", { r1m("tap", 10, 0, { pp = 0 }), r1m("chop", 10, 0, { pp = 10 }) },
+        { spd = 90, disable = { moveIndex = 2, turns = 5 } }),
+    },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 8701, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 } } }),
+}))
+
+-- DisableEffect (effects.asm :1286-1367): its MoveHitTest, then a random
+-- slot (`BattleRandom & 3`, redrawn until it holds a move -- and, when the
+-- target is the player's, has a raw PP byte: PP Ups count), for 1..8 steps
+-- of `.AnyMoveDisabledCheck`, each in the disabled monster's own turn:
+--   1 1v1: Beta's THUMP / CHOP / SLAM, disabled and worn off over six turns;
+--   2 1v1: a 0-PP move with PP Ups is pickable, a bare 0-PP one never is;
+--   3 wild: the player disables the wild Beta, whose PP is never read;
+--   4 1v1: accuracy 0 -- "But it failed!"; a doll does not stop it.
+scenario("g1_disable", fights("g1ds", {
+  r1duo(
+    { r1s("Alpha", { r1m("lock", 0, 86), r1m("splash", 0, 85) }, { spd = 90 }) },
+    {
+      r1s("Beta", { r1m("thump", 10, 0), r1m("chop", 10, 0), r1m("slam", 10, 0) }, { spd = 10 }),
+    },
+    {
+      seed = 8801,
+      turns = {
+        { p1 = 0, p2 = 0 },
+        { p1 = 1, p2 = 0 },
+        { p1 = 1, p2 = 0 },
+        { p1 = 1, p2 = 0 },
+        { p1 = 1, p2 = 0 },
+        { p1 = 1, p2 = 0 },
+      },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("lock", 0, 86) }, { spd = 90 }) },
+    {
+      r1s(
+        "Beta",
+        {
+          r1m("thump", 10, 0, { pp = 0, ppUps = 2 }),
+          r1m("chop", 10, 0, { pp = 0 }),
+          r1m("slam", 10, 0, { pp = 5 }),
+        },
+        { spd = 10 }),
+    },
+    { seed = 8802, turns = { { p1 = 0, p2 = 2 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("lock", 0, 86) }, { spd = 90 }) },
+    {
+      r1s("Beta", { r1m("thump", 10, 0, { pp = 0 }), r1m("chop", 10, 0, { pp = 0 }) },
+        { spd = 10 }),
+    },
+    { mode = "wild", seed = 8803, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("lock", 0, 86, { accuracy = 0 }), r1m("lock", 0, 86) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, substitute = 30 }) },
+    { seed = 8804, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 } } }),
+}))
+
+-- PoisonEffect's primary branch (effects.asm :78-162): a doll, a status or a
+-- Poison type turn it away before its MoveHitTest ("It didn't affect"), and
+-- TOXIC -- the move, by its id -- badly poisons:
+--   1 a Poison-type Beta (typeIds names index 1): no byte drawn;
+--   2 a Normal-type Beta: poisoned;
+--   3 TOXIC: badly poisoned, the counter climbing;
+--   4 a doll: turned away.
+scenario("g1_poison_primary", fights("g1pp", {
+  r1duo(
+    { r1s("Alpha", { r1m("powder", 0, 66) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 1 } }) },
+    { seed = 8901, typeIds = { "NORMAL", "POISON" }, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("powder", 0, 66) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 0 } }) },
+    { seed = 8901, typeIds = { "NORMAL", "POISON" }, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("TOXIC", 0, 66) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 0 } }) },
+    {
+      seed = 8902,
+      typeIds = { "NORMAL", "POISON" },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("powder", 0, 66) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 0 }, substitute = 30 }) },
+    { seed = 8903, typeIds = { "NORMAL", "POISON" }, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- "Hit the enemy N times!" (_MultiHitText, the player's) and "Hit N
+-- times!" (_HitXTimesText, the computer's), with the drawn count, once the
+-- hits run out with the target standing; a knockout returns before it:
+--   1 1v1: Alpha's DOUBLE KICK;
+--   2 wild: the wild Beta's;
+--   3 1v1: a two-to-five move that knocks Beta out says nothing;
+--   4 1v1: a power-0 two-to-five move still hits (CalculateDamage's 2).
+scenario("g1_multihit_lines", fights("g1mh", {
+  r1duo(
+    { r1s("Alpha", { r1m("kicks", 20, 44) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9001, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("kicks", 20, 44) }, { spd = 90 }) },
+    { mode = "wild", seed = 9001, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("pelt", 40, 29) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 12 }) },
+    { seed = 9002, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("pelt", 0, 29) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9003, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- Contract K9, the rebuild experience.asm makes after a level-up in battle:
+--   1 wild: the fielded Alpha (burned, at +1 Attack, every badge) grows to
+--     level 21 with stated stats and max HP: the party stats, the HP step,
+--     then CalculateModifiedStats, the burn and the badges; the benched
+--     Gamma grows from its K7 sheet alone (no stats stated); a claim with a
+--     stat that went down, a level that did not go up, and side b's are
+--     refused;
+--   2 1v1: a link fight earns no experience -- refused.
+scenario("g1_level_up", fights("g1lu", {
+  r1duo(
+    {
+      r1s("Alpha", { r1m("tap", 10, 0) },
+        {
+          spd = 90,
+          atk = 60,
+          spc = 55,
+          maxHp = 60,
+          hp = 30,
+          status = "BRN",
+          stages = { atk = 1, def = 0, spd = 0, spc = 0, acc = 0, eva = 0 },
+          def = 50,
+        }),
+      r1s("Gamma", { r1m("splash", 0, 85) },
+        {
+          level = 15,
+          atk = 22,
+          spd = 22,
+          spc = 28,
+          maxHp = 38,
+          base = { hp = 45, atk = 49, def = 49, spd = 45, spc = 65 },
+          dvs = { atk = 10, def = 8, spd = 12, spc = 14 },
+          def = 22,
+        }),
+    },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    {
+      mode = "wild",
+      seed = 9101,
+      aSeat = {
+        badges = { BOULDERBADGE = true, THUNDERBADGE = true, SOULBADGE = true, VOLCANOBADGE = true },
+      },
+      turns = {
+        { p1 = 0, p2 = 0, lv = { "p1", 1, 21, { atk = 63, def = 52, spd = 94, spc = 57 }, 63 } },
+        { p1 = 0, p2 = 0, lv = { "p1", 2, 16, nil, nil } },
+        { p1 = 0, p2 = 0, lv = { "p1", 1, 22, { atk = 62, def = 53, spd = 95, spc = 58 }, 64 } },
+        { p1 = 0, p2 = 0, lv = { "p1", 1, 21, { atk = 64, def = 53, spd = 95, spc = 58 }, 64 } },
+        {
+          p1 = 0,
+          p2 = 0,
+          lv = { "p2", 1, 21, { atk = 41, def = 41, spd = 41, spc = 41 }, 401 },
+        },
+      },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    {
+      seed = 9102,
+      turns = {
+        {
+          p1 = 0,
+          p2 = 0,
+          lv = { "p1", 1, 21, { atk = 42, def = 42, spd = 92, spc = 42 }, 402 },
+        },
+      },
+    }),
+}))
+
+-- JUMP KICK's crash is 1 HP (PrintMoveFailureText: wDamage is 0 by then) and
+-- goes the self-hit's way past the crasher's own doll to the opposing one;
+-- SetDamageEffects draw no crit, no roll and ignore the chart, and
+-- `.specialDamage` reads the move id:
+--   1 a missed JUMP KICK: 1 HP;  2 behind its own doll: Beta's doll takes it;
+--   3 into a Ghost (chart 0): "doesn't affect", then the crash;
+--   4 SEISMIC TOSS (level 30) and SONICBOOM into a Ghost: 30, then 20;
+--   5 DRAGON RAGE, then SUPER FANG: 40, then half what is left;
+--   6 PSYWAVE (level 30): BattleRandom until it is in 1..44.
+scenario("g1_crash_and_set_damage", fights("g1cs", {
+  r1duo(
+    { r1s("Alpha", { r1m("leap", 70, 45, { accuracy = 0 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9201, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("leap", 70, 45, { accuracy = 0 }) }, { spd = 90, substitute = 40 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, substitute = 10 }) },
+    { seed = 9201, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("leap", 70, 45, { type = 1 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 2 } }) },
+    {
+      seed = 9202,
+      chart = { { 100, 100, 100 }, { 100, 100, 0 }, { 100, 100, 100 } },
+      turns = { { p1 = 0, p2 = 0 } },
+    }),
+  r1duo(
+    {
+      r1s("Alpha", { r1m("SEISMIC_TOSS", 1, 41, { type = 1 }), r1m("SONICBOOM", 1, 41) },
+        { level = 30, spd = 90 }),
+    },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 2 } }) },
+    {
+      seed = 9203,
+      chart = { { 100, 100, 0 }, { 100, 100, 0 }, { 100, 100, 100 } },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("DRAGON_RAGE", 1, 41), r1m("fang", 1, 40) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9204, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("PSYWAVE", 1, 41) }, { level = 30, spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 9205, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- OneHitKOEffect_ fails only on a SLOWER user (`jr c`): a Speed tie lands;
+-- a full paralysis (`.MonHurtItselfOrFullyParalysed`) drops a charge but not
+-- INVULNERABLE:
+--   1 1v1, both at Speed 40: the OHKO lands;
+--   2 a paralysed Alpha in the air with FLY is fully paralysed on the release
+--     turn (seed 9309): no charge, still invulnerable -- Beta's thump fails --
+--     and turn 2 is Alpha's own choice, a fresh FLY.
+scenario("g1_ohko_paralysis", fights("g1op", {
+  r1duo(
+    { r1s("Alpha", { r1m("drill", 1, 38) }, { spd = 40 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 40 }) },
+    { seed = 9301, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    {
+      r1s("Alpha", { r1m("FLY", 90, 43) },
+        {
+          spd = 90,
+          status = "PAR",
+          charging = { moveIndex = 1, effect = 43, targetSlot = 3, moveId = "FLY" },
+          invulnerable = true,
+        }),
+    },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10 }) },
+    { seed = 9309, turns = { { p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- TrappingEffect runs before the hit (SpecialEffectsCont): only MoveHitTest's
+-- miss takes it back -- a doll that holds keeps the trap, an immunity leaves
+-- it at 0 a turn -- and its counter is the two-to-five odds:
+--   1 Wrap into a 50-HP doll that holds: Beta held;
+--   2 Wrap, accuracy 0: no trap;
+--   3 Wrap into a Ghost (chart 0): "doesn't affect", Beta held at 0;
+--   4 Wrap breaking a 3-HP doll: Beta held all the same.
+scenario("g1_trap_start", fights("g1ts", {
+  r1duo(
+    { r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, substitute = 50 }) },
+    { seed = 9401, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("wrap", 15, 42, { accuracy = 0 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10 }) },
+    { seed = 9402, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, types = { 2 } }) },
+    {
+      seed = 9403,
+      chart = { { 100, 100, 0 }, { 100, 100, 100 }, { 100, 100, 100 } },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+  r1duo(
+    { r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, substitute = 3 }) },
+    { seed = 9404, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+}))
+
+-- MIRROR MOVE copies wEnemyUsedMove -- the last move the target printed a
+-- "used" line for: after its METRONOME called THRASH it is THRASH, and
+-- Alpha, mirroring, thrashes too (a MIRROR MOVE of METRONOME would have
+-- called again).
+scenario("g1_mirror_used", fights("g1mu", {
+  r1duo(
+    { r1s("Alpha", { r1m("MIRROR_MOVE", 0, 9) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("METRONOME", 0, 83) }, { spd = 90 }) },
+    {
+      seed = 9501,
+      pool = { r1m("THRASH", 30, 27) },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } },
+    }),
+}))
+
+-- EndOfBattle pays the Pay Day pile whenever wBattleResult is still 0: an
+-- escape by TELEPORT / ROAR / WHIRLWIND -- either side's -- pays; the
+-- player's RUN (TryRunningFromBattle writes 2) does not:
+--   1 wild: Alpha's PAY DAY, then the wild Beta teleports away;
+--   2 wild: Alpha's PAY DAY, then Alpha teleports;
+--   3 wild: Alpha's PAY DAY, then Alpha runs.
+scenario("g1_pay_day_escape", fights("g1pe", {
+  r1duo(
+    { r1s("Alpha", { r1m("coins", 20, 16) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85), r1m("warp", 0, 28) }, { spd = 10 }) },
+    { mode = "wild", seed = 9601, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 1 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("coins", 20, 16), r1m("warp", 0, 28) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 9601, turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 } } }),
+  r1duo(
+    { r1s("Alpha", { r1m("coins", 20, 16) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    {
+      mode = "wild",
+      seed = 9601,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = { action = "run" }, p2 = 0 } },
+    }),
+}))
+
+-- A power-0 move whose routine never calls MoveHitTest draws no accuracy
+-- byte and is not stopped by FLY: Beta (fast) is up on turns 1 and 3, where
+-- Alpha's effect-less move goes ahead and its GROWL fails (MoveHitTest's
+-- INVULNERABLE); SWORDS DANCE and HAZE draw nothing either.
+scenario("g1_no_hit_test", fights("g1nh", {
+  r1duo(
+    {
+      r1s(
+        "Alpha",
+        { r1m("wave", 0, 0), r1m("dance", 0, 50), r1m("haze", 0, 25), r1m("growl", 0, 18) },
+        { spd = 10 }),
+    },
+    { r1s("Beta", { r1m("FLY", 90, 43) }, { spd = 90 }) },
+    {
+      seed = 9701,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 1, p2 = 0 }, { p1 = 3, p2 = 0 }, { p1 = 2, p2 = 0 } },
+    }),
 }))
 
 -- ------------------------------------------------------------------

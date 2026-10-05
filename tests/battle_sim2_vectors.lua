@@ -320,7 +320,10 @@ function STATUS.sleep(input)
   return Status.sleepTick(input.turnsRemaining)
 end
 
+-- A freeze case is CheckTurn's gate (never a thaw), or -- with `defrostByte`
+-- -- HandleDefrost's roll between turns.
 function STATUS.freeze(input)
+  if input.defrostByte ~= nil then return { defrosted = Status.defrosts(input.defrostByte) } end
   return Status.freezeTick(input.roll)
 end
 

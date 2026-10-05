@@ -1935,7 +1935,8 @@ function runFamily2() {
  * field; a mon is read with none, as the hub reads a caught sheet): K7's
  * base / dvs / statExp blocks, K8's ppUps and Gold priority, K9's moveset
  * level / stats / maxHp, K10's signed stage for an older reader, K11's payDay
- * per reader (payEdges12) and K13's 40-character id refusal. Twin of gaps()
+ * per reader (payEdges12) and on a run outcome, K13's 40-character id refusal
+ * and its 64-character map-id twin, and K14's Gold happiness. Twin of gaps()
  * in tests/drivers/hub_protocol_parity.lua -- same cases, same order; the
  * argument for each is written there.
  */
@@ -2183,6 +2184,52 @@ function gaps() {
     ['choice', { battle: 'b1', action: 'item', item: 'I'.repeat(41) }, 1],
     ['outcome', { battle: 'b1', outcome: 'win', catcher: 'c'.repeat(41) }, 1],
     ['party', { battle: 'p'.repeat(41), mons: [sheet12(1)] }, 1],
+    // K13's twin: a map id refused past 64 characters, never cut
+    ['mapId', 'M'.repeat(64)],
+    ['mapId', 'M'.repeat(65)],
+    ['mapId', 'M'.repeat(200)],
+    ['mapId', 'FR_PALLET_TOWN'],
+    ['mapId', 'route-1.2'],
+    ['mapId', ''],
+    ['mapId', '../secret'],
+    ['mapId', 'a b'],
+    ['mapId', 64],
+    // K14
+    ['mon', sheet12(2, { happiness: 0 })],
+    ['mon', sheet12(2, { happiness: 70 })],
+    ['mon', sheet12(2, { happiness: 255 })],
+    ['mon', sheet12(2, { happiness: 256 })],
+    ['mon', sheet12(2, { happiness: -1 })],
+    ['mon', sheet12(2, { happiness: '70' })],
+    ['mon', sheet12(2, { happiness: 70.9 })],
+    ['mon', sheet12(2, { happiness: ' 9 ' })],
+    ['mon', sheet12(2, { happiness: '0x10' })],
+    ['mon', sheet12(2, { happiness: true })],
+    ['mon', sheet12(2, { happiness: 'fond' })],
+    ['mon', sheet12(2, { happiness: [70] })],
+    ['mon', sheet12(2, { happiness: null })],
+    ['mon', sheet12(2, { ...k7(2), happiness: 200, generation: 2 })],
+    ['mon', sheet12(1, { happiness: 70 })],
+    ['mon', sheet12(1, { happiness: 'fond' })],
+    ['mon', { ...mon3(), happiness: 70 }],
+    ['party', { battle: 'b1', mons: [sheet12(2, { happiness: 200 })] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(2, { happiness: 300 })] }, 2],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: sheet12(2, { happiness: 70 }),
+    }, 2],
+    // K11 on an escape: every reader keeps a run outcome's coins
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: ['nw1a'], losers: [ID_A], reason: 'run', payDay: 350,
+    }, 1],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: ['nw1a'], losers: [ID_A], reason: 'run', payDay: 350,
+    }, 2],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: ['nw1a'], losers: [ID_A], reason: 'run', payDay: 350,
+    }, 3],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: [ID_A], losers: ['nw1a'], reason: 'run', payDay: 350,
+    }],
   ];
 }
 
@@ -2200,6 +2247,7 @@ function readGap(kind, input, gen) {
   if (kind === 'choice') return sanitize.cleanBattleChoice(input, gen);
   if (kind === 'reconnect') return sanitize.cleanBattleReconnect(input);
   if (kind === 'id') return sanitize.cleanId(input);
+  if (kind === 'mapId') return sanitize.cleanMapId(input);
   return undefined;
 }
 
@@ -2306,42 +2354,72 @@ function levelFight3() {
 /*
  * Pay Day on a Gen 1 / Gen 2 outcome (contract K11): the hubs copy the
  * referee's outcome().payDay onto the broadcast in the NPC modes alone, and
- * only a positive count. The referee's outcome is a stub. Twin of paidFight in
- * the Lua driver.
+ * only a positive count -- and on an escape (reason `run`) only a Red hub does
+ * (pokered pays after a Teleport / Whirlwind / Roar / POKE DOLL escape; Gold
+ * calls every escape a draw and Gen 3 pays only on a win -- paysDay). The
+ * referee's outcome is a stub; a stub run names the side that fled the loser.
+ * Twin of paidFight in the Lua driver.
  */
-function paidFight(generation, mode, coins) {
+function paidFight(generation, mode, coins, reason) {
   const relay = makeGenRelay(makeClock(), generation);
-  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
-  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
-  const b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  let a;
+  let b;
+  if (generation === 3) {
+    a = dialAs(relay, 'ANN', ID_A, {
+      generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+    });
+    b = dialAs(relay, 'BOB', ID_B, {
+      generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+    });
+  } else {
+    const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+    a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+    b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  }
+  const sheet = (extra) => (generation === 3 ? mon3(extra) : sheet12(generation, extra));
   let id;
+  const solo = mode === 'wild';
   if (mode === '1v1') {
     id = openFight(relay, a, b).id;
     uploadReady(relay, a, b, id, [sheet12(generation)], [sheet12(generation)]);
   } else {
-    const solo = mode === 'wild';
     id = 'w1';
     relay.openCoopBattle(id, solo ? [a.id] : [a.id, b.id], { mode, hostId: a.id });
-    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+    if (generation === 3) {
+      relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+    } else {
+      relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+    }
     relay.handle(a.id, {
-      type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet12(generation)],
+      type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet()],
     });
     if (!solo) {
       relay.handle(b.id, {
-        type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet12(generation)],
+        type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet()],
       });
     }
     relay.handle(a.id, {
-      type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet12(generation, { catchRate: 45 })],
+      type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet({ catchRate: 45 })],
     });
   }
   const record = relay.battles.get(id);
   if (!record || !record.sim) return { opened: false };
   a.peer.outbox = [];
   b.peer.outbox = [];
-  record.sim.outcome = () => ({
+  let verdict = {
     outcome: 'win', winners: [a.id], losers: [b.id], reason: 'ko', payDay: coins,
-  });
+  };
+  if (reason === 'run') {
+    const wild = record.npcIds && record.npcIds[0];
+    verdict = {
+      outcome: 'win',
+      winners: [wild || b.id],
+      losers: mode === '1v1' || solo ? [a.id] : [a.id, b.id],
+      reason: 'run',
+      payDay: coins,
+    };
+  }
+  record.sim.outcome = () => verdict;
   relay.flushBattle(record);
   const outcome = take(a, 'mmo.battle_outcome');
   return {
@@ -2353,6 +2431,111 @@ function paidFight(generation, mode, coins) {
     readNone: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome)),
     battleGone: !relay.battles.has(id),
   };
+}
+
+/*
+ * K13's twin on the roster: a map id past 64 characters leaves its player
+ * unplaced on both hubs, in a hello's welcome / join and on a step. Twin of
+ * map_id_bound in the Lua driver.
+ */
+function slimStep(msg) {
+  if (!msg) return '(nil)';
+  return {
+    id: msg.id, map: msg.map || '(none)', x: orNil(msg.x), y: orNil(msg.y),
+  };
+}
+
+function mapIdBound() {
+  const relay = makeGenRelay(makeClock(), 1);
+  const edge = 'M'.repeat(64);
+  const long = 'M'.repeat(65);
+  const a = dialAs(relay, 'ANN', ID_A, { map: long, sprite: DEFAULT_SPRITE });
+  const aWelcome = take(a, 'mmo.welcome');
+  const b = dialAs(relay, 'BOB', ID_B, { map: edge, sprite: DEFAULT_SPRITE });
+  const bWelcome = take(b, 'mmo.welcome');
+  const joinAtA = take(a, 'mmo.join');
+  const steps = [];
+  for (const map of [edge, long, 'ROUTE_1', 'M'.repeat(200), '../secret']) {
+    relay.handle(a.id, {
+      type: 'mmo.move', map, x: 3, y: 4, facing: 'up',
+    });
+    steps.push(slimStep(take(b, 'mmo.move')));
+  }
+  return {
+    aWelcomed: aWelcome !== null,
+    bWelcomed: bWelcome !== null,
+    bSees: slimRoster(bWelcome && bWelcome.players),
+    aSeesJoin: slimPresence(joinAtA && joinAtA.player),
+    steps,
+  };
+}
+
+/*
+ * A learn on a transformed battler (Red and Gold, real referees): written into
+ * the party list put aside at Transform (`preTransform.moves`) so the
+ * switch-out gives it back; Red also overwrites the copied moves (pokered
+ * LearnMove), Gold leaves them (pokecrystal LearnMove). Twin of
+ * transformLearn in the Lua driver.
+ */
+function slimRows(moves) {
+  return (moves || []).map((m) => ({ id: m.id, pp: orNil(m.pp) }));
+}
+
+function transformLearn(generation) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const id = 't1';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  const mv = (moveId, effect, power) => row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [
+      sheet12(generation, { species: 'COPYCAT', moves: [mv('TRANSFORM', 57), mv('TACKLE', 0, 1)] }),
+      sheet12(generation, { species: 'BENCH', moves: [mv('TACKLE', 0, 1)] }),
+    ],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE', moves: [mv('GROWL'), mv('HUSH')] })],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  const live = record.sim.byId.get(a.id).mons[0];
+  const look = () => {
+    const saved = live.preTransform;
+    return {
+      transformed: live.transformed === true,
+      battle: slimRows(live.moves),
+      party: saved ? slimRows(saved.moves) : '(none)',
+      separate: saved && saved.moves ? saved.moves[0] !== live.moves[0] : '(n/a)',
+    };
+  };
+  const steps = [look()];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [mv('TRANSFORM', 57), mv('TACKLE', 0, 1), mv('LEARNT', 0, 40)],
+  });
+  steps.push(look());
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [mv('AAA'), mv('BBB'), mv('CCC')],
+  });
+  steps.push(look());
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  steps.push(look());
+  return { opened: true, steps };
 }
 
 function runGaps() {
@@ -2384,8 +2567,18 @@ function runGaps() {
         goldWild: paidFight(2, 'wild', 99999),
         goldNone: paidFight(2, 'coop_wild', 0),
         red1v1: paidFight(1, '1v1', 350),
+        redWildRun: paidFight(1, 'wild', 350, 'run'),
+        redCoopRun: paidFight(1, 'coop_wild', 350, 'run'),
+        redRunNone: paidFight(1, 'wild', 0, 'run'),
+        red1v1Run: paidFight(1, '1v1', 350, 'run'),
+        goldWildRun: paidFight(2, 'wild', 350, 'run'),
+        goldCoopRun: paidFight(2, 'coop_wild', 350, 'run'),
+        gen3WildRun: paidFight(3, 'wild', 350, 'run'),
+        gen3WildKo: paidFight(3, 'wild', 350),
       },
     },
+    { name: 'map_id_bound', result: mapIdBound() },
+    { name: 'transformed_learn', result: { red: transformLearn(1), gold: transformLearn(2) } },
   ];
 }
 

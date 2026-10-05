@@ -179,12 +179,17 @@ test('status vectors', async (t) => {
   }
 });
 
-test('freeze thaws exactly when roll % 5 === 0', () => {
+test('freeze never thaws in CheckTurn; HandleDefrost thaws under 25', () => {
   let thaws = 0;
-  for (let roll = 0; roll < 20; roll++) {
+  for (let roll = 0; roll <= 255; roll++) {
     if (status.freezeTick(roll).thawed) thaws++;
   }
-  assert.strictEqual(thaws, 4, '0,5,10,15 of 0..19');
+  assert.strictEqual(thaws, 0, 'the CheckTurn gate draws nothing and thaws nothing');
+  let defrosts = 0;
+  for (let byte = 0; byte <= 255; byte++) {
+    if (status.defrosts(byte)) defrosts++;
+  }
+  assert.strictEqual(defrosts, status.DEFROST_BYTE, '`cp 10 percent`: 25 of 256');
 });
 
 test('paralysis stops exactly when roll % 4 === 0', () => {
@@ -408,7 +413,9 @@ test('gen2 applyPrimary fails foe-targeting effects through a substitute', () =>
 
   const growlTarget = dummyMon2({ species: 'Beta', substitute: 40 });
   const growl = applyPrimary2(18, dummyMon2(), growlTarget);
-  assert.strictEqual(growl.nothing, true, 'Growl vs substitute is nothing');
+  // BattleCommand_StatDown's `.DidntMiss`: a substitute is `.Failed`, whose
+  // StatDownFailText is "But it failed!" (R2b), not "But nothing happened".
+  assert.deepStrictEqual(growl.messages, ['But it failed'], 'Growl vs substitute fails');
   assert.strictEqual(growlTarget.stages.atk, 0, 'Growl does not drop atk behind a substitute');
 
   const swordsUser = dummyMon2();
@@ -418,8 +425,10 @@ test('gen2 applyPrimary fails foe-targeting effects through a substitute', () =>
 
   const transformUser = dummyMon2();
   const transform = applyPrimary2(57, transformUser, dummyMon2({ species: 'Beta', substitute: 40 }));
-  assert.strictEqual(transform.nothing, true, 'TRANSFORM_EFFECT vs substitute is nothing');
-  assert.strictEqual(transformUser.transformed, undefined, 'TRANSFORM_EFFECT does not copy');
+  // BattleCommand_Transform reads no substitute: only a transformed or hidden
+  // target fails it (R2b).
+  assert.strictEqual(transform.nothing, false, 'TRANSFORM_EFFECT copies through a substitute');
+  assert.strictEqual(transformUser.transformed, true, '...and the user is transformed');
 
   const hazeUser = dummyMon2();
   hazeUser.stages.atk = 2;

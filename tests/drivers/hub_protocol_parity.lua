@@ -1805,8 +1805,13 @@ scenarios[#scenarios + 1] = {
 --     Gen 2 only, each refusing the message when unreadable;
 --   * K10 -- a `stat` event's signed `stage` for an older reader;
 --   * K11 -- `payDay` on an outcome per reader, PAYDAY12_MAX for 1 / 2 and
---     PAYDAY3_MAX for 3 or none (payEdges12);
---   * K13 -- an id refused past 40 characters, never cut, wherever one rides.
+--     PAYDAY3_MAX for 3 or none (payEdges12), and kept on a run outcome by
+--     every reader (which runs pay is the hubs' gate, gen12_payday_forward);
+--   * K13 -- an id refused past 40 characters, never cut, wherever one rides,
+--     and its twin: a map id refused past 64 (Wire.mapId / cleanMapId);
+--   * K14 -- Gold's `happiness` 0..255 on a Gen 2 sheet, refusing the sheet
+--     when unreadable, neither copied nor refused off a Gen 1 sheet, never
+--     read off a Gen 3 one.
 -- ------------------------------------------------------------------
 
 local function k7(gen)
@@ -1944,6 +1949,47 @@ local function gaps()
     { "choice", { battle = "b1", action = "item", item = string.rep("I", 41) }, 1 },
     { "outcome", { battle = "b1", outcome = "win", catcher = string.rep("c", 41) }, 1 },
     { "party", { battle = string.rep("p", 41), mons = { sheet12(1) } }, 1 },
+    -- K13's twin: a map id refused past 64 characters, never cut
+    { "mapId", string.rep("M", 64) },
+    { "mapId", string.rep("M", 65) },
+    { "mapId", string.rep("M", 200) },
+    { "mapId", "FR_PALLET_TOWN" },
+    { "mapId", "route-1.2" },
+    { "mapId", "" },
+    { "mapId", "../secret" },
+    { "mapId", "a b" },
+    { "mapId", 64 },
+    -- K14
+    { "mon", sheet12(2, { happiness = 0 }) },
+    { "mon", sheet12(2, { happiness = 70 }) },
+    { "mon", sheet12(2, { happiness = 255 }) },
+    { "mon", sheet12(2, { happiness = 256 }) },
+    { "mon", sheet12(2, { happiness = -1 }) },
+    { "mon", sheet12(2, { happiness = "70" }) },
+    { "mon", sheet12(2, { happiness = 70.9 }) },
+    { "mon", sheet12(2, { happiness = " 9 " }) },
+    { "mon", sheet12(2, { happiness = "0x10" }) },
+    { "mon", sheet12(2, { happiness = true }) },
+    { "mon", sheet12(2, { happiness = "fond" }) },
+    { "mon", sheet12(2, { happiness = { 70 } }) },
+    { "mon", sheet12(2, { happiness = NULL }) },
+    { "mon", sheet12(2, merged(k7(2), { happiness = 200, generation = 2 })) },
+    { "mon", sheet12(1, { happiness = 70 }) },
+    { "mon", sheet12(1, { happiness = "fond" }) },
+    { "mon", merged(mon3(), { happiness = 70 }) },
+    { "party", { battle = "b1", mons = { sheet12(2, { happiness = 200 }) } }, 2 },
+    { "party", { battle = "b1", mons = { sheet12(2, { happiness = 300 }) } }, 2 },
+    { "outcome", { battle = "b1", outcome = "win", reason = "catch",
+                   caught = sheet12(2, { happiness = 70 }) }, 2 },
+    -- K11 on an escape: every reader keeps a run outcome's coins
+    { "outcome", { battle = "b1", outcome = "win", winners = { "nw1a" }, losers = { ID_A },
+                   reason = "run", payDay = 350 }, 1 },
+    { "outcome", { battle = "b1", outcome = "win", winners = { "nw1a" }, losers = { ID_A },
+                   reason = "run", payDay = 350 }, 2 },
+    { "outcome", { battle = "b1", outcome = "win", winners = { "nw1a" }, losers = { ID_A },
+                   reason = "run", payDay = 350 }, 3 },
+    { "outcome", { battle = "b1", outcome = "win", winners = { ID_A }, losers = { "nw1a" },
+                   reason = "run", payDay = 350 } },
   }
 end
 
@@ -1967,6 +2013,7 @@ scenarios[#scenarios + 1] = {
       elseif kind == "choice" then got = Wire.battleChoice(input, gen)
       elseif kind == "reconnect" then got = Wire.battleReconnect(input)
       elseif kind == "id" then got = Wire.id(input)
+      elseif kind == "mapId" then got = Wire.mapId(input)
       end
       out[i] = { kind = kind, got = orNil(got) }
     end
@@ -2086,40 +2133,69 @@ scenarios[#scenarios + 1] = {
 -- Pay Day on a Gen 1 / Gen 2 outcome (contract K11): the hubs copy the
 -- referee's `outcome().payDay` onto the broadcast in the NPC modes alone, and
 -- only a positive count -- a 0 is the field's absence on both twins, where
--- Lua alone would read it as true.  The referee's outcome is a stub here (the
--- coins themselves are the Gen 1 / Gen 2 turn fixtures'); what is pinned is
--- the hub's copy and each reader's read of it.
+-- Lua alone would read it as true.  On an escape (reason `run`) only a Red
+-- hub copies it: pokered pays wTotalPayDayMoney after a Teleport / Whirlwind
+-- / Roar / POKE DOLL escape (wBattleResult left at 0, EndOfBattle), Gold calls
+-- every escape a DRAW (ExitBattle skips CheckPayDay) and Gen 3 pays only from
+-- HandleEndTurn_BattleWon -- so a Gold and a Gen 3 hub keep the field off a
+-- run whatever the referee said (paysDay).  The referee's outcome is a stub
+-- here (the coins themselves are the Gen 1 / Gen 2 turn fixtures'); what is
+-- pinned is the hub's copy and each reader's read of it.  A stub run names
+-- the side that fled the loser, as the referees' `_concedeRun` does.
 -- ------------------------------------------------------------------
 
-local function paidFight(generation, mode, coins)
+local function paidFight(generation, mode, coins, reason)
   local hub = makeGenHub(generation)
-  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
-  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
-  local b = dialAs(hub, "BOB", ID_B, { generation = generation, sprite = sprite })
+  local a, b
+  if generation == 3 then
+    a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
+      sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+    b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "emerald",
+      sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN" })
+  else
+    local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+    a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+    b = dialAs(hub, "BOB", ID_B, { generation = generation, sprite = sprite })
+  end
+  local function sheet(extra)
+    if generation == 3 then return mon3(extra) end
+    return sheet12(generation, extra)
+  end
   local id
+  local solo = mode == "wild"
   if mode == "1v1" then
     id = openFight(hub, a, b).id
     uploadReady(hub, a, b, id, { sheet12(generation) }, { sheet12(generation) })
   else
     -- `wild` seats its one player alone against the hub's seat; `coop_wild`
     -- seats both.
-    local solo = mode == "wild"
     id = "w1"
     hub:openCoopBattle(id, solo and { a.id } or { a.id, b.id }, { mode = mode, hostId = a.id })
-    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
-    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet12(generation) } })
+    if generation == 3 then
+      hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+    else
+      hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+    end
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet() } })
     if not solo then
-      hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet12(generation) } })
+      hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet() } })
     end
     hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b",
-                            mons = { sheet12(generation, { catchRate = 45 }) } })
+                            mons = { sheet({ catchRate = 45 }) } })
   end
   local record = hub.battles[id]
   if not (record and record.sim) then return { opened = false } end
   a.peer.outbox, b.peer.outbox = {}, {}
-  record.sim.outcome = function()
-    return { outcome = "win", winners = { a.id }, losers = { b.id }, reason = "ko", payDay = coins }
+  local verdict = { outcome = "win", winners = { a.id }, losers = { b.id }, reason = "ko", payDay = coins }
+  if reason == "run" then
+    -- The players fled: the hub's seat (or, in a 1v1, the other player) is
+    -- the winners list, the whole of side a the losers.
+    local wild = record.npcIds and record.npcIds[1]
+    verdict = { outcome = "win", winners = { wild or b.id },
+                losers = (mode == "1v1" or solo) and { a.id } or { a.id, b.id },
+                reason = "run", payDay = coins }
   end
+  record.sim.outcome = function() return verdict end
   hub:flushBattle(record)
   local outcome = take(a.peer, Wire.BATTLE_OUTCOME)
   return {
@@ -2141,7 +2217,121 @@ scenarios[#scenarios + 1] = {
       goldWild = paidFight(2, "wild", 99999),
       goldNone = paidFight(2, "coop_wild", 0),
       red1v1 = paidFight(1, "1v1", 350),
+      -- K11 on an escape: Red's hub carries the coins, Gold's and Gen 3's
+      -- never do, a link fight never does, and 0 is still absence.
+      redWildRun = paidFight(1, "wild", 350, "run"),
+      redCoopRun = paidFight(1, "coop_wild", 350, "run"),
+      redRunNone = paidFight(1, "wild", 0, "run"),
+      red1v1Run = paidFight(1, "1v1", 350, "run"),
+      goldWildRun = paidFight(2, "wild", 350, "run"),
+      goldCoopRun = paidFight(2, "coop_wild", 350, "run"),
+      gen3WildRun = paidFight(3, "wild", 350, "run"),
+      gen3WildKo = paidFight(3, "wild", 350),
     }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- K13's twin on the roster: a map id past 64 characters leaves its player
+-- unplaced on both hubs -- in a hello's welcome / join and on a step -- where
+-- Hub.lua once stood them on its first 64 characters (Wire.mapId cut it, the
+-- node hub's cleanMapId refused it).  A 64-character id places them.
+-- ------------------------------------------------------------------
+
+local function slimStep(msg)
+  if not msg then return "(nil)" end
+  return { id = msg.id, map = msg.map or "(none)", x = orNil(msg.x), y = orNil(msg.y) }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "map_id_bound",
+  run = function()
+    local hub = makeGenHub(1)
+    local edge, long = string.rep("M", 64), string.rep("M", 65)
+    local a = dialAs(hub, "ANN", ID_A, { map = long, sprite = Config.DEFAULT_SPRITE })
+    local aWelcome = take(a.peer, Wire.WELCOME)
+    local b = dialAs(hub, "BOB", ID_B, { map = edge, sprite = Config.DEFAULT_SPRITE })
+    local bWelcome = take(b.peer, Wire.WELCOME)
+    local joinAtA = take(a.peer, Wire.JOIN)
+    local steps = {}
+    for _, map in ipairs({ edge, long, "ROUTE_1", string.rep("M", 200), "../secret" }) do
+      hub:receive(a.client, { type = Wire.MOVE, map = map, x = 3, y = 4, facing = "up" })
+      steps[#steps + 1] = slimStep(take(b.peer, Wire.MOVE))
+    end
+    return {
+      aWelcomed = aWelcome ~= nil,
+      bWelcomed = bWelcome ~= nil,
+      bSees = slimRoster(bWelcome and bWelcome.players),
+      aSeesJoin = slimPresence(joinAtA and joinAtA.player),
+      steps = steps,
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- A learn on a transformed battler (Red and Gold, real referees): the hubs
+-- judge it against, and write it into, the party list the referee put aside
+-- at Transform (`mon.preTransform.moves`), so the switch-out gives back the
+-- learned list.  Gold leaves the copied moves in the fight (pokecrystal
+-- LearnMove skips the battle copy while SUBSTATUS_TRANSFORMED is set); Red
+-- overwrites them with its own (pokered LearnMove has no such check) -- a
+-- separate copy, so the PP the fight spends never reaches the party list.
+-- A rewrite is refused either way.  `learnTo` in both hubs.
+-- ------------------------------------------------------------------
+
+local function slimRows(moves)
+  local out = {}
+  for i, m in ipairs(moves or {}) do out[i] = { id = m.id, pp = orNil(m.pp) } end
+  return out
+end
+
+local function transformLearn(generation)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  local id = "t1"
+  hub:openCoopBattle(id, { a.id }, { mode = "wild", hostId = a.id })
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  local function mv(moveId, effect, power)
+    return row12(moveId, { pp = 10, power = power or 0, effect = effect or 0 })
+  end
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet12(generation, { species = "COPYCAT", moves = { mv("TRANSFORM", 57), mv("TACKLE", 0, 1) } }),
+    sheet12(generation, { species = "BENCH", moves = { mv("TACKLE", 0, 1) } }) } })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet12(generation, { species = "FOE", moves = { mv("GROWL"), mv("HUSH") } }) } })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false } end
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  local live = record.sim.byId[a.id].mons[1]
+  local function look()
+    local saved = live.preTransform
+    return {
+      transformed = live.transformed == true,
+      battle = slimRows(live.moves),
+      party = saved and slimRows(saved.moves) or "(none)",
+      separate = saved and saved.moves and saved.moves[1] ~= live.moves[1] or "(n/a)",
+    }
+  end
+  local steps = { look() }
+  -- a learn: appended to the party list
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+    moves = { mv("TRANSFORM", 57), mv("TACKLE", 0, 1), mv("LEARNT", 0, 40) } })
+  steps[#steps + 1] = look()
+  -- a rewrite: refused, nothing moves
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+    moves = { mv("AAA"), mv("BBB"), mv("CCC") } })
+  steps[#steps + 1] = look()
+  -- the switch-out undoes the Transform: the learned list comes back
+  hub:receive(a.client, { type = Wire.BATTLE_CHOICE, battle = id, action = "switch", slot = 1 })
+  steps[#steps + 1] = look()
+  return { opened = true, steps = steps }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "transformed_learn",
+  run = function()
+    return { red = transformLearn(1), gold = transformLearn(2) }
   end,
 }
 

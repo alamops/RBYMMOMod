@@ -13,6 +13,14 @@
 -- Callers may pass stages (-6..+6) or legacy percent mods (100 = neutral);
 -- stages win when present.
 --
+-- Two checks are the cart's byte domain instead (BattleCommand_CheckHit's
+-- own, effect_commands.asm:1574-1610): a target holding BRIGHTPOWDER, whose
+-- parameter comes off the accuracy BYTE, and a one-hit KO move, whose
+-- BattleCommand_OHKO raises the byte by the level gap before CheckHit.  Both
+-- roll a BattleRandom byte against the byte (`hitBytes`), never a percent
+-- rebuilt from it.  The stage ratios are this file's either way, so the two
+-- domains agree wherever no powder and no level enter.
+--
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
 local need = ...
@@ -58,6 +66,49 @@ function M.effective(accuracy, accuracyStage, evasionStage)
   return min(M.MAX, max(M.MIN, value))
 end
 
+-- The cart's accuracy byte for a sheet's accuracy: a percent (0..100)
+-- through RGBDS `percent` (`* $ff / 100`, the `move` macro's), a byte a Gen 1
+-- sheet still carries (101..255) as it is.
+function M.moveByte(accuracy)
+  local acc = max(0, int(accuracy, M.MAX))
+  if acc > M.MAX then return min(255, acc) end
+  return floor(acc * 255 / 100)
+end
+
+-- `.StatModifiers` on a byte, over the stage ratios above: the user's
+-- accuracy stage, then the target's evasion negated, each pass at least 1
+-- (`.min_accuracy`), and a result past a byte held at 255 (`.finish_accuracy`:
+-- "max out at 100%").  The intermediate keeps its width, as hQuotient does.
+function M.effectiveByte(byte, accuracyStage, evasionStage)
+  local num, den = stageMul(accuracyStage)
+  local value = floor(max(0, int(byte, 0)) * num / den)
+  if value < 1 then value = 1 end
+  num, den = stageMul(-(int(evasionStage, 0)))
+  value = floor(value * num / den)
+  if value < 1 then value = 1 end
+  if value > 255 then value = 255 end
+  return value
+end
+
+-- `.skip_brightpowder`: `cp -1 / jr z, .Hit`, then `BattleRandom / cp b /
+-- jr nc, .Miss`.  `roll` is the byte.
+function M.hitByte(byteAccuracy, roll)
+  local b = int(byteAccuracy, 0)
+  if b >= 255 then return true end
+  return int(roll, 255) < b
+end
+
+-- The byte-domain tail of CheckHit from a base byte (the move's, or the one
+-- BattleCommand_OHKO raised): `.StatModifiers`, `.BrightPowder` (the
+-- defender's parameter, `opts.brightPowder`, when it holds one) and the roll.
+-- Returns hit and the byte rolled against.
+function M.hitBytes(byte, roll, opts)
+  opts = opts or {}
+  local b = M.effectiveByte(byte, opts.accuracyStage, opts.evasionStage)
+  if opts.brightPowder ~= nil then b = Items.brightPowder(b, opts.brightPowder) end
+  return M.hitByte(b, roll), b
+end
+
 -- Percent-mod path for fixtures that do not carry stages.
 function M.effectiveFromMods(accuracy, accuracyMod, evasionMod)
   local acc = max(0, int(accuracy, M.MAX))
@@ -73,23 +124,24 @@ end
 --
 -- `brightPowder` is the DEFENDER's HELD_BRIGHTPOWDER parameter, when it holds
 -- one: BattleCommand_CheckHit's `.BrightPowder` takes it off the stage-scaled
--- accuracy after `.StatModifiers` and before the roll (Items.brightPowder does
--- the arithmetic), so an always-hit move -- Swift, X Accuracy -- returns above
--- and never meets it, as on the cart.
+-- accuracy BYTE after `.StatModifiers` and before the roll, so with it the
+-- check is `hitBytes` over the move's byte and `roll` is a BattleRandom byte
+-- (0..255), the effective accuracy returned a byte too.  An always-hit move --
+-- Swift, X Accuracy -- returns above and never meets it, as on the cart.
 function M.hit(moveAccuracy, roll, opts)
   opts = opts or {}
   if opts.alwaysHits then return true, nil end
   local acc = max(0, int(moveAccuracy, M.MAX))
   if acc <= 0 then return true, nil end
+  if opts.brightPowder ~= nil then
+    return M.hitBytes(M.moveByte(acc), roll, opts)
+  end
 
   local effective
   if opts.accuracyStage ~= nil or opts.evasionStage ~= nil then
     effective = M.effective(acc, opts.accuracyStage, opts.evasionStage)
   else
     effective = M.effectiveFromMods(acc, opts.accuracyMod, opts.evasionMod)
-  end
-  if opts.brightPowder ~= nil then
-    effective = Items.brightPowder(effective, opts.brightPowder)
   end
   return int(roll, 0) < effective, effective
 end

@@ -10453,6 +10453,24 @@ end)()
   eq(party[1].status, nil, "status clears")
   eq(party[1].moves[1].pp, 24,
      "and PP restores to base plus the PP UP bonus (20 + floor(20/5)*1)")
+  -- The bonus is capped at 7 per PP UP on both carts (pokered AddBonusPP,
+  -- pokecrystal / pokegold ComputeMaxPP): a 40-PP move with three heals to
+  -- 61, not 64 -- the uncapped fifth this heal used to add.
+  local capped = {
+    { stats = { hp = 60 }, hp = 1, moves = {
+      { id = "FIX_LONG", pp = 0, ppUps = 3 }, { id = "FIX_EDGE", pp = 0, ppUps = 3 } } },
+  }
+  Coop.healParty({ data = { moves = { FIX_LONG = { pp = 40 }, FIX_EDGE = { pp = 35 } } },
+                   save = { party = capped } })
+  eq(capped[1].moves[1].pp, 61, "PP cap: a 40-PP move with three PP UPs heals to 61")
+  eq(capped[1].moves[2].pp, 56, "PP cap: a 35-PP move's bonus is exactly the cap, 56")
+  -- A Gold slot that states only its raised maximum (the engine's own
+  -- Mon.ppUpsOf recovers the count) heals to it, and keeps it in step.
+  local gold = { { stats = { hp = 60 }, hp = 1, moves = { { id = "FIX_LONG", pp = 3, maxPp = 61 } } } }
+  Coop.healParty({ generation = 2, data = { moves = { FIX_LONG = { pp = 40 } } },
+                   save = { generation = 2, party = gold } })
+  eq(gold[1].moves[1].pp, 61, "PP cap (Gold): a stated 61 is three PP UPs, and heals to it")
+  eq(gold[1].moves[1].maxPp, 61, "PP cap (Gold): ...the stated maximum kept in step")
   eq(Coop.healParty({ save = {} }), false,
      "no party at all is answered rather than thrown through")
 
@@ -25127,8 +25145,11 @@ end
     check(screen.slots[0].hp < mine.hp or plateHpBefore == hpBefore,
           "...so a hurt fighter is not healed to full off the save file")
 
-    -- The referee never levels, so the next damage packet still states the
-    -- pre-level pair. The plate must keep the climb rather than snap back.
+    -- The rest of the batch the level-up came in was resolved before the
+    -- referee heard of it (contract K9 tells it; from the next batch on its
+    -- numbers hold the climb -- tests/mediated_battle_client.lua pins that
+    -- half), so the next damage packet here still states the pre-level pair.
+    -- The plate must keep the climb rather than snap back.
     screen:noteSlot({
       t = "damage", slot = 0,
       hp = plateHpBefore, maxHp = plateMaxBefore,

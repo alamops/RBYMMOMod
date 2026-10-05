@@ -141,6 +141,10 @@ M.FIELDS = {
   mon          = "number",
   team         = "string",
   confused     = "number",
+  -- Contract K10: a `stat` event's signed stage, -6..6, where the stat now
+  -- sits -- `amount` is unsigned on the wire and could never carry a stage
+  -- below zero.  Wire.battleEvent reads it for the Gen 1 / Gen 2 dialect.
+  stage        = "number",
 }
 
 -- ------------------------------------------------------------------
@@ -203,7 +207,8 @@ M.SHAPES = {
   status    = { slot = true, side = true, status = "absent means cleared",
                 text = true,
                 confused = "1 inflicted, 0 snapped out; independent of status" },
-  stat      = { slot = true, side = true, amount = true, text = true },
+  stat      = { slot = true, side = true, amount = "the stage, when not below 0",
+                text = true, stage = "the signed stage, -6..6 (K10)" },
   switch    = { slot = true, side = true, text = "the species coming in",
                 speciesId = "registry id for the art, when the sheet named one",
                 level = "the monster's level, for the seat opposite's pill",

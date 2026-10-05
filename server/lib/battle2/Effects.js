@@ -18,6 +18,8 @@
 // For the burn / paralysis tail of `battleStat`, so the halving and the
 // quartering are one rule with one owner rather than a second copy here.
 const Status = require('./Status.js');
+// The HELD_PREVENT_* tokens the status commands ask about (Items.prevents).
+const Items = require('./Items.js');
 
 const NAMES = [
   'NO_ADDITIONAL_EFFECT',
@@ -125,11 +127,16 @@ const NAMES = [
   'EFFECT_GUST', // 99
   'EFFECT_EARTHQUAKE', // 100
   'EFFECT_SKY_ATTACK', // 101
+  // The referee-gaps run's wave 2 (R2b; the Lua twin explains).
+  'EFFECT_SLEEP_TALK', // 102
+  'EFFECT_LOCK_ON', // 103
+  'EFFECT_SAFEGUARD', // 104
+  'EFFECT_TOXIC', // 105
 ];
 
 // The last id either table numbers. The wire carries a Gen 1/2 move's effect
 // as a byte (Wire.battleMove, sanitize EFFECT_MAX), so this may grow to 255.
-const MAX_EFFECT_ID = 101;
+const MAX_EFFECT_ID = 105;
 
 // The Gold-native ids by name, for the call sites that branch on one.
 const SP_DEF_DOWN_HIT = 87;
@@ -147,6 +154,10 @@ const TRI_ATTACK = 98;
 const GUST = 99;
 const EARTHQUAKE = 100;
 const SKY_ATTACK = 101;
+const SLEEP_TALK = 102;
+const LOCK_ON = 103;
+const SAFEGUARD = 104;
+const TOXIC = 105;
 
 const CATEGORIES = [
   'none', 'other', 'status_side', 'drain', 'status_side', 'status_side',
@@ -175,6 +186,8 @@ const CATEGORIES = [
   'status_side', 'status_side',
   'other', 'other',
   'charge',
+  'meta', 'volatile', 'volatile',
+  'status_primary',
 ];
 
 const STAGE_MIN = -6;
@@ -283,7 +296,6 @@ const GEN2_EFFECT_ID = {
   EFFECT_LIGHT_SCREEN: 64,
   EFFECT_REFLECT: 65,
   EFFECT_POISON: 66,
-  EFFECT_TOXIC: 66,
   EFFECT_PARALYZE: 67,
   EFFECT_ATTACK_DOWN_HIT: 68,
   EFFECT_DEFENSE_DOWN_HIT: 69,
@@ -442,9 +454,8 @@ function badgeBoost(statValue, wireStatKey, badges, spa) {
 //   3. ApplyPrzEffectOnSpeed / ApplyBrnEffectOnAttack (core.asm:6585-6669):
 //      paralysis quarters Speed and burn halves Attack, each at least 1.
 //
-// Read-time rather than stored; the Lua twin's note says where the cart reads
-// otherwise (a switch-in's status penalty runs before BadgeStatBoosts) and
-// why that stays written down rather than modelled.
+// This is the cart's CalcPlayerStats; the three writers that use another
+// order are `storedStat`'s (the Lua twin explains).
 //
 // `mon` is a sheet: { stats, stages, status }. `badges` is its seat's set
 // (null for every seat the cart would not boost; see Turn.BADGE_MODES).
@@ -461,6 +472,121 @@ function battleStat(mon, key, badges) {
     value = Status.paralysisSpeed(value);
   }
   return value;
+}
+
+// ------------------------------------------------------------------
+// the stored battle stats (docs/plans/gen12-referee-gaps-fix.md, R2b; the
+// Lua twin carries the notes: "init" InitBattleMon / InitEnemyMon / the
+// in-battle level-up, status before badge; "load" LoadEnemyMon, no status;
+// Transform's copy; a snapshot stands while its inputs do)
+// ------------------------------------------------------------------
+const STAT_KEYS = ['atk', 'def', 'spe', 'spa', 'spd'];
+const STAGE_KEYS = ['atk', 'def', 'spe', 'spa', 'spd', 'acc', 'eva'];
+
+function orderedStat(mon, key, badges, order) {
+  const stats = mon.stats && typeof mon.stats === 'object' ? mon.stats : {};
+  const stages = mon.stages && typeof mon.stages === 'object' ? mon.stages : {};
+  let value = applyStage(stats[key], stages[key]);
+  if (order === 'load') return value;
+  if (key === 'atk' && mon.status === 'burn') value = Status.burnAttack(value);
+  if (key === 'spe' && mon.status === 'paralysis') value = Status.paralysisSpeed(value);
+  let spa;
+  if (key === 'spd') spa = applyStage(stats.spa, stages.spa);
+  return badgeBoost(value, key, badges, spa);
+}
+
+// CalcMonStatC for one stat (the Lua twin explains): GetSquareRoot is the
+// smallest root whose square is not below the stat exp, 255 at most.
+function squareRoot(exp) {
+  const e = Math.max(0, int(exp, 0));
+  for (let b = 1; b <= 254; b += 1) {
+    if (b * b >= e) return b;
+  }
+  return 255;
+}
+
+function monStat(base, dv, exp, level, hp) {
+  let value = (Math.max(0, int(base, 0)) + Math.max(0, int(dv, 0))) * 2
+    + Math.floor(squareRoot(exp) / 4);
+  value = Math.floor((value * level) / 100);
+  value += hp ? level + 10 : 5;
+  if (value > MAX_STAT_VALUE) value = MAX_STAT_VALUE;
+  return value;
+}
+
+// CalcMonStats over a Gold sheet's K7 blocks at `level`, or null without
+// `base` and `dvs`.
+function calcMonStats(base, dvs, statExp, level) {
+  if (!base || typeof base !== 'object' || !dvs || typeof dvs !== 'object') return null;
+  const exp = statExp && typeof statExp === 'object' ? statExp : {};
+  const lv = Math.max(1, int(level, 1));
+  const hpDv = (int(dvs.atk, 0) % 2) * 8 + (int(dvs.def, 0) % 2) * 4
+    + (int(dvs.spe, 0) % 2) * 2 + (int(dvs.spc, 0) % 2);
+  return {
+    stats: {
+      atk: monStat(base.atk, dvs.atk, exp.atk, lv, false),
+      def: monStat(base.def, dvs.def, exp.def, lv, false),
+      spe: monStat(base.spe, dvs.spe, exp.spe, lv, false),
+      spa: monStat(base.spa, dvs.spc, exp.spc, lv, false),
+      spd: monStat(base.spd, dvs.spc, exp.spc, lv, false),
+    },
+    maxHp: monStat(base.hp, hpDv, exp.hp, lv, true),
+  };
+}
+
+// The five battle stats in `order` ('calc', 'init' or 'load').
+function calcStats(mon, badges, order) {
+  const out = {};
+  for (const key of STAT_KEYS) {
+    out[key] = order === 'calc' ? battleStat(mon, key, badges) : orderedStat(mon, key, badges, order);
+  }
+  return out;
+}
+
+// Record `values` as the monster's battle stats, with the inputs they stand on.
+function snapStats(mon, badges, values) {
+  const stats = mon.stats && typeof mon.stats === 'object' ? mon.stats : {};
+  const stages = mon.stages && typeof mon.stages === 'object' ? mon.stages : {};
+  const snap = {
+    values: {}, stats: {}, stages: {}, status: mon.status, badges,
+  };
+  for (const key of STAT_KEYS) {
+    snap.values[key] = values[key];
+    snap.stats[key] = stats[key];
+  }
+  for (const key of STAGE_KEYS) snap.stages[key] = clampStage(stages[key]);
+  mon.statSnap = snap;
+}
+
+function dropSnap(mon) {
+  if (mon && typeof mon === 'object') mon.statSnap = null;
+}
+
+// Lua's nil and JS's null / undefined are one "absent".
+const same = (x, y) => (x === undefined || x === null ? (y === undefined || y === null) : x === y);
+
+function snapStands(snap, mon, badges) {
+  if (!same(snap.status, mon.status) || !same(snap.badges, badges)) return false;
+  const stats = mon.stats && typeof mon.stats === 'object' ? mon.stats : {};
+  const stages = mon.stages && typeof mon.stages === 'object' ? mon.stages : {};
+  for (const key of STAT_KEYS) {
+    if (!same(snap.stats[key], stats[key])) return false;
+  }
+  for (const key of STAGE_KEYS) {
+    if (snap.stages[key] !== clampStage(stages[key])) return false;
+  }
+  return true;
+}
+
+// The battle stat a hit, the turn order or RaiseStat's 999 test reads.
+function storedStat(mon, key, badges) {
+  if (!mon || typeof mon !== 'object') return battleStat(mon, key, badges);
+  const snap = mon.statSnap;
+  if (snap) {
+    if (snapStands(snap, mon, badges)) return snap.values[key];
+    mon.statSnap = null;
+  }
+  return battleStat(mon, key, badges);
 }
 
 // DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146; port
@@ -544,6 +670,30 @@ const PHASE1_PRIMARY = {
   53: true, 54: true, 55: true, 56: true, 58: true, 59: true,
   60: true, 61: true, 62: true, 63: true, 66: true, 67: true,
   84: true, 85: true, 86: true,
+  103: true, 104: true, 105: true, // LOCK_ON, SAFEGUARD, TOXIC
+};
+
+// The referee-numbered move scripts with no `checkhit` (the Lua twin lists
+// them): none of them spends the target's LOCK-ON.
+const NO_CHECKHIT = {
+  9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
+  15: true, 24: true, 25: true, 26: true, 46: true, 47: true,
+  50: true, 51: true, 52: true, 53: true, 54: true, 55: true,
+  56: true, 57: true, 64: true, 65: true, 79: true, 83: true,
+  85: true, 102: true, 104: true,
+};
+
+// CheckHit's `.LockOn`: a locked-on target in the sky is still missed by these.
+const LOCK_ON_SKY_MISS = { EARTHQUAKE: true, FISSURE: true, MAGNITUDE: true };
+
+// SLEEP TALK's `.check_two_turn_move`: the effects it never calls.
+const SLEEP_TALK_EXCLUDED = {
+  26: true, 39: true, 43: true, 101: true,
+};
+
+// The scripts with `checksafeguard` after their `checkhit`.
+const CHECKS_SAFEGUARD = {
+  32: true, 49: true, 66: true, 67: true, 105: true,
 };
 
 function isPhase1Primary(effectId) {
@@ -589,6 +739,23 @@ function fighterFields(fighter) {
   return { slot: fighter.slot, side: fighter.side };
 }
 
+// Whether a monster has the type a chart index names (null names none).
+function hasType(mon, typeIndex) {
+  if (typeIndex === null || typeIndex === undefined || !Array.isArray(mon.types)) return false;
+  return mon.types.includes(typeIndex);
+}
+
+// PrintDidntAffect's line (DidntAffect1Text), a status command's own failure.
+function didntAffectLine(mon) {
+  return `It didn't affect ${mon.species}!`;
+}
+
+// BattleCommand_Safeguard's `ld a, 5`.
+const SAFEGUARD_TURNS = 5;
+
+// BattleCommand_Transform's `.pp_loop`: 5 PP a copied move (SKETCH 1).
+const TRANSFORM_PP = 5;
+
 // Confusion is a volatile, not a major status: it does not occupy `mon.status`
 // and does not persist on the party sheet. The chip is a `confused` flag on
 // the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
@@ -607,32 +774,64 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
   out.events.push({ kind: 'status', fields });
 }
 
-// Returns true when the stage moved (BattleCommand_StatUp's wFailedMessage 0,
-// which MinimizeDropSub reads).
+// The stored battle stats as they stand now (`storedStat` for each).
+function currentStats(mon, badges) {
+  const out = {};
+  for (const key of STAT_KEYS) out[key] = storedStat(mon, key, badges);
+  return out;
+}
+
+// A status written the way the cart writes one outside a stat rebuild (the
+// Lua twin explains): the byte changes, the battle stats stay -- but for the
+// penalty a landing burn or paralysis puts on the stat it finds.
+function setStatus(mon, badges, status) {
+  const values = currentStats(mon, badges);
+  mon.status = status;
+  if (status === 'burn') values.atk = Status.burnAttack(values.atk);
+  if (status === 'paralysis') values.spe = Status.paralysisSpeed(values.spe);
+  snapStats(mon, badges, values);
+}
+
+// `setStatus` on a monster whose seat is `fighter` (its badges).
+function setStatusOn(mon, fighter, status) {
+  setStatus(mon, fighter ? fighter.badges : null, status);
+}
+
+// A stage written the way RaiseStat's `.stats_already_max` writes it: the
+// level moves and no CalcPlayerStats follows, so the battle stats stay.
+function setStageKeep(mon, badges, stat, stage) {
+  const values = currentStats(mon, badges);
+  mon.stages[stat] = stage;
+  snapStats(mon, badges, values);
+}
+
+// What a sentence calls a held item (Items.label's rule).
+function itemLabel(mon) {
+  return mon.itemName || mon.heldItem || 'ITEM';
+}
+
+// The `stat` event for a stage that moved: `amount` as it always rode and the
+// signed `stage` beside it (contract K10).
+function statEvent(out, fighter, stage, text) {
+  const fields = fighterFields(fighter);
+  fields.amount = stage;
+  fields.stage = stage;
+  fields.text = text;
+  out.events.push({ kind: 'stat', fields });
+}
+
+// One stage written and announced: the battle stats are rebuilt (the
+// snapshot drops) and the line is StatUpMessage / StatDownMessage's.
 function applyStatChange(out, fighter, mon, stat, delta) {
-  if (delta < 0 && mon.mist) {
-    out.messages.push('But it failed');
-    return false;
-  }
   const label = STAT_LABELS[stat] || stat;
   const before = clampStage(mon.stages[stat]);
   const after = clampStage(before + delta);
-  if (after === before) {
-    if (delta > 0) {
-      out.messages.push(`${mon.species}'s ${label} won't go any higher`);
-    } else {
-      out.messages.push(`${mon.species}'s ${label} won't go any lower`);
-    }
-    return false;
-  }
   mon.stages[stat] = after;
+  dropSnap(mon);
   const verb = delta > 0 ? 'rose' : 'fell';
   const text = `${mon.species}'s ${label} ${verb}`;
   out.messages.push(text);
-  const fields = fighterFields(fighter);
-  fields.amount = after;
-  fields.text = text;
-  out.events.push({ kind: 'stat', fields });
+  statEvent(out, fighter, after, text);
   return true;
 }
 
@@ -641,7 +840,8 @@ function applyStatChange(out, fighter, mon, stat, delta) {
 // refills it on every send-out (ResetPlayerStatLevels, engine/battle/
 // core.asm:3944), so a monster that switches in or faints brings no stage
 // with it -- the referee keeps them per monster and clears them at those two
-// points instead (Turn `_resolveSwitches` / `_faint`).
+// points instead (Turn `_resolveSwitches` / `_faint`). Haze rebuilds the
+// battle stats, so the snapshot goes with them.
 function resetStages(mon) {
   mon.stages.atk = 0;
   mon.stages.def = 0;
@@ -650,6 +850,7 @@ function resetStages(mon) {
   mon.stages.spd = 0;
   mon.stages.acc = 0;
   mon.stages.eva = 0;
+  dropSnap(mon);
 }
 
 // BattleCommand_StatDown's `.ComputerMiss` byte (pokecrystal engine/battle/
@@ -667,59 +868,118 @@ function primaryStatDown(effectId) {
   return null;
 }
 
-// BattleCommand_StatDown up to `.DidntMiss`, the one routine a primary
-// stat-down move (`attackdown` after `checkhit`) and a *DownHit side effect
-// (`attackdown` after `buildopponentrage`) both run, in its order:
-//
-//   1. CheckMist: the target's SUBSTATUS_MIST -> `.Mist`;
-//   2. the stage already at -6 (`dec b / jp z, .CantLower`) -> `.CantLower`
-//      -- a -2 drop from -5 goes on, its `dec b / jr nz` / `inc b` stopping
-//      it at -6;
-//   3. `.ComputerMiss`: on the enemy's turn outside a link battle
-//      (`computerMover`, Turn's isComputerSeat) a BattleRandom under
-//      COMPUTER_DROP_MISS -> `.Failed` -- skipped for the attacking moves
-//      that lower accuracy (`cp EFFECT_ACCURACY_DOWN_HIT / jr z, .DidntMiss`:
-//      MUD-SLAP and OCTAZOOKA, `effectId` ACCURACY_DOWN_HIT here). Lock-On's
-//      exemption is not mapped, so every other stat-down move draws it.
-//
-// Nothing before the byte asks whether the move hit, whether a substitute
-// stands or whether the side effect's chance landed: `checkhit` only set
-// wAttackMissed, a substitute is CheckSubstituteOpp at `.DidntMiss`, and
-// wEffectFailed is read after that -- so the computer draws it for a missed
-// GROWL, for a hit into a substitute and for an AURORA BEAM whose chance
-// byte failed alike. Returns 'mist', 'floor' or 'missed' for the step that
-// stopped the drop, or null when it goes on to `.DidntMiss`.
-function statDownGate(rng, targetMon, stat, computerMover, effectId) {
+// BattleCommand_StatDown up to `.DidntMiss` (the Lua twin carries the
+// notes): Mist, the stage at -6, then the computer's byte -- skipped while the
+// target is still locked on (`lockedOn`) and for ACCURACY_DOWN_HIT. Returns
+// 'mist', 'floor' or 'missed' for the step that stopped the drop, or null.
+function statDownGate(rng, targetMon, stat, computerMover, effectId, lockedOn) {
   if (targetMon.mist) return 'mist';
   if (clampStage(targetMon.stages[stat]) <= STAGE_MIN) return 'floor';
-  if (computerMover && int(effectId, 0) !== ACCURACY_DOWN_HIT
+  if (computerMover && !lockedOn && int(effectId, 0) !== ACCURACY_DOWN_HIT
       && rng && rng.byte() < COMPUTER_DROP_MISS) {
     return 'missed';
   }
   return null;
 }
 
-// Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
-// Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
-// Substitute) and field-wide Haze still run; Conversion copies onto the user.
-// A stat-down move meets the substitute later, inside BattleCommand_StatDown
-// (`applyPrimary` below), so it is not stopped here.
+// TryLowerStat's floor: the battle stat is already 1 (not acc / eva).
+function statAtFloor(mon, stat, badges) {
+  if (stat === 'acc' || stat === 'eva') return false;
+  return storedStat(mon, stat, badges) <= 1;
+}
+
+// StatDownFailText / StatUpFailText's lines (data/text/battle.asm).
+function mistLine(mon) {
+  return `${mon.species}'s protected by MIST.`;
+}
+function wontDropLine(mon, stat) {
+  return `${mon.species}'s ${STAT_LABELS[stat] || stat} won't drop anymore!`;
+}
+function wontRiseLine(mon, stat) {
+  return `${mon.species}'s ${STAT_LABELS[stat] || stat} won't rise anymore!`;
+}
+
+// The line a primary stat-down move ends on when its `checkhit` missed.
+function statDownMissLine(targetMon, stat) {
+  if (targetMon.mist) return mistLine(targetMon);
+  if (clampStage(targetMon.stages[stat]) <= STAGE_MIN) return wontDropLine(targetMon, stat);
+  return 'But it failed';
+}
+
+// Cartridge Substitute blocks foe-targeting primaries (Disable, Mimic, Lock-On
+// ...); the Lua twin lists what it leaves to the commands themselves.
 function blockedBySubstitute(effectId) {
   const statFx = STAT_EFFECTS[effectId];
   if (statFx) return false;
   if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
-      || effectId === 56 || effectId === 64 || effectId === 65
-      || effectId === 79 || effectId === 85) {
+      || effectId === 56 || effectId === 57 || effectId === 64 || effectId === 65
+      || effectId === 79 || effectId === 85 || effectId === SAFEGUARD
+      || effectId === 32 || effectId === 49 || effectId === 66 || effectId === 67
+      || effectId === 84 || effectId === TOXIC || effectId === LOCK_ON) {
     return false;
   }
   return true;
 }
 
+// The HELD_PREVENT_* item's line ("<TARGET>'s protected by <ITEM>!").
+function protectedBy(out, targetMon) {
+  out.messages.push(`${targetMon.species}'s protected by ${itemLabel(targetMon)}!`);
+  return out;
+}
+
+// RaiseStat for a primary stat-up move (the Lua twin carries the notes):
+// +6 fails, a battle stat at MAX_STAT_VALUE puts ONE level back with no
+// rebuild, both "won't rise anymore!". Returns whether the stat rose.
+function raisePrimary(out, fighter, mon, stat, delta) {
+  const before = clampStage(mon.stages[stat]);
+  if (before >= STAGE_MAX) {
+    out.messages.push(wontRiseLine(mon, stat));
+    return false;
+  }
+  let after = Math.min(STAGE_MAX, before + delta);
+  const badges = fighter ? fighter.badges : null;
+  if (stat !== 'acc' && stat !== 'eva'
+      && storedStat(mon, stat, badges) >= MAX_STAT_VALUE) {
+    after -= 1;
+    const text = wontRiseLine(mon, stat);
+    if (after !== before) {
+      setStageKeep(mon, badges, stat, after);
+      statEvent(out, fighter, after, text);
+    }
+    out.messages.push(text);
+    return false;
+  }
+  return applyStatChange(out, fighter, mon, stat, after - before);
+}
+
+// BattleCommand_StatDown and its lines for a primary stat-down move that hit.
+function lowerPrimary(out, c, fighter, mon, stat, delta) {
+  const stop = statDownGate(c.rng, mon, stat, c.computerMover === true,
+    c.effectId, mon.lockOn === true);
+  if (stop === 'mist') {
+    out.messages.push(mistLine(mon));
+    return out;
+  }
+  if (stop === 'floor') {
+    out.messages.push(wontDropLine(mon, stat));
+    return out;
+  }
+  if (stop === 'missed' || int(mon.substitute, 0) > 0) {
+    out.messages.push('But it failed');
+    return out;
+  }
+  if (statAtFloor(mon, stat, fighter ? fighter.badges : null)) {
+    out.messages.push(wontDropLine(mon, stat));
+    return out;
+  }
+  applyStatChange(out, fighter, mon, stat, delta);
+  return out;
+}
+
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
-//      moveIndex (1-based), statusToWire, userScreens (the user's side's
-//      screen counts; see LIGHT_SCREEN_EFFECT below), computerMover (the
-//      move is the computer's: BattleCommand_StatDown's extra miss), moveKey
-//      (the move's id, upper-cased: MinimizeDropSub's `cp MINIMIZE`)
+//      moveIndex (1-based), statusToWire, userScreens, computerMover,
+//      moveKey, moveImmune, poisonType / grassType, fieldMons (the Lua twin
+//      describes each).
 function applyPrimary(ctx) {
   const out = {
     nothing: false, messages: [], events: [], heals: [], costs: [],
@@ -731,6 +991,7 @@ function applyPrimary(ctx) {
     userMon, targetMon, userFighter, targetFighter, rng,
   } = c;
   const wire = c.statusToWire || {};
+  const targetBadges = targetFighter ? targetFighter.badges : null;
 
   if (targetMon && (targetMon.substitute || 0) > 0 && blockedBySubstitute(effectId)) {
     out.nothing = true;
@@ -748,50 +1009,35 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_ResetStats: every monster on the field, all four in a 2v2.
   if (effectId === 25) {
-    resetStages(userMon);
-    resetStages(targetMon);
+    const field = Array.isArray(c.fieldMons) ? c.fieldMons : [userMon, targetMon];
+    for (const mon of field) resetStages(mon);
     out.messages.push('All stat changes were eliminated');
     return out;
   }
 
   const statFx = STAT_EFFECTS[effectId];
   if (statFx) {
-    const mon = statFx.selfTarget ? userMon : targetMon;
-    const fighter = statFx.selfTarget ? userFighter : targetFighter;
-    if (!statFx.selfTarget) {
-      // BattleCommand_StatDown's own order (statDownGate): Mist and a stage
-      // at -6 first -- applyStatChange says their lines, "But it failed" and
-      // "won't go any lower", as before -- then the computer's byte, whose
-      // miss is `.Failed` ("But it failed!", TryPrintButItFailed), and only
-      // then the substitute (CheckSubstituteOpp at `.DidntMiss`).
-      const stop = statDownGate(rng, mon, statFx.stat, c.computerMover === true, effectId);
-      if (stop === 'missed') {
-        out.messages.push('But it failed');
-        return out;
-      }
-      if (stop === null && (mon.substitute || 0) > 0) {
-        out.nothing = true;
-        return out;
-      }
+    if (statFx.selfTarget) {
+      const raised = raisePrimary(out, userFighter, userMon, statFx.stat, statFx.delta);
+      // MinimizeDropSub: wPlayerMinimized / wEnemyMinimized, what STOMP's
+      // doubleminimizedamage reads. A send-out clears it.
+      if (raised && c.moveKey === 'MINIMIZE') userMon.minimized = true;
+      return out;
     }
-    const raised = applyStatChange(out, fighter, mon, statFx.stat, statFx.delta);
-    // MinimizeDropSub, the tail of a BattleCommand_StatUp that moved a stage:
-    // the move is MINIMIZE, so wPlayerMinimized / wEnemyMinimized goes up --
-    // what STOMP's doubleminimizedamage reads. A send-out clears it.
-    if (raised && statFx.selfTarget && c.moveKey === 'MINIMIZE') {
-      userMon.minimized = true;
-    }
-    return out;
+    return lowerPrimary(out, c, targetFighter, targetMon, statFx.stat, statFx.delta);
   }
 
+  // BattleCommand_SleepTarget: HELD_PREVENT_SLEEP first, then the rest.
   if (effectId === 32) {
-    if (hasMajorStatus(targetMon)) {
+    if (Items.prevents(targetMon, 'sleep')) return protectedBy(out, targetMon);
+    if (hasMajorStatus(targetMon) || int(targetMon.substitute, 0) > 0) {
       out.nothing = true;
       return out;
     }
     const turns = (rng ? rng.byte() : 0) % 7 + 1;
-    targetMon.status = 'sleep';
+    setStatus(targetMon, targetBadges, 'sleep');
     targetMon.statusTurns = turns;
     const token = wire.sleep || 'SLP';
     const text = `${targetMon.species} fell asleep`;
@@ -803,28 +1049,54 @@ function applyPrimary(ctx) {
     return out;
   }
 
-  if (effectId === 66) {
-    if (hasMajorStatus(targetMon)) {
+  // BattleCommand_Poison, POISONPOWDER's and TOXIC's one command.
+  if (effectId === 66 || effectId === TOXIC) {
+    if (c.moveImmune || hasType(targetMon, c.poisonType)) {
+      out.messages.push(`It doesn't affect ${targetMon.species}`);
+      return out;
+    }
+    if (targetMon.status === 'poison' || targetMon.status === 'toxic') {
       out.nothing = true;
       return out;
     }
-    targetMon.status = 'poison';
-    const token = wire.poison || 'PSN';
-    const text = `${targetMon.species} was poisoned`;
+    if (Items.prevents(targetMon, 'poison')) return protectedBy(out, targetMon);
+    if (hasMajorStatus(targetMon) || int(targetMon.substitute, 0) > 0) {
+      out.nothing = true;
+      return out;
+    }
+    const toxic = effectId === TOXIC;
+    setStatus(targetMon, targetBadges, toxic ? 'toxic' : 'poison');
+    let text;
+    if (toxic) {
+      targetMon.toxicCounter = 1;
+      text = `${targetMon.species}'s badly poisoned!`;
+    } else {
+      text = `${targetMon.species} was poisoned`;
+    }
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
-    fields.status = token;
+    fields.status = toxic ? (wire.toxic || 'TOX') : (wire.poison || 'PSN');
     fields.text = text;
     out.events.push({ kind: 'status', fields });
     return out;
   }
 
+  // BattleCommand_Paralyze.
   if (effectId === 67) {
-    if (hasMajorStatus(targetMon)) {
+    if (targetMon.status === 'paralysis') {
       out.nothing = true;
       return out;
     }
-    targetMon.status = 'paralysis';
+    if (c.moveImmune) {
+      out.messages.push(`It doesn't affect ${targetMon.species}`);
+      return out;
+    }
+    if (Items.prevents(targetMon, 'paralysis')) return protectedBy(out, targetMon);
+    if (hasMajorStatus(targetMon) || int(targetMon.substitute, 0) > 0) {
+      out.nothing = true;
+      return out;
+    }
+    setStatus(targetMon, targetBadges, 'paralysis');
     const token = wire.paralysis || 'PAR';
     const text = `${targetMon.species} is paralyzed`;
     out.messages.push(text);
@@ -835,12 +1107,27 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_Confuse.
   if (effectId === 49) {
+    if (Items.prevents(targetMon, 'confusion')) return protectedBy(out, targetMon);
+    if ((targetMon.confusion || 0) > 0 || int(targetMon.substitute, 0) > 0) {
+      out.nothing = true;
+      return out;
+    }
     confuse(out, targetFighter, targetMon, rng, true);
     return out;
   }
 
+  // BattleCommand_LeechSeed: a substitute, a Grass type, one already seeded.
   if (effectId === 84) {
+    if (int(targetMon.substitute, 0) > 0) {
+      out.nothing = true;
+      return out;
+    }
+    if (hasType(targetMon, c.grassType)) {
+      out.messages.push(`It doesn't affect ${targetMon.species}`);
+      return out;
+    }
     if (targetMon.leechSeed) {
       out.nothing = true;
       return out;
@@ -891,8 +1178,8 @@ function applyPrimary(ctx) {
   // 6147-6188): a screen belongs to the user's SIDE (wPlayerScreens), lasts
   // SCREEN_TURNS, and a second cast while it is up fails ("But it failed!")
   // rather than refreshing the count. `c.userScreens` is the side's
-  // { lightScreen, reflect } turn counts (Turn's `this.screens[side]`), which
-  // the between-turn tick counts down; nothing else ever clears them.
+  // { lightScreen, reflect, safeguard } turn counts (Turn's
+  // `this.screens[side]`), which the between-turn ticks count down.
   if (effectId === 64 || effectId === 65) {
     const key = effectId === 64 ? 'lightScreen' : 'reflect';
     const screens = c.userScreens;
@@ -903,6 +1190,29 @@ function applyPrimary(ctx) {
     screens[key] = SCREEN_TURNS;
     out.messages.push(`${userMon.species}`
       + (effectId === 64 ? ' created a light screen' : ' created a reflect'));
+    return out;
+  }
+
+  // BattleCommand_Safeguard: the user's SIDE for five ticks.
+  if (effectId === SAFEGUARD) {
+    const screens = c.userScreens;
+    if (!screens || typeof screens !== 'object' || int(screens.safeguard, 0) > 0) {
+      out.messages.push('But it failed');
+      return out;
+    }
+    screens.safeguard = SAFEGUARD_TURNS;
+    out.messages.push(`${userMon.species}'s covered by a veil!`);
+    return out;
+  }
+
+  // BattleCommand_LockOn: a substitute fails it, else the TARGET is locked on.
+  if (effectId === LOCK_ON) {
+    if (int(targetMon.substitute, 0) > 0) {
+      out.messages.push(didntAffectLine(targetMon));
+      return out;
+    }
+    targetMon.lockOn = true;
+    out.messages.push(`${userMon.species} took aim!`);
     return out;
   }
 
@@ -955,12 +1265,32 @@ function applyPrimary(ctx) {
     return out;
   }
 
+  // BattleCommand_Transform (the Lua twin carries the notes): ClearLastMove,
+  // "But it failed" against a transformed or hidden target, no substitute
+  // asked; the copy with 5 PP a move (SKETCH 1), the DVs, the unmodified
+  // stats, the target's battle stats as they stand, the types and the
+  // levels; what the user was kept in `preTransform`.
   if (effectId === 57) {
-    userMon.stats.atk = Math.max(1, int(targetMon.stats.atk, 1));
-    userMon.stats.def = Math.max(1, int(targetMon.stats.def, 1));
-    userMon.stats.spe = Math.max(1, int(targetMon.stats.spe, 1));
-    userMon.stats.spa = Math.max(1, int(targetMon.stats.spa, 1));
-    userMon.stats.spd = Math.max(1, int(targetMon.stats.spd, 1));
+    userMon.lastCounterMove = null;
+    out.clearLastMove = true;
+    if (targetMon.transformed || targetMon.invulnerable) {
+      out.messages.push('But it failed');
+      return out;
+    }
+    if (!userMon.preTransform) {
+      userMon.preTransform = {
+        stats: userMon.stats, types: userMon.types,
+        moves: userMon.moves.slice(), dvs: userMon.dvs,
+      };
+    }
+    const battleStats = currentStats(targetMon, targetBadges);
+    userMon.stats = {
+      atk: Math.max(1, int(targetMon.stats.atk, 1)),
+      def: Math.max(1, int(targetMon.stats.def, 1)),
+      spe: Math.max(1, int(targetMon.stats.spe, 1)),
+      spa: Math.max(1, int(targetMon.stats.spa, 1)),
+      spd: Math.max(1, int(targetMon.stats.spd, 1)),
+    };
     userMon.types = targetMon.types.length ? [...targetMon.types] : [0];
     userMon.stages.atk = clampStage(targetMon.stages.atk);
     userMon.stages.def = clampStage(targetMon.stages.def);
@@ -969,23 +1299,32 @@ function applyPrimary(ctx) {
     userMon.stages.spd = clampStage(targetMon.stages.spd);
     userMon.stages.acc = clampStage(targetMon.stages.acc);
     userMon.stages.eva = clampStage(targetMon.stages.eva);
-    userMon.moves = targetMon.moves.map((m) => ({
-      id: m.id || 'move',
-      name: m.name,
-      pp: Math.max(0, int(m.pp, 0)),
-      power: Math.max(0, int(m.power, 0)),
-      accuracy: Math.max(0, int(m.accuracy, 255)),
-      type: Math.max(0, int(m.type, 0)),
-      effect: Math.max(0, int(m.effect, 0)),
-      chance: Math.max(0, int(m.chance, 0)),
-      highCrit: m.highCrit === true,
-    }));
+    userMon.dvs = targetMon.dvs && typeof targetMon.dvs === 'object'
+      ? { ...targetMon.dvs } : undefined;
+    userMon.moves = targetMon.moves.map((m) => {
+      const pp = moveKey(m) === 'SKETCH' ? 1 : TRANSFORM_PP;
+      return {
+        id: m.id || 'move',
+        name: m.name,
+        pp,
+        maxPp: pp,
+        power: Math.max(0, int(m.power, 0)),
+        accuracy: Math.max(0, int(m.accuracy, 255)),
+        type: Math.max(0, int(m.type, 0)),
+        effect: Math.max(0, int(m.effect, 0)),
+        chance: Math.max(0, int(m.chance, 0)),
+        highCrit: m.highCrit === true,
+        priority: m.priority,
+      };
+    });
     userMon.transformed = true;
+    userMon.disable = null;
     // BattleCommand_Transform copies the target's species into the battle
     // struct, which the Lucky Punch / Stick crit check reads; the party
     // species -- `speciesId`, untouched -- is what Light Ball, Thick Club and
     // Metal Powder read (Items.js).
     userMon.transformSpecies = targetMon.speciesId === undefined ? null : targetMon.speciesId;
+    snapStats(userMon, userFighter ? userFighter.badges : null, battleStats);
     out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
     out.movesChanged = true;
     return out;
@@ -1069,22 +1408,16 @@ const SIDE_TEXT = {
 };
 const SIDE_TOKEN = { poison: 'PSN', burn: 'BRN', freeze: 'FRZ', paralysis: 'PAR' };
 
+// The status lands the way the cart writes it (`setStatus`), on the target's
+// seat's badges.
 function inflict(out, fighter, mon, status, wire) {
-  mon.status = status;
+  setStatusOn(mon, fighter, status);
   const text = `${mon.species} ${SIDE_TEXT[status]}`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.status = wire[status] || SIDE_TOKEN[status];
   fields.text = text;
   out.events.push({ kind: 'status', fields });
-}
-
-function hasType(mon, typeIndex) {
-  if (typeIndex === null || typeIndex === undefined || !Array.isArray(mon.types)) return false;
-  for (let i = 0; i < mon.types.length; i += 1) {
-    if (mon.types[i] === typeIndex) return true;
-  }
-  return false;
 }
 
 // CheckMoveTypeMatchesTarget (effect_commands.asm:5909-5945, pokegold the
@@ -1102,15 +1435,18 @@ function moveTypeMatchesTarget(targetMon, moveType, normalType) {
 // The status commands, one function each because TRI ATTACK's
 // `tristatuschance` jumps into whichever its byte names. `s` is the side
 // state applySide builds: target, fighter, wire, behindSub, moveType,
-// normalType, poisonType.
+// normalType, poisonType, safeguard (the target's side has SAFEGUARD up).
+// Each command also asks the target's HELD_PREVENT_* item just ahead of
+// wEffectFailed; all of these stop silently.
 
 // BattleCommand_PoisonTarget (:3668-3700): a substitute, any status, a
-// POISON-type target (CheckIfTargetIsPoisonType -- POISON alone), and only
-// then wEffectFailed.
+// POISON-type target (CheckIfTargetIsPoisonType -- POISON alone),
+// HELD_PREVENT_POISON, wEffectFailed, then Safeguard.
 function poisonTarget(out, s, hit) {
   if (s.behindSub || hasMajorStatus(s.target)) return;
   if (hasType(s.target, s.poisonType)) return;
-  if (!hit) return;
+  if (Items.prevents(s.target, 'poison')) return;
+  if (!hit || s.safeguard) return;
   out.proc = true;
   inflict(out, s.fighter, s.target, 'poison', s.wire);
 }
@@ -1119,13 +1455,14 @@ function poisonTarget(out, s, hit) {
 // any status jumps to Defrost (:3969-3993) BEFORE wEffectFailed is read, so a
 // frozen target is thawed by every burn-family hit that reaches the command,
 // its chance byte landed or not, and any other status ends it there; then a
-// target sharing the move's type, then wEffectFailed.
+// target sharing the move's type, HELD_PREVENT_BURN, wEffectFailed, then
+// Safeguard. Defrost writes the status byte with no rebuild (`setStatus`).
 function burnTarget(out, s, hit) {
   if (s.behindSub) return;
   const targetMon = s.target;
   if (hasMajorStatus(targetMon)) {
     if (targetMon.status === 'freeze') {
-      targetMon.status = null;
+      setStatusOn(targetMon, s.fighter, null);
       targetMon.statusTurns = 0;
       const text = `${targetMon.species} was defrosted`;
       out.messages.push(text);
@@ -1138,26 +1475,30 @@ function burnTarget(out, s, hit) {
     return;
   }
   if (moveTypeMatchesTarget(targetMon, s.moveType, s.normalType)) return;
-  if (!hit) return;
+  if (Items.prevents(targetMon, 'burn')) return;
+  if (!hit || s.safeguard) return;
   out.proc = true;
   inflict(out, s.fighter, targetMon, 'burn', s.wire);
 }
 
 // BattleCommand_FreezeTarget (:3994-4044): a substitute, any status, a
-// target sharing the move's type, then wEffectFailed.
+// target sharing the move's type, HELD_PREVENT_FREEZE, wEffectFailed, then
+// Safeguard. A landed freeze's tail is Turn's `_applySide`.
 function freezeTarget(out, s, hit) {
   if (s.behindSub || hasMajorStatus(s.target)) return;
   if (moveTypeMatchesTarget(s.target, s.moveType, s.normalType)) return;
-  if (!hit) return;
+  if (Items.prevents(s.target, 'freeze')) return;
+  if (!hit || s.safeguard) return;
   out.proc = true;
   inflict(out, s.fighter, s.target, 'freeze', s.wire);
 }
 
-// BattleCommand_ParalyzeTarget (:4045-4078): a substitute, any status, then
-// wEffectFailed. No type check at all.
+// BattleCommand_ParalyzeTarget (:4045-4078): a substitute, any status,
+// HELD_PREVENT_PARALYZE, wEffectFailed, then Safeguard. No type check at all.
 function paralyzeTarget(out, s, hit) {
   if (s.behindSub || hasMajorStatus(s.target)) return;
-  if (!hit) return;
+  if (Items.prevents(s.target, 'paralysis')) return;
+  if (!hit || s.safeguard) return;
   out.proc = true;
   inflict(out, s.fighter, s.target, 'paralysis', s.wire);
 }
@@ -1187,25 +1528,17 @@ function triStatusChance(out, s, rng, chance) {
 
 // RaiseStat (:4142-4231) for the *UpHit side effects: wEffectFailed, a stage
 // already at +6, and -- for a stat that is not accuracy or evasion -- the
-// battle stat already at MAX_STAT_VALUE all fail it, silently. Returns
-// whether the stage moved.
+// stored battle stat already at MAX_STAT_VALUE all fail it, silently.
+// Returns whether the stage moved.
 function raiseSideStat(out, fighter, mon, stat, hit, badges) {
   if (!hit) return false;
   const before = clampStage(mon.stages[stat]);
   if (before >= STAGE_MAX) return false;
   if (stat !== 'acc' && stat !== 'eva'
-      && battleStat(mon, stat, badges) >= MAX_STAT_VALUE) {
+      && storedStat(mon, stat, badges) >= MAX_STAT_VALUE) {
     return false;
   }
-  const after = before + 1;
-  mon.stages[stat] = after;
-  const text = `${mon.species}'s ${STAT_LABELS[stat] || stat} rose`;
-  out.messages.push(text);
-  const fields = fighterFields(fighter);
-  fields.amount = after;
-  fields.text = text;
-  out.events.push({ kind: 'stat', fields });
-  return true;
+  return applyStatChange(out, fighter, mon, stat, 1);
 }
 
 // The secondary effect of a damaging hit, run where every *Hit script runs it:
@@ -1216,7 +1549,7 @@ function raiseSideStat(out, fighter, mon, stat, hit, badges) {
 // ctx: effectId, hit, rng, targetMon, targetFighter, userMon, userFighter,
 //      userBadges, statusToWire, moveType, poisonType / normalType,
 //      computerMover, chance (TRI ATTACK's and DEFENSE_DOWN_HIT's own bytes,
-//      and the byte drawn here when `hit` is absent).
+//      and the byte drawn here when `hit` is absent), targetSafeguard.
 // Returns { proc, messages, events }. The Lua twin carries the long notes.
 function applySide(ctx) {
   const out = { proc: false, messages: [], events: [] };
@@ -1233,6 +1566,7 @@ function applySide(ctx) {
     moveType: int(c.moveType, null),
     normalType: c.normalType,
     poisonType: c.poisonType,
+    safeguard: c.targetSafeguard === true,
   };
 
   if (effectId === TRI_ATTACK) {
@@ -1266,8 +1600,12 @@ function applySide(ctx) {
   const stat = SIDE_STAT_DOWN[effectId];
   if (stat) {
     if (effectId === 69) hit = effectChance(rng, c.chance, behindSub);
-    if (statDownGate(rng, targetMon, stat, c.computerMover === true, effectId)) return out;
+    if (statDownGate(rng, targetMon, stat, c.computerMover === true, effectId,
+      targetMon.lockOn === true)) {
+      return out;
+    }
     if (behindSub || !hit || targetMon.invulnerable) return out;
+    if (statAtFloor(targetMon, stat, targetFighter ? targetFighter.badges : null)) return out;
     out.proc = true;
     applyStatChange(out, targetFighter, targetMon, stat, -1);
     return out;
@@ -1285,11 +1623,12 @@ function applySide(ctx) {
     return out;
   }
 
-  // BattleCommand_ConfuseTarget (:5732-5749): wEffectFailed, then a
-  // substitute, then a target already confused, all before
-  // FinishConfusingTarget draws the 2-5 turn byte.
+  // BattleCommand_ConfuseTarget (:5732-5749): HELD_PREVENT_CONFUSE,
+  // wEffectFailed, Safeguard, a substitute, then a target already confused,
+  // all before FinishConfusingTarget draws the 2-5 turn byte.
   if (effectId === 76) {
-    if (!hit || behindSub) return out;
+    if (Items.prevents(targetMon, 'confusion')) return out;
+    if (!hit || s.safeguard || behindSub) return out;
     if (targetMon.confusion && targetMon.confusion > 0) return out;
     out.proc = true;
     confuse(out, targetFighter, targetMon, rng, false);
@@ -1358,18 +1697,14 @@ function payDayCoins(level) {
   return (Math.max(0, int(level, 0)) * 2) % 256;
 }
 
+// EFFECT_OHKO is not here: Gold's is BattleCommand_OHKO, resolved whole by
+// Turn (`isOhko`).
 function fixedDamage(ctx) {
   const c = ctx || {};
   const effectId = int(c.effectId, 0);
   const { userMon, targetMon } = c;
   const movePower = int(c.power, 0);
-  const userSpeed = int(c.userSpeed, 0);
-  const foeSpeed = int(c.foeSpeed, 0);
 
-  if (effectId === 38) {
-    if (userSpeed <= foeSpeed) return null;
-    return Math.max(1, int(targetMon.hp, 0));
-  }
   if (effectId === 40) {
     return Math.max(1, Math.floor(int(targetMon.hp, 0) / 2));
   }
@@ -1378,6 +1713,11 @@ function fixedDamage(ctx) {
     return Math.max(1, int(userMon.level, 1));
   }
   return null;
+}
+
+// EFFECT_OHKO: BattleCommand_OHKO, its own accuracy and $ffff (Turn).
+function isOhko(effectId) {
+  return int(effectId, 0) === 38;
 }
 
 // ------------------------------------------------------------------
@@ -1506,8 +1846,12 @@ const MOVE_PRIORITY = {
   VITAL_THROW: 0, // `cp VITAL_THROW / ld a, 0`
 };
 
-// The priority bracket of a move (a move record or its id).
+// The priority bracket of a move (a move record or its id). A record's own
+// `priority` (contract K8) wins over the table.
 function movePriority(moveOrId) {
+  if (moveOrId && typeof moveOrId === 'object' && typeof moveOrId.priority === 'number') {
+    return moveOrId.priority;
+  }
   const key = moveKey(moveOrId);
   if (!Object.prototype.hasOwnProperty.call(MOVE_PRIORITY, key)) return BASE_PRIORITY;
   return MOVE_PRIORITY[key];
@@ -1826,6 +2170,32 @@ module.exports = {
   GUST,
   EARTHQUAKE,
   SKY_ATTACK,
+  SLEEP_TALK,
+  LOCK_ON,
+  SAFEGUARD,
+  TOXIC,
+  SAFEGUARD_TURNS,
+  TRANSFORM_PP,
+  NO_CHECKHIT,
+  LOCK_ON_SKY_MISS,
+  SLEEP_TALK_EXCLUDED,
+  CHECKS_SAFEGUARD,
+  STAT_KEYS,
+  calcStats,
+  calcMonStats,
+  snapStats,
+  dropSnap,
+  storedStat,
+  currentStats,
+  setStatus,
+  setStatusOn,
+  statEvent,
+  didntAffectLine,
+  mistLine,
+  wontDropLine,
+  wontRiseLine,
+  statDownMissLine,
+  isOhko,
   STAGE_MIN,
   STAGE_MAX,
   STAGE_MULT,

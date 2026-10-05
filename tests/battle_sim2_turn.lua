@@ -1457,7 +1457,10 @@ end
 do
   local target = dummyMon({ species = "Beta", substitute = 40 })
   local out = applyPrimary(18, dummyMon(), target)
-  eq(out.nothing, true, "gen2: Growl vs substitute is nothing")
+  -- BattleCommand_StatDown's `.DidntMiss`: a substitute is `.Failed`, whose
+  -- StatDownFailText is "But it failed!" (R2b), not "But nothing happened".
+  eq(out.nothing, false, "gen2: Growl vs substitute is no \"nothing\"")
+  eq(out.messages[1], "But it failed", "gen2: ...it fails")
   eq(target.stages.atk, 0, "gen2: Growl does not drop atk behind a substitute")
 end
 
@@ -1469,9 +1472,11 @@ end
 
 do
   local user = dummyMon()
+  -- BattleCommand_Transform reads no substitute: only a transformed or hidden
+  -- target fails it (R2b).
   eq(applyPrimary(57, user, dummyMon({ species = "Beta", substitute = 40 })).nothing,
-     true, "gen2: TRANSFORM_EFFECT vs substitute is nothing")
-  eq(user.transformed, nil, "gen2: TRANSFORM_EFFECT does not copy through a substitute")
+     false, "gen2: TRANSFORM_EFFECT copies through a substitute")
+  eq(user.transformed, true, "gen2: ...and the user is transformed")
 end
 
 do
@@ -2548,9 +2553,17 @@ do
   local _, thunderRocked = kr(hit("THUNDER", 10, 0, Effects.THUNDER), rock)
   eq(thunderPlain.rng:state(), thunderRocked.rng:state(),
      "...nor does a Gold-native id whose script has none (THUNDER)")
-  local _, snorePlain = kr(hit("SNORE", 10, 0, Effects.SNORE), nil)
-  local _, snoreRocked = kr(hit("SNORE", 10, 0, Effects.SNORE), rock)
-  ok(snorePlain.rng:state() ~= snoreRocked.rng:state(),
+  -- SNORE needs a sleeping user (BattleCommand_Snore fails an awake one).
+  local function snoreRun(item)
+    local battle, foe = fight({ seed = 3,
+      a = { held({ species = "Alpha", spe = 90, item = item, status = "SLP", statusTurns = 7,
+                   moves = { hit("SNORE", 10, 0, Effects.SNORE) } }) },
+      b = { held({ species = "Beta", maxHp = 400, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    round(battle, foe)
+    return battle
+  end
+  ok(snoreRun(nil).rng:state() ~= snoreRun(rock).rng:state(),
      "SNORE's script ends in `kingsrock`, so its own id rolls it")
   local _, burnt = kr(hit("ember_hit", 10, 0, 4), rock)
   local _, burntPlain = kr(hit("ember_hit", 10, 0, 4), nil)
@@ -2854,7 +2867,10 @@ do
   end
   local tEvents, tBattle = bideRelease(true)
   local _, uBattle = bideRelease(nil)
-  ok(said(tEvents, "Alpha used BIDE"), "a traded monster's Bide is unleashed")
+  -- StoreEnergy's release says "unleashed energy" and runs no `usedmovetext`
+  -- (R2b), at its slot rather than at the turn's open.
+  ok(said(tEvents, "Alpha unleashed energy") and not said(tEvents, "Alpha used BIDE"),
+     "a traded monster's Bide is unleashed")
   eq(damageOn(tEvents, 3), 80, "...at twice the energy stored")
   eq(rngOf(tBattle), rngOf(uBattle), "...and its release draws no obedience byte")
 
@@ -2998,9 +3014,12 @@ do
   end
   local function tgt(o)
     o = o or {}
+    -- `stats`: TryLowerStat reads the battle stat (a stat already at 1 is
+    -- not lowered), so the target states one.
     return { species = "Tgt", types = o.types or { NORMAL }, status = o.status, statusTurns = 0,
              substitute = o.substitute or 0, mist = o.mist, confusion = o.confusion or 0,
              invulnerable = o.invulnerable,
+             stats = { atk = 50, def = 50, spe = 50, spa = 50, spd = 50 },
              stages = { atk = o.atk or 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 } }
   end
   local function side(effectId, target, o)
@@ -3190,17 +3209,17 @@ do
   t = tgt({ substitute = 10 })
   out = primary(18, t, { rng = r, computer = true })
   eq(r.drawn, 1, "the byte comes before the substitute")
-  eq(out.nothing, true, "...which then stops the move")
+  eq(out.messages[1], "But it failed", "...which then stops the move (`.Failed`, R2b)")
   r = bytes({ 64 })
   t = tgt({ mist = true })
   out = primary(18, t, { rng = r, computer = true })
   eq(r.drawn, 0, "Mist comes before the byte")
-  eq(out.messages[1], "But it failed", "...with the Mist line it always had")
+  eq(out.messages[1], "Tgt's protected by MIST.", "...with the cart's Mist line (ProtectedByMistText, R2b)")
   r = bytes({ 64 })
   t = tgt({ atk = -6 })
   out = primary(18, t, { rng = r, computer = true })
   eq(r.drawn, 0, "so does a stage at -6")
-  eq(out.messages[1], "Tgt's ATTACK won't go any lower", "...with its line")
+  eq(out.messages[1], "Tgt's ATTACK won't drop anymore!", "...with the cart's line (WontDropAnymoreText, R2b)")
   r = bytes({ 64 })
   t = tgt({ atk = -5 })
   primary(58, t, { rng = r, computer = true })
@@ -3208,7 +3227,7 @@ do
   eq(t.stages.atk, -6, "...and stops at -6")
   t = tgt({ mist = true, substitute = 10 })
   out = primary(18, t)
-  eq(out.messages[1], "But it failed", "Mist is asked before the substitute, a player's move too")
+  eq(out.messages[1], "Tgt's protected by MIST.", "Mist is asked before the substitute, a player's move too")
   eq(out.nothing, false, "...so the substitute's \"nothing happened\" is not the line")
 
   -- (g) Through the turn machine.  Two seats on one seed: the wild fight is
@@ -3241,7 +3260,10 @@ do
   local miss = { id = "growl", pp = 30, power = 0, accuracy = 1, type = 0, effect = 18, chance = 0 }
   local linkM, linkMEvents = duelOf("1v1", miss)
   local wildM = duelOf("wild", miss)
-  ok(said(linkMEvents, "Beta missed"), "a 1% GROWL misses on this seed")
+  -- A missed primary stat-down move says StatDownFailText's line -- `.Failed`
+  -- on wAttackMissed is "But it failed" -- not a miss line (R2b).
+  ok(said(linkMEvents, "But it failed") and not said(linkMEvents, "Beta missed"),
+     "a 1% GROWL misses on this seed, with StatDownFailText's line")
   oneByteAhead(linkM, wildM, "...and the computer's still draws its StatDown byte after the miss")
   local linkF, linkFEvents = duelOf("1v1", growl, { aAway = true })
   local wildF = duelOf("wild", growl, { aAway = true })
@@ -3320,13 +3342,15 @@ do
     EFFECT_SACRED_FIRE = 93, EFFECT_STOMP = 94, EFFECT_TWISTER = 95, EFFECT_SNORE = 96,
     EFFECT_THUNDER = 97, EFFECT_TRI_ATTACK = 98, EFFECT_GUST = 99, EFFECT_EARTHQUAKE = 100,
     EFFECT_SKY_ATTACK = 101,
+    -- R2b's: the commands the referee runs now, and TOXIC off POISON's id.
+    EFFECT_SLEEP_TALK = 102, EFFECT_LOCK_ON = 103, EFFECT_SAFEGUARD = 104, EFFECT_TOXIC = 105,
   }
   for name, id in pairs(names) do
     eq(Effects.idOf(name), id, name .. " has its own id")
     eq(Effects.nameOf(id), name, "...and the id names it back")
   end
-  eq(Effects.MAX_EFFECT_ID, 101, "the table ends at SKY ATTACK")
-  eq(Effects.nameOf(102), nil, "nothing past it")
+  eq(Effects.MAX_EFFECT_ID, 105, "the table ends at EFFECT_TOXIC")
+  eq(Effects.nameOf(106), nil, "nothing past it")
   eq(Effects.category(101), "charge", "SKY ATTACK still charges")
   ok(Effects.isCharge(Effects.SKY_ATTACK), "...as a charge move")
   eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "the other charge moves keep CHARGE_EFFECT")
@@ -3467,7 +3491,10 @@ do
   local beam = withMove(hit("HYPER_BEAM", 150, 0, 80), { seed = 4, substitute = 400 })
   local beamTurn = round(beam, "p2")
   eq(beam.byId.p2.mons[1].hp, 900, "the substitute took the HYPER BEAM")
-  ok(said(beamTurn, "Alpha must recharge"), "...and it still recharges (the next turn's forced skip)")
+  -- The recharge is the next turn's: said at its slot in that turn (R2b,
+  -- CheckTurn's first test), not at the open of it.
+  ok(not said(beamTurn, "Alpha must recharge"), "...the line is not the HYPER BEAM turn's")
+  ok(said(round(beam, "p2"), "Alpha must recharge"), "...and it still recharges (the next turn)")
 
   -- (j) PAY DAY: the pot on a win against the computer, a catch included;
   --     none in a link fight
@@ -3500,6 +3527,264 @@ do
   local caught = catcher:outcome()
   eq(caught and caught.reason, "catch", "a MASTER BALL catches")
   eq(caught and caught.payDay, 60, "...and a catch is a WIN: the pot is paid")
+end
+
+-- ------------------------------------------------------------------
+-- the referee-gaps run's wave 2 (docs/plans/gen12-referee-gaps-fix.md, R2b).
+-- The parity scenarios (tests/drivers/battle2_turn_parity.lua, `r2b_*`) pin
+-- the streams; these name the rules.
+-- ------------------------------------------------------------------
+
+-- (a) the sheet: K8 on a move, K7 / K14 on a monster; absent stays absent
+do
+  local b = fight({ seed = 1,
+    a = { held({ species = "Alpha", moves = { { id = "jab", pp = 5, power = 10, accuracy = 100,
+                                              priority = 2, ppUps = 3 }, hit("tap", 1) } }) },
+    b = { held({ species = "Beta", moves = { hit("tap", 1) } }) } })
+  local m = b.byId.p1.mons[1]
+  eq(m.moves[1].priority, 2, "K8: the sheet's priority is kept")
+  eq(m.moves[1].ppUps, 3, "K8: ...and its PP Ups")
+  eq(m.moves[2].priority, nil, "...absent stays absent")
+  local raw = held({ species = "Gamma", moves = { hit("tap", 1) } })
+  raw.base = { hp = 50, atk = 60, def = 70, spe = 80, spa = 90, spd = 100 }
+  raw.dvs = { atk = 15, def = 0, spe = 7, spc = 99 }
+  raw.statExp = { hp = 1000 }
+  raw.happiness = 300
+  local c = fight({ seed = 1, a = { raw }, b = { held({ species = "Beta", moves = { hit("tap", 1) } }) } })
+  local g = c.byId.p1.mons[1]
+  eq(g.base.spd, 100, "K7: base kept")
+  eq(g.dvs.spc, 15, "K7: a DV is held to 0..15")
+  eq(g.statExp.hp, 1000, "K7: stat exp kept")
+  eq(g.statExp.atk, nil, "K7: a block's missing key stays missing")
+  eq(g.happiness, 255, "K14: happiness held to a byte")
+  eq(b.byId.p1.mons[1].dvs, nil, "...and a sheet that states none carries none")
+end
+
+-- (b) K10: a `stat` event carries the signed stage, which Events accepts
+do
+  local b = fight({ seed = 2,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("GROWL", 0, 0, 18) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(b)
+  local events = round(b, "p2")
+  local stage
+  for _, e in ipairs(events) do
+    if e.t == "stat" then stage = e.stage; ok(Events.check(e), "...and the event checks") end
+  end
+  eq(stage, -1, "a lowered stat's event says stage -1")
+  eq(Events.FIELDS.stage, "number", "`stage` is a number field")
+end
+
+-- (c) CalcMonStatC (K9's fallback): ((base + DV) x 2 + root(exp) / 4) x L / 100 + 5,
+--     HP + L + 10, the HP DV from the four's low bits, held at 999
+do
+  local s = Effects.calcMonStats({ hp = 100, atk = 100, def = 100, spe = 100, spa = 100, spd = 100 },
+    { atk = 15, def = 15, spe = 15, spc = 15 }, { atk = 65535 }, 50)
+  eq(s.stats.def, 120, "no stat exp: (115 x 2) x 50 / 100 + 5")
+  eq(s.stats.atk, 151, "full stat exp: root 255, + 63")
+  eq(s.maxHp, 175, "HP: the HP DV (15) and L + 10")
+  eq(Effects.calcMonStats(nil, {}, nil, 50), nil, "nothing without base and DVs")
+  local cap = Effects.calcMonStats({ hp = 255, atk = 255, def = 1, spe = 1, spa = 1, spd = 1 },
+    { atk = 15, def = 0, spe = 0, spc = 0 }, { atk = 65535 }, 255)
+  eq(cap.stats.atk, 999, "held at MAX_STAT_VALUE")
+end
+
+-- (d) the switch-in order: InitBattleMon (status, then badge) and
+--     LoadEnemyMon (no status at all), until the next rebuild
+do
+  local b = fight({ mode = "wild", seed = 3, badges = { PLAIN = true },
+    a = { held({ species = "Alpha", spe = 10, moves = { hit("tap", 1) } }),
+          held({ species = "Gamma", spe = 15, status = "PAR", moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 4, moves = { hit("tap", 1) } }) } })
+  drain(b)
+  round(b, "wild", { action = "switch", slot = 1 })
+  local fa = b.byId.p1
+  local g = fa.mons[2]
+  eq(b:_speedOf(fa, g), 3, "a paralysed switch-in with PLAIN: boost(quarter(15)) = 3")
+  eq(Effects.battleStat(g, "spe", fa.badges), 4, "...where CalcPlayerStats would read 4")
+  g.stages.atk = 1
+  eq(b:_speedOf(fa, g), 4, "a stage change rebuilds it in CalcPlayerStats's order")
+  g.stages.atk = 0
+  eq(b:_speedOf(fa, g), 4, "...and the snapshot stays gone when the stage comes back")
+  local c = fight({ mode = "coop_npc", seed = 3,
+    a = { held({ species = "Alpha", atk = 200, spe = 30, moves = { hit("slam", 40) } }) },
+    b = { held({ species = "Beta", hp = 1, spe = 10, moves = { hit("tap", 1) } }),
+          held({ species = "Delta", spe = 80, status = "PAR", moves = { hit("tap", 1) } }) } })
+  drain(c)
+  round(c, "p2")
+  c:submitChoice("p2", { action = "switch", slot = 1 })
+  local fb = c.byId.p2
+  eq(c:_speedOf(fb, fb.mons[2]), 80, "the computer's paralysed switch-in keeps its full Speed")
+  local d = fight({ seed = 3,
+    a = { held({ species = "Alpha", atk = 200, spe = 30, moves = { hit("slam", 40) } }) },
+    b = { held({ species = "Beta", hp = 1, spe = 10, moves = { hit("tap", 1) } }),
+          held({ species = "Delta", spe = 80, status = "PAR", moves = { hit("tap", 1) } }) } })
+  drain(d)
+  round(d, "p2")
+  d:submitChoice("p2", { action = "switch", slot = 1 })
+  eq(d:_speedOf(d.byId.p2, d.byId.p2.mons[2]), 20, "...a link fight's foe is quartered (InitEnemyMon)")
+end
+
+-- (e) K9 levelUp: what it refuses, the HP step, a transformed and a benched mon
+do
+  local b = fight({ mode = "wild", seed = 4,
+    a = { held({ species = "Alpha", level = 20, maxHp = 100, hp = 60, spe = 40, moves = { hit("tap", 1) } }),
+          held({ species = "Gamma", level = 10, maxHp = 50, spe = 5, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", level = 20, maxHp = 900, spe = 50, moves = { hit("tap", 1) } }) } })
+  drain(b)
+  local stats = { atk = 45, def = 45, spe = 60, spa = 45, spd = 45 }
+  eq(b:levelUp("nobody", 1, 21), false, "an unknown seat is refused")
+  eq(b:levelUp("p1", 9, 21), false, "...a monster the party lacks")
+  eq(b:levelUp("p1", 1, 19), false, "...a level below the current one")
+  eq(b:levelUp("p1", 1, 101), false, "...past LEVEL_MAX")
+  eq(b:levelUp("p1", 1, 21, { atk = 45 }), false, "...a stat block missing a stat")
+  eq(b:levelUp("p1", 1, 20), false, "...and a report that changes nothing")
+  eq(b:levelUp("p1", 1, 21, stats, 110), true, "a level-up lands")
+  local a = b.byId.p1.mons[1]
+  eq(a.level, 21, "the level")
+  eq(a.maxHp, 110, "the max HP")
+  eq(a.hp, 70, "the HP rises by the max-HP step")
+  eq(a.stats.spe, 60, "the party stats")
+  eq(b:_speedOf(b.byId.p1, a), 60, "and the fielded monster's battle stats are rebuilt")
+  eq(b:levelUp("p1", 2, 11, stats, 60), true, "a benched monster grows too")
+  eq(b.byId.p1.mons[2].stats.spe, 60, "...in its party stats")
+  ok(b.byId.p1.mons[2].statSnap == nil, "...and no battle stats until it is sent out")
+end
+
+-- (f) Transform undone: a switch-out gives back the party moves, types and
+--     stats; 5 PP a copied move, SKETCH 1
+do
+  local b = fight({ seed = 5,
+    a = { held({ species = "Alpha", spe = 90, types = { 1 }, moves = { hit("TRANSFORM", 0, 0, 57, 10) } }),
+          held({ species = "Gamma", spe = 20, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", atk = 120, spe = 60, types = { 3 },
+                moves = { hit("SKETCH", 0), hit("slam", 40, 0, 0, 30) } }) } })
+  drain(b)
+  round(b, "p2")
+  local a = b.byId.p1.mons[1]
+  ok(a.transformed, "Alpha transformed")
+  eq(a.moves[1].pp, 1, "SKETCH copied with 1 PP")
+  eq(a.moves[2].pp, 5, "...the rest with 5")
+  eq(a.types[1], 3, "...and the types")
+  eq(a.stats.atk, 120, "...and the stats")
+  round(b, "p2", { action = "switch", slot = 1 })
+  ok(not a.transformed, "the switch-out undoes it")
+  eq(a.moves[1].id, "TRANSFORM", "...its own moves back")
+  eq(a.moves[1].pp, 9, "...with the PP the party kept")
+  eq(a.types[1], 1, "...its own types")
+  eq(a.stats.atk, 40, "...and its own stats")
+end
+
+-- (g) SLEEP TALK's pick: never itself, the disabled move or a two-turn one;
+--     a 0-PP move is called all the same
+do
+  local b = fight({ seed = 6,
+    a = { held({ species = "Alpha", status = "SLP", statusTurns = 7, spe = 90,
+                 moves = { hit("SLEEP_TALK", 0, 0, 102), hit("SKULL_BASH", 50, 0, 39),
+                           hit("BIDE", 0, 0, 26), hit("kick", 20, 0, 0, 0) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(b)
+  local a = b.byId.p1.mons[1]
+  for _ = 1, 4 do
+    eq(b:_sleepTalkPick(a, a.moves[1]).id, "kick", "the one callable move, its 0 PP and all")
+  end
+  a.status = nil
+  eq(b:_sleepTalkPick(a, a.moves[1]), nil, "awake, nothing")
+end
+
+-- (h) LOCK-ON: only a move whose script runs `checkhit` spends it, and while
+--     it stands the computer's stat-down byte is skipped
+do
+  local b = fight({ seed = 7,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("SWORDS_DANCE", 0, 0, 50), hit("tap", 1) } }) },
+    b = { held({ species = "Beta", spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(b)
+  local beta = b.byId.p2.mons[1]
+  beta.lockOn = true
+  round(b, "p2")
+  eq(beta.lockOn, true, "SWORDS DANCE (no checkhit) leaves the target's lock-on")
+  round(b, "p2", { action = "fight", move = 1 })
+  eq(beta.lockOn, nil, "a hit spends it")
+  local drawn = 0
+  local r = { byte = function() drawn = drawn + 1; return 0 end }
+  local t = { mist = false, stages = { atk = 0 } }
+  eq(Effects.statDownGate(r, t, "atk", true, 18, true), nil, "locked on: no `.ComputerMiss`")
+  eq(drawn, 0, "...and no byte drawn")
+end
+
+-- (i) a recharge is an actor: its Quick Claw rolls (DetermineMoveOrder
+--     compares wCurPlayerMove)
+do
+  local function steps(from, to)
+    local r = BattleSim2.Rng.new(0)
+    r:setState(from)
+    for n = 0, 64 do
+      if r:state() == to then return n end
+      r:next()
+    end
+    return nil
+  end
+  local function beam(item)
+    local b = fight({ seed = 8,
+      a = { held({ species = "Alpha", spe = 10, item = item, moves = { hit("HYPER_BEAM", 150, 0, 80) } }) },
+      b = { held({ species = "Beta", maxHp = 900, spe = 50, moves = { hit("tap", 1) } }) } })
+    drain(b)
+    round(b, "p2")
+    local before = b.rng:state()
+    b:submitChoice("p2", { action = "fight", move = 0 })
+    local events = drain(b)
+    return steps(before, b.rng:state()), events
+  end
+  local bare = beam(nil)
+  local clawed, events = beam({ "QUICK_CLAW", "HELD_QUICK_CLAW", 255, "QUICK CLAW" })
+  eq(clawed, bare + 1, "the recharging seat's claw rolls one byte on its forced turn")
+  ok(said(events, "Alpha must recharge"), "...and the recharge is said at its slot")
+  eq(events[#events].t, "turn", "...the turn then opens")
+end
+
+-- (j) Haze reaches every monster on the field (BattleCommand_ResetStats)
+do
+  local mons = {}
+  for i = 1, 4 do
+    mons[i] = { species = "M" .. i, stages = { atk = 2, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 } }
+  end
+  Effects.applyPrimary({ effectId = 25, userMon = mons[1], targetMon = mons[3],
+    userFighter = { slot = 0, side = "a" }, targetFighter = { slot = 3, side = "b" }, fieldMons = mons })
+  for i = 1, 4 do eq(mons[i].stages.atk, 0, "Haze resets battler " .. i) end
+end
+
+-- (k) TOXIC: 1/16 x n, and a switch-out leaves plain poison
+do
+  local b = fight({ seed = 9,
+    a = { held({ species = "Alpha", spe = 90, moves = { hit("TOXIC", 0, 0, 105) } }) },
+    b = { held({ species = "Beta", maxHp = 160, spe = 10, moves = { hit("tap", 1) } }),
+          held({ species = "Delta", maxHp = 160, spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(b)
+  local first = round(b, "p2")
+  ok(said(first, "Beta's badly poisoned!"), "TOXIC badly poisons")
+  eq(damageOn(first, 3), 10, "...the first tick 1/16")
+  eq(damageOn(round(b, "p2"), 3), 20, "...the second 2/16")
+  round(b, "p2", nil, { action = "switch", slot = 1 })
+  eq(b.byId.p2.mons[1].status, "poison", "the switch-out leaves plain poison")
+end
+
+-- (l) the freeze: CheckTurn draws nothing for it and never thaws; HandleDefrost
+--     skips the turn it landed
+do
+  local b = fight({ seed = 10,
+    a = { held({ species = "Alpha", spe = 90, status = "FRZ", moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(b)
+  local a = b.byId.p1.mons[1]
+  a.justFrozen = true
+  local before = b.rng:state()
+  b:_runGates(b.byId.p1, a, a.moves[1])
+  eq(b.rng:state(), before, "the frozen gate draws nothing")
+  b:_heldDefrost()
+  eq(b.rng:state(), before, "...nor does the defrost on the turn the freeze landed")
+  a.justFrozen = nil
+  b:_heldDefrost()
+  ok(b.rng:state() ~= before, "the next turn's defrost rolls")
 end
 
 -- ------------------------------------------------------------------

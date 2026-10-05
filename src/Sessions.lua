@@ -814,6 +814,17 @@ function M:beginMediated(game, sessionId, peerId, peerName, role)
   return true
 end
 
+-- One byte (0..255) for a roll the cart makes outside the referee (the Gold
+-- wild item in `beginWildMediated`): love.math.random when LOVE is up, plain
+-- math.random under a headless suite -- CoopBattle.randomByte's reading.
+function M.randomByte()
+  local love_ = rawget(_G, "love")
+  local roll = love_ and love_.math and love_.math.random or math.random
+  local ok, value = pcall(roll, 0, 255)
+  if ok and tonumber(value) then return math.floor(value) % 256 end
+  return 0
+end
+
 -- Protocol-only wild mediated fight: the caller (or a test) already opened a
 -- hub battle with mode "wild". This screen uploads the player's party and the
 -- wild sheets as side "b", and keeps `wildCatchMon` for a catch grant.
@@ -837,6 +848,21 @@ function M:beginWildMediated(game, battleId, opts)
   local wildParty = opts.wildParty
   if type(wildParty) ~= "table" or #wildParty == 0 then
     if opts.mon then
+      -- Gold's wild monster holds what the cart would have rolled for it
+      -- (pokecrystal LoadEnemyMon `.WildItem`; MediatedBattle.rollWildItem2),
+      -- written onto the engine monster -- the one a catch keeps -- before
+      -- its sheet is cut, exactly as src/SoloBattle.lua and src/CoopBattle.lua's
+      -- `wildMons` roll it: the engine builds every wild monster holding
+      -- nothing.  Off the caller's byte source (`opts.random`, a function
+      -- answering 0..255) or love.math.random's, never the referee's stream;
+      -- `opts.battleType` is the Gold battle's (BATTLETYPE_FORCEITEM hands
+      -- item 1 over unrolled).  A no-op off Gold and for a monster already
+      -- holding one.  A caller that hands its own `wildParty` described the
+      -- monster itself and is left as it is.
+      MediatedBattle.rollWildItem2(game, opts.mon, {
+        battleType = opts.battleType,
+        random = type(opts.random) == "function" and opts.random or M.randomByte,
+      })
       wildParty = MediatedBattle.snapshotMons(game, { opts.mon })
     end
   end
@@ -1039,9 +1065,16 @@ function M:onBattleEvent(msg)
   if event then fight:onEvent(event) end
 end
 
+-- Read in this boot's own vocabulary too (Wire.battleOutcome's `generation`):
+-- the Pay Day pot's bound is the reader's cart's -- 999999 on Red and Gold
+-- (contract K11, Wire.PAYDAY12_MAX), Gen 3's u16 there -- and a reader that
+-- named none capped a Red or Gold pot at Gen 3's 65535, dropping a larger one.
+-- With no fight there is nothing to read it for.
 function M:onBattleOutcome(msg)
-  local outcome = Wire.battleOutcome(msg)
-  if outcome and self.fight then self.fight:onOutcome(outcome) end
+  local fight = self.fight
+  if not fight then return end
+  local outcome = Wire.battleOutcome(msg, Gen.generation(gameOf(self, fight.game)))
+  if outcome then fight:onOutcome(outcome) end
 end
 
 -- A refused relay is the same silence src/Hub.lua's onDrop was given a voice

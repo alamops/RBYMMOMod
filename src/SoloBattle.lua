@@ -870,13 +870,13 @@ function M:_transport(pending)
           transport.refusal = ok and line or nil
         end
         return taken
-      elseif msgType == Wire.BATTLE_MOVESET and solo.generation == 3 then
-        -- A move learned mid-fight (the screen's LearnMove exchange) is the
-        -- hub's to apply on the online path; here it is ours, or the monster
-        -- would go on fighting with the move it just forgot.  Gen 3 only:
-        -- the Gen 1 / Gen 2 solo path has always dropped this message and is
-        -- left exactly as it was.
-        return solo:_applyMoveset3(payload)
+      elseif msgType == Wire.BATTLE_MOVESET then
+        -- A move learned mid-fight (the screen's LearnMove exchange) or a
+        -- level-up (contract K9) is the hub's to apply on the online path;
+        -- here it is ours, or the monster would go on fighting with the move
+        -- it just forgot and the stats it walked in with.
+        if solo.generation == 3 then return solo:_applyMoveset3(payload) end
+        return solo:_applyMoveset12(payload)
       end
       -- Everything else -- a session leave on the way out, a reconnect nudge
       -- from a transport that never dropped -- is about a hub this fight does
@@ -3207,6 +3207,54 @@ local function movesetDeltaOk(old, incoming)
     return true
   end
   return false
+end
+
+-- Red and Gold's: the hub's own two rules (src/Hub.lua `movesetDeltaOk` /
+-- `nextMoves12`, exported for exactly this caller so a solo fight and a hub
+-- fight apply a learn alike), then the referee's level-up (contract K9 of
+-- docs/plans/gen12-referee-gaps-fix.md, `sim:levelUp(playerId, monIndex1,
+-- level, stats, maxHp)` -- the call both hubs make after the moves).  The
+-- payload is read through the wire's own reader first, as a hub reads it, so
+-- the referee is never handed a field a hub would have refused.  Before K9
+-- this path dropped the message whole: a solo Red or Gold fight never heard
+-- of a move learned mid-fight, nor of a level.
+--
+-- A transformed battler keeps its copied list (the hub's rule: a learn must
+-- not end Transform a turn early); the level-up still lands, as on the hub --
+-- the monster grew whatever it is wearing.  Answers whether anything reached
+-- the referee.
+function M:_applyMoveset12(payload)
+  local sim = self.sim
+  local fighter = sim and sim.byId and sim.byId[PLAYER_SEAT]
+  if not (fighter and type(fighter.mons) == "table") then return false end
+  local clean = Wire.battleMoveset(payload, self.generation)
+  if not clean then return false end
+  local mon = fighter.mons[clean.mon + 1]
+  if type(mon) ~= "table" then return false end
+  local Hub = need("Hub")
+  local applied = false
+  local incoming = clean.moves
+  if not mon.transformed and type(incoming) == "table" and #incoming > 0 then
+    local old = type(mon.moves) == "table" and mon.moves or {}
+    if Hub.movesetDeltaOk(old, incoming) then
+      mon.moves = Hub.nextMoves12(old, incoming)
+      applied = true
+    end
+  end
+  local grew = clean.level ~= nil or clean.stats ~= nil or clean.maxHp ~= nil
+  if grew and type(sim.levelUp) == "function" then
+    local ok, err = pcall(sim.levelUp, sim, PLAYER_SEAT, clean.mon + 1,
+      clean.level, clean.stats, clean.maxHp)
+    if ok then
+      applied = true
+    else
+      self:warn("levelup", "a level gained in this battle could not reach the "
+        .. "battle referee (%s), so it fights on its old stats until the "
+        .. "battle ends -- the level itself is kept; report this with the "
+        .. "monster that levelled", tostring(err))
+    end
+  end
+  return applied
 end
 
 function M:_applyMoveset3(payload)

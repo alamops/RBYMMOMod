@@ -109,9 +109,12 @@ end
 do
   local user = dummyMon()
   local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
+  -- DisableEffect never asks CheckTargetSubstitute (R1b, effects.asm
+  -- :1286-1367): its only test is MoveHitTest, whose doll check is the
+  -- broken drain one -- so it reaches the monster behind the doll.
   local out = apply(86, user, target)
-  eq(out.nothing, true, "DISABLE_EFFECT vs substitute is nothing")
-  eq(target.disable, nil, "DISABLE_EFFECT does not lock a move behind a substitute")
+  eq(out.nothing, false, "DISABLE_EFFECT is not stopped by a substitute")
+  eq(target.disable ~= nil, true, "DISABLE_EFFECT locks a move behind a substitute")
 end
 
 do
@@ -262,7 +265,8 @@ do
   eq(sideTarget.stages.spd, -6, "the stage stays at -6")
 
   local primary = apply(20, dummyMon(), floored())
-  eq(primary.messages[1], "Beta's SPEED won't go any lower", "the primary at -6 says so")
+  -- CantLowerAnymore's NothingHappenedText (R1b, effects.asm :705-710).
+  eq(primary.messages[1], "Nothing happened", "the primary at -6 says so")
   eq(#primary.messages, 1, "...once")
 end
 

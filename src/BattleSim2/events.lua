@@ -105,6 +105,11 @@ M.KINDS = {
 -- `confused` is the fight-local volatile (not a Wire.STATUSES token): 1 on
 -- send when the newcomer is already confused, and 1/0 on a status event for
 -- inflict / snap-out. It never occupies `status`, so PSN and confusion coexist.
+--
+-- `stage` is a `stat` event's signed stat stage after the change, -6..6
+-- (contract K10 of docs/plans/gen12-referee-gaps-fix.md): `amount` rides
+-- beside it as it always did, but the wire's `amount` is unsigned, so a
+-- lowered stat reached the screen with no stage at all.
 M.FIELDS = {
   battle       = "string",
   seq          = "number",
@@ -123,6 +128,7 @@ M.FIELDS = {
   mon          = "number",
   team         = "string",
   confused     = "number",
+  stage        = "number",
 }
 
 -- ------------------------------------------------------------------

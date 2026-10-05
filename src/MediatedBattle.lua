@@ -398,6 +398,34 @@ M.typeOrder = typeOrder
 
 local moveOf
 
+-- The moves each cart's METRONOME can never call, by registry id (the pool
+-- `snapshotRuleset` uploads leaves them out; the referee picks from the pool).
+--
+--   Red   pokered MetronomePickMove (engine/battle/core.asm): a BattleRandom
+--         byte is re-drawn while it is 0, at or past STRUGGLE (`ASSERT
+--         NUM_ATTACKS == STRUGGLE`: nothing past it is a move), or METRONOME
+--         -- so METRONOME and STRUGGLE.
+--   Gold  pokecrystal BattleCommand_Metronome (engine/battle/move_effects/
+--         metronome.asm, identical in pokegold) re-draws a byte past
+--         NUM_ATTACKS or in MetronomeExcepts (data/moves/
+--         metronome_exception_moves.asm, the same list in both repos):
+--         NO_MOVE, METRONOME, STRUGGLE, SKETCH, MIMIC, COUNTER, MIRROR_COAT,
+--         PROTECT, DETECT, ENDURE, DESTINY_BOND, SLEEP_TALK and THIEF.  (Its
+--         third re-draw -- a move the user already knows, CheckUserMove -- is
+--         the user's, so the referee's pick owns it, not this list.)
+--
+-- Before contract K13 Gold's pool was cut at 200 rows and took only Red's two
+-- exclusions, so the last ~50 ids could never be called and the twelve the
+-- cart bars could.
+M.METRONOME_EXCEPT = {
+  [1] = { METRONOME = true, STRUGGLE = true },
+  [2] = {
+    METRONOME = true, STRUGGLE = true, SKETCH = true, MIMIC = true,
+    COUNTER = true, MIRROR_COAT = true, PROTECT = true, DETECT = true,
+    ENDURE = true, DESTINY_BOND = true, SLEEP_TALK = true, THIEF = true,
+  },
+}
+
 -- The ephemeral rules for one match: the type chart, as integer percent.
 --
 -- The engine's table holds x10 multipliers (5 is half, 20 is double, 0 is
@@ -521,7 +549,9 @@ function M.snapshotRuleset(game, opts)
   end
 
   -- Ephemeral Metronome pool from the host's own move table.  Sorted for a
-  -- stable wire order; Metronome itself is excluded so a call cannot recurse.
+  -- stable wire order; what the cart's METRONOME can never call is left out
+  -- (M.METRONOME_EXCEPT -- Metronome itself among them, so a call cannot
+  -- recurse), and Gold's whole table fits the cap since K13.
   local metronomePool = {}
   local moveCount = 0
   if type(data) == "table" and type(data.moves) == "table" then
@@ -540,20 +570,24 @@ function M.snapshotRuleset(game, opts)
       end
     end
     table.sort(ids)
-    -- Exclude Metronome itself (either generation's name) and Struggle so a
-    -- call cannot recurse or land on the no-PP filler.  Use this boot's
-    -- Effects pack: Gen 1 Effects.idOf("METRONOME_EFFECT") is 83, and Gen 2
-    -- maps EFFECT_METRONOME onto the same id.  A Gen 1-only lookup would
-    -- still work after that alias, but comparing against the pack that
-    -- `moveOf` just used is the one that cannot drift.
+    -- What the cart's METRONOME never picks, per cart (M.METRONOME_EXCEPT).
+    -- Metronome's own effect is excluded on top of the id lists, so a content
+    -- mod's second Metronome cannot recurse either.  Use this boot's Effects
+    -- pack: Gen 1 Effects.idOf("METRONOME_EFFECT") is 83, and Gen 2 maps
+    -- EFFECT_METRONOME onto the same id.  A Gen 1-only lookup would still work
+    -- after that alias, but comparing against the pack that `moveOf` just used
+    -- is the one that cannot drift.
+    local generation = Gen.generation(game)
+    local except = M.METRONOME_EXCEPT[generation == 2 and 2 or 1]
     local metroEffect = effectsFor(game).idOf("METRONOME_EFFECT")
     for _, id in ipairs(ids) do
       if #metronomePool >= Config.BATTLE_METRONOME_POOL_MAX then break end
-      local sheet = moveOf(data, { id = id, pp = 5 }, order, Gen.generation(game))
       local idKey = type(id) == "string" and id:upper() or ""
-      if sheet and sheet.effect ~= metroEffect
-         and idKey ~= "STRUGGLE" and idKey ~= "METRONOME" then
-        metronomePool[#metronomePool + 1] = sheet
+      if not except[idKey] then
+        local sheet = moveOf(data, { id = id, pp = 5 }, order, generation)
+        if sheet and sheet.effect ~= metroEffect then
+          metronomePool[#metronomePool + 1] = sheet
+        end
       end
     end
     if moveCount > 0 and #metronomePool == 0 then
@@ -681,6 +715,95 @@ local HIGH_CRIT_MOVES2 = {
   SLASH = true, AEROBLAST = true, CROSS_CHOP = true,
 }
 
+-- ------- PP Ups (contract K8 of docs/plans/gen12-referee-gaps-fix.md)
+--
+-- What one PP Up adds to a move's maximum, on both carts: a fifth of the base
+-- PP, **capped at 7** -- pokered AddBonusPP (engine/items/item_effects.asm,
+-- "1/5 of normal max PP (capped at 7) is added for each PP Up": `cp 8` /
+-- `ld a, 7`) and pokegold / pokecrystal ComputeMaxPP (the same `cp $8` /
+-- `ld a, $7`, whose comment says why: a 40-PP move would otherwise reach 64
+-- with three PP Ups and overflow into the PP-Up bits, so it stops at 61).
+-- `base + ups * floor(base / 5)` with no cap -- what this mod used to add --
+-- is right for every base PP under 40 and three too many per PP Up from 40
+-- up.  Exported for src/Coop.lua's heal and src/CoopBattle.lua's move pane,
+-- so the rule lives in one place.
+M.PP_UP_BONUS_MAX = 7
+function M.ppUpBonus(base)
+  base = tonumber(base)
+  if not base or base ~= base or base <= 0 then return 0 end
+  return min(floor(base / 5), M.PP_UP_BONUS_MAX)
+end
+
+-- A move's maximum PP with `ups` PP Ups (0..3), the cart's GetMaxPP: the
+-- base, plus one capped bonus per PP Up.
+function M.maxPpOf(base, ups)
+  base = tonumber(base)
+  if not base or base ~= base then return nil end
+  base = max(0, floor(base))
+  ups = clamp(intOr(ups, 0), 0, Wire.PP_UPS_MAX)
+  return base + ups * M.ppUpBonus(base)
+end
+
+-- The PP Ups used on one move slot, 0..3 -- the top two bits of the cart's PP
+-- byte (PP_UP_MASK), which both engines keep as `slot.ppUps` (src/pokemon/
+-- Pokemon.lua, src/battle/gen2/Mon.lua).  Gold's engine also accepts a slot
+-- that states only its raised `maxPp`, and recovers the count from it
+-- (Mon.ppUpsOf: the excess over the base, in whole capped bonuses); read the
+-- same way here so a Gold slot the engine never stamped still says how many
+-- it has.  Gen 1 slots never state a `maxPp`, so the derivation is Gold's.
+local function ppUpsOf(slot, def, generation)
+  local ups = tonumber(slot.ppUps)
+  if (ups == nil or ups ~= ups) and generation == 2 then
+    local base = def and tonumber(def.pp)
+    local stored = tonumber(slot.maxPp)
+    ups = 0
+    if base and stored and stored > base then
+      local bonus = M.ppUpBonus(base)
+      if bonus > 0 and (stored - base) % bonus == 0 then
+        ups = (stored - base) / bonus
+      end
+    end
+  end
+  return clamp(intOr(ups, 0), 0, Wire.PP_UPS_MAX)
+end
+M.slotPpUps = ppUpsOf
+
+-- Gold's move priority, as the cart's GetMovePriority answers it (pokecrystal
+-- engine/battle/core.asm, identical in pokegold): VITAL_THROW is 0 by its move
+-- id (`cp VITAL_THROW` / `ld a, 0`), every other move takes its effect's row
+-- in MoveEffectPriorities (data/moves/effects_priorities.asm), and a move with
+-- no row is BASE_PRIORITY (constants/battle_constants.asm, 1).  The raw byte,
+-- unsigned, exactly as the Gen 2 referee numbers it (src/BattleSim2/Effects.lua
+-- MOVE_PRIORITY / BASE_PRIORITY), so a sheet's number and the referee's table
+-- agree for every vanilla move.  Keyed by effect here, where the referee has
+-- to key by move id: the client holds the move record and its EFFECT_* name,
+-- and that is what lets a content mod's own move with a priority effect move
+-- in its bracket (known gap #11) -- the table on the referee could only ever
+-- know vanilla ids.
+local GOLD_EFFECT_PRIORITY = {
+  EFFECT_PROTECT = 3,
+  EFFECT_ENDURE = 3,
+  EFFECT_PRIORITY_HIT = 2,
+  EFFECT_FORCE_SWITCH = 0,
+  EFFECT_COUNTER = 0,
+  EFFECT_MIRROR_COAT = 0,
+}
+M.GOLD_EFFECT_PRIORITY = GOLD_EFFECT_PRIORITY
+M.GOLD_BASE_PRIORITY = 1
+
+-- One Gold move's priority byte.  A move record that states its own
+-- `priority` wins (a content mod's move), clamped to the byte the wire carries
+-- (Wire.PRIORITY2_MAX); otherwise the cart's rule above.
+function M.goldPriority(id, def)
+  local own = type(def) == "table" and tonumber(def.priority) or nil
+  if own and own == own then return clamp(floor(own), 0, Wire.PRIORITY2_MAX) end
+  if id == "VITAL_THROW" then return 0 end
+  local effect = type(def) == "table" and def.effect or nil
+  local row = effect ~= nil and GOLD_EFFECT_PRIORITY[effect] or nil
+  if row ~= nil then return row end
+  return M.GOLD_BASE_PRIORITY
+end
+
 moveOf = function(data, slot, order, generation)
   if type(slot) ~= "table" then return nil end
   local id = Wire.id(slot.id)
@@ -723,7 +846,18 @@ moveOf = function(data, slot, order, generation)
   end
 
   local pp = clamp(intOr(slot.pp, 0), 0, 99)
-  local maxPp = clamp(intOr(slot.maxPp or slot.pp, pp), pp, 99)
+  local ppUps = ppUpsOf(slot, def, generation)
+  -- The slot's own maximum when it states one (Gold's engine keeps it);
+  -- otherwise the cart's GetMaxPP over the record's base PP and this slot's PP
+  -- Ups -- Red's engine slot is `{ id, pp, ppUps }` and states none.  Before
+  -- K8 the fallback was the *current* PP, so a Red move that came into the
+  -- fight already spent said its maximum was what it had left, and an ETHER
+  -- or ELIXER (the referee's `ppRestore`, capped at `maxPp`) could restore
+  -- nothing past it.  Never below the current PP; the record-less move keeps
+  -- the old reading.
+  local maxPp = intOr(slot.maxPp, nil)
+  if maxPp == nil and def then maxPp = M.maxPpOf(def.pp, ppUps) end
+  maxPp = clamp(maxPp or pp, pp, 99)
   local highCrit = false
   if def and def.highCrit ~= nil then
     -- The move-record field wins, including an explicit false that opts a
@@ -756,8 +890,17 @@ moveOf = function(data, slot, order, generation)
     type     = typeId,
     effect   = effect,
     chance   = chance,
+    -- Contract K8: the PP Ups used on this slot, which the cart's move pick
+    -- reads in the raw PP byte (pokered `.chooseMove`: a move at 0 PP that
+    -- has PP Ups is still selectable) -- every Red and Gold row.
+    ppUps    = ppUps,
   }
   if highCrit then out.highCrit = true end
+  -- ...and Gold's priority byte (K8; `M.goldPriority`), on every Gold row so
+  -- the referee reads the sheet before its move-id table.  Red has no move
+  -- priority, and Wire.battleMove neither copies nor refuses one on a Gen 1
+  -- row, so none is stated there.
+  if generation == 2 then out.priority = M.goldPriority(id, def) end
   return out
 end
 
@@ -837,6 +980,90 @@ local function sheetOf(raw, low, high, generation)
     out.hp = clamp(floor(hp), low, high)
   end
   return out
+end
+
+-- ------- contract K7 (docs/plans/gen12-referee-gaps-fix.md)
+--
+-- What the cart computes a monster's stats *from*, in the cart's own shape:
+-- the species' base stats, the four DVs it stores, and its five stat-exp
+-- words.  The referee needs them where it must compute a stat itself -- a
+-- transformed computer foe's crit stat (pokered GetEnemyMonStat runs
+-- CalcStat over the copied species with the foe's own DVs), the copied
+-- species' base Speed for Red's crit rate, and the rebuild after a mid-fight
+-- level-up (K9) -- and the hub holds no species table, so they ride the sheet
+-- the way `baseSpd` always has.  `ivs` / `evs` above stay what they were (the
+-- older blocks keyed like `stats`, which the vitamin store reads); these are
+-- the same numbers in the shape the cart keeps them.
+--
+-- The wire keys are Wire's own (K7_KEYS1 / K7_KEYS2); each maps to the
+-- engine's field of the same meaning.  Gold's base stats split Special
+-- (`specialAttack` / `specialDefense` -- src/import/RomExtractorGen2.lua's
+-- BaseData row) while its DVs and stat exp keep one Special word, exactly as
+-- the party struct does (pokecrystal box_struct: four DVs in two bytes, five
+-- stat-exp words ending at SpcExp), and the engine spells that word `special`
+-- (src/battle/gen2/Mon.lua Mon.stats; an older record's `specialAttack` is
+-- read as the fallback the engine reads it as).
+local K7_ENGINE = {
+  [1] = {
+    base = { hp = { "hp" }, atk = { "attack" }, def = { "defense" },
+             spd = { "speed" }, spc = { "special" } },
+    dvs = { atk = { "attack" }, def = { "defense" }, spd = { "speed" },
+            spc = { "special" } },
+    statExp = { hp = { "hp" }, atk = { "attack" }, def = { "defense" },
+                spd = { "speed" }, spc = { "special" } },
+  },
+  [2] = {
+    base = { hp = { "hp" }, atk = { "attack" }, def = { "defense" },
+             spe = { "speed" }, spa = { "specialAttack", "special" },
+             spd = { "specialDefense", "special" } },
+    dvs = { atk = { "attack" }, def = { "defense" }, spe = { "speed" },
+            spc = { "special", "specialAttack", "specialDefense" } },
+    statExp = { hp = { "hp" }, atk = { "attack" }, def = { "defense" },
+                spe = { "speed" },
+                spc = { "special", "specialAttack", "specialDefense" } },
+  },
+}
+local K7_BOUNDS = {
+  base = function() return Wire.BASE_STAT_MAX end,
+  dvs = function() return Wire.DV_MAX end,
+  statExp = function() return Wire.STAT_EXP_MAX end,
+}
+
+-- One K7 block off an engine table, or nil.  All of the dialect's keys or
+-- none, on Wire's own rule (a present block with a hole refuses the monster
+-- there, and with it the party): a monster this client does not track a
+-- block for -- a Red trainer mon has no stat exp, a hand-built test mon has
+-- no DVs -- states none, and the referee reads the absence as the cart's
+-- computer does (GetEnemyMonStat's zero stat exp; plan §8).  Clamped rather
+-- than refused, `statsOf`'s reasoning: here the number is our own truth.
+local function k7Block(raw, block, generation)
+  if type(raw) ~= "table" then return nil end
+  local keys = (generation == 2 and Wire.K7_KEYS2 or Wire.K7_KEYS1)[block]
+  local engine = K7_ENGINE[generation == 2 and 2 or 1][block]
+  local high = K7_BOUNDS[block]()
+  local out = {}
+  for _, key in ipairs(keys) do
+    local n
+    for _, field in ipairs(engine[key] or {}) do
+      n = tonumber(raw[field])
+      if n and n == n then break end
+      n = nil
+    end
+    if n == nil then return nil end
+    out[key] = clamp(floor(n), 0, high)
+  end
+  return out
+end
+
+-- The three K7 blocks for one engine monster, onto `sheet`: `base` off its
+-- species record, `dvs` and `statExp` off the monster.  Gen 1 / Gen 2 only.
+function M.stampK7(sheet, def, mon, generation)
+  if type(sheet) ~= "table" or type(mon) ~= "table" then return sheet end
+  local base = type(def) == "table" and def.baseStats or nil
+  sheet.base = k7Block(base, "base", generation)
+  sheet.dvs = k7Block(mon.dvs, "dvs", generation)
+  sheet.statExp = k7Block(mon.statExp, "statExp", generation)
+  return sheet
 end
 
 -- What this monster is called on the other player's screen.
@@ -1159,6 +1386,23 @@ function M.snapshotMons(game, party, opts)
               out[#out].baseSpd = clamp(floor(base), 0, 255)
             end
           end
+          -- Contract K7, on every Red and Gold sheet this builds -- this
+          -- player's own and every foe it describes (a wild monster, a
+          -- trainer's), since a transformed foe's crit stat is computed from
+          -- the foe's own DVs (M.stampK7).
+          M.stampK7(sheet, def, mon, generation)
+          -- Contract K14: Gold's happiness (MON_HAPPINESS, 0..255), which
+          -- RETURN and FRUSTRATION read (pokecrystal BattleCommand_
+          -- HappinessPower / FrustrationPower).  The engine keeps it on the
+          -- monster (src/battle/gen2/Mon.lua: 70 for a caught one, 120 for a
+          -- gift or a hatchling); a monster that states none sends none.  Red
+          -- has no happiness byte, and its dialect never carries one.
+          if generation == 2 then
+            local happy = tonumber(mon.happiness)
+            if happy and happy == happy then
+              sheet.happiness = clamp(floor(happy), 0, 255)
+            end
+          end
         end
       end
     end
@@ -1251,17 +1495,52 @@ function M.sheetMoves(game, mon)
   return moves
 end
 
+-- What a mid-fight level-up tells the referee (contract K9 of docs/plans/
+-- gen12-referee-gaps-fix.md): the save monster's new level, its new stats in
+-- the sheet's own dialect -- `statsOf`, the same reading the opening upload
+-- made -- and its new maximum HP.  The client is the only party that ran the
+-- Exp award, so it is the only one that knows the monster grew; the referee
+-- rebuilds its battle stats from these the way the cart does after a level-up
+-- in battle (badge boosts re-run, current HP raised by the maximum's step:
+-- pokered / pokecrystal GainExperience).  Gen 1 / Gen 2 only, and nil for a
+-- monster this client cannot describe -- a K9 field the referee cannot read
+-- would refuse the whole message, moves included.
+function M.growthOf(game, mon)
+  if type(mon) ~= "table" then return nil end
+  local generation = Gen.generation(game)
+  if generation ~= 1 and generation ~= 2 then return nil end
+  local stats = statsOf(mon, generation)
+  local maxHp = intOr(type(mon.stats) == "table" and mon.stats.hp or nil, nil)
+  local level = intOr(mon.level, nil)
+  if not (stats and maxHp and level) then return nil end
+  return {
+    level = clamp(level, 1, Wire.LEVEL_MAX),
+    stats = stats,
+    maxHp = clamp(maxHp, 1, Wire.HP_MAX),
+  }
+end
+
 -- PROTOCOL 28: tell the referee this party member's moveset changed.
 --
 -- `generation` (optional) is the boot's, and is the dialect the pre-send check
 -- reads the rows in (Wire.battleMoveset's `generation`, the one the hub reads
 -- them in); nil asks the live boot.  Gen 1 / Gen 2 rows read the same either
 -- way -- none carries the `num` that alone would pick Gen 3's reader.
-function M.sendMoveset(transport, battle, monIndex0, moves, generation)
+--
+-- `growth` (optional; `M.growthOf`) makes the same message a level-up (K9):
+-- `level`, `stats` and `maxHp` ride beside the current move list, which may
+-- be the referee's own unchanged (a level that taught nothing is as valid as
+-- a learn).  Gen 1 / Gen 2 only -- Gen 3's reader reads none of them, and a
+-- Gen 3 caller never passes one.
+function M.sendMoveset(transport, battle, monIndex0, moves, generation, growth)
   if not (transport and battle) then return false end
   if type(moves) ~= "table" or #moves == 0 then return false end
   local msg = { battle = battle, mon = monIndex0, moves = moves }
-  if not Wire.battleMoveset(msg, generation or Gen.generation(nil)) then return false end
+  local gen = generation or Gen.generation(nil)
+  if type(growth) == "table" and (gen == 1 or gen == 2) then
+    msg.level, msg.stats, msg.maxHp = growth.level, growth.stats, growth.maxHp
+  end
+  if not Wire.battleMoveset(msg, gen) then return false end
   if transport:send(Wire.BATTLE_MOVESET, msg) == false then return false end
   return true
 end
@@ -3382,16 +3661,11 @@ function M:onEvent(msg)
 
   elseif kind == "stat" then
     -- Arrows on the seat, and the direction comes off the sentence rather than
-    -- off `amount`: the referee sends the resulting *stage*, not the change
-    -- (src/BattleSim/Turn.lua's three `_emit("stat")` sites), so the number
-    -- alone cannot say which way it went. Every one of those three is a rise,
-    -- which is why "rose" is the default and "fell" is what is looked for --
-    -- a referee that grows a drop event still draws the right arrows.
-    local down = type(msg.text) == "string"
-      and msg.text:lower():find("fell", 1, true) ~= nil
-    -- Gen 3 states the change itself (`delta`, C5 §7.1), which beats any
-    -- reading of a sentence.
-    if tonumber(msg.delta) then down = tonumber(msg.delta) < 0 end
+    -- off `amount` or `stage`: the referee sends the resulting *stage*, not
+    -- the change, so the number alone cannot say which way it went (a drop
+    -- from +2 lands on +1).  `M.statFell` reads Gen 3's `delta`, then the
+    -- sentence, then K10's signed `stage` as the last word.
+    local down = M.statFell(msg)
     self:queueVfx(Vfx.forStat(down and -1 or 1), msg.slot)
 
   elseif kind == "item" then
@@ -3494,6 +3768,14 @@ function M:onEvent(msg)
     local owed = msg.slot
     self.replaceWait = owed
     self.answeredTurn = false
+    -- A level-up the referee was told of (contract K9, `syncLevelHp`) is in
+    -- its numbers from the next batch on, and this slot-less `turn` closes the
+    -- one it came in: the climb stops being added to its packets.
+    if owed == nil then
+      local mine = self:mySlot()
+      local seat = mine ~= nil and self.slots[mine] or nil
+      if type(seat) == "table" then seat.levelHpRefereed = nil end
+    end
     if owed == nil then
       self.pendingTurn = true
     elseif owed == self:mySlot() then
@@ -3633,6 +3915,44 @@ function M:syncMinePp(moves, index)
   return true
 end
 
+-- Which way a `stat` event moved the stat, for the arrows on the seat: true
+-- for a drop.  Shared with src/CoopBattle.lua's twin reading.
+--
+--   * Gen 3 states the change itself (`delta`, C5 §7.1), which beats any
+--     reading of a sentence.
+--   * Otherwise the referee's sentence says it -- "rose" / "fell", every
+--     Gen 1 / Gen 2 `stat` site's wording.
+--   * A sentence naming neither (or none at all) falls back on the signed
+--     stage the stat now sits at (contract K10 of docs/plans/
+--     gen12-referee-gaps-fix.md: `stage`, -6..6, on Gen 1 / Gen 2 since the
+--     wire's unsigned `amount` could never carry a stage below zero).  The
+--     stage is where the stat *is*, not which way it went, so it only breaks
+--     a tie the words left -- below zero reads as a drop.
+--
+-- No Gen 1 / Gen 2 screen keeps a stage table off these events (the plates
+-- show no stage), so the arrows are the whole of what `stage` feeds here.
+function M.statFell(msg)
+  if type(msg) ~= "table" then return false end
+  local delta = tonumber(msg.delta)
+  if delta then return delta < 0 end
+  local text = type(msg.text) == "string" and msg.text:lower() or ""
+  if text:find("fell", 1, true) then return true end
+  if text:find("rose", 1, true) then return false end
+  local stage = tonumber(msg.stage)
+  return stage ~= nil and stage < 0
+end
+
+-- How much HP a seat's plate holds above what the referee's packets state:
+-- a level-up's climb the stream has not caught up with (`syncLevelHp` --
+-- `levelHpGrown` for a growth the referee never hears of, `levelHpRefereed`
+-- for one it was told of and holds from its next batch), never negative.
+function M.levelHpOwed(slot)
+  if type(slot) ~= "table" then return 0 end
+  local grown = (tonumber(slot.levelHpGrown) or 0) + (tonumber(slot.levelHpRefereed) or 0)
+  if grown ~= grown or grown < 0 then return 0 end
+  return grown
+end
+
 -- Keep `mine[].hp` in step with field damage so partyRows / mustReplace see
 -- the same numbers the referee just applied.
 function M:syncMineHp(msg)
@@ -3640,8 +3960,7 @@ function M:syncMineHp(msg)
   local mon = self.mine and self.mine[self.active]
   if not mon then return end
   local slot = self.slots[msg.slot]
-  local grown = (type(slot) == "table" and tonumber(slot.levelHpGrown)) or 0
-  if grown < 0 then grown = 0 end
+  local grown = M.levelHpOwed(slot)
   if msg.hp ~= nil then
     local hp = msg.hp
     if hp > 0 and grown > 0 then hp = hp + grown end
@@ -4146,6 +4465,8 @@ function M:gainExp(msg)
   -- referee's pair, then the bar climbs -- same chronology CoopBattle uses
   -- (gen1recomp #224). Bench awards stay text and save-file only.
   self:syncLevelHp(paidIndex, oldMax, mon, onField)
+  -- The bench's K9 sends (EXP.ALL / EXP.SHARE) have no plate to settle.
+  self.levelSent = nil
   return true
 end
 
@@ -4154,6 +4475,11 @@ end
 -- current HP on the arena rises by the same amount, never to the save mon's
 -- post-award HP.
 function M:syncLevelHp(paidIndex, oldMax, mon, onField)
+  -- Whether the referee was told (contract K9, `syncFightMoves`): taken here
+  -- and cleared whatever the HP did, so the next award asks again.
+  local refereed = type(self.levelSent) == "table" and mon ~= nil
+    and self.levelSent[mon] == true
+  if type(self.levelSent) == "table" and mon ~= nil then self.levelSent[mon] = nil end
   local newMax = tonumber(mon and mon.stats and mon.stats.hp)
   -- A Gen 3 mon keeps its maximum flat on the mon (Pokemon.applyStats).
   if self:generation() == 3 then newMax = tonumber(mon and mon.maxHp) end
@@ -4174,9 +4500,26 @@ function M:syncLevelHp(paidIndex, oldMax, mon, onField)
   arena.maxHp = max(1, (tonumber(arena.maxHp) or 1) + grown)
   arena.hp = max(0, (tonumber(arena.hp) or 0) + grown)
   if arena.hp > arena.maxHp then arena.maxHp = arena.hp end
-  -- Remember the delta: the referee never levels, so the next `damage`
-  -- still states the pre-level pair. noteSlot / syncMineHp add this back
-  -- rather than snapping the plate (and the party sheet) to the old numbers.
+  -- Remember the delta: every event still in this batch was resolved before
+  -- the referee heard of the level, so the next `damage` here states the
+  -- pre-level pair. noteSlot / syncMineHp add this back rather than snapping
+  -- the plate (and the party sheet) to the old numbers.
+  --
+  -- How long for is the question K9 changed.  A referee that was told
+  -- (`refereed`, Gen 1 / Gen 2) rebuilds the pair itself -- maximum and
+  -- current HP raised by the same step, as the cart does -- so from its next
+  -- batch on its numbers already hold the climb, and adding it again would
+  -- count the level twice.  That delta is kept apart (`levelHpRefereed`) and
+  -- dropped at the slot-less `turn` that closes this batch: the client files
+  -- its next choice after this message on the same ordered transport, so the
+  -- next resolution has the level in hand.  Anything the referee never hears
+  -- -- Gen 3, whose referee rebuilds nothing; a send the transport refused;
+  -- an evolution's growth (`refreshAfterEvolve`) -- stays on `levelHpGrown`
+  -- for as long as the monster stands there, as before.
+  if refereed then
+    arena.levelHpRefereed = (tonumber(arena.levelHpRefereed) or 0) + grown
+    return self:queueDrain(index)
+  end
   arena.levelHpGrown = (tonumber(arena.levelHpGrown) or 0) + grown
   -- Raise the ceiling before the climb so startDrain does not clamp `to`
   -- against the old maximum. Classic reads the same `shownHp` clock, so
@@ -4195,6 +4538,11 @@ function M:levelled(mon, fallbackName, levels)
   local def = type(data) == "table" and (data.pokemon or {})[mon.species] or nil
   local name = mon.nickname or fallbackName or (def and def.name) or "?"
   local eng = loadEngine()
+  -- A move learned into a free slot below is told to the referee once, with
+  -- the level-up, after the loop (contract K9) -- not once per move and then
+  -- again for the level.
+  local deferred = self.deferMoveset
+  self.deferMoveset = true
   for _, newLevel in ipairs(levels) do
     self:say(name .. " grew to\nlevel " .. tostring(newLevel) .. "!")
     -- Levelled here, so the moves it learns are decided here too -- the
@@ -4222,6 +4570,15 @@ function M:levelled(mon, fallbackName, levels)
       self:teach(mon, name, moveId)
     end
   end
+  self.deferMoveset = deferred
+  -- Contract K9: the referee hears about every level-up of a monster this
+  -- client uploaded, on the field or on the bench, with or without a new
+  -- move -- the cart rebuilds the battle stats after a level-up in battle
+  -- (pokered / pokecrystal GainExperience), and before K9 the referee fought
+  -- on the stats the monster walked in with.  One message: the current move
+  -- list (whatever `teach` just learned) and the new level, stats and max HP.
+  -- Gen 3 never reaches here (`levelled3`).
+  self:syncFightMoves(mon, true)
   self.leveledUp = self.leveledUp or {}
   self.leveledUp[mon] = true
   self.lines = self.lines or {}
@@ -4246,7 +4603,8 @@ function M:teach(mon, name, moveId)
   name = name or "?"
   if status == "learned" then
     self:say(name .. " learned\n" .. ((def and def.name) or moveId) .. "!")
-    self:syncFightMoves(mon)
+    -- Inside a level-up `levelled` sends the list once, with the level (K9).
+    if not self.deferMoveset then self:syncFightMoves(mon) end
     return true
   end
   self.toLearn = self.toLearn or {}
@@ -4269,7 +4627,13 @@ end
 -- Rebuild this sheet from the save mon and tell the referee. Transform's
 -- `liveMoves` overlay is left alone: the real sheet still updates so the
 -- new move is there when the transform ends.
-function M:syncFightMoves(mon)
+--
+-- `grew` (Gen 1 / Gen 2): the monster just levelled, so the message carries
+-- its new level, stats and max HP too (contract K9; `M.growthOf`), and the
+-- sheet takes the same stats.  A successful level-up send is remembered in
+-- `levelSent` so `syncLevelHp` knows the referee will fight on the levelled
+-- pair from its next batch on.
+function M:syncFightMoves(mon, grew)
   local index = self:sheetIndexFor(mon)
   if not index then return false end
   local sheet = self.mine and self.mine[index]
@@ -4277,7 +4641,18 @@ function M:syncFightMoves(mon)
   local moves = M.sheetMoves(self.game, mon)
   if #moves == 0 then return false end
   sheet.moves = moves
-  return M.sendMoveset(self.transport, self.battle, index - 1, moves, self:generation())
+  local growth = nil
+  if grew and self:generation() ~= 3 then
+    growth = M.growthOf(self.game, mon)
+    if growth then sheet.stats = growth.stats end
+  end
+  local sent = M.sendMoveset(self.transport, self.battle, index - 1, moves,
+    self:generation(), growth)
+  if sent and growth then
+    self.levelSent = self.levelSent or {}
+    self.levelSent[mon] = true
+  end
+  return sent
 end
 
 -- ------- Gen 3: the award, the held items, the throw, the catch
@@ -5071,14 +5446,16 @@ function M:noteSlot(msg)
   -- arrives with it, so a stream that disagrees with itself still draws a
   -- fraction rather than a bar past its own end.
   --
-  -- A local level-up is the other disagreement: the hub never applies
-  -- Experience, so the next `damage` still carries the pre-level pair.
-  -- `levelHpGrown` is that delta; it is added here rather than letting the
-  -- packet take the climb back off the plate. A fresh send is a new occupant,
-  -- so the delta is dropped and the referee's numbers win.
-  if fresh then slot.levelHpGrown = 0 end
-  local grown = (not fresh and tonumber(slot.levelHpGrown)) or 0
-  if grown < 0 then grown = 0 end
+  -- A local level-up is the other disagreement: the referee never applies
+  -- Experience, so a packet resolved before it heard of the level still
+  -- carries the pre-level pair (on Gen 1 / Gen 2 that is the rest of the
+  -- batch the level-up came in -- K9 tells it, `syncLevelHp`; on Gen 3, and
+  -- for an evolution's growth, for good). `M.levelHpOwed` is that delta; it is
+  -- added here rather than letting the packet take the climb back off the
+  -- plate. A fresh send is a new occupant, so the delta is dropped and the
+  -- referee's numbers win.
+  if fresh then slot.levelHpGrown, slot.levelHpRefereed = 0, nil end
+  local grown = (not fresh) and M.levelHpOwed(slot) or 0
   if msg.maxHp ~= nil then slot.maxHp = max(1, msg.maxHp) + grown end
   if msg.hp ~= nil then
     slot.hp = msg.hp
@@ -5354,7 +5731,11 @@ function M:onOutcome(msg)
   if self.expBatch then self:flushExp3() end
   self.pendingTurn = false
   self:finish(M.resultFor(msg, self.peerId), msg.reason, msg)
-  if self:generation() == 3 then self:payDay3(msg) end
+  if self:generation() == 3 then
+    self:payDay3(msg)
+  else
+    self:payDay12(msg)
+  end
 end
 
 -- ------- Gen 3: Pay Day
@@ -5519,7 +5900,94 @@ function M:payDay3(msg)
   return bonus
 end
 
--- Say the owed Pay Day line, once.  True when it queued one (the caller then
+-- ------- Red and Gold: Pay Day (contract K11 of docs/plans/gen12-referee-gaps-fix.md)
+--
+-- The referee counts the pot (`outcome().payDay`, side a's whole pile -- on
+-- Red it includes the computer's own PAY DAY coins, pokered's
+-- wTotalPayDayMoney; Gold's wPayDayMoney likewise) and reports it on a fight
+-- against the computer only; the wallet and Gold's AMULET COIN are this
+-- client's, as they are the cart's:
+--
+--   Red   EndOfBattle (engine/battle/end_of_battle.asm): outside a link
+--         battle, with wBattleResult 0, the pot is added to the player's
+--         money (AddBCD, which saturates the three BCD bytes at 999999) and
+--         "<PLAYER> picked up ¥N!" is printed (_PickUpPayDayMoneyText,
+--         text_bcd LEADING_ZEROES | LEFT_ALIGN: the number as it is).
+--         wBattleResult is 0 on a win and also on a flee -- running never
+--         sets it -- so Red pays a run as well (the referee's Gen 1 `run`
+--         outcome carries the pot; for side a it reads as a loss here).
+--   Gold  ExitBattle -> CheckPayDay (engine/battle/core.asm, pokecrystal and
+--         pokegold): on a WIN only (a flee is a DRAW), the pot is doubled
+--         under wAmuletCoin (`sla` / `rl`, saturating at $ffffff), paid with
+--         AddBattleMoneyToAccount (clamped at MAX_MONEY 999999), and
+--         BattleText_PlayerPickedUpPayDayMoney says the doubled pot
+--         ("<PLAYER> picked up / ¥N!", text_decimal 3 bytes, 6 digits).
+--
+-- Paid only where the cart keeps what a fight does (KEEPS_HELD_MODES: wild,
+-- coop_wild, coop_npc -- a link fight pays nothing, and the referee sends
+-- none there; this is the belt), and only to a player on side a, the side the
+-- pot is counted for.  Once per fight; the money lands with the verdict and
+-- the line waits for the ending to finish printing (`sayPayDay3`), where both
+-- carts print it: after the knockout's exp and the trainer's prize.
+-- Answers the amount the line names (the pot, doubled on Gold under an AMULET
+-- COIN), 0 when nothing was owed.
+function M:payDay12(msg)
+  if self.payDayPaid ~= nil then return 0 end
+  local coins = tonumber(type(msg) == "table" and msg.payDay or nil)
+  if not coins or coins ~= coins or coins < 1 then return 0 end
+  coins = min(floor(coins), Wire.PAYDAY12_MAX)
+  if not KEEPS_HELD_MODES[self.mode] or self.mySide ~= "a" then return 0 end
+  local generation = self:generation()
+  local won = self.result == "win"
+  -- Red's flee keeps wBattleResult at 0; Gold's is a DRAW and pays nothing.
+  local ran = generation == 1 and type(msg) == "table" and msg.reason == "run"
+  if not (won or ran) then return 0 end
+  self.payDayPaid = 0
+  local save = self.game and self.game.save
+  if type(save) ~= "table" then
+    mod.log:warn("this fight's Pay Day coins could not be paid because no save "
+      .. "is loaded -- start or continue a game before battling; the fight's "
+      .. "result still counts")
+    return 0
+  end
+  local pot = coins
+  if generation == 2 and self:amuletCoin2() then pot = coins * 2 end
+  M.addMoney(save, pot)
+  self.payDayPaid = pot
+  self.payDayLine = M.payDayText(playerName(self.game), pot)
+  return pot
+end
+
+-- The wallet, capped where both carts cap it (pokered AddBCD's 999999,
+-- pokecrystal AddBattleMoneyToAccount's MAX_MONEY), through the save format
+-- the boot keeps money in (Gen.money).  Shared with src/CoopBattle.lua.
+M.MONEY_MAX = 999999
+function M.addMoney(save, amount)
+  if type(save) ~= "table" then return 0 end
+  amount = floor(tonumber(amount) or 0)
+  if amount <= 0 then return 0 end
+  local before = tonumber(Gen.money.get(save)) or 0
+  local after = min(M.MONEY_MAX, before + amount)
+  Gen.money.set(save, after)
+  return after - before
+end
+
+-- The carts' Pay Day line, both of them the same words (pokered
+-- _PickUpPayDayMoneyText, pokecrystal / pokegold
+-- BattleText_PlayerPickedUpPayDayMoney): `text "<PLAYER> picked up"`,
+-- `line "¥..."`, `!`, the number as it is (Red's left-aligned BCD without
+-- leading zeroes; Gold's `text_decimal` of the pot).  Gold's printer has six
+-- digit places, and only an AMULET COIN doubling a pot already past 499999
+-- could need a seventh -- no fight scatters that much (a PAY DAY that lands
+-- scatters twice its user's level) -- so the whole number is printed rather
+-- than a cart's overflow tile.
+function M.payDayText(name, amount)
+  amount = max(0, floor(tonumber(amount) or 0))
+  return ("%s picked up\n¥%d!"):format(tostring(name or "PLAYER"), amount)
+end
+
+-- Say the owed Pay Day line, once (Gen 3's `payDay3` and Red / Gold's
+-- `payDay12` both leave it here).  True when it queued one (the caller then
 -- lets the queue print it before anything else happens).
 function M:sayPayDay3()
   local line = self.payDayLine
@@ -7771,6 +8239,10 @@ function M:applySwap(row)
   if slot.shownHp > (slot.maxHp or 1) then slot.maxHp = slot.shownHp end
   slot.status = arrival.status
   slot.confused = arrival.confused
+  -- A level-up's climb belonged to the monster that walked off (`noteSlot`
+  -- drops it on a fresh send for the same reason): carried over, the
+  -- newcomer's every later packet was read that much too high.
+  slot.levelHpGrown, slot.levelHpRefereed = 0, nil
   self:arriveOnSeat(index, index == self:mySlot())
   return true
 end
@@ -8476,8 +8948,9 @@ function M:update(dt)
   if self:tickMessages(dt, input) then return end
 
   if self.phase == "over" then
-    -- Gen 3's Pay Day line, owed since `onOutcome` paid the coins: after the
-    -- whole ending -- ours and the caller's -- has printed (`payDay3`).
+    -- The Pay Day line, owed since `onOutcome` paid the coins: after the
+    -- whole ending -- ours and the caller's -- has printed (`payDay3`,
+    -- `payDay12`).
     if self:sayPayDay3() then return end
     -- The catch's naming prompt, owed since `grantCatch` and asked now that
     -- the ending has finished printing -- the engine's own ordering, and the
@@ -8889,7 +9362,8 @@ function M:drawMoves(Font)
     local movesData = self.game and self.game.data and self.game.data.moves
     local def = type(movesData) == "table" and movesData[pick.id] or nil
     if def then
-      maxPp = (def.pp or 0) + (pick.ppUps or 0) * math.floor((def.pp or 0) / 5)
+      -- The cart's GetMaxPP: a fifth of the base per PP Up, capped at 7.
+      maxPp = M.maxPpOf(def.pp or 0, pick.ppUps)
     end
   end
   if pp and maxPp then

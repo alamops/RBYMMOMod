@@ -41,6 +41,14 @@ const RESTORE_PP = 'HELD_RESTORE_PP'; // HandleMysteryberry
 const HEAL_CONFUSION = 'HELD_HEAL_CONFUSION'; // UseConfusionHealingItem
 const HEAL_STATUS = 'HELD_HEAL_STATUS'; // both status routines
 
+// The HELD_PREVENT_* effects, by what each keeps off its holder (the Lua
+// twin explains: no cart item carries one, the checks key on the token).
+const PREVENT = {
+  poison: 'HELD_PREVENT_POISON', burn: 'HELD_PREVENT_BURN',
+  freeze: 'HELD_PREVENT_FREEZE', sleep: 'HELD_PREVENT_SLEEP',
+  paralysis: 'HELD_PREVENT_PARALYZE', confusion: 'HELD_PREVENT_CONFUSE',
+};
+
 // data/types/type_boost_items.asm, as the type's registry id.
 const TYPE_BOOST = {
   HELD_NORMAL_BOOST: 'NORMAL', HELD_FIGHTING_BOOST: 'FIGHTING',
@@ -215,13 +223,18 @@ function quickClawFires(param, byte) {
   return int(byte, 255) < int(param, 0);
 }
 
-// `.BrightPowder`, in the referee's percent domain (the Lua twin explains).
-function brightPowder(effectivePercent, param) {
-  const percent = int(effectivePercent, 0);
-  let byte = Math.floor((percent * 255) / 100) - int(param, 0);
+// `.BrightPowder`, in the cart's byte domain (the Lua twin explains): the
+// parameter off the accuracy byte, held at 0.
+function brightPowder(byteAccuracy, param) {
+  let byte = int(byteAccuracy, 0) - int(param, 0);
   if (byte < 0) byte = 0;
-  if (byte >= 255) return percent;
-  return Math.floor((byte * 100 + 254) / 255);
+  return byte;
+}
+
+// Whether the holder's HELD_PREVENT_* item keeps `what` off it.
+function prevents(mon, what) {
+  const token = own(PREVENT, what) ? PREVENT[what] : null;
+  return token !== null && holds(mon, token);
 }
 
 // SpeciesItemBoost: the stat doubled as a 16-bit value.
@@ -315,6 +328,7 @@ module.exports = {
   RESTORE_PP,
   HEAL_CONFUSION,
   HEAL_STATUS,
+  PREVENT,
   TYPE_BOOST,
   STATUS_CURE,
   STAT_UP,
@@ -343,6 +357,7 @@ module.exports = {
   typeBoostPercent,
   quickClawFires,
   brightPowder,
+  prevents,
   speciesAttack,
   metalPowder,
   critSpeciesItem,

@@ -2588,6 +2588,12 @@ do
   eq(next12[1].pp, 3, "export: an unchanged row keeps the old PP")
   eq(next12[1].highCrit, true, "export: ...and its high-crit flag")
   eq(next12[2].ppUps, 1, "export: a new row takes its own PP Ups")
+  local held = { transformed = true, moves = { row("COPY") }, preTransform = { moves = { row("A") } } }
+  eq(Hub.learnTo(2, held, { row("A"), row("B") }), true, "export: learnTo lands a learn")
+  eq(#held.preTransform.moves, 2, "export: ...in the list a Transform put aside")
+  eq(held.moves[1].id, "COPY", "export: ...leaving Gold's copied moves be")
+  eq(Hub.learnTo(2, { transformed = true, moves = { row("COPY") } }, { row("COPY"), row("B") }), false,
+     "export: a transformed battler with nothing put aside is left alone")
 end
 
 -- Gold: the learn keeps the cart's priority byte (K8), and a Gold sheet's K7
@@ -2603,6 +2609,7 @@ do
   gold.base = { hp = 41, atk = 52, def = 63, spe = 74, spa = 85, spd = 96 }
   gold.dvs = { atk = 12, def = 7, spe = 15, spc = 3 }
   gold.statExp = { hp = 1, atk = 2, def = 3, spe = 4, spc = 5 }
+  gold.happiness = 200
   gold.moves[1].priority, gold.moves[1].ppUps = 2, 3
   hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART2 })
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { gold } })
@@ -2613,6 +2620,7 @@ do
   eq(stored and stored.dvs and stored.dvs.spc, 3, "gold K7: the stored sheet keeps the cart's DVs")
   eq(stored and stored.base and stored.base.spd, 96, "gold K7: ...the species base stats")
   eq(stored and stored.statExp and stored.statExp.spc, 5, "gold K7: ...and the stat exp")
+  eq(stored and stored.happiness, 200, "gold K14: ...and the happiness RETURN reads")
   eq(stored and stored.moves[1].priority, 2, "gold K8: ...and the move's priority byte")
   eq(stored and stored.moves[1].ppUps, 3, "gold K8: ...and its PP Ups")
   if record and record.sim then
@@ -2632,6 +2640,88 @@ do
       moves = { row("thump"), row("quick") }, level = 52,
       stats = { atk = 1, def = 2, spd = 3, spc = 4 } })
     eq(calls, 1, "gold K9: Kanto-keyed stats refuse a Gold moveset")
+  end
+end
+
+-- A learn on a transformed battler, real referees: the hub judges it against,
+-- and writes it into, the party list the referee put aside at Transform
+-- (`preTransform.moves`), so the switch-out gives back the learned list
+-- rather than the one from before it.  Gold leaves the copied moves in the
+-- fight (pokecrystal LearnMove skips wBattleMonMoves while
+-- SUBSTATUS_TRANSFORMED is set); Red overwrites them with its own (pokered
+-- LearnMove has no such check), as a separate copy.  Hub.learnTo;
+-- server/hub_battle.test.js pins the same on the Node twin.
+local function transformLearn(generation)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  hub.forceBattleSeed = 1
+  local ann = (generation == 2 and join2 or join)(hub, "ANN")
+  local id = "tl"
+  hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                     chart = generation == 2 and CHART2 or CHART })
+  local function sheet(species, moves)
+    local out = generation == 2 and sheet2({ species = species }) or mon({ species = species })
+    out.moves = moves
+    return out
+  end
+  local function mv(moveId, effect, power)
+    return row(moveId, { pp = 10, power = power or 0, effect = effect or 0 })
+  end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = {
+    sheet("COPYCAT", { mv("TRANSFORM", 57), mv("TACKLE", 0, 1) }),
+    sheet("BENCH", { mv("TACKLE", 0, 1) }) } })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = {
+    sheet("FOE", { mv("GROWL"), mv("HUSH") }) } })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return nil end
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+  local live = record.sim.byId[ann.id].mons[1]
+  local seen = { transformed = live.transformed == true, put = live.preTransform ~= nil }
+  local learnt = hub:applyBattleMoveset(record, ann, { mon = 0,
+    moves = { mv("TRANSFORM", 57), mv("TACKLE", 0, 1), mv("LEARNT", 0, 40) } })
+  seen.learnt = learnt
+  seen.battle = live.moves[1] and live.moves[1].id
+  seen.battleCount = #live.moves
+  seen.party = live.preTransform and #live.preTransform.moves
+  seen.partyPp = live.preTransform and live.preTransform.moves[1].pp
+  seen.separate = live.preTransform and live.preTransform.moves[1] ~= live.moves[1]
+  seen.rewrite = hub:applyBattleMoveset(record, ann, { mon = 0,
+    moves = { mv("AAA"), mv("BBB"), mv("CCC") } })
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "switch", slot = 1 })
+  seen.after = live.transformed == true
+  seen.restored = {}
+  for i, m in ipairs(live.moves) do seen.restored[i] = m.id end
+  return seen
+end
+
+do
+  local gold = transformLearn(2)
+  ok(gold ~= nil, "transformed learn: a Gold wild fight opens")
+  if gold then
+    ok(gold.transformed and gold.put, "transformed learn (gold): TRANSFORM put the party list aside")
+    eq(gold.learnt, true, "transformed learn (gold): the learn is applied")
+    eq(gold.party, 3, "transformed learn (gold): ...to the list put aside")
+    eq(gold.partyPp, 9, "transformed learn (gold): ...which keeps the party's PP")
+    eq(gold.battle, "GROWL", "transformed learn (gold): the copied moves stay in the fight")
+    eq(gold.battleCount, 2, "transformed learn (gold): ...all of them (pokecrystal LearnMove)")
+    eq(gold.rewrite, false, "transformed learn (gold): a rewrite is still refused")
+    eq(gold.after, false, "transformed learn (gold): the switch-out undoes the Transform")
+    eq(table.concat(gold.restored, ","), "TRANSFORM,TACKLE,LEARNT",
+       "transformed learn (gold): ...and gives back the learned list")
+  end
+  local red = transformLearn(1)
+  ok(red ~= nil, "transformed learn: a Red wild fight opens")
+  if red then
+    ok(red.transformed and red.put, "transformed learn (red): TRANSFORM put the party list aside")
+    eq(red.learnt, true, "transformed learn (red): the learn is applied")
+    eq(red.party, 3, "transformed learn (red): ...to the list put aside")
+    eq(red.battle, "TRANSFORM", "transformed learn (red): the fight's moves become its own (pokered LearnMove)")
+    eq(red.battleCount, 3, "transformed learn (red): ...the learned move among them")
+    eq(red.separate, true, "transformed learn (red): ...as a copy the fight's PP cannot reach the party through")
+    eq(red.rewrite, false, "transformed learn (red): a rewrite is still refused")
+    eq(red.after, false, "transformed learn (red): the switch-out undoes the Transform")
+    eq(table.concat(red.restored, ","), "TRANSFORM,TACKLE,LEARNT",
+       "transformed learn (red): ...and gives back the learned list")
   end
 end
 
@@ -2702,6 +2792,76 @@ do
   eq(none and none.payDay, nil, "pay day 1/2: a 0 is the field's absence, as on the Node twin")
 end
 
+-- K11 on an escape: pokered's EndOfBattle pays wTotalPayDayMoney whenever
+-- wBattleResult is still 0, and a Teleport / Whirlwind / Roar / POKE DOLL
+-- escape never writes it -- so Red's coins ride a `run` outcome.  Gold calls
+-- every escape a DRAW (ExitBattle skips CheckPayDay) and Gen 3 pays only from
+-- HandleEndTurn_BattleWon, so their hubs keep the field off a run even when
+-- the referee's (stubbed) outcome carries one.  The stub names side a the
+-- losers, as a referee does when the players fled -- the coins are still
+-- theirs.  server/hub_battle.test.js pins the same on the Node twin.
+local function fled(generation, mode, coins, reason)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  local joinAs = (generation == 2 and join2) or (generation == 3 and join3) or join
+  local ann, annPeer = joinAs(hub, "ANN")
+  local bob, bobPeer = joinAs(hub, "BOB")
+  local function sheet()
+    if generation == 2 then return sheet2({}) end
+    if generation == 3 then return mon3() end
+    return mon()
+  end
+  local members = mode == "coop_wild" and { ann.id, bob.id } or { ann.id }
+  local id = "fw"
+  hub:openCoopBattle(id, members, { mode = mode, hostId = ann.id })
+  if generation == 3 then
+    hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+  else
+    hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id,
+                       chart = generation == 2 and CHART2 or CHART })
+  end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet() } })
+  if mode == "coop_wild" then
+    hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet() } })
+  end
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { sheet() } })
+  local record = hub.battles[id]
+  if not (record and record.sim) then return nil end
+  annPeer.outbox, bobPeer.outbox = {}, {}
+  local wild = record.npcIds[1]
+  record.sim.outcome = function()
+    if reason == "ko" then
+      return { outcome = "win", winners = members, losers = { wild }, reason = "ko", payDay = coins }
+    end
+    return { outcome = "win", winners = { wild }, losers = members, reason = "run", payDay = coins }
+  end
+  hub:flushBattle(record)
+  return take(annPeer, Wire.BATTLE_OUTCOME), take(bobPeer, Wire.BATTLE_OUTCOME)
+end
+
+do
+  local red = fled(1, "wild", 350)
+  ok(red, "pay day on a run: a Red wild escape settles")
+  eq(red and red.reason, "run", "pay day on a run: ...as a run")
+  eq(red and red.winners and red.winners[1], "nfwa", "pay day on a run: ...the wild seat named the winner")
+  eq(red and red.losers and #red.losers, 1, "pay day on a run: ...and the player who fled the loser")
+  eq(red and red.payDay, 350, "pay day on a run: Red's coins ride the escape (pokered EndOfBattle)")
+  eq(red and Wire.battleOutcome(red, 1).payDay, 350, "pay day on a run: ...and a Gen 1 reader keeps them")
+  local atAnn, atBob = fled(1, "coop_wild", 350)
+  eq(atAnn and atAnn.payDay, 350, "pay day on a run: a Red co-op escape pays the first player")
+  eq(atBob and atBob.payDay, 350, "pay day on a run: ...and the second (both seats on side a)")
+  eq((fled(1, "wild", 0) or {}).payDay, nil, "pay day on a run: a 0 is still the field's absence")
+  local gold = fled(2, "wild", 350)
+  ok(gold, "pay day on a run: a Gold wild escape settles")
+  eq(gold and gold.payDay, nil, "pay day on a run: Gold pays none (every escape is a DRAW)")
+  local gold2 = fled(2, "coop_wild", 350)
+  eq(gold2 and gold2.payDay, nil, "pay day on a run: ...in co-op neither")
+  eq((fled(2, "wild", 350, "ko") or {}).payDay, 350, "pay day on a run: Gold's knockout still pays")
+  local g3 = fled(3, "wild", 350)
+  ok(g3, "pay day on a run: a Gen 3 wild escape settles")
+  eq(g3 and g3.payDay, nil, "pay day on a run: Gen 3 pays none (HandleEndTurn_BattleWon only)")
+  eq((fled(3, "wild", 350, "ko") or {}).payDay, 350, "pay day on a run: Gen 3's knockout still pays")
+end
+
 -- K13: an id is refused past 40 characters, never cut (the Node twin's cleanId).
 do
   eq(Wire.id(string.rep("i", 40)), string.rep("i", 40), "id: 40 characters is an id")
@@ -2710,6 +2870,42 @@ do
   local long = mon()
   long.moves[1].id = string.rep("m", 41)
   eq(Wire.battleMon(long), nil, "id: a long move id refuses the monster, as on the dedicated hub")
+end
+
+-- K13's twin: a map id is refused past 64 characters, never cut (the Node
+-- twin's cleanMapId), so a step there leaves its player unplaced on this hub
+-- as on the dedicated one.
+do
+  eq(Wire.mapId(string.rep("M", 64)), string.rep("M", 64), "map id: 64 characters is a map id")
+  eq(Wire.mapId(string.rep("M", 65)), nil, "map id: 65 is refused, not cut to 64")
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann = join(hub, "ANN")
+  local bob, bobPeer = join(hub, "BOB")
+  bobPeer.outbox = {}
+  hub:receive(ann, { type = Wire.MOVE, map = string.rep("M", 65), x = 3, y = 4, facing = "up" })
+  local step = take(bobPeer, Wire.MOVE)
+  ok(step ~= nil, "map id: a step with a long map still reaches the room")
+  eq(step and step.map, nil, "map id: ...with its player unplaced")
+  eq(ann.map, nil, "map id: ...and nowhere on the hub's own roster")
+  hub:receive(ann, { type = Wire.MOVE, map = string.rep("M", 64), x = 3, y = 4, facing = "up" })
+  step = take(bobPeer, Wire.MOVE)
+  eq(step and step.map, string.rep("M", 64), "map id: a 64-character map places them")
+  eq(bob.map, "PALLET", "map id: (the onlooker stays where it was)")
+end
+
+-- K14: Gold's happiness rides a Gen 2 sheet; a Gen 1 reader neither copies
+-- nor refuses one, and a Gen 2 sheet with an unreadable one is refused whole.
+do
+  local red = mon()
+  red.happiness = 70
+  local read = Wire.battleMon(red)
+  ok(read ~= nil, "happiness: a Red sheet stating one is still read")
+  eq(read and read.happiness, nil, "happiness: ...without it (Red has no happiness byte)")
+  local gold = sheet2({})
+  gold.happiness = 255
+  eq((Wire.battleMon(gold) or {}).happiness, 255, "happiness: a Gold sheet carries it")
+  gold.happiness = 256
+  eq(Wire.battleMon(gold), nil, "happiness: past one byte refuses the Gold sheet")
 end
 
 -- ------------------------------------------------------------------

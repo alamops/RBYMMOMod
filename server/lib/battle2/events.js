@@ -99,6 +99,9 @@ const KINDS = {
 // `confused` is the fight-local volatile (not a Wire.STATUSES token): 1 on
 // send when the newcomer is already confused, and 1/0 on a status event for
 // inflict / snap-out. It never occupies `status`, so PSN and confusion coexist.
+//
+// `stage` is a `stat` event's signed stat stage after the change, -6..6
+// (contract K10): `amount` rides beside it, but the wire's is unsigned.
 const FIELDS = {
   battle: 'string',
   seq: 'number',
@@ -117,6 +120,7 @@ const FIELDS = {
   mon: 'number',
   team: 'string',
   confused: 'number',
+  stage: 'number',
 };
 
 // ------------------------------------------------------------------
