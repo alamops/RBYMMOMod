@@ -907,3 +907,124 @@ test('Gold\'s held event (K3): a Gen 2 reader only, id text and a 0 / 1 amount',
       `Gen 3's held reads as it always did (reader ${reader})`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Referee gaps (docs/plans/gen12-referee-gaps-fix.md K7-K11, K13): the Gen 1 /
+// Gen 2 sheet's base / dvs / statExp, a move row's ppUps and Gold priority, the
+// moveset's level-up, the older `stat` event's signed stage, the Gen 1 / Gen 2
+// Pay Day bound, the 40-character id and the Metronome pool cap. The hub
+// protocol parity driver (referee_gaps_dialect, levelup_moveset_forward,
+// gen12_payday_forward) holds the twins to one answer case by case; this pins
+// the numbers, the key lists and the event field set they are written against.
+// ---------------------------------------------------------------------------
+
+test('the referee-gap bounds and the Metronome pool cap match Config / Wire / sanitize', () => {
+  // A one-sided bound is a sheet, a learn or a coin count one hosting path
+  // takes and the other refuses.
+  const wire = read('src/Wire.lua');
+  for (const name of ['BASE_STAT_MAX', 'DV_MAX', 'STAT_EXP_MAX', 'PP_UPS_MAX', 'PRIORITY2_MAX',
+    'STAGE12_MAX', 'PAYDAY12_MAX']) {
+    assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name],
+      `Wire.${name} and sanitize.${name} must match`);
+  }
+  assert.strictEqual(sanitize.BASE_STAT_MAX, 255, 'a base stat is one byte on both carts');
+  assert.strictEqual(sanitize.DV_MAX, sanitize.IV_MAX, 'a DV is the nibble the `ivs` block already bounds');
+  assert.strictEqual(sanitize.STAT_EXP_MAX, sanitize.EV_MAX, 'a stat-exp word is the `evs` block\'s 16 bits');
+  assert.strictEqual(sanitize.PP_UPS_MAX, 3, 'PP_UP_MASK is the top two bits of the PP byte');
+  assert.strictEqual(sanitize.STAGE12_MAX, sanitize.STAGE3_MAX, 'a stat stage is -6..6 on every cart');
+  assert.strictEqual(sanitize.PAYDAY12_MAX, 999999,
+    'Red\'s three BCD bytes saturate there, and Gold pays into a MAX_MONEY 999999 wallet');
+  assert.ok(sanitize.PAYDAY12_MAX > sanitize.PAYDAY3_MAX, 'the Kanto / Johto bound is the wider one');
+
+  const config = read('src/Config.lua');
+  assert.strictEqual(luaAssignNumber(config, 'BATTLE_METRONOME_POOL_MAX'), sanitize.METRONOME_POOL_MAX,
+    'bump Config.BATTLE_METRONOME_POOL_MAX and sanitize METRONOME_POOL_MAX together');
+  assert.ok(sanitize.METRONOME_POOL_MAX >= 251, 'every one of Gold\'s 251 moves fits the pool');
+  assert.ok(sanitize.METRONOME_POOL_MAX <= 256,
+    'and no more than the 64 KiB line was measured for (Config.lua says how)');
+});
+
+test('the K7 key lists are one list per dialect on Wire and sanitize', () => {
+  // `base` keyed like `stats` plus hp; `dvs` the cart's four DVs; `statExp` the
+  // cart's five stat-exp words. A key one side reads and the other does not is
+  // a sheet one hub refuses whole.
+  const wire = read('src/Wire.lua');
+  const luaKeys = (name) => {
+    const m = wire.match(new RegExp(`local ${name}\\s*=\\s*\\{([\\s\\S]*?)\\n\\}`));
+    assert.ok(m, `Wire.lua must declare local ${name}`);
+    return Object.fromEntries([...m[1].matchAll(/(\w+)\s*=\s*\{([^}]*)\}/g)]
+      .map((x) => [x[1], [...x[2].matchAll(/"(\w+)"/g)].map((y) => y[1])]));
+  };
+  assert.deepStrictEqual(luaKeys('K7_KEYS1'), sanitize.K7_KEYS1, 'the Gen 1 blocks');
+  assert.deepStrictEqual(luaKeys('K7_KEYS2'), sanitize.K7_KEYS2, 'the Gen 2 blocks');
+  assert.deepStrictEqual(sanitize.K7_KEYS1.base, ['hp', ...sanitize.BATTLE_STATS_GEN1],
+    'Gen 1 `base` is `stats` plus hp');
+  assert.deepStrictEqual(sanitize.K7_KEYS2.base, ['hp', ...sanitize.BATTLE_STATS_GEN2],
+    'Gen 2 `base` is `stats` plus hp, Special split');
+  for (const keys of [sanitize.K7_KEYS1, sanitize.K7_KEYS2]) {
+    assert.deepStrictEqual(keys.statExp, ['hp', ...keys.dvs], '`statExp` is hp plus the DV keys');
+    assert.strictEqual(keys.dvs.length, 4, 'four stored DVs; the HP DV is derived');
+  }
+});
+
+test('the Gen 1 / Gen 2 event field set (K10): one whitelist on Wire, sanitize and both older sims', () => {
+  // Every field an event may carry, each at a value every reader keeps.
+  const every = {
+    battle: 'b1', seq: 1, t: 'stat', text: 'ATK fell', amount: 2, slot: 0, hp: 5, maxHp: 9,
+    species: 'ALPHA', speciesId: 'ALPHA', level: 5, participants: 1, mon: 0, team: 'o',
+    side: 'a', status: 'PSN', confused: 1, target: 2, spread: 1, stat: 'atk', stage: -2,
+    delta: -2, holding: 3,
+    moves: [{
+      id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  const OLDER = ['amount', 'battle', 'confused', 'hp', 'level', 'maxHp', 'mon', 'moves',
+    'participants', 'seq', 'side', 'slot', 'species', 'speciesId', 'stage', 'status', 't',
+    'team', 'text'];
+  const GEN3_ONLY = ['delta', 'holding', 'spread', 'stat', 'target'];
+  for (const reader of [1, 2]) {
+    const got = sanitize.cleanBattleEvent(every, reader);
+    assert.deepStrictEqual(Object.keys(got).sort(), OLDER,
+      `a generation ${reader} reader keeps exactly the older field set`);
+    assert.strictEqual(got.stage, -2, `...the signed stage among them (K10, reader ${reader})`);
+  }
+  // A reader naming none keeps the union; a Gen 3 reader the same, less the
+  // older-dialect `moves` row (it has no `num`, so the Gen 3 row refuses it).
+  const union = [...OLDER, ...GEN3_ONLY].sort();
+  assert.deepStrictEqual(Object.keys(sanitize.cleanBattleEvent(every)).sort(), union,
+    'a reader naming none keeps the older set and Gen 3\'s five');
+  assert.deepStrictEqual(Object.keys(sanitize.cleanBattleEvent(every, 3)).sort(),
+    union.filter((key) => key !== 'moves'), 'a Gen 3 reader keeps the same, less an older move row');
+  // Wire.lua reads the same field for the older dialect, in its own branch.
+  const wire = read('src/Wire.lua');
+  assert.ok(/if older and raw\.stage ~= nil then/.test(wire),
+    'Wire.battleEvent reads `stage` for an older reader');
+  assert.ok(/-M\.STAGE12_MAX, M\.STAGE12_MAX/.test(wire), '...bounded by STAGE12_MAX');
+  // Both older sims (and their Node twins) emit only fields an older reader
+  // keeps, so nothing a referee says is dropped on the way to the screen. A
+  // subset, so it holds before and after the referees learn `stage`.
+  for (const [rel, js] of [['src/BattleSim/events.lua', './lib/battle/events.js'],
+    ['src/BattleSim2/events.lua', './lib/battle2/events.js']]) {
+    const fields = luaTypedKeys(read(rel), /M\.FIELDS\s*=\s*\{([\s\S]*?)\}/);
+    for (const key of Object.keys(fields)) {
+      assert.ok(OLDER.includes(key), `${rel} FIELDS.${key} is a field an older reader keeps`);
+    }
+    const Events = require(js);
+    if (Events.FIELDS) {
+      assert.deepStrictEqual(Object.keys(Events.FIELDS).sort(), Object.keys(fields).sort(),
+        `${js} FIELDS mirrors ${rel}`);
+    }
+  }
+});
+
+test('K13: an id is refused past 40 characters on both twins, never cut', () => {
+  // Lua's Wire.id used to cut a long id to 40 where cleanId refused it -- one
+  // party fought on the LAN host and refused on the dedicated hub.
+  const wire = read('src/Wire.lua');
+  const body = wire.match(/function M\.id\(value\)([\s\S]*?)\nend/);
+  assert.ok(body, 'Wire.lua must define M.id(value)');
+  assert.ok(/#value > 40 then return nil/.test(body[1]), 'Wire.id refuses past 40');
+  assert.ok(!/sub\(1, 40\)/.test(body[1]), 'and no longer cuts');
+  assert.strictEqual(sanitize.cleanId('i'.repeat(40)), 'i'.repeat(40));
+  assert.strictEqual(sanitize.cleanId('i'.repeat(41)), null);
+});

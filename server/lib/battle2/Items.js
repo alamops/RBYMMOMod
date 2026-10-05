@@ -105,18 +105,17 @@ const SLEEP_BYPASS = { SNORE: true, SLEEP_TALK: true };
 const THIEF = 'THIEF';
 
 // The move effects whose script runs `kingsrock`, in this referee's effect ids
-// (the Lua header lists the Crystal names behind each), and the damaging moves
-// whose effect folds to 0 on a Gold sheet but runs no `kingsrock`.
+// (the Lua header lists the Crystal names behind each) -- SNORE (96) and SKY
+// ATTACK (101) among the Gold-native ones -- and the damaging moves whose
+// effect still folds to 0 on a Gold sheet but runs no `kingsrock`.
 const KINGS_ROCK_EFFECTS = {
   0: true, 3: true, 7: true, 16: true, 17: true, 26: true,
   27: true, 29: true, 39: true, 40: true, 41: true, 43: true,
   44: true, 45: true, 48: true, 77: true, 81: true,
+  96: true, 101: true,
 };
 const KINGS_ROCK_FOLDED_EXCEPTIONS = {
-  GUST: true, STOMP: true, THUNDER: true, EARTHQUAKE: true, PSYCHIC_M: true,
-  TRI_ATTACK: true, FLAME_WHEEL: true, MUD_SLAP: true, OCTAZOOKA: true,
-  STEEL_WING: true, SACRED_FIRE: true, METAL_CLAW: true, TWISTER: true,
-  CRUNCH: true, ANCIENTPOWER: true, SHADOW_BALL: true, FUTURE_SIGHT: true,
+  FUTURE_SIGHT: true,
 };
 
 // ------------------------------------------------------------------
@@ -277,6 +276,19 @@ function sixteenth(maxHp) {
   return b * 256 + c;
 }
 
+// GetEighthMaxHP over the same GetQuarterMaxHP: c alone halved, at least 1,
+// b riding through -- 1024 HP saps 257. LEECH SEED's sap.
+function eighth(maxHp) {
+  const n = Math.max(0, int(maxHp, 0));
+  const quarter = Math.floor((n % 65536) / 4);
+  const b = Math.floor(quarter / 256);
+  let c = quarter % 256;
+  if (c === 0) c = 1;
+  c = Math.floor(c / 2);
+  if (c === 0) c = 1;
+  return b * 256 + c;
+}
+
 // HandleHPHealingItem: HP less than half the maximum.
 function berryWants(hp, maxHp) {
   return int(hp, 0) * 2 < int(maxHp, 0);
@@ -336,6 +348,7 @@ module.exports = {
   critSpeciesItem,
   focusBand,
   sixteenth,
+  eighth,
   berryWants,
   kingsRockMove,
 };

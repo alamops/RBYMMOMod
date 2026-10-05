@@ -1404,9 +1404,10 @@ local function battleSeconds(clock)
 end
 
 -- The fights whose outcome may carry Pay Day coins: the sim's own EXP_MODES
--- (src/BattleSim3/Turn.lua `_checkOver`), the three where side a is players
--- and side b is the hub's NPC seats.  1v1 / coop_pvp are link rules and pay
--- none.  Twin of relay.js PAY_DAY_MODES.
+-- (src/BattleSim3/Turn.lua `_checkOver`; the Gen 1 / Gen 2 referees' K11
+-- coins follow the same rule), the three where side a is players and side b
+-- is the hub's NPC seats.  1v1 / coop_pvp are link rules and pay none.  Twin
+-- of relay.js PAY_DAY_MODES.
 local PAY_DAY_MODES = { wild = true, coop_wild = true, coop_npc = true }
 
 -- The cart family a fighter entry's `family` names, keyed by the cart the
@@ -1750,20 +1751,15 @@ local function applyBattleMoveset3(fighter, payload)
   return true
 end
 
--- Mid-fight learn / replace (PROTOCOL 28). Twin of Relay.applyBattleMoveset.
--- Unchanged ids keep the hub's PP and combat fields; a transformed battler
--- is left alone so this does not end Transform a turn early.
-function M:applyBattleMoveset(record, client, payload)
-  if not (record and record.sim and payload) then return false end
-  local fighter = record.sim.byId and record.sim.byId[client.id]
-  if not (fighter and type(fighter.mons) == "table") then return false end
-  if self.generation == 3 then return applyBattleMoveset3(fighter, payload) end
-  local mon = fighter.mons[payload.mon + 1]
-  if not mon or mon.transformed then return false end
-  local incoming = payload.moves
-  if type(incoming) ~= "table" or #incoming == 0 then return false end
-  local old = type(mon.moves) == "table" and mon.moves or {}
-  if not movesetDeltaOk(old, incoming) then return false end
+-- The Gen 1 / Gen 2 move list a learn leaves on a live battler.  Unchanged
+-- ids keep the hub's PP and combat fields -- `highCrit` among them -- with
+-- only what the hub's row never stated (a name, a max PP, a type, the K8
+-- PP Ups and Gold priority) filled from the client's; a new id takes the
+-- client's row whole.  `highCrit` is carried as the sims' copyMove spells it
+-- (a boolean): before contract K8 this rebuild named only the nine core
+-- fields, so a learn silently cost every move on the mon its high-crit flag.
+-- Twin of nextMoves12 in server/lib/relay.js.
+local function nextMoves12(old, incoming)
   local nextMoves = {}
   for i, nm in ipairs(incoming) do
     local prev = old[i]
@@ -1775,17 +1771,80 @@ function M:applyBattleMoveset(record, client, payload)
         power = prev.power, accuracy = prev.accuracy,
         type = prev.type ~= nil and prev.type or nm.type,
         effect = prev.effect, chance = prev.chance,
+        highCrit = prev.highCrit,
+        ppUps = prev.ppUps ~= nil and prev.ppUps or nm.ppUps,
+        priority = prev.priority ~= nil and prev.priority or nm.priority,
       }
     else
       nextMoves[i] = {
         id = nm.id, name = nm.name, pp = nm.pp, maxPp = nm.maxPp,
         power = nm.power, accuracy = nm.accuracy, type = nm.type,
         effect = nm.effect, chance = nm.chance,
+        highCrit = nm.highCrit == true,
+        ppUps = nm.ppUps, priority = nm.priority,
       }
     end
   end
-  mon.moves = nextMoves
-  return true
+  return nextMoves
+end
+-- Exported with the delta rule above so a referee that runs without a hub --
+-- the solo path, src/SoloBattle.lua -- applies a learn by the same two rules
+-- rather than a third copy of them.  Twin exports in server/lib/relay.js.
+M.movesetDeltaOk = movesetDeltaOk
+M.nextMoves12 = nextMoves12
+
+-- Mid-fight learn / replace (PROTOCOL 28) and level-up (contract K9 of
+-- docs/plans/gen12-referee-gaps-fix.md). Twin of Relay.applyBattleMoveset.
+--
+-- Moves: unchanged ids keep the hub's PP and combat fields (nextMoves12); a
+-- transformed battler's list is left alone so this does not end Transform a
+-- turn early.
+--
+-- Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
+-- Gen 2 only -- Wire.battleMoveset reads none on Gen 3), the hub forwards
+-- them to the referee's K9 API once the moves are settled:
+--
+--   record.sim:levelUp(playerId, monIndex, level, stats, maxHp)
+--
+--     playerId  the sender's seat (`client.id`, the sim's byId key)
+--     monIndex  1-BASED party index -- the sim's own convention on both
+--               twins (fighter.mons[i] here, monAt(fighter, i) in JS) --
+--               so the wire's 0-based `mon` plus one
+--     level     1..LEVEL_MAX, or nil when the payload stated none
+--     stats     the dialect's `stats` block (Wire.battleMoveset), or nil
+--     maxHp     1..HP_MAX, or nil
+--
+-- always forwarded whatever became of the moves -- a transformed mon still
+-- grew (only its move list is protected), and a learn refused as a rewrite
+-- does not undo the level it came with.  Whether the claim is plausible and
+-- what it rebuilds (the cart's in-battle CalcStats, badge boosts, the HP
+-- step) is the referee's to decide.  Guarded on the method existing: the
+-- Gen 1 / Gen 2 referees implement it, BattleSim3 never does, and a hub
+-- whose sim predates it simply applies the moves as before.
+--
+-- Returns whether anything reached the referee (a move list or a level-up).
+function M:applyBattleMoveset(record, client, payload)
+  if not (record and record.sim and payload) then return false end
+  local fighter = record.sim.byId and record.sim.byId[client.id]
+  if not (fighter and type(fighter.mons) == "table") then return false end
+  if self.generation == 3 then return applyBattleMoveset3(fighter, payload) end
+  local mon = fighter.mons[payload.mon + 1]
+  if not mon then return false end
+  local applied = false
+  local incoming = payload.moves
+  if not mon.transformed and type(incoming) == "table" and #incoming > 0 then
+    local old = type(mon.moves) == "table" and mon.moves or {}
+    if movesetDeltaOk(old, incoming) then
+      mon.moves = nextMoves12(old, incoming)
+      applied = true
+    end
+  end
+  local grew = payload.level ~= nil or payload.stats ~= nil or payload.maxHp ~= nil
+  if grew and type(record.sim.levelUp) == "function" then
+    record.sim:levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp)
+    applied = true
+  end
+  return applied
 end
 
 -- List of `{id, count}` → lookup map. Empty / nil → empty map (no items).
@@ -2332,13 +2391,18 @@ function M:settleMediated(record, outcome)
   if outcome.reason then payload.reason = outcome.reason end
   if outcome.caught then payload.caught = outcome.caught end
   if outcome.catcher then payload.catcher = outcome.catcher end
-  -- Gen 3's Pay Day coins: side a's total on a knockout win (BattleSim3
-  -- `_checkOver`; none under link rules).  A broadcast is already side a
-  -- only here: in the three NPC modes every member is a human seated on side
-  -- a (`openMediatedBattle` puts the npc seats alone on side b), and each
-  -- client still checks the winners list before it pays.  The mode test
-  -- keeps the field off a player-vs-player fight even if a sim ever set it.
-  if outcome.payDay and PAY_DAY_MODES[record.mode] then payload.payDay = outcome.payDay end
+  -- Pay Day coins: side a's total on a knockout win (BattleSim3 `_checkOver`;
+  -- the Gen 1 / Gen 2 referees' `outcome().payDay` from contract K11 of
+  -- docs/plans/gen12-referee-gaps-fix.md; none under link rules).  A
+  -- broadcast is already side a only here: in the three NPC modes every
+  -- member is a human seated on side a (`openMediatedBattle` puts the npc
+  -- seats alone on side b), and each client still checks the winners list
+  -- before it pays.  The mode test keeps the field off a player-vs-player
+  -- fight even if a sim ever set it.  A positive number only: Lua reads a 0
+  -- as true where the JS twin reads it as false, so "no coins" is spelled as
+  -- the field's absence on both (every reader reads a 0 as absent anyway).
+  local coins = tonumber(outcome.payDay)
+  if coins and coins > 0 and PAY_DAY_MODES[record.mode] then payload.payDay = outcome.payDay end
   self:broadcastBattle(record, Wire.BATTLE_OUTCOME, payload)
 
   local match = self.matches[record.id]

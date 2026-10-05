@@ -40,11 +40,31 @@ function M:byte()
   return floor(self:next() / 65536) % 256
 end
 
+-- One draw into 0..span-1 off the state's HIGH bits (contract K12): its high
+-- 16 bits (16..31) modulo the span.  `next() % span` kept the low bits, and an
+-- LCG's bit k cycles with period 2^(k+1) -- bit 0 alternates, bits 0..1 repeat
+-- every four draws -- so a crit at chance 4 or 2 and the 16-wide damage roll
+-- followed a fixed pattern set by the draw's position in the stream.  The same
+-- rule as Gen 1's BattleSim/Rng.lua (one K12 for both referees), exact in both
+-- runtimes: `floor(s / 65536)` of a state under 2^32 is an integer in a double
+-- and in V8.  A span wider than 65536 (no referee caller has one) stitches two
+-- high halves into a 32-bit value first, still exact.
+local function high16(self)
+  return floor(self:next() / 65536)
+end
+
+local function scaled(self, span)
+  if span <= 65536 then return high16(self) % span end
+  local top = high16(self)               -- two statements: Lua leaves the
+  local bottom = high16(self)            -- order of operands unspecified
+  return (top * 65536 + bottom) % span
+end
+
 -- 0..n-1, matching engine Damage.rollCritical / rand(..., n).
 function M:below(n)
   local span = floor(tonumber(n) or 0)
   if span <= 1 then return 0 end
-  return self:next() % span
+  return scaled(self, span)
 end
 
 function M:nextInt(min, max)
@@ -55,7 +75,7 @@ function M:nextInt(min, max)
   if hi < lo then lo, hi = hi, lo end
   local span = hi - lo + 1
   if span <= 1 then return lo end
-  return lo + (self:next() % span)
+  return lo + scaled(self, span)
 end
 
 function M:damageRoll()

@@ -23,7 +23,13 @@
 --     time as floor(d * pct/100), with a non-immune floor of 1.
 --   * Rage's RageDamage (opts.rageCount) next: x(count + 1), 16-bit.
 --   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
---     running damage ≥ 2; final clamp 1..999.
+--     running damage ≥ 2, at least 1.  NO cap after it: DamageCalc's 997 + 2
+--     is the only one, and STAB, the matchup, RageDamage and the variation each
+--     keep their own 16-bit result (BattleCommand_Stab's `add hl, bc`, the
+--     matchup's and DamageVariation's low quotient bytes), so a hit can pass
+--     999 -- which only HP-free readers see (Bide's store, Counter).
+--   * `double` is DoubleDamage / DoubleMinimizeDamage, run by the caller after
+--     the variation: a 16-bit shift whose carry pins $ffff.
 --
 -- Physical vs special: opts.physical (default true).  When false, attacker
 -- reads spa (or spc) and defender reads spd (or spc).
@@ -43,8 +49,12 @@ local floor, max, min = math.floor, math.max, math.min
 
 M.ROLL_MIN = 85
 M.ROLL_MAX = 100
+-- DamageCalc's tail: the base is held at MAX_DAMAGE - MIN_DAMAGE (997) and
+-- MIN_DAMAGE added -- the one cap Gold's damage has.
 M.MAX_DAMAGE = 999
 M.MIN_DAMAGE = 2
+-- The 16-bit register every later step keeps (wCurDamage).
+M.WORD_MAX = 65535
 
 local function int(value, fallback)
   local n = tonumber(value)
@@ -139,13 +149,24 @@ function M.truncateStats(attack, defense, onePass)
   return a % 256, d % 256
 end
 
+-- BattleCommand_DamageVariation: nothing for 0 or 1 ("No point in reducing
+-- 1 or 0 damage"), otherwise floor(d * roll / 100), at least 1 and NOT capped
+-- (see the header) -- `modified` is a 16-bit value already, and roll <= 100
+-- keeps the product's quotient inside it.
 function M.applyRoll(modified, roll)
   local d = max(0, int(modified, 0))
   if d < 2 then return max(1, d) end
   local r = int(roll, M.ROLL_MAX)
   if r < M.ROLL_MIN then r = M.ROLL_MIN end
   if r > M.ROLL_MAX then r = M.ROLL_MAX end
-  return max(1, min(M.MAX_DAMAGE, floor(d * r / 100)))
+  return max(1, floor(d * r / 100))
+end
+
+-- DoubleDamage / BattleCommand_DoubleMinimizeDamage (effect_commands.asm:
+-- 5977-5987, 6515-6531): wCurDamage shifted left as a 16-bit pair, a carry
+-- out pinning it at $ffff.
+function M.double(damage)
+  return min(M.WORD_MAX, max(0, int(damage, 0)) * 2)
 end
 
 -- attacker: { level, attack|atk, spa|spc, ... }
@@ -232,7 +253,7 @@ function M.compute(attacker, defender, move, opts)
   -- damage added to itself once per rage-counter step, x(count + 1), a carry
   -- out of the 16-bit sum pinning it at $ffff.
   local rage = max(0, int(opts.rageCount, 0))
-  if rage > 0 then d = min(65535, d * (rage + 1)) end
+  if rage > 0 then d = min(M.WORD_MAX, d * (rage + 1)) end
 
   result.modified = d
   result.minDamage = M.applyRoll(d, M.ROLL_MIN)

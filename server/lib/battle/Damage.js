@@ -35,10 +35,11 @@
  *     to where it started for every base value.
  *   * Immunity short-circuits. Nothing after a 0% runs, so the random roll
  *     never gets to drag the result back up to its own minimum of 1.
- *
- * The one Gen1 behaviour deliberately *not* modelled is the shortcut where a
- * damage of 1 skips the random roll; the fixture says so in its own notes, and
- * the min-1 clamp below is applied unconditionally instead.
+ *   * RandomizeDamage (core.asm :5420-5455) opens on `cp 2` / `ret c`: a hit
+ *     already at 0 or 1 keeps that number and draws no roll (`rolls`). A 0
+ *     that is not immunity -- a 0.25x matchup taking a 2 or 3 down to 0 --
+ *     is the caller's miss (AdjustDamageForMoveType sets wMoveMissed,
+ *     core.asm :5170-5176): `modified` 0 with `immune` false.
  *
  * Edge inputs match Lua's Damage.lua: missing level → 1, atk/def/typeEff
  * aliases, a bare number typeEffect, and nonsensical values coerced rather than
@@ -138,7 +139,16 @@ function applyTypeEffect(d, list) {
   return out;
 }
 
-function applyRoll(d, roll) {
+// Whether RandomizeDamage draws for this damage: `cp 2` / `ret c` returns
+// before the BattleRandom loop on a 0 or a 1.
+function rolls(modified) {
+  return Math.max(0, int(modified, 0)) >= 2;
+}
+
+// A 0 or a 1 comes back as it went in, with no roll applied (`rolls`).
+function applyRoll(modified, roll) {
+  const d = Math.max(0, int(modified, 0));
+  if (!rolls(d)) return d;
   return Math.max(1, idiv(d * int(roll, ROLL_MAX), ROLL_MAX));
 }
 
@@ -189,6 +199,7 @@ function compute(input) {
     crit,
     stab: !!src.stab,
     immune,
+    rolls: rolls(modified),
     minDamage: immune ? 0 : applyRoll(modified, ROLL_MIN),
     maxDamage: immune ? 0 : applyRoll(modified, ROLL_MAX),
   };
@@ -227,6 +238,7 @@ module.exports = {
   applyStab,
   applyTypeEffect,
   applyRoll,
+  rolls,
   idiv,
   int,
   percents,

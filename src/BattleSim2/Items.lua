@@ -130,9 +130,9 @@ M.MAIL = {
 -- ------------------------------------------------------------------
 
 -- CheckTurn's "Snore and Sleep Talk bypass sleep", and IgnoreSleepOnly's
--- `cp SNORE / cp SLEEP_TALK`: both compare the move id.  A Gold sheet names
--- neither move's effect (EFFECT_SNORE / EFFECT_SLEEP_TALK have no row in
--- Effects.idOf), so the id is the only handle the referee has, as the cart's.
+-- `cp SNORE / cp SLEEP_TALK`: both compare the move id, and so does this --
+-- EFFECT_SNORE has its own effect id now (Effects.SNORE, its flinch), but
+-- EFFECT_SLEEP_TALK has none, and the cart asks the id either way.
 M.SLEEP_BYPASS = { SNORE = true, SLEEP_TALK = true }
 
 -- BattleCommand_Thief, the `thief` command in the Thief script.  Same reason:
@@ -142,36 +142,37 @@ M.THIEF = "THIEF"
 -- King's Rock (BattleCommand_HeldFlinch) only runs inside the move scripts
 -- that hold a `kingsrock` command (data/moves/effects.asm, identical in
 -- pokegold).  A Gold sheet numbers a move's effect through Effects.idOf, which
--- folds Crystal's EFFECT_* names onto this referee's 0..86 ids and every name
--- with no handler onto 0, so the list is kept in those ids:
+-- folds Crystal's EFFECT_* names onto this referee's 0..86 ids, gives the
+-- Gold-native scripts their own (87..), and folds every name with no handler
+-- onto 0, so the list is kept in those ids:
 --
 --    0 EFFECT_NORMAL_HIT (and every unmapped hit, below)   3 LEECH_HIT
 --    7 SELFDESTRUCT   16 PAY_DAY        17 ALWAYS_HIT       26 BIDE
 --   27 RAMPAGE        29 MULTI_HIT      39 RAZOR_WIND / SOLARBEAM /
---   SKULL_BASH / SKY_ATTACK              40 SUPER_FANG       41 STATIC_DAMAGE /
+--   SKULL_BASH                           40 SUPER_FANG       41 STATIC_DAMAGE /
 --   LEVEL_DAMAGE / PSYWAVE               43 FLY              44 DOUBLE_HIT
 --   45 JUMP_KICK      48 RECOIL_HIT     77 POISON_MULTI_HIT  81 RAGE
+--   96 SNORE (`flinchtarget`, then `kingsrock`)              101 SKY_ATTACK
 --
--- Every other mapped id is a script with no `kingsrock` (the status hits, the
--- stat-down hits, FLINCH_HIT, OHKO, TRAP_TARGET, HYPER_BEAM, DREAM_EATER and
--- the non-damaging effects).  Twineedle's and Skull Bash's scripts run
--- `kingsrock` before their last command rather than as it, which is still a
--- run.  Id 0 is mixed on the sheet: of the damaging moves whose Crystal effect
--- folds to it, these run no `kingsrock` and are named by move id -- Gust,
--- Stomp, Twister, Earthquake, Thunder, Future Sight (their own scripts), Tri
--- Attack, Flame Wheel, Sacred Fire, the Sp. Def / accuracy drop hits and the
--- stat-raising hits; every other one does (Thief, Snore, Quick Attack, Rollout,
--- Return, Hidden Power, Counter ...).
+-- Every other mapped id is a script with no `kingsrock`: the status hits, the
+-- stat-down hits, FLINCH_HIT, OHKO, TRAP_TARGET, HYPER_BEAM, DREAM_EATER, the
+-- non-damaging effects, and the Gold-native SP. DEF / ACCURACY drop hits, the
+-- stat-raising hits, FLAME WHEEL, SACRED FIRE, STOMP, TWISTER, THUNDER, TRI
+-- ATTACK, GUST and EARTHQUAKE -- which used to fold to 0 and be named here by
+-- move id.  Twineedle's and Skull Bash's scripts run `kingsrock` before their
+-- last command rather than as it, which is still a run.  Id 0 is mixed on the
+-- sheet: of the damaging moves whose effect still folds to it, FUTURE SIGHT
+-- runs no `kingsrock` and is named by move id; every other one does (Thief,
+-- Quick Attack, Rollout, Return, Hidden Power, Counter, Triple Kick, Beat Up
+-- ...).
 M.KINGS_ROCK_EFFECTS = {
   [0] = true, [3] = true, [7] = true, [16] = true, [17] = true, [26] = true,
   [27] = true, [29] = true, [39] = true, [40] = true, [41] = true, [43] = true,
   [44] = true, [45] = true, [48] = true, [77] = true, [81] = true,
+  [96] = true, [101] = true,
 }
 M.KINGS_ROCK_FOLDED_EXCEPTIONS = {
-  GUST = true, STOMP = true, THUNDER = true, EARTHQUAKE = true, PSYCHIC_M = true,
-  TRI_ATTACK = true, FLAME_WHEEL = true, MUD_SLAP = true, OCTAZOOKA = true,
-  STEEL_WING = true, SACRED_FIRE = true, METAL_CLAW = true, TWISTER = true,
-  CRUNCH = true, ANCIENTPOWER = true, SHADOW_BALL = true, FUTURE_SIGHT = true,
+  FUTURE_SIGHT = true,
 }
 
 -- ------------------------------------------------------------------
@@ -348,6 +349,23 @@ function M.sixteenth(maxHp)
   local b, c = floor(quarter / 256), quarter % 256
   if c == 0 then c = 1 end
   c = floor(c / 4)
+  if c == 0 then c = 1 end
+  return b * 256 + c
+end
+
+-- GetEighthMaxHP (core.asm:1844-1856) over the same GetQuarterMaxHP: the
+-- quarter's low byte c alone is halved -- "assumes nothing can have 1024 or
+-- more hp" -- and bumped to 1 when it is 0, b riding through as above.  Under
+-- 1024 HP that is max(1, floor(maxHp / 8)); from 1024 the high byte rides
+-- through, so 1024 HP saps 257 (b = 1, c = 0 -> 1 -> 0 -> 1).  LEECH SEED's
+-- sap (ResidualDamage) is this.
+function M.eighth(maxHp)
+  local n = int(maxHp, 0)
+  if n < 0 then n = 0 end
+  local quarter = floor((n % 65536) / 4)
+  local b, c = floor(quarter / 256), quarter % 256
+  if c == 0 then c = 1 end
+  c = floor(c / 2)
   if c == 0 then c = 1 end
   return b * 256 + c
 end

@@ -12,8 +12,9 @@
  *
  * Sheet stats are atk/def/spe/spa/spd (Sp.Def); legacy spd+spc still accepted
  * on ingest. Damage/crit/accuracy/status draws use Gen2 rules, and the held
- * items, obedience, Thief and Rage follow pokecrystal (the Lua header cites
- * them).
+ * items, obedience, Thief, Rage, the Gold-native secondary effects
+ * (Effects.js 87..), traps, rampages, Pay Day, Mirror Move, Leech Seed and the
+ * damage tail follow pokecrystal (the Lua header cites them).
  *
  * **The RNG order is the contract.** The Lua twin has to consume draws at
  * exactly the same points or the same seed produces a different fight, so every
@@ -32,17 +33,23 @@
  *      it;
  *   3. the obedience bytes of a traded monster over its badge cap, on a
  *      `badgeRules` seat (`_obey`, each only when reached);
- *   4. per move that is actually used: accuracy byte, multihit-count byte
- *      (TWO_TO_FIVE only), crit byte, damage roll, one Focus Band byte per hit
- *      on a holder, side-chance byte (a hit that reached the HP, or one no
- *      substitute stood in front of), the computer's StatDown byte, the King's
- *      Rock byte, in that order, and none of them drawn when an earlier step
- *      ended the move (a missed move draws no crit byte). The StatDown byte
- *      (BattleCommand_StatDown's `.ComputerMiss`, Effects.statDownGate) is a
- *      side b seat's in a fight against the computer, for a stat-down move --
+ *   4. per move that is actually used: a rampage's confusion byte (its last
+ *      turn) or THRASH's turn-count byte (its first, ahead of `checkhit`); the
+ *      accuracy byte; the `effectchance` byte right after it, hit or miss, for
+ *      a script that runs one there and no substitute standing
+ *      (Effects.drawsEffectChance -- on a FLY / DIG miss too); then per hit
+ *      the crit byte, the damage roll and a Focus Band byte on a holder,
+ *      MULTI_HIT's count byte (or two) after the first hit when the target
+ *      still stands; then the move's tail -- DEFENSE_DOWN_HIT's second
+ *      `effectchance` byte, the computer's StatDown byte, TRI ATTACK's own
+ *      `effectchance` byte and its loop's bytes, the confusion side effect's
+ *      turn byte, TRAP_TARGET's count byte -- and the King's Rock byte, in
+ *      that order, none of them drawn when an earlier step ended the move. The
+ *      StatDown byte (Effects.statDownGate) is a side b seat's in a fight
+ *      against the computer, for a stat-down move but MUD-SLAP / OCTAZOOKA --
  *      a primary one right after its accuracy byte, hit or missed
- *      (`_statDownAfterMiss`), a *DownHit after its side-chance byte, through
- *      a substitute too -- and never into Mist or at -6.
+ *      (`_statDownAfterMiss`), a *DownHit in its tail, through a substitute
+ *      too -- and never into Mist or at -6.
  *
  * The damage roll is drawn even when the hit turns out to be an immunity,
  * because in the Lua the roll is an argument to `Damage.compute` and arguments
@@ -84,9 +91,10 @@
  *     concede, coop_npc refuses without finishing.
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
  *     ItemEffects); unknown ids say "But it failed" and still spend the turn.
- *     Bags are client claims (sheet trust locked). Forced lock-in injects on
- *     openTurn (trapper continue anim + residual; no menu); forced-only turns
- *     defer to the next tick.
+ *     Bags are client claims (sheet trust locked). Forced lock-in (recharge,
+ *     a charge's release, a rampage, Bide) injects on openTurn; a trap is none
+ *     on Gold (the wrapped seat is asked and refused a switch, HandleWrap's
+ *     sixteenth is the residual); forced-only turns defer to the next tick.
  *   * *Metronome* picks from host-uploaded metronomePool on the ruleset.
  *   * *Physical / Special* via host-uploaded specialTypes (Gen1 type categories).
  *   * *Type names* ride on the ruleset as `typeIds`, the chart's axis in
@@ -519,10 +527,10 @@ function copyMon(raw, fallback) {
   }
 
   let trapped = null;
+  // A wrap the sheet carries: its HandleWrap count and its trapper's seat.
   if (isTable(raw.trapped)) {
     trapped = {
       turns: Math.max(0, int(raw.trapped.turns, 0)),
-      damage: Math.max(0, int(raw.trapped.damage, 0)),
       fromSlot: int(raw.trapped.fromSlot, null),
     };
   }
@@ -598,7 +606,6 @@ function copyMon(raw, fallback) {
     invulnerable: raw.invulnerable === true,
     mustRecharge: raw.mustRecharge === true,
     trapped,
-    trapping: null,
     thrashing,
     raging: raw.raging === true,
     rageCounter: Math.max(0, Math.min(255, int(raw.rageCounter, 0))),
@@ -683,6 +690,25 @@ function partyIndexOf(fighter, wireSlot) {
 
 function hasType(mon, typeId) {
   return mon.types.includes(typeId);
+}
+
+// CheckUserMove: whether the user already knows a move, by id.
+function knowsMove(mon, move) {
+  const key = Effects.moveKey(move);
+  for (const m of mon.moves) {
+    if (Effects.moveKey(m) === key) return true;
+  }
+  return false;
+}
+
+// TrapTarget's line, by the trapping move's id (`.Traps`); a move the table
+// does not name gets FIRE SPIN's.
+function trapLine(move, user, target) {
+  const key = Effects.moveKey(move);
+  if (key === 'BIND') return `${user.species} used BIND on ${target.species}`;
+  if (key === 'WRAP') return `${target.species} was WRAPPED by ${user.species}`;
+  if (key === 'CLAMP') return `${target.species} was CLAMPED by ${user.species}`;
+  return `${target.species} was trapped`;
 }
 
 function allPpEmpty(mon) {
@@ -828,6 +854,9 @@ class Battle {
       a: { lightScreen: 0, reflect: 0 },
       b: { lightScreen: 0, reflect: 0 },
     };
+    // wPayDayMoney: the coins every PAY DAY that landed scattered, whoever
+    // used it (BattleCommand_PayDay); see `_payDayOutcome`.
+    this.payDay = 0;
     this.result = null;
   }
 
@@ -1048,9 +1077,11 @@ class Battle {
     return true;
   }
 
-  // Inject forced choices for charge release, recharge skip, thrash repeat,
-  // and trap lock-in. Gen1 trapping: victim can't move; user stays locked (no
-  // menu) while residual damage (first-hit store) ticks — not a re-rolled fight.
+  // Inject forced choices for charge release, recharge skip, Bide and the
+  // rampage's next turns (CheckPlayerLockedIn). A trap is not one on Gold: a
+  // wrapped monster picks its moves (wPlayerWrapCount only closes switching
+  // and running, `_normaliseChoice`) and its trapper is free (`_residualDamage`
+  // holds HandleWrap).
   _fillForcedChoices() {
     for (const fighter of this.fighters) {
       if (fighter.choice !== null && fighter.choice !== undefined) continue;
@@ -1094,34 +1125,6 @@ class Battle {
             });
           }
         }
-        continue;
-      }
-
-      if (mon.trapped && mon.trapped.turns > 0) {
-        this._say(`${mon.species} can't move`);
-        fighter.forced = true;
-        fighter.choice = { action: 'skip' };
-        this._emit('chose', {
-          slot: fighter.slot, side: fighter.side, text: fighter.name,
-        });
-        continue;
-      }
-
-      if (mon.trapping && mon.trapping.turns > 0) {
-        // Cartridge lock-in: no menu, residual still deals stored damage. Emit
-        // continue narration + anim so the screen shows the trap going on —
-        // do not re-enter _useMove (that would re-roll damage).
-        const move = mon.moves[mon.trapping.moveIndex - 1];
-        const moveId = (move && move.id) || 'attack';
-        this._say(`${mon.species}'s ${moveLabel(move, 'attack')} continues`);
-        this._emit('anim', {
-          slot: fighter.slot, side: fighter.side, text: moveId,
-        });
-        fighter.forced = true;
-        fighter.choice = { action: 'skip' };
-        this._emit('chose', {
-          slot: fighter.slot, side: fighter.side, text: fighter.name,
-        });
         continue;
       }
 
@@ -1191,8 +1194,16 @@ class Battle {
 
     const mon = activeMon(fighter);
     if (!mon) return null;
+    // wPlayerWrapCount: a monster a trapping move holds can be neither
+    // recalled (`.check_trapped`) nor run from a wild fight (`.cant_escape`).
+    // Refused rather than filed, as the menu refuses it; conceding a link
+    // fight is the mod's, not a run.
+    const wrapped = !!(mon.trapped && mon.trapped.turns > 0);
 
-    if (action === 'run') return { action: 'run' };
+    if (action === 'run') {
+      if (wrapped && Effects.teleportRunAllowed(this.mode)) return null;
+      return { action: 'run' };
+    }
 
     if (action === 'item') {
       const item = str(choice.item);
@@ -1231,6 +1242,7 @@ class Battle {
     }
 
     if (action === 'switch') {
+      if (wrapped) return null;
       const slot = int(choice.slot, null);
       if (slot === null) return null;
       const target = partyIndexOf(fighter, slot);
@@ -1320,11 +1332,10 @@ class Battle {
       // only hand the seat a second way to hold the fight open.
       if (this.phase === 'replace') return false;
       if (fighter.choice === null) return false;
-      // A referee-filled answer is not the player's to take back.  Trap
-      // lock-in, recharge, Bide, thrash and a charge release all fill the seat
-      // at `_openTurn`; without this a client could cancel out of a Wrap and
-      // switch away, and on a turn where *every* seat is forced -- which is
-      // exactly what a trap looks like -- `_openTurn` left no deadline, so the
+      // A referee-filled answer is not the player's to take back. Recharge,
+      // Bide, a rampage and a charge release all fill the seat at `_openTurn`;
+      // without this a client could cancel out of a lock-in, and on a turn
+      // where *every* seat is forced `_openTurn` left no deadline, so the
       // cleared choice would hang the fight with nothing to time it out.
       if (fighter.forced) return false;
       this._emit('unchose', {
@@ -1508,12 +1519,9 @@ class Battle {
         };
       }
     }
-    if (mon.trapped && mon.trapped.turns > 0) {
-      return { action: 'skip' };
-    }
-    if (mon.trapping && mon.trapping.turns > 0) {
-      return { action: 'skip' };
-    }
+    // A wrapped monster fights on but cannot switch (`_normaliseChoice`), so
+    // none of the retreats below is open to it.
+    const canSwitch = !(mon.trapped && mon.trapped.turns > 0);
     if (mon.thrashing && mon.thrashing.turns > 0) {
       const foe = this._autoTarget(fighter);
       if (foe) {
@@ -1552,13 +1560,13 @@ class Battle {
     const weSlower = this._speedOf(fighter, mon) < this._speedOf(foe, defender);
 
     // Critical HP: SE retreat (heal already tried via bag).
-    if (mon.hp * 4 <= mon.maxHp) {
+    if (canSwitch && mon.hp * 4 <= mon.maxHp) {
       const se = this._bestSeBench(fighter, defender);
       if (se) return { action: 'switch', slot: se };
     }
 
     // Behind a boosted / subbed foe at mid-low HP: prefer an SE bench mon.
-    if ((foeBoosted || foeSub) && mon.hp * 2 <= mon.maxHp) {
+    if (canSwitch && (foeBoosted || foeSub) && mon.hp * 2 <= mon.maxHp) {
       const se = this._bestSeBench(fighter, defender);
       if (se) return { action: 'switch', slot: se };
     }
@@ -1583,7 +1591,7 @@ class Battle {
       }
     }
 
-    if (!pick || pickEff === 0) {
+    if (canSwitch && (!pick || pickEff === 0)) {
       const se = this._bestSeBench(fighter, defender);
       if (se) return { action: 'switch', slot: se };
     }
@@ -1861,6 +1869,10 @@ class Battle {
   // Metronome's priority whatever it calls.
   _priorityOf(fighter, mon) {
     const choice = fighter.choice;
+    // A lock-in's move first (`_lockedMove`), as GetMovePriority reads
+    // wCurPlayerMove.
+    const locked = this._lockedMove(fighter, mon);
+    if (locked) return Effects.movePriority(locked);
     if (allPpEmpty(mon)) return Effects.movePriority(STRUGGLE);
     return Effects.movePriority(mon.moves[(choice ? choice.move : 0) - 1]);
   }
@@ -2032,6 +2044,13 @@ class Battle {
         amount = band.amount;
         banded = band.held;
       }
+    }
+    // ApplyDamage's `.update_damage_taken`, between the band and the HP: a
+    // biding monster with no substitute adds the hit's whole wCurDamage to
+    // what BIDE releases, a 16-bit sum pinned at $ffff. Only a move's hit.
+    if (mon.bide && int(mon.substitute, 0) <= 0) {
+      mon.bide.stored = Math.min(Damage.WORD_MAX,
+        mon.bide.stored + Math.max(0, int(amount, 0)));
     }
     this._damage(fighter, mon, amount, null);
     if (banded) {
@@ -2232,6 +2251,7 @@ class Battle {
   // `.EndDisobedience`.
   _disobeyed(fighter, mon) {
     mon.lastMoveIndex = 0;
+    mon.lastCounterMove = null;
     return 'stop';
   }
 
@@ -2409,7 +2429,6 @@ class Battle {
           mon.raging = false;
           mon.rageCounter = 0;
           mon.trapped = null;
-          mon.trapping = null;
           mon.bide = null;
           mon.substitute = 0;
           mon.mist = false;
@@ -2418,6 +2437,11 @@ class Battle {
           mon.xAccuracy = false;
           mon.leechSeed = null;
           mon.disable = null;
+          mon.minimized = false;
+          // NewBattleMonStatus / NewEnemyMonStatus: a send-out clears BOTH
+          // sides' last counter moves.
+          mon.lastCounterMove = null;
+          this._forgetFoesLastMoves(fighter);
           this._clearTrapsFrom(fighter.slot);
           // `mon` is the index the referee just fielded -- `choice.slot`,
           // already normalised to a party position by `_normaliseChoice`. This
@@ -2444,11 +2468,21 @@ class Battle {
     }
   }
 
+  // A send-out or a faint at `slot` ends the wraps its monster held (every
+  // send-out clears both wrap counts on the cart).
   _clearTrapsFrom(slot) {
     for (const fighter of this.fighters) {
       const mon = activeMon(fighter);
       if (mon && mon.trapped && mon.trapped.fromSlot === slot) mon.trapped = null;
-      if (mon && mon.trapping && mon.trapping.targetSlot === slot) mon.trapping = null;
+    }
+  }
+
+  // The other half of that send-out: the seats across the field forget what
+  // they last used (wLastEnemyCounterMove / wLastPlayerCounterMove).
+  _forgetFoesLastMoves(fighter) {
+    for (const foe of this._foes(fighter)) {
+      const mon = activeMon(foe);
+      if (mon) mon.lastCounterMove = null;
     }
   }
 
@@ -2597,6 +2631,7 @@ class Battle {
             const sheet = Effects.caughtSheet(target);
             if (finish && sheet) finish.caught = sheet;
             if (finish) finish.catcher = fighter.playerId;
+            if (fighter.side === BADGE_SIDE) this._payDayOutcome(finish);
           } else {
             this._say('It broke free');
           }
@@ -2933,7 +2968,12 @@ class Battle {
   // do. CheckTurn's order (the Lua twin cites the lines): sleep, freeze, the
   // flinch (`.not_frozen`), confusion, the disabled move, and paralysis last.
   _runGates(fighter, mon, selected) {
-    if (mon.status === 'sleep' || mon.status === 'freeze') {
+    // CheckTurn's `.not_asleep`: a frozen monster that selected FLAME WHEEL or
+    // SACRED FIRE (by move id) skips the freeze check, no byte and no line;
+    // the move's own `defrost` thaws it after its hit (`_useMove`).
+    const thawing = mon.status === 'freeze' && !!selected
+      && has(Effects.FREEZE_BYPASS, Effects.moveKey(selected));
+    if ((mon.status === 'sleep' || mon.status === 'freeze') && !thawing) {
       const asleep = mon.status === 'sleep';
       if (!this._statusGate(fighter, mon)) {
         // "Snore and Sleep Talk bypass sleep": told it is fast asleep, the
@@ -3018,7 +3058,8 @@ class Battle {
     }
   }
 
-  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId) {
+  // `move` is the sheet move in use: its id is MinimizeDropSub's `cp MINIMIZE`.
+  _applyPrimary(fighter, mon, targetFighter, targetMon, moveIndex, effectId, move) {
     const before = { status: targetMon.status, confusion: targetMon.confusion };
     const result = Effects.applyPrimary({
       effectId,
@@ -3031,6 +3072,7 @@ class Battle {
       statusToWire: STATUS_TO_WIRE,
       userScreens: this.screens[fighter.side],
       computerMover: isComputerSeat(this.mode, fighter),
+      moveKey: Effects.moveKey(move),
     });
     if (result.nothing) this._say('But nothing happened');
     for (const text of result.messages || []) this._say(text);
@@ -3093,6 +3135,10 @@ class Battle {
       poisonType: this.poisonType,
       normalType: this.normalType,
       computerMover: isComputerSeat(this.mode, fighter),
+      // The bytes the effect draws itself (TRI ATTACK, DEFENSE_DOWN_HIT's
+      // second `effectchance`), and RaiseStat's 999 test's badges.
+      chance: move ? move.chance : undefined,
+      userBadges: fighter.badges,
     });
     for (const text of result.messages || []) this._say(text);
     for (const entry of result.events || []) {
@@ -3118,6 +3164,199 @@ class Battle {
     }
   }
 
+  // usedmovetext (UsedMoveText): the move an action is now using becomes its
+  // user's LAST_MOVE / LAST_COUNTER_MOVE -- what a foe's MIRROR MOVE copies.
+  // A called move records itself; Struggle is kept as the STRUGGLE sentinel.
+  // Cleared by ClearLastMove, `.EndDisobedience` and every send-out. The Lua
+  // twin carries the long note.
+  _recordLastMove(mon, move) {
+    mon.lastCounterMove = move === STRUGGLE ? STRUGGLE : copyMove(move);
+  }
+
+  // The move a lock-in resolves to (CheckPlayerLockedIn's `.quit`): a charge's
+  // release and a rampage's next turn re-use the move that started them -- the
+  // called one, when METRONOME or MIRROR MOVE called it -- never Struggle.
+  _lockedMove(fighter, mon) {
+    // A BIDE a METRONOME / MIRROR MOVE called is released as BIDE.
+    if (mon.bide && mon.bide.move && fighter.choice && fighter.choice.bideRelease) {
+      return mon.bide.move;
+    }
+    const charge = mon.charging;
+    if (charge && Effects.isCharge(charge.effect)) {
+      return charge.move || mon.moves[charge.moveIndex - 1] || null;
+    }
+    const rampage = mon.thrashing;
+    if (rampage && rampage.turns > 0) {
+      return rampage.move || mon.moves[rampage.moveIndex - 1] || null;
+    }
+    return null;
+  }
+
+  // CantMove: every CheckTurn stop clears SUBSTATUS_BIDE, _RAMPAGE and
+  // _CHARGED, and a FLY / DIG user comes back down.
+  _cantMove(mon) {
+    mon.bide = null;
+    mon.thrashing = null;
+    if (mon.charging && Effects.isCharge(mon.charging.effect)) {
+      mon.charging = null;
+      mon.invulnerable = false;
+    }
+  }
+
+  // The move a vanished monster is charging, upper-cased ("FLY" / "DIG"), or
+  // null when it is on the field.
+  _vanishedInto(mon) {
+    if (!mon.invulnerable || !mon.charging) return null;
+    const charge = mon.charging;
+    let id = charge.moveId;
+    if (!id && charge.move) id = charge.move.id;
+    if (!id) {
+      const slot = mon.moves && mon.moves[charge.moveIndex - 1];
+      id = slot ? slot.id : null;
+    }
+    return Effects.moveKey(id);
+  }
+
+  // Whether this hit's doubling command fires (Effects.DOUBLE_VS_*).
+  _doublesDamage(effectId, defender) {
+    if (Effects.DOUBLE_VS_MINIMIZED[effectId]) return defender.minimized === true;
+    if (Effects.DOUBLE_VS_FLYING[effectId]) return this._vanishedInto(defender) === 'FLY';
+    if (Effects.DOUBLE_VS_UNDERGROUND[effectId]) return this._vanishedInto(defender) === 'DIG';
+    return false;
+  }
+
+  // BattleCommand_EffectChance where the script has one right after
+  // `checkhit` (Effects.drawsEffectChance): drawn hit or miss, skipped with no
+  // byte by a substitute standing before the hit.
+  _effectChance(move, effectId, behindSub) {
+    if (!Effects.drawsEffectChance(effectId, move)) return false;
+    return Effects.effectChance(this.rng, move.chance, behindSub) === true;
+  }
+
+  // One pass of the damage commands (`critical` ... `damagevariation` and the
+  // doubling after it), the pass MultiHit, DoubleHit and PoisonMultiHit run
+  // again for every hit. Draws the crit byte and then the damage roll, one
+  // each whatever the outcome.
+  _hitDamage(fighter, mon, target, defender, move, effectId, struggling, isFixed) {
+    // Gen2 crit ladder (not Gen1 base-Speed threshold), with the attacker's
+    // item: Scope Lens adds a level; Lucky Punch / Stick on the battle species
+    // set it to 2 outright (Crit.level).
+    const critOpts = {
+      focusEnergy: mon.focusEnergy,
+      highCritMove: move.highCrit === true,
+      scopeLens: Items.holds(mon, Items.CRITICAL_UP),
+      speciesItemBonus: Items.critSpeciesItem(this._battleSpecies(mon), mon.heldItem),
+    };
+    const critLevel = Crit.level(critOpts);
+    const critChance = Crit.chance(critLevel);
+    const isCrit = Crit.check({
+      criticalLevel: critLevel,
+      roll: this.rng.below(critChance),
+    }).isCrit;
+    // Struggle skips BattleCommand_Stab's matchup loop with the rest of it, so
+    // it is neutral against everything, a Ghost included.
+    const percents = struggling ? [100] : this._typePercents(move.type, defender);
+    const out = { damage: 0, crit: isCrit, percents };
+
+    let immune = false;
+    for (const pct of percents) {
+      if (pct <= 0) { immune = true; break; }
+    }
+
+    if (isFixed) {
+      this.rng.damageRoll();
+      if (immune) { out.immune = true; return out; }
+      const fixed = Effects.fixedDamage({
+        effectId,
+        userMon: mon,
+        targetMon: defender,
+        power: move.power,
+        userSpeed: this._speedOf(fighter, mon),
+        foeSpeed: this._speedOf(target, defender),
+      });
+      if (fixed === null) { out.failed = true; return out; }
+      out.damage = fixed;
+      return out;
+    }
+
+    const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
+    const atkKey = isSpecial ? 'spa' : 'atk';
+    const defKey = isSpecial ? 'spd' : 'def';
+
+    // PlayerAttackDamage / EnemyAttackDamage (pokecrystal engine/battle/
+    // effect_commands.asm:2532-2612, 2777-2855), in the cart's order.
+    //
+    // 1. The defender's battle stat (stage, its seat's badge), doubled when
+    //    its SIDE has the screen up -- Reflect for a physical hit, Light
+    //    Screen for a special one -- as a 16-bit value, before any fold.
+    let defense = this._battleStat(target, defender, defKey);
+    if (this._screenUp(target.side, isSpecial)) defense *= 2;
+    // 2. The attacker's battle stat: stage, its seat's badge, burn.
+    let attack = this._battleStat(fighter, mon, atkKey);
+    // 3. CheckDamageStatsCritical (:2660-2700): a crit keeps the pair above
+    //    only when the defender's stage is strictly LOWER than the
+    //    attacker's; otherwise it reads the unmodified stats -- no stage, no
+    //    badge, no burn and no screen.
+    if (isCrit && !(Effects.clampStage(defender.stages[defKey])
+                    < Effects.clampStage(mon.stages[atkKey]))) {
+      attack = Math.max(1, int(mon.stats[atkKey], 1));
+      defense = Math.max(1, int(defender.stats[defKey], 1));
+    }
+    // 4. ThickClubBoost (physical) / LightBallBoost (special) double the
+    //    attack here, still 16-bit, which is why they can wrap past 1024
+    //    when the fold below makes one pass (Items.speciesAttack).
+    attack = Items.speciesAttack(mon, isSpecial, attack);
+    // 5. TruncateHL_BC: both folded into a byte -- one pass in a link battle
+    //    and on Gold / Silver, a loop on Crystal otherwise (K6).
+    const folded = Damage.truncateStats(attack, defense, this._onePassTruncate());
+    // 6. DittoMetalPowder on the folded pair (Items.metalPowder), and then
+    //    BattleCommand_DamageCalc halves the defense for Explosion /
+    //    Self-Destruct, at least 1 (:2904-2913).
+    const powdered = Items.metalPowder(defender, folded.attack, folded.defense);
+    attack = powdered.attack;
+    defense = powdered.defense;
+    if (Effects.isExplode(effectId)) {
+      defense = Math.max(1, Math.floor(defense / 2));
+    }
+
+    const roll = this.rng.damageRoll();
+    const result = Damage.compute({
+      level: mon.level,
+      attack,
+      spa: attack,
+      defense,
+      spd: defense,
+      power: move.power,
+      crit: isCrit,
+      // Struggle takes none of BattleCommand_Stab: no STAB, no badge type
+      // boost (its `cp STRUGGLE / ret z` comes before DoBadgeTypeBoosts),
+      // and the neutral `percents` above.
+      stab: !struggling && hasType(mon, move.type),
+      typeEffect: percents,
+      roll,
+      physical: !isSpecial,
+      // DamageCalc's type-boost item scan, ahead of the crit x2: NORMAL for
+      // Struggle, whose row still says so.
+      itemBoostPercent: this._typeBoostOf(mon, move),
+      //
+      // The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
+      // this is the cart's "player's turn only" without asking whose turn.
+      badgeTypeBoost: !struggling
+        && Effects.badgeTypeBoost(this._typeIdOf(move.type), fighter.badges),
+      // BattleCommand_RageDamage, Rage's own `ragedamage`: the user's rage
+      // counter (`_buildRage`) multiplies the damage, after STAB and before
+      // the variation.
+      rageCount: Effects.isRage(effectId) ? mon.rageCounter : 0,
+    });
+
+    if (result.immune) { out.immune = true; return out; }
+    let damage = result.damage === null || result.damage === undefined ? 0 : result.damage;
+    // The doubling commands sit after `damagevariation` in their scripts.
+    if (this._doublesDamage(effectId, defender)) damage = Damage.double(damage);
+    out.damage = damage;
+    return out;
+  }
+
   _useMove(fighter, mon, opts = {}) {
     const choice = fighter.choice;
     // A move Metronome or Mirror Move called is not the turn's own move. The
@@ -3127,17 +3366,31 @@ class Battle {
     // move, not a state of the user's PP, so the call that spent the last PP
     // takes no recoil.
     const called = opts.moveOverride !== undefined && opts.moveOverride !== null;
-    // The move this action resolves to. Every slot empty -- an empty sheet
-    // (`moves.length === 0`) included -- is the synthetic STRUGGLE; returning
-    // on the missing slot used to eat that turn instead.
+    // The move this action resolves to: a lock-in's (`_lockedMove`), else the
+    // synthetic STRUGGLE when every slot is empty -- an empty sheet included --
+    // else the chosen slot.
     let move = opts.moveOverride;
-    if (!called) move = allPpEmpty(mon) ? STRUGGLE : mon.moves[choice.move - 1];
+    let locked = null;
+    if (!called) {
+      locked = this._lockedMove(fighter, mon);
+      if (locked) {
+        move = locked;
+      } else if (allPpEmpty(mon)) {
+        move = STRUGGLE;
+      } else {
+        move = mon.moves[choice.move - 1];
+      }
+    }
     if (!move) return;
     const struggling = move === STRUGGLE;
 
-    // A move used in place of a disobeyed one runs no CheckTurn of its own.
+    // A move used in place of a disobeyed one runs no CheckTurn of its own. A
+    // stop is CantMove's (`_cantMove`).
     const disobeyed = opts.disobeyed === true;
-    if (!called && !disobeyed && !this._runGates(fighter, mon, move)) return;
+    if (!called && !disobeyed && !this._runGates(fighter, mon, move)) {
+      this._cantMove(mon);
+      return;
+    }
 
     // `checkobedience`, for the move the monster chose (`_obey`). A move it
     // uses instead is used in full under "used instead,", and then forgotten
@@ -3151,6 +3404,7 @@ class Battle {
         this._useMove(fighter, mon, { disobeyed: true });
         fighter.choice = saved;
         mon.lastMoveIndex = 0;
+        mon.lastCounterMove = null;
         return;
       }
     }
@@ -3171,21 +3425,46 @@ class Battle {
     const effectId = int(move.effect, 0);
     const releasing = mon.charging !== null && mon.charging !== undefined
       && Effects.isCharge(mon.charging.effect);
+    // A rampage's next turn: the locked move again, no PP (DoTurn's
+    // SUBSTATUS_RAMPAGE mask).
+    const rampaging = locked !== null && !releasing
+      && mon.thrashing !== null && mon.thrashing !== undefined;
     const mirrorCopy = opts.mirrorCopy === true;
 
-    if (!struggling && move.pp > 0 && !releasing && !choice.bideRelease) {
+    if (!struggling && move.pp > 0 && !releasing && !rampaging && !choice.bideRelease) {
       move.pp -= 1;
       // FIGHT reads the uploaded sheet. Publish whenever PP actually moved
       // (Transform/Mimic already emit via movesChanged). Skip an override
       // copy -- Metronome/Mirror already spent the real slot on the first call.
       if (!opts.moveOverride) this._emitMoves(fighter, mon, fighter.active);
     }
+
+    // BattleCommand_CheckRampage on a rampage's next turn: the count goes
+    // down, and when it runs out the rampage ends and the user is confused for
+    // 2-3 turns -- before the move it still makes this turn.
+    if (rampaging) {
+      const rampage = mon.thrashing;
+      rampage.turns -= 1;
+      if (rampage.turns <= 0) {
+        mon.thrashing = null;
+        const turns = Effects.rampageConfusion(this.rng);
+        mon.confusion = turns;
+        fighter.confuseCount = turns;
+        this._say(`${mon.species} became confused`);
+        this._emit('status', {
+          slot: fighter.slot, side: fighter.side, confused: 1,
+          text: `${mon.species} became confused`,
+        });
+      }
+    }
+
     const chargingUp = Effects.isCharge(effectId) && !mon.charging;
     this._emit('anim', {
       slot: fighter.slot, side: fighter.side, text: move.id,
       amount: chargingUp ? 1 : undefined,
     });
     this._say(`${mon.species}${disobeyed ? ' used instead, ' : ' used '}${moveLabel(move)}`);
+    this._recordLastMove(mon, move);
 
     if (choice.bideRelease && mon.bide) {
       const stored = mon.bide.stored;
@@ -3195,69 +3474,39 @@ class Battle {
         this._markLastMove(mon, choice.move);
         return;
       }
-      // Bide's script releases through applydamage, so a Focus Band answers
-      // it, then `checkfaint`, `buildopponentrage` and `kingsrock`.
-      this._strike(target, defender, 2 * stored);
+      // BattleCommand_StoreEnergy's release: the damage taken doubled as a
+      // 16-bit pair, a carry pinning $ffff, through applydamage, then
+      // `checkfaint`, `buildopponentrage` and `kingsrock`.
+      this._strike(target, defender, Math.min(Damage.WORD_MAX, 2 * stored));
       this._buildRage(defender);
       this._kingsRock(mon, move, effectId, defender);
       this._markLastMove(mon, choice.move);
       return;
     }
 
-    // Charge / Fly: first turn sets state and ends; second turn releases.
-    if (Effects.isCharge(effectId) && !mon.charging) {
-      mon.charging = {
-        moveIndex: choice.move,
-        effect: effectId,
-        targetSlot,
-        moveId: move.id,
-      };
-      if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
-      this._say(Effects.chargeMessage(mon, effectId, move.id));
-      this._markLastMove(mon, choice.move);
-      return;
-    }
-
-    if (mon.charging && Effects.isCharge(mon.charging.effect)) {
-      mon.charging = null;
-      mon.invulnerable = false;
-    }
-
-    if (defender.invulnerable) {
-      let chargeMoveId = defender.charging && defender.charging.moveId;
-      if (!chargeMoveId && defender.charging) {
-        const charged = defender.moves && defender.moves[defender.charging.moveIndex - 1];
-        chargeMoveId = charged && charged.id;
-      }
-      if (!Effects.hitsInvulnerable(chargeMoveId, move)) {
-        this._say('But it failed');
-        this._statDownAfterMiss(fighter, defender, effectId);
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-        if (Effects.isJumpKick(effectId)) {
-          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
-        }
-        this._markLastMove(mon, choice.move);
-        return;
-      }
-    }
-
+    // BattleCommand_MirrorMove: ClearLastMove, then the opponent's
+    // LAST_COUNTER_MOVE -- failing when there is none or the user already
+    // knows it (CheckUserMove) -- used in full through ResetTurn.
     if (Effects.isMirrorMove(effectId) && !mirrorCopy) {
-      const lastIdx = int(defender.lastMoveIndex, 0);
-      if (lastIdx < 1 || !defender.moves[lastIdx - 1]) {
+      mon.lastCounterMove = null;
+      const copied = defender.lastCounterMove;
+      if (!copied || knowsMove(mon, copied)) {
         this._say('But it failed');
         this._markLastMove(mon, choice.move);
         return;
       }
       this._markLastMove(mon, choice.move);
       this._useMove(fighter, mon, {
-        moveOverride: copyMove(defender.moves[lastIdx - 1]),
+        moveOverride: copied === STRUGGLE ? STRUGGLE : copyMove(copied),
         mirrorCopy: true,
       });
       return;
     }
 
+    // BattleCommand_Metronome: ClearLastMove, then the pick.
     const metronomeCall = opts.metronomeCall === true;
     if (Effects.isMetronome(effectId) && !metronomeCall) {
+      mon.lastCounterMove = null;
       const pool = this.metronomePool;
       if (!pool || pool.length === 0) {
         this._say('But nothing happened');
@@ -3271,6 +3520,59 @@ class Battle {
         metronomeCall: true,
       });
       return;
+    }
+
+    // Charge / Fly: first turn sets state and ends; second turn releases.
+    if (Effects.isCharge(effectId) && !mon.charging) {
+      mon.charging = {
+        moveIndex: choice.move,
+        effect: effectId,
+        targetSlot,
+        moveId: move.id,
+        // The move a METRONOME or MIRROR MOVE called: the release next turn
+        // is that move (`_lockedMove`), not a second call.
+        move: called ? copyMove(move) : null,
+      };
+      if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
+      this._say(Effects.chargeMessage(mon, effectId, move.id));
+      this._markLastMove(mon, choice.move);
+      return;
+    }
+
+    if (mon.charging && Effects.isCharge(mon.charging.effect)) {
+      mon.charging = null;
+      mon.invulnerable = false;
+    }
+
+    // BattleCommand_Rampage, THRASH's `rampage` on its first turn, ahead of
+    // `checkhit` (so on a miss too): 1-2 more turns, the called move kept. "No
+    // rampage during Sleep Talk": a sleeping user starts none.
+    if (Effects.isThrash(effectId) && !mon.thrashing && !rampaging
+        && mon.status !== 'sleep') {
+      mon.thrashing = {
+        turns: Effects.rampageTurns(this.rng),
+        moveIndex: choice.move,
+        move: called ? copyMove(move) : null,
+      };
+    }
+
+    // `effectchance` reads the target's substitute before the hit can break it.
+    const subAtChance = (defender.substitute || 0) > 0;
+
+    if (defender.invulnerable) {
+      if (!Effects.hitsInvulnerable(this._vanishedInto(defender), move)) {
+        this._say('But it failed');
+        // `.FlyDigMoves` is one of `checkhit`'s misses: the `effectchance`
+        // after it still draws.
+        this._effectChance(move, effectId, subAtChance);
+        this._statDownAfterMiss(fighter, defender, effectId);
+        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+        if (Effects.isJumpKick(effectId)) {
+          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+        }
+        this._markLastMove(mon, choice.move);
+        return;
+      }
     }
 
     const alwaysHits = effectId === Effects.idOf('SWIFT_EFFECT')
@@ -3291,6 +3593,8 @@ class Battle {
       // X Accuracy never reach.
       brightPowder: powder.effect === Items.BRIGHTPOWDER ? powder.param : null,
     });
+    // The script's `effectchance`, right after `checkhit`, hit or miss.
+    const effectHit = this._effectChance(move, effectId, subAtChance);
     if (!shot.hit) {
       this._say(`${mon.species} missed`);
       this._statDownAfterMiss(fighter, defender, effectId);
@@ -3317,6 +3621,8 @@ class Battle {
           stored: 0,
           moveIndex: choice.move,
           targetSlot,
+          // A called BIDE releases as BIDE, not as a second call (`_lockedMove`).
+          move: called ? copyMove(move) : null,
         };
         this._say(`${mon.species} began storing energy`);
         this._markLastMove(mon, choice.move);
@@ -3337,7 +3643,7 @@ class Battle {
         return;
       }
       if (Effects.handlesPrimary(effectId)) {
-        this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
+        this._applyPrimary(fighter, mon, target, defender, choice.move, effectId, move);
       } else {
         this._say('But nothing happened');
       }
@@ -3354,189 +3660,82 @@ class Battle {
       }
     }
 
-    const hits = Effects.hitCount(effectId, this.rng);
-    // Gen2 crit ladder (not Gen1 base-Speed threshold), with the attacker's
-    // item: Scope Lens adds a level; Lucky Punch / Stick on the battle species
-    // set it to 2 outright (Crit.level).
-    const critOpts = {
-      focusEnergy: mon.focusEnergy,
-      highCritMove: move.highCrit === true,
-      scopeLens: Items.holds(mon, Items.CRITICAL_UP),
-      speciesItemBonus: Items.critSpeciesItem(this._battleSpecies(mon), mon.heldItem),
-    };
-    const critLevel = Crit.level(critOpts);
-    const critChance = Crit.chance(critLevel);
-    const isCrit = Crit.check({
-      criticalLevel: critLevel,
-      roll: this.rng.below(critChance),
-    }).isCrit;
-    // Struggle skips BattleCommand_Stab's matchup loop with the rest of it, so
-    // it is neutral against everything, a Ghost included.
-    const percents = struggling ? [100] : this._typePercents(move.type, defender);
-
-    let immune = false;
-    for (const pct of percents) {
-      if (pct <= 0) { immune = true; break; }
+    // The first pass of the damage commands; MultiHit, DoubleHit and
+    // PoisonMultiHit run another for each hit after it.
+    let struck = this._hitDamage(fighter, mon, target, defender, move, effectId,
+      struggling, isFixed);
+    if (struck.immune) {
+      this._say(`It doesn't affect ${defender.species}`);
+      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      if (Effects.isJumpKick(effectId)) {
+        this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+      }
+      this._markLastMove(mon, choice.move);
+      return;
     }
-
-    let damage = 0;
-    if (isFixed) {
-      if (immune) {
-        this.rng.damageRoll();
-        this._say(`It doesn't affect ${defender.species}`);
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-        if (Effects.isJumpKick(effectId)) {
-          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
-        }
-        this._markLastMove(mon, choice.move);
-        return;
-      }
-      const fixed = Effects.fixedDamage({
-        effectId,
-        userMon: mon,
-        targetMon: defender,
-        power: move.power,
-        userSpeed: this._speedOf(fighter, mon),
-        foeSpeed: this._speedOf(target, defender),
-      });
-      if (fixed === null) {
-        this.rng.damageRoll();
-        this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-        this._markLastMove(mon, choice.move);
-        return;
-      }
-      this.rng.damageRoll();
-      damage = fixed;
-    } else {
-      const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
-      const atkKey = isSpecial ? 'spa' : 'atk';
-      const defKey = isSpecial ? 'spd' : 'def';
-
-      // PlayerAttackDamage / EnemyAttackDamage (pokecrystal engine/battle/
-      // effect_commands.asm:2532-2612, 2777-2855), in the cart's order.
-      //
-      // 1. The defender's battle stat (stage, its seat's badge), doubled when
-      //    its SIDE has the screen up -- Reflect for a physical hit, Light
-      //    Screen for a special one -- as a 16-bit value, before any fold.
-      let defense = this._battleStat(target, defender, defKey);
-      if (this._screenUp(target.side, isSpecial)) defense *= 2;
-      // 2. The attacker's battle stat: stage, its seat's badge, burn.
-      let attack = this._battleStat(fighter, mon, atkKey);
-      // 3. CheckDamageStatsCritical (:2660-2700): a crit keeps the pair above
-      //    only when the defender's stage is strictly LOWER than the
-      //    attacker's; otherwise it reads the unmodified stats -- no stage, no
-      //    badge, no burn and no screen.
-      if (isCrit && !(Effects.clampStage(defender.stages[defKey])
-                      < Effects.clampStage(mon.stages[atkKey]))) {
-        attack = Math.max(1, int(mon.stats[atkKey], 1));
-        defense = Math.max(1, int(defender.stats[defKey], 1));
-      }
-      // 4. ThickClubBoost (physical) / LightBallBoost (special) double the
-      //    attack here, still 16-bit, which is why they can wrap past 1024
-      //    when the fold below makes one pass (Items.speciesAttack).
-      attack = Items.speciesAttack(mon, isSpecial, attack);
-      // 5. TruncateHL_BC: both folded into a byte -- one pass in a link battle
-      //    and on Gold / Silver, a loop on Crystal otherwise (K6).
-      const folded = Damage.truncateStats(attack, defense, this._onePassTruncate());
-      // 6. DittoMetalPowder on the folded pair (Items.metalPowder), and then
-      //    BattleCommand_DamageCalc halves the defense for Explosion /
-      //    Self-Destruct, at least 1 (:2904-2913).
-      const powdered = Items.metalPowder(defender, folded.attack, folded.defense);
-      attack = powdered.attack;
-      defense = powdered.defense;
-      if (Effects.isExplode(effectId)) {
-        defense = Math.max(1, Math.floor(defense / 2));
-      }
-
-      const roll = this.rng.damageRoll();
-      const result = Damage.compute({
-        level: mon.level,
-        attack,
-        spa: attack,
-        defense,
-        spd: defense,
-        power: move.power,
-        crit: isCrit,
-        // Struggle takes none of BattleCommand_Stab: no STAB, no badge type
-        // boost (its `cp STRUGGLE / ret z` comes before DoBadgeTypeBoosts),
-        // and the neutral `percents` above.
-        stab: !struggling && hasType(mon, move.type),
-        typeEffect: percents,
-        roll,
-        physical: !isSpecial,
-        // DamageCalc's type-boost item scan, ahead of the crit x2: NORMAL for
-        // Struggle, whose row still says so.
-        itemBoostPercent: this._typeBoostOf(mon, move),
-        //
-        // The attacker's own badges: a foe seat holds none (BADGE_SIDE), so
-        // this is the cart's "player's turn only" without asking whose turn.
-        badgeTypeBoost: !struggling
-          && Effects.badgeTypeBoost(this._typeIdOf(move.type), fighter.badges),
-        // BattleCommand_RageDamage, Rage's own `ragedamage`: the user's rage
-        // counter (`_buildRage`) multiplies the damage, after STAB and before
-        // the variation.
-        rageCount: Effects.isRage(effectId) ? mon.rageCounter : 0,
-      });
-
-      if (result.immune) {
-        this._say(`It doesn't affect ${defender.species}`);
-        if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
-        if (Effects.isJumpKick(effectId)) {
-          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
-        }
-        this._markLastMove(mon, choice.move);
-        return;
-      }
-      damage = result.damage === null || result.damage === undefined
-        ? 0 : result.damage;
+    if (struck.failed) {
+      this._say('But it failed');
+      if (Effects.isExplode(effectId)) this._faintUser(fighter, mon);
+      this._markLastMove(mon, choice.move);
+      return;
     }
 
     let effectiveness = 1;
-    for (const pct of percents) effectiveness = (effectiveness * pct) / 100;
-    if (isCrit && !isFixed) this._say('A critical hit');
-    if (effectiveness > 1) {
-      this._say("It's super effective");
-    } else if (effectiveness < 1) {
-      this._say("It's not very effective");
-    }
+    for (const pct of struck.percents) effectiveness = (effectiveness * pct) / 100;
 
-    // `effectchance` reads the target's substitute before the hit can break
-    // it (CheckSubstituteOpp): Thief asks this below.
-    const subAtChance = (defender.substitute || 0) > 0;
-    // MultiHit / DoubleHit / PoisonMultiHit run `checkfaint` and
-    // `buildopponentrage` inside their loop, once per hit; every other script
-    // once, after its own post-damage command (below).
+    // The hits: each its own `critical` / `damagevariation`, Focus Band roll,
+    // `checkfaint` and `buildopponentrage`; MULTI_HIT's count drawn after the
+    // first, the target still standing. `curDamage` is wCurDamage after the
+    // hit's `applydamage` -- 0 when a substitute took it -- which RECOIL reads.
     const multihit = Effects.isMultihit(effectId);
+    let hits = Effects.fixedHits(effectId);
     let totalDealt = 0;
-    for (let h = 0; h < hits; h += 1) {
-      if (defender.hp <= 0) break;
+    let curDamage = 0;
+    for (let index = 1; index <= hits; index += 1) {
+      if (index > 1) {
+        if (defender.hp <= 0) break;
+        struck = this._hitDamage(fighter, mon, target, defender, move, effectId,
+          struggling, isFixed);
+      }
+      if (struck.crit && !isFixed) this._say('A critical hit');
+      if (index === 1) {
+        if (effectiveness > 1) {
+          this._say("It's super effective");
+        } else if (effectiveness < 1) {
+          this._say("It's not very effective");
+        }
+      }
       const hpBefore = defender.hp;
-      this._strike(target, defender, damage);
-      totalDealt += hpBefore - defender.hp;
+      this._strike(target, defender, struck.damage);
+      curDamage = hpBefore - defender.hp;
+      totalDealt += curDamage;
       if (multihit) this._buildRage(defender);
+      if (index === 1 && effectId === 29 && defender.hp > 0) {
+        hits = Effects.multiHitCount(this.rng);
+      }
     }
 
-    // BattleCommand_EffectChance's byte, for a hit that reached the HP; what
-    // it decides is applied further down, after the script's post-damage
-    // command, `checkfaint` and `buildopponentrage`. Nothing in between draws.
-    // The byte is the script's, drawn before `applydamage`, and only a
-    // substitute standing at it skips it (CheckSubstituteOpp): so a hit a
-    // Focus Band held at 1 HP took nothing off -- a holder already at 1 --
-    // still draws it, and its effect can still land.
-    let effectHit = false;
-    if (totalDealt > 0 || !subAtChance) {
-      effectHit = Effects.sideChanceProc(this.rng, move.chance) === true;
+    // FLAME WHEEL's and SACRED FIRE's `defrost`, before `checkfaint`: a frozen
+    // user thaws.
+    if (Effects.DEFROSTS_USER[effectId] && mon.status === 'freeze') {
+      mon.status = null;
+      mon.statusTurns = 0;
+      const text = `${mon.species} was defrosted`;
+      this._say(text);
+      // No token: a `status` event without one is a cure (events.js).
+      this._emit('status', { slot: fighter.slot, side: fighter.side, text });
     }
-    if (totalDealt > 0) {
-      if (Effects.isDrain(effectId)) {
-        const heal = Effects.drainAmount(totalDealt);
-        if (heal > 0) this._heal(fighter, mon, heal);
-      }
 
-      if (Effects.isPayDay(effectId)) {
-        this._say('Coins scattered');
-      }
+    if (totalDealt > 0 && Effects.isDrain(effectId)) {
+      const heal = Effects.drainAmount(totalDealt);
+      if (heal > 0) this._heal(fighter, mon, heal);
+    }
+
+    // BattleCommand_PayDay, on every hit that did not miss, for whoever used
+    // it: the fight's one pot (`_payDayOutcome`).
+    if (Effects.isPayDay(effectId)) {
+      this.payDay += Effects.payDayCoins(mon.level);
+      this._say('Coins scattered');
     }
 
     // The Thief script's `thief`, right after the damage (Items.THIEF), when
@@ -3546,10 +3745,13 @@ class Battle {
       this._thief(fighter, mon, target, defender);
     }
 
-    if ((struggling || Effects.isRecoil(effectId)) && totalDealt >= 1) {
-      const recoil = Effects.recoilAmount(totalDealt);
+    // BattleCommand_Recoil, on every hit that did not miss: a quarter of
+    // wCurDamage, at least 1 -- so 1 when a substitute took the hit --
+    // straight off the user's HP, past its own substitute.
+    if (struggling || Effects.isRecoil(effectId)) {
+      const recoil = Effects.recoilAmount(curDamage);
       this._say(`${mon.species} is hit with recoil`);
-      this._damage(fighter, mon, recoil, null);
+      this._damage(fighter, mon, recoil, null, true);
     }
 
     if (!multihit) this._buildRage(defender);
@@ -3558,9 +3760,7 @@ class Battle {
     // the hit knocked out is never burned, poisoned or confused. `checkfaint`
     // reads the monster's HP and not its substitute's, so a hit the substitute
     // took goes on to the effect command, which asks about the substitute
-    // itself (Effects.applySide) -- after BattleCommand_StatDown's
-    // `.ComputerMiss` byte, and after BattleCommand_BurnTarget's Defrost of a
-    // target whose substitute this hit broke.
+    // itself (Effects.applySide).
     if (defender.hp > 0) {
       this._applySide(fighter, mon, target, defender, effectId, effectHit, move);
     }
@@ -3568,14 +3768,7 @@ class Battle {
     // A substitute absorbs HP (including the breaking hit), so totalDealt
     // stays 0. Do not then apply a foe primary onto the mon behind it.
     if (Effects.handlesPrimary(effectId) && totalDealt > 0) {
-      this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
-    }
-
-    if (Effects.isThrash(effectId) && !mon.thrashing) {
-      mon.thrashing = {
-        turns: Effects.thrashTurns(this.rng),
-        moveIndex: choice.move,
-      };
+      this._applyPrimary(fighter, mon, target, defender, choice.move, effectId, move);
     }
 
     // BattleCommand_Rage: SUBSTATUS_RAGE on the user of a Rage that connected.
@@ -3584,26 +3777,23 @@ class Battle {
       mon.raging = true;
     }
 
-    if (Effects.isTrapping(effectId) && totalDealt > 0) {
-      const turns = Effects.trapTurns(this.rng);
-      // `turns` is Gen1's *total* attack count (2..5), and the hit that just
-      // landed was the first of them -- so the trap is marked `fresh` and the
-      // residual at the end of this same turn ticks the counter without
-      // dealing damage a second time.  Without it a 2-turn Wrap hit 3 times.
+    // BattleCommand_TrapTarget, after `checkfaint`: a target with a wrap count
+    // already, or a substitute standing now, is not trapped; otherwise the
+    // count and the move's name for HandleWrap, and the cart's line.
+    if (Effects.isTrapping(effectId) && defender.hp > 0 && !defender.trapped
+        && int(defender.substitute, 0) <= 0) {
       defender.trapped = {
-        turns,
-        damage: totalDealt,
+        turns: Effects.wrapCount(this.rng),
         fromSlot: fighter.slot,
-        fresh: true,
+        label: moveLabel(move, 'the trap'),
       };
-      mon.trapping = {
-        turns,
-        moveIndex: choice.move,
-        targetSlot: target.slot,
-      };
+      this._say(trapLine(move, mon, defender));
     }
 
-    if (Effects.isHyperBeam(effectId) && totalDealt > 0 && defender.hp > 0) {
+    // BattleCommand_RechargeNextTurn, before `checkfaint`: every hit that did
+    // not miss -- a knockout and a substitute's included -- costs the user its
+    // next turn on Gold.
+    if (Effects.isHyperBeam(effectId)) {
       mon.mustRecharge = true;
     }
 
@@ -3615,33 +3805,16 @@ class Battle {
     this._kingsRock(mon, move, effectId, defender);
 
     this._markLastMove(mon, choice.move);
-
-    if (mon.thrashing) {
-      mon.thrashing.turns -= 1;
-      if (mon.thrashing.turns <= 0) {
-        mon.thrashing = null;
-        const turns = this.rng.byte() % 4 + 2;
-        mon.confusion = turns;
-        fighter.confuseCount = turns;
-        this._say(`${mon.species} became confused`);
-        this._emit('status', {
-          slot: fighter.slot, side: fighter.side, confused: 1,
-          text: `${mon.species} became confused`,
-        });
-      }
-    }
   }
 
   // One place where HP comes off, so the faint that follows can never be
   // forgotten at one of the call sites. `ignoreSubstitute` is the cart's
   // DoPlayerDamage / DoEnemyDamage `c` flag: the confusion self-hit sets it,
-  // so the damage reaches the HP behind the user's own substitute.
+  // so the damage reaches the HP behind the user's own substitute -- and so
+  // does every SubtractHPFromUser (recoil, poison, burn, LEECH SEED, a wrap).
+  // Bide's store is `_strike`'s: only a move's hit feeds it.
   _damage(fighter, mon, rawAmount, status, ignoreSubstitute) {
     let amount = Math.max(0, int(rawAmount, 0));
-
-    if (amount > 0 && mon.bide && mon.bide.turns > 0) {
-      mon.bide.stored += amount;
-    }
 
     if (amount > 0 && !ignoreSubstitute && mon.substitute && mon.substitute > 0) {
       if (amount >= mon.substitute) {
@@ -3871,9 +4044,10 @@ class Battle {
     mon.raging = false;
     mon.rageCounter = 0;
     mon.trapped = null;
-    mon.trapping = null;
     mon.bide = null;
     mon.substitute = 0;
+    mon.minimized = false;
+    mon.lastCounterMove = null;
     mon.mist = false;
     mon.focusEnergy = false;
     mon.transformed = false;
@@ -3966,6 +4140,9 @@ class Battle {
     }
   }
 
+  // Per seat, in field order: ResidualDamage's poison / burn and LEECH SEED
+  // and HandleWrap, each a SubtractHPFromUser -- straight off the HP, a
+  // substitute never asked -- and the Bide and Disable counters.
   _residualDamage() {
     for (const fighter of this.fighters) {
       if (this.result) return;
@@ -3977,35 +4154,24 @@ class Battle {
         if (amount !== null && amount !== undefined) {
           if (mon.status === 'toxic') mon.toxicCounter += 1;
           this._say(`${mon.species} is hurt by its ${mon.status}`);
-          this._damage(fighter, mon, amount, mon.status);
+          this._damage(fighter, mon, amount, mon.status, true);
         }
       }
       if (this.result) return;
+      // HandleWrap: a wrapped monster with no substitute of its own loses a
+      // turn off the count; at 0 it is released, otherwise it takes a
+      // sixteenth of its max HP under the trapping move's name.
       mon = activeMon(fighter);
-      if (mon && mon.trapped && mon.trapped.turns > 0) {
+      if (mon && mon.trapped && mon.trapped.turns > 0 && int(mon.substitute, 0) <= 0) {
         const trap = mon.trapped;
-        // The turn the trap landed on already paid its damage through the move
-        // itself: spend that attack off the counter here and say nothing.
-        // Every later turn is a real residual.  A trap that arrived on a sheet
-        // rather than from a move carries no `fresh` mark and ticks at once.
-        if (trap.fresh) {
-          trap.fresh = null;
-        } else {
-          this._say(`${mon.species} is hurt by the trap`);
-          this._damage(fighter, mon, trap.damage, null);
-        }
+        const label = trap.label || 'the trap';
         trap.turns -= 1;
         if (trap.turns <= 0) {
           mon.trapped = null;
-          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
-            ? this._fighterAtSlot(trap.fromSlot) : null;
-          const tMon = trapper && activeMon(trapper);
-          if (tMon) tMon.trapping = null;
+          this._say(`${mon.species} was released from ${label}`);
         } else {
-          const trapper = trap.fromSlot !== null && trap.fromSlot !== undefined
-            ? this._fighterAtSlot(trap.fromSlot) : null;
-          const tMon = trapper && activeMon(trapper);
-          if (tMon && tMon.trapping) tMon.trapping.turns = trap.turns;
+          this._say(`${mon.species} is hurt by ${label}`);
+          this._damage(fighter, mon, Items.sixteenth(mon.maxHp), null, true);
         }
       }
       mon = activeMon(fighter);
@@ -4015,17 +4181,20 @@ class Battle {
       if (this.result) return;
       mon = activeMon(fighter);
       if (mon && mon.leechSeed) {
-        const amount = Math.max(1, Math.floor(mon.maxHp / 16));
-        // Read before the sap: a sap that knocks the seeded monster out
-        // faints it, and `_faint` clears its leechSeed. The seeder is still
-        // healed (RestoreHP comes before HasUserFainted).
+        // GetEighthMaxHP through SubtractHPFromUser, then RestoreHP on the seat
+        // opposite with what SubtractHP hands back: the whole eighth, or just
+        // the HP that was left. Read before the sap: a sap that knocks the
+        // seeded monster out faints it, and `_faint` clears its leechSeed. The
+        // seeder is still healed (RestoreHP comes before HasUserFainted).
+        const amount = Items.eighth(mon.maxHp);
+        const taken = Math.min(amount, mon.hp);
         const from = mon.leechSeed.fromSlot;
         this._say(`${mon.species} is seeded`);
-        this._damage(fighter, mon, amount, null);
+        this._damage(fighter, mon, amount, null, true);
         const seeder = from !== null && from !== undefined
           ? this._fighterAtSlot(from) : null;
         const sMon = seeder && activeMon(seeder);
-        if (sMon && sMon.hp > 0) this._heal(seeder, sMon, amount);
+        if (sMon && sMon.hp > 0) this._heal(seeder, sMon, taken);
       }
       if (this.result) return;
       mon = activeMon(fighter);
@@ -4056,11 +4225,21 @@ class Battle {
     if (!aliveA && !aliveB) {
       this._finish('draw', null, null, 'ko');
     } else if (aliveA) {
-      this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
+      this._payDayOutcome(this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko'));
     } else {
       this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko');
     }
     return true;
+  }
+
+  // CheckPayDay, run only outside a link battle and only on a WIN -- a
+  // knockout or a catch: the fight's one wPayDayMoney is the player's, the
+  // computer's own PAY DAY coins included. Contract K11: `payDay` on side a's
+  // win against the computer (BADGE_MODES), never in a link fight; the Amulet
+  // Coin doubling and the wallet are the client's.
+  _payDayOutcome(result) {
+    if (!result || typeof result !== 'object' || !BADGE_MODES[this.mode]) return;
+    if (this.payDay > 0) result.payDay = this.payDay;
   }
 
   /*
@@ -4152,7 +4331,7 @@ class Battle {
     }
 
     // Forced-only turns opened by the previous resolve wait here so one drain
-    // does not swallow a whole trap / recharge / thrash chain. Keep the flag
+    // does not swallow a whole recharge / rampage / charge chain. Keep the flag
     // while a seat is away; reconnect()'s `_maybeResolve` closes the turn.
     if (this.forcedPending && this.phase === 'choice' && !this._anyDisconnected()) {
       this.forcedPending = false;

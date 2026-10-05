@@ -1451,8 +1451,11 @@ function testGen12ReadPathsUnchanged() {
   const ev = sanitize.cleanBattleEvent({
     battle: 'b1', seq: 2, t: 'stat', slot: 0, side: 'a', target: 2, stage: 1, delta: 1, holding: 3,
   }, 2);
-  ok(ev && ev.target === undefined && ev.stage === undefined && ev.delta === undefined
-    && ev.holding === undefined, "a Gen 2 reader keeps none of Gen 3's event fields");
+  ok(ev && ev.target === undefined && ev.delta === undefined
+    && ev.holding === undefined, "a Gen 2 reader keeps none of Gen 3's other event fields");
+  // ...but `stage` it reads now: a `stat` event's signed stage is the older
+  // dialect's too (contract K10 of docs/plans/gen12-referee-gaps-fix.md).
+  ok(ev.stage === 1, 'a Gen 2 reader keeps the signed stage (K10)');
   const mv = sanitize.cleanBattleEvent({
     battle: 'b1', seq: 3, t: 'moves', slot: 0, side: 'a', moves: [sheet.moves[0]],
   }, 1);
@@ -2113,8 +2116,10 @@ function testGen3PayDayAndHoldersOnly() {
   ok(atBob && atBob.payDay === 600, 'pay day: both players on side a hear the coins');
   const read = sanitize.cleanBattleOutcome(outcome, 3);
   ok(read && read.payDay === 600, 'pay day: the Gen 3 outcome reader keeps it');
-  ok(sanitize.cleanBattleOutcome(outcome, 1).payDay === undefined,
-    'pay day: an older reader never sees it');
+  // An older reader reads it too since contract K11 (Red and Gold report their
+  // own Pay Day coins), under its own cart's PAYDAY12_MAX bound.
+  ok(sanitize.cleanBattleOutcome(outcome, 1).payDay === 600,
+    'pay day: a Gen 1 reader reads it too (K11)');
   ok(!relay.battles.has('g3pay'), 'pay day: the record settles and clears');
 }
 
@@ -2700,6 +2705,278 @@ function testGen2FamilyPvp() {
   ok(entryOf(seen, 'b', ids[3]).family === 'crystal', "family gen 2 pvp: DEE's");
 }
 
+// ---------------------------------------------------------------------------
+// The referee-gap contracts on the hub (docs/plans/gen12-referee-gaps-fix.md).
+// Twin of the same block in tests/hub_battle.lua, which argues each case;
+// tests/fixtures/hub_protocol_parity.json holds the two hubs to one digest.
+// ---------------------------------------------------------------------------
+
+function row12(id, o) {
+  return {
+    id, pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, ...(o || {}),
+  };
+}
+
+// K9: a mid-fight level-up rides mmo.battle_moveset and the hub forwards its
+// level / stats / maxHp to the referee's levelUp(playerId, monIndex, level,
+// stats, maxHp) -- 1-based index -- whatever became of the move list, only when
+// the referee has the method. K8: a learn keeps an unchanged row's highCrit /
+// PP Ups and takes a new row's.
+function testGen12LevelUpForward() {
+  const relay = makeRelay(makeClock());
+  const a = dial(relay, 'LVLA');
+  const b = dial(relay, 'LVLB');
+  const session = openBattle(relay, a, b);
+  uploadAndReady(relay, a, b, session);
+  const record = relay.battles.get(session.id);
+  ok(record && record.sim, 'level-up: the fight is live');
+  const client = relay.get(a.id);
+  const calls = [];
+  record.sim.levelUp = function levelUp(playerId, index, level, stats, maxHp) {
+    calls.push({
+      self: this, playerId, index, level, stats, maxHp,
+    });
+  };
+  const live = record.sim.byId.get(a.id).mons[0];
+  live.moves = [row12('OLD', { pp: 10, highCrit: true, ppUps: 1 })];
+
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('OLD', { pp: 99 })], level: 51, stats: { atk: 1, def: 2, spd: 3, spc: 4 }, maxHp: 310,
+  }), "level-up: the hub's own moves with a level reach the referee");
+  ok(calls.length === 1, 'level-up: one call');
+  ok(calls[0].self === record.sim, 'level-up: called as a method on the referee');
+  ok(calls[0].playerId === a.id, "level-up: for the sender's seat");
+  ok(calls[0].index === 1, 'level-up: the 1-based party index (wire mon 0)');
+  ok(calls[0].level === 51, 'level-up: the new level');
+  ok(calls[0].stats && calls[0].stats.spc === 4, 'level-up: the new stats');
+  ok(calls[0].maxHp === 310, 'level-up: the new max HP');
+  ok(live.moves[0].pp === 10, "level-up: the unchanged row keeps the hub's PP");
+  ok(live.moves[0].highCrit === true, 'level-up: ...and its high-crit flag (K8: the rebuild used to drop it)');
+  ok(live.moves[0].ppUps === 1, 'level-up: ...and its PP Ups');
+
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: session.id, mon: 0, moves: [row12('OLD')], level: '52',
+    stats: { atk: 5, def: 6, spd: 7, spc: 8 },
+  });
+  ok(calls.length === 2, 'level-up: the wire path forwards too');
+  ok(calls[1].level === 52, 'level-up: ...the sanitised level');
+  ok(calls[1].maxHp === undefined, 'level-up: ...and no max HP when none was stated');
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: session.id, mon: 0, moves: [row12('OLD')], level: 0,
+  });
+  ok(calls.length === 2, 'level-up: a mangled level refuses the whole message');
+
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('OLD'), row12('NEW', { ppUps: 2, highCrit: true })],
+  }), 'level-up: a learn with no level is applied');
+  ok(calls.length === 2, 'level-up: ...and calls nothing');
+  ok(live.moves[1] && live.moves[1].ppUps === 2, 'level-up: the learned row keeps its PP Ups');
+  ok(live.moves[1].highCrit === true, 'level-up: ...and its high-crit flag');
+  ok(live.moves[1].priority === undefined, 'level-up: a Gen 1 row has no priority');
+
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('AAA'), row12('BBB')], level: 53,
+  }), 'level-up: a refused rewrite still forwards its level');
+  ok(calls.length === 3, 'level-up: ...one more call');
+  ok(live.moves[0].id === 'OLD', 'level-up: ...and the list is untouched');
+
+  live.transformed = true;
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('OLD'), row12('NEW'), row12('THIRD')], level: 54, maxHp: 320,
+  }), 'level-up: a transformed battler still grows');
+  ok(calls.length === 4, 'level-up: ...the referee hears it');
+  ok(live.moves.length === 2, 'level-up: ...and only its move list is protected');
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('OLD'), row12('NEW'), row12('THIRD')],
+  }) === false, 'level-up: moves alone on a transformed battler reach nothing');
+  live.transformed = false;
+
+  ok(relay.applyBattleMoveset(record, client, { mon: 5, moves: [row12('OLD')], level: 55 }) === false,
+    'level-up: a party index with no mon is refused');
+  ok(calls.length === 4, 'level-up: ...and forwards nothing');
+
+  record.sim.levelUp = false;
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('AAA'), row12('BBB')], level: 56,
+  }) === false, 'level-up: a referee with no K9 method is not called');
+  ok(relay.applyBattleMoveset(record, client, {
+    mon: 0, moves: [row12('OLD'), row12('NEW'), row12('THIRD')], level: 56,
+  }), 'level-up: ...and a learn still lands without it');
+  ok(live.moves.length === 3, 'level-up: ...three moves now');
+}
+
+// The two learn rules are exported (twin of Hub.lua's, which the solo path's
+// referee uses).
+function testLearnRulesExported() {
+  const { movesetDeltaOk, nextMoves12 } = require('./lib/relay.js');
+  ok(movesetDeltaOk([row12('A')], [row12('A'), row12('B')]) === true, 'export: an append is a learn');
+  ok(movesetDeltaOk([row12('A'), row12('B')], [row12('C'), row12('D')]) === false, 'export: a rewrite is not');
+  const next12 = nextMoves12([row12('A', { pp: 3, highCrit: true })],
+    [row12('A', { pp: 99 }), row12('B', { ppUps: 1 })]);
+  ok(next12[0].pp === 3, 'export: an unchanged row keeps the old PP');
+  ok(next12[0].highCrit === true, 'export: ...and its high-crit flag');
+  ok(next12[1].ppUps === 1, 'export: a new row takes its own PP Ups');
+}
+
+// Gold: the learn keeps the cart's priority byte (K8), and a Gold sheet's K7
+// blocks ride the hub's stored party into the referee's hands.
+function testGen2LevelUpAndSheet() {
+  const relay = makeRelay(makeClock(), { generation: 2 });
+  const a = dial2(relay, 'ANN');
+  const b = dial2(relay, 'BOB');
+  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+  relay.handle(b.id, {
+    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+  });
+  const { id } = take(a, 'mmo.session');
+  const gold = sheet2({});
+  gold.base = {
+    hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
+  };
+  gold.dvs = {
+    atk: 12, def: 7, spe: 15, spc: 3,
+  };
+  gold.statExp = {
+    hp: 1, atk: 2, def: 3, spe: 4, spc: 5,
+  };
+  gold.moves[0].priority = 2;
+  gold.moves[0].ppUps = 3;
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART2 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [gold] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [sheet2({})] });
+  const record = relay.battles.get(id);
+  ok(record && record.sim, 'gold K7/K8: the fight opens on a sheet carrying them');
+  const parties = record.parties;
+  const party = parties && (typeof parties.get === 'function' ? parties.get(a.id) : parties[a.id]);
+  const stored = party && party.mons[0];
+  ok(stored && stored.dvs && stored.dvs.spc === 3, "gold K7: the stored sheet keeps the cart's DVs");
+  ok(stored.base && stored.base.spd === 96, 'gold K7: ...the species base stats');
+  ok(stored.statExp && stored.statExp.spc === 5, 'gold K7: ...and the stat exp');
+  ok(stored.moves[0].priority === 2, "gold K8: ...and the move's priority byte");
+  ok(stored.moves[0].ppUps === 3, 'gold K8: ...and its PP Ups');
+  const live = record.sim.byId.get(a.id).mons[0];
+  live.moves = [row12('thump', { priority: 1 })];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [row12('thump', { priority: 3 }), row12('quick', { priority: 2 })],
+  });
+  ok(live.moves[0].priority === 1, "gold K8: an unchanged row keeps the hub's priority");
+  ok(live.moves[1] && live.moves[1].priority === 2, 'gold K8: a learned row takes its own');
+  let calls = 0;
+  record.sim.levelUp = () => { calls += 1; };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [row12('thump'), row12('quick')],
+    level: 51,
+    stats: {
+      atk: 1, def: 2, spe: 3, spa: 4, spd: 5,
+    },
+    maxHp: 140,
+  });
+  ok(calls === 1, 'gold K9: a Gold level-up reaches the referee');
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [row12('thump'), row12('quick')],
+    level: 52,
+    stats: {
+      atk: 1, def: 2, spd: 3, spc: 4,
+    },
+  });
+  ok(calls === 1, 'gold K9: Kanto-keyed stats refuse a Gold moveset');
+}
+
+// A Gen 3 hub reads no level-up, so a referee there is never called.
+function testGen3LevelUpNotRead() {
+  const relay = makeRelay(makeClock(), { generation: 3 });
+  const a = dial3(relay, 'ANN');
+  const b = dial3(relay, 'BOB');
+  relay.handle(a.id, { type: 'mmo.request', to: b.id, kind: 'battle' });
+  relay.handle(b.id, {
+    type: 'mmo.respond', to: a.id, kind: 'battle', accept: true,
+  });
+  const { id } = take(a, 'mmo.session');
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: id, mons: [mon3()] });
+  const record = relay.battles.get(id);
+  let calls = 0;
+  record.sim.levelUp = () => { calls += 1; };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [move3(), move3({ id: 'NEW3', num: 44 })],
+    level: 51,
+    stats: {
+      atk: 1, def: 2, spe: 3, spa: 4, spd: 5,
+    },
+    maxHp: 140,
+  });
+  ok(calls === 0, "gen 3: a moveset's level-up fields are never read");
+  ok(record.sim.byId.get(a.id).mons[0].moves.length === 2, 'gen 3: ...while the learn lands as before');
+}
+
+// K11: the hubs copy a Gen 1 / Gen 2 referee's Pay Day coins onto the outcome in
+// the NPC modes alone, and only a positive count. The referee's outcome is a stub.
+function paid12(mode, coins) {
+  const relay = makeRelay(makeClock());
+  const a = dial(relay, 'PAYA');
+  const b = dial(relay, 'PAYB');
+  let id;
+  if (mode === '1v1') {
+    id = openBattle(relay, a, b).id;
+    uploadAndReady(relay, a, b, { id });
+  } else {
+    id = 'pw';
+    relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: [[100]] });
+    relay.handle(a.id, {
+      type: 'mmo.battle_party', battle: id, side: 'a', mons: [mon(90)],
+    });
+    relay.handle(a.id, {
+      type: 'mmo.battle_party', battle: id, side: 'b', mons: [mon(20)],
+    });
+  }
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return false;
+  a.peer.outbox = [];
+  record.sim.outcome = () => ({
+    outcome: 'win', winners: [a.id], losers: [b.id], reason: 'ko', payDay: coins,
+  });
+  relay.flushBattle(record);
+  return take(a, 'mmo.battle_outcome');
+}
+
+function testGen12PayDayForward() {
+  const wild = paid12('wild', 350);
+  ok(wild, "pay day 1/2: a wild fight settles on the referee's outcome");
+  ok(wild.payDay === 350, 'pay day 1/2: the coins ride the outcome of a fight against the computer');
+  ok(sanitize.cleanBattleOutcome(wild, 1).payDay === 350, 'pay day 1/2: and a Gen 1 reader keeps them');
+  const link = paid12('1v1', 350);
+  ok(link, 'pay day 1/2: a 1v1 settles too');
+  ok(link.payDay === undefined, 'pay day 1/2: a fight between players carries none');
+  const none = paid12('wild', 0);
+  ok(none, 'pay day 1/2: a fight with no coins settles');
+  ok(none.payDay === undefined, "pay day 1/2: a 0 is the field's absence, as on the Lua twin");
+}
+
+// K13: an id is refused past 40 characters on both twins.
+function testIdRefusedPastForty() {
+  ok(sanitize.cleanId('i'.repeat(40)) === 'i'.repeat(40), 'id: 40 characters is an id');
+  ok(sanitize.cleanId('i'.repeat(41)) === null, 'id: 41 is refused, not cut to 40');
+  ok(sanitize.cleanBattleReconnect({ battle: 'b'.repeat(41) }) === null,
+    'id: a long battle id refuses the message');
+  const long = mon(40);
+  long.moves[0].id = 'm'.repeat(41);
+  ok(sanitize.cleanBattleMon(long) === null, 'id: a long move id refuses the monster');
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
@@ -2716,5 +2993,11 @@ testGen2TypeIdsBoost();
 testGen2Family();
 testGen2FamilyGoldAndNone();
 testGen2FamilyPvp();
+testGen12LevelUpForward();
+testLearnRulesExported();
+testGen2LevelUpAndSheet();
+testGen3LevelUpNotRead();
+testGen12PayDayForward();
+testIdRefusedPastForty();
 
 console.log(`hub_battle: ${passed} checks passed`);

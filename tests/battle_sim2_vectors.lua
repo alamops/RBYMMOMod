@@ -436,6 +436,11 @@ function ITEMS.sixteenth(input)
   return { value = Items.sixteenth(input.maxHp) }
 end
 
+-- GetEighthMaxHP, LEECH SEED's sap: the same register walk, halved.
+function ITEMS.eighth(input)
+  return { value = Items.eighth(input.maxHp) }
+end
+
 function ITEMS.berryWants(input)
   return { wants = Items.berryWants(input.hp, input.maxHp) }
 end
@@ -515,6 +520,37 @@ do
   for _ = 1, 10 do live:byte() end
   local restored = Rng.new(0):setState(live:state())
   rngCheck("state_restores", live:byte(), restored:byte())
+
+  -- Contract K12: `below` and `nextInt` read the state's HIGH bits (its high
+  -- 16 bits modulo the span, Gen 1's rule too), so a span of 4 no longer
+  -- reads the LCG's two low bits, which repeat every four draws.  The one
+  -- place raw draws are pinned, because this IS the generator's identity: the
+  -- JS twin asserts the same four streams from the same seed.
+  local function stream(seed, n, draw)
+    local r, out = Rng.new(seed), {}
+    for i = 1, n do out[i] = draw(r) end
+    return table.concat(out, ",")
+  end
+  rngCheck("k12_below_4", "1,0,0,1,3,2,2,0",
+    stream(12345, 8, function(r) return r:below(4) end))
+  rngCheck("k12_below_17", "11,13,15,10,3,9,11,15",
+    stream(12345, 8, function(r) return r:below(17) end))
+  rngCheck("k12_damage_roll", "94,97,97,94,92,95,87,85",
+    stream(12345, 8, function(r) return r:damageRoll() end))
+  rngCheck("k12_accuracy_roll", "37,84,96,9,39,70,98,36",
+    stream(12345, 8, function(r) return r:nextInt(0, 99) end))
+  -- The old low-bit draw: the state's two low bits cycle with period four,
+  -- whatever the seed -- the pattern K12 removes.
+  local cycled = true
+  local probe = Rng.new(12345)
+  local first = {}
+  for i = 1, 4 do first[i] = probe:next() % 4 end
+  for _ = 1, 16 do
+    for i = 1, 4 do
+      if probe:next() % 4 ~= first[i] then cycled = false end
+    end
+  end
+  rngCheck("k12_low_bits_cycle", true, cycled)
 end
 
 -- ------------------------------------------------------------------

@@ -301,6 +301,8 @@ const ITEM_RULES = {
   metalPowder: (input) => Items.metalPowder(sheetOf(input), input.attack, input.defense),
   focusBand: (input) => Items.focusBand(input.amount, input.hp),
   sixteenth: (input) => ({ value: Items.sixteenth(input.maxHp) }),
+  // GetEighthMaxHP, LEECH SEED's sap: the same register walk, halved.
+  eighth: (input) => ({ value: Items.eighth(input.maxHp) }),
   berryWants: (input) => ({ wants: Items.berryWants(input.hp, input.maxHp) }),
   obedienceCap: (input) => ({ cap: Items.obedienceCap(input.badges) }),
   swap: (input) => ({ value: Items.swap(input.byte) }),
@@ -342,6 +344,29 @@ test('Rng LCG matches the Lua twin for a known seed stream', () => {
   assert.strictEqual(live.byte(), restored.byte(), 'state restores');
   assert.strictEqual(Rng.create(1).below(1), 0, 'below(1) is 0');
   assert.ok(Rng.create(2).below(15) < 15, 'below(n) is in range');
+
+  // Contract K12: `below` and `nextInt` read the state's HIGH bits (its high
+  // 16 bits modulo the span, Gen 1's rule too); the same four streams the Lua
+  // vectors suite pins from the same seed.
+  const stream = (seed, n, draw) => {
+    const r = Rng.create(seed);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(draw(r));
+    return out.join(',');
+  };
+  assert.strictEqual(stream(12345, 8, (r) => r.below(4)), '1,0,0,1,3,2,2,0', 'K12 below(4)');
+  assert.strictEqual(stream(12345, 8, (r) => r.below(17)), '11,13,15,10,3,9,11,15', 'K12 below(17)');
+  assert.strictEqual(stream(12345, 8, (r) => r.damageRoll()), '94,97,97,94,92,95,87,85',
+    'K12 damage roll');
+  assert.strictEqual(stream(12345, 8, (r) => r.nextInt(0, 99)), '37,84,96,9,39,70,98,36',
+    'K12 accuracy roll');
+  // The old low-bit draw: the state's two low bits cycle with period four.
+  const probe = Rng.create(12345);
+  const first = [];
+  for (let i = 0; i < 4; i++) first.push(probe.next() % 4);
+  for (let k = 0; k < 16; k++) {
+    for (let i = 0; i < 4; i++) assert.strictEqual(probe.next() % 4, first[i], 'low bits cycle');
+  }
 });
 
 function dummyMon2(o) {

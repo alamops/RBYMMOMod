@@ -920,6 +920,7 @@ function runJs() {
     ...runPayDay3(),
     ...runFidelity(),
     ...runFamily2(),
+    ...runGaps(),
   ];
 }
 
@@ -1182,8 +1183,9 @@ function edges3() {
 
 // Gen 1 / Gen 2 read paths, as they were before Gen 3 had a dialect: a stray
 // `num` on an older row, and Gen 3's choice fields on an older choice, are
-// ignored rather than read -- on both hosting paths. Twin of gen12 in the Lua
-// driver.
+// ignored rather than read -- on both hosting paths. The `stat` case's signed
+// `stage` is the one Gen 3 field an older reader keeps (contract K10 of
+// docs/plans/gen12-referee-gaps-fix.md). Twin of gen12 in the Lua driver.
 function gen12() {
   const stray = {
     id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, num: 7,
@@ -1922,6 +1924,466 @@ function runFamily2() {
         bare: familyFight(2, ['gold', '(none)'], 'coop_npc'),
         spar: familyFight(2, ['crystal', 'gold', 'silver', 'crystal'], 'coop_pvp'),
         kanto: familyFight(1, ['red', 'yellow'], 'coop_npc'),
+      },
+    },
+  ];
+}
+
+/*
+ * The referee-gap wire (docs/plans/gen12-referee-gaps-fix.md K7-K11, K13),
+ * each input read by lib/sanitize under the reader's generation (the third
+ * field; a mon is read with none, as the hub reads a caught sheet): K7's
+ * base / dvs / statExp blocks, K8's ppUps and Gold priority, K9's moveset
+ * level / stats / maxHp, K10's signed stage for an older reader, K11's payDay
+ * per reader (payEdges12) and K13's 40-character id refusal. Twin of gaps()
+ * in tests/drivers/hub_protocol_parity.lua -- same cases, same order; the
+ * argument for each is written there.
+ */
+function k7(gen) {
+  if (gen === 2) {
+    return {
+      base: {
+        hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
+      },
+      dvs: {
+        atk: 12, def: 7, spe: 15, spc: 3,
+      },
+      statExp: {
+        hp: 1000, atk: 2000, def: 0, spe: 65535, spc: 7,
+      },
+    };
+  }
+  return {
+    base: {
+      hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+    },
+    dvs: {
+      atk: 12, def: 7, spd: 15, spc: 3,
+    },
+    statExp: {
+      hp: 1000, atk: 2000, def: 0, spd: 65535, spc: 7,
+    },
+  };
+}
+
+function row12(id, extra) {
+  return {
+    id, pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, ...(extra || {}),
+  };
+}
+
+const GROWN1 = {
+  atk: 91, def: 92, spd: 93, spc: 94,
+};
+const GROWN2 = {
+  atk: 91, def: 92, spe: 93, spa: 94, spd: 95,
+};
+
+function statEvent(seq, stage) {
+  return {
+    battle: 'b1', seq, t: 'stat', slot: 0, side: 'a', amount: 2, text: 'ATK fell', stage,
+  };
+}
+
+function gaps() {
+  const B1 = {
+    hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+  };
+  const thump = row12('thump');
+  return [
+    // K7
+    ['mon', sheet12(1, k7(1))],
+    ['mon', sheet12(2, k7(2))],
+    ['mon', sheet12(2, { ...k7(2), generation: 2 })],
+    ['mon', sheet12(1, {
+      base: {
+        hp: 0, atk: 255, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, { base: { ...B1, atk: 256 } })],
+    ['mon', sheet12(1, { base: { ...B1, hp: -1 } })],
+    ['mon', sheet12(1, {
+      base: {
+        atk: 52, def: 63, spd: 74, spc: 85,
+      },
+    })],
+    ['mon', sheet12(2, { base: B1 })],
+    ['mon', sheet12(1, { base: [41, 52, 63, 74, 85] })],
+    ['mon', sheet12(1, { base: '41' })],
+    ['mon', sheet12(1, { base: null, dvs: null, statExp: null })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: 15, def: 0, spd: '7', spc: 3.9,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: 16, def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: true, def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: '0x10', def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: ' 9 ', def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(2, {
+      dvs: {
+        atk: 1, def: 2, spd: 3, spc: 4,
+      },
+    })],
+    ['mon', sheet12(2, {
+      dvs: {
+        atk: 1, def: 2, spe: 3, spc: 4, spa: 9, hp: 5,
+      },
+    })],
+    ['mon', sheet12(2, {
+      statExp: {
+        hp: 1, atk: 2, def: 3, spe: 4, spa: 5, spd: 6,
+      },
+    })],
+    ['mon', sheet12(1, {
+      statExp: {
+        hp: 65535, atk: 0, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      statExp: {
+        hp: 65536, atk: 0, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      statExp: {
+        atk: 0, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', { ...sheet12(1, k7(2)), generation: 1 }],
+    ['mon', { ...mon3(), ...k7(2) }],
+    ['mon', {
+      ...mon3(), base: 'x', dvs: 99, statExp: true,
+    }],
+    ['party', { battle: 'b1', mons: [sheet12(2, k7(2))] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(1, k7(2))] }, 1],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: sheet12(1, k7(1)),
+    }, 1],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: sheet12(1, { dvs: { atk: 99 } }),
+    }, 1],
+    // K8
+    ['move', row12('m', { ppUps: 0 }), 1],
+    ['move', row12('m', { ppUps: 3 }), 2],
+    ['move', row12('m', { ppUps: 4 }), 1],
+    ['move', row12('m', { ppUps: -1 }), 2],
+    ['move', row12('m', { ppUps: '2' }), 1],
+    ['move', row12('m', { ppUps: 1.5 }), 1],
+    ['move', row12('m', { ppUps: true }), 1],
+    ['move', row12('m', { ppUps: null }), 1],
+    ['move', row12('m', { priority: 0 }), 2],
+    ['move', row12('m', { priority: 255 }), 2],
+    ['move', row12('m', { priority: 256 }), 2],
+    ['move', row12('m', { priority: -1 }), 2],
+    ['move', row12('m', { priority: 'fast' }), 2],
+    ['move', row12('m', { priority: '3' }), 2],
+    ['move', row12('m', { priority: 3 }), 1],
+    ['move', row12('m', { priority: 'fast' }), 1],
+    ['move', row12('m', { priority: 3, ppUps: 2 })],
+    ['move', { ...move3(), ppUps: 3, priority: 2 }, 3],
+    ['ruleset', { chart: CHART, metronomePool: [row12('m', { priority: 2, ppUps: 0 })] }, 2],
+    ['ruleset', { chart: CHART, metronomePool: [row12('m', { priority: 2, ppUps: 0 })] }, 1],
+    ['ruleset', { chart: CHART, metronomePool: [row12('m', { ppUps: 9 })] }, 2],
+    ['event', {
+      battle: 'b1', seq: 4, t: 'moves', slot: 0, side: 'a', moves: [row12('m', { priority: 3, ppUps: 1 })],
+    }, 2],
+    ['event', {
+      battle: 'b1', seq: 5, t: 'moves', slot: 0, side: 'a', moves: [row12('m', { priority: 3, ppUps: 1 })],
+    }, 1],
+    ['mon', sheet12(2, { moves: [row12('m', { priority: 3, ppUps: 3 })] })],
+    ['mon', sheet12(2, { moves: [row12('m', { priority: 300 })] })],
+    ['mon', sheet12(1, { moves: [row12('m', { priority: 300 })] })],
+    // K9
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 51, stats: GROWN1, maxHp: 140,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 1, moves: [thump], level: 51, stats: GROWN2, maxHp: 140,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], stats: GROWN1,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 0,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 101,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: '50',
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: true,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], maxHp: 0,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], maxHp: 1000,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], stats: { atk: 91, def: 92, spd: 93 },
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], stats: { ...GROWN1, atk: 0 },
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 51, stats: null, maxHp: null,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [move3()], level: 51, stats: GROWN2, maxHp: 140,
+    }, 3],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 51, stats: GROWN1, maxHp: 140,
+    }],
+    // K10
+    ['event', statEvent(10, -6), 1],
+    ['event', statEvent(11, 6), 1],
+    ['event', statEvent(12, -7), 1],
+    ['event', statEvent(13, 7), 2],
+    ['event', statEvent(14, '-2'), 2],
+    ['event', statEvent(15, true), 1],
+    ['event', statEvent(16, 2.5), 1],
+    ['event', statEvent(17, -1), 2],
+    ['event', statEvent(18, -3), 3],
+    ['event', statEvent(19, -3)],
+    // K13
+    ['id', 'i'.repeat(40)],
+    ['id', 'i'.repeat(41)],
+    ['id', 'i'.repeat(100)],
+    ['id', 'a-b_C9'],
+    ['id', ''],
+    ['id', 'a b'],
+    ['reconnect', { battle: 'b'.repeat(40) }],
+    ['reconnect', { battle: 'b'.repeat(41) }],
+    ['move', row12('m'.repeat(40)), 1],
+    ['move', row12('m'.repeat(41)), 1],
+    ['mon', sheet12(1, { speciesId: 'S'.repeat(41) })],
+    ['mon', sheet12(2, { heldItem: 'H'.repeat(41) })],
+    ['event', {
+      battle: 'b1', seq: 20, t: 'item', slot: 0, side: 'a', text: 'I'.repeat(41),
+    }, 1],
+    ['choice', { battle: 'b1', action: 'item', item: 'I'.repeat(41) }, 1],
+    ['outcome', { battle: 'b1', outcome: 'win', catcher: 'c'.repeat(41) }, 1],
+    ['party', { battle: 'p'.repeat(41), mons: [sheet12(1)] }, 1],
+  ];
+}
+
+const PAYDAY12_EDGES = [200, 0, 1, 65535, 65536, 999999, 1000000, -3, 1.5, '0x10', ' 7 ', '1e2',
+  true, [3]];
+
+function readGap(kind, input, gen) {
+  if (kind === 'mon') return sanitize.cleanBattleMon(input);
+  if (kind === 'party') return sanitize.cleanBattleParty(input, gen);
+  if (kind === 'move') return sanitize.cleanBattleMove(input, gen);
+  if (kind === 'ruleset') return sanitize.cleanBattleRuleset(input, gen);
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'moveset') return sanitize.cleanBattleMoveset(input, gen);
+  if (kind === 'outcome') return sanitize.cleanBattleOutcome(input, gen);
+  if (kind === 'choice') return sanitize.cleanBattleChoice(input, gen);
+  if (kind === 'reconnect') return sanitize.cleanBattleReconnect(input);
+  if (kind === 'id') return sanitize.cleanId(input);
+  return undefined;
+}
+
+/*
+ * A mid-fight level-up reaches the referee (contract K9), and a learn keeps
+ * highCrit / PP Ups / Gold priority (K8): twin of levelFight / levelFight3 in
+ * the Lua driver, whose header argues each step. The sim's levelUp is a stub
+ * recording each call; the hub's own rows are set first so the digest never
+ * leans on how either sim's copyMove spells a field it was not given.
+ */
+function slimMoves12(moves) {
+  return (moves || []).map((m) => ({
+    id: m.id,
+    pp: orNil(m.pp),
+    power: orNil(m.power),
+    highCrit: orNil(m.highCrit),
+    ppUps: orNil(m.ppUps),
+    priority: orNil(m.priority),
+  }));
+}
+
+function levelFight(generation) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  const sess = openFight(relay, a, b);
+  uploadReady(relay, a, b, sess.id, [sheet12(generation)], [sheet12(generation)]);
+  const record = relay.battles.get(sess.id);
+  if (!record || !record.sim) return { opened: false };
+  const calls = [];
+  record.sim.levelUp = (playerId, index, level, stats, maxHp) => {
+    calls.push({
+      playerId, index, level: orNil(level), stats: orNil(stats), maxHp: orNil(maxHp),
+    });
+  };
+  const gold = generation === 2;
+  const live = record.sim.byId.get(a.id).mons[0];
+  live.moves = [
+    row12('slash', {
+      pp: 7, power: 70, highCrit: true, ppUps: 1, priority: gold ? 1 : undefined,
+    }),
+    row12('thump', { pp: 9, highCrit: false }),
+  ];
+  const steps = [];
+  const send = (extra) => {
+    relay.handle(a.id, {
+      type: 'mmo.battle_moveset', battle: sess.id, mon: 0, ...extra,
+    });
+    steps.push({ calls: calls.length, moves: slimMoves12(live.moves) });
+  };
+  const four = [row12('slash'), row12('thump'), row12('swap'), row12('extra')];
+  send({
+    moves: [row12('slash', { pp: 99, power: 999 }), row12('thump')],
+    level: 51,
+    stats: gold ? GROWN2 : GROWN1,
+    maxHp: 140,
+  });
+  send({
+    moves: [row12('slash'), row12('thump'),
+      row12('learnt', { ppUps: 2, priority: 3, highCrit: true })],
+    level: 52,
+  });
+  send({ moves: [row12('slash'), row12('thump'), row12('swap', { ppUps: 0 })] });
+  send({ moves: [row12('aaa'), row12('bbb'), row12('swap')], level: 53 });
+  live.transformed = true;
+  send({ moves: four, level: 54, maxHp: 150 });
+  live.transformed = false;
+  send({ moves: four, level: 0 });
+  record.sim.levelUp = false;
+  send({ moves: four, level: 55 });
+  return { opened: true, calls, steps };
+}
+
+function levelFight3() {
+  const relay = makeGenRelay(makeClock(), 3);
+  const a = dialAs(relay, 'ANN', ID_A, {
+    generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+  });
+  const b = dialAs(relay, 'BOB', ID_B, {
+    generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+  });
+  const sess = openFight(relay, a, b);
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  const record = relay.battles.get(sess.id);
+  if (!record || !record.sim) return { opened: false };
+  let calls = 0;
+  record.sim.levelUp = () => { calls += 1; };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: sess.id,
+    mon: 0,
+    moves: [move3(), move3({ id: 'NEW3', num: 44 })],
+    level: 51,
+    stats: GROWN2,
+    maxHp: 140,
+  });
+  const ids = record.sim.byId.get(a.id).mons[0].moves.map((m) => m.id);
+  return { opened: true, calls, moves: ids };
+}
+
+/*
+ * Pay Day on a Gen 1 / Gen 2 outcome (contract K11): the hubs copy the
+ * referee's outcome().payDay onto the broadcast in the NPC modes alone, and
+ * only a positive count. The referee's outcome is a stub. Twin of paidFight in
+ * the Lua driver.
+ */
+function paidFight(generation, mode, coins) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  let id;
+  if (mode === '1v1') {
+    id = openFight(relay, a, b).id;
+    uploadReady(relay, a, b, id, [sheet12(generation)], [sheet12(generation)]);
+  } else {
+    const solo = mode === 'wild';
+    id = 'w1';
+    relay.openCoopBattle(id, solo ? [a.id] : [a.id, b.id], { mode, hostId: a.id });
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+    relay.handle(a.id, {
+      type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet12(generation)],
+    });
+    if (!solo) {
+      relay.handle(b.id, {
+        type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet12(generation)],
+      });
+    }
+    relay.handle(a.id, {
+      type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet12(generation, { catchRate: 45 })],
+    });
+  }
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  record.sim.outcome = () => ({
+    outcome: 'win', winners: [a.id], losers: [b.id], reason: 'ko', payDay: coins,
+  });
+  relay.flushBattle(record);
+  const outcome = take(a, 'mmo.battle_outcome');
+  return {
+    opened: true,
+    outcome: slimPaid(outcome),
+    read1: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 1)),
+    read2: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 2)),
+    read3: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 3)),
+    readNone: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome)),
+    battleGone: !relay.battles.has(id),
+  };
+}
+
+function runGaps() {
+  return [
+    {
+      name: 'referee_gaps_dialect',
+      result: (() => {
+        const cases = gaps().map(([kind, input, gen]) => ({ kind, got: orNil(readGap(kind, input, gen)) }));
+        const payEdges12 = PAYDAY12_EDGES.map((v) => {
+          const row = {};
+          for (const reader of [1, 2, 3, 'none']) {
+            const got = sanitize.cleanBattleOutcome({ battle: 'b1', outcome: 'win', payDay: v },
+              reader !== 'none' ? reader : undefined);
+            row[`r${reader}`] = orNil(got && got.payDay);
+          }
+          return row;
+        });
+        return { cases, payEdges12 };
+      })(),
+    },
+    {
+      name: 'levelup_moveset_forward',
+      result: { red: levelFight(1), gold: levelFight(2), gen3: levelFight3() },
+    },
+    {
+      name: 'gen12_payday_forward',
+      result: {
+        redWild: paidFight(1, 'coop_wild', 350),
+        goldWild: paidFight(2, 'wild', 99999),
+        goldNone: paidFight(2, 'coop_wild', 0),
+        red1v1: paidFight(1, '1v1', 350),
       },
     },
   ];

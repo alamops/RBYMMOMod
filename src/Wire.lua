@@ -454,10 +454,21 @@ function M.spriteId(value)
 end
 
 -- an id is opaque to us; it only ever has to round-trip and index a table
+--
+-- Refused past 40 characters, never cut (contract K13 of
+-- docs/plans/gen12-referee-gaps-fix.md): server/lib/sanitize.js's cleanId is
+-- /^[\w-]{1,40}$/ and has always thrown a longer one away, and a Lua side that
+-- truncated instead accepted, stored and re-broadcast an id the node hub had
+-- refused -- one party fought on the LAN host and refused on the dedicated
+-- hub.  A cut id is no id anyway: it indexes no table the full one was a key
+-- of (a move's animation, an item's record, a defeat flag), so all the cut
+-- ever bought was a key that looked right and matched nothing.  M.spriteId's
+-- argument, made for every id.
 function M.id(value)
   if type(value) ~= "string" then return nil end
+  if #value > 40 then return nil end
   if not value:match("^[%w_%-]+$") then return nil end
-  return value:sub(1, 40)
+  return value
 end
 
 -- A nonce or a digest.  Hex is not an id, and cannot borrow M.id.
@@ -1175,11 +1186,20 @@ M.AMOUNT_MAX = 9999
 -- there rather than a divisor; the older readings keep the floor of one.
 M.PARTICIPANTS_MAX = Config.BATTLE_MON_MAX * Config.COOP_SIDE
 
--- The most Pay Day coins an outcome may say side a picked up (Gen 3 only,
--- M.battleOutcome).  pret's gPaydayMoney is a u16 that saturates, so this is
--- the cart's own ceiling rather than a guess; the Amulet Coin doubling is the
--- client's, applied after the read.
+-- The most Pay Day coins an outcome may say side a picked up, read by a Gen 3
+-- reader (or one that names none; M.battleOutcome).  pret's gPaydayMoney is a
+-- u16 that saturates, so this is the cart's own ceiling rather than a guess;
+-- the Amulet Coin doubling is the client's, applied after the read.
 M.PAYDAY3_MAX = 65535
+-- The same, read by a Gen 1 / Gen 2 reader (contract K11 of
+-- docs/plans/gen12-referee-gaps-fix.md).  pokered's wTotalPayDayMoney is three
+-- BCD bytes and AddBCD fills it with $99 on a carry, so Red saturates at
+-- 999999; pokecrystal's wPayDayMoney is a three-byte binary counter
+-- (BattleCommand_PayDay), but the wallet it is paid into is clamped to
+-- MAX_MONEY 999999 (AddBattleMoneyToAccount), so no larger count could ever
+-- be paid.  Gold's Amulet Coin doubling (CheckPayDay) is the client's, after
+-- the read, as on Gen 3.
+M.PAYDAY12_MAX = 999999
 
 -- How long a reason token this build has never heard of may be.  Refused past it
 -- rather than trimmed -- a cut token matches nothing and is a value nobody sent.
@@ -1277,6 +1297,33 @@ M.OBEY_TOKENS3 = {
 M.HOLD_EFFECT2_MAX = 32       -- characters in a HELD_* token
 M.HOLD_PARAM2_MAX = 255
 M.ITEM_NAME2_MAX = 12
+
+-- The referee-gap additions' bounds (contracts K7-K10 of
+-- docs/plans/gen12-referee-gaps-fix.md), Gen 1 / Gen 2 dialect only -- each
+-- the width the carts store the number in, so an honest sheet always fits:
+--
+--   BASE_STAT_MAX  a species base stat: one byte in both carts' base-stats
+--                  rows (pokered / pokecrystal data/pokemon/base_stats).
+--                  `baseSpd`'s 0..255, for the whole block.
+--   DV_MAX         a DV: one nibble of MON_DVS (the `ivs` block's 15).
+--   STAT_EXP_MAX   a stat-exp word: MON_STAT_EXP holds five big-endian
+--                  words (the `evs` block's 65535).
+--   PP_UPS_MAX     the PP Ups used on a move: the top two bits of its PP byte
+--                  (PP_UP_MASK %11000000, PP_MASK %00111111), so 0..3.
+--   PRIORITY2_MAX  Gold's raw GetMovePriority byte: VITAL_THROW 0, the
+--                  MoveEffectPriorities rows 0 / 2 / 3, BASE_PRIORITY 1 for
+--                  the rest.  Unsigned, unlike Gen 3's -7..7, and bounded by
+--                  the byte rather than by today's table so a content mod's
+--                  own number fits.
+--   STAGE12_MAX    a `stat` event's signed stage (K10): a stat level is 1..13
+--                  around 7 on both carts (wPlayerMonStatMods), so -6..6 --
+--                  Gen 3's STAGE3_MAX, named for the older dialect.
+M.BASE_STAT_MAX = 255
+M.DV_MAX = 15
+M.STAT_EXP_MAX = 65535
+M.PP_UPS_MAX = 3
+M.PRIORITY2_MAX = 255
+M.STAGE12_MAX = 6
 
 -- One Gen 2 hold effect, or nil.  Refused rather than trimmed past
 -- HOLD_EFFECT2_MAX, on M.spriteId's argument: a cut token names no rule, and
@@ -1639,11 +1686,10 @@ end
 -- on this function's rule; `maxPp` and `name` optional as before.  No
 -- `highCrit`: Gen 3's high-crit moves are an effect (§5.2), not a flag.
 -- M.id, refusing rather than cutting past 40 characters -- the reading
--- lib/sanitize.js's cleanId has always had.  The Gen 3 dialect is new on both
--- twins, so it takes the one the two can agree on; the older dialects keep
--- M.id's cut exactly as they always had it.
+-- lib/sanitize.js's cleanId has always had.  The Gen 3 dialect took it from
+-- the start; since K13 (docs/plans/gen12-referee-gaps-fix.md) M.id itself
+-- refuses, so this is M.id under the name the Gen 3 readers call it by.
 local function id3(value)
-  if type(value) ~= "string" or #value > 40 then return nil end
   return M.id(value)
 end
 
@@ -1718,6 +1764,35 @@ function M.battleMove(raw, generation)
     if raw.highCrit ~= true and raw.highCrit ~= false then return nil end
     if raw.highCrit == true then out.highCrit = true end
   end
+  -- Contract K8 (docs/plans/gen12-referee-gaps-fix.md), optional like
+  -- `highCrit` and refused like it when present and unreadable:
+  --
+  --   ppUps     Gen 1 and Gen 2: the PP Ups used on the move, the top two
+  --             bits of its PP byte (PP_UP_MASK).  The cart's move pick reads
+  --             that raw byte, so a move at 0 PP that has PP Ups is still
+  --             selectable (pokered `.chooseMove`) -- the referee needs the
+  --             count to see it.
+  --   priority  Gen 2 only: the cart's raw GetMovePriority byte for this move
+  --             (0..255).  The referee's priority table is keyed by vanilla
+  --             move id, so a content mod's move with a priority effect moved
+  --             at base priority; a row that states its own number is read
+  --             before the table.  A Gen 1 row never carries one (Red has no
+  --             move priority), and its reader neither copies nor refuses it --
+  --             the posture a Gen 1 sheet takes to Gold's held-item fields.
+  --
+  -- `gen` is the caller's dialect: a sheet's resolved generation, a ruleset's
+  -- (default 1), or the reader's own on an event or a moveset.  A caller that
+  -- names none reads the older row without `priority`, since it cannot say
+  -- the row is Gold's.  Read the way the Gen 3 fields are (M.int on both
+  -- twins: lib/sanitize's luaInt), because the readings are new on both.
+  if raw.ppUps ~= nil then
+    out.ppUps = M.int(raw.ppUps, 0, M.PP_UPS_MAX)
+    if out.ppUps == nil then return nil end
+  end
+  if gen == 2 and raw.priority ~= nil then
+    out.priority = M.int(raw.priority, 0, M.PRIORITY2_MAX)
+    if out.priority == nil then return nil end
+  end
   return out
 end
 
@@ -1728,6 +1803,21 @@ end
 -- sanitise, and a Gen 2 spa/spd sheet must not be refused as "wrong game".
 local STAT_KEYS_GEN1 = { "atk", "def", "spd", "spc" }
 local STAT_KEYS_GEN2 = { "atk", "def", "spe", "spa", "spd" }
+
+-- Contract K7's three blocks (see M.battleMon), per dialect: `base` keyed like
+-- `stats` plus `hp`; `dvs` the cart's four DVs; `statExp` the cart's five
+-- stat-exp words.  Twin of lib/sanitize.js K7_KEYS1 / K7_KEYS2.
+local K7_KEYS1 = {
+  base = { "hp", "atk", "def", "spd", "spc" },
+  dvs = { "atk", "def", "spd", "spc" },
+  statExp = { "hp", "atk", "def", "spd", "spc" },
+}
+local K7_KEYS2 = {
+  base = { "hp", "atk", "def", "spe", "spa", "spd" },
+  dvs = { "atk", "def", "spe", "spc" },
+  statExp = { "hp", "atk", "def", "spe", "spc" },
+}
+M.K7_KEYS1, M.K7_KEYS2 = K7_KEYS1, K7_KEYS2
 
 -- Which dialect a stats / ivs / evs block is in.
 --
@@ -2157,6 +2247,46 @@ function M.battleMon(raw)
   if raw.traded ~= nil then
     if type(raw.traded) ~= "boolean" then return nil end
     if raw.traded then out.traded = true end
+  end
+
+  -- Contract K7 (docs/plans/gen12-referee-gaps-fix.md): what the cart computes
+  -- a monster's stats *from*, so the referee can compute one itself -- a
+  -- transformed computer foe's crit stat (GetEnemyMonStat runs CalcMonStat
+  -- over the copied species with the foe's own DVs), the copied species' base
+  -- Speed for the crit rate, and the rebuild after a mid-fight level-up (K9)
+  -- when the client states no new stats.  The hub holds no species table and
+  -- never will, so these ride the sheet the way `baseSpd` does.  Each block
+  -- is optional and whole-or-refused, block3's reading and `ivs` / `evs`'
+  -- posture: a block with three of its five numbers is a bug on the sending
+  -- side that accepting would silently zero the rest of.
+  --
+  --   base     the species' base stats, keyed like `stats` plus `hp` --
+  --            Gen 1 hp atk def spd spc, Gen 2 hp atk def spe spa spd
+  --            (Gold splits Special) -- each 0..BASE_STAT_MAX, a byte.
+  --   dvs      the four DVs the cart stores, 0..DV_MAX -- Gen 1 atk def spd
+  --            spc, Gen 2 atk def spe spc (one Special DV feeds both of
+  --            Gold's special stats).  The HP DV is derived from these, so it
+  --            is never a key.
+  --   statExp  the cart's five stat-exp words, 0..STAT_EXP_MAX -- `hp` and
+  --            the `dvs` keys (Gold keeps one Special word for both special
+  --            stats, CalcMonStatC).  The cart's shape rather than `stats`',
+  --            so a sheet cannot state two Special values that disagree.
+  --
+  -- Gen 1 / Gen 2 only: battleMon3 builds its sheet field by field and reads
+  -- none of them.  `ivs` / `evs` above are the older blocks keyed like
+  -- `stats` (the vitamin store reads `evs`); these are the cart's.
+  local keys = generation == 2 and K7_KEYS2 or K7_KEYS1
+  if raw.base ~= nil then
+    out.base = block3(raw.base, keys.base, 0, M.BASE_STAT_MAX)
+    if not out.base then return nil end
+  end
+  if raw.dvs ~= nil then
+    out.dvs = block3(raw.dvs, keys.dvs, 0, M.DV_MAX)
+    if not out.dvs then return nil end
+  end
+  if raw.statExp ~= nil then
+    out.statExp = block3(raw.statExp, keys.statExp, 0, M.STAT_EXP_MAX)
+    if not out.statExp then return nil end
   end
 
   return out
@@ -2714,6 +2844,14 @@ function M.battleEvent(raw, generation)
     if raw.delta ~= nil then out.delta = M.int(raw.delta, -M.DELTA3_MAX, M.DELTA3_MAX) end
     if raw.holding ~= nil then out.holding = M.int(raw.holding, 0, Config.GEN3_ITEM_MAX) end
   end
+  -- The one Gen 3 field the older dialect now reads too (contract K10 of
+  -- docs/plans/gen12-referee-gaps-fix.md): a `stat` event's signed stage,
+  -- -6..6, where the stat now sits.  `amount` stays what it was -- unsigned,
+  -- so a stage below zero never fit in it and a lowered stat reached the
+  -- screen with no number at all.  Dropped like every mangled field here.
+  if older and raw.stage ~= nil then
+    out.stage = M.int(raw.stage, -M.STAGE12_MAX, M.STAGE12_MAX)
+  end
   if type(raw.moves) == "table" then
     local moves = {}
     for _, entry in ipairs(raw.moves) do
@@ -2795,9 +2933,11 @@ end
 -- pair, and a rank settle has four ids to move.  Present-and-malformed refuses
 -- the message: these are the names a rating moves for.
 --
--- `generation` (optional) is the reader's own, M.battleEvent's convention: 1
--- or 2 reads an outcome exactly as before Gen 3 had one, 3 or none named also
--- reads `payDay`.
+-- `generation` (optional) is the reader's own, M.battleEvent's convention.
+-- Every reader reads `payDay` (Gen 1 / Gen 2 from contract K11 of
+-- docs/plans/gen12-referee-gaps-fix.md); the bound is the reader's cart's --
+-- PAYDAY12_MAX for 1 or 2, PAYDAY3_MAX for 3 or none named, exactly as
+-- before.
 function M.battleOutcome(raw, generation)
   if type(raw) ~= "table" then return nil end
   local gen = M.int(generation, 1, M.GENERATION_MAX)
@@ -2833,17 +2973,19 @@ function M.battleOutcome(raw, generation)
     out.catcher = M.id(raw.catcher)
     if not out.catcher then return nil end
   end
-  -- Gen 3's Pay Day coins (sheet doc §1, §6): side a's total, present only on
-  -- a knockout win in a wild / coop_wild / coop_npc fight.  **Dropped rather
-  -- than fatal**, unlike the fields above, and the difference is who a bad
-  -- value can hurt.  A wrong winner or catcher moves a rating or a monster to
-  -- the wrong player, so refusing is the safe failure; a mangled coin count
-  -- has no recipient of its own (the winners list above decides who is paid),
-  -- and refusing the whole outcome over it would leave a finished fight on a
-  -- screen with no way out -- M.battleReason's argument -- to protect a
-  -- bonus.  The Amulet Coin doubling is the reader's, never the wire's.
-  if not older and raw.payDay ~= nil then
-    out.payDay = M.int(raw.payDay, 1, M.PAYDAY3_MAX)
+  -- Pay Day coins (Gen 3: sheet doc §1, §6; Gen 1 / Gen 2: contract K11):
+  -- side a's total, present only on a knockout win in a wild / coop_wild /
+  -- coop_npc fight.  **Dropped rather than fatal**, unlike the fields above,
+  -- and the difference is who a bad value can hurt.  A wrong winner or
+  -- catcher moves a rating or a monster to the wrong player, so refusing is
+  -- the safe failure; a mangled coin count has no recipient of its own (the
+  -- winners list above decides who is paid), and refusing the whole outcome
+  -- over it would leave a finished fight on a screen with no way out --
+  -- M.battleReason's argument -- to protect a bonus.  The Amulet Coin
+  -- doubling is the reader's, never the wire's.  A zero is no coins, read as
+  -- absent on every cart.
+  if raw.payDay ~= nil then
+    out.payDay = M.int(raw.payDay, 1, older and M.PAYDAY12_MAX or M.PAYDAY3_MAX)
   end
   return out
 end
@@ -2869,6 +3011,25 @@ end
 --
 -- `generation` (optional) is the hub's, and picks the move-row dialect the way
 -- M.battleMove documents (absent: a row stating `num` is Gen 3's).
+--
+-- A mid-fight level-up rides here too (contract K9 of
+-- docs/plans/gen12-referee-gaps-fix.md) -- no new message type: the client
+-- that owns the save copy is the only party that ran the Exp award, so it is
+-- the only one that knows the monster grew.  Generation 1 or 2 only (Gen 3's
+-- referee rebuilds nothing from it, and its reader reads none of it), each
+-- optional, present-and-unreadable refusing the message like a mangled move:
+--
+--   level   the new level, 1..LEVEL_MAX
+--   stats   the new stats, the sheet's `stats` block in the hub's dialect
+--   maxHp   the new max HP, 1..HP_MAX -- the sheet keeps it beside `stats`
+--           rather than in it, and the cart raises current HP by the same
+--           step it raises the maximum (pokered / pokecrystal
+--           GainExperience), so the referee needs it as much as the stats
+--
+-- A payload whose moves are the hub's own with any of these is a level-up
+-- that taught nothing, and is as valid as a learn.  Whether the claim is
+-- plausible (a level that rises) is the referee's to judge: the hub forwards
+-- it (M:applyBattleMoveset).
 function M.battleMoveset(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
@@ -2883,7 +3044,25 @@ function M.battleMoveset(raw, generation)
     moves[#moves + 1] = move
   end
   if #moves == 0 then return nil end
-  return { battle = battle, mon = mon, moves = moves }
+  local out = { battle = battle, mon = mon, moves = moves }
+  local gen = M.int(generation, 1, M.GENERATION_MAX)
+  if gen == 1 or gen == 2 then
+    if raw.level ~= nil then
+      out.level = M.int(raw.level, 1, M.LEVEL_MAX)
+      if out.level == nil then return nil end
+    end
+    if raw.stats ~= nil then
+      -- The dialect's keys whole, as statsOf reads a sheet's -- through
+      -- block3 so both twins read the numbers alike (luaInt there).
+      out.stats = block3(raw.stats, gen == 2 and STAT_KEYS_GEN2 or STAT_KEYS_GEN1, 1, M.STAT_MAX)
+      if not out.stats then return nil end
+    end
+    if raw.maxHp ~= nil then
+      out.maxHp = M.int(raw.maxHp, 1, M.HP_MAX)
+      if out.maxHp == nil then return nil end
+    end
+  end
+  return out
 end
 
 -- The shapes a mediated fight comes in.

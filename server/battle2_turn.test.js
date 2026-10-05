@@ -278,12 +278,12 @@ scenario('retarget', (events) => {
   return battle;
 });
 
-// 5. a whole trapping chain. Gen1's 2..5 counter is a *total* attack count, so
-//    the turn Wrap lands on deals the move's damage and no residual on top of
-//    it; every later turn is one attack, forced on both seats and therefore
-//    ticked rather than submitted. The tail also pins that a referee-filled
-//    answer cannot be cancelled away -- silently, so what shows up on the wire
-//    is the absence of an `unchose`.
+// 5. a whole trapping chain, Gold's way. TrapTarget sets a 3..6 count;
+//    HandleWrap ticks it at the end of every turn -- the one Wrap landed on
+//    included -- for a sixteenth of max HP, and releases at 0. Nobody is
+//    forced: the wrapped seat answers every turn, its switch is refused while
+//    the count runs and taken once it is released, and the trapper picks its
+//    own moves (a plain hit after the first turn).
 scenario('trap_chain', (events) => {
   const wrap = () => ({ id: 'wrap', pp: 60, power: 5, accuracy: 255, type: 0,
     effect: 42, chance: 0 });
@@ -292,23 +292,23 @@ scenario('trap_chain', (events) => {
     choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [
-        mn({ species: 'Alpha', maxHp: 400, spe: 120, moves: [wrap()] })] }],
+        mn({ species: 'Alpha', maxHp: 400, spe: 120, moves: [wrap(), mv('tap', 10, 255, 0)] })] }],
       b: [{ playerId: 'p2', name: 'Bob', mons: [
-        mn({ species: 'Beta', maxHp: 400, def: 200, spe: 1,
-          moves: [mv('tap', 40, 255, 0)] })] }],
+        mn({ species: 'Beta', maxHp: 400, def: 200, spe: 1, moves: [mv('tap', 10, 255, 0)] }),
+        mn({ species: 'Gamma', maxHp: 400, spe: 1, moves: [mv('tap', 10, 255, 0)] })] }],
     },
   });
   drainInto(battle, events);
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   drainInto(battle, events);
-  for (let step = 1; step <= 10; step += 1) {
-    battle.tick(step);
+  for (let i = 0; i < 6; i += 1) {
+    if (!battle.submitChoice('p2', { action: 'switch', slot: 1 })) {
+      battle.submitChoice('p2', { action: 'fight', move: 0 });
+    }
+    battle.submitChoice('p1', { action: 'fight', move: 1 });
     drainInto(battle, events);
   }
-  battle.submitChoice('p2', { action: 'cancel' });
-  battle.submitChoice('p2', { action: 'switch', slot: 0 });
-  drainInto(battle, events);
   return battle;
 });
 
@@ -569,7 +569,7 @@ scenario('crit_stages', (events) => {
   };
   const wall = () => fx('wall_up', 0, 1, 65, 20);
   const battle = build({
-    id: 'cr', mode: '1v1', seed: 2, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'cr', mode: '1v1', seed: 34, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [
         mn({ species: 'Alpha', level: 30, maxHp: 400, atk: 80, def: 80, spe: 60,
@@ -888,7 +888,7 @@ scenario('focus_band', (events) => {
     b.submitChoice('p2', { action: 'fight', move: 0 });
   };
   return play(events, {
-    id: 'fb', mode: '1v1', seed: 13, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'fb', mode: '1v1', seed: 11, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, atk: 60, spe: 90,
         types: [2], moves: [hm('thump', 40)] })] }],
@@ -908,7 +908,7 @@ scenario('kings_rock', (events) => {
     id: 'kr', mode: '1v1', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 999, spe: 90, types: [2],
-        item: rock, moves: [hm('thump', 10), hm('THUNDER', 10), hm('ember_hit', 10, 0, 4)] })] }],
+        item: rock, moves: [hm('thump', 10), hm('THUNDER', 10, 0, 97), hm('ember_hit', 10, 0, 4)] })] }],
       b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', maxHp: 999, spe: 10, types: [2],
         item: rock, moves: [hm('thump', 10)] })] }],
     },
@@ -1211,7 +1211,7 @@ scenario('thief_substitute', (events) => play(events, {
 }, repeat(duelRound('wild'), 4)));
 
 scenario('thief_chance_miss', (events) => play(events, {
-  id: 'tcm', mode: '1v1', seed: 26836, choiceTimeout: 60, reconnectGrace: 60,
+  id: 'tcm', mode: '1v1', seed: 153, choiceTimeout: 60, reconnectGrace: 60,
   sides: {
     a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', maxHp: 300, spe: 90, types: [2],
       moves: [thief(10)] })] }],
@@ -1462,6 +1462,161 @@ scenario('computer_growl_miss', (events) => {
 });
 
 // ------------------------------------------------------------------
+// the referee-gaps run (docs/plans/gen12-referee-gaps-fix.md, R2a): mirrored
+// line for line from the Lua driver, which carries the notes.
+// ------------------------------------------------------------------
+
+// One seat a side; `rounds` is a list of [playerId, choice] lists, each
+// submitted in order -- or 'tick', one second on the clock.
+const duo = (id, mode, seed, aMons, bMons, extra = {}) => ({
+  id, mode, seed, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', mons: aMons }],
+    b: [{ playerId: 'p2', name: 'Bob', mons: bMons }],
+  },
+  typeIds: extra.typeIds,
+  metronomePool: extra.metronomePool,
+});
+const seq = (events, opts, rounds) => play(events, opts, rounds.map((list) => (
+  list === 'tick'
+    ? (b) => { b.tick(b.now + 1); }
+    : (b) => { for (const [id, choice] of list) b.submitChoice(id, choice); }
+)));
+const F = (i) => ({ action: 'fight', move: i });
+const S = (slot) => ({ action: 'switch', slot });
+const both = (a, b) => [['p1', a], ['p2', b]];
+
+scenario('gold_stat_hits', (events) => seq(events, duo('gsh', 'wild', 501,
+  [mn({ species: 'Alpha', maxHp: 400, def: 999, spe: 90, stages: { atk: 5 },
+    moves: [hm('CRUNCH', 20, 0, 87, 60, 100), hm('METAL_CLAW', 20, 0, 89, 60, 100),
+      hm('ANCIENTPOWER', 20, 0, 91, 60, 100), hm('STEEL_WING', 20, 0, 90, 60, 100)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('MUD_SLAP', 5, 0, 88, 60, 100)] })]),
+[both(F(0), F(0)), both(F(1), F(0)), both(F(2), F(0)), both(F(3), F(0))]));
+
+scenario('flame_wheel_thaw', (events) => seq(events, duo('fwt', '1v1', 502,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, status: 'FRZ', types: [0],
+    moves: [hm('FLAME_WHEEL', 30, 1, 92, 60, 100)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 10, status: 'FRZ', types: [0],
+    moves: [hm('SACRED_FIRE', 30, 1, 93, 60, 100)] })],
+  { typeIds: SIDE_TYPES }),
+[both(F(0), F(0)), both(F(0), F(0))]));
+
+scenario('stomp_minimize', (events) => seq(events, duo('stm', '1v1', 503,
+  [mn({ species: 'Alpha', maxHp: 500, spe: 90, moves: [hm('MINIMIZE', 0, 0, 15)] }),
+    mn({ species: 'Gamma', maxHp: 500, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 500, spe: 10, moves: [hm('STOMP', 40, 0, 94, 60, 30)] })]),
+[both(F(0), F(0)), both(F(0), F(0)), both(S(1), F(0))]));
+
+scenario('twister_fly', (events) => seq(events, duo('twf', '1v1', 504,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [hm('FLY', 30, 0, 43), hm('DIG', 30, 0, 43)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('TWISTER', 20, 0, 95, 60, 20), hm('GUST', 20, 0, 99),
+      hm('EARTHQUAKE', 20, 0, 100), hm('THUNDER', 20, 0, 97, 60, 100)] })]),
+[both(F(0), F(0)), both(F(0), F(1)), both(F(1), F(2)), both(F(1), F(1)),
+  both(F(0), F(3))]));
+
+scenario('snore_sky_attack', (events) => seq(events, duo('ssa', '1v1', 505,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, item: ['KINGS_ROCK', 'HELD_FLINCH', 30, "KING'S ROCK"],
+    moves: [hm('SNORE', 20, 0, 96, 60, 30), hm('SKY_ATTACK', 40, 0, 101, 60, 30)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both(F(0), F(0)), both(F(1), F(0)), both(F(1), F(0)), both(F(0), F(0))]));
+
+scenario('tri_attack', (events) => {
+  const quiet = hm('wait', 0, 0, 85);
+  return seq(events, duo('tri', '1v1', 506,
+    [mn({ species: 'Alpha', maxHp: 400, spe: 90, types: [0],
+      moves: [hm('TRI_ATTACK', 10, 0, 98, 60, 100)] })],
+    [mn({ species: 'Beta', maxHp: 999, spe: 10, status: 'FRZ', types: [2], moves: [quiet] })],
+    { typeIds: SIDE_TYPES }),
+  [both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)),
+    both(F(0), F(0)), both(F(0), F(0))]);
+});
+
+scenario('effectchance_miss', (events) => {
+  const wild = { id: 'wild_flame', pp: 60, power: 40, accuracy: 1, type: 1, effect: 4, chance: 10 };
+  return seq(events, duo('ecm', '1v1', 507,
+    [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [wild] })],
+    [mn({ species: 'Beta', maxHp: 400, spe: 10,
+      moves: [hm('wait', 0, 0, 85), hm('SUBSTITUTE', 0, 0, 79), hm('FLY', 30, 0, 43)] })]),
+  [both(F(0), F(0)), both(F(0), F(2)), [['p1', F(0)]], both(F(0), F(1)), both(F(0), F(0))]);
+});
+
+scenario('multi_hit_draws', (events) => seq(events, duo('mhd', '1v1', 508,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, focusEnergy: true,
+    moves: [hm('fury_hits', 15, 0, 29), hm('twin_hits', 25, 0, 44), hm('TWINEEDLE', 25, 0, 77, 60, 20)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, types: [0], moves: [hm('tap', 1)] })],
+  { typeIds: SIDE_TYPES }),
+[both(F(0), F(0)), both(F(0), F(0)), both(F(1), F(0)), both(F(2), F(0)), both(F(2), F(0))]));
+
+scenario('multi_hit_first_ko', (events) => seq(events, duo('mfk', '1v1', 509,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [hm('fury_hits', 15, 0, 29)] })],
+  [mn({ species: 'Beta', maxHp: 400, hp: 1, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 400, spe: 10, moves: [hm('tap', 1)] })]),
+[both(F(0), F(0)), [['p2', S(1)]], both(F(0), F(0))]));
+
+scenario('leech_seed_eighth', (events) => {
+  const seeded = mn({ species: 'Beta', maxHp: 400, spe: 10, substitute: 50,
+    leechSeed: { fromSlot: 0 }, moves: [hm('wait', 0, 0, 85)] });
+  return seq(events, duo('lse', '1v1', 510,
+    [mn({ species: 'Alpha', maxHp: 400, hp: 100, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+    [seeded]),
+  [both(F(0), F(0)), both(F(0), F(0))]);
+});
+
+scenario('no_999_cap', (events) => seq(events, duo('n9c', '1v1', 511,
+  [mn({ species: 'Alpha', level: 100, maxHp: 9000, atk: 255, spe: 90, types: [0],
+    moves: [hm('crush', 250, 0, 0)] })],
+  [mn({ species: 'Beta', level: 100, maxHp: 9000, def: 1, spe: 10, types: [0],
+    moves: [hm('BIDE', 0, 0, 26)] })]),
+[both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0))]));
+
+scenario('recoil_substitute', (events) => seq(events, duo('rcs', '1v1', 512,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, substitute: 50,
+    moves: [hm('TAKE_DOWN', 40, 0, 48)] })],
+  [mn({ species: 'Beta', maxHp: 400, spe: 10, substitute: 200, moves: [hm('wait', 0, 0, 85)] })]),
+[both(F(0), F(0)), both(F(0), F(0))]));
+
+scenario('rampage_zero_pp', (events) => seq(events, duo('rzp', '1v1', 513,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('THRASH', 20, 0, 27, 1)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 90, status: 'PAR', moves: [hm('THRASH', 20, 0, 27, 5)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, moves: [hm('tap', 1)] })]),
+[both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)),
+  both(S(1), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0))]));
+
+scenario('mirror_move_last_used', (events) => seq(events, duo('mml', '1v1', 514,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 10, moves: [hm('MIRROR_MOVE', 0, 0, 9), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 600, spe: 90, moves: [hm('METRONOME', 0, 0, 83), hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 600, spe: 90, moves: [hm('tap', 1)] })],
+  { metronomePool: [hm('pool_hit', 30, 0, 0)] }),
+[both(F(0), F(0)), both(F(0), F(1)), both(F(0), S(1))]));
+
+scenario('metronome_charge', (events) => seq(events, duo('mtc', '1v1', 515,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 90, moves: [hm('METRONOME', 0, 0, 83)] })],
+  [mn({ species: 'Beta', maxHp: 600, spe: 10, moves: [hm('MIRROR_MOVE', 0, 0, 9)] })],
+  { metronomePool: [hm('FLY', 30, 0, 43)] }),
+[both(F(0), F(0)), 'tick', both(F(0), F(0))]));
+
+scenario('metronome_bide', (events) => seq(events, duo('mtb', '1v1', 518,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 90, moves: [hm('METRONOME', 0, 0, 83)] })],
+  [mn({ species: 'Beta', maxHp: 600, atk: 90, spe: 10, moves: [hm('thump', 40)] })],
+  { metronomePool: [hm('BIDE', 0, 0, 26)] }),
+[both(F(0), F(0)), [['p2', F(0)]], [['p2', F(0)]], [['p2', F(0)]], both(F(0), F(0))]));
+
+const payDayFight = (id, mode) => (events) => seq(events, duo(id, mode, 516,
+  [mn({ species: 'Alpha', level: 30, maxHp: 400, atk: 90, spe: 90, moves: [hm('PAY_DAY', 40, 0, 16)] })],
+  [mn({ species: 'Beta', level: 140, maxHp: 60, spe: 10, moves: [hm('PAY_DAY', 1, 0, 16)] })]),
+[both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0))]);
+scenario('pay_day_wild', payDayFight('pdw', 'wild'));
+scenario('pay_day_link', payDayFight('pdl', '1v1'));
+
+scenario('hyper_beam_recharge', (events) => seq(events, duo('hbr', '1v1', 517,
+  [mn({ species: 'Alpha', maxHp: 600, atk: 90, spe: 90, moves: [hm('HYPER_BEAM', 150, 0, 80), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 20, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 600, spe: 10, moves: [hm('SUBSTITUTE', 0, 0, 79), hm('wait', 0, 0, 85)] })]),
+[both(F(0), F(0)), [['p2', S(1)]], [['p2', F(0)]], both(F(0), F(1)), [['p2', F(1)]]]));
+
+// ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
 
@@ -1489,6 +1644,8 @@ function slimOutcome(out) {
   const slim = { battle: out.battle, outcome: out.outcome, reason: out.reason };
   if (out.winners) slim.winners = out.winners;
   if (out.losers) slim.losers = out.losers;
+  // Contract K11: Pay Day's coins on side a's win against the computer.
+  if (out.payDay) slim.payDay = out.payDay;
   return slim;
 }
 
@@ -1524,7 +1681,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 58, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 77, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -2053,7 +2210,9 @@ const RULES = { typeIds: ['DARK', 'BUG', 'FIRE'], specialTypes: [2] };
 // One exchange: Ann (side a) and Bob (side b) each swing once. `a` / `b`
 // override the stats, the move's power and type, and carry each seat's upload
 // (`a.pp = 0` empties Ann's one slot, so she Struggles); `rules` is the ruleset
-// (typeIds, specialTypes).
+// (typeIds, specialTypes). The default seed is the one the numbers below were
+// pinned on, re-chosen (from 777001) when K12 moved the stream onto the RNG's
+// high bits, so every exchange rolls what it did.
 const exchange = (mode, a, b, rules = {}) => {
   const move = (power, type, pp = 20) => ({
     id: 'thump', pp, power, accuracy: 255, type, effect: 0, chance: 0,
@@ -2065,7 +2224,7 @@ const exchange = (mode, a, b, rules = {}) => {
   };
   if (a.confusion) ann.confusion = a.confusion;
   const battle = build({
-    id: 'b1', mode, seed: a.seed || 777001, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'b1', mode, seed: a.seed || 777002, choiceTimeout: 60, reconnectGrace: 60,
     typeIds: rules.typeIds, specialTypes: rules.specialTypes,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [ann] }],
@@ -2410,8 +2569,10 @@ test('fidelity: stages do not survive a switch-in or a faint', () => {
 });
 
 test('fidelity: screens are per side, tick five times, fail on a recast and skip fixed damage', () => {
+  // Seed 4243: Beta's zap does not crit (it does on 4242 since K12, and a crit
+  // reads the unscreened Sp. Def -- CheckDamageStatsCritical).
   const battle = duel({
-    specialTypes: [1],
+    specialTypes: [1], seed: 4243,
     a: [sheet({ species: 'Alpha', spe: 90, moves: [hit('glow_wall', 0, 1, 64, 20), hit('tap', 1)] })],
     b: [sheet({ species: 'Beta', spe: 10, spa: 60, moves: [hit('zap', 40, 1), hit('sonic_ping', 20, 0, 41)] })],
   });
@@ -2775,8 +2936,16 @@ test("held items: King's Rock -- eligible scripts only, never through a standing
     return { events: roundOf(battle, foe), battle };
   };
   assert.ok(said(run(hit('thump', 10), rock).events, 'Beta flinched'));
-  assert.strictEqual(rngOf(run(hit('thump', 10)).battle), rngOf(run(hit('THUNDER', 10), rock).battle),
+  assert.strictEqual(rngOf(run(hit('thump', 10)).battle), rngOf(run(hit('FUTURE_SIGHT', 10), rock).battle),
     'a folded-0 move without `kingsrock` draws nothing');
+  // THUNDER has its own id now (Effects.THUNDER), whose script has no
+  // `kingsrock`; SNORE's own id ends in it.
+  assert.strictEqual(rngOf(run(hit('THUNDER', 10, 0, Effects.THUNDER)).battle),
+    rngOf(run(hit('THUNDER', 10, 0, Effects.THUNDER), rock).battle),
+    'nor does a Gold-native id whose script has none (THUNDER)');
+  assert.notStrictEqual(rngOf(run(hit('SNORE', 10, 0, Effects.SNORE)).battle),
+    rngOf(run(hit('SNORE', 10, 0, Effects.SNORE), rock).battle),
+    "SNORE's script ends in `kingsrock`, so its own id rolls it");
   assert.strictEqual(rngOf(run(hit('ember_hit', 10, 0, 4), rock).battle),
     rngOf(run(hit('ember_hit', 10, 0, 4)).battle), 'nor does a status hit');
   const subbed = () => held({ species: 'Beta', maxHp: 400, spe: 10, substitute: 300, moves: [hit('tap', 1)] });
@@ -2832,7 +3001,7 @@ test('held items: Thief both ways, never Mail, never into a full hand, never pas
   assert.ok(!sawHeld(sub.events), 'a substitute at effectchance keeps the item');
   assert.strictEqual(monOf(sub.battle, sub.foe).heldItem, 'CHARCOAL');
   assert.ok(said(sub.events, 'Alpha used THIEF'));
-  const miss = run(charcoal, undefined, 26836);
+  const miss = run(charcoal, undefined, 153);
   assert.ok(!sawHeld(miss.events), 'the 1/256 byte of 255 against a 100% chance takes nothing');
   assert.strictEqual(monOf(miss.battle, miss.foe).heldItem, 'CHARCOAL');
   const zero = fight({
@@ -3100,7 +3269,9 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   leech.battle.drainEvents();
   const leechEvents = roundOf(leech.battle, leech.foe);
   assert.ok(said(leechEvents, 'Beta is seeded'));
-  assert.strictEqual(monOf(leech.battle, 'p1').hp, 119);
+  // GetEighthMaxHP of 320 is 40, but SubtractHP hands back the 9 HP Beta had
+  // left, and that is what RestoreHP gives the seeder.
+  assert.strictEqual(monOf(leech.battle, 'p1').hp, 108, 'the seeder is healed the HP taken');
   assert.strictEqual(leech.battle.outcome().reason, 'ko');
 
   // Gold / Crystal Rage.
@@ -3130,7 +3301,11 @@ test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leec
   assert.strictEqual(ralpha.rageCounter, 0);
   const plain = { level: 20, attack: 40, defense: 40, power: 20, roll: 100 };
   assert.strictEqual(Damage2.compute({ ...plain, rageCount: 4 }).damage, 5 * Damage2.compute(plain).damage);
-  assert.strictEqual(Damage2.compute({ ...plain, rageCount: 255 }).damage, 999);
+  assert.strictEqual(Damage2.compute({ ...plain, rageCount: 255 }).damage,
+    256 * Damage2.compute(plain).damage, 'x256 at 255, with no 999 tail after it');
+  assert.strictEqual(Damage2.compute({
+    level: 100, attack: 255, defense: 1, power: 250, roll: 100, rageCount: 255,
+  }).damage, 65535, 'pinned at $ffff when the sum carries');
   const src = rageFight({ seed: 1, status: 'PSN', confusion: 3, bMove: 'thump', bEffect: 0 });
   src.battle.drainEvents();
   roundOf(src.battle, src.foe);
@@ -3296,9 +3471,28 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   assert.strictEqual(out.messages.length, 0, '-6 fails a side effect silently');
   r = bytes([]);
   t = tgt();
-  side(69, t, { rng: r });
+  side(68, t, { rng: r });
   assert.strictEqual(r.drawn, 0, "a player's drop draws no byte");
-  assert.strictEqual(t.stages.def, -1);
+  assert.strictEqual(t.stages.atk, -1);
+  // DefenseDownHit's second `effectchance`: drawn in the tail against the
+  // substitute standing then, and its verdict is the one StatDown reads.
+  const sideAt = (target, rng, hit) => Effects.applySide({
+    effectId: 69, hit, chance: 30, rng, targetMon: target,
+    targetFighter: { slot: 3, side: 'b' }, statusToWire: WIRE,
+  });
+  r = bytes([10]);
+  t = tgt();
+  sideAt(t, r, false);
+  assert.strictEqual(r.drawn, 1, 'DEFENSE_DOWN_HIT draws its second effectchance byte');
+  assert.strictEqual(t.stages.def, -1, 'a landed second byte lowers Defense whatever the first said');
+  r = bytes([200]);
+  t = tgt();
+  sideAt(t, r, true);
+  assert.strictEqual(t.stages.def, 0, 'a failed one stops it whatever the first said');
+  r = bytes([10]);
+  t = tgt({ substitute: 10 });
+  sideAt(t, r, true);
+  assert.strictEqual(r.drawn, 0, 'a substitute still standing skips it, byte and all');
   t = tgt({ invulnerable: true });
   side(68, t);
   assert.strictEqual(t.stages.atk, 0, 'CheckHiddenOpponent');
@@ -3402,4 +3596,190 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   const banded = duelOf('1v1', hit('tap', 1), { aMove: ember, aSpe: 90, bSpe: 10, bHp: 1, bItem: band });
   assert.ok(said(banded.events, 'Beta hung on with FOCUS BAND!'));
   assert.strictEqual(monOf(banded.battle, 'p2').status, 'burn', 'the chance byte still draws');
+});
+
+// The referee-gaps run (docs/plans/gen12-referee-gaps-fix.md, R2a): the claims
+// the parity scenarios pin only as streams. Twin of the Lua suite's block.
+test('referee gaps: the Gold-native effects, effectchance, multi-hit, rampage, recoil, Pay Day', () => {
+  const Rng2 = require('./lib/battle2/Rng');
+  const bytes = (list) => {
+    const r = { drawn: 0 };
+    r.byte = () => { r.drawn += 1; return list[r.drawn - 1] || 0; };
+    return r;
+  };
+  const withMove = (m, o = {}) => {
+    const { battle } = fight({ seed: o.seed === undefined ? 5 : o.seed, mode: o.mode,
+      a: [held({ species: 'Alpha', maxHp: 400, spe: 90, status: o.status, moves: [m] })],
+      b: [held({ species: 'Beta', maxHp: 900, spe: 10, substitute: o.substitute,
+        moves: [hit('wait', 0, 0, 85)] })] });
+    battle.drainEvents();
+    return battle;
+  };
+
+  // (a) the Gold-native ids, under the cart's own names
+  const names = {
+    EFFECT_SP_DEF_DOWN_HIT: 87, EFFECT_ACCURACY_DOWN_HIT: 88, EFFECT_ATTACK_UP_HIT: 89,
+    EFFECT_DEFENSE_UP_HIT: 90, EFFECT_ALL_UP_HIT: 91, EFFECT_FLAME_WHEEL: 92,
+    EFFECT_SACRED_FIRE: 93, EFFECT_STOMP: 94, EFFECT_TWISTER: 95, EFFECT_SNORE: 96,
+    EFFECT_THUNDER: 97, EFFECT_TRI_ATTACK: 98, EFFECT_GUST: 99, EFFECT_EARTHQUAKE: 100,
+    EFFECT_SKY_ATTACK: 101,
+  };
+  for (const [name, id] of Object.entries(names)) {
+    assert.strictEqual(Effects.idOf(name), id, `${name} has its own id`);
+    assert.strictEqual(Effects.nameOf(id), name);
+  }
+  assert.strictEqual(Effects.MAX_EFFECT_ID, 101);
+  assert.strictEqual(Effects.nameOf(102), null);
+  assert.strictEqual(Effects.category(101), 'charge');
+  assert.ok(Effects.isCharge(Effects.SKY_ATTACK));
+  assert.strictEqual(Effects.idOf('EFFECT_SOLARBEAM'), 39);
+
+  // (b) BattleCommand_EffectChance
+  let r = bytes([254]);
+  assert.strictEqual(Effects.effectChance(r, 100, false), true);
+  r = bytes([255]);
+  assert.strictEqual(Effects.effectChance(r, 100, false), false, 'the 1/256 miss');
+  r = bytes([0]);
+  assert.strictEqual(Effects.effectChance(r, 0, false), false);
+  assert.strictEqual(r.drawn, 1, 'a 0% chance draws its byte');
+  r = bytes([0]);
+  assert.strictEqual(Effects.effectChance(r, 100, true), false);
+  assert.strictEqual(r.drawn, 0, 'a substitute fails it before any byte');
+  assert.ok(Effects.drawsEffectChance(4, hit('ember', 40, 1, 4)));
+  assert.ok(Effects.drawsEffectChance(Effects.EARTHQUAKE, hit('EARTHQUAKE', 40, 0, 100)));
+  assert.ok(!Effects.drawsEffectChance(Effects.TRI_ATTACK, hit('TRI_ATTACK', 40)));
+  assert.ok(!Effects.drawsEffectChance(Effects.GUST, hit('GUST', 40)));
+  assert.ok(!Effects.drawsEffectChance(0, hit('thump', 40)));
+  assert.ok(Effects.drawsEffectChance(0, { ...hit('THIEF', 40), chance: 100 }));
+
+  // ...and on a miss
+  const wild = (effect) => ({ id: 'wild', pp: 60, power: 40, accuracy: 1, type: 0, effect,
+    chance: effect === 0 ? 0 : 10 });
+  let missSeed = null;
+  for (let seed = 1; seed <= 400; seed += 1) {
+    const b = withMove(wild(0), { seed });
+    if (said(roundOf(b, 'p2'), 'Alpha missed')) { missSeed = seed; break; }
+  }
+  assert.ok(missSeed !== null);
+  const plainMiss = withMove(wild(0), { seed: missSeed });
+  const burnMiss = withMove(wild(4), { seed: missSeed });
+  roundOf(plainMiss, 'p2');
+  roundOf(burnMiss, 'p2');
+  const probe = Rng2.create(0).setState(rngOf(plainMiss));
+  probe.next();
+  assert.strictEqual(rngOf(burnMiss), probe.state(),
+    'a missed burn hit draws exactly one more byte: its `effectchance`');
+  const subMiss = withMove(wild(4), { seed: missSeed, substitute: 50 });
+  const subPlain = withMove(wild(0), { seed: missSeed, substitute: 50 });
+  roundOf(subMiss, 'p2');
+  roundOf(subPlain, 'p2');
+  assert.strictEqual(rngOf(subMiss), rngOf(subPlain), 'none behind a substitute');
+
+  // (c) MULTI_HIT's count
+  const tally = [0, 0, 0, 0, 0, 0];
+  for (let first = 0; first < 4; first += 1) {
+    for (let second = 0; second < 4; second += 1) {
+      tally[Effects.multiHitCount(bytes([first, second]))] += 1;
+    }
+  }
+  assert.strictEqual(tally.slice(2).join(','), '6,6,2,2', '2 and 3 at 3/8, 4 and 5 at 1/8');
+  r = bytes([1]);
+  assert.strictEqual(Effects.multiHitCount(r), 3);
+  assert.strictEqual(r.drawn, 1);
+  assert.strictEqual(Effects.fixedHits(29), 1);
+  assert.strictEqual(Effects.fixedHits(44), 2);
+  assert.strictEqual(Effects.fixedHits(77), 2);
+
+  // (d) the counts the carts draw
+  assert.strictEqual(Effects.wrapCount(bytes([0])), 3);
+  assert.strictEqual(Effects.wrapCount(bytes([7])), 6);
+  assert.strictEqual(`${Effects.rampageTurns(bytes([0]))}/${Effects.rampageTurns(bytes([1]))}`, '1/2');
+  assert.strictEqual(`${Effects.rampageConfusion(bytes([0]))}/${Effects.rampageConfusion(bytes([1]))}`, '2/3');
+  assert.strictEqual(Effects.payDayCoins(30), 60);
+  assert.strictEqual(Effects.payDayCoins(140), 24, 'the carry lost');
+
+  // (e) StatDown's `.ComputerMiss` exemption for ACCURACY_DOWN_HIT
+  r = bytes([0]);
+  const target = { species: 'Tgt', stages: { atk: 0, def: 0, spe: 0, spa: 0, spd: 0, acc: 0, eva: 0 } };
+  assert.strictEqual(Effects.statDownGate(r, target, 'acc', true, Effects.ACCURACY_DOWN_HIT), null);
+  assert.strictEqual(r.drawn, 0);
+  assert.strictEqual(Effects.statDownGate(r, target, 'atk', true, 68), 'missed');
+
+  // (f) RaiseStat on the user
+  const user = held({ species: 'Alpha', def: 999, moves: [hit('tap', 1)] });
+  user.stages = { atk: 6, def: 0, spe: 0, spa: 0, spd: 0, acc: 0, eva: 0 };
+  const out = Effects.applySide({ effectId: Effects.ALL_UP_HIT, hit: true, rng: bytes([]),
+    targetMon: { species: 'Tgt', stages: target.stages, substitute: 0 },
+    userMon: user, userFighter: { slot: 0, side: 'a' }, targetFighter: { slot: 3, side: 'b' } });
+  assert.strictEqual(`${user.stages.atk}/${user.stages.def}/${user.stages.spe}`, '6/0/1');
+  assert.strictEqual(out.messages.length, 3);
+  user.stages.spe = 0;
+  Effects.applySide({ effectId: Effects.ATTACK_UP_HIT, hit: false, rng: bytes([]),
+    targetMon: { species: 'Tgt', stages: target.stages, substitute: 0 },
+    userMon: user, userFighter: { slot: 0, side: 'a' }, targetFighter: { slot: 3, side: 'b' } });
+  assert.strictEqual(user.stages.spe, 0);
+
+  // (g) CantMove
+  const thrasher = withMove(hit('THRASH', 20, 0, 27, 10), { seed: 7 });
+  roundOf(thrasher, 'p2');
+  const alpha = monOf(thrasher, 'p1');
+  assert.ok(alpha.thrashing);
+  alpha.status = 'paralysis';
+  let stopped = false;
+  for (let i = 0; i < 30; i += 1) {
+    if (!alpha.thrashing) break;
+    if (said(roundOf(thrasher, 'p2'), 'Alpha is fully paralyzed')) { stopped = true; break; }
+  }
+  assert.ok(stopped, 'seed 7: a full paralysis lands while the rampage runs');
+  assert.strictEqual(alpha.thrashing, null, 'CantMove ends the rampage');
+  assert.strictEqual(alpha.confusion, 0);
+  const flier = withMove(hit('FLY', 30, 0, 43), { seed: 3 });
+  roundOf(flier, 'p2');
+  const fa = monOf(flier, 'p1');
+  assert.ok(fa.charging && fa.invulnerable);
+  fa.flinch = true;
+  assert.ok(said(roundOf(flier, 'p2'), 'Alpha flinched'));
+  assert.strictEqual(fa.charging, null, 'CantMove ends the charge');
+  assert.strictEqual(fa.invulnerable, false);
+
+  // (h) THRASH with its last PP
+  const last = withMove(hit('THRASH', 20, 0, 27, 1), { seed: 9 });
+  roundOf(last, 'p2');
+  const la = monOf(last, 'p1');
+  assert.strictEqual(la.moves[0].pp, 0);
+  const nextTurn = roundOf(last, 'p2');
+  assert.ok(said(nextTurn, 'Alpha used THRASH'));
+  assert.ok(!said(nextTurn, 'Alpha used STRUGGLE'));
+  assert.strictEqual(la.moves[0].pp, 0);
+
+  // (i) HYPER BEAM into a substitute
+  const beam = withMove(hit('HYPER_BEAM', 150, 0, 80), { seed: 4, substitute: 400 });
+  const beamTurn = roundOf(beam, 'p2');
+  assert.strictEqual(monOf(beam, 'p2').hp, 900);
+  assert.ok(said(beamTurn, 'Alpha must recharge'));
+
+  // (j) PAY DAY
+  const payFight = (mode) => {
+    const { battle, foe } = fight({ mode, seed: 6,
+      a: [held({ species: 'Alpha', level: 30, maxHp: 400, atk: 90, spe: 90,
+        moves: [hit('PAY_DAY', 40, 0, 16)] })],
+      b: [held({ species: 'Beta', maxHp: 30, spe: 10, moves: [hit('wait', 0, 0, 85)] })] });
+    battle.drainEvents();
+    for (let i = 0; i < 6 && !battle.outcome(); i += 1) roundOf(battle, foe);
+    return battle.outcome();
+  };
+  const won = payFight('wild');
+  assert.ok(won && won.outcome === 'win' && won.payDay && won.payDay % 60 === 0);
+  assert.strictEqual(payFight('1v1').payDay, undefined, 'a link fight reports none');
+  const { battle: catcher } = fight({ mode: 'wild', seed: 6,
+    a: [held({ species: 'Alpha', level: 30, maxHp: 400, atk: 1, spe: 90,
+      moves: [hit('PAY_DAY', 1, 0, 16)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('wait', 0, 0, 85)] })] });
+  catcher.drainEvents();
+  roundOf(catcher, 'wild');
+  catcher.submitChoice('p1', { action: 'item', item: 'MASTER_BALL' });
+  catcher.submitChoice('wild', { action: 'fight', move: 0 });
+  catcher.drainEvents();
+  assert.strictEqual(catcher.outcome().reason, 'catch');
+  assert.strictEqual(catcher.outcome().payDay, 60, 'a catch is a WIN: the pot is paid');
 });

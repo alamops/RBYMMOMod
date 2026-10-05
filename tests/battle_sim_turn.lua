@@ -3505,7 +3505,8 @@ do
   for _, mode in ipairs({ "1v1", "coop_pvp" }) do
     local bare = exchange(mode, {}, {})
     local plainDmg = hitOn(bare, 3)
-    eq(plainDmg, 17, mode .. ": the unbadged attack lands for 17")
+    -- 18 since K12 (the damage roll reads the RNG's high bits); 17 before.
+    eq(plainDmg, 18, mode .. ": the unbadged attack lands for 18")
     eq(hitOn(exchange(mode, hit, {}), 3), plainDmg,
        mode .. ": BOULDERBADGE does not raise the damage -- a link battle")
     -- One seat at a time: both at once would cancel here (each attack is
@@ -3523,10 +3524,11 @@ do
   -- (b) the same seats against the computer: boosted, which is what makes the
   --     gate the mode rather than a removal of the boost.
   for _, mode in ipairs({ "coop_npc", "wild" }) do
-    eq(hitOn(exchange(mode, {}, {}), 3), 17, mode .. ": unbadged, the same 17")
-    -- 88 -> floor(88 * 9 / 8) = 99 Attack; lib/battle reaches the same 19.
-    eq(hitOn(exchange(mode, hit, {}), 3), 19,
-       mode .. ": BOULDERBADGE raises side a's physical damage to 19")
+    eq(hitOn(exchange(mode, {}, {}), 3), 18, mode .. ": unbadged, the same 18")
+    -- 88 -> floor(88 * 9 / 8) = 99 Attack; lib/battle reaches the same 20
+    -- (18 / 20 since K12's high-bits damage roll; 17 / 19 before).
+    eq(hitOn(exchange(mode, hit, {}), 3), 20,
+       mode .. ": BOULDERBADGE raises side a's physical damage to 20")
     eq(firstHit(exchange(mode, { spd = 40 }, foe)), 0,
        mode .. ": unbadged, the foe (42) still goes first")
     eq(firstHit(exchange(mode, fast, foe)), 3,
@@ -5081,7 +5083,9 @@ do
 
   local snap = battle:snapshot()
   eq(fighterIn(snap, "foeA").hp, 182, "retarget/same-position: Epsilon (the replacement) took slow's hit")
-  eq(fighterIn(snap, "foeB").hp, 6, "retarget/same-position: foeB took fast's original, unretargeted hit")
+  -- 0 since K12 (the high-bits damage roll now knocks Delta out); 6 before.
+  -- Either way the hit landed on foeB, the seat fast aimed at.
+  eq(fighterIn(snap, "foeB").hp, 0, "retarget/same-position: foeB took fast's original, unretargeted hit")
 end
 
 -- (c) both opposing seats are empty when the action runs, but the field
@@ -6512,6 +6516,22 @@ do
     end
     eq(selfHit(true), 10, "the foe's Reflect doubles the self-hit's Defense")
     eq(selfHit(false), 18, "...and without it the hit is 18")
+
+    -- Behind its own doll the same 18 lands on the FOE's doll:
+    -- HandleSelfConfusionDamage ends on ApplyDamageToPlayerPokemon, and its
+    -- Substitute branch's AttackSubstitute picks the doll by hWhoseTurn --
+    -- the other side's (core.asm :3714, :4849-4856).  CheckForDisobedience
+    -- calls it without `.IsConfused`'s BattleStatus1 clear.
+    local battle = arena({ a = { rogue({ extra = { substitute = 25 } }) },
+      b = { bob({ extra = { substitute = 30 } }) } })
+    script(battle, { 0x05, 50, 0xA5 })
+    local events = step(battle, use(0), use(0))
+    ok(said(events, "Alpha hurt itself in confusion"), "behind a doll: still the self-hit line")
+    eq(#hits(events, 0), 0, "...but Alpha takes nothing")
+    eq(hits(events, 3)[1], 18, "...Bob's doll takes the 18")
+    eq(activeMonOf(battle, "p2").substitute, 12, "...and stands at 12")
+    eq(activeMonOf(battle, "p1").substitute, 25, "Alpha's own doll is untouched")
+    eq(battle.lastDamage, 18, "wDamage holds the self-hit's 18")
   end
 
   -- (h) `.monDoesNothing`'s four lines: R3 swap(0x4B) = 180, 180 - 90 >= 90;
@@ -7283,12 +7303,14 @@ end
 -- gone all the same, so TWINEEDLE's poison never rolls.  Every byte is
 -- scripted and the damage roll held at 255, so each hit is exactly 10 (level
 -- 20, 40 / 40, power 40, no STAB): a 5-HP doll breaks on hit 1, a 15-HP doll
--- on hit 2, a 25-HP one on hit 3.  The two-to-five count byte is the move's
--- second draw (acc, count, crit; 2 + byte % 4, so 3 is five hits), and it is
--- drawn even when the first hit ends the move -- the referee draws it up
--- front, the cart at `.notDone` and not at all after a first-hit break: a
--- stream-only difference.  The g1_multi_sub / g1_rage_sub* parity scenarios
--- hold lib/battle to the same streams.
+-- on hit 2, a 25-HP one on hit 3, and a 10-HP doll survives hit 1 at 0
+-- (AttackSubstitute's `ret nc`) to break on hit 2.  The two-to-five count is
+-- TwoToFiveAttacksEffect's (effects.asm :925-969), drawn where the cart
+-- draws it: after the first hit (acc, crit, hit 1, then the count), and not
+-- at all when that hit broke the doll.  `byte % 4` below 2 is 2 or 3 hits;
+-- 2 or 3 draws a second byte whose `% 4` is kept -- 3/8, 3/8, 1/8, 1/8 for
+-- 2..5.  The g1_multi_sub / g1_rage_sub* parity scenarios hold lib/battle to
+-- the same streams.
 
 do
   local Rng = BattleSim.Rng
@@ -7348,30 +7370,51 @@ do
     return table.concat(hits, " "), #log, broke, poisoned, activeMonOf(battle, "p2")
   end
 
-  -- (a) Two-to-five (29) on a count byte of 3: five hits.
-  local FIVE = { 0, 3, 255 }
+  -- (a) Two-to-five (29): count bytes 3 then 3, five hits.
+  local FIVE = { 0, 255, 3, 3 }
   local hits, draws, broke, poisoned, beta = turn(29, 0, FIVE)
   eq(hits, "10:390 10:380 10:370 10:360 10:350", "29, no doll: five hits on Beta")
-  eq(draws, 4, "...acc, count, crit, then Beta's acc")
+  eq(draws, 5, "...acc, crit, the two count bytes after hit 1, then Beta's acc")
   hits, draws, broke, _, beta = turn(29, 5, FIVE)
   ok(broke, "29, a 5-HP doll: the first hit breaks it")
   eq(hits, "10:400", "...and the move ends there: the four hits left are never thrown")
   eq(beta.hp, 400, "...Beta untouched")
   eq(beta.substitute or 0, 0, "...the doll gone")
-  eq(draws, 4, "...the count byte drawn all the same (up front: a stream-only difference)")
+  eq(draws, 3, "...and no count byte: acc, crit, then Beta's acc")
   hits, draws, broke, _, beta = turn(29, 15, FIVE)
   ok(broke, "29, a 15-HP doll: the second hit breaks it")
   eq(hits, "10:400 10:400 10:390 10:380 10:370",
      "...and the move goes on: hits 3 to 5 land on Beta")
   eq(beta.hp, 370, "...30 off Beta")
-  eq(draws, 4, "...the same four bytes")
+  eq(draws, 5, "...the same five bytes")
   hits, draws, broke = turn(29, 25, FIVE)
   ok(broke, "29, a 25-HP doll: the third hit breaks it")
   eq(hits, "10:400 10:400 10:400 10:390 10:380", "...and hits 4 and 5 land on Beta")
-  hits, draws, broke, _, beta = turn(29, 15, { 0, 0, 255 })
+  hits, draws, broke, _, beta = turn(29, 10, FIVE)
+  ok(broke, "29, a 10-HP doll: hit 1 takes exactly its HP and it stands, at 0")
+  eq(hits, "10:400 10:400 10:390 10:380 10:370",
+     "...so the count is drawn, hit 2 breaks it and hits 3 to 5 land on Beta")
+  eq(draws, 5, "...five bytes, as with no doll")
+  hits, draws, broke, _, beta = turn(29, 15, { 0, 255, 0 })
   ok(broke, "29 on a count byte of 0, two hits: the second breaks the 15-HP doll")
   eq(hits, "10:400 10:400", "...both on the doll, Beta untouched")
   eq(beta.hp, 400, "...at 400")
+  eq(draws, 4, "...one count byte: acc, crit, count, Beta's acc")
+  -- The rest of the distribution: 1 keeps 3 hits; 2 redraws, and the redraw's
+  -- `% 4` is kept whatever it is (2 + 2 = 4 hits, 2 + 0 = 2 hits).
+  hits, draws = turn(29, 0, { 0, 255, 1 })
+  eq(hits, "10:390 10:380 10:370", "29 on a count byte of 1: three hits, no redraw")
+  eq(draws, 4, "...acc, crit, count, Beta's acc")
+  hits, draws = turn(29, 0, { 0, 255, 2, 6 })
+  eq(hits, "10:390 10:380 10:370 10:360", "29 on 2 then 6: the redraw's 2, four hits")
+  eq(draws, 5, "...two count bytes")
+  hits, draws = turn(29, 0, { 0, 255, 7, 4 })
+  eq(hits, "10:390 10:380", "29 on 7 then 4: the redraw's 0, two hits")
+  -- EFFECT_1E (30) is the same routine (effects_pointers.asm) and the same
+  -- AlwaysHappenSideEffects entry: a two-to-five move.
+  hits, draws = turn(30, 0, FIVE)
+  eq(hits, "10:390 10:380 10:370 10:360 10:350", "EFFECT_1E (30): five hits on the same bytes")
+  eq(draws, 5, "...drawn as 29 draws them")
 
   -- (b) DOUBLE KICK (44): two hits, no count byte.
   local TWO = { 0, 255 }
@@ -7409,6 +7452,212 @@ do
   ok(not broke and beta.substitute == 10, "77, a 30-HP doll soaks both hits and stands at 10")
   ok(not poisoned and beta.status == nil, "...and PoisonEffect, reached, stops at it")
   eq(draws, 3, "...before its byte")
+end
+
+-- ------------------------------------------------------------------
+-- R1a (gen12-referee-gaps-fix): the draws the cart's rules take away, on a
+-- scripted generator that counts bytes and damage rolls apart.  The
+-- g1_damage_tails / g1_counter / g1_pay_day / g1_leech_toxic parity
+-- scenarios hold lib/battle to the same streams.
+-- ------------------------------------------------------------------
+
+do
+  local Rng = BattleSim.Rng
+  local function script(battle, bytes)
+    local fallback = Rng.new(99)
+    local log = { bytes = 0, rolls = 0 }
+    battle.rng = {
+      byte = function()
+        log.bytes = log.bytes + 1
+        local b = bytes[log.bytes]
+        if b == nil then b = fallback:byte() end
+        return b
+      end,
+      nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+      damageRoll = function() log.rolls = log.rolls + 1; return 255 end,
+      next = function() return fallback:next() end,
+      state = function() return fallback:state() end,
+    }
+    return log
+  end
+  local function duel(o)
+    local battle = assert(Turn.create({
+      id = "r1a", mode = o.mode or "1v1", seed = 7, choiceTimeout = 60, reconnectGrace = 60,
+      chart = o.chart, typeIds = o.typeIds,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = { o.a } } },
+        b = { { playerId = "p2", name = "Bob", mons = { o.b } } },
+      },
+    }))
+    drain(battle)
+    return battle
+  end
+  local function play(battle, bytes, aMove, bMove)
+    local log = script(battle, bytes or {})
+    battle:submitChoice("p1", { action = "fight", move = aMove or 0 })
+    battle:submitChoice("p2", { action = "fight", move = bMove or 0 })
+    return drain(battle), log
+  end
+  local function hitsOn(events, slot)
+    local out = {}
+    for _, e in ipairs(events) do
+      if e.t == "damage" and e.slot == slot then out[#out + 1] = e.amount end
+    end
+    return table.concat(out, " ")
+  end
+  local function saidIt(events, text)
+    for _, e in ipairs(events) do
+      if e.t == "msg" and e.text == text then return true end
+    end
+    return false
+  end
+
+  -- (a) RandomizeDamage's `cp 2` / `ret c` and AdjustDamageForMoveType's 0.
+  --     A level-2, Attack-5 hit into Defense 200 is a base 2; Beta is types 1
+  --     and 2.  Two bytes for Alpha (acc, crit), one for Beta's splash.
+  local CHART = { { 100, 100, 100 }, { 100, 50, 100 }, { 100, 50, 50 }, { 100, 0, 100 } }
+  local function tails(moveType)
+    local battle = duel({ chart = CHART,
+      a = { species = "Alpha", level = 2, maxHp = 60, stats = { atk = 5, def = 40, spd = 90, spc = 40 },
+            types = { 0 }, baseSpd = 0, moves = { move({ id = "tap", power = 10, type = moveType }) } },
+      b = { species = "Beta", maxHp = 60, stats = { atk = 40, def = 200, spd = 10, spc = 40 },
+            types = { 1, 2 }, baseSpd = 0, moves = { move({ id = "splash", power = 0, effect = 85 }) } } })
+    return play(battle, { 0, 255 })
+  end
+  local events, log = tails(1)
+  eq(hitsOn(events, 3), "1", "0.5x on a base 2: the hit lands for 1")
+  eq(log.rolls, 0, "...and draws no damage roll (`cp 2` / `ret c`)")
+  events, log = tails(2)
+  ok(saidIt(events, "Alpha missed") and hitsOn(events, 3) == "",
+     "0.25x on a base 2 reaches 0: a miss (AdjustDamageForMoveType)")
+  eq(log.rolls, 0, "...with no roll")
+  events, log = tails(3)
+  ok(saidIt(events, "It doesn't affect Beta"), "an immunity says so")
+  eq(log.rolls, 0, "...and an immunity's 0 draws no roll either")
+  events, log = tails(0)
+  eq(log.rolls, 1, "a STAB 3 rolls")
+  eq(log.bytes, 3, "every case: acc, crit, then Beta's acc")
+
+  -- (b) COUNTER: the conditions first, with no draw when they fail; then
+  --     the one hit test, and no crit byte and no roll.  Bob (fast) thumps
+  --     for 10 (level 20, 40 / 40, power 40, roll held at 255).
+  local function counterDuel(bobMove, aExtra)
+    local a = { species = "Alpha", level = 20, maxHp = 400, stats = { atk = 40, def = 40, spd = 10, spc = 40 },
+                types = { 1 }, baseSpd = 0,
+                moves = { move({ id = "COUNTER", power = 1, type = 1 }) } }
+    for k, v in pairs(aExtra or {}) do a[k] = v end
+    return duel({
+      a = a,
+      b = { species = "Beta", level = 20, maxHp = 400, stats = { atk = 40, def = 40, spd = 90, spc = 40 },
+            types = { 1 }, baseSpd = 0, moves = { bobMove } } })
+  end
+  local battle = counterDuel(move({ id = "thump", power = 40 }))
+  events, log = play(battle, { 0, 255, 0 })
+  eq(hitsOn(events, 3), "20", "COUNTER returns twice the 10")
+  eq(log.bytes, 3, "...Bob's acc and crit, then COUNTER's one hit test")
+  eq(log.rolls, 1, "...and only Bob's roll")
+  eq(battle.lastDamage, 20, "wDamage now holds the 20")
+  battle = counterDuel(move({ id = "flame", power = 40, type = 2 }))
+  events, log = play(battle, { 0, 255 })
+  ok(saidIt(events, "Alpha missed"), "a type-2 hit is not countered")
+  eq(log.bytes, 2, "...and COUNTER drew nothing")
+  battle = counterDuel(move({ id = "thump", power = 40 }), { substitute = 50 })
+  events = play(battle, { 0, 255, 0 })
+  eq(hitsOn(events, 3), "20", "a hit Alpha's doll soaked is countered whole")
+
+  -- (c) Pay Day: the pile on a wild win; nothing in a link fight.
+  local function payDuel(mode)
+    local battle = duel({ mode = mode,
+      a = { species = "Alpha", level = 20, maxHp = 400, stats = { atk = 40, def = 40, spd = 90, spc = 40 },
+            types = { 1 }, baseSpd = 0, moves = { move({ id = "coin", power = 40, effect = 16 }) } },
+      b = { species = "Beta", level = 20, hp = 10, maxHp = 400, stats = { atk = 40, def = 40, spd = 10, spc = 40 },
+            types = { 1 }, baseSpd = 0, moves = { move({ id = "splash", power = 0, effect = 85 }) } } })
+    play(battle, { 0, 255 })
+    return battle:outcome()
+  end
+  local won = payDuel("wild")
+  eq(won and won.payDay, 40, "a wild win reports level x 2 = 40 (PayDayEffect_)")
+  local link = payDuel("1v1")
+  eq(link and link.payDay, nil, "a link win reports no Pay Day")
+
+  -- (d) LEECH SEED x the toxic counter (HandlePoisonBurnLeechSeed_DecreaseOwnHP
+  --     runs the counter for the seed tick too), and the seeder's whole share.
+  battle = duel({
+    a = { species = "Alpha", level = 20, hp = 300, maxHp = 400, stats = { atk = 40, def = 40, spd = 90, spc = 40 },
+          types = { 1 }, baseSpd = 0, moves = { move({ id = "splash", power = 0, effect = 85 }) } },
+    b = { species = "Beta", level = 20, maxHp = 400, status = "TOX", stats = { atk = 40, def = 40, spd = 10, spc = 40 },
+          types = { 1 }, baseSpd = 0, leechSeed = { fromSlot = 0 },
+          moves = { move({ id = "splash", power = 0, effect = 85 }) } } })
+  events = play(battle, { 0, 0 })
+  eq(hitsOn(events, 3), "25 50", "toxic x1, then the seed x2")
+  eq(activeMonOf(battle, "p1").hp, 350, "...the seeder gets the 50")
+  eq(activeMonOf(battle, "p2").toxicCounter, 3, "...and the counter went up twice")
+
+  -- (e) AlwaysHappenSideEffects against a 200-HP doll that holds: the drain
+  --     heals half the whole hit (DrainHPEffect_ halves wDamage), STRUGGLE's
+  --     recoil is half of it (RecoilEffect_ `cp STRUGGLE`) off the user's own
+  --     HP, never its own doll.  The hit is 10 (roll held at 255).
+  local function intoDoll(moves, aExtra)
+    local a = { species = "Alpha", level = 20, hp = 300, maxHp = 400,
+                stats = { atk = 40, def = 40, spd = 90, spc = 40 }, types = { 1 }, baseSpd = 0,
+                moves = moves }
+    for k, v in pairs(aExtra or {}) do a[k] = v end
+    local b = duel({ a = a,
+      b = { species = "Beta", level = 20, maxHp = 400, substitute = 200,
+            stats = { atk = 40, def = 40, spd = 10, spc = 40 }, types = { 1 }, baseSpd = 0,
+            moves = { move({ id = "splash", power = 0, effect = 85 }) } } })
+    play(b, { 0, 255 })
+    return activeMonOf(b, "p1")
+  end
+  eq(intoDoll({ move({ id = "leech", power = 40, effect = 3 }) }).hp, 305,
+     "a drain into a holding doll heals 5 of the 10")
+  local strug = intoDoll({ move({ id = "thump", power = 40, pp = 0 }) }, { substitute = 30 })
+  eq(strug.hp, 294, "STRUGGLE (power 50: 12) into the doll: half, 6, off Alpha's HP")
+  eq(strug.substitute, 30, "...never Alpha's own doll")
+
+  -- (f) RAGE pays its PP once (DecrementPP returns while USING_RAGE);
+  --     "<MON>'s RAGE is building!" heads every build.  (The g1_rage_thrash_pp
+  --     scenario holds RAGE at 0 PP to RAGE.)
+  battle = duel({
+    a = { species = "Alpha", level = 20, maxHp = 400, stats = { atk = 40, def = 40, spd = 90, spc = 40 },
+          types = { 1 }, baseSpd = 0, moves = { move({ id = "RAGE", power = 20, effect = 81, pp = 2 }) } },
+    b = { species = "Beta", level = 20, maxHp = 400, stats = { atk = 40, def = 40, spd = 10, spc = 40 },
+          types = { 1 }, baseSpd = 0, moves = { move({ id = "thump", power = 10 }) } } })
+  for turn = 1, 2 do
+    events = play(battle, { 0, 255, 0, 255 })
+    ok(saidIt(events, "Alpha used RAGE"), "turn " .. turn .. ": RAGE")
+    ok(saidIt(events, "Alpha's RAGE is building!"), "turn " .. turn .. ": the building line")
+  end
+  eq(activeMonOf(battle, "p1").moves[1].pp, 1, "one PP spent over both turns")
+
+  -- (g) Pay Day's pile is both sides': the computer's coins are picked up too.
+  battle = duel({ mode = "wild",
+    a = { species = "Alpha", level = 20, maxHp = 400, stats = { atk = 40, def = 40, spd = 90, spc = 40 },
+          types = { 1 }, baseSpd = 0, moves = { move({ id = "coin", power = 40, effect = 16 }) } },
+    b = { species = "Beta", level = 30, hp = 15, maxHp = 400, stats = { atk = 40, def = 40, spd = 10, spc = 40 },
+          types = { 1 }, baseSpd = 0, moves = { move({ id = "coin", power = 10, effect = 16 }) } } })
+  play(battle, { 0, 255, 0, 255 })
+  play(battle, { 0, 255 })
+  eq(battle:outcome() and battle:outcome().payDay, 140, "2 x 40 of Alpha's + 60 of Beta's")
+
+  -- (h) A METRONOME that called FLY lands FLY on the next turn.
+  battle = assert(Turn.create({ id = "r1am", mode = "1v1", seed = 7, choiceTimeout = 60,
+    reconnectGrace = 60, metronomePool = { move({ id = "FLY", power = 90, effect = 43 }) },
+    sides = {
+      a = { { playerId = "p1", name = "Ann", mons = { { species = "Alpha", level = 20, maxHp = 400,
+        stats = { atk = 40, def = 40, spd = 90, spc = 40 }, types = { 1 }, baseSpd = 0,
+        moves = { move({ id = "METRONOME", power = 0, effect = 83 }) } } } } },
+      b = { { playerId = "p2", name = "Bob", mons = { { species = "Beta", level = 20, maxHp = 400,
+        stats = { atk = 40, def = 40, spd = 10, spc = 40 }, types = { 1 }, baseSpd = 0,
+        moves = { move({ id = "splash", power = 0, effect = 85 }) } } } } },
+    } }))
+  drain(battle)
+  play(battle, { 0, 0, 0 })
+  events = play(battle, { 0, 255, 0 })
+  ok(saidIt(events, "Alpha used FLY") and not saidIt(events, "Alpha used METRONOME"),
+     "the release is FLY, not a second METRONOME")
+  eq(hitsOn(events, 3) ~= "", true, "...and it lands")
+  eq(activeMonOf(battle, "p1").moves[1].pp, 19, "METRONOME paid once (20 -> 19)")
 end
 
 -- ------------------------------------------------------------------

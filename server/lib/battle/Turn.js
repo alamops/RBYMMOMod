@@ -23,21 +23,22 @@
  *      (`_obey`, Status' obedience section: CheckForDisobedience's loops, the
  *      instead-move, nap and loaf draws) -- a fight with no traded monster on
  *      the player's side draws none of them;
- *   5. per move that is actually used: accuracy byte, multihit-count byte
- *      (TWO_TO_FIVE only), crit byte, damage roll, side-chance byte
+ *   5. per move that is actually used: accuracy byte, crit byte, damage
+ *      roll -- only for a damage of 2 or more after the type chart
+ *      (RandomizeDamage's `cp 2` / `ret c`: an immunity or a hit already at 0
+ *      or 1 draws none) -- then, after the first hit, the two-to-five count
+ *      byte(s) (TwoToFiveAttacksEffect: one, or two when the first is a 2 or
+ *      3; none when that hit broke a Substitute), then the side-chance byte
  *      (damaging hits only), in that order, and none of them drawn when an
- *      earlier step ended the move (a missed move draws no crit byte). The
+ *      earlier step ended the move (a missed move draws no crit byte).
+ *      COUNTER draws its accuracy byte alone, and nothing when its
+ *      conditions fail (`_counterDamage`). The
  *      side-chance byte is the effect's own pokered routine's, drawn where
  *      and when that routine draws it (Effects.applySide): never on a target
  *      that fainted or a Substitute the move broke, not by a poison / burn /
  *      freeze / paralysis / flinch / stat-drop routine whose target it
  *      already turned away (a Substitute, a status, a type), and behind the
  *      computer's extra stat-drop miss byte when the computer drops a stat.
- *
- * The damage roll is drawn even when the hit turns out to be an immunity,
- * because in the Lua the roll is an argument to `Damage.compute` and arguments
- * are evaluated before the call finds out. That is a draw the port cannot
- * optimise away without desyncing the two runtimes on the next attack.
  *
  * Nothing else rolls. Residuals, switches, items and the clock are all
  * deterministic, so a battle replays from its seed plus the choice log.
@@ -166,6 +167,10 @@ const SIDES = ['a', 'b'];
 // damage step) sees null and needs no gate of its own.
 const BADGE_MODES = { wild: true, coop_wild: true, coop_npc: true };
 const BADGE_SIDE = 'a';
+
+// wTotalPayDayMoney is three BCD bytes, and AddBCD saturates at 999999
+// (engine/math/bcd.asm). `_checkOver`.
+const PAY_DAY_MAX = 999999;
 
 // The modes a faint pays experience in -- the ones vanilla awards it in. 1v1
 // and coop_pvp never do; see `_awardExp` for why the gate is the mode rather
@@ -654,6 +659,13 @@ function typeIndexOf(typeIds, name) {
   return null;
 }
 
+// typeIndexOf for COUNTER's two types, with pokered's own index when the
+// ruleset sent no axis at all (`attempt`'s note).
+function counterType(typeIds, name, fallback) {
+  if (!Array.isArray(typeIds)) return fallback;
+  return typeIndexOf(typeIds, name);
+}
+
 function hasType(mon, typeId) {
   return mon.types.includes(typeId);
 }
@@ -711,6 +723,21 @@ function copyBag(raw) {
   return out;
 }
 
+// Every forced fight carries the move it replays (`forcedMove`): the move its
+// record kept, or the recording slot's own. The cart skips the move menu for
+// all of them (MainInBattleLoop: CHARGING_UP / THRASHING_ABOUT, USING_RAGE,
+// STORING_ENERGY), so wPlayerSelectedMove still names the move from the turn
+// that started it -- the one MetronomePickMove / MirrorMoveCopyMove wrote
+// there for a called move (core.asm :5013-5031, :4961-4986), which is why a
+// METRONOME that called FLY lands FLY next turn rather than rolling METRONOME
+// again. And since no menu is asked, nothing is ever Struggle here: RAGE at
+// 0 PP stays RAGE. `called` marks a record holding a called move, whose
+// selected move is not the slot's (`_useMove`'s disabled check).
+function forcedMoveOf(mon, calledMove, slot) {
+  if (calledMove) return { move: calledMove, called: true };
+  return { move: mon.moves[slot - 1], called: null };
+}
+
 // ------------------------------------------------------------------
 // the battle
 // ------------------------------------------------------------------
@@ -727,6 +754,21 @@ class Battle {
     // The two types a side effect's routine asks about by name (attempt).
     this.poisonType = typeIndexOf(opts.typeIds, 'POISON');
     this.fireType = typeIndexOf(opts.typeIds, 'FIRE');
+    // The two COUNTER answers (attempt).
+    this.normalType = counterType(opts.typeIds, 'NORMAL', 0);
+    this.fightingType = counterType(opts.typeIds, 'FIGHTING', 1);
+    // wDamage: the one damage word both sides share on the cart, read by
+    // COUNTER (`_counterDamage`). Written where the cart writes it -- a hit
+    // (capped to the HP it took off a monster, whole against a doll), a miss
+    // (MoveHitTest zeroes it), a drain (halved in place), a self-hit, a Bide
+    // release, a trap's later hit -- and never by a residual, a recoil or a
+    // status move that lands (CalculateDamage returns before writing on power
+    // 0). 0 at the start: InitBattleVariables clears the battle variables.
+    this.lastDamage = 0;
+    // Pay Day's pile, per side of the field: PayDayEffect_ adds the user's
+    // level x 2 to wTotalPayDayMoney on either side's turn, and EndOfBattle
+    // pays the whole pile (`_checkOver`).
+    this.payDay = { a: 0, b: 0 };
     if (Array.isArray(opts.specialTypes)) {
       const set = Object.create(null);
       for (const t of opts.specialTypes) set[Math.max(0, int(t, 0))] = true;
@@ -894,11 +936,12 @@ class Battle {
   //     wild seat of a wild / coop_wild fight, therefore consume nothing and
   //     replay exactly as they always did -- the aim stream in those fights is
   //     never even touched.
-  //   * `byte()` is the draw, not `nextInt`. `nextInt` takes the whole LCG
-  //     state modulo the span, and this generator's bit 0 alternates every
+  //   * `byte()` is the draw, not `nextInt`. `nextInt` used to take the whole
+  //     LCG state modulo the span, and this generator's bit 0 alternates every
   //     step, so a two-seat side would have got a perfect A-B-A-B rota rather
   //     than a spread. `byte()` reads bits 16..23, which is the reason Rng.js
-  //     puts them there.
+  //     puts them there (since K12 `nextInt` reads the high bits too; the aim
+  //     draw stays `byte()` so no recorded aim stream moves).
   //
   // Draw order is the parity contract, exactly as it is for `this.rng`: both
   // runtimes call this at the same points, in the same seat order, or their
@@ -1025,12 +1068,15 @@ class Battle {
           if (foe) {
             this._say(`${mon.species} unleashed energy`);
             fighter.forced = true;
+            const forced = forcedMoveOf(mon, mon.bide.move, mon.bide.moveIndex);
             fighter.choice = {
               action: 'fight',
               move: mon.bide.moveIndex,
               target: mon.bide.targetSlot !== null && mon.bide.targetSlot !== undefined
                 ? mon.bide.targetSlot : foe.slot,
               bideRelease: true,
+              forcedMove: forced.move,
+              called: forced.called,
             };
             this._emit('chose', {
               slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -1054,7 +1100,7 @@ class Battle {
         // Cartridge lock-in: no menu, residual still deals stored damage. Emit
         // continue narration + anim so the screen shows the trap going on —
         // do not re-enter _useMove (that would re-roll damage).
-        const move = mon.moves[mon.trapping.moveIndex - 1];
+        const { move } = forcedMoveOf(mon, mon.trapping.move, mon.trapping.moveIndex);
         const moveId = (move && move.id) || 'attack';
         this._say(`${mon.species}'s ${moveLabel(move, 'attack')} continues`);
         this._emit('anim', {
@@ -1071,10 +1117,13 @@ class Battle {
       if (mon.charging) {
         const c = mon.charging;
         fighter.forced = true;
+        const forced = forcedMoveOf(mon, c.move, c.moveIndex);
         fighter.choice = {
           action: 'fight',
           move: c.moveIndex,
           target: c.targetSlot,
+          forcedMove: forced.move,
+          called: forced.called,
         };
         this._emit('chose', {
           slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -1087,10 +1136,13 @@ class Battle {
         if (foe) {
           this._say(`${mon.species} thrashing about`);
           fighter.forced = true;
+          const forced = forcedMoveOf(mon, mon.thrashing.move, mon.thrashing.moveIndex);
           fighter.choice = {
             action: 'fight',
             move: mon.thrashing.moveIndex,
             target: foe.slot,
+            forcedMove: forced.move,
+            called: forced.called,
           };
           this._emit('chose', {
             slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -1099,15 +1151,21 @@ class Battle {
         continue;
       }
 
+      // No line here: `.RageCheck` (core.asm :3568-3579) only names the move
+      // and goes to PlayerCanExecuteMove, whose "used RAGE!" `_useMove` says.
+      // "<MON>'s RAGE is building!" is HandleBuildingRage's, at each build
+      // (`_buildRage`).
       if (mon.raging && mon.rageMove && mon.rageMove > 0) {
         const foe = this._autoTarget(fighter);
         if (foe) {
-          this._say(`${mon.species}'s RAGE is building`);
           fighter.forced = true;
+          const forced = forcedMoveOf(mon, mon.rageCall, mon.rageMove);
           fighter.choice = {
             action: 'fight',
             move: mon.rageMove,
             target: foe.slot,
+            forcedMove: forced.move,
+            called: forced.called,
           };
           this._emit('chose', {
             slot: fighter.slot, side: fighter.side, text: fighter.name,
@@ -1510,7 +1568,7 @@ class Battle {
       || (defender.stages.spd || 0) >= 2
       || (defender.stages.spc || 0) >= 2
       || defender.focusEnergy;
-    const foeSub = (defender.substitute || 0) > 0;
+    const foeSub = Effects.hasSubstitute(defender);
     const weSlower = this._speedOf(fighter, mon) < this._speedOf(foe, defender);
 
     // Critical HP: SE retreat (heal already tried via bag).
@@ -1829,11 +1887,22 @@ class Battle {
   // resolve to -- and the slot's own otherwise. Read off the choice, as the
   // cart reads wPlayerSelectedMove before anything runs: a Metronome moves at
   // Metronome's priority whatever it calls, and a disobedient monster at the
-  // priority of the move it was told to use, whatever it does instead.
+  // priority of the move it was told to use, whatever it does instead. A
+  // forced replay is the move it replays (`forcedMoveOf`), never Struggle.
   _priorityOf(fighter, mon) {
+    return Effects.movePriority(this._selectedMove(fighter, mon));
+  }
+
+  // The move a fight choice selects, before anything runs: a forced replay's
+  // own, Struggle when every slot is empty, else the chosen slot's. null when
+  // the choice is not a fight.
+  _selectedMove(fighter, mon) {
     const choice = fighter.choice;
-    if (allPpEmpty(mon)) return Effects.movePriority(STRUGGLE);
-    return Effects.movePriority(mon.moves[(choice ? choice.move : 0) - 1]);
+    if (!choice || choice.action !== 'fight') return null;
+    if (choice.forcedMove) return choice.forcedMove;
+    if (allPpEmpty(mon)) return STRUGGLE;
+    const move = mon.moves[(choice.move || 0) - 1];
+    return move === undefined ? null : move;
   }
 
   // The battler opposite this one: the foe seat in the same position if it
@@ -1958,10 +2027,12 @@ class Battle {
           mon.thrashing = null;
           mon.raging = false;
           mon.rageMove = 0;
+          mon.rageCall = null;
           mon.trapped = null;
           mon.trapping = null;
           mon.bide = null;
           mon.substitute = 0;
+          mon.subAtZero = null;
           mon.lightScreen = false;
           mon.reflect = false;
           mon.mist = false;
@@ -2419,6 +2490,12 @@ class Battle {
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
       const mon = activeMon(fighter);
+      // wEnemySelectedMove / wPlayerSelectedMove for this turn, which COUNTER
+      // reads off the seat it strikes (`_counterDamage`): what the seat chose
+      // to use, rewritten by `_useMove` with a move its METRONOME / MIRROR
+      // MOVE called or its disobedience picked instead. A seat that switched,
+      // used an item or ran selected no move.
+      fighter.selectedMove = mon ? this._selectedMove(fighter, mon) : null;
       if (choice && choice.action === 'fight' && mon) {
         actors.push({
           fighter,
@@ -2501,8 +2578,9 @@ class Battle {
             text: `${mon.species} snapped out of confusion`,
           });
         } else if (gate.selfHit) {
+          this._selfHitClears(fighter, mon);
           this._say(`${mon.species} hurt itself in confusion`);
-          this._damage(fighter, mon, gate.selfDamage || 0, null);
+          this._selfHit(fighter, mon, gate.selfDamage || 0);
           return false;
         }
         if (!gate.canMove) return false;
@@ -2510,6 +2588,62 @@ class Battle {
     }
 
     return true;
+  }
+
+  // `.IsConfused` on a self-hit (core.asm :3420-3434): `and 1 << CONFUSED`
+  // keeps the confusion and clears every other wPlayerBattleStatus1 bit
+  // before HandleSelfConfusionDamage runs -- STORING_ENERGY (a Bide),
+  // THRASHING_ABOUT, ATTACKING_MULTIPLE_TIMES, FLINCHED, CHARGING_UP,
+  // USING_TRAPPING_MOVE and INVULNERABLE. So a confused monster that hurts
+  // itself loses the Bide it was storing, the thrash it was in (no confusion
+  // at its end, since it never ends), the charge it was about to release (and
+  // the FLY / DIG vanish with it), and the trap it held, which frees the
+  // monster it held. Rage is a wPlayerBattleStatus2 bit and stays. The
+  // disobedience self-hit (CheckForDisobedience `.monHurtsItself`) calls
+  // HandleSelfConfusionDamage directly and clears nothing.
+  _selfHitClears(fighter, mon) {
+    mon.bide = null;
+    mon.thrashing = null;
+    mon.flinch = false;
+    mon.charging = null;
+    mon.invulnerable = false;
+    if (mon.trapping) {
+      const held = this._fighterAtSlot(mon.trapping.targetSlot);
+      const heldMon = held ? activeMon(held) : null;
+      if (heldMon && heldMon.trapped && heldMon.trapped.fromSlot === fighter.slot) {
+        heldMon.trapped = null;
+      }
+      mon.trapping = null;
+    }
+  }
+
+  // Where a self-hit's damage goes (both callers: the confusion gate above and
+  // the disobedient "won't obey"). HandleSelfConfusionDamage ends on
+  // ApplyDamageToPlayerPokemon (core.asm :3714; the enemy's mirror, :5814),
+  // and that routine's Substitute branch jumps to AttackSubstitute, which
+  // picks the doll by hWhoseTurn -- the turn is the self-hitter's, so the doll
+  // it picks is the OTHER side's ("damage will be applied to the other
+  // player's Substitute", AttackSubstitute's own header, :4849-4856). A
+  // monster behind its own doll therefore takes nothing and the opposing doll
+  // takes the hit: it holds or breaks as under any attack. With no doll
+  // across, the cart subtracts from the other side's stale doll byte, which
+  // no field shows and the referee does not keep -- so nothing moves. Gen 1
+  // has one opponent; in a 2v2 it is the battler opposite (`_oppositeFoe`),
+  // the same battler whose Reflect the self-hit borrows. wDamage keeps the
+  // self-hit's number either way (CalculateDamage wrote it; the doll never
+  // rewrites it).
+  _selfHit(fighter, mon, amount) {
+    if (Effects.hasSubstitute(mon)) {
+      const opposite = this._oppositeFoe(fighter);
+      const foe = opposite ? activeMon(opposite) : null;
+      if (foe && Effects.hasSubstitute(foe)) {
+        this.lastDamage = this._damage(opposite, foe, amount, null);
+      } else {
+        this.lastDamage = Math.max(0, int(amount, 0));
+      }
+      return;
+    }
+    this.lastDamage = this._damage(fighter, mon, amount, null);
   }
 
   // What HandleSelfConfusionDamage hits with (core.asm :3672-3710), for both of
@@ -2578,7 +2712,7 @@ class Battle {
     if (verdict === 'selfhit') {
       this._say(`${mon.species} won't obey!`);
       this._say(`${mon.species} hurt itself in confusion`);
-      this._damage(fighter, mon, Status.selfHitDamage(this._selfHitState(fighter, mon)), null);
+      this._selfHit(fighter, mon, Status.selfHitDamage(this._selfHitState(fighter, mon)));
       return { goes: false, instead: null };
     }
 
@@ -2650,8 +2784,9 @@ class Battle {
     if (moveIndex && moveIndex >= 1) mon.lastMoveIndex = moveIndex;
   }
 
+  // ExplodeEffect zeroes the user's HP word itself -- never its own doll.
   _faintUser(fighter, mon) {
-    if (mon.hp > 0) this._damage(fighter, mon, mon.hp, null);
+    if (mon.hp > 0) this._damage(fighter, mon, mon.hp, null, true);
   }
 
   // An Explosion / Self-Destruct that did not land. EXPLODE_EFFECT is the one
@@ -2664,6 +2799,46 @@ class Battle {
   _explodeMissed(fighter, mon, target, defender) {
     this._buildRage(target, defender, fighter);
     this._faintUser(fighter, mon);
+  }
+
+  // A move that did not land, after the caller has said why: MoveHitTest's
+  // `.moveMissed` (core.asm :5328-5332) zeroes wDamage, as
+  // AdjustDamageForMoveType's 0 does; an EXPLOSION still goes down
+  // (`_explodeMissed`) and a JUMP KICK crashes (PrintMoveFailureText).
+  _moveMissed(fighter, mon, target, defender, effectId, usedSlot) {
+    this.lastDamage = 0;
+    if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
+    if (Effects.isJumpKick(effectId)) {
+      this.lastDamage = this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+    }
+    this._markLastMove(mon, usedSlot);
+  }
+
+  // HandleCounterMove (core.asm :4547-4610): COUNTER's damage, or null for a
+  // miss. It reads the seat it strikes -- the one opponent on the cart, the
+  // target here -- through wEnemySelectedMove and that move's data
+  // (`selectedMove`, `_resolveFights`), and wDamage (`lastDamage`):
+  //   * a target whose selected move is COUNTER, has 0 power, or is neither
+  //     Normal nor Fighting makes it miss -- whether or not that move was ever
+  //     used this turn (a sleeping, frozen or fully paralysed foe still
+  //     selected it; a seat that switched or used an item selected none,
+  //     which the cart answers from its move-menu cursor and the referee
+  //     cannot);
+  //   * so does a wDamage of 0. wDamage is one word both sides share and
+  //     nothing resets between turns, so it is the LAST damage anyone dealt
+  //     -- usually the target's hit this turn, but a miss zeroed it and it may
+  //     be the COUNTER user's own (the cart's comment says as much);
+  //   * otherwise the damage is wDamage doubled, held at $ffff. It is not
+  //     typed (it reaches a Ghost) and not rolled, and a hit test follows.
+  _counterDamage(target) {
+    const foeMove = target ? target.selectedMove : null;
+    if (!foeMove || typeof foeMove !== 'object') return null;
+    if (Effects.isCounter(foeMove)) return null;
+    if (int(foeMove.power, 0) <= 0) return null;
+    const moveType = int(foeMove.type, -1);
+    if (moveType !== this.normalType && moveType !== this.fightingType) return null;
+    if (this.lastDamage <= 0) return null;
+    return Math.min(65535, this.lastDamage * 2);
   }
 
   _concedeRun(fighter) {
@@ -2686,13 +2861,31 @@ class Battle {
     // a state of the user's PP, so the call that spent the last PP takes no
     // recoil.
     const called = opts.moveOverride !== undefined && opts.moveOverride !== null;
-    // The move this action resolves to. Every slot empty -- an empty sheet
-    // (`moves.length === 0`) included -- is the synthetic STRUGGLE; returning
-    // on the missing slot used to eat that turn instead.
+    // The move this action resolves to. A forced replay is the move it
+    // replays (`_fillForcedChoices`), a called one included, and never
+    // Struggle: no menu was opened to offer it. Otherwise every slot empty --
+    // an empty sheet (`moves.length === 0`) included -- is the synthetic
+    // STRUGGLE; returning on the missing slot used to eat that turn instead.
     let move = opts.moveOverride;
-    if (!called) move = allPpEmpty(mon) ? STRUGGLE : mon.moves[choice.move - 1];
+    if (!called) {
+      if (choice.forcedMove) {
+        move = choice.forcedMove;
+      } else if (allPpEmpty(mon)) {
+        move = STRUGGLE;
+      } else {
+        move = mon.moves[choice.move - 1];
+      }
+    }
     if (!move) return;
     const struggling = move === STRUGGLE;
+    // MetronomePickMove / MirrorMoveCopyMove write the called move into
+    // wPlayerSelectedMove, where COUNTER reads it (`_counterDamage`).
+    if (called) fighter.selectedMove = move;
+    // What a record this action starts keeps for its forced turns: the move
+    // itself when it is a called one -- this call, or a forced replay of one
+    // (`choice.called`) -- and nothing for the slot's own move, which the
+    // record's slot already names.
+    const recordMove = (called || choice.called) ? move : null;
     // The slot this action is *using*: the chosen one, or the one a
     // disobedient monster picked instead (below), carried into a Metronome /
     // Mirror Move call. Whatever the action records for a later turn -- a
@@ -2707,8 +2900,11 @@ class Battle {
 
     if (!called && !this._runGates(fighter, mon)) return;
 
-    if (!struggling && !called && mon.disable && mon.disable.turns > 0
-        && mon.disable.moveIndex === choice.move) {
+    // TriedToUseDisabledMoveCheck compares the disabled move with
+    // wPlayerSelectedMove, which a forced replay of a called move holds
+    // instead of the calling slot's (`choice.called`).
+    if (!struggling && !called && !choice.called && mon.disable
+        && mon.disable.turns > 0 && mon.disable.moveIndex === choice.move) {
       const blocked = mon.moves[choice.move - 1];
       this._say(`${moveLabel(blocked)} is disabled`);
       return;
@@ -2726,6 +2922,7 @@ class Battle {
         usedSlot = verdict.instead;
         move = mon.moves[verdict.instead - 1];
         disobedient = true;
+        fighter.selectedMove = move;
       }
     }
 
@@ -2748,9 +2945,16 @@ class Battle {
     const mirrorCopy = opts.mirrorCopy === true;
 
     // DecrementPP spends wPlayerMoveListIndex's PP -- the chosen slot -- even
-    // when a disobedient monster used another move (`usedSlot` above).
+    // when a disobedient monster used another move (`usedSlot` above). It
+    // returns first while THRASHING_ABOUT or USING_RAGE is set
+    // (engine/battle/decrement_pp.asm), so the turns after the first of a
+    // thrash or a Rage spend nothing -- the thrash's own continuation even
+    // skips the call (`.ThrashingAboutCheck` goes to PlayerCalcMoveDamage) --
+    // and a charge's release and a Bide's unleash are the turns the cart's
+    // PP accounting already settled (below).
     const paying = disobedient && !called ? mon.moves[choice.move - 1] : move;
-    if (!struggling && paying.pp > 0 && !releasing && !choice.bideRelease) {
+    if (!struggling && paying.pp > 0 && !releasing && !choice.bideRelease
+        && !mon.thrashing && !mon.raging) {
       paying.pp -= 1;
       // FIGHT reads the uploaded sheet. Publish whenever PP actually moved
       // (Transform/Mimic already emit via movesChanged). Skip an override
@@ -2777,12 +2981,14 @@ class Battle {
     if (choice.bideRelease && mon.bide) {
       const stored = mon.bide.stored;
       mon.bide = null;
+      // `.UnleashEnergy` writes 2x the store into wDamage (0 is the miss).
       if (stored <= 0) {
+        this.lastDamage = 0;
         this._say('But it failed');
         this._markLastMove(mon, usedSlot);
         return;
       }
-      this._damage(target, defender, 2 * stored, null);
+      this.lastDamage = this._damage(target, defender, 2 * stored, null);
       this._buildRage(target, defender, fighter);
       this._markLastMove(mon, usedSlot);
       return;
@@ -2790,11 +2996,14 @@ class Battle {
 
     // Charge / Fly: first turn sets state and ends; second turn releases.
     if (Effects.isCharge(effectId) && !mon.charging) {
+      // `move` is kept when METRONOME / MIRROR MOVE called it: the release
+      // replays it (`_fillForcedChoices`), not the calling slot.
       mon.charging = {
         moveIndex: usedSlot,
         effect: effectId,
         targetSlot,
         moveId: move.id,
+        move: recordMove,
       };
       if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
       this._say(Effects.chargeMessage(mon, effectId, move.id));
@@ -2815,11 +3024,7 @@ class Battle {
       }
       if (!Effects.hitsInvulnerable(chargeMoveId, move)) {
         this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-        if (Effects.isJumpKick(effectId)) {
-          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
-        }
-        this._markLastMove(mon, usedSlot);
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
     }
@@ -2859,6 +3064,23 @@ class Battle {
       return;
     }
 
+    // COUNTER names its own damage before anything else would
+    // (`_counterDamage`): PlayerCalcMoveDamage calls HandleCounterMove right
+    // after CriticalHitTest, before CalculateDamage could look at its power.
+    // A COUNTER whose conditions fail misses there and then -- wMoveMissed
+    // set, no hit test drawn, wDamage left as it was -- and one that passes
+    // goes on to MoveHitTest, the accuracy byte below, with its damage already
+    // fixed.
+    let counter = null;
+    if (Effects.isCounter(move)) {
+      counter = this._counterDamage(target);
+      if (!counter) {
+        this._say(`${mon.species} missed`);
+        this._markLastMove(mon, usedSlot);
+        return;
+      }
+    }
+
     // A power-0 move reaches HandleBuildingRage ahead of any hit test of its
     // own: CalculateDamage's `jp z` (core.asm :3145) goes round MoveHitTest,
     // so wMoveMissed is still clear when the no-op ApplyAttackToEnemyPokemon
@@ -2867,7 +3089,7 @@ class Battle {
     // Disable, whose own MoveHitTest -- the roll below -- comes after. So a
     // raging target builds whether the Disable lands or not.
     if (move.power <= 0 && !Effects.isFixedDamage(effectId)
-        && !Effects.skipsBuildingRage(effectId)) {
+        && !Effects.skipsBuildingRage(effectId) && !counter) {
       this._buildRage(target, defender, fighter);
     }
 
@@ -2883,29 +3105,25 @@ class Battle {
     });
     if (!shot.hit) {
       this._say(`${mon.species} missed`);
-      if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-      if (Effects.isJumpKick(effectId)) {
-        this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
-      }
-      this._markLastMove(mon, usedSlot);
+      this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
       return;
     }
 
     const isFixed = Effects.isFixedDamage(effectId);
     if (effectId === 8 && defender.status !== 'sleep') {
       this._say('But it failed');
-      if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-      this._markLastMove(mon, usedSlot);
+      this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
       return;
     }
 
-    if (move.power <= 0 && !isFixed) {
+    if (move.power <= 0 && !isFixed && !counter) {
       if (Effects.isBide(effectId) && !mon.bide) {
         mon.bide = {
           turns: Effects.bideTurns(this.rng),
           stored: 0,
           moveIndex: usedSlot,
           targetSlot,
+          move: recordMove,
         };
         this._say(`${mon.species} began storing energy`);
         this._markLastMove(mon, usedSlot);
@@ -2937,122 +3155,135 @@ class Battle {
     if (effectId === 38) {
       if (this._speedOf(fighter, mon) <= this._speedOf(target, defender)) {
         this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-        this._markLastMove(mon, usedSlot);
+        this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
     }
 
-    const hits = Effects.hitCount(effectId, this.rng);
-    // Species base Speed, not battle Speed: paralysis and the Speed badge must
-    // not change the crit rate. Absent `baseSpd` (old sheet) falls back to the
-    // unmodified stat, still without a stage, badge or penalty.
-    const critSpd = mon.baseSpd !== undefined && mon.baseSpd !== null
-      ? mon.baseSpd : mon.stats.spd;
-    const isCrit = Crit.check({
-      baseSpeed: critSpd,
-      roll: this.rng.byte(),
-      focusEnergy: mon.focusEnergy,
-      highCritMove: move.highCrit === true,
-    }).isCrit;
-    const percents = this._typePercents(move.type, defender);
-
-    let immune = false;
-    for (const pct of percents) {
-      if (pct <= 0) { immune = true; break; }
-    }
-
+    // COUNTER takes none of the draws below: HandleCounterMove has already
+    // named the damage, and the cart goes from it straight to the hit test it
+    // just ran, round CalculateDamage, AdjustDamageForMoveType (no type, so it
+    // reaches a Ghost; no "super effective") and RandomizeDamage. (Its
+    // CriticalHitTest came first on the cart and can still print "Critical
+    // hit!" over a number it never touched; the referee draws no byte for a
+    // line that changes nothing.)
+    let isCrit = false;
+    let percents = null;
     let damage = 0;
-    if (isFixed) {
-      if (immune) {
-        this.rng.damageRoll();
-        this._say(`It doesn't affect ${defender.species}`);
-        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-        if (Effects.isJumpKick(effectId)) {
-          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
-        }
-        this._markLastMove(mon, usedSlot);
-        return;
-      }
-      const fixed = Effects.fixedDamage({
-        effectId,
-        userMon: mon,
-        targetMon: defender,
-        power: move.power,
-        userSpeed: this._speedOf(fighter, mon),
-        foeSpeed: this._speedOf(target, defender),
-      });
-      if (fixed === null) {
-        this.rng.damageRoll();
-        this._say('But it failed');
-        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-        this._markLastMove(mon, usedSlot);
-        return;
-      }
-      this.rng.damageRoll();
-      damage = fixed;
+    if (counter) {
+      damage = counter;
     } else {
-      // GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255). An
-      // ordinary hit reads the stored battle stats -- stage, badges and a burn
-      // already in them -- and a screen on the defender doubles its stat
-      // (`sla c / rl b`, uncapped, so a big enough one wraps in the scaling).
-      // A critical hit throws all of that away for the party stats at both
-      // ends: the attacker's party struct (pre-Transform) and the defender's
-      // -- the cart's GetEnemyMonStat reads the enemy's party struct in a link
-      // fight and recomputes it without stat exp against the computer, which
-      // is the same number as its party stat for every foe the computer
-      // fields (they carry none) -- until it Transforms: the recompute reads
-      // wEnemyMonSpecies and wEnemyMonDVs, which TransformEffect_ overwrote,
-      // so a transformed foe's crit stat is a CalcStat over the copied species
-      // and DVs, which a sheet cannot say
-      // (docs/plans/gen12-referee-known-gaps.md, gap 1).
-      // No stage, no badge, no burn, no screen. The scaling, the Explosion
-      // halving and the 997 cap are Damage.compute's.
-      const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
-      const atkKey = isSpecial ? 'spc' : 'atk';
-      const defKey = isSpecial ? 'spc' : 'def';
-      let attack;
-      let defense;
-      if (isCrit) {
-        attack = mon.partyStats[atkKey];
-        defense = defender.partyStats[defKey];
+      // Species base Speed, not battle Speed: paralysis and the Speed badge
+      // must not change the crit rate. Absent `baseSpd` (old sheet) falls back
+      // to the unmodified stat, still without a stage, badge or penalty.
+      const critSpd = mon.baseSpd !== undefined && mon.baseSpd !== null
+        ? mon.baseSpd : mon.stats.spd;
+      isCrit = Crit.check({
+        baseSpeed: critSpd,
+        roll: this.rng.byte(),
+        focusEnergy: mon.focusEnergy,
+        highCritMove: move.highCrit === true,
+      }).isCrit;
+      percents = this._typePercents(move.type, defender);
+
+      let immune = false;
+      for (const pct of percents) {
+        if (pct <= 0) { immune = true; break; }
+      }
+
+      if (isFixed) {
+        if (immune) {
+          this.rng.damageRoll();
+          this._say(`It doesn't affect ${defender.species}`);
+          this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+          return;
+        }
+        const fixed = Effects.fixedDamage({
+          effectId,
+          userMon: mon,
+          targetMon: defender,
+          power: move.power,
+          userSpeed: this._speedOf(fighter, mon),
+          foeSpeed: this._speedOf(target, defender),
+        });
+        if (fixed === null) {
+          this.rng.damageRoll();
+          this._say('But it failed');
+          this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+          return;
+        }
+        this.rng.damageRoll();
+        damage = fixed;
       } else {
-        attack = mon.cur[atkKey];
-        defense = defender.cur[defKey];
-        if ((isSpecial && defender.lightScreen)
-            || (!isSpecial && defender.reflect)) {
-          defense *= 2;
+        // GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255). An
+        // ordinary hit reads the stored battle stats -- stage, badges and a
+        // burn already in them -- and a screen on the defender doubles its
+        // stat (`sla c / rl b`, uncapped, so a big enough one wraps in the
+        // scaling). A critical hit throws all of that away for the party
+        // stats at both ends: the attacker's party struct (pre-Transform) and
+        // the defender's -- the cart's GetEnemyMonStat reads the enemy's party
+        // struct in a link fight and recomputes it without stat exp against
+        // the computer, which is the same number as its party stat for every
+        // foe the computer fields (they carry none) -- until it Transforms:
+        // the recompute reads wEnemyMonSpecies and wEnemyMonDVs, which
+        // TransformEffect_ overwrote, so a transformed foe's crit stat is a
+        // CalcStat over the copied species and DVs, which a sheet cannot say
+        // (docs/plans/gen12-referee-known-gaps.md, gap 1).
+        // No stage, no badge, no burn, no screen. The scaling, the Explosion
+        // halving and the 997 cap are Damage.compute's.
+        const isSpecial = Effects.isSpecialType(move.type, this.specialTypes);
+        const atkKey = isSpecial ? 'spc' : 'atk';
+        const defKey = isSpecial ? 'spc' : 'def';
+        let attack;
+        let defense;
+        if (isCrit) {
+          attack = mon.partyStats[atkKey];
+          defense = defender.partyStats[defKey];
+        } else {
+          attack = mon.cur[atkKey];
+          defense = defender.cur[defKey];
+          if ((isSpecial && defender.lightScreen)
+              || (!isSpecial && defender.reflect)) {
+            defense *= 2;
+          }
         }
-      }
 
-      const roll = this.rng.damageRoll();
-      const result = Damage.compute({
-        level: mon.level,
-        attack,
-        defense,
-        power: move.power,
-        crit: isCrit,
-        stab: hasType(mon, move.type),
-        typeEffect: percents,
-        roll,
-        explode: Effects.isExplode(effectId),
-      });
+        const result = Damage.compute({
+          level: mon.level,
+          attack,
+          defense,
+          power: move.power,
+          crit: isCrit,
+          stab: hasType(mon, move.type),
+          typeEffect: percents,
+          explode: Effects.isExplode(effectId),
+        });
 
-      if (result.immune) {
-        this._say(`It doesn't affect ${defender.species}`);
-        if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
-        if (Effects.isJumpKick(effectId)) {
-          this._damage(fighter, mon, Effects.jumpKickCrash(mon.maxHp), null);
+        // An immunity is a 0 too (AdjustDamageForMoveType's multiply by 0), so
+        // it draws no roll either -- "doesn't affect" is PrintMoveFailureText
+        // reading the 0 multiplier.
+        if (result.immune) {
+          this._say(`It doesn't affect ${defender.species}`);
+          this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+          return;
         }
-        this._markLastMove(mon, usedSlot);
-        return;
+        // A 0.25x matchup that leaves a 2 or a 3 at 0 is a miss
+        // (AdjustDamageForMoveType :5173-5177 sets wMoveMissed): "<MON>'s
+        // attack missed!", an EXPLOSION still goes down, a JUMP KICK crashes.
+        if (result.modified <= 0) {
+          this._say(`${mon.species} missed`);
+          this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
+          return;
+        }
+        // RandomizeDamage draws only for a 2 and up (`cp 2` / `ret c`): a hit
+        // already at 1 lands for 1 with no roll.
+        damage = result.modified;
+        if (result.rolls) damage = Damage.applyRoll(damage, this.rng.damageRoll());
       }
-      damage = result.damage === null || result.damage === undefined
-        ? 0 : result.damage;
     }
 
     let effectiveness = 1;
-    for (const pct of percents) effectiveness = (effectiveness * pct) / 100;
+    for (const pct of percents || []) effectiveness = (effectiveness * pct) / 100;
     if (isCrit && !isFixed) this._say('A critical hit');
     if (effectiveness > 1) {
       this._say("It's super effective");
@@ -3060,71 +3291,64 @@ class Battle {
       this._say("It's not very effective");
     }
 
-    // Rage builds per hit, after it (the multi-hit loop jumps back to
-    // GetPlayerAnimationType from below HandleBuildingRage), and before the
-    // move's side effect, which `.executeOtherEffects` runs after the loop.
+    // The hits, each in the cart's order (ExecutePlayerMove :3226-3256):
+    // ApplyAttackToEnemyPokemon, then the AlwaysHappenSideEffects routine at
+    // `.notDone` (`_alwaysHappen`) -- before `ret z` on the target's HP, so a
+    // knockout still runs it -- then HandleBuildingRage on a target still
+    // standing, then the multi-hit test, which jumps back to
+    // GetPlayerAnimationType with the same wDamage for the next hit.
     //
-    // A Substitute the *first* hit breaks ends a multi-hit move there. The
-    // cart only learns it is hitting more than once after that hit:
-    // TwoToFiveAttacksEffect sets ATTACKING_MULTIPLE_TIMES from the
-    // AlwaysHappenSideEffects lookup at `.notDone` (core.asm :3232-3237), and
-    // AttackSubstitute's `.nullifyEffect` (:4899) has already zeroed the
-    // move's effect, so the lookup misses, the bit stays clear, and the loop
-    // test (:3245-3247) goes straight to `.executeOtherEffects` -- which finds
-    // effect 0 and does nothing: no Twineedle poison, and not the "Hit the
-    // enemy N times!" line either (one the referee never says for any
-    // multi-hit move). The Rage build of that one hit still runs: it sits
-    // above the test. A break on hit 2 or later finds the bit already set, so
-    // the move goes on and the hits after it land on the monster. DOUBLE KICK
-    // (44), TWINEEDLE (77) and the two-to-five moves (29) alike. The
-    // two-to-five count was drawn up front, before the crit byte
-    // (Effects.hitCount); the cart draws it at that same `.notDone` -- after
-    // the first hit, and not at all when the first hit broke a Substitute.
-    // The referee keeps its up-front draw, a stream-only difference: a
-    // first-hit break spends one byte the cart would not, nothing on the
-    // field reads which byte it was, and every fight draws exactly the bytes
-    // it drew before this rule.
+    // A hit that breaks a Substitute zeroes the move's effect
+    // (AttackSubstitute `.nullifyEffect`, :4899): from that hit on no
+    // AlwaysHappen routine runs and `.executeOtherEffects` finds nothing. So
+    // no drain, no recoil, no Pay Day coins, no RAGE (the user never starts
+    // raging), no EXPLOSION faint (the user survives), no HYPER BEAM recharge
+    // and no side effect -- the hit itself and the target's Rage build stand.
+    // A doll that holds zeroes nothing, and wDamage is then the whole hit
+    // (AttackSubstitute takes it off the doll's own byte), so the drain, the
+    // recoil -- STRUGGLE's half included -- the coins and the recharge all
+    // happen.
+    //
+    // TwoToFiveAttacksEffect is an AlwaysHappen routine too, so the count is
+    // drawn after the first hit (Effects.hitCount) -- a knockout included --
+    // and never when that hit broke a doll, which leaves
+    // ATTACKING_MULTIPLE_TIMES clear and ends the move there (the loop test,
+    // :3245-3247, goes straight to `.executeOtherEffects`). A break on hit 2
+    // or later finds the count set: the move goes on, the hits after it land
+    // on the monster, the effect still gone. DOUBLE KICK (44) and TWINEEDLE
+    // (77) are 2 without a draw; no line is said for the count ("Hit the
+    // enemy N times!" is one the referee never says).
+    const multihit = Effects.isMultihit(effectId);
+    let hits = 1;
     let totalDealt = 0;
-    let subBroke = false;
-    for (let h = 1; h <= hits; h += 1) {
+    let effectLive = true;
+    let h = 0;
+    while (h < hits) {
+      h += 1;
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
-      const subUp = (defender.substitute || 0) > 0;
-      this._damage(target, defender, damage, null);
-      if (subUp && (defender.substitute || 0) <= 0) subBroke = true;
+      const subUp = Effects.hasSubstitute(defender);
+      this.lastDamage = this._damage(target, defender, damage, null);
       totalDealt += hpBefore - defender.hp;
+      if (subUp && !Effects.hasSubstitute(defender)) effectLive = false;
+      if (effectLive) {
+        if (h === 1 && multihit) hits = Effects.hitCount(effectId, this.rng);
+        this._alwaysHappen(fighter, mon, effectId, struggling, usedSlot, recordMove);
+      }
+      if (defender.hp <= 0) break;
       this._buildRage(target, defender, fighter);
-      if (subBroke && h === 1) break;
     }
 
     // `.executeOtherEffects` (core.asm :3258-3269) runs the side effect once,
     // after the last hit, and only if the move got that far: a hit that
     // knocked the target out returned at `ret z` (:3242), and a Substitute
-    // this move broke -- on any hit -- zeroed the move's effect
-    // (AttackSubstitute `.nullifyEffect`, :4899), so TWINEEDLE's poison
-    // (`.twineedle` rewrote the effect to POISON_SIDE_EFFECT1 on the first
-    // hit) is gone with it. A Substitute that soaked every hit and still
-    // stands is the routine's to answer, so it is passed through
-    // (Effects.applySide).
-    if (defender.hp > 0 && !subBroke) {
+    // this move broke -- on any hit -- zeroed the move's effect, so
+    // TWINEEDLE's poison (`.twineedle` rewrote the effect to
+    // POISON_SIDE_EFFECT1 on the first hit) is gone with it. A Substitute that
+    // soaked every hit and still stands is the routine's to answer, so it is
+    // passed through (Effects.applySide).
+    if (defender.hp > 0 && effectLive) {
       this._applySide(fighter, mon, target, defender, effectId, move);
-    }
-
-    if (totalDealt > 0) {
-      if (Effects.isDrain(effectId)) {
-        const heal = Effects.drainAmount(totalDealt);
-        if (heal > 0) this._heal(fighter, mon, heal);
-      }
-
-      if (Effects.isPayDay(effectId)) {
-        this._say('Coins scattered');
-      }
-    }
-
-    if ((struggling || Effects.isRecoil(effectId)) && totalDealt >= 1) {
-      const recoil = Effects.recoilAmount(totalDealt);
-      this._say(`${mon.species} is hit with recoil`);
-      this._damage(fighter, mon, recoil, null);
     }
 
     // A substitute absorbs HP (including the breaking hit), so totalDealt
@@ -3133,16 +3357,14 @@ class Battle {
       this._applyPrimary(fighter, mon, target, defender, choice.move, effectId);
     }
 
+    // `move` is kept when METRONOME / MIRROR MOVE called it, for the forced
+    // turns that replay it (`_fillForcedChoices`).
     if (Effects.isThrash(effectId) && !mon.thrashing) {
       mon.thrashing = {
         turns: Effects.thrashTurns(this.rng),
         moveIndex: usedSlot,
+        move: recordMove,
       };
-    }
-
-    if (Effects.isRage(effectId)) {
-      mon.raging = true;
-      mon.rageMove = usedSlot;
     }
 
     if (Effects.isTrapping(effectId) && totalDealt > 0) {
@@ -3161,14 +3383,23 @@ class Battle {
         turns,
         moveIndex: usedSlot,
         targetSlot: target.slot,
+        move: recordMove,
       };
     }
 
-    if (Effects.isHyperBeam(effectId) && totalDealt > 0 && defender.hp > 0) {
+    // HYPER_BEAM_EFFECT is one of `.executeOtherEffects`' (a knockout
+    // returned before it, a broken doll zeroed it); a doll that held still
+    // costs the recharge.
+    if (Effects.isHyperBeam(effectId) && effectLive && defender.hp > 0) {
       mon.mustRecharge = true;
     }
 
-    if (Effects.isExplode(effectId)) {
+    // ExplodeEffect ran with the AlwaysHappen routines (`_alwaysHappen`
+    // notes it); the faint is said here, after the target's Rage lines, where
+    // the cart says it -- ExplodeEffect zeroes the HP without a word and
+    // "fainted!" comes once the move is over. A doll the blast broke zeroed
+    // the effect first: the user lives.
+    if (Effects.isExplode(effectId) && effectLive) {
       this._faintUser(fighter, mon);
     }
 
@@ -3189,22 +3420,73 @@ class Battle {
     }
   }
 
+  // AlwaysHappenSideEffects (data/battle/always_happen_effects.asm), the
+  // routines `.notDone` jumps to after a hit lands, before HandleBuildingRage
+  // and before the target's knockout is looked at: DRAIN_HP / DREAM_EATER,
+  // PAY_DAY, RECOIL (and STRUGGLE, whose effect it is), RAGE, EXPLODE and the
+  // multi-hit counts (`_useMove` draws those). One per move -- a move carries
+  // one effect. `_useMove` skips this once a doll the move hit has broken.
+  //   * DrainHPEffect_ halves wDamage in place (at least 1) and heals that.
+  //   * PayDayEffect_ adds the user's level x 2 to the pile, on either side's
+  //     turn (`_checkOver` pays it).
+  //   * RecoilEffect_ costs a quarter of wDamage (a half for STRUGGLE), at
+  //     least 1, straight off the user's HP -- never its own doll.
+  //   * RageEffect sets USING_RAGE; `calledMove` is the move a METRONOME /
+  //     MIRROR MOVE called, which the forced turns replay.
+  //   * ExplodeEffect's faint is `_useMove`'s, said after the move.
+  _alwaysHappen(fighter, mon, effectId, struggling, usedSlot, calledMove) {
+    if (Effects.isDrain(effectId)) {
+      const heal = Effects.drainAmount(this.lastDamage);
+      this.lastDamage = heal;
+      this._heal(fighter, mon, heal);
+    } else if (Effects.isPayDay(effectId)) {
+      this.payDay[fighter.side] += Effects.payDayCoins(mon.level);
+      this._say('Coins scattered');
+    } else if (struggling || Effects.isRecoil(effectId)) {
+      const recoil = Effects.recoilAmount(this.lastDamage, struggling);
+      this._say(`${mon.species} is hit with recoil`);
+      this._damage(fighter, mon, recoil, null, true);
+    } else if (Effects.isRage(effectId)) {
+      mon.raging = true;
+      mon.rageMove = usedSlot;
+      mon.rageCall = calledMove;
+    }
+  }
+
   // One place where HP comes off, so the faint that follows can never be
   // forgotten at one of the call sites. Rage is not built here: what builds
   // it is a move landing (`_buildRage`), not HP coming off.
-  _damage(fighter, mon, rawAmount, status) {
+  //
+  // `direct` is HP the cart takes straight off the monster, past any doll:
+  // HandlePoisonBurnLeechSeed_DecreaseOwnHP (a poison, burn or Leech Seed
+  // tick), RecoilEffect_ and ExplodeEffect write the HP word themselves, and
+  // only ApplyDamageTo*Pokemon -- a move's hit -- ever asks AttackSubstitute
+  // (whose header says as much of recoil).
+  //
+  // Returns what wDamage holds after the hit, for COUNTER (`lastDamage`): the
+  // whole amount against a doll -- AttackSubstitute takes it off the doll's
+  // own byte and leaves wDamage alone -- and on a monster the HP it actually
+  // took, ApplyDamageTo*Pokemon writing the old HP back over a knockout.
+  _damage(fighter, mon, rawAmount, status, direct) {
     let amount = Math.max(0, int(rawAmount, 0));
 
     if (amount > 0 && mon.bide && mon.bide.turns > 0) {
       mon.bide.stored += amount;
     }
 
-    if (amount > 0 && mon.substitute && mon.substitute > 0) {
-      if (amount >= mon.substitute) {
+    // AttackSubstitute (core.asm :4849-4910): a hit over 255 breaks the doll
+    // outright (`and a` on wDamage's high byte); otherwise `sub [hl]` /
+    // `ret nc`, so a hit for exactly the doll's HP leaves it standing at 0
+    // (`subAtZero`), and only a hit for more breaks it.
+    if (amount > 0 && !direct && Effects.hasSubstitute(mon)) {
+      const dollHp = Math.max(0, int(mon.substitute, 0));
+      if (amount > 255 || amount > dollHp) {
         mon.substitute = 0;
+        mon.subAtZero = null;
         this._say(`${mon.species}'s substitute broke`);
       } else {
-        mon.substitute -= amount;
+        mon.substitute = dollHp - amount;
+        mon.subAtZero = mon.substitute === 0 ? true : null;
       }
       this._emit('damage', {
         slot: fighter.slot,
@@ -3213,7 +3495,7 @@ class Battle {
         hp: mon.hp,
         status: status && has(STATUS_TO_WIRE, status) ? STATUS_TO_WIRE[status] : undefined,
       });
-      return;
+      return amount;
     }
 
     if (amount > mon.hp) amount = mon.hp;
@@ -3229,6 +3511,7 @@ class Battle {
     });
 
     if (mon.hp <= 0) this._faint(fighter, mon);
+    return amount;
   }
 
   // HandleBuildingRage (core.asm :4913-4950), for the monster `source`'s move
@@ -3252,9 +3535,14 @@ class Battle {
   // is the "user": its own badges re-run (when it is the player's) and the
   // re-penalty lands on the battler whose turn it then is not -- the
   // attacker, `source`'s monster. At +6 the cart returns before saying
-  // anything, as this does.
+  // anything (`cp $0d` / `ret z`, ahead of the text), as this does; otherwise
+  // it prints BuildingRageText, "<MON>'s RAGE is building!", and then whatever
+  // StatModifierUpEffect prints -- "ATTACK rose!", or "Nothing happened!" off
+  // a 999 Attack.
   _buildRage(fighter, mon, source) {
     if (!source || !mon || !mon.raging || mon.hp <= 0) return;
+    if (Effects.clampStage(mon.stages ? mon.stages.atk : null) >= Effects.STAGE_MAX) return;
+    this._say(`${mon.species}'s RAGE is building!`);
     const { outcome, stage } = Effects.changeStat({
       mon, fighter, stat: 'atk', delta: 1,
       mover: fighter, nonMover: activeMon(source),
@@ -3480,10 +3768,12 @@ class Battle {
     mon.thrashing = null;
     mon.raging = false;
     mon.rageMove = 0;
+    mon.rageCall = null;
     mon.trapped = null;
     mon.trapping = null;
     mon.bide = null;
     mon.substitute = 0;
+    mon.subAtZero = null;
     mon.lightScreen = false;
     mon.reflect = false;
     mon.mist = false;
@@ -3556,6 +3846,13 @@ class Battle {
     for (const fighter of this.fighters) {
       if (this.result) return;
       let mon = activeMon(fighter);
+      // HandlePoisonBurnLeechSeed (core.asm :470-548) takes the poison / burn
+      // tick and then the Leech Seed tick in one pass, and looks at the HP
+      // only after both -- so a monster the poison or burn knocks out still
+      // feeds its seeder. Read before the tick: `_faint` clears `leechSeed`.
+      const seeded = mon;
+      const seed = mon ? mon.leechSeed : null;
+      let poisonKo = false;
       if (mon && mon.status) {
         const amount = Status.residual({
           status: mon.status, maxHp: mon.maxHp, toxicCounter: mon.toxicCounter,
@@ -3563,7 +3860,8 @@ class Battle {
         if (amount !== null && amount !== undefined) {
           if (mon.status === 'toxic') mon.toxicCounter += 1;
           this._say(`${mon.species} is hurt by its ${mon.status}`);
-          this._damage(fighter, mon, amount, mon.status);
+          this._damage(fighter, mon, amount, mon.status, true);
+          poisonKo = mon.hp <= 0;
         }
       }
       if (this.result) return;
@@ -3578,7 +3876,7 @@ class Battle {
           trap.fresh = null;
         } else {
           this._say(`${mon.species} is hurt by the trap`);
-          this._damage(fighter, mon, trap.damage, null);
+          this.lastDamage = this._damage(fighter, mon, trap.damage, null);
           // On the cart this tick is the trapper's own turn:
           // `.MultiturnMoveCheck` jumps to GetPlayerAnimationType, the stored
           // hit goes through ApplyAttackToEnemyPokemon, and HandleBuildingRage
@@ -3609,16 +3907,28 @@ class Battle {
         mon.bide.turns -= 1;
       }
       if (this.result) return;
+      // The Leech Seed tick, on the monster seeded when the residual began:
+      // the one still standing, or the one its own poison or burn just knocked
+      // out (`poisonKo`; a trap's tick between is the trapper's hit on the
+      // cart, not part of this pass, so a monster it fells feeds nobody).
+      // HandlePoisonBurnLeechSeed_DecreaseOwnHP takes 1/16 of the max HP (at
+      // least 1) and multiplies it by the toxic counter -- incremented again,
+      // so a badly poisoned, seeded monster's counter climbs twice a turn (the
+      // Leech Seed + Toxic glitch) -- whether or not the HP was there to take,
+      // and _IncreaseEnemyHP hands the seeder that whole amount ("bc isn't
+      // updated if HP subtracted was capped"). Read before the damage, since
+      // a tick that knocks the seeded monster out runs `_faint`, which clears
+      // `leechSeed`.
       mon = activeMon(fighter);
-      if (mon && mon.leechSeed) {
-        const amount = Math.max(1, Math.floor(mon.maxHp / 16));
-        // Read before the damage: a tick that knocks the seeded monster out
-        // runs `_faint`, which clears `leechSeed`. The seeder is healed all
-        // the same -- HandlePoisonBurnLeechSeed drains, then heals, and only
-        // then is the faint looked at.
-        const from = mon.leechSeed.fromSlot;
-        this._say(`${mon.species} is seeded`);
-        this._damage(fighter, mon, amount, null);
+      if (seed && (mon === seeded || poisonKo)) {
+        let amount = Math.max(1, Math.floor(seeded.maxHp / 16));
+        if (seeded.status === 'toxic') {
+          amount *= Math.max(1, int(seeded.toxicCounter, 1));
+          seeded.toxicCounter = Math.max(1, int(seeded.toxicCounter, 1)) + 1;
+        }
+        const from = seed.fromSlot;
+        this._say(`${seeded.species} is seeded`);
+        if (mon === seeded) this._damage(fighter, mon, amount, null, true);
         const seeder = from !== null && from !== undefined
           ? this._fighterAtSlot(from) : null;
         const sMon = seeder && activeMon(seeder);
@@ -3653,7 +3963,17 @@ class Battle {
     if (!aliveA && !aliveB) {
       this._finish('draw', null, null, 'ko');
     } else if (aliveA) {
-      this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
+      const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
+      // EndOfBattle (engine/battle/end_of_battle.asm): outside a link battle a
+      // won fight (wBattleResult 0) adds wTotalPayDayMoney to the player's
+      // money, "<PLAYER> picked up ¥N!". The pile is every PAY DAY that
+      // landed in the fight -- PayDayEffect_ adds to it on either side's
+      // turn, so the computer's coins are the player's to pick up too -- held
+      // at the 3-byte BCD's 999999 (AddBCD). Side a is the player in the
+      // three fights against the computer; a link fight pays nothing. The
+      // wallet (and Gold's Amulet Coin) is the client's (K11).
+      const coins = Math.min(PAY_DAY_MAX, this.payDay.a + this.payDay.b);
+      if (result && EXP_MODES[this.mode] && coins > 0) result.payDay = coins;
     } else {
       this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko');
     }
@@ -3893,11 +4213,15 @@ class Battle {
  *   sides = { a: [ { playerId, name, mons, bag, badges } ], b: [ ... ] }
  *
  * `typeIds` is the chart's axis by name (MediatedBattle.snapshotRuleset:
- * `typeIds[i]` names chart index i). Red's referee asks it two questions and
+ * `typeIds[i]` names chart index i). Red's referee asks it four questions and
  * keeps only the answers: which index is POISON (PoisonEffect turns a
- * Poison-type target away) and which is FIRE (CheckDefrost thaws on a Fire
- * move). Without it neither type can be named -- a side effect can poison a
- * Poison-type monster and nothing thaws -- and every other rule stands.
+ * Poison-type target away), which is FIRE (CheckDefrost thaws on a Fire
+ * move), and which are NORMAL and FIGHTING (HandleCounterMove strikes back
+ * only at those two). Without it POISON and FIRE cannot be named -- a side
+ * effect can poison a Poison-type monster and nothing thaws -- and NORMAL and
+ * FIGHTING fall back to pokered's own indices, 0 and 1
+ * (constants/type_constants.asm), the axis the synthetic STRUGGLE's type 0
+ * already assumes.
  *
  * `badges` is kept only on side a of a BADGE_MODES fight and dropped
  * everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -4032,6 +4356,7 @@ module.exports = {
   SIDES,
   BADGE_MODES,
   BADGE_SIDE,
+  PAY_DAY_MAX,
   STATUS_FROM_WIRE,
   STATUS_TO_WIRE,
 };

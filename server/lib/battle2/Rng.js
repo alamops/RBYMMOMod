@@ -8,7 +8,8 @@
  * 85..100 inclusive.
  *
  * 32-bit LCG: state = (1664525 * state + 1013904223) >>> 0
- * (Numerical Recipes constants). Draws use bits 16..23, not the low byte.
+ * (Numerical Recipes constants). Every draw comes off the high half of the
+ * state: `byte()` reads bits 16..23, `below` / `nextInt` bits 16..31 (K12).
  */
 
 const TWO32 = 4294967296;
@@ -38,11 +39,30 @@ function create(seed) {
     return Math.floor(next() / 65536) % 256;
   }
 
+  // One draw into 0..span-1 off the state's HIGH bits (contract K12): its
+  // high 16 bits (16..31) modulo the span. `next() % span` kept the low bits,
+  // and an LCG's bit k cycles with period 2^(k+1) -- bit 0 alternates, bits
+  // 0..1 repeat every four draws -- so a crit at chance 4 or 2 and the 16-wide
+  // damage roll followed a fixed pattern set by the draw's position in the
+  // stream. The same rule as Gen 1's lib/battle/Rng.js (one K12 for both
+  // referees), exact in both runtimes. A span wider than 65536 (no referee
+  // caller has one) stitches two high halves into a 32-bit value first.
+  function high16() {
+    return Math.floor(next() / 65536);
+  }
+
+  function scaled(span) {
+    if (span <= 65536) return high16() % span;
+    const top = high16();
+    const bottom = high16();
+    return (top * 65536 + bottom) % span;
+  }
+
   // 0..n-1, matching engine Damage.rollCritical / rand(..., n).
   function below(n) {
     const span = Math.floor(Number(n) || 0);
     if (span <= 1) return 0;
-    return next() % span;
+    return scaled(span);
   }
 
   function nextInt(min, max) {
@@ -58,7 +78,7 @@ function create(seed) {
     }
     const span = hi - lo + 1;
     if (span <= 1) return lo;
-    return lo + (next() % span);
+    return lo + scaled(span);
   }
 
   return {

@@ -35,16 +35,24 @@
 --      are two separate truncating steps, not one combined one, so 200 then 50
 --      does not always land back where it started.  A single 0 anywhere in the
 --      list is immunity: damage is 0 and nothing after it runs.
---   7. the random factor, max(1, floor(d * roll / 255)) for roll in 217..255.
+--   7. the random factor, floor(d * roll / 255) for roll in 217..255 --
+--      only when d is 2 or more.  RandomizeDamage (core.asm :5420-5455)
+--      opens on `cp 2` / `ret c`: a hit the type chart has already brought
+--      to 0 or 1 keeps that number and draws no roll at all, so `rolls`
+--      tells the caller whether there is a roll to draw.  For d >= 2 the
+--      product is at least floor(2 * 217 / 255) = 1, so the old min-1 clamp
+--      only ever guarded a nonsense roll and stays for that.
+--
+-- A 0 that is not immunity -- a 0.25x matchup taking a 2 or 3 down to 0 --
+-- is the caller's miss: AdjustDamageForMoveType sets wMoveMissed when a
+-- multiplier step leaves the damage at 0 (core.asm :5170-5176, "this only
+-- occurs if a move that would do 2 or 3 damage is 0.25x effective").  This
+-- module reports it as `modified = 0` with `immune = false`; Turn says
+-- "missed".
 --
 -- Which stats arrive here is the caller's half of the rule (Turn.lua): the
 -- stored battle stats with a screen doubling the defence, or on a critical
 -- hit the party stats with no screen at all.
---
--- The min-1 clamp at step 7 is applied unconditionally.  (The original skips
--- the roll entirely when damage has already fallen to 1; that shortcut is
--- deliberately not modelled here, because the shared fixture does not, and the
--- two runtimes agreeing matters more than either agreeing with a disassembly.)
 --
 -- Nothing here raises: a missing or nonsensical field is coerced to something
 -- the arithmetic survives, because every caller is downstream of a mod
@@ -188,6 +196,7 @@ function M.compute(attacker, defender, move, opts)
   end
 
   result.modified = d
+  result.rolls = M.rolls(d)
   result.minDamage = M.applyRoll(d, M.ROLL_MIN)
   result.maxDamage = M.applyRoll(d, M.ROLL_MAX)
 
@@ -199,10 +208,19 @@ function M.compute(attacker, defender, move, opts)
   return result
 end
 
+-- Whether RandomizeDamage draws for this damage: `cp 2` / `ret c` returns
+-- before the BattleRandom loop on a 0 or a 1.
+function M.rolls(modified)
+  return max(0, int(modified, 0)) >= 2
+end
+
 -- The random factor on its own, so the turn machine can re-apply a roll it
--- drew elsewhere without rebuilding the whole pipeline.
+-- drew elsewhere without rebuilding the whole pipeline.  A 0 or a 1 comes
+-- back as it went in, with no roll applied (`M.rolls`).
 function M.applyRoll(modified, roll)
-  return max(1, floor(max(0, int(modified, 0)) * int(roll, M.ROLL_MAX) / 255))
+  local d = max(0, int(modified, 0))
+  if not M.rolls(d) then return d end
+  return max(1, floor(d * int(roll, M.ROLL_MAX) / 255))
 end
 
 return M

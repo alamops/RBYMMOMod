@@ -31,7 +31,11 @@
  *     as floor(d * pct/100), with a non-immune floor of 1.
  *   * Rage's RageDamage (input.rageCount) next: x(count + 1), 16-bit.
  *   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
- *     running damage ≥ 2; final clamp 1..999.
+ *     running damage ≥ 2, at least 1. NO cap after it: DamageCalc's 997 + 2
+ *     is the only one; STAB, the matchup, RageDamage and the variation keep
+ *     their own 16-bit results, so a hit can pass 999 (Bide's store, Counter).
+ *   * `double` is DoubleDamage / DoubleMinimizeDamage, run by the caller after
+ *     the variation: a 16-bit shift whose carry pins $ffff.
  *
  * Flat `compute(input)` shape matches the Gen1 JS twin and the fixture; Lua
  * takes (attacker, defender, move, opts). Physical vs special: input.physical
@@ -40,8 +44,12 @@
 
 const ROLL_MIN = 85;
 const ROLL_MAX = 100;
+// DamageCalc's tail: the base held at MAX_DAMAGE - MIN_DAMAGE (997) and
+// MIN_DAMAGE added -- the one cap Gold's damage has.
 const MAX_DAMAGE = 999;
 const MIN_DAMAGE = 2;
+// The 16-bit register every later step keeps (wCurDamage).
+const WORD_MAX = 65535;
 
 const idiv = (a, b) => Math.floor(a / b);
 
@@ -135,13 +143,21 @@ function truncateStats(attack, defense, onePass) {
   return { attack: a % 256, defense: d % 256 };
 }
 
+// BattleCommand_DamageVariation: nothing for 0 or 1, otherwise
+// floor(d * roll / 100), at least 1 and NOT capped (see the header).
 function applyRoll(modified, roll) {
   const d = Math.max(0, int(modified, 0));
   if (d < 2) return Math.max(1, d);
   let r = int(roll, ROLL_MAX);
   if (r < ROLL_MIN) r = ROLL_MIN;
   if (r > ROLL_MAX) r = ROLL_MAX;
-  return Math.max(1, Math.min(MAX_DAMAGE, idiv(d * r, 100)));
+  return Math.max(1, idiv(d * r, 100));
+}
+
+// DoubleDamage / BattleCommand_DoubleMinimizeDamage: wCurDamage shifted left
+// as a 16-bit pair, a carry out pinning it at $ffff.
+function double(damage) {
+  return Math.min(WORD_MAX, Math.max(0, int(damage, 0)) * 2);
 }
 
 /*
@@ -228,7 +244,7 @@ function compute(input) {
   // BattleCommand_RageDamage, between Stab and DamageVariation in Rage's
   // script: x(count + 1), a carry out of the 16-bit sum pinning it at $ffff.
   const rage = Math.max(0, int(src.rageCount, 0));
-  if (rage > 0) d = Math.min(65535, d * (rage + 1));
+  if (rage > 0) d = Math.min(WORD_MAX, d * (rage + 1));
 
   result.modified = d;
   result.minDamage = applyRoll(d, ROLL_MIN);
@@ -268,4 +284,6 @@ module.exports = {
   ROLL_MAX,
   MAX_DAMAGE,
   MIN_DAMAGE,
+  WORD_MAX,
+  double,
 };

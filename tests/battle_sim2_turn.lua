@@ -990,86 +990,94 @@ end
 
 
 -- ------------------------------------------------------------------
--- trapping moves: the counter is a total attack count, and the answer the
--- referee files for a locked seat is not the player's to take back
+-- trapping moves, Gold's way: BattleCommand_TrapTarget sets a 3..6 wrap
+-- count, HandleWrap ticks it at the end of every turn -- the one it landed on
+-- included -- for a sixteenth of max HP until it releases at 0, and the only
+-- thing the trap takes from its victim is switching and running.
 -- ------------------------------------------------------------------
 
--- Gen1's 2..5 roll counts the hit that applied the trap, so the turn it lands
--- on deals the move's damage and no residual on top of it.  Counting it the
--- other way made a 2-turn Wrap hit three times.
 do
-  local battle = battleOf({ seed = 9999, sides = {
-    a = { { playerId = "p1", name = "One", mons = {
-      mon({ species = "Alpha", maxHp = 999, spe = 120,
-            moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) } } },
-    b = { { playerId = "p2", name = "Two", mons = {
-      mon({ species = "Beta", maxHp = 999, def = 200, spe = 1,
-            moves = { move({ id = "tap", power = 0 }) } }) } } },
-  } })
+  local function wrapFight()
+    return battleOf({ seed = 9999, sides = {
+      a = { { playerId = "p1", name = "One", mons = {
+        mon({ species = "Alpha", maxHp = 999, spe = 120,
+              moves = { move({ id = "wrap", power = 5, effect = 42 }),
+                        move({ id = "tap", power = 1 }) } }) } } },
+      b = { { playerId = "p2", name = "Two", mons = {
+        mon({ species = "Beta", maxHp = 999, def = 200, spe = 1,
+              moves = { move({ id = "tap", power = 1 }) } }),
+        mon({ species = "Delta", maxHp = 999, spe = 1,
+              moves = { move({ id = "tap", power = 1 }) } }) } } },
+    } })
+  end
+  local function saw(events, text)
+    for _, event in ipairs(events) do
+      if event.t == "msg" and event.text and event.text:find(text, 1, true) then return true end
+    end
+    return false
+  end
+
+  local battle = wrapFight()
   drain(battle)
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
+  local first = drain(battle)
+  local beta = battle.byId["p2"].mons[1]
+  ok(saw(first, "Beta was WRAPPED by Alpha"), "TrapTarget says the cart's WRAP line")
+  ok(beta.trapped ~= nil and beta.trapped.turns >= 2 and beta.trapped.turns <= 5,
+     "a 3..6 count, already one tick down at the end of the turn it landed on")
+  ok(saw(first, "Beta is hurt by wrap"), "HandleWrap deals its residual that same turn")
+  ok(saw(first, "Beta used tap"), "the wrapped monster still moved that turn")
 
-  local landingResidual = false
-  for _, event in ipairs(drain(battle)) do
-    if event.t == "msg" and event.text:find("hurt by the trap", 1, true) then
-      landingResidual = true
-    end
+  -- The next turn forces nobody: both seats are asked, and a deadline runs.
+  ok(battle.deadline ~= nil, "a wrap forces no seat, so the turn opens with a deadline")
+  ok(battle.byId["p2"].forced == nil, "the wrapped seat is not answered by the referee")
+  ok(battle:submitChoice("p2", { action = "switch", slot = 1 }) == false,
+     "the wrapped monster cannot be recalled")
+  ok(battle:submitChoice("p2", { action = "fight", move = 0 }), "...but it can fight")
+  ok(battle:submitChoice("p2", { action = "cancel" }), "...and take its answer back like anyone")
+  ok(battle:submitChoice("p1", { action = "fight", move = 1 }), "the trapper chooses freely")
+  local before = beta.hp
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  local second = drain(battle)
+  ok(saw(second, "Beta is hurt by wrap") or saw(second, "Beta was released from wrap"),
+     "each later turn ticks the count")
+  ok(beta.hp < before, "...and the residual is a sixteenth of max HP off the HP")
+
+  local released = false
+  for _ = 1, 8 do
+    if released or battle:outcome() then break end
+    battle:submitChoice("p1", { action = "fight", move = 1 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    released = saw(drain(battle), "Beta was released from wrap")
   end
-  ok(not landingResidual, "the turn the trap lands on deals no residual on top of the hit")
-
-  local beta = battle.byId["p2"]
-  local afterHit = beta.mons[beta.active].hp
-  ok(afterHit < 999, "the trapping move itself damages the victim")
-
-  -- The turn after is forced on both seats, so it waits for a tick.
-  battle:tick(battle.now + 1)
-  local residual = false
-  for _, event in ipairs(drain(battle)) do
-    if event.t == "msg" and event.text:find("hurt by the trap", 1, true) then
-      residual = true
-    end
-  end
-  ok(residual, "the turns that follow each deal one residual")
-  ok(beta.mons[beta.active].hp < afterHit, "trap residual reduces trapped mon HP")
+  ok(released, "the count runs out with the cart's release line")
+  eq(beta.trapped, nil, "...and the wrap is gone")
+  ok(battle:submitChoice("p2", { action = "switch", slot = 1 }), "released, it can switch again")
 end
 
--- A trap forces *both* seats, so `_openTurn` leaves that turn without a
--- deadline: a cancel that cleared one of those answers would hang the fight
--- with nothing left to time it out.
+-- A wrap held by a monster that leaves the field ends: every send-out clears
+-- both wrap counts (NewBattleMonStatus / NewEnemyMonStatus).
 do
   local battle = battleOf({ seed = 9999, sides = {
     a = { { playerId = "p1", name = "One", mons = {
       mon({ species = "Alpha", maxHp = 999, spe = 120,
-            moves = { move({ id = "wrap", power = 5, effect = 42 }) } }) } } },
+            moves = { move({ id = "wrap", power = 5, effect = 42 }) } }),
+      mon({ species = "Gamma", maxHp = 999, spe = 120,
+            moves = { move({ id = "tap", power = 1 }) } }) } } },
     b = { { playerId = "p2", name = "Two", mons = {
       mon({ species = "Beta", maxHp = 999, def = 200, spe = 1,
-            moves = { move({ id = "tap", power = 0 }) } }),
-      mon({ species = "Delta", maxHp = 999, spe = 1,
-            moves = { move({ id = "tap", power = 0 }) } }) } } },
+            moves = { move({ id = "tap", power = 1 }) } }) } } },
   } })
   drain(battle)
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drain(battle)
-
-  eq(battle.deadline, nil, "a turn forced on every seat opens without a deadline")
-  ok(battle.byId["p2"].forced, "the trapped seat is marked as answered by the referee")
-  ok(battle:submitChoice("p2", { action = "cancel" }) == false,
-     "cancel cannot clear a forced trap answer")
-  ok(battle:submitChoice("p2", { action = "switch", slot = 1 }) == false,
-     "and the victim still cannot switch out of the trap")
-  ok(battle.byId["p2"].choice ~= nil, "the forced answer survived the cancel")
-
-  -- The refusal is what keeps the clock alive: the chain still runs to its end.
-  local freed = false
-  for _ = 1, 40 do
-    if battle:outcome() then break end
-    if battle:submitChoice("p2", { action = "fight", move = 0 }) then freed = true; break end
-    if not battle:tick(battle.now + 1) then break end
-    drain(battle)
-  end
-  ok(freed, "the trap chain still ends after a refused cancel")
+  ok(battle.byId["p2"].mons[1].trapped ~= nil, "Beta is wrapped")
+  battle:submitChoice("p1", { action = "switch", slot = 1 })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
+  drain(battle)
+  eq(battle.byId["p2"].mons[1].trapped, nil, "the trapper's switch releases it")
 end
 
 -- An ordinary answer stays cancellable -- the guard is about forced fills only.
@@ -1758,11 +1766,13 @@ do
   -- One exchange: Ann (side a) and Bob (side b) each swing once.  `a` / `b`
   -- override the stats, the move's power and type, and carry each seat's
   -- upload (`a.pp = 0` empties Ann's one slot, so she Struggles); `rules` is
-  -- the ruleset (typeIds, specialTypes).
+  -- the ruleset (typeIds, specialTypes).  The default seed is the one the
+  -- numbers below were pinned on, re-chosen (from 777001) when K12 moved the
+  -- stream onto the RNG's high bits, so every exchange rolls what it did.
   local function exchange(mode, a, b, rules)
     rules = rules or {}
     local battle, err = Turn.create({
-      id = "b1", mode = mode, seed = a.seed or 777001,
+      id = "b1", mode = mode, seed = a.seed or 777002,
       choiceTimeout = 60, reconnectGrace = 60,
       typeIds = rules.typeIds, specialTypes = rules.specialTypes,
       sides = {
@@ -2143,8 +2153,10 @@ end
 
 -- (c) screens: per side, five ticks, a failed recast, special and fixed hits
 do
+  -- Seed 4243: Beta's zap does not crit (it does on 4242 since K12, and a crit
+  -- reads the unscreened Sp. Def -- CheckDamageStatsCritical).
   local battle = duel({
-    specialTypes = { 1 },
+    specialTypes = { 1 }, seed = 4243,
     a = { sheet({ species = "Alpha", spe = 90,
                   moves = { hit("glow_wall", 0, 1, 64, 20), hit("tap", 1) } }) },
     b = { sheet({ species = "Beta", spe = 10, spa = 60,
@@ -2528,8 +2540,18 @@ do
   local events = kr(hit("thump", 10), rock)
   ok(said(events, "Beta flinched"), "a plain hit with King's Rock flinches a slower target")
   local _, plain = kr(hit("thump", 10), nil)
-  local _, rocked = kr(hit("THUNDER", 10), rock)
+  local _, rocked = kr(hit("FUTURE_SIGHT", 10), rock)
   eq(plain.rng:state(), rocked.rng:state(), "a folded-0 move whose script has no `kingsrock` draws nothing")
+  -- THUNDER has its own id now (Effects.THUNDER): its script has no
+  -- `kingsrock` either, and it is no longer named by move id to say so.
+  local _, thunderPlain = kr(hit("THUNDER", 10, 0, Effects.THUNDER), nil)
+  local _, thunderRocked = kr(hit("THUNDER", 10, 0, Effects.THUNDER), rock)
+  eq(thunderPlain.rng:state(), thunderRocked.rng:state(),
+     "...nor does a Gold-native id whose script has none (THUNDER)")
+  local _, snorePlain = kr(hit("SNORE", 10, 0, Effects.SNORE), nil)
+  local _, snoreRocked = kr(hit("SNORE", 10, 0, Effects.SNORE), rock)
+  ok(snorePlain.rng:state() ~= snoreRocked.rng:state(),
+     "SNORE's script ends in `kingsrock`, so its own id rolls it")
   local _, burnt = kr(hit("ember_hit", 10, 0, 4), rock)
   local _, burntPlain = kr(hit("ember_hit", 10, 0, 4), nil)
   eq(burnt.rng:state(), burntPlain.rng:state(), "...nor does a status hit")
@@ -2599,7 +2621,7 @@ do
   ok(not sawKind(subEvents, "held"), "a substitute at `effectchance` keeps the item")
   eq(subBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...which the foe still holds")
   ok(said(subEvents, "Alpha used THIEF"), "...though the hit itself landed")
-  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 26836)
+  local missEvents, missBattle = thief({ "CHARCOAL", "HELD_FIRE_BOOST", 20, "CHARCOAL" }, nil, 153)
   ok(not sawKind(missEvents, "held"), "the 1/256 byte of 255 against a 100% chance takes nothing")
   eq(missBattle.byId.p2.mons[1].heldItem, "CHARCOAL", "...and the foe keeps its item")
   local zero = thiefMove()
@@ -2893,7 +2915,9 @@ do
   ok(lok, "a sap that knocks the seeded monster out does not throw")
   if lok then
     ok(said(lEvents, "Beta is seeded"), "...the sap is announced")
-    eq(lBattle.byId.p1.mons[1].hp, 119, "...and the seeder is healed (99 + 20)")
+    -- GetEighthMaxHP of 320 is 40, but SubtractHP hands back the 9 HP Beta
+    -- had left, and that is what RestoreHP gives the seeder.
+    eq(lBattle.byId.p1.mons[1].hp, 108, "...and the seeder is healed the HP taken (99 + 9)")
     eq(lBattle:outcome() and lBattle:outcome().reason, "ko", "...and the faint ends the fight")
   end
 
@@ -2926,7 +2950,11 @@ do
   eq(Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 },
                     { roll = 100, rageCount = 4 }).damage, 5 * base, "RageDamage: x(count + 1)")
   eq(Damage.compute({ level = 20, attack = 40 }, { defense = 40 }, { power = 20 },
-                    { roll = 100, rageCount = 255 }).damage, 999, "...pinned at $ffff, then the 999 tail")
+                    { roll = 100, rageCount = 255 }).damage, 256 * base,
+     "...x256 at 255, with no 999 tail after it")
+  eq(Damage.compute({ level = 100, attack = 255 }, { defense = 1 }, { power = 250 },
+                    { roll = 100, rageCount = 255 }).damage, 65535,
+     "...pinned at $ffff when the sum carries")
   local sBattle, sFoe = rageFight({ seed = 1, status = "PSN", confusion = 3, bMove = "thump", bEffect = 0 })
   round(sBattle, sFoe)
   local s2 = round(sBattle, sFoe)
@@ -3113,9 +3141,28 @@ do
   eq(#out.messages, 0, "...silently (no \"won't go any lower\")")
   r = bytes({})
   t = tgt()
-  side(69, t, { rng = r })
+  side(68, t, { rng = r })
   eq(r.drawn, 0, "a player's side-effect drop draws no byte")
-  eq(t.stages.def, -1, "...and lands")
+  eq(t.stages.atk, -1, "...and lands")
+  -- DefenseDownHit's second `effectchance` (pokecrystal docs/bugs_and_
+  -- glitches.md): drawn in the tail against the substitute standing then, and
+  -- its verdict is the one StatDown reads.
+  r = bytes({ 10 })
+  t = tgt()
+  out = Effects.applySide({ effectId = 69, hit = false, chance = 30, rng = r, targetMon = t,
+    targetFighter = { slot = 3, side = "b" }, statusToWire = WIRE })
+  eq(r.drawn, 1, "DEFENSE_DOWN_HIT draws its second effectchance byte")
+  eq(t.stages.def, -1, "...and a landed second byte lowers Defense whatever the first said")
+  r = bytes({ 200 })
+  t = tgt()
+  Effects.applySide({ effectId = 69, hit = true, chance = 30, rng = r, targetMon = t,
+    targetFighter = { slot = 3, side = "b" }, statusToWire = WIRE })
+  eq(t.stages.def, 0, "...and a failed one stops it whatever the first said")
+  r = bytes({ 10 })
+  t = tgt({ substitute = 10 })
+  Effects.applySide({ effectId = 69, hit = true, chance = 30, rng = r, targetMon = t,
+    targetFighter = { slot = 3, side = "b" }, statusToWire = WIRE })
+  eq(r.drawn, 0, "...which a substitute still standing skips, byte and all")
   t = tgt({ invulnerable = true })
   side(68, t)
   eq(t.stages.atk, 0, "CheckHiddenOpponent: a target in the sky or underground is not lowered")
@@ -3238,6 +3285,221 @@ do
                                                                  bHp = 1, bItem = band })
   ok(said(bandEvents, "Beta hung on with FOCUS BAND!"), "the band holds a 1-HP holder at 1")
   eq(bandBattle.byId.p2.mons[1].status, "burn", "...and the chance byte still draws and burns it")
+end
+
+-- ------------------------------------------------------------------
+-- the referee-gaps run (docs/plans/gen12-referee-gaps-fix.md, R2a): the claims
+-- the parity scenarios pin only as streams
+-- ------------------------------------------------------------------
+
+do
+  local Damage = need("BattleSim2/Damage")
+  -- A byte source that hands out a list, then 0s, and counts its draws.
+  local function bytes(list)
+    local r = { drawn = 0 }
+    function r:byte()
+      self.drawn = self.drawn + 1
+      return list[self.drawn] or 0
+    end
+    return r
+  end
+  local function withMove(m, o)
+    o = o or {}
+    local battle = fight({ seed = o.seed or 5, mode = o.mode,
+      a = { held({ species = "Alpha", maxHp = 400, spe = 90, status = o.status, moves = { m } }) },
+      b = { held({ species = "Beta", maxHp = 900, spe = 10, substitute = o.substitute,
+                   moves = { hit("wait", 0, 0, 85) } }) } })
+    drain(battle)
+    return battle
+  end
+
+  -- (a) the Gold-native ids, under the cart's own names
+  local names = {
+    EFFECT_SP_DEF_DOWN_HIT = 87, EFFECT_ACCURACY_DOWN_HIT = 88, EFFECT_ATTACK_UP_HIT = 89,
+    EFFECT_DEFENSE_UP_HIT = 90, EFFECT_ALL_UP_HIT = 91, EFFECT_FLAME_WHEEL = 92,
+    EFFECT_SACRED_FIRE = 93, EFFECT_STOMP = 94, EFFECT_TWISTER = 95, EFFECT_SNORE = 96,
+    EFFECT_THUNDER = 97, EFFECT_TRI_ATTACK = 98, EFFECT_GUST = 99, EFFECT_EARTHQUAKE = 100,
+    EFFECT_SKY_ATTACK = 101,
+  }
+  for name, id in pairs(names) do
+    eq(Effects.idOf(name), id, name .. " has its own id")
+    eq(Effects.nameOf(id), name, "...and the id names it back")
+  end
+  eq(Effects.MAX_EFFECT_ID, 101, "the table ends at SKY ATTACK")
+  eq(Effects.nameOf(102), nil, "nothing past it")
+  eq(Effects.category(101), "charge", "SKY ATTACK still charges")
+  ok(Effects.isCharge(Effects.SKY_ATTACK), "...as a charge move")
+  eq(Effects.idOf("EFFECT_SOLARBEAM"), 39, "the other charge moves keep CHARGE_EFFECT")
+
+  -- (b) BattleCommand_EffectChance: a byte at chance 0, none behind a substitute
+  local r = bytes({ 254 })
+  eq(Effects.effectChance(r, 100, false), true, "254 is under a 100% chance's byte")
+  r = bytes({ 255 })
+  eq(Effects.effectChance(r, 100, false), false, "255 is the 1/256 miss")
+  r = bytes({ 0 })
+  eq(Effects.effectChance(r, 0, false), false, "a 0% chance never lands...")
+  eq(r.drawn, 1, "...but draws its byte (EARTHQUAKE, SKY ATTACK on the carts)")
+  r = bytes({ 0 })
+  eq(Effects.effectChance(r, 100, true), false, "a substitute fails it...")
+  eq(r.drawn, 0, "...before any byte")
+  ok(Effects.drawsEffectChance(4, hit("ember", 40, 1, 4)), "a burn hit's script has the command")
+  ok(Effects.drawsEffectChance(Effects.EARTHQUAKE, hit("EARTHQUAKE", 40, 0, 100)), "...and EARTHQUAKE's")
+  ok(not Effects.drawsEffectChance(Effects.TRI_ATTACK, hit("TRI_ATTACK", 40)), "TRI ATTACK draws its own later")
+  ok(not Effects.drawsEffectChance(Effects.GUST, hit("GUST", 40)), "GUST has none")
+  ok(not Effects.drawsEffectChance(0, hit("thump", 40)), "NormalHit has none")
+  local thief = hit("THIEF", 40)
+  thief.chance = 100
+  ok(Effects.drawsEffectChance(0, thief), "a damaging id-0 move that states a chance is read as THIEF's")
+
+  -- ...and on a miss: a 1%-accurate burn hit draws one byte more than a
+  -- 1%-accurate plain hit, and a substitute takes that byte away again.
+  -- A plain hit states no chance (a damaging id-0 move that did would be
+  -- read as THIEF's script, which has the command).
+  local function wild(effect)
+    return { id = "wild", pp = 60, power = 40, accuracy = 1, type = 0, effect = effect,
+             chance = (effect == 0) and 0 or 10 }
+  end
+  local missSeed
+  for seed = 1, 400 do
+    local b = withMove(wild(0), { seed = seed })
+    if said(round(b, "p2"), "Alpha missed") then missSeed = seed; break end
+  end
+  ok(missSeed ~= nil, "found a seed where the 1% move misses")
+  local plainMiss, burnMiss = withMove(wild(0), { seed = missSeed }), withMove(wild(4), { seed = missSeed })
+  round(plainMiss, "p2"); round(burnMiss, "p2")
+  local plainState, burnState = plainMiss.rng:state(), burnMiss.rng:state()
+  local probe = need("BattleSim2/Rng").new(0):setState(plainState)
+  probe:next()
+  eq(burnState, probe:state(), "a missed burn hit draws exactly one more byte: its `effectchance`")
+  local subMiss = withMove(wild(4), { seed = missSeed, substitute = 50 })
+  local subPlain = withMove(wild(0), { seed = missSeed, substitute = 50 })
+  round(subMiss, "p2"); round(subPlain, "p2")
+  eq(subMiss.rng:state(), subPlain.rng:state(), "...and none behind a substitute")
+
+  -- (c) MULTI_HIT's count: BattleRandom & 3, a second byte when it is 2 or 3
+  local tally = { 0, 0, 0, 0, 0, 0 }
+  for first = 0, 3 do
+    for second = 0, 3 do
+      local n = Effects.multiHitCount(bytes({ first, second }))
+      tally[n] = tally[n] + 1
+    end
+  end
+  -- 16 equally likely pairs: 2 and 3 take 4 + 2 each, 4 and 5 two each.
+  eq(tally[2] .. "," .. tally[3] .. "," .. tally[4] .. "," .. tally[5], "6,6,2,2",
+     "2 and 3 hits at 3/8 each, 4 and 5 at 1/8")
+  r = bytes({ 1 })
+  eq(Effects.multiHitCount(r), 3, "a first byte under 2 stands")
+  eq(r.drawn, 1, "...with no second draw")
+  eq(Effects.fixedHits(29), 1, "MULTI_HIT's count is not known before its first hit")
+  eq(Effects.fixedHits(44), 2, "DOUBLE_HIT is two")
+  eq(Effects.fixedHits(77), 2, "...and so is TWINEEDLE")
+
+  -- (d) the counts the carts draw
+  eq(Effects.wrapCount(bytes({ 0 })), 3, "TrapTarget: & 3 plus 3, from 3...")
+  eq(Effects.wrapCount(bytes({ 7 })), 6, "...to 6")
+  eq(Effects.rampageTurns(bytes({ 0 })) .. "/" .. Effects.rampageTurns(bytes({ 1 })), "1/2",
+     "Rampage: 1 or 2 more turns")
+  eq(Effects.rampageConfusion(bytes({ 0 })) .. "/" .. Effects.rampageConfusion(bytes({ 1 })), "2/3",
+     "CheckRampage's confusion: 2 or 3 turns")
+  eq(Effects.payDayCoins(30), 60, "PAY DAY: level x 2")
+  eq(Effects.payDayCoins(140), 24, "...in a byte, its carry lost (`add a`, then `add [hl]`)")
+
+  -- (e) StatDown's `.ComputerMiss` exemption for ACCURACY_DOWN_HIT
+  r = bytes({ 0 })
+  local target = { species = "Tgt", stages = { atk = 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 } }
+  eq(Effects.statDownGate(r, target, "acc", true, Effects.ACCURACY_DOWN_HIT), nil,
+     "the computer's MUD-SLAP goes on to `.DidntMiss`...")
+  eq(r.drawn, 0, "...without the 25% byte")
+  eq(Effects.statDownGate(r, target, "atk", true, 68), "missed", "an ATTACK_DOWN_HIT still draws it")
+
+  -- (f) RaiseStat on the user: silent at +6 and at a 999 battle stat
+  local user = held({ species = "Alpha", def = 999, stages = { atk = 6 },
+                      moves = { hit("tap", 1) } })
+  user.stages = { atk = 6, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 }
+  local out = Effects.applySide({ effectId = Effects.ALL_UP_HIT, hit = true, rng = bytes({}),
+    targetMon = { species = "Tgt", stages = target.stages, substitute = 0 },
+    userMon = user, userFighter = { slot = 0, side = "a" }, targetFighter = { slot = 3, side = "b" } })
+  eq(user.stages.atk .. "/" .. user.stages.def .. "/" .. user.stages.spe, "6/0/1",
+     "ANCIENTPOWER raises what it can: Attack at +6 and Defense at 999 stay")
+  eq(#out.messages, 3, "...three lines, and none for the two that failed")
+  user.stages.spe = 0
+  Effects.applySide({ effectId = Effects.ATTACK_UP_HIT, hit = false, rng = bytes({}),
+    targetMon = { species = "Tgt", stages = target.stages, substitute = 0 },
+    userMon = user, userFighter = { slot = 0, side = "a" }, targetFighter = { slot = 3, side = "b" } })
+  eq(user.stages.spe, 0, "a failed effectchance raises nothing")
+
+  -- (g) CantMove: a stopped rampage or charge is over
+  local thrasher = withMove(hit("THRASH", 20, 0, 27, 10), { seed = 7 })
+  round(thrasher, "p2")
+  local alpha = thrasher.byId.p1.mons[1]
+  ok(alpha.thrashing ~= nil, "THRASH starts a rampage")
+  alpha.status = "paralysis"
+  local stopped = false
+  for _ = 1, 30 do
+    if not alpha.thrashing then break end
+    local ev = round(thrasher, "p2")
+    if said(ev, "Alpha is fully paralyzed") then stopped = true; break end
+  end
+  ok(stopped, "seed 7: a full paralysis lands while the rampage runs")
+  eq(alpha.thrashing, nil, "a full paralysis (CantMove) ends the rampage")
+  eq(alpha.confusion, 0, "...with no confusion")
+  local flier = withMove(hit("FLY", 30, 0, 43), { seed = 3 })
+  round(flier, "p2")
+  local fa = flier.byId.p1.mons[1]
+  ok(fa.charging ~= nil and fa.invulnerable, "FLY charges and vanishes")
+  fa.flinch = true
+  local fev = round(flier, "p2")
+  ok(said(fev, "Alpha flinched"), "a flinch stops the release")
+  eq(fa.charging, nil, "...and CantMove ends the charge")
+  eq(fa.invulnerable, false, "...bringing the flier back down")
+
+  -- (h) THRASH with its last PP keeps thrashing, never Struggle
+  local last = withMove(hit("THRASH", 20, 0, 27, 1), { seed = 9 })
+  round(last, "p2")
+  local la = last.byId.p1.mons[1]
+  eq(la.moves[1].pp, 0, "the first turn spends the last PP")
+  local nextTurn = round(last, "p2")
+  ok(said(nextTurn, "Alpha used THRASH"), "the rampage's next turn is THRASH...")
+  ok(not said(nextTurn, "Alpha used STRUGGLE"), "...not Struggle")
+  eq(la.moves[1].pp, 0, "...and spends no PP")
+
+  -- (i) HYPER BEAM recharges after a hit into a substitute
+  local beam = withMove(hit("HYPER_BEAM", 150, 0, 80), { seed = 4, substitute = 400 })
+  local beamTurn = round(beam, "p2")
+  eq(beam.byId.p2.mons[1].hp, 900, "the substitute took the HYPER BEAM")
+  ok(said(beamTurn, "Alpha must recharge"), "...and it still recharges (the next turn's forced skip)")
+
+  -- (j) PAY DAY: the pot on a win against the computer, a catch included;
+  --     none in a link fight
+  local function payFight(mode)
+    local b = fight({ mode = mode, seed = 6,
+      a = { held({ species = "Alpha", level = 30, maxHp = 400, atk = 90, spe = 90,
+                   moves = { hit("PAY_DAY", 40, 0, 16) } }) },
+      b = { held({ species = "Beta", maxHp = 30, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+    drain(b)
+    local foe = (mode == "wild") and "wild" or "p2"
+    for _ = 1, 6 do
+      if b:outcome() then break end
+      round(b, foe)
+    end
+    return b:outcome()
+  end
+  local won = payFight("wild")
+  ok(won and won.outcome == "win" and won.payDay ~= nil and won.payDay % 60 == 0,
+     "a won wild fight reports the pot, 60 a hit")
+  eq(payFight("1v1").payDay, nil, "a link fight reports none")
+  local catcher = fight({ mode = "wild", seed = 6,
+    a = { held({ species = "Alpha", level = 30, maxHp = 400, atk = 1, spe = 90,
+                 moves = { hit("PAY_DAY", 1, 0, 16) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(catcher)
+  round(catcher, "wild")
+  catcher:submitChoice("p1", { action = "item", item = "MASTER_BALL" })
+  catcher:submitChoice("wild", { action = "fight", move = 0 })
+  drain(catcher)
+  local caught = catcher:outcome()
+  eq(caught and caught.reason, "catch", "a MASTER BALL catches")
+  eq(caught and caught.payDay, 60, "...and a catch is a WIN: the pot is paid")
 end
 
 -- ------------------------------------------------------------------

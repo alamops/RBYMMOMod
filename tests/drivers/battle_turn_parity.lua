@@ -16,10 +16,11 @@
 -- speed tie-break byte (for a pair and for a group of four); `status` runs a
 -- paralysis gate, a confusion gate, a miss that must not go on to draw a crit
 -- byte, and a power-0 move that must not draw a damage roll; `immune` proves
--- the damage roll is drawn anyway when the type chart says zero, because in
--- Turn.lua that roll is an argument and arguments are evaluated before the call
--- discovers it did not matter. The snapshot digest carries `rngState`, which is
--- the single number that says both runtimes drew the same count.
+-- an immunity draws no damage roll either (pokered RandomizeDamage returns on
+-- the 0 AdjustDamageForMoveType left, `cp 2` / `ret c` -- before 1.5.0 the
+-- roll was an argument evaluated ahead of the call, and was drawn). The
+-- snapshot digest carries `rngState`, which is the single number that says
+-- both runtimes drew the same count.
 --
 -- Standalone on purpose, like the suites beside it: it loads the shipped files
 -- through the same `need`-shaped resolver main.lua uses, with no love, no
@@ -150,6 +151,10 @@ local function encOutcome(out)
       .. '"hp":' .. encNumber(out.caught.hp) .. ","
       .. '"maxHp":' .. encNumber(out.caught.maxHp)
       .. "}"
+  end
+  -- K11: the Pay Day pile a won fight against the computer reports.
+  if out.payDay then
+    parts[#parts + 1] = '"payDay":' .. encNumber(out.payDay)
   end
   return "{" .. table.concat(parts, ",") .. "}"
 end
@@ -1567,7 +1572,9 @@ end)
 -- both sides falls to Speed.  1v1 is a link fight: priority is every mode's.
 --   T1 QA vs thump: the slow QA first.   T2 QA vs QA: the faster first.
 --   T3 thump vs COUNTER: the slow thump first.   T4 COUNTER vs COUNTER: Speed.
---   T5 QA vs COUNTER: QA first.
+--   T5 QA vs COUNTER: QA first.  (Since 1.5.0 COUNTER is HandleCounterMove's:
+--   T3 and T5 strike back twice the hit, and in T4 both miss -- a COUNTER
+--   never counters a COUNTER; the order is the bracket's all the same.)
 scenario("g1_priority", function(events)
   local function kit()
     return { fx("QUICK_ATTACK", 10, 0), fx("thump", 10, 0), fx("COUNTER", 10, 0) }
@@ -1592,11 +1599,12 @@ end)
 
 -- Four actors in three brackets: the two Quick Attacks at Speed 20 are one
 -- tie group (one byte: this seed's turn-1 byte is >= 128, NpcA's first; its
--- turn-2 byte is below, Ann's first), then the plain move, then the Counter
--- at Speed 99, last.
+-- turn-2 byte is below, Ann's first -- 6304 since COUNTER draws only its hit
+-- test, 6302 before), then the plain move, then the Counter at Speed 99,
+-- last.
 scenario("g1_priority_group", function(events)
   local battle = build({
-    id = "g1g", mode = "coop_npc", seed = 6302, choiceTimeout = 60, reconnectGrace = 60,
+    id = "g1g", mode = "coop_npc", seed = 6304, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = {
         { playerId = "a1", name = "Ann", mons = {
@@ -2261,20 +2269,28 @@ scenario("g1_side_gates", sideTurns("g1sg", {
 -- that breaks a Substitute has zeroed the effect first (`.nullifyEffect`): the
 -- move ends after that one hit.  A later break leaves the move going, its
 -- remaining hits on the monster, the effect still gone.  Power 40 hits for 8
--- to 10, so a 5-HP doll breaks on hit 1 and a 15-HP doll on hit 2.
---   1-3 two-to-five (29) on seed 29007, a five-hit draw: no doll (five hits
---   on Beta), a 5-HP doll (one hit; the count byte drawn all the same, so
---   the RNG state is battle 1's), a 15-HP doll (hits 3-5 on Beta);
+-- to 10, so a 5-HP doll breaks on hit 1 and a 15-HP doll on hit 2.  The
+-- two-to-five count is drawn where the cart draws it, after hit 1
+-- (TwoToFiveAttacksEffect: `& 3`, and a second `& 3` on a 2 or 3).
+--   1-3 two-to-five (29) on seed 29011, whose count bytes are 182 then 151
+--   (2, redrawn; 3): five hits.  No doll (five hits on Beta), a 5-HP doll
+--   (one hit and no count byte at all, so the RNG state is two bytes short
+--   of battle 1's), a 15-HP doll (hits 3-5 on Beta, battle 1's state);
 --   4-6 DOUBLE KICK (44): no doll, 5 HP (one hit), 15 HP (both on the doll);
 --   7-9 TWINEEDLE (77) on seed 11078, whose side byte is 51 and lands: no
 --   doll (poisoned), 5 HP (one hit, no poison), 15 HP (two hits, no poison)
 --   -- 8 and 9 end on battle 10's RNG state, a plain hit's: no side byte;
---   10 a plain hit on the same seed.
+--   10 a plain hit on the same seed;
+--   11 two-to-five into a 9-HP doll, a hit for exactly its HP: the doll
+--   stands at 0 (AttackSubstitute `sub [hl]` / `ret nc`), so the count is
+--   drawn (battle 1's state), hit 2 breaks it and hits 3-5 land on Beta;
+--   12 DOUBLE KICK into an 8-HP doll on seed 29007: hit 1 leaves it at 0,
+--   hit 2 breaks it.
 local function multi(effect) return fx("multi", 40, effect) end
 scenario("g1_multi_sub", sideTurns("g1ms", {
-  { seed = 29007, move = multi(29) },
-  { seed = 29007, move = multi(29), bExtra = { substitute = 5 } },
-  { seed = 29007, move = multi(29), bExtra = { substitute = 15 } },
+  { seed = 29011, move = multi(29) },
+  { seed = 29011, move = multi(29), bExtra = { substitute = 5 } },
+  { seed = 29011, move = multi(29), bExtra = { substitute = 15 } },
   { seed = 29007, move = multi(44) },
   { seed = 29007, move = multi(44), bExtra = { substitute = 5 } },
   { seed = 29007, move = multi(44), bExtra = { substitute = 15 } },
@@ -2282,6 +2298,322 @@ scenario("g1_multi_sub", sideTurns("g1ms", {
   { seed = 11078, move = multi(77), bExtra = { substitute = 5 } },
   { seed = 11078, move = multi(77), bExtra = { substitute = 15 } },
   { seed = 11078, move = multi(0) },
+  { seed = 29011, move = multi(29), bExtra = { substitute = 9 } },
+  { seed = 29007, move = multi(44), bExtra = { substitute = 8 } },
+}))
+
+-- ------------------------------------------------------------------
+-- R1a (gen12-referee-gaps-fix): the damage tails, AlwaysHappenSideEffects,
+-- COUNTER, RAGE / THRASH PP, called multi-turn moves, Leech Seed, Pay Day
+-- and the self-hit -- each against pokered, one battle per case.
+-- ------------------------------------------------------------------
+
+-- After each turn of a `duels` battle: the RNG state, wDamage (`lastDamage`)
+-- and the Pay Day pile, then every seat's monster -- standing or not -- with
+-- the volatiles these rows move.  `pp` is the slots' PP, comma-joined.
+local function probeDuel(battle, at, turn)
+  probes[#probes + 1] = { at = at, turn = turn, rng = battle.rng:state(),
+                          last = battle.lastDamage, payA = battle.payDay.a,
+                          payB = battle.payDay.b }
+  for _, fighter in ipairs(battle.fighters) do
+    for index, mon in ipairs(fighter.mons) do
+      local pp = {}
+      for i = 1, #mon.moves do pp[i] = tostring(mon.moves[i].pp) end
+      probes[#probes + 1] = {
+        at = at, turn = turn, slot = fighter.slot, mon = index, hp = mon.hp,
+        sub = mon.substitute or 0, zero = mon.subAtZero == true,
+        raging = mon.raging == true, recharge = mon.mustRecharge == true,
+        charging = mon.charging ~= nil, invuln = mon.invulnerable == true,
+        thrash = mon.thrashing ~= nil, bide = mon.bide ~= nil,
+        conf = mon.confusion or 0, tox = mon.toxicCounter or 0,
+        sAtk = mon.stages.atk, pp = table.concat(pp, ","),
+      }
+    end
+  end
+end
+
+-- One battle per entry, every battle's events into the one stream: Ann's
+-- Alpha (p1) against Bob's Beta (p2), each a raw `mn` sheet (`a` / `b`), on
+-- the entry's seed, mode, chart, typeIds and METRONOME pool.  `turns` lists
+-- each turn's two move slots (0-based), one game turn apiece: a seat whose
+-- turn is forced refuses its submission, Bob is not asked once Ann's choice
+-- has resolved the turn (it would land in the next one), and a turn with
+-- every seat forced resolves on the clock.
+-- `probeDuel` after each turn, and a closing row with the battle's outcome
+-- (its `payDay` -- K11 -- included) when it ended.
+local function duels(id, entries)
+  return function(events)
+    local battle
+    for i, e in ipairs(entries) do
+      battle = build({
+        id = id .. i, mode = e.mode or "1v1", seed = e.seed, choiceTimeout = 60,
+        reconnectGrace = 60, typeIds = e.typeIds, chart = e.chart,
+        metronomePool = e.pool,
+        sides = {
+          a = { { playerId = "p1", name = "Ann", mons = { mn(e.a) } } },
+          b = { { playerId = "p2", name = "Bob", mons = { mn(e.b) } } },
+        },
+      })
+      drainInto(battle, events)
+      for t, pair in ipairs(e.turns or { { 0, 0 } }) do
+        if battle:outcome() then break end
+        local turnNo = battle.turn
+        battle:submitChoice("p1", { action = "fight", move = pair[1] })
+        if battle.turn == turnNo then
+          battle:submitChoice("p2", { action = "fight", move = pair[2] })
+        end
+        if battle.forcedPending then battle:tick(battle.now) end
+        drainInto(battle, events)
+        probeDuel(battle, i, t)
+      end
+      local o = battle:outcome()
+      if o then
+        probes[#probes + 1] = { at = i, outcome = o.outcome, reason = o.reason,
+                                winner = o.winners and o.winners[1] or "",
+                                payDay = o.payDay or 0 }
+      end
+    end
+    return battle
+  end
+end
+
+local SPLASH = fx("splash", 0, 85)
+-- A fast attacker and a slow target, 400 HP each, base Speed 0 (no crit).
+local function fast(moves, extra, o)
+  o = o or {}
+  return { species = "Alpha", maxHp = 400, hp = o.hp, level = o.level, atk = o.atk,
+           spd = 90, baseSpd = 0, types = o.types or { 1 }, moves = moves,
+           status = o.status, confusion = o.confusion, toxicCounter = o.toxicCounter,
+           extra = extra }
+end
+local function slow(moves, extra, o)
+  o = o or {}
+  return { species = "Beta", maxHp = o.maxHp or 400, hp = o.hp, def = o.def,
+           spd = 10, baseSpd = 0, types = o.types or { 1 }, moves = moves or { SPLASH },
+           status = o.status, confusion = o.confusion, toxicCounter = o.toxicCounter,
+           extra = extra }
+end
+
+-- The damage tails (core.asm :5075-5185 AdjustDamageForMoveType, :5420-5455
+-- RandomizeDamage), on one seed: a level-2, Attack-5 hit into Defense 200 is
+-- a base 2.  1 its type step halves to 1 (0.5x): it lands for 1 and draws no
+-- roll; 2 halved twice (0.5x against each of Beta's two types) it reaches 0 -- "missed", no roll; 3 neutral,
+-- it rolls; 4 an immunity draws no roll either ("doesn't affect").  1, 2 and
+-- 4 end on one RNG state (acc + crit, then Beta's acc); 3 is a byte past it.
+-- 5 a doll of exactly the hit's HP takes it and stands at 0 (`ret nc`); the
+-- second turn's hit breaks it.
+local TAIL_CHART = { { 100, 100, 100 }, { 100, 50, 100 }, { 100, 50, 50 }, { 100, 0, 100 } }
+local TAIL_TYPES = { 1, 2 }
+local function tail(ty) return fx("tap", 10, 0, { type = ty }) end
+local function weak(moves, extra) return { species = "Alpha", maxHp = 400, level = 2,
+  atk = 5, spd = 90, baseSpd = 0, types = { 0 }, moves = moves, extra = extra } end
+scenario("g1_damage_tails", duels("g1dt", {
+  { seed = 7101, chart = TAIL_CHART, a = weak({ tail(1) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
+  { seed = 7101, chart = TAIL_CHART, a = weak({ tail(2) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
+  { seed = 7101, chart = TAIL_CHART, a = weak({ tail(0) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
+  { seed = 7101, chart = TAIL_CHART, a = weak({ tail(3) }), b = slow(nil, nil, { def = 200, types = TAIL_TYPES }) },
+  { seed = 7101, a = fast({ fx("thump", 40, 0) }), b = slow(nil, { substitute = 9 }),
+    turns = { { 0, 0 }, { 0, 0 } } },
+}))
+
+-- AlwaysHappenSideEffects (data/battle/always_happen_effects.asm) run at
+-- `.notDone` after the hit, before HandleBuildingRage -- unless the hit broke a
+-- Substitute, whose `.nullifyEffect` zeroed the effect first.  Alpha (fast,
+-- 300 of 400 HP) into Beta behind a 200-HP doll that holds (H) or a 1-HP doll
+-- the hit breaks (B), one turn each unless noted:
+--   1 H drain (3): Alpha heals half the whole hit (wDamage is the whole hit
+--     against a doll); 2 B drain: no heal;
+--   3 H recoil (48): a quarter of the whole hit; 4 B recoil: none;
+--   5 H STRUGGLE (every slot at 0 PP): HALF the whole hit (RecoilEffect_'s
+--     `cp STRUGGLE`); 6 B STRUGGLE: none;
+--   7 H HYPER BEAM (80), two turns: Alpha must recharge; 8 B: no recharge,
+--     Alpha fires again;
+--   9 H EXPLOSION (7): Alpha faints; 10 B EXPLOSION: Alpha lives;
+--   11 H RAGE (81): raging; 12 B RAGE: never starts raging;
+--   13 Beta raging, no doll, Alpha drains: the drain comes before Beta's RAGE
+--     lines (drain is AlwaysHappen, the build after it);
+--   14 Alpha behind its own 30-HP doll, recoil into an H doll: the recoil
+--     comes off Alpha's HP, never its doll (RecoilEffect_ writes the HP);
+--   15 the same with EXPLOSION: Alpha faints, its doll does not soak it.
+local HOLD, BREAK = { substitute = 200 }, { substitute = 1 }
+local function hurt(moves, extra) return fast(moves, extra, { hp = 300 }) end
+local ZERO_PP = { fx("thump", 40, 0, { pp = 0 }) }
+scenario("g1_always_happen", duels("g1ah", {
+  { seed = 7201, a = hurt({ fx("leech", 40, 3) }), b = slow(nil, HOLD) },
+  { seed = 7201, a = hurt({ fx("leech", 40, 3) }), b = slow(nil, BREAK) },
+  { seed = 7201, a = hurt({ fx("ram", 40, 48) }), b = slow(nil, HOLD) },
+  { seed = 7201, a = hurt({ fx("ram", 40, 48) }), b = slow(nil, BREAK) },
+  { seed = 7201, a = hurt(ZERO_PP), b = slow(nil, HOLD) },
+  { seed = 7201, a = hurt(ZERO_PP), b = slow(nil, BREAK) },
+  { seed = 7201, a = hurt({ fx("beam", 60, 80) }), b = slow(nil, HOLD), turns = { { 0, 0 }, { 0, 0 } } },
+  { seed = 7201, a = hurt({ fx("beam", 60, 80) }), b = slow(nil, BREAK), turns = { { 0, 0 }, { 0, 0 } } },
+  { seed = 7201, a = hurt({ fx("blast", 60, 7) }), b = slow(nil, HOLD) },
+  { seed = 7201, a = hurt({ fx("blast", 60, 7) }), b = slow(nil, BREAK) },
+  { seed = 7201, a = hurt({ fx("RAGE", 20, 81) }), b = slow(nil, HOLD) },
+  { seed = 7201, a = hurt({ fx("RAGE", 20, 81) }), b = slow(nil, BREAK) },
+  { seed = 7201, a = hurt({ fx("leech", 40, 3) }),
+    b = slow({ fx("RAGE", 20, 81) }, { raging = true, rageMove = 1 }) },
+  { seed = 7201, a = hurt({ fx("ram", 40, 48) }, { substitute = 30 }), b = slow(nil, HOLD) },
+  { seed = 7201, a = hurt({ fx("blast", 60, 7) }, { substitute = 30 }), b = slow(nil, HOLD) },
+}))
+
+-- Pay Day (PayDayEffect_: level x 2, `add a`, per landed use, either side's
+-- turn, into wTotalPayDayMoney; EndOfBattle pays the pile on a won fight
+-- outside a link battle).  Alpha (L20, 80 power) and Beta (10 power) both
+-- use PAY DAY; Beta (40 HP) falls on Alpha's third hit:
+--   1 wild: Alpha 3 x 40 + Beta 2 x 40 -- the computer's coins are in the
+--     pile too -- so the outcome's payDay is 200;
+--   2 1v1: the same fight, a link battle -- no payDay;
+--   3 wild, Alpha's first hit breaks a doll -- no coins for it (the effect
+--     was zeroed); the rest still count: 3 x 40 + 3 x 40 = 240;
+--   4 wild, Alpha at level 140: 280 wraps the 8-bit `add a` to 24 a use;
+--   5 wild, Beta wins (Alpha 40 HP, Beta's hits heavy): side b's win pays
+--     nothing.
+local function payer(o) return { species = "Alpha", maxHp = 400, hp = o.hp, level = o.level,
+  spd = 90, baseSpd = 0, types = { 1 }, moves = { fx("coin", 80, 16) } } end
+local function payee(o) return { species = "Beta", maxHp = 400, hp = o.hp or 40, atk = o.atk,
+  spd = 10, baseSpd = 0, types = { 1 }, moves = { fx("coin", o.power or 10, 16) }, extra = o.extra } end
+local TWO = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } }
+scenario("g1_pay_day", duels("g1pd", {
+  { seed = 7401, mode = "wild", a = payer({}), b = payee({}), turns = TWO },
+  { seed = 7401, mode = "1v1", a = payer({}), b = payee({}), turns = TWO },
+  { seed = 7401, mode = "wild", a = payer({}), b = payee({ extra = { substitute = 1 } }), turns = TWO },
+  { seed = 7401, mode = "wild", a = payer({ level = 140 }), b = payee({}), turns = TWO },
+  { seed = 7401, mode = "wild", a = payer({ hp = 40 }), b = payee({ hp = 400, atk = 250, power = 120 }),
+    turns = TWO },
+}))
+
+-- COUNTER (HandleCounterMove, core.asm :4547-4610): Ann's slow Alpha counters
+-- Bob's fast Beta.  wDamage is the last damage dealt; the target's selected
+-- move must be Normal or Fighting with power, and not COUNTER:
+--   1 Beta's Normal thump lands: Alpha deals twice that hit, untyped, unrolled;
+--   2 a Fire (type 2) hit: COUNTER misses, drawing no hit test;
+--   3 Beta counters too: both miss;
+--   4 Beta's thump misses (accuracy 0): wDamage 0, COUNTER misses;
+--   5 Beta's thump into Alpha's 200-HP doll: wDamage is the whole hit, doubled;
+--   6 Beta is a Ghost to Fighting (chart 0): COUNTER hits it anyway;
+--   7 two turns: a thump (countered), then a 0-power Normal move -- the stale
+--     wDamage is there, the power is not: a miss;
+--   8 a Fighting (type 1) hit: countered;
+--   9 typeIds puts NORMAL at index 3: Beta's type-0 thump is not Normal, a miss.
+local CTR = fx("COUNTER", 1, 0, { type = 1 })
+local function counterer(extra) return { species = "Alpha", maxHp = 400, spd = 10, baseSpd = 0,
+  types = { 1 }, moves = { CTR }, extra = extra } end
+local function striker(moves, types) return { species = "Beta", maxHp = 400, spd = 90, baseSpd = 0,
+  types = types or { 1 }, moves = moves } end
+local THUMP = fx("thump", 40, 0)
+local GHOST_CHART = { { 100, 100, 100 }, { 100, 100, 0 }, { 100, 100, 100 } }
+local function missing() local m = fx("thump", 40, 0); m.accuracy = 0; return m end
+scenario("g1_counter", duels("g1ct", {
+  { seed = 7501, a = counterer(), b = striker({ THUMP }) },
+  { seed = 7501, a = counterer(), b = striker({ fx("flame", 40, 0, { type = 2 }) }) },
+  { seed = 7501, a = counterer(), b = striker({ CTR }) },
+  { seed = 7501, a = counterer(), b = striker({ missing() }) },
+  { seed = 7501, a = counterer({ substitute = 200 }), b = striker({ THUMP }) },
+  { seed = 7501, chart = GHOST_CHART, a = counterer(), b = striker({ THUMP }, { 2 }) },
+  { seed = 7501, a = counterer(), b = striker({ THUMP, fx("growl", 0, 18) }),
+    turns = { { 0, 0 }, { 0, 1 } } },
+  { seed = 7501, a = counterer(), b = striker({ fx("chop", 40, 0, { type = 1 }) }) },
+  { seed = 7501, typeIds = { "FIRE", "FIGHTING", "WATER", "NORMAL" }, a = counterer(),
+    b = striker({ THUMP }) },
+}))
+
+-- RAGE and THRASH spend PP on their first turn only: DecrementPP returns while
+-- USING_RAGE / THRASHING_ABOUT is set, and the thrash's continuation skips it
+-- outright (`.ThrashingAboutCheck`).  The forced turns open no menu, so a RAGE
+-- at 0 PP stays RAGE -- never STRUGGLE.  HandleBuildingRage says "<MON>'s
+-- RAGE is building!" at each build, then the stat line; nothing at +6.
+--   1 RAGE at 1 PP, three turns, Beta thumping it: 1 -> 0 on turn 1, RAGE
+--     (not STRUGGLE) on turns 2 and 3, a building line per hit taken;
+--   2 THRASH at 1 PP: 1 -> 0 on turn 1 and no more, confused at its end;
+--   3 a raging Alpha at +6 Attack: built on, silent.
+scenario("g1_rage_thrash_pp", duels("g1rp", {
+  { seed = 7601, a = fast({ fx("RAGE", 20, 81, { pp = 1 }) }), b = slow({ fx("thump", 10, 0) }),
+    turns = { { 0, 0 }, { 0, 0 }, { 0, 0 } } },
+  { seed = 7601, a = fast({ fx("THRASH", 30, 27, { pp = 1 }) }), b = slow(),
+    turns = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } } },
+  { seed = 7601, a = fast({ fx("RAGE", 20, 81) }, { raging = true, rageMove = 1, stages = { atk = 6 } }),
+    b = slow({ fx("thump", 10, 0) }) },
+}))
+
+-- A multi-turn move METRONOME or MIRROR MOVE called keeps the called move in
+-- its record (MetronomePickMove / MirrorMoveCopyMove wrote it into
+-- wPlayerSelectedMove), so the forced turns replay it rather than the calling
+-- slot.  Each METRONOME pool holds the one move, so the pick is certain:
+--   1 FLY: up on turn 1, lands FLY on turn 2; METRONOME's PP spent once;
+--   2 DIG (CHARGE + the id): the same;
+--   3 THRASH: replayed, no PP, confused at its end;
+--   4 RAGE: replayed as RAGE on turns 2 and 3;
+--   5 BIDE: stores, then unleashes as BIDE;
+--   6 MIRROR MOVE: Beta (fast) flies up and Alpha's MIRROR MOVE fails (no
+--     move used yet); turn 2 Beta's FLY lands and Alpha mirrors it, going up;
+--     turn 3 Beta splashes and Alpha's forced FLY lands -- FLY, not MIRROR
+--     MOVE again, and no PP.
+local function metro() return fx("METRONOME", 0, 83) end
+local FOUR = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } }
+local function poolOf(m) return { m } end
+scenario("g1_called_multiturn", duels("g1cm", {
+  { seed = 7701, pool = poolOf(fx("FLY", 90, 43)), a = fast({ metro() }), b = slow(), turns = FOUR },
+  { seed = 7701, pool = poolOf(fx("DIG", 100, 39)), a = fast({ metro() }), b = slow(), turns = FOUR },
+  { seed = 7701, pool = poolOf(fx("THRASH", 30, 27)), a = fast({ metro() }), b = slow(), turns = FOUR },
+  { seed = 7701, pool = poolOf(fx("RAGE", 20, 81)), a = fast({ metro() }),
+    b = slow({ fx("thump", 10, 0) }), turns = FOUR },
+  { seed = 7701, pool = poolOf(fx("BIDE", 0, 26)), a = fast({ metro() }),
+    b = slow({ fx("thump", 10, 0) }), turns = FOUR },
+  { seed = 7701, a = { species = "Alpha", maxHp = 400, spd = 10, baseSpd = 0, types = { 1 },
+      moves = { fx("MIRROR_MOVE", 0, 9) } },
+    b = { species = "Beta", maxHp = 400, spd = 90, baseSpd = 0, types = { 1 },
+      moves = { fx("FLY", 90, 43), SPLASH } }, turns = { { 0, 0 }, { 0, 0 }, { 0, 1 } } },
+}))
+
+-- LEECH SEED (HandlePoisonBurnLeechSeed, core.asm :470-548): the poison /
+-- burn tick, then the seed tick, then -- only then -- the faint check.  The
+-- seed's sixteenth is multiplied by the toxic counter, incremented again, and
+-- the seeder gets the whole amount.  Beta (400 max HP, so 25 a sixteenth) is
+-- seeded by Alpha (300 of 400 HP), which splashes:
+--   1 badly poisoned, two turns: poison x1 then seed x2 (Alpha +50); poison x3
+--     then seed x4 (Alpha +100);
+--   2 poisoned at 20 HP: the poison knocks it out, and Alpha is still fed 25;
+--   3 burned at 20 HP: the same;
+--   4 behind a 50-HP doll, poisoned: both ticks come off Beta's HP, never the
+--     doll.
+local SEEDED = { leechSeed = { fromSlot = 0 } }
+local function seeder() return fast({ SPLASH }, nil, { hp = 300 }) end
+scenario("g1_leech_toxic", duels("g1lt", {
+  { seed = 7801, a = seeder(), b = slow(nil, SEEDED, { status = "TOX", toxicCounter = 1 }),
+    turns = { { 0, 0 }, { 0, 0 } } },
+  { seed = 7801, a = seeder(), b = slow(nil, SEEDED, { status = "PSN", hp = 20 }) },
+  { seed = 7801, a = seeder(), b = slow(nil, SEEDED, { status = "BRN", hp = 20 }) },
+  { seed = 7801, a = seeder(), b = slow(nil, { leechSeed = { fromSlot = 0 }, substitute = 50 },
+    { status = "PSN" }) },
+}))
+
+-- The confusion self-hit (seed 7304: Alpha's confusion byte is 22, a hit).  It
+-- is 10 here (level 20, 40 / 40, the fixed max roll).  HandleSelfConfusionDamage
+-- ends on ApplyDamageToPlayerPokemon, whose doll branch takes the OTHER side's
+-- doll (AttackSubstitute picks it by hWhoseTurn), and `.IsConfused` clears
+-- every other wPlayerBattleStatus1 bit first:
+--   1 Alpha behind a 30-HP doll, Beta behind a 10-HP doll: Beta's doll takes
+--     the 10 and stands at 0; Alpha and its doll untouched;
+--   2 Beta's doll at 5: it breaks;
+--   3 no doll across: nothing moves at all;
+--   4 Alpha with no doll: Alpha takes the 10;
+--   5 Alpha charging FLY, vanished: the self-hit drops the charge and the
+--     vanish -- turn 2 is Alpha's own choice, not a forced release;
+--   6 Alpha thrashing: the thrash is gone, and with it the confusion at its end;
+--   7 Alpha about to unleash a Bide: the Bide is gone, nothing unleashed.
+local function dizzy(extra, moves) return fast(moves or { SPLASH }, extra, { confusion = 4 }) end
+scenario("g1_self_hit", duels("g1sh", {
+  { seed = 7304, a = dizzy({ substitute = 30 }), b = slow(nil, { substitute = 10 }) },
+  { seed = 7304, a = dizzy({ substitute = 30 }), b = slow(nil, { substitute = 5 }) },
+  { seed = 7304, a = dizzy({ substitute = 30 }), b = slow() },
+  { seed = 7304, a = dizzy(nil), b = slow(nil, { substitute = 10 }) },
+  { seed = 7304, a = dizzy({ charging = { moveIndex = 1, effect = 43, targetSlot = 3, moveId = "FLY" },
+      invulnerable = true }, { fx("FLY", 90, 43) }), b = slow(), turns = { { 0, 0 }, { 0, 0 } } },
+  { seed = 7304, a = dizzy({ thrashing = { turns = 1, moveIndex = 1 } }, { fx("THRASH", 30, 27) }),
+    b = slow(), turns = { { 0, 0 }, { 0, 0 } } },
+  { seed = 7304, a = dizzy({ bide = { turns = 0, stored = 30, moveIndex = 1, targetSlot = 3 } },
+      { fx("BIDE", 0, 26) }), b = slow(), turns = { { 0, 0 }, { 0, 0 } } },
 }))
 
 -- ------------------------------------------------------------------

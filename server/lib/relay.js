@@ -259,9 +259,10 @@ const BATTLE_SEED_MAX = 1073741824;
 // machine does. One conversion, in one place.
 const battleSeconds = (ms) => Math.floor(ms / 1000);
 // The fights whose outcome may carry Pay Day coins: the sim's own EXP_MODES
-// (lib/battle3/Turn.js `_checkOver`), the three where side a is players and
-// side b is the hub's NPC seats. 1v1 / coop_pvp are link rules and pay none.
-// Twin of Hub.lua PAY_DAY_MODES.
+// (lib/battle3/Turn.js `_checkOver`; the Gen 1 / Gen 2 referees' K11 coins
+// follow the same rule), the three where side a is players and side b is the
+// hub's NPC seats. 1v1 / coop_pvp are link rules and pay none. Twin of Hub.lua
+// PAY_DAY_MODES.
 const PAY_DAY_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
 // The cart family a fighter entry's `family` names, keyed by the cart the
 // player's hello named (sanitize VERSIONS). Gen 3 (lib/battle3 Turn.FAMILIES,
@@ -1636,6 +1637,55 @@ function applyBattleMoveset3(fighter, payload) {
   mon.moves = next;
   if (active && !b.overlay) b.moves = next;
   return true;
+}
+
+/*
+ * The Gen 1 / Gen 2 move list a learn leaves on a live battler. Unchanged ids
+ * keep the hub's PP and combat fields -- highCrit among them -- with only what
+ * the hub's row never stated (a name, a max PP, a type, the K8 PP Ups and Gold
+ * priority) filled from the client's; a new id takes the client's row whole.
+ * highCrit is carried as the sims' copyMove spells it (a boolean): before
+ * contract K8 this rebuild named only the nine core fields, so a learn silently
+ * cost every move on the mon its high-crit flag. Twin of Hub.lua's nextMoves12.
+ */
+function nextMoves12(old, incoming) {
+  const next = [];
+  for (let i = 0; i < incoming.length; i += 1) {
+    const nm = incoming[i];
+    const prev = old[i];
+    if (prev && prev.id === nm.id) {
+      next.push({
+        id: prev.id,
+        name: prev.name != null ? prev.name : nm.name,
+        pp: prev.pp,
+        maxPp: prev.maxPp != null ? prev.maxPp : nm.maxPp,
+        power: prev.power,
+        accuracy: prev.accuracy,
+        type: prev.type != null ? prev.type : nm.type,
+        effect: prev.effect,
+        chance: prev.chance,
+        highCrit: prev.highCrit,
+        ppUps: prev.ppUps != null ? prev.ppUps : nm.ppUps,
+        priority: prev.priority != null ? prev.priority : nm.priority,
+      });
+    } else {
+      next.push({
+        id: nm.id,
+        name: nm.name,
+        pp: nm.pp,
+        maxPp: nm.maxPp,
+        power: nm.power,
+        accuracy: nm.accuracy,
+        type: nm.type,
+        effect: nm.effect,
+        chance: nm.chance,
+        highCrit: nm.highCrit === true,
+        ppUps: nm.ppUps,
+        priority: nm.priority,
+      });
+    }
+  }
+  return next;
 }
 
 // --------------------------------------------------------------------- relay
@@ -3139,15 +3189,41 @@ class Relay {
   }
 
   /*
-   * Mid-fight learn / replace (PROTOCOL 28). Twin of Hub:applyBattleMoveset.
+   * Mid-fight learn / replace (PROTOCOL 28) and level-up (contract K9 of
+   * docs/plans/gen12-referee-gaps-fix.md). Twin of Hub:applyBattleMoveset.
    *
    * The referee holds no learnset, so the client that owns the save copy is
    * the only party that can name the new sheet. Only an append of one slot
    * or a single-id replace is applied -- a full rewrite after seeing the
    * foe is not a learn. Unchanged ids keep the hub's PP *and* power /
-   * accuracy / effect, so this is not a free Ether or a live stat editor.
-   * A transformed battler is left alone: Transform wrote over `mon.moves`
-   * in place, and replacing that list would end the transform a turn early.
+   * accuracy / effect, so this is not a free Ether or a live stat editor
+   * (nextMoves12). A transformed battler's list is left alone: Transform
+   * wrote over `mon.moves` in place, and replacing that list would end the
+   * transform a turn early.
+   *
+   * Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
+   * Gen 2 only -- cleanBattleMoveset reads none on Gen 3), the hub forwards
+   * them to the referee's K9 API once the moves are settled:
+   *
+   *   record.sim.levelUp(playerId, monIndex, level, stats, maxHp)
+   *
+   *     playerId  the sender's seat (`client.id`, the sim's byId key)
+   *     monIndex  1-BASED party index -- the sim's own convention on both
+   *               twins (monAt(fighter, i) here, fighter.mons[i] in Lua) --
+   *               so the wire's 0-based `mon` plus one
+   *     level     1..LEVEL_MAX, or undefined when the payload stated none
+   *     stats     the dialect's `stats` block (cleanBattleMoveset), or undefined
+   *     maxHp     1..HP_MAX, or undefined
+   *
+   * always forwarded whatever became of the moves -- a transformed mon still
+   * grew (only its move list is protected), and a learn refused as a rewrite
+   * does not undo the level it came with. Whether the claim is plausible and
+   * what it rebuilds (the cart's in-battle CalcStats, badge boosts, the HP
+   * step) is the referee's to decide. Guarded on the method existing: the Gen
+   * 1 / Gen 2 referees implement it, lib/battle3 never does, and a hub whose
+   * sim predates it simply applies the moves as before.
+   *
+   * Returns whether anything reached the referee (a move list or a level-up).
    */
   applyBattleMoveset(record, client, payload) {
     if (!record || !record.sim || !payload) return false;
@@ -3157,43 +3233,22 @@ class Relay {
     if (!fighter || !Array.isArray(fighter.mons)) return false;
     if (this.generation === 3) return applyBattleMoveset3(fighter, payload);
     const mon = fighter.mons[payload.mon];
-    if (!mon || mon.transformed) return false;
+    if (!mon) return false;
+    let applied = false;
     const incoming = payload.moves;
-    if (!Array.isArray(incoming) || incoming.length === 0) return false;
-    const old = Array.isArray(mon.moves) ? mon.moves : [];
-    if (!movesetDeltaOk(old, incoming)) return false;
-    const next = [];
-    for (let i = 0; i < incoming.length; i += 1) {
-      const nm = incoming[i];
-      const prev = old[i];
-      if (prev && prev.id === nm.id) {
-        next.push({
-          id: prev.id,
-          name: prev.name != null ? prev.name : nm.name,
-          pp: prev.pp,
-          maxPp: prev.maxPp != null ? prev.maxPp : nm.maxPp,
-          power: prev.power,
-          accuracy: prev.accuracy,
-          type: prev.type != null ? prev.type : nm.type,
-          effect: prev.effect,
-          chance: prev.chance,
-        });
-      } else {
-        next.push({
-          id: nm.id,
-          name: nm.name,
-          pp: nm.pp,
-          maxPp: nm.maxPp,
-          power: nm.power,
-          accuracy: nm.accuracy,
-          type: nm.type,
-          effect: nm.effect,
-          chance: nm.chance,
-        });
+    if (!mon.transformed && Array.isArray(incoming) && incoming.length > 0) {
+      const old = Array.isArray(mon.moves) ? mon.moves : [];
+      if (movesetDeltaOk(old, incoming)) {
+        mon.moves = nextMoves12(old, incoming);
+        applied = true;
       }
     }
-    mon.moves = next;
-    return true;
+    const grew = payload.level != null || payload.stats != null || payload.maxHp != null;
+    if (grew && typeof record.sim.levelUp === 'function') {
+      record.sim.levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp);
+      applied = true;
+    }
+    return applied;
   }
 
   /*
@@ -3901,14 +3956,18 @@ class Relay {
     if (outcome.caught) payload.caught = outcome.caught;
     if (outcome.catcher) payload.catcher = outcome.catcher;
     /*
-     * Gen 3's Pay Day coins: side a's total on a knockout win (lib/battle3
-     * `_checkOver`; none under link rules). A broadcast is already side a only
-     * here: in the three NPC modes every member is a human seated on side a
-     * (openMediatedBattle puts the npc seats alone on side b), and each client
-     * still checks the winners list before it pays. The mode test keeps the
-     * field off a player-vs-player fight even if a sim ever set it.
+     * Pay Day coins: side a's total on a knockout win (lib/battle3
+     * `_checkOver`; the Gen 1 / Gen 2 referees' `outcome().payDay` from
+     * contract K11 of docs/plans/gen12-referee-gaps-fix.md; none under link
+     * rules). A broadcast is already side a only here: in the three NPC modes
+     * every member is a human seated on side a (openMediatedBattle puts the npc
+     * seats alone on side b), and each client still checks the winners list
+     * before it pays. The mode test keeps the field off a player-vs-player
+     * fight even if a sim ever set it. A positive number only, Hub.lua's
+     * spelling: Lua reads a 0 as true, so "no coins" is the field's absence on
+     * both twins (every reader reads a 0 as absent anyway).
      */
-    if (outcome.payDay && PAY_DAY_MODES.has(record.mode)) payload.payDay = outcome.payDay;
+    if (Number(outcome.payDay) > 0 && PAY_DAY_MODES.has(record.mode)) payload.payDay = outcome.payDay;
     this.broadcastBattle(record, 'mmo.battle_outcome', payload);
 
     // Rank from the intermediator alone -- no dual mmo.result vote.
@@ -4189,4 +4248,7 @@ module.exports = {
   Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE,
   DEFAULT_SPRITE_GEN2, DEFAULT_SPRITE_GEN3, defaultSpriteFor,
   FRIEND_HOLD_MS, FRIEND_HOLD_PER_NAME, FRIEND_HOLD_MAX,
+  // The learn rules, twin of Hub.lua's M.movesetDeltaOk / M.nextMoves12
+  // (exported there for the solo path's referee).
+  movesetDeltaOk, nextMoves12,
 };

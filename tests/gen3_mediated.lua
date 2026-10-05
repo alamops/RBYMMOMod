@@ -1826,14 +1826,15 @@ do
   eq(SESSION.money, 1000, "no coins: an ordinary win pays nothing")
   eq(f.payDayLine, nil, "no coins: ...and says nothing")
 
-  -- What the wire hands over: Wire's Gen 3 reading keeps the coins, an older
-  -- reading drops them, and a mangled count is dropped without the outcome.
+  -- What the wire hands over: every reader keeps the coins (Red and Gold pay
+  -- Pay Day too since K11, docs/plans/gen12-referee-gaps-fix.md), and a
+  -- mangled count is dropped without the outcome.
   local raw = { battle = "rf", outcome = "win", winners = { "me" }, losers = { "w" },
                 reason = "ko", payDay = 300 }
   eq(Wire.battleOutcome(raw, 3).payDay, 300, "wire: a Gen 3 outcome keeps payDay")
   eq(Wire.battleOutcome(raw).payDay, 300, "wire: ...as does a reader that names no generation")
-  eq(Wire.battleOutcome(raw, 1).payDay, nil, "wire: Gen 1 never reads it")
-  eq(Wire.battleOutcome(raw, 2).payDay, nil, "wire: nor Gen 2")
+  eq(Wire.battleOutcome(raw, 1).payDay, 300, "wire: a Gen 1 reader keeps it too (K11)")
+  eq(Wire.battleOutcome(raw, 2).payDay, 300, "wire: and a Gen 2 reader (K11)")
   raw.payDay = 70000
   local clean = Wire.battleOutcome(raw, 3)
   check(clean ~= nil and clean.payDay == nil, "wire: past the cart's u16 the count is dropped, the outcome kept")

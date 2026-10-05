@@ -64,6 +64,14 @@
 --     (GetSixteenthMaxHP past 1024), `leech_seed_ko`, `rage` / `rage_cap` /
 --     `rage_sources` (Gold's Rage counter) and `side_effect_ko` (no secondary
 --     effect past `checkfaint`).
+--   * the referee-gaps run (docs/plans/gen12-referee-gaps-fix.md, R2a):
+--     `gold_stat_hits` (SP. DEF / ACCURACY down, ATTACK / DEFENSE / ALL up),
+--     `flame_wheel_thaw`, `stomp_minimize`, `twister_fly` (GUST, EARTHQUAKE,
+--     THUNDER), `snore_sky_attack`, `tri_attack`, `effectchance_miss`,
+--     `multi_hit_draws` / `multi_hit_first_ko`, `leech_seed_eighth`,
+--     `no_999_cap`, `recoil_substitute`, `rampage_zero_pp`,
+--     `mirror_move_last_used`, `metronome_charge`, `metronome_bide`, `pay_day_wild` /
+--     `pay_day_link` and `hyper_beam_recharge`; `trap_chain` is Gold's wrap.
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -189,6 +197,10 @@ local function encOutcome(out)
   end
   if out.losers then
     parts[#parts + 1] = '"losers":' .. encList(out.losers, encString)
+  end
+  -- Contract K11: Pay Day's coins on side a's win against the computer.
+  if out.payDay then
+    parts[#parts + 1] = '"payDay":' .. encNumber(out.payDay)
   end
   return "{" .. table.concat(parts, ",") .. "}"
 end
@@ -431,12 +443,12 @@ scenario("retarget", function(events)
   return battle
 end)
 
--- 5. a whole trapping chain.  Gen1's 2..5 counter is a *total* attack count, so
---    the turn Wrap lands on deals the move's damage and no residual on top of
---    it; every later turn is one attack, forced on both seats and therefore
---    ticked rather than submitted.  The tail also pins that a referee-filled
---    answer cannot be cancelled away -- silently, so what shows up on the wire
---    is the absence of an `unchose`.
+-- 5. a whole trapping chain, Gold's way.  TrapTarget sets a 3..6 count;
+--    HandleWrap ticks it at the end of every turn -- the one Wrap landed on
+--    included -- for a sixteenth of max HP, and releases at 0.  Nobody is
+--    forced: the wrapped seat answers every turn, its switch is refused while
+--    the count runs and taken once it is released, and the trapper picks its
+--    own moves (a plain hit after the first turn).
 scenario("trap_chain", function(events)
   local wrap = function()
     return { id = "wrap", pp = 60, power = 5, accuracy = 255, type = 0,
@@ -448,23 +460,25 @@ scenario("trap_chain", function(events)
     sides = {
       a = { { playerId = "p1", name = "Ann",
               mons = { mn({ species = "Alpha", maxHp = 400, spe = 120,
-                            moves = { wrap() } }) } } },
+                            moves = { wrap(), mv("tap", 10, 255, 0) } }) } } },
       b = { { playerId = "p2", name = "Bob",
               mons = { mn({ species = "Beta", maxHp = 400, def = 200, spe = 1,
-                            moves = { mv("tap", 40, 255, 0) } }) } } },
+                            moves = { mv("tap", 10, 255, 0) } }),
+                       mn({ species = "Gamma", maxHp = 400, spe = 1,
+                            moves = { mv("tap", 10, 255, 0) } }) } } },
     },
   })
   drainInto(battle, events)
   battle:submitChoice("p1", { action = "fight", move = 0 })
   battle:submitChoice("p2", { action = "fight", move = 0 })
   drainInto(battle, events)
-  for step = 1, 10 do
-    battle:tick(step)
+  for _ = 1, 6 do
+    if not battle:submitChoice("p2", { action = "switch", slot = 1 }) then
+      battle:submitChoice("p2", { action = "fight", move = 0 })
+    end
+    battle:submitChoice("p1", { action = "fight", move = 1 })
     drainInto(battle, events)
   end
-  battle:submitChoice("p2", { action = "cancel" })
-  battle:submitChoice("p2", { action = "switch", slot = 0 })
-  drainInto(battle, events)
   return battle
 end)
 
@@ -734,7 +748,7 @@ scenario("crit_stages", function(events)
   end
   local wall = function() return fx("wall_up", 0, 1, 65, 20) end
   local battle = build({
-    id = "cr", mode = "1v1", seed = 2, choiceTimeout = 60, reconnectGrace = 60,
+    id = "cr", mode = "1v1", seed = 34, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = {
         mn({ species = "Alpha", level = 30, maxHp = 400, atk = 80, def = 80, spe = 60,
@@ -1081,7 +1095,7 @@ scenario("focus_band", function(events)
     b:submitChoice("p1", { action = "fight", move = 0 })
     b:submitChoice("p2", { action = "fight", move = 0 })
   end
-  return play(events, { id = "fb", mode = "1v1", seed = 13, choiceTimeout = 60, reconnectGrace = 60,
+  return play(events, { id = "fb", mode = "1v1", seed = 11, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, atk = 60, spe = 90,
               types = { 2 }, moves = { hm("thump", 40) } }) } } },
@@ -1091,8 +1105,8 @@ scenario("focus_band", function(events)
 end)
 
 -- King's Rock.  Turn 1: Ann's plain hit (a `kingsrock` script) flinches Bob,
--- who has not moved.  Turn 2: THUNDER folds to effect 0 on a Gold sheet but
--- runs no `kingsrock`, so Ann rolls nothing; Bob's hit lands his own roll on
+-- who has not moved.  Turn 2: THUNDER, on its own Gold-native id (97), runs
+-- no `kingsrock`, so Ann rolls nothing; Bob's hit lands his own roll on
 -- Ann, who already moved.  Turn 3: that flag died at the turn's open, so Ann
 -- acts -- with a burn hit, another script without the command.  Turn 4: a
 -- plain hit again.
@@ -1108,7 +1122,7 @@ scenario("kings_rock", function(events)
   return play(events, { id = "kr", mode = "1v1", seed = 1, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 999, spe = 90, types = { 2 },
-              item = rock, moves = { hm("thump", 10), hm("THUNDER", 10), hm("ember_hit", 10, 0, 4) } }) } } },
+              item = rock, moves = { hm("thump", 10), hm("THUNDER", 10, 0, 97), hm("ember_hit", 10, 0, 4) } }) } } },
       b = { { playerId = "p2", name = "Bob", mons = { mn({ species = "Beta", maxHp = 999, spe = 10, types = { 2 },
               item = rock, moves = { hm("thump", 10) } }) } } },
     } }, rounds)
@@ -1432,7 +1446,7 @@ scenario("thief_chance_miss", function(events)
     b:submitChoice("p1", { action = "fight", move = 0 })
     b:submitChoice("p2", { action = "fight", move = 0 })
   end
-  return play(events, { id = "tcm", mode = "1v1", seed = 26836, choiceTimeout = 60, reconnectGrace = 60,
+  return play(events, { id = "tcm", mode = "1v1", seed = 153, choiceTimeout = 60, reconnectGrace = 60,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = { mn({ species = "Alpha", maxHp = 300, spe = 90, types = { 2 },
               moves = { thief(10) } }) } } },
@@ -1757,6 +1771,252 @@ scenario("computer_growl_miss", function(events)
             { playerId = "n2", name = "Fay", mons = { mn({ species = "Delta", maxHp = 300, spe = 80, types = { 0 },
               moves = { growl() } }) } } },
     } }, { round, round })
+end)
+
+-- ------------------------------------------------------------------
+-- the referee-gaps run (docs/plans/gen12-referee-gaps-fix.md, R2a): the
+-- Gold-native secondary effects (Effects.lua 87..101), `effectchance` on a
+-- miss, per-hit multi-hit draws, LEECH SEED's eighth, no 999 cap after STAB,
+-- Gold's wrap (`trap_chain` above), recoil into a substitute, a rampage at
+-- 0 PP, MIRROR MOVE's last move used, a METRONOME-called charge, Pay Day and
+-- HYPER BEAM's recharge.  Every number synthetic.
+-- ------------------------------------------------------------------
+
+-- One seat a side; `rounds` is a list of { playerId, choice } lists, each
+-- submitted in order -- or "tick", one second on the clock, for a turn every
+-- seat is forced through.
+local function duo(id, mode, seed, aMons, bMons, extra)
+  local o = { id = id, mode = mode, seed = seed, choiceTimeout = 60, reconnectGrace = 60,
+    sides = { a = { { playerId = "p1", name = "Ann", mons = aMons } },
+              b = { { playerId = "p2", name = "Bob", mons = bMons } } } }
+  if extra then
+    o.typeIds = extra.typeIds
+    o.metronomePool = extra.metronomePool
+  end
+  return o
+end
+local function seq(events, opts, rounds)
+  local fns = {}
+  for i, list in ipairs(rounds) do
+    if list == "tick" then
+      fns[i] = function(b) b:tick(b.now + 1) end
+    else
+      fns[i] = function(b)
+        for _, pair in ipairs(list) do b:submitChoice(pair[1], pair[2]) end
+      end
+    end
+  end
+  return play(events, opts, fns)
+end
+local function F(i) return { action = "fight", move = i } end
+local function S(slot) return { action = "switch", slot = slot } end
+local function both(a, b) return { { "p1", a }, { "p2", b } } end
+
+-- The stat hits.  Ann (against the computer) lowers Bob's Sp. Def with CRUNCH
+-- (87), raises her Attack with METAL CLAW (89) -- +5 -> +6 -- then
+-- ANCIENTPOWER (91) raises all but the Attack already at +6, and STEEL WING
+-- (90) fails silently on a Defense of 999.  Bob's MUD-SLAP (88) is the
+-- computer's ACCURACY_DOWN_HIT: no `.ComputerMiss` byte.
+scenario("gold_stat_hits", function(events)
+  return seq(events, duo("gsh", "wild", 501,
+    { mn({ species = "Alpha", maxHp = 400, def = 999, spe = 90, stages = { atk = 5 },
+           moves = { hm("CRUNCH", 20, 0, 87, 60, 100), hm("METAL_CLAW", 20, 0, 89, 60, 100),
+                     hm("ANCIENTPOWER", 20, 0, 91, 60, 100), hm("STEEL_WING", 20, 0, 90, 60, 100) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("MUD_SLAP", 5, 0, 88, 60, 100) } }) }),
+    { both(F(0), F(0)), both(F(1), F(0)), both(F(2), F(0)), both(F(3), F(0)) })
+end)
+
+-- FLAME WHEEL (92) and SACRED FIRE (93): both monsters frozen; each passes
+-- CheckTurn's freeze by move id, Ann's hit thaws Bob through BurnTarget's
+-- Defrost, and her own `defrost` thaws her.
+scenario("flame_wheel_thaw", function(events)
+  return seq(events, duo("fwt", "1v1", 502,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, status = "FRZ", types = { 0 },
+           moves = { hm("FLAME_WHEEL", 30, 1, 92, 60, 100) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, status = "FRZ", types = { 0 },
+           moves = { hm("SACRED_FIRE", 30, 1, 93, 60, 100) } }) },
+    { typeIds = SIDE_TYPES }),
+    { both(F(0), F(0)), both(F(0), F(0)) })
+end)
+
+-- STOMP (94) against a MINIMIZE that went up (wEnemyMinimized): doubled after
+-- the variation; a switch-in clears it.
+scenario("stomp_minimize", function(events)
+  return seq(events, duo("stm", "1v1", 503,
+    { mn({ species = "Alpha", maxHp = 500, spe = 90, moves = { hm("MINIMIZE", 0, 0, 15) } }),
+      mn({ species = "Gamma", maxHp = 500, spe = 90, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 500, spe = 10, moves = { hm("STOMP", 40, 0, 94, 60, 30) } }) }),
+    { both(F(0), F(0)), both(F(0), F(0)), both(S(1), F(0)) })
+end)
+
+-- TWISTER (95) and GUST (99) reach a FLY user and double; EARTHQUAKE (100)
+-- reaches a DIG user and doubles; THUNDER (97) reaches the sky too and
+-- paralyses.
+scenario("twister_fly", function(events)
+  return seq(events, duo("twf", "1v1", 504,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("FLY", 30, 0, 43), hm("DIG", 30, 0, 43) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("TWISTER", 20, 0, 95, 60, 20), hm("GUST", 20, 0, 99),
+                     hm("EARTHQUAKE", 20, 0, 100), hm("THUNDER", 20, 0, 97, 60, 100) } }) }),
+    { both(F(0), F(0)), both(F(0), F(1)), both(F(1), F(2)), both(F(1), F(1)),
+      both(F(0), F(3)) })
+end)
+
+-- SNORE (96) and SKY ATTACK (101) end in FlinchTarget and `kingsrock`.
+scenario("snore_sky_attack", function(events)
+  return seq(events, duo("ssa", "1v1", 505,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, item = { "KINGS_ROCK", "HELD_FLINCH", 30, "KING'S ROCK" },
+           moves = { hm("SNORE", 20, 0, 96, 60, 30), hm("SKY_ATTACK", 40, 0, 101, 60, 30) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both(F(0), F(0)), both(F(1), F(0)), both(F(1), F(0)), both(F(0), F(0)) })
+end)
+
+-- TRI ATTACK (98): its own effectchance and the `.loop` bytes every hit,
+-- landing on ParalyzeTarget / FreezeTarget / BurnTarget -- the frozen target
+-- thawed when it lands on BurnTarget.
+scenario("tri_attack", function(events)
+  local quiet = hm("wait", 0, 0, 85)
+  return seq(events, duo("tri", "1v1", 506,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, types = { 0 },
+           moves = { hm("TRI_ATTACK", 10, 0, 98, 60, 100) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 10, status = "FRZ", types = { 2 }, moves = { quiet } }) },
+    { typeIds = SIDE_TYPES }),
+    { both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)),
+      both(F(0), F(0)), both(F(0), F(0)) })
+end)
+
+-- `effectchance` right after `checkhit`: a 1%-accurate burn hit draws it on
+-- its misses, and on its miss into the sky (`.FlyDigMoves`); a substitute
+-- standing skips it.
+scenario("effectchance_miss", function(events)
+  local wild = { id = "wild_flame", pp = 60, power = 40, accuracy = 1, type = 1, effect = 4, chance = 10 }
+  return seq(events, duo("ecm", "1v1", 507,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { wild } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10,
+           moves = { hm("wait", 0, 0, 85), hm("SUBSTITUTE", 0, 0, 79), hm("FLY", 30, 0, 43) } }) }),
+    { both(F(0), F(0)), both(F(0), F(2)), { { "p1", F(0) } }, both(F(0), F(1)), both(F(0), F(0)) })
+end)
+
+-- MultiHit / DoubleHit / PoisonMultiHit: per hit, a crit byte and a roll;
+-- MULTI_HIT's count after the first hit; TWINEEDLE's one effectchance before
+-- its loop.
+scenario("multi_hit_draws", function(events)
+  return seq(events, duo("mhd", "1v1", 508,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, focusEnergy = true,
+           moves = { hm("fury_hits", 15, 0, 29), hm("twin_hits", 25, 0, 44), hm("TWINEEDLE", 25, 0, 77, 60, 20) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 10, types = { 0 }, moves = { hm("tap", 1) } }) },
+    { typeIds = SIDE_TYPES }),
+    { both(F(0), F(0)), both(F(0), F(0)), both(F(1), F(0)), both(F(2), F(0)), both(F(2), F(0)) })
+end)
+
+-- A first hit that knocks the target out ends MULTI_HIT before EndLoop draws
+-- its count.
+scenario("multi_hit_first_ko", function(events)
+  return seq(events, duo("mfk", "1v1", 509,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { hm("fury_hits", 15, 0, 29) } }) },
+    { mn({ species = "Beta", maxHp = 400, hp = 1, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both(F(0), F(0)), { { "p2", S(1) } }, both(F(0), F(0)) })
+end)
+
+-- LEECH SEED's eighth (GetEighthMaxHP) through SubtractHPFromUser: past the
+-- seeded monster's own substitute, and the seeder healed what was taken.
+scenario("leech_seed_eighth", function(events)
+  local seeded = mn({ species = "Beta", maxHp = 400, spe = 10, substitute = 50,
+                      leechSeed = { fromSlot = 0 }, moves = { hm("wait", 0, 0, 85) } })
+  return seq(events, duo("lse", "1v1", 510,
+    { mn({ species = "Alpha", maxHp = 400, hp = 100, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { seeded }),
+    { both(F(0), F(0)), both(F(0), F(0)) })
+end)
+
+-- No 999 cap after the DamageCalc tail: a STAB hit past 999 lands whole, and
+-- BIDE stores it (16-bit, pinned at $ffff) and releases twice that.
+scenario("no_999_cap", function(events)
+  return seq(events, duo("n9c", "1v1", 511,
+    { mn({ species = "Alpha", level = 100, maxHp = 9000, atk = 255, spe = 90, types = { 0 },
+           moves = { hm("crush", 250, 0, 0) } }) },
+    { mn({ species = "Beta", level = 100, maxHp = 9000, def = 1, spe = 10, types = { 0 },
+           moves = { hm("BIDE", 0, 0, 26) } }) }),
+    { both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)) })
+end)
+
+-- RECOIL into a substitute: wCurDamage is 0 after DoSubstituteDamage, so the
+-- recoil is the minimum 1 -- off the user's HP, past its own substitute.
+scenario("recoil_substitute", function(events)
+  return seq(events, duo("rcs", "1v1", 512,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, substitute = 50,
+           moves = { hm("TAKE_DOWN", 40, 0, 48) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, substitute = 200, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both(F(0), F(0)), both(F(0), F(0)) })
+end)
+
+-- THRASH with its last PP: the rampage's next turns re-use it (no PP, never
+-- Struggle), its count drawn before `checkhit`, the confusion when it runs
+-- out; a full paralysis (CantMove) ends one.
+scenario("rampage_zero_pp", function(events)
+  return seq(events, duo("rzp", "1v1", 513,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("THRASH", 20, 0, 27, 1) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 90, status = "PAR", moves = { hm("THRASH", 20, 0, 27, 5) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)),
+      both(S(1), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)) })
+end)
+
+-- MIRROR MOVE reads the foe's last move USED: the move its METRONOME called,
+-- not METRONOME; it fails on a move the user knows, and after a send-out.
+scenario("mirror_move_last_used", function(events)
+  return seq(events, duo("mml", "1v1", 514,
+    { mn({ species = "Alpha", maxHp = 600, spe = 10, moves = { hm("MIRROR_MOVE", 0, 0, 9), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 600, spe = 90, moves = { hm("METRONOME", 0, 0, 83), hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 600, spe = 90, moves = { hm("tap", 1) } }) },
+    { metronomePool = { hm("pool_hit", 30, 0, 0) } }),
+    { both(F(0), F(0)), both(F(0), F(1)), both(F(0), S(1)) })
+end)
+
+-- A charge move METRONOME called keeps the called move: FLY lands the next
+-- turn instead of a second call; and a MIRROR MOVE that copied the FLY
+-- charges and lands it too.
+scenario("metronome_charge", function(events)
+  return seq(events, duo("mtc", "1v1", 515,
+    { mn({ species = "Alpha", maxHp = 600, spe = 90, moves = { hm("METRONOME", 0, 0, 83) } }) },
+    { mn({ species = "Beta", maxHp = 600, spe = 10, moves = { hm("MIRROR_MOVE", 0, 0, 9) } }) },
+    { metronomePool = { hm("FLY", 30, 0, 43) } }),
+    { both(F(0), F(0)), "tick", both(F(0), F(0)) })
+end)
+
+-- ...and a BIDE METRONOME called is released as BIDE, not a second call.
+scenario("metronome_bide", function(events)
+  return seq(events, duo("mtb", "1v1", 518,
+    { mn({ species = "Alpha", maxHp = 600, spe = 90, moves = { hm("METRONOME", 0, 0, 83) } }) },
+    { mn({ species = "Beta", maxHp = 600, atk = 90, spe = 10, moves = { hm("thump", 40) } }) },
+    { metronomePool = { hm("BIDE", 0, 0, 26) } }),
+    { both(F(0), F(0)), { { "p2", F(0) } }, { { "p2", F(0) } }, { { "p2", F(0) } }, both(F(0), F(0)) })
+end)
+
+-- PAY DAY: level x 2 a hit into the fight's one pot, the computer's own
+-- included, paid as `payDay` on side a's win against the computer; a link
+-- fight reports none.
+local function payDayFight(id, mode)
+  return function(events)
+    return seq(events, duo(id, mode, 516,
+      { mn({ species = "Alpha", level = 30, maxHp = 400, atk = 90, spe = 90, moves = { hm("PAY_DAY", 40, 0, 16) } }) },
+      { mn({ species = "Beta", level = 140, maxHp = 60, spe = 10, moves = { hm("PAY_DAY", 1, 0, 16) } }) }),
+      { both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)) })
+  end
+end
+scenario("pay_day_wild", payDayFight("pdw", "wild"))
+scenario("pay_day_link", payDayFight("pdl", "1v1"))
+
+-- HYPER BEAM recharges after a knockout and after a hit into a substitute on
+-- Gold (`rechargenextturn` before `checkfaint`).
+scenario("hyper_beam_recharge", function(events)
+  return seq(events, duo("hbr", "1v1", 517,
+    { mn({ species = "Alpha", maxHp = 600, atk = 90, spe = 90, moves = { hm("HYPER_BEAM", 150, 0, 80), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 20, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 600, spe = 10, moves = { hm("SUBSTITUTE", 0, 0, 79), hm("wait", 0, 0, 85) } }) }),
+    { both(F(0), F(0)), { { "p2", S(1) } }, { { "p2", F(0) } }, both(F(0), F(1)), { { "p2", F(1) } } })
 end)
 
 -- ------------------------------------------------------------------

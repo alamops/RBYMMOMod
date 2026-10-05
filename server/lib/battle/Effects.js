@@ -637,6 +637,16 @@ function hazeReset(mon) {
   mon.lightScreen = false;
 }
 
+// Whether a Substitute stands in front of `mon`. The doll's HP is
+// `substitute`; AttackSubstitute (core.asm :4849-4900) leaves a doll standing
+// at 0 when a hit takes exactly its HP (`sub [hl]` / `ret nc`), and that doll
+// is `subAtZero` -- still up, so it still blocks, still soaks the next hit
+// (which breaks it) and still makes a second SUBSTITUTE fail.
+function hasSubstitute(mon) {
+  if (!mon || typeof mon !== 'object') return false;
+  return int(mon.substitute, 0) > 0 || mon.subAtZero === true;
+}
+
 // Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
 // Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
 // Substitute) and field-wide Haze still run; Conversion copies onto the user.
@@ -665,7 +675,7 @@ function applyPrimary(ctx) {
   } = c;
   const wire = c.statusToWire || {};
 
-  if (targetMon && (targetMon.substitute || 0) > 0 && blockedBySubstitute(effectId)) {
+  if (targetMon && hasSubstitute(targetMon) && blockedBySubstitute(effectId)) {
     out.nothing = true;
     return out;
   }
@@ -789,7 +799,7 @@ function applyPrimary(ctx) {
 
   if (effectId === 79) {
     const cost = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 4);
-    if (userMon.substitute && userMon.substitute > 0) {
+    if (hasSubstitute(userMon)) {
       out.nothing = true;
       return out;
     }
@@ -799,6 +809,7 @@ function applyPrimary(ctx) {
     }
     userMon.hp -= cost;
     userMon.substitute = cost;
+    userMon.subAtZero = null;
     out.directDamage = [{ amount: cost }];
     out.messages.push(`${userMon.species} created a substitute`);
     return out;
@@ -1034,7 +1045,8 @@ function inflict(out, fighter, mon, status, wire) {
 // where the cart gets that far: a target that fainted returned at `ret z`
 // (core.asm :3242), and a Substitute the move broke zeroed the move's effect
 // (AttackSubstitute `.nullifyEffect`, :4899). A Substitute still standing is
-// read here, off `targetMon.substitute`, because each routine answers it
+// read here, off `targetMon.substitute` (hasSubstitute: a doll standing at
+// 0 HP included), because each routine answers it
 // differently.
 //
 // ctx: effectId, chance, rng, targetMon, targetFighter, userFighter,
@@ -1058,7 +1070,7 @@ function applySide(ctx) {
   const wire = c.statusToWire || {};
   const threshold = sideThreshold(effectId, c.chance);
   if (threshold <= 0 || !targetMon || typeof targetMon !== 'object') return out;
-  const behindSub = int(targetMon.substitute, 0) > 0;
+  const behindSub = hasSubstitute(targetMon);
   const moveType = c.moveType === undefined || c.moveType === null
     ? null : int(c.moveType, null);
 
@@ -1151,7 +1163,12 @@ function applySide(ctx) {
 // Phase 3 multi-hit, fixed damage, drain, recoil
 // ------------------------------------------------------------------
 
-const MULTIHIT = { 29: true, 44: true, 77: true };
+// TWO_TO_FIVE_ATTACKS_EFFECT (29) and EFFECT_1E (30) share
+// TwoToFiveAttacksEffect in the cart's pointer table
+// (data/moves/effects_pointers.asm) and both sit in AlwaysHappenSideEffects,
+// so a move carrying the unused 30 hits two to five times as 29 does;
+// ATTACK_TWICE (44) and TWINEEDLE (77) are the fixed pair.
+const MULTIHIT = { 29: true, 30: true, 44: true, 77: true };
 const FIXED_DAMAGE = { 38: true, 40: true, 41: true };
 const DRAIN = { 3: true, 8: true };
 const RECOIL = { 48: true };
@@ -1160,10 +1177,20 @@ function isMultihit(effectId) {
   return MULTIHIT[int(effectId, 0)] === true;
 }
 
+// TwoToFiveAttacksEffect (effects.asm :925-969): ATTACK_TWICE and TWINEEDLE
+// are 2 with no draw; the two-to-five pair draws `BattleRandom & 3`, keeps a
+// 0 or 1 (2 or 3 hits), and on a 2 or 3 draws `& 3` again and keeps that --
+// 2, 3, 4, 5 hits at 3/8, 3/8, 1/8, 1/8. The caller draws this where the cart
+// does: at the first hit's AlwaysHappenSideEffects, so after that hit (a
+// knockout included) and never when that hit broke a Substitute (Turn).
 function hitCount(effectId, rng) {
   const id = int(effectId, 0);
   if (id === 44 || id === 77) return 2;
-  if (id === 29) return 2 + (rng ? rng.byte() : 0) % 4;
+  if (id === 29 || id === 30) {
+    let n = (rng ? rng.byte() : 0) % 4;
+    if (n >= 2) n = (rng ? rng.byte() : 0) % 4;
+    return 2 + n;
+  }
   return 1;
 }
 
@@ -1179,12 +1206,19 @@ function isRecoil(effectId) {
   return RECOIL[int(effectId, 0)] === true;
 }
 
+// DrainHPEffect_ (engine/battle/move_effects/drain_hp.asm): wDamage halved
+// in place, and a 0 bumped to 1 -- "the attacker gains at least 1 HP".
 function drainAmount(damage) {
-  return Math.floor(Math.max(0, int(damage, 0)) / 2);
+  return Math.max(1, Math.floor(Math.max(0, int(damage, 0)) / 2));
 }
 
-function recoilAmount(damage) {
-  return Math.max(1, Math.floor(Math.max(0, int(damage, 0)) / 4));
+// RecoilEffect_ (engine/battle/move_effects/recoil.asm): a quarter of
+// wDamage, or half for STRUGGLE (`cp STRUGGLE` before the second `srl`), at
+// least 1.
+function recoilAmount(damage, struggle) {
+  const d = Math.max(0, int(damage, 0));
+  if (struggle) return Math.max(1, Math.floor(d / 2));
+  return Math.max(1, Math.floor(d / 4));
 }
 
 function fixedDamage(ctx) {
@@ -1619,6 +1653,19 @@ function isPayDay(effectId) {
   return int(effectId, 0) === 16;
 }
 
+// PayDayEffect_ (engine/battle/move_effects/pay_day.asm): the user's level
+// doubled with an 8-bit `add a` (a level over 127 wraps), per use.
+function payDayCoins(level) {
+  return (2 * Math.max(0, int(level, 0))) % 256;
+}
+
+// The cart's move id for COUNTER: HandleCounterMove (core.asm :4547-4610)
+// compares wPlayerSelectedMove / wEnemySelectedMove with COUNTER, so it is
+// the move, not an effect (COUNTER is NO_ADDITIONAL_EFFECT).
+function isCounter(moveOrId) {
+  return moveKey(moveOrId) === 'COUNTER';
+}
+
 function isMirrorMove(effectId) {
   return int(effectId, 0) === 9;
 }
@@ -1659,6 +1706,7 @@ module.exports = {
   isPhase6Primary,
   handlesPrimary,
   hasMajorStatus,
+  hasSubstitute,
   applyPrimary,
   SIDE_THRESHOLD,
   COMPUTER_DROP_MISS,
@@ -1707,6 +1755,8 @@ module.exports = {
   teleportRunAllowed,
   runEndsBattle,
   isPayDay,
+  payDayCoins,
+  isCounter,
   isMirrorMove,
   isMimic,
   isMetronome,

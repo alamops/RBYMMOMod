@@ -700,10 +700,23 @@ M.MOVE_NAME_MAX = 16
 M.BATTLE_TYPE_MAX = 20
 
 -- Cap on the ephemeral Metronome pick list uploaded with a ruleset.  Gen 1 has
--- 165 moves; the spare is for data packs.  The pool is ROM-derived at runtime
--- from the host's own decode and is thrown away with the battle -- it does not
--- ship in this repo.
-M.BATTLE_METRONOME_POOL_MAX = 200
+-- 165 moves and Gold 251; the spare is for data packs.  The pool is
+-- ROM-derived at runtime from the host's own decode and is thrown away with
+-- the battle -- it does not ship in this repo.
+--
+-- 256 rather than 200 (contract K13 of docs/plans/gen12-referee-gaps-fix.md):
+-- at 200 the client's sorted walk stopped before Gold's last ~50 ids, so
+-- METRONOME could never call them.  Not more, because the pool is the bulk of
+-- one newline-JSON line and both hubs close a connection that sends a line
+-- past 64 KiB ("Message too long."; MAX_LINE in server/lib/server.js,
+-- HostServer.MAX_LINE).  Measured with src/link/Json.lua
+-- on a 20-type chart: Gold's own 249-row pool with every K8 field is ~36 KB
+-- (55%); 256 rows of 12-character ids ~39 KB (60%); 256 rows with every id at
+-- its 40-character cap, every name at MOVE_NAME_MAX and every number at its
+-- widest ~54 KB (82%) -- where 300 such rows would be ~62 KB (95%), too close
+-- to a limit whose failure is a dropped connection.  Twin of
+-- server/lib/sanitize.js METRONOME_POOL_MAX (server/twin_parity.test.js).
+M.BATTLE_METRONOME_POOL_MAX = 256
 
 -- The Gen 3 ruleset's two lists (docs/plans/gen3-battle-sheet.md §3).
 --

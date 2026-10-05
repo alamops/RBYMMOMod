@@ -1514,8 +1514,11 @@ do
      "(which a reader naming none still draws)")
   local ev = Wire.battleEvent({ battle = "b1", seq = 2, t = "stat", slot = 0, side = "a",
     target = 2, stage = 1, delta = 1, holding = 3 }, 2)
-  ok(ev ~= nil and ev.target == nil and ev.stage == nil and ev.delta == nil and ev.holding == nil,
-     "a Gen 2 reader keeps none of Gen 3's event fields")
+  ok(ev ~= nil and ev.target == nil and ev.delta == nil and ev.holding == nil,
+     "a Gen 2 reader keeps none of Gen 3's other event fields")
+  -- ...but `stage` it reads now: a `stat` event's signed stage is the older
+  -- dialect's too (contract K10 of docs/plans/gen12-referee-gaps-fix.md).
+  eq(ev and ev.stage, 1, "a Gen 2 reader keeps the signed stage (K10)")
   local mv = Wire.battleEvent({ battle = "b1", seq = 3, t = "moves", slot = 0, side = "a",
     moves = { stray } }, 1)
   eq(mv and mv.moves and mv.moves[1].id, "thump", "and reads a moves row in the older dialect")
@@ -1993,7 +1996,9 @@ do
   eq(atBob and atBob.payDay, 600, "pay day: both players on side a hear the coins")
   local read = outcome and Wire.battleOutcome(outcome, 3)
   eq(read and read.payDay, 600, "pay day: the Gen 3 outcome reader keeps it")
-  eq(outcome and Wire.battleOutcome(outcome, 1).payDay, nil, "pay day: an older reader never sees it")
+  -- An older reader reads it too since contract K11 (Red and Gold report
+  -- their own Pay Day coins), under its own cart's PAYDAY12_MAX bound.
+  eq(outcome and Wire.battleOutcome(outcome, 1).payDay, 600, "pay day: a Gen 1 reader reads it too (K11)")
   eq(hub.battles["g3pay"], nil, "pay day: the record settles and clears")
 end
 
@@ -2477,6 +2482,234 @@ do
     io.write("hub_battle: src.link.Json not reachable from here (run from the engine root); "
       .. "decoder checks skipped\n")
   end
+end
+
+-- ------------------------------------------------------------------
+-- The referee-gap contracts on the hub (docs/plans/gen12-referee-gaps-fix.md)
+-- ------------------------------------------------------------------
+--
+-- K9: a mid-fight level-up rides mmo.battle_moveset, and the hub forwards its
+-- level / stats / maxHp to the referee's `levelUp(playerId, monIndex, level,
+-- stats, maxHp)` -- 1-based index -- whatever became of the move list, only
+-- when the referee has the method.  The method is a stub recording each call
+-- (the Gen 1 / Gen 2 referees' own rebuild is theirs to pin).  K8: a learn
+-- keeps an unchanged row's highCrit / PP Ups / Gold priority and takes a new
+-- row's.  server/hub_battle.test.js pins the same on the Node twin, and
+-- tests/fixtures/hub_protocol_parity.json holds the two to one digest.
+
+local function row(id, o)
+  local out = { id = id, pp = 20, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 }
+  for k, v in pairs(o or {}) do out[k] = v end
+  return out
+end
+
+do
+  local hub = Hub.new({ maxPlayers = 4 })
+  local fight = openFight(hub)
+  local record = hub.battles[fight.id]
+  local client = fight.ann.client
+  ok(record.sim ~= nil, "level-up: the fight is live")
+  local calls = {}
+  record.sim.levelUp = function(sim, playerId, index, level, stats, maxHp)
+    calls[#calls + 1] = { sim = sim, playerId = playerId, index = index, level = level,
+                          stats = stats, maxHp = maxHp }
+  end
+  local live = record.sim.byId[client.id].mons[1]
+  live.moves = { row("OLD", { pp = 10, highCrit = true, ppUps = 1 }) }
+
+  ok(hub:applyBattleMoveset(record, client, { mon = 0, moves = { row("OLD", { pp = 99 }) },
+       level = 51, stats = { atk = 1, def = 2, spd = 3, spc = 4 }, maxHp = 310 }),
+     "level-up: the hub's own moves with a level reach the referee")
+  eq(#calls, 1, "level-up: one call")
+  eq(calls[1] and calls[1].sim, record.sim, "level-up: called as a method on the referee")
+  eq(calls[1] and calls[1].playerId, client.id, "level-up: for the sender's seat")
+  eq(calls[1] and calls[1].index, 1, "level-up: the 1-based party index (wire mon 0)")
+  eq(calls[1] and calls[1].level, 51, "level-up: the new level")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spc, 4, "level-up: the new stats")
+  eq(calls[1] and calls[1].maxHp, 310, "level-up: the new max HP")
+  eq(live.moves[1].pp, 10, "level-up: the unchanged row keeps the hub's PP")
+  eq(live.moves[1].highCrit, true, "level-up: ...and its high-crit flag (K8: the rebuild used to drop it)")
+  eq(live.moves[1].ppUps, 1, "level-up: ...and its PP Ups")
+
+  hub:receive(client, { type = Wire.BATTLE_MOVESET, battle = fight.id, mon = 0,
+    moves = { row("OLD") }, level = "52", stats = { atk = 5, def = 6, spd = 7, spc = 8 } })
+  eq(#calls, 2, "level-up: the wire path forwards too")
+  eq(calls[2] and calls[2].level, 52, "level-up: ...the sanitised level")
+  eq(calls[2] and calls[2].maxHp, nil, "level-up: ...and no max HP when none was stated")
+  hub:receive(client, { type = Wire.BATTLE_MOVESET, battle = fight.id, mon = 0,
+    moves = { row("OLD") }, level = 0 })
+  eq(#calls, 2, "level-up: a mangled level refuses the whole message")
+
+  ok(hub:applyBattleMoveset(record, client, { mon = 0,
+       moves = { row("OLD"), row("NEW", { ppUps = 2, highCrit = true }) } }),
+     "level-up: a learn with no level is applied")
+  eq(#calls, 2, "level-up: ...and calls nothing")
+  eq(live.moves[2] and live.moves[2].ppUps, 2, "level-up: the learned row keeps its PP Ups")
+  eq(live.moves[2] and live.moves[2].highCrit, true, "level-up: ...and its high-crit flag")
+  eq(live.moves[2] and live.moves[2].priority, nil, "level-up: a Gen 1 row has no priority")
+
+  ok(hub:applyBattleMoveset(record, client, { mon = 0,
+       moves = { row("AAA"), row("BBB") }, level = 53 }),
+     "level-up: a refused rewrite still forwards its level")
+  eq(#calls, 3, "level-up: ...one more call")
+  eq(live.moves[1].id, "OLD", "level-up: ...and the list is untouched")
+
+  live.transformed = true
+  ok(hub:applyBattleMoveset(record, client, { mon = 0,
+       moves = { row("OLD"), row("NEW"), row("THIRD") }, level = 54, maxHp = 320 }),
+     "level-up: a transformed battler still grows")
+  eq(#calls, 4, "level-up: ...the referee hears it")
+  eq(#live.moves, 2, "level-up: ...and only its move list is protected")
+  eq(hub:applyBattleMoveset(record, client, { mon = 0,
+       moves = { row("OLD"), row("NEW"), row("THIRD") } }), false,
+     "level-up: moves alone on a transformed battler reach nothing")
+  live.transformed = nil
+
+  eq(hub:applyBattleMoveset(record, client, { mon = 5, moves = { row("OLD") }, level = 55 }), false,
+     "level-up: a party index with no mon is refused")
+  eq(#calls, 4, "level-up: ...and forwards nothing")
+
+  record.sim.levelUp = false
+  eq(hub:applyBattleMoveset(record, client, { mon = 0, moves = { row("AAA"), row("BBB") },
+       level = 56 }), false, "level-up: a referee with no K9 method is not called")
+  ok(hub:applyBattleMoveset(record, client, { mon = 0,
+       moves = { row("OLD"), row("NEW"), row("THIRD") }, level = 56 }),
+     "level-up: ...and a learn still lands without it")
+  eq(#live.moves, 3, "level-up: ...three moves now")
+end
+
+-- The two learn rules are exported for the solo path's referee (a fight with
+-- no hub), so it applies a learn by the same rule rather than a copy of it.
+do
+  eq(Hub.movesetDeltaOk({ row("A") }, { row("A"), row("B") }), true, "export: an append is a learn")
+  eq(Hub.movesetDeltaOk({ row("A"), row("B") }, { row("C"), row("D") }), false, "export: a rewrite is not")
+  local next12 = Hub.nextMoves12({ row("A", { pp = 3, highCrit = true }) },
+                                 { row("A", { pp = 99 }), row("B", { ppUps = 1 }) })
+  eq(next12[1].pp, 3, "export: an unchanged row keeps the old PP")
+  eq(next12[1].highCrit, true, "export: ...and its high-crit flag")
+  eq(next12[2].ppUps, 1, "export: a new row takes its own PP Ups")
+end
+
+-- Gold: the learn keeps the cart's priority byte (K8), and a Gold sheet's K7
+-- blocks ride the hub's stored party into the referee's hands.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 2 })
+  local ann = join2(hub, "ANN")
+  local bob = join2(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+  local gold = sheet2({})
+  gold.base = { hp = 41, atk = 52, def = 63, spe = 74, spa = 85, spd = 96 }
+  gold.dvs = { atk = 12, def = 7, spe = 15, spc = 3 }
+  gold.statExp = { hp = 1, atk = 2, def = 3, spe = 4, spc = 5 }
+  gold.moves[1].priority, gold.moves[1].ppUps = 2, 3
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART2 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { gold } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { sheet2({}) } })
+  local record = hub.battles[id]
+  ok(record and record.sim ~= nil, "gold K7/K8: the fight opens on a sheet carrying them")
+  local stored = record.parties[ann.id] and record.parties[ann.id].mons[1]
+  eq(stored and stored.dvs and stored.dvs.spc, 3, "gold K7: the stored sheet keeps the cart's DVs")
+  eq(stored and stored.base and stored.base.spd, 96, "gold K7: ...the species base stats")
+  eq(stored and stored.statExp and stored.statExp.spc, 5, "gold K7: ...and the stat exp")
+  eq(stored and stored.moves[1].priority, 2, "gold K8: ...and the move's priority byte")
+  eq(stored and stored.moves[1].ppUps, 3, "gold K8: ...and its PP Ups")
+  if record and record.sim then
+    local live = record.sim.byId[ann.id].mons[1]
+    live.moves = { row("thump", { priority = 1 }) }
+    hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+      moves = { row("thump", { priority = 3 }), row("quick", { priority = 2 }) } })
+    eq(live.moves[1].priority, 1, "gold K8: an unchanged row keeps the hub's priority")
+    eq(live.moves[2] and live.moves[2].priority, 2, "gold K8: a learned row takes its own")
+    local calls = 0
+    record.sim.levelUp = function() calls = calls + 1 end
+    hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+      moves = { row("thump"), row("quick") }, level = 51,
+      stats = { atk = 1, def = 2, spe = 3, spa = 4, spd = 5 }, maxHp = 140 })
+    eq(calls, 1, "gold K9: a Gold level-up reaches the referee")
+    hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+      moves = { row("thump"), row("quick") }, level = 52,
+      stats = { atk = 1, def = 2, spd = 3, spc = 4 } })
+    eq(calls, 1, "gold K9: Kanto-keyed stats refuse a Gold moveset")
+  end
+end
+
+-- A Gen 3 hub reads no level-up (BattleSim3 rebuilds nothing from one), so a
+-- referee there is never called, whatever the client sends.
+do
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  local ann = join3(hub, "ANN")
+  local bob = join3(hub, "BOB")
+  hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+  hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+  local id = ann.sessionId
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, typeTable = CHART3 })
+  hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon3() } })
+  local record = hub.battles[id]
+  local calls = 0
+  record.sim.levelUp = function() calls = calls + 1 end
+  hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
+    moves = { move3(), move3({ id = "NEW3", num = 44 }) }, level = 51,
+    stats = { atk = 1, def = 2, spe = 3, spa = 4, spd = 5 }, maxHp = 140 })
+  eq(calls, 0, "gen 3: a moveset's level-up fields are never read")
+  eq(#record.sim.byId[ann.id].mons[1].moves, 2, "gen 3: ...while the learn lands as before")
+end
+
+-- K11: the hubs copy a Gen 1 / Gen 2 referee's Pay Day coins onto the outcome
+-- in the NPC modes alone, and only a positive count (a 0 is the field's
+-- absence on both twins).  The referee's outcome is a stub here.
+local function paid(mode, coins)
+  local hub = Hub.new({ maxPlayers = 4 })
+  local ann, annPeer = join(hub, "ANN")
+  local bob = join(hub, "BOB")
+  local id
+  if mode == "1v1" then
+    hub:receive(ann, { type = Wire.REQUEST, to = bob.id, kind = "battle" })
+    hub:receive(bob, { type = Wire.RESPOND, to = ann.id, kind = "battle", accept = true })
+    id = ann.sessionId
+    hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+    hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon() } })
+    hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, mons = { mon() } })
+  else
+    id = "pw"
+    hub:openCoopBattle(id, { ann.id }, { mode = "wild", hostId = ann.id })
+    hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+    hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { mon() } })
+    hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { mon() } })
+  end
+  local record = hub.battles[id]
+  if not (record and record.sim) then return false end
+  annPeer.outbox = {}
+  record.sim.outcome = function()
+    return { outcome = "win", winners = { ann.id }, losers = { bob.id }, reason = "ko", payDay = coins }
+  end
+  hub:flushBattle(record)
+  return take(annPeer, Wire.BATTLE_OUTCOME)
+end
+
+do
+  local wild = paid("wild", 350)
+  ok(wild, "pay day 1/2: a wild fight settles on the referee's outcome")
+  eq(wild and wild.payDay, 350, "pay day 1/2: the coins ride the outcome of a fight against the computer")
+  eq(wild and Wire.battleOutcome(wild, 1).payDay, 350, "pay day 1/2: and a Gen 1 reader keeps them")
+  local link = paid("1v1", 350)
+  ok(link, "pay day 1/2: a 1v1 settles too")
+  eq(link and link.payDay, nil, "pay day 1/2: a fight between players carries none")
+  local none = paid("wild", 0)
+  ok(none, "pay day 1/2: a fight with no coins settles")
+  eq(none and none.payDay, nil, "pay day 1/2: a 0 is the field's absence, as on the Node twin")
+end
+
+-- K13: an id is refused past 40 characters, never cut (the Node twin's cleanId).
+do
+  eq(Wire.id(string.rep("i", 40)), string.rep("i", 40), "id: 40 characters is an id")
+  eq(Wire.id(string.rep("i", 41)), nil, "id: 41 is refused, not cut to 40")
+  eq(Wire.battleReconnect({ battle = string.rep("b", 41) }), nil, "id: a long battle id refuses the message")
+  local long = mon()
+  long.moves[1].id = string.rep("m", 41)
+  eq(Wire.battleMon(long), nil, "id: a long move id refuses the monster, as on the dedicated hub")
 end
 
 -- ------------------------------------------------------------------

@@ -1265,7 +1265,10 @@ scenarios[#scenarios + 1] = {
 
 -- Gen 1 / Gen 2 read paths, as they were before Gen 3 had a dialect: a stray
 -- `num` on an older row, and Gen 3's choice fields on an older choice, are
--- ignored rather than read -- on both hosting paths.
+-- ignored rather than read -- on both hosting paths.  The one Gen 3 event
+-- field an older reader does keep since contract K10 of
+-- docs/plans/gen12-referee-gaps-fix.md is `stage` (the signed stage of a
+-- `stat` event), so the Gen 2 read of the `stat` case below carries it.
 local function gen12()
   local stray = { id = "thump", pp = 20, power = 40, accuracy = 255, type = 0, effect = 0,
                   chance = 0, num = 7 }
@@ -1424,7 +1427,9 @@ scenarios[#scenarios + 1] = {
 -- fought but has nobody standing who did, so it gets the holders-only fact
 -- (`participants` 0, no `mon`); and the outcome carries side a's coins to
 -- both players.  Then each twin's sanitiser reads what it was sent, and the
--- boundary cases of the two new readings.
+-- boundary cases of the two new readings.  `read1` / `read2` keep the coins
+-- since contract K11 of docs/plans/gen12-referee-gaps-fix.md (every reader
+-- reads `payDay`, each under its own cart's bound -- gen12_payday_forward).
 -- ------------------------------------------------------------------
 
 local IDLE3 = { id = "IDLE", num = 150, effect = 85, power = 0, target = 16, flags = 0 }
@@ -1778,6 +1783,364 @@ scenarios[#scenarios + 1] = {
       bare = familyFight(2, { "gold", "(none)" }, "coop_npc"),
       spar = familyFight(2, { "crystal", "gold", "silver", "crystal" }, "coop_pvp"),
       kanto = familyFight(1, { "red", "yellow" }, "coop_npc"),
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- The referee-gap wire (docs/plans/gen12-referee-gaps-fix.md K7-K11, K13),
+-- each input read by Wire.lua here and lib/sanitize.js there, under the
+-- reader's generation (the third field; a mon is read with none, as the hub
+-- reads a caught sheet):
+--
+--   * K7  -- `base` / `dvs` / `statExp` on a Gen 1 and a Gen 2 sheet: each
+--     block whole or the sheet refused, at and past every bound, each wrong
+--     key set (Gen 1 keys on a Gold sheet, Gold's split Special on `statExp`),
+--     a JSON null as absent, through a party and a caught sheet, and never
+--     read off a Gen 3 sheet;
+--   * K8  -- a move row's `ppUps` (both) and `priority` (Gold only; a Gen 1
+--     row's is neither copied nor refused, nor one a reader naming no
+--     generation reads), on a sheet, a ruleset's pool and a `moves` event;
+--   * K9  -- `mmo.battle_moveset`'s `level` / `stats` / `maxHp`, Gen 1 and
+--     Gen 2 only, each refusing the message when unreadable;
+--   * K10 -- a `stat` event's signed `stage` for an older reader;
+--   * K11 -- `payDay` on an outcome per reader, PAYDAY12_MAX for 1 / 2 and
+--     PAYDAY3_MAX for 3 or none (payEdges12);
+--   * K13 -- an id refused past 40 characters, never cut, wherever one rides.
+-- ------------------------------------------------------------------
+
+local function k7(gen)
+  if gen == 2 then
+    return {
+      base = { hp = 41, atk = 52, def = 63, spe = 74, spa = 85, spd = 96 },
+      dvs = { atk = 12, def = 7, spe = 15, spc = 3 },
+      statExp = { hp = 1000, atk = 2000, def = 0, spe = 65535, spc = 7 },
+    }
+  end
+  return {
+    base = { hp = 41, atk = 52, def = 63, spd = 74, spc = 85 },
+    dvs = { atk = 12, def = 7, spd = 15, spc = 3 },
+    statExp = { hp = 1000, atk = 2000, def = 0, spd = 65535, spc = 7 },
+  }
+end
+
+local function row12(id, extra)
+  return merged({ id = id, pp = 20, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 },
+                extra or {})
+end
+
+local GROWN1 = { atk = 91, def = 92, spd = 93, spc = 94 }
+local GROWN2 = { atk = 91, def = 92, spe = 93, spa = 94, spd = 95 }
+
+local function statEvent(seq, stage)
+  return { battle = "b1", seq = seq, t = "stat", slot = 0, side = "a", amount = 2,
+           text = "ATK fell", stage = stage }
+end
+
+local function gaps()
+  local B1 = { hp = 41, atk = 52, def = 63, spd = 74, spc = 85 }
+  local thump = row12("thump")
+  return {
+    -- K7
+    { "mon", sheet12(1, k7(1)) },
+    { "mon", sheet12(2, k7(2)) },
+    { "mon", sheet12(2, merged(k7(2), { generation = 2 })) },
+    { "mon", sheet12(1, { base = { hp = 0, atk = 255, def = 1, spd = 2, spc = 3 } }) },
+    { "mon", sheet12(1, { base = merged(B1, { atk = 256 }) }) },
+    { "mon", sheet12(1, { base = merged(B1, { hp = -1 }) }) },
+    { "mon", sheet12(1, { base = { atk = 52, def = 63, spd = 74, spc = 85 } }) },
+    { "mon", sheet12(2, { base = B1 }) },
+    { "mon", sheet12(1, { base = { 41, 52, 63, 74, 85 } }) },
+    { "mon", sheet12(1, { base = "41" }) },
+    { "mon", sheet12(1, { base = NULL, dvs = NULL, statExp = NULL }) },
+    { "mon", sheet12(1, { dvs = { atk = 15, def = 0, spd = "7", spc = 3.9 } }) },
+    { "mon", sheet12(1, { dvs = { atk = 16, def = 0, spd = 7, spc = 3 } }) },
+    { "mon", sheet12(1, { dvs = { atk = true, def = 0, spd = 7, spc = 3 } }) },
+    { "mon", sheet12(1, { dvs = { atk = "0x10", def = 0, spd = 7, spc = 3 } }) },
+    { "mon", sheet12(1, { dvs = { atk = " 9 ", def = 0, spd = 7, spc = 3 } }) },
+    { "mon", sheet12(2, { dvs = { atk = 1, def = 2, spd = 3, spc = 4 } }) },
+    { "mon", sheet12(2, { dvs = { atk = 1, def = 2, spe = 3, spc = 4, spa = 9, hp = 5 } }) },
+    { "mon", sheet12(2, { statExp = { hp = 1, atk = 2, def = 3, spe = 4, spa = 5, spd = 6 } }) },
+    { "mon", sheet12(1, { statExp = { hp = 65535, atk = 0, def = 1, spd = 2, spc = 3 } }) },
+    { "mon", sheet12(1, { statExp = { hp = 65536, atk = 0, def = 1, spd = 2, spc = 3 } }) },
+    { "mon", sheet12(1, { statExp = { atk = 0, def = 1, spd = 2, spc = 3 } }) },
+    { "mon", merged(sheet12(1, k7(2)), { generation = 1 }) },
+    { "mon", merged(mon3(), k7(2)) },
+    { "mon", merged(mon3(), { base = "x", dvs = 99, statExp = true }) },
+    { "party", { battle = "b1", mons = { sheet12(2, k7(2)) } }, 2 },
+    { "party", { battle = "b1", mons = { sheet12(1, k7(2)) } }, 1 },
+    { "outcome", { battle = "b1", outcome = "win", reason = "catch", caught = sheet12(1, k7(1)) }, 1 },
+    { "outcome", { battle = "b1", outcome = "win", reason = "catch",
+                   caught = sheet12(1, { dvs = { atk = 99 } }) }, 1 },
+    -- K8
+    { "move", row12("m", { ppUps = 0 }), 1 },
+    { "move", row12("m", { ppUps = 3 }), 2 },
+    { "move", row12("m", { ppUps = 4 }), 1 },
+    { "move", row12("m", { ppUps = -1 }), 2 },
+    { "move", row12("m", { ppUps = "2" }), 1 },
+    { "move", row12("m", { ppUps = 1.5 }), 1 },
+    { "move", row12("m", { ppUps = true }), 1 },
+    { "move", row12("m", { ppUps = NULL }), 1 },
+    { "move", row12("m", { priority = 0 }), 2 },
+    { "move", row12("m", { priority = 255 }), 2 },
+    { "move", row12("m", { priority = 256 }), 2 },
+    { "move", row12("m", { priority = -1 }), 2 },
+    { "move", row12("m", { priority = "fast" }), 2 },
+    { "move", row12("m", { priority = "3" }), 2 },
+    { "move", row12("m", { priority = 3 }), 1 },
+    { "move", row12("m", { priority = "fast" }), 1 },
+    { "move", row12("m", { priority = 3, ppUps = 2 }) },
+    { "move", merged(move3(), { ppUps = 3, priority = 2 }), 3 },
+    { "ruleset", { chart = CHART, metronomePool = { row12("m", { priority = 2, ppUps = 0 }) } }, 2 },
+    { "ruleset", { chart = CHART, metronomePool = { row12("m", { priority = 2, ppUps = 0 }) } }, 1 },
+    { "ruleset", { chart = CHART, metronomePool = { row12("m", { ppUps = 9 }) } }, 2 },
+    { "event", { battle = "b1", seq = 4, t = "moves", slot = 0, side = "a",
+                 moves = { row12("m", { priority = 3, ppUps = 1 }) } }, 2 },
+    { "event", { battle = "b1", seq = 5, t = "moves", slot = 0, side = "a",
+                 moves = { row12("m", { priority = 3, ppUps = 1 }) } }, 1 },
+    { "mon", sheet12(2, { moves = { row12("m", { priority = 3, ppUps = 3 }) } }) },
+    { "mon", sheet12(2, { moves = { row12("m", { priority = 300 }) } }) },
+    { "mon", sheet12(1, { moves = { row12("m", { priority = 300 }) } }) },
+    -- K9
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = 51, stats = GROWN1, maxHp = 140 }, 1 },
+    { "moveset", { battle = "b1", mon = 1, moves = { thump }, level = 51, stats = GROWN2, maxHp = 140 }, 2 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, stats = GROWN1 }, 2 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = 0 }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = 101 }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = "50" }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = true }, 2 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, maxHp = 0 }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, maxHp = 1000 }, 2 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, stats = { atk = 91, def = 92, spd = 93 } }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, stats = merged(GROWN1, { atk = 0 }) }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = 51, stats = NULL, maxHp = NULL }, 1 },
+    { "moveset", { battle = "b1", mon = 0, moves = { move3() }, level = 51, stats = GROWN2, maxHp = 140 }, 3 },
+    { "moveset", { battle = "b1", mon = 0, moves = { thump }, level = 51, stats = GROWN1, maxHp = 140 } },
+    -- K10
+    { "event", statEvent(10, -6), 1 },
+    { "event", statEvent(11, 6), 1 },
+    { "event", statEvent(12, -7), 1 },
+    { "event", statEvent(13, 7), 2 },
+    { "event", statEvent(14, "-2"), 2 },
+    { "event", statEvent(15, true), 1 },
+    { "event", statEvent(16, 2.5), 1 },
+    { "event", statEvent(17, -1), 2 },
+    { "event", statEvent(18, -3), 3 },
+    { "event", statEvent(19, -3) },
+    -- K13
+    { "id", string.rep("i", 40) },
+    { "id", string.rep("i", 41) },
+    { "id", string.rep("i", 100) },
+    { "id", "a-b_C9" },
+    { "id", "" },
+    { "id", "a b" },
+    { "reconnect", { battle = string.rep("b", 40) } },
+    { "reconnect", { battle = string.rep("b", 41) } },
+    { "move", row12(string.rep("m", 40)), 1 },
+    { "move", row12(string.rep("m", 41)), 1 },
+    { "mon", sheet12(1, { speciesId = string.rep("S", 41) }) },
+    { "mon", sheet12(2, { heldItem = string.rep("H", 41) }) },
+    { "event", { battle = "b1", seq = 20, t = "item", slot = 0, side = "a", text = string.rep("I", 41) }, 1 },
+    { "choice", { battle = "b1", action = "item", item = string.rep("I", 41) }, 1 },
+    { "outcome", { battle = "b1", outcome = "win", catcher = string.rep("c", 41) }, 1 },
+    { "party", { battle = string.rep("p", 41), mons = { sheet12(1) } }, 1 },
+  }
+end
+
+local PAYDAY12_EDGES = { 200, 0, 1, 65535, 65536, 999999, 1000000, -3, 1.5, "0x10", " 7 ", "1e2",
+                         true, { 3 } }
+
+scenarios[#scenarios + 1] = {
+  name = "referee_gaps_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(gaps()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      local got
+      if kind == "mon" then got = Wire.battleMon(input)
+      elseif kind == "party" then got = Wire.battleParty(input, gen)
+      elseif kind == "move" then got = Wire.battleMove(input, gen)
+      elseif kind == "ruleset" then got = Wire.battleRuleset(input, gen)
+      elseif kind == "event" then got = Wire.battleEvent(input, gen)
+      elseif kind == "moveset" then got = Wire.battleMoveset(input, gen)
+      elseif kind == "outcome" then got = Wire.battleOutcome(input, gen)
+      elseif kind == "choice" then got = Wire.battleChoice(input, gen)
+      elseif kind == "reconnect" then got = Wire.battleReconnect(input)
+      elseif kind == "id" then got = Wire.id(input)
+      end
+      out[i] = { kind = kind, got = orNil(got) }
+    end
+    local payEdges12 = {}
+    for i, v in ipairs(PAYDAY12_EDGES) do
+      local row = {}
+      for _, reader in ipairs({ 1, 2, 3, "none" }) do
+        local got = Wire.battleOutcome({ battle = "b1", outcome = "win", payDay = v },
+                                       reader ~= "none" and reader or nil)
+        row["r" .. tostring(reader)] = orNil(got and got.payDay)
+      end
+      payEdges12[i] = row
+    end
+    return { cases = out, payEdges12 = payEdges12 }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- A mid-fight level-up reaches the referee (contract K9): both hubs forward a
+-- moveset's `level` / `stats` / `maxHp` to `sim:levelUp(playerId, monIndex,
+-- level, stats, maxHp)` -- the index 1-based -- whatever became of the move
+-- list, and only when the referee has the method.  The sim's method is a stub
+-- that records each call, and the hub's own rows are set first so the digest
+-- never leans on how either sim's copyMove spells a field it was not given.
+-- Along the way the learn keeps highCrit, PP Ups and Gold priority on an
+-- unchanged row and takes them off a new one (K8).  A Gen 3 hub reads none of
+-- it and so calls nothing.
+-- ------------------------------------------------------------------
+
+local function slimMoves12(moves)
+  local out = {}
+  for i, m in ipairs(moves or {}) do
+    out[i] = { id = m.id, pp = orNil(m.pp), power = orNil(m.power), highCrit = orNil(m.highCrit),
+               ppUps = orNil(m.ppUps), priority = orNil(m.priority) }
+  end
+  return out
+end
+
+local function levelFight(generation)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  local b = dialAs(hub, "BOB", ID_B, { generation = generation, sprite = sprite })
+  local sess = openFight(hub, a, b)
+  uploadReady(hub, a, b, sess.id, { sheet12(generation) }, { sheet12(generation) })
+  local record = hub.battles[sess.id]
+  if not (record and record.sim) then return { opened = false } end
+  local calls = {}
+  record.sim.levelUp = function(_, playerId, index, level, stats, maxHp)
+    calls[#calls + 1] = { playerId = playerId, index = index, level = orNil(level),
+                          stats = orNil(stats), maxHp = orNil(maxHp) }
+  end
+  local gold = generation == 2
+  local live = record.sim.byId[a.id].mons[1]
+  live.moves = {
+    row12("slash", { pp = 7, power = 70, highCrit = true, ppUps = 1, priority = gold and 1 or nil }),
+    row12("thump", { pp = 9, highCrit = false }),
+  }
+  local steps = {}
+  local function send(extra)
+    hub:receive(a.client, merged({ type = Wire.BATTLE_MOVESET, battle = sess.id, mon = 0 }, extra))
+    steps[#steps + 1] = { calls = #calls, moves = slimMoves12(live.moves) }
+  end
+  local four = { row12("slash"), row12("thump"), row12("swap"), row12("extra") }
+  -- 1. the hub's own moves (rewritten by the client) and a level-up: the list
+  --    keeps the hub's rows, the referee hears the growth
+  send({ moves = { row12("slash", { pp = 99, power = 999 }), row12("thump") },
+         level = 51, stats = gold and GROWN2 or GROWN1, maxHp = 140 })
+  -- 2. a learn carrying K8 fields, with its level
+  send({ moves = { row12("slash"), row12("thump"),
+                   row12("learnt", { ppUps = 2, priority = 3, highCrit = true }) }, level = 52 })
+  -- 3. forget-and-learn with no level: nothing is called
+  send({ moves = { row12("slash"), row12("thump"), row12("swap", { ppUps = 0 }) } })
+  -- 4. two slots rewritten: the list is refused, the level still goes on
+  send({ moves = { row12("aaa"), row12("bbb"), row12("swap") }, level = 53 })
+  -- 5. a transformed battler grows; only its list is protected
+  live.transformed = true
+  send({ moves = four, level = 54, maxHp = 150 })
+  live.transformed = nil
+  -- 6. a mangled level refuses the whole message
+  send({ moves = four, level = 0 })
+  -- 7. a referee with no K9 method: the learn lands, nothing is called
+  record.sim.levelUp = false
+  send({ moves = four, level = 55 })
+  return { opened = true, calls = calls, steps = steps }
+end
+
+local function levelFight3()
+  local hub = makeGenHub(3)
+  local a = dialAs(hub, "ANN", ID_A, { generation = 3, version = "firered",
+    sprite = "OBJ_EVENT_GFX_RED_NORMAL", map = "FR_PALLET_TOWN" })
+  local b = dialAs(hub, "BOB", ID_B, { generation = 3, version = "emerald",
+    sprite = "OBJ_EVENT_GFX_MAY_NORMAL", map = "EM_LITTLEROOT_TOWN" })
+  local sess = openFight(hub, a, b)
+  hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = sess.id, typeTable = CHART3 })
+  hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { mon3() } })
+  hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = sess.id, mons = { mon3() } })
+  local record = hub.battles[sess.id]
+  if not (record and record.sim) then return { opened = false } end
+  local calls = 0
+  record.sim.levelUp = function() calls = calls + 1 end
+  hub:receive(a.client, { type = Wire.BATTLE_MOVESET, battle = sess.id, mon = 0,
+    moves = { move3(), move3({ id = "NEW3", num = 44 }) }, level = 51, stats = GROWN2, maxHp = 140 })
+  local ids = {}
+  for i, m in ipairs(record.sim.byId[a.id].mons[1].moves) do ids[i] = m.id end
+  return { opened = true, calls = calls, moves = ids }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "levelup_moveset_forward",
+  run = function()
+    return { red = levelFight(1), gold = levelFight(2), gen3 = levelFight3() }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- Pay Day on a Gen 1 / Gen 2 outcome (contract K11): the hubs copy the
+-- referee's `outcome().payDay` onto the broadcast in the NPC modes alone, and
+-- only a positive count -- a 0 is the field's absence on both twins, where
+-- Lua alone would read it as true.  The referee's outcome is a stub here (the
+-- coins themselves are the Gen 1 / Gen 2 turn fixtures'); what is pinned is
+-- the hub's copy and each reader's read of it.
+-- ------------------------------------------------------------------
+
+local function paidFight(generation, mode, coins)
+  local hub = makeGenHub(generation)
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local a = dialAs(hub, "ANN", ID_A, { generation = generation, sprite = sprite })
+  local b = dialAs(hub, "BOB", ID_B, { generation = generation, sprite = sprite })
+  local id
+  if mode == "1v1" then
+    id = openFight(hub, a, b).id
+    uploadReady(hub, a, b, id, { sheet12(generation) }, { sheet12(generation) })
+  else
+    -- `wild` seats its one player alone against the hub's seat; `coop_wild`
+    -- seats both.
+    local solo = mode == "wild"
+    id = "w1"
+    hub:openCoopBattle(id, solo and { a.id } or { a.id, b.id }, { mode = mode, hostId = a.id })
+    hub:receive(a.client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet12(generation) } })
+    if not solo then
+      hub:receive(b.client, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet12(generation) } })
+    end
+    hub:receive(a.client, { type = Wire.BATTLE_PARTY, battle = id, side = "b",
+                            mons = { sheet12(generation, { catchRate = 45 }) } })
+  end
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false } end
+  a.peer.outbox, b.peer.outbox = {}, {}
+  record.sim.outcome = function()
+    return { outcome = "win", winners = { a.id }, losers = { b.id }, reason = "ko", payDay = coins }
+  end
+  hub:flushBattle(record)
+  local outcome = take(a.peer, Wire.BATTLE_OUTCOME)
+  return {
+    opened = true,
+    outcome = slimPaid(outcome),
+    read1 = slimPaid(outcome and Wire.battleOutcome(outcome, 1)),
+    read2 = slimPaid(outcome and Wire.battleOutcome(outcome, 2)),
+    read3 = slimPaid(outcome and Wire.battleOutcome(outcome, 3)),
+    readNone = slimPaid(outcome and Wire.battleOutcome(outcome)),
+    battleGone = hub.battles[id] == nil,
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "gen12_payday_forward",
+  run = function()
+    return {
+      redWild = paidFight(1, "coop_wild", 350),
+      goldWild = paidFight(2, "wild", 99999),
+      goldNone = paidFight(2, "coop_wild", 0),
+      red1v1 = paidFight(1, "1v1", 350),
     }
   end,
 }

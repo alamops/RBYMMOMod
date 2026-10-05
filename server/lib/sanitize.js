@@ -591,8 +591,9 @@ const EFF_MULTS = new Set([0, 25, 50, EFF_NEUTRAL, 200, CHART_MAX]);
 // data pack that adds some, since a cap of exactly fifteen would refuse the
 // modded ruleset rather than the malformed one. Mirrors Config.BATTLE_TYPE_MAX.
 const BATTLE_TYPE_MAX = 20;
-// Cap on ephemeral Metronome pools (mirrors Config.BATTLE_METRONOME_POOL_MAX).
-const METRONOME_POOL_MAX = 200;
+// Cap on ephemeral Metronome pools (mirrors Config.BATTLE_METRONOME_POOL_MAX,
+// whose comment says why 256: Gold's 251 moves and the line they ride on).
+const METRONOME_POOL_MAX = 256;
 
 // The type a *move* may name, bounded generously and independently of the
 // chart's width on purpose: a party naming a type the uploaded chart has no row
@@ -679,6 +680,37 @@ const HOLD_EFFECT2_MAX = 32; // characters in a HELD_* token
 const HOLD_PARAM2_MAX = 255;
 const ITEM_NAME2_MAX = 12;
 
+/*
+ * The referee-gap additions' bounds (contracts K7-K10 of
+ * docs/plans/gen12-referee-gaps-fix.md), Gen 1 / Gen 2 dialect only, each the
+ * width the carts store the number in. Twin of the block beside Wire.lua's
+ * ITEM_NAME2_MAX, where each is argued: a base stat is a byte, a DV a nibble,
+ * a stat-exp word 16 bits, the PP Ups the top two bits of the PP byte
+ * (PP_UP_MASK), Gold's priority the raw GetMovePriority byte (unsigned, unlike
+ * Gen 3's -7..7), and a `stat` event's stage -6..6.
+ */
+const BASE_STAT_MAX = 255;
+const DV_MAX = 15;
+const STAT_EXP_MAX = 65535;
+const PP_UPS_MAX = 3;
+const PRIORITY2_MAX = 255;
+const STAGE12_MAX = 6;
+
+// Contract K7's three blocks per dialect: `base` keyed like `stats` plus `hp`,
+// `dvs` the cart's four DVs (Gold's one Special DV feeds both special stats),
+// `statExp` the cart's five stat-exp words. Twin of Wire.lua's K7_KEYS1 /
+// K7_KEYS2.
+const K7_KEYS1 = {
+  base: ['hp', 'atk', 'def', 'spd', 'spc'],
+  dvs: ['atk', 'def', 'spd', 'spc'],
+  statExp: ['hp', 'atk', 'def', 'spd', 'spc'],
+};
+const K7_KEYS2 = {
+  base: ['hp', 'atk', 'def', 'spe', 'spa', 'spd'],
+  dvs: ['atk', 'def', 'spe', 'spc'],
+  statExp: ['hp', 'atk', 'def', 'spe', 'spc'],
+};
+
 // One Gen 2 hold effect, or null. Refused rather than trimmed past
 // HOLD_EFFECT2_MAX (a cut token names no rule), and the HELD_ prefix is part of
 // the shape. Twin of Wire.holdEffect2.
@@ -761,6 +793,12 @@ const PARTICIPANTS_MAX = BATTLE_MON_MAX * COOP_SIDE;
 // the cart's own ceiling rather than a guess; the Amulet Coin doubling is the
 // client's, applied after the read. Twin of Wire.PAYDAY3_MAX.
 const PAYDAY3_MAX = 65535;
+// The same, read by a Gen 1 / Gen 2 reader (contract K11 of
+// docs/plans/gen12-referee-gaps-fix.md). pokered's wTotalPayDayMoney is three
+// BCD bytes that AddBCD saturates at 999999; pokecrystal's wPayDayMoney is a
+// three-byte binary counter, but the wallet it is paid into is clamped to
+// MAX_MONEY 999999 (AddBattleMoneyToAccount). Twin of Wire.PAYDAY12_MAX.
+const PAYDAY12_MAX = 999999;
 // How long a reason token this build has never heard of may be. Refused past it
 // rather than trimmed -- a cut token matches nothing and is a value nobody sent.
 const REASON_MAX = 32;
@@ -1381,6 +1419,24 @@ function cleanBattleMove(raw, generation) {
     if (raw.highCrit !== true && raw.highCrit !== false) return null;
     if (raw.highCrit === true) move.highCrit = true;
   }
+  // Contract K8 (docs/plans/gen12-referee-gaps-fix.md), optional like highCrit
+  // and refused like it when present and unreadable: `ppUps` (Gen 1 and Gen 2,
+  // the top two bits of the PP byte -- the cart's move pick reads that raw
+  // byte, so a 0-PP move with PP Ups is still selectable) and `priority` (Gen
+  // 2 only, the cart's raw GetMovePriority byte, which the referee reads before
+  // its vanilla-id table). A Gen 1 row's `priority` is neither copied nor
+  // refused, and a caller that names no generation reads none. Read the way
+  // Wire.int reads them (luaInt): new on both twins. Twin of Wire.battleMove.
+  if (raw.ppUps !== undefined && raw.ppUps !== null) {
+    const ppUps = luaInt(raw.ppUps, 0, PP_UPS_MAX);
+    if (ppUps === null) return null;
+    move.ppUps = ppUps;
+  }
+  if (gen === 2 && raw.priority !== undefined && raw.priority !== null) {
+    const priority = luaInt(raw.priority, 0, PRIORITY2_MAX);
+    if (priority === null) return null;
+    move.priority = priority;
+  }
   return move;
 }
 
@@ -1774,6 +1830,31 @@ function cleanBattleMon(raw) {
   if (raw.traded !== undefined && raw.traded !== null) {
     if (typeof raw.traded !== 'boolean') return null;
     if (raw.traded) mon.traded = true;
+  }
+
+  // Contract K7 (docs/plans/gen12-referee-gaps-fix.md): what the cart computes
+  // the stats from -- `base` (species base stats, keyed like `stats` plus hp,
+  // 0..BASE_STAT_MAX), `dvs` (the cart's four DVs, 0..DV_MAX; the HP DV is
+  // derived) and `statExp` (the cart's five stat-exp words, 0..STAT_EXP_MAX)
+  // -- so the referee can run CalcMonStat itself (a transformed foe's crit
+  // stat, the copied species' base Speed, a level-up rebuild). Each optional
+  // and whole-or-refused (cleanBlock3's reading, `ivs` / `evs`' posture). Gen 1
+  // / Gen 2 only: cleanBattleMon3 reads none of them. Twin of Wire.battleMon.
+  const keys = generation === 2 ? K7_KEYS2 : K7_KEYS1;
+  if (raw.base !== undefined && raw.base !== null) {
+    const base = cleanBlock3(raw.base, keys.base, 0, BASE_STAT_MAX);
+    if (!base) return null;
+    mon.base = base;
+  }
+  if (raw.dvs !== undefined && raw.dvs !== null) {
+    const dvs = cleanBlock3(raw.dvs, keys.dvs, 0, DV_MAX);
+    if (!dvs) return null;
+    mon.dvs = dvs;
+  }
+  if (raw.statExp !== undefined && raw.statExp !== null) {
+    const statExp = cleanBlock3(raw.statExp, keys.statExp, 0, STAT_EXP_MAX);
+    if (!statExp) return null;
+    mon.statExp = statExp;
   }
 
   return mon;
@@ -2261,6 +2342,14 @@ function cleanBattleEvent(raw, generation) {
       if (holding !== null) event.holding = holding;
     }
   }
+  // The one Gen 3 field the older dialect now reads too (contract K10 of
+  // docs/plans/gen12-referee-gaps-fix.md): a `stat` event's signed stage, -6..6.
+  // `amount` stays unsigned, so a stage below zero never fit in it. Dropped
+  // like every mangled field here. Twin of Wire.battleEvent.
+  if (older && raw.stage !== undefined && raw.stage !== null) {
+    const stage = luaInt(raw.stage, -STAGE12_MAX, STAGE12_MAX);
+    if (stage !== null) event.stage = stage;
+  }
   if (raw.moves !== undefined && raw.moves !== null) {
     if (Array.isArray(raw.moves)) {
       const moves = [];
@@ -2290,9 +2379,11 @@ function cleanBattleEvent(raw, generation) {
  * pair, and a rank settle has four ids to move. Present-and-malformed refuses the
  * message: these are the names a rating moves for.
  *
- * `generation` (optional) is the reader's own, cleanBattleEvent's convention: 1
- * or 2 reads an outcome exactly as before Gen 3 had one, 3 or none named also
- * reads `payDay`. Twin of Wire.battleOutcome.
+ * `generation` (optional) is the reader's own, cleanBattleEvent's convention.
+ * Every reader reads `payDay` (Gen 1 / Gen 2 from contract K11 of
+ * docs/plans/gen12-referee-gaps-fix.md); the bound is the reader's cart's --
+ * PAYDAY12_MAX for 1 or 2, PAYDAY3_MAX for 3 or none named, exactly as before.
+ * Twin of Wire.battleOutcome.
  */
 function cleanBattleOutcome(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
@@ -2332,16 +2423,17 @@ function cleanBattleOutcome(raw, generation) {
     if (!catcher) return null;
     result.catcher = catcher;
   }
-  // Gen 3's Pay Day coins (sheet doc §1, §6): side a's total, present only on a
-  // knockout win in a wild / coop_wild / coop_npc fight. **Dropped rather than
-  // fatal**, unlike the fields above: a wrong winner or catcher moves a rating
-  // or a monster to the wrong player, where a mangled coin count has no
-  // recipient of its own (the winners list decides who is paid), and refusing
-  // the whole outcome over it would strand a finished fight on a screen with no
-  // way out to protect a bonus. Read the way Wire.int reads it (luaInt). The
-  // Amulet Coin doubling is the reader's, never the wire's.
-  if (!older && raw.payDay !== undefined && raw.payDay !== null) {
-    const payDay = luaInt(raw.payDay, 1, PAYDAY3_MAX);
+  // Pay Day coins (Gen 3: sheet doc §1, §6; Gen 1 / Gen 2: contract K11): side
+  // a's total, present only on a knockout win in a wild / coop_wild / coop_npc
+  // fight. **Dropped rather than fatal**, unlike the fields above: a wrong
+  // winner or catcher moves a rating or a monster to the wrong player, where a
+  // mangled coin count has no recipient of its own (the winners list decides
+  // who is paid), and refusing the whole outcome over it would strand a
+  // finished fight on a screen with no way out to protect a bonus. Read the way
+  // Wire.int reads it (luaInt). The Amulet Coin doubling is the reader's, never
+  // the wire's. A zero is no coins, read as absent on every cart.
+  if (raw.payDay !== undefined && raw.payDay !== null) {
+    const payDay = luaInt(raw.payDay, 1, older ? PAYDAY12_MAX : PAYDAY3_MAX);
     if (payDay !== null) result.payDay = payDay;
   }
   return result;
@@ -2353,6 +2445,17 @@ function cleanBattleOutcome(raw, generation) {
 // over a live battler. The hub then allows only add-one or replace-one.
 // `generation` (optional) is the hub's and picks the move-row dialect the way
 // cleanBattleMove documents.
+//
+// A mid-fight level-up rides here too (contract K9 of
+// docs/plans/gen12-referee-gaps-fix.md): generation 1 or 2 only, each optional
+// and present-and-unreadable refusing the message like a mangled move --
+// `level` (1..LEVEL_MAX), `stats` (the sheet's `stats` block in the hub's
+// dialect) and `maxHp` (1..HP_MAX; the cart raises current HP by the step it
+// raises the maximum, GainExperience). Moves that are the hub's own plus any of
+// them is a level-up that taught nothing, as valid as a learn; plausibility is
+// the referee's to judge (Relay.applyBattleMoveset forwards it). Read the way
+// Wire.int reads them (luaInt, cleanBlock3): new on both twins. Twin of
+// Wire.battleMoveset.
 function cleanBattleMoveset(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
   // Gen 3 reads its index and list the way Wire.lua is handed them (luaInt,
@@ -2371,7 +2474,26 @@ function cleanBattleMoveset(raw, generation) {
     moves.push(move);
   }
   if (moves.length === 0) return null;
-  return { battle, mon, moves };
+  const out = { battle, mon, moves };
+  const gen = luaInt(generation, 1, GENERATION_MAX);
+  if (gen === 1 || gen === 2) {
+    if (raw.level !== undefined && raw.level !== null) {
+      const level = luaInt(raw.level, 1, LEVEL_MAX);
+      if (level === null) return null;
+      out.level = level;
+    }
+    if (raw.stats !== undefined && raw.stats !== null) {
+      const stats = cleanBlock3(raw.stats, gen === 2 ? BATTLE_STATS_GEN2 : BATTLE_STATS_GEN1, 1, STAT_MAX);
+      if (!stats) return null;
+      out.stats = stats;
+    }
+    if (raw.maxHp !== undefined && raw.maxHp !== null) {
+      const maxHp = luaInt(raw.maxHp, 1, HP_MAX);
+      if (maxHp === null) return null;
+      out.maxHp = maxHp;
+    }
+  }
+  return out;
 }
 
 // mmo.battle_reconnect. Names the fight and nothing else: who is rejoining is
@@ -2506,6 +2628,18 @@ module.exports = {
   HOLD_EFFECT2_MAX,
   HOLD_PARAM2_MAX,
   ITEM_NAME2_MAX,
+  // The referee-gap dialect (contracts K7-K11 and K13 of
+  // docs/plans/gen12-referee-gaps-fix.md), named as Wire.lua names it.
+  BASE_STAT_MAX,
+  DV_MAX,
+  STAT_EXP_MAX,
+  PP_UPS_MAX,
+  PRIORITY2_MAX,
+  STAGE12_MAX,
+  PAYDAY12_MAX,
+  K7_KEYS1,
+  K7_KEYS2,
+  METRONOME_POOL_MAX,
   effectsFor,
   luaNumber,
   luaInt,
