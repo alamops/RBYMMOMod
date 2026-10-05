@@ -400,6 +400,98 @@ function M.name(value)
   return M.text(value, Config.NAME_MAX)
 end
 
+-- A referee's battle line: M.text's set, plus the few glyphs the carts' own
+-- battle text is spelled with (wave 6 of docs/plans/gen12-referee-gaps-fix.md).
+--
+--   é   POKéMON, POKé BALL, POKéMANIAC -- pokered charmap $BA, pokecrystal /
+--       pokegold $EA.  The Gold referee prints "Both POKéMON will faint in 3
+--       turns!" (PerishSongText) and "Enemy POKéMON's LIGHT SCREEN fell!"
+--       (BattleText_MonsLightScreenFell); M.text cut them to "POKMON".
+--   …   charmap $75 in both carts: Gold's "ignored orders…sleeping!"
+--       (IgnoredSleepingText) and "It's not very effective…".
+--   ♂ ♀ charmap $EF / $F5: the trainer classes the NPC seat's name carries
+--       into the referee's AI item line (pokered TrainerNames "JR.TRAINER♂",
+--       "COOLTRAINER♀"; Gold's "SWIMMER♂").
+--   &   pokecrystal / pokegold $E9: a Gold trainer's own name ("TWINS AMY &
+--       MAY", data/trainers/parties.asm) -- ASCII, and the one other glyph a
+--       line can carry.  Red's charmap has no "&", and no Red name spells one.
+--
+-- A reader of its own rather than a wider M.text, because M.text is the
+-- allowlist that keeps *player-typed* text -- chat, presence and friend names,
+-- the rank board, room and server names -- inside the font, and none of those
+-- gains anything from these glyphs while every one of them is a string
+-- somebody else chose.  Only a line the referee composed, or the trainer name
+-- it composes one from (M.npcName), reads through here.
+--
+-- Twin of lib/sanitize.js's cleanBattleText, **byte for byte on every input**,
+-- which is why it walks bytes rather than using a pattern: a multi-byte glyph
+-- is kept only as its whole UTF-8 sequence (C3 A9, E2 80 A6, E2 99 82,
+-- E2 99 80) and every other byte at or past 0x80 is dropped alone.  Node
+-- decodes an inbound line by the WHATWG rules, so a stray or truncated
+-- sequence there is one U+FFFD per maximal subpart -- dropped -- and a lead
+-- byte C3 / E2 can never be a continuation byte, so it always starts a fresh
+-- character on that side too: the two twins keep the same glyphs at the same
+-- places whatever bytes arrive.  The cut counts glyphs, not bytes (JS's
+-- slice counts the one UTF-16 unit each of these is): `sub` would split
+-- "POKéMON" inside the é and cut a byte-counted line short of a glyph-counted
+-- one.  Spaces collapse and trim exactly as M.text's do.
+M.BATTLE_GLYPHS = {
+  ["\195\169"] = true,          -- é  U+00E9
+  ["\226\128\166"] = true,      -- …  U+2026
+  ["\226\153\130"] = true,      -- ♂  U+2642
+  ["\226\153\128"] = true,      -- ♀  U+2640
+}
+local BATTLE_ASCII = "[A-Za-z0-9 %.,!%?'%-:;%(%)/&]"
+
+function M.battleText(value, limit)
+  if type(value) ~= "string" then return nil end
+  local glyphs, space = {}, false
+  local i, n = 1, #value
+  while i <= n do
+    local byte, glyph, step = value:byte(i), nil, 1
+    if byte < 128 then
+      local c = value:sub(i, i)
+      if c:find(BATTLE_ASCII) then glyph = c end
+    elseif M.BATTLE_GLYPHS[value:sub(i, i + 1)] then
+      glyph, step = value:sub(i, i + 1), 2
+    elseif M.BATTLE_GLYPHS[value:sub(i, i + 2)] then
+      glyph, step = value:sub(i, i + 2), 3
+    end
+    i = i + step
+    -- A space is held until a glyph follows it: a run collapses to one, and
+    -- none is written at either end.
+    if glyph == " " then
+      space = #glyphs > 0
+    elseif glyph then
+      if space then glyphs[#glyphs + 1] = " " end
+      space = false
+      glyphs[#glyphs + 1] = glyph
+    end
+  end
+  if #glyphs == 0 then return nil end
+  local cap = limit or Config.MESSAGE_MAX
+  if #glyphs > cap then
+    for k = #glyphs, cap + 1, -1 do glyphs[k] = nil end
+  end
+  return table.concat(glyphs)
+end
+
+-- The trainer an NPC seat is (wave 6): the name the cart's own lines print for
+-- the computer, which the client sends with the side-"b" party (M.battleParty,
+-- `name`) and the hub hands the referee as that seat's `name` -- pokered's
+-- AIBattleUseItemText prints wTrainerName ("<TRAINER> used <ITEM> on <MON>!").
+-- Read as a battle line's glyphs (M.battleText) because it is printed inside
+-- one, and capped at NPC_NAME_MAX rather than NAME_MAX: a player's ten
+-- characters cut "COOLTRAINER♂" (pokered TRAINER_NAME_LENGTH 13, so twelve) and
+-- every Gold "<CLASS> <NAME>" (PlaceEnemysName: wOTClassName, a space, then the
+-- trainer's name -- TRAINER_CLASS_NAME_LENGTH 13 and NAME_LENGTH 11, so
+-- 12 + 1 + 10 = 23).  Twin of lib/sanitize.js's cleanNpcName / NPC_NAME_MAX.
+M.NPC_NAME_MAX = 23
+
+function M.npcName(value)
+  return M.battleText(value, M.NPC_NAME_MAX)
+end
+
 -- The same name, as the one string that decides whether two of them are the
 -- same person.
 --
@@ -1432,6 +1524,13 @@ end
 -- chart's width, and reading that gap as neutral is its call -- so a rectangle of
 -- numbers in range is what this function owes, and it is what makes the table
 -- safe to walk at all.
+--
+-- A JSON null row or cell never reaches here: the engine's decoder closes it
+-- up, so `[[100, null, 50]]` is the one-row chart `{ { 100, 50 } }`.  Since
+-- wave 6 of docs/plans/gen12-referee-gaps-fix.md lib/sanitize.js's cleanChart
+-- closes both up the same way (luaList) and reads each cell as Wire.int does
+-- (luaInt), where it used to refuse the chart over a null -- one chart on
+-- both hosting paths.
 local function chartOf(raw)
   if type(raw) ~= "table" then return nil end
   local rows, width = {}, nil
@@ -1690,8 +1789,16 @@ function M.battleRuleset(raw, generation)
   -- Optional Gen1 Special-type indices (0-based chart axis). Absent = all
   -- Physical. Present-but-unreadable refuses the ruleset rather than silently
   -- falling back to atk/def for a host that meant to upload the split.
+  --
+  -- Read as a list (isList, wave 6 of docs/plans/gen12-referee-gaps-fix.md),
+  -- the twin of lib/sanitize.js: a non-empty object where the list belongs is
+  -- refused there, where ipairs here used to read it as "no Special type" --
+  -- every type Physical, the opposite split from the host's.  A JSON null
+  -- inside the list never reaches this line (the engine's decoder closes it
+  -- up), and lib/sanitize.js now closes it up the same way (luaList) where it
+  -- used to refuse the ruleset over it.
   if raw.specialTypes ~= nil then
-    if type(raw.specialTypes) ~= "table" then return nil end
+    if not isList(raw.specialTypes) then return nil end
     local special = {}
     for _, entry in ipairs(raw.specialTypes) do
       local t = M.int(entry, 0, Config.BATTLE_TYPE_MAX - 1)
@@ -2601,6 +2708,43 @@ local function uploadComplete3(mon)
   return mon.weight ~= nil and mon.hiddenPower ~= nil and mon.beatUp ~= nil
 end
 
+-- A Red trainer's move-choice layers (`aiMods`, wave 6 of
+-- docs/plans/gen12-referee-gaps-fix.md): pokered AIEnemyTrainerChooseMoves
+-- runs its class's TrainerClassMoveChoiceModifications row
+-- (data/trainers/move_choices.asm), a list of AIMoveChoiceModification
+-- numbers -- 1..4, where 4 is the routine that does nothing -- and the Red
+-- referee layers exactly that list (BattleSim Turn `_aiTrainerMoves`,
+-- `fighter.aiMods`).  The client reads the row off its own engine trainer
+-- record (the engine extracts it from the player's ROM; the mod ships none of
+-- it), so the hub can only pass on what the host's cart says.
+--
+--   AI_MOD_MAX    the cart's four AIMoveChoiceModification pointers
+--   AI_MODS_MAX   layers in one list: the Red referee's MAX_AI_MODS (8)
+--
+-- Present and empty is a real answer (YOUNGSTER's `.useOriginalMoveSet`: no
+-- layer at all), so the list is read as a list (isList; lib/sanitize.js
+-- closes a JSON null up first, as the engine's decoder does) and refused
+-- WHOLE rather than trimmed: a dropped layer, a value off the four pointers
+-- or a list past the cap is a different trainer from the one the host's cart
+-- fights with.  Each entry is read the way Wire.int reads it on both twins
+-- (lib/sanitize's luaInt).  Twin of lib/sanitize.js's cleanAiMods.
+M.AI_MOD_MAX = 4
+M.AI_MODS_MAX = 8
+
+local function aiModsOf(raw)
+  if not isList(raw) then return nil end
+  local n = #raw
+  if n > M.AI_MODS_MAX then return nil end
+  local out = {}
+  for i = 1, n do
+    local layer = M.int(raw[i], 1, M.AI_MOD_MAX)
+    if layer == nil then return nil end
+    out[i] = layer
+  end
+  return out
+end
+M.aiMods = aiModsOf
+
 function M.battleParty(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
@@ -2634,6 +2778,32 @@ function M.battleParty(raw, generation)
   if raw.side ~= nil then
     out.side = M.side(raw.side)
     if not out.side then return nil end
+  end
+
+  -- Wave 6 of docs/plans/gen12-referee-gaps-fix.md: the two facts an NPC
+  -- party carries about the trainer rather than its monsters.  Read off any
+  -- party (the wire cannot tell an NPC upload from a human's -- the hub can,
+  -- and copies them onto the NPC seats alone: Hub:fillBattleParty,
+  -- tryStartSim), by the dialect this party resolved to:
+  --
+  --   aiMods  Red only (aiModsOf): the class's move-choice layers.  Gold's
+  --           AI is not the layer list (pokecrystal's AIChooseMove scores by
+  --           the trainer's AI flags), so a Gen 2 / Gen 3 reader -- or one
+  --           naming no generation -- neither copies nor refuses one.
+  --           Present and unreadable refuses the party, K7's posture: the
+  --           layers decide the computer's pick.
+  --   name    Red and Gold (M.npcName): the trainer's display name, which the
+  --           referee prints as the seat's name (Red's AI item line; Gold's
+  --           "<NAME> used an item").  Cosmetic, so an unreadable one is
+  --           dropped -- the hub then names the seat "TRAINER" as it always
+  --           has -- rather than costing the fight.  Gen 3's referee names
+  --           its trainer from its own sheet, so a Gen 3 reader ignores it.
+  if partyGen == 1 and raw.aiMods ~= nil then
+    out.aiMods = aiModsOf(raw.aiMods)
+    if out.aiMods == nil then return nil end
+  end
+  if (partyGen == 1 or partyGen == 2) and raw.name ~= nil then
+    out.name = M.npcName(raw.name)
   end
 
   if type(raw.mons) ~= "table" then return nil end
@@ -2962,11 +3132,18 @@ function M.battleEvent(raw, generation)
   -- An `obey`'s is one of the eight outcome tokens (M.OBEY_TOKENS3) or nothing:
   -- dropped like any mangled field, so the screen falls back to the referee's
   -- own sentence that follows it rather than phrasing a token it has no line for.
+  -- A Red / Gold reader's `msg` is the referee's own line in the cart's
+  -- English (wave 6 of docs/plans/gen12-referee-gaps-fix.md), so it reads the
+  -- carts' battle glyphs too -- é, …, ♂, ♀, & (M.battleText) -- under the same
+  -- MESSAGE_MAX, counted in glyphs.  Every other kind's text, and a Gen 3 (or
+  -- unnamed) reader's `msg`, reads exactly as before.
   if raw.text ~= nil then
     if raw.t == "item" or raw.t == "anim" or raw.t == "ball" or held2 then
       out.text = M.id(raw.text)
     elseif raw.t == "obey" then
       out.text = M.OBEY_TOKENS3[raw.text] and raw.text or nil
+    elseif older and raw.t == "msg" then
+      out.text = M.battleText(raw.text, Config.MESSAGE_MAX)
     else
       out.text = M.text(raw.text, Config.MESSAGE_MAX)
     end

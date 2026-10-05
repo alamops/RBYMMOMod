@@ -940,11 +940,19 @@ moveOf = function(data, slot, order, generation)
   -- K8 the fallback was the *current* PP, so a Red move that came into the
   -- fight already spent said its maximum was what it had left, and an ETHER
   -- or ELIXER (the referee's `ppRestore`, capped at `maxPp`) could restore
-  -- nothing past it.  Never below the current PP; the record-less move keeps
-  -- the old reading.
+  -- nothing past it.  Never below the current PP -- except on Red, where a
+  -- slot can hold more than its maximum: DecrementPP on a slot at 0 wraps the
+  -- PP byte to 63 and borrows a PP Up (`M.ppByteStep1`), and the cart goes on
+  -- showing GetMaxPP over the base and the PP Up bits beside it (pokered
+  -- PrintMenuItem), so the upload states that, as the save's byte holds it.
+  -- The record-less move keeps the old reading.
   local maxPp = intOr(slot.maxPp, nil)
   if maxPp == nil and def then maxPp = M.maxPpOf(def.pp, ppUps) end
-  maxPp = clamp(maxPp or pp, pp, 99)
+  if generation == 1 and maxPp ~= nil then
+    maxPp = clamp(maxPp, 0, 99)
+  else
+    maxPp = clamp(maxPp or pp, pp, 99)
+  end
   local highCrit = false
   if def and def.highCrit ~= nil then
     -- The move-record field wins, including an explicit false that opts a
@@ -1576,11 +1584,17 @@ end
 -- their own party (and bag). `bag` is the optional inventory claim for this
 -- fight (PROTOCOL 15); omit or pass nil for an empty sheet.
 -- `badges` is optional: a list of earned badge ids for human seats (not NPC).
-function M.sendParty(transport, battle, mons, side, bag, badges)
+-- `seat` is optional too, and only an NPC upload's (`M.npcSeat`): the
+-- trainer's `name` and Red move-choice layers (`aiMods`), which the hub hands
+-- the computer seat it fills (Wire.battleParty, wave 6).
+function M.sendParty(transport, battle, mons, side, bag, badges, seat)
   if not (transport and battle) then return false end
   if type(mons) ~= "table" or #mons == 0 then return false end
   local msg = { battle = battle, mons = mons, side = side, bag = bag }
   if badges then msg.badges = badges end
+  if type(seat) == "table" then
+    msg.name, msg.aiMods = seat.name, seat.aiMods
+  end
   -- Party-level generation when every mon agrees (Wire prefers this, then shape).
   local gen = mons[1] and mons[1].generation
   if gen == 1 or gen == 2 or gen == 3 then
@@ -1592,6 +1606,53 @@ function M.sendParty(transport, battle, mons, side, bag, badges)
   end
   transport:send(Wire.BATTLE_PARTY, msg)
   return true
+end
+
+-- What an NPC party says about the trainer rather than its monsters (wave 6
+-- of docs/plans/gen12-referee-gaps-fix.md), for `sendParty`'s `seat`:
+--
+--   aiMods  Red only: pokered AIEnemyTrainerChooseMoves runs the class's
+--           TrainerClassMoveChoiceModifications row (data/trainers/
+--           move_choices.asm) -- the engine record's `aiMods`, the same list
+--           src/SoloBrain.lua scores with (`trainer.aiMods`) -- and a coop_npc
+--           computer seat the Red referee picks for runs exactly that list
+--           (BattleSim Turn `_aiTrainerMoves`).  The wire takes the cart's four
+--           AIMoveChoiceModification numbers and refuses the whole party over
+--           anything else (Wire.battleParty), so a registered layer named by
+--           id is sent as its number ("LAYER_2" is 2, the key the engine
+--           resolves a number through: TrainerAI) and a layer no number names
+--           -- a mod's own class record -- is one the referee cannot run and
+--           is left out.  An empty row is a real answer (`.useOriginalMoveSet`).
+--   name    Red and Gold: the trainer as the cart's lines name it (pokered
+--           AIBattleUseItemText's wTrainerName, Gold's PlaceEnemysName) --
+--           the record's own `name`, "YOUNGSTER JOEY" on Gold, the class name
+--           on Red (`fallback`, the caller's display name, without one).  The
+--           hub names the seat "TRAINER" when none rides.
+--
+-- nil on Gen 3 (its referee reads its own trainer) and with nothing to say.
+function M.npcSeat(game, trainer, fallback)
+  local generation = Gen.generation(game)
+  if generation ~= 1 and generation ~= 2 then return nil end
+  local out = {}
+  local record = type(trainer) == "table" and trainer or nil
+  local name = record and record.name
+  if type(name) ~= "string" or name == "" then name = fallback end
+  if type(name) == "string" and name ~= "" then out.name = name end
+  local raw = record and record.aiMods
+  if generation == 1 and type(raw) == "table" then
+    local layers = {}
+    for _, entry in ipairs(raw) do
+      local n = tonumber(entry)
+      if n == nil and type(entry) == "string" then n = tonumber(entry:match("^LAYER_(%d+)$")) end
+      if n and n == floor(n) and n >= 1 and n <= (Wire.AI_MOD_MAX or 4)
+         and #layers < (Wire.AI_MODS_MAX or 8) then
+        layers[#layers + 1] = n
+      end
+    end
+    out.aiMods = layers
+  end
+  if out.name == nil and out.aiMods == nil then return nil end
+  return out
 end
 
 -- Wire-shaped moves for a save mon, the same `moveOf` the opening upload
@@ -3384,7 +3445,8 @@ function M:start(game)
     M.sendParty(self.transport, self.battle, self.wildParty, "b")
   elseif type(self.npcParty) == "table" and #self.npcParty > 0 then
     M.sendParty(self.transport, self.battle, self.npcParty, "b",
-      M.trainerBagEntries(self.trainer, self.game))
+      M.trainerBagEntries(self.trainer, self.game), nil,
+      M.npcSeat(self.game, self.trainer, self.peerName))
   end
   return true
 end
@@ -3573,6 +3635,9 @@ function M:onEvent(msg)
   if self.phase == "setup" then self.phase = "play" end
 
   local kind = msg.t
+  -- A foe's sleep clip held behind its line (`M.viewerAnim`) goes on the
+  -- queue ahead of anything that is not that line.
+  if kind ~= "msg" then self:flushAnimBehind() end
   -- An `obey` this screen phrased in the cart's words owns exactly the next
   -- event -- the referee's own sentence for it, which it always emits straight
   -- behind (Move.lua Bm:_obeyLine) -- and nothing after.  Matched on `seq` so a
@@ -3592,6 +3657,7 @@ function M:onEvent(msg)
       self.lines[#self.lines + 1] = { stateRow = "weather", value = sky }
     end
     if not (obeyed and msg.seq == obeyed + 1) then self:say(msg.text) end
+    self:flushAnimBehind()
     self:noteBideLine(msg.text)
     -- The referee has narrated an escape itself (M.escapeLine): the ending
     -- adds no second one (`finish`).
@@ -3600,10 +3666,25 @@ function M:onEvent(msg)
   elseif kind == "anim" then
     -- Queued with the message stream so the flash lands in referee order.
     -- `amount` is shake count on SHAKE_ANIM; ball id is stashed from `item`.
+    -- A Red status animation is this viewer's variant (`M.viewerAnim`), and
+    -- the arena wears it as the condition's look (Vfx.forStatusAnim); a
+    -- foe's sleep clip waits behind the line it follows on this cart.
     if msg.text then
-      self.lines[#self.lines + 1] = {
-        anim = msg.text, slot = msg.slot, side = msg.side, amount = msg.amount,
-      }
+      local mine = msg.slot == self:mySlot()
+        or (msg.side ~= nil and msg.side == self.mySide)
+      local anim, behind = M.viewerAnim(msg.text, mine)
+      local rows = { {
+        anim = anim, slot = msg.slot, side = msg.side, amount = msg.amount,
+      } }
+      local seat = msg.slot ~= nil and self.slots[msg.slot] or nil
+      local look = self:usesBattlefield()
+        and Vfx.forStatusAnim(anim, seat and seat.status) or nil
+      if look then rows[#rows + 1] = { vfxrow = look, slot = msg.slot } end
+      if behind then
+        self.animBehind = rows
+      else
+        for _, row in ipairs(rows) do self.lines[#self.lines + 1] = row end
+      end
     end
 
   elseif kind == "switch" then
@@ -4195,9 +4276,53 @@ function M:sketchMine(index, prior, incoming)
   return wrote
 end
 
+-- ------- Red's PP byte past the wrap
+--
+-- pokered keeps a move's PP in one byte: the PP in the low six bits, the PP
+-- Ups in the top two (PP_UP_MASK).  DecrementPP's `dec [hl]` and
+-- IncrementMovePP's `inc [hl]` step the whole byte (engine/battle/
+-- decrement_pp.asm, core.asm), so a slot at 0 PP that pays wraps to 63 PP and
+-- one PP Up fewer -- none wraps to three -- and a refund at 63 carries back
+-- (the Red referee steps it the same way, BattleSim Turn `stepPp`, wave 5).
+-- The referee's `moves` rows state the PP and no PP Ups, so the client reads
+-- the borrow off the step it sees -- 0 to 63 is a borrow, 63 to 0 a carry: no
+-- Red move reaches 63 any other way (AddBonusPP caps a PP Up's bonus at 7, so
+-- the largest maximum is 61) -- and writes the PP Ups beside the PP, so the
+-- save holds the byte the cart's party struct holds.  A row that does state
+-- its `ppUps` is taken as it is.  `row` is the client's slot (a sheet's or the
+-- save's), before its `pp` is overwritten; `incoming` the referee's.
+function M.ppByteStep1(row, incoming)
+  if type(row) ~= "table" or type(incoming) ~= "table" then return end
+  local stated = tonumber(incoming.ppUps)
+  if stated then
+    row.ppUps = clamp(floor(stated), 0, Wire.PP_UPS_MAX or 3)
+    return
+  end
+  local was, now = tonumber(row.pp), tonumber(incoming.pp)
+  local ups = intOr(row.ppUps, 0)
+  if was == 0 and now == 63 then
+    row.ppUps = (ups + 3) % 4
+  elseif was == 63 and now == 0 then
+    row.ppUps = (ups + 1) % 4
+  end
+end
+
+-- What a Red slot's maximum reads as on the cart: GetMaxPP over the move's
+-- base PP and the slot's PP Ups (pokered PrintMenuItem), nil for a move with
+-- no record.
+function M.redMaxPp(game, row)
+  local data = game and game.data
+  local def = type(row) == "table" and type(data) == "table"
+    and type(data.moves) == "table" and data.moves[row.id] or nil
+  if type(def) ~= "table" or tonumber(def.pp) == nil then return nil end
+  return M.maxPpOf(def.pp, row.ppUps)
+end
+
 -- Keep `mine[index].moves[].pp` in step with the referee so the FIGHT menu
 -- (bandMoveRows / pickMove) shows the live count. Same-length, same-ids
--- only: a mismatched list is not the real sheet.
+-- only: a mismatched list is not the real sheet.  Red's PP Ups follow the
+-- byte (`M.ppByteStep1`), and its maximum is the cart's GetMaxPP over them
+-- (`M.redMaxPp`) -- a slot past its wrap reads 63 over that, never 63/63.
 function M:syncMinePp(moves, index)
   local mon = self.mine and self.mine[index or self.active]
   if not (type(mon) == "table" and type(mon.moves) == "table") then return false end
@@ -4208,11 +4333,14 @@ function M:syncMinePp(moves, index)
       return false
     end
   end
+  local red = self:generation() == 1
   for i, slot in ipairs(mon.moves) do
     local incoming = moves[i]
+    if red then M.ppByteStep1(slot, incoming) end
     local pp = tonumber(incoming.pp)
     if pp then slot.pp = pp end
     local maxPp = tonumber(incoming.maxPp)
+    if red then maxPp = M.redMaxPp(self.game, slot) or maxPp end
     if maxPp then slot.maxPp = maxPp end
   end
   return true
@@ -4223,8 +4351,13 @@ end
 --
 --   * Gen 3 states the change itself (`delta`, C5 §7.1), which beats any
 --     reading of a sentence.
---   * Otherwise the referee's sentence says it -- "rose" / "fell", every
---     Gen 1 / Gen 2 `stat` site's wording.
+--   * Otherwise the referee's sentence says it, in its cart's words (wave 5):
+--     Red's StatModifierUpEffect / StatModifierDownEffect "rose!" / "greatly
+--     rose!" and "fell!" / "greatly fell!" (pokered data/text/text_6.asm
+--     _GreatlyRoseText, _FellText...), Gold's StatUpMessage / StatDownMessage
+--     "went up!" / "went way up!" and "fell!" / "sharply fell!" (pokecrystal
+--     data/text/common_2.asm, BattleSim2 Effects.statUpLine / statDownLine),
+--     and a vitamin's "rose" on either.
 --   * A sentence naming neither (or none at all) falls back on the signed
 --     stage the stat now sits at (contract K10 of docs/plans/
 --     gen12-referee-gaps-fix.md: `stage`, -6..6, on Gen 1 / Gen 2 since the
@@ -4240,7 +4373,10 @@ function M.statFell(msg)
   if delta then return delta < 0 end
   local text = type(msg.text) == "string" and msg.text:lower() or ""
   if text:find("fell", 1, true) then return true end
-  if text:find("rose", 1, true) then return false end
+  if text:find("rose", 1, true) or text:find("went up", 1, true)
+     or text:find("went way up", 1, true) then
+    return false
+  end
   local stage = tonumber(msg.stage)
   return stage ~= nil and stage < 0
 end
@@ -5158,7 +5294,10 @@ function M.slotPp(own, incoming, generation)
     local shown = incoming[i]
     local pp = type(shown) == "table" and tonumber(shown.pp) or nil
     local mine = type(row) == "table" and (generation ~= 2 or row.id == shown.id)
-    if mine and pp then row.pp = max(0, floor(pp)) end
+    if mine and pp then
+      if generation == 1 then M.ppByteStep1(row, shown) end
+      row.pp = max(0, floor(pp))
+    end
   end
   return true
 end
@@ -5722,6 +5861,44 @@ function M:queueBall3(msg)
     anim("POOF_ANIM")
     anim("SHOWPIC_ANIM")
   end
+end
+
+-- ------- Red's status animations, as this viewer's cart plays them
+--
+-- The Red referee names the sleeping and the confused monster's clip from
+-- the cart's own branches (BattleSim Turn `_statusAnim`, wave 5): pokered
+-- CheckPlayerStatusConditions plays SLP_PLAYER_ANIM *ahead of* FastAsleepText
+-- and CONF_PLAYER_ANIM behind IsConfusedText; CheckEnemyStatusConditions
+-- plays SLP_ANIM *behind* FastAsleepText and CONF_ANIM behind IsConfused
+-- Text (engine/battle/core.asm).  "The player" is the owner's rule
+-- (docs/plans/gen12-referee-gaps-fix.md): against the computer side a, and in
+-- a link fight *both* sides -- each seat carries its own console's variant.
+-- So the screen across swaps it for a monster that is not its own: on this
+-- viewer's cart that monster is the enemy's, and its clip is the enemy's
+-- variant (and the other way round for one of ours named plain, which no
+-- referee does today).  `behind` is true for a sleep clip turned into the
+-- enemy's: the cart plays it after the line, so the caller holds it until the
+-- line is queued.  Every other id comes back unchanged (BURN_PSN_ANIM has one
+-- variant, faced by the seat it plays over).
+local STATUS_ANIM_SWAP = {
+  SLP_ANIM = "SLP_PLAYER_ANIM", SLP_PLAYER_ANIM = "SLP_ANIM",
+  CONF_ANIM = "CONF_PLAYER_ANIM", CONF_PLAYER_ANIM = "CONF_ANIM",
+}
+function M.viewerAnim(anim, mine)
+  local other = type(anim) == "string" and STATUS_ANIM_SWAP[anim] or nil
+  if not other then return anim, false end
+  local playerVariant = anim:find("_PLAYER_ANIM", 1, true) ~= nil
+  if playerVariant == (mine == true) then return anim, false end
+  return other, other == "SLP_ANIM"
+end
+
+-- The held rows (`viewerAnim`'s `behind`), onto the queue.
+function M:flushAnimBehind()
+  local rows = self.animBehind
+  if not rows then return end
+  self.animBehind = nil
+  self.lines = self.lines or {}
+  for _, row in ipairs(rows) do self.lines[#self.lines + 1] = row end
 end
 
 -- Gold's weather, read off the referee's own lines (pokecrystal
@@ -6635,13 +6812,18 @@ local ENDINGS = {
 -- a newer intermediator naming something this build cannot phrase -- is
 -- deliberately silent rather than printed raw: the result is the part that
 -- matters and it has already landed.
+--
+-- No `catch`: every referee says the catch itself, in its cart's words --
+-- pokered ItemUseBall's ItemUseBallText05 "All right! <MON> was caught!"
+-- (BattleSim Turn, wave 5), the Gold referee's "Gotcha" (pokecrystal
+-- Text_BallCaught, "Gotcha! <MON> was caught!"), Gen 3's "Gotcha! <MON> was
+-- caught!" -- so a "Gotcha!" of this screen's under it was a line said twice.
 local REASONS = {
   timeout    = "Nobody answered\nin time.",
   disconnect = "The link was lost.",
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
   agree      = "The battle was\ncalled off.",
-  catch      = "Gotcha!",
 }
 
 -- An escape from a wild fight, in the carts' words, said once.
@@ -6652,16 +6834,24 @@ local REASONS = {
 -- loss line.  A move's escape ends on the move's line instead: pokered
 -- SwitchAndTeleportEffect's "<USER> ran from battle!" / "<TARGET> ran away
 -- scared!" / "<TARGET> was blown away!", pokecrystal BattleCommand_Teleport's
--- "<USER> fled from battle!", and a POKé DOLL's "The wild pokemon ran away"
--- (the referees' spellings).  The Red referee says "Got away safely!" itself
--- for a coop_wild runner (BattleSim Turn `_tryRun`, the roll R1d added);
--- SoloBattle rolls a solo wild RUN on the client and says nothing on a
--- success.  So the ending says it only when the stream did not, and the old
--- "Someone ran away!" no longer follows an escape the referee had already
--- narrated.  A fight between players keeps its concession lines.
+-- "<USER> fled from battle!", BattleCommand_ForceSwitch's "<TARGET> fled in
+-- fear!" (ROAR) / "<TARGET> was blown away!" -- and a POKé DOLL's.  Red's
+-- doll ends on its use line alone: ItemUsePokeDoll sets wEscapedFromBattle
+-- behind PrintItemUseTextAndRemoveItem's "<PLAYER> used POKé DOLL!" and the
+-- cart prints nothing after it (the referee's "<PLAYER> used POKe DOLL!",
+-- BattleSim Turn `_resolveOneItem`, printed only in a wild fight); Gold's
+-- referee still says "The wild pokemon ran away" (the referees' spellings;
+-- the doll's tail is read with the accent or without).  The Red referee says "Got
+-- away safely!" itself for a coop_wild runner (BattleSim Turn `_tryRun`, the
+-- roll R1d added), Gold's too (wave 5); SoloBattle rolls a solo wild RUN on
+-- the client and says nothing on a success.  So the ending says it only when
+-- the stream did not, and the old "Someone ran away!" no longer follows an
+-- escape the referee had already narrated.  A fight between players keeps
+-- its concession lines.
 M.GOT_AWAY = "Got away safely!"
 local ESCAPE_TAILS = {
   " ran from battle!", " ran away scared!", " was blown away!", " fled from battle!",
+  " fled in fear!", " used POKe DOLL!", " used POKé DOLL!",
 }
 function M.escapeLine(text)
   if type(text) ~= "string" then return false end
@@ -6782,7 +6972,7 @@ end
 -- ------- the nickname the catcher is owed
 --
 -- Recorded here and asked *later*, and the gap is the whole point: this runs
--- inside `finish`, one line after "Gotcha!" is queued and while the rest of
+-- inside `finish`, behind the referee's catch line and while the rest of
 -- the ending is still to print.  A grid pushed now would land on top of the
 -- lines that say what just happened -- the player would be typing a name for
 -- a catch they have not been told about yet.
@@ -6845,7 +7035,7 @@ function M:finish(result, reason, msg)
   -- same question the fanfare above just asked. It has to be gated on that:
   -- the outcome lands while the rows that show it are still queued, and on a
   -- catch those rows *are* the throw. Snapping here would stand the caught
-  -- monster back up on its seat one line before "Gotcha!" printed, and on an
+  -- monster back up on its seat one line before the catch line printed, and on an
   -- ordinary win it would cut the last KO short. When the answer is "something
   -- is still owed", the rows themselves finish the job: a KO's `clearPic` takes
   -- the sink down with the pic, a failed throw's closing burst clears the flow,
@@ -6853,9 +7043,9 @@ function M:finish(result, reason, msg)
   -- clears whatever is left on the way out.
   if not self:hasPendingHpFx() then self:snapDisplay() end
   if reason == "catch" and result == "win" then
-    -- Gen 3's referee has already said it, the cart's way ("Gotcha! X was
-    -- caught!"); a second "Gotcha!" under it would be this screen's echo.
-    if self:generation() ~= 3 then self:say("Gotcha!") end
+    -- Every referee has already said it, the cart's way (REASONS: Red's "All
+    -- right! X was caught!", Gold's and Gen 3's "Gotcha!"); a line of this
+    -- screen's under it would be its echo.
     self:grantCatch(msg)
   elseif self:generation() == 3 then
     self:sayEnding3(reason)
@@ -7539,11 +7729,16 @@ end
 --
 -- The wire states no Bide, so it is read off what this client did and saw:
 -- it chose BIDE (or went on with one), and the turn just resolved said its
--- monster is storing energy -- the line every storing turn prints (pokecrystal
--- StoringEnergyText, the referee's `bideStore`).  A turn that did not say so
--- -- the release ("unleashed energy"), or a CantMove that ended the Bide
--- (sleep, paralysis, a flinch, confusion) -- reopens the move list, so a
--- wrong reading can only cost a screen, never pick a move for the player.
+-- monster is in one.  The first turn says it with the used line alone --
+-- "<MON> used BIDE!": BattleCommand_StoreEnergy returns at once while
+-- SUBSTATUS_BIDE is clear, and `usedmovetext` prints it before
+-- BattleCommand_UnleashEnergy sets the substatus (move_effects/bide.asm;
+-- the referee's "began storing energy" is gone since wave 5) -- and every
+-- storing turn after it with StoringEnergyText, "<MON> is storing energy!"
+-- (the referee's `bideStore`).  A turn that said neither -- the release
+-- ("unleashed energy!"), or a CantMove that ended the Bide (sleep,
+-- paralysis, a flinch, confusion) -- reopens the move list, so a wrong
+-- reading can only cost a screen, never pick a move for the player.
 
 -- A sheet row by its effect number -- both referees number BIDE's 26
 -- (BattleSim Effects BIDE_EFFECT, BattleSim2 EFFECT_BIDE) -- and an engine
@@ -7559,18 +7754,27 @@ function M.isBideMove(move, game)
     and (def.effect == "EFFECT_BIDE" or def.effect == "BIDE_EFFECT")
 end
 
--- "store" for a line saying `species` is (or began) storing energy,
--- "release" for its "unleashed energy", nil for anything else (the referee's
--- own spellings: BattleSim2 Turn `_useMove`).
-function M.bideLine(text, species)
+-- Gold's Bide, read off the referee's lines in pokecrystal's words (wave 5;
+-- BattleSim2 Turn `_useMove`): "start" for "<MON> used BIDE!" (`labels`, as
+-- `bideLine1` reads it: the upper-case names a Bide row goes by on this
+-- sheet, BIDE itself always), "store" for StoringEnergyText's "<MON> is
+-- storing energy!", "release" for UnleashedEnergyText's "<MON> unleashed
+-- energy!", nil for anything else and for a line about another monster.  The
+-- closing "!" is optional, so an older referee's bare line still reads.
+function M.bideLine(text, species, labels)
   if type(text) ~= "string" or type(species) ~= "string" or species == "" then
     return nil
   end
-  if text == species .. " is storing energy"
-     or text == species .. " began storing energy" then
-    return "store"
+  local line = text:gsub("!+$", "")
+  if line == species .. " is storing energy" then return "store" end
+  if line == species .. " unleashed energy" then return "release" end
+  local prefix = species .. " used "
+  if line:sub(1, #prefix) == prefix then
+    local label = line:sub(#prefix + 1):upper()
+    if label == "BIDE" or (type(labels) == "table" and labels[label]) then
+      return "start"
+    end
   end
-  if text == species .. " unleashed energy" then return "release" end
   return nil
 end
 
@@ -7656,8 +7860,8 @@ function M:noteBideLine(text)
     return
   end
   if not self.bideFiled then return end
-  local said = M.bideLine(text, species)
-  if said == "store" then
+  local said = M.bideLine(text, species, M.bideLabels(sheet and sheet.moves, self.game))
+  if said == "store" or said == "start" then
     self.bideStoring = true
   elseif said == "release" then
     self.bideFiled, self.bideStoring = nil, nil
@@ -7788,6 +7992,25 @@ function M:drawMimicPick(Font)
   if #rows > 0 then Font.drawCode(0xED, 8, 56 + (self.mimicIndex or 1) * 8) end
 end
 
+-- A POKé DOLL outside a wild fight, as both carts answer it at the bag: the
+-- cart's line, the bag back up, the item kept and the turn not spent --
+-- pokered ItemUsePokeDoll (`ld a, [wIsInBattle] / dec a / jp nz,
+-- ItemUseNotTime`: a trainer or a link battle) and pokecrystal
+-- PokeDollEffect (`.not_wild` leaves wItemEffectSucceeded 0, and the battle
+-- pack's `.BattleOnly` answers that with `.Oak`, OakThisIsntTheTimeText --
+-- engine/items/pack.asm), both "OAK: <PLAYER>! This isn't the time to use
+-- that!", the same refusal
+-- `updateCommand` gives a trainer RUN.  The Red referee files a doll it is
+-- sent there as a spent turn with the same line, so the screen does not send
+-- it.  The line, or nil where the doll is usable (a wild fight) or the cart
+-- is not Red / Gold (Gen 3 reads its own bag).  Shared with
+-- src/CoopBattle.lua.
+local DOLL_MODES = { wild = true, coop_wild = true }
+function M.dollRefusal(game, mode)
+  if Gen.generation(game) == 3 or DOLL_MODES[mode] then return nil end
+  return "OAK: " .. playerName(game) .. "!\nThis isn't the\ntime to use that!"
+end
+
 function M:updateItemMenu(input)
   local items = self:usableItems()
   if #items == 0 then
@@ -7805,9 +8028,13 @@ function M:updateItemMenu(input)
     local pick = items[self.itemIndex]
     local effect = pick.effect
     self.itemPick = pick
+    local notTime = effect and effect.pokeDoll and M.dollRefusal(self.game, self.mode)
     if not effect then
       -- Unknown bag id: still spend it and let the sim announce failure.
       self:commitItem(self.active, nil)
+    elseif notTime then
+      self.itemPick = nil
+      self:say(notTime)
     elseif effect.ball or effect.pokeDoll or effect.pokeFlute then
       self:commitItem(nil, nil)
     elseif effect.activeOnly then
@@ -8221,10 +8448,15 @@ end
 
 -- ------- move / catch SFX (same contract as CoopBattle / BattleState)
 
-local function hitSfxFromText(text)
+-- The effectiveness line in either cart's spelling: pokered's "It's super
+-- effective!" and pokecrystal's "It's super-effective!" (data/text/
+-- battle.asm SuperEffectiveText, which the Gold referee says word for word
+-- since wave 5) -- the hyphen read as the space it stands for -- and both
+-- carts' "It's not very effective...".  Shared with src/CoopBattle.lua.
+function M.hitSfxFromText(text)
   if type(text) ~= "string" then return nil end
   -- Engine / BattleSim lines may break mid-phrase ("It's super\neffective!").
-  local lower = text:lower():gsub("%s+", " ")
+  local lower = text:lower():gsub("[%s%-]+", " ")
   if lower:find("super effective", 1, true) then
     return { sound = "Super_Effective", pitch = 0xe0 }
   end
@@ -8233,6 +8465,7 @@ local function hitSfxFromText(text)
   end
   return nil
 end
+local hitSfxFromText = M.hitSfxFromText
 
 function M:peekHitSfx()
   -- Mirror CoopBattle / solo: thud only when a following effectiveness line,

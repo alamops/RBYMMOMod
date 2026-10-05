@@ -3428,6 +3428,181 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- Wave 6 of docs/plans/gen12-referee-gaps-fix.md, through the hub:
+--
+--   * An NPC party's trainer facts reach the referee: its display `name`
+--     (Wire.npcName, Red and Gold) names every seat the trainer is dealt
+--     across -- "TRAINER" when it brought none or one that does not read --
+--     and the referee prints it in the cart's AI item line (pokered
+--     AIBattleUseItemText, "<TRAINER> used <ITEM> on <MON>!"); its Red
+--     `aiMods` (the class's AIMoveChoiceModification layers) ride on those
+--     seats alone, never on a human's, and an unreadable list refuses the
+--     party.  Gold reads the name and no layers.
+--   * The line reaches a Red / Gold client whole: Wire.battleEvent keeps
+--     the carts' battle glyphs in a `msg` (é, …, ♂, ♀, &).
+--   * A JSON null inside a ruleset's chart or specialTypes is closed up (the
+--     engine's decoder does it before the hub sees the list; lib/sanitize.js
+--     now does the same), and an object where specialTypes' list belongs is
+--     refused, as the Node hub always refused it.
+-- server/hub_battle.test.js pins the same on the Node twin.
+-- ------------------------------------------------------------------
+
+local MALE6, E6 = "\226\153\130", "\195\169"
+
+-- A coop_npc fight on a fresh hub: ANN (and BOB) on side a, the trainer's
+-- party (`npc` merged in) dealt across the NPC seats.  What the referee holds,
+-- and the lines of ANN's first FIGHT.
+local function npcFight6(generation, npc, humans, own)
+  local hub = Hub.new({ maxPlayers = 4, generation = generation })
+  hub.forceBattleSeed = 1
+  local joiner = generation == 2 and join2 or join
+  local ann, annPeer = joiner(hub, "ANN")
+  local members = { ann.id }
+  local bob = nil
+  if humans == 2 then
+    bob = joiner(hub, "BOB")
+    members[2] = bob.id
+  end
+  local id = "w6"
+  hub:openCoopBattle(id, members, { mode = "coop_npc", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  local sheet = function(species)
+    if generation == 2 then return sheet2({ species = species }) end
+    return mon({ species = species })
+  end
+  local mine = { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet("HERO") } }
+  for k, v in pairs(own or {}) do mine[k] = v end
+  hub:receive(ann, mine)
+  if bob then
+    hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet("HERO") } })
+  end
+  local theirs = { type = Wire.BATTLE_PARTY, battle = id, side = "b",
+                   mons = { sheet("FOE"), sheet("FOE") } }
+  for k, v in pairs(npc or {}) do theirs[k] = v end
+  hub:receive(ann, theirs)
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false, record = record } end
+  local seats = {}
+  for _, npcId in ipairs(record.npcIds) do seats[#seats + 1] = record.sim.byId[npcId] end
+  local out = { opened = true, record = record, seats = seats, ann = record.sim.byId[ann.id], lines = {} }
+  if humans ~= 2 then
+    annPeer.outbox = {}
+    hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+    for _ = 1, 64 do
+      local msg = take(annPeer, Wire.BATTLE_EVENT)
+      if not msg then break end
+      if msg.t == "msg" then
+        local read = Wire.battleEvent(msg, generation)
+        out.lines[#out.lines + 1] = { sent = msg.text, read = read and read.text }
+      end
+    end
+  end
+  return out
+end
+
+local function lineWith(lines, part)
+  for _, l in ipairs(lines or {}) do
+    if l.sent:find(part, 1, true) then return l end
+  end
+  return nil
+end
+
+do
+  local xItem = { { id = "X_ATTACK", count = 1 } }
+  local named = npcFight6(1, { name = "COOLTRAINER" .. MALE6, aiMods = { 1, 3 }, bag = xItem })
+  ok(named.opened, "wave 6: a Red trainer naming itself opens")
+  eq(named.opened and named.seats[1].name, "COOLTRAINER" .. MALE6, "wave 6: the NPC seat is the trainer's name")
+  eq(named.opened and named.seats[1].aiMods and table.concat(named.seats[1].aiMods, ","), "1,3",
+     "wave 6: ...and the referee holds its Red move-choice layers")
+  eq(named.opened and named.ann.name, "ANN", "wave 6: a human seat is still its connection's name")
+  eq(named.opened and named.ann.aiMods, nil, "wave 6: ...with no layers")
+  local used = named.opened and lineWith(named.lines, " used X ATTACK on ")
+  eq(used and used.sent, "COOLTRAINER" .. MALE6 .. " used X ATTACK on FOE!",
+     "wave 6: the referee prints the cart's AI item line with the trainer's name")
+  eq(used and used.read, "COOLTRAINER" .. MALE6 .. " used X ATTACK on FOE!",
+     "wave 6: ...and a Red client reads the line whole, ♂ and all")
+
+  local plain = npcFight6(1, { bag = xItem })
+  eq(plain.opened and plain.seats[1].name, "TRAINER", "wave 6: a trainer naming nothing is TRAINER, as before")
+  eq(plain.opened and plain.seats[1].aiMods, nil, "wave 6: ...and brings no layers")
+  local bad = npcFight6(1, { name = 42, aiMods = {} })
+  eq(bad.opened and bad.seats[1].name, "TRAINER", "wave 6: a name that does not read is dropped, not fatal")
+  eq(bad.opened and bad.seats[1].aiMods and #bad.seats[1].aiMods, 0,
+     "wave 6: an empty layer list is a class with no layer (YOUNGSTER)")
+  local refused = npcFight6(1, { name = "LASS", aiMods = { 9 } })
+  ok(not refused.opened, "wave 6: a layer off the cart's four refuses the trainer's party")
+  eq(refused.record and refused.record.parties[refused.record.npcIds[1]], nil,
+     "wave 6: ...so no NPC seat is filled")
+
+  local two = npcFight6(1, { name = "LASS", aiMods = { 2 } }, 2)
+  eq(two.opened and #two.seats, 2, "wave 6: a 2v2 trainer is dealt across two seats")
+  for i = 1, 2 do
+    eq(two.opened and two.seats[i].name, "LASS", "wave 6: ...each named the trainer (" .. i .. ")")
+    eq(two.opened and two.seats[i].aiMods and two.seats[i].aiMods[1], 2,
+       "wave 6: ...each with its layers (" .. i .. ")")
+  end
+
+  local claims = npcFight6(1, { name = "LASS" }, 1, { name = "MALLORY", aiMods = { 2 } })
+  eq(claims.opened and claims.ann.name, "ANN", "wave 6: a human's party cannot rename its own seat")
+  eq(claims.opened and claims.ann.aiMods, nil, "wave 6: ...nor hand it layers")
+
+  local gold = npcFight6(2, { name = "TWINS AMY & MAY", aiMods = { 1 }, bag = xItem })
+  eq(gold.opened and gold.seats[1].name, "TWINS AMY & MAY", "wave 6: a Gold trainer's \"<CLASS> <NAME>\" names its seat")
+  eq(gold.opened and gold.seats[1].aiMods, nil, "wave 6: ...and Gold reads no Red layers")
+  local goldLine = gold.opened and lineWith(gold.lines, "TWINS AMY & MAY")
+  ok(goldLine, "wave 6: the Gold referee prints the trainer's name in its item line")
+  eq(goldLine and goldLine.read, goldLine and goldLine.sent, "wave 6: a Gold client reads the & whole")
+
+  -- A Gold referee line in the cart's own spelling reaches a Gold client whole.
+  local perish = Wire.battleEvent({ battle = "b", seq = 1, t = "msg",
+                                    text = "Both POK" .. E6 .. "MON will faint in 3 turns!" }, 2)
+  eq(perish and perish.text, "Both POK" .. E6 .. "MON will faint in 3 turns!",
+     "wave 6: PerishSongText keeps its é on a Gold reader")
+  eq(Wire.text("Both POK" .. E6 .. "MON"), "Both POKMON", "wave 6: player-typed text stays inside the old set")
+end
+
+do
+  -- Nulls in the chart and specialTypes reach this hub closed up (the
+  -- engine's decoder; the stand-in here is the closed list) and the fight
+  -- opens; an object where specialTypes' list belongs refuses the ruleset.
+  local function rulesetFight6(rules)
+    local hub = Hub.new({ maxPlayers = 4 })
+    local ann = join(hub, "ANN")
+    hub:openCoopBattle("w6r", { ann.id }, { mode = "wild", hostId = ann.id })
+    local msg = { type = Wire.BATTLE_RULESET, battle = "w6r" }
+    for k, v in pairs(rules) do msg[k] = v end
+    hub:receive(ann, msg)
+    local record = hub.battles["w6r"]
+    return record and record.ruleset
+  end
+  local closed = rulesetFight6({ chart = CHART, specialTypes = { 1, 0 } })
+  eq(closed and table.concat(closed.specialTypes, ","), "1,0", "wave 6: a closed-up specialTypes is read")
+  eq(rulesetFight6({ chart = CHART, specialTypes = { a = 1 } }), nil,
+     "wave 6: an object where specialTypes' list belongs refuses the ruleset, as on the Node hub")
+  local empty = rulesetFight6({ chart = CHART, specialTypes = {} })
+  eq(empty and #empty.specialTypes, 0, "wave 6: the empty list (or object) is no Special type")
+
+  -- The real decoder, where the engine root makes it reachable: the line a
+  -- client sends with JSON nulls in it, and a battle line spelled with \u
+  -- escapes, read the way the LAN host and a client read them.
+  local okJson, Json = pcall(require, "src.link.Json")
+  if okJson and type(Json) == "table" and type(Json.decode) == "function" then
+    local decoded = rulesetFight6(Json.decode(
+      '{"chart":[[100,null,100],null,[100,100]],"specialTypes":[1,null,0]}'))
+    eq(decoded and #decoded.chart, 2, "wave 6 json: a null chart row is closed up by the decoder")
+    eq(decoded and table.concat(decoded.chart[1], ","), "100,100", "wave 6 json: ...and a null cell")
+    eq(decoded and table.concat(decoded.specialTypes, ","), "1,0", "wave 6 json: ...and a null index")
+    local line = Wire.battleEvent(Json.decode(
+      '{"battle":"b","seq":1,"t":"msg","text":"POK\\u00e9MON \\u2026 \\u2642\\u2640 &"}'), 1)
+    eq(line and line.text, "POK" .. E6 .. "MON \226\128\166 " .. MALE6 .. "\226\153\128 &",
+       "wave 6 json: \\u escapes decode to the glyphs a Red reader keeps")
+  else
+    io.write("hub_battle: src.link.Json not reachable from here (run from the engine root); "
+      .. "wave 6 decoder checks skipped\n")
+  end
+end
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("hub_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -150,6 +150,42 @@ function cleanText(value, limit) {
   return clean.slice(0, limit);
 }
 
+/*
+ * A referee's battle line (wave 6 of docs/plans/gen12-referee-gaps-fix.md):
+ * cleanText's set plus the carts' own battle glyphs -- é (POKéMON; pokered
+ * charmap $BA, Gold $EA), … ($75: Gold's "ignored orders…sleeping!"), ♂ / ♀
+ * ($EF / $F5: the trainer classes an NPC seat's name carries, "JR.TRAINER♂")
+ * and & (Gold $E9: "TWINS AMY & MAY"). Its own reader, so cleanText -- the
+ * allowlist for player-typed text -- stays as narrow as it was.
+ *
+ * Twin of Wire.battleText, byte for byte: the Lua side keeps each glyph only as
+ * its whole UTF-8 sequence and drops every other byte past 0x7F, and this side
+ * reads what Node's WHATWG UTF-8 decoding made of the same bytes (a stray or
+ * truncated sequence is a U+FFFD, dropped here; C3 / E2 are never continuation
+ * bytes, so each glyph decodes where Lua finds it). Each kept glyph is one
+ * UTF-16 unit, so `slice` cuts in glyphs, as Wire.battleText does; a surrogate
+ * half is never in the set. MESSAGE_MAX when no limit is named, as Wire.lua's
+ * `limit or Config.MESSAGE_MAX`.
+ */
+const BATTLE_TEXT_OK = /[^A-Za-z0-9 .,!?'\-:;()/&é…♂♀]/g;
+
+function cleanBattleText(value, limit) {
+  if (typeof value !== 'string') return null;
+  const clean = value.replace(BATTLE_TEXT_OK, '').replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  return clean.slice(0, limit === undefined || limit === null ? MESSAGE_MAX : limit);
+}
+
+// The trainer an NPC seat is: the name the cart prints for the computer
+// (pokered's wTrainerName, up to 12 -- "COOLTRAINER♂"; Gold's PlaceEnemysName
+// "<CLASS> <NAME>", 12 + 1 + 10), sent with the side-"b" party. A battle line's
+// glyphs, since a line prints it. Twin of Wire.npcName / Wire.NPC_NAME_MAX.
+const NPC_NAME_MAX = 23;
+
+function cleanNpcName(value) {
+  return cleanBattleText(value, NPC_NAME_MAX);
+}
+
 function cleanId(value) {
   if (typeof value !== 'string') return null;
   return /^[\w-]{1,40}$/.test(value) ? value : null;
@@ -1082,19 +1118,30 @@ function cleanStatBlock(value, min, max, generation) {
  * chart's width, and reading that gap as neutral is its call -- so a rectangle of
  * numbers in range is what this owes, and it is what makes the table safe to walk
  * at all.
+ *
+ * Read as Wire.lua's chartOf is handed it (wave 6 of
+ * docs/plans/gen12-referee-gaps-fix.md): the rows and each row's cells closed
+ * up first (luaList), as the engine's decoder closes a JSON null before the Lua
+ * hub sees the chart, and each cell read as Wire.int reads it (luaInt). This
+ * used to refuse the chart over a null row and read a null cell as Number(null)
+ * -- 0, an immunity -- where the Lua hub fought the closed-up chart; `true`,
+ * `[n]` and '' cells were 1, n and 0 here and nothing there. An object where a
+ * list belongs is refused on both (Lua finds no row, or no cell, in it).
  */
 function cleanChart(value) {
-  if (!Array.isArray(value)) return null;
+  const list = luaList(value);
+  if (!list) return null;
 
   const rows = [];
   let width = null;
-  for (const row of value) {
-    if (!Array.isArray(row)) return null;
+  for (const entry of list) {
+    const row = luaList(entry);
+    if (!row) return null;
     if (rows.length >= BATTLE_TYPE_MAX) return null;
     const cells = [];
     for (const raw of row) {
       if (cells.length >= BATTLE_TYPE_MAX) return null;
-      const cell = cleanInt(raw, 0, CHART_MAX);
+      const cell = luaInt(raw, 0, CHART_MAX);
       if (cell === null) return null;
       cells.push(cell);
     }
@@ -1330,11 +1377,17 @@ function cleanBattleRuleset(raw, generation) {
     if (seed === null) return null;
     ruleset.seed = seed;
   }
+  // Read as Wire.lua reads it (wave 6): a list (luaList -- a JSON null closed
+  // up, as the engine's decoder closes it, where this used to read it as
+  // Number(null), type 0 Special; an object refused, as Wire.lua's isList now
+  // refuses it), each index read as Wire.int reads it (luaInt). Twin of
+  // Wire.battleRuleset.
   if (raw.specialTypes !== undefined && raw.specialTypes !== null) {
-    if (!Array.isArray(raw.specialTypes)) return null;
+    const list = luaList(raw.specialTypes);
+    if (!list) return null;
     const special = [];
-    for (const entry of raw.specialTypes) {
-      const t = cleanInt(entry, 0, BATTLE_TYPE_MAX - 1);
+    for (const entry of list) {
+      const t = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
       if (t === null) return null;
       special.push(t);
     }
@@ -2105,6 +2158,32 @@ function uploadComplete3(mon) {
     && mon.beatUp !== undefined;
 }
 
+/*
+ * A Red trainer's move-choice layers (`aiMods`, wave 6 of
+ * docs/plans/gen12-referee-gaps-fix.md): pokered's
+ * TrainerClassMoveChoiceModifications row for its class, the
+ * AIMoveChoiceModification numbers (1..AI_MOD_MAX; 4 does nothing) the Red
+ * referee layers (lib/battle Turn `_aiTrainerMoves`), at most AI_MODS_MAX --
+ * its MAX_AI_MODS. A list as Wire.lua's isList reads it (luaList: a JSON null
+ * closed up, an object refused, an empty list kept -- YOUNGSTER's
+ * `.useOriginalMoveSet`), refused whole, each entry read as Wire.int reads it
+ * (luaInt). Twin of Wire.lua's aiModsOf.
+ */
+const AI_MOD_MAX = 4;
+const AI_MODS_MAX = 8;
+
+function cleanAiMods(value) {
+  const list = luaList(value);
+  if (!list || list.length > AI_MODS_MAX) return null;
+  const out = [];
+  for (const entry of list) {
+    const layer = luaInt(entry, 1, AI_MOD_MAX);
+    if (layer === null) return null;
+    out.push(layer);
+  }
+  return out;
+}
+
 function cleanBattleParty(raw, hubGeneration) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
@@ -2147,6 +2226,21 @@ function cleanBattleParty(raw, hubGeneration) {
     const side = cleanSide(raw.side);
     if (!side) return null;
     party.side = side;
+  }
+
+  // Wave 6: the trainer's facts an NPC party carries, read off any party by
+  // the dialect it resolved to (the hub copies them onto NPC seats alone).
+  // `aiMods` on Red only, refusing the party when unreadable (it decides the
+  // computer's pick); `name` on Red and Gold, dropped when unreadable (the
+  // hub then says "TRAINER", as it always has). Twin of Wire.battleParty.
+  if (partyGen === 1 && raw.aiMods !== undefined && raw.aiMods !== null) {
+    const aiMods = cleanAiMods(raw.aiMods);
+    if (!aiMods) return null;
+    party.aiMods = aiMods;
+  }
+  if ((partyGen === 1 || partyGen === 2) && raw.name !== undefined && raw.name !== null) {
+    const name = cleanNpcName(raw.name);
+    if (name) party.name = name;
   }
 
   // A Gen 3 party's list is read as the Lua decoder leaves it (luaList).
@@ -2348,9 +2442,13 @@ function cleanBattleEvent(raw, generation) {
     // item its own save holds, where Gen 3's `held` text is the name it prints.
     // An `obey`'s is one of the eight outcome tokens or nothing (Wire.lua's
     // reading): dropped like any mangled field, never refused whole.
+    // A Red / Gold reader's `msg` is the referee's own line, read with the
+    // carts' battle glyphs (cleanBattleText, wave 6); every other kind, and a
+    // Gen 3 (or unnamed) reader's `msg`, as before. Twin of Wire.battleEvent.
     let text;
     if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball' || held2) text = cleanId(raw.text);
     else if (raw.t === 'obey') text = OBEY_TOKENS3.has(raw.text) ? raw.text : null;
+    else if (older && raw.t === 'msg') text = cleanBattleText(raw.text, MESSAGE_MAX);
     else text = cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
   }
@@ -2798,6 +2896,12 @@ module.exports = {
   CHART_ORDER_MAX,
   NUM_ATTACKS2,
   cleanChartOrder,
+  cleanBattleText,
+  cleanNpcName,
+  NPC_NAME_MAX,
+  cleanAiMods,
+  AI_MOD_MAX,
+  AI_MODS_MAX,
   K7_KEYS1,
   K7_KEYS2,
   METRONOME_POOL_MAX,

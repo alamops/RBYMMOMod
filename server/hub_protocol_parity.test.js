@@ -923,6 +923,7 @@ function runJs() {
     ...runGaps(),
     ...runWave4(),
     ...runWave5(),
+    ...runWave6(),
   ];
 }
 
@@ -3138,6 +3139,256 @@ function runWave5() {
         goldAttractNone: goldAttract(undefined, undefined),
         goldMetronomeNum: goldMetronome(true),
         goldMetronomePlace: goldMetronome(false),
+      },
+    },
+  ];
+}
+
+// ------------------------------------------------------------------
+// Wave 6 of docs/plans/gen12-referee-gaps-fix.md, the wire: a Red / Gold
+// reader's `msg` with the carts' battle glyphs (cleanBattleText), `ppUps` on
+// an older `moves` event's rows, chart / specialTypes nulls closed up, and an
+// NPC party's Red `aiMods` and Red / Gold `name`. Twin of
+// referee_gaps_wave6_dialect in the Lua driver, whose header argues each case.
+// The Lua driver's strings are the bytes a hub is handed; each one here is what
+// Node's UTF-8 decoding makes of those bytes (`dec` for the ones that are not
+// valid UTF-8, where a stray sequence becomes U+FFFD), so each row pins one
+// byte stream through both readers. NULL there is a real null here.
+// ------------------------------------------------------------------
+
+const dec = (hex) => Buffer.from(hex, 'hex').toString('utf8');
+
+function wave6() {
+  const line = (text, t) => ({
+    battle: 'b1', seq: 1, t: t || 'msg', text,
+  });
+  const rules = (extra) => ({ chart: CHART, ...extra });
+  const party = (extra, gen) => ({ battle: 'b1', mons: [sheet12(gen || 1)], ...extra });
+  const movesEvent = (rows) => ({
+    battle: 'b1', seq: 2, t: 'moves', slot: 0, side: 'a', mon: 0, moves: rows,
+  });
+  const texts = [
+    'Both POKéMON will faint in 3 turns!',
+    'Enemy POKéMON\'s LIGHT SCREEN fell!',
+    'ALPHA ignored orders…sleeping!',
+    'COOLTRAINER♂ used X ATTACK on JR.TRAINER♀!',
+    'TWINS AMY & MAY used an item',
+    '  POKé  …\té  ',
+    dec('e2c3a958'),
+    dec('e280c3a9'),
+    dec('c345a9'),
+    `${dec('f09f9880')} HI`,
+    'POKÉMON',
+    'POKèMON',
+    'é'.repeat(70),
+    `${'A'.repeat(59)}éB`,
+    '#MON <PKMN> @ \\ _ ~ ¥',
+  ];
+  const cases = [];
+  for (const gen of [1, 2, 3, undefined]) {
+    for (const text of texts) cases.push(['event', line(text), gen]);
+  }
+  return [
+    ...cases,
+    // other kinds keep cleanText
+    ['event', line('COOLTRAINER♂', 'chose'), 1],
+    ['event', line('POKéMON', 'send'), 2],
+    ['event', line('Wild POKéMON fled!', 'run'), 2],
+    // ppUps on the older `moves` event
+    ['event', movesEvent([row12('TAP', { pp: 0, maxPp: 35, ppUps: 3 }),
+      row12('HUSH', { ppUps: 4 }), row12('ZAP', { ppUps: '2' }),
+      row12('NAP', { ppUps: null })]), 1],
+    ['event', movesEvent([row12('TAP', {
+      pp: 0, maxPp: 35, ppUps: 3, priority: 2,
+    }), row12('HUSH', { ppUps: -1 })]), 2],
+    // chart nulls (rows and cells)
+    ['ruleset', { chart: [[100, null, 50], [0, 200]] }, 1],
+    ['ruleset', { chart: [null, [100, 50], [0, 200]] }, 2],
+    ['ruleset', { chart: [[100, 50], null] }],
+    ['ruleset', { chart: [[null, null]] }, 1],
+    ['ruleset', { chart: [null] }, 1],
+    ['ruleset', { chart: [[100, 50], { a: 1 }] }, 1],
+    ['ruleset', { chart: { a: [100] } }, 2],
+    ['ruleset', { chart: [[true, 100]] }, 1],
+    ['ruleset', { chart: [['100', ' 50 ']] }, 2],
+    ['ruleset', { chart: [['', 50]] }, 1],
+    ['ruleset', { chart: [[[100], 50]] }, 1],
+    ['ruleset', { chart: [['0x10', 50]] }, 1],
+    // specialTypes nulls
+    ['ruleset', rules({ specialTypes: [1, null, 0] }), 1],
+    ['ruleset', rules({ specialTypes: [null] }), 2],
+    ['ruleset', rules({ specialTypes: [] }), 1],
+    ['ruleset', rules({ specialTypes: {} }), 2],
+    ['ruleset', rules({ specialTypes: { a: 1 } }), 1],
+    ['ruleset', rules({ specialTypes: { a: null } }), 2],
+    ['ruleset', rules({ specialTypes: [true] }), 1],
+    ['ruleset', rules({ specialTypes: [[1]] }), 2],
+    ['ruleset', rules({ specialTypes: [''] }), 1],
+    ['ruleset', rules({ specialTypes: ['1', ' 0 '] }), 2],
+    ['ruleset', rules({ specialTypes: '1' }), 1],
+    ['ruleset', rules({ specialTypes: [1, null, 0] })],
+    // Red aiMods
+    ['npc', party({ aiMods: [1, 2, 3] }), 1],
+    ['npc', party({ aiMods: [] }), 1],
+    ['npc', party({ aiMods: [1, null, 3] }), 1],
+    ['npc', party({ aiMods: [null] }), 1],
+    ['npc', party({ aiMods: [4, 4] }), 1],
+    ['npc', party({ aiMods: [0] }), 1],
+    ['npc', party({ aiMods: [5] }), 1],
+    ['npc', party({ aiMods: [-1] }), 1],
+    ['npc', party({ aiMods: ['2', ' 3 '] }), 1],
+    ['npc', party({ aiMods: ['0x2'] }), 1],
+    ['npc', party({ aiMods: [1.5] }), 1],
+    ['npc', party({ aiMods: [true] }), 1],
+    ['npc', party({ aiMods: [[1]] }), 1],
+    ['npc', party({ aiMods: [''] }), 1],
+    ['npc', party({ aiMods: [1, 2, 3, 4, 1, 2, 3, 4] }), 1],
+    ['npc', party({ aiMods: [1, 2, 3, 4, 1, 2, 3, 4, 1] }), 1],
+    ['npc', party({ aiMods: [1, 2, 3, 4, null, 1, 2, 3, 4] }), 1],
+    ['npc', party({ aiMods: { a: 1 } }), 1],
+    ['npc', party({ aiMods: { a: null } }), 1],
+    ['npc', party({ aiMods: '1,2' }), 1],
+    ['npc', party({ aiMods: 3 }), 1],
+    ['npc', party({ aiMods: null }), 1],
+    ['npc', party({ aiMods: [1, 2], generation: 1 })],
+    ['npc', party({ aiMods: [9], generation: 1 })],
+    ['npc', party({ aiMods: [1, 2] })],
+    ['npc', party({ aiMods: [9] })],
+    ['npc', party({ aiMods: [1, 2] }, 2), 2],
+    ['npc', party({ aiMods: [9] }, 2), 2],
+    ['npc', { battle: 'b1', mons: [mon3()], aiMods: [1] }, 3],
+    ['npc', { battle: 'b1', mons: [mon3()], aiMods: [9] }, 3],
+    // the NPC seat's display name
+    ['npc', party({ name: 'COOLTRAINER♂' }), 1],
+    ['npc', party({ name: 'POKéMANIAC', aiMods: [1] }), 1],
+    ['npc', party({ name: 'JR.TRAINER♀' }), 1],
+    ['npc', party({ name: 'FIREBREATHER WALT' }, 2), 2],
+    ['npc', party({ name: 'TWINS AMY & MAY' }, 2), 2],
+    ['npc', party({ name: 'SWIMMER♂ HAROLD' }, 2), 2],
+    ['npc', party({ name: 'FIREBREATHER ABCDEFGHIJ' }, 2), 2],
+    ['npc', party({ name: 'FIREBREATHER ABCDEFGHIJK' }, 2), 2],
+    ['npc', party({ name: 'é'.repeat(30) }, 2), 2],
+    ['npc', party({ name: '  RIVAL   BLUE  ' }), 1],
+    ['npc', party({ name: 'BUG_CATCHER<PK>#' }), 1],
+    ['npc', party({ name: '' }), 1],
+    ['npc', party({ name: '   ' }), 1],
+    ['npc', party({ name: dec('f09f9880') }), 1],
+    ['npc', party({ name: dec('c3') }), 1],
+    ['npc', party({ name: 42 }), 1],
+    ['npc', party({ name: ['A'] }), 1],
+    ['npc', party({ name: true }), 1],
+    ['npc', party({ name: null }), 1],
+    ['npc', party({ name: 'ROCKET', generation: 2 }, 2)],
+    ['npc', party({ name: 'ROCKET' })],
+    ['npc', { battle: 'b1', mons: [mon3()], name: 'LEADER' }, 3],
+  ];
+}
+
+function readWave6(kind, input, gen) {
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'ruleset') return sanitize.cleanBattleRuleset(input, gen);
+  if (kind === 'npc') {
+    const read = sanitize.cleanBattleParty(input, gen);
+    if (!read) return '(refused)';
+    return { name: orNil(read.name), aiMods: orNil(read.aiMods) };
+  }
+  return undefined;
+}
+
+/*
+ * Wave 6, the hubs and the real referees: an NPC party's `name` and Red
+ * `aiMods` reach the referee on every seat the trainer is dealt across and
+ * nowhere else, and the trainer's opening X item prints the cart's AI item line
+ * with the seat's name in it, read whole by a Red / Gold client. Twin of
+ * wave6_hub_fields in the Lua driver, whose header argues each fight.
+ */
+function npcFight(generation, mode, sideB, sideA, humans = 1) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const seen = {};
+  const real = relay.Turn;
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const ids = [ID_A, ID_B];
+  const names = ['ANN', 'BOB'];
+  const players = [];
+  for (let i = 0; i < humans; i += 1) {
+    players.push(dialAs(relay, names[i], ids[i], { generation, sprite }));
+  }
+  const memberIds = players.map((p) => p.id);
+  const id = 'nf';
+  relay.openCoopBattle(id, memberIds, { mode, hostId: memberIds[0] });
+  relay.handle(players[0].id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  for (const p of players) {
+    relay.handle(p.id, {
+      type: 'mmo.battle_party',
+      battle: id,
+      side: 'a',
+      mons: [sheet12(generation, { species: 'HERO' })],
+      ...(sideA || {}),
+    });
+  }
+  relay.handle(players[0].id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE' }), sheet12(generation, { species: 'FOE' })],
+    ...(sideB || {}),
+  });
+  const record = relay.battles.get(id);
+  const npcIds = (record && record.npcIds) || [];
+  const entries = [];
+  for (const side of ['a', 'b']) {
+    for (const entry of (seen.opts && seen.opts.sides[side]) || []) {
+      const fighter = record && record.sim ? record.sim.byId.get(entry.playerId) : null;
+      entries.push({
+        side,
+        seat: npcIds.includes(entry.playerId) ? 'npc' : entry.playerId,
+        name: orNil(entry.name),
+        aiMods: orNil(entry.aiMods),
+        simName: fighter ? orNil(fighter.name) : '(no sim)',
+        simAiMods: fighter ? orNil(fighter.aiMods) : '(no sim)',
+      });
+    }
+  }
+  const out = { opened: !!(record && record.sim), entries };
+  if (out.opened && humans === 1) {
+    players[0].peer.outbox.length = 0;
+    relay.handle(players[0].id, {
+      type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+    });
+    out.lines = takeAll(players[0], 'mmo.battle_event')
+      .filter((msg) => msg.t === 'msg' && msg.text.includes(' used ') && !msg.text.startsWith('HERO'))
+      .map((msg) => {
+        const read = sanitize.cleanBattleEvent(msg, generation);
+        return { sent: msg.text, read: read ? orNil(read.text) : '(refused)' };
+      });
+  }
+  return out;
+}
+
+function runWave6() {
+  const xItem = [{ id: 'X_ATTACK', count: 1 }];
+  return [
+    {
+      name: 'referee_gaps_wave6_dialect',
+      result: wave6().map(([kind, input, gen]) => ({ kind, got: orNil(readWave6(kind, input, gen)) })),
+    },
+    {
+      name: 'wave6_hub_fields',
+      result: {
+        redNamed: npcFight(1, 'coop_npc', { name: 'COOLTRAINER♂', aiMods: [1, 3], bag: xItem }),
+        redUnnamed: npcFight(1, 'coop_npc', { bag: xItem }),
+        redBadName: npcFight(1, 'coop_npc', { name: 42, aiMods: [], bag: xItem }),
+        redBadMods: npcFight(1, 'coop_npc', { name: 'LASS', aiMods: [9] }),
+        redTwoSeats: npcFight(1, 'coop_npc', { name: 'JR.TRAINER♀', aiMods: [1] }, undefined, 2),
+        redHumanClaims: npcFight(1, 'coop_npc', { name: 'LASS' }, { name: 'MALLORY', aiMods: [2] }),
+        redWild: npcFight(1, 'wild', { name: 'WILD', aiMods: [1] }),
+        goldNamed: npcFight(2, 'coop_npc', { name: 'TWINS AMY & MAY', aiMods: [1], bag: xItem }),
       },
     },
   ];

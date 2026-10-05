@@ -4512,7 +4512,9 @@ do
   ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
   ev({ t = "turn", amount = 1 })
   check(fight:pickMove(2), "Bide (Gold): BIDE is chosen")
-  ev({ t = "msg", text = "CHARMANDER began storing energy" })
+  -- The first turn says only the used line (wave 5: pokecrystal's
+  -- StoreEnergy prints nothing while SUBSTATUS_BIDE is clear).
+  ev({ t = "msg", text = "CHARMANDER used BIDE!" })
   ev({ t = "moves", slot = 0, side = "a", mon = 0,
        moves = { { id = "TACKLE", pp = 20, maxPp = 30 }, { id = "BIDE", pp = 0, maxPp = 9 } } })
   ev({ t = "turn", amount = 2 })
@@ -4525,14 +4527,14 @@ do
   eq(#sent, 2, "Bide (Gold): FIGHT sends at once, no move list (ParsePlayerAction .locked_in)")
   eq(sent[2] and sent[2].move, 1, "Bide (Gold): ...the Bide's slot, past its spent PP")
   eq(fight.phase, "play", "Bide (Gold): ...and the menu closes")
-  ev({ t = "msg", text = "CHARMANDER is storing energy" })
+  ev({ t = "msg", text = "CHARMANDER is storing energy!" })
   ev({ t = "turn", amount = 3 })
   check(fight.bideLocked == true, "Bide (Gold): each storing turn keeps it")
   -- The release ends it; so does a turn that never said it stored (a CantMove).
   fight.phase, fight.commandIndex = "choose", 1
   input.press("a")
   fight:updateCommand(input)
-  ev({ t = "msg", text = "CHARMANDER unleashed energy" })
+  ev({ t = "msg", text = "CHARMANDER unleashed energy!" })
   ev({ t = "turn", amount = 4 })
   check(not fight.bideLocked, "Bide (Gold): the release ends it")
   fight.phase, fight.commandIndex = "choose", 1
@@ -4545,10 +4547,10 @@ do
     return m end)() }, SKETCH_DATA), "wild", "bd2")
   ev2({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
   f2:pickMove(1)
-  ev2({ t = "msg", text = "CHARMANDER began storing energy" })
+  ev2({ t = "msg", text = "CHARMANDER used BIDE!" })
   ev2({ t = "turn", amount = 2 })
   f2:sendLockedFight(1)
-  ev2({ t = "msg", text = "CHARMANDER is fully paralyzed" })
+  ev2({ t = "msg", text = "CHARMANDER's fully paralyzed!" })
   ev2({ t = "turn", amount = 3 })
   check(not f2.bideLocked, "Bide (Gold): a turn with no storing line (a CantMove) ends it")
   -- An item ends one (pokecrystal .reset_bide).
@@ -4946,6 +4948,608 @@ do
   package.loaded["src.core.gen2.Evolution"] = savedEvo
   eq(EvolveFx.timeOfDay2(gameWith({}, DATA)), nil, "EvolveFx: Red has no clock")
   stubMod.world = saved
+end
+
+-- ------- wave 6: the referees' own lines, through every client matcher
+--
+-- Wave 5 rewrote every Red and Gold referee line into the carts' wording, and
+-- each screen reads some of those lines to know what happened.  So the lines
+-- here are not typed in: real fights are driven through src/BattleSim/Turn.lua
+-- and src/BattleSim2/Turn.lua and their own `msg` texts are fed to every
+-- matcher -- a future wording change fails this block instead of silently
+-- breaking a screen.  Synthetic monsters and moves throughout (ALPHA / BETA,
+-- invented ids); the effect numbers are the referees' own tables.
+do
+  local Red, Gold = need("BattleSim/init"), need("BattleSim2/init")
+  local E1, E2 = Red.Effects, Gold.Effects
+  local function mv(id, effect, o)
+    o = o or {}
+    return { id = id, pp = o.pp or 20, power = o.power or 0, accuracy = o.accuracy or 255,
+             type = o.type or 0, effect = effect or 0, chance = 0 }
+  end
+  local function red(sp, moves, o)
+    o = o or {}
+    return { species = sp, level = o.level or 20, hp = o.hp, maxHp = o.maxHp or 200,
+             types = o.types,
+             stats = { atk = o.atk or 40, def = 40, spd = o.spd or 40, spc = 40 }, moves = moves }
+  end
+  local function gold(sp, moves, o)
+    o = o or {}
+    return { species = sp, level = o.level or 20, hp = o.hp, maxHp = o.maxHp or 200,
+             types = o.types,
+             stats = { atk = o.atk or 40, def = 40, spe = o.spe or 40, spa = 40, spd = 40 },
+             moves = moves }
+  end
+  local n = 0
+  -- One refereed fight: `a` against `b` (lists of mons), driven turn by turn.
+  -- Returns the battle, a `step(choiceA, choiceB, choiceC)` that files and
+  -- drains, and the list every event lands in.
+  local function fightOf(Turn, mode, a, b, o)
+    o = o or {}
+    n = n + 1
+    local id = "w6_" .. n
+    local sides = { a = { { playerId = "me", name = "ANN", mons = a, bag = o.bag } },
+                    b = { { playerId = "npc", name = o.nameB or "BOB", mons = b, bag = o.bagB } } }
+    if o.a2 then sides.a[2] = { playerId = "cal", name = "CAL", mons = o.a2 } end
+    local battle = assert(Turn.create({ id = id, mode = mode, seed = o.seed or 7,
+      chart = o.chart, choiceTimeout = 60, reconnectGrace = 60, sides = sides }))
+    local all = {}
+    local function drainTo()
+      local got = battle:drainEvents()
+      for _, e in ipairs(got) do all[#all + 1] = e end
+      return got
+    end
+    drainTo()
+    local function step(ca, cb, cc)
+      if ca then battle:submitChoice("me", ca) end
+      if cb then battle:submitChoice("npc", cb) end
+      if cc then battle:submitChoice("cal", cc) end
+      return drainTo()
+    end
+    return battle, step, all
+  end
+  local F = function(m) return { action = "fight", move = m or 0 } end
+  local function said(events)
+    local out = {}
+    for _, e in ipairs(events) do if e.t == "msg" then out[#out + 1] = e.text end end
+    return out
+  end
+  local function find(lines, pattern)
+    for _, line in ipairs(lines) do if line:find(pattern) then return line end end
+    return nil
+  end
+
+  -- Bide.  Red: "used BIDE!" then "unleashed energy!", and no storing line
+  -- (pokered BideEffect; SavingEnergyText is never referenced).  Gold: "used
+  -- BIDE!" alone on the first turn, "is storing energy!" on each storing
+  -- turn, "unleashed energy!" on the release.
+  local _, rstep, rall = fightOf(Red.Turn, "1v1",
+    { red("ALPHA", { mv("BIDE", E1.idOf("BIDE_EFFECT")) }) },
+    { red("BETA", { mv("THUMP", 0, { power = 20 }) }) })
+  for _ = 1, 4 do rstep(F(), F()) end
+  local rl = said(rall)
+  local rUsed, rRelease = find(rl, "^ALPHA used BIDE"), find(rl, "unleashed energy")
+  check(rUsed ~= nil and rRelease ~= nil, "real lines (Red Bide): the referee's lines were said")
+  eq(Mediated.bideLine1(rUsed or "", "ALPHA", Mediated.bideLabels({}, nil)), "start",
+     "bideLine1 (Red): the referee's used line starts the Bide")
+  eq(Mediated.bideLine1(rRelease or "", "ALPHA"), "release", "bideLine1 (Red): its release ends it")
+  eq(find(rl, "storing energy"), nil, "bideLine1 (Red): no store turn says anything")
+  local _, gstep, gall = fightOf(Gold.Turn, "1v1",
+    { gold("ALPHA", { mv("BIDE", E2.idOf("EFFECT_BIDE")) }) },
+    { gold("BETA", { mv("THUMP", 0, { power = 20 }) }) })
+  for _ = 1, 4 do gstep(F(), F()) end
+  local gl = said(gall)
+  local gUsed, gStore = find(gl, "^ALPHA used BIDE"), find(gl, "storing energy")
+  local gRelease = find(gl, "unleashed energy")
+  check(gUsed and gStore and gRelease, "real lines (Gold Bide): the referee's three lines were said")
+  eq(Mediated.bideLine(gUsed or "", "ALPHA"), "start", "bideLine (Gold): \"used BIDE!\" starts it (the first turn's only line)")
+  eq(Mediated.bideLine(gStore or "", "ALPHA"), "store", "bideLine (Gold): the storing line, \"!\" and all")
+  eq(Mediated.bideLine(gRelease or "", "ALPHA"), "release", "bideLine (Gold): the release")
+  eq(Mediated.bideLine(gStore or "", "BETA"), nil, "bideLine (Gold): a line about another monster is nothing")
+
+  -- Stat changes: Red's "rose!" / "greatly rose!" / "fell!" / "greatly fell!",
+  -- Gold's "went up!" / "went way up!" / "fell!" / "sharply fell!".  Each
+  -- fight lowers ALPHA's ATTACK twice and then raises it once -- a rise that
+  -- lands below zero, which K10's stage alone reads as a drop -- then lowers
+  -- its DEFENSE by two (the faster BETA) and raises its ATTACK by two.
+  local function statRun(Turn, mk, E, names)
+    local _, step, all = fightOf(Turn, "1v1",
+      { mk("ALPHA", { mv("SPLASH", 0), mv("SHARPEN", E.idOf(names.up1)),
+                      mv("DANCE", E.idOf(names.up2)) }, { spd = 1, spe = 1 }) },
+      { mk("BETA", { mv("GROWL", E.idOf(names.down1)), mv("SPLASH", 0),
+                     mv("SCREECH", E.idOf(names.down2)) }, { spd = 90, spe = 90 }) })
+    step(F(0), F(0)) step(F(0), F(0)) step(F(1), F(1)) step(F(2), F(2))
+    local got = {}
+    for _, e in ipairs(all) do
+      if e.t == "stat" then got[#got + 1] = (Mediated.statFell(e) and "down" or "up") .. ":" .. tostring(e.text) end
+    end
+    return got
+  end
+  local redStats = statRun(Red.Turn, red, E1, { up1 = "ATTACK_UP1_EFFECT", up2 = "ATTACK_UP2_EFFECT",
+    down1 = "ATTACK_DOWN1_EFFECT", down2 = "DEFENSE_DOWN2_EFFECT" })
+  eq(table.concat(redStats, "|"),
+     "down:ALPHA's ATTACK fell!|down:ALPHA's ATTACK fell!|up:ALPHA's ATTACK rose!"
+       .. "|down:ALPHA's DEFENSE greatly fell!|up:ALPHA's ATTACK greatly rose!",
+     "statFell (Red): every referee line read the way it moved")
+  local goldStats = statRun(Gold.Turn, gold, E2, { up1 = "EFFECT_ATTACK_UP", up2 = "EFFECT_ATTACK_UP_2",
+    down1 = "EFFECT_ATTACK_DOWN", down2 = "EFFECT_DEFENSE_DOWN_2" })
+  eq(table.concat(goldStats, "|"),
+     "down:ALPHA's ATTACK fell!|down:ALPHA's ATTACK fell!|up:ALPHA's ATTACK went up!"
+       .. "|down:ALPHA's DEFENSE sharply fell!|up:ALPHA's ATTACK went way up!",
+     "statFell (Gold): \"went up!\" is a rise even at a stage below zero")
+
+  -- The effectiveness line, through the hit thud: pokered "It's super
+  -- effective!", pokecrystal "It's super-effective!", both "not very".
+  local chart = { { 100, 200 }, { 50, 100 } }
+  local function hitLines(Turn, mk)
+    local _, step, all = fightOf(Turn, "1v1",
+      { mk("ALPHA", { mv("HIT", 0, { power = 40, type = 0 }) }, { types = { 0 }, spd = 90, spe = 90 }) },
+      { mk("BETA", { mv("WEAK", 0, { power = 40, type = 1 }) }, { types = { 1 } }) }, { chart = chart })
+    step(F(), F())
+    local l = said(all)
+    return find(l, "^It's super"), find(l, "^It's not very")
+  end
+  local screen = screenFor(gameWith({ mon("CHARMANDER") }, DATA), "1v1", "w6hit")
+  local function thud(line)
+    screen.lines = { line }
+    local sfx = screen:peekHitSfx()
+    return sfx and sfx.sound
+  end
+  for _, cart in ipairs({ { "Red", Red.Turn, red }, { "Gold", Gold.Turn, gold } }) do
+    local super, weak = hitLines(cart[2], cart[3])
+    check(super and weak, "real lines (" .. cart[1] .. "): both effectiveness lines were said")
+    eq(thud(super), Gen.sfx(screen.game, "Super_Effective"),
+       "hit thud (" .. cart[1] .. "): \"" .. tostring(super) .. "\" is the super-effective thud")
+    eq(thud(weak), Gen.sfx(screen.game, "Not_Very_Effective"),
+       "hit thud (" .. cart[1] .. "): \"" .. tostring(weak) .. "\" is the not-very-effective thud")
+  end
+
+  -- The used line names the move for the arena's callout (CoopBattle's
+  -- `moveNameFromBattleText`), on both carts, plain and named.
+  local Coop = need("CoopBattle")
+  for _, line in ipairs({ rUsed or "", gUsed or "" }) do
+    eq(Coop.moveNameFromBattleText(line), "BIDE", "moveNameFromBattleText: \"" .. line .. "\"")
+  end
+  -- ...and the computer's item line (Red's AIBattleUseItemText) shouts the item.
+  local _, iStep, iAll = fightOf(Red.Turn, "coop_npc", { red("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+    { red("BETA", { mv("THUMP", 0, { power = 1 }) }, { hp = 50 }) },
+    { bagB = { POTION = 1 }, nameB = "BUG CATCHER" })
+  iStep(F(), { action = "item", item = "POTION" })
+  local itemLine = find(said(iAll), " used POTION on ")
+  check(itemLine ~= nil, "real lines (Red computer item): \"<TRAINER> used <ITEM> on <MON>!\"")
+  eq(Coop.moveNameFromBattleText(itemLine or ""), "POTION",
+     "moveNameFromBattleText: the computer's item line names the item, not \"POTION on BETA\"")
+
+  -- Escapes.  Red: the player's POKe DOLL (its use line is the whole of it),
+  -- TELEPORT, WHIRLWIND; Gold: the doll, ROAR in the wild ("fled in fear!"),
+  -- and a coop_wild RUN -- "Got away safely!" an escape, "Can't escape!" not.
+  local function lastLines(Turn, mode, a, b, ca, cb, o)
+    local _, step, all = fightOf(Turn, mode, a, b, o)
+    step(ca, cb, o and o.cc)
+    return said(all)
+  end
+  local doll = { action = "item", item = "POKE_DOLL" }
+  local escapes = {
+    { "Red doll", lastLines(Red.Turn, "wild", { red("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+        { red("BETA", { mv("THUMP", 0, { power = 1 }) }) }, doll, F(), { bag = { POKE_DOLL = 1 } }) },
+    { "Red TELEPORT", lastLines(Red.Turn, "wild",
+        { red("ALPHA", { mv("TELEPORT", E1.idOf("SWITCH_AND_TELEPORT_EFFECT")) }, { level = 50 }) },
+        { red("BETA", { mv("THUMP", 0, { power = 1 }) }) }, F(), F()) },
+    { "Red WHIRLWIND", lastLines(Red.Turn, "wild", { red("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+        { red("BETA", { mv("WHIRLWIND", E1.idOf("SWITCH_AND_TELEPORT_EFFECT")) }, { level = 50 }) },
+        F(), F()) },
+    { "Gold doll", lastLines(Gold.Turn, "wild", { gold("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+        { gold("BETA", { mv("THUMP", 0, { power = 1 }) }) }, doll, F(), { bag = { POKE_DOLL = 1 } }) },
+    { "Gold ROAR", lastLines(Gold.Turn, "wild", { gold("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+        { gold("BETA", { mv("ROAR", E2.idOf("EFFECT_FORCE_SWITCH")) }, { level = 50 }) }, F(), F()) },
+  }
+  for _, case in ipairs(escapes) do
+    local hit = false
+    for _, line in ipairs(case[2]) do if Mediated.escapeLine(line) then hit = true end end
+    check(hit, "escapeLine (" .. case[1] .. "): the referee's escape is read as one: "
+      .. table.concat(case[2], " / "))
+  end
+  local _, cwStep, cwAll = fightOf(Gold.Turn, "coop_wild",
+    { gold("ALPHA", { mv("THUMP", 0, { power = 1 }) }, { spe = 1 }) },
+    { gold("BETA", { mv("THUMP", 0, { power = 1 }) }, { spe = 250 }) },
+    { a2 = { gold("ZETA", { mv("THUMP", 0, { power = 1 }) }) }, seed = 1 })
+  for _ = 1, 8 do cwStep({ action = "run" }, F(), F()) end
+  local cw = said(cwAll)
+  local cant, away = find(cw, "^Can't escape"), find(cw, "^Got away safely")
+  check(cant ~= nil, "real lines (Gold coop_wild RUN): a failed try says \"Can't escape!\"")
+  eq(Mediated.escapeLine(cant or ""), false, "escapeLine: \"Can't escape!\" is no escape (the turn goes on)")
+  if away then eq(Mediated.escapeLine(away), true, "escapeLine: \"Got away safely!\" is one") end
+
+  -- Gold's weather lines (WEATHER_LINES), as the referee says them.
+  local _, wStep, wAll = fightOf(Gold.Turn, "1v1",
+    { gold("ALPHA", { mv("RAIN", E2.idOf("EFFECT_RAIN_DANCE")), mv("SPLASH", 0) }) },
+    { gold("BETA", { mv("SPLASH", 0) }) })
+  wStep(F(0), F()) for _ = 1, 6 do wStep(F(1), F()) end
+  local wl = said(wAll)
+  eq(Mediated.weatherOfLine2(find(wl, "downpour") or ""), "RAIN", "weatherOfLine2: the referee's start line")
+  eq(Mediated.weatherOfLine2(find(wl, "continues") or ""), "RAIN", "weatherOfLine2: ...its continuation")
+  eq(Mediated.weatherOfLine2(find(wl, "stopped") or ""), false, "weatherOfLine2: ...and its end")
+
+  -- The confusion lines the Red Bide reading keys on (`noteBideLine`).
+  local _, cStep, cAll = fightOf(Red.Turn, "1v1",
+    { red("ALPHA", { mv("CONF", E1.idOf("CONFUSION_EFFECT")) }, { spd = 90 }) },
+    { red("BETA", { mv("THUMP", 0, { power = 20 }) }) }, { seed = 11 })
+  for _ = 1, 3 do cStep(F(), F()) end
+  local cl = said(cAll)
+  local isConf, selfHit = find(cl, " is confused!$"), find(cl, "^It hurt itself")
+  check(isConf and selfHit, "real lines (Red confusion): the referee's two lines were said")
+  eq(Mediated.bideLine1(selfHit or "", "BETA", nil, "BETA"), "end",
+     "bideLine1 (Red): the cart's self-hit line ends a confused monster's Bide")
+  eq((isConf or ""):match("^(.-) is confused!?$"), "BETA", "the confusion line names its monster")
+
+  -- ------- the screen, fed by the real referee
+  --
+  -- A MediatedBattle whose own upload is the referee's side for "me", the
+  -- foe's monsters beside it; `turn(foeChoice)` files whatever the screen sent
+  -- since the last call, then the foe's, and plays the events into the screen.
+  local sn = 0
+  local function refereed(Turn, game, mode, foeMons, o)
+    o = o or {}
+    sn = sn + 1
+    local id = "w6s_" .. sn
+    local fight, _, transport = screenFor(game, mode, id, o.screen)
+    local party
+    for _, m in ipairs(transport.sent) do
+      if m.t == Wire.BATTLE_PARTY and m.p.side == nil then party = m.p end
+    end
+    local mine = o.side or "a"
+    local theirs = mine == "a" and "b" or "a"
+    local sides = {
+      [mine] = { { playerId = "me", name = "ANN", mons = party.mons, bag = o.bag or party.bag } },
+      [theirs] = { { playerId = "npc", name = "BOB", mons = foeMons } },
+    }
+    local battle = assert(Turn.create({ id = id, mode = mode, seed = o.seed or 7,
+      choiceTimeout = 60, reconnectGrace = 60, sides = sides }))
+    fight:onReady({ battle = id, mode = mode, sides = { [mine] = { "me" }, [theirs] = { "npc" } } })
+    local seen = 0
+    local function pump()
+      for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+    end
+    pump()
+    local function turn(foeChoice, mineChoice)
+      local sent = choicesOf(transport)
+      for i = seen + 1, #sent do battle:submitChoice("me", sent[i]) end
+      seen = #sent
+      if mineChoice then battle:submitChoice("me", mineChoice) end
+      if foeChoice then battle:submitChoice("npc", foeChoice) end
+      pump()
+    end
+    return fight, battle, turn, transport
+  end
+  -- How many times the screen's queue says `pattern` -- read across its
+  -- pages (a line the box paged is one sentence again).
+  local function shown(fight, pattern)
+    local parts = {}
+    for _, line in ipairs(fight.lines or {}) do
+      if type(line) == "string" then parts[#parts + 1] = (line:gsub("\n", " ")) end
+    end
+    local _, n = table.concat(parts, " "):gsub(pattern, "")
+    return n
+  end
+  local function pressFight(fight)
+    local input = fakeInput()
+    fight.phase, fight.commandIndex = "choose", 1
+    input.press("a")
+    fight:updateCommand(input)
+  end
+
+  -- Red's Bide (row 8): the referee's "used BIDE!" opens it, every turn after
+  -- it FIGHT goes at once on the Bide's slot, and "unleashed energy!" ends it.
+  do
+    local data = setmetatable({ moves = BP_DATA.moves }, { __index = K_RED })
+    local bider = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 30 }, { id = "BIDE", pp = 10 } } })
+    local fight, _, turn, transport = refereed(Red.Turn, gameWith({ bider }, data), "1v1",
+      { red("BETA", { mv("THUMP", 0, { power = 5 }) }) })
+    check(fight:pickMove(2), "Bide (Red, refereed): BIDE is chosen")
+    turn(F())
+    check(fight.bideLocked == true, "Bide (Red, refereed): the referee's \"used BIDE!\" locks the next FIGHT")
+    local rounds, atOnce = 0, true
+    while fight.bideLocked and rounds < 5 do
+      rounds = rounds + 1
+      local before = #choicesOf(transport)
+      pressFight(fight)
+      local sent = choicesOf(transport)
+      if not (#sent == before + 1 and sent[#sent].move == 1) then atOnce = false end
+      turn(F())
+    end
+    check(rounds >= 2 and atOnce, "Bide (Red, refereed): each storing turn's FIGHT went at once on the Bide ("
+      .. rounds .. " turns)")
+    eq(shown(fight, "CHARMANDER unleashed energy!"), 1, "Bide (Red, refereed): the referee released it")
+    check(not fight.bideLocked, "Bide (Red, refereed): ...and the release ends the lock")
+    eq(shown(fight, "storing energy"), 0, "Bide (Red, refereed): no storing line on Red")
+  end
+
+  -- Gold's Bide (row 1): "used BIDE!" alone on the first turn, "is storing
+  -- energy!" after it, FIGHT at once until the release.
+  do
+    local bider = goldMon("CHARMANDER", nil, 4321)
+    bider.moves = { { id = "TACKLE", pp = 20, maxPp = 30 }, { id = "BIDE", pp = 9, maxPp = 9 } }
+    local fight, _, turn, transport = refereed(Gold.Turn, goldGame({ bider }, SKETCH_DATA), "1v1",
+      { gold("BETA", { mv("THUMP", 0, { power = 1 }) }, { atk = 1 }) })
+    check(fight:pickMove(2), "Bide (Gold, refereed): BIDE is chosen")
+    turn(F())
+    eq(shown(fight, "storing energy"), 0, "Bide (Gold, refereed): the first turn says no storing line")
+    check(fight.bideLocked == true, "Bide (Gold, refereed): ...and still locks the next FIGHT (\"used BIDE!\")")
+    local rounds, atOnce = 0, true
+    while fight.bideLocked and rounds < 5 do
+      rounds = rounds + 1
+      local before = #choicesOf(transport)
+      pressFight(fight)
+      local sent = choicesOf(transport)
+      if not (#sent == before + 1 and sent[#sent].move == 1) then atOnce = false end
+      turn(F())
+    end
+    check(rounds >= 2 and atOnce, "Bide (Gold, refereed): FIGHT went at once every storing turn ("
+      .. rounds .. " turns)")
+    eq(shown(fight, "CHARMANDER unleashed energy!"), 1, "Bide (Gold, refereed): the referee released it")
+    check(not fight.bideLocked, "Bide (Gold, refereed): ...and the release ends the lock")
+  end
+
+  -- The catch, said once (row 2): the referee's own line, no "Gotcha!" of
+  -- this screen's under it -- Red's and Gold's.
+  for _, cart in ipairs({
+    { "Red", Red.Turn, gameWith({ mon("CHARMANDER") }, K_RED), red },
+    { "Gold", Gold.Turn, goldGame({ goldMon("CHARMANDER", nil, 4321) }), gold },
+  }) do
+    local fight, battle = refereed(cart[2], cart[3], "wild",
+      { cart[4]("BETA", { mv("THUMP", 0, { power = 1 }) }, { hp = 1 }) },
+      { bag = { MASTER_BALL = 1 } })
+    battle:submitChoice("me", { action = "item", item = "MASTER_BALL" })
+    battle:submitChoice("npc", F())
+    for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+    fight:onOutcome(battle:outcome())
+    eq(shown(fight, "Gotcha") + shown(fight, "was caught"), 1,
+       "catch (" .. cart[1] .. "): the catch is said once, in the referee's words")
+  end
+
+  -- POKe DOLL (row 3): a Red doll's escape ends on its use line -- no "Got
+  -- away safely!" under it -- and outside a wild fight the doll is refused at
+  -- the bag with the cart's line, nothing sent.
+  do
+    local fight, battle = refereed(Red.Turn, gameWith({ mon("CHARMANDER") }, K_RED), "wild",
+      { red("BETA", { mv("THUMP", 0, { power = 1 }) }) }, { bag = { POKE_DOLL = 1 } })
+    battle:submitChoice("me", { action = "item", item = "POKE_DOLL" })
+    battle:submitChoice("npc", F())
+    for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+    fight:onOutcome(battle:outcome())
+    eq(shown(fight, "used POKe DOLL!"), 1, "doll (Red): the use line is said")
+    eq(shown(fight, "Got away safely"), 0, "doll (Red): ...and nothing after it (ItemUsePokeDoll)")
+    local dollRow = { id = "POKE_DOLL", name = "POKe DOLL", count = 1, effect = E1.itemEffect("POKE_DOLL") }
+    local function tryDoll(game, mode, tag)
+      game.save.inventory = { POKE_DOLL = 1 }
+      local f, _, transport = screenFor(game, mode, "w6doll" .. tag)
+      f.bagSheet = { POKE_DOLL = 1 }
+      local before = #choicesOf(transport)
+      local input = fakeInput()
+      f.phase, f.itemIndex, f.itemList = "item", 1, { dollRow }
+      input.press("a")
+      f:updateItemMenu(input)
+      return f, #choicesOf(transport) - before
+    end
+    local tf, tsent = tryDoll(gameWith({ mon("CHARMANDER") }, K_RED), "coop_npc", "t")
+    eq(tsent, 0, "doll (Red trainer): nothing is filed -- the turn is not spent")
+    eq(shown(tf, "OAK: ANN! This isn't the time to use that!"), 1,
+       "doll (Red trainer): ItemUseNotTime's line")
+    eq(tf.phase, "item", "doll (Red trainer): ...and the bag stays up")
+    local gf, gsent = tryDoll(goldGame({ goldMon("CHARMANDER", nil, 4321) }), "coop_npc", "g")
+    eq(gsent, 0, "doll (Gold trainer): refused too (PokeDollEffect .not_wild)")
+    eq(shown(gf, "OAK: GOLD! This isn't the time to use that!"), 1, "doll (Gold trainer): the same line")
+    local _, wsent = tryDoll(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "w")
+    eq(wsent, 1, "doll (wild): ...where it is filed as ever")
+  end
+
+  -- Red's status animations (row 5): the referee names a link seat's clip
+  -- from its own console (both sides are "the player"), so the screen across
+  -- swaps it; a foe's sleep clip plays after its line, as CheckEnemyStatus
+  -- Conditions plays SLP_ANIM.
+  do
+    local function animRows(fight)
+      local out = {}
+      for i, row in ipairs(fight.lines or {}) do
+        if type(row) == "table" and type(row.anim) == "string" and row.anim:find("_ANIM$")
+           and (row.anim:find("^SLP") or row.anim:find("^CONF")) then
+          out[#out + 1] = { at = i, anim = row.anim }
+        end
+      end
+      return out
+    end
+    local function feed(all, side, tag)
+      local f = screenFor(gameWith({ mon("CHARMANDER") }, DATA), "1v1", all[1].battle)
+      f:onReady({ battle = all[1].battle, mode = "1v1",
+        sides = side == "a" and { a = { "me" }, b = { "npc" } } or { a = { "npc" }, b = { "me" } } })
+      for _, e in ipairs(all) do f:onEvent(e) end
+      return f
+    end
+    local _, cStep2, conf = fightOf(Red.Turn, "1v1",
+      { red("ALPHA", { mv("CONF", E1.idOf("CONFUSION_EFFECT")) }, { spd = 90 }) },
+      { red("BETA", { mv("THUMP", 0, { power = 20 }) }) }, { seed = 11 })
+    cStep2(F(), F())
+    local raw = {}
+    for _, e in ipairs(conf) do if e.t == "anim" and e.text:find("^CONF.*_ANIM$") then raw[#raw + 1] = e.text end end
+    eq(raw[1], "CONF_PLAYER_ANIM", "status anim (Red 1v1): the referee names BETA's clip from BETA's console")
+    local seenA, seenB = {}, {}
+    for _, r in ipairs(animRows(feed(conf, "a"))) do seenA[#seenA + 1] = r.anim end
+    for _, r in ipairs(animRows(feed(conf, "b"))) do seenB[#seenB + 1] = r.anim end
+    eq(table.concat(seenA, ","), "CONF_ANIM", "status anim: side a's screen plays the enemy's CONF_ANIM over BETA")
+    eq(table.concat(seenB, ","), "CONF_PLAYER_ANIM", "status anim: BETA's own screen keeps its CONF_PLAYER_ANIM")
+    local _, sStep, slp = fightOf(Red.Turn, "1v1",
+      { red("ALPHA", { mv("SLP", E1.idOf("SLEEP_EFFECT")) }, { spd = 90 }) },
+      { red("BETA", { mv("THUMP", 0, { power = 20 }) }) }, { seed = 5 })
+    sStep(F(), F()) sStep(F(), F())
+    local fa = feed(slp, "a")
+    local rows = animRows(fa)
+    local asleepAt
+    for i, line in ipairs(fa.lines) do
+      if type(line) == "string" and line:gsub("\n", " "):find("BETA is fast asleep!") then asleepAt = i end
+    end
+    check(asleepAt ~= nil and #rows == 1 and rows[1].anim == "SLP_ANIM" and rows[1].at > asleepAt,
+          "status anim: side a plays the enemy's SLP_ANIM, behind \"BETA is fast asleep!\" (CheckEnemyStatusConditions)")
+    eq(Mediated.viewerAnim("BURN_PSN_ANIM", false), "BURN_PSN_ANIM", "viewerAnim: BURN_PSN_ANIM has one variant")
+    -- ...and the arena wears each in its condition's colours (Vfx.forStatusAnim).
+    local Vfx = need("Vfx")
+    eq((Vfx.forStatusAnim("SLP_ANIM") or {}).style, Vfx.forStatus("SLP").style, "arena: a sleep clip is sleep's look")
+    eq((Vfx.forStatusAnim("CONF_PLAYER_ANIM") or {}).style, Vfx.forStatus("confusion").style,
+       "arena: a confusion clip is confusion's")
+    eq((Vfx.forStatusAnim("BURN_PSN_ANIM", "BRN") or {}).style, Vfx.forStatus("BRN").style,
+       "arena: BURN_PSN_ANIM over a burned monster is a burn's")
+    eq((Vfx.forStatusAnim("BURN_PSN_ANIM", "TOX") or {}).style, Vfx.forStatus("TOX").style,
+       "arena: ...over a badly poisoned one, poison's")
+    eq(Vfx.forStatusAnim("TACKLE"), nil, "arena: a move's id is no status clip")
+    eq(Mediated.viewerAnim("SLP_ANIM", true), "SLP_PLAYER_ANIM", "viewerAnim: our own monster's is the player's")
+  end
+
+  -- The NPC upload carries the trainer (row 4): its name, and on Red the
+  -- class's move-choice layers -- as the wire takes them.
+  do
+    local foes = Mediated.snapshotMons(gameWith({}, K_RED), { mon("SQUIRTLE") })
+    local f, _, transport = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "coop_npc", "w6ai",
+      { trainer = { name = "BUG CATCHER", aiMods = { 1, "LAYER_3", 9, "MYMOD" } }, npcParty = foes,
+        peerName = "BUG" })
+    local npc
+    for _, m in ipairs(transport.sent) do
+      if m.t == Wire.BATTLE_PARTY and m.p.side == "b" then npc = m.p end
+    end
+    eq(npc and npc.name, "BUG CATCHER", "NPC upload (Red): the trainer's name, as wTrainerName prints it")
+    eq(npc and table.concat(npc.aiMods or {}, ","), "1,3",
+       "NPC upload (Red): the class's AI layers, by number (a layer no number names is left out)")
+    local packed = npc and Wire.battleParty(npc, 1)
+    check(packed ~= nil, "NPC upload (Red): Wire.battleParty takes it")
+    eq(packed and packed.aiMods and table.concat(packed.aiMods, ","), "1,3", "NPC upload (Red): ...layers and all")
+    local mine
+    for _, m in ipairs(transport.sent) do
+      if m.t == Wire.BATTLE_PARTY and m.p.side == nil then mine = m.p end
+    end
+    check(mine and mine.name == nil and mine.aiMods == nil, "the player's own upload states neither")
+    local gfoes = Mediated.snapshotMons(goldGame({}), { goldMon("SQUIRTLE") })
+    local _, _, gt = screenFor(goldGame({ goldMon("CHARMANDER", nil, 4321) }), "coop_npc", "w6ai2",
+      { trainer = { name = "YOUNGSTER JOEY", aiMods = { 1 } }, npcParty = gfoes })
+    local gnpc
+    for _, m in ipairs(gt.sent) do
+      if m.t == Wire.BATTLE_PARTY and m.p.side == "b" then gnpc = m.p end
+    end
+    eq(gnpc and gnpc.name, "YOUNGSTER JOEY", "NPC upload (Gold): the record's whole name")
+    eq(gnpc and gnpc.aiMods, nil, "NPC upload (Gold): no Red layers (pokecrystal scores by AI flags)")
+  end
+
+  -- Red's PP byte (row 6): DecrementPP at 0 wraps to 63 and borrows a PP Up;
+  -- IncrementMovePP at 63 carries it back.  The referee's own steps, onto the
+  -- sheet: the PP is never clamped, the PP Ups follow the byte, and the
+  -- maximum reads as GetMaxPP over them.
+  do
+    local m = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 0 } } })
+    local fight, battle = refereed(Red.Turn, gameWith({ m }, K_RED), "1v1",
+      { red("BETA", { mv("THUMP", 0, { power = 1 }) }) })
+    local me = battle.byId.me
+    local rmon = me.mons[1]
+    battle:_decrementPp(rmon, 1)
+    battle:_emitMoves(me, rmon, 1)
+    for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+    local slot = fight.mine[1].moves[1]
+    eq(slot.pp, 63, "PP wrap (Red): 0 PP paid is 63, not clamped to the maximum")
+    eq(slot.ppUps, 3, "PP wrap (Red): ...with a PP Up borrowed (none wraps to three)")
+    eq(slot.maxPp, Mediated.maxPpOf(35, 3), "PP wrap (Red): the maximum is GetMaxPP over the byte's PP Ups")
+    battle:_incrementPp(me, rmon, 1)
+    battle:_emitMoves(me, rmon, 1)
+    for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+    eq(slot.pp .. "/" .. slot.ppUps, "0/0", "PP wrap (Red): IncrementMovePP's refund carries it back")
+    local wrappedSheet = Mediated.snapshotParty(gameWith({ mon("CHARMANDER",
+      { moves = { { id = "TACKLE", pp = 63, ppUps = 3 } } }) }, K_RED))[1]
+    local wrapped = wrappedSheet.moves[1]
+    eq(wrapped.pp .. "/" .. wrapped.maxPp, "63/" .. Mediated.maxPpOf(35, 3),
+       "PP wrap (Red): a wrapped save slot uploads its 63 over the cart's maximum")
+    local packedWrap = Wire.battleParty({ battle = "w6pp", mons = { wrappedSheet }, generation = 1 })
+    eq(packedWrap and packedWrap.mons[1].moves[1].pp, 63, "PP wrap (Red): ...and the wire takes it as it is")
+  end
+
+  -- Gold's mid-turn seat changes (row 7).  WHIRLWIND drags our monster out
+  -- (a `switch` + `send` we never chose), and the screen follows the seat; a
+  -- monster SPIKES left `standing` at 0 HP is asked, and its FIGHT goes.
+  do
+    local a1, a2 = goldMon("CHARMANDER", nil, 4321), goldMon("SQUIRTLE", nil, 4321)
+    a1.moves = { { id = "TACKLE", pp = 20, maxPp = 30 } }
+    a2.moves = { { id = "GROWL", pp = 40, maxPp = 40 } }
+    local fight, _, turn = refereed(Gold.Turn, goldGame({ a1, a2 }, SKETCH_DATA), "1v1",
+      { gold("BETA", { mv("WHIRLWIND", E2.idOf("EFFECT_FORCE_SWITCH")) }, { level = 50, spe = 250 }) })
+    fight:pickMove(1)
+    turn(F())
+    eq(shown(fight, "SQUIRTLE was dragged out!"), 1, "WHIRLWIND (Gold): the referee drags our second monster out")
+    eq(fight.active, 2, "WHIRLWIND (Gold): ...and the screen's seat follows it")
+    local now = fight:activeMon()
+    eq(now and now.moves[1].id, "GROWL", "WHIRLWIND (Gold): FIGHT lists the newcomer's moves")
+
+    local s1, s2 = goldMon("CHARMANDER", nil, 4321), goldMon("SQUIRTLE", nil, 4321)
+    s1.moves = { { id = "TACKLE", pp = 30, maxPp = 30 } }
+    s2.moves = { { id = "TACKLE", pp = 30, maxPp = 30 } }
+    s2.hp = 3
+    local sf, sbattle, sturn, stransport = refereed(Gold.Turn, goldGame({ s1, s2 }, SKETCH_DATA), "1v1",
+      { gold("ALPHA", { mv("SPIKES", E2.idOf("EFFECT_SPIKES")), mv("PERISH", E2.idOf("EFFECT_PERISH_SONG")),
+                        mv("SPLASH", 0) }, { spe = 90 }),
+        gold("DELTA", { mv("SPLASH", 0) }, { spe = 1 }) }, { side = "b" })
+    for _, foe in ipairs({ 0, 1, 2, 2, 2 }) do
+      sf:pickMove(1)
+      sturn(F(foe))
+    end
+    sturn({ action = "switch", slot = 1 }, { action = "switch", slot = 1 })
+    eq(shown(sf, "SQUIRTLE's hurt by SPIKES!"), 1, "standing (Gold): SPIKES takes the successor to 0")
+    eq(sbattle:snapshot().phase, "choice", "standing (Gold): the referee opens the turn with it standing")
+    check(sf.pendingTurn == true and not sf.mustReplace,
+          "standing (Gold): the screen opens the command menu for it, no picker")
+    local before = #choicesOf(stransport)
+    pressFight(sf)
+    eq(sf.phase, "move", "standing (Gold): FIGHT opens its move list")
+    check(sf:pickMove(1), "standing (Gold): ...and its move is chosen")
+    eq(#choicesOf(stransport), before + 1, "standing (Gold): ...and sent")
+    sturn(F(0))
+    eq(shown(sf, "SQUIRTLE used TACKLE!"), 1, "standing (Gold): the 0-HP monster acts before its faint")
+  end
+
+  -- Gold's TRANSFORM: the copies' PP spends carry no `mon` (wave 5), and the
+  -- screen spends them on the overlay -- never on the party's own sheet.
+  do
+    local data = setmetatable({ moves = {
+      TRANSFORM = { name = "TRANSFORM", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+                    effect = "EFFECT_TRANSFORM" },
+      TACKLE = SKETCH_DATA.moves.TACKLE,
+    } }, { __index = SKETCH_DATA })
+    local t = goldMon("CHARMANDER", nil, 4321)
+    t.moves = { { id = "TRANSFORM", pp = 10, maxPp = 10 }, { id = "TACKLE", pp = 30, maxPp = 30 } }
+    local fight, _, turn = refereed(Gold.Turn, goldGame({ t }, data), "1v1",
+      { gold("BETA", { mv("THUMP", 0, { power = 1 }) }, { atk = 1 }) })
+    fight:pickMove(1)
+    turn(F())
+    eq(fight.liveMoves and fight.liveMoves[1] and fight.liveMoves[1].id, "THUMP",
+       "TRANSFORM (Gold): the copies are the FIGHT list")
+    local copyPp = fight.liveMoves[1].pp
+    local ownPp = fight.mine[1].moves[1].pp
+    fight:pickMove(1)
+    turn(F())
+    eq(fight.liveMoves and fight.liveMoves[1] and fight.liveMoves[1].pp, copyPp - 1,
+       "TRANSFORM (Gold): the copy's spend (no `mon`) lands on the overlay")
+    eq(fight.mine[1].moves[1].pp, ownPp, "TRANSFORM (Gold): ...and never on the party's own list")
+  end
+
+  -- Glyphs, not bytes (wave 6 W5: é … ♂ ♀ ride a Red / Gold line now): the
+  -- box wraps and cuts one tile per glyph, and nothing is split.
+  local Classic = need("ClassicBattle")
+  local Field = need("Battlefield")
+  local perish = Classic.wrapBoxLines("Both POKéMON will faint in 3 turns!")
+  eq(perish[1], "Both POKéMON will", "glyph wrap: \"POKéMON\" is 7 columns -- the line breaks after \"will\"")
+  local cool = Classic.wrapBoxLines("COOLTRAINER♂ used X ATTACK on FOE!")
+  eq(cool[1], "COOLTRAINER♂ used", "glyph wrap: \"COOLTRAINER♂\" is 12 columns")
+  local hard = Classic.wrapBoxLines(string.rep("A", 17) .. "éB")
+  eq(hard[1], string.rep("A", 17) .. "é", "glyph wrap: a hard cut keeps the é whole")
+  eq(Field.fitLine(nil, "COOLTRAINER♂ used X ATTACK", 15 * 6), "COOLTRAINER♂...",
+     "glyph fit (arena): the ellipsis cut lands after the ♂, never inside it")
+  eq(Field.truncateText("COOLTRAINER♂X", 13), "COOLTRAINER♂X", "glyph truncate (arena): 13 glyphs fit 13")
+  eq(Field.truncateText("POKéMON TRAINER", 8), "POKéMON.", "glyph truncate (arena): ...and a cut keeps the é")
+  local Coop2 = need("CoopBattle")
+  eq(Coop2.fitHudName("POKéDOLLS", 5), "POKé.", "glyph cut (co-op HUD): by glyph")
+  eq(Coop2.hudSanitize("é"), ".", "co-op HUD sheet: an é it lacks is one '.'")
 end
 
 T.finish("mediated_battle_client")

@@ -2877,6 +2877,283 @@ scenarios[#scenarios + 1] = {
 }
 
 -- ------------------------------------------------------------------
+-- Wave 6 of docs/plans/gen12-referee-gaps-fix.md, the wire:
+--
+--   * A Red / Gold reader's `msg` keeps the carts' battle glyphs (é … ♂ ♀ &,
+--     Wire.battleText): a multi-byte glyph only as its whole UTF-8 sequence,
+--     every other byte past 0x7F dropped, spaces collapsed and trimmed, the
+--     line cut at MESSAGE_MAX glyphs (seventy é keep sixty).  A Gen 3 or
+--     unnamed reader's `msg`, and every other kind's text (`chose`, `send`),
+--     read through M.text as before.  The strings here are the bytes a hub or
+--     client is handed; the JS twin's are what Node's UTF-8 decoding makes of
+--     the same bytes (a stray or truncated sequence is U+FFFD there), so each
+--     row pins one byte stream through both readers.
+--   * A Gen 1 / Gen 2 `moves` event keeps each row's `ppUps` (K8's reader,
+--     0..3; a row past it is dropped like any mangled row), so a client can
+--     mirror the PP Up bits DecrementPP's wrap borrows.
+--   * A JSON null in a Gen 1 / Gen 2 `chart` (row or cell) or `specialTypes`
+--     is closed up on both twins (lib/sanitize.js used to refuse a null row
+--     and read a null cell or index as 0), each cell / index read as Wire.int
+--     reads it (`true`, `{ 1 }` and "" refused on both), and an object where
+--     the specialTypes list belongs refused on both (Lua used to read it as
+--     no Special type).
+--   * An NPC party's trainer facts: Red's `aiMods` (1..4, at most 8, a list
+--     refused whole -- the party with it; ignored by a Gold / Gen 3 reader or
+--     one naming no generation) and the Red / Gold display `name`
+--     (Wire.npcName: the battle glyphs, cut at NPC_NAME_MAX 23; dropped, not
+--     refused, when it does not read).  `npc` reports just those two fields
+--     of the party read, or "(refused)".
+-- ------------------------------------------------------------------
+
+local function wave6()
+  local E, ELL, MALE, FEMALE = "\195\169", "\226\128\166", "\226\153\130", "\226\153\128"
+  local function line(text, t) return { battle = "b1", seq = 1, t = t or "msg", text = text } end
+  local function rules(extra) return merged({ chart = CHART }, extra) end
+  local function party(extra, gen) return merged({ battle = "b1", mons = { sheet12(gen or 1) } }, extra) end
+  local function movesEvent(rows)
+    return { battle = "b1", seq = 2, t = "moves", slot = 0, side = "a", mon = 0, moves = rows }
+  end
+  local texts = {
+    "Both POK" .. E .. "MON will faint in 3 turns!",
+    "Enemy POK" .. E .. "MON's LIGHT SCREEN fell!",
+    "ALPHA ignored orders" .. ELL .. "sleeping!",
+    "COOLTRAINER" .. MALE .. " used X ATTACK on JR.TRAINER" .. FEMALE .. "!",
+    "TWINS AMY & MAY used an item",
+    "  POK" .. E .. "  " .. ELL .. "\t" .. E .. "  ",
+    "\226\195\169X",
+    "\226\128\195\169",
+    "\195E\169",
+    "\240\159\152\128 HI",
+    "POK\195\137MON",
+    "POK\195\168MON",
+    string.rep(E, 70),
+    string.rep("A", 59) .. E .. "B",
+    "#MON <PKMN> @ \\ _ ~ \194\165",
+  }
+  local cases = {}
+  for _, gen in ipairs({ 1, 2, 3, "none" }) do
+    for _, text in ipairs(texts) do
+      cases[#cases + 1] = { "event", line(text), gen ~= "none" and gen or nil }
+    end
+  end
+  local tail = {
+    -- other kinds keep M.text
+    { "event", line("COOLTRAINER" .. MALE, "chose"), 1 },
+    { "event", line("POK" .. E .. "MON", "send"), 2 },
+    { "event", line("Wild POK" .. E .. "MON fled!", "run"), 2 },
+    -- ppUps on the older `moves` event
+    { "event", movesEvent({ row12("TAP", { pp = 0, maxPp = 35, ppUps = 3 }),
+                            row12("HUSH", { ppUps = 4 }), row12("ZAP", { ppUps = "2" }),
+                            row12("NAP", { ppUps = NULL }) }), 1 },
+    { "event", movesEvent({ row12("TAP", { pp = 0, maxPp = 35, ppUps = 3, priority = 2 }),
+                            row12("HUSH", { ppUps = -1 }) }), 2 },
+    -- chart nulls (rows and cells)
+    { "ruleset", { chart = { { 100, NULL, 50 }, { 0, 200 } } }, 1 },
+    { "ruleset", { chart = { NULL, { 100, 50 }, { 0, 200 } } }, 2 },
+    { "ruleset", { chart = { { 100, 50 }, NULL } } },
+    { "ruleset", { chart = { { NULL, NULL } } }, 1 },
+    { "ruleset", { chart = { NULL } }, 1 },
+    { "ruleset", { chart = { { 100, 50 }, { a = 1 } } }, 1 },
+    { "ruleset", { chart = { a = { 100 } } }, 2 },
+    { "ruleset", { chart = { { true, 100 } } }, 1 },
+    { "ruleset", { chart = { { "100", " 50 " } } }, 2 },
+    { "ruleset", { chart = { { "", 50 } } }, 1 },
+    { "ruleset", { chart = { { { 100 }, 50 } } }, 1 },
+    { "ruleset", { chart = { { "0x10", 50 } } }, 1 },
+    -- specialTypes nulls
+    { "ruleset", rules({ specialTypes = { 1, NULL, 0 } }), 1 },
+    { "ruleset", rules({ specialTypes = { NULL } }), 2 },
+    { "ruleset", rules({ specialTypes = {} }), 1 },
+    { "ruleset", rules({ specialTypes = {} }), 2 },
+    { "ruleset", rules({ specialTypes = { a = 1 } }), 1 },
+    { "ruleset", rules({ specialTypes = { a = NULL } }), 2 },
+    { "ruleset", rules({ specialTypes = { true } }), 1 },
+    { "ruleset", rules({ specialTypes = { { 1 } } }), 2 },
+    { "ruleset", rules({ specialTypes = { "" } }), 1 },
+    { "ruleset", rules({ specialTypes = { "1", " 0 " } }), 2 },
+    { "ruleset", rules({ specialTypes = "1" }), 1 },
+    { "ruleset", rules({ specialTypes = { 1, NULL, 0 } }) },
+    -- Red aiMods
+    { "npc", party({ aiMods = { 1, 2, 3 } }), 1 },
+    { "npc", party({ aiMods = {} }), 1 },
+    { "npc", party({ aiMods = { 1, NULL, 3 } }), 1 },
+    { "npc", party({ aiMods = { NULL } }), 1 },
+    { "npc", party({ aiMods = { 4, 4 } }), 1 },
+    { "npc", party({ aiMods = { 0 } }), 1 },
+    { "npc", party({ aiMods = { 5 } }), 1 },
+    { "npc", party({ aiMods = { -1 } }), 1 },
+    { "npc", party({ aiMods = { "2", " 3 " } }), 1 },
+    { "npc", party({ aiMods = { "0x2" } }), 1 },
+    { "npc", party({ aiMods = { 1.5 } }), 1 },
+    { "npc", party({ aiMods = { true } }), 1 },
+    { "npc", party({ aiMods = { { 1 } } }), 1 },
+    { "npc", party({ aiMods = { "" } }), 1 },
+    { "npc", party({ aiMods = { 1, 2, 3, 4, 1, 2, 3, 4 } }), 1 },
+    { "npc", party({ aiMods = { 1, 2, 3, 4, 1, 2, 3, 4, 1 } }), 1 },
+    { "npc", party({ aiMods = { 1, 2, 3, 4, NULL, 1, 2, 3, 4 } }), 1 },
+    { "npc", party({ aiMods = { a = 1 } }), 1 },
+    { "npc", party({ aiMods = { a = NULL } }), 1 },
+    { "npc", party({ aiMods = "1,2" }), 1 },
+    { "npc", party({ aiMods = 3 }), 1 },
+    { "npc", party({ aiMods = NULL }), 1 },
+    { "npc", party({ aiMods = { 1, 2 }, generation = 1 }) },
+    { "npc", party({ aiMods = { 9 }, generation = 1 }) },
+    { "npc", party({ aiMods = { 1, 2 } }) },
+    { "npc", party({ aiMods = { 9 } }) },
+    { "npc", party({ aiMods = { 1, 2 } }, 2), 2 },
+    { "npc", party({ aiMods = { 9 } }, 2), 2 },
+    { "npc", { battle = "b1", mons = { mon3() }, aiMods = { 1 } }, 3 },
+    { "npc", { battle = "b1", mons = { mon3() }, aiMods = { 9 } }, 3 },
+    -- the NPC seat's display name
+    { "npc", party({ name = "COOLTRAINER" .. MALE }), 1 },
+    { "npc", party({ name = "POK" .. E .. "MANIAC", aiMods = { 1 } }), 1 },
+    { "npc", party({ name = "JR.TRAINER" .. FEMALE }), 1 },
+    { "npc", party({ name = "FIREBREATHER WALT" }, 2), 2 },
+    { "npc", party({ name = "TWINS AMY & MAY" }, 2), 2 },
+    { "npc", party({ name = "SWIMMER" .. MALE .. " HAROLD" }, 2), 2 },
+    { "npc", party({ name = "FIREBREATHER ABCDEFGHIJ" }, 2), 2 },
+    { "npc", party({ name = "FIREBREATHER ABCDEFGHIJK" }, 2), 2 },
+    { "npc", party({ name = string.rep(E, 30) }, 2), 2 },
+    { "npc", party({ name = "  RIVAL   BLUE  " }), 1 },
+    { "npc", party({ name = "BUG_CATCHER<PK>#" }), 1 },
+    { "npc", party({ name = "" }), 1 },
+    { "npc", party({ name = "   " }), 1 },
+    { "npc", party({ name = "\240\159\152\128" }), 1 },
+    { "npc", party({ name = "\195" }), 1 },
+    { "npc", party({ name = 42 }), 1 },
+    { "npc", party({ name = { "A" } }), 1 },
+    { "npc", party({ name = true }), 1 },
+    { "npc", party({ name = NULL }), 1 },
+    { "npc", party({ name = "ROCKET", generation = 2 }, 2) },
+    { "npc", party({ name = "ROCKET" }) },
+    { "npc", { battle = "b1", mons = { mon3() }, name = "LEADER" }, 3 },
+  }
+  for _, case in ipairs(tail) do cases[#cases + 1] = case end
+  return cases
+end
+
+local function readWave6(kind, input, gen)
+  if kind == "event" then return Wire.battleEvent(input, gen) end
+  if kind == "ruleset" then return Wire.battleRuleset(input, gen) end
+  if kind == "npc" then
+    local read = Wire.battleParty(input, gen)
+    if not read then return "(refused)" end
+    return { name = orNil(read.name), aiMods = orNil(read.aiMods) }
+  end
+  return nil
+end
+
+scenarios[#scenarios + 1] = {
+  name = "referee_gaps_wave6_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(wave6()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      out[i] = { kind = kind, got = orNil(readWave6(kind, input, gen)) }
+    end
+    return out
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- Wave 6, the hubs and the real referees: an NPC party's `name` and Red
+-- `aiMods` reach the referee on every seat the trainer is dealt across, and
+-- nowhere else.  The digest is each roster entry the hub hands Turn.create
+-- (`name`, `aiMods`) beside what the referee kept (`fighter.name`,
+-- `fighter.aiMods` -- Red's referee drops the layers off a wild seat), then,
+-- for a one-human fight, the trainer's opening X item: the cart's AI item
+-- line with the seat's name in it (pokered AIBattleUseItemText), as sent and
+-- as a Red / Gold client's Wire.battleEvent reads it.
+--
+--   redNamed       COOLTRAINER♂ with layers 1, 3: named, layered, its line whole
+--   redUnnamed     no name and no layers: "TRAINER", none (as before)
+--   redBadName     a name that does not read is dropped: "TRAINER"; an empty
+--                  layer list is a class with no layer (YOUNGSTER)
+--   redBadMods     a layer off the cart's four refuses the party: no fight
+--   redTwoSeats    a 2v2 trainer dealt across two seats: both carry it
+--   redHumanClaims a human's own party naming a name and layers: the seat is
+--                  its connection's name, and carries no layers
+--   redWild        a wild seat: the hub passes what came, Red's referee keeps
+--                  no layers for a wild monster
+--   goldNamed      Gold: the name rides, `aiMods` is not Gold's (not read)
+-- ------------------------------------------------------------------
+
+local function npcFight(generation, mode, sideB, sideA, humans)
+  local hub = makeGenHub(generation)
+  local seen = {}
+  local real = hub.Turn
+  hub.Turn = setmetatable({
+    create = function(opts) seen.opts = opts; return real.create(opts) end,
+  }, { __index = real })
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local ids, names = { ID_A, ID_B }, { "ANN", "BOB" }
+  local players, memberIds = {}, {}
+  for i = 1, humans or 1 do
+    players[i] = dialAs(hub, names[i], ids[i], { generation = generation, sprite = sprite })
+    memberIds[i] = players[i].id
+  end
+  local id = "nf"
+  hub:openCoopBattle(id, memberIds, { mode = mode, hostId = memberIds[1] })
+  hub:receive(players[1].client, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART })
+  for _, p in ipairs(players) do
+    hub:receive(p.client, merged({ type = Wire.BATTLE_PARTY, battle = id, side = "a",
+                                   mons = { sheet12(generation, { species = "HERO" }) } }, sideA or {}))
+  end
+  hub:receive(players[1].client, merged({ type = Wire.BATTLE_PARTY, battle = id, side = "b",
+    mons = { sheet12(generation, { species = "FOE" }), sheet12(generation, { species = "FOE" }) } },
+    sideB or {}))
+  local record = hub.battles[id]
+  local entries = {}
+  for _, side in ipairs({ "a", "b" }) do
+    for _, entry in ipairs(seen.opts and seen.opts.sides[side] or {}) do
+      local npc = false
+      for _, npcId in ipairs(record and record.npcIds or {}) do
+        if npcId == entry.playerId then npc = true end
+      end
+      local fighter = record and record.sim and record.sim.byId[entry.playerId]
+      entries[#entries + 1] = {
+        side = side, seat = npc and "npc" or entry.playerId,
+        name = orNil(entry.name), aiMods = orNil(entry.aiMods),
+        simName = fighter and orNil(fighter.name) or "(no sim)",
+        simAiMods = fighter and orNil(fighter.aiMods) or "(no sim)",
+      }
+    end
+  end
+  local out = { opened = record ~= nil and record.sim ~= nil, entries = entries }
+  if out.opened and (humans or 1) == 1 then
+    players[1].peer.outbox = {}
+    hub:receive(players[1].client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
+    local lines = {}
+    for _, msg in ipairs(takeAll(players[1].peer, Wire.BATTLE_EVENT)) do
+      if msg.t == "msg" and msg.text:find(" used ", 1, true) and msg.text:sub(1, 4) ~= "HERO" then
+        local read = Wire.battleEvent(msg, generation)
+        lines[#lines + 1] = { sent = msg.text, read = read and orNil(read.text) or "(refused)" }
+      end
+    end
+    out.lines = lines
+  end
+  return out
+end
+
+scenarios[#scenarios + 1] = {
+  name = "wave6_hub_fields",
+  run = function()
+    local MALE, FEMALE = "\226\153\130", "\226\153\128"
+    local xItem = { { id = "X_ATTACK", count = 1 } }
+    return {
+      redNamed = npcFight(1, "coop_npc", { name = "COOLTRAINER" .. MALE, aiMods = { 1, 3 }, bag = xItem }),
+      redUnnamed = npcFight(1, "coop_npc", { bag = xItem }),
+      redBadName = npcFight(1, "coop_npc", { name = 42, aiMods = {}, bag = xItem }),
+      redBadMods = npcFight(1, "coop_npc", { name = "LASS", aiMods = { 9 } }),
+      redTwoSeats = npcFight(1, "coop_npc", { name = "JR.TRAINER" .. FEMALE, aiMods = { 1 } }, nil, 2),
+      redHumanClaims = npcFight(1, "coop_npc", { name = "LASS" }, { name = "MALLORY", aiMods = { 2 } }),
+      redWild = npcFight(1, "wild", { name = "WILD", aiMods = { 1 } }),
+      goldNamed = npcFight(2, "coop_npc", { name = "TWINS AMY & MAY", aiMods = { 1 }, bag = xItem }),
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
 
 local runs = {}
 for _, scenario in ipairs(scenarios) do

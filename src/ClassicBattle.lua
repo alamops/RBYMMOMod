@@ -48,11 +48,57 @@ end
 M.BOX_COLS = 18
 M.BOX_ROWS = 2
 
+-- ------- glyphs, not bytes
+--
+-- A Red / Gold referee line carries the carts' own glyphs since wave 6 of
+-- docs/plans/gen12-referee-gaps-fix.md (Wire.battleText: é, …, ♂, ♀ -- "Both
+-- POKéMON will faint in 3 turns!", "COOLTRAINER♂ used X ATTACK on ...!"), and
+-- the font draws each of them as ONE tile (the engine's Font.split: "POKéMON
+-- is 8 bytes and 7 glyphs").  So everything on these screens that measures or
+-- cuts referee text walks whole UTF-8 sequences: counted by bytes, a line
+-- wrapped a column early; cut by bytes, it split a glyph into two invalid
+-- bytes the ROM font draws as spaces and a LÖVE font refuses to draw at all.
+-- A lead byte takes the continuation bytes that follow it (0x80..0xBF, up to
+-- its length), so a stray byte is a glyph of its own and nothing is lost.
+
+-- The glyphs of `text`, in order, each a whole UTF-8 sequence.
+function M.glyphs(text)
+  text = tostring(text or "")
+  local out, i, n = {}, 1, #text
+  while i <= n do
+    local b = text:byte(i)
+    local len = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 1
+    local j = i + 1
+    while j < i + len and j <= n do
+      local c = text:byte(j)
+      if c < 0x80 or c > 0xBF then break end
+      j = j + 1
+    end
+    out[#out + 1] = text:sub(i, j - 1)
+    i = j
+  end
+  return out
+end
+
+-- How many glyphs `text` is.
+function M.glyphCount(text)
+  return #M.glyphs(text)
+end
+
+-- The first `count` glyphs of `text` (all of it when it has no more).
+function M.glyphPrefix(text, count)
+  local g = M.glyphs(text)
+  count = math.max(0, math.floor(tonumber(count) or 0))
+  if count >= #g then return table.concat(g) end
+  return table.concat(g, "", 1, count)
+end
+
 -- Soft-wrap one string into lines that fit the bottom box.
 --
 -- Collapses runs of whitespace so a typewriter-spaced line does not paint
 -- through the right border. Prefers a break at the last space that still
--- fits; otherwise hard-cuts. Author newlines stay paragraph breaks.
+-- fits; otherwise hard-cuts. Author newlines stay paragraph breaks.  Columns
+-- are glyphs (`M.glyphs`): one tile each, whatever its UTF-8 length.
 function M.wrapBoxLines(text, width)
   width = width or M.BOX_COLS
   local lines = {}
@@ -63,15 +109,22 @@ function M.wrapBoxLines(text, width)
     if rest == "" then
       lines[#lines + 1] = ""
     else
-      while #rest > width do
-        local chunk = rest:sub(1, width)
-        local space = chunk:match("^.*()%s")
+      local g = M.glyphs(rest)
+      while #g > width do
+        -- The last space among the first `width` glyphs (the collapse above
+        -- leaves single spaces only), else a hard cut at `width`.
         local breakAt = width
-        if space and space > 1 then breakAt = space - 1 end
-        lines[#lines + 1] = rest:sub(1, breakAt):gsub("%s+$", "")
-        rest = rest:sub(breakAt + 1):gsub("^%s+", "")
+        for k = width, 2, -1 do
+          if g[k] == " " then breakAt = k - 1; break end
+        end
+        lines[#lines + 1] = table.concat(g, "", 1, breakAt):gsub("%s+$", "")
+        local from = breakAt + 1
+        while g[from] == " " do from = from + 1 end
+        local left = {}
+        for k = from, #g do left[#left + 1] = g[k] end
+        g = left
       end
-      if rest ~= "" then lines[#lines + 1] = rest end
+      if #g > 0 then lines[#lines + 1] = table.concat(g) end
     end
   end
   if #lines == 0 then return { "" } end
@@ -111,7 +164,7 @@ function M.drawFittedText(Font, text, x, y, maxW)
     local ok, measured = pcall(Font.width, text)
     if ok and type(measured) == "number" then w = measured end
   end
-  if w <= 0 then w = #text * 8 end
+  if w <= 0 then w = M.glyphCount(text) * 8 end
   if w <= maxW then
     if Font and Font.draw then Font.draw(text, x, y) end
     return
@@ -121,9 +174,9 @@ function M.drawFittedText(Font, text, x, y, maxW)
     local budget = math.max(1, math.floor(maxW / 8))
     if Font and Font.draw then
       if budget > 1 then
-        Font.draw(text:sub(1, budget - 1) .. ".", x, y)
+        Font.draw(M.glyphPrefix(text, budget - 1) .. ".", x, y)
       else
-        Font.draw(text:sub(1, 1), x, y)
+        Font.draw(M.glyphPrefix(text, 1), x, y)
       end
     end
     return
@@ -131,7 +184,7 @@ function M.drawFittedText(Font, text, x, y, maxW)
   local g = love and love.graphics
   if not (g and g.push and g.scale and g.translate and g.pop) then
     local budget = math.max(1, math.floor(maxW / 8))
-    if Font and Font.draw then Font.draw(text:sub(1, budget), x, y) end
+    if Font and Font.draw then Font.draw(M.glyphPrefix(text, budget), x, y) end
     return
   end
   local s = maxW / w
@@ -1136,13 +1189,14 @@ end
 local function fitText(F, text, px, opts)
   text = tostring(text or "")
   if measure(F, text, opts) <= px then return text end
+  -- Whole glyphs off the end (M.glyphs): dropping continuation bytes alone
+  -- left the lead byte of "é" behind, half a UTF-8 sequence.
+  local glyphs = M.glyphs(text)
+  local n = #glyphs
   local cut = text
-  while #cut > 1 and measure(F, cut, opts) > px do
-    cut = cut:sub(1, -2)
-    -- never leave half a UTF-8 sequence at the end
-    while #cut > 1 and cut:byte(-1) and cut:byte(-1) >= 0x80 and cut:byte(-1) < 0xC0 do
-      cut = cut:sub(1, -2)
-    end
+  while n > 1 and measure(F, cut, opts) > px do
+    n = n - 1
+    cut = table.concat(glyphs, "", 1, n)
   end
   return cut
 end

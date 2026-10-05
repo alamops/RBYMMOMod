@@ -3389,17 +3389,24 @@ class Relay {
       dealt[index % record.npcIds.length].push(mon);
     });
 
+    // One trainer, so every seat it is dealt across is that trainer: each
+    // carries the party's display name and Red move-choice layers
+    // (cleanBattleParty reads `name` on Red / Gold and `aiMods` on Red, wave
+    // 6) -- tryStartSim names the seat and hands the layers on from here.
     const kept = [];
     const dropped = new Set();
     record.npcIds.forEach((npcId, at) => {
       if (dealt[at].length) {
         kept.push(npcId);
-        record.parties.set(npcId, {
+        const seatParty = {
           battle: party.battle,
           side: party.side,
           badges: party.badges,
           mons: dealt[at],
-        });
+        };
+        if (party.name) seatParty.name = party.name;
+        if (party.aiMods) seatParty.aiMods = party.aiMods;
+        record.parties.set(npcId, seatParty);
       } else {
         dropped.add(npcId);
         record.parties.delete(npcId);
@@ -3710,14 +3717,22 @@ class Relay {
       const bagCopy = this.generation === 3
         ? this.simBag3(record, seat, bag)
         : this.cloneBagMap(bag);
+      // A human seat is named by its connection, an NPC seat by the trainer's
+      // display name its party brought (wave 6: cleanNpcName, Red / Gold), else
+      // 'TRAINER' as before. Its Red move-choice layers ride on the NPC seat
+      // alone (lib/battle Turn's copyAiMods reads a computer trainer seat's).
+      // Left off the object rather than set undefined, as Hub.lua's nil is no
+      // key at all.
+      const npc = this.isNpcSeat(record, seat);
       const entry = {
         playerId: seat,
         name: (client && client.name)
-          || (this.isNpcSeat(record, seat) ? 'TRAINER' : seat),
+          || (npc ? (party.name || 'TRAINER') : seat),
         mons: party.mons,
         badges: party.badges,
         bag: bagCopy || undefined,
       };
+      if (npc && party.aiMods) entry.aiMods = party.aiMods;
       // Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
       // connection and so no cart, and the referees read side a's anyway.
       // Every human is still connected here -- a seat that drops while the

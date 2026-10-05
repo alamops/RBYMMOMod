@@ -2482,6 +2482,78 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- wave 6 of docs/plans/gen12-referee-gaps-fix.md (C4): Red's PP byte comes
+-- home whole, the trainer seat carries its name and AI layers, and a Gold
+-- trainer monster `standing` at 0 HP is answered for
+-- ------------------------------------------------------------------
+
+;(function()
+  -- Red's PP byte: a slot DecrementPP wrapped holds 63 PP and one PP Up fewer
+  -- (pokered decrement_pp.asm), and the party struct keeps both.
+  local solo = Solo.new({ say = function() end }, { enabled = function() return true end })
+  local tgt = mon({})
+  tgt.moves = { { id = "THUMP", pp = 0, ppUps = 3 }, { id = "SWIPE", pp = 9 } }
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60,
+    moves = { { id = "THUMP", pp = 63, ppUps = 2 }, { id = "SWIPE", pp = 8, ppUps = 0 } } }, 1)
+  eq(tgt.moves[1].pp, 63, "PP wrap (solo Red): the save keeps the 63 the byte holds, never a clamped PP")
+  eq(tgt.moves[1].ppUps, 2, "PP wrap (solo Red): ...and the PP Up the wrap borrowed")
+  eq(tgt.moves[2].ppUps, nil, "PP wrap (solo Red): a slot whose PP Ups did not move keeps its shape")
+  local gold = mon({})
+  gold.moves = { { id = "THUMP", pp = 3, maxPp = 35 } }
+  solo:_applyMon(gold, { hp = 10, maxHp = 60, moves = { { id = "THUMP", pp = 2, ppUps = 1 } } }, 2)
+  eq(gold.moves[1].ppUps, nil, "PP (solo Gold): no PP Up is written -- Gold's DecrementPP never wraps")
+
+  -- The trainer seat (Red): the record's name, as the cart's lines print it,
+  -- and its class's move-choice layers for a pick nobody filed.
+  local realCreate, seen = Turn.create, nil
+  Turn.create = function(opts) seen = opts; return realCreate(opts) end
+  pcall(fightOf, "trainer", { trainer = { baseMoney = 20, classId = "OPP_ALPHA",
+                                          name = "ALPHA TRAINER", aiMods = { 1, 2 } } })
+  Turn.create = realCreate
+  local seat = seen and seen.sides.b[1]
+  eq(seat and seat.name, "ALPHA TRAINER", "trainer seat (solo Red): named as the record names the trainer")
+  eq(seat and table.concat(seat.aiMods or {}, ","), "1,2", "trainer seat (solo Red): ...with its AI layers")
+
+  -- A Gold trainer monster SPIKES left `standing` at 0 HP (BattleSim2, wave
+  -- 5) is asked for a choice; the solo screen answers for it -- with no choice
+  -- deadline, a seat it skipped would hold the fight forever.
+  local Turn2 = need("BattleSim2/Turn")
+  local E2 = need("BattleSim2/Effects")
+  local function mv(id, effect) return { id = id, pp = 20, power = 0, accuracy = 255, type = 0,
+                                          effect = effect or 0, chance = 0 } end
+  local function g(sp, moves, o)
+    o = o or {}
+    return { species = sp, level = 20, hp = o.hp, maxHp = 80,
+             stats = { atk = 40, def = 40, spe = o.spe or 40, spa = 40, spd = 40 }, moves = moves }
+  end
+  local battle = assert(Turn2.create({ id = "solo_w6", mode = "coop_npc", seed = 3,
+    choiceTimeout = 0, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = PLAYER, name = "ANN", mons = {
+        g("ALPHA", { mv("SPIKES", E2.idOf("EFFECT_SPIKES")), mv("PERISH", E2.idOf("EFFECT_PERISH_SONG")),
+                     mv("SPLASH") }, { spe = 90 }),
+        g("DELTA", { mv("SPLASH") }, { spe = 1 }) } } },
+      b = { { playerId = FOE, name = "BOB", mons = {
+        g("BETA", { mv("SPLASH") }), g("GAMMA", { mv("SPLASH") }, { hp = 5 }) } } },
+    } }))
+  local function round(a, b)
+    battle:submitChoice(PLAYER, a)
+    battle:submitChoice(FOE, b)
+    battle:drainEvents()
+  end
+  local F = function(m) return { action = "fight", move = m } end
+  round(F(0), F(0)) round(F(1), F(0)) round(F(2), F(0)) round(F(2), F(0)) round(F(2), F(0))
+  round({ action = "switch", slot = 1 }, { action = "switch", slot = 1 })
+  local foe = battle.byId[FOE]
+  local gamma = foe.mons[foe.active]
+  eq(gamma and gamma.hp, 0, "standing (solo Gold): SPIKES left the trainer's successor at 0 HP")
+  eq(battle:snapshot().phase, "choice", "standing (solo Gold): ...and the turn opened with it standing")
+  local host = setmetatable({ sim = battle, generation = 2, brain = nil }, { __index = Solo })
+  eq(host:_answerFoe(), true, "standing (solo Gold): the screen answers for the standing monster")
+  ok(foe.choice ~= nil, "standing (solo Gold): ...so the turn is not left waiting on it")
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

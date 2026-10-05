@@ -2156,7 +2156,7 @@ function M:missingActors()
   local acted = self.acted or {}
   for _, slot in ipairs(self.sim.slots or {}) do
     if slot.owner ~= nil and not self:isMine(slot.index)
-       and not self.sim:isDown(slot) and not acted[slot.index] then
+       and not self:seatDown(slot) and not acted[slot.index] then
       out[#out + 1] = tostring(slot.name or "Someone")
     end
   end
@@ -2210,12 +2210,13 @@ function M:waitLine()
   if who then return ("%s is\nchoosing... (%d)"):format(who, left) end
   local missing = self:missingActors()
   if #missing > 0 then
-    local name = missing[1]:sub(1, Config.NAME_MAX)
+    local name = ClassicBattle.glyphPrefix(missing[1], Config.NAME_MAX)
+    local nameCols = ClassicBattle.glyphCount(name)
     -- Gen1 font has no '+'; use " &N" so the wait line stays drawable.
     local tail = (#missing > 1) and (" &" .. (#missing - 1)) or ""
     local clock = (" (%d)"):format(left)
-    if #name + 3 + #tail + #clock > 18 then tail = "" end
-    if #name + 3 + #clock > 18 then clock = "" end
+    if nameCols + 3 + #tail + #clock > 18 then tail = "" end
+    if nameCols + 3 + #clock > 18 then clock = "" end
     return ("Waiting for\n%s...%s%s"):format(name, tail, clock)
   end
   -- Nobody nameable -- an older host that sends no `act` this client can read,
@@ -2233,6 +2234,19 @@ end
 -- with a reserve is `replacing` instead, and one that is merely waiting on
 -- somebody else is not down at all. `gone` counts too -- a forfeited slot is
 -- as out as an empty one.
+-- Is the seat out of the fight?  CoopSim's `isDown` (no monster, or one at
+-- 0 HP), except for a Gold monster the referee still has `standing` there at
+-- 0 HP (`medStanding`, read in `onBattleEvent`): it chooses, acts and is
+-- aimed at until its faint comes.
+function M:seatDown(slot)
+  if not (self.sim and slot) then return true end
+  if self.medStanding and slot.index ~= nil and self.medStanding[slot.index]
+     and not slot.gone and slot.battler ~= nil then
+    return false
+  end
+  return self.sim:isDown(slot)
+end
+
 function M:spectating()
   if self.result then return false end
   if self.replacing then return false end
@@ -2247,12 +2261,12 @@ function M:spectating()
   if self.ownSlots then
     for _, at in ipairs(self.ownSlots) do
       local own = self.sim:slot(at)
-      if own and not self.sim:isDown(own) then return false end
+      if own and not self:seatDown(own) then return false end
     end
     return true
   end
   local slot = self:mySlot()
-  return slot ~= nil and self.sim:isDown(slot)
+  return slot ~= nil and self:seatDown(slot)
 end
 
 function M:liveMoves()
@@ -2312,7 +2326,11 @@ function M:syncLivePp(moves, index)
       return false
     end
   end
+  -- Red's PP Ups follow the PP byte past a wrap (Mediated.ppByteStep1): the
+  -- list is the party's own, so the save holds the byte pokered's does.
+  local red = not self.gen3 and Gen.generation(self.game) == 1
   for i, slot in ipairs(current) do
+    if red then Mediated.ppByteStep1(slot, moves[i]) end
     local pp = tonumber(moves[i].pp)
     if pp then slot.pp = pp end
   end
@@ -2657,7 +2675,7 @@ function M:updateMove(input)
     -- the old deadlock of looping the wait line while the referee waited on us.
     local anyUp = false
     for _, entry in ipairs(targets) do
-      if not self.sim:isDown(entry) then anyUp = true; break end
+      if not self:seatDown(entry) then anyUp = true; break end
     end
     if not anyUp then
       return self:commit({ slot = self.mine, move = self.moveIndex,
@@ -2892,8 +2910,16 @@ function M:updateItem(input)
       self.itemPick = pick
       local seat = self:mySlot()
       local active = (seat and seat.active) or 1
+      -- A POKé DOLL outside coop_wild: the cart's "This isn't the time" and
+      -- the bag back up, nothing filed (Mediated.dollRefusal).
+      local notTime = effect and effect.pokeDoll and Mediated.dollRefusal(self.game, self.mode)
       if not effect then
         self:commitMediatedItem(active, nil)
+      elseif notTime then
+        self.itemPick = nil
+        self.phase = "messages"
+        self.after = "item"
+        self:say(notTime)
       elseif effect.ball or effect.pokeDoll or effect.pokeFlute then
         self:commitMediatedItem(nil, nil)
       elseif effect.activeOnly then
@@ -3063,7 +3089,20 @@ function M:targetChoices()
   local mine = self:mySlot()
   if not (mine and self.sim) then return {} end
   if self.gen3 then return self.sim:targetsFor(mine, { ally = true }) end
-  return self.sim:targetsFor(mine)
+  local out = self.sim:targetsFor(mine)
+  -- ...and a Gold foe `standing` at 0 HP (`seatDown`): still the monster in
+  -- that seat, and the cart aims at it.
+  if self.medStanding then
+    local listed = {}
+    for _, entry in ipairs(out) do listed[entry] = true end
+    for _, slot in ipairs(self.sim.slots or {}) do
+      if slot.side ~= mine.side and not listed[slot] and not self:seatDown(slot)
+         and self.sim:isDown(slot) then
+        out[#out + 1] = slot
+      end
+    end
+  end
+  return out
 end
 
 function M:updateTarget(input)
@@ -4942,7 +4981,7 @@ function M:snapDisplay()
       -- Nothing legitimate needs the clear: a send-out replaces `slot.battler`
       -- with a different object, and a resync rebuilds every battler, so a
       -- flag never outlives the monster it was raised for.
-      battler.displayFainted = self.sim:isDown(slot) or battler.displayFainted
+      battler.displayFainted = self:seatDown(slot) or battler.displayFainted
         or nil
     end
   end
@@ -5093,23 +5132,25 @@ function M.fitHudName(text, maxCols, widthOf)
       ell = "."
       if widthOf(ell) > maxW then return "" end
     end
-    local lo, hi = 0, #text
+    -- Searched over glyphs (ClassicBattle.glyphs), never splitting one.
+    local glyphs = ClassicBattle.glyphs(text)
+    local lo, hi = 0, #glyphs
     while lo < hi do
       local mid = math.floor((lo + hi + 1) / 2)
-      if widthOf(text:sub(1, mid) .. ell) <= maxW then
+      if widthOf(table.concat(glyphs, "", 1, mid) .. ell) <= maxW then
         lo = mid
       else
         hi = mid - 1
       end
     end
     if lo <= 0 then return ell end
-    return text:sub(1, lo) .. ell
+    return table.concat(glyphs, "", 1, lo) .. ell
   end
   maxCols = math.floor(tonumber(maxCols) or 0)
   if maxCols <= 0 then return "" end
-  if #text <= maxCols then return text end
-  if maxCols == 1 then return text:sub(1, 1) end
-  return text:sub(1, maxCols - 1) .. "."
+  if ClassicBattle.glyphCount(text) <= maxCols then return text end
+  if maxCols == 1 then return ClassicBattle.glyphPrefix(text, 1) end
+  return ClassicBattle.glyphPrefix(text, maxCols - 1) .. "."
 end
 
 -- ImageFonts for status names (5×7) and level/HP nums (4×5). Cached;
@@ -5164,9 +5205,10 @@ function M.hudSanitize(text)
   local glyphs = Config.BATTLE_HUD_GLYPHS
     or " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-'?!"
   local out = {}
-  for i = 1, #text do
-    local c = text:sub(i, i)
-    if glyphs:find(c, 1, true) then
+  -- One "." per glyph the sheet lacks (ClassicBattle.glyphs), not per byte:
+  -- an é is one character on the HUD as everywhere else.
+  for _, c in ipairs(ClassicBattle.glyphs(text)) do
+    if #c == 1 and glyphs:find(c, 1, true) then
       out[#out + 1] = c
     else
       out[#out + 1] = "."
@@ -5478,42 +5520,10 @@ end
 
 -- Draw `text` at (x, y), scaling on X only when it would run past `maxW`.
 -- Shared by move names (TYPE pane) and status readouts (level on the right).
+-- ClassicBattle's, which measures and cuts in glyphs (an item or trainer name
+-- with é / ♂ / ♀ in it is one tile per character, never a split byte).
 local function drawFittedText(Font, text, x, y, maxW)
-  text = tostring(text or "")
-  local w = 0
-  if Font.width then
-    local ok, measured = pcall(Font.width, text)
-    if ok and type(measured) == "number" then w = measured end
-  end
-  if w <= 0 then w = #text * 8 end
-  if w <= maxW then
-    Font.draw(text, x, y)
-    return
-  end
-  -- Below ~0.92 width the glyphs smash (THUNDERBOLT → "THJNDERBOLT");
-  -- truncate with a dot instead of an unreadable squash.
-  local minScale = ClassicBattle.MOVE_NAME_MIN_SCALE or 0.75
-  if maxW / w < minScale then
-    local budget = math.max(1, math.floor(maxW / 8))
-    if budget > 1 then
-      Font.draw(text:sub(1, budget - 1) .. ".", x, y)
-    else
-      Font.draw(text:sub(1, 1), x, y)
-    end
-    return
-  end
-  local g = love and love.graphics
-  if not (g and g.push and g.scale and g.translate and g.pop) then
-    local budget = math.max(1, math.floor(maxW / 8))
-    Font.draw(text:sub(1, budget), x, y)
-    return
-  end
-  local s = maxW / w
-  g.push()
-  g.translate(x, y)
-  g.scale(s, 1)
-  Font.draw(text, 0, 0)
-  g.pop()
+  return ClassicBattle.drawFittedText(Font, text, x, y, maxW)
 end
 
 local function drawReadout(self, battler, panel, row, mine, showExp)
@@ -6280,6 +6290,11 @@ local function moveNameFromBattleText(text)
   local move = text:match("[Uu]sed\n([^\n!]+)")
     or text:match("[Uu]sed%s+([^\n!]+)")
   if not move then return nil end
+  -- The computer's item line names the monster it was used on (pokered
+  -- AIBattleUseItemText, the Red referee's "<TRAINER> used <ITEM> on
+  -- <MON>!", wave 5): the shout is the item.  Lower-case "on" is the line's
+  -- own word -- no move or item name spells one.
+  move = move:gsub("%s+on%s+.*$", "")
   move = move:gsub("^%s+", ""):gsub("%s+$", "")
   if move == "" then return nil end
   return move
@@ -8468,17 +8483,10 @@ local CLASSIC_ENEMY = { x = STAGE_FOE.x, y = STAGE_FOE.y }
 -- SFX_TINK; on completion, PlayApplyingAttackSound-style effectiveness thud.
 -- Derived client-side from the following effectiveness line (no PROTOCOL).
 
+-- MediatedBattle's reading, shared: both carts' spellings of the line
+-- (pokecrystal's "It's super-effective!" carries a hyphen).
 local function hitSfxFromText(text)
-  if type(text) ~= "string" then return nil end
-  -- Engine / BattleSim lines may break mid-phrase ("It's super\neffective!").
-  local lower = text:lower():gsub("%s+", " ")
-  if lower:find("super effective", 1, true) then
-    return { sound = "Super_Effective", pitch = 0xe0 }
-  end
-  if lower:find("not very effective", 1, true) then
-    return { sound = "Not_Very_Effective", pitch = 0x50 }
-  end
-  return nil
+  return Mediated.hitSfxFromText(text)
 end
 
 -- Peek the message queue for the effectiveness line (or a following drain,
@@ -10419,8 +10427,13 @@ function M:uploadMediated()
     local npc = self:npcMons()
     if npc and #npc > 0 then
       self.medNpcSheets = npc
+      -- ...with the trainer's name and Red move-choice layers, which the hub
+      -- hands the computer seats (Mediated.npcSeat): the Red referee picks a
+      -- coop_npc trainer's moves through pokered's layers 1-3, as the
+      -- engine's own trainer battle does.
       Mediated.sendParty(self.transport, self.battleId, npc, "b",
-        Mediated.trainerBagEntries(self.trainer, self.game))
+        Mediated.trainerBagEntries(self.trainer, self.game), nil,
+        Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName()))
     else
       mod.log:warn("the trainer's party could not be described for a refereed "
         .. "2-on-2 -- report which trainer it was")
@@ -10551,13 +10564,16 @@ end
 -- unknown token -- a newer intermediator naming something this build cannot
 -- phrase -- is silent rather than printed raw: the result is the part that
 -- matters and it has already landed.
+--
+-- No `catch` (MediatedBattle's REASONS has why): the referee's own catch line
+-- -- Red's "All right! <MON> was caught!", Gold's and Gen 3's "Gotcha!" -- is
+-- in the stream every seat reads, and a second one here was its echo.
 local MED_REASONS = {
   timeout    = "Nobody answered\nin time.",
   disconnect = "The link was lost.",
   run        = "Someone ran away!",
   forfeit    = "Someone gave up.",
   agree      = "The battle was\ncalled off.",
-  catch      = "Gotcha!",
 }
 
 -- One wire event, as rows `playEvents` understands.
@@ -10794,9 +10810,18 @@ function M:medRows(msg)
     -- Play via the existing AnimPlayer path; if mapping fails `startAnim`
     -- no-ops safely. The "X used MOVE" line rides in the `msg` beside this.
     -- `amount` is shake count on SHAKE_ANIM; ball id is stashed from `item`.
+    -- A Red status animation is this viewer's variant (Mediated.viewerAnim:
+    -- a coop_pvp foe's sleep / confusion clip is the enemy's on this cart),
+    -- worn on the arena in the condition's colours (Vfx.forStatusAnim); a
+    -- foe's sleep clip is held behind the line it follows (`medAnimBehind`,
+    -- flushed by `onBattleEvent`).
     if index then
-      rows[#rows + 1] = {
-        kind = "anim", anim = msg.text, from = index,
+      local anim, behind = Mediated.viewerAnim(msg.text, not self:foeSide(index))
+      local list = behind and {} or rows
+      local mon = slot and slot.battler and slot.battler.mon
+      local look = Vfx.forStatusAnim(anim, mon and mon.status)
+      list[#list + 1] = {
+        kind = "anim", anim = anim, from = index,
         amount = msg.amount,
         -- Viewer-relative: this client's ally side faces as the player.
         attackerIsPlayer = not self:foeSide(index),
@@ -10806,6 +10831,8 @@ function M:medRows(msg)
         to = msg.target ~= nil and self:medSlotOf({ slot = msg.target }) or nil,
         spread = msg.spread == 1 or nil,
       }
+      if look then list[#list + 1] = { kind = "vfx", spec = look, slot = index } end
+      if behind then self.medAnimBehind = list end
     end
 
   elseif kind == "item" then
@@ -10827,9 +10854,11 @@ function M:medRows(msg)
     if look and index then
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index }
     end
-    -- Gen 3's `item` text is the item's number; the referee's own `msg` beside
-    -- it is the sentence ("ANN used POTION!"), so the number is not printed.
-    if not self.gen3 then say(msg.text) end
+    -- The `item` text is the item's id (Gen 3's, its number), never a line:
+    -- the referee's own `msg` beside it is the sentence, on every generation
+    -- since wave 5 -- Red's in pokered's words ("ANN used POKe BALL!", a
+    -- medicine's own line), Gold's and Gen 3's likewise -- so printing the id
+    -- here put a line no cart prints ("POTION") ahead of the cart's.
 
   elseif kind == "status" then
     -- Truth first: the plate reads `mon.status`, and a condition the referee
@@ -11106,6 +11135,24 @@ function M:onBattleEvent(msg)
     end
     return true
   end
+  -- Gold's 0-HP `standing` state (BattleSim2 Turn, wave 5), read off the
+  -- stream: a seat a hit left at 0 HP with no `faint` behind it -- SPIKES on
+  -- a successor, PERISH SONG's count -- is still the monster in that seat
+  -- until the cart's next faint check knocks it out (docs/bugs_and_glitches
+  -- .md, "Perish Song and Spikes can leave a Pokémon with 0 HP and not
+  -- faint"), and the referee asks it for a choice and lets it act.  Noted at
+  -- intake, so a `faint` later in the same batch is already read by the time
+  -- the batch plays; `seatDown` is where the rules read it.
+  if Gen.generation(self.game) == 2 and not self.gen3 then
+    local at = self:medSlotOf(msg)
+    if at and (msg.t == "damage" or msg.t == "drain") and tonumber(msg.hp) == 0 then
+      self.medStanding = self.medStanding or {}
+      self.medStanding[at] = true
+    elseif at and (msg.t == "faint" or msg.t == "send"
+        or ((msg.t == "damage" or msg.t == "drain") and (tonumber(msg.hp) or 0) > 0)) then
+      if self.medStanding then self.medStanding[at] = nil end
+    end
+  end
   -- Timeout / took-too-long lines: show immediately. Batched behind `turn`, a
   -- client that left the choose menu the moment auto-pick landed (the player
   -- who stalled) never saw the explanation before the next A-mash cleared the
@@ -11242,17 +11289,19 @@ function M:onBattleEvent(msg)
     end
   end
   -- A Bide going on (Gold; MediatedBattle's `noteBideLine` has the rule):
-  -- our monster's storing line, and the release that ends it...
+  -- our monster's "used BIDE!" (the first turn's only line) or storing line,
+  -- and the release that ends it...
   if msg.t == "msg" and self.bideFiled and not self.ownSlots then
-    local said = Mediated.bideLine(msg.text, self.medMineName)
-    if said == "store" then
+    local said = Mediated.bideLine(msg.text, self.medMineName,
+      Mediated.bideLabels(self:liveMoves(), self.game))
+    if said == "store" or said == "start" then
       self.bideStoring = true
     elseif said == "release" then
       self.bideFiled, self.bideStoring = nil, nil
     end
   end
   -- ...read as the next turn opens: its FIGHT is `.locked_in` only when the
-  -- turn just closed said our monster is storing energy.
+  -- turn just closed said our monster started or is storing energy.
   if msg.t == "turn" and msg.slot == nil and not self.ownSlots then
     self.bideLocked = (Gen.generation(self.game) == 2 and self.bideFiled == true
       and self.bideStoring == true)
@@ -11261,9 +11310,18 @@ function M:onBattleEvent(msg)
     self.confusedNow = nil
   end
 
+  -- A foe's sleep clip held behind its line (`medRows`, Mediated.viewerAnim)
+  -- is queued after that line, or ahead of anything else that comes first.
+  local function flushBehind()
+    local held = self.medAnimBehind
+    self.medAnimBehind = nil
+    for _, row in ipairs(held or {}) do self.medPending[#self.medPending + 1] = row end
+  end
+  if msg.t ~= "msg" then flushBehind() end
   for _, row in ipairs(self:medRows(msg)) do
     self.medPending[#self.medPending + 1] = row
   end
+  if msg.t == "msg" then flushBehind() end
   if msg.t == "reconnect" then self.awaitingReconnect = false end
   -- The two that close a batch. Everything between them is collected, for the
   -- reason in this section's header: a menu taken away mid-decision is a turn
@@ -11505,7 +11563,8 @@ function M:onBattleOutcome(msg)
     self:payDay12(msg, result, mySide)
   end
   self:medFlush()
-  -- Catcher-only grant: everyone sees Gotcha; only msg.catcher adds the mon.
+  -- Catcher-only grant: everyone read the referee's catch line; only
+  -- msg.catcher adds the mon.
   if msg.reason == "catch" then
     local catcher = msg.catcher
     if catcher ~= nil and (catcher == self.selfId
@@ -11632,7 +11691,7 @@ end
 -- Recorded on the grant and asked once the message queue has run dry, which
 -- on this screen is the tick that would otherwise call `finish` and pop the
 -- battle (see `update`'s "messages" branch). That gap is deliberate: the
--- grant happens while "Gotcha!" and the line saying where the monster went
+-- grant happens while the catch line and the line saying where the monster went
 -- are still queued, and a grid pushed then would have the player naming a
 -- catch nobody had told them about.
 function M:oweNickname(mon, label)
@@ -11860,14 +11919,14 @@ function M:drawList(rows, index, title)
   local line = 8
   local top = title and 112 or 104
   local visible = title and 3 or 4
-  if title then Font.draw(tostring(title):sub(1, BOX_COLS), 8, 104) end
+  if title then Font.draw(ClassicBattle.glyphPrefix(tostring(title), BOX_COLS), 8, 104) end
   local first = 1
   if index > visible then first = index - visible + 1 end
   local shown = math.min(#rows, visible)
   for i = 0, shown - 1 do
     local row = rows[first + i]
     if row then
-      Font.draw(tostring(row):sub(1, BOX_COLS - 2), 16, top + i * line)
+      Font.draw(ClassicBattle.glyphPrefix(tostring(row), BOX_COLS - 2), 16, top + i * line)
     end
   end
   if #rows > 0 then
@@ -14104,7 +14163,9 @@ function M:syncPartyPp(mon, moves)
     local incoming = moves[i]
     if not (type(incoming) == "table" and incoming.id == row.id) then return false end
   end
+  local red = not self.gen3 and Gen.generation(self.game) == 1
   for i, row in ipairs(current) do
+    if red then Mediated.ppByteStep1(row, moves[i]) end
     local pp = tonumber(moves[i].pp)
     if pp then row.pp = pp end
   end
@@ -14853,7 +14914,8 @@ function M:start(game)
   if type(self.npcParty) == "table" and #self.npcParty > 0 then
     self.medNpcSheets = self.npcParty
     Mediated.sendParty(self.transport, self.battleId, self.npcParty, "b",
-      Mediated.trainerBagEntries(self.trainer, self.game))
+      Mediated.trainerBagEntries(self.trainer, self.game), nil,
+      Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName()))
   end
   -- Which held items this fight's uploads brought (`ownItem3`).
   self.ownItems3 = nil

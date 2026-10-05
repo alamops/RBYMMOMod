@@ -915,6 +915,11 @@ do
 
   local item = vfxRows({ t = "item", slot = 0, text = "POTION" })
   eq(#item, 1, "an item files one particle row")
+  local itemSaid = 0
+  for _, row in ipairs(fxScreen:medRows({ t = "item", slot = 0, text = "POTION" })) do
+    if row.kind == "msg" then itemSaid = itemSaid + 1 end
+  end
+  eq(itemSaid, 0, "an item's id is never a battle line -- the referee's own sentence is (wave 6)")
   eq(item[1].spec.style, "heal", "...with the look the catalogue gave it")
   eq(item[1].slot, 1, "...on the seat that opened the bag, mapped through medSlots")
 
@@ -4021,7 +4026,8 @@ do
     local targets = sc:targetChoices()
     sc:commit({ slot = 1, move = 2, target = targets[1].index })
     check(sc.bideFiled == true, "Bide (Gold co-op): BIDE chosen")
-    ev(sc, { t = "msg", text = SPECIES_NAME .. " began storing energy" })
+    -- The first turn says only the used line (wave 5, pokecrystal StoreEnergy).
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " used BIDE!" })
     ev(sc, { t = "turn", amount = 2 })
     check(sc.bideLocked == true, "Bide (Gold co-op): the next turn is a Bide going on")
     lead.moves[2].pp = 0
@@ -4031,7 +4037,7 @@ do
     local sent = choices(sc)
     eq(#sent, before + 1, "Bide (Gold co-op): FIGHT files at once (.locked_in)")
     eq(sent[#sent] and sent[#sent].move, 1, "Bide (Gold co-op): ...the Bide's slot, past its PP")
-    ev(sc, { t = "msg", text = SPECIES_NAME .. " unleashed energy" })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " unleashed energy!" })
     ev(sc, { t = "turn", amount = 3 })
     check(not sc.bideLocked, "Bide (Gold co-op): the release ends it")
     sc.phase, sc.commandIndex = "choose", 1
@@ -4330,6 +4336,185 @@ do
     ev(sc, { t = "msg", text = SPECIES_NAME .. " unleashed energy" })
     ev(sc, { t = "turn", amount = 4 })
     check(not sc.bideLocked, "Bide (Red co-op): the release ends it")
+  end
+
+  -- ------- wave 6 of docs/plans/gen12-referee-gaps-fix.md: the co-op screen
+  -- against the referees' new wording, events and states.
+  local function noInput6()
+    return { wasPressed = function() return false end, isDown = function() return false end }
+  end
+  -- Plays the batch out, A pressed on every frame a line is up (and only
+  -- then, so no press reaches the menu the batch hands over to).
+  local function drain6(sc)
+    local n = 0
+    while (sc.phase == "messages" or sc.shown ~= nil or #sc.messages > 0) and n < 400 do
+      sc.game.input = (sc.phase == "messages") and inputOf("a") or noInput6()
+      sc:update(1 / 60)
+      n = n + 1
+    end
+    sc.game.input = noInput6()
+  end
+  local function rowsOf(sc, kind)
+    local out = {}
+    for _, r in ipairs(sc.medPending or {}) do
+      if r.kind == kind then out[#out + 1] = r end
+    end
+    return out
+  end
+
+  -- Gold's 0-HP `standing` seat (BattleSim2, wave 5): a hit that left our
+  -- monster at 0 with no `faint` behind it -- SPIKES on a successor -- is
+  -- still our monster: we choose for it, never watch.
+  do
+    local sc = seat5(2)
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 6 })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. "'s hurt by SPIKES!" })
+    ev(sc, { t = "damage", slot = 0, side = "a", hp = 0, amount = 6 })
+    ev(sc, { t = "damage", slot = 2, side = "b", hp = 0, amount = 50 })
+    ev(sc, { t = "turn", amount = 2 })
+    drain6(sc)
+    local seat = sc.sim:slot(1)
+    eq(seat.battler and seat.battler.mon and seat.battler.mon.hp, 0,
+       "standing (Gold co-op): the monster on our seat is at 0 HP")
+    eq(sc:spectating(), false, "standing (Gold co-op): ...and we are not spectating")
+    eq(sc.phase, "choose", "standing (Gold co-op): the command menu opens for it")
+    local foeAt = false
+    for _, t in ipairs(sc:targetChoices()) do if t.index == 3 then foeAt = true end end
+    check(foeAt, "standing (Gold co-op): a foe standing at 0 HP is still a target")
+    ev(sc, { t = "faint", slot = 0, side = "a", text = SPECIES_NAME })
+    eq(sc:spectating(), true, "standing (Gold co-op): the faint that comes later ends it")
+  end
+
+  -- Gold's ROAR / WHIRLWIND drags our monster out mid-turn (wave 5): a
+  -- `switch` + `send` on our seat we never chose, and the seat follows it.
+  do
+    local lead, bench = mon(60, 40), mon(60, 35)
+    bench.moves = { { id = "FIX_TACKLE", pp = 7 } }
+    local sc = seat5(2, { lead, bench })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    ev(sc, { t = "msg", text = "FOE used WHIRLWIND!" })
+    ev(sc, { t = "switch", slot = 0, side = "a", mon = 1, text = SPECIES_NAME })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 1, text = SPECIES_NAME, hp = 60 })
+    ev(sc, { t = "msg", text = SPECIES_NAME .. " was dragged out!" })
+    ev(sc, { t = "turn", amount = 2 })
+    drain6(sc)
+    eq(sc.sim:slot(1).active, 2, "dragged out (Gold co-op): our seat fields the party member the referee named")
+    eq(sc:liveMoves()[1] and sc:liveMoves()[1].pp, 7, "dragged out (Gold co-op): FIGHT lists the newcomer's moves")
+    eq(sc.phase, "choose", "dragged out (Gold co-op): ...and the next turn is ours to choose")
+  end
+
+  -- The trainer on the NPC upload (Red): its name and its class's AI layers,
+  -- which the hub hands the computer seats (W5).
+  do
+    local game = newGame()
+    game.data = data5
+    local host = screen({ slots = npcSlots(), mine = 1, host = true, mode = "coop_npc",
+                          selfId = "ann", game = game })
+    host.trainer = { name = "BUG CATCHER", aiMods = { 1, 3 } }
+    eq(host:uploadMediated(), true, "NPC seat (Red co-op): the upload goes out")
+    local npc
+    for _, m in ipairs(host.sent) do
+      if m.type == Wire.BATTLE_PARTY and m.payload.side == "b" then npc = m.payload end
+    end
+    eq(npc and npc.name, "BUG CATCHER", "NPC seat (Red co-op): the trainer's name rides the party")
+    eq(npc and table.concat(npc.aiMods or {}, ","), "1,3", "NPC seat (Red co-op): ...with its AI layers")
+    local packed = npc and Wire.battleParty(npc, 1)
+    eq(packed and packed.aiMods and table.concat(packed.aiMods, ","), "1,3",
+       "NPC seat (Red co-op): Wire.battleParty takes them")
+  end
+
+  -- POKe DOLL in a trainer fight (Red and Gold): the cart's line, the bag back
+  -- up, nothing filed.
+  for _, gen in ipairs({ 1, 2 }) do
+    local sc = seat5(gen)
+    sc.game.save.player = sc.game.save.player or { name = "ANN" }
+    local before = #choices(sc)
+    sc.phase, sc.itemIndex = "item", 1
+    sc.itemList = { { id = "POKE_DOLL", name = "POKe DOLL", count = 1,
+                      effect = need("BattleSim/Effects").itemEffect("POKE_DOLL") } }
+    sc:updateItem(inputOf("a"))
+    eq(#choices(sc), before, "doll (co-op trainer, gen " .. gen .. "): nothing is filed")
+    eq(sc.after, "item", "doll (co-op trainer, gen " .. gen .. "): the bag comes back")
+    local said = table.concat(texts(sc), " "):gsub("\n", " ")
+    check(said:find("OAK: ANN! This isn't the time to use that!", 1, true) ~= nil,
+          "doll (co-op trainer, gen " .. gen .. "): ItemUseNotTime's line")
+  end
+
+  -- Red's status animations in coop_pvp: a foe's clip is the enemy's variant
+  -- on this screen, and its sleep clip goes after its line.
+  do
+    local sc = seat5(1, nil, "coop_pvp", pvpSlots())
+    sc.medPending = {}
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "CONF_PLAYER_ANIM" })
+    ev(sc, { t = "anim", slot = 0, side = "a", text = "CONF_PLAYER_ANIM" })
+    local anims = rowsOf(sc, "anim")
+    eq(anims[1] and anims[1].anim, "CONF_ANIM", "status anim (co-op): a foe's clip is the enemy's")
+    eq(anims[2] and anims[2].anim, "CONF_PLAYER_ANIM", "status anim (co-op): ...our own keeps the player's")
+    sc.medPending = {}
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "SLP_PLAYER_ANIM" })
+    ev(sc, { t = "msg", text = "FOE is fast asleep!" })
+    local order = {}
+    for _, r in ipairs(sc.medPending) do
+      if r.kind == "anim" then order[#order + 1] = r.anim
+      elseif r.kind == "msg" then order[#order + 1] = "msg" end
+    end
+    eq(table.concat(order, ","), "msg,SLP_ANIM", "status anim (co-op): the foe's sleep clip plays behind its line")
+  end
+
+  -- Red's PP byte past the wrap (co-op's live party is the save's): 0 paid is
+  -- 63 and a PP Up borrowed, and a refund carries it back.
+  do
+    local lead = mon(60, 40)
+    lead.moves = { { id = "FIX_TACKLE", pp = 0 } }
+    local sc = seat5(1, { lead })
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 0,
+             moves = { { id = "FIX_TACKLE", pp = 63, maxPp = 35 } } })
+    eq(lead.moves[1].pp .. "/" .. tostring(lead.moves[1].ppUps), "63/3",
+       "PP wrap (Red co-op): the save holds 63 PP and the borrowed PP Up")
+    ev(sc, { t = "moves", slot = 0, side = "a", mon = 0,
+             moves = { { id = "FIX_TACKLE", pp = 0, maxPp = 35 } } })
+    eq(lead.moves[1].pp .. "/" .. tostring(lead.moves[1].ppUps), "0/0",
+       "PP wrap (Red co-op): IncrementMovePP's carry gives it back")
+  end
+
+  -- The catch is the referee's line alone: no "Gotcha!" of this screen's.
+  do
+    local sc = seat5(1, nil, "coop_wild")
+    sc:onBattleOutcome({ battle = "cb1", winners = { "ann", "bob" }, losers = { "npc" },
+                         reason = "catch", catcher = "bob" })
+    eq(count(texts(sc), "Gotcha!"), 0, "catch (co-op): the referee's catch line is not echoed")
+  end
+
+  -- Gold's coop_wild RUN can fail (wave 5): "Can't escape!" and the turn goes
+  -- on -- the screen is back at its menu, the fight still open.
+  do
+    local game = newGame()
+    game.data = data5
+    game.generation, game.save.generation = 2, 2
+    game.save.player = { name = "ANN", id = 4321, money = 0 }
+    -- Built on the fixture's Red field (CoopField takes no Gold game), then
+    -- handed the Gold game, as `seat5` does.
+    local sc = screen({ slots = npcSlots(), mine = 1, host = true, mode = "coop_wild",
+                        selfId = "ann" })
+    sc.game = game
+    sc.gen2Mediated = true
+    sc.wildParty = need("MediatedBattle").snapshotMons(game, { mon(20, 10) })
+    eq(sc:uploadMediated(), true, "failed run (Gold co-op): the wild fight is uploaded")
+    sc.mediated = true
+    sc.medSlots = { [0] = 1, [1] = 2, [2] = 3, [3] = 4 }
+    sc.medFields = { [1] = 0, [2] = 1, [3] = 2, [4] = 3 }
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    sc.phase = "choose"
+    sc:askToRun()
+    local sent = choices(sc)
+    eq(sent[#sent] and sent[#sent].action, "run", "failed run (Gold co-op): the RUN is filed")
+    ev(sc, { t = "msg", text = "Can't escape!" })
+    ev(sc, { t = "turn", amount = 2 })
+    drain6(sc)
+    eq(sc.result, nil, "failed run (Gold co-op): the fight is still on")
+    eq(sc.escapeSaid, nil, "failed run (Gold co-op): no escape was read")
+    eq(sc.phase, "choose", "failed run (Gold co-op): ...and the menu is back")
   end
 end
 

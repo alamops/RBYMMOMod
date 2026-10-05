@@ -3696,6 +3696,130 @@ function testWave5LineBudget() {
   }
 }
 
+// ------------------------------------------------------------------
+// Wave 6 of docs/plans/gen12-referee-gaps-fix.md, through the hub: an NPC
+// party's display `name` (Red and Gold) names every seat the trainer is dealt
+// across and its Red `aiMods` ride on those seats alone; the referee's AI item
+// line carries the name and a Red / Gold client reads it whole (é … ♂ ♀ &); a
+// JSON null in a ruleset's chart or specialTypes is closed up as the Lua hub's
+// decoder closes it. Twin of the wave 6 block in tests/hub_battle.lua.
+// ------------------------------------------------------------------
+
+function npcFight6(generation, npc, humans = 1, own) {
+  const relay = makeRelay(makeClock(), { generation });
+  const joiner = generation === 2 ? dial2 : dial;
+  const a = joiner(relay, 'ANN');
+  const members = [a.id];
+  const b = humans === 2 ? joiner(relay, 'BOB') : null;
+  if (b) members.push(b.id);
+  const id = 'w6';
+  relay.openCoopBattle(id, members, { mode: 'coop_npc', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: [[100, 100], [100, 100]] });
+  const sheet = (species) => (generation === 2 ? sheet2({ species }) : { ...mon(40), species });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet('HERO')], ...(own || {}),
+  });
+  if (b) {
+    relay.handle(b.id, {
+      type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet('HERO')],
+    });
+  }
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet('FOE'), sheet('FOE')], ...(npc || {}),
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false, record };
+  const seats = record.npcIds.map((npcId) => record.sim.byId.get(npcId));
+  const out = {
+    opened: true, record, seats, ann: record.sim.byId.get(a.id), lines: [],
+  };
+  if (humans !== 2) {
+    a.peer.outbox.length = 0;
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+    });
+    out.lines = takeAll(a, 'mmo.battle_event').filter((msg) => msg.t === 'msg').map((msg) => {
+      const read = sanitize.cleanBattleEvent(msg, generation);
+      return { sent: msg.text, read: read ? read.text : undefined };
+    });
+  }
+  return out;
+}
+
+const lineWith6 = (lines, part) => (lines || []).find((l) => l.sent.includes(part));
+
+function testWave6NpcSeat() {
+  const xItem = [{ id: 'X_ATTACK', count: 1 }];
+  const named = npcFight6(1, { name: 'COOLTRAINER♂', aiMods: [1, 3], bag: xItem });
+  ok(named.opened, 'wave 6: a Red trainer naming itself opens');
+  ok(named.seats[0].name === 'COOLTRAINER♂', 'wave 6: the NPC seat is the trainer\'s name');
+  ok(JSON.stringify(named.seats[0].aiMods) === '[1,3]', 'wave 6: ...and the referee holds its Red layers');
+  ok(named.ann.name === 'ANN', 'wave 6: a human seat is still its connection\'s name');
+  ok(!named.ann.aiMods, 'wave 6: ...with no layers');
+  const used = lineWith6(named.lines, ' used X ATTACK on ');
+  ok(used && used.sent === 'COOLTRAINER♂ used X ATTACK on FOE!',
+    'wave 6: the referee prints the cart\'s AI item line with the trainer\'s name');
+  ok(used && used.read === used.sent, 'wave 6: ...and a Red client reads the line whole, ♂ and all');
+
+  const plain = npcFight6(1, { bag: xItem });
+  ok(plain.seats[0].name === 'TRAINER', 'wave 6: a trainer naming nothing is TRAINER, as before');
+  ok(!plain.seats[0].aiMods, 'wave 6: ...and brings no layers');
+  const bad = npcFight6(1, { name: 42, aiMods: [] });
+  ok(bad.seats[0].name === 'TRAINER', 'wave 6: a name that does not read is dropped, not fatal');
+  ok(Array.isArray(bad.seats[0].aiMods) && bad.seats[0].aiMods.length === 0,
+    'wave 6: an empty layer list is a class with no layer (YOUNGSTER)');
+  const refused = npcFight6(1, { name: 'LASS', aiMods: [9] });
+  ok(!refused.opened, 'wave 6: a layer off the cart\'s four refuses the trainer\'s party');
+  ok(!refused.record.parties.has(refused.record.npcIds[0]), 'wave 6: ...so no NPC seat is filled');
+
+  const two = npcFight6(1, { name: 'LASS', aiMods: [2] }, 2);
+  ok(two.opened && two.seats.length === 2, 'wave 6: a 2v2 trainer is dealt across two seats');
+  for (const seat of two.seats) {
+    ok(seat.name === 'LASS' && seat.aiMods[0] === 2, 'wave 6: ...each named the trainer, each with its layers');
+  }
+
+  const claims = npcFight6(1, { name: 'LASS' }, 1, { name: 'MALLORY', aiMods: [2] });
+  ok(claims.ann.name === 'ANN', 'wave 6: a human\'s party cannot rename its own seat');
+  ok(!claims.ann.aiMods, 'wave 6: ...nor hand it layers');
+
+  const gold = npcFight6(2, { name: 'TWINS AMY & MAY', aiMods: [1], bag: xItem });
+  ok(gold.seats[0].name === 'TWINS AMY & MAY', 'wave 6: a Gold trainer\'s "<CLASS> <NAME>" names its seat');
+  ok(!gold.seats[0].aiMods, 'wave 6: ...and Gold reads no Red layers');
+  const goldLine = lineWith6(gold.lines, 'TWINS AMY & MAY');
+  ok(goldLine, 'wave 6: the Gold referee prints the trainer\'s name in its item line');
+  ok(goldLine && goldLine.read === goldLine.sent, 'wave 6: a Gold client reads the & whole');
+
+  const perish = sanitize.cleanBattleEvent({
+    battle: 'b', seq: 1, t: 'msg', text: 'Both POKéMON will faint in 3 turns!',
+  }, 2);
+  ok(perish.text === 'Both POKéMON will faint in 3 turns!', 'wave 6: PerishSongText keeps its é on a Gold reader');
+  ok(sanitize.cleanText('Both POKéMON', 60) === 'Both POKMON', 'wave 6: player-typed text stays inside the old set');
+}
+
+function testWave6RulesetNulls() {
+  const rulesetOf = (rules) => {
+    const relay = makeRelay(makeClock());
+    const a = dial(relay, 'ANN');
+    relay.openCoopBattle('w6r', [a.id], { mode: 'wild', hostId: a.id });
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: 'w6r', ...rules });
+    const record = relay.battles.get('w6r');
+    return record && record.ruleset;
+  };
+  // The line a client sends, through JSON.parse as the hub reads it.
+  const parsed = rulesetOf(JSON.parse('{"chart":[[100,null,100],null,[100,100]],"specialTypes":[1,null,0]}'));
+  ok(parsed && parsed.chart.length === 2, 'wave 6: a null chart row is closed up, as the Lua decoder does');
+  ok(parsed && parsed.chart[0].join(',') === '100,100', 'wave 6: ...and a null cell (it used to read as 0)');
+  ok(parsed && parsed.specialTypes.join(',') === '1,0', 'wave 6: ...and a null index (it used to read as type 0)');
+  ok(!rulesetOf({ chart: [[100, 100], [100, 100]], specialTypes: { a: 1 } }),
+    'wave 6: an object where specialTypes\' list belongs refuses the ruleset, as on the Lua hub');
+  const empty = rulesetOf({ chart: [[100, 100], [100, 100]], specialTypes: {} });
+  ok(empty && empty.specialTypes.length === 0, 'wave 6: an empty object is the empty list, as Lua decodes it');
+  const line = sanitize.cleanBattleEvent(JSON.parse(
+    '{"battle":"b","seq":1,"t":"msg","text":"POK\\u00e9MON \\u2026 \\u2642\\u2640 &"}',
+  ), 1);
+  ok(line.text === 'POKéMON … ♂♀ &', 'wave 6: \\u escapes decode to the glyphs a Red reader keeps');
+}
+
 testGen3SimSelection();
 testGen3OneVOne();
 testGen3CoopNpc();
@@ -3732,5 +3856,7 @@ testWave5BatonPass();
 testWave5Gender();
 testWave5PoolNum();
 testWave5LineBudget();
+testWave6NpcSeat();
+testWave6RulesetNulls();
 
 console.log(`hub_battle: ${passed} checks passed`);

@@ -319,9 +319,14 @@ end
 -- dependency on an implementation detail of the one file in this repo that is
 -- not allowed to change.
 
+-- ...including a Gold monster `standing` at 0 HP (BattleSim2 Turn's
+-- `activeMon`, wave 5): one SPIKES or PERISH SONG left at 0 has not fainted
+-- until the cart's next faint check finds it, and until then it is asked for
+-- a choice and acts -- so the trainer's brain is asked for it too, or a solo
+-- fight with no choice deadline (SOLO_CHOICE_TIMEOUT) waits on it forever.
 local function activeOf(fighter)
   local mon = fighter and fighter.mons and fighter.mons[fighter.active]
-  if mon and (tonumber(mon.hp) or 0) > 0 then return mon end
+  if mon and ((tonumber(mon.hp) or 0) > 0 or mon.standing == true) then return mon end
   return nil
 end
 
@@ -722,12 +727,22 @@ function M:_begin(game, state, mapId, kind)
     } },
     b = { {
       playerId = FOE_SEAT,
+      -- A trainer is named as the cart's lines name it -- the record's own
+      -- name, which the screen's NPC upload carries (MediatedBattle.npcSeat:
+      -- pokered's wTrainerName, a rival's chosen name included; Gold's
+      -- "YOUNGSTER JOEY") -- the class label without one.
       name = (kind == "wild") and (enemySheets[1].species or "WILD")
+        or (pending.wild and type(pending.wild.name) == "string" and pending.wild.name)
         or foeName(state),
       mons = enemySheets,
       -- Side b is the uploaded NPC claim (wild encounter, or the trainer
       -- plus their kit). Side nil is the player's own party.
       bag = (kind ~= "wild") and bagFromUpload(pending.wild) or nil,
+      -- Red's trainer move-choice layers, off the same upload: the referee
+      -- runs them only for a pick nobody filed (`_computerChoice` -- the
+      -- brain files this seat's every turn it can answer), as a hub's
+      -- coop_npc computer seat does for every turn.
+      aiMods = (kind ~= "wild" and pending.wild) and pending.wild.aiMods or nil,
     } },
   }
 
@@ -1856,9 +1871,9 @@ local function partyMoves12(mon, generation)
       local own = mimicked and mimicked[i]
       if type(own) == "table" and own.id ~= nil then
         local pp = (generation == 2 and own.pp ~= nil) and own.pp or row.pp
-        out[#out + 1] = { id = own.id, pp = pp }
+        out[#out + 1] = { id = own.id, pp = pp, ppUps = row.ppUps }
       else
-        out[#out + 1] = { id = row.id, pp = row.pp }
+        out[#out + 1] = { id = row.id, pp = row.pp, ppUps = row.ppUps }
       end
     end
   end
@@ -1988,6 +2003,15 @@ function M:_applyMon(target, mon, generation)
       while found <= #moves and moves[found].id ~= id do found = found + 1 end
       if found <= #moves then
         moves[found].pp = max(0, tonumber(simMove.pp) or 0)
+        -- Red's PP byte, whole: a slot DecrementPP wrapped holds 63 PP and
+        -- one PP Up fewer (pokered decrement_pp.asm; the referee's `stepPp`),
+        -- and that is what the party struct keeps -- never the PP clamped to
+        -- a maximum.  Written only where it moved, so a slot that never
+        -- stated its PP Ups keeps its shape.
+        local ups = tonumber(simMove.ppUps)
+        if generation == 1 and ups and ups ~= (tonumber(moves[found].ppUps) or 0) then
+          moves[found].ppUps = ups
+        end
         at = found + 1
       end
     end

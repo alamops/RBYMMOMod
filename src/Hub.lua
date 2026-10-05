@@ -1675,6 +1675,11 @@ function M:fillBattleParty(record, client, party)
     hand[#hand + 1] = mon
   end
 
+  -- One trainer, so every seat it is dealt across is that trainer: each
+  -- carries the party's display name and Red move-choice layers (Wire.battleParty
+  -- reads `name` on Red / Gold and `aiMods` on Red, wave 6 of
+  -- docs/plans/gen12-referee-gaps-fix.md) -- tryStartSim names the seat and
+  -- hands the layers to the referee from here.
   local kept, dropped = {}, {}
   for at, npcId in ipairs(record.npcIds) do
     if dealt[at] and #dealt[at] > 0 then
@@ -1682,6 +1687,7 @@ function M:fillBattleParty(record, client, party)
       record.parties[npcId] = {
         battle = party.battle, side = party.side,
         badges = party.badges, mons = dealt[at],
+        name = party.name, aiMods = party.aiMods,
       }
     else
       dropped[npcId] = true
@@ -2177,10 +2183,19 @@ function M:tryStartSim(record)
     local bag = record.bags[seat]
     if self.generation == 3 then bag = self:simBag3(record, seat, bag)
     else bag = bag and self:cloneBagMap(bag) or nil end
+    -- A human seat is named by its connection, never by a payload; an NPC seat
+    -- by the trainer's display name its party brought (wave 6: Wire.npcName,
+    -- Red / Gold, which the referee prints -- pokered's AI item line is
+    -- "<wTrainerName> used <ITEM> on <MON>!"), else "TRAINER" as before.  Its
+    -- Red move-choice layers (`aiMods`) ride on the NPC seat alone: the Red
+    -- referee reads them for a computer trainer seat (BattleSim Turn
+    -- `copyAiMods`), and a human's party has no business naming any.
+    local npc = self:isNpcSeat(record, seat)
     return {
       playerId = seat,
       name = (client and client.name)
-        or (self:isNpcSeat(record, seat) and "TRAINER" or seat),
+        or (npc and (party.name or "TRAINER") or seat),
+      aiMods = npc and party.aiMods or nil,
       mons = party.mons,
       badges = party.badges,
       bag = bag,

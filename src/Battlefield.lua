@@ -391,12 +391,17 @@ end
 
 -- Shared by the card, the plates and the bubbles — declared here so the pure
 -- model helpers below can reach it too.
+-- Counted and cut in glyphs (ClassicBattle.glyphs): a trainer's name and a
+-- referee line carry é / … / ♂ / ♀ since wave 6, one character each, and a
+-- byte cut through one is text the font cannot draw.
 local function truncate(text, maxChars)
   if type(text) ~= "string" then return "" end
   maxChars = maxChars or 12
-  if #text <= maxChars then return text end
-  return text:sub(1, math.max(1, maxChars - 1)) .. "."
+  if ClassicBattle.glyphCount(text) <= maxChars then return text end
+  return ClassicBattle.glyphPrefix(text, math.max(1, maxChars - 1)) .. "."
 end
+-- For the suites.
+M.truncateText = truncate
 
 -- Callout voice: "pikachu" -> "PIKACHU!". Collapses whitespace, upper-cases,
 -- and appends exactly one exclamation mark — an author's own terminal ! or ?
@@ -2002,7 +2007,7 @@ local function widthWith(font, text)
     local ok, w = pcall(font.getWidth, font, text)
     if ok and type(w) == "number" then return w end
   end
-  return #text * 6
+  return ClassicBattle.glyphCount(text) * 6
 end
 
 local function heightWith(font)
@@ -2148,22 +2153,30 @@ end
 -- because Font:getWidth kerns — prefix width plus ellipsis width is not the
 -- same number, and the output here has to be byte-identical to the walk.
 -- Width is non-decreasing in the cut, which is what makes the search legal.
+--
+-- The cut is searched over glyphs (ClassicBattle.glyphs), not bytes: a
+-- referee line carries é / … / ♂ / ♀ since wave 6, and a prefix ending inside
+-- one is invalid UTF-8 -- which a LÖVE font will not measure or print.
 local function fitLine(font, text, maxW)
   text = tostring(text or "")
   if widthWith(font, text) <= maxW then return text, false end
+  local glyphs = ClassicBattle.glyphs(text)
+  local function prefix(count) return table.concat(glyphs, "", 1, count) end
   -- Floor of 1, as the walk had: something ellipsised beats an empty row.
-  local lo, hi, cut = 1, #text, 1
+  local lo, hi, cut = 1, #glyphs, 1
   while lo <= hi do
     local mid = math.floor((lo + hi) / 2)
-    if widthWith(font, text:sub(1, mid) .. "...") <= maxW then
+    if widthWith(font, prefix(mid) .. "...") <= maxW then
       cut = mid
       lo = mid + 1
     else
       hi = mid - 1
     end
   end
-  return text:sub(1, cut) .. "...", true
+  return prefix(cut) .. "...", true
 end
+-- For the suites.
+M.fitLine = fitLine
 
 -- Word wrap by measured width, honouring embedded newlines (battle text is
 -- written with them). Returns at most `maxLines` lines plus whether anything

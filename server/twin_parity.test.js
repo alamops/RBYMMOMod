@@ -1382,3 +1382,245 @@ test('a Gold Metronome pool row\'s `num` rides a Gen 2 ruleset only, refusing it
   assert.ok(/opts\.metronomePool\[i\]\.num/.test(read('src/BattleSim2/Turn.lua')), 'BattleSim2 reads the pool num');
   assert.ok(/\.num/.test(read('server/lib/battle2/Turn.js')), 'lib/battle2 reads it too');
 });
+
+// ---------------------------------------------------------------------------
+// Wave 6 of docs/plans/gen12-referee-gaps-fix.md: the carts' battle glyphs in a
+// Red / Gold `msg`, an NPC party's Red `aiMods` and Red / Gold `name`, and the
+// chart / specialTypes nulls closed up alike. The hub parity driver
+// (referee_gaps_wave6_dialect, wave6_hub_fields) holds the readers to one
+// answer case by case; this pins the bounds, the glyph set and the hub lines.
+// ---------------------------------------------------------------------------
+
+test('wave 6 bounds: the NPC name cap and the aiMods bounds match Wire, sanitize and both Red referees', () => {
+  const wire = read('src/Wire.lua');
+  for (const name of ['NPC_NAME_MAX', 'AI_MOD_MAX', 'AI_MODS_MAX']) {
+    assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name],
+      `Wire.${name} and sanitize.${name} must match`);
+  }
+  // pokered TRAINER_NAME_LENGTH 13 (twelve: "COOLTRAINER♂"); Gold's
+  // PlaceEnemysName prints wOTClassName, a space, then the trainer's name
+  // (TRAINER_CLASS_NAME_LENGTH 13, NAME_LENGTH 11): 12 + 1 + 10.
+  assert.strictEqual(sanitize.NPC_NAME_MAX, 23, 'the longest name either cart prints for its computer');
+  assert.ok(sanitize.NPC_NAME_MAX > sanitize.NAME_MAX, 'wider than a player name, which cuts COOLTRAINER');
+  assert.strictEqual(sanitize.AI_MOD_MAX, 4, 'pokered has four AIMoveChoiceModification pointers');
+  assert.strictEqual(luaNumber(read('src/BattleSim/Turn.lua'), 'MAX_AI_MODS', 'BattleSim/Turn.lua'),
+    sanitize.AI_MODS_MAX, 'the wire takes exactly the layers BattleSim keeps');
+  assert.strictEqual(require('./lib/battle/Turn.js').MAX_AI_MODS, sanitize.AI_MODS_MAX,
+    'and lib/battle keeps');
+});
+
+test('a Red / Gold msg keeps the carts\' battle glyphs; player-typed text does not', () => {
+  const msg = (text, gen) => {
+    const event = sanitize.cleanBattleEvent({
+      battle: 'b1', seq: 1, t: 'msg', text,
+    }, gen);
+    return event ? event.text : undefined;
+  };
+  for (const gen of [1, 2]) {
+    assert.strictEqual(msg('Both POKéMON will faint in 3 turns!', gen), 'Both POKéMON will faint in 3 turns!',
+      `a Gen ${gen} reader keeps é`);
+    assert.strictEqual(msg('X ignored orders…sleeping!', gen), 'X ignored orders…sleeping!', '...and …');
+    assert.strictEqual(msg('JR.TRAINER♂ used X ATTACK on COOLTRAINER♀!', gen),
+      'JR.TRAINER♂ used X ATTACK on COOLTRAINER♀!', '...and ♂ ♀');
+    assert.strictEqual(msg('TWINS AMY & MAY used an item', gen), 'TWINS AMY & MAY used an item', '...and &');
+    assert.strictEqual(msg('é'.repeat(70), gen), 'é'.repeat(sanitize.MESSAGE_MAX),
+      'the cut counts glyphs, at MESSAGE_MAX');
+    assert.strictEqual(msg('POKÉMON ¥ <PK> _ \u{1F600}', gen), 'POKMON PK', 'nothing else past the old set');
+  }
+  for (const gen of [3, undefined]) {
+    assert.strictEqual(msg('Both POKéMON will faint…', gen), 'Both POKMON will faint',
+      `a reader for generation ${gen} reads a msg as before`);
+  }
+  assert.strictEqual(sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 1, t: 'chose', text: 'COOLTRAINER♂',
+  }, 1).text, 'COOLTRAINER', 'every other kind\'s text reads as before');
+  assert.strictEqual(sanitize.cleanText('POKéMON & …', 60), 'POKMON', 'chat, names and rooms stay narrow');
+  const wire = read('src/Wire.lua');
+  assert.ok(/elseif older and raw\.t == "msg" then\s+out\.text = M\.battleText\(raw\.text, Config\.MESSAGE_MAX\)/
+    .test(wire), 'Wire.battleEvent reads an older msg through M.battleText');
+  assert.ok(/local ALLOWED = "\[\^A-Za-z0-9 %\.,!%\?'%-:;%\(%\)\/\]"/.test(wire), 'Wire.text\'s set is unchanged');
+  assert.ok(/local BATTLE_ASCII = "\[A-Za-z0-9 %\.,!%\?'%-:;%\(%\)\/&\]"/.test(wire),
+    'Wire.battleText\'s ASCII is M.text\'s plus &');
+  // The multi-byte glyphs, as the byte escapes Wire.lua lists them.
+  const block = wire.match(/M\.BATTLE_GLYPHS = \{([\s\S]*?)\n\}/);
+  assert.ok(block, 'Wire.lua must define M.BATTLE_GLYPHS');
+  const luaGlyphs = [...block[1].matchAll(/\["((?:\\\d+)+)"\] = true/g)]
+    .map((m) => Buffer.from(m[1].split('\\').filter(Boolean).map(Number)).toString('utf8'))
+    .sort();
+  assert.deepStrictEqual(luaGlyphs, ['é', '…', '♀', '♂'].sort(), 'é … ♂ ♀, as whole UTF-8 sequences');
+  for (const glyph of luaGlyphs) {
+    assert.strictEqual(sanitize.cleanBattleText(glyph), glyph, `cleanBattleText keeps ${glyph}`);
+  }
+});
+
+test('battle lines read byte for byte alike on Wire.battleText and cleanBattleText', (t) => {
+  // Each string is bytes as a hub receives them: Lua reads the bytes, Node the
+  // string its UTF-8 decoding makes of them (a stray sequence is U+FFFD). Skipped
+  // (not failed) without luajit, as the parity suites are.
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('luajit', ['-v'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    t.skip('luajit not on PATH');
+    return;
+  }
+  const pieces = ['c3a9', 'e280a6', 'e29982', 'e29980', 'c3', 'a9', 'e280', 'e299', 'e2', '80', 'a6',
+    'f09f9880', 'f09f98', 'eda080', 'c0a9', 'c2a0', 'efbbbf', 'ff', 'c389', 'c3a8', 'c2a5', '20', '2020',
+    '09', '0a', '00', '26', '23', '3c', '5f', '50', '4f', '4b', '41', '39', '2e', '21', '27', '2d', '7e'];
+  let seed = 20261005;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  const cases = [];
+  for (let i = 0; i < 3000; i += 1) {
+    let hex = '';
+    for (let n = Math.floor(rand() * 40); n > 0; n -= 1) hex += pieces[Math.floor(rand() * pieces.length)];
+    if (i % 50 === 0) hex = 'c3a9'.repeat(30 + (i % 7)) + '2078'.repeat(i % 5);
+    const limit = [0, 1, 5, 23, 60, 61][i % 6];
+    cases.push({ hex, limit });
+  }
+  const script = [
+    `package.path = "${ROOT}/?.lua;" .. package.path`,
+    'local cache = {}',
+    'local function need(name)',
+    '  if cache[name] ~= nil then return cache[name] end',
+    `  local h = assert(io.open("${ROOT}/src/" .. name .. ".lua", "rb"))`,
+    '  local body = h:read("*a"); h:close()',
+    '  cache[name] = assert((loadstring or load)(body, "@" .. name))(need)',
+    '  return cache[name]',
+    'end',
+    'local Wire = need("Wire")',
+    'for line in io.lines() do',
+    '  local limit, hex = line:match("^(%d+) (%x*)$")',
+    "  local s = hex:gsub('..', function(h) return string.char(tonumber(h, 16)) end)",
+    '  local out = Wire.battleText(s, limit ~= "0" and tonumber(limit) or nil)',
+    "  io.write(out and (out:gsub('.', function(c) return string.format('%02x', c:byte()) end)) or 'nil', '\\n')",
+    'end',
+  ].join('\n');
+  const lua = spawnSync('luajit', ['-e', script], {
+    input: `${cases.map((c) => `${c.limit} ${c.hex}`).join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
+  assert.strictEqual(lua.status, 0, `luajit failed: ${lua.stderr}`);
+  const answers = lua.stdout.trim().split('\n');
+  assert.strictEqual(answers.length, cases.length, 'one answer per string');
+  const differ = [];
+  cases.forEach((c, i) => {
+    const js = sanitize.cleanBattleText(Buffer.from(c.hex, 'hex').toString('utf8'), c.limit || undefined);
+    const mine = js === null ? 'nil' : Buffer.from(js, 'utf8').toString('hex');
+    if (mine !== answers[i]) differ.push(`${c.hex}/${c.limit}: lua=${answers[i]} js=${mine}`);
+  });
+  assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${cases.length} lines read differently`);
+});
+
+test('an NPC party\'s Red aiMods and Red / Gold name: read by dialect, carried to NPC seats alone', () => {
+  const sheet1 = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spd: 90, spc: 90,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  const sheet2 = {
+    ...sheet1,
+    stats: {
+      atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+    },
+  };
+  const party = (extra, gen) => sanitize.cleanBattleParty({
+    battle: 'b1', mons: [gen === 2 ? sheet2 : sheet1], ...extra,
+  }, gen);
+  assert.deepStrictEqual(party({ aiMods: [1, 3] }, 1).aiMods, [1, 3], 'a Red party carries its layers');
+  assert.deepStrictEqual(party({ aiMods: [] }, 1).aiMods, [], 'an empty list is a class with no layer');
+  assert.deepStrictEqual(party({ aiMods: [2, null, '3'] }, 1).aiMods, [2, 3],
+    'a JSON null is closed up and a numeric string read as Wire.int reads it');
+  for (const bad of [[0], [5], [true], [[1]], [''], new Array(sanitize.AI_MODS_MAX + 1).fill(1), { a: 1 }, '1,2', 3]) {
+    assert.strictEqual(party({ aiMods: bad }, 1), null,
+      `unreadable layers (${JSON.stringify(bad)}) refuse the Red party`);
+  }
+  assert.strictEqual(party({ aiMods: new Array(sanitize.AI_MODS_MAX).fill(4) }, 1).aiMods.length,
+    sanitize.AI_MODS_MAX, 'a list at the cap is taken whole');
+  for (const gen of [2, undefined]) {
+    const got = party({ aiMods: [9] }, gen);
+    assert.ok(got && got.aiMods === undefined, `a party read for generation ${gen} neither keeps nor refuses layers`);
+  }
+  assert.strictEqual(party({ name: 'COOLTRAINER♂' }, 1).name, 'COOLTRAINER♂', 'a Red trainer\'s name, ♂ and all');
+  assert.strictEqual(party({ name: 'TWINS AMY & MAY' }, 2).name, 'TWINS AMY & MAY', 'a Gold "<CLASS> <NAME>"');
+  assert.strictEqual(party({ name: 'FIREBREATHER ABCDEFGHIJK' }, 2).name, 'FIREBREATHER ABCDEFGHIJ',
+    'cut at NPC_NAME_MAX');
+  for (const bad of [42, '', '\u{1F600}', ['A'], true]) {
+    const got = party({ name: bad }, 1);
+    assert.ok(got && got.name === undefined, `an unreadable name (${JSON.stringify(bad)}) is dropped, not fatal`);
+  }
+  assert.strictEqual(party({ name: 'ROCKET' }).name, undefined, 'a party read for no generation reads no name');
+
+  const wire = read('src/Wire.lua');
+  assert.ok(/if partyGen == 1 and raw\.aiMods ~= nil then\s+out\.aiMods = aiModsOf\(raw\.aiMods\)\s+if out\.aiMods == nil then return nil end/
+    .test(wire), 'Wire.battleParty reads aiMods on a Red party and refuses it unreadable');
+  assert.ok(/if \(partyGen == 1 or partyGen == 2\) and raw\.name ~= nil then\s+out\.name = M\.npcName\(raw\.name\)/
+    .test(wire), 'Wire.battleParty reads the name on a Red / Gold party');
+  // Both hubs deal both facts onto every NPC seat, and hand them to the referee
+  // from there alone.
+  const hub = read('src/Hub.lua');
+  assert.ok(/name = party\.name, aiMods = party\.aiMods,/.test(hub), 'Hub:fillBattleParty copies both onto NPC seats');
+  assert.ok(/or \(npc and \(party\.name or "TRAINER"\) or seat\),\s+aiMods = npc and party\.aiMods or nil,/.test(hub),
+    'Hub:tryStartSim names an NPC seat from its party and passes its layers');
+  const relay = read('server/lib/relay.js');
+  assert.ok(/if \(party\.name\) seatParty\.name = party\.name;\s+if \(party\.aiMods\) seatParty\.aiMods = party\.aiMods;/
+    .test(relay), 'relay fillBattleParty copies both onto NPC seats');
+  assert.ok(/\|\| \(npc \? \(party\.name \|\| 'TRAINER'\) : seat\),[\s\S]{0,200}if \(npc && party\.aiMods\) entry\.aiMods = party\.aiMods;/
+    .test(relay), 'relay tryStartSim names an NPC seat from its party and passes its layers');
+  // ...and both Red referees read them off the roster entry.
+  assert.ok(/copyAiMods\(entry\.aiMods\)/.test(read('src/BattleSim/Turn.lua')), 'BattleSim reads entry.aiMods');
+  assert.ok(/copyAiMods\(entry\.aiMods\)/.test(read('server/lib/battle/Turn.js')), 'lib/battle reads entry.aiMods');
+});
+
+test('a Gen 1 / Gen 2 chart and specialTypes close a JSON null up, as the Lua decoder does', () => {
+  const rules = (extra, gen = 1) => sanitize.cleanBattleRuleset({ chart: [[100, 100], [100, 100]], ...extra }, gen);
+  assert.deepStrictEqual(sanitize.cleanChart([[100, null, 50], null, [0, 200]]), [[100, 50], [0, 200]],
+    'a null row and a null cell are closed up');
+  assert.strictEqual(sanitize.cleanChart([[null, null]]), null, 'a row of nulls is an empty row');
+  for (const bad of [[[true, 100]], [[[100], 50]], [['', 50]], [[100, 50], { a: 1 }], { a: [100] }]) {
+    assert.strictEqual(sanitize.cleanChart(bad), null, `${JSON.stringify(bad)} is no chart on either twin`);
+  }
+  assert.deepStrictEqual(sanitize.cleanChart([['100', ' 50 ']]), [[100, 50]], 'a numeric string reads as Wire.int');
+  assert.deepStrictEqual(rules({ specialTypes: [1, null, 0] }).specialTypes, [1, 0], 'a null index is closed up');
+  assert.deepStrictEqual(rules({ specialTypes: [null] }, 2).specialTypes, [], '...to the empty list');
+  assert.deepStrictEqual(rules({ specialTypes: {} }).specialTypes, [], 'an empty object is the empty list');
+  for (const bad of [{ a: 1 }, [true], [[1]], [''], '1']) {
+    assert.strictEqual(rules({ specialTypes: bad }), null, `${JSON.stringify(bad)} refuses the ruleset`);
+  }
+  const wire = read('src/Wire.lua');
+  assert.ok(/if raw\.specialTypes ~= nil then\s+if not isList\(raw\.specialTypes\) then return nil end/.test(wire),
+    'Wire.battleRuleset reads specialTypes as a list');
+  const src = read('server/lib/sanitize.js');
+  assert.ok(/function cleanChart\(value\) \{\s+const list = luaList\(value\);/.test(src), 'cleanChart closes rows up');
+  assert.ok(/const row = luaList\(entry\);/.test(src), '...and each row\'s cells');
+});
+
+test('a Gen 1 / Gen 2 moves event keeps a row\'s ppUps for the client to mirror', () => {
+  const rows = [
+    {
+      id: 'TAP', pp: 0, maxPp: 35, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, ppUps: 3,
+    },
+    {
+      id: 'HUSH', pp: 5, power: 0, accuracy: 255, type: 0, effect: 0, chance: 0, ppUps: 4,
+    },
+  ];
+  for (const gen of [1, 2]) {
+    const event = sanitize.cleanBattleEvent({
+      battle: 'b1', seq: 1, t: 'moves', slot: 0, side: 'a', mon: 0, moves: rows,
+    }, gen);
+    assert.strictEqual(event.moves.length, 1, `a row past PP_UPS_MAX is dropped on Gen ${gen}`);
+    assert.strictEqual(event.moves[0].ppUps, 3, `...and a readable one kept on Gen ${gen}`);
+  }
+});

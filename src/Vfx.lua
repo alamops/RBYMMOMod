@@ -1105,6 +1105,30 @@ function M.forStatus(status)
     entry.intensity or 0.8, entry.duration)
 end
 
+-- The look of a status animation the Red referee names by its battle_anims
+-- id (BattleSim Turn `_statusAnim`, wave 5): the sleeping monster's SLP_ANIM /
+-- SLP_PLAYER_ANIM (pokered CheckPlayerStatusConditions / CheckEnemyStatus
+-- Conditions, every turn it sleeps), the confused one's CONF_ANIM /
+-- CONF_PLAYER_ANIM (behind IsConfusedText), and BURN_PSN_ANIM, the residual
+-- burn or poison tick (HandlePoisonBurnLeechSeed) -- worn in the colours of
+-- the condition doing it, `status` (the seat's token: BRN, else poison).
+-- The arena draws these where the classic page plays the engine's clip.  nil
+-- for any other id.
+local STATUS_ANIM_LOOK = {
+  SLP_ANIM = "SLP", SLP_PLAYER_ANIM = "SLP",
+  CONF_ANIM = "confusion", CONF_PLAYER_ANIM = "confusion",
+}
+function M.forStatusAnim(anim, status)
+  if type(anim) ~= "string" then return nil end
+  local key = STATUS_ANIM_LOOK[anim]
+  if anim == "BURN_PSN_ANIM" then
+    key = (status == "BRN" or status == "burn") and "BRN"
+      or ((status == "TOX" or status == "toxic") and "TOX" or "PSN")
+  end
+  if not key then return nil end
+  return M.forStatus(key)
+end
+
 -- A stat stage moving: arrows up for a rise, arrows down for a drop, and the
 -- count of them is the size of the change (a Growl is one arrow, a Screech is
 -- two). `delta` is the stage change the `stat` event carried.
