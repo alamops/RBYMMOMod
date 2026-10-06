@@ -6,9 +6,9 @@
 | Source | "fix all" on `docs/plans/gen12-referee-known-gaps.md` (every row, §1–§14 and the client notes) |
 | Config | AGENTS_CONFIG.yml (quality preset, host `claude_code`) |
 | Flags | none |
-| Gates | grilled (one owner decision, below) + awaiting approval |
+| Gates | grilled (owner decisions below) + approved; scope widened by the owner after wave 1 |
 | Branch | `feature/firered-and-emerald-support` (unpushed, 1.5.0, PROTOCOL 30 unreleased — no bump) |
-| Base SHA | `24af23a` (plan); wave 1 `e51c48d` |
+| Base SHA | `24af23a` (plan); delivered in `e51c48d`..`17a802b` (six waves, polish, review fixes, e2e) |
 
 **Rule source:** the carts in pret (`pokered`, `pokecrystal`, `pokegold` where it differs), quirks reproduced, freezes never, both twins line for line, a parity scenario per rule. Copies in `<scratchpad>/pret/`.
 
