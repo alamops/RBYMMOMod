@@ -785,7 +785,12 @@ function recordUsedMove(mon, move) {
   if (!mon || typeof mon !== 'object' || !move || typeof move !== 'object') return;
   if (!Array.isArray(mon.usedMoves)) mon.usedMoves = [];
   const list = mon.usedMoves;
-  const row = { id: move.id, power: move.power, type: move.type, typeId: move.typeId };
+  // The effect and accuracy too: AIChooseMove's handlers read them through it
+  // (a METRONOME-called PROTECT / DETECT the sheet no longer holds).
+  const row = {
+    id: move.id, power: move.power, type: move.type, typeId: move.typeId,
+    effect: move.effect, accuracy: move.accuracy,
+  };
   for (let i = 0; i < NUM_MOVES; i += 1) {
     const seen = list[i];
     if (!seen) {

@@ -1501,7 +1501,13 @@ const duo2 = (id, mode, seed, aMons, bMons, extra = {}) => {
 const seq = (events, opts, rounds) => play(events, opts, rounds.map((list) => {
   if (typeof list === 'function') return (b) => list(b, events);
   if (list === 'tick') return (b) => { b.tick(b.now + 1); };
-  return (b) => { for (const [id, choice] of list) b.submitChoice(id, choice); };
+  // 'auto' files the seat's answer the way a hub's NPC seat and a solo foe do
+  // (`autoPick`: the computer's own AI, H2).
+  return (b) => {
+    for (const [id, choice] of list) {
+      if (choice === 'auto') b.autoPick(id); else b.submitChoice(id, choice);
+    }
+  };
 }));
 const F = (i) => ({ action: 'fight', move: i });
 const S = (slot) => ({ action: 'switch', slot });
@@ -2291,7 +2297,8 @@ scenario('r2d_swagger', (events) => seq(events, duo4('r4u', '1v1', 821,
     mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
 [both3(F(0), F(0)), both3(F(0), S(1)), both3(F(0), F(0)), both3(F(0), F(0))]));
 
-scenario('r2d_status_lines', (events) => seq(events, duo4('r4v', 'coop_npc', 822,
+// Seed 825 (822 before K16): the AIChooseMove byte moved the rolls.
+scenario('r2d_status_lines', (events) => seq(events, duo4('r4v', 'coop_npc', 825,
   [mn({ species: 'Alpha', maxHp: 999, spe: 90, moves: [hm('LEECH_SEED', 0, 9, 84), hm('wait', 0, 0, 85)] }),
     mn({ species: 'Gamma', maxHp: 999, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
     mn({ species: 'Delta', maxHp: 999, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
@@ -2830,6 +2837,161 @@ scenario('t2_nightmare_curse_fs', (events) => seq(events, duo4('t2e', '1v1', 975
   [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'SLP', statusTurns: 7, moves: [hm('tap', 1)] })]),
 [both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0)), both3(F(3), F(0))]));
 
+// docs/plans/gen12-referee-remaining-gaps.md, wave 2's Gold half (H2): the
+// computer's choices at the cart's points (K16), K17's side-word marks, K22's
+// quiet clips and missed moves, and the follow-ups (the Lua driver lists each).
+const A = (choice, foe = 'p2') => [['p1', choice], [foe, 'auto'], [foe, 'auto']];
+const npc = (o, fields) => { Object.assign(o.sides.b[0], fields); return o; };
+const typed = (o, types) => mn({ ...o, types });
+
+scenario('h2_ai_flags0', (events) => seq(events, duo4('h2a', 'coop_npc', 1101,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 5), hm('thump', 10), hm('slam', 20)] })]),
+[A(F(0)), A(F(0)), A(F(0)), A(F(0)), A(F(0))]));
+
+scenario('h2_ai_layers', (events) => {
+  const o = duo4('h2b', 'coop_npc', 1102,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, status: 'PSN', types: [4], moves: [hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, types: [3],
+      moves: [am('HYPNOSIS', 0, 8, 32, 255), hm('splash_wave', 40, 3), hm('tap', 5), hm('GROWL', 0, 0, 18)] })]);
+  npc(o, { aiFlags: 1023 });
+  return seq(events, o, [A(F(0)), A(F(0)), A(F(0)), A(F(0))]);
+});
+
+scenario('h2_ai_disabled', (events) => seq(events, duo4('h2c', 'coop_npc', 1103,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85), hm('DISABLE', 0, 0, 86)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 5)] })]),
+[A(F(0)), A(F(1)), A(F(0)), A(F(0))]));
+
+scenario('h2_ai_out_of_pp', (events) => seq(events, duo4('h2d', 'coop_npc', 1104,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85), hm('SPITE', 0, 0, 150)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 5, 0, 0, 2)] })]),
+[A(F(0)), A(F(1)), A(F(0))]));
+
+scenario('h2_ai_encore', (events) => seq(events, duo4('h2e', 'coop_npc', 1105,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85), hm('ENCORE', 0, 0, 139)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 5), hm('thump', 10), hm('slam', 20)] })]),
+[A(F(0)), A(F(1)), A(F(0)), A(F(0)), A(F(0))]));
+
+scenario('h2_wild_pick', (events) => seq(events, duo4('h2f', 'wild', 1106,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85), hm('DISABLE', 0, 0, 86)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 5, 0, 0, 0), hm('thump', 10), hm('slam', 20)] })],
+  { foe: 'wild' }),
+[A(F(0), 'wild'), A(F(0), 'wild'), A(F(1), 'wild'), A(F(0), 'wild'), A(F(0), 'wild'), A(F(0), 'wild')]));
+
+scenario('h2_ai_item_base_reward', (events) => {
+  const o = duo4('h2g', 'coop_npc', 1107,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 5)] })]);
+  npc(o, { itemSwitch: 0x10, trainerItems: ['ANTIDOTE', 'FULL_RESTORE'], baseReward: 0x31 });
+  return seq(events, o, [A(F(0)), A(F(0))]);
+});
+
+scenario('h2_ai_potion', (events) => {
+  const o = duo4('h2h', 'coop_npc', 1108,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 100, hp: 20, spe: 10, moves: [hm('tap', 5)] })]);
+  npc(o, { trainerItems: ['POTION'] });
+  return seq(events, o, [A(F(0)), A(F(0))]);
+});
+
+scenario('h2_ai_switch_pursuit', (events) => {
+  const o = duo4('h2i', 'coop_npc', 1109,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+      moves: [hm('PERISH_SONG', 0, 0, 145), hm('wait', 0, 0, 85), hm('PURSUIT', 40, 7, 117)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 50, moves: [hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 400, spe: 10, moves: [hm('tap', 5)] }),
+      mn({ species: 'Delta', maxHp: 400, spe: 10, moves: [hm('tap', 5)] })]);
+  npc(o, { itemSwitch: 0x01 });
+  return seq(events, o, [A(F(0)), A(F(1)), A(F(1)), A(F(2)), [['p1', S(1)], ['p2', 'auto']], A(F(0))]);
+});
+
+scenario('h2_replace_single', (events) => seq(events, duo4('h2j', 'coop_npc', 1110,
+  [typed({ species: 'Alpha', maxHp: 900, atk: 200, spe: 90, moves: [hm('THRASH', 60, 0, 27)] }, [10])],
+  [typed({ species: 'Beta', maxHp: 100, hp: 5, spe: 10, moves: [hm('tap', 5)] }, [0]),
+    typed({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('tap', 5)] }, [11])]),
+[A(F(0)), A(F(0)), A(F(0))]));
+
+scenario('h2_replace_double', (events) => seq(events, duo4('h2k', 'coop_npc', 1111,
+  [typed({ species: 'Alpha', maxHp: 100, atk: 250, spe: 90, moves: [hm('EXPLOSION', 250, 0, 7)] }, [0]),
+    typed({ species: 'Gamma', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] }, [4])],
+  [typed({ species: 'Beta', maxHp: 50, def: 5, spe: 10, moves: [hm('tap', 5)] }, [0]),
+    typed({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('tap', 5)] }, [0]),
+    typed({ species: 'Eps', maxHp: 900, spe: 10, moves: [hm('splash_wave', 40, 3)] }, [3])]),
+[A(F(0)), [['p2', 'auto'], ['p1', S(1)]], A(F(0))]));
+
+scenario('h2_love_ball_transform', (events) => {
+  const wild = sexed({ species: 'Beta', maxHp: 300, spe: 10, moves: [hm('TRANSFORM', 0, 0, 57)] }, FEMALE);
+  wild.speciesId = 'MAGNEMITE';
+  wild.catchRate = 3;
+  const alpha = sexed({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('wait', 0, 0, 85)] }, MALE);
+  alpha.speciesId = 'MAGNEMITE';
+  return seq(events, duo4('h2l', 'wild', 1112, [alpha], [wild], { foe: 'wild' }),
+    [A(ITEM('LOVE_BALL'), 'wild'), A(F(0), 'wild'), A(ITEM('LOVE_BALL'), 'wild'), A(ITEM('LOVE_BALL'), 'wild')]);
+});
+
+scenario('h2_quiet_anims', (events) => seq(events, duo4('h2m', '1v1', 1113,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [hm('SOLARBEAM', 60, 9, 127), am('FLY', 60, 12, 43, 1), hm('BIND', 10, 0, 42),
+      am('HI_JUMP_KICK', 60, 1, 45, 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)),
+  both3(F(3), F(0)), both3(F(3), F(0))]));
+
+scenario('h2_miss_no_anim', (events) => seq(events, duo4('h2n', '1v1', 1114,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [am('whiff', 40, 0, 0, 1), am('HYPNOSIS', 0, 8, 32, 1), hm('SANDSTORM', 0, 5, 126),
+      hm('MIRROR_MOVE', 0, 0, 9)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'PSN',
+    moves: [hm('tap', 5), am('POISONPOWDER', 0, 13, 66, 255)] })]),
+[both3(F(0), F(0)), both3(F(1), F(1)), both3(F(2), F(0)), both3(F(2), F(0)), both3(F(3), F(1))]));
+
+scenario('h2_side_word_marks', (events) => {
+  const rounds = [both3(F(0), F(0))];
+  for (let i = 0; i < 5; i += 1) rounds.push(both3(F(1), F(1)));
+  return seq(events, duo4('h2o', '1v1', 1115,
+    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('LIGHT_SCREEN', 0, 8, 64), hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('REFLECT', 0, 8, 65), hm('wait', 0, 0, 85)] })]),
+  rounds);
+});
+
+scenario('h2_selfdestruct_status', (events) => seq(events, duo4('h2p', '1v1', 1116,
+  [mn({ species: 'Alpha', maxHp: 100, atk: 250, spe: 90, status: 'PSN', leechSeed: { fromSlot: 3 },
+    moves: [hm('EXPLOSION', 250, 0, 7)] }),
+  mn({ species: 'Gamma', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), [['p1', S(1)]], both3(F(0), F(0))]));
+
+scenario('h2_team_hold', (events) => seq(events, duo4('h2q', '1v1', 1117,
+  [mn({ species: 'Alpha', maxHp: 100, hp: 1, atk: 250, spe: 90, moves: [hm('ram', 80, 0, 48)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 100, hp: 5, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), [['p1', S(1)], ['p2', S(1)]], both3(F(0), F(0))]));
+
+scenario('h2_pursuit_bond', (events) => seq(events, duo4('h2r', '1v1', 1118,
+  [mn({ species: 'Alpha', maxHp: 20, spe: 10, moves: [hm('DESTINY_BOND', 0, 0, 138)] }),
+    mn({ species: 'Gamma', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 300, atk: 250, spe: 90, moves: [hm('wait', 0, 0, 85), hm('PURSUIT', 80, 7, 117)] }),
+    mn({ species: 'Delta', maxHp: 900, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(S(1), F(1)), [['p2', S(1)]], both3(F(0), F(0))]));
+
+scenario('h2_solo_seat', (events) => {
+  const o = duo4('h2s', 'coop_npc', 1119,
+    [typed({ species: 'Alpha', maxHp: 300, atk: 150, spe: 90, moves: [hm('thump', 50), hm('splash_wave', 50, 3)] }, [3]),
+      typed({ species: 'Gamma', maxHp: 300, atk: 150, spe: 50, moves: [hm('thump', 50)] }, [0])],
+    [typed({ species: 'Beta', level: 22, maxHp: 200, spe: 40, moves: [hm('tap', 20), hm('GROWL', 0, 0, 18)] }, [4]),
+      typed({ species: 'Delta', level: 20, maxHp: 200, spe: 40, moves: [hm('splash_wave', 30, 3), hm('tap', 20)] }, [3]),
+      typed({ species: 'Eps', level: 20, maxHp: 200, spe: 40, moves: [hm('tap', 20)] }, [5])],
+    { foe: 'solo_foe' });
+  o.sides.b[0].name = 'YOUNGSTER JOEY';
+  npc(o, { aiFlags: 0x07, trainerItems: ['POTION', 'X_ATTACK'], itemSwitch: 0x01,
+    baseReward: 0x12, countSpeciesTypes: [3] });
+  const rounds = [];
+  for (let i = 0; i < 16; i += 1) rounds.push(A(F(0), 'solo_foe'));
+  return seq(events, o, rounds);
+});
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -2896,7 +3058,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 206, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 225, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -3525,12 +3687,16 @@ for (const mode of ['1v1', 'coop_pvp']) {
 
 for (const mode of ['coop_npc', 'wild']) {
   test(`${mode}: side a's badges follow Gold's rules against the computer`, () => {
-    assert.strictEqual(hitOn(exchange(mode, {}, {}), 3), 18, 'unbadged, the same 18');
+    // A coop_npc trainer takes AIChooseMove's byte(s) at every turn's head
+    // (K16), which moves Ann's roll on this seed: `roll` picks that mode's
+    // number, the badge's step the same (the Lua twin explains).
+    const roll = (trainer, wildOne) => (mode === 'coop_npc' ? trainer : wildOne);
+    assert.strictEqual(hitOn(exchange(mode, {}, {}), 3), roll(17, 18), 'unbadged, the same 18');
     // 88 -> 88 + floor(88 / 8) = 99 Attack; BattleSim2 reaches the same 20.
-    assert.strictEqual(hitOn(exchange(mode, { badges: { ZEPHYR: true } }, {}), 3), 20,
+    assert.strictEqual(hitOn(exchange(mode, { badges: { ZEPHYR: true } }, {}), 3), roll(18, 20),
       "ZEPHYR raises side a's physical damage to 20");
     assert.strictEqual(
-      hitOn(exchange(mode, { badges: { BOULDER: true, BOULDERBADGE: true } }, {}), 3), 18,
+      hitOn(exchange(mode, { badges: { BOULDER: true, BOULDERBADGE: true } }, {}), 3), roll(17, 18),
       "BOULDER (Kanto) and BOULDERBADGE (Red's id) boost no stat on Gold");
     assert.strictEqual(firstHit(exchange(mode, { spe: 40 }, { spe: 42 })), 0,
       'unbadged, the foe (42) still goes first');
@@ -3542,10 +3708,10 @@ for (const mode of ['coop_npc', 'wild']) {
       "Bob's 30-power hit on an unbadged Ann is 10");
     assert.strictEqual(hitOn(exchange(mode, { badges: { MINERAL: true } }, { power: 30 }), 0), 8,
       'MINERAL (Defense 40 -> 45) cuts it to 8');
-    assert.strictEqual(hitOn(exchange(mode, { type: 2, spa: 88 }, {}, RULES), 3), 23,
+    assert.strictEqual(hitOn(exchange(mode, { type: 2, spa: 88 }, {}, RULES), 3), roll(21, 23),
       "Ann's Special hit, unbadged, is 23");
     assert.strictEqual(
-      hitOn(exchange(mode, { type: 2, spa: 88, badges: { GLACIER: true } }, {}, RULES), 3), 25,
+      hitOn(exchange(mode, { type: 2, spa: 88, badges: { GLACIER: true } }, {}, RULES), 3), roll(23, 25),
       'GLACIER (Sp. Atk 88 -> 99) raises it to 25');
 
     // Glacier's Sp. Def tail, both ways: Bob's Special hit on Ann. Sp. Atk 227
@@ -3563,24 +3729,24 @@ for (const mode of ['coop_npc', 'wild']) {
 
     // The 999 cap: 950 + floor(950 / 8) = 1068 is held at 999, so a badged 950
     // hits exactly as an unbadged 999 does, and harder than a bare 950.
-    assert.strictEqual(hitOn(exchange(mode, { atk: 950 }, { def: 600 }), 3), 24,
+    assert.strictEqual(hitOn(exchange(mode, { atk: 950 }, { def: 600 }), 3), roll(22, 24),
       'an unbadged Attack of 950 hits for 24');
-    assert.strictEqual(hitOn(exchange(mode, { atk: 999 }, { def: 600 }), 3), 26,
+    assert.strictEqual(hitOn(exchange(mode, { atk: 999 }, { def: 600 }), 3), roll(24, 26),
       'an unbadged Attack of 999 hits for 26');
     assert.strictEqual(
-      hitOn(exchange(mode, { atk: 950, badges: { ZEPHYR: true } }, { def: 600 }), 3), 26,
+      hitOn(exchange(mode, { atk: 950, badges: { ZEPHYR: true } }, { def: 600 }), 3), roll(24, 26),
       'ZEPHYR on 950 is capped at 999 and hits for the same 26');
 
     // DoBadgeTypeBoosts: Ann's BUG move (no STAB, so 12 bare) and HIVE.
-    assert.strictEqual(hitOn(exchange(mode, { type: 1 }, {}, RULES), 3), 12,
+    assert.strictEqual(hitOn(exchange(mode, { type: 1 }, {}, RULES), 3), roll(11, 12),
       "Ann's BUG move, no badge, is 12");
-    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { HIVE: true } }, {}, RULES), 3), 13,
+    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { HIVE: true } }, {}, RULES), 3), roll(12, 13),
       'HIVE adds its eighth: 13');
-    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { FOG: true } }, {}, RULES), 3), 12,
+    assert.strictEqual(hitOn(exchange(mode, { type: 1, badges: { FOG: true } }, {}, RULES), 3), roll(11, 12),
       'a badge of another type adds nothing');
     assert.strictEqual(
       hitOn(exchange(mode, { type: 1, badges: { HIVE: true } }, {},
-        { specialTypes: RULES.specialTypes }), 3), 12,
+        { specialTypes: RULES.specialTypes }), 3), roll(11, 12),
       "with no typeIds the move's type has no name, and nothing fires");
     assert.strictEqual(
       hitOn(exchange(mode, { badges: { HIVE: true } }, { power: 30, type: 1 }, RULES), 0),
@@ -3594,16 +3760,16 @@ for (const mode of ['coop_npc', 'wild']) {
     // though Ann is type 0 (the same early return): 10 x 50 x 88 / 80 / 50 =
     // 11, +2 = 13, and the roll leaves 12, where STAB used to make it 19 and 18.
     const BUG_FIRST = { typeIds: ['BUG', 'DARK', 'FIRE'], specialTypes: [2] };
-    assert.strictEqual(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), 18,
+    assert.strictEqual(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), roll(17, 18),
       "index 0 named BUG, Ann's type-0 move is 18 bare");
-    assert.strictEqual(hitOn(exchange(mode, { badges: { HIVE: true } }, {}, BUG_FIRST), 3), 20,
+    assert.strictEqual(hitOn(exchange(mode, { badges: { HIVE: true } }, {}, BUG_FIRST), 3), roll(18, 20),
       '...and HIVE type-boosts it to 20');
     const struggled = exchange(mode, { pp: 0 }, {}, BUG_FIRST);
     assert.ok(struggled.some((event) => event.t === 'anim' && event.text === 'STRUGGLE'),
       'with her one slot at 0 PP, Ann Struggles');
-    assert.strictEqual(hitOn(struggled, 3), 12, 'her Struggle, no badge and no STAB, is 12');
+    assert.strictEqual(hitOn(struggled, 3), roll(11, 12), 'her Struggle, no badge and no STAB, is 12');
     assert.strictEqual(
-      hitOn(exchange(mode, { pp: 0, badges: { HIVE: true } }, {}, BUG_FIRST), 3), 12,
+      hitOn(exchange(mode, { pp: 0, badges: { HIVE: true } }, {}, BUG_FIRST), 3), roll(11, 12),
       'HIVE leaves her Struggle at 12 (type 0 is BUG here, and still nothing fires)');
 
     // HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
@@ -3812,7 +3978,10 @@ test('fidelity: screens are per side, tick five times, fail on a recast and skip
   assert.strictEqual(damageOn(fixed, 0), 20, 'a fixed-damage hit is never screened: the post-hoc halving is gone');
   turnOf(battle, { action: 'fight', move: 1 });
   const fade = turnOf(battle, { action: 'fight', move: 1 });
-  assert.ok(said(fade, "Ann's POKéMON's LIGHT SCREEN fell!"), 'it falls at the end of its fifth turn');
+  // HandleScreens' "Your" / "Enemy" as K17's side-word mark (`_screenOwner`).
+  assert.ok(said(fade, "POKéMON's LIGHT SCREEN fell!"), 'it falls at the end of its fifth turn');
+  assert.ok(fade.some((e) => e.t === 'msg' && e.text === "^APOKéMON's\nLIGHT SCREEN fell!"),
+    "...behind side a's side-word mark, ^A");
   assert.strictEqual(battle.screens.a.lightScreen, 0, 'and is down');
   const bare = turnOf(battle, { action: 'fight', move: 1 });
   const unscreened = damageOn(bare, 0);
@@ -6264,8 +6433,9 @@ test('K20: the cart\'s status, residual and weather clips, each where pokecrysta
   const STATUS = ['SLP_ANIM', 'SLP_PLAYER_ANIM', 'CONF_ANIM', 'CONF_PLAYER_ANIM', 'PSN_ANIM', 'BRN_ANIM',
     'FRZ_ANIM', 'PAR_ANIM', 'SAP_ANIM', 'IN_LOVE_ANIM', 'IN_SANDSTORM_ANIM', 'IN_NIGHTMARE_ANIM',
     'HIT_CONFUSION_ANIM', 'ENEMY_STAT_DOWN_ANIM', 'WOBBLE_ANIM'];
+  // BLOCKBALL_ANIM: UseBallInTrainerBattle's blocked throw (wave 2, K22).
   const BALL = ['TOSS_ANIM', 'GREATTOSS_ANIM', 'ULTRATOSS_ANIM', 'POOF_ANIM', 'HIDEPIC_ANIM', 'SHAKE_ANIM',
-    'SHOWPIC_ANIM'];
+    'SHOWPIC_ANIM', 'BLOCKBALL_ANIM'];
   for (const id of seen) assert.ok(STATUS.includes(id) || BALL.includes(id), `${id} is one of the cart's`);
 });
 
@@ -6286,4 +6456,101 @@ test('K20: the secondary FRZ / PAR / BRN clips and the Berserk Gene\'s confusion
       moves: [hit('tap', 1)] })] });
   assert.ok(placesOf(battle.drainEvents(), [isMsg('^bBeta\'s\nBERSERKGENE\nactivated!'), isAnim('CONF_ANIM', 3),
     isMsg('^bBeta\nbecame confused!')]), 'HandleBerserkGene\'s ANIM_CONFUSED on the holder');
+});
+
+// docs/plans/gen12-referee-remaining-gaps.md, wave 2's Gold half (H2): the
+// computer's choices at the cart's points (K16), K17's side-word marks, K22's
+// quiet clips and missed moves, LOVE / HEAVY BALL and T2's follow-ups, read
+// off the h2_* parity scenarios (the Lua suite carries the same checks on its
+// own fights).
+test('H2: the computer chooses as the cart does, at the cart\'s points', () => {
+  const ev = (name) => byName(jsRuns).get(name).events;
+  const lines = (name) => ev(name).filter((e) => e.t === 'msg').map((e) => plainLine(e.text));
+  const hasLine = (name, text) => lines(name).includes(text);
+  // A slot the AI chose, DISABLEd before it moved: CheckTurn fails it; then
+  // `.continue` finds nothing usable -- Struggle.
+  assert.ok(hasLine('h2_ai_disabled', "Beta's tap is DISABLED!"));
+  assert.ok(hasLine('h2_ai_disabled', 'Beta used STRUGGLE!'));
+  // The slot SPITE emptied: `.out_of_pp`, no clip.
+  assert.ok(hasLine('h2_ai_out_of_pp', 'But no PP is left for the move!'));
+  const oop = ev('h2_ai_out_of_pp');
+  const noPp = oop.findIndex((e) => e.t === 'msg' && plainLine(e.text) === 'But no PP is left for the move!');
+  assert.ok(!oop.slice(noPp - 3, noPp).some((e) => e.t === 'anim' && e.text === 'tap'), 'no clip on `.out_of_pp`');
+  // The wild `.loop2` never picks the empty-PP slot.
+  assert.ok(!hasLine('h2_wild_pick', 'Beta used tap!'));
+  // AI_TryItem's base-reward bug, and an ordinary POTION.
+  assert.ok(hasLine('h2_ai_item_base_reward', 'Bob used X ATTACK on Beta!'));
+  assert.ok(hasLine('h2_ai_potion', 'Bob used POTION on Beta!'));
+  // AI_Switch: PURSUIT's hit, then the withdraw line, then the send-out.
+  const sw = ev('h2_ai_switch_pursuit');
+  const pursuit = sw.findIndex((e) => e.t === 'anim' && e.text === 'PURSUIT');
+  const withdrew = sw.findIndex((e) => e.t === 'msg' && plainLine(e.text) === 'Bob withdrew Beta!');
+  const sent = sw.findIndex((e) => e.t === 'send' && e.text === 'Delta');
+  assert.ok(pursuit > 0 && withdrew > pursuit && sent > withdrew, 'PursuitSwitch, _EnemyWithdrewText, EnemySwitch');
+  assert.ok(!sw.some((e) => e.t === 'msg' && /SPIKES/.test(e.text)), 'AI_Switch runs no SpikesDamage');
+  // FindMonInOTPartyToSwitchIntoBattle: the THRASH carries the player's type
+  // into the successor; in a double KO the AI scores the player's successor.
+  assert.ok(hasLine('h2_replace_single', "It doesn't affect Delta!"), 'the move-struct type clobber');
+  assert.ok(ev('h2_replace_double').some((e) => e.t === 'send' && e.text === 'Eps' && e.mon === 2),
+    'the successor that beats the player\'s own successor');
+  // The solo foe: autoPick every turn, its item and its replacement.
+  assert.ok(hasLine('h2_solo_seat', 'YOUNGSTER JOEY used POTION on Beta!'));
+  assert.ok(ev('h2_solo_seat').some((e) => e.t === 'send' && e.slot === 3 && e.text === 'Delta'));
+  // K22: quiet clips; no clip for a missed move or a failed command.
+  const quiet = ev('h2_quiet_anims').filter((e) => e.t === 'anim' && e.quiet === true).map((e) => e.text);
+  assert.deepStrictEqual([...new Set(quiet)].sort(), ['BIND', 'FLY', 'HI_JUMP_KICK', 'SOLARBEAM']);
+  assert.ok(!hasLine('h2_quiet_anims', 'Alpha used SOLARBEAM!') || lines('h2_quiet_anims')
+    .indexOf('Alpha took in sunlight!') < lines('h2_quiet_anims').indexOf('Alpha used SOLARBEAM!'),
+  'the charge turn says no "used" line');
+  const miss = ev('h2_miss_no_anim');
+  for (const id of ['whiff', 'HYPNOSIS', 'MIRROR_MOVE']) {
+    assert.ok(!miss.some((e) => e.t === 'anim' && e.text === id), `${id}: no clip`);
+  }
+  assert.strictEqual(miss.filter((e) => e.t === 'anim' && e.text === 'SANDSTORM').length, 1,
+    'SANDSTORM\'s second use fails, unanimated');
+  // K17's side-word marks.
+  assert.ok(ev('h2_side_word_marks').some((e) => e.t === 'msg' && e.text === "^APOKéMON's\nLIGHT SCREEN fell!"));
+  assert.ok(ev('h2_side_word_marks').some((e) => e.t === 'msg' && e.text === "^BPOKéMON's\nREFLECT faded!"));
+  // Selfdestruct's status write; the team sync's hold; PursuitSwitch's faint.
+  const boom = ev('h2_selfdestruct_status');
+  const cured = boom.findIndex((e) => e.t === 'status' && e.slot === 0 && !e.status);
+  const emptied = boom.findIndex((e) => e.t === 'damage' && e.slot === 0 && e.hp === 0);
+  assert.ok(cured > 0 && emptied > cured, 'the status byte, then the HP');
+  const hold = ev('h2_team_hold');
+  const at = (pred) => hold.findIndex(pred);
+  assert.ok(at((e) => e.t === 'team' && e.slot === 0 && e.team === 'xo')
+    > at((e) => e.t === 'faint' && e.slot === 0), 'Alpha\'s ball goes dark at its own faint');
+  const bond = ev('h2_pursuit_bond');
+  assert.ok(bond.findIndex((e) => e.t === 'faint' && e.slot === 3)
+    > bond.findIndex((e) => e.t === 'send' && e.text === 'Gamma'), 'the pursuer faints at the check after the switch');
+});
+
+test('H2: K16 is copied onto each computer seat; LOVE / HEAVY BALL read the transformed copy', () => {
+  const Effects = require('./lib/battle2/Effects.js');
+  const items = ['POTION', 'X_ATTACK'];
+  const entry = (id) => ({ playerId: id, name: 'Bob', aiFlags: 7, itemSwitch: 1, baseReward: 18,
+    trainerItems: items, countSpeciesTypes: [3],
+    mons: [held({ species: 'Beta', spe: 10, maxHp: 900, moves: [hit('tap', 5)] })] });
+  const battle = Turn.create({ id: 'k16', mode: 'coop_npc', seed: 31, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', aiFlags: 5,
+        mons: [held({ species: 'Alpha', spe: 90, maxHp: 900, moves: [hit('wait', 0, 0, 85)] })] },
+      { playerId: 'a2', name: 'Abe', mons: [held({ species: 'Gamma', spe: 80, maxHp: 900, moves: [hit('wait', 0, 0, 85)] })] }],
+      b: [entry('b1'), entry('b2')] } });
+  const b1 = battle.byId.get('b1');
+  const b2 = battle.byId.get('b2');
+  assert.strictEqual(b1.aiFlags, 7);
+  assert.strictEqual(b1.baseReward, 18);
+  assert.ok(b1.trainerItems !== items && b1.trainerItems !== b2.trainerItems, 'never aliased');
+  b1.trainerItems[0] = 'NO_ITEM';
+  assert.strictEqual(b2.trainerItems[0], 'POTION');
+  assert.strictEqual(battle.byId.get('a1').aiFlags, null, 'a player\'s seat keeps none');
+  const thrower = { speciesId: 'MAGNEMITE', base: { gender: 127 }, dvs: { atk: 15, def: 8, spe: 15, spc: 8 } };
+  const own = { atk: 2, def: 8, spe: 2, spc: 8 };
+  assert.strictEqual(Effects.ballRate('LOVE_BALL', 10,
+    { speciesId: 'MAGNEMITE', base: { gender: 127 }, dvs: own }, { thrower }), 10);
+  assert.strictEqual(Effects.ballRate('LOVE_BALL', 10, { speciesId: 'MAGNEMITE', base: { gender: 127 },
+    transformed: true, dvs: thrower.dvs, preTransform: { dvs: own } }, { thrower }), 80);
+  assert.strictEqual(Effects.ballRate('HEAVY_BALL', 100,
+    { weight: 50, transformed: true, transformWeight: 9000 }, {}), 130);
 });

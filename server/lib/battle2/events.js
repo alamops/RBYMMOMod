@@ -121,6 +121,9 @@ const FIELDS = {
   team: 'string',
   confused: 'number',
   stage: 'number',
+  // Contract K22: an `anim` playing a move's clip for a beat that is not its
+  // user's own use of the move says `true` (the Lua twin explains).
+  quiet: 'boolean',
 };
 
 // ------------------------------------------------------------------
@@ -138,7 +141,8 @@ const FIELDS = {
 const SHAPES = {
   msg: { text: true },
   anim: { slot: true, side: true, text: 'move id, ball-anim id, or a cart status clip (`<X>_ANIM`, K20)',
-    amount: 'shake count on SHAKE_ANIM (0-3)' },
+    amount: "shake count on SHAKE_ANIM (0-3); 1 on a charge's first turn",
+    quiet: 'true when the clip is not the monster using its move (K22)' },
   damage: {
     slot: true, side: true, amount: true, hp: 'hp left',
     status: 'set when a residual dealt it',
@@ -277,6 +281,8 @@ function coerce(key, value) {
     if (n === null) return undefined;
     return Math.floor(n);
   }
+  // A flag is kept only as `true`: `false` is the absence it would mean.
+  if (FIELDS[key] === 'boolean') return value === true ? true : undefined;
   if (typeof value !== 'string' || value === '') return undefined;
   return value;
 }
@@ -291,9 +297,10 @@ function coerce(key, value) {
 // K17 / K18 (the Lua twin explains): a `msg` line's marks and breaks, the cap
 // it is held to, and the plain sentence the other kinds carry.
 const BATTLE_LINE_MAX = 80;
+// A name mark (`^a` / `^b`) and a side-word mark (`^A` / `^B`) alike go.
 function plainLine(text) {
   if (typeof text !== 'string') return text;
-  return text.replace(/\^[ab]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
+  return text.replace(/\^[abAB]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
 }
 
 function build(kind, fields) {

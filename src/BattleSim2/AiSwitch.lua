@@ -1027,8 +1027,12 @@ function M.recordUsedMove(mon, move)
   if type(mon) ~= "table" or type(move) ~= "table" then return end
   if type(mon.usedMoves) ~= "table" then mon.usedMoves = {} end
   local list = mon.usedMoves
-  -- What the switch logic reads off it (a power) and the key it is kept by.
-  local row = { id = move.id, power = move.power, type = move.type, typeId = move.typeId }
+  -- What the switch logic reads off it (a power) and the key it is kept by --
+  -- and what AIChooseMove's handlers read through it (AiMove.usedMove): the
+  -- effect (AI_Smart_RazorWind looks for a PROTECT / DETECT a METRONOME
+  -- called, which the sheet no longer holds) and the accuracy.
+  local row = { id = move.id, power = move.power, type = move.type, typeId = move.typeId,
+                effect = move.effect, accuracy = move.accuracy }
   for i = 1, M.NUM_MOVES do
     local seen = list[i]
     if not seen then

@@ -24,6 +24,9 @@ local M = {
   Effects = need("BattleSim2/Effects"),
   Items = need("BattleSim2/Items"),
   Events = need("BattleSim2/events"),
+  -- The computer's AI (contract K16): AIChooseMove and AI_SwitchOrTryItem.
+  AiMove = need("BattleSim2/AiMove"),
+  AiSwitch = need("BattleSim2/AiSwitch"),
   Turn = need("BattleSim2/Turn"),
 }
 

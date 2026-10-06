@@ -18,8 +18,9 @@
  * 0-based here.
  *
  * State the referee does not keep, read from named fields with a default:
- * `mon.turnsTaken` (wPlayerTurnsTaken / wEnemyTurnsTaken, 0) and the player's
- * `mon.usedMoves` (wPlayerUsedMoves, empty).
+ * `mon.turnsTaken` (wPlayerTurnsTaken / wEnemyTurnsTaken, 0: DoTurn's count --
+ * a lock-in's first turn only; the Lua twin explains) and the player's
+ * `mon.usedMoves` (wPlayerUsedMoves, empty), both kept by Turn.
  */
 
 const Damage = require('./Damage.js');

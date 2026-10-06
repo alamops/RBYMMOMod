@@ -1393,13 +1393,22 @@ end
 -- PrintButItFailed ("But it failed!" -- this referee's "But it failed!", the
 -- line every other site says), PrintDidntAffect / PrintDidntAffect2
 -- (DidntAffect1Text / DidntAffect2Text, both "It didn't affect <TARGET>!").
+-- Every command failure below is the cart's AnimateFailedMove (a MoveDelay)
+-- or a `statupanim` / `statdownanim` wAttackMissed skips: the move's clip is
+-- not played (`out.failed`, contract K22 -- Turn takes the clip back).  The
+-- RaiseStat / StatDown failures also SET wAttackMissed (`out.missed`), which
+-- AI_SwitchOrTryItem's X items read next turn.
+local function failed(out)
+  out.failed = true
+  return out
+end
 local function butItFailed(out)
   out.messages[#out.messages + 1] = "But it failed!"
-  return out
+  return failed(out)
 end
 local function didntAffect(out, targetMon)
   out.messages[#out.messages + 1] = M.didntAffectLine(targetMon)
-  return out
+  return failed(out)
 end
 -- FailMove / FailMimic (effect_commands.asm:6209-6216): "But it failed!" --
 -- or, while the target's SUBSTATUS_PROTECT stands (FailText_CheckOpponentProtect),
@@ -1418,7 +1427,7 @@ function M.failMoveLine(targetMon)
 end
 local function failMove(out, targetMon)
   out.messages[#out.messages + 1] = M.failMoveLine(targetMon)
-  return out
+  return failed(out)
 end
 
 -- `.CheckAIRandomFail` (BattleCommand_SleepTarget, effect_commands.asm:3640-
@@ -1476,12 +1485,19 @@ M.raiseStat = raiseStat
 -- base block's BASE_GENDER byte); a sheet that states none, or no DVs,
 -- cannot be placed, and reads as genderless -- `.genderless_samegender`, so
 -- ATTRACT fails rather than invent a gender.  Returns "M", "F" or nil.
-function M.gender(mon)
+--
+-- `battleDvs`: read the battle struct's DVs instead -- GetGender with
+-- wMonType WILDMON reads wEnemyMonDVs (engine/pokemon/mon_stats.asm,
+-- `.DVs` after `ld hl, wEnemyMonDVs`), which a TRANSFORM overwrote with the
+-- target's (`mon.dvs`, the copy) while wEnemyBackupDVs kept its own: what the
+-- LOVE BALL reads off a transformed wild monster (`ballRate`).  The species
+-- -- the BASE_GENDER row -- is still its own (wTempEnemyMonSpecies).
+function M.gender(mon, battleDvs)
   if type(mon) ~= "table" or type(mon.base) ~= "table" then return nil end
   local ratio = int(mon.base.gender, nil)
   if ratio == nil then return nil end
   local dvs = mon.dvs
-  if mon.preTransform then dvs = mon.preTransform.dvs end
+  if mon.preTransform and not battleDvs then dvs = mon.preTransform.dvs end
   if type(dvs) ~= "table" then return nil end
   if ratio == M.GENDER_UNKNOWN then return nil end
   if ratio == M.GENDER_F0 then return "M" end
@@ -1502,7 +1518,7 @@ M.GENDER_UNKNOWN = 255
 local function protectedBy(out, targetMon)
   out.messages[#out.messages + 1] =
     nameOf(targetMon) .. "'s\nprotected by\n" .. itemLabel(targetMon) .. "!"
-  return out
+  return failed(out)
 end
 
 -- RaiseStat (effect_commands.asm:4142-4236) for a primary stat-up move, then
@@ -1527,6 +1543,8 @@ local function raisePrimary(out, fighter, mon, stat, delta)
   local text = M.wontRiseLine(mon, stat)
   if after ~= before then statEvent(out, fighter, after, text) end
   out.messages[#out.messages + 1] = text
+  failed(out)
+  out.missed = true
   return false
 end
 
@@ -1542,19 +1560,23 @@ local function lowerPrimary(out, ctx, fighter, mon, stat, delta)
     ctx.effectId, mon.lockOn == true)
   if stop == "mist" then
     out.messages[#out.messages + 1] = M.mistLine(mon)
-    return out
+    out.missed = true
+    return failed(out)
   end
   if stop == "floor" then
     out.messages[#out.messages + 1] = M.wontDropLine(mon, stat)
-    return out
+    out.missed = true
+    return failed(out)
   end
   if stop == "missed" or int(mon.substitute, 0) > 0 then
     out.messages[#out.messages + 1] = "But it failed!"
-    return out
+    out.missed = true
+    return failed(out)
   end
   if statAtFloor(mon, stat, fighter and fighter.badges or nil) then
     out.messages[#out.messages + 1] = M.wontDropLine(mon, stat)
-    return out
+    out.missed = true
+    return failed(out)
   end
   -- `statdownanim` (BattleCommand_StatDownAnim, K20): on a drop that landed
   -- -- every failure above set wAttackMissed, which skips it -- the move's
@@ -1617,7 +1639,7 @@ function M.applyPrimary(ctx)
     local maxHp = max(1, int(userMon.maxHp, 1))
     if userMon.hp >= maxHp then
       out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nHP is full!"
-      return out
+      return failed(out)
     end
     local amount = max(1, floor(maxHp / 2))
     if ctx.moveKey == "REST" then
@@ -1688,7 +1710,7 @@ function M.applyPrimary(ctx)
     if Items.prevents(targetMon, "sleep") then return protectedBy(out, targetMon) end
     if targetMon.status == "sleep" then
       out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready asleep!"
-      return out
+      return failed(out)
     end
     if ctx.missed or aiRandomFail(ctx, targetMon) or M.hasMajorStatus(targetMon)
        or int(targetMon.substitute, 0) > 0 then
@@ -1729,11 +1751,11 @@ function M.applyPrimary(ctx)
   if effectId == 66 or effectId == M.TOXIC then -- POISON_EFFECT / EFFECT_TOXIC
     if ctx.moveImmune or hasType(targetMon, ctx.poisonType) then
       out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
-      return out
+      return failed(out)
     end
     if targetMon.status == "poison" or targetMon.status == "toxic" then
       out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready poisoned!"
-      return out
+      return failed(out)
     end
     if Items.prevents(targetMon, "poison") then return protectedBy(out, targetMon) end
     if M.hasMajorStatus(targetMon) or aiRandomFail(ctx, targetMon)
@@ -1770,11 +1792,11 @@ function M.applyPrimary(ctx)
   if effectId == 67 then -- PARALYZE_EFFECT
     if targetMon.status == "paralysis" then
       out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready paralyzed!"
-      return out
+      return failed(out)
     end
     if ctx.moveImmune then
       out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
-      return out
+      return failed(out)
     end
     if Items.prevents(targetMon, "paralysis") then return protectedBy(out, targetMon) end
     if aiRandomFail(ctx, targetMon) or M.hasMajorStatus(targetMon) or ctx.missed
@@ -1801,7 +1823,7 @@ function M.applyPrimary(ctx)
     if Items.prevents(targetMon, "confusion") then return protectedBy(out, targetMon) end
     if (targetMon.confusion or 0) > 0 then
       out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready confused!"
-      return out
+      return failed(out)
     end
     if int(targetMon.substitute, 0) > 0 or ctx.missed then
       return didntAffect(out, targetMon)
@@ -1819,15 +1841,15 @@ function M.applyPrimary(ctx)
     local evaded = nameOf(targetMon) .. "\nevaded the attack!"
     if ctx.missed or int(targetMon.substitute, 0) > 0 then
       out.messages[#out.messages + 1] = evaded
-      return out
+      return failed(out)
     end
     if hasType(targetMon, ctx.grassType) then
       out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
-      return out
+      return failed(out)
     end
     if targetMon.leechSeed then
       out.messages[#out.messages + 1] = evaded
-      return out
+      return failed(out)
     end
     targetMon.leechSeed = { fromSlot = userFighter.slot }
     local text = nameOf(targetMon) .. "\nwas seeded!"
@@ -1882,11 +1904,11 @@ function M.applyPrimary(ctx)
     local cost = floor(max(1, int(userMon.maxHp, 1)) / 4)
     if userMon.substitute and userMon.substitute > 0 then
       out.messages[#out.messages + 1] = nameOf(userMon) .. "\nhas a SUBSTITUTE!"
-      return out
+      return failed(out)
     end
     if userMon.hp <= cost then
       out.messages[#out.messages + 1] = "Too weak to make\na SUBSTITUTE!"
-      return out
+      return failed(out)
     end
     userMon.hp = userMon.hp - cost
     userMon.substitute = cost
@@ -1909,7 +1931,7 @@ function M.applyPrimary(ctx)
     local screens = ctx.userScreens
     if type(screens) ~= "table" or int(screens[key], 0) > 0 then
       out.messages[#out.messages + 1] = "But it failed!"
-      return out
+      return failed(out)
     end
     screens[key] = M.SCREEN_TURNS
     -- LightScreenEffectText / ReflectEffectText (wave 5).
@@ -1927,7 +1949,7 @@ function M.applyPrimary(ctx)
     local screens = ctx.userScreens
     if type(screens) ~= "table" or int(screens.safeguard, 0) > 0 then
       out.messages[#out.messages + 1] = "But it failed!"
-      return out
+      return failed(out)
     end
     screens.safeguard = M.SAFEGUARD_TURNS
     out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\ncovered by a veil!"
@@ -2036,7 +2058,7 @@ function M.applyPrimary(ctx)
     out.clearLastMove = true
     if targetMon.transformed or targetMon.invulnerable then
       out.messages[#out.messages + 1] = "But it failed!"
-      return out
+      return failed(out)
     end
     if not userMon.preTransform then
       local partyMoves = {}
@@ -2102,6 +2124,9 @@ function M.applyPrimary(ctx)
     -- ...and the copied species' base stats (K7), which BEAT UP reads off
     -- wEnemyMonSpecies' base data for a transformed target's Defense.
     userMon.transformBase = targetMon.transformBase or targetMon.base
+    -- ...and its Pokedex weight (K21), which the HEAVY BALL reads off
+    -- wEnemyMonSpecies (`ballRate`).
+    userMon.transformWeight = targetMon.weight
     M.snapStats(userMon, userFighter and userFighter.badges or nil, battleStats)
     -- TransformedText: "<USER>\nTRANSFORMED into\n" and wStringBuffer1, the
     -- species GetPokemonName wrote there -- printed bare, no prefix (K17).
@@ -2147,6 +2172,7 @@ function M.applyPrimary(ctx)
     local half = max(1, floor(max(1, int(userMon.maxHp, 1)) / 2))
     if not raised or userMon.hp <= half then
       if after ~= before then statEvent(out, userFighter, after, nil) end
+      if not raised then out.missed = true end
       return butItFailed(out)
     end
     out.selfDamage = half
@@ -2191,7 +2217,7 @@ function M.applyPrimary(ctx)
     if M.clampStage(userMon.stages.atk) >= M.STAGE_MAX
        and M.clampStage(userMon.stages.def) >= M.STAGE_MAX then
       out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nABILITY won't\nrise anymore!"
-      return out
+      return failed(out)
     end
     local badges = userFighter and userFighter.badges or nil
     local speed = M.clampStage(userMon.stages.spe)
@@ -2337,14 +2363,15 @@ function M.applyPrimary(ctx)
   if effectId == M.SWAGGER then
     if ctx.missed then
       out.failureText = true
-      return out
+      return failed(out)
     end
     local before = M.clampStage(targetMon.stages.atk)
     local raised, after = raiseStat(targetMon, targetBadges, "atk", 2)
     if not raised then
       if after ~= before then statEvent(out, targetFighter, after, nil) end
       out.failureText = true
-      return out
+      out.missed = true
+      return failed(out)
     end
     local text = M.statUpLine(targetMon, "atk", 2)
     out.messages[#out.messages + 1] = text
@@ -2699,9 +2726,14 @@ function M.applySide(ctx)
   -- lower Defense can do so after breaking a Substitute"): its byte is drawn
   -- here, against the substitute standing now -- so a hit that broke the doll
   -- draws it, and the drop can land -- and it is that verdict StatDown reads.
+  --
+  -- Every one of those failures -- `.Mist`, `.CantLower`, `.Failed` (a missed
+  -- effect chance included), `.CouldntLower` -- sets wAttackMissed
+  -- (`out.missed`): what the computer's X item reads next turn (Turn).
   local stat = SIDE_STAT_DOWN[effectId]
   if stat then
     if effectId == 69 then hit = M.effectChance(rng, ctx.chance, behindSub) end
+    out.missed = true
     if M.statDownGate(rng, targetMon, stat, ctx.computerMover == true, effectId,
                       targetMon.lockOn == true) then
       return out
@@ -2710,6 +2742,7 @@ function M.applySide(ctx)
     if statAtFloor(targetMon, stat, targetFighter and targetFighter.badges or nil) then
       return out
     end
+    out.missed = nil
     out.proc = true
     applyStatChange(out, targetFighter, targetMon, stat, -1)
     return out
@@ -2717,14 +2750,17 @@ function M.applySide(ctx)
 
   -- The *UpHit scripts' `attackup` / `defenseup` / `allstatsup` on the user
   -- (raiseSideStat; AllStatsUp's ResetMiss lets each of the five fail alone).
+  -- RaiseStat's `.cant_raise_stat` / `.stats_already_max` set wAttackMissed
+  -- (`out.missed`); a missed effect chance is `.stat_raise_failed`, which
+  -- writes none; AllStatsUp's ResetMiss before each leaves the last one's.
   local ups = SIDE_STAT_UP[effectId]
   if ups then
     local userMon = ctx.userMon
     if type(userMon) ~= "table" then return out end
     for _, key in ipairs(ups) do
-      if raiseSideStat(out, ctx.userFighter, userMon, key, hit, ctx.userBadges) then
-        out.proc = true
-      end
+      local raised = raiseSideStat(out, ctx.userFighter, userMon, key, hit, ctx.userBadges)
+      if raised then out.proc = true end
+      out.missed = (hit and not raised) or nil
     end
     return out
   end
@@ -3537,8 +3573,14 @@ end
 --   * HEAVY BALL: by the species' weight (`heavyBallWeightByte`) -- under
 --     102.4 kg -20 (a rate under 20 is 1: `ret nc / ld b, $1`), else
 --     +0/+20/+30/+40 held at $ff.  The weight is the Pokedex entry's, which a
---     sheet carries as `weight`; without it the referee cannot place the
---     monster and leaves the rate (docs: a wire field FX-R2 reports);
+--     sheet carries as `weight` (contract K21: the client stamps it on a wild
+--     foe, Turn's copyMon keeps it); without it the referee cannot place the
+--     monster and leaves the rate.  This is the true weight for every species:
+--     Crystal's HeavyBall_GetDexEntryBank gets the wrong bank for three of
+--     them (docs/bugs_and_glitches.md, "Heavy Ball uses wrong weight value
+--     for three Pokémon") and reads bytes this referee does not have and may
+--     not ship, so a Crystal fight is read the same way -- out of the plan's
+--     scope, by its Scope section;
 --   * LEVEL BALL: x2 when the wild level is below the player's, x4 below its
 --     half, x8 below its quarter, $ff on any carry (and the HP step skipped,
 --     `catchAttempt`);
@@ -3549,7 +3591,10 @@ end
 --   * LOVE BALL: x8 ($ff on a carry) when the two monsters are one species
 --     (the parties' species, wTempBattleMonSpecies / wTempEnemyMonSpecies)
 --     and of the SAME gender (the routine's bug), neither genderless --
---     GetGender as ATTRACT reads it (`gender`, K15);
+--     GetGender (`gender`, K15): the player's PARTYMON (its party DVs, a
+--     TRANSFORM never wrote them) and the wild WILDMON, whose wEnemyMonDVs a
+--     TRANSFORM did overwrite -- a transformed wild monster's gender is read
+--     off the DVs it copied (pokecrystal / pokegold LoveBallMultiplier);
 --   * FAST BALL: x4 ($ff on a carry) for MAGNEMITE, GRIMER and TANGELA alone
 --     (the routine's bug, M.FAST_BALL_SPECIES).
 function M.ballRate(ballId, rate, target, ctx)
@@ -3562,7 +3607,18 @@ function M.ballRate(ballId, rate, target, ctx)
     return b
   end
   if ballId == "HEAVY_BALL" then
-    local weight = type(target) == "table" and int(target.weight, nil) or nil
+    -- HeavyBallMultiplier reads the dex entry of wEnemyMonSpecies -- the
+    -- battle struct's species, which a TRANSFORM overwrote -- so a
+    -- transformed wild monster weighs what it copied (`transformWeight`; a
+    -- copied sheet that stated no weight leaves the rate).
+    local weight = nil
+    if type(target) == "table" then
+      if target.transformed then
+        weight = int(target.transformWeight, nil)
+      else
+        weight = int(target.weight, nil)
+      end
+    end
     if weight == nil then return b end
     local high = M.heavyBallWeightByte(weight)
     if high < 4 then
@@ -3601,7 +3657,7 @@ function M.ballRate(ballId, rate, target, ctx)
     if type(thrower) ~= "table" or type(target) ~= "table" then return b end
     local species = thrower.speciesId
     if species == nil or species ~= target.speciesId then return b end
-    local mine, theirs = M.gender(thrower), M.gender(target)
+    local mine, theirs = M.gender(thrower), M.gender(target, true)
     if mine == nil or theirs == nil or mine ~= theirs then return b end
     return min(255, b * 8)
   end

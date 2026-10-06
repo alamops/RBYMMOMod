@@ -1162,13 +1162,20 @@ function statDownMissLine(targetMon, stat) {
 // them).
 
 // The cart's failure lines: FailMove / PrintButItFailed, PrintDidntAffect(2).
+// Every failure is AnimateFailedMove or a skipped `statupanim` /
+// `statdownanim`: no clip (`out.failed`, K22); RaiseStat / StatDown's also set
+// wAttackMissed (`out.missed`). The Lua twin explains.
+function failed(out) {
+  out.failed = true;
+  return out;
+}
 function butItFailed(out) {
   out.messages.push('But it failed!');
-  return out;
+  return failed(out);
 }
 function didntAffect(out, targetMon) {
   out.messages.push(didntAffectLine(targetMon));
-  return out;
+  return failed(out);
 }
 // FailMove / FailMimic: "But it failed!", or "It failed!" while the target
 // is PROTECTing (FailText_CheckOpponentProtect).
@@ -1183,7 +1190,7 @@ function failMoveLine(targetMon) {
 }
 function failMove(out, targetMon) {
   out.messages.push(failMoveLine(targetMon));
-  return out;
+  return failed(out);
 }
 
 // `.CheckAIRandomFail` and its inlined twins in Poison / Paralyze (the Lua
@@ -1214,15 +1221,17 @@ function raiseStat(mon, badges, stat, delta) {
 // GetGender for CheckOppositeGender (the Lua twin explains): the Attack and
 // Speed DVs as a byte against the species' BASE_GENDER (`base.gender`,
 // proposed K15), the monster's own under Transform. 'M', 'F' or null.
+// `battleDvs`: the battle struct's DVs instead -- GetGender's WILDMON reads
+// wEnemyMonDVs, which a TRANSFORM overwrote (the LOVE BALL's reading).
 const GENDER_F0 = 0;
 const GENDER_F100 = 254;
 const GENDER_UNKNOWN = 255;
-function gender(mon) {
+function gender(mon, battleDvs) {
   if (!mon || !mon.base || typeof mon.base !== 'object') return null;
   const ratio = int(mon.base.gender, null);
   if (ratio === null) return null;
   let dvs = mon.dvs;
-  if (mon.preTransform) dvs = mon.preTransform.dvs;
+  if (mon.preTransform && !battleDvs) dvs = mon.preTransform.dvs;
   if (!dvs || typeof dvs !== 'object') return null;
   if (ratio === GENDER_UNKNOWN) return null;
   if (ratio === GENDER_F0) return 'M';
@@ -1235,7 +1244,7 @@ function gender(mon) {
 // The HELD_PREVENT_* item's line ("<TARGET>'s protected by <ITEM>!").
 function protectedBy(out, targetMon) {
   out.messages.push(`${name(targetMon)}'s\nprotected by\n${itemLabel(targetMon)}!`);
-  return out;
+  return failed(out);
 }
 
 // RaiseStat for a primary stat-up move (the Lua twin carries the notes):
@@ -1253,6 +1262,8 @@ function raisePrimary(out, fighter, mon, stat, delta) {
   const text = wontRiseLine(mon, stat);
   if (r.stage !== before) statEvent(out, fighter, r.stage, text);
   out.messages.push(text);
+  failed(out);
+  out.missed = true;
   return false;
 }
 
@@ -1262,19 +1273,23 @@ function lowerPrimary(out, c, fighter, mon, stat, delta) {
     c.effectId, mon.lockOn === true);
   if (stop === 'mist') {
     out.messages.push(mistLine(mon));
-    return out;
+    out.missed = true;
+    return failed(out);
   }
   if (stop === 'floor') {
     out.messages.push(wontDropLine(mon, stat));
-    return out;
+    out.missed = true;
+    return failed(out);
   }
   if (stop === 'missed' || int(mon.substitute, 0) > 0) {
     out.messages.push('But it failed!');
-    return out;
+    out.missed = true;
+    return failed(out);
   }
   if (statAtFloor(mon, stat, fighter ? fighter.badges : null)) {
     out.messages.push(wontDropLine(mon, stat));
-    return out;
+    out.missed = true;
+    return failed(out);
   }
   // `statdownanim` on a drop that landed (K20): ANIM_ENEMY_STAT_DOWN, the
   // WOBBLE variant on a player's seat (Turn `_statusAnim`).
@@ -1314,7 +1329,7 @@ function applyPrimary(ctx) {
     const maxHp = Math.max(1, int(userMon.maxHp, 1));
     if (userMon.hp >= maxHp) {
       out.messages.push(`${name(userMon)}'s\nHP is full!`);
-      return out;
+      return failed(out);
     }
     let amount = Math.max(1, Math.floor(maxHp / 2));
     if (c.moveKey === 'REST') {
@@ -1373,7 +1388,7 @@ function applyPrimary(ctx) {
     if (Items.prevents(targetMon, 'sleep')) return protectedBy(out, targetMon);
     if (targetMon.status === 'sleep') {
       out.messages.push(`${name(targetMon)}'s\nalready asleep!`);
-      return out;
+      return failed(out);
     }
     if (c.missed || aiRandomFail(c, targetMon) || hasMajorStatus(targetMon)
         || int(targetMon.substitute, 0) > 0) {
@@ -1403,11 +1418,11 @@ function applyPrimary(ctx) {
   if (effectId === 66 || effectId === TOXIC) {
     if (c.moveImmune || hasType(targetMon, c.poisonType)) {
       out.messages.push(doesntAffectLine(targetMon));
-      return out;
+      return failed(out);
     }
     if (targetMon.status === 'poison' || targetMon.status === 'toxic') {
       out.messages.push(`${name(targetMon)}'s\nalready poisoned!`);
-      return out;
+      return failed(out);
     }
     if (Items.prevents(targetMon, 'poison')) return protectedBy(out, targetMon);
     // Any other status, the computer's byte, a substitute, wAttackMissed.
@@ -1439,11 +1454,11 @@ function applyPrimary(ctx) {
   if (effectId === 67) {
     if (targetMon.status === 'paralysis') {
       out.messages.push(`${name(targetMon)}'s\nalready paralyzed!`);
-      return out;
+      return failed(out);
     }
     if (c.moveImmune) {
       out.messages.push(doesntAffectLine(targetMon));
-      return out;
+      return failed(out);
     }
     if (Items.prevents(targetMon, 'paralysis')) return protectedBy(out, targetMon);
     if (aiRandomFail(c, targetMon) || hasMajorStatus(targetMon) || c.missed
@@ -1467,7 +1482,7 @@ function applyPrimary(ctx) {
     if (Items.prevents(targetMon, 'confusion')) return protectedBy(out, targetMon);
     if ((targetMon.confusion || 0) > 0) {
       out.messages.push(`${name(targetMon)}'s\nalready confused!`);
-      return out;
+      return failed(out);
     }
     if (int(targetMon.substitute, 0) > 0 || c.missed) return didntAffect(out, targetMon);
     confuse(out, targetFighter, targetMon, rng, true);
@@ -1480,15 +1495,15 @@ function applyPrimary(ctx) {
     const evaded = `${name(targetMon)}\nevaded the attack!`;
     if (c.missed || int(targetMon.substitute, 0) > 0) {
       out.messages.push(evaded);
-      return out;
+      return failed(out);
     }
     if (hasType(targetMon, c.grassType)) {
       out.messages.push(doesntAffectLine(targetMon));
-      return out;
+      return failed(out);
     }
     if (targetMon.leechSeed) {
       out.messages.push(evaded);
-      return out;
+      return failed(out);
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
     const text = `${name(targetMon)}\nwas seeded!`;
@@ -1534,11 +1549,11 @@ function applyPrimary(ctx) {
     const cost = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 4);
     if (userMon.substitute && userMon.substitute > 0) {
       out.messages.push(`${name(userMon)}\nhas a SUBSTITUTE!`);
-      return out;
+      return failed(out);
     }
     if (userMon.hp <= cost) {
       out.messages.push('Too weak to make\na SUBSTITUTE!');
-      return out;
+      return failed(out);
     }
     userMon.hp -= cost;
     userMon.substitute = cost;
@@ -1559,7 +1574,7 @@ function applyPrimary(ctx) {
     const screens = c.userScreens;
     if (!screens || typeof screens !== 'object' || int(screens[key], 0) > 0) {
       out.messages.push('But it failed!');
-      return out;
+      return failed(out);
     }
     screens[key] = SCREEN_TURNS;
     // LightScreenEffectText / ReflectEffectText (wave 5).
@@ -1573,7 +1588,7 @@ function applyPrimary(ctx) {
     const screens = c.userScreens;
     if (!screens || typeof screens !== 'object' || int(screens.safeguard, 0) > 0) {
       out.messages.push('But it failed!');
-      return out;
+      return failed(out);
     }
     screens.safeguard = SAFEGUARD_TURNS;
     out.messages.push(`${name(userMon)}'s\ncovered by a veil!`);
@@ -1653,7 +1668,7 @@ function applyPrimary(ctx) {
     out.clearLastMove = true;
     if (targetMon.transformed || targetMon.invulnerable) {
       out.messages.push('But it failed!');
-      return out;
+      return failed(out);
     }
     if (!userMon.preTransform) {
       userMon.preTransform = {
@@ -1706,6 +1721,8 @@ function applyPrimary(ctx) {
     userMon.transformSpecies = targetMon.speciesId === undefined ? null : targetMon.speciesId;
     // ...and the copied species' base stats (K7), BEAT UP's target Defense.
     userMon.transformBase = targetMon.transformBase || targetMon.base || null;
+    // ...and its Pokedex weight (K21), the HEAVY BALL's wEnemyMonSpecies read.
+    userMon.transformWeight = targetMon.weight;
     snapStats(userMon, userFighter ? userFighter.badges : null, battleStats);
     // TransformedText: the copied species from wStringBuffer1, bare (K17).
     out.messages.push(`${name(userMon)}\nTRANSFORMED into\n${targetMon.species}!`);
@@ -1739,6 +1756,7 @@ function applyPrimary(ctx) {
     const half = Math.max(1, Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 2));
     if (!first.raised || userMon.hp <= half) {
       if (after !== before) statEvent(out, userFighter, after, undefined);
+      if (!first.raised) out.missed = true;
       return butItFailed(out);
     }
     out.selfDamage = half;
@@ -1771,7 +1789,7 @@ function applyPrimary(ctx) {
     if (clampStage(userMon.stages.atk) >= STAGE_MAX
         && clampStage(userMon.stages.def) >= STAGE_MAX) {
       out.messages.push(`${name(userMon)}'s\nABILITY won't\nrise anymore!`);
-      return out;
+      return failed(out);
     }
     const badges = userFighter ? userFighter.badges : null;
     const speed = clampStage(userMon.stages.spe);
@@ -1868,14 +1886,15 @@ function applyPrimary(ctx) {
   if (effectId === SWAGGER) {
     if (c.missed) {
       out.failureText = true;
-      return out;
+      return failed(out);
     }
     const before = clampStage(targetMon.stages.atk);
     const r = raiseStat(targetMon, targetBadges, 'atk', 2);
     if (!r.raised) {
       if (r.stage !== before) statEvent(out, targetFighter, r.stage, undefined);
       out.failureText = true;
-      return out;
+      out.missed = true;
+      return failed(out);
     }
     const text = statUpLine(targetMon, 'atk', 2);
     out.messages.push(text);
@@ -2166,28 +2185,34 @@ function applySide(ctx) {
   // BattleCommand_StatDown (statDownGate, then `.DidntMiss`), every failure
   // silent. DefenseDownHit's SECOND `effectchance` is drawn here, against the
   // substitute standing now, and its verdict is the one StatDown reads.
+  // Every failure sets wAttackMissed (`out.missed`; the Lua twin explains).
   const stat = SIDE_STAT_DOWN[effectId];
   if (stat) {
     if (effectId === 69) hit = effectChance(rng, c.chance, behindSub);
+    out.missed = true;
     if (statDownGate(rng, targetMon, stat, c.computerMover === true, effectId,
       targetMon.lockOn === true)) {
       return out;
     }
     if (behindSub || !hit || targetMon.invulnerable) return out;
     if (statAtFloor(targetMon, stat, targetFighter ? targetFighter.badges : null)) return out;
+    delete out.missed;
     out.proc = true;
     applyStatChange(out, targetFighter, targetMon, stat, -1);
     return out;
   }
 
   // The *UpHit scripts' raises on the user (raiseSideStat; AllStatsUp's
-  // ResetMiss lets each of the five fail alone).
+  // ResetMiss lets each of the five fail alone); RaiseStat's failures set
+  // wAttackMissed, a missed effect chance none -- the last one's stands.
   const ups = SIDE_STAT_UP[effectId];
   if (ups) {
     const { userMon } = c;
     if (!userMon || typeof userMon !== 'object') return out;
     for (const key of ups) {
-      if (raiseSideStat(out, c.userFighter, userMon, key, hit, c.userBadges)) out.proc = true;
+      const raised = raiseSideStat(out, c.userFighter, userMon, key, hit, c.userBadges);
+      if (raised) out.proc = true;
+      if (hit && !raised) out.missed = true; else delete out.missed;
     }
     return out;
   }
@@ -2814,6 +2839,10 @@ function heavyBallWeightByte(weight) {
   return Math.floor((half - sixteenth - Math.floor(sixteenth / 2)) / 256);
 }
 
+// BallMultiplierFunctionTable's routines (the Lua twin carries the notes). The
+// HEAVY BALL reads the true dex weight for every species: Crystal's
+// HeavyBall_GetDexEntryBank bug ("Heavy Ball uses wrong weight value for three
+// Pokémon") needs bytes this referee may not ship -- out of the plan's scope.
 function ballRate(ballId, rate, target, ctx) {
   const c0 = isTable(ctx) ? ctx : {};
   let b = Math.max(0, Math.min(255, int(rate, 0)));
@@ -2823,7 +2852,12 @@ function ballRate(ballId, rate, target, ctx) {
     return b > 255 ? 255 : b;
   }
   if (ballId === 'HEAVY_BALL') {
-    const weight = isTable(target) ? int(target.weight, null) : null;
+    // wEnemyMonSpecies' dex entry: a transformed wild monster weighs what it
+    // copied (`transformWeight`; none stated leaves the rate).
+    let weight = null;
+    if (isTable(target)) {
+      weight = target.transformed ? int(target.transformWeight, null) : int(target.weight, null);
+    }
     if (weight === null) return b;
     const high = heavyBallWeightByte(weight);
     if (high < 4) return b < 20 ? 1 : b - 20;
@@ -2858,8 +2892,10 @@ function ballRate(ballId, rate, target, ctx) {
     if (!isTable(thrower) || !isTable(target)) return b;
     const species = thrower.speciesId;
     if (species === undefined || species === null || species !== target.speciesId) return b;
+    // The player's PARTYMON DVs, the wild WILDMON's battle-struct ones (a
+    // TRANSFORM's copy): LoveBallMultiplier's two GetGender calls.
     const mine = gender(thrower);
-    const theirs = gender(target);
+    const theirs = gender(target, true);
     if (mine === null || theirs === null || mine !== theirs) return b;
     return Math.min(255, b * 8);
   }

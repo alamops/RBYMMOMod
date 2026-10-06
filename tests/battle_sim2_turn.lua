@@ -177,7 +177,7 @@ end
 local SEEN_LINES, WIRE_LOSSES = {}, {}
 local function shapeOf(text)
   local out = {}
-  for piece in tostring(text or ""):gmatch("%^[ab]") do out[#out + 1] = piece end
+  for piece in tostring(text or ""):gmatch("%^[abAB]") do out[#out + 1] = piece end
   local _, breaks = tostring(text or ""):gsub("\n", "")
   return table.concat(out, "") .. "/" .. breaks
 end
@@ -1946,13 +1946,18 @@ do
        mode .. ": nor does ZEPHYR reach a confusion self-hit")
   end
 
-  -- (b) the same seats against the computer, under Gold's mapping.
+  -- (b) the same seats against the computer, under Gold's mapping.  A
+  -- coop_npc trainer takes AIChooseMove's byte(s) at the head of every turn
+  -- (contract K16, `_aiChooseMoves`), which moves Ann's damage roll on this
+  -- seed: `npc` picks that mode's number, the badge's step the same.
   for _, mode in ipairs({ "coop_npc", "wild" }) do
-    eq(hitOn(exchange(mode, {}, {}), 3), 18, mode .. ": unbadged, the same 18")
+    local npc = mode == "coop_npc"
+    local function roll(trainer, wildOne) return npc and trainer or wildOne end
+    eq(hitOn(exchange(mode, {}, {}), 3), roll(17, 18), mode .. ": unbadged, the same 18")
     -- 88 -> 88 + floor(88 / 8) = 99 Attack; lib/battle2 reaches the same 20.
-    eq(hitOn(exchange(mode, { badges = { ZEPHYR = true } }, {}), 3), 20,
+    eq(hitOn(exchange(mode, { badges = { ZEPHYR = true } }, {}), 3), roll(18, 20),
        mode .. ": ZEPHYR raises side a's physical damage to 20")
-    eq(hitOn(exchange(mode, { badges = { BOULDER = true, BOULDERBADGE = true } }, {}), 3), 18,
+    eq(hitOn(exchange(mode, { badges = { BOULDER = true, BOULDERBADGE = true } }, {}), 3), roll(17, 18),
        mode .. ": BOULDER (Kanto) and BOULDERBADGE (Red's id) boost no stat on Gold")
     eq(firstHit(exchange(mode, { spe = 40 }, { spe = 42 })), 0,
        mode .. ": unbadged, the foe (42) still goes first")
@@ -1965,9 +1970,9 @@ do
        mode .. ": Bob's 30-power hit on an unbadged Ann is 10")
     eq(hitOn(exchange(mode, { badges = { MINERAL = true } }, { power = 30 }), 0), 8,
        mode .. ": MINERAL (Defense 40 -> 45) cuts it to 8")
-    eq(hitOn(exchange(mode, { type = 2, spa = 88 }, {}, RULES), 3), 23,
+    eq(hitOn(exchange(mode, { type = 2, spa = 88 }, {}, RULES), 3), roll(21, 23),
        mode .. ": Ann's Special hit, unbadged, is 23")
-    eq(hitOn(exchange(mode, { type = 2, spa = 88, badges = { GLACIER = true } }, {}, RULES), 3), 25,
+    eq(hitOn(exchange(mode, { type = 2, spa = 88, badges = { GLACIER = true } }, {}, RULES), 3), roll(23, 25),
        mode .. ": GLACIER (Sp. Atk 88 -> 99) raises it to 25")
 
     -- Glacier's Sp. Def tail, both ways: Bob's Special hit on Ann.  Sp. Atk
@@ -1983,22 +1988,22 @@ do
 
     -- The 999 cap: 950 + floor(950 / 8) = 1068 is held at 999, so a badged
     -- 950 hits exactly as an unbadged 999 does, and harder than a bare 950.
-    eq(hitOn(exchange(mode, { atk = 950 }, { def = 600 }), 3), 24,
+    eq(hitOn(exchange(mode, { atk = 950 }, { def = 600 }), 3), roll(22, 24),
        mode .. ": an unbadged Attack of 950 hits for 24")
-    eq(hitOn(exchange(mode, { atk = 999 }, { def = 600 }), 3), 26,
+    eq(hitOn(exchange(mode, { atk = 999 }, { def = 600 }), 3), roll(24, 26),
        mode .. ": an unbadged Attack of 999 hits for 26")
-    eq(hitOn(exchange(mode, { atk = 950, badges = { ZEPHYR = true } }, { def = 600 }), 3), 26,
+    eq(hitOn(exchange(mode, { atk = 950, badges = { ZEPHYR = true } }, { def = 600 }), 3), roll(24, 26),
        mode .. ": ZEPHYR on 950 is capped at 999 and hits for the same 26")
 
     -- DoBadgeTypeBoosts: Ann's BUG move (no STAB, so 12 bare) and HIVE.
-    eq(hitOn(exchange(mode, { type = 1 }, {}, RULES), 3), 12,
+    eq(hitOn(exchange(mode, { type = 1 }, {}, RULES), 3), roll(11, 12),
        mode .. ": Ann's BUG move, no badge, is 12")
-    eq(hitOn(exchange(mode, { type = 1, badges = { HIVE = true } }, {}, RULES), 3), 13,
+    eq(hitOn(exchange(mode, { type = 1, badges = { HIVE = true } }, {}, RULES), 3), roll(12, 13),
        mode .. ": HIVE adds its eighth: 13")
-    eq(hitOn(exchange(mode, { type = 1, badges = { FOG = true } }, {}, RULES), 3), 12,
+    eq(hitOn(exchange(mode, { type = 1, badges = { FOG = true } }, {}, RULES), 3), roll(11, 12),
        mode .. ": a badge of another type adds nothing")
     eq(hitOn(exchange(mode, { type = 1, badges = { HIVE = true } }, {},
-                      { specialTypes = RULES.specialTypes }), 3), 12,
+                      { specialTypes = RULES.specialTypes }), 3), roll(11, 12),
        mode .. ": with no typeIds the move's type has no name, and nothing fires")
     eq(hitOn(exchange(mode, { badges = { HIVE = true } }, { power = 30, type = 1 }, RULES), 0),
        hitOn(exchange(mode, {}, { power = 30, type = 1 }, RULES), 0),
@@ -2012,9 +2017,9 @@ do
     -- 80 / 50 = 11, +2 = 13, and the roll leaves 12, where STAB used to make
     -- it 19 and 18.
     local BUG_FIRST = { typeIds = { "BUG", "DARK", "FIRE" }, specialTypes = { 2 } }
-    eq(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), 18,
+    eq(hitOn(exchange(mode, {}, {}, BUG_FIRST), 3), roll(17, 18),
        mode .. ": index 0 named BUG, Ann's type-0 move is 18 bare")
-    eq(hitOn(exchange(mode, { badges = { HIVE = true } }, {}, BUG_FIRST), 3), 20,
+    eq(hitOn(exchange(mode, { badges = { HIVE = true } }, {}, BUG_FIRST), 3), roll(18, 20),
        mode .. ": ...and HIVE type-boosts it to 20")
     local struggled = exchange(mode, { pp = 0 }, {}, BUG_FIRST)
     local struggledAnim = false
@@ -2022,8 +2027,8 @@ do
       if event.t == "anim" and event.text == "STRUGGLE" then struggledAnim = true end
     end
     ok(struggledAnim, mode .. ": with her one slot at 0 PP, Ann Struggles")
-    eq(hitOn(struggled, 3), 12, mode .. ": her Struggle, no badge and no STAB, is 12")
-    eq(hitOn(exchange(mode, { pp = 0, badges = { HIVE = true } }, {}, BUG_FIRST), 3), 12,
+    eq(hitOn(struggled, 3), roll(11, 12), mode .. ": her Struggle, no badge and no STAB, is 12")
+    eq(hitOn(exchange(mode, { pp = 0, badges = { HIVE = true } }, {}, BUG_FIRST), 3), roll(11, 12),
        mode .. ": HIVE leaves her Struggle at 12 (type 0 is BUG here, and still nothing fires)")
 
     -- HitConfusion reads the boosted Attack (ZEPHYR) like any other hit.
@@ -2241,9 +2246,15 @@ do
   eq(damageOn(fixed, 0), 20, "a fixed-damage hit is never screened: the post-hoc halving is gone")
   turn(battle, { action = "fight", move = 1 })
   local fade = turn(battle, { action = "fight", move = 1 })
-  -- BattleText_MonsLightScreenFell; a link fight names the side's trainer
-  -- where each cart says "Your" (wave 5, `_screenOwner`).
-  ok(said(fade, "Ann's POKéMON's LIGHT SCREEN fell!"), "it falls at the end of its fifth turn")
+  -- BattleText_MonsLightScreenFell: HandleScreens' "Your" / "Enemy" as K17's
+  -- side-word mark, the screen owner's side (`_screenOwner`): each viewer
+  -- prints its own cart's word, in a link fight too.
+  ok(said(fade, "POKéMON's LIGHT SCREEN fell!"), "it falls at the end of its fifth turn")
+  local marked = false
+  for _, event in ipairs(fade) do
+    if event.t == "msg" and event.text == "^APOKéMON's\nLIGHT SCREEN fell!" then marked = true end
+  end
+  ok(marked, "...behind side a's side-word mark, ^A")
   eq(battle.screens.a.lightScreen, 0, "...and is down")
   local bare = turn(battle, { action = "fight", move = 1 })
   local unscreened = damageOn(bare, 0)
@@ -4188,12 +4199,19 @@ do
     local oneByte = battle.rng:clone()
     oneByte:setState(before)
     oneByte:byte()
+    -- ...then the next turn's AIChooseMove (K16, `_aiChooseMoves`), which a
+    -- trainer's seat draws as the turn opens -- AiMove's own count, off the
+    -- same stream (flags 0: `.ChooseMove`'s redraws alone).
+    if mode == "coop_npc" then
+      need("BattleSim2/AiMove").evaluate({ rng = oneByte, mode = mode },
+        battle.byId[foe], battle.byId.p1)
+    end
     return before, battle.rng:state(), oneByte:state()
   end
   local a1, a2 = sleepRng("1v1")
   local _, b2, bOne = sleepRng("coop_npc")
   eq(a1, a2, "R2d: a link foe's HYPNOSIS into a status draws nothing")
-  eq(b2, bOne, "R2d: the computer's draws exactly its AI byte")
+  eq(b2, bOne, "R2d: the computer's draws exactly its AI byte (then the next turn's AIChooseMove)")
 end
 
 -- ------------------------------------------------------------------
@@ -5225,6 +5243,272 @@ do
       item = { "BERSERK_GENE", nil, 0, "BERSERKGENE" }, moves = { hit("tap", 1) } }) } } } } })
   inOrder(drain(battle), { msgRaw("^bBeta's\nBERSERKGENE\nactivated!"), msgRaw("^bBeta's\nATTACK\nwent way up!"),
     animOn("CONF_ANIM", 3), msgRaw("^bBeta\nbecame confused!") }, "K20: the Berserk Gene's ANIM_CONFUSED")
+end
+
+-- (q) docs/plans/gen12-referee-remaining-gaps.md, wave 2's Gold half (H2):
+--     the computer's choices at the cart's points (K16), K17's side-word
+--     marks, K22's quiet clips and missed moves, LOVE / HEAVY BALL on a
+--     transformed wild monster, and T2's follow-ups.
+do
+  local AiMove = need("BattleSim2/AiMove")
+  local function seatsOf(mode, bExtra)
+    local function npcEntry(id)
+      local e = { playerId = id, name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+        moves = { hit("tap", 5), hit("thump", 10) } }) } }
+      for k, v in pairs(bExtra or {}) do e[k] = v end
+      return e
+    end
+    return battleOf({ mode = mode, seed = 31, sides = {
+      a = { { playerId = "a1", name = "Ann", aiFlags = 5, trainerItems = { "POTION" },
+              mons = { held({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } },
+            { playerId = "a2", name = "Abe",
+              mons = { held({ species = "Gamma", spe = 80, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } } },
+      b = { npcEntry("b1"), npcEntry("b2") } } })
+  end
+  -- K16: the trainer's bytes reach each computer seat as its own copy.
+  local items, types = { "POTION", "X_ATTACK" }, { 3 }
+  local battle = seatsOf("coop_npc", { aiFlags = 7, itemSwitch = 1, baseReward = 18,
+    trainerItems = items, countSpeciesTypes = types })
+  local b1, b2, a1 = battle.byId.b1, battle.byId.b2, battle.byId.a1
+  eq(b1.aiFlags, 7, "K16: aiFlags on the computer's seat")
+  eq(b1.itemSwitch, 1, "K16: itemSwitch")
+  eq(b1.baseReward, 18, "K16: baseReward")
+  ok(b1.trainerItems ~= items and b2.trainerItems ~= items and b1.trainerItems ~= b2.trainerItems,
+     "K16: trainerItems copied per seat, never aliased")
+  eq(table.concat(b1.trainerItems, ","), "POTION,X_ATTACK", "K16: ...in the cart's slot order")
+  ok(b1.countSpeciesTypes ~= types and b1.countSpeciesTypes[1] == 3, "K23: countSpeciesTypes copied")
+  b1.trainerItems[1] = "NO_ITEM"
+  eq(b2.trainerItems[1], "POTION", "K16: a seat's spent item leaves its partner's")
+  eq(a1.aiFlags, nil, "K16: a player's seat keeps none")
+  eq(a1.trainerItems, nil, "K16: ...nor items")
+  local link = seatsOf("coop_pvp", { aiFlags = 7, trainerItems = items })
+  eq(link.byId.b1.aiFlags, nil, "K16: a link fight's seats keep none")
+
+  -- AIChooseMove draws as the turn opens, for every trainer seat -- a
+  -- submitted answer stands and the draws were taken all the same.
+  local plain = battleOf({ mode = "coop_npc", seed = 77, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 5), hit("thump", 10), hit("slam", 20) } }) } } } } })
+  local probe = need("BattleSim2/Rng").new(77)
+  local mirror = { rng = probe, mode = "coop_npc" }
+  local picked = AiMove.evaluate(mirror, plain.byId.p2, plain.byId.p1).slot
+  eq(plain.rng:state(), probe:state(), "K16: AIChooseMove's bytes are the first of the fight")
+  eq(plain.byId.p2.aiPick.slot, picked, "K16: ...and its slot is the seat's pick")
+  plain:submitChoice("p2", { action = "fight", move = (picked == 1) and 1 or 0 })
+  plain:submitChoice("p1", { action = "fight", move = 0 })
+  local filed = drain(plain)
+  ok(said(filed, (picked == 1) and "Beta used thump!" or "Beta used tap!"),
+     "K16: a filed move stands over the AI's")
+  local auto = battleOf({ mode = "coop_npc", seed = 77, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 5), hit("thump", 10), hit("slam", 20) } }) } } } } })
+  auto:submitChoice("p1", { action = "fight", move = 0 })
+  ok(auto:autoPick("p2"), "K16: autoPick files the computer's answer")
+  local names = { "tap", "thump", "slam" }
+  ok(said(drain(auto), "Beta used " .. names[picked] .. "!"), "K16: ...which is AIChooseMove's slot")
+
+  -- ParseEnemyAction: ENCORE's slot whatever the AI drew; Struggle when
+  -- `.continue` finds nothing; a disabled slot the AI chose is not repaired.
+  local enc = battleOf({ mode = "coop_npc", seed = 9, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 5), hit("thump", 10), hit("slam", 20) } }) } } } } })
+  drain(enc)
+  enc.byId.p2.mons[1].encore = { moveIndex = 3, turns = 3 }
+  enc:autoPick("p2")
+  eq(enc.byId.p2.choice.move, 3, "ParseEnemyAction: an ENCOREd computer uses the encored slot")
+  eq(enc.byId.p2.aiMove.id, "slam", "...and that is the move struct AI_SwitchOrTryItem reads")
+  local dry = battleOf({ mode = "coop_npc", seed = 9, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 5, 0, 0, 0), hit("thump", 10, 0, 0, 0) } }) } } } } })
+  dry:autoPick("p2")
+  ok(dry.byId.p2.choice.struggle == true, "ParseEnemyAction's `.struggle`: no usable slot")
+  local dis = battleOf({ mode = "coop_npc", seed = 9, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85), hit("DISABLE", 0, 0, 86) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 5) } }) } } } } })
+  dis:submitChoice("p1", { action = "fight", move = 0 }); dis:autoPick("p2"); drain(dis)
+  dis:submitChoice("p1", { action = "fight", move = 1 }); dis:autoPick("p2")
+  local disabled = drain(dis)
+  ok(said(disabled, "Beta's tap is DISABLED!"), "the slot the AI chose, DISABLEd before it moved, fails at CheckTurn")
+  dis:submitChoice("p1", { action = "fight", move = 0 }); dis:autoPick("p2")
+  ok(said(drain(dis), "Beta used STRUGGLE!"), "...and the next turn `.continue` finds nothing: Struggle")
+
+  -- The wild `.loop2` at ParseEnemyAction: pending until the resolve, never
+  -- an empty-PP slot.
+  local wild = battleOf({ mode = "wild", seed = 13, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "wild", name = "Wild", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 5, 0, 0, 0), hit("thump", 10), hit("slam", 20) } }) } } } } })
+  drain(wild)
+  local before = wild.rng:state()
+  wild:autoPick("wild")
+  ok(wild.byId.wild.choice.wildPick == true, "the wild pick waits for ParseEnemyAction's place")
+  eq(wild.rng:state(), before, "...and draws nothing as it is filed")
+  local tapped = false
+  for _ = 1, 8 do
+    wild:submitChoice("p1", { action = "fight", move = 0 }); wild:autoPick("wild")
+    if said(drain(wild), "Beta used tap!") then tapped = true end
+  end
+  ok(not tapped, "`.loop2` redraws an empty-PP slot")
+
+  -- AI_TryItem's base-reward bug; AI_HealItem.
+  local reward = battleOf({ mode = "coop_npc", seed = 21, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", itemSwitch = 0x10, trainerItems = { "ANTIDOTE", "FULL_RESTORE" },
+            baseReward = 0x31, mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+              moves = { hit("tap", 5) } }) } } } } })
+  reward:submitChoice("p1", { action = "fight", move = 0 }); reward:autoPick("p2")
+  local used = drain(reward)
+  ok(said(used, "Bob used X ATTACK on Beta!"), "AI_TryItem reads the base reward as an item")
+  eq(reward.byId.p2.baseReward, 0, "...and spends it")
+  eq(reward.byId.p2.mons[1].stages.atk, 1, "...an X ATTACK all the same")
+  ok(not said(used, "Beta used tap!"), "the item is the computer's turn")
+
+  -- LOVE BALL / HEAVY BALL on a transformed wild monster.
+  local male = { base = { gender = 127 }, dvs = { atk = 15, def = 8, spe = 15, spc = 8 } }
+  local thrower = { speciesId = "MAGNEMITE", base = male.base, dvs = male.dvs }
+  local own = { speciesId = "MAGNEMITE", base = { gender = 127 }, dvs = { atk = 2, def = 8, spe = 2, spc = 8 } }
+  eq(Effects.ballRate("LOVE_BALL", 10, own, { thrower = thrower }), 10,
+     "LOVE BALL: the other gender, no boost (the routine's bug)")
+  local copied = { speciesId = "MAGNEMITE", base = { gender = 127 }, transformed = true,
+    dvs = { atk = 15, def = 8, spe = 15, spc = 8 }, preTransform = { dvs = own.dvs } }
+  eq(Effects.ballRate("LOVE_BALL", 10, copied, { thrower = thrower }), 80,
+     "LOVE BALL: a transformed wild monster's wEnemyMonDVs are the copied ones -- same gender, x8")
+  eq(Effects.gender(copied), "F", "...while ATTRACT's GetGender still reads its own (wEnemyBackupDVs)")
+  eq(Effects.ballRate("HEAVY_BALL", 100, { weight = 50, transformed = true, transformWeight = 9000 }, {}), 130,
+     "HEAVY BALL: wEnemyMonSpecies' weight -- the copied species'")
+  eq(Effects.ballRate("HEAVY_BALL", 100, { weight = 9000, transformed = true }, {}), 100,
+     "HEAVY BALL: a copied sheet with no weight leaves the rate")
+end
+
+do
+  -- K22: a charge turn's clip is quiet and says no "used" line; a missed
+  -- move plays none; a missed FLY's user comes back into view.
+  local battle = battleOf({ mode = "1v1", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("SOLARBEAM", 60, 0, 127), { id = "FLY", pp = 30, power = 60, accuracy = 1, type = 0,
+                effect = 43, chance = 0 }, { id = "whiff", pp = 30, power = 40, accuracy = 1, type = 0,
+                effect = 0, chance = 0 } } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } } } })
+  drain(battle)
+  local charge = round(battle, "p2", { action = "fight", move = 0 })
+  local clip = nil
+  for _, e in ipairs(charge) do if e.t == "anim" and e.text == "SOLARBEAM" then clip = e end end
+  ok(clip and clip.quiet == true and clip.amount == 1, "K22: a charge turn's clip is quiet, amount 1")
+  ok(not said(charge, "Alpha used SOLARBEAM!"), "...and BattleCommand_Charge ends the move before `usedmovetext`")
+  ok(said(charge, "Alpha took in sunlight!"), "...its own line the turn's only one")
+  ok(said(round(battle, "p2", { action = "fight", move = 0 }), "Alpha used SOLARBEAM!"), "the release says it")
+  round(battle, "p2", { action = "fight", move = 1 })
+  local missed = round(battle, "p2", { action = "fight", move = 1 })
+  local seq = {}
+  for _, e in ipairs(missed) do
+    if e.slot == 0 and e.t == "anim" then seq[#seq + 1] = (e.quiet and "quiet:" or "") .. e.text end
+  end
+  eq(table.concat(seq, ","), "quiet:FLY", "K22: a missed FLY plays no strike, only FailureText's AppearUserRaiseSub")
+  local whiff = round(battle, "p2", { action = "fight", move = 2 })
+  local any = false
+  for _, e in ipairs(whiff) do if e.t == "anim" and e.text == "whiff" then any = true end end
+  ok(not any, "K22: a missed move's `moveanim` plays nothing")
+
+  -- wAttackMissed as the turn's last move left it (AI_SwitchOrTryItem's X
+  -- items read it): CheckTurn clears it, CheckHit's `.Miss` sets it.
+  local flag = battleOf({ mode = "1v1", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { { id = "whiff", pp = 30, power = 40, accuracy = 1, type = 0, effect = 0, chance = 0 },
+                hit("wait", 0, 0, 85) } }) } } } } })
+  drain(flag)
+  round(flag, "p2", nil, { action = "fight", move = 0 })
+  ok(flag.lastAttackMissed == true, "wAttackMissed stands after the turn's last move missed")
+  round(flag, "p2", nil, { action = "fight", move = 1 })
+  ok(flag.lastAttackMissed == false, "...and CheckTurn cleared it for the next")
+
+  -- T2's follow-ups: BattleCommand_Selfdestruct zeroes the status and LEECH
+  -- SEED; the team sync waits for a standing 0-HP monster's own faint.
+  local boom = battleOf({ mode = "1v1", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = {
+      held({ species = "Alpha", spe = 90, maxHp = 100, atk = 250, status = "PSN",
+             moves = { hit("EXPLOSION", 250, 0, 7) } }),
+      held({ species = "Gamma", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } } } })
+  drain(boom)
+  boom.byId.p1.mons[1].leechSeed = { fromSlot = 3 }
+  local blast = round(boom, "p2")
+  local alpha = boom.byId.p1.mons[1]
+  eq(alpha.status, nil, "Selfdestruct: the status byte zeroed")
+  eq(alpha.leechSeed, nil, "Selfdestruct: SUBSTATUS_LEECH_SEED off")
+  inOrder(blast, { function(e) return e.t == "status" and e.slot == 0 and e.status == nil end,
+    function(e) return e.t == "damage" and e.slot == 0 and e.hp == 0 end },
+    "Selfdestruct: the HUD loses the status, then the HP")
+  local recoil = battleOf({ mode = "1v1", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = {
+      held({ species = "Alpha", spe = 90, maxHp = 100, hp = 1, atk = 250, moves = { hit("ram", 80, 0, 48) } }),
+      held({ species = "Gamma", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = {
+      held({ species = "Beta", spe = 10, maxHp = 100, hp = 5, moves = { hit("tap", 1) } }),
+      held({ species = "Delta", spe = 10, maxHp = 900, moves = { hit("tap", 1) } }) } } } } })
+  drain(recoil)
+  inOrder(round(recoil, "p2"), { function(e) return e.t == "faint" and e.slot == 3 end,
+    function(e) return e.t == "team" and e.slot == 3 end,
+    function(e) return e.t == "faint" and e.slot == 0 end,
+    function(e) return e.t == "team" and e.slot == 0 end },
+    "the team sync holds Alpha's 0-HP ball until its own faint")
+
+  -- The vitamin line: _ItemStatRoseText, the bag's own.
+  local vit = battleOf({ mode = "wild", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "wild", name = "Wild", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } } } })
+  drain(vit)
+  vit:submitChoice("p1", { action = "item", item = "CALCIUM" })
+  vit:autoPick("wild")
+  ok(said(drain(vit), "Alpha's SPECIAL rose."), "a vitamin says _ItemStatRoseText, StatStrings' SPECIAL")
+
+  -- UseBallInTrainerBattle: the blocked throw's clip, then the lines.
+  local block = battleOf({ mode = "coop_npc", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } } } })
+  drain(block)
+  block:submitChoice("p1", { action = "item", item = "POKE_BALL" })
+  block:autoPick("p2")
+  inOrder(drain(block), { animOn("TOSS_ANIM", 0), animOn("BLOCKBALL_ANIM", 0),
+    msgRaw("The trainer\nblocked the BALL!") }, "a ball in a trainer fight: the toss, the block, the line")
+
+  -- wPlayerUsedMoves (UpdateUsedMoves) and wEnemyTurnsTaken (DoTurn) as the
+  -- AI reads them.
+  local log = battleOf({ mode = "coop_npc", seed = 4, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85), hit("thump", 10, 0, 0) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("SOLARBEAM", 60, 0, 127) } }) } } } } })
+  drain(log)
+  for _, m in ipairs({ 0, 1, 0 }) do
+    log:submitChoice("p1", { action = "fight", move = m }); log:autoPick("p2"); drain(log)
+  end
+  local used2 = log.byId.p1.mons[1].usedMoves
+  eq(#used2, 2, "UpdateUsedMoves: each move once, first use order")
+  eq(used2[1].id .. "/" .. used2[2].id, "wait/thump", "...wait then thump")
+  eq(used2[2].effect, 0, "...the row keeps its effect (AiSwitch.recordUsedMove)")
+  eq(used2[2].accuracy, 255, "...and its accuracy")
+  eq(log.byId.p1.mons[1].turnsTaken, 3, "DoTurn counts the player's three turns")
+  eq(log.byId.p2.mons[1].turnsTaken, 2, "...the computer's SOLARBEAM counts its charge turns, not the release")
 end
 
 -- (p) K17 / K18: every event this suite drained crossed the wire whole --

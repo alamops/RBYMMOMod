@@ -124,6 +124,12 @@
 --     `_link` (LostBattle / TiedAgainstText), `fx2_residual_ko` (the HP bar
 --     before the line), `fx2_bag_no_effect` ("It won't have any effect."),
 --     `fx2_ball_table` (PokeBallEffect) and `fx2_level_up_guards` (K9).
+--   * the remaining-gaps run's wave 2, Gold (H2, docs/plans/gen12-referee-
+--     remaining-gaps.md): the `h2_*` rows -- AIChooseMove, ParseEnemyAction's
+--     overrides and wild pick, AI_SwitchOrTryItem, FindMonInOTPartyToSwitch-
+--     IntoBattle (K16, driven through `autoPick` -- a round's "auto"), LOVE
+--     BALL on a transformed wild monster, K22's quiet clips and missed moves,
+--     K17's side-word marks and T2's follow-ups.
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -1868,7 +1874,11 @@ local function seq(events, opts, rounds)
       fns[i] = function(b) b:tick(b.now + 1) end
     else
       fns[i] = function(b)
-        for _, pair in ipairs(list) do b:submitChoice(pair[1], pair[2]) end
+        -- "auto" files the seat's answer the way a hub's NPC seat and a solo
+        -- foe do (`autoPick`: the computer's own AI, H2).
+        for _, pair in ipairs(list) do
+          if pair[2] == "auto" then b:autoPick(pair[1]) else b:submitChoice(pair[1], pair[2]) end
+        end
       end
     end
   end
@@ -3117,7 +3127,9 @@ end)
 -- then "already asleep / poisoned / paralyzed"; Ann's LEECH SEED into a
 -- substitute "evaded the attack!".
 scenario("r2d_status_lines", function(events)
-  return seq(events, duo4("r4v", "coop_npc", 822,
+  -- Seed 825 (822 before K16): the trainer's AIChooseMove byte at each
+  -- turn's head moved the `.CheckAIRandomFail` rolls this scenario shows.
+  return seq(events, duo4("r4v", "coop_npc", 825,
     { mn({ species = "Alpha", maxHp = 999, spe = 90, moves = { hm("LEECH_SEED", 0, 9, 84), hm("wait", 0, 0, 85) } }),
       mn({ species = "Gamma", maxHp = 999, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
       mn({ species = "Delta", maxHp = 999, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
@@ -3885,6 +3897,230 @@ scenario("t2_nightmare_curse_fs", function(events)
                      hm("wait", 0, 0, 85) } }) },
     { mn({ species = "Beta", maxHp = 900, spe = 10, status = "SLP", statusTurns = 7, moves = { hm("tap", 1) } }) }),
     { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0)), both3(F(3), F(0)) })
+end)
+
+-- docs/plans/gen12-referee-remaining-gaps.md, wave 2's Gold half (H2): the
+-- computer's choices at the cart's points (K16) -- `"auto"` is `autoPick`, the
+-- path a hub's NPC seat and a solo foe take.  `h2_ai_flags0` / `_layers`:
+-- AIChooseMove with no layers and with all ten; `h2_ai_disabled`: the AI's
+-- slot DISABLE takes from it the same turn fails at CheckTurn, then
+-- `.continue` finds nothing usable -- Struggle; `h2_ai_out_of_pp`: the slot
+-- SPITE empties is `.out_of_pp`; `h2_ai_encore`: ENCORE's move whatever the
+-- AI drew; `h2_wild_pick`: `.loop2`'s redraws (an empty slot, no PP, the
+-- disabled one); `h2_ai_item_base_reward`: AI_TryItem reads the base reward
+-- as an item; `h2_ai_potion`; `h2_ai_switch_pursuit`: PERISH SONG's count of
+-- 1 makes AI_SwitchOrTryItem switch -- PURSUIT chases it, then the withdraw
+-- line, no SPIKES; `h2_replace_single`: FindMonInOTPartyToSwitchIntoBattle
+-- and the move-struct type a THRASH carries on into the successor;
+-- `h2_replace_double`: the AI's successor scored against the player's own;
+-- `h2_love_ball_transform`; `h2_quiet_anims` / `h2_miss_no_anim` (K22);
+-- `h2_side_word_marks` (K17); `h2_selfdestruct_status`; `h2_team_hold`;
+-- `h2_pursuit_bond`; `h2_solo_seat` (SoloBattle's `sides.b[1]`).
+local function A(choice, foe)
+  foe = foe or "p2"
+  return { { "p1", choice }, { foe, "auto" }, { foe, "auto" } }
+end
+local function npc(o, fields)
+  for key, value in pairs(fields) do o.sides.b[1][key] = value end
+  return o
+end
+local function typed(o, types)
+  o.types = types
+  return mn(o)
+end
+
+scenario("h2_ai_flags0", function(events)
+  return seq(events, duo4("h2a", "coop_npc", 1101,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("tap", 5), hm("thump", 10), hm("slam", 20) } }) }),
+    { A(F(0)), A(F(0)), A(F(0)), A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_ai_layers", function(events)
+  local o = duo4("h2b", "coop_npc", 1102,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, status = "PSN", types = { 4 },
+           moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, types = { 3 },
+           moves = { am("HYPNOSIS", 0, 8, 32, 255), hm("splash_wave", 40, 3), hm("tap", 5),
+                     hm("GROWL", 0, 0, 18) } }) })
+  npc(o, { aiFlags = 1023 })
+  return seq(events, o, { A(F(0)), A(F(0)), A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_ai_disabled", function(events)
+  return seq(events, duo4("h2c", "coop_npc", 1103,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("wait", 0, 0, 85), hm("DISABLE", 0, 0, 86) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 5) } }) }),
+    { A(F(0)), A(F(1)), A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_ai_out_of_pp", function(events)
+  return seq(events, duo4("h2d", "coop_npc", 1104,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("wait", 0, 0, 85), hm("SPITE", 0, 0, 150) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 5, 0, 0, 2) } }) }),
+    { A(F(0)), A(F(1)), A(F(0)) })
+end)
+
+scenario("h2_ai_encore", function(events)
+  return seq(events, duo4("h2e", "coop_npc", 1105,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("wait", 0, 0, 85), hm("ENCORE", 0, 0, 139) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("tap", 5), hm("thump", 10), hm("slam", 20) } }) }),
+    { A(F(0)), A(F(1)), A(F(0)), A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_wild_pick", function(events)
+  return seq(events, duo4("h2f", "wild", 1106,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("wait", 0, 0, 85), hm("DISABLE", 0, 0, 86) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("tap", 5, 0, 0, 0), hm("thump", 10), hm("slam", 20) } }) }, { foe = "wild" }),
+    { A(F(0), "wild"), A(F(0), "wild"), A(F(1), "wild"), A(F(0), "wild"), A(F(0), "wild"),
+      A(F(0), "wild") })
+end)
+
+scenario("h2_ai_item_base_reward", function(events)
+  local o = duo4("h2g", "coop_npc", 1107,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 5) } }) })
+  -- ANTIDOTE matches no row; FULL_RESTORE (item 2) matches the first and its
+  -- routine declines at full HP, so `de` stays on item 2 and the rows after
+  -- read the byte past it: the base reward, $31 -- X_ATTACK's number.
+  npc(o, { itemSwitch = 0x10, trainerItems = { "ANTIDOTE", "FULL_RESTORE" }, baseReward = 0x31 })
+  return seq(events, o, { A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_ai_potion", function(events)
+  local o = duo4("h2h", "coop_npc", 1108,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 100, hp = 20, spe = 10, moves = { hm("tap", 5) } }) })
+  npc(o, { trainerItems = { "POTION" } })
+  return seq(events, o, { A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_ai_switch_pursuit", function(events)
+  local o = duo4("h2i", "coop_npc", 1109,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("PERISH_SONG", 0, 0, 145), hm("wait", 0, 0, 85), hm("PURSUIT", 40, 7, 117) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 50, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 400, spe = 10, moves = { hm("tap", 5) } }),
+      mn({ species = "Delta", maxHp = 400, spe = 10, moves = { hm("tap", 5) } }) })
+  npc(o, { itemSwitch = 0x01 })
+  return seq(events, o, { A(F(0)), A(F(1)), A(F(1)), A(F(2)), { { "p1", S(1) }, { "p2", "auto" } },
+    A(F(0)) })
+end)
+
+scenario("h2_replace_single", function(events)
+  return seq(events, duo4("h2j", "coop_npc", 1110,
+    { typed({ species = "Alpha", maxHp = 900, atk = 200, spe = 90,
+              moves = { hm("THRASH", 60, 0, 27) } }, { 10 }) },
+    { typed({ species = "Beta", maxHp = 100, hp = 5, spe = 10, moves = { hm("tap", 5) } }, { 0 }),
+      typed({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("tap", 5) } }, { 11 }) }),
+    { A(F(0)), A(F(0)), A(F(0)) })
+end)
+
+scenario("h2_replace_double", function(events)
+  return seq(events, duo4("h2k", "coop_npc", 1111,
+    { typed({ species = "Alpha", maxHp = 100, atk = 250, spe = 90,
+              moves = { hm("EXPLOSION", 250, 0, 7) } }, { 0 }),
+      typed({ species = "Gamma", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }, { 4 }) },
+    { typed({ species = "Beta", maxHp = 50, def = 5, spe = 10, moves = { hm("tap", 5) } }, { 0 }),
+      typed({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("tap", 5) } }, { 0 }),
+      typed({ species = "Eps", maxHp = 900, spe = 10, moves = { hm("splash_wave", 40, 3) } }, { 3 }) }),
+    { A(F(0)), { { "p2", "auto" }, { "p1", S(1) } }, A(F(0)) })
+end)
+
+scenario("h2_love_ball_transform", function(events)
+  local wild = sexed({ species = "Beta", maxHp = 300, spe = 10, moves = { hm("TRANSFORM", 0, 0, 57) } }, FEMALE)
+  wild.speciesId, wild.catchRate = "MAGNEMITE", 3
+  local alpha = sexed({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("wait", 0, 0, 85) } }, MALE)
+  alpha.speciesId = "MAGNEMITE"
+  return seq(events, duo4("h2l", "wild", 1112, { alpha }, { wild }, { foe = "wild" }),
+    { A(ITEM("LOVE_BALL"), "wild"), A(F(0), "wild"), A(ITEM("LOVE_BALL"), "wild"),
+      A(ITEM("LOVE_BALL"), "wild") })
+end)
+
+scenario("h2_quiet_anims", function(events)
+  return seq(events, duo4("h2m", "1v1", 1113,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("SOLARBEAM", 60, 9, 127), am("FLY", 60, 12, 43, 1), hm("BIND", 10, 0, 42),
+                     am("HI_JUMP_KICK", 60, 1, 45, 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)),
+      both3(F(3), F(0)), both3(F(3), F(0)) })
+end)
+
+scenario("h2_miss_no_anim", function(events)
+  return seq(events, duo4("h2n", "1v1", 1114,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { am("whiff", 40, 0, 0, 1), am("HYPNOSIS", 0, 8, 32, 1), hm("SANDSTORM", 0, 5, 126),
+                     hm("MIRROR_MOVE", 0, 0, 9) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, status = "PSN",
+           moves = { hm("tap", 5), am("POISONPOWDER", 0, 13, 66, 255) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(1)), both3(F(2), F(0)), both3(F(2), F(0)), both3(F(3), F(1)) })
+end)
+
+scenario("h2_side_word_marks", function(events)
+  local rounds = { both3(F(0), F(0)) }
+  for _ = 1, 5 do rounds[#rounds + 1] = both3(F(1), F(1)) end
+  return seq(events, duo4("h2o", "1v1", 1115,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("LIGHT_SCREEN", 0, 8, 64), hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("REFLECT", 0, 8, 65), hm("wait", 0, 0, 85) } }) }),
+    rounds)
+end)
+
+scenario("h2_selfdestruct_status", function(events)
+  return seq(events, duo4("h2p", "1v1", 1116,
+    { mn({ species = "Alpha", maxHp = 100, atk = 250, spe = 90, status = "PSN", leechSeed = { fromSlot = 3 },
+           moves = { hm("EXPLOSION", 250, 0, 7) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), { { "p1", S(1) } }, both3(F(0), F(0)) })
+end)
+
+scenario("h2_team_hold", function(events)
+  return seq(events, duo4("h2q", "1v1", 1117,
+    { mn({ species = "Alpha", maxHp = 100, hp = 1, atk = 250, spe = 90, moves = { hm("ram", 80, 0, 48) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 100, hp = 5, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), { { "p1", S(1) }, { "p2", S(1) } }, both3(F(0), F(0)) })
+end)
+
+scenario("h2_pursuit_bond", function(events)
+  return seq(events, duo4("h2r", "1v1", 1118,
+    { mn({ species = "Alpha", maxHp = 20, spe = 10, moves = { hm("DESTINY_BOND", 0, 0, 138) } }),
+      mn({ species = "Gamma", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 300, atk = 250, spe = 90,
+           moves = { hm("wait", 0, 0, 85), hm("PURSUIT", 80, 7, 117) } }),
+      mn({ species = "Delta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(S(1), F(1)), { { "p2", S(1) } }, both3(F(0), F(0)) })
+end)
+
+-- A solo trainer fight (src/SoloBattle.lua): `solo_foe` in coop_npc, the
+-- side entry K16 builds (aiFlags, trainerItems, itemSwitch, baseReward,
+-- countSpeciesTypes, no bag), `autoPick` every turn and every send-out.
+scenario("h2_solo_seat", function(events)
+  local o = duo4("h2s", "coop_npc", 1119,
+    { typed({ species = "Alpha", maxHp = 300, atk = 150, spe = 90,
+              moves = { hm("thump", 50), hm("splash_wave", 50, 3) } }, { 3 }),
+      typed({ species = "Gamma", maxHp = 300, atk = 150, spe = 50, moves = { hm("thump", 50) } }, { 0 }) },
+    { typed({ species = "Beta", level = 22, maxHp = 200, spe = 40,
+              moves = { hm("tap", 20), hm("GROWL", 0, 0, 18) } }, { 4 }),
+      typed({ species = "Delta", level = 20, maxHp = 200, spe = 40,
+              moves = { hm("splash_wave", 30, 3), hm("tap", 20) } }, { 3 }),
+      typed({ species = "Eps", level = 20, maxHp = 200, spe = 40, moves = { hm("tap", 20) } }, { 5 }) },
+    { foe = "solo_foe" })
+  o.sides.b[1].name = "YOUNGSTER JOEY"
+  npc(o, { aiFlags = 0x07, trainerItems = { "POTION", "X_ATTACK" }, itemSwitch = 0x01,
+           baseReward = 0x12, countSpeciesTypes = { 3 } })
+  local rounds = {}
+  for _ = 1, 16 do rounds[#rounds + 1] = A(F(0), "solo_foe") end
+  return seq(events, o, rounds)
 end)
 
 -- ------------------------------------------------------------------

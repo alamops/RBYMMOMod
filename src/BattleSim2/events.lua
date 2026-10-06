@@ -129,6 +129,12 @@ M.FIELDS = {
   team         = "string",
   confused     = "number",
   stage        = "number",
+  -- Contract K22 of docs/plans/gen12-referee-remaining-gaps.md: an `anim`
+  -- that plays a move's clip for a beat that is not its user's own use of the
+  -- move (HandleWrap's trap move, ItemRecoveryAnim's RECOVER, DESTINY BOND's
+  -- and FUTURE SIGHT's hit, a charge's first turn) says `true` -- the screen
+  -- plays the look alone, no callout and no lunge.  Absent otherwise.
+  quiet        = "boolean",
 }
 
 -- ------------------------------------------------------------------
@@ -157,7 +163,8 @@ M.SHAPES = {
   msg       = { text = true },
   anim      = { slot = true, side = true,
                 text = "move id, ball-anim id, or a cart status clip (`<X>_ANIM`, K20)",
-                amount = "shake count on SHAKE_ANIM (0-3)" },
+                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge's first turn",
+                quiet = "true when the clip is not the monster using its move (K22)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true,
@@ -297,11 +304,13 @@ end
 -- (two glyphs) and breaks (one) included.
 M.BATTLE_LINE_MAX = 80
 
--- The same line as one plain sentence: each mark gone, each break a space --
--- none after a hyphen the cart split a word on.  Twin of Wire.plainBattleLine.
+-- The same line as one plain sentence: each mark gone -- a name mark (`^a`
+-- / `^b`) and a side-word mark (`^A` / `^B`, K17's wave-2 bullet: HandleScreens'
+-- "Your" / "Enemy") alike -- each break a space, none after a hyphen the cart
+-- split a word on.  Twin of Wire.plainBattleLine.
 function M.plainLine(text)
   if type(text) ~= "string" then return text end
-  local plain = text:gsub("%^[ab]", ""):gsub("%-\n", "-"):gsub("\n", " ")
+  local plain = text:gsub("%^[abAB]", ""):gsub("%-\n", "-"):gsub("\n", " ")
   return plain
 end
 
@@ -317,6 +326,11 @@ local function coerce(key, value)
     local n = tonumber(value)
     if not n or n ~= n then return nil end
     return floor(n)
+  end
+  -- A flag is kept only as `true`: `false` is the absence it would mean.
+  if want == "boolean" then
+    if value == true then return true end
+    return nil
   end
   if type(value) ~= "string" or value == "" then return nil end
   return value

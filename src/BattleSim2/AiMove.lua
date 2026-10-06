@@ -25,11 +25,14 @@
 --
 --   * mon.turnsTaken -- wPlayerTurnsTaken / wEnemyTurnsTaken, the byte
 --     BattleCommand_DoTurn counts up (effect_commands.asm `.proceed`: `inc a`
---     once per move a monster starts, Struggle and a lock-in's turns
---     included, not a METRONOME / MIRROR MOVE / SLEEP TALK call -- those run
---     with wPlayerCharging set, CheckUserIsCharging's `ret nz`), cleared by
---     NewBattleMonStatus / NewEnemyMonStatus at a send-out (not BATON
---     PASS's).  Absent reads 0: the monster's first turn.
+--     once per move that reaches `doturn`: Struggle, an `.out_of_pp`, and a
+--     lock-in's FIRST turn -- a charge's, a rampage's, the first ROLLOUT,
+--     BIDE's start -- but not its later ones, whose CheckCharge / CheckRampage
+--     / CheckRollout / StoreEnergy skip past `doturn`; not a METRONOME /
+--     MIRROR MOVE / SLEEP TALK call -- those run with wPlayerCharging set,
+--     CheckUserIsCharging's `ret nz`), cleared by NewBattleMonStatus /
+--     NewEnemyMonStatus at a send-out (not BATON PASS's): Turn keeps it
+--     (`_useMove`, `_sendOut`).  Absent reads 0: the monster's first turn.
 --   * mon.usedMoves -- wPlayerUsedMoves (the PLAYER's monster's only): the
 --     moves UpdateUsedMoves appends in UsedMoveText on the player's turn
 --     (wPlayerMoveStruct + MOVE_ANIM, unless already there), first use

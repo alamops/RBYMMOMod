@@ -24,9 +24,12 @@ const Turn = require('./Turn.js');
 const events = require('./events.js');
 const Effects = require('./Effects.js');
 const Items = require('./Items.js');
+// The computer's AI (contract K16): AIChooseMove and AI_SwitchOrTryItem.
+const AiMove = require('./AiMove.js');
+const AiSwitch = require('./AiSwitch.js');
 
 module.exports = {
-  damage, accuracy, crit, status, Rng, Turn, events, Effects, Items,
+  damage, accuracy, crit, status, Rng, Turn, events, Effects, Items, AiMove, AiSwitch,
   VERSION: 1,
   GENERATION: 2,
 };
