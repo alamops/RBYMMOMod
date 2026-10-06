@@ -621,7 +621,8 @@ version, but each was a real failure on a live boot or on the wire:
   The engine copies live objects into the neighbour's draw pool when a map
   loads, which left remote players frozen (and doubled) on the far side;
   the mod now purges its avatars from those pools, so you see another player
-  once you share a map.
+  once you share a map. The engine seam that would draw them there is asked
+  for in `docs/upstream/gen3-spawn-npc.md` (addendum B).
 - **Party-on-map on Gen 3 is a list over the region map**, not a figure
   standing on a city as on Red.
 - **No official Gen 3 server** is on the `SERVERS` list — none is deployed.
@@ -634,8 +635,9 @@ version, but each was a real failure on a live boot or on the wire:
   `BattleBridge.start`, and avatars are shielded from the FireRed quest-log
   recorder and Emerald's rotating-tile puzzle. Each wrap keeps the engine's
   original and is re-applied, never stacked, across a hot reload; all of it
-  is written up as an upstream proposal in
-  `docs/upstream/gen3-spawn-npc.md`. An engine
+  is written up as one upstream proposal in
+  `docs/upstream/gen3-spawn-npc.md`, together with the two seams the map-edge
+  and trainer-draw items below need. An engine
   update that renames one of those internals can break that feature on Gen 3
   until the mod follows.
 - **A remote player walking nearby can hold the VS Seeker's charge a
@@ -645,7 +647,9 @@ version, but each was a real failure on a live boot or on the wire:
   trainerbattle opcode has no answer for that ending, so its script is halted
   where it waited: no prize, no flag, no TM or badge. An unbeaten trainer who
   still sees you challenges you again — the cart's own sight check. A draw
-  that leaves your team on nothing is a whiteout, as on the cart.
+  that leaves your team on nothing is a whiteout, as on the cart. A draw
+  answer for the opcode, so the engine rather than the mod ends the script,
+  is asked for in `docs/upstream/gen3-spawn-npc.md` (addendum C).
 - **The bag works in a fight between players**, as it does on Red and Gold —
   this mod's rule for every generation; the carts lock the bag in a link
   battle.

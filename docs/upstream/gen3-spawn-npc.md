@@ -1,4 +1,4 @@
-# Upstream proposal (Lane B) — runtime objects, the player's look and screen events on game3
+# Upstream proposal (Lane B) — the game3 seams `rby_mmo` needs: runtime objects, the player's look, screen events, battle takeover, neighbour-map objects and trainer draws
 
 **For:** `bryanthaboi/gen1recomp`, the game3 (FireRed / LeafGreen / Emerald)
 mod surface. Against `dev` @ `fdea09dc`.
@@ -10,6 +10,22 @@ through `src/Gen3.lua`) and each behind a `pcall`; every module-function wrap
 goes through one discipline, `Gen3.wrapFn` / `unwrapFn`, which keeps the
 original and re-applies rather than stacks on a hot reload. Nothing in this
 document is a workaround we intend to keep once a seam exists.
+
+**One request.** This is everything the Gen 3 port asks of the engine, meant to
+go upstream as a single RFC rather than as separate asks:
+
+1. **Runtime objects, `player.sprite` and `screen.*` on game3** (the body of
+   this document), with the **battle takeover** seam, `battle.intercept`
+   (addendum A).
+2. **Runtime objects on a neighbouring map**, so a player across a seamless
+   map edge is drawn (addendum B; closes `docs/plans/gen3-known-gaps.md` §4).
+3. **A draw answer for `trainerbattle`**, so a mod-refereed fight that ends
+   with nobody beaten leaves the trainer to be fought again without the mod
+   stopping the script VM from outside (addendum C; closes §7).
+
+The two later seams build on the first: B is `spawnNpc` taught about the maps
+the field already draws around the current one, and C is the third answer
+`battle.intercept`'s `spec.finish("draw")` needs from the opcode.
 
 ## Summary
 
@@ -24,6 +40,8 @@ the `player.sprite` hook, and learns that a battle or a menu arrived from
 | `mod.world:removeNpc(id)` | removes the runtime NPC | hides a *template* object and sets its hide flag (`:453`) |
 | `player.sprite` hook | the player's walking sheet | never raised (no call site under `src/core/game3`) |
 | `screen.pushed` / `screen.popped` | every state push / pop | never raised; the game3 modal stack (`src/ui/game3/stack.lua`) has no emit |
+| a runtime object on a neighbouring map | not needed (no objects are drawn across a Gen 1 / Gen 2 connection) | no way in: `spawnNpc` is unsupported and the neighbour pools are private (addendum B) |
+| a draw answer from `trainerbattle` | not needed (the buried battle's own finish takes the result) | none: `"lose"` runs the bytes after the opcode, anything else marks the trainer beaten (addendum C) |
 
 This asks for the smallest additive surface that closes the gap, in the shape
 the Gen 1 / Gen 2 API already has, so a mod written against those carries over.
@@ -195,14 +213,20 @@ battles. Guarded by `Runtime.wants`.
   for it (`talk = true`).
 - `player.sprite` on game3 is a new call site for an existing hook, with the
   generation in `ctx`; no Gen 1 / Gen 2 call site moves.
+- Addendum B changes nothing for a map with no runtime objects: the same pools
+  are built, captured and adopted. Addendum C gives one new string a meaning
+  in the `trainerbattle` continuation; every answer it took before keeps its
+  meaning, and an unknown one still counts as a win.
 - The link fingerprint is unaffected: none of this touches a
   `Manifest.LINK_REGISTRIES` registry.
 
 ## Obligations (CLAUDE.md, "If upstream itself needs to change")
 
-1. **RFC** — `docs/rfcs/NNNN-game3-runtime-objects.md` covering the delta above.
-2. **Backward-compatibility statement** — the section above, in the RFC.
-3. **Parity test pair** for each seam:
+1. **RFC** — one, `docs/rfcs/NNNN-game3-mod-seams.md`, covering the delta
+   above and addenda A, B and C.
+2. **Backward-compatibility statement** — the section above, in the RFC, with
+   each addendum's own.
+3. **Parity test pair** for each seam (addenda A, B and C state theirs):
    - *vanilla unchanged with no mod installed*: a game3 map load, A press on a
      template NPC, and a frame of `playerGraphicsId` produce the same objects,
      the same script start and the same graphic id as before;
@@ -229,8 +253,9 @@ battles. Guarded by `Runtime.wants`.
   ghost-pool purge on every map change and the `QuestLogRecorder.capture` and
   `RotatingTilePuzzle.move` wraps. (The look fence stays either way: a remote
   player should be drawn as a walking person, not a boulder.)
+- With addenda A–C: what each one's "What `rby_mmo` removes" lists.
 
-## Addendum — taking a battle over (`battle.intercept`)
+## Addendum A — taking a battle over (`battle.intercept`)
 
 **Found by:** `rby_mmo` wave 4 (co-op and solo battles on game3). Against the
 same `dev` @ `fdea09dc`.
@@ -340,8 +365,9 @@ end)
   Scent / scripted wilds are covered by the same seam (the spec's `opts` says
   which), and `trainer.party` runs before it so a taker sees the hooked party.
 - `spec.finish("draw")` gets a real third answer in the opcode (trainer not
-  marked beaten, no whiteout, script halted as after a loss) instead of the
-  mod halting the script VM from outside.
+  marked beaten, no whiteout, script halted) instead of the mod halting the
+  script VM from outside. That answer is addendum C, which also stands on its
+  own for a mod still taking fights the way `rby_mmo` does today.
 
 Parity pair: *vanilla unchanged* — a headless trainerbattle with no hook runs
 the same battle and sets the same flag; *through the public API* — a
@@ -358,8 +384,168 @@ to `spec.finish`); the `encounter.roll` link can stay or move to the new hook.
 
 ## Additional costs of the reach-around (found in review, 2026-09-30)
 
-**Ghost capture.** `Map.load` calls `Ghosts.capture(Map.current)` (map.lua:303) before `Objects.loadMap` (map.lua:510), copying the live object list into `Ghosts._pools[oldMap]`; `FieldView.collectNeighborActors` (field_view.lua:369, via `Objects.poolForDraw`) keeps drawing that pool while the old map is a neighbour. An injected runtime object is therefore drawn frozen on the far side of every seamless edge, and twice once its owner follows. The mod works around it by retiring an avatar it lets go (`hidden`/`visible`) and purging its marked objects from every ghost pool on each map change. **Ask:** spawnNpc objects should be runtime-owned — `Ghosts.capture` and `adoptPool` skip them (e.g. a `runtime = true` flag on the event object) and they are removed only on the spawner's request.
+**Ghost capture.** `Map.load` calls `Ghosts.capture(Map.current)` (map.lua:304) before `Objects.loadMap` (map.lua:510), copying the live object list into `Ghosts._pools[oldMap]`; `FieldView.collectNeighborActors` (field_view.lua:369, via `Objects.poolForDraw`) keeps drawing that pool while the old map is a neighbour. An injected runtime object is therefore drawn frozen on the far side of every seamless edge, and twice once its owner follows. The mod works around it by retiring an avatar it lets go (`hidden`/`visible`) and purging its marked objects from every ghost pool on each map change. **Ask:** spawnNpc objects should be runtime-owned (e.g. a `runtime = true` flag on the event object) and removed only on the spawner's request. Addendum B settles what capture does with them: rather than skipping them, `Ghosts.capture` / `adoptPool` carry each runtime object as a member of the map it was spawned on, so it is never copied and never left behind.
 
 **Quest-log persistence.** `quest_log_recorder.capture` records `Objects.forDraw()` as actor frames into `session.questLog`, which is saved — so injected objects replay in the FireRed/LeafGreen CONTINUE recap. The mod wraps `QuestLogRecorder.capture` and drops actors whose id is in its local-id block (`GEN3_AVATAR_LOCAL_ID_BASE`..+0xFF). **Ask:** the recorder should skip runtime-flagged objects, or offer a `quest_log.capture` hook.
 
 **Walkers.** Several engine passes walk `Objects._order` or key on graphics for their own ends: `RotatingTilePuzzle.move` shoves every visible object on an arrow tile, gives it a track and names it `lastMoved`; the VS Seeker charge completion (vs_seeker.lua:610-635) freezes every object and waits while any is moving; `Field.interact` offers Cut/Rock Smash/Strength by `def.graphicsId` before the script key. No marker is honoured by these but not by the renderer. The mod hides avatars around `RotatingTilePuzzle.move` and restricts avatar graphics to player looks. **Ask:** one engine predicate (e.g. `Objects.isMapObject(eo)`) that map logic checks, so a spawned object draws and collides like any other but is never moved, recorded or offered a field move.
+
+## Addendum B — runtime objects on a neighbouring map (players across a seamless edge)
+
+**Found by:** `rby_mmo` 1.5.0 review (`docs/plans/gen3-known-gaps.md` §4).
+Against the same `dev` @ `fdea09dc`.
+
+### What happens today
+
+game3 draws the objects of every map placed around the current one, not only
+the current map's:
+
+- `Map.world` lists the maps around the current one with their offsets
+  (`WorldAPI:liveMaps()` hands mods the same list).
+- `Ghosts.sync` builds each neighbour a pool from its templates and
+  `Ghosts.update` ticks it, so a neighbour's NPCs walk (`ghosts.lua:72`,
+  `:101`, called from `field.lua:208`).
+- `FieldView.collectNeighborActors` draws each pool at its map's offset
+  (`field_view.lua:356`, `:369`).
+- On a crossing, `Map.load` snapshots the live list into the map being left
+  (`Ghosts.capture`, `map.lua:304`), loads the new map from its templates
+  (`Objects.loadMap`, `:510`), and copies the walkers' motion back from that
+  map's pool (`Ghosts.adopt` → `Objects.adoptPool`, `:512`, `objects.lua:2005`;
+  WALK / BACK_FORTH / SEQUENCE objects only).
+
+A remote player on a neighbouring map has no place in any of this. Presence
+says which map and tile they stand on, but there is no public way to put an
+object into a neighbour's pool: `spawnNpc` is unsupported, and writing into
+`Ghosts._pools` would be one more private table to reach into. The avatars the
+mod injects into the *current* map end up in `Ghosts.capture`'s copy, frozen
+and later doubled (the "Ghost capture" cost above), so `rby_mmo` purges its
+avatars from every pool on each map change (`Avatars.purgeGhosts3`).
+
+The result is known gap §4. You see another player only once you share a map,
+and they vanish whenever the edge is between you, while the NPC standing next
+to them is drawn.
+
+### Proposed seam: a runtime object belongs to its map
+
+This extends `spawnNpc` above; it adds no new call.
+
+- **Any live map.** `mod.world:spawnNpc(mapId, def)` accepts any map
+  `liveMaps()` lists, not only the current one. A runtime object belongs to the
+  map it was spawned on and lives in that map's object list:
+  - while the map is current, in the live list;
+  - while it is a neighbour, in its pool (`Ghosts._pools[mapId]`), ticked by
+    `Ghosts.update` and drawn by `collectNeighborActors` exactly like that
+    map's own NPCs.
+- **Crossing an edge moves nothing.**
+  - `Ghosts.capture` keeps the old map's runtime objects as members of its pool.
+  - `Objects.loadMap(newMap)` re-inserts the new map's runtime objects after the
+    templates (the reload rule above).
+  - `adoptPool` carries a runtime object's motion state as it does a walker's
+    (cell, `px` / `py`, `moving`, `progress`, `facing`), so a step in progress
+    continues across the edge.
+
+  Each runtime object exists once, in its own map's list.
+- **Leaving the neighbourhood.** When `Ghosts.sync` drops a pool because its
+  map is no longer placed, that map's runtime objects stay registered and come
+  back when it is placed again. `removeNpc` is the only thing that ends one.
+- **Driving it.** The handle (`WorldAPI:npc(mapId, name)`,
+  `Handle:stepNow(dir, frames)`) resolves a runtime object in whichever list
+  holds it, so an avatar on a neighbouring map walks there. A neighbour pool's
+  collision (`Ghosts._contextFor` → `blocks`) already skips `passable` objects.
+- **Moving to another map** is `removeNpc` followed by `spawnNpc` on the new
+  map; the mod already knows when a remote player warps or crosses. An optional
+  `Handle:relocate(mapId, x, y)` would save the reallocation, but nothing needs
+  it.
+
+Parity pair:
+
+- **Vanilla unchanged:** a seamless crossing with no runtime objects builds the
+  same pools, adopts the same walkers and draws the same neighbour actors.
+- **Through the public API:** a `tests/modkit/cases/` case
+  1. spawns a runtime object on a neighbouring map;
+  2. asserts `collectNeighborActors` draws it at that map's offset;
+  3. steps it with `stepNow(dir, 16)`;
+  4. crosses into that map and asserts exactly one copy stands in the live list
+     at the same cell, its step carried;
+  5. crosses back and asserts it is a member of the pool again.
+
+### What `rby_mmo` removes when it lands
+
+- `Avatars.purgeGhosts3`, the per-map-change retirement of avatars
+  (`retire3`), and their reinjection after a crossing.
+- A player on a neighbouring map is spawned there from presence (the roster
+  already carries every player's map and tile), which closes known gap §4.
+
+## Addendum C — a draw answer for `trainerbattle`
+
+**Found by:** `rby_mmo` 1.5.0 review (`docs/plans/gen3-known-gaps.md` §7).
+Against the same `dev` @ `fdea09dc`.
+
+### What happens today
+
+`trainerbattle` / `dotrainerbattle` (`scripting/ops_a.lua:1510`) starts the
+fight through the adapter's `startTrainerBattle`. Its continuation (`:1653`)
+writes an early rival's `VAR_RESULT` and clears the rematch state for every
+answer (`:1656`–`:1662`), then knows two:
+
+- **A loss** (`"lose"` / `"whiteout"` / `"blackout"`, `:1654`) sets no trainer
+  flag and lets the VM run on past the opcode. That is right after a cart loss:
+  the bridge's own finish has whited the player out, and `Field.respawnAtHeal`
+  has already halted the script.
+- **Anything else** is a win. The trainer flag is set and the
+  CONTINUE_SCRIPT jump or the script's end follows (`:1663`–`:1690`).
+
+The cart never needs a third answer. A battle that ends with the player still
+standing and nobody beaten does not exist there: `IsPlayerDefeated` counts
+`B_OUTCOME_DREW` as a loss, so a mutual KO is a whiteout.
+
+A mod-refereed fight can end that way: a dropped link, a referee timeout, or a
+co-op partner gone. `rby_mmo` cannot say so:
+
+- `"lose"` would run the bytes after `trainerbattle` (a gym leader's TM without
+  the badge);
+- anything else marks the trainer beaten.
+
+So it halts the script VM from outside (`Space.vm:halt(true)`, in `CoopField`'s
+`haltScript3` and in `SoloBattle.haltScript3`) and never answers the
+continuation.
+
+### Proposed seam
+
+The continuation accepts `"draw"` (and `"drew"`, the spellings
+`Natives.outcome_to_code` already maps to `B_OUTCOME_DREW`):
+
+- **No flags.** No trainer flag, no rematch flag, no `onTrainerBattleWon`, and
+  `VAR_RESULT` untouched (the script halts before anything could read it); the
+  rematch-state clear still runs, as for every answer.
+- **The script halts** where it waits (`shouldHalt = true`, as after a
+  rematch). The trainer stays on the map, unbeaten, and the cart's own sight
+  check challenges the player again.
+- **No whiteout and no heal.** Whatever finished the fight has already left the
+  party as it is. The bridge's own finish never passes `"draw"` for a fight the
+  engine ran.
+- **The outcome is recorded.** `session.battleOutcome` is `B_OUTCOME_DREW`, and
+  `battle.ended` carries it wherever the bridge's finish raises the event.
+
+Every existing answer keeps its meaning, and an unknown string still counts as
+a win. `battle.intercept`'s `spec.finish("draw")` (addendum A) is this answer
+reached through the bridge.
+
+Parity pair:
+
+- **Vanilla unchanged:** a headless `trainerbattle` answered `"win"` sets the
+  flag and jumps; answered `"lose"`, it sets no flag and falls through, exactly
+  as today.
+- **Through the public API:** a `tests/modkit/cases/` case answers the
+  continuation `"draw"` and asserts:
+  - no flag is set;
+  - the VM is halted at the opcode, with none of the following bytes run;
+  - `battleOutcome` is DREW;
+  - the trainer's sight check starts the same battle again on the next step.
+
+### What `rby_mmo` removes when it lands
+
+`CoopField`'s and `SoloBattle`'s `haltScript3`: the mod answers
+`opts.done("draw")` instead. That closes known gap §7. The trainer is still
+unbeaten after a draw, which is the cart-faithful outcome, but the script now
+ends by the engine's rule rather than the mod's.

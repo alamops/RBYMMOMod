@@ -34,7 +34,9 @@ return {
         .. "into the save nor shoved. Every wrap keeps the engine's original "
         .. "and is re-applied, never stacked, across a hot reload "
         .. "(Gen3.wrapFn). Menus are ordinary layers on the game3 modal "
-        .. "stack. The public seams that would replace all of it are proposed "
+        .. "stack. The public seams that would replace all of it -- with the "
+        .. "two that would draw a player across a seamless map edge and give a "
+        .. "trainer draw its own answer -- are proposed as one request "
         .. "in docs/upstream/gen3-spawn-npc.md "
         .. "(https://github.com/alamops/RBYMMOMod/blob/main/docs/upstream/gen3-spawn-npc.md).",
     },

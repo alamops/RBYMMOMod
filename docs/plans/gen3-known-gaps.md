@@ -109,9 +109,12 @@ them from every pool on each map change (see ~l.111, ~l.537, ~l.945). You
 see another player only once you share a map.
 
 **To do:** the roster already knows every player's map and tile. Either:
-- **(preferred)** ask upstream for a seam to contribute live objects to a
-  neighbour's draw pool each frame (add it to `docs/upstream/gen3-spawn-npc.md`),
-  or
+- **(preferred)** the engine seam, now asked for in
+  `docs/upstream/gen3-spawn-npc.md` addendum B: `spawnNpc` on any map
+  `liveMaps()` lists, the object owned by that map, so it is ticked and drawn
+  in the neighbour's pool and carried across the edge with its map. When it
+  lands, the mod spawns each player on their own map and drops
+  `purgeGhosts3`; or
 - draw them from the mod on `render.hud`, using the map-connection offsets
   to place them. That is more code and easy to get out of step with
   `FieldView`.
@@ -149,7 +152,10 @@ battles. Where it lives: the referees' `BADGE_MODES` gate, the Gen 3 sheet's
 
 ## 7. A trainer draw with your team standing leaves the trainer unbeaten
 
-- [ ] Accept it (document only), or ask upstream for a draw answer.
+- [x] Ask upstream for a draw answer: `docs/upstream/gen3-spawn-npc.md`
+      addendum C.
+- [ ] When it lands, answer the trainer's continuation `"draw"` instead of
+      halting the script VM.
 
 **Why:** the cart's `trainerbattle` opcode has no answer for a draw, so the
 mod halts the trainer's script where it waited. You get no prize, flag, TM or
@@ -159,8 +165,11 @@ check. A draw that leaves your team on nothing is a whiteout, as on the cart.
 **Where:** `SoloBattle.haltScript3` (`src/SoloBattle.lua` ~l.3060, reasoning
 ~l.2240) and `CoopField` `haltScript3` (`src/CoopField.lua` ~l.1211).
 
-**To do:** probably nothing. A real fix is an engine seam that lets a mod
-hand `trainerbattle` a draw outcome (Lane B; fold it into the RFC in item 8).
+**To do:** nothing until the engine has the seam. The real fix is the one
+asked for in addendum C: `trainerbattle`'s continuation accepts `"draw"` (no
+flag, the script halts, no whiteout), and the mod answers with it instead of
+`haltScript3`. It is part of the same RFC as item 8. The trainer stays
+unbeaten either way, which is the cart-faithful outcome.
 
 ## 8. Gen 3 reaches into engine internals
 
@@ -185,8 +194,10 @@ that feature on Gen 3 until the mod follows.
    `docs/rfcs/NNNN-<slug>.md`, a backward-compatibility statement, a parity
    test pair (vanilla unchanged; the seam driven through the public mod API),
    regenerated registry docs, nothing removed.
-2. Include the seams items 4 and 7 want (neighbour draw pool, trainer draw
-   outcome).
+2. ~~Include the seams items 4 and 7 want~~ Done: the proposal is one
+   request, with the neighbour-map objects (addendum B) and the trainer draw
+   answer (addendum C) beside the runtime objects, `player.sprite`,
+   `screen.*` and `battle.intercept` (addendum A). Open it as one RFC.
 3. After it lands, migrate one reach-around at a time, keeping the fallback
    for older engines.
 4. Until then, re-run the Gen 3 e2e matrix after every engine update.
