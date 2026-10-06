@@ -519,7 +519,9 @@ test('gen2 applyPrimary fails foe-targeting effects through a substitute', () =>
   const target = dummyMon2({ species: 'Beta', substitute: 40 });
   const sleep = applyPrimary2(32, dummyMon2(), target);
   // R2d: SleepTarget's own line, DidntAffect1Text.
-  assert.deepStrictEqual(sleep.messages, ["It didn't affect Beta!"], 'SLEEP_EFFECT vs substitute didn\'t affect');
+  // K18: DidntAffect1Text's `line` break; an unmarked synthetic sheet prints
+  // its name bare (K17).
+  assert.deepStrictEqual(sleep.messages, ["It didn't affect\nBeta!"], 'SLEEP_EFFECT vs substitute didn\'t affect');
   assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
 
   const growlTarget = dummyMon2({ species: 'Beta', substitute: 40 });

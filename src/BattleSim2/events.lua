@@ -155,7 +155,8 @@ M.FIELDS = {
 -- field it has and is compared rather than sized, so a long fight is fine.
 M.SHAPES = {
   msg       = { text = true },
-  anim      = { slot = true, side = true, text = "move or ball-anim id",
+  anim      = { slot = true, side = true,
+                text = "move id, ball-anim id, or a cart status clip (`<X>_ANIM`, K20)",
                 amount = "shake count on SHAKE_ANIM (0-3)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
@@ -284,6 +285,27 @@ local function checkMoves(value)
 end
 
 -- ------------------------------------------------------------------
+-- battle lines (docs/plans/gen12-referee-remaining-gaps.md K17 / K18)
+-- ------------------------------------------------------------------
+--
+-- A `msg` line names a battler the cart prints through `<USER>` / `<TARGET>`
+-- with its side's mark before it -- `^a` or `^b`, never a glyph of a name --
+-- and carries the cart's `line` / `cont` as `\n`; each client prints the
+-- mark as its own cart would ("Enemy ", or nothing on its own side).
+-- Mirrored from Config.BATTLE_LINE_MAX / Wire.BATTLE_MARK rather than
+-- required, for the reason in the header: the cap a line is held to, marks
+-- (two glyphs) and breaks (one) included.
+M.BATTLE_LINE_MAX = 80
+
+-- The same line as one plain sentence: each mark gone, each break a space --
+-- none after a hyphen the cart split a word on.  Twin of Wire.plainBattleLine.
+function M.plainLine(text)
+  if type(text) ~= "string" then return text end
+  local plain = text:gsub("%^[ab]", ""):gsub("%-\n", "-"):gsub("\n", " ")
+  return plain
+end
+
+-- ------------------------------------------------------------------
 -- construction
 -- ------------------------------------------------------------------
 
@@ -320,6 +342,10 @@ function M.build(kind, fields)
       end
     end
   end
+  -- K17 / K18 ride the `msg` line alone: the sentence a `status` / `stat`
+  -- event carries beside it (a client's matcher reads it -- MediatedBattle
+  -- statFell) is the plain one, as Wire reads every kind but `msg`.
+  if kind ~= "msg" and type(out.text) == "string" then out.text = M.plainLine(out.text) end
   return out
 end
 

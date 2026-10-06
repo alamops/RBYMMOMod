@@ -66,6 +66,13 @@ const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'battle2_turn_parity.json')
 // fixtures -- mirrored line for line from the Lua driver
 // ------------------------------------------------------------------
 
+// A referee line read the way K17 / K18 say every matcher reads one (docs/
+// plans/gen12-referee-remaining-gaps.md; lib/sanitize.js plainBattleLine,
+// Wire's twin): each side mark (`^a` / `^b`) gone, each break a space --
+// none where the cart broke a word on its hyphen ("It's super-\neffective!").
+// The raw lines are pinned by the K17 / K18 tests near the end of this file.
+const { plainBattleLine: plainLine, cleanBattleEvent } = require('./lib/sanitize.js');
+
 function mv(id, power, accuracy, type, pp) {
   return { id, pp: pp === undefined ? 60 : pp, power, accuracy, type, effect: 0, chance: 0 };
 }
@@ -2780,6 +2787,49 @@ scenario('fx2_level_up_guards', (events) => {
     up('p1', 1, 31, s5(64), 101), up('p1', 1, 31, s5(64), 100), both3(F(0), F(0))]);
 });
 
+// docs/plans/gen12-referee-remaining-gaps.md, the Gold half (W1-T2): K17's
+// marks, K18's breaks, K19's faint timing and K20's clips (the driver's
+// notes on each scenario).
+scenario('t2_marks_ko_tails', (events) => seq(events, duo4('t2a', '1v1', 971,
+  [mn({ species: 'Alpha', types: [3], maxHp: 100, hp: 1, atk: 250, spe: 90,
+    moves: [hm('sap', 80, 3, 3), hm('ram', 80, 0, 48)] })],
+  [mn({ species: 'Beta', types: [4], maxHp: 100, hp: 5, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', types: [0], maxHp: 100, hp: 60, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Eps', maxHp: 300, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), [['p2', S(1)]], both3(F(1), F(0))]));
+
+scenario('t2_thief_bond_boom', (events) => seq(events, duo4('t2b', '1v1', 972,
+  [mn({ species: 'Alpha', maxHp: 100, atk: 250, spe: 10, moves: [hm('THIEF', 40, 0, 0, 60, 100)] }),
+    mn({ species: 'Gamma', maxHp: 100, atk: 250, spe: 10, substitute: 20,
+      moves: [hm('EXPLOSION', 250, 0, 7)] }),
+    mn({ species: 'Zeta', maxHp: 100, spe: 10, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 100, hp: 5, spe: 90, item: ['LEFTOVERS', 'HELD_LEFTOVERS', 0, 'LEFTOVERS'],
+    moves: [hm('DESTINY_BOND', 0, 0, 138)] }),
+    mn({ species: 'Delta', maxHp: 50, def: 5, spe: 90, moves: [hm('DESTINY_BOND', 0, 0, 138)] }),
+    mn({ species: 'Eps', maxHp: 300, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), [['p1', S(1)], ['p2', S(1)]], both3(F(0), F(0))]));
+
+scenario('t2_status_anims', (events) => seq(events, duo4('t2c', 'coop_npc', 973,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [hm('sting', 10, 0, 2, 60, 100), hm('psybeam', 10, 0, 76, 60, 100),
+      hm('LEER', 0, 0, 19), hm('LEECH_SEED', 0, 9, 84)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('GROWL', 0, 0, 18), hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(1)), both3(F(2), F(0)), both3(F(3), F(1)), both3(F(2), F(1))]));
+
+scenario('t2_love_sand_bind', (events) => seq(events, duo4('t2d', '1v1', 974,
+  [sexed({ species: 'Alpha', maxHp: 900, spe: 90,
+    moves: [hm('ATTRACT', 0, 0, 133), hm('SANDSTORM', 0, 5, 126), hm('BIND', 10, 0, 42)] }, MALE)],
+  [sexed({ species: 'Beta', maxHp: 100, hp: 60, spe: 10, item: ['BERRY', 'HELD_BERRY', 12, 'BERRY'],
+    moves: [hm('tap', 1)] }, FEMALE)]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(2), F(0))]));
+
+scenario('t2_nightmare_curse_fs', (events) => seq(events, duo4('t2e', '1v1', 975,
+  [mn({ species: 'Alpha', types: [2], maxHp: 900, spe: 90,
+    moves: [hm('NIGHTMARE', 0, 0, 143), hm('CURSE', 0, 2, 137), hm('FUTURE_SIGHT', 40, 8, 119),
+      hm('wait', 0, 0, 85)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10, status: 'SLP', statusTurns: 7, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0)), both3(F(3), F(0))]));
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -2846,7 +2896,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 201, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 206, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -3127,7 +3177,7 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   // not an import, so a fix applied to one half of one generation is exactly
   // the drift this catches.
   const run = byName(jsRuns).get('move_names');
-  const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
+  const said = run.events.filter((event) => event.t === 'msg').map((event) => plainLine(event.text));
 
   assert.ok(said.includes('Alpha used SLOW SWIPE!'), 'an attack prints the display name');
   // R2d: Gold's own DISABLE line, WasDisabledText.
@@ -3185,7 +3235,7 @@ test('an unanswered replacement times out instead of wedging the fight', () => {
 test('a stolen KO retargets instead of fizzling', () => {
   const run = byName(jsRuns).get('retarget');
   const fizzled = run.events.some((e) => e.t === 'msg'
-    && typeof e.text === 'string' && e.text.includes('has no target'));
+    && typeof e.text === 'string' && plainLine(e.text).includes('has no target'));
   assert.ok(!fizzled, 'the slower ally does not fizzle on the seat its partner emptied');
   assert.ok(run.events.some((e) => e.t === 'damage' && e.slot === 3),
     'it swings at the nearest living opposing seat instead');
@@ -3422,7 +3472,7 @@ const selfHit = (events) => {
   let hurt = false;
   for (const event of events) {
     if (event.t === 'msg' && typeof event.text === 'string'
-        && event.text.includes('hurt itself')) {
+        && plainLine(event.text).includes('hurt itself')) {
       hurt = true;
     } else if (hurt && event.t === 'damage') {
       return event.amount;
@@ -3619,7 +3669,7 @@ const hit = (id, power, type, effect, pp) => ({
   id, pp: pp === undefined ? 30 : pp, power, accuracy: 255,
   type: type === undefined ? 0 : type, effect: effect === undefined ? 0 : effect, chance: 0,
 });
-const said = (events, text) => events.some((e) => e.t === 'msg' && e.text === text);
+const said = (events, text) => events.some((e) => e.t === 'msg' && plainLine(e.text) === text);
 const damageOn = (events, slot) => {
   const event = events.find((e) => e.t === 'damage' && e.slot === slot);
   return event ? event.amount : null;
@@ -4390,7 +4440,7 @@ test('held items: Mysteryberry, the stat-up items, and the held vocabulary', () 
 // The wave-2 review fixes (docs/plans/gen12-referee-fidelity.md); the Lua
 // twin's block (p) cites the cart for each.
 test('review fixes: Bide release, CheckTurn order, Mysteryberry, sixteenth, Leech Seed KO, Rage', () => {
-  const countSaid = (events, text) => events.filter((e) => e.t === 'msg' && e.text === text).length;
+  const countSaid = (events, text) => events.filter((e) => e.t === 'msg' && plainLine(e.text) === text).length;
 
   // A Bide's release skips checkobedience.
   const bideRelease = (traded) => {
@@ -4605,7 +4655,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   t = tgt({ status: 'freeze' });
   out = side(4, t, { hit: false, moveType: FIRE, normalType: NORMAL });
   assert.ok(noStatus(t), 'a burn-family hit thaws whatever its chance byte said');
-  assert.strictEqual(out.messages[0], 'Tgt was defrosted!');
+  assert.strictEqual(plainLine(out.messages[0]), 'Tgt was defrosted!');
   assert.strictEqual(out.events[0].fields.status, undefined, 'a cure: no token');
   t = tgt({ status: 'freeze', types: [FIRE] });
   side(4, t, { hit: true, moveType: FIRE, normalType: NORMAL });
@@ -4647,7 +4697,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   t = tgt();
   out = side(68, t, { rng: r, computer: true });
   assert.strictEqual(t.stages.atk, -1);
-  assert.strictEqual(out.messages[0], "Tgt's ATTACK fell!");
+  assert.strictEqual(plainLine(out.messages[0]), "Tgt's ATTACK fell!");
   r = bytes([200]);
   t = tgt();
   side(70, t, { rng: r, computer: true, hit: false });
@@ -4709,7 +4759,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   r = bytes([10]);
   t = tgt();
   out = primary(18, t, { rng: r, computer: true });
-  assert.strictEqual(out.messages[0], 'But it failed!');
+  assert.strictEqual(plainLine(out.messages[0]), 'But it failed!');
   assert.strictEqual(t.stages.atk, 0);
   r = bytes([64]);
   t = tgt();
@@ -4719,17 +4769,17 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   t = tgt({ substitute: 10 });
   out = primary(18, t, { rng: r, computer: true });
   assert.strictEqual(r.drawn, 1, 'the byte comes before the substitute');
-  assert.strictEqual(out.messages[0], 'But it failed!', '...which then stops the move (`.Failed`, R2b)');
+  assert.strictEqual(plainLine(out.messages[0]), 'But it failed!', '...which then stops the move (`.Failed`, R2b)');
   r = bytes([64]);
   t = tgt({ mist: true });
   out = primary(18, t, { rng: r, computer: true });
   assert.strictEqual(r.drawn, 0);
-  assert.strictEqual(out.messages[0], "Tgt's protected by MIST.", "the cart's Mist line (R2b)");
+  assert.strictEqual(plainLine(out.messages[0]), "Tgt's protected by MIST.", "the cart's Mist line (R2b)");
   r = bytes([64]);
   t = tgt({ atk: -6 });
   out = primary(18, t, { rng: r, computer: true });
   assert.strictEqual(r.drawn, 0);
-  assert.strictEqual(out.messages[0], "Tgt's ATTACK won't drop anymore!", 'WontDropAnymoreText (R2b)');
+  assert.strictEqual(plainLine(out.messages[0]), "Tgt's ATTACK won't drop anymore!", 'WontDropAnymoreText (R2b)');
   r = bytes([64]);
   t = tgt({ atk: -5 });
   primary(58, t, { rng: r, computer: true });
@@ -4737,7 +4787,7 @@ test('side effects: the carts\' type immunities, Defrost, the flinch return and 
   assert.strictEqual(t.stages.atk, -6);
   t = tgt({ mist: true, substitute: 10 });
   out = primary(18, t);
-  assert.strictEqual(out.messages[0], "Tgt's protected by MIST.", 'Mist before the substitute');
+  assert.strictEqual(plainLine(out.messages[0]), "Tgt's protected by MIST.", 'Mist before the substitute');
   assert.strictEqual(out.nothing, false);
 
   // (g) Through the turn machine.
@@ -5197,13 +5247,13 @@ test('R2b: Transform undone, SLEEP TALK, LOCK-ON, a recharge actor, Haze, TOXIC,
 
 test('R2c: the Gold move effects, weather and R2b\'s found cart differences', () => {
   const runs = byName(jsRuns);
-  const lines = (name) => runs.get(name).events.filter((e) => e.t === 'msg').map((e) => e.text);
+  const lines = (name) => runs.get(name).events.filter((e) => e.t === 'msg').map((e) => plainLine(e.text));
   const hits = (name, slot) => runs.get(name).events
     .filter((e) => e.t === 'damage' && e.slot === slot).map((e) => e.amount);
   const has = (name, text) => lines(name).includes(text);
   const after = (name, text) => {
     const events = runs.get(name).events;
-    const i = events.findIndex((e) => e.t === 'msg' && e.text === text);
+    const i = events.findIndex((e) => e.t === 'msg' && plainLine(e.text) === text);
     return i < 0 ? [] : events.slice(i + 1);
   };
 
@@ -5211,7 +5261,7 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   // damage event), BASE_HAPPINESS 70 without the byte.
   const happiness = after('r2c_happiness', 'Alpha used FRUSTRATION!')
     .filter((e) => e.t === 'msg' || e.t === 'damage');
-  assert.ok(happiness[0].t === 'msg' && happiness[0].text === 'Beta used tap!',
+  assert.ok(happiness[0].t === 'msg' && plainLine(happiness[0].text) === 'Beta used tap!',
     'FRUSTRATION at 255 takes nothing and says nothing');
   assert.ok(hits('r2c_happiness', 3)[0] > hits('r2c_happiness', 3)[1],
     'RETURN at 255 outhits RETURN at the base 70');
@@ -5228,8 +5278,8 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   let flailing = false;
   let flailCrit = false;
   for (const e of flail) {
-    if (/ used /.test(e.text)) flailing = e.text === 'Alpha used FLAIL!';
-    else if (flailing && e.text === 'A critical hit!') flailCrit = true;
+    if (/ used /.test(plainLine(e.text))) flailing = plainLine(e.text) === 'Alpha used FLAIL!';
+    else if (flailing && plainLine(e.text) === 'A critical hit!') flailCrit = true;
   }
   assert.ok(!flailCrit, 'FLAIL draws no crit');
 
@@ -5284,7 +5334,7 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(has('r2c_future_sight', 'Alpha foresaw an attack!'));
   assert.ok(has('r2c_future_sight', 'Delta was hit by FUTURE SIGHT!'));
   assert.ok(after('r2c_future_sight', 'Alpha foresaw an attack!')
-    .some((e) => e.t === 'msg' && e.text === 'But it failed!'), 'a second use while it runs fails');
+    .some((e) => e.t === 'msg' && plainLine(e.text) === 'But it failed!'), 'a second use while it runs fails');
 
   // PROTECT / DETECT / ENDURE.
   assert.strictEqual(lines('r2c_protect').filter((t) => t === "Alpha's PROTECTING itself!").length, 2);
@@ -5323,7 +5373,7 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(has('r2c_checkturn', "Beta's disabled no more!"));
   assert.ok(has('r2c_checkturn', 'Delta fell asleep!'));
   assert.ok(after('r2c_bide', 'Alpha unleashed energy!')
-    .some((e) => e.t === 'msg' && e.text === "It doesn't affect Delta!"));
+    .some((e) => e.t === 'msg' && plainLine(e.text) === "It doesn't affect Delta!"));
   assert.ok(has('r2c_flinch', 'Beta flinched!') && !has('r2c_flinch', 'Beta must recharge!'));
 });
 
@@ -5335,11 +5385,11 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
 test('R2d: the Gold status and field scripts, their failure lines, the residual order', () => {
   const runs = byName(jsRuns);
   const events = (name) => runs.get(name).events;
-  const lines = (name) => events(name).filter((e) => e.t === 'msg').map((e) => e.text);
+  const lines = (name) => events(name).filter((e) => e.t === 'msg').map((e) => plainLine(e.text));
   const has = (name, text) => lines(name).includes(text);
   const count = (name, text) => lines(name).filter((t) => t === text).length;
   const index = (name, pred) => events(name).findIndex(pred);
-  const msgAt = (name, text) => index(name, (e) => e.t === 'msg' && e.text === text);
+  const msgAt = (name, text) => index(name, (e) => e.t === 'msg' && plainLine(e.text) === text);
 
   // ATTRACT: love, the infatuation gate, a failed second ATTRACT, the switch
   // breaking it, and no gender ratio on the sheet -- no attraction.
@@ -5347,7 +5397,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   assert.ok(has('r2d_attract', "Beta's infatuation kept it from attacking!"));
   assert.ok(count('r2d_attract', 'But it failed!') >= 2, 'a second ATTRACT and a genderless one fail');
   const sent = index('r2d_attract', (e) => e.t === 'send' && e.text === 'Gamma');
-  assert.ok(!events('r2d_attract').slice(sent).some((e) => e.t === 'msg' && /in love/.test(e.text)),
+  assert.ok(!events('r2d_attract').slice(sent).some((e) => e.t === 'msg' && /in love/.test(plainLine(e.text))),
     'the send-out broke the love');
 
   // BATON PASS: the named successor, the SPIKES on its way in, the passed
@@ -5365,7 +5415,9 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
 
   // CURSE both ways.
   assert.ok(has('r2d_curse', "Gamma's SPEED fell!") && has('r2d_curse', "Gamma's ABILITY won't rise anymore!"));
-  assert.ok(has('r2d_curse', 'Alpha cut its own HP and put a CURSE on Beta!'));
+  // PutACurseText's `para` is a second line (K18).
+  assert.ok(has('r2d_curse', 'Alpha cut its own HP and')
+    && has('r2d_curse', 'put a CURSE on Beta!'));
   assert.ok(count('r2d_curse', "Beta's hurt by the CURSE!") >= 2);
 
   // DESTINY BOND: once taken down, once spent.
@@ -5376,7 +5428,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   // ENCORE: the rewrite this turn and the end on its PP.
   assert.ok(has('r2d_encore', "It didn't affect Beta!"));
   const encored = msgAt('r2d_encore', 'Beta got an ENCORE!');
-  assert.strictEqual(events('r2d_encore').slice(encored).find((e) => e.t === 'msg' && / used /.test(e.text)).text,
+  assert.strictEqual(plainLine(events('r2d_encore').slice(encored).find((e) => e.t === 'msg' && / used /.test(plainLine(e.text))).text),
     'Beta used GROWL!', 'the TAP Beta chose became GROWL');
   assert.ok(has('r2d_encore', "Beta's ENCORE ended!"));
 
@@ -5394,7 +5446,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   // NIGHTMARE until the wake.
   assert.strictEqual(count('r2d_nightmare', 'Beta has a NIGHTMARE!'), 2);
   const woke = index('r2d_nightmare', (e) => e.t === 'status' && e.text === 'Beta woke up');
-  assert.ok(!events('r2d_nightmare').slice(woke).some((e) => e.t === 'msg' && e.text === 'Beta has a NIGHTMARE!'));
+  assert.ok(!events('r2d_nightmare').slice(woke).some((e) => e.t === 'msg' && plainLine(e.text) === 'Beta has a NIGHTMARE!'));
 
   // PAIN SPLIT, PERISH SONG, PSYCH UP.
   assert.ok(events('r2d_pain_split').some((e) => e.t === 'drain' && e.hp === 200));
@@ -5402,7 +5454,9 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   assert.ok(has('r2d_perish_song', "Alpha's PERISH count is 0!") && has('r2d_perish_song', 'But it failed!'));
   assert.strictEqual(lines('r2d_perish_2v2').filter((t) => / count is 3!$/.test(t)).length, 4, 'all four sing along');
   assert.ok(has('r2d_perish_2v2', "Iota's PERISH count is 2!"), 'BATON PASS hands the count on');
-  assert.ok(has('r2d_psych_up', 'Alpha copied the stat changes of Beta!'));
+  // CopiedStatsText's `para` is a second line (K18).
+  assert.ok(has('r2d_psych_up', 'Alpha copied the stat')
+    && has('r2d_psych_up', 'changes of Beta!'));
 
   // RAPID SPIN.
   for (const text of ['Alpha shed LEECH SEED!', 'Alpha blew away SPIKES!', 'Alpha was released by Beta!']) {
@@ -5426,7 +5480,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   assert.ok(has('r2d_spite', "Beta's thump was reduced by 3!"));
   // FX-R2: the chosen thump SPITE emptied is BattleCommand_DoTurn's `.out_of_pp`.
   assert.ok(has('r2d_spite', 'But no PP is left for the move!'));
-  assert.ok(events('r2d_amnesia').some((e) => e.t === 'stat' && e.stage === 2 && /SPCL\.DEF went way up!/.test(e.text)));
+  assert.ok(events('r2d_amnesia').some((e) => e.t === 'stat' && e.stage === 2 && /SPCL\.DEF went way up!/.test(plainLine(e.text))));
   assert.ok(has('r2d_swagger', "Alpha's attack missed!"), 'SWAGGER at +6 is a miss');
   assert.strictEqual(count('r2d_swagger', 'Delta became confused!'), 1);
 
@@ -5461,7 +5515,7 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
   assert.ok(ro.indexOf('Alpha is hurt by poison!') < ro.indexOf('Beta used tap!'));
   const ko = events('r2d_residual_order').findIndex((e) => e.t === 'faint');
   const before = events('r2d_residual_order').slice(0, ko).filter((e) => e.t === 'msg');
-  assert.strictEqual(before[before.length - 1].text, 'Alpha used slam!', 'no poison on the KO turn');
+  assert.strictEqual(plainLine(before[before.length - 1].text), 'Alpha used slam!', 'no poison on the KO turn');
 
   // A faint's party `moves`, after the faint.
   const fm = events('r2d_faint_moves');
@@ -5601,7 +5655,7 @@ test('R2e: CONVERSION, HEAL BELL\'s toxic bit, SKETCH\'s base PP, the run odds, 
   numbered.drainEvents();
   let modded = 0;
   for (let i = 0; i < 3; i += 1) {
-    modded += turnOf(numbered).filter((e) => e.t === 'msg' && e.text.includes('used MODDED')).length;
+    modded += turnOf(numbered).filter((e) => e.t === 'msg' && plainLine(e.text).includes('used MODDED')).length;
   }
   assert.strictEqual(modded, 0, 'an unnumbered row in a numbered pool is never called');
   const placed = poolBattle([{ id: 'MODDED', pp: 5, power: 40, type: 0, effect: 0 }]);
@@ -5620,8 +5674,8 @@ test('R2e: CONVERSION, HEAL BELL\'s toxic bit, SKETCH\'s base PP, the run odds, 
 // scenarios pin the streams).
 // ------------------------------------------------------------------
 
-const msgsOf = (events) => events.filter((e) => e.t === 'msg').map((e) => e.text);
-const msgIndex = (events, text) => events.findIndex((e) => e.t === 'msg' && e.text === text);
+const msgsOf = (events) => events.filter((e) => e.t === 'msg').map((e) => plainLine(e.text));
+const msgIndex = (events, text) => events.findIndex((e) => e.t === 'msg' && plainLine(e.text) === text);
 const animIndex = (events, id, slot) => events.findIndex((e) => e.t === 'anim' && e.text === id
   && e.slot === slot);
 
@@ -5743,7 +5797,8 @@ test('RP2: a wild POKé DOLL is its use line and a DRAW; the POKé FLUTE\'s line
   let lines = turnOf(flute, ITEM('POKE_FLUTE'));
   assert.ok(said(lines, 'Ann played the POKé FLUTE.') && said(lines, 'All sleeping POKéMON woke up.'));
   lines = turnOf(flute, ITEM('POKE_FLUTE'));
-  assert.ok(said(lines, "Played the POKé FLUTE. Now, that's a catchy tune!"));
+  // _PlayedFluteText's `para` is a second line (K18).
+  assert.ok(said(lines, 'Played the POKé FLUTE.') && said(lines, "Now, that's a catchy tune!"));
 });
 
 test('RP2: CheckTurn\'s ANIM_SLP and ANIM_CONFUSED, placed as the cart plays them', () => {
@@ -6058,7 +6113,177 @@ test('FX-R2 (11): SANDSTORM -- the HP bar, the line, then the faint check', () =
   battle.drainEvents();
   const events = roundOf(battle, foe);
   const hurt = events.findIndex((e) => e.t === 'damage' && e.slot === 3);
-  const line = events.findIndex((e) => e.t === 'msg' && e.text === 'The SANDSTORM hits Beta!');
+  const line = events.findIndex((e) => e.t === 'msg' && plainLine(e.text) === 'The SANDSTORM hits Beta!');
   const faint = events.findIndex((e) => e.t === 'faint' && e.text === 'Beta');
   assert.ok(hurt >= 0 && hurt < line && line < faint);
+});
+
+// ------------------------------------------------------------------
+// docs/plans/gen12-referee-remaining-gaps.md, the Gold referee's half: K17's
+// marks, K18's breaks, K19's faint timing and K20's clips, over the `t2_*`
+// parity scenarios (the driver's notes on each); tests/battle_sim2_turn.lua
+// section (12) states the same rules on duels of its own.
+// ------------------------------------------------------------------
+
+const t2Events = (name) => byName(jsRuns).get(name).events;
+const isMsg = (text) => (e) => e.t === 'msg' && e.text === text;
+const isAnim = (id, slot) => (e) => e.t === 'anim' && e.text === id && e.slot === slot;
+const isKind = (kind, slot) => (e) => e.t === kind && e.slot === slot;
+// The places of `preds` in order, each after the last; null when one is missing.
+function placesOf(events, preds) {
+  const out = [];
+  let at = -1;
+  for (const pred of preds) {
+    const i = events.findIndex((e, k) => k > at && pred(e));
+    if (i < 0) return null;
+    out.push(i);
+    at = i;
+  }
+  return out;
+}
+
+test('K17 / K18: both sides marked, the cart\'s breaks, the bare names left bare', () => {
+  const ev = t2Events('t2_marks_ko_tails');
+  assert.ok(ev.some(isMsg('^aAlpha\nused sap!')), 'side a is `^a` before the name');
+  assert.ok(ev.some(isMsg('It\'s super-\neffective!')), 'SuperEffectiveText\'s break');
+  assert.ok(ev.filter((e) => e.t === 'send' || e.t === 'faint').every((e) => !e.text.includes('^')),
+    'a send / faint names the species bare');
+  const bond = t2Events('t2_thief_bond_boom');
+  assert.ok(bond.some(isMsg('^bBeta\nused DESTINY_BOND!')), 'side b is `^b`');
+  assert.ok(bond.some(isMsg('^bBeta\ntook down with it,\n^aAlpha!')), 'a line naming two battlers marks both');
+  const love = t2Events('t2_love_sand_bind');
+  assert.ok(love.some(isMsg('^aAlpha\nused BIND on\n^bBeta!')), 'UsedBindText marks both');
+  assert.ok(love.some(isMsg('^bBeta\nis in love with\n^aAlpha!')), 'InLoveWithText marks both');
+  // The cart's `text_ram` names: the obedience lines and the computer's item line.
+  for (const line of Turn.LOAF_LINES) assert.ok(!line.includes('^'));
+  const battle = build({ id: 'b1', mode: 'coop_npc', seed: 7, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [held({ species: 'Alpha', maxHp: 900, spe: 90,
+        moves: [hit('wait', 0, 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', bag: [{ id: 'X_ATTACK', count: 1 }],
+        mons: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('tap', 1)] })] }],
+    } });
+  battle.drainEvents();
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'item', item: 'X_ATTACK' });
+  assert.ok(battle.drainEvents().some(isMsg('Bob\nused X ATTACK\non Beta!')),
+    '_EnemyUsedOnText names trainer and monster bare');
+  // K18: `para` is a second line.
+  const curse = t2Events('t2_nightmare_curse_fs');
+  assert.ok(placesOf(curse, [isMsg('^aAlpha\ncut its own HP and'), isMsg('put a CURSE on\n^bBeta!')]),
+    'PutACurseText\'s paragraphs are two lines');
+});
+
+test('K17 / K18: every Gold parity event survives the wire whole (sanitize cleanBattleEvent, Gen 2)', () => {
+  for (const run of jsRuns) {
+    for (const e of run.events) {
+      // The driver's own rows (a submit's or a level-up's verdict) are no events.
+      if (typeof e.seq !== 'number' || !Events.KINDS[e.t]) continue;
+      const clean = cleanBattleEvent(e, 2);
+      assert.ok(clean, `${run.name}: ${e.t} #${e.seq} is refused`);
+      if (e.t === 'msg') {
+        // Every mark and every break arrives, in order (a synthetic move id's
+        // `_` is no battle glyph, so the text itself may lose one).
+        const shape = (t) => (t.match(/\^[ab]|\n/g) || []).join('|');
+        assert.strictEqual(shape(clean.text), shape(e.text), `${run.name}: msg #${e.seq}'s marks and breaks`);
+      } else if (e.text !== undefined && e.t !== 'anim' && e.t !== 'item') {
+        assert.ok(!/\^[ab]|\n/.test(clean.text || ''), `${run.name}: ${e.t} #${e.seq} carries a plain sentence`);
+      }
+    }
+  }
+});
+
+test('K18: every line of every Gold parity scenario is BATTLE_LINE_MAX glyphs or fewer', () => {
+  let longest = 0;
+  let text = '';
+  for (const run of jsRuns) {
+    for (const e of run.events) {
+      if (e.t !== 'msg') continue;
+      const n = [...e.text].length;
+      if (n > longest) { longest = n; text = e.text; }
+    }
+  }
+  assert.ok(longest > 0 && longest <= Events.BATTLE_LINE_MAX, `the longest is ${longest}: ${JSON.stringify(text)}`);
+});
+
+test('K19: a move\'s knockout faints after the move\'s tail; DESTINY BOND and EXPLOSION keep the cart\'s order', () => {
+  const ev = t2Events('t2_marks_ko_tails');
+  assert.ok(placesOf(ev, [isKind('damage', 3), isKind('drain', 0), isMsg('Sucked health from\n^bBeta!'),
+    isKind('faint', 3)]), 'the drain and its line before the faint');
+  assert.ok(placesOf(ev, [isMsg('^aAlpha\nused ram!'), isKind('damage', 3), isMsg('^aAlpha\'s\nhit with recoil!'),
+    isKind('damage', 0), isKind('faint', 3), isKind('faint', 0)]), 'a recoil KOs both: the target faints first');
+  const bond = t2Events('t2_thief_bond_boom');
+  assert.ok(placesOf(bond, [isKind('damage', 3), isMsg('^aAlpha\nstole LEFTOVERS\nfrom its foe!'),
+    isMsg('^bBeta\ntook down with it,\n^aAlpha!'), isKind('damage', 0), isAnim('DESTINY_BOND', 3),
+    isKind('faint', 3), isKind('faint', 0)]), 'THIEF robs, the bond settles with its clip, then both faint');
+  const boom = placesOf(bond, [isMsg('^aGamma\nused EXPLOSION!'), isKind('damage', 0), isKind('damage', 3),
+    isKind('faint', 3), isKind('faint', 0)]);
+  assert.ok(boom, 'EXPLOSION\'s user empties at `selfdestruct`, before the hit, and faints after its target');
+  assert.ok(!bond.slice(boom[0]).some((e) => e.t === 'msg' && /took down|SUBSTITUTE/.test(e.text)),
+    'Selfdestruct resets the bond and never asks the user\'s own doll');
+  const fs = t2Events('t2_nightmare_curse_fs');
+  assert.ok(placesOf(fs, [isKind('damage', 3), isMsg('^bBeta\nhas a NIGHTMARE!'), isKind('faint', 3)]),
+    'a ResidualDamage knockout faints after its step\'s line');
+});
+
+test('K20: the cart\'s status, residual and weather clips, each where pokecrystal plays it', () => {
+  const st = t2Events('t2_status_anims');
+  assert.ok(placesOf(st, [isAnim('PSN_ANIM', 3), isMsg('^bBeta\nwas poisoned!')]), 'PoisonTarget\'s ANIM_PSN');
+  assert.ok(placesOf(st, [isMsg('^bBeta\nis hurt by poison!'), isAnim('PSN_ANIM', 3), isKind('damage', 3)]),
+    'ResidualDamage\'s ANIM_PSN after the line, before the HP');
+  assert.ok(placesOf(st, [isAnim('CONF_ANIM', 3), isMsg('^bBeta\nbecame confused!')]),
+    'FinishConfusingTarget\'s ANIM_CONFUSED on the computer\'s monster');
+  assert.ok(placesOf(st, [isAnim('WOBBLE_ANIM', 0), isMsg('^aAlpha\'s\nATTACK fell!')]),
+    'BattleCommand_StatDownAnim\'s ANIM_WOBBLE over the player\'s monster');
+  assert.ok(placesOf(st, [isAnim('ENEMY_STAT_DOWN_ANIM', 3), isMsg('^bBeta\'s\nDEFENSE fell!')]),
+    '...and ANIM_ENEMY_STAT_DOWN over the computer\'s');
+  assert.ok(placesOf(st, [isMsg('It hurt itself in\nits confusion!'), isAnim('HIT_CONFUSION_ANIM', 3),
+    isKind('damage', 3)]), 'HitConfusion\'s clip on its own seat');
+  assert.ok(placesOf(st, [isAnim('SAP_ANIM', 0), isKind('damage', 3), isKind('drain', 0),
+    isMsg('LEECH SEED saps\n^bBeta!')]), 'ANIM_SAP on the seeder, the HP, then the line');
+  const love = t2Events('t2_love_sand_bind');
+  assert.ok(placesOf(love, [isMsg('^bBeta\nis in love with\n^aAlpha!'), isAnim('IN_LOVE_ANIM', 3)]),
+    'ANIM_IN_LOVE behind InLoveWithText');
+  assert.ok(placesOf(love, [isMsg('The SANDSTORM\nrages.'), isAnim('IN_SANDSTORM_ANIM', 0), isKind('damage', 0),
+    isMsg('The SANDSTORM hits\n^aAlpha!'), isAnim('IN_SANDSTORM_ANIM', 3), isKind('damage', 3)]),
+  'ANIM_IN_SANDSTORM per seat it hits');
+  assert.ok(placesOf(love, [isAnim('RECOVER', 3), isKind('drain', 3), isMsg('^bBeta\nrecovered using a\nBERRY!')]),
+    'ItemRecoveryAnim before a BERRY\'s HP');
+  assert.ok(placesOf(love, [isAnim('BIND', 0), isKind('damage', 3), isMsg('^bBeta\'s\nhurt by\nBIND!')]),
+    'HandleWrap plays the trapping move\'s clip on the trapper\'s seat');
+  const nc = t2Events('t2_nightmare_curse_fs');
+  assert.ok(placesOf(nc, [isAnim('IN_NIGHTMARE_ANIM', 3), isKind('damage', 3), isMsg('^bBeta\nhas a NIGHTMARE!')]),
+    'NIGHTMARE\'s ANIM_IN_NIGHTMARE');
+  assert.ok(placesOf(nc, [isAnim('IN_NIGHTMARE_ANIM', 3), isKind('damage', 3), isMsg('^bBeta\'s\nhurt by the CURSE!')]),
+    'the CURSE plays ANIM_IN_NIGHTMARE too');
+  // The ids this referee emits for the cart's clips, and only those.
+  const seen = new Set();
+  for (const run of jsRuns) {
+    for (const e of run.events) if (e.t === 'anim' && /_ANIM$/.test(e.text)) seen.add(e.text);
+  }
+  const STATUS = ['SLP_ANIM', 'SLP_PLAYER_ANIM', 'CONF_ANIM', 'CONF_PLAYER_ANIM', 'PSN_ANIM', 'BRN_ANIM',
+    'FRZ_ANIM', 'PAR_ANIM', 'SAP_ANIM', 'IN_LOVE_ANIM', 'IN_SANDSTORM_ANIM', 'IN_NIGHTMARE_ANIM',
+    'HIT_CONFUSION_ANIM', 'ENEMY_STAT_DOWN_ANIM', 'WOBBLE_ANIM'];
+  const BALL = ['TOSS_ANIM', 'GREATTOSS_ANIM', 'ULTRATOSS_ANIM', 'POOF_ANIM', 'HIDEPIC_ANIM', 'SHAKE_ANIM',
+    'SHOWPIC_ANIM'];
+  for (const id of seen) assert.ok(STATUS.includes(id) || BALL.includes(id), `${id} is one of the cart's`);
+});
+
+test('K20: the secondary FRZ / PAR / BRN clips and the Berserk Gene\'s confusion', () => {
+  for (const [effect, id, line] of [[4, 'BRN_ANIM', '^bBeta\nwas burned!'], [5, 'FRZ_ANIM', '^bBeta\nwas frozen solid!'],
+    [6, 'PAR_ANIM', '^bBeta\'s\nparalyzed! Maybe\nit can\'t attack!']]) {
+    const sting = hit('sting', 10, 0, effect);
+    sting.chance = 100;
+    const battle = duel({ seed: 29,
+      a: [sheet({ species: 'Alpha', spe: 90, maxHp: 900, moves: [sting] })],
+      b: [sheet({ species: 'Beta', spe: 10, maxHp: 900, moves: [hit('wait', 0, 0, 85)] })] });
+    battle.drainEvents();
+    assert.ok(placesOf(turnOf(battle), [isAnim(id, 3), isMsg(line)]), `${id} ahead of its line`);
+  }
+  const { battle } = fight({ mode: 'coop_npc', seed: 3,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, item: ['BERSERK_GENE', null, 0, 'BERSERKGENE'],
+      moves: [hit('tap', 1)] })] });
+  assert.ok(placesOf(battle.drainEvents(), [isMsg('^bBeta\'s\nBERSERKGENE\nactivated!'), isAnim('CONF_ANIM', 3),
+    isMsg('^bBeta\nbecame confused!')]), 'HandleBerserkGene\'s ANIM_CONFUSED on the holder');
 });

@@ -137,7 +137,7 @@ const FIELDS = {
 //     `text` carries the sentence either way.
 const SHAPES = {
   msg: { text: true },
-  anim: { slot: true, side: true, text: 'move or ball-anim id',
+  anim: { slot: true, side: true, text: 'move id, ball-anim id, or a cart status clip (`<X>_ANIM`, K20)',
     amount: 'shake count on SHAKE_ANIM (0-3)' },
   damage: {
     slot: true, side: true, amount: true, hp: 'hp left',
@@ -288,6 +288,14 @@ function coerce(key, value) {
  * treats null as "do not emit" and carries on, and the suites assert null never
  * happens for the kinds it actually sends.
  */
+// K17 / K18 (the Lua twin explains): a `msg` line's marks and breaks, the cap
+// it is held to, and the plain sentence the other kinds carry.
+const BATTLE_LINE_MAX = 80;
+function plainLine(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/\^[ab]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
+}
+
 function build(kind, fields) {
   if (!own(KINDS, kind)) return null;
   const out = { t: kind };
@@ -303,6 +311,8 @@ function build(kind, fields) {
       }
     }
   }
+  // K17 / K18 ride the `msg` line alone: a `status` / `stat` sentence is plain.
+  if (kind !== 'msg' && typeof out.text === 'string') out.text = plainLine(out.text);
   return out;
 }
 
@@ -345,4 +355,6 @@ module.exports = {
   build,
   check,
   toNumber,
+  BATTLE_LINE_MAX,
+  plainLine,
 };

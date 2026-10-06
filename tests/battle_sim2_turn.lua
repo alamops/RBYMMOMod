@@ -69,6 +69,9 @@ end
 
 local BattleSim2 = need("BattleSim2/init")
 local Turn, Events, Effects = BattleSim2.Turn, BattleSim2.Events, BattleSim2.Effects
+-- The wire's reader, for K17 / K18: Wire.plainBattleLine is how every
+-- matcher reads a line, and Wire.battleEvent is what a line must survive.
+local Wire = need("Wire")
 
 -- ------------------------------------------------------------------
 -- assertions
@@ -99,6 +102,13 @@ local function listEq(actual, expected, what)
   if type(actual) ~= "table" then return eq(tostring(actual), table.concat(expected, ","), what) end
   eq(table.concat(actual, ","), table.concat(expected, ","), what)
 end
+
+-- A referee line read the way K17 / K18 (docs/plans/gen12-referee-remaining-
+-- gaps.md) say every matcher reads one -- Wire.plainBattleLine: each side
+-- mark (`^a` / `^b`) gone, each break a space, none where the cart broke a
+-- word on its hyphen ("It's super-\neffective!").  The raw lines are pinned
+-- by section (12) near the end of this file.
+local plainLine = Wire.plainBattleLine
 
 -- ------------------------------------------------------------------
 -- fixtures
@@ -159,8 +169,33 @@ local function battleOf(o)
   return battle
 end
 
+-- Every `msg` line any battle in this suite drains, for K18's length check
+-- (section 12).
+-- ...and every event that does not cross the wire whole (Wire.battleEvent,
+-- Gen 2: a refused event, a line that lost a mark or a break, another kind's
+-- sentence that kept one).
+local SEEN_LINES, WIRE_LOSSES = {}, {}
+local function shapeOf(text)
+  local out = {}
+  for piece in tostring(text or ""):gmatch("%^[ab]") do out[#out + 1] = piece end
+  local _, breaks = tostring(text or ""):gsub("\n", "")
+  return table.concat(out, "") .. "/" .. breaks
+end
 local function drain(battle)
-  return battle:drainEvents()
+  local events = battle:drainEvents()
+  for _, event in ipairs(events) do
+    if event.t == "msg" and type(event.text) == "string" then SEEN_LINES[#SEEN_LINES + 1] = event.text end
+    local clean = Wire.battleEvent(event, 2)
+    if not clean then
+      WIRE_LOSSES[#WIRE_LOSSES + 1] = tostring(event.t) .. " refused"
+    elseif event.t == "msg" and shapeOf(clean.text) ~= shapeOf(event.text) then
+      WIRE_LOSSES[#WIRE_LOSSES + 1] = "msg " .. tostring(event.text)
+    elseif event.t ~= "msg" and event.t ~= "anim" and event.t ~= "item" and type(clean.text) == "string"
+       and (clean.text:find("^", 1, true) or clean.text:find("\n", 1, true)) then
+      WIRE_LOSSES[#WIRE_LOSSES + 1] = tostring(event.t) .. " " .. clean.text
+    end
+  end
+  return events
 end
 
 -- Play a scripted fight and hand back everything it emitted, opening drain
@@ -539,7 +574,7 @@ do
   local fizzled = false
   for _, event in ipairs(events) do
     if event.t == "msg" and type(event.text) == "string"
-       and event.text:find("has no target", 1, true) then
+       and plainLine(event.text):find("has no target", 1, true) then
       fizzled = true
     end
   end
@@ -1014,7 +1049,7 @@ do
   end
   local function saw(events, text)
     for _, event in ipairs(events) do
-      if event.t == "msg" and event.text and event.text:find(text, 1, true) then return true end
+      if event.t == "msg" and event.text and plainLine(event.text):find(text, 1, true) then return true end
     end
     return false
   end
@@ -1130,7 +1165,7 @@ do
     battle:submitChoice("p1", { action = "fight", move = aMove })
     battle:submitChoice("p2", { action = "fight", move = bMove })
     for _, event in ipairs(drain(battle)) do
-      if event.t == "msg" then said[#said + 1] = event.text end
+      if event.t == "msg" then said[#said + 1] = plainLine(event.text) end
       if event.t == "anim" then animated[#animated + 1] = event.text end
     end
   end
@@ -1292,9 +1327,9 @@ do
   ok(not Effects.hitsInvulnerable("FLY", { id = "SWIFT" }), "gen2: Swift misses Fly")
   ok(not Effects.hitsInvulnerable("DIG", { id = "TACKLE" }), "gen2: Tackle misses Dig")
   local mon = { species = "Alpha" }
-  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight!")
-  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head!")
-  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind!")
+  eq(plainLine(Effects.chargeMessage(mon, 39, "SOLARBEAM")), "Alpha took in sunlight!")
+  eq(plainLine(Effects.chargeMessage(mon, 39, "SKULL_BASH")), "Alpha lowered its head!")
+  eq(plainLine(Effects.chargeMessage(mon, 39, "RAZOR_WIND")), "Alpha made a whirlwind!")
 end
 
 do
@@ -1319,8 +1354,8 @@ do
   local turn1 = drain(battle)
   local dug, failed, damaged = false, false, false
   for _, event in ipairs(turn1) do
-    if event.t == "msg" and event.text:find("dug a hole", 1, true) then dug = true end
-    if event.t == "msg" and event.text:find("But it failed!", 1, true) then failed = true end
+    if event.t == "msg" and plainLine(event.text):find("dug a hole", 1, true) then dug = true end
+    if event.t == "msg" and plainLine(event.text):find("But it failed!", 1, true) then failed = true end
     if event.t == "damage" and event.slot == 0 then damaged = true end
   end
   ok(dug, "gen2: DIG announces dug a hole")
@@ -1363,7 +1398,7 @@ do
   local failed, damaged = false, false
   for _, event in ipairs(turn1) do
     -- CheckHit's `.FlyDigMoves` miss: AttackMissedText (wave 5).
-    if event.t == "msg" and event.text:find("attack missed!", 1, true) then failed = true end
+    if event.t == "msg" and plainLine(event.text):find("attack missed!", 1, true) then failed = true end
     if event.t == "damage" and event.slot == 0 then damaged = true end
   end
   ok(failed, "gen2: Swift misses a flying target")
@@ -1460,7 +1495,7 @@ do
   local target = dummyMon({ species = "Beta", substitute = 40 })
   local out = applyPrimary(32, dummyMon(), target)
   -- R2d: SleepTarget's own line, DidntAffect1Text.
-  eq(out.messages[1], "It didn't affect Beta!", "gen2: SLEEP_EFFECT vs substitute didn't affect")
+  eq(plainLine(out.messages[1]), "It didn't affect Beta!", "gen2: SLEEP_EFFECT vs substitute didn't affect")
   eq(target.status, nil, "gen2: SLEEP_EFFECT does not land through a substitute")
 end
 
@@ -1484,7 +1519,7 @@ do
     userMon = dummyMon(), targetMon = target,
     userFighter = { slot = 1, side = "a" }, targetFighter = { slot = 2, side = "b" },
   })
-  eq(out.messages[1], "Beta's THUMP was DISABLED!", "gen2: DISABLE_EFFECT lands behind a substitute")
+  eq(plainLine(out.messages[1]), "Beta's THUMP was DISABLED!", "gen2: DISABLE_EFFECT lands behind a substitute")
   eq(target.disable and target.disable.turns, 4, "gen2: ...for `.loop2`'s byte & 7, plus 1")
 end
 
@@ -1594,7 +1629,7 @@ do
   local refused = false
   for _, event in ipairs(out) do
     if event.t == "msg"
-       and event.text == "No! There's no running from a trainer battle!" then
+       and plainLine(event.text) == "No! There's no running from a trainer battle!" then
       refused = true
     end
   end
@@ -1658,9 +1693,9 @@ do
   local defFell, slept = false, false
   for _, event in ipairs(events) do
     if event.t == "msg" and type(event.text) == "string" then
-      if event.text:find("nothing happened", 1, true) then nothing = true end
-      if event.text:find("DEFENSE fell", 1, true) then defFell = true end
-      if event.text:find("fell asleep", 1, true) then slept = true end
+      if plainLine(event.text):find("nothing happened", 1, true) then nothing = true end
+      if plainLine(event.text):find("DEFENSE fell", 1, true) then defFell = true end
+      if plainLine(event.text):find("fell asleep", 1, true) then slept = true end
     end
   end
   ok(not nothing, "2v2: Crystal status moves do not no-op")
@@ -1696,7 +1731,7 @@ do
   local events = drain(battle)
   local nothing = false
   for _, event in ipairs(events) do
-    if event.t == "msg" and event.text == "But nothing happened." then
+    if event.t == "msg" and plainLine(event.text) == "But nothing happened." then
       nothing = true
     end
   end
@@ -1842,7 +1877,7 @@ do
   local function selfHit(events)
     local hurt = false
     for _, event in ipairs(events) do
-      if event.t == "msg" and event.text and event.text:find("hurt itself", 1, true) then
+      if event.t == "msg" and event.text and plainLine(event.text):find("hurt itself", 1, true) then
         hurt = true
       elseif hurt and event.t == "damage" then
         return event.amount
@@ -2042,7 +2077,7 @@ local function hit(id, power, ty, effect, pp)
 end
 local function said(events, text)
   for _, event in ipairs(events) do
-    if event.t == "msg" and event.text == text then return true end
+    if event.t == "msg" and plainLine(event.text) == text then return true end
   end
   return false
 end
@@ -2878,7 +2913,7 @@ do
   local function countSaid(events, text)
     local n = 0
     for _, event in ipairs(events) do
-      if event.t == "msg" and event.text == text then n = n + 1 end
+      if event.t == "msg" and plainLine(event.text) == text then n = n + 1 end
     end
     return n
   end
@@ -3136,7 +3171,7 @@ do
   t = tgt({ status = "freeze" })
   out = side(4, t, { hit = false, moveType = FIRE, normalType = NORMAL })
   eq(t.status, nil, "a burn-family hit thaws a frozen target whatever its chance byte said")
-  eq(out.messages[1], "Tgt was defrosted!", "...with the cart's line")
+  eq(plainLine(out.messages[1]), "Tgt was defrosted!", "...with the cart's line")
   eq(out.events[1] and out.events[1].fields.status, nil, "...on a status event with no token (a cure)")
   t = tgt({ status = "freeze", types = { FIRE } })
   side(4, t, { hit = true, moveType = FIRE, normalType = NORMAL })
@@ -3179,7 +3214,7 @@ do
   t = tgt()
   out = side(68, t, { rng = r, computer = true })
   eq(t.stages.atk, -1, "64 and over goes on to the drop")
-  eq(out.messages[1], "Tgt's ATTACK fell!", "...with its line")
+  eq(plainLine(out.messages[1]), "Tgt's ATTACK fell!", "...with its line")
   r = bytes({ 200 })
   t = tgt()
   side(70, t, { rng = r, computer = true, hit = false })
@@ -3256,12 +3291,12 @@ do
   t = tgt({ mist = true })
   out = primary(18, t, { rng = r, computer = true })
   eq(r.drawn, 0, "Mist comes before the byte")
-  eq(out.messages[1], "Tgt's protected by MIST.", "...with the cart's Mist line (ProtectedByMistText, R2b)")
+  eq(plainLine(out.messages[1]), "Tgt's protected by MIST.", "...with the cart's Mist line (ProtectedByMistText, R2b)")
   r = bytes({ 64 })
   t = tgt({ atk = -6 })
   out = primary(18, t, { rng = r, computer = true })
   eq(r.drawn, 0, "so does a stage at -6")
-  eq(out.messages[1], "Tgt's ATTACK won't drop anymore!", "...with the cart's line (WontDropAnymoreText, R2b)")
+  eq(plainLine(out.messages[1]), "Tgt's ATTACK won't drop anymore!", "...with the cart's line (WontDropAnymoreText, R2b)")
   r = bytes({ 64 })
   t = tgt({ atk = -5 })
   primary(58, t, { rng = r, computer = true })
@@ -3269,7 +3304,7 @@ do
   eq(t.stages.atk, -6, "...and stops at -6")
   t = tgt({ mist = true, substitute = 10 })
   out = primary(18, t)
-  eq(out.messages[1], "Tgt's protected by MIST.", "Mist is asked before the substitute, a player's move too")
+  eq(plainLine(out.messages[1]), "Tgt's protected by MIST.", "Mist is asked before the substitute, a player's move too")
   eq(out.nothing, false, "...so the substitute's \"nothing happened\" is not the line")
 
   -- (g) Through the turn machine.  Two seats on one seed: the wild fight is
@@ -4290,7 +4325,7 @@ do
   local hits = {}
   for _ = 1, 3 do
     for _, event in ipairs(turn(b2)) do
-      if event.t == "msg" and event.text:find("used MODDED", 1, true) then hits[#hits + 1] = event.text end
+      if event.t == "msg" and plainLine(event.text):find("used MODDED", 1, true) then hits[#hits + 1] = plainLine(event.text) end
     end
   end
   eq(#hits, 0, "R2e: an unnumbered row in a numbered pool is never called")
@@ -4298,7 +4333,7 @@ do
   local called = false
   for _ = 1, 3 do
     for _, event in ipairs(turn(mixed)) do
-      if event.t == "msg" and event.text == "Alpha used MODDED!" then called = true end
+      if event.t == "msg" and plainLine(event.text) == "Alpha used MODDED!" then called = true end
     end
   end
   ok(called, "R2e: a pool with no `num` is numbered by place")
@@ -4314,7 +4349,7 @@ end
 local function msgs(events)
   local out = {}
   for _, event in ipairs(events) do
-    if event.t == "msg" then out[#out + 1] = event.text end
+    if event.t == "msg" then out[#out + 1] = plainLine(event.text) end
   end
   return out
 end
@@ -4325,7 +4360,7 @@ local function indexOf(events, pred)
   return nil
 end
 local function msgAt(events, text)
-  return indexOf(events, function(e) return e.t == "msg" and e.text == text end)
+  return indexOf(events, function(e) return e.t == "msg" and plainLine(e.text) == text end)
 end
 local function animAt(events, id, slot)
   return indexOf(events, function(e) return e.t == "anim" and e.text == id and e.slot == slot end)
@@ -4467,7 +4502,9 @@ do
   ok(said(events, "Ann played the POKé FLUTE.") and said(events, "All sleeping POKéMON woke up."),
      "RP2: the flute's two lines, with the cart's POKé")
   events = turn(battle, { action = "item", item = "POKE_FLUTE" })
-  ok(said(events, "Played the POKé FLUTE. Now, that's a catchy tune!"), "RP2: ...and its tune when nobody sleeps")
+  -- K18: _PlayedFluteText's `para` is a second box, so a second line.
+  ok(said(events, "Played the POKé FLUTE.") and said(events, "Now, that's a catchy tune!"),
+    "RP2: ...and its tune when nobody sleeps")
 end
 
 -- (g) CheckTurn's status animations: the player's sleep clip ahead of its
@@ -4813,11 +4850,398 @@ do
   local hurt, line, faint = nil, nil, nil
   for i, event in ipairs(events) do
     if event.t == "damage" and event.slot == 3 and not hurt then hurt = i end
-    if event.t == "msg" and event.text == "The SANDSTORM hits Beta!" then line = i end
+    if event.t == "msg" and plainLine(event.text) == "The SANDSTORM hits Beta!" then line = i end
     if event.t == "faint" and event.text == "Beta" then faint = i end
   end
   ok(hurt and line and faint and hurt < line and line < faint,
      "FX-R2: SubtractHPFromUser, SandstormHitsText, then the faint check")
+end
+
+-- ------------------------------------------------------------------
+-- (12) docs/plans/gen12-referee-remaining-gaps.md, the Gold referee's half:
+--      K17 (a battler named through `<USER>` / `<TARGET>` carries its side's
+--      mark), K18 (the cart's `line` / `cont` is a break, its `para` a second
+--      line, no line past BATTLE_LINE_MAX), K19 (a move's knockout faints at
+--      the check after the turn, past the move's tail) and K20 (the cart's
+--      status / residual / weather clips).  server/battle2_turn.test.js holds
+--      the same claims over the `t2_*` parity scenarios.
+-- ------------------------------------------------------------------
+
+-- The index of the first event `pred` takes, from `from` on.
+local function find(events, pred, from)
+  for i = from or 1, #events do
+    if pred(events[i]) then return i end
+  end
+  return nil
+end
+local function msgRaw(text)
+  return function(e) return e.t == "msg" and e.text == text end
+end
+local function animOn(id, slot)
+  return function(e) return e.t == "anim" and e.text == id and e.slot == slot end
+end
+local function kindOn(kind, slot)
+  return function(e) return e.t == kind and e.slot == slot end
+end
+local function inOrder(events, preds, what)
+  local at, places = 0, {}
+  for k, pred in ipairs(preds) do
+    local i = find(events, pred, at + 1)
+    if not i then
+      ok(false, what .. " (step " .. k .. " not found after event " .. at .. ")")
+      return nil
+    end
+    places[k], at = i, i
+  end
+  ok(true, what)
+  return places
+end
+local FEMALE2 = { base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50, gender = 127 },
+                  dvs = { atk = 0, def = 8, spe = 0, spc = 8 } }
+local MALE2 = { base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50, gender = 127 },
+                dvs = { atk = 15, def = 8, spe = 15, spc = 8 } }
+local function sexed(m, sex)
+  m.base, m.dvs = sex.base, sex.dvs
+  return m
+end
+
+-- (a) K17 / K18: both sides marked, the breaks the cart's text has, and a
+--     marked line whose second name is printed bare.
+do
+  local battle = duel({ seed = 3, chart = { { 200 } },
+    a = { sheet({ species = "Alpha", spe = 90, types = { 0 }, maxHp = 900, moves = { hit("thump", 10) } }) },
+    b = { sheet({ species = "Beta", spe = 10, types = { 0 }, maxHp = 900, moves = { hit("tap", 10) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  ok(find(events, msgRaw("^aAlpha\nused thump!")), "K17: side a's monster is `^a` before its name")
+  ok(find(events, msgRaw("^bBeta\nused tap!")), "K17: side b's is `^b`")
+  ok(find(events, msgRaw("It's super-\neffective!")), "K18: SuperEffectiveText's `line` break")
+  for _, e in ipairs(events) do
+    if e.t == "send" or e.t == "faint" then ok(not e.text:find("^", 1, true), "K17: a send / faint names the species bare") end
+  end
+
+  local copy = duel({ seed = 3,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("TRANSFORM", 0, 0, 57) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("tap", 1) } }) } })
+  drain(copy)
+  ok(find(turn(copy), msgRaw("^aAlpha\nTRANSFORMED into\nBeta!")),
+    "K17: TransformedText marks <USER> and prints wStringBuffer1's species bare")
+end
+
+-- (b) K17: a line naming two battlers marks both -- TrapTarget's BIND line --
+--     and K20: HandleWrap plays the trapping move's own clip on the
+--     trapper's seat before the HP comes off.
+do
+  local battle = duel({ seed = 5,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("BIND", 10, 0, 42) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  ok(find(events, msgRaw("^aAlpha\nused BIND on\n^bBeta!")), "K17: UsedBindText marks <USER> and <TARGET>")
+  inOrder(events, { animOn("BIND", 0), kindOn("damage", 3), msgRaw("^bBeta's\nhurt by\nBIND!") },
+    "K20: HandleWrap's clip (the trapper's seat), the HP, then the line")
+end
+
+-- (c) K17: the cart's bare names stay bare -- the computer's item line
+--     (<ENEMY> is a trainer, <MON> a `text_ram`) and the obedience lines.
+do
+  local battle = battleOf({ mode = "coop_npc", seed = 7, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { sheet({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", bag = { { id = "X_ATTACK", count = 1 } },
+      mons = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("tap", 1) } }) } } } } })
+  drain(battle)
+  battle:submitChoice("p1", { action = "fight", move = 0 })
+  battle:submitChoice("p2", { action = "item", item = "X_ATTACK" })
+  local events = drain(battle)
+  ok(find(events, msgRaw("Bob\nused X ATTACK\non Beta!")), "K17: _EnemyUsedOnText names trainer and monster bare")
+  for _, line in ipairs(Turn.LOAF_LINES) do
+    ok(not line:find("^", 1, true), "K17: the obedience lines print wBattleMonNickname bare")
+  end
+end
+
+-- (d) K18: a `para` is a second line (CURSE's and PSYCH UP's), each broken
+--     where the cart breaks it.
+do
+  local battle = duel({ seed = 9, typeIds = { "NORMAL", "GHOST" },
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, types = { 1 }, moves = { hit("CURSE", 0, 1, 137) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, types = { 0 }, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { msgRaw("^aAlpha\ncut its own HP and"), msgRaw("put a CURSE on\n^bBeta!") },
+    "K18: PutACurseText's paragraphs are two lines")
+  -- K20: the CURSE's residual plays ANIM_IN_NIGHTMARE (both carts), then
+  -- the HP, then HurtByCurseText.
+  inOrder(events, { animOn("IN_NIGHTMARE_ANIM", 3), kindOn("damage", 3), msgRaw("^bBeta's\nhurt by the CURSE!") },
+    "K20: the CURSE's clip is ANIM_IN_NIGHTMARE")
+end
+
+-- (e) K19: a drain's knockout faints after SuckedHealthText; a recoil that
+--     takes both down faints the target first; THIEF robs before the faint.
+do
+  local battle = duel({ seed = 11,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 100, hp = 50, moves = { hit("sap", 80, 0, 3) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 100, hp = 5, moves = { hit("tap", 1) } }),
+          sheet({ species = "Delta", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { kindOn("damage", 3), kindOn("drain", 0), msgRaw("Sucked health from\n^bBeta!"), kindOn("faint", 3) },
+    "K19: the drain, its line, then the faint")
+
+  local ram = duel({ seed = 13,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 100, hp = 1, moves = { hit("ram", 80, 0, 48) } }),
+          sheet({ species = "Gamma", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 100, hp = 5, moves = { hit("tap", 1) } }),
+          sheet({ species = "Delta", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  drain(ram)
+  local rammed = turn(ram)
+  local places = inOrder(rammed, { kindOn("damage", 3), msgRaw("^aAlpha's\nhit with recoil!"), kindOn("damage", 0),
+    kindOn("faint", 3), kindOn("faint", 0) },
+    "K19: recoil KOs both -- the target faints first, both after the recoil line")
+  ok(places and find(rammed, function(e) return e.t == "faint" end) == places[4],
+    "K19: nothing faints before the move's tail")
+
+  local thief = fight({ mode = "1v1", seed = 17,
+    a = { held({ species = "Alpha", spe = 90, maxHp = 100, moves = { { id = "THIEF", pp = 10, power = 40,
+      accuracy = 255, type = 0, effect = 0, chance = 100 } } }) },
+    b = { held({ species = "Beta", spe = 10, maxHp = 100, hp = 5, item = LEFTOVERS, moves = { hit("tap", 1) } }),
+          held({ species = "Delta", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  drain(thief)
+  local stolen = round(thief, "p2")
+  inOrder(stolen, { kindOn("damage", 3), msgRaw("^aAlpha\nstole LEFTOVERS\nfrom its foe!"), kindOn("faint", 3) },
+    "K19: THIEF robs the knocked-out foe before it faints")
+end
+
+-- (f) K19 keeps DESTINY BOND's order -- the line, the user's bar, DESTINY
+--     BOND's clip on the bonded seat (K20), the target's faint, the user's --
+--     and EXPLOSION's: the user's HP goes at `selfdestruct` (before the hit,
+--     its own substitute never asked), the target's bond is reset, and the
+--     target faints first.
+do
+  local battle = duel({ seed = 19,
+    a = { sheet({ species = "Alpha", spe = 10, maxHp = 100, atk = 200, moves = { hit("slam", 200) } }),
+          sheet({ species = "Gamma", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) },
+    b = { sheet({ species = "Beta", spe = 90, maxHp = 50, moves = { hit("DESTINY_BOND", 0, 0, 138) } }),
+          sheet({ species = "Delta", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { msgRaw("^bBeta\ntook down with it,\n^aAlpha!"), kindOn("damage", 0), animOn("DESTINY_BOND", 3),
+    kindOn("faint", 3), kindOn("faint", 0) }, "K19 / K20: DESTINY BOND unchanged, its clip on the bonded seat")
+
+  local boom = duel({ seed = 23,
+    a = { sheet({ species = "Alpha", spe = 10, maxHp = 100, atk = 250, substitute = 20,
+                  moves = { hit("EXPLOSION", 250, 0, 7) } }),
+          sheet({ species = "Gamma", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) },
+    b = { sheet({ species = "Beta", spe = 90, maxHp = 50, def = 5, moves = { hit("DESTINY_BOND", 0, 0, 138) } }),
+          sheet({ species = "Delta", spe = 10, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  drain(boom)
+  local blast = turn(boom)
+  inOrder(blast, { msgRaw("^aAlpha\nused EXPLOSION!"), kindOn("damage", 0), kindOn("damage", 3),
+    kindOn("faint", 3), kindOn("faint", 0) }, "K19: EXPLOSION's user empties at `selfdestruct`, faints after its target")
+  ok(not find(blast, function(e) return e.t == "msg" and e.text:find("took down", 1, true) end),
+    "Selfdestruct resets the target's DESTINY BOND")
+  ok(not find(blast, function(e) return e.t == "msg" and e.text:find("SUBSTITUTE", 1, true) end),
+    "Selfdestruct writes the HP straight: the user's own doll is never asked")
+end
+
+-- (g) K20: the secondary statuses' clips, each on the target ahead of its
+--     line, and ResidualDamage's PSN / BRN after the line, before the HP.
+do
+  for _, row in ipairs({ { 2, "PSN_ANIM", "^bBeta\nwas poisoned!" }, { 4, "BRN_ANIM", "^bBeta\nwas burned!" },
+                         { 5, "FRZ_ANIM", "^bBeta\nwas frozen solid!" },
+                         { 6, "PAR_ANIM", "^bBeta's\nparalyzed! Maybe\nit can't attack!" } }) do
+    local sting = hit("sting", 10, 0, row[1])
+    sting.chance = 100
+    local battle = duel({ seed = 29,
+      a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { sting } }) },
+      b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } })
+    drain(battle)
+    local events = turn(battle)
+    inOrder(events, { animOn(row[2], 3), msgRaw(row[3]) }, "K20: " .. row[2] .. " ahead of its line, on the target")
+    if row[1] == 2 or row[1] == 4 then
+      local line = row[1] == 2 and "^bBeta\nis hurt by poison!" or "^bBeta's\nhurt by its burn!"
+      local events2 = turn(battle)
+      inOrder(events2, { msgRaw(line), animOn(row[2], 3), kindOn("damage", 3) },
+        "K20: ResidualDamage's " .. row[2] .. " after its line, before the HP")
+    end
+  end
+end
+
+-- (h) K20: a confusion that lands plays ANIM_CONFUSED on the target --
+--     CONF_ANIM over the computer's monster, CONF_PLAYER_ANIM over a
+--     player's -- and the self-hit plays ANIM_HIT_CONFUSION on its own seat.
+do
+  local beam = hit("psybeam", 10, 0, 76)
+  beam.chance = 100
+  local battle = battleOf({ mode = "coop_npc", seed = 31, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { beam } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { sheet({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("tap", 1) } }) } } } } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { animOn("CONF_ANIM", 3), msgRaw("^bBeta\nbecame confused!") },
+    "K20: FinishConfusingTarget's clip on the computer's monster")
+  local link = duel({ seed = 31,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { beam } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("tap", 1) } }) } })
+  drain(link)
+  ok(find(turn(link), animOn("CONF_PLAYER_ANIM", 3)), "K20: ...its player variant on a link seat")
+
+  local selfHit = nil
+  for seed = 1, 60 do
+    local b = duel({ seed = seed,
+      a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("tap", 1) } }) },
+      b = { sheet({ species = "Beta", spe = 10, maxHp = 900, confusion = 5, moves = { hit("tap", 1) } }) } })
+    drain(b)
+    local ev = turn(b)
+    if find(ev, msgRaw("It hurt itself in\nits confusion!")) then selfHit = ev; break end
+  end
+  ok(selfHit ~= nil, "found a seed where the confused Beta hits itself")
+  if selfHit then
+    inOrder(selfHit, { msgRaw("It hurt itself in\nits confusion!"), animOn("HIT_CONFUSION_ANIM", 3), kindOn("damage", 3) },
+      "K20: HitConfusion's line, ANIM_HIT_CONFUSION on its own seat, then the HP")
+  end
+end
+
+-- (i) K20: LEECH SEED's sap is ANIM_SAP on the SEEDER's seat, then the HP
+--     off, the HP on, and only then LeechSeedSapsText (the cart's order).
+do
+  local battle = duel({ seed = 37,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, hp = 500, moves = { hit("LEECH_SEED", 0, 0, 84) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { msgRaw("^bBeta\nwas seeded!"), animOn("SAP_ANIM", 0), kindOn("damage", 3), kindOn("drain", 0),
+    msgRaw("LEECH SEED saps\n^bBeta!") }, "K20: ANIM_SAP on the seeder, the HP, then the line")
+end
+
+-- (j) K20: ATTRACT's love plays ANIM_IN_LOVE after InLoveWithText, both
+--     names marked (K17).
+do
+  local battle = duel({ seed = 41,
+    a = { sexed(sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("ATTRACT", 0, 0, 133) } }), MALE2) },
+    b = { sexed(sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("tap", 1) } }), FEMALE2) } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { msgRaw("^bBeta\nfell in love!"), msgRaw("^bBeta\nis in love with\n^aAlpha!"), animOn("IN_LOVE_ANIM", 3) },
+    "K17 / K20: InLoveWithText marks both, then ANIM_IN_LOVE on the infatuated seat")
+end
+
+-- (k) K20: NIGHTMARE's ANIM_IN_NIGHTMARE, the HP, the line.
+do
+  local battle = duel({ seed = 43,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("NIGHTMARE", 0, 0, 143) } }) },
+    b = { held({ species = "Beta", spe = 10, maxHp = 900, status = "SLP", statusTurns = 7,
+                 moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  inOrder(turn(battle), { msgRaw("^bBeta\nstarted to have a\nNIGHTMARE!"), animOn("IN_NIGHTMARE_ANIM", 3),
+    kindOn("damage", 3), msgRaw("^bBeta\nhas a NIGHTMARE!") }, "K20: ANIM_IN_NIGHTMARE ahead of the HP and the line")
+end
+
+-- (l) K20: SANDSTORM's ANIM_IN_SANDSTORM on the seat it hits, the HP, the
+--     line -- the weather lines broken as the cart's are (K18).
+do
+  local battle = duel({ seed = 47,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("SANDSTORM", 0, 5, 126) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = turn(battle)
+  ok(find(events, msgRaw("A SANDSTORM\nbrewed!")), "K18: SandstormBrewedText's break")
+  inOrder(events, { msgRaw("The SANDSTORM\nrages."), animOn("IN_SANDSTORM_ANIM", 0), kindOn("damage", 0),
+    msgRaw("The SANDSTORM hits\n^aAlpha!"), animOn("IN_SANDSTORM_ANIM", 3), kindOn("damage", 3),
+    msgRaw("The SANDSTORM hits\n^bBeta!") }, "K20: ANIM_IN_SANDSTORM per seat it hits, ahead of the HP")
+end
+
+-- (m) K20: BattleCommand_StatDownAnim's after-animation on a drop that
+--     landed -- ANIM_ENEMY_STAT_DOWN over the computer's monster, ANIM_WOBBLE
+--     over a player's -- and none for a drop that failed.
+do
+  local battle = battleOf({ mode = "coop_npc", seed = 53, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { sheet({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("LEER", 0, 0, 19) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { sheet({ species = "Beta", spe = 10, maxHp = 900,
+      moves = { hit("GROWL", 0, 0, 18) } }) } } } } })
+  drain(battle)
+  local events = turn(battle)
+  inOrder(events, { animOn("ENEMY_STAT_DOWN_ANIM", 3), msgRaw("^bBeta's\nDEFENSE fell!") },
+    "K20: ANIM_ENEMY_STAT_DOWN over the computer's monster, ahead of the line")
+  if find(events, msgRaw("^aAlpha's\nATTACK fell!")) then
+    inOrder(events, { animOn("WOBBLE_ANIM", 0), msgRaw("^aAlpha's\nATTACK fell!") },
+      "K20: ANIM_WOBBLE over the player's")
+  end
+  local floor = battleOf({ mode = "coop_npc", seed = 53, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { sheet({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("LEER", 0, 0, 19) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { sheet({ species = "Beta", spe = 10, maxHp = 900,
+      stages = { def = -6 }, moves = { hit("wait", 0, 0, 85) } }) } } } } })
+  drain(floor)
+  local floored = turn(floor)
+  ok(find(floored, msgRaw("^bBeta's\nDEFENSE won't\ndrop anymore!")) and not find(floored, animOn("ENEMY_STAT_DOWN_ANIM", 3)),
+    "K20: no after-animation on a drop that failed (wAttackMissed)")
+end
+
+-- (n) K20: ItemRecoveryAnim -- RECOVER's clip on the holder -- ahead of a
+--     BERRY's HP; LEFTOVERS plays none.
+do
+  local battle, foe = fight({ mode = "1v1", seed = 59,
+    a = { held({ species = "Alpha", spe = 90, maxHp = 100, atk = 200, moves = { hit("slam", 40) } }) },
+    b = { held({ species = "Beta", maxHp = 100, hp = 60, spe = 10, item = { "BERRY", "HELD_BERRY", 12, "BERRY" },
+                moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  inOrder(events, { animOn("RECOVER", 3), kindOn("drain", 3), msgRaw("^bBeta\nrecovered using a\nBERRY!") },
+    "K20: ItemRecoveryAnim before the BERRY's HP and line")
+  local left, foe2 = fight({ mode = "1v1", seed = 59,
+    a = { held({ species = "Alpha", spe = 90, maxHp = 100, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 100, hp = 60, spe = 10, item = LEFTOVERS, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(left)
+  local lefts = round(left, foe2)
+  ok(find(lefts, msgRaw("^bBeta\nrecovered with\nLEFTOVERS.")) and not find(lefts, animOn("RECOVER", 3)),
+    "K20: HandleLeftovers plays no clip")
+end
+
+-- (o) K20: FUTURE SIGHT's hit plays its own clip from the seat that foresaw
+--     it (the script's `moveanim`), between its line and the HP.
+do
+  local battle = duel({ seed = 61,
+    a = { sheet({ species = "Alpha", spe = 90, maxHp = 900, moves = { hit("FUTURE_SIGHT", 40, 0, 119), hit("wait", 0, 0, 85) } }) },
+    b = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local all = {}
+  for _, choice in ipairs({ 0, 1, 1 }) do
+    for _, e in ipairs(turn(battle, { action = "fight", move = choice })) do all[#all + 1] = e end
+  end
+  inOrder(all, { msgRaw("^aAlpha\nforesaw an attack!"), msgRaw("^bBeta\nwas hit by FUTURE\nSIGHT!"),
+    animOn("FUTURE_SIGHT", 0), kindOn("damage", 3) }, "K20: FUTURE SIGHT's clip on its hit")
+end
+
+-- (q) K20: HandleBerserkGene's ANIM_CONFUSED on the holder, after the
+--     item's line and the Attack line, ahead of BecameConfusedText.
+do
+  local battle = battleOf({ mode = "coop_npc", seed = 3, sides = {
+    a = { { playerId = "p1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "p2", name = "Bob", mons = { held({ species = "Beta", spe = 10, maxHp = 900,
+      item = { "BERSERK_GENE", nil, 0, "BERSERKGENE" }, moves = { hit("tap", 1) } }) } } } } })
+  inOrder(drain(battle), { msgRaw("^bBeta's\nBERSERKGENE\nactivated!"), msgRaw("^bBeta's\nATTACK\nwent way up!"),
+    animOn("CONF_ANIM", 3), msgRaw("^bBeta\nbecame confused!") }, "K20: the Berserk Gene's ANIM_CONFUSED")
+end
+
+-- (p) K17 / K18: every event this suite drained crossed the wire whole --
+--     each line's marks and breaks, every other kind's plain sentence -- and
+--     every Gold line is BATTLE_LINE_MAX (80) glyphs or fewer, marks (two
+--     each) and breaks (one each) counted.
+do
+  eq(#WIRE_LOSSES, 0, "K17 / K18: Wire.battleEvent keeps every event whole"
+    .. (WIRE_LOSSES[1] and (" (first: " .. WIRE_LOSSES[1] .. ")") or ""))
+  eq(Events.BATTLE_LINE_MAX, 80, "events.lua mirrors Config.BATTLE_LINE_MAX")
+  local longest, text = 0, ""
+  for _, line in ipairs(SEEN_LINES) do
+    local _, n = line:gsub("[^\128-\191]", "")
+    if n > longest then longest, text = n, line end
+  end
+  ok(longest > 0 and longest <= Events.BATTLE_LINE_MAX, "K18: the longest line is " .. longest .. " glyphs")
+  io.write(string.format("battle_sim2_turn: longest line %d glyphs: %q\n", longest, text))
 end
 
 -- ------------------------------------------------------------------

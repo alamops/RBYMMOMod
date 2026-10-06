@@ -3824,6 +3824,69 @@ scenario("fx2_level_up_guards", function(events)
     up("p1", 1, 31, s5(64), 101), up("p1", 1, 31, s5(64), 100), both3(F(0), F(0)) })
 end)
 
+-- docs/plans/gen12-referee-remaining-gaps.md, the Gold half (W1-T2): the
+-- name marks (K17), the cart's breaks (K18), a move's knockout fainting at
+-- the check after the turn (K19) and the cart's status / residual / weather
+-- clips (K20).  `t2_marks_ko_tails`: both sides marked, SuperEffectiveText's
+-- break, a drain's KO fainting after SuckedHealthText and a recoil that KOs
+-- both (the target first); `t2_thief_bond_boom`: THIEF robbing a foe it
+-- knocks out, DESTINY BOND's line, clip and faints, and EXPLOSION's user
+-- emptied at `selfdestruct`, the target's bond reset; `t2_status_anims`:
+-- PSN / CONF / stat-down / SAP clips against the computer;
+-- `t2_love_sand_bind`: IN_LOVE, IN_SANDSTORM, HandleWrap's move clip and
+-- ItemRecoveryAnim; `t2_nightmare_curse_fs`: IN_NIGHTMARE for both, the
+-- CURSE's paragraphs and FUTURE SIGHT's clip.
+scenario("t2_marks_ko_tails", function(events)
+  return seq(events, duo4("t2a", "1v1", 971,
+    { mn({ species = "Alpha", types = { 3 }, maxHp = 100, hp = 1, atk = 250, spe = 90,
+           moves = { hm("sap", 80, 3, 3), hm("ram", 80, 0, 48) } }) },
+    { mn({ species = "Beta", types = { 4 }, maxHp = 100, hp = 5, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", types = { 0 }, maxHp = 100, hp = 60, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Eps", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), { { "p2", S(1) } }, both3(F(1), F(0)) })
+end)
+
+scenario("t2_thief_bond_boom", function(events)
+  return seq(events, duo4("t2b", "1v1", 972,
+    { mn({ species = "Alpha", maxHp = 100, atk = 250, spe = 10,
+           moves = { hm("THIEF", 40, 0, 0, 60, 100) } }),
+      mn({ species = "Gamma", maxHp = 100, atk = 250, spe = 10, substitute = 20,
+           moves = { hm("EXPLOSION", 250, 0, 7) } }),
+      mn({ species = "Zeta", maxHp = 100, spe = 10, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 100, hp = 5, spe = 90, item = { "LEFTOVERS", "HELD_LEFTOVERS", 0, "LEFTOVERS" },
+           moves = { hm("DESTINY_BOND", 0, 0, 138) } }),
+      mn({ species = "Delta", maxHp = 50, def = 5, spe = 90, moves = { hm("DESTINY_BOND", 0, 0, 138) } }),
+      mn({ species = "Eps", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), { { "p1", S(1) }, { "p2", S(1) } }, both3(F(0), F(0)) })
+end)
+
+scenario("t2_status_anims", function(events)
+  return seq(events, duo4("t2c", "coop_npc", 973,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90,
+           moves = { hm("sting", 10, 0, 2, 60, 100), hm("psybeam", 10, 0, 76, 60, 100),
+                     hm("LEER", 0, 0, 19), hm("LEECH_SEED", 0, 9, 84) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("GROWL", 0, 0, 18), hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(1)), both3(F(2), F(0)), both3(F(3), F(1)), both3(F(2), F(1)) })
+end)
+
+scenario("t2_love_sand_bind", function(events)
+  return seq(events, duo4("t2d", "1v1", 974,
+    { sexed({ species = "Alpha", maxHp = 900, spe = 90,
+              moves = { hm("ATTRACT", 0, 0, 133), hm("SANDSTORM", 0, 5, 126), hm("BIND", 10, 0, 42) } }, MALE) },
+    { sexed({ species = "Beta", maxHp = 100, hp = 60, spe = 10, item = { "BERRY", "HELD_BERRY", 12, "BERRY" },
+              moves = { hm("tap", 1) } }, FEMALE) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(2), F(0)) })
+end)
+
+scenario("t2_nightmare_curse_fs", function(events)
+  return seq(events, duo4("t2e", "1v1", 975,
+    { mn({ species = "Alpha", types = { 2 }, maxHp = 900, spe = 90,
+           moves = { hm("NIGHTMARE", 0, 0, 143), hm("CURSE", 0, 2, 137), hm("FUTURE_SIGHT", 40, 8, 119),
+                     hm("wait", 0, 0, 85) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, status = "SLP", statusTurns = 7, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0)), both3(F(3), F(0)) })
+end)
+
 -- ------------------------------------------------------------------
 
 local out = {}

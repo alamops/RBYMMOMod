@@ -32,6 +32,41 @@ local M = {}
 
 local floor, max, min = math.floor, math.max, math.min
 
+-- A battler's name the way the cart prints it through a prefixing macro --
+-- `<USER>` / `<TARGET>` (home/text.asm PlaceMoveUsersName /
+-- PlaceMoveTargetsName -> PlaceBattlersName, which writes EnemyText's
+-- "Enemy " before wEnemyMonNickname on the enemy's turn and nothing before
+-- wBattleMonNickname): contract K17 of docs/plans/gen12-referee-remaining-
+-- gaps.md.  The referee is one narrator for both sides, so it cannot know
+-- whose "Enemy" a name is; it writes the monster's side as a mark -- `^a` or
+-- `^b`, stamped on every monster as it is copied in (`mon.mark`, Turn
+-- `create`) -- immediately before the name, and each client prints the
+-- prefix its own cart would (nothing on its own side).  The one helper every
+-- marked line goes through, so the audit is a grep: a line that names a
+-- battler bare (`.species` with no `M.name`) is a line the cart prints with
+-- `text_ram` -- the obedience lines, BEAT UP's party member, a species name
+-- from wStringBuffer1, "Gotcha!", the send-outs -- each one commented where
+-- it is built.  A monster with no mark (a synthetic sheet a vector test
+-- builds) prints bare, as it always did.
+function M.name(mon)
+  return (mon.mark or "") .. mon.species
+end
+local nameOf = M.name
+
+-- The cart's status animations (pokecrystal ANIM_<X>, sent as `<X>_ANIM`;
+-- contract K20) a command here plays, queued at the line it precedes: `at` is
+-- the index in `out.messages` of the line it plays ahead of (one past the
+-- last for one that plays after every line).  Turn emits them in that place
+-- (`_sayResult`) on the seat of `fighter`, the monster the clip plays over
+-- (PlayOpponentBattleAnim's switched turn: the target), and gives SLP / CONF
+-- their player variant there (`_statusAnim`).
+local function statusAnim(out, fighter, id)
+  if not fighter then return end
+  out.anims = out.anims or {}
+  out.anims[#out.anims + 1] = { at = #out.messages + 1, fighter = fighter, id = id }
+end
+M.statusAnim = statusAnim
+
 -- pret/pokered effect name order (effect id = index).
 M.NAMES = {
   [0] = "NO_ADDITIONAL_EFFECT",
@@ -1069,7 +1104,14 @@ end
 -- command's own failure: "It didn't affect <TARGET>!" -- not the matchup's
 -- "It doesn't affect" (DoesntAffectText).
 function M.didntAffectLine(mon)
-  return "It didn't affect " .. mon.species .. "!"
+  return "It didn't affect\n" .. nameOf(mon) .. "!"
+end
+
+-- DoesntAffectText, the matchup's own "It doesn't affect\n<TARGET>!" -- the
+-- type immunity's line wherever a script prints it (failuretext, OHKO,
+-- Poison, Paralyze, LeechSeed's Grass check, COUNTER, BIDE).
+function M.doesntAffectLine(mon)
+  return "It doesn't affect\n" .. nameOf(mon) .. "!"
 end
 
 -- BattleCommand_Safeguard's `ld a, 5`: five between-turn ticks
@@ -1134,7 +1176,10 @@ local function confuse(out, fighter, mon, rng, failIfAlready)
   end
   local turns = (rng and rng:byte() or 0) % 4 + 2
   mon.confusion = turns
-  local text = mon.species .. " became confused!"
+  -- BattleCommand_FinishConfusingTarget: ANIM_CONFUSED on the target
+  -- (PlayOpponentBattleAnim), then BecameConfusedText (K20).
+  statusAnim(out, fighter, "CONF_ANIM")
+  local text = nameOf(mon) .. "\nbecame confused!"
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
   fields.confused = 1
@@ -1193,13 +1238,17 @@ end
 -- up!" for a +2 command (the $10 bit RaiseStat keeps in wLoweredStat, so a
 -- +2 that only had room for +1 still says it) -- and "<MON>'s STAT fell!" /
 -- "sharply fell!"; the stat names are GetStatName's (SPCL.ATK, SPCL.DEF).
+--
+-- K18's breaks are Text_BattleEffectActivate's (data/text/common_2.asm):
+-- "<USER>'s" / `line` the stat, then " went up!" on that row or `<SCROLL>`
+-- "went way up!" on the next -- and the same for the falls.
 function M.statUpLine(mon, stat, delta)
-  return mon.species .. "'s " .. (STAT_LABELS[stat] or stat)
-    .. ((int(delta, 1) >= 2) and " went way up!" or " went up!")
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat)
+    .. ((int(delta, 1) >= 2) and "\nwent way up!" or " went up!")
 end
 function M.statDownLine(mon, stat, delta)
-  return mon.species .. "'s " .. (STAT_LABELS[stat] or stat)
-    .. ((int(delta, -1) <= -2) and " sharply fell!" or " fell!")
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat)
+    .. ((int(delta, -1) <= -2) and "\nsharply fell!" or " fell!")
 end
 
 local function statEvent(out, fighter, stage, text)
@@ -1309,13 +1358,13 @@ end
 -- WontRiseAnymoreText.  wFailedMessage 1 is TryPrintButItFailed, the "But it
 -- failed" every other site in this referee says.
 function M.mistLine(mon)
-  return mon.species .. "'s protected by MIST."
+  return nameOf(mon) .. "'s\nprotected by MIST."
 end
 function M.wontDropLine(mon, stat)
-  return mon.species .. "'s " .. (STAT_LABELS[stat] or stat) .. " won't drop anymore!"
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat) .. " won't\ndrop anymore!"
 end
 function M.wontRiseLine(mon, stat)
-  return mon.species .. "'s " .. (STAT_LABELS[stat] or stat) .. " won't rise anymore!"
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat) .. " won't\nrise anymore!"
 end
 
 -- The line a primary stat-down move ends on when its `checkhit` missed
@@ -1360,7 +1409,7 @@ end
 -- reads the same) -- "<USER>'s attack missed!" (wave 5; "<MON> missed" was
 -- the referee's own line).
 function M.missLine(userMon)
-  return userMon.species .. "'s attack missed!"
+  return nameOf(userMon) .. "'s\nattack missed!"
 end
 
 function M.failMoveLine(targetMon)
@@ -1452,7 +1501,7 @@ M.GENDER_UNKNOWN = 255
 -- a sheet whose item states one is protected.
 local function protectedBy(out, targetMon)
   out.messages[#out.messages + 1] =
-    targetMon.species .. "'s protected by " .. itemLabel(targetMon) .. "!"
+    nameOf(targetMon) .. "'s\nprotected by\n" .. itemLabel(targetMon) .. "!"
   return out
 end
 
@@ -1507,6 +1556,12 @@ local function lowerPrimary(out, ctx, fighter, mon, stat, delta)
     out.messages[#out.messages + 1] = M.wontDropLine(mon, stat)
     return out
   end
+  -- `statdownanim` (BattleCommand_StatDownAnim, K20): on a drop that landed
+  -- -- every failure above set wAttackMissed, which skips it -- the move's
+  -- clip plays with its after-animation, ANIM_ENEMY_STAT_DOWN on the
+  -- player's turn and ANIM_WOBBLE on the enemy's, over the monster whose stat
+  -- fell (Turn `_statusAnim` gives a player's seat the WOBBLE variant).
+  statusAnim(out, fighter, "ENEMY_STAT_DOWN_ANIM")
   applyStatChange(out, fighter, mon, stat, delta)
   return out
 end
@@ -1561,7 +1616,7 @@ function M.applyPrimary(ctx)
   if effectId == 56 then -- HEAL_EFFECT
     local maxHp = max(1, int(userMon.maxHp, 1))
     if userMon.hp >= maxHp then
-      out.messages[#out.messages + 1] = userMon.species .. "'s HP is full!"
+      out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nHP is full!"
       return out
     end
     local amount = max(1, floor(maxHp / 2))
@@ -1572,8 +1627,10 @@ function M.applyPrimary(ctx)
       -- `res SUBSTATUS_TOXIC`: the bit with no PSN too (Turn, wave 5).
       userMon.toxicLatent = nil
       M.dropSnap(userMon)
-      local text = userMon.species
-        .. (had and " fell asleep and became healthy!" or " went to sleep!")
+      -- RestedText ("<USER>\nfell asleep and\nbecame healthy!") /
+      -- WentToSleepText ("<USER>\nwent to sleep!").
+      local text = nameOf(userMon)
+        .. (had and "\nfell asleep and\nbecame healthy!" or "\nwent to sleep!")
       out.messages[#out.messages + 1] = text
       local fields = fighterFields(userFighter)
       fields.status = wire.sleep or "SLP"
@@ -1582,7 +1639,7 @@ function M.applyPrimary(ctx)
       amount = maxHp
     end
     out.heals[#out.heals + 1] = { amount = amount }
-    out.trailing[#out.trailing + 1] = userMon.species .. " regained health!"
+    out.trailing[#out.trailing + 1] = nameOf(userMon) .. "\nregained health!"
     return out
   end
 
@@ -1593,7 +1650,7 @@ function M.applyPrimary(ctx)
   if effectId == 25 then -- HAZE_EFFECT
     local field = type(ctx.fieldMons) == "table" and ctx.fieldMons or { userMon, targetMon }
     for _, mon in ipairs(field) do resetStages(mon) end
-    out.messages[#out.messages + 1] = "All stat changes were eliminated!"
+    out.messages[#out.messages + 1] = "All stat changes\nwere eliminated!"
     return out
   end
 
@@ -1630,7 +1687,7 @@ function M.applyPrimary(ctx)
   if effectId == 32 then -- SLEEP_EFFECT
     if Items.prevents(targetMon, "sleep") then return protectedBy(out, targetMon) end
     if targetMon.status == "sleep" then
-      out.messages[#out.messages + 1] = targetMon.species .. "'s already asleep!"
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready asleep!"
       return out
     end
     if ctx.missed or aiRandomFail(ctx, targetMon) or M.hasMajorStatus(targetMon)
@@ -1649,7 +1706,7 @@ function M.applyPrimary(ctx)
     M.setStatus(targetMon, targetBadges, "sleep")
     targetMon.statusTurns = turns
     local token = wire.sleep or "SLP"
-    local text = targetMon.species .. " fell asleep!"
+    local text = nameOf(targetMon) .. "\nfell asleep!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
@@ -1671,11 +1728,11 @@ function M.applyPrimary(ctx)
   -- poison move is plain poison.
   if effectId == 66 or effectId == M.TOXIC then -- POISON_EFFECT / EFFECT_TOXIC
     if ctx.moveImmune or hasType(targetMon, ctx.poisonType) then
-      out.messages[#out.messages + 1] = "It doesn't affect " .. targetMon.species .. "!"
+      out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
       return out
     end
     if targetMon.status == "poison" or targetMon.status == "toxic" then
-      out.messages[#out.messages + 1] = targetMon.species .. "'s already poisoned!"
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready poisoned!"
       return out
     end
     if Items.prevents(targetMon, "poison") then return protectedBy(out, targetMon) end
@@ -1690,9 +1747,9 @@ function M.applyPrimary(ctx)
       targetMon.toxicCounter = 1
       -- The bit a HEAL BELL / BATON PASS left is the status's now (Turn).
       targetMon.toxicLatent = nil
-      text = targetMon.species .. "'s badly poisoned!"
+      text = nameOf(targetMon) .. "'s\nbadly poisoned!"
     else
-      text = targetMon.species .. " was poisoned!"
+      text = nameOf(targetMon) .. "\nwas poisoned!"
     end
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
@@ -1712,11 +1769,11 @@ function M.applyPrimary(ctx)
   -- `setStatus`).
   if effectId == 67 then -- PARALYZE_EFFECT
     if targetMon.status == "paralysis" then
-      out.messages[#out.messages + 1] = targetMon.species .. "'s already paralyzed!"
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready paralyzed!"
       return out
     end
     if ctx.moveImmune then
-      out.messages[#out.messages + 1] = "It doesn't affect " .. targetMon.species .. "!"
+      out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
       return out
     end
     if Items.prevents(targetMon, "paralysis") then return protectedBy(out, targetMon) end
@@ -1726,7 +1783,7 @@ function M.applyPrimary(ctx)
     end
     M.setStatus(targetMon, targetBadges, "paralysis")
     local token = wire.paralysis or "PAR"
-    local text = targetMon.species .. "'s paralyzed! Maybe it can't attack!"
+    local text = nameOf(targetMon) .. "'s\nparalyzed! Maybe\nit can't attack!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
@@ -1743,7 +1800,7 @@ function M.applyPrimary(ctx)
   if effectId == 49 then -- CONFUSION_EFFECT
     if Items.prevents(targetMon, "confusion") then return protectedBy(out, targetMon) end
     if (targetMon.confusion or 0) > 0 then
-      out.messages[#out.messages + 1] = targetMon.species .. "'s already confused!"
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready confused!"
       return out
     end
     if int(targetMon.substitute, 0) > 0 or ctx.missed then
@@ -1759,13 +1816,13 @@ function M.applyPrimary(ctx)
   -- PrintDoesntAffect -- GRASS against either of its types), then one already
   -- seeded (EvadedText again).
   if effectId == 84 then -- LEECH_SEED_EFFECT
-    local evaded = targetMon.species .. " evaded the attack!"
+    local evaded = nameOf(targetMon) .. "\nevaded the attack!"
     if ctx.missed or int(targetMon.substitute, 0) > 0 then
       out.messages[#out.messages + 1] = evaded
       return out
     end
     if hasType(targetMon, ctx.grassType) then
-      out.messages[#out.messages + 1] = "It doesn't affect " .. targetMon.species .. "!"
+      out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
       return out
     end
     if targetMon.leechSeed then
@@ -1773,7 +1830,7 @@ function M.applyPrimary(ctx)
       return out
     end
     targetMon.leechSeed = { fromSlot = userFighter.slot }
-    local text = targetMon.species .. " was seeded!"
+    local text = nameOf(targetMon) .. "\nwas seeded!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.text = text
@@ -1811,7 +1868,7 @@ function M.applyPrimary(ctx)
     if count == 0 then count = 2 end
     targetMon.disable = { moveIndex = index, turns = count }
     out.messages[#out.messages + 1] =
-      targetMon.species .. "'s " .. moveLabel(slotMove) .. " was DISABLED!"
+      nameOf(targetMon) .. "'s\n" .. moveLabel(slotMove) .. " was\nDISABLED!"
     return out
   end
 
@@ -1824,11 +1881,11 @@ function M.applyPrimary(ctx)
   if effectId == 79 then -- SUBSTITUTE_EFFECT
     local cost = floor(max(1, int(userMon.maxHp, 1)) / 4)
     if userMon.substitute and userMon.substitute > 0 then
-      out.messages[#out.messages + 1] = userMon.species .. " has a SUBSTITUTE!"
+      out.messages[#out.messages + 1] = nameOf(userMon) .. "\nhas a SUBSTITUTE!"
       return out
     end
     if userMon.hp <= cost then
-      out.messages[#out.messages + 1] = "Too weak to make a SUBSTITUTE!"
+      out.messages[#out.messages + 1] = "Too weak to make\na SUBSTITUTE!"
       return out
     end
     userMon.hp = userMon.hp - cost
@@ -1836,7 +1893,7 @@ function M.applyPrimary(ctx)
     userMon.trapped = nil
     out.directDamage = { { amount = cost } }
     out.messages[#out.messages + 1] =
-      userMon.species .. " made a SUBSTITUTE!"
+      nameOf(userMon) .. "\nmade a SUBSTITUTE!"
     return out
   end
 
@@ -1856,8 +1913,8 @@ function M.applyPrimary(ctx)
     end
     screens[key] = M.SCREEN_TURNS
     -- LightScreenEffectText / ReflectEffectText (wave 5).
-    out.messages[#out.messages + 1] = userMon.species
-      .. (effectId == 64 and "'s SPCL.DEF rose!" or "'s DEFENSE rose!")
+    out.messages[#out.messages + 1] = nameOf(userMon)
+      .. (effectId == 64 and "'s\nSPCL.DEF rose!" or "'s\nDEFENSE rose!")
     return out
   end
 
@@ -1873,7 +1930,7 @@ function M.applyPrimary(ctx)
       return out
     end
     screens.safeguard = M.SAFEGUARD_TURNS
-    out.messages[#out.messages + 1] = userMon.species .. "'s covered by a veil!"
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\ncovered by a veil!"
     return out
   end
 
@@ -1887,7 +1944,7 @@ function M.applyPrimary(ctx)
       return didntAffect(out, targetMon)
     end
     targetMon.lockOn = true
-    out.messages[#out.messages + 1] = userMon.species .. " took aim!"
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "\ntook aim!"
     return out
   end
 
@@ -1898,14 +1955,14 @@ function M.applyPrimary(ctx)
   if effectId == 46 then -- MIST_EFFECT
     if userMon.mist then return butItFailed(out) end
     userMon.mist = true
-    out.messages[#out.messages + 1] = userMon.species .. "'s shrouded in MIST!"
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nshrouded in MIST!"
     return out
   end
 
   if effectId == 47 then -- FOCUS_ENERGY_EFFECT
     if userMon.focusEnergy then return butItFailed(out) end
     userMon.focusEnergy = true
-    out.messages[#out.messages + 1] = userMon.species .. "'s getting pumped!"
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\ngetting pumped!"
     return out
   end
 
@@ -1953,7 +2010,7 @@ function M.applyPrimary(ctx)
     copy.pp, copy.maxPp, copy.ppUps = M.MIMIC_PP, M.MIMIC_PP, nil
     userMon.moves[slot] = copy
     out.messages[#out.messages + 1] =
-      userMon.species .. " learned " .. moveLabel(last) .. "!"
+      nameOf(userMon) .. "\nlearned\n" .. moveLabel(last) .. "!"
     out.movesChanged = true
     return out
   end
@@ -2046,8 +2103,10 @@ function M.applyPrimary(ctx)
     -- wEnemyMonSpecies' base data for a transformed target's Defense.
     userMon.transformBase = targetMon.transformBase or targetMon.base
     M.snapStats(userMon, userFighter and userFighter.badges or nil, battleStats)
+    -- TransformedText: "<USER>\nTRANSFORMED into\n" and wStringBuffer1, the
+    -- species GetPokemonName wrote there -- printed bare, no prefix (K17).
     out.messages[#out.messages + 1] =
-      userMon.species .. " TRANSFORMED into " .. targetMon.species .. "!"
+      nameOf(userMon) .. "\nTRANSFORMED into\n" .. targetMon.species .. "!"
     out.movesChanged = true
     return out
   end
@@ -2066,7 +2125,7 @@ function M.applyPrimary(ctx)
       return failMove(out, targetMon)
     end
     targetMon.inLove = { fromSlot = userFighter and userFighter.slot }
-    out.messages[#out.messages + 1] = targetMon.species .. " fell in love!"
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "\nfell in love!"
     return out
   end
 
@@ -2096,7 +2155,7 @@ function M.applyPrimary(ctx)
       after = now
       if not ok then break end
     end
-    local text = userMon.species .. " cut its HP and maximized ATTACK!"
+    local text = nameOf(userMon) .. "\ncut its HP and\nmaximized ATTACK!"
     statEvent(out, userFighter, after, text)
     out.trailing[#out.trailing + 1] = text
     return out
@@ -2124,13 +2183,14 @@ function M.applyPrimary(ctx)
       end
       targetMon.cursed = true
       out.selfDamage = max(1, floor(max(1, int(userMon.maxHp, 1)) / 2))
-      out.trailing[#out.trailing + 1] = userMon.species
-        .. " cut its own HP and put a CURSE on " .. targetMon.species .. "!"
+      -- PutACurseText's `para` (K18): two boxes, two lines.
+      out.trailing[#out.trailing + 1] = nameOf(userMon) .. "\ncut its own HP and"
+      out.trailing[#out.trailing + 1] = "put a CURSE on\n" .. nameOf(targetMon) .. "!"
       return out
     end
     if M.clampStage(userMon.stages.atk) >= M.STAGE_MAX
        and M.clampStage(userMon.stages.def) >= M.STAGE_MAX then
-      out.messages[#out.messages + 1] = userMon.species .. "'s ABILITY won't rise anymore!"
+      out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nABILITY won't\nrise anymore!"
       return out
     end
     local badges = userFighter and userFighter.badges or nil
@@ -2162,7 +2222,7 @@ function M.applyPrimary(ctx)
   if effectId == M.DESTINY_BOND then
     userMon.destinyBond = true
     out.messages[#out.messages + 1] =
-      userMon.species .. "'s trying to take its opponent with it!"
+      nameOf(userMon) .. "'s\ntrying to take its\nopponent with it!"
     return out
   end
 
@@ -2178,7 +2238,7 @@ function M.applyPrimary(ctx)
     end
     targetMon.identified = true
     out.messages[#out.messages + 1] =
-      userMon.species .. " identified " .. targetMon.species .. "!"
+      nameOf(userMon) .. "\nidentified\n" .. nameOf(targetMon) .. "!"
     return out
   end
 
@@ -2192,7 +2252,7 @@ function M.applyPrimary(ctx)
   if effectId == M.MEAN_LOOK then
     if targetMon.invulnerable or userMon.meanLook then return butItFailed(out) end
     userMon.meanLook = { slot = targetFighter and targetFighter.slot }
-    out.messages[#out.messages + 1] = targetMon.species .. " can't escape now!"
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "\ncan't escape now!"
     return out
   end
 
@@ -2208,7 +2268,7 @@ function M.applyPrimary(ctx)
       return butItFailed(out)
     end
     targetMon.nightmare = true
-    out.messages[#out.messages + 1] = targetMon.species .. " started to have a NIGHTMARE!"
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "\nstarted to have a\nNIGHTMARE!"
     return out
   end
 
@@ -2227,8 +2287,9 @@ function M.applyPrimary(ctx)
       userMon.stages[key] = M.clampStage(targetMon.stages[key])
     end
     M.dropSnap(userMon)
-    out.messages[#out.messages + 1] = userMon.species
-      .. " copied the stat changes of " .. targetMon.species .. "!"
+    -- CopiedStatsText's `para` (K18): two boxes, two lines.
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "\ncopied the stat"
+    out.messages[#out.messages + 1] = "changes of\n" .. nameOf(targetMon) .. "!"
     return out
   end
 
@@ -2256,8 +2317,8 @@ function M.applyPrimary(ctx)
     if slotMove.pp < amount then amount = slotMove.pp end
     slotMove.pp = slotMove.pp - amount
     out.targetMovesChanged = true
-    out.messages[#out.messages + 1] = targetMon.species .. "'s " .. moveLabel(slotMove)
-      .. " was reduced by " .. amount .. "!"
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\n" .. moveLabel(slotMove)
+      .. " was\nreduced by " .. amount .. "!"
     return out
   end
 
@@ -2377,19 +2438,28 @@ local SIDE_FLINCH = {
 }
 
 -- The cart's lines (WasPoisonedText, WasBurnedText, WasFrozenText,
--- ParalyzedText), each after the target's name.
+-- ParalyzedText), each after the target's marked name, with their breaks.
 local SIDE_TEXT = {
-  poison = " was poisoned!", burn = " was burned!",
-  freeze = " was frozen solid!", paralysis = "'s paralyzed! Maybe it can't attack!",
+  poison = "\nwas poisoned!", burn = "\nwas burned!",
+  freeze = "\nwas frozen solid!", paralysis = "'s\nparalyzed! Maybe\nit can't attack!",
 }
 local SIDE_TOKEN = { poison = "PSN", burn = "BRN", freeze = "FRZ", paralysis = "PAR" }
+-- The clip each command plays on the target ahead of its line (K20):
+-- PoisonTarget's ANIM_PSN, BurnTarget's ANIM_BRN, FreezeTarget's ANIM_FRZ,
+-- ParalyzeTarget's ANIM_PAR, each a PlayOpponentBattleAnim (pokegold
+-- engine/battle/effect_commands.asm :3662, :3924, :3989, :4037).  The
+-- primary status commands play the move's own animation instead.
+local SIDE_ANIM = {
+  poison = "PSN_ANIM", burn = "BRN_ANIM", freeze = "FRZ_ANIM", paralysis = "PAR_ANIM",
+}
 
 -- The status lands the way the cart writes it (`setStatus`: a burn's or a
 -- paralysis's penalty on the battle stat as it stands, no rebuild), on the
 -- target's seat's badges.
 local function inflict(out, fighter, mon, status, wire)
   setStatusOn(mon, fighter, status)
-  local text = mon.species .. SIDE_TEXT[status]
+  statusAnim(out, fighter, SIDE_ANIM[status])
+  local text = nameOf(mon) .. SIDE_TEXT[status]
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
   fields.status = wire[status] or SIDE_TOKEN[status]
@@ -2446,7 +2516,8 @@ local function burnTarget(out, s, hit)
     if targetMon.status == "freeze" then
       setStatusOn(targetMon, s.fighter, nil)
       targetMon.statusTurns = 0
-      local text = targetMon.species .. " was defrosted!"
+      -- DefrostedOpponentText.
+      local text = nameOf(targetMon) .. "\nwas defrosted!"
       out.messages[#out.messages + 1] = text
       -- No token: a `status` event without one is a cure (events.lua).
       local fields = fighterFields(s.fighter)
@@ -2985,14 +3056,16 @@ end
 M.SANDSTORM_IMMUNE = { ROCK = true, GROUND = true, STEEL = true }
 
 -- The weather lines (data/text/battle.asm): the start, the between-turn
--- continuation and the end, per weather.
+-- continuation and the end, per weather, with their `line` breaks (K18).
+-- The client reads the sky off these very strings (MediatedBattle
+-- weatherOfLine2), so a line and its match never drift apart.
 M.WEATHER_LINES = {
-  rain = { start = "A downpour started!", continues = "Rain continues to fall.",
+  rain = { start = "A downpour\nstarted!", continues = "Rain continues to\nfall.",
            ended = "The rain stopped." },
-  sun = { start = "The sunlight got bright!", continues = "The sunlight is strong.",
-          ended = "The sunlight faded." },
-  sandstorm = { start = "A SANDSTORM brewed!", continues = "The SANDSTORM rages.",
-                ended = "The SANDSTORM subsided." },
+  sun = { start = "The sunlight got\nbright!", continues = "The sunlight is\nstrong.",
+          ended = "The sunlight\nfaded." },
+  sandstorm = { start = "A SANDSTORM\nbrewed!", continues = "The SANDSTORM\nrages.",
+                ended = "The SANDSTORM\nsubsided." },
 }
 
 -- BattleCommand_TimeBasedHealContinue (effect_commands.asm:6421-6513): the
@@ -3049,15 +3122,17 @@ function M.vanishes(effectId, moveOrId)
   return M.isFly(effectId) or M.isDigMove(moveOrId)
 end
 
+-- BattleCommand_Charge's lines (data/text/common_2.asm): Text_BattleUser's
+-- "<USER>", then `line` and the move's words (K17 / K18).
 function M.chargeMessage(mon, effectId, moveOrId)
   local key = M.moveKey(moveOrId)
-  local species = (mon and mon.species) or "POKéMON"
-  if key == "DIG" then return species .. " dug a hole!" end
-  if key == "SOLARBEAM" then return species .. " took in sunlight!" end
-  if key == "SKULL_BASH" then return species .. " lowered its head!" end
-  if key == "RAZOR_WIND" then return species .. " made a whirlwind!" end
-  if key == "FLY" or M.isFly(effectId) then return species .. " flew up high!" end
-  return species .. " is glowing!"
+  local species = (mon and mon.species) and nameOf(mon) or "POKéMON"
+  if key == "DIG" then return species .. "\ndug a hole!" end
+  if key == "SOLARBEAM" then return species .. "\ntook in sunlight!" end
+  if key == "SKULL_BASH" then return species .. "\nlowered its head!" end
+  if key == "RAZOR_WIND" then return species .. "\nmade a whirlwind!" end
+  if key == "FLY" or M.isFly(effectId) then return species .. "\nflew up high!" end
+  return species .. "\nis glowing!"
 end
 
 -- CheckHit's .FlyDigMoves (Crystal effect_commands.asm:1713-1746).
