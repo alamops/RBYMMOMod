@@ -740,9 +740,11 @@ M.BATTLE_MOVE_POOL3_MAX = 360
 -- The same referee with nobody on the other end of a socket: one player's
 -- ordinary wild encounters and every trainer they walk into, run by
 -- src/BattleSim in this process instead of by a hub.  src/SoloBattle.lua owns
--- the fight and src/SoloBrain.lua answers for the opponent; the screen is the
--- mediated one, because from a client's side a battle it does not referee
--- looks the same whether the referee is across a wire or a table away.
+-- the fight; the opponent is answered by the referee's own computer (`autoPick`:
+-- the carts' trainer AI on Red / Gold) or, on Gen 3 and for a Red trainer with a
+-- mod-registered `brain`, by src/SoloBrain.lua; the screen is the mediated one,
+-- because from a client's side a battle it does not referee looks the same
+-- whether the referee is across a wire or a table away.
 --
 -- Nothing here is on the wire.  No message type, no PROTOCOL, no server/ twin,
 -- no new BattleSim mode -- the turn machine has never needed a socket to run

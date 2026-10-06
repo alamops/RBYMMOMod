@@ -178,7 +178,8 @@ return {
         .. "this mod's own battle system instead of the engine's, in a copy "
         .. "with no hub, no partner and no network. The referee runs "
         .. "in-process, so nothing goes on the wire and no protocol changes; "
-        .. "the opponent is driven by the engine's own TrainerAI, so a gym "
+        .. "on Red and Gold the opponent is driven by the cart's own trainer "
+        .. "AI, built into the referee (on Gen 3 by pret's AI scripts), so a gym "
         .. "leader still plays like that gym leader. The Safari Zone, the "
         .. "Marowak ghost and the Viridian old-man demo are left on the "
         .. "vanilla engine, since their mechanics are not modelled.",

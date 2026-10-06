@@ -543,19 +543,21 @@ simulation running a few lines away. No protocol number moves, `server/`
 isn't involved, and a copy that has never been online behaves identically to
 one that has.
 
-**The trainer plays like themselves.** Because no choice has to cross a wire,
-the opponent's move is picked by the **engine's own `TrainerAI`** — the real
-per-trainer scoring layers, the real item and switch budgets — and handed to
-the referee as an ordinary choice. Brock plays Brock. The alternative was a
-generic auto-picker, and you'd have noticed.
+**The trainer plays like themselves.** On Red and Gold the opponent is run by
+**the cart's own trainer AI**, built into the referee: pokered's `TrainerAI`
+(each class's item and switch routine, its use budget, the random byte it
+draws every turn) and move-choice layers, and on Gold pokecrystal's
+`AIChooseMove` scoring and `AI_SwitchOrTryItem`, each at the point in the turn
+where the cart runs it. Brock plays Brock — the cartridge's Brock, down to
+when he reaches for his FULL HEAL. A mod that registers its own `brain` for a
+Red trainer still picks that trainer's moves. On FireRed / LeafGreen /
+Emerald the trainer thinks with pret's AI scripts, as before.
 
 **It's still a trainer battle, mechanically.** A trainer's monsters can't be
 caught and you can't run from them: throw a ball and the throw is refused,
 the ball is spent, the turn is gone — which is exactly what the engine
-charges you for the same mistake. The *lines* are the referee's own, though:
-you get a plain `used an item` / `But it failed` where the cartridge would
-have said `The TRAINER blocked the BALL!` and `Don't be a thief!`. Same
-price, different words. The refusal itself falls out of how the fight is
+charges you for the same mistake, with the cartridge's own words: `The
+trainer blocked the BALL!` and `Don't be a thief!`. The refusal itself falls out of how the fight is
 seated rather than being bolted on afterwards — the wild fight is seated as a
 wild fight, where catching and fleeing are the whole point, and a trainer
 fight is not.

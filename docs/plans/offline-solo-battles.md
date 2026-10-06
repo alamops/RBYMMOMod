@@ -111,6 +111,12 @@ budgets from `ai_classes`, and full `brain` records — then submitted as an ord
 byte-identical, so no Node-twin drift. `autoPick` remains the fallback if the bridge cannot
 answer.
 
+> **Superseded for Red / Gold** by `docs/plans/gen12-referee-remaining-gaps.md` (K16, "Solo
+> fights"): the referees now hold the carts' own computer (pokered TrainerAI and the move layers;
+> pokecrystal AIChooseMove and AI_SwitchOrTryItem) drawing at the carts' points, which the
+> engine's ports do not, so a Red / Gold solo opponent is answered by `autoPick`. A mod-registered
+> `brain` on a Red trainer still has its move filed through `SoloBrain`. Gen 3 keeps D3.
+
 **D4 — Reuse `Coop`'s post-battle ritual by extraction, not duplication.** The prize/blackout/
 `onFinish`/unwind sequence is delicate and its comments record several rounds of bugs.
 Wave 1 lifts it into reusable helpers **without changing co-op behaviour**; the existing
