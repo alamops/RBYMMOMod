@@ -17,13 +17,14 @@
 -- MediatedBattle's renderer, Coop's warp, SoloBrain's TrainerAI. Run from the
 -- engine checkout those resolve and run from this folder they do not, which
 -- would make the same suite a different suite depending on which directory it
--- was started in -- and the sharpest end of that is `SoloBrain`, whose default
--- RNG is `math.random`: with the engine reachable a trainer fight stops being a
--- pure function of its seed. Blanking the search path makes every one of those
--- requires fail the same way in both places, which is both what keeps this
--- suite deterministic and what proves the fallback contract SoloBattle states
--- outright: a nil brain is not a failure, `Turn:autoPick` answers for the
--- opponent, and the fight still runs. The brain itself is tests/solo_brain.lua.
+-- was started in. Blanking the search path makes every one of those requires
+-- fail the same way in both places, which keeps this suite deterministic.  It
+-- costs nothing on the opponent's side: on Red and Gold SoloBrain builds no
+-- brain anyway (the referee runs the carts' own computer, `Turn:autoPick`),
+-- and the one brain it does build -- a mod's `brain` function on a Red
+-- trainer record -- needs no engine module to run.  The brain itself is
+-- tests/solo_brain.lua; who answers for the opponent in a whole fight is the
+-- "who answers for the computer" section at the end of this file.
 --
 -- Legal: every species, move and trainer below is invented for this file. No
 -- ROM-derived name appears in it. The item ids are the ones `BattleSim`'s own
@@ -414,10 +415,10 @@ end
   eq(table.concat(levels, ","), "11,12,13",
      "in party order, so the trainer leads with the monster it means to")
 
-  -- The trainer's own kit. This fixture has no items list and no AI class
-  -- that would give it one, so the seat is empty -- not DEFAULT_NPC_BAG.
-  -- A Youngster that spammed potions was the gym kit being handed to every
-  -- NPC; gym leaders still reach for their class item via SoloBrain.bagFor.
+  -- The trainer's kit. Red and Gold seat none (contract K16): the class's
+  -- item is the referee's TrainerAI / AI_TryItem, run from the class data the
+  -- upload states -- not DEFAULT_NPC_BAG, the gym kit that once made a
+  -- Youngster spam potions.
   local bag = foe.bag
   eq(bag, nil, "a trainer with no items carries no bag")
 end)()
@@ -450,9 +451,9 @@ end)()
 --
 -- The property the spike measured and this pins: a three-mon trainer fought on
 -- one seat runs through both replacements to a real outcome, and every event
--- reaches the screen. The brain is deliberately absent here (see the header),
--- so what answers for the trainer is `Turn:autoPick` -- the same picker every
--- hub-refereed NPC seat runs on.
+-- reaches the screen. A Red trainer with no registered brain gets none (the
+-- header), so what answers for the trainer is `Turn:autoPick` -- the carts'
+-- own computer, the same path every hub-refereed NPC seat runs on.
 
 ;(function()
   local f = fightOf("trainer", {
@@ -465,8 +466,8 @@ end)()
     },
   })
   eq(f.solo.brain, nil,
-     "no brain: with no engine reachable SoloBrain declines, which is the "
-     .. "fallback contract rather than a failure")
+     "no brain: a Red trainer with no registered brain gets none -- the "
+     .. "referee's own computer answers for it")
 
   local out = playOut(f)
   ok(out ~= nil, "the fight reaches an outcome")
@@ -2710,6 +2711,205 @@ end)()
   end)
   eq(redWild and redWild.battleType, nil, "K21: Red's ruleset carries no battle type")
   eq(redWild and redWild.sides.b[1].mons[1].weight, nil, "K21: ...nor a weight")
+end)()
+
+-- ------------------------------------------------------------------
+-- who answers for the computer: the referee on Red and Gold, a registered
+-- brain's move on Red (the "Solo fights" bullet of contract K16,
+-- docs/plans/gen12-referee-remaining-gaps.md)
+-- ------------------------------------------------------------------
+--
+-- What is pinned is *who decided*, never which move: the referee's own pick
+-- is the cart's (TrainerAI / AIEnemyTrainerChooseMoves, AIChooseMove,
+-- AI_SwitchOrTryItem), and its draws are the referee suites' to test.  Every
+-- referee a fight below builds is watched from its first answer: the
+-- `autoPick` calls that filed for the computer's seat, split by whether the
+-- seat owed a send-out, and every choice `submitChoice` was handed for it --
+-- the only road a SoloBrain answer takes to the referee (M:_answerFoe).
+-- Every number is invented.
+
+;(function()
+  local function watched(T, fn)
+    local log = { turnPicks = 0, sendPicks = 0, filed = {} }
+    local real = T.create
+    T.create = function(opts)
+      local sim, why = real(opts)
+      log.opts = opts
+      if sim then
+        local pick, submit = sim.autoPick, sim.submitChoice
+        sim.autoPick = function(self, id, ...)
+          local seat = self.byId and self.byId[id]
+          local replacing = (seat and seat.mustReplace) and true or false
+          local got = pick(self, id, ...)
+          if got and id == FOE then
+            if replacing then log.sendPicks = log.sendPicks + 1
+            else log.turnPicks = log.turnPicks + 1 end
+          end
+          return got
+        end
+        sim.submitChoice = function(self, id, choice, ...)
+          local got = submit(self, id, choice, ...)
+          if id == FOE then log.filed[#log.filed + 1] = { choice = choice, got = got } end
+          return got
+        end
+      end
+      return sim, why
+    end
+    local okRun, f = pcall(fn)
+    T.create = real
+    if not okRun then error(f, 0) end
+    return log, f
+  end
+  local function threeFoes(moves)
+    local out = {}
+    for i, level in ipairs({ 11, 12, 13 }) do
+      out[i] = mon({ species = "BETA", level = level, maxHp = 20, spd = 5, atk = 5 })
+      if moves then out[i].moves = moves() end
+    end
+    return out
+  end
+
+  -- Red, a trainer with layers and no brain: autoPick, every turn and both
+  -- send-outs.
+  local red, f = watched(Turn, function()
+    return fightOf("trainer", {
+      party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 40 }) },
+      foes = threeFoes(),
+      trainer = { baseMoney = 20, classId = "OPP_ALPHA", name = "FIX RED", aiMods = { 1, 3 } },
+    })
+  end)
+  ok(f.started, "who answers (Red trainer): the fight is taken over")
+  eq(f.solo.brain, nil, "who answers (Red trainer): SoloBrain builds no brain")
+  local out = playOut(f)
+  eq(out and out.outcome, "win", "who answers (Red trainer): the fight is played to its verdict")
+  eq(#red.filed, 0, "who answers (Red trainer): nothing reached the computer's seat through submitChoice")
+  ok(red.turnPicks >= 3, "who answers (Red trainer): autoPick answered every turn it owed (" .. red.turnPicks .. ")")
+  eq(red.sendPicks, 2, "who answers (Red trainer): ...and both forced send-outs (EnemySendOut)")
+  eq(table.concat(red.opts.sides.b[1].aiMods or {}, ","), "1,3",
+     "who answers (Red trainer): the seat carries the layers the referee picks with")
+
+  -- Red wild: the same, with no trainer record at all.
+  local redWild, w = watched(Turn, function() return fightOf("wild", { pAtk = 120 }) end)
+  eq(w.solo.brain, nil, "who answers (Red wild): no brain")
+  local wout = playOut(w)
+  ok(wout ~= nil, "who answers (Red wild): the fight ends")
+  eq(#redWild.filed, 0, "who answers (Red wild): nothing filed through submitChoice")
+  ok(redWild.turnPicks >= 1, "who answers (Red wild): autoPick answered (" .. redWild.turnPicks .. ")")
+
+  -- Red, a mod's `brain` on the trainer record: its move is filed, every
+  -- turn; the send-outs are still the referee's, and the seat keeps the class
+  -- data the referee runs TrainerAI from in the computer's slot.
+  local mindData = setmetatable({
+    moves = {
+      THUMP = data.moves.THUMP,
+      SWIPE = { power = 40, accuracy = 100, type = "NORM", pp = 20 },
+    },
+    -- `chance = 0`: the class routine's `cp N percent` never passes, so the
+    -- slot's move is the brain's every turn (the referee draws the byte).
+    ai_classes = { FIX_MIND_CLASS = { uses = 1, chance = 0, item = "X_ATTACK" } },
+  }, { __index = data })
+  local asked, views = 0, {}
+  local mindTrainer = {
+    baseMoney = 20, classId = "OPP_ALPHA", name = "FIX MIND", aiMods = { 1 },
+    aiClass = "FIX_MIND_CLASS",
+    brain = function(battle)
+      asked = asked + 1
+      views[#views + 1] = battle
+      return battle.enemy.curMoves[2]
+    end,
+  }
+  local mind, m = watched(Turn, function()
+    return fightOf("trainer", {
+      data = mindData,
+      party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 40 }) },
+      foes = threeFoes(function() return { { id = "THUMP", pp = 20 }, { id = "SWIPE", pp = 20 } } end),
+      trainer = mindTrainer,
+    })
+  end)
+  ok(m.started, "who answers (Red brain): the fight is taken over")
+  ok(m.solo.brain ~= nil, "who answers (Red brain): a registered brain gets a SoloBrain")
+  local mout = playOut(m)
+  eq(mout and mout.outcome, "win", "who answers (Red brain): the fight is played to its verdict")
+  ok(asked >= 3, "who answers (Red brain): the brain was asked every turn (" .. asked .. ")")
+  eq(#mind.filed, asked, "who answers (Red brain): each answer was filed through submitChoice")
+  local allMoves = true
+  for _, entry in ipairs(mind.filed) do
+    local c = entry.choice
+    if not (entry.got and c.action == "fight" and c.move == 1) then allMoves = false end
+  end
+  ok(allMoves, "who answers (Red brain): ...each the brain's move (SWIPE, zero-based 1), and the referee took it")
+  eq(mind.turnPicks, 0, "who answers (Red brain): autoPick answered no turn")
+  eq(mind.sendPicks, 2, "who answers (Red brain): ...but both send-outs, which the brain never files")
+  eq(views[1] and views[1].trainer, mindTrainer, "who answers (Red brain): the brain sees its own trainer record")
+  eq(views[1] and views[1].enemy.curMoves[2].id, "SWIPE", "who answers (Red brain): ...and the monster's moves")
+  local mseat = mind.opts.sides.b[1]
+  eq(table.concat(mseat.aiMods or {}, ","), "1", "who answers (Red brain): the seat keeps its layers")
+  eq(mseat.aiClass and mseat.aiClass.uses, 1, "who answers (Red brain): ...and its class record (TrainerAI's slot)")
+
+  -- Gold: no brain for anyone, a `brain` on the record included -- AIChooseMove,
+  -- AI_SwitchOrTryItem and the replacement are the referee's.  A Gold game
+  -- reads as one through the stand-ins the Gold section above installs, put
+  -- back after.
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = { heldItemFor = function() return nil end },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local goldData = setmetatable({ pokemon = {
+    ALPHA = data.pokemon.ALPHA,
+    BETA = data.pokemon.BETA,
+    -- K23: the species numbered the party's size (three), whose types the
+    -- seat states for pokegold's FindEnemyMonsThatResistPlayer.
+    GAMMA = { name = "GAMMA", index = 3, dex = 3, types = { "FIRE", "NORM" }, catchRate = 200 },
+  } }, { __index = data })
+  local function goldLead()
+    local lead = mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 20 })
+    lead.otId = 4321
+    return lead
+  end
+  local Turn2 = need("BattleSim2/Turn")
+  local goldAsked = false
+  local gold, g = watched(Turn2, function()
+    return fightOf("trainer", { cart2 = true, data = goldData, seed = 7,
+      party = { goldLead() }, foes = threeFoes(),
+      trainer = { name = "FIX GOLD", baseMoney = 30, items = { "POTION" },
+                  attributes = { 1, 0, 30, 0x11, 0x02, 0x34, 0x01, 0 },
+                  brain = function() goldAsked = true end } })
+  end)
+  ok(g.started, "who answers (Gold trainer): the fight is taken over")
+  eq(g.solo.brain, nil, "who answers (Gold trainer): SoloBrain builds no brain, a `brain` on the record notwithstanding")
+  local gout = playOut(g)
+  eq(gout and gout.outcome, "win", "who answers (Gold trainer): the fight is played to its verdict")
+  eq(goldAsked, false, "who answers (Gold trainer): the record's `brain` is never called")
+  eq(#gold.filed, 0, "who answers (Gold trainer): nothing reached the computer's seat through submitChoice")
+  ok(gold.turnPicks >= 3, "who answers (Gold trainer): autoPick answered every turn it owed (" .. gold.turnPicks .. ")")
+  eq(gold.sendPicks, 2, "who answers (Gold trainer): ...and both forced send-outs")
+  local gseat = gold.opts.sides.b[1]
+  eq(table.concat({ table.concat(gseat.trainerItems or {}, ","), tostring(gseat.aiFlags),
+                    tostring(gseat.itemSwitch), tostring(gseat.baseReward) }, " "),
+     "POTION " .. 0x0211 .. " " .. 0x0134 .. " 30",
+     "who answers (Gold trainer): the seat carries the class data the referee's AI runs from (K16)")
+  eq(table.concat(gseat.countSpeciesTypes or {}, ","), "0,1",
+     "who answers (Gold trainer): ...and the count-as-species types (K23)")
+
+  local goldWild, gw = watched(Turn2, function()
+    return fightOf("wild", { cart2 = true, data = goldData, seed = 7, random = function() return 0 end,
+      party = { goldLead() } })
+  end)
+  eq(gw.solo.brain, nil, "who answers (Gold wild): no brain")
+  local gwout = playOut(gw)
+  ok(gwout ~= nil, "who answers (Gold wild): the fight ends")
+  eq(#goldWild.filed, 0, "who answers (Gold wild): nothing filed through submitChoice")
+  ok(goldWild.turnPicks >= 1, "who answers (Gold wild): autoPick answered (" .. goldWild.turnPicks .. ")")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
 end)()
 
 -- ------------------------------------------------------------------

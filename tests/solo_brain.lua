@@ -1,23 +1,39 @@
--- src/SoloBrain.lua: the bridge from the engine's real trainer AI to a
--- BattleSim choice, exercised with no engine BattleState anywhere.
+-- src/SoloBrain.lua: who answers for a solo fight's opponent, exercised with
+-- no engine BattleState anywhere.
 --
 -- Run: luajit tests/solo_brain.lua
 --   or luajit mods/rby_mmo/tests/solo_brain.lua  (from the engine)
 --
+-- The contract pinned here (SoloBrain's header; the "Solo fights" bullet of
+-- contract K16, docs/plans/gen12-referee-remaining-gaps.md):
+--
+--   * Red and Gold: no brain.  The referee runs the carts' own computer
+--     (pokered TrainerAI / AIEnemyTrainerChooseMoves / EnemySendOut,
+--     pokecrystal AIChooseMove / AI_SwitchOrTryItem /
+--     FindMonInOTPartyToSwitchIntoBattle) through `Turn:autoPick`, so
+--     `SoloBrain.new` declines for a wild monster, every Gold trainer and a
+--     Red trainer with no registered `brain`.
+--   * The one exception: a mod-registered `brain` function on a Red trainer
+--     record or its `ai_classes` class.  It is handed a BattleState-shaped
+--     copy of the field and its *move* is filed; an item or a switch it
+--     answers is declined, and so is a forced send-out.
+--   * Gen 3 answers the whole turn (tests/gen3_solo.lua has the full arm).
+--
 -- Standalone in the same spirit as tests/battle_sim_turn.lua: it loads the
 -- shipped mod files through a from-scratch `need`-shaped resolver, the same
 -- two-argument `chunk(need, mod)` convention main.lua's real loader uses
--- (SoloBrain.lua:73 reads `local need, mod = ...`).  What makes this suite
+-- (SoloBrain.lua reads `local need, mod = ...`).  What makes this suite
 -- possible at all is that SoloBrain synthesises its own BattleState-shaped
--- view rather than touching a real one (see the module's own header,
--- "the adapter, and why it is a copy rather than a puppet") -- so a unit test
+-- view rather than touching a real one (see the module's own header, "a
+-- brain's view, and why it is a copy rather than a puppet") -- so a unit test
 -- can hand it plain tables and never stand up love, a ROM, or a screen.
 --
--- The engine's own AI modules (src/battle/TrainerAI.lua, TypeChart.lua,
--- src/battle/gen2/Ai.lua, Damage.lua) are pulled in by SoloBrain itself via
--- plain `require`, not through `need` -- so this suite only runs from a
--- checkout where those resolve, i.e. the engine root (or a view of it with
--- this mod symlinked in), never in total isolation.
+-- The engine's own modules (src/battle/TrainerAI.lua, TypeChart.lua) are
+-- pulled in by SoloBrain itself via plain `require`, not through `need` -- a
+-- class-registered brain is resolved through TrainerAI.classFor, and section
+-- 3's brain hands its view to TrainerAI.chooseMove -- so this suite only runs
+-- from a checkout where those resolve, i.e. the engine root (or a view of it
+-- with this mod symlinked in), never in total isolation.
 --
 -- Legal: every trainer id, move id, item id and type name below is invented
 -- for this file (the "thump" / "FIX_*" convention every sibling suite
@@ -111,12 +127,12 @@ end
 -- One shared type-name space (PLAIN / AQUA / SCORCH, all invented) and one
 -- shared `type_chart`.  Not a style choice: src/battle/TypeChart.lua keeps
 -- its loaded matchup table in a *module-level* upvalue behind `require`, so
--- the very first Gen 1 brain in this whole process to call `_ensureTypeChart`
--- decides the chart for every Gen 1 brain built afterwards -- TypeChart.load
--- is never called a second time once the module's own probe already
--- succeeds. A second, different `type_chart` table defined later in this
--- file would therefore be silently ignored. One canonical chart sidesteps
--- that trap instead of tripping over it.
+-- the very first brain in this whole process to call `_ensureTypeChart`
+-- decides the chart for every brain built afterwards -- TypeChart.load is
+-- never called a second time once the module's own probe already succeeds.
+-- A second, different `type_chart` table defined later in this file would
+-- therefore be silently ignored. One canonical chart sidesteps that trap
+-- instead of tripping over it.
 
 local TYPE_NAMES = { "PLAIN", "AQUA", "SCORCH" } -- index 0, 1, 2
 local PLAIN, AQUA, SCORCH = 0, 1, 2
@@ -169,215 +185,315 @@ local function mkMon1(o)
   }
 end
 
-local function mkMon2(o)
-  o = o or {}
-  return {
-    species = o.species or "fixmon2",
-    level = o.level or 50,
-    hp = o.hp ~= nil and o.hp or 100,
-    maxHp = o.maxHp or 100,
-    status = o.status,
-    moves = o.moves or {},
-    stats = o.stats or { atk = 50, def = 50, spa = 50, spd = 50, spe = 50 },
-    types = o.types or {},
-    disable = o.disable,
-    stages = o.stages,
-    slot = o.slot or 1,
+local function twoMoves()
+  return { { id = "soak", pp = 10 }, { id = "bonk", pp = 10 } }
+end
+
+-- A Red brain over `trainer`, built the way every scenario below builds one.
+local function redBrain(trainer, extra)
+  extra = extra or {}
+  return SoloBrain.new{
+    data = DATA, trainer = trainer, generation = 1, aiMods = extra.aiMods,
+    rng = detRng, typeName = TYPE_NAMES,
   }
 end
 
 -- ------------------------------------------------------------------
--- 1. layer scoring prefers the super-effective move, both generations
+-- 1. Red and Gold: no brain -- the referee's own computer answers
 -- ------------------------------------------------------------------
 --
--- Gen 1 reads LAYER_3 straight off src/battle/TrainerAI.lua; Gen 2 reads the
--- TYPES layer off the *other* engine module, src/battle/gen2/Ai.lua, driven
--- entirely by the trainer class's AI word (TRNATTR_AI_MOVE_WEIGHTS). Same
--- claim, two unrelated implementations, so it is worth pinning on both.
+-- Whatever the trainer's class would do on the cart -- layers in `aiMods`,
+-- an item every turn, Gold's whole AI word -- is the referee's now, run from
+-- the class data the NPC upload states, at the cart's own draw points.  So
+-- there is nothing for this module to build, and SoloBattle files `autoPick`.
 
 do
-  local trainer1 = { id = "FIX_TRAINER_LAYER1" }
-  local mon = mkMon1{
-    moves = { { id = "soak", pp = 10 }, { id = "bonk", pp = 10 } },
+  DATA.ai_classes.FIX_TRAINER_ITEMCLASS = {
+    kind = "class", chance = 256, item = "FIX_ITEM_CLASS", uses = 2,
   }
-  local foe = mkMon1{ types = { SCORCH } }
+  local brain, reason = redBrain({ id = "FIX_TRAINER_ITEMCLASS", aiMods = { "LAYER_3" } },
+    { aiMods = { "LAYER_3" } })
+  eq(brain, nil, "Red: a trainer with layers and an item class but no brain gets none")
+  ok(type(reason) == "string" and reason:find("brain") ~= nil,
+    "...and the reason says so rather than raising: " .. tostring(reason))
 
-  local brain, reason = SoloBrain.new{
-    data = DATA, trainer = trainer1, generation = 1, aiMods = { "LAYER_3" },
-    rng = detRng, typeName = TYPE_NAMES,
-  }
-  ok(brain ~= nil, "Gen 1 brain builds against a trainer with a real class: " .. tostring(reason))
+  eq(redBrain({ id = "FIX_TRAINER_NOCLASS" }), nil,
+    "Red: a trainer with no class record at all (GenericAI) gets none")
 
-  local choice = brain:choose{ mon = mon, foe = foe, party = { mon } }
-  ok(choice ~= nil, "Gen 1 layer scoring answers")
-  eq(choice and choice.action, "fight", "Gen 1 layer scoring picks a move")
-  -- the index vocabulary trap (item 5): submitChoice's `move` is zero-based,
-  -- and slot 1 ("soak") is the super-effective one, so this must read 0 --
-  -- not 1, which is what `fighter.choice` would have held instead.
-  eq(choice and choice.move, 0, "Gen 1: soak (slot 1, zero-based 0) is chosen over neutral bonk")
+  -- A record that is not a function is not a brain (the engine would call
+  -- it and raise; this declines).
+  eq(redBrain({ id = "FIX_TRAINER_NOTFN", brain = "not a function" }), nil,
+    "Red: a non-function `brain` field builds nothing")
 end
 
 do
-  local trainer2 = {
-    id = "FIX_TRAINER_LAYER2",
-    -- byte 4 of TrainerClassAttributes is the low half of the AI word;
-    -- Ai.FLAGS.TYPES = 0x0004 turns on only the type-effectiveness layer.
-    attributes = { 0, 0, 0, 0x04, 0, 0, 0, 0 },
-  }
-  local mon = mkMon2{
-    stats = { atk = 50, def = 50, spa = 50, spd = 50, spe = 50 },
-    moves = { { id = "soak", pp = 10 }, { id = "bonk", pp = 10 } },
-    types = { PLAIN },
-  }
-  local foe = mkMon2{ types = { SCORCH } }
-
-  local brain, reason = SoloBrain.new{
-    data = DATA, trainer = trainer2, generation = 2,
-    rng = detRng, typeName = TYPE_NAMES,
-  }
-  ok(brain ~= nil, "Gen 2 brain builds against a trainer with an AI word: " .. tostring(reason))
-
-  local choice = brain:choose{ mon = mon, foe = foe }
-  ok(choice ~= nil, "Gen 2 layer scoring answers")
-  eq(choice and choice.action, "fight", "Gen 2 layer scoring picks a move")
-  eq(choice and choice.move, 0, "Gen 2: soak is chosen over neutral bonk too")
-end
-
--- ------------------------------------------------------------------
--- 2. ai_classes "class" records: the referee's now, never this file's
--- ------------------------------------------------------------------
---
--- Contract K16 of docs/plans/gen12-referee-remaining-gaps.md: the Red and
--- Gold referees run the class's item and switch AI themselves, at the cart's
--- point in the turn (pokered TrainerAI's `Random` byte while wAICount lasts;
--- pokecrystal AI_SwitchOrTryItem), off the class data the NPC upload states.
--- So whatever the record would do -- an item every turn, a rotation, a heal
--- below an HP fraction -- this brain answers the move, and spends nothing.
-
--- 2a. an item-only class that would fire every turn: a move, every turn.
-do
-  DATA.ai_classes.FIX_TRAINER_BUDGET = {
-    kind = "class", chance = 256, item = "FIX_ITEM_BUDGET", uses = 2,
-  }
-  local trainer = { id = "FIX_TRAINER_BUDGET" }
-  local mon = mkMon1{ moves = { { id = "bonk", pp = 10 } } }
-  local foe = mkMon1{}
-  local view = { mon = mon, foe = foe, party = { mon }, bag = { FIX_ITEM_BUDGET = 9 } }
-
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-
-  for turn = 1, 3 do
-    local c = brain:choose(view)
-    eq(c and c.action, "fight", "K16 (Red): turn " .. turn .. " is a move -- the class item is the referee's")
-  end
-  eq(brain.aiUses, 2, "K16 (Red): wAICount is seeded off the record and never spent here")
-end
-
--- 2b. switchChance would always rotate: still the move.
-do
-  DATA.ai_classes.FIX_TRAINER_SWITCHCHANCE = { switchChance = 256, uses = 1 }
-  local trainer = { id = "FIX_TRAINER_SWITCHCHANCE" }
-  local active = mkMon1{ slot = 1, hp = 50, moves = { { id = "bonk", pp = 10 } } }
-  local bench = mkMon1{ slot = 7, hp = 30 }
-  local foe = mkMon1{}
-
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-  local choice = brain:choose{ mon = active, foe = foe, party = { active, bench }, bag = {} }
-  eq(choice and choice.action, "fight", "K16 (Red): Agatha's switch roll is the referee's -- a move here")
-end
-
--- 2c. hpBelow / switchBelow at every HP band: the move.
-do
-  DATA.ai_classes.FIX_TRAINER_HPGATE = {
-    hpBelow = 4, switchBelow = 2, item = "FIX_ITEM_HPGATE", uses = 1,
-  }
-  local trainer = { id = "FIX_TRAINER_HPGATE" }
-  local foe = mkMon1{}
-  for _, hp in ipairs({ 10, 30, 80 }) do
-    local mon = mkMon1{ hp = hp, maxHp = 100, slot = 1, moves = { { id = "bonk", pp = 10 } } }
-    local bench = mkMon1{ hp = 40, maxHp = 100, slot = 9 }
-    local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-      rng = detRng, typeName = TYPE_NAMES }
-    local choice = brain:choose{ mon = mon, foe = foe, party = { mon, bench },
-      bag = { FIX_ITEM_HPGATE = 1 } }
-    eq(choice and choice.action, "fight",
-       "K16 (Red): at " .. hp .. "/100 HP the class's heal / rotation is the referee's -- a move here")
-  end
-end
-
--- ------------------------------------------------------------------
--- 3. a `brain` record supersedes the layers -- for the move
--- ------------------------------------------------------------------
-
-do
-  -- The class would always fire the item (chance = 256), and LAYER_3 would
-  -- always prefer the super-effective "soak" -- neither gets a say once the
-  -- trainer carries a `brain` function.
-  DATA.ai_classes.FIX_TRAINER_BRAINSUP = {
-    chance = 256, item = "FIX_ITEM_NEVERUSED", uses = 5,
-  }
+  local asked = false
   local trainer = {
-    id = "FIX_TRAINER_BRAINSUP",
-    brain = function(battle) return battle.enemy.curMoves[2] end, -- always "bonk"
+    id = "FIX_TRAINER_GOLD",
+    -- TRNATTR_AI_MOVE_WEIGHTS with every layer bit set: on the cart this
+    -- class scores its moves, and so does the referee -- not this module.
+    attributes = { 0, 0, 0, 0xFF, 0x03, 0, 0, 0 },
+    items = { "POTION" },
+    -- Gold's engine battle has no brain seam (gen2 Battle:vanillaEnemyMove
+    -- consults none), so a function here is never asked either.
+    brain = function() asked = true; return nil end,
   }
-  local mon = mkMon1{
-    moves = { { id = "soak", pp = 10 }, { id = "bonk", pp = 10 } },
-  }
-  local foe = mkMon1{ types = { SCORCH } }
-
-  local brain = SoloBrain.new{
-    data = DATA, trainer = trainer, generation = 1, aiMods = { "LAYER_3" },
-    rng = detRng, typeName = TYPE_NAMES,
-  }
-  local choice = brain:choose{ mon = mon, foe = foe, party = { mon }, bag = {} }
-  eq(choice and choice.action, "fight", "a brain's own move choice wins")
-  eq(choice and choice.move, 1,
-    "...specifically bonk (slot 2, zero-based 1), not the layer's super-effective pick")
-end
-
-do
-  -- A brain that answers with an item on Red is declined (K16): the item
-  -- slot of the turn is the referee's TrainerAI, and nil hands the seat to
-  -- `autoPick`.  Nothing is spent.
-  DATA.ai_classes.FIX_TRAINER_BRAINITEM = { uses = 3 }
-  local trainer = {
-    id = "FIX_TRAINER_BRAINITEM",
-    brain = function(_) return { special = "aiItem", item = "FIX_ITEM_BRAIN" } end,
-  }
-  local mon = mkMon1{ moves = { { id = "bonk", pp = 10 } } }
-  local foe = mkMon1{}
-
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
+  local brain, reason = SoloBrain.new{ data = DATA, trainer = trainer, generation = 2,
     rng = detRng, typeName = TYPE_NAMES }
-  local choice = brain:choose{ mon = mon, foe = foe, party = { mon } }
-  eq(choice, nil, "K16 (Red): a brain's item answer is declined -- the referee owns that slot")
-  eq(brain.aiUses, 3, "...and spends none of the budget seeded from uses = 3")
+  eq(brain, nil, "Gold: no brain for any trainer -- AIChooseMove is the referee's")
+  ok(type(reason) == "string" and reason:find("Gold") ~= nil,
+    "...and the reason names it: " .. tostring(reason))
+  eq(asked, false, "Gold: a `brain` on the record is never called")
+  eq(#trainer.items, 1, "Gold: the registry's own item list is untouched")
 end
 
--- ------------------------------------------------------------------
--- 4. the nil contract: a decline, never an error
--- ------------------------------------------------------------------
-
 do
-  local noBrain, reason = SoloBrain.new{ data = DATA }
-  eq(noBrain, nil, "no trainer record at all -- a wild fight -- refuses to build")
+  local noBrain, reason = SoloBrain.new{ data = DATA, generation = 1 }
+  eq(noBrain, nil, "Red wild: no trainer record refuses to build")
   ok(type(reason) == "string" and reason:find("trainer") ~= nil,
     "...and names the reason rather than raising: " .. tostring(reason))
+  eq(SoloBrain.new{ data = DATA, generation = 2 }, nil, "Gold wild: the same")
 end
 
 do
-  local noData, reason = SoloBrain.new{ trainer = { id = "x" } }
-  eq(noData, nil, "no dataset to read moves from also refuses to build")
+  local noData, reason = SoloBrain.new{ trainer = { id = "x", brain = function() end } }
+  eq(noData, nil, "Red: no dataset to read moves from refuses to build, brain or not")
   ok(type(reason) == "string" and reason:find("dataset") ~= nil,
     "...and says so: " .. tostring(reason))
 end
 
+-- ------------------------------------------------------------------
+-- 2. a registered brain on a Red trainer: its move is filed
+-- ------------------------------------------------------------------
+
+-- 2a. the record's own brain, over layers that would pick otherwise.
 do
-  local trainer = { id = "FIX_TRAINER_NILCONTRACT" }
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
+  local trainer = {
+    id = "FIX_TRAINER_BRAINSUP",
+    aiMods = { "LAYER_3" },
+    brain = function(battle) return battle.enemy.curMoves[2] end, -- always "bonk"
+  }
+  local brain, reason = redBrain(trainer, { aiMods = { "LAYER_3" } })
+  ok(brain ~= nil, "Red: a trainer carrying a brain function gets a brain: " .. tostring(reason))
+  eq(brain and brain.generation, 1, "...a Red one")
+  local mon = mkMon1{ moves = twoMoves() }
+  local foe = mkMon1{ types = { SCORCH } }
+  local choice = brain and brain:choose{ mon = mon, foe = foe, party = { mon } }
+  eq(choice and choice.action, "fight", "the brain's move is filed")
+  -- the index vocabulary trap: submitChoice's `move` is zero-based, so slot 2
+  -- ("bonk") reads 1 -- not 2, which is what `fighter.choice` would hold.
+  eq(choice and choice.move, 1,
+    "...bonk (slot 2, zero-based 1), not the layers' super-effective soak")
+end
+
+-- 2b. a class-registered brain (an `ai_classes` record of kind "brain"),
+-- resolved through TrainerAI.classFor -- the record's own `aiClass` first.
+do
+  DATA.ai_classes.FIX_CLASS_BRAIN = {
+    kind = "brain",
+    brain = function(battle) return battle.enemy.curMoves[1] end, -- "soak"
+  }
+  local brain = redBrain({ id = "FIX_TRAINER_OTHER", aiClass = "FIX_CLASS_BRAIN" })
+  ok(brain ~= nil, "Red: a class carrying a brain gives its trainers one")
+  local mon = mkMon1{ moves = twoMoves() }
+  local choice = brain and brain:choose{ mon = mon, foe = mkMon1{}, party = { mon } }
+  eq(choice and choice.move, 0, "...and the class brain's move (soak, zero-based 0) is filed")
+end
+
+-- 2c. the record's brain over its class's (vanillaEnemyAction's
+-- `self.trainer.brain or (class and class.brain)`).
+do
+  local brain = redBrain({
+    id = "FIX_CLASS_BRAIN",
+    brain = function(battle) return battle.enemy.curMoves[2] end,
+  })
+  local mon = mkMon1{ moves = twoMoves() }
+  local choice = brain and brain:choose{ mon = mon, foe = mkMon1{}, party = { mon } }
+  eq(choice and choice.move, 1, "the trainer record's brain wins over its class's")
+end
+
+-- 2d. answers spelled other ways: an id, Struggle, and a duplicate move.
+do
+  local answer
+  local brain = redBrain({ id = "FIX_TRAINER_SHAPES", brain = function() return answer end })
+
+  answer = { id = "bonk" }
+  local mon = mkMon1{ moves = twoMoves() }
+  local c = brain:choose{ mon = mon, foe = mkMon1{}, party = { mon } }
+  eq(c and c.move, 1, "a move named by id is filed by its slot")
+
+  answer = { id = "STRUGGLE", struggle = true }
+  local spent = mkMon1{ moves = { { id = "bonk", pp = 0 }, { id = "soak", pp = 0 } } }
+  c = brain:choose{ mon = spent, foe = mkMon1{}, party = { spent } }
+  eq(c and c.action, "fight", "Struggle is filed as a move")
+  eq(c and c.move, 0, "...the sim's own spelling of it: every slot empty, the first index")
+
+  local twice = mkMon1{ moves = { { id = "bonk", pp = 10 }, { id = "bonk", pp = 10 } } }
+  local exact = twice.moves
+  brain.brainFn = function(battle) return battle.enemy.curMoves[2] end
+  c = brain:choose{ mon = twice, foe = mkMon1{}, party = { twice } }
+  eq(c and c.move, 1, "a move known twice is filed at the exact slot the brain returned")
+  eq(twice.moves, exact, "...and the sim monster is not written to")
+end
+
+-- 2e. what the brain is handed: the BattleState surface, per send-out.
+do
+  DATA.ai_classes.FIX_TRAINER_VIEW = { uses = 2, chance = 64, item = "FIX_ITEM_VIEW" }
+  local seen = {}
+  local trainer = {
+    id = "FIX_TRAINER_VIEW", aiMods = { 3 },
+    brain = function(battle)
+      seen[#seen + 1] = battle
+      return battle.enemy.curMoves[1]
+    end,
+  }
+  local brain = redBrain(trainer, { aiMods = { 3 } })
+  local first = mkMon1{ species = "fixlead", moves = twoMoves(), types = { AQUA }, slot = 1 }
+  local second = mkMon1{ species = "fixnext", moves = twoMoves(), slot = 4 }
+  local foe = mkMon1{ types = { SCORCH, PLAIN } }
+  local party = { first, second }
+  brain:choose{ mon = first, foe = foe, party = party, active = 1 }
+  brain:choose{ mon = first, foe = foe, party = party, active = 1 }
+  brain:choose{ mon = second, foe = foe, party = party, active = 2 }
+
+  local v = seen[1] or {}
+  eq(v.kind, "trainer", "view: a trainer battle")
+  eq(v.trainer, trainer, "view: the trainer record itself")
+  eq(v.data, DATA, "view: the dataset")
+  eq(v.rng, detRng, "view: the brain draws from the generator it was built with")
+  eq(v.enemyAIMods and v.enemyAIMods[1], 3, "view: enemyAIMods, the class's layers")
+  eq(v.ruleset and v.ruleset.enemyUnlimitedPP, false, "view: the enemy's PP counts (the referee depletes it)")
+  eq(v.enemy and v.enemy.curMoves[1].id, "soak", "view: the enemy's moves")
+  eq(v.enemy and v.enemy.curTypes[1], "AQUA", "view: the enemy's types by name")
+  eq(v.player and table.concat(v.player.curTypes, ","), "SCORCH,PLAIN", "view: the player's too")
+  eq(v.enemy and v.enemy.mon.species, "fixlead", "view: the enemy monster's species")
+  eq(#(v.enemyParty or {}), 2, "view: the whole party")
+  eq(v.enemyIndex, 1, "view: and which one is out")
+  eq(v.aiUses, 2, "view: wAICount seeded from the class's uses")
+  eq(v.turnCount, 0, "view: the first selection of this monster")
+  eq(seen[2] and seen[2].turnCount, 1, "view: the second counts on")
+  eq(seen[3] and seen[3].turnCount, 0, "view: a new monster out starts again")
+  eq(seen[3] and seen[3].enemyIndex, 2, "view: ...at its own party index")
+  ok(seen[1] ~= seen[2], "view: a fresh copy every call -- nothing the brain writes leaks in")
+end
+
+-- ------------------------------------------------------------------
+-- 3. a brain that hands its view to the engine's own chooser
+-- ------------------------------------------------------------------
+--
+-- A registered brain may wrap vanilla: `TrainerAI.chooseMove(battle.enemy,
+-- battle.rng, battle)`.  The copy is complete enough for that -- LAYER_3
+-- prices the types off the loaded chart -- and wAILayer2Encouragement, which
+-- chooseMove counts on the battler it is handed, comes back off the copy and
+-- is handed in again next call, as BattleState's battler keeps it, until the
+-- monster changes.
+
+do
+  local TrainerAI = require("src.battle.TrainerAI")
+  local layer2 = {}
+  local brain = redBrain({
+    id = "FIX_TRAINER_WRAP", aiMods = { "LAYER_3" },
+    brain = function(battle)
+      layer2[#layer2 + 1] = battle.enemy.aiLayer2
+      return TrainerAI.chooseMove(battle.enemy, battle.rng, battle)
+    end,
+  }, { aiMods = { "LAYER_3" } })
+  local mon = mkMon1{ moves = twoMoves(), types = { PLAIN } }
+  local foe = mkMon1{ types = { SCORCH } }
+  local c = brain:choose{ mon = mon, foe = foe, party = { mon } }
+  eq(c and c.move, 0, "wrapped TrainerAI: LAYER_3 picks the super-effective soak")
+  brain:choose{ mon = mon, foe = foe, party = { mon } }
+  local next_ = mkMon1{ moves = twoMoves() }
+  brain:choose{ mon = next_, foe = foe, party = { mon, next_ } }
+  eq(table.concat(layer2, ","), "0,1,0",
+    "wrapped TrainerAI: wAILayer2Encouragement carries across selections and resets on a send-out")
+end
+
+-- ------------------------------------------------------------------
+-- 4. what a brain answers that is not filed
+-- ------------------------------------------------------------------
+--
+-- The class routine's slot of the turn -- an item, a switch -- is the
+-- referee's (contract K16), run from the uploaded `aiClass` whoever filed
+-- the move; EnemySendOut's walk is the referee's too.  Each of these is nil,
+-- SoloBattle's cue to file `autoPick`.
+
+do
+  DATA.ai_classes.FIX_TRAINER_BRAINITEM = { uses = 3, item = "FIX_ITEM_BRAIN" }
+  local answer
+  local calls = 0
+  local brain = redBrain({ id = "FIX_TRAINER_BRAINITEM",
+    brain = function() calls = calls + 1; return answer end })
+  local mon = mkMon1{ moves = { { id = "bonk", pp = 10 } }, slot = 1 }
+  local bench = mkMon1{ moves = { { id = "bonk", pp = 10 } }, slot = 6 }
+  local view = { mon = mon, foe = mkMon1{}, party = { mon, bench } }
+
+  answer = { special = "aiItem", item = "FIX_ITEM_BRAIN" }
+  eq(brain:choose(view), nil, "K16 (Red): a brain's item answer is declined")
+  eq(brain.aiUses, 3, "...and the budget seeded from uses = 3 is not spent here")
+
+  answer = { special = "aiSwitch", index = 2 }
+  eq(brain:choose(view), nil, "K16 (Red): a brain's switch answer is declined")
+
+  answer = nil
+  eq(brain:choose(view), nil, "a brain that answers nothing is declined")
+  answer = "bonk"
+  eq(brain:choose(view), nil, "a brain that answers a non-table is declined")
+
+  local before = calls
+  answer = { id = "bonk" }
+  local fainted = mkMon1{ hp = 0, slot = 1, moves = { { id = "bonk", pp = 10 } } }
+  eq(brain:choose{ mon = fainted, mustReplace = true, party = { fainted, bench } }, nil,
+    "K16 (Red): a forced send-out is the referee's (EnemySendOut) -- nil, never a switch")
+  eq(calls, before, "...and the brain is not even asked")
+end
+
+-- A move the referee would refuse is declined, never filed to be refused.
+do
+  local answer
+  local brain = redBrain({ id = "FIX_TRAINER_REFUSED", brain = function(battle)
+    return answer == "slot1" and battle.enemy.curMoves[1] or answer
+  end })
+  local disabled = mkMon1{ moves = twoMoves(), disable = { turns = 3, moveIndex = 1 } }
+  answer = "slot1"
+  eq(brain:choose{ mon = disabled, foe = mkMon1{}, party = { disabled } }, nil,
+    "a brain's disabled slot is declined -- autoPick answers instead")
+  answer = { id = "bonk" }
+  local c = brain:choose{ mon = disabled, foe = mkMon1{}, party = { disabled } }
+  eq(c and c.move, 1, "...while the slot the sim takes is filed")
+
+  local dry = mkMon1{ moves = { { id = "soak", pp = 0 }, { id = "bonk", pp = 10 } } }
+  answer = "slot1"
+  eq(brain:choose{ mon = dry, foe = mkMon1{}, party = { dry } }, nil,
+    "a brain's empty-PP slot (another still has PP) is declined")
+  answer = { id = "nosuchmove" }
+  eq(brain:choose{ mon = dry, foe = mkMon1{}, party = { dry } }, nil,
+    "a move the monster does not know is declined")
+end
+
+-- A brain that raises: declined, and said once -- naming whose it is.
+do
+  local brain = redBrain({ id = "FIX_TRAINER_RAISES", brain = function() error("fix boom") end })
+  local mon = mkMon1{ moves = twoMoves() }
+  local before = #warnings
+  eq(brain:choose{ mon = mon, foe = mkMon1{}, party = { mon } }, nil, "a raising brain is declined")
+  eq(brain:choose{ mon = mon, foe = mkMon1{}, party = { mon } }, nil, "...every time")
+  eq(#warnings - before, 1, "...with one warning for the session, not one a turn")
+  local line = warnings[before + 1] or ""
+  ok(line:find("brain") ~= nil and line:find("fix boom", 1, true) ~= nil
+     and line:find("report this to the mod", 1, true) ~= nil,
+    "...naming the brain, its error and the remediation: " .. line)
+  for i = #warnings, before + 1, -1 do table.remove(warnings, i) end
+end
+
+-- ------------------------------------------------------------------
+-- 5. the nil contract: a decline, never an error
+-- ------------------------------------------------------------------
+
+do
+  local brain = redBrain({ id = "FIX_TRAINER_NILCONTRACT", brain = function(battle)
+    return battle.enemy.curMoves[1]
+  end })
   local mon = mkMon1{ moves = { { id = "bonk", pp = 10 } } }
 
   eq(brain:choose(nil), nil, "choose(nil) declines rather than throwing")
@@ -387,65 +503,7 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 5. forced replacement: the referee's (K16), on Red and Gold
--- ------------------------------------------------------------------
---
--- pokered EnemySendOut's party order and pokecrystal
--- FindMonInOTPartyToSwitchIntoBattle are the referee's to run; this brain
--- answers nil and SoloBattle files `autoPick`, which reaches them.
-
-do
-  local trainer = { id = "FIX_TRAINER_REPLACE" }
-  local fainted = mkMon1{ slot = 1, hp = 0 }
-  local alive = mkMon1{ slot = 8, hp = 20 }
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-  eq(brain:choose{ mon = fainted, mustReplace = true, party = { fainted, alive } }, nil,
-     "K16 (Red): a forced replacement is the referee's -- nil, never a switch")
-end
-
-do
-  local trainer = { id = "FIX_TRAINER_REPLACE2", attributes = { 0, 0, 0, 0, 0 } }
-  local fainted = mkMon2{ slot = 2, hp = 0 }
-  local alive = mkMon2{ slot = 5, hp = 15 }
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 2,
-    rng = detRng, typeName = TYPE_NAMES }
-  eq(brain:choose{ mon = fainted, mustReplace = true, party = { fainted, alive } }, nil,
-     "K16 (Gold): a forced replacement is the referee's too")
-end
-
--- ------------------------------------------------------------------
--- 6. Gold: AI_TryItem is the referee's -- the move, and no engine mutation
--- ------------------------------------------------------------------
---
--- A hurt, highest-level monster whose trainer holds a POTION would drink it
--- on the cart (AI_TryItem); the Gold referee does that now from the class
--- attributes the NPC upload states (`trainerItems`).  This brain answers the
--- move and never touches the registry's own item list.  "POTION" is the
--- engine's own functional identifier here (src/battle/gen2/Ai.lua matches
--- real ids), not ROM-derived flavor.
-do
-  local trainer = {
-    id = "FIX_TRAINER_ITEMS2",
-    items = { "POTION" },
-    attributes = { 0, 0, 0, 0, 0 }, -- flags = 0: no scoring layers to score with
-  }
-  local mon = mkMon2{ hp = 10, maxHp = 100, moves = { { id = "bonk", pp = 10 } } }
-  local foe = mkMon2{}
-  local view = { mon = mon, foe = foe, bag = { POTION = 5 } }
-
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 2,
-    rng = detRng, typeName = TYPE_NAMES }
-
-  local c1 = brain:choose(view)
-  eq(c1 and c1.action, "fight", "K16 (Gold): a hurt monster's POTION is the referee's -- a move here")
-  eq(#trainer.items, 1, "the registry's own item list is untouched in length")
-  eq(trainer.items[1], "POTION", "...and in content -- this is the record every future fight reads")
-  eq(brain.items2, nil, "K16 (Gold): no private item copy is kept -- nothing here spends one")
-end
-
--- ------------------------------------------------------------------
--- 7. SoloBrain.classOf: one resolution of a trainer's class record
+-- 6. SoloBrain.classOf: one resolution of a trainer's class record
 -- ------------------------------------------------------------------
 
 do
@@ -458,7 +516,7 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 8. SoloBrain.trainerOf: both generations' shapes, and no others
+-- 7. SoloBrain.trainerOf: both generations' shapes, and no others
 -- ------------------------------------------------------------------
 
 do
@@ -481,107 +539,29 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 9. SoloBrain.itemsFor
+-- 8. the trainer's kit: Gen 3's slots, nothing on Red or Gold (K16)
 -- ------------------------------------------------------------------
 
 do
-  DATA.ai_classes.FIX_TRAINER_ITEMSFOR = { item = "FIX_ITEM_FOR" }
-  local trainer = { id = "FIX_TRAINER_ITEMSFOR" }
-  local items = SoloBrain.itemsFor(trainer, DATA, 1)
-  eq(#items, 1, "Gen 1 with no items list: only the class's own item")
-  eq(items[1], "FIX_ITEM_FOR", "...by id")
-end
-
-do
-  local trainer = { id = "FIX_TRAINER_ITEMSFOR2", items = { "FIX_ITEM_A", "FIX_ITEM_B" } }
-  local items = SoloBrain.itemsFor(trainer, DATA, 2)
-  eq(#items, 2, "Gen 2 carries the trainer's own item list through")
-  eq(items[1], "FIX_ITEM_A", "...in order")
-  eq(items[2], "FIX_ITEM_B", "...both of them")
+  DATA.ai_classes.FIX_TRAINER_KIT = { item = "FIX_ITEM_KIT", uses = 2 }
+  local red = { id = "FIX_TRAINER_KIT", items = { "FIX_ITEM_A" } }
+  eq(#SoloBrain.itemsFor(red, DATA, 1), 0, "itemsFor(1): Red carries no NPC kit -- the class item is the referee's")
+  eq(next(SoloBrain.bagFor(red, DATA, 1)), nil, "bagFor(1): ...nor a bag")
+  local gold = { id = "FIX_TRAINER_KIT2", items = { "FIX_ITEM_A", "FIX_ITEM_B" } }
+  eq(#SoloBrain.itemsFor(gold, DATA, 2), 0, "itemsFor(2): Gold's trainer items are the referee's (trainerItems)")
+  eq(next(SoloBrain.bagFor(gold, DATA, 2)), nil, "bagFor(2): ...and no bag")
+  eq(SoloBrain.bagEntries, nil, "no wire-shaped NPC bag is offered at all")
 end
 
 -- ------------------------------------------------------------------
--- 9b. SoloBrain.bagFor -- actual counts, not the gym kit
--- ------------------------------------------------------------------
-
-do
-  DATA.ai_classes.FIX_TRAINER_BAGFOR = { item = "FIX_ITEM_CLASS", uses = 2 }
-  local trainer = { id = "FIX_TRAINER_BAGFOR" }
-  local bag = SoloBrain.bagFor(trainer, DATA, 1)
-  eq(bag.FIX_ITEM_CLASS, 2, "Gen 1 with no items list: class.item x class.uses")
-end
-
-do
-  DATA.ai_classes.FIX_TRAINER_BAGNONE = { item = "FIX_ITEM_UNUSED", uses = 0 }
-  local trainer = { id = "FIX_TRAINER_BAGNONE" }
-  local bag = SoloBrain.bagFor(trainer, DATA, 1)
-  eq(bag.FIX_ITEM_UNUSED, nil, "uses = 0 is an empty bag, not a free potion")
-end
-
-do
-  local trainer = { id = "FIX_TRAINER_BAG2", items = { "FIX_ITEM_A", "FIX_ITEM_A", "FIX_ITEM_B" } }
-  local bag = SoloBrain.bagFor(trainer, DATA, 2)
-  eq(bag.FIX_ITEM_A, 2, "Gen 2 counts duplicate entries as uses")
-  eq(bag.FIX_ITEM_B, 1, "...and keeps the rest")
-  local entries = SoloBrain.bagEntries(trainer, DATA, 2)
-  eq(#entries, 2, "bagEntries is the wire shape")
-  eq(entries[1].id, "FIX_ITEM_A", "...sorted by id")
-  eq(entries[1].count, 2, "...with the counted uses")
-end
-
--- ------------------------------------------------------------------
--- 10. disabled and empty-PP slots are never returned
--- ------------------------------------------------------------------
-
-do
-  local trainer = { id = "FIX_TRAINER_STRUGGLE" }
-  local mon = mkMon1{ moves = { { id = "bonk", pp = 0 }, { id = "soak", pp = 0 } } }
-  local foe = mkMon1{}
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-  local choice = brain:choose{ mon = mon, foe = foe, party = { mon } }
-  -- every slot out of PP is the sim's own spelling of Struggle: any index is
-  -- legal, and the referee's convention (mirrored in SoloBrain) is the first.
-  eq(choice and choice.action, "fight", "an all-empty moveset still answers -- Struggle")
-  eq(choice and choice.move, 0, "...as the sim's own Struggle convention, slot 0")
-end
-
-do
-  local trainer = { id = "FIX_TRAINER_DISABLED" }
-  local mon = mkMon1{
-    moves = { { id = "bonk", pp = 10 }, { id = "soak", pp = 10 } },
-    disable = { turns = 3, moveIndex = 1 },
-  }
-  local foe = mkMon1{}
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-  local choice = brain:choose{ mon = mon, foe = foe, party = { mon } }
-  eq(choice and choice.action, "fight", "a disabled slot still leaves a legal move to answer with")
-  eq(choice and choice.move, 1, "...the other slot, zero-based 1 -- never the disabled slot 0")
-end
-
-do
-  local trainer = { id = "FIX_TRAINER_NOPP" }
-  local mon = mkMon1{
-    moves = { { id = "bonk", pp = 0 }, { id = "soak", pp = 10 } },
-  }
-  local foe = mkMon1{}
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-  local choice = brain:choose{ mon = mon, foe = foe, party = { mon } }
-  eq(choice and choice.action, "fight", "a slot with no PP (but not every slot) still answers")
-  eq(choice and choice.move, 1, "...the slot that still has PP, never the empty one")
-end
-
--- ------------------------------------------------------------------
--- 11. Gen 3 is its own brain, never Red's (the old `~= 2 -> 1` clamp)
+-- 9. Gen 3 is its own brain, never Red's (the old `~= 2 -> 1` clamp)
 -- ------------------------------------------------------------------
 --
 -- The full Gen 3 arm is tests/gen3_solo.lua, over a real BattleSim3 referee;
 -- what is pinned here is the dispatch, on bare sheets with no referee in the
--- view (the brain reads a battler-shaped copy of each).  (That no Gen 1 /
--- Gen 2 engine module is reached on the way is gen3_solo's to assert: this
--- suite has loaded them itself by here.)
+-- view (the brain reads a battler-shaped copy of each).  (That no Gen 1
+-- engine module is reached on the way is gen3_solo's to assert: this suite
+-- has loaded them itself by here.)
 
 do
   local brain = SoloBrain.new{ generation = 3, trainer = { aiFlags = 1, items = { 13, 0, 0, 0 } },
@@ -615,11 +595,12 @@ end
 
 -- ------------------------------------------------------------------
 -- every scenario above is a legitimate decline or a legitimate answer --
--- none of them should have made the adapter's own pcall catch anything
+-- none of them (the raising brain aside, whose one line was checked and
+-- taken back) should have made the module's own pcall catch anything
 -- ------------------------------------------------------------------
 
 eq(#warnings, 0,
-  "no adapter warning fired during any of the above -- every nil above was a clean decline: "
+  "no warning fired during any of the above -- every nil above was a clean decline: "
   .. table.concat(warnings, " | "))
 
 -- ------------------------------------------------------------------

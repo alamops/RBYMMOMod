@@ -322,8 +322,9 @@ end
 -- ...including a Gold monster `standing` at 0 HP (BattleSim2 Turn's
 -- `activeMon`, wave 5): one SPIKES or PERISH SONG left at 0 has not fainted
 -- until the cart's next faint check finds it, and until then it is asked for
--- a choice and acts -- so the trainer's brain is asked for it too, or a solo
--- fight with no choice deadline (SOLO_CHOICE_TIMEOUT) waits on it forever.
+-- a choice and acts -- so the trainer's seat is answered for it too
+-- (`autoPick`: Gold builds no brain), or a solo fight with no choice deadline
+-- (SOLO_CHOICE_TIMEOUT) waits on it forever.
 local function activeOf(fighter)
   local mon = fighter and fighter.mons and fighter.mons[fighter.active]
   if mon and ((tonumber(mon.hp) or 0) > 0 or mon.standing == true) then return mon end
@@ -339,11 +340,13 @@ end
 
 -- Does this seat owe the referee an answer right now?
 --
--- Asked before the brain is, and that is the whole reason it exists:
--- `src/SoloBrain.lua` carries the AI's `aiUses` budget and draws from the
--- engine's RNG, so a speculative call spends a gym leader's FULL HEAL on a turn
--- nobody asked about. `Turn:autoPick` refuses politely when a seat owes
--- nothing; the brain has no way to know.
+-- Asked before the seat is answered, and that is the whole reason it exists:
+-- a brain built in `src/SoloBrain.lua` keeps state a speculative call would
+-- move -- Gen 3's spends the trainer's item slots (ShouldUseItem) and draws
+-- from the RNG, a registered Red brain draws and counts the monster's turns --
+-- so asking it on a turn nobody owes spends a gym leader's FULL RESTORE on
+-- nothing. `Turn:autoPick` refuses politely when a seat owes nothing; a brain
+-- has no way to know.
 -- A shared team's emptied seat (BattleSim3's `seats = 2`, a Gen 3 double) is
 -- owed a monster only while the bench still holds one after every sibling
 -- *ahead* of it that is owed one too -- `Battle:_canRefill`, restated like the
@@ -401,7 +404,7 @@ function M.new(ui, opts)
     -- together: half of a solo battle is not a state this file can be in.
     fight = nil,      -- the MediatedBattle screen
     sim = nil,        -- the Turn refereeing it
-    brain = nil,      -- SoloBrain, on a trainer fight with an AI to bridge
+    brain = nil,      -- SoloBrain: a Gen 3 trainer's, or a Red trainer's registered `brain`
     engine = nil,     -- the frozen engine BattleState buried underneath
     game = nil,
 
@@ -425,13 +428,6 @@ function M.new(ui, opts)
     -- The save table this fight belongs to, so a load mid-battle cannot make
     -- us write one playthrough's damage onto another's party.
     save = nil,
-
-    -- What the player has shown the AI: move ids in the order they were first
-    -- used, and how long their current monster has been out.
-    playerMoves = nil,
-    playerTurns = 0,
-    playerMon = nil,
-    playerMove = nil,
 
     -- Coop.blackout parks its deferred warp here and Coop.pumpBlackout takes
     -- it from here. Ours to own, because a holder that never pumps leaves the
@@ -558,12 +554,6 @@ function M:_randomByte()
   return 0
 end
 
--- The trainer's kit, as the side-"b" sheet this client just uploaded.
---
--- 1xNPC: the player sends the NPC items from their game data with the NPC
--- party. The referee holds that claim for this fight only -- not a gym kit
--- seeded onto the seat. Empty (Youngster, wild) is nil so `_autoItemChoice`
--- never treats an empty table as "a bag".
 -- Gold's wBattleType as the engine battle underneath holds it (`battleType`
 -- on the gen2 Battle, src/battle/gen2/Battle.lua -- the shell BattleState
 -- carries the battle as `state.battle`), or the state's own; nil without one.
@@ -571,21 +561,6 @@ local function engineBattleType(state)
   if type(state) ~= "table" then return nil end
   local inner = type(state.battle) == "table" and state.battle or nil
   return tonumber(inner and inner.battleType) or tonumber(state.battleType)
-end
-
-local function bagFromUpload(party)
-  local entries = party and party.bag
-  if type(entries) ~= "table" then return nil end
-  local bag, any = {}, false
-  for _, entry in ipairs(entries) do
-    if type(entry) == "table" and type(entry.id) == "string"
-        and type(entry.count) == "number" and entry.count > 0 then
-      bag[entry.id] = entry.count
-      any = true
-    end
-  end
-  if not any then return nil end
-  return bag
 end
 
 function M:_begin(game, state, mapId, kind)
@@ -748,13 +723,14 @@ function M:_begin(game, state, mapId, kind)
         or (pending.wild and type(pending.wild.name) == "string" and pending.wild.name)
         or foeName(state),
       mons = enemySheets,
-      -- Side b is the uploaded NPC claim (wild encounter, or the trainer
-      -- plus their kit). Side nil is the player's own party.
-      bag = (kind ~= "wild") and bagFromUpload(pending.wild) or nil,
+      -- No bag: Red and Gold upload no NPC kit (contract K16,
+      -- MediatedBattle.trainerBagEntries) -- their referees run the cart's
+      -- item AI off the class data below and read no bag for it.
       -- Red's trainer move-choice layers, off the same upload: the referee
-      -- runs them only for a pick nobody filed (`_computerChoice` -- the
-      -- brain files this seat's every turn it can answer), as a hub's
-      -- coop_npc computer seat does for every turn.
+      -- runs them for every pick it makes for this seat (`autoPick` ->
+      -- `_computerChoice`), which is every pick there is unless a mod
+      -- registered a `brain` for the trainer (src/SoloBrain.lua) -- the
+      -- path a hub's coop_npc computer seat takes.
       aiMods = (kind ~= "wild" and pending.wild) and pending.wild.aiMods or nil,
       -- ...and the class's own data (contract K16, MediatedBattle.npcSeat),
       -- which the referee runs the cart's item and switch AI from at the
@@ -824,11 +800,15 @@ function M:_begin(game, state, mapId, kind)
     return false
   end
 
-  -- The opponent's mind. Constructed once per fight and never for a wild one:
-  -- there is no trainer record behind a PIDGEY, so there is no per-trainer
-  -- behaviour to be faithful to and `Turn:autoPick` is the honest answer.
-  -- A nil brain is not a failure and is not logged as one -- see SoloBrain's
-  -- header, where declining is the whole error contract.
+  -- The opponent's mind, where it is not the referee's.  On Red and Gold the
+  -- referee runs the cart's own computer for side b -- the move, the item,
+  -- the switch and the send-out, off the class data above (contract K16) --
+  -- so SoloBrain builds nothing for a wild monster, a Gold trainer or a Red
+  -- trainer with no registered `brain`, and `Turn:autoPick` answers every
+  -- turn and every forced send-out (M:_answerFoe).  The one brain built here
+  -- is a mod's own: a Red trainer whose record or class carries a `brain`
+  -- function, whose move is filed.  A nil brain is the ordinary answer, not a
+  -- failure, and is not logged as one -- see SoloBrain's header.
   local brain
   if kind == "trainer" then
     brain = SoloBrain.new({ game = game, engine = state })
@@ -843,8 +823,6 @@ function M:_begin(game, state, mapId, kind)
   self.refuseRun, self.failedRun, self.fledLine = nil, nil, nil
   self.runAttempts, self.faults = 0, 0
   self.clock, self.seq = 0, 0
-  self.playerMoves, self.playerTurns = {}, 0
-  self.playerMon, self.playerMove = nil, nil
   self.warned = nil
   self.save = game.save
   self.levels = self:_levelSnapshot(game)
@@ -1421,51 +1399,17 @@ end
 -- the opponent
 -- ------------------------------------------------------------------
 
--- What the player has shown, for the layers that read it.
---
--- Both Gen 1's and Gen 2's AI reason about the *player's* history: how long the
--- monster in front of them has been out, and which moves it has used (Gen 2's
--- SMART layer prices its own move against the last one the player played, and
--- its switch score counts how many super-effective moves it has been shown).
--- None of that rides on an event -- the vocabulary has no "a move was used"
--- kind -- so it is read straight off the referee's own copy, where
--- `lastMoveIndex` is exactly the field it was recorded in.
---
--- Recorded only when the entry differs from the previous one, so a player who
--- presses the same move eight times leaves one mark rather than eight. That
--- keeps the list at the length a matchup scan wants and keeps its last entry
--- correct, which is the one thing that has to be.
-function M:_trackPlayer()
-  local sim = self.sim
-  local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
-  local mon = player and player.mons and player.mons[player.active]
-  if not mon then return end
-
-  if mon ~= self.playerMon then
-    -- A different monster is out. The counters the AI reads are per-send-out,
-    -- so both reset -- and identity is the only sound test for "the same
-    -- monster", since a party can hold two of a species at one level.
-    self.playerMon = mon
-    self.playerTurns = 0
-  else
-    self.playerTurns = self.playerTurns + 1
-  end
-
-  local index = tonumber(mon.lastMoveIndex) or 0
-  local move = index >= 1 and mon.moves and mon.moves[index] or nil
-  local id = move and move.id
-  if id and id ~= self.playerMove then
-    self.playerMove = id
-    self.playerMoves[#self.playerMoves + 1] = id
-  end
-end
-
 -- The opponent's answer for this turn, if it owes one.
 --
--- `SoloBrain` first and `Turn:autoPick` behind it, and the fallback is a
--- complete answer rather than a degraded one: it is the same picker that
--- answers for every NPC seat in every hub-refereed fight. The brain makes a
--- good fight better and can never make one fail to run.
+-- On Red and Gold that is `Turn:autoPick`, every turn and every forced
+-- send-out, wild and trainer alike: the referee runs the carts' own computer
+-- for a seat nobody filed for -- pokered TrainerAI, AIEnemyTrainerChooseMoves
+-- and EnemySendOut; pokecrystal AIChooseMove, AI_SwitchOrTryItem and
+-- FindMonInOTPartyToSwitchIntoBattle -- at the cart's own points (contract
+-- K16), the path a hub's NPC seat takes, so SoloBrain builds no brain there.
+-- A brain, where there is one -- Gen 3's, which answers the whole turn, or a
+-- mod's registered `brain` on a Red trainer, which answers the move -- is
+-- asked first, and `autoPick` takes whatever it declines.
 --
 -- The two speak different index vocabularies and that is the sharpest edge in
 -- this file. `autoPick` writes `fighter.choice` directly, so its `move` is
@@ -1499,9 +1443,6 @@ function M:_answerFoe()
     local got = false
     local brain = self.brain
     if brain then
-      -- Tracked here, once, at the moment the opponent is actually asked --
-      -- which is also the moment the turn count means something.
-      if sim.phase == "choice" then self:_trackPlayer() end
       local player = sim.byId[PLAYER_SEAT]
       local view = {
         mon = foe.mons[foe.active],
@@ -1510,8 +1451,6 @@ function M:_answerFoe()
         active = foe.active,
         bag = foe.bag,
         mustReplace = foe.mustReplace and true or false,
-        playerUsedMoves = self.playerMoves,
-        playerTurns = self.playerTurns,
       }
       -- Gen 3's brain reads the referee itself: the battlers carry the
       -- stages, the volatiles and the Transform overlay, and the field the
@@ -1527,7 +1466,7 @@ function M:_answerFoe()
       local ok, choice = pcall(brain.choose, brain, view)
       if not ok then
         self:warn("brain", "the trainer's own AI could not be asked for a move "
-          .. "(%s), so this fight is played with the referee's generic picker; "
+          .. "(%s), so the referee's own trainer AI answers for it instead; "
           .. "report this with the trainer you were fighting", tostring(choice))
       elseif type(choice) == "table" and sim:submitChoice(FOE_SEAT, choice) then
         got = true
@@ -2084,8 +2023,6 @@ function M:reset()
   self.settled, self.pendingWarp, self.refuseRun = false, nil, nil
   self.failedRun, self.generation, self.fledLine = nil, nil, nil
   self.runAttempts, self.faults = 0, 0
-  self.playerMoves, self.playerTurns = nil, 0
-  self.playerMon, self.playerMove = nil, nil
   if game and fight and engine then
     -- Our screen off, the engine's battle back on top, untouched.
     Coop.unwindStackTo(game, engine, false)
@@ -2942,8 +2879,6 @@ function M:_begin3(game, kind, party, opts, extra)
   self.refuseRun, self.failedRun, self.cantEscape = nil, nil, nil
   self.runAttempts, self.faults = 0, 0
   self.clock, self.seq = 0, 0
-  self.playerMoves, self.playerTurns = {}, 0
-  self.playerMon, self.playerMove = nil, nil
   self.warned = nil
   self.save = session
   self.levels = nil
@@ -2964,8 +2899,7 @@ function M:_begin3(game, kind, party, opts, extra)
     results = { catchAttempts = {}, usedMasterBall = false, lastUsedItem = 0 },
     -- A lone double: two player seats, `foeSeats` trainer seats.  The ending
     -- reads `double` for the prize and the TV; M:_note3 keeps `foeOut` (the
-    -- party index out on each trainer slot) and `lastFoeFainted` from it, and
-    -- M:_answerFoes3 `trackedTurn` (the turn the player's history was read).
+    -- party index out on each trainer slot) and `lastFoeFainted` from it.
     double = double or nil,
     foeSeats = double and foeSeats or nil,
     foeOut = double and {} or nil,
@@ -3170,16 +3104,10 @@ function M:_answerFoes3()
     local got = false
     local brain = self.brain
     if brain then
-      -- The player's history is a per-turn reading: once, however many of
-      -- the trainer's seats are asked in it.
-      if sim.phase == "choice" and g3.trackedTurn ~= sim.turn then
-        g3.trackedTurn = sim.turn
-        self:_trackPlayer()
-      end
       local ok, choice = pcall(brain.choose, brain, self:_foeView3(seat, seats))
       if not ok then
         self:warn("brain", "the trainer's own AI could not be asked for a move "
-          .. "(%s), so this fight is played with the referee's generic picker; "
+          .. "(%s), so the referee's own trainer AI answers for it instead; "
           .. "report this with the trainer you were fighting", tostring(choice))
       elseif type(choice) == "table" and sim:submitChoice(seat.playerId, choice) then
         got = true
@@ -3234,8 +3162,6 @@ function M:_foeView3(seat, seats)
     active = seat.active,
     bag = seat.bag,
     mustReplace = seat.mustReplace and true or false,
-    playerUsedMoves = self.playerMoves,
-    playerTurns = self.playerTurns,
     sim = sim,
     battler = seat.b,
     foeBattler = lead and lead.battler or nil,
@@ -3802,8 +3728,6 @@ function M:_clear3()
   self.settled, self.pendingWarp, self.refuseRun = false, nil, nil
   self.failedRun, self.generation, self.cantEscape = nil, nil, nil
   self.runAttempts, self.faults = 0, 0
-  self.playerMoves, self.playerTurns = nil, 0
-  self.playerMon, self.playerMove = nil, nil
   self.gen3 = nil
 end
 

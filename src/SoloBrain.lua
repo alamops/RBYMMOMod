@@ -1,69 +1,89 @@
--- The opponent's mind, borrowed from the engine and lent to the mod's referee.
+-- The opponent's mind on a solo fight, where the referee does not already hold
+-- it.
 --
 -- When this mod substitutes its own battle system for an ordinary solo fight
--- (src/SoloBattle.lua), the far side of the field is a `BattleSim` fighter with
--- no connection behind it. The referee already knows how to answer for such a
--- seat: `Turn:autoPick` files the same choice the choice-timeout would file, a
--- bag/super-effective/setup/switch heuristic that both runtimes reproduce byte
--- for byte. That heuristic exists so a hub-refereed fight cannot stall, and it
--- is the right answer *there* -- but it is not anybody in particular. It plays
--- BROCK exactly the way it plays a bug catcher.
+-- (src/SoloBattle.lua), the far side of the field is a referee fighter with no
+-- connection behind it.  The referee answers for such a seat itself --
+-- `Turn:autoPick` files what it files for a hub's NPC seat -- and a brain
+-- built here, where there is one, is asked first.  Whether there is one is a
+-- per-generation question, and the answers are not alike.
 --
--- A solo fight never crosses the wire, and that one fact changes what is
--- possible. There is no second runtime to stay byte-identical with, no Node
--- twin to keep in parity, and nothing to gain by hiding the engine's own data
--- from the thing choosing the move. So the NPC's move is decided *here*, on the
--- client, by the engine's real trainer AI -- `src/battle/TrainerAI.lua` on Gen 1
--- and `src/battle/gen2/Ai.lua` on Gen 2 -- and then handed to the referee as an
--- ordinary `submitChoice`: a Gold class with the SMART bit set still scores its
--- moves the way scoring.asm scores them.  Giovanni's GUARD SPEC, Agatha's
--- rotation and Brock's FULL HEAL are the referees' own now (contract K16, see
--- "what it will not answer" below).  `src/BattleSim/Turn.lua` is not touched
--- by any of it, which is the property that keeps this whole feature off the
--- wire.
+-- ------- Red and Gold: nothing, unless a mod registered a brain
 --
--- ------- the adapter, and why it is a copy rather than a puppet
+-- The Red and Gold referees run the carts' own computer, off the class data
+-- the NPC upload states (contract K16 of docs/plans/gen12-referee-remaining-
+-- gaps.md) and drawing from the fight's RNG at the cart's own points: pokered
+-- TrainerAI's class routine in the computer's slot of the turn,
+-- AIEnemyTrainerChooseMoves' layers from `aiMods` with SelectEnemyMove, and
+-- EnemySendOut's party order; pokecrystal AIChooseMove's layers from the
+-- class's AI word (ParseEnemyAction's random pick for a wild monster),
+-- AI_SwitchOrTryItem at Battle_PlayerFirst / Battle_EnemyFirst, and
+-- FindMonInOTPartyToSwitchIntoBattle.  The engine's own ports are the worse
+-- source for the same choice: src/battle/gen2/Ai.lua departs from pret in
+-- layer order, rolls and filtering, and either port, asked from here, draws
+-- from the client's RNG at a point the cart never draws.  So on Red and Gold
+-- `M.new` declines and SoloBattle files `autoPick` for every turn and every
+-- forced send-out -- the path a hub's NPC seat takes.  A trainer still plays
+-- like itself, which is why docs/plans/offline-solo-battles.md D3 bridged the
+-- engine's AI in the first place; the cart's own routine is the better road
+-- there, and this supersedes D3 for Red and Gold.
 --
--- `TrainerAI` was written against an engine `BattleState`: it reads
+-- The one exception is another mod's AI.  The engine's `ai_classes` registry,
+-- and a trainer record, can carry a `brain` function -- the chooser
+-- BattleState:vanillaEnemyAction hands the enemy's choice to instead of the
+-- layers -- and no referee can run a function another mod registered.  So a
+-- Red trainer whose record or class carries one gets a brain here, and that
+-- function's *move* is filed.  The item or switch it answers is declined: the
+-- class routine's slot of the turn is the referee's, which runs it whoever
+-- filed the move, as the engine's own executeAction runs trainerAIAction
+-- ahead of a brain's choice.  A forced send-out is declined too (EnemySendOut's
+-- walk is the referee's).  Gold's engine battle has no such seam -- gen2
+-- Battle:vanillaEnemyMove consults no `brain` -- so Gold builds none.
+--
+-- ------- Gen 3: the whole turn
+--
+-- FireRed / LeafGreen / Emerald trainers are answered here in full -- switch,
+-- item, move and send-out -- by a port of pret's AI scripts over the
+-- BattleSim3 field.  The Gen 3 section below says what it keeps and why.
+--
+-- ------- a brain's view, and why it is a copy rather than a puppet
+--
+-- A registered brain was written against an engine `BattleState`: it reads
 -- `battle.enemy.curMoves`, `battle.player.curTypes`, `battle.aiUses`,
--- `battle.rng`. Our fight is a `BattleSim` `Turn`, whose monsters are a
--- different shape entirely -- numeric type ids, numeric effect ids, `atk`/`spc`
--- where the engine says `attack`/`special`, and a party dealt onto one fighter
--- rather than an `enemyParty` beside an `enemyIndex`.
+-- `battle.rng`, and may hand the battle to `TrainerAI.chooseMove` itself.  Our
+-- fight is a `BattleSim` `Turn`, whose monsters are a different shape entirely
+-- -- numeric type ids, numeric effect ids, `atk`/`spc` where the engine says
+-- `attack`/`special`, and a party dealt onto one fighter rather than an
+-- `enemyParty` beside an `enemyIndex`.
 --
 -- There were two ways across. The frozen engine `BattleState` is *right there*,
 -- sitting on the stack underneath our screen with a real `enemy` battler and a
 -- real `enemyParty` on it, and the sim's state could simply be written onto it
--- each turn and `battle:vanillaEnemyAction()` called directly. That is less
--- translation, and it is the wrong trade: it mutates a live engine object in
--- the middle of a fight it is not running, which means every bug it produces
--- looks like an engine bug, reproduces only in this mod, and reproduces only
--- some of the time. It would also make this file impossible to test without
--- standing up a whole `BattleState`.
+-- each turn and the brain handed that.  That is less translation, and it is
+-- the wrong trade: it mutates a live engine object in the middle of a fight it
+-- is not running, which means every bug it produces looks like an engine bug,
+-- reproduces only in this mod, and reproduces only some of the time. It would
+-- also make this file impossible to test without standing up a whole
+-- `BattleState`.
 --
 -- So this file synthesises a `BattleState`-*shaped* view from a plain
--- description of the sim's current state, calls the engine AI against the copy,
--- and translates the answer back. Nothing engine-owned is written to. The
--- inputs are tables a caller can build by hand, which is what makes the
--- dispatch (layer / class action / `brain` record / `aiUses` budget) testable
--- under headless `luajit` with no battle anywhere.
+-- description of the sim's current state, hands the brain the copy, and
+-- translates the answer back. Nothing engine-owned is written to. The inputs
+-- are tables a caller can build by hand, which is what makes the dispatch
+-- testable under headless `luajit` with no battle anywhere.
 --
 -- ------- what it will not answer
 --
--- `nil` is a first-class result and never an error. A build whose engine battle
--- modules would not load, a wild encounter (no trainer record, so no per-trainer
--- behaviour to be faithful to), a monster whose every move is disabled, an AI
--- that reached for an item the NPC's bag sheet does not hold, a dataset with no
--- move table -- all of them answer `nil`, and the caller falls back to
--- `Turn:autoPick`, which is a complete answer on its own. That is the whole
--- error contract: this module makes a good fight better and can never make one
--- fail to run.
---
--- **On Red and Gold it answers the move, and nothing else.** The referees run
--- the class's item and switch AI -- and a forced send-out -- themselves, at the
--- cart's point in the turn, from the class data the NPC upload carries
--- (contract K16 of docs/plans/gen12-referee-remaining-gaps.md; `M:_decide`).
--- Gen 3's answer is still the whole turn.
+-- `nil` is a first-class result and never an error, and on Red and Gold it is
+-- the ordinary one: `M.new` builds no brain for a wild encounter (no trainer
+-- record), a Gold trainer, or a Red trainer with no registered `brain`; a
+-- built one declines a forced send-out, a brain's item or switch, a move the
+-- referee would refuse, and a brain that raised.  Gen 3 builds none when its
+-- BattleSim3 modules would not load, and declines a seat with nothing across
+-- the field to score against or no monster to send.  Every one of them leaves
+-- the caller to `Turn:autoPick`, which is a complete answer on its own.  That
+-- is the whole error contract: this module can decline, but never make a
+-- fight fail to run.
 --
 -- ------- two index vocabularies, and the one this speaks
 --
@@ -93,8 +113,10 @@ local max = math.max
 -- `CoopBattle.loadEngine` take: `modkit validate` loads every file in this
 -- folder headlessly with no love and no data, and a require that throws at file
 -- scope would fail the whole mod over a feature the player may never turn on.
--- Every one of these is optional -- a boot missing `TrainerAI` fights on with
--- `autoPick`, which is exactly what happened before this file existed.
+-- Both are optional, and both are Red's alone: `TrainerAI.classFor` resolves a
+-- trainer's class (where a registered `brain` may hang), and `TypeChart` is
+-- the chart a brain that runs the engine's LAYER_3 asks for effectiveness.
+-- A boot missing either fights on with `autoPick`.
 
 local engine, engineTried
 
@@ -106,13 +128,8 @@ local function loadEngine()
     local ok, value = pcall(require, path)
     if ok and value ~= nil then parts[key] = value end
   end
-  -- Gen 1: the three vanilla scoring layers, the per-class item/switch table,
-  -- and the type chart those layers ask for effectiveness.
   grab("TrainerAI", "src.battle.TrainerAI")
   grab("TypeChart", "src.battle.TypeChart")
-  -- Gen 2: the ten flag-gated layers, plus the damage estimator they rank by.
-  grab("Ai2", "src.battle.gen2.Ai")
-  grab("Damage2", "src.battle.gen2.Damage")
   engine = parts
   return engine
 end
@@ -130,6 +147,16 @@ local function warnOnce(key, message)
   if log and log.warn then pcall(log.warn, log, message) end
 end
 
+-- The default generator a brain draws from (`battle.rng`, Gen 3's rolls):
+-- love's, else math's, `(lo, hi)` or `(hi)` as the engine's `rng` is called.
+local function defaultRng(lo, hi)
+  if hi == nil then lo, hi = 1, lo end
+  if hi < lo then return lo end
+  local love_ = rawget(_G, "love")
+  local roll = love_ and love_.math and love_.math.random or math.random
+  return roll(lo, hi)
+end
+
 -- ------------------------------------------------------------------
 -- the sim's spellings, and the engine's
 -- ------------------------------------------------------------------
@@ -143,17 +170,11 @@ local STATUS_TO_ENGINE = {
   freeze = "FRZ", paralysis = "PAR", toxic = "TOX",
 }
 
--- Both sims carry battle stats under short keys and the two generations do not
--- agree: Gen 1 is atk/def/spd/spc with one shared Special, Gen 2 is
--- atk/def/spe/spa/spd with Speed spelled `spe` and `spd` meaning Sp.Def. Read
--- through these rather than by key, so a view built from either sim answers.
-local function statOf(stats, ...)
+-- Red's battle stats ride under short keys (atk/def/spd/spc, one shared
+-- Special); a sheet with no stats table reads every one as absent.
+local function statOf(stats, key)
   if type(stats) ~= "table" then return nil end
-  for i = 1, select("#", ...) do
-    local value = tonumber(stats[select(i, ...)])
-    if value then return value end
-  end
-  return nil
+  return tonumber(stats[key])
 end
 
 -- The numeric type ids a sim monster carries are positions in an ordering the
@@ -161,7 +182,7 @@ end
 -- which sorts the registry's own type ids and cuts the tail at
 -- `Config.BATTLE_TYPE_MAX`. Reversing it is how a sim mon gets its engine type
 -- names back, and it is deliberately *that* function rather than a second copy
--- of the same sort: two orderings that drift would hand the AI a Fire move
+-- of the same sort: two orderings that drift would hand a brain a Fire move
 -- against a Rock defender and call it neutral, silently, forever.
 local mediated, mediatedTried
 
@@ -175,8 +196,8 @@ local function typeOrderOf(data)
       mediated = false
       warnOnce("typeOrder",
         "the mod's own MediatedBattle module did not load, so a solo trainer's "
-        .. "AI cannot resolve type matchups and will score moves without them; "
-        .. "reinstall the mod folder so every file under src/ is present")
+        .. "registered AI sees no types on either monster; reinstall the mod "
+        .. "folder so every file under src/ is present")
     end
   end
   if not mediated then return nil end
@@ -207,8 +228,9 @@ end
 
 -- The engine's per-class record for this trainer, or nil.
 --
--- Shared by itemsFor / bagFor / _usesFor so a third caller cannot resolve the
--- class one way and the budget another.
+-- Shared by brainOf / _usesFor here and by MediatedBattle.aiClass1, which
+-- states the same record on the NPC upload (contract K16): one resolution of
+-- a trainer's class, not two.
 local function classOf(trainer, data)
   local eng = loadEngine()
   local TrainerAI = eng and eng.TrainerAI
@@ -218,173 +240,107 @@ local function classOf(trainer, data)
   if ok and type(class) == "table" then return class end
   return nil
 end
--- ...and for MediatedBattle.aiClass1, which states the same record on the
--- NPC upload (contract K16): one resolution of a trainer's class, not two.
 M.classOf = classOf
 
--- Every item id this trainer's AI could ever reach for.
---
--- Exported for the caller's benefit rather than used here: a `coop_npc` seat
--- whose `bag` sheet is set is held to it (`Turn._bagHas`). The ids come from
--- the trainer's own `items` list and, on Gen 1, the class's `item` -- not from
--- `Turn.DEFAULT_NPC_BAG`, which is a generic gym kit that made every Youngster
--- look like Brock.
-function M.itemsFor(trainer, data, generation)
-  local out = {}
-  if type(trainer) ~= "table" then return out end
-  -- Gen 3 keeps a trainer's kit as up to four numeric pret item ids (the
-  -- engine trainer row's `items`, 0 for an empty slot) and has no class table
-  -- to consult -- nor could it: the Gen 1 TrainerAI module is a boot error on
-  -- Emerald.  So its answer is the list itself, zeros dropped.
-  if generation == 3 then
-    for _, id in ipairs(M.itemsOf3(trainer)) do out[#out + 1] = id end
-    return out
-  end
-  local seen = {}
-  local function put(id)
-    if type(id) ~= "string" or id == "" or seen[id] then return end
-    seen[id] = true
-    out[#out + 1] = id
-  end
-  if generation == 2 or type(trainer.items) == "table" then
-    for _, id in ipairs(trainer.items or {}) do put(id) end
-  end
+-- A Red trainer's registered `brain`, or nil: BattleState:vanillaEnemyAction's
+-- `self.trainer.brain or (class and class.brain)` -- the record's own first,
+-- then its class's (through classOf, TrainerAI.classFor's resolution).
+local function brainOf(trainer, data)
+  if type(trainer.brain) == "function" then return trainer.brain end
   local class = classOf(trainer, data)
-  if class then put(class.item) end
-  return out
+  if class and type(class.brain) == "function" then return class.brain end
+  return nil
 end
 
--- The trainer's actual kit, as id → count.
---
--- Gen 2 (and any trainer that already carries an `items` list): each entry is
--- one use, the way AI_TryItem spends `trainer.items`. Gen 1 with no list: the
--- class's `item` × `uses`, which is what BattleState would have allowed -- a
--- bug catcher with uses = 0 carries nothing, a gym leader with uses = 2
--- carries two of their item. Empty when there is nothing to carry; never the
--- generic gym kit.
-function M.bagFor(trainer, data, generation)
+-- The trainer's kit as the referee holds it: Gen 3's item slots (M.itemsOf3),
+-- as a list (`itemsFor`, empty slots dropped) or as id -> uses (`bagFor`,
+-- keyed the way the BattleSim3 bag is, docs/plans/gen3-battle-sheet.md §4).
+-- Red and Gold carry no NPC kit at all -- their referees run the cart's item
+-- AI off the class data the upload states (contract K16) -- so both are
+-- empty there.
+function M.itemsFor(trainer, _, generation)
+  if generation ~= 3 then return {} end
+  return M.itemsOf3(trainer)
+end
+
+function M.bagFor(trainer, _, generation)
   local bag = {}
-  if type(trainer) ~= "table" then return bag end
-  -- Gen 3: one use per slot, keyed by the numeric id the BattleSim3 bag is
-  -- keyed by (docs/plans/gen3-battle-sheet.md §4).
-  if generation == 3 then
-    for _, id in ipairs(M.itemsOf3(trainer)) do bag[id] = (bag[id] or 0) + 1 end
-    return bag
-  end
-  if generation == 2 or type(trainer.items) == "table" then
-    for _, id in ipairs(trainer.items or {}) do
-      if type(id) == "string" and id ~= "" then
-        bag[id] = (bag[id] or 0) + 1
-      end
-    end
-  end
-  if generation ~= 2 then
-    local class = classOf(trainer, data)
-    local item = class and class.item
-    local uses = class and max(0, tonumber(class.uses) or 0) or 0
-    if type(item) == "string" and item ~= "" and uses > 0 then
-      bag[item] = max(bag[item] or 0, uses)
-    end
-  end
+  if generation ~= 3 then return bag end
+  for _, id in ipairs(M.itemsOf3(trainer)) do bag[id] = (bag[id] or 0) + 1 end
   return bag
 end
 
--- bagFor as a `{id, count}` list the wire (and sendParty) already speaks.
-function M.bagEntries(trainer, data, generation)
-  local bag = M.bagFor(trainer, data, generation)
-  local out = {}
-  for id, count in pairs(bag) do
-    out[#out + 1] = { id = id, count = count }
-  end
-  table.sort(out, function(a, b) return a.id < b.id end)
-  return out
-end
-
 -- opts:
---   game        the live game; `game.data` is the dataset the AI reads
+--   game        the live game; `game.data` is the dataset a brain reads
 --   engine      the frozen engine BattleState underneath, for its trainer
 --   trainer     an explicit trainer record, overriding the one above
 --   data        an explicit dataset, overriding game.data
---   generation  1 or 2; defaults to Gen.generation(game)
---   aiMods      the Gen 1 scoring layers; defaults to the battle's own
+--   generation  1, 2 or 3; defaults to Gen.generation(game)
+--   aiMods      the Gen 1 scoring layers a brain's view states; defaults to
+--               the battle's own
 --   rng         function(lo, hi) -> integer in [lo, hi]
 --   typeName    function(n) -> engine type id, or an array indexed from 1;
 --               injected by the suites so a unit test needs no type chart
 --
--- Returns the brain, or nil plus a reason. A reason and not a raise: the caller
--- is a divert path that must leave the vanilla battle running when this cannot
--- be built, and it has a player standing in front of it either way.
+-- Returns the brain, or nil plus a reason. A reason and not a raise: on Red
+-- and Gold nil is the ordinary answer (see the header), and the caller is a
+-- divert path with a player standing in front of it either way.
 function M.new(opts)
   opts = opts or {}
   local game = opts.game
   -- Gen 3 is built by its own constructor, before anything below asks for a
   -- dataset: its moves, types and stats all ride on the BattleSim3 sheets
   -- (docs/plans/gen3-battle-sheet.md), so there is no `data.moves` to need,
-  -- and none of the Gen 1 / Gen 2 engine modules may be reached for at all.
+  -- and none of the Gen 1 engine modules may be reached for at all.
   if tonumber(opts.generation) == 3
       or (opts.generation == nil and Gen.generation(game) == 3) then
     return M.new3(opts)
   end
+
+  local trainer = opts.trainer or M.trainerOf(opts.engine)
+  if type(trainer) ~= "table" then
+    -- A wild encounter: the referee's own wild pick (pokered's random move,
+    -- pokecrystal ParseEnemyAction) is the cart's answer there.
+    return nil, "this battle has no trainer record, so there is no AI to bridge"
+  end
+
+  -- Gold's computer is the referee's whole: AIChooseMove,
+  -- AI_SwitchOrTryItem and the replacement, with no brain seam to defer to.
+  -- What passes is Red -- and anything unrecognisable (a stub game with no
+  -- generation) reads as Red, the build this file was first written for.
+  if (tonumber(opts.generation) or Gen.generation(game)) == 2 then
+    return nil, "a Gold trainer's AI is the referee's own (AIChooseMove)"
+  end
+
   local data = opts.data or (type(game) == "table" and game.data) or nil
   if type(data) ~= "table" or type(data.moves) ~= "table" then
     return nil, "no dataset to read the trainer's moves from"
   end
-
-  local trainer = opts.trainer or M.trainerOf(opts.engine)
-  if type(trainer) ~= "table" then
-    -- A wild encounter has no trainer and therefore no per-trainer behaviour to
-    -- be faithful to. `autoPick` is the honest answer there, and refusing here
-    -- is how the caller learns to use it without a second predicate.
-    return nil, "this battle has no trainer record, so there is no AI to bridge"
+  local brain = brainOf(trainer, data)
+  if not brain then
+    return nil, "no registered brain: the referee runs this trainer's own TrainerAI"
   end
 
-  -- Three-way, not a clamp: Gen 3 left above through M.new3, so what reaches
-  -- here is Gold (2) or Red -- and anything unrecognisable (a stub game with
-  -- no generation) reads as Red, the build this file was first written for.
-  local generation = tonumber(opts.generation) or Gen.generation(game)
-  if generation ~= 2 then generation = 1 end
-
-  local eng = loadEngine()
-  if generation == 1 and not (eng and eng.TrainerAI) then
-    return nil, "the engine's TrainerAI module is unavailable"
-  end
-  if generation == 2 and not (eng and eng.Ai2) then
-    return nil, "the engine's Gen 2 Ai module is unavailable"
-  end
-
-  local rng = opts.rng
-  if type(rng) ~= "function" then
-    rng = function(lo, hi)
-      if hi == nil then lo, hi = 1, lo end
-      if hi < lo then return lo end
-      local love_ = rawget(_G, "love")
-      local roll = love_ and love_.math and love_.math.random or math.random
-      return roll(lo, hi)
-    end
-  end
-
-  local self = setmetatable({
+  return setmetatable({
     data = data,
-    generation = generation,
+    generation = 1,
     trainer = trainer,
-    rng = rng,
+    brainFn = brain,
+    rng = type(opts.rng) == "function" and opts.rng or defaultRng,
     -- The Gen 1 scoring layers. `battle.enemyAIMods` is what BattleState reads
     -- and the trainer record is where it came from, so either answers.
     aiMods = opts.aiMods
       or (type(opts.engine) == "table" and opts.engine.enemyAIMods)
       or trainer.aiMods,
     typeName = opts.typeName,
-    -- wAICount and wAILayer2Encouragement, both of which the engine resets on
-    -- every enemy send-out. Seeded on the first turn each monster is out --
-    -- see M:_rollover.  On Red the count is what a registered `brain` record
-    -- reads off the view; the item budget itself is the referee's (K16).
+    -- wAICount and wAILayer2Encouragement, both of which BattleState resets
+    -- on every enemy send-out, and the turns the monster has been out -- the
+    -- per-send-out surface a brain reads off its view (M:_rollover).
     aiUses = 0,
     aiLayer2 = 0,
     turns = 0,
     lastMon = nil,
   }, M)
-
-  return self
 end
 
 -- ------------------------------------------------------------------
@@ -412,8 +368,9 @@ function M:_typesOf(simMon)
   return out
 end
 
--- `TypeChart.rows` asserts on a chart that was never loaded, and Gen 1's
--- LAYER_3 calls it for every move it scores. The engine loads the chart when it
+-- `TypeChart.rows` asserts on a chart that was never loaded, and the engine's
+-- LAYER_3 calls it for every move it scores -- which a brain that hands its
+-- view to `TrainerAI.chooseMove` reaches. The engine loads the chart when it
 -- opens a battle, so in the live game this probe always passes on the first
 -- turn and never runs again; it exists for the headless case, where nothing has
 -- opened a battle and the assert would take the whole choice with it.
@@ -442,11 +399,11 @@ end
 -- The move slots `_normaliseChoice` would take, as `{ id, pp, move }` where
 -- `move` is already the zero-based index a choice states.
 --
--- Two rules, both the sim's rather than the AI's: a slot with no PP is refused
--- unless *every* slot is empty (which is how the sim spells Struggle), and a
--- disabled slot is refused outright. Filtering here rather than after the AI
--- has chosen is what keeps a refused choice from silently costing the NPC its
--- turn.
+-- Two rules, both the sim's rather than the brain's: a slot with no PP is
+-- refused unless *every* slot is empty (which is how the sim spells Struggle),
+-- and a disabled slot is refused outright. Filtering here rather than after the
+-- brain has chosen is what keeps a refused choice from silently costing the
+-- NPC its turn.
 local function legalMoves(simMon)
   local moves = (simMon and simMon.moves) or {}
   local anyPp = false
@@ -478,13 +435,13 @@ end
 --                   (required except on a forced send-out)
 --   party           the NPC fighter's whole `mons` list, in order (optional)
 --   active          index into `party` of `mon`                   (optional)
---   bag             the NPC fighter's bag sheet, id -> count      (optional)
+--   bag             the NPC fighter's bag sheet, id -> count      (optional;
+--                   Gen 3's, the trainer's item slots)
 --   mustReplace     the fighter owes a send-out, not a turn       (optional)
---   playerUsedMoves move ids the player has used this fight       (optional)
---   playerTurns     turns the player's active monster has been out (optional)
 --
--- and, for a Gen 3 lone double only (absent on every 1v1, which then reads
--- exactly as it always has):
+-- and, for Gen 3, the referee itself (`sim`, `battler`, `foeBattler`,
+-- `fighter`) when SoloBattle builds the view; for a Gen 3 lone double only
+-- (absent on every 1v1, which then reads exactly as it always has):
 --
 --   double          true
 --   seat            the field slot of the trainer seat choosing (3 or 4)
@@ -495,7 +452,7 @@ end
 --                   switches or sends in this turn
 --
 -- Returns a choice in `Turn:submitChoice`'s vocabulary --
--- `{ action = "fight", move = <zero-based index> }`,
+-- `{ action = "fight", move = <zero-based index> }`, and on Gen 3 also
 -- `{ action = "switch", slot = <the monster's own slot> }` or
 -- `{ action = "item", item = <id> }` -- or nil when it has no answer, which is
 -- a normal outcome and the caller's cue to call `Turn:autoPick`.
@@ -520,23 +477,37 @@ function M:choose(view)
     return nil
   end
 
-  self:_rollover(view)
-
-  -- The whole decision, inside one pcall. Everything below reaches into engine
-  -- modules that were written for a different object, and the contract of this
-  -- file is that it can decline but never throw: a raise here would surface as
-  -- a battle that stops answering, which is worse than a generic move.
+  -- The whole decision, inside one pcall. Everything below reaches into
+  -- engine-shaped views and another mod's code, and the contract of this file
+  -- is that it can decline but never throw: a raise here would surface as a
+  -- battle that stops answering, which is worse than the referee's answer.
   local ok, choice = pcall(self._decide, self, view)
   if not ok then
     warnOnce("decide",
-      "the engine's trainer AI could not be driven against this battle ("
-      .. tostring(choice) .. "), so solo trainers will fight with the "
-      .. "referee's generic move picker instead; report this with the game "
-      .. "version and the trainer you were fighting")
+      "the solo trainer AI could not be asked about this battle ("
+      .. tostring(choice) .. "), so the referee's own trainer AI answers "
+      .. "instead; report this with the game version and the trainer you "
+      .. "were fighting")
     return nil
   end
   return choice
 end
+
+function M:_decide(view)
+  -- Gen 3 answers the whole turn, its forced send-out included: the cart's
+  -- opponent controller sends out GetMostSuitableMonToSwitchInto, not the
+  -- next monster in the party (see M:_replacement3).
+  if self.generation == 3 then return self:_decideGen3(view) end
+  -- Red, a registered brain: the move, and only the move.  A forced send-out
+  -- is EnemySendOut's party walk, which the referee runs (`autoPick`, which
+  -- SoloBattle files when this answers nil).
+  if view.mustReplace then return nil end
+  return self:_decideBrain(view)
+end
+
+-- ------------------------------------------------------------------
+-- Red: a registered brain
+-- ------------------------------------------------------------------
 
 -- wAICount and wAILayer2Encouragement are reset on every enemy send-out, and
 -- the send-out this file can see is "the active monster is not the one it was
@@ -555,58 +526,49 @@ function M:_rollover(view)
   self.aiUses = self:_usesFor()
 end
 
--- BattleState:aiUsesFor, without the BattleState: the class record's `uses`, or
--- zero for a trainer whose class never reaches for anything.
+-- BattleState:aiUsesFor, without the BattleState: the class record's `uses`,
+-- or zero for a trainer whose class never reaches for anything.  A brain reads
+-- it off its view; the count the class routine actually spends is the
+-- referee's (contract K16), so it is seeded here and never spent.
 function M:_usesFor()
-  if self.generation ~= 1 then return 0 end
   local class = classOf(self.trainer, self.data)
   if not class then return 0 end
   return max(0, tonumber(class.uses) or 0)
 end
 
-function M:_decide(view)
-  -- Gen 3 answers the whole turn, its forced send-out included: the cart's
-  -- opponent controller sends out GetMostSuitableMonToSwitchInto, not the
-  -- next monster in the party (see M:_replacement3).
-  if self.generation == 3 then return self:_decideGen3(view) end
-
-  -- ------- Red and Gold: the move, and only the move
-  --
-  -- Both referees run the computer's item and switch AI themselves now, at
-  -- the cart's point in the turn and off the class data the NPC upload states
-  -- (contract K16 of docs/plans/gen12-referee-remaining-gaps.md): pokered
-  -- TrainerAI with its `Random` byte drawn while wAICount lasts, and
-  -- EnemySendOut's party order; pokecrystal AI_SwitchOrTryItem at
-  -- Battle_PlayerFirst / Battle_EnemyFirst, and
-  -- FindMonInOTPartyToSwitchIntoBattle for a replacement.  An item or a
-  -- switch filed from here would take that slot of the turn from the cart's
-  -- own routine, so a forced send-out is left to the referee (`autoPick`,
-  -- which SoloBattle files when this answers nil) and an answer that is not a
-  -- move -- a registered `brain` reaching for the bag -- is declined the same
-  -- way.
-  if view.mustReplace then return nil end
-  local choice
-  if self.generation == 2 then
-    choice = self:_decideGen2(view)
-  else
-    choice = self:_decideGen1(view)
+-- `BattleState:vanillaEnemyAction` with a registered brain: the brain gets
+-- the turn, here as there, and its answer is translated back -- the move
+-- alone (M:_moveOf).
+function M:_decideBrain(view)
+  self:_rollover(view)
+  self:_ensureTypeChart()
+  local battle = self:_gen1Battle(view)
+  local ok, action = pcall(self.brainFn, battle)
+  -- BattleState's enemy battler keeps wAILayer2Encouragement from one
+  -- selection to the next, so a brain that hands its view to
+  -- `TrainerAI.chooseMove` (which counts the selection on the battler, layer
+  -- 2 firing on the second) needs the count back off the copy before it is
+  -- discarded.
+  self.aiLayer2 = tonumber(battle.enemy.aiLayer2) or self.aiLayer2
+  if not ok then
+    warnOnce("brain",
+      "a solo trainer's registered AI brain raised an error ("
+      .. tostring(action) .. "), so the referee's own trainer AI answers for "
+      .. "it instead; report this to the mod that registered the brain")
+    return nil
   end
-  if type(choice) ~= "table" or choice.action ~= "fight" then return nil end
-  return choice
+  return self:_moveOf(action, view, battle)
 end
-
--- ------------------------------------------------------------------
--- Gen 1
--- ------------------------------------------------------------------
 
 -- A `BattleState`-shaped copy of the sim's current field.
 --
--- Only the surface `TrainerAI` reads is filled, plus the handful of fields a
--- registered `brain` record plausibly reaches for (species, level, stats), so
--- that a mod's own brain meets something recognisable rather than a stub. The
--- table is rebuilt per call and thrown away after: `chooseMove` *writes*
--- `battler.aiLayer2`, and a shared view would carry that write into the next
--- turn twice.
+-- Only the surface a registered brain reads is filled -- the engine's own
+-- TrainerAI's, for a brain that wraps it, plus the handful of fields a brain
+-- plausibly reaches for (species, level, stats) -- so that a mod's brain meets
+-- something recognisable rather than a stub. The table is rebuilt per call and
+-- thrown away after; what BattleState would carry from one turn to the next
+-- (wAICount, wAILayer2Encouragement, the turn count) is kept on this object
+-- instead (M:_rollover, M:_decideBrain).
 function M:_gen1Battle(view)
   local mon, foe = view.mon, view.foe
   local enemy = self:_battler(mon, false)
@@ -628,10 +590,11 @@ function M:_gen1Battle(view)
     -- Vanilla Gen 1 never reads the enemy's PP -- `SelectEnemyMove` does not
     -- look -- and the engine spells that as `enemyUnlimitedPP`. The referee
     -- does deplete it, though, and a choice naming an empty slot is refused
-    -- outright by `_normaliseChoice`. Between "the AI may pick a move that
-    -- cannot be used" and "the AI respects a limit the cart did not have", the
-    -- second is the one that still produces a fight, so the flag is forced off
-    -- here whatever the frozen battle's ruleset says.
+    -- outright by `_normaliseChoice`. Between "a brain that asks
+    -- `TrainerAI.chooseMove` may get a move that cannot be used" and "it
+    -- respects a limit the cart did not have", the second is the one that
+    -- still produces a fight, so the flag is forced off here whatever the
+    -- frozen battle's ruleset says.
     ruleset = { enemyUnlimitedPP = false },
     enemyAIMods = self.aiMods,
     aiUses = self.aiUses,
@@ -666,8 +629,8 @@ function M:_battler(simMon, isPlayer)
       hp = tonumber(simMon and simMon.maxHp) or 1,
       attack = statOf(simMon and simMon.stats, "atk") or 1,
       defense = statOf(simMon and simMon.stats, "def") or 1,
-      speed = statOf(simMon and simMon.stats, "spd", "spe") or 1,
-      special = statOf(simMon and simMon.stats, "spc", "spa") or 1,
+      speed = statOf(simMon and simMon.stats, "spd") or 1,
+      special = statOf(simMon and simMon.stats, "spc") or 1,
     },
   }
 
@@ -681,8 +644,8 @@ function M:_battler(simMon, isPlayer)
     stages = {
       attack = tonumber(stages.atk) or 0,
       defense = tonumber(stages.def) or 0,
-      speed = tonumber(stages.spd) or tonumber(stages.spe) or 0,
-      special = tonumber(stages.spc) or tonumber(stages.spa) or 0,
+      speed = tonumber(stages.spd) or 0,
+      special = tonumber(stages.spc) or 0,
       accuracy = tonumber(stages.acc) or 0,
       evasion = tonumber(stages.eva) or 0,
     },
@@ -691,104 +654,36 @@ function M:_battler(simMon, isPlayer)
   }
 end
 
--- `BattleState:vanillaEnemyAction`, step for step: a registered `brain` record
--- supersedes everything, then the class's item/switch roll gets the turn if it
--- wants it, then the scoring layers pick a move.
-function M:_decideGen1(view)
-  local TrainerAI = (loadEngine() or {}).TrainerAI
-  if not TrainerAI then return nil end
-  self:_ensureTypeChart()
-
-  local battle = self:_gen1Battle(view)
-
-  local classOk, class = pcall(TrainerAI.classFor, battle)
-  class = classOk and class or nil
-  local brain = self.trainer.brain or (type(class) == "table" and class.brain)
-  if type(brain) == "function" then
-    local ok, action = pcall(brain, battle)
-    if not ok then return nil end
-    -- A brain owns the move; an item or a switch it answers is the
-    -- referee's to make (`_decide` declines it).
-    return self:_fromEngineAction(action, view, battle)
-  end
-
-  -- No TrainerAI.classAction here: the class routine -- its roll, its
-  -- `wAICount`, its item or rotation -- is the referee's (contract K16), run
-  -- in the computer's slot of the turn from the uploaded `aiClass`.
-  local ok, chosen = pcall(TrainerAI.chooseMove, battle.enemy, battle.rng, battle)
-  -- `chooseMove` counts the selection on the battler it was handed, and layer 2
-  -- only fires on the second selection of each monster -- so the count has to
-  -- come back off the copy before it is discarded.
-  self.aiLayer2 = tonumber(battle.enemy.aiLayer2) or self.aiLayer2
-  if not ok or type(chosen) ~= "table" then return nil end
+-- Translate a brain's answer -- what `vanillaEnemyAction` would return: a
+-- move instance (one of `battle.enemy.curMoves`, or anything with an `id`), a
+-- `{ struggle = true }`, or a class routine's `{ special = "aiItem" |
+-- "aiSwitch" }` -- into a move choice, or decline.  The `special` answers are
+-- declined: the item and the switch are the class routine's slot of the turn,
+-- which the referee runs from the uploaded `aiClass` (contract K16), and an
+-- item or switch filed from here would take it from the cart's own routine.
+function M:_moveOf(action, view, battle)
+  if type(action) ~= "table" or action.special ~= nil then return nil end
 
   -- Struggle. The referee has its own spelling for this (every slot empty makes
   -- any index legal) and no id to match against, so the answer is the first
   -- slot the referee would accept.
-  if chosen.struggle then
-    local legal = legalMoves(view.mon)
-    if #legal == 0 then return nil end
-    return { action = "fight", move = legal[1].move }
-  end
-
-  -- `chooseMove` returns one of the very entries it was given, so identity is
-  -- the exact answer to "which slot" -- and it is the only exact one, because a
-  -- monster may legally know the same move twice.
-  for index, move in ipairs(battle.enemy.curMoves) do
-    if move == chosen then
-      return self:_fightAt(view, index)
-    end
-  end
-  return self:_fightById(view, chosen.id)
-end
-
--- Translate `vanillaEnemyAction`'s answer -- an `{ special = ... }` table from
--- the class routine, or a bare move instance from a brain or a locked action.
-function M:_fromEngineAction(action, view, battle)
-  if type(action) ~= "table" then return nil end
-
-  if action.special == "aiSwitch" then
-    local index = tonumber(action.index)
-    local target = index and (view.party or {})[index]
-    if type(target) ~= "table" then return nil end
-    if target == view.mon or (tonumber(target.hp) or 0) <= 0 then return nil end
-    return { action = "switch", slot = tonumber(target.slot) or 0 }
-  end
-
-  if action.special == "aiItem" then
-    local item = action.item
-    if type(item) ~= "string" or item == "" then return nil end
-    -- A seat with a bag sheet is held to it by `_normaliseChoice`, and a
-    -- refused choice would cost the trainer its turn without saying so. A seat
-    -- with no sheet is permissive, and so is this.
-    if type(view.bag) == "table" and (tonumber(view.bag[item]) or 0) <= 0 then
-      return nil
-    end
-    -- No `slot`: the referee reads an absent one as the active monster, which
-    -- is the only monster a trainer's AI ever heals.
-    return { action = "item", item = item }
-  end
-
   if action.struggle then
     local legal = legalMoves(view.mon)
     if #legal == 0 then return nil end
     return { action = "fight", move = legal[1].move }
   end
 
-  if action.id ~= nil then
-    if battle then
-      for index, move in ipairs(battle.enemy.curMoves) do
-        if move == action then return self:_fightAt(view, index) end
-      end
-    end
-    return self:_fightById(view, action.id)
+  -- One of the very entries the view handed over: identity is the exact
+  -- answer to "which slot" -- and the only exact one, because a monster may
+  -- legally know the same move twice.
+  for index, move in ipairs(battle.enemy.curMoves) do
+    if move == action then return self:_fightAt(view, index) end
   end
-
-  return nil
+  return self:_fightById(view, action.id)
 end
 
 -- A one-based slot in the monster's move list, as a choice -- but only if the
--- referee would take it. The AI is allowed to want a move the sim will not
+-- referee would take it. A brain is allowed to want a move the sim will not
 -- accept (a disabled slot on a build where the two disagree about the count);
 -- answering nil there hands the turn to `autoPick` rather than losing it.
 function M:_fightAt(view, slot)
@@ -811,230 +706,13 @@ function M:_fightById(view, moveId)
 end
 
 -- ------------------------------------------------------------------
--- Gen 2
--- ------------------------------------------------------------------
---
--- Gold's AI is a friendlier thing to bridge than Red's: `Ai.choose` already
--- takes a plain context table rather than a `BattleState`, because the engine
--- built it that way for its own tests. So the adapter here is a context builder
--- and nothing else -- there is no synthetic battle object at all, and
--- `Battle:vanillaEnemyMove` is the shape being mirrored rather than a thing
--- being fooled.
---
--- Two of the cart's inputs have no counterpart in a `BattleSim` field and are
--- therefore left absent rather than guessed: the weather (the sim models none)
--- and the `usedMoves` history the switch heuristic scores matchups from. The
--- second is offered on the view (`playerUsedMoves`) for a caller that keeps it,
--- and its absence reads as a neutral matchup -- which `Ai.switchScore` answers
--- by not rotating, the conservative half of the wrong answer.
-
--- `spd` is the one key the two sims disagree about outright: Gen 1 spells Speed
--- with it, Gen 2 spells Sp.Def with it and puts Speed on `spe`. So the shape is
--- decided the same way `BattleSim2`'s own ingest decides it -- by whether the
--- Gen 2 keys are present at all -- rather than by falling back key by key,
--- which would quietly file a Gen 1 Speed stage as a Sp.Def one.
-function M:_gen2Stages(simMon)
-  local stages = (simMon and simMon.stages) or {}
-  local gen2Shaped = stages.spe ~= nil or stages.spa ~= nil
-  local speed = gen2Shaped and stages.spe or stages.spd
-  local spAttack = gen2Shaped and stages.spa or stages.spc
-  local spDefense = gen2Shaped and stages.spd or stages.spc
-  return {
-    attack = tonumber(stages.atk) or 0,
-    defense = tonumber(stages.def) or 0,
-    speed = tonumber(speed) or 0,
-    specialAttack = tonumber(spAttack) or 0,
-    specialDefense = tonumber(spDefense) or 0,
-    accuracy = tonumber(stages.acc) or 0,
-    evasion = tonumber(stages.eva) or 0,
-  }
-end
-
-function M:_decideGen2(view)
-  local eng = loadEngine()
-  local Ai = eng and eng.Ai2
-  if not Ai then return nil end
-  local flags = Ai.flagsOf(self.trainer.attributes)
-
-  -- AI_SwitchOrTryItem is the referee's (contract K16: the class attributes
-  -- ride the NPC upload), run at Battle_PlayerFirst / Battle_EnemyFirst --
-  -- this answers the move.
-  local legal = legalMoves(view.mon)
-  if #legal == 0 then return nil end
-
-  -- A class with no AI word picks at random, which is what AIChooseMove does
-  -- when wEnemyTrainerAIFlags is zero -- and what a wild mon does. It is a real
-  -- answer, not a fallback, so it is returned rather than declined.
-  if flags == 0 then
-    return { action = "fight", move = legal[self.rng(1, #legal)].move }
-  end
-
-  local mon, foe = view.mon, view.foe
-  local data = self.data
-  local chart = type(data.type_chart) == "table" and data.type_chart or {}
-  local enemyTypes, playerTypes = self:_typesOf(mon), self:_typesOf(foe)
-
-  local ok, chosen = pcall(Ai.choose, {
-    moves = legal,
-    moveDef = function(id) return data.moves[id] end,
-    attacker = {
-      level = tonumber(mon.level) or 1,
-      stats = {
-        attack = statOf(mon.stats, "atk") or 1,
-        specialAttack = statOf(mon.stats, "spa", "spc") or 1,
-      },
-      types = enemyTypes,
-    },
-    defender = {
-      hp = tonumber(foe.hp) or 0,
-      stats = {
-        defense = statOf(foe.stats, "def") or 1,
-        specialDefense = statOf(foe.stats, "spd", "spc") or 1,
-      },
-      status = STATUS_TO_ENGINE[foe.status] or nil,
-      confused = (tonumber(foe.confusion) or 0) > 0,
-      types = playerTypes,
-    },
-    typeChart = chart,
-    data = data,
-    enemyHp = tonumber(mon.hp) or 0,
-    enemyMaxHp = tonumber(mon.maxHp) or 1,
-    enemyTurns = self.turns,
-    playerTurns = tonumber(view.playerTurns) or self.turns,
-    smart = self:_gen2Smart(view, enemyTypes, playerTypes),
-    playerLastPower = self:_gen2LastPower(view),
-    attackerStages = self:_gen2Stages(mon),
-    defenderStages = self:_gen2Stages(foe),
-    flags = flags,
-    random = function(n) return self.rng(0, max(0, (tonumber(n) or 1) - 1)) end,
-  })
-  if not ok or type(chosen) ~= "string" then return nil end
-  return self:_fightById(view, chosen)
-end
-
--- Everything AI_Smart's seventy handlers read that a `BattleSim` field can
--- honestly answer. A field this sim does not model is simply absent, and the
--- engine's own comment on this table is that a missing field never fires its
--- branch -- so an omission costs one handler, never correctness.
-function M:_gen2Smart(view, enemyTypes, playerTypes)
-  local mon, foe, data = view.mon, view.foe, self.data
-  local chart = type(data.type_chart) == "table" and data.type_chart or {}
-
-  local knownEffects, moveIds = {}, {}
-  for _, move in ipairs(mon.moves or {}) do
-    moveIds[move.id] = true
-    local def = data.moves[move.id]
-    if def and def.effect then knownEffects[def.effect] = true end
-  end
-
-  local usedEffects, physical, special = {}, 0, 0
-  local Damage2 = (loadEngine() or {}).Damage2
-  local categories = chart.types
-  for _, id in ipairs(view.playerUsedMoves or {}) do
-    local def = data.moves[id]
-    if def then
-      if def.effect then usedEffects[def.effect] = true end
-      if (tonumber(def.power) or 0) > 0 then
-        local isPhysical = true
-        if Damage2 and type(Damage2.isPhysical) == "function" then
-          local ok, value = pcall(Damage2.isPhysical, def.type, categories)
-          if ok then isPhysical = value and true or false end
-        end
-        if isPhysical then physical = physical + 1 else special = special + 1 end
-      end
-    end
-  end
-
-  local hasBench = false
-  for _, member in ipairs(view.party or {}) do
-    if member ~= mon and (tonumber(member.hp) or 0) > 0 then hasBench = true; break end
-  end
-
-  local playerSpecial = false
-  if type(categories) == "table" then
-    for _, id in ipairs(playerTypes) do
-      local record = categories[id]
-      if type(record) == "table" and record.category == "special" then
-        playerSpecial = true
-        break
-      end
-    end
-  end
-
-  return {
-    enemyHp = tonumber(mon.hp) or 0,
-    enemyMaxHp = tonumber(mon.maxHp) or 1,
-    playerHp = tonumber(foe.hp) or 0,
-    playerMaxHp = tonumber(foe.maxHp) or 1,
-    enemyFaster = (statOf(mon.stats, "spe", "spd") or 0)
-      > (statOf(foe.stats, "spe", "spd") or 0),
-    enemyTurns = self.turns,
-    playerTurns = tonumber(view.playerTurns) or self.turns,
-    enemyStatus = STATUS_TO_ENGINE[mon.status] or nil,
-    playerStatus = STATUS_TO_ENGINE[foe.status] or nil,
-    playerToxic = foe.status == "toxic",
-    enemyToxic = mon.status == "toxic",
-    playerLeechSeed = foe.leechSeed ~= nil,
-    enemyLeechSeed = mon.leechSeed ~= nil,
-    playerCharged = foe.charging ~= nil,
-    playerFlying = foe.invulnerable == true,
-    enemyRage = mon.raging == true,
-    enemySleepTurns = mon.status == "sleep" and (tonumber(mon.statusTurns) or 0) or nil,
-    enemyHasBench = hasBench,
-    stages = self:_gen2Stages(mon),
-    playerStages = self:_gen2Stages(foe),
-    knownEffects = knownEffects,
-    enemyMoveIds = moveIds,
-    enemyTypes = enemyTypes,
-    playerTypes = playerTypes,
-    playerSpecialType = playerSpecial,
-    playerPhysicalMoves = physical,
-    playerSpecialMoves = special,
-    playerUsedEffects = usedEffects,
-    playerMatchupScore = self:_gen2MatchupScore(view, enemyTypes),
-  }
-end
-
--- wLastPlayerCounterMove's base power, which two SMART handlers take as their
--- fifth argument. Only a caller that tracks the player's history can answer it.
-function M:_gen2LastPower(view)
-  local used = view.playerUsedMoves
-  if type(used) ~= "table" or #used == 0 then return nil end
-  local def = self.data.moves[used[#used]]
-  return def and tonumber(def.power) or nil
-end
-
--- CheckPlayerMoveTypeMatchups: one point off BASE_AI_SWITCH_SCORE for every
--- super-effective damaging move the player has *shown*. With no history the
--- score stays neutral, which reads to `Ai.switchScore` as "the player is not
--- winning the matchup" and therefore as no rotation.
-function M:_gen2MatchupScore(view, enemyTypes)
-  local eng = loadEngine()
-  local Ai, Damage2 = eng and eng.Ai2, eng and eng.Damage2
-  if not (Ai and Damage2 and type(Damage2.typeMultiplier) == "function") then
-    return nil
-  end
-  local score = tonumber(Ai.BASE_SWITCH_SCORE) or 10
-  local matchups = (type(self.data.type_chart) == "table")
-    and self.data.type_chart.matchups or nil
-  for _, id in ipairs(view.playerUsedMoves or {}) do
-    local def = self.data.moves[id]
-    if def and (tonumber(def.power) or 0) > 0 then
-      local ok, mult = pcall(Damage2.typeMultiplier, def.type, enemyTypes, matchups)
-      if ok and (tonumber(mult) or 10) > 10 then score = score - 1 end
-    end
-  end
-  return score
-end
-
--- ------------------------------------------------------------------
 -- Gen 3
 -- ------------------------------------------------------------------
 --
 -- FireRed / LeafGreen / Emerald trainers think with pret's AI *scripts*
 -- (data/battle_ai_scripts.s, run by src/core/game3/battle/ai_vm.lua over the
--- engine's own battle state), and that is the one Gen 3 engine AI this file
--- does not bridge the way it bridges Red's TrainerAI and Gold's Ai: the VM
+-- engine's own battle state), and that is an engine AI this file cannot drive
+-- the way it hands a registered Red brain a copied battle: the VM
 -- reads some sixty commands' worth of an engine `st` -- battle history, the
 -- controller's per-battler records, the move table by ROM number -- and a copy
 -- of *that* synthesised from a BattleSim3 field would be a second battle
@@ -1052,8 +730,8 @@ end
 --     battle profile.  A youngster with CHECK_BAD_MOVE alone and a gym leader
 --     with half the bits set fight differently for the reason they do on the
 --     cart; a trainer with no bits at all picks among its usable moves at
---     random, which is what an empty script list does there (and what Gold's
---     bridge does for a class with no AI word);
+--     random, which is what an empty script list does there (and what
+--     pokecrystal AIChooseMove does with wEnemyTrainerAIFlags zero);
 --   * **scoring**: every usable move starts at 100 and each script moves it
 --     (AI_CheckBadMove's -8 / -10 / -12, TryToFaint's +4, SetupFirstTurn's
 --     +2 ...), the simulated 85..100 damage roll per move
@@ -1150,8 +828,8 @@ local function int3(value, fallback)
 end
 
 -- A Gen 3 trainer's items: the numeric ids in the engine row's `items` (four
--- slots, 0 for an empty one), in slot order.  Exported for SoloBattle and the
--- bag helpers above.
+-- slots, 0 for an empty one), in slot order.  On the module because the kit
+-- helpers above (itemsFor / bagFor) are defined before it.
 function M.itemsOf3(trainer)
   local out = {}
   if type(trainer) ~= "table" or type(trainer.items) ~= "table" then return out end
@@ -1190,16 +868,6 @@ function M.new3(opts)
   if not Sim3() then
     return nil, "the mod's Gen 3 battle modules are unavailable"
   end
-  local rng = opts.rng
-  if type(rng) ~= "function" then
-    rng = function(lo, hi)
-      if hi == nil then lo, hi = 1, lo end
-      if hi < lo then return lo end
-      local love_ = rawget(_G, "love")
-      local roll = love_ and love_.math and love_.math.random or math.random
-      return roll(lo, hi)
-    end
-  end
   local flags = tonumber(opts.aiFlags) or tonumber(trainer.aiFlags) or 0
   local bits = type(opts.aiBits) == "table" and opts.aiBits or aiBitsOf3()
   local family = (opts.family == "rse" or opts.family == "frlg") and opts.family
@@ -1207,11 +875,10 @@ function M.new3(opts)
   local self = setmetatable({
     generation = 3,
     trainer = trainer,
-    rng = rng,
+    rng = type(opts.rng) == "function" and opts.rng or defaultRng,
     aiFlags = math.max(0, math.floor(flags)),
     aiBits = bits,
     family3 = family,
-    aiUses = 0, aiLayer2 = 0, turns = 0, lastMon = nil,
     -- battleHistory->trainerItems: the four slots, spent to 0 as they are
     -- used, never compacted (ShouldUseItem's slot arithmetic reads the gaps).
     items3 = M.itemsOf3(trainer),

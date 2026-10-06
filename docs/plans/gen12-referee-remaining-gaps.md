@@ -46,6 +46,7 @@ These ride on the side-b NPC `BATTLE_PARTY` upload, like `aiMods` and `name`. Th
 **Elsewhere:**
 - The referee no longer reads an NPC seat's `bag` for the computer's choices on Red / Gold.
 - The client stops uploading an NPC bag on Red / Gold.
+- **Solo fights (decided in wave 2):** on Red / Gold `SoloBrain` no longer answers the computer's move either. The referee now holds the carts' own move choice (Red: AIEnemyTrainerChooseMoves + SelectEnemyMove from `aiMods`; Gold: AIChooseMove from `aiFlags`), drawing at the carts' points, while the engine's Gen 2 port (`src/battle/gen2/Ai.lua`) departs from pret in layer order, rolls and filtering (W1-A2m §5), and either engine port draws from the client's RNG at the wrong point. So a solo NPC seat goes through the same `autoPick` path as a hub's NPC seat. The one exception is a mod-registered `brain` function on a Red trainer or class (the engine's ai_classes seam): `SoloBrain` still files that brain's move, so another mod's custom AI keeps working. This supersedes `docs/plans/offline-solo-battles.md` D3 for Red / Gold; D3's reason (a trainer plays like itself, not like a generic picker) is better served by the cart's own routine. Gen 3 is unchanged.
 
 ### K17: name marks in battle text
 
