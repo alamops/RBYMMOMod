@@ -1538,7 +1538,9 @@ return function(game)
     -- Without it the seat has no pokedex row to draw a front pic from and no
     -- level to print, which is the placeholder box under `Lv 1`.
     local top = H.top(game)
-    local foeSlot = (top.mySlot and top:mySlot() == 0) and 2 or 0
+    -- The other side's lead, by the screen's own reckoning: side b starts at
+    -- Config.COOP_SIDE, which is the party size (3), not 2.
+    local foeSlot = top.foeSlot and top:foeSlot() or 0
     H.waitFor(game, function()
       local live = H.top(game)
       return H.isMediatedBattle(live)
