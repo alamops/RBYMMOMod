@@ -29387,6 +29387,44 @@ do
   stubMod.log.warn = function() end
 end
 
+-- ------- SCREEN.HOSTINFO: the address page states what a friend types
+--
+-- Drawn rows, not a text box: `textLines` is what `draw` paints, row for
+-- row.  The IP and the PORT are rows of their own, because "ip:port" whole
+-- ran past the box's right border (17 glyphs from x 16 on a 20-tile box) and
+-- cut the last digit of the port.
+do
+  local hostingClient = {
+    isHosting = function() return true end,
+    isConnected = function() return true end,
+    hostAddress = function() return "192.168.1.125:7681" end,
+    hostJoinCode = function() return "SN21JW" end,
+  }
+  local before = ctx.client
+  ctx.client = hostingClient
+  local infoDef = screenRegistry[Ui.SCREEN.HOSTINFO]
+  local page = infoDef and infoDef.new({ input = {}, stack = {} })
+  check(page ~= nil and type(page.textLines) == "function",
+        "HOSTINFO is a drawn page that says its words through textLines")
+  local text = page and table.concat(page:textLines(), " | ") or ""
+  check(text:find("192.168.1.125", 1, true) ~= nil, "the page states the IP: " .. text)
+  check(text:find("PORT 7681", 1, true) ~= nil, "...the port on a row of its own")
+  check(text:find("CODE SN21JW", 1, true) ~= nil, "...and the join code")
+  local fits = true
+  for _, row in ipairs(page and page:rows() or {}) do
+    if row[2] + #row[1] * 8 > 152 then fits = false end
+  end
+  check(fits, "every row ends inside the box's right border (x <= 152)")
+  local widest = "255.255.255.255:65535"
+  hostingClient.hostAddress = function() return widest end
+  fits = true
+  for _, row in ipairs(page:rows()) do
+    if row[2] + #row[1] * 8 > 152 then fits = false end
+  end
+  check(fits, "...the widest IPv4 address and port too")
+  ctx.client = before
+end
+
 stubMod.content.screens, stubMod.hooks, stubMod.ui = nil, nil, nil
 _G.love = ambientLove
 

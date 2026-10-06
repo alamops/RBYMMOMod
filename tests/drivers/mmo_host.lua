@@ -922,7 +922,9 @@ return function(game)
       -- PROTOCOL 22 states the registry id and the level on `send`; this is
       -- the only place either is asserted against a real socket, a real hub
       -- and a real peer party rather than a fixture.
-      local foeSlot = (top.mySlot and top:mySlot() == 0) and 2 or 0
+      -- The other side's lead, by the screen's own reckoning: side b starts
+      -- at Config.COOP_SIDE, which is the party size (3), not 2.
+      local foeSlot = top.foeSlot and top:foeSlot() or 0
       -- The seat is *held* until its spawn row plays -- the send line prints
       -- first and the monster is thrown in behind it -- so a probe taken the
       -- instant the packet was parsed reads an empty arena and proves nothing
@@ -1557,7 +1559,11 @@ return function(game)
       U.wait(30)
       local shown = H.textOf(H.top(game))
       log("address screen reads:", shown)
-      check(shown:find(tostring(address), 1, true) ~= nil,
+      -- The page states the IP and the port on rows of their own (the whole
+      -- "ip:port" is wider than the box), so each half is looked for.
+      local ip, port = tostring(address):match("^(.*):(%d+)$")
+      check(ip ~= nil and shown:find(ip, 1, true) ~= nil
+              and shown:find("PORT " .. port, 1, true) ~= nil,
             "the address can be re-viewed from the MMO menu")
       -- and the code with it: they are read out in the same breath, and a
       -- host who set one and cannot find it again has a locked game nobody

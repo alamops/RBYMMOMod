@@ -1843,29 +1843,73 @@ function M:install()
     Font.draw("B: BACK", LX, 134)
   end
 
+  -- The page's rows, `{ text, x, y }`, in reading order: what `draw` paints and
+  -- what `textLines` hands a reader, so the two cannot disagree.
+  --
+  -- The address is two rows -- the IP, then PORT -- because the box holds 17
+  -- glyphs from x 16 and "192.168.1.125:7681" is 18: it ran into the right
+  -- border, cutting the last digit of the port a friend has to type.  An
+  -- IPv4 dotted quad is at most 15, so the split fits every LAN address, and
+  -- it is the layout the hidden-IP rows already use.
+  function HostInfo:rows()
+    local client = ctx.client
+    local address = client:hostAddress()
+    local code = client:hostJoinCode()
+    local rows = { { "HOSTING", 16, 8 } }
+    local ip, port
+    if type(address) == "string" and not address:find("^%?") then
+      ip, port = address:match("^(.*):(%d+)$")
+      ip = ip or address
+    end
+    if ip then
+      rows[#rows + 1] = { ip, 16, 32 }
+      if port then rows[#rows + 1] = { ("PORT %s"):format(port), 16, 48 } end
+    else
+      rows[#rows + 1] = { ("PORT %s"):format(tostring(Config.DEFAULT_PORT)), 16, 32 }
+      rows[#rows + 1] = { "IP HIDDEN", 16, 48 }
+    end
+    rows[#rows + 1] = { ("CODE %s"):format(codeText(code)), 16, 64 }
+    if self.qr then
+      rows[#rows + 1] = { "A: SHOW QR", 16, 96 }
+    elseif self.error then
+      rows[#rows + 1] = { "QR UNAVAILABLE", 16, 96 }
+      rows[#rows + 1] = { tostring(self.error):sub(1, 17), 16, 108 }
+    end
+    rows[#rows + 1] = { "B: BACK", 16, 124 }
+    return rows
+  end
+
+  -- The words on the page, top to bottom (the GBA page's label / value pairs
+  -- read as one line each) -- for a reader that wants the page as text
+  -- rather than as pixels.
+  function HostInfo:textLines()
+    local out = {}
+    if self.gen3 then
+      local client = ctx.client
+      local address = client:hostAddress()
+      out[1] = "HOSTING"
+      if type(address) == "string" and not address:find("^%?") then
+        out[#out + 1] = "ADDRESS " .. address
+      else
+        out[#out + 1] = "PORT " .. tostring(Config.DEFAULT_PORT)
+        out[#out + 1] = "IP HIDDEN"
+      end
+      out[#out + 1] = "JOIN CODE " .. codeText(client:hostJoinCode())
+      if self.qr then out[#out + 1] = "A: SHOW QR"
+      elseif self.error then out[#out + 1] = "QR UNAVAILABLE" end
+      out[#out + 1] = "B: BACK"
+      return out
+    end
+    for _, row in ipairs(self:rows()) do out[#out + 1] = row[1] end
+    return out
+  end
+
   function HostInfo:draw()
     if self.gen3 then return self:draw3() end
     local Font = mod.ui.Font
     if not (Font and Font.draw) then return end
-    local client = ctx.client
-    local address = client:hostAddress()
-    local code = client:hostJoinCode()
     Font.drawBox(0, 0, 20, 18)
-    Font.draw("HOSTING", 16, 8)
-    if type(address) == "string" and not address:find("^%?") then
-      Font.draw(address, 16, 32)
-    else
-      Font.draw(("PORT %s"):format(tostring(Config.DEFAULT_PORT)), 16, 32)
-      Font.draw("IP HIDDEN", 16, 48)
-    end
-    Font.draw(("CODE %s"):format(codeText(code)), 16, 64)
-    if self.qr then
-      Font.draw("A: SHOW QR", 16, 96)
-    elseif self.error then
-      Font.draw("QR UNAVAILABLE", 16, 96)
-      Font.draw(tostring(self.error):sub(1, 24), 16, 108)
-    end
-    Font.draw("B: BACK", 16, 124)
+    for _, row in ipairs(self:rows()) do Font.draw(row[1], row[2], row[3]) end
   end
 
   local HostQr = {}

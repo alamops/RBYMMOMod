@@ -3263,7 +3263,17 @@ end
 -- The visible contents of a TextBox, flattened. TextBox paginates into
 -- self.pages, so this is how a driver checks that what the player is
 -- actually being shown says what it should.
+-- A drawn page that is not a text box (the host's ADDRESS page) says its
+-- words through `textLines`, the same rows it paints.
 function M.textOf(top)
+  if top and type(top.pages) ~= "table" and type(top.textLines) == "function" then
+    local ok, lines = pcall(top.textLines, top)
+    if ok and type(lines) == "table" then
+      local out = {}
+      for _, line in ipairs(lines) do out[#out + 1] = tostring(line) end
+      return table.concat(out, " ")
+    end
+  end
   if not (top and type(top.pages) == "table") then return "" end
   local out = {}
   for _, page in ipairs(top.pages) do
@@ -3298,6 +3308,10 @@ end
 -- visible pair is the *last* two lines -- the address and the CODE row --
 -- which is precisely the half a friend has to be told.
 function M.printed(top)
+  -- A drawn page has nothing to type: it is settled on its first frame.
+  if top and type(top.pages) ~= "table" and type(top.textLines) == "function" then
+    return true
+  end
   if not (top and type(top.pages) == "table") then return false end
   return top.done == true or top.waiting == true
 end
