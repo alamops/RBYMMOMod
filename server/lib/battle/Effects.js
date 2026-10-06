@@ -670,6 +670,9 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
   }
   const turns = (rng ? rng.byte() : 0) % 4 + 2;
   mon.confusion = turns;
+  // ConfusionSideEffectSuccess plays the move's animation for the primary
+  // (`cp CONFUSION_SIDE_EFFECT / call nz, PlayCurrentMoveAnimation2`).
+  out.animates = true;
   // BecameConfusedText, "<TARGET>\nbecame confused!".
   const text = `${Events.named(fighter.side, mon.species)}\nbecame confused!`;
   out.messages.push(text);
@@ -701,7 +704,8 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
 // :368-370) and a drop at -6 is CantLowerAnymore (:705-710), both "Nothing
 // happened!" -- the same line the 999 / 1 walls print. Mist is no longer
 // asked here: it is MoveHitTest's (core.asm :5262-5283), and Turn runs that
-// before the accuracy byte (`_statusHitTest`).
+// before the accuracy byte (`_statusHitTest`). Returns true when the stage
+// moved -- the one outcome UpdateStatDone / UpdateLoweredStatDone animate.
 function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) {
   const label = STAT_LABELS[stat] || stat;
   const { outcome, stage } = changeStat({
@@ -709,7 +713,7 @@ function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) 
   });
   if (outcome === 'max' || outcome === 'min' || outcome === 'stuck') {
     if (!side) out.messages.push('Nothing happened!');
-    return;
+    return false;
   }
   // MonsStatsRoseText / MonsStatsFellText (effects.asm :516-536, :718-742):
   // "<USER>'s <STAT> rose!" and "<TARGET>'s <STAT> fell!", with "greatly"
@@ -732,6 +736,7 @@ function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) 
   fields.stage = stage;
   fields.text = Events.plain(text);
   out.events.push({ kind: 'stat', fields });
+  return true;
 }
 
 // HazeEffect_ (engine/battle/move_effects/haze.asm) on one battler: every
@@ -998,8 +1003,13 @@ function teleportEscapes(userLevel, targetLevel, rng) {
 //   playerMover  the user is "the player" (Transform's broken check)
 //   unlimitedPp  the target is the computer's, whose PP DisableEffect never
 //                reads outside a link battle
-// Returns { nothing, messages, events, heals, cannotMove } where heals =
-// { amount } for user and `cannotMove` is Haze's CANNOT_MOVE on the target.
+// Returns { nothing, messages, events, heals, cannotMove, animates } where
+// heals = { amount } for user, `cannotMove` is Haze's CANNOT_MOVE on the
+// target and `animates` says the routine played the move's animation
+// (PlayCurrentMoveAnimation / PlayCurrentMoveAnimation2): every routine here
+// plays it where it succeeds and nowhere it fails -- HAZE and SPLASH always
+// -- which is what Turn reads to keep or take back the power-0 move's `anim`
+// (contract K22's audit).
 function applyPrimary(ctx) {
   const out = {
     nothing: false, messages: [], events: [], heals: [], costs: [],
@@ -1020,6 +1030,7 @@ function applyPrimary(ctx) {
   // SplashEffect (effects.asm :1282-1284): its animation, then
   // PrintNoEffectText -- "No effect!".
   if (effectId === 85) {
+    out.animates = true;
     out.messages.push('No effect!');
     return out;
   }
@@ -1062,6 +1073,8 @@ function applyPrimary(ctx) {
     }
     out.heals.push({ amount });
     out.afterHeals = [`${Events.named(userFighter.side, userMon.species)}\nregained health!`];
+    // `.playAnim`, the restore's (heal.asm): never on the failed compare.
+    out.animates = true;
     return out;
   }
 
@@ -1097,6 +1110,7 @@ function applyPrimary(ctx) {
       out.events.push({ kind: 'status', fields });
     }
     out.messages.push('All STATUS changes\nare eliminated!');
+    out.animates = true;
     return out;
   }
 
@@ -1104,7 +1118,9 @@ function applyPrimary(ctx) {
   if (statFx) {
     const mon = statFx.selfTarget ? userMon : targetMon;
     const fighter = statFx.selfTarget ? userFighter : targetFighter;
-    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
+    // UpdateStatDone / UpdateLoweredStatDone play it on a stage that moved;
+    // a wall is "Nothing happened!" and no animation.
+    out.animates = applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
       userFighter, targetMon, false);
     return out;
   }
@@ -1127,6 +1143,7 @@ function applyPrimary(ctx) {
     const turns = sleepTurns(rng);
     targetMon.status = 'sleep';
     targetMon.statusTurns = turns;
+    out.animates = true;
     const token = wire.sleep || 'SLP';
     const text = `${Events.named(targetFighter.side, targetMon.species)}\nfell asleep!`;
     out.messages.push(text);
@@ -1149,6 +1166,7 @@ function applyPrimary(ctx) {
       return out;
     }
     const toxic = moveKey(c.moveId) === 'TOXIC';
+    out.animates = true;
     targetMon.status = toxic ? 'toxic' : 'poison';
     targetMon.toxicLinger = null;
     if (toxic) targetMon.toxicCounter = 1;
@@ -1169,6 +1187,7 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.status = 'paralysis';
+    out.animates = true;
     // ParalyzeEffect_ quarters the battle Speed the moment it lands
     // (paralyze.asm `callfar QuarterSpeedDueToParalysis`).
     applyStatusPenalty(targetMon);
@@ -1195,6 +1214,7 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
+    out.animates = true;
     const text = `${Events.named(targetFighter.side, targetMon.species)}\nwas seeded!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
@@ -1267,6 +1287,7 @@ function applyPrimary(ctx) {
     // The slot (the menu's wPlayerDisabledMove nibble) and the move's id
     // (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
     targetMon.disable = { moveIndex: slot, turns, moveId: moves[slot - 1].id };
+    out.animates = true;
     // MoveWasDisabledText, "<TARGET>'s\n<MOVE> was\ndisabled!".
     out.messages.push(`${Events.named(targetFighter.side, targetMon.species)}`
       + `'s\n${moveLabel(moves[slot - 1])} was\ndisabled!`);
@@ -1292,6 +1313,7 @@ function applyPrimary(ctx) {
     userMon.hp -= cost;
     userMon.substitute = cost;
     userMon.subAtZero = null;
+    out.animates = true;
     out.directDamage = [{ amount: cost }];
     out.messages.push('It created a\nSUBSTITUTE!');
     return out;
@@ -1306,6 +1328,7 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.lightScreen = true;
+    out.animates = true;
     out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
       + "'s\nprotected against\nspecial attacks!");
     return out;
@@ -1317,6 +1340,7 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.reflect = true;
+    out.animates = true;
     out.messages.push(
       `${Events.named(userFighter.side, userMon.species)}\ngained armor!`);
     return out;
@@ -1331,6 +1355,7 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.mist = true;
+    out.animates = true;
     out.messages.push(
       `${Events.named(userFighter.side, userMon.species)}'s\nshrouded in mist!`);
     return out;
@@ -1342,6 +1367,7 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.focusEnergy = true;
+    out.animates = true;
     out.messages.push(
       `${Events.named(userFighter.side, userMon.species)}'s\ngetting pumped!`);
     return out;
@@ -1355,6 +1381,7 @@ function applyPrimary(ctx) {
     for (let i = 0; i < (targetMon.types || []).length; i += 1) types.push(targetMon.types[i]);
     if (types.length === 0) types.push(0);
     userMon.types = types;
+    out.animates = true;
     out.messages.push(
       `Converted type to\n${Events.named(targetFighter.side, targetMon.species)}'s!`);
     return out;
@@ -1403,6 +1430,7 @@ function applyPrimary(ctx) {
       chance: Math.max(0, int(source.chance, 0)),
       highCrit: source.highCrit === true,
     };
+    out.animates = true;
     // MimicLearnedMoveText, "<USER>\nlearned\n<MOVE>!".
     out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
       + `\nlearned\n${moveLabel(source)}!`);
@@ -1477,6 +1505,7 @@ function applyPrimary(ctx) {
       highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
+    out.animates = true;
     // TransformedText, "<USER>\ntransformed into\n<SPECIES>!": the copied
     // species is wNameBuffer's (GetMonName), printed bare.
     out.messages.push(`${Events.named(userFighter.side, userMon.species)}`

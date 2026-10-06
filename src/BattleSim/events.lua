@@ -145,6 +145,14 @@ M.FIELDS = {
   -- sits -- `amount` is unsigned on the wire and could never carry a stage
   -- below zero.  Wire.battleEvent reads it for the Gen 1 / Gen 2 dialect.
   stage        = "number",
+  -- Contract K22: an `anim` whose id is a move id but which is not the acting
+  -- monster's own use of its move -- Leech Seed's ABSORB on the seeder's seat
+  -- (HandlePoisonBurnLeechSeed), a FLY's charge-turn TELEPORT (ChargeEffect),
+  -- a trap's later hit (`.MultiturnMoveCheck`) -- is `quiet`: play the look
+  -- only, no callout and no lunge.  Only `true` is ever sent (`coerce`);
+  -- absent is an ordinary move animation.  Wire.battleEvent reads it on the
+  -- Gen 1 / Gen 2 readers.
+  quiet        = "boolean",
 }
 
 -- ------------------------------------------------------------------
@@ -186,7 +194,8 @@ M.FIELDS = {
 M.SHAPES = {
   msg       = { text = true },
   anim      = { slot = true, side = true, text = "move or ball-anim id",
-                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge/vanish setup beat" },
+                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge/vanish setup beat",
+                quiet = "true when a move id plays as a look only (K22)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true,
@@ -373,6 +382,11 @@ local function coerce(key, value)
   if key == "moves" then return nil end
   local want = M.FIELDS[key]
   if want == nil then return nil end                  -- not in the whitelist
+  -- A flag is sent set or not at all (K22's `quiet`).
+  if want == "boolean" then
+    if value == true then return true end
+    return nil
+  end
   if want == "number" then
     local n = tonumber(value)
     if not n or n ~= n then return nil end

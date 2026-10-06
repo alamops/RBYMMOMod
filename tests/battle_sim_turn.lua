@@ -155,7 +155,7 @@ local function battleOf(o)
               mons = o.aMons or { mon() }, bag = o.aBag } },
       b = { { playerId = "p2", name = "Bob",
               mons = o.bMons or { mon({ species = "Beta" }) },
-              bag = o.bBag } },
+              bag = o.bBag, aiClass = o.bAiClass } },
     },
   })
   if not battle then error("fixture battle refused: " .. tostring(err), 0) end
@@ -1662,12 +1662,14 @@ do
     -- attack missed!" (R1c), not "But, it failed!".
     if event.t == "msg" and event.text == "Beta's attack missed!" then failed = true end
     if event.t == "damage" then damaged = true end
-    if event.t == "anim" and event.text == "DIG" and event.amount == 1 then
+    -- ChargeEffect's `cp DIG`: SLIDE_DOWN_ANIM, not the move's own (K20 /
+    -- K22), still the setup beat.
+    if event.t == "anim" and event.text == "SLIDE_DOWN_ANIM" and event.amount == 1 then
       chargeAnim = true
     end
   end
   ok(dug, "DIG turn one announces dug a hole!")
-  ok(chargeAnim, "DIG charge anim carries amount=1")
+  ok(chargeAnim, "DIG's charge turn plays SLIDE_DOWN_ANIM with amount=1")
   ok(failed, "Gen1 Earthquake misses a digging target")
   ok(not damaged, "DIG charge turn deals no damage")
   local alpha = activeMonOf(battle, "p1")
@@ -4452,8 +4454,8 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
       if event.t == "item" and event.side == "b" then itemUsed = event.text end
     end
     eq(itemUsed, nil, mode .. ": auto-pick never reaches the wild seat's bag")
-    eq(battle.byId.wild.bag.POTION, 2, mode .. ": and spends none of it")
-    eq(battle.byId.wild.bag.FULL_HEAL, 1, mode .. ": cure untouched too")
+    -- K16: the computer keeps no bag at all, so there is nothing to spend.
+    eq(battle.byId.wild.bag, nil, mode .. ": the wild seat keeps no bag")
     eq(battle.byId.wild.mons[1].status, "poison", mode .. ": still poisoned")
   end
 
@@ -4835,9 +4837,11 @@ end
 
 -- (c) the foe swaps its monster out and back: each swap resets that seat's
 -- own participation set, so only who is in against the CURRENT foe is paid.
+-- The swaps are the trainer's own (K16): a JugglerAI record whose roll always
+-- passes withdraws its monster in its slot every turn it has two standing.
 do
   local battle = battleOf({
-    mode = "wild",
+    mode = "coop_npc",
     seed = 303,
     sides = {
       a = { { playerId = "p1", name = "Ann", mons = {
@@ -4845,7 +4849,8 @@ do
               moves = { move({ id = "tap", power = 5 }) } }),
         mon({ species = "Gamma", maxHp = 300, atk = 90, spd = 80, moves = { thumpMove() } }),
       } } },
-      b = { { playerId = "wild", name = "Wild", mons = {
+      b = { { playerId = "npc", name = "Juggler",
+              aiClass = { uses = 3, chance = 256, switch = true }, mons = {
         mon({ species = "Beta", maxHp = 90, atk = 5, spd = 10,
               moves = { move({ id = "tap", power = 5 }) } }),
         mon({ species = "Delta", maxHp = 300, atk = 5, spd = 10,
@@ -4855,32 +4860,32 @@ do
   })
   drain(battle)
   local events = {}
-  -- Alpha is in against Beta.
+  -- Alpha taps Beta, then the trainer withdraws Beta for Delta: Delta's set
+  -- is {Alpha}.
   battle:submitChoice("p1", { action = "fight", move = 0 })
-  battle:submitChoice("wild", { action = "fight", move = 0 })
+  battle:submitChoice("npc", { action = "fight", move = 0 })
   for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
-  -- Alpha out, Gamma in: Beta's set is now {Alpha, Gamma}.
+  -- Alpha out, Gamma in before the order: Delta's set is {Alpha, Gamma};
+  -- then Delta out, Beta back: Beta's set resets to {Gamma} -- Alpha is gone.
   battle:submitChoice("p1", { action = "switch", slot = 1 })
-  battle:submitChoice("wild", { action = "fight", move = 0 })
-  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
-  -- Beta out, Delta in: Delta's set resets to whoever is standing -- {Gamma}.
-  battle:submitChoice("p1", { action = "fight", move = 0 })
-  battle:submitChoice("wild", { action = "switch", slot = 1 })
-  for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
-  -- Delta out, Beta back: Beta's set resets again to {Gamma} -- Alpha is gone.
-  battle:submitChoice("p1", { action = "fight", move = 0 })
-  battle:submitChoice("wild", { action = "switch", slot = 0 })
+  battle:submitChoice("npc", { action = "fight", move = 0 })
   for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
   for _ = 1, 10 do
-    if battle:outcome() then break end
+    if battle:outcome() or #expEvents(events) > 0 then break end
+    if battle.phase == "replace" then battle:autoPick("npc") end
     battle:submitChoice("p1", { action = "fight", move = 0 })
-    battle:submitChoice("wild", { action = "fight", move = 0 })
+    battle:submitChoice("npc", { action = "fight", move = 0 })
     for _, e in ipairs(drain(battle)) do events[#events + 1] = e end
   end
+  local withdrew = 0
+  for _, e in ipairs(events) do
+    if e.t == "msg" and e.text == "Juggler with-drew Beta!" then withdrew = withdrew + 1 end
+  end
+  ok(withdrew >= 1, "the fixture really did swap Beta out (AIBattleWithdrawText)")
   local exps = expEvents(events)
-  eq(#exps, 1, "the foe-switch reset leaves only one participant")
+  ok(#exps >= 1, "the fixture really did knock a foe out")
   eq(exps[1] and exps[1].mon, 1, "...Gamma, party index 1 -- Alpha's earlier turn was reset away")
-  eq(exps[1] and exps[1].participants, 1, "...divisor 1")
+  eq(exps[1] and exps[1].participants, 1, "...divisor 1: the foe-switch reset leaves only one participant")
 end
 
 -- (d) coop_wild: the partner's monster fought and then switched to its
@@ -5991,7 +5996,8 @@ do
       sides = {
         a = { { playerId = "p1", name = "Ann", badges = o.aBadges,
                 bag = o.aBag, mons = aMons } },
-        b = { { playerId = "p2", name = "Bob", bag = o.bBag, mons = bMons } },
+        b = { { playerId = "p2", name = "Bob", bag = o.bBag, mons = bMons,
+                aiClass = o.bAiClass } },
       },
     })
     drain(battle)
@@ -6324,12 +6330,14 @@ do
   do
     local function cured(item, hp, mode, side)
       local battle = g1({ mode = mode or "wild", aBadges = ALL,
-        aBag = { [item] = 1 }, bBag = { [item] = 1 },
+        aBag = { [item] = 1 },
+        -- The computer's cure is TrainerAI's (K16): BrockAI's FULL HEAL.
+        bAiClass = side == "b" and { uses = 5, onStatus = true, item = item } or nil,
         a = { ann({ status = side == "b" and nil or "PAR", hp = hp, moves = { splash } }) },
         b = { { species = "Beta", spd = 80, status = side == "b" and "PAR" or nil,
                 baseSpd = 0, moves = { splash } } } })
       if side == "b" then
-        step(battle, use(0), { action = "item", item = item })
+        step(battle, use(0), use(0))
         return activeMonOf(battle, "p2")
       end
       step(battle, { action = "item", item = item }, use(0))
@@ -6344,7 +6352,7 @@ do
     eq(restored.cur.spd, 16, "...but leaves the stored penalty")
     local full = cured("FULL_RESTORE", nil)
     eq(full.cur.spd, 60, "at full HP a Full Restore is a Full Heal")
-    local npc = cured("PARLYZ_HEAL", nil, "coop_npc", "b")
+    local npc = cured("FULL_HEAL", nil, "coop_npc", "b")
     eq(npc.status, nil, "the computer cures its own monster")
     eq(npc.cur.spd, 20, "...and AICureStatus leaves the quartered Speed")
   end
@@ -6491,8 +6499,20 @@ do
          mode .. ": Quick Attack on both sides is Speed's")
       eq(order(step(battle, use(1), use(2))), "0:thump 3:COUNTER",
          mode .. ": the faster Counter moves last")
-      eq(order(step(battle, use(2), use(2))), "3:COUNTER 0:COUNTER",
+      -- Both COUNTERs miss (each target selected COUNTER, HandleCounterMove)
+      -- and a move that missed plays no animation (HandleIfPlayerMoveMissed,
+      -- K22's audit), so who went first is read off the used lines.
+      local both = step(battle, use(2), use(2))
+      local used = {}
+      for _, event in ipairs(both) do
+        if event.t == "msg" then
+          local who, what = event.text:match("^(%a+) used (.-)!$")
+          if who then used[#used + 1] = who .. ":" .. what end
+        end
+      end
+      eq(table.concat(used, " "), "Beta:COUNTER Alpha:COUNTER",
          mode .. ": Counter on both sides is Speed's")
+      eq(order(both), "", mode .. ": ...and neither missed COUNTER is animated")
     end
 
     local metro = arena({ pool = { fxm("QUICK_ATTACK", 10, 0) },
@@ -7897,7 +7917,8 @@ do
       sides = {
         a = { { playerId = "p1", name = "Ann", mons = o.aMons or { o.a }, bag = o.aBag,
                 badges = o.aBadges } },
-        b = { { playerId = "p2", name = "Bob", mons = o.bMons or { o.b }, bag = o.bBag } },
+        b = { { playerId = "p2", name = "Bob", mons = o.bMons or { o.b }, bag = o.bBag,
+                aiClass = o.bAiClass } },
       },
     }))
     drain(battle)
@@ -8190,11 +8211,13 @@ do
   eq(b:submitChoice("p1", { action = "fight", move = 0 }), false, "a 0-PP slot with PP Ups: no Struggle, refused")
   eq(b:submitChoice("p1", { action = "fight", move = 1 }), false, "...and the disabled one too")
 
-  -- (k) The computer's item in its slot: Alpha's hit, then the potion.
-  b = duel({ mode = "coop_npc", bBag = { SUPER_POTION = 1 },
+  -- (k) The computer's item in its slot -- TrainerAI's (K16), BlaineAI's
+  --     SUPER POTION on a roll that always passes: Alpha's hit, then the
+  --     potion.
+  b = duel({ mode = "coop_npc", bAiClass = { uses = 2, chance = 256, item = "SUPER_POTION" },
              a = sh({ species = "Alpha", spd = 90, moves = { mv("tap", 20, 0) } }),
              b = sh({ species = "Beta", spd = 10, hp = 100, maxHp = 400, moves = { SPL() } }) })
-  events = play(b, {}, 0, { action = "item", item = "SUPER_POTION" })
+  events = play(b, {}, 0, 0)
   local order = {}
   for _, e in ipairs(events) do
     if e.t == "damage" or e.t == "item" then order[#order + 1] = e.t end
@@ -9264,7 +9287,7 @@ end
 local function duel30(o)
   local battle = battleOf({
     mode = o.mode, seed = o.seed,
-    aMons = o.a, bMons = o.b, aBag = o.aBag, bBag = o.bBag,
+    aMons = o.a, bMons = o.b, aBag = o.aBag, bBag = o.bBag, bAiClass = o.bAiClass,
   })
   drainRaw(battle)
   return battle
@@ -9286,17 +9309,19 @@ do
 end
 
 -- (b) A name the cart prints bare stays bare: the party menu's PotionText
---     (wNameBuffer), the AI's item line (wEnemyMonNick through text_ram), a
---     caught monster's ItemUseBallText05.
+--     (wNameBuffer), the AI's item line (wEnemyMonNick through text_ram --
+--     TrainerAI's POTION, K16, on a roll that always passes), a caught
+--     monster's ItemUseBallText05.
 do
   local b = duel30({
     mode = "coop_npc",
+    bAiClass = { uses = 1, chance = 256, item = "POTION" },
     a = { mon({ species = "Alpha", maxHp = 200, hp = 100, spd = 90,
                 moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
     b = { mon({ species = "Beta", maxHp = 200, hp = 100, spd = 10,
                 moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
   })
-  local list = rawTurn(b, { action = "item", item = "POTION" }, { action = "item", item = "POTION" })
+  local list = rawTurn(b, { action = "item", item = "POTION" })
   ok(saidAt(list, "Alpha\nrecovered by 20!"), "PotionText: the name bare, a break after it")
   ok(saidAt(list, "Bob\nused POTION\non Beta!"),
      "_AIBattleUseItemText: the trainer, `line` used, `cont` on, the monster bare")
@@ -9610,6 +9635,521 @@ do
   eq(Events.named("a", "Alpha"), "^aAlpha", "...side a's")
   eq(Events.plain("^aAlpha's\nATTACK\ngreatly rose!"), "Alpha's ATTACK greatly rose!",
      "Events.plain: no marks, each break a space")
+end
+
+-- ------------------------------------------------------------------
+-- 31. H1 (docs/plans/gen12-referee-remaining-gaps.md, wave 2): TrainerAI in
+--     the computer's slot (K16, pokered engine/battle/trainer_ai.asm),
+--     EnemySendOut's replacement, the animations the cart plays or does not
+--     (K20 completion, K22's `quiet`), and RemoveFaintedPlayerMon's status.
+--     Read raw (`drainRaw`).  The g1_trainer_ai / g1_k22_anims parity
+--     scenarios hold lib/battle to the same streams.
+-- ------------------------------------------------------------------
+
+do
+  local Rng = BattleSim.Rng
+  -- `bytes` first, then a seeded stream; every byte counted.
+  local function scripted(battle, bytes)
+    local fallback = Rng.new(77)
+    local log = { bytes = 0 }
+    battle.rng = {
+      byte = function()
+        log.bytes = log.bytes + 1
+        local b = bytes[log.bytes]
+        if b == nil then b = fallback:byte() end
+        return b
+      end,
+      nextInt = function(_, lo, hi) return fallback:nextInt(lo, hi) end,
+      damageRoll = function() return fallback:damageRoll() end,
+      next = function() return fallback:next() end,
+      state = function() return fallback:state() end,
+    }
+    return log
+  end
+  local SPLASH = function() return move({ id = "splash", power = 0, effect = 85 }) end
+  local function sheet(o, extra)
+    local raw = mon(o)
+    raw.baseSpd = 0
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return raw
+  end
+  -- Ann (p1) against BOB (p2), a coop_npc trainer unless `mode` says not.
+  local function h1(o)
+    local battle = assert(Turn.create({
+      id = "h1", mode = o.mode or "coop_npc", seed = o.seed or 31, choiceTimeout = 60,
+      reconnectGrace = 60, chart = o.chart,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = o.a, bag = o.aBag } },
+        b = { { playerId = "p2", name = "BOB", mons = o.b, aiClass = o.ai, bag = o.bBag } },
+      },
+    }))
+    drainRaw(battle)
+    return battle
+  end
+  local function turn(battle, bytes, aChoice, bChoice)
+    local log = scripted(battle, bytes or {})
+    battle:submitChoice("p1", aChoice or { action = "fight", move = 0 })
+    if bChoice ~= false then battle:submitChoice("p2", bChoice or { action = "fight", move = 0 }) end
+    if battle.forcedPending then battle:tick(battle.now) end
+    return drainRaw(battle), log
+  end
+  local function anims(list)
+    local out = {}
+    for _, e in ipairs(list) do
+      if e.t == "anim" then out[#out + 1] = e.slot .. ":" .. e.text .. (e.quiet and "~" or "") end
+    end
+    return table.concat(out, " ")
+  end
+  local function kinds(list, want)
+    local out = {}
+    for _, e in ipairs(list) do
+      if want[e.t] then out[#out + 1] = e.t end
+    end
+    return table.concat(out, " ")
+  end
+  local function seat(battle, id) return battle.byId[id] end
+  local function active(battle, id)
+    local f = battle.byId[id]
+    return f.mons[f.active]
+  end
+
+  -- (a) GenericAI: a trainer with no record draws TrainerAI's byte in its
+  --     slot every turn (wAICount 3, never spent) and never acts; a wild
+  --     monster (wIsInBattle 1) and a link fight's seat draw nothing.
+  do
+    local b = h1({ a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                   b = { sheet({ species = "Beta", spd = 10, moves = { SPLASH() } }) } })
+    local _, log = turn(b, {})
+    eq(log.bytes, 1, "GenericAI: one byte in the trainer's slot")
+    eq(seat(b, "p2").aiCount, 3, "...wAICount loaded from GenericAI's 3")
+    _, log = turn(b, {})
+    eq(log.bytes, 1, "...every turn")
+    eq(seat(b, "p2").aiCount, 3, "...and never spent")
+    for _, mode in ipairs({ "wild", "1v1" }) do
+      local w = h1({ mode = mode, ai = { uses = 3, chance = 256, item = "X_ATTACK" },
+                     a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                     b = { sheet({ species = "Beta", spd = 10, moves = { SPLASH() } }) } })
+      local list
+      list, log = turn(w, {})
+      eq(log.bytes, 0, mode .. ": TrainerAI returns before its byte")
+      eq(eventAt(list, "item"), nil, mode .. ": ...and never acts")
+      eq(seat(w, "p2").aiClass, nil, mode .. ": ...the record is not even kept")
+    end
+  end
+
+  -- (b) A `cp N percent` class (MistyAI's X DEFEND, 25 percent + 1 = 64): a
+  --     byte below it acts in the slot -- the item event, AIBattleUseItemText
+  --     with both names bare, XSTATITEM_ANIM straight behind on the user,
+  --     the rose line -- and the move is not used; 64 does nothing; the one
+  --     use spent, wAICount 0 draws no byte at all.
+  do
+    local ai = { uses = 1, chance = 64, item = "X_DEFEND" }
+    local b = h1({ ai = ai, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                   b = { sheet({ species = "Beta", spd = 10, moves = { SPLASH() } }) } })
+    local list = turn(b, { 64 })
+    eq(eventAt(list, "item"), nil, "byte 64: MistyAI's `ret nc`")
+    ok(saidAt(list, "^bBeta\nused splash!"), "...and Beta uses its move")
+    list = turn(b, { 63 })
+    local item = eventAt(list, "item", 3, "X_DEFEND")
+    ok(item ~= nil, "byte 63: the AI's X DEFEND, on Beta's seat")
+    local line = saidAt(list, "BOB\nused X DEFEND\non Beta!")
+    local x = eventAt(list, "anim", 3, "XSTATITEM_ANIM")
+    local rose = saidAt(list, "^bBeta's\nDEFENSE rose!")
+    ok(before(item, line) and before(line, x) and before(x, rose),
+       "item, AIBattleUseItemText, XSTATITEM_ANIM, MonsStatsRoseText")
+    local between = {}
+    for i = (item or 1), (x or 0) do between[#between + 1] = list[i] end
+    eq(anims(between), "3:XSTATITEM_ANIM",
+       "...no other anim between the item event and XSTATITEM_ANIM")
+    eq(saidAt(list, "^bBeta\nused splash!"), nil, "...and the move SelectEnemyMove picked never runs")
+    eq(active(b, "p2").stages.def, 1, "one stage (AIIncreaseStat's UP1 effect)")
+    eq(seat(b, "p2").aiCount, 0, "DecrementAICount")
+    local _, log = turn(b, { 0 })
+    eq(log.bytes, 0, "wAICount 0: `and a / ret z`, no byte")
+    ai.uses = 9
+    eq(seat(b, "p2").aiClass.uses, 1, "the seat's record is a copy")
+  end
+
+  -- (c) AgathaAI: `cp 8 percent` switches first -- and a switch that cannot
+  --     happen does nothing else (`and a / ret`) -- then her 50 percent + 1
+  --     item roll below a quarter.  The withdraw line, then the send-out of
+  --     the first living monster in party order (EnemySendOut), and no use
+  --     spent: the send-out puts wAICount back to $ff.
+  do
+    local agatha = { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION", hpBelow = 4 }
+    local b = h1({ ai = agatha, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                   b = { sheet({ species = "Beta", spd = 10, hp = 50, maxHp = 400, moves = { SPLASH() } }),
+                         sheet({ species = "Zeta", spd = 10, hp = 0, maxHp = 400, moves = { SPLASH() } }),
+                         sheet({ species = "Delta", spd = 10, maxHp = 400, moves = { SPLASH() } }) } })
+    local list = turn(b, { 19 })
+    local line = saidAt(list, "BOB with-\ndrew Beta!")
+    local send = eventAt(list, "send", 3, "Delta")
+    ok(before(line, send), "byte 19: AIBattleWithdrawText, then Delta -- Zeta at 0 HP is walked past")
+    eq(eventAt(list, "item"), nil, "...no item")
+    eq(seat(b, "p2").aiCount, Turn.AI_COUNT_RELOAD, "...and wAICount is $ff again")
+    eq(saidAt(list, "^bDelta\nused splash!"), nil, "...and nobody's move runs in the slot")
+    local solo = h1({ ai = agatha, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                      b = { sheet({ species = "Beta", spd = 10, hp = 50, maxHp = 400, moves = { SPLASH() } }) } })
+    list = turn(solo, { 19 })
+    eq(eventAt(list, "item"), nil, "alone, byte 19: the switch fails and the potion is not tried")
+    ok(saidAt(list, "^bBeta\nused splash!"), "...Beta moves")
+    list = turn(solo, { 20 })
+    ok(eventAt(list, "item", 3, "SUPER_POTION") and active(solo, "p2").hp == 100,
+       "byte 20: under 50 percent + 1 and below a quarter: SUPER POTION, 50 HP")
+  end
+
+  -- (d) BrockAI: no roll read -- a status means FULL HEAL; AICureStatus
+  --     leaves the quartered Speed.
+  do
+    local brock = { uses = 5, onStatus = true, item = "FULL_HEAL" }
+    local b = h1({ ai = brock, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                   b = { sheet({ species = "Beta", spd = 80, moves = { SPLASH() } }) } })
+    local list = turn(b, { 255 })
+    eq(eventAt(list, "item"), nil, "no status: nothing")
+    b = h1({ ai = brock, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+             b = { sheet({ species = "Beta", spd = 80, status = "PAR", moves = { SPLASH() } }) } })
+    list = turn(b, { 255 })
+    ok(eventAt(list, "item", 3, "FULL_HEAL") and active(b, "p2").status == nil,
+       "PAR, byte 255: FULL HEAL all the same")
+    ok(eventAt(list, "status", 3), "...the chip clears")
+    eq(active(b, "p2").cur.spd, 20, "...and the Speed stays quartered (AICureStatus)")
+  end
+
+  -- (e) CooltrainerFAI: her `cp 25 percent + 1` is never read, so a byte of
+  --     255 still acts -- HYPER POTION below a tenth, else a switch below a
+  --     fifth, else nothing.
+  do
+    local coolF = { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5 }
+    local function cf(hp)
+      local b = h1({ ai = coolF, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                     b = { sheet({ species = "Beta", spd = 10, hp = hp, maxHp = 400, moves = { SPLASH() } }),
+                           sheet({ species = "Delta", spd = 10, maxHp = 400, moves = { SPLASH() } }) } })
+      return b, turn(b, { 255 })
+    end
+    local b, list = cf(39)
+    ok(eventAt(list, "item", 3, "HYPER_POTION") and active(b, "p2").hp == 239, "39/400: HYPER POTION")
+    b, list = cf(40)
+    ok(saidAt(list, "BOB with-\ndrew Beta!") and active(b, "p2").species == "Delta",
+       "40/400 (not below 40, below 80): the switch")
+    b, list = cf(80)
+    ok(eventAt(list, "item") == nil and saidAt(list, "^bBeta\nused splash!"), "80/400: nothing")
+  end
+
+  -- (f) Every item routine: FULL RESTORE cures and fills; a POTION at full
+  --     HP (BlaineAI never looks) is the line and no bar; GUARD SPEC. sets
+  --     Mist and says nothing more; an X item at +6 is "Nothing happened!"
+  --     with no animation -- and every one spends a use.
+  do
+    local function use(item, extra, bytes)
+      local b = h1({ ai = { uses = 4, chance = 256, item = item },
+                     a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                     b = { sheet({ species = "Beta", spd = 10, maxHp = 400, moves = { SPLASH() } }, extra) } })
+      return b, turn(b, bytes or { 0 })
+    end
+    local b, list = use("FULL_RESTORE", { hp = 100, status = "TOX", toxicCounter = 3 })
+    ok(active(b, "p2").hp == 400 and active(b, "p2").status == nil, "FULL RESTORE: full HP, no status")
+    ok(before(saidAt(list, "BOB\nused FULL RESTORE\non Beta!"), eventAt(list, "drain", 3)),
+       "...the line, then the bar")
+    eq(seat(b, "p2").aiCount, 3, "...one use spent")
+    b, list = use("POTION", {})
+    ok(saidAt(list, "BOB\nused POTION\non Beta!") and eventAt(list, "drain") == nil,
+       "a POTION at full HP: the line, no bar")
+    b, list = use("GUARD_SPEC", {})
+    ok(active(b, "p2").mist == true and saidAt(list, "BOB\nused GUARD SPEC.\non Beta!"),
+       "GUARD SPEC.: PROTECTED_BY_MIST")
+    local said = 0
+    for i = (eventAt(list, "item", 3) or #list + 1), #list do
+      if list[i].t == "msg" then said = said + 1 end
+    end
+    eq(said, 1, "...and the use line is all that is said")
+    b, list = use("X_ATTACK", { stages = { atk = 6 } })
+    ok(saidAt(list, "Nothing happened!") and eventAt(list, "anim", 3, "XSTATITEM_ANIM") == nil,
+       "X ATTACK at +6: Nothing happened!, no XSTATITEM_ANIM")
+    eq(seat(b, "p2").aiCount, 3, "...the use is spent all the same")
+  end
+
+  -- (g) The slot: the faster trainer acts before Ann's move; a slower one
+  --     after it -- and not at all when Ann's move knocked its monster out
+  --     (no byte) or Ann's own poison took Ann down (no byte); an AI that
+  --     acts still takes its residual; a recharge it spent the slot past is
+  --     still owed.
+  do
+    local ai = { uses = 3, chance = 256, item = "SUPER_POTION" }
+    local b = h1({ ai = ai, a = { sheet({ species = "Alpha", spd = 10, moves = { move({ id = "tap", power = 10 }) } }) },
+                   b = { sheet({ species = "Beta", spd = 90, hp = 100, maxHp = 400, moves = { SPLASH() } }) } })
+    local list = turn(b, {})
+    ok(before(eventAt(list, "item", 3), saidAt(list, "^aAlpha\nused tap!")),
+       ".enemyMovesFirst: TrainerAI, then Ann's move")
+    b = h1({ ai = ai, a = { sheet({ species = "Alpha", spd = 90, atk = 200,
+                                    moves = { move({ id = "slam", power = 120 }) } }) },
+             b = { sheet({ species = "Beta", spd = 10, hp = 1, maxHp = 400, moves = { SPLASH() } }),
+                   sheet({ species = "Delta", spd = 10, maxHp = 400, moves = { SPLASH() } }) } })
+    local log
+    list, log = turn(b, { 255, 0 })
+    eq(eventAt(list, "item"), nil, "a knockout in Ann's slot: no TrainerAI")
+    eq(log.bytes, 2, "...crit and accuracy bytes only, no AI byte")
+    b = h1({ ai = ai, a = { sheet({ species = "Alpha", spd = 90, hp = 1, maxHp = 400, status = "PSN",
+                                    moves = { SPLASH() } }) },
+             b = { sheet({ species = "Beta", spd = 10, hp = 100, maxHp = 400, moves = { SPLASH() } }) } })
+    list, log = turn(b, {})
+    ok(eventAt(list, "faint", 0) and eventAt(list, "item") == nil and log.bytes == 0,
+       "Ann's own poison takes her: `jp z, HandlePlayerMonFainted`, no TrainerAI")
+    b = h1({ ai = ai, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+             b = { sheet({ species = "Beta", spd = 10, hp = 100, maxHp = 400, status = "PSN",
+                          moves = { SPLASH() } }) } })
+    list = turn(b, {})
+    ok(before(eventAt(list, "item", 3), saidAt(list, "^bBeta's\nhurt by poison!")),
+       "the AI acted: HandlePoisonBurnLeechSeed follows all the same")
+    b = h1({ ai = ai, a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+             b = { sheet({ species = "Beta", spd = 10, hp = 100, maxHp = 400, moves = { SPLASH() } },
+                         { mustRecharge = true }) } })
+    list = turn(b, {})
+    ok(eventAt(list, "item", 3) and saidAt(list, "^bBeta\nmust recharge!") == nil
+       and active(b, "p2").mustRecharge == true, "a recharge the AI spent the slot past is still owed")
+  end
+
+  -- (h) EnemySendOut: the replacement is the first living monster in party
+  --     order -- not the bench the timeout heuristic would rank first.
+  do
+    local chart = {}
+    for i = 1, 3 do chart[i] = { 100, 100, 100 } end
+    chart[2][1] = 200
+    local b = h1({ chart = chart,
+      a = { sheet({ species = "Alpha", spd = 90, atk = 200, types = { 0 },
+                    moves = { move({ id = "slam", power = 120 }) } }) },
+      b = { sheet({ species = "Beta", spd = 10, hp = 1, moves = { SPLASH() } }),
+            sheet({ species = "Gamma", spd = 10, moves = { move({ id = "tap", power = 10, type = 0 }) } }),
+            sheet({ species = "Delta", spd = 10, moves = { move({ id = "chop", power = 10, type = 1 }) } }) } })
+    turn(b, { 255, 0 })
+    eq(b.phase, "replace", "Beta is down: the replace phase")
+    ok(b:autoPick("p2"), "the referee answers for the trainer")
+    local list = drainRaw(b)
+    local send = eventAt(list, "send", 3)
+    eq(send and list[send].text, "Gamma", "EnemySendOut: Gamma, the next in party order (Delta's CHOP is the SE one)")
+    eq(seat(b, "p2").aiCount, Turn.AI_COUNT_RELOAD, "...and wAICount is $ff for it")
+  end
+
+  -- (i) A 2v2 trainer: every seat its own copy of the one record and its own
+  --     wAICount.
+  do
+    local shared = { uses = 1, chance = 256, item = "X_ATTACK" }
+    local b = assert(Turn.create({
+      id = "h1i", mode = "coop_npc", seed = 33, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "a1", name = "Ann", mons = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) } },
+              { playerId = "a2", name = "Abe", mons = { sheet({ species = "Gamma", spd = 80, moves = { SPLASH() } }) } } },
+        b = { { playerId = "n1", name = "BOB", aiClass = shared, mons = { sheet({ species = "Beta", spd = 10, moves = { SPLASH() } }) } },
+              { playerId = "n2", name = "BOB", aiClass = shared, mons = { sheet({ species = "Delta", spd = 5, moves = { SPLASH() } }) } } },
+      },
+    }))
+    drainRaw(b)
+    ok(b.byId.n1.aiClass ~= shared and b.byId.n2.aiClass ~= shared
+       and b.byId.n1.aiClass ~= b.byId.n2.aiClass, "copied per seat, never aliased")
+    local function round()
+      b:submitChoice("a1", { action = "fight", move = 0 })
+      b:submitChoice("a2", { action = "fight", move = 0 })
+      b:submitChoice("n1", { action = "fight", move = 0 })
+      b:submitChoice("n2", { action = "fight", move = 0 })
+      return drainRaw(b)
+    end
+    local list = round()
+    local items = 0
+    for _, e in ipairs(list) do if e.t == "item" then items = items + 1 end end
+    eq(items, 2, "both seats use their X ATTACK in their own slots")
+    eq(b.byId.n1.aiCount .. "/" .. b.byId.n2.aiCount, "0/0", "...each spending its own use")
+    list = round()
+    eq(eventAt(list, "item"), nil, "...and neither has one left")
+  end
+
+  -- (j) The computer files no item and no voluntary switch, and keeps no bag.
+  do
+    local b = h1({ bBag = { POTION = 3 },
+                   a = { sheet({ species = "Alpha", spd = 90, moves = { SPLASH() } }) },
+                   b = { sheet({ species = "Beta", spd = 10, moves = { SPLASH() } }),
+                         sheet({ species = "Delta", spd = 10, moves = { SPLASH() } }) } })
+    eq(b:submitChoice("p2", { action = "item", item = "POTION" }), false, "an item from the trainer's seat is refused")
+    eq(b:submitChoice("p2", { action = "switch", slot = 1 }), false, "...and a switch")
+    eq(b.byId.p2.bag, nil, "...and its bag is not kept")
+  end
+
+  -- (k) An unreadable record refuses the fight (Wire.aiClass' posture); a
+  --     wild or a link seat's is not read at all.
+  do
+    local function try(ai, mode)
+      return Turn.create({ id = "h1k", mode = mode or "coop_npc", seed = 1,
+        sides = { a = { { playerId = "p1", mons = { mon() } } },
+                  b = { { playerId = "p2", mons = { mon({ species = "Beta" }) }, aiClass = ai } } } })
+    end
+    local battle, why = try({ uses = 0 })
+    ok(battle == nil and type(why) == "string" and why:find("aiClass", 1, true), "uses 0: refused")
+    ok(try({ chance = 64 }) == nil, "no uses: refused")
+    ok(try({ uses = 3, switch = "yes" }) == nil, "a flag that is not a boolean: refused")
+    ok(try({ uses = 3, hpBelow = 0 }) == nil, "a divisor of 0: refused")
+    ok(try({ uses = 3, chance = 256, item = "X_SPEED", switch = false }) ~= nil, "a readable one: taken")
+    ok(try({ uses = 0 }, "wild") ~= nil and try({ uses = 0 }, "1v1") ~= nil, "a wild / link seat's: ignored")
+  end
+
+  -- (l) The animations the cart plays (K20 completion) and does not (K22's
+  --     audit), and `quiet`.
+  do
+    local function pair(aMoves, bMoves, o)
+      o = o or {}
+      return h1({ mode = o.mode or "wild", chart = o.chart, aBag = o.aBag,
+                  a = { sheet({ species = "Alpha", spd = 90, atk = 60, maxHp = 400, types = { 0 },
+                                moves = aMoves }, o.aExtra) },
+                  b = { sheet({ species = "Beta", spd = 10, maxHp = 400, types = { 0 },
+                                moves = bMoves }, o.bExtra) } })
+    end
+    -- A ball at a trainer: TOSS_ANIM, BLOCKBALL_ANIM straight behind, then the line.
+    local b = pair({ SPLASH() }, { SPLASH() }, { mode = "coop_npc", aBag = { POKE_BALL = 1 } })
+    local list = turn(b, {}, { action = "item", item = "POKE_BALL" })
+    local toss = eventAt(list, "anim", 0, "TOSS_ANIM")
+    ok(toss and list[toss + 1].t == "anim" and list[toss + 1].text == "BLOCKBALL_ANIM"
+       and before(toss + 1, saidAt(list, "The trainer\nblocked the BALL!")),
+       "TOSS_ANIM, BLOCKBALL_ANIM, then the trainer blocks the ball")
+    -- ChargeEffect's own: XSTATITEM_ANIM, FLY's TELEPORT (quiet), DIG's SLIDE_DOWN_ANIM.
+    for _, row in ipairs({ { "SOLARBEAM", 39, "0:XSTATITEM_ANIM" }, { "FLY", 43, "0:TELEPORT~" },
+                           { "DIG", 39, "0:SLIDE_DOWN_ANIM" } }) do
+      b = pair({ move({ id = row[1], power = 60, effect = row[2] }) }, { SPLASH() })
+      list = turn(b, {})
+      local mine = {}
+      for _, e in ipairs(list) do if e.slot == 0 then mine[#mine + 1] = e end end
+      eq(anims(mine), row[3], row[1] .. ": the charge turn's animation is ChargeEffect's")
+      local beat = eventAt(list, "anim", 0)
+      eq(beat and list[beat].amount, 1, row[1] .. ": ...the setup beat")
+      list = turn(b, {})
+      ok(eventAt(list, "anim", 0, row[1]) ~= nil, row[1] .. ": the release plays the move")
+    end
+    -- BideEffect's XSTATITEM_ANIM leads its used line; an unleash of 0 plays nothing.
+    b = pair({ move({ id = "BIDE", power = 0, effect = 26 }) }, { SPLASH() })
+    list = turn(b, {})
+    ok(before(eventAt(list, "anim", 0, "XSTATITEM_ANIM"), saidAt(list, "^aAlpha\nused BIDE!"))
+       and eventAt(list, "anim", 0, "BIDE") == nil, "Bide's first turn: XSTATITEM_ANIM, never BIDE's")
+    for _ = 1, 3 do
+      list = turn(b, {})
+      if saidAt(list, "^aAlpha\nunleashed energy!") then break end
+    end
+    ok(saidAt(list, "^aAlpha's\nattack missed!") and eventAt(list, "anim", 0, "BIDE") == nil,
+       "a Bide unleashed at 0: wMoveMissed, no animation")
+    -- A move that missed plays nothing -- EXPLOSION excepted.
+    b = pair({ move({ id = "jab", power = 40, accuracy = 0 }) }, { SPLASH() })
+    list = turn(b, {})
+    ok(saidAt(list, "^aAlpha\nused jab!") and saidAt(list, "^aAlpha's\nattack missed!")
+       and eventAt(list, "anim", 0) == nil, "an accuracy miss: no animation")
+    b = pair({ move({ id = "blast", power = 170, effect = 7, accuracy = 0 }) }, { SPLASH() })
+    list = turn(b, {})
+    ok(eventAt(list, "anim", 0, "blast") ~= nil, "a missed EXPLOSION still plays")
+    b = pair({ move({ id = "jab", power = 40 }) }, { SPLASH() },
+             { chart = { { 0 } } })
+    list = turn(b, {})
+    ok(saidAt(list, "It doesn't affect\n^bBeta!") and eventAt(list, "anim", 0) == nil,
+       "an immunity: no animation")
+    -- A power-0 routine plays its animation where it succeeds, nowhere it fails.
+    b = pair({ move({ id = "growl", power = 0, effect = 18 }) }, { SPLASH() })
+    list = turn(b, {})
+    ok(eventAt(list, "anim", 0, "growl") and saidAt(list, "^bBeta's\nATTACK fell!"), "GROWL that lands: animated")
+    b = pair({ move({ id = "growl", power = 0, effect = 18 }) }, { SPLASH() },
+             { bExtra = { stages = { atk = -6 } } })
+    list = turn(b, {})
+    ok(saidAt(list, "Nothing happened!") and eventAt(list, "anim", 0) == nil, "GROWL at -6: no animation")
+    b = pair({ move({ id = "lull", power = 0, effect = 32 }) }, { SPLASH() }, { bExtra = { status = "PSN" } })
+    list = turn(b, {})
+    ok(saidAt(list, "It didn't affect\n^bBeta!") and eventAt(list, "anim", 0) == nil,
+       "a sleep move on a statused target: no animation")
+    -- MIRROR MOVE has no animation of its own; the copied move plays.
+    b = pair({ move({ id = "mirror", power = 0, effect = 9 }) }, { move({ id = "jab", power = 10 }) },
+             { aExtra = { stats = { atk = 40, def = 40, spd = 5, spc = 40 } } })
+    turn(b, {})
+    list = turn(b, {})
+    ok(eventAt(list, "anim", 0, "mirror") == nil and eventAt(list, "anim", 0, "jab") ~= nil,
+       "MIRROR MOVE: the copied JAB's animation, never MIRROR MOVE's")
+    -- `quiet`: the seeder's ABSORB, a trap's later hit.
+    b = pair({ SPLASH() }, { SPLASH() }, { bExtra = { leechSeed = { fromSlot = 0 } } })
+    list = turn(b, {})
+    local sap = eventAt(list, "anim", 0, "ABSORB")
+    ok(sap and list[sap].quiet == true, "the seeder's ABSORB is quiet")
+    local own = eventAt(list, "anim", 0, "splash")
+    ok(own and list[own].quiet == nil, "...Alpha's own SPLASH is not")
+    b = pair({ move({ id = "wrap", power = 15, effect = 42 }) }, { SPLASH() })
+    turn(b, { 255, 0, 0, 0, 0 })
+    list = turn(b, {})
+    local trap = eventAt(list, "anim", 0, "wrap")
+    ok(trap and list[trap].quiet == true and saidAt(list, "^aAlpha's\nattack continues!"),
+       "a trap's later hit is quiet")
+  end
+
+  -- (m) RemoveFaintedPlayerMon zeroes the player's fallen monster's status;
+  --     FaintEnemyPokemon leaves the computer's; a link fight's both sides
+  --     are players.
+  do
+    local function ko(mode, aExtra, bExtra)
+      local b = h1({ mode = mode,
+        a = { sheet({ species = "Alpha", spd = 90, atk = 200, maxHp = 400,
+                      moves = { move({ id = "slam", power = 120 }) } }, aExtra),
+              sheet({ species = "Gamma", spd = 90, moves = { SPLASH() } }) },
+        b = { sheet({ species = "Beta", spd = 10, atk = 200, maxHp = 400,
+                      moves = { move({ id = "slam", power = 120 }) } }, bExtra),
+              sheet({ species = "Delta", spd = 10, moves = { SPLASH() } }) } })
+      turn(b, { 255, 0, 255, 0 })
+      return b
+    end
+    local b = ko("wild", { hp = 1, status = "PSN" }, nil)
+    eq(b.byId.p1.mons[1].status, nil, "the player's fallen monster: no status")
+    b = ko("coop_npc", nil, { hp = 1, status = "BRN" })
+    eq(b.byId.p2.mons[1].status, "burn", "the computer's keeps its own")
+    b = ko("1v1", nil, { hp = 1, status = "BRN" })
+    eq(b.byId.p2.mons[1].status, nil, "a link fight: the other player's too")
+  end
+
+  -- (n) A solo trainer's seat, driven as SoloBattle drives it: one seat with
+  --     the whole party and the upload's `aiMods` / `aiClass` (a `bag` too,
+  --     which the referee does not keep), answered by `autoPick` every turn
+  --     and every send-out.  The layers run at `.selectEnemyMove`, TrainerAI
+  --     in the slot, EnemySendOut for each replacement.
+  do
+    local b = assert(Turn.create({
+      id = "h1n", mode = "coop_npc", seed = 4711, choiceTimeout = 0, reconnectGrace = 60,
+      chart = { { 100, 100 }, { 200, 100 } },
+      sides = {
+        a = { { playerId = "player", name = "Ann", mons = {
+          sheet({ species = "Alpha", spd = 50, atk = 140, maxHp = 400, types = { 0 },
+                  moves = { move({ id = "slam", power = 60 }) } }) } } },
+        b = { { playerId = "foe", name = "BOB", bag = { POTION = 2 },
+                aiMods = { 1, 3 }, aiClass = { uses = 2, chance = 256, item = "SUPER_POTION", hpBelow = 4 },
+                mons = {
+                  sheet({ species = "Beta", spd = 40, maxHp = 200,
+                          moves = { move({ id = "thump", power = 20 }),
+                                    move({ id = "chop", power = 20, type = 1 }) } }),
+                  sheet({ species = "Kappa", spd = 40, maxHp = 200,
+                          moves = { move({ id = "thump", power = 20 }) } }),
+                  sheet({ species = "Delta", spd = 40, maxHp = 200,
+                          moves = { move({ id = "chop", power = 20, type = 1 }) } }) } } },
+      },
+    }))
+    drainRaw(b)
+    eq(b.byId.foe.bag, nil, "the upload's bag is not kept")
+    local events = {}
+    for _ = 1, 40 do
+      if b:outcome() then break end
+      if b.phase == "replace" then
+        b:autoPick("foe")
+      else
+        b:submitChoice("player", { action = "fight", move = 0 })
+        if b.byId.foe.choice == nil then b:autoPick("foe") end
+      end
+      for _, e in ipairs(drainRaw(b)) do events[#events + 1] = e end
+    end
+    local items, sends, thumps = 0, {}, 0
+    for _, e in ipairs(events) do
+      if e.t == "item" and e.slot == 3 then items = items + 1 end
+      if e.t == "send" and e.slot == 3 then sends[#sends + 1] = e.text end
+      if e.t == "msg" and e.text == "^bBeta\nused thump!" then thumps = thumps + 1 end
+    end
+    ok(items >= 1, "TrainerAI's SUPER POTION in the seat's slot")
+    eq(table.concat(sends, ","), "Kappa,Delta", "EnemySendOut: Kappa, then Delta, in party order")
+    eq(thumps, 0, "layer 3: Beta's super-effective CHOP is the only move it picks")
+    ok(b:outcome() ~= nil, "the fight runs to its end on autoPick alone")
+  end
 end
 
 -- ------------------------------------------------------------------

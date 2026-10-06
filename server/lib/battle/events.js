@@ -146,6 +146,14 @@ const FIELDS = {
   // sits -- `amount` is unsigned on the wire and could never carry a stage
   // below zero. lib/sanitize reads it for the Gen 1 / Gen 2 dialect.
   stage: 'number',
+  // Contract K22: an `anim` whose id is a move id but which is not the acting
+  // monster's own use of its move -- Leech Seed's ABSORB on the seeder's seat
+  // (HandlePoisonBurnLeechSeed), a FLY's charge-turn TELEPORT (ChargeEffect),
+  // a trap's later hit (`.MultiturnMoveCheck`) -- is `quiet`: play the look
+  // only, no callout and no lunge. Only `true` is ever sent (`coerce`);
+  // absent is an ordinary move animation. lib/sanitize reads it on the
+  // Gen 1 / Gen 2 readers.
+  quiet: 'boolean',
 };
 
 // ------------------------------------------------------------------
@@ -179,7 +187,8 @@ const FIELDS = {
 const SHAPES = {
   msg: { text: true },
   anim: { slot: true, side: true, text: 'move or ball-anim id',
-    amount: 'shake count on SHAKE_ANIM (0-3)' },
+    amount: 'shake count on SHAKE_ANIM (0-3); 1 on a charge/vanish setup beat',
+    quiet: 'true when a move id plays as a look only (K22)' },
   damage: {
     slot: true, side: true, amount: true, hp: 'hp left',
     status: 'set when a residual dealt it',
@@ -362,6 +371,11 @@ function checkMoves(value) {
 function coerce(key, value) {
   if (key === 'moves') return undefined;
   if (!own(FIELDS, key)) return undefined;
+  // A flag is sent set or not at all (K22's `quiet`).
+  if (FIELDS[key] === 'boolean') {
+    if (value === true) return true;
+    return undefined;
+  }
   if (FIELDS[key] === 'number') {
     const n = toNumber(value);
     if (n === null) return undefined;

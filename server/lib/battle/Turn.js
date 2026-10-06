@@ -30,6 +30,11 @@
  *      bracket at one Speed -- and every battler on the field is an actor
  *      there, whatever its seat chose (a switch, an item, a recharge, a held
  *      monster's CANNOT_MOVE all take part in MainInBattleLoop's compare);
+ *   1b. TrainerAI's `Random` byte, in a computer trainer seat's own slot of
+ *      the order, before its move (`_trainerAi`) -- drawn while the seat's
+ *      wAICount is not 0, GenericAI's included, and never for a wild monster
+ *      or a link fight's seat; the class routine and the AI's item or switch
+ *      draw nothing else;
  *   2. the gates (`_runGates`): sleep and freeze draw nothing; a confused
  *      monster draws its self-hit byte only when still confused after the
  *      counter's step (the snap-out turn draws none); paralysis its byte;
@@ -73,8 +78,9 @@
  *     +1, COUNTER -1, off the selected move), then the stored Speed, then the
  *     tie-break (`_orderActors`); a player's switch and item resolve before
  *     any move but the seat still takes part in the compare, and the
- *     computer's item or switch is spent in its own slot of the order, in the
- *     bracket of the move SelectEnemyMove picked first (`picked`).
+ *     computer's item or switch is TrainerAI's, in its own slot of the order
+ *     (`_trainerAi`), in the bracket of the move SelectEnemyMove picked --
+ *     which an AI that acts skips.
  *   * *Speed ties* break on a single byte per tied group -- one bracket at one
  *     Speed -- below 128 leaving the side-a member first and otherwise
  *     reversing the group.
@@ -126,11 +132,15 @@
  *     and every seat still acts after a faint.
  *   * The computer's MOVE is the cart's (`_computerChoice`): a wild monster's
  *     `.chooseRandomMove`, a trainer's AIEnemyTrainerChooseMoves over its
- *     seat's `aiMods`; its item or switch, and a player's timeout, stay the
- *     heuristic below.
- *   * A *timeout* / NPC auto-picks with bag cures & heals (≤50% HP), X-items,
- *     SE damage, status / setup reading, and SE bench switches (deterministic
- *     heuristics — not a full TrainerAI port) -- and the fight goes on.
+ *     seat's `aiMods`; its item and switch are TrainerAI's (contract K16,
+ *     `_trainerAi`) over its seat's `aiClass` -- none is GenericAI -- and its
+ *     send-out after a faint is EnemySendOut's, the first living monster in
+ *     party order. The computer never files an item or a switch, and its bag
+ *     is never read.
+ *   * A *player's timeout* auto-picks with bag cures & heals (≤50% HP),
+ *     X-items, SE damage, status / setup reading, and SE bench switches
+ *     (`_autoChoice`: the mod's rule, not a cart behaviour) -- and the fight
+ *     goes on.
  *   * The choice clock is *suspended while anybody is disconnected*.
  *     `submitChoice` also refuses a seat whose `connected` is false until
  *     `reconnect()`, because SESSION_LEAVE leaves the TCP up and would
@@ -154,6 +164,17 @@
  *     does wait for the slot's end (`_reapKo`), where MainInBattleLoop tests
  *     the HP once Execute*Move has returned; two at once go side a first; a
  *     residual's knockout is its pass's own.
+ *   * *A move's animation leads its used line* (the screen's order) and is
+ *     taken back where the cart plays none (K20 / K22, `_dropMoveAnim`): a
+ *     miss (EXPLODE_EFFECT excepted), a power-0 routine that failed, MIRROR
+ *     MOVE, a Bide unleashed at 0. A charge turn plays ChargeEffect's
+ *     (XSTATITEM_ANIM, FLY's TELEPORT, DIG's SLIDE_DOWN_ANIM), a Bide's first
+ *     turn BideEffect's (XSTATITEM_ANIM). A move id played as a look only --
+ *     the seeder's ABSORB, FLY's TELEPORT, a trap's later hit -- is `quiet`.
+ *   * *TrainerAI in a 2v2* (coop_npc): each of the trainer's seats is "the
+ *     enemy" for its own slot -- its own `aiClass` copy, its own wAICount
+ *     (`aiCount`, $ff at each of its send-outs), its own monster and its own
+ *     dealt hand for AISwitchIfEnoughMons and EnemySendOut.
  *
  * Two shape differences from the Lua, both forced by the language:
  *
@@ -304,9 +325,10 @@ function maxFighters(mode, side) {
 // The wild monster's seat. Wildlife is always the synthetic side-b seat of a
 // mode whose name says "wild" (the seat `maxFighters` caps at one above and
 // `_awardExp` pays the other side for), and wildlife carries no bag: a wild
-// monster never uses an item, no matter who asks on its behalf. Both askers are
-// gated -- `_normaliseChoice` refuses a submitted one, `_autoItemChoice` never
-// picks one -- because the seat can be driven from either end.
+// monster never uses an item, no matter who asks on its behalf. It is a seat
+// of the computer's, so both askers are gated with every other one --
+// `_normaliseChoice` refuses a submitted item, `_computerChoice` never picks
+// one, and TrainerAI never runs for it (`_runsTrainerAi`: wIsInBattle 1).
 const WILD_SIDE = 'b';
 
 function isWildSeat(mode, fighter) {
@@ -419,6 +441,33 @@ const AI_BETTER_EFFECTS = { 40: true, 41: true, 43: true };
 // AIGetTypeEffectiveness' starting value, $10 (the cart's own comment: it
 // should have been EFFECTIVE, 10): what no matching row leaves.
 const AI_NEUTRAL = 16;
+
+// wAICount's $ff, which InitBattle and EnemySendOutFirstMon write (core.asm
+// :1306-1307, :6685-6686) and TrainerAI reads as "reload from the class's
+// TrainerAIPointers byte" (`inc a / jr nz, .getpointer`) -- `_trainerAi`.
+const AI_COUNT_RELOAD = 255;
+// GenericAI's TrainerAIPointers byte (`dbw 3, GenericAI`, ai_pointers.asm):
+// the class a trainer with no record of its own runs.
+const AI_GENERIC_USES = 3;
+// AIRecoverHP's `ld b, N` (trainer_ai.asm :487-503): POTION 20, SUPER
+// POTION 50, HYPER POTION 200, added to the HP and held at the maximum.
+const AI_HEAL = { POTION: 20, SUPER_POTION: 50, HYPER_POTION: 200 };
+// AIIncreaseStat's StatModifierUpEffect (:685-725): the UP1 effect each X
+// item writes into wEnemyMoveEffect, one stage.
+const AI_X_STAT = { X_ATTACK: 'atk', X_DEFEND: 'def', X_SPEED: 'spd', X_SPECIAL: 'spc' };
+
+// ChargeEffect's animation (effects.asm :998-1030), which a charge turn plays
+// in place of the move's: XSTATITEM_ANIM -- the enemy's turn loads
+// XSTATITEM_DUPLICATE_ANIM, the same picture, sent as XSTATITEM_ANIM (K20)
+// -- TELEPORT's for FLY_EFFECT, and SLIDE_DOWN_ANIM for DIG, whose test is
+// the move's own number and comes last (`cp DIG` on the move struct), so it
+// wins. TELEPORT is a move id played as a look: `quiet` (K22). Returns the
+// id and the flag.
+function chargeAnim(effectId, move) {
+  if (Effects.isDigMove(move)) return ['SLIDE_DOWN_ANIM', null];
+  if (Effects.isFly(effectId)) return ['TELEPORT', true];
+  return ['XSTATITEM_ANIM', null];
+}
 
 // The sentences `.monDoesNothing` prints (pokered data/text/text_2.asm
 // _LoafingAroundText .. _IgnoredOrdersText), keyed by Status.LOAF_LINES, with
@@ -1056,6 +1105,54 @@ function copyAiMods(raw) {
   return out;
 }
 
+// A trainer seat's TrainerAI record (contract K16): the engine's
+// `ai_classes` record for its class, which matches pokered's
+// data/trainers/ai_pointers.asm and the class routines of
+// engine/battle/trainer_ai.asm row for row -- `uses` (TrainerAIPointers'
+// byte, the wAICount loaded for each monster), `chance` / `switchChance`
+// (the routine's `cp N percent` against TrainerAI's byte, out of 256), `item`,
+// `switch` (AISwitchIfEnoughMons is the routine), `onStatus` (BrockAI's
+// status test), `hpBelow` / `switchBelow` (AICheckIfHPBelowFraction's
+// divisors). Read field by field into an object of this seat's own -- the
+// hub hands every seat of one trainer the same object -- and null, the
+// caller's refusal, when a key it knows is present and unreadable
+// (Wire.aiClass' posture: a record half-read is another class).
+// `_trainerAi` reads it.
+const AI_USES_MAX = 255;
+const AI_CHANCE_MAX = 256;
+const AI_DIVISOR_MAX = 255;
+const AI_CLASS_INTS = [
+  ['uses', 1, AI_USES_MAX],
+  ['chance', 0, AI_CHANCE_MAX],
+  ['switchChance', 0, AI_CHANCE_MAX],
+  ['hpBelow', 1, AI_DIVISOR_MAX],
+  ['switchBelow', 1, AI_DIVISOR_MAX],
+];
+const AI_CLASS_FLAGS = ['switch', 'onStatus'];
+
+function copyAiClass(raw) {
+  if (!isTable(raw) || raw.uses == null) return null;
+  const out = {};
+  for (const [key, lo, hi] of AI_CLASS_INTS) {
+    if (raw[key] != null) {
+      const n = int(raw[key], null);
+      if (n === null || n < lo || n > hi) return null;
+      out[key] = n;
+    }
+  }
+  if (raw.item != null) {
+    out.item = str(raw.item);
+    if (out.item === null) return null;
+  }
+  for (const key of AI_CLASS_FLAGS) {
+    if (raw[key] != null) {
+      if (typeof raw[key] !== 'boolean') return null;
+      if (raw[key]) out[key] = true;
+    }
+  }
+  return out;
+}
+
 // Bag sheet for auto-pick / timeout item use (id → count). Accepts the same
 // shapes Wire.bag does: a list of {id,count} or a map.
 function copyBag(raw) {
@@ -1192,6 +1289,9 @@ class Battle {
     // Every faint so far, counted: `_resolveFights` reads what one slot or
     // one residual added to it.
     this.faints = 0;
+    // The move animation `_useMove` put out ahead of its used line, which a
+    // miss or a failed routine takes back (`_dropMoveAnim`).
+    this.moveAnim = null;
     this.result = null;
   }
 
@@ -1264,6 +1364,28 @@ class Battle {
   _flyOrChargeAnim(fighter, effectId) {
     if (Effects.isCharge(effectId)) {
       this._statusAnim(fighter, 'STATUS_AFFECTED_ANIM');
+    }
+  }
+
+  // The move's animation taken back out of the stream (K20 / K22).
+  // `_useMove` emits it ahead of the used line (`moveAnim`, the header's
+  // note) before the cart has decided whether to play it, and where the cart
+  // plays none -- a move that missed (HandleIfPlayerMoveMissed, EXPLODE_EFFECT
+  // excepted), a power-0 move whose routine failed, MIRROR MOVE's own -- it is
+  // removed here, every later event of the action moving up one `seq`.
+  // Nothing is drained in between: an action resolves inside one call, so the
+  // event is still in the buffer; one that is not is left alone.
+  _dropMoveAnim() {
+    const event = this.moveAnim;
+    this.moveAnim = null;
+    if (!event) return;
+    for (let i = this.buffer.length - 1; i >= 0; i -= 1) {
+      if (this.buffer[i] === event) {
+        this.buffer.splice(i, 1);
+        for (let j = i; j < this.buffer.length; j += 1) this.buffer[j].seq -= 1;
+        this.seq -= 1;
+        return;
+      }
     }
   }
 
@@ -1711,12 +1833,14 @@ class Battle {
     }
 
     if (action === 'item') {
+      // The computer never files an item: a trainer's is TrainerAI's, in its
+      // slot of the order (contract K16, `_trainerAi`), and wildlife has no
+      // bag and no hands. Refused rather than ignored, so a seat of the
+      // computer's that is somehow handed one never spends the turn on it.
+      if (isComputerSeat(this.mode, fighter)) return null;
       const item = str(choice.item);
       if (!item) return null;
-      // Wildlife has no bag and no hands. Refused rather than ignored so a wild
-      // seat that is somehow handed one never spends the turn on it either.
-      if (isWildSeat(this.mode, fighter)) return null;
-      // A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
+      // A fighter with a bag sheet must actually hold the stack.
       // Seats with no bag stay permissive so headless fixtures can still item.
       if (fighter.bag && !this._bagHas(fighter, item)) return null;
       const effect = Effects.itemEffect(item);
@@ -1750,15 +1874,16 @@ class Battle {
       // reaches RemoveUsedItem: the bag keeps the item, the turn is not
       // spent, and the battle menu asks again. So a player's such use is
       // refused here, before it is filed (`_itemFails`), as the fainted cases
-      // above are -- the seat still owes its turn. The computer's AI items
-      // never take that path.
-      if (!isComputerSeat(this.mode, fighter) && this._itemFails(fighter, effect, out)) {
-        return null;
-      }
+      // above are -- the seat still owes its turn.
+      if (this._itemFails(fighter, effect, out)) return null;
       return out;
     }
 
     if (action === 'switch') {
+      // ...and never a voluntary switch: a trainer's is AISwitchIfEnoughMons'
+      // (`_aiSwitch`), and its send-out after a faint is the replace branch
+      // above.
+      if (isComputerSeat(this.mode, fighter)) return null;
       const slot = int(choice.slot, null);
       if (slot === null) return null;
       const target = partyIndexOf(fighter, slot);
@@ -1984,11 +2109,9 @@ class Battle {
   }
 
   // Bag item for the active mon: cure → heal ≤50% → X-item while stages flat.
+  // A player's (`_autoChoice`); the computer keeps no bag.
   _autoItemChoice(fighter, mon) {
     if (!fighter.bag) return null;
-    // A wild monster is not a trainer: it never reaches into a bag, even when
-    // the hub seeded its seat with one.
-    if (isWildSeat(this.mode, fighter)) return null;
 
     if (mon.status) {
       const list = AUTO_STATUS_CURE[mon.status];
@@ -2033,24 +2156,14 @@ class Battle {
     return null;
   }
 
-  _autoChoice(fighter) {
-    if (fighter.mustReplace) {
-      const foe = this._autoTarget(fighter);
-      const defender = foe && activeMon(foe);
-      const se = this._bestSeBench(fighter, defender);
-      if (se) return { action: 'switch', slot: se };
-      const next = firstLiving(fighter.mons);
-      if (next) return { action: 'switch', slot: next };
-      return null;
-    }
-
-    const mon = activeMon(fighter);
-    if (!mon) return null;
-
-    // The forced turns, the same answers `_fillForcedChoices` files (that
-    // pass runs first, so these are reached only when it could not file one)
-    // -- and a player's Bide, trap and hold, which it leaves to the player: an
-    // unanswered one is the FIGHT `_menuFight` would make of it.
+  // The forced turns, the same answers `_fillForcedChoices` files (that pass
+  // runs first, so these are reached only when it could not file one) -- and
+  // a player's Bide, trap and hold, which it leaves to the player: an
+  // unanswered one is the FIGHT `_menuFight` would make of it. null for a
+  // monster free to choose. Shared by a player's timeout (`_autoChoice`) and
+  // the computer's answer (`_computerChoice`), so both draw the same aims for
+  // them.
+  _lockedChoice(fighter, mon) {
     if (mon.charging) {
       const c = mon.charging;
       const forced = forcedMoveOf(mon, c.move, c.moveIndex);
@@ -2097,13 +2210,38 @@ class Battle {
         };
       }
     }
+    return null;
+  }
 
+  // The seat an answer nobody chose is aimed at (`_autoTarget`), or one still
+  // owing a send-out when nobody across stands.
+  _autoFoe(fighter) {
     let foe = this._autoTarget(fighter);
     if (!foe) {
       for (const f of this._foes(fighter)) {
         if (f.mustReplace) { foe = f; break; }
       }
     }
+    return foe;
+  }
+
+  _autoChoice(fighter) {
+    if (fighter.mustReplace) {
+      const foe = this._autoTarget(fighter);
+      const defender = foe && activeMon(foe);
+      const se = this._bestSeBench(fighter, defender);
+      if (se) return { action: 'switch', slot: se };
+      const next = firstLiving(fighter.mons);
+      if (next) return { action: 'switch', slot: next };
+      return null;
+    }
+
+    const mon = activeMon(fighter);
+    if (!mon) return null;
+    const locked = this._lockedChoice(fighter, mon);
+    if (locked) return locked;
+
+    const foe = this._autoFoe(fighter);
     if (!foe) return null;
     const defender = activeMon(foe);
     if (!defender) {
@@ -2248,9 +2386,11 @@ class Battle {
    * and `_checkOver` should have ended the fight.
    */
   _autoChoiceOrSkip(fighter) {
-    let auto = this._autoChoice(fighter);
-    if (auto && isComputerSeat(this.mode, fighter)) {
-      auto = this._computerChoice(fighter, auto);
+    let auto;
+    if (isComputerSeat(this.mode, fighter)) {
+      auto = this._computerChoice(fighter);
+    } else {
+      auto = this._autoChoice(fighter);
     }
     if (auto) return auto;
     if (this.phase === 'choice' && activeMon(fighter)) {
@@ -2260,32 +2400,33 @@ class Battle {
   }
 
   // The computer's answer, as SelectEnemyMove gives it (core.asm :2915-3005).
-  // Its forced turns stand as `_autoChoice` filed them -- SelectEnemyMove
-  // returns before `.canSelectMove` for every one of them, drawing nothing --
-  // and so does a send-out owed after a faint. Every other answer is a move
-  // chosen at `.canSelectMove`, which is not chosen here: it is drawn from the
-  // battle's own stream where the cart draws it, after the players' menus --
-  // their RUN rolls, their switches, their balls -- and before the speed
-  // compare (`_selectComputerMoves`), so `cartPick` files the seat and names no
-  // slot yet. The heuristic's item or switch (the stand-in for TrainerAI, which
-  // the referee does not port: its class routine and uses are not on the
-  // sheet) keeps its action and is marked the same way: on the cart the move is
-  // selected first and TrainerAI then spends the turn on something else in the
-  // seat's slot, so the draws -- and the selection the priority bracket and
-  // COUNTER read -- happen all the same.
-  _computerChoice(fighter, auto) {
-    if (fighter.mustReplace) return auto;
-    if (auto.action === 'fight') {
-      if ((auto.forcedMove !== undefined && auto.forcedMove !== null)
-          || auto.bideStore || auto.trapContinue) {
-        return auto;
-      }
-      return { action: 'fight', target: auto.target, cartPick: true };
+  // Its forced turns stand as `_lockedChoice` answers them -- SelectEnemyMove
+  // returns before `.canSelectMove` for every one of them, drawing nothing.
+  // Every other answer is a move chosen at `.canSelectMove`, which is not
+  // chosen here: it is drawn from the battle's own stream where the cart
+  // draws it, after the players' menus -- their RUN rolls, their switches,
+  // their balls -- and before the speed compare (`_selectComputerMoves`), so
+  // `cartPick` files the seat and names no slot yet. Its item and its switch
+  // are never filed: TrainerAI decides them in the seat's slot of the order
+  // (`_trainerAi`), the move SelectEnemyMove picked standing all the same.
+  //
+  // A send-out owed after a faint is EnemySendOut's (core.asm :1276-1341,
+  // `.next` / `.next2`): `wWhichPokemon` walks the party from the top, past
+  // wEnemyMonPartyPos and past every monster at 0 HP, and the first one left
+  // comes out -- party order, the cart's only rule (a trainer has no say).
+  _computerChoice(fighter) {
+    if (fighter.mustReplace) {
+      const next = firstLiving(fighter.mons, fighter.active);
+      if (next) return { action: 'switch', slot: next };
+      return null;
     }
-    if (auto.action === 'item' || auto.action === 'switch') {
-      auto.cartPick = true;
-    }
-    return auto;
+    const mon = activeMon(fighter);
+    if (!mon) return null;
+    const locked = this._lockedChoice(fighter, mon);
+    if (locked) return locked;
+    const foe = this._autoFoe(fighter);
+    if (!foe) return null;
+    return { action: 'fight', target: foe.slot, cartPick: true };
   }
 
   /*
@@ -2295,9 +2436,9 @@ class Battle {
    * connection behind it, so without this the referee would wait out the whole
    * choice deadline every turn and then auto-pick anyway -- a minute a turn, for
    * a decision nothing was ever going to make. It is deliberately the *same*
-   * pick the timeout files rather than a second, cleverer one: both runtimes
-   * reproduce it byte for byte (bag / SE / status / setup / switch heuristics
-   * above).
+   * pick the timeout files rather than a second one (`_autoChoiceOrSkip`): the
+   * cart's for the computer's seats (`_computerChoice`), the mod's heuristic
+   * for a player's -- both runtimes reproduce it byte for byte.
    *
    * Returns true when a choice was actually filed, so a caller can loop until
    * the machine stops owing. Filing one may resolve the turn and open the next,
@@ -2480,9 +2621,9 @@ class Battle {
   // Metronome's priority whatever it calls, and a disobedient monster at the
   // priority of the move it was told to use, whatever it does instead. A
   // forced replay is the move it replays (`forcedMoveOf`), never Struggle. A
-  // computer seat's item or switch moves in the bracket of the move
-  // SelectEnemyMove picked before TrainerAI threw it away (`picked`,
-  // `_selectionOf`).
+  // computer seat always selects a move (`_computerChoice`): the bracket its
+  // slot moves in is that move's even when TrainerAI then spends the slot on
+  // an item or a switch (`_trainerAi`).
   _priorityOf(fighter, mon) {
     return Effects.movePriority(fighter.selectedMove);
   }
@@ -2517,8 +2658,8 @@ class Battle {
   // since (`cannotMove`, `_selectsAnew`).
   // A player's seat that switched, used an item or ran selected nothing the
   // referee can name (the cart answers from its menu cursor): null. The
-  // computer's item or switch is TrainerAI's, made after SelectEnemyMove had
-  // selected a move (`_cartMovePick`'s `picked`): that move.
+  // computer's seat never files either (`_computerChoice`): TrainerAI's item
+  // or switch comes after SelectEnemyMove has selected the move named here.
   _selectionOf(fighter, mon) {
     const choice = fighter.choice;
     if (!choice || !mon) return null;
@@ -2528,13 +2669,7 @@ class Battle {
       if (choice.skip && choice.skip !== 'trapped') return last;
       return null;
     }
-    if (choice.action !== 'fight') {
-      if (choice.picked && isComputerSeat(this.mode, fighter)) {
-        if (this._struggles(fighter, mon)) return STRUGGLE;
-        return moveAt(mon, choice.picked);
-      }
-      return null;
-    }
+    if (choice.action !== 'fight') return null;
     if (choice.forcedMove) return choice.forcedMove;
     if (choice.stale || mon.status === 'sleep' || mon.status === 'freeze') return last;
     if (this._struggles(fighter, mon)) return STRUGGLE;
@@ -2723,10 +2858,8 @@ class Battle {
       if (choice && choice.cartPick && mon) {
         choice.cartPick = null;
         if (mon.status === 'sleep' || mon.status === 'freeze') {
-          if (choice.action === 'fight') {
-            choice.stale = true;
-            if (choice.move === undefined || choice.move === null) choice.move = 1;
-          }
+          choice.stale = true;
+          if (choice.move === undefined || choice.move === null) choice.move = 1;
         } else {
           this._cartMovePick(fighter, mon, choice);
         }
@@ -2745,11 +2878,11 @@ class Battle {
   // the disabled slot (wEnemyDisabledMove's high nibble) or on an empty one
   // (no move there, or one the AI's list zeroed) draws again. PP is never read
   // (`computerMustStruggle`'s note). The slot is wEnemyMoveListIndex
-  // (`moveListIndex`); a fight takes it as its move, an item or a switch keeps
-  // it as the selection TrainerAI then threw away (`picked`, `_selectionOf`).
+  // (`moveListIndex`) and the fight's move -- the selection TrainerAI may then
+  // spend the slot past (`_trainerAi`).
   _cartMovePick(fighter, mon, choice) {
     if (computerMustStruggle(mon)) {
-      if (choice.action === 'fight') choice.move = 1; else choice.picked = 1;
+      choice.move = 1;
       return;
     }
     let usable = null;
@@ -2772,11 +2905,7 @@ class Battle {
     }
     if (slot === null) slot = 1;
     fighter.moveListIndex = slot;
-    if (choice.action === 'fight') {
-      choice.move = slot;
-    } else {
-      choice.picked = slot;
-    }
+    choice.move = slot;
   }
 
   // AIGetTypeEffectiveness (core.asm): the FIRST TypeEffects row whose
@@ -2969,27 +3098,14 @@ class Battle {
     return true;
   }
 
-  // Whether a choice is the computer's item or voluntary switch, which the
-  // cart spends in its own slot of the turn order: MainInBattleLoop calls
-  // TrainerAI at `.enemyMovesFirst` / after ExecutePlayerMove (core.asm
-  // :413-460), and only a trainer's AI ever uses an item or switches
-  // (TrainerAI returns at once in a wild or a link battle). A send-out owed
-  // after a faint is not the AI's and resolves with everybody's.
-  _computerTurnAction(fighter) {
-    const choice = fighter.choice;
-    if (!choice || fighter.mustReplace) return false;
-    if (choice.action !== 'item' && choice.action !== 'switch') return false;
-    return isComputerSeat(this.mode, fighter);
-  }
-
-  // `inTurn` is the turn's own pass, which leaves the computer's voluntary
-  // switches to their slot (`_computerTurnAction`); the replace phase fields
-  // everybody's.
+  // `inTurn` is the turn's own pass -- the players' switches, which
+  // DisplayBattleMenu runs before the order is asked; the computer's voluntary
+  // switch is TrainerAI's, in its slot (`_trainerAi`) -- and the replace phase
+  // fields everybody's send-outs.
   _resolveSwitches(inTurn) {
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
-      if (choice && choice.action === 'switch'
-          && !(inTurn && this._computerTurnAction(fighter))) {
+      if (choice && choice.action === 'switch') {
         // ReplaceFaintedEnemyMon zeroes wAILayer2Encouragement after the
         // send-out (core.asm :906-911); TrainerAI's own switch does not.
         if (!inTurn && fighter.mustReplace) fighter.aiLayer2 = 0;
@@ -3017,6 +3133,11 @@ class Battle {
     }
     fighter.active = slot;
     fighter.mustReplace = null;
+    // EnemySendOutFirstMon's `dec a / ld [wAICount], a` (core.asm
+    // :1306-1307): $ff, so TrainerAI reloads the class's uses for the
+    // newcomer -- "number of times (per Pokémon)" (ai_pointers.asm). Only a
+    // trainer seat ever reads it (`_trainerAi`).
+    fighter.aiCount = AI_COUNT_RELOAD;
     // The seat's monster changed: its own participation set resets and the
     // standing opposition re-marks into it, while the incoming monster joins
     // the sets of the foes it is now in against.
@@ -3096,12 +3217,12 @@ class Battle {
     // Non-ball items keep Gen1 array order (heals, dolls, vitamins, …). Balls
     // resolve in a second pass ordered by active-mon speed (fight tie policy),
     // so the faster thrower spends first and a successful catch aborts the rest.
-    // The computer's items are not here: they wait for its slot of the order
-    // (`_computerTurnAction`, `_resolveFights`).
+    // Only the players' items are here: the computer's are TrainerAI's, used
+    // in its slot of the order (`_trainerAi`, `_resolveFights`).
     for (const fighter of this.fighters) {
       if (this.result) return;
       const choice = fighter.choice;
-      if (choice && choice.action === 'item' && !this._computerTurnAction(fighter)) {
+      if (choice && choice.action === 'item') {
         const effect = Effects.itemEffect(choice.item);
         if (!(effect && effect.ball)) {
           this._resolveOneItem(fighter);
@@ -3113,7 +3234,7 @@ class Battle {
     const balls = [];
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
-      if (choice && choice.action === 'item' && !this._computerTurnAction(fighter)) {
+      if (choice && choice.action === 'item') {
         const effect = Effects.itemEffect(choice.item);
         if (effect && effect.ball) {
           const mon = activeMon(fighter);
@@ -3270,22 +3391,16 @@ class Battle {
     if (vitaminApplied) itemEv.amount = 1;
     this._emit('item', itemEv);
     const label = itemLabel(choice.item);
-    const computer = isComputerSeat(this.mode, fighter);
     const wild = Effects.isWildMode(this.mode);
-    // The line the use opens with. The computer's every item is
-    // AIPrintItemUse's "<TRAINER> used <ITEM> on <MON>!" (trainer_ai.asm,
-    // _AIBattleUseItemText). The player's is ItemUseText00, "<PLAYER> used
-    // <ITEM>!", where its routine prints it: a ball (ItemUseBall, before the
-    // throw -- not in a trainer fight, which blocks the ball first), X
-    // ACCURACY, GUARD SPEC., DIRE HIT, a POKé DOLL in a wild fight and the X
-    // stat items (PrintItemUseTextAndRemoveItem). A medicine, a PP restorer
-    // and the POKé FLUTE print only what they did. The AI's line breaks
-    // before "used" and "on" and names its monster by wEnemyMonNick, bare;
-    // ItemUseText00 breaks at its `text_low`, before the item (K17 / K18).
-    if (computer) {
-      const onMon = activeMon(fighter);
-      this._say(`${fighter.name}\nused ${label}\non ${onMon ? onMon.species : 'POKéMON'}!`);
-    } else if (effect && ((effect.ball && wild) || effect.xAccuracy || effect.mist
+    // The line the use opens with -- a player's: the computer's items are
+    // TrainerAI's (`_aiUseItem`). ItemUseText00, "<PLAYER> used <ITEM>!",
+    // where its routine prints it: a ball (ItemUseBall, before the throw --
+    // not in a trainer fight, which blocks the ball first), X ACCURACY, GUARD
+    // SPEC., DIRE HIT, a POKé DOLL in a wild fight and the X stat items
+    // (PrintItemUseTextAndRemoveItem). A medicine, a PP restorer and the POKé
+    // FLUTE print only what they did. ItemUseText00 breaks at its
+    // `text_low`, before the item (K18).
+    if (effect && ((effect.ball && wild) || effect.xAccuracy || effect.mist
         || effect.focusEnergy || (effect.pokeDoll && wild) || effect.stage)) {
       this._say(`${fighter.name} used\n${label}!`);
     }
@@ -3294,7 +3409,7 @@ class Battle {
     // cart's ItemUseFailed takes (`_itemFails`): `_normaliseChoice` refuses
     // one before it is filed, so only a field that moved under a filed choice
     // gets here with it -- and RemoveUsedItem is never reached then either.
-    const fails = !computer && this._itemFails(fighter, effect, choice);
+    const fails = this._itemFails(fighter, effect, choice);
     if (!(effect && effect.noConsume) && !fails) {
       this._spendBag(fighter, choice.item);
     }
@@ -3304,9 +3419,12 @@ class Battle {
     } else if (effect.ball) {
       if (!wild) {
         // ThrowBallAtTrainerMon (item_effects.asm :2292-2303): the toss --
-        // TOSS_ANIM whatever the ball, on the thrower's seat (K20) -- then
-        // the trainer knocks it away, and the ball is gone.
+        // TOSS_ANIM whatever the ball, on the thrower's seat (K20), and
+        // TossBallAnimation's `.BlockBall` (animations.asm) plays
+        // BLOCKBALL_ANIM straight behind it, the trainer knocking it away --
+        // then the lines, and the ball is gone.
         this._statusAnim(fighter, 'TOSS_ANIM');
+        this._statusAnim(fighter, 'BLOCKBALL_ANIM');
         this._say('The trainer\nblocked the BALL!');
         this._say("Don't be a thief!");
       } else {
@@ -3486,7 +3604,7 @@ class Battle {
           // `ld a, 0 / ld [wPlayerMoveListIndex], a` after MoveSelectionMenu
           // (item_effects.asm :1981-1984) -- whatever it restored: the first
           // slot is the one a later forced or stale turn pays from (`_listIndex`).
-          if (!isComputerSeat(this.mode, fighter)) fighter.moveListIndex = 1;
+          fighter.moveListIndex = 1;
           const move = rows[choice.move - 1];
           if (!move) {
             this._say(NO_EFFECT);
@@ -3560,11 +3678,10 @@ class Battle {
         }
         // The Bad Poison bit goes with a cure (ItemUseMedicine's
         // `.cureStatusAilment` -- `res BADLY_POISONED`, item_effects.asm
-        // :903-905 -- and AICureStatus, trainer_ai.asm :633-635), a lingering
-        // one included. The player's FULL RESTORE that restored HP takes the
+        // :903-905), a lingering one included. The player's FULL RESTORE that restored HP takes the
         // `.healHP` branch instead (:1152-1176), which zeroes the status byte
         // and leaves BattleStatus3 alone: a TOXIC it cured lingers.
-        const healBranch = !!effect.clearAllStatus && healed && !computer;
+        const healBranch = !!effect.clearAllStatus && healed;
         if (cleared) {
           if (healBranch) {
             if (wasToxic) mon.toxicLinger = true;
@@ -3578,9 +3695,9 @@ class Battle {
         // with every badge boost. A Full Restore that also restored HP takes
         // the .healHP branch instead (item_effects.asm :1152-1176): the status
         // goes, the stats stay as they were, penalty included; only at full HP
-        // does it turn into a Full Heal (:976-990). The computer's cure
-        // (AICureStatus) never touches a stat.
-        if (cleared && partyIdx === fighter.active && !computer && !healBranch) {
+        // does it turn into a Full Heal (:976-990). (The computer's cure,
+        // AICureStatus, never touches a stat: `_aiCureStatus`.)
+        if (cleared && partyIdx === fighter.active && !healBranch) {
           Effects.reloadPartyStats(mon);
         }
         if (cleared) {
@@ -3592,16 +3709,13 @@ class Battle {
         // The party menu's message for the player's medicine
         // (engine/menus/party_menu.asm): PotionText's "<MON> recovered by <N>!"
         // for HP, the cure's own line for a status (FULL RESTORE at full HP is
-        // a FULL HEAL), ItemUseNoEffect's when it did nothing. The computer's
-        // AIPrintItemUse line is all it says.
-        if (!computer) {
-          if (healed) {
-            this._say(`${mon.species}\nrecovered by ${healedBy}!`);
-          } else if (cleared) {
-            this._say(`${mon.species}${has(CURE_TEXT, choice.item) ? CURE_TEXT[choice.item] : CURE_TEXT.FULL_HEAL}`);
-          } else if (!applied && !said) {
-            this._say(NO_EFFECT);
-          }
+        // a FULL HEAL), ItemUseNoEffect's when it did nothing.
+        if (healed) {
+          this._say(`${mon.species}\nrecovered by ${healedBy}!`);
+        } else if (cleared) {
+          this._say(`${mon.species}${has(CURE_TEXT, choice.item) ? CURE_TEXT[choice.item] : CURE_TEXT.FULL_HEAL}`);
+        } else if (!applied && !said) {
+          this._say(NO_EFFECT);
         }
       }
     }
@@ -3667,6 +3781,177 @@ class Battle {
     }
   }
 
+  // ------------------------------------------------------------------
+  // TrainerAI (contract K16): the computer's item and switch
+  // ------------------------------------------------------------------
+  //
+  // pokered engine/battle/trainer_ai.asm, run where MainInBattleLoop runs it
+  // (core.asm :413-460): at `.enemyMovesFirst` before ExecuteEnemyMove, and
+  // at `.playerMovesFirst` once the player's move and
+  // HandlePoisonBurnLeechSeed are done -- never when either knocked a monster
+  // out (`jp z, Handle*MonFainted` leaves first; `_resolveFights` ends the
+  // slot's turn, or skips the fallen actor). `jr c, .AIActionUsed*` skips
+  // ExecuteEnemyMove when the AI acted, and the enemy's
+  // HandlePoisonBurnLeechSeed follows either way. So in the computer seat's
+  // own slot of the order: TrainerAI, then (unless it acted) the move
+  // SelectEnemyMove picked -- its priority already counted in the order --
+  // then the residual. The move's forced states are not looked at: a
+  // recharge, a charge, a Bide, a thrash or a monster held in a trap still
+  // meets TrainerAI first, and an item spent there leaves the state for the
+  // next turn, as ExecuteEnemyMove never ran.
+
+  // Whether TrainerAI runs for this seat at all: `dec a / ret z` on
+  // wIsInBattle returns for a wild monster, `cp LINK_STATE_BATTLING / ret z`
+  // for a link fight -- the computer's trainer seat of a coop_npc alone.
+  _runsTrainerAi(fighter) {
+    return isComputerSeat(this.mode, fighter) && !Effects.isWildMode(this.mode);
+  }
+
+  // TrainerAI (trainer_ai.asm :290-320) for one seat, in its slot. wAICount
+  // at 0 returns without a draw (`and a / ret z`); $ff reloads it from the
+  // class record's `uses` (GenericAI's 3 without one); then `call Random` --
+  // one byte, every call, GenericAI included -- and the class routine, which
+  // the record describes field by field (the engine's `ai_classes`, contract
+  // K16):
+  //   * `switchChance`: AgathaAI's `cp 8 percent / jp c,
+  //     AISwitchIfEnoughMons`, ahead of her item roll -- a switch that cannot
+  //     happen does nothing else (`and a / ret`);
+  //   * `onStatus`: BrockAI -- no roll read; the item while wEnemyMonStatus
+  //     holds anything;
+  //   * `chance`: the routine's `cp N percent / ret nc` -- the byte must be
+  //     below it (CooltrainerFAI has none: her `ret nc` is commented out);
+  //   * `switch`: JugglerAI's AISwitchIfEnoughMons;
+  //   * `hpBelow`: AICheckIfHPBelowFraction before the item -- and below it,
+  //     `switchBelow` (CooltrainerFAI's 1/5) before her switch;
+  //   * otherwise the item outright (BlaineAI's SUPER POTION, at any HP).
+  // A record with no item and no switch has no routine: GenericAI's `and a /
+  // ret`. Returns true when the AI acted -- an item (DecrementAICount) or a
+  // switch (SwitchEnemyMon's `scf`, which spends no use) -- and the slot's
+  // move is skipped.
+  _trainerAi(fighter, mon) {
+    if (!this._runsTrainerAi(fighter)) return false;
+    const cls = fighter.aiClass;
+    if (int(fighter.aiCount, 0) === 0) return false;
+    if (fighter.aiCount === AI_COUNT_RELOAD) {
+      fighter.aiCount = cls ? cls.uses : AI_GENERIC_USES;
+    }
+    const roll = this.rng.byte();
+    if (!cls) return false;
+    if (cls.switchChance != null && roll < cls.switchChance) {
+      return this._aiSwitch(fighter, mon);
+    }
+    if (cls.onStatus) {
+      if (!mon.status) return false;
+      return this._aiUseItem(fighter, mon, cls.item);
+    }
+    if (cls.chance != null && roll >= cls.chance) return false;
+    if (cls.switch) return this._aiSwitch(fighter, mon);
+    if (cls.hpBelow != null) {
+      if (this._aiHpBelow(mon, cls.hpBelow)) {
+        return this._aiUseItem(fighter, mon, cls.item);
+      }
+      if (cls.switchBelow != null && this._aiHpBelow(mon, cls.switchBelow)) {
+        return this._aiSwitch(fighter, mon);
+      }
+      return false;
+    }
+    return this._aiUseItem(fighter, mon, cls.item);
+  }
+
+  // AICheckIfHPBelowFraction (trainer_ai.asm :659-683): wEnemyMonMaxHP
+  // divided by `a` (a 16-bit quotient), and carry when wEnemyMonHP is below
+  // it.
+  _aiHpBelow(mon, divisor) {
+    return mon.hp < Math.floor(mon.maxHp / Math.max(1, int(divisor, 1)));
+  }
+
+  // AISwitchIfEnoughMons (trainer_ai.asm :554-582): two or more of the party
+  // standing -- the active one counted, through its party copy, which is
+  // never 0 while it stands -- or nothing at all. Then SwitchEnemyMon
+  // (:584-613): AIBattleWithdrawText, "<TRAINER> with-" / line "drew <MON>!"
+  // -- both names bare (text_ram wTrainerName, wEnemyMonNick: K17) -- and
+  // EnemySendOut, whose walk sends the first monster in party order past
+  // wEnemyMonPartyPos and the fainted (`_computerChoice`'s note);
+  // EnemySendOutFirstMon puts wAICount back to $ff and clears what the
+  // send-out clears (`_switchIn`). `scf / ret`: the AI acted, and no use is
+  // spent.
+  _aiSwitch(fighter, mon) {
+    let standing = 0;
+    for (const each of fighter.mons) {
+      if (each.hp > 0) standing += 1;
+    }
+    if (standing < 2) return false;
+    const next = firstLiving(fighter.mons, fighter.active);
+    if (!next) return false;
+    this._say(`${fighter.name} with-\ndrew ${mon.species}!`);
+    this._switchIn(fighter, next);
+    return true;
+  }
+
+  // AICureStatus (trainer_ai.asm :625-636): the status byte zeroed in the
+  // party roster and on the battler, and BADLY_POISONED reset -- and nothing
+  // else: the stats keep a paralysis' quartered Speed and a burn's halved
+  // Attack (ItemUseMedicine's reload is the player's alone), and the toxic
+  // counter is left as it is. Whether there was anything to cure.
+  _aiCureStatus(mon) {
+    const had = mon.status != null;
+    mon.status = null;
+    mon.statusTurns = 0;
+    mon.toxicLinger = null;
+    return had;
+  }
+
+  // The AI's item, the routine the record names (trainer_ai.asm :463-740),
+  // after the `item` event the client draws the bag's look from:
+  //   * AIPrintItemUse_'s AIBattleUseItemText, "<TRAINER>" / line "used
+  //     <ITEM>" / cont "on <MON>!" -- the trainer's name and wEnemyMonNick
+  //     both bare (text_ram, K17), the item by its cart name;
+  //   * FULL RESTORE: AICureStatus, then the HP to its maximum
+  //     (AIPrintItemUseAndUpdateHPBar: the line, then the bar);
+  //   * POTION / SUPER POTION / HYPER POTION: AIRecoverHP's N, held at the
+  //     maximum -- at full HP too (BlaineAI never looks);
+  //   * FULL HEAL: AICureStatus;
+  //   * X ATTACK / DEFEND / SPEED / SPECIAL: AIIncreaseStat -- the line, then
+  //     StatModifierUpEffect over the user with XSTATITEM_DUPLICATE_ANIM in
+  //     the move struct (`_xStatItem`: XSTATITEM_ANIM, K20, then the rose
+  //     line; at the wall "Nothing happened!");
+  //   * GUARD SPEC.: PROTECTED_BY_MIST; DIRE HIT (unreferenced on the cart):
+  //     GETTING_PUMPED; X ACCURACY (unreferenced): USING_X_ACCURACY -- the
+  //     line alone says so;
+  //   * any other id: the line, and nothing it could do.
+  // Every one ends in DecrementAICount. No bag is read or spent: the class
+  // record is the whole of what the trainer may use. null names no routine.
+  _aiUseItem(fighter, mon, item) {
+    if (item == null) return false;
+    this._emit('item', { slot: fighter.slot, side: fighter.side, text: item });
+    this._say(`${fighter.name}\nused ${itemLabel(item)}\non ${mon.species}!`);
+    let cured = false;
+    if (item === 'FULL_RESTORE') {
+      cured = this._aiCureStatus(mon);
+      this._heal(fighter, mon, mon.maxHp);
+    } else if (has(AI_HEAL, item)) {
+      this._heal(fighter, mon, AI_HEAL[item]);
+    } else if (item === 'FULL_HEAL') {
+      cured = this._aiCureStatus(mon);
+    } else if (has(AI_X_STAT, item)) {
+      this._xStatItem(fighter, mon, AI_X_STAT[item], 1);
+    } else if (item === 'GUARD_SPEC') {
+      mon.mist = true;
+    } else if (item === 'DIRE_HIT') {
+      mon.focusEnergy = true;
+    } else if (item === 'X_ACCURACY') {
+      mon.xAccuracy = true;
+    }
+    if (cured) {
+      this._emit('status', {
+        slot: fighter.slot, side: fighter.side,
+        text: `${mon.species} recovered`,
+      });
+    }
+    fighter.aiCount = int(fighter.aiCount, 1) - 1;
+    return true;
+  }
+
   _resolveFights() {
     // Every battler on the field takes part in MainInBattleLoop's compare
     // (core.asm :369-412), whatever its seat chose: the cart reaches
@@ -3678,8 +3963,9 @@ class Battle {
     // now -- a switch-in's own, an X SPEED's raised one -- and in the bracket
     // its selection names (`_priorityOf`: a switch, an item or a run name none
     // and sit in the base one). What an actor then does in its slot:
+    //   * a computer trainer's seat: TrainerAI first (`_trainerAi`), whose
+    //     item or switch, when it acts, is the whole of the slot;
     //   * a fight: the move (`_useMove`);
-    //   * the computer's item or switch: spent there (`_computerTurnAction`);
     //   * a recharge: the gates and "must recharge" (`_rechargeTurn`);
     //   * a held monster's CANNOT_MOVE, a player's switch or item (already
     //     done before the order: `_resolveSwitches`, `_resolveItems`), a run
@@ -3761,22 +4047,22 @@ class Battle {
       this.koHeld = true;
       if (activeMon(fighter) === actor.mon) {
         const choice = fighter.choice;
+        // TrainerAI at the computer trainer's slot (`_trainerAi`): an item or
+        // a switch it makes is the slot (`jr c, .AIActionUsed*`), and the move
+        // SelectEnemyMove picked is never run.
+        const aiActed = this._trainerAi(fighter, actor.mon);
         // ExecuteEnemyMove's `inc [hl]` on wAILayer2Encouragement (core.asm
         // :5474), past its CANNOT_MOVE return and never reached when TrainerAI
         // spent the slot: every turn the computer's monster takes its slot to
         // move -- asleep, recharging or locked in included. A byte.
-        if (isComputerSeat(this.mode, fighter) && !this._computerTurnAction(fighter)
+        if (isComputerSeat(this.mode, fighter) && !aiActed
             && !fighter.cannotMove
             && (actor.action === 'fight'
                 || (actor.action === 'skip' && choice.skip === 'recharge'))) {
           fighter.aiLayer2 = (int(fighter.aiLayer2, 0) + 1) % 256;
         }
-        if (this._computerTurnAction(fighter)) {
-          if (actor.action === 'item') {
-            this._resolveOneItem(fighter);
-          } else {
-            this._switchIn(fighter, choice.slot);
-          }
+        if (aiActed) {
+          // (the slot was the AI's item or switch)
         } else if (fighter.cannotMove) {
           // Haze's CANNOT_MOVE on a target it woke or thawed (ExecutePlayerMove's
           // `inc a / jp z, ExecutePlayerMoveDone`): the turn is gone, silently
@@ -4232,6 +4518,9 @@ class Battle {
       });
     }
     if (result.movesChanged) this._emitMoves(fighter, mon);
+    // Whether the routine played the move's animation (Effects.applyPrimary's
+    // `animates`): `_statusMove` takes the `anim` back when it did not.
+    return result.animates === true;
   }
 
   // The move's side effect, after its last hit. `move` is the sheet move that
@@ -4368,6 +4657,10 @@ class Battle {
   // (AttackSubstitute) -- the self-hit's route (`_selfHit`).
   _moveMissed(fighter, mon, target, defender, effectId, usedSlot) {
     this.lastDamage = 0;
+    // HandleIfPlayerMoveMissed (core.asm :3150-3156): "don't play any
+    // animation if the move missed, unless it was EXPLODE_EFFECT" -- and a
+    // power-0 routine's miss never reaches its own animation (K22's audit).
+    if (!Effects.isExplode(effectId)) this._dropMoveAnim();
     if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
     if (Effects.isJumpKick(effectId)) {
       this._say(`${named(fighter, mon)}\nkept going and\ncrashed!`);
@@ -4490,7 +4783,8 @@ class Battle {
   // (`.playAnimAndPrintText`, keyed by the move id), and the fight is over
   // (`_concedeRun`, whose runner is TELEPORT's user and the others' target).
   // "Its target" is the monster the move was aimed at -- the cart's one
-  // opponent -- on the seat `target`.
+  // opponent -- on the seat `target`. Returns whether it escaped -- the one
+  // outcome `.playAnimAndPrintText` animates.
   _switchAndTeleport(fighter, mon, target, defender, move) {
     const key = Effects.moveKey(move);
     const teleport = key === 'TELEPORT';
@@ -4500,7 +4794,7 @@ class Battle {
       } else {
         this._say(`${named(target, defender)}\nis unaffected!`);
       }
-      return;
+      return false;
     }
     if (!Effects.teleportEscapes(mon.level, defender.level, this.rng)) {
       if (teleport) {
@@ -4508,7 +4802,7 @@ class Battle {
       } else {
         this._say(`It didn't affect\n${named(target, defender)}!`);
       }
-      return;
+      return false;
     }
     if (teleport) {
       this._say(`${named(fighter, mon)}\nran from battle!`);
@@ -4518,6 +4812,7 @@ class Battle {
       this._say(`${named(target, defender)}\nwas blown away!`);
     }
     this._concedeRun(teleport ? fighter : target);
+    return true;
   }
 
   // MimicEffect's pick (effects.asm :1210-1259): the slot of the target's
@@ -4589,8 +4884,12 @@ class Battle {
       this._say(`${named(fighter, mon)} has no target`);
       return;
     }
-    this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
     const damage = (2 * stored) % 65536;
+    // `.UnleashEnergy` jumps to handleIfPlayerMoveMissed with wMoveMissed set
+    // on a 0 (core.asm :3510-3524): no animation then (K22's audit).
+    if (damage > 0) {
+      this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
+    }
     if (damage <= 0) {
       this.lastDamage = 0;
       this._say(`${named(fighter, mon)}'s\nattack missed!`);
@@ -4622,6 +4921,11 @@ class Battle {
     const plan = Effects.statusPlan(effectId);
     // What a routine's checks hand on to its effect (Effects.applyPrimary):
     // SleepEffect's recharge overwrite, MimicEffect's pick.
+    // Every routine plays the move's animation itself, where it succeeds and
+    // nowhere it fails (PlayCurrentMoveAnimation / ...2 sit past each check):
+    // a check below that turns the move away takes the `anim` `_useMove` put
+    // ahead of the used line back out (`_dropMoveAnim`), as `_moveMissed` does
+    // for a miss; Effects.applyPrimary says whether its part played it.
     let extra = null;
     if (plan === 'statdown') {
       // StatModifierDownEffect (effects.asm :539-562): outside a link battle
@@ -4631,11 +4935,13 @@ class Battle {
       if (isComputerSeat(this.mode, fighter)
           && this.rng.byte() < Effects.COMPUTER_DROP_MISS) {
         this._say('But, it failed!');
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
       if (Effects.hasSubstitute(defender)) {
         this._say('But, it failed!');
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4650,6 +4956,7 @@ class Battle {
       // -- "It didn't affect <TARGET>!" (`.noEffect` / `.didntAffect`).
       if (Effects.poisonTurnsAway(defender, this.poisonType)) {
         this._say(`It didn't affect\n${named(target, defender)}!`);
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4681,10 +4988,12 @@ class Battle {
         extra = { overwrite: true };
       } else if (defender.status === 'sleep') {
         this._say(`${named(target, defender)}'s\nalready asleep!`);
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       } else if (Effects.hasMajorStatus(defender)) {
         this._say(`It didn't affect\n${named(target, defender)}!`);
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       } else if (!this._hitTest(mon, defender, move, effectId).hit) {
@@ -4700,12 +5009,14 @@ class Battle {
       // Substitute check: THUNDER WAVE reaches the monster behind a doll.
       if (Effects.hasMajorStatus(defender)) {
         this._say(`It didn't affect\n${named(target, defender)}!`);
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
       if (this.electricType !== null && int(move.type, -1) === this.electricType
           && hasType(defender, this.groundType)) {
         this._say(`It doesn't affect\n${named(target, defender)}!`);
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4720,6 +5031,7 @@ class Battle {
       // and an already confused target fails the same way (Effects).
       if (Effects.hasSubstitute(defender)) {
         this._say('But, it failed!');
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4740,6 +5052,7 @@ class Battle {
       }
       if (hasType(defender, this.grassType) || defender.leechSeed) {
         this._say(`${named(target, defender)}\nevaded attack!`);
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4755,6 +5068,7 @@ class Battle {
       const pick = this._mimicPick(fighter, defender, choice);
       if (pick === null) {
         this._say('But, it failed!');
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4763,6 +5077,7 @@ class Battle {
       // ConversionEffect_'s own INVULNERABLE test on the target, no byte.
       if (defender.invulnerable) {
         this._say('But, it failed!');
+        this._dropMoveAnim();
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4770,7 +5085,10 @@ class Battle {
 
     // `targetSlot` the seat actually swung at, which a Bide records.
     // BideEffect (effects.asm :764-789) sets STORING_ENERGY, draws its 2..3
-    // and plays an animation: no line past "used BIDE!".
+    // and plays an animation: no line past "used BIDE!". Its animation is not
+    // the move's: `add XSTATITEM_ANIM` on hWhoseTurn -- XSTATITEM_ANIM, or the
+    // enemy's XSTATITEM_DUPLICATE_ANIM sent as the same id (K20) -- so the
+    // `anim` ahead of the used line is that one (K22's audit).
     if (Effects.isBide(effectId) && !mon.bide) {
       mon.bide = {
         turns: Effects.bideTurns(this.rng),
@@ -4779,16 +5097,21 @@ class Battle {
         targetSlot: target.slot,
         move: recordMove,
       };
+      if (this.moveAnim) this.moveAnim.text = 'XSTATITEM_ANIM';
       this._markLastMove(mon, usedSlot);
       return;
     }
     if (Effects.isSwitchAndTeleport(effectId)) {
-      this._switchAndTeleport(fighter, mon, target, defender, move);
+      // `.playAnimAndPrintText` plays the move's animation for an escape alone.
+      if (!this._switchAndTeleport(fighter, mon, target, defender, move)) {
+        this._dropMoveAnim();
+      }
       this._markLastMove(mon, usedSlot);
       return;
     }
     if (Effects.isNoOp(effectId)) {
       this._say('But nothing happened');
+      this._dropMoveAnim();
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -4801,10 +5124,13 @@ class Battle {
       }
       // MIMIC overwrites the list index's slot (`.letPlayerChooseMove` reads
       // wPlayerMoveListIndex, effects.asm :1238).
-      this._applyPrimary(fighter, mon, target, defender, this._listIndex(fighter, choice),
-        effectId, move.id, extra);
+      if (!this._applyPrimary(fighter, mon, target, defender, this._listIndex(fighter, choice),
+        effectId, move.id, extra)) {
+        this._dropMoveAnim();
+      }
     } else {
       this._say('But nothing happened');
+      this._dropMoveAnim();
     }
     this._markLastMove(mon, usedSlot);
   }
@@ -4853,7 +5179,12 @@ class Battle {
     const defender = target ? activeMon(target) : null;
     const held = defender ? defender.trapped : null;
     if (held && held.fromSlot === fighter.slot) held.turns = trap.turns;
-    this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
+    // The move's animation again (GetPlayerAnimationType: wMoveMissed is
+    // clear, no hit test ran), but no use of the move -- no used line, no
+    // callout: `quiet` (K22's "a trap's per-turn hit").
+    this._emit('anim', {
+      slot: fighter.slot, side: fighter.side, text: move.id, quiet: true,
+    });
     if (defender) {
       let damage = int(trap.damage, 0);
       if (held && held.fromSlot === fighter.slot) damage = int(held.damage, 0);
@@ -4873,6 +5204,9 @@ class Battle {
 
   _useMove(fighter, mon, opts = {}) {
     const choice = fighter.choice;
+    // No animation of this move is out yet (`moveAnim`): a gate that stops it
+    // has nothing to take back, and a called move's is its own.
+    this.moveAnim = null;
     // A move Metronome or Mirror Move called is not the turn's own move. The
     // gates and the obedience check already ran for the move that called it
     // -- MetronomePickMove and MirrorMoveCopyMove jump back to
@@ -5075,15 +5409,24 @@ class Battle {
       // The refund a called charge keeps for its charge turn.
       this._emitMoves(fighter, mon, fighter.active);
     }
-    // amount=1 is the charge/vanish setup beat (release omits it). A thrash's
-    // continuation animates THRASH whatever the move: `.ThrashingAboutCheck`
-    // writes THRASH into wPlayerMoveNum (core.asm :3529-3530), the number
-    // PlayPlayerMoveAnimation plays -- so a PETAL DANCE's later turns look
-    // like THRASH's.
-    this._emit('anim', {
+    // The move's animation, ahead of its used line (the header's note), held
+    // as `moveAnim` until the move shows whether the cart plays it: a miss, a
+    // routine that fails or MIRROR MOVE take it back (`_dropMoveAnim`).
+    // amount=1 is the charge/vanish setup beat (release omits it). The charge
+    // turn's own is ChargeEffect's, not the move's (`chargeAnim`:
+    // XSTATITEM_ANIM, FLY's TELEPORT -- `quiet` -- or DIG's SLIDE_DOWN_ANIM).
+    // A thrash's continuation animates THRASH whatever the move:
+    // `.ThrashingAboutCheck` writes THRASH into wPlayerMoveNum (core.asm
+    // :3529-3530), the number PlayPlayerMoveAnimation plays -- so a PETAL
+    // DANCE's later turns look like THRASH's.
+    let animText = thrashTurn ? THRASH_ANIM : move.id;
+    let animQuiet = null;
+    if (chargingUp) [animText, animQuiet] = chargeAnim(effectId, move);
+    this.moveAnim = this._emit('anim', {
       slot: fighter.slot, side: fighter.side,
-      text: thrashTurn ? THRASH_ANIM : move.id,
+      text: animText,
       amount: chargingUp ? 1 : undefined,
+      quiet: animQuiet,
     });
     // DisplayUsedMoveText with wMonIsDisobedient set takes UsedMove2Text and
     // `.UsedInsteadText` (pokered engine/battle/used_move_text.asm; text_2.asm
@@ -5164,6 +5507,10 @@ class Battle {
     }
 
     if (Effects.isMirrorMove(effectId) && !mirrorCopy) {
+      // MIRROR MOVE has no animation of its own on the cart:
+      // MirrorMoveCopyMove plays none, and the copied move plays its own
+      // (K22's audit).
+      this._dropMoveAnim();
       // MirrorMoveCopyMove (core.asm :4960-4986) copies wEnemyUsedMove /
       // wPlayerUsedMove -- the move the target last printed a "used" line
       // for, so after its METRONOME called THRASH it is THRASH -- and fails
@@ -5297,6 +5644,8 @@ class Battle {
         // (PrintCriticalOHKOText), as the cart's does.
         const counter = this._counterDamage(target);
         if (!counter) {
+          // wMoveMissed: no animation (HandleIfPlayerMoveMissed).
+          this._dropMoveAnim();
           this._flyOrChargeAnim(fighter, effectId);
           this._say(`${named(fighter, mon)}'s\nattack missed!`);
           this._markLastMove(mon, usedSlot);
@@ -5915,6 +6264,18 @@ class Battle {
     } else if (this._sideAlive(EXP_OWNER_SIDE)) {
       this.battleResult = 0;
     }
+    // RemoveFaintedPlayerMon (core.asm :1003-1031) writes its 0 into
+    // wBattleMonStatus, and ReadPlayerMonCurHPAndStatus copies it into the
+    // party: the player's fallen monster carries no status, a Revive brings
+    // it back clean. "The player" is the owner's rule (`isPlayerSeat`): side
+    // a against the computer, both sides of a link fight -- each console for
+    // its own monster. FaintEnemyPokemon (:732-830) zeroes the enemy's party
+    // HP and leaves its status byte alone, so the computer's monster keeps the
+    // status it fell with (the `team` row draws it down either way).
+    if (isPlayerSeat(this.mode, fighter)) {
+      mon.status = null;
+      mon.statusTurns = 0;
+    }
     mon.charging = null;
     mon.invulnerable = false;
     mon.mustRecharge = false;
@@ -6071,8 +6432,11 @@ class Battle {
       // there now, which is also the one the HP goes to. Then the HP goes both
       // ways and HurtByLeechSeedText follows (:518-523), "LEECH SEED saps\n
       // <USER>!" -- <USER> the seeded monster, hWhoseTurn flipped back.
+      // ABSORB is the seeder's look and not its move: `quiet` (K22).
       if (sMon && sMon.hp > 0) {
-        this._emit('anim', { slot: seeder.slot, side: seeder.side, text: 'ABSORB' });
+        this._emit('anim', {
+          slot: seeder.slot, side: seeder.side, text: 'ABSORB', quiet: true,
+        });
       }
       if (mon === seeded) this._damage(fighter, mon, amount, null, true, true);
       if (sMon && sMon.hp > 0) this._heal(seeder, sMon, amount);
@@ -6500,6 +6864,8 @@ class Battle {
  *   id, mode, seed, chart, chartOrder, specialTypes, typeIds, metronomePool,
  *   choiceTimeout, reconnectGrace, resolveTimeout, now
  *   sides = { a: [ { playerId, name, mons, bag, badges } ], b: [ ... ] }
+ *   (a computer trainer seat's entry also carries `aiMods` and `aiClass`;
+ *   the computer's `bag` is not kept)
  *
  * `typeIds` is the chart's axis by name (MediatedBattle.snapshotRuleset:
  * `typeIds[i]` names chart index i). Red's referee asks it four questions and
@@ -6571,6 +6937,17 @@ function attempt(opts) {
       // beside `badges` because a player with no badges at all is the one
       // with the most to disobey.
       const badgeRules = side === BADGE_SIDE && has(BADGE_MODES, self.mode);
+      // The computer's seat (`isComputerSeat`) and, of those, the trainer's
+      // -- the seat TrainerAI runs for (`_runsTrainerAi`).
+      const computer = isComputerSeat(self.mode, { side });
+      const trainer = computer && !Effects.isWildMode(self.mode);
+      // Its class record, copied (K16); an unreadable one refuses the fight,
+      // as Wire refuses the party that carries it.
+      let aiClass = null;
+      if (trainer && entry.aiClass != null) {
+        aiClass = copyAiClass(entry.aiClass);
+        if (!aiClass) return refuse(`${playerId} brought an unreadable aiClass`);
+      }
       const fighter = {
         playerId,
         name: str(entry.name) || playerId,
@@ -6580,7 +6957,9 @@ function attempt(opts) {
         mons,
         badgeRules: badgeRules || null,
         badges: seatBadges(self.mode, side, entry.badges),
-        bag: copyBag(entry.bag),
+        // A player's bag; the computer's choices never read one (K16: its
+        // items are TrainerAI's, a wild monster has none), so none is kept.
+        bag: !computer ? copyBag(entry.bag) : null,
         active: firstLiving(mons),
         connected: true,
         graceEndsAt: null,
@@ -6592,11 +6971,17 @@ function attempt(opts) {
         fought: Object.create(null),
         // The trainer's move-choice layers (`_cartMovePick`), the computer's
         // trainer seat only; null is no layer at all.
-        aiMods: (isComputerSeat(self.mode, { side }) && !Effects.isWildMode(self.mode))
-          ? copyAiMods(entry.aiMods) : null,
+        aiMods: trainer ? copyAiMods(entry.aiMods) : null,
         // wAILayer2Encouragement (`_cartMovePick`, `_resolveFights`), the
         // computer's seats: 0 at InitBattleVariables.
         aiLayer2: 0,
+        // The trainer's TrainerAI record (K16, `_trainerAi`), the trainer
+        // seat only; null is GenericAI.
+        aiClass,
+        // wAICount: InitBattle's $ff (core.asm :6685-6686), reloaded from
+        // the record at the first TrainerAI call and $ff again at each
+        // send-out (`_switchIn`).
+        aiCount: AI_COUNT_RELOAD,
       };
       // Every monster's battle stats, seeded the way LoadBattleMonFromParty
       // seeds them (the unmodified stats, the condition penalty, this seat's
@@ -6665,6 +7050,11 @@ module.exports = {
   RUN_ROLL_MODES,
   CHART_ORDER_MAX,
   MAX_AI_MODS,
+  AI_USES_MAX,
+  AI_CHANCE_MAX,
+  AI_DIVISOR_MAX,
+  AI_COUNT_RELOAD,
+  AI_GENERIC_USES,
   LEVEL_MAX,
   STATUS_FROM_WIRE,
   STATUS_TO_WIRE,

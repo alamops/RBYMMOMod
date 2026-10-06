@@ -101,7 +101,10 @@ test('gen1 DIG: dug a hole, invulnerable, Earthquake fails', () => {
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   const events = drained(battle);
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('dug a hole')));
-  assert.ok(events.some((e) => e.t === 'anim' && e.text === 'DIG' && e.amount === 1));
+  // ChargeEffect's `cp DIG`: SLIDE_DOWN_ANIM, not the move's own (K20 /
+  // K22), still the setup beat.
+  assert.ok(events.some((e) => e.t === 'anim' && e.text === 'SLIDE_DOWN_ANIM' && e.amount === 1));
+  assert.ok(!events.some((e) => e.t === 'anim' && e.text === 'DIG'));
   // MoveHitTest's INVULNERABLE miss is PrintMoveFailureText's "<USER>'s attack
   // missed!" (R1c), not "But it failed".
   assert.ok(events.some((e) => e.t === 'msg' && e.text === "Beta's attack missed!"));

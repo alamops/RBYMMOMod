@@ -2317,6 +2317,8 @@ function probeR1b(battle, at, turn) {
       li: fighter.moveListIndex || 0, ai: fighter.aiLayer2 || 0,
       sp: struct ? struct.power : -1,
       st: struct ? struct.type : -1,
+      // wAICount (K16, `_trainerAi`).
+      ac: fighter.aiCount,
     });
   }
   for (const fighter of battle.fighters) {
@@ -2363,6 +2365,7 @@ function fights(id, entries) {
         sides[seat.side].push({
           playerId: seat.pid, name: seat.pid, mons: seat.mons,
           bag: seat.bag, badges: seat.badges, aiMods: seat.aiMods,
+          aiClass: seat.aiClass,
         });
       }
       battle = build({
@@ -2453,7 +2456,7 @@ function r1duo(a, b, o) {
     seats: [
       { pid: 'p1', side: 'a', mons: a, bag: aSeat.bag, badges: aSeat.badges },
       { pid: 'p2', side: 'b', mons: b, bag: bSeat.bag, badges: bSeat.badges,
-        aiMods: bSeat.aiMods },
+        aiMods: bSeat.aiMods, aiClass: bSeat.aiClass },
     ],
   };
   for (const [key, value] of Object.entries(o)) {
@@ -2687,12 +2690,15 @@ scenario('g1_clear_recharge', fights('g1cr', [
 
 // The computer's item and switch in its own slot of the order
 // (MainInBattleLoop -> TrainerAI at `.enemyMovesFirst` / after
-// ExecutePlayerMove), a coop_npc trainer on side b:
+// ExecutePlayerMove), a coop_npc trainer on side b -- TrainerAI's (K16), on
+// class records whose roll always passes (`chance` 256):
 //   1 a slower Beta's SUPER POTION lands after Alpha's hit;
 //   2 a faster Beta switches to Delta before Alpha moves: the hit finds Delta;
 //   3 a slower Beta that Alpha knocks out never switches (the AI's turn is
-//     gone with it); its send-out follows;
+//     gone with it); its send-out (EnemySendOut, the referee's own) follows;
 //   4 the same Speed: the tie byte is drawn for the item as for a move.
+const POTION_AI = { uses: 2, chance: 256, item: 'SUPER_POTION' };
+const JUGGLER_AI = { uses: 3, chance: 256, switch: true };
 scenario('g1_computer_turn_slot', fights('g1ct', [
   r1duo(
     [r1s('Alpha', [r1m('tap', 20, 0)], { spd: 90 })],
@@ -2700,8 +2706,8 @@ scenario('g1_computer_turn_slot', fights('g1ct', [
     {
       mode: 'coop_npc',
       seed: 8501,
-      bSeat: { bag: { SUPER_POTION: 1 } },
-      turns: [{ p1: 0, p2: { action: 'item', item: 'SUPER_POTION' } }],
+      bSeat: { aiClass: POTION_AI },
+      turns: [{ p1: 0, p2: 0 }],
     }),
   r1duo(
     [r1s('Alpha', [r1m('tap', 20, 0)], { spd: 10 })],
@@ -2709,7 +2715,7 @@ scenario('g1_computer_turn_slot', fights('g1ct', [
       r1s('Beta', [r1m('splash', 0, 85)], { spd: 90 }),
       r1s('Delta', [r1m('splash', 0, 85)], { spd: 5 }),
     ],
-    { mode: 'coop_npc', seed: 8502, turns: [{ p1: 0, p2: { action: 'switch', slot: 1 } }] }),
+    { mode: 'coop_npc', seed: 8502, bSeat: { aiClass: JUGGLER_AI }, turns: [{ p1: 0, p2: 0 }] }),
   r1duo(
     [r1s('Alpha', [r1m('tap', 200, 0)], { spd: 90, atk: 200 })],
     [
@@ -2719,7 +2725,8 @@ scenario('g1_computer_turn_slot', fights('g1ct', [
     {
       mode: 'coop_npc',
       seed: 8503,
-      turns: [{ p1: 0, p2: { action: 'switch', slot: 1 } }, { p2: { action: 'switch', slot: 1 } }],
+      bSeat: { aiClass: JUGGLER_AI },
+      turns: [{ p1: 0, p2: 0 }, { p2: 'auto' }],
     }),
   r1duo(
     [r1s('Alpha', [r1m('tap', 20, 0)], { spd: 40 })],
@@ -2727,8 +2734,8 @@ scenario('g1_computer_turn_slot', fights('g1ct', [
     {
       mode: 'coop_npc',
       seed: 8504,
-      bSeat: { bag: { SUPER_POTION: 1 } },
-      turns: [{ p1: 0, p2: { action: 'item', item: 'SUPER_POTION' } }],
+      bSeat: { aiClass: POTION_AI },
+      turns: [{ p1: 0, p2: 0 }],
     }),
 ]));
 
@@ -3621,7 +3628,14 @@ scenario('g1_item_lines', fights('g1il', [
       turns: [{ p1: { action: 'item', item: 'FULL_RESTORE' }, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
     [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, hp: 100 })],
-    { mode: 'coop_npc', seed: 10053, bSeat: { bag: { POTION: 1 } }, turns: autoRows(2) }),
+    // K16: the trainer's POTION is TrainerAI's -- a class that heals below
+    // half (AICheckIfHPBelowFraction), once (`uses` 1), its roll always passing.
+    {
+      mode: 'coop_npc',
+      seed: 10053,
+      bSeat: { aiClass: { uses: 1, chance: 256, hpBelow: 2, item: 'POTION' } },
+      turns: autoRows(2),
+    }),
 ]));
 
 scenario('g1_conversion', fights('g1cv', [
@@ -3789,6 +3803,173 @@ scenario('g1_marks_faints', fights('g1mf', [
   r1duo([r1s('Alpha', [r1m('snarl', 80, 18)], { spd: 90, atk: 200 })],
     [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 1 })],
     { seed: 12008, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// H1 (K16, docs/plans/gen12-referee-remaining-gaps.md wave 2): TrainerAI in
+// the computer trainer's slot, its `Random` byte drawn while wAICount is not
+// 0, on each class family's record shape (the engine's `ai_classes`):
+//   1 GenericAI (no record): a byte every turn, never an action;
+//   2 MistyAI's shape (25 percent + 1, X DEFEND, one use): its own rolls, the
+//     use spent, then no byte at all;
+//   3 AgathaAI's (8 percent switch first, 50 percent + 1 SUPER POTION below
+//     a quarter), a fainted party member walked past by EnemySendOut;
+//   4 BrockAI's: a paralysed Beta's FULL HEAL, the Speed left quartered;
+//   5 CooltrainerFAI's (no roll): HYPER POTION below a tenth, then the switch
+//     below a fifth;
+//   6 JugglerAI's against a hard hitter: switches, and the send-out after a
+//     knockout in party order (EnemySendOut, `p2: 'auto'`);
+//   7 a faster trainer's FULL RESTORE before Alpha's move, its Leech Seed
+//     residual after it;
+//   8 an item spent past a recharge: the recharge is still owed;
+//   9 a 2v2 trainer: one record, each seat its own copy and wAICount;
+//  10 a wild monster and a link foe that carry a record: no TrainerAI;
+//  11 a solo trainer's seat, driven as SoloBattle drives it (one seat with
+//     the whole party, its `aiMods` and `aiClass`, no bag, `autoPick` every
+//     turn and every send-out): the layers at `.selectEnemyMove`, TrainerAI
+//     in the slot, EnemySendOut's replacements.
+const quadAuto = () => ({ p1: 0, p3: 0, p2: 'auto', p4: 'auto' });
+scenario('g1_trainer_ai', fights('g1ai', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13001, turns: autoRows(3) }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13002,
+      bSeat: { aiClass: { uses: 1, chance: 64, item: 'X_DEFEND' } }, turns: autoRows(8) }),
+  r1duo([r1s('Alpha', [r1m('tap', 20, 0)], { spd: 90, atk: 60 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 60 }),
+      r1s('Zeta', [r1m('splash', 0, 85)], { spd: 10, hp: 0 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13027,
+      bSeat: { aiClass: { uses: 2, switchChance: 20, chance: 128, item: 'SUPER_POTION',
+        hpBelow: 4 } },
+      turns: autoRows(10) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 80, status: 'PAR' })],
+    { mode: 'coop_npc', seed: 13004,
+      bSeat: { aiClass: { uses: 5, onStatus: true, item: 'FULL_HEAL' } }, turns: autoRows(2) }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 39 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 10, hp: 60 })],
+    { mode: 'coop_npc', seed: 13005,
+      bSeat: { aiClass: { uses: 1, item: 'HYPER_POTION', hpBelow: 10, switchBelow: 5 } },
+      turns: autoRows(3) }),
+  r1duo([r1s('Alpha', [r1m('slam', 120, 0)], { spd: 90, atk: 200 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 }),
+      r1s('Gamma', [r1m('splash', 0, 85)], { spd: 10 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13006,
+      bSeat: { aiClass: { uses: 3, chance: 64, switch: true } }, turns: autoRows(12) }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('splash', 0, 85)],
+      { spd: 90, hp: 50, status: 'TOX', toxicCounter: 2, leechSeed: { fromSlot: 0 } })],
+    { mode: 'coop_npc', seed: 13007,
+      bSeat: { aiClass: { uses: 1, chance: 256, hpBelow: 5, item: 'FULL_RESTORE' } },
+      turns: autoRows(2) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 100, mustRecharge: true })],
+    { mode: 'coop_npc', seed: 13008,
+      bSeat: { aiClass: { uses: 2, chance: 256, item: 'SUPER_POTION' } }, turns: autoRows(3) }),
+  {
+    mode: 'coop_npc',
+    seed: 13009,
+    seats: [
+      { pid: 'p1', side: 'a', mons: [r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })] },
+      { pid: 'p3', side: 'a', mons: [r1s('Gamma', [r1m('tap', 10, 0)], { spd: 80 })] },
+      { pid: 'p2', side: 'b', aiClass: { uses: 1, chance: 128, item: 'X_ATTACK' },
+        mons: [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })] },
+      { pid: 'p4', side: 'b', aiClass: { uses: 1, chance: 128, item: 'X_ATTACK' },
+        mons: [r1s('Delta', [r1m('thump', 10, 0)], { spd: 5 })] },
+    ],
+    turns: [quadAuto(), quadAuto(), quadAuto(), quadAuto()],
+  },
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 13010,
+      bSeat: { aiClass: { uses: 3, chance: 256, item: 'X_ATTACK' } }, turns: autoRows(2) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 13011,
+      bSeat: { aiClass: { uses: 3, chance: 256, item: 'X_ATTACK' } },
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('slam', 60, 0), r1m('growl', 0, 18)], { spd: 50, atk: 120, types: [0] })],
+    [r1s('Beta', [r1m('thump', 20, 0), r1m('lull', 0, 32), r1m('chop', 20, 1, { type: 1 }),
+      r1m('grow', 0, 10)], { spd: 40, hp: 120 }),
+    r1s('Kappa', [r1m('thump', 20, 0), r1m('grow', 0, 10)], { spd: 60 }),
+    r1s('Delta', [r1m('chop', 20, 0, { type: 1 })], { spd: 30 })],
+    { mode: 'coop_npc', seed: 13012, chart: [[100, 100], [200, 100]],
+      bSeat: { aiMods: [1, 2, 3],
+        aiClass: { uses: 2, chance: 128, item: 'SUPER_POTION', hpBelow: 4 } },
+      turns: autoRows(16) }),
+]));
+
+// K20's completion and K22's audit: the animations the cart plays, the ones
+// it does not, and `quiet`:
+//   1 a ball at a trainer: TOSS_ANIM, then BLOCKBALL_ANIM (TossBallAnimation
+//     `.BlockBall`), then the lines;
+//   2-4 ChargeEffect's own on the charge turn: XSTATITEM_ANIM (SOLARBEAM),
+//     FLY's TELEPORT (quiet), DIG's SLIDE_DOWN_ANIM -- the setup beat -- and
+//     the move's on the release;
+//   5 BideEffect's XSTATITEM_ANIM on its first turn, and an unleash of 0
+//     with no animation (wMoveMissed);
+//   6 a move that missed plays nothing (HandleIfPlayerMoveMissed) ...
+//   7 ... but a missed EXPLOSION does;
+//   8 an immunity plays nothing;
+//   9 a GROWL that lands plays, one at -6 ("Nothing happened!") does not;
+//  10 a sleep move turned away by a status plays nothing;
+//  11 MIRROR MOVE plays no animation of its own, the copied move its;
+//  12 the seeder's ABSORB and a trap's later hits are quiet;
+//  13 RemoveFaintedPlayerMon zeroes the player's fallen monster's status,
+//     FaintEnemyPokemon leaves the computer's.
+const twoRows = () => [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }];
+scenario('g1_k22_anims', fights('g1ka', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 14001, aSeat: { bag: { POKE_BALL: 1 } },
+      turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('SOLARBEAM', 120, 39)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14002, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('FLY', 90, 43)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14003, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('DIG', 100, 39)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14004, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14005, turns: [...twoRows(), ...twoRows()] }),
+  r1duo([r1s('Alpha', [r1m('jab', 40, 0, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14006, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7, { accuracy: 0 })], { spd: 90 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+  { mode: 'wild', seed: 14007, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('jab', 40, 0)], { spd: 90, types: [0] })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [0] })],
+    { mode: 'wild', seed: 14008, chart: [[0]], turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, stages: { atk: -5 } })],
+    { mode: 'wild', seed: 14009, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('lull', 0, 32)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, status: 'PSN' })],
+    { mode: 'wild', seed: 14010, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('mirror', 0, 9)], { spd: 5 })],
+    [r1s('Beta', [r1m('jab', 10, 0)], { spd: 10 })],
+    { mode: 'wild', seed: 14011, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, leechSeed: { fromSlot: 0 } })],
+    { mode: 'wild', seed: 14012, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('slam', 120, 0)], { spd: 90, atk: 200, hp: 1, status: 'PSN' }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('slam', 120, 0)], { spd: 10, atk: 200, hp: 1, status: 'BRN' }),
+    r1s('Delta', [r1m('splash', 0, 85)], { spd: 10 })],
+  { mode: 'coop_npc', seed: 14013, turns: [{ p1: 0, p2: 'auto' }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 1, status: 'BRN' }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('slam', 120, 0)], { spd: 10, atk: 200 })],
+  { mode: 'wild', seed: 14014, turns: [{ p1: 0, p2: 0 }] }),
 ]));
 
 // ------------------------------------------------------------------
@@ -4794,8 +4975,8 @@ for (const mode of ['wild', 'coop_wild']) {
     assert.strictEqual(battle.tick(11), true, "the wild seat's turn resolves");
     const items = battle.drainEvents().filter((event) => event.t === 'item');
     assert.deepStrictEqual(items, [], 'no item event came off the wild seat');
-    assert.strictEqual(battle.byId.get('wild').bag.POTION, 2, 'and it spent none of it');
-    assert.strictEqual(battle.byId.get('wild').bag.FULL_HEAL, 1, 'cure untouched too');
+    // K16: the computer keeps no bag at all, so there is nothing to spend.
+    assert.strictEqual(battle.byId.get('wild').bag, null, 'the wild seat keeps no bag');
     assert.strictEqual(battle.byId.get('wild').mons[0].status, 'poison', 'still poisoned');
   });
 
@@ -5086,7 +5267,7 @@ const g1Battle = (o) => build({
   id: 'g1u', mode: o.mode || 'wild', seed: o.seed || 6201, choiceTimeout: 60, reconnectGrace: 60,
   sides: {
     a: [{ playerId: 'p1', name: 'Ann', badges: o.aBadges, bag: o.aBag, mons: o.a }],
-    b: [{ playerId: 'p2', name: 'Bob', bag: o.bBag, mons: o.b }],
+    b: [{ playerId: 'p2', name: 'Bob', bag: o.bBag, mons: o.b, aiClass: o.bAiClass }],
   },
 });
 const g1Mon = (o) => mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
@@ -5101,13 +5282,15 @@ test("a player's cure reloads the party stats; a Full Restore that heals, or the
   const cured = (item, hp, side) => {
     const battle = g1Battle({
       mode: side === 'b' ? 'coop_npc' : 'wild', aBadges: allBadges(),
-      aBag: { [item]: 1 }, bBag: { [item]: 1 },
+      aBag: { [item]: 1 },
+      // The computer's cure is TrainerAI's (K16): BrockAI's FULL HEAL.
+      bAiClass: side === 'b' ? { uses: 5, onStatus: true, item } : undefined,
       a: [g1Mon({ status: side === 'b' ? undefined : 'PAR', hp })],
       b: [g1Foe({ spd: 80, status: side === 'b' ? 'PAR' : undefined })],
     });
     if (side === 'b') {
       battle.submitChoice('p1', { action: 'fight', move: 0 });
-      battle.submitChoice('p2', { action: 'item', item });
+      battle.submitChoice('p2', { action: 'fight', move: 0 });
       return g1Active(battle, 'p2');
     }
     battle.submitChoice('p1', { action: 'item', item });
@@ -5121,7 +5304,7 @@ test("a player's cure reloads the party stats; a Full Restore that heals, or the
   assert.strictEqual(cured('FULL_RESTORE', 100).cur.spd, 16,
     'a Full Restore that also heals keeps the stored 15 -> 16');
   assert.strictEqual(cured('FULL_RESTORE').cur.spd, 60, 'at full HP it is a Full Heal');
-  const npc = cured('PARLYZ_HEAL', undefined, 'b');
+  const npc = cured('FULL_HEAL', undefined, 'b');
   assert.strictEqual(npc.status, null);
   assert.strictEqual(npc.cur.spd, 20, 'AICureStatus leaves the quartered Speed');
 });
@@ -5264,8 +5447,18 @@ test('Gen 1 priority: Quick Attack first, Counter last, Metronome and Struggle a
       '3:QUICK_ATTACK 0:QUICK_ATTACK', `${mode}: Quick Attack on both sides is Speed's`);
     assert.strictEqual(g1bOrder(g1bStep(battle, g1bUse(1), g1bUse(2))), '0:thump 3:COUNTER',
       `${mode}: the faster Counter moves last`);
-    assert.strictEqual(g1bOrder(g1bStep(battle, g1bUse(2), g1bUse(2))), '3:COUNTER 0:COUNTER',
+    // Both COUNTERs miss (each target selected COUNTER, HandleCounterMove)
+    // and a move that missed plays no animation (HandleIfPlayerMoveMissed,
+    // K22's audit), so who went first is read off the used lines.
+    const both = g1bStep(battle, g1bUse(2), g1bUse(2));
+    const used = [];
+    for (const event of both) {
+      const m = event.t === 'msg' ? /^(\w+) used (.*)!$/.exec(event.text) : null;
+      if (m) used.push(`${m[1]}:${m[2]}`);
+    }
+    assert.strictEqual(used.join(' '), 'Beta:COUNTER Alpha:COUNTER',
       `${mode}: Counter on both sides is Speed's`);
+    assert.strictEqual(g1bOrder(both), '', `${mode}: ...and neither missed COUNTER is animated`);
   }
   const metro = g1bArena({ pool: [g1bMove('QUICK_ATTACK', 10, 0)],
     a: [{ species: 'Alpha', maxHp: 400, spd: 30, baseSpd: 0, moves: [g1bMove('metronome', 0, 83)] }],
@@ -6188,8 +6381,11 @@ test("SwitchAndTeleportEffect: the level roll in a wild fight, the trainer's ref
   // ROAR blows its TARGET away: the runner is Alpha's seat, so Beta's wins
   // (FX-R1; it was the user's seat).
   assert.deepStrictEqual([r1End(g, 2).reason, r1End(g, 3).winner], ['run', 'p2']);
+  // The only byte that turn is the trainer's TrainerAI byte (GenericAI, K16).
+  const aiByte = G1bRng.create(9863);
+  aiByte.byte();
   assert.ok(duelSaid(g, 4, 'Alpha is unaffected!') && duelSaid(g, 4, 'But, it failed!')
-    && r1Row(g, 4, 1).rng === 9863, 'a trainer fight: ROAR and TELEPORT fail, no roll');
+    && r1Row(g, 4, 1).rng === aiByte.state(), 'a trainer fight: ROAR and TELEPORT fail, no roll');
   assert.ok(duelSaid(g, 5, 'Beta was blown away!'));
 });
 
@@ -6282,7 +6478,12 @@ test('a charge turn is the charge line alone; the release says "used" and pays',
   assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used FLY!').length, 1, 'one used line, the release');
   assert.strictEqual(r1Seat(g, 1, 1, 0).moves, 'FLY:10', 'no PP on the charge turn');
   assert.strictEqual(r1Seat(g, 1, 2, 0).moves, 'FLY:9', 'the release pays');
-  assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'FLY' && e.amount === 1), 'the vanish beat');
+  // ChargeEffect's FLY: TELEPORT's animation, a look and not a move (K22's
+  // `quiet`), still the setup beat; the release plays FLY.
+  assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'TELEPORT' && e.amount === 1
+    && e.quiet === true), 'the vanish beat');
+  assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'FLY' && e.amount === undefined),
+    'the release animates FLY');
   assert.ok(duelSaid(g, 2, "Alpha's fully paralyzed!"), 'battle 2: paralysed on the release');
   assert.deepStrictEqual([r1Seat(g, 2, 2, 0).moves, r1Seat(g, 2, 2, 0).charging], ['SOLARBEAM:10', false],
     '...the charge is gone and nothing was paid');
@@ -6398,7 +6599,9 @@ test('COUNTER reads the selection for COUNTER and the move struct for power and 
     '...and a fresh BIDE (power 0) is not');
   assert.deepStrictEqual(duelHits(g, 3).slice(-1), ['3:8:373'],
     'a held Beta (CANNOT_MOVE) is countered off its struct and the wrap\'s wDamage');
-  assert.ok(duelHits(g, 4).includes('3:30:364'), "the trainer's KARATE (type 1, 50) is countered");
+  // (K16: GenericAI's TrainerAI byte in Beta's slot moved the stream -- the
+  // KARATE that is countered now rolls 17, so COUNTER's 34.)
+  assert.ok(duelHits(g, 4).includes('3:34:348'), "the trainer's KARATE (type 1, 50) is countered");
   assert.deepStrictEqual([duelRowSeat(g, 1, 1, 3).sp, duelRowSeat(g, 1, 1, 3).st], [10, 0],
     "Beta's struct after its switch: THUMP's power and type");
 });
@@ -6656,4 +6859,102 @@ test("K20: STATUS_AFFECTED_ANIM, XSTATITEM_ANIM, ABSORB from the seeder, TOSS_AN
   "the `item` event first and no other anim before XSTATITEM_ANIM (the client's bag-look swap)");
   assert.strictEqual(items[kindAt(items, 'stat', 0)].text, "Alpha's ATTACK rose!",
     "the `stat` event's text is the line read plain");
+});
+
+// ------------------------------------------------------------------
+// H1 (K16, K20 completion, K22): TrainerAI in the computer's slot,
+// EnemySendOut, the animations, RemoveFaintedPlayerMon's status
+// ------------------------------------------------------------------
+
+const rawOf = (name, prefix, at) => jsRunsRaw.find((entry) => entry.name === name)
+  .events.filter((e) => e.battle === `${prefix}${at}`);
+const itemsOf = (list) => list.filter((e) => e.t === 'item').map((e) => `${e.slot}:${e.text}`);
+
+test('TrainerAI: GenericAI\'s byte, each class family, wAICount per monster (K16)', () => {
+  const g = 'g1_trainer_ai';
+  assert.ok([1, 2, 3].every((t) => duelRowSeat(g, 1, t, 3).ac === 3)
+    && !duelEvents(g, 1).some((e) => e.t === 'item'),
+  'GenericAI: wAICount 3, never spent, never an item');
+  assert.notStrictEqual(r1Row(g, 1, 1).rng, 13001, '...its byte is drawn');
+  assert.deepStrictEqual(itemsOf(duelEvents(g, 2)), ['3:X_DEFEND'], 'MistyAI: one X DEFEND, its one use');
+  assert.strictEqual(duelRowSeat(g, 2, 8, 3).ac, 0, '...wAICount 0 after it');
+  const agatha = rawOf(g, 'g1ai', 3);
+  assert.ok(inOrder(lineAt(agatha, 'p2 with-\ndrew Beta!'), kindAt(agatha, 'send', 3, 'Delta')),
+    'AgathaAI: the withdraw line, then Delta -- the fainted Zeta walked past');
+  assert.ok(itemsOf(agatha).includes('3:SUPER_POTION'), '...and her SUPER POTION below a quarter');
+  assert.ok([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].some((t) => duelRowSeat(g, 3, t, 3).ac === 255),
+    '...a switch puts wAICount back to $ff (EnemySendOutFirstMon)');
+  assert.deepStrictEqual([duelSeat(g, 4, 1, 3).status, duelSeat(g, 4, 1, 3).cur.split('/')[2]],
+    ['', '20'], 'BrockAI: FULL HEAL, the Speed left quartered (AICureStatus)');
+  assert.ok(duelSaid(g, 5, 'p2 used HYPER POTION on Beta!') && !duelSaid(g, 5, 'p2 with-drew Beta!')
+    && duelRowSeat(g, 5, 3, 3).ac === 0,
+  'CooltrainerFAI: HYPER POTION below a tenth -- her one use, so nothing after it');
+  const juggler = rawOf(g, 'g1ai', 6);
+  const sends = juggler.filter((e) => e.t === 'send' && e.slot === 3).map((e) => e.text);
+  assert.deepStrictEqual(sends.slice(0, 3), ['Beta', 'Gamma', 'Delta'],
+    'JugglerAI: Beta falls, Gamma is next in party order, then the switches');
+  const restore = rawOf(g, 'g1ai', 7);
+  assert.ok(inOrder(kindAt(restore, 'item', 3, 'FULL_RESTORE'), kindAt(restore, 'anim', 0, 'ABSORB'),
+    lineAt(restore, '^aAlpha\nused tap!')),
+  'a faster trainer: TrainerAI first, its residual, then Alpha');
+  assert.ok(!duelSaid(g, 8, 'Beta must recharge!') || duelTexts(g, 8).indexOf('Beta must recharge!')
+    > duelTexts(g, 8).lastIndexOf('p2 used SUPER POTION on Beta!'),
+  'an item spent past a recharge: the recharge comes after the uses run out');
+  assert.deepStrictEqual([duelRowSeat(g, 9, 4, 3).ac, duelRowSeat(g, 9, 4, 4).ac], [0, 0],
+    'a 2v2 trainer: each seat spent its own use');
+  assert.deepStrictEqual([itemsOf(duelEvents(g, 10)), r1Row(g, 10, 2).rng !== 13010],
+    [[], true], 'a wild monster: no item (its own move draws)');
+  assert.deepStrictEqual([itemsOf(duelEvents(g, 11)), r1Row(g, 11, 2).rng], [[], 13011],
+    'a link foe: no TrainerAI, no byte');
+  const solo = rawOf(g, 'g1ai', 12);
+  assert.ok(itemsOf(solo).includes('3:SUPER_POTION'), 'a solo seat: TrainerAI in its slot');
+  assert.deepStrictEqual(solo.filter((e) => e.t === 'send' && e.slot === 3).map((e) => e.text),
+    ['Beta', 'Kappa', 'Delta'], '...and EnemySendOut\'s replacements in party order');
+});
+
+test('K20 completion / K22: the animations the cart plays, the ones it does not, quiet', () => {
+  const g = 'g1_k22_anims';
+  const fight = (at) => rawOf(g, 'g1ka', at);
+  const anims = (at, slot) => fight(at).filter((e) => e.t === 'anim' && e.slot === slot)
+    .map((e) => `${e.text}${e.quiet ? '~' : ''}${e.amount === 1 ? '!' : ''}`);
+  const ball = fight(1);
+  const toss = kindAt(ball, 'anim', 0, 'TOSS_ANIM');
+  assert.ok(toss !== null && ball[toss + 1].text === 'BLOCKBALL_ANIM'
+    && lineAt(ball, 'The trainer\nblocked the BALL!') === toss + 2, 'TOSS_ANIM, BLOCKBALL_ANIM, the line');
+  assert.deepStrictEqual(anims(2, 0), ['XSTATITEM_ANIM!', 'SOLARBEAM'], 'a charge: XSTATITEM_ANIM, then the move');
+  assert.deepStrictEqual(anims(3, 0), ['TELEPORT~!', 'FLY'], 'FLY: a quiet TELEPORT, then FLY');
+  assert.deepStrictEqual(anims(4, 0), ['SLIDE_DOWN_ANIM!', 'DIG'], 'DIG: SLIDE_DOWN_ANIM, then DIG');
+  assert.ok(anims(5, 0)[0] === 'XSTATITEM_ANIM' && !anims(5, 0).includes('BIDE')
+    && duelSaid(g, 5, "Alpha's attack missed!"), "Bide: BideEffect's XSTATITEM_ANIM, a 0 unleash unanimated");
+  assert.deepStrictEqual(anims(6, 0), [], 'a missed move: nothing');
+  assert.deepStrictEqual(anims(7, 0), ['blast'], 'a missed EXPLOSION: still played');
+  assert.deepStrictEqual(anims(8, 0), [], 'an immunity: nothing');
+  assert.deepStrictEqual(anims(9, 0), ['growl'], 'GROWL: played where it lands, not at -6');
+  assert.deepStrictEqual(anims(10, 0), [], 'a sleep move turned away: nothing');
+  assert.deepStrictEqual(anims(11, 0), ['jab'], "MIRROR MOVE: the copied move's, never its own");
+  assert.deepStrictEqual(anims(12, 0), ['wrap', 'ABSORB~', 'wrap~', 'ABSORB~'],
+    "the seeder's ABSORB and the trap's later hit are quiet");
+  assert.deepStrictEqual([duelSeat(g, 13, 1, 3).status, duelSeat(g, 14, 1, 0).status], ['burn', ''],
+    'FaintEnemyPokemon keeps the computer\'s status; RemoveFaintedPlayerMon zeroes the player\'s');
+});
+
+test('an unreadable aiClass refuses the fight; a wild or link seat\'s is not read (K16)', () => {
+  const tryAi = (aiClass, mode = 'coop_npc') => Turn.attempt({
+    id: 'h1k', mode, seed: 1,
+    sides: {
+      a: [{ playerId: 'p1', mons: [{ species: 'Alpha', level: 20, maxHp: 60, stats: { atk: 40, def: 40, spd: 40, spc: 40 }, moves: [{ id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 }] }] }],
+      b: [{ playerId: 'p2', aiClass, mons: [{ species: 'Beta', level: 20, maxHp: 60, stats: { atk: 40, def: 40, spd: 40, spc: 40 }, moves: [{ id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 }] }] }],
+    },
+  });
+  const refused = tryAi({ uses: 0 });
+  assert.ok(refused.battle === null && /aiClass/.test(refused.reason), 'uses 0: refused');
+  assert.strictEqual(tryAi({ chance: 64 }).battle, null, 'no uses: refused');
+  assert.strictEqual(tryAi({ uses: 3, switch: 'yes' }).battle, null, 'a flag that is not a boolean: refused');
+  assert.strictEqual(tryAi({ uses: 3, hpBelow: 0 }).battle, null, 'a divisor of 0: refused');
+  const taken = tryAi({ uses: 3, chance: 256, item: 'X_SPEED', switch: false }).battle;
+  assert.deepStrictEqual(taken.byId.get('p2').aiClass, { uses: 3, chance: 256, item: 'X_SPEED' },
+    'a readable one: copied field by field');
+  assert.ok(tryAi({ uses: 0 }, 'wild').battle && tryAi({ uses: 0 }, '1v1').battle,
+    "a wild / link seat's: ignored");
+  assert.strictEqual(tryAi({ uses: 0 }, 'wild').battle.byId.get('p2').aiClass, null);
 });

@@ -714,6 +714,9 @@ local function confuse(out, fighter, mon, rng, failIfAlready)
   end
   local turns = (rng and rng:byte() or 0) % 4 + 2
   mon.confusion = turns
+  -- ConfusionSideEffectSuccess plays the move's animation for the primary
+  -- (`cp CONFUSION_SIDE_EFFECT / call nz, PlayCurrentMoveAnimation2`).
+  out.animates = true
   -- BecameConfusedText, "<TARGET>\nbecame confused!".
   local text = Events.named(fighter.side, mon.species) .. "\nbecame confused!"
   out.messages[#out.messages + 1] = text
@@ -745,7 +748,8 @@ end
 -- :368-370) and a drop at -6 is CantLowerAnymore (:705-710), both "Nothing
 -- happened!" -- the same line the 999 / 1 walls print.  Mist is no longer
 -- asked here: it is MoveHitTest's (core.asm :5262-5283), and Turn runs that
--- before the accuracy byte (`_statusHitTest`).
+-- before the accuracy byte (`_statusHitTest`).  Returns true when the stage
+-- moved -- the one outcome UpdateStatDone / UpdateLoweredStatDone animate.
 local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side)
   local label = STAT_LABELS[stat] or stat
   local outcome, after = M.changeStat({
@@ -754,7 +758,7 @@ local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, 
   })
   if outcome == "max" or outcome == "min" or outcome == "stuck" then
     if not side then out.messages[#out.messages + 1] = "Nothing happened!" end
-    return
+    return false
   end
   -- MonsStatsRoseText / MonsStatsFellText (effects.asm :516-536, :718-742):
   -- "<USER>'s <STAT> rose!" and "<TARGET>'s <STAT> fell!", with "greatly"
@@ -777,6 +781,7 @@ local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, 
   fields.stage = after
   fields.text = Events.plain(text)
   out.events[#out.events + 1] = { kind = "stat", fields = fields }
+  return true
 end
 
 -- HazeEffect_ (engine/battle/move_effects/haze.asm) on one battler: every
@@ -1046,8 +1051,13 @@ end
 --   playerMover  the user is "the player" (Transform's broken check)
 --   unlimitedPp  the target is the computer's, whose PP DisableEffect never
 --                reads outside a link battle
--- Returns { nothing, messages, events, heals, cannotMove } where heals =
--- { amount } for user and `cannotMove` is Haze's CANNOT_MOVE on the target.
+-- Returns { nothing, messages, events, heals, cannotMove, animates } where
+-- heals = { amount } for user, `cannotMove` is Haze's CANNOT_MOVE on the
+-- target and `animates` says the routine played the move's animation
+-- (PlayCurrentMoveAnimation / PlayCurrentMoveAnimation2): every routine here
+-- plays it where it succeeds and nowhere it fails -- HAZE and SPLASH always
+-- -- which is what Turn reads to keep or take back the power-0 move's `anim`
+-- (contract K22's audit).
 function M.applyPrimary(ctx)
   ctx = ctx or {}
   local out = { nothing = false, messages = {}, events = {}, heals = {}, costs = {}, directDamage = {} }
@@ -1067,6 +1077,7 @@ function M.applyPrimary(ctx)
   -- SplashEffect (effects.asm :1282-1284): its animation, then
   -- PrintNoEffectText -- "No effect!".
   if effectId == 85 then -- SPLASH_EFFECT
+    out.animates = true
     out.messages[#out.messages + 1] = "No effect!"
     return out
   end
@@ -1108,6 +1119,8 @@ function M.applyPrimary(ctx)
     end
     out.heals[#out.heals + 1] = { amount = amount }
     out.afterHeals = { Events.named(userFighter.side, userMon.species) .. "\nregained health!" }
+    -- `.playAnim`, the restore's (heal.asm): never on the failed compare.
+    out.animates = true
     return out
   end
 
@@ -1144,6 +1157,7 @@ function M.applyPrimary(ctx)
       out.events[#out.events + 1] = { kind = "status", fields = fields }
     end
     out.messages[#out.messages + 1] = "All STATUS changes\nare eliminated!"
+    out.animates = true
     return out
   end
 
@@ -1151,7 +1165,9 @@ function M.applyPrimary(ctx)
   if statFx then
     local mon = statFx.selfTarget and userMon or targetMon
     local fighter = statFx.selfTarget and userFighter or targetFighter
-    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
+    -- UpdateStatDone / UpdateLoweredStatDone play it on a stage that moved;
+    -- a wall is "Nothing happened!" and no animation.
+    out.animates = applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
       userFighter, targetMon, false)
     return out
   end
@@ -1174,6 +1190,7 @@ function M.applyPrimary(ctx)
     local turns = M.sleepTurns(rng)
     targetMon.status = "sleep"
     targetMon.statusTurns = turns
+    out.animates = true
     local token = wire.sleep or "SLP"
     local text = Events.named(targetFighter.side, targetMon.species) .. "\nfell asleep!"
     out.messages[#out.messages + 1] = text
@@ -1196,6 +1213,7 @@ function M.applyPrimary(ctx)
       return out
     end
     local toxic = M.moveKey(ctx.moveId) == "TOXIC"
+    out.animates = true
     targetMon.status = toxic and "toxic" or "poison"
     targetMon.toxicLinger = nil
     if toxic then targetMon.toxicCounter = 1 end
@@ -1216,6 +1234,7 @@ function M.applyPrimary(ctx)
       return out
     end
     targetMon.status = "paralysis"
+    out.animates = true
     -- ParalyzeEffect_ quarters the battle Speed the moment it lands
     -- (paralyze.asm `callfar QuarterSpeedDueToParalysis`).
     M.applyStatusPenalty(targetMon)
@@ -1242,6 +1261,7 @@ function M.applyPrimary(ctx)
       return out
     end
     targetMon.leechSeed = { fromSlot = userFighter.slot }
+    out.animates = true
     local text = Events.named(targetFighter.side, targetMon.species) .. "\nwas seeded!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
@@ -1313,6 +1333,7 @@ function M.applyPrimary(ctx)
     -- The slot (the menu's wPlayerDisabledMove nibble) and the move's id
     -- (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
     targetMon.disable = { moveIndex = slot, turns = turns, moveId = moves[slot].id }
+    out.animates = true
     -- MoveWasDisabledText, "<TARGET>'s\n<MOVE> was\ndisabled!".
     out.messages[#out.messages + 1] = Events.named(targetFighter.side, targetMon.species)
       .. "'s\n" .. moveLabel(moves[slot]) .. " was\ndisabled!"
@@ -1338,6 +1359,7 @@ function M.applyPrimary(ctx)
     userMon.hp = userMon.hp - cost
     userMon.substitute = cost
     userMon.subAtZero = nil
+    out.animates = true
     out.directDamage = { { amount = cost } }
     out.messages[#out.messages + 1] = "It created a\nSUBSTITUTE!"
     return out
@@ -1352,6 +1374,7 @@ function M.applyPrimary(ctx)
       return out
     end
     userMon.lightScreen = true
+    out.animates = true
     out.messages[#out.messages + 1] = Events.named(userFighter.side, userMon.species)
       .. "'s\nprotected against\nspecial attacks!"
     return out
@@ -1363,6 +1386,7 @@ function M.applyPrimary(ctx)
       return out
     end
     userMon.reflect = true
+    out.animates = true
     out.messages[#out.messages + 1] =
       Events.named(userFighter.side, userMon.species) .. "\ngained armor!"
     return out
@@ -1377,6 +1401,7 @@ function M.applyPrimary(ctx)
       return out
     end
     userMon.mist = true
+    out.animates = true
     out.messages[#out.messages + 1] =
       Events.named(userFighter.side, userMon.species) .. "'s\nshrouded in mist!"
     return out
@@ -1388,6 +1413,7 @@ function M.applyPrimary(ctx)
       return out
     end
     userMon.focusEnergy = true
+    out.animates = true
     out.messages[#out.messages + 1] =
       Events.named(userFighter.side, userMon.species) .. "'s\ngetting pumped!"
     return out
@@ -1401,6 +1427,7 @@ function M.applyPrimary(ctx)
     for i = 1, #(targetMon.types or {}) do types[i] = targetMon.types[i] end
     if #types == 0 then types[1] = 0 end
     userMon.types = types
+    out.animates = true
     out.messages[#out.messages + 1] =
       "Converted type to\n" .. Events.named(targetFighter.side, targetMon.species) .. "'s!"
     return out
@@ -1448,6 +1475,7 @@ function M.applyPrimary(ctx)
       chance = max(0, int(source.chance, 0)),
       highCrit = source.highCrit == true,
     }
+    out.animates = true
     -- MimicLearnedMoveText, "<USER>\nlearned\n<MOVE>!".
     out.messages[#out.messages + 1] = Events.named(userFighter.side, userMon.species)
       .. "\nlearned\n" .. moveLabel(source) .. "!"
@@ -1527,6 +1555,7 @@ function M.applyPrimary(ctx)
     end
     userMon.moves = copied
     userMon.transformed = true
+    out.animates = true
     -- TransformedText, "<USER>\ntransformed into\n<SPECIES>!": the copied
     -- species is wNameBuffer's (GetMonName), printed bare.
     out.messages[#out.messages + 1] = Events.named(userFighter.side, userMon.species)

@@ -2655,7 +2655,9 @@ local function probeR1b(battle, at, turn)
     probes[#probes + 1] = { at = at, turn = turn, seat = fighter.slot,
                             li = fighter.moveListIndex or 0, ai = fighter.aiLayer2 or 0,
                             sp = struct and struct.power or -1,
-                            st = struct and struct.type or -1 }
+                            st = struct and struct.type or -1,
+                            -- wAICount (K16, `_trainerAi`).
+                            ac = fighter.aiCount }
   end
   for _, fighter in ipairs(battle.fighters) do
     for index, mon in ipairs(fighter.mons) do
@@ -2710,7 +2712,8 @@ local function fights(id, entries)
       for _, seat in ipairs(e.seats) do
         local list = sides[seat.side]
         list[#list + 1] = { playerId = seat.pid, name = seat.pid, mons = seat.mons,
-                            bag = seat.bag, badges = seat.badges, aiMods = seat.aiMods }
+                            bag = seat.bag, badges = seat.badges, aiMods = seat.aiMods,
+                            aiClass = seat.aiClass }
       end
       battle = build({
         id = id .. i, mode = e.mode or "1v1", seed = e.seed, choiceTimeout = 60,
@@ -2791,7 +2794,7 @@ local function r1duo(a, b, o)
   local e = { seats = {
     { pid = "p1", side = "a", mons = a, bag = aSeat.bag, badges = aSeat.badges },
     { pid = "p2", side = "b", mons = b, bag = bSeat.bag, badges = bSeat.badges,
-      aiMods = bSeat.aiMods },
+      aiMods = bSeat.aiMods, aiClass = bSeat.aiClass },
   } }
   for key, value in pairs(o) do
     if key ~= "aSeat" and key ~= "bSeat" then e[key] = value end
@@ -3032,12 +3035,15 @@ scenario("g1_clear_recharge", fights("g1cr", {
 
 -- The computer's item and switch in its own slot of the order
 -- (MainInBattleLoop -> TrainerAI at `.enemyMovesFirst` / after
--- ExecutePlayerMove), a coop_npc trainer on side b:
+-- ExecutePlayerMove), a coop_npc trainer on side b -- TrainerAI's (K16), on
+-- class records whose roll always passes (`chance` 256):
 --   1 a slower Beta's SUPER POTION lands after Alpha's hit;
 --   2 a faster Beta switches to Delta before Alpha moves: the hit finds Delta;
 --   3 a slower Beta that Alpha knocks out never switches (the AI's turn is
---     gone with it); its send-out follows;
+--     gone with it); its send-out (EnemySendOut, the referee's own) follows;
 --   4 the same Speed: the tie byte is drawn for the item as for a move.
+local POTION_AI = { uses = 2, chance = 256, item = "SUPER_POTION" }
+local JUGGLER_AI = { uses = 3, chance = 256, switch = true }
 scenario("g1_computer_turn_slot", fights("g1ct", {
   r1duo(
     { r1s("Alpha", { r1m("tap", 20, 0) }, { spd = 90 }) },
@@ -3045,8 +3051,8 @@ scenario("g1_computer_turn_slot", fights("g1ct", {
     {
       mode = "coop_npc",
       seed = 8501,
-      bSeat = { bag = { SUPER_POTION = 1 } },
-      turns = { { p1 = 0, p2 = { action = "item", item = "SUPER_POTION" } } },
+      bSeat = { aiClass = POTION_AI },
+      turns = { { p1 = 0, p2 = 0 } },
     }),
   r1duo(
     { r1s("Alpha", { r1m("tap", 20, 0) }, { spd = 10 }) },
@@ -3057,7 +3063,8 @@ scenario("g1_computer_turn_slot", fights("g1ct", {
     {
       mode = "coop_npc",
       seed = 8502,
-      turns = { { p1 = 0, p2 = { action = "switch", slot = 1 } } },
+      bSeat = { aiClass = JUGGLER_AI },
+      turns = { { p1 = 0, p2 = 0 } },
     }),
   r1duo(
     { r1s("Alpha", { r1m("tap", 200, 0) }, { spd = 90, atk = 200 }) },
@@ -3068,9 +3075,10 @@ scenario("g1_computer_turn_slot", fights("g1ct", {
     {
       mode = "coop_npc",
       seed = 8503,
+      bSeat = { aiClass = JUGGLER_AI },
       turns = {
-        { p1 = 0, p2 = { action = "switch", slot = 1 } },
-        { p2 = { action = "switch", slot = 1 } },
+        { p1 = 0, p2 = 0 },
+        { p2 = "auto" },
       },
     }),
   r1duo(
@@ -3079,8 +3087,8 @@ scenario("g1_computer_turn_slot", fights("g1ct", {
     {
       mode = "coop_npc",
       seed = 8504,
-      bSeat = { bag = { SUPER_POTION = 1 } },
-      turns = { { p1 = 0, p2 = { action = "item", item = "SUPER_POTION" } } },
+      bSeat = { aiClass = POTION_AI },
+      turns = { { p1 = 0, p2 = 0 } },
     }),
 }))
 
@@ -4145,7 +4153,11 @@ scenario("g1_item_lines", fights("g1il", {
       turns = { { p1 = { action = "item", item = "FULL_RESTORE" }, p2 = 0 } } }),
   r1duo({ r1s("Alpha", { r1m("thump", 10, 0) }, { spd = 90 }) },
     { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10, hp = 100 }) },
-    { mode = "coop_npc", seed = 10053, bSeat = { bag = { POTION = 1 } }, turns = autoRows(2) }),
+    -- K16: the trainer's POTION is TrainerAI's -- a class that heals below
+    -- half (AICheckIfHPBelowFraction), once (`uses` 1), its roll always passing.
+    { mode = "coop_npc", seed = 10053,
+      bSeat = { aiClass = { uses = 1, chance = 256, hpBelow = 2, item = "POTION" } },
+      turns = autoRows(2) }),
 }))
 
 -- ConversionEffect_ copies both of the target's types.
@@ -4352,6 +4364,172 @@ scenario("g1_marks_faints", fights("g1mf", {
   r1duo({ r1s("Alpha", { r1m("snarl", 80, 18) }, { spd = 90, atk = 200 }) },
     { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 1 }) },
     { seed = 12008, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
+-- H1 (K16, docs/plans/gen12-referee-remaining-gaps.md wave 2): TrainerAI in
+-- the computer trainer's slot, its `Random` byte drawn while wAICount is not
+-- 0, on each class family's record shape (the engine's `ai_classes`):
+--   1 GenericAI (no record): a byte every turn, never an action;
+--   2 MistyAI's shape (25 percent + 1, X DEFEND, one use): its own rolls, the
+--     use spent, then no byte at all;
+--   3 AgathaAI's (8 percent switch first, 50 percent + 1 SUPER POTION below
+--     a quarter), a fainted party member walked past by EnemySendOut;
+--   4 BrockAI's: a paralysed Beta's FULL HEAL, the Speed left quartered;
+--   5 CooltrainerFAI's (no roll): HYPER POTION below a tenth, then the switch
+--     below a fifth;
+--   6 JugglerAI's against a hard hitter: switches, and the send-out after a
+--     knockout in party order (EnemySendOut, `p2 = "auto"`);
+--   7 a faster trainer's FULL RESTORE before Alpha's move, its Leech Seed
+--     residual after it;
+--   8 an item spent past a recharge: the recharge is still owed;
+--   9 a 2v2 trainer: one record, each seat its own copy and wAICount;
+--  10 a wild monster and a link foe that carry a record: no TrainerAI;
+--  11 a solo trainer's seat, driven as SoloBattle drives it (one seat with
+--     the whole party, its `aiMods` and `aiClass`, no bag, `autoPick` every
+--     turn and every send-out): the layers at `.selectEnemyMove`, TrainerAI
+--     in the slot, EnemySendOut's replacements.
+local GENERIC_ROWS = autoRows
+scenario("g1_trainer_ai", fights("g1ai", {
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "coop_npc", seed = 13001, turns = GENERIC_ROWS(3) }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "coop_npc", seed = 13002,
+      bSeat = { aiClass = { uses = 1, chance = 64, item = "X_DEFEND" } }, turns = autoRows(8) }),
+  r1duo({ r1s("Alpha", { r1m("tap", 20, 0) }, { spd = 90, atk = 60 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 60 }),
+      r1s("Zeta", { r1m("splash", 0, 85) }, { spd = 10, hp = 0 }),
+      r1s("Delta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "coop_npc", seed = 13027,
+      bSeat = { aiClass = { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION",
+                            hpBelow = 4 } },
+      turns = autoRows(10) }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 80, status = "PAR" }) },
+    { mode = "coop_npc", seed = 13004,
+      bSeat = { aiClass = { uses = 5, onStatus = true, item = "FULL_HEAL" } }, turns = autoRows(2) }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 39 }),
+      r1s("Delta", { r1m("splash", 0, 85) }, { spd = 10, hp = 60 }) },
+    { mode = "coop_npc", seed = 13005,
+      bSeat = { aiClass = { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5 } },
+      turns = autoRows(3) }),
+  r1duo({ r1s("Alpha", { r1m("slam", 120, 0) }, { spd = 90, atk = 200 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }),
+      r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 10 }),
+      r1s("Delta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "coop_npc", seed = 13006,
+      bSeat = { aiClass = { uses = 3, chance = 64, switch = true } }, turns = autoRows(12) }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) },
+        { spd = 90, hp = 50, status = "TOX", toxicCounter = 2, leechSeed = { fromSlot = 0 } }) },
+    { mode = "coop_npc", seed = 13007,
+      bSeat = { aiClass = { uses = 1, chance = 256, hpBelow = 5, item = "FULL_RESTORE" } },
+      turns = autoRows(2) }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 100, mustRecharge = true }) },
+    { mode = "coop_npc", seed = 13008,
+      bSeat = { aiClass = { uses = 2, chance = 256, item = "SUPER_POTION" } }, turns = autoRows(3) }),
+  { mode = "coop_npc", seed = 13009, seats = {
+      { pid = "p1", side = "a", mons = { r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }) } },
+      { pid = "p3", side = "a", mons = { r1s("Gamma", { r1m("tap", 10, 0) }, { spd = 80 }) } },
+      { pid = "p2", side = "b", aiClass = { uses = 1, chance = 128, item = "X_ATTACK" },
+        mons = { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10 }) } },
+      { pid = "p4", side = "b", aiClass = { uses = 1, chance = 128, item = "X_ATTACK" },
+        mons = { r1s("Delta", { r1m("thump", 10, 0) }, { spd = 5 }) } },
+    },
+    turns = {
+      { p1 = 0, p3 = 0, p2 = "auto", p4 = "auto" }, { p1 = 0, p3 = 0, p2 = "auto", p4 = "auto" },
+      { p1 = 0, p3 = 0, p2 = "auto", p4 = "auto" }, { p1 = 0, p3 = 0, p2 = "auto", p4 = "auto" },
+    } },
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 13010,
+      bSeat = { aiClass = { uses = 3, chance = 256, item = "X_ATTACK" } }, turns = autoRows(2) }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 13011,
+      bSeat = { aiClass = { uses = 3, chance = 256, item = "X_ATTACK" } },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("slam", 60, 0), r1m("growl", 0, 18) }, { spd = 50, atk = 120, types = { 0 } }) },
+    { r1s("Beta", { r1m("thump", 20, 0), r1m("lull", 0, 32), r1m("chop", 20, 1, { type = 1 }),
+                    r1m("grow", 0, 10) }, { spd = 40, hp = 120 }),
+      r1s("Kappa", { r1m("thump", 20, 0), r1m("grow", 0, 10) }, { spd = 60 }),
+      r1s("Delta", { r1m("chop", 20, 0, { type = 1 }) }, { spd = 30 }) },
+    { mode = "coop_npc", seed = 13012, chart = { { 100, 100 }, { 200, 100 } },
+      bSeat = { aiMods = { 1, 2, 3 },
+                aiClass = { uses = 2, chance = 128, item = "SUPER_POTION", hpBelow = 4 } },
+      turns = autoRows(16) }),
+}))
+
+-- K20's completion and K22's audit: the animations the cart plays, the ones
+-- it does not, and `quiet`:
+--   1 a ball at a trainer: TOSS_ANIM, then BLOCKBALL_ANIM (TossBallAnimation
+--     `.BlockBall`), then the lines;
+--   2-4 ChargeEffect's own on the charge turn: XSTATITEM_ANIM (SOLARBEAM),
+--     FLY's TELEPORT (quiet), DIG's SLIDE_DOWN_ANIM -- the setup beat -- and
+--     the move's on the release;
+--   5 BideEffect's XSTATITEM_ANIM on its first turn, and an unleash of 0
+--     with no animation (wMoveMissed);
+--   6 a move that missed plays nothing (HandleIfPlayerMoveMissed) ...
+--   7 ... but a missed EXPLOSION does;
+--   8 an immunity plays nothing;
+--   9 a GROWL that lands plays, one at -6 ("Nothing happened!") does not;
+--  10 a sleep move turned away by a status plays nothing;
+--  11 MIRROR MOVE plays no animation of its own, the copied move its;
+--  12 the seeder's ABSORB and a trap's later hits are quiet;
+--  13 RemoveFaintedPlayerMon zeroes the player's fallen monster's status,
+--     FaintEnemyPokemon leaves the computer's.
+scenario("g1_k22_anims", fights("g1ka", {
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "coop_npc", seed = 14001, aSeat = { bag = { POKE_BALL = 1 } },
+      turns = { { p1 = { action = "item", item = "POKE_BALL" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("SOLARBEAM", 120, 39) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 14002, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("FLY", 90, 43) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 14003, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("DIG", 100, 39) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 14004, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("BIDE", 0, 26) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 14005,
+      turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("jab", 40, 0, { accuracy = 0 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 14006, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("blast", 170, 7, { accuracy = 0 }) }, { spd = 90 }),
+          r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 14007, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("jab", 40, 0) }, { spd = 90, types = { 0 } }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, types = { 0 } }) },
+    { mode = "wild", seed = 14008, chart = { { 0 } }, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, stages = { atk = -5 } }) },
+    { mode = "wild", seed = 14009, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("lull", 0, 32) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, status = "PSN" }) },
+    { mode = "wild", seed = 14010, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("mirror", 0, 9) }, { spd = 5 }) },
+    { r1s("Beta", { r1m("jab", 10, 0) }, { spd = 10 }) },
+    { mode = "wild", seed = 14011, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("wrap", 15, 42) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, leechSeed = { fromSlot = 0 } }) },
+    { mode = "wild", seed = 14012, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("slam", 120, 0) }, { spd = 90, atk = 200, hp = 1, status = "PSN" }),
+          r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("slam", 120, 0) }, { spd = 10, atk = 200, hp = 1, status = "BRN" }),
+      r1s("Delta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "coop_npc", seed = 14013, turns = { { p1 = 0, p2 = "auto" } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90, hp = 1, status = "BRN" }),
+          r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("slam", 120, 0) }, { spd = 10, atk = 200 }) },
+    { mode = "wild", seed = 14014, turns = { { p1 = 0, p2 = 0 } } }),
 }))
 
 -- ------------------------------------------------------------------
