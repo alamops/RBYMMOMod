@@ -2704,6 +2704,52 @@ end)()
   eq(wildOpts and wildOpts.battleType, 4, "K21 (solo Gold wild): the engine battle's type reaches the referee")
   local foe = wildOpts and wildOpts.sides.b[1].mons[1] or {}
   eq(foe.weight, 55, "K21 (solo Gold wild): the wild foe's sheet carries its dex weight")
+  eq(wildOpts and wildOpts.sides.a[1].mons[1].weight, nil,
+     "K21 (solo Gold wild): a species with no dex entry states no weight on our side")
+
+  -- CL2: our own sheets weigh their species too, because a wild monster
+  -- that TRANSFORMed into ours weighs the copy under a HEAVY BALL
+  -- (pokecrystal HeavyBallMultiplier reads wEnemyMonSpecies' dex entry, which
+  -- BattleCommand_Transform overwrote; BattleSim2 Effects `transformWeight`).
+  -- End to end: the stamp, the referee's copy, the ball's rate.
+  do
+    local Effects2 = need("BattleSim2/Effects")
+    local ALPHA_W, BETA_W = 9000, 55
+    local tfData = setmetatable({
+      gen2Pokedex = { entries = { ALPHA = { weight = ALPHA_W }, BETA = { weight = BETA_W } } },
+      moves = {
+        THUMP = data.moves.THUMP,
+        MIMICRY = { id = "MIMICRY", name = "MIMICRY", power = 0, type = "NORM", pp = 10,
+                    accuracy = 100, accuracyRaw = 255, effect = "EFFECT_TRANSFORM", effectId = 57 },
+      },
+    }, { __index = data })
+    local morph = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+    morph.moves = { { id = "MIMICRY", pp = 10 } }
+    local tfOpts, t = capture(Turn2, function()
+      return fightOf("wild", { cart2 = true, data = tfData, wildMon = morph, pAtk = 1 })
+    end)
+    ok(t.started, "CL2 K21 (solo Gold): the encounter is taken over")
+    eq(tfOpts and tfOpts.sides.a[1].mons[1].weight, ALPHA_W,
+       "CL2 K21 (solo Gold wild): our own sheet carries its species' dex weight")
+    eq(tfOpts and tfOpts.sides.b[1].mons[1].weight, BETA_W, "CL2 K21: ...beside the wild foe's own")
+    t.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do t.solo:update(1 / 60, t.game) end
+    local seat = t.sim.byId[FOE]
+    local foeMon = seat and seat.mons[seat.active or 1] or {}
+    eq(foeMon.transformed, true, "CL2 K21: the wild monster TRANSFORMed into ours")
+    eq(foeMon.transformWeight, ALPHA_W, "CL2 K21: ...and the referee holds the weight it copied")
+    local heavy = Effects2.ballRate("HEAVY_BALL", 200, foeMon)
+    eq(heavy, Effects2.ballRate("HEAVY_BALL", 200, { weight = ALPHA_W }),
+       "CL2 K21: a HEAVY BALL now weighs our monster's species")
+    ok(heavy ~= Effects2.ballRate("HEAVY_BALL", 200, { weight = BETA_W }),
+       "CL2 K21: ...not the wild monster's own (the fixture's two weights rate apart)")
+    -- A trainer fight (the ball is blocked) leaves our sheets unweighed.
+    local trOpts = capture(Turn2, function()
+      return fightOf("trainer", { cart2 = true, data = tfData,
+        trainer = { name = "SCOUT FIX", baseMoney = 30, items = {}, attributes = { 0, 0, 30, 0, 0, 0, 0, 0 } } })
+    end)
+    eq(trOpts and trOpts.sides.a[1].mons[1].weight, nil, "CL2 K21 (solo Gold trainer): no weight on our side")
+  end
   package.loaded["src.link.Handshake"] = savedHandshake
 
   local redWild = capture(Turn, function()

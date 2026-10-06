@@ -1518,6 +1518,46 @@ do
     eq(#warns, before + 1, "and a second miss in the same fight is not said again")
   end
 
+  -- ------- CL2: Red's traded boost in co-op.  pokered GainExperience pays a
+  -- monster whose MON_OTID is not wPlayerID x1.5 and says "a boosted"
+  -- (Mediated.expTraded1, the reading solo and 1v1 price theirs with); co-op
+  -- used to hand the formula `false` and pay it as home-grown.
+  do
+    local function award(otId, flagged)
+      local host, game = wildScreen()
+      game.save.player = { name = "ANN", id = 1111 }
+      host:onBattleReady({ battle = "cb-wild",
+        sides = { a = { "ann", "bob" }, b = { "wild" } } })
+      local winner = game.save.party[1]
+      winner.level, winner.exp = 50, 1000000   -- no level-up, so the number is readable
+      winner.otId, winner.traded = otId, flagged
+      local before = winner.exp
+      host:onBattleEvent({ battle = "cb-wild", seq = 1, t = "faint",
+        slot = Config.COOP_SIDE, text = SPECIES_NAME })
+      host:onBattleEvent({ battle = "cb-wild", seq = 2, t = "exp",
+        slot = 0, species = SPECIES_NAME, level = 50, participants = 2 })
+      host:onBattleEvent({ battle = "cb-wild", seq = 3, t = "turn" })
+      local said = nil
+      for _, row in ipairs(host.messages) do
+        local text = rowText(row)
+        if text and text:find("gained", 1, true) then said = text end
+      end
+      return winner.exp - before, said
+    end
+    local plain = Experience.gainFor(data.pokemon[SPECIES], 50, false, 2, false)
+    local boosted = Experience.gainFor(data.pokemon[SPECIES], 50, false, 2, true)
+    check(boosted > plain, "the fixture's traded award is larger than the plain one")
+    local got, line = award(2222)
+    eq(got, boosted, "CL2 co-op exp: a monster from another OT id is paid x1.5 (GainExperience)")
+    check(line ~= nil and line:find("a boosted", 1, true) ~= nil,
+          "CL2 co-op exp: ...and its line says \"a boosted\" (" .. tostring(line) .. ")")
+    got, line = award(1111, true)
+    eq(got, plain, "CL2 co-op exp: the player's own OT id is home-grown, a stale `traded` flag notwithstanding")
+    check(line ~= nil and line:find("a boosted", 1, true) == nil, "CL2 co-op exp: ...with the plain line")
+    got = award(nil, true)
+    eq(got, boosted, "CL2 co-op exp: an OT-less monster flagged traded is paid as one (the engine's #1488 reading)")
+  end
+
   -- ------- coop_wild pays the wild rate, coop_npc pays x1.5, for identical
   -- inputs -- pinned against Experience.gainFor so a mode/isTrainer
   -- regression shows up as a wrong number rather than a vibe
@@ -5245,6 +5285,149 @@ do
       if m.type == Wire.BATTLE_PARTY and m.payload.side == "b" then redNpc = m.payload end
     end
     eq(redNpc and redNpc.countSpeciesTypes, nil, "K23 (co-op Red): none")
+  end
+
+  -- ------- CL2: a coop_wild host's own Gold sheets weigh their species (K21:
+  -- the wild monster may TRANSFORM into either player's and then take a
+  -- HEAVY BALL, which BattleSim2 weighs as the copy -- `transformWeight`).
+  do
+    local function ownSheet(mode)
+      local slots = npcSlots()
+      if mode == "coop_wild" then slots[4] = nil; slots[3].party = { mon(50, 20) } end
+      local sc = seat5(2, nil, mode, slots)
+      sc.game.data = setmetatable({ gen2Pokedex = { entries = { [SPECIES] = { weight = 77 } } } },
+        { __index = sc.game.data })
+      sc.medUploaded = false
+      for k in pairs(sc.sent) do sc.sent[k] = nil end
+      sc.wildCatchMon = mon(50, 20)
+      sc:uploadMediated()
+      for _, m in ipairs(sc.sent) do
+        if m.type == Wire.BATTLE_PARTY and m.payload.side == "a" then return m.payload end
+      end
+      return nil
+    end
+    local wild = ownSheet("coop_wild")
+    eq(wild and wild.mons[1].weight, 77, "CL2 K21 (co-op Gold wild): our own sheet states its species' weight")
+    local packed = wild and Wire.battleParty(wild, 2)
+    eq(packed and packed.mons[1].weight, 77, "CL2 K21 (co-op Gold wild): ...which Wire.battleParty keeps on side a")
+    local npc = ownSheet("coop_npc")
+    eq(npc and npc.mons[1].weight, nil, "CL2 K21 (co-op Gold trainer): none -- the trainer blocks the ball")
+  end
+
+  -- ------- CL2: Red's follow-on shakes and a coop_pvp HUD shake on our own
+  -- side, as this viewer's cart plays them (Mediated.followShake /
+  -- hudShakeFor).  A partner's monster is our own side.
+  do
+    local function kinds(rows)
+      local out = {}
+      for _, r in ipairs(rows) do
+        if type(r) == "table" then
+          if r.kind == "anim" then out[#out + 1] = r.anim
+          elseif r.kind == "shakefx" then out[#out + 1] = "+" .. r.fx
+          elseif r.kind == "msg" then out[#out + 1] = "msg" end
+        end
+      end
+      return table.concat(out, " ")
+    end
+    local function pvpSeat()
+      local sc = seat5(1, nil, "coop_pvp", pvpSlots())
+      sc.usesBattlefield = function() return true end
+      sc.medPending = {}
+      return sc
+    end
+    -- Our partner poisoned by the other side's move: the screen shake and
+    -- the enemy's Slow, ahead of the line.
+    local sc = pvpSeat()
+    ev(sc, { t = "anim", slot = 1, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    eq(kinds(sc.medPending), "", "CL2 coop_pvp (our side): the HUD shake waits for its line")
+    ev(sc, { t = "msg", text = "^aFIXMON A\nwas poisoned!" })
+    eq(kinds(sc.medPending), "SHAKE_SCREEN_ANIM +slowshake msg",
+       "CL2 coop_pvp (a partner's poisoning): SHAKE_SCREEN_ANIM and the enemy's Slow, then the line")
+    eq(sc.medPending[1].from, 2, "CL2 coop_pvp: ...on the partner's seat")
+    -- Our own burned: nothing but the line.
+    sc = pvpSeat()
+    ev(sc, { t = "anim", slot = 0, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev(sc, { t = "msg", text = "^aFIXMON A\nwas burned!" })
+    eq(kinds(sc.medPending), "msg", "CL2 coop_pvp (our burn): `.burn2` plays nothing")
+    -- The other side's: the plate shakes, then the follow-on by line.
+    sc = pvpSeat()
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev(sc, { t = "msg", text = "^bFIXMON A\nwas frozen solid!" })
+    eq(kinds(sc.medPending), "ENEMY_HUD_SHAKE_ANIM +lightshake msg",
+       "CL2 coop_pvp (the foe frozen): the HUD shake, then the move's own light shake")
+    sc = pvpSeat()
+    ev(sc, { t = "anim", slot = 3, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev(sc, { t = "msg", text = "^bFIXMON A\nwas poisoned!" })
+    eq(kinds(sc.medPending), "ENEMY_HUD_SHAKE_ANIM +slowshake2 msg",
+       "CL2 coop_pvp (the foe poisoned): the HUD shake, then PoisonEffect's Slow2")
+    -- No line behind it: nothing more.
+    sc = pvpSeat()
+    ev(sc, { t = "anim", slot = 1, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev(sc, { t = "damage", slot = 1, side = "a", amount = 1, hp = 59 })
+    check(kinds(sc.medPending) == "" and sc.medHudShake == nil, "CL2 coop_pvp (our side, no line): nothing")
+    -- Against the computer: untouched, with its follow-on.
+    local npc = seat5(1)
+    npc.usesBattlefield = function() return true end
+    npc.medPending = {}
+    ev(npc, { t = "anim", slot = 2, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev(npc, { t = "msg", text = "^bFIXMON A\nwas poisoned!" })
+    eq(kinds(npc.medPending), "ENEMY_HUD_SHAKE_ANIM +slowshake2 msg",
+       "CL2 coop_npc: the trainer's monster poisoned -- as sent, then Slow2")
+    npc.medPending = {}
+    ev(npc, { t = "anim", slot = 1, side = "a", text = "SHAKE_SCREEN_ANIM" })
+    eq(kinds(npc.medPending), "SHAKE_SCREEN_ANIM +slowshake",
+       "CL2 coop_npc: the trainer's poisoning of our partner -- the screen shake, then the enemy's Slow")
+    -- THRASH's square, by side: the partner's is the player's turn.
+    npc.medPending = {}
+    ev(npc, { t = "anim", slot = 1, side = "a", text = "SHRINKING_SQUARE_ANIM" })
+    local follow = npc.medPending[#npc.medPending]
+    check(type(follow) == "table" and follow.kind == "shakefx" and follow.fx == "slowshake2"
+          and (tonumber(follow.shakeWait) or 0) > 0,
+          "CL2 coop_npc: a partner's THRASH square, then Slow2 once its look has played")
+    npc.medPending = {}
+    ev(npc, { t = "anim", slot = 2, side = "b", text = "SHRINKING_SQUARE_ANIM" })
+    follow = npc.medPending[#npc.medPending]
+    eq(follow and follow.fx, "slowshake", "CL2 coop_npc: the trainer's square, the enemy's Slow")
+    -- The classic page queues none.
+    npc.usesBattlefield = function() return false end
+    npc.medPending = {}
+    ev(npc, { t = "anim", slot = 2, side = "b", text = "SHRINKING_SQUARE_ANIM" })
+    local any = false
+    for _, r in ipairs(npc.medPending) do if type(r) == "table" and r.kind == "shakefx" then any = true end end
+    check(not any, "CL2 classic (co-op): no follow-on row")
+
+    -- Played: the field jolt, then the slide, which holds the queue and is
+    -- projected onto the arena whole.
+    local host = pvpSeat()
+    host.game.input = { wasPressed = function() return false end }
+    host.animPlayer = nil
+    host.phase = "choose"
+    ev(host, { t = "anim", slot = 1, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev(host, { t = "msg", text = "^aFIXMON A\nwas poisoned!" })
+    ev(host, { t = "turn", amount = 2 })
+    local seen, at, frame, projected = {}, {}, 0, nil
+    local lineAt = nil
+    for _ = 1, 600 do
+      host:update(1 / 60)
+      frame = frame + 1
+      for _, fx in ipairs(host.fx or {}) do
+        if not seen[fx] then seen[fx] = true; at[fx.kind] = at[fx.kind] or frame end
+        if fx.kind == "slowshake" and not projected then
+          for _, e in ipairs(host:battlefieldFxCtx({}, {}) or {}) do
+            if e.kind == "slowshake" then projected = e end
+          end
+        end
+      end
+      if not lineAt and type(host.shown) == "string" and host.shown:find("was poisoned", 1, true) then
+        lineAt = frame
+      end
+    end
+    check(at.shake ~= nil and at.slowshake ~= nil and at.shake < at.slowshake and at.hudshake == nil,
+          "CL2 coop_pvp played: the field jolts, then slides; no plate shakes ("
+          .. tostring(at.shake) .. ", " .. tostring(at.slowshake) .. ")")
+    check(lineAt ~= nil and at.slowshake ~= nil and lineAt >= at.slowshake + 40,
+          "CL2 coop_pvp played: ...and the slide holds the line (" .. tostring(lineAt) .. ")")
+    check(projected ~= nil, "CL2 coop_pvp played: the slide reaches the arena with no seat to match")
   end
 end
 

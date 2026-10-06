@@ -1798,7 +1798,7 @@ function M:update(dt)
       if type(head) == "table"
          and (head.anim or head.drain or head.faintfx or head.expfill
               or head.evolve or head.wait or head.act or head.ballsend
-              or head.vfxrow) then
+              or head.vfxrow or head.shakefx) then
         -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
         -- when the post-appear wait starts (not on every page advance), so a
         -- multi-page appear does not begin the gap early.
@@ -1834,6 +1834,10 @@ function M:update(dt)
             -- put half a second of empty arena between the item being used and
             -- the box saying so.
             self:emitVfx(head.vfxrow, head.slot, head.from)
+          elseif head.shakefx then
+            -- Red's follow-on shake (Mediated.followShake): its hold, or
+            -- nothing on the classic page.
+            self:startShakeRow(head)
           else
             self:startFaint(head)
           end
@@ -4143,6 +4147,11 @@ function M:playEvents(events)
       -- before the one it belongs to.
       self.messages[#self.messages + 1] =
         { vfxrow = event.spec, slot = event.slot, from = event.from }
+    elseif event.kind == "shakefx" then
+      -- Red's follow-on shake behind a clip (Mediated.followShake), in its
+      -- place in the stream: it plays, and holds, after the clip it follows.
+      self.messages[#self.messages + 1] =
+        { shakefx = event.fx, shakeWait = event.shakeWait }
 
     elseif event.kind == "status" then
       -- The referee's reading of a condition, applied the same way HP is:
@@ -7387,6 +7396,12 @@ local FX_SPAN = {
   -- Red's ENEMY_HUD_SHAKE_ANIM (SE_SHAKE_ENEMY_HUD): one seat's plate shakes
   -- side to side, the field holds still (Battlefield.fxPlateShake).
   hudshake = 0.40,
+  -- Red's follow-on screen shakes (MediatedBattle.followShake): the field
+  -- slides sideways for the cart routine's own frame count, and the row that
+  -- emits one holds the queue as long (Battlefield.FX_FOLLOW_SPAN).
+  slowshake = Battlefield.FX_FOLLOW_SPAN.slowshake,
+  slowshake2 = Battlefield.FX_FOLLOW_SPAN.slowshake2,
+  lightshake = Battlefield.FX_FOLLOW_SPAN.lightshake,
   faint = 0.60,
   spawn = 0.40,
   -- The ball flow. One constant per kind, and each one is also the dwell the
@@ -8290,7 +8305,8 @@ end
 -- seat is not on the arena is dropped rather than published with no seat index:
 -- an entry carrying none applies to *every* seat on its side, which in a
 -- 2-on-2 would flash the partner too. The field-wide jolt is the exception --
--- `fxFieldShake` ignores side and seat by design.
+-- `fxFieldShake` ignores side and seat by design -- and so are Red's follow-on
+-- slides (Battlefield.isFieldShake), which name no seat at all.
 function M:battlefieldFxCtx(allySeats, foeSeats)
   local list = self.fx
   if type(list) ~= "table" or #list == 0 then return nil end
@@ -8315,8 +8331,9 @@ function M:battlefieldFxCtx(allySeats, foeSeats)
   local out = {}
   for _, fx in ipairs(list) do
     if type(fx) == "table" then
-      if fx.kind == "shake" then
-        out[#out + 1] = { kind = "shake", side = fx.side, t = fx.t }
+      if Battlefield.isFieldShake(fx.kind) then
+        -- The jolt and Red's follow-on slides: field-wide, no seat to match.
+        out[#out + 1] = { kind = fx.kind, side = fx.side, t = fx.t }
       else
         local seatIndex = fx.slot ~= nil and seatIndexOf[fx.slot] or nil
         -- Same exception, and for the same reason: a `vfx` can be aimed at a
@@ -9524,8 +9541,9 @@ function M:gainExp(event)
   -- levels reached and the raw amount the "gained N EXP" line says -- so
   -- everything below this point is generation-free again.
   local ok, levels, gained
-  -- Whether the award took the traded x1.5 (Gold's Exp2 OT check; the Red
-  -- formula here is handed no traded flag), for the line's "a boosted".
+  -- Whether the award took the traded x1.5, for the line's "a boosted": Gold's
+  -- off Exp2's own OT check, Red's off GainExperience's (Mediated.expTraded1,
+  -- the one reading solo and 1v1 price theirs with).
   local boosted
   if generation == 2 then
     -- `winners` is the referee's divisor unmodified: Gen 2's Share tax is the
@@ -9537,9 +9555,15 @@ function M:gainExp(event)
     })
     if levels == nil then return end
   else
+    -- pokered GainExperience pays a monster from another OT id x1.5 -- read
+    -- against this player's own save, whose party the award is paid into.
+    -- Handing the formula `false` here paid a traded monster as home-grown
+    -- in co-op alone, with no "a boosted" row.
+    local traded = Mediated.expTraded1(self.game, mon)
     ok, levels, gained = pcall(eng.Experience.apply, self.game.data, mon,
-      def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), false)
+      def, event.level or 1, isTrainer, winners * (expAll and 2 or 1), traded)
     if not ok then return end
+    boosted = traded
   end
 
   -- The plate's name is the *active's* name, so it is only a fallback for the
@@ -9623,7 +9647,7 @@ function M:gainExp(event)
         member.exp = member.exp or 0
         local gotOk, gotLevels = pcall(eng.Experience.apply, self.game.data,
           member, def, event.level or 1, isTrainer,
-          winners * 2 * math.max(1, #party), false)
+          winners * 2 * math.max(1, #party), Mediated.expTraded1(self.game, member))
         if gotOk then self:levelled(member, nil, gotLevels) end
       end
     end
@@ -10858,11 +10882,15 @@ function M:uploadMediated()
   -- `traded` / `unfateful` (contract K2 of docs/plans/gen3-badge-rules.md).
   -- Gen 1 / Gen 2 sheets are `own` the same way, for contract K1 of
   -- docs/plans/gen12-referee-fidelity.md (`traded`, outside a link battle).
+  -- A coop_wild fight's Gold sheets weigh what their species do (K21,
+  -- Mediated.WEIGHT_MODES): the wild monster may TRANSFORM into either
+  -- player's monster and then take a HEAVY BALL, which weighs the copy.
   local mons = self.gen3
       and Sheet3.mons(self.game, mine.party,
         { link = Mediated.LINK_MODES[self.mode] == true, own = true })
     or Mediated.snapshotMons(self.game, mine.party,
-        { link = Mediated.LINK_MODES[self.mode] == true, own = true })
+        { link = Mediated.LINK_MODES[self.mode] == true, own = true,
+          weight = Mediated.WEIGHT_MODES[self.mode] == true })
   if #mons == 0 then
     -- Uploading nothing would leave the hub holding a seat open. Ending the
     -- fight is better than host-sim with a different item/effect surface.
@@ -11078,6 +11106,54 @@ function M:noteSendRows(msg, rows, from)
   end
   if #held == 0 then return end
   self.medSendHeld = { species = tostring(msg.text), rows = held }
+end
+
+-- The ENEMY_HUD_SHAKE_ANIM `medRows` held (`medHudShake`), settled by `text`
+-- -- the line of the event behind it, or nil when that event was no line:
+-- its rows join the batch as this viewer's cart plays them (a held clip
+-- renamed, or dropped), then the follow-on (Mediated.hudShakeFor /
+-- followRow), all ahead of that line.
+function M:medResolveHudShake(text)
+  local held = self.medHudShake
+  self.medHudShake = nil
+  if type(held) ~= "table" then return end
+  local anim, follow = Mediated.hudShakeFor(held.own, held.link, text)
+  self.medPending = self.medPending or {}
+  if not held.queued then
+    if anim == nil then return end
+    for _, row in ipairs(held.rows or {}) do
+      if row.kind == "anim" then row.anim = anim end
+      self.medPending[#self.medPending + 1] = row
+    end
+  end
+  local row = (follow and self:usesBattlefield()) and Mediated.followRow(follow, held.rows) or nil
+  if row then
+    self.medPending[#self.medPending + 1] =
+      { kind = "shakefx", fx = row.shakefx, shakeWait = row.shakeWait }
+  end
+end
+
+-- Red's follow-on shake reaching the head of the queue (Mediated.followRow):
+-- it first waits out the look queued with its clip (`shakeWait`, the row put
+-- back at the head once), then shakes the field and holds the queue while it
+-- does -- the cart's PlayApplyingAttackAnimation blocks.  Arena only.
+function M:startShakeRow(row)
+  if type(row) ~= "table" or not self:usesBattlefield() then return false end
+  local wait = tonumber(row.shakeWait)
+  if wait and wait > 0 and not row.shakeWaited then
+    row.shakeWaited = true
+    table.insert(self.messages, 1, row)
+    self.anim = row
+    self.animHold = wait
+    self.animDwell = nil
+    return true
+  end
+  local fx = self:emitFx(row.shakefx)
+  if not fx then return false end
+  self.anim = row
+  self.animHold = fx.duration
+  self.animDwell = nil
+  return true
 end
 
 -- The bag's own look for an item on seat `index` (`itemLook`, the `item`
@@ -11378,8 +11454,15 @@ function M:medRows(msg)
     local itemSeat = self.medItemSeat
     self.medItemSeat = nil
     if index then
-      local anim, behind = Mediated.viewerAnim(msg.text, not self:foeSide(index))
-      local list = behind and {} or rows
+      local own = not self:foeSide(index)
+      local anim, behind = Mediated.viewerAnim(msg.text, own)
+      -- Red's ENEMY_HUD_SHAKE_ANIM is read against the status line behind it
+      -- (Mediated.hudShakeFor, settled by `onBattleEvent` on the next event):
+      -- on our side -- a partner's monster included -- in a link fight the
+      -- clip itself waits for that line; anywhere else only its follow-on.
+      local link = Mediated.LINK_MODES[self.mode] == true
+      local hudHeld = anim == "ENEMY_HUD_SHAKE_ANIM" and own and link
+      local list = (behind or hudHeld) and {} or rows
       local mon = slot and slot.battler and slot.battler.mon
       local look = Vfx.forStatusAnim(anim, mon and mon.status)
       list[#list + 1] = {
@@ -11412,7 +11495,17 @@ function M:medRows(msg)
       if look and anim == "XSTATITEM_ANIM" and itemSeat ~= nil and itemSeat == index then
         self:dropItemLook(index)
       end
-      if behind then self.medAnimBehind = list end
+      if anim == "ENEMY_HUD_SHAKE_ANIM" then
+        self.medHudShake = { rows = list, own = own, link = link, queued = not hudHeld }
+      elseif behind then
+        self.medAnimBehind = list
+      else
+        -- PlayBattleAnimation2's slow shake behind THRASH's square or
+        -- PoisonEffect's SHAKE_SCREEN_ANIM (Mediated.followShake).
+        local follow = self:usesBattlefield() and Mediated.followShake(anim, own) or nil
+        local row = follow and Mediated.followRow(follow, list) or nil
+        if row then rows[#rows + 1] = { kind = "shakefx", fx = row.shakefx, shakeWait = row.shakeWait } end
+      end
     end
 
   elseif kind == "item" then
@@ -11958,6 +12051,10 @@ function M:onBattleEvent(msg)
     for _, row in ipairs(held or {}) do self.medPending[#self.medPending + 1] = row end
   end
   if msg.t ~= "msg" then flushBehind() end
+  -- A Red HUD shake held for the status line behind it (`medRows`,
+  -- Mediated.hudShakeFor) is settled by this event, ahead of what it queues:
+  -- that line, or -- anything else coming first -- no line at all.
+  if self.medHudShake then self:medResolveHudShake(msg.t == "msg" and msg.text or nil) end
   -- A Gold send-out's line, held for this event (`noteSendRows`): a
   -- drag-out's own line takes its place.  `moves` -- which a send-out may
   -- state for the monster that left -- returned above, and is no answer.

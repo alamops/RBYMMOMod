@@ -1974,6 +1974,18 @@ test('K21: Gold\'s sheet weight and ruleset battleType ride Gen 2 alone, and rea
     const got = cleanBattleMon({ ...red, weight });
     assert.ok(got && got.weight === undefined, `a Gen 1 sheet ignores weight ${JSON.stringify(weight)}`);
   }
+  // CL2: the player's own Gen 2 party keeps it too -- a wild monster that
+  // TRANSFORMed into one is weighed as the copy (BattleSim2 `transformWeight`),
+  // so side a's weight must not be dropped by either reader. Twin of
+  // tests/rby_mmo_test.lua's K21 party pins.
+  for (const side of ['a', undefined]) {
+    const got = sanitize.cleanBattleParty({ battle: 'k21a', side, generation: 2,
+      mons: [{ ...gold, weight: 850 }] }, 2);
+    assert.ok(got && got.mons[0].weight === 850,
+      `a Gold party read for side ${side} keeps its sheets' weight`);
+  }
+  assert.strictEqual(sanitize.cleanBattleParty({ battle: 'k21a', side: 'a', generation: 2,
+    mons: [{ ...gold, weight: 70000 }] }, 2), null, 'an unreadable side-a weight refuses the party');
   const chart = [[100, 100], [100, 100]];
   for (const battleType of [0, 4, 255, '4']) {
     assert.strictEqual(sanitize.cleanBattleRuleset({ chart, battleType }, 2).battleType, Number(battleType),

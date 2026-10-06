@@ -7063,6 +7063,274 @@ do
     ev({ t = "anim", slot = FOE, side = "b", text = "SLP_ANIM" })
     check(f.animSeq ~= before, "K22 Bide: ...where a cart _ANIM (the user's own clip) still does")
   end
+
+  -- ------- CL2: Red's follow-on screen shakes (pokered
+  -- PlayApplyingAttackAnimation's wAnimationType 3 / 5 / 6 behind a clip)
+  -- and the link fight's HUD shake as the target's own cart plays it.  Each
+  -- trace drains the screen and notes the frame every effect and line
+  -- first appeared on.
+  local function trace(f, limit)
+    local log, seen, frame, guard = { fx = {}, lines = {} }, {}, 0, 0
+    local last = nil
+    while (#f.lines > 0 or f.anim or f.shown) and guard < (limit or 3000) do
+      f:update(1 / 60); guard = guard + 1; frame = frame + 1
+      for _, e in ipairs(f.fx or {}) do
+        if not seen[e] then
+          seen[e] = true
+          log.fx[#log.fx + 1] = { kind = e.kind, side = e.side, at = frame, span = e.duration }
+        end
+      end
+      if f.shown ~= nil and f.shown ~= last then
+        log.lines[#log.lines + 1] = { text = f.shown, at = frame }
+      end
+      last = f.shown
+    end
+    function log.first(kind)
+      for _, e in ipairs(log.fx) do if e.kind == kind then return e end end
+      return nil
+    end
+    function log.line(needle)
+      for _, l in ipairs(log.lines) do
+        if type(l.text) == "string" and l.text:find(needle, 1, true) then return l end
+      end
+      return nil
+    end
+    return log
+  end
+  local function noShake(log)
+    return log.first("shake") == nil and log.first("hudshake") == nil and log.first("slowshake") == nil
+      and log.first("slowshake2") == nil and log.first("lightshake") == nil
+  end
+
+  -- The helpers, read off pret.
+  do
+    eq(Mediated.followShake("SHRINKING_SQUARE_ANIM", true), "slowshake2",
+       "CL2 follow: THRASH's square over our own monster is the player's turn (wAnimationType 6, Slow2)")
+    eq(Mediated.followShake("SHRINKING_SQUARE_ANIM", false), "slowshake",
+       "CL2 follow: ...over the other side's, the enemy's (type 3, Slow)")
+    eq(Mediated.followShake("SHAKE_SCREEN_ANIM", true), "slowshake",
+       "CL2 follow: PoisonEffect's SHAKE_SCREEN_ANIM is the enemy's turn's alone (type 3)")
+    eq(Mediated.followShake("ENEMY_HUD_SHAKE_ANIM", false), nil,
+       "CL2 follow: the HUD shake's waits for its line (`hudShakeFor`)")
+    eq(Mediated.followShake("XSTATITEM_ANIM", true), nil, "CL2 follow: no other clip has one here")
+    eq(Mediated.followShake("EMBER", true), nil, "CL2 follow: ...nor a move")
+    eq(Mediated.sideStatusLine("^bSQUIRTLE\nwas poisoned!"), "poison", "CL2: PoisonedText")
+    eq(Mediated.sideStatusLine("^aCHARMANDER's\nbadly poisoned!"), "poison", "CL2: BadlyPoisonedText")
+    eq(Mediated.sideStatusLine("^bSQUIRTLE\nwas burned!"), "fbp", "CL2: BurnedText")
+    eq(Mediated.sideStatusLine("^bSQUIRTLE\nwas frozen solid!"), "fbp", "CL2: FrozenText")
+    eq(Mediated.sideStatusLine("^bSQUIRTLE's\nparalyzed! It may\nnot attack!"), "fbp",
+       "CL2: PrintMayNotAttackText, broken where the cart breaks it")
+    eq(Mediated.sideStatusLine("^aCHARMANDER\nused EMBER!"), nil, "CL2: any other line is neither")
+    eq(Mediated.sideStatusLine(nil), nil, "CL2: no line is neither")
+    local function hud(own, link, text)
+      local anim, follow = Mediated.hudShakeFor(own, link, text)
+      return tostring(anim) .. "/" .. tostring(follow)
+    end
+    eq(hud(true, true, "^aCHARMANDER\nwas poisoned!"), "SHAKE_SCREEN_ANIM/slowshake",
+       "CL2 link, our monster poisoned: the enemy's branch -- SHAKE_SCREEN_ANIM and its slow shake")
+    eq(hud(true, true, "^aCHARMANDER\nwas burned!"), "nil/nil",
+       "CL2 link, our monster burned: `.burn2` prints and plays nothing")
+    eq(hud(true, true, nil), "nil/nil", "CL2 link, our side, no line behind it: nothing")
+    eq(hud(false, true, "^bSQUIRTLE\nwas poisoned!"), "ENEMY_HUD_SHAKE_ANIM/slowshake2",
+       "CL2: the foe poisoned -- the HUD shake and PlayBattleAnimation2's Slow2")
+    eq(hud(false, true, "^bSQUIRTLE\nwas frozen solid!"), "ENEMY_HUD_SHAKE_ANIM/lightshake",
+       "CL2: the foe frozen -- the HUD shake and the move's own light shake (type 5)")
+    eq(hud(true, false, "^aCHARMANDER\nwas burned!"), "ENEMY_HUD_SHAKE_ANIM/lightshake",
+       "CL2: against the computer the clip plays as sent, whatever side")
+    eq(hud(false, false, nil), "ENEMY_HUD_SHAKE_ANIM/nil", "CL2: no line, no follow-on")
+    local row = Mediated.followRow("slowshake2", { { anim = "SHRINKING_SQUARE_ANIM" },
+      { vfxrow = { duration = 0.35 } } })
+    eq(row.shakefx .. "/" .. tostring(row.shakeWait), "slowshake2/0.35",
+       "CL2 followRow: waits out the clip's look first")
+    eq(Mediated.followRow("slowshake", { { anim = "SHAKE_SCREEN_ANIM" } }).shakeWait, nil,
+       "CL2 followRow: ...and nothing when the clip has none")
+    eq(Mediated.followRow(nil, {}), nil, "CL2 followRow: no kind, no row")
+  end
+
+  -- The arena draws them: horizontal only, right of rest, at the cart's
+  -- proportions under the overscan.
+  do
+    local Battlefield = need("Battlefield")
+    local function dxAt(kind, t) return (Battlefield.fxFieldShake({ { kind = kind, t = t } })) end
+    eq(dxAt("slowshake", 0.25), Battlefield.FX_FOLLOW_SHAKE.slowshake, "CL2 arena: Slow peaks mid-cycle")
+    eq(dxAt("slowshake", 0), 0, "CL2 arena: ...from rest")
+    eq(dxAt("slowshake", 0.5), 0, "CL2 arena: ...back to rest between its two cycles")
+    eq(dxAt("slowshake", 0.75), Battlefield.FX_FOLLOW_SHAKE.slowshake, "CL2 arena: ...out again")
+    eq(dxAt("slowshake", 1), 0, "CL2 arena: ...and home at its end")
+    eq(dxAt("slowshake2", 0.25), Battlefield.FX_FOLLOW_SHAKE.slowshake2, "CL2 arena: Slow2 is half Slow's travel")
+    eq(dxAt("lightshake", 0.1), Battlefield.FX_FOLLOW_SHAKE.lightshake, "CL2 arena: Light's first step")
+    eq(dxAt("lightshake", 0.4), 0, "CL2 arena: ...home")
+    eq(dxAt("lightshake", 0.6), Battlefield.FX_FOLLOW_SHAKE.lightshake / 2, "CL2 arena: ...then half a step")
+    local _, dy = Battlefield.fxFieldShake({ { kind = "slowshake", t = 0.25 } })
+    eq(dy, 0, "CL2 arena: horizontal only (rWX)")
+    local leftOfRest, past = false, false
+    for i = 0, 100 do
+      for _, kind in ipairs({ "slowshake", "slowshake2", "lightshake" }) do
+        local dx = dxAt(kind, i / 100)
+        if dx < 0 then leftOfRest = true end
+        if dx > Battlefield.FX_SHAKE then past = true end
+      end
+    end
+    check(not leftOfRest and not past, "CL2 arena: never left of rest, never past the overscan")
+    eq(Battlefield.FX_FOLLOW_SPAN.slowshake .. "/" .. Battlefield.FX_FOLLOW_SPAN.slowshake2 .. "/"
+       .. Battlefield.FX_FOLLOW_SPAN.lightshake, "0.8/0.4/0.3",
+       "CL2 arena: spans are the routines' 48 / 24 / 18 frames")
+    check(Battlefield.isFieldShake("slowshake") and Battlefield.isFieldShake("shake")
+          and not Battlefield.isFieldShake("hudshake"), "CL2 arena: the slides are field-wide")
+  end
+
+  -- THRASH's square: the slow shake once the square has played, by side.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2t")
+    ev({ t = "anim", slot = 0, side = "a", text = "SHRINKING_SQUARE_ANIM" })
+    ev({ t = "msg", text = "^aCHARMANDER\nused THRASH!" })
+    local log = trace(f)
+    local look, slide = log.first("vfx"), log.first("slowshake2")
+    check(look ~= nil and slide ~= nil and slide.at >= look.at + 20,
+          "CL2 THRASH (ours): Slow2 behind the square's look (" .. tostring(look and look.at) .. ", "
+          .. tostring(slide and slide.at) .. ")")
+    eq(log.first("slowshake"), nil, "CL2 THRASH (ours): ...not the enemy's Slow")
+    local f2, ev2 = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2t2")
+    ev2({ t = "anim", slot = FOE, side = "b", text = "SHRINKING_SQUARE_ANIM" })
+    local log2 = trace(f2)
+    check(log2.first("slowshake") ~= nil and log2.first("slowshake2") == nil,
+          "CL2 THRASH (the foe's): the enemy's turn's Slow")
+  end
+
+  -- PoisonEffect's / FreezeBurnParalyzeEffect's HUD shake off our side: the
+  -- clip, its follow-on, then the line -- the follow-on holding the queue.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2p")
+    ev({ t = "anim", slot = FOE, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev({ t = "msg", text = "^bSQUIRTLE\nwas poisoned!" })
+    ev({ t = "status", slot = FOE, side = "b", status = "PSN" })
+    local log = trace(f)
+    local hudFx, slide, line = log.first("hudshake"), log.first("slowshake2"), log.line("was poisoned!")
+    eq(hudFx and hudFx.side, "foe", "CL2 poison (the foe's): the HUD of the poisoned seat shakes")
+    check(slide ~= nil and hudFx ~= nil and slide.at > hudFx.at, "CL2 poison (the foe's): ...then Slow2")
+    check(line ~= nil and slide ~= nil and line.at >= slide.at + math.floor(slide.span * 60) - 1,
+          "CL2 poison (the foe's): ...which holds the line until it has played ("
+          .. tostring(slide and slide.at) .. " -> " .. tostring(line and line.at) .. ")")
+    eq(log.first("shake"), nil, "CL2 poison (the foe's): no field jolt")
+    local fb, evb = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2b")
+    evb({ t = "anim", slot = FOE, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    evb({ t = "msg", text = "^bSQUIRTLE\nwas burned!" })
+    local logb = trace(fb)
+    check(logb.first("hudshake") ~= nil and logb.first("lightshake") ~= nil
+          and logb.first("slowshake2") == nil,
+          "CL2 burn (the foe's): the HUD shake, then the move's own light shake")
+  end
+
+  -- ...and on our own side in a link fight: the cart ran the enemy's branch.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2o")
+    ev({ t = "anim", slot = 0, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    eq(#f.lines, 0, "CL2 link (ours): the HUD shake waits for the line behind it")
+    ev({ t = "msg", text = "^aCHARMANDER\nwas poisoned!" })
+    ev({ t = "status", slot = 0, side = "a", status = "PSN" })
+    local log = trace(f)
+    local jolt, slide, line = log.first("shake"), log.first("slowshake"), log.line("was poisoned!")
+    check(jolt ~= nil and log.first("hudshake") == nil,
+          "CL2 link poison (ours): SHAKE_SCREEN_ANIM -- the field jolts, no plate does")
+    check(slide ~= nil and jolt ~= nil and slide.at > jolt.at and log.first("slowshake2") == nil,
+          "CL2 link poison (ours): ...then the enemy's turn's Slow")
+    check(line ~= nil and slide ~= nil and line.at > slide.at, "CL2 link poison (ours): ...ahead of the line")
+    local fp, evp = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2o2")
+    evp({ t = "anim", slot = 0, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    evp({ t = "msg", text = "^aCHARMANDER's\nparalyzed! It may\nnot attack!" })
+    local logp = trace(fp)
+    check(noShake(logp), "CL2 link paralysis (ours): `paralyze2` plays nothing")
+    check(logp.line("paralyzed!") ~= nil, "CL2 link paralysis (ours): ...and still says its line")
+    local fn, evn = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2o3")
+    evn({ t = "anim", slot = 0, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    evn({ t = "turn", amount = 2 })
+    check(noShake(trace(fn)) and fn.hudShakeHeld == nil, "CL2 link (ours): no line behind it, nothing")
+    -- A side b viewer's own monster is side b's.
+    local fs, evs = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2o4")
+    fs.mySide = "b"
+    evs({ t = "anim", slot = FOE, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    evs({ t = "msg", text = "^bSQUIRTLE\nwas poisoned!" })
+    local logs = trace(fs)
+    check(logs.first("shake") ~= nil and logs.first("hudshake") == nil,
+          "CL2 link poison (side b's own): the screen shake on its own screen too")
+  end
+
+  -- Against the computer the referee sends each side's own clip: untouched.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "cl2w")
+    ev({ t = "anim", slot = 0, side = "a", text = "SHAKE_SCREEN_ANIM" })
+    ev({ t = "msg", text = "^aCHARMANDER\nwas poisoned!" })
+    local log = trace(f)
+    local jolt, slide = log.first("shake"), log.first("slowshake")
+    check(jolt ~= nil and slide ~= nil and slide.at > jolt.at,
+          "CL2 vs the computer: its poisoning's SHAKE_SCREEN_ANIM, then the enemy's Slow")
+    local fh, evh = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "cl2w2")
+    evh({ t = "anim", slot = 0, side = "a", text = "ENEMY_HUD_SHAKE_ANIM" })
+    evh({ t = "msg", text = "^aCHARMANDER\nwas burned!" })
+    local logh = trace(fh)
+    check(logh.first("hudshake") ~= nil and logh.first("shake") == nil,
+          "CL2 vs the computer: a HUD shake plays as sent, on whichever plate it names")
+  end
+
+  -- The classic page queues no follow-on row at all.
+  do
+    local f, ev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "cl2c", { peerName = "BLUE" })
+    f.usesBattlefield = function() return false end
+    ev({ t = "anim", slot = 0, side = "a", text = "SHRINKING_SQUARE_ANIM" })
+    ev({ t = "anim", slot = FOE, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    ev({ t = "msg", text = "^bSQUIRTLE\nwas poisoned!" })
+    local follows = 0
+    for _, row in ipairs(f.lines) do
+      if type(row) == "table" and row.shakefx then follows = follows + 1 end
+    end
+    eq(follows, 0, "CL2 classic: no follow-on rows")
+  end
+
+  -- ------- CL2: Gold's own sheets carry their dex weight in a wild fight
+  -- (K21: a wild monster that TRANSFORMed into one weighs the copy under a
+  -- HEAVY BALL -- BattleSim2 Effects `transformWeight`).
+  do
+    local data = setmetatable({ gen2Pokedex = { entries = { CHARMANDER = { weight = 85 },
+      SQUIRTLE = { weight = 90 } } } }, { __index = goldData() })
+    local game = goldGame({ goldMon("CHARMANDER", nil, 4321) }, data)
+    eq(Mediated.snapshotParty(game, { weight = true })[1].weight, 85,
+       "CL2 K21: our own Gold sheet weighs its species when asked")
+    eq(Mediated.snapshotParty(game)[1].weight, nil, "CL2 K21: ...and only then")
+    eq(Mediated.snapshotParty(gameWith({ mon("CHARMANDER") }, K_RED), { weight = true })[1].weight, nil,
+       "CL2 K21: Red's never does")
+    check(Mediated.WEIGHT_MODES.wild and Mediated.WEIGHT_MODES.coop_wild
+          and not Mediated.WEIGHT_MODES["1v1"] and not Mediated.WEIGHT_MODES.coop_npc
+          and not Mediated.WEIGHT_MODES.coop_pvp,
+          "CL2 K21: the wild fights alone weigh their own sheets")
+    local function ownUpload(mode)
+      local f = screenFor(game, mode, "cl2k21" .. mode, {
+        wildParty = Mediated.snapshotWild(game, goldMon("SQUIRTLE")), peerName = "SILVER" })
+      for _, m in ipairs(f.transport.sent) do
+        if m.t == Wire.BATTLE_PARTY and m.p.side == nil then return m.p end
+      end
+      return nil
+    end
+    local wild = ownUpload("wild")
+    eq(wild and wild.mons[1].weight, 85, "CL2 K21: a wild fight's own upload states the weight")
+    local packed = wild and Wire.battleParty(wild, 2)
+    eq(packed and packed.mons[1].weight, 85, "CL2 K21: ...and Wire.battleParty keeps it on the player's side")
+    eq(ownUpload("1v1").mons[1].weight, nil, "CL2 K21: a 1v1 (no ball) states none")
+    eq(ownUpload("coop_npc").mons[1].weight, nil, "CL2 K21: ...nor a trainer fight (the ball is blocked)")
+  end
+
+  -- ------- CL2: Red's traded EXP boost, read as GainExperience reads it
+  do
+    local function game(id) return { save = { player = { id = id } } } end
+    eq(Mediated.expTraded1(game(4321), { otId = 1234 }), true, "CL2 exp: another OT id is traded")
+    eq(Mediated.expTraded1(game(4321), { otId = 4321 }), false, "CL2 exp: the player's own is not")
+    eq(Mediated.expTraded1(game(4321), { otId = 4321, traded = true }), false,
+       "CL2 exp: the OT id decides, as the cart compares MON_OTID with wPlayerID")
+    eq(Mediated.expTraded1(game(4321), { traded = true }), true,
+       "CL2 exp: an OT-less monster flagged traded is (SaveData.repairTradedOtIds)")
+    eq(Mediated.expTraded1(game(4321), {}), false, "CL2 exp: ...one not flagged is the player's")
+    eq(Mediated.expTraded1(game(nil), { otId = 1234 }), false, "CL2 exp: no player id is nothing to compare")
+    eq(Mediated.expTraded1(game("4321"), { otId = 4321 }), false, "CL2 exp: ids read as numbers")
+  end
 end
 
 T.finish("mediated_battle_client")

@@ -1259,6 +1259,29 @@ function M.tradedOf(game, mon)
   return true
 end
 
+-- Red's EXP boost for a traded monster: pokered GainExperience
+-- (engine/battle/experience.asm, `.tradedMon`) compares the party struct's
+-- MON_OTID with wPlayerID on every award and pays x1.5 -- "a boosted" in the
+-- line (`gainedLine`) -- when they differ.  Read exactly as the engine's own
+-- award reads it (src/battle/BattleState.lua's `applyShare`): the OT id against
+-- the save's player id, and for a monster with no OT id on record the port's
+-- `traded` flag (SaveData.repairTradedOtIds scrubs a stamped id off a traded
+-- monster, engine #1488) -- so a fight the mod referees pays what the same
+-- fight on the engine would.  No player id is nothing to compare: not traded.
+-- One reading for every Red award this mod prices (this screen's and
+-- src/CoopBattle.lua's, both passes), so solo, 1v1 and co-op cannot disagree.
+-- Gold's is Exp2's own (`Exp2.traded`).
+function M.expTraded1(game, mon)
+  local save = type(game) == "table" and game.save or nil
+  local player = type(save) == "table" and save.player or nil
+  local playerId = type(player) == "table" and player.id or nil
+  if playerId == nil or type(mon) ~= "table" then return false end
+  if mon.otId == nil then return mon.traded == true end
+  local a, b = tonumber(mon.otId), tonumber(playerId)
+  if a and b then return a ~= b end
+  return mon.otId ~= playerId
+end
+
 -- The Gold item modules, resolved on first use and only by a Gen 2 caller: the
 -- loader throws on a cross-generation require (modkit MK403), so nothing here
 -- is reached at file scope or off a Gold boot -- `goldBadges`' posture, a
@@ -1440,7 +1463,9 @@ end
 -- cart, and a sheet built for one states none.  A foe's sheet (a wild monster,
 -- a trainer's) is never `own`: the cart asks the question of the player's
 -- battle monster alone.  `own` also picks a Gold sheet's happiness (K14): the
--- monster's own byte, or for a foe the cart's BASE_HAPPINESS.
+-- monster's own byte, or for a foe the cart's BASE_HAPPINESS.  `weight = true`
+-- stamps each Gold sheet's dex weight (K21): the wild foe's
+-- (`snapshotWild`), and this player's own in a wild fight (`WEIGHT_MODES`).
 function M.snapshotMons(game, party, opts)
   if type(party) ~= "table" then return {} end
   -- Gen 3: the C4 sheet.  Every sheet built here carries its species' catch
@@ -1455,6 +1480,9 @@ function M.snapshotMons(game, party, opts)
   local generation = Gen.generation(game)
   local own = type(opts) == "table" and opts.own == true
   local stampTraded = own and opts.link ~= true
+  -- `{ weight = true }`: each Gold sheet carries its species' dex weight
+  -- (K21, below).  Gen 2 alone -- Red's balls read no weight.
+  local stampWeight = generation == 2 and type(opts) == "table" and opts.weight == true
 
   local out = {}
   for index = 1, #party do
@@ -1548,6 +1576,14 @@ function M.snapshotMons(game, party, opts)
               end
             end
           end
+          -- Contract K21: Gold's dex weight word (`weight2`), on the sheets a
+          -- ball can be thrown at -- the wild foe (`snapshotWild`) -- and on
+          -- the player's own in a fight where one can be thrown, because
+          -- HeavyBallMultiplier reads wEnemyMonSpecies' dex entry and a
+          -- TRANSFORM overwrote that species with the player's monster's: the
+          -- Gold referee weighs a transformed wild monster as the monster it
+          -- copied (BattleSim2 Effects `transformWeight`, `ballRate`).
+          if stampWeight then sheet.weight = M.weight2(game, mon) end
         end
       end
     end
@@ -1578,13 +1614,18 @@ function M.weight2(game, mon)
 end
 
 -- A wild monster's sheet: `snapshotMons` of the one monster, with its Gold
--- weight stamped on (K21: the Gen 2 sheet's `weight`, a wild foe's only).
+-- weight stamped on (K21: the Gen 2 sheet's `weight`).
 function M.snapshotWild(game, mon)
-  local sheets = M.snapshotMons(game, { mon })
-  local weight = M.weight2(game, mon)
-  if weight and sheets[1] then sheets[1].weight = weight end
-  return sheets
+  return M.snapshotMons(game, { mon }, { weight = true })
 end
+
+-- The fights whose own sheets carry Gold's dex weight (K21): the ones a ball
+-- can be thrown in, at a wild monster that may have TRANSFORMed into one of
+-- them -- a solo or hub wild fight (Config.SOLO_WILD_MODE, Sessions'
+-- `beginWildMediated`) and a co-op one (src/CoopBattle.lua's `uploadMediated`).
+-- A trainer blocks every ball and a link fight throws none, so their sheets
+-- leave the field off.
+M.WEIGHT_MODES = { wild = true, coop_wild = true }
 
 -- This player's own team.
 --
@@ -1592,7 +1633,9 @@ end
 -- Gen 3 that is where Deoxys fights on its link-battle stats; on every
 -- generation it is the fight whose sheets state no `traded` (contract K1 of
 -- docs/plans/gen12-referee-fidelity.md on Gen 1 / Gen 2, Sheet3's own on Gen 3),
--- because no cart runs its obedience check in a link battle.
+-- because no cart runs its obedience check in a link battle.  `{ weight =
+-- true }` (a WEIGHT_MODES fight) stamps Gold's dex weight on each sheet (K21,
+-- `snapshotMons`).
 function M.snapshotParty(game, opts)
   local link = type(opts) == "table" and opts.link == true
   -- Gen 3: the live session party, not game.save (a snapshot there).
@@ -1600,7 +1643,9 @@ function M.snapshotParty(game, opts)
     return Sheet3.party(game, { link = link })
   end
   local save = game and game.save
-  return M.snapshotMons(game, save and save.party, { own = true, link = link })
+  return M.snapshotMons(game, save and save.party, {
+    own = true, link = link, weight = type(opts) == "table" and opts.weight == true,
+  })
 end
 
 -- ------- what goes out before the fight opens, in one place
@@ -1666,12 +1711,13 @@ end
 --
 --   aiMods  Red only: pokered AIEnemyTrainerChooseMoves runs the class's
 --           TrainerClassMoveChoiceModifications row (data/trainers/
---           move_choices.asm) -- the engine record's `aiMods`, the same list
---           src/SoloBrain.lua scores with (`trainer.aiMods`) -- and a coop_npc
---           computer seat the Red referee picks for runs exactly that list
---           (BattleSim Turn `_aiTrainerMoves`).  The wire takes the cart's four
---           AIMoveChoiceModification numbers and refuses the whole party over
---           anything else (Wire.battleParty), so a registered layer named by
+--           move_choices.asm), which is the engine record's `aiMods`
+--           (`trainer.aiMods`) -- and a computer seat the Red referee picks
+--           for, a hub's coop_npc seat and a solo trainer's alike (contract
+--           K16), runs exactly that list (BattleSim Turn `_aiTrainerMoves`).
+--           The wire takes the cart's four AIMoveChoiceModification numbers
+--           and refuses the whole party over anything else
+--           (Wire.battleParty), so a registered layer named by
 --           id is sent as its number ("LAYER_2" is 2, the key the engine
 --           resolves a number through: TrainerAI) and a layer no number names
 --           -- a mod's own class record -- is one the referee cannot run and
@@ -2379,6 +2425,12 @@ local FX_SPAN = {
   -- Red's ENEMY_HUD_SHAKE_ANIM (SE_SHAKE_ENEMY_HUD): one seat's plate shakes
   -- side to side, the field holds still (Battlefield.fxPlateShake).
   hudshake = 0.40,
+  -- Red's follow-on screen shakes (MediatedBattle.followShake): the field
+  -- slides sideways for the cart routine's own frame count, and the row that
+  -- emits one holds the queue as long (Battlefield.FX_FOLLOW_SPAN).
+  slowshake = Battlefield.FX_FOLLOW_SPAN.slowshake,
+  slowshake2 = Battlefield.FX_FOLLOW_SPAN.slowshake2,
+  lightshake = Battlefield.FX_FOLLOW_SPAN.lightshake,
   faint = 0.60,
   spawn = 0.40,
   -- The ball flow. One constant per kind, and each one is also the dwell the
@@ -3816,7 +3868,11 @@ function M:start(game)
   if self.uploaded then return true end
   if not (self.transport and self.battle) then return false end
 
-  local mons = M.snapshotParty(self.game, { link = LINK_MODES[self.mode] == true })
+  -- A wild fight's own sheets weigh what the species does (K21, WEIGHT_MODES):
+  -- the wild monster may TRANSFORM into one and then take a HEAVY BALL.
+  local mons = M.snapshotParty(self.game, {
+    link = LINK_MODES[self.mode] == true, weight = M.WEIGHT_MODES[self.mode] == true,
+  })
   if #mons == 0 then
     -- Uploading nothing would leave the intermediator holding a seat open
     -- until its grace expired, and the player watching a screen that never
@@ -4113,6 +4169,10 @@ function M:onEvent(msg)
   if self.phase == "setup" then self.phase = "play" end
 
   local kind = msg.t
+  -- A Red HUD shake held for the status line behind it (`hudShakeFor`) is
+  -- settled by the very next event, ahead of anything it queues: that line,
+  -- or -- anything else coming first -- no line at all.
+  if self.hudShakeHeld then self:resolveHudShake(kind == "msg" and msg.text or nil) end
   -- A Gold send-out's line, held for the event behind it (`noteSendLine`):
   -- a ROAR / WHIRLWIND drag-out says "<MON> was dragged out!" there instead.
   -- The `moves` a send-out may state for the monster that left rides between
@@ -4217,10 +4277,26 @@ function M:onEvent(msg)
       if look and anim == "XSTATITEM_ANIM" and itemSeat ~= nil and itemSeat == msg.slot then
         self:dropItemLook(msg.slot)
       end
-      if behind then
+      if anim == "ENEMY_HUD_SHAKE_ANIM" then
+        -- Read against the status line straight behind it (`hudShakeFor`),
+        -- which the next event settles (`resolveHudShake`): on our own side
+        -- in a link fight the clip itself waits for it -- the cart plays the
+        -- enemy's branch there, a screen shake or nothing -- and anywhere
+        -- else it plays as sent and only its follow-on waits.
+        local link = LINK_MODES[self.mode] == true
+        local held = mine and link
+        if not held then
+          for _, row in ipairs(rows) do self.lines[#self.lines + 1] = row end
+        end
+        self.hudShakeHeld = { rows = rows, own = mine, link = link, queued = not held }
+      elseif behind then
         self.animBehind = rows
       else
         for _, row in ipairs(rows) do self.lines[#self.lines + 1] = row end
+        -- PlayBattleAnimation2's slow shake behind THRASH's square or
+        -- PoisonEffect's SHAKE_SCREEN_ANIM (`followShake`).
+        local follow = self:usesBattlefield() and M.followShake(anim, mine) or nil
+        if follow then self.lines[#self.lines + 1] = M.followRow(follow, rows) end
       end
     end
 
@@ -5436,13 +5512,16 @@ function M:gainExp(msg)
       return false
     end
   else
+    -- GainExperience's OT check, as the engine's own award reads it
+    -- (`expTraded1`).
+    local traded = M.expTraded1(self.game, mon)
     ok, levels, gained = pcall(eng.Experience.apply, data, mon, def,
-      level, isTrainer, participants * (expAll and 2 or 1), mon.traded)
+      level, isTrainer, participants * (expAll and 2 or 1), traded)
     if not ok then
       self:warnNoExp("the engine refused the award for this monster")
       return false
     end
-    boosted = mon.traded
+    boosted = traded
   end
 
   -- The name the box has been calling it all fight: the referee narrates under
@@ -5541,7 +5620,7 @@ function M:gainExp(msg)
         member.exp = member.exp or 0
         local gotOk, gotLevels = pcall(eng.Experience.apply, data, member, def,
           level, isTrainer, participants * 2 * math.max(1, #party),
-          member.traded)
+          M.expTraded1(self.game, member))
         if gotOk then self:levelled(member, nil, gotLevels) end
       end
     end
@@ -6549,6 +6628,105 @@ function M.viewerAnim(anim, mine)
   return other, other == "SLP_ANIM"
 end
 
+-- ------- Red's follow-on screen shakes, as this viewer's cart plays them
+--
+-- pokered MoveAnimation ends every clip with PlayApplyingAttackAnimation
+-- (engine/battle/animations.asm), which runs the wAnimationType the caller
+-- left: AnimationTypePointerTable's 3 is ShakeScreenHorizontallySlow (`lb bc,
+-- 6, 2`), 5 ShakeScreenHorizontallyLight (`ld b, 2`), 6
+-- ShakeScreenHorizontallySlow2 (`lb bc, 3, 2`).  The clips the Red referee
+-- sends as `_ANIM` ids that leave one:
+--
+--   * PlayBattleAnimation2 (engine/battle/effects.asm) stores 6 on the
+--     player's turn and 3 on the enemy's -- ThrashPetalDanceEffect's
+--     SHRINKING_SQUARE_ANIM, and PoisonEffect's side-effect shakes
+--     (ENEMY_HUD_SHAKE_ANIM on the player's turn, SHAKE_SCREEN_ANIM on the
+--     enemy's);
+--   * FreezeBurnParalyzeEffect's ENEMY_HUD_SHAKE_ANIM goes through
+--     PlayBattleAnimation, which keeps the wAnimationType the move's own
+--     animation stored (core.asm GetPlayerAnimationType: 5 for a move with an
+--     effect) -- the move's light shake again.
+--
+-- "The player's turn" is this viewer's: its own side's monster (a co-op
+-- partner's counts) is the player's on its cart, the other side's the
+-- enemy's.  The follow-on is a row of its own (`shakefx`, one of the three
+-- FOLLOW_SHAKE kinds Battlefield.fxFieldShake draws), queued behind the clip
+-- and held while it plays, as the cart blocks on it.
+M.FOLLOW_SHAKE_ENEMY = "slowshake"   -- wAnimationType 3
+M.FOLLOW_SHAKE_PLAYER = "slowshake2" -- wAnimationType 6
+M.FOLLOW_SHAKE_MOVE = "lightshake"   -- wAnimationType 5 (a move with an effect)
+
+-- The follow-on a clip decides by itself (`own`: the seat it plays on is this
+-- viewer's side).  ENEMY_HUD_SHAKE_ANIM's waits for the line behind it
+-- (`hudShakeFor`); every other id has none.
+function M.followShake(anim, own)
+  if anim == "SHRINKING_SQUARE_ANIM" then
+    -- Over the thrasher: the player's turn when it is ours.
+    return own and M.FOLLOW_SHAKE_PLAYER or M.FOLLOW_SHAKE_ENEMY
+  end
+  -- PoisonEffect's on the enemy's turn only (`ld b, SHAKE_SCREEN_ANIM`), so
+  -- always the enemy's slow shake.
+  if anim == "SHAKE_SCREEN_ANIM" then return M.FOLLOW_SHAKE_ENEMY end
+  return nil
+end
+
+-- Which side effect a status line is, read plain (K17 / K18): pokered
+-- PoisonedText / BadlyPoisonedText "poison"; BurnedText, FrozenText and
+-- PrintMayNotAttackText (FreezeBurnParalyzeEffect's three) "fbp"; nil else.
+local SIDE_STATUS_TAILS = {
+  { " was poisoned!", "poison" }, { "'s badly poisoned!", "poison" },
+  { " was burned!", "fbp" }, { " was frozen solid!", "fbp" },
+  { "'s paralyzed! It may not attack!", "fbp" },
+}
+function M.sideStatusLine(text)
+  if type(text) ~= "string" then return nil end
+  local plain = plainLine(text)
+  for _, tail in ipairs(SIDE_STATUS_TAILS) do
+    local t = tail[1]
+    if #plain > #t and plain:sub(-#t) == t then return tail[2] end
+  end
+  return nil
+end
+
+-- ENEMY_HUD_SHAKE_ANIM against the status line the referee sends straight
+-- behind it (BattleSim Turn `_applySide`: the shake, then the line), as this
+-- viewer's cart plays it.  Returns the clip to play (nil: none) and its
+-- follow-on (nil: none).
+--
+-- In a link fight (LINK_MODES) both seats are "the player" (the owner's
+-- rule), so the referee sends ENEMY_HUD_SHAKE_ANIM whoever moved -- and on
+-- the screen of the monster it landed on (`own`) the cart ran the enemy's
+-- branch: PoisonEffect's SHAKE_SCREEN_ANIM and its slow shake (type 3) for a
+-- poisoning, FreezeBurnParalyzeEffect's `.burn2` / `.freeze2` / paralyze2,
+-- which print and play nothing, for the other three.  Against the computer
+-- the referee already sends each side's own clip, and it plays as sent.
+-- Off our own side the clip stays, with PoisonEffect's slow shake (type 6)
+-- behind a poisoning and the move's light one (type 5) behind the other three.
+function M.hudShakeFor(own, link, text)
+  local kind = M.sideStatusLine(text)
+  if own and link then
+    if kind == "poison" then return "SHAKE_SCREEN_ANIM", M.FOLLOW_SHAKE_ENEMY end
+    return nil, nil
+  end
+  if kind == "poison" then return "ENEMY_HUD_SHAKE_ANIM", M.FOLLOW_SHAKE_PLAYER end
+  if kind == "fbp" then return "ENEMY_HUD_SHAKE_ANIM", M.FOLLOW_SHAKE_MOVE end
+  return "ENEMY_HUD_SHAKE_ANIM", nil
+end
+
+-- A follow-on row for `kind` behind `rows` (a clip and its look): it waits out
+-- the longest look queued with the clip first -- a look row holds nothing
+-- (`startVfxRow`), and the cart's shake comes after the clip's last frame.
+function M.followRow(kind, rows)
+  if kind == nil then return nil end
+  local wait = 0
+  for _, row in ipairs(rows or {}) do
+    local spec = type(row) == "table" and (row.vfxrow or (row.kind == "vfx" and row.spec)) or nil
+    local span = type(spec) == "table" and tonumber(spec.duration) or nil
+    if span and span > wait then wait = span end
+  end
+  return { shakefx = kind, shakeWait = (wait > 0) and wait or nil }
+end
+
 -- The bag's own look for an item on `slot` (`itemLook`, the `item` branch),
 -- taken back off the queue -- the newest one still waiting, and only past rows
 -- that are not another animation, so a look already played or one belonging
@@ -6567,6 +6745,52 @@ function M:dropItemLook(slot)
     end
   end
   return false
+end
+
+-- The ENEMY_HUD_SHAKE_ANIM the `anim` branch held (`hudShakeHeld`), settled
+-- by `text` -- the line of the event behind it, or nil when that event was no
+-- line: its rows go on the queue as this viewer's cart plays them (a held
+-- clip renamed, or dropped), then the follow-on, all ahead of that line.
+function M:resolveHudShake(text)
+  local held = self.hudShakeHeld
+  self.hudShakeHeld = nil
+  if type(held) ~= "table" then return end
+  local anim, follow = M.hudShakeFor(held.own, held.link, text)
+  self.lines = self.lines or {}
+  if not held.queued then
+    if anim == nil then return end
+    for _, row in ipairs(held.rows or {}) do
+      if row.anim ~= nil then row.anim = anim end
+      self.lines[#self.lines + 1] = row
+    end
+  end
+  if follow and self:usesBattlefield() then
+    self.lines[#self.lines + 1] = M.followRow(follow, held.rows)
+  end
+end
+
+-- A follow-on shake reaching the head of the queue (`followRow`): it first
+-- waits out the look queued with its clip (`shakeWait`, the row put back at
+-- the head once, `startAnim`'s two-beat shape), then shakes the field and holds
+-- the queue while it does -- the cart's PlayApplyingAttackAnimation blocks.
+-- Arena only; the classic page costs the row and nothing else.
+function M:startShakeRow(row)
+  if type(row) ~= "table" or not self:usesBattlefield() then return false end
+  local wait = tonumber(row.shakeWait)
+  if wait and wait > 0 and not row.shakeWaited then
+    row.shakeWaited = true
+    table.insert(self.lines, 1, row)
+    self.anim = row
+    self.animHold = wait
+    self.dwell = 0
+    return true
+  end
+  local fx = self:emitFx(row.shakefx)
+  if not fx then return false end
+  self.anim = row
+  self.animHold = fx.duration
+  self.dwell = 0
+  return true
 end
 
 -- The held rows (`viewerAnim`'s `behind`), onto the queue.
@@ -9644,6 +9868,12 @@ function M:tickMessages(dt, input)
     if type(next) == "table" and next.callout then
       -- A used line's own shout (K22, `noteUsedLine`): its beat, or nothing.
       if self:startCallout(next) then self.dwell = 0 end
+      return true
+    end
+    if type(next) == "table" and next.shakefx ~= nil then
+      -- Red's follow-on shake behind a clip (`followRow`): its hold, or
+      -- nothing on the classic page.
+      self:startShakeRow(next)
       return true
     end
     if type(next) == "table" and next.drain ~= nil then

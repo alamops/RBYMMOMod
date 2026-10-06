@@ -1160,7 +1160,9 @@ local STATUS_ANIM_LOOK = {
 --   FreezeBurnParalyzeEffect's on a side-effect status) are motion, not
 --   particles: the screens shake a seat's plate or the whole field for them
 --   (MediatedBattle / CoopBattle `startAnim`, Battlefield.fxPlateShake), and
---   they have no row here.
+--   they have no row here.  Nor do the slow / light screen shakes the cart's
+--   PlayApplyingAttackAnimation runs behind them and behind the square
+--   (MediatedBattle.followShake, Battlefield.FX_FOLLOW_SHAKE).
 --   Gold (pokecrystal / pokegold constants/move_constants.asm, ANIM_<X> sent
 --   as <X>_ANIM): the residual and condition clips of engine/battle/core.asm
 --   (ResidualDamage's PSN / BRN / SAP / IN_NIGHTMARE, HandleWeather's

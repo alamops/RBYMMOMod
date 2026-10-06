@@ -988,6 +988,22 @@ end)()
     local got = mon(sheet1, w)
     check(got ~= nil and got.weight == nil, "a Red sheet ignores weight " .. tostring(w))
   end
+  -- CL2: the player's own Gen 2 party keeps it too -- a wild monster that
+  -- TRANSFORMed into one is weighed as the copy (BattleSim2
+  -- `transformWeight`). Twin of server/twin_parity.test.js's K21 party pins.
+  local function raw2(weight)
+    local raw = {}
+    for k, v in pairs(g2) do raw[k] = v end
+    raw.weight = weight
+    return raw
+  end
+  for _, side in ipairs({ "a", false }) do
+    local got = Wire.battleParty({ battle = "k21a", side = side or nil, generation = 2,
+      mons = { raw2(850) } }, 2)
+    eq(got and got.mons[1].weight, 850, "a Gold party read for side " .. tostring(side) .. " keeps its weight")
+  end
+  eq(Wire.battleParty({ battle = "k21a", side = "a", generation = 2, mons = { raw2(70000) } }, 2), nil,
+     "an unreadable side-a weight refuses the party")
   local chart = { { 100, 100 }, { 100, 100 } }
   for _, bt in ipairs({ 0, 4, 255 }) do
     eq(Wire.battleRuleset({ chart = chart, battleType = bt }, 2).battleType, bt,
@@ -25381,6 +25397,35 @@ end
                      level = 40, participants = 1 })
     check(mine.exp > before,
           "...and the id the referee states beside it is what pays the award")
+  end
+
+  -- ------- CL2: Red's traded boost, read as pokered GainExperience reads it
+  -- (MON_OTID against wPlayerID; MediatedBattle.expTraded1, the one reading
+  -- co-op prices its awards with too): x1.5 and "a boosted" in the line.
+  do
+    local function award(otId, flagged)
+      local mine = monAt(50)
+      mine.exp = 1000000 -- no level-up, so the number is readable
+      mine.otId, mine.traded = otId, flagged
+      local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-trade" })
+      screen.game.save.player.id = 1111
+      local said = nil
+      screen.say = function(_, text) if type(text) == "string" and text:find("gained", 1, true) then said = text end end
+      local before = mine.exp
+      screen:gainExp({ slot = 0, species = foeSpecies, level = 50, participants = 1 })
+      return mine.exp - before, said
+    end
+    local def = data.pokemon[foeSpecies]
+    local plain = eng.Experience.gainFor(def, 50, false, 1, false, data.constants)
+    local boosted = eng.Experience.gainFor(def, 50, false, 1, true, data.constants)
+    local got, line = award(2222)
+    eq(got, boosted, "CL2 (mediated Red): a monster from another OT id is paid x1.5")
+    check(line ~= nil and line:find("a boosted", 1, true) ~= nil,
+          "CL2 (mediated Red): ...and its line says \"a boosted\" (" .. tostring(line) .. ")")
+    got, line = award(1111, true)
+    eq(got, plain, "CL2 (mediated Red): the player's own OT id is home-grown, a stale flag notwithstanding")
+    check(line ~= nil and line:find("a boosted", 1, true) == nil, "CL2 (mediated Red): ...with the plain line")
+    eq((award(nil, true)), boosted, "CL2 (mediated Red): an OT-less monster flagged traded is paid as one")
   end
 
   -- ------- save-mon mutation vs. the referee sheet, and the row order the

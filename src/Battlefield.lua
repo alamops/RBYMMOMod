@@ -928,6 +928,18 @@ end
 M.FX_LUNGE = 14 -- peak px toward the midline, reached at t == 0.5
 M.FX_SHAKE = 3 -- peak whole-field jolt, px
 M.FX_HUD_SHAKE = 4 -- peak plate jolt, px (Red's ENEMY_HUD_SHAKE_ANIM)
+-- Red's follow-on shakes (pokered PlayApplyingAttackAnimation's
+-- AnimationTypePointerTable, run behind a clip that left one -- see
+-- MediatedBattle.followShake): the field slides right and back, horizontally
+-- only, as rWX does.  Peaks keep the cart's proportions under FX_SHAKE (the
+-- overscan drawArena reserves): ShakeScreenHorizontallySlow's 6 px is the
+-- full FX_SHAKE, Slow2's 3 px half of it, Light's 2 px a third.  Spans are the
+-- routines' own frame counts at 60 fps -- Slow `lb bc, 6, 2`: 6 steps out and
+-- 6 back at 2 frames each, twice (48 frames); Slow2 `lb bc, 3, 2` (24);
+-- PredefShakeScreenHorizontally `ld b, 2`: 2 px then 1, 5 frames out and 4
+-- back each (18).  The screens hold their queue for the span.
+M.FX_FOLLOW_SHAKE = { slowshake = 3, slowshake2 = 1.5, lightshake = 1 }
+M.FX_FOLLOW_SPAN = { slowshake = 0.8, slowshake2 = 0.4, lightshake = 0.3 }
 M.FX_FAINT_DROP = 0.5 -- fraction of the mon box a fainting seat sinks
 M.FX_BALL_R = 5 -- pokéball radius (a ~10px ball on a 60px mon)
 M.FX_BALL_LIFT = 46 -- peak px the arc rises above the straight line
@@ -1136,10 +1148,38 @@ function M.fxSeat(fx, side, seatIndex)
   return out
 end
 
--- Whole-field jolt. `shake` is field-wide, so side / seatIndex are ignored.
--- The fold is clamped: a multi-hit move stacks three to five live shakes, and
--- their unclamped sum would walk the field past the outset drawArena reserves
--- and uncover the canvas edge.
+-- AnimationShakeScreenHorizontallySlow's travel, 0..1 of the peak: out one
+-- step at a time and back to rest, twice (`c` = 2) -- a triangle, never left
+-- of rest (rWX only grows from 7).
+function M.fxSlowShake(t)
+  t = fxT(t)
+  local phase = (t * 2) % 1
+  if t >= 1 then phase = 0 end
+  return 1 - math.abs(2 * phase - 1)
+end
+
+-- PredefShakeScreenHorizontally's travel with `b` = 2, 0..1 of the peak: the
+-- full step out and home, then half of it out and home (each 5 frames out,
+-- 4 back).
+function M.fxLightShake(t)
+  t = fxT(t)
+  if t >= 1 then return 0 end
+  local half = (t < 0.5) and 1 or 0.5
+  local phase = (t * 2) % 1
+  return (phase < 5 / 9) and half or 0
+end
+
+-- Is `kind` a field-wide shake (`fxFieldShake` reads it, side and seat
+-- ignored)?  The co-op screen asks before it projects an effect onto seats.
+function M.isFieldShake(kind)
+  return kind == "shake" or M.FX_FOLLOW_SHAKE[kind] ~= nil
+end
+
+-- Whole-field jolt. `shake` is field-wide, so side / seatIndex are ignored;
+-- so are Red's follow-on shakes (`FX_FOLLOW_SHAKE`), which slide it
+-- horizontally alone.  The fold is clamped: a multi-hit move stacks three to
+-- five live shakes, and their unclamped sum would walk the field past the
+-- outset drawArena reserves and uncover the canvas edge.
 function M.fxFieldShake(fx)
   local dx, dy = 0, 0
   for _, e in ipairs(listOf(fx)) do
@@ -1147,6 +1187,10 @@ function M.fxFieldShake(fx)
       local t = fxT(e.t)
       dx = dx + M.FX_SHAKE * M.fxShake(t)
       dy = dy + M.FX_SHAKE * 0.6 * math.cos(t * math.pi * 5) * (1 - t)
+    elseif type(e) == "table" and (e.kind == "slowshake" or e.kind == "slowshake2") then
+      dx = dx + M.FX_FOLLOW_SHAKE[e.kind] * M.fxSlowShake(e.t)
+    elseif type(e) == "table" and e.kind == "lightshake" then
+      dx = dx + M.FX_FOLLOW_SHAKE.lightshake * M.fxLightShake(e.t)
     end
   end
   return clamp(dx, -M.FX_SHAKE, M.FX_SHAKE), clamp(dy, -M.FX_SHAKE, M.FX_SHAKE)
