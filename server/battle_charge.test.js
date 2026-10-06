@@ -13,6 +13,13 @@ const assert = require('node:assert');
 
 const Battle1 = require('./lib/battle');
 const Battle2 = require('./lib/battle2');
+const { plainBattleLine } = require('./lib/sanitize');
+
+// The stream as a reader that knows no marks reads it (contract K17): a
+// `msg` without its `^a` / `^b`, each K18 break a space (W's plainBattleLine)
+// -- the sentences below are the cart's words, whichever referee said them.
+const drained = (battle) => battle.drainEvents().map((e) => (
+  e.t === 'msg' && typeof e.text === 'string' ? { ...e, text: plainBattleLine(e.text) } : e));
 
 function mv(o) {
   return {
@@ -92,7 +99,7 @@ test('gen1 DIG: dug a hole, invulnerable, Earthquake fails', () => {
   });
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
-  const events = battle.drainEvents();
+  const events = drained(battle);
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('dug a hole')));
   assert.ok(events.some((e) => e.t === 'anim' && e.text === 'DIG' && e.amount === 1));
   // MoveHitTest's INVULNERABLE miss is PrintMoveFailureText's "<USER>'s attack
@@ -117,7 +124,7 @@ test('gen1 Thunder does not reach Fly', () => {
   });
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
-  const events = battle.drainEvents();
+  const events = drained(battle);
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('flew up high')));
   assert.ok(!events.some((e) => e.t === 'damage' && e.slot === 0));
   assert.ok(events.some((e) => e.t === 'msg' && e.text === "Beta's attack missed!"));
@@ -125,13 +132,19 @@ test('gen1 Thunder does not reach Fly', () => {
 
 test('gen1 charge-family texts and DIG turn two', () => {
   const Effects = Battle1.Effects;
+  // ChargeMoveEffectText breaks after <USER> (K18); a caller that names the
+  // user's side gets its mark (K17).
   assert.strictEqual(
     Effects.chargeMessage({ species: 'Alpha' }, 39, 'SOLARBEAM'),
-    'Alpha took in sunlight!',
+    'Alpha\ntook in sunlight!',
   );
   assert.strictEqual(
     Effects.chargeMessage({ species: 'Alpha' }, 39, 'SKULL_BASH'),
-    'Alpha lowered its head!',
+    'Alpha\nlowered its head!',
+  );
+  assert.strictEqual(
+    Effects.chargeMessage({ species: 'Alpha' }, 43, 'FLY', 'b'),
+    '^bAlpha\nflew up high!',
   );
   const battle = fight(Battle1.Turn, {
     seed: 4242,
@@ -172,7 +185,7 @@ test('gen2 EFFECT_* aliases and Earthquake reaches Dig', () => {
   });
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
-  const events = battle.drainEvents();
+  const events = drained(battle);
   assert.ok(events.some((e) => e.t === 'msg' && e.text.includes('dug a hole')));
   assert.ok(events.some((e) => e.t === 'damage' && e.slot === 0));
 });
@@ -233,7 +246,7 @@ test('gen2 2v2 Crystal status names actually apply', () => {
   battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
   battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
   battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
-  const events = battle.drainEvents();
+  const events = drained(battle);
   assert.ok(!events.some((e) => e.t === 'msg' && String(e.text).includes('nothing happened')),
     'status moves do not no-op');
   assert.ok(events.some((e) => e.t === 'msg' && String(e.text).includes('DEFENSE fell')),
@@ -299,7 +312,7 @@ test('gen2 2v2 Metronome calls a move from the uploaded pool', () => {
   battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
   battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
   battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
-  const events = battle.drainEvents();
+  const events = drained(battle);
   assert.ok(events.some((e) => e.t === 'anim' && e.text === 'pool-thump'));
   assert.ok(battle.byId.get('b1').mons[0].hp < hpBefore);
 });

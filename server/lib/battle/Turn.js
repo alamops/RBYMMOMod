@@ -145,6 +145,15 @@
  *   * *"The enemy" in a 2v2*: a move's stage change re-penalises the aimed
  *     seat, Rage the attacker, an X item and the self-hit's Reflect check the
  *     battler opposite (`_oppositeFoe`).
+ *   * *One narrator, two screens* (contracts K17 / K18): a name the cart prints
+ *     through <USER> / <TARGET> or an "Enemy @" line carries its side's mark
+ *     (`named`, Events.named: `^a` / `^b`), a bare one stays bare; `\n` is the
+ *     cart's `line` / `cont` / <SCROLL>, a `para` its own `msg`; any other
+ *     event's `text` is the line read plain (Events.plain).
+ *   * *A knockout faints after the move* (K19): the `faint` and all `_faint`
+ *     does wait for the slot's end (`_reapKo`), where MainInBattleLoop tests
+ *     the HP once Execute*Move has returned; two at once go side a first; a
+ *     residual's knockout is its pass's own.
  *
  * Two shape differences from the Lua, both forced by the language:
  *
@@ -413,12 +422,14 @@ const AI_NEUTRAL = 16;
 
 // The sentences `.monDoesNothing` prints (pokered data/text/text_2.asm
 // _LoafingAroundText .. _IgnoredOrdersText), keyed by Status.LOAF_LINES, with
-// the monster's name in front -- the cart's English, punctuation included.
+// the monster's name in front -- the cart's English, punctuation included,
+// and its breaks (K18). The name is wBattleMonNick, printed bare: only the
+// player's monster ever disobeys, so the cart has no "Enemy" form (K17).
 const LOAF_TEXT = {
-  loafing: ' is loafing around.',
-  wont_obey: " won't obey!",
-  turned_away: ' turned away!',
-  ignored_orders: ' ignored orders!',
+  loafing: ' is\nloafing around.',
+  wont_obey: " won't\nobey!",
+  turned_away: ' turned\naway!',
+  ignored_orders: '\nignored orders!',
 };
 
 // ItemUseBall's misses by shake count (`.printMessage`, wPokeBallAnimData
@@ -426,22 +437,23 @@ const LOAF_TEXT = {
 // charmap's "POKé" ($54) and ends in the é ($BA) a Red `msg` now carries
 // (sanitize cleanBattleText), so POKéMON is spelled as the cart prints it.
 const BALL_MISS_TEXT = {
-  0: 'You missed the POKéMON!',
-  1: 'Darn! The POKéMON broke free!',
-  2: 'Aww! It appeared to be caught!',
-  3: 'Shoot! It was so close too!',
+  0: 'You missed the\nPOKéMON!',
+  1: 'Darn! The POKéMON\nbroke free!',
+  2: 'Aww! It appeared\nto be caught!',
+  3: 'Shoot! It was so\nclose too!',
 };
 
 // The party menu's line for a status cure, by item (ItemUseMedicine's
 // `lb bc, <ITEM>_MSG, ...`, party_menu.asm's AntidoteText .. FullHealText),
-// after the monster's name. FULL RESTORE at full HP is a FULL HEAL.
+// after the monster's name (wNameBuffer, the party menu's: bare, K17) and
+// with the menu text's breaks (K18). FULL RESTORE at full HP is a FULL HEAL.
 const CURE_TEXT = {
-  ANTIDOTE: ' was cured of poison!',
-  BURN_HEAL: "'s burn was healed!",
-  ICE_HEAL: ' was defrosted!',
-  AWAKENING: ' woke up!',
-  PARLYZ_HEAL: "'s rid of paralysis!",
-  FULL_HEAL: "'s health returned!",
+  ANTIDOTE: ' was\ncured of poison!',
+  BURN_HEAL: "'s\nburn was healed!",
+  ICE_HEAL: ' was\ndefrosted!',
+  AWAKENING: '\nwoke up!',
+  PARLYZ_HEAL: "'s\nrid of paralysis!",
+  FULL_HEAL: "'s\nhealth returned!",
 };
 
 // An item's name in a sentence: its id's words, which are the cart's item
@@ -453,6 +465,25 @@ function itemLabel(id) {
   if (label === 'GUARD SPEC') label = 'GUARD SPEC.';
   return label;
 }
+
+// A battler's name the way the cart's <USER> / <TARGET> print it
+// (PlaceMoveUsersName / PlaceMoveTargetsName): the seat's side mark, then the
+// name (Events.named, contract K17). Every marked name in this file comes
+// through here; a name the cart prints bare is `mon.species` as it is.
+function named(fighter, mon) {
+  return Events.named(fighter ? fighter.side : undefined, mon ? mon.species : 'POKéMON');
+}
+
+// ItemUseNoEffectText, "It won't have any\neffect." (text_6.asm).
+const NO_EFFECT_TEXT = "It won't have any\neffect.";
+// The X items' stat names (`_xStatItem`).
+const X_STAT_LABEL = {
+  atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
+  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVADE',
+};
+// HurtItselfText (text_2.asm), the confusion self-hit's and a disobedient
+// monster's.
+const HURT_ITSELF_TEXT = 'It hurt itself in\nits confusion!';
 
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
@@ -934,8 +965,8 @@ function typeLine(percents, last) {
     effectiveness = 100;
     for (const pct of percents || []) effectiveness = effectiveness * pct / 100;
   }
-  if (effectiveness > 100) return "It's super effective!";
-  if (effectiveness < 100) return "It's not very effective...";
+  if (effectiveness > 100) return "It's super\neffective!";
+  if (effectiveness < 100) return "It's not very\neffective...";
   return null;
 }
 
@@ -1218,6 +1249,24 @@ class Battle {
     return this._emit('anim', { slot: fighter.slot, side: fighter.side, text: id });
   }
 
+  // STATUS_AFFECTED_ANIM over the user (contract K20), wherever the cart plays
+  // it: `.FlyOrChargeEffect` when a full paralysis or a confusion self-hit
+  // ends the turn (`.MonHurtItselfOrFullyParalysed`, core.asm :3459-3476; the
+  // enemy's, :5836-5853) and PlayerCheckIfFlyOrChargeEffect /
+  // EnemyCheckIfFlyOrChargeEffect (:3184-3197, :5585-5599) on a move that missed
+  // -- HandleIfPlayerMoveMissed's `jr` -- or that CalculateDamage found at power
+  // 0. Each tests the move struct's effect, wPlayerMoveEffect /
+  // wEnemyMoveEffect, for FLY_EFFECT or CHARGE_EFFECT (Effects.isCharge): the
+  // cancelled FLY or charge. At a gate that is the struct as it stands
+  // (`moveStruct`, before GetCurrentMove) -- the charging move's on its
+  // release turn, the menu's pick on a player's fresh one; on a miss, the move
+  // being used.
+  _flyOrChargeAnim(fighter, effectId) {
+    if (Effects.isCharge(effectId)) {
+      this._statusAnim(fighter, 'STATUS_AFFECTED_ANIM');
+    }
+  }
+
   /*
    * Every seat's party roster, published when -- and only when -- it moved.
    *
@@ -1241,10 +1290,17 @@ class Battle {
    * which is how the opening rosters reach a client (`_openTurn` runs at the
    * end of construction, behind the send-outs).
    */
-  _syncTeams() {
+  // `fainting` is the seat `_faint` is taking down: its roster goes with its
+  // faint. Any other seat whose monster still stands at 0 HP -- a knockout
+  // waiting for the action's end, K19's `_reapKo` -- is held back until its own
+  // faint publishes it, so a double knockout darkens each ball with the faint it
+  // belongs to rather than the first one's.
+  _syncTeams(fainting) {
     for (const fighter of this.fighters) {
+      const standing = fighter.active ? monAt(fighter, fighter.active) : null;
+      const pending = fighter !== fainting && standing !== null && standing.hp <= 0;
       const roster = Events.teamString(fighter.mons);
-      if (roster !== fighter.team) {
+      if (!pending && roster !== fighter.team) {
         fighter.team = roster;
         this._emit('team', {
           slot: fighter.slot, side: fighter.side, team: roster,
@@ -1602,13 +1658,13 @@ class Battle {
   // and the step that reaches 0 lifts it there and then ("<MON>'s disabled no
   // more!"), so that turn's move goes ahead even if it is the one that was
   // disabled. The 1..8 of DisableEffect counts these steps.
-  _tickDisable(mon) {
+  _tickDisable(fighter, mon) {
     const d = mon.disable;
     if (!d || int(d.turns, 0) <= 0) return;
     d.turns -= 1;
     if (d.turns <= 0) {
       mon.disable = null;
-      this._say(`${mon.species}'s disabled no more!`);
+      this._say(`${named(fighter, mon)}'s\ndisabled no more!`);
     }
   }
 
@@ -2836,7 +2892,8 @@ class Battle {
       }
     }
     if (lastRead) {
-      fighter.moveStruct = { power: int(lastRead.power, 0), type: int(lastRead.type, 0) };
+      fighter.moveStruct = { power: int(lastRead.power, 0), type: int(lastRead.type, 0),
+        effect: int(lastRead.effect, 0) };
     }
     let best = null;
     for (let i = 1; i <= n; i += 1) {
@@ -3222,13 +3279,15 @@ class Battle {
     // throw -- not in a trainer fight, which blocks the ball first), X
     // ACCURACY, GUARD SPEC., DIRE HIT, a POKé DOLL in a wild fight and the X
     // stat items (PrintItemUseTextAndRemoveItem). A medicine, a PP restorer
-    // and the POKé FLUTE print only what they did.
+    // and the POKé FLUTE print only what they did. The AI's line breaks
+    // before "used" and "on" and names its monster by wEnemyMonNick, bare;
+    // ItemUseText00 breaks at its `text_low`, before the item (K17 / K18).
     if (computer) {
       const onMon = activeMon(fighter);
-      this._say(`${fighter.name} used ${label} on ${onMon ? onMon.species : 'POKéMON'}!`);
+      this._say(`${fighter.name}\nused ${label}\non ${onMon ? onMon.species : 'POKéMON'}!`);
     } else if (effect && ((effect.ball && wild) || effect.xAccuracy || effect.mist
         || effect.focusEnergy || (effect.pokeDoll && wild) || effect.stage)) {
-      this._say(`${fighter.name} used ${label}!`);
+      this._say(`${fighter.name} used\n${label}!`);
     }
     // Spend after the announce (Gen1 bag stack). noConsume (Poké Flute) and
     // seats with no bag sheet are left alone, and so is a player's use the
@@ -3241,12 +3300,14 @@ class Battle {
     }
     if (!effect) {
       // An item the referee has no table row for: ItemUseNoEffect's line.
-      this._say("It won't have any effect.");
+      this._say(NO_EFFECT_TEXT);
     } else if (effect.ball) {
       if (!wild) {
-        // ThrowBallAtTrainerMon (item_effects.asm): the trainer knocks it
-        // away, and the ball is gone.
-        this._say('The trainer blocked the BALL!');
+        // ThrowBallAtTrainerMon (item_effects.asm :2292-2303): the toss --
+        // TOSS_ANIM whatever the ball, on the thrower's seat (K20) -- then
+        // the trainer knocks it away, and the ball is gone.
+        this._statusAnim(fighter, 'TOSS_ANIM');
+        this._say('The trainer\nblocked the BALL!');
         this._say("Don't be a thief!");
       } else {
         // Wild modes seat exactly one monster on side b, so "the first
@@ -3263,7 +3324,8 @@ class Battle {
           // ItemUseBall's `.printMessage` off wPokeBallAnimData: the shake
           // count picks ItemUseBallText01..04; a catch is ItemUseBallText05.
           if (result.caught) {
-            this._say(`All right! ${target.species} was caught!`);
+            // ItemUseBallText05 names wEnemyMonNick bare (K17).
+            this._say(`All right!\n${target.species} was\ncaught!`);
             const finish = this._finish(
               'win',
               this._sidePlayers(fighter.side),
@@ -3290,7 +3352,7 @@ class Battle {
         ));
       } else {
         // ItemUsePokeDoll outside a wild fight is ItemUseNotTime.
-        this._say(`OAK: ${fighter.name}! This isn't the time to use that!`);
+        this._say(`OAK: ${fighter.name}!\nThis isn't the\ntime to use that!`);
       }
     } else if (effect.vitamin) {
       if (!vitaminApplied) {
@@ -3320,7 +3382,8 @@ class Battle {
             text: `${mon.species}'s ${statLabel} rose.`,
           });
         }
-        this._say(`${mon.species}'s ${statLabel} rose.`);
+        // (wNameBuffer, bare: K17.)
+        this._say(`${mon.species}'s\n${statLabel} rose.`);
       }
     } else if (effect.pokeFlute) {
       let woke = false;
@@ -3339,19 +3402,21 @@ class Battle {
       }
       // ItemUsePokeFlute's `.inBattle`: PlayedFluteHadEffectText then
       // FluteWokeUpText, or PlayedFluteNoEffectText (data/text/text_6.asm
-      // "# FLUTE", "#MON woke up.": the charmap's POKé).
+      // "# FLUTE", "#MON woke up.": the charmap's POKé) -- whose `para` is a
+      // second line of its own (K18).
       if (woke) {
-        this._say(`${fighter.name} played the POKé FLUTE.`);
-        this._say('All sleeping POKéMON woke up.');
+        this._say(`${fighter.name} played the\nPOKé FLUTE.`);
+        this._say('All sleeping\nPOKéMON woke up.');
       } else {
-        this._say("Played the POKé FLUTE. Now, that's a catchy tune!");
+        this._say('Played the POKé\nFLUTE.');
+        this._say("Now, that's a\ncatchy tune!");
       }
     } else {
       const partyIdx = choice.slot != null ? choice.slot : fighter.active;
       const mon = monAt(fighter, partyIdx);
       // ItemUseNoEffect, "It won't have any effect.", for every use the
       // party menu turns down (`.healingItemNoEffect` and the PP menus').
-      const NO_EFFECT = "It won't have any effect.";
+      const NO_EFFECT = NO_EFFECT_TEXT;
       if (!mon) {
         this._say(NO_EFFECT);
       } else if (effect.activeOnly && partyIdx !== fighter.active) {
@@ -3382,34 +3447,8 @@ class Battle {
           applied = true;
         }
         if (effect.stage) {
-          // ItemUseXStat runs StatModifierUpEffect on the player's turn
-          // (item_effects.asm :1638-1666), and the AI's X items run the same
-          // routine on its own (trainer_ai.asm AIIncreaseStat): so an X item
-          // is a stat-up move in everything but the menu -- the 999 wall, the
-          // badge re-run on the user and the re-penalty on the battler
-          // opposite, who has no aimed seat to be read off.
-          const stat = effect.stage.stat;
-          const foe = this._oppositeFoe(fighter);
-          const { outcome, stage } = Effects.changeStat({
-            mon, fighter, stat,
-            delta: int(effect.stage.delta, 1),
-            mover: fighter, nonMover: foe ? activeMon(foe) : null,
-          });
-          if (outcome === 'rose') {
-            const statLabel = ({
-              atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
-              spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVADE',
-            })[stat] || 'STAT';
-            // StatModifierUpEffect's MonsStatsRoseText (an UP1 effect).
-            this._say(`${mon.species}'s ${statLabel} rose!`);
-            this._emit('stat', {
-              slot: fighter.slot, side: fighter.side,
-              amount: stage, stage,
-              text: `${mon.species}'s ${statLabel} rose!`,
-            });
-          } else {
-            this._say('Nothing happened!');
-          }
+          // ItemUseXStat / AIIncreaseStat: `_xStatItem`.
+          this._xStatItem(fighter, mon, effect.stage.stat, effect.stage.delta);
           applied = true;
         }
         if (effect.revive) {
@@ -3423,7 +3462,7 @@ class Battle {
             slot: fighter.slot, side: fighter.side,
             amount: hp, hp: mon.hp,
           });
-          this._say(`${mon.species} is revitalized!`);
+          this._say(`${mon.species}\nis revitalized!`);
           applied = true;
         }
         // ItemUsePPRestore works on the PARTY struct (wPartyMon1Moves /
@@ -3557,7 +3596,7 @@ class Battle {
         // AIPrintItemUse line is all it says.
         if (!computer) {
           if (healed) {
-            this._say(`${mon.species} recovered by ${healedBy}!`);
+            this._say(`${mon.species}\nrecovered by ${healedBy}!`);
           } else if (cleared) {
             this._say(`${mon.species}${has(CURE_TEXT, choice.item) ? CURE_TEXT[choice.item] : CURE_TEXT.FULL_HEAL}`);
           } else if (!applied && !said) {
@@ -3566,6 +3605,42 @@ class Battle {
         }
       }
     }
+  }
+
+  // An X item's stat raise: StatModifierUpEffect run on the item user's own
+  // turn -- ItemUseXStat (item_effects.asm :1638-1666) for the player's,
+  // AIIncreaseStat (trainer_ai.asm) for the AI's -- so an X item is a stat-up
+  // move in everything but the menu: the 999 wall, the badge re-run on the user
+  // and the re-penalty on the battler opposite, who has no aimed seat to be read
+  // off (`_oppositeFoe`). On a raise UpdateStatDone (effects.asm :457-485)
+  // plays the move struct's animation over the user -- XSTATITEM_ANIM, which
+  // ItemUseXStat wrote into wPlayerMoveNum (AIIncreaseStat writes
+  // XSTATITEM_DUPLICATE_ANIM, the same picture on the enemy's half; contract
+  // K20 sends both as XSTATITEM_ANIM) -- and then MonsStatsRoseText,
+  // "<USER>'s\n<STAT> rose!" (an UP1 effect: never "greatly"). At +6 or at
+  // 999 it is PrintNothingHappenedText and no animation. Returns
+  // Effects.changeStat's outcome. The one door for both seats' X items: the
+  // computer's TrainerAI calls it too.
+  _xStatItem(fighter, mon, stat, delta) {
+    const foe = this._oppositeFoe(fighter);
+    const { outcome, stage } = Effects.changeStat({
+      mon, fighter, stat,
+      delta: int(delta, 1),
+      mover: fighter, nonMover: foe ? activeMon(foe) : null,
+    });
+    if (outcome === 'rose') {
+      this._statusAnim(fighter, 'XSTATITEM_ANIM');
+      const line = `${named(fighter, mon)}'s\n${X_STAT_LABEL[stat] || 'STAT'} rose!`;
+      this._say(line);
+      this._emit('stat', {
+        slot: fighter.slot, side: fighter.side,
+        amount: stage, stage,
+        text: Events.plain(line),
+      });
+    } else {
+      this._say('Nothing happened!');
+    }
+    return outcome;
   }
 
   // Gen1 TossBallAnimation event stream (mirror BattleState:ballChain / tossAnimFor).
@@ -3682,6 +3757,8 @@ class Battle {
       // a faster attacker, the replacement that came in behind it does not
       // inherit the turn -- nor spend the AI's item or switch for it.
       const fighter = actor.fighter;
+      // Every knockout the slot deals waits for its end (`_reapKo`, K19).
+      this.koHeld = true;
       if (activeMon(fighter) === actor.mon) {
         const choice = fighter.choice;
         // ExecuteEnemyMove's `inc [hl]` on wAILayer2Encouragement (core.asm
@@ -3711,6 +3788,7 @@ class Battle {
           this._rechargeTurn(fighter, actor.mon);
         }
       }
+      this._reapKo();
       // Finalize after each action (not inside `_faint`) so KO + recoil / explode
       // on the same move can still mutual-faint into a draw, while an empty-bench
       // KO still stops the slower seat from acting. The action's faint batch is
@@ -3739,7 +3817,7 @@ class Battle {
     if (!this._firstGates(fighter, mon)) return;
     if (mon.mustRecharge) {
       mon.mustRecharge = false;
-      this._say(`${mon.species} must recharge!`);
+      this._say(`${named(fighter, mon)}\nmust recharge!`);
     }
   }
 
@@ -3860,7 +3938,7 @@ class Battle {
           mon.statusTurns = 0;
           // WokeUpText (core.asm :3346-3347), the line; the chip's cure rides
           // the `status` event.
-          this._say(`${mon.species} woke up!`);
+          this._say(`${named(fighter, mon)}\nwoke up!`);
           this._emit('status', {
             slot: fighter.slot, side: fighter.side,
             text: `${mon.species} woke up!`,
@@ -3871,10 +3949,10 @@ class Battle {
           // SLP_ANIM behind it on the enemy's (:5686-5691).
           const player = isPlayerSeat(this.mode, fighter);
           if (player) this._statusAnim(fighter, 'SLP_PLAYER_ANIM');
-          this._say(`${mon.species} is fast asleep!`);
+          this._say(`${named(fighter, mon)}\nis fast asleep!`);
           if (!player) this._statusAnim(fighter, 'SLP_ANIM');
         } else if (mon.status === 'freeze') {
-          this._say(`${mon.species} is frozen solid!`);
+          this._say(`${named(fighter, mon)}\nis frozen solid!`);
         }
         if (!gate.canMove) {
           mon.lastUsedMove = null;
@@ -3884,13 +3962,13 @@ class Battle {
     }
 
     if (this._isHeld(fighter, mon)) {
-      this._say(`${mon.species} can't move!`);
+      this._say(`${named(fighter, mon)}\ncan't move!`);
       return false;
     }
 
     if (mon.flinch) {
       mon.flinch = false;
-      this._say(`${mon.species} flinched!`);
+      this._say(`${named(fighter, mon)}\nflinched!`);
       return false;
     }
     return true;
@@ -3905,7 +3983,7 @@ class Battle {
   _runGates(fighter, mon, move) {
     if (!this._firstGates(fighter, mon)) return false;
 
-    this._tickDisable(mon);
+    this._tickDisable(fighter, mon);
 
     if (mon.confusion > 0) {
       const hit = this._selfHitState(fighter, mon);
@@ -3916,7 +3994,7 @@ class Battle {
       // byte (core.asm :3418-3424), whether or not it then hurts itself.
       let roll = null;
       if (mon.confusion > 1) {
-        this._say(`${mon.species} is confused!`);
+        this._say(`${named(fighter, mon)}\nis confused!`);
         // CONF_PLAYER_ANIM / CONF_ANIM behind IsConfusedText, before the
         // byte, on either side's turn (core.asm :3422-3426, :5762-5767).
         this._statusAnim(fighter, isPlayerSeat(this.mode, fighter)
@@ -3933,15 +4011,17 @@ class Battle {
       if (gate) {
         mon.confusion = int(gate.turnsRemaining, 0);
         if (gate.snappedOut) {
-          this._say(`${mon.species}'s confused no more!`);
+          this._say(`${named(fighter, mon)}'s\nconfused no more!`);
           this._emit('status', {
             slot: fighter.slot, side: fighter.side, confused: 0,
             text: `${mon.species}'s confused no more!`,
           });
         } else if (gate.selfHit) {
           this._selfHitClears(fighter, mon);
-          this._say('It hurt itself in its confusion!');
+          this._say(HURT_ITSELF_TEXT);
           this._selfHit(fighter, mon, gate.selfDamage || 0);
+          // `.MonHurtItselfOrFullyParalysed`, after HandleSelfConfusionDamage.
+          this._flyOrChargeAnim(fighter, fighter.moveStruct ? fighter.moveStruct.effect : undefined);
           return false;
         }
         if (!gate.canMove) return false;
@@ -3949,15 +4029,17 @@ class Battle {
     }
 
     if (this._isDisabledMove(mon, move)) {
-      this._say(`${mon.species}'s ${moveLabel(move)} is disabled!`);
+      // MoveIsDisabledText, "<USER>'s\n<MOVE> is\ndisabled!".
+      this._say(`${named(fighter, mon)}'s\n${moveLabel(move)} is\ndisabled!`);
       return false;
     }
 
     if (mon.status === 'paralysis') {
       const gate = Status.beforeMove({ status: 'paralysis' }, this.rng.byte());
       if (gate && gate.fullyParalyzed) {
-        this._say(`${mon.species}'s fully paralyzed!`);
+        this._say(`${named(fighter, mon)}'s\nfully paralyzed!`);
         this._paralysisClears(fighter, mon);
+        this._flyOrChargeAnim(fighter, fighter.moveStruct ? fighter.moveStruct.effect : undefined);
         return false;
       }
     }
@@ -4073,17 +4155,19 @@ class Battle {
       if (mon.status === 'toxic') mon.toxicLinger = true;
       mon.status = 'sleep';
       mon.statusTurns = Status.napTurns(this.rng);
-      const text = `${mon.species} began to nap!`;
+      // BeganToNapText over wBattleMonNick: bare (K17), "<MON> began\nto nap!".
+      const text = `${mon.species} began\nto nap!`;
       this._say(text);
       this._emit('status', {
-        slot: fighter.slot, side: fighter.side, status: STATUS_TO_WIRE.sleep, text,
+        slot: fighter.slot, side: fighter.side, status: STATUS_TO_WIRE.sleep,
+        text: Events.plain(text),
       });
       return { goes: false, instead: null };
     }
 
     if (verdict === 'selfhit') {
-      this._say(`${mon.species} won't obey!`);
-      this._say('It hurt itself in its confusion!');
+      this._say(`${mon.species}${LOAF_TEXT.wont_obey}`);
+      this._say(HURT_ITSELF_TEXT);
       this._selfHit(fighter, mon, Status.selfHitDamage(this._selfHitState(fighter, mon)));
       return { goes: false, instead: null };
     }
@@ -4200,12 +4284,14 @@ class Battle {
 
   // The move struct COUNTER reads off the seat it strikes (wPlayerMoveNum ..
   // wPlayerMoveMaxPP / the enemy's): power and type of the move GetCurrentMove,
-  // ReloadMoveData or the trainer AI's ReadMove last copied there. One per
+  // ReloadMoveData or the trainer AI's ReadMove last copied there -- and its
+  // effect, which a gate's STATUS_AFFECTED_ANIM reads (`_flyOrChargeAnim`). One per
   // seat, as the cart keeps one per side; nothing clears it (a send-out zeroes
   // the number byte alone, which COUNTER never reads).
   _loadMoveStruct(fighter, move) {
     if (!move || typeof move !== 'object') return;
-    fighter.moveStruct = { power: int(move.power, 0), type: int(move.type, 0) };
+    fighter.moveStruct = { power: int(move.power, 0), type: int(move.type, 0),
+      effect: int(move.effect, 0) };
   }
 
   // DecrementPP (engine/battle/decrement_pp.asm) on the list index's slot of the
@@ -4234,6 +4320,32 @@ class Battle {
     if (mon.hp > 0) this._damage(fighter, mon, mon.hp, null, true);
   }
 
+  // The knockouts an action left, fainted where MainInBattleLoop looks for
+  // them (contract K19): `ld a, b / and a / jp z, HandleEnemyMonFainted` -- or
+  // HandlePlayerMonFainted -- once ExecutePlayerMove / ExecuteEnemyMove has
+  // returned (core.asm :413-467), so after the move's whole tail: the drain,
+  // the recoil, the Pay Day line, the hit count, the target's Rage, the side
+  // effect, and an EXPLOSION's user taken to 0 (ExplodeEffect zeroes it among
+  // the AlwaysHappen routines, without a word). Until then a monster at 0 HP
+  // stays on the field, `activeMon` reading it as gone. Two at once -- a
+  // knockout and the recoil or blast that took the user with it -- go in the
+  // cart's order against the computer, the player's first: HandleEnemyMonFainted's
+  // FaintEnemyPokemon calls RemoveFaintedPlayerMon (:806) before it prints the
+  // enemy's line and writes wBattleResult 0 (:812-818), and HandlePlayerMonFainted
+  // removes the player's (:969-972) before it reads the enemy's HP. So side a,
+  // then side b, each in field order; a link fight -- whose consoles each put
+  // their own first -- takes the same order. A residual's knockout keeps its
+  // own point (`_residualFor`): this runs at the end of the slot, before it.
+  _reapKo() {
+    this.koHeld = null;
+    for (const side of SIDES) {
+      for (const fighter of this.bySide[side]) {
+        const mon = fighter.active ? monAt(fighter, fighter.active) : null;
+        if (mon && mon.hp <= 0) this._faint(fighter, mon);
+      }
+    }
+  }
+
   // An Explosion / Self-Destruct that did not land. EXPLODE_EFFECT is the one
   // miss ExecutePlayerMove lets on to `.notDone` (core.asm :3222-3225; the
   // enemy's `.handleExplosionMiss`, :5622-5624), so the user still goes down
@@ -4258,7 +4370,7 @@ class Battle {
     this.lastDamage = 0;
     if (Effects.isExplode(effectId)) this._explodeMissed(fighter, mon, target, defender);
     if (Effects.isJumpKick(effectId)) {
-      this._say(`${mon.species} kept going and crashed!`);
+      this._say(`${named(fighter, mon)}\nkept going and\ncrashed!`);
       this._selfHit(fighter, mon, Effects.jumpKickCrash(this.lastDamage));
     }
     this._markLastMove(mon, usedSlot);
@@ -4270,11 +4382,12 @@ class Battle {
   // wCriticalHitOrOHKO (a target faster than the user) is "<TARGET>'s
   // unaffected!"; else "<USER>'s attack missed!" -- the accuracy byte, DREAM
   // EATER's sleep check, an invulnerable or a Misted target, a 0.25x zero
-  // all alike.
-  _damageMissText(mon, defender, immune, ohko) {
-    if (immune) return `It doesn't affect ${defender.species}!`;
-    if (ohko) return `${defender.species}'s unaffected!`;
-    return `${mon.species}'s attack missed!`;
+  // all alike. With the cart's marks and breaks (K17 / K18):
+  // DoesntAffectMonText, UnaffectedText, AttackMissedText.
+  _damageMissText(fighter, mon, target, defender, immune, ohko) {
+    if (immune) return `It doesn't affect\n${named(target, defender)}!`;
+    if (ohko) return `${named(target, defender)}'s\nunaffected!`;
+    return `${named(fighter, mon)}'s\nattack missed!`;
   }
 
   // MoveHitTest (core.asm :5228-5345) for a move that reaches it, in its
@@ -4385,7 +4498,7 @@ class Battle {
       if (teleport) {
         this._say('But, it failed!');
       } else {
-        this._say(`${defender.species} is unaffected!`);
+        this._say(`${named(target, defender)}\nis unaffected!`);
       }
       return;
     }
@@ -4393,16 +4506,16 @@ class Battle {
       if (teleport) {
         this._say('But, it failed!');
       } else {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
       }
       return;
     }
     if (teleport) {
-      this._say(`${mon.species} ran from battle!`);
+      this._say(`${named(fighter, mon)}\nran from battle!`);
     } else if (key === 'ROAR') {
-      this._say(`${defender.species} ran away scared!`);
+      this._say(`${named(target, defender)}\nran away scared!`);
     } else {
-      this._say(`${defender.species} was blown away!`);
+      this._say(`${named(target, defender)}\nwas blown away!`);
     }
     this._concedeRun(teleport ? fighter : target);
   }
@@ -4468,19 +4581,19 @@ class Battle {
     // leaving the struct's type as GetCurrentMove last left it: a COUNTER can
     // answer a Bide.
     if (fighter.moveStruct && typeof fighter.moveStruct === 'object') fighter.moveStruct.power = 1;
-    this._say(`${mon.species} unleashed energy!`);
+    this._say(`${named(fighter, mon)}\nunleashed energy!`);
     const aim = fighter.choice.target;
     const target = aim !== null && aim !== undefined ? this._retarget(fighter, aim) : null;
     const defender = target ? activeMon(target) : null;
     if (!defender) {
-      this._say(`${mon.species} has no target`);
+      this._say(`${named(fighter, mon)} has no target`);
       return;
     }
     this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
     const damage = (2 * stored) % 65536;
     if (damage <= 0) {
       this.lastDamage = 0;
-      this._say(`${mon.species}'s attack missed!`);
+      this._say(`${named(fighter, mon)}'s\nattack missed!`);
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -4536,12 +4649,12 @@ class Battle {
       // turn it away before its MoveHitTest, and a miss says the same thing
       // -- "It didn't affect <TARGET>!" (`.noEffect` / `.didntAffect`).
       if (Effects.poisonTurnsAway(defender, this.poisonType)) {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
         this._markLastMove(mon, usedSlot);
         return;
       }
       if (!this._hitTest(mon, defender, move, effectId).hit) {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
@@ -4567,15 +4680,15 @@ class Battle {
         defender.mustRecharge = false;
         extra = { overwrite: true };
       } else if (defender.status === 'sleep') {
-        this._say(`${defender.species}'s already asleep!`);
+        this._say(`${named(target, defender)}'s\nalready asleep!`);
         this._markLastMove(mon, usedSlot);
         return;
       } else if (Effects.hasMajorStatus(defender)) {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
         this._markLastMove(mon, usedSlot);
         return;
       } else if (!this._hitTest(mon, defender, move, effectId).hit) {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
@@ -4586,18 +4699,18 @@ class Battle {
       // both before MoveHitTest, whose miss is "It didn't affect" again. No
       // Substitute check: THUNDER WAVE reaches the monster behind a doll.
       if (Effects.hasMajorStatus(defender)) {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
         this._markLastMove(mon, usedSlot);
         return;
       }
       if (this.electricType !== null && int(move.type, -1) === this.electricType
           && hasType(defender, this.groundType)) {
-        this._say(`It doesn't affect ${defender.species}!`);
+        this._say(`It doesn't affect\n${named(target, defender)}!`);
         this._markLastMove(mon, usedSlot);
         return;
       }
       if (!this._hitTest(mon, defender, move, effectId).hit) {
-        this._say(`It didn't affect ${defender.species}!`);
+        this._say(`It didn't affect\n${named(target, defender)}!`);
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
@@ -4621,12 +4734,12 @@ class Battle {
       // "<TARGET> evaded attack!". No Substitute check: LEECH SEED reaches the
       // monster behind a doll.
       if (!this._hitTest(mon, defender, move, effectId).hit) {
-        this._say(`${defender.species} evaded attack!`);
+        this._say(`${named(target, defender)}\nevaded attack!`);
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
       if (hasType(defender, this.grassType) || defender.leechSeed) {
-        this._say(`${defender.species} evaded attack!`);
+        this._say(`${named(target, defender)}\nevaded attack!`);
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -4734,7 +4847,7 @@ class Battle {
   // held; fully paralysed or hurting itself, the trap is gone).
   _trapTurn(fighter, mon, move, usedSlot) {
     const trap = mon.trapping;
-    this._say(`${mon.species}'s attack continues!`);
+    this._say(`${named(fighter, mon)}'s\nattack continues!`);
     trap.turns = Math.max(0, int(trap.turns, 0) - 1);
     const target = this._fighterAtSlot(trap.targetSlot);
     const defender = target ? activeMon(target) : null;
@@ -4754,7 +4867,7 @@ class Battle {
   // (_HitXTimesText, the enemy's), with the count TwoToFiveAttacksEffect drew
   // (wPlayerNumHits / wEnemyNumHits). "The player" is the owner's rule.
   _hitTimesText(fighter, hits) {
-    if (isPlayerSeat(this.mode, fighter)) return `Hit the enemy ${hits} times!`;
+    if (isPlayerSeat(this.mode, fighter)) return `Hit the enemy\n${hits} times!`;
     return `Hit ${hits} times!`;
   }
 
@@ -4854,7 +4967,7 @@ class Battle {
     // new thrash.
     const thrashTurn = !called && !!choice.forcedMove && !!mon.thrashing;
     if (thrashTurn) {
-      this._say(`${mon.species}'s thrashing about!`);
+      this._say(`${named(fighter, mon)}'s\nthrashing about!`);
       mon.thrashing.turns -= 1;
       if (mon.thrashing.turns <= 0) {
         mon.thrashing = null;
@@ -4910,7 +5023,7 @@ class Battle {
     const target = this._retarget(fighter, choice.target);
     const defender = target && activeMon(target);
     if (!defender) {
-      this._say(`${mon.species} has no target`);
+      this._say(`${named(fighter, mon)} has no target`);
       return;
     }
 
@@ -4984,9 +5097,11 @@ class Battle {
     if (thrashTurn || chargingUp) {
       // nothing: see above
     } else if (disobedient) {
-      this._say(`${mon.species} used instead, ${moveLabel(move)}!`);
+      // _ActorNameText's <USER>, _UsedMove2Text's `line`, _UsedInsteadText's
+      // `cont` (K17 / K18).
+      this._say(`${named(fighter, mon)}\nused instead,\n${moveLabel(move)}!`);
     } else {
-      this._say(`${mon.species} used ${moveLabel(move)}!`);
+      this._say(`${named(fighter, mon)}\nused ${moveLabel(move)}!`);
     }
 
     // Charge / Fly: first turn sets state and ends; second turn releases.
@@ -5003,7 +5118,7 @@ class Battle {
         move: recordMove,
       };
       if (Effects.vanishes(effectId, move)) mon.invulnerable = true;
-      this._say(Effects.chargeMessage(mon, effectId, move.id));
+      this._say(Effects.chargeMessage(mon, effectId, move.id, fighter.side));
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -5057,7 +5172,7 @@ class Battle {
       // "The MIRROR MOVE failed!" (`.mirrorMoveFailed`, :4983-4986).
       const last = defender.lastUsedMove;
       if (!isTable(last) || Effects.isMirrorMove(last.effect)) {
-        this._say('The MIRROR MOVE failed!');
+        this._say('The MIRROR MOVE\nfailed!');
         this._markLastMove(mon, usedSlot);
         return;
       }
@@ -5096,6 +5211,11 @@ class Battle {
     const damaging = move.power > 0 || isCounter || Effects.isFixedDamage(effectId)
       || Effects.hitsAtPowerZero(effectId);
     if (!damaging) {
+      // CalculateDamage's power-0 `jp z, PlayerCheckIfFlyOrChargeEffect`
+      // (core.asm :3145): a FLY or charge move at power 0 -- on its release,
+      // the charge turn having returned above -- shows STATUS_AFFECTED_ANIM
+      // there (K20).
+      this._flyOrChargeAnim(fighter, effectId);
       this._statusMove(fighter, mon, target, defender, move, effectId,
         usedSlot, choice, recordMove);
       return;
@@ -5134,7 +5254,8 @@ class Battle {
     let damage = 0;
     if (Effects.isSetDamage(effectId)) {
       if (!this._hitTest(mon, defender, move, effectId).hit) {
-        this._say(this._damageMissText(mon, defender, false, false));
+        this._flyOrChargeAnim(fighter, effectId);
+        this._say(this._damageMissText(fighter, mon, target, defender, false, false));
         this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
         return;
       }
@@ -5176,12 +5297,14 @@ class Battle {
         // (PrintCriticalOHKOText), as the cart's does.
         const counter = this._counterDamage(target);
         if (!counter) {
-          this._say(`${mon.species}'s attack missed!`);
+          this._flyOrChargeAnim(fighter, effectId);
+          this._say(`${named(fighter, mon)}'s\nattack missed!`);
           this._markLastMove(mon, usedSlot);
           return;
         }
         if (!this._hitTest(mon, defender, move, effectId).hit) {
-          this._say(this._damageMissText(mon, defender, false, false));
+          this._flyOrChargeAnim(fighter, effectId);
+          this._say(this._damageMissText(fighter, mon, target, defender, false, false));
           this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
           return;
         }
@@ -5200,7 +5323,8 @@ class Battle {
           // outright on its high byte (AttackSubstitute) and keeps it for
           // COUNTER, and a monster takes its HP, which the overkill writes back.
           if (!Effects.ohkoLands(this._speedOf(fighter, mon), this._speedOf(target, defender))) {
-            this._say(this._damageMissText(mon, defender, false, true));
+            this._flyOrChargeAnim(fighter, effectId);
+            this._say(this._damageMissText(fighter, mon, target, defender, false, true));
             this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
             return;
           }
@@ -5278,7 +5402,11 @@ class Battle {
         const hit = this._hitTest(mon, defender, move, effectId).hit;
         if (immune || zeroed || !hit) {
           const noEffect = lastPct !== null ? lastPct === 0 : immune;
-          this._say(this._damageMissText(mon, defender, noEffect, false));
+          // HandleIfPlayerMoveMissed's `jr PlayerCheckIfFlyOrChargeEffect`: a
+          // released FLY or charge that missed shows STATUS_AFFECTED_ANIM
+          // ahead of PrintMoveFailureText's line (K20).
+          this._flyOrChargeAnim(fighter, effectId);
+          this._say(this._damageMissText(fighter, mon, target, defender, noEffect, false));
           if (hit) trapAfterZero();
           this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
           return;
@@ -5342,8 +5470,10 @@ class Battle {
       if (defender.hp <= 0) break;
       const hpBefore = defender.hp;
       const subUp = Effects.hasSubstitute(defender);
-      // The knockout's `faint` waits for the hit's lines (`holdFaint`).
-      this.lastDamage = this._damage(target, defender, damage, null, false, true);
+      // A knockout keeps its 0 HP on the field until the move is over: its
+      // `faint` is the action's end's (`_reapKo`, K19), after the lines below,
+      // the AlwaysHappen routine's and the rest of the move's.
+      this.lastDamage = this._damage(target, defender, damage, null);
       if (h === 1) {
         if (isOhko) {
           this._say('One-hit KO!');
@@ -5352,7 +5482,6 @@ class Battle {
         }
       }
       if (effectLine) this._say(effectLine);
-      if (defender.hp <= 0) this._faint(target, defender);
       totalDealt += hpBefore - defender.hp;
       if (subUp && !Effects.hasSubstitute(defender)) effectLive = false;
       if (effectLive) {
@@ -5360,7 +5489,7 @@ class Battle {
           hits = Effects.hitCount(effectId, this.rng);
           counted = true;
         }
-        this._alwaysHappen(fighter, mon, effectId, struggling, usedSlot, recordMove, defender);
+        this._alwaysHappen(fighter, mon, effectId, struggling, usedSlot, recordMove, defender, target);
       }
       if (defender.hp <= 0) break;
       this._buildRage(target, defender, fighter);
@@ -5388,8 +5517,12 @@ class Battle {
     }
 
     // A substitute absorbs HP (including the breaking hit), so totalDealt
-    // stays 0. Do not then apply a foe primary onto the mon behind it.
-    if (Effects.handlesPrimary(effectId) && totalDealt > 0) {
+    // stays 0. Do not then apply a foe primary onto the mon behind it. Nor onto
+    // one the move knocked out: JumpMoveEffect at `.executeOtherEffects` is
+    // past `ret z` on the target's HP (core.asm :3232-3242), and the
+    // knockout's faint waits for the move's end now (K19), so the 0 HP is
+    // what says so.
+    if (Effects.handlesPrimary(effectId) && totalDealt > 0 && defender.hp > 0) {
       this._applyPrimary(fighter, mon, target, defender, this._listIndex(fighter, choice),
         effectId, move.id);
     }
@@ -5402,10 +5535,10 @@ class Battle {
     }
 
     // ExplodeEffect ran with the AlwaysHappen routines (`_alwaysHappen`
-    // notes it); the faint is said here, after the target's Rage lines, where
-    // the cart says it -- ExplodeEffect zeroes the HP without a word and
-    // "fainted!" comes once the move is over. A doll the blast broke zeroed
-    // the effect first: the user lives.
+    // notes it); its HP is taken here, after the target's Rage lines --
+    // ExplodeEffect zeroes the HP without a word -- and "fainted!" comes once
+    // the move is over (`_reapKo`). A doll the blast broke zeroed the effect
+    // first: the user lives.
     if (Effects.isExplode(effectId) && effectLive) {
       this._faintUser(fighter, mon);
     }
@@ -5427,25 +5560,26 @@ class Battle {
   //   * RageEffect sets USING_RAGE; `calledMove` is the move a METRONOME /
   //     MIRROR MOVE called, which the forced turns replay.
   //   * ExplodeEffect's faint is `_useMove`'s, said after the move.
-  _alwaysHappen(fighter, mon, effectId, struggling, usedSlot, calledMove, defender) {
+  _alwaysHappen(fighter, mon, effectId, struggling, usedSlot, calledMove, defender, target) {
     if (Effects.isDrain(effectId)) {
       const heal = Effects.drainAmount(this.lastDamage);
       this.lastDamage = heal;
       this._heal(fighter, mon, heal);
       // DrainHPEffect_ ends on SuckedHealthText -- DreamWasEatenText for
-      // DREAM EATER (move_effects/drain_hp.asm :85-96) -- full HP or not.
-      const name = defender ? defender.species : 'POKéMON';
+      // DREAM EATER (move_effects/drain_hp.asm :85-96) -- full HP or not:
+      // "Sucked health from\n<TARGET>!", "<TARGET>'s\ndream was eaten!".
+      const name = named(target, defender);
       if (int(effectId, 0) === 8) {
-        this._say(`${name}'s dream was eaten!`);
+        this._say(`${name}'s\ndream was eaten!`);
       } else {
-        this._say(`Sucked health from ${name}!`);
+        this._say(`Sucked health from\n${name}!`);
       }
     } else if (Effects.isPayDay(effectId)) {
       this.payDay[fighter.side] += Effects.payDayCoins(mon.level);
-      this._say('Coins scattered everywhere!');
+      this._say('Coins scattered\neverywhere!');
     } else if (struggling || Effects.isRecoil(effectId)) {
       const recoil = Effects.recoilAmount(this.lastDamage, struggling);
-      this._say(`${mon.species}'s hit with recoil!`);
+      this._say(`${named(fighter, mon)}'s\nhit with recoil!`);
       this._damage(fighter, mon, recoil, null, true);
     } else if (Effects.isRage(effectId)) {
       mon.raging = true;
@@ -5483,12 +5617,12 @@ class Battle {
       // opening line, core.asm :4857-4858): <TARGET> is the doll's owner --
       // the other side's, on a self-hit or a crash -- then
       // SubstituteBrokeText if it went.
-      this._say(`The SUBSTITUTE took damage for ${mon.species}!`);
+      this._say(`The SUBSTITUTE\ntook damage for\n${named(fighter, mon)}!`);
       const dollHp = Math.max(0, int(mon.substitute, 0));
       if (amount > 255 || amount > dollHp) {
         mon.substitute = 0;
         mon.subAtZero = null;
-        this._say(`${mon.species}'s SUBSTITUTE broke!`);
+        this._say(`${named(fighter, mon)}'s\nSUBSTITUTE broke!`);
       } else {
         mon.substitute = dollHp - amount;
         mon.subAtZero = mon.substitute === 0 ? true : null;
@@ -5515,9 +5649,11 @@ class Battle {
       status: status && has(STATUS_TO_WIRE, status) ? STATUS_TO_WIRE[status] : undefined,
     });
 
-    // `holdFaint`: the caller runs `_faint` itself, after the lines the cart
-    // prints between the hit and the knockout (`_useMove`'s strike loop).
-    if (mon.hp <= 0 && !holdFaint) this._faint(fighter, mon);
+    // `holdFaint`: the caller runs `_faint` itself, once its pass is done
+    // (`_residualFor`). Inside an action (`koHeld`) the knockout waits for
+    // the action's end, where MainInBattleLoop looks at the HP (`_reapKo`,
+    // K19). Anywhere else it faints here.
+    if (mon.hp <= 0 && !holdFaint && !this.koHeld) this._faint(fighter, mon);
     return amount;
   }
 
@@ -5549,16 +5685,17 @@ class Battle {
   _buildRage(fighter, mon, source) {
     if (!source || !mon || !mon.raging || mon.hp <= 0) return;
     if (Effects.clampStage(mon.stages ? mon.stages.atk : null) >= Effects.STAGE_MAX) return;
-    this._say(`${mon.species}'s RAGE is building!`);
+    this._say(`${named(fighter, mon)}'s\nRAGE is building!`);
     const { outcome, stage } = Effects.changeStat({
       mon, fighter, stat: 'atk', delta: 1,
       mover: fighter, nonMover: activeMon(source),
     });
     if (outcome === 'rose') {
-      this._say(`${mon.species}'s ATTACK rose!`);
+      const line = `${named(fighter, mon)}'s\nATTACK rose!`;
+      this._say(line);
       this._emit('stat', {
         slot: fighter.slot, side: fighter.side,
-        amount: stage, stage, text: `${mon.species}'s ATTACK rose!`,
+        amount: stage, stage, text: Events.plain(line),
       });
     } else if (outcome === 'stuck') {
       this._say('Nothing happened!');
@@ -5817,7 +5954,7 @@ class Battle {
     // this is the one roster change a player is *watching* happen: the ball
     // goes dark in the same batch the monster goes down in, and a fight that
     // ends on this faint has no next window to have said it at.
-    this._syncTeams();
+    this._syncTeams(fighter);
 
     // Owed here, paid at the end of the action (`_drainExp`), with the fallen
     // sheet held in the queue so the payout still names the monster that fell
@@ -5892,9 +6029,9 @@ class Battle {
         // HurtByBurnText for a burn, HurtByPoisonText for a poison --
         // PSN on the status byte, a toxic included (core.asm :484-489).
         if (mon.status === 'burn') {
-          this._say(`${mon.species}'s hurt by the burn!`);
+          this._say(`${named(fighter, mon)}'s\nhurt by the burn!`);
         } else {
-          this._say(`${mon.species}'s hurt by poison!`);
+          this._say(`${named(fighter, mon)}'s\nhurt by poison!`);
         }
         // ...then BURN_PSN_ANIM, then the HP (:490-495).
         this._statusAnim(fighter, 'BURN_PSN_ANIM');
@@ -5925,15 +6062,21 @@ class Battle {
         seeded.toxicCounter = Math.max(1, int(seeded.toxicCounter, 1)) + 1;
       }
       const from = seed.fromSlot;
-      // The HP goes both ways first and HurtByLeechSeedText follows
-      // (:519-524). (The cart's ABSORB animation from the seeder is not
-      // sent: a move id on an `anim` reads as that monster using ABSORB.)
-      if (mon === seeded) this._damage(fighter, mon, amount, null, true, true);
       const seeder = from !== null && from !== undefined
         ? this._fighterAtSlot(from) : null;
       const sMon = seeder && activeMon(seeder);
+      // ABSORB's animation first, played from the seeder's half: the cart
+      // flips hWhoseTurn round PlayMoveAnimation (core.asm :506-516), so the
+      // move id rides an `anim` on the SEEDER's seat (K20) -- the one standing
+      // there now, which is also the one the HP goes to. Then the HP goes both
+      // ways and HurtByLeechSeedText follows (:518-523), "LEECH SEED saps\n
+      // <USER>!" -- <USER> the seeded monster, hWhoseTurn flipped back.
+      if (sMon && sMon.hp > 0) {
+        this._emit('anim', { slot: seeder.slot, side: seeder.side, text: 'ABSORB' });
+      }
+      if (mon === seeded) this._damage(fighter, mon, amount, null, true, true);
       if (sMon && sMon.hp > 0) this._heal(seeder, sMon, amount);
-      this._say(`LEECH SEED saps ${seeded.species}!`);
+      this._say(`LEECH SEED saps\n${named(fighter, seeded)}!`);
     }
     if (seeded && seeded.hp <= 0 && monAt(fighter, fighter.active) === seeded) {
       this._faint(fighter, seeded);

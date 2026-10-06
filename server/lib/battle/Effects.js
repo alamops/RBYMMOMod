@@ -17,6 +17,10 @@
 // The two condition penalties are Status' formulas (and its vectors'); the
 // stat machinery below is where they are written into a battle stat.
 const Status = require('./Status.js');
+// The lines below name battlers the way the cart's <USER> / <TARGET> do:
+// through Events.named (contract K17), with the cart's breaks (K18); an
+// event's own `text` is the same line read plain (Events.plain).
+const Events = require('./events.js');
 
 const NAMES = [
   'NO_ADDITIONAL_EFFECT',
@@ -666,11 +670,12 @@ function confuse(out, fighter, mon, rng, failIfAlready) {
   }
   const turns = (rng ? rng.byte() : 0) % 4 + 2;
   mon.confusion = turns;
-  const text = `${mon.species} became confused!`;
+  // BecameConfusedText, "<TARGET>\nbecame confused!".
+  const text = `${Events.named(fighter.side, mon.species)}\nbecame confused!`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.confused = 1;
-  fields.text = text;
+  fields.text = Events.plain(text);
   out.events.push({ kind: 'status', fields });
 }
 
@@ -710,9 +715,12 @@ function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) 
   // "<USER>'s <STAT> rose!" and "<TARGET>'s <STAT> fell!", with "greatly"
   // for the two-stage effects (an UP2 effect: `cp ATTACK_DOWN1_EFFECT / ret
   // nc`; a DOWN2 one: BIDE_EFFECT up to ATTACK_DOWN_SIDE_EFFECT). A side
-  // effect's one stage is plain "fell!".
-  const text = `${mon.species}'s ${label}`
-    + `${(delta >= 2 || delta <= -2) ? ' greatly ' : ' '}${outcome}!`;
+  // effect's one stage is plain "fell!". The name is <USER>'s for a raise
+  // and <TARGET>'s for a drop -- `mon` either way, on `fighter`'s side
+  // (K17) -- and the box breaks after it ("'s" / `line`) and, for a
+  // "greatly", at GreatlyRoseText's / GreatlyFellText's <SCROLL> (K18).
+  const text = `${Events.named(fighter.side, mon.species)}'s\n${label}`
+    + `${(delta >= 2 || delta <= -2) ? '\ngreatly ' : ' '}${outcome}!`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   // The stage it now sits at -- when that is not below neutral. `amount` is
@@ -722,7 +730,7 @@ function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) 
   if (stage >= 0) fields.amount = stage;
   // ...and `stage` says it signed, -6..6, every time (contract K10).
   fields.stage = stage;
-  fields.text = text;
+  fields.text = Events.plain(text);
   out.events.push({ kind: 'stat', fields });
 }
 
@@ -1041,17 +1049,19 @@ function applyPrimary(ctx) {
       if (userMon.status === 'toxic') userMon.toxicLinger = true;
       userMon.status = 'sleep';
       userMon.statusTurns = 2;
-      const text = had ? `${userMon.species} fell asleep and became healthy!`
-        : `${userMon.species} started sleeping!`;
+      // FellAsleepBecameHealthyText / StartedSleepingEffect, <USER>'s.
+      const user = Events.named(userFighter.side, userMon.species);
+      const text = had ? `${user}\nfell asleep and\nbecame healthy!`
+        : `${user}\nstarted sleeping!`;
       out.messages.push(text);
       const fields = fighterFields(userFighter);
       fields.status = wire.sleep || 'SLP';
-      fields.text = text;
+      fields.text = Events.plain(text);
       out.events.push({ kind: 'status', fields });
       amount = maxHp;
     }
     out.heals.push({ amount });
-    out.afterHeals = [`${userMon.species} regained health!`];
+    out.afterHeals = [`${Events.named(userFighter.side, userMon.species)}\nregained health!`];
     return out;
   }
 
@@ -1086,7 +1096,7 @@ function applyPrimary(ctx) {
       fields.text = `${seat.mon.species} snapped out of confusion`;
       out.events.push({ kind: 'status', fields });
     }
-    out.messages.push('All STATUS changes are eliminated!');
+    out.messages.push('All STATUS changes\nare eliminated!');
     return out;
   }
 
@@ -1118,11 +1128,11 @@ function applyPrimary(ctx) {
     targetMon.status = 'sleep';
     targetMon.statusTurns = turns;
     const token = wire.sleep || 'SLP';
-    const text = `${targetMon.species} fell asleep!`;
+    const text = `${Events.named(targetFighter.side, targetMon.species)}\nfell asleep!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
@@ -1143,11 +1153,12 @@ function applyPrimary(ctx) {
     targetMon.toxicLinger = null;
     if (toxic) targetMon.toxicCounter = 1;
     const token = toxic ? (wire.toxic || 'TOX') : (wire.poison || 'PSN');
-    const text = `${targetMon.species}${toxic ? "'s badly poisoned!" : ' was poisoned!'}`;
+    const text = Events.named(targetFighter.side, targetMon.species)
+      + (toxic ? "'s\nbadly poisoned!" : '\nwas poisoned!');
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
@@ -1163,11 +1174,12 @@ function applyPrimary(ctx) {
     applyStatusPenalty(targetMon);
     const token = wire.paralysis || 'PAR';
     // PrintMayNotAttackText (paralyze.asm :39).
-    const text = `${targetMon.species}'s paralyzed! It may not attack!`;
+    const text = Events.named(targetFighter.side, targetMon.species)
+      + "'s\nparalyzed! It may\nnot attack!";
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
@@ -1183,10 +1195,10 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
-    const text = `${targetMon.species} was seeded!`;
+    const text = `${Events.named(targetFighter.side, targetMon.species)}\nwas seeded!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
@@ -1255,7 +1267,9 @@ function applyPrimary(ctx) {
     // The slot (the menu's wPlayerDisabledMove nibble) and the move's id
     // (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
     targetMon.disable = { moveIndex: slot, turns, moveId: moves[slot - 1].id };
-    out.messages.push(`${targetMon.species}'s ${moveLabel(moves[slot - 1])} was disabled!`);
+    // MoveWasDisabledText, "<TARGET>'s\n<MOVE> was\ndisabled!".
+    out.messages.push(`${Events.named(targetFighter.side, targetMon.species)}`
+      + `'s\n${moveLabel(moves[slot - 1])} was\ndisabled!`);
     return out;
   }
 
@@ -1267,18 +1281,19 @@ function applyPrimary(ctx) {
     // monster, and keeps the `<=`.)
     const cost = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 4);
     if (hasSubstitute(userMon)) {
-      out.messages.push(`${userMon.species} has a SUBSTITUTE!`);
+      out.messages.push(
+        `${Events.named(userFighter.side, userMon.species)}\nhas a SUBSTITUTE!`);
       return out;
     }
     if (userMon.hp <= cost) {
-      out.messages.push('Too weak to make a SUBSTITUTE!');
+      out.messages.push('Too weak to make\na SUBSTITUTE!');
       return out;
     }
     userMon.hp -= cost;
     userMon.substitute = cost;
     userMon.subAtZero = null;
     out.directDamage = [{ amount: cost }];
-    out.messages.push('It created a SUBSTITUTE!');
+    out.messages.push('It created a\nSUBSTITUTE!');
     return out;
   }
 
@@ -1291,7 +1306,8 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.lightScreen = true;
-    out.messages.push(`${userMon.species}'s protected against special attacks!`);
+    out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
+      + "'s\nprotected against\nspecial attacks!");
     return out;
   }
 
@@ -1301,7 +1317,8 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.reflect = true;
-    out.messages.push(`${userMon.species} gained armor!`);
+    out.messages.push(
+      `${Events.named(userFighter.side, userMon.species)}\ngained armor!`);
     return out;
   }
 
@@ -1314,7 +1331,8 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.mist = true;
-    out.messages.push(`${userMon.species}'s shrouded in mist!`);
+    out.messages.push(
+      `${Events.named(userFighter.side, userMon.species)}'s\nshrouded in mist!`);
     return out;
   }
 
@@ -1324,7 +1342,8 @@ function applyPrimary(ctx) {
       return out;
     }
     userMon.focusEnergy = true;
-    out.messages.push(`${userMon.species}'s getting pumped!`);
+    out.messages.push(
+      `${Events.named(userFighter.side, userMon.species)}'s\ngetting pumped!`);
     return out;
   }
 
@@ -1336,7 +1355,8 @@ function applyPrimary(ctx) {
     for (let i = 0; i < (targetMon.types || []).length; i += 1) types.push(targetMon.types[i]);
     if (types.length === 0) types.push(0);
     userMon.types = types;
-    out.messages.push(`Converted type to ${targetMon.species}'s!`);
+    out.messages.push(
+      `Converted type to\n${Events.named(targetFighter.side, targetMon.species)}'s!`);
     return out;
   }
 
@@ -1383,7 +1403,9 @@ function applyPrimary(ctx) {
       chance: Math.max(0, int(source.chance, 0)),
       highCrit: source.highCrit === true,
     };
-    out.messages.push(`${userMon.species} learned ${moveLabel(source)}!`);
+    // MimicLearnedMoveText, "<USER>\nlearned\n<MOVE>!".
+    out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
+      + `\nlearned\n${moveLabel(source)}!`);
     out.movesChanged = true;
     return out;
   }
@@ -1455,7 +1477,10 @@ function applyPrimary(ctx) {
       highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
-    out.messages.push(`${userMon.species} transformed into ${targetMon.species}!`);
+    // TransformedText, "<USER>\ntransformed into\n<SPECIES>!": the copied
+    // species is wNameBuffer's (GetMonName), printed bare.
+    out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
+      + `\ntransformed into\n${targetMon.species}!`);
     out.movesChanged = true;
     return out;
   }
@@ -1544,11 +1569,13 @@ const SIDE_STAT_DOWN = {
   68: 'atk', 69: 'def', 70: 'spd', 71: 'spc',
 };
 
+// PoisonedText, BurnedText, FrozenText, ParalyzedMayNotAttackText (text_3
+// .asm): "<TARGET>" and the cart's breaks after it.
 const INFLICTED = {
-  poison: { token: 'PSN', says: ' was poisoned!' },
-  burn: { token: 'BRN', says: ' was burned!' },
-  freeze: { token: 'FRZ', says: ' was frozen solid!' },
-  paralysis: { token: 'PAR', says: "'s paralyzed! It may not attack!" },
+  poison: { token: 'PSN', says: '\nwas poisoned!' },
+  burn: { token: 'BRN', says: '\nwas burned!' },
+  freeze: { token: 'FRZ', says: '\nwas frozen solid!' },
+  paralysis: { token: 'PAR', says: "'s\nparalyzed! It may\nnot attack!" },
 };
 
 // Whether chart index `typeIndex` is one of the monster's (wEnemyMonType1 /
@@ -1570,11 +1597,11 @@ function inflict(out, fighter, mon, status, wire) {
   mon.status = status;
   applyStatusPenalty(mon);
   const entry = INFLICTED[status];
-  const text = `${mon.species}${entry.says}`;
+  const text = `${Events.named(fighter.side, mon.species)}${entry.says}`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.status = wire[status] || entry.token;
-  fields.text = text;
+  fields.text = Events.plain(text);
   out.events.push({ kind: 'status', fields });
 }
 
@@ -1642,11 +1669,11 @@ function applySide(ctx) {
         && moveType === c.fireType) {
         targetMon.status = null;
         targetMon.statusTurns = 0;
-        const text = `Fire defrosted ${targetMon.species}!`;
+        const text = `Fire defrosted\n${Events.named(targetFighter.side, targetMon.species)}!`;
         out.messages.push(text);
         // No token: a `status` event without one is a cure (events.js).
         const fields = fighterFields(targetFighter);
-        fields.text = text;
+        fields.text = Events.plain(text);
         out.events.push({ kind: 'status', fields });
       }
       return out;
@@ -1910,15 +1937,19 @@ function vanishes(effectId, moveOrId) {
   return isFly(effectId) || isDigMove(moveOrId);
 }
 
-function chargeMessage(mon, effectId, moveOrId) {
+// ChargeMoveEffectText (text_3.asm): "<USER>", then the move's own `line`.
+// `side` is the user's (K17's mark); a caller that names none gets the bare
+// name.
+function chargeMessage(mon, effectId, moveOrId, side) {
   const key = moveKey(moveOrId);
-  const species = (mon && mon.species) || 'POKéMON';
-  if (key === 'DIG') return `${species} dug a hole!`;
-  if (key === 'SOLARBEAM') return `${species} took in sunlight!`;
-  if (key === 'SKULL_BASH') return `${species} lowered its head!`;
-  if (key === 'RAZOR_WIND') return `${species} made a whirlwind!`;
-  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high!`;
-  return `${species} is glowing!`;
+  let species = (mon && mon.species) || 'POKéMON';
+  if (side !== undefined && side !== null) species = Events.named(side, species);
+  if (key === 'DIG') return `${species}\ndug a hole!`;
+  if (key === 'SOLARBEAM') return `${species}\ntook in sunlight!`;
+  if (key === 'SKULL_BASH') return `${species}\nlowered its head!`;
+  if (key === 'RAZOR_WIND') return `${species}\nmade a whirlwind!`;
+  if (key === 'FLY' || isFly(effectId)) return `${species}\nflew up high!`;
+  return `${species}\nis glowing!`;
 }
 
 // MoveHitTest (core.asm :5228-5262): SWIFT's `ret z` comes before the

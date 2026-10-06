@@ -427,8 +427,10 @@ end)()
     trainer = { baseMoney = 20, classId = "OPP_ALPHA",
                 items = { "POTION", "POTION" } },
   })
-  eq(f.sim.byId[FOE].bag and f.sim.byId[FOE].bag.POTION, 2,
-     "the trainer's own items list is the bag, counted per entry")
+  -- Contract K16: Red and Gold upload no NPC bag -- the referee runs the
+  -- class's own item AI off `aiClass` (Red) / the class attributes (Gold).
+  eq(f.sim.byId[FOE].bag, nil,
+     "K16: a Red trainer's items list is no bag any more -- nothing is uploaded")
 end)()
 
 ;(function()
@@ -669,12 +671,14 @@ end)()
   eq(fight.COMMANDS[4], "RUN", "the fourth command is RUN")
   fight:updateCommand(input)
 
-  eq(saidTimes(fight, "running from"), 1, "the screen refuses, once")
+  -- "No! There's no" / line "running from a" / cont "trainer battle!": the
+  -- `cont` scrolls the middle row (K18), so the first row is the count.
+  eq(saidTimes(fight, "No! There's no"), 1, "the screen refuses, once")
   eq(f.solo.refuseRun, nil, "and nothing is filed with the referee")
   eq(fight.answeredTurn, false, "the menu is not closed as answered")
 
   f.solo:update(1 / 60, f.game)
-  eq(saidTimes(fight, "running from"), 1,
+  eq(saidTimes(fight, "No! There's no"), 1,
      "the pump adds no second copy of the sentence")
   eq(sim.turn, turnBefore, "the turn is not spent")
   eq(sim:outcome(), nil, "and nothing was forfeited")
@@ -717,12 +721,14 @@ end)()
   eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
   eq(saidTimes(pvp, "running from"), 0,
      "and does not pretend a 1v1 is a trainer battle")
-  eq(saidTimes(pvp, "forfeit"), 1,
-     "and says it forfeited after the send landed")
+  -- Red: nothing at the send -- the cart's "Got away safely!" follows the
+  -- referee's `run` event (MediatedBattle.linkRunLine).
+  eq(saidTimes(pvp, "forfeit"), 0,
+     "and says nothing at the send on Red (the link run line follows the referee)")
 
   local npc, npcSent = pressRun("coop_npc")
   eq(#npcSent, 0, "trainer RUN is not filed")
-  eq(saidTimes(npc, "running from"), 1,
+  eq(saidTimes(npc, "No! There's no"), 1,
      "the screen still says there is no running from a trainer battle")
 end)()
 
@@ -2616,6 +2622,78 @@ end)()
     ok(after <= money, "mutual KO (" .. case.tag .. "): no prize and no coins were paid")
     package.loaded["src.link.Handshake"] = savedHandshake
   end
+end)()
+
+-- ------------------------------------------------------------------
+-- K16 / K21 on the solo path (docs/plans/gen12-referee-remaining-gaps.md):
+-- the class data rides to the computer's seat, no NPC bag, Gold's battle
+-- type on the ruleset and the wild foe's weight on its sheet.  Every
+-- number is invented.
+-- ------------------------------------------------------------------
+
+;(function()
+  local function capture(T, fn)
+    local captured
+    local real = T.create
+    T.create = function(opts) captured = opts; return real(opts) end
+    local okRun, result = pcall(fn)
+    T.create = real
+    if not okRun then error(result, 0) end
+    return captured, result
+  end
+
+  -- Red: the trainer's ai_classes record (TrainerAI.classFor's).
+  local redData = setmetatable({ ai_classes = {
+    OPP_FIX = { uses = 2, chance = 64, item = "X_ATTACK", hpBelow = 5 } } }, { __index = data })
+  local opts, f = capture(Turn, function()
+    return fightOf("trainer", { data = redData,
+      trainer = { id = "OPP_FIX", name = "FIXER", baseMoney = 20 } })
+  end)
+  ok(f.started, "K16 (solo Red): the trainer fight is taken over")
+  local seat = opts and opts.sides and opts.sides.b and opts.sides.b[1] or {}
+  local ai = seat.aiClass or {}
+  eq(table.concat({ ai.uses or "-", ai.chance or "-", ai.item or "-", ai.hpBelow or "-" }, ","),
+     "2,64,X_ATTACK,5", "K16 (solo Red): the class record rides to the computer's seat")
+  eq(seat.bag, nil, "K16 (solo Red): ...and no bag does")
+  eq(seat.trainerItems, nil, "K16 (solo Red): no Gold fields on a Red seat")
+
+  -- Gold: the class attributes, and the fight's battle type.  A Gold game
+  -- reads as one through the link handshake's generation (the Gold section
+  -- above has why); taken away again below.
+  local savedHandshake = package.loaded["src.link.Handshake"]
+  package.loaded["src.link.Handshake"] = {
+    generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+  }
+  local Turn2 = need("BattleSim2/Turn")
+  local goldOpts, g = capture(Turn2, function()
+    return fightOf("trainer", { cart2 = true, data = setmetatable({}, { __index = data }),
+      trainer = { name = "SCOUT FIX", baseMoney = 30, items = { "POTION" },
+                  attributes = { 1, 0, 30, 0x11, 0x02, 0x34, 0x01, 0 } } })
+  end)
+  ok(g.started, "K16 (solo Gold): the trainer fight is taken over")
+  local gseat = goldOpts and goldOpts.sides.b[1] or {}
+  eq(table.concat(gseat.trainerItems or {}, ","), "POTION", "K16 (solo Gold): trainerItems ride")
+  eq(gseat.aiFlags, 0x0211, "K16 (solo Gold): aiFlags (TRNATTR_AI_MOVE_WEIGHTS)")
+  eq(gseat.itemSwitch, 0x0134, "K16 (solo Gold): itemSwitch (TRNATTR_AI_ITEM_SWITCH)")
+  eq(gseat.baseReward, 30, "K16 (solo Gold): baseReward (TRNATTR_BASEMONEY)")
+  eq(gseat.bag, nil, "K16 (solo Gold): no NPC bag")
+
+  local gwData = setmetatable({ gen2Pokedex = { entries = { BETA = { weight = 55 } } } },
+    { __index = data })
+  local wildOpts, w = capture(Turn2, function()
+    return fightOf("wild", { cart2 = true, data = gwData, battleType = 4 })
+  end)
+  ok(w.started, "K21 (solo Gold wild): the encounter is taken over")
+  eq(wildOpts and wildOpts.battleType, 4, "K21 (solo Gold wild): the engine battle's type reaches the referee")
+  local foe = wildOpts and wildOpts.sides.b[1].mons[1] or {}
+  eq(foe.weight, 55, "K21 (solo Gold wild): the wild foe's sheet carries its dex weight")
+  package.loaded["src.link.Handshake"] = savedHandshake
+
+  local redWild = capture(Turn, function()
+    return fightOf("wild", { battleType = 4 })
+  end)
+  eq(redWild and redWild.battleType, nil, "K21: Red's ruleset carries no battle type")
+  eq(redWild and redWild.sides.b[1].mons[1].weight, nil, "K21: ...nor a weight")
 end)()
 
 -- ------------------------------------------------------------------

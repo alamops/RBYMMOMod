@@ -3429,7 +3429,12 @@ class Relay {
     // One trainer, so every seat it is dealt across is that trainer: each
     // carries the party's display name and Red move-choice layers
     // (cleanBattleParty reads `name` on Red / Gold and `aiMods` on Red, wave
-    // 6) -- tryStartSim names the seat and hands the layers on from here.
+    // 6) -- tryStartSim names the seat and hands the layers on from here. K16
+    // rides the same way: Red's `aiClass` and Gold's `trainerItems`,
+    // `aiFlags`, `itemSwitch` and `baseReward`, the same objects on every seat
+    // as aiMods (one trainer, one record; what a 2v2 shares is the referee's to
+    // say). Left off when absent, as Hub.lua's nil is no key at all; a number
+    // by `!== undefined`, as Lua's 0 is true.
     const kept = [];
     const dropped = new Set();
     record.npcIds.forEach((npcId, at) => {
@@ -3443,6 +3448,11 @@ class Relay {
         };
         if (party.name) seatParty.name = party.name;
         if (party.aiMods) seatParty.aiMods = party.aiMods;
+        if (party.aiClass) seatParty.aiClass = party.aiClass;
+        if (party.trainerItems) seatParty.trainerItems = party.trainerItems;
+        if (party.aiFlags !== undefined) seatParty.aiFlags = party.aiFlags;
+        if (party.itemSwitch !== undefined) seatParty.itemSwitch = party.itemSwitch;
+        if (party.baseReward !== undefined) seatParty.baseReward = party.baseReward;
         record.parties.set(npcId, seatParty);
       } else {
         dropped.add(npcId);
@@ -3776,6 +3786,15 @@ class Relay {
         bag: bagCopy || undefined,
       };
       if (npc && party.aiMods) entry.aiMods = party.aiMods;
+      // The computer's item / switch facts (K16): Red's TrainerAI record and
+      // Gold's TrainerClassAttributes bytes, on the NPC seat alone, as
+      // cleanBattleParty read them. A number by `!== undefined`, never by
+      // truthiness: an aiFlags or a baseReward of 0 is a value (Lua's 0 is true).
+      if (npc && party.aiClass) entry.aiClass = party.aiClass;
+      if (npc && party.trainerItems) entry.trainerItems = party.trainerItems;
+      if (npc && party.aiFlags !== undefined) entry.aiFlags = party.aiFlags;
+      if (npc && party.itemSwitch !== undefined) entry.itemSwitch = party.itemSwitch;
+      if (npc && party.baseReward !== undefined) entry.baseReward = party.baseReward;
       // Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
       // connection and so no cart, and the referees read side a's anyway.
       // Every human is still connected here -- a seat that drops while the
@@ -3849,6 +3868,12 @@ class Relay {
     // Turn.create's `opts.timeOfDay`; absent is its link reading).
     if (this.generation === 2) {
       createOpts.timeOfDay = rules.timeOfDay;
+    }
+    // Gold's wBattleType (K21; cleanBattleRuleset reads it on a Gen 2 hub
+    // alone), for the LURE BALL's BATTLETYPE_FISH (lib/battle2 Turn.create's
+    // `opts.battleType`; absent reads as no fishing fight).
+    if (this.generation === 2) {
+      createOpts.battleType = rules.battleType;
     }
     // Red's TypeEffects order (cleanBattleRuleset reads `chartOrder` on a Gen 1
     // hub alone, wave 5), which decides a dual type's effectiveness line and

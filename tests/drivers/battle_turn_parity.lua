@@ -4310,6 +4310,50 @@ scenario("g1_fx_r1", fights("g1fx", {
     { seed = 11013, turns = { { p1 = 0, p2 = 0 } } }),
 }))
 
+-- Contracts K17-K20 (docs/plans/gen12-referee-remaining-gaps.md), one fight
+-- each:
+--   1 the used line both ways: <USER> marked ^a / ^b, a break after it;
+--   2 a drain KO: SuckedHealthText (<TARGET> marked) before the faint;
+--   3 a recoil that takes the user while the target rages: the recoil line,
+--     the target's RAGE, then the user's faint (HandlePlayerMonFainted
+--     after ExecutePlayerMoveDone);
+--   4 a wild EXPLOSION that takes both: the player's faint first;
+--   5 a Leech Seed sap: ABSORB on the seeder's seat before the HP moves;
+--   6 a released FLY that misses: STATUS_AFFECTED_ANIM before the miss line;
+--   7 the trainer blocks a ball (TOSS_ANIM first), then an X item
+--     (XSTATITEM_ANIM between the use line and the rose line);
+--   8 a damaging move whose effect a KO skips (`.executeOtherEffects` is
+--     past `ret z`).
+scenario("g1_marks_faints", fights("g1mf", {
+  r1duo({ r1s("Alpha", { r1m("thump", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0) }, { spd = 10 }) },
+    { seed = 12001, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("suck", 80, 3) }, { spd = 90, atk = 200, hp = 100 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 1 }) },
+    { seed = 12002, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("crash", 80, 48) }, { spd = 90, atk = 200, hp = 1 }) },
+    { r1s("Beta", { r1m("fury", 20, 81) }, { spd = 10, raging = true, rageMove = 1 }) },
+    { seed = 12003, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 10, hp = 1 }),
+          r1s("Gamma", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { r1s("Beta", { r1m("boom", 170, 7) }, { spd = 90, atk = 200 }) },
+    { mode = "wild", seed = 12004, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90, hp = 100 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, leechSeed = { fromSlot = 0 } }) },
+    { seed = 12005, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("FLY", 90, 43, { accuracy = 0 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 12006, turns = { { p1 = 0, p2 = 0 }, { p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 12007, aSeat = { bag = { POKE_BALL = 1, X_ATTACK = 1 } },
+      turns = { { p1 = { action = "item", item = "POKE_BALL" }, p2 = 0 },
+                { p1 = { action = "item", item = "X_ATTACK" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("snarl", 80, 18) }, { spd = 90, atk = 200 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 1 }) },
+    { seed = 12008, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
 -- ------------------------------------------------------------------
 
 local out = {}

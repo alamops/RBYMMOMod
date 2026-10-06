@@ -925,6 +925,7 @@ function runJs() {
     ...runWave5(),
     ...runWave6(),
     ...runReview(),
+    ...runRemaining(),
   ];
 }
 
@@ -3026,12 +3027,16 @@ function wave5Hub(generation, id, rules, aMons, bMons) {
 
 // The lines of `user`'s own move, from its "<USER> used" line up to the next
 // "used" line (the Lua driver's msgTexts).
+// Matched on the plain line (plainBattleLine: K17's name marks gone, K18's
+// breaks spaces); the digest keeps the line as it was sent. Twin of the Lua
+// driver's msgTexts.
 function msgTexts(player, user) {
   const out = [];
   let on = false;
   for (const msg of takeAll(player, 'mmo.battle_event')) {
     if (msg.t === 'msg') {
-      if (msg.text.includes(' used ')) on = msg.text.startsWith(`${user} `);
+      const plain = sanitize.plainBattleLine(msg.text);
+      if (plain.includes(' used ')) on = plain.startsWith(`${user} `);
       if (on) out.push(msg.text);
     }
   }
@@ -3373,7 +3378,8 @@ function npcFight(generation, mode, sideB, sideA, humans = 1) {
       type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
     });
     out.lines = takeAll(players[0], 'mmo.battle_event')
-      .filter((msg) => msg.t === 'msg' && msg.text.includes(' used ') && !msg.text.startsWith('HERO'))
+      .filter((msg) => msg.t === 'msg' && sanitize.plainBattleLine(msg.text).includes(' used ')
+        && !sanitize.plainBattleLine(msg.text).startsWith('HERO'))
       .map((msg) => {
         const read = sanitize.cleanBattleEvent(msg, generation);
         return { sent: msg.text, read: read ? orNil(read.text) : '(refused)' };
@@ -3614,6 +3620,306 @@ function runReview() {
     },
     { name: 'basepp_kept', result: basePpKept() },
     { name: 'review_twin_readings', result: reviewReadings() },
+  ];
+}
+
+/*
+ * Contracts K16-K18 and K21 of docs/plans/gen12-referee-remaining-gaps.md, the
+ * wire: a Red / Gold `msg`'s `^a` / `^b` name marks and `\n` breaks, cut at
+ * BATTLE_LINE_MAX (and `^` in no name); an NPC party's Red `aiClass` and Gold
+ * `trainerItems` / `aiFlags` / `itemSwitch` / `baseReward`; Gold's sheet
+ * `weight` and ruleset `battleType`. Twin of remaining_gaps_dialect in the Lua
+ * driver, whose header argues each case. NULL there is a real null here.
+ */
+function remainingGaps() {
+  const line = (text, t) => ({
+    battle: 'b1', seq: 1, t: t || 'msg', text,
+  });
+  const party = (extra, gen) => ({ battle: 'b1', mons: [sheet12(gen || 1)], ...extra });
+  const sheet = (gen, extra) => ({ ...sheet12(gen, { generation: gen }), ...extra });
+  const exp = {
+    battle: 'b1', seq: 1, t: 'exp', species: '^bFOE\n', level: 5, participants: 1,
+  };
+  const texts = [
+    '^bRATTATA used\nTACKLE!',
+    '^aPIKA\'s\nattack missed!',
+    'Wild ^bPIDGEY\nfled!',
+    '  ^bX \n  used \n\n Y ! \n ',
+    '\n\nX\n',
+    '^cX ^^aY ^',
+    '^AX ^',
+    '^a^bX',
+    '^a\nX',
+    'A\r\nB\tC',
+    `${'A'.repeat(78)}^bXY`,
+    `${'A'.repeat(79)}^bXY`,
+    `${'A'.repeat(79)} B`,
+    `${'A'.repeat(79)}\nB`,
+    'X'.repeat(81),
+  ];
+  const cases = [];
+  for (const gen of [1, 2, 3, undefined]) {
+    for (const text of texts) cases.push(['event', line(text), gen]);
+  }
+  const blackbelt = {
+    uses: 2, chance: 64, item: 'X_ATTACK', bogus: 1,
+  };
+  return [
+    ...cases,
+    // every other kind's text is a name: no mark, no break
+    ['event', line('^aANN\nX', 'run'), 1],
+    ['event', line('^bFOE\nX', 'send'), 2],
+    ['event', line('^aANN\nX', 'chose'), 2],
+    ['event', exp, 1],
+    ['event', exp, 2],
+    ['event', exp, 3],
+    // Red aiClass
+    ['npc', party({ aiClass: blackbelt }), 1],
+    ['npc', party({
+      aiClass: {
+        uses: 2, switchChance: 20, chance: 128, item: 'SUPER_POTION', hpBelow: 4,
+      },
+    }), 1],
+    ['npc', party({
+      aiClass: {
+        uses: 1, item: 'HYPER_POTION', hpBelow: 10, switchBelow: 5, switch: false,
+      },
+    }), 1],
+    ['npc', party({ aiClass: { uses: '5', onStatus: true, item: 'FULL_HEAL' } }), 1],
+    ['npc', party({ aiClass: { uses: 3, chance: 256, switch: true } }), 1],
+    ['npc', party({ aiClass: { uses: 3, chance: null } }), 1],
+    ['npc', party({ aiClass: { uses: 1.5 } }), 1],
+    ['npc', party({ aiClass: { uses: ' 2 ' } }), 1],
+    ['npc', party({ aiClass: { uses: '0x2' } }), 1],
+    ['npc', party({ aiClass: null }), 1],
+    ['npc', party({ aiClass: {} }), 1],
+    ['npc', party({ aiClass: { chance: 64 } }), 1],
+    ['npc', party({ aiClass: { uses: 0 } }), 1],
+    ['npc', party({ aiClass: { uses: 256 } }), 1],
+    ['npc', party({ aiClass: { uses: true } }), 1],
+    ['npc', party({ aiClass: { uses: '' } }), 1],
+    ['npc', party({ aiClass: { uses: 1, chance: 257 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, chance: -1 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, switchChance: 300 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, hpBelow: 0 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, switchBelow: 256 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, item: 'X ATTACK' } }), 1],
+    ['npc', party({ aiClass: { uses: 1, item: 7 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, item: 'X'.repeat(41) } }), 1],
+    ['npc', party({ aiClass: { uses: 1, switch: 1 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, onStatus: 'yes' } }), 1],
+    ['npc', party({ aiClass: [3] }), 1],
+    ['npc', party({ aiClass: 'GenericAI' }), 1],
+    ['npc', party({ aiClass: 3 }), 1],
+    ['npc', party({ aiClass: { uses: 0 } }, 2), 2],
+    ['npc', party({ aiClass: { uses: 2 }, generation: 1 })],
+    ['npc', party({ aiClass: { uses: 0 } })],
+    ['npc', { battle: 'b1', mons: [mon3()], aiClass: { uses: 0 } }, 3],
+    // Gold's four
+    ['npc', party({
+      trainerItems: ['FULL_HEAL', 'POTION'], aiFlags: 0, itemSwitch: 513, baseReward: 25,
+    }, 2), 2],
+    ['npc', party({ trainerItems: [] }, 2), 2],
+    ['npc', party({ trainerItems: [null, 'POTION'] }, 2), 2],
+    ['npc', party({ trainerItems: ['NO_ITEM', 'POTION'] }, 2), 2],
+    ['npc', party({ trainerItems: { a: null } }, 2), 2],
+    ['npc', party({ aiFlags: 65535, itemSwitch: '4', baseReward: 255 }, 2), 2],
+    ['npc', party({
+      aiFlags: null, itemSwitch: null, baseReward: null, trainerItems: null,
+    }, 2), 2],
+    ['npc', party({ trainerItems: ['A', 'B', 'C'] }, 2), 2],
+    ['npc', party({ trainerItems: ['FULL HEAL'] }, 2), 2],
+    ['npc', party({ trainerItems: [7] }, 2), 2],
+    ['npc', party({ trainerItems: { a: 'POTION' } }, 2), 2],
+    ['npc', party({ trainerItems: 'POTION' }, 2), 2],
+    ['npc', party({ aiFlags: 65536 }, 2), 2],
+    ['npc', party({ aiFlags: -1 }, 2), 2],
+    ['npc', party({ aiFlags: true }, 2), 2],
+    ['npc', party({ itemSwitch: [1] }, 2), 2],
+    ['npc', party({ itemSwitch: '' }, 2), 2],
+    ['npc', party({ baseReward: 256 }, 2), 2],
+    ['npc', party({ baseReward: 'x' }, 2), 2],
+    ['npc', party({
+      trainerItems: ['A', 'B', 'C'], aiFlags: -1, itemSwitch: -1, baseReward: -1,
+    }), 1],
+    ['npc', party({ trainerItems: ['A', 'B', 'C'], aiFlags: -1, generation: 2 }, 2)],
+    ['npc', {
+      battle: 'b1', mons: [mon3()], trainerItems: [7], aiFlags: -1,
+    }, 3],
+    // `^` in a trainer name
+    ['npc', party({ name: '^bLASS^' }), 1],
+    ['npc', party({ name: '^aTWINS AMY & MAY\n' }, 2), 2],
+    // Gold's sheet weight; a Red sheet's is no field
+    ['mon', sheet(2, { weight: 0 })],
+    ['mon', sheet(2, { weight: 4600 })],
+    ['mon', sheet(2, { weight: 65535 })],
+    ['mon', sheet(2, { weight: '300' })],
+    ['mon', sheet(2, { weight: null })],
+    ['mon', sheet(2, { weight: 65536 })],
+    ['mon', sheet(2, { weight: -1 })],
+    ['mon', sheet(2, { weight: true })],
+    ['mon', sheet(2, { weight: 'heavy' })],
+    ['mon', sheet(2, { weight: [300] })],
+    ['mon', sheet(1, { weight: 300 })],
+    ['mon', sheet(1, { weight: 70000 })],
+    ['mon', sheet(1, { weight: 'heavy' })],
+    // `^` in a monster's name
+    ['mon', sheet(1, { species: '^aFOE\n' })],
+    ['mon', sheet(2, { species: '^bFOE^' })],
+    ['mon', mon3({ species: '^aGAMMA' })],
+    // Gold's ruleset battleType
+    ['ruleset', { chart: CHART, battleType: 0 }, 2],
+    ['ruleset', { chart: CHART, battleType: 4 }, 2],
+    ['ruleset', { chart: CHART, battleType: 255 }, 2],
+    ['ruleset', { chart: CHART, battleType: '4' }, 2],
+    ['ruleset', { chart: CHART, battleType: null }, 2],
+    ['ruleset', { chart: CHART, battleType: 256 }, 2],
+    ['ruleset', { chart: CHART, battleType: -1 }, 2],
+    ['ruleset', { chart: CHART, battleType: true }, 2],
+    ['ruleset', { chart: CHART, battleType: 'FISH' }, 2],
+    ['ruleset', { chart: CHART, battleType: [4] }, 2],
+    ['ruleset', { chart: CHART, battleType: 'FISH' }, 1],
+    ['ruleset', { chart: CHART, battleType: 4 }],
+  ];
+}
+
+function readRemaining(kind, input, gen) {
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'ruleset') return sanitize.cleanBattleRuleset(input, gen);
+  if (kind === 'mon') {
+    const read = sanitize.cleanBattleMon(input);
+    if (!read) return '(refused)';
+    return { species: orNil(read.species), weight: orNil(read.weight) };
+  }
+  if (kind === 'npc') {
+    const read = sanitize.cleanBattleParty(input, gen);
+    if (!read) return '(refused)';
+    return {
+      name: orNil(read.name),
+      aiMods: orNil(read.aiMods),
+      aiClass: orNil(read.aiClass),
+      trainerItems: orNil(read.trainerItems),
+      aiFlags: orNil(read.aiFlags),
+      itemSwitch: orNil(read.itemSwitch),
+      baseReward: orNil(read.baseReward),
+    };
+  }
+  return undefined;
+}
+
+/*
+ * K16 / K21, the hubs and the real referees: what each hub hands Turn.create
+ * (each roster entry's K16 fields, first monster's name and every monster's
+ * weight; the ruleset's battleType) beside what the referee kept. No turn is
+ * played. Twin of remaining_gaps_hub_fields in the Lua driver, whose header
+ * argues each fight.
+ */
+const weightsOf = (mons) => (mons || []).map((m) => orNil(m.weight));
+
+function factsFight(generation, mode, o = {}) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const seen = {};
+  const real = relay.Turn;
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const ids = [ID_A, ID_B];
+  const names = o.names || ['ANN', 'BOB'];
+  const players = [];
+  for (let i = 0; i < (o.humans || 1); i += 1) {
+    players.push(dialAs(relay, names[i], ids[i], { generation, sprite }));
+  }
+  const memberIds = players.map((p) => p.id);
+  const id = 'rg';
+  relay.openCoopBattle(id, memberIds, { mode, hostId: memberIds[0] });
+  relay.handle(players[0].id, {
+    type: 'mmo.battle_ruleset', battle: id, chart: CHART, ...(o.rules || {}),
+  });
+  for (const p of players) {
+    relay.handle(p.id, {
+      type: 'mmo.battle_party',
+      battle: id,
+      side: 'a',
+      mons: [sheet12(generation, { species: 'HERO' })],
+      ...(o.sideA || {}),
+    });
+  }
+  relay.handle(players[0].id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE', ...(o.foe || {}) }), sheet12(generation, { species: 'FOE' })],
+    ...(o.sideB || {}),
+  });
+  const record = relay.battles.get(id);
+  const sim = record ? record.sim : null;
+  const npcIds = (record && record.npcIds) || [];
+  const entries = [];
+  for (const side of ['a', 'b']) {
+    for (const entry of (seen.opts && seen.opts.sides[side]) || []) {
+      const fighter = sim ? sim.byId.get(entry.playerId) : null;
+      entries.push({
+        side,
+        seat: npcIds.includes(entry.playerId) ? 'npc' : entry.playerId,
+        name: orNil(entry.name),
+        aiClass: orNil(entry.aiClass),
+        trainerItems: orNil(entry.trainerItems),
+        aiFlags: orNil(entry.aiFlags),
+        itemSwitch: orNil(entry.itemSwitch),
+        baseReward: orNil(entry.baseReward),
+        species: orNil(entry.mons && entry.mons[0] && entry.mons[0].species),
+        weights: weightsOf(entry.mons),
+        simWeights: fighter ? weightsOf(fighter.mons) : '(no sim)',
+      });
+    }
+  }
+  return {
+    opened: !!sim,
+    battleType: seen.opts ? orNil(seen.opts.battleType) : '(no create)',
+    simBattleType: sim ? orNil(sim.battleType) : '(no sim)',
+    entries,
+  };
+}
+
+function runRemaining() {
+  const blackbelt = { uses: 2, chance: 32, item: 'X_ATTACK' };
+  const gold4 = {
+    trainerItems: ['FULL_HEAL', 'POTION'], aiFlags: 0, itemSwitch: 513, baseReward: 0,
+  };
+  return [
+    {
+      name: 'remaining_gaps_dialect',
+      result: remainingGaps().map(([kind, input, gen]) => ({ kind, got: orNil(readRemaining(kind, input, gen)) })),
+    },
+    {
+      name: 'remaining_gaps_hub_fields',
+      result: {
+        redClass: factsFight(1, 'coop_npc', { sideB: { name: 'BLACKBELT', aiClass: blackbelt } }),
+        redTwoSeats: factsFight(1, 'coop_npc', {
+          humans: 2, sideB: { aiClass: { uses: 3, chance: 64, switch: true } },
+        }),
+        redHumanClaims: factsFight(1, 'coop_npc', { sideA: { aiClass: blackbelt, ...gold4 } }),
+        redBadClass: factsFight(1, 'coop_npc', { sideB: { aiClass: { uses: 0 } } }),
+        redIgnoresGold: factsFight(1, 'coop_npc', { sideB: gold4 }),
+        redWild: factsFight(1, 'wild', { rules: { battleType: 4 }, foe: { weight: 300 } }),
+        goldFacts: factsFight(2, 'coop_npc', {
+          rules: { battleType: 0 }, sideB: { name: 'TWINS AMY & MAY', aiClass: blackbelt, ...gold4 },
+        }),
+        goldTwoSeats: factsFight(2, 'coop_npc', { humans: 2, sideB: gold4 }),
+        goldHumanClaims: factsFight(2, 'coop_npc', { sideA: gold4 }),
+        goldBadItems: factsFight(2, 'coop_npc', { sideB: { trainerItems: ['A', 'B', 'C'] } }),
+        goldWildFish: factsFight(2, 'wild', { rules: { battleType: 4 }, foe: { weight: 4600 } }),
+        goldWildPlain: factsFight(2, 'wild'),
+        goldBadType: factsFight(2, 'wild', { rules: { battleType: 256 } }),
+        caretNames: factsFight(1, 'coop_npc', {
+          names: ['^aANN'], sideB: { name: '^bLASS' }, foe: { species: '^aFOE' },
+        }),
+      },
+    },
   ];
 }
 

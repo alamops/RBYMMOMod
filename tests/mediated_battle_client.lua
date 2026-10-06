@@ -3138,8 +3138,11 @@ do
   eq(pvpSent[1] and pvpSent[1].action, "run",
      "1v1 RUN still sends the concession")
   local pvpSaid = table.concat(pvp.lines or {}, "\n")
-  check(pvpSaid:find("forfeit", 1, true),
-        "1v1 RUN says it is a forfeit")
+  -- Red / Gold (this fixture is Red): nothing at the send -- the cart's link
+  -- run prints "Got away safely!" once the exchange comes back
+  -- (TryRunningFromBattle `.canEscape`), which is the referee's `run` event
+  -- (`linkRunLine`, pinned below).  Gen 3 keeps "You forfeited".
+  eq(pvpSaid, "", "1v1 RUN (Red) says nothing at the send -- the run line follows the referee")
   check(not pvpSaid:find("trainer", 1, true),
         "and does not borrow the trainer-battle refuse line")
 
@@ -5014,8 +5017,13 @@ do
     for _, e in ipairs(events) do if e.t == "msg" then out[#out + 1] = e.text end end
     return out
   end
+  -- Found on the line as every matcher reads it -- the referee's marks out,
+  -- its breaks as spaces (K17 / K18, Mediated.plainLine) -- and handed back
+  -- raw, so each matcher below is fed exactly what the referee said.
   local function find(lines, pattern)
-    for _, line in ipairs(lines) do if line:find(pattern) then return line end end
+    for _, line in ipairs(lines) do
+      if Mediated.plainLine(line):find(pattern) then return line end
+    end
     return nil
   end
 
@@ -5061,7 +5069,9 @@ do
     step(F(0), F(0)) step(F(0), F(0)) step(F(1), F(1)) step(F(2), F(2))
     local got = {}
     for _, e in ipairs(all) do
-      if e.t == "stat" then got[#got + 1] = (Mediated.statFell(e) and "down" or "up") .. ":" .. tostring(e.text) end
+      if e.t == "stat" then
+        got[#got + 1] = (Mediated.statFell(e) and "down" or "up") .. ":" .. tostring(Mediated.plainLine(e.text))
+      end
     end
     return got
   end
@@ -5180,7 +5190,7 @@ do
   check(isConf and selfHit, "real lines (Red confusion): the referee's two lines were said")
   eq(Mediated.bideLine1(selfHit or "", "BETA", nil, "BETA"), "end",
      "bideLine1 (Red): the cart's self-hit line ends a confused monster's Bide")
-  eq((isConf or ""):match("^(.-) is confused!?$"), "BETA", "the confusion line names its monster")
+  eq(Mediated.plainLine(isConf or ""):match("^(.-) is confused!?$"), "BETA", "the confusion line names its monster")
 
   -- ------- the screen, fed by the real referee
   --
@@ -5222,13 +5232,21 @@ do
     return fight, battle, turn, transport
   end
   -- How many times the screen's queue says `pattern` -- read across its
-  -- pages (a line the box paged is one sentence again).
+  -- pages (a line the box paged is one sentence again), a row a `cont`
+  -- scrolled up (K18: the previous page's last row, again at the top of the
+  -- next) read once.
   local function shown(fight, pattern)
-    local parts = {}
+    local rows = {}
     for _, line in ipairs(fight.lines or {}) do
-      if type(line) == "string" then parts[#parts + 1] = (line:gsub("\n", " ")) end
+      if type(line) == "string" then
+        local first = true
+        for row in (line .. "\n"):gmatch("(.-)\n") do
+          if not (first and rows[#rows] == row) then rows[#rows + 1] = row end
+          first = false
+        end
+      end
     end
-    local _, n = table.concat(parts, " "):gsub(pattern, "")
+    local _, n = table.concat(rows, " "):gsub(pattern, "")
     return n
   end
   local function pressFight(fight)
@@ -5338,12 +5356,15 @@ do
     end
     local tf, tsent = tryDoll(gameWith({ mon("CHARMANDER") }, K_RED), "coop_npc", "t")
     eq(tsent, 0, "doll (Red trainer): nothing is filed -- the turn is not spent")
+    -- _ItemUseNotTimeText is text / line / cont: the `cont` scrolls the
+    -- second row up under the third (K18); `shown` reads the sentence back.
     eq(shown(tf, "OAK: ANN! This isn't the time to use that!"), 1,
        "doll (Red trainer): ItemUseNotTime's line")
     eq(tf.phase, "item", "doll (Red trainer): ...and the bag stays up")
     local gf, gsent = tryDoll(goldGame({ goldMon("CHARMANDER", nil, 4321) }), "coop_npc", "g")
     eq(gsent, 0, "doll (Gold trainer): refused too (PokeDollEffect .not_wild)")
-    eq(shown(gf, "OAK: GOLD! This isn't the time to use that!"), 1, "doll (Gold trainer): the same line")
+    eq(shown(gf, "OAK: GOLD! This isn't the time to use that!"), 1,
+       "doll (Gold trainer): the same line")
     local _, wsent = tryDoll(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "w")
     eq(wsent, 1, "doll (wild): ...where it is filed as ever")
   end
@@ -6238,6 +6259,363 @@ do
       ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
       eq(fight.itemFlags2 and fight.itemFlags2.focusEnergy, nil, "bits (Gold): an ordinary send-out drops it")
     end
+  end
+end
+
+-- ------------------------------------------------------------------
+-- the remaining Red / Gold gaps (docs/plans/gen12-referee-remaining-gaps.md):
+-- K17 marks per viewer, K18 cart breaks, K19 faint timing, K20 looks, the
+-- link run lines, K16 / K21 stamping.  Every name and number is invented.
+-- ------------------------------------------------------------------
+do
+  local CB = need("ClassicBattle")
+  local Vfx = need("Vfx")
+  local function strings(fight)
+    local out = {}
+    for _, l in ipairs(fight.lines or {}) do if type(l) == "string" then out[#out + 1] = l end end
+    return out
+  end
+  local function has(fight, text)
+    for _, l in ipairs(strings(fight)) do if l == text then return true end end
+    return false
+  end
+  local function indexOf(fight, pred)
+    for i, l in ipairs(fight.lines or {}) do if pred(l) then return i end end
+    return nil
+  end
+  local function noMark(fight, label)
+    for _, l in ipairs(strings(fight)) do
+      if l:find("^", 1, true) then check(false, label .. ": a mark reached the box (" .. l .. ")"); return end
+    end
+    check(true, label .. ": no mark reaches the box")
+  end
+
+  -- ------- K17: the shared helpers (ClassicBattle)
+  eq(CB.plainLine("^aCHARMANDER used\nEMBER!"), "CHARMANDER used EMBER!",
+     "K17 plainLine: marks out, a break read as a space")
+  eq(Mediated.plainLine, CB.plainLine, "K17: MediatedBattle shares the one normaliser")
+  eq(CB.plainLine("^bSQUIRTLE's\nIt's super-\neffective!"), "SQUIRTLE's It's super-effective!",
+     "K17 plainLine: a row broken after a hyphen joins whole (Wire.plainBattleLine)")
+  for _, line in ipairs({ "^aALPHA\nused SAND-\nATTACK!", "^bBETA's\nATTACK fell!", "Got away safely!" }) do
+    eq(CB.plainLine(line), Wire.plainBattleLine(line), "K17 plainLine reads as the wire's plain line: " .. line)
+  end
+  eq(CB.stripMarks("^bSQUIRTLE^"), "SQUIRTLE", "K17 stripMarks: a stray ^ never survives")
+  eq(CB.renderMarks("^aALPHA hit ^bBETA!", "a", "Enemy "), "ALPHA hit Enemy BETA!",
+     "K17 renderMarks: own side bare, the other side behind the word")
+  eq(CB.renderMarks("^aALPHA hit ^bBETA!", "b", "Enemy "), "Enemy ALPHA hit BETA!",
+     "K17 renderMarks: ...read from side b")
+  eq(CB.foeMarkWord(1, "wild"), "Enemy ", "K17: Red's EnemyText in a wild fight")
+  eq(CB.foeMarkWord(1, "1v1"), "Enemy ", "K17: ...and in a link fight")
+  eq(CB.foeMarkWord(2, "wild"), "Enemy ",
+     "K17: Gold's PlaceBattlersName prints EnemyText in a wild fight too (pokecrystal home/text.asm)")
+  eq(CB.foeMarkWord(2, "coop_npc"), "Enemy ", "K17: Gold, a trainer fight")
+  eq(CB.foeMarkWord(2, "coop_pvp"), "Enemy ", "K17: Gold, a link fight")
+  eq(CB.foeMarkWord(3, "wild"), "", "K17: Gen 3 has no marks to say")
+  eq(CB.fightKind("1v1") .. CB.fightKind("coop_wild") .. CB.fightKind("coop_npc"),
+     "linkwildtrainer", "K17 fightKind: link / wild / trainer")
+
+  -- ------- K18: the cart's breaks, `cont` scrolling
+  eq(table.concat(CB.pageBoxText("ROW ONE\nROW TWO\nROW THREE", 18, true), "|"),
+     "ROW ONE\nROW TWO|ROW TWO\nROW THREE", "K18: a third row scrolls in under the second (_ContText)")
+  eq(table.concat(CB.pageBoxText("ROW ONE\nROW TWO\nROW THREE", 18), "|"),
+     "ROW ONE\nROW TWO|ROW THREE", "K18: a caller that does not ask (Gen 3) pages as before")
+  local prose = "The quick brown fox jumps over the lazy dog and keeps running far away"
+  eq(table.concat(CB.pageBoxText(prose, 18, true), "|"), table.concat(CB.pageBoxText(prose, 18), "|"),
+     "K18: with no break the text word-wraps exactly as before")
+  eq(table.concat(CB.pageBoxText("Wild SQUIRTLE\nappeared!", 18, true), "|"), "Wild SQUIRTLE\nappeared!",
+     "K18: two rows are one page")
+  eq(table.concat(CB.pageBoxText("Enemy BUTTERFREE used\nSTUN SPORE!", 18, true), "|"),
+     "Enemy BUTTERFREE\nused|used\nSTUN SPORE!", "K18: a row too wide still wraps, and its spill scrolls")
+
+  -- ------- K17: what each viewer reads (Red 1v1, both seats)
+  local rf, rev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k17r", { peerName = "BLUE" })
+  rev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+  rev({ t = "msg", text = "^bSQUIRTLE\nused TACKLE!" })
+  rev({ t = "msg", text = "^bSQUIRTLE's\nattack missed!" })
+  check(has(rf, "CHARMANDER\nused EMBER!"), "K17 (Red, side a): our monster is said bare")
+  check(has(rf, "Enemy SQUIRTLE\nused TACKLE!"), "K17 (Red, side a): the other player's is the enemy's")
+  check(has(rf, "Enemy SQUIRTLE's\nattack missed!"), "K17 (Red, side a): ...in a possessive too")
+  noMark(rf, "K17 (Red, side a)")
+  local gf, gev = screenFor(gameWith({ mon("SQUIRTLE") }, K_RED), "1v1", "k17g", { peerName = "RED" })
+  gf.mySide = "b"
+  gev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+  gev({ t = "msg", text = "^bSQUIRTLE\nused TACKLE!" })
+  check(has(gf, "Enemy CHARMANDER\nused EMBER!"), "K17 (Red, side b): side a's monster is the enemy's here")
+  check(has(gf, "SQUIRTLE\nused TACKLE!"), "K17 (Red, side b): our own is bare")
+  noMark(gf, "K17 (Red, side b)")
+  -- Gold, a wild fight: "Enemy" (PlaceBattlersName / EnemyText), and a stray mark is dropped.
+  local gold = goldGame({ goldMon("CHARMANDER", nil, 4321) })
+  local wsheets = Mediated.snapshotMons(gold, { goldMon("SQUIRTLE") })
+  local wf, wev = screenFor(gold, "wild", "k17w", { wildParty = wsheets })
+  wev({ t = "msg", text = "^bSQUIRTLE\nused TACKLE!" })
+  wev({ t = "msg", text = "^aCHARMANDER^ used EMBER!" })
+  check(has(wf, "Enemy SQUIRTLE\nused TACKLE!"), "K17 (Gold, wild): the wild monster is \"Enemy\" on the cart")
+  check(has(wf, "CHARMANDER used\nEMBER!"), "K17 (Gold, wild): a stray ^ is dropped, not drawn")
+  noMark(wf, "K17 (Gold, wild)")
+
+  -- ------- line readers on marked, broken text (behaviour unchanged)
+  local Effects2 = need("BattleSim2/Effects")
+  local rainStart = Effects2.WEATHER_LINES.rain.start
+  local broken = (CB.plainLine(rainStart):gsub(" ", "\n", 1))
+  eq(Mediated.weatherOfLine2(broken), "RAIN", "readers: Gold's weather line, broken by the cart's \\n")
+  eq(Mediated.weatherOfLine2(rainStart), "RAIN", "readers: ...and whole, as the referee writes it")
+  check(Mediated.draggedOutLine("^bSQUIRTLE\nwas dragged out!", "SQUIRTLE"), "readers: drag-out, marked")
+  check(Mediated.escapeLine("^aCHARMANDER\nfled from battle!"), "readers: escape, marked and broken")
+  eq(Mediated.bideLine("^aCHARMANDER\nunleashed energy!", "CHARMANDER", {}), "release",
+     "readers: Gold's Bide release, marked")
+  eq(Mediated.bideLine1("^aCHARMANDER\nused BIDE!", "CHARMANDER", {}), "start",
+     "readers: Red's Bide start, marked")
+  local onOff, at = Mediated.disableLine("^bSQUIRTLE's\nTACKLE was\ndisabled!", "SQUIRTLE",
+    { { id = "TACKLE" } }, gameWith({}, K_RED))
+  eq(tostring(onOff) .. tostring(at), "on1", "readers: Disable, marked and broken over three rows")
+  eq(Mediated.statFell({ text = "^bSQUIRTLE's\nATTACK fell!" }), true, "readers: a fall, marked")
+  eq(Mediated.statFell({ text = "^aCHARMANDER's\nATTACK went\nup!" }), false,
+     "readers: \"went up\" across a break is a rise")
+  -- ...and through the screen: our Disable read off a marked line.
+  local df, dev = screenFor(gameWith({ mon("CHARMANDER", { moves = { { id = "EMBER", pp = 25 },
+    { id = "GROWL", pp = 40 } } }) }, K_RED), "wild", "k17d")
+  dev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+  dev({ t = "anim", slot = Config.COOP_SIDE, side = "b", text = "DISABLE" })
+  dev({ t = "msg", text = "^aCHARMANDER's\nGROWL was\ndisabled!" })
+  eq(df.disabledMove, 2, "readers: the screen takes our Disable off a marked, broken line")
+
+  -- ------- the faint line, per viewer (pokered / pokecrystal *MonFainted)
+  eq(Mediated.faintLine("^bSQUIRTLE", true, 1), "Enemy SQUIRTLE\nfainted!", "faint (Red): the enemy's")
+  eq(Mediated.faintLine("CHARMANDER", false, 1), "CHARMANDER\nfainted!", "faint (Red): our own")
+  eq(Mediated.faintLine("SQUIRTLE", true, 2), "Enemy SQUIRTLE\nfainted!",
+     "faint (Gold): BattleText_EnemyMonFainted's literal \"Enemy\", wild or not")
+  eq(Mediated.faintLine("SQUIRTLE", true, 3), "SQUIRTLE fainted!", "faint: Gen 3 keeps its line")
+  rev({ t = "faint", slot = Config.COOP_SIDE, side = "b", text = "SQUIRTLE" })
+  check(has(rf, "Enemy SQUIRTLE\nfainted!"), "faint (Red 1v1, side a): the other player's is the enemy's")
+  gev({ t = "faint", slot = Config.COOP_SIDE, side = "b", text = "SQUIRTLE" })
+  check(has(gf, "SQUIRTLE\nfainted!") and not has(gf, "Enemy SQUIRTLE\nfainted!"),
+        "faint (Red 1v1, side b): our own is bare")
+
+  -- ------- the award line (pokered GainedText / BoostedText; pokecrystal
+  -- Text_MonGainedExpPoint / BoostedExpPointsText)
+  eq(Mediated.gainedLine("CHARMANDER", 42), "CHARMANDER gained\n42 EXP. Points!",
+     "exp line: \"<MON> gained\" / line \"<N> EXP. Points!\"")
+  eq(Mediated.gainedLine("CHARMANDER", 63, true), "CHARMANDER gained\na boosted\n63 EXP. Points!",
+     "exp line: a traded monster's \"a boosted\" row")
+  eq(table.concat(CB.pageBoxText(Mediated.gainedLine("CHARMANDER", 63, true), 18, true), "|"),
+     "CHARMANDER gained\na boosted|a boosted\n63 EXP. Points!", "exp line: ...which the `cont` scrolls")
+
+  -- ------- K19: a knockout's faint after the hit's tail
+  do
+    local kf, kev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "k19",
+      { wildParty = Mediated.snapshotMons(gameWith({}, K_RED), { mon("SQUIRTLE") }) })
+    local foe = Config.COOP_SIDE
+    kev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 20, maxHp = 30 })
+    kev({ t = "send", slot = foe, side = "b", mon = 0, text = "SQUIRTLE", hp = 30, maxHp = 30 })
+    kev({ t = "anim", slot = 0, side = "a", text = "MEGA_DRAIN" })
+    kev({ t = "msg", text = "^aCHARMANDER\nused MEGA DRAIN!" })
+    kev({ t = "damage", slot = foe, side = "b", hp = 0 })
+    check(kf.slots[foe].koHold ~= true, "K19: a hit to 0 HP is not a knockout yet")
+    kev({ t = "drain", slot = 0, side = "a", hp = 30 })
+    kev({ t = "msg", text = "Sucked health from\n^bSQUIRTLE!" })
+    kev({ t = "faint", slot = foe, side = "b", text = "SQUIRTLE" })
+    local tail = indexOf(kf, function(l) return l == "Sucked health from\nEnemy SQUIRTLE!" end)
+    local line = indexOf(kf, function(l) return l == "Enemy SQUIRTLE\nfainted!" end)
+    local release = indexOf(kf, function(l) return type(l) == "table" and l.clearPic == foe end)
+    check(tail ~= nil and line ~= nil and tail < line,
+          "K19: the drain's line is read before the faint line")
+    check(line ~= nil and release ~= nil and line < release,
+          "K19: ...and the pic is released only behind the faint line")
+    eq(kf.slots[foe].hp, 0, "K19: the plate stands at 0 through the tail")
+    eq(kf.slots[foe].koHold, true, "K19: ...and the seat is held for its sink once the faint arrives")
+    eq(kf.slots[foe].species, "SQUIRTLE", "K19: the 0-HP monster is still the seat's occupant")
+  end
+
+  -- ------- the link run lines (pokered EnemyRan / GotAwayText; pokecrystal
+  -- BattleText_EnemyFled / BattleText_GotAwaySafely)
+  do
+    local function linkRun(game, sides, result, tag)
+      local f, ev = screenFor(game, "1v1", tag, { peerName = "BLUE" })
+      ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+      ev({ t = "send", slot = Config.COOP_SIDE, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+      for _, side in ipairs(sides) do
+        ev({ t = "run", slot = side == "a" and 0 or Config.COOP_SIDE, side = side, text = "TRAINER" })
+      end
+      local winners, losers = {}, {}
+      if result == "win" then winners, losers = { "me" }, { "npc" } end
+      if result == "loss" then winners, losers = { "npc" }, { "me" } end
+      f:onOutcome({ battle = tag, winners = winners, losers = losers, reason = "run" })
+      return f
+    end
+    local mine = linkRun(gameWith({ mon("CHARMANDER") }, K_RED), { "a" }, "loss", "lr1")
+    local a = indexOf(mine, function(l) return l == "Got away safely!" end)
+    local b = indexOf(mine, function(l) return l == "You lost!" end)
+    check(a ~= nil and b ~= nil and a < b, "link run (Red, runner): \"Got away safely!\", then the result")
+    check(not has(mine, "Someone ran away!") and not has(mine, "You forfeited\nthe battle!"),
+          "link run (Red, runner): no mod line")
+    local theirs = linkRun(gameWith({ mon("CHARMANDER") }, K_RED), { "b" }, "win", "lr2")
+    check(has(theirs, "Enemy SQUIRTLE\nran!"), "link run (Red, foe): _EnemyRanText names the runner's monster")
+    check(has(theirs, "You won!") and not has(theirs, "Someone ran away!"), "link run (Red, foe): ...then the result")
+    local goldRun = linkRun(goldGame({ goldMon("CHARMANDER", nil, 4321) }), { "b" }, "win", "lr3")
+    check(has(goldRun, "Enemy SQUIRTLE\nfled!"), "link run (Gold, foe): BattleText_EnemyFled")
+    local both = linkRun(gameWith({ mon("CHARMANDER") }, K_RED), { "a", "b" }, "draw", "lr4")
+    check(has(both, "Got away safely!") and not has(both, "Enemy SQUIRTLE\nran!"),
+          "link run (double): both carts say \"Got away safely!\" and nothing about the other")
+    -- No `run` event (an older stream): the mod's line stays.
+    local old = linkRun(gameWith({ mon("CHARMANDER") }, K_RED), {}, "win", "lr5")
+    check(has(old, "Someone ran away!"), "link run: with no run event the old line stays")
+    eq(Mediated.linkRunLine({ a = { name = "^aCHARMANDER" } }, "a", true, 1), "CHARMANDER\nran!",
+       "link run (partner): the foe's line without the prefix")
+    eq(Mediated.linkRunLine({ a = { name = "X" } }, "a", false, 2), "Got away safely!",
+       "link run: the runner's own line on Gold")
+    eq(Mediated.linkRunLine(nil, "a", false, 1), nil, "link run: nobody ran, no line")
+  end
+
+  -- ------- K20: the looks, and the viewer's twin
+  local function twin(anim, mine) local got = Mediated.viewerAnim(anim, mine); return got end
+  eq(twin("ENEMY_STAT_DOWN_ANIM", true), "WOBBLE_ANIM",
+     "K20: a drop on our seat is the WOBBLE clip (BattleCommand_StatDownAnim, the enemy's turn)")
+  eq(twin("WOBBLE_ANIM", false), "ENEMY_STAT_DOWN_ANIM", "K20: ...one across is ANIM_ENEMY_STAT_DOWN")
+  eq(twin("ENEMY_STAT_DOWN_ANIM", false), "ENEMY_STAT_DOWN_ANIM", "K20: ...and stays when it already is")
+  eq(twin("ENEMY_DAMAGE_ANIM", true), "PLAYER_DAMAGE_ANIM", "K20: the DAMAGE after-anims pair the same way")
+  eq(twin("SLP_ANIM", true), "SLP_PLAYER_ANIM", "K20: the SLP twin is unchanged")
+  local _, held = Mediated.viewerAnim("SLP_PLAYER_ANIM", false)
+  eq(held, true, "K20: a foe's sleep clip still waits behind its line")
+  eq(twin("PSN_ANIM", true), "PSN_ANIM", "K20: an id with one clip is left alone")
+  for _, id in ipairs({ "STATUS_AFFECTED_ANIM", "XSTATITEM_ANIM", "BRN_ANIM", "PSN_ANIM", "SAP_ANIM",
+      "FRZ_ANIM", "PAR_ANIM", "IN_LOVE_ANIM", "IN_SANDSTORM_ANIM", "IN_NIGHTMARE_ANIM",
+      "IN_WHIRLPOOL_ANIM", "UNDER_CURSE_ANIM", "MISS_ANIM", "ENEMY_STAT_DOWN_ANIM",
+      "PLAYER_STAT_DOWN_ANIM", "WOBBLE_ANIM", "HIT_CONFUSION_ANIM" }) do
+    local look = Vfx.forStatusAnim(id)
+    check(type(look) == "table" and Vfx.STYLES[look.style] ~= nil and Vfx.PALETTES[look.palette] ~= nil,
+          "K20: " .. id .. " has a look")
+  end
+  eq(Vfx.forStatusAnim("PSN_ANIM", "TOX").scale, Vfx.forStatus("TOX").scale,
+     "K20: Gold's poison tick on a badly poisoned monster wears TOXIC's look")
+  eq(Vfx.forStatusAnim("NO_SUCH_ANIM"), nil, "K20: an unknown _ANIM id is still skipped")
+  eq((Vfx.forStatusAnim("IN_LOVE_PLAYER_ANIM") or {}).palette, "FAIRY",
+     "K20: a _PLAYER_ variant of a listed id wears its look")
+  eq(Vfx.forStatusAnim("NO_SUCH_PLAYER_ANIM"), nil, "K20: ...an unlisted one is still skipped")
+  -- XSTATITEM_ANIM takes the X item's look over (one look, the cart's).
+  do
+    local xf, xev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "k20x")
+    xf.usesBattlefield = function() return true end
+    xev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    local before = #xf.lines
+    xev({ t = "item", slot = 0, side = "a", text = "X_ATTACK" })
+    xev({ t = "msg", text = "ANN used X ATTACK!" })
+    xev({ t = "anim", slot = 0, side = "a", text = "XSTATITEM_ANIM" })
+    local looks, styles = 0, {}
+    for i = before + 1, #xf.lines do
+      local row = xf.lines[i]
+      if type(row) == "table" and row.vfxrow then
+        looks = looks + 1
+        styles[#styles + 1] = row.vfxrow.style
+      end
+    end
+    eq(looks, 1, "K20: an X item is one look on the arena, not the bag's and the cart's")
+    eq(styles[1], "sparkle", "K20: ...XSTATITEM_ANIM's (XStatItemAnim's spiral, ahead of the stat's arrows)")
+  end
+  -- STATUS_AFFECTED_ANIM puts a cut-short FLY's monster back (classic).
+  do
+    local sf, sev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "k20s")
+    sev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    sf:startVanish("fly", { slot = 0, side = "a" })
+    check(sf:seatVanished(0), "K20: FLY's charge hides the monster")
+    pcall(sf.startAnim, sf, { anim = "STATUS_AFFECTED_ANIM", slot = 0, side = "a" })
+    eq(sf:seatVanished(0), false, "K20: STATUS_AFFECTED_ANIM (SE_SHOW_MON_PIC) shows it again")
+  end
+
+  -- ------- K16: the computer's trainer data on the NPC upload
+  do
+    local data = setmetatable({ ai_classes = {
+      OPP_FIX = { uses = 2, chance = 64, item = "X_ATTACK", kind = "class", hpBelow = 5 },
+      OPP_BAD = { uses = 0, item = "POTION" },
+    } }, { __index = K_RED })
+    local game = gameWith({ mon("CHARMANDER") }, data)
+    local seat = Mediated.npcSeat(game, { id = "OPP_FIX", name = "FIXER" })
+    local ai = seat and seat.aiClass or {}
+    eq(table.concat({ ai.uses or "-", ai.chance or "-", ai.item or "-", ai.hpBelow or "-" }, ","),
+       "2,64,X_ATTACK,5", "K16 (Red): the class record, field for field")
+    eq(ai.kind, nil, "K16 (Red): ...the K16 fields only")
+    eq(Mediated.npcSeat(game, { id = "OPP_NONE", name = "NOBODY" }).aiClass, nil,
+       "K16 (Red): a class with no record states none (GenericAI)")
+    local warned = #warns
+    eq(Mediated.npcSeat(game, { id = "OPP_BAD", name = "BAD" }).aiClass, nil,
+       "K16 (Red): a record that cannot be stated whole is not sent half")
+    check(#warns > warned, "K16 (Red): ...and a warning names the field to fix")
+    eq(Mediated.npcSeat(game, { id = "OPP_FIX", aiClass = "OPP_FIX", name = "X" }).aiClass.uses, 2,
+       "K16 (Red): `aiClass` names the record when it is set (TrainerAI.classFor)")
+    -- Gold: TrainerClassAttributes off the engine record.
+    local gseat = Mediated.npcSeat(goldGame({ goldMon("CHARMANDER", nil, 4321) }), {
+      name = "SCOUT FIX", items = { "POTION", "", "SUPER_POTION", "HYPER_POTION" },
+      attributes = { 1, 2, 30, 0x11, 0x02, 0x34, 0x01, 0 } })
+    eq(table.concat(gseat.trainerItems or {}, ","), "POTION,SUPER_POTION",
+       "K16 (Gold): trainerItems, the two slots in order")
+    eq(gseat.aiFlags, 0x0211, "K16 (Gold): aiFlags is TRNATTR_AI_MOVE_WEIGHTS (bytes 4-5, little-endian)")
+    eq(gseat.itemSwitch, 0x0134, "K16 (Gold): itemSwitch is TRNATTR_AI_ITEM_SWITCH (bytes 6-7)")
+    eq(gseat.baseReward, 30, "K16 (Gold): baseReward is TRNATTR_BASEMONEY")
+    eq(gseat.aiClass, nil, "K16 (Gold): no Red class record")
+    local slot2 = Mediated.trainerAi2({ items = { "SUPER_POTION" }, attributes = { 0, 9, 30, 0, 0, 0, 0 } })
+    eq(table.concat(slot2.trainerItems, ","), "NO_ITEM,SUPER_POTION",
+       "K16 (Gold): an empty ITEM1 ahead of a filled ITEM2 is sent as NO_ITEM, the slots kept")
+    local slot1 = Mediated.trainerAi2({ items = { "SUPER_POTION" }, attributes = { 9, 0, 30, 0, 0, 0, 0 } })
+    eq(table.concat(slot1.trainerItems, ","), "SUPER_POTION", "K16 (Gold): a lone ITEM1 is the one slot")
+    eq(#Mediated.trainerAi2({ items = {}, attributes = { 0, 0, 30, 0, 0, 0, 0 } }).trainerItems, 0,
+       "K16 (Gold): no items is an empty list")
+    local packedSeat = Wire.battleParty({ battle = "k16w", mons = Mediated.snapshotMons(
+      goldGame({ goldMon("CHARMANDER", nil, 4321) }), { goldMon("SQUIRTLE") }), side = "b",
+      generation = 2, trainerItems = slot2.trainerItems, aiFlags = gseat.aiFlags,
+      itemSwitch = gseat.itemSwitch, baseReward = gseat.baseReward }, 2)
+    eq(packedSeat and table.concat(packedSeat.trainerItems or {}, ","), "NO_ITEM,SUPER_POTION",
+       "K16 (Gold): Wire.battleParty takes the upload whole")
+    -- sendParty carries them; no NPC bag on Red / Gold.
+    local t = recorder()
+    Mediated.sendParty(t, "k16", { { species = "X" } }, "b", nil, nil, gseat)
+    local p = t.sent[1] and t.sent[1].p or {}
+    eq(p.aiFlags, 0x0211, "K16: sendParty carries the class data")
+    eq(p.baseReward, 30, "K16: ...all of it")
+    eq(Mediated.trainerBagEntries({ id = "OPP_FIX", items = { "POTION" } }, game), nil,
+       "K16 (Red): no NPC bag is uploaded")
+    eq(Mediated.trainerBagEntries({ items = { "POTION" } }, goldGame({})), nil,
+       "K16 (Gold): ...nor on Gold")
+    local nf = screenFor(game, "coop_npc", "k16n", {
+      trainer = { id = "OPP_FIX", name = "FIXER" },
+      npcParty = Mediated.snapshotMons(game, { mon("SQUIRTLE") }) })
+    local npc
+    for _, m in ipairs(nf.transport.sent) do
+      if m.t == Wire.BATTLE_PARTY and m.p.side == "b" then npc = m.p end
+    end
+    eq(npc and npc.bag, nil, "K16 (Red trainer): the side-b upload carries no bag")
+    eq(npc and npc.aiClass and npc.aiClass.uses, 2, "K16 (Red trainer): ...and carries the class record")
+    local packedRed = npc and Wire.battleParty(npc, 1)
+    eq(packedRed and packedRed.aiClass and packedRed.aiClass.item, "X_ATTACK",
+       "K16 (Red trainer): Wire.battleParty takes the record")
+  end
+
+  -- ------- K21: HEAVY BALL's weight, LURE BALL's battle type
+  do
+    local data = goldData()
+    data = setmetatable({ gen2Pokedex = { entries = { SQUIRTLE = { weight = 90 } } } },
+      { __index = data })
+    local game = goldGame({ goldMon("CHARMANDER", nil, 4321) }, data)
+    eq(Mediated.weight2(game, goldMon("SQUIRTLE")), 90, "K21: the Gold dex weight word")
+    eq(Mediated.snapshotWild(game, goldMon("SQUIRTLE"))[1].weight, 90,
+       "K21: stamped on the wild foe's sheet")
+    eq(Mediated.snapshotMons(game, { goldMon("SQUIRTLE") })[1].weight, nil,
+       "K21: ...and only there")
+    eq(Mediated.weight2(gameWith({}, K_RED), mon("SQUIRTLE")), nil, "K21: Red has no weight")
+    eq(Mediated.snapshotRuleset(game, { battleType = 4 }).battleType, 4,
+       "K21: the Gold ruleset states the engine battle's type")
+    eq(Mediated.snapshotRuleset(gameWith({}, K_RED), { battleType = 4 }).battleType, nil,
+       "K21: ...Red's never does")
+    local packedRules = Wire.battleRuleset(Mediated.snapshotRuleset(game, { battleType = 4 }), 2)
+    eq(packedRules and packedRules.battleType, 4, "K21: Wire.battleRuleset takes the battle type")
+    local packedWild = Wire.battleParty({ battle = "k21w", side = "b", generation = 2,
+      mons = Mediated.snapshotWild(game, goldMon("SQUIRTLE")) }, 2)
+    eq(packedWild and packedWild.mons[1].weight, 90, "K21: Wire.battleParty takes the weight")
+    local transport = recorder()
+    local lf = Mediated.new({ transport = transport, game = game, battle = "k21", role = "host",
+      mode = "wild", wildParty = Mediated.snapshotWild(game, goldMon("SQUIRTLE")), battleType = 4 })
+    lf:start(game)
+    local rules
+    for _, m in ipairs(transport.sent) do if m.t == Wire.BATTLE_RULESET then rules = m.p end end
+    eq(rules and rules.battleType, 4, "K21: the screen uploads it on the ruleset")
   end
 end
 

@@ -2774,11 +2774,15 @@ end
 -- "used" line.  Only those are what each field decides; the foe's turn is the
 -- referees' business (their own fixtures pin it), so it stays out of this
 -- digest.
+-- Matched on the plain line (Wire.plainBattleLine: K17's name marks gone,
+-- K18's breaks spaces), so a mark or a break the referee writes never hides
+-- a line from the match; the digest keeps the line as it was sent.
 local function msgTexts(peer, user)
   local out, on = {}, false
   for _, msg in ipairs(takeAll(peer, Wire.BATTLE_EVENT)) do
     if msg.t == "msg" then
-      if msg.text:find(" used ", 1, true) then on = msg.text:sub(1, #user + 1) == user .. " " end
+      local plain = Wire.plainBattleLine(msg.text)
+      if plain:find(" used ", 1, true) then on = plain:sub(1, #user + 1) == user .. " " end
       if on then out[#out + 1] = msg.text end
     end
   end
@@ -3129,7 +3133,8 @@ local function npcFight(generation, mode, sideB, sideA, humans)
     hub:receive(players[1].client, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0 })
     local lines = {}
     for _, msg in ipairs(takeAll(players[1].peer, Wire.BATTLE_EVENT)) do
-      if msg.t == "msg" and msg.text:find(" used ", 1, true) and msg.text:sub(1, 4) ~= "HERO" then
+      local plain = msg.t == "msg" and Wire.plainBattleLine(msg.text) or ""
+      if plain:find(" used ", 1, true) and plain:sub(1, 4) ~= "HERO" then
         local read = Wire.battleEvent(msg, generation)
         lines[#lines + 1] = { sent = msg.text, read = read and orNil(read.text) or "(refused)" }
       end
@@ -3363,6 +3368,316 @@ end
 scenarios[#scenarios + 1] = {
   name = "review_twin_readings",
   run = function() return reviewReadings() end,
+}
+
+-- ------------------------------------------------------------------
+-- Contracts K16-K18 and K21 of docs/plans/gen12-referee-remaining-gaps.md,
+-- the wire:
+--
+--   * A Red / Gold reader's `msg` keeps the line's `^a` / `^b` name marks
+--     (a `^` only with its side letter after it; any other `^` dropped,
+--     alone) and its `\n` breaks (never leading, trailing or doubled; a space
+--     beside one collapses into it), cut at BATTLE_LINE_MAX 80 glyphs -- a cut
+--     that leaves a mark with no name, a `^` with no letter or a gap at the
+--     end drops it.  A Gen 3 or unnamed reader's `msg`, and every other
+--     kind's text (a `run`'s, `send`'s or `chose`'s is a name), reads as
+--     before: no mark, no break.  `^` reaches no name field: an `exp`'s
+--     species, a party's trainer name, a sheet's species.
+--   * An NPC party's computer facts (K16): Red's `aiClass` (the engine's
+--     ai_classes record, field by field -- `uses` 1..255 required, `chance`
+--     / `switchChance` 0..256, `item` an id, `switch` / `onStatus` booleans,
+--     `hpBelow` / `switchBelow` 1..255, an unknown key dropped) and Gold's
+--     `trainerItems` (0..2 ids, in order), `aiFlags` / `itemSwitch`
+--     (0..65535) and `baseReward` (0..255) -- each present and unreadable
+--     refuses the party; a reader of another generation, or of none, neither
+--     copies nor refuses one.  `npc` reports the party's trainer fields, or
+--     "(refused)".
+--   * Gold's sheet `weight` (0..65535) and ruleset `battleType` (0..255)
+--     (K21): read on Gen 2 alone, refused with the sheet / ruleset when
+--     unreadable.  `mon` reports the sheet's species and weight.
+-- ------------------------------------------------------------------
+
+local function remainingGaps()
+  local function line(text, t) return { battle = "b1", seq = 1, t = t or "msg", text = text } end
+  local function party(extra, gen) return merged({ battle = "b1", mons = { sheet12(gen or 1) } }, extra) end
+  local function sheet(gen, extra) return merged(sheet12(gen, { generation = gen }), extra) end
+  local texts = {
+    "^bRATTATA used\nTACKLE!",
+    "^aPIKA's\nattack missed!",
+    "Wild ^bPIDGEY\nfled!",
+    "  ^bX \n  used \n\n Y ! \n ",
+    "\n\nX\n",
+    "^cX ^^aY ^",
+    "^AX ^",
+    "^a^bX",
+    "^a\nX",
+    "A\r\nB\tC",
+    string.rep("A", 78) .. "^bXY",
+    string.rep("A", 79) .. "^bXY",
+    string.rep("A", 79) .. " B",
+    string.rep("A", 79) .. "\nB",
+    string.rep("X", 81),
+  }
+  local cases = {}
+  for _, gen in ipairs({ 1, 2, 3, "none" }) do
+    for _, text in ipairs(texts) do
+      cases[#cases + 1] = { "event", line(text), gen ~= "none" and gen or nil }
+    end
+  end
+  local tail = {
+    -- every other kind's text is a name: no mark, no break
+    { "event", line("^aANN\nX", "run"), 1 },
+    { "event", line("^bFOE\nX", "send"), 2 },
+    { "event", line("^aANN\nX", "chose"), 2 },
+    { "event", { battle = "b1", seq = 1, t = "exp", species = "^bFOE\n", level = 5, participants = 1 }, 1 },
+    { "event", { battle = "b1", seq = 1, t = "exp", species = "^bFOE\n", level = 5, participants = 1 }, 2 },
+    { "event", { battle = "b1", seq = 1, t = "exp", species = "^bFOE\n", level = 5, participants = 1 }, 3 },
+    -- Red aiClass
+    { "npc", party({ aiClass = { uses = 2, chance = 64, item = "X_ATTACK", bogus = 1 } }), 1 },
+    { "npc", party({ aiClass = { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION",
+                                 hpBelow = 4 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5,
+                                 switch = false } }), 1 },
+    { "npc", party({ aiClass = { uses = "5", onStatus = true, item = "FULL_HEAL" } }), 1 },
+    { "npc", party({ aiClass = { uses = 3, chance = 256, switch = true } }), 1 },
+    { "npc", party({ aiClass = { uses = 3, chance = NULL } }), 1 },
+    { "npc", party({ aiClass = { uses = 1.5 } }), 1 },
+    { "npc", party({ aiClass = { uses = " 2 " } }), 1 },
+    { "npc", party({ aiClass = { uses = "0x2" } }), 1 },
+    { "npc", party({ aiClass = NULL }), 1 },
+    { "npc", party({ aiClass = {} }), 1 },
+    { "npc", party({ aiClass = { chance = 64 } }), 1 },
+    { "npc", party({ aiClass = { uses = 0 } }), 1 },
+    { "npc", party({ aiClass = { uses = 256 } }), 1 },
+    { "npc", party({ aiClass = { uses = true } }), 1 },
+    { "npc", party({ aiClass = { uses = "" } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, chance = 257 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, chance = -1 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, switchChance = 300 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, hpBelow = 0 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, switchBelow = 256 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, item = "X ATTACK" } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, item = 7 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, item = string.rep("X", 41) } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, switch = 1 } }), 1 },
+    { "npc", party({ aiClass = { uses = 1, onStatus = "yes" } }), 1 },
+    { "npc", party({ aiClass = { 3 } }), 1 },
+    { "npc", party({ aiClass = "GenericAI" }), 1 },
+    { "npc", party({ aiClass = 3 }), 1 },
+    { "npc", party({ aiClass = { uses = 0 } }, 2), 2 },
+    { "npc", party({ aiClass = { uses = 2 }, generation = 1 }) },
+    { "npc", party({ aiClass = { uses = 0 } }) },
+    { "npc", { battle = "b1", mons = { mon3() }, aiClass = { uses = 0 } }, 3 },
+    -- Gold's four
+    { "npc", party({ trainerItems = { "FULL_HEAL", "POTION" }, aiFlags = 0, itemSwitch = 513,
+                     baseReward = 25 }, 2), 2 },
+    { "npc", party({ trainerItems = {} }, 2), 2 },
+    { "npc", party({ trainerItems = { NULL, "POTION" } }, 2), 2 },
+    { "npc", party({ trainerItems = { "NO_ITEM", "POTION" } }, 2), 2 },
+    { "npc", party({ trainerItems = { a = NULL } }, 2), 2 },
+    { "npc", party({ aiFlags = 65535, itemSwitch = "4", baseReward = 255 }, 2), 2 },
+    { "npc", party({ aiFlags = NULL, itemSwitch = NULL, baseReward = NULL, trainerItems = NULL }, 2), 2 },
+    { "npc", party({ trainerItems = { "A", "B", "C" } }, 2), 2 },
+    { "npc", party({ trainerItems = { "FULL HEAL" } }, 2), 2 },
+    { "npc", party({ trainerItems = { 7 } }, 2), 2 },
+    { "npc", party({ trainerItems = { a = "POTION" } }, 2), 2 },
+    { "npc", party({ trainerItems = "POTION" }, 2), 2 },
+    { "npc", party({ aiFlags = 65536 }, 2), 2 },
+    { "npc", party({ aiFlags = -1 }, 2), 2 },
+    { "npc", party({ aiFlags = true }, 2), 2 },
+    { "npc", party({ itemSwitch = { 1 } }, 2), 2 },
+    { "npc", party({ itemSwitch = "" }, 2), 2 },
+    { "npc", party({ baseReward = 256 }, 2), 2 },
+    { "npc", party({ baseReward = "x" }, 2), 2 },
+    { "npc", party({ trainerItems = { "A", "B", "C" }, aiFlags = -1, itemSwitch = -1, baseReward = -1 }), 1 },
+    { "npc", party({ trainerItems = { "A", "B", "C" }, aiFlags = -1, generation = 2 }, 2) },
+    { "npc", { battle = "b1", mons = { mon3() }, trainerItems = { 7 }, aiFlags = -1 }, 3 },
+    -- `^` in a trainer name
+    { "npc", party({ name = "^bLASS^" }), 1 },
+    { "npc", party({ name = "^aTWINS AMY & MAY\n" }, 2), 2 },
+    -- Gold's sheet weight; a Red sheet's is no field
+    { "mon", sheet(2, { weight = 0 }) },
+    { "mon", sheet(2, { weight = 4600 }) },
+    { "mon", sheet(2, { weight = 65535 }) },
+    { "mon", sheet(2, { weight = "300" }) },
+    { "mon", sheet(2, { weight = NULL }) },
+    { "mon", sheet(2, { weight = 65536 }) },
+    { "mon", sheet(2, { weight = -1 }) },
+    { "mon", sheet(2, { weight = true }) },
+    { "mon", sheet(2, { weight = "heavy" }) },
+    { "mon", sheet(2, { weight = { 300 } }) },
+    { "mon", sheet(1, { weight = 300 }) },
+    { "mon", sheet(1, { weight = 70000 }) },
+    { "mon", sheet(1, { weight = "heavy" }) },
+    -- `^` in a monster's name
+    { "mon", sheet(1, { species = "^aFOE\n" }) },
+    { "mon", sheet(2, { species = "^bFOE^" }) },
+    { "mon", mon3({ species = "^aGAMMA" }) },
+    -- Gold's ruleset battleType
+    { "ruleset", { chart = CHART, battleType = 0 }, 2 },
+    { "ruleset", { chart = CHART, battleType = 4 }, 2 },
+    { "ruleset", { chart = CHART, battleType = 255 }, 2 },
+    { "ruleset", { chart = CHART, battleType = "4" }, 2 },
+    { "ruleset", { chart = CHART, battleType = NULL }, 2 },
+    { "ruleset", { chart = CHART, battleType = 256 }, 2 },
+    { "ruleset", { chart = CHART, battleType = -1 }, 2 },
+    { "ruleset", { chart = CHART, battleType = true }, 2 },
+    { "ruleset", { chart = CHART, battleType = "FISH" }, 2 },
+    { "ruleset", { chart = CHART, battleType = { 4 } }, 2 },
+    { "ruleset", { chart = CHART, battleType = "FISH" }, 1 },
+    { "ruleset", { chart = CHART, battleType = 4 } },
+  }
+  for _, case in ipairs(tail) do cases[#cases + 1] = case end
+  return cases
+end
+
+local function readRemaining(kind, input, gen)
+  if kind == "event" then return Wire.battleEvent(input, gen) end
+  if kind == "ruleset" then return Wire.battleRuleset(input, gen) end
+  if kind == "mon" then
+    local read = Wire.battleMon(input)
+    if not read then return "(refused)" end
+    return { species = orNil(read.species), weight = orNil(read.weight) }
+  end
+  if kind == "npc" then
+    local read = Wire.battleParty(input, gen)
+    if not read then return "(refused)" end
+    return {
+      name = orNil(read.name), aiMods = orNil(read.aiMods), aiClass = orNil(read.aiClass),
+      trainerItems = orNil(read.trainerItems), aiFlags = orNil(read.aiFlags),
+      itemSwitch = orNil(read.itemSwitch), baseReward = orNil(read.baseReward),
+    }
+  end
+  return nil
+end
+
+scenarios[#scenarios + 1] = {
+  name = "remaining_gaps_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(remainingGaps()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      out[i] = { kind = kind, got = orNil(readRemaining(kind, input, gen)) }
+    end
+    return out
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- K16 / K21, the hubs and the real referees: what each hub hands Turn.create.
+-- No turn is played, so nothing here reads the referees' text or event order.
+-- Each roster entry reports its K16 fields, its first monster's name and every
+-- monster's `weight` as the hub handed them, and the weights the referee kept
+-- (`fighter.mons`); the fight reports the ruleset's `battleType` handed to
+-- create and the one the referee kept (`sim.battleType`, Gold's alone).
+--
+--   redClass        a Red trainer's aiClass on its NPC seat, nowhere else
+--   redTwoSeats     a 2v2 trainer dealt across two seats: both carry it
+--   redHumanClaims  a human's own party naming an aiClass and Gold's four:
+--                   its seat carries none of them
+--   redBadClass     an unreadable record refuses the party: no fight
+--   redIgnoresGold  Gold's four on a Red trainer: not read, not copied
+--   redWild         a Red ruleset's battleType is no field
+--   goldFacts       Gold's four on its NPC seat, a zero aiFlags / baseReward
+--                   included; a battleType of 0 reaching the referee
+--   goldTwoSeats    the 2v2 deal
+--   goldHumanClaims a human's own Gold facts: carried nowhere
+--   goldBadItems    three item slots refuse the party: no fight
+--   goldWildFish    BATTLETYPE_FISH and the wild monster's weight reach the
+--                   Gold referee (LURE BALL, HEAVY BALL)
+--   goldWildPlain   no battleType and no weight: absent all the way
+--   goldBadType     a battleType off the byte refuses the ruleset: no fight
+--   caretNames      `^` in a player's hello name, a trainer's name and a
+--                   monster's: stripped before any seat is named
+-- ------------------------------------------------------------------
+
+local function weightsOf(mons)
+  local out = {}
+  for i, m in ipairs(mons or {}) do out[i] = orNil(m.weight) end
+  return out
+end
+
+local function factsFight(generation, mode, o)
+  o = o or {}
+  local hub = makeGenHub(generation)
+  local seen = {}
+  local real = hub.Turn
+  hub.Turn = setmetatable({
+    create = function(opts) seen.opts = opts; return real.create(opts) end,
+  }, { __index = real })
+  local sprite = generation == 2 and Config.DEFAULT_SPRITE_GEN2 or Config.DEFAULT_SPRITE
+  local ids, names = { ID_A, ID_B }, o.names or { "ANN", "BOB" }
+  local players, memberIds = {}, {}
+  for i = 1, o.humans or 1 do
+    players[i] = dialAs(hub, names[i], ids[i], { generation = generation, sprite = sprite })
+    memberIds[i] = players[i].id
+  end
+  local id = "rg"
+  hub:openCoopBattle(id, memberIds, { mode = mode, hostId = memberIds[1] })
+  hub:receive(players[1].client, merged({ type = Wire.BATTLE_RULESET, battle = id, chart = CHART },
+                                        o.rules or {}))
+  for _, p in ipairs(players) do
+    hub:receive(p.client, merged({ type = Wire.BATTLE_PARTY, battle = id, side = "a",
+                                   mons = { sheet12(generation, { species = "HERO" }) } }, o.sideA or {}))
+  end
+  hub:receive(players[1].client, merged({ type = Wire.BATTLE_PARTY, battle = id, side = "b",
+    mons = { sheet12(generation, merged({ species = "FOE" }, o.foe or {})),
+             sheet12(generation, { species = "FOE" }) } },
+    o.sideB or {}))
+  local record = hub.battles[id]
+  local sim = record and record.sim
+  local entries = {}
+  for _, side in ipairs({ "a", "b" }) do
+    for _, entry in ipairs(seen.opts and seen.opts.sides[side] or {}) do
+      local npc = false
+      for _, npcId in ipairs(record and record.npcIds or {}) do
+        if npcId == entry.playerId then npc = true end
+      end
+      local fighter = sim and sim.byId[entry.playerId]
+      entries[#entries + 1] = {
+        side = side, seat = npc and "npc" or entry.playerId, name = orNil(entry.name),
+        aiClass = orNil(entry.aiClass), trainerItems = orNil(entry.trainerItems),
+        aiFlags = orNil(entry.aiFlags), itemSwitch = orNil(entry.itemSwitch),
+        baseReward = orNil(entry.baseReward),
+        species = orNil(entry.mons and entry.mons[1] and entry.mons[1].species),
+        weights = weightsOf(entry.mons),
+        simWeights = fighter and weightsOf(fighter.mons) or "(no sim)",
+      }
+    end
+  end
+  return {
+    opened = sim ~= nil,
+    battleType = seen.opts and orNil(seen.opts.battleType) or "(no create)",
+    simBattleType = sim and orNil(sim.battleType) or "(no sim)",
+    entries = entries,
+  }
+end
+
+scenarios[#scenarios + 1] = {
+  name = "remaining_gaps_hub_fields",
+  run = function()
+    local blackbelt = { uses = 2, chance = 32, item = "X_ATTACK" }
+    local gold4 = { trainerItems = { "FULL_HEAL", "POTION" }, aiFlags = 0, itemSwitch = 513, baseReward = 0 }
+    return {
+      redClass = factsFight(1, "coop_npc", { sideB = { name = "BLACKBELT", aiClass = blackbelt } }),
+      redTwoSeats = factsFight(1, "coop_npc", { humans = 2,
+        sideB = { aiClass = { uses = 3, chance = 64, switch = true } } }),
+      redHumanClaims = factsFight(1, "coop_npc", { sideA = merged({ aiClass = blackbelt }, gold4) }),
+      redBadClass = factsFight(1, "coop_npc", { sideB = { aiClass = { uses = 0 } } }),
+      redIgnoresGold = factsFight(1, "coop_npc", { sideB = gold4 }),
+      redWild = factsFight(1, "wild", { rules = { battleType = 4 }, foe = { weight = 300 } }),
+      goldFacts = factsFight(2, "coop_npc", { rules = { battleType = 0 },
+        sideB = merged({ name = "TWINS AMY & MAY", aiClass = blackbelt }, gold4) }),
+      goldTwoSeats = factsFight(2, "coop_npc", { humans = 2, sideB = gold4 }),
+      goldHumanClaims = factsFight(2, "coop_npc", { sideA = gold4 }),
+      goldBadItems = factsFight(2, "coop_npc", { sideB = { trainerItems = { "A", "B", "C" } } }),
+      goldWildFish = factsFight(2, "wild", { rules = { battleType = 4 }, foe = { weight = 4600 } }),
+      goldWildPlain = factsFight(2, "wild"),
+      goldBadType = factsFight(2, "wild", { rules = { battleType = 256 } }),
+      caretNames = factsFight(1, "coop_npc", { names = { "^aANN" },
+        sideB = { name = "^bLASS" }, foe = { species = "^aFOE" } }),
+    }
+  end,
 }
 
 -- ------------------------------------------------------------------

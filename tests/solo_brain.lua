@@ -244,11 +244,17 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 2. ai_classes "class" records: item budget, switch / switchChance / switchBelow
+-- 2. ai_classes "class" records: the referee's now, never this file's
 -- ------------------------------------------------------------------
+--
+-- Contract K16 of docs/plans/gen12-referee-remaining-gaps.md: the Red and
+-- Gold referees run the class's item and switch AI themselves, at the cart's
+-- point in the turn (pokered TrainerAI's `Random` byte while wAICount lasts;
+-- pokecrystal AI_SwitchOrTryItem), off the class data the NPC upload states.
+-- So whatever the record would do -- an item every turn, a rotation, a heal
+-- below an HP fraction -- this brain answers the move, and spends nothing.
 
--- 2a. an item-only class fires every turn it can, and stops dead exactly
--- `uses` turns later -- never a turn early, never a turn late.
+-- 2a. an item-only class that would fire every turn: a move, every turn.
 do
   DATA.ai_classes.FIX_TRAINER_BUDGET = {
     kind = "class", chance = 256, item = "FIX_ITEM_BUDGET", uses = 2,
@@ -261,78 +267,48 @@ do
   local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
     rng = detRng, typeName = TYPE_NAMES }
 
-  local c1 = brain:choose(view)
-  eq(c1 and c1.action, "item", "budget: use #1 is the item")
-  eq(c1 and c1.item, "FIX_ITEM_BUDGET", "budget: the class's own item id")
-
-  local c2 = brain:choose(view)
-  eq(c2 and c2.action, "item", "budget: use #2 is still the item (uses = 2)")
-
-  local c3 = brain:choose(view)
-  eq(c3 and c3.action, "fight", "budget: use #3 is a move -- the budget is exhausted")
-  eq(brain.aiUses, 0, "budget: the counter reads exactly zero after the record's uses")
+  for turn = 1, 3 do
+    local c = brain:choose(view)
+    eq(c and c.action, "fight", "K16 (Red): turn " .. turn .. " is a move -- the class item is the referee's")
+  end
+  eq(brain.aiUses, 2, "K16 (Red): wAICount is seeded off the record and never spent here")
 end
 
--- 2b. switchChance fires unconditionally (it is rolled before the item
--- branch even runs) and rotates to the lowest-indexed living bench mon.
+-- 2b. switchChance would always rotate: still the move.
 do
   DATA.ai_classes.FIX_TRAINER_SWITCHCHANCE = { switchChance = 256, uses = 1 }
   local trainer = { id = "FIX_TRAINER_SWITCHCHANCE" }
-  local active = mkMon1{ slot = 1, hp = 50 }
+  local active = mkMon1{ slot = 1, hp = 50, moves = { { id = "bonk", pp = 10 } } }
   local bench = mkMon1{ slot = 7, hp = 30 }
   local foe = mkMon1{}
 
   local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
     rng = detRng, typeName = TYPE_NAMES }
   local choice = brain:choose{ mon = active, foe = foe, party = { active, bench }, bag = {} }
-  eq(choice and choice.action, "switch", "switchChance always rotates when it triggers")
-  eq(choice and choice.slot, 7, "switch names the bench mon's own slot, not a party index")
+  eq(choice and choice.action, "fight", "K16 (Red): Agatha's switch roll is the referee's -- a move here")
 end
 
--- 2c. hpBelow / switchBelow: heal when badly hurt, rotate when moderately
--- hurt, do nothing (fall through to a move) at full health. Three fresh
--- brains, one per HP band, so budgets never bleed across scenarios.
+-- 2c. hpBelow / switchBelow at every HP band: the move.
 do
   DATA.ai_classes.FIX_TRAINER_HPGATE = {
     hpBelow = 4, switchBelow = 2, item = "FIX_ITEM_HPGATE", uses = 1,
   }
   local trainer = { id = "FIX_TRAINER_HPGATE" }
   local foe = mkMon1{}
-
-  -- badly hurt (< maxHp/4): the item.
-  do
-    local mon = mkMon1{ hp = 10, maxHp = 100, moves = { { id = "bonk", pp = 10 } } }
-    local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-      rng = detRng, typeName = TYPE_NAMES }
-    local choice = brain:choose{ mon = mon, foe = foe, party = { mon },
-      bag = { FIX_ITEM_HPGATE = 1 } }
-    eq(choice and choice.action, "item", "hpBelow: low HP reaches for the item")
-  end
-
-  -- moderately hurt (maxHp/4 <= hp < maxHp/2): rotate instead.
-  do
-    local mon = mkMon1{ hp = 30, maxHp = 100, slot = 1 }
+  for _, hp in ipairs({ 10, 30, 80 }) do
+    local mon = mkMon1{ hp = hp, maxHp = 100, slot = 1, moves = { { id = "bonk", pp = 10 } } }
     local bench = mkMon1{ hp = 40, maxHp = 100, slot = 9 }
     local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
       rng = detRng, typeName = TYPE_NAMES }
-    local choice = brain:choose{ mon = mon, foe = foe, party = { mon, bench }, bag = {} }
-    eq(choice and choice.action, "switch", "switchBelow: moderate HP rotates")
-    eq(choice and choice.slot, 9, "...to the bench mon's own slot")
-  end
-
-  -- healthy (>= maxHp/2): the class declines outright, and the budget it
-  -- never spent falls through to a move.
-  do
-    local mon = mkMon1{ hp = 80, maxHp = 100, moves = { { id = "bonk", pp = 10 } } }
-    local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-      rng = detRng, typeName = TYPE_NAMES }
-    local choice = brain:choose{ mon = mon, foe = foe, party = { mon }, bag = {} }
-    eq(choice and choice.action, "fight", "hpBelow: full health does nothing special, so a move is played")
+    local choice = brain:choose{ mon = mon, foe = foe, party = { mon, bench },
+      bag = { FIX_ITEM_HPGATE = 1 } }
+    eq(choice and choice.action, "fight",
+       "K16 (Red): at " .. hp .. "/100 HP the class's heal / rotation is the referee's -- a move here")
   end
 end
 
 -- ------------------------------------------------------------------
--- 3. a `brain` record supersedes everything -- layer, class and budget alike
+-- 3. a `brain` record supersedes the layers -- for the move
 -- ------------------------------------------------------------------
 
 do
@@ -362,9 +338,9 @@ do
 end
 
 do
-  -- A brain that answers with an item still spends the aiUses budget, same
-  -- as the class path -- the module's own comment on this: "if it answered
-  -- with an item or a switch, that is a use".
+  -- A brain that answers with an item on Red is declined (K16): the item
+  -- slot of the turn is the referee's TrainerAI, and nil hands the seat to
+  -- `autoPick`.  Nothing is spent.
   DATA.ai_classes.FIX_TRAINER_BRAINITEM = { uses = 3 }
   local trainer = {
     id = "FIX_TRAINER_BRAINITEM",
@@ -375,14 +351,9 @@ do
 
   local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
     rng = detRng, typeName = TYPE_NAMES }
-  -- aiUses is seeded lazily, on the first `choose` (the send-out rollover),
-  -- not by `new` -- so the budget is 0 until the first call, and what proves
-  -- the class's `uses = 3` really seeded it is the arithmetic after that
-  -- call: 3 minus the one use this item answer spends.
   local choice = brain:choose{ mon = mon, foe = foe, party = { mon } }
-  eq(choice and choice.action, "item", "the brain's item answer is honoured")
-  eq(choice and choice.item, "FIX_ITEM_BRAIN", "...with the brain's own item id")
-  eq(brain.aiUses, 2, "...and it cost the brain one use, seeded from the class's uses = 3")
+  eq(choice, nil, "K16 (Red): a brain's item answer is declined -- the referee owns that slot")
+  eq(brain.aiUses, 3, "...and spends none of the budget seeded from uses = 3")
 end
 
 -- ------------------------------------------------------------------
@@ -416,86 +387,43 @@ do
 end
 
 -- ------------------------------------------------------------------
--- 5. bag honesty: an item the trainer's bag does not hold is declined, and
---    the decline costs nothing off the AI's own budget
+-- 5. forced replacement: the referee's (K16), on Red and Gold
 -- ------------------------------------------------------------------
-
-do
-  DATA.ai_classes.FIX_TRAINER_BAGHONESTY = {
-    chance = 256, item = "FIX_ITEM_NOTINBAG", uses = 1,
-  }
-  local trainer = { id = "FIX_TRAINER_BAGHONESTY" }
-  local mon = mkMon1{ moves = { { id = "bonk", pp = 10 } } }
-  local foe = mkMon1{}
-  local view = { mon = mon, foe = foe, party = { mon }, bag = {} } -- empty bag
-
-  local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
-    rng = detRng, typeName = TYPE_NAMES }
-
-  local c1 = brain:choose(view)
-  eq(c1 and c1.action, "fight", "an item not on the bag sheet is declined, falling to a move")
-  eq(brain.aiUses, 1, "...and the decline spent none of the budget")
-
-  local c2 = brain:choose(view)
-  eq(c2 and c2.action, "fight", "it declines again next turn, not just once")
-  eq(brain.aiUses, 1, "...the budget is still untouched")
-end
-
--- ------------------------------------------------------------------
--- 6. forced replacement: mustReplace yields a switch to a living bench mon
--- ------------------------------------------------------------------
+--
+-- pokered EnemySendOut's party order and pokecrystal
+-- FindMonInOTPartyToSwitchIntoBattle are the referee's to run; this brain
+-- answers nil and SoloBattle files `autoPick`, which reaches them.
 
 do
   local trainer = { id = "FIX_TRAINER_REPLACE" }
   local fainted = mkMon1{ slot = 1, hp = 0 }
-  local alsoFainted = mkMon1{ slot = 4, hp = 0 }
   local alive = mkMon1{ slot = 8, hp = 20 }
-
   local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 1,
     rng = detRng, typeName = TYPE_NAMES }
-  -- no `foe` at all: a forced send-out never scores against the far side.
-  local choice = brain:choose{
-    mon = fainted, mustReplace = true, party = { fainted, alsoFainted, alive },
-  }
-  eq(choice and choice.action, "switch", "a forced replacement switches")
-  eq(choice and choice.slot, 8, "...to the lowest-indexed living bench mon's own slot")
-
-  local wipedOut = brain:choose{
-    mon = fainted, mustReplace = true, party = { fainted, alsoFainted },
-  }
-  eq(wipedOut, nil, "with no living bench mon, there is nothing to answer -- nil, not an error")
+  eq(brain:choose{ mon = fainted, mustReplace = true, party = { fainted, alive } }, nil,
+     "K16 (Red): a forced replacement is the referee's -- nil, never a switch")
 end
 
 do
-  -- the same forced-replacement path, off a Gen 2 brain: `_decide` handles
-  -- mustReplace before it ever branches on generation, so this is one code
-  -- path serving both.
   local trainer = { id = "FIX_TRAINER_REPLACE2", attributes = { 0, 0, 0, 0, 0 } }
   local fainted = mkMon2{ slot = 2, hp = 0 }
   local alive = mkMon2{ slot = 5, hp = 15 }
   local brain = SoloBrain.new{ data = DATA, trainer = trainer, generation = 2,
     rng = detRng, typeName = TYPE_NAMES }
-  local choice = brain:choose{ mon = fainted, mustReplace = true, party = { fainted, alive } }
-  eq(choice and choice.action, "switch", "Gen 2 forced replacement switches too")
-  eq(choice and choice.slot, 5, "...to the same living bench mon's own slot")
+  eq(brain:choose{ mon = fainted, mustReplace = true, party = { fainted, alive } }, nil,
+     "K16 (Gold): a forced replacement is the referee's too")
 end
 
 -- ------------------------------------------------------------------
--- 7. no engine mutation: Gen 2 items are spent off a private copy
+-- 6. Gold: AI_TryItem is the referee's -- the move, and no engine mutation
 -- ------------------------------------------------------------------
 --
--- The real cart's AI_TryItem removes what it used from the trainer's item
--- list; SoloBrain's own header calls this out as a corruption it guards
--- against, because the registry's trainer record has to survive the battle
--- for the next player who fights this same trainer.
---
--- Gen 2's `Ai.chooseItem` -- unlike Gen 1's `ai_classes` item field, which
--- passes its string straight through unvalidated -- walks a fixed table of
--- real item ids (`Ai.ITEM_ORDER` / `Ai.HEAL_ITEMS`) baked into
--- src/battle/gen2/Ai.lua itself; a made-up id is simply never matched. So
--- this is the one spot in this suite that must use a real item id -- "POTION"
--- is the engine's own functional identifier here, not ROM-derived flavor,
--- the same way "STRUGGLE" is elsewhere in this bridge.
+-- A hurt, highest-level monster whose trainer holds a POTION would drink it
+-- on the cart (AI_TryItem); the Gold referee does that now from the class
+-- attributes the NPC upload states (`trainerItems`).  This brain answers the
+-- move and never touches the registry's own item list.  "POTION" is the
+-- engine's own functional identifier here (src/battle/gen2/Ai.lua matches
+-- real ids), not ROM-derived flavor.
 do
   local trainer = {
     id = "FIX_TRAINER_ITEMS2",
@@ -510,14 +438,23 @@ do
     rng = detRng, typeName = TYPE_NAMES }
 
   local c1 = brain:choose(view)
-  eq(c1 and c1.action, "item", "Gen 2: a hurt, highest-level mon reaches for its item")
-  eq(c1 and c1.item, "POTION", "...the trainer's own item id")
+  eq(c1 and c1.action, "fight", "K16 (Gold): a hurt monster's POTION is the referee's -- a move here")
   eq(#trainer.items, 1, "the registry's own item list is untouched in length")
   eq(trainer.items[1], "POTION", "...and in content -- this is the record every future fight reads")
-  eq(#brain.items2, 0, "the brain's private copy is what actually got spent")
+  eq(brain.items2, nil, "K16 (Gold): no private item copy is kept -- nothing here spends one")
+end
 
-  local c2 = brain:choose(view)
-  eq(c2 and c2.action, "fight", "with the private copy empty, the item is not offered again")
+-- ------------------------------------------------------------------
+-- 7. SoloBrain.classOf: one resolution of a trainer's class record
+-- ------------------------------------------------------------------
+
+do
+  DATA.ai_classes.FIX_TRAINER_CLASSOF = { uses = 2, chance = 64, item = "FIX_ITEM_CLASSOF" }
+  local class = SoloBrain.classOf({ id = "FIX_TRAINER_CLASSOF" }, DATA)
+  eq(class and class.uses, 2, "classOf: the trainer's ai_classes record by id")
+  local aliased = SoloBrain.classOf({ id = "OTHER", aiClass = "FIX_TRAINER_CLASSOF" }, DATA)
+  eq(aliased and aliased.item, "FIX_ITEM_CLASSOF", "classOf: ...or by its `aiClass` (TrainerAI.classFor)")
+  eq(SoloBrain.classOf({ id = "FIX_NO_SUCH_CLASS" }, DATA), nil, "classOf: no record is nil (GenericAI)")
 end
 
 -- ------------------------------------------------------------------

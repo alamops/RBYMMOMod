@@ -443,37 +443,106 @@ M.BATTLE_GLYPHS = {
 }
 local BATTLE_ASCII = "[A-Za-z0-9 %.,!%?'%-:;%(%)/&]"
 
-function M.battleText(value, limit)
+-- A battle line's two marks of its own (contracts K17 / K18 of
+-- docs/plans/gen12-referee-remaining-gaps.md), read by M.battleLine alone:
+--
+--   ^a ^b  a name mark: the referee writes it immediately before a battler's
+--          name wherever the cart prints that name through a prefixing macro
+--          (pokered <USER> / <TARGET> -- PlaceMoveUsersName /
+--          PlaceMoveTargetsName -- and its "Enemy @" lines; pokecrystal
+--          <USER> / <TARGET> / <ENEMY> -- PlaceBattlersName /
+--          PlaceEnemysName), the letter naming the monster's side.  The
+--          viewer prints "Enemy " / "Wild " or nothing for it, so a mark is
+--          only ever a `^` with its side letter after it: a `^` followed by
+--          anything else is dropped, alone, and the glyphs after it read as
+--          they would have.
+--   \n     the cart's `line` / `cont` inside one paragraph (a `para` is a
+--          separate `msg`).  Held like a space -- never leading, trailing or
+--          doubled -- and a space beside it collapses into it.
+--
+-- `^` is never a name glyph: M.text's set and this file's name readers
+-- (M.name, M.npcName, M.moveName, M.label) have no `^`, and only the battle
+-- line reads one -- so a player, nickname or trainer can never spell a mark.
+M.BATTLE_MARK = "^"
+M.BATTLE_MARK_SIDES = { a = true, b = true }
+
+-- The walker both readers share.  `line` reads the two marks above; without
+-- it, it is M.battleText exactly as it was.  A line cut at `cap` loses what
+-- would hang off its end -- a space or break the cut glyph was waiting for, a
+-- `^` whose letter fell past the cut, a mark whose name did -- so a cut line
+-- still holds only marks with a side and breaks between words.
+local function battleGlyphs(value, cap, line)
   if type(value) ~= "string" then return nil end
-  local glyphs, space = {}, false
+  local glyphs, gap = {}, nil
   local i, n = 1, #value
   while i <= n do
     local byte, glyph, step = value:byte(i), nil, 1
     if byte < 128 then
       local c = value:sub(i, i)
-      if c:find(BATTLE_ASCII) then glyph = c end
+      if c:find(BATTLE_ASCII) then
+        glyph = c
+      elseif line and c == "\n" then
+        glyph = c
+      elseif line and c == M.BATTLE_MARK and M.BATTLE_MARK_SIDES[value:sub(i + 1, i + 1)] then
+        glyph = c
+      end
     elseif M.BATTLE_GLYPHS[value:sub(i, i + 1)] then
       glyph, step = value:sub(i, i + 1), 2
     elseif M.BATTLE_GLYPHS[value:sub(i, i + 2)] then
       glyph, step = value:sub(i, i + 2), 3
     end
     i = i + step
-    -- A space is held until a glyph follows it: a run collapses to one, and
-    -- none is written at either end.
-    if glyph == " " then
-      space = #glyphs > 0
+    -- A space or a break is held until a glyph follows it: a run collapses to
+    -- one -- a break when the run holds one -- and none is written at either end.
+    if glyph == " " or glyph == "\n" then
+      if #glyphs > 0 and gap ~= "\n" then gap = glyph end
     elseif glyph then
-      if space then glyphs[#glyphs + 1] = " " end
-      space = false
+      if gap then glyphs[#glyphs + 1] = gap end
+      gap = nil
       glyphs[#glyphs + 1] = glyph
     end
   end
   if #glyphs == 0 then return nil end
-  local cap = limit or Config.MESSAGE_MAX
   if #glyphs > cap then
     for k = #glyphs, cap + 1, -1 do glyphs[k] = nil end
+    while line and #glyphs > 0 do
+      local last = glyphs[#glyphs]
+      if last == " " or last == "\n" or last == M.BATTLE_MARK then
+        glyphs[#glyphs] = nil
+      elseif glyphs[#glyphs - 1] == M.BATTLE_MARK then
+        glyphs[#glyphs], glyphs[#glyphs - 1] = nil, nil
+      else
+        break
+      end
+    end
+    if #glyphs == 0 then return nil end
   end
   return table.concat(glyphs)
+end
+
+function M.battleText(value, limit)
+  return battleGlyphs(value, limit or Config.MESSAGE_MAX, false)
+end
+
+-- A Red / Gold referee's battle line (K17 / K18): M.battleText's glyphs, its
+-- name marks and its breaks, cut at BATTLE_LINE_MAX glyphs -- a mark is two of
+-- them and a break one.  The reader of an older `msg` event's text
+-- (M.battleEvent) and of nothing else: no name and no Gen 3 line reads marks.
+-- Twin of lib/sanitize.js's cleanBattleLine, byte for byte on every input.
+function M.battleLine(value, limit)
+  return battleGlyphs(value, limit or Config.BATTLE_LINE_MAX, true)
+end
+
+-- The same line as one plain sentence: each mark gone and each break a space
+-- -- or nothing after a hyphen, the word the cart split over two rows
+-- (pokecrystal's "It's super-" / line "effective!") -- for whatever reads a
+-- line's words rather than drawing it: a matcher that asks "is this the
+-- weather line?", a driver, a test.  Anything that is not a string comes back
+-- as it went in.  Twin of lib/sanitize.js's plainBattleLine.
+function M.plainBattleLine(text)
+  if type(text) ~= "string" then return text end
+  local plain = text:gsub("%^[ab]", ""):gsub("%-\n", "-"):gsub("\n", " ")
+  return plain
 end
 
 -- The trainer an NPC seat is (wave 6): the name the cart's own lines print for
@@ -1455,6 +1524,19 @@ M.HAPPINESS2_MAX = 255
 M.CHART_ORDER_MAX = 512
 M.NUM_ATTACKS2 = 251
 
+-- Contract K21 of docs/plans/gen12-referee-remaining-gaps.md, Gold only -- the
+-- two facts the LURE BALL and the HEAVY BALL read (pokecrystal / pokegold
+-- engine/items/item_effects.asm LureBallMultiplier, HeavyBallMultiplier):
+--
+--   WEIGHT2_MAX       a Gen 2 sheet's `weight`: the species' Pokedex weight
+--                     word (data/pokemon/dex_entries, `dw` after the height),
+--                     which HeavyBallMultiplier reads through GetFarWord.
+--   BATTLE_TYPE2_MAX  a Gen 2 ruleset's `battleType`: wBattleType, one byte
+--                     (constants/battle_constants.asm BATTLETYPE_*), which
+--                     LureBallMultiplier compares with BATTLETYPE_FISH.
+M.WEIGHT2_MAX = 65535
+M.BATTLE_TYPE2_MAX = 255
+
 -- Gold's wTimeOfDay as a Gen 2 ruleset spells it (`timeOfDay`, wave 4 of
 -- docs/plans/gen12-referee-gaps-fix.md): pokecrystal / pokegold
 -- constants/ram_constants.asm `shift_const MORN / DAY / NITE` -- MORN_F 0,
@@ -1893,6 +1975,19 @@ function M.battleRuleset(raw, generation)
   if M.int(generation, 2, 2) and raw.timeOfDay ~= nil then
     if not M.TIMES_OF_DAY2[raw.timeOfDay] then return nil end
     out.timeOfDay = raw.timeOfDay
+  end
+  -- Gold's wBattleType (contract K21 of
+  -- docs/plans/gen12-referee-remaining-gaps.md), the engine battle's own id,
+  -- which the LURE BALL compares with BATTLETYPE_FISH (LureBallMultiplier) --
+  -- the hubs hand it to the Gold referee's `opts.battleType`.  Read on a Gen 2
+  -- hub alone, by the hub's generation as `timeOfDay` is: a Gen 1 reader (or a
+  -- caller naming none) neither copies nor refuses one.  0..BATTLE_TYPE2_MAX,
+  -- read as Wire.int reads it on both twins (lib/sanitize's luaInt), or the
+  -- ruleset is refused -- `timeOfDay`'s posture for an input to a catch rate.
+  -- Absent stays absent: the referee then reads no fishing fight.
+  if M.int(generation, 2, 2) and raw.battleType ~= nil then
+    out.battleType = M.int(raw.battleType, 0, M.BATTLE_TYPE2_MAX)
+    if out.battleType == nil then return nil end
   end
   return out
 end
@@ -2586,6 +2681,19 @@ function M.battleMon(raw)
     if out.happiness == nil then return nil end
   end
 
+  -- Contract K21 of docs/plans/gen12-referee-remaining-gaps.md: the species'
+  -- Pokedex weight word, 0..WEIGHT2_MAX, which the HEAVY BALL reads
+  -- (pokecrystal HeavyBallMultiplier, GetFarWord on the dex entry) -- the
+  -- Gold referee's copyMon keeps it as the monster's `weight`.  The hub holds
+  -- no dex and never will, so it rides the sheet as Gen 3's does.  Gen 2 only,
+  -- by the dialect this sheet resolved to (Red's balls read no weight, so a
+  -- Gen 1 reader neither copies nor refuses one), and refused with the sheet
+  -- when present and unreadable, K14's posture for an input to a formula.
+  if generation == 2 and raw.weight ~= nil then
+    out.weight = M.int(raw.weight, 0, M.WEIGHT2_MAX)
+    if out.weight == nil then return nil end
+  end
+
   return out
 end
 
@@ -2746,6 +2854,113 @@ local function aiModsOf(raw)
 end
 M.aiMods = aiModsOf
 
+-- The computer's own choices (contract K16 of
+-- docs/plans/gen12-referee-remaining-gaps.md): the trainer facts an NPC party
+-- carries beside `aiMods` / `name`, which the referees' item / switch AI reads
+-- off the seat (`fighter`).  The client reads each off its own engine
+-- trainer (extracted from the player's ROM; the mod ships none of it), so the
+-- hub passes on only what the host's cart says.
+--
+-- Red, `aiClass`: the engine's `ai_classes` record for the trainer's class
+-- (TrainerAI.classFor), which matches pokered's data/trainers/ai_pointers.asm
+-- and the class routines of engine/battle/trainer_ai.asm row for row:
+--
+--   uses         TrainerAIPointers' first byte, the wAICount TrainerAI loads
+--                for each monster -- 1..AI_USES_MAX, and the one key a record
+--                cannot do without (a class with no record runs GenericAI)
+--   chance       the routine's `cp N percent` against TrainerAI's Random
+--                byte, out of 256 -- 0..AI_CHANCE_MAX
+--   switchChance AgathaAI's switch roll before her item roll, the same scale
+--   item         the item the routine uses (AIUseXAttack, AIUseFullHeal ...),
+--                an item id read as every Gen 1 bag id is (M.id)
+--   switch       true: the routine is AISwitchIfEnoughMons (JugglerAI)
+--   onStatus     true: BrockAI's "only while the active monster has a status"
+--   hpBelow      AICheckIfHPBelowFraction's divisor for the item -- 1..
+--                AI_DIVISOR_MAX (a byte: `ld a, 10`)
+--   switchBelow  CooltrainerFAI's second divisor, for the switch
+--
+-- Read field by field, so an unknown key is dropped, and refused WHOLE when a
+-- key it knows is present and unreadable -- the party with it, `aiMods`'
+-- posture: a record half-read is a different class from the one the host's
+-- cart fights with.  The booleans read the way `traded` does (`true` kept,
+-- `false` kept as absent, anything else refused); every number as Wire.int
+-- reads it on both twins (lib/sanitize's luaInt).  Twin of lib/sanitize.js's
+-- cleanAiClass.
+M.AI_USES_MAX = 255
+M.AI_CHANCE_MAX = 256
+M.AI_DIVISOR_MAX = 255
+
+local AI_CLASS_INTS = {
+  { "uses", 1, M.AI_USES_MAX },
+  { "chance", 0, M.AI_CHANCE_MAX },
+  { "switchChance", 0, M.AI_CHANCE_MAX },
+  { "hpBelow", 1, M.AI_DIVISOR_MAX },
+  { "switchBelow", 1, M.AI_DIVISOR_MAX },
+}
+local AI_CLASS_FLAGS = { "switch", "onStatus" }
+
+local function aiClassOf(raw)
+  if type(raw) ~= "table" then return nil end
+  if raw.uses == nil then return nil end
+  local out = {}
+  for _, field in ipairs(AI_CLASS_INTS) do
+    local key = field[1]
+    if raw[key] ~= nil then
+      out[key] = M.int(raw[key], field[2], field[3])
+      if out[key] == nil then return nil end
+    end
+  end
+  if raw.item ~= nil then
+    out.item = M.id(raw.item)
+    if out.item == nil then return nil end
+  end
+  for _, key in ipairs(AI_CLASS_FLAGS) do
+    if raw[key] ~= nil then
+      if type(raw[key]) ~= "boolean" then return nil end
+      if raw[key] then out[key] = true end
+    end
+  end
+  return out
+end
+M.aiClass = aiClassOf
+
+-- Gold, four bytes of the class's TrainerClassAttributes
+-- (pokecrystal / pokegold data/trainers/attributes.asm; the engine's
+-- `attributes[1..7]`), which AI_SwitchOrTryItem, AI_TryItem and AIChooseMove
+-- read (engine/battle/ai/items.asm, move.asm):
+--
+--   trainerItems  TRNATTR_ITEM1 / ITEM2, which LoadEnemyMon copies into
+--                 wEnemyTrainerItem1 / 2: an ordered list of 0..TRAINER_ITEMS2_MAX
+--                 item ids (M.id, every Gold bag id's reading), the cart's
+--                 slot order kept -- AI_TryItem walks item 1 then item 2, and
+--                 its base-reward bug reads past whichever slot matched
+--   aiFlags       TRNATTR_AI_MOVE_WEIGHTS, the AIChooseMove layer word
+--   itemSwitch    TRNATTR_AI_ITEM_SWITCH, the item-use and switch flags
+--   baseReward    TRNATTR_BASEMONEY, the wEnemyTrainerBaseReward byte
+--                 AI_TryItem's bug reads as an item ("AI might use its base
+--                 reward value as an item", docs/bugs_and_glitches.md)
+--
+-- Each present-and-unreadable one refuses the party (aiClass' posture); a
+-- list past its two slots, or with an entry that is not an id, is refused
+-- whole.  Twin of lib/sanitize.js's cleanTrainerItems / the Gold bounds.
+M.TRAINER_ITEMS2_MAX = 2
+M.AI_FLAGS2_MAX = 65535
+M.BASE_REWARD2_MAX = 255
+
+local function trainerItemsOf(raw)
+  if not isList(raw) then return nil end
+  local n = #raw
+  if n > M.TRAINER_ITEMS2_MAX then return nil end
+  local out = {}
+  for i = 1, n do
+    local id = M.id(raw[i])
+    if id == nil then return nil end
+    out[i] = id
+  end
+  return out
+end
+M.trainerItems = trainerItemsOf
+
 function M.battleParty(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
@@ -2805,6 +3020,40 @@ function M.battleParty(raw, generation)
   end
   if (partyGen == 1 or partyGen == 2) and raw.name ~= nil then
     out.name = M.npcName(raw.name)
+  end
+  -- K16 of docs/plans/gen12-referee-remaining-gaps.md: the computer's item /
+  -- switch facts, by the same dialect gate (copied onto the NPC seats alone
+  -- by the hubs, as `aiMods` is).  Each one decides the computer's choice, so
+  -- each present-and-unreadable one refuses the party, `aiMods`' posture; a
+  -- reader of another generation -- or of none -- neither copies nor refuses
+  -- one.
+  --
+  --   aiClass       Red only (aiClassOf): the class's TrainerAI record.
+  --   trainerItems  Gold only (trainerItemsOf): wEnemyTrainerItem1 / 2.
+  --   aiFlags       Gold only: TRNATTR_AI_MOVE_WEIGHTS, 0..AI_FLAGS2_MAX.
+  --   itemSwitch    Gold only: TRNATTR_AI_ITEM_SWITCH, 0..AI_FLAGS2_MAX.
+  --   baseReward    Gold only: TRNATTR_BASEMONEY, 0..BASE_REWARD2_MAX.
+  if partyGen == 1 and raw.aiClass ~= nil then
+    out.aiClass = aiClassOf(raw.aiClass)
+    if out.aiClass == nil then return nil end
+  end
+  if partyGen == 2 then
+    if raw.trainerItems ~= nil then
+      out.trainerItems = trainerItemsOf(raw.trainerItems)
+      if out.trainerItems == nil then return nil end
+    end
+    if raw.aiFlags ~= nil then
+      out.aiFlags = M.int(raw.aiFlags, 0, M.AI_FLAGS2_MAX)
+      if out.aiFlags == nil then return nil end
+    end
+    if raw.itemSwitch ~= nil then
+      out.itemSwitch = M.int(raw.itemSwitch, 0, M.AI_FLAGS2_MAX)
+      if out.itemSwitch == nil then return nil end
+    end
+    if raw.baseReward ~= nil then
+      out.baseReward = M.int(raw.baseReward, 0, M.BASE_REWARD2_MAX)
+      if out.baseReward == nil then return nil end
+    end
   end
 
   if type(raw.mons) ~= "table" then return nil end
@@ -3101,7 +3350,7 @@ end
 --
 -- `text` borrows MESSAGE_MAX: it lands in the same box a chat line does and is
 -- drawn by the same code, even though an intermediator wrote it rather than a
--- player.
+-- player.  A Red / Gold `msg` is the one exception (BATTLE_LINE_MAX, below).
 --
 -- `seq` has a floor and no ceiling.  It is only ever compared, never sized, so an
 -- absurdly large one sorts late and does nothing else -- whereas a cap would be a
@@ -3142,16 +3391,19 @@ function M.battleEvent(raw, generation)
   -- own sentence that follows it rather than phrasing a token it has no line for.
   -- A Red / Gold reader's `msg` is the referee's own line in the cart's
   -- English (wave 6 of docs/plans/gen12-referee-gaps-fix.md), so it reads the
-  -- carts' battle glyphs too -- é, …, ♂, ♀, & (M.battleText) -- under the same
-  -- MESSAGE_MAX, counted in glyphs.  Every other kind's text, and a Gen 3 (or
-  -- unnamed) reader's `msg`, reads exactly as before.
+  -- carts' battle glyphs too -- é, …, ♂, ♀, & -- and, since K17 / K18 of
+  -- docs/plans/gen12-referee-remaining-gaps.md, the line's `^a` / `^b` name
+  -- marks and its `\n` breaks (M.battleLine), cut at BATTLE_LINE_MAX glyphs
+  -- rather than chat's MESSAGE_MAX.  Every other kind's text -- a `run`'s or a
+  -- `send`'s is a name, which never reads a mark -- and a Gen 3 (or unnamed)
+  -- reader's `msg`, reads exactly as before.
   if raw.text ~= nil then
     if raw.t == "item" or raw.t == "anim" or raw.t == "ball" or held2 then
       out.text = M.id(raw.text)
     elseif raw.t == "obey" then
       out.text = M.OBEY_TOKENS3[raw.text] and raw.text or nil
     elseif older and raw.t == "msg" then
-      out.text = M.battleText(raw.text, Config.MESSAGE_MAX)
+      out.text = M.battleLine(raw.text)
     else
       out.text = M.text(raw.text, Config.MESSAGE_MAX)
     end

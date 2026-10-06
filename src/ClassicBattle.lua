@@ -156,9 +156,37 @@ function M.wrapBoxLines(text, width)
 end
 
 -- Pages of at most BOX_ROWS lines, each line already <= width.
-function M.pageBoxText(text, width)
+--
+-- `cartBreaks` (Red / Gold, contract K18 of
+-- docs/plans/gen12-referee-remaining-gaps.md): an explicit `\n` is the cart's
+-- own line break -- the referee writes one where the cart's text has `line`
+-- or `cont`, and a `para` is a separate `msg`.  Two rows make a page; a third
+-- row starts the next page the way the cart's `cont` does it -- `_ContText`
+-- (pokered home/text.asm, pokecrystal the same) waits for the button and
+-- scrolls the box one row, so the row above stays in sight under it: rows
+-- r1 r2 r3 read as "r1\nr2", then "r2\nr3" (the shape `sentOutPages` already
+-- gives Gold's BattleText_EnemySentOut).  A row too long for the box still
+-- word-wraps, and its spill rows scroll in the same way.  Text with no `\n`
+-- word-wraps and packs two rows a page exactly as it always has, and a caller
+-- that does not ask (Gen 3, whose box breaks its own way) gets the old pager
+-- whatever the text holds.
+function M.pageBoxText(text, width, cartBreaks)
   local lines = M.wrapBoxLines(text, width or M.BOX_COLS)
   local pages = {}
+  local scroll = cartBreaks == true and #lines > M.BOX_ROWS
+    and tostring(text or ""):find("\n", 1, true) ~= nil
+  -- A blank row is not a cart break (K18 never writes `\n\n`: a `para` is its
+  -- own `msg`), so a text holding one pages the old way, blank row and all.
+  for _, line in ipairs(scroll and lines or {}) do
+    if line == "" then scroll = false; break end
+  end
+  if scroll then
+    pages[1] = lines[1] .. "\n" .. lines[2]
+    for i = 3, #lines do
+      pages[#pages + 1] = lines[i - 1] .. "\n" .. lines[i]
+    end
+    return pages
+  end
   for i = 1, #lines, M.BOX_ROWS do
     local page = lines[i]
     if lines[i + 1] then page = page .. "\n" .. lines[i + 1] end
@@ -166,6 +194,92 @@ function M.pageBoxText(text, width)
   end
   if #pages == 0 then pages[1] = "" end
   return pages
+end
+
+-- ------- K17: the name marks in a Red / Gold referee line
+--
+-- The referee is one narrator for every seat, so where a cart prints a
+-- battler's name through a prefixing macro it writes `^a` or `^b` -- the
+-- monster's side -- straight before the name instead of a prefix (contract
+-- K17 of docs/plans/gen12-referee-remaining-gaps.md), and each screen says
+-- the mark the way its own cart would for its own player.  The macros are
+-- pokered PlaceMoveUsersName / PlaceMoveTargetsName (`<USER>` / `<TARGET>`,
+-- home/text.asm) and pokecrystal / pokegold PlaceBattlersName (the same two
+-- characters): the player's own monster is printed bare (wBattleMonNick), and
+-- the other one behind EnemyText, "Enemy @" -- on both carts, in every kind of
+-- fight.  Neither cart's routine looks at the battle mode: there is no "Wild"
+-- on this path (Gold's "Wild <MON>" lines -- WildPokemonAppearedText,
+-- BattleText_WildFled -- are literal text the referee writes whole), and a
+-- link battle prints "Enemy" for the other player's monster because each
+-- console calls its own player's side the player.  `^` is never a name glyph
+-- (Wire strips it from every name), so a mark is never part of a name.
+
+-- What the other side's mark becomes, per generation and per kind of fight:
+-- one row per cart and fight, so a cart rule that differs is one row.
+-- `wild` / `trainer` / `link` are the three kinds `M.fightKind` reads off a
+-- screen's mode.
+M.FOE_MARK = {
+  [1] = { wild = "Enemy ", trainer = "Enemy ", link = "Enemy " },  -- pokered EnemyText
+  [2] = { wild = "Enemy ", trainer = "Enemy ", link = "Enemy " },  -- pokecrystal / pokegold EnemyText
+}
+
+-- The fights the cart fights under link rules (MediatedBattle.LINK_MODES'
+-- set, restated here so this module needs nothing above it) and the wild ones.
+local LINK_FIGHTS = { ["1v1"] = true, coop_pvp = true }
+local WILD_FIGHTS = { wild = true, coop_wild = true }
+
+-- "wild" | "trainer" | "link" for a screen's mode: anything that is neither
+-- a link fight nor a wild one is a fight against a computer trainer.
+function M.fightKind(mode)
+  if LINK_FIGHTS[mode] then return "link" end
+  if WILD_FIGHTS[mode] then return "wild" end
+  return "trainer"
+end
+
+-- The word the other side's mark is said as on `generation`'s cart, in a
+-- fight of `mode` ("" for a generation with no marks: Gen 3's referee writes
+-- none).
+function M.foeMarkWord(generation, mode)
+  local row = M.FOE_MARK[tonumber(generation) or 0]
+  if not row then return "" end
+  return row[M.fightKind(mode)] or ""
+end
+
+-- `text` with every mark taken out -- and any `^` left over with it, so a
+-- stray or malformed mark never reaches the box as a glyph.
+function M.stripMarks(text)
+  if type(text) ~= "string" then return text end
+  if not text:find("^", 1, true) then return text end
+  return (text:gsub("%^[ab]", ""):gsub("%^", ""))
+end
+
+-- One referee line as a viewer reads it: a mark on `ownSide`'s monster is
+-- nothing (the cart prints its own player's monster bare), a mark on the other
+-- side's is `foeWord`.  `ownSide` nil reads every mark as the other side's.
+function M.renderMarks(text, ownSide, foeWord)
+  if type(text) ~= "string" then return text end
+  if not text:find("^", 1, true) then return text end
+  foeWord = tostring(foeWord or "")
+  local out = text:gsub("%^([ab])", function(side)
+    if side == ownSide then return "" end
+    return foeWord
+  end)
+  return (out:gsub("%^", ""))
+end
+
+-- The line every client matcher reads (K17's "every line is read without its
+-- marks", K18's breaks): Wire.plainBattleLine's reading, so the screens'
+-- matchers, the suites and the e2e drivers all read one plain text -- the
+-- marks out, a row broken after a hyphen joined whole ("super-\neffective!"
+-- is "super-effective!", the word the cart split), and every other `\n` read
+-- as the space between two words.  A `^` the wire would never carry (a stray
+-- one in a line this client composed) is dropped too.  The one normaliser
+-- the screens' line readers share, so a referee that starts breaking a line
+-- or marking a name changes what the box shows and never what a matcher sees.
+function M.plainLine(text)
+  if type(text) ~= "string" then return text end
+  local Wire = need("Wire")
+  return M.stripMarks(Wire.plainBattleLine(text))
 end
 
 -- Vanilla RBY FIGHT pane: names on the left, TYPE/ + PP of the cursor

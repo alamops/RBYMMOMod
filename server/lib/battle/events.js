@@ -244,6 +244,49 @@ function fieldSlot(side, index) {
 }
 
 // ------------------------------------------------------------------
+// a battler's name in a line (contract K17), and the line's breaks (K18)
+// ------------------------------------------------------------------
+//
+// The referee is one narrator for two screens; the cart is not. A line that
+// names a battler through <USER> / <TARGET> (home/text.asm
+// PlaceMoveUsersName / PlaceMoveTargetsName: "Enemy @" ahead of
+// wEnemyMonNick on the enemy's half) or through an "Enemy @" / text_ram
+// wEnemyMonNick line of its own reads differently on each console. So the
+// referee writes the battler's *side* where the cart wrote the word -- `^a` or
+// `^b` immediately before the name -- and each client prints nothing for its
+// own side and "Enemy " (Red) for the other. A name the cart prints bare
+// carries no mark: "Go! X!", "<TRAINER> sent out X!", the party menu's "X
+// recovered by N!", the obedience lines over wBattleMonNick, the species a
+// TRANSFORM copied, a caught monster's "All right! X was caught!".
+//
+// `\n` is where the cart's two-row box breaks the sentence: its `line`, its
+// `cont`, and the <SCROLL> in front of "greatly". A `para` is a separate
+// `msg`, as it always was.
+//
+// LINE_MAX mirrors Config.BATTLE_LINE_MAX -- the glyphs Wire keeps of a Red /
+// Gold `msg`, marks and breaks included -- for the reason in the header; the
+// suites hold every line the referee says under it.
+const LINE_MAX = 80;
+const MARK = '^';
+
+// The one door every marked name goes through, so the audit is a grep.
+function named(side, name) {
+  return `${MARK}${side === 'b' ? 'b' : 'a'}${String(name)}`;
+}
+
+// A line read without its marks, each break a space -- or nothing after a
+// hyphen, the word the cart split over two rows ("with-" / line "drew"): the
+// sentence the referee said before K17 / K18, word for word. It is what an
+// event other than a `msg` carries in its `text` (a `status`'s, a `stat`'s,
+// which a client reads as a sentence rather than prints), and what a reader
+// that knows no marks matches lines against. Mirrors sanitize.js's
+// plainBattleLine rule for rule (the suite holds the two to the same output).
+function plain(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/\^[ab]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
+}
+
+// ------------------------------------------------------------------
 // team rosters
 // ------------------------------------------------------------------
 //
@@ -383,6 +426,10 @@ module.exports = {
   SHAPES,
   SIDE_SLOTS,
   fieldSlot,
+  LINE_MAX,
+  MARK,
+  named,
+  plain,
   TEAM_OK,
   TEAM_STATUS,
   TEAM_FAINTED,

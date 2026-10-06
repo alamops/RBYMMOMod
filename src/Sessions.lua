@@ -863,7 +863,8 @@ function M:beginWildMediated(game, battleId, opts)
         battleType = opts.battleType,
         random = type(opts.random) == "function" and opts.random or M.randomByte,
       })
-      wildParty = MediatedBattle.snapshotMons(game, { opts.mon })
+      -- ...with Gold's dex weight on the sheet (contract K21, HEAVY BALL).
+      wildParty = MediatedBattle.snapshotWild(game, opts.mon)
     end
   end
   if type(wildParty) ~= "table" or #wildParty == 0 then
@@ -881,6 +882,9 @@ function M:beginWildMediated(game, battleId, opts)
     mode         = "wild",
     wildParty    = wildParty,
     wildCatchMon = opts.wildCatchMon or opts.mon,
+    -- Gold's wBattleType (contract K21): the screen states it on the
+    -- ruleset it uploads, for LURE BALL.
+    battleType   = opts.battleType,
     autoPick     = self.autoPick == true,
     -- Same on the wild path, and it is the one that reaches this most often:
     -- a wild fight is where a mediated party earns its levels today, and a

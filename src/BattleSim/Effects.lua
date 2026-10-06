@@ -21,6 +21,10 @@ local need = ...
 -- The two condition penalties are Status' formulas (and its vectors'); the
 -- stat machinery below is where they are written into a battle stat.
 local Status = need("BattleSim/Status")
+-- The lines below name battlers the way the cart's <USER> / <TARGET> do:
+-- through Events.named (contract K17), with the cart's breaks (K18); an
+-- event's own `text` is the same line read plain (Events.plain).
+local Events = need("BattleSim/events")
 
 local M = {}
 
@@ -710,11 +714,12 @@ local function confuse(out, fighter, mon, rng, failIfAlready)
   end
   local turns = (rng and rng:byte() or 0) % 4 + 2
   mon.confusion = turns
-  local text = mon.species .. " became confused!"
+  -- BecameConfusedText, "<TARGET>\nbecame confused!".
+  local text = Events.named(fighter.side, mon.species) .. "\nbecame confused!"
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
   fields.confused = 1
-  fields.text = text
+  fields.text = Events.plain(text)
   out.events[#out.events + 1] = { kind = "status", fields = fields }
 end
 
@@ -755,9 +760,12 @@ local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, 
   -- "<USER>'s <STAT> rose!" and "<TARGET>'s <STAT> fell!", with "greatly"
   -- for the two-stage effects (an UP2 effect: `cp ATTACK_DOWN1_EFFECT / ret
   -- nc`; a DOWN2 one: BIDE_EFFECT up to ATTACK_DOWN_SIDE_EFFECT).  A side
-  -- effect's one stage is plain "fell!".
-  local text = mon.species .. "'s " .. label
-    .. ((delta >= 2 or delta <= -2) and " greatly " or " ") .. outcome .. "!"
+  -- effect's one stage is plain "fell!".  The name is <USER>'s for a raise
+  -- and <TARGET>'s for a drop -- `mon` either way, on `fighter`'s side
+  -- (K17) -- and the box breaks after it ("'s" / `line`) and, for a
+  -- "greatly", at GreatlyRoseText's / GreatlyFellText's <SCROLL> (K18).
+  local text = Events.named(fighter.side, mon.species) .. "'s\n" .. label
+    .. ((delta >= 2 or delta <= -2) and "\ngreatly " or " ") .. outcome .. "!"
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
   -- The stage it now sits at -- when that is not below neutral.  `amount` is
@@ -767,7 +775,7 @@ local function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, 
   if after >= 0 then fields.amount = after end
   -- ...and `stage` says it signed, -6..6, every time (contract K10).
   fields.stage = after
-  fields.text = text
+  fields.text = Events.plain(text)
   out.events[#out.events + 1] = { kind = "stat", fields = fields }
 end
 
@@ -1087,17 +1095,19 @@ function M.applyPrimary(ctx)
       if userMon.status == "toxic" then userMon.toxicLinger = true end
       userMon.status = "sleep"
       userMon.statusTurns = 2
-      local text = had and (userMon.species .. " fell asleep and became healthy!")
-        or (userMon.species .. " started sleeping!")
+      -- FellAsleepBecameHealthyText / StartedSleepingEffect, <USER>'s.
+      local user = Events.named(userFighter.side, userMon.species)
+      local text = had and (user .. "\nfell asleep and\nbecame healthy!")
+        or (user .. "\nstarted sleeping!")
       out.messages[#out.messages + 1] = text
       local fields = fighterFields(userFighter)
       fields.status = wire.sleep or "SLP"
-      fields.text = text
+      fields.text = Events.plain(text)
       out.events[#out.events + 1] = { kind = "status", fields = fields }
       amount = maxHp
     end
     out.heals[#out.heals + 1] = { amount = amount }
-    out.afterHeals = { userMon.species .. " regained health!" }
+    out.afterHeals = { Events.named(userFighter.side, userMon.species) .. "\nregained health!" }
     return out
   end
 
@@ -1133,7 +1143,7 @@ function M.applyPrimary(ctx)
       fields.text = seat.mon.species .. " snapped out of confusion"
       out.events[#out.events + 1] = { kind = "status", fields = fields }
     end
-    out.messages[#out.messages + 1] = "All STATUS changes are eliminated!"
+    out.messages[#out.messages + 1] = "All STATUS changes\nare eliminated!"
     return out
   end
 
@@ -1165,11 +1175,11 @@ function M.applyPrimary(ctx)
     targetMon.status = "sleep"
     targetMon.statusTurns = turns
     local token = wire.sleep or "SLP"
-    local text = targetMon.species .. " fell asleep!"
+    local text = Events.named(targetFighter.side, targetMon.species) .. "\nfell asleep!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
-    fields.text = text
+    fields.text = Events.plain(text)
     out.events[#out.events + 1] = { kind = "status", fields = fields }
     return out
   end
@@ -1190,11 +1200,12 @@ function M.applyPrimary(ctx)
     targetMon.toxicLinger = nil
     if toxic then targetMon.toxicCounter = 1 end
     local token = toxic and (wire.toxic or "TOX") or (wire.poison or "PSN")
-    local text = targetMon.species .. (toxic and "'s badly poisoned!" or " was poisoned!")
+    local text = Events.named(targetFighter.side, targetMon.species)
+      .. (toxic and "'s\nbadly poisoned!" or "\nwas poisoned!")
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
-    fields.text = text
+    fields.text = Events.plain(text)
     out.events[#out.events + 1] = { kind = "status", fields = fields }
     return out
   end
@@ -1210,11 +1221,12 @@ function M.applyPrimary(ctx)
     M.applyStatusPenalty(targetMon)
     local token = wire.paralysis or "PAR"
     -- PrintMayNotAttackText (paralyze.asm :39).
-    local text = targetMon.species .. "'s paralyzed! It may not attack!"
+    local text = Events.named(targetFighter.side, targetMon.species)
+      .. "'s\nparalyzed! It may\nnot attack!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
-    fields.text = text
+    fields.text = Events.plain(text)
     out.events[#out.events + 1] = { kind = "status", fields = fields }
     return out
   end
@@ -1230,10 +1242,10 @@ function M.applyPrimary(ctx)
       return out
     end
     targetMon.leechSeed = { fromSlot = userFighter.slot }
-    local text = targetMon.species .. " was seeded!"
+    local text = Events.named(targetFighter.side, targetMon.species) .. "\nwas seeded!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
-    fields.text = text
+    fields.text = Events.plain(text)
     out.events[#out.events + 1] = { kind = "status", fields = fields }
     return out
   end
@@ -1301,8 +1313,9 @@ function M.applyPrimary(ctx)
     -- The slot (the menu's wPlayerDisabledMove nibble) and the move's id
     -- (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
     targetMon.disable = { moveIndex = slot, turns = turns, moveId = moves[slot].id }
-    out.messages[#out.messages + 1] =
-      targetMon.species .. "'s " .. moveLabel(moves[slot]) .. " was disabled!"
+    -- MoveWasDisabledText, "<TARGET>'s\n<MOVE> was\ndisabled!".
+    out.messages[#out.messages + 1] = Events.named(targetFighter.side, targetMon.species)
+      .. "'s\n" .. moveLabel(moves[slot]) .. " was\ndisabled!"
     return out
   end
 
@@ -1314,18 +1327,19 @@ function M.applyPrimary(ctx)
     -- monster, and keeps the `<=`.)
     local cost = floor(max(1, int(userMon.maxHp, 1)) / 4)
     if M.hasSubstitute(userMon) then
-      out.messages[#out.messages + 1] = userMon.species .. " has a SUBSTITUTE!"
+      out.messages[#out.messages + 1] =
+        Events.named(userFighter.side, userMon.species) .. "\nhas a SUBSTITUTE!"
       return out
     end
     if userMon.hp <= cost then
-      out.messages[#out.messages + 1] = "Too weak to make a SUBSTITUTE!"
+      out.messages[#out.messages + 1] = "Too weak to make\na SUBSTITUTE!"
       return out
     end
     userMon.hp = userMon.hp - cost
     userMon.substitute = cost
     userMon.subAtZero = nil
     out.directDamage = { { amount = cost } }
-    out.messages[#out.messages + 1] = "It created a SUBSTITUTE!"
+    out.messages[#out.messages + 1] = "It created a\nSUBSTITUTE!"
     return out
   end
 
@@ -1338,8 +1352,8 @@ function M.applyPrimary(ctx)
       return out
     end
     userMon.lightScreen = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. "'s protected against special attacks!"
+    out.messages[#out.messages + 1] = Events.named(userFighter.side, userMon.species)
+      .. "'s\nprotected against\nspecial attacks!"
     return out
   end
 
@@ -1350,7 +1364,7 @@ function M.applyPrimary(ctx)
     end
     userMon.reflect = true
     out.messages[#out.messages + 1] =
-      userMon.species .. " gained armor!"
+      Events.named(userFighter.side, userMon.species) .. "\ngained armor!"
     return out
   end
 
@@ -1364,7 +1378,7 @@ function M.applyPrimary(ctx)
     end
     userMon.mist = true
     out.messages[#out.messages + 1] =
-      userMon.species .. "'s shrouded in mist!"
+      Events.named(userFighter.side, userMon.species) .. "'s\nshrouded in mist!"
     return out
   end
 
@@ -1375,7 +1389,7 @@ function M.applyPrimary(ctx)
     end
     userMon.focusEnergy = true
     out.messages[#out.messages + 1] =
-      userMon.species .. "'s getting pumped!"
+      Events.named(userFighter.side, userMon.species) .. "'s\ngetting pumped!"
     return out
   end
 
@@ -1388,7 +1402,7 @@ function M.applyPrimary(ctx)
     if #types == 0 then types[1] = 0 end
     userMon.types = types
     out.messages[#out.messages + 1] =
-      "Converted type to " .. targetMon.species .. "'s!"
+      "Converted type to\n" .. Events.named(targetFighter.side, targetMon.species) .. "'s!"
     return out
   end
 
@@ -1434,8 +1448,9 @@ function M.applyPrimary(ctx)
       chance = max(0, int(source.chance, 0)),
       highCrit = source.highCrit == true,
     }
-    out.messages[#out.messages + 1] =
-      userMon.species .. " learned " .. moveLabel(source) .. "!"
+    -- MimicLearnedMoveText, "<USER>\nlearned\n<MOVE>!".
+    out.messages[#out.messages + 1] = Events.named(userFighter.side, userMon.species)
+      .. "\nlearned\n" .. moveLabel(source) .. "!"
     out.movesChanged = true
     return out
   end
@@ -1512,8 +1527,10 @@ function M.applyPrimary(ctx)
     end
     userMon.moves = copied
     userMon.transformed = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " transformed into " .. targetMon.species .. "!"
+    -- TransformedText, "<USER>\ntransformed into\n<SPECIES>!": the copied
+    -- species is wNameBuffer's (GetMonName), printed bare.
+    out.messages[#out.messages + 1] = Events.named(userFighter.side, userMon.species)
+      .. "\ntransformed into\n" .. targetMon.species .. "!"
     out.movesChanged = true
     return out
   end
@@ -1602,11 +1619,13 @@ local SIDE_STAT_DOWN = {
   [68] = "atk", [69] = "def", [70] = "spd", [71] = "spc",
 }
 
+-- PoisonedText, BurnedText, FrozenText, ParalyzedMayNotAttackText (text_3
+-- .asm): "<TARGET>" and the cart's breaks after it.
 local INFLICTED = {
-  poison = { token = "PSN", says = " was poisoned!" },
-  burn = { token = "BRN", says = " was burned!" },
-  freeze = { token = "FRZ", says = " was frozen solid!" },
-  paralysis = { token = "PAR", says = "'s paralyzed! It may not attack!" },
+  poison = { token = "PSN", says = "\nwas poisoned!" },
+  burn = { token = "BRN", says = "\nwas burned!" },
+  freeze = { token = "FRZ", says = "\nwas frozen solid!" },
+  paralysis = { token = "PAR", says = "'s\nparalyzed! It may\nnot attack!" },
 }
 
 -- Whether chart index `typeIndex` is one of the monster's (wEnemyMonType1 /
@@ -1628,11 +1647,11 @@ local function inflict(out, fighter, mon, status, wire)
   mon.status = status
   M.applyStatusPenalty(mon)
   local entry = INFLICTED[status]
-  local text = mon.species .. entry.says
+  local text = Events.named(fighter.side, mon.species) .. entry.says
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
   fields.status = wire[status] or entry.token
-  fields.text = text
+  fields.text = Events.plain(text)
   out.events[#out.events + 1] = { kind = "status", fields = fields }
 end
 
@@ -1701,11 +1720,11 @@ function M.applySide(ctx)
          and moveType == ctx.fireType then
         targetMon.status = nil
         targetMon.statusTurns = 0
-        local text = "Fire defrosted " .. targetMon.species .. "!"
+        local text = "Fire defrosted\n" .. Events.named(targetFighter.side, targetMon.species) .. "!"
         out.messages[#out.messages + 1] = text
         -- No token: a `status` event without one is a cure (Events.lua).
         local fields = fighterFields(targetFighter)
-        fields.text = text
+        fields.text = Events.plain(text)
         out.events[#out.events + 1] = { kind = "status", fields = fields }
       end
       return out
@@ -1976,15 +1995,19 @@ function M.vanishes(effectId, moveOrId)
   return M.isFly(effectId) or M.isDigMove(moveOrId)
 end
 
-function M.chargeMessage(mon, effectId, moveOrId)
+-- ChargeMoveEffectText (text_3.asm): "<USER>", then the move's own `line`.
+-- `side` is the user's (K17's mark); a caller that names none gets the bare
+-- name.
+function M.chargeMessage(mon, effectId, moveOrId, side)
   local key = M.moveKey(moveOrId)
   local species = (mon and mon.species) or "POKéMON"
-  if key == "DIG" then return species .. " dug a hole!" end
-  if key == "SOLARBEAM" then return species .. " took in sunlight!" end
-  if key == "SKULL_BASH" then return species .. " lowered its head!" end
-  if key == "RAZOR_WIND" then return species .. " made a whirlwind!" end
-  if key == "FLY" or M.isFly(effectId) then return species .. " flew up high!" end
-  return species .. " is glowing!"
+  if side ~= nil then species = Events.named(side, species) end
+  if key == "DIG" then return species .. "\ndug a hole!" end
+  if key == "SOLARBEAM" then return species .. "\ntook in sunlight!" end
+  if key == "SKULL_BASH" then return species .. "\nlowered its head!" end
+  if key == "RAZOR_WIND" then return species .. "\nmade a whirlwind!" end
+  if key == "FLY" or M.isFly(effectId) then return species .. "\nflew up high!" end
+  return species .. "\nis glowing!"
 end
 
 -- MoveHitTest (core.asm :5228-5262): SWIFT's `ret z` comes before the

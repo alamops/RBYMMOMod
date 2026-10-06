@@ -1118,12 +1118,84 @@ local STATUS_ANIM_LOOK = {
   SLP_ANIM = "SLP", SLP_PLAYER_ANIM = "SLP",
   CONF_ANIM = "confusion", CONF_PLAYER_ANIM = "confusion",
 }
+
+-- ...and every other cart animation the Red / Gold referees name by id
+-- (contract K20 of docs/plans/gen12-referee-remaining-gaps.md): one row per
+-- id, `{ style, palette, scale?, intensity? }`, worn on the seat the `anim`
+-- event names.  A string row borrows a condition's look (`M.forStatus`).
+-- Ids the classic page plays through the engine's own clip and the arena has
+-- no particle for are simply absent; an id on no list is skipped (nil), as
+-- every unknown `_ANIM` always has been.
+--
+--   Red (pokered constants/move_constants.asm, data/moves/animations.asm):
+--     STATUS_AFFECTED_ANIM  EnemyFlashAnim, SE_SHOW_MON_PIC -- a FLY or
+--                           charge cut short (or released) brings the
+--                           monster back into view (core.asm
+--                           `.FlyOrChargeEffect`); the arena's emerge is the
+--                           screens' (`clearVanishAt`), this is the shimmer
+--                           on it.
+--     XSTATITEM_ANIM        XStatItemAnim, SE_SPIRAL_BALLS_INWARD -- an X
+--                           item on the user's seat: a gathering shimmer in
+--                           the stat board's colours (the `stat` event behind
+--                           it draws the arrows).
+--   Gold (pokecrystal / pokegold constants/move_constants.asm, ANIM_<X> sent
+--   as <X>_ANIM): the residual and condition clips of engine/battle/core.asm
+--   (ResidualDamage's PSN / BRN / SAP / IN_NIGHTMARE, HandleWeather's
+--   IN_SANDSTORM, HandleWrap's IN_WHIRLPOOL, the attraction check's IN_LOVE,
+--   the thaw / paralysis checks' FRZ / PAR), and the after-anims
+--   (BATTLE_AFTERANIMS: MISS, BattleCommand_StatDownAnim's ENEMY_STAT_DOWN /
+--   WOBBLE pair, the DAMAGE pair, HIT_CONFUSION; PLAYER_STAT_DOWN, which no
+--   routine plays, keeps the drop's look).  The curse tick plays
+--   ANIM_IN_NIGHTMARE on the carts; UNDER_CURSE is kept for a referee that
+--   names it apart.
+local POISON_NAME = "PSN"
+M.CART_ANIM_LOOK = {
+  -- Red
+  STATUS_AFFECTED_ANIM = { style = "sparkle", palette = "NORMAL", scale = 0.75, intensity = 0.6 },
+  XSTATITEM_ANIM       = { style = "sparkle", palette = "BUFF",   scale = 0.9,  intensity = 0.9 },
+  -- Gold: the conditions
+  BRN_ANIM = "BRN", PSN_ANIM = POISON_NAME, FRZ_ANIM = "FRZ", PAR_ANIM = "PAR",
+  SAP_ANIM             = { style = "swarm",   palette = "GRASS" },
+  IN_LOVE_ANIM         = { style = "shine",   palette = "FAIRY" },
+  IN_SANDSTORM_ANIM    = { style = "rock",    palette = "ROCK" },
+  IN_NIGHTMARE_ANIM    = { style = "shadow",  palette = "GHOST" },
+  IN_WHIRLPOOL_ANIM    = { style = "splash",  palette = "WATER" },
+  UNDER_CURSE_ANIM     = { style = "spirit",  palette = "GHOST" },
+  -- Gold: the after-anims
+  MISS_ANIM            = { style = "gust",    palette = "ESCAPE", scale = 0.6, intensity = 0.5 },
+  ENEMY_STAT_DOWN_ANIM  = { style = "debuff", palette = "DEBUFF", scale = 1, intensity = 0.95 },
+  WOBBLE_ANIM           = { style = "debuff", palette = "DEBUFF", scale = 1, intensity = 0.95 },
+  PLAYER_STAT_DOWN_ANIM = { style = "debuff", palette = "DEBUFF", scale = 1, intensity = 0.95 },
+  ENEMY_DAMAGE_ANIM    = { style = "impact",  palette = "NORMAL", scale = 0.85, intensity = 0.8 },
+  PLAYER_DAMAGE_ANIM   = { style = "impact",  palette = "NORMAL", scale = 0.85, intensity = 0.8 },
+  HIT_CONFUSION_ANIM   = { style = "impact",  palette = "PSYCHIC" },
+}
+
 function M.forStatusAnim(anim, status)
   if type(anim) ~= "string" then return nil end
   local key = STATUS_ANIM_LOOK[anim]
   if anim == "BURN_PSN_ANIM" then
     key = (status == "BRN" or status == "burn") and "BRN"
       or ((status == "TOX" or status == "toxic") and "TOX" or "PSN")
+  end
+  if not key then
+    local look = M.CART_ANIM_LOOK[anim]
+    if type(look) == "string" then
+      key = look
+      -- A Gold poison tick on a badly poisoned monster wears TOXIC's look.
+      if look == POISON_NAME and (status == "TOX" or status == "toxic") then key = "TOX" end
+    elseif type(look) == "table" then
+      return specOf(look.style, look.palette, "burst", look.scale or 0.85,
+        look.intensity or 0.8, look.duration)
+    else
+      -- A `_PLAYER_` variant of an id listed once (`<X>_PLAYER_ANIM`, the
+      -- naming K20 gives a clip the cart plays from the player's side) wears
+      -- the same look as `<X>_ANIM`.
+      local base = anim:match("^(.+)_PLAYER_ANIM$")
+      if base and M.CART_ANIM_LOOK[base .. "_ANIM"] ~= nil then
+        return M.forStatusAnim(base .. "_ANIM", status)
+      end
+    end
   end
   if not key then return nil end
   return M.forStatus(key)

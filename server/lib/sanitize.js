@@ -164,17 +164,103 @@ function cleanText(value, limit) {
  * reads what Node's WHATWG UTF-8 decoding made of the same bytes (a stray or
  * truncated sequence is a U+FFFD, dropped here; C3 / E2 are never continuation
  * bytes, so each glyph decodes where Lua finds it). Each kept glyph is one
- * UTF-16 unit, so `slice` cuts in glyphs, as Wire.battleText does; a surrogate
- * half is never in the set. MESSAGE_MAX when no limit is named, as Wire.lua's
- * `limit or Config.MESSAGE_MAX`.
+ * UTF-16 unit, so the walker below cuts in glyphs, as Wire.battleText does; a
+ * surrogate half is never in the set. MESSAGE_MAX when no limit is named, as
+ * Wire.lua's `limit or Config.MESSAGE_MAX`. One glyph at a time (battleGlyphs)
+ * rather than a replace chain since K17 / K18, so it and cleanBattleLine are
+ * Wire.lua's one walker spelled once more.
  */
-const BATTLE_TEXT_OK = /[^A-Za-z0-9 .,!?'\-:;()/&é…♂♀]/g;
+const BATTLE_TEXT_OK = /[A-Za-z0-9 .,!?'\-:;()/&é…♂♀]/;
+
+/*
+ * A battle line's two marks of its own (contracts K17 / K18 of
+ * docs/plans/gen12-referee-remaining-gaps.md), read by cleanBattleLine alone:
+ * `^a` / `^b`, the name mark the referee writes before a battler's name where
+ * the cart prints it through a prefixing macro (pokered <USER> / <TARGET>,
+ * pokecrystal <USER> / <TARGET> / <ENEMY>) -- a `^` kept only with its side
+ * letter after it -- and `\n`, the cart's `line` / `cont`, held like a space
+ * (never leading, trailing or doubled; a space beside it collapses into it).
+ * No name reader here has a `^`. Twin of Wire.BATTLE_MARK /
+ * Wire.BATTLE_MARK_SIDES.
+ */
+const BATTLE_MARK = '^';
+const BATTLE_MARK_SIDES = new Set(['a', 'b']);
+
+/*
+ * The walker both readers share, line for line with Wire.lua's battleGlyphs:
+ * one UTF-16 unit is one glyph here (each kept glyph is one unit; a U+FFFD or
+ * a surrogate half is never in the set), so the cut counts what Lua's does.
+ * The `^` test reads the next unit, which is the next byte on the Lua side
+ * whenever it is the ASCII `a` / `b`. A line cut at `cap` loses what would
+ * hang off its end: a gap the cut glyph was waiting for, a `^` whose letter
+ * fell past it, a mark whose name did.
+ */
+function battleGlyphs(value, cap, line) {
+  if (typeof value !== 'string') return null;
+  const glyphs = [];
+  let gap = null;
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value[i];
+    let glyph = null;
+    if (BATTLE_TEXT_OK.test(c)) {
+      glyph = c;
+    } else if (line && c === '\n') {
+      glyph = c;
+    } else if (line && c === BATTLE_MARK && BATTLE_MARK_SIDES.has(value[i + 1])) {
+      glyph = c;
+    }
+    // A space or a break is held until a glyph follows it: a run collapses to
+    // one -- a break when the run holds one -- and none is written at either end.
+    if (glyph === ' ' || glyph === '\n') {
+      if (glyphs.length > 0 && gap !== '\n') gap = glyph;
+    } else if (glyph !== null) {
+      if (gap !== null) glyphs.push(gap);
+      gap = null;
+      glyphs.push(glyph);
+    }
+  }
+  if (glyphs.length === 0) return null;
+  if (glyphs.length > cap) {
+    glyphs.length = cap;
+    while (line && glyphs.length > 0) {
+      const last = glyphs[glyphs.length - 1];
+      if (last === ' ' || last === '\n' || last === BATTLE_MARK) {
+        glyphs.pop();
+      } else if (glyphs[glyphs.length - 2] === BATTLE_MARK) {
+        glyphs.length -= 2;
+      } else {
+        break;
+      }
+    }
+    if (glyphs.length === 0) return null;
+  }
+  return glyphs.join('');
+}
 
 function cleanBattleText(value, limit) {
-  if (typeof value !== 'string') return null;
-  const clean = value.replace(BATTLE_TEXT_OK, '').replace(/\s+/g, ' ').trim();
-  if (!clean) return null;
-  return clean.slice(0, limit === undefined || limit === null ? MESSAGE_MAX : limit);
+  return battleGlyphs(value, limit === undefined || limit === null ? MESSAGE_MAX : limit, false);
+}
+
+/*
+ * A Red / Gold referee's battle line (K17 / K18): cleanBattleText's glyphs, its
+ * name marks and its breaks, cut at BATTLE_LINE_MAX glyphs (a mark is two, a
+ * break one). An older `msg` event's text (cleanBattleEvent) and nothing else.
+ * Twin of Wire.battleLine, byte for byte on every input.
+ */
+const BATTLE_LINE_MAX = 80;
+
+function cleanBattleLine(value, limit) {
+  return battleGlyphs(value, limit === undefined || limit === null ? BATTLE_LINE_MAX : limit, true);
+}
+
+// The same line as one plain sentence: each mark gone, each break a space -- or
+// nothing after a hyphen, the word the cart split over two rows ("It's super-"
+// / "effective!") -- for a matcher, a driver or a test that reads a line's
+// words. Anything that is not a string comes back as it went in. Twin of
+// Wire.plainBattleLine.
+function plainBattleLine(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/\^[ab]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
 }
 
 // The trainer an NPC seat is: the name the cart prints for the computer
@@ -766,6 +852,13 @@ const TIMES_OF_DAY2 = new Set(['morn', 'day', 'nite']);
 // Twins of Wire.CHART_ORDER_MAX / Wire.NUM_ATTACKS2.
 const CHART_ORDER_MAX = 512;
 const NUM_ATTACKS2 = 251;
+// Contract K21 of docs/plans/gen12-referee-remaining-gaps.md, Gold only: a Gen 2
+// sheet's `weight` (the species' Pokedex weight word, which pokecrystal's
+// HeavyBallMultiplier reads) and a Gen 2 ruleset's `battleType` (wBattleType,
+// one byte, which LureBallMultiplier compares with BATTLETYPE_FISH). Twins of
+// Wire.WEIGHT2_MAX / Wire.BATTLE_TYPE2_MAX.
+const WEIGHT2_MAX = 65535;
+const BATTLE_TYPE2_MAX = 255;
 
 // Contract K7's three blocks per dialect: `base` keyed like `stats` plus `hp`,
 // `dvs` the cart's four DVs (Gold's one Special DV feeds both special stats),
@@ -1474,6 +1567,18 @@ function cleanBattleRuleset(raw, generation) {
     if (!TIMES_OF_DAY2.has(raw.timeOfDay)) return null;
     ruleset.timeOfDay = raw.timeOfDay;
   }
+  // Gold's wBattleType (contract K21), which the LURE BALL compares with
+  // BATTLETYPE_FISH -- the hubs hand it to the Gold referee's
+  // `opts.battleType`. Read on a Gen 2 hub alone, by the hub's generation, as
+  // timeOfDay is: a Gen 1 reader (or a caller naming none) neither copies nor
+  // refuses one. 0..BATTLE_TYPE2_MAX read as Wire.int reads it (luaInt), or the
+  // ruleset is refused. Absent stays absent. Twin of Wire.battleRuleset.
+  if (luaInt(generation, 2, 2) !== null
+      && raw.battleType !== undefined && raw.battleType !== null) {
+    const battleType = luaInt(raw.battleType, 0, BATTLE_TYPE2_MAX);
+    if (battleType === null) return null;
+    ruleset.battleType = battleType;
+  }
   return ruleset;
 }
 
@@ -2046,6 +2151,19 @@ function cleanBattleMon(raw) {
     mon.happiness = happiness;
   }
 
+  // Contract K21 of docs/plans/gen12-referee-remaining-gaps.md: the species'
+  // Pokedex weight word, 0..WEIGHT2_MAX, which the HEAVY BALL reads (pokecrystal
+  // HeavyBallMultiplier) and lib/battle2's copyMon keeps as `weight`. Gen 2
+  // only, by the dialect this sheet resolved to (a Gen 1 reader neither copies
+  // nor refuses one), refused with the sheet when present and unreadable --
+  // K14's posture. Read the way Wire.int reads it (luaInt). Twin of
+  // Wire.battleMon.
+  if (generation === 2 && raw.weight !== undefined && raw.weight !== null) {
+    const weight = luaInt(raw.weight, 0, WEIGHT2_MAX);
+    if (weight === null) return null;
+    mon.weight = weight;
+  }
+
   return mon;
 }
 
@@ -2192,6 +2310,91 @@ function cleanAiMods(value) {
   return out;
 }
 
+/*
+ * The computer's own choices (contract K16 of
+ * docs/plans/gen12-referee-remaining-gaps.md): the trainer facts an NPC party
+ * carries beside aiMods / name, which the referees' item / switch AI reads off
+ * the seat. Red's `aiClass` is the engine's `ai_classes` record for the
+ * trainer's class (pokered data/trainers/ai_pointers.asm + the class routines of
+ * engine/battle/trainer_ai.asm): `uses` (the wAICount TrainerAI loads per
+ * monster, 1..AI_USES_MAX, required), `chance` / `switchChance` (the routine's
+ * `cp N percent` against TrainerAI's Random byte, 0..AI_CHANCE_MAX), `item` (a
+ * cleanId, as every Gen 1 bag id), `switch` / `onStatus` (booleans read as
+ * `traded` is) and `hpBelow` / `switchBelow` (AICheckIfHPBelowFraction's
+ * divisor, 1..AI_DIVISOR_MAX). Field by field, so an unknown key is dropped;
+ * refused whole when a known key is present and unreadable (the party with it,
+ * aiMods' posture). Each number as Wire.int reads it (luaInt). Twin of
+ * Wire.lua's aiClassOf.
+ */
+const AI_USES_MAX = 255;
+const AI_CHANCE_MAX = 256;
+const AI_DIVISOR_MAX = 255;
+
+const AI_CLASS_INTS = [
+  ['uses', 1, AI_USES_MAX],
+  ['chance', 0, AI_CHANCE_MAX],
+  ['switchChance', 0, AI_CHANCE_MAX],
+  ['hpBelow', 1, AI_DIVISOR_MAX],
+  ['switchBelow', 1, AI_DIVISOR_MAX],
+];
+const AI_CLASS_FLAGS = ['switch', 'onStatus'];
+
+// A key Lua's decoder keeps: a JSON null is no key at all.
+const stated = (v) => v !== undefined && v !== null;
+
+function cleanAiClass(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  if (!stated(raw.uses)) return null;
+  const out = {};
+  for (const [key, min, max] of AI_CLASS_INTS) {
+    if (stated(raw[key])) {
+      const n = luaInt(raw[key], min, max);
+      if (n === null) return null;
+      out[key] = n;
+    }
+  }
+  if (stated(raw.item)) {
+    const item = cleanId(raw.item);
+    if (!item) return null;
+    out.item = item;
+  }
+  for (const key of AI_CLASS_FLAGS) {
+    if (stated(raw[key])) {
+      if (typeof raw[key] !== 'boolean') return null;
+      if (raw[key]) out[key] = true;
+    }
+  }
+  return out;
+}
+
+/*
+ * Gold's four bytes of the class's TrainerClassAttributes (pokecrystal /
+ * pokegold data/trainers/attributes.asm), which AI_SwitchOrTryItem, AI_TryItem
+ * and AIChooseMove read: `trainerItems` (TRNATTR_ITEM1 / ITEM2 --
+ * wEnemyTrainerItem1 / 2 -- an ordered list of 0..TRAINER_ITEMS2_MAX cleanIds,
+ * the slot order kept: AI_TryItem walks item 1 then item 2, and its
+ * base-reward bug reads past whichever matched), `aiFlags`
+ * (TRNATTR_AI_MOVE_WEIGHTS) and `itemSwitch` (TRNATTR_AI_ITEM_SWITCH),
+ * 0..AI_FLAGS2_MAX, and `baseReward` (TRNATTR_BASEMONEY, 0..BASE_REWARD2_MAX).
+ * Present and unreadable refuses the party. Twin of Wire.lua's trainerItemsOf /
+ * the Gold bounds.
+ */
+const TRAINER_ITEMS2_MAX = 2;
+const AI_FLAGS2_MAX = 65535;
+const BASE_REWARD2_MAX = 255;
+
+function cleanTrainerItems(value) {
+  const list = luaList(value);
+  if (!list || list.length > TRAINER_ITEMS2_MAX) return null;
+  const out = [];
+  for (const entry of list) {
+    const id = cleanId(entry);
+    if (!id) return null;
+    out.push(id);
+  }
+  return out;
+}
+
 function cleanBattleParty(raw, hubGeneration) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
@@ -2250,6 +2453,38 @@ function cleanBattleParty(raw, hubGeneration) {
   if ((partyGen === 1 || partyGen === 2) && raw.name !== undefined && raw.name !== null) {
     const name = cleanNpcName(raw.name);
     if (name) party.name = name;
+  }
+  // K16: the computer's item / switch facts, by the same dialect gate (the hub
+  // copies them onto NPC seats alone, as aiMods). Red's `aiClass`; Gold's
+  // `trainerItems`, `aiFlags`, `itemSwitch` and `baseReward`. Each one
+  // present and unreadable refuses the party; a reader of another generation,
+  // or of none, neither copies nor refuses one. Twin of Wire.battleParty.
+  if (partyGen === 1 && stated(raw.aiClass)) {
+    const aiClass = cleanAiClass(raw.aiClass);
+    if (!aiClass) return null;
+    party.aiClass = aiClass;
+  }
+  if (partyGen === 2) {
+    if (stated(raw.trainerItems)) {
+      const trainerItems = cleanTrainerItems(raw.trainerItems);
+      if (!trainerItems) return null;
+      party.trainerItems = trainerItems;
+    }
+    if (stated(raw.aiFlags)) {
+      const aiFlags = luaInt(raw.aiFlags, 0, AI_FLAGS2_MAX);
+      if (aiFlags === null) return null;
+      party.aiFlags = aiFlags;
+    }
+    if (stated(raw.itemSwitch)) {
+      const itemSwitch = luaInt(raw.itemSwitch, 0, AI_FLAGS2_MAX);
+      if (itemSwitch === null) return null;
+      party.itemSwitch = itemSwitch;
+    }
+    if (stated(raw.baseReward)) {
+      const baseReward = luaInt(raw.baseReward, 0, BASE_REWARD2_MAX);
+      if (baseReward === null) return null;
+      party.baseReward = baseReward;
+    }
   }
 
   // A Gen 3 party's list is read as the Lua decoder leaves it (luaList).
@@ -2425,7 +2660,8 @@ function cleanBattleChoice(raw, generation) {
  * fields nothing had checked.
  *
  * `text` borrows MESSAGE_MAX because it lands in the same box a chat line does
- * and is drawn by the same code, even though an intermediator wrote it.
+ * and is drawn by the same code, even though an intermediator wrote it. A Red /
+ * Gold `msg` is the one exception (BATTLE_LINE_MAX, below).
  *
  * `generation` (optional) is the reader's own. 1 or 2 reads an event as it did
  * before Gen 3 had a stream: the older vocabulary only (none of Gen 3's seven
@@ -2459,12 +2695,15 @@ function cleanBattleEvent(raw, generation) {
     // An `obey`'s is one of the eight outcome tokens or nothing (Wire.lua's
     // reading): dropped like any mangled field, never refused whole.
     // A Red / Gold reader's `msg` is the referee's own line, read with the
-    // carts' battle glyphs (cleanBattleText, wave 6); every other kind, and a
-    // Gen 3 (or unnamed) reader's `msg`, as before. Twin of Wire.battleEvent.
+    // carts' battle glyphs (wave 6) and, since K17 / K18, its `^a` / `^b` name
+    // marks and `\n` breaks, cut at BATTLE_LINE_MAX (cleanBattleLine); every
+    // other kind -- a `run`'s or `send`'s text is a name, which never reads a
+    // mark -- and a Gen 3 (or unnamed) reader's `msg`, as before. Twin of
+    // Wire.battleEvent.
     let text;
     if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball' || held2) text = cleanId(raw.text);
     else if (raw.t === 'obey') text = OBEY_TOKENS3.has(raw.text) ? raw.text : null;
-    else if (older && raw.t === 'msg') text = cleanBattleText(raw.text, MESSAGE_MAX);
+    else if (older && raw.t === 'msg') text = cleanBattleLine(raw.text);
     else text = cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
   }
@@ -2917,11 +3156,26 @@ module.exports = {
   NUM_ATTACKS2,
   cleanChartOrder,
   cleanBattleText,
+  cleanBattleLine,
+  plainBattleLine,
+  BATTLE_LINE_MAX,
+  BATTLE_MARK,
+  BATTLE_MARK_SIDES,
   cleanNpcName,
   NPC_NAME_MAX,
   cleanAiMods,
   AI_MOD_MAX,
   AI_MODS_MAX,
+  cleanAiClass,
+  AI_USES_MAX,
+  AI_CHANCE_MAX,
+  AI_DIVISOR_MAX,
+  cleanTrainerItems,
+  TRAINER_ITEMS2_MAX,
+  AI_FLAGS2_MAX,
+  BASE_REWARD2_MAX,
+  WEIGHT2_MAX,
+  BATTLE_TYPE2_MAX,
   K7_KEYS1,
   K7_KEYS2,
   METRONOME_POOL_MAX,

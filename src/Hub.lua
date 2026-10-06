@@ -1695,7 +1695,11 @@ function M:fillBattleParty(record, client, party)
   -- carries the party's display name and Red move-choice layers (Wire.battleParty
   -- reads `name` on Red / Gold and `aiMods` on Red, wave 6 of
   -- docs/plans/gen12-referee-gaps-fix.md) -- tryStartSim names the seat and
-  -- hands the layers to the referee from here.
+  -- hands the layers to the referee from here.  K16 of
+  -- docs/plans/gen12-referee-remaining-gaps.md rides the same way: Red's
+  -- `aiClass` and Gold's `trainerItems`, `aiFlags`, `itemSwitch` and
+  -- `baseReward`.  The same tables on every seat, as `aiMods` is -- one
+  -- trainer, one record; what a 2v2 shares is the referee's to say.
   local kept, dropped = {}, {}
   for at, npcId in ipairs(record.npcIds) do
     if dealt[at] and #dealt[at] > 0 then
@@ -1704,6 +1708,9 @@ function M:fillBattleParty(record, client, party)
         battle = party.battle, side = party.side,
         badges = party.badges, mons = dealt[at],
         name = party.name, aiMods = party.aiMods,
+        aiClass = party.aiClass, trainerItems = party.trainerItems,
+        aiFlags = party.aiFlags, itemSwitch = party.itemSwitch,
+        baseReward = party.baseReward,
       }
     else
       dropped[npcId] = true
@@ -2231,13 +2238,22 @@ function M:tryStartSim(record)
     -- "<wTrainerName> used <ITEM> on <MON>!"), else "TRAINER" as before.  Its
     -- Red move-choice layers (`aiMods`) ride on the NPC seat alone: the Red
     -- referee reads them for a computer trainer seat (BattleSim Turn
-    -- `copyAiMods`), and a human's party has no business naming any.
+    -- `copyAiMods`), and a human's party has no business naming any.  So do
+    -- the computer's item / switch facts (K16 of
+    -- docs/plans/gen12-referee-remaining-gaps.md): Red's TrainerAI record
+    -- (`aiClass`) and Gold's TrainerClassAttributes bytes (`trainerItems`,
+    -- `aiFlags`, `itemSwitch`, `baseReward`), each as Wire.battleParty read it.
     local npc = self:isNpcSeat(record, seat)
     return {
       playerId = seat,
       name = (client and client.name)
         or (npc and (party.name or "TRAINER") or seat),
       aiMods = npc and party.aiMods or nil,
+      aiClass = npc and party.aiClass or nil,
+      trainerItems = npc and party.trainerItems or nil,
+      aiFlags = npc and party.aiFlags or nil,
+      itemSwitch = npc and party.itemSwitch or nil,
+      baseReward = npc and party.baseReward or nil,
       mons = party.mons,
       badges = party.badges,
       bag = bag,
@@ -2306,6 +2322,13 @@ function M:tryStartSim(record)
   -- (BattleSim2 Turn.create's `opts.timeOfDay`; absent is its link reading).
   if self.generation == 2 then
     createOpts.timeOfDay = rules.timeOfDay
+  end
+  -- Gold's wBattleType (K21 of docs/plans/gen12-referee-remaining-gaps.md;
+  -- Wire.battleRuleset reads it on a Gen 2 hub alone), for the LURE BALL's
+  -- BATTLETYPE_FISH (BattleSim2 Turn.create's `opts.battleType`; absent reads
+  -- as no fishing fight).
+  if self.generation == 2 then
+    createOpts.battleType = rules.battleType
   end
   -- Red's TypeEffects order (Wire.battleRuleset reads `chartOrder` on a Gen 1
   -- hub alone, wave 5), which decides a dual type's effectiveness line and

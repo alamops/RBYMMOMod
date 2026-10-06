@@ -100,6 +100,8 @@ tests/fixtures/hub_protocol_parity.json
 # suite, and the Gold drivers.
 tests/battle_sim2_turn.lua
 tests/battle_sim2_vectors.lua
+tests/battle_sim2_ai_move.lua
+tests/battle_sim2_ai_switch.lua
 tests/trade2.lua
 tests/fixtures/battle2_turn_parity.json
 tests/fixtures/battle_sim2_vectors.json

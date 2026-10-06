@@ -33,6 +33,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { damage, accuracy, crit, status, Effects } = require('./lib/battle');
+const { plainBattleLine } = require('./lib/sanitize');
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim_vectors.json');
 const vectors = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -357,7 +358,10 @@ const SIDE = {
       proc: out.proc, draws: rng.used(), status: orNull(mon.status),
       flinch: mon.flinch === true, confused: (mon.confusion || 0) > 0,
       stage: input.stat ? mon.stages[input.stat] : null,
-      said: orNull(out.messages[0]),
+      // The line as a reader without K17's marks reads it (W's
+      // plainBattleLine: no `^a` / `^b`, each K18 break a space) -- the
+      // fixture's sentence.
+      said: orNull(plainBattleLine(out.messages[0])),
     };
   },
 };

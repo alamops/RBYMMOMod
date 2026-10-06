@@ -220,7 +220,10 @@ end
 local everyEvent = {}
 local lastSeq, seqGaps = {}, 0
 
-local function drain(battle)
+-- The stream exactly as the referee emitted it: a `msg` keeps its marks
+-- (`^a` / `^b` before a battler's name, contract K17) and its breaks (`\n`,
+-- K18).  The sections that pin those read this.
+local function drainRaw(battle)
   local list = battle:drainEvents()
   for _, event in ipairs(list) do
     everyEvent[#everyEvent + 1] = event
@@ -229,6 +232,35 @@ local function drain(battle)
     lastSeq[battle] = event.seq
   end
   return list
+end
+
+-- ...and as every other section reads it: a line without its marks, each
+-- break a space (W's Wire.plainBattleLine, the client's own reader; where Wire
+-- does not load, Events.plain -- the same rule, mirrored, which section 14
+-- holds equal) -- K17's "every test that matches text reads the line without
+-- its marks", which keeps those sections' sentences the cart's words they
+-- always were.  A copy: `everyEvent` keeps the raw event for the Wire round
+-- trip at the bottom.
+local plainLine = Events.plain
+do
+  local loaded, Wire = pcall(need, "Wire")
+  if loaded and type(Wire) == "table" and type(Wire.plainBattleLine) == "function" then
+    plainLine = Wire.plainBattleLine
+  end
+end
+
+local function readable(event)
+  if event.t ~= "msg" or type(event.text) ~= "string" then return event end
+  local copy = {}
+  for key, value in pairs(event) do copy[key] = value end
+  copy.text = plainLine(event.text)
+  return copy
+end
+
+local function drain(battle)
+  local out = {}
+  for i, event in ipairs(drainRaw(battle)) do out[i] = readable(event) end
+  return out
 end
 
 -- ------------------------------------------------------------------
@@ -1672,14 +1704,18 @@ do
 end
 
 -- Charge-family setup lines key off move.id (hyphenated ids still glow).
+-- ChargeMoveEffectText breaks after <USER> (K18); a caller that names the
+-- user's side gets its mark (K17), one that names none the bare name.
 do
   local Effects = need("BattleSim/Effects")
   local mon = { species = "Alpha" }
-  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha took in sunlight!")
-  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha lowered its head!")
-  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha made a whirlwind!")
-  eq(Effects.chargeMessage(mon, 39, "SKY_ATTACK"), "Alpha is glowing!")
-  eq(Effects.chargeMessage(mon, 39, "solar-beam"), "Alpha is glowing!")
+  eq(Effects.chargeMessage(mon, 39, "SOLARBEAM"), "Alpha\ntook in sunlight!")
+  eq(Effects.chargeMessage(mon, 39, "SKULL_BASH"), "Alpha\nlowered its head!")
+  eq(Effects.chargeMessage(mon, 39, "RAZOR_WIND"), "Alpha\nmade a whirlwind!")
+  eq(Effects.chargeMessage(mon, 39, "SKY_ATTACK"), "Alpha\nis glowing!")
+  eq(Effects.chargeMessage(mon, 39, "solar-beam"), "Alpha\nis glowing!")
+  eq(Effects.chargeMessage(mon, 43, "FLY", "b"), "^bAlpha\nflew up high!")
+  eq(Effects.chargeMessage(mon, 39, "DIG", "a"), "^aAlpha\ndug a hole!")
 end
 
 -- Fly: nothing but SWIFT reaches it on Red -- MoveHitTest's INVULNERABLE
@@ -8978,7 +9014,9 @@ do
   ok(has(t, "Darn! The POKéMON broke free!"), "ItemUseBallText02: one shake at 100 and full HP")
   b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild" })
   t = texts(turn(b, item("POKE_FLUTE")))
-  ok(has(t, "Played the POKé FLUTE. Now, that's a catchy tune!"), "PlayedFluteNoEffectText")
+  -- PlayedFluteNoEffectText's `para` is a line of its own (K18).
+  ok(has(t, "Played the POKé FLUTE."), "PlayedFluteNoEffectText")
+  ok(has(t, "Now, that's a catchy tune!"), "...and its second paragraph")
   b = duel({ mv("splash", { power = 0, effect = 85 }) }, { mode = "wild", bMons = {
     mon({ species = "Beta", spd = 10, maxHp = 400, status = "SLP",
           moves = { mv("splash", { power = 0, effect = 85 }) } }) } })
@@ -9198,6 +9236,383 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 30. Contracts K17-K20 (docs/plans/gen12-referee-remaining-gaps.md): the
+--     name marks, the cart's line breaks, faint timing, and the Red
+--     animations on the existing paths.  Read raw (`drainRaw`): the marks and
+--     breaks are what these pin.
+-- ------------------------------------------------------------------
+
+local function at(list, pred)
+  for i, e in ipairs(list) do if pred(e) then return i end end
+  return nil
+end
+local function saidAt(list, text)
+  return at(list, function(e) return e.t == "msg" and e.text == text end)
+end
+local function eventAt(list, kind, slot, text)
+  return at(list, function(e)
+    return e.t == kind and (slot == nil or e.slot == slot) and (text == nil or e.text == text)
+  end)
+end
+local function before(a, b) return a ~= nil and b ~= nil and a < b end
+local function rawTurn(battle, a, b)
+  battle:submitChoice("p1", a or { action = "fight", move = 0 })
+  if b ~= false then battle:submitChoice("p2", b or { action = "fight", move = 0 }) end
+  if battle.forcedPending then battle:tick(battle.now) end
+  return drainRaw(battle)
+end
+local function duel30(o)
+  local battle = battleOf({
+    mode = o.mode, seed = o.seed,
+    aMons = o.a, bMons = o.b, aBag = o.aBag, bBag = o.bBag,
+  })
+  drainRaw(battle)
+  return battle
+end
+
+-- (a) K17 / K18: the used line is _ActorNameText's <USER> -- marked with the
+--     user's side -- and _UsedMove1Text's `line`; the hit's lines carry no name.
+do
+  local b = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0,
+                moves = { move({ id = "thump", power = 10 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 10, baseSpd = 0,
+                moves = { move({ id = "thump", power = 10 }) } }) },
+  })
+  local list = rawTurn(b)
+  ok(saidAt(list, "^aAlpha\nused thump!"), "K17: side a's user is marked ^a; K18: a break after <USER>")
+  ok(saidAt(list, "^bBeta\nused thump!"), "K17: side b's user is marked ^b")
+  ok(not saidAt(list, "Alpha used thump!"), "...never the old unmarked one-row line")
+end
+
+-- (b) A name the cart prints bare stays bare: the party menu's PotionText
+--     (wNameBuffer), the AI's item line (wEnemyMonNick through text_ram), a
+--     caught monster's ItemUseBallText05.
+do
+  local b = duel30({
+    mode = "coop_npc",
+    a = { mon({ species = "Alpha", maxHp = 200, hp = 100, spd = 90,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, hp = 100, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  local list = rawTurn(b, { action = "item", item = "POTION" }, { action = "item", item = "POTION" })
+  ok(saidAt(list, "Alpha\nrecovered by 20!"), "PotionText: the name bare, a break after it")
+  ok(saidAt(list, "Bob\nused POTION\non Beta!"),
+     "_AIBattleUseItemText: the trainer, `line` used, `cont` on, the monster bare")
+  local caught = duel30({
+    mode = "wild",
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 1, catchRate = 255,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  list = rawTurn(caught, { action = "item", item = "MASTER_BALL" })
+  ok(saidAt(list, "All right!\nBeta was\ncaught!"), "ItemUseBallText05: the caught monster bare")
+  ok(saidAt(list, "Ann used\nPOKé BALL!") == nil and saidAt(list, "Ann used\nMASTER BALL!"),
+     "ItemUseText00 breaks at its `text_low`, before the item")
+end
+
+-- (c) K20 TOSS_ANIM: ThrowBallAtTrainerMon tosses before the trainer's line.
+do
+  local b = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 1,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  local list = rawTurn(b, { action = "item", item = "POKE_BALL" })
+  local toss = eventAt(list, "anim", 0, "TOSS_ANIM")
+  local item = eventAt(list, "item", 0)
+  local blocked = saidAt(list, "The trainer\nblocked the BALL!")
+  ok(before(item, toss) and before(toss, blocked), "TOSS_ANIM on the thrower's seat, then the line")
+  ok(saidAt(list, "Don't be a thief!"), "...and its second paragraph, a line of its own")
+end
+
+-- (d) K20 XSTATITEM_ANIM: ItemUseXStat's animation between the use line and
+--     MonsStatsRoseText; none when StatModifierUpEffect prints "Nothing
+--     happened!".  `_xStatItem` is the one door, the computer's included.
+do
+  local b = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  local list = rawTurn(b, { action = "item", item = "X_ATTACK" })
+  local used = saidAt(list, "Ann used\nX ATTACK!")
+  local anim = eventAt(list, "anim", 0, "XSTATITEM_ANIM")
+  local rose = saidAt(list, "^aAlpha's\nATTACK rose!")
+  ok(before(used, anim) and before(anim, rose), "use line, XSTATITEM_ANIM on the user's seat, rose line")
+  local itemAt = eventAt(list, "item", 0, "X_ATTACK")
+  local between = false
+  for i = (itemAt or 0) + 1, (anim or 0) - 1 do
+    if list[i].t == "anim" then between = true end
+  end
+  ok(before(itemAt, anim) and not between,
+     "...the `item` event first and no other anim before it: the client swaps the bag look for it")
+  local stat = list[eventAt(list, "stat", 0)]
+  eq(stat and stat.text, "Alpha's ATTACK rose!", "the `stat` event's text is the line read plain")
+  local fighter = b.byId.p1
+  local alpha = fighter.mons[fighter.active]
+  alpha.stages.atk = 6
+  list = rawTurn(b, { action = "item", item = "X_ATTACK" })
+  ok(saidAt(list, "Nothing happened!") and not eventAt(list, "anim", 0, "XSTATITEM_ANIM"),
+     "at +6: Nothing happened!, and no animation")
+  local bob = b.byId.p2
+  eq(b:_xStatItem(bob, bob.mons[bob.active], "def", 1), "rose", "the computer's X item through the helper")
+  list = drainRaw(b)
+  ok(before(eventAt(list, "anim", 3, "XSTATITEM_ANIM"), saidAt(list, "^bBeta's\nDEFENSE rose!")),
+     "...its animation on its own seat, its line marked ^b")
+end
+
+-- (e) K20 ABSORB from the seeder: HandlePoisonBurnLeechSeed plays ABSORB
+--     with hWhoseTurn flipped, before the HP moves both ways, then "LEECH
+--     SEED saps\n<USER>!" -- the seeded monster's name, marked.
+do
+  local seeded = mon({ species = "Beta", maxHp = 160, spd = 10,
+                       moves = { move({ id = "splash", power = 0, effect = 85 }) } })
+  seeded.leechSeed = { fromSlot = 0 }
+  local b = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, hp = 100, spd = 90,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    b = { seeded },
+  })
+  local list = rawTurn(b)
+  local absorb = eventAt(list, "anim", 0, "ABSORB")
+  local tick = eventAt(list, "damage", 3)
+  local heal = eventAt(list, "drain", 0)
+  local line = saidAt(list, "LEECH SEED saps\n^bBeta!")
+  ok(before(absorb, tick) and before(tick, heal) and before(heal, line),
+     "ABSORB on the seeder's seat, the seeded's HP, the seeder's, then the line")
+end
+
+-- (f) K20 STATUS_AFFECTED_ANIM: a released FLY that misses plays it ahead
+--     of PrintMoveFailureText's line; a plain move's miss does not.
+do
+  local b = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0,
+                moves = { move({ id = "FLY", power = 90, effect = 43, accuracy = 0 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  local charge = rawTurn(b)
+  ok(saidAt(charge, "^aAlpha\nflew up high!"), "ChargeMoveEffectText: <USER> marked, its `line`")
+  local release = rawTurn(b, nil, nil)
+  local anim = eventAt(release, "anim", 0, "STATUS_AFFECTED_ANIM")
+  local missed = saidAt(release, "^aAlpha's\nattack missed!")
+  ok(before(anim, missed) and anim == missed - 1, "a missed release: STATUS_AFFECTED_ANIM, then the miss")
+  local plain = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0,
+                moves = { move({ id = "jab", power = 40, accuracy = 0 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  local list = rawTurn(plain)
+  ok(saidAt(list, "^aAlpha's\nattack missed!") and not eventAt(list, "anim", nil, "STATUS_AFFECTED_ANIM"),
+     "...a plain move's miss has none")
+  -- CalculateDamage's power-0 `jp z`: a FLY at power 0 plays it on its release.
+  local hop = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0,
+                moves = { move({ id = "FLY", power = 0, effect = 43 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  rawTurn(hop)
+  list = rawTurn(hop)
+  ok(eventAt(list, "anim", 0, "STATUS_AFFECTED_ANIM"), "a power-0 FLY's release plays it too")
+end
+
+-- (g) K20 STATUS_AFFECTED_ANIM at `.MonHurtItselfOrFullyParalysed`: a full
+--     paralysis or a confusion self-hit with FLY in the move struct -- the
+--     charging move's on its release turn, the menu's pick on a fresh one --
+--     and never with a plain move there.
+do
+  local function paralysed(seed, moveRow)
+    local b = duel30({
+      seed = seed,
+      a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0, status = "PAR",
+                  moves = { moveRow } }) },
+      b = { mon({ species = "Beta", maxHp = 200, spd = 1,
+                  moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    })
+    return rawTurn(b)
+  end
+  local flySeed, plainSeed = nil, nil
+  for seed = 1, 400 do
+    local list = paralysed(seed, move({ id = "FLY", power = 90, effect = 43 }))
+    local stop = saidAt(list, "^aAlpha's\nfully paralyzed!")
+    if stop and not flySeed then
+      flySeed = seed
+      eq(list[stop + 1] and list[stop + 1].text, "STATUS_AFFECTED_ANIM",
+         "fully paralysed with FLY picked: STATUS_AFFECTED_ANIM right behind the line")
+      eq(list[stop + 1] and list[stop + 1].slot, 0, "...over the paralysed monster")
+    end
+    list = paralysed(seed, move({ id = "jab", power = 40 }))
+    if saidAt(list, "^aAlpha's\nfully paralyzed!") and not plainSeed then
+      plainSeed = seed
+      ok(not eventAt(list, "anim", nil, "STATUS_AFFECTED_ANIM"), "...and none with a plain move")
+    end
+    if flySeed and plainSeed then break end
+  end
+  ok(flySeed ~= nil and plainSeed ~= nil, "found seeds where Alpha is fully paralysed")
+
+  local hitSeed = nil
+  for seed = 1, 400 do
+    local b = duel30({
+      seed = seed,
+      a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0, confusion = 4,
+                  moves = { move({ id = "FLY", power = 90, effect = 43 }) } }) },
+      b = { mon({ species = "Beta", maxHp = 200, spd = 1,
+                  moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    })
+    local list = rawTurn(b)
+    local hurt = saidAt(list, "It hurt itself in\nits confusion!")
+    if hurt then
+      hitSeed = seed
+      local hp = eventAt(list, "damage", 0)
+      local anim = eventAt(list, "anim", 0, "STATUS_AFFECTED_ANIM")
+      ok(before(hurt, hp) and before(hp, anim), "a self-hit with FLY picked: the line, the HP, the animation")
+      break
+    end
+  end
+  ok(hitSeed ~= nil, "found a seed where a confused Alpha hits itself")
+end
+
+-- (h) K19: a knockout's `faint` waits for the move's tail -- where
+--     MainInBattleLoop's `ld a, b / and a / jp z, HandleEnemyMonFainted`
+--     runs, after ExecutePlayerMove returned.
+do
+  local function koBy(effect, o)
+    o = o or {}
+    local b = duel30({
+      mode = o.mode,
+      a = o.a or { mon({ species = "Alpha", maxHp = 200, hp = 100, spd = 90, baseSpd = 0, atk = 200,
+                         moves = { move({ id = "hit", power = 80, effect = effect }) } }) },
+      b = o.b or { mon({ species = "Beta", maxHp = 200, hp = 1, spd = 10,
+                         moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    })
+    return rawTurn(b), b
+  end
+  local list = koBy(3)
+  local sucked = saidAt(list, "Sucked health from\n^bBeta!")
+  local faint = eventAt(list, "faint", 3)
+  ok(before(eventAt(list, "damage", 3), sucked) and before(sucked, faint),
+     "a drain KO: the hit, SuckedHealthText (<TARGET> marked), then the faint")
+  ok(before(eventAt(list, "drain", 0), faint), "...the user's HP before it too")
+  ok(before(faint, eventAt(list, "team", 3)), "...and its ball goes dark with it")
+
+  list = koBy(48)
+  ok(before(saidAt(list, "^aAlpha's\nhit with recoil!"), eventAt(list, "faint", 3)),
+     "a recoil move's KO: RecoilEffect's line first")
+  list = koBy(16)
+  ok(before(saidAt(list, "Coins scattered\neverywhere!"), eventAt(list, "faint", 3)),
+     "a Pay Day KO: the coin line first")
+
+  -- A recoil that takes the user, the target standing and raging: the
+  -- target's HandleBuildingRage lines come before the user's faint
+  -- (ExecutePlayerMoveDone, then HandlePlayerMonFainted).
+  local rager = mon({ species = "Beta", maxHp = 400, spd = 10,
+                      moves = { move({ id = "fury", power = 20, effect = 81 }) } })
+  rager.raging = true
+  rager.rageMove = 1
+  list = koBy(48, {
+    a = { mon({ species = "Alpha", maxHp = 200, hp = 1, spd = 90, baseSpd = 0, atk = 200,
+                moves = { move({ id = "hit", power = 80, effect = 48 }) } }) },
+    b = { rager },
+  })
+  local recoil = saidAt(list, "^aAlpha's\nhit with recoil!")
+  local building = saidAt(list, "^bBeta's\nRAGE is building!")
+  faint = eventAt(list, "faint", 0)
+  ok(before(recoil, building) and before(building, faint),
+     "the user's recoil KO: the line, the target's RAGE, and only then the user's faint")
+  ok(saidAt(list, "^bBeta's\nATTACK rose!"), "HandleBuildingRage's rose line names the rager, marked")
+
+  -- EXPLOSION, both down: the user's HP goes at the move's end and the
+  -- player's monster faints first (FaintEnemyPokemon's RemoveFaintedPlayerMon,
+  -- HandlePlayerMonFainted), whichever side blew up.
+  local blast, battle = koBy(7, {
+    mode = "wild",
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0, atk = 200,
+                moves = { move({ id = "boom", power = 170, effect = 7 }) } }),
+          mon({ species = "Gamma", maxHp = 200 }) },
+  })
+  local userHp, targetHp = eventAt(blast, "damage", 0), eventAt(blast, "damage", 3)
+  local userDown, targetDown = eventAt(blast, "faint", 0), eventAt(blast, "faint", 3)
+  ok(before(targetHp, userHp) and before(userHp, userDown) and before(userDown, targetDown),
+     "side a blows up: the target's HP, the user's, the user's faint, the target's")
+  eq(battle.battleResult, 0,
+     "wBattleResult: RemoveFaintedPlayerMon's 1, then FaintEnemyPokemon's 0 behind it")
+  blast = koBy(7, {
+    mode = "wild",
+    a = { mon({ species = "Alpha", maxHp = 200, hp = 1, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 200, spd = 90, baseSpd = 0, atk = 200,
+                moves = { move({ id = "boom", power = 170, effect = 7 }) } }) },
+  })
+  ok(before(eventAt(blast, "faint", 0), eventAt(blast, "faint", 3)),
+     "side b blows up: the player's target still faints first")
+  ok(before(eventAt(blast, "damage", 3), eventAt(blast, "faint", 0)),
+     "...after the blast took the user's HP")
+
+  -- `.executeOtherEffects` is past `ret z`: a damaging move's own effect
+  -- never lands on the monster it knocked out.
+  list = koBy(18)
+  ok(not at(list, function(e) return e.t == "msg" and e.text:find("ATTACK fell!", 1, true) end),
+     "a KO skips the move's effect (no ATTACK fell!)")
+  list = koBy(18, { b = { mon({ species = "Beta", maxHp = 400, spd = 10,
+                               moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+  ok(saidAt(list, "^bBeta's\nATTACK fell!"), "...a standing target takes it, <TARGET> marked")
+end
+
+-- (i) Effects' lines: the side effect's <TARGET>, the stat-up's <USER> and
+--     its <SCROLL>ed "greatly", TRANSFORM's copied species bare -- and every
+--     event's own `text` read plain.
+do
+  local b = duel30({
+    a = { mon({ species = "Alpha", maxHp = 200, spd = 90, baseSpd = 0,
+                moves = { move({ id = "sting", power = 10, effect = 2, chance = 100 }),
+                          move({ id = "dance", power = 0, effect = 50 }),
+                          move({ id = "morph", power = 0, effect = 57 }) } }) },
+    b = { mon({ species = "Beta", maxHp = 400, spd = 10,
+                moves = { move({ id = "splash", power = 0, effect = 85 }) } }) },
+  })
+  local list = rawTurn(b)
+  local said = saidAt(list, "^bBeta\nwas poisoned!")
+  ok(said, "PoisonedText: <TARGET> marked ^b, a break")
+  local status = list[eventAt(list, "status", 3)]
+  eq(status and status.text, "Beta was poisoned!", "the status event's text is plain")
+  list = rawTurn(b, { action = "fight", move = 1 })
+  ok(saidAt(list, "^aAlpha's\nATTACK\ngreatly rose!"), "an UP2: <USER>'s, `line`, <SCROLL>greatly")
+  list = rawTurn(b, { action = "fight", move = 2 })
+  ok(saidAt(list, "^aAlpha\ntransformed into\nBeta!"), "TransformedText: the copied species bare")
+end
+
+-- (j) K18's bound: every line the referee said in this whole suite, marks and
+--     breaks included, fits Wire's BATTLE_LINE_MAX.
+do
+  local longest, longestText = 0, ""
+  for _, event in ipairs(everyEvent) do
+    if event.t == "msg" and type(event.text) == "string" then
+      local glyphs = 0
+      for _ in event.text:gmatch("[^\128-\191]") do glyphs = glyphs + 1 end
+      if glyphs > longest then longest, longestText = glyphs, event.text end
+    end
+  end
+  ok(longest <= Events.LINE_MAX,
+     "every Red line fits LINE_MAX (" .. longest .. ": " .. Events.plain(longestText) .. ")")
+  eq(Events.LINE_MAX, 80, "LINE_MAX mirrors Config.BATTLE_LINE_MAX")
+  local loaded, Config = pcall(need, "Config")
+  if loaded and type(Config) == "table" and Config.BATTLE_LINE_MAX ~= nil then
+    eq(Events.LINE_MAX, Config.BATTLE_LINE_MAX, "...and Config agrees")
+  end
+  eq(Events.named("b", "Beta"), "^bBeta", "Events.named: the mark, then the name")
+  eq(Events.named("a", "Alpha"), "^aAlpha", "...side a's")
+  eq(Events.plain("^aAlpha's\nATTACK\ngreatly rose!"), "Alpha's ATTACK greatly rose!",
+     "Events.plain: no marks, each break a space")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 
@@ -9247,6 +9662,21 @@ do
       end
     end
     eq(mangled, nil, "every emitted event survives Wire.battleEvent unchanged")
+
+    -- K17 / K18's reader: Events.plain is Wire.plainBattleLine, rule for rule
+    -- -- on every line this suite produced, and on a hyphen split over rows.
+    if type(Wire.plainBattleLine) == "function" then
+      local differs = nil
+      for _, event in ipairs(everyEvent) do
+        if event.t == "msg" and Events.plain(event.text) ~= Wire.plainBattleLine(event.text) then
+          differs = differs or event.text
+        end
+      end
+      eq(differs, nil, "Events.plain reads every line as Wire.plainBattleLine does")
+      eq(Events.plain("BOB with-\ndrew ^bBETA!"), Wire.plainBattleLine("BOB with-\ndrew ^bBETA!"),
+         "...a hyphen at a break included")
+      eq(Events.plain("BOB with-\ndrew ^bBETA!"), "BOB with-drew BETA!", "...which keeps the hyphen")
+    end
   end
 end
 

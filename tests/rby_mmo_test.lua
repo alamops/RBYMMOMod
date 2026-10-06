@@ -807,6 +807,194 @@ check(badTeam ~= nil, "a malformed roster does not put a hole in the stream")
 eq(badTeam.team, nil, "...it just arrives with nothing to draw")
 end)()
 
+-- ------- Wire: the battle line's name marks and breaks (K17 / K18 of
+-- docs/plans/gen12-referee-remaining-gaps.md)
+--
+-- A Red / Gold referee writes `^a` / `^b` before a battler's name where the
+-- cart prints it through a prefixing macro, and `\n` where the cart's text has
+-- `line` / `cont`.  Wire.battleLine is the one reader that keeps them, cut at
+-- Config.BATTLE_LINE_MAX; chat keeps MESSAGE_MAX, Gen 3 lines and every name
+-- keep their old readers, and `^` reaches no name field.
+;(function()
+  eq(Config.BATTLE_LINE_MAX, 80, "a battle line is 80 glyphs, marks and breaks included")
+  eq(Config.MESSAGE_MAX, 60, "chat keeps its sixty")
+  eq(Wire.BATTLE_MARK, "^", "one mark glyph")
+  check(Wire.BATTLE_MARK_SIDES.a and Wire.BATTLE_MARK_SIDES.b and not Wire.BATTLE_MARK_SIDES.c,
+        "a mark names side a or side b, nothing else")
+
+  local line = Wire.battleLine
+  eq(line("^bRATTATA used\nTACKLE!"), "^bRATTATA used\nTACKLE!", "a mark and a break survive")
+  eq(line("  ^bX \n  used \n\n Y ! \n "), "^bX\nused\nY !",
+     "a space beside a break collapses into it; never leading, trailing or doubled")
+  eq(line("\n\nX\n"), "X", "a break alone at either end is dropped")
+  eq(line("^cX ^^aY ^"), "cX ^aY", "a ^ without its side letter is dropped, alone")
+  eq(line("^AX"), "AX", "the side letter is lower case")
+  eq(line("A\r\nB\tC"), "A\nBC", "a CR or a tab is no break")
+  eq(line(string.rep("A", 78) .. "^bXY"), string.rep("A", 78), "a cut leaving a nameless mark drops it")
+  eq(line(string.rep("A", 79) .. "^bXY"), string.rep("A", 79), "...and a letterless ^")
+  eq(line(string.rep("A", 79) .. " B"), string.rep("A", 79), "...and the gap it cut before")
+  eq(line(string.rep("A", 79) .. "\nB"), string.rep("A", 79), "...a break included")
+  eq(line(string.rep("X", 81)), string.rep("X", 80), "cut at BATTLE_LINE_MAX")
+  eq(line(string.rep("\195\169", 90)), string.rep("\195\169", 80), "counted in glyphs, not bytes")
+  eq(line("^aXY", 2), nil, "a line that is only a cut mark is no line")
+  eq(line(42), nil, "a non-string is no line")
+  eq(Wire.battleText("^aX\nY"), "aXY", "Wire.battleText keeps no mark and no break, as before")
+  eq(Wire.plainBattleLine("^aPIKA used\nTHUNDER on ^bONIX!"), "PIKA used THUNDER on ONIX!",
+     "the plain reading: marks gone, breaks spaces")
+  eq(Wire.plainBattleLine("It's super-\neffective!"), "It's super-effective!",
+     "a word split over two rows after a hyphen joins with no space")
+  eq(Wire.plainBattleLine(nil), nil, "not a string: back as it came")
+
+  local function msg(text, gen, t)
+    local e = Wire.battleEvent({ battle = "b1", seq = 1, t = t or "msg", text = text }, gen)
+    return e and e.text
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(msg("^aPIKA's\nattack missed!", gen), "^aPIKA's\nattack missed!",
+       "a Gen " .. gen .. " msg keeps its marks and breaks")
+    eq(msg(string.rep("A", 70), gen), string.rep("A", 70), "...past MESSAGE_MAX, on Gen " .. gen)
+    for _, t in ipairs({ "run", "send", "chose" }) do
+      eq(msg("^aANN\nX", gen, t), "aANNX", "a " .. t .. "'s text is a name: no mark, no break")
+    end
+  end
+  eq(msg("^bRATTATA used\nTACKLE!", 3), "bRATTATA usedTACKLE!", "a Gen 3 msg reads as before")
+  eq(msg("^bRATTATA used\nTACKLE!"), "bRATTATA usedTACKLE!", "...and so does an unnamed reader's")
+  eq(msg(string.rep("A", 70), 3), string.rep("A", Config.MESSAGE_MAX), "...under MESSAGE_MAX")
+
+  -- `^` is never a name glyph.
+  local caret = "^aANN^b"
+  eq(Wire.name(caret), "aANNb", "a player name drops ^")
+  eq(Wire.text(caret), "aANNb", "so does chat")
+  eq(Wire.npcName(caret), "aANNb", "and an NPC trainer's name")
+  eq(Wire.moveName(caret), "aANNb", "and a move or item name")
+  eq(Wire.label(caret), "aANNb", "and a fight label")
+  eq(Wire.presence({ id = "p1", name = caret }).name, "aANNb", "and a presence's name")
+  local sheet1 = { species = caret, level = 5, hp = 10, maxHp = 10,
+                   stats = { atk = 9, def = 9, spd = 9, spc = 9 },
+                   moves = { { id = "T", pp = 5, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 } } }
+  eq(Wire.battleMon(sheet1).species, "aANNb", "and a monster's name")
+  eq(Wire.battleParty({ battle = "b1", mons = { sheet1 }, name = caret }, 1).name, "aANNb",
+     "and the party's trainer name")
+  for _, gen in ipairs({ 1, 2, 3 }) do
+    eq(Wire.battleEvent({ battle = "b1", seq = 1, t = "exp", species = caret, level = 5,
+                          participants = 1 }, gen).species, "aANNb",
+       "and an exp event's species, generation " .. gen)
+  end
+end)()
+
+-- ------- Wire: the computer's item / switch facts on an NPC party (K16) and
+-- Gold's LURE / HEAVY BALL inputs (K21)
+;(function()
+  local move = { id = "T", pp = 5, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 }
+  local sheet1 = { species = "A", level = 5, hp = 10, maxHp = 10,
+                   stats = { atk = 9, def = 9, spd = 9, spc = 9 }, moves = { move } }
+  local sheet2 = { species = "A", level = 5, hp = 10, maxHp = 10,
+                   stats = { atk = 9, def = 9, spe = 9, spa = 9, spd = 9 }, moves = { move } }
+  local function party(extra, gen)
+    local raw = { battle = "b1", mons = { gen == 2 and sheet2 or sheet1 } }
+    for k, v in pairs(extra) do raw[k] = v end
+    return Wire.battleParty(raw, gen)
+  end
+  local function same(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    for k, v in pairs(a) do if not same(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+  end
+
+  -- Red's aiClass: the engine's ai_classes record, field by field.
+  check(same(party({ aiClass = { uses = 2, chance = 64, item = "X_ATTACK", bogus = 1 } }, 1).aiClass,
+             { uses = 2, chance = 64, item = "X_ATTACK" }), "a BLACKBELT-shaped record, an unknown key dropped")
+  check(same(party({ aiClass = { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION",
+                                 hpBelow = 4 } }, 1).aiClass,
+             { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION", hpBelow = 4 }),
+        "an AGATHA-shaped record")
+  check(same(party({ aiClass = { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5,
+                                 switch = false } }, 1).aiClass,
+             { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5 }),
+        "a COOLTRAINER_F-shaped record, a false flag absent")
+  check(same(party({ aiClass = { uses = "5", onStatus = true, item = "FULL_HEAL" } }, 1).aiClass,
+             { uses = 5, onStatus = true, item = "FULL_HEAL" }), "a BROCK-shaped record, read as Wire.int")
+  check(same(party({ aiClass = { uses = 3, chance = 256, switch = true } }, 1).aiClass,
+             { uses = 3, chance = 256, switch = true }), "a JUGGLER-shaped record, chance at its 256")
+  local bads = {
+    {}, { chance = 64 }, { uses = 0 }, { uses = 256 }, { uses = true }, { uses = 1, chance = 257 },
+    { uses = 1, chance = -1 }, { uses = 1, switchChance = 300 }, { uses = 1, hpBelow = 0 },
+    { uses = 1, switchBelow = 256 }, { uses = 1, item = "X ATTACK" }, { uses = 1, item = 7 },
+    { uses = 1, switch = 1 }, { uses = 1, onStatus = "yes" }, { 3 }, "GenericAI", 3,
+  }
+  for i, bad in ipairs(bads) do
+    eq(party({ aiClass = bad }, 1), nil, "an unreadable record refuses the Red party (" .. i .. ")")
+  end
+  for _, gen in ipairs({ 2, false }) do
+    local got = party({ aiClass = { uses = 0 } }, gen or nil)
+    check(got ~= nil and got.aiClass == nil,
+          "a party read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses an aiClass")
+  end
+
+  -- Gold's four TrainerClassAttributes bytes.
+  local gold = party({ trainerItems = { "FULL_HEAL", "POTION" }, aiFlags = 0, itemSwitch = 513,
+                       baseReward = 25 }, 2)
+  check(same(gold.trainerItems, { "FULL_HEAL", "POTION" }), "Gold's item slots, in order")
+  eq(gold.aiFlags, 0, "an aiFlags of 0 kept")
+  eq(gold.itemSwitch, 513, "itemSwitch kept")
+  eq(gold.baseReward, 25, "baseReward kept")
+  check(same(party({ trainerItems = {} }, 2).trainerItems, {}), "no item at all is a list")
+  local tops = party({ aiFlags = 65535, itemSwitch = "4", baseReward = 255 }, 2)
+  check(tops.aiFlags == 65535 and tops.itemSwitch == 4 and tops.baseReward == 255, "at their bounds")
+  local goldBads = {
+    { trainerItems = { "A", "B", "C" } }, { trainerItems = { "FULL HEAL" } }, { trainerItems = { 7 } },
+    { trainerItems = { a = "POTION" } }, { trainerItems = "POTION" }, { aiFlags = 65536 }, { aiFlags = -1 },
+    { aiFlags = true }, { itemSwitch = { 1 } }, { itemSwitch = "" }, { baseReward = 256 }, { baseReward = "x" },
+  }
+  for i, bad in ipairs(goldBads) do
+    eq(party(bad, 2), nil, "an unreadable Gold fact refuses the party (" .. i .. ")")
+  end
+  for _, gen in ipairs({ 1, false }) do
+    local got = party({ trainerItems = { "A", "B", "C" }, aiFlags = -1, itemSwitch = -1, baseReward = -1 },
+                      gen or nil)
+    check(got ~= nil and got.trainerItems == nil and got.aiFlags == nil and got.itemSwitch == nil
+          and got.baseReward == nil,
+          "a party read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses Gold's four")
+  end
+
+  -- K21: Gold's sheet weight and ruleset battleType.
+  local function mon(base, weight)
+    local raw = {}
+    for k, v in pairs(base) do raw[k] = v end
+    raw.weight = weight
+    return Wire.battleMon(raw)
+  end
+  local g2 = {}
+  for k, v in pairs(sheet2) do g2[k] = v end
+  g2.generation = 2
+  for _, w in ipairs({ 0, 4600, 65535 }) do
+    eq(mon(g2, w).weight, w, "a Gold sheet carries weight " .. w)
+  end
+  eq(mon(g2, "300").weight, 300, "read as Wire.int reads it")
+  for _, w in ipairs({ 65536, -1, true, "heavy" }) do
+    eq(mon(g2, w), nil, "an unreadable weight refuses the Gold sheet (" .. tostring(w) .. ")")
+  end
+  for _, w in ipairs({ 300, 70000, "heavy" }) do
+    local got = mon(sheet1, w)
+    check(got ~= nil and got.weight == nil, "a Red sheet ignores weight " .. tostring(w))
+  end
+  local chart = { { 100, 100 }, { 100, 100 } }
+  for _, bt in ipairs({ 0, 4, 255 }) do
+    eq(Wire.battleRuleset({ chart = chart, battleType = bt }, 2).battleType, bt,
+       "a Gold ruleset carries battleType " .. bt)
+  end
+  for _, bt in ipairs({ 256, -1, true, "FISH" }) do
+    eq(Wire.battleRuleset({ chart = chart, battleType = bt }, 2), nil,
+       "an unreadable battleType refuses the Gold ruleset (" .. tostring(bt) .. ")")
+  end
+  for _, gen in ipairs({ 1, false }) do
+    local got = Wire.battleRuleset({ chart = chart, battleType = "FISH" }, gen or nil)
+    check(got ~= nil and got.battleType == nil,
+          "a ruleset read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses one")
+  end
+end)()
+
 -- ------- Wire.partyEvent: what your partner just did, off the wire
 --
 -- The fighter never sends their own name and the hub stamps it from the
@@ -15027,8 +15215,10 @@ end)()
     refBoth:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
     local refBothEvents = refBoth:drainEvents()
     local refSaysNoTarget = false
+    -- Read without its K17 name mark (and any K18 break): the referee writes
+    -- "^aGamma" where the cart's <USER> prints the name.
     for _, e in ipairs(refBothEvents) do
-      if e.t == "msg" and e.text == "Gamma has no target" then refSaysNoTarget = true end
+      if e.t == "msg" and Wire.plainBattleLine(e.text) == "Gamma has no target" then refSaysNoTarget = true end
     end
     check(refSaysNoTarget,
        "cross-path/wording: the referee narrates the skip -- 'Gamma has no target'")
@@ -22597,20 +22787,20 @@ end)()
   eq(f.lines[2].spawnfx, 3, "row 2 is the reveal that pops it")
   eq(f.lines[3].drain, 3, "row 3 is the bar finishing its fall")
   eq(f.lines[4].faintfx, 3, "row 4 is the monster sinking")
-  eq(f.lines[5], "RATT fainted!", "row 5 is the text, only after the sink")
+  eq(f.lines[5], "Enemy RATT\nfainted!", "row 5 is the text, only after the sink")
   eq(f.lines[6].clearPic, 3, "row 6 releases the sprite, behind the text")
 
   local sawTextEarly = false
   local guard = 0
-  while f.shown ~= "RATT fainted!" and guard < 400 do
+  while f.shown ~= "Enemy RATT\nfainted!" and guard < 400 do
     f:update(1 / 60)
     guard = guard + 1
-    if f.shown == "RATT fainted!" and (f.draining or f.faintFx) then
+    if f.shown == "Enemy RATT\nfainted!" and (f.draining or f.faintFx) then
       sawTextEarly = true
     end
   end
   check(guard < 400, "the faint sequence resolves in a bounded number of frames")
-  eq(f.shown, "RATT fainted!", "...and it ends on the fainted! text")
+  eq(f.shown, "Enemy RATT\nfainted!", "...and it ends on the fainted! text")
   check(not sawTextEarly,
         "the text never shows while the bar or the sink is still playing")
   eq(f.slots[3].shownHp, 0, "by the time the text shows, the bar has fully landed")

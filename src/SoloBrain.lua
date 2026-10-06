@@ -12,14 +12,15 @@
 -- A solo fight never crosses the wire, and that one fact changes what is
 -- possible. There is no second runtime to stay byte-identical with, no Node
 -- twin to keep in parity, and nothing to gain by hiding the engine's own data
--- from the thing choosing the move. So the NPC's turn is decided *here*, on the
+-- from the thing choosing the move. So the NPC's move is decided *here*, on the
 -- client, by the engine's real trainer AI -- `src/battle/TrainerAI.lua` on Gen 1
 -- and `src/battle/gen2/Ai.lua` on Gen 2 -- and then handed to the referee as an
--- ordinary `submitChoice`. Giovanni buys his GUARD SPEC, Agatha rotates, Brock
--- reaches for the FULL HEAL the moment you paralyse Onix, and a Gold class with
--- the SMART bit set still scores its moves the way scoring.asm scores them.
--- `src/BattleSim/Turn.lua` is not touched by any of it, which is the property
--- that keeps this whole feature off the wire.
+-- ordinary `submitChoice`: a Gold class with the SMART bit set still scores its
+-- moves the way scoring.asm scores them.  Giovanni's GUARD SPEC, Agatha's
+-- rotation and Brock's FULL HEAL are the referees' own now (contract K16, see
+-- "what it will not answer" below).  `src/BattleSim/Turn.lua` is not touched
+-- by any of it, which is the property that keeps this whole feature off the
+-- wire.
 --
 -- ------- the adapter, and why it is a copy rather than a puppet
 --
@@ -57,6 +58,12 @@
 -- `Turn:autoPick`, which is a complete answer on its own. That is the whole
 -- error contract: this module makes a good fight better and can never make one
 -- fail to run.
+--
+-- **On Red and Gold it answers the move, and nothing else.** The referees run
+-- the class's item and switch AI -- and a forced send-out -- themselves, at the
+-- cart's point in the turn, from the class data the NPC upload carries
+-- (contract K16 of docs/plans/gen12-referee-remaining-gaps.md; `M:_decide`).
+-- Gen 3's answer is still the whole turn.
 --
 -- ------- two index vocabularies, and the one this speaks
 --
@@ -211,6 +218,9 @@ local function classOf(trainer, data)
   if ok and type(class) == "table" then return class end
   return nil
 end
+-- ...and for MediatedBattle.aiClass1, which states the same record on the
+-- NPC upload (contract K16): one resolution of a trainer's class, not two.
+M.classOf = classOf
 
 -- Every item id this trainer's AI could ever reach for.
 --
@@ -366,25 +376,13 @@ function M.new(opts)
     typeName = opts.typeName,
     -- wAICount and wAILayer2Encouragement, both of which the engine resets on
     -- every enemy send-out. Seeded on the first turn each monster is out --
-    -- see M:_rollover.
+    -- see M:_rollover.  On Red the count is what a registered `brain` record
+    -- reads off the view; the item budget itself is the referee's (K16).
     aiUses = 0,
     aiLayer2 = 0,
     turns = 0,
     lastMon = nil,
-    -- Gen 2's AI_TryItem removes what it used from `trainer.items`, so a
-    -- trainer with one POTION cannot drink it every turn. That list is engine-
-    -- owned registry data and must not be edited, so the budget is spent
-    -- against this copy instead.
-    items2 = nil,
   }, M)
-
-  if generation == 2 then
-    local items = {}
-    for _, id in ipairs(trainer.items or {}) do
-      if type(id) == "string" and id ~= "" then items[#items + 1] = id end
-    end
-    self.items2 = items
-  end
 
   return self
 end
@@ -567,34 +565,34 @@ function M:_usesFor()
 end
 
 function M:_decide(view)
-  -- A forced send-out is not a turn and the AI is never asked for one.
-  -- EnemySendOutFirstMon walks the party from the top and fields the first
-  -- monster that can still fight, which is also exactly what
-  -- `TrainerAI.switchAction` picks when it rotates -- so both generations get
-  -- the same one answer here.
-  --
-  -- Gen 3 is the exception: the cart's opponent controller sends out
-  -- GetMostSuitableMonToSwitchInto, not the next monster in the party (see
-  -- M:_replacement3), so its forced send-out is its own.
+  -- Gen 3 answers the whole turn, its forced send-out included: the cart's
+  -- opponent controller sends out GetMostSuitableMonToSwitchInto, not the
+  -- next monster in the party (see M:_replacement3).
   if self.generation == 3 then return self:_decideGen3(view) end
-  if view.mustReplace then
-    local slot = self:_firstLivingBench(view)
-    if slot == nil then return nil end
-    return { action = "switch", slot = slot }
-  end
 
-  if self.generation == 2 then return self:_decideGen2(view) end
-  return self:_decideGen1(view)
-end
-
--- The lowest-indexed living bench monster's own slot, or nil.
-function M:_firstLivingBench(view)
-  for _, mon in ipairs(view.party or {}) do
-    if mon ~= view.mon and (tonumber(mon.hp) or 0) > 0 then
-      return tonumber(mon.slot) or 0
-    end
+  -- ------- Red and Gold: the move, and only the move
+  --
+  -- Both referees run the computer's item and switch AI themselves now, at
+  -- the cart's point in the turn and off the class data the NPC upload states
+  -- (contract K16 of docs/plans/gen12-referee-remaining-gaps.md): pokered
+  -- TrainerAI with its `Random` byte drawn while wAICount lasts, and
+  -- EnemySendOut's party order; pokecrystal AI_SwitchOrTryItem at
+  -- Battle_PlayerFirst / Battle_EnemyFirst, and
+  -- FindMonInOTPartyToSwitchIntoBattle for a replacement.  An item or a
+  -- switch filed from here would take that slot of the turn from the cart's
+  -- own routine, so a forced send-out is left to the referee (`autoPick`,
+  -- which SoloBattle files when this answers nil) and an answer that is not a
+  -- move -- a registered `brain` reaching for the bag -- is declined the same
+  -- way.
+  if view.mustReplace then return nil end
+  local choice
+  if self.generation == 2 then
+    choice = self:_decideGen2(view)
+  else
+    choice = self:_decideGen1(view)
   end
-  return nil
+  if type(choice) ~= "table" or choice.action ~= "fight" then return nil end
+  return choice
 end
 
 -- ------------------------------------------------------------------
@@ -709,31 +707,14 @@ function M:_decideGen1(view)
   if type(brain) == "function" then
     local ok, action = pcall(brain, battle)
     if not ok then return nil end
-    -- A brain owns the whole turn, including the budget: if it answered with an
-    -- item or a switch, that is a use, exactly as it would be through the class
-    -- path below.
-    local choice = self:_fromEngineAction(action, view, battle)
-    if choice and choice.action ~= "fight" then
-      self.aiUses = max(0, self.aiUses - 1)
-    end
-    return choice
+    -- A brain owns the move; an item or a switch it answers is the
+    -- referee's to make (`_decide` declines it).
+    return self:_fromEngineAction(action, view, battle)
   end
 
-  if self.aiUses > 0 then
-    local ok, action = pcall(TrainerAI.classAction, battle)
-    if ok and type(action) == "table" then
-      local choice = self:_fromEngineAction(action, view, battle)
-      if choice then
-        self.aiUses = max(0, self.aiUses - 1)
-        return choice
-      end
-      -- Declined -- the item is not on the NPC's bag sheet, or the bench it
-      -- wanted to rotate to is gone. The budget is *not* spent on a turn the
-      -- trainer did not get to take, and the fight falls through to a move,
-      -- which is what the class routine's own `ret nc` arms do.
-    end
-  end
-
+  -- No TrainerAI.classAction here: the class routine -- its roll, its
+  -- `wAICount`, its item or rotation -- is the referee's (contract K16), run
+  -- in the computer's slot of the turn from the uploaded `aiClass`.
   local ok, chosen = pcall(TrainerAI.chooseMove, battle.enemy, battle.rng, battle)
   -- `chooseMove` counts the selection on the battler it was handed, and layer 2
   -- only fires on the second selection of each monster -- so the count has to
@@ -875,10 +856,9 @@ function M:_decideGen2(view)
   if not Ai then return nil end
   local flags = Ai.flagsOf(self.trainer.attributes)
 
-  -- AI_SwitchOrTryItem runs ahead of the move choice and can spend the turn.
-  local spent = self:_gen2SwitchOrItem(view, flags)
-  if spent then return spent end
-
+  -- AI_SwitchOrTryItem is the referee's (contract K16: the class attributes
+  -- ride the NPC upload), run at Battle_PlayerFirst / Battle_EnemyFirst --
+  -- this answers the move.
   local legal = legalMoves(view.mon)
   if #legal == 0 then return nil end
 
@@ -1045,94 +1025,6 @@ function M:_gen2MatchupScore(view, enemyTypes)
     end
   end
   return score
-end
-
--- AI_SwitchOrTryItem, in its own order: the rotation roll first, then the item.
--- Returns a choice when the turn was spent, nil when the AI wants to attack.
-function M:_gen2SwitchOrItem(view, flags)
-  local eng = loadEngine()
-  local Ai, Damage2 = eng and eng.Ai2, eng and eng.Damage2
-  if not Ai then return nil end
-  local attributes = self.trainer.attributes
-  if type(attributes) ~= "table" then return nil end
-
-  local mon = view.mon
-  -- The AI cannot rotate out of a wrap, the same pin that closes
-  -- `TryPlayerSwitch`. The sim spells it `trapped` on the monster being held.
-  local trapped = type(mon.trapped) == "table"
-    and (tonumber(mon.trapped.turns) or 0) > 0
-
-  if not trapped and Damage2 and type(Damage2.typeMultiplier) == "function" then
-    local playerTypes = self:_typesOf(view.foe)
-    local matchups = (type(self.data.type_chart) == "table")
-      and self.data.type_chart.matchups or nil
-    local bench = {}
-    for index, member in ipairs(view.party or {}) do
-      if member ~= mon and (tonumber(member.hp) or 0) > 0 then
-        local memberTypes = self:_typesOf(member)
-        local incomingOk, incoming = pcall(Damage2.typeMultiplier,
-          playerTypes[1], memberTypes, matchups)
-        local superEffective = false
-        for _, move in ipairs(member.moves or {}) do
-          local def = self.data.moves[move.id]
-          if def and (tonumber(def.power) or 0) > 0 then
-            local ok, mult = pcall(Damage2.typeMultiplier, def.type,
-              playerTypes, matchups)
-            if ok and (tonumber(mult) or 10) > 10 then
-              superEffective = true
-              break
-            end
-          end
-        end
-        bench[#bench + 1] = {
-          index = index, mon = member, healthy = true,
-          resists = incomingOk and (tonumber(incoming) or 10) < 10 or false,
-          superEffective = superEffective,
-        }
-      end
-    end
-
-    local scoreOk, score, target = pcall(Ai.switchScore, {
-      bench = bench,
-      perishCount = tonumber(mon.perish),
-      matchupScore = self:_gen2MatchupScore(view, self:_typesOf(mon)),
-    })
-    if scoreOk and target then
-      local rollOk, wants = pcall(Ai.shouldSwitch, attributes, score,
-        function(n) return self.rng(0, max(0, (tonumber(n) or 1) - 1)) end)
-      if rollOk and wants then
-        local chosen = (view.party or {})[target]
-        if type(chosen) == "table" then
-          return { action = "switch", slot = tonumber(chosen.slot) or 0 }
-        end
-      end
-    end
-  end
-
-  -- AI_TryItem. Only the trainer's highest-level monster is worth an item.
-  local highest = 0
-  for _, member in ipairs(view.party or { mon }) do
-    highest = max(highest, tonumber(member.level) or 0)
-  end
-  local itemOk, item = pcall(Ai.chooseItem, {
-    items = self.items2 or {},
-    isHighestLevel = (tonumber(mon.level) or 0) >= highest,
-    hp = tonumber(mon.hp) or 0,
-    maxHp = tonumber(mon.maxHp) or 1,
-    status = STATUS_TO_ENGINE[mon.status] or nil,
-    enemyTurns = self.turns,
-  })
-  if not itemOk or type(item) ~= "string" then return nil end
-  if type(view.bag) == "table" and (tonumber(view.bag[item]) or 0) <= 0 then
-    return nil
-  end
-  -- Spend it off this brain's own copy of the list, never off the registry
-  -- record: a trainer with one POTION must not drink it every turn, and the
-  -- trainer record outlives the battle.
-  for index, id in ipairs(self.items2 or {}) do
-    if id == item then table.remove(self.items2, index); break end
-  end
-  return { action = "item", item = item }
 end
 
 -- ------------------------------------------------------------------

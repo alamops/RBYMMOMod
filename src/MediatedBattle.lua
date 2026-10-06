@@ -695,6 +695,16 @@ function M.snapshotRuleset(game, opts)
   -- which the referee takes as the move's own time.  Gen 2 only: Red has no
   -- clock, and the wire refuses the field on no other generation's ruleset.
   if Gen.generation(game) == 2 then out.timeOfDay = M.timeOfDay2(game) end
+  -- Gold's wBattleType (contract K21): the engine battle's own number, read
+  -- at the divert (`opts.battleType`) and handed to the referee, which
+  -- reads it for LURE BALL's BATTLETYPE_FISH test (BattleSim2 Effects).
+  -- Gen 2 only, 0..255, and absent when the caller has no engine battle.
+  if Gen.generation(game) == 2 and type(opts) == "table" then
+    local kind = tonumber(opts.battleType)
+    if kind and kind == floor(kind) and kind >= 0 and kind <= 255 then
+      out.battleType = kind
+    end
+  end
   -- The chart's axis by name: `typeIds[i + 1]` is the registry id of the type
   -- every row, column, move and monster on this upload calls `i`.  The referee
   -- holds no type table and a move row carries only the index, so this is how
@@ -1545,6 +1555,37 @@ function M.snapshotMons(game, party, opts)
   return out
 end
 
+-- ------- K21: a Gold wild monster's weight, for HEAVY BALL
+--
+-- pokecrystal HeavyBall_GetDexEntryBank / HeavyBallMultiplier read the wild
+-- species' Pokédex weight word (the 0.1 lb unit DisplayDexEntry prints) off
+-- the dex entry.  The engine's Gold import keeps that word as
+-- `data.gen2Pokedex.entries[species].weight` (src/import/RomExtractorGen2.lua
+-- extractPokedex); a dataset keyed by species directly is read too.  nil off
+-- Gold, or with no dex entry, and the referee then takes the ball as x1.
+function M.weight2(game, mon)
+  if type(game) ~= "table" or type(mon) ~= "table" then return nil end
+  if Gen.generation(game) ~= 2 then return nil end
+  local dex = type(game.data) == "table" and game.data.gen2Pokedex or nil
+  if type(dex) ~= "table" or mon.species == nil then return nil end
+  local entries = type(dex.entries) == "table" and dex.entries or nil
+  local entry = (entries and entries[mon.species]) or dex[mon.species]
+  local weight = type(entry) == "table" and tonumber(entry.weight) or nil
+  if not (weight and weight == floor(weight) and weight >= 0 and weight <= 65535) then
+    return nil
+  end
+  return weight
+end
+
+-- A wild monster's sheet: `snapshotMons` of the one monster, with its Gold
+-- weight stamped on (K21: the Gen 2 sheet's `weight`, a wild foe's only).
+function M.snapshotWild(game, mon)
+  local sheets = M.snapshotMons(game, { mon })
+  local weight = M.weight2(game, mon)
+  if weight and sheets[1] then sheets[1].weight = weight end
+  return sheets
+end
+
 -- This player's own team.
 --
 -- `opts`: `{ link = true }` for a fight between two players (LINK_MODES).  On
@@ -1598,6 +1639,12 @@ function M.sendParty(transport, battle, mons, side, bag, badges, seat)
   if badges then msg.badges = badges end
   if type(seat) == "table" then
     msg.name, msg.aiMods = seat.name, seat.aiMods
+    -- Contract K16: the computer's trainer data (`npcSeat`) -- Red's class
+    -- record, Gold's class attributes -- which the hubs copy onto the NPC
+    -- seat alone, as they do `aiMods`.
+    msg.aiClass = seat.aiClass
+    msg.trainerItems, msg.aiFlags = seat.trainerItems, seat.aiFlags
+    msg.itemSwitch, msg.baseReward = seat.itemSwitch, seat.baseReward
   end
   -- Party-level generation when every mon agrees (Wire prefers this, then shape).
   local gen = mons[1] and mons[1].generation
@@ -1655,7 +1702,156 @@ function M.npcSeat(game, trainer, fallback)
     end
     out.aiMods = layers
   end
-  if out.name == nil and out.aiMods == nil then return nil end
+  -- Contract K16: the class's own data, which the referee now runs the
+  -- cart's item / switch AI from (it no longer reads a bag for the computer).
+  if generation == 1 then
+    out.aiClass = M.aiClass1(record, game)
+  elseif record ~= nil then
+    local ai2 = M.trainerAi2(record)
+    for key, value in pairs(ai2) do out[key] = value end
+  end
+  if next(out) == nil then return nil end
+  return out
+end
+
+-- ------- K16: the computer's trainer data, Red
+--
+-- pokered TrainerAI (engine/battle/trainer_ai.asm) runs the class routine
+-- data/trainers/ai_pointers.asm names for wTrainerClass, `wAICount` times a
+-- monster, gated on a `Random` byte the routine compares with its own
+-- threshold.  The engine keeps that table as `ai_classes` records -- one per
+-- class, field for field the routines' numbers (data/scripts/ai_classes.lua's
+-- header) -- and reaches the trainer's through TrainerAI.classFor
+-- (`trainer.aiClass or trainer.id`, the merged registry first), which
+-- src/SoloBrain.lua's `classOf` already asks.  This copies the record's K16
+-- fields and nothing else:
+--
+--   uses         1..255   wAICount for each monster sent out
+--   chance       0..256   the routine's `cp N percent` threshold
+--   switchChance 0..256   Agatha's switch roll, ahead of her item roll
+--   item         item id  what the routine uses
+--   switch       true     the Juggler's rotation
+--   onStatus     true     Brock's FULL HEAL, only while statused
+--   hpBelow      1..255   only below max HP / N
+--   switchBelow  1..255   Cooltrainer♀'s switch below max HP / N
+--
+-- nil when the class has no record -- the referee then runs GenericAI, as
+-- the cart does for every class ai_pointers.asm points there.  A record
+-- this client cannot state whole (a mod's, say, with no `uses`) is sent as
+-- nothing rather than half: the wire refuses the party over an unreadable
+-- one (K7's posture), which would cost the fight, and a warning names it.
+local AI_CLASS_INTS = {
+  chance = { 0, 256 }, switchChance = { 0, 256 },
+  hpBelow = { 1, 255 }, switchBelow = { 1, 255 },
+}
+local warnedAiClass = {}
+function M.aiClass1(trainer, game)
+  if type(trainer) ~= "table" then return nil end
+  local data = type(game) == "table" and game.data or nil
+  -- TrainerAI.classFor's own lookup: the merged registry when the dataset
+  -- has one, else the engine module (which reads its bundled table).
+  local class
+  local classes = type(data) == "table" and data.ai_classes or nil
+  if type(classes) == "table" then
+    class = classes[trainer.aiClass or trainer.id]
+  else
+    local ok, found = pcall(SoloBrain.classOf, trainer, data)
+    class = ok and found or nil
+  end
+  if type(class) ~= "table" then return nil end
+  local function bad(why)
+    local key = tostring(trainer.aiClass or trainer.id) .. ":" .. why
+    if not warnedAiClass[key] then
+      warnedAiClass[key] = true
+      mod.log:warn("the trainer class %s has an ai_classes record whose %s "
+        .. "cannot be sent to the battle referee, so this trainer fights with "
+        .. "no item or switch AI; fix that field of the ai_classes record",
+        tostring(trainer.aiClass or trainer.id), why)
+    end
+    return nil
+  end
+  local uses = tonumber(class.uses)
+  if not (uses and uses == floor(uses) and uses >= 1 and uses <= 255) then
+    return bad("`uses`")
+  end
+  local out = { uses = uses }
+  for key, range in pairs(AI_CLASS_INTS) do
+    local raw = class[key]
+    if raw ~= nil then
+      local n = tonumber(raw)
+      if not (n and n == floor(n) and n >= range[1] and n <= range[2]) then
+        return bad("`" .. key .. "`")
+      end
+      out[key] = n
+    end
+  end
+  if class.item ~= nil then
+    local id = type(class.item) == "string" and Wire.id(class.item) or nil
+    if not id then return bad("`item`") end
+    out.item = id
+  end
+  if class.switch == true then out.switch = true end
+  if class.onStatus == true then out.onStatus = true end
+  return out
+end
+
+-- ------- K16: the computer's trainer data, Gold
+--
+-- pokecrystal / pokegold TrainerClassAttributes (data/trainers/attributes.asm)
+-- is eight bytes a class: TRNATTR_ITEM1, TRNATTR_ITEM2, TRNATTR_BASEMONEY,
+-- TRNATTR_AI_MOVE_WEIGHTS (a little-endian word), TRNATTR_AI_ITEM_SWITCH (a
+-- word), and padding.  The engine's Gold trainer record carries the class's
+-- bytes as `attributes` (src/world/gen2/Trainers.lua lookup; its
+-- src/battle/gen2/Ai.lua `flagsOf` reads bytes 4-5 and `switchFlagsOf` 6-7)
+-- and the two items as ids in `items` -- the copy AI_TryItem spends,
+-- wEnemyTrainerItem1 / 2 (GetTrainerAttributes).  Sent as:
+--
+--   trainerItems  0..2 item ids, in slot order ("NO_ITEM" for an empty slot
+--                 1 ahead of a filled slot 2)
+--   aiFlags       TRNATTR_AI_MOVE_WEIGHTS, 0..65535
+--   itemSwitch    TRNATTR_AI_ITEM_SWITCH, 0..65535
+--   baseReward    TRNATTR_BASEMONEY, 0..255 (AI_TryItem's base-reward bug)
+--
+-- A field the record cannot state is left off (an empty table for a record
+-- with neither), and the referee reads no fields as no item, no switch and
+-- AIChooseMove with no layers.
+local function word2(lo, hi)
+  lo, hi = tonumber(lo), tonumber(hi)
+  if not (lo and hi) then return nil end
+  if lo ~= floor(lo) or hi ~= floor(hi) or lo < 0 or lo > 255 or hi < 0 or hi > 255 then
+    return nil
+  end
+  return lo + hi * 256
+end
+function M.trainerAi2(trainer)
+  local out = {}
+  if type(trainer) ~= "table" then return out end
+  local attributes = type(trainer.attributes) == "table" and trainer.attributes or nil
+  -- The two slots, in the cart's order.  The engine's `items` keeps the
+  -- carried ones and drops NO_ITEM (src/import/RomExtractorGen2.lua), so a
+  -- lone item is slot 2's only when the class's own ITEM1 byte is empty and
+  -- its ITEM2 byte is not; slot 1 is then sent as "NO_ITEM" (W's upload
+  -- contract) -- AI_TryItem walks wEnemyTrainerItem1 before 2, and its
+  -- base-reward bug reads past whichever slot matched.
+  local carried = {}
+  for _, id in ipairs(type(trainer.items) == "table" and trainer.items or {}) do
+    if #carried >= 2 then break end
+    local clean = type(id) == "string" and Wire.id(id) or nil
+    if clean and clean ~= "NO_ITEM" then carried[#carried + 1] = clean end
+  end
+  local slot1Empty = attributes ~= nil and tonumber(attributes[1]) == 0
+    and (tonumber(attributes[2]) or 0) ~= 0
+  local items = carried
+  if #carried == 1 and slot1Empty then items = { "NO_ITEM", carried[1] } end
+  out.trainerItems = items
+  if attributes then
+    out.aiFlags = word2(attributes[4], attributes[5])
+    out.itemSwitch = word2(attributes[6], attributes[7])
+  end
+  local reward = tonumber(attributes and attributes[3]) or tonumber(trainer.baseMoney)
+  if reward and reward == floor(reward) and reward >= 0 and reward <= 255 then
+    out.baseReward = reward
+  end
   return out
 end
 
@@ -1870,24 +2066,18 @@ function M.itemIsBattleUsable(id, game)
   return effect
 end
 
--- Trainer kit as a `{id, count}` list for a side-"b" NPC upload. From the
--- initiator's game data (SoloBrain.bagEntries), filtered to BattleSim-known
--- ids so an unknown class item cannot refuse the whole party sheet.
+-- Trainer kit as a `{id, count}` list for a side-"b" NPC upload: Gen 3's
+-- trainer row's own item list (numeric ids), §4 only.
+--
+-- Red and Gold upload no NPC bag (contract K16 of docs/plans/
+-- gen12-referee-remaining-gaps.md): their referees run the cart's own item AI
+-- off the class data `npcSeat` states -- pokered TrainerAI's class item and
+-- `wAICount`, pokecrystal AI_TryItem's wEnemyTrainerItem1 / 2 -- and read no
+-- bag for the computer's choices, so there is no kit to claim.  nil there.
 function M.trainerBagEntries(trainer, game)
   if not trainer then return nil end
-  -- Gen 3: the trainer row's own item list (numeric ids), §4 only.  Never
-  -- SoloBrain's Gen 1 class kit, which would reach Gen 1's TrainerAI.
   if Gen.generation(game) == 3 then return Sheet3.trainerBag(trainer) end
-  local ok, entries = pcall(SoloBrain.bagEntries, trainer,
-    game and game.data, Gen.generation(game))
-  if not (ok and type(entries) == "table") then return nil end
-  local out = {}
-  for _, entry in ipairs(entries) do
-    if type(entry) == "table" and M.itemIsBattleUsable(entry.id, game) then
-      out[#out + 1] = entry
-    end
-  end
-  return out
+  return nil
 end
 
 -- Engine save.statExp keys for BattleSim vitaminStat tokens.
@@ -2352,8 +2542,16 @@ local GEN3_BOX_COLS = 30
 
 local function pageText(text)
   if Gen3.active() then return ClassicBattle.pageBoxText(text, GEN3_BOX_COLS) end
-  return ClassicBattle.pageBoxText(text)
+  -- Red / Gold: an explicit `\n` is the cart's row break (K18), scrolled the
+  -- way the cart's `cont` scrolls it (ClassicBattle.pageBoxText).
+  return ClassicBattle.pageBoxText(text, nil, true)
 end
+
+-- The line every matcher on this screen reads (ClassicBattle.plainLine): the
+-- referee's name marks out (K17) and its row breaks read as spaces (K18).
+-- Shared with src/CoopBattle.lua.
+local plainLine = ClassicBattle.plainLine
+M.plainLine = plainLine
 
 -- The command grid, row-major.  Gen 3 lays it out the cart's way: FIGHT BAG
 -- over POKeMON RUN (pokefirered battle_controller_player.c's action menu).
@@ -2382,6 +2580,10 @@ function M.new(opts)
     -- Trainer sheets for a solo 1xNPC upload (side "b"), same claim the
     -- co-op host sends. Nil on wild (wildParty) and on every peer fight.
     npcParty  = opts.npcParty,
+    -- Gold's wBattleType, the engine battle's own number at the divert
+    -- (contract K21), stated on the ruleset this screen uploads.  Nil
+    -- anywhere there is no engine battle to read it from.
+    battleType = opts.battleType,
 
     -- A test hook, and named as one.  With it set, a turn is answered the
     -- instant it opens with the first move at the default target, which is
@@ -3396,6 +3598,49 @@ end
 function M:mySlot() return slotOfSide(self.mySide) end
 function M:foeSlot() return slotOfSide(self.mySide == "a" and "b" or "a") end
 
+-- ------- a referee line, as this viewer's cart says it (contract K17)
+--
+-- The Red / Gold referee writes `^a` / `^b` before a battler's name where the
+-- cart prefixes one (ClassicBattle's K17 notes have the macros): our own
+-- side's monster is said bare, the other side's behind the cart's "Enemy "
+-- (`ClassicBattle.foeMarkWord`) -- in a link fight too, where the other
+-- player's monster is the enemy's on this console.  Our side is `mySide`: a
+-- 1v1's seat as `onReady` read it off the roster, side a in every fight
+-- against the computer.  Gen 3's referee writes no marks; a stray one is
+-- still never drawn.
+function M:viewLine(text)
+  if type(text) ~= "string" then return text end
+  if self:generation() == 3 then return ClassicBattle.stripMarks(text) end
+  return ClassicBattle.renderMarks(text, self.mySide or "a",
+    ClassicBattle.foeMarkWord(self:generation(), self.mode))
+end
+
+-- A name this screen prints inside a line of its own (a send-out, a faint):
+-- whatever the referee stated, with no mark left in it.
+local function bareName(text)
+  if type(text) ~= "string" then return text end
+  return ClassicBattle.stripMarks(text)
+end
+M.bareName = bareName
+
+-- A knockout, in the cart's words for this viewer (Red / Gold):
+--   pokered _PlayerMonFaintedText "<MON>" / line "fainted!" -- our own;
+--           _EnemyMonFaintedText "Enemy <MON>" / line "fainted!" -- the other
+--           side's (FaintEnemyPokemon's EnemyMonFaintedText);
+--   pokecrystal / pokegold BattleText_MonFainted and
+--           BattleText_EnemyMonFainted, the same two lines -- "Enemy @" is
+--           literal there, so a wild monster is "Enemy" too.
+-- Gen 3 keeps this screen's "<MON> fainted!".  `foe` is the fallen monster
+-- being on the side across from the viewer.
+function M.faintLine(name, foe, generation)
+  name = tostring(bareName(name) or "?")
+  if generation == 1 or generation == 2 then
+    if foe then return ("Enemy %s\nfainted!"):format(name) end
+    return ("%s\nfainted!"):format(name)
+  end
+  return ("%s fainted!"):format(name)
+end
+
 -- Upload what we are bringing.  Idempotent, because two things call it: the
 -- session, the moment the hub pairs us, and `enter`, when the screen actually
 -- goes up.  The session's call is the one that matters -- it is what lets the
@@ -3437,7 +3682,8 @@ function M:start(game)
   end
 
   if self.role == "host" or self.mode == "wild" then
-    M.sendRuleset(self.transport, self.game, { wild = self.mode == "wild" })
+    M.sendRuleset(self.transport, self.game,
+      { wild = self.mode == "wild", battleType = self.battleType })
   end
   -- No side: a 1v1 has none to name. NPC uploads (wild / trainer) are side
   -- "b" from this client, the initiator. Wild carries no bag; a trainer
@@ -3560,7 +3806,7 @@ end
 -- The arrival (the throw, the burst) stays; the cart plays it.
 function M.draggedOutLine(text, species)
   if type(text) ~= "string" then return false end
-  local who = text:match("^(.-) was dragged out!?$")
+  local who = plainLine(text):match("^(.-) was dragged out!?$")
   if not who or who == "" then return false end
   return species == nil or who == species
 end
@@ -3732,7 +3978,9 @@ function M:onEvent(msg)
     if sky ~= nil then
       self.lines[#self.lines + 1] = { stateRow = "weather", value = sky }
     end
-    if not (obeyed and msg.seq == obeyed + 1) then self:say(msg.text) end
+    -- Said as this viewer's cart says it (`viewLine`, K17); every matcher
+    -- below reads the referee's own text with the marks out (`plainLine`).
+    if not (obeyed and msg.seq == obeyed + 1) then self:say(self:viewLine(msg.text)) end
     self:flushAnimBehind()
     self:noteBideLine(msg.text, msg.seq)
     -- Our monster's Disable, as the referee says it (`noteDisableLine`), and
@@ -3758,10 +4006,18 @@ function M:onEvent(msg)
       local rows = { {
         anim = anim, slot = msg.slot, side = msg.side, amount = msg.amount,
       } }
+      -- The condition is the occupant's as the referee sees it: a parked
+      -- arrival's when one is waiting (`noteSlot`) -- the seat alone is
+      -- the monster still leaving.
       local seat = msg.slot ~= nil and self.slots[msg.slot] or nil
+      local on = seat and (seat.pending or seat)
       local look = self:usesBattlefield()
-        and Vfx.forStatusAnim(anim, seat and seat.status) or nil
+        and Vfx.forStatusAnim(anim, on and on.status) or nil
       if look then rows[#rows + 1] = { vfxrow = look, slot = msg.slot } end
+      -- Red's X item is one look, the cart's (K20): XSTATITEM_ANIM plays it
+      -- where the cart does, so the bag's own look queued for the same item
+      -- on the same seat is taken back.
+      if look and anim == "XSTATITEM_ANIM" then self:dropItemLook(msg.slot) end
       if behind then
         self.animBehind = rows
       else
@@ -3879,14 +4135,14 @@ function M:onEvent(msg)
         -- (`onReady`) is its whole introduction, on both carts.  A trainer's --
         -- or the other player's -- is the cart's own line (M.sentOutPages).
         if not (self.mode == "wild" and self:generation() ~= 3) then
-          for _, page in ipairs(M.sentOutPages(self:foeTrainerName(), msg.text,
+          for _, page in ipairs(M.sentOutPages(self:foeTrainerName(), bareName(msg.text),
               self:generation())) do
             self:say(page)
           end
         end
         if not parked then self:refreshSlotSprite(msg.slot, false) end
       else
-        self:say(("Go! %s!"):format(msg.text))
+        self:say(("Go! %s!"):format(bareName(msg.text)))
         self:trackActive(msg.text, msg)
         if not parked then self:arriveOnSeat(msg.slot, true) end
       end
@@ -3958,7 +4214,12 @@ function M:onEvent(msg)
     -- faint line still comes straight after the event.
     self:queueDrain(msg.slot)
     self:queueFaintFx(msg.slot)
-    if msg.text then self:say(("%s fainted!"):format(msg.text)) end
+    -- The cart's line for whose monster it was (`faintLine`): "Enemy <MON>
+    -- \nfainted!" across from this viewer, "<MON>\nfainted!" on its own side.
+    if msg.text then
+      self:say(M.faintLine(msg.text, sideOfSlot(msg.slot) ~= (self.mySide or "a"),
+        self:generation()))
+    end
     -- After the faint line has been read (and any anim still ahead of it in
     -- `lines` has played), drop the pic. Queued behind the say so the KO stays
     -- on screen through the flash + "X fainted!". Stamped with its occupant
@@ -4082,8 +4343,11 @@ function M:onEvent(msg)
     -- ...and what it looks like, on the seat of whoever opened the bag. Balls
     -- answer nil (`Vfx.forItem`) and are left to the throw chain below, which
     -- already draws the arc, the rocking and the burst -- a second effect over
-    -- that would be drawing the same throw twice.
-    self:queueVfx(itemVfx(msg.text), msg.slot, msg.slot)
+    -- that would be drawing the same throw twice.  Marked as the bag's look,
+    -- so Red's XSTATITEM_ANIM behind an X item takes its place (`anim`).
+    if self:queueVfx(itemVfx(msg.text), msg.slot, msg.slot) then
+      self.lines[#self.lines].itemLook = true
+    end
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
     if effect and effect.ball then
@@ -4253,18 +4517,28 @@ function M:onEvent(msg)
     self.foePicHidden = nil
 
   elseif kind == "wait" then
-    if msg.text then self:say(("Waiting for\n%s..."):format(msg.text)) end
+    if msg.text then self:say(("Waiting for\n%s..."):format(bareName(msg.text))) end
 
   elseif kind == "reconnect" then
     -- Their return, or ours after we re-announced: either way the waiting
     -- caption is done.
     self.awaitingReconnect = false
-    if msg.text then self:say(("%s is back!"):format(msg.text)) end
+    if msg.text then self:say(("%s is back!"):format(bareName(msg.text))) end
 
   elseif kind == "run" then
     -- Whose side left: an escape this side made is the cart's "Got away
     -- safely!" at the end (`finish`), one the foe made is its own line.
     self.ranSide = msg.side
+    -- ...and in a fight between players, every side that ran and the monster
+    -- it had out, for the cart's link-run lines (`sayLinkRun`): the name is
+    -- the seat's occupant as the referee sees it -- a parked arrival when one
+    -- is waiting (`noteSlot`).
+    if msg.side == "a" or msg.side == "b" then
+      local seat = msg.slot ~= nil and self.slots[msg.slot] or nil
+      local on = seat and (seat.pending or seat)
+      self.ranSeats = self.ranSeats or {}
+      self.ranSeats[msg.side] = { name = on and on.species or nil }
+    end
 
   elseif kind == "chose" or kind == "unchose" then
     if msg.slot == self:mySlot() then
@@ -4515,7 +4789,7 @@ function M.statFell(msg)
   if type(msg) ~= "table" then return false end
   local delta = tonumber(msg.delta)
   if delta then return delta < 0 end
-  local text = type(msg.text) == "string" and msg.text:lower() or ""
+  local text = type(msg.text) == "string" and plainLine(msg.text):lower() or ""
   if text:find("fell", 1, true) then return true end
   if text:find("rose", 1, true) or text:find("went up", 1, true)
      or text:find("went way up", 1, true) then
@@ -4936,10 +5210,15 @@ function M:gainExp(msg)
   -- third value, but `levelled` below derives the same list per level through
   -- `Exp2.movesLearnedAt` -- capturing it would be a value nothing reads.
   local ok, levels, gained
+  -- Whether the award took the traded monster's x1.5, which the line says
+  -- ("a boosted", `gainedLine`): Gold's off Exp2's own OT check, Red's the
+  -- flag handed to the formula.
+  local boosted
   if generation == 2 then
     -- `participants` is the referee's divisor unmodified: Gen 2's Share tax is
     -- the `halved` flag on the pool, not a doubling of the divisor.
-    levels, gained = Exp2.apply(self.game, mon, def, {
+    local _
+    levels, gained, _, boosted = Exp2.apply(self.game, mon, def, {
       level = level, participants = participants, isTrainer = isTrainer,
       halved = halved, save = save,
     })
@@ -4957,6 +5236,7 @@ function M:gainExp(msg)
       self:warnNoExp("the engine refused the award for this monster")
       return false
     end
+    boosted = mon.traded
   end
 
   -- The name the box has been calling it all fight: the referee narrates under
@@ -4978,7 +5258,7 @@ function M:gainExp(msg)
   -- fight that ended by catch, where paying nothing is correct. This counts the
   -- awards this screen actually applied, which is the fact worth asserting.
   self.expPaid = (self.expPaid or 0) + 1
-  self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
+  self:say(M.gainedLine(name, gained, boosted))
 
   -- ...and *then* the strip crawls, which is the cart's chronology: the line
   -- is read, and the bar answers it. Queued ahead of the level lines
@@ -6034,16 +6314,53 @@ end
 -- enemy's: the cart plays it after the line, so the caller holds it until the
 -- line is queued.  Every other id comes back unchanged (BURN_PSN_ANIM has one
 -- variant, faced by the seat it plays over).
-local STATUS_ANIM_SWAP = {
-  SLP_ANIM = "SLP_PLAYER_ANIM", SLP_PLAYER_ANIM = "SLP_ANIM",
-  CONF_ANIM = "CONF_PLAYER_ANIM", CONF_PLAYER_ANIM = "CONF_ANIM",
+--
+-- The twins, as one row each -- the enemy's (plain) id, then the player's.
+-- Gold's after-anims come in such pairs too (contract K20, pokecrystal
+-- BATTLE_AFTERANIMS): BattleCommand_StatDownAnim plays ANIM_ENEMY_STAT_DOWN
+-- on the player's turn (the enemy's stat fell) and ANIM_WOBBLE on the
+-- enemy's (the player's did) -- the Gold referee's M.PLAYER_ANIMS pairing --
+-- and a hit's after-anim is ANIM_ENEMY_DAMAGE or ANIM_PLAYER_DAMAGE the same
+-- way.  So a drop on this viewer's own seat is the WOBBLE clip whichever the
+-- referee named, and one across is the ENEMY_STAT_DOWN.  A row added here is
+-- the whole of a new twin.
+M.VIEWER_ANIM_TWINS = {
+  { "SLP_ANIM", "SLP_PLAYER_ANIM" },
+  { "CONF_ANIM", "CONF_PLAYER_ANIM" },
+  { "ENEMY_STAT_DOWN_ANIM", "WOBBLE_ANIM" },
+  { "ENEMY_DAMAGE_ANIM", "PLAYER_DAMAGE_ANIM" },
 }
+local STATUS_ANIM_SWAP, PLAYER_VARIANT = {}, {}
+for _, pair in ipairs(M.VIEWER_ANIM_TWINS) do
+  STATUS_ANIM_SWAP[pair[1]], STATUS_ANIM_SWAP[pair[2]] = pair[2], pair[1]
+  PLAYER_VARIANT[pair[2]] = true
+end
 function M.viewerAnim(anim, mine)
   local other = type(anim) == "string" and STATUS_ANIM_SWAP[anim] or nil
   if not other then return anim, false end
-  local playerVariant = anim:find("_PLAYER_ANIM", 1, true) ~= nil
+  local playerVariant = PLAYER_VARIANT[anim] == true
   if playerVariant == (mine == true) then return anim, false end
   return other, other == "SLP_ANIM"
+end
+
+-- The bag's own look for an item on `slot` (`itemLook`, the `item` branch),
+-- taken back off the queue -- the newest one still waiting, and only past rows
+-- that are not another animation, so a look already played or one belonging
+-- to an earlier use is left alone.
+function M:dropItemLook(slot)
+  local lines = self.lines
+  if type(lines) ~= "table" then return false end
+  for i = #lines, 1, -1 do
+    local row = lines[i]
+    if type(row) == "table" then
+      if row.itemLook and row.slot == slot then
+        table.remove(lines, i)
+        return true
+      end
+      if row.anim ~= nil then return false end
+    end
+  end
+  return false
 end
 
 -- The held rows (`viewerAnim`'s `behind`), onto the queue.
@@ -6073,13 +6390,15 @@ function M.weatherOfLine2(text)
     for kind, lines in pairs(Effects2.WEATHER_LINES or {}) do
       local key = WEATHER_KEYS2[kind]
       if key and type(lines) == "table" then
-        if lines.start then weatherByLine2[lines.start] = key end
-        if lines.continues then weatherByLine2[lines.continues] = key end
-        if lines.ended then weatherByLine2[lines.ended] = false end
+        -- Keyed on the plain line (`plainLine`), as the lookup reads it, so
+        -- a line the referee breaks with the cart's `\n` (K18) still matches.
+        if lines.start then weatherByLine2[plainLine(lines.start)] = key end
+        if lines.continues then weatherByLine2[plainLine(lines.continues)] = key end
+        if lines.ended then weatherByLine2[plainLine(lines.ended)] = false end
       end
     end
   end
-  return weatherByLine2[text]
+  return weatherByLine2[plainLine(text)]
 end
 
 -- A queued Gen 3 state change reaching the head of the queue: the sky, a
@@ -7004,9 +7323,64 @@ local REASONS = {
 -- roll R1d added), Gold's too (wave 5); SoloBattle rolls a solo wild RUN on
 -- the client and says nothing on a success.  So the ending says it only when
 -- the stream did not, and the old "Someone ran away!" no longer follows an
--- escape the referee had already narrated.  A fight between players keeps
--- its concession lines.
+-- escape the referee had already narrated.  A fight between players ends on
+-- the carts' link-run lines on Red and Gold (`linkRunLine`, below), and on
+-- Gen 3's concession lines.
 M.GOT_AWAY = "Got away safely!"
+
+-- ------- a run from a fight between players, in each cart's words
+--
+-- What the cart prints when a link battle ends on RUN, per viewer (Red and
+-- Gold; Gen 3 keeps `sayEnding3`):
+--
+--   the runner   GotAwayText / BattleText_GotAwaySafely, "Got away safely!"
+--                -- pokered TryRunningFromBattle `.canEscape` and pokecrystal
+--                TryToRunAwayFromBattle `.can_escape` both print it after the
+--                link exchange, whatever the other side sent (a double run
+--                is two "Got away safely!" and nobody's "Enemy ... ran!").
+--   the foe      pokered EnemyRan's link branch, _EnemyRanText: "Enemy @"
+--                wEnemyMonNick / line "ran!"; pokecrystal EnemyTriesToFlee
+--                -> WildFled_EnemyFled_LinkBattleCanceled's BattleText_
+--                EnemyFled: "Enemy @" wEnemyMonNickname / line "fled!" --
+--                naming the monster the runner had out.
+--   a partner    (coop_pvp, the runner's ally) no cart has a seat for: the
+--                foe's line about the same monster without the prefix, since
+--                that monster is on the viewer's own side.
+--
+-- `ran` is side -> { name = the runner's field monster } (`ranSeats`);
+-- `partner` is true when this viewer's side ran but this viewer's own seat
+-- did not.  nil when nobody ran (a disconnect, a timeout: the mod's own
+-- lines stay, the cart has none).
+function M.linkRunLine(ran, mySide, partner, generation)
+  if type(ran) ~= "table" then return nil end
+  mySide = mySide or "a"
+  local verb = (generation == 2) and "fled!" or "ran!"
+  local own = ran[mySide]
+  if own and not partner then return M.GOT_AWAY end
+  if own then
+    return ("%s\n%s"):format(tostring(bareName(own.name) or "POKéMON"), verb)
+  end
+  local other = ran[mySide == "a" and "b" or "a"]
+  if other then
+    return ("Enemy %s\n%s"):format(tostring(bareName(other.name) or "POKéMON"), verb)
+  end
+  return nil
+end
+
+-- ------- an award, in the carts' words
+--
+-- pokered GainExperience's GainedText: "<MON> gained" / line, then -- for a
+-- traded monster (wGainBoostedExp) -- BoostedText "a boosted" / cont, then
+-- ExpPointsText "<N> EXP. Points!"; pokecrystal / pokegold
+-- Text_MonGainedExpPoint the same rows (Text_Gained, then
+-- BoostedExpPointsText's `line "a boosted"` / `cont` or ExpPointsText's
+-- `line`, on IsTradedMon).  Three rows scroll the way the cart's `cont` does
+-- (K18, ClassicBattle.pageBoxText).  Shared with src/CoopBattle.lua.
+function M.gainedLine(name, amount, boosted)
+  return tostring(name or "?") .. " gained\n" .. (boosted and "a boosted\n" or "")
+    .. tostring(amount or 0) .. " EXP. Points!"
+end
+
 local ESCAPE_TAILS = {
   " ran from battle!", " ran away scared!", " was blown away!", " fled from battle!",
   " fled in fear!", " used POKe DOLL!", " used POKé DOLL!",
@@ -7014,6 +7388,7 @@ local ESCAPE_TAILS = {
 }
 function M.escapeLine(text)
   if type(text) ~= "string" then return false end
+  text = plainLine(text)
   if text == M.GOT_AWAY then return true end
   for _, tail in ipairs(ESCAPE_TAILS) do
     if #text > #tail and text:sub(-#tail) == tail then return true end
@@ -7224,6 +7599,18 @@ function M:finish(result, reason, msg)
     if not self.escapeSaid and (self.ranSide == nil or self.ranSide == mine) then
       self:say(M.GOT_AWAY)
     end
+  elseif reason == "run" and LINK_MODES[self.mode] then
+    -- A fight between players that somebody ran from: the cart's line for
+    -- this viewer (`linkRunLine`) in place of the old "Someone ran away!"
+    -- (none when a move's own escape line already said it), and then the
+    -- result, as the cart shows its link result screen after the run.
+    -- A run nobody's `run` event named (an older stream) keeps the old line,
+    -- after the result as before.
+    local line = not self.escapeSaid
+      and M.linkRunLine(self.ranSeats, self.mySide or "a", false, self:generation())
+    if line then self:say(line) end
+    self:say(ENDINGS[self.result] or ENDINGS.draw)
+    if not line and not self.escapeSaid then self:say(REASONS.run) end
   else
     self:say(ENDINGS[self.result] or ENDINGS.draw)
     local why = REASONS[reason]
@@ -7469,7 +7856,7 @@ end
 -- build's name for the id.
 function M.disableLine(text, species, moves, game)
   if type(text) ~= "string" or type(species) ~= "string" or species == "" then return nil end
-  local flat = text:gsub("\n", " ")
+  local flat = plainLine(text)
   local prefix = species .. "'s "
   if flat:sub(1, #prefix) ~= prefix then return nil end
   local rest = flat:sub(#prefix + 1)
@@ -7508,6 +7895,7 @@ end
 function M:noteDisableLine(text)
   local generation = self:generation()
   if generation == 3 then return end
+  text = plainLine(text)
   if generation == 1 and text == "All STATUS changes are eliminated!" then
     self.disabledMove = nil
     return
@@ -8098,6 +8486,7 @@ end
 -- resets the stat levels alone).
 function M:noteItemFlags2(text)
   if self:generation() ~= 2 or type(text) ~= "string" then return end
+  text = plainLine(text)
   local sheet = self.mine and self.mine[self.active or 1]
   local species = sheet and sheet.species
   if type(species) ~= "string" or species == "" then return end
@@ -8255,12 +8644,17 @@ function M:updateCommand(input)
       -- NPC modes -- printing it on 1v1 then sending run made the match
       -- look like a wasted turn. Honest trainer menus never file `run`
       -- (#86): the sim no-ops a filed one as modified-client proof.
-      -- 1v1 says you forfeited only after the send lands.
+      -- 1v1 says you forfeited only after the send lands -- on Gen 3.  Red
+      -- and Gold say nothing here: the cart's link run prints "Got away
+      -- safely!" once the exchange has come back (pokered
+      -- TryRunningFromBattle `.canEscape`, pokecrystal TryToRunAwayFromBattle
+      -- `.can_escape`), which on this screen is the referee's `run` event
+      -- (`sayLinkRun`, from `finish`).
       if self.mode == "wild" then
         self:sendChoice({ action = "run" })
       elseif TRAINER_MODES[self.mode] then
         self:say("No! There's no\nrunning from a\ntrainer battle!")
-      elseif self:sendChoice({ action = "run" }) then
+      elseif self:sendChoice({ action = "run" }) and self:generation() == 3 then
         self:say("You forfeited\nthe battle!")
       end
     end
@@ -8386,7 +8780,7 @@ function M.bideLine(text, species, labels)
   if type(text) ~= "string" or type(species) ~= "string" or species == "" then
     return nil
   end
-  local line = text:gsub("!+$", "")
+  local line = plainLine(text):gsub("!+$", "")
   if line == species .. " is storing energy" then return "store" end
   if line == species .. " unleashed energy" then return "release" end
   local prefix = species .. " used "
@@ -8427,7 +8821,7 @@ function M.bideLine1(text, species, labels, confusedNow)
   if type(text) ~= "string" or type(species) ~= "string" or species == "" then
     return nil
   end
-  local line = text:gsub("!+$", "")
+  local line = plainLine(text):gsub("!+$", "")
   if line == species .. " unleashed energy" then return "release" end
   if line == species .. " hurt itself in confusion"
      or line == species .. " is fully paralyzed"
@@ -8469,6 +8863,7 @@ end
 function M:noteBideLine(text, seq)
   local sheet = self.mine and self.mine[self.active or 1]
   local species = sheet and sheet.species
+  text = plainLine(text)
   if self:generation() == 1 then
     if type(text) == "string" and type(species) == "string" then
       local who = text:match("^(.-) is confused!?$")
@@ -9110,7 +9505,7 @@ end
 function M.hitSfxFromText(text)
   if type(text) ~= "string" then return nil end
   -- Engine / BattleSim lines may break mid-phrase ("It's super\neffective!").
-  local lower = text:lower():gsub("[%s%-]+", " ")
+  local lower = plainLine(text):lower():gsub("[%s%-]+", " ")
   if lower:find("super effective", 1, true) then
     return { sound = "Super_Effective", pitch = 0xe0 }
   end
@@ -9343,6 +9738,15 @@ function M:startAnim(row)
         self:emitFx("lunge", row.slot, row.side)
         self:startMoveVfx(row)
       end
+    elseif row.anim == "STATUS_AFFECTED_ANIM" then
+      -- Red's FLY / charge cut short, or a FLY / SKY ATTACK class release
+      -- (pokered `.FlyOrChargeEffect`): EnemyFlashAnim's SE_SHOW_MON_PIC
+      -- puts the hidden monster back on its seat -- the arena's emerge, and
+      -- the shimmer the row's `vfxrow` carries (Vfx.CART_ANIM_LOOK).
+      if self:seatVanished(row.slot) then
+        self:clearVanishAt(row.slot, row.side)
+        self:emitFx("emerge", row.slot, row.side)
+      end
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held
@@ -9371,7 +9775,9 @@ function M:startAnim(row)
       self:playMoveAnimFallback(row)
       self.animHold = (row.anim == "FLY" or flyCharge) and FX_SPAN.fly or FX_SPAN.dig
       return
-    elseif VANISH_MOVES[row.anim] and already then
+    elseif (VANISH_MOVES[row.anim] or row.anim == "STATUS_AFFECTED_ANIM") and already then
+      -- ...and Red's STATUS_AFFECTED_ANIM (SE_SHOW_MON_PIC) shows the pic a
+      -- cut-short FLY hid; the engine's own clip plays below.
       self:clearVanishAt(row.slot, row.side)
     end
   end

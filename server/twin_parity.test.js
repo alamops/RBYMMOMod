@@ -1505,8 +1505,8 @@ test('a Red / Gold msg keeps the carts\' battle glyphs; player-typed text does n
     assert.strictEqual(msg('JR.TRAINER♂ used X ATTACK on COOLTRAINER♀!', gen),
       'JR.TRAINER♂ used X ATTACK on COOLTRAINER♀!', '...and ♂ ♀');
     assert.strictEqual(msg('TWINS AMY & MAY used an item', gen), 'TWINS AMY & MAY used an item', '...and &');
-    assert.strictEqual(msg('é'.repeat(70), gen), 'é'.repeat(sanitize.MESSAGE_MAX),
-      'the cut counts glyphs, at MESSAGE_MAX');
+    assert.strictEqual(msg('é'.repeat(90), gen), 'é'.repeat(sanitize.BATTLE_LINE_MAX),
+      'the cut counts glyphs, at BATTLE_LINE_MAX (K18; MESSAGE_MAX before)');
     assert.strictEqual(msg('POKÉMON ¥ <PK> _ \u{1F600}', gen), 'POKMON PK', 'nothing else past the old set');
   }
   for (const gen of [3, undefined]) {
@@ -1518,8 +1518,8 @@ test('a Red / Gold msg keeps the carts\' battle glyphs; player-typed text does n
   }, 1).text, 'COOLTRAINER', 'every other kind\'s text reads as before');
   assert.strictEqual(sanitize.cleanText('POKéMON & …', 60), 'POKMON', 'chat, names and rooms stay narrow');
   const wire = read('src/Wire.lua');
-  assert.ok(/elseif older and raw\.t == "msg" then\s+out\.text = M\.battleText\(raw\.text, Config\.MESSAGE_MAX\)/
-    .test(wire), 'Wire.battleEvent reads an older msg through M.battleText');
+  assert.ok(/elseif older and raw\.t == "msg" then\s+out\.text = M\.battleLine\(raw\.text\)/
+    .test(wire), 'Wire.battleEvent reads an older msg through M.battleLine (K17 / K18)');
   assert.ok(/local ALLOWED = "\[\^A-Za-z0-9 %\.,!%\?'%-:;%\(%\)\/\]"/.test(wire), 'Wire.text\'s set is unchanged');
   assert.ok(/local BATTLE_ASCII = "\[A-Za-z0-9 %\.,!%\?'%-:;%\(%\)\/&\]"/.test(wire),
     'Wire.battleText\'s ASCII is M.text\'s plus &');
@@ -1664,6 +1664,342 @@ test('an NPC party\'s Red aiMods and Red / Gold name: read by dialect, carried t
   // ...and both Red referees read them off the roster entry.
   assert.ok(/copyAiMods\(entry\.aiMods\)/.test(read('src/BattleSim/Turn.lua')), 'BattleSim reads entry.aiMods');
   assert.ok(/copyAiMods\(entry\.aiMods\)/.test(read('server/lib/battle/Turn.js')), 'lib/battle reads entry.aiMods');
+});
+
+// ---------------------------------------------------------------------------
+// Contracts K16-K18 and K21 of docs/plans/gen12-referee-remaining-gaps.md: a
+// Red / Gold battle line's `^a` / `^b` name marks and `\n` breaks, cut at
+// BATTLE_LINE_MAX (and `^` in no name); the computer's item / switch facts on
+// an NPC party (Red `aiClass`, Gold `trainerItems` / `aiFlags` / `itemSwitch` /
+// `baseReward`); Gold's sheet `weight` and ruleset `battleType`. The hub parity
+// driver (remaining_gaps_dialect, remaining_gaps_hub_fields) holds the readers
+// and both hubs to one answer case by case; this pins the bounds, the gates and
+// the hand-offs.
+// ---------------------------------------------------------------------------
+
+test('K18: BATTLE_LINE_MAX matches Config.lua, and chat keeps MESSAGE_MAX', () => {
+  const config = read('src/Config.lua');
+  assert.strictEqual(luaAssignNumber(config, 'BATTLE_LINE_MAX'), sanitize.BATTLE_LINE_MAX,
+    'bump Config.BATTLE_LINE_MAX and sanitize BATTLE_LINE_MAX together');
+  assert.strictEqual(sanitize.BATTLE_LINE_MAX, 80, 'a battle line is 80 glyphs, marks and breaks included');
+  assert.strictEqual(luaAssignNumber(config, 'MESSAGE_MAX'), 60, 'chat keeps its sixty');
+  assert.strictEqual(sanitize.MESSAGE_MAX, 60, '...on both twins');
+  assert.strictEqual(sanitize.BATTLE_MARK, '^', 'one mark glyph');
+  const wire = read('src/Wire.lua');
+  assert.ok(/M\.BATTLE_MARK = "\^"/.test(wire), 'Wire spells the same mark');
+  assert.deepStrictEqual(luaSet(wire, 'BATTLE_MARK_SIDES'), [...sanitize.BATTLE_MARK_SIDES].sort(),
+    'and the same two side letters');
+  assert.deepStrictEqual([...sanitize.BATTLE_MARK_SIDES].sort(), ['a', 'b'], 'a and b, the two sides');
+  assert.ok(/function M\.battleLine\(value, limit\)\s+return battleGlyphs\(value, limit or Config\.BATTLE_LINE_MAX, true\)/
+    .test(wire), 'Wire.battleLine cuts at Config.BATTLE_LINE_MAX');
+});
+
+test('K17 / K18: a Red / Gold msg keeps its name marks and breaks; nothing else does', () => {
+  const msg = (text, gen, t = 'msg') => {
+    const event = sanitize.cleanBattleEvent({
+      battle: 'b1', seq: 1, t, text,
+    }, gen);
+    return event ? event.text : undefined;
+  };
+  for (const gen of [1, 2]) {
+    assert.strictEqual(msg('^bRATTATA used\nTACKLE!', gen), '^bRATTATA used\nTACKLE!',
+      `a Gen ${gen} line keeps a mark and a break`);
+    assert.strictEqual(msg('^aPIKA\'s\nattack missed!', gen), '^aPIKA\'s\nattack missed!', '...either side');
+    assert.strictEqual(msg('  ^bX \n  used \n\n Y ! \n ', gen), '^bX\nused\nY !',
+      'a space beside a break collapses into it; never leading, trailing or doubled');
+    assert.strictEqual(msg('\n\nX\n', gen), 'X', 'a break alone at either end is dropped');
+    assert.strictEqual(msg('^cX ^^aY ^', gen), 'cX ^aY', 'a ^ without its side letter is dropped, alone');
+    assert.strictEqual(msg('^AX', gen), 'AX', 'the side letter is lower case');
+    assert.strictEqual(msg('A\r\nB\tC', gen), 'A\nBC', 'a CR or a tab is no break');
+    assert.strictEqual(msg(`${'A'.repeat(78)}^bXY`, gen), 'A'.repeat(78),
+      'a cut that leaves a mark with no name drops the mark');
+    assert.strictEqual(msg(`${'A'.repeat(79)}^bXY`, gen), 'A'.repeat(79), '...and a ^ with no letter');
+    assert.strictEqual(msg(`${'A'.repeat(79)} B`, gen), 'A'.repeat(79), '...and the gap it was waiting for');
+    assert.strictEqual(msg(`${'A'.repeat(79)}\nB`, gen), 'A'.repeat(79), '...a break included');
+    assert.strictEqual(msg('X'.repeat(81), gen), 'X'.repeat(80), 'cut at 80');
+  }
+  for (const gen of [3, undefined]) {
+    assert.strictEqual(msg('^bRATTATA used\nTACKLE!', gen), 'bRATTATA usedTACKLE!',
+      `a reader for generation ${gen} reads a msg as before: no mark, no break`);
+  }
+  for (const gen of [1, 2]) {
+    for (const t of ['run', 'send', 'chose']) {
+      assert.strictEqual(msg('^aANN\nX', gen, t), 'aANNX', `a ${t}'s text is a name: no mark, no break`);
+    }
+  }
+  // The walker, as Wire.battleLine / cleanBattleLine, and the plain reading.
+  assert.strictEqual(sanitize.cleanBattleLine('^aX'), '^aX');
+  assert.strictEqual(sanitize.cleanBattleLine('^aXY', 2), null, 'a line that is only a cut mark is no line');
+  assert.strictEqual(sanitize.cleanBattleText('^aX\nY'), 'aXY', 'cleanBattleText reads no mark and no break');
+  assert.strictEqual(sanitize.plainBattleLine('^aPIKA used\nTHUNDER on ^bONIX!'), 'PIKA used THUNDER on ONIX!',
+    'the plain reading: marks gone, breaks spaces');
+  assert.strictEqual(sanitize.plainBattleLine('It\'s super-\neffective!'), 'It\'s super-effective!',
+    'a word split over two rows after a hyphen joins with no space');
+  assert.strictEqual(sanitize.plainBattleLine(undefined), undefined, 'not a string: back as it came');
+});
+
+test('K17: a ^ reaches no name field on either twin', () => {
+  const caret = '^aANN^b';
+  assert.strictEqual(sanitize.cleanText(caret, sanitize.NAME_MAX), 'aANNb', 'a player name (hello, presence)');
+  assert.strictEqual(sanitize.cleanNpcName(caret), 'aANNb', 'an NPC seat\'s trainer name');
+  assert.strictEqual(sanitize.cleanBattleText(caret), 'aANNb', 'the glyph reader names are read through');
+  assert.strictEqual(sanitize.cleanMoveName(caret), 'aANNb', 'a move or item name');
+  assert.strictEqual(sanitize.cleanLabel(caret), 'aANNb', 'a fight label');
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const red = {
+    species: caret, level: 50, hp: 100, maxHp: 100, stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move],
+  };
+  const gold = { ...red, stats: { atk: 90, def: 90, spe: 90, spa: 90, spd: 90 }, itemName: caret, heldItem: 'BERRY' };
+  assert.strictEqual(cleanBattleMon(red).species, 'aANNb', 'a Red monster\'s name (its nickname)');
+  assert.strictEqual(cleanBattleMon(gold).species, 'aANNb', 'a Gold monster\'s name');
+  assert.strictEqual(cleanBattleMon(gold).itemName, 'aANNb', '...and its held item\'s');
+  const party = sanitize.cleanBattleParty({ battle: 'b1', mons: [red], name: caret }, 1);
+  assert.strictEqual(party.name, 'aANNb', 'the party\'s trainer name');
+  for (const gen of [1, 2, 3]) {
+    const exp = sanitize.cleanBattleEvent({
+      battle: 'b1', seq: 1, t: 'exp', species: caret, level: 5, participants: 1,
+    }, gen);
+    assert.strictEqual(exp.species, 'aANNb', `an exp event's species, generation ${gen}`);
+  }
+});
+
+test('battle lines read byte for byte alike on Wire.battleLine and cleanBattleLine', (t) => {
+  // Wire.battleText's differential run, with the two marks' bytes in the mix:
+  // `^`, its side letters, a break, a CR, and every cap a cut can leave a mark,
+  // a ^ or a gap hanging at. Each line also runs through the plain reading
+  // (Wire.plainBattleLine / plainBattleLine) on both sides.
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('luajit', ['-v'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    t.skip('luajit not on PATH');
+    return;
+  }
+  const pieces = ['5e', '5e61', '5e62', '5e63', '5e41', '5e5e', '61', '62', '0a', '0a0a', '200a', '0a20', '0d0a', '2d0a',
+    '0d', '09', '20', '2020', 'c3a9', 'e280a6', 'e29982', 'e29980', 'c3', 'a9', 'e2', '80', 'f09f9880', 'c0a9',
+    'ff', 'c389', '26', '23', '3c', '5f', '50', '4f', '4b', '41', '39', '2e', '21', '27', '2d', '7e', '00'];
+  let seed = 20261006;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  const cases = [];
+  for (let i = 0; i < 4000; i += 1) {
+    let hex = '';
+    for (let n = Math.floor(rand() * 50); n > 0; n -= 1) hex += pieces[Math.floor(rand() * pieces.length)];
+    if (i % 40 === 0) hex = '41'.repeat(70 + (i % 13)) + ['5e6142', '0a42', '2042', '5e42'][i % 4].repeat(4);
+    const limit = [0, 1, 2, 3, 5, 23, 60, 79, 80, 81][i % 10];
+    cases.push({ hex, limit });
+  }
+  const script = [
+    `package.path = "${ROOT}/?.lua;" .. package.path`,
+    'local cache = {}',
+    'local function need(name)',
+    '  if cache[name] ~= nil then return cache[name] end',
+    `  local h = assert(io.open("${ROOT}/src/" .. name .. ".lua", "rb"))`,
+    '  local body = h:read("*a"); h:close()',
+    '  cache[name] = assert((loadstring or load)(body, "@" .. name))(need)',
+    '  return cache[name]',
+    'end',
+    'local Wire = need("Wire")',
+    "local function hex(s) return s and (s:gsub('.', function(c) return string.format('%02x', c:byte()) end)) or 'nil' end",
+    'for line in io.lines() do',
+    '  local limit, h = line:match("^(%d+) (%x*)$")',
+    "  local s = h:gsub('..', function(x) return string.char(tonumber(x, 16)) end)",
+    '  local out = Wire.battleLine(s, limit ~= "0" and tonumber(limit) or nil)',
+    "  io.write(hex(out), ' ', hex(out and Wire.plainBattleLine(out)), '\\n')",
+    'end',
+  ].join('\n');
+  const lua = spawnSync('luajit', ['-e', script], {
+    input: `${cases.map((c) => `${c.limit} ${c.hex}`).join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
+  assert.strictEqual(lua.status, 0, `luajit failed: ${lua.stderr}`);
+  const answers = lua.stdout.trim().split('\n');
+  assert.strictEqual(answers.length, cases.length, 'one answer per string');
+  const hexOf = (s) => (s === null ? 'nil' : Buffer.from(s, 'utf8').toString('hex'));
+  const differ = [];
+  let marks = 0;
+  let breaks = 0;
+  cases.forEach((c, i) => {
+    const js = sanitize.cleanBattleLine(Buffer.from(c.hex, 'hex').toString('utf8'), c.limit || undefined);
+    const mine = `${hexOf(js)} ${hexOf(js === null ? null : sanitize.plainBattleLine(js))}`;
+    if (js && js.includes('^')) marks += 1;
+    if (js && js.includes('\n')) breaks += 1;
+    if (mine !== answers[i]) differ.push(`${c.hex}/${c.limit}: lua=${answers[i]} js=${mine}`);
+  });
+  assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${cases.length} lines read differently`);
+  assert.ok(marks > 100 && breaks > 100, `the run reached marks (${marks}) and breaks (${breaks})`);
+});
+
+test('K16: an NPC party\'s Red aiClass and Gold trainer facts, read by dialect, carried to NPC seats alone', () => {
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const sheet1 = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100, stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move],
+  };
+  const sheet2 = { ...sheet1, stats: { atk: 90, def: 90, spe: 90, spa: 90, spd: 90 } };
+  const party = (extra, gen) => sanitize.cleanBattleParty({
+    battle: 'b1', mons: [gen === 2 ? sheet2 : sheet1], ...extra,
+  }, gen);
+  // Red: the engine's ai_classes record, field by field.
+  assert.deepStrictEqual(party({
+    aiClass: {
+      uses: 2, chance: 64, item: 'X_ATTACK', bogus: 1,
+    },
+  }, 1).aiClass, { uses: 2, chance: 64, item: 'X_ATTACK' }, 'BLACKBELT-shaped, an unknown key dropped');
+  assert.deepStrictEqual(party({
+    aiClass: {
+      uses: 2, switchChance: 20, chance: 128, item: 'SUPER_POTION', hpBelow: 4,
+    },
+  }, 1).aiClass, {
+    uses: 2, switchChance: 20, chance: 128, item: 'SUPER_POTION', hpBelow: 4,
+  }, 'AGATHA-shaped');
+  assert.deepStrictEqual(party({
+    aiClass: {
+      uses: 1, item: 'HYPER_POTION', hpBelow: 10, switchBelow: 5, switch: false,
+    },
+  }, 1).aiClass, {
+    uses: 1, item: 'HYPER_POTION', hpBelow: 10, switchBelow: 5,
+  }, 'COOLTRAINER_F-shaped, a false flag absent');
+  assert.deepStrictEqual(party({ aiClass: { uses: '5', onStatus: true, item: 'FULL_HEAL' } }, 1).aiClass,
+    { uses: 5, onStatus: true, item: 'FULL_HEAL' }, 'BROCK-shaped, a numeric string read as Wire.int');
+  assert.deepStrictEqual(party({ aiClass: { uses: 3, chance: 256, switch: true } }, 1).aiClass,
+    { uses: 3, chance: 256, switch: true }, 'JUGGLER-shaped, chance at its 256');
+  assert.strictEqual(party({ aiClass: null }, 1).aiClass, undefined, 'a null is absent');
+  for (const bad of [{}, { chance: 64 }, { uses: 0 }, { uses: 256 }, { uses: true }, { uses: 1, chance: 257 },
+    { uses: 1, chance: -1 }, { uses: 1, switchChance: 300 }, { uses: 1, hpBelow: 0 }, { uses: 1, switchBelow: 256 },
+    { uses: 1, item: 'X ATTACK' }, { uses: 1, item: 7 }, { uses: 1, switch: 1 }, { uses: 1, onStatus: 'yes' },
+    [3], 'GenericAI', 3]) {
+    assert.strictEqual(party({ aiClass: bad }, 1), null,
+      `an unreadable record (${JSON.stringify(bad)}) refuses the Red party`);
+  }
+  for (const gen of [2, undefined]) {
+    const got = party({ aiClass: { uses: 0 } }, gen);
+    assert.ok(got && got.aiClass === undefined, `a party read for generation ${gen} neither keeps nor refuses one`);
+  }
+  // Gold: TrainerClassAttributes' item slots, AI words and base reward.
+  assert.deepStrictEqual(party({
+    trainerItems: ['FULL_HEAL', 'POTION'], aiFlags: 0, itemSwitch: 513, baseReward: 25,
+  }, 2), {
+    ...party({}, 2), trainerItems: ['FULL_HEAL', 'POTION'], aiFlags: 0, itemSwitch: 513, baseReward: 25,
+  }, 'all four, the item slots in order and a zero kept');
+  assert.deepStrictEqual(party({ trainerItems: [] }, 2).trainerItems, [], 'no item at all is a list');
+  assert.deepStrictEqual(party({ trainerItems: [null, 'POTION'] }, 2).trainerItems, ['POTION'],
+    'a JSON null closed up, as the Lua decoder does');
+  assert.deepStrictEqual(party({ aiFlags: 65535, itemSwitch: '4', baseReward: 255 }, 2),
+    { ...party({}, 2), aiFlags: 65535, itemSwitch: 4, baseReward: 255 }, 'at their bounds');
+  for (const bad of [{ trainerItems: ['A', 'B', 'C'] }, { trainerItems: ['FULL HEAL'] }, { trainerItems: [7] },
+    { trainerItems: { a: 'POTION' } }, { trainerItems: 'POTION' }, { aiFlags: 65536 }, { aiFlags: -1 },
+    { aiFlags: true }, { itemSwitch: [1] }, { itemSwitch: '' }, { baseReward: 256 }, { baseReward: 'x' }]) {
+    assert.strictEqual(party(bad, 2), null, `${JSON.stringify(bad)} refuses the Gold party`);
+  }
+  for (const gen of [1, undefined]) {
+    const got = party({
+      trainerItems: ['A', 'B', 'C'], aiFlags: -1, itemSwitch: -1, baseReward: -1,
+    }, gen);
+    assert.ok(got && ['trainerItems', 'aiFlags', 'itemSwitch', 'baseReward'].every((k) => got[k] === undefined),
+      `a party read for generation ${gen} neither keeps nor refuses Gold's four`);
+  }
+  // The bounds, on both twins.
+  const wire = read('src/Wire.lua');
+  for (const name of ['AI_USES_MAX', 'AI_CHANCE_MAX', 'AI_DIVISOR_MAX', 'TRAINER_ITEMS2_MAX', 'AI_FLAGS2_MAX',
+    'BASE_REWARD2_MAX']) {
+    assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name], `Wire.${name} and sanitize.${name} must match`);
+  }
+  assert.ok(/if partyGen == 1 and raw\.aiClass ~= nil then\s+out\.aiClass = aiClassOf\(raw\.aiClass\)\s+if out\.aiClass == nil then return nil end/
+    .test(wire), 'Wire.battleParty reads aiClass on a Red party and refuses it unreadable');
+  assert.ok(/if partyGen == 2 then\s+if raw\.trainerItems ~= nil then/.test(wire),
+    'Wire.battleParty reads Gold\'s four on a Gold party');
+  // Both hubs deal them onto every NPC seat and hand them to the referee from
+  // there alone.
+  const hub = read('src/Hub.lua');
+  assert.ok(/aiClass = party\.aiClass, trainerItems = party\.trainerItems,\s+aiFlags = party\.aiFlags, itemSwitch = party\.itemSwitch,\s+baseReward = party\.baseReward,/
+    .test(hub), 'Hub:fillBattleParty copies all five onto NPC seats');
+  for (const key of ['aiClass', 'trainerItems', 'aiFlags', 'itemSwitch', 'baseReward']) {
+    assert.ok(new RegExp(`${key} = npc and party\\.${key} or nil,`).test(hub), `Hub:tryStartSim hands ${key} on`);
+  }
+  const relay = read('server/lib/relay.js');
+  for (const key of ['aiClass', 'trainerItems']) {
+    assert.ok(new RegExp(`if \\(party\\.${key}\\) seatParty\\.${key} = party\\.${key};`).test(relay),
+      `relay fillBattleParty copies ${key}`);
+    assert.ok(new RegExp(`if \\(npc && party\\.${key}\\) entry\\.${key} = party\\.${key};`).test(relay),
+      `relay tryStartSim hands ${key} on`);
+  }
+  for (const key of ['aiFlags', 'itemSwitch', 'baseReward']) {
+    assert.ok(new RegExp(`if \\(party\\.${key} !== undefined\\) seatParty\\.${key} = party\\.${key};`).test(relay),
+      `relay fillBattleParty copies ${key}, a zero included`);
+    assert.ok(new RegExp(`if \\(npc && party\\.${key} !== undefined\\) entry\\.${key} = party\\.${key};`).test(relay),
+      `relay tryStartSim hands ${key} on, a zero included`);
+  }
+});
+
+test('K21: Gold\'s sheet weight and ruleset battleType ride Gen 2 alone, and reach the Gold referee', () => {
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const red = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100, stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move],
+  };
+  const gold = { ...red, stats: { atk: 90, def: 90, spe: 90, spa: 90, spd: 90 } };
+  for (const weight of [0, 4600, 65535]) {
+    assert.strictEqual(cleanBattleMon({ ...gold, weight }).weight, weight, `a Gold sheet carries weight ${weight}`);
+  }
+  assert.strictEqual(cleanBattleMon({ ...gold, weight: '300' }).weight, 300, 'read as Wire.int reads it');
+  assert.strictEqual(cleanBattleMon({ ...gold, weight: null }).weight, undefined, 'a null is absent');
+  for (const weight of [65536, -1, true, 'heavy', [300]]) {
+    assert.strictEqual(cleanBattleMon({ ...gold, weight }), null,
+      `an unreadable weight (${JSON.stringify(weight)}) refuses the sheet`);
+  }
+  for (const weight of [300, 70000, 'heavy']) {
+    const got = cleanBattleMon({ ...red, weight });
+    assert.ok(got && got.weight === undefined, `a Gen 1 sheet ignores weight ${JSON.stringify(weight)}`);
+  }
+  const chart = [[100, 100], [100, 100]];
+  for (const battleType of [0, 4, 255, '4']) {
+    assert.strictEqual(sanitize.cleanBattleRuleset({ chart, battleType }, 2).battleType, Number(battleType),
+      `a Gold ruleset carries battleType ${JSON.stringify(battleType)}`);
+  }
+  assert.strictEqual(sanitize.cleanBattleRuleset({ chart, battleType: null }, 2).battleType, undefined,
+    'a null is absent');
+  for (const battleType of [256, -1, true, 'FISH', [4]]) {
+    assert.strictEqual(sanitize.cleanBattleRuleset({ chart, battleType }, 2), null,
+      `an unreadable battleType (${JSON.stringify(battleType)}) refuses the Gold ruleset`);
+  }
+  for (const gen of [1, undefined]) {
+    const got = sanitize.cleanBattleRuleset({ chart, battleType: 'FISH' }, gen);
+    assert.ok(got && got.battleType === undefined, `a ruleset read for generation ${gen} neither keeps nor refuses one`);
+  }
+  const wire = read('src/Wire.lua');
+  for (const name of ['WEIGHT2_MAX', 'BATTLE_TYPE2_MAX']) {
+    assert.strictEqual(luaNumber(wire, name, 'Wire.lua'), sanitize[name], `Wire.${name} and sanitize.${name} must match`);
+  }
+  assert.ok(/if generation == 2 and raw\.weight ~= nil then\s+out\.weight = M\.int\(raw\.weight, 0, M\.WEIGHT2_MAX\)/
+    .test(wire), 'Wire.battleMon reads weight on a Gen 2 sheet only');
+  assert.ok(/if M\.int\(generation, 2, 2\) and raw\.battleType ~= nil then/.test(wire),
+    'Wire.battleRuleset reads battleType on a Gen 2 hub only');
+  // Both hubs hand the ruleset's battleType to the Gold referee's create, which
+  // reads it (and a sheet's weight) itself.
+  assert.ok(/if self\.generation == 2 then\s+createOpts\.battleType = rules\.battleType\s+end/.test(read('src/Hub.lua')),
+    'Hub.lua passes battleType into Turn.create on a Gen 2 hub');
+  assert.ok(/if \(this\.generation === 2\) \{\s+createOpts\.battleType = rules\.battleType;\s+\}/
+    .test(read('server/lib/relay.js')), 'relay.js passes it too');
+  assert.ok(/battleType\s+= optInt\(opts\.battleType, 0, 255\)/.test(read('src/BattleSim2/Turn.lua')),
+    'BattleSim2 reads opts.battleType');
+  assert.ok(/this\.battleType = optInt\(opts\.battleType, 0, 255\)/.test(read('server/lib/battle2/Turn.js')),
+    'lib/battle2 reads opts.battleType');
+  assert.ok(/weight = optInt\(raw\.weight, 0, 65535\)/.test(read('src/BattleSim2/Turn.lua')),
+    'BattleSim2 keeps a sheet\'s weight');
+  assert.ok(/const weight = optInt\(raw\.weight, 0, 65535\)/.test(read('server/lib/battle2/Turn.js')),
+    'lib/battle2 keeps it');
+  assert.strictEqual(sanitize.WEIGHT2_MAX, 65535, 'the dex weight word');
+  assert.strictEqual(sanitize.BATTLE_TYPE2_MAX, 255, 'wBattleType is one byte');
 });
 
 test('a Gen 1 / Gen 2 chart and specialTypes close a JSON null up, as the Lua decoder does', () => {

@@ -42,6 +42,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const { Turn, events: Events } = require('./lib/battle');
+const { plainBattleLine } = require('./lib/sanitize');
 
 const ROOT = path.join(__dirname, '..');
 const DRIVER = path.join(ROOT, 'tests', 'drivers', 'battle_turn_parity.lua');
@@ -3746,6 +3747,50 @@ scenario('g1_fx_r1', fights('g1fx', [
     { seed: 11013, turns: [{ p1: 0, p2: 0 }] }),
 ]));
 
+// Contracts K17-K20 (docs/plans/gen12-referee-remaining-gaps.md), one fight
+// each -- the Lua driver's g1_marks_faints, line for line:
+//   1 the used line both ways: <USER> marked ^a / ^b, a break after it;
+//   2 a drain KO: SuckedHealthText (<TARGET> marked) before the faint;
+//   3 a recoil that takes the user while the target rages: the recoil line,
+//     the target's RAGE, then the user's faint (HandlePlayerMonFainted
+//     after ExecutePlayerMoveDone);
+//   4 a wild EXPLOSION that takes both: the player's faint first;
+//   5 a Leech Seed sap: ABSORB on the seeder's seat before the HP moves;
+//   6 a released FLY that misses: STATUS_AFFECTED_ANIM before the miss line;
+//   7 the trainer blocks a ball (TOSS_ANIM first), then an X item
+//     (XSTATITEM_ANIM between the use line and the rose line);
+//   8 a damaging move whose effect a KO skips (`.executeOtherEffects` is
+//     past `ret z`).
+scenario('g1_marks_faints', fights('g1mf', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 12001, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('suck', 80, 3)], { spd: 90, atk: 200, hp: 100 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 1 })],
+    { seed: 12002, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('crash', 80, 48)], { spd: 90, atk: 200, hp: 1 })],
+    [r1s('Beta', [r1m('fury', 20, 81)], { spd: 10, raging: true, rageMove: 1 })],
+    { seed: 12003, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10, hp: 1 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 10 })],
+  [r1s('Beta', [r1m('boom', 170, 7)], { spd: 90, atk: 200 })],
+  { mode: 'wild', seed: 12004, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 100 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, leechSeed: { fromSlot: 0 } })],
+    { seed: 12005, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('FLY', 90, 43, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 12006, turns: [{ p1: 0, p2: 0 }, { p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 12007, aSeat: { bag: { POKE_BALL: 1, X_ATTACK: 1 } },
+      turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'X_ATTACK' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('snarl', 80, 18)], { spd: 90, atk: 200 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 1 })],
+    { seed: 12008, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -3820,7 +3865,19 @@ function runLua() {
   return JSON.parse(luajit.stdout);
 }
 
-const jsRuns = runJs();
+// The streams exactly as the twin emitted them -- a `msg` keeps its marks
+// (`^a` / `^b`, contract K17) and its breaks (`\n`, K18) -- for the parity
+// tests, which hold them to the Lua byte for byte.
+const jsRunsRaw = runJs();
+// ...and as every claim below reads them: a line without its marks, each break
+// a space (W's plainBattleLine, the client's own reader) -- K17's "every test
+// that matches text reads the line
+// without its marks", which keeps the claims' sentences the cart's words. The
+// sections that pin the marks and breaks themselves read `jsRunsRaw`.
+const readable = (event) => (event.t === 'msg' && typeof event.text === 'string'
+  ? { ...event, text: plainBattleLine(event.text) } : event);
+const readAll = (list) => list.map(readable);
+const jsRuns = jsRunsRaw.map((run) => ({ ...run, events: readAll(run.events) }));
 const luaRuns = runLua();
 const fixture = fs.existsSync(FIXTURE)
   ? JSON.parse(fs.readFileSync(FIXTURE, 'utf8'))
@@ -3831,7 +3888,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 21, 'the JS half built every scenario');
+  assert.ok(jsRunsRaw.length >= 21, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle_turn_parity.json is available -- '
@@ -3846,7 +3903,7 @@ test('JS matches the Lua turn machine, event for event', async (t) => {
     return;
   }
   const lua = byName(luaRuns);
-  for (const run of jsRuns) {
+  for (const run of jsRunsRaw) {
     await t.test(run.name, () => {
       const twin = lua.get(run.name);
       assert.ok(twin, `${run.name}: the Lua driver did not produce this scenario`);
@@ -3889,7 +3946,7 @@ test('JS matches the committed Lua fixture', async (t) => {
     return;
   }
   const pinned = byName(fixture);
-  for (const run of jsRuns) {
+  for (const run of jsRunsRaw) {
     await t.test(run.name, () => {
       const twin = pinned.get(run.name);
       assert.ok(twin, `${run.name}: not in the fixture -- regenerate it`);
@@ -4133,8 +4190,9 @@ test('a switch-out-alive participant is paid alongside its replacement, mon 0 th
 test('a self-KO is neither paid nor counted -- the exploder drops out before the divisor is taken', () => {
   const run = byName(jsRuns).get('explode_double_ko');
   const kinds = run.events.map((event) => event.t);
-  // Both faints land -- the wild mon's, then a1's own -- before the one exp
-  // event the knockout funds, and that event is the only one this action pays.
+  // Both faints land -- a1's own, then the wild mon's: the player's first,
+  // once the move is over (K19's `_reapKo`) -- before the one exp event the
+  // knockout funds, and that event is the only one this action pays.
   const faintIdx = [];
   kinds.forEach((t, i) => { if (t === 'faint') faintIdx.push(i); });
   assert.strictEqual(faintIdx.length, 2,
@@ -5170,7 +5228,7 @@ const g1bArena = (o) => {
 const g1bStep = (battle, a, b) => {
   battle.submitChoice('p1', a);
   battle.submitChoice('p2', b);
-  return battle.drainEvents();
+  return readAll(battle.drainEvents());
 };
 const g1bUse = (i) => ({ action: 'fight', move: i });
 const g1bSaid = (events, text) => events.some((e) => e.t === 'msg' && e.text === text);
@@ -5420,7 +5478,7 @@ test('Gen 1 flinch-reset skip: the player\'s raging or recharging monster keeps 
     coop.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
     coop.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
     coop.submitChoice('w', { action: 'fight', move: 0, target });
-    return coop.drainEvents();
+    return readAll(coop.drainEvents());
   };
   round(0);
   assert.ok(g1bSaid(round(1), 'Alpha flinched!'), 'co-op: the raging seat keeps its flinch');
@@ -6432,7 +6490,9 @@ test('GetMaxPP through a wrap, .restorePP, K8 PP Ups on the moves rows, and POK�
     ['PP was restored.', 'PP was restored.'], '...and a full move with none is no effect:');
   assert.deepStrictEqual(refused(3), ['2:p1'], '...refused unfiled (FX-R1)');
   assert.ok(duelSaid(g, 4, 'p1 used POKé DOLL!'), 'the doll: data/items/names.asm "POKé DOLL"');
-  assert.ok(duelSaid(g, 5, "Played the POKé FLUTE. Now, that's a catchy tune!"), 'PlayedFluteNoEffectText');
+  // PlayedFluteNoEffectText's `para` is a line of its own (K18).
+  assert.ok(duelSaid(g, 5, 'Played the POKé FLUTE.'), 'PlayedFluteNoEffectText');
+  assert.ok(duelSaid(g, 5, "Now, that's a catchy tune!"), '...and its second paragraph');
   assert.ok(duelSaid(g, 6, 'p1 used POKé BALL!') && duelSaid(g, 6, 'You missed the POKéMON!'),
     'ItemUseBallText01');
   assert.ok(duelSaid(g, 7, 'Darn! The POKéMON broke free!'), 'ItemUseBallText02');
@@ -6501,4 +6561,99 @@ test('FX-R1: a learned row without a base re-reads GetMaxPP through a wrap', () 
   assert.strictEqual(`${row.pp}/${row.ppUps}/${row.maxPp}`, '63/0/15',
     "a learned row's wrap: GetMaxPP re-read over the base its 18 named (15 + 3)");
   assert.strictEqual(row.basePp, 15, '...the base kept on the row');
+});
+
+// ------------------------------------------------------------------
+// Contracts K17-K20: the g1_marks_faints streams, read raw -- the marks and
+// the breaks are what these pin (the parity tests hold the Lua half to the
+// same bytes). Twin of tests/battle_sim_turn.lua's 30.
+// ------------------------------------------------------------------
+
+const rawFight = (at) => {
+  const run = jsRunsRaw.find((entry) => entry.name === 'g1_marks_faints');
+  return run.events.filter((e) => e.battle === `g1mf${at}`);
+};
+const indexWhere = (list, pred) => {
+  const i = list.findIndex(pred);
+  return i < 0 ? null : i;
+};
+const lineAt = (list, text) => indexWhere(list, (e) => e.t === 'msg' && e.text === text);
+const kindAt = (list, t, slot, text) => indexWhere(list, (e) => e.t === t
+  && (slot === undefined || e.slot === slot) && (text === undefined || e.text === text));
+const inOrder = (...at) => at.every((v) => v !== null)
+  && at.every((v, i) => i === 0 || at[i - 1] < v);
+// The last `team` for a seat: the roster after its faint, not the opening one.
+const lastTeam = (list, slot) => {
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i].t === 'team' && list[i].slot === slot) return i;
+  }
+  return null;
+};
+
+test('K17 / K18: <USER> and <TARGET> marked by side, the cart\'s breaks, bare names bare', () => {
+  const one = rawFight(1);
+  assert.ok(lineAt(one, '^aAlpha\nused thump!') !== null, "side a's user: ^a, a break after <USER>");
+  assert.ok(lineAt(one, '^bBeta\nused thump!') !== null, "side b's user: ^b");
+  assert.ok(lineAt(rawFight(2), 'Sucked health from\n^bBeta!') !== null,
+    'SuckedHealthText: <TARGET> marked with its own side');
+  assert.ok(lineAt(rawFight(7), 'p1 used\nX ATTACK!') !== null,
+    "ItemUseText00: the player's name bare, a break at `text_low`");
+  for (const e of jsRunsRaw.flatMap((run) => run.events)) {
+    if (e.t !== 'msg') continue;
+    assert.ok([...e.text].length <= Events.LINE_MAX, `within LINE_MAX: ${JSON.stringify(e.text)}`);
+  }
+  assert.strictEqual(Events.named('b', 'Beta'), '^bBeta');
+  assert.strictEqual(Events.plain("^aAlpha's\nATTACK\ngreatly rose!"), "Alpha's ATTACK greatly rose!");
+  // Events.plain mirrors W's plainBattleLine rule for rule: every line here,
+  // and a hyphen split over rows.
+  for (const e of jsRunsRaw.flatMap((run) => run.events)) {
+    if (e.t === 'msg') assert.strictEqual(Events.plain(e.text), plainBattleLine(e.text));
+  }
+  assert.strictEqual(Events.plain('BOB with-\ndrew ^bBETA!'), plainBattleLine('BOB with-\ndrew ^bBETA!'));
+  assert.strictEqual(Events.plain('BOB with-\ndrew ^bBETA!'), 'BOB with-drew BETA!');
+});
+
+test('K19: a knockout faints once the move is over; two at once, the player\'s first', () => {
+  const drain = rawFight(2);
+  assert.ok(inOrder(kindAt(drain, 'damage', 3), kindAt(drain, 'drain', 0),
+    lineAt(drain, 'Sucked health from\n^bBeta!'), kindAt(drain, 'faint', 3), lastTeam(drain, 3)),
+  'a drain KO: the hit, the heal, the line, then the faint and its ball');
+  const recoil = rawFight(3);
+  assert.ok(inOrder(lineAt(recoil, "^aAlpha's\nhit with recoil!"), kindAt(recoil, 'damage', 0),
+    lineAt(recoil, "^bBeta's\nRAGE is building!"), lineAt(recoil, "^bBeta's\nATTACK rose!"),
+    kindAt(recoil, 'faint', 0)),
+  "the user's recoil KO: the recoil, the target's RAGE, then the user's faint");
+  const blast = rawFight(4);
+  assert.ok(inOrder(kindAt(blast, 'damage', 0), kindAt(blast, 'damage', 3),
+    kindAt(blast, 'faint', 0), lastTeam(blast, 0), kindAt(blast, 'faint', 3),
+    lastTeam(blast, 3)),
+  "the computer's EXPLOSION takes both: the player's faint first, each ball with its own");
+  const snarl = rawFight(8);
+  assert.ok(!snarl.some((e) => e.t === 'msg' && e.text.includes('fell!')),
+    "a KO skips the move's own effect (`.executeOtherEffects` is past `ret z`)");
+});
+
+test("K20: STATUS_AFFECTED_ANIM, XSTATITEM_ANIM, ABSORB from the seeder, TOSS_ANIM", () => {
+  const sap = rawFight(5);
+  assert.ok(inOrder(kindAt(sap, 'anim', 0, 'ABSORB'), kindAt(sap, 'damage', 3),
+    kindAt(sap, 'drain', 0), lineAt(sap, 'LEECH SEED saps\n^bBeta!')),
+  "ABSORB on the seeder's seat, the HP both ways, the line naming the seeded");
+  const fly = rawFight(6);
+  const anim = kindAt(fly, 'anim', 0, 'STATUS_AFFECTED_ANIM');
+  assert.ok(anim !== null && lineAt(fly, "^aAlpha's\nattack missed!") === anim + 1,
+    'a released FLY that misses: STATUS_AFFECTED_ANIM right before the miss line');
+  const items = rawFight(7);
+  assert.ok(inOrder(kindAt(items, 'item', 0, 'POKE_BALL'), kindAt(items, 'anim', 0, 'TOSS_ANIM'),
+    lineAt(items, 'The trainer\nblocked the BALL!'), lineAt(items, "Don't be a thief!")),
+  'TOSS_ANIM before "The trainer blocked the BALL!"');
+  assert.ok(inOrder(lineAt(items, 'p1 used\nX ATTACK!'), kindAt(items, 'anim', 0, 'XSTATITEM_ANIM'),
+    lineAt(items, "^aAlpha's\nATTACK rose!"), kindAt(items, 'stat', 0)),
+  "XSTATITEM_ANIM on the user's seat between the use line and the rose line");
+  const xItem = kindAt(items, 'item', 0, 'X_ATTACK');
+  const xAnim = kindAt(items, 'anim', 0, 'XSTATITEM_ANIM');
+  assert.ok(xItem !== null && xItem < xAnim
+    && !items.slice(xItem + 1, xAnim).some((e) => e.t === 'anim'),
+  "the `item` event first and no other anim before XSTATITEM_ANIM (the client's bag-look swap)");
+  assert.strictEqual(items[kindAt(items, 'stat', 0)].text, "Alpha's ATTACK rose!",
+    "the `stat` event's text is the line read plain");
 });

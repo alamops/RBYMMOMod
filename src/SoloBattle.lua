@@ -564,6 +564,15 @@ end
 -- party. The referee holds that claim for this fight only -- not a gym kit
 -- seeded onto the seat. Empty (Youngster, wild) is nil so `_autoItemChoice`
 -- never treats an empty table as "a bag".
+-- Gold's wBattleType as the engine battle underneath holds it (`battleType`
+-- on the gen2 Battle, src/battle/gen2/Battle.lua -- the shell BattleState
+-- carries the battle as `state.battle`), or the state's own; nil without one.
+local function engineBattleType(state)
+  if type(state) ~= "table" then return nil end
+  local inner = type(state.battle) == "table" and state.battle or nil
+  return tonumber(inner and inner.battleType) or tonumber(state.battleType)
+end
+
 local function bagFromUpload(party)
   local entries = party and party.bag
   if type(entries) ~= "table" then return nil end
@@ -627,7 +636,8 @@ function M:_begin(game, state, mapId, kind)
       })
       rolledItem = wildMon.item ~= itemBefore
     end
-    enemySheets = MediatedBattle.snapshotMons(game, { wildMon })
+    -- With Gold's dex weight on it (contract K21, HEAVY BALL).
+    enemySheets = MediatedBattle.snapshotWild(game, wildMon)
   else
     local party = enemyPartyOf(state)
     if not party then return false end
@@ -689,6 +699,9 @@ function M:_begin(game, state, mapId, kind)
     mode = mode,
     wildParty = (kind == "wild") and enemySheets or nil,
     wildCatchMon = wildMon,
+    -- Gold's wBattleType off the engine battle underneath (contract K21),
+    -- which the screen states on its ruleset: LURE BALL reads it.
+    battleType = (generation == 2) and engineBattleType(state) or nil,
     onDone = function(result, toLearn) self:_ended(result, toLearn) end,
   })
 
@@ -743,6 +756,15 @@ function M:_begin(game, state, mapId, kind)
       -- brain files this seat's every turn it can answer), as a hub's
       -- coop_npc computer seat does for every turn.
       aiMods = (kind ~= "wild" and pending.wild) and pending.wild.aiMods or nil,
+      -- ...and the class's own data (contract K16, MediatedBattle.npcSeat),
+      -- which the referee runs the cart's item and switch AI from at the
+      -- cart's point in the turn: Red's ai_classes record, Gold's class
+      -- attributes.  What a hub copies onto the NPC seat, copied here.
+      aiClass = (kind ~= "wild" and pending.wild) and pending.wild.aiClass or nil,
+      trainerItems = (kind ~= "wild" and pending.wild) and pending.wild.trainerItems or nil,
+      aiFlags = (kind ~= "wild" and pending.wild) and pending.wild.aiFlags or nil,
+      itemSwitch = (kind ~= "wild" and pending.wild) and pending.wild.itemSwitch or nil,
+      baseReward = (kind ~= "wild" and pending.wild) and pending.wild.baseReward or nil,
     } },
   }
 
@@ -773,6 +795,9 @@ function M:_begin(game, state, mapId, kind)
     -- hub's Wire.battleRuleset applies is this line's.  Red has no clock, and
     -- Gen 3 builds its fight in `_begin3` (no wTimeOfDay in a GBA battle).
     timeOfDay = (generation == 2) and ruleset.timeOfDay or nil,
+    -- Gold's wBattleType (contract K21), off the same upload: what a hub
+    -- hands the referee's `opts.battleType` from the ruleset.
+    battleType = (generation == 2) and ruleset.battleType or nil,
     -- Zero, which the referee reads as "no deadline at all". A solo fight has
     -- nobody to keep waiting and the vanilla battle menu waits forever.
     choiceTimeout = Config.SOLO_CHOICE_TIMEOUT,

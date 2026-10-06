@@ -433,6 +433,15 @@ end
 
 local Effects = BattleSim.Effects
 
+-- W's reader for a K17 / K18 line, when Wire loads here; its mirror otherwise.
+local plainLine = BattleSim.Events.plain
+do
+  local loaded, Wire = pcall(need, "Wire")
+  if loaded and type(Wire) == "table" and type(Wire.plainBattleLine) == "function" then
+    plainLine = Wire.plainBattleLine
+  end
+end
+
 local SIDE = {}
 
 function SIDE.threshold(input)
@@ -475,7 +484,10 @@ function SIDE.apply(input)
     proc = out.proc, draws = rng.used(), status = mon.status,
     flinch = mon.flinch == true, confused = (mon.confusion or 0) > 0,
     stage = input.stat and mon.stages[input.stat] or nil,
-    said = out.messages[1],
+    -- The line as a reader without K17's marks reads it (Wire.plainBattleLine,
+    -- or its mirror Events.plain where Wire does not load: no `^a` / `^b`,
+    -- each K18 break a space) -- the fixture's sentence.
+    said = plainLine(out.messages[1]),
   }
 end
 

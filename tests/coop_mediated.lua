@@ -4438,7 +4438,8 @@ do
     eq(#choices(sc), before, "doll (co-op trainer, gen " .. gen .. "): nothing is filed")
     eq(sc.after, "item", "doll (co-op trainer, gen " .. gen .. "): the bag comes back")
     local said = table.concat(texts(sc), " "):gsub("\n", " ")
-    check(said:find("OAK: ANN! This isn't the time to use that!", 1, true) ~= nil,
+    -- text / line / cont: the `cont` scrolls the middle row up (K18).
+    check(said:find("OAK: ANN! This isn't the This isn't the time to use that!", 1, true) ~= nil,
           "doll (co-op trainer, gen " .. gen .. "): ItemUseNotTime's line")
   end
 
@@ -4803,6 +4804,166 @@ do
     eq(#choices(sc), before, "X ACCURACY (Gold co-op): ...nothing sent")
     ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
     eq(sc.medItemFlags2, nil, "X ACCURACY (Gold co-op): a send-out on our seat drops the bit")
+  end
+
+  -- ------------------------------------------------------------------
+  -- the remaining Red / Gold gaps (docs/plans/gen12-referee-remaining-gaps.md)
+  -- ------------------------------------------------------------------
+  local function has(list, text) return count(list, text) > 0 end
+
+  -- K17: a mark per viewer -- our side, a partner's monster included, bare;
+  -- the other side "Enemy " (Red's and Gold's EnemyText, every mode).
+  for _, gen in ipairs({ 1, 2 }) do
+    local sc = seat5(gen)
+    ev(sc, { t = "msg", text = "^a" .. SPECIES_NAME .. "\nused FIX TACKLE!" })
+    ev(sc, { t = "msg", text = "^b" .. SPECIES_NAME .. "'s\nattack missed!" })
+    ev(sc, { t = "turn", amount = 2 })
+    local said = texts(sc)
+    check(has(said, SPECIES_NAME .. "\nused FIX TACKLE!"),
+          "K17 (co-op, gen " .. gen .. "): our side's monster -- ours or the partner's -- is bare")
+    check(has(said, "Enemy " .. SPECIES_NAME .. "'s\nattack missed!"),
+          "K17 (co-op, gen " .. gen .. "): the trainer's is the enemy's")
+    for _, t in ipairs(said) do
+      if t:find("^", 1, true) then check(false, "K17 (co-op): a mark reached the box: " .. t) end
+    end
+  end
+  do
+    local sc = seat5(2, nil, "coop_wild")
+    ev(sc, { t = "msg", text = "^b" .. SPECIES_NAME .. "\nused FIX TACKLE!" })
+    ev(sc, { t = "turn", amount = 2 })
+    check(has(texts(sc), "Enemy " .. SPECIES_NAME .. "\nused FIX TACKLE!"),
+          "K17 (co-op Gold wild): \"Enemy\" -- PlaceBattlersName has no wild arm")
+  end
+  do
+    -- A coop_pvp seat on side b reads side a as the enemy's.
+    local slots = pvpSlots()
+    local sc = screen({ slots = slots, mine = 3, host = false, mode = "coop_pvp", selfId = "cal" })
+    sc.mediated = true
+    sc.medSlots = { [0] = 1, [1] = 2, [2] = 3, [3] = 4 }
+    sc.medFields = { [1] = 0, [2] = 1, [3] = 2, [4] = 3 }
+    eq(sc:viewerSide(), "b", "K17 (coop_pvp): this seat's side is the sim's")
+    eq(sc:medViewLine("^aALPHA hit ^bBETA!"), "Enemy ALPHA hit BETA!",
+       "K17 (coop_pvp, side b): side a's monster is the enemy's here")
+  end
+
+  -- The faint line, per viewer: a partner's monster is on our side.
+  do
+    local sc = seat5(1)
+    ev(sc, { t = "faint", slot = 1, side = "a", text = SPECIES_NAME })
+    ev(sc, { t = "faint", slot = 2, side = "b", text = SPECIES_NAME })
+    ev(sc, { t = "turn", amount = 2 })
+    local said = texts(sc)
+    check(has(said, SPECIES_NAME .. "\nfainted!"), "faint (co-op): the partner's monster is said bare")
+    check(has(said, "Enemy " .. SPECIES_NAME .. "\nfainted!"), "faint (co-op): the trainer's is the enemy's")
+  end
+
+  -- K19: a knockout's faint after the hit's tail -- the 0-HP monster stands,
+  -- its sink and line come behind the drain's line.
+  do
+    local sc = seat5(1)
+    ev(sc, { t = "damage", slot = 2, side = "b", hp = 0 })
+    ev(sc, { t = "drain", slot = 0, side = "a", hp = 60 })
+    ev(sc, { t = "msg", text = "Sucked health from\n^b" .. SPECIES_NAME .. "!" })
+    ev(sc, { t = "faint", slot = 2, side = "b", text = SPECIES_NAME })
+    ev(sc, { t = "turn", amount = 2 })
+    local tail, sink, line
+    for i, row in ipairs(sc.messages) do
+      local text = type(row) == "table" and row.text or row
+      if text == "Sucked health from\nEnemy " .. SPECIES_NAME .. "!" then tail = tail or i end
+      if type(row) == "table" and row.faintfx ~= nil then sink = sink or i end
+      if text == "Enemy " .. SPECIES_NAME .. "\nfainted!" then line = line or i end
+    end
+    check(tail ~= nil and sink ~= nil and tail < sink, "K19 (co-op): the tail's line plays before the sink")
+    check(sink ~= nil and line ~= nil and sink < line, "K19 (co-op): ...and the faint line after it")
+    local foe = sc.sim:slot(3)
+    eq(foe.battler and foe.battler.displayFainted, nil, "K19 (co-op): the 0-HP monster still stands while it plays")
+  end
+
+  -- Timeout lines said at once are rendered too.
+  do
+    local sc = seat5(1)
+    ev(sc, { t = "msg", text = "^aANN ran out of time!" })
+    check(has(texts(sc), "ANN ran out of\ntime!"), "K17 (co-op): an immediate line is rendered as well")
+  end
+
+  -- Link run lines in coop_pvp: the runner, the runner's partner, the foe.
+  local function pvpRun(gen, runnerField, runnerSide, result)
+    local sc = seat5(gen, nil, "coop_pvp", pvpSlots())
+    ev(sc, { t = "run", slot = runnerField, side = runnerSide, text = "SOMEONE" })
+    local winners, losers = { "cal", "dee" }, { "ann", "bob" }
+    if result == "win" then winners, losers = losers, winners end
+    sc:onBattleOutcome({ battle = "cb1", winners = winners, losers = losers, reason = "run" })
+    return texts(sc)
+  end
+  do
+    local runner = pvpRun(1, 0, "a", "loss")
+    check(has(runner, "Got away safely!"), "link run (coop_pvp, runner): GotAwayText")
+    check(not has(runner, "Someone ran away!") and not has(runner, "SOMEONE"),
+          "link run (coop_pvp, runner): no mod line, and the trainer's name is never a line")
+    local partner = pvpRun(1, 1, "a", "loss")
+    check(has(partner, SPECIES_NAME .. "\nran!"), "link run (coop_pvp, partner): the foe's line without the prefix")
+    local foe = pvpRun(1, 2, "b", "win")
+    check(has(foe, "Enemy " .. SPECIES_NAME .. "\nran!"), "link run (coop_pvp Red, foe): _EnemyRanText")
+    local foe2 = pvpRun(2, 2, "b", "win")
+    check(has(foe2, "Enemy " .. SPECIES_NAME .. "\nfled!"), "link run (coop_pvp Gold, foe): BattleText_EnemyFled")
+  end
+  do
+    -- A coop_wild escape: the referee's own line, once, and no trainer's name.
+    local sc = seat5(1, nil, "coop_wild")
+    ev(sc, { t = "msg", text = "Got away safely!" })
+    ev(sc, { t = "run", slot = 0, side = "a", text = "ANN" })
+    sc:onBattleOutcome({ battle = "cb1", winners = { "ann", "bob" }, losers = {}, reason = "run" })
+    local said = texts(sc)
+    eq(count(said, "Got away safely!"), 1, "coop_wild run: \"Got away safely!\" once")
+    eq(count(said, "ANN"), 0, "coop_wild run: the runner's name is not printed as a line")
+  end
+
+  -- K20: XSTATITEM_ANIM takes the X item's look over.
+  do
+    local sc = seat5(1)
+    sc.medPending = {}
+    ev(sc, { t = "item", slot = 0, side = "a", text = "X_ATTACK" })
+    ev(sc, { t = "msg", text = "ANN used X ATTACK!" })
+    ev(sc, { t = "anim", slot = 0, side = "a", text = "XSTATITEM_ANIM" })
+    local looks, style = 0, nil
+    for _, row in ipairs(sc.medPending) do
+      if type(row) == "table" and row.kind == "vfx" and type(row.spec) == "table" then
+        looks = looks + 1
+        style = row.spec.style
+      end
+    end
+    eq(looks, 1, "K20 (co-op): an X item is one look, not the bag's and the cart's")
+    eq(style, "sparkle", "K20 (co-op): ...XSTATITEM_ANIM's")
+    -- ...and a Gold residual id has a look on its seat.
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "IN_SANDSTORM_ANIM" })
+    local last = sc.medPending[#sc.medPending]
+    check(type(last) == "table" and last.kind == "vfx" and last.spec and last.spec.palette == "ROCK",
+          "K20 (co-op): a Gold residual clip wears its look")
+  end
+
+  -- K21: the Gold wild foe's weight and the fight's battle type.
+  do
+    local sc = seat5(2, nil, "coop_wild")
+    sc.game.data = setmetatable({ gen2Pokedex = { entries = { [SPECIES] = { weight = 77 } } } },
+      { __index = sc.game.data })
+    sc.wildCatchMon = mon(50, 20)
+    sc.wildParty = nil
+    eq(sc:wildMons()[1].weight, 77, "K21 (co-op Gold): the wild foe's sheet carries its dex weight")
+    sc.medUploaded, sc.wildBattleType = false, 4
+    for k in pairs(sc.sent) do sc.sent[k] = nil end
+    sc:uploadMediated()
+    local rules = sc.firstSent(Wire.BATTLE_RULESET)
+    eq(rules and rules.battleType, 4, "K21 (co-op Gold): the ruleset states the wild fight's battle type")
+  end
+
+  -- K16: the co-op host's NPC upload carries the class data and no bag.
+  do
+    local sc = seat5(2)
+    local npc
+    for _, m in ipairs(sc.sent) do
+      if m.type == Wire.BATTLE_PARTY and m.payload.side == "b" then npc = m.payload end
+    end
+    eq(npc and npc.bag, nil, "K16 (co-op Gold): the NPC upload carries no bag")
   end
 end
 

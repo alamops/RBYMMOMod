@@ -992,6 +992,16 @@ M.CHAT_SCOPES = { "global", "local", "private", "party" }
 M.LOCAL_RADIUS = 12          -- tiles, and same map
 M.CHAT_HISTORY = 64          -- lines kept for the chat screen
 M.MESSAGE_MAX = 60           -- longest message accepted off the wire
+-- A Red / Gold referee's battle line (contract K18 of
+-- docs/plans/gen12-referee-remaining-gaps.md), counted in glyphs with its
+-- name marks (`^a` / `^b`, K17) and its `\n` breaks included -- Wire.battleLine,
+-- lib/sanitize.js's BATTLE_LINE_MAX.  Wider than MESSAGE_MAX because the line
+-- is one paragraph of the cart's own box text, not something a player typed:
+-- `line` and `cont` run it over several rows of the 18-glyph text box
+-- (pokered / pokecrystal TEXTBOX_INNERW), every row break and every mark is
+-- a glyph of its own here, and MESSAGE_MAX cut lines the cart prints whole.
+-- Chat keeps MESSAGE_MAX.
+M.BATTLE_LINE_MAX = 80
 -- What the naming grid will let you type.  Shorter than MESSAGE_MAX on
 -- purpose: the grid shows the line being typed on one 20-tile row, and a
 -- line that has to be truncated to be shown is worse than one the player was

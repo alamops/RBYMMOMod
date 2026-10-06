@@ -1532,7 +1532,9 @@ end
 local GEN3_BOX_COLS = 30
 local function pageBoxText(text)
   if Gen3.active() then return ClassicBattle.pageBoxText(text, GEN3_BOX_COLS) end
-  return ClassicBattle.pageBoxText(text, BOX_COLS)
+  -- Red / Gold: an explicit `\n` is the cart's row break, scrolled the way
+  -- the cart's `cont` scrolls it (K18; ClassicBattle.pageBoxText).
+  return ClassicBattle.pageBoxText(text, BOX_COLS, true)
 end
 
 -- One step on a vertical list. UP/DOWN move; LEFT/RIGHT are aliases (same habit
@@ -3253,6 +3255,8 @@ end
 function M:noteDisableLine(text)
   if not self:medMenuSeat() then return end
   local generation = Gen.generation(self.game)
+  -- Read with the marks out and the breaks as spaces (Mediated.plainLine).
+  text = Mediated.plainLine(text)
   if generation == 1 and text == "All STATUS changes are eliminated!" then
     self.medDisabled = nil
     return
@@ -3302,6 +3306,7 @@ function M:noteItemFlags2(text)
   local species = self.medMineName
   if type(text) ~= "string" or type(species) ~= "string" or species == "" then return end
   if self.medAnimAt ~= nil and self.medAnimAt ~= self.mine then return end
+  text = Mediated.plainLine(text)
   self.medItemFlags2 = self.medItemFlags2 or {}
   if text == species .. "'s getting pumped!" then
     self.medItemFlags2.focusEnergy = true
@@ -5977,6 +5982,29 @@ function M:foeSide(index)
   return (slot ~= nil and ours ~= nil and slot.side ~= ours) and true or false
 end
 
+-- ------- a referee line, as this viewer's cart says it (contract K17)
+--
+-- The Red / Gold referee marks a battler's name with its side (`^a` / `^b`,
+-- ClassicBattle's K17 notes); this viewer's side is said bare and the other
+-- side behind the cart's "Enemy " (`ClassicBattle.foeMarkWord`).  "Own side"
+-- is the side of this client's seat -- so a co-op partner's monster, which
+-- stands on the same side, is said bare like our own: the cart has one
+-- player's side, and the partner fights on it.  The referee's sides are the
+-- sim's (`medMap` seats side a's ids on the sim's side "a" slots).  Gen 3's
+-- referee writes no marks; a stray one is still never drawn.
+function M:viewerSide()
+  local own = self.sim and self.mine and self.sim:slot(self.mine)
+  if own and (own.side == "a" or own.side == "b") then return own.side end
+  return "a"
+end
+
+function M:medViewLine(text)
+  if type(text) ~= "string" then return text end
+  if self.gen3 then return ClassicBattle.stripMarks(text) end
+  return ClassicBattle.renderMarks(text, self:viewerSide(),
+    ClassicBattle.foeMarkWord(Gen.generation(self.game), self.mode))
+end
+
 -- Visual lane for a field slot: allies first (bottom-left), then foes
 -- (top-right) offset by #ally. Field indices stay on the wire; only drawing
 -- keys off this remapping so every client still sees itself on the Gen 1
@@ -6510,6 +6538,9 @@ end
 
 local function moveNameFromBattleText(text)
   if type(text) ~= "string" then return nil end
+  -- Read with the referee's name marks out and its row breaks as spaces
+  -- (Mediated.plainLine, K17 / K18): every pattern below spans a space.
+  text = Mediated.plainLine(text)
   -- A disobedient monster's own pick (docs/plans/gen12-referee-fidelity.md):
   -- both Gen 1 / Gen 2 referees say the cart's "<MON> used instead, <MOVE>"
   -- (pokered _UsedInsteadText, pokecrystal UsedInsteadText).  "instead," is
@@ -8933,8 +8964,24 @@ function M:startAnim(row)
           self:startMoveVfx(row, lunger)
         end
       end
+    elseif row.anim == "STATUS_AFFECTED_ANIM" then
+      -- Red's FLY / charge cut short, or released (pokered
+      -- `.FlyOrChargeEffect`): EnemyFlashAnim's SE_SHOW_MON_PIC puts the
+      -- hidden monster back -- the arena's emerge, under the shimmer its
+      -- `vfx` row carries (Vfx.CART_ANIM_LOOK).
+      local seat = row.from
+      if seat ~= nil and self.vanishFlow and self.vanishFlow[seat] then
+        self:clearVanishAt(seat)
+        self:emitFx("emerge", seat)
+      end
     else
       self:startBallFx(row)
+    end
+  elseif row.anim == "STATUS_AFFECTED_ANIM" then
+    -- Classic: the pic a cut-short FLY hid is shown again (SE_SHOW_MON_PIC);
+    -- the engine's own clip plays below.
+    if row.from ~= nil and self.vanishFlow and self.vanishFlow[row.from] then
+      self:clearVanishAt(row.from)
     end
   elseif moveAnim then
     -- Classic 160×144: same charge/release hold, no theatre particles.
@@ -9302,10 +9349,14 @@ function M:gainExp(event)
   -- levels reached and the raw amount the "gained N EXP" line says -- so
   -- everything below this point is generation-free again.
   local ok, levels, gained
+  -- Whether the award took the traded x1.5 (Gold's Exp2 OT check; the Red
+  -- formula here is handed no traded flag), for the line's "a boosted".
+  local boosted
   if generation == 2 then
     -- `winners` is the referee's divisor unmodified: Gen 2's Share tax is the
     -- `halved` flag on the pool, not a doubling of the divisor.
-    levels, gained = Exp2.apply(self.game, mon, def, {
+    local _
+    levels, gained, _, boosted = Exp2.apply(self.game, mon, def, {
       level = event.level or 1, participants = winners, isTrainer = isTrainer,
       halved = halved, save = save,
     })
@@ -9334,7 +9385,8 @@ function M:gainExp(event)
   -- fight that ended by catch, where paying nothing is correct. This counts the
   -- awards this screen actually applied, which is the fact worth asserting.
   self.expPaid = (self.expPaid or 0) + 1
-  self:say(name .. " gained\n" .. tostring(gained or 0) .. " EXP. Points!")
+  -- The cart's rows, "a boosted" and all (Mediated.gainedLine).
+  self:say(Mediated.gainedLine(name, gained, boosted))
 
   -- ...and *then* the strip crawls, which is the cart's chronology: the line
   -- is read, and the bar answers it. Queued ahead of `levelled` deliberately
@@ -10580,7 +10632,8 @@ function M:wildMons()
         random = function() return M.randomByte() end,
       })
     end
-    return Mediated.snapshotMons(self.game, { self.wildCatchMon })
+    -- With Gold's dex weight on it (contract K21, HEAVY BALL).
+    return Mediated.snapshotWild(self.game, self.wildCatchMon)
   end
   return nil
 end
@@ -10657,8 +10710,15 @@ function M:uploadMediated()
   if self.host then
     -- A Gen 3 wild fight opens under the overworld's weather (Sheet3.ruleset
     -- reads the field's own); a fight against people or a trainer does not.
-    Mediated.sendRuleset(self.transport, self.game,
-      (self.gen3 and self.mode == "coop_wild") and { wild = true } or nil)
+    -- Gold states the wild fight's wBattleType, the engine battle's own
+    -- number at the divert (contract K21: LURE BALL reads it).
+    local rules = nil
+    if self.gen3 and self.mode == "coop_wild" then
+      rules = { wild = true }
+    elseif self.gen2Mediated and self.mode == "coop_wild" then
+      rules = { battleType = self.wildBattleType }
+    end
+    Mediated.sendRuleset(self.transport, self.game, rules)
   end
   -- This player's own badges, for the referee's badge boosts and (Gen 3)
   -- obedience caps against a trainer or a wild mon; coop_pvp is a link battle
@@ -10845,6 +10905,25 @@ function M:noteSendRows(msg, rows, from)
   self.medSendHeld = { species = tostring(msg.text), rows = held }
 end
 
+-- The bag's own look for an item on seat `index` (`itemLook`, the `item`
+-- branch of `medRows`), taken back out of the batch still waiting for its
+-- `turn` -- the newest, and only past rows that are not another animation.
+function M:dropItemLook(index)
+  local pending = self.medPending
+  if type(pending) ~= "table" then return false end
+  for i = #pending, 1, -1 do
+    local row = pending[i]
+    if type(row) == "table" then
+      if row.itemLook and row.slot == index then
+        table.remove(pending, i)
+        return true
+      end
+      if row.kind == "anim" then return false end
+    end
+  end
+  return false
+end
+
 -- The held rows out of the batch still waiting for its `turn` (`medPending`),
 -- by identity.
 function M:dropSendRows(held)
@@ -10891,7 +10970,9 @@ function M:medRows(msg)
         rows[#rows + 1] = { kind = "state3", what = "weather", value = sky }
       end
     end
-    say(msg.text)
+    -- As this viewer's cart says it (`medViewLine`, K17); the matchers read
+    -- the referee's own text with the marks out (Mediated.plainLine).
+    say(self:medViewLine(msg.text))
     -- An escape the referee narrated itself (Mediated.escapeLine): the
     -- outcome adds no second one (`onBattleOutcome`).
     if Mediated.escapeLine(msg.text) then self.escapeSaid = true end
@@ -10998,7 +11079,14 @@ function M:medRows(msg)
     -- The referee's `faint` carries the species and no sentence of its own, so
     -- the sentence is made here -- in the original's order, which prints the
     -- line over the top of the monster already sliding down.
-    if msg.text then say(("%s fainted!"):format(tostring(msg.text))) end
+    --
+    -- Red / Gold: the cart's line for whose monster it was
+    -- (Mediated.faintLine): "Enemy <MON>\nfainted!" across from this viewer,
+    -- "<MON>\nfainted!" on its own side -- a partner's monster included.
+    if msg.text then
+      say(Mediated.faintLine(msg.text, index ~= nil and self:foeSide(index),
+        self.gen3 and 3 or Gen.generation(self.game)))
+    end
     -- Authoritative mustReplace: amount=1 means a living bench remains.
     -- Empty bench omits amount so we never arm the replace picker. Absent
     -- amount (older stream) falls back to a local bench check.
@@ -11121,6 +11209,9 @@ function M:medRows(msg)
         spread = msg.spread == 1 or nil,
       }
       if look then list[#list + 1] = { kind = "vfx", spec = look, slot = index } end
+      -- Red's X item is one look, the cart's (K20): XSTATITEM_ANIM plays it,
+      -- so the bag's look for the same item on the same seat is taken back.
+      if look and anim == "XSTATITEM_ANIM" then self:dropItemLook(index) end
       if behind then self.medAnimBehind = list end
     end
 
@@ -11141,7 +11232,9 @@ function M:medRows(msg)
     -- which already draws the arc, the rocking and the burst.
     local look = self:itemVfx(msg.text)
     if look and index then
-      rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index }
+      -- Marked as the bag's look: Red's XSTATITEM_ANIM behind an X item
+      -- takes its place (`anim`, `dropItemLook`).
+      rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index, itemLook = true }
     end
     -- The `item` text is the item's id (Gen 3's, its number), never a line:
     -- the referee's own `msg` beside it is the sentence, on every generation
@@ -11248,12 +11341,30 @@ function M:medRows(msg)
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index }
     end
 
+  elseif kind == "run" and not self.gen3 then
+    -- Red / Gold: a `run` names the runner's seat and its trainer, never a
+    -- line (the `text` is the player's name).  Who ran -- and whether it was
+    -- this client's own seat -- is kept for the ending (`onBattleOutcome`):
+    -- a coop_wild escape is the referee's own "Got away safely!", a coop_pvp
+    -- run is the cart's link-run line for this viewer
+    -- (Mediated.linkRunLine).  Printing the name here put a line no cart
+    -- prints (the runner's trainer's name) ahead of it.
+    local side = slot and slot.side or msg.side
+    if side == "a" or side == "b" then
+      self.medRan = self.medRan or {}
+      local ran = self.medRan[side] or {}
+      ran.name = ran.name or seatMonName(slot)
+      if index ~= nil and index == self.mine then ran.me = true end
+      self.medRan[side] = ran
+    end
+
   else
     -- status, stat, run, wait, reconnect: the referee's own sentence is
     -- the whole of what they contribute to a screen today. The state they
     -- describe rides on the events beside them -- a status that gated a move is
-    -- followed by the `damage` that did or did not happen.
-    say(msg.text)
+    -- followed by the `damage` that did or did not happen.  No mark of a
+    -- Red / Gold line reaches the box (`medViewLine`).
+    say(self:medViewLine(msg.text))
   end
   return rows
 end
@@ -11447,9 +11558,9 @@ function M:onBattleEvent(msg)
   -- who stalled) never saw the explanation before the next A-mash cleared the
   -- queue -- which is exactly who the line is for.
   if msg.t == "msg" and type(msg.text) == "string"
-     and (msg.text:find("ran out of time", 1, true)
-          or msg.text:find("took too long", 1, true)) then
-    self:say(msg.text)
+     and (Mediated.plainLine(msg.text):find("ran out of time", 1, true)
+          or Mediated.plainLine(msg.text):find("took too long", 1, true)) then
+    self:say(self:medViewLine(msg.text))
     return true
   end
   if msg.t == "item" then
@@ -11591,7 +11702,8 @@ function M:onBattleEvent(msg)
   -- asks" note has why that gate, and not the others).
   if msg.t == "msg" and not self.ownSlots and not self.gen3
      and Gen.generation(self.game) == 1 then
-    local who = type(msg.text) == "string" and msg.text:match("^(.-) is confused!?$") or nil
+    local who = type(msg.text) == "string"
+      and Mediated.plainLine(msg.text):match("^(.-) is confused!?$") or nil
     if who then self.confusedNow = who end
     local said = Mediated.bideLine1(msg.text, self.medMineName,
       Mediated.bideLabels(self:liveMoves(), self.game), self.confusedNow)
@@ -11894,6 +12006,22 @@ function M:onBattleOutcome(msg)
   -- no longer follows the line it repeated.
   if msg.reason == "run" and self.mode == "coop_wild" and not self.gen3 then
     why = (not self.escapeSaid) and Mediated.GOT_AWAY or nil
+  end
+  -- A fight between players somebody ran from: the cart's link-run line for
+  -- this viewer in place of "Someone ran away!" -- "Got away safely!" for the
+  -- runner, "Enemy <MON>\nran!" (Red) / "fled!" (Gold) across from it, and
+  -- the same line without the prefix for the runner's partner, whose side it
+  -- is (Mediated.linkRunLine; `medRan`, from the `run` events).  A move's
+  -- own escape line already said it.
+  if msg.reason == "run" and Mediated.LINK_MODES[self.mode] and not self.gen3 then
+    local ran = self.medRan or {}
+    local own = mySide and ran[mySide]
+    -- A run nobody's `run` event named (an older stream) keeps the old line.
+    why = nil
+    if not self.escapeSaid then
+      why = Mediated.linkRunLine(ran, mySide or "a", own ~= nil and not own.me,
+        Gen.generation(self.game)) or MED_REASONS.run
+    end
   end
   if why then
     self.medPending[#self.medPending + 1] = { kind = "msg", text = why }
@@ -12988,7 +13116,8 @@ function M:medRows3(msg, rows, index, slot, say)
   local obey = self.obeyRow3
   self.obeyRow3 = nil
   if kind == "msg" and obey and tonumber(msg.seq) == obey.seq + 1 then
-    obey.fallback = msg.text
+    -- No mark ever reaches the box (`medViewLine`; Gen 3 writes none).
+    obey.fallback = self:medViewLine(msg.text)
     return true
   end
   if kind == "obey" then
