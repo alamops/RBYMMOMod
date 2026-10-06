@@ -2637,61 +2637,92 @@ function M.matchesDefaultKit(bag, copies)
   return not extra
 end
 
-local function kitFromRecord(rec)
-  if type(rec) ~= "table" then return nil end
-  if type(rec.items) == "table" then
-    local bag = {}
-    for _, id in ipairs(rec.items) do
-      if type(id) == "string" and id ~= "" then
-        bag[id] = (bag[id] or 0) + 1
-      end
-    end
-    return bag
-  end
-  if type(rec.item) == "string" and rec.item ~= "" then
-    local uses = math.max(0, math.floor(tonumber(rec.uses) or 0))
-    if uses <= 0 then return {} end
-    return { [rec.item] = uses }
-  end
-  if rec.uses ~= nil and math.floor(tonumber(rec.uses) or 0) <= 0 then
-    return {}
-  end
-  return nil
+-- ------- K16: what the computer's items are now
+--
+-- Contract K16 of docs/plans/gen12-referee-remaining-gaps.md: the Red and
+-- Gold referees run the carts' own item / switch AI off the trainer's *class*,
+-- so the client uploads no NPC bag on either cart and the referee keeps none
+-- for the computer.  What a trainer can use is its class data on the seat:
+--
+--   Red   `aiClass`  the class's ai_classes record (pokered TrainerAI, the
+--                    routine data/trainers/ai_pointers.asm names: wAICount
+--                    `uses`, its `item`, ...) -- nil for a class
+--                    ai_pointers.asm sends to GenericAI, which uses nothing;
+--   Gold  `trainerItems` (wEnemyTrainerItem1 / 2), `aiFlags`
+--                    (TRNATTR_AI_MOVE_WEIGHTS), `itemSwitch`
+--                    (TRNATTR_AI_ITEM_SWITCH) -- the class's
+--                    TrainerClassAttributes, which AI_SwitchOrTryItem and
+--                    AIChooseMove read.
+--
+-- These read what the engine's own data says the class carries, the way the
+-- client reads it (MediatedBattle.aiClass1 / trainerAi2), so a seat can be
+-- held to it.  `known` false: the dataset has no table to read, and the leg
+-- says so rather than guess.
+
+-- Red: the ai_classes record for the trainer class `classId`, looked up the
+-- way TrainerAI.classFor (and MediatedBattle.aiClass1 after it) looks it up:
+-- the trainer record's `aiClass`, else its `id` -- the class id the driver
+-- staged only when there is no trainer record to ask.  record, known.
+function M.aiClassRecord1(game, classId)
+  local data = game and game.data
+  local classes = type(data) == "table" and data.ai_classes or nil
+  if type(classes) ~= "table" or classId == nil then return nil, false end
+  local trainer = type(data.trainers) == "table" and data.trainers[classId] or nil
+  local key = classId
+  if type(trainer) == "table" then key = trainer.aiClass or trainer.id end
+  local record = key ~= nil and classes[key] or nil
+  return type(record) == "table" and record or nil, true
 end
 
-function M.expectedTrainerKit(game, classId)
-  local data = game and game.data
-  if not (data and classId) then return nil end
-  local found = kitFromRecord(data.ai_classes and data.ai_classes[classId])
-  if found then return found end
-  found = kitFromRecord(data.trainers and data.trainers[classId])
-  if found then return found end
-  local classes = data.trainers and data.trainers.classes
-  local classRec = classes and classes[classId]
-  found = kitFromRecord(classRec)
-  if found then return found end
-  if type(classRec) == "table" and type(classRec.trainers) == "table" then
-    local best
-    for _, row in ipairs(classRec.trainers) do
-      local party = row and row.party
-      if party and #party >= 2 then
-        local total = 0
-        for _, spec in ipairs(party) do total = total + (spec.level or 0) end
-        if best == nil or total < best.total then
-          best = { row = row, total = total }
-        end
-      end
-    end
-    if best then return kitFromRecord(best.row) end
-    if classRec.trainers[1] then return kitFromRecord(classRec.trainers[1]) end
+-- A little-endian word out of two attribute bytes, or nil.
+local function attrWord(lo, hi)
+  lo, hi = tonumber(lo), tonumber(hi)
+  if not (lo and hi) then return nil end
+  return lo + hi * 256
+end
+
+-- The carried item ids of a two-slot list, in slot order -- NO_ITEM (an empty
+-- slot 1 ahead of a filled slot 2) and anything that is not an id dropped.
+local function carriedItems(list)
+  local out = {}
+  for i = 1, math.min(2, type(list) == "table" and #list or 0) do
+    local id = list[i]
+    if type(id) == "string" and id ~= "" and id ~= "NO_ITEM" then out[#out + 1] = id end
   end
-  return nil
+  return out
+end
+M.carriedItems = carriedItems
+
+-- Gold: the class's TrainerClassAttributes as the seat should carry them --
+-- { items = carried ids, aiFlags = word?, itemSwitch = word? } -- off the
+-- trainer-class record (`data.trainers.classes[classId]`: `items`,
+-- `attributes`, src/world/gen2/Trainers.lookup's own source).  record, known.
+function M.trainerAttrs2(game, classId)
+  local data = game and game.data
+  local classes = type(data) == "table" and type(data.trainers) == "table"
+    and data.trainers.classes or nil
+  if type(classes) ~= "table" or classId == nil then return nil, false end
+  local rec = classes[classId]
+  if type(rec) ~= "table" then return nil, false end
+  local attributes = type(rec.attributes) == "table" and rec.attributes or nil
+  return {
+    items = carriedItems(rec.items),
+    aiFlags = attributes and attrWord(attributes[4], attributes[5]) or nil,
+    itemSwitch = attributes and attrWord(attributes[6], attributes[7]) or nil,
+  }, true
+end
+
+-- The solo referee's computer seat, `solo_foe` (SoloBattle's FOE_SEAT); nil
+-- when no solo fight is live.  The LAN hub's NPC seats are `hubNpcBags`'
+-- `fighters`.
+function M.soloFoeSeat(game)
+  local ctx = M.modCtx(game)
+  local solo = ctx and ctx.solo
+  return solo and solo.sim and solo.sim.byId and solo.sim.byId.solo_foe or nil
 end
 
 function M.soloFoeBag(game)
-  local ctx = M.modCtx(game)
-  local solo = ctx and ctx.solo
-  local foe = solo and solo.sim and solo.sim.byId and solo.sim.byId.solo_foe
+  local foe = M.soloFoeSeat(game)
   return foe and foe.bag
 end
 
@@ -2712,16 +2743,18 @@ function M.hubNpcBags(game)
       local shared = #fighters >= 2
         and fighters[1] ~= nil and fighters[2] ~= nil
         and fighters[1].bag == fighters[2].bag
-      return { bags = bags, shared = shared, n = #record.npcIds }
+      return { bags = bags, shared = shared, n = #record.npcIds, fighters = fighters }
     end
   end
   return nil
 end
 
--- Capture side-"b" mmo.battle_party bags the host uploads (the trainer kit).
--- Extra signal only: the eight-item lock is the Node referee dump
--- (M.readBattleDump / MMO_BATTLE_DUMP), not this wrap. An upload can be
--- honest and the hub can still seed DEFAULT_NPC_BAG after it.
+-- Capture side-"b" mmo.battle_party uploads the host makes for the trainer:
+-- whether a bag rode along, and (contract K16) whether the class data did --
+-- Red's `aiClass` record, Gold's `trainerItems` (a count) and its two flag
+-- words (present or not).  Shape only: no item id and no attribute byte ever
+-- reaches a watch table that e2e prints.  Extra signal only: what the referee
+-- holds is the Node dump (M.readBattleDump / MMO_BATTLE_DUMP).
 function M.watchPartyUploads(game)
   local seen = { uploads = {} }
   local ctx = M.modCtx(game)
@@ -2746,6 +2779,11 @@ function M.watchPartyUploads(game)
       seen.uploads[#seen.uploads + 1] = {
         side = payload.side,
         nonempty = nonempty,
+        hasBag = payload.bag ~= nil,
+        aiClass = type(payload.aiClass) == "table",
+        trainerItems = type(payload.trainerItems) == "table" and #payload.trainerItems or nil,
+        aiFlags = payload.aiFlags ~= nil,
+        itemSwitch = payload.itemSwitch ~= nil,
       }
     end
     return inner(self, msgType, payload)
@@ -2761,7 +2799,11 @@ function M.uploadedTrainerBag(watch)
   for i = #watch.uploads, 1, -1 do
     local row = watch.uploads[i]
     if row and row.side == "b" then
-      return { nonempty = row.nonempty == true }
+      return {
+        nonempty = row.nonempty == true, hasBag = row.hasBag == true,
+        aiClass = row.aiClass == true, trainerItems = row.trainerItems,
+        aiFlags = row.aiFlags == true, itemSwitch = row.itemSwitch == true,
+      }
     end
   end
   return nil
@@ -2813,118 +2855,145 @@ function M.readBattleDump(path)
   }
 end
 
--- Live trainer kit vs the gym-kit seed and vs the class's own uses.
+-- The computer's items on the referee, held to contract K16 (docs/plans/
+-- gen12-referee-remaining-gaps.md).
 --
--- Prefer the in-process referee (SoloBattle / LAN Hub.lua). On a Node hub,
--- read MMO_BATTLE_DUMP -- that is fighter.bag after shareNpcBags, not the
--- client's upload. An upload is necessary but not the eight-item bug
--- (the hub used to seed DEFAULT_NPC_BAG after an empty one).
+-- Red / Gold: **no bag at all** on a computer seat -- the client uploads none
+-- and the referee keeps none, since the carts' own AI spends the class's items
+-- (pokered TrainerAI, pokecrystal AI_TryItem) -- and, where the seat lives in
+-- this process (SoloBattle's referee, the LAN Hub.lua), the class data that AI
+-- reads: Red's `aiClass` as the class's ai_classes record (nil for a GenericAI
+-- class), Gold's `trainerItems` / `aiFlags` / `itemSwitch` as its
+-- TrainerClassAttributes.  On a Node hub only the bag's shape leaves the
+-- process (MMO_BATTLE_DUMP), so that is what is held there.  The old gym-kit
+-- seed (DEFAULT_NPC_BAG) and "potion spam" both fail the no-bag check, which
+-- is stricter than the two checks it replaces.  Gen 3 keeps its trainer's own
+-- item list as a bag (`g3AssertTrainerKit`).
+--
+-- A 2v2's NPC seats are one trainer: the hubs copy one class record onto
+-- every seat (as they do `aiMods`), so the seats must agree.
+local function sameList(a, b)
+  if #a ~= #b then return false end
+  for i = 1, #a do if a[i] ~= b[i] then return false end end
+  return true
+end
+
+local function classData12(generation, seat)
+  if type(seat) ~= "table" then return nil end
+  if generation == 2 then
+    return { items = carriedItems(seat.trainerItems), aiFlags = tonumber(seat.aiFlags),
+             itemSwitch = tonumber(seat.itemSwitch) }
+  end
+  local class = type(seat.aiClass) == "table" and seat.aiClass or nil
+  return { uses = class and tonumber(class.uses), item = class and class.item, has = class ~= nil }
+end
+
+local function sameClassData(generation, a, b)
+  if not (a and b) then return false end
+  if generation == 2 then
+    return sameList(a.items, b.items) and a.aiFlags == b.aiFlags and a.itemSwitch == b.itemSwitch
+  end
+  return a.has == b.has and a.uses == b.uses and a.item == b.item
+end
+
 function M.assertTrainerKit(game, check, log, opts)
   opts = opts or {}
   if g3(game) then return M.g3AssertTrainerKit(game, check, log, opts) end
-  local expected = M.expectedTrainerKit(game, opts.class)
-  if log then
-    local kind = "unknown"
-    if expected ~= nil then
-      kind = bagIsEmpty(expected) and "empty" or "nonempty"
-    end
-    log("trainer kit expected:", kind, "class", tostring(opts.class))
-  end
+  local generation = M.generation(game)
+  local K16 = "Red / Gold's trainer items are its class data (K16)"
 
   local dumpPath = os.getenv("MMO_BATTLE_DUMP")
   if dumpPath == "" then dumpPath = nil end
 
-  local bag, shared, source
+  local bags, seats, source = {}, {}, nil
   if opts.solo then
-    bag = M.soloFoeBag(game)
-    source = "solo foe"
+    local seat = M.soloFoeSeat(game)
+    bags[1], seats[1], source = seat and seat.bag, seat, "solo foe"
   else
     local npc = M.hubNpcBags(game)
     if npc then
-      bag = npc.bags[1]
-      shared = npc.shared
-      source = "lan hub"
-      if npc.n >= 2 then
-        check(shared == true,
-              "both NPC seats share one bag table -- a 2v2 does not clone "
-              .. "the kit",
-              M.bagSummary(npc.bags[1]) .. " / " .. M.bagSummary(npc.bags[2]))
-      end
+      bags, seats, source = npc.bags, npc.fighters or {}, "lan hub"
     else
       local dumped = M.readBattleDump(dumpPath)
       if dumped and dumped.mode and dumped.n >= 1 then
-        bag = dumped.bags[1]
-        shared = dumped.shared
-        source = "node hub dump"
-        if dumped.n >= 2 then
-          check(shared == true,
-                "both NPC seats share one bag -- a 2v2 does not clone the kit",
-                M.bagSummary(dumped.bags[1]) .. " / "
-                  .. M.bagSummary(dumped.bags[2]))
+        -- Shape only: item ids never leave the hub.
+        for i, row in ipairs(dumped.bags) do
+          if log then
+            log(("trainer bag on the referee (node hub dump), seat %d:"):format(i), M.bagSummary(row))
+          end
+          check(row.empty == true, "the computer carries no bag on the referee -- " .. K16,
+                M.bagSummary(row))
         end
+        return
       elseif dumpPath then
-        check(false,
-              "the Node hub dumped NPC bags for this fight",
-              tostring(dumpPath))
+        check(false, "the Node hub dumped NPC bags for this fight", tostring(dumpPath))
         return
       else
-        if log then
-          log("skip trainer kit -- no in-process hub on this side")
-        end
+        if log then log("skip trainer kit -- no in-process hub on this side") end
         return
       end
     end
   end
-  if log then
-    log("trainer kit actual (" .. source .. "):", M.bagSummary(bag))
-  end
 
-  if source == "node hub dump" then
-    -- Shape only: item ids never left the hub. gym is this mod's former
-    -- DEFAULT_NPC_BAG seed; heal is gym-seed stacks that heal or cure.
-    check(bag.gym ~= true,
-          "the trainer is not carrying the generic gym kit",
-          M.bagSummary(bag))
-    check((tonumber(bag.heal) or 0) < 8,
-          "healing items stay under two gym kits",
-          tostring(bag.heal))
-    if expected ~= nil and bagIsEmpty(expected) then
-      check(bag.empty == true,
-            "a trainer with no items carries none -- not potion spam",
-            M.bagSummary(bag))
-    elseif expected ~= nil then
-      check(bag.empty ~= true,
-            "a trainer that carries items still has a bag on the referee",
-            M.bagSummary(bag))
+  for i = 1, math.max(1, #bags) do
+    if log then
+      log(("trainer bag on the referee (%s), seat %d:"):format(source, i), M.bagSummary(bags[i]))
     end
-    return
+    check(bagIsEmpty(bags[i]), "the computer carries no bag on the referee -- " .. K16,
+          M.bagSummary(bags[i]))
   end
 
-  check(not M.matchesDefaultKit(bag, 1),
-        "the trainer is not carrying the generic gym kit",
-        M.bagSummary(bag))
-  check(not M.matchesDefaultKit(bag, 2),
-        "and not two copies of it (the 2v2 eight-item seed)",
-        M.bagSummary(bag))
-  check(M.bagHealCount(bag) < 8,
-        "healing items stay under two gym kits",
-        tostring(M.bagHealCount(bag)))
-
-  if expected ~= nil and bagIsEmpty(expected) then
-    check(bagIsEmpty(bag),
-          "a trainer with no items carries none -- not potion spam",
-          M.bagSummary(bag))
-  elseif expected ~= nil then
-    -- Uploads drop ids BattleSim cannot use, so actual ⊆ expected rather
-    -- than a byte match. Extra stacks from the gym kit fail this. The
-    -- check names no item: those ids are the player's ROM sheet.
-    for id, count in pairs(bag or {}) do
-      if type(id) == "string" and (tonumber(count) or 0) > 0 then
-        check((tonumber(expected[id]) or 0) >= (tonumber(count) or 0),
-              "no extra stack beyond the trainer's own kit",
-              M.bagSummary(bag))
+  local seat = seats[1]
+  check(type(seat) == "table", "the computer's seat is on the referee (" .. source .. ")")
+  if type(seat) ~= "table" then return end
+  local got = classData12(generation, seat)
+  if generation == 2 then
+    local want, known = M.trainerAttrs2(game, opts.class)
+    if log then
+      log(("trainer class data (%s): %d item(s), aiFlags %s, itemSwitch %s; the class states %s item(s)")
+        :format(source, #got.items, got.aiFlags and "set" or "none", got.itemSwitch and "set" or "none",
+          want and tostring(#want.items) or "?"))
+    end
+    check(type(seat.trainerItems) == "table",
+          "the Gold computer seat carries its class's item slots (K16 `trainerItems`)",
+          type(seat.trainerItems))
+    if known and want then
+      check(sameList(got.items, want.items),
+            "...the class's own ITEM1 / ITEM2 (wEnemyTrainerItem1 / 2), in slot order",
+            ("%d vs %d item(s)"):format(#got.items, #want.items))
+      if want.aiFlags then
+        check(got.aiFlags == want.aiFlags,
+              "...its AI layers (TRNATTR_AI_MOVE_WEIGHTS, K16 `aiFlags`) as the class states them")
       end
+      if want.itemSwitch then
+        check(got.itemSwitch == want.itemSwitch,
+              "...and its item / switch flags (TRNATTR_AI_ITEM_SWITCH, K16 `itemSwitch`)")
+      end
+    elseif log then
+      log("skip the class-data match -- no trainer-class record for", tostring(opts.class))
     end
+  else
+    local want, known = M.aiClassRecord1(game, opts.class)
+    if log then
+      log(("trainer class data (%s): aiClass %s; the class %s"):format(source,
+        got.has and ("uses=" .. tostring(got.uses) .. (got.item and " item=set" or " item=none")) or "none",
+        not known and "is unknown here" or (want and "has a TrainerAI record" or "runs GenericAI")))
+    end
+    if not known then
+      if log then log("skip the class-data match -- this dataset has no ai_classes table") end
+    elseif want then
+      check(got.has and got.uses == tonumber(want.uses) and got.item == want.item,
+            "the Red computer seat carries its class's TrainerAI record (K16 `aiClass`: wAICount uses, its item)",
+            got.has and ("uses %s"):format(tostring(got.uses)) or "none")
+    else
+      check(not got.has,
+            "a GenericAI class (ai_pointers.asm) carries no record -- it uses no item and never switches",
+            got.has and "a record" or "none")
+    end
+  end
+  for i = 2, #seats do
+    check(sameClassData(generation, got, classData12(generation, seats[i])),
+          ("NPC seat %d carries the same trainer's class data as seat 1 -- one trainer, one record"):format(i))
   end
 end
 
@@ -3113,6 +3182,73 @@ function M.listenForModEvents(game, names)
     end, 0, "mmo_driver")
   end
   return seen
+end
+
+-- ------- a Red / Gold referee line, as the battle screen reads it
+--
+-- The Red and Gold referees write a battle line the way the carts print it
+-- (contracts K17 / K18 of docs/plans/gen12-referee-remaining-gaps.md):
+--
+--   * a battler's name the cart prints through a prefixing macro (pokered
+--     <USER> / <TARGET>, pokecrystal PlaceBattlersName) carries its side's
+--     mark, `^a` or `^b`, straight before it; a side word (pokecrystal
+--     HandleScreens' "Your@" / "Enemy@") is `^A` / `^B`;
+--   * a row break is `\n`, where the cart's text has `line` or `cont`.
+--
+-- A screen says a mark on its own side's monster as nothing and one on the
+-- other side's as "Enemy " -- both carts, every kind of fight, link included
+-- (pokered EnemyText, pokecrystal / pokegold PlaceBattlersName) -- and a side
+-- word as "Your " / "Enemy " (src/ClassicBattle.lua renderMarks).  Its pager
+-- shows two rows a page and scrolls a third in like `_ContText`, so a box never
+-- holds a three-row line whole: read a line off what the screen was *handed*
+-- (`say`), not off one page.  A driver that sits in a mod sandbox cannot
+-- require the mod's own reader, so these restate it: Wire.plainBattleLine and
+-- ClassicBattle.renderMarks, rule for rule.
+--
+-- Gen 3's referee writes no marks; every helper here leaves its lines as they
+-- are (bar a stray `^`, which no screen ever draws either).
+
+-- The other side's mark and the two side words, as both carts print them.
+M.FOE_MARK_WORD = "Enemy "
+M.SIDE_WORD_OWN = "Your "
+M.SIDE_WORD_OTHER = "Enemy "
+
+-- One sentence, the way a matcher reads it: every mark out (and a stray `^`
+-- with them), a row broken after a hyphen joined whole ("super-\neffective!",
+-- the word the cart split), every other break the space between two words.
+-- Works on a referee line and on a screen's line alike -- the screen's has no
+-- marks left, only its words and breaks.
+function M.plainBattleLine(text)
+  if type(text) ~= "string" then return text end
+  local plain = text:gsub("%^[abAB]", ""):gsub("%^", ""):gsub("%-\n", "-"):gsub("\n", " ")
+  return plain
+end
+
+-- A referee line as the screen of a player on `ownSide` ("a" | "b"; "a" when
+-- nil -- the player's side in every fight against the computer) is handed it:
+-- marks rendered, breaks kept.  Exactly the text that screen's `say` receives
+-- for that `msg` (MediatedBattle:viewLine / CoopBattle's), so it compares with
+-- `==`.  A co-op partner's side is its own, so both humans of a 2v2 pass the
+-- same side.
+function M.viewBattleLine(text, ownSide)
+  if type(text) ~= "string" then return text end
+  ownSide = ownSide or "a"
+  local out = text:gsub("%^([abAB])", function(mark)
+    local side = mark:lower()
+    if mark ~= side then
+      return (side == ownSide) and M.SIDE_WORD_OWN or M.SIDE_WORD_OTHER
+    end
+    if side == ownSide then return "" end
+    return M.FOE_MARK_WORD
+  end)
+  return (out:gsub("%^", ""))
+end
+
+-- ...and that line as one sentence, for a leg about its words rather than its
+-- breaks: "Enemy RATTATA stole NUGGET from its foe!" for side a.  A literal
+-- with no marks reads as itself (bar its breaks), so a leg can hand either.
+function M.readBattleLine(text, ownSide)
+  return M.plainBattleLine(M.viewBattleLine(text, ownSide))
 end
 
 -- The visible contents of a TextBox, flattened. TextBox paginates into

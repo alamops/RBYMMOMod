@@ -37,9 +37,13 @@
 --   6. **a solo trainer fight** diverts, plays to a win, and pays out: prize
 --      money on the save, the engine's onFinish called with "win" (which is
 --      the script's resume), and the player back in the overworld and walking.
---      The foe bag is the trainer's own kit (empty for a uses=0 Youngster,
---      never DEFAULT_NPC_BAG), and picking a 0-PP move stays on the list
---      instead of spending the turn.
+--      The computer carries no bag on the referee (contract K16: the carts'
+--      own AI spends the class's items -- Red's TrainerAI record, Gold's
+--      TrainerClassAttributes -- which sit on its seat instead), and picking
+--      a 0-PP move stays on the list instead of spending the turn.  Every
+--      computer choice (move, item, switch, replacement) is the referee's
+--      cart AI's now, so these legs assert the player's side and the outcome,
+--      never which move the trainer picked.
 --   7. **a real sighted trainer** (Gen 1; Gold's map objects carry no Gen 1
 --      sight cone, so the leg skips there) walked into for real, so the
 --      *defeated flag* is asserted against a live npcId rather than a staged
@@ -54,7 +58,13 @@
 --      referee-gaps-fix.md TT-E): PAY DAY's pot on the save (Red's TELEPORT
 --      escape too, Gold's AMULET COIN), a Gold trainer's held item stolen,
 --      SLEEP TALK, a level-up reaching the referee mid-fight, Gold's rain and
---      BATON PASS to a picked successor.
+--      BATON PASS to a picked successor.  Every wild foe there knows exactly
+--      one move, so the cart's own pick (pokered's random slot, pokecrystal
+--      ParseEnemyAction's) can only be that move; the lines are matched as
+--      the screen reads them (H.readBattleLine: the referee's `^a` / `^b`
+--      marks rendered for side a, its rows joined -- contracts K17 / K18),
+--      and a move's use is its clip *or* its "used" line, since a missed
+--      move plays no clip on either cart (K22).
 --
 -- ------- what is local here, and why
 --
@@ -4549,8 +4559,11 @@ return function(game)
   -- proved on the live solo path -- a real save monster, a real engine battle
   -- staged and diverted, the real referee, the real screen, and the save after.
   -- Every assertion reads the referee's own event stream (its `_emit`,
-  -- watched) or the save; the screen's lines (its `say`, watched) are checked
-  -- to carry the referee's words.  One screenshot per leg.
+  -- watched, less any clip it took back before sending -- K22) or the save;
+  -- the screen's lines (its `say`, watched) are checked to carry the
+  -- referee's words -- word for word where the leg is about the line, its
+  -- marks said for side a ("Enemy " before the foe's monster, nothing before
+  -- the player's: K17) and its breaks kept (K18).  One screenshot per leg.
   --
   --   obey-traded     Red and Gold: a traded L50 lead (its OT id is not the
   --                   save's player id -- `mon.otId` against `save.player.id`,
@@ -4662,10 +4675,33 @@ return function(game)
     local function haveMove(id) return type(data.moves) == "table" and data.moves[id] ~= nil end
     local function itemRow(id) return type(data.items) == "table" and data.items[id] or nil end
     -- The cart's glyphs flattened for the screen matchers: ’ as ', and the one
-    -- "…" tile (pokecrystal IgnoredSleepingText) as three dots.
+    -- "…" tile (pokecrystal IgnoredSleepingText) as three dots -- read as one
+    -- sentence first (H.plainBattleLine: a row the cart broke after a hyphen
+    -- joined whole, every other break a space).
     local function flat12(text)
-      return (tostring(text or ""):gsub("\226\128\153", "'"):gsub("\226\128\166", "...")
-        :gsub("%s+", " "):lower())
+      return (H.plainBattleLine(tostring(text or "")):gsub("\226\128\153", "'")
+        :gsub("\226\128\166", "..."):gsub("%s+", " "):lower())
+    end
+
+    -- ------- the referee's lines, as the player's screen reads them
+    --
+    -- The Red / Gold referee writes `^a` / `^b` before a battler's name the
+    -- cart prefixes and breaks its rows where the cart's text does (contracts
+    -- K17 / K18 of docs/plans/gen12-referee-remaining-gaps.md); a solo screen
+    -- is side a's (the player's side in every fight against the computer), so
+    -- it says the foe's mark as "Enemy " and its own as nothing.  `rec.events`
+    -- keep the referee's text as it was sent; `rec.said` keeps what the
+    -- screen was handed.
+    --   plain12  one sentence, marks out -- the referee's words
+    --   view12   exactly the text the screen's `say` gets for that line
+    --   read12   view12 as one sentence -- what the player reads
+    local SOLO_SIDE = "a"
+    local function plain12(text) return H.plainBattleLine(text) end
+    local function view12(text) return H.viewBattleLine(text, SOLO_SIDE) end
+    local function read12(text) return H.readBattleLine(text, SOLO_SIDE) end
+    -- Whose monster a referee line opens with (its leading mark), or nil.
+    local function markOf(text)
+      return type(text) == "string" and text:match("^%^([ab])") or nil
     end
 
     -- ------- the monsters
@@ -4905,9 +4941,32 @@ return function(game)
           row.turn = self.turn
           row.pStatus, row.pHp = pm and pm.status, pm and pm.hp
           row.pActive, row.pStages = pf and pf.active, pm and copy12(pm.stages)
+          row.src = ev
           rec.events[#rec.events + 1] = row
         end
         return ev
+      end
+      -- A move's clip the referee takes back before it is sent (K22: the
+      -- carts play none for a move that missed or failed -- Red's
+      -- `_dropMoveAnim`, Gold's `_noAnim` pull it out of the outgoing buffer)
+      -- is taken out of this record too, so `rec.events` stays what the
+      -- screen was actually sent.
+      for _, name in ipairs({ "_dropMoveAnim", "_noAnim" }) do
+        local takeBack = sim[name]
+        if type(takeBack) == "function" then
+          sim[name] = function(self, ...)
+            local before = {}
+            for _, b in ipairs(self.buffer or {}) do before[b] = true end
+            local r1, r2 = takeBack(self, ...)
+            local still = {}
+            for _, b in ipairs(self.buffer or {}) do still[b] = true end
+            for k = #rec.events, 1, -1 do
+              local src = rec.events[k].src
+              if src ~= nil and before[src] and not still[src] then table.remove(rec.events, k) end
+            end
+            return r1, r2
+          end
+        end
       end
       local submit = sim.submitChoice
       if type(submit) == "function" then
@@ -4956,16 +5015,33 @@ return function(game)
       return rec
     end
 
+    -- Every `msg` of the fight: `raw` the referee's text, `text` as the
+    -- player reads it (`read12`).
     local function msgsOf(rec)
       local out = {}
       for i, e in ipairs(rec.events) do
-        if e.t == "msg" then out[#out + 1] = { i = i, text = e.text, turn = e.turn, pStatus = e.pStatus } end
+        if e.t == "msg" then
+          out[#out + 1] = { i = i, raw = e.text, text = read12(e.text), turn = e.turn, pStatus = e.pStatus }
+        end
       end
       return out
     end
+    -- The screen said `text` -- a referee line (marks and breaks) or a
+    -- literal -- in the player's words: both read as one sentence, so a leg
+    -- about what a line says does not hang on where the cart breaks it.
     local function screenSaid(rec, text)
+      local want = read12(text)
       for _, line in ipairs(rec.said) do
-        if line == text then return true end
+        if plain12(line) == want then return true end
+      end
+      return false
+    end
+    -- ...and word for word: the line the screen was handed is the referee's
+    -- `raw`, its marks said for side a and its breaks kept (K17 / K18).
+    local function screenSaidExact(rec, raw)
+      local want = view12(raw)
+      for _, line in ipairs(rec.said) do
+        if line == want then return true end
       end
       return false
     end
@@ -4975,13 +5051,44 @@ return function(game)
       end
       return false
     end
-    -- The first move played this fight (an `anim` naming one of `ids`): its
-    -- side and move.
+    -- The names a move's "used" line may call `id` by: the sheet's (the
+    -- player's move row's `name`, which the referee prints -- moveLabel) and
+    -- the id's own words.
+    local function moveNames12(id)
+      local names = { (tostring(id):gsub("_", " ")) }
+      local row = type(data.moves) == "table" and data.moves[id] or nil
+      if row and type(row.name) == "string" and row.name ~= "" then names[#names + 1] = row.name end
+      return names
+    end
+    -- A "<USER>\nused <MOVE>!" line (pokered _UsedMove1Text, pokecrystal
+    -- UsedMoveText) naming one of `ids`: whose (its mark) and which.
+    local function usedLineOf(text, ids)
+      local side = markOf(text)
+      if not side then return nil end
+      local plain = plain12(text)
+      for _, id in ipairs(ids) do
+        for _, name in ipairs(moveNames12(id)) do
+          local tail = " used " .. name .. "!"
+          if #plain > #tail and plain:sub(-#tail) == tail then return side, id end
+        end
+      end
+      return nil
+    end
+    -- The first use of one of `ids` this fight: its side and move.  A use is
+    -- the move's own clip (an `anim` naming it, not `quiet` -- K22's residual
+    -- and charge beats are nobody's use) or its "used" line, whichever came
+    -- first: a move that misses plays no clip on either cart (pokered
+    -- handleIfPlayerMoveMissed, pokecrystal BattleCommand_MoveAnim's
+    -- wAttackMissed test) and still printed its line.
     local function firstMove(rec, ids)
       local want = {}
       for _, id in ipairs(ids) do want[id] = true end
       for _, e in ipairs(rec.events) do
-        if e.t == "anim" and want[e.text] then return e.side, e.text end
+        if e.t == "anim" and want[e.text] and not e.quiet then return e.side, e.text end
+        if e.t == "msg" then
+          local side, id = usedLineOf(e.text, ids)
+          if side then return side, id end
+        end
       end
       return nil
     end
@@ -5138,9 +5245,13 @@ return function(game)
     -- monster's name (pokered engine/battle/core.asm CheckForDisobedience and
     -- text_2.asm; pokecrystal BattleCommand_CheckObedience and
     -- data/text/battle.asm -- src/BattleSim/Turn.lua LOAF_TEXT / `_obey`,
-    -- src/BattleSim2/Turn.lua LOAF_LINES / `_obey`).  Gold's asleep line is
-    -- the cart's one "…" tile (IgnoredSleepingText); the three-dot spelling
-    -- is kept beside it for the flattened screen lines (`flat12`).
+    -- src/BattleSim2/Turn.lua LOAF_LINES / `_obey`), read as one sentence
+    -- (`msgsOf`'s `text`: the referee breaks them where the cart does, "<MON>
+    -- is" / "loafing around.", K18).  The monster is the player's own, which
+    -- the carts print bare (wBattleMonNick through `text_ram`, no prefixing
+    -- macro), so a line with "Enemy " in front is never ours.  Gold's asleep
+    -- line is the cart's one "…" tile (IgnoredSleepingText); the three-dot
+    -- spelling is kept beside it for the flattened screen lines (`flat12`).
     local OBEY_TAILS = {
       { key = "loafing", tail = " is loafing around." },
       { key = "wont", tail = " won't obey!" },
@@ -5177,7 +5288,8 @@ return function(game)
             key = "selfhit"
           end
           if key then
-            found[#found + 1] = { key = key, text = text, i = m.i, turn = m.turn, pStatus = m.pStatus }
+            found[#found + 1] = { key = key, text = text, raw = m.raw, i = m.i, turn = m.turn,
+                                  pStatus = m.pStatus }
           else
             for _, row in ipairs(OBEY_TAILS) do
               if text:sub(-#row.tail) == row.tail then strays[#strays + 1] = text end
@@ -5188,11 +5300,14 @@ return function(game)
       end
       return found, strays
     end
+    -- A page on screen (`flat12`) showing a disobedience line.  A page is two
+    -- rows, and "<MON>" / "used instead," / "<MOVE>!" is three (K18's
+    -- scroll), so the "used instead," row is looked for on its own.
     local function anyObeyLine(line)
       for _, row in ipairs(OBEY_TAILS) do
         if line:find(row.tail:lower(), 1, true) then return true end
       end
-      return line:find(INSTEAD, 1, true) ~= nil
+      return line:find("used instead,", 1, true) ~= nil
     end
 
     local OBEY_MOVES = { "SCRATCH", "GROWL" }
@@ -5222,11 +5337,14 @@ return function(game)
         for _, ob in ipairs(found) do
           lines = lines + 1
           seen[ob.key] = (seen[ob.key] or 0) + 1
-          if not screenSaid(rec, ob.text) then unsaid[#unsaid + 1] = ob.text end
+          -- Word for word, breaks and all: the screen was handed the
+          -- referee's line with nothing in front of the player's own monster.
+          if not screenSaidExact(rec, ob.raw) then unsaid[#unsaid + 1] = ob.text end
           if ob.key == "nap" then
-            -- `.monNaps` / `.Nap`: the line is the status event's own text
+            -- `.monNaps` / `.Nap`: the line is the status event's own text --
+            -- in its words (a `status` carries Red's line plain, Gold's as said).
             if not eventAfter(rec, ob.i - 1, function(e)
-                  return e.t == "status" and e.side == "a" and e.text == ob.text end) then
+                  return e.t == "status" and e.side == "a" and plain12(e.text) == plain12(ob.raw) end) then
               badNap = badNap + 1
             end
           elseif ob.key == "instead" then
@@ -5331,7 +5449,7 @@ return function(game)
             if ob.key == "asleep" then
               hit = hit or rec
               if ob.pStatus ~= "sleep" then awake = awake + 1 end
-              if not screenSaid(rec, ob.text) then unsaid[#unsaid + 1] = ob.text end
+              if not screenSaidExact(rec, ob.raw) then unsaid[#unsaid + 1] = ob.text end
             end
           end
           if rec.result ~= "win" then unsaid[#unsaid + 1] = "result " .. tostring(rec.result) end
@@ -5414,10 +5532,13 @@ return function(game)
 
     -- ------- the referee gaps (docs/plans/gen12-referee-gaps-fix.md TT-E)
 
+    -- The referee's `msg`s that say `text` (a literal or a referee line), as
+    -- the player reads both (`read12`): "Coins scattered everywhere!" is sent
+    -- as the cart's two rows (K18).
     local function countMsgs(rec, text)
-      local n = 0
+      local n, want = 0, read12(text)
       for _, e in ipairs(rec.events) do
-        if e.t == "msg" and e.text == text then n = n + 1 end
+        if e.t == "msg" and read12(e.text) == want then n = n + 1 end
       end
       return n
     end
@@ -5428,12 +5549,13 @@ return function(game)
       end
       return n, last
     end
-    -- The side-`side` anim of `moveId` at or after event `from`, and the first
-    -- `pred` event after it before the next anim of anybody's.
+    -- The side-`side` anim of `moveId` at or after event `from` -- the move's
+    -- own clip, not a `quiet` beat (K22) -- and the first `pred` event after
+    -- it before the next anim of anybody's.
     local function afterAnim(rec, from, side, moveId, pred)
       for i = from or 1, #rec.events do
         local e = rec.events[i]
-        if e.t == "anim" and e.side == side and e.text == moveId then
+        if e.t == "anim" and e.side == side and e.text == moveId and not e.quiet then
           for j = i + 1, #rec.events do
             local x = rec.events[j]
             if x.t == "anim" then return e, i, nil, j end
@@ -5739,16 +5861,23 @@ return function(game)
           check(lost ~= nil and took ~= nil,
                 L .. ": the referee's `held` pair: the foe's item gone, the lead holding it",
                 ("%s / %s"):format(tostring(lost ~= nil), tostring(took ~= nil)))
+          -- The referee's THIEF line (pokecrystal BattleCommand_Thief's
+          -- StoleText, "<USER>" / "stole <ITEM>" / "from its foe!"), read
+          -- as one sentence: the thief is the player's lead, side a's mark,
+          -- which its own screen says bare (K17).
           local stoleLine = nil
           for _, e in ipairs(rec.events) do
-            if e.t == "msg" and type(e.text) == "string" and e.text:find(" stole ", 1, true) then
+            if e.t == "msg" and type(e.text) == "string" and plain12(e.text):find(" stole ", 1, true) then
               stoleLine = e.text
               break
             end
           end
           local want = tostring(f.species) .. " stole " .. tostring(row.name) .. " from its foe!"
-          check(stoleLine == want, L .. ": the cart's line", tostring(stoleLine))
-          check(stoleLine ~= nil and screenSaid(rec, stoleLine), L .. ": and the screen said it")
+          check(stoleLine ~= nil and plain12(stoleLine) == want, L .. ": the cart's line",
+                tostring(stoleLine and plain12(stoleLine)))
+          check(markOf(stoleLine) == "a", L .. ": naming the lead by side a's mark", tostring(stoleLine))
+          check(stoleLine ~= nil and screenSaidExact(rec, stoleLine) and screenSaid(rec, want),
+                L .. ": and the screen said it -- the lead's name bare, nothing in front of it")
           check(rec.result == "win", L .. ": a win", tostring(rec.result))
           check(rec.after ~= nil and rec.after.item == pickT.item,
                 L .. ": the save's lead holds the stolen " .. pickT.item .. " after the fight",
@@ -5780,32 +5909,38 @@ return function(game)
         })
         if rec then
           local species = rec.facts and rec.facts.species or "?"
+          -- Each SLEEP TALK the lead used, found by its "used" line rather
+          -- than its clip: told while awake, the cart's BattleCommand_SleepTalk
+          -- fails through AnimateFailedMove, which plays no clip (K22), and
+          -- its "used" line is still printed.  Awake, the next line is the
+          -- failure; asleep, the next "used" line of the lead's in that turn
+          -- is the move it called (ResetTurn re-enters the move script, so
+          -- the called move prints its own).
+          local leadMoves = (rec.facts and rec.facts.moves) or { "SLEEP_TALK", "SCRATCH" }
           local awake, asleep, calledLine = nil, nil, nil
-          local i = 1
-          while i <= #rec.events do
-            local e, at, _, stop = afterAnim(rec, i, "a", "SLEEP_TALK", function() return false end)
-            if not e then break end
-            if e.pStatus ~= "sleep" and not awake then
-              local failed = nil
-              for j = at + 1, stop do
-                local x = rec.events[j]
-                if x and x.t == "msg" and x.text ~= species .. " used SLEEP TALK!" then failed = x.text break end
-              end
-              awake = { line = failed, turn = e.turn }
-            elseif e.pStatus == "sleep" and not asleep then
-              local nextAnim = rec.events[stop]
-              asleep = { called = nextAnim and nextAnim.t == "anim" and nextAnim.side == "a" and nextAnim.text or nil,
-                         turn = e.turn }
-              if asleep.called then
-                local line = eventAfter(rec, stop, function(x) return x.t == "msg" end)
-                calledLine = line and line.text
+          for k, e in ipairs(rec.events) do
+            if e.t == "msg" and usedLineOf(e.text, { "SLEEP_TALK" }) == "a" then
+              if e.pStatus ~= "sleep" and not awake then
+                local failed = eventAfter(rec, k, function(x) return x.t == "msg" end)
+                awake = { line = failed and read12(failed.text), turn = e.turn }
+              elseif e.pStatus == "sleep" and not asleep then
+                asleep = { turn = e.turn }
+                for j = k + 1, #rec.events do
+                  local x = rec.events[j]
+                  if x.turn ~= e.turn then break end
+                  local side, id = nil, nil
+                  if x.t == "msg" then side, id = usedLineOf(x.text, leadMoves) end
+                  if side == "a" then
+                    asleep.called, calledLine = id, x.text
+                    break
+                  end
+                end
               end
             end
-            i = at + 1
           end
           log(("%s: awake=%s asleep=%s line=[%s] turns=%d"):format(L,
             awake and tostring(awake.line) or "-", asleep and tostring(asleep.called) or "-",
-            tostring(calledLine), rec.turns or 0))
+            tostring(calledLine and plain12(calledLine)), rec.turns or 0))
           check(awake ~= nil and awake.line == "But it failed!",
                 L .. ": told while awake, SLEEP TALK fails -- \"But it failed!\"", awake and awake.line)
           check(screenSaid(rec, "But it failed!"), L .. ": and the screen said it")
@@ -5813,8 +5948,9 @@ return function(game)
                 L .. ": asleep, it calls the lead's other move (SCRATCH)", asleep and asleep.called)
           local want = species .. " used " .. tostring(rec.facts and rec.facts.moveLabels
             and rec.facts.moveLabels[2]) .. "!"
-          check(calledLine == want, L .. ": in the referee's own line", tostring(calledLine))
-          check(calledLine ~= nil and screenSaid(rec, calledLine), L .. ": and the screen said it")
+          check(calledLine ~= nil and read12(calledLine) == want, L .. ": in the referee's own line",
+                tostring(calledLine and read12(calledLine)))
+          check(calledLine ~= nil and screenSaidExact(rec, calledLine), L .. ": and the screen said it")
           check(rec.result == "win", L .. ": the called SCRATCH won the fight", tostring(rec.result))
           local after = rec.after and rec.after.moves or {}
           local scratchRow = data.moves and data.moves.SCRATCH
@@ -5888,10 +6024,17 @@ return function(game)
           check(tonumber(a.maxHp) == tonumber(up and up.maxHp) and tonumber(a.maxHp) > (tonumber(b.maxHp) or 0),
                 L .. ": its maximum HP rose to the K9 maximum",
                 ("%s -> %s (K9 %s)"):format(tostring(b.maxHp), tostring(a.maxHp), tostring(up and up.maxHp)))
+          -- A use of the lead's after the level-up: its move's clip (not a
+          -- `quiet` beat or a cart `_ANIM` -- K20 / K22 put those on a seat
+          -- nobody chose for) or its "used" line, which a miss still prints.
           local fought = false
           for j = (up and up.at or #rec.events) + 1, #rec.events do
             local e = rec.events[j]
-            if e.t == "anim" and e.side == "a" then fought = true break end
+            if e.t == "anim" and e.side == "a" and not e.quiet
+                and not tostring(e.text):find("_ANIM$") then
+              fought = true break
+            end
+            if e.t == "msg" and usedLineOf(e.text, { move }) == "a" then fought = true break end
           end
           check(fought, L .. ": and it fought on after the level-up (the trainer's next monster)")
           check(screenSaidLike(rec, "grew to level " .. tostring(level + 1) .. "!"),
@@ -5947,11 +6090,16 @@ return function(game)
         log(("%s: first WATER GUN %s in the rain, %s without"):format(L, tostring(wetHit), tostring(dryHit)))
         if wet then
           local start, stop, continues, startAt, stopAt = 0, 0, 0, nil, nil
+          -- The weather lines as the player reads them (pokecrystal
+          -- DownpourText "A downpour" / line "started!",
+          -- BattleText_RainContinuesToFall "Rain continues to" / line "fall.",
+          -- BattleText_TheRainStopped: the referee keeps the rows, K18).
           for i, e in ipairs(wet.events) do
             if e.t == "msg" then
-              if e.text == "A downpour started!" then start = start + 1; startAt = startAt or i end
-              if e.text == "The rain stopped." then stop = stop + 1; stopAt = stopAt or i end
-              if e.text == "Rain continues to fall." and startAt and not stopAt then continues = continues + 1 end
+              local line = read12(e.text)
+              if line == "A downpour started!" then start = start + 1; startAt = startAt or i end
+              if line == "The rain stopped." then stop = stop + 1; stopAt = stopAt or i end
+              if line == "Rain continues to fall." and startAt and not stopAt then continues = continues + 1 end
             end
           end
           log(("%s: start=%d continues=%d stop=%d turns=%d"):format(L, start, continues, stop, wet.turns or 0))
@@ -6088,10 +6236,15 @@ return function(game)
                 drain and ("+%s -> %s (max %s, from %s)"):format(tostring(drain.amount), tostring(drain.hp),
                   tostring(f.maxHp), tostring(f.hp)) or "no drain")
           local line = ev and nextMsg(rec, i)
+          -- BattleText_TargetRecoveredWithItem (pokecrystal HandleLeftovers:
+          -- "<TARGET>" / "recovered with" / "<ITEM>."), the lead's own: read
+          -- as the player reads it, and handed to the screen as the referee
+          -- said it.
           local want = tostring(f.species) .. " recovered with " .. tostring(f.itemName) .. "."
-          check(line ~= nil and line.text == want, L .. ": the cart's line right behind it",
-                line and line.text)
-          check(screenSaid(rec, want), L .. ": and the screen said it")
+          check(line ~= nil and read12(line.text) == want, L .. ": the cart's line right behind it",
+                line and read12(line.text))
+          check(line ~= nil and screenSaidExact(rec, line.text) and screenSaid(rec, want),
+                L .. ": and the screen said it")
           check(rec.result == "win", L .. ": a win", tostring(rec.result))
           check(rec.after ~= nil and rec.after.item == "LEFTOVERS",
                 L .. ": LEFTOVERS is never used up -- still on the save's lead",
@@ -6131,9 +6284,14 @@ return function(game)
                 drain and ("+%s -> %s (from %s of %s)"):format(tostring(drain.amount), tostring(drain.hp),
                   tostring(f.hp), tostring(f.maxHp)) or "no drain")
           local line = ev and nextMsg(rec, i)
+          -- RecoveredUsingText (pokecrystal HandleHPHealingItem's
+          -- UseOpponentItem: "<TARGET>" / "recovered using a" / "<ITEM>!"),
+          -- the lead's own, read as the player reads it.
           local want = tostring(f.species) .. " recovered using a " .. tostring(f.itemName) .. "!"
-          check(line ~= nil and line.text == want, L .. ": the cart's line right behind it", line and line.text)
-          check(screenSaid(rec, want), L .. ": and the screen said it")
+          check(line ~= nil and read12(line.text) == want, L .. ": the cart's line right behind it",
+                line and read12(line.text))
+          check(line ~= nil and screenSaidExact(rec, line.text) and screenSaid(rec, want),
+                L .. ": and the screen said it")
           check(rec.result == "win", L .. ": a win", tostring(rec.result))
           check(rec.after ~= nil and (rec.after.item == nil or rec.after.item == ""),
                 L .. ": the save's lead holds nothing after the fight -- the eaten BERRY is gone",
@@ -6213,9 +6371,17 @@ return function(game)
                 L .. ": the referee's `held` pair: the lead's NUGGET gone, the foe holding it",
                 ("%s / %s"):format(tostring(lost ~= nil), tostring(took ~= nil)))
           local line = lost and nextMsg(rec, i)
-          local want = tostring(f.foeSpecies) .. " stole " .. tostring(f.itemName) .. " from its foe!"
-          check(line ~= nil and line.text == want, L .. ": the cart's line behind them", line and line.text)
-          check(screenSaid(rec, want), L .. ": and the screen said it")
+          -- StoleText (pokecrystal BattleCommand_Thief) over the thief, the
+          -- foe's monster: `<USER>` is PlaceBattlersName, so its name carries
+          -- side b's mark and the player's screen says it behind "Enemy "
+          -- (K17) -- "Enemy <MON>" / "stole <ITEM>" / "from its foe!".
+          local words = tostring(f.foeSpecies) .. " stole " .. tostring(f.itemName) .. " from its foe!"
+          check(line ~= nil and plain12(line.text) == words, L .. ": the cart's line behind them",
+                line and plain12(line.text))
+          check(line ~= nil and markOf(line.text) == "b", L .. ": naming the thief by the foe's mark",
+                line and line.text)
+          check(line ~= nil and screenSaidExact(rec, line.text) and screenSaid(rec, "Enemy " .. words),
+                L .. ": and the screen said it as \"Enemy " .. tostring(f.foeSpecies) .. " stole ...\"")
           check(rec.result == "win", L .. ": a win", tostring(rec.result))
           check(rec.after ~= nil and (rec.after.item == nil or rec.after.item == ""),
                 L .. ": the save's lead has lost the NUGGET after the fight",

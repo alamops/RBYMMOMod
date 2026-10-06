@@ -903,10 +903,12 @@ return function(game)
 
   local partyWatch
   if coopClass then
-    -- Extra host-upload log only. The eight-item lock is the Node referee
-    -- dump (MMO_BATTLE_DUMP): wrapping mmo.battle_party sees the client's
-    -- sheet, not fighter.bag, so a hub that re-seeded DEFAULT_NPC_BAG would
-    -- still look green. Role a is the one that stages and uploads side b.
+    -- The host's side-b upload, by shape. What the referee holds is the Node
+    -- dump (MMO_BATTLE_DUMP, H.assertTrainerKit): wrapping mmo.battle_party
+    -- sees the client's sheet, not fighter.bag. The upload is where contract
+    -- K16 starts, though -- no NPC bag on Red / Gold, the class's TrainerAI
+    -- record instead -- so that much is held here. Role a is the one that
+    -- stages and uploads side b.
     if ROLE == "a" then partyWatch = H.watchPartyUploads(game) end
     -- Without a live hub + party, Coop.onTrainerBattle leaves the engine
     -- battle alone. The wait-for-the-cover loop below used to tap A on any
@@ -1087,10 +1089,27 @@ return function(game)
             "the co-op command grid opens once the opening line is done")
       H.assertTrainerKit(game, check, log, { class = coopClass })
       if partyWatch then
-        if log then
-          local uploaded = H.uploadedTrainerBag(partyWatch)
-          log("host uploaded side-b (not the referee bag):",
-              (uploaded and uploaded.nonempty) and "present" or "empty")
+        local uploaded = H.uploadedTrainerBag(partyWatch)
+        log("host uploaded side-b (not the referee bag): bag",
+            (uploaded and uploaded.hasBag) and ((uploaded.nonempty and "present") or "empty")
+              or "none", "aiClass", (uploaded and uploaded.aiClass) and "set" or "none")
+        -- Contract K16: no NPC bag rides the upload on Red / Gold, and Red's
+        -- class record does exactly when the class has one (a GenericAI
+        -- class -- ai_pointers.asm -- has none to send).
+        -- The referee's side of this is H.assertTrainerKit's Node dump above;
+        -- a wrap that saw no upload is a gap in this watch, not in the fight.
+        if uploaded then
+          check(not uploaded.hasBag,
+                "the host's trainer upload carries no bag -- the class's own AI "
+                .. "spends its items (K16)")
+          local record, known = H.aiClassRecord1(game, coopClass)
+          if known and H.generation(game) == 1 then
+            check(uploaded.aiClass == (record ~= nil),
+                  record and "...and carries the class's TrainerAI record (aiClass)"
+                    or "...and no TrainerAI record for a GenericAI class")
+          end
+        else
+          log("skip the K16 upload check -- the watch saw no side-b upload")
         end
         if partyWatch.stop then partyWatch.stop() end
       end
