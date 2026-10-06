@@ -12,9 +12,9 @@
  * reproduced (the AI's false assumption about CheckTypeMatchup, the
  * base-reward bug, the three AI_HealStatus bugs, the quarter-HP `srl c / rl b`,
  * `e` never cleared, Gold's wOTPartyCount walks and `.loop5` bound, RaiseStat's
- * stale wAttackMissed) and the fields the hook maintains (trainerItems,
- * baseReward, itemSwitch, aiMove, turnsTaken, usedMoves, countSpeciesTypes,
- * lastAttackMissed / lastEffectFailed). Arrays here are 0-based where the Lua
+ * stale wAttackMissed) and the fields the hook maintains (trainerKit -- or a
+ * seat's own trainerItems / baseReward -- itemSwitch, aiMove, turnsTaken,
+ * usedMoves, countSpeciesTypes, lastAttackMissed / lastEffectFailed). Arrays here are 0-based where the Lua
  * twin's are 1-based; party indices, `trainerSlot` and `fighter.active` are
  * 1-based in both.
  *
@@ -593,12 +593,19 @@ function isHighestLevel(view) {
   return own !== undefined && own !== null && Math.max(0, int(own.level, 0)) >= top;
 }
 
+// The kit AI_TryItem reads and spends: the trainer's shared one when Turn made
+// it (`fighter.trainerKit`), else the seat's own trainerItems / baseReward.
+function kitOf(fighter) {
+  if (fighter.trainerKit !== null && typeof fighter.trainerKit === 'object') return fighter.trainerKit;
+  return fighter;
+}
+
 function tryItem(view) {
-  const fighter = view.fighter;
-  const items = Array.isArray(fighter.trainerItems) ? fighter.trainerItems : [];
+  const kit = kitOf(view.fighter);
+  const items = Array.isArray(kit.trainerItems) ? kit.trainerItems : [];
   const bytes = [
     itemByte(items[0]), itemByte(items[1]),
-    Math.max(0, int(fighter.baseReward, 0)) % 256, 0,
+    Math.max(0, int(kit.baseReward, 0)) % 256, 0,
   ];
   if (bytes[0] === 0 && bytes[1] === 0) return null;
   if (!isHighestLevel(view)) return null;
@@ -760,17 +767,19 @@ function useItem(battle, fighter, decision) {
     }
   }
 
+  // The trainer's kit: one co-op seat's use is gone for its partner too.
+  const kit = kitOf(fighter);
   const slot = int(decision.trainerSlot, 0);
   if (slot === 1 || slot === 2) {
-    if (!Array.isArray(fighter.trainerItems)) fighter.trainerItems = [];
+    if (!Array.isArray(kit.trainerItems)) kit.trainerItems = [];
     for (let i = 1; i <= slot - 1; i += 1) {
-      if (fighter.trainerItems[i - 1] === undefined || fighter.trainerItems[i - 1] === null) {
-        fighter.trainerItems[i - 1] = 'NO_ITEM';
+      if (kit.trainerItems[i - 1] === undefined || kit.trainerItems[i - 1] === null) {
+        kit.trainerItems[i - 1] = 'NO_ITEM';
       }
     }
-    fighter.trainerItems[slot - 1] = 'NO_ITEM';
+    kit.trainerItems[slot - 1] = 'NO_ITEM';
   } else if (slot === 3) {
-    fighter.baseReward = 0;
+    kit.baseReward = 0;
   }
   mon.bide = null;
   mon.furyCutter = 0;
@@ -950,6 +959,7 @@ module.exports = {
   findEnemyMonsWithAtLeastQuarterMaxHP,
   checkAbleToSwitch,
   tryItem,
+  kitOf,
   switchOrTryItem,
   usedOnLine,
   withdrewLine,

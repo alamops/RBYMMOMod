@@ -132,7 +132,8 @@ local function mn(o)
 end
 
 -- A coop_npc fight: the player's seat "p1" (side a) against the computer's
--- "npc" (side b, "LASS AMY").  `o.fields` lands on the computer's seat,
+-- "npc" (side b, "LASS AMY").  `o.fields` lands on the computer's seat --
+-- `trainerItems` / `baseReward` in its trainer's kit (Turn's `trainerKit`) --
 -- `o.mon` on its active monster, `o.foeMon` on the player's, `o.battle` on the
 -- battle; `o.bytes` scripts the draws.
 local function fight(o)
@@ -149,7 +150,13 @@ local function fight(o)
   battle:drainEvents()
   local npc, foe = battle.byId.npc, battle.byId.p1
   if o.active then npc.active = o.active end
-  for k, v in pairs(o.fields or {}) do npc[k] = v end
+  for k, v in pairs(o.fields or {}) do
+    if (k == "trainerItems" or k == "baseReward") and npc.trainerKit then
+      npc.trainerKit[k] = v
+    else
+      npc[k] = v
+    end
+  end
   local mon = npc.mons[npc.active]
   for k, v in pairs(o.mon or {}) do mon[k] = v end
   local foeMon = foe.mons[foe.active]
@@ -647,8 +654,8 @@ do
                                    flags = A.ALWAYS_USE, mon = { status = "poison" } })
   eq(d, "item FULL_HEAL 3", "a POTION it will not use leaves `de` on item 2: the base reward 0x26 is FULL HEAL")
   A.useItem(f.battle, f.npc, decision)
-  eq(f.npc.baseReward, 0, "...and the base reward byte is what it clears")
-  eq(f.npc.trainerItems[2], "POTION", "...the POTION stays")
+  eq(f.npc.trainerKit.baseReward, 0, "...and the base reward byte is what it clears")
+  eq(f.npc.trainerKit.trainerItems[2], "POTION", "...the POTION stays")
   eq(f.mon.status, nil, "...and the FULL HEAL works")
 end
 eq(item({ fields = { trainerItems = { "FULL_HEAL", "POTION" } }, flags = A.ALWAYS_USE,
@@ -689,7 +696,7 @@ do
   eq(events[1].text, "LASS AMY\nused POTION\non Ace!", "_EnemyUsedOnText, `line` and `cont` as K18 breaks")
   eq(events[3].amount, 20, "...20 HP")
   eq(f.mon.hp, 30, "...on the monster")
-  eq(f.npc.trainerItems[1], "NO_ITEM", "...and the slot is cleared")
+  eq(f.npc.trainerKit.trainerItems[1], "NO_ITEM", "...and the slot is cleared")
 end
 do
   local f, events = use({ id = "HYPER_POTION", mon = { hp = 25 } })

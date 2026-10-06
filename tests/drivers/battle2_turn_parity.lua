@@ -4214,18 +4214,20 @@ end)
 -- `h2f_coop_npc_double`: a co-op 2v2 against one computer trainer whose party
 -- is dealt across two seats (`countSpeciesTypes` absent -- Turn.create keeps
 -- it only for a seat dealt the whole party), each seat carrying K16's bytes:
--- every turn each seat's AIChooseMove pick, AI_SwitchOrTryItem (a POTION at a
--- quarter of the HP) and, after a knockout, its own
--- FindMonInOTPartyToSwitchIntoBattle -- all through `autoPick`, as
--- `Hub:fillNpcChoices` drives them -- and the fight runs to its end.
+-- every turn each seat's AIChooseMove pick, AI_SwitchOrTryItem and, after a
+-- knockout, its own FindMonInOTPartyToSwitchIntoBattle -- all through
+-- `autoPick`, as `Hub:fillNpcChoices` drives them -- and the fight runs to
+-- its end.  Both seats are handed the SAME `trainerItems` table, as the hubs
+-- hand them: one trainer, one kit (`trainerKitOf`), so its one POTION is
+-- drunk once -- by the first seat to want it -- and is gone for the other.
 local function T(i, target) return { action = "fight", move = i, target = target } end
 local function A2(a1, a2)
   return { { "a1", a1 }, { "a2", a2 }, { "b1", "auto" }, { "b2", "auto" }, { "b1", "auto" }, { "b2", "auto" } }
 end
 scenario("h2f_coop_npc_double", function(events)
+  local items = { "POTION", "NO_ITEM" }
   local k16 = function(name)
-    return { aiFlags = 0x07, trainerItems = { "POTION", "NO_ITEM" }, itemSwitch = 0x01, baseReward = 0x12,
-             name = name }
+    return { aiFlags = 0x07, trainerItems = items, itemSwitch = 0x01, baseReward = 0x12, name = name }
   end
   local o = { id = "h2fd", mode = "coop_npc", seed = 1134, choiceTimeout = 60, reconnectGrace = 60,
     typeIds = R2D_TYPES, chart = R2D_CHART, specialTypes = R2D_SPECIAL,
@@ -4253,6 +4255,23 @@ scenario("h2f_coop_npc_double", function(events)
     rounds[#rounds + 1] = A2(T(0, aim), T(0, 7 - aim))
   end
   return seq(events, o, rounds)
+end)
+
+-- `h2f_triple_kick_sub`: BattleCommand_TripleKick multiplies by wBattleAnimParam
+-- + 1, which `lowersub` started at 1 behind the user's own SUBSTITUTE -- so
+-- Ann's kicks deal x2 / x3 / x4 there (the battle scene on), clips 1 / 2 / 3;
+-- the same kick METRONOME calls is x1 / x2 / x3 (its `lowersub` returns at
+-- CheckUserIsCharging), clips 0 / 1 / 2.  BEAT UP behind it: one clip a
+-- swinging member, no parameter.
+scenario("h2f_triple_kick_sub", function(events)
+  return seq(events, duo4("h2fk", "1v1", 1139,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, substitute = 100,
+           moves = { hm("TRIPLE_KICK", 10, 0, 112), hm("METRONOME", 0, 0, 83), hm("BEAT_UP", 10, 0, 116) } }),
+      mn({ species = "Gamma", maxHp = 300, spe = 40, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { metronomePool = { hm("kick3", 10, 0, 112) } }),
+    { both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+      both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0)) })
 end)
 
 -- `h2f_metronome_rampage`: a THRASH METRONOME called writes nothing on any of

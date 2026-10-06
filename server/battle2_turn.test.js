@@ -3044,8 +3044,10 @@ scenario('h2f_multi_hit_anims', (events) => seq(events, duo4('h2fh', '1v1', 1133
 const T = (i, target) => ({ action: 'fight', move: i, target });
 const A2 = (a1, a2) => [['a1', a1], ['a2', a2], ['b1', 'auto'], ['b2', 'auto'], ['b1', 'auto'], ['b2', 'auto']];
 scenario('h2f_coop_npc_double', (events) => {
+  // One `trainerItems` array for both seats, as the hubs hand it: one kit.
+  const items = ['POTION', 'NO_ITEM'];
   const k16 = (name) => ({
-    aiFlags: 0x07, trainerItems: ['POTION', 'NO_ITEM'], itemSwitch: 0x01, baseReward: 0x12, name,
+    aiFlags: 0x07, trainerItems: items, itemSwitch: 0x01, baseReward: 0x12, name,
   });
   const o = {
     id: 'h2fd', mode: 'coop_npc', seed: 1134, choiceTimeout: 60, reconnectGrace: 60,
@@ -3076,6 +3078,15 @@ scenario('h2f_coop_npc_double', (events) => {
   }
   return seq(events, o, rounds);
 });
+
+scenario('h2f_triple_kick_sub', (events) => seq(events, duo4('h2fk', '1v1', 1139,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, substitute: 100,
+    moves: [hm('TRIPLE_KICK', 10, 0, 112), hm('METRONOME', 0, 0, 83), hm('BEAT_UP', 10, 0, 116)] }),
+  mn({ species: 'Gamma', maxHp: 300, spe: 40, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  { metronomePool: [hm('kick3', 10, 0, 112)] }),
+[both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)),
+  both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)), both3(F(2), F(0))]));
 
 scenario('h2f_metronome_rampage', (events) => seq(events, duo4('h2fr', '1v1', 1132,
   [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('METRONOME', 0, 0, 83), hm('jab', 20)] })],
@@ -3151,7 +3162,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 229, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 230, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -5990,7 +6001,7 @@ test('RP2: ItemUsedText / _EnemyUsedOnText, and nothing past them where the cart
   const rose = events.find((e) => e.t === 'stat' && e.slot === 3);
   assert.strictEqual(rose && rose.stage, 1, 'the computer\'s X ATTACK still raises its stage');
   assert.strictEqual(monOf(battle, 'p1').xAccuracy, true);
-  assert.strictEqual(battle.byId.get(foe).trainerItems[0], 'NO_ITEM', 'AI_TryItem clears the slot it used');
+  assert.strictEqual(battle.byId.get(foe).trainerKit.trainerItems[0], 'NO_ITEM', 'AI_TryItem clears the slot it used');
   {
     const other = fight({
       mode: 'coop_npc', seed: 3, trainerItems: ['DIRE_HIT'], itemSwitch: 0x10,
@@ -6698,8 +6709,8 @@ test("H2 follow-up: the computer's items and switches are its AI's; a called mov
   // (3) A co-op 2v2, the trainer dealt across two NPC seats: each seat's own
   // AI_TryItem and FindMonInOTPartyToSwitchIntoBattle, and the fight ends.
   const dbl = ev('h2f_coop_npc_double');
-  assert.ok(lines('h2f_coop_npc_double').includes('LASS AMY used POTION on Beta!'), "b1's item");
-  assert.ok(lines('h2f_coop_npc_double').includes('LASS AMY used POTION on Eps!'), "b2's item");
+  assert.strictEqual(lines('h2f_coop_npc_double').filter((l) => /^LASS AMY used POTION on /.test(l)).length, 1,
+    "one trainer, one kit: its one POTION is drunk once across both seats");
   assert.ok(dbl.some((e) => e.t === 'send' && e.slot === 3 && e.text === 'Delta'), "b1's successor");
   assert.ok(dbl.some((e) => e.t === 'send' && e.slot === 4 && e.text === 'Zeta'), "b2's successor");
   assert.strictEqual(byName(jsRuns).get('h2f_coop_npc_double').outcome.outcome, 'win', 'no stall: decided');
@@ -6718,6 +6729,35 @@ test("H2 follow-up: the computer's items and switches are its AI's; a called mov
   assert.deepStrictEqual(firstKicks.filter((e) => e.t === 'anim').map((e) => e.amount || 0), [0, 1, 2]);
   const order = firstKicks.filter((e) => e.t === 'anim' || e.t === 'damage').map((e) => e.t);
   assert.deepStrictEqual(order, ['anim', 'damage', 'anim', 'damage', 'anim', 'damage'], 'each clip ahead of its HP');
+  // BEAT UP: one clip a swinging member, after its "<MEMBER>'s attack!", with
+  // no parameter (MoveAnimNoSub's `xor a`).
+  const bu = ev('r2c_beat_up');
+  const gamma = bu.findIndex((e) => e.t === 'msg' && plainLine(e.text) === "Gamma's attack!");
+  assert.ok(bu[gamma + 1].t === 'anim' && bu[gamma + 1].text === 'BEAT_UP' && !bu[gamma + 1].amount,
+    "the second member's clip, after its line");
+  // TRIPLE KICK behind the user's own SUBSTITUTE: wBattleAnimParam 1, 2, 3 --
+  // the kicks x2 / x3 / x4; called by METRONOME: 0, 1, 2 and x1 / x2 / x3.
+  const tks = ev('h2f_triple_kick_sub');
+  const kicks = (id) => {
+    const out = [];
+    tks.forEach((e, i) => {
+      if (e.t === 'anim' && e.text === id) {
+        const hit = tks.slice(i + 1).find((x) => x.t === 'damage' && x.slot === 3);
+        out.push([e.amount || 0, hit.amount]);
+      }
+    });
+    return out;
+  };
+  const own = kicks('TRIPLE_KICK');
+  assert.ok(own.some(([p]) => p === 3), 'a third kick behind the SUBSTITUTE');
+  for (const [param, dealt] of own) {
+    assert.ok(Math.abs(dealt - 5 * (param + 1)) <= 3, `kick at param ${param}: x${param + 1} (${dealt})`);
+  }
+  const called = kicks('kick3');
+  assert.deepStrictEqual([...new Set(called.map(([p]) => p))].sort(), [0, 1, 2], 'a called kick starts from 0');
+  for (const [param, dealt] of called) {
+    assert.ok(Math.abs(dealt - 5 * (param + 1)) <= 3, `called kick at param ${param}: x${param + 1} (${dealt})`);
+  }
   const fury = ev('multi_hit_first_ko');
   assert.deepStrictEqual(fury.filter((e) => e.t === 'anim' && e.text === 'fury_hits').map((e) => e.amount || 0),
     [1, 1, 0], 'no SUBSTITUTE: 1 then 0; a first-hit knockout plays one');
@@ -6766,11 +6806,42 @@ test('H2: K16 is copied onto each computer seat; LOVE / HEAVY BALL read the tran
   const b1 = battle.byId.get('b1');
   const b2 = battle.byId.get('b2');
   assert.strictEqual(b1.aiFlags, 7);
-  assert.strictEqual(b1.baseReward, 18);
-  assert.ok(b1.trainerItems !== items && b1.trainerItems !== b2.trainerItems, 'never aliased');
-  b1.trainerItems[0] = 'NO_ITEM';
-  assert.strictEqual(b2.trainerItems[0], 'POTION');
+  assert.strictEqual(b1.trainerKit.baseReward, 18);
+  // One trainer, one kit: the seats handed the same `trainerItems` object
+  // share one copy (`trainerKitOf`, object identity as Lua's table key).
+  assert.strictEqual(b1.trainerKit, b2.trainerKit, 'one kit for both seats');
+  assert.ok(b1.trainerKit.trainerItems !== items, 'a copy: the source is never written');
   assert.strictEqual(battle.byId.get('a1').aiFlags, null, 'a player\'s seat keeps none');
+  assert.strictEqual(battle.byId.get('a1').trainerKit, null, '...nor a kit');
+  // An item either seat's AI uses is gone for its partner.
+  const pot = ['POTION'];
+  const seat = (id, species) => ({ playerId: id, name: 'Bob', trainerItems: pot, baseReward: 0x12,
+    mons: [held({ species, spe: 10, maxHp: 900, moves: [hit('tap', 5)] })] });
+  const shared = Turn.create({ id: 'k16s', mode: 'coop_npc', seed: 31, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'a1', name: 'Ann', mons: [held({ species: 'Alpha', spe: 90, maxHp: 900, moves: [hit('wait', 0, 0, 85)] })] },
+        { playerId: 'a2', name: 'Abe', mons: [held({ species: 'Gamma', spe: 80, maxHp: 900, moves: [hit('wait', 0, 0, 85)] })] }],
+      b: [seat('b1', 'Beta'), seat('b2', 'Delta')] } });
+  for (const id of ['b1', 'b2']) {
+    const m = shared.byId.get(id).mons[0];
+    m.hp = Math.floor(m.maxHp / 4);
+  }
+  shared.submitChoice('a1', { action: 'fight', move: 0 });
+  shared.submitChoice('a2', { action: 'fight', move: 0 });
+  shared.autoPick('b1');
+  shared.autoPick('b2');
+  const potions = shared.drainEvents().filter((e) => e.t === 'item' && e.text === 'POTION').length;
+  assert.strictEqual(potions, 1, 'one POTION for the trainer, not one a seat');
+  assert.strictEqual(shared.byId.get('b2').trainerKit.trainerItems[0], 'NO_ITEM', 'the slot empty for both');
+  assert.strictEqual(pot[0], 'POTION', 'the source untouched');
+  shared.byId.get('b1').trainerKit.baseReward = 0;
+  assert.strictEqual(shared.byId.get('b2').trainerKit.baseReward, 0, 'the base reward is the kit\'s too');
+  const ownKit = (id) => ({ playerId: id, name: 'Bob', trainerItems: ['POTION'],
+    mons: [held({ species: 'Beta', spe: 10, maxHp: 900, moves: [hit('tap', 5)] })] });
+  const apart = Turn.create({ id: 'k16a', mode: 'coop_npc', seed: 31, choiceTimeout: 60, reconnectGrace: 60,
+    sides: { a: [{ playerId: 'a1', name: 'Ann', mons: [held({ species: 'Alpha', spe: 90, maxHp: 900, moves: [hit('wait', 0, 0, 85)] })] }],
+      b: [ownKit('b1'), ownKit('b2')] } });
+  assert.notStrictEqual(apart.byId.get('b1').trainerKit, apart.byId.get('b2').trainerKit, 'two arrays, two kits');
   const thrower = { speciesId: 'MAGNEMITE', base: { gender: 127 }, dvs: { atk: 15, def: 8, spe: 15, spc: 8 } };
   const own = { atk: 2, def: 8, spe: 2, spc: 8 };
   assert.strictEqual(Effects.ballRate('LOVE_BALL', 10,

@@ -1008,9 +1008,9 @@ local function copyBag(raw)
 end
 
 -- Contract K16's wEnemyTrainerItem1 / 2 (Wire.trainerItems: 0..2 ids in the
--- cart's slot order), COPIED: the hub hands one trainer's table to each of
--- its NPC seats, and AiSwitch.useItem empties the slot it used ("NO_ITEM")
--- on the seat's own list -- an alias would spend the other seat's item too.
+-- cart's slot order), COPIED: AiSwitch.useItem empties the slot it used
+-- ("NO_ITEM") in the trainer's kit (`trainerKitOf`), never in the source the
+-- hub handed over.
 -- An id is kept as the string it is, a number as the byte it names (AiSwitch
 -- .itemByte reads both); anything else is an empty slot.
 local function copyTrainerItems(raw)
@@ -1027,6 +1027,28 @@ local function copyTrainerItems(raw)
     end
   end
   return out
+end
+
+-- The trainer's kit (contract K16): wEnemyTrainerItem1 / 2 and the base
+-- reward AI_TryItem reads as a third (`AiSwitch.tryItem`) and clears as it
+-- uses one (`AiSwitch.useItem`).  A trainer dealt across two co-op seats is
+-- still one trainer with one kit, as the NPC bag was one bag: seats whose
+-- entries carry the SAME `trainerItems` table -- the hubs hand every NPC seat
+-- of one trainer the same object (Hub:fillBattleParty / relay twin) -- share
+-- one kit, so an item either seat uses (or the base reward it zeroes) is gone
+-- for both.  The kit is a copy (`copyTrainerItems`), so the source is never
+-- written; it takes the base reward of the first seat that brought it.  Any
+-- other entry -- a table of its own, or none -- gets a kit of its own.
+-- `aiFlags` / `itemSwitch` stay per seat: they are read, never spent.
+local function trainerKitOf(kits, entry)
+  local source = entry.trainerItems
+  if type(source) == "table" and kits[source] then return kits[source] end
+  local kit = {
+    trainerItems = copyTrainerItems(source),
+    baseReward = optInt(entry.baseReward, 0, 255),
+  }
+  if type(source) == "table" then kits[source] = kit end
+  return kit
 end
 
 -- Contract K23's `countSpeciesTypes` (1..2 chart indices), copied the same
@@ -1115,7 +1137,9 @@ end
 --   sides = { a = { { playerId, name, mons, bag, badges, family } }, b = { ... } }
 --     a computer seat (side b against the computer) may add contract K16's
 --     aiFlags, itemSwitch, baseReward and trainerItems, and K23's
---     countSpeciesTypes -- each copied onto its own seat
+--     countSpeciesTypes -- each copied onto its own seat, but for the
+--     trainer's kit (trainerItems, baseReward), shared by the seats whose
+--     entries carry the same trainerItems table (`trainerKitOf`)
 --
 -- `badges` is kept only on side a of a BADGE_MODES fight and dropped
 -- everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -1228,6 +1252,9 @@ function M.create(opts)
   end
 
   local sides = type(opts.sides) == "table" and opts.sides or {}
+  -- One trainer, one kit (`trainerKitOf`): the kits built so far, by the
+  -- `trainerItems` source table their seats' entries carried.
+  local kits = {}
   for _, side in ipairs(M.SIDES) do
     local roster = type(sides[side]) == "table" and sides[side] or {}
     if #roster == 0 then return nil, "side " .. side .. " has nobody on it" end
@@ -1282,17 +1309,19 @@ function M.create(opts)
         -- Gene's confusion inherits (`_berserkGene`).
         confuseCount = 0,
         -- A player's bag; the computer's seats keep none (K16: their items
-        -- are AI_TryItem's, off `trainerItems`).
+        -- are AI_TryItem's, off the trainer's kit).
         bag       = (not computerSide) and copyBag(entry.bag) or nil,
         active    = firstLiving(mons),
         -- Contract K16: the trainer's TrainerClassAttributes bytes the
         -- computer's AI reads (AiMove / AiSwitch), on the computer's seats
-        -- alone -- copied, never aliased (`copyTrainerItems`).  Absent is
-        -- AIChooseMove with no layers, no item and no switch.
+        -- alone -- copied, the source never written.  Absent is AIChooseMove
+        -- with no layers, no item and no switch.
         aiFlags    = computerSide and optInt(entry.aiFlags, 0, 65535) or nil,
         itemSwitch = computerSide and optInt(entry.itemSwitch, 0, 65535) or nil,
-        baseReward = computerSide and optInt(entry.baseReward, 0, 255) or nil,
-        trainerItems = computerSide and copyTrainerItems(entry.trainerItems) or nil,
+        -- wEnemyTrainerItem1 / 2 and wEnemyTrainerBaseReward: the trainer's
+        -- kit, shared by every seat the trainer is dealt across
+        -- (`trainerKitOf`).
+        trainerKit = computerSide and trainerKitOf(kits, entry) or nil,
         -- Contract K23 (Gold / Silver's FindEnemyMonsThatResistPlayer).
         countSpeciesTypes = computerSide and copyCountTypes(entry.countSpeciesTypes) or nil,
         connected = true,
@@ -5788,6 +5817,18 @@ function Battle:_hitAnimParam(fighter, mon, effectId, hit)
   return param
 end
 
+-- BattleCommand_TripleKick (move_effects/triple_kick.asm, pokegold the same):
+-- wCurDamage added to itself wBattleAnimParam times (`ld b, a / inc b`, the
+-- word pinned at $ffff on a carry: Damage.multiply) -- the parameter
+-- `kickcounter` raises after every kick, which `lowersub` started at 1 when
+-- it lowered the user's own SUBSTITUTE (`_hitAnimParam`, the battle scene
+-- on).  So kick `kick` deals x kick normally and x kick + 1 from behind the
+-- user's substitute (x2 / x3 / x4) -- not for a called TRIPLE KICK, whose
+-- `lowersub` returns at CheckUserIsCharging.
+function Battle:_kickTimes(fighter, mon, kick)
+  return (self:_hitAnimParam(fighter, mon, Effects.TRIPLE_KICK, kick) or 0) + 1
+end
+
 -- ResetTurn (engine/battle/effect_commands.asm): wPlayerCharging /
 -- wEnemyCharging set to 1, wAlreadyDisobeyed 0, then DoMove for the move
 -- METRONOME, MIRROR MOVE or SLEEP TALK loaded -- whose UsedMoveText, DoTurn,
@@ -6493,7 +6534,7 @@ function Battle:_damagingMove(fighter, mon, target, defender, move, effectId, ct
       end
     else
       struck = self:_hitDamage(fighter, mon, target, defender, move, effectId, struggling,
-        { kicks = (effectId == Effects.TRIPLE_KICK) and 1 or nil })
+        { kicks = (effectId == Effects.TRIPLE_KICK) and self:_kickTimes(fighter, mon, 1) or nil })
     end
     struck.damage = self:_vary(struck.damage)
   elseif rollLate then
@@ -6578,7 +6619,7 @@ function Battle:_damagingMove(fighter, mon, target, defender, move, effectId, ct
     if index > 1 then
       if defender.hp <= 0 then break end
       struck = self:_hitDamage(fighter, mon, target, defender, move, effectId, struggling,
-        { kicks = (effectId == Effects.TRIPLE_KICK) and index or nil })
+        { kicks = (effectId == Effects.TRIPLE_KICK) and self:_kickTimes(fighter, mon, index) or nil })
       struck.damage = self:_vary(struck.damage)
       -- BattleCommand_EndLoop's `.loop_back_to_critical` (pokecrystal
       -- engine/battle/effect_commands.asm :5320, pokegold :5277) re-enters
@@ -6853,6 +6894,15 @@ end
 --     `stab`, so no matchup either -- then the roll, `failuretext` (a miss ends
 --     the move here), applydamage, `checkfaint` (a knockout ends it) and
 --     `buildopponentrage`;
+--   * each member that swings plays BEAT UP's clip: the script runs
+--     `moveanimnosub` after `damagevariation` on every pass EndLoop's
+--     `.loop_back_to_critical` (effect_commands.asm :5320, pokegold :5277)
+--     brings it back to (data/moves/effects.asm :2041-2062), and a skipped
+--     member's SkipToBattleCommand passes it -- so one `anim` a swing, after
+--     "<MEMBER>'s attack!" and ahead of its HP; the first swing's is the use's
+--     own (`useAnim`).  MoveAnimNoSub's `xor a` zeroes wBattleAnimParam for
+--     BEAT_UP (no `.alternate_anim` row), so no `amount`: BattleAnim_BeatUp's
+--     `anim_if_param_equal $0, .current_mon` is taken every pass;
 --   * a party of one is EndLoop's `.only_one_beatup` after the first pass:
 --     BeatUpFailText ("But it failed!" when nobody swung) and no `kingsrock`;
 --     otherwise, after the last pass -- no "Hit N times!" -- BeatUpFailText
@@ -6893,6 +6943,7 @@ function Battle:_beatUp(fighter, mon, target, defender, move, effectId, verdict)
     or max(1, int(defender.stats.def, 1))
   local boost = Items.typeBoostPercent(mon, self:_typeIdOf(move.type))
   local hitOnce = false
+  local swings = 0
   for i = 1, #party do
     local member = party[i]
     local isCrit = self:_critical(mon, move)
@@ -6913,6 +6964,11 @@ function Battle:_beatUp(fighter, mon, target, defender, move, effectId, verdict)
         self:_say(Effects.missLine(mon))
         self:_markLastMove(mon, choice.move)
         return
+      end
+      -- This swing's `moveanimnosub` (the first's is `useAnim`).
+      swings = swings + 1
+      if swings > 1 then
+        self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = move.id })
       end
       if isCrit then self:_say("A critical hit!") end
       self:_strike(target, defender, d, fighter)

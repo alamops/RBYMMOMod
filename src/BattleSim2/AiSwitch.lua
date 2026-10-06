@@ -52,11 +52,15 @@
 -- the hook (Turn) maintains where the cart writes it, with the default this
 -- file reads when it is absent:
 --
---   fighter.trainerItems   wEnemyTrainerItem1 / 2 (K16): a list, cart slot
+--   fighter.trainerKit     the trainer's kit (K16), one per trainer -- Turn
+--                          shares it across every seat the trainer is dealt
+--                          (`trainerKitOf`) -- holding the two below; absent,
+--                          they are read off the fighter itself (`kitOf`).
+--   kit.trainerItems       wEnemyTrainerItem1 / 2 (K16): a list, cart slot
 --                          order kept; an id, "NO_ITEM" / "" / false / 0 for
 --                          an empty slot, or the item's number.  Absent: no
 --                          item.  A used slot becomes "NO_ITEM".
---   fighter.baseReward     wEnemyTrainerBaseReward (K16), 0..255; default 0.
+--   kit.baseReward         wEnemyTrainerBaseReward (K16), 0..255; default 0.
 --                          The bug's third byte; set to 0 when it is "used".
 --   fighter.itemSwitch     TRNATTR_AI_ITEM_SWITCH (K16): its low byte is what
 --                          `bit` reads; default 0 (no switch, no flags).
@@ -778,6 +782,15 @@ local function isHighestLevel(view)
   return own ~= nil and max(0, int(own.level, 0)) >= top
 end
 
+-- The kit AI_TryItem reads and spends: the trainer's shared one when Turn made
+-- it (`fighter.trainerKit`), else the seat's own `trainerItems` /
+-- `baseReward` fields.
+local function kitOf(fighter)
+  if type(fighter.trainerKit) == "table" then return fighter.trainerKit end
+  return fighter
+end
+M.kitOf = kitOf
+
 -- AI_TryItem.  `de` starts at wEnemyTrainerItem1 and, on a row that matches
 -- item 2, stays on it -- a DontUse leaves it there, so the rows after compare
 -- item 2 and the byte after it, wEnemyTrainerBaseReward ("AI might use its
@@ -785,11 +798,11 @@ end
 -- byte after that is wEnemyTrainerAIFlags, never written (0: ClearBattleRAM
 -- fills wBattle), so `de` goes no further.  Returns the decision or nil.
 function M.tryItem(view)
-  local fighter = view.fighter
-  local items = type(fighter.trainerItems) == "table" and fighter.trainerItems or {}
+  local kit = kitOf(view.fighter)
+  local items = type(kit.trainerItems) == "table" and kit.trainerItems or {}
   local bytes = {
     M.itemByte(items[1]), M.itemByte(items[2]),
-    max(0, int(fighter.baseReward, 0)) % 256, 0,
+    max(0, int(kit.baseReward, 0)) % 256, 0,
   }
   if bytes[1] == 0 and bytes[2] == 0 then return nil end
   if not isHighestLevel(view) then return nil end
@@ -1000,15 +1013,17 @@ function M.useItem(battle, fighter, decision)
   -- set (Turn's action order: an item is taken before every move),
   -- SUBSTATUS_BIDE and _RAGE go, the Fury Cutter, Protect and Rage counts are
   -- 0, and -- Crystal only -- wLastEnemyCounterMove.
+  -- The trainer's kit: one co-op seat's use is gone for its partner too.
+  local kit = kitOf(fighter)
   local slot = int(decision.trainerSlot, 0)
   if slot == 1 or slot == 2 then
-    if type(fighter.trainerItems) ~= "table" then fighter.trainerItems = {} end
+    if type(kit.trainerItems) ~= "table" then kit.trainerItems = {} end
     for i = 1, slot - 1 do
-      if fighter.trainerItems[i] == nil then fighter.trainerItems[i] = "NO_ITEM" end
+      if kit.trainerItems[i] == nil then kit.trainerItems[i] = "NO_ITEM" end
     end
-    fighter.trainerItems[slot] = "NO_ITEM"
+    kit.trainerItems[slot] = "NO_ITEM"
   elseif slot == 3 then
-    fighter.baseReward = 0
+    kit.baseReward = 0
   end
   mon.bide = nil
   mon.furyCutter = 0

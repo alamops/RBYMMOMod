@@ -1049,8 +1049,8 @@ function copyBag(raw) {
 }
 
 // Contract K16's wEnemyTrainerItem1 / 2 (0..2 ids in the cart's slot order),
-// COPIED: the hub hands one trainer's table to each of its NPC seats, and
-// AiSwitch.useItem empties the slot it used on the seat's own list. An id is
+// COPIED: AiSwitch.useItem empties the slot it used in the trainer's kit
+// (`trainerKitOf`), never in the source the hub handed over. An id is
 // kept as the string it is, a number as the byte it names; anything else is
 // an empty slot. Twin of Turn.lua's copyTrainerItems.
 function copyTrainerItems(raw) {
@@ -1067,6 +1067,23 @@ function copyTrainerItems(raw) {
     }
   }
   return out;
+}
+
+// The trainer's kit (contract K16; the Lua twin explains): seats whose entries
+// carry the SAME `trainerItems` object -- the hubs hand every NPC seat of one
+// trainer the same one -- share one copied kit, so an item either seat uses
+// (or the base reward it zeroes) is gone for both; any other entry gets its
+// own. Sameness is object identity, as Lua's table key is.
+function trainerKitOf(kits, entry) {
+  const source = entry.trainerItems;
+  const keyed = source !== null && typeof source === 'object';
+  if (keyed && kits.has(source)) return kits.get(source);
+  const kit = {
+    trainerItems: copyTrainerItems(source),
+    baseReward: optInt(entry.baseReward, 0, 255),
+  };
+  if (keyed) kits.set(source, kit);
+  return kit;
 }
 
 // Contract K23's `countSpeciesTypes` (1..2 chart indices), copied the same way.
@@ -4919,6 +4936,14 @@ class Battle {
     return param === 0 ? undefined : param;
   }
 
+  // BattleCommand_TripleKick: wCurDamage times wBattleAnimParam + 1 -- the
+  // parameter `kickcounter` raises, which `lowersub` started at 1 behind the
+  // user's own SUBSTITUTE (`_hitAnimParam`): x2 / x3 / x4 there, not for a
+  // called TRIPLE KICK. The Lua twin cites it.
+  _kickTimes(fighter, mon, kick) {
+    return (this._hitAnimParam(fighter, mon, Effects.TRIPLE_KICK, kick) || 0) + 1;
+  }
+
   // ResetTurn: wPlayerCharging / wEnemyCharging set to 1, then DoMove for the
   // move METRONOME, MIRROR MOVE or SLEEP TALK loaded (`userCharging`).
   _callMove(fighter, mon, opts) {
@@ -5523,7 +5548,7 @@ class Battle {
         }
       } else {
         struck = this._hitDamage(fighter, mon, target, defender, move, effectId, struggling,
-          { kicks: effectId === Effects.TRIPLE_KICK ? 1 : null });
+          { kicks: effectId === Effects.TRIPLE_KICK ? this._kickTimes(fighter, mon, 1) : null });
       }
       struck.damage = this._vary(struck.damage);
     } else if (rollLate) {
@@ -5600,7 +5625,7 @@ class Battle {
       if (index > 1) {
         if (defender.hp <= 0) break;
         struck = this._hitDamage(fighter, mon, target, defender, move, effectId, struggling,
-          { kicks: effectId === Effects.TRIPLE_KICK ? index : null });
+          { kicks: effectId === Effects.TRIPLE_KICK ? this._kickTimes(fighter, mon, index) : null });
         struck.damage = this._vary(struck.damage);
         // BattleCommand_EndLoop's `.loop_back_to_critical` (pokecrystal :5320,
         // pokegold :5277): every later hit runs its own `moveanimnosub` --
@@ -5815,7 +5840,9 @@ class Battle {
   // attack!", DamageCalc on its level, base Attack and the target's base
   // Defense, the roll, a miss ending the move, applydamage, `checkfaint`,
   // `buildopponentrage` -- a party of one ending after the first pass with no
-  // `kingsrock`, otherwise BeatUpFailText and `kingsrock`.
+  // `kingsrock`, otherwise BeatUpFailText and `kingsrock`. Each swing plays
+  // BEAT UP's clip (`moveanimnosub` on every pass EndLoop loops back to; the
+  // first's is `useAnim`), with no `amount`: MoveAnimNoSub zeroes the param.
   _beatUp(fighter, mon, target, defender, move, effectId, verdict) {
     const choice = fighter.choice;
     if (isWildSeat(this.mode, fighter)) {
@@ -5850,6 +5877,7 @@ class Battle {
       && targetBase.def !== null) ? targetBase.def : Math.max(1, int(defender.stats.def, 1));
     const boost = Items.typeBoostPercent(mon, this._typeIdOf(move.type));
     let hitOnce = false;
+    let swings = 0;
     for (let i = 0; i < party.length; i += 1) {
       const member = party[i];
       const isCrit = this._critical(mon, move);
@@ -5873,6 +5901,9 @@ class Battle {
           this._markLastMove(mon, choice.move);
           return;
         }
+        // This swing's `moveanimnosub` (the first's is `useAnim`).
+        swings += 1;
+        if (swings > 1) this._emit('anim', { slot: fighter.slot, side: fighter.side, text: move.id });
         if (isCrit) this._say('A critical hit!');
         this._strike(target, defender, d, fighter);
         this._settleBond();
@@ -7628,7 +7659,9 @@ class Battle {
  *   sides = { a: [ { playerId, name, mons, bag, badges } ], b: [ ... ] }
  *     a computer seat (side b against the computer) may add contract K16's
  *     aiFlags, itemSwitch, baseReward and trainerItems, and K23's
- *     countSpeciesTypes -- each copied onto its own seat
+ *     countSpeciesTypes -- each copied onto its own seat, but for the
+ *     trainer's kit (trainerItems, baseReward), shared by the seats whose
+ *     entries carry the same trainerItems object (`trainerKitOf`)
  *
  * `badges` is kept only on side a of a BADGE_MODES fight and dropped
  * everywhere else, silently: a PvP upload that carries one is a well-formed
@@ -7646,6 +7679,9 @@ function attempt(opts) {
   const self = new Battle(opts);
 
   const sides = isTable(opts.sides) ? opts.sides : {};
+  // One trainer, one kit (`trainerKitOf`): the kits built so far, by the
+  // `trainerItems` source object their seats' entries carried.
+  const kits = new Map();
   for (const side of SIDES) {
     const roster = Array.isArray(sides[side]) ? sides[side] : [];
     if (roster.length === 0) return refuse(`side ${side} has nobody on it`);
@@ -7699,13 +7735,14 @@ function attempt(opts) {
         bag: computerSide ? null : copyBag(entry.bag),
         active: firstLiving(mons),
         // Contract K16: the trainer's TrainerClassAttributes bytes the
-        // computer's AI reads, on the computer's seats alone -- copied, never
-        // aliased (`copyTrainerItems`). Absent is AIChooseMove with no layers,
-        // no item and no switch.
+        // computer's AI reads, on the computer's seats alone -- copied, the
+        // source never written. Absent is AIChooseMove with no layers, no item
+        // and no switch.
         aiFlags: computerSide ? optInt(entry.aiFlags, 0, 65535) : null,
         itemSwitch: computerSide ? optInt(entry.itemSwitch, 0, 65535) : null,
-        baseReward: computerSide ? optInt(entry.baseReward, 0, 255) : null,
-        trainerItems: computerSide ? copyTrainerItems(entry.trainerItems) : null,
+        // wEnemyTrainerItem1 / 2 and wEnemyTrainerBaseReward: the trainer's
+        // kit, shared by every seat the trainer is dealt across (`trainerKitOf`).
+        trainerKit: computerSide ? trainerKitOf(kits, entry) : null,
         // Contract K23 (Gold / Silver's FindEnemyMonsThatResistPlayer).
         countSpeciesTypes: computerSide ? copyCountTypes(entry.countSpeciesTypes) : null,
         connected: true,

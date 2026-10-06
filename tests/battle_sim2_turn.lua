@@ -4441,7 +4441,7 @@ do
   for _, event in ipairs(events) do if event.t == "stat" and event.slot == 3 then rose = event end end
   eq(rose and rose.stage, 1, "RP2: the computer's X ATTACK still raises its stage (RaiseStat)")
   ok(battle.byId.p1.mons[1].xAccuracy == true, "RP2: X ACCURACY still sets its bit")
-  eq(battle.byId[foe].trainerItems[1], "NO_ITEM", "RP2: ...and AI_TryItem clears the slot it used")
+  eq(battle.byId[foe].trainerKit.trainerItems[1], "NO_ITEM", "RP2: ...and AI_TryItem clears the slot it used")
   do
     local other, otherFoe = fight({ mode = "coop_npc", seed = 3,
       trainerItems = { "DIRE_HIT" }, itemSwitch = 0x10,
@@ -4963,6 +4963,47 @@ do
   ok(kicks == "0" or kicks == "0,1" or kicks == "0,1,2", "H2f: TRIPLE KICK -- kickcounter, one up a kick: " .. kicks)
 end
 
+-- H2's last round: BattleCommand_TripleKick multiplies wCurDamage by
+-- wBattleAnimParam + 1, which `lowersub` starts at 1 behind the user's own
+-- SUBSTITUTE -- the same seed's first kick deals twice the plain one's (the
+-- roll after it, so within one) -- and BEAT UP plays a clip a swing.
+do
+  local function firstKick(substitute)
+    local battle, foe = fight({ mode = "1v1", seed = 23,
+      a = { held({ species = "Alpha", maxHp = 900, spe = 90, moves = { hit("TRIPLE_KICK", 10, 0, 112) } }) },
+      b = { held({ species = "Beta", maxHp = 999, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+    drain(battle)
+    battle.byId.p1.mons[1].substitute = substitute
+    local events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+    local clip, dealt = nil, nil
+    for _, event in ipairs(events) do
+      if event.t == "anim" and event.text == "TRIPLE_KICK" and not clip then clip = event.amount or 0 end
+      if event.t == "damage" and event.slot == 3 and not dealt then dealt = event.amount end
+    end
+    return clip, dealt
+  end
+  local plainClip, plain = firstKick(0)
+  local subClip, behind = firstKick(50)
+  eq(plainClip, 0, "H2f: the first kick's parameter is 0")
+  eq(subClip, 1, "H2f: ...1 behind the user's SUBSTITUTE (`lowersub`)")
+  ok(math.abs(behind - 2 * plain) <= 1, "H2f: ...so the cart's first kick is x2: " .. plain .. " -> " .. behind)
+  local battle, foe = fight({ mode = "1v1", seed = 24,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90, moves = { hit("BEAT_UP", 10, 0, 116) } }),
+          held({ species = "Gamma", maxHp = 300, spe = 40, moves = { hit("tap", 1) } }),
+          held({ species = "Iota", maxHp = 300, hp = 0, spe = 40, moves = { hit("tap", 1) } }),
+          held({ species = "Kappa", maxHp = 300, spe = 40, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 999, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  local shape = {}
+  for _, event in ipairs(events) do
+    if event.t == "anim" and event.text == "BEAT_UP" then shape[#shape + 1] = "clip" .. (event.amount and "!" or "") end
+    if event.t == "msg" and plainLine(event.text):find("'s attack!", 1, true) then shape[#shape + 1] = "line" end
+  end
+  eq(table.concat(shape, ","), "clip,line,line,clip,line,clip",
+     "H2f: BEAT UP -- the use's clip, then one a later swing, after its line; the fainted member none")
+end
+
 -- (11) SANDSTORM and a wrap: the HP bar first, then the line; a knockout
 --      waits for the faint check after the routine.
 do
@@ -5372,22 +5413,52 @@ do
               mons = { held({ species = "Gamma", spe = 80, maxHp = 900, moves = { hit("wait", 0, 0, 85) } }) } } },
       b = { npcEntry("b1"), npcEntry("b2") } } })
   end
-  -- K16: the trainer's bytes reach each computer seat as its own copy.
+  -- K16: the trainer's bytes reach each computer seat; its items and base
+  -- reward are ONE kit for the trainer (`trainerKitOf`): seats handed the
+  -- same `trainerItems` table -- the hubs' shape -- share one copy.
   local items, types = { "POTION", "X_ATTACK" }, { 3 }
   local battle = seatsOf("coop_npc", { aiFlags = 7, itemSwitch = 1, baseReward = 18,
     trainerItems = items, countSpeciesTypes = types })
   local b1, b2, a1 = battle.byId.b1, battle.byId.b2, battle.byId.a1
   eq(b1.aiFlags, 7, "K16: aiFlags on the computer's seat")
   eq(b1.itemSwitch, 1, "K16: itemSwitch")
-  eq(b1.baseReward, 18, "K16: baseReward")
-  ok(b1.trainerItems ~= items and b2.trainerItems ~= items and b1.trainerItems ~= b2.trainerItems,
-     "K16: trainerItems copied per seat, never aliased")
-  eq(table.concat(b1.trainerItems, ","), "POTION,X_ATTACK", "K16: ...in the cart's slot order")
+  eq(b1.trainerKit.baseReward, 18, "K16: baseReward, in the trainer's kit")
+  ok(b1.trainerKit == b2.trainerKit, "K16: one trainer, one kit -- shared by both seats")
+  ok(b1.trainerKit.trainerItems ~= items, "K16: ...a copy: the source is never written")
+  eq(table.concat(b1.trainerKit.trainerItems, ","), "POTION,X_ATTACK", "K16: ...in the cart's slot order")
   ok(b1.countSpeciesTypes ~= types and b1.countSpeciesTypes[1] == 3, "K23: countSpeciesTypes copied")
-  b1.trainerItems[1] = "NO_ITEM"
-  eq(b2.trainerItems[1], "POTION", "K16: a seat's spent item leaves its partner's")
   eq(a1.aiFlags, nil, "K16: a player's seat keeps none")
-  eq(a1.trainerItems, nil, "K16: ...nor items")
+  eq(a1.trainerKit, nil, "K16: ...nor a kit")
+  -- An item either seat's AI_TryItem uses is gone for its partner; the base
+  -- reward's zero is shared too.  Both seats at a quarter of their HP with
+  -- one POTION: the first seat's AI drinks it, the second finds NO_ITEM.
+  local pot = { "POTION" }
+  local shared = seatsOf("coop_npc", { trainerItems = pot, baseReward = 0x12 })
+  for _, id in ipairs({ "b1", "b2" }) do
+    local m = shared.byId[id].mons[1]
+    m.hp = math.floor(m.maxHp / 4)
+  end
+  shared:submitChoice("a1", { action = "fight", move = 0 })
+  shared:submitChoice("a2", { action = "fight", move = 0 })
+  shared:autoPick("b1"); shared:autoPick("b2")
+  local potions = 0
+  for _, event in ipairs(drain(shared)) do
+    if event.t == "item" and event.text == "POTION" then potions = potions + 1 end
+  end
+  eq(potions, 1, "K16: one POTION for the trainer, not one a seat")
+  eq(shared.byId.b2.trainerKit.trainerItems[1], "NO_ITEM", "K16: ...the slot empty for both seats")
+  eq(pot[1], "POTION", "K16: ...and the source untouched")
+  shared.byId.b1.trainerKit.baseReward = 0
+  eq(shared.byId.b2.trainerKit.baseReward, 0, "K16: the base reward is the kit's too")
+  -- Seats with tables of their own are separate trainers' kits.
+  local apart = battleOf({ mode = "coop_npc", seed = 31, sides = {
+    a = { { playerId = "a1", name = "Ann", mons = { held({ species = "Alpha", spe = 90, maxHp = 900,
+      moves = { hit("wait", 0, 0, 85) } }) } } },
+    b = { { playerId = "b1", name = "Bob", trainerItems = { "POTION" }, mons = { held({ species = "Beta",
+            spe = 10, maxHp = 900, moves = { hit("tap", 5) } }) } },
+          { playerId = "b2", name = "Bob", trainerItems = { "POTION" }, mons = { held({ species = "Delta",
+            spe = 10, maxHp = 900, moves = { hit("tap", 5) } }) } } } } })
+  ok(apart.byId.b1.trainerKit ~= apart.byId.b2.trainerKit, "K16: two tables, two kits")
   local link = seatsOf("coop_pvp", { aiFlags = 7, trainerItems = items })
   eq(link.byId.b1.aiFlags, nil, "K16: a link fight's seats keep none")
 
@@ -5478,7 +5549,7 @@ do
   reward:submitChoice("p1", { action = "fight", move = 0 }); reward:autoPick("p2")
   local used = drain(reward)
   ok(said(used, "Bob used X ATTACK on Beta!"), "AI_TryItem reads the base reward as an item")
-  eq(reward.byId.p2.baseReward, 0, "...and spends it")
+  eq(reward.byId.p2.trainerKit.baseReward, 0, "...and spends it")
   eq(reward.byId.p2.mons[1].stages.atk, 1, "...an X ATTACK all the same")
   ok(not said(used, "Beta used tap!"), "the item is the computer's turn")
 

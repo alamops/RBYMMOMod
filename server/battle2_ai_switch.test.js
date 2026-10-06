@@ -85,7 +85,11 @@ function fight(o) {
   const npc = battle.byId.get('npc');
   const foe = battle.byId.get('p1');
   if (o.active) npc.active = o.active;
-  for (const [k, v] of Object.entries(o.fields || {})) npc[k] = v;
+  // `trainerItems` / `baseReward` go in the trainer's kit (Turn's `trainerKit`).
+  for (const [k, v] of Object.entries(o.fields || {})) {
+    if ((k === 'trainerItems' || k === 'baseReward') && npc.trainerKit) npc.trainerKit[k] = v;
+    else npc[k] = v;
+  }
   const mon = npc.mons[npc.active - 1];
   for (const [k, v] of Object.entries(o.mon || {})) mon[k] = v;
   const foeMon = foe.mons[foe.active - 1];
@@ -453,8 +457,8 @@ test('AI_TryItem', () => {
     flags: A.ALWAYS_USE, mon: { status: 'poison' } });
   eq(bug, 'item FULL_HEAL 3', 'the base reward read as FULL HEAL');
   A.useItem(f.battle, f.npc, decision);
-  eq(f.npc.baseReward, 0, '...cleared');
-  eq(f.npc.trainerItems[1], 'POTION', '...the POTION stays');
+  eq(f.npc.trainerKit.baseReward, 0, '...cleared');
+  eq(f.npc.trainerKit.trainerItems[1], 'POTION', '...the POTION stays');
   eq(f.mon.status, null, '...the FULL HEAL works');
   eq(item({ fields: { trainerItems: ['FULL_HEAL', 'POTION'] }, flags: A.ALWAYS_USE,
     mon: { status: 'poison' } })[0], 'nil', 'item 1 never looked at again');
@@ -485,7 +489,7 @@ test('EnemyUsed* and the tail', () => {
   eq(events[0].text, 'LASS AMY\nused POTION\non Ace!', 'the line');
   eq(events[2].amount, 20, '...20 HP');
   eq(f.mon.hp, 30, '...on the monster');
-  eq(f.npc.trainerItems[0], 'NO_ITEM', '...slot cleared');
+  eq(f.npc.trainerKit.trainerItems[0], 'NO_ITEM', '...slot cleared');
 
   [f, events] = use({ id: 'HYPER_POTION', mon: { hp: 25 } });
   eq(f.mon.hp, 100, 'HYPER POTION');
