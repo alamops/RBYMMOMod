@@ -104,6 +104,17 @@ A monster a move knocks out keeps its 0 HP on the field until the move has finis
 - **Moves:** a move's own animation for a residual or weather beat (a trap's per-turn hit, a weather turn) is the move id.
 - **Client:** every id has a look (Vfx / Battlefield). An unknown `_ANIM` id is skipped, as today.
 
+### K22: quiet animations (added in wave 2)
+
+- An `anim` event whose id is a move id but which is **not** the acting monster's own use of its move carries `quiet = true`: Leech Seed's residual ABSORB on the seeder's seat, a charge turn's TELEPORT (pokered ChargeEffect for FLY), a trap's per-turn hit, a weather turn's move animation, and any other residual / charge beat the referees send as a move id.
+- Meaning: play the look only. No trainer callout bubble, no lunge. `_ANIM` ids are never callouts already.
+- Optional boolean on `anim` in both referees' events FIELDS, read by Wire / sanitize on Gen 1 / 2 readers only.
+- Also from wave 1's audit: the cart plays **no** move animation for a move that missed (pokered `handleIfPlayerMoveMissed`, EXPLODE_EFFECT excepted; pokecrystal BattleCommand_MoveAnim's `wAttackMissed` test), BLOCKBALL_ANIM follows TOSS_ANIM, and ChargeEffect / BideEffect play their own turn-1 animations (XSTATITEM_ANIM, TELEPORT for FLY, SLIDE_DOWN_ANIM for DIG).
+
+### K23: Gold's slot-1 resist reading
+
+- Gold's FindEnemyMonsThatResistPlayer starts at wOTPartyCount, so its first iteration reads the party **count** as a species number. The NPC `BATTLE_PARTY` gains `countSpeciesTypes`: the 1–2 type ids of the species whose national number is the party's size, stamped by the client on Gold (family `gs`) only. Crystal (fixed walk) ignores it.
+
 ### K21: LURE / HEAVY BALL fields
 
 - **Gen 2 mon sheet:** gains `weight` (0..65535, the Pokédex weight word). The client stamps it on a wild foe from `data.gen2Pokedex[species].weight`.
