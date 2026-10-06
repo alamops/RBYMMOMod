@@ -1358,10 +1358,11 @@ function M:enter()
   -- song labels (Gold has no data.audio.battle[kind] ladder). See Gen.
   -- Gen 3: the song battle_bridge.lua would pick (the trainer's own theme by
   -- class, the wild theme, or the link one for two parties), through
-  -- Gen.playBattleMusic's Gen 3 arm.
+  -- Gen.playBattleMusic's Gen 3 arm -- or the fight's own theme a solo
+  -- double was handed (`playBattleTheme3`).
   local eng = engine
   if self.gen3 then
-    Gen.playBattleMusic(self.game, self:gen3MusicOpts())
+    self:playBattleTheme3()
   elseif eng and eng.Music then
     Gen.playBattleMusic(self.game, {
       Music = eng.Music,
@@ -1414,8 +1415,10 @@ function M:enter()
       pcall(Sound.play, self.game.data, Gen.sfx(self.game, "Trainer_Appeared"))
     end
     if self.gen3 then
-      -- The cart's own opening: "BUG CATCHER RICK would like to battle!".
-      self:say(("%s\nwould like to battle!"):format(self:trainerIntroName()))
+      -- The cart's own opening: "BUG CATCHER RICK would like to battle!" --
+      -- or, for a solo double's two trainers, both of them at once
+      -- (`openingLine3`).
+      self:say(self:openingLine3())
     elseif Gen.generation(self.game) == 2 then
       -- pokecrystal WantsToBattleText: "<ENEMY>\nwants to battle!".
       self:say(("%s\nwants to battle!"):format(self:trainerIntroName()))
@@ -1850,6 +1853,9 @@ function M:update(dt)
         if type(next) == "table" then
           self.acting = next.from or self.acting
           fromSlot = next.from
+          -- A solo double's ending line said with a trainer on the field
+          -- (`sayTrainer3`): that trainer comes in as its line does.
+          if next.trainer3 ~= nil then self.endTrainer3 = next.trainer3 or nil end
           next = next.text
         end
         -- Hub / playEvents lines skip M:say, so wrap here too: a single long
@@ -2436,9 +2442,22 @@ function M:updateCommand(input)
       self.switchIndex = 1
       self.passAction = nil
       self.phase = "switch"
+    elseif command == "ITEM" and self:bagRefused3() then
+      -- A facility with no bag (contract C3 `rules.bag == false`): the cart
+      -- says so and the action menu stays (pret battle_main.c:4221 -- the
+      -- Frontier but the Pyramid, the e-Reader trainer --
+      -- BattleScript_ActionSelectionItemsCantBeUsed).
+      self.phase = "messages"
+      self.after = "choose"
+      self:say(self:itemsRefusedLine3())
     elseif command == "ITEM" then
       self.itemIndex = 1
       self.phase = "item"
+    elseif command == "RUN" and self:forfeits3() then
+      -- A facility's RUN is a forfeit, asked first (contract C3
+      -- `rules.forfeit`; pret battle_main.c:4321 -- the Frontier and the
+      -- Trainer Hill -- BattleScript_AskIfWantsToForfeitMatch).
+      self:askForfeit3()
     elseif command == "RUN" then
       -- Three different questions behind one command.
       --
@@ -3765,6 +3784,30 @@ function M:updateRunAsk(input, dt)
   -- behind a batch of messages (see the branch order in `update`).
   ask.clock = (ask.clock or 0) + (dt or 0)
 
+  -- A solo double's facility forfeit (`askForfeit3`): the cart's own YES /
+  -- NO -- the cursor on NO, UP / DOWN between them, A answers, B is NO
+  -- (pret battle_controller_player.c:2591 PlayerHandleYesNoBox, :1420
+  -- PlayerHandleYesNoInput) -- under the same settle floor as every prompt
+  -- here.  YES files this seat's RUN, which the referee plays as the forfeit
+  -- (pret STATE_SELECTION_SCRIPT_MAY_RUN: B_ACTION_RUN for this battler, the
+  -- next one still asked); NO goes back to the action menu, nothing filed.
+  if ask.role == "forfeit" then
+    ask.index = ask.index or RUN_DEFAULT
+    local moved = listPress(ask.index, #RUN_ANSWERS, input)
+    if moved then
+      ask.index = moved
+      return
+    end
+    if ask.clock < MSG_MIN_DWELL then return end
+    if input:wasPressed("a") then
+      self.runAsk = nil
+      if ask.index == 1 then self:commit({ slot = ask.slot or self.mine, kind = "run" }) end
+    elseif input:wasPressed("b") then
+      self.runAsk = nil
+    end
+    return
+  end
+
   -- "confirming" is the mediated path's own question (see `mediatedRunAsk`) and
   -- is driven by exactly the same two answers, the same safe default and the
   -- same settle floor -- only who is being asked differs, and that is a fact
@@ -3821,6 +3864,9 @@ function M:drawRunAsk()
   local ask = self.runAsk
   if not ask then return end
   local name = ask.name
+  if ask.role == "forfeit" then
+    return self:drawList(RUN_ANSWERS, ask.index or RUN_DEFAULT, "FORFEIT?")
+  end
   if ask.role == "confirming" then
     -- Its own words, because the honest sentence is different: nobody is being
     -- asked for permission, and a title that named the partner would be
@@ -4339,6 +4385,12 @@ function M:playEvents(events)
       elseif event.slot == self.mine then
         self.replacing = true
         self.switchIndex = 1
+      elseif self.soloDouble and waiting and waiting.owner == nil then
+        -- A solo double's computer seat -- a trainer's, the partner's -- picks
+        -- in silence: the cart's controller chooses and the send-out line is
+        -- the first word of it (pret OpponentHandleChoosePokemon,
+        -- PlayerPartnerHandleChoosePokemon print nothing).  The wait line is
+        -- co-op's, for a person on the other end.
       else
         self:say((event.trainer or "They") .. " is choosing\nwho to send out...")
       end
@@ -4909,14 +4961,19 @@ function M:stepEvolve()
       line = EvolveFx.stoppedLine(movie)
     end
   end
-  EvolveFx.restoreBattleMusic(self.game, {
-    Music = engine and engine.Music,
-    kind = self:musicKind(),
-    mode = self.mode,
-    trainer = self.trainer,
-    oppClass = self.oppClass,
-    partyIndex = self.partyIndex,
-  })
+  if self.song3 then
+    -- A solo double's own theme comes back, not the mode's (`playBattleTheme3`).
+    self:playBattleTheme3()
+  else
+    EvolveFx.restoreBattleMusic(self.game, {
+      Music = engine and engine.Music,
+      kind = self:musicKind(),
+      mode = self.mode,
+      trainer = self.trainer,
+      oppClass = self.oppClass,
+      partyIndex = self.partyIndex,
+    })
+  end
   self.shown = line
   self.msgClock = 0
 end
@@ -5169,14 +5226,18 @@ function M:snapDisplay()
   -- are the fallback's other half, and dropping them here would skip a
   -- prompt the player never answered.
   if self.evolving then
-    EvolveFx.restoreBattleMusic(self.game, {
-      Music = engine and engine.Music,
-      kind = self:musicKind(),
-      mode = self.mode,
-      trainer = self.trainer,
-      oppClass = self.oppClass,
-      partyIndex = self.partyIndex,
-    })
+    if self.song3 then
+      self:playBattleTheme3()
+    else
+      EvolveFx.restoreBattleMusic(self.game, {
+        Music = engine and engine.Music,
+        kind = self:musicKind(),
+        mode = self.mode,
+        trainer = self.trainer,
+        oppClass = self.oppClass,
+        partyIndex = self.partyIndex,
+      })
+    end
     self.evolving = nil
   end
   local kept = {}
@@ -7109,6 +7170,10 @@ function M:battlefieldSeats(theirs)
         -- Gen 3's field state on the seat: the substitute doll, Castform's
         -- form, a floater's lift (nil off Gen 3).
         if self.gen3 then self:gen3Seat(out[#out], slot, battler) end
+        -- Whose monster it is, where one side has two trainers on it: a solo
+        -- double's pair, and the partner beside us (Battlefield.plateModel's
+        -- `owner`; nil everywhere else, which draws the plate as it was).
+        out[#out].owner = self:seatOwnerLabel3(slot.index)
       end
     end
   end
@@ -7155,7 +7220,40 @@ function M:battlefieldAllyHumans()
     return tostring(a.id) < tostring(b.id)
   end)
   for _, h in ipairs(humans) do h._mine = nil end
+  -- A solo double's partner stands beside the player, second -- the seat
+  -- order of side a (pret battler 0 the player's, battler 2 his) -- with his
+  -- own party on his chip (`npcHuman3`).
+  local partner = self.partner3
+  if partner and self.soloDouble then
+    local slot = self.sim and self.sim:slot(partner.slot)
+    if slot and slot.side == mySide and not slot.gone then
+      humans[#humans + 1] = self:npcHuman3("partner", partner.trainer, partner.label,
+        slot.party)
+    end
+  end
   return humans
+end
+
+-- One computer trainer on a Gen 3 solo double's field, the shape the arena
+-- places (`battlefieldFoeHumans`' NPC entry): its own party for the chip,
+-- `trainerKey3` -- "a" / "b" / "partner", which seats it stands behind
+-- (`seatTrainer3`, `battlefieldHumanIndex`) -- and its figure: a foe as the
+-- cart's front pic when the record names one (the arena's NPC rule), the
+-- partner as his walker (the record's `gfxName` / `graphicsId`, Emerald's
+-- OBJ_EVENT_GFX_STEVEN), facing the field beside the player's own, which is
+-- the figure our side's layout reserves room for.
+function M:npcHuman3(key, trainer, label, party)
+  trainer = type(trainer) == "table" and trainer or {}
+  local name = trainer.name or trainer.trainerName
+  if type(name) ~= "string" or name == "" then name = label end
+  return {
+    id = trainer.id or trainer.trainerId or key,
+    name = name,
+    trainerPic = (key ~= "partner") and tonumber(trainer.trainerPic or trainer.pic) or nil,
+    spriteId = trainerWalkSpriteId(trainer, self.game),
+    party = party,
+    trainerKey3 = key,
+  }
 end
 
 function M:battlefieldFoeHumans()
@@ -7172,6 +7270,19 @@ function M:battlefieldFoeHumans()
     -- overworld vote → generic); on the rare nil, Battlefield draws the
     -- silhouette, which is still a trainer standing there.
     --
+    -- A solo double's two trainers stand side by side on the foe edge, each
+    -- with its own party on its chip (pret battle_main.c:1977 -- each fields
+    -- its own three), first the one behind slot 3, then slot 4's: the order
+    -- the plates stack in, so trainer i stands beside its own seat.
+    local pair = self.pair3
+    if pair and self.soloDouble then
+      local slotA = self.sim and self.sim:slot(pair.slotA)
+      local slotB = self.sim and self.sim:slot(pair.slotB)
+      return {
+        self:npcHuman3("a", pair.a, pair.labelA, slotA and slotA.party),
+        self:npcHuman3("b", pair.b, pair.labelB, slotB and slotB.party),
+      }
+    end
     -- One entry, and never a player's: this branch is the NPC shape, so the
     -- foe seats are ownerless by construction and no seat walk runs here.
     return {
@@ -7228,6 +7339,14 @@ function M:battlefieldHumanIndex(slotIndex)
       if h.id == slot.owner then
         return theirs and "foe" or "ally", i
       end
+    end
+  end
+  -- A solo double's computer seats each stand in front of their own trainer:
+  -- a pair's two, the partner beside us (`npcHuman3`'s `trainerKey3`).
+  if slot.owner == nil and (self.pair3 or self.partner3) then
+    local who = self:seatTrainer3(slotIndex)
+    for i, h in ipairs(who and humans or {}) do
+      if h.trainerKey3 == who.key then return theirs and "foe" or "ally", i end
     end
   end
   -- NPC trainer bubble host: any foe seat without a matching owner maps to
@@ -8693,7 +8812,18 @@ function M:drawBandWidgets()
   if self.runAsk and self.phase ~= "messages" then
     local ask = self.runAsk
     local name = ask.name
-    if ask.role == "confirming" then
+    if ask.role == "forfeit" then
+      -- The cart's question beside its YES / NO, on the action box's split
+      -- (`commandGridOpts`).
+      local opts = self:commandGridOpts()
+      if opts then
+        message(self:forfeitQuestion3(), opts.prompt)
+        list(RUN_ANSWERS, ask.index or RUN_DEFAULT,
+          { x = opts.x, y = opts.y, w = opts.w, h = opts.h })
+      else
+        list(RUN_ANSWERS, ask.index or RUN_DEFAULT, { title = "FORFEIT?" })
+      end
+    elseif ask.role == "confirming" then
       list(RUN_ANSWERS, ask.index or RUN_DEFAULT, { title = "RUN AWAY?" })
     elseif ask.role == "deciding" then
       list(RUN_ANSWERS, ask.index or RUN_DEFAULT,
@@ -11233,6 +11363,12 @@ function M:medRows(msg)
     -- An escape the referee narrated itself (Mediated.escapeLine): the
     -- outcome adds no second one (`onBattleOutcome`).
     if Mediated.escapeLine(msg.text) then self.escapeSaid = true end
+    -- ...and a facility forfeit the referee narrated ("<PLAYER> forfeited
+    -- the match!"): a solo double's outcome says it only when nobody did.
+    if self.soloDouble and type(msg.text) == "string"
+       and msg.text:lower():find("forfeit", 1, true) then
+      self.forfeitSaid3 = true
+    end
 
   elseif kind == "send" then
     -- Which of that seat's party is coming out, because the row `playEvents`
@@ -11277,6 +11413,12 @@ function M:medRows(msg)
     local lineFrom = #rows + 1
     if self:isMine(index) then
       say(("Go! %s!"):format(tostring(msg.text)))
+    elseif self:isPartnerSeat3(index) then
+      -- A solo double's partner's replacement is the cart's player-side line,
+      -- whoever's monster it is (pret battle_message.c:2107 STRINGID_SWITCHINMON:
+      -- GetBattlerSide == B_SIDE_PLAYER and a double -> sText_GoPkmn2, "Go!
+      -- <MON>!" -- the partner's battler 2 included, a quirk kept).
+      say(("Go! %s!"):format(tostring(msg.text)))
     elseif self:sentByTrainer(index) then
       -- A foe's send-out -- the trainer's, or another player's in a party
       -- fight -- is the cart's own line on Red and Gold
@@ -11290,8 +11432,9 @@ function M:medRows(msg)
           say(page)
         end
       else
-        say(("%s sent out\n%s!"):format(slot and slot.name or "Someone",
-          tostring(msg.text)))
+        -- A solo double's two trainers each say their own (`foeSendLine3`).
+        say(self:foeSendLine3(index, tostring(msg.text))
+          or ("%s sent out\n%s!"):format(slot and slot.name or "Someone", tostring(msg.text)))
       end
     end
     -- Gold: the send-out's line is held for the event behind it, and taken
@@ -12306,6 +12449,15 @@ function M:onBattleOutcome(msg)
   self.medPending[#self.medPending + 1] = { kind = "over", winner = winner,
     escaped = (msg.reason == "run" and not self.gen3) or nil }
   local why = MED_REASONS[msg.reason]
+  -- A solo double's facility forfeit (contract C3: `how = "forfeit"`, or a
+  -- `run` under `rules.forfeit`) is the cart's own line, once -- the
+  -- referee's when it said one (`forfeitSaid3`), else this screen's (pret
+  -- BattleScript_PrintPlayerForfeited, STRINGID_FORFEITEDMATCH) -- never
+  -- co-op's "Someone gave up." / "Someone ran away!".
+  if self.soloDouble and (msg.reason == "forfeit" or msg.how == "forfeit"
+      or (msg.reason == "run" and self:forfeits3())) then
+    why = (not self.forfeitSaid3) and self:forfeitedLine3() or nil
+  end
   -- A party's escape from a wild fight is the cart's "Got away safely!" and
   -- nothing more (Mediated.GOT_AWAY): said here only when the stream did not
   -- narrate the escape itself -- the Red referee's coop_wild roll says it, a
@@ -13301,6 +13453,26 @@ function M:gen3MusicOpts()
   return { kind = self:musicKind(), mode = self.mode, trainer = self.trainer }
 end
 
+-- The battle theme on Gen 3: the song a solo double was handed (`song3`,
+-- newSoloDouble's `song` -- the engine's own `opts.song`, a Frontier hall's
+-- or the Space Center's, the way battle_bridge.lua resolve_battle_song takes
+-- an explicit song first), else the one Gen.playBattleMusic resolves from the
+-- mode and the trainer.  A song the cart cannot play is said once and the
+-- ordinary theme plays instead.  MediatedBattle:playBattleTheme3's twin.
+function M:playBattleTheme3()
+  if not self.game then return false end
+  if self.song3 ~= nil then
+    if Gen3.audio.playSong(self.song3) then return true end
+    if not self.songWarned3 then
+      self.songWarned3 = true
+      mod.log:warn("this fight's own theme (%s) could not be played, so it takes the "
+        .. "ordinary battle music; re-import the ROM from the title screen if the "
+        .. "music is missing everywhere", tostring(self.song3))
+    end
+  end
+  return Gen.playBattleMusic(self.game, self:gen3MusicOpts()) ~= nil
+end
+
 -- ------- the bag
 
 function M:usableItems3()
@@ -13556,6 +13728,9 @@ function M:ownItemSet3()
   add(self.medMine)
   add(self.medNpcSheets)
   add(self.medWildSheets)
+  -- A solo double's second trainer and partner, described by this client.
+  add(self.medNpcSheetsB)
+  add(self.medPartnerSheets)
   self.ownItems3 = set
   return set
 end
@@ -14480,6 +14655,14 @@ function M:gen3ClassicModel()
     if pic then model.trainer = { pic = pic } end
     model.showTrainer = true
   end
+  -- A solo double's two trainers and its partner stand where the cart puts
+  -- them (`gen3Figures3`) -- the page's one centred trainer and one back pic
+  -- are not theirs.
+  if double and (self.pair3 or self.partner3 or self.endTrainer3) then
+    if self.pair3 or self.endTrainer3 then model.trainer = nil end
+    if self.partner3 then model.playerBack = nil end
+    model.figures3 = self:gen3Figures3(double)
+  end
   local mine = self:mySlot()
   model.prompt = self:choosePrompt()
   -- The POKéMON / BAG / TARGET lists are the page's expensive half (a front
@@ -14491,7 +14674,10 @@ function M:gen3ClassicModel()
   -- the cursor on the move, and the battler aimed at blinks (the engine's
   -- ui.lua: "target" draws the move menu) -- so no list then, and the moves.
   local aiming = double ~= nil and phase == "target" and not self.replacing
-  local list = (not aiming) and self:classicList3(phase, mine) or nil
+  -- The forfeit question: the cart's YES / NO window with the question in
+  -- the box under it (`forfeitList3`).
+  local list = self:forfeitList3()
+  if not list then list = (not aiming) and self:classicList3(phase, mine) or nil end
   if list then
     model.list = list
   elseif phase == "choose" then
@@ -14814,7 +15000,12 @@ function M:drawGen3Classic()
   local model = self:gen3ClassicModel()
   if type(ClassicBattle.drawGen3) == "function" then
     local ok, drew = pcall(ClassicBattle.drawGen3, model, self)
-    if ok and drew ~= false then return true end
+    if ok and drew ~= false then
+      -- A solo double's trainers and partner, over the field the page drew
+      -- (`gen3Figures3`): they stand clear of every healthbox and of the box.
+      if model.figures3 then pcall(self.drawFigures3, self, model) end
+      return true
+    end
   end
   if type(Mediated.drawGen3Plain) == "function" then
     pcall(Mediated.drawGen3Plain, self, model)
@@ -15139,6 +15330,9 @@ function M:refuseOwn(index, action)
   local back = "move"
   if action.kind == "switch" then
     back = "switch"
+  elseif action.kind == "run" then
+    -- A facility forfeit the referee would not take: the action menu again.
+    back = "choose"
   elseif action.kind == "item" then
     local effect = Sheet3.itemEffect(tonumber(action.item))
     back = (effect and (effect.needsMove or effect.needsParty or effect.faintedOnly))
@@ -15489,11 +15683,30 @@ function M:sendOutLine3(side, names)
   else
     fill.opponentMon1, fill.opponentMon2 = names[1], names[2]
   end
+  -- Two trainers, or a partner beside us: the cart's own two-trainer lines
+  -- (pret battle_message.c:2040 sText_InGamePartnerSentOutZGoN -- "STEVEN
+  -- sent out METANG! Go, X!", the partner's battler 2 named first -- and
+  -- :2058 sText_TwoTrainersSentPkmn, one page per trainer).  `names` is in
+  -- slot order: ours first, the partner's second; the first trainer's
+  -- battler 1, the second's battler 3.
+  local pair, partner = self.pair3, self.partner3
+  if two and ((side == "a" and partner) or (side == "b" and pair)) then
+    local both = self:trainerFill3()
+    for k, v in pairs(both) do if fill[k] == nil then fill[k] = v end end
+    if side == "a" then fill.twoOpponents = nil end
+  end
   local text = Gen3.battleText("STRINGID_INTROSENDOUT", fill)
   if text then return text end
   if side == "a" then
+    if two and partner then
+      return ("%s sent\nout %s!\nGo, %s!"):format(partner.label, names[2], names[1])
+    end
     if two then return ("Go! %s and\n%s!"):format(names[1], names[2]) end
     return ("Go! %s!"):format(names[1])
+  end
+  if two and pair then
+    return ("%s sent\nout %s!\n\n%s sent\nout %s!"):format(pair.labelA, names[1],
+      pair.labelB, names[2])
   end
   local who = self:trainerIntroName()
   if two then return ("%s sent\nout %s and %s!"):format(who, names[1], names[2]) end
@@ -15527,7 +15740,13 @@ function M:composeIntro3()
     if #list == 0 then return end
     local names = {}
     for i, row in ipairs(list) do names[i] = row.name end
-    rows[#rows + 1] = { kind = "msg", text = self:sendOutLine3(which, names) }
+    -- A page of its own per paragraph: the two trainers' line is two (the
+    -- printer's `\p`, a blank line once Gen3.battleText has cleaned it), and
+    -- an event's line is paged by width alone, blank row and all.
+    local line = self:sendOutLine3(which, names)
+    for part in (tostring(line) .. "\n\n"):gmatch("(.-)\n%s*\n%s*") do
+      if part ~= "" then rows[#rows + 1] = { kind = "msg", text = part } end
+    end
     for _, row in ipairs(list) do
       if row.index then
         rows[#rows + 1] = { kind = "send", slot = row.slot, index = row.index,
@@ -15540,6 +15759,346 @@ function M:composeIntro3()
   for i = #rows, 1, -1 do table.insert(kept, at, rows[i]) end
   self.medPending = kept
   return true
+end
+
+-- ------- two trainers, and a partner
+--
+-- Emerald's other doubles, on the same screen (newSoloDouble's `trainerB` /
+-- `partner` options): two trainers who spotted the player together (pret
+-- BATTLE_TYPE_TWO_OPPONENTS, battle_setup.c:1273), and Steven's multi in the
+-- Space Center, where a partner the player does not command fights beside
+-- them against MAXIE and TABITHA (BATTLE_TYPE_INGAME_PARTNER,
+-- battle_tower.c:2122).  What changes is who is named and who is drawn:
+-- every line, figure, pic and plate is the cart's for the trainer behind
+-- that seat.  The referee, the brains and the ending's money are the
+-- caller's (src/SoloBattle.lua and its kinds).
+
+-- Is this seat a solo double's partner's (the NPC on our side)?
+function M:isPartnerSeat3(index)
+  local partner = self.partner3
+  return partner ~= nil and index ~= nil and index == partner.slot
+end
+
+-- The computer trainer behind a solo double's seat, { key, trainer, label }:
+-- "partner" for the partner's seat, "b" for a pair's second trainer (slot
+-- 4), "a" for every other trainer seat (the first trainer, a lone trainer's
+-- two); nil for the player's own seats and off a solo double.
+function M:seatTrainer3(index)
+  if not self.soloDouble or index == nil then return nil end
+  if self:isPartnerSeat3(index) then
+    local partner = self.partner3
+    return { key = "partner", trainer = partner.trainer, label = partner.label }
+  end
+  if not self:foeSide(index) then return nil end
+  local pair = self.pair3
+  if pair and index == pair.slotB then
+    return { key = "b", trainer = pair.b, label = pair.labelB }
+  end
+  return { key = "a", trainer = type(self.trainer) == "table" and self.trainer or {},
+           label = self:trainerIntroName() }
+end
+
+-- The owner tag a seat's plate carries (Battlefield.plateModel `owner`):
+-- each of a pair's seats its own trainer, the partner's seat the partner --
+-- by name, the word the trainer's roster chip shows ("MIA"), else its label.
+-- nil wherever one trainer stands behind a whole side.
+function M:seatOwnerLabel3(index)
+  if not (self.pair3 or self.partner3) then return nil end
+  local who = self:seatTrainer3(index)
+  if not who then return nil end
+  if not (who.key == "partner" or self.pair3) then return nil end
+  local name = type(who.trainer) == "table" and (who.trainer.name or who.trainer.trainerName) or nil
+  if type(name) == "string" and name ~= "" then return name end
+  return who.label
+end
+
+local function trainerClass3(t)
+  return t.className or t.trainerClassName or t.trainerClass
+end
+
+local function trainerName3(t)
+  return t.trainerName or t.name
+end
+
+-- The battle-text fill for this fight's trainers, the engine's own spelling
+-- of it (battle/adapter.lua Adapter.fill): the first trainer's class and
+-- name; for a pair, `twoOpponents` and the second's (pret
+-- battle_message.c:2673 B_TXT_TRAINER2_CLASS / _NAME / _LOSE_TEXT); beside a
+-- partner, `inGamePartner` and his (:2725 B_TXT_PARTNER_CLASS / _NAME).
+function M:trainerFill3()
+  local t = type(self.trainer) == "table" and self.trainer or {}
+  local player = Gen3.player()
+  local fill = {
+    trainer = true,
+    playerName = player and player.name or nil,
+    trainer1Class = trainerClass3(t),
+    trainer1Name = trainerName3(t),
+    trainer1LoseText = t.defeatText,
+  }
+  local pair = self.pair3
+  if pair then
+    fill.twoOpponents = true
+    fill.trainer2Class = trainerClass3(pair.b)
+    fill.trainer2Name = trainerName3(pair.b)
+    fill.trainer2LoseText = pair.b.defeatText
+  end
+  local partner = self.partner3
+  if partner then
+    fill.inGamePartner = true
+    fill.partnerClass = trainerClass3(partner.trainer)
+    fill.partnerName = trainerName3(partner.trainer) or partner.label
+  end
+  return fill
+end
+
+-- The opening line (`enter`): a lone trainer's "<TRAINER>\nwould like to
+-- battle!" -- this screen's sentence, as it always was -- and a pair's two at
+-- once in the cart's words (pret battle_message.c:2015 -- the two trainers,
+-- and Steven's two, INGAME_PARTNER -- sText_TwoTrainersWantToBattle).
+function M:openingLine3()
+  local pair = self.soloDouble and self.pair3 or nil
+  if pair then
+    return Gen3.battleText("STRINGID_INTROMSG", self:trainerFill3())
+      or ("%s and\n%s\nwant to battle!"):format(pair.labelA, pair.labelB)
+  end
+  return ("%s\nwould like to battle!"):format(self:trainerIntroName())
+end
+
+-- A pair's replacement send-out, in its own trainer's name (pret
+-- battle_message.c:2141 STRINGID_SWITCHINMON: TWO_OPPONENTS -- battler 1
+-- sText_Trainer1SentOutPkmn2, battler 3 sText_Trainer2SentOutPkmn), or nil
+-- for every other seat and fight (the caller's line).
+function M:foeSendLine3(index, name)
+  local pair = self.soloDouble and self.pair3 or nil
+  if not (pair and self:foeSide(index)) then return nil end
+  local fill = self:trainerFill3()
+  fill.side, fill.double = 1, true
+  fill.switchBattler = (index == pair.slotB) and 3 or 1
+  fill.buff1 = name
+  local text = Gen3.battleText("STRINGID_SWITCHINMON", fill)
+  if text then return text end
+  local label = (index == pair.slotB) and pair.labelB or pair.labelA
+  return ("%s sent out\n%s!"):format(label, tostring(name))
+end
+
+-- A line said with one of the trainers on the field (the classic page draws
+-- it where the cart slides a trainer back in, `gen3Figures3`): "a" / "b" for
+-- a pair's two, the first trainer for a lone one; nil takes it off.  The
+-- trainer comes in with the line's first page (pret trainerslidein then
+-- printstring) and stays for the rest of the ending unless another call
+-- moves it; with no line it comes in as the queue reaches it.  For the
+-- ending's after-words src/SoloBattle.lua and its kinds say
+-- (`sayPairDefeated3`).
+function M:sayTrainer3(which, text)
+  if not self.soloDouble then return false end
+  if which ~= nil and which ~= "a" and which ~= "b" then which = "a" end
+  local before = #self.messages
+  if type(text) == "string" and text ~= "" then self:say(text) end
+  local first = self.messages[before + 1]
+  if first == nil then
+    self.messages[#self.messages + 1] = {
+      act = function(battle) battle.endTrainer3 = which end,
+    }
+    return true
+  end
+  if type(first) ~= "table" then
+    first = { text = first }
+    self.messages[before + 1] = first
+  end
+  first.trainer3 = which or false
+  return true
+end
+
+-- A pair's defeat, in the cart's order (pret data/battle_scripts_1.s:2920
+-- BattleScript_LocalTrainerBattleWon, TWO_OPPONENTS): "<A> and <B> were
+-- defeated!" (STRINGID_TWOENEMIESDEFEATED), the first trainer slides in and
+-- says its lose text, slides out, the second slides in and says its own
+-- (trainerslidein BS_ATTACKER / trainerslideout B_POSITION_OPPONENT_LEFT /
+-- trainerslidein BS_FAINTED).  The prize line that follows is the caller's
+-- (the two trainers' money summed, battle_script_commands.c:5624).  False
+-- off a pair: a lone trainer's ending is said as it always was.
+function M:sayPairDefeated3()
+  local pair = self.soloDouble and self.pair3 or nil
+  if not pair then return false end
+  self:say(Gen3.battleText("STRINGID_TWOENEMIESDEFEATED", self:trainerFill3())
+    or ("%s and\n%s\nwere defeated!"):format(pair.labelA, pair.labelB))
+  local loseA = pair.a.defeatText
+  local loseB = pair.b.defeatText
+  self:sayTrainer3("a", type(loseA) == "string" and loseA or nil)
+  self:sayTrainer3("b", type(loseB) == "string" and loseB or nil)
+  return true
+end
+
+-- Where the cart stands this fight's trainers on the GBA page, in page
+-- pixels (centres): a pair's two at the intro -- the first trainer's battler
+-- 1 at x 200, the second's battler 3 at x 152 (pret
+-- battle_controller_opponent.c:1296 OpponentHandleDrawTrainerPic, MULTI |
+-- TWO_OPPONENTS by flank), the y the page's lone trainer uses -- and the one
+-- sliding back in for its lose text at x 208 (:1382 OpponentHandleTrainerSlide,
+-- 176 + 32); the player's and the partner's backs before anybody of ours is
+-- out -- the player's battler 0 at x 32 (battle_controller_player.c:2297, a
+-- multi's left flank), the partner's battler 2 at x 90
+-- (battle_controller_player_partner.c:1301, Steven's back pic), on the
+-- page's back-pic row.
+M.PAIR_PIC_X3 = { a = 200, b = 152 }
+M.END_PIC_X3 = 208
+M.MULTI_BACK_X3 = { player = 32, partner = 90 }
+
+-- The figures the page draws over its field (`drawFigures3`): { kind =
+-- "front", pic = TRAINER_PIC_*, x, y, who } and { kind = "back", back =
+-- TRAINER_BACK_PIC_* index (a number, or the battle profile's backPics key),
+-- x, y, who }; nil when this fight has none.  `double` is gen3DoubleView's.
+function M:gen3Figures3(double)
+  if not self.soloDouble then return nil end
+  local G = ClassicBattle.G3 or {}
+  local out = {}
+  local pair = self.pair3
+  local function front(t, x, who)
+    local pic = type(t) == "table" and tonumber(t.trainerPic or t.pic) or nil
+    if pic then
+      out[#out + 1] = { kind = "front", pic = pic, x = x, y = G.TRAINER_Y or 40, who = who }
+    end
+  end
+  if pair and self.showEnemyTrainer then
+    front(pair.a, M.PAIR_PIC_X3.a, "a")
+    front(pair.b, M.PAIR_PIC_X3.b, "b")
+  elseif self.endTrainer3 then
+    local t = (self.endTrainer3 == "b" and pair) and pair.b or self.trainer
+    front(t, M.END_PIC_X3, self.endTrainer3)
+  end
+  local partner = self.partner3
+  if partner and self:alliesUnseen3(double) then
+    local player = Gen3.player()
+    local y = G.PLAYER_BACK_Y or 80
+    out[#out + 1] = { kind = "back", back = player and player.gender or 0,
+                      x = M.MULTI_BACK_X3.player, y = y, who = "player" }
+    local back = partner.trainer.backPic or partner.trainer.partnerBackPic
+    if back ~= nil then
+      out[#out + 1] = { kind = "back", back = back, x = M.MULTI_BACK_X3.partner, y = y,
+                        who = "partner" }
+    elseif tonumber(partner.trainer.trainerPic) then
+      -- No back pic for this partner: the cart draws a frontier partner by
+      -- his front pic there (battle_controller_player_partner.c:1309).
+      out[#out + 1] = { kind = "front", pic = tonumber(partner.trainer.trainerPic),
+                        x = M.MULTI_BACK_X3.partner, y = y, who = "partner" }
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
+-- Has nobody of ours come out yet?  The backs stand until the first of our
+-- monsters is on the field, and are not drawn again (a side emptied by
+-- faints is not the intro).
+function M:alliesUnseen3(double)
+  if self.alliesSeen3 then return false end
+  local allies = type(double) == "table" and double.allies or nil
+  for i = 1, 2 do
+    local seat = allies and allies[i]
+    if type(seat) == "table" and not seat.hidden then
+      self.alliesSeen3 = true
+      return false
+    end
+  end
+  return true
+end
+
+-- The figures, drawn into the 240x160 page over the field ClassicBattle
+-- painted (never over a POKéMON page, which is the whole page): a front pic
+-- centred on its spot, a back pic's first 64x64 frame (the page's own
+-- drawPlayerBack rule).  The pics are the player's cart's (Battlefield's
+-- Gen 3 art doors).
+local backQuads3 = setmetatable({}, { __mode = "k" })
+function M:drawFigures3(model)
+  local figures = type(model) == "table" and model.figures3 or nil
+  if type(figures) ~= "table" or #figures == 0 then return false end
+  if type(model.list) == "table" and ClassicBattle.gen3IsPartyList(model.list) then
+    return false
+  end
+  local gfx = love and love.graphics
+  if not gfx then return false end
+  for _, f in ipairs(figures) do
+    if f.kind == "back" then
+      local entry = Battlefield.gen3TrainerBackPic(f.back)
+      local img = type(entry) == "table" and entry.image or nil
+      if img then
+        local quad = backQuads3[img]
+        if not quad then
+          local iw, ih = img:getDimensions()
+          quad = gfx.newQuad(0, 0, 64, 64, iw, ih)
+          backQuads3[img] = quad
+        end
+        gfx.setColor(1, 1, 1, 1)
+        gfx.draw(img, quad, f.x - 32, f.y - 32)
+      end
+    else
+      local img = Battlefield.gen3TrainerPic(f.pic)
+      if img then
+        local iw, ih = img:getDimensions()
+        gfx.setColor(1, 1, 1, 1)
+        gfx.draw(img, f.x - floor(iw / 2), f.y - floor(ih / 2))
+      end
+    end
+  end
+  return true
+end
+
+-- ------- facility prompts (contract C3 `rules`)
+--
+-- The two things a facility's rules change on the action menu, the same on
+-- this screen as on the single's: BAG refused in the cart's words, RUN a
+-- forfeit asked first.  Only a solo double reads `rules3` (co-op never takes
+-- a facility fight, contract C1).
+
+function M:bagRefused3()
+  local rules = self.soloDouble and self.rules3 or nil
+  return type(rules) == "table" and rules.bag == false
+end
+
+function M:forfeits3()
+  local rules = self.soloDouble and self.rules3 or nil
+  return type(rules) == "table" and rules.forfeit == true
+end
+
+-- "Items can't be used now." (STRINGID_ITEMSCANTBEUSEDNOW, pret
+-- battle_message.c:251).
+function M:itemsRefusedLine3()
+  return Gen3.battleText("STRINGID_ITEMSCANTBEUSEDNOW", self:trainerFill3())
+    or "Items can't be used now."
+end
+
+-- "Would you like to forfeit the match\nand quit now?"
+-- (STRINGID_QUESTIONFORFEITMATCH, pret battle_message.c:1422).
+function M:forfeitQuestion3()
+  return Gen3.battleText("STRINGID_QUESTIONFORFEITMATCH", self:trainerFill3())
+    or "Would you like to forfeit the match\nand quit now?"
+end
+
+-- "<PLAYER> forfeited the match!" (STRINGID_FORFEITEDMATCH, pret
+-- battle_message.c:1423).
+function M:forfeitedLine3()
+  local fill = self:trainerFill3()
+  return Gen3.battleText("STRINGID_FORFEITEDMATCH", fill)
+    or ("%s forfeited the match!"):format(tostring(fill.playerName or "PLAYER"))
+end
+
+-- The question, for the seat choosing now: the YES / NO opens on NO
+-- (`updateRunAsk`'s forfeit arm).
+function M:askForfeit3()
+  self.runAsk = { role = "forfeit", index = RUN_DEFAULT, clock = 0, slot = self.mine }
+  return true
+end
+
+-- The GBA page's YES / NO window for the forfeit question (the question in
+-- the box under it, ClassicBattle's list title), or nil.
+function M:forfeitList3()
+  local ask = self.runAsk
+  if not (ask and ask.role == "forfeit" and self.phase ~= "messages") then return nil end
+  return {
+    title = self:forfeitQuestion3(),
+    rows = { { label = RUN_ANSWERS[1] }, { label = RUN_ANSWERS[2] } },
+    cursor = ask.index or RUN_DEFAULT,
+  }
 end
 
 -- ------- aiming
@@ -15677,6 +16236,12 @@ function M:start(game)
   if self.medUploaded then return true end
   if not (self.transport and self.battleId and self.sim) then return false end
   local mons = Mediated.snapshotParty(self.game, { link = false })
+  -- Beside a partner, only the player's own half is the player's: the engine
+  -- appended the partner's monsters to the live party for the cart's
+  -- gPlayerParty[3..5] (pret battle_tower.c:2124 FillPartnerParty; the
+  -- engine's doStevenBattle), and the referee fields those on the partner's
+  -- own entry, which src/SoloBattle.lua seats from its own sheets.
+  if self.partner3 and type(mons) == "table" then mons = M.playerHalfSheets3(mons, self.partner3.half) end
   if type(mons) ~= "table" or #mons == 0 then
     mod.log:warn("no POKéMON could be described for a double battle, so it is "
       .. "fought the ordinary way -- check the party from START > POKéMON, and "
@@ -15698,6 +16263,14 @@ function M:start(game)
       Mediated.trainerBagEntries(self.trainer, self.game), nil,
       Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName(), self.npcParty))
   end
+  -- The second trainer's team and the partner's are this client's own
+  -- descriptions too (their held items count as brought, `ownItem3`), but
+  -- they are not uploaded: the table transport keeps one side-b claim (the
+  -- first trainer's, with its kit -- the cart's one item pool, A's four,
+  -- pret battle_ai_script_commands.c:292), and src/SoloBattle.lua seats the
+  -- second trainer's and the partner's entries from its own sheets.
+  if self.pair3 then self.medNpcSheetsB = self.pair3.sheetsB end
+  if self.partner3 then self.medPartnerSheets = self.partner3.sheets end
   -- Which held items this fight's uploads brought (`ownItem3`).
   self.ownItems3 = nil
   self:ownItemSet3()
@@ -15774,6 +16347,45 @@ end
 -- co-op seat's do -- led by the first two monsters that can fight; side b is
 -- the trainer behind one seat or two over one rebuilt party.  Answers the
 -- screen, or nil and why.
+--
+-- ------- the shapes the wave-2 kinds hand in (all optional; absent is the
+-- lone double above, unchanged)
+--
+--   trainerB, npcPartyB, peerNameB   a second foe trainer (Emerald's two
+--       trainers who spot the player at once, pret battle_setup.c:1273
+--       BATTLE_TYPE_TWO_OPPONENTS; Steven's MAXIE and TABITHA): its record
+--       (gen3TrainerRecord's shape -- className / trainerName / trainerPic /
+--       defeatText), its sheets in the order its referee entry holds them
+--       (the second side-b entry's `mons`; its `send` stamps index them), its
+--       label.  Each trainer then stands behind one seat of its own -- slot 3
+--       the first (pret battler 1, gEnemyParty[0..2]), slot 4 the second
+--       (battler 3, gEnemyParty[3..5], battle_main.c:1977) -- and `foeSeats`
+--       is not read.  Not uploaded here: src/SoloBattle.lua seats the second
+--       entry itself (`start`).
+--   partner, partnerParty, partnerName, playerHalf   an NPC partner on side a
+--       (pret BATTLE_TYPE_INGAME_PARTNER, Steven in the Space Center): his
+--       record (the engine's battle/init.lua st.partner shape: name /
+--       className / class / trainerPic, plus `backPic` -- the cart's
+--       TRAINER_BACK_PIC_* index, or `partnerBackPic` = "steven", the engine
+--       battle profile's backPics key -- and `gfxName` / `graphicsId` for his
+--       walker), his sheets (the ally entry's `mons`, in its order), his
+--       label, and how many of the live party are the player's (the engine
+--       appends the partner's three behind them, doStevenBattle's
+--       `playerHalf`; absent = the whole party).  The player's own seat is
+--       slot 1 (pret battler 0) and the only one this screen commands
+--       (`ownSlots = { 1 }`); his is slot 2 (battler 2), answered by the
+--       caller's brain and fed by the referee's events as a co-op partner's
+--       is.
+--   rules   the facility rules the referee plays by (contract C3's `rules`
+--       table, the same one): `bag == false` refuses BAG with the cart's line,
+--       `forfeit` turns RUN into the cart's forfeit question (`updateCommand`).
+--   song    the fight's own battle theme (a MUS_* name or a song number: the
+--       engine's `opts.song`), in place of the trainer's (`playBattleTheme3`).
+--
+-- The referee's seat ids `onReady` maps: side a is { the player, the
+-- partner's id } beside a partner, else the shared team's two; side b is {
+-- the first trainer's id, the second's } for a pair (each NPC seat takes the
+-- next ownerless slot of its side, `medMap`).
 function M.newSoloDouble(game, opts)
   opts = type(opts) == "table" and opts or {}
   if Gen.generation(game) ~= 3 then
@@ -15790,20 +16402,73 @@ function M.newSoloDouble(game, opts)
   if #sheets == 0 then return nil, "the trainer has no monsters to field" end
   local foeParty = {}
   for i, sheet in ipairs(sheets) do foeParty[i] = foeMon3(sheet) end
-  local lead1, lead2 = soloLeads3(party)
   local foe1, foe2 = soloLeads3(foeParty)
   local label = opts.peerName or Mediated.trainerLabel3(trainer) or "TRAINER"
   local player = Gen3.player()
   local myName = (player and type(player.name) == "string" and player.name ~= "")
     and player.name or "PLAYER"
+
+  -- The second trainer, behind a seat of its own.
+  local trainerB = type(opts.trainerB) == "table" and opts.trainerB or nil
+  local sheetsB = type(opts.npcPartyB) == "table" and opts.npcPartyB or nil
+  local pair = nil
+  if trainerB or sheetsB then
+    if not (sheetsB and #sheetsB > 0) then
+      return nil, "the second trainer has no monsters to field"
+    end
+    local partyB = {}
+    for i, sheet in ipairs(sheetsB) do partyB[i] = foeMon3(sheet) end
+    pair = {
+      a = trainer or {}, b = trainerB or {},
+      labelA = label,
+      labelB = opts.peerNameB or Mediated.trainerLabel3(trainerB) or "TRAINER",
+      partyB = partyB, sheetsB = sheetsB,
+    }
+  end
+
+  -- The partner on our side, and the player's own half of the live party.
+  local partnerRec = type(opts.partner) == "table" and opts.partner or nil
+  local partnerSheets = type(opts.partnerParty) == "table" and opts.partnerParty or nil
+  local partner, mine = nil, party
+  if partnerRec or partnerSheets then
+    if not (partnerSheets and #partnerSheets > 0) then
+      return nil, "the partner has no monsters to field"
+    end
+    local half = math.floor(tonumber(opts.playerHalf) or #party)
+    half = math.max(0, math.min(#party, half))
+    -- The same monster tables, so the referee's numbers land on the save
+    -- monsters as before; only the partner's are left out of this seat's
+    -- bench (pret battle_util.c:2274 -- each side of a multi switches within
+    -- its own half).
+    mine = {}
+    for i = 1, half do mine[i] = party[i] end
+    local partnerMons = {}
+    for i, sheet in ipairs(partnerSheets) do partnerMons[i] = foeMon3(sheet) end
+    partner = {
+      trainer = partnerRec or {},
+      label = opts.partnerName or Mediated.trainerLabel3(partnerRec)
+        or (partnerRec and (partnerRec.name or partnerRec.trainerName)) or "PARTNER",
+      party = partnerMons, sheets = partnerSheets, half = half,
+    }
+  end
+
+  local lead1, lead2 = soloLeads3(mine)
   -- An empty seat is active 0: CoopSim fields nothing there (`sendOut` of a
   -- party index nobody holds), the referee's absent battler.
   local slots = {
-    { side = "a", owner = selfId, name = myName, party = party, active = lead1 },
-    { side = "a", owner = selfId, name = myName, party = party, active = lead2 or 0 },
-    { side = "b", name = label, party = foeParty, active = foe1 },
+    { side = "a", owner = selfId, name = myName, party = mine, active = lead1 },
   }
-  if tonumber(opts.foeSeats) ~= 1 then
+  if partner then
+    local p1 = soloLeads3(partner.party)
+    slots[2] = { side = "a", name = partner.label, party = partner.party, active = p1 or 0 }
+  else
+    slots[2] = { side = "a", owner = selfId, name = myName, party = party, active = lead2 or 0 }
+  end
+  slots[3] = { side = "b", name = label, party = foeParty, active = foe1 }
+  if pair then
+    local b1 = soloLeads3(pair.partyB)
+    slots[4] = { side = "b", name = pair.labelB, party = pair.partyB, active = b1 or 0 }
+  elseif tonumber(opts.foeSeats) ~= 1 then
     slots[4] = { side = "b", name = label, party = foeParty, active = foe2 or 0 }
   end
   local screen, why = M.new(game, {
@@ -15816,13 +16481,37 @@ function M.newSoloDouble(game, opts)
   })
   if not screen then return nil, why end
   screen.soloDouble = true
-  screen.ownSlots = { 1, 2 }
+  screen.ownSlots = partner and { 1 } or { 1, 2 }
   screen.chooser = 1
   screen.battle = opts.battle
   screen.npcParty = sheets
   screen.trainerLabel3 = label
   screen.soloIntro3 = true
+  if pair then
+    pair.slotA, pair.slotB = 3, 4
+    screen.pair3 = pair
+  end
+  if partner then
+    partner.slot = 2
+    screen.partner3 = partner
+  end
+  if type(opts.rules) == "table" then screen.rules3 = opts.rules end
+  local song = opts.song
+  if (type(song) == "string" and song ~= "") or tonumber(song) then screen.song3 = song end
   return screen
+end
+
+-- The player's own half of an uploaded party (`start`, beside a partner): the
+-- sheets of the first `half` party members, by the save position each sheet
+-- stamps (`slot`, 0-based), else by place.
+function M.playerHalfSheets3(mons, half)
+  half = math.floor(tonumber(half) or #mons)
+  local out = {}
+  for i, sheet in ipairs(mons) do
+    local at = type(sheet) == "table" and tonumber(sheet.slot) or nil
+    if (at and at < half) or (not at and i <= half) then out[#out + 1] = sheet end
+  end
+  return out
 end
 
 return M

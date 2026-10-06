@@ -2172,6 +2172,1019 @@ do
   if not ok then check(false, "obey: the block raised -- " .. tostring(err)) end
 end
 
+-- ------------------------------------------------------------------
+-- 10. the solo kinds' screen (docs/plans/gen3-solo-remaining-fights.md,
+--     wave 1 UM): a fight with no own battler, the facility prompts, Oak's
+--     voice-over, the Pokémon Tower GHOST, the fight's own theme and the
+--     command-set seam -- every screen option `applyScreenOptions` reads
+-- ------------------------------------------------------------------
+--
+-- The streams are fed by hand (the referee's no-battler side, its facility
+-- rules, its `lesson` events and its ghost arms are wave 1 RF / wave 2 R2's),
+-- in the shapes contract C3 / C6 fix.  The cart's text is a stand-in for the
+-- engine's (Gen3.battleText, the oak_advice table, gText_Ghost): capitals, so
+-- a line the screen read off the "cart" can be told from a fallback.
+do
+  local Gen3 = need("Gen3")
+  local ClassicBattle = need("ClassicBattle")
+  local Battlefield = need("Battlefield")
+  ITEMS[75] = { name = "X ATTACK", pocket = "ITEMS", price = 500 }
+
+  local CART = {
+    STRINGID_ITEMSCANTBEUSEDNOW = "ITEMS CAN'T BE USED NOW.",
+    STRINGID_QUESTIONFORFEITMATCH = "WOULD YOU LIKE TO FORFEIT THE MATCH\nAND QUIT NOW?",
+    STRINGID_ITDODGEDBALL = "IT DODGED THE THROWN BALL!\nTHIS POKéMON CAN'T BE CAUGHT!",
+    STRINGID_SILPHSCOPEUNVEILED = "SILPH SCOPE UNVEILED THE GHOST'S\nIDENTITY!",
+    STRINGID_GHOSTWASMAROWAK = "THE GHOST WAS MAROWAK!",
+  }
+  local realText = Gen3.battleText
+  local packOff = false
+  local introFill = nil
+  Gen3.battleText = function(id, fill)
+    if packOff then return nil end
+    if id == "STRINGID_INTROMSG" and type(fill) == "table" and fill.ghost then
+      introFill = fill
+      return fill.ghostUnveiled and "THE GHOST APPEARED!" or "THE GHOST APPEARED!\n\nDARN!\nTHE GHOST CAN'T BE ID'D!"
+    end
+    if CART[id] then return CART[id] end
+    return realText(id, fill)
+  end
+
+  -- The engine's oak_advice table, stood in (Oak.pages / Oak.screens): one
+  -- page a lesson, the intro two -- with a printer page break -- and the
+  -- player's name where the cart's text puts it.
+  local OAK_TEXT = {
+    forPetesSake = { "OAK: OH, FOR PETE'S SAKE...\\pSO PUSHY, {NAME}!", "OAK: THE TRAINER THAT...",
+                     "OAK: TRY BATTLING!" },
+    inflictingDamage = { "OAK: INFLICTING DAMAGE IS THE KEY." },
+    loweringStats = { "OAK: LOWERING THE FOE'S STATS..." },
+    keepAnEyeOnHp = { "OAK: KEEP YOUR EYES ON YOUR HP." },
+    partyMenu = { "OAK: THIS IS YOUR PARTY." },
+    noRunning = { "OAK: NO! THERE'S NO RUNNING AWAY!" },
+    winEarnsPrize = { "OAK: HM! EXCELLENT!" },
+    howDisappointing = { "OAK: HM... HOW DISAPPOINTING..." },
+  }
+  local oakOff = false
+  local FakeOak = {}
+  function FakeOak.pages(st, key)
+    if oakOff then return nil end
+    local keys = OAK_TEXT[key]
+    if not keys then return nil end
+    local out = {}
+    for i, page in ipairs(keys) do out[i] = page:gsub("{NAME}", tostring(st and st.playerName)) end
+    return out
+  end
+  function FakeOak.screens(pages)
+    local out = {}
+    for _, page in ipairs(pages or {}) do
+      for part in (tostring(page) .. "\\p"):gmatch("(.-)\\p") do
+        if part ~= "" then out[#out + 1] = part end
+      end
+    end
+    return out
+  end
+  stub("src.core.game3.battle.oak_advice", FakeOak)
+  -- The ghost silhouette, the engine's own reader stood in.
+  local ghostImage = fakeImage("ghost")
+  local ghostAsked = 0
+  FakePokemon.ghostPic = function()
+    ghostAsked = ghostAsked + 1
+    return { image = ghostImage, w = 64, h = 64 }
+  end
+
+  -- A screen over a recording transport: every choice it files, and the
+  -- party / ruleset uploads, as `start` sends them.
+  local function screen3(mode, screenOpts, extra)
+    extra = extra or {}
+    local sent, uploads = {}, {}
+    local transport = {
+      isReady = function() return true end,
+      send = function(_, kind, msg)
+        if type(msg) == "table" and msg.action then
+          sent[#sent + 1] = msg
+          if extra.refuse then return false end
+        elseif type(msg) == "table" then
+          uploads[#uploads + 1] = msg
+        end
+        return true
+      end,
+    }
+    local o = {
+      transport = transport, game = GAME, battle = "um", role = "host",
+      peerId = (mode ~= "wild") and "p" or nil, peerName = extra.peerName or "BOB",
+      mode = mode, wildParty = extra.wildParty, wildCatchMon = extra.wildCatchMon,
+      trainer = extra.trainer, classicUi = extra.classicUi ~= false,
+    }
+    for k, v in pairs(screenOpts or {}) do o[k] = v end
+    local f = Mediated.new(o)
+    f:start(GAME)
+    local function ev(e)
+      e.battle, e.seq = "um", (f.seq or 0) + 1
+      f:onEvent(e)
+    end
+    -- Reads the queue out, then gives the screen the one frame more it takes
+    -- to open whatever menu is owed behind it.
+    local function drain()
+      for _ = 1, 80 do
+        f:update(2.0)
+        if #f.lines == 0 and f.shown == nil and not f.anim then
+          f:update(2.0)
+          if #f.lines == 0 and f.shown == nil and not f.anim then break end
+        end
+      end
+    end
+    f:onReady({ battle = "um", mode = mode,
+                sides = { a = { "me" }, b = { (mode == "wild") and "wild" or "p" } } })
+    return f, ev, sent, drain, uploads
+  end
+
+  local function press(f, key)
+    local saved = GAME.input
+    GAME.input = { pressed = {}, wasPressed = function(_, k) return k == key end,
+                   isDown = function() return false end }
+    f:update(0)
+    GAME.input = saved
+  end
+
+  local function said(f, needle, from)
+    for i = (from or 0) + 1, #(f.textLog or {}) do
+      if tostring(f.textLog[i]):gsub("\n", " "):find(needle, 1, true) then return i end
+    end
+    return nil
+  end
+  local function saidCount(f, needle, from)
+    local n = 0
+    for i = (from or 0) + 1, #(f.textLog or {}) do
+      if tostring(f.textLog[i]):gsub("\n", " "):find(needle, 1, true) then n = n + 1 end
+    end
+    return n
+  end
+
+  -- A recording love.graphics, and the cart chrome / font the classic page
+  -- reads stood in, so a draw can be asked what it put where.
+  local drawnCalls = {}
+  local graphics = setmetatable({}, { __index = function(_, key)
+    return function(...) drawnCalls[#drawnCalls + 1] = { key, ... } end
+  end })
+  graphics.newQuad = function(x, y, w, h)
+    return { getViewport = function() return x, y, w, h end }
+  end
+  graphics.getColor = function() return 1, 1, 1, 1 end
+  graphics.getScissor = function() return nil end
+  graphics.getFont = function() return nil end
+  local chromeCalls = {}
+  local function rec(name) return function(...) chromeCalls[#chromeCalls + 1] = { name, ... }; return true end end
+  local FakeChrome = {
+    manifest = rec("manifest"), isRse = function() return false end,
+    drawTerrain = rec("drawTerrain"), drawEnemyBox = rec("drawEnemyBox"),
+    drawPlayerBox = rec("drawPlayerBox"), drawHpBar = rec("drawHpBar"),
+    drawPanel = rec("drawPanel"), drawMenuFrames = rec("drawMenuFrames"),
+    drawPartyBall = rec("drawPartyBall"), drawExpBar = rec("drawExpBar"),
+  }
+  local textDrawn = {}
+  local FakeFont = {
+    COLOR = { NORMAL = "normal", WHITE = "white" }, LINE_PITCH = 15,
+    draw = function(text, x, y, opts)
+      textDrawn[#textDrawn + 1] = { text = text, x = x, y = y, colors = opts and opts.colors }
+      return #tostring(text) * 6
+    end,
+    measure = function(text) return #tostring(text) * 6 end,
+    wrap = function(text) return text end,
+    drawGlyph = function() return 6 end,
+  }
+  local backPics = 0
+  local function classicDraw(model)
+    drawnCalls, chromeCalls, textDrawn, backPics = {}, {}, {}, 0
+    local savedLove, savedEngine, savedBack = _G.love, Gen3.engine, Gen3.trainerBackPic
+    _G.love = { graphics = graphics, timer = { getTime = function() return 0 end } }
+    Gen3.engine = function(name)
+      if name == "src.ui.game3.battle_chrome" then return FakeChrome end
+      if name == "src.ui.game3.frlg_font" then return FakeFont end
+      return savedEngine(name)
+    end
+    Gen3.trainerBackPic = function()
+      backPics = backPics + 1
+      return { image = fakeImage("playerback") }
+    end
+    -- The terrain is named, so the page does not go asking the map for one.
+    model.terrain = model.terrain or "building"
+    local ok, drew = pcall(ClassicBattle.drawGen3, model, {})
+    _G.love, Gen3.engine, Gen3.trainerBackPic = savedLove, savedEngine, savedBack
+    return ok and drew
+  end
+  local function chromeCount(name)
+    local n = 0
+    for _, call in ipairs(chromeCalls) do if call[1] == name then n = n + 1 end end
+    return n
+  end
+  local function textAt(needle)
+    for _, t in ipairs(textDrawn) do
+      if tostring(t.text):find(needle, 1, true) then return t end
+    end
+    return nil
+  end
+  local function textIs(exact)
+    for _, t in ipairs(textDrawn) do
+      if tostring(t.text) == exact then return t end
+    end
+    return nil
+  end
+  local function withLove(fn, ...)
+    local savedLove = _G.love
+    drawnCalls = {}
+    _G.love = { graphics = graphics, timer = { getTime = function() return 0 end } }
+    local result = { pcall(fn, ...) }
+    _G.love = savedLove
+    return (table.unpack or unpack)(result)
+  end
+  local function dimDrawn(w, h)
+    local dark = false
+    for _, call in ipairs(drawnCalls) do
+      if call[1] == "setColor" then
+        dark = call[2] == 0 and call[3] == 0 and call[4] == 0 and call[5] == 0.5
+      elseif call[1] == "rectangle" and dark and call[2] == "fill"
+             and call[3] == 0 and call[4] == 0 and call[5] == w and call[6] == h then
+        return true
+      end
+    end
+    return false
+  end
+
+  local ok, err = pcall(function()
+    -- ---- (a) a fight with no own battler, start to end, on both pages
+    for _, classic in ipairs({ true, false }) do
+      local tag = classic and "no battler (classic): " or "no battler (arena): "
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      FakeBag.add(SESSION.bag, 4, 3)
+      FakeBag.add(SESSION.bag, 75, 1)
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f, ev, sent, drain, uploads = screen3("wild", { noOwnBattler = true },
+        { wildParty = { wild }, classicUi = classic })
+      eq(f.noOwnBattler, true, tag .. "the screen option is read")
+      eq(f:usesBattlefield(), not classic, tag .. "the page under test is the one asked for")
+      check(#uploads > 0, tag .. "the party and ruleset still go up (the kind decides what is seated)")
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20,
+           level = 5 })
+      ev({ t = "team", slot = 3, team = "o" })
+      ev({ t = "turn" })
+      drain()
+      eq(f.phase, "choose", tag .. "the command menu opens every turn with nothing of ours out")
+      eq(f.slots[0], nil, tag .. "no own seat exists")
+      eq(said(f, "Go!"), nil, tag .. "no send-out of ours")
+      check(said(f, "Wild PIDGEY") ~= nil, tag .. "the wild opening as ever")
+      eq(said(f, "sent out"), nil, tag .. "...and no send-out line for a wild seat")
+      local model = f:gen3ClassicModel()
+      eq(model.ally, nil, tag .. "no own plate on the classic page")
+      check(type(model.playerBack) == "table", tag .. "the trainer back pic stays up")
+      eq(model.prompt, "What will\nANN do?", tag .. "the prompt names the player (gText_WhatWillPkmnDo2)")
+      eq(model.foe and model.foe.name, "PIDGEY", tag .. "the foe's plate")
+      local ctx = f:battlefieldCtx()
+      eq(#ctx.allySeats, 0, tag .. "the arena has no ally seat")
+      eq(ctx.allyHumans[1].party, nil, tag .. "...and the trainer figure carries no roster chip")
+      eq(ctx.showTarget, false, tag .. "FIGHT highlighted shows no target card")
+      eq(#f:bandCommandItems(), 4, tag .. "the cart's grid is still offered")
+      check(classicDraw(f:gen3ClassicModel()) == true, tag .. "the classic page draws")
+      eq(chromeCount("drawPlayerBox"), 0, tag .. "...with no own healthbox")
+      check(backPics > 0, tag .. "...and the trainer's back pic")
+      eq(chromeCount("drawEnemyBox"), 1, tag .. "...and the foe's box")
+      -- FIGHT and POKéMON have nothing behind them.
+      f:runCommand("FIGHT")
+      eq(f.phase, "choose", tag .. "FIGHT opens no move list")
+      f:runCommand("SWITCH")
+      eq(f.phase, "choose", tag .. "POKéMON opens no picker")
+      eq(#sent, 0, tag .. "...and neither files anything")
+      -- The bag: an X item has no battler to raise.
+      f:runCommand("ITEM")
+      eq(f.phase, "item", tag .. "BAG opens")
+      local rows = f:usableItems()
+      local xAt
+      for i, row in ipairs(rows) do if row.id == 75 then xAt = i end end
+      check(xAt ~= nil, tag .. "the X ATTACK is in the bag")
+      f.itemIndex = xAt
+      press(f, "a")
+      eq(#sent, 0, tag .. "an X item is not used with no battler out")
+      check(said(f, "won't have any") ~= nil, tag .. "...the cart's no-effect line")
+      eq(f.phase, "item", tag .. "...and the bag stays up")
+      drain()
+      press(f, "b")
+      eq(f.phase, "choose", tag .. "B is back to the grid")
+      -- A ball, thrown with nobody of ours out.
+      f.itemPick = { id = 4, effect = Sheet3.itemEffect(4) }
+      check(f:commitItem(nil, nil), tag .. "a ball goes out")
+      eq(sent[#sent].action, "item", tag .. "...as an item choice")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      eq(f.phase, "play", tag .. "the referee took it")
+      ev({ t = "item", slot = 0, side = "a", text = "4" })
+      eq(FakeBag.get(SESSION.bag, 4), 2, tag .. "the ball is spent on the referee's word")
+      ev({ t = "msg", text = "ANN used POKé BALL!" })
+      ev({ t = "ball", slot = 0, side = "a", target = 3, amount = 1, text = "4" })
+      ev({ t = "msg", text = "Darn! The POKéMON broke free!" })
+      ev({ t = "msg", text = "PIDGEY is watching carefully!" })
+      ev({ t = "turn" })
+      drain()
+      eq(f.phase, "choose", tag .. "turn 2's menu")
+      check(classicDraw(f:gen3ClassicModel()) == true, tag .. "the page draws after a throw")
+      -- A stray solicitation for our seat opens nothing.
+      ev({ t = "turn", slot = 0 })
+      eq(f.mustReplace, false, tag .. "no replacement is owed on a side that fields nothing")
+      eq(f.pendingTurn, false, tag .. "...and no picker opens")
+      ev({ t = "faint", slot = 0, side = "a", text = "?" })
+      eq(f.mustReplace, false, tag .. "a stray faint on our seat owes nothing either")
+      ev({ t = "turn" })
+      drain()
+      -- RUN: filed as in any wild fight.
+      f:runCommand("RUN")
+      eq(sent[#sent].action, "run", tag .. "RUN is filed")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "run", slot = 0, side = "a" })
+      ev({ t = "msg", text = "Got away safely!" })
+      ev({ t = "over" })
+      f:onOutcome({ battle = "um", outcome = "win", winners = { "wild" }, losers = { "me" },
+                    reason = "run" })
+      drain()
+      check(f.finished, tag .. "the fight ends")
+      eq(saidCount(f, "Got away safely!"), 1, tag .. "the getaway is said once")
+      if not classic then
+        local okW = withLove(f.drawWidescreen, f, 1280, 720)
+        check(okW, tag .. "the arena frame is asked for")
+      end
+      eq(f.drawFailed, nil, tag .. "nothing failed to draw")
+    end
+
+    -- The test hook answers a no-battler turn with the one command it has.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { noOwnBattler = true, autoPick = true },
+        { wildParty = { wild } })
+      f.autoPick = true
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      ev({ t = "turn" })
+      drain()
+      eq(sent[1] and sent[1].action, "run", "no battler: autoPick files RUN, never a move")
+    end
+
+    -- An empty party is no reason to refuse a fight that fields nothing.
+    do
+      newGame()
+      SESSION.party = {}
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f = screen3("wild", { noOwnBattler = true }, { wildParty = { wild } })
+      eq(f.finished, false, "no battler: an empty party does not end the fight")
+      check(not said(f, "no POKeMON"), "no battler: ...and says nothing about it")
+      local plain = screen3("wild", nil, { wildParty = { wild } })
+      eq(plain.finished, true, "an ordinary fight with an empty party still ends at once")
+    end
+
+    -- ---- (b) the command-set seam
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local ran = {}
+      local f, ev, sent, drain = screen3("wild", {
+        noOwnBattler = true,
+        commands = { "BALL", "BAIT", "ROCK", "RUN" },
+        commandLabels = { BALL = "BALL", BAIT = "BAIT", ROCK = "ROCK" },
+        commandHandlers = {
+          BALL = function(screen, id) ran[#ran + 1] = id; screen:sendChoice({ action = "run" }) end,
+          ROCK = function() error("boom") end,
+        },
+        prompt = "What will\nANN\nthrow?",
+      }, { wildParty = { wild } })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      ev({ t = "turn" })
+      drain()
+      eq(table.concat(f:commandList(), ","), "BALL,BAIT,ROCK,RUN", "commands: the fight's own grid")
+      local labels = {}
+      for i, item in ipairs(f:bandCommandItems()) do labels[i] = item.label end
+      eq(table.concat(labels, ","), "BALL,BAIT,ROCK,RUN", "commands: ...labelled its way")
+      local model = f:gen3ClassicModel()
+      eq(table.concat(model.commands, ","), "BALL,BAIT,ROCK,RUN", "commands: the classic grid")
+      eq(model.prompt, "What will\nANN\nthrow?", "commands: the fight's own prompt")
+      eq(ClassicBattle.gen3CommandLabel("BALL"), "BALL", "commands: a kind's word is kept, never remapped")
+      f:runCommand("BAIT")
+      eq(f.phase, "choose", "commands: an id nothing answers is inert")
+      eq(#sent, 0, "commands: ...and files nothing")
+      local warned = #warns
+      f:runCommand("ROCK")
+      eq(f.phase, "choose", "commands: a handler that throws leaves the menu up")
+      check(#warns > warned, "commands: ...and is logged")
+      press(f, "a")   -- the cursor is on BALL
+      eq(ran[1], "BALL", "commands: A on a slab runs its handler")
+      eq(sent[1] and sent[1].action, "run", "commands: ...which owns what is filed")
+      f:runCommand("RUN")
+      eq(sent[2] and sent[2].action, "run", "commands: a built-in id keeps its own arm")
+    end
+
+    -- ---- (c) facility prompts (C3 `rules`)
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      FakeBag.add(SESSION.bag, 13, 1)
+      local trainer = { trainerPic = 7, className = "COOLTRAINER", trainerName = "ANA" }
+      local f, ev, sent, drain = screen3("coop_npc", { rules = { bag = false, forfeit = true } },
+        { trainer = trainer })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 50,
+           maxHp = 50, level = 20, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 30, maxHp = 30 })
+      ev({ t = "turn" })
+      drain()
+      eq(f.phase, "choose", "facility: the menu")
+      local mark = #(f.textLog or {})
+      f:runCommand("ITEM")
+      eq(f.phase, "choose", "facility: BAG does not open with `rules.bag = false`")
+      check(said(f, "ITEMS CAN'T BE USED NOW.", mark), "facility: the cart's line (STRINGID_ITEMSCANTBEUSEDNOW)")
+      f:update(0)
+      local shown = f:gen3ClassicModel()
+      eq(shown.commands, nil, "facility: the line takes the box over the menu while it is read")
+      check(shown.message ~= nil, "facility: ...as the message")
+      drain()
+      local back = f:gen3ClassicModel()
+      check(back.commands ~= nil, "facility: the menu is back once it is read")
+      packOff = true
+      f:runCommand("ITEM")
+      packOff = false
+      check(said(f, "Items can't be used now.", mark), "facility: the fallback without a text pack")
+      drain()
+      eq(#sent, 0, "facility: no item choice went out")
+      -- RUN asks first.
+      f:runCommand("RUN")
+      eq(f.phase, "ask", "forfeit: RUN asks before anything is filed")
+      eq(f.asking and f.asking.cursor, 2, "forfeit: the cursor opens on NO (PlayerHandleYesNoBox)")
+      eq(#sent, 0, "forfeit: ...nothing filed yet")
+      local asked = f:gen3ClassicModel()
+      eq(asked.message, CART.STRINGID_QUESTIONFORFEITMATCH, "forfeit: the cart's question in the box")
+      eq(asked.yesNo and asked.yesNo.cursor, 2, "forfeit: ...the YES / NO window beside it")
+      eq(asked.commands, nil, "forfeit: ...in place of the grid")
+      check(classicDraw(asked) == true, "forfeit: the classic page draws the question")
+      local yes, no = textIs("YES"), textIs("NO")
+      local box = ClassicBattle.gen3YesNoLayout()
+      check(yes and yes.x == box.rows[1].x and yes.y == box.rows[1].y, "forfeit: YES at the cart's window")
+      check(no and no.y == box.rows[2].y, "forfeit: NO under it")
+      check(box.frame.x == 192 and box.frame.y == 64 and box.frame.w == 48 and box.frame.h == 48,
+            "forfeit: the window is YESNOBOX_X_Y's tiles 24..29 x 8..13")
+      press(f, "b")
+      eq(f.phase, "choose", "forfeit: B is NO -- back to the menu")
+      eq(#sent, 0, "forfeit: ...and nothing is filed")
+      f:runCommand("RUN")
+      press(f, "a")
+      eq(#sent, 0, "forfeit: A on NO files nothing")
+      eq(f.phase, "choose", "forfeit: ...and the menu is back")
+      f:runCommand("RUN")
+      press(f, "up")
+      eq(f.asking.cursor, 1, "forfeit: UP puts the cursor on YES")
+      local band = Battlefield.drawListPanel
+      local bandRows, bandTitle
+      Battlefield.drawListPanel = function(rows, cursor, opts)
+        bandRows, bandTitle = rows, opts and opts.title
+        return true
+      end
+      local okBand = withLove(f.drawModernBand, f)
+      Battlefield.drawListPanel = band
+      check(okBand, "forfeit: the arena's band draws the question")
+      eq(bandRows and #bandRows, 2, "forfeit: ...as a two-row list")
+      check(bandTitle and bandTitle:find("FORFEIT", 1, true), "forfeit: ...titled with the question")
+      press(f, "a")
+      eq(sent[1] and sent[1].action, "run", "forfeit: a YES files RUN")
+      eq(f.phase, "play", "forfeit: ...and the turn is answered")
+      -- A chose that closes the turn takes a question still up with it.
+      ev({ t = "turn" })
+      drain()
+      f:runCommand("RUN")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      eq(f.asking, nil, "forfeit: the referee answering the turn drops the question")
+      eq(f.phase, "play", "forfeit: ...and the phase")
+    end
+    -- Without the rules: today's trainer refusal, and today's bag.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      FakeBag.add(SESSION.bag, 13, 1)
+      local f, ev, sent, drain = screen3("coop_npc", nil, { trainer = { className = "LASS", trainerName = "AMY" } })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 50, maxHp = 50, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 30, maxHp = 30 })
+      ev({ t = "turn" })
+      drain()
+      f:runCommand("RUN")
+      check(said(f, "No! There's no"), "no rules: RUN is the trainer refusal as before")
+      eq(f.phase, "choose", "no rules: ...no question")
+      drain()
+      f:runCommand("ITEM")
+      eq(f.phase, "item", "no rules: BAG opens")
+      eq(#sent, 0, "no rules: nothing filed")
+    end
+    -- `forfeit` is a trainer fight's rule: a wild RUN stays a RUN.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { rules = { forfeit = true } }, { wildParty = { wild } })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 50, maxHp = 50, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      ev({ t = "turn" })
+      drain()
+      f:runCommand("RUN")
+      eq(sent[1] and sent[1].action, "run", "forfeit in a wild fight: RUN is filed, no question")
+    end
+
+    -- ---- (d) Oak's voice-over (C6 `lesson`)
+    do
+      newGame()
+      SESSION.party = { monOf(4, 5), monOf(16, 5) }
+      FakeBag.add(SESSION.bag, 13, 2)
+      local rival = { trainerPic = 9, className = "RIVAL", trainerName = "TERRY" }
+      local f, ev, sent, drain = screen3("coop_npc", { firstBattle = "oak" }, { trainer = rival })
+      eq(f.firstBattle, "oak", "oak: the screen option is read")
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 20, maxHp = 20,
+           level = 5, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "SQUIRTLE", speciesId = "7", hp = 20, maxHp = 20 })
+      ev({ t = "turn" })
+      local go = said(f, "Go! CHARMANDER")
+      local petes = said(f, "OAK: OH, FOR PETE'S SAKE")
+      check(go and petes and petes > go, "oak: 'for Pete's sake' after the intro send-outs")
+      check(said(f, "SO PUSHY, ANN!"), "oak: ...paged at the printer's break, with the player's name")
+      check(said(f, "OAK: TRY BATTLING!"), "oak: ...every page")
+      -- The field darkens under exactly those lines.
+      local seenDark, seenLight, litFoe, unlit = false, false, false, true
+      for _ = 1, 80 do
+        f:update(2.0)
+        if f.shown and f.shown:find("OAK:", 1, true) then
+          if f.voiceover then seenDark = true end
+          local model = f:gen3ClassicModel()
+          if f.shown:find("THE TRAINER THAT", 1, true) then
+            litFoe = model.voiceoverLit == "foe"
+            classicDraw(model)
+            eq(chromeCount("drawEnemyBox"), 2, "oak: the foe's box is lit again over the dark")
+          elseif model.voiceoverLit ~= nil then
+            unlit = false
+          end
+          if model.voiceover and model.message then
+            check(classicDraw(model) == true, "oak: the classic page draws the voice-over")
+            check(dimDrawn(240, 112), "oak: ...the field darkened halfway to black")
+            local line = textAt("OAK:")
+            eq(line and line.colors, "normal", "oak: ...the line in dark ink (the voice-over frame)")
+            eq(line and line.x, ClassicBattle.G3.VOICEOVER_X, "oak: ...at B_WIN_OAK_OLD_MAN's origin")
+          end
+        elseif f.shown == nil and #f.lines == 0 then
+          seenLight = f.voiceover == nil
+          break
+        end
+      end
+      f:update(2.0)
+      check(seenDark, "oak: the voice-over darkens the field")
+      check(litFoe, "oak: 'The trainer that...' lights the foe's healthbox (PrintOakText_ForPetesSake)")
+      check(unlit, "oak: ...and only that page")
+      check(seenLight, "oak: ...and lifts after his last page")
+      eq(f.phase, "choose", "oak: the menu opens behind him")
+      -- The arena darkens its field the same way.
+      f.voiceover = true
+      local _, dimmed = withLove(f.drawVoiceoverDim, f)
+      local dimCalls = drawnCalls
+      f.voiceover = nil
+      drawnCalls = dimCalls
+      check(dimmed and dimDrawn(Battlefield.WIDTH, Battlefield.FIELD_BOTTOM),
+            "oak: the arena's field darkens under him, the band does not")
+      -- The referee's lessons.
+      local mark = #(f.textLog or {})
+      f:runCommand("FIGHT")
+      f:pickMove(1)
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "damage", slot = 3, side = "b", hp = 15, maxHp = 20, amount = 5 })
+      ev({ t = "lesson", text = "damage" })
+      ev({ t = "msg", text = "SQUIRTLE used TACKLE!" })
+      ev({ t = "lesson", text = "damage" })
+      ev({ t = "lesson", text = "1" })
+      ev({ t = "lesson", text = "stat" })
+      ev({ t = "lesson", text = "nonsense" })
+      ev({ t = "turn" })
+      local dmg, used = said(f, "INFLICTING DAMAGE", mark), said(f, "SQUIRTLE used TACKLE!", mark)
+      check(dmg and used and dmg < used, "oak: the damage lesson where the referee put it")
+      eq(saidCount(f, "INFLICTING DAMAGE", mark), 1, "oak: ...once, however often it is asked")
+      check(said(f, "LOWERING THE FOE'S STATS", mark), "oak: the stat lesson")
+      drain()
+      -- RUN: his line, every time, never the plain refusal.
+      mark = #(f.textLog or {})
+      f:runCommand("RUN")
+      drain()
+      f:runCommand("RUN")
+      drain()
+      eq(saidCount(f, "NO RUNNING AWAY", mark), 2, "oak: RUN is his line every time")
+      eq(said(f, "No! There's no", mark), nil, "oak: ...never the plain trainer refusal")
+      eq(#sent, 1, "oak: ...and nothing more is filed")
+      -- The first POKéMON menu is his first; the picker opens behind him.
+      mark = #(f.textLog or {})
+      f:runCommand("SWITCH")
+      eq(f.phase, "choose", "oak: the picker waits for his party lesson")
+      drain()
+      check(said(f, "THIS IS YOUR PARTY", mark), "oak: the party lesson")
+      eq(f.phase, "switch", "oak: ...then the picker")
+      press(f, "b")
+      f:runCommand("SWITCH")
+      eq(f.phase, "switch", "oak: the second POKéMON menu opens at once")
+      press(f, "b")
+      -- The first POTION chosen.
+      mark = #(f.textLog or {})
+      f.itemPick = { id = 13, effect = Sheet3.itemEffect(13) }
+      check(f:commitItem(1, nil), "oak: a POTION goes out")
+      check(said(f, "KEEP YOUR EYES ON YOUR HP", mark), "oak: ...after his HP lesson")
+      local litRow = nil
+      for _, row in ipairs(f.lines) do
+        if type(row) == "table" and row.stateRow == "voiceover" and row.value == true then litRow = row end
+      end
+      eq(litRow and litRow.lit, "ally", "oak: the HP lesson lights the player's healthbox (PrintOakText_KeepAnEyeOnHP)")
+      eq(sent[#sent].item, "13", "oak: ...as the item choice")
+      ev({ t = "unchose", slot = 0, side = "a", text = "ANN" })
+      drain()
+      f.itemPick = { id = 13, effect = Sheet3.itemEffect(13) }
+      f:commitItem(1, nil)
+      eq(saidCount(f, "KEEP YOUR EYES ON YOUR HP", mark), 1, "oak: ...once")
+      -- The caller's two, behind its own ending lines.
+      check(f:sayLesson3("prize"), "oak: the caller says the prize lesson")
+      check(f:sayLesson3("lost"), "oak: ...and the disappointed one")
+      check(not f:sayLesson3("prize"), "oak: ...each once")
+      check(said(f, "HM! EXCELLENT!") and said(f, "HOW DISAPPOINTING"), "oak: both are said")
+      check(f:sayLesson3("winEarnsPrize") == false, "oak: the engine's key names the same lesson")
+      check(f:sayLesson3("win") == false and f:sayLesson3("lose") == false,
+            "oak: ...and so do the referee's ids")
+    end
+    -- The referee's ids, as BattleSim3 states them (Turn.LESSONS): each one
+    -- names its lesson, and the two ending ones wait for the caller's lines.
+    for _, id in ipairs({ "intro", "damage", "stat", "potion", "party", "run", "win", "lose" }) do
+      check(Mediated.LESSONS3[id] ~= nil, "oak: the referee's `" .. id .. "` names a lesson")
+    end
+    do
+      newGame()
+      SESSION.party = { monOf(4, 5) }
+      local rival = { trainerPic = 9, className = "RIVAL", trainerName = "TERRY" }
+      local f, ev, sent, drain = screen3("coop_npc", { firstBattle = "oak" }, { trainer = rival })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 20, maxHp = 20, mon = 0 })
+      ev({ t = "lesson", text = "intro" })
+      ev({ t = "turn" })
+      eq(saidCount(f, "FOR PETE'S SAKE"), 1, "oak: the referee's intro and the screen's are one")
+      drain()
+      ev({ t = "faint", slot = 3, side = "b", text = "SQUIRTLE" })
+      ev({ t = "lesson", text = "win" })
+      eq(said(f, "HM! EXCELLENT!"), nil, "oak: `win` waits for the prize line")
+      ev({ t = "over" })
+      f:onOutcome({ battle = "um", outcome = "win", winners = { "me" }, losers = { "p" }, reason = "ko" })
+      f:say("ANN got $96 for winning!")   -- the caller's prize line (SoloBattle)
+      drain()
+      local prize, oak = said(f, "for winning!"), said(f, "HM! EXCELLENT!")
+      check(prize and oak and oak > prize, "oak: ...and follows it once the ending is read")
+      eq(saidCount(f, "HM! EXCELLENT!"), 1, "oak: ...once")
+      eq(f.voiceover, nil, "oak: the field is light again before the screen closes")
+      -- The caller may say it itself, at its own line: the held one goes.
+      local g, gev, _, gdrain = screen3("coop_npc", { firstBattle = "oak" }, { trainer = rival })
+      gev({ t = "lesson", text = "lose" })
+      gev({ t = "over" })
+      g:onOutcome({ battle = "um", outcome = "win", winners = { "p" }, losers = { "me" }, reason = "ko" })
+      g:say("RIVAL: YEAH! AM I GREAT OR WHAT?")
+      check(g:sayLesson3("lose"), "oak: the caller says `lose` behind the win text")
+      gdrain()
+      eq(saidCount(g, "HOW DISAPPOINTING"), 1, "oak: ...and the held one is not said again")
+      -- The bag's party picker is his first party menu too.
+      newGame()
+      SESSION.party = { monOf(4, 5), monOf(16, 5) }
+      FakeBag.add(SESSION.bag, 13, 1)
+      local b, bev, _, bdrain = screen3("coop_npc", { firstBattle = "oak" }, { trainer = rival })
+      bev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 10, maxHp = 20, mon = 0 })
+      bev({ t = "turn" })
+      bdrain()
+      b:runCommand("ITEM")
+      eq(b.phase, "item", "oak: BAG opens")
+      press(b, "a")   -- the POTION, the bag's one row
+      eq(b.phase, "item", "oak: the party picker waits for his lesson")
+      bdrain()
+      check(said(b, "THIS IS YOUR PARTY"), "oak: the party lesson from the bag")
+      eq(b.phase, "item_party", "oak: ...then the picker")
+    end
+    -- A fight that is not Oak's: no intro, the plain RUN line; a `lesson`
+    -- from the referee is still said.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 5) }
+      local f, ev, sent, drain = screen3("coop_npc", nil, { trainer = { className = "RIVAL", trainerName = "T" } })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 20, maxHp = 20, mon = 0 })
+      ev({ t = "turn" })
+      eq(said(f, "OAK:"), nil, "no first battle: no voice-over at the intro")
+      drain()
+      f:runCommand("RUN")
+      check(said(f, "No! There's no"), "no first battle: the plain refusal")
+      ev({ t = "lesson", text = "stat" })
+      check(said(f, "LOWERING"), "a referee `lesson` is said whatever the screen was told")
+      -- Birch's fight: nothing of the screen's own.  RUN is filed like any wild
+      -- RUN -- a SMOKE BALL or RUN AWAY still gets away first on the cart
+      -- (pokeemerald battle_main.c:4021) -- and a refusal's "Don't leave me
+      -- like this!" reaches the box as a line from behind the screen (the
+      -- kind's `choose` parking it, SoloBattle's pump), said like any other.
+      local b, bev, bsent, bdrain = screen3("wild", { firstBattle = "birch" },
+        { wildParty = { assert(Sheet3.mon(SESSION, monOf(16, 2), 0, { wild = true })) } })
+      eq(b.firstBattle, "birch", "birch: the screen option is read")
+      bev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 20, maxHp = 20, mon = 0 })
+      bev({ t = "turn" })
+      bdrain()
+      eq(said(b, "OAK:"), nil, "birch: no voice-over")
+      b:runCommand("RUN")
+      eq(bsent[1] and bsent[1].action, "run", "birch: RUN is filed (the refusal is the referee's)")
+      b:say("PROF. BIRCH: Don't leave me like this!")
+      check(said(b, "Don't leave me like this!"), "birch: ...and his line is said when it comes")
+    end
+    -- No text for the lessons: the fight goes on, warned once.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 5) }
+      oakOff = true
+      local warned = #warns
+      local f, ev = screen3("coop_npc", { firstBattle = "oak" }, { trainer = { className = "RIVAL", trainerName = "T" } })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 20, maxHp = 20, mon = 0 })
+      ev({ t = "turn" })
+      ev({ t = "lesson", text = "damage" })
+      oakOff = false
+      eq(said(f, "OAK:"), nil, "oak, no text: nothing is said")
+      eq(#warns, warned + 1, "oak, no text: warned once")
+      eq(f.pendingTurn, true, "oak, no text: the turn still opens")
+    end
+
+    -- ---- (e) the Pokémon Tower GHOST
+    do
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      FakeBag.add(SESSION.bag, 4, 2)
+      local maro = assert(Sheet3.mon(SESSION, monOf(16, 30), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { ghost = "veiled" }, { wildParty = { maro } })
+      eq(f.ghost, "veiled", "ghost: the screen option is read")
+      check(said(f, "THE GHOST APPEARED!") and said(f, "THE GHOST CAN'T BE ID'D!"),
+            "ghost: the cart's opening (sText_GhostAppearedCantId)")
+      eq(introFill and introFill.ghostUnveiled, false, "ghost: ...asked as the veiled one")
+      eq(said(f, "Wild PIDGEY"), nil, "ghost: no 'Wild X appeared!'")
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 60, maxHp = 60, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 40, maxHp = 40, level = 30 })
+      ev({ t = "turn" })
+      drain()
+      eq(said(f, "sent out"), nil, "ghost: no send-out line for it")
+      local foe = f:gen3ClassicModel().foe
+      eq(foe and foe.name, Mediated.ghostName3(), "ghost: the plate reads GHOST")
+      eq(foe and foe.sprite, ghostImage, "ghost: the engine's silhouette is its pic")
+      eq(foe and foe.gender, nil, "ghost: no gender mark")
+      eq(foe and foe.caught, false, "ghost: no owned ball")
+      eq(foe and foe.speciesId, nil, "ghost: nothing of the species underneath")
+      local seat = f:battlefieldCtx().foeSeats[1]
+      eq(seat and seat.name, Mediated.ghostName3(), "ghost: the arena's seat reads GHOST")
+      eq(seat and seat.front, ghostImage, "ghost: ...on the silhouette")
+      eq(seat and seat.icon, nil, "ghost: ...with no icon of the species")
+      check(classicDraw(f:gen3ClassicModel()) == true, "ghost: the classic page draws it")
+      local nameDrawn = textAt(Mediated.ghostName3())
+      check(nameDrawn ~= nil, "ghost: ...its box named GHOST")
+      eq(textAt("PIDGEY"), nil, "ghost: ...and never the species")
+      -- A ball: dodged and spent.
+      f.itemPick = { id = 4, effect = Sheet3.itemEffect(4) }
+      f:commitItem(nil, nil)
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "item", slot = 0, side = "a", text = "4" })
+      ev({ t = "msg", text = "ANN used POKé BALL!" })
+      local mark = #(f.textLog or {})
+      local before = #f.lines
+      ev({ t = "ball", slot = 0, side = "a", target = 3, amount = -1, text = "4" })
+      local rows = {}
+      for i = before + 1, #f.lines do
+        local row = f.lines[i]
+        if type(row) == "table" and row.anim then rows[#rows + 1] = row.anim end
+      end
+      eq(table.concat(rows, ","), "TOSS_ANIM,BLOCKBALL_ANIM",
+         "dodge: the throw and nothing to open (no recall, no shakes, no burst)")
+      ev({ t = "msg", text = "It dodged the thrown BALL!\nThis POKéMON can't be caught!" })
+      ev({ t = "msg", text = "GHOST: Get out...... Get out......" })
+      eq(saidCount(f, "DODGED THE THROWN BALL", mark), 1, "dodge: the cart's line (STRINGID_ITDODGEDBALL)")
+      eq(saidCount(f, "It dodged the thrown BALL", mark), 0, "dodge: ...and not the referee's again")
+      check(said(f, "Get out", mark), "dodge: the line after it is still said")
+      eq(FakeBag.get(SESSION.bag, 4), 1, "dodge: the ball is spent")
+      drain()
+      eq(f.ballFlow, nil, "dodge: no throw is left standing over the GHOST")
+      -- Without a text pack: the fallback, still once.
+      packOff = true
+      mark = #(f.textLog or {})
+      ev({ t = "ball", slot = 0, side = "a", target = 3, amount = -1, text = "4" })
+      ev({ t = "msg", text = "It dodged the thrown BALL!\nThis POKéMON can't be caught!" })
+      packOff = false
+      eq(saidCount(f, "It dodged the thrown BALL", mark), 1, "dodge: the fallback, once")
+      -- A lossy stream: the referee's sentence went missing, the next line is said.
+      mark = #(f.textLog or {})
+      local seq0 = f.seq
+      f:onEvent({ battle = "um", seq = seq0 + 1, t = "ball", slot = 0, side = "a", target = 3, amount = -1, text = "4" })
+      f:onEvent({ battle = "um", seq = seq0 + 3, t = "msg", text = "It dodged the thrown BALL! again" })
+      eq(saidCount(f, "again", mark), 1, "dodge gap: a line that is not right behind it is said")
+      -- The scared clips are nobody's order: no callout, no lunge.
+      local n = #f.lines
+      ev({ t = "anim", slot = 0, side = "a", text = "MON_SCARED" })
+      ev({ t = "anim", slot = 3, side = "b", text = "GHOST_GET_OUT" })
+      eq(f.lines[n + 1] and f.lines[n + 1].quiet, true, "ghost: MON_SCARED is a quiet clip")
+      eq(f.lines[n + 2] and f.lines[n + 2].quiet, true, "ghost: GHOST_GET_OUT too")
+      drain()
+      eq(f.battlefieldBubbles, nil, "ghost: ...so no trainer shouts it")
+    end
+    -- Unveiled: the silhouette through the opening, MAROWAK from the scope on.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local maro = assert(Sheet3.mon(SESSION, monOf(16, 30), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { ghost = "unveiled" }, { wildParty = { maro } })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 60, maxHp = 60, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 40, maxHp = 40, level = 30 })
+      ev({ t = "turn" })
+      eq(introFill and introFill.ghostUnveiled, true, "unveil: the opening asked as the scoped one")
+      local appeared = said(f, "THE GHOST APPEARED!")
+      local scope, was = said(f, "SILPH SCOPE UNVEILED"), said(f, "THE GHOST WAS MAROWAK!")
+      check(appeared and scope and was and appeared < scope and scope < was,
+            "unveil: appeared -> SILPH SCOPE unveiled -> the GHOST was (BattleScript_SilphScopeUnveiled)")
+      eq(said(f, "DARN!"), nil, "unveil: no 'can't be ID'd'")
+      local go = said(f, "Go! CHARMANDER")
+      check(go and was and go > was, "unveil: ...all before our send-out, as the cart opens it")
+      eq(f:gen3ClassicModel().foe.name, Mediated.ghostName3(), "unveil: the GHOST until the scope plays")
+      local scoped = false
+      for _, row in ipairs(f.lines) do
+        if type(row) == "table" and row.anim == "SILPH_SCOPED" then scoped = row.quiet == true end
+      end
+      check(scoped, "unveil: B_ANIM_SILPH_SCOPED plays on the foe, quietly")
+      drain()
+      local foe = f:gen3ClassicModel().foe
+      eq(foe and foe.name, "PIDGEY", "unveil: its own name after the scope")
+      check(foe and foe.sprite ~= ghostImage and foe.sprite ~= nil, "unveil: ...and its own pic")
+      eq(f:battlefieldCtx().foeSeats[1].name, "PIDGEY", "unveil: the arena too")
+      eq(f:ghostVeiled(), false, "unveil: the veil is off")
+    end
+    -- No silhouette in the cache: no pic at all, never the monster's own.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local saved = FakePokemon.ghostPic
+      FakePokemon.ghostPic = nil
+      local warned = #warns
+      local f, ev = screen3("wild", { ghost = "veiled" },
+        { wildParty = { assert(Sheet3.mon(SESSION, monOf(16, 30), 0, { wild = true })) } })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 40, maxHp = 40 })
+      local foe = f:gen3ClassicModel().foe
+      eq(foe and foe.sprite, nil, "ghost, no pic: nothing drawn")
+      eq(foe and foe.noPic, true, "ghost, no pic: ...and nothing looked for again")
+      eq(#warns, warned + 1, "ghost, no pic: warned once")
+      FakePokemon.ghostPic = saved
+    end
+
+    -- ---- (f) the fight's own theme
+    do
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 30), 0, { wild = true }))
+      audioCalls = {}
+      local f = screen3("wild", { song = 412 }, { wildParty = { wild } })
+      f:enter()
+      local played = nil
+      for _, call in ipairs(audioCalls) do if call[1] == "playSong" then played = call[2] end end
+      eq(played, 412, "song: the kind's theme is what plays")
+      audioCalls = {}
+      f:restoreBattleTheme()
+      played = nil
+      for _, call in ipairs(audioCalls) do if call[1] == "playSong" then played = call[2] end end
+      eq(played, 412, "song: ...and what an evolution movie restores")
+      audioCalls = {}
+      local plain = screen3("wild", nil, { wildParty = { wild } })
+      plain:enter()
+      played = nil
+      for _, call in ipairs(audioCalls) do if call[1] == "playSong" then played = call[2] end end
+      check(played ~= nil and played ~= 412, "song: without one, the mode's theme as ever")
+    end
+
+    -- ---- (h) the real referee's stream (BattleSim3, contract C3 / C6)
+    --
+    -- The screen over a local referee told the same fight: its `ghost` and
+    -- `firstBattle` create options, the foe answered by the referee itself.
+    local function realScreen(mode, foeSheets, screenOpts, createOpts)
+      local pending, battle = {}, nil
+      local foeId = (mode == "wild") and "wild" or "peer"
+      local transport = {
+        isReady = function() return true end,
+        send = function(_, kind, msg)
+          if type(msg) == "table" and msg.action then
+            local c = {}
+            for k, v in pairs(msg) do if k ~= "battle" then c[k] = v end end
+            local took = battle and battle:submitChoice("me", c) or false
+            if took then battle:autoPick(foeId) end
+            return took
+          elseif type(msg) == "table" and msg.mons then
+            if msg.side ~= "b" then pending.party = msg end
+          elseif type(msg) == "table" and (msg.typeTable or msg.movePool) then
+            pending.ruleset = msg
+          end
+        end,
+      }
+      local o = { transport = transport, game = GAME, battle = "rr", role = "host",
+                  peerId = (mode ~= "wild") and foeId or nil, peerName = "BOB", mode = mode,
+                  wildParty = (mode == "wild") and foeSheets or nil, classicUi = true }
+      for k, v in pairs(screenOpts or {}) do o[k] = v end
+      local fight = Mediated.new(o)
+      fight:start(GAME)
+      local ruleset = pending.ruleset or {}
+      local create = {
+        id = "rr", mode = mode, seed = 5, typeTable = ruleset.typeTable, movePool = ruleset.movePool,
+        sides = {
+          a = { { playerId = "me", name = "ANN", mons = pending.party.mons, bag = pending.party.bag } },
+          b = { { playerId = foeId, name = "BOB", mons = foeSheets } },
+        },
+      }
+      for k, v in pairs(createOpts or {}) do create[k] = v end
+      battle = assert(Sim.Turn.create(create))
+      fight:onReady({ battle = "rr", mode = mode, sides = { a = { "me" }, b = { foeId } } })
+      local function pump()
+        battle:tick(0)
+        for _, e in ipairs(battle:drainEvents()) do fight:onEvent(e) end
+        local out = battle:outcome()
+        if out and not fight.finished then
+          fight:onOutcome({ battle = "rr", outcome = out.outcome, winners = out.winners,
+                            losers = out.losers, reason = out.reason, caught = out.caught })
+        end
+        for _ = 1, 400 do
+          fight:update(2.0)
+          if fight.phase == "choose" or (fight.phase == "over" and #fight.lines == 0
+             and not fight.shown) then break end
+        end
+      end
+      return fight, battle, pump
+    end
+    do
+      newGame()
+      SESSION.party = { monOf(4, 30, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+      FakeBag.add(SESSION.bag, 4, 2)
+      local maro = assert(Sheet3.mon(SESSION, monOf(16, 30, { moves = { 33 }, pp = { 35 }, maxPp = { 35 } }),
+        0, { wild = true }))
+      local f, battle, pump = realScreen("wild", { maro }, { ghost = "veiled" }, { ghost = "veiled" })
+      pump()
+      eq(f.phase, "choose", "referee ghost: the menu opens")
+      eq(f:gen3ClassicModel().foe.name, Mediated.ghostName3(), "referee ghost: the GHOST stands there")
+      local mark = #(f.textLog or {})
+      f.itemPick = { id = 4, effect = Sheet3.itemEffect(4) }
+      check(f:commitItem(nil, nil), "referee ghost: a ball goes out")
+      pump()
+      eq(saidCount(f, "DODGED THE THROWN BALL", mark), 1, "referee ghost: the dodge, in the cart's words")
+      eq(saidCount(f, "It dodged the thrown BALL", mark), 0, "referee ghost: ...the referee's sentence not again")
+      eq(FakeBag.get(SESSION.bag, 4), 1, "referee ghost: the ball is spent")
+      check(said(f, "Get out", mark), "referee ghost: the GHOST's turn is its line")
+      eq(f.finished, false, "referee ghost: the fight goes on")
+      f:runCommand("RUN")
+      pump()
+      check(f.finished, "referee ghost: RUN ends it")
+    end
+    do
+      newGame()
+      SESSION.party = { monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+      local rival = assert(Sheet3.mon(SESSION, monOf(16, 5, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }), 0))
+      local f, battle, pump = realScreen("coop_npc", { rival }, { firstBattle = "oak" },
+        { firstBattle = "oak" })
+      pump()
+      eq(f.phase, "choose", "referee oak: the menu opens")
+      eq(saidCount(f, "FOR PETE'S SAKE"), 1, "referee oak: 'for Pete's sake', once (referee and screen agree)")
+      f:runCommand("RUN")
+      pump()
+      eq(saidCount(f, "NO RUNNING AWAY"), 1, "referee oak: RUN is Oak's line, once")
+      f:runCommand("FIGHT")
+      f:pickMove(1)
+      pump()
+      eq(saidCount(f, "INFLICTING DAMAGE"), 1, "referee oak: the damage lesson, from the referee's event")
+      local guard = 0
+      while not f.finished and guard < 20 do
+        guard = guard + 1
+        if f.phase == "choose" then f:runCommand("FIGHT"); f:pickMove(1) end
+        pump()
+      end
+      check(f.finished, "referee oak: the fight ends")
+      for _ = 1, 20 do f:update(2.0) end
+      local won = f.result == "win"
+      check(said(f, won and "HM! EXCELLENT!" or "HOW DISAPPOINTING") ~= nil,
+            "referee oak: the ending lesson is said once the ending is read")
+    end
+
+    -- ---- (g) the options read nothing they were not given
+    do
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local f = Mediated.new({ game = GAME, battle = "x", mode = "wild", ghost = "nope",
+                               firstBattle = "elm", commands = {}, rules = "no" })
+      eq(f.ghost, nil, "options: an unknown ghost shape is ignored")
+      eq(f.firstBattle, nil, "options: an unknown first battle is ignored")
+      eq(f.commandSet, nil, "options: an empty grid is no grid")
+      eq(f.rules, nil, "options: rules must be a table")
+      eq(f.noOwnBattler, nil, "options: a side fields its battler unless told otherwise")
+      f:applyScreenOptions({ noOwnBattler = true, firstBattle = "oak" })
+      eq(f.noOwnBattler, true, "options: applyScreenOptions after `new`")
+      eq(f.firstBattle, "oak", "options: ...for any key")
+    end
+  end)
+  Gen3.battleText = realText
+  FakePokemon.ghostPic = nil
+  if not ok then check(false, "solo kinds' screen: the block raised -- " .. tostring(err)) end
+end
+
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.
 check(package.loaded["src.battle.BattleState"] == nil, "no Gen 1 BattleState on a Gen 3 boot")
 check(package.loaded["src.ui.PartyMenu"] == nil, "no Gen 1 PartyMenu on a Gen 3 boot")

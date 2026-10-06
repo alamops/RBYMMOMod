@@ -189,6 +189,14 @@ M.PLATE_EXP_GAP = 2 -- HP bar bottom to EXP strip top
 -- same width read as a pair of equals; pulling the secondary one in at both
 -- ends makes it read as subordinate to the HP bar it hangs under.
 M.PLATE_EXP_XINSET = 2
+-- The owner tag a plate carries where one side has two trainers (a Gen 3
+-- solo double's pair, its partner): the trainer's label, cut to this many
+-- glyphs, in the status row's free end -- right-aligned on a foe plate (no
+-- figures there), after the status chips on our side, never over the HP
+-- figures (`drawPlate`).
+M.PLATE_OWNER_CHARS = 12
+-- ...and the least room it is drawn in at all: an ellipsis alone says nothing.
+M.PLATE_OWNER_MIN_W = 24
 
 -- ------- the roster chip
 --
@@ -240,6 +248,10 @@ M.HUMAN_DRAW_H3 = 64
 -- How far a Gen 3 walker's visible figure reaches above its feet: the frame's
 -- top 8 source rows are headroom (16px at 2x).
 M.HUMAN_REACH3 = M.HUMAN_DRAW_H3 - 16
+-- Two NPC trainers side by side on one Gen 3 edge (placeHumans: a solo
+-- double's pair, where the trainer column cannot stack two 64px pics): the
+-- step between their columns -- a figure's width and a gutter.
+M.HUMAN_ROW_PITCH3 = M.HUMAN_DRAW_W3 + 8
 -- Distance from the canvas edge to a trainer's column. Shared with the ball
 -- arc, which starts at the thrower's column.
 local HUMAN_PAD = 20
@@ -813,6 +825,11 @@ function M.plateModel(seat)
   local shownLevel = tonumber(seat.shownLevel)
   if shownLevel ~= shownLevel then shownLevel = nil end
   if shownLevel then shownLevel = math.max(1, math.floor(shownLevel)) end
+  -- The trainer the monster fights for, on a side with two (a Gen 3 solo
+  -- double's pair, its partner); absent is a side with one, and nothing is
+  -- drawn for it.
+  local owner = seat.owner
+  if type(owner) ~= "string" or owner == "" then owner = nil end
   return {
     name = truncate(base.name, 10),
     level = base.level,
@@ -825,6 +842,7 @@ function M.plateModel(seat)
     side = side,
     expFrac = expFrac,
     shownLevel = shownLevel,
+    owner = owner and truncate(owner, M.PLATE_OWNER_CHARS) or nil,
   }
 end
 
@@ -1546,6 +1564,9 @@ local function placeHumans(humans, side, rows, paired, plates, out)
     end
   end
   local ys
+  -- Side by side rather than stacked (Gen 3, M.HUMAN_ROW_PITCH3): a column
+  -- step per figure, inboard from the trainer column.
+  local rowStep = nil
   if paired and #rows == count then
     -- Paired: take the mons' own rows verbatim. sideRows already folded this
     -- column's plate clearance into the band they came out of, so re-clamping
@@ -1561,6 +1582,32 @@ local function placeHumans(humans, side, rows, paired, plates, out)
       minY, maxY = dodgeMin, dodgeMax
     end
     ys = rowStack(count, stackGap, centerY, minY, maxY)
+    -- Two NPC trainers on one Gen 3 edge (a solo double's pair: each a 64px
+    -- front pic) where the column between the plates and the chips cannot
+    -- stack them a whole figure apart: they stand side by side on the one
+    -- row, the first on the trainer column and each next one inboard -- the
+    -- cart's own arrangement of a pair (pret OpponentHandleDrawTrainerPic:
+    -- the first trainer outer, the second nearer the middle).  A squeezed
+    -- stack would put one pic over the other.  Players' walkers (co-op) keep
+    -- their stack.
+    if onGen3() and count >= 2 and (maxY - minY) < (count - 1) * occ.up then
+      local pics = true
+      for _, human in ipairs(humans) do
+        if not (human and (human.trainerPic or human.picId or human.pic)) then pics = false end
+      end
+      local inboard = (side == "foe") and -1 or 1
+      local lastX = x + inboard * (count - 1) * M.HUMAN_ROW_PITCH3
+      local monEdge = (side == "foe") and (M.MON_COLUMN_FOE + math.floor(M.MON_DRAW / 2))
+        or (M.MON_COLUMN_ALLY - math.floor(M.MON_DRAW / 2))
+      local clear = (side == "foe") and (lastX - occ.half > monEdge)
+        or (lastX + occ.half < monEdge)
+      if pics and clear then
+        rowStep = inboard * M.HUMAN_ROW_PITCH3
+        local rowY = clamp(centerY, minY, maxY)
+        ys = {}
+        for i = 1, count do ys[i] = rowY end
+      end
+    end
   end
   for i, human in ipairs(humans) do
     local y = clamp(math.floor(num(ys[i], centerY)), minY, maxY)
@@ -1582,7 +1629,7 @@ local function placeHumans(humans, side, rows, paired, plates, out)
       -- business. Absent for a side nobody described, which is what leaves a
       -- wild fight's foe edge without one.
       party = human and human.party,
-      x = x,
+      x = rowStep and (x + (i - 1) * rowStep) or x,
       y = y,
       facing = facing,
       drawW = drawW,
@@ -1656,6 +1703,9 @@ local function placeMons(seats, side, rows, out)
       -- doll stands in for it. nil everywhere else.
       elevation = seat and seat.elevation,
       substitute = seat and seat.substitute and true or nil,
+      -- Whose monster, where a side has two trainers on it (a Gen 3 solo
+      -- double's pair, its partner): the plate's owner tag. nil elsewhere.
+      owner = seat and seat.owner,
       x = x,
       y = y,
       facing = facing,
@@ -3432,6 +3482,34 @@ function M.gen3TrainerPic(picId)
   return nil
 end
 
+-- A trainer's back pic strip (the engine's trainer_pic.lua TrainerPic.back
+-- entry: { image, w, h, frames }, frames of 64x64 stacked), by the cart's
+-- TRAINER_BACK_PIC_* index -- the player's is their gender, a partner's his
+-- own (pret battle_controller_player_partner.c:1303 TRAINER_BACK_PIC_STEVEN)
+-- -- or by the engine battle profile's `backPics` key ("steven", "wally";
+-- profiles/emerald/battle.lua), which is how the engine's own battle names
+-- it (battle/init.lua st.partner.backPic).  Gen3.trainerBackPic takes a
+-- gender alone, so the index is asked of the engine here.  nil off Gen 3, or
+-- with no such pic in the player's cache.
+function M.gen3TrainerBackPic(which)
+  local index = tonumber(which)
+  if index == nil and type(which) == "string" and which ~= "" then
+    local Profile = Gen3.engine("src.core.game3.battle.profile")
+    local ok, bp = false, nil
+    if Profile and type(Profile.get) == "function" then
+      ok, bp = pcall(Profile.get, Gen3.session and Gen3.session() or nil)
+    end
+    local pics = ok and type(bp) == "table" and bp.backPics or nil
+    index = type(pics) == "table" and tonumber(pics[which]) or nil
+  end
+  if index == nil or index < 0 then return nil end
+  local TrainerPic = Gen3.engine("src.core.game3.trainer_pic")
+  if not (TrainerPic and type(TrainerPic.back) == "function") then return nil end
+  local ok, entry = pcall(TrainerPic.back, math.floor(index))
+  if ok and type(entry) == "table" and entry.image then return entry end
+  return nil
+end
+
 -- A seat's `elevation`: how far the cart floats this species over its
 -- platform (pret gEnemyMonElevation -- Gastly, the Magnemite line...), or nil.
 -- Read from the engine's PicCoords, which is per version (Emerald's comes out
@@ -4453,15 +4531,28 @@ local function drawPlate(plate)
         chipX = chipX + drawStatusChip(gfx, micro, model.status, chipX, statusY, 12) + 2
       end
       if model.confused then
-        drawStatusChip(gfx, micro, "CNF", chipX, statusY, 12)
+        chipX = chipX + drawStatusChip(gfx, micro, "CNF", chipX, statusY, 12) + 2
       end
+      local figuresW = 0
       if plate.numbers then
         -- Exact figures on your own side only, per series convention.
         withFont(gfx, M.FONT_SECONDARY, function(secondary)
           local hpText = ("%d/%d"):format(model.shownHp, model.maxHp)
+          figuresW = widthWith(secondary, hpText)
           setColor(gfx, TEXT_MUTED)
-          gfx.print(hpText, chipRight - widthWith(secondary, hpText), statusY - 1)
+          gfx.print(hpText, chipRight - figuresW, statusY - 1)
         end)
+      end
+      if model.owner then
+        -- Whose monster (M.PLATE_OWNER_CHARS): in whatever the chips and the
+        -- figures leave of the status row, or not at all.
+        local room = chipRight - chipX - (figuresW > 0 and figuresW + 4 or 0)
+        if room >= M.PLATE_OWNER_MIN_W then
+          local tag = fitLine(micro, model.owner, room)
+          setColor(gfx, TEXT_MUTED)
+          local tagX = plate.numbers and chipX or (chipRight - widthWith(micro, tag))
+          gfx.print(tag, tagX, statusY)
+        end
       end
       withFont(gfx, M.FONT_PRIMARY, function(primary)
         setColor(gfx, TEXT_ON)

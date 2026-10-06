@@ -266,6 +266,78 @@ eq(Battlefield.gen3Front(25), nil, "off a Gen 3 boot there is no Gen 3 art to ha
 eq(Battlefield.gen3Elevation(92), nil, "...nor an elevation")
 Gen3Stub.on = true
 
+-- ---- a trainer's back pic by the cart's TRAINER_BACK_PIC_* index (a solo
+-- double's partner, W1-UC): the engine's TrainerPic.back by number, or by the
+-- battle profile's backPics key; synthetic indices
+do
+  local backAsked = {}
+  stubModules["src.core.game3.trainer_pic"] = {
+    back = function(i)
+      backAsked[#backAsked + 1] = i
+      if i == 99 then return nil end
+      return { image = fakeImage("trainerback:" .. tostring(i), 64, 256), w = 64, h = 256, frames = 4 }
+    end,
+  }
+  stubModules["src.core.game3.battle.profile"] = {
+    get = function() return { backPics = { steven = 7, wally = 6 } } end,
+  }
+  local entry = Battlefield.gen3TrainerBackPic(7)
+  eq(entry and entry.image and entry.image.tag, "trainerback:7", "gen3TrainerBackPic: by index, the engine's strip")
+  eq(entry and entry.frames, 4, "gen3TrainerBackPic: ...the whole entry (its frames)")
+  eq(Battlefield.gen3TrainerBackPic("steven") and Battlefield.gen3TrainerBackPic("steven").image.tag,
+     "trainerback:7", "gen3TrainerBackPic: the profile's key names the same pic")
+  eq(Battlefield.gen3TrainerBackPic("wally").image.tag, "trainerback:6", "gen3TrainerBackPic: ...any key")
+  eq(Battlefield.gen3TrainerBackPic(1).image.tag, "trainerback:1", "gen3TrainerBackPic: the player's, by gender")
+  eq(Battlefield.gen3TrainerBackPic("nobody"), nil, "gen3TrainerBackPic: an unknown key is nothing")
+  eq(Battlefield.gen3TrainerBackPic(-1), nil, "gen3TrainerBackPic: a negative index is nothing")
+  eq(Battlefield.gen3TrainerBackPic(99), nil, "gen3TrainerBackPic: a pic the cache lacks is nothing")
+  eq(Battlefield.gen3TrainerBackPic(nil), nil, "gen3TrainerBackPic: no pic named is nothing")
+  Gen3Stub.on = false
+  local asked = #backAsked
+  eq(Battlefield.gen3TrainerBackPic(7), nil, "gen3TrainerBackPic: off a Gen 3 boot, nothing")
+  eq(#backAsked, asked, "gen3TrainerBackPic: ...and the engine is not asked")
+  Gen3Stub.on = true
+  stubModules["src.core.game3.trainer_pic"] = nil
+  stubModules["src.core.game3.battle.profile"] = nil
+end
+
+-- ---- a plate's owner tag (a side with two trainers on it, W1-UC)
+do
+  local tagged = Battlefield.plateModel({ name = "MEW", hp = 5, maxHp = 10, owner = "LASS MIA" })
+  eq(tagged.owner, "LASS MIA", "plate owner: the trainer's label rides the plate model")
+  eq(Battlefield.plateModel({ name = "MEW", hp = 5, maxHp = 10 }).owner, nil,
+     "plate owner: a seat with no owner has none (the plate as it was)")
+  eq(Battlefield.plateModel({ name = "MEW", hp = 5, maxHp = 10, owner = "" }).owner, nil,
+     "plate owner: an empty label is none")
+  local long = Battlefield.plateModel({ name = "MEW", hp = 5, maxHp = 10,
+                                        owner = "PKMN TRAINER ALEXANDRIA" }).owner
+  eq(#long, Battlefield.PLATE_OWNER_CHARS, "plate owner: cut to PLATE_OWNER_CHARS glyphs")
+  eq(long:sub(-1), ".", "plate owner: ...with the cut mark")
+  local layout = Battlefield.layout({
+    mode = "coop_npc",
+    allySeats = { { index = 1, name = "A", hp = 5, maxHp = 9 },
+                  { index = 2, name = "B", hp = 5, maxHp = 9, owner = "STEVEN" } },
+    foeSeats = { { index = 3, name = "C", hp = 5, maxHp = 9, owner = "DUO" },
+                 { index = 4, name = "D", hp = 5, maxHp = 9, owner = "MIA" } },
+  })
+  local owners = {}
+  for _, plate in ipairs(layout.plates) do owners[#owners + 1] = tostring(plate.model.owner) end
+  eq(table.concat(owners, ","), "nil,STEVEN,DUO,MIA", "plate owner: the layout carries each seat's owner onto its plate")
+  -- drawn into the status row, never over the HP figures
+  drawn = {}
+  local drewOwner = false
+  local okDraw = pcall(Battlefield.draw, { gen3 = true }, {
+    mode = "coop_npc", frame = 0,
+    allySeats = { { index = 1, name = "A", hp = 5, maxHp = 9 } },
+    foeSeats = { { index = 3, name = "C", hp = 5, maxHp = 9, owner = "DUO" } },
+  })
+  for _, call in ipairs(drawn) do
+    if call[1] == "print" and tostring(call[2]):find("DUO", 1, true) then drewOwner = true end
+  end
+  check(okDraw, "plate owner: a plated arena with an owner tag draws")
+  check(drewOwner, "plate owner: ...and prints the trainer's label on the foe plate")
+end
+
 -- ---- icon frames: the cart's two-frame bob
 local img0, q0, size = Battlefield.gen3IconFrame(icon, 0)
 eq(img0, icon.image, "an icon frame draws the record's own sheet")

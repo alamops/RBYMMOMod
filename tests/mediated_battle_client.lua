@@ -2829,6 +2829,54 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 14c. the Gen 3 solo kinds' screen options leave Red's screen as it was
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen3-solo-remaining-fights.md (wave 1 UM) adds screen options
+-- for the fights the Gen 3 cart used to keep (`applyScreenOptions`).  A Red
+-- screen never gets one from a caller; these pin that the seams they ride on
+-- -- `runCommand`, `commandList`, the band's labels, the wild send-out line --
+-- answer a Red fight exactly as before, and that the Gen 3-only facility
+-- forfeit stays off a Red trainer's RUN even if a table says otherwise.
+do
+  local plain = Mediated.new({ game = { data = DATA }, battle = "g1", mode = "wild" })
+  eq(table.concat(plain:commandList(), ","), "FIGHT,SWITCH,ITEM,RUN",
+     "Red: the grid is the one it always was")
+  local labels = {}
+  for i, item in ipairs(plain:bandCommandItems()) do labels[i] = item.label end
+  eq(table.concat(labels, ","), "FIGHT,PKMN,ITEM,RUN", "Red: ...labelled the way it always was")
+  eq(plain.noOwnBattler, nil, "Red: a screen fields its battler unless a caller says otherwise")
+
+  local sent = {}
+  local trainer = setmetatable({
+    game = { data = DATA }, mode = "coop_npc", phase = "choose", commandIndex = 4,
+    lines = {}, answeredTurn = false, rules = { forfeit = true, bag = true },
+    sendChoice = function(_, choice) sent[#sent + 1] = choice; return true end,
+  }, { __index = Mediated })
+  trainer:runCommand("RUN")
+  eq(#sent, 0, "Red: a trainer RUN is still not filed")
+  eq(trainer.phase, "choose", "Red: ...and asks nothing (the forfeit is Gen 3's)")
+  check(saidTrainerRun(trainer), "Red: ...the same refusal line")
+
+  -- A Red wild seat's send-out is still no line of its own.
+  local game = gameWith({ mon("SQUIRTLE", { level = 10 }) })
+  local wild = Mediated.new({
+    transport = { isReady = function() return true end, send = function() return true end },
+    game = game, battle = "g1w", role = "host", mode = "wild",
+    wildParty = { { species = "PIDGEY", speciesId = "PIDGEY", hp = 20, maxHp = 20, level = 3 } },
+  })
+  wild:start(game)
+  wild:onReady({ battle = "g1w", mode = "wild", sides = { a = { "me" }, b = { "wild" } } })
+  wild:onEvent({ battle = "g1w", seq = 1, t = "send", slot = 3, side = "b", text = "PIDGEY",
+                 hp = 20, maxHp = 20 })
+  local sentOut = false
+  for _, row in ipairs(wild.lines) do
+    if type(row) == "string" and row:find("sent", 1, true) then sentOut = true end
+  end
+  eq(sentOut, false, "Red: a wild seat is never 'sent out'")
+end
+
+-- ------------------------------------------------------------------
 -- 15. who is standing on the foe edge of the arena
 -- ------------------------------------------------------------------
 --

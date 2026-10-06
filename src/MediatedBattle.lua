@@ -2672,7 +2672,7 @@ local COMMAND_LABEL3 = { FIGHT = "FIGHT", ITEM = "BAG", SWITCH = "POKéMON", RUN
 
 function M.new(opts)
   opts = opts or {}
-  return setmetatable({
+  local screen = setmetatable({
     transport = opts.transport,
     ui        = opts.ui,
     game      = opts.game,
@@ -2842,6 +2842,97 @@ function M.new(opts)
     -- `opts.classicUi` is the suite hook; nil reads the live row.
     classicUi = ClassicBattle.latched(opts.classicUi),
   }, M)
+  screen:applyScreenOptions(opts)
+  return screen
+end
+
+-- ------- what a solo kind tells the screen (Gen 3, contract C2 `screen`)
+--
+-- docs/plans/gen3-solo-remaining-fights.md: every fight the cart used to keep
+-- -- the Safari Zone, the tutorials, a Pokémon Tower ghost, Oak's lab, a
+-- facility -- is fought on this one screen, and a kind module's
+-- `screen(self, ctx)` hands it what differs.  Each key is optional and absent
+-- means today's screen, so a fight no kind describes is the fight it always
+-- was:
+--
+--   noOwnBattler = true      side a fields nothing for the whole fight (pret
+--                            zeroes gBattleMons[player] for the Safari Zone,
+--                            battle_main.c:2565; the old man's and the
+--                            Pokédude's fights draw their trainer's back pic
+--                            the same way): the trainer back pic stays up, no
+--                            own plate, no "Go! X!", no own faint and no
+--                            replacement picker -- and the command menu still
+--                            opens every turn.  FIGHT and POKéMON have nothing
+--                            to act on, so they do nothing (the cart never
+--                            offers them there); `commands` replaces the grid.
+--   commands = { id, ... }   the command grid, row-major (built-ins FIGHT /
+--                            ITEM / SWITCH / RUN, or an id of the kind's own --
+--                            the Safari's BALL / BAIT / ROCK / RUN, Emerald's
+--                            BALL / POKéBLOCK / GO NEAR / RUN).
+--   commandLabels = { [id] = "WORD" }   what the grid prints for an id (the
+--                            cart's word; a built-in's is the battle menu's).
+--   commandHandlers = { [id] = function(screen, id) }   an A on that slab --
+--                            the seam a replacement command set acts through
+--                            (`runCommand`); a built-in id with no handler
+--                            keeps its own arm, an unknown one is inert.
+--   prompt = "What will\n..."   the action prompt above the grid, as the cart
+--                            words it for this fight (pret gText_WhatWillPkmnDo2
+--                            / the Safari's "throw?" / the old man's).
+--   rules = { bag = false, forfeit = true }   a facility's (C3 `rules`): BAG
+--                            refused with the cart's "Items can't be used
+--                            now." (pret battle_main.c:4221), RUN in a trainer
+--                            fight asks the cart's forfeit yes / no first (pret
+--                            battle_main.c:4321, BattleScript_AskIfWantsTo
+--                            ForfeitMatch) and only a YES files it.
+--   firstBattle = "oak" | "birch"   Oak's lab (FireRed / LeafGreen): his
+--                            voice-over at the cart's points (`sayLesson3`);
+--                            Birch (Emerald) changes nothing here -- RUN is
+--                            filed as any wild RUN (a SMOKE BALL still gets
+--                            away), and the refused one's "Don't leave me like
+--                            this!" comes from behind the screen like any
+--                            other line.
+--   ghost = "veiled" | "unveiled"   a Pokémon Tower ghost (FireRed /
+--                            LeafGreen): the foe is the GHOST under the engine's
+--                            silhouette pic until -- on the SILPH SCOPE fight --
+--                            the scope unveils it at the intro; a dodged ball
+--                            (`ball` amount -1) is the cart's line and look.
+--   song = <MUS_* name | song number>   the battle theme the cart would start
+--                            for this fight (a legendary's, a roamer's, the
+--                            engine's own `opts.song`), in place of the theme
+--                            resolved from the mode.
+--
+-- Read once here, from `new`'s own options; a caller holding the screen
+-- before `start` may hand the same table to `applyScreenOptions` again.
+local FIRST_BATTLES = { oak = true, birch = true }
+local GHOSTS = { veiled = true, unveiled = true }
+
+function M:applyScreenOptions(opts)
+  if type(opts) ~= "table" then return self end
+  if opts.noOwnBattler ~= nil then self.noOwnBattler = opts.noOwnBattler == true end
+  if type(opts.commands) == "table" and #opts.commands > 0 then
+    local list = {}
+    for i, id in ipairs(opts.commands) do
+      if type(id) == "string" and id ~= "" then list[#list + 1] = id end
+      if i >= 4 then break end
+    end
+    self.commandSet = (#list > 0) and list or nil
+  end
+  if type(opts.commandLabels) == "table" then self.commandLabels = opts.commandLabels end
+  if type(opts.commandHandlers) == "table" then self.commandHandlers = opts.commandHandlers end
+  if type(opts.prompt) == "string" and opts.prompt ~= "" then self.prompt = opts.prompt end
+  if type(opts.rules) == "table" then self.rules = opts.rules end
+  if FIRST_BATTLES[opts.firstBattle] then self.firstBattle = opts.firstBattle end
+  if GHOSTS[opts.ghost] then
+    self.ghost = opts.ghost
+    -- Both shapes open on the silhouette: the SILPH SCOPE fight is "The GHOST
+    -- appeared!" over the ghost pic until the intro's unveil row plays (pret
+    -- OpponentHandleLoadMonSprite loads the ghost pic for any GHOST battle,
+    -- battle_controller_opponent.c:1025; BattleScript_SilphScopeUnveiled).
+    self.ghostVeil = true
+  end
+  local song = opts.song
+  if (type(song) == "string" and song ~= "") or tonumber(song) then self.song = song end
+  return self
 end
 
 -- The exp-awarding modes that have a *trainer* on the other side.
@@ -3306,7 +3397,7 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     expFrac = slot.shownExpFrac
     shownLevel = slot.shownLevel
   end
-  return {
+  local seat = {
     index = slotIndex,
     name = slot.species,
     level = slot.level or (monHint and monHint.level) or 1,
@@ -3338,6 +3429,15 @@ function M:battlefieldSeat(slotIndex, isPlayer)
     form = slot.form,
     elevation = self:seatElevation(key),
   }
+  -- The GHOST on the arena, the classic page's `veilSeat3`: its name and the
+  -- silhouette, and no icon or height of the species underneath.
+  if not isPlayer and self:ghostVeiled() then
+    seat.name = M.ghostName3()
+    seat.front = self:ghostImage3()
+    seat.icon, seat.form, seat.elevation = nil, nil, nil
+    seat.species = seat.name
+  end
+  return seat
 end
 
 -- pret gEnemyMonElevation for a Gen 3 species (Battlefield reads it off the
@@ -3641,7 +3741,9 @@ function M:battlefieldCtx()
     id = "self",
     name = playerName(self.game),
     spriteId = selfSpriteId(),
-    party = self:seatRoster(self:mySlot(), true),
+    -- A side that fields nothing (`noOwnBattler`) brings no party into the
+    -- fight: the figure stands alone, with no roster chip beside it.
+    party = (not self.noOwnBattler) and self:seatRoster(self:mySlot(), true) or nil,
   }}
   local gen3 = self:generation() == 3
   if gen3 then
@@ -3711,7 +3813,8 @@ function M:battlefieldCtx()
   local showTarget = false
   if self.phase == "move" or self.phase == "mimic" then
     showTarget = true
-  elseif self.phase == "choose" and self:commandList()[self.commandIndex or 1] == "FIGHT" then
+  elseif self.phase == "choose" and self:commandList()[self.commandIndex or 1] == "FIGHT"
+         and not self.noOwnBattler then
     showTarget = true
   elseif self.phase == "target" then
     showTarget = true
@@ -3756,7 +3859,29 @@ function M:battlefieldCtx()
     -- the queue's own position: Gen 3's `weather` events, Gold's weather
     -- lines (`weatherOfLine2`); nil when the sky is clear, and always on Red.
     weather = self.weatherShown,
+    -- Oak's voice-over is up (`sayLesson3`): this screen darkens the field
+    -- under it itself (`drawVoiceoverDim`); stated for any renderer that
+    -- wants to know.
+    voiceover = self.voiceover == true or nil,
   }
+end
+
+-- The field darkened under Oak's lines on the arena, the way the cart fades
+-- its battle backgrounds halfway to black (pret PrintOakTextWithMainBgDarkened,
+-- BeginNormalPaletteFade 0 -> 8 of 16): over the field, never the band the
+-- lines print in.
+local VOICEOVER_DIM = 0.5
+M.VOICEOVER_DIM = VOICEOVER_DIM
+
+function M:drawVoiceoverDim()
+  if not self.voiceover then return false end
+  local g = love and love.graphics
+  if not g then return false end
+  local bottom = tonumber(Battlefield.FIELD_BOTTOM) or Battlefield.HEIGHT
+  g.setColor(0, 0, 0, VOICEOVER_DIM)
+  g.rectangle("fill", 0, 0, Battlefield.WIDTH, bottom)
+  g.setColor(1, 1, 1, 1)
+  return true
 end
 
 -- Classic 160×144 chrome drawn into Battlefield.MENU_BAND at the bottom.
@@ -3873,7 +3998,11 @@ function M:start(game)
   local mons = M.snapshotParty(self.game, {
     link = LINK_MODES[self.mode] == true, weight = M.WEIGHT_MODES[self.mode] == true,
   })
-  if #mons == 0 then
+  -- A fight where side a fields nothing (`noOwnBattler`) is still a fight
+  -- with an empty party: the party is uploaded when there is one (the kind
+  -- decides what the referee seats; a catch still asks whether it has room),
+  -- and the empty case is no reason to refuse it.
+  if #mons == 0 and not self.noOwnBattler then
     -- Uploading nothing would leave the intermediator holding a seat open
     -- until its grace expired, and the player watching a screen that never
     -- starts.  Ended here instead, with the reason on it.
@@ -3966,7 +4095,11 @@ function M:onReady(msg)
       -- -- the name on a line of its own, the way pret's
       -- sText_Trainer1WantsToBattle / sText_LinkTrainerWantsToBattle break it.
       local wild = type(self.wildParty) == "table" and self.wildParty[1] or nil
-      if self.mode == "wild" then
+      if self.mode == "wild" and self.ghost then
+        -- A Pokémon Tower ghost: the cart's own opening for it, and on the
+        -- SILPH SCOPE fight the unveil right behind it (`sayGhostIntro3`).
+        self:sayGhostIntro3()
+      elseif self.mode == "wild" then
         self:say(("Wild %s\nappeared!"):format(tostring(wild and wild.species or "POKéMON")))
       else
         self:say(("%s\nwould like to battle!"):format(
@@ -4091,6 +4224,251 @@ function M:foeTrainerName()
   return tostring(self.peerName or "?")
 end
 
+-- ------- a Pokémon Tower ghost (FireRed / LeafGreen; screen option `ghost`)
+--
+-- pret BATTLE_TYPE_GHOST: the foe's front pic is the ghost silhouette
+-- (OpponentHandleLoadMonSprite -> DecompressGhostFrontPic,
+-- battle_controller_opponent.c:1025 -- no shadow, no shiny anim), its healthbox
+-- reads its nickname "GHOST" with no gender mark and no owned ball
+-- (battle_interface.c:1506 / :1564, CheckBattleTypeGhost), and the opening is
+-- sText_GhostAppearedCantId "The GHOST appeared!\pDarn!\nThe GHOST can't be
+-- ID'd!" -- or, with the SILPH SCOPE, sText_TheGhostAppeared and then
+-- BattleScript_SilphScopeUnveiled (battle_scripts_1.s:3820): "SILPH SCOPE
+-- unveiled the GHOST's\nidentity!", B_ANIM_SILPH_SCOPED, "The GHOST was
+-- MAROWAK!" -- after which it is an ordinary foe under its own name and pic.
+--
+-- Everything here is the engine's: the pic is its Pokemon.ghostPic
+-- (battle_gfx_sfx_util.c:422's sheet out of the player's cache), the name is
+-- the cart's gText_Ghost, the lines its battle text.  The English is a
+-- fallback for a text pack that is not there, never the first choice.
+M.GHOST_NAME3 = "GHOST"
+M.GHOST_INTRO3 = "The GHOST appeared!\n\nDarn!\nThe GHOST can't be ID'd!"
+M.GHOST_APPEARED3 = "The GHOST appeared!"
+M.GHOST_UNVEILED3 = "SILPH SCOPE unveiled the GHOST's\nidentity!"
+M.GHOST_WAS3 = "The GHOST was MAROWAK!"
+
+-- Is the foe still the GHOST on this screen?  The whole of a veiled fight,
+-- and the SILPH SCOPE fight until its unveil row has played.
+function M:ghostVeiled()
+  return self.ghost ~= nil and self.ghostVeil ~= false
+end
+
+-- The name the cart's GHOST goes by: gText_Ghost out of the player's text pack.
+function M.ghostName3()
+  local RomText = Gen3.engine("src.core.game3.rom_text")
+  if RomText and type(RomText.plain) == "function" then
+    local ok, name = pcall(RomText.plain, "gText_Ghost")
+    if ok and type(name) == "string" and name ~= "" then return name end
+  end
+  return M.GHOST_NAME3
+end
+
+-- The ghost silhouette, from the engine's own reader (Pokemon.ghostPic), once
+-- per screen: `false` is "looked, and the cache has none", and the seat then
+-- draws no pic at all -- never the monster's own, which would give it away.
+function M:ghostImage3()
+  if self.ghostPic ~= nil then return self.ghostPic or nil end
+  local image = nil
+  local P = Gen3.engine("src.core.game3.pokemon")
+  if P and type(P.ghostPic) == "function" then
+    local ok, entry = pcall(P.ghostPic)
+    if ok and type(entry) == "table" then image = entry.image end
+  end
+  self.ghostPic = image or false
+  if not image and not self.ghostPicWarned then
+    self.ghostPicWarned = true
+    mod.log:warn("the GHOST's silhouette could not be read from this cart's graphics, "
+      .. "so the Pokémon Tower ghost is fought with no picture; re-import the ROM "
+      .. "from the title screen if this keeps happening")
+  end
+  return image
+end
+
+-- The opening of a GHOST battle, and on the SILPH SCOPE fight the unveil
+-- behind it: the line, the scope's clip on the foe, the `unveil` row that puts
+-- the foe's own name and pic up (`applyStateRow`), then "The GHOST was ...!".
+function M:sayGhostIntro3()
+  local unveiled = self.ghost == "unveiled"
+  self:say(Gen3.battleText("STRINGID_INTROMSG", { ghost = true, ghostUnveiled = unveiled })
+    or (unveiled and M.GHOST_APPEARED3 or M.GHOST_INTRO3))
+  if not unveiled then return end
+  self:say(Gen3.battleText("STRINGID_SILPHSCOPEUNVEILED") or M.GHOST_UNVEILED3)
+  local foe = self.mySide == "b" and "a" or "b"
+  self.lines[#self.lines + 1] = {
+    anim = "SILPH_SCOPED", slot = slotOfSide(foe), side = foe, quiet = true,
+  }
+  self.lines[#self.lines + 1] = { stateRow = "unveil" }
+  self:say(Gen3.battleText("STRINGID_GHOSTWASMAROWAK") or M.GHOST_WAS3)
+end
+
+-- ------- Oak's voice-over (FireRed / LeafGreen's first battle; C6 `lesson`)
+--
+-- pret battle_controller_oak_old_man.c: in the lab's BATTLE_TYPE_FIRST_BATTLE
+-- the professor talks over the darkened field at the cart's points
+-- (PrintOakTextWithMainBgDarkened :744 -- the battle BGs fade halfway to black
+-- and his lines print in the voice-over frame, B_WIN_OAK_OLD_MAN):
+--
+--   intro   "Oh, for Pete's sake..." -- after the intro send-outs, before the
+--           first action menu (Intro_WaitForShinyAnimAndHealthbox :452)
+--   damage  the foe's HP bar first moves (opponent controller :304, flag 1)
+--   stat    the foe's first "...fell!" (OakOldManHandlePrintString :1769, flag 2)
+--   potion  the first POTION chosen (CompleteWhenChoseItem :389, flag 4)
+--   party   the first party menu, from POKéMON or from the bag
+--           (party_menu.c:5834 OpenPartyMenuInTutorialBattle, :5875
+--           EnterPartyFromItemMenuInBattle; flag 8 -- shown inside the party
+--           menu on the cart)
+--   run     RUN, every time (BattleScript_PrintCantRunFromTrainer jumps to the
+--           empty STRINGID_DONTLEAVEBIRCH, which the controller answers, :1783)
+--   win     after the prize line (STRINGID_PLAYERGOTMONEY, :1777)
+--   lose    after the rival's win text (STRINGID_TRAINER1WINTEXT, :1780)
+--
+-- The ids are the referee's (BattleSim3 Turn.LESSONS, the `lesson` event's
+-- text, contract C6); `hp` / `prize` / `lost`, the cart's flag numbers and the
+-- engine's own Oak.TEXT keys name the same lessons.  The words are the
+-- player's own cart's, read at run time through the engine's oak_advice table
+-- (Oak.pages / Oak.screens) -- nothing is shipped.  The referee states each
+-- moment it sees as a `lesson` event; this screen says `intro`, `party`,
+-- `potion` and `run` where its own menus are, ahead of the referee (whose
+-- repeat is then dropped); `win` / `lose` come after the caller's own ending
+-- lines, so a `lesson` event naming one is held until the ending has been
+-- read (`flushLessons3`) unless the caller says it first.  Every lesson but
+-- `run` is said once a fight (the cart's oakMsgFlags), whoever asks first.
+M.LESSONS3 = {
+  intro = "forPetesSake", damage = "inflictingDamage", stat = "loweringStats",
+  potion = "keepAnEyeOnHp", hp = "keepAnEyeOnHp", party = "partyMenu", run = "noRunning",
+  win = "winEarnsPrize", prize = "winEarnsPrize",
+  lose = "howDisappointing", lost = "howDisappointing",
+  -- The cart's flag numbers name the four flagged ones too.
+  ["1"] = "inflictingDamage", ["2"] = "loweringStats", ["4"] = "keepAnEyeOnHp",
+  ["8"] = "partyMenu",
+}
+-- The two that follow the caller's ending lines (the prize line, the rival's
+-- win text), which this screen does not print: a `lesson` naming one waits.
+M.LESSON_AFTER_ENDING3 = { winEarnsPrize = true, howDisappointing = true }
+for _, key in pairs({ "forPetesSake", "inflictingDamage", "loweringStats", "keepAnEyeOnHp",
+                      "partyMenu", "noRunning", "winEarnsPrize", "howDisappointing" }) do
+  M.LESSONS3[key] = key
+end
+-- The one the cart says every time it is earned (no oakMsgFlags bit).
+M.LESSON_REPEATS3 = { noRunning = true }
+-- pret include/constants/items.h ITEM_POTION: the one item whose choice earns
+-- the HP lesson (CompleteWhenChoseItem's `gSpecialVar_ItemId == ITEM_POTION`;
+-- the engine's battle/items.lua afterPlayerItem checks the same number).
+M.ITEM_POTION3 = 13
+
+-- Which healthbox the cart lights again under one of his lines, by the
+-- lesson's text key and that key's place in it: "The trainer that..." (the
+-- second of forPetesSake's three) over the foe's box, and the whole HP lesson
+-- over the player's (pret PrintOakText_ForPetesSake states 3-5 and
+-- PrintOakText_KeepAnEyeOnHP states 1-4 fade the healthbox palettes back from
+-- black, DoLoadHealthboxPalsForLevelUp).
+M.LESSON_LIT3 = { forPetesSake = { [2] = "foe" }, keepAnEyeOnHp = { [1] = "ally" } }
+
+-- The pages of one lesson, as the box pages them: the engine's Oak.pages over
+-- the player's name -- one entry a text key -- each split where the cart's
+-- printer pages (Oak.screens) and cleaned of its control codes, as
+-- `{ text = page, lit = "foe" | "ally" | nil }` (M.LESSON_LIT3).  nil when the
+-- engine has no such table or no text for it.
+function M.lessonPages3(key, name)
+  local Oak = Gen3.engine("src.core.game3.battle.oak_advice")
+  if not (Oak and type(Oak.pages) == "function") then return nil end
+  local okP, pages = pcall(Oak.pages, { playerName = name }, key)
+  if not (okP and type(pages) == "table" and #pages > 0) then return nil end
+  local lit = M.LESSON_LIT3[key] or {}
+  local out = {}
+  for i, page in ipairs(pages) do
+    local screens = { page }
+    if type(Oak.screens) == "function" then
+      local okS, split = pcall(Oak.screens, { page })
+      if okS and type(split) == "table" and #split > 0 then screens = split end
+    end
+    for _, screen in ipairs(screens) do
+      local text = Gen3.cleanText(tostring(screen))
+      if type(text) == "string" and text ~= "" then
+        out[#out + 1] = { text = text, lit = lit[i] }
+      end
+    end
+  end
+  return (#out > 0) and out or nil
+end
+
+-- Say one lesson: its pages between two `voiceover` rows, so the field darkens
+-- under exactly those lines and comes back after them (`applyStateRow`).
+-- True when anything was queued.  A lesson already said this fight, an id no
+-- lesson goes by, or a cart whose text cannot be read says nothing -- the last
+-- warned once, since the fight is still whole without it.
+function M:sayLesson3(id)
+  local key = id ~= nil and M.LESSONS3[tostring(id)] or nil
+  if not key then return false end
+  self.lessonsSaid = self.lessonsSaid or {}
+  if self.lessonsHeld then self.lessonsHeld[key] = nil end
+  if not M.LESSON_REPEATS3[key] then
+    if self.lessonsSaid[key] then return false end
+    self.lessonsSaid[key] = true
+  end
+  local pages = M.lessonPages3(key, playerName(self.game))
+  if not pages then
+    if not self.lessonWarned then
+      self.lessonWarned = true
+      mod.log:warn("PROF. OAK's advice could not be read from this cart's text, so the "
+        .. "first battle goes on without it; re-import the ROM from the title screen "
+        .. "if this keeps happening")
+    end
+    return false
+  end
+  self.lines = self.lines or {}
+  local lit = false
+  for i, page in ipairs(pages) do
+    -- A `voiceover` row ahead of the first page, and again wherever the box
+    -- the cart lights under him changes (M.LESSON_LIT3).
+    if i == 1 or (page.lit or false) ~= lit then
+      lit = page.lit or false
+      self.lines[#self.lines + 1] = { stateRow = "voiceover", value = true, lit = page.lit }
+    end
+    self:say(page.text)
+  end
+  self.lines[#self.lines + 1] = { stateRow = "voiceover", value = false }
+  return true
+end
+
+-- A `lesson` event, as the referee states it: said where it landed -- except
+-- the two that belong behind the caller's ending lines (`win` after the
+-- prize line, `lose` after the rival's win text), which wait for
+-- `flushLessons3` or for the caller to say them itself.
+function M:noteLesson3(id)
+  local key = id ~= nil and M.LESSONS3[tostring(id)] or nil
+  if not key then return false end
+  if M.LESSON_AFTER_ENDING3[key] then
+    if self.lessonsSaid and self.lessonsSaid[key] then return false end
+    self.lessonsHeld = self.lessonsHeld or {}
+    if not self.lessonsHeld[key] then
+      self.lessonsHeld[key] = true
+      self.lessonsHeldOrder = self.lessonsHeldOrder or {}
+      self.lessonsHeldOrder[#self.lessonsHeldOrder + 1] = key
+    end
+    return true
+  end
+  return self:sayLesson3(key)
+end
+
+-- Say the lessons still held for after the ending (`noteLesson3`), once the
+-- fight is over and every line ahead of them -- the caller's prize line or
+-- the rival's win text among them -- has been read.  True when one was
+-- queued (the screen then reads it before anything else).
+function M:flushLessons3()
+  local order = self.lessonsHeldOrder
+  if not (order and self.lessonsHeld) then return false end
+  self.lessonsHeldOrder = nil
+  local said = false
+  for _, key in ipairs(order) do
+    if self.lessonsHeld[key] then
+      self.lessonsHeld[key] = nil
+      if self:sayLesson3(key) then said = true end
+    end
+  end
+  return said
+end
+
 -- ------- a mon that would not obey (contract K3)
 --
 -- The cart's line for each outcome of the engine's `disobedient`
@@ -4191,6 +4569,11 @@ function M:onEvent(msg)
   -- lossy stream that dropped that sentence cannot swallow the line after it.
   local obeyed = self.obeyed3
   self.obeyed3 = nil
+  -- ...and a dodged ball the same way (`queueDodge3`): the cart's line went
+  -- into the queue with the throw, and the referee's own sentence for the
+  -- dodge straight behind it is not said twice.
+  local dodged = self.dodged3
+  self.dodged3 = nil
   -- Gen 3 prices a knockout whole (Exp3): the `exp` events of one faint are
   -- banked as they arrive and paid the moment anything else follows them.
   if kind ~= "exp" and self.expBatch then self:flushExp3() end
@@ -4208,7 +4591,9 @@ function M:onEvent(msg)
     self:noteUsedLine(msg.text)
     -- Said as this viewer's cart says it (`viewLine`, K17); every matcher
     -- below reads the referee's own text with the marks out (`plainLine`).
-    if not (obeyed and msg.seq == obeyed + 1) then self:say(self:viewLine(msg.text)) end
+    local echo = (obeyed and msg.seq == obeyed + 1)
+      or (dodged and msg.seq == dodged + 1 and M.isDodgeLine3(msg.text))
+    if not echo then self:say(self:viewLine(msg.text)) end
     self:flushAnimBehind()
     self:noteBideLine(msg.text, msg.seq)
     -- Our monster's Disable, as the referee says it (`noteDisableLine`), and
@@ -4236,9 +4621,12 @@ function M:onEvent(msg)
         or (msg.side ~= nil and msg.side == self.mySide)
       local anim, behind = M.viewerAnim(msg.text, mine)
       -- `quiet` (K22): the look alone -- no callout, no lunge (`startAnim`).
+      -- So is one of Gen 3's general animations (`M.GENERAL_ANIMS3`): the
+      -- cart's B_ANIM_* clip on a battler, which nobody ordered.
+      local general = self:generation() == 3 and M.GENERAL_ANIMS3[anim] == true
       local row = {
         anim = anim, slot = msg.slot, side = msg.side, amount = msg.amount,
-        quiet = msg.quiet == true or nil,
+        quiet = (msg.quiet == true or general) or nil,
       }
       -- Whose used line this animation shouts for, or follows (K22) -- unless
       -- it is a multi-hit move's next strike: pokered replays the move's
@@ -4409,7 +4797,12 @@ function M:onEvent(msg)
         -- A wild POKeMON is nobody's send-out: the cart's "Wild X\nappeared!"
         -- (`onReady`) is its whole introduction, on both carts.  A trainer's --
         -- or the other player's -- is the cart's own line (M.sentOutPages).
-        if not (self.mode == "wild" and self:generation() ~= 3) then
+        -- Gen 3 the same: pret BattleIntroPrintWildMonAttacked prints
+        -- STRINGID_INTROMSG and goes straight to BattleIntroPrintPlayerSendsOut
+        -- (pokefirered battle_main.c:2730) -- no opponent send-out line in a
+        -- wild battle, so a Gen 3 wild seat no longer says "WILD sent out X!"
+        -- (and a Pokémon Tower ghost's opening is the GHOST's lines alone).
+        if self.mode ~= "wild" then
           for _, page in ipairs(M.sentOutPages(self:foeTrainerName(), bareName(msg.text),
               self:generation())) do
             self:say(page)
@@ -4451,7 +4844,11 @@ function M:onEvent(msg)
     -- the same way.
     local down = slot and (slot.pending or slot) or nil
     if down then down.hp = 0 end
-    if msg.slot == self:mySlot() then
+    -- A side that fields nothing has no monster to knock out and no faint to
+    -- handle (pret HandleFaintedMonActions returns at once in the Safari Zone,
+    -- battle_util.c:1146): a stray one on our seat zeroes no sheet and owes
+    -- no replacement.
+    if msg.slot == self:mySlot() and not self.noOwnBattler then
       local mon = self.mine and self.mine[self.active]
       if mon then mon.hp = 0 end
       -- The Transform / Mimic overlay ends with the monster wearing it: both
@@ -4678,11 +5075,23 @@ function M:onEvent(msg)
   elseif kind == "sub" then
     self.lines[#self.lines + 1] = { stateRow = "sub", slot = msg.slot, value = msg.amount == 1 }
 
+  elseif kind == "ball" and tonumber(msg.amount) == -1 then
+    -- A ball the GHOST dodged (contract C3 `ghost`, `amount = -1`): the throw
+    -- that never opens, and the cart's line for it (`queueDodge3`).
+    if self:queueDodge3(msg) then self.dodged3 = msg.seq end
+
   elseif kind == "ball" then
     -- One throw, as the arena's ball flow already plays it (TOSS, POOF,
     -- HIDEPIC, SHAKE, and POOF + SHOWPIC on a break-out) -- the rows Gen 1 and
     -- Gen 2's referees emit one by one, stated by Gen 3's in one event.
     self:queueBall3(msg)
+
+  elseif kind == "lesson" then
+    -- Oak's lab (contract C6): the referee reached one of the cart's lesson
+    -- points -- the foe's first HP loss, its first stat fall -- and Oak says
+    -- his piece over the darkened field, in the player's cart's words
+    -- (`sayLesson3`; the two ending ones wait, `noteLesson3`).
+    self:noteLesson3(msg.text)
 
   elseif kind == "obey" then
     -- A player's mon disobeyed -- traded and over its badge cap, or a Mew /
@@ -4743,6 +5152,20 @@ function M:onEvent(msg)
     end
     if owed == nil then
       self.pendingTurn = true
+      -- Oak's "Oh, for Pete's sake..." (FireRed / LeafGreen's lab): the cart
+      -- says it once the intro's send-outs have landed and before the first
+      -- action menu (pret Intro_WaitForShinyAnimAndHealthbox ->
+      -- PrintOakText_ForPetesSake, battle_controller_oak_old_man.c:452) --
+      -- which is this first slot-less `turn`, queued behind the send-outs.
+      if self.firstBattle == "oak" then self:sayLesson3("intro") end
+    elseif owed == self:mySlot() and self.noOwnBattler then
+      -- A side that fields nothing has nobody to send (pret's Safari battler
+      -- is zeroed and never faints, battle_util.c:1146): a solicitation for
+      -- it is a disagreement about our own seat, so the screen opens no picker
+      -- and waits for the referee, as it does for an empty bench below.
+      self.mustReplace = false
+      self.pendingTurn = false
+      self.replaceWait = nil
     elseif owed == self:mySlot() then
       -- Our own seat: this is the picker the faint already asked for, so it is
       -- opened by the flow that has always opened it -- `mustReplace` +
@@ -4834,8 +5257,12 @@ function M:onEvent(msg)
         if self.phase == "choose" or self.phase == "move"
            or self.phase == "target" or self.phase == "mimic"
            or self.phase == "item" or self.phase == "item_party"
-           or self.phase == "item_move" or self.phase == "switch" then
+           or self.phase == "item_move" or self.phase == "switch"
+           or self.phase == "ask" then
           self.phase = "play"
+          -- A question still up (the forfeit yes / no) is about a turn the
+          -- referee has already answered: it goes, unanswered.
+          self.asking = nil
         end
       else
         self.answeredTurn = false
@@ -6579,6 +7006,61 @@ function M:queueBall3(msg)
   end
 end
 
+-- ------- a ball the GHOST dodged (FireRed / LeafGreen's Pokémon Tower)
+--
+-- pret Cmd_handleballthrow (pokefirered battle_script_commands.c:9473): in any
+-- GHOST battle, veiled or unveiled, the throw is BALL_GHOST_DODGE -- the ball
+-- flies and never opens (no recall, no shakes, no burst) -- and
+-- BattleScript_GhostBallDodge (battle_scripts_2.s:124) prints
+-- STRINGID_ITDODGEDBALL, "It dodged the thrown BALL!\nThis POKéMON can't be
+-- caught!".  The ball is spent all the same (the `item` event ahead of this one
+-- debits it, `confirmPendingItem3`).  The referee states it as a `ball` event
+-- with `amount = -1` (contract C3 `ghost`).
+--
+-- The look is the throw's own arc and then nothing to open: the toss row, and
+-- the BLOCKBALL row that ends a throw no recall is coming to close
+-- (`startAnim` clears the ball flow on it; the classic page plays the throw's
+-- sound).  Then the cart's line, in the player's cart's words when its text is
+-- there.  True when the line went into the queue: the referee's own sentence
+-- for the same dodge, right behind, is then not said twice (`onEvent`).
+M.DODGE_LINE3 = "It dodged the thrown BALL!\nThis POKéMON can't be caught!"
+
+function M.dodgeLine3()
+  return Gen3.battleText("STRINGID_ITDODGEDBALL") or M.DODGE_LINE3
+end
+
+-- Is this referee line the dodge's sentence (in the cart's words or the
+-- fallback's)?  Read flat, the way every matcher here reads a line.
+function M.isDodgeLine3(text)
+  if type(text) ~= "string" then return false end
+  local flat = plainLine(text)
+  if flat == plainLine(M.DODGE_LINE3) then return true end
+  local cart = Gen3.battleText("STRINGID_ITDODGEDBALL")
+  if cart and flat == plainLine(cart) then return true end
+  return flat:find("dodged the thrown", 1, true) ~= nil
+end
+
+function M:queueDodge3(msg)
+  local ballId = tonumber(msg.text)
+  local toss = (ballId == 4 and "TOSS_ANIM") or (ballId == 3 and "GREATTOSS_ANIM")
+    or "ULTRATOSS_ANIM"
+  self.lines = self.lines or {}
+  self.lines[#self.lines + 1] = { anim = toss, slot = msg.slot, side = msg.side }
+  self.lines[#self.lines + 1] = { anim = "BLOCKBALL_ANIM", slot = msg.slot, side = msg.side }
+  self:say(M.dodgeLine3())
+  return true
+end
+
+-- ------- Gen 3's general animations: a clip on a battler nobody ordered
+--
+-- The B_ANIM_* ids the Gen 3 referee names in an `anim` event for something
+-- that is not a move (pret gBattleAnims_General): a too-scared monster and the
+-- GHOST's "Get out..." (battle_scripts_1.s:3809 / :3815, contract C3 `ghost`),
+-- and the SILPH SCOPE unveiling it (:3820).  None is an order a trainer gave,
+-- so none shouts a callout or lunges (`onEvent` marks the row `quiet`); the
+-- look, when the catalogue has one, plays on the seat.
+M.GENERAL_ANIMS3 = { MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true }
+
 -- ------- Red's and Gold's status animations, as this viewer's cart plays them
 --
 -- The Red referee names the sleeping and the confused monster's clip from
@@ -6838,6 +7320,32 @@ function M:applyStateRow(row)
   local what = row and row.stateRow
   if what == "weather" then
     self.weatherShown = row.value or nil
+    return true
+  end
+  if what == "voiceover" then
+    -- Oak's lines (`sayLesson3`): the field darkens under them and comes back
+    -- after (pret PrintOakTextWithMainBgDarkened's BeginNormalPaletteFade 0 -> 8
+    -- and back).
+    self.voiceover = row.value == true or nil
+    self.voiceoverLit = self.voiceover and row.lit or nil
+    return true
+  end
+  if what == "unveil" then
+    -- The SILPH SCOPE has shown what the GHOST is (`sayGhostIntro3`): the
+    -- foe's own name and front pic from here on.
+    self.ghostVeil = false
+    local foe = self.slots[self:foeSlot()]
+    if type(foe) == "table" then
+      foe.sprite, foe._bfFront, foe._bfFrontSpecies, foe.icon = nil, nil, nil, nil
+      self:refreshSlotSprite(self:foeSlot(), false)
+    end
+    return true
+  end
+  if what == "phase" then
+    -- A menu held behind the lines that introduce it (Oak's party-menu
+    -- lesson ahead of the POKéMON picker): opened as the row plays, unless the
+    -- screen has moved on from the menu that asked for it.
+    if self.phase == (row.from or "choose") and not self.finished then self.phase = row.value end
     return true
   end
   local slot = row and row.slot ~= nil and self.slots[row.slot] or nil
@@ -7976,6 +8484,8 @@ function M:finish(result, reason, msg)
   self.finished = true
   self.pendingItem = nil
   self.pendingItemSlot = nil
+  -- A question still up (the forfeit yes / no) belongs to a fight that is over.
+  self.asking = nil
   self.result = result or "draw"
   self.phase = "over"
   self.cursor = 1
@@ -8464,10 +8974,21 @@ end
 M.COMMANDS = { "FIGHT", "SWITCH", "ITEM", "RUN" }
 M.COMMANDS3 = COMMANDS3
 
--- This boot's grid (the Gen 3 one is the cart's order; see COMMANDS3).
+-- This boot's grid (the Gen 3 one is the cart's order; see COMMANDS3) -- or
+-- the fight's own (screen option `commands`, `applyScreenOptions`).
 function M:commandList()
+  if self.commandSet then return self.commandSet end
   if self:generation() == 3 then return COMMANDS3 end
   return M.COMMANDS
+end
+
+-- What the grid prints for one command id: the fight's own word for it when
+-- it gave one (`commandLabels`), else the cart's battle-menu word for a
+-- built-in (BAG, POKéMON), else the id itself.
+function M:commandLabel(command)
+  local own = type(self.commandLabels) == "table" and self.commandLabels[command] or nil
+  if type(own) == "string" and own ~= "" then return own end
+  return COMMAND_LABEL3[command] or command
 end
 
 -- One step around a `cols`-wide grid of `count` items, clamped at every edge
@@ -9002,6 +9523,13 @@ function M:commitItem(partyIndex, moveIndex)
   if partyIndex then fields.slot = self:wireSlotOf(partyIndex) end
   if moveIndex then fields.move = moveIndex - 1 end
   self.itemPick = nil
+  -- Oak's lab: the first POTION chosen earns his HP lesson before the turn
+  -- goes (pret CompleteWhenChoseItem, battle_controller_oak_old_man.c:389 --
+  -- ITEM_POTION and nothing else).  Queued ahead of the choice, so the turn's
+  -- own lines land behind it.
+  if gen3 and self.firstBattle == "oak" and tonumber(pick.id) == M.ITEM_POTION3 then
+    self:sayLesson3("hp")
+  end
   if not self:sendChoice(fields) then
     self.pendingItem = nil
     self.pendingItemSlot = nil
@@ -9048,7 +9576,34 @@ function M:updateCommand(input)
   if moved then
     self.commandIndex = moved
   elseif input:wasPressed("a") then
-    local command = commands[self.commandIndex]
+    self:runCommand(commands[self.commandIndex])
+  end
+end
+
+-- One command off the grid, as an A on its slab runs it.
+--
+-- The seam a fight's own command set acts through (screen option
+-- `commandHandlers`, `applyScreenOptions`): a handler the kind registered for
+-- the id runs first and owns the whole answer -- what it sends, what it says,
+-- which phase it leaves -- and the built-in arms below are the four the cart's
+-- battle menu has always had.  An id nothing answers does nothing; the grid
+-- stays where it is.
+function M:runCommand(command)
+  local handler = type(self.commandHandlers) == "table" and self.commandHandlers[command] or nil
+  if type(handler) == "function" then
+    local ok, err = pcall(handler, self, command)
+    if not ok then
+      mod.log:warn("the battle command %s failed (%s); the menu stays open -- pick "
+        .. "another, and report this with the battle you were in", tostring(command),
+        tostring(err))
+    end
+    return
+  end
+  -- A side that fields nothing has no move to pick and nobody to switch
+  -- (pret's Safari battler is zeroed, battle_main.c:2565): FIGHT and POKéMON
+  -- have nothing behind them, and the grid stays up.
+  if self.noOwnBattler and (command == "FIGHT" or command == "SWITCH") then return end
+  do
     local locked = command == "FIGHT" and self:lockedFightSlot() or nil
     if locked then
       -- A Bide going on (Gold's `.locked_in`), or Red's monster asleep or
@@ -9064,8 +9619,16 @@ function M:updateCommand(input)
     elseif command == "SWITCH" then
       self.switchIndex = 1
       self.passMove = nil
-      self.phase = "switch"
+      self:openPartyPicker3("switch")
     elseif command == "ITEM" then
+      if type(self.rules) == "table" and self.rules.bag == false then
+        -- A facility with no bag (contract C3 `rules.bag`): pret
+        -- BattleScript_ActionSelectionItemsCantBeUsed (pokeemerald
+        -- battle_main.c:4221 -- FRONTIER_NO_PYRAMID / EREADER_TRAINER) prints
+        -- STRINGID_ITEMSCANTBEUSEDNOW and goes back to the action menu.
+        self:say(Gen3.battleText("STRINGID_ITEMSCANTBEUSEDNOW") or M.ITEMS_CANT_LINE3)
+        return
+      end
       self.itemIndex = 1
       self.itemList = nil
       self.phase = "item"
@@ -9082,6 +9645,25 @@ function M:updateCommand(input)
       -- (`sayLinkRun`, from `finish`).
       if self.mode == "wild" then
         self:sendChoice({ action = "run" })
+      elseif TRAINER_MODES[self.mode] and self:generation() == 3
+             and type(self.rules) == "table" and self.rules.forfeit == true then
+        -- A facility's RUN is a forfeit (contract C3 `rules.forfeit`): pret
+        -- BattleScript_AskIfWantsToForfeitMatch (pokeemerald
+        -- battle_main.c:4321) asks STRINGID_QUESTIONFORFEITMATCH with the
+        -- cursor on NO (PlayerHandleYesNoBox, battle_controller_player.c:2591)
+        -- and only a YES files the run; the referee then says
+        -- "{PLAYER} forfeited the match!".
+        self:ask(Gen3.battleText("STRINGID_QUESTIONFORFEITMATCH") or M.FORFEIT_ASK3,
+          function(yes)
+            if yes then self:sendChoice({ action = "run" }) end
+          end, { defaultNo = true })
+      elseif TRAINER_MODES[self.mode] and self.firstBattle == "oak" then
+        -- Oak's lab: the cart's trainer refusal jumps to the (empty)
+        -- STRINGID_DONTLEAVEBIRCH in a FIRST_BATTLE (battle_scripts_1.s:3024),
+        -- which the Oak controller answers with his own line, every time.
+        if not self:sayLesson3("run") then
+          self:say("No! There's no\nrunning from a\ntrainer battle!")
+        end
       elseif TRAINER_MODES[self.mode] then
         self:say("No! There's no\nrunning from a\ntrainer battle!")
       elseif self:sendChoice({ action = "run" }) and self:generation() == 3 then
@@ -9089,6 +9671,73 @@ function M:updateCommand(input)
       end
     end
   end
+end
+
+-- Open a POKéMON picker (`phase` "switch" or "item_party").  In Oak's lab the
+-- first party menu is his, whichever door it is opened from (pret
+-- party_menu.c:5834 OpenPartyMenuInTutorialBattle for POKéMON, :5875
+-- EnterPartyFromItemMenuInBattle from the bag; flag 8 -- the cart prints it
+-- inside the party menu): his pages play first and the picker opens behind
+-- them (`applyStateRow`'s `phase` row), unless the menu that asked has gone.
+function M:openPartyPicker3(phase)
+  if self.firstBattle == "oak" and self:sayLesson3("party") then
+    self.lines[#self.lines + 1] = { stateRow = "phase", value = phase, from = self.phase }
+    return
+  end
+  self.phase = phase
+end
+
+-- The facility lines' fallbacks, for a text pack that is not there (the
+-- cart's own -- pokeemerald battle_message.c sText_ItemsCantBeUsedNow,
+-- sText_QuestionForfeitMatch -- are read first).
+M.ITEMS_CANT_LINE3 = "Items can't be used now."
+M.FORFEIT_ASK3 = "Would you like to forfeit the match\nand quit now?"
+
+-- ------- a yes / no on the battle screen itself
+--
+-- The cart asks inside its own battle window: the question stays in the
+-- message box and a YES / NO box opens at its right (pret PlayerHandleYesNoBox
+-- / PlayerHandleYesNoInput, battle_controller_player.c:2591 / :1420: UP / DOWN
+-- move the cursor, A answers, B is NO).  Phase "ask" holds the menu until it
+-- is answered; `onAnswer(yes)` runs after the screen is back in the phase it
+-- asked from, so an answer that files a choice leaves the screen exactly as
+-- that choice does.  `opts.defaultNo` opens on NO (the forfeit's
+-- `gMultiUsePlayerCursor = 1`).
+function M:ask(text, onAnswer, opts)
+  self.asking = {
+    text = tostring(text or ""),
+    cursor = (type(opts) == "table" and opts.defaultNo) and 2 or 1,
+    onAnswer = onAnswer,
+    from = self.phase,
+  }
+  self.phase = "ask"
+  return true
+end
+
+function M:updateAsk(input)
+  local ask = self.asking
+  if not ask then
+    self.phase = "choose"
+    return
+  end
+  if input:wasPressed("up") then
+    ask.cursor = 1
+  elseif input:wasPressed("down") then
+    ask.cursor = 2
+  elseif input:wasPressed("b") then
+    self:answerAsk(false)
+  elseif input:wasPressed("a") then
+    self:answerAsk(ask.cursor == 1)
+  end
+end
+
+function M:answerAsk(yes)
+  local ask = self.asking
+  self.asking = nil
+  if self.phase == "ask" then
+    self.phase = (ask and ask.from ~= "ask" and ask.from) or "choose"
+  end
+  if ask and type(ask.onAnswer) == "function" then ask.onAnswer(yes == true) end
 end
 
 function M:updateMoveMenu(input)
@@ -9545,14 +10194,20 @@ function M:updateItemMenu(input)
       self:say(notTime)
     elseif effect.ball or effect.pokeDoll or effect.pokeFlute then
       self:commitItem(nil, nil)
+    elseif effect.activeOnly and self.noOwnBattler then
+      -- An X item, a DIRE HIT, a GUARD SPEC.: each is for the battler out,
+      -- and a side that fields nothing has none -- the cart's "won't have any
+      -- effect", nothing sent and nothing spent.
+      self.itemPick = nil
+      self:say(M.NO_EFFECT_LINE)
     elseif effect.activeOnly then
       self:commitItem(self.active, nil)
     elseif effect.needsMove then
       self.cursor = 1
-      self.phase = "item_party"
+      self:openPartyPicker3("item_party")
     elseif effect.needsParty or effect.faintedOnly then
       self.switchIndex = 1
-      self.phase = "item_party"
+      self:openPartyPicker3("item_party")
     else
       self:commitItem(self.active, nil)
     end
@@ -9703,12 +10358,40 @@ function M:battleMusicOpts(eng)
   return { Music = eng and eng.Music, kind = self:musicKind(), mode = self.mode }
 end
 
+-- Gen 3's battle theme: the fight's own when its kind named one (screen option
+-- `song` -- the engine's `opts.song`, a legendary's or a roamer's theme, the
+-- way battle_bridge.lua resolve_battle_song takes an explicit song first),
+-- else the one Gen.playBattleMusic resolves from the mode and the trainer.
+-- True when a song was started.
+function M:playBattleTheme3()
+  if not self.game then return false end
+  if self.song ~= nil then
+    if Gen3.audio.playSong(self.song) then return true end
+    if not self.songWarned then
+      self.songWarned = true
+      mod.log:warn("this fight's own theme (%s) could not be played, so it takes the "
+        .. "ordinary battle music; re-import the ROM from the title screen if the "
+        .. "music is missing everywhere", tostring(self.song))
+    end
+  end
+  return Gen.playBattleMusic(self.game, self:gen3MusicOpts()) ~= nil
+end
+
+-- The theme back after an evolution movie: the same song `enter` started.
+function M:restoreBattleTheme(eng)
+  if self:generation() == 3 and self.song ~= nil then
+    self:playBattleTheme3()
+    return
+  end
+  EvolveFx.restoreBattleMusic(self.game, self:battleMusicOpts(eng))
+end
+
 function M:enter()
   loadEngine()
   if self:usesBattlefield() then self:ensureBattlefield() end
   local eng = engine
   if self:generation() == 3 then
-    if self.game then Gen.playBattleMusic(self.game, self:gen3MusicOpts()) end
+    self:playBattleTheme3()
   elseif eng and eng.Music and self.game then
     Gen.playBattleMusic(self.game, {
       Music = eng.Music,
@@ -11558,7 +12241,7 @@ function M:stepEvolve(dt, input)
       if movie.slot then self:refreshSlotSprite(movie.slot, true) end
     end
   end
-  EvolveFx.restoreBattleMusic(self.game, self:battleMusicOpts(eng))
+  self:restoreBattleTheme(eng)
   self.shown = line
   self.dwell = 0
 end
@@ -11715,7 +12398,7 @@ function M:snapDisplay()
   -- after-battle fallback still offers. Unplayed evolve rows stay in `lines`.
   if self.evolving then
     local eng = loadEngine()
-    EvolveFx.restoreBattleMusic(self.game, self:battleMusicOpts(eng))
+    self:restoreBattleTheme(eng)
     self.evolving = nil
   end
   -- The arrival window closes here too, and it closes *forwards*: this is
@@ -11799,6 +12482,9 @@ function M:update(dt)
   if self:tickMessages(dt, input) then return end
 
   if self.phase == "over" then
+    -- Oak's ending lesson, held since its `lesson` event: behind the caller's
+    -- prize line or the rival's win text, all read by now (`flushLessons3`).
+    if self:flushLessons3() then return end
     -- The Pay Day line, owed since `onOutcome` paid the coins: after the
     -- whole ending -- ours and the caller's -- has printed (`payDay3`,
     -- `payDay12`).
@@ -11830,14 +12516,21 @@ function M:update(dt)
     elseif self.phase ~= "choose" and self.phase ~= "move"
        and self.phase ~= "item" and self.phase ~= "item_party"
        and self.phase ~= "item_move" and self.phase ~= "switch"
-       and self.phase ~= "target" and self.phase ~= "mimic" then
+       and self.phase ~= "target" and self.phase ~= "mimic"
+       and self.phase ~= "ask" then
       self.pendingTurn = false
       self.replaceOnly = false
       self.phase = "choose"
       self.commandIndex = 1
       self.cursor = 1
       if self.autoPick then
-        self:pickMove(1)
+        -- The test hook's answer: the first move -- or, with no battler of
+        -- ours out (`noOwnBattler`), the one command every such fight has.
+        if self.noOwnBattler then
+          self:sendChoice({ action = "run" })
+        else
+          self:pickMove(1)
+        end
         return
       end
     end
@@ -11847,6 +12540,7 @@ function M:update(dt)
 
   if not input then return end
   if self.phase == "choose" then return self:updateCommand(input) end
+  if self.phase == "ask" then return self:updateAsk(input) end
   if self.phase == "move" then return self:updateMoveMenu(input) end
   if self.phase == "target" then return self:updateTarget(input) end
   if self.phase == "mimic" then return self:updateMimic(input) end
@@ -12241,9 +12935,9 @@ end
 -- and the index are `M.COMMANDS`' own -- `updateCommand` steps that grid.
 function M:bandCommandItems()
   local items = {}
-  if self:generation() == 3 then
-    for i, command in ipairs(COMMANDS3) do
-      items[i] = { label = COMMAND_LABEL3[command] or command }
+  if self:generation() == 3 or self.commandSet then
+    for i, command in ipairs(self:commandList()) do
+      items[i] = { label = self:commandLabel(command) }
     end
     return items
   end
@@ -12393,6 +13087,13 @@ function M:drawModernBand()
   if self.anim then
     return bandDrew(message(""))
   end
+  if self.phase == "ask" then
+    -- A yes / no (`ask`): the two answers as a list, the question its title.
+    local ask = self.asking or {}
+    local rows = {}
+    for i, label in ipairs(ClassicBattle.gen3YesNoLabels()) do rows[i] = { label = label } end
+    return bandDrew(list(rows, ask.cursor or 1, { title = plainLine(ask.text or "") }))
+  end
   if self.phase == "choose" then
     return bandDrew(grid(self:bandCommandItems(), self.commandIndex or 1))
   end
@@ -12480,6 +13181,9 @@ function M:drawBattlefieldMenus(Font)
     if self.anim then
       return self:drawBox(Font, "")
     end
+    if self.phase == "ask" then
+      return self:drawList(Font, ClassicBattle.gen3YesNoLabels(), (self.asking or {}).cursor or 1)
+    end
     if self.phase == "choose" then
       return self:drawCommands(Font)
     end
@@ -12547,6 +13251,7 @@ function M:drawBattlefieldSafe()
     if ok then engBag.SpriteRenderer = SR end
   end
   pcall(Battlefield.draw, self, self:battlefieldCtx(), engBag)
+  pcall(self.drawVoiceoverDim, self)
 
   -- Gen 3 has no Game Boy font to fall back on; the band widgets carry their
   -- own, and a band that cannot draw simply stays empty.
@@ -12799,9 +13504,39 @@ function M:gen3SeatModel(index, isPlayer)
     if self.mode == "wild" then seat.caught = self:wildDexCaught() end
     local sheet = type(self.wildParty) == "table" and self.wildParty[1] or nil
     if sheet and sheet.speciesId == key then seat.gender = sheet.gender end
+    if self:ghostVeiled() then self:veilSeat3(seat) end
   end
   if seat.gender ~= "M" and seat.gender ~= "F" then seat.gender = nil end
   return seat
+end
+
+-- A foe seat as the cart shows the GHOST (`ghostVeiled`): the silhouette for
+-- its pic and gText_Ghost for its name, no gender mark and no owned ball
+-- (pret battle_interface.c:1506 / :1564, CheckBattleTypeGhost), standing on
+-- the ghost's own default height rather than the species' elevation
+-- (GetGhostSpriteDefault_Y).  Nothing of the monster underneath shows.
+function M:veilSeat3(seat)
+  local image = self:ghostImage3()
+  seat.name = M.ghostName3()
+  seat.sprite = image or nil
+  seat.noPic = (image == nil) or nil
+  seat.gender, seat.caught = nil, false
+  seat.speciesId, seat.form, seat.mon = nil, nil, nil
+  seat.elevation = 0
+  return seat
+end
+
+-- The action prompt above the command grid: the fight's own when its kind
+-- worded one (screen option `prompt`), else the cart's "What will\nX do?" --
+-- X the monster out, or with none of ours out (`noOwnBattler`) the player
+-- (pret gText_WhatWillPkmnDo2, pokeemerald battle_controller_safari.c:449).
+function M:commandPrompt()
+  if type(self.prompt) == "string" and self.prompt ~= "" then return self.prompt end
+  if self.noOwnBattler then
+    return ("What will\n%s do?"):format(playerName(self.game))
+  end
+  local active = self.mine and self.mine[self.active]
+  return ("What will\n%s do?"):format(tostring(active and active.species or "?"))
 end
 
 function M:gen3ClassicModel()
@@ -12825,9 +13560,32 @@ function M:gen3ClassicModel()
     local pic = tonumber(self.trainer.trainerPic or self.trainer.pic or self.trainer.picId)
     if pic then model.trainer = { pic = pic } end
   end
-  local active = self.mine and self.mine[self.active]
-  model.prompt = ("What will\n%s do?"):format(tostring(active and active.species or "?"))
-  if phase == "choose" then
+  model.prompt = self:commandPrompt()
+  -- Oak's voice-over is up: the field darkens under it (`sayLesson3`), one
+  -- healthbox lit again under some of his lines (M.LESSON_LIT3).
+  model.voiceover = self.voiceover == true or nil
+  model.voiceoverLit = model.voiceover and self.voiceoverLit or nil
+  -- A line said from inside a menu -- a refusal, a lesson -- takes the box the
+  -- way the cart's selection strings print into its message window over the
+  -- action menu (pret BattleScript_ActionSelectionItemsCantBeUsed's
+  -- printselectionstring), and the menu is back once it has been read.  The
+  -- arena's band reads `shown` first for the same reason (`drawModernBand`).
+  -- The POKéMON page keeps itself up and prints the line in its own message
+  -- row, as the cart's party menu does.
+  local partyLine = nil
+  if self.shown ~= nil and self.shown ~= "" then
+    if phase == "item_party" or phase == "switch" then
+      partyLine = plainLine(self.shown)
+    else
+      phase = "play"
+    end
+  end
+  if phase == "ask" then
+    -- The question stays in the box and the YES / NO window opens beside it.
+    local ask = self.asking or {}
+    model.message, model.hint = ask.text or "", false
+    model.yesNo = { cursor = ask.cursor or 1 }
+  elseif phase == "choose" then
     local items = {}
     for i, entry in ipairs(self:bandCommandItems()) do items[i] = entry.label end
     model.commands, model.commandIndex = items, self.commandIndex or 1
@@ -12852,7 +13610,7 @@ function M:gen3ClassicModel()
     end
     model.list = { title = "BAG", rows = rows, cursor = self.itemIndex or 1 }
   elseif phase == "item_party" or phase == "switch" then
-    model.list = { title = "POKéMON", rows = self:gen3PartyRows(phase == "item_party"),
+    model.list = { title = partyLine or "POKéMON", rows = self:gen3PartyRows(phase == "item_party"),
                    cursor = self.switchIndex or 1 }
   elseif phase == "target" then
     local rows = {}
@@ -13001,8 +13759,27 @@ function M:drawGen3Plain(model)
   end
   if model.foe then drawGen3Plate(g, Font, model.foe, 8, 8, 110, false) end
   if model.ally then drawGen3Plate(g, Font, model.ally, 124, 70, 110, true) end
+  -- Oak's voice-over darkens the field under his lines (`sayLesson3`).
+  if model.voiceover then
+    g.setColor(0, 0, 0, 0.5)
+    g.rectangle("fill", 0, 0, GEN3_W, 112)
+    g.setColor(1, 1, 1, 1)
+  end
 
   -- The bottom: the message box, or a menu.
+  if model.yesNo then
+    -- The question in the box, YES / NO in a window at its right (the cart's
+    -- YESNOBOX, tiles 24..29 x 8..13).
+    Gen3Ui.dialogueFrame()
+    local lines = Font.wrap(tostring(model.message or ""):gsub("\n", " "), 208)
+    for i = 1, math.min(2, #lines) do Font.draw(lines[i], 16, 121 + (i - 1) * 16) end
+    local box, labels = ClassicBattle.gen3YesNoLayout(), ClassicBattle.gen3YesNoLabels()
+    Gen3Ui.frame(25, 9, 4, 4)
+    for i = 1, 2 do Font.draw(labels[i] or "", box.rows[i].x, box.rows[i].y) end
+    local at = box.cursor[(model.yesNo.cursor == 2) and 2 or 1]
+    Gen3Ui.cursor(at.x, at.y)
+    return
+  end
   if model.list then
     local list = model.list
     Gen3Ui.frame(2, 2, 26, 11)

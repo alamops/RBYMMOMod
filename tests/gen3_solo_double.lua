@@ -57,6 +57,17 @@
 --      refusal's line), the backstop for a seat the screen stopped asking
 --      about (silent in a real fight), and a vacant trainer seat the
 --      referee re-arms, answered by the pump.
+--  14. a mon that would not obey: the cart's line, once.
+--  15. the other doubles (newSoloDouble's trainerB / partner / rules): two
+--      trainers who spot the player at once -- a seat each, the cart's
+--      two-trainer challenge, send-outs and replacements in each one's name,
+--      two figures and two chips on the foe edge, each foe plate labelled
+--      with its owner, the two trainer pics on the GBA page, both defeat
+--      texts in the cart's order; Steven's multi -- one seat ours, his a
+--      partner seat (his own party, "STEVEN sent out X! Go, Y!", his
+--      replacement's "Go!", his back pic beside the player's, his figure
+--      and plate); and a facility's BAG refusal and forfeit YES / NO on the
+--      double screen, with the forfeit's one line at the end.
 --
 -- Each block of checks runs under `block`, so an error in one flow is a
 -- failure of its own and the rest of the run is still measured.
@@ -810,6 +821,9 @@ local function attachRig(ctx, screen, sim, autoIds)
       ctx.outcome = out
       screen:onOutcome(out)
       for _, line in ipairs(ctx.afterWords or {}) do screen:say(line) end
+      -- What the caller does after the verdict, beyond plain lines (a pair's
+      -- defeat, said through the screen's own `sayPairDefeated3`).
+      if ctx.afterFn then ctx.afterFn(screen, out) end
     end
   end
   function ctx.tick(key)
@@ -817,6 +831,7 @@ local function attachRig(ctx, screen, sim, autoIds)
     screen:update(key and (1 / 60) or 1.0)
     GAME.input = fakeInput()
     shownLog(screen, ctx.seen)
+    if ctx.watch then ctx.watch(screen) end
   end
   function ctx.press(key)
     ctx.pump()
@@ -3642,6 +3657,791 @@ do
   end)
 
   Gen3.battleText = realText
+end
+
+-- ------------------------------------------------------------------
+-- 15. two trainers, and a partner (W1-UC: newSoloDouble's trainerB /
+--     partner / rules options)
+-- ------------------------------------------------------------------
+--
+-- Emerald's two trainers who spot the player at once (pret
+-- BATTLE_TYPE_TWO_OPPONENTS) and Steven's multi (INGAME_PARTNER) on the same
+-- screen: the fixture trainer 400 (PKMN TRAINER DUO, pic 9) is the first
+-- trainer, a synthetic 401 (LASS MIA, pic 11) the second, and a synthetic
+-- STEVEN (back pic 7, front pic 21) the partner whose two monsters the
+-- engine appended behind the player's own, as doStevenBattle does.  The
+-- referee is the real one, seated the way the wave-2 kinds seat it -- two
+-- side-b entries for the two trainers, a second side-a entry for the
+-- partner -- with every computer seat answered by `autoPick`.
+do
+  local Gen3 = need("Gen3")
+  local realText = Gen3.battleText
+
+  TRAINERS[401] = { class = 45, className = "LASS", name = "MIA", pic = 11, items = { 0, 0, 0, 0 },
+                    lastLevel = 6, doubleBattle = false,
+                    party = { { species = 5, level = 6, iv = 0, moves = { 33 } },
+                              { species = 29, level = 6, iv = 0, moves = { 33 } } } }
+  local B_DEFAULT = TRAINERS[401].party
+  local STEVEN = { id = 804, trainerId = 804, name = "STEVEN", trainerName = "STEVEN",
+                   className = "PKMN TRAINER", backPic = 7, trainerPic = 21 }
+
+  -- A solo double of another shape:
+  --   party, bag, foeParty, foeItems, seed, classicUi   as makeFight
+  --   foePartyB      the second trainer's team (a pair), else none
+  --   partnerParty   the partner's team, rows of { species, level, moves } (a
+  --                  multi), appended to the live party behind the player's
+  --   rules          the facility rules handed to the screen
+  --   acceptRun      a `run` is taken by the transport without the referee (a
+  --                  facility forfeit, whose referee half is wave 1's RF)
+  local function makeMulti(opts)
+    opts = opts or {}
+    newGame()
+    SESSION.party = opts.party
+    for _, entry in ipairs(opts.bag or {}) do FakeBag.add(SESSION.bag, entry[1], entry[2]) end
+    TRAINERS[400].party = opts.foeParty or FOE_DEFAULT
+    TRAINERS[400].items = opts.foeItems or { 0, 0, 0, 0 }
+    local foeA = FakeTrainers.foeFromId(400)
+    local sheets = Sheet3.mons(GAME, assert(CoopField.trainerParty3(foeA)), {})
+    local trainer = CoopField.trainerRecord3(foeA)
+    trainer.trainerName = trainer.name
+    trainer.defeatText = "DUO: you win this time."
+    local trainerB, sheetsB
+    if opts.foePartyB then
+      TRAINERS[401].party = opts.foePartyB
+      local foeB = FakeTrainers.foeFromId(401)
+      sheetsB = Sheet3.mons(GAME, assert(CoopField.trainerParty3(foeB)), {})
+      trainerB = CoopField.trainerRecord3(foeB)
+      trainerB.trainerName = trainerB.name
+      trainerB.defeatText = "MIA: oh no!"
+    end
+    local partner, partnerSheets, half = nil, nil, nil
+    if opts.partnerParty then
+      half = #SESSION.party
+      local his = {}
+      for i, row in ipairs(opts.partnerParty) do
+        his[i] = mon(row.species, row.level, { moves = row.moves or { 33 }, otId = 804,
+                                               otName = "STEVEN" })
+      end
+      partnerSheets = Sheet3.mons(GAME, his, {})
+      for _, m in ipairs(his) do SESSION.party[#SESSION.party + 1] = m end
+      partner = STEVEN
+    end
+    local ctx = { choices = {}, sent = {}, seq = 0, seen = {}, battleId = "sd1", sheets = sheets,
+                  sheetsB = sheetsB, partnerSheets = partnerSheets }
+    local pending = {}
+    local seatIds = partner and { [0] = "solo_player" } or { [0] = "solo_player", [1] = "solo_player#2" }
+    local transport = {
+      isReady = function() return true end,
+      send = function(self_, kind, payload)
+        ctx.sent[#ctx.sent + 1] = { kind = kind, payload = payload }
+        if kind == Wire.BATTLE_RULESET then
+          pending.ruleset = payload
+        elseif kind == Wire.BATTLE_PARTY then
+          if payload.side == "b" then pending.foe = payload else pending.party = payload end
+        elseif kind == Wire.BATTLE_CHOICE then
+          ctx.choices[#ctx.choices + 1] = copyTable(payload)
+          self_.refusal = nil
+          if opts.acceptRun and payload.action == "run" then
+            ctx.localRun = ctx.localRun or {}
+            ctx.localRun[payload.seat] = true
+            return true
+          end
+          if opts.acceptRun and payload.action == "cancel" and (ctx.localRun or {})[payload.seat] then
+            ctx.localRun[payload.seat] = nil
+            return true
+          end
+          local seatId = seatIds[payload.seat]
+          if not seatId then
+            ctx.unseated = (ctx.unseated or 0) + 1
+            return false
+          end
+          local ok, filed = pcall(ctx.sim.submitChoice, ctx.sim, seatId, payload)
+          if not ok then ctx.err = filed end
+          if ok and not filed then
+            ctx.refused = (ctx.refused or 0) + 1
+            self_.refusal = Solo.refusalText3(ctx.sim, seatId, payload)
+          end
+          return (ok and filed) and true or false
+        end
+      end,
+    }
+    local screen, why = CoopBattle.newSoloDouble(GAME, {
+      transport = transport, battle = "sd1", trainer = trainer,
+      peerName = "PKMN TRAINER DUO", npcParty = sheets, mode = "coop_npc",
+      selfId = "solo_player", foeId = "solo_foe", foeSeats = 2,
+      trainerB = trainerB, npcPartyB = sheetsB,
+      partner = partner, partnerParty = partnerSheets, playerHalf = half,
+      rules = opts.rules, song = opts.song,
+      onDone = function(result, toLearn) ctx.done = { result = result, toLearn = toLearn } end,
+      classicUi = opts.classicUi,
+    })
+    assert(screen, why)
+    ctx.started = screen:start(GAME)
+    ctx.pending = pending
+    local ruleset = pending.ruleset or {}
+    local sideA, sideB
+    if partner then
+      sideA = { { playerId = "solo_player", name = "ANN", mons = pending.party.mons,
+                  bag = pending.party.bag },
+                { playerId = "solo_ally", name = "STEVEN", mons = partnerSheets } }
+    else
+      sideA = { { playerId = "solo_player", seats = 2, name = "ANN", mons = pending.party.mons,
+                  bag = pending.party.bag } }
+    end
+    if trainerB then
+      sideB = { { playerId = "solo_foe", name = "DUO", mons = sheets,
+                  bag = pending.foe and pending.foe.bag or nil },
+                { playerId = "solo_foe_b", name = "MIA", mons = sheetsB } }
+    else
+      sideB = { { playerId = "solo_foe", seats = (#sheets >= 2) and 2 or 1, name = "DUO", mons = sheets,
+                  bag = pending.foe and pending.foe.bag or nil } }
+    end
+    local sim, err = Turn.create({
+      id = "sd1", mode = "coop_npc", seed = opts.seed or 11,
+      typeTable = ruleset.typeTable, specialTypes = ruleset.specialTypes,
+      movePool = ruleset.movePool, choiceTimeout = 0, now = 0,
+      sides = { a = sideA, b = sideB },
+    })
+    assert(sim, err)
+    screen:enter()
+    ctx.introModel = screen:gen3ClassicModel()
+    local a = partner and { "solo_player", "solo_ally" } or { "solo_player", "solo_player#2" }
+    local b = trainerB and { "solo_foe", "solo_foe_b" }
+      or ((#sheets >= 2) and { "solo_foe", "solo_foe#2" } or { "solo_foe" })
+    screen:onReady({ battle = "sd1", mode = "coop_npc", sides = { a = a, b = b } })
+    local auto = { "solo_foe" }
+    if trainerB then auto[#auto + 1] = "solo_foe_b" end
+    if partner then auto[#auto + 1] = "solo_ally" end
+    return attachRig(ctx, screen, sim, auto)
+  end
+
+  -- The cart's text pack, stood in: each line this section reads in a shape
+  -- of its own (capitals, so a cart line can be told from the screen's own
+  -- spelling), every fill it was asked with recorded.
+  local asked = {}
+  local function cartText(id, fill)
+    asked[#asked + 1] = { id = id, fill = fill }
+    fill = fill or {}
+    if id == "STRINGID_INTROMSG" and fill.twoOpponents then
+      return ("%s %s AND\n%s %s\nWANT TO BATTLE!"):format(fill.trainer1Class, fill.trainer1Name,
+        fill.trainer2Class, fill.trainer2Name)
+    elseif id == "STRINGID_INTROSENDOUT" and fill.side == 1 and fill.double and fill.twoOpponents then
+      return ("%s %s SENT\nOUT %s!\n\n%s %s SENT\nOUT %s!"):format(fill.trainer1Class,
+        fill.trainer1Name, fill.opponentMon1, fill.trainer2Class, fill.trainer2Name, fill.opponentMon2)
+    elseif id == "STRINGID_INTROSENDOUT" and fill.side == 0 and fill.double and fill.inGamePartner then
+      return ("%s %s SENT\nOUT %s!\nGO, %s!"):format(fill.partnerClass, fill.partnerName,
+        fill.playerMon2, fill.playerMon1)
+    elseif id == "STRINGID_SWITCHINMON" and fill.twoOpponents and fill.side == 1 then
+      if fill.switchBattler == 3 then
+        return ("%s %s SENT\nOUT %s!"):format(fill.trainer2Class, fill.trainer2Name, fill.buff1)
+      end
+      return ("%s %s SENT\nOUT %s!"):format(fill.trainer1Class, fill.trainer1Name, fill.buff1)
+    elseif id == "STRINGID_TWOENEMIESDEFEATED" and fill.twoOpponents then
+      return ("%s %s AND\n%s %s\nWERE DEFEATED!"):format(fill.trainer1Class, fill.trainer1Name,
+        fill.trainer2Class, fill.trainer2Name)
+    elseif id == "STRINGID_ITEMSCANTBEUSEDNOW" then
+      return "ITEMS CAN'T BE USED NOW."
+    elseif id == "STRINGID_QUESTIONFORFEITMATCH" then
+      return "WOULD YOU LIKE TO FORFEIT THE MATCH\nAND QUIT NOW?"
+    elseif id == "STRINGID_FORFEITEDMATCH" then
+      return ("%s FORFEITED THE MATCH!"):format(tostring(fill.playerName))
+    end
+    return nil
+  end
+  local function lastAsked(id)
+    for i = #asked, 1, -1 do
+      if asked[i].id == id then return asked[i].fill end
+    end
+    return nil
+  end
+  local function withCart(fn)
+    asked = {}
+    Gen3.battleText = cartText
+    local ok, err = pcall(fn)
+    Gen3.battleText = realText
+    if not ok then error(err, 0) end
+  end
+
+  local function strongParty()
+    return { mon(4, 30, { moves = { 33 } }), mon(16, 30, { moves = { 33 } }), mon(29, 30, { moves = { 33 } }) }
+  end
+
+  -- Fight on until the screen finishes: every seat of ours at its first foe.
+  local function fightOut(f)
+    local s = f.screen
+    for _ = 1, 30 do
+      local r = f.settle()
+      if r ~= "choose" then return r end
+      fightWith(f, 1)
+      if s.phase == "choose" and s.mine == 2 then fightWith(f, 1) end
+    end
+    return "unfinished"
+  end
+
+  -- ------- a pair: two trainers, a seat each
+
+  block("pair seating", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+    local s = f.screen
+    check(f.started == true, "pair seating: start() answers true")
+    eq(#f.sent, 3, "pair seating: three uploads -- the ruleset, our party, the first trainer's")
+    eq(f.sent[3] and f.sent[3].payload.side, "b", "pair seating: the first trainer's team is side b")
+    check(f.sent[3] and rawequal(f.sent[3].payload.mons, f.sheets),
+          "pair seating: ...the first trainer's sheets, not the second's (the caller seats that entry)")
+    check(rawequal(s.medNpcSheetsB, f.sheetsB), "pair seating: the second trainer's sheets are kept as described")
+    eq(joined(s.ownSlots[1], s.ownSlots[2]), "1,2", "pair seating: both of side a's seats are still ours")
+    check(s.pair3 ~= nil and s.partner3 == nil, "pair seating: a pair, no partner")
+    eq(#s.sim.slots, 4, "pair seating: four seats")
+    eq(s.sim:slot(3).name, "PKMN TRAINER DUO", "pair seating: slot 3 is the first trainer's")
+    eq(s.sim:slot(4).name, "LASS MIA", "pair seating: slot 4 the second's (its label from its record)")
+    check(s.sim:slot(3).party ~= s.sim:slot(4).party, "pair seating: each trainer fields its own party")
+    eq(#s.sim:slot(4).party, 2, "pair seating: the second trainer's two")
+    eq(tonumber(s.sim:slot(4).party[1].species), 5, "pair seating: ...in its own order")
+    eq(s.sim:slot(3).owner, nil, "pair seating: the trainers' seats are computer seats")
+    eq(s.medSlots[3], 3, "pair seating: field 3 (solo_foe) is slot 3")
+    eq(s.medSlots[4], 4, "pair seating: field 4 (solo_foe_b) is slot 4")
+    eq(s.medSlots[0], 1, "pair seating: our field 0 is slot 1")
+    eq(s.medSlots[1], 2, "pair seating: our field 1 (solo_player#2) is slot 2")
+    eq(s:seatTrainer3(3).key, "a", "pair seating: slot 3's trainer is the first")
+    eq(s:seatTrainer3(4).key, "b", "pair seating: slot 4's the second")
+    eq(s:seatTrainer3(1), nil, "pair seating: our seats have no computer trainer")
+    eq(s:seatOwnerLabel3(4), "MIA", "pair seating: slot 4 is labelled with its owner, by name")
+    eq(s:seatOwnerLabel3(3), "DUO", "pair seating: ...and slot 3 with its")
+    eq(s:seatOwnerLabel3(1), nil, "pair seating: our own seats carry no owner tag")
+    eq(f.err, nil, "pair seating: nothing threw")
+  end)
+
+  -- The cart's order, in this screen's own words (no text pack): both
+  -- trainers' challenge, the first's send-out, the second's, then ours.
+  block("pair intro", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+    local s = f.screen
+    eq(f.settle(), "choose", "pair intro: the first menu opens")
+    local opening = lineIndex(f.seen, "PKMN TRAINER DUO and", "LASS MIA")
+    local want = lineIndex(f.seen, "want to battle")
+    local sendA = lineIndex(f.seen, "PKMN TRAINER DUO sent", "MEW")
+    local sendB = lineIndex(f.seen, "LASS MIA sent", "CHARMELEON")
+    local go = lineIndex(f.seen, "Go! ", "CHARMANDER", "PIDGEY")
+    eq(opening, 1, "pair intro: the two trainers' challenge opens the fight")
+    check(want ~= nil, "pair intro: ...they want to battle")
+    check(sendA ~= nil, "pair intro: the first trainer sends out its own")
+    check(sendB ~= nil, "pair intro: the second trainer sends out its own, on a page of its own")
+    check(sendA and sendB and sendA < sendB, "pair intro: the first trainer's line first")
+    check(sendB and go and sendB < go, "pair intro: ...then ours")
+    check(sendA and not f.seen[sendA]:find("CHARMELEON", 1, true),
+          "pair intro: the first trainer's line names only its own monster")
+    check(not contains(f.seen, "would like to battle"), "pair intro: not a lone trainer's challenge")
+    eq(s.mine, 1, "pair intro: then mon 1 is asked")
+  end)
+
+  -- The cart's own lines, asked of the text pack with both trainers in the fill.
+  block("pair intro cart", function()
+    withCart(function()
+      local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+      eq(f.settle(), "choose", "pair intro cart: the first menu opens")
+      local intro = lastAsked("STRINGID_INTROMSG")
+      check(intro ~= nil and intro.twoOpponents == true, "pair intro cart: the challenge is the two-trainer one")
+      eq(intro and intro.trainer1Name, "DUO", "pair intro cart: ...the first trainer's name")
+      eq(intro and intro.trainer1Class, "PKMN TRAINER", "pair intro cart: ...and class")
+      eq(intro and intro.trainer2Name, "MIA", "pair intro cart: ...the second's name")
+      eq(intro and intro.trainer2Class, "LASS", "pair intro cart: ...and class")
+      eq(f.seen[1] and flat(f.seen[1]), "PKMN TRAINER DUO AND LASS MIA",
+         "pair intro cart: the box shows the cart's challenge first")
+      local foeFill
+      for _, entry in ipairs(asked) do
+        if entry.id == "STRINGID_INTROSENDOUT" and entry.fill.side == 1 then foeFill = entry.fill end
+      end
+      check(foeFill and foeFill.twoOpponents == true, "pair intro cart: the foes' send-out is the two-trainer one")
+      eq(foeFill and foeFill.opponentMon1, "MEW", "pair intro cart: the first trainer's monster is battler 1's")
+      eq(foeFill and foeFill.opponentMon2, "CHARMELEON", "pair intro cart: the second's is battler 3's")
+      local pageA = lineIndex(f.seen, "DUO SENT", "MEW")
+      local pageB = lineIndex(f.seen, "MIA SENT", "CHARMELEON")
+      check(pageA and pageB and pageB == pageA + 1, "pair intro cart: one page per trainer, in order")
+      check(pageA and not f.seen[pageA]:find("MIA", 1, true), "pair intro cart: ...the printer's page break kept")
+      check(lineIndex(f.seen, "Go! ", "CHARMANDER", "PIDGEY") ~= nil,
+            "pair intro cart: our own line is the player's two (no partner)")
+    end)
+  end)
+
+  -- A replacement says its own trainer's name: the second trainer's battler 3
+  -- is sText_Trainer2SentOutPkmn, the first's battler 1 sText_Trainer1SentOutPkmn2.
+  block("pair send", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+    local s = f.screen
+    eq(f.settle(), "choose", "pair send: menu")
+    local hp = f.sheetsB[2].hp
+    local rowsB = s:medRows({ battle = "sd1", seq = 901, t = "send", slot = 4, side = "b",
+                              text = "NIDORAN", mon = 1, hp = hp })
+    local lineB = rowsB[1] and rowsB[1].text
+    check(says(lineB, "LASS MIA", "sent out", "NIDORAN"), "pair send: the second trainer's own line (" .. tostring(lineB) .. ")")
+    local rowsA = s:medRows({ battle = "sd1", seq = 902, t = "send", slot = 3, side = "b",
+                              text = "PIDGEY", mon = 1, hp = f.sheets[2].hp })
+    check(says(rowsA[1] and rowsA[1].text, "PKMN TRAINER DUO", "PIDGEY"), "pair send: the first trainer's own")
+    withCart(function()
+      local cartB = s:medRows({ battle = "sd1", seq = 903, t = "send", slot = 4, side = "b",
+                                text = "NIDORAN", mon = 1, hp = hp })
+      eq(lastAsked("STRINGID_SWITCHINMON") and lastAsked("STRINGID_SWITCHINMON").switchBattler, 3,
+         "pair send: the second trainer's is battler 3's line")
+      eq(cartB[1] and flat(cartB[1].text), "LASS MIA SENT OUT NIDORAN!", "pair send: ...in the cart's words")
+      s:medRows({ battle = "sd1", seq = 904, t = "send", slot = 3, side = "b",
+                  text = "PIDGEY", mon = 1, hp = f.sheets[2].hp })
+      eq(lastAsked("STRINGID_SWITCHINMON") and lastAsked("STRINGID_SWITCHINMON").switchBattler, 1,
+         "pair send: the first trainer's is battler 1's")
+    end)
+    -- the computer picks in silence: no co-op wait line for a trainer's seat
+    local before = #s.messages
+    s:playEvents({ { kind = "choose", slot = 4, trainer = "LASS MIA" } })
+    eq(#s.messages, before, "pair send: a trainer's replacement is not narrated as a wait")
+    eq(s.replacing, nil, "pair send: ...and opens no picker of ours")
+  end)
+
+  -- The field: two trainers on the foe edge, each behind its own seat with its
+  -- own chip; nothing overlaps.
+  block("pair arena", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+    local s = f.screen
+    eq(f.settle(), "choose", "pair arena: menu")
+    local foes = s:battlefieldFoeHumans()
+    eq(#foes, 2, "pair arena: two trainers on the foe edge")
+    eq(foes[1] and foes[1].trainerPic, 9, "pair arena: the first stands as its own front pic")
+    eq(foes[2] and foes[2].trainerPic, 11, "pair arena: the second as its own")
+    eq(foes[1] and foes[1].name, "DUO", "pair arena: each with its own name")
+    eq(foes[2] and foes[2].name, "MIA", "pair arena: ...")
+    check(foes[1] and rawequal(foes[1].party, s.sim:slot(3).party), "pair arena: the first's chip is its own party")
+    check(foes[2] and rawequal(foes[2].party, s.sim:slot(4).party), "pair arena: the second's chip its own")
+    eq(joined(s:battlefieldHumanIndex(3)), "foe,1", "pair arena: slot 3's callouts go over the first trainer")
+    eq(joined(s:battlefieldHumanIndex(4)), "foe,2", "pair arena: slot 4's over the second")
+    check(s:sentByTrainer(4), "pair arena: slot 4's send-out is a trainer's")
+    local seats = s:battlefieldSeats(true)
+    eq(seats[1] and seats[1].owner, "DUO", "pair arena: the first foe seat is labelled with its owner")
+    eq(seats[2] and seats[2].owner, "MIA", "pair arena: the second with its own")
+    eq(s:battlefieldSeats(false)[1].owner, nil, "pair arena: our seats carry no owner tag")
+    local layout = Battlefield.layout(s:battlefieldCtx())
+    eq(#layout.humans, 3, "pair arena: three figures (the player, two trainers)")
+    eq(#layout.rosters, 3, "pair arena: three chips")
+    local owners = {}
+    for _, plate in ipairs(layout.plates) do
+      if plate.side == "foe" then owners[#owners + 1] = plate.model.owner end
+    end
+    eq(table.concat(owners, ","), "DUO,MIA", "pair arena: each foe plate names its trainer")
+    checkArena(layout, "pair arena")
+    local fh = {}
+    for _, e in ipairs(layout.humans) do if e.side == "foe" then fh[#fh + 1] = e end end
+    check(fh[1] and fh[2] and fh[1].y == fh[2].y and fh[1].x > fh[2].x,
+          "pair arena: the two trainers stand side by side, the first on the outer column")
+    eq(fh[1] and fh[1].trainerPic, 9, "pair arena: ...the first trainer's pic outer")
+    -- the shout: the second trainer's monster moves, the bubble is over it
+    s.battlefieldBubbles = nil
+    s.calloutShout = nil
+    local shouted = s:noteBattlefieldBubble(4, "CHARMELEON used\nTACKLE!")
+    check(shouted, "pair arena: a callout is raised for the second trainer's seat")
+    eq(s.battlefieldBubbles and s.battlefieldBubbles[1].humanIndex, 2,
+       "pair arena: ...over the second trainer")
+  end)
+
+  -- The GBA page: both trainers' front pics where the cart draws them while
+  -- the challenge is up; then the field.
+  block("pair classic", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT, classicUi = true })
+    local s = f.screen
+    local m = f.introModel
+    eq(m.trainer, nil, "pair classic: not the page's one centred trainer")
+    local figs = m.figures3 or {}
+    eq(#figs, 2, "pair classic: two trainers at the challenge")
+    eq(figs[1] and joined(figs[1].kind, figs[1].pic, figs[1].x, figs[1].y), "front,9,200,40",
+       "pair classic: the first trainer's front pic at the cart's battler-1 spot")
+    eq(figs[2] and joined(figs[2].kind, figs[2].pic, figs[2].x, figs[2].y), "front,11,152,40",
+       "pair classic: the second's at battler 3's")
+    eq(f.settle(), "choose", "pair classic: menu")
+    eq(s:gen3ClassicModel().figures3, nil, "pair classic: once the monsters are out, no trainer stands")
+    local okDraw = pcall(s.drawFigures3, s, { figures3 = figs })
+    check(okDraw, "pair classic: drawing the figures does not throw")
+  end)
+
+  -- The ending, in the cart's order: both defeated, the first's lose text with
+  -- the first trainer in, the second's with the second.
+  block("pair ending", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT, classicUi = true })
+    local s = f.screen
+    f.afterFn = function(screen) screen:sayPairDefeated3() end
+    local during = {}
+    f.watch = function(screen)
+      if screen.shown ~= nil and during[#during] ~= screen.shown then
+        during[#during + 1] = screen.shown
+        local figs = screen:gen3Figures3(screen:gen3DoubleView(screen.phase)) or {}
+        during[screen.shown] = { who = screen.endTrainer3, pic = figs[1] and figs[1].pic,
+                                 x = figs[1] and figs[1].x }
+      end
+    end
+    eq(fightOut(f), "finished", "pair ending: the fight is won to the end")
+    eq(f.outcome and #f.outcome.losers, 2, "pair ending: both trainers lost")
+    local both = lineIndex(f.seen, "PKMN TRAINER DUO and", "LASS MIA")
+    local defeated = lineIndex(f.seen, "were defeated")
+    local loseA = lineIndex(f.seen, "DUO: you win")
+    local loseB = lineIndex(f.seen, "MIA: oh no")
+    check(defeated ~= nil, "pair ending: both were defeated")
+    check(both and defeated and defeated >= both, "pair ending: ...the two-trainer line")
+    check(defeated and loseA and loseA > defeated, "pair ending: the first trainer's lose text next")
+    check(loseA and loseB and loseB > loseA, "pair ending: then the second's")
+    local atA = during[f.seen[loseA or 0]]
+    local atB = during[f.seen[loseB or 0]]
+    eq(atA and atA.who, "a", "pair ending: the first trainer is on the field for its line")
+    eq(atA and joined(atA.pic, atA.x), "9,208", "pair ending: ...its front pic where the cart slides it in")
+    eq(atB and atB.who, "b", "pair ending: the second trainer for its own")
+    eq(atB and joined(atB.pic, atB.x), "11,208", "pair ending: ...its own pic")
+    check(lineIndex(f.seen, "LASS MIA sent out", "NIDORAN") ~= nil,
+          "pair ending: the second trainer's replacement came out of its own party, in its name")
+    check(lineIndex(f.seen, "PKMN TRAINER DUO sent out", "PIDGEY") ~= nil,
+          "pair ending: ...and the first trainer's out of its own")
+    eq(f.done and f.done.result, "win", "pair ending: onDone(win)")
+  end)
+
+  block("pair ending cart", function()
+    withCart(function()
+      local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+      f.afterFn = function(screen) screen:sayPairDefeated3() end
+      eq(fightOut(f), "finished", "pair ending cart: won")
+      local fill = lastAsked("STRINGID_TWOENEMIESDEFEATED")
+      check(fill and fill.twoOpponents == true, "pair ending cart: STRINGID_TWOENEMIESDEFEATED, both trainers")
+      eq(fill and fill.trainer2Name, "MIA", "pair ending cart: ...the second named")
+      check(lineIndex(f.seen, "WERE DEFEATED") ~= nil, "pair ending cart: the cart's words on the box")
+    end)
+  end)
+
+  -- A lone trainer's screen keeps every one of these off.
+  block("pair off", function()
+    local f = makeFight({ party = { mon(4, 20), mon(16, 20) } })
+    local s = f.screen
+    eq(s.pair3, nil, "pair off: a lone double is no pair")
+    eq(s:sayPairDefeated3(), false, "pair off: ...and says no pair's defeat")
+    eq(s:seatOwnerLabel3(3), nil, "pair off: its seats carry no owner tag")
+    eq(s:foeSendLine3(3, "MEW"), nil, "pair off: its send-outs keep the screen's line")
+    eq(#s:battlefieldFoeHumans(), 1, "pair off: one trainer on the foe edge")
+    eq(s:openingLine3(), "PKMN TRAINER DUO\nwould like to battle!", "pair off: its challenge as it was")
+  end)
+
+  -- ------- a partner beside us (Steven's multi)
+
+  block("partner seating", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT,
+                          partnerParty = { { species = 92, level = 30 }, { species = 5, level = 30 } } })
+    local s = f.screen
+    check(f.started == true, "partner seating: start() answers true")
+    eq(#SESSION.party, 5, "partner seating: the live party holds the player's three and the partner's two")
+    local mine = f.sent[2] and f.sent[2].payload.mons or {}
+    eq(#mine, 3, "partner seating: only the player's own half is uploaded as ours")
+    eq(mine[3] and tonumber(mine[3].slot), 2, "partner seating: ...the first three, by save position")
+    eq(joined(s.ownSlots[1], s.ownSlots[2]), "1,nil", "partner seating: one seat is ours")
+    check(s:isPartnerSeat3(2), "partner seating: slot 2 is the partner's")
+    check(not s:isMine(2), "partner seating: ...which we do not command")
+    eq(s.sim:slot(2).owner, nil, "partner seating: a computer seat")
+    eq(s.sim:slot(2).name, "PKMN TRAINER STEVEN", "partner seating: named for the partner")
+    eq(#s.sim:slot(1).party, 3, "partner seating: our seat's bench is our own three")
+    for i = 1, 3 do
+      check(rawequal(s.sim:slot(1).party[i], SESSION.party[i]),
+            "partner seating: our seat fights with the live monster " .. i)
+    end
+    eq(tonumber(s.sim:slot(2).party[1].species), 92, "partner seating: his lead is his own")
+    eq(s.medSlots[0], 1, "partner seating: field 0 is our seat")
+    eq(s.medSlots[1], 2, "partner seating: field 1 (solo_ally) is his")
+    eq(s:seatTrainer3(2).key, "partner", "partner seating: his seat's trainer is the partner")
+    eq(s:seatOwnerLabel3(2), "STEVEN", "partner seating: his plate names him")
+    local allies = s:battlefieldAllyHumans()
+    eq(#allies, 2, "partner seating: two figures on our side")
+    eq(allies[1] and allies[1].id, "solo_player", "partner seating: the player first")
+    eq(allies[2] and allies[2].trainerKey3, "partner", "partner seating: the partner beside")
+    check(allies[2] and rawequal(allies[2].party, s.sim:slot(2).party), "partner seating: ...with his own party")
+    eq(joined(s:battlefieldHumanIndex(2)), "ally,2", "partner seating: his seat's callouts go over him")
+    eq(allies[2] and allies[2].trainerPic, nil, "partner seating: he stands as a walker beside the player's")
+    eq(f.settle(), "choose", "partner seating: menu")
+    local layout = Battlefield.layout(s:battlefieldCtx())
+    eq(#layout.humans, 4, "partner seating: four figures (the player, the partner, two trainers)")
+    eq(#layout.mons, 4, "partner seating: four monsters")
+    local owners = {}
+    for _, plate in ipairs(layout.plates) do owners[#owners + 1] = tostring(plate.model.owner) end
+    eq(table.concat(owners, ","), "nil,STEVEN,DUO,MIA",
+       "partner seating: his plate and each trainer's carry their owner")
+    checkArena(layout, "partner arena")
+    eq(f.err, nil, "partner seating: nothing threw")
+  end)
+
+  block("partner intro", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT,
+                          partnerParty = { { species = 92, level = 30 }, { species = 5, level = 30 } } })
+    local s = f.screen
+    eq(f.settle(), "choose", "partner intro: menu")
+    local opening = lineIndex(f.seen, "DUO and", "MIA")
+    local his = lineIndex(f.seen, "STEVEN sent", "GASTLY")
+    local go = lineIndex(f.seen, "Go, CHARMANDER")
+    eq(opening, 1, "partner intro: the two trainers' challenge")
+    check(his ~= nil, "partner intro: the partner sends out his own first (" .. tostring(f.seen[his or 0]) .. ")")
+    check(his and go and go > his, "partner intro: then the player's, 'Go, X!'")
+    check(lineIndex(f.seen, "LASS MIA sent") and his and his > lineIndex(f.seen, "LASS MIA sent"),
+          "partner intro: after both trainers' send-outs")
+    check(not contains(f.seen, "Go! CHARMANDER and"), "partner intro: not the player's own pair")
+    eq(s.mine, 1, "partner intro: our seat is asked")
+  end)
+
+  block("partner intro cart", function()
+    withCart(function()
+      local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT,
+                            partnerParty = { { species = 92, level = 30 } } })
+      eq(f.settle(), "choose", "partner intro cart: menu")
+      local ours
+      for _, entry in ipairs(asked) do
+        if entry.id == "STRINGID_INTROSENDOUT" and entry.fill.side == 0 then ours = entry.fill end
+      end
+      check(ours and ours.inGamePartner == true, "partner intro cart: the in-game partner's line")
+      eq(ours and ours.partnerName, "STEVEN", "partner intro cart: ...his name")
+      eq(ours and ours.partnerClass, "PKMN TRAINER", "partner intro cart: ...his class")
+      eq(ours and ours.playerMon2, "GASTLY", "partner intro cart: his monster is battler 2's")
+      eq(ours and ours.playerMon1, "CHARMANDER", "partner intro cart: ours battler 0's")
+      check(lineIndex(f.seen, "STEVEN SENT", "GASTLY") ~= nil, "partner intro cart: the cart's words")
+    end)
+  end)
+
+  -- One command a turn: our seat's; his is the caller's brain (autoPick here).
+  block("partner turns", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT,
+                          partnerParty = { { species = 92, level = 30 }, { species = 5, level = 30 } } })
+    local s = f.screen
+    local turns = 0
+    for _ = 1, 3 do
+      if f.settle() ~= "choose" then break end
+      eq(s.mine, 1, "partner turns: only our seat's menu opens")
+      local before = #f.choices
+      fightWith(f, 1)
+      turns = turns + 1
+      eq(#f.choices, before + 1, "partner turns: one command filed")
+      eq(f.choices[#f.choices].seat, 0, "partner turns: ...for field 0")
+      check(s.phase ~= "choose" or s.mine == 1, "partner turns: his seat is never asked")
+    end
+    check(turns >= 2, "partner turns: several turns played")
+    eq(f.unseated, nil, "partner turns: no command named a seat that is not ours")
+    local model = s:gen3ClassicModel()
+    eq(model.double and model.double.choosing, nil, "partner turns: (waiting) nobody bobs")
+  end)
+
+  -- His replacement: no wait line, the cart's player-side "Go! X!".
+  block("partner send", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT,
+                          partnerParty = { { species = 92, level = 30 }, { species = 5, level = 30 } } })
+    local s = f.screen
+    eq(f.settle(), "choose", "partner send: menu")
+    local before = #s.messages
+    s:playEvents({ { kind = "choose", slot = 2, trainer = "PKMN TRAINER STEVEN" } })
+    eq(#s.messages, before, "partner send: his replacement pick is not narrated")
+    eq(s.replacing, nil, "partner send: ...and no picker of ours opens")
+    local rows = s:medRows({ battle = "sd1", seq = 950, t = "send", slot = 1, side = "a",
+                             text = "CHARMELEON", mon = 1, hp = f.partnerSheets[2].hp })
+    eq(rows[1] and rows[1].text, "Go! CHARMELEON!", "partner send: the cart's player-side line for his")
+    eq(rows[2] and rows[2].kind, "send", "partner send: ...and the send-out itself")
+    eq(rows[2] and rows[2].index, 2, "partner send: his second monster, by the referee's stamp")
+  end)
+
+  -- The GBA page: the player's back and his before anybody of ours is out.
+  block("partner classic", function()
+    local f = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT, classicUi = true,
+                          partnerParty = { { species = 92, level = 30 } } })
+    local s = f.screen
+    local m = f.introModel
+    eq(m.playerBack, nil, "partner classic: not the page's one centred back")
+    local backs = {}
+    for _, fig in ipairs(m.figures3 or {}) do
+      if fig.kind == "back" then backs[#backs + 1] = joined(fig.who, fig.back, fig.x, fig.y) end
+    end
+    eq(table.concat(backs, " "), "player,0,32,80 partner,7,90,80",
+       "partner classic: the player's back at battler 0's spot, his own back pic at battler 2's")
+    eq(f.settle(), "choose", "partner classic: menu")
+    local after = s:gen3ClassicModel().figures3
+    eq(after, nil, "partner classic: once ours are out, no back stands")
+    -- and not again once ours have been out (a side emptied by faints is no intro)
+    s.alliesSeen3 = true
+    eq(s:gen3Figures3({ allies = {} }), nil, "partner classic: the backs never return")
+    -- the profile key spelling of his back pic
+    s.alliesSeen3 = nil
+    s.partner3.trainer = { name = "STEVEN", partnerBackPic = "steven" }
+    local figs = s:gen3Figures3({ allies = {} }) or {}
+    eq(figs[2] and figs[2].back, "steven", "partner classic: a back pic named by the profile's key")
+  end)
+
+  -- ------- facility prompts (contract C3 `rules`)
+
+  block("facility bag", function()
+    local f = makeMulti({ party = { mon(4, 20), mon(16, 20) }, bag = { { 13, 2 } },
+                          rules = { bag = false } })
+    local s = f.screen
+    eq(f.settle(), "choose", "facility bag: menu")
+    s.commandIndex = 2
+    eq(s:commandList()[2], "ITEM", "facility bag: the command is BAG")
+    local sentBefore = #f.choices
+    f.press("a")
+    check(s.phase ~= "item", "facility bag: the bag does not open")
+    f.tick(nil)
+    check(says(s.shown, "Items can't be used now"), "facility bag: the cart's line (" .. tostring(s.shown) .. ")")
+    eq(readOut(f), "choose", "facility bag: the action menu again")
+    eq(s.mine, 1, "facility bag: ...for the same seat")
+    eq(#f.choices, sentBefore, "facility bag: nothing filed")
+    withCart(function()
+      s.commandIndex = 2
+      f.press("a")
+      f.tick(nil)
+      eq(s.shown, "ITEMS CAN'T BE USED NOW.", "facility bag: STRINGID_ITEMSCANTBEUSEDNOW, the cart's words")
+      readOut(f)
+    end)
+  end)
+
+  block("facility forfeit", function()
+    local f = makeMulti({ party = { mon(4, 20), mon(16, 20) }, rules = { forfeit = true },
+                          acceptRun = true, classicUi = true })
+    local s = f.screen
+    eq(f.settle(), "choose", "facility forfeit: menu")
+    s.commandIndex = 4
+    eq(s:commandList()[4], "RUN", "facility forfeit: the command is RUN")
+    f.press("a")
+    eq(s.runAsk and s.runAsk.role, "forfeit", "facility forfeit: RUN asks first")
+    eq(s.runAsk and s.runAsk.index, 2, "facility forfeit: the cursor opens on NO")
+    local list = s:gen3ClassicModel().list
+    eq(list and joined(list.rows[1].label, list.rows[2].label, list.cursor), "YES,NO,2",
+       "facility forfeit: the page's YES / NO window, NO under the cursor")
+    check(list and says(list.title, "forfeit the match", "quit now"),
+          "facility forfeit: the cart's question in the box")
+    f.press("a")
+    check(s.runAsk ~= nil, "facility forfeit: no answer before the box has been seen")
+    f.tick(nil)
+    f.press("a")
+    eq(s.runAsk, nil, "facility forfeit: NO closes the question")
+    eq(s.phase, "choose", "facility forfeit: ...back on the action menu")
+    eq(#f.choices, 0, "facility forfeit: ...nothing filed")
+    -- B is NO too
+    s.commandIndex = 4
+    f.press("a")
+    f.tick(nil)
+    f.press("b")
+    eq(s.runAsk, nil, "facility forfeit: B answers NO")
+    eq(#f.choices, 0, "facility forfeit: ...nothing filed")
+    -- YES files this seat's RUN, and the next seat is still asked
+    s.commandIndex = 4
+    f.press("a")
+    f.tick(nil)
+    f.press("up")
+    eq(s.runAsk and s.runAsk.index, 1, "facility forfeit: UP to YES")
+    f.press("a")
+    eq(#f.choices, 1, "facility forfeit: YES files a command")
+    eq(f.choices[1] and joined(f.choices[1].action, f.choices[1].seat), "run,0",
+       "facility forfeit: ...this seat's RUN")
+    eq(s.mine, 2, "facility forfeit: the next battler is still asked")
+    eq(s.phase, "choose", "facility forfeit: ...on its action menu")
+    -- B takes it back, as any first command
+    f.press("b")
+    eq(f.choices[2] and joined(f.choices[2].action, f.choices[2].seat), "cancel,0",
+       "facility forfeit: B on seat 2 takes the forfeit back")
+    eq(s.mine, 1, "facility forfeit: ...seat 1 asked again")
+  end)
+
+  block("facility forfeit band", function()
+    local f = makeMulti({ party = { mon(4, 20), mon(16, 20) }, rules = { forfeit = true },
+                          acceptRun = true })
+    local s = f.screen
+    eq(f.settle(), "choose", "facility forfeit band: menu")
+    s.commandIndex = 4
+    f.press("a")
+    eq(s.runAsk and s.runAsk.role, "forfeit", "facility forfeit band: the arena asks too")
+    eq(s:gen3ClassicModel().list and s:gen3ClassicModel().list.cursor, 2,
+       "facility forfeit band: the same question either way")
+  end)
+
+  -- The verdict: the cart's "<PLAYER> forfeited the match!" once -- the
+  -- referee's own when it said it, else the screen's -- never co-op's lines.
+  block("facility forfeited", function()
+    for _, said in ipairs({ false, true }) do
+      local f = makeMulti({ party = { mon(4, 20), mon(16, 20) }, rules = { forfeit = true } })
+      local s = f.screen
+      eq(f.settle(), "choose", "facility forfeited: menu")
+      if said then
+        s:onEvent({ battle = "sd1", seq = 990, t = "msg", text = "ANN forfeited the match!" })
+      end
+      s:onOutcome({ battle = "sd1", reason = "forfeit", how = "forfeit", by = "a",
+                    winners = { "solo_foe" }, losers = { "solo_player" } })
+      for _ = 1, 200 do
+        f.tick(nil)
+        if s.finished then break end
+      end
+      local n = 0
+      for _, line in ipairs(f.seen) do
+        if line:find("forfeited the match", 1, true) then n = n + 1 end
+      end
+      eq(n, 1, "facility forfeited: the cart's line once (referee said it: " .. tostring(said) .. ")")
+      check(not contains(f.seen, "Someone gave up"), "facility forfeited: not co-op's line")
+      check(not contains(f.seen, "Someone ran away"), "facility forfeited: ...nor the run line")
+      eq(s.result, "loss", "facility forfeited: the forfeiting side lost")
+    end
+    -- a `run` outcome under the forfeit rule is the same forfeit (a referee
+    -- that names no `how`)
+    withCart(function()
+      local f = makeMulti({ party = { mon(4, 20), mon(16, 20) }, rules = { forfeit = true } })
+      local s = f.screen
+      eq(f.settle(), "choose", "facility forfeited: menu")
+      s:onOutcome({ battle = "sd1", reason = "run", winners = { "solo_foe" }, losers = { "solo_player" } })
+      for _ = 1, 200 do
+        f.tick(nil)
+        if s.finished then break end
+      end
+      check(contains(f.seen, "ANN FORFEITED THE MATCH!"), "facility forfeited: STRINGID_FORFEITEDMATCH")
+    end)
+  end)
+
+  -- No rules: the lone double's BAG and RUN as they were.
+  block("facility off", function()
+    local f = makeFight({ party = { mon(4, 20), mon(16, 20) }, bag = { { 13, 2 } } })
+    local s = f.screen
+    eq(f.settle(), "choose", "facility off: menu")
+    check(not s:bagRefused3() and not s:forfeits3(), "facility off: no rules, no facility prompt")
+    s.commandIndex = 2
+    f.press("a")
+    eq(s.phase, "item", "facility off: BAG opens the bag")
+    f.press("b")
+    s.phase = "choose"
+    s.commandIndex = 4
+    f.press("a")
+    eq(s.runAsk, nil, "facility off: RUN asks nothing")
+    f.tick(nil)
+    check(says(s.shown, "No! There's no"), "facility off: ...it is refused, as a trainer's RUN is")
+  end)
+
+  -- The fight's own theme (the engine's `opts.song`, a hall's): played at the
+  -- open in place of the trainer's, and none without one.
+  block("song", function()
+    local function playedSongs()
+      local out = {}
+      for _, call in ipairs(audioCalls) do
+        if call[1] == "playSong" then out[#out + 1] = tostring(call[2]) end
+      end
+      return table.concat(out, ",")
+    end
+    for i = #audioCalls, 1, -1 do audioCalls[i] = nil end
+    local f = makeMulti({ party = { mon(4, 20), mon(16, 20) }, song = 444 })
+    eq(f.screen.song3, 444, "song: the screen keeps the fight's theme")
+    check(playedSongs():find("444", 1, true) ~= nil, "song: ...and opens on it (" .. playedSongs() .. ")")
+    for i = #audioCalls, 1, -1 do audioCalls[i] = nil end
+    local g = makeMulti({ party = { mon(4, 20), mon(16, 20) } })
+    eq(g.screen.song3, nil, "song: none handed, none kept")
+    check(playedSongs():find("444", 1, true) == nil, "song: ...the ordinary theme")
+  end)
+
+  -- Co-op never reads them: the rules are a solo double's.
+  block("facility co-op", function()
+    local f = makeCoop({ party = { mon(4, 20) }, partnerParty = { mon(16, 20) } })
+    local s = f.screen
+    s.rules3 = { bag = false, forfeit = true }
+    check(not s:bagRefused3(), "facility co-op: a co-op fight's BAG is never refused by rules")
+    check(not s:forfeits3(), "facility co-op: ...nor its RUN a forfeit")
+    eq(s:forfeitList3(), nil, "facility co-op: no forfeit window")
+    eq(s:gen3Figures3({ allies = {} }), nil, "facility co-op: no solo figures")
+    eq(s:seatTrainer3(3), nil, "facility co-op: no computer trainer seats in its sense")
+    eq(s:isPartnerSeat3(2), false, "facility co-op: the co-op partner is no NPC partner")
+    s.rules3 = nil
+  end)
 end
 
 -- ------------------------------------------------------------------

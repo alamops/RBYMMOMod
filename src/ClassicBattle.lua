@@ -1067,6 +1067,9 @@ end
 --   M.gen3PreviewWash(startY, n) -> the wash n frames into one preview fade
 --       (0..16 towards white) and the fade's whole length in frames (pure).
 --   M.gen3CommandLabel(idOrLabel) -> the cart's own word for a command.
+--   M.gen3YesNoLabels() -> the cart's two answers ({ "YES", "NO" } in its
+--       own words, gText_BattleYesNoChoice).
+--   M.gen3YesNoLayout() -> the YES / NO window's rects (pure).
 --   M.G3 -> the geometry constants; M.G3D -> the double screen's.
 --
 -- `view` (every field optional unless marked):
@@ -1116,6 +1119,20 @@ end
 --                   "sunny" too): the arena's weather painter over the field
 --   evolveFront, evolveFlash   a bench evolution: a front pic mid-field
 --   frame           an animation clock (60/s); else the state's, else time
+--   voiceover       true while Oak's lines are up (FireRed / LeafGreen's
+--                   first battle): the field darkens halfway to black and
+--                   the line prints in the voice-over frame, dark ink on the
+--                   dialogue window, in place of the battle textbox (pret
+--                   PrintOakTextWithMainBgDarkened, B_WIN_OAK_OLD_MAN)
+--   voiceoverLit    "foe" | "ally" -- under some of his lines the cart lights
+--                   one healthbox again over the darkened field (singles)
+--   yesNo           { cursor = 1 | 2 } -- a yes / no is up: `message` stays
+--                   in the textbox and the YES / NO window opens at its
+--                   right (pret PlayerHandleYesNoBox, YESNOBOX_X_Y), the
+--                   cursor on YES (1) or NO (2)
+--   foe.sprite / foe.name   a Pokémon Tower GHOST is the caller's: the
+--                   silhouette as `sprite`, gText_Ghost as `name`, no
+--                   `gender` and `caught` false (MediatedBattle veilSeat3)
 --   double          a lone trainer's double battle, in place of foe / ally /
 --                   the strips (contract C4):
 --                     foes   = { [1] = seat | nil, [2] = seat | nil } --
@@ -1172,6 +1189,19 @@ M.G3 = {
   LIST_TX = 15, LIST_TY = 1, LIST_TW = 13, LIST_TH = 10, LIST_ROWS = 5,
   PARTY_ROWS = 5, PARTY_ROW_H = 24, PARTY_LIST_X = 84, PARTY_LIST_Y = 8,
   PARTY_PIC_X = 8, PARTY_PIC_Y = 8, PARTY_TITLE_Y = 138,
+  -- The YES / NO window, as Emerald -- the cart whose facilities ask it --
+  -- lays it: HandleBattleWindow's YESNOBOX_X_Y frame (tiles 24..29 x 8..13,
+  -- drawn here as the std frame around tiles 25..28 x 9..12), the answers in
+  -- B_WIN_YESNO (pokeemerald battle_bg.c:273, tiles 26,9 3x4) a row of 16
+  -- apart, the arrow on tile 25 ahead of them (BattleCreateYesNoCursorAt,
+  -- battle_script_commands.c:10200).
+  YESNO_TX = 25, YESNO_TY = 9, YESNO_TW = 4, YESNO_TH = 4,
+  YESNO_TEXT_X = 208, YESNO_TEXT_Y = 72, YESNO_CURSOR_X = 200, YESNO_PITCH = 16,
+  -- Oak's voice-over: the battle BGs fade 8/16 of the way to black under it
+  -- (PrintOakTextWithMainBgDarkened's BeginNormalPaletteFade 0 -> 8), and the
+  -- line prints in B_WIN_OAK_OLD_MAN (battle_bg.c:359, tiles 2,15 26x4 -- the
+  -- dialogue window's rect) inside BtlCtrl_DrawVoiceoverMessageFrame's frame.
+  VOICEOVER_DIM = 0.5, VOICEOVER_X = 16, VOICEOVER_Y = 120,
 }
 local G = M.G3
 
@@ -1463,6 +1493,44 @@ function M.gen3CommandLabel(label)
   local slot = COMMAND_SLOT[key]
   if not slot then return tostring(label or "") end
   return cartMenuLabels()[slot] or tostring(label)
+end
+
+-- The battle's YES / NO, the way PlayerHandleYesNoBox prints it
+-- (gText_BattleYesNoChoice, "YES\nNO"), broken on its newline -- the cart's
+-- words when its text is reachable, else the two plain ones.
+local yesNoCache = nil
+function M.gen3YesNoLabels()
+  if yesNoCache then return yesNoCache end
+  local labels = {}
+  local text = romPlain("gText_BattleYesNoChoice", nil)
+  if type(text) == "string" then
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+      local word = line:gsub("^%s+", ""):gsub("%s+$", "")
+      if word ~= "" then labels[#labels + 1] = word end
+    end
+  end
+  if #labels ~= 2 then labels = { "YES", "NO" } end
+  -- Cached only once the cart has answered, so a first ask before the cache
+  -- mounted does not pin the fallback for the session.
+  if text then yesNoCache = labels end
+  return labels
+end
+
+-- The YES / NO window's rects in pixels: `frame` (the std frame around the
+-- text window), `rows` (each answer's text origin) and `cursor` (the arrow's
+-- origin for each row).  Pure.
+function M.gen3YesNoLayout()
+  local rows, cursor = {}, {}
+  for i = 1, 2 do
+    local y = G.YESNO_TEXT_Y + (i - 1) * G.YESNO_PITCH
+    rows[i] = { x = G.YESNO_TEXT_X, y = y }
+    cursor[i] = { x = G.YESNO_CURSOR_X, y = y }
+  end
+  return {
+    frame = { x = (G.YESNO_TX - 1) * 8, y = (G.YESNO_TY - 1) * 8,
+              w = (G.YESNO_TW + 2) * 8, h = (G.YESNO_TH + 2) * 8 },
+    rows = rows, cursor = cursor,
+  }
 end
 
 -- ------- the page's geometry (pure)
@@ -2188,6 +2256,66 @@ local function drawListWindow(gfx, C, F, list)
   drawMessage(F, list.title or "", false)
 end
 
+-- The YES / NO window over the right of the field, its question still in the
+-- textbox below (pret PlayerHandleYesNoBox / BattleCreateYesNoCursorAt).
+local function drawYesNo(gfx, F, yesNo)
+  local Gen3Ui = nil
+  pcall(function() Gen3Ui = need("Gen3Ui") end)
+  local box = M.gen3YesNoLayout()
+  if Gen3Ui and type(Gen3Ui.frame) == "function" then
+    Gen3Ui.frame(G.YESNO_TX, G.YESNO_TY, G.YESNO_TW, G.YESNO_TH)
+  else
+    gfx.setColor(1, 1, 1, 1)
+    gfx.rectangle("fill", box.frame.x, box.frame.y, box.frame.w, box.frame.h)
+  end
+  local normal = F.COLOR and F.COLOR.NORMAL
+  local labels = M.gen3YesNoLabels()
+  for i = 1, 2 do
+    drawText(F, labels[i] or "", box.rows[i].x, box.rows[i].y, { colors = normal })
+  end
+  local cursor = (type(yesNo) == "table" and tonumber(yesNo.cursor) == 2) and 2 or 1
+  drawCursor(F, box.cursor[cursor].x, box.cursor[cursor].y, normal)
+  gfx.setColor(1, 1, 1, 1)
+end
+
+-- Oak's line in the voice-over frame (B_WIN_OAK_OLD_MAN, the dialogue
+-- window's rect): dark ink on the cart's dialogue window in place of the
+-- battle textbox, two lines at most, the ▼ under a page still being read.
+local function drawVoiceover(gfx, F, text, hint)
+  local Gen3Ui = nil
+  pcall(function() Gen3Ui = need("Gen3Ui") end)
+  if Gen3Ui and type(Gen3Ui.dialogueFrame) == "function" then
+    Gen3Ui.dialogueFrame()
+  else
+    gfx.setColor(1, 1, 1, 1)
+    gfx.rectangle("fill", 8, G.PANEL_Y + 2, G.W - 16, G.PANEL_H - 4)
+  end
+  text = printable(text)
+  if text == "" then return end
+  local wrapped = text
+  if type(F.wrap) == "function" then
+    local ok, w = pcall(F.wrap, text, G.MSG_W)
+    if ok and type(w) == "string" then wrapped = w end
+  end
+  local lines = {}
+  for line in (wrapped .. "\n"):gmatch("(.-)\n") do
+    lines[#lines + 1] = line
+    if #lines >= 2 then break end
+  end
+  local colors = F.COLOR and F.COLOR.NORMAL
+  local pitch = tonumber(F.LINE_PITCH) or 15
+  local endX = G.VOICEOVER_X
+  for i, line in ipairs(lines) do
+    drawText(F, line, G.VOICEOVER_X, G.VOICEOVER_Y + (i - 1) * (pitch + 1), { colors = colors })
+    if i == #lines then endX = G.VOICEOVER_X + measure(F, line) end
+  end
+  if hint and F.CHAR_DOWN_ARROW and type(F.drawGlyph) == "function" then
+    pcall(F.drawGlyph, F.CHAR_DOWN_ARROW, math.min(endX + 2, 228),
+      G.VOICEOVER_Y + (#lines - 1) * (pitch + 1), { colors = colors })
+  end
+  gfx.setColor(1, 1, 1, 1)
+end
+
 -- "12/34" (a row's `right`) -> 12, 34.
 local function hpOfRow(row)
   local hp, maxHp = tonumber(row.hp), tonumber(row.maxHp)
@@ -2639,6 +2767,27 @@ function M.drawGen3(view, state)
       else
         drawSingleField(gfx, C, F, BF, view, frame)
       end
+      -- Oak's voice-over: the field darkened under his line, which prints
+      -- in its own frame in place of the textbox.
+      if view.voiceover then
+        gfx.setColor(0, 0, 0, G.VOICEOVER_DIM)
+        gfx.rectangle("fill", 0, 0, G.W, G.PANEL_Y)
+        gfx.setColor(1, 1, 1, 1)
+        -- ...and the one healthbox the cart lights again under this line
+        -- (`voiceoverLit`, DoLoadHealthboxPalsForLevelUp's fade back).
+        if not double then
+          if view.voiceoverLit == "foe" and type(view.foe) == "table" then
+            drawFoeBox(gfx, C, F, view.foe)
+          elseif view.voiceoverLit == "ally" and type(view.ally) == "table" then
+            drawAllyBox(gfx, C, F, view.ally)
+          end
+        end
+        if not (type(list) == "table" or view.commands or view.moves) then
+          pcall(C.drawPanel, "none")
+          drawVoiceover(gfx, F, view.message, view.hint == true and not view.hold)
+          return
+        end
+      end
 
       -- the textbox
       if type(list) == "table" then
@@ -2651,7 +2800,11 @@ function M.drawGen3(view, state)
       if double and view.phase == "target" and view.moves then mode = "moves" end
       pcall(C.drawPanel, mode)
       pcall(C.drawMenuFrames, mode)
-      if mode == "menu" then
+      if view.yesNo and mode == "none" then
+        -- a yes / no: the question stays in the textbox, the answers beside it
+        drawMessage(F, view.message, false)
+        drawYesNo(gfx, F, view.yesNo)
+      elseif mode == "menu" then
         drawCommands(C, F, view, rse)
       elseif mode == "moves" then
         drawMoves(C, F, view, rse)
