@@ -214,6 +214,19 @@ here must match `manifest.version`.
     - The move list shows each cart's PP Up cap.
   - **Running in co-op.** A wild fight in co-op now rolls the cart's escape
     odds, so "Can't escape!" can happen.
+  - **Catching.**
+    - Gold uses its own catch formula (pokegold's): the ball table includes
+      Kurt's balls, with the cart's own bugs in them, plus Gold's HP
+      arithmetic and wobble checks.
+    - Red's GREAT BALL and ULTRA BALL no longer catch far more often than
+      they should.
+  - **Items that won't do anything** (a POTION at full HP, a cure with no
+    matching status, an X ACCURACY already in effect) are refused as on
+    the cart: the bag and the turn are kept.
+  - **STRUGGLE** comes up when the only move with PP left is the disabled
+    one.
+  - **Knockouts:** a fight against the computer that ends with both last
+    POKéMON fainting is a loss, as on the cart.
   - **How it works.**
     - The referees' random numbers take the generator's high bits.
     - Sheets carry each mon's base stats, DVs, stat exp, PP Ups and (on Gold)
@@ -412,6 +425,17 @@ here must match `manifest.version`.
 - **Gold's high-crit moves were never high-crit in a refereed fight.**
   Gold's high-crit list is now the cart's: KARATE CHOP, RAZOR WIND, RAZOR
   LEAF, CRABHAMMER, SLASH, AEROBLAST and CROSS CHOP.
+- **Red's evasion was inverted.** DOUBLE TEAM and MINIMIZE made the user
+  easier to hit. Raised evasion now lowers the hit chance, as on the cart.
+- **Red: confusion survived a switch-out.** Switching now clears it (and a
+  pending recharge), as the cart's send-out does.
+- **Red: poison, burn and LEECH SEED ticked at the end of the turn.** They
+  now hurt right after each POKéMON's own move. A knockout ends the turn
+  before the slower one moves.
+- **Gold: a forged level-up could raise a POKéMON's stats mid-fight in a
+  fight between players.** No cart levels a POKéMON in a link battle; the
+  hubs now ignore those messages in PvP, and the referee checks every
+  level-up it receives.
 - **A LEECH SEED knockout froze Red and Gold fights.** When the drain fainted
   the seeded POKéMON, the referee read the seed it had just cleared and
   stopped mid-turn. The fight now goes on.

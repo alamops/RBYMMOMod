@@ -119,6 +119,23 @@ Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICU
 - **`IgnoredOrders2Text`** (a disobedient move landing on a charge move) isn't emitted.
 - **Bag text:** the item lines (the use line, ball wobbles, "It won't have any effect.", the party-menu cure lines) are the referee's own.
 
+### 10b. Found in the final review, left for later
+
+**Red:**
+- **A self-KO with a residual:** a mon whose own move took it to 0 HP while poisoned or seeded still runs HandlePoisonBurnLeechSeed on the cart. The referee faints it inside its slot.
+- **ETHER on a fainted mon:** the cart allows it; the mod refuses it (`itemFailsOnFainted`, older than this work).
+- **Evolution after a RUN or a catch:** pokered skips the after-battle evolution whenever `wBattleResult` ≠ 0; the client still offers it after a run or a catch.
+
+**Both:**
+- **Items on a benched mon:** a POTION, REVIVE or HP UP used on a benched mon emits `drain` on the fighter's seat with no `mon`, so the client applies it to the active mon's sheet until the next sync. The fix is a `mon` index on `drain` (Wire, sanitize and both referees) routed by the client.
+- **Victory fanfare after a catch:** neither cart plays it; the client does.
+
+**Gold:**
+- **A second ETHER under Transform** on the same slot can be sent and then silently refused: the own-move PP only reaches the client when the overlay drops.
+- **LURE BALL and HEAVY BALL** need the fight's battle type and the species' weight on the wire; until then they act as ×1. Also not modelled: Crystal's Heavy Ball dex-bank bug, a LOVE BALL on a transformed wild mon (the cart reads the copied DVs), and FRIEND BALL's happiness, which is set client-side.
+- **HEAL POWDER** has no battle effect entry.
+- **A mid-fight learn and Disable / Encore:** a learn rewrites the move list in place, so a `disable` / `encore` index can point at the new move.
+
 ### 11. The random-number generator
 
 The referees use their own LCG (Numerical Recipes constants, high bits), not the carts' `Random` (rDIV plus an add-with-carry). Every draw point and every byte→outcome mapping follows pret; the byte values themselves can't, because the seed is the referee's. This is by design: the referee's seed is what makes a fight replayable and the Lua and Node twins provably identical.

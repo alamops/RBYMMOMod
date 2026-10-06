@@ -211,3 +211,6 @@ These are differences in Gen1Recomp's own battle code from pret, recorded for an
 - **Baton Pass:** (~2660) prints "%s passed the baton!", a line pret doesn't have, and passes to the first living member.
 - **Curse:** the can't-raise line reads "ATTACK" where pret prints "ABILITY".
 - **Time of day:** `BattleState.startEvolutions` / `Game2:729` call `Palettes.clockDaytime()` with no hour, reading the host clock without the save's RTC base (the engine's own comment says callers should pass the hour).
+- **Catching:** `src/battle/gen2/Catching.lua` keeps the HP step and status bonus for the Level Ball, catches only on `roll < rate` (the cart also catches on equal), floors the ball rate at 1 before the HP step, doesn't wrap B−C to a byte or take the quotient's low byte, and avoids the cart's divide hang with a floor on the tripled max HP.
+- **Red items:** `src/inventory/ItemEffects.lua:383-385` restores PP only when `pp < maxPP`, so it never brings a wrapped 63 back down and has no MAX ETHER whole-byte compare.
+- **Evolution after a loss:** `src/battle/BattleState.lua:5743-5748` (`finish`) runs `Evolution.checkParty` whatever the result; pokered `EndOfBattle` skips it whenever `wBattleResult` ≠ 0.
