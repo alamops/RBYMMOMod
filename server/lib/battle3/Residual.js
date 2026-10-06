@@ -244,7 +244,10 @@ Bm._tickWeather = function _tickWeather(order) {
   if (kind !== 'SAND' && kind !== 'HAIL') return;
   if (!truthy(this.weather())) return;
   for (const b of order) {
-    if (b.mon.hp > 0 && !Field.weatherImmune(b, kind)) {
+    // pokefirered/src/battle_script_commands.c:7218 Cmd_weatherdamage: a veiled
+    // GHOST takes no chip (0 damage, so no line either).
+    const ghost = this.ghost === 'veiled' && b.side === 'b';
+    if (b.mon.hp > 0 && !Field.weatherImmune(b, kind) && !ghost) {
       this.say(this.nameOf(b) + (kind === 'SAND' ? ' is buffeted by the sandstorm!' : ' is pelted by HAIL!'));
       this.loseHp(b, Field.chip(b.mon.maxHp));
       this._faintSweep();

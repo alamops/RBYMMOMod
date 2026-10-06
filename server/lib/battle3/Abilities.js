@@ -230,6 +230,9 @@ const WEATHER_ABILITY = {
 M.switchIn = function switchIn(B, b) {
   if (!truthy(b) || int(b.mon.hp, 0) <= 0) return false;
   const ab = b.ability;
+  // pokefirered/src/battle_util.c:1698: in a veiled GHOST fight Intimidate and
+  // Trace do nothing, either side (Turn.create `ghost = 'veiled'`).
+  if (B.ghost === 'veiled' && (ab === 'INTIMIDATE' || ab === 'TRACE')) return false;
   const key = truthy(ab) ? ab : '';
   const row = (typeof key === 'string' && own(WEATHER_ABILITY, key)) ? WEATHER_ABILITY[key] : null;
   if (row) {

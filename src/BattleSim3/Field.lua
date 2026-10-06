@@ -97,8 +97,10 @@ end
 -- pokefirered/src/battle_main.c:3399 GetWhoStrikesFirst's speed (engine
 -- speed_of, engine.lua:203): Swift Swim / Chlorophyll x2 in their weather, the
 -- Speed stage, badge 3 x110/100 floored (the battler's own trainer's, which only
--- side a carries against the computer -- Turn.BADGE_MODES; engine.lua:221),
--- Macho Brace halves, paralysis quarters, and Quick Claw makes it the maximum
+-- side a carries against the computer -- Turn.BADGE_MODES; engine.lua:221 --
+-- and not in a Frontier fight: the battler's `noSpeedBadge`, Turn.create
+-- `rules.boosts.speed = false`, pokeemerald battle_main.c:4640), Macho Brace
+-- halves, paralysis quarters, and Quick Claw makes it the maximum
 -- when this turn's random number falls under 0xFFFF * param / 100.  `weather` is
 -- already Cloud-Nine-filtered; `quickClawNumber` is the turn's roll(0, 65535), or
 -- nil when none was drawn.  Escape odds read the raw stat, not this (Turn.lua's
@@ -114,7 +116,7 @@ function M.speed(b, weather, quickClawNumber)
     mul = 2
   end
   spe = Damage.applyStage(spe * mul, b.stages and b.stages.spe)
-  if Damage.hasBadge(b, 3) then spe = floor(spe * 110 / 100) end
+  if Damage.hasBadge(b, 3) and not b.noSpeedBadge then spe = floor(spe * 110 / 100) end
   local mon = b.mon or {}
   local he = (int(mon.heldItem, 0) ~= 0) and int(mon.holdEffect, 0) or 0
   local param = int(mon.holdParam, 0)

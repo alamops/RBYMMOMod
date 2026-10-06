@@ -172,16 +172,30 @@ local function nm(B, b) return B:nameOf(b) end
 -- battle_script_commands.c:2619; Cmd_tryswapitems, :8801 -- pokeemerald's
 -- same two): an attacker on the opponent side (B_SIDE_OPPONENT, side b) may not
 -- take or swap the player's items unless the fight is link / recorded link /
--- e-reader / frontier (FRLG: battle tower) / secret base.  None of those is a
--- fight against the computer here, so the bar is Turn.BADGE_MODES (wild /
--- coop_wild / coop_npc), read off side a's `badgeRules` -- true on its fighters
--- exactly there (Turn requires this module, so it cannot read the set).  1v1 /
--- coop_pvp are link fights: either side may.  Trainer Hill / Trainer Tower,
--- which bar everyone, are never mediated.
+-- e-reader / frontier (FRLG: battle tower) / secret base.  Against the
+-- computer the bar is Turn.BADGE_MODES (wild / coop_wild / coop_npc), read off
+-- side a's `badgeRules` -- true on its fighters exactly there (Turn requires
+-- this module, so it cannot read the set).  1v1 / coop_pvp are link fights:
+-- either side may.  A facility says which it is (Turn.create `rules.theft`):
+-- "foe" -- e-reader / frontier / secret base, the foe may -- and "none" --
+-- Trainer Hill / FRLG Trainer Tower, whose check comes first and bars everyone
+-- (pokeemerald :2740 / :9193, pokefirered :2612 / :8801).
 local function foeItemsBarred(B, user)
+  local theft = B.rules and B.rules.theft
+  if theft == "none" then return true end
+  if theft == "foe" then return false end
   if user.side ~= "b" then return false end
   local first = B.bySide and B.bySide.a and B.bySide.a[1]
   return first ~= nil and first.badgeRules == true
+end
+
+-- Whether a knocked-off item still bars Thief / Covet / Trick: the cart lifts
+-- the check in the fights whose items the foe may take (link, e-reader,
+-- frontier, secret base, pokeemerald battle_script_commands.c:2756 / :9203);
+-- link fights keep it here (the referee writes items back like a non-link
+-- fight; see STEAL_ITEM), `rules.theft = "foe"` lifts it as the cart does.
+local function knockedOffBars(B)
+  return not (B.rules and B.rules.theft == "foe")
 end
 
 -- ------------------------------------------------------------------
@@ -249,6 +263,14 @@ function M.changeStat(B, b, stat, delta, flags)
                      text = text })
   end
   if not flags.noMsg then B:say(text) end
+  -- Oak's flag 2 (pokefirered/src/battle_controller_oak_old_man.c:1769): the
+  -- first STRINGID_DEFENDERSSTATFELL the player's controller prints -- a fall
+  -- printed for a foe while a side-a battler's action runs (`B.mover`, the
+  -- attacker whose controller prints it).
+  if delta < 0 and not flags.noMsg and not flags.user and b.side == "b"
+      and B.mover and B.mover.side == "a" and B.mover ~= b then
+    B:_lesson("stat")
+  end
   return "worked"
 end
 
@@ -429,7 +451,7 @@ function M.set(C, eff, primary, certain, affectsUser)
     -- this check only in link fights; this one writes items back like a
     -- non-link fight, so the check stands.
     if foeItemsBarred(B, user) then return false end
-    if user.mon.knockedOff then return false end
+    if user.mon.knockedOff and knockedOffBars(B) then return false end
     local tItem = int(target.mon.heldItem, 0)
     if tItem ~= 0 and target.ability == "STICKY_HOLD" then
       B:emitAbility(target)
@@ -442,6 +464,10 @@ function M.set(C, eff, primary, certain, affectsUser)
     end
     local row = Items.rowOf(target)
     local lbl = B:itemLabel(target)
+    -- REQUEST_HELDITEM_BATTLE writes the stolen item to the thief's party
+    -- slot (pokeemerald battle_script_commands.c:2790), over an item Knock Off
+    -- left there -- reachable only where the knocked-off check is lifted.
+    user.mon.knockedOff = nil
     Items.give(user, row)
     Items.give(target, nil)
     -- :2668: the robbed battler's Choice Band lock goes with the band
@@ -1571,8 +1597,9 @@ H[E.ROAR] = function(C)
   end
   C:attackAnimation()
   if B:isWild() then
-    -- pokefirered/data/battle_scripts_1.s:3283: blown out of a wild fight
-    B:blownAway(t)
+    -- pokefirered/data/battle_scripts_1.s:3283: blown out of a wild fight --
+    -- the user's side ended it (Turn.lua `blownAway`, outcome().by)
+    B:blownAway(t, user)
     return
   end
   local slot = candidates[B:roll(1, #candidates)]
@@ -1775,7 +1802,7 @@ H[E.TRICK] = function(C)
   if sub(t) then return C:fail() end
   if not C:accuracyCheck("normal", true) then return end
   if foeItemsBarred(B, user) then return C:fail() end
-  if user.mon.knockedOff or t.mon.knockedOff then return C:fail() end
+  if (user.mon.knockedOff or t.mon.knockedOff) and knockedOffBars(B) then return C:fail() end
   local ui, ti = int(user.mon.heldItem, 0), int(t.mon.heldItem, 0)
   if (ui == 0 and ti == 0) or ui == Items.ITEM_ENIGMA_BERRY or ti == Items.ITEM_ENIGMA_BERRY
       or Items.isMail(ui) or Items.isMail(ti) then
@@ -1787,6 +1814,9 @@ H[E.TRICK] = function(C)
   end
   local urow, trow = Items.rowOf(user), Items.rowOf(t)
   local ulbl, tlbl = B:itemLabel(user), B:itemLabel(t)
+  -- Both party slots are written (REQUEST_HELDITEM_BATTLE, :9248), over any
+  -- item Knock Off left there (only where the knocked-off check is lifted).
+  user.mon.knockedOff, t.mon.knockedOff = nil, nil
   Items.give(user, trow)
   Items.give(t, urow)
   -- :8862: both Choice Band locks are lifted

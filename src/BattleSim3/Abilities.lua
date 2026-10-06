@@ -153,6 +153,10 @@ local WEATHER_ABILITY = {
 function M.switchIn(B, b)
   if not b or int(b.mon.hp, 0) <= 0 then return false end
   local ab = b.ability
+  -- pokefirered/src/battle_util.c:1698: in a veiled GHOST fight Intimidate and
+  -- Trace do nothing, either side (Turn.create `ghost = "veiled"`; the engine's
+  -- Abilities.ghostBlocks).
+  if B.ghost == "veiled" and (ab == "INTIMIDATE" or ab == "TRACE") then return false end
   local row = WEATHER_ABILITY[ab or ""]
   if row then
     -- An ability's weather is permanent (weatherTurns 0); the same permanent

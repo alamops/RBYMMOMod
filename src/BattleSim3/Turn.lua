@@ -17,19 +17,29 @@
 -- `rng:roll(lo, hi)` (Rng.lua: top bits; a one-value range draws nothing), and
 -- the Node twin must draw at exactly these points, in this order:
 --
+--   0. a computer wild seat's choice, when it is asked (`autoPick` / the clock)
+--      under `wildPick = "cart"` or a side entry's `ai` (`_cartWildChoice`):
+--      the cart's random move roll(0,3) per draw until a usable slot, then
+--      roll(0,1) for the target in a fight with two side-a seats (n-1 for
+--      more); the AI's pick roll(0,n-1) over its best-scored slots.  None for
+--      Struggle, an Encore, a lock-in, or a flee;
 --   1. battle start: one roll(0,255) per speed-tied group of the switch-in order;
 --      Trace's pick between two or more traceable foes, roll(0, n-1);
 --   2. turn start: Quick Claw roll(0,65535) -- only when two or more seats
---      fight and a fighting mon holds QUICK_CLAW; one roll(0,255) per group of
---      fighters tied on both priority and speed;
+--      fight (a wild seat's flee counts) and one of them holds QUICK_CLAW; one
+--      roll(0,255) per group of them tied on both priority and speed;
 --   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon
---      (no draw for Smoke Ball, Run Away or the faster runner);
+--      (no draw for Smoke Ball, Run Away, the faster runner or a veiled
+--      GHOST's foe); under `rules.pyramidRun` every runner but a Smoke Ball
+--      holder draws roll(0,255), Run Away too.  A wild seat's flee draws
+--      nothing (it runs in step 6's order);
 --   4. switches (and, interleaved in battler order, the bag items that are not
 --      balls -- those draw nothing): any foe Pursuit aimed at the leaving seat
 --      draws as a move, minus the canceller's and the accuracy draws;
 --   5. bag: balls (after other items, fastest thrower first) draw up to four
---      roll(0,65535) (none for a Master Ball or odds > 254);
---   6. moves, in speed order, each drawing only at the points it reaches:
+--      roll(0,65535) (none for a Master Ball, odds > 254, or a GHOST's dodge);
+--   6. moves -- and a wild seat's flee, which draws nothing -- in speed order,
+--      each drawing only at the points it reaches:
 --      canceller (freeze roll(0,4); a sleeper with no counter roll(0,3); confusion
 --      roll(0,1) [+ self-hit roll(85,100) + Focus Band roll(0,99) when held];
 --      paralysis roll(0,3); infatuation roll(0,1)); obedience, after the PP
@@ -42,9 +52,12 @@
 --      roll(0,99)] or one roll(0,3) for the loaf line; random target over two or
 --      more living foes roll(0,n-1); Metronome roll(1,511) until a pool move
 --      (or roll(1,n) after 64 misses); Sleep Talk / Assist roll(1,n); Protect
---      streak roll(0,2^k-1); Magnitude roll(0,99); accuracy roll(1,100);
+--      streak roll(0,2^k-1); Magnitude roll(0,99); accuracy roll(1,100) (none
+--      for side a under `firstBattle = "oak"` before its lesson, below);
 --      multi-hit roll(0,3) (+ roll(0,3)); per strike Psywave roll(0,10), crit
---      roll(0,n-1) (not vs Battle / Shell Armor, not for fixed damage), damage
+--      roll(0,n-1) (not vs Battle / Shell Armor, not for fixed damage, not
+--      under `firstBattle = "birch"`; under "oak" drawn and void until the
+--      `damage` lesson), damage
 --      roll(85,100), Present roll(0,255), Focus Band roll(0,99) (holder only),
 --      Beat Up's crit (not vs Battle / Shell Armor) + damage per party member;
 --      secondary roll(0,99) (not for certain effects); effect-internal draws
@@ -87,7 +100,11 @@
 --     speed (the cart's ENDTURN_ORDER), not BattleSim2's field order.
 --   * Running: 1v1 / coop_pvp concede; coop_npc refuses; wild modes run pret's
 --     TryRunFromBattle and a failure spends the turn; trapped runs and switches
---     are refused at submit.
+--     are refused at submit.  A wild seat's own `run` is the cart's opponent
+--     RUN instead (pokefirered/src/battle_main.c:4317 HandleAction_Run): a turn
+--     action sorted with the moves at priority 0, never refused at submit,
+--     stopped only by a partial trap or Mean Look / Block / Spider Web when it
+--     executes ("can't escape", the turn spent), else the fight ends `flee`.
 --   * Forced lock-in (no menu): recharge, a two-turn release, Bide, Thrash-type
 --     rampage, Uproar, Rollout.  A partial trap does not lock the victim.
 --   * Badge rules (docs/plans/gen3-badge-rules.md K1-K3): against the computer
@@ -100,7 +117,36 @@
 --     fight reports side a's coins as `outcome().payDay`).  King's Rock keeps the
 --     cart's battler-0 quirk.
 --   * Timeout / NPC auto-pick: BattleSim2's heuristic on Gen 3 ids; a Ghost's
---     CURSE goes unaimed, as the cart's AI files it.
+--     CURSE goes unaimed, as the cart's AI files it.  A wild seat picks as the
+--     cart's opponent controller does when the create options ask for it
+--     (`wildPick = "cart"`, a side entry's `ai`): `_cartWildChoice`.
+--   * How a fight ended (contract C3 of docs/plans/gen3-solo-remaining-
+--     fights.md): `outcome().how` is one of
+--     M.HOW -- ko, run (RUN, Smoke Ball, Run Away, Poke Doll / Fluffy Tail, a
+--     link concession), flee (a wild seat's own RUN), teleport (TELEPORT),
+--     roar (ROAR / WHIRLWIND out of a wild fight), catch, forfeit (RUN under
+--     `rules.forfeit`), judge (later: the Arena) -- absent for a disconnect or
+--     a timeout; `outcome().by` is the side ("a" | "b") whose action ended it
+--     (the KO side's winner; nil on a draw).  `reason` keeps its meaning.
+--   * The solo-only create options (none of them is ever on a hub's wire;
+--     absent, every fight is the one it always was):
+--       wildPick = "cart"            the cart's random wild move (above);
+--       firstBattle = "oak"|"birch"  the FireRed / LeafGreen lab rival
+--         (pokefirered/src/battle_script_commands.c:1007, :1200; `lesson`
+--         events at M.LESSONS) or Emerald's Birch rescue (pokeemerald
+--         battle_script_commands.c:1281 no crits, battle_main.c:4078 no RUN);
+--       ghost = "veiled"|"unveiled"  Pokemon Tower (wild modes only): veiled,
+--         every move of both sides is cancelled (battle_util.c:1451), RUN
+--         always works (battle_main.c:4252), no sand / hail chip on the ghost
+--         (battle_script_commands.c:7218), no Intimidate / Trace
+--         (battle_util.c:1698); both, a ball is dodged and spent (:9473);
+--       rules = { bag, forfeit, exp, boosts = { damage, speed }, obedience,
+--         theft, soulDew, pyramidRun, pyramidBag } -- the facility rules
+--         (M.copyRules);
+--     and three side-entry fields: `ai = "roamer" | "firstBattle"` (a wild
+--     entry's AI script), `spare = true` (Steven: the side is down when every
+--     other entry is), `bagFrom = "<playerId>"` (spend another entry's bag:
+--     one pool, as a pair's A and B share A's items).
 --
 -- Nothing here raises.  Bad input is refused with nil-plus-reason from `create`
 -- or a plain `false` from `submitChoice`.
@@ -165,6 +211,55 @@ M.STATUS_TO_WIRE = M.STATUS_FROM_WIRE
 
 local ACTIONS = { fight = true, item = true, switch = true, run = true, cancel = true }
 
+-- Contract C3 (docs/plans/gen3-solo-remaining-fights.md): `outcome().how`.
+-- `balls` (out of Safari Balls) and `judge` (the Arena) belong to later waves;
+-- they are named here so the vocabulary is closed once.
+M.HOW = {
+  ko = true, run = true, flee = true, teleport = true, roar = true, catch = true,
+  forfeit = true, balls = true, judge = true,
+}
+
+-- `firstBattle`: the FireRed / LeafGreen rival in Oak's lab (BATTLE_TYPE_FIRST_
+-- BATTLE with the Oak / Old Man controller) and Emerald's rescue of Birch.
+M.FIRST_BATTLES = { oak = true, birch = true }
+
+-- PROF. OAK's eight lesson points, the `lesson` event's ids (`_lesson`), each
+-- the cart's own moment (pokefirered/src/battle_controller_oak_old_man.c,
+-- battle_controller_opponent.c:304, party_menu.c:5834):
+--   intro   "Oh, for Pete's sake..." -- before the first action menu
+--   damage  "Inflicting damage on the foe..." -- the foe's HP bar first moves
+--           (flag 1: from now on the player's moves can miss by power, crits
+--           count)
+--   stat    "Lowering the foe's stats..." -- the first "foe's X fell!" a
+--           side-a move prints (flag 2: the player's moves can miss)
+--   potion  "Keep your eyes on your POKeMON's HP..." -- the first POTION chosen
+--           (flag 4)
+--   party   the first party menu (flag 8): the referee sees it at the first
+--           filed switch or party-targeted bag item; a screen that opens the
+--           menu earlier says it then and ignores the repeat
+--   run     "No! There's no running away from a TRAINER..." -- every RUN
+--           (refused at submit; the cart keeps the action menu)
+--   win     "Hm! Excellent!..." -- after the prize line (the screen's)
+--   lose    "Hm... How disappointing..." -- after the rival's win text (a draw
+--           too: B_OUTCOME_DREW runs HandleEndTurn_BattleLost)
+-- Every id but `run` is spoken once a battle.
+M.LESSONS = { "intro", "damage", "stat", "potion", "party", "run", "win", "lose" }
+M.ITEM_POTION = 13   -- pret ITEM_POTION (the Oak controller's flag-4 test)
+
+-- `ghost` (FireRed / LeafGreen Pokemon Tower, BATTLE_TYPE_GHOST): without the
+-- SILPH SCOPE the GHOST is veiled; with it, unveiled.
+M.GHOSTS = { veiled = true, unveiled = true }
+
+-- A wild side entry's AI script: AI_Roaming (roamers) or AI_FirstBattle
+-- (Emerald's Birch rescue) -- the only wild battles the cart's opponent
+-- controller runs an AI for (pokefirered/src/battle_controller_opponent.c:1355).
+M.WILD_AI = { roamer = true, firstBattle = true }
+
+-- How many `Random() & 3` draws `_cartWildChoice` makes before it settles on
+-- the first usable slot: the cart loops until it hits one; a referee never
+-- freezes.  Unreachable with a working generator (each draw is >= 1/4 usable).
+M.WILD_PICK_CAP = 256
+
 local E = Effects.E
 local T = Move.TARGET
 
@@ -193,6 +288,11 @@ local function runEndsBattle(mode)
   return isWildMode(mode) or mode == "1v1" or mode == "coop_pvp"
 end
 M.runEndsBattle = runEndsBattle
+
+-- One bit of a pret MOVE_TARGET_* byte.
+local function hasBit(value, bit)
+  return floor(value / bit) % 2 == 1
+end
 
 -- ------------------------------------------------------------------
 -- coercion (the C4 sheet)
@@ -374,6 +474,54 @@ local function copyBag(raw)
   return out, names
 end
 
+-- The facility rules (contract C3 of docs/plans/gen3-solo-remaining-fights.md),
+-- normalised: a key absent, or holding anything but the value below, is
+-- today's behaviour.  The carts these rules come from:
+--   bag = false        no item from the bag, either side (pokeemerald battle_
+--                      main.c:4221 FRONTIER_NO_PYRAMID | EREADER, "Items can't
+--                      be used now." -- the screen's line); refused at submit
+--   forfeit = true     a RUN in a trainer fight is a forfeit (pokeemerald
+--                      battle_main.c:4321 asks, battle_util.c:448 always gets
+--                      away, :5058 B_OUTCOME_FORFEITED): `how = "forfeit"`, the
+--                      runner's side loses, traps or not
+--   exp = false        no EXP (battle_script_commands.c:3270): no `exp` facts
+--   boosts = { damage = false, speed = false } (boosts = false: both) -- no
+--                      badge stat boosts (pokemon.c:3407 / battle_main.c:4640)
+--   obedience = false  no disobedience but the Mew / Deoxys rule
+--                      (battle_util.c:3924, inside the fateful arm)
+--   theft = "foe"      the foe may Thief / Covet / Trick and the knocked-off
+--                      check is lifted (FRONTIER, EREADER, SECRET_BASE,
+--                      battle_script_commands.c:2746 / :9192); "none": nobody
+--                      may (TRAINER_HILL, FRLG TRAINER_TOWER, :2740 / :9193)
+--   soulDew = false    SOUL DEW inert (pokemon.c:3187, FRONTIER)
+--   pyramidRun = n     the Battle Pyramid's run multiplier: a wild RUN, Run
+--                      Away included, always rolls speed * n / foe speed + 30
+--                      * tries (pokeemerald battle_util.c:427-458)
+--   pyramidBag = true  the bag uploaded is the Pyramid bag: nothing changes
+--                      here (the client writes the spends back)
+local function copyRules(raw)
+  local r = {}
+  if type(raw) ~= "table" then return r end
+  r.noBag = (raw.bag == false) or nil
+  r.forfeit = (raw.forfeit == true) or nil
+  r.noExp = (raw.exp == false) or nil
+  local boosts = raw.boosts
+  if boosts == false then
+    r.noDamageBoost, r.noSpeedBoost = true, true
+  elseif type(boosts) == "table" then
+    r.noDamageBoost = (boosts.damage == false) or nil
+    r.noSpeedBoost = (boosts.speed == false) or nil
+  end
+  r.noObedience = (raw.obedience == false) or nil
+  if raw.theft == "foe" or raw.theft == "none" then r.theft = raw.theft end
+  r.noSoulDew = (raw.soulDew == false) or nil
+  local mult = int(raw.pyramidRun, nil)
+  if mult and mult >= 1 then r.pyramidRun = clamp(mult, 1, 255) end
+  r.pyramidBag = (raw.pyramidBag == true) or nil
+  return r
+end
+M.copyRules = copyRules
+
 -- ------------------------------------------------------------------
 -- the battle
 -- ------------------------------------------------------------------
@@ -421,6 +569,12 @@ function Battle:_newBattler(fighter, index)
     isFirstTurn = 2, toxicCounter = 0,
     -- K1: its trainer's badges (nil off side a, in a link mode, or with none).
     badges = fighter.badges,
+    -- The facility rules that live in the formulas (copyRules): no damage
+    -- badge boosts (Damage.base), no speed badge boost (Field.speed), an inert
+    -- SOUL DEW (Damage.base, attacker and defender alike).
+    noDamageBadges = self.rules.noDamageBoost,
+    noSpeedBadge = self.rules.noSpeedBoost,
+    noSoulDew = self.rules.noSoulDew,
   }
   return b
 end
@@ -439,8 +593,17 @@ end
 -- opts:
 --   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 --   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
---   sides = { a = { { playerId, name, mons, bag, seats?, badges?, family? } },
---             b = { ... } }
+--   wildPick?, firstBattle?, ghost?, rules? (the header's solo-only options),
+--   sides = { a = { { playerId, name, mons, bag, seats?, badges?, family?,
+--                     spare?, bagFrom? } },
+--             b = { { ..., ai? } } }
+--
+-- `ai` ("roamer" | "firstBattle") is read only on a wild seat (side b of a
+-- wild mode) and dropped elsewhere, silently; `spare = true` takes the entry
+-- out of its side's standing count (`_sideAlive`) -- a side of nothing but
+-- spares is refused; `bagFrom` names another entry on the same side whose bag
+-- this one spends (the same tables) -- an unknown id, the other side, the
+-- entry itself or a lender that borrows in turn is refused.
 --
 -- `badges` (K1: a list of badge numbers, as strings or numbers, or a set) and
 -- `family` ("frlg" | "rse") are read only for side a in M.BADGE_MODES and
@@ -491,6 +654,13 @@ function M.create(opts)
     fleeAttempts   = 0,
     payDay         = { a = 0, b = 0 },  -- pret gPaydayMoney, per side (Effects PAYDAY)
     usedHeldItems  = {},                -- Recycle's memory, per field slot (Items.consume)
+    -- The solo-only options (header; contract C3).
+    wildPick       = (opts.wildPick == "cart") and "cart" or nil,
+    firstBattle    = M.FIRST_BATTLES[opts.firstBattle] and opts.firstBattle or nil,
+    ghost          = (isWildMode(mode) and M.GHOSTS[opts.ghost]) and opts.ghost or nil,
+    rules          = copyRules(opts.rules),
+    lessons        = {},                -- the Oak lessons already spoken (`_lesson`)
+    mover          = nil,               -- the battler whose action is running (`_fightAction`)
   }, Battle)
 
   if type(opts.specialTypes) == "table" then
@@ -557,6 +727,10 @@ function M.create(opts)
         badges = Damage.badgeSet(entry.badges)
         family = M.FAMILIES[entry.family] and entry.family or "frlg"
       end
+      -- The side-entry fields of contract C3 (the header).
+      local ai = (side == WILD_SIDE and isWildMode(mode) and M.WILD_AI[entry.ai]) and entry.ai or nil
+      local spare = (entry.spare == true) or nil
+      local bagFrom = str(entry.bagFrom)
       local party, lead = {}, nil
       for seat = 1, seats do
         -- The cart's leads: the first usable mon, then the next one after it
@@ -572,6 +746,7 @@ function M.create(opts)
           bag = bag, bagNames = bagNames, active = active,
           connected = true, graceEndsAt = nil, choice = nil, team = nil, fought = {},
           badgeRules = badgeRules or nil, badges = badges, family = family,
+          ai = ai, spare = spare, bagFrom = bagFrom,
         }
         party[#party + 1] = fighter
         self.fighters[#self.fighters + 1] = fighter
@@ -579,6 +754,29 @@ function M.create(opts)
         bucket[#bucket + 1] = fighter
       end
     end
+  end
+
+  -- `bagFrom`: the entry spends the named entry's bag -- the same tables, so a
+  -- count spent by either is spent for both and an item one has filed this
+  -- turn is held back from the other (`_bagHas`).  A two-trainer fight's items
+  -- are trainer A's four, one pool either foe battler may spend (pokeemerald
+  -- battle_ai_script_commands.c:292, battle_ai_switch_items.c:808).
+  for _, fighter in ipairs(self.fighters) do
+    if fighter.bagFrom then
+      local lender = self.byId[fighter.bagFrom]
+      if not lender or lender.side ~= fighter.side or lender.owner == fighter.owner
+          or lender.bagFrom then
+        return nil, fighter.owner .. " has a bad bagFrom"
+      end
+      fighter.bag, fighter.bagNames = lender.bag, lender.bagNames
+    end
+  end
+  for _, side in ipairs(M.SIDES) do
+    local holds = false
+    for _, fighter in ipairs(self.bySide[side]) do
+      if not fighter.spare then holds = true end
+    end
+    if not holds then return nil, "side " .. side .. " has only spare fighters" end
   end
 
   -- pret battler ids interleave the sides: a1, b1, a2, b2, a3, b3.
@@ -600,6 +798,9 @@ function M.create(opts)
   self:_battleStart()
   self:_drainExp()
   self.phase = "choice"
+  -- pokefirered/src/battle_controller_oak_old_man.c:452: Oak speaks before the
+  -- first action menu.
+  if not self.result then self:_lesson("intro") end
   if not self.result and self:_anyMustReplace() then
     self:_openReplace()
     return self
@@ -620,6 +821,35 @@ function Battle:_emit(kind, fields)
   event.seq = self.seq
   self.buffer[#self.buffer + 1] = event
   return event
+end
+
+-- One of PROF. OAK's lessons (M.LESSONS), under `firstBattle = "oak"` only:
+-- each id once a battle, but `run`, which the cart says at every RUN press.
+function Battle:_lesson(id)
+  if self.firstBattle ~= "oak" then return end
+  if id ~= "run" then
+    if self.lessons[id] then return end
+    self.lessons[id] = true
+  end
+  self:_emit("lesson", { text = id })
+end
+
+-- The lessons a side-a choice opens on the cart, said as it is filed: a party
+-- menu (flag 8) for a switch or a bag item used on a party member
+-- (pokefirered/src/party_menu.c:5834 OpenPartyMenuInTutorialBattle, :5875
+-- EnterPartyFromItemMenuInBattle), then -- a POTION -- flag 4 when the bag
+-- hands it back (battle_controller_oak_old_man.c:389 CompleteWhenChoseItem).
+function Battle:_choiceLessons(choice)
+  if choice.action == "switch" then
+    self:_lesson("party")
+    return
+  end
+  if choice.action ~= "item" then return end
+  local effect = Items.bagEffect(choice.item)
+  if effect and not (effect.ball or effect.escape or effect.flute or effect.activeOnly) then
+    self:_lesson("party")
+  end
+  if choice.item == M.ITEM_POTION then self:_lesson("potion") end
 end
 
 -- One roster per party: a shared team's second seat holds the same list, so
@@ -687,9 +917,13 @@ function Battle:_autoTarget(fighter)
   return living[(self.aim:byte() % #living) + 1]
 end
 
+-- A `spare` entry never holds its side up: pret's Cmd_checkteamslost counts
+-- only the player's half beside an in-game partner (pokeemerald battle_script_
+-- commands.c:3543), so the fight is lost when the player's mons are down
+-- whatever Steven still has.
 function Battle:_sideAlive(side)
   for _, fighter in ipairs(self.bySide[side]) do
-    if firstLiving(fighter.mons) then return true end
+    if not fighter.spare and firstLiving(fighter.mons) then return true end
   end
   return false
 end
@@ -804,16 +1038,21 @@ end
 -- bag, and the cart takes a medicine out of it when it is CHOSEN -- the
 -- engine's partner cancel cannot give a non-ball item back (init.lua
 -- D.cancelPartner, pokefirered/src/battle_controller_player.c:286) -- so one
--- the sibling seat has filed this turn is not there to choose again.  A flute
--- is never spent, so it is never held back.
+-- the sibling seat has filed this turn is not there to choose again.  The same
+-- holds for every seat that spends this bag (`bagFrom`: the AI takes a trainer
+-- item off BATTLE_HISTORY when it decides, pokeemerald battle_ai_switch_items.c
+-- ShouldUseItem).  A flute is never spent, so it is never held back.
 function Battle:_bagHas(fighter, item)
   if not fighter.bag then return false end
   local n = fighter.bag[item] or 0
   local effect = Items.bagEffect(item)
   if not (effect and effect.noConsume) then
-    for _, seat in ipairs(fighter.seats) do
+    for _, seat in ipairs(self.fighters) do
       local c = seat.choice
-      if seat ~= fighter and c and c.action == "item" and c.item == item then n = n - 1 end
+      if seat ~= fighter and seat.bag == fighter.bag and c and c.action == "item"
+          and c.item == item then
+        n = n - 1
+      end
     end
   end
   return n > 0
@@ -892,9 +1131,19 @@ function Battle:_normaliseChoice(fighter, choice)
   if not b or b.mon.hp <= 0 then return nil end
 
   if action == "run" then
+    -- A wild seat's own RUN is the cart's opponent RUN: it reaches the cart as
+    -- the move controller's AI_CHOICE_FLEE (pokefirered/src/battle_main.c:3268),
+    -- past the selection's IsRunningFromBattleImpossible (:3236), so nothing
+    -- refuses it here; it is ordered with the moves and re-checked when it
+    -- runs (`_wildFlee`).
+    if isWildSeat(self.mode, fighter) then return { action = "run", flee = true } end
     if isWildMode(self.mode) then
+      -- pokeemerald/src/battle_main.c:4021 IsRunningFromBattleImpossible: a
+      -- Smoke Ball or Run Away gets away first, then the traps, then Birch's
+      -- "Don't leave me like this!" (FIRST_BATTLE, :4078 -- the screen's line).
       local he = Items.of(b)
-      if he ~= Items.HOLD.CAN_ALWAYS_RUN and b.ability ~= "RUN_AWAY" and self:_switchBlocked(b) then
+      if he ~= Items.HOLD.CAN_ALWAYS_RUN and b.ability ~= "RUN_AWAY"
+          and (self:_switchBlocked(b) or self.firstBattle == "birch") then
         return nil
       end
     end
@@ -902,6 +1151,9 @@ function Battle:_normaliseChoice(fighter, choice)
   end
 
   if action == "item" then
+    -- rules.bag = false: "Items can't be used now." at selection (pokeemerald
+    -- battle_main.c:4221; the screen's line), for every seat.
+    if self.rules.noBag then return nil end
     local item = Items.idOf(choice.item)
     if not item then return nil end
     if isWildSeat(self.mode, fighter) then return nil end
@@ -1024,9 +1276,21 @@ function Battle:submitChoice(playerId, choice)
     return false
   end
 
+  -- Oak's lab: the trainer RUN is refused at selection, with Oak's line in
+  -- place of the trainer's (pokefirered/data/battle_scripts_1.s:3024
+  -- BattleScript_PrintCantRunFromTrainer -> STRINGID_DONTLEAVEBIRCH, which the
+  -- Oak controller turns into PrintOakText_OakNoRunningFromATrainer) -- the
+  -- action menu stays, so nothing is filed; the `run` lesson is the one event
+  -- a refused choice leaves.
+  if choice.action == "run" and self.firstBattle == "oak" and fighter.side == "a" then
+    self:_lesson("run")
+    return false
+  end
+
   local normalised = self:_normaliseChoice(fighter, choice)
   if not normalised then return false end
   fighter.choice = normalised
+  if self.firstBattle == "oak" and fighter.side == "a" then self:_choiceLessons(normalised) end
   self:_emit("chose", { slot = fighter.slot, side = fighter.side, text = fighter.name })
   self:_maybeResolve()
   return true
@@ -1114,6 +1378,7 @@ end
 
 function Battle:_autoItemChoice(fighter, b)
   if not fighter.bag then return nil end
+  if self.rules.noBag then return nil end
   if isWildSeat(self.mode, fighter) then return nil end
   local mon = b.mon
   local s = Status.normalise(mon.status)
@@ -1172,6 +1437,10 @@ function Battle:_autoChoice(fighter)
   if not b or b.mon.hp <= 0 then return nil end
   if b.mustRecharge then return { action = "fight", recharge = true, move = b.lastSlot or 1 } end
   if b.lockedNum then return { action = "fight", locked = true, move = b.lockedSlot or 1 } end
+
+  if isWildSeat(self.mode, fighter) and (fighter.ai or self.wildPick == "cart") then
+    return self:_cartWildChoice(fighter, b)
+  end
 
   local foe = self:_autoTarget(fighter)
   if not foe then
@@ -1267,6 +1536,135 @@ function Battle:_autoChoice(fighter)
     end
   end
   return self:_autoFight(b, pick or 1, foe)
+end
+
+-- The cart's opponent controller for a wild seat (pokefirered/src/battle_
+-- controller_opponent.c:1351 OpponentHandleChooseMove; pokeemerald :1551).
+-- HandleTurnActionSelectionState (pokefirered/src/battle_main.c:3141) asks it
+-- only when the battler has a move to choose: every slot unusable is Struggle
+-- and an Encore is the encored move, with no controller, no AI and no draw
+-- (:3143-3155); a lock-in never gets this far (`_fillForcedChoices`).
+function Battle:_cartWildChoice(fighter, b)
+  local foes = self:_foeSeats(fighter)
+  local left = foes[1]   -- B_POSITION_PLAYER_LEFT
+  if not self:hasUsableMove(b) then
+    return { action = "fight", move = 1, struggle = true, target = left.slot }
+  end
+  local encoreSlot = (int(b.encoreTurns, 0) > 0 and b.encoreNum) and self:slotOfNum(b, b.encoreNum) or nil
+  if encoreSlot then return self:_autoFight(b, encoreSlot, left) end
+  if fighter.ai then return self:_wildAiChoice(fighter, b, left) end
+  -- The wild arm (a wild battle that is not ROAMER / FIRST_BATTLE / SAFARI has
+  -- no AI): `Random() & 3` until the slot holds a move; a move the selection
+  -- refuses (TrySetCantSelectMoveBattleScript, battle_main.c:3277: disabled,
+  -- tormented, taunted, sealed, Choice-locked, out of PP) sends the action
+  -- back to the controller (stateIdAfterSelScript = STATE_WAIT_ACTION_CHOSEN),
+  -- which draws again -- the opponent's selection line prints nothing
+  -- (OpponentHandlePrintSelectionString).
+  local bad = self:moveLimitations(b)
+  local slot = nil
+  for _ = 1, M.WILD_PICK_CAP do
+    local s = self:roll(0, 3) + 1
+    if b.moves[s] and not bad[s] then
+      slot = s
+      break
+    end
+  end
+  if not slot then
+    for i = 1, #b.moves do
+      if not bad[i] then
+        slot = i
+        break
+      end
+    end
+  end
+  local ttype = int(b.moves[slot].target, 0)
+  -- A USER / USER_OR_SELECTED row aims at the user (a Ghost's CURSE files
+  -- unaimed, `_autoFight`); a double battle draws the player's position
+  -- (`GetBattlerAtPosition(Random() & 2)`: one of the two side-a seats -- one
+  -- of n with more); otherwise the player's left battler.
+  if hasBit(ttype, T.USER_OR_SELECTED) or hasBit(ttype, T.USER) then
+    return self:_autoFight(b, slot, left)
+  end
+  local aim = left
+  if self.double then aim = foes[self:roll(0, #foes - 1) + 1] end
+  return { action = "fight", move = slot, target = aim.slot }
+end
+
+-- AI_Roaming / AI_FirstBattle (pokefirered/data/battle_ai_scripts.s:3226,
+-- pokeemerald :3233), the one script a ROAMER / FIRST_BATTLE wild battle runs
+-- (pokefirered/src/battle_ai_script_commands.c:337, pokeemerald :365): flee, or
+-- end with every usable move at the same score (BattleAI_SetupAIData: 100,
+-- unusable 0) and pick among the best.  AI_TARGET is the battler opposite
+-- (gBattlerAttacker ^ BIT_SIDE in a single battle).  The AI's other draws
+-- (four simulatedRNG rolls per call, a double's target) feed nothing these
+-- scripts read and are not drawn.
+function Battle:_wildAiChoice(fighter, b, left)
+  local target = self:oppositeFoe(b)
+  if fighter.ai == "roamer" then
+    if self:_roamerFlees(b, target) then return { action = "run", flee = true } end
+  elseif fighter.ai == "firstBattle" then
+    -- if_hp_equal / if_hp_less_than AI_TARGET, 20: 100 * hp / maxHP, floored
+    -- (Cmd_if_hp_less_than), so 20% and under flees, whatever the speeds.
+    if target and floor(100 * target.mon.hp / max(1, target.mon.maxHp)) <= 20 then
+      return { action = "run", flee = true }
+    end
+  end
+  return self:_autoFight(b, self:_aiBestSlot(b), target or left)
+end
+
+-- AI_Roaming: not while wrapped (STATUS2_WRAPPED) or held by Mean Look / Block
+-- / Spider Web (STATUS2_ESCAPE_PREVENTION), not when the target has SHADOW
+-- TAG; LEVITATE flees past an ARENA TRAP, which otherwise holds it.  Nothing
+-- else is asked: not Ingrain, not Magnet Pull, not sleep or freeze -- a
+-- sleeping roamer still runs (the run action has no canceller).
+function Battle:_roamerFlees(b, target)
+  if int(b.trapTurns, 0) > 0 or b.trappedBy ~= nil then return false end
+  local tab = target and target.ability
+  if tab == "SHADOW_TAG" then return false end
+  if b.ability == "LEVITATE" then return true end
+  if tab == "ARENA_TRAP" then return false end
+  return true
+end
+
+-- BattleAI_ChooseMoveOrAction's single-battle pick over the scores (usable
+-- 100, unusable or empty 0), in the cart family's own loop: FireRed /
+-- LeafGreen raise the best THEN test the tie (pokefirered/src/battle_ai_script_
+-- commands.c:401), so a new best is listed twice and the first usable slot
+-- after an unusable first slot is twice as likely; Emerald tests the tie
+-- first and skips an empty slot (pokeemerald :427).  The family is the
+-- player's (side a's first entry: the cart the wild mon lives on).
+function Battle:_aiBestSlot(b)
+  local bad = self:moveLimitations(b)
+  local function score(i)
+    if b.moves[i] and not bad[i] then return 100 end
+    return 0
+  end
+  local first = self.bySide.a[1]
+  local frlg = not (first and first.family == "rse")
+  local considered, n, best = { 1 }, 1, score(1)
+  for i = 2, 4 do
+    local sc = score(i)
+    if frlg then
+      if best < sc then
+        n, best = 1, sc
+        considered[1] = i
+      end
+      if best == sc then
+        n = n + 1
+        considered[n] = i
+      end
+    elseif b.moves[i] then
+      if best == sc then
+        n = n + 1
+        considered[n] = i
+      end
+      if best < sc then
+        n, best = 1, sc
+        considered[1] = i
+      end
+    end
+  end
+  return considered[self:roll(0, n - 1) + 1]
 end
 
 function Battle:_autoChoiceOrSkip(fighter)
@@ -1459,22 +1857,26 @@ function Battle:forceSwitch(fighter, index, reason, baton)
 end
 
 -- Whirlwind / Roar blowing a battler out of a wild fight ends it
--- (pokefirered/data/battle_scripts_1.s:3283).
-function Battle:blownAway(b)
-  self:_concedeRun(b.fighter)
+-- (pokefirered/data/battle_scripts_1.s:3283): `how = "roar"`, `by` the side
+-- of the USER -- the side whose action ended it, which the cart's outcome
+-- reads (pokeemerald battle_script_commands.c:6487 VARIOUS_SET_TELEPORT_
+-- OUTCOME keys PLAYER_TELEPORTED / MON_TELEPORTED on the attacker's side).
+function Battle:blownAway(b, user)
+  local by = user and user.side or ((b.side == "a") and "b" or "a")
+  self:_concedeRun(b.fighter, "roar", by)
 end
 
--- Teleport out of a wild fight.
+-- Teleport out of a wild fight: `how = "teleport"`, `by` the user's side.
 function Battle:concede(fighter)
-  self:_concedeRun(fighter)
+  self:_concedeRun(fighter, "teleport", fighter.side)
 end
 
-function Battle:_concedeRun(fighter)
+function Battle:_concedeRun(fighter, how, by)
   self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
   if fighter.side == "a" then
-    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "run")
+    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "run", how, by)
   else
-    self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "run")
+    self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "run", how, by)
   end
 end
 
@@ -1510,7 +1912,14 @@ function Battle:_beginTurn()
   for i, f in ipairs(self.order) do
     local b = f.b
     local choice = f.choice
-    if b and b.mon.hp > 0 and choice and choice.action == "fight" then
+    if b and b.mon.hp > 0 and choice and choice.flee then
+      -- A wild seat's RUN is ordered with the moves (pokefirered/src/battle_
+      -- main.c:3546 hoists only battler 0's RUN), at priority 0 -- GetWho-
+      -- StrikesFirst reads MOVE_NONE for any action but a move (:3485) -- by
+      -- speed, Quick Claw and paralysis included.  MOVE_NONE is not Rage.
+      b.rage = nil
+      rows[#rows + 1] = { f = f, b = b, row = nil, pri = 0, order = i, flee = true }
+    elseif b and b.mon.hp > 0 and choice and choice.action == "fight" then
       -- A recharge turn chooses no move (pokefirered/src/battle_main.c:3126
       -- withholds the menu; :2993 left gChosenMoveByBattler MOVE_NONE): Rage
       -- ends, no Focus Punch line, bracket 0 (the cart reads the stale chosen
@@ -1548,7 +1957,10 @@ function Battle:_beginTurn()
   local list, seen = {}, {}
   for _, f in ipairs(self.order) do
     local a = f.choice and f.choice.action
-    if a == "switch" or a == "item" or a == "run" then list[#list + 1] = f; seen[f] = true end
+    if (a == "switch" or a == "item" or a == "run") and not f.choice.flee then
+      list[#list + 1] = f
+      seen[f] = true
+    end
   end
   for _, r in ipairs(rows) do list[#list + 1] = r.f; seen[r.f] = true end
   for _, f in ipairs(self.order) do
@@ -1602,9 +2014,33 @@ end
 function Battle:_resolveRuns()
   local running = {}
   for _, fighter in ipairs(self.order) do
-    if fighter.choice and fighter.choice.action == "run" then running[#running + 1] = fighter end
+    if fighter.choice and fighter.choice.action == "run" and not fighter.choice.flee then
+      running[#running + 1] = fighter
+    end
   end
   if #running == 0 then return false end
+
+  -- rules.forfeit: the Frontier / Trainer Hill trainer RUN (pokeemerald
+  -- battle_main.c:4321 -- the "forfeit the match?" prompt is the screen's)
+  -- always gets away (battle_util.c:448, traps or not) and ends as
+  -- B_OUTCOME_FORFEITED, "{PLAYER} forfeited the match!" (:5058): the runner's
+  -- side loses.  A wild fight's RUN stays a RUN.
+  if self.rules.forfeit and not isWildMode(self.mode) then
+    local sides = {}
+    for _, fighter in ipairs(running) do
+      sides[fighter.side] = true
+      self:say(fighter.name .. " forfeited the match!")
+      self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
+    end
+    if sides.a and sides.b then
+      self:_finish("draw", nil, nil, "run", "forfeit", nil)
+    elseif sides.a then
+      self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "run", "forfeit", "a")
+    else
+      self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "run", "forfeit", "b")
+    end
+    return true
+  end
 
   if not runEndsBattle(self.mode) then
     self:say("No! There's no running from a trainer battle!")
@@ -1618,11 +2054,11 @@ function Battle:_resolveRuns()
       self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
     end
     if sides.a and sides.b then
-      self:_finish("draw", nil, nil, "run")
+      self:_finish("draw", nil, nil, "run", "run", nil)
     elseif sides.a then
-      self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "run")
+      self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "run", "run", "a")
     else
-      self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "run")
+      self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "run", "run", "b")
     end
     return true
   end
@@ -1639,14 +2075,34 @@ function Battle:_resolveRuns()
         self:say(self:nameOf(b) .. " fled using its " .. lbl .. "!")
         escaped = true
       elseif b.ability == "RUN_AWAY" then
-        self:emitAbility(b)
-        self:say(self:nameOf(b) .. " fled using RUN AWAY!")
+        if self.rules.pyramidRun then
+          -- pokeemerald/src/battle_util.c:429: in the Pyramid Run Away rolls
+          -- too, the try counted before the roll.
+          self.fleeAttempts = self.fleeAttempts + 1
+          escaped = self:_pyramidEscape(b)
+          if escaped then
+            self:emitAbility(b)
+            self:say(self:nameOf(b) .. " fled using RUN AWAY!")
+          end
+        else
+          self:emitAbility(b)
+          self:say(self:nameOf(b) .. " fled using RUN AWAY!")
+          escaped = true
+        end
+      elseif self.ghost == "veiled" and fighter.side == "a" then
+        -- pokefirered/src/battle_main.c:4252: from a GHOST the player's side
+        -- always gets away, no try counted.
         escaped = true
+        self:say("Got away safely!")
       else
         local foe = self:foes(b)[1]
         local mySpe = int(b.mon.stats.spe, 0)
         local foeSpe = foe and int(foe.mon.stats.spe, 0) or 0
-        if mySpe < foeSpe then
+        if self.rules.pyramidRun then
+          -- pokeemerald/src/battle_util.c:451: the Pyramid rolls whatever the
+          -- speeds.
+          escaped = self:_pyramidEscape(b)
+        elseif mySpe < foeSpe then
           local speedVar = (floor(mySpe * 128 / max(1, foeSpe)) + self.fleeAttempts * 30) % 256
           escaped = speedVar > self:roll(0, 255)
         else
@@ -1658,7 +2114,8 @@ function Battle:_resolveRuns()
       if escaped then
         self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
         local other = fighter.side == "a" and "b" or "a"
-        self:_finish("win", self:_sidePlayers(other), self:_sidePlayers(fighter.side), "run")
+        self:_finish("win", self:_sidePlayers(other), self:_sidePlayers(fighter.side), "run",
+          "run", fighter.side)
         return true
       end
       -- pokefirered/src/battle_main.c:4311: a failed escape clears Fury
@@ -1668,6 +2125,35 @@ function Battle:_resolveRuns()
     end
   end
   return false
+end
+
+-- The Pyramid's escape roll (pokeemerald/src/battle_util.c:434 / :453): speed
+-- times the floor's multiplier over the foe's, plus 30 a try, as a byte.
+function Battle:_pyramidEscape(b)
+  local foe = self:foes(b)[1]
+  local mySpe = int(b.mon.stats.spe, 0)
+  local foeSpe = foe and int(foe.mon.stats.spe, 0) or 0
+  local speedVar = (floor(mySpe * self.rules.pyramidRun / max(1, foeSpe)) + self.fleeAttempts * 30) % 256
+  return speedVar > self:roll(0, 255)
+end
+
+-- A wild seat's RUN when its turn comes (pokefirered/src/battle_main.c:4317
+-- HandleAction_Run, the opponent arm; pokeemerald battle_util.c:526): a
+-- partial trap or Mean Look / Block / Spider Web holds it ("can't escape!",
+-- B_MSG_ATTACKER_CANT_ESCAPE, the turn spent); nothing else is asked -- no
+-- speed, no Smoke Ball, no Shadow Tag, no Ingrain, no sleep or freeze -- and it
+-- is gone: B_OUTCOME_MON_FLED, `how = "flee"`.
+function Battle:_wildFlee(fighter)
+  local b = fighter.b
+  if int(b.trapTurns, 0) > 0 or b.trappedBy ~= nil then
+    self:say("Wild " .. self:nameOf(b) .. " can't escape!")
+    return
+  end
+  self:say("Wild " .. self:nameOf(b) .. " fled!")
+  self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
+  local other = fighter.side == "a" and "b" or "a"
+  self:_finish("win", self:_sidePlayers(other), self:_sidePlayers(fighter.side), "run",
+    "flee", fighter.side)
 end
 
 -- Pursuit aimed at a seat that is switching out strikes first, doubled
@@ -1796,6 +2282,15 @@ function Battle:_useItem(fighter)
       self:say("But it failed!")
       return
     end
+    if self.ghost then
+      -- pokefirered/src/battle_script_commands.c:9473: a GHOST dodges every
+      -- ball, veiled or unveiled -- no roll, the ball spent ("It dodged the
+      -- thrown BALL! This POKeMON can't be caught!").
+      self:_emit("ball", { slot = fighter.slot, side = fighter.side, target = foe.slot,
+                           amount = -1, text = tostring(item) })
+      self:say("It dodged the thrown BALL! This POKeMON can't be caught!")
+      return
+    end
     local caught, shakes = Catch.attempt(item, target, self.rng, {
       types = target.mon.types, level = target.mon.level, turn = self.turn - 1,
       underwater = self.underwater, dexCaught = choice.dexCaught,
@@ -1805,7 +2300,7 @@ function Battle:_useItem(fighter)
     if caught then
       self:say("Gotcha! " .. self:nameOf(target) .. " was caught!")
       local finish = self:_finish("win", self:_sidePlayers(fighter.side),
-        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch")
+        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch", "catch", fighter.side)
       if finish then
         finish.caught = self:_caughtSheet(target, item)
         finish.catcher = fighter.owner
@@ -1820,7 +2315,7 @@ function Battle:_useItem(fighter)
     if isWildMode(self.mode) then
       self:say("Got away safely!")
       self:_finish("win", self:_sidePlayers(fighter.side),
-        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run")
+        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "run", "run", fighter.side)
     else
       self:say("But it failed!")
     end
@@ -1942,7 +2437,7 @@ function Battle:_resolveFights()
     -- inherit the turn, and a Pursuit already spent it.
     if not f.acted and f.b == r.b and r.b.mon.hp > 0 then
       f.acted = true
-      self:_fightAction(f, f.choice)
+      if r.flee then self:_wildFlee(f) else self:_fightAction(f, f.choice) end
       self:_afterAction()
     end
     self:_faintSweep()
@@ -2041,6 +2536,7 @@ end
 -- however many seats it fought from, and gets one `exp` fact.
 function Battle:_awardExp(fallen, mon)
   if not EXP_MODES[self.mode] then return end
+  if self.rules.noExp then return end
   if fallen.side == EXP_OWNER_SIDE then return end
   local fought = fallen.fought or {}
   local participants, alive = 0, {}
@@ -2147,9 +2643,9 @@ function Battle:_checkOver()
   local aliveA, aliveB = self:_sideAlive("a"), self:_sideAlive("b")
   if aliveA and aliveB then return false end
   if not aliveA and not aliveB then
-    self:_finish("draw", nil, nil, "ko")
+    self:_finish("draw", nil, nil, "ko", "ko", nil)
   elseif aliveA then
-    local result = self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko")
+    local result = self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko", "ko", "a")
     -- pokefirered/src/battle_main.c:3764: only a WON battle runs
     -- BattleScript_PayDayMoneyAndPickUpItems (Cmd_givepaydaymoney), and the
     -- coins are the player side's.  Link rules pay nothing (1v1 / coop_pvp); in
@@ -2158,19 +2654,25 @@ function Battle:_checkOver()
     local coins = int(self.payDay and self.payDay.a, 0)
     if result and EXP_MODES[self.mode] and coins > 0 then result.payDay = coins end
   else
-    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko")
+    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko", "ko", "b")
   end
   return true
 end
 
-function Battle:_finish(outcome, winners, losers, reason)
+-- `how` (M.HOW) and `by` (the side whose action ended it) are contract C3's;
+-- both nil for a disconnect or a timeout.  Oak's closing lesson comes right
+-- before `over`: "win" on a KO side a won, "lose" on any other KO, a draw
+-- included (HandleEndTurn_BattleLost runs for B_OUTCOME_DREW).
+function Battle:_finish(outcome, winners, losers, reason, how, by)
   if self.result then return self.result end
   self.result = {
     battle = self.id, outcome = outcome, winners = winners, losers = losers, reason = reason,
+    how = how, by = by,
   }
   self.phase = "over"
   self.deadline = nil
   self.resolveDeadline = nil
+  if how == "ko" then self:_lesson((by == "a") and "win" or "lose") end
   self:_emit("over", { text = reason })
   return self.result
 end

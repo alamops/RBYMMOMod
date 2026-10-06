@@ -18,10 +18,12 @@
 -- absorb abilities act before the accuracy roll (attackcanceler), Future Sight
 -- is a delayed attack even though it has power, Facade / Revenge / SmellingSalt
 -- double, Struggle is not stopped by Wonder Guard, a cancelled move clears the
--- last *resulting* move too (Protect's streak), and there is no Oak / Pokedude /
--- ghost-battle branch.  Disobedience (`Bm:_disobey`, engine.lua:1291) and the
--- badge boosts (Damage.base, Field.speed) follow the engine, for side a against
--- the computer only (Turn.BADGE_MODES): link rules everywhere else.
+-- last *resulting* move too (Protect's streak).  Disobedience (`Bm:_disobey`,
+-- engine.lua:1291) and the badge boosts (Damage.base, Field.speed) follow the
+-- engine, for side a against the computer only (Turn.BADGE_MODES): link rules
+-- everywhere else.  The first battles (Turn.create's `firstBattle`: Oak's
+-- accuracy and crit gates, Birch's crits) and the Pokemon Tower GHOST
+-- (`ghost`: the canceller) follow pret; there is no Pokedude branch.
 --
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
@@ -237,6 +239,7 @@ function Bm:heal(b, amount)
   local gained = b.mon.hp - before
   if gained > 0 then
     self:_emit("drain", { slot = b.slot, side = b.side, amount = gained, hp = b.mon.hp })
+    if b.side == "b" then self:_lesson("damage") end
   end
   return gained
 end
@@ -250,6 +253,11 @@ function Bm:loseHp(b, amount, opts)
     slot = b.slot, side = b.side, amount = amount, hp = b.mon.hp,
     status = opts and opts.status or nil,
   })
+  -- Oak's flag 1 is the foe's HP bar finishing ANY update (pokefirered/src/
+  -- battle_controller_opponent.c:304 CompleteOnHealthbarDone): every `damage`
+  -- -- a 0 one too, healthbarupdate runs unless the move had no effect -- and
+  -- every `drain` on side b (`heal`).  A doll's damage moves no bar.
+  if b.side == "b" then self:_lesson("damage") end
   return amount
 end
 
@@ -632,6 +640,20 @@ function Ctx:accuracyCheck(mode, printFail)
     if self:isProtected() then failMsg("protected"); return false end
     return true
   end
+  -- pokefirered/src/battle_script_commands.c:1007: Oak's lab spares the
+  -- player's moves the whole check -- Protect and semi-invulnerability too --
+  -- until a lesson.  pret reads gBattleMoves[param].power BEFORE it resolves
+  -- ACC_CURR_MOVE (0), so every move script reads MOVE_NONE's power, 0: each
+  -- player move is sure to hit until the `stat` lesson (flag 2); only Future
+  -- Sight / Doom Desire, whose scripts name themselves, read their own power
+  -- and the `damage` lesson (flag 1).  (NO_ACC_CALC calls read past the move
+  -- table on the cart; they take the plain path here.)
+  if B.firstBattle == "oak" and user.side == "a" then
+    local power = self.opts.futureSight and int(self.move.power, 0) or 0
+    if (power ~= 0 and not B.lessons.damage) or (power == 0 and not B.lessons.stat) then
+      return true
+    end
+  end
   -- pokefirered/src/battle_script_commands.c:896 JumpIfMoveAffectedByProtect
   if self:isProtected() then failMsg("protected"); return false end
   if self:lockOnActive() then return true end
@@ -928,6 +950,21 @@ local function canceller(C)
     return false
   end
 
+  -- pokefirered/src/battle_util.c:1451 CANCELLER_GHOST: a veiled GHOST cancels
+  -- every move of both sides (battle_scripts_1.s:3809 / :3815) -- no attack
+  -- string, no PP, and neither HITMARKER_UNABLE_TO_USE_MOVE nor a multi-turn
+  -- cancel.
+  if B.ghost == "veiled" then
+    if user.side == "a" then
+      B:say(nm .. " is too scared to move!")
+      B:emit("anim", { slot = user.slot, side = user.side, text = "MON_SCARED" })
+    else
+      B:say("GHOST: Get out...... Get out......")
+      B:emit("anim", { slot = user.slot, side = user.side, text = "GHOST_GET_OUT" })
+    end
+    return false
+  end
+
   if user.infatuatedWith then
     B:say(nm .. " is in love with " .. B:nameOf(user.infatuatedWith) .. "!")
     if B:roll(0, 1) == 0 then
@@ -1028,6 +1065,10 @@ function Bm:_disobey(C)
   local species = int(mon.speciesNum, 0)
   local ob = 0
   if not ((species == SPECIES_MEW or species == SPECIES_DEOXYS) and mon.unfateful == true) then
+    -- rules.obedience = false: pokeemerald/src/battle_util.c:3924 returns for
+    -- BATTLE_TYPE_FRONTIER inside the fateful arm, so only the Mew / Deoxys
+    -- rule is left.
+    if self.rules.noObedience then return nil end
     if mon.traded ~= true or Damage.hasBadge(user, 8) then return nil end
     ob = 10
     if Damage.hasBadge(user, 2) then ob = 30 end
@@ -1115,12 +1156,23 @@ M.dynamicMoveType = dynamicMoveType
 -- the damaging path (effects/hit.lua)
 -- ------------------------------------------------------------------
 
+-- The first battles' crit rule (Damage.calc `critGate`): "none" under Birch
+-- -- Cmd_critcalc tests BATTLE_TYPE_FIRST_BATTLE before Random() (pokeemerald
+-- battle_script_commands.c:1281), so nothing is drawn -- "void" in Oak's lab
+-- until the `damage` lesson -- Random() first, then the battle type voids it
+-- (pokefirered :1200) -- else nil.  Both sides alike.
+function Bm:critGate()
+  if self.firstBattle == "birch" then return "none" end
+  if self.firstBattle == "oak" and not self.lessons.damage then return "void" end
+  return nil
+end
+
 function Bm:_calcOpts(C, target, extra)
   local side = self.sides[target.side]
   local twoDef = self.double and self:countStandingOnSide(target.side) >= 2
   local o = {
     typeTable = self.typeTable, specialTypes = self.specialTypes, rng = self.rng,
-    weather = self:weather(), dmgMultiplier = C.dmgMultiplier,
+    weather = self:weather(), dmgMultiplier = C.dmgMultiplier, critGate = self:critGate(),
     reflect = int(side.reflectTurns, 0) > 0, lightScreen = int(side.lightScreenTurns, 0) > 0,
     doubleScreens = twoDef, spread = twoDef and int(C.move.target, 0) == T.BOTH,
     mudSport = self:fieldSport("mudSport"), waterSport = self:fieldSport("waterSport"),
@@ -1527,9 +1579,11 @@ local function beatUp(C)
       -- Cmd_critcalc (battle_script_commands.c:1196) skips the roll entirely
       -- against Battle Armor / Shell Armor, as Damage.calc does.
       local crit = false
-      if target.ability ~= "BATTLE_ARMOR" and target.ability ~= "SHELL_ARMOR" then
+      local gate = B:critGate()
+      if target.ability ~= "BATTLE_ARMOR" and target.ability ~= "SHELL_ARMOR" and gate ~= "none" then
         local stage = Crit.stage(user, C.move)
         crit = Crit.check(stage, B:roll(0, Crit.chance(stage) - 1))
+        if gate == "void" then crit = false end
       end
       if crit then dmg = dmg * 2 end
       local r = B:roll(Damage.ROLL_MIN, Damage.ROLL_MAX)
@@ -2560,9 +2614,15 @@ function Bm:_fightAction(fighter, choice, opts)
   if aimed and aimed.side == user.side and aimed ~= user then chosenAlly = aimed end
   local target = self:_pickTarget(user, row, aimed, why == "encore", false)
   if slot then user.lastSlot = slot end
-  return self:_resolveMove(user, target, row, slot, {
+  -- `mover`: whose action this is, for Oak's `stat` lesson (Effects.changeStat:
+  -- the cart prints the fall through the ATTACKER's controller).
+  local prev = self.mover
+  self.mover = user
+  local C = self:_resolveMove(user, target, row, slot, {
     pursuit = opts.pursuit, passSlot = choice.pass, chosenAlly = chosenAlly,
   })
+  self.mover = prev
+  return C
 end
 
 function M.install(Battle)

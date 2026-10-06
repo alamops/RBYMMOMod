@@ -201,6 +201,9 @@ function M.battler(spec)
     lastPhysDmg = int(spec.lastPhysDmg, 0), lastPhysBy = spec.lastPhysBy,
     lastSpecDmg = int(spec.lastSpecDmg, 0), lastSpecBy = spec.lastSpecBy,
     badges = M.badgeSet(spec.badges),
+    noDamageBadges = (spec.noDamageBadges == true) or nil,
+    noSpeedBadge = (spec.noSpeedBadge == true) or nil,
+    noSoulDew = (spec.noSoulDew == true) or nil,
   }
   local t2 = int(types[2], nil)
   if t2 ~= nil and t2 ~= b.type1 then b.type2 = t2 end
@@ -301,11 +304,20 @@ function M.base(attacker, defender, move, opts)
   -- (confusion, disobedience: attacker and defender the same battler) carries
   -- both of its own.  `b.badges` exists only on side a against the computer
   -- (Turn.BADGE_MODES); Emerald's e-reader / secret base / frontier / recorded
-  -- exclusions (pokeemerald/src/pokemon.c:3407) are fights no referee hosts.
-  if hasBadge(attacker, 1) then attack = floor(110 * attack / 100) end
-  if hasBadge(defender, 5) then defense = floor(110 * defense / 100) end
-  if hasBadge(attacker, 7) then spAttack = floor(110 * spAttack / 100) end
-  if hasBadge(defender, 7) then spDefense = floor(110 * spDefense / 100) end
+  -- exclusions (pokeemerald/src/pokemon.c:3407) arrive as the battler's
+  -- `noDamageBadges` (Turn.create `rules.boosts.damage = false`).
+  if hasBadge(attacker, 1) and not (attacker and attacker.noDamageBadges) then
+    attack = floor(110 * attack / 100)
+  end
+  if hasBadge(defender, 5) and not (defender and defender.noDamageBadges) then
+    defense = floor(110 * defense / 100)
+  end
+  if hasBadge(attacker, 7) and not (attacker and attacker.noDamageBadges) then
+    spAttack = floor(110 * spAttack / 100)
+  end
+  if hasBadge(defender, 7) and not (defender and defender.noDamageBadges) then
+    spDefense = floor(110 * spDefense / 100)
+  end
 
   local aHe, aParam = holdOf(attacker)
   local dHe = holdOf(defender)
@@ -319,10 +331,14 @@ function M.base(attacker, defender, move, opts)
   local aSp = int(attacker and attacker.speciesNum, 0)
   local dSp = int(defender and defender.speciesNum, 0)
   if aHe == HOLD.CHOICE_BAND then attack = floor(150 * attack / 100) end
-  if aHe == HOLD.SOUL_DEW and (aSp == SPECIES.LATIAS or aSp == SPECIES.LATIOS) then
+  -- pokeemerald/src/pokemon.c:3187: SOUL DEW is inert in the Frontier
+  -- (`noSoulDew`, Turn.create `rules.soulDew = false`), for either battler.
+  if aHe == HOLD.SOUL_DEW and (aSp == SPECIES.LATIAS or aSp == SPECIES.LATIOS)
+      and not attacker.noSoulDew then
     spAttack = floor(150 * spAttack / 100)
   end
-  if dHe == HOLD.SOUL_DEW and (dSp == SPECIES.LATIAS or dSp == SPECIES.LATIOS) then
+  if dHe == HOLD.SOUL_DEW and (dSp == SPECIES.LATIAS or dSp == SPECIES.LATIOS)
+      and not defender.noSoulDew then
     spDefense = floor(150 * spDefense / 100)
   end
   if aHe == HOLD.DEEP_SEA_TOOTH and aSp == SPECIES.CLAMPERL then spAttack = spAttack * 2 end
@@ -437,6 +453,8 @@ local function fixedInfo(move, product, flags, physical, extra)
 end
 
 -- opts (beyond M.base's): typeTable, rng, forceCrit, forceRoll, noRandom, noCrit,
+--   critGate ("none": no crit and no draw; "void": the crit roll is drawn and
+--   then voided -- the first battles, Move.lua Bm:critGate),
 --   dmgMultiplier, magnitudeRoll, psywaveRoll, pursuitSwitch, double
 --   (doubles-mode Revenge bookkeeping), attackerId (this battle's id for the
 --   attacker, Revenge), foresight (override; default defender.identified).
@@ -565,10 +583,12 @@ function M.calc(attacker, defender, move, opts)
   local dAb = defender.ability
   if opts.forceCrit ~= nil then
     crit = opts.forceCrit and true or false
-  elseif dAb ~= "BATTLE_ARMOR" and dAb ~= "SHELL_ARMOR" and not opts.noCrit then
+  elseif dAb ~= "BATTLE_ARMOR" and dAb ~= "SHELL_ARMOR" and not opts.noCrit
+      and opts.critGate ~= "none" then
     -- pokefirered/src/battle_script_commands.c:1170
     local stage = Crit.stage(attacker, move)
     crit = Crit.check(stage, roll(opts, 0, Crit.chance(stage) - 1))
+    if opts.critGate == "void" then crit = false end
   end
   local critMul = crit and Crit.MULTIPLIER or 1
 

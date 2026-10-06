@@ -19,18 +19,27 @@
  * `rng.roll(lo, hi)` (Rng.js: top bits; a one-value range draws nothing), and
  * this twin draws at exactly the points the Lua header lists, in that order:
  *
+ *   0. a computer wild seat's choice, when it is asked under `wildPick =
+ *      'cart'` or a side entry's `ai` (`_cartWildChoice`): roll(0,3) per draw
+ *      until a usable slot, then roll(0,1) for the target with two side-a
+ *      seats (n-1 for more); the AI's pick roll(0,n-1) over its best slots;
+ *      none for Struggle, an Encore, a lock-in or a flee;
  *   1. battle start: one roll(0,255) per speed-tied group of the switch-in order;
  *      Trace's pick between two or more traceable foes, roll(0, n-1);
  *   2. turn start: Quick Claw roll(0,65535) -- only when two or more seats fight
- *      and a fighting mon holds QUICK_CLAW; one roll(0,255) per group tied on
- *      both priority and speed;
- *   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon;
+ *      (a wild seat's flee counts) and one of them holds QUICK_CLAW; one
+ *      roll(0,255) per group tied on both priority and speed;
+ *   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon
+ *      (none for a veiled GHOST's foe); under `rules.pyramidRun` every runner
+ *      but a Smoke Ball holder rolls, Run Away too; a wild seat's flee draws
+ *      nothing;
  *   4. switches (and, interleaved in battler order, the bag items that are
  *      not balls -- those draw nothing): any foe Pursuit aimed at the leaving
  *      seat draws as a move, minus the canceller's and the accuracy draws;
  *   5. bag: balls (after other items, fastest thrower first) draw up to four
- *      roll(0,65535) (none for a Master Ball or odds > 254);
- *   6. moves, in speed order, each drawing only at the points it reaches (the
+ *      roll(0,65535) (none for a Master Ball, odds > 254 or a GHOST's dodge);
+ *   6. moves (and a wild seat's flee, drawing nothing), in speed order, each
+ *      drawing only at the points it reaches (the
  *      full list is in the Lua header and docs/plans/gen3-battle-sheet.md §8;
  *      obedience draws after the PP check, for a side-a mon against the
  *      computer over its badge cap; a multi-hit / Triple Kick / Beat Up strike
@@ -56,6 +65,12 @@
  * x1.1 stat boosts (Damage.js base, Field.js speed) -- and obey by the cart's
  * rule (Move.js Bm._disobey). Link rules in 1v1 / coop_pvp and for side b
  * everywhere, whatever an entry uploads.
+ *
+ * Contract C3 of docs/plans/gen3-solo-remaining-fights.md (the Lua header has
+ * the prose): `outcome().how` (M.HOW) and `outcome().by`; a wild seat's own
+ * RUN is the cart's opponent RUN (`_wildFlee`); the solo-only create options
+ * `wildPick`, `firstBattle`, `ghost`, `rules` (M.copyRules) and the side-entry
+ * fields `ai`, `spare`, `bagFrom`.
  *
  * Shape differences from the Lua, all forced by the language:
  *
@@ -129,6 +144,29 @@ const ACTIONS = {
   fight: true, item: true, switch: true, run: true, cancel: true,
 };
 
+// Contract C3: `outcome().how` (`balls` and `judge` belong to later waves).
+M.HOW = {
+  ko: true, run: true, flee: true, teleport: true, roar: true, catch: true, forfeit: true, balls: true, judge: true,
+};
+
+// `firstBattle`: Oak's lab (FireRed / LeafGreen) and Birch's rescue (Emerald).
+M.FIRST_BATTLES = { oak: true, birch: true };
+
+// PROF. OAK's eight lesson points, the `lesson` event's ids (see the Lua twin
+// for each one's cart moment); every id but `run` is spoken once a battle.
+M.LESSONS = ['intro', 'damage', 'stat', 'potion', 'party', 'run', 'win', 'lose'];
+M.ITEM_POTION = 13; // pret ITEM_POTION (the Oak controller's flag-4 test)
+
+// `ghost` (Pokemon Tower): veiled without the SILPH SCOPE, unveiled with it.
+M.GHOSTS = { veiled: true, unveiled: true };
+
+// A wild side entry's AI script: AI_Roaming or AI_FirstBattle.
+M.WILD_AI = { roamer: true, firstBattle: true };
+
+// How many `Random() & 3` draws `_cartWildChoice` makes before it settles on
+// the first usable slot (a referee never freezes).
+M.WILD_PICK_CAP = 256;
+
 const { E } = Effects;
 const T = Move.TARGET;
 
@@ -157,6 +195,11 @@ function runEndsBattle(mode) {
   return isWildMode(mode) || mode === '1v1' || mode === 'coop_pvp';
 }
 M.runEndsBattle = runEndsBattle;
+
+// One bit of a pret MOVE_TARGET_* byte.
+function hasBit(value, bit) {
+  return Math.floor(value / bit) % 2 === 1;
+}
 
 // ------------------------------------------------------------------
 // coercion (the C4 sheet)
@@ -365,6 +408,33 @@ function copyBag(raw) {
   return [out, names];
 }
 
+// The facility rules (contract C3; the Lua twin lists each key's cart source),
+// normalised: a key absent, or holding anything but the documented value, is
+// today's behaviour.
+function copyRules(raw) {
+  const r = {};
+  if (!isTable(raw)) return r;
+  r.noBag = (raw.bag === false) ? true : null;
+  r.forfeit = (raw.forfeit === true) ? true : null;
+  r.noExp = (raw.exp === false) ? true : null;
+  const { boosts } = raw;
+  if (boosts === false) {
+    r.noDamageBoost = true;
+    r.noSpeedBoost = true;
+  } else if (isTable(boosts)) {
+    r.noDamageBoost = (boosts.damage === false) ? true : null;
+    r.noSpeedBoost = (boosts.speed === false) ? true : null;
+  }
+  r.noObedience = (raw.obedience === false) ? true : null;
+  if (raw.theft === 'foe' || raw.theft === 'none') r.theft = raw.theft;
+  r.noSoulDew = (raw.soulDew === false) ? true : null;
+  const mult = int(raw.pyramidRun, null);
+  if (mult != null && mult >= 1) r.pyramidRun = clamp(mult, 1, 255);
+  r.pyramidBag = (raw.pyramidBag === true) ? true : null;
+  return r;
+}
+M.copyRules = copyRules;
+
 // ------------------------------------------------------------------
 // the battle
 // ------------------------------------------------------------------
@@ -429,6 +499,12 @@ Battle.prototype._newBattler = function _newBattler(fighter, index) {
     toxicCounter: 0,
     // K1: its trainer's badges (null off side a, in a link mode, or with none).
     badges: fighter.badges,
+    // The facility rules that live in the formulas (copyRules): no damage
+    // badge boosts (Damage.base), no speed badge boost (Field.speed), an inert
+    // SOUL DEW (Damage.base, attacker and defender alike).
+    noDamageBadges: this.rules.noDamageBoost,
+    noSpeedBadge: this.rules.noSpeedBoost,
+    noSoulDew: this.rules.noSoulDew,
   };
   return b;
 };
@@ -453,7 +529,15 @@ Battle.prototype._sendEvent = function _sendEvent(fighter) {
 // opts:
 //   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 //   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
-//   sides = { a: [{ playerId, name, mons, bag, seats?, badges?, family? }], b: [...] }
+//   wildPick?, firstBattle?, ghost?, rules? (the header's solo-only options),
+//   sides = { a: [{ playerId, name, mons, bag, seats?, badges?, family?, spare?,
+//                   bagFrom? }], b: [{ ..., ai? }] }
+//
+// `ai` ('roamer' | 'firstBattle') is read only on a wild seat and dropped
+// elsewhere, silently; `spare = true` takes the entry out of its side's
+// standing count (a side of nothing but spares is refused); `bagFrom` names
+// another entry on the same side whose bag this one spends (an unknown id,
+// the other side, the entry itself or a borrowing lender is refused).
 //
 // `badges` (K1: a list of badge numbers, as strings or numbers, or a set) and
 // `family` ('frlg' | 'rse') are read only for side a in M.BADGE_MODES and
@@ -509,6 +593,15 @@ function attempt(opts) {
     fleeAttempts: 0,
     payDay: { a: 0, b: 0 }, // pret gPaydayMoney, per side (Effects PAYDAY)
     usedHeldItems: {}, // Recycle's memory, per field slot (Items.consume)
+    // The solo-only options (header; contract C3).
+    wildPick: (opts.wildPick === 'cart') ? 'cart' : null,
+    firstBattle: (typeof opts.firstBattle === 'string' && own(M.FIRST_BATTLES, opts.firstBattle))
+      ? opts.firstBattle : null,
+    ghost: (isWildMode(mode) && typeof opts.ghost === 'string' && own(M.GHOSTS, opts.ghost))
+      ? opts.ghost : null,
+    rules: copyRules(opts.rules),
+    lessons: {}, // the Oak lessons already spoken (`_lesson`)
+    mover: null, // the battler whose action is running (`_fightAction`)
   });
 
   if (isTable(opts.specialTypes)) {
@@ -585,6 +678,11 @@ function attempt(opts) {
         family = (typeof entry.family === 'string' && own(M.FAMILIES, entry.family))
           ? entry.family : 'frlg';
       }
+      // The side-entry fields of contract C3 (the header).
+      const ai = (side === WILD_SIDE && isWildMode(mode) && typeof entry.ai === 'string'
+        && own(M.WILD_AI, entry.ai)) ? entry.ai : null;
+      const spare = (entry.spare === true) ? true : null;
+      const bagFrom = str(entry.bagFrom);
       const party = [];
       let lead = null;
       for (let seat = 1; seat <= seats; seat += 1) {
@@ -618,6 +716,9 @@ function attempt(opts) {
           badgeRules: badgeRules ? true : null,
           badges,
           family,
+          ai,
+          spare,
+          bagFrom,
         };
         party.push(fighter);
         self.fighters.push(fighter);
@@ -625,6 +726,29 @@ function attempt(opts) {
         bucket.push(fighter);
       }
     }
+  }
+
+  // `bagFrom`: the entry spends the named entry's bag -- the same tables, so a
+  // count spent by either is spent for both and an item one has filed this
+  // turn is held back from the other (`_bagHas`; pokeemerald battle_ai_script_
+  // commands.c:292, battle_ai_switch_items.c:808: a pair's items are A's four).
+  for (const fighter of self.fighters) {
+    if (fighter.bagFrom) {
+      const lender = self.byId.get(fighter.bagFrom);
+      if (!lender || lender.side !== fighter.side || lender.owner === fighter.owner
+          || lender.bagFrom) {
+        return refuse(`${fighter.owner} has a bad bagFrom`);
+      }
+      fighter.bag = lender.bag;
+      fighter.bagNames = lender.bagNames;
+    }
+  }
+  for (const side of M.SIDES) {
+    let holds = false;
+    for (const fighter of self.bySide[side]) {
+      if (!fighter.spare) holds = true;
+    }
+    if (!holds) return refuse(`side ${side} has only spare fighters`);
   }
 
   // pret battler ids interleave the sides: a1, b1, a2, b2, a3, b3.
@@ -646,6 +770,9 @@ function attempt(opts) {
   self._battleStart();
   self._drainExp();
   self.phase = 'choice';
+  // pokefirered/src/battle_controller_oak_old_man.c:452: Oak speaks before the
+  // first action menu.
+  if (!truthy(self.result)) self._lesson('intro');
   if (!truthy(self.result) && self._anyMustReplace()) {
     self._openReplace();
     return { battle: self, reason: null };
@@ -673,6 +800,35 @@ Battle.prototype._emit = function _emit(kind, fields) {
   event.seq = this.seq;
   this.buffer.push(event);
   return event;
+};
+
+// One of PROF. OAK's lessons (M.LESSONS), under `firstBattle = 'oak'` only:
+// each id once a battle, but `run`, which the cart says at every RUN press.
+Battle.prototype._lesson = function _lesson(id) {
+  if (this.firstBattle !== 'oak') return;
+  if (id !== 'run') {
+    if (truthy(this.lessons[id])) return;
+    this.lessons[id] = true;
+  }
+  this._emit('lesson', { text: id });
+};
+
+// The lessons a side-a choice opens on the cart, said as it is filed: a party
+// menu (flag 8) for a switch or a bag item used on a party member
+// (pokefirered/src/party_menu.c:5834 / :5875), then -- a POTION -- flag 4
+// (battle_controller_oak_old_man.c:389 CompleteWhenChoseItem).
+Battle.prototype._choiceLessons = function _choiceLessons(choice) {
+  if (choice.action === 'switch') {
+    this._lesson('party');
+    return;
+  }
+  if (choice.action !== 'item') return;
+  const effect = Items.bagEffect(choice.item);
+  if (effect && !(truthy(effect.ball) || truthy(effect.escape) || truthy(effect.flute)
+      || truthy(effect.activeOnly))) {
+    this._lesson('party');
+  }
+  if (choice.item === M.ITEM_POTION) this._lesson('potion');
 };
 
 // One roster per party: a shared team's second seat holds the same list, so
@@ -738,9 +894,12 @@ Battle.prototype._autoTarget = function _autoTarget(fighter) {
   return living[this.aim.byte() % living.length];
 };
 
+// A `spare` entry never holds its side up: pret's Cmd_checkteamslost counts
+// only the player's half beside an in-game partner (pokeemerald battle_script_
+// commands.c:3543).
 Battle.prototype._sideAlive = function _sideAlive(side) {
   for (const fighter of this.bySide[side]) {
-    if (firstLiving(fighter.mons) != null) return true;
+    if (!truthy(fighter.spare) && firstLiving(fighter.mons) != null) return true;
   }
   return false;
 };
@@ -857,17 +1016,22 @@ Battle.prototype._anyDisconnected = function _anyDisconnected() {
 // bag, and the cart takes a medicine out of it when it is CHOSEN -- the
 // engine's partner cancel cannot give a non-ball item back (init.lua
 // D.cancelPartner, pokefirered/src/battle_controller_player.c:286) -- so one
-// the sibling seat has filed this turn is not there to choose again. A flute
-// is never spent, so it is never held back.
+// the sibling seat has filed this turn is not there to choose again. The same
+// holds for every seat that spends this bag (`bagFrom`: the AI takes a trainer
+// item off BATTLE_HISTORY when it decides). A flute is never spent, so it is
+// never held back.
 Battle.prototype._bagHas = function _bagHas(fighter, item) {
   if (!truthy(fighter.bag)) return false;
   const held = fighter.bag[item];
   let n = truthy(held) ? held : 0;
   const effect = Items.bagEffect(item);
   if (!(effect && truthy(effect.noConsume))) {
-    for (const seat of fighter.seats) {
+    for (const seat of this.fighters) {
       const c = seat.choice;
-      if (seat !== fighter && c && c.action === 'item' && c.item === item) n -= 1;
+      if (seat !== fighter && seat.bag === fighter.bag && c && c.action === 'item'
+          && c.item === item) {
+        n -= 1;
+      }
     }
   }
   return n > 0;
@@ -948,9 +1112,17 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
   if (!b || b.mon.hp <= 0) return null;
 
   if (action === 'run') {
+    // A wild seat's own RUN is the cart's opponent RUN: AI_CHOICE_FLEE arrives
+    // past the selection's IsRunningFromBattleImpossible (pokefirered/src/
+    // battle_main.c:3268 / :3236); it is ordered with the moves and re-checked
+    // when it runs (`_wildFlee`).
+    if (isWildSeat(this.mode, fighter)) return { action: 'run', flee: true };
     if (isWildMode(this.mode)) {
+      // pokeemerald/src/battle_main.c:4021: a Smoke Ball or Run Away gets away
+      // first, then the traps, then Birch's "Don't leave me like this!" (:4078).
       const he = Items.of(b)[0];
-      if (he !== Items.HOLD.CAN_ALWAYS_RUN && b.ability !== 'RUN_AWAY' && this._switchBlocked(b)) {
+      if (he !== Items.HOLD.CAN_ALWAYS_RUN && b.ability !== 'RUN_AWAY'
+          && (this._switchBlocked(b) || this.firstBattle === 'birch')) {
         return null;
       }
     }
@@ -958,6 +1130,9 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
   }
 
   if (action === 'item') {
+    // rules.bag = false: "Items can't be used now." (pokeemerald battle_main.c:
+    // 4221; the screen's line), for every seat.
+    if (truthy(this.rules.noBag)) return null;
     const item = Items.idOf(choice.item);
     if (item == null) return null;
     if (isWildSeat(this.mode, fighter)) return null;
@@ -1085,9 +1260,19 @@ Battle.prototype.submitChoice = function submitChoice(playerId, choice) {
     return false;
   }
 
+  // Oak's lab: the trainer RUN is refused at selection with Oak's line
+  // (pokefirered/data/battle_scripts_1.s:3024 -> STRINGID_DONTLEAVEBIRCH, which
+  // the Oak controller turns into PrintOakText_OakNoRunningFromATrainer); the
+  // `run` lesson is the one event a refused choice leaves.
+  if (choice.action === 'run' && this.firstBattle === 'oak' && fighter.side === 'a') {
+    this._lesson('run');
+    return false;
+  }
+
   const normalised = this._normaliseChoice(fighter, choice);
   if (!normalised) return false;
   fighter.choice = normalised;
+  if (this.firstBattle === 'oak' && fighter.side === 'a') this._choiceLessons(normalised);
   this._emit('chose', { slot: fighter.slot, side: fighter.side, text: fighter.name });
   this._maybeResolve();
   return true;
@@ -1197,6 +1382,7 @@ Battle.prototype._bestSeBench = function _bestSeBench(fighter, defender) {
 
 Battle.prototype._autoItemChoice = function _autoItemChoice(fighter, b) {
   if (!truthy(fighter.bag)) return null;
+  if (truthy(this.rules.noBag)) return null;
   if (isWildSeat(this.mode, fighter)) return null;
   const { mon } = b;
   const s = Status.normalise(mon.status);
@@ -1255,6 +1441,10 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
   if (!b || b.mon.hp <= 0) return null;
   if (truthy(b.mustRecharge)) return { action: 'fight', recharge: true, move: orv(b.lastSlot, 1) };
   if (truthy(b.lockedNum)) return { action: 'fight', locked: true, move: orv(b.lockedSlot, 1) };
+
+  if (isWildSeat(this.mode, fighter) && (truthy(fighter.ai) || this.wildPick === 'cart')) {
+    return this._cartWildChoice(fighter, b);
+  }
 
   let foe = this._autoTarget(fighter);
   if (!foe) {
@@ -1370,6 +1560,119 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
     }
   }
   return this._autoFight(b, orv(pick, 1), foe);
+};
+
+// The cart's opponent controller for a wild seat (pokefirered/src/battle_
+// controller_opponent.c:1351; pokeemerald :1551), asked only when the battler
+// has a move to choose: every slot unusable is Struggle and an Encore is the
+// encored move, with no controller and no draw (battle_main.c:3143-3155).
+Battle.prototype._cartWildChoice = function _cartWildChoice(fighter, b) {
+  const foes = this._foeSeats(fighter);
+  const left = foes[0]; // B_POSITION_PLAYER_LEFT
+  if (!truthy(this.hasUsableMove(b))) {
+    return {
+      action: 'fight', move: 1, struggle: true, target: left.slot,
+    };
+  }
+  const encoreSlot = (int(b.encoreTurns, 0) > 0 && truthy(b.encoreNum))
+    ? this.slotOfNum(b, b.encoreNum) : null;
+  if (truthy(encoreSlot)) return this._autoFight(b, encoreSlot, left);
+  if (truthy(fighter.ai)) return this._wildAiChoice(fighter, b, left);
+  // The wild arm: `Random() & 3` until the slot holds a move; a move the
+  // selection refuses (TrySetCantSelectMoveBattleScript, battle_main.c:3277)
+  // sends the action back to the controller, which draws again.
+  const bad = this.moveLimitations(b);
+  let slot = null;
+  for (let k = 1; k <= M.WILD_PICK_CAP; k += 1) {
+    const s = this.roll(0, 3) + 1;
+    if (at(b.moves, s) && !truthy(bad[s])) {
+      slot = s;
+      break;
+    }
+  }
+  if (slot == null) {
+    for (let i = 1; i <= b.moves.length; i += 1) {
+      if (!truthy(bad[i])) {
+        slot = i;
+        break;
+      }
+    }
+  }
+  const ttype = int(at(b.moves, slot).target, 0);
+  // A USER / USER_OR_SELECTED row aims at the user; a double draws the
+  // player's position (`Random() & 2`); otherwise the player's left battler.
+  if (hasBit(ttype, T.USER_OR_SELECTED) || hasBit(ttype, T.USER)) {
+    return this._autoFight(b, slot, left);
+  }
+  let aim = left;
+  if (truthy(this.double)) aim = foes[this.roll(0, foes.length - 1)];
+  return { action: 'fight', move: slot, target: aim.slot };
+};
+
+// AI_Roaming / AI_FirstBattle (pokefirered/data/battle_ai_scripts.s:3226,
+// pokeemerald :3233): flee, or every usable move at the same score and a pick
+// among the best. AI_TARGET is the battler opposite.
+Battle.prototype._wildAiChoice = function _wildAiChoice(fighter, b, left) {
+  const target = this.oppositeFoe(b);
+  if (fighter.ai === 'roamer') {
+    if (this._roamerFlees(b, target)) return { action: 'run', flee: true };
+  } else if (fighter.ai === 'firstBattle') {
+    // if_hp_equal / if_hp_less_than AI_TARGET, 20: 100 * hp / maxHP, floored.
+    if (target && Math.floor((100 * target.mon.hp) / Math.max(1, target.mon.maxHp)) <= 20) {
+      return { action: 'run', flee: true };
+    }
+  }
+  return this._autoFight(b, this._aiBestSlot(b), target || left);
+};
+
+// AI_Roaming: not while wrapped or held by Mean Look / Block / Spider Web, not
+// when the target has SHADOW TAG; LEVITATE flees past an ARENA TRAP.
+Battle.prototype._roamerFlees = function _roamerFlees(b, target) {
+  if (int(b.trapTurns, 0) > 0 || b.trappedBy != null) return false;
+  const tab = target ? target.ability : null;
+  if (tab === 'SHADOW_TAG') return false;
+  if (b.ability === 'LEVITATE') return true;
+  if (tab === 'ARENA_TRAP') return false;
+  return true;
+};
+
+// BattleAI_ChooseMoveOrAction's single-battle pick over the scores (usable
+// 100, unusable or empty 0), in the cart family's own loop: FireRed /
+// LeafGreen raise THEN test the tie (a new best is listed twice), Emerald
+// tests the tie first and skips an empty slot. The family is side a's.
+Battle.prototype._aiBestSlot = function _aiBestSlot(b) {
+  const bad = this.moveLimitations(b);
+  const score = (i) => ((at(b.moves, i) && !truthy(bad[i])) ? 100 : 0);
+  const first = this.bySide.a[0];
+  const frlg = !(first && first.family === 'rse');
+  const considered = [1];
+  let n = 1;
+  let best = score(1);
+  for (let i = 2; i <= 4; i += 1) {
+    const sc = score(i);
+    if (frlg) {
+      if (best < sc) {
+        n = 1;
+        best = sc;
+        considered[0] = i;
+      }
+      if (best === sc) {
+        n += 1;
+        considered[n - 1] = i;
+      }
+    } else if (at(b.moves, i)) {
+      if (best === sc) {
+        n += 1;
+        considered[n - 1] = i;
+      }
+      if (best < sc) {
+        n = 1;
+        best = sc;
+        considered[0] = i;
+      }
+    }
+  }
+  return considered[this.roll(0, n - 1)];
 };
 
 Battle.prototype._autoChoiceOrSkip = function _autoChoiceOrSkip(fighter) {
@@ -1576,22 +1879,24 @@ Battle.prototype.forceSwitch = function forceSwitch(fighter, index, reason, bato
 };
 
 // Whirlwind / Roar blowing a battler out of a wild fight ends it
-// (pokefirered/data/battle_scripts_1.s:3283).
-Battle.prototype.blownAway = function blownAway(b) {
-  this._concedeRun(b.fighter);
+// (pokefirered/data/battle_scripts_1.s:3283): `how = 'roar'`, `by` the side of
+// the USER, whose action ended it (pokeemerald battle_script_commands.c:6487).
+Battle.prototype.blownAway = function blownAway(b, user) {
+  const by = user ? user.side : ((b.side === 'a') ? 'b' : 'a');
+  this._concedeRun(b.fighter, 'roar', by);
 };
 
-// Teleport out of a wild fight.
+// Teleport out of a wild fight: `how = 'teleport'`, `by` the user's side.
 Battle.prototype.concede = function concede(fighter) {
-  this._concedeRun(fighter);
+  this._concedeRun(fighter, 'teleport', fighter.side);
 };
 
-Battle.prototype._concedeRun = function _concedeRun(fighter) {
+Battle.prototype._concedeRun = function _concedeRun(fighter, how, by) {
   this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
   if (fighter.side === 'a') {
-    this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'run');
+    this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'run', how, by);
   } else {
-    this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run');
+    this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run', how, by);
   }
 };
 
@@ -1640,7 +1945,16 @@ Battle.prototype._beginTurn = function _beginTurn() {
     const f = this.order[i - 1];
     const { b } = f;
     const { choice } = f;
-    if (b && b.mon.hp > 0 && choice && choice.action === 'fight') {
+    if (b && b.mon.hp > 0 && choice && truthy(choice.flee)) {
+      // A wild seat's RUN is ordered with the moves (pokefirered/src/battle_
+      // main.c:3546 hoists only battler 0's RUN), at priority 0 (GetWhoStrikes-
+      // First reads MOVE_NONE for any action but a move, :3485), by speed.
+      // MOVE_NONE is not Rage.
+      delete b.rage;
+      rows.push({
+        f, b, row: null, pri: 0, order: i, flee: true,
+      });
+    } else if (b && b.mon.hp > 0 && choice && choice.action === 'fight') {
       // A recharge turn chooses no move (pokefirered/src/battle_main.c:3126
       // withholds the menu; :2993 left gChosenMoveByBattler MOVE_NONE): Rage
       // ends, no Focus Punch line, bracket 0 (the cart reads the stale chosen
@@ -1681,7 +1995,7 @@ Battle.prototype._beginTurn = function _beginTurn() {
   const seen = new Set();
   for (const f of this.order) {
     const a = f.choice ? f.choice.action : null;
-    if (a === 'switch' || a === 'item' || a === 'run') {
+    if ((a === 'switch' || a === 'item' || a === 'run') && !truthy(f.choice.flee)) {
       list.push(f);
       seen.add(f);
     }
@@ -1742,9 +2056,31 @@ Battle.prototype._resolveTurn = function _resolveTurn() {
 Battle.prototype._resolveRuns = function _resolveRuns() {
   const running = [];
   for (const fighter of this.order) {
-    if (fighter.choice && fighter.choice.action === 'run') running.push(fighter);
+    if (fighter.choice && fighter.choice.action === 'run' && !truthy(fighter.choice.flee)) {
+      running.push(fighter);
+    }
   }
   if (running.length === 0) return false;
+
+  // rules.forfeit: the Frontier / Trainer Hill trainer RUN always gets away
+  // and ends as B_OUTCOME_FORFEITED (pokeemerald battle_main.c:4321,
+  // battle_util.c:448, :5058): the runner's side loses. A wild RUN stays a RUN.
+  if (truthy(this.rules.forfeit) && !isWildMode(this.mode)) {
+    const sides = {};
+    for (const fighter of running) {
+      sides[fighter.side] = true;
+      this.say(`${fighter.name} forfeited the match!`);
+      this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
+    }
+    if (sides.a && sides.b) {
+      this._finish('draw', null, null, 'run', 'forfeit', null);
+    } else if (sides.a) {
+      this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'run', 'forfeit', 'a');
+    } else {
+      this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run', 'forfeit', 'b');
+    }
+    return true;
+  }
 
   if (!runEndsBattle(this.mode)) {
     this.say("No! There's no running from a trainer battle!");
@@ -1758,11 +2094,11 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
       this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
     }
     if (sides.a && sides.b) {
-      this._finish('draw', null, null, 'run');
+      this._finish('draw', null, null, 'run', 'run', null);
     } else if (sides.a) {
-      this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'run');
+      this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'run', 'run', 'a');
     } else {
-      this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run');
+      this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'run', 'run', 'b');
     }
     return true;
   }
@@ -1779,14 +2115,34 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
         this.say(`${this.nameOf(b)} fled using its ${lbl}!`);
         escaped = true;
       } else if (b.ability === 'RUN_AWAY') {
-        this.emitAbility(b);
-        this.say(`${this.nameOf(b)} fled using RUN AWAY!`);
+        if (truthy(this.rules.pyramidRun)) {
+          // pokeemerald/src/battle_util.c:429: in the Pyramid Run Away rolls
+          // too, the try counted before the roll.
+          this.fleeAttempts += 1;
+          escaped = this._pyramidEscape(b);
+          if (escaped) {
+            this.emitAbility(b);
+            this.say(`${this.nameOf(b)} fled using RUN AWAY!`);
+          }
+        } else {
+          this.emitAbility(b);
+          this.say(`${this.nameOf(b)} fled using RUN AWAY!`);
+          escaped = true;
+        }
+      } else if (this.ghost === 'veiled' && fighter.side === 'a') {
+        // pokefirered/src/battle_main.c:4252: from a GHOST the player's side
+        // always gets away, no try counted.
         escaped = true;
+        this.say('Got away safely!');
       } else {
         const foe = this.foes(b)[0];
         const mySpe = int(b.mon.stats.spe, 0);
         const foeSpe = foe ? int(foe.mon.stats.spe, 0) : 0;
-        if (mySpe < foeSpe) {
+        if (truthy(this.rules.pyramidRun)) {
+          // pokeemerald/src/battle_util.c:451: the Pyramid rolls whatever the
+          // speeds.
+          escaped = this._pyramidEscape(b);
+        } else if (mySpe < foeSpe) {
           const speedVar = (Math.floor(mySpe * 128 / Math.max(1, foeSpe)) + this.fleeAttempts * 30) % 256;
           escaped = speedVar > this.roll(0, 255);
         } else {
@@ -1798,7 +2154,8 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
       if (escaped) {
         this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
         const other = fighter.side === 'a' ? 'b' : 'a';
-        this._finish('win', this._sidePlayers(other), this._sidePlayers(fighter.side), 'run');
+        this._finish('win', this._sidePlayers(other), this._sidePlayers(fighter.side), 'run',
+          'run', fighter.side);
         return true;
       }
       // pokefirered/src/battle_main.c:4311: a failed escape clears Fury
@@ -1810,6 +2167,34 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
     }
   }
   return false;
+};
+
+// The Pyramid's escape roll (pokeemerald/src/battle_util.c:434 / :453): speed
+// times the floor's multiplier over the foe's, plus 30 a try, as a byte.
+Battle.prototype._pyramidEscape = function _pyramidEscape(b) {
+  const foe = this.foes(b)[0];
+  const mySpe = int(b.mon.stats.spe, 0);
+  const foeSpe = foe ? int(foe.mon.stats.spe, 0) : 0;
+  const speedVar = (Math.floor(mySpe * this.rules.pyramidRun / Math.max(1, foeSpe))
+    + this.fleeAttempts * 30) % 256;
+  return speedVar > this.roll(0, 255);
+};
+
+// A wild seat's RUN when its turn comes (pokefirered/src/battle_main.c:4317
+// HandleAction_Run, the opponent arm; pokeemerald battle_util.c:526): a partial
+// trap or Mean Look / Block / Spider Web holds it ("can't escape!", the turn
+// spent); nothing else is asked; else B_OUTCOME_MON_FLED, `how = 'flee'`.
+Battle.prototype._wildFlee = function _wildFlee(fighter) {
+  const { b } = fighter;
+  if (int(b.trapTurns, 0) > 0 || b.trappedBy != null) {
+    this.say(`Wild ${this.nameOf(b)} can't escape!`);
+    return;
+  }
+  this.say(`Wild ${this.nameOf(b)} fled!`);
+  this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
+  const other = fighter.side === 'a' ? 'b' : 'a';
+  this._finish('win', this._sidePlayers(other), this._sidePlayers(fighter.side), 'run',
+    'flee', fighter.side);
 };
 
 // Pursuit aimed at a seat that is switching out strikes first, doubled
@@ -1975,6 +2360,19 @@ Battle.prototype._useItem = function _useItem(fighter) {
       this.say('But it failed!');
       return;
     }
+    if (truthy(this.ghost)) {
+      // pokefirered/src/battle_script_commands.c:9473: a GHOST dodges every
+      // ball, veiled or unveiled -- no roll, the ball spent.
+      this._emit('ball', {
+        slot: fighter.slot,
+        side: fighter.side,
+        target: foe.slot,
+        amount: -1,
+        text: String(item),
+      });
+      this.say("It dodged the thrown BALL! This POKeMON can't be caught!");
+      return;
+    }
     const [caught, shakes] = Catch.attempt(item, target, this.rng, {
       types: target.mon.types,
       level: target.mon.level,
@@ -1992,7 +2390,7 @@ Battle.prototype._useItem = function _useItem(fighter) {
     if (caught) {
       this.say(`Gotcha! ${this.nameOf(target)} was caught!`);
       const finish = this._finish('win', this._sidePlayers(fighter.side),
-        this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'), 'catch');
+        this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'), 'catch', 'catch', fighter.side);
       if (finish) {
         finish.caught = this._caughtSheet(target, item);
         finish.catcher = fighter.owner;
@@ -2007,7 +2405,7 @@ Battle.prototype._useItem = function _useItem(fighter) {
     if (isWildMode(this.mode)) {
       this.say('Got away safely!');
       this._finish('win', this._sidePlayers(fighter.side),
-        this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'), 'run');
+        this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'), 'run', 'run', fighter.side);
     } else {
       this.say('But it failed!');
     }
@@ -2137,7 +2535,8 @@ Battle.prototype._resolveFights = function _resolveFights() {
     // inherit the turn, and a Pursuit already spent it.
     if (!truthy(f.acted) && f.b === r.b && r.b.mon.hp > 0) {
       f.acted = true;
-      this._fightAction(f, f.choice);
+      if (truthy(r.flee)) this._wildFlee(f);
+      else this._fightAction(f, f.choice);
       this._afterAction();
     }
     this._faintSweep();
@@ -2236,6 +2635,7 @@ Battle.prototype._expSlot = function _expSlot(fighter, index) {
 // however many seats it fought from, and gets one `exp` fact.
 Battle.prototype._awardExp = function _awardExp(fallen, mon) {
   if (!own(EXP_MODES, this.mode)) return;
+  if (truthy(this.rules.noExp)) return;
   if (fallen.side === EXP_OWNER_SIDE) return;
   const fought = fallen.fought || {};
   let participants = 0;
@@ -2353,9 +2753,9 @@ Battle.prototype._checkOver = function _checkOver() {
   const aliveB = this._sideAlive('b');
   if (aliveA && aliveB) return false;
   if (!aliveA && !aliveB) {
-    this._finish('draw', null, null, 'ko');
+    this._finish('draw', null, null, 'ko', 'ko', null);
   } else if (aliveA) {
-    const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
+    const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko', 'ko', 'a');
     // pokefirered/src/battle_main.c:3764: only a WON battle runs
     // BattleScript_PayDayMoneyAndPickUpItems (Cmd_givepaydaymoney), and the
     // coins are the player side's.  Link rules pay nothing (1v1 / coop_pvp); in
@@ -2364,21 +2764,27 @@ Battle.prototype._checkOver = function _checkOver() {
     const coins = int(this.payDay ? this.payDay.a : this.payDay, 0);
     if (result && own(EXP_MODES, this.mode) && coins > 0) result.payDay = coins;
   } else {
-    this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko');
+    this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko', 'ko', 'b');
   }
   return true;
 };
 
-Battle.prototype._finish = function _finish(outcome, winners, losers, reason) {
+// `how` (M.HOW) and `by` (the side whose action ended it) are contract C3's;
+// both absent for a disconnect or a timeout. Oak's closing lesson comes right
+// before `over`: 'win' on a KO side a won, 'lose' on any other KO.
+Battle.prototype._finish = function _finish(outcome, winners, losers, reason, how, by) {
   if (truthy(this.result)) return this.result;
   // nil winners / losers in the Lua are absent keys, not null ones.
   const result = { battle: this.id, outcome, reason };
   if (winners != null) result.winners = winners;
   if (losers != null) result.losers = losers;
+  if (how != null) result.how = how;
+  if (by != null) result.by = by;
   this.result = result;
   this.phase = 'over';
   this.deadline = null;
   this.resolveDeadline = null;
+  if (how === 'ko') this._lesson((by === 'a') ? 'win' : 'lose');
   this._emit('over', { text: reason });
   return this.result;
 };

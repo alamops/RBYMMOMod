@@ -19,7 +19,10 @@
 --   types     Types.typeCalc over the fixture's synthetic ordered chart
 --   damage    Damage.calc(Damage.battler(a), Damage.battler(d), move, opts)
 --             (`opts.rolls` feed Rng.scripted in draw order; a spec's `badges`
---             is its trainer's, docs/plans/gen3-badge-rules.md K1)
+--             is its trainer's, docs/plans/gen3-badge-rules.md K1; its
+--             `noDamageBadges` / `noSpeedBadge` / `noSoulDew` and the opts'
+--             `critGate` are Turn.create's `rules` / `firstBattle`, contract C3
+--             of docs/plans/gen3-solo-remaining-fights.md)
 --   base      Damage.base (CalculateBaseDamage, before crit/STAB/chart/roll;
 --             the badge boosts' placement)
 --   power     hidden power, flail, low kick, magnitude, psywave

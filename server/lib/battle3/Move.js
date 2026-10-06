@@ -21,11 +21,12 @@
  * absorb abilities act before the accuracy roll (attackcanceler), Future Sight
  * is a delayed attack even though it has power, Facade / Revenge /
  * SmellingSalt double, Struggle is not stopped by Wonder Guard, a cancelled
- * move clears the last *resulting* move too (Protect's streak), and there is no
- * Oak / Pokedude / ghost-battle branch. Disobedience (`Bm._disobey`,
- * engine.lua:1291) and the badge boosts (Damage.js base, Field.js speed)
- * follow the engine, for side a against the computer only (Turn.BADGE_MODES):
- * link rules everywhere else.
+ * move clears the last *resulting* move too (Protect's streak). Disobedience
+ * (`Bm._disobey`, engine.lua:1291) and the badge boosts (Damage.js base,
+ * Field.js speed) follow the engine, for side a against the computer only
+ * (Turn.BADGE_MODES): link rules everywhere else. The first battles (Oak's
+ * accuracy and crit gates, Birch's crits) and the Pokemon Tower GHOST (the
+ * canceller) follow pret; there is no Pokedude branch.
  *
  * Multi-value returns as arrays: canInflict -> [ok, reason] (Status.canApply),
  * _adjustDamage -> [dmg, how], _actionMove -> [row, slot, why], and the local
@@ -320,6 +321,7 @@ Bm.heal = function heal(b, amountIn) {
     this._emit('drain', {
       slot: b.slot, side: b.side, amount: gained, hp: b.mon.hp,
     });
+    if (b.side === 'b') this._lesson('damage');
   }
   return gained;
 };
@@ -336,6 +338,9 @@ Bm.loseHp = function loseHp(b, amountIn, opts) {
     hp: b.mon.hp,
     status: (truthy(opts) && truthy(opts.status)) ? opts.status : null,
   });
+  // Oak's flag 1: the foe's HP bar finishing ANY update (pokefirered/src/
+  // battle_controller_opponent.c:304), a 0 one too; a doll's damage moves no bar.
+  if (b.side === 'b') this._lesson('damage');
   return amount;
 };
 
@@ -769,6 +774,17 @@ Ctx.accuracyCheck = function accuracyCheck(mode, printFail) {
     }
     return true;
   }
+  // pokefirered/src/battle_script_commands.c:1007: Oak's lab spares the
+  // player's moves the whole check until a lesson. pret reads
+  // gBattleMoves[param].power before it resolves ACC_CURR_MOVE (0): MOVE_NONE's
+  // power, 0, for every move script -- sure to hit until the `stat` lesson;
+  // only Future Sight / Doom Desire read their own power and `damage`.
+  if (B.firstBattle === 'oak' && user.side === 'a') {
+    const power = truthy(this.opts.futureSight) ? int(this.move.power, 0) : 0;
+    if ((power !== 0 && !truthy(B.lessons.damage)) || (power === 0 && !truthy(B.lessons.stat))) {
+      return true;
+    }
+  }
   // pokefirered/src/battle_script_commands.c:896 JumpIfMoveAffectedByProtect
   if (this.isProtected()) {
     failMsg('protected');
@@ -1091,6 +1107,20 @@ function canceller(C) {
     return false;
   }
 
+  // pokefirered/src/battle_util.c:1451 CANCELLER_GHOST: a veiled GHOST cancels
+  // every move of both sides -- no attack string, no PP, and neither
+  // HITMARKER_UNABLE_TO_USE_MOVE nor a multi-turn cancel.
+  if (B.ghost === 'veiled') {
+    if (user.side === 'a') {
+      B.say(`${nm} is too scared to move!`);
+      B.emit('anim', { slot: user.slot, side: user.side, text: 'MON_SCARED' });
+    } else {
+      B.say('GHOST: Get out...... Get out......');
+      B.emit('anim', { slot: user.slot, side: user.side, text: 'GHOST_GET_OUT' });
+    }
+    return false;
+  }
+
   if (truthy(user.infatuatedWith)) {
     B.say(`${nm} is in love with ${B.nameOf(user.infatuatedWith)}!`);
     if (B.roll(0, 1) === 0) {
@@ -1184,6 +1214,9 @@ Bm._disobey = function _disobey(C) {
   const species = int(mon.speciesNum, 0);
   let ob = 0;
   if (!((species === SPECIES_MEW || species === SPECIES_DEOXYS) && mon.unfateful === true)) {
+    // rules.obedience = false: pokeemerald/src/battle_util.c:3924 returns for
+    // BATTLE_TYPE_FRONTIER inside the fateful arm.
+    if (truthy(this.rules.noObedience)) return [null];
     if (mon.traded !== true || Damage.hasBadge(user, 8)) return [null];
     ob = 10;
     if (Damage.hasBadge(user, 2)) ob = 30;
@@ -1272,6 +1305,16 @@ M.dynamicMoveType = dynamicMoveType;
 // the damaging path (effects/hit.lua)
 // ------------------------------------------------------------------
 
+// The first battles' crit rule (Damage.calc `critGate`): 'none' under Birch
+// (pokeemerald battle_script_commands.c:1281 tests the type before Random()),
+// 'void' in Oak's lab until the `damage` lesson (pokefirered :1200 draws
+// Random() first), else null. Both sides alike.
+Bm.critGate = function critGate() {
+  if (this.firstBattle === 'birch') return 'none';
+  if (this.firstBattle === 'oak' && !truthy(this.lessons.damage)) return 'void';
+  return null;
+};
+
 Bm._calcOpts = function _calcOpts(C, target, extra) {
   const side = this.sides[target.side];
   const twoDef = truthy(this.double) && this.countStandingOnSide(target.side) >= 2;
@@ -1281,6 +1324,7 @@ Bm._calcOpts = function _calcOpts(C, target, extra) {
     rng: this.rng,
     weather: this.weather(),
     dmgMultiplier: C.dmgMultiplier,
+    critGate: this.critGate(),
     reflect: int(side.reflectTurns, 0) > 0,
     lightScreen: int(side.lightScreenTurns, 0) > 0,
     doubleScreens: twoDef,
@@ -1728,9 +1772,11 @@ function beatUp(C) {
       // Cmd_critcalc (battle_script_commands.c:1196) skips the roll entirely
       // against Battle Armor / Shell Armor, as Damage.calc does.
       let crit = false;
-      if (target.ability !== 'BATTLE_ARMOR' && target.ability !== 'SHELL_ARMOR') {
+      const gate = B.critGate();
+      if (target.ability !== 'BATTLE_ARMOR' && target.ability !== 'SHELL_ARMOR' && gate !== 'none') {
         const stage = Crit.stage(user, C.move);
         [crit] = Crit.check(stage, B.roll(0, Crit.chance(stage) - 1));
+        if (gate === 'void') crit = false;
       }
       if (crit) dmg *= 2;
       const r = B.roll(Damage.ROLL_MIN, Damage.ROLL_MAX);
@@ -2839,9 +2885,14 @@ Bm._fightAction = function _fightAction(fighter, choice, optsIn) {
   if (truthy(aimed) && aimed.side === user.side && aimed !== user) chosenAlly = aimed;
   const target = this._pickTarget(user, row, aimed, why === 'encore', false);
   if (truthy(slot)) user.lastSlot = slot;
-  return this._resolveMove(user, target, row, slot, {
+  // `mover`: whose action this is, for Oak's `stat` lesson (Effects.changeStat).
+  const prev = this.mover;
+  this.mover = user;
+  const C = this._resolveMove(user, target, row, slot, {
     pursuit: opts.pursuit, passSlot: choice.pass, chosenAlly,
   });
+  this.mover = prev;
+  return C;
 };
 
 M.install = function install(Battle) {

@@ -395,16 +395,27 @@ function nm(B, b) {
 // battle_script_commands.c:2619; Cmd_tryswapitems, :8801 -- pokeemerald's
 // same two): an attacker on the opponent side (B_SIDE_OPPONENT, side b) may not
 // take or swap the player's items unless the fight is link / recorded link /
-// e-reader / frontier (FRLG: battle tower) / secret base. None of those is a
-// fight against the computer here, so the bar is Turn.BADGE_MODES (wild /
-// coop_wild / coop_npc), read off side a's `badgeRules` -- true on its fighters
-// exactly there (Turn requires this module, so it cannot read the set). 1v1 /
-// coop_pvp are link fights: either side may. Trainer Hill / Trainer Tower,
-// which bar everyone, are never mediated.
+// e-reader / frontier (FRLG: battle tower) / secret base. Against the computer
+// the bar is Turn.BADGE_MODES (wild / coop_wild / coop_npc), read off side a's
+// `badgeRules` -- true on its fighters exactly there (Turn requires this
+// module, so it cannot read the set). 1v1 / coop_pvp are link fights: either
+// side may. A facility says which it is (Turn.create `rules.theft`): 'foe' --
+// e-reader / frontier / secret base, the foe may -- and 'none' -- Trainer Hill
+// / FRLG Trainer Tower, whose check comes first and bars everyone.
 function foeItemsBarred(B, user) {
+  const theft = B.rules ? B.rules.theft : null;
+  if (theft === 'none') return true;
+  if (theft === 'foe') return false;
   if (user.side !== 'b') return false;
   const first = B.bySide && B.bySide.a && B.bySide.a[0];
   return first != null && first.badgeRules === true;
+}
+
+// Whether a knocked-off item still bars Thief / Covet / Trick: `rules.theft =
+// 'foe'` lifts the check as the cart does (pokeemerald battle_script_
+// commands.c:2756 / :9203); link fights keep it here (see STEAL_ITEM).
+function knockedOffBars(B) {
+  return !(B.rules && B.rules.theft === 'foe');
 }
 
 // ------------------------------------------------------------------
@@ -471,6 +482,13 @@ M.changeStat = function changeStat(B, b, stat, delta, flagsIn) {
     });
   }
   if (!truthy(flags.noMsg)) B.say(text);
+  // Oak's flag 2 (pokefirered/src/battle_controller_oak_old_man.c:1769): the
+  // first STRINGID_DEFENDERSSTATFELL the player's controller prints -- a fall
+  // printed for a foe while a side-a battler's action runs (`B.mover`).
+  if (delta < 0 && !truthy(flags.noMsg) && !truthy(flags.user) && b.side === 'b'
+      && B.mover && B.mover.side === 'a' && B.mover !== b) {
+    B._lesson('stat');
+  }
   return 'worked';
 };
 
@@ -685,7 +703,7 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     // this check only in link fights; this one writes items back like a
     // non-link fight, so the check stands.
     if (foeItemsBarred(B, user)) return false;
-    if (truthy(user.mon.knockedOff)) return false;
+    if (truthy(user.mon.knockedOff) && knockedOffBars(B)) return false;
     const tItem = int(target.mon.heldItem, 0);
     if (tItem !== 0 && target.ability === 'STICKY_HOLD') {
       B.emitAbility(target);
@@ -698,6 +716,10 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     }
     const row = Items.rowOf(target);
     const lbl = B.itemLabel(target);
+    // REQUEST_HELDITEM_BATTLE writes the stolen item to the thief's party slot
+    // (pokeemerald battle_script_commands.c:2790), over an item Knock Off left
+    // there -- reachable only where the knocked-off check is lifted.
+    user.mon.knockedOff = null;
     Items.give(user, row);
     Items.give(target, null);
     // :2668: the robbed battler's Choice Band lock goes with the band
@@ -1956,7 +1978,7 @@ H[E.ROAR] = function effectRoar(C) {
   C.attackAnimation();
   if (truthy(B.isWild())) {
     // pokefirered/data/battle_scripts_1.s:3283: blown out of a wild fight
-    B.blownAway(t);
+    B.blownAway(t, user);
     return undefined;
   }
   const slot = candidates[B.roll(1, candidates.length) - 1];
@@ -2182,7 +2204,7 @@ H[E.TRICK] = function effectTrick(C) {
   if (sub(t)) return C.fail();
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
   if (foeItemsBarred(B, user)) return C.fail();
-  if (truthy(user.mon.knockedOff) || truthy(t.mon.knockedOff)) return C.fail();
+  if ((truthy(user.mon.knockedOff) || truthy(t.mon.knockedOff)) && knockedOffBars(B)) return C.fail();
   const ui = int(user.mon.heldItem, 0);
   const ti = int(t.mon.heldItem, 0);
   if ((ui === 0 && ti === 0) || ui === Items.ITEM_ENIGMA_BERRY || ti === Items.ITEM_ENIGMA_BERRY
@@ -2197,6 +2219,10 @@ H[E.TRICK] = function effectTrick(C) {
   const trow = Items.rowOf(t);
   const ulbl = B.itemLabel(user);
   const tlbl = B.itemLabel(t);
+  // Both party slots are written (REQUEST_HELDITEM_BATTLE, :9248), over any
+  // item Knock Off left there (only where the knocked-off check is lifted).
+  user.mon.knockedOff = null;
+  t.mon.knockedOff = null;
   Items.give(user, trow);
   Items.give(t, urow);
   // :8862: both Choice Band locks are lifted

@@ -219,7 +219,10 @@ function Bm:_tickWeather(order)
   if kind ~= "SAND" and kind ~= "HAIL" then return end
   if not self:weather() then return end
   for _, b in ipairs(order) do
-    if b.mon.hp > 0 and not Field.weatherImmune(b, kind) then
+    -- pokefirered/src/battle_script_commands.c:7218 Cmd_weatherdamage: a veiled
+    -- GHOST takes no chip (0 damage, so no line either).
+    local ghost = self.ghost == "veiled" and b.side == "b"
+    if b.mon.hp > 0 and not Field.weatherImmune(b, kind) and not ghost then
       self:say(self:nameOf(b) .. (kind == "SAND" and " is buffeted by the sandstorm!" or " is pelted by HAIL!"))
       self:loseHp(b, Field.chip(b.mon.maxHp))
       self:_faintSweep()

@@ -113,6 +113,9 @@ function outcomeOf(out) {
   if (out.catcher) o.catcher = out.catcher;
   if (out.caught) o.caughtSpecies = out.caught.species;
   if (out.payDay) o.payDay = out.payDay;
+  // contract C3 (docs/plans/gen3-solo-remaining-fights.md): how it ended, by whom
+  if (out.how) o.how = out.how;
+  if (out.by) o.by = out.by;
   return o;
 }
 

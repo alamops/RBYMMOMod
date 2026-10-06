@@ -266,6 +266,9 @@ function battler(specIn) {
     lastSpecDmg: int(spec.lastSpecDmg, 0),
     lastSpecBy: spec.lastSpecBy,
     badges: badgeSet(spec.badges),
+    noDamageBadges: (spec.noDamageBadges === true) ? true : null,
+    noSpeedBadge: (spec.noSpeedBadge === true) ? true : null,
+    noSoulDew: (spec.noSoulDew === true) ? true : null,
   };
   const t2 = int(types[1], null);
   if (t2 !== null && t2 !== b.type1) b.type2 = t2;
@@ -370,11 +373,21 @@ function base(attacker, defender, moveIn, optsIn) {
   // the abilities below; the stat stages come later, in the formula. Badge 1 the
   // attacker's Attack, 5 the defender's Defense, 7 the attacker's Sp. Atk and the
   // defender's Sp. Def -- each read off that battler's own trainer, so a self-hit
-  // (confusion, disobedience) carries both of its own. See the Lua twin.
-  if (hasBadge(attacker, 1)) attack = Math.floor(110 * attack / 100);
-  if (hasBadge(defender, 5)) defense = Math.floor(110 * defense / 100);
-  if (hasBadge(attacker, 7)) spAttack = Math.floor(110 * spAttack / 100);
-  if (hasBadge(defender, 7)) spDefense = Math.floor(110 * spDefense / 100);
+  // (confusion, disobedience) carries both of its own. See the Lua twin. The
+  // Frontier / e-Reader exclusions (pokeemerald/src/pokemon.c:3407) arrive as
+  // the battler's `noDamageBadges` (Turn.create `rules.boosts.damage = false`).
+  if (hasBadge(attacker, 1) && !(attacker && truthy(attacker.noDamageBadges))) {
+    attack = Math.floor(110 * attack / 100);
+  }
+  if (hasBadge(defender, 5) && !(defender && truthy(defender.noDamageBadges))) {
+    defense = Math.floor(110 * defense / 100);
+  }
+  if (hasBadge(attacker, 7) && !(attacker && truthy(attacker.noDamageBadges))) {
+    spAttack = Math.floor(110 * spAttack / 100);
+  }
+  if (hasBadge(defender, 7) && !(defender && truthy(defender.noDamageBadges))) {
+    spDefense = Math.floor(110 * spDefense / 100);
+  }
 
   const [aHe, aParam] = holdOf(attacker);
   const [dHe] = holdOf(defender);
@@ -388,10 +401,14 @@ function base(attacker, defender, moveIn, optsIn) {
   const aSp = int(attacker ? attacker.speciesNum : null, 0);
   const dSp = int(defender ? defender.speciesNum : null, 0);
   if (aHe === HOLD.CHOICE_BAND) attack = Math.floor(150 * attack / 100);
-  if (aHe === HOLD.SOUL_DEW && (aSp === SPECIES.LATIAS || aSp === SPECIES.LATIOS)) {
+  // pokeemerald/src/pokemon.c:3187: SOUL DEW is inert in the Frontier
+  // (`noSoulDew`, Turn.create `rules.soulDew = false`), for either battler.
+  if (aHe === HOLD.SOUL_DEW && (aSp === SPECIES.LATIAS || aSp === SPECIES.LATIOS)
+      && !truthy(attacker.noSoulDew)) {
     spAttack = Math.floor(150 * spAttack / 100);
   }
-  if (dHe === HOLD.SOUL_DEW && (dSp === SPECIES.LATIAS || dSp === SPECIES.LATIOS)) {
+  if (dHe === HOLD.SOUL_DEW && (dSp === SPECIES.LATIAS || dSp === SPECIES.LATIOS)
+      && !truthy(defender.noSoulDew)) {
     spDefense = Math.floor(150 * spDefense / 100);
   }
   if (aHe === HOLD.DEEP_SEA_TOOTH && aSp === SPECIES.CLAMPERL) spAttack *= 2;
@@ -507,7 +524,8 @@ function fixedInfo(move, product, flags, physical, extra) {
 }
 
 // opts (beyond base's): typeTable, rng, forceCrit, forceRoll, noRandom, noCrit,
-//   dmgMultiplier, magnitudeRoll, psywaveRoll, pursuitSwitch, defenderId
+//   critGate ('none': no crit, no draw; 'void': drawn, then voided -- the first
+//   battles, Move.js Bm.critGate), dmgMultiplier, magnitudeRoll, psywaveRoll, pursuitSwitch, defenderId
 //   (Revenge), foresight (override; default defender.identified), fixedDamage.
 //
 // Returns [damage, info], info = { effectiveness (product x100), critical,
@@ -647,10 +665,12 @@ function calc(attacker, defender, moveIn, optsIn) {
   const dAb = defender.ability;
   if (opts.forceCrit !== undefined && opts.forceCrit !== null) {
     crit = truthy(opts.forceCrit);
-  } else if (dAb !== 'BATTLE_ARMOR' && dAb !== 'SHELL_ARMOR' && !truthy(opts.noCrit)) {
+  } else if (dAb !== 'BATTLE_ARMOR' && dAb !== 'SHELL_ARMOR' && !truthy(opts.noCrit)
+      && opts.critGate !== 'none') {
     // pokefirered/src/battle_script_commands.c:1170
     const stage = Crit.stage(attacker, move);
     [crit] = Crit.check(stage, roll(opts, 0, Crit.chance(stage) - 1));
+    if (opts.critGate === 'void') crit = false;
   }
   const critMul = crit ? Crit.MULTIPLIER : 1;
 
