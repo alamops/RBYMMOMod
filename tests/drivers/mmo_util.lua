@@ -2878,10 +2878,19 @@ local function sameList(a, b)
   return true
 end
 
+-- Gold's item slots live in the trainer's kit, one per trainer and shared by
+-- its seats (BattleSim2 `trainerKitOf`: wEnemyTrainerItem1 / 2 and the base
+-- reward); a seat built without one holds them itself.
+local function seatTrainerItems(seat)
+  local kit = type(seat) == "table" and seat.trainerKit or nil
+  if type(kit) == "table" then return kit.trainerItems end
+  return type(seat) == "table" and seat.trainerItems or nil
+end
+
 local function classData12(generation, seat)
   if type(seat) ~= "table" then return nil end
   if generation == 2 then
-    return { items = carriedItems(seat.trainerItems), aiFlags = tonumber(seat.aiFlags),
+    return { items = carriedItems(seatTrainerItems(seat)), aiFlags = tonumber(seat.aiFlags),
              itemSwitch = tonumber(seat.itemSwitch) }
   end
   local class = type(seat.aiClass) == "table" and seat.aiClass or nil
@@ -2954,9 +2963,9 @@ function M.assertTrainerKit(game, check, log, opts)
         :format(source, #got.items, got.aiFlags and "set" or "none", got.itemSwitch and "set" or "none",
           want and tostring(#want.items) or "?"))
     end
-    check(type(seat.trainerItems) == "table",
+    check(type(seatTrainerItems(seat)) == "table",
           "the Gold computer seat carries its class's item slots (K16 `trainerItems`)",
-          type(seat.trainerItems))
+          type(seatTrainerItems(seat)))
     if known and want then
       check(sameList(got.items, want.items),
             "...the class's own ITEM1 / ITEM2 (wEnemyTrainerItem1 / 2), in slot order",
