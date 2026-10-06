@@ -1151,6 +1151,16 @@ local STATUS_ANIM_LOOK = {
 --                           sight -- a ground rumble under the screens' dig
 --                           vanish, which STATUS_AFFECTED_ANIM or DIG's
 --                           release undoes, as FLY's.
+--     SHRINKING_SQUARE_ANIM ThrashPetalDanceEffect's on a THRASH / PETAL
+--                           DANCE's first turn (ShrinkingSquareAnim: the
+--                           light-screen palette and
+--                           SUBANIM_0_CIRCLE_1_SQUARE_CLOSING over the user):
+--                           a short pulse closing in on the user's seat.
+--   ENEMY_HUD_SHAKE_ANIM and SHAKE_SCREEN_ANIM (PoisonEffect's and
+--   FreezeBurnParalyzeEffect's on a side-effect status) are motion, not
+--   particles: the screens shake a seat's plate or the whole field for them
+--   (MediatedBattle / CoopBattle `startAnim`, Battlefield.fxPlateShake), and
+--   they have no row here.
 --   Gold (pokecrystal / pokegold constants/move_constants.asm, ANIM_<X> sent
 --   as <X>_ANIM): the residual and condition clips of engine/battle/core.asm
 --   (ResidualDamage's PSN / BRN / SAP / IN_NIGHTMARE, HandleWeather's
@@ -1168,6 +1178,8 @@ M.CART_ANIM_LOOK = {
   XSTATITEM_ANIM       = { style = "sparkle", palette = "BUFF",   scale = 0.9,  intensity = 0.9 },
   BLOCKBALL_ANIM       = { style = "impact",  palette = "NORMAL", scale = 0.6,  intensity = 0.7 },
   SLIDE_DOWN_ANIM      = { style = "quake",   palette = "GROUND", scale = 0.9,  intensity = 0.85 },
+  SHRINKING_SQUARE_ANIM = { style = "psi",    palette = "NORMAL", scale = 0.7,  intensity = 0.75,
+                            duration = 0.35 },
   -- Gold: the conditions
   BRN_ANIM = "BRN", PSN_ANIM = POISON_NAME, FRZ_ANIM = "FRZ", PAR_ANIM = "PAR",
   SAP_ANIM             = { style = "swarm",   palette = "GRASS" },

@@ -6866,6 +6866,125 @@ do
     eq(looks(), 2, "K22: an XSTATITEM_ANIM not straight behind its seat's item takes no bag look over")
   end
 
+  -- ------- H1b: a multi-hit move is one strike a hit (pokered `jp nz,
+  -- GetPlayerAnimationType`: the Red referee sends the move's animation
+  -- again before every hit after the first) -- each its own lunge, look and
+  -- hit beat, one shout for the attack.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "h1m")
+    ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+    ev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+    ev({ t = "damage", slot = FOE, side = "b", amount = 3, hp = 27 })
+    ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+    ev({ t = "damage", slot = FOE, side = "b", amount = 3, hp = 24 })
+    ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+    ev({ t = "damage", slot = FOE, side = "b", amount = 3, hp = 21 })
+    ev({ t = "msg", text = "Hit the enemy\n3 times!" })
+    eq(#calloutRows(f), 0, "H1b multi-hit: the first strike's animation shouts; no callout row")
+    local strikes, marked = 0, 0
+    for _, row in ipairs(f.lines) do
+      if type(row) == "table" and row.anim == "EMBER" then
+        strikes = strikes + 1
+        if row.calledOut then marked = marked + 1 end
+      end
+    end
+    eq(strikes .. "/" .. marked, "3/2", "H1b multi-hit: three strikes, the two after the first shout nothing")
+    local raised, lunges, flashes = 0, 0, 0
+    local guard, borns = 0, {}
+    while (#f.lines > 0 or f.anim or f.shown) and guard < 4000 do
+      f:update(1 / 60); guard = guard + 1
+      -- A bubble is new when its `born` frame is (the list is rebuilt as it fades).
+      local now = f.battlefieldBubbles and f.battlefieldBubbles[1]
+      if now ~= nil and not borns[now.born or -1] then
+        borns[now.born or -1] = true
+        raised = raised + 1
+      end
+      for _, e in ipairs(f.fx or {}) do
+        if not e.h1Seen then
+          e.h1Seen = true
+          if e.kind == "lunge" then lunges = lunges + 1 end
+          if e.kind == "flash" then flashes = flashes + 1 end
+        end
+      end
+    end
+    eq(raised, 1, "H1b multi-hit: one bubble for the attack")
+    eq(lunges .. "/" .. flashes, "3/3", "H1b multi-hit: a lunge and a hit beat for every hit -- no doubling")
+    -- A new turn is a new attack: the same move from the same seat shouts again.
+    ev({ t = "turn", amount = 2 })
+    ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+    local again
+    for _, row in ipairs(f.lines) do if type(row) == "table" and row.anim == "EMBER" then again = row end end
+    eq(again and again.calledOut, nil, "H1b multi-hit: the next turn's EMBER is a fresh attack")
+  end
+
+  -- ------- H1b: the side-effect shakes and THRASH's square have their looks
+  do
+    local look = Vfx.forStatusAnim("SHRINKING_SQUARE_ANIM")
+    check(type(look) == "table" and Vfx.STYLES[look.style] ~= nil and Vfx.PALETTES[look.palette] ~= nil,
+          "H1b: SHRINKING_SQUARE_ANIM has a look")
+    eq(Vfx.forStatusAnim("ENEMY_HUD_SHAKE_ANIM"), nil, "H1b: ENEMY_HUD_SHAKE_ANIM is motion, not particles")
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "h1s")
+    ev({ t = "anim", slot = 0, side = "a", text = "SHRINKING_SQUARE_ANIM" })
+    pump(f)
+    local square = sawFx(f, "vfx")
+    eq(square and square.side, "ally", "H1b: THRASH's square plays on the thrasher's seat")
+    eq(sawFx(f, "lunge"), nil, "H1b: ...as a look, no lunge")
+    f.fx, f.seenFx = nil, nil
+    ev({ t = "anim", slot = FOE, side = "b", text = "ENEMY_HUD_SHAKE_ANIM" })
+    pump(f)
+    local hud = sawFx(f, "hudshake")
+    eq(hud and hud.side, "foe", "H1b: ENEMY_HUD_SHAKE_ANIM shakes the plate of the seat it names")
+    eq(sawFx(f, "shake"), nil, "H1b: ...and not the field")
+    f.fx, f.seenFx = nil, nil
+    ev({ t = "anim", slot = 0, side = "a", text = "SHAKE_SCREEN_ANIM" })
+    pump(f)
+    check(sawFx(f, "shake") ~= nil and sawFx(f, "hudshake") == nil, "H1b: SHAKE_SCREEN_ANIM jolts the whole field")
+    local Battlefield = need("Battlefield")
+    local moved = Battlefield.fxPlateShake({ { kind = "hudshake", side = "foe", seatIndex = 1, t = 0.1 } }, "foe", 1)
+    check(moved ~= 0 and math.abs(moved) <= Battlefield.FX_HUD_SHAKE, "H1b: Battlefield moves that plate, clamped")
+    eq(Battlefield.fxPlateShake({ { kind = "hudshake", side = "foe", seatIndex = 1, t = 0.1 } }, "ally", 1), 0,
+       "H1b: ...and no other")
+  end
+
+  -- ------- H1b: THRASH's first turn as the Red referee sends it -- the used
+  -- line, ThrashPetalDanceEffect's square, then the move's animation (pret:
+  -- SpecialEffectsCont before MoveHitTest and the move's animation).  The
+  -- line shouts on its own, the square plays, and the strike behind it lunges
+  -- without a second shout.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "h1t")
+    ev({ t = "msg", text = "^aCHARMANDER\nused THRASH!" })
+    ev({ t = "anim", slot = 0, side = "a", text = "SHRINKING_SQUARE_ANIM" })
+    ev({ t = "anim", slot = 0, side = "a", text = "THRASH" })
+    ev({ t = "damage", slot = FOE, side = "b", amount = 5, hp = 25 })
+    eq(#calloutRows(f), 1, "H1b THRASH: the used line queues its own shout")
+    local strike
+    for _, row in ipairs(f.lines) do
+      if type(row) == "table" and row.anim == "THRASH" then strike = row end
+    end
+    eq(strike and strike.calledOut, true, "H1b THRASH: the strike behind the square shouts nothing")
+    local frame, guard, borns, raised = 0, 0, {}, 0
+    local squareAt, lungeAt, lunges = nil, nil, 0
+    while (#f.lines > 0 or f.anim or f.shown) and guard < 4000 do
+      f:update(1 / 60); guard = guard + 1; frame = frame + 1
+      local now = f.battlefieldBubbles and f.battlefieldBubbles[1]
+      if now ~= nil and not borns[now.born or -1] then
+        borns[now.born or -1] = true
+        raised = raised + 1
+      end
+      for _, e in ipairs(f.fx or {}) do
+        if not e.h1tSeen then
+          e.h1tSeen = true
+          if e.kind == "lunge" then lunges = lunges + 1; lungeAt = lungeAt or frame end
+          if e.kind == "vfx" and e.side == "ally" then squareAt = squareAt or frame end
+        end
+      end
+    end
+    eq(raised .. "/" .. lunges, "1/1", "H1b THRASH: one bubble, one lunge")
+    check(squareAt ~= nil and lungeAt ~= nil and squareAt < lungeAt,
+          "H1b THRASH: the square plays before the strike (" .. tostring(squareAt) .. " < " .. tostring(lungeAt) .. ")")
+  end
+
   -- ------- K23: Gold / Silver's count-as-species types
   do
     local data = setmetatable({ pokemon = {

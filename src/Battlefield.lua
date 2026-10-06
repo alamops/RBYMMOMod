@@ -927,6 +927,7 @@ end
 
 M.FX_LUNGE = 14 -- peak px toward the midline, reached at t == 0.5
 M.FX_SHAKE = 3 -- peak whole-field jolt, px
+M.FX_HUD_SHAKE = 4 -- peak plate jolt, px (Red's ENEMY_HUD_SHAKE_ANIM)
 M.FX_FAINT_DROP = 0.5 -- fraction of the mon box a fainting seat sinks
 M.FX_BALL_R = 5 -- pokéball radius (a ~10px ball on a 60px mon)
 M.FX_BALL_LIFT = 46 -- peak px the arc rises above the straight line
@@ -1149,6 +1150,22 @@ function M.fxFieldShake(fx)
     end
   end
   return clamp(dx, -M.FX_SHAKE, M.FX_SHAKE), clamp(dy, -M.FX_SHAKE, M.FX_SHAKE)
+end
+
+-- One seat's plate jolting side to side: pokered EnemyHUDShakeAnim
+-- (SE_SHAKE_ENEMY_HUD), which PoisonEffect and FreezeBurnParalyzeEffect play
+-- on a side-effect status the player's move landed -- the HUD of the monster
+-- it landed on shakes and the field holds still.  `hudshake` FX on that seat
+-- (side and seatIndex as `fxSeat` reads them); clamped like the field's.
+function M.fxPlateShake(fx, side, seatIndex)
+  local dx = 0
+  for _, e in ipairs(listOf(fx)) do
+    if type(e) == "table" and e.kind == "hudshake" and e.side == side
+       and (e.seatIndex == nil or e.seatIndex == seatIndex) then
+      dx = dx + M.FX_HUD_SHAKE * M.fxShake(e.t)
+    end
+  end
+  return clamp(dx, -M.FX_HUD_SHAKE, M.FX_HUD_SHAKE)
 end
 
 -- dir -1 / +1; wraps. `current` is 1-based index into `targets`, or a seat
@@ -6097,7 +6114,17 @@ function M.draw(battle, ctx, eng)
           M.FIELD_HEIGHT, layout.frame, 1)
       end
       for _, plate in ipairs(layout.plates) do
-        pcall(drawPlate, plate)
+        -- A seat's own HUD shake (ENEMY_HUD_SHAKE_ANIM) moves its plate alone.
+        local hud = hasFx and plate.mon
+          and M.fxPlateShake(layout.fx, plate.side, plate.mon.seatIndex) or 0
+        if hud ~= 0 then
+          local moved = {}
+          for k, v in pairs(plate) do moved[k] = v end
+          moved.x = plate.x + hud
+          pcall(drawPlate, moved)
+        else
+          pcall(drawPlate, plate)
+        end
       end
       -- After the plates and before the pointer: the chips sit in the two
       -- corners the plates never reach, so the order between those two is free

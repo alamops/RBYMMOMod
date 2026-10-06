@@ -3972,6 +3972,54 @@ scenario('g1_k22_anims', fights('g1ka', [
   { mode: 'wild', seed: 14014, turns: [{ p1: 0, p2: 0 }] }),
 ]));
 
+// H1b: the animations a multi-hit move, a thrash's first turn and a
+// side-effect status play (pokered core.asm `jp nz, GetPlayerAnimationType`,
+// effects.asm ThrashPetalDanceEffect / PoisonEffect /
+// FreezeBurnParalyzeEffect):
+//   1 DOUBLE KICK: the move's animation before each of its two hits;
+//   2 a two-to-five move: one per hit, the count's own;
+//   3 the same at power 0 (CalculateDamage's `.skipbp`: a hit like any other);
+//   4 THRASH's first turn: SHRINKING_SQUARE_ANIM behind the used line and
+//     ahead of the move's animation, and its later turns none;
+//   5 a THRASH that misses: the square all the same, no move animation;
+//   6 wild: the player's poison side effect shakes the enemy's HUD, the wild
+//     monster's shakes the screen;
+//   7 wild: the player's burn shakes the enemy's HUD, the wild monster's
+//     shakes nothing;
+//   8 a link fight: both sides are the player -- each side's burn shakes the
+//     other's HUD;
+//   9 TWINEEDLE's poison is PoisonEffect's side effect too.
+const oneRow = () => [{ p1: 0, p2: 0 }];
+scenario('g1_h1b_anims', fights('g1hb', [
+  r1duo([r1s('Alpha', [r1m('kicks', 20, 44)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15001, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('barrage', 15, 29)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15002, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('pebbles', 0, 29)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15003, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('THRASH', 30, 27)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15004, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('THRASH', 30, 27, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15005, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('sting', 10, 2, { chance: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('sting', 10, 2, { chance: 100 })], { spd: 10 })],
+    { mode: 'wild', seed: 15006, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 90 })],
+    [r1s('Beta', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 10 })],
+    { mode: 'wild', seed: 15007, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 90 })],
+    [r1s('Beta', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 10 })],
+    { seed: 15008, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('needle', 10, 77, { chance: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15009, turns: oneRow() }),
+]));
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -6494,7 +6542,10 @@ test('a charge turn is the charge line alone; the release says "used" and pays',
 test('a PETAL DANCE continuation animates as THRASH', () => {
   const anims = duelEvents('g1_thrash_anim', 1).filter((e) => e.t === 'anim' && e.slot === 0)
     .map((e) => e.text);
-  assert.deepStrictEqual(anims.slice(0, 3), ['PETAL_DANCE', 'THRASH', 'THRASH']);
+  // The first turn's ThrashPetalDanceEffect adds SHRINKING_SQUARE_ANIM, ahead
+  // of the move's own animation (SpecialEffectsCont runs before MoveHitTest).
+  assert.deepStrictEqual(anims.slice(0, 4),
+    ['SHRINKING_SQUARE_ANIM', 'PETAL_DANCE', 'THRASH', 'THRASH']);
 });
 
 test('the crit and effectiveness lines follow the hit; One-hit KO!', () => {
@@ -6957,4 +7008,42 @@ test('an unreadable aiClass refuses the fight; a wild or link seat\'s is not rea
   assert.ok(tryAi({ uses: 0 }, 'wild').battle && tryAi({ uses: 0 }, '1v1').battle,
     "a wild / link seat's: ignored");
   assert.strictEqual(tryAi({ uses: 0 }, 'wild').battle.byId.get('p2').aiClass, null);
+});
+
+test('H1b: a multi-hit move animates every hit, THRASH starts on a square, a side-effect status shakes', () => {
+  const g = 'g1_h1b_anims';
+  const fight = (at) => rawOf(g, 'g1hb', at);
+  const seq = (at, keep) => fight(at).filter(keep).map((e) => (e.t === 'anim'
+    ? `@${e.slot}:${e.text}` : e.t === 'damage' ? `-${e.slot}` : e.text));
+  const mine = (at) => seq(at, (e) => (e.t === 'anim' && e.slot === 0) || (e.t === 'damage' && e.slot === 3));
+  assert.deepStrictEqual(mine(1), ['@0:kicks', '-3', '@0:kicks', '-3'], 'DOUBLE KICK: an animation a hit');
+  const barrage = mine(2);
+  assert.strictEqual(barrage.filter((x) => x === '@0:barrage').length,
+    barrage.filter((x) => x === '-3').length, 'two-to-five: as many animations as hits');
+  assert.deepStrictEqual(mine(3), ['@0:pebbles', '-3', '@0:pebbles', '-3'],
+    'power 0 (.skipbp): the first hit animates too');
+  const thrash = fight(4);
+  assert.ok(inOrder(lineAt(thrash, '^aAlpha\nused THRASH!'), kindAt(thrash, 'anim', 0, 'SHRINKING_SQUARE_ANIM'),
+    kindAt(thrash, 'anim', 0, 'THRASH'), kindAt(thrash, 'damage', 3)),
+  'THRASH: the used line, the square, the move, the hit');
+  assert.ok(thrash.every((e, i) => i === 0 || e.seq === thrash[i - 1].seq + 1),
+    'the moved animation keeps the stream\'s seq unbroken');
+  assert.strictEqual(thrash.filter((e) => e.text === 'SHRINKING_SQUARE_ANIM').length, 1,
+    '...on the first turn only');
+  const missed = fight(5);
+  assert.ok(kindAt(missed, 'anim', 0, 'SHRINKING_SQUARE_ANIM') !== null
+    && kindAt(missed, 'anim', 0, 'THRASH') === null, 'a missed THRASH: the square, no move animation');
+  const poison = fight(6);
+  assert.ok(inOrder(kindAt(poison, 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM'), lineAt(poison, '^bBeta\nwas poisoned!'))
+    && inOrder(kindAt(poison, 'anim', 0, 'SHAKE_SCREEN_ANIM'), lineAt(poison, '^aAlpha\nwas poisoned!')),
+  "poison: the player's shakes the enemy's HUD, the computer's the screen, each ahead of its line");
+  const burn = fight(7);
+  assert.ok(inOrder(kindAt(burn, 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM'), lineAt(burn, '^bBeta\nwas burned!'))
+    && kindAt(burn, 'anim', 0, 'ENEMY_HUD_SHAKE_ANIM') === null
+    && kindAt(burn, 'anim', 0, 'SHAKE_SCREEN_ANIM') === null,
+  "burn: the player's shakes the enemy's HUD, the computer's nothing");
+  const link = fight(8);
+  assert.ok(kindAt(link, 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM') !== null
+    && kindAt(link, 'anim', 0, 'ENEMY_HUD_SHAKE_ANIM') !== null, 'a link fight: both sides are the player');
+  assert.ok(kindAt(fight(9), 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM') !== null, "TWINEEDLE's poison shakes too");
 });

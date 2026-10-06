@@ -10153,6 +10153,88 @@ do
 end
 
 -- ------------------------------------------------------------------
+-- 32. H1b: the animations a multi-hit move (core.asm `jp nz,
+--     GetPlayerAnimationType`), a thrash's first turn (ThrashPetalDanceEffect)
+--     and a side-effect status (PoisonEffect, FreezeBurnParalyzeEffect) play.
+--     Read raw.  The g1_h1b_anims parity scenario holds lib/battle to them.
+-- ------------------------------------------------------------------
+
+do
+  local function fight(mode, aMove, bMove, seed)
+    local battle = assert(Turn.create({
+      id = "h1b", mode = mode, seed = seed or 41, choiceTimeout = 60, reconnectGrace = 60,
+      sides = {
+        a = { { playerId = "p1", name = "Ann", mons = { mon({ species = "Alpha", spd = 90, maxHp = 400,
+                                                              moves = { move(aMove) } }) } } },
+        b = { { playerId = "p2", name = "Bob", mons = { mon({ species = "Beta", spd = 10, maxHp = 400,
+                                                              moves = { move(bMove) } }) } } },
+      },
+    }))
+    drainRaw(battle)
+    battle:submitChoice("p1", { action = "fight", move = 0 })
+    battle:submitChoice("p2", { action = "fight", move = 0 })
+    return drainRaw(battle)
+  end
+  local SPL = { id = "splash", power = 0, effect = 85 }
+  local function strikes(list, id)
+    local anims, hits = 0, 0
+    for _, e in ipairs(list) do
+      if e.t == "anim" and e.slot == 0 and e.text == id then anims = anims + 1 end
+      if e.t == "damage" and e.slot == 3 then hits = hits + 1 end
+    end
+    return anims, hits
+  end
+  local list = fight("wild", { id = "kicks", power = 20, effect = 44 }, SPL)
+  local anims, hits = strikes(list, "kicks")
+  eq(anims .. "/" .. hits, "2/2", "DOUBLE KICK: the move's animation before each hit")
+  list = fight("wild", { id = "barrage", power = 15, effect = 29 }, SPL)
+  anims, hits = strikes(list, "barrage")
+  ok(hits >= 2 and anims == hits, "two-to-five: an animation for every hit (" .. anims .. "/" .. hits .. ")")
+  list = fight("wild", { id = "pebbles", power = 0, effect = 29 }, SPL)
+  anims, hits = strikes(list, "pebbles")
+  ok(hits >= 2 and anims == hits, "power 0 (CalculateDamage `.skipbp`): the first hit animates too")
+
+  list = fight("wild", { id = "THRASH", power = 30, effect = 27 }, SPL)
+  ok(before(saidAt(list, "^aAlpha\nused THRASH!"), eventAt(list, "anim", 0, "SHRINKING_SQUARE_ANIM"))
+     and before(eventAt(list, "anim", 0, "SHRINKING_SQUARE_ANIM"), eventAt(list, "anim", 0, "THRASH"))
+     and before(eventAt(list, "anim", 0, "THRASH"), eventAt(list, "damage", 3)),
+     "THRASH's first turn: the used line, SHRINKING_SQUARE_ANIM on the thrasher, the move's animation, then the hit")
+  do
+    local seqs, sorted = {}, true
+    for i, e in ipairs(list) do
+      seqs[#seqs + 1] = e.seq
+      if i > 1 and e.seq ~= list[i - 1].seq + 1 then sorted = false end
+    end
+    ok(sorted, "the moved animation keeps the stream's seq unbroken (" .. table.concat(seqs, ","):sub(1, 60) .. ")")
+  end
+  list = fight("wild", { id = "THRASH", power = 30, effect = 27, accuracy = 0 }, SPL)
+  ok(eventAt(list, "anim", 0, "SHRINKING_SQUARE_ANIM") and eventAt(list, "anim", 0, "THRASH") == nil,
+     "a THRASH that misses: the square all the same, no move animation")
+
+  local sting = { id = "sting", power = 10, effect = 2, chance = 100 }
+  list = fight("wild", sting, sting)
+  ok(before(eventAt(list, "anim", 3, "ENEMY_HUD_SHAKE_ANIM"), saidAt(list, "^bBeta\nwas poisoned!")),
+     "the player's poison side effect: ENEMY_HUD_SHAKE_ANIM on the target, ahead of the line")
+  ok(before(eventAt(list, "anim", 0, "SHAKE_SCREEN_ANIM"), saidAt(list, "^aAlpha\nwas poisoned!")),
+     "the computer's: SHAKE_SCREEN_ANIM")
+  local ember = { id = "ember", power = 10, effect = 4, chance = 100, type = 2 }
+  list = fight("wild", ember, ember)
+  ok(before(eventAt(list, "anim", 3, "ENEMY_HUD_SHAKE_ANIM"), saidAt(list, "^bBeta\nwas burned!")),
+     "the player's burn: ENEMY_HUD_SHAKE_ANIM")
+  ok(saidAt(list, "^aAlpha\nwas burned!") and eventAt(list, "anim", 0, "ENEMY_HUD_SHAKE_ANIM") == nil
+     and eventAt(list, "anim", 0, "SHAKE_SCREEN_ANIM") == nil,
+     "the computer's burn (`.burn2`): no shake at all")
+  list = fight("1v1", ember, ember)
+  ok(eventAt(list, "anim", 0, "ENEMY_HUD_SHAKE_ANIM") and eventAt(list, "anim", 3, "ENEMY_HUD_SHAKE_ANIM"),
+     "a link fight: both sides are the player")
+  list = fight("wild", { id = "needle", power = 10, effect = 77, chance = 100 }, SPL)
+  ok(eventAt(list, "anim", 3, "ENEMY_HUD_SHAKE_ANIM"), "TWINEEDLE's poison is PoisonEffect's side effect")
+  local flinch = { id = "stomp", power = 10, effect = 37, chance = 100 }
+  list = fight("wild", flinch, SPL)
+  ok(eventAt(list, "anim", 3, "ENEMY_HUD_SHAKE_ANIM") == nil, "a flinch plays none")
+end
+
+-- ------------------------------------------------------------------
 -- 13. the vocabulary, on everything every scenario above produced
 -- ------------------------------------------------------------------
 

@@ -1655,9 +1655,21 @@ function inflict(out, fighter, mon, status, wire) {
 //   computerMover  the move is the computer's (StatModifierDownEffect's
 //                  extra miss)
 //   playerMover    the move is the player's (FreezeBurnParalyzeEffect's
-//                  ClearHyperBeam on a freeze)
-// Returns { proc, messages, events }; `proc` is the routine's own draw
-// landing (not the computer's miss byte).
+//                  ClearHyperBeam on a freeze, and its HUD shake)
+// Returns { proc, messages, events, shake }; `proc` is the routine's own draw
+// landing (not the computer's miss byte), `shake` the cart animation the
+// routine plays on a status it lands, ahead of its line (Turn sends it on the
+// target's seat):
+//   PoisonEffect (:118-151), a side effect -- the primary plays the move's
+//     own: ENEMY_HUD_SHAKE_ANIM on the player's turn, SHAKE_SCREEN_ANIM on
+//     the enemy's (`ld b, SHAKE_SCREEN_ANIM` ... `jr nz, .ok` / `ld b,
+//     ENEMY_HUD_SHAKE_ANIM`, then `ld a, b / call PlayBattleAnimation2`);
+//   FreezeBurnParalyzeEffect (:194-302): ENEMY_HUD_SHAKE_ANIM on the
+//     player's turn (`.burn1` / `.freeze1` / paralyze1), nothing on the
+//     enemy's (`.burn2` / `.freeze2` / paralyze2 print only).
+// "The player's turn" is `playerMover`, the owner's rule. No other side
+// effect plays one: a flinch, a stat drop, a confusion side effect say
+// nothing or only their line.
 function applySide(ctx) {
   const out = { proc: false, messages: [], events: [] };
   const c = ctx || {};
@@ -1681,6 +1693,7 @@ function applySide(ctx) {
     if (!drawBelow(rng, threshold)) return out;
     out.proc = true;
     inflict(out, targetFighter, targetMon, 'poison', wire);
+    out.shake = c.playerMover ? 'ENEMY_HUD_SHAKE_ANIM' : 'SHAKE_SCREEN_ANIM';
     return out;
   }
 
@@ -1716,6 +1729,7 @@ function applySide(ctx) {
     // player": side a against the computer, both sides of a link fight.
     if (status === 'freeze' && c.playerMover) targetMon.mustRecharge = false;
     inflict(out, targetFighter, targetMon, status, wire);
+    if (c.playerMover) out.shake = 'ENEMY_HUD_SHAKE_ANIM';
     return out;
   }
 

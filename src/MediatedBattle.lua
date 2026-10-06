@@ -2376,6 +2376,9 @@ local FX_SPAN = {
   lunge = 0.35,
   flash = 0.30,
   shake = 0.25,
+  -- Red's ENEMY_HUD_SHAKE_ANIM (SE_SHAKE_ENEMY_HUD): one seat's plate shakes
+  -- side to side, the field holds still (Battlefield.fxPlateShake).
+  hudshake = 0.40,
   faint = 0.60,
   spawn = 0.40,
   -- The ball flow. One constant per kind, and each one is also the dwell the
@@ -4177,8 +4180,22 @@ function M:onEvent(msg)
         anim = anim, slot = msg.slot, side = msg.side, amount = msg.amount,
         quiet = msg.quiet == true or nil,
       }
-      -- Whose used line this animation shouts for, or follows (K22).
-      self:noteCalloutAnim(row)
+      -- Whose used line this animation shouts for, or follows (K22) -- unless
+      -- it is a multi-hit move's next strike: pokered replays the move's
+      -- animation before every hit after the first (`jp nz,
+      -- GetPlayerAnimationType`) and the Red referee sends each one, so the
+      -- same seat's same move again inside one turn is another strike of the
+      -- attack already shouted.  It lunges and plays its look like the first
+      -- (`startAnim`), its hit beat follows on its own `damage` -- one strike
+      -- a hit -- but it raises no second bubble and claims no used line.
+      local strike = self.lastStrike
+      local callout = isCalloutAnim(row)
+      if callout and strike and strike.slot == row.slot and strike.anim == row.anim then
+        row.calledOut = true
+      else
+        self:noteCalloutAnim(row)
+      end
+      if callout then self.lastStrike = { slot = row.slot, anim = row.anim } end
       local rows = { row }
       -- The condition is the occupant's as the referee sees it: a parked
       -- arrival's when one is waiting (`noteSlot`) -- the seat alone is
@@ -4622,8 +4639,10 @@ function M:onEvent(msg)
     self.replaceWait = owed
     self.answeredTurn = false
     self.passMove = nil
-    -- A turn's callout bookkeeping (K22, `noteUsedLine`) ends with it.
+    -- A turn's callout bookkeeping (K22, `noteUsedLine`) ends with it, and so
+    -- does the multi-hit strike it reads (`lastStrike`).
     self.calloutAnim, self.calloutLine = nil, nil
+    self.lastStrike = nil
     -- A level-up the referee was told of (contract K9, `syncLevelHp`) is in
     -- its numbers from the next batch on, and this slot-less `turn` closes the
     -- one it came in: the climb stops being added to its packets.
@@ -9987,6 +10006,15 @@ function M:startAnim(row)
       -- away, so the throw TOSS_ANIM opened is over -- no recall and no burst
       -- are coming to close it.  The knock is the row's `vfxrow`.
       self:clearBallFlow()
+    elseif row.anim == "ENEMY_HUD_SHAKE_ANIM" then
+      -- pokered EnemyHUDShakeAnim (SE_SHAKE_ENEMY_HUD), PoisonEffect's and
+      -- FreezeBurnParalyzeEffect's on a side-effect status the player's move
+      -- landed: the HUD of the seat the row names shakes, nothing else does.
+      self:emitFx("hudshake", row.slot, row.side)
+    elseif row.anim == "SHAKE_SCREEN_ANIM" then
+      -- ShakeScreenAnim (SE_SHAKE_SCREEN), PoisonEffect's on the enemy's
+      -- side-effect poison: the whole field jolts, the cart's screen shake.
+      self:emitFx("shake", row.slot, row.side)
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held

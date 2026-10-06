@@ -243,7 +243,13 @@
 --     turn plays ChargeEffect's animation instead (XSTATITEM_ANIM, FLY's
 --     TELEPORT, DIG's SLIDE_DOWN_ANIM) and a Bide's first turn BideEffect's
 --     (XSTATITEM_ANIM).  A move id played as a look only -- the seeder's
---     ABSORB, FLY's TELEPORT, a trap's later hit -- is `quiet` (K22).
+--     ABSORB, FLY's TELEPORT, a trap's later hit -- is `quiet` (K22).  A
+--     multi-hit move replays its animation before every hit after the first
+--     (`jp nz, GetPlayerAnimationType`); a thrash's first turn adds
+--     ThrashPetalDanceEffect's SHRINKING_SQUARE_ANIM between the used line
+--     and the move's animation, which moves behind it there; a
+--     side-effect status lands with its routine's ENEMY_HUD_SHAKE_ANIM or
+--     SHAKE_SCREEN_ANIM ahead of its line (`_applySide`).
 --   * *TrainerAI in a 2v2* (coop_npc): the cart has one enemy, so each of
 --     the trainer's seats is "the enemy" for its own slot -- its own copy of
 --     the class record (`aiClass`), its own wAICount (`aiCount`, $ff at each
@@ -1371,6 +1377,29 @@ function Battle:_dropMoveAnim()
       table.remove(self.buffer, i)
       for j = i, #self.buffer do self.buffer[j].seq = self.buffer[j].seq - 1 end
       self.seq = self.seq - 1
+      return
+    end
+  end
+end
+
+-- The move's animation moved behind everything emitted since it (`moveAnim`
+-- stays the same event, so a later miss still takes it back).  A thrash's
+-- first turn plays ThrashPetalDanceEffect's square between the used line and
+-- the move's own animation (PlayerCanExecuteMove runs SpecialEffectsCont
+-- before MoveHitTest and PlayPlayerMoveAnimation), so the move's animation
+-- that `_useMove` put ahead of the used line goes behind the square: the
+-- used line then shouts on its own and the animation behind it lunges
+-- without a second shout (MediatedBattle's `calloutLine`, CoopBattle's
+-- sentence-first order).  Same buffer rule as `_dropMoveAnim`.
+function Battle:_trailMoveAnim()
+  local event = self.moveAnim
+  if not event then return end
+  for i = #self.buffer, 1, -1 do
+    if self.buffer[i] == event then
+      table.remove(self.buffer, i)
+      for j = i, #self.buffer do self.buffer[j].seq = self.buffer[j].seq - 1 end
+      event.seq = self.seq
+      self.buffer[#self.buffer + 1] = event
       return
     end
   end
@@ -4597,6 +4626,10 @@ function Battle:_applySide(fighter, mon, targetFighter, targetMon, effectId, mov
     targetFighter = targetFighter,
     statusToWire = M.STATUS_TO_WIRE,
   })
+  -- The routine's shake ahead of its line (Effects.applySide's `shake`):
+  -- ENEMY_HUD_SHAKE_ANIM is the target's HUD shaking, SHAKE_SCREEN_ANIM the
+  -- whole screen, both sent on the seat the status landed on.
+  if result.shake then self:_statusAnim(targetFighter, result.shake) end
   for _, text in ipairs(result.messages or {}) do self:_say(text) end
   for _, entry in ipairs(result.events or {}) do
     self:_emit(entry.kind, entry.fields)
@@ -5543,12 +5576,23 @@ function Battle:_useMove(fighter, mon, opts)
   -- counter, and only MoveHitTest's `.moveMissed` (`res USING_TRAPPING_MOVE`)
   -- takes the trap back -- an immunity or a 0.25x zero leaves it standing,
   -- doing 0 a turn, and a doll that holds keeps it (`_startTrap`).
+  -- ThrashPetalDanceEffect ends on `add SHRINKING_SQUARE_ANIM` over
+  -- hWhoseTurn (effects.asm :791-808): SHRINKING_SQUARE_ANIM on the player's
+  -- turn, ANIM_B1 on the enemy's -- the same ShrinkingSquareAnim, whose
+  -- SUBANIMTYPE_ENEMY subanimation sits on the enemy's pic and is flipped
+  -- down onto the player's on the player's turn, so it plays over the user
+  -- either way; sent as SHRINKING_SQUARE_ANIM on the user's seat (K20's
+  -- normalisation).  Its point is the routine's: after the used line and
+  -- before MoveHitTest, so ahead of the move's own animation -- which moves
+  -- behind it (`_trailMoveAnim`) -- and on a miss too.
   if Effects.isThrash(effectId) and not mon.thrashing and not thrashTurn then
     mon.thrashing = {
       turns = Effects.thrashTurns(self.rng),
       moveIndex = usedSlot,
       move = recordMove,
     }
+    self:_statusAnim(fighter, "SHRINKING_SQUARE_ANIM")
+    self:_trailMoveAnim()
   end
   -- TrappingEffect's counter, wPlayerNumAttacksLeft: the attacks after this
   -- one, 1..4 (Effects.trapTurns is the 2..5 total).
@@ -5858,6 +5902,13 @@ function Battle:_useMove(fighter, mon, opts)
   while h < hits do
     h = h + 1
     if defender.hp <= 0 then break end
+    -- `jp nz, GetPlayerAnimationType` (core.asm :3245-3249): every hit after
+    -- the first replays the move's animation before it lands -- one strike
+    -- a hit, as the cart draws a DOUBLE KICK or a FURY ATTACK.  The first
+    -- hit's is the one ahead of the used line (`moveAnim`).
+    if h > 1 then
+      self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = animText })
+    end
     local hpBefore = defender.hp
     local subUp = Effects.hasSubstitute(defender)
     -- A knockout keeps its 0 HP on the field until the move is over: its

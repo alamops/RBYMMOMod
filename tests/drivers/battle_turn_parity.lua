@@ -4532,6 +4532,53 @@ scenario("g1_k22_anims", fights("g1ka", {
     { mode = "wild", seed = 14014, turns = { { p1 = 0, p2 = 0 } } }),
 }))
 
+-- H1b: the animations a multi-hit move, a thrash's first turn and a
+-- side-effect status play (pokered core.asm `jp nz, GetPlayerAnimationType`,
+-- effects.asm ThrashPetalDanceEffect / PoisonEffect /
+-- FreezeBurnParalyzeEffect):
+--   1 DOUBLE KICK: the move's animation before each of its two hits;
+--   2 a two-to-five move: one per hit, the count's own;
+--   3 the same at power 0 (CalculateDamage's `.skipbp`: a hit like any other);
+--   4 THRASH's first turn: SHRINKING_SQUARE_ANIM behind the used line and
+--     ahead of the move's animation, and its later turns none;
+--   5 a THRASH that misses: the square all the same, no move animation;
+--   6 wild: the player's poison side effect shakes the enemy's HUD, the wild
+--     monster's shakes the screen;
+--   7 wild: the player's burn shakes the enemy's HUD, the wild monster's
+--     shakes nothing;
+--   8 a link fight: both sides are the player -- each side's burn shakes the
+--     other's HUD;
+--   9 TWINEEDLE's poison is PoisonEffect's side effect too.
+scenario("g1_h1b_anims", fights("g1hb", {
+  r1duo({ r1s("Alpha", { r1m("kicks", 20, 44) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 15001, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("barrage", 15, 29) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 15002, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("pebbles", 0, 29) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 15003, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("THRASH", 30, 27) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 15004, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("THRASH", 30, 27, { accuracy = 0 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 15005, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("sting", 10, 2, { chance = 100 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("sting", 10, 2, { chance = 100 }) }, { spd = 10 }) },
+    { mode = "wild", seed = 15006, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("ember", 10, 4, { chance = 100, type = 2 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("ember", 10, 4, { chance = 100, type = 2 }) }, { spd = 10 }) },
+    { mode = "wild", seed = 15007, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("ember", 10, 4, { chance = 100, type = 2 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("ember", 10, 4, { chance = 100, type = 2 }) }, { spd = 10 }) },
+    { seed = 15008, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("needle", 10, 77, { chance = 100 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { mode = "wild", seed = 15009, turns = { { p1 = 0, p2 = 0 } } }),
+}))
+
 -- ------------------------------------------------------------------
 
 local out = {}

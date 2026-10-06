@@ -2405,6 +2405,121 @@ do
         "...and still lit when the monster leans in")
 end
 
+-- H1b: a multi-hit move is one strike a hit.  pokered replays the move's
+-- animation before every hit after the first (`jp nz,
+-- GetPlayerAnimationType`) and the Red referee sends each one: every strike
+-- leans in and lands its own hit beat, and the attack is still one shout
+-- (`calloutSpent`).  The plate shake and the field shake have their motion.
+do
+  local host = screen({ slots = npcSlots(), mine = 1, host = true,
+                        mode = "coop_npc", selfId = "ann" })
+  host:uploadMediated()
+  host:onBattleReady({ battle = "cb1", mode = "coop_npc",
+    sides = { a = { "ann", "bob" }, b = { "ann" } } })
+  host.game.input = { wasPressed = function() return false end }
+  local animLeft = 0
+  host.animPlayer = {
+    start = function() animLeft = 30 end,
+    update = function() animLeft = animLeft - 1 end,
+    isDone = function() return animLeft <= 0 end,
+    draw = function() end,
+  }
+  host.phase = "choose"
+  local seq = 0
+  local function send(e)
+    seq = seq + 1
+    e.battle, e.seq = "cb1", seq
+    host:onBattleEvent(e)
+  end
+  send({ t = "anim", slot = 0, side = "a", text = "FIX_TACKLE" })
+  send({ t = "msg", text = "^aFIXMON A\nused FIX_TACKLE!" })
+  send({ t = "damage", slot = 3, side = "b", amount = 3, hp = 27 })
+  send({ t = "anim", slot = 0, side = "a", text = "FIX_TACKLE" })
+  send({ t = "damage", slot = 3, side = "b", amount = 3, hp = 24 })
+  send({ t = "anim", slot = 0, side = "a", text = "FIX_TACKLE" })
+  send({ t = "damage", slot = 3, side = "b", amount = 3, hp = 21 })
+  send({ t = "msg", text = "Hit the enemy\n3 times!" })
+  send({ t = "turn" })
+  local appearances, wasUp, lunges, seen = 0, false, 0, {}
+  for _ = 1, 900 do
+    host:update(1 / 60)
+    local ctx = host:battlefieldBubbleCtx()
+    local up = (type(ctx) == "table") and #ctx > 0
+    if up and not wasUp then appearances = appearances + 1 end
+    wasUp = up
+    for _, fx in ipairs(host.fx or {}) do
+      if fx.kind == "lunge" and not seen[fx] then seen[fx] = true; lunges = lunges + 1 end
+    end
+  end
+  eq(appearances, 1, "H1b (co-op): a three-hit attack shouts once")
+  eq(lunges, 3, "H1b (co-op): ...and leans in for every hit")
+
+  -- ENEMY_HUD_SHAKE_ANIM moves one plate; SHAKE_SCREEN_ANIM the field.
+  host.fx = nil
+  pcall(host.startAnim, host, { kind = "anim", anim = "ENEMY_HUD_SHAKE_ANIM", from = 3 })
+  local hud
+  for _, fx in ipairs(host.fx or {}) do if fx.kind == "hudshake" then hud = fx end end
+  eq(hud and hud.slot, 3, "H1b (co-op): ENEMY_HUD_SHAKE_ANIM shakes the plate of the seat it names")
+  host.fx = nil
+  pcall(host.startAnim, host, { kind = "anim", anim = "SHAKE_SCREEN_ANIM", from = 1 })
+  local jolt
+  for _, fx in ipairs(host.fx or {}) do if fx.kind == "shake" then jolt = fx end end
+  check(jolt ~= nil, "H1b (co-op): SHAKE_SCREEN_ANIM jolts the field")
+end
+
+-- H1b: THRASH's first turn as the Red referee sends it -- the used line,
+-- ThrashPetalDanceEffect's SHRINKING_SQUARE_ANIM, then the move's animation
+-- (pret runs SpecialEffectsCont before MoveHitTest and the move's own
+-- animation).  The sentence shouts first (`noteBattlefieldBubble`'s
+-- sentence-first order), the square plays, then the strike leans in: one
+-- shout, one lunge, the square ahead of it.
+do
+  local host = screen({ slots = npcSlots(), mine = 1, host = true,
+                        mode = "coop_npc", selfId = "ann" })
+  host:uploadMediated()
+  host:onBattleReady({ battle = "cb1", mode = "coop_npc",
+    sides = { a = { "ann", "bob" }, b = { "ann" } } })
+  host.game.input = { wasPressed = function() return false end }
+  local animLeft = 0
+  host.animPlayer = {
+    start = function() animLeft = 30 end,
+    update = function() animLeft = animLeft - 1 end,
+    isDone = function() return animLeft <= 0 end,
+    draw = function() end,
+  }
+  host.phase = "choose"
+  local seq = 0
+  local function send(e)
+    seq = seq + 1
+    e.battle, e.seq = "cb1", seq
+    host:onBattleEvent(e)
+  end
+  send({ t = "msg", text = "^aFIXMON A\nused FIX_TACKLE!" })
+  send({ t = "anim", slot = 0, side = "a", text = "SHRINKING_SQUARE_ANIM" })
+  send({ t = "anim", slot = 0, side = "a", text = "FIX_TACKLE" })
+  send({ t = "damage", slot = 3, side = "b", amount = 3, hp = 27 })
+  send({ t = "turn" })
+  local appearances, wasUp, lunges, seen = 0, false, 0, {}
+  local squareAt, lungeAt
+  for frame = 1, 900 do
+    host:update(1 / 60)
+    local ctx = host:battlefieldBubbleCtx()
+    local up = (type(ctx) == "table") and #ctx > 0
+    if up and not wasUp then appearances = appearances + 1 end
+    wasUp = up
+    for _, fx in ipairs(host.fx or {}) do
+      if not seen[fx] then
+        seen[fx] = true
+        if fx.kind == "lunge" then lunges = lunges + 1; lungeAt = lungeAt or frame end
+        if fx.kind == "vfx" then squareAt = squareAt or frame end
+      end
+    end
+  end
+  eq(appearances .. "/" .. lunges, "1/1", "H1b (co-op): THRASH's first turn shouts once and leans in once")
+  check(squareAt ~= nil and lungeAt ~= nil and squareAt < lungeAt,
+        "H1b (co-op): the square plays before the strike (" .. tostring(squareAt) .. " < " .. tostring(lungeAt) .. ")")
+end
+
 -- A disobedient monster's own pick is said the cart's way -- "<MON> used
 -- instead, <MOVE>" (both Gen 1 / Gen 2 referees, pokered _UsedInsteadText /
 -- pokecrystal UsedInsteadText) -- and "instead," is the sentence, not the

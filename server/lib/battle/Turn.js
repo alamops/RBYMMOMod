@@ -171,6 +171,12 @@
  *     (XSTATITEM_ANIM, FLY's TELEPORT, DIG's SLIDE_DOWN_ANIM), a Bide's first
  *     turn BideEffect's (XSTATITEM_ANIM). A move id played as a look only --
  *     the seeder's ABSORB, FLY's TELEPORT, a trap's later hit -- is `quiet`.
+ *     A multi-hit move replays its animation before every hit after the
+ *     first (`jp nz, GetPlayerAnimationType`); a thrash's first turn adds
+ *     ThrashPetalDanceEffect's SHRINKING_SQUARE_ANIM between the used line
+ *     and the move's animation, which moves behind it there; a
+ *     side-effect status lands with its routine's ENEMY_HUD_SHAKE_ANIM or
+ *     SHAKE_SCREEN_ANIM ahead of its line (`_applySide`).
  *   * *TrainerAI in a 2v2* (coop_npc): each of the trainer's seats is "the
  *     enemy" for its own slot -- its own `aiClass` copy, its own wAICount
  *     (`aiCount`, $ff at each of its send-outs), its own monster and its own
@@ -1384,6 +1390,30 @@ class Battle {
         this.buffer.splice(i, 1);
         for (let j = i; j < this.buffer.length; j += 1) this.buffer[j].seq -= 1;
         this.seq -= 1;
+        return;
+      }
+    }
+  }
+
+  // The move's animation moved behind everything emitted since it
+  // (`moveAnim` stays the same event, so a later miss still takes it back).
+  // A thrash's first turn plays ThrashPetalDanceEffect's square between the
+  // used line and the move's own animation (PlayerCanExecuteMove runs
+  // SpecialEffectsCont before MoveHitTest and PlayPlayerMoveAnimation), so
+  // the move's animation that `_useMove` put ahead of the used line goes
+  // behind the square: the used line then shouts on its own and the
+  // animation behind it lunges without a second shout (MediatedBattle's
+  // `calloutLine`, CoopBattle's sentence-first order). Same buffer rule as
+  // `_dropMoveAnim`.
+  _trailMoveAnim() {
+    const event = this.moveAnim;
+    if (!event) return;
+    for (let i = this.buffer.length - 1; i >= 0; i -= 1) {
+      if (this.buffer[i] === event) {
+        this.buffer.splice(i, 1);
+        for (let j = i; j < this.buffer.length; j += 1) this.buffer[j].seq -= 1;
+        event.seq = this.seq;
+        this.buffer.push(event);
         return;
       }
     }
@@ -4547,6 +4577,10 @@ class Battle {
       targetFighter,
       statusToWire: STATUS_TO_WIRE,
     });
+    // The routine's shake ahead of its line (Effects.applySide's `shake`):
+    // ENEMY_HUD_SHAKE_ANIM is the target's HUD shaking, SHAKE_SCREEN_ANIM the
+    // whole screen, both sent on the seat the status landed on.
+    if (result.shake) this._statusAnim(targetFighter, result.shake);
     for (const text of result.messages || []) this._say(text);
     for (const entry of result.events || []) {
       this._emit(entry.kind, entry.fields);
@@ -5491,12 +5525,23 @@ class Battle {
     // USING_TRAPPING_MOVE`) takes the trap back -- an immunity or a 0.25x
     // zero leaves it standing, doing 0 a turn, and a doll that holds keeps it
     // (`_startTrap`).
+    // ThrashPetalDanceEffect ends on `add SHRINKING_SQUARE_ANIM` over
+    // hWhoseTurn (effects.asm :791-808): SHRINKING_SQUARE_ANIM on the
+    // player's turn, ANIM_B1 on the enemy's -- the same ShrinkingSquareAnim,
+    // whose SUBANIMTYPE_ENEMY subanimation sits on the enemy's pic and is
+    // flipped down onto the player's on the player's turn, so it plays over
+    // the user either way; sent as SHRINKING_SQUARE_ANIM on the user's seat
+    // (K20's normalisation). Its point is the routine's: after the used line
+    // and before MoveHitTest, so ahead of the move's own animation -- which
+    // moves behind it (`_trailMoveAnim`) -- and on a miss too.
     if (Effects.isThrash(effectId) && !mon.thrashing && !thrashTurn) {
       mon.thrashing = {
         turns: Effects.thrashTurns(this.rng),
         moveIndex: usedSlot,
         move: recordMove,
       };
+      this._statusAnim(fighter, 'SHRINKING_SQUARE_ANIM');
+      this._trailMoveAnim();
     }
     // TrappingEffect's counter, wPlayerNumAttacksLeft: the attacks after this
     // one, 1..4 (Effects.trapTurns is the 2..5 total).
@@ -5817,6 +5862,13 @@ class Battle {
     while (h < hits) {
       h += 1;
       if (defender.hp <= 0) break;
+      // `jp nz, GetPlayerAnimationType` (core.asm :3245-3249): every hit
+      // after the first replays the move's animation before it lands -- one
+      // strike a hit, as the cart draws a DOUBLE KICK or a FURY ATTACK. The
+      // first hit's is the one ahead of the used line (`moveAnim`).
+      if (h > 1) {
+        this._emit('anim', { slot: fighter.slot, side: fighter.side, text: animText });
+      }
       const hpBefore = defender.hp;
       const subUp = Effects.hasSubstitute(defender);
       // A knockout keeps its 0 HP on the field until the move is over: its

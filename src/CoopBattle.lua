@@ -7384,6 +7384,9 @@ local FX_SPAN = {
   lunge = 0.35,
   flash = 0.30,
   shake = 0.25,
+  -- Red's ENEMY_HUD_SHAKE_ANIM (SE_SHAKE_ENEMY_HUD): one seat's plate shakes
+  -- side to side, the field holds still (Battlefield.fxPlateShake).
+  hudshake = 0.40,
   faint = 0.60,
   spawn = 0.40,
   -- The ball flow. One constant per kind, and each one is also the dwell the
@@ -9126,6 +9129,15 @@ function M:startAnim(row)
       -- TossBallAnimation's `.BlockBall` (K22): the trainer knocks the ball
       -- away, so the throw TOSS_ANIM opened is over.
       self:clearBallFlow()
+    elseif row.anim == "ENEMY_HUD_SHAKE_ANIM" then
+      -- pokered EnemyHUDShakeAnim (SE_SHAKE_ENEMY_HUD), PoisonEffect's and
+      -- FreezeBurnParalyzeEffect's on a side-effect status the player's move
+      -- landed: the plate of the seat the row names shakes, nothing else does.
+      if row.from ~= nil then self:emitFx("hudshake", row.from) end
+    elseif row.anim == "SHAKE_SCREEN_ANIM" then
+      -- ShakeScreenAnim (SE_SHAKE_SCREEN), PoisonEffect's on the enemy's
+      -- side-effect poison: the whole field jolts, the cart's screen shake.
+      self:emitFx("shake", row.from)
     else
       self:startBallFx(row)
     end
