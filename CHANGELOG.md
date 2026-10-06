@@ -195,9 +195,9 @@ here must match `manifest.version`.
     carts' byte arithmetic for accuracy, crits, full paralysis, sleep length
     and damage variation. The computer's own items and switches resolve in
     its turn slot.
-  - **The computer's choices.** A wild POKéMON picks its move at random as
-    the cart does. A co-op trainer uses the cart's move-choice layers, and on
-    Gold the computer's status moves miss 25% of the time.
+  - **The computer's choices.** A wild POKéMON picks its move as the cart
+    does, and on Gold the computer's status moves miss 25% of the time. The
+    trainer AI is in the next entry.
   - **The carts' own words.** Every line the Red and Gold referees print is
     now pokered's or pokecrystal's text, from "It's super effective!" to
     "The SUBSTITUTE took damage for …!", along with the cart's sleep and
@@ -236,6 +236,64 @@ here must match `manifest.version`.
     - A mid-fight level-up rides the existing moveset message; outcomes
       carry Pay Day coins.
     - The plan is `docs/plans/gen12-referee-gaps-fix.md`.
+- **The computer plays as the cart, and the battle screens say what the cart
+  says.** The last differences listed for the Red and Gold referees are
+  closed, in the hub's copy and the LAN host's alike, and the Lua and Node
+  copies were fuzzed against each other with no mismatch.
+  - **The trainer AI is the cart's.** On Red, pokered's `TrainerAI` runs in
+    the computer's slot of the turn: each class's item and switch routine,
+    its use budget, and the random byte it draws every turn while uses
+    remain (generic trainers included), with EnemySendOut's party order for
+    a replacement. On Gold, pokecrystal's `AIChooseMove` picks the move with
+    every scoring layer the class has (and the carts' scoring bugs), a wild
+    monster's move is the cart's random pick, `AI_SwitchOrTryItem` uses the
+    trainer's two item slots or switches out (PURSUIT catches it), and the
+    replacement is the cart's matchup pick. The computer carries no bag on
+    either cart; its class data rides the NPC upload.
+  - **Solo fights too.** A Red or Gold opponent in `SOLO BATTLES` is now the
+    referee's cart AI rather than the engine's port, so it plays and draws
+    exactly as in a co-op fight. A mod that registers its own `brain` for a
+    Red trainer still picks that trainer's moves; extra scoring layers a mod
+    registers are no longer run on Red or Gold.
+  - **"Enemy" and "Your", per player.** Each line names the other side's
+    POKéMON as "Enemy X" and your own (or your partner's) as plain "X", as
+    each cart prints for its own player — on Gold in wild fights too, as
+    pokecrystal does. Gold's screen-fade lines say "Your" or "Enemy" per
+    player. "X fainted!" follows the same rule.
+  - **The cart's line breaks.** Battle text breaks where the cart's does, and
+    a three-row line scrolls its third row in as the cart's text box does.
+    A battle line may be up to 80 characters on the wire; chat stays at 60.
+  - **Knockouts after the move.** A POKéMON a move knocks out stays at 0 HP
+    until the move is over: drain, recoil, PAY DAY, THIEF, RAGE and DESTINY
+    BOND come first, then the faint, as on the carts.
+  - **Running from a fight between players** prints the carts' lines: "Got
+    away safely!" for the runner, "Enemy X ran!" (Red) or "Enemy X fled!"
+    (Gold) for the other side.
+  - **Animations.** Red: the cancelled FLY or charge, X items (yours and the
+    computer's), LEECH SEED's drain from the seeder, the trainer's
+    blocked ball, the charge and BIDE turns, THRASH's first turn, the
+    status-effect shakes, and every hit of a multi-hit move. Gold: the
+    cart's status, love, sandstorm, nightmare, curse, confusion-hit and
+    stat-down clips, wrap and berry beats, the blocked ball, and every hit
+    of a multi-hit move or BEAT UP. A move that
+    misses plays no animation, as on the carts, and a residual or charge
+    beat no longer pops a trainer callout. Red's arena adds the slow and
+    light screen shakes that follow THRASH's first turn and the status
+    shakes, and in a fight between players each side sees its own cart's
+    beat when it is the one poisoned, burned, frozen or paralyzed.
+  - **Traded EXP on Red** is decided by the POKéMON's original trainer, as
+    the cart does it, and co-op fights now pay it too: ×1.5 and "a boosted".
+  - **Smaller cart rules found on the way (Gold):** MIRROR MOVE, ENCORE,
+    DISABLE and the rest see no "last move" after a move METRONOME, MIRROR
+    MOVE or SLEEP TALK called; a charge turn prints no "used" line;
+    SELFDESTRUCT clears the user's status and LEECH SEED; PURSUIT on a
+    switching monster faints only that monster; TRIPLE KICK from behind the
+    user's own SUBSTITUTE kicks ×2 / ×3 / ×4, the cart's quirk; a trainer
+    split across two co-op seats has one kit between them.
+  - **LURE BALL and HEAVY BALL** work on Gold: the fight's battle type and
+    the species' weight now reach the referee. LOVE BALL and HEAVY BALL read
+    a transformed wild monster the way the cart does.
+  - The plan is `docs/plans/gen12-referee-remaining-gaps.md`.
 - **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
   out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
   referee instead of the cart's. That covers the Twins and couples on the
@@ -597,11 +655,11 @@ version, but each was a real failure on a live boot or on the wire:
 - **What the Red and Gold referees still do differently from the carts** is
   listed, with where it lives in the code, in
   `docs/plans/gen12-referee-known-gaps.md`. The main items:
-  - the computer's item and switch choices use the mod's own logic, not the
-    carts' trainer AI;
-  - lines that depend on the viewer, such as the "Enemy" prefix, are not
-    printed;
-  - a few animations are not shown;
+  - a move's animation plays before its "used" line, where the carts print
+    the line first;
+  - a few screens the client still words its own way (the send-out line by
+    the foe's HP, EXP.ALL's lines, the catch follow-ups, the link result
+    screen);
   - the referee's random-number generator is its own, though it draws at
     the carts' points.
 - **Engine, not mod:** on a fresh Emerald save the heal point is still the

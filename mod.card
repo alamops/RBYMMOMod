@@ -428,9 +428,9 @@ return {
         .. "remote player walking nearby can hold the VS Seeker's charge a "
         .. "moment, because the cart waits for every object to stop.",
       "What the Red and Gold referees still do differently from the carts "
-        .. "(the computer's item and switch choices, lines that depend on "
-        .. "the viewer such as the Enemy prefix, a few animations) is listed "
-        .. "in docs/plans/gen12-referee-known-gaps.md. On every cart a fight "
+        .. "(a move's animation plays before its \"used\" line, a few screens "
+        .. "the client words its own way, the referee's own random numbers) "
+        .. "is listed in docs/plans/gen12-referee-known-gaps.md. On every cart a fight "
         .. "between players leaves both saves exactly as they were, as the "
         .. "carts' Cable Club does.",
       "On Gen 3, badges work the cart's way against the computer (solo, and "

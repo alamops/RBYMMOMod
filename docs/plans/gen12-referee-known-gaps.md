@@ -9,6 +9,8 @@ The first version of this file (after `docs/plans/gen12-referee-fidelity.md`) li
 - **Waves 1–5:** `e51c48d`, `fda141f`, `d7294a8`, `3fb4b82`, `3714826`.
 - **Wave 6 and later:** see `git log`.
 
+The second version's rows 1–4 (the computer's item and switch choices, lines that depend on the viewer, faint timing, animations not emitted) and §10b's LURE / HEAVY BALL row were closed by `docs/plans/gen12-referee-remaining-gaps.md` (`e69bfe2` onward), together with Gold's move choice, which the referee had been making with the mod's heuristic. What that run found and left is folded in below.
+
 What remains is below. Each item is either a design choice, needs data the mod doesn't have, or is presentation only.
 
 The rule source for fixing any of them is unchanged:
@@ -23,10 +25,10 @@ The rule source for fixing any of them is unchanged:
 
 | # | Gap | Gen | Kind |
 |---|-----|-----|------|
-| 1 | The computer's item and switch choices | 1, 2 | AI |
-| 2 | Lines that depend on the viewer | 1, 2 | presentation |
-| 3 | Faint timing on a knockout | 1, 2 | event order |
-| 4 | Animations not emitted | 1, 2 | presentation |
+| 1 | A move's animation comes before its "used" line | 1, 2 | event order |
+| 2 | Screens the client still words its own way | 1, 2 | presentation |
+| 3 | Viewer-dependent beats a shared stream can't carry | 1 | presentation |
+| 4 | Gold's computer replacement is chosen in the replace phase | 2 | turn flow |
 | 5 | Red's trapper and held mon still show the move list | 1 | client signal |
 | 6 | Red METRONOME's draw | 1 | needs a wire field |
 | 7 | Gold dual-type rounding per chart row | 2 | needs a wire field |
@@ -35,44 +37,25 @@ The rule source for fixing any of them is unchanged:
 | 10 | Smaller differences | 1, 2 | various |
 | 11 | The random-number generator | 1, 2 | by design |
 
-### 1. The computer's item and switch choices
+### 1. A move's animation comes before its "used" line
 
-The computer's moves are picked as on the carts. Its items and switches are not.
+Both referees send a move's `anim` ahead of its "X used Y!" `msg`, and take it back when the move misses or fails. The carts print the used line first and animate after the hit test. The arena's trainer callout hangs off the used line, so what the player sees is the animation, then the line. The one stream in the cart's order is Red's THRASH / PETAL DANCE first turn (used line, SHRINKING_SQUARE_ANIM, the move). Moving every move's anim behind its line reorders both fixtures, every hub suite and the e2e drivers; the client already plays a move anim that arrives after its line (`f935871`).
 
-- **Moves:**
-  - wild mons use `.chooseRandomMove`;
-  - co-op trainers use pokered's move-choice layers 1–3, from the trainer's `aiMods`;
-  - solo trainers use `src/SoloBrain.lua`.
-- **Items and switches** still come from the referee's heuristic (`_autoChoice`), not from the cart's routines:
-  - pokered `TrainerAI`: the per-class routines, `wAICount`, the `Random` byte drawn every turn while uses remain, Juggler and Cooltrainer switches, the class HP fractions;
-  - pokecrystal `AI_SwitchOrTryItem` and item AI, e.g. the toxic-count Full Heal check.
-- **What a port needs:** the class's item list and AI flags on the NPC side entry (engine data, client-stamped like `aiMods`), and the routines in both referees.
+### 2. Screens the client still words its own way
 
-### 2. Lines that depend on the viewer
+- **Send-out:** the carts vary "Go! X!" by the foe's HP (pokered PrintSendOutMonMessage: "Do it!" / "Get'm!" / "The enemy's weak!"; pokecrystal SendOutMonText: "Go for it," / "Your foe's weak!"). The client always says "Go!".
+- **EXP.ALL (Red):** the cart prints "X gained\nwith EXP.ALL,\nN EXP. Points!" for each member; the client prints nothing for that pass.
+- **Catch follow-ups:** neither cart prints an "added to the party" line; Red's box line is "X was\ntransferred to\nBILL's PC!" (or "someone's PC!"), Gold's "X was\nsent to BILL's PC.".
+- **Link result:** "You won!" / "You lost!" stand in for the carts' YOU WIN / YOU LOSE / DRAW screen.
+- **Hit and shake shapes (Red arena):** the damaging moves' animation types 1/2/4/5 (vertical, heavy, blink, light) all draw as the arena's one hit beat; a status move's own PlayCurrentMoveAnimation2 slow shake, and BIDE's start follow-on shake, aren't drawn; the type-5 follow-on replays PlayApplyingAttackSound on the cart and is silent here. Gold's after-animation damage shake (MoveAnimNoSub's wBattleAfterAnim, BATTLEANIM_ENEMY_DAMAGE / PLAYER_DAMAGE) isn't carried either; the arena's hit beat stands in.
 
-The referee is one shared narrator, so it can't do what each cart does for its own player:
+### 3. Viewer-dependent beats a shared stream can't carry
 
-- the "Enemy" / "Wild" prefixes on the foe's names;
-- the cart's line breaks and pauses;
-- in a link battle, "Enemy <MON> ran!" for the player whose foe fled (the mod says "You forfeited" / "Someone ran away!").
+- **Red double KO:** when HandleEnemyMonFainted catches both monsters at 0 HP, RemoveFaintedPlayerMon returns before the player's own "fainted!" text (core.asm :1037-1039), so each player sees only the foe's faint line. The client prints both.
 
-The wire also caps a battle line at 60 characters. Each client could add the prefixes itself, since it knows which seats are its own.
+### 4. Gold's computer replacement is chosen in the replace phase
 
-### 3. Faint timing on a knockout
-
-The target's `faint` event comes before the same hit's tail lines (drain, recoil, Pay Day, Thief). The cart prints those first and faints the target after the move.
-
-- **Gold:** only Destiny Bond defers the faint.
-- **Red:** keeps the existing order.
-
-Changing this moves every KO's event order in both fixtures.
-
-### 4. Animations not emitted
-
-These are presentation only:
-
-- **Red:** STATUS_AFFECTED_ANIM (a cancelled FLY or charge), XSTATITEM_ANIM, ABSORB from the seeder, TOSS_ANIM for a ball a trainer blocks.
-- **Gold:** the move animations of the new Gold effects beyond what the screens already play.
+FindMonInOTPartyToSwitchIntoBattle (and its `.loop5` draws) runs at the cart's faint check, mid-turn. The referee runs it in the replace phase, after the whole between-turn block, as it sends every successor (see 8). The pick itself is the cart's.
 
 ### 5. Red's trapper and held mon still show the move list
 
@@ -94,11 +77,12 @@ A mon sent in at the replace phase gets its held items and its defrost roll. It 
 
 ### 9. Gold battle types
 
-Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICUNE fights. They change ForceSwitch and running on the cart. The mod refereeing those fights would need the battle type on the ruleset.
+Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICUNE fights. They change ForceSwitch and running on the cart. The Gold ruleset now carries the engine's `battleType` (LURE BALL reads it), so the remaining work is the rules those types change, not the data.
 
 ### 10. Smaller differences
 
 **Red:**
+- **The Bide store at a faint:** FaintEnemyPokemon zeroes only the high byte of the player's BIDE damage (a bug) and RemoveFaintedPlayerMon zeroes the enemy's; the referee leaves a standing BIDE's store untouched.
 - **COUNTER and the menu cursor:** the cart reads whatever move the player's FIGHT cursor last hovered. For a player who opened FIGHT and then switched, used an item or ran, that's unknowable; the referee keeps the previous selection.
 - **The AI's type lookup** without `chartOrder` checks the target's type 1, then type 2.
 - **A transformed mon's IncrementMovePP refund** reaches the client only at the switch-out restore.
@@ -106,6 +90,7 @@ Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICU
 - **Catch follow-ups** (Pokédex, PC transfer, box full) are client-side.
 
 **Both:**
+- **Mod-registered AI layers:** the referees run the carts' own move layers; a non-vanilla `aiMods` / Gold layer another mod registers is not run (co-op never ran them; solo did through the engine until `9cdebb2`). A Red trainer's registered `brain` function still picks its move in a solo fight.
 - **A SUBSTITUTE made at exactly ¼ HP:** the cart's 0-HP doll glitch isn't reproduced; the referee refuses with "too weak".
 - **Vitamins in battle:** the carts refuse them (ItemUseNotTime) and keep the turn; the referee applies them. The mod's bag rule.
 - **The bag in a fight between players:** this is the mod's rule; the carts lock the bag in a link battle (CHANGELOG Known).
@@ -114,8 +99,9 @@ Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICU
 **Gold:**
 - **Link-battle check order:** with the external clock, faints, Perish Song and Leftovers are checked enemy-first; the referee always checks side a first.
 - **PursuitSwitch** doesn't end Destiny Bonds on the cart.
-- **PRESENT's failure line** depends on the battle-scene option; the referee assumes animations are on.
-- **The `team` roster** shows a standing (0-HP, not yet fainted) mon as fainted.
+- **The battle-scene option:** PRESENT's failure line and `lowersub`'s animation parameter depend on it; the referee assumes animations are on.
+- **Shift mode:** OfferSwitch, the prompt offering the player a switch after the computer picks its successor, isn't modelled; the referee plays Set.
+- **A pursuer at 0 HP** can be healed by the computer's item before HasEnemyFainted on the cart; the referee faints it first.
 - **`IgnoredOrders2Text`** (a disobedient move landing on a charge move) isn't emitted.
 - **Bag text:** the item lines (the use line, ball wobbles, "It won't have any effect.", the party-menu cure lines) are the referee's own.
 
@@ -132,7 +118,7 @@ Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICU
 
 **Gold:**
 - **A second ETHER under Transform** on the same slot can be sent and then silently refused: the own-move PP only reaches the client when the overlay drops.
-- **LURE BALL and HEAVY BALL** need the fight's battle type and the species' weight on the wire; until then they act as ×1. Also not modelled: Crystal's Heavy Ball dex-bank bug, a LOVE BALL on a transformed wild mon (the cart reads the copied DVs), and FRIEND BALL's happiness, which is set client-side.
+- **Kurt's balls:** Crystal's HEAVY BALL dex-bank bug (it reads weights from the wrong bank, which needs ROM bytes) and FRIEND BALL's happiness, which is set client-side. LURE BALL, HEAVY BALL and a LOVE BALL on a transformed wild mon are the cart's since `9c80683`.
 - **HEAL POWDER** has no battle effect entry.
 - **A mid-fight learn and Disable / Encore:** a learn rewrites the move list in place, so a `disable` / `encore` index can point at the new move.
 
@@ -142,4 +128,4 @@ The referees use their own LCG (Numerical Recipes constants, high bits), not the
 
 ## Engine-port divergences
 
-Places where Gen1Recomp's own battle code disagrees with pret are listed in `docs/plans/gen12-referee-fidelity.md` §10 and `docs/plans/gen12-referee-gaps-fix.md` §10. They belong in an upstream report, not a mod change.
+Places where Gen1Recomp's own battle code disagrees with pret are listed in `docs/plans/gen12-referee-fidelity.md` §10, `docs/plans/gen12-referee-gaps-fix.md` §10 and `docs/plans/gen12-referee-remaining-gaps.md` ("Delivery"). They belong in an upstream report, not a mod change.

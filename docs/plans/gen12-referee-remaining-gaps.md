@@ -42,9 +42,10 @@ These ride on the side-b NPC `BATTLE_PARTY` upload, like `aiMods` and `name`. Th
 - `baseReward`: TRNATTR_BASEMONEY, 0..255, for AI_TryItem's base-reward bug.
 - The client reads the class's TrainerClassAttributes off the engine (`attributes[1..7]`).
 - No fields on an NPC seat → no item, no switch, and AIChooseMove with no layers (flags 0).
+- **One trainer, one kit (decided in wave 3):** seats handed the same `trainerItems` object — the hubs hand every NPC seat of one trainer the same one — share one copy of wEnemyTrainerItem1/2 and the base reward (`trainerKitOf`, `fighter.trainerKit`), as the old NPC bag was shared, so a co-op 2v2 against one trainer has the cart's two items. `aiFlags`, `itemSwitch`, `countSpeciesTypes` and Red's `aiClass` / `aiCount` stay per seat (wAICount reloads per send-out; Red's items are not consumed).
 
 **Elsewhere:**
-- The referee no longer reads an NPC seat's `bag` for the computer's choices on Red / Gold.
+- The referee no longer reads an NPC seat's `bag` for the computer's choices on Red / Gold, keeps none for a computer seat, and refuses an item or a voluntary switch filed for one (`2b50a05` Red, `a179654` Gold): the computer's items and switches are its AI's alone. Forced replacements still go through `autoPick`.
 - The client stops uploading an NPC bag on Red / Gold.
 - **Solo fights (decided in wave 2):** on Red / Gold `SoloBrain` no longer answers the computer's move either. The referee now holds the carts' own move choice (Red: AIEnemyTrainerChooseMoves + SelectEnemyMove from `aiMods`; Gold: AIChooseMove from `aiFlags`), drawing at the carts' points, while the engine's Gen 2 port (`src/battle/gen2/Ai.lua`) departs from pret in layer order, rolls and filtering (W1-A2m §5), and either engine port draws from the client's RNG at the wrong point. So a solo NPC seat goes through the same `autoPick` path as a hub's NPC seat. The one exception is a mod-registered `brain` function on a Red trainer or class (the engine's ai_classes seam): `SoloBrain` still files that brain's move, so another mod's custom AI keeps working. This supersedes `docs/plans/offline-solo-battles.md` D3 for Red / Gold; D3's reason (a trainer plays like itself, not like a generic picker) is better served by the cart's own routine. Gen 3 is unchanged.
 
@@ -119,7 +120,7 @@ A monster a move knocks out keeps its 0 HP on the field until the move has finis
 
 ### K21: LURE / HEAVY BALL fields
 
-- **Gen 2 mon sheet:** gains `weight` (0..65535, the Pokédex weight word). The client stamps it on a wild foe from `data.gen2Pokedex[species].weight`.
+- **Gen 2 mon sheet:** gains `weight` (0..65535, the Pokédex weight word). The client stamps it on the wild foe, and on the player's own Gold sheets in wild / coop_wild fights (a TRANSFORMed wild monster is weighed as the species it copied), from the Gen 2 Pokédex entry.
 - **Gen 2 ruleset:** gains `battleType` (0..255, the engine battle's own id). The hubs hand it to the referee's `opts.battleType`, which BattleSim2 already reads.
 
 ## Waves
@@ -145,3 +146,35 @@ File ownership is strict within a wave.
 - The three parity fixtures regenerated and reproduced by both twins.
 - Lua↔JS fuzzers with 0 mismatches on the changed referees; the stall drivers clean.
 - The full e2e matrix, judged against the known pre-existing reds (`docs/plans/gen12-referee-gaps-fix.md`'s delivery notes).
+
+## Delivery
+
+### Commits
+
+| Commit | What |
+|---|---|
+| `e69bfe2` | Red referee: K17–K20; Wire / hubs: K16, K18, K21; client: K17 rendering, K18 paging, link run lines, K20 looks, K16 / K21 stamping; Gold AiSwitch module |
+| `1033bc2` | Gold AiMove module (AIChooseMove, every layer, AI_Smart, AI_Redundant, the wild pick) |
+| `a7babc2` | Gold referee: K17–K20 |
+| `f935871` | Wire / client: K22 quiet anims, `^A` / `^B`, K23, callouts on the used line |
+| `2b50a05` | Red TrainerAI, EnemySendOut, charge / miss / blocked-ball anims |
+| `9cdebb2` | Solo Red / Gold: the referee answers the computer |
+| `700d22b` | e2e drivers on marked text and K16 |
+| `9c80683` | Gold AIChooseMove / wild pick / AI_SwitchOrTryItem / replacement hooked; LOVE / HEAVY on a transformed foe |
+| `18adc88` | Red per-hit anims, THRASH's square, side-effect shakes |
+| `a179654` | Gold: computer files no item / switch; LAST_MOVE skips a called move (CheckUserIsCharging); a clip per multi-hit hit with wBattleAnimParam |
+| `fbffada` | Gold: one trainer's kit shared across its seats; BEAT UP's clip per swing; TRIPLE KICK ×2/×3/×4 behind the user's own SUBSTITUTE |
+| `bb24685` | Hub suites on K16 and marked text |
+| `c193e36` | Client: own Gold sheets' weight, Red follow-on shakes and link-fight shake mapping, traded EXP by OT id (co-op too) |
+
+### Decisions taken during the run
+
+- **Gold "Enemy", not "Wild".** The first K17 draft said Gold prints "Wild " before a wild monster; pret's PlaceBattlersName always places EnemyText. Corrected in K17.
+- **Solo fights use the referee's computer on Red / Gold** (K16 "Elsewhere"), superseding `offline-solo-battles.md` D3 there.
+- **K22 / K23 and the side-word marks** were added in wave 2 from wave 1's findings.
+- **Faint suppression in a Red double KO** is left (known gaps §3): it differs per viewer.
+
+### Engine-port divergences found (pret followed; for an upstream report)
+
+- **Red (`src/battle/TrainerAI.lua`, `src/inventory/ItemEffects.lua`):** GenericAI draws no byte without a record; AI X items skip StatModifierUpEffect (no "Nothing happened!" at +6 / 999, the anim regardless); GUARD SPEC prints a line pret's AIUseGuardSpec doesn't; FULL HEAL / FULL RESTORE clear the toxic counter; UNUSED_JUGGLER falls to GenericAI; the AI item line's fallback drops "on <MON>"; ItemUseXStat has no XSTATITEM_ANIM and no 999 wall; no STATUS_AFFECTED_ANIM anywhere; FreezeBurnParalyzeEffect's row lacks the follow-on light shake.
+- **Gold (`src/battle/gen2/Ai.lua`, `Battle.lua`, `src/ui/gen2/BattleState.lua`):** AIChooseMove's layers run per move in a different order, rolls are `random(100)` rather than bytes against `percent`, 0-PP and disabled moves are filtered, the final pick is "lowest, random tie", flags 0 is a random move, and AI_Basic / Types / Aggressive / Status / Risky / Opportunist / Cautious each differ in detail (pokegold variants only); switch scoring uses real matchups without the quarter-HP test, the immune arm or the ≥ 11 gate, with percent odds; item choice ignores the use flags, Full Heal clears confusion, X items do nothing, no base-reward bug; the replacement is the first healthy monster; HEAVY BALL reads `gen2Pokedex[species]` though the import nests entries under `.entries`; "Wild %s fainted!" where pret prints "Enemy @"; the new-#DEX line is unbroken; HitConfusion always animates; Selfdestruct doesn't reset the foe's DESTINY BOND.
