@@ -165,6 +165,7 @@ File ownership is strict within a wave.
 | `a179654` | Gold: computer files no item / switch; LAST_MOVE skips a called move (CheckUserIsCharging); a clip per multi-hit hit with wBattleAnimParam |
 | `fbffada` | Gold: one trainer's kit shared across its seats; BEAT UP's clip per swing; TRIPLE KICK ×2/×3/×4 behind the user's own SUBSTITUTE |
 | `bb24685` | Hub suites on K16 and marked text |
+| `af92e62`, `c02cc95` | Docs; the Gold trainer-kit e2e check reads the shared kit |
 | `c193e36` | Client: own Gold sheets' weight, Red follow-on shakes and link-fight shake mapping, traded EXP by OT id (co-op too) |
 
 ### Decisions taken during the run
@@ -178,3 +179,10 @@ File ownership is strict within a wave.
 
 - **Red (`src/battle/TrainerAI.lua`, `src/inventory/ItemEffects.lua`):** GenericAI draws no byte without a record; AI X items skip StatModifierUpEffect (no "Nothing happened!" at +6 / 999, the anim regardless); GUARD SPEC prints a line pret's AIUseGuardSpec doesn't; FULL HEAL / FULL RESTORE clear the toxic counter; UNUSED_JUGGLER falls to GenericAI; the AI item line's fallback drops "on <MON>"; ItemUseXStat has no XSTATITEM_ANIM and no 999 wall; no STATUS_AFFECTED_ANIM anywhere; FreezeBurnParalyzeEffect's row lacks the follow-on light shake.
 - **Gold (`src/battle/gen2/Ai.lua`, `Battle.lua`, `src/ui/gen2/BattleState.lua`):** AIChooseMove's layers run per move in a different order, rolls are `random(100)` rather than bytes against `percent`, 0-PP and disabled moves are filtered, the final pick is "lowest, random tie", flags 0 is a random move, and AI_Basic / Types / Aggressive / Status / Risky / Opportunist / Cautious each differ in detail (pokegold variants only); switch scoring uses real matchups without the quarter-HP test, the immune arm or the ≥ 11 gate, with percent odds; item choice ignores the use flags, Full Heal clears confusion, X items do nothing, no base-reward bug; the replacement is the first healthy monster; HEAVY BALL reads `gen2Pokedex[species]` though the import nests entries under `.entries`; "Wild %s fainted!" where pret prints "Enemy @"; the new-#DEX line is unbroken; HitConfusion always animates; Selfdestruct doesn't reset the foe's DESTINY BOND.
+
+### Verification (HEAD `c02cc95`)
+
+- **Headless:** every Lua suite and every Node test file green (hub_battle 875/0, rby_mmo_test 6288/6288, battle_sim_turn 1564/0, battle_sim2_turn 1137/0, battle_sim2_ai_move 540/0, battle_sim2_ai_switch 247/0, mediated_battle_client 1730/1730, coop_mediated 1100/1100, solo_battle 551/0, solo_brain 84/0, Node battle_turn 422/0, battle2_turn 550/0, twin_parity 64/0, hub_protocol_parity 94/0); the three parity fixtures reproduced byte for byte; T4 and the server scripts' self-tests green; modkit lint / validate / pack show only the known MK301 / MK302 lines, gen2check only MK409 warnings on `"crystal"` family tests.
+- **Lua↔JS fuzz, 0 mismatches:** Red 24.8k (T1) + 23k (H1) + 21k (H1b) battles; Gold 1.5k (T2) + 20k (H2) + 15k (H2 follow-up) + 10k (kit / BEAT UP / TRIPLE KICK) fights; AiMove 55k and AiSwitch 56k states; Wire↔sanitize 34k (W) + 84k (CL). Stall drivers clean on both referees, including 2v2 coop_npc against two Gold NPC seats.
+- **e2e matrix:** Gen 3 (FireRed / Emerald MMO, trip, mismatch, solo, battlefield) all passed; Gen 2 MMO passed; Red solo GAPS:0; Gen 1 MMO and hub runs show only the known address-scrape (2 host) and registry-id (3 guest-b) reds; Gold solo shows only the known walk-sheet red. The Gold solo rules legs (obey, priority, held items, PAY DAY, trainer item, SLEEP TALK, level-up, weather, BATON PASS) all ran green on the cart AI.
+
