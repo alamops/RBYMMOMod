@@ -131,7 +131,16 @@
 -- double (one trainer sending out two) is the one Gen 3 fight with a second
 -- screen: two seats a side over one shared team each on the referee, and
 -- CoopBattle's solo double in front of it (M:_doubleScreen3) -- see
--- docs/plans/gen3-solo-doubles.md.
+-- docs/plans/gen3-solo-doubles.md.  Every other fight the carts start (the
+-- Safari Zone, roamers and legendaries, the ghosts, the facilities, two
+-- trainers, Steven, the first battles, the tutorials) is this same fight
+-- with a few rules moved, and each family's rules are a *kind* registered
+-- from src/Solo3/ (M.registerKind3, contract C2 of
+-- docs/plans/gen3-solo-remaining-fights.md): hooks the core calls at its
+-- own points, every computer seat on either side answered by its owner's
+-- brain (M:_answerNpcs3), and the engine's outcome word read off how the
+-- referee says the fight ended (M.gen3Words).  A fight whose kind nobody
+-- registered stays the cart's.
 
 local need, mod = ...
 local Config = need("Config")
@@ -981,6 +990,11 @@ function M:_choose(payload)
   if self.generation == 3 then
     seat = self:_seat3(payload)
     if not seat then return false end
+    -- The fight's kind reads every choice first (contract C2 `choose`): a
+    -- Safari throw, a facility's forfeit, a RUN the kind refuses in its own
+    -- words.  Handled there, nothing below runs.
+    local okK, handled, taken = self:_hook3(self.gen3, "choose", payload, seat)
+    if okK and handled == true then return taken and true or false end
   end
   if payload.action == "run" then
     if self.kind == "trainer" then
@@ -1428,8 +1442,9 @@ end
 -- or skip (no target) rather than declining, and the loop is what carries a
 -- trap/recharge chain without a wait line.
 function M:_answerFoe()
-  -- A Gen 3 lone double has two trainer seats to answer, and its own loop.
-  if self.gen3 and self.gen3.double then return self:_answerFoes3() end
+  -- Gen 3 answers every computer seat on either side -- a trainer's, a
+  -- second trainer's, Steven's, a wild one -- in its own loop (contract C4).
+  if self.generation == 3 and self.gen3 then return self:_answerNpcs3() end
   local sim = self.sim
   local foe = sim and sim.byId and sim.byId[FOE_SEAT]
   if not (sim and foe) then return false end
@@ -1452,17 +1467,8 @@ function M:_answerFoe()
         bag = foe.bag,
         mustReplace = foe.mustReplace and true or false,
       }
-      -- Gen 3's brain reads the referee itself: the battlers carry the
-      -- stages, the volatiles and the Transform overlay, and the field the
-      -- weather and the screens.  A fainted seat has no active mon, so the
-      -- one it is replacing stands in for the send-out question.
-      if self.generation == 3 then
-        view.sim = sim
-        view.battler = foe.b
-        view.foeBattler = player and player.b or nil
-        view.fighter = foe
-        if view.mon == nil and foe.lastB then view.mon = foe.lastB.mon end
-      end
+      -- (Gen 3's brain, which reads the referee itself, is asked through
+      -- M:_answerNpcs3 / M:_npcView3.)
       local ok, choice = pcall(brain.choose, brain, view)
       if not ok then
         self:warn("brain", "the trainer's own AI could not be asked for a move "
@@ -2161,12 +2167,302 @@ function M.gen3TakesDouble(opts, foe, party)
 end
 
 -- ------------------------------------------------------------------
+-- the solo kind registry (contract C2 of docs/plans/gen3-solo-remaining-fights.md)
+-- ------------------------------------------------------------------
+--
+-- An ordinary wild encounter and an ordinary trainer are this file's own
+-- fight, start to finish.  Every other fight the carts start -- the Safari
+-- Zone, a roamer, a scripted or legendary wild, a Pokemon Tower ghost, the
+-- facilities, two trainers or Steven beside you, the first battles, the
+-- tutorials -- is the same fight with a few rules moved, and each family's
+-- rules live in their own module under src/Solo3/, registered here by name:
+--
+--   SoloBattle.registerKind3(name, kind)
+--
+-- `name` is the stand's `kind3` (contract C1: "safari" | "roamer" |
+-- "legendary" | "scripted" | "ghost" | "facility" | "pair" | "partner" |
+-- "firstBattle" | "tutorial"; "wild" / "trainer" are this file's own and
+-- need no kind).  A fight whose name no kind claims is handed back to the
+-- cart, silently, whatever the refusal list says -- so a family nobody has
+-- written yet is the cart's fight, never an ordinary one fought by mistake.
+--
+-- `kind` is a table of hooks, every one optional.  Each is called as
+-- `kind:<hook>(ctx, ...)` inside a pcall; a hook that throws is said once
+-- and the fight goes on the way the comment beside it says.  `ctx` is the
+-- fight's own state table (the one M:_begin3 keeps as `self.gen3`), so what
+-- a hook writes on it the rest of the fight reads.  From the entry: `solo`
+-- (this SoloBattle), `game`, `kind` (the entry's own "wild" / "trainer"),
+-- `name` = `kind3` (the kind's name), `hooks3` (the kind), `stand` and its
+-- `facility3` / `tutorial3` / `firstBattle3` / `ghost3`, `opts` (the
+-- engine's battle opts), `foe` (the encounter or the trainer's foe record),
+-- `trainerId`, `done` (the caller's continuation -- a kind may wrap it),
+-- `session`, `family`, `song`, `parties`.  From seating on: `party`,
+-- `wildMon`, `trainer`, `enemySheets`, `pending` (the screen's uploads),
+-- `fight`, `create`, `sim`, `npcs`, `double`, `foeSeats`; from the verdict:
+-- `outcome`, `verdict`, `whiteout`, `healAfter`, `deferHeal`, `scriptedLoss`.
+--
+--   takes(ctx) -> ok, why
+--       After the common gates (the row, a fight already running, the
+--       refusal list, a battle already on screen), before anything is built.
+--       False hands the fight back.  May set the foe and the shape:
+--       ctx.party (the foe's engine monsters), ctx.wildMon, ctx.trainer,
+--       ctx.double (true / false; nil asks the core's lone-double rule),
+--       ctx.foeSeats, ctx.parties[ownerId] (another NPC's engine party, for
+--       the dex and the TV), ctx.song, and the flags below.  Throws: handed
+--       back.
+--   screen(ctx, screenOpts) -> extra?
+--       The options the screen is about to be built with
+--       (MediatedBattle.new's for a single, CoopBattle.newSoloDouble's for a
+--       double -- ctx.screen says which); edit them in place, or return a
+--       table of keys to set.  Throws: handed back.
+--   seat(ctx, create) -> extra?, sides?
+--       The referee's Turn.create options, sides included, as the core
+--       built them; edit in place, return `extra` (C3 create keys to set:
+--       rules, firstBattle, ghost, safari, mode...) and / or `sides`
+--       ({ a = { entry... }, b = { entry... } }, appended after the core's
+--       own: Steven on a, the second trainer on b).  Throws: handed back.
+--   brains(ctx, npcs) -> extra?
+--       Who answers each NPC owner's seats (contract C4): `npcs[ownerId]` is
+--       a SoloBrain (anything with :choose(view)), a function(view, seat),
+--       "referee" (Turn:autoPick, which plays `wildPick` / a side entry's
+--       `ai`) or false (nobody: the kind files that seat itself).  The core's
+--       default is the trainer's SoloBrain on "solo_foe", or "referee" for a
+--       wild; an owner it was not told about is the referee's.  PLAYER_SEAT
+--       is the screen's unless named here.  A brain answering `false` is
+--       asked again next frame (a scripted turn waiting on its beat); nil or
+--       a refused choice falls to the referee.  Throws: handed back.
+--   choose(ctx, payload, seat) -> handled, taken
+--       Every choice the screen files, before the core reads it (a Safari
+--       throw, a forfeit, a refused RUN with the kind's own words).
+--       `handled` true: the core does nothing more and answers `taken`.
+--       Helpers: ctx.solo:file3(payload, seat), ctx.solo:parkLine3(text).
+--   note(ctx, event)
+--       Every referee event on its way to the screen, after the core's own
+--       reading of it (M:_note3).
+--   settle(ctx, outcome) -> handled
+--       The verdict is in, ctx.verdict / ctx.whiteout / ctx.healAfter /
+--       ctx.scriptedLoss decided (and still the kind's to change).  True
+--       skips the core's after-words (the defeated line, the defeat speech
+--       and the prize; or the lost lines).
+--   word(ctx, outcome, ending) -> doneWord?
+--       Contract C5: `ending.result` (handed to `done`) and `ending.word`
+--       (session.battleOutcome, the TV) as the core read them off
+--       outcome.how / by, ending.halt (the trainer-script halt of a draw),
+--       and the monsters the reports name (playerMon, foeMon, playerMon2,
+--       lastFoeMon).  A word returned replaces ending.result and lifts the
+--       halt: the kind answers the caller itself.  Throws: the core's word.
+--   finish(ctx, outcome, ending) -> after?
+--       After the rewards, the prompts and the engine's end-of-battle
+--       reports, before the map's resume scripts and `done(ending.result)`:
+--       the kind's writeback and engine tails.  A function returned is
+--       called once `done` has returned (a record the caller's
+--       continuation would otherwise overwrite).
+--   handBack(ctx) -> handled
+--       A fight the referee could not keep going is about to be handed back
+--       (M:_reset3): put back what the kind took.  True: the kind started
+--       the cart's battle itself.
+--
+-- Flags a kind may set on ctx: `partyless` (the screen uploads no party:
+-- Safari, a tutorial), `noReconcile` (HP / PP / status are not written home:
+-- the party was not in the fight, or was rented), `lossless` (an ending with
+-- nobody standing on side a costs nothing: no whiteout, no lost lines),
+-- `noPickup`, `noDexSeen` (the foe's send-out marks no dex "seen": FRLG
+-- legendaries, a veiled ghost, the Frontier).
+--
+-- A family module is found by its name the first time a fight asks for one
+-- (M.KIND_FILES3), so nothing at boot has to list them: it returns a table
+-- whose `kinds3` maps names to kinds, or registers them itself at load.
+M.KINDS3 = {}
+
+-- The kind names this file fights itself.
+M.DEFAULT_KINDS3 = { wild = true, trainer = true }
+
+-- Where each family lives (wave 2 / 3 of the plan).
+M.KIND_FILES3 = {
+  safari = "Solo3/Safari",
+  roamer = "Solo3/Legend", legendary = "Solo3/Legend",
+  scripted = "Solo3/Legend", ghost = "Solo3/Legend",
+  facility = "Solo3/Facility",
+  pair = "Solo3/Doubles", partner = "Solo3/Doubles",
+  firstBattle = "Solo3/First",
+  tutorial = "Solo3/Tutorial",
+}
+
+-- The engine keys that spell each kind (contract C1's refusal keys), for a
+-- fight that arrives with no stand naming it (a direct call; an older
+-- stand): the first family that matches names the fight, in the order
+-- src/CoopField.lua's classify3 asks (the cart's own nesting: a tutorial
+-- whatever else it is; a facility's hall decides even its pair and partner
+-- fights -- a Battle Tower multi carries all three; a first battle before a
+-- trainer; the ghost before the scripted wild, the Marowak being both).
+-- Safari and the veiled ghost are also session states the engine reads at
+-- its own start (the safari flag, a Tower floor without the SILPH SCOPE);
+-- only the stand sees those.
+M.KIND_KEYS3 = {
+  { "tutorial", { "oldManTutorial", "tutorialKind", "tutorial", "pokedude" } },
+  { "facility", { "dome", "palace", "arena", "factory", "pike", "pyramid", "battleTower",
+                  "tower", "trainerHill", "trainerTower", "secretBase", "frontier" } },
+  { "firstBattle", { "firstBattle", "firstBattleKind" } },
+  { "partner", { "partner" } },
+  { "pair", { "twoOpponents", "trainerIdB" } },
+  { "safari", { "safari" } },
+  { "roamer", { "roamer" } },
+  { "ghost", { "ghost", "ghostBattle" } },
+  { "legendary", { "legendary", "specialWild", "kyogreGroudon", "regi", "groudon", "kyogre",
+                   "rayquaza" } },
+  { "scripted", { "wildScripted" } },
+}
+
+-- The hooks a kind may carry; anything else on it is the kind's own.
+M.KIND_HOOKS3 = {
+  "takes", "screen", "seat", "brains", "choose", "note", "settle", "word", "finish", "handBack",
+}
+
+-- Register (or, on a hot reload, replace) a kind.  -> true, or false + why.
+function M.registerKind3(name, kind)
+  if type(name) ~= "string" or name == "" then return false, "a kind needs a name" end
+  if type(kind) ~= "table" then return false, "a kind is a table of hooks" end
+  for _, hook in ipairs(M.KIND_HOOKS3) do
+    local fn = kind[hook]
+    if fn ~= nil and type(fn) ~= "function" then
+      return false, ("the %s kind's %s is not a function"):format(name, hook)
+    end
+  end
+  M.KINDS3[name] = kind
+  return true
+end
+
+function M.unregisterKind3(name)
+  if type(name) == "string" then M.KINDS3[name] = nil end
+end
+
+-- A family module, read once per file, only when it is there: the mod's own
+-- resolver gives up on every later module once one is missing (main.lua), so
+-- a file that does not exist yet is never asked for.  A suite's stub facade
+-- has no reader; its kinds are registered by hand.
+local kindFilesTried3 = {}
+local function loadKindFile3(file)
+  if kindFilesTried3[file] then return end
+  kindFilesTried3[file] = true
+  if not (type(mod) == "table" and type(mod.read) == "function") then return end
+  local okR, body = pcall(mod.read, mod, "src/" .. file .. ".lua")
+  if not (okR and type(body) == "string") then return end
+  local ok, family = pcall(need, file)
+  if not ok then
+    mod.log:warn("the %s solo battles could not be loaded (%s); those fights are fought "
+      .. "the ordinary way -- reinstall the mod folder", file, tostring(family))
+    return
+  end
+  if type(family) == "table" and type(family.kinds3) == "table" then
+    for name, kind in pairs(family.kinds3) do
+      if M.KINDS3[name] == nil then M.registerKind3(name, kind) end
+    end
+  end
+end
+
+-- Every family module there is, read now (an install that would rather
+-- meet a broken one at boot than at its first fight).  -> the kind names
+-- registered.
+function M.loadKinds3()
+  local files = {}
+  for _, file in pairs(M.KIND_FILES3) do files[file] = true end
+  for file in pairs(files) do loadKindFile3(file) end
+  local names = {}
+  for name in pairs(M.KINDS3) do names[#names + 1] = name end
+  table.sort(names)
+  return names
+end
+
+-- The kind registered under `name`, its family module read first if need be.
+function M.kind3(name)
+  if type(name) ~= "string" then return nil end
+  local kind = M.KINDS3[name]
+  if kind then return kind end
+  local file = M.KIND_FILES3[name]
+  if file then loadKindFile3(file) end
+  return M.KINDS3[name]
+end
+
+-- The kind name of a fight: the stand's `kind3` (opts.stand3, src/CoopField.lua),
+-- else a caller's own `opts.kind3`, else the first family whose engine key
+-- is set on the opts, the foe / encounter, or a `kinds` table on either
+-- (set to anything but false: the trainer op's `firstBattle = false` is an
+-- ordinary trainer), else `base` ("wild" / "trainer").
+function M.kind3Name(opts, foe, base)
+  opts = type(opts) == "table" and opts or {}
+  local stand = type(opts.stand3) == "table" and opts.stand3 or nil
+  local named = stand and stand.kind3
+  if type(named) == "string" and named ~= "" then return named end
+  if type(opts.kind3) == "string" and opts.kind3 ~= "" then return opts.kind3 end
+  local places = {}
+  for _, t in ipairs({ opts, foe }) do
+    if type(t) == "table" then
+      places[#places + 1] = t
+      if type(t.kinds) == "table" then places[#places + 1] = t.kinds end
+    end
+  end
+  for _, row in ipairs(M.KIND_KEYS3) do
+    for _, key in ipairs(row[2]) do
+      for _, place in ipairs(places) do
+        local v = place[key]
+        if v ~= nil and v ~= false then return row[1] end
+      end
+    end
+  end
+  return base
+end
+
+local unpack3 = unpack or table.unpack
+local function pack3(...) return { n = select("#", ...), ... } end
+
+-- One hook of the fight's kind, guarded: -> true, its results; false when
+-- the kind has no such hook; false, "error" when it threw (said once).
+function M:_hook3(ctx, name, ...)
+  local kind = type(ctx) == "table" and ctx.hooks3 or nil
+  local fn = type(kind) == "table" and kind[name] or nil
+  if type(fn) ~= "function" then return false end
+  local res = pack3(pcall(fn, kind, ctx, ...))
+  if not res[1] then
+    self:warn("kind3:" .. name, "the %s fight's own rules failed at '%s' (%s); %s", tostring(ctx.name),
+      name, tostring(res[2]), (name == "takes" or name == "screen" or name == "seat" or name == "brains")
+        and "this fight is fought the ordinary way -- report it with the battle you met"
+        or "the battle carries on by the ordinary rules -- report it with the battle you were in")
+    return false, "error"
+  end
+  return true, unpack3(res, 2, res.n)
+end
+
+-- Copy `extra`'s keys onto `into` (a hook's returned table).
+local function merge3(into, extra)
+  if type(extra) ~= "table" then return into end
+  for k, v in pairs(extra) do into[k] = v end
+  return into
+end
+
+-- Helpers a kind's `choose` reaches through ctx.solo: file a choice into the
+-- referee (M:_submit3), and park a line the pump prints before the window
+-- comes back with nothing spent (the trapped-RUN path).
+function M:file3(payload, seat) return self:_submit3(payload, seat) end
+function M:parkLine3(text)
+  if type(text) == "string" and text ~= "" then self.cantEscape = text end
+end
+function M:say3(text) return self:_say3(text) end
+
+-- ------------------------------------------------------------------
 -- the monsters on the other side, built as the engine builds them
 -- ------------------------------------------------------------------
 
--- A wild monster's held item (pret battle_main.c / pokemon.c:6678): FireRed
--- and LeafGreen roll the species' common / rare slots against one Random()
--- (50 / 5), Emerald asks its encounter rules.
+-- A wild monster's held item, SetWildMonHeldItem.  Emerald asks its own
+-- encounter rules (the engine's encounter_rules/rse.lua wildHeldItem: pret
+-- pokeemerald/src/pokemon.c:6678, Compound Eyes and the common == rare
+-- certainty included).  FireRed / LeafGreen is pret pokefirered/src/
+-- pokemon.c:6032 itself: one Random() % 100 drawn whatever the species
+-- holds; a species whose common and rare slots name the same item holds it
+-- every time (FRLG's Snorlax and its LEFTOVERS); otherwise 45..94 is the
+-- common item and 95..99 the rare one -- not the engine port's `r < 50` /
+-- `r < 55` reading (battle/init.lua foe_mon_from), which keeps the odds but
+-- maps the draw onto the wrong items and never draws for an empty species.
+-- pret wins.  Whether the roll happens at all is the caller's (M.gen3HeldRoll).
 function M.gen3WildItem(species, random16)
   if Gen3.family() == "rse" then
     local Enc = Gen3.engine("src.core.game3.encounters")
@@ -2177,15 +2473,38 @@ function M.gen3WildItem(species, random16)
   local info = Gen3.speciesInfo(species)
   local items = info and info.heldItems or {}
   local common, rare = int3(items.common, 0), int3(items.rare, 0)
-  if common == 0 and rare == 0 then return 0 end
   local r = random16() % 100
-  if common ~= 0 and rare ~= 0 then
-    if r < 50 then return common end
-    if r < 55 then return rare end
-    return 0
+  if common == rare then return common end
+  if r > 44 then
+    if r <= 94 then return common end
+    return rare
   end
-  if common ~= 0 then return (r < 50) and common or 0 end
-  return (r < 5) and rare or 0
+  return 0
+end
+
+-- Whether a wild foe rolls a held item at all (SetWildMonHeldItem's gate; a
+-- trainer's monster never reaches it -- M.gen3TrainerParty builds with
+-- `wild = false`): not under BATTLE_TYPE_LEGENDARY -- which on FireRed /
+-- LeafGreen is also GHOST_UNVEILED, the scoped Marowak (pret pokefirered
+-- include/constants/battle.h) -- nor for the Teachy TV's POKeDUDE (FRLG),
+-- nor a Battle Pyramid or Battle Pike wild (Emerald, whose facility builds
+-- its own monsters anyway).  Read off the engine's own opts and the foe row,
+-- the places the engine spells these (battle/init.lua:717-740).  A row's own
+-- item (`setwildbattle`'s, 0 on every legendary) is kept either way.
+M.HELD_ROLL_EXEMPT3 = {
+  "legendary", "specialWild", "kyogreGroudon", "regi", "groudon", "kyogre", "rayquaza",
+  "ghostUnveiled", "pokedude", "pyramid", "pike",
+}
+function M.gen3HeldRoll(opts, foe)
+  for _, place in ipairs({ opts, foe }) do
+    if type(place) == "table" then
+      for _, key in ipairs(M.HELD_ROLL_EXEMPT3) do
+        local v = place[key]
+        if v ~= nil and v ~= false then return false end
+      end
+    end
+  end
+  return true
 end
 
 -- A move as a number: a trainer row may name its custom moves.
@@ -2209,8 +2528,13 @@ end
 -- exp set on the growth curve (Experience.syncExpToLevel) -- so a caught one
 -- is the cart's monster at that level, not a sheet.
 --
--- opts: { wild = true } for an encounter (the IV / item draws).  nil when the
--- engine cannot describe the species.
+-- opts: { wild = true } for an encounter (the IV / item draws), and
+-- `heldRoll = false` (M.gen3HeldRoll's answer) for a wild that rolls no held
+-- item -- a legendary, the scoped Marowak, the POKeDUDE's.  A row's
+-- `fatefulEncounter` (seteventmon / CreateEnemyEventMon, the engine's
+-- natives_events.lua: Mew, Deoxys and the island legendaries) is carried on
+-- the monster, so the one caught keeps the bit its obedience and a trade
+-- read.  nil when the engine cannot describe the species.
 function M.gen3FoeMon(row, opts)
   opts = opts or {}
   if type(row) ~= "table" then return nil end
@@ -2252,7 +2576,9 @@ function M.gen3FoeMon(row, opts)
     evs[k] = type(row.evs) == "table" and max(0, min(255, int3(row.evs[k], 0))) or 0
   end
   local item = int3(row.item, nil) or int3(row.heldItem, nil)
-  if item == nil and opts.wild then item = M.gen3WildItem(species, random16) end
+  if item == nil and opts.wild and opts.heldRoll ~= false then
+    item = M.gen3WildItem(species, random16)
+  end
   item = max(0, item or 0)
   local gender = row.gender
   if gender ~= "M" and gender ~= "F" and gender ~= "U" then
@@ -2311,6 +2637,7 @@ function M.gen3FoeMon(row, opts)
   if hp == nil or hp > int3(mon.maxHp, 1) then hp = mon.maxHp end
   mon.hp = hp
   if type(row.status) == "string" and row.status ~= "" then mon.status = row.status end
+  if row.fatefulEncounter ~= nil then mon.fatefulEncounter = row.fatefulEncounter and true or false end
   local Experience = Gen3.engine("src.core.game3.battle.experience")
   if Experience then pcall(Experience.syncExpToLevel, mon) end
   return mon
@@ -2515,45 +2842,105 @@ function M.levelled3(party, levels)
   return any and out or nil
 end
 
--- The engine's word for how it went (battle_bridge's `done(result)`,
--- Natives.outcome_to_code): a catch is "caught"; a flight is "run" when the
--- player's side left and "fled" when the wild monster did (Roar / Whirlwind /
--- Teleport by the foe); a whiteout is "lose" whatever the knockouts said --
--- a draw that leaves the player standing on nothing is a defeat on the cart
--- (pret IsPlayerDefeated counts B_OUTCOME_DREW); the rest is the verdict.
+-- The engine's words for how it went (contract C5): the one `done(result)`
+-- is handed (battle_bridge's continuation: a native's VAR_RESULT, the
+-- trainerbattle opcode) and the one session.battleOutcome / the TV are
+-- written from (Natives.outcome_to_code, pret B_OUTCOME_*).  Every post-battle
+-- script reads the code (`specialvar VAR_RESULT, GetBattleOutcome`), and a
+-- legendary's script turns on it: WON is "defeated", RAN / PLAYER_TELEPORTED
+-- "ran from", anything else falls through to FLAG_CAUGHT_X -- so the word is
+-- read off how the referee says the fight ended (outcome().how / by), never
+-- off which side left:
 --
--- `ranSide` is the side the referee's `run` event named ("a" ours, "b"
--- theirs), which is what decides a flight -- not the verdict: a POKé DOLL or
--- FLUFFY TAIL ends the fight with the thrower's side as the winners and no
--- `run` event at all, and on the cart that is the player's escape
--- (B_OUTCOME_RAN).  Without it the verdict is read, as before.
+--   how "catch"                -> "caught"            (7)
+--   how "flee" (a wild seat's own RUN) -> "mon_fled"  (6)
+--   how "run" (the player's RUN, a POKe DOLL / FLUFFY TAIL) -> "run" (4)
+--   how "teleport" / "roar"    -> "teleport_player" (5), except where the
+--       cart says the outcome by the user's side (Emerald's
+--       VARIOUS_SET_TELEPORT_OUTCOME, pokeemerald battle_script_commands.c:
+--       6487; the engine's profile rule teleportOutcome = "side") and the
+--       wild monster used it: "mon_teleported" (10).  FireRed / LeafGreen
+--       set PLAYER_TELEPORTED whoever used it (battle_scripts_1.s:1933 /
+--       :3290) -- Mew's TELEPORT on Emerald is 10, and FARAWAY ISLAND's
+--       script keeps the Mew; a player's WHIRLWIND on Mewtwo is 5, "ran
+--       from", never the catch path.
+--   how "balls"                -> "no_safari_balls"   (8)
+--   how "forfeit"              -> "forfeited"         (9)
+--   a knockout / an Arena judgment / the clock: a whiteout is "lose"
+--       whatever the knockouts said (pret IsPlayerDefeated counts DREW),
+--       else the verdict; a trainer's draw is "lose" to `done` (the
+--       trainerbattle opcode reads anything else as a win: the flag, the
+--       beaten script, the badge) and DREW to the save.  A kind's own `word`
+--       hook answers the draws the opcode is not waiting on (a facility's
+--       "draw", a pair's "lose") -- see M:_ended3.
 --
--- `kind` "trainer": a draw is "lose".  The trainerbattle opcode reads
--- everything that is not a loss as a win -- the trainer flag, the beaten
--- script and its badge or TM -- and a draw is not one on the cart
--- (IsPlayerDefeated again).  M.gen3OutcomeWord keeps the DREW for the save.
--- (A trainer drawn with the player still standing is not answered at all --
--- M:_ended3 halts its script -- so this is the word only for a draw that
--- whites out, and a safe one for any caller that asks.)
-function M.gen3Result(verdict, reason, whiteout, ranSide, kind)
-  if reason == "catch" then return "caught" end
-  if reason == "run" then
-    if ranSide == "b" then return "fled" end
-    if ranSide == "a" then return "run" end
-    return (verdict == "win") and "fled" or "run"
+-- info: { verdict ("win" | "loss" | "draw", ours), reason, how, by,
+--         whiteout, ranSide, kind ("wild" | "trainer"), teleportBySide }.
+-- A referee that says no `how` (one older than W1-RF's outcome fields) is
+-- read the old way: reason "catch", and a "run" by the side the referee's
+-- `run` event named (`ranSide`; none -- a POKe DOLL -- was ours), else by
+-- the verdict.
+-- -> doneWord, saveWord
+function M.gen3Words(info)
+  info = type(info) == "table" and info or {}
+  local verdict, how = info.verdict, info.how
+  if how == nil then
+    if info.reason == "catch" then
+      how = "catch"
+    elseif info.reason == "run" then
+      local side = info.ranSide
+      if side ~= "a" and side ~= "b" then side = (verdict == "win") and "b" or "a" end
+      how = (side == "b") and "flee" or "run"
+    end
   end
-  if whiteout then return "lose" end
-  if verdict == "win" then return "win" end
-  if verdict == "loss" then return "lose" end
-  if kind == "trainer" then return "lose" end
-  return "draw"
+  if how == "catch" then return "caught", "caught" end
+  if how == "flee" then return "mon_fled", "mon_fled" end
+  if how == "run" or how == "item" then return "run", "run" end
+  if how == "teleport" or how == "roar" then
+    local w = (info.teleportBySide and info.by == "b") and "mon_teleported" or "teleport_player"
+    return w, w
+  end
+  if how == "balls" then return "no_safari_balls", "no_safari_balls" end
+  if how == "forfeit" then return "forfeited", "forfeited" end
+  if info.whiteout then return "lose", "lose" end
+  if verdict == "win" then return "win", "win" end
+  if verdict == "loss" then return "lose", "lose" end
+  if info.kind == "trainer" then return "lose", "draw" end
+  return "draw", "draw"
 end
 
--- The word session.battleOutcome is written from (Natives.outcome_to_code):
--- M.gen3Result's, except that a drawn trainer fight the player is still
--- standing after stays B_OUTCOME_DREW for a script that reads the outcome.
-function M.gen3OutcomeWord(verdict, reason, whiteout, ranSide)
-  return M.gen3Result(verdict, reason, whiteout, ranSide, nil)
+-- Does this cart word a TELEPORT / ROAR ending by the user's side?  The
+-- engine's battle profile rule when it states one (Emerald's
+-- teleportOutcome = "side"), else the family's.
+function M.teleportBySide3(bp, family)
+  local rules = type(bp) == "table" and type(bp.rules) == "table" and bp.rules or nil
+  local rule = rules and rules.teleportOutcome
+  if rule ~= nil then return rule == "side" end
+  family = (type(bp) == "table" and bp.family) or family or Gen3.family()
+  return family == "rse"
+end
+
+-- M.gen3Words' `done` word, in the older positional shape (kept for the
+-- callers and suites that ask it so): `ranSide` is the side the referee's
+-- `run` event named, `kind` "trainer" turns a draw into "lose", `how` / `by`
+-- / `teleportBySide` are the outcome's own when known.
+function M.gen3Result(verdict, reason, whiteout, ranSide, kind, how, by, teleportBySide)
+  local done = M.gen3Words({
+    verdict = verdict, reason = reason, whiteout = whiteout, ranSide = ranSide,
+    kind = kind, how = how, by = by, teleportBySide = teleportBySide,
+  })
+  return done
+end
+
+-- ...and the word session.battleOutcome is written from: the same, except
+-- that a drawn trainer fight the player is still standing after stays
+-- B_OUTCOME_DREW for a script that reads the outcome.
+function M.gen3OutcomeWord(verdict, reason, whiteout, ranSide, how, by, teleportBySide)
+  local _, save = M.gen3Words({
+    verdict = verdict, reason = reason, whiteout = whiteout, ranSide = ranSide,
+    how = how, by = by, teleportBySide = teleportBySide,
+  })
+  return save
 end
 
 -- ------------------------------------------------------------------
@@ -2569,11 +2956,18 @@ end
 -- nothing at all has happened and the caller starts the engine's own battle.
 --
 -- opts (both):
---   done       function(result): "win" | "lose" | "draw" | "run" | "fled" |
---              "caught" -- battle_bridge's own vocabulary, so a caller can
---              hand this the very callback it was going to hand the engine
---              (the trainer script's resume, the trainer flag).  Called after
---              the rewards, the whiteout and the evolutions.
+--   done       function(result): "win" | "lose" | "draw" | "run" | "mon_fled"
+--              | "caught" | "teleport_player" | "mon_teleported" |
+--              "no_safari_balls" | "forfeited" (M.gen3Words, contract C5) --
+--              Natives.outcome_to_code's vocabulary, so a caller can hand this
+--              the very callback it was going to hand the engine (the trainer
+--              script's resume, the trainer flag, a native's VAR_RESULT).
+--              Called after the rewards, the whiteout and the evolutions.
+--   stand3     (optional) the stand-in src/CoopField.lua built for the fight
+--              (contract C1): its `kind3` names the fight's kind (contract
+--              C2, M.kind3Name), `facility3` / `tutorial3` the hall or the
+--              tutorial; a kind reads the rest.  Without one, the engine's
+--              own keys on the opts / foe name the kind.
 --   fallback   function() (optional): starts the engine's own battle, for the
 --              one case this file gives a fight back (a referee that keeps
 --              faulting).  Without it, BattleBridge.start / startWild are
@@ -2622,18 +3016,27 @@ function M:fromGen3Encounter(game, enc, opts)
   if self.fight or self.handingBack3 then return false end
   if not (type(game) == "table" and Gen.generation(game) == 3) then return false end
   if type(enc) ~= "table" then return false end
-  if M.gen3Refused(opts, enc) or enc.roamer then return false end
+  if M.gen3Refused(opts, enc) then return false end
+  -- A roamer, a legendary, the Safari Zone...: their kind's, or the cart's.
+  local ctx = self:_ctx3(game, "wild", opts, enc)
+  if not ctx then return false end
   if self:_fightOnScreen3() then return false end
-  local given = prebuiltParty3(opts.party)
-  local mon = (given and given[1]) or (prebuilt3(enc.mon) and enc.mon) or nil
-  mon = mon or M.gen3FoeMon(enc, { wild = true })
+  if not self:_takes3(ctx) then return false end
+  local mon = ctx.wildMon or (prebuiltParty3(ctx.party) and ctx.party[1]) or nil
+  if not mon then
+    local given = prebuiltParty3(opts.party)
+    mon = (given and given[1]) or (prebuilt3(enc.mon) and enc.mon) or nil
+  end
+  mon = mon or M.gen3FoeMon(enc, { wild = true, heldRoll = M.gen3HeldRoll(opts, enc) })
   if not mon then
     self:warn("nofoe3", "the wild POKéMON in this encounter could not be built for the "
       .. "mod's battle system, so it is fought the ordinary way; report this with "
       .. "the species you met")
     return false
   end
-  local begun = self:_begin3(game, "wild", { mon }, opts, { wildMon = mon, foe = enc })
+  ctx.wildMon = ctx.wildMon or mon
+  ctx.party = prebuiltParty3(ctx.party) or { mon }
+  local begun = self:_begin3(game, ctx)
   if begun then
     -- pret battle_setup.c: a battle starting re-arms the encounter cooldown,
     -- as BattleBridge.startWild does for the engine's own.
@@ -2662,29 +3065,117 @@ function M:fromGen3Trainer(game, foe, opts)
   end
   if type(foe) ~= "table" then return false end
   if M.gen3Refused(opts, foe) then return false end
+  -- Two trainers, Steven, a facility, Oak's lab...: their kind's, or the cart's.
+  local ctx = self:_ctx3(game, "trainer", opts, foe)
+  if not ctx then return false end
+  ctx.trainerId = trainerId
   -- A lone double with two usable monsters is fought as the cart's double;
   -- any other double (a second trainer, a party that cannot field two) is
-  -- the cart's to refuse in its own words.
-  local double = M.gen3Double(opts, foe)
-  if double then
-    local session = Gen3.session()
-    if not M.gen3TakesDouble(opts, foe, session and session.party) then return false end
+  -- the cart's to refuse in its own words.  A kind that says what shape its
+  -- fight is (ctx.double true or false) is not asked this.
+  local function loneDouble()
+    local double = M.gen3Double(opts, foe)
+    if double then
+      local session = Gen3.session()
+      if not M.gen3TakesDouble(opts, foe, session and session.party) then return false end
+    end
+    ctx.double = double or nil
+    return true
   end
+  if not ctx.hooks3 and not loneDouble() then return false end
   if self:_fightOnScreen3() then return false end
+  if not self:_takes3(ctx) then return false end
+  if ctx.hooks3 and ctx.double == nil and not loneDouble() then return false end
   -- A prebuilt party has been through the `trainer.party` hook already (the
   -- stand-in built it with M.gen3HookedFoe); it is not run a second time.
-  local given = prebuiltParty3(opts.party)
-  local hooked = given and foe or M.gen3HookedFoe(foe, trainerId)
-  local party = given or M.gen3TrainerParty(hooked, trainerId)
+  local party = prebuiltParty3(ctx.party)
+  local hooked = foe
+  if not party then
+    local given = prebuiltParty3(opts.party)
+    hooked = given and foe or M.gen3HookedFoe(foe, trainerId)
+    party = given or M.gen3TrainerParty(hooked, trainerId)
+  end
   if #party == 0 then
     self:warn("nofoe3", "this trainer's party could not be built for the mod's battle "
       .. "system, so the trainer is fought the ordinary way; report this with the "
       .. "trainer you met")
     return false
   end
-  local trainer = M.gen3TrainerRecord(hooked, trainerId, opts)
-  return self:_begin3(game, "trainer", party, opts,
-    { foe = foe, trainer = trainer, double = double or nil })
+  ctx.party = party
+  ctx.trainer = ctx.trainer or M.gen3TrainerRecord(hooked, trainerId, opts)
+  return self:_begin3(game, ctx)
+end
+
+-- A stand-in that names neither an encounter nor a trainer (the Teachy TV's
+-- POKeDUDE, routed here by src/CoopField.lua's wrap of its start): routed
+-- through the entry its shape says -- a trainer stand to M:fromGen3Trainer,
+-- anything else to M:fromGen3Encounter with its encounter, its foe, or its
+-- first prebuilt monster as the row -- with the stand as `opts.stand3` and
+-- its monsters as `opts.party`.  Every tutorial is a wild-shaped fight on
+-- the cart (the old man's Weedle, Wally's Ralts, the POKeDUDE's demo foe),
+-- so there is no third entry: the tutorial kind's own hooks (contract C2)
+-- seat what differs.  `opts` are the engine's battle opts (the stand's own
+-- `opts` when absent).  Same answer as the entry it reaches.
+function M:fromGen3Stand(game, stand, opts)
+  if type(stand) ~= "table" then return false end
+  local o = {}
+  local src = type(opts) == "table" and opts or (type(stand.opts) == "table" and stand.opts) or {}
+  for k, v in pairs(src) do o[k] = v end
+  o.stand3 = stand
+  if o.party == nil and type(stand.enemyParty) == "table" and #stand.enemyParty > 0 then
+    o.party = stand.enemyParty
+  end
+  if stand.kind == "trainer" then
+    local foe = stand.foe or stand.trainerId
+      or (type(stand.trainer) == "table" and stand.trainer.trainerId) or nil
+    return self:fromGen3Trainer(game, foe, o)
+  end
+  local enc = type(stand.encounter) == "table" and stand.encounter
+    or (type(stand.foe) == "table" and stand.foe) or nil
+  if not enc then
+    local lead = type(o.party) == "table" and o.party[1] or nil
+    if type(lead) ~= "table" then return false end
+    enc = { species = lead.species or lead.speciesId, level = lead.level, mon = lead }
+  end
+  return self:fromGen3Encounter(game, enc, o)
+end
+
+-- A fight's own state table (contract C2's `ctx`, kept as `self.gen3` once
+-- it is seated), or nil when its kind is one nobody registered -- that fight
+-- is the cart's.
+function M:_ctx3(game, base, opts, foe)
+  local name = M.kind3Name(opts, foe, base)
+  local kind = nil
+  if not M.DEFAULT_KINDS3[name] or M.KINDS3[name] then
+    kind = M.kind3(name)
+    if not kind then return nil end
+  end
+  local stand = type(opts.stand3) == "table" and opts.stand3 or nil
+  return {
+    solo = self, game = game,
+    -- `kind` the entry's own "wild" / "trainer", `name` (and `kind3`, the
+    -- stand's spelling) the kind's name, `hooks3` the registered kind.
+    kind = base, name = name, kind3 = name, hooks3 = kind,
+    stand = stand,
+    -- The stand's details of its kind (src/CoopField.lua classify3): the
+    -- hall, the tutorial, which first battle, which ghost.
+    facility3 = stand and stand.facility3 or nil,
+    tutorial3 = stand and stand.tutorial3 or nil,
+    firstBattle3 = stand and stand.firstBattle3 or nil,
+    ghost3 = stand and stand.ghost3 or nil,
+    opts = opts, done = opts.done, foe = foe,
+    session = Gen3.session(),
+    family = Gen3.family(),
+    song = opts.song,
+    parties = {},
+  }
+end
+
+-- The kind's `takes`, for a fight that has one; a throw is a no.
+function M:_takes3(ctx)
+  local ok, taken = self:_hook3(ctx, "takes")
+  if ok then return taken and true or false end
+  return taken ~= "error"
 end
 
 -- Another fight already owns the screen: the cart's own battle, or a mod
@@ -2701,7 +3192,11 @@ end
 -- building the fight
 -- ------------------------------------------------------------------
 
-function M:_begin3(game, kind, party, opts, extra)
+-- ctx is the fight's own state table (M:_ctx3, filled by the entry and the
+-- kind's `takes`): kind ("wild" | "trainer"), party (the foe's engine
+-- monsters), opts, foe, trainer, wildMon, double / foeSeats, and the kind.
+function M:_begin3(game, ctx)
+  local kind, party, opts = ctx.kind, ctx.party, ctx.opts or {}
   local Turn = turnFor(3)
   if type(Turn) ~= "table" or type(Turn.create) ~= "function" then
     self:warn("noturn", "the mod's Gen 3 battle referee could not be loaded, so this "
@@ -2716,18 +3211,23 @@ function M:_begin3(game, kind, party, opts, extra)
       .. "trainer or the species you met")
     return false
   end
+  ctx.enemySheets = enemySheets
 
   self.counter = self.counter + 1
   local battleId = ("solo_%d"):format(self.counter)
   local mode = (kind == "wild") and Config.SOLO_WILD_MODE or Config.SOLO_TRAINER_MODE
-  local trainer = extra.trainer
+  local trainer = ctx.trainer
   local pending = {}
-  -- A lone double (M.gen3TakesDouble said yes): two seats a side over one
-  -- shared team each -- the cart's gPlayerParty behind battlers 0 and 2,
-  -- gEnemyParty behind 1 and 3 -- except that a trainer with one monster
-  -- fields one (pret's absent battler from the start).
-  local double = extra.double == true and kind == "trainer"
-  local foeSeats = (double and #enemySheets >= 2) and 2 or 1
+  ctx.battleId, ctx.mode, ctx.pending = battleId, mode, pending
+  -- A double (M.gen3TakesDouble said yes, or the kind said so): two seats a
+  -- side -- the cart's gPlayerParty behind battlers 0 and 2, the foes behind
+  -- 1 and 3 -- except that a trainer with one monster fields one (pret's
+  -- absent battler from the start).  Only a trainer's fight is a double on
+  -- the carts unless a kind says otherwise.
+  local double = ctx.double == true and (kind == "trainer" or ctx.hooks3 ~= nil)
+  local foeSeats = int3(ctx.foeSeats, nil) or ((double and #enemySheets >= 2) and 2 or 1)
+  ctx.double = double or nil
+  ctx.screen = double and "double" or "single"
   -- Stated before the screen is built: the transport's moveset handling reads
   -- it, and so does every Gen 3 arm the pump reaches.
   self.generation = 3
@@ -2736,20 +3236,21 @@ function M:_begin3(game, kind, party, opts, extra)
   -- on the live party -- has touched a monster of it (M.snapshotParty3); put
   -- back on every way out that is not the fight's own ending.
   local partySnap = nil
+  local function giveUp()
+    self.generation = nil
+    M.restoreParty3(partySnap)
+    return false
+  end
   if double then
     local session0 = Gen3.session()
     partySnap = M.snapshotParty3(session0 and session0.party)
     fight = self:_doubleScreen3(game, pending, {
       battle = battleId, mode = mode, trainer = trainer,
       enemySheets = enemySheets, foeSeats = foeSeats,
-    })
-    if not fight then
-      self.generation = nil
-      M.restoreParty3(partySnap)
-      return false
-    end
+    }, ctx)
+    if not fight then return giveUp() end
   else
-    fight = MediatedBattle.new({
+    local screenOpts = {
       transport = self:_transport(pending),
       ui = self.ui,
       game = game,
@@ -2761,10 +3262,18 @@ function M:_begin3(game, kind, party, opts, extra)
       npcParty = (kind ~= "wild") and enemySheets or nil,
       mode = mode,
       wildParty = (kind == "wild") and enemySheets or nil,
-      wildCatchMon = extra.wildMon,
+      wildCatchMon = ctx.wildMon,
+      -- The battle theme a script named (Emerald's legendary natives,
+      -- Trainer Hill: `opts.song`), for the screen's music to play.
+      song = ctx.song,
       onDone = function(result, toLearn) self:_ended(result, toLearn) end,
-    })
+    }
+    local okS, extraS = self:_hook3(ctx, "screen", screenOpts)
+    if not okS and extraS == "error" then return giveUp() end
+    merge3(screenOpts, extraS)
+    fight = MediatedBattle.new(screenOpts)
   end
+  ctx.fight = fight
 
   local started
   if double then
@@ -2782,19 +3291,16 @@ function M:_begin3(game, kind, party, opts, extra)
     started = fight:start(game)
   end
   local mine = pending.party
-  if not (started and type(mine) == "table" and type(mine.mons) == "table"
-          and #mine.mons > 0) then
-    self.generation = nil
-    M.restoreParty3(partySnap)
-    return false
-  end
+  local hasParty = type(mine) == "table" and type(mine.mons) == "table" and #mine.mons > 0
+  if not (started and (hasParty or ctx.partyless)) then return giveUp() end
+  mine = type(mine) == "table" and mine or {}
 
   local ruleset = pending.ruleset or {}
   local terrain, underwater = M.gen3Terrain(game)
   local player = Gen3.player()
   local foeName = (kind == "wild") and (enemySheets[1].species or "WILD")
     or M.gen3FoeLabel(trainer)
-  local sim, why = Turn.create({
+  local create = {
     id = battleId,
     mode = mode,
     seed = self:_seed(),
@@ -2812,6 +3318,14 @@ function M:_begin3(game, kind, party, opts, extra)
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
     resolveTimeout = Config.BATTLE_RESOLVE_TIMEOUT,
     now = 0,
+    -- The cart's own wild move (contract C3): a wild battle without an AI
+    -- script picks `Random() & 3` until it lands on a move, never the
+    -- trainer heuristic (pret battle_controller_opponent.c: the AI runs only
+    -- for TRAINER | FIRST_BATTLE | SAFARI | ROAMER -- pokefirered :1355,
+    -- pokeemerald :1563).  On every wild fight this file seats; a side
+    -- entry's own `ai` (a roamer's, Birch's Zigzagoon's) is the referee's to
+    -- prefer.  A trainer's seat never reads it.
+    wildPick = (kind == "wild") and "cart" or nil,
     -- A double is one entry a side with `seats` on it (contract C1 of
     -- docs/plans/gen3-solo-doubles.md, the shared team of
     -- docs/plans/gen3-battle-sheet.md §1.3): the referee expands it into two
@@ -2854,26 +3368,60 @@ function M:_begin3(game, kind, party, opts, extra)
         bag = (kind ~= "wild") and pending.wild and pending.wild.bag or nil,
       } },
     },
-  })
+  }
+  -- The kind's create options (contract C3) and its extra side entries.
+  local okC, extraC, sidesC = self:_hook3(ctx, "seat", create)
+  if not okC and extraC == "error" then
+    fight.onDone = nil
+    return giveUp()
+  end
+  if type(extraC) == "table" then
+    for k, v in pairs(extraC) do
+      if k ~= "sides" then create[k] = v end
+    end
+  end
+  if type(sidesC) == "table" then
+    for _, side in ipairs({ "a", "b" }) do
+      for _, entry in ipairs(type(sidesC[side]) == "table" and sidesC[side] or {}) do
+        local list = create.sides[side]
+        list[#list + 1] = entry
+      end
+    end
+  end
+  ctx.create = create
+  local sim, why = Turn.create(create)
   if not sim then
-    self.generation = nil
-    M.restoreParty3(partySnap)
+    fight.onDone = nil
+    giveUp()
     self:warn("nosim", "the mod's battle system could not assemble this fight (%s), so "
       .. "it is fought the ordinary way; report this with the battle you were in",
       tostring(why))
     return false
   end
 
-  local brain
+  -- Who answers the computer's seats (contract C4): the trainer's own
+  -- SoloBrain on the trainer's, the referee's own picker (`wildPick` / the
+  -- entry's `ai`) on a wild one; the kind may add or replace any owner's.
+  local npcs = {}
   if kind == "trainer" then
-    brain = SoloBrain.new({ game = game, generation = 3, trainer = trainer })
+    npcs[FOE_SEAT] = SoloBrain.new({ game = game, generation = 3, trainer = trainer }) or "referee"
+  else
+    npcs[FOE_SEAT] = "referee"
   end
+  ctx.sim = sim
+  local okB, extraB = self:_hook3(ctx, "brains", npcs)
+  if not okB and extraB == "error" then
+    fight.onDone = nil
+    return giveUp()
+  end
+  merge3(npcs, extraB)
+  local brain = type(npcs[FOE_SEAT]) == "table" and npcs[FOE_SEAT] or nil
 
   local session = Gen3.session()
   self.fight, self.sim, self.brain = fight, sim, brain
   self.engine, self.game, self.kind = nil, game, kind
   self.generation = 3
-  self.wildMon = extra.wildMon
+  self.wildMon = ctx.wildMon
   self.mapId = opts.mapId
   self.settled, self.reason = false, nil
   self.refuseRun, self.failedRun, self.cantEscape = nil, nil, nil
@@ -2882,30 +3430,24 @@ function M:_begin3(game, kind, party, opts, extra)
   self.warned = nil
   self.save = session
   self.levels = nil
-  self.gen3 = {
-    kind = kind,
-    opts = opts,
-    done = opts.done,
-    foe = extra.foe,
-    trainer = trainer,
-    party = party,
-    session = session,
-    levels = M.levels3(session and session.party),
-    verdict = nil, whiteout = false, healAfter = false,
-    amuletPlayer = false, amuletFoe = false,
-    -- The side the referee's `run` event named, when one did (M.gen3Result).
-    ranSide = nil,
-    -- pret gBattleResults, as far as the ending reads it (the TV, M:_note3).
-    results = { catchAttempts = {}, usedMasterBall = false, lastUsedItem = 0 },
-    -- A lone double: two player seats, `foeSeats` trainer seats.  The ending
-    -- reads `double` for the prize and the TV; M:_note3 keeps `foeOut` (the
-    -- party index out on each trainer slot) and `lastFoeFainted` from it.
-    double = double or nil,
-    foeSeats = double and foeSeats or nil,
-    foeOut = double and {} or nil,
-    -- The party as the fight found it (a double only; M:_reset3 restores it).
-    partySnap = partySnap,
-  }
+  -- The fight's state is its ctx (contract C2), with what the core keeps:
+  ctx.npcs = npcs
+  ctx.session = session
+  ctx.levels = M.levels3(session and session.party)
+  ctx.verdict, ctx.whiteout, ctx.healAfter = nil, false, false
+  ctx.amuletPlayer, ctx.amuletFoe = false, false
+  -- The side the referee's `run` event named, when one did (M.gen3Words).
+  ctx.ranSide = nil
+  -- pret gBattleResults, as far as the ending reads it (the TV, M:_note3).
+  ctx.results = { catchAttempts = {}, usedMasterBall = false, lastUsedItem = 0 }
+  -- A double: `foeSeats` trainer seats.  The ending reads `double` for the
+  -- prize and the TV; M:_note3 keeps `foeOut` (the party index out on each
+  -- foe slot) and `lastFoeFainted` from it.
+  ctx.foeSeats = double and foeSeats or nil
+  ctx.foeOut = double and {} or nil
+  -- The party as the fight found it (a double only; M:_reset3 restores it).
+  ctx.partySnap = partySnap
+  self.gen3 = ctx
 
   -- Claimed only once it is on screen.  A layer the modal stack refused would
   -- leave a referee running a fight nobody can see or answer; the caller is
@@ -2924,33 +3466,33 @@ function M:_begin3(game, kind, party, opts, extra)
       .. "BATTLES off in the mod manager (F10) and report it")
     return false
   end
-  -- The seats, as the referee named them: in a double both of each shared
-  -- team, in slot order (solo_player, solo_player#2; solo_foe and, for a
-  -- trainer with two monsters or more, solo_foe#2).
-  local sides = { a = { PLAYER_SEAT }, b = { FOE_SEAT } }
-  if double then
-    sides = { a = M.seatIds3(sim, PLAYER_SEAT), b = M.seatIds3(sim, FOE_SEAT) }
-  end
+  -- The seats, as the referee named them, side by side in slot order: one a
+  -- side for a single; both of each shared team in a lone double
+  -- (solo_player, solo_player#2; solo_foe and, for a trainer with two
+  -- monsters or more, solo_foe#2); and whatever entries a kind added.
+  -- The screen's own mode, whatever the referee was seated as (a Safari
+  -- referee's mode is its own; the screen stays a wild one).
   fight:onReady({
     battle = battleId,
     mode = mode,
-    sides = sides,
+    sides = { a = M.sideIds3(sim, "a", PLAYER_SEAT), b = M.sideIds3(sim, "b", FOE_SEAT) },
   })
   self:_pump()
   return true
 end
 
--- The screen of a lone double: CoopBattle's solo double (contract C3 of
+-- The screen of a double: CoopBattle's solo double (contract C3 of
 -- docs/plans/gen3-solo-doubles.md) -- two monsters a side, a command menu per
 -- monster, targets, a replacement per seat -- behind the same narrow surface
 -- MediatedBattle serves a single (`start`, `onReady`, `onEvent`, `onOutcome`,
 -- `say`, `onDone`, `evoResolved`, `battle`), over the same table transport,
 -- plus the two M:_backstop3 reads (`waitingOnReferee`, `reopenOwed`) and the
--- transport's `refusal` line it reads back (`_transport`).
+-- transport's `refusal` line it reads back (`_transport`).  The kind's
+-- `screen` hook sees its options first (`ctx`).
 -- Reached for here rather than at load: CoopBattle is the co-op screen, and
 -- every other fight this file runs never needs it.  nil when it cannot be
 -- built, said once; the caller hands the fight back.
-function M:_doubleScreen3(game, pending, args)
+function M:_doubleScreen3(game, pending, args, ctx)
   local okC, CoopBattle = pcall(need, "CoopBattle")
   if not (okC and type(CoopBattle) == "table" and type(CoopBattle.newSoloDouble) == "function") then
     self:warn("double3load", "the mod's double-battle screen could not be loaded, so this "
@@ -2959,7 +3501,7 @@ function M:_doubleScreen3(game, pending, args)
     return nil
   end
   local trainer = args.trainer
-  local ok, fight = pcall(CoopBattle.newSoloDouble, game, {
+  local screenOpts = {
     transport = self:_transport(pending),
     ui = self.ui,
     battle = args.battle,
@@ -2971,8 +3513,15 @@ function M:_doubleScreen3(game, pending, args)
     selfId = PLAYER_SEAT,
     foeId = FOE_SEAT,
     foeSeats = args.foeSeats,
+    song = ctx and ctx.song or nil,
     onDone = function(result, toLearn) self:_ended(result, toLearn) end,
-  })
+  }
+  if ctx then
+    local okH, extra = self:_hook3(ctx, "screen", screenOpts)
+    if not okH and extra == "error" then return nil end
+    merge3(screenOpts, extra)
+  end
+  local ok, fight = pcall(CoopBattle.newSoloDouble, game, screenOpts)
   if not (ok and type(fight) == "table" and type(fight.start) == "function") then
     self:warn("double3open", "the mod's double-battle screen could not be opened (%s), so "
       .. "this double battle is fought the ordinary way; report it with the trainer "
@@ -2992,6 +3541,30 @@ function M.seatIds3(sim, ownerId)
   end
   if #out == 0 then out[1] = ownerId end
   return out
+end
+
+-- Every seat id on one side of the referee, in slot order -- every owner's
+-- (a second trainer's, Steven's), each shared team's two -- from its own
+-- `bySide`; `fallback` alone when it has none.
+function M.sideIds3(sim, side, fallback)
+  local out = {}
+  local bucket = type(sim) == "table" and type(sim.bySide) == "table" and sim.bySide[side] or nil
+  for _, fighter in ipairs(type(bucket) == "table" and bucket or {}) do
+    if type(fighter) == "table" and fighter.playerId then out[#out + 1] = fighter.playerId end
+  end
+  if #out == 0 then out[1] = fallback end
+  return out
+end
+
+-- The fighter standing on a field slot (the referee's own `_fighterAtSlot`,
+-- restated over its public `fighters`).
+local function fighterAt3(sim, slot)
+  slot = int3(slot, nil)
+  if not (slot and type(sim) == "table") then return nil end
+  for _, fighter in ipairs(sim.fighters or {}) do
+    if fighter.slot == slot then return fighter end
+  end
+  return nil
 end
 
 -- ------------------------------------------------------------------
@@ -3073,21 +3646,44 @@ function M:_backstop3()
   return filed
 end
 
--- The trainer's answers in a lone double: every trainer seat that owes the
--- referee one -- a command for the turn, or a monster for an emptied seat --
--- in seat order (pret's battler order: the left monster's command, then the
--- right's), asked of ONE brain, because the trainer's item budget is the
--- trainer's and not a monster's (the brain facts of
--- docs/plans/gen3-solo-doubles.md).  Each seat falls back to `Turn:autoPick`
--- on its own, as the single's one seat does; a seat neither can answer is
--- left for the next frame without holding its sibling up.  Looped for the
--- single's reason (M:_answerFoe): filing the last answer can resolve the turn
--- and open the next one, where a seat owes again.
-function M:_answerFoes3()
+-- Who answers a seat (contract C4): its owner's entry in the fight's `npcs`
+-- (M:_begin3's default, the kind's `brains`), else the referee for any
+-- owner but the player -- a computer seat nobody named is never left
+-- unanswered -- and nobody for the player's own seats (the screen's).  nil:
+-- not this loop's seat.
+function M:_answerer3(seat)
+  local npcs = self.gen3 and self.gen3.npcs or {}
+  local answer = npcs[seat.owner or seat.playerId]
+  if answer == false then return nil end
+  if answer ~= nil then return answer end
+  if (seat.owner or seat.playerId) == PLAYER_SEAT then return nil end
+  return "referee"
+end
+
+-- Every computer seat that owes the referee an answer -- a command for the
+-- turn, or a monster for an emptied seat -- on either side, in pret's
+-- battler order (the referee's own `order`: a1 b1 a2 b2, the cart's battlers
+-- 0..3, each choosing in turn), each asked of its OWNER's answerer
+-- (M:_answerer3): a trainer's one SoloBrain for both seats of its shared
+-- team, because the item budget is the trainer's and not a monster's (the
+-- brain facts of docs/plans/gen3-solo-doubles.md); a second trainer's own,
+-- Steven's own on side a; the referee's picker (`Turn:autoPick`, which plays
+-- the create's `wildPick` and a side entry's `ai`) for a wild seat.  A
+-- brain's answer goes through `submitChoice` (its index vocabulary, see
+-- M:_answerFoe); one it declines or the referee refuses falls to
+-- `autoPick`, seat by seat; a brain that answers `false` is waiting for its
+-- moment (a tutorial's scripted beat) and is asked again next frame.  A
+-- seat neither can answer is left for the next frame without holding the
+-- others up.  Looped, because filing the last answer can resolve the turn
+-- and open the next one, where a seat owes again (Hub:fillNpcChoices).
+function M:_answerNpcs3()
   local sim, g3 = self.sim, self.gen3
   if not (sim and g3) then return false end
-  local okS, seats = pcall(sim.seatsOf, sim, FOE_SEAT)
-  if not (okS and type(seats) == "table" and #seats > 0) then return false end
+  local seats = {}
+  for _, fighter in ipairs(type(sim.order) == "table" and sim.order or {}) do
+    if self:_answerer3(fighter) ~= nil then seats[#seats + 1] = fighter end
+  end
+  if #seats == 0 then return false end
   local bound = (tonumber(Config.BATTLE_MON_MAX) or 6)
     * math.max(1, tonumber(Config.COOP_FIGHTERS) or 1) * #seats
   local filed, stuck = false, {}
@@ -3101,53 +3697,96 @@ function M:_answerFoes3()
     end
     if not seat then break end
 
-    local got = false
-    local brain = self.brain
-    if brain then
-      local ok, choice = pcall(brain.choose, brain, self:_foeView3(seat, seats))
+    local answer = self:_answerer3(seat)
+    local got, waiting = false, false
+    if answer ~= "referee" then
+      local ok, choice = true, nil
+      if type(answer) == "function" then
+        ok, choice = pcall(answer, self:_npcView3(seat), seat)
+      elseif type(answer) == "table" and type(answer.choose) == "function" then
+        ok, choice = pcall(answer.choose, answer, self:_npcView3(seat))
+      end
       if not ok then
         self:warn("brain", "the trainer's own AI could not be asked for a move "
           .. "(%s), so the referee's own trainer AI answers for it instead; "
           .. "report this with the trainer you were fighting", tostring(choice))
+      elseif choice == false then
+        waiting = true
       elseif type(choice) == "table" and sim:submitChoice(seat.playerId, choice) then
         got = true
       end
     end
-    if not got then
+    if not got and not waiting then
       got = sim:autoPick(seat.playerId) and true or false
     end
     if got then filed = true else stuck[seat] = stamp end
   end
   return filed
 end
+-- The name the lone double's loop was written under.
+M._answerFoes3 = M._answerNpcs3
 
--- What the brain is shown for one trainer seat of a double: the single's view
--- of that seat (its monster, the shared party and bag, the referee, its
--- battler) plus contract C2 of docs/plans/gen3-solo-doubles.md --
+-- What a brain is shown for one computer seat, on either side.
 --
---   double   true
---   seat     the choosing seat's field slot (3 or 4)
---   partner  the trainer's other battler while it stands, else nil
---   foes     the player's standing battlers, { slot, battler }, by slot
---   claimed  party indices (1-based: the referee's own, once it normalised
---            the sibling's choice) the sibling seat has filed a switch or a
---            replacement into this turn -- the party menu's "already
---            selected" (pret monToSwitchIntoId)
+-- A single (one seat a side) is the view a Gen 3 trainer has always had:
+-- its monster (a fainted seat's last one stands in for the send-out
+-- question), its party and bag, the monster across the field (`foe`), the
+-- referee and both battlers.  A double adds contract C2 of
+-- docs/plans/gen3-solo-doubles.md, read off the referee's sides rather than
+-- off two owners, so a second trainer and a side-a ally get it too:
 --
--- `foe` / `foeBattler` are the first of `foes`, for whatever part of the brain
--- reads one; a fainted seat's last monster stands in for the send-out
--- question, as on the single.
-function M:_foeView3(seat, seats)
+--   double     true
+--   side       "a" | "b", the seat's own side (a brain may sit on either)
+--   seat       the choosing seat's field slot
+--   partner    the other battler standing on the seat's side -- the shared
+--              team's sibling, the other trainer's, Steven's, the player's
+--              -- else nil; partnerSlot its field slot
+--   foes       the other side's standing battlers, { slot, battler }, by slot
+--              (both of the player's and Steven's, against a foe brain)
+--   claimed    party indices (1-based: the referee's own, once it normalised
+--              the sibling's choice) a sibling seat OF THE SAME PARTY has
+--              filed a switch or a replacement into this turn -- the party
+--              menu's "already selected" (pret monToSwitchIntoId).  Another
+--              trainer's switch is into another party, and claims nothing
+--              here (pret's halves: battle_ai_switch_items.c reads its own
+--              flank's party only).
+--
+-- `foe` / `foeBattler` are the first of `foes`, for whatever part of the
+-- brain reads one.
+function M:_npcView3(seat)
   local sim = self.sim
+  local side = seat.side == "a" and "a" or "b"
+  local other = side == "a" and "b" or "a"
+  local bySide = type(sim.bySide) == "table" and sim.bySide or {}
+  if not sim.double then
+    local opp = (bySide[other] or {})[1]
+    local view = {
+      mon = seat.active and seat.mons[seat.active] or nil,
+      foe = opp and opp.mons and opp.active and opp.mons[opp.active] or nil,
+      party = seat.mons,
+      active = seat.active,
+      bag = seat.bag,
+      mustReplace = seat.mustReplace and true or false,
+      sim = sim,
+      battler = seat.b,
+      foeBattler = opp and opp.b or nil,
+      fighter = seat,
+      side = side,
+    }
+    if view.mon == nil and seat.lastB then view.mon = seat.lastB.mon end
+    return view
+  end
   local foes = {}
-  local okP, players = pcall(sim.seatsOf, sim, PLAYER_SEAT)
-  for _, p in ipairs(okP and type(players) == "table" and players or {}) do
+  for _, p in ipairs(bySide[other] or {}) do
     if p.b and activeOf(p) then foes[#foes + 1] = { slot = p.slot, battler = p.b } end
   end
-  local partner, claimed = nil, {}
-  for _, s in ipairs(seats) do
+  local partner, partnerSlot = nil, nil
+  for _, s in ipairs(bySide[side] or {}) do
+    if s ~= seat and s.b and activeOf(s) and not partner then partner, partnerSlot = s.b, s.slot end
+  end
+  local claimed = {}
+  for _, s in ipairs(type(seat.seats) == "table" and seat.seats or {}) do
     if s ~= seat then
-      if s.b and activeOf(s) then partner = s.b end
       local c = s.choice
       if type(c) == "table" and c.action == "switch" and tonumber(c.slot) then
         claimed[tonumber(c.slot)] = true
@@ -3167,14 +3806,19 @@ function M:_foeView3(seat, seats)
     foeBattler = lead and lead.battler or nil,
     fighter = seat,
     double = true,
+    side = side,
     seat = seat.slot,
     partner = partner,
+    partnerSlot = partnerSlot,
     foes = foes,
     claimed = claimed,
   }
   if view.mon == nil and seat.lastB then view.mon = seat.lastB.mon end
   return view
 end
+-- The name the lone double's view was written under (a seat's own party
+-- stands in for the `seats` it was handed).
+function M:_foeView3(seat) return self:_npcView3(seat) end
 
 -- A `send`: the dex's "seen" for a foe (the engine monster the sheet was cut
 -- from carries the personality Unown / Spinda record), and an Amulet Coin on
@@ -3182,23 +3826,38 @@ end
 -- hold the one `mons` table, so the party index finds the monster from the
 -- first seat whichever slot it came out on -- and the cart's Amulet Coin
 -- (gBattleStruct->moneyMultiplier, set as its holder is sent in) does not ask
--- which battler position it was either.
+-- which battler position it was either.  The fighter is the one standing on
+-- the event's slot, so a second trainer's monster is read from its own party
+-- (and its engine monster from ctx.parties[owner]); a kind that says the
+-- fight marks no dex "seen" (ctx.noDexSeen: FRLG's legendaries and veiled
+-- ghosts, pret battle_main.c:2618; the Frontier) is not marked.
 function M:_onSend3(event)
   local g3, sim = self.gen3, self.sim
   if not (g3 and sim and sim.byId) then return end
   local foeSide = event.side == "b"
-  local fighter = sim.byId[foeSide and FOE_SEAT or PLAYER_SEAT]
+  local fighter = fighterAt3(sim, event.slot)
+  if not (fighter and fighter.side == event.side) then
+    fighter = sim.byId[foeSide and FOE_SEAT or PLAYER_SEAT]
+  end
   local index = int3(event.mon, nil)
   local mon = fighter and index and fighter.mons and fighter.mons[index + 1] or nil
   if foeSide then
     local species = int3(event.speciesId, nil) or int3(mon and mon.speciesNum, nil)
-    local src = mon and g3.party and g3.party[int3(mon.slot, index or 0) + 1] or nil
-    if species then
+    local owner = fighter and fighter.owner or FOE_SEAT
+    local party = (type(g3.parties) == "table" and g3.parties[owner])
+      or (owner == FOE_SEAT and g3.party) or nil
+    local src = mon and type(party) == "table" and party[int3(mon.slot, index or 0) + 1] or nil
+    if species and not g3.noDexSeen then
       pcall(Gen3.dexMark, species, true, false, src and src.personality)
     end
-    -- Who is out on each trainer slot, for the double's last-fainted foe.
+    -- Who is out on each foe slot (and whose it is), for the double's
+    -- last-fainted foe.
     local slot = int3(event.slot, nil)
-    if g3.foeOut and slot and mon then g3.foeOut[slot] = mon end
+    if g3.foeOut and slot and mon then
+      g3.foeOut[slot] = mon
+      g3.foeOwner = g3.foeOwner or {}
+      g3.foeOwner[slot] = owner
+    end
   end
   if mon and int3(mon.heldItem, 0) ~= 0 and int3(mon.holdEffect, 0) == HOLD_DOUBLE_PRIZE then
     if foeSide then g3.amuletFoe = true else g3.amuletPlayer = true end
@@ -3207,37 +3866,50 @@ end
 
 -- pret ITEM_MASTER_BALL: gBattleResults keeps it apart from the rest.
 local ITEM_MASTER_BALL = 1
+-- pret ITEM_SAFARI_BALL: counted nowhere.
+local ITEM_SAFARI_BALL = 5
 
 -- Every Gen 3 event on its way to the screen: a `send` (M:_onSend3); a `run`,
--- whose side is who left (M.gen3Result); and our side's `ball`, counted the
--- way Cmd_handleballthrow keeps gBattleResults (the engine's
+-- whose side is who left (M.gen3Words' fallback); and our side's `ball`,
+-- counted the way Cmd_handleballthrow keeps gBattleResults (the engine's
 -- Catching.tryCatch: the last ball, a MASTER BALL flag, a per-ball count
--- indexed ball id - 1, capped at 255) for the ending's TV report.
+-- indexed ball id - 1, capped at 255) for the ending's TV report -- except a
+-- SAFARI BALL, which pret counts nowhere (pokeemerald
+-- battle_script_commands.c Cmd_handleballthrow: `if (gLastUsedItem !=
+-- ITEM_SAFARI_BALL)` around the whole count).  Then the kind's own `note`.
 function M:_note3(event)
   local g3 = self.gen3
   local t = event.t
-  if t == "send" then return self:_onSend3(event) end
-  if not g3 then return end
-  if t == "faint" and event.side == "b" and g3.foeOut then
-    -- A double's gBattleResults.lastOpponentSpecies: the trainer's monster
-    -- that fainted last, whichever slot it stood on (pret Cmd_tryfaintmon
-    -- writes it from gBattlerPartyIndexes of the fainting battler).  A
-    -- single's ending reads the one foe slot's monster instead, as before.
-    local mon = g3.foeOut[int3(event.slot, -1)]
-    if mon then g3.lastFoeFainted = mon end
+  if t == "send" then
+    self:_onSend3(event)
+  elseif not g3 then
+    return
+  elseif t == "faint" and event.side == "b" and g3.foeOut then
+    -- A double's gBattleResults.lastOpponentSpecies: the foe's monster that
+    -- fainted last, whichever slot it stood on (pret Cmd_tryfaintmon writes
+    -- it from gBattlerPartyIndexes of the fainting battler).  A single's
+    -- ending reads the one foe slot's monster instead, as before.
+    local slot = int3(event.slot, -1)
+    local mon = g3.foeOut[slot]
+    if mon then
+      g3.lastFoeFainted = mon
+      g3.lastFoeFaintedOwner = g3.foeOwner and g3.foeOwner[slot] or FOE_SEAT
+    end
   elseif t == "run" and (event.side == "a" or event.side == "b") then
     g3.ranSide = event.side
   elseif t == "ball" and event.side == "a" then
     local ball = int3(event.text, nil)
-    if not ball or ball < 1 then return end
-    local r = g3.results
-    r.lastUsedItem = ball
-    if ball == ITEM_MASTER_BALL then
-      r.usedMasterBall = true
-    elseif int3(r.catchAttempts[ball - 1], 0) < 255 then
-      r.catchAttempts[ball - 1] = int3(r.catchAttempts[ball - 1], 0) + 1
+    if ball and ball >= 1 then
+      local r = g3.results
+      r.lastUsedItem = ball
+      if ball == ITEM_MASTER_BALL then
+        r.usedMasterBall = true
+      elseif ball ~= ITEM_SAFARI_BALL and int3(r.catchAttempts[ball - 1], 0) < 255 then
+        r.catchAttempts[ball - 1] = int3(r.catchAttempts[ball - 1], 0) + 1
+      end
     end
   end
+  if self.gen3 then self:_hook3(self.gen3, "note", event) end
 end
 
 -- A mid-fight learn, onto the referee's copy (the hub's applyBattleMoveset3,
@@ -3552,23 +4224,47 @@ function M:_settle3(outcome)
   end
   if not g3 then return end
   g3.verdict = verdict
+  -- The referee's whole verdict (its `how` / `by`, contract C5), for the
+  -- word M:_ended3 hands the engine.
+  g3.outcome = outcome
   local reason = outcome.reason
-  -- The whole party, either seat's monsters: a double's two seats share the
-  -- one `mons` table, so the first seat's is every monster the player has.
+  -- The player's party, either seat's monsters: a double's two seats share
+  -- the one `mons` table, so the first seat's is every monster the player
+  -- has (an ally's -- Steven's -- are not: the fight is lost when the
+  -- player's are down, pret Cmd_checkteamslost's partner branch).
   local standing = hasLiving(sim.byId[PLAYER_SEAT])
   local lost = (verdict == "loss" or verdict == "draw") and reason ~= "run" and not standing
+  -- A kind whose side a fights with nothing of the player's (Safari: out of
+  -- balls is no defeat) loses nothing.
+  if g3.lossless then lost = false end
   g3.whiteout = lost
-  -- The early rival's heal-after flag (RIVAL_BATTLE_HEAL_AFTER, battle_bridge
-  -- writeback's `noWhiteout or (earlyRival and rivalFlags bit 0)`): a loss
-  -- that heals the party and lets the script carry on, no warp and no money.
+  -- The loss that is not a whiteout, in battle_bridge writeback's order:
+  --   * Emerald's first battle (pokeemerald battle_setup.c:950
+  --     CB2_EndFirstBattle: Birch's Zigzagoon never sends you home) and a
+  --     scripted loss (battle_tower.c:1994: Steven's fight, the Frontier --
+  --     the script that called the fight decides what a loss means): no
+  --     warp, no money, no heal -- the cart still prints its whiteout lines
+  --     (pret BattleScript_LocalBattleLost) unless the kind says otherwise;
+  --   * the early rival's heal-after flag (RIVAL_BATTLE_HEAL_AFTER: `noWhiteout
+  --     or (earlyRival and rivalFlags bit 0)`): the party healed -- unless the
+  --     caller defers it (a Secret Base, secret_base.inc:641) -- and the
+  --     script carries on, no warp and no money.
   local opts = g3.opts or {}
+  local scripted = opts.scriptedLoss or opts.firstBattleKind == "birch"
   local healAfter = opts.noWhiteout
     or (opts.earlyRival and (int3(opts.rivalFlags, 0) % 2 == 1))
-  if g3.whiteout and healAfter then
+  if g3.whiteout and scripted then
+    g3.whiteout, g3.scriptedLoss = false, true
+  elseif g3.whiteout and healAfter then
     g3.whiteout, g3.healAfter = false, true
+    g3.deferHeal = opts.deferHeal and true or nil
   end
+  -- The kind's own after-words (a pair's two defeat speeches and A + B's
+  -- prize, a facility's silence), in place of the core's when it says so.
+  local okK, handled = self:_hook3(g3, "settle", outcome)
+  if okK and handled == true then return end
   local okW, errW = pcall(function()
-    if self.kind == "trainer" and verdict == "win" and reason == "ko" then
+    if self.kind == "trainer" and verdict == "win" and (reason == "ko" or outcome.how == "judge") then
       self:_trainerWon3()
     elseif lost then
       -- pret BattleScript_LocalBattleLost's early-rival arm (the engine's
@@ -3578,7 +4274,7 @@ function M:_settle3(outcome)
       if self.kind == "trainer" and opts.earlyRival and t.victoryText then
         self:_say3(t.victoryText)
       end
-      if g3.whiteout then self:_lostLines3() end
+      if g3.whiteout or g3.scriptedLoss then self:_lostLines3() end
     end
   end)
   if not okW then
@@ -3770,8 +4466,9 @@ end
 -- and the after-battle evolutions (pret FreeResetData_ReturnToOvOrDoEvolutions:
 -- a won battle only), and last, once those have closed, the rest of what the
 -- engine does as a battle it ran comes to an end (M:_finishEffects3), the
--- map's resume scripts and the caller's `done` -- so a trainer script resumes
--- over a settled party, on a field no prompt is still covering.
+-- kind's own tail (contract C2 `finish`), a first battle's saved song let go,
+-- the map's resume scripts and the caller's `done` -- so a trainer script
+-- resumes over a settled party, on a field no prompt is still covering.
 function M:_ended3(result, toLearn)
   local game, sim, g3 = self.game, self.sim, self.gen3
   local reason = self.reason
@@ -3782,84 +4479,124 @@ function M:_ended3(result, toLearn)
   local session = Gen3.session()
   local same = session ~= nil and session == g3.session
   if same then
-    self:_reconcile3(sim, session)
+    -- A kind whose party was not in the fight (Safari) or was rented has
+    -- nothing to bring home.
+    if not g3.noReconcile then self:_reconcile3(sim, session) end
   else
     self:warn("reload", "the save changed while a battle was running, so that battle's "
       .. "damage was not written to your party; nothing was lost, but check the party "
       .. "you loaded")
   end
+  local o = type(g3.outcome) == "table" and g3.outcome or {}
   local verdict = g3.verdict or result
   local whiteout = same and g3.whiteout and not M.gen3Standing(session.party)
-  -- A flight is decided by who ran; one with no `run` event was a POKé DOLL /
-  -- FLUFFY TAIL thrown by our side (the only side with a bag in a wild fight).
+  -- A flight with no `how` is decided by who ran; one with no `run` event was
+  -- a POKé DOLL / FLUFFY TAIL thrown by our side (the only side with a bag in
+  -- a wild fight).
   local ranSide = (reason == "run") and (g3.ranSide or "a") or nil
-  local outcome = M.gen3Result(verdict, reason, whiteout, ranSide, g3.kind)
-  local word = M.gen3OutcomeWord(verdict, reason, whiteout, ranSide)
-  local won = verdict == "win" and reason == "ko"
+  local bp = battleProfile3()
+  local doneWord, saveWord = M.gen3Words({
+    verdict = verdict, reason = reason, how = o.how, by = o.by,
+    whiteout = whiteout, ranSide = ranSide, kind = g3.kind,
+    teleportBySide = M.teleportBySide3(bp, g3.family),
+  })
+  local won = verdict == "win" and (reason == "ko" or o.how == "judge")
 
+  -- The ending as the reports and the caller will be told it.  `halt`: a
+  -- trainer fight this player ends neither winning nor whited out nor
+  -- healed nor scripted out (a draw with their team still standing -- the
+  -- one ending the cart has no word for) is never handed to the
+  -- trainerbattle opcode.  Its `done` has no third answer: anything but a
+  -- loss sets the trainer flag and runs the beaten script, and a loss sets
+  -- no flag but lets the VM run on into the bytes after the command
+  -- (ops_a.lua: nothing halts it; on the cart a loss's whiteout ends the
+  -- script) -- a gym leader's TM, handed over with no badge.  So the script
+  -- waiting on the trainer is halted instead, as the whiteout would have
+  -- halted it, and nobody is whited out: the trainer stays unbeaten and the
+  -- save says B_OUTCOME_DREW.  src/CoopField.lua's Stand:finish holds co-op
+  -- to the same rule.  A scripted loss's caller is waiting for its "lose"
+  -- (Steven, the Frontier), and a kind that names its own word answers its
+  -- own caller (a facility's "draw", a pair's "lose").
+  local ending = {
+    result = doneWord, word = saveWord,
+    halt = same and g3.kind == "trainer" and doneWord == "lose" and not whiteout
+      and not g3.healAfter and not g3.scriptedLoss,
+  }
   -- Read now: the ending's reports name the monsters out at the end.  In a
   -- double the reports that take one monster a side (the quest log,
   -- `battle.ended`) are given each side's first seat; the TV also reads the
-  -- player's second battler and the trainer's monster that fainted last.
-  local playerMon = same and endMon3(sim.byId and sim.byId[PLAYER_SEAT], session.party) or nil
-  local foeMon = endMon3(sim.byId and sim.byId[FOE_SEAT], g3.party)
-  local playerMon2, lastFoeMon = nil, nil
+  -- player's second battler and the foe's monster that fainted last.
+  ending.playerMon = same and endMon3(sim.byId and sim.byId[PLAYER_SEAT], session.party) or nil
+  ending.foeMon = endMon3(sim.byId and sim.byId[FOE_SEAT], g3.party)
   if g3.double then
-    if same then playerMon2 = M.secondMon3(sim, session.party) end
+    if same then ending.playerMon2 = M.secondMon3(sim, session.party) end
     local fainted = g3.lastFoeFainted
-    local src = fainted and type(g3.party) == "table" and g3.party[int3(fainted.slot, 0) + 1] or nil
-    lastFoeMon = type(src) == "table" and src or nil
+    local owner = g3.lastFoeFaintedOwner or FOE_SEAT
+    local party = (type(g3.parties) == "table" and g3.parties[owner])
+      or (owner == FOE_SEAT and g3.party) or nil
+    local src = fainted and type(party) == "table" and party[int3(fainted.slot, 0) + 1] or nil
+    ending.lastFoeMon = type(src) == "table" and src or nil
+  end
+  -- The kind's own word (contract C5): it answers its caller itself.
+  local okK, kindWord = self:_hook3(g3, "word", o, ending)
+  if okK and type(kindWord) == "string" and kindWord ~= "" then
+    ending.result, ending.halt = kindWord, false
   end
 
   if same then
     local Natives = Gen3.engine("src.core.game3.scripting.natives")
-    local code = Natives and try3(Natives.outcome_to_code, word)
+    local code = Natives and try3(Natives.outcome_to_code, ending.word)
     if code ~= nil then session.battleOutcome = code end
     if whiteout then
       self:_whiteout3(game, session)
-    elseif g3.healAfter then
+    elseif g3.healAfter and not g3.deferHeal then
       local Party = Gen3.engine("src.core.game3.party")
       if Party then pcall(Party.healAll, session.party) end
     end
     -- Pickup after a win (pret Cmd_pickup, the engine's
-    -- give_payday_money_and_pickup).
-    if won then
+    -- give_payday_money_and_pickup), unless the kind's rules have none.
+    if won and not g3.noPickup then
       local Prize = Gen3.engine("src.core.game3.battle.prize")
-      local bp = battleProfile3()
       if Prize then pcall(Prize.pickup, session.party, nil, bp and bp.rules or nil) end
     end
   end
 
-  -- A trainer fight this player ends neither winning nor whited out (a draw
-  -- with their team still standing -- the one ending the cart has no word
-  -- for) is never handed to the trainerbattle opcode.  Its `done` has no third
-  -- answer: anything but a loss sets the trainer flag and runs the beaten
-  -- script, and a loss sets no flag but lets the VM run on into the bytes
-  -- after the command (ops_a.lua: nothing halts it; on the cart a loss's
-  -- whiteout ends the script) -- a gym leader's TM, handed over with no badge.
-  -- So the script waiting on the trainer is halted instead, as the whiteout
-  -- would have halted it, and nobody is whited out: the trainer stays
-  -- unbeaten and the save says B_OUTCOME_DREW.  src/CoopField.lua's
-  -- Stand:finish holds co-op to the same rule.
-  local halt = same and g3.kind == "trainer" and verdict ~= "win"
-    and not whiteout and not g3.healAfter
+  local halt = ending.halt
   local levelled = same and won and M.levelled3(session.party, g3.levels) or nil
   levelled = EvolveFx.withoutResolved(levelled, evoResolved)
   local done = g3.done
+  local opts = g3.opts or {}
   local finished = false
   local function finish()
     if finished then return end
     finished = true
+    local after = nil
     if same then
       local okE, errE = pcall(self._finishEffects3, self, session, g3, {
-        result = halt and word or outcome, word = word,
-        playerMon = playerMon, foeMon = foeMon,
-        playerMon2 = playerMon2, lastFoeMon = lastFoeMon,
+        result = halt and ending.word or ending.result, word = ending.word,
+        playerMon = ending.playerMon, foeMon = ending.foeMon,
+        playerMon2 = ending.playerMon2, lastFoeMon = ending.lastFoeMon,
       })
       if not okE then
         self:warn("effects3", "part of the end of this battle could not be recorded (%s); "
           .. "the battle itself counted -- report this with the battle you were in",
           tostring(errE))
+      end
+      -- The kind's own tail: its writeback and the engine's ends of it (a
+      -- roamer's relocation, the Safari Zone's counters, a facility's
+      -- records).
+      local okF, tail = self:_hook3(g3, "finish", o, ending)
+      if okF and type(tail) == "function" then after = tail end
+      -- pokeemerald battle_setup.c:952 CB2_EndFirstBattle's
+      -- Overworld_ClearSavedMusic (battle_bridge.lua finish, for both
+      -- carts' first battles): the song the script saved to come back to
+      -- (Oak's / Birch's theme) is let go, and the map's own plays.
+      if opts.firstBattleKind or opts.firstBattle then
+        local Audio = Gen3.engine("src.core.game3.audio")
+        if Audio and type(Audio.clearSavedSong) == "function" then
+          pcall(Audio.clearSavedSong)
+          pcall(Gen3.audio.restoreMapSong)
+        end
       end
       if halt then M.haltScript3() end
       -- The map's resume scripts (pokefirered battle_setup.c:432), after the
@@ -3870,11 +4607,18 @@ function M:_ended3(result, toLearn)
     if halt then return end
     local okD, errD = true, nil
     if type(done) == "function" then
-      okD, errD = pcall(done, outcome)
+      okD, errD = pcall(done, ending.result)
     end
     if not okD then
       self:warn("done3", "what was waiting on this battle could not carry on (%s); "
         .. "talk to the trainer again, or reload from your last save", tostring(errD))
+    end
+    if after then
+      local okA, errA = pcall(after)
+      if not okA then
+        self:warn("after3k", "the end of this battle could not be fully recorded (%s); "
+          .. "report this with the battle you were in", tostring(errA))
+      end
     end
   end
   self:_afterBattle3(game, same and toLearn or nil, levelled, finish)
@@ -3919,18 +4663,114 @@ end
 --     with the engine's payload -- `{ battle = <state>, result }` -- the
 --     state being what the engine's battle state says about the fight
 --     (`wild`, `link`, the trainer's class / name / id, `player` / `enemy`
---     as `{ mon = <engine monster> }`, the parties, `battleResults`), and
+--     as `{ mon = <engine monster> }`, the parties, `battleResults`, and the
+--     engine's own battle-type flags and `kinds` -- M.engineKinds3), and
 --     `rbyMmoSolo` saying whose fight it was.
+--
+-- The TV is told the fight's battle type the way BattleBridge.tvBattleEnd
+-- tells it (pret battle_main.c:5102's exclusions: a safari, a first battle,
+-- Wally's tutorial, a Frontier fight, an e-Reader trainer are never on air).
+
+-- The engine's words for a fight's ending, where they differ from the
+-- caller's (battle/init.lua's st.result, which `battle.ended` carries): a
+-- catch is "catch", a wild flee "fled", the player's TELEPORT
+-- "player_teleported" (battle/effects/special.lua:292).
+M.ENGINE_RESULT3 = { caught = "catch", mon_fled = "fled", teleport_player = "player_teleported" }
+
+-- The battle-type flags the engine's battle state carries for a fight
+-- (battle/init.lua:539-740, from the start's opts and foe), for the reports
+-- that read them.  `g3` is a fight's ctx; its kind name stands in for the
+-- session states the engine reads at its own start (the Safari Zone, a
+-- Pokemon Tower ghost) and its stand's `tutorial3` for the POKeDUDE.
+function M.engineFlags3(g3)
+  g3 = type(g3) == "table" and g3 or {}
+  local opts = type(g3.opts) == "table" and g3.opts or {}
+  local foe = type(g3.foe) == "table" and g3.foe or {}
+  local function on(key)
+    return (opts[key] ~= nil and opts[key] ~= false) or (foe[key] ~= nil and foe[key] ~= false)
+  end
+  return {
+    wild = g3.kind == "wild",
+    double = g3.double or nil,
+    link = false, unionRoom = false, spectate = false, multi = nil,
+    safari = on("safari") or g3.name == "safari",
+    roamer = on("roamer") or g3.name == "roamer",
+    legendary = on("legendary"),
+    wildScripted = on("wildScripted"),
+    trainerTower = opts.trainerTower and true or false,
+    eReader = opts.eReader and true or false,
+    battleTower = opts.battleTower and true or false,
+    secretBase = opts.secretBase and true or false,
+    pokedude = on("pokedude") or g3.tutorial3 == "pokedude",
+    ghostBattle = on("ghostBattle") or on("ghost") or g3.name == "ghost",
+    oldManTutorial = on("oldManTutorial") or g3.tutorial3 == "oldMan",
+    firstBattle = on("firstBattle"),
+  }
+end
+
+-- The engine battle state's `kinds` for that fight: its own Kinds.fromOpts
+-- over the opts and those flags (battle/kinds.lua, the one table the quest
+-- log, the TV and every `battle.ended` listener read), else -- an engine
+-- without it, or a profile it refuses -- the same table spelled here: each
+-- flag that is set, the start's extra kinds, `trainer` off the wild,
+-- `firstBattle` / `tutorial` named as the profile names them.
+M.EXTRA_KINDS3 = {
+  "twoOpponents", "partner", "recordedLink", "frontier", "trainerHill", "kyogreGroudon", "regi",
+  "groudon", "kyogre", "rayquaza", "dome", "palace", "arena", "factory", "pike", "pyramid",
+}
+function M.engineKinds3(opts, flags, bp)
+  opts = type(opts) == "table" and opts or {}
+  flags = type(flags) == "table" and flags or {}
+  local Kinds = Gen3.engine("src.core.game3.battle.kinds")
+  if Kinds and type(Kinds.fromOpts) == "function" and type(bp) == "table"
+      and type(bp.kinds) == "table" then
+    local ok, k = pcall(Kinds.fromOpts, opts, flags, bp)
+    if ok and type(k) == "table" then return k end
+  end
+  local k = {}
+  for name, v in pairs(flags) do
+    if v == true then k[name] = true end
+  end
+  for _, name in ipairs(M.EXTRA_KINDS3) do
+    if opts[name] then k[name] = true end
+  end
+  k.trainer = not flags.wild or nil
+  local named = type(bp) == "table" and type(bp.kinds) == "table" and bp.kinds or {}
+  if opts.firstBattleKind ~= nil then
+    k.firstBattle = opts.firstBattleKind
+  elseif flags.firstBattle then
+    k.firstBattle = named.firstBattle or true
+  end
+  if opts.tutorialKind ~= nil then
+    k.tutorial = opts.tutorialKind
+  elseif flags.oldManTutorial then
+    k.tutorial = named.tutorial or "oldman"
+  end
+  return k
+end
+
+-- The TV's battle type (BattleBridge.tvBattleEnd's, pret battle_main.c:5102).
+function M.tvBattleType3(st)
+  local k = type(st.kinds) == "table" and st.kinds or {}
+  return {
+    link = st.link or k.link, recordedLink = k.recordedLink, trainer = not st.wild,
+    firstBattle = k.firstBattle ~= nil, safari = st.safari or k.safari,
+    ereaderTrainer = st.eReader, wallyTutorial = k.tutorial == "wally", frontier = k.frontier,
+  }
+end
+
 function M:_finishEffects3(session, g3, ending)
   local bp = battleProfile3()
   local family = (bp and bp.family) or Gen3.family()
   local wild = g3.kind == "wild"
   local t = g3.trainer or {}
-  -- The engine battle state's own word: a catch is "catch" there.
-  local stateResult = (ending.result == "caught") and "catch" or ending.result
-  local st = {
+  -- The engine battle state's own word.
+  local stateResult = M.ENGINE_RESULT3[ending.result] or ending.result
+  local st = M.engineFlags3(g3)
+  st.kinds = M.engineKinds3(g3.opts, st, bp)
+  local fields = {
     rbyMmoSolo = true,
-    wild = wild, link = false, over = true, result = stateResult,
+    over = true, result = stateResult,
     trainerId = (not wild) and int3(t.trainerId, nil) or nil,
     trainerClass = (not wild) and int3(t.trainerClass, nil) or nil,
     trainerClassName = (not wild) and t.className or nil,
@@ -3939,11 +4779,11 @@ function M:_finishEffects3(session, g3, ending)
     enemy = ending.foeMon and { mon = ending.foeMon } or nil,
     -- A double, in the engine state's own words: `double`, and `player2` --
     -- the name BattleBridge.tvBattleEnd reads the second battler by.
-    double = g3.double or nil,
     player2 = ending.playerMon2 and { mon = ending.playerMon2 } or nil,
     playerParty = session.party, foeParty = g3.party,
-    battleResults = g3.results, kinds = {}, session = session,
+    battleResults = g3.results, session = session,
   }
+  for k, v in pairs(fields) do st[k] = v end
 
   local Pokemon = Gen3.engine("src.core.game3.pokemon")
   if family == "rse" and Pokemon then
@@ -3988,7 +4828,7 @@ function M:_finishEffects3(session, g3, ending)
       }
       local code = Natives and try3(Natives.outcome_to_code, ending.word) or nil
       pcall(Rse.call, "tv", "onBattleEnd", "TryPutPokemonTodayOnAir", nil, session, results,
-        code, { trainer = not wild })
+        code, M.tvBattleType3(st))
     end
   end
 
@@ -4156,6 +4996,13 @@ function M:_reset3()
       .. "before the ordinary battle took over; check your POKéMON's HP and PP, or "
       .. "reload from your last save")
   end
+  -- The kind puts back what it took (a facility's `Battle._nextFacility`),
+  -- and may start the cart's battle itself (a roamer with its own
+  -- encounter).  Under the hand-back guard: that start re-enters the divert.
+  self.handingBack3 = true
+  local okK, handled = self:_hook3(g3, "handBack")
+  self.handingBack3 = false
+  if okK and handled == true then return true end
   self:_handBack3(game, g3)
   return true
 end

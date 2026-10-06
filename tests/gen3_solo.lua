@@ -1559,14 +1559,43 @@ do
   eq(Solo.gen3Kind({}, { species = 16, level = 3 }), "wild", "gen3Kind: an encounter row")
   eq(Solo.gen3Kind({ trainerId = 900 }, {}), "trainer", "gen3Kind: a trainer id")
   eq(Solo.gen3Kind({}, 900), "trainer", "gen3Kind: a bare trainer id")
-  for _, field_ in ipairs({ "safari", "roamer", "legendary", "wildScripted", "oldManTutorial",
-                            "firstBattle", "pokedude", "ghost", "link", "twoOpponents" }) do
+  -- What stays the cart's for everybody is Config.SOLO_REFUSED_GEN3 (C1: the
+  -- link family and the e-Reader); every other refusal key names a kind
+  -- (C2) -- the cart's until a module registers it (section 4).
+  for _, field_ in ipairs(Config.SOLO_REFUSED_GEN3) do
     check(Solo.gen3Refused({ [field_] = true }, {}), "gen3Refused: " .. field_ .. " on the opts")
   end
-  check(Solo.gen3Refused({}, { roamer = true }), "gen3Refused: ...and on the foe")
-  check(Solo.gen3Refused({}, { kinds = { tutorial = "oldman" } }), "gen3Refused: ...and in a kinds table")
+  check(Solo.gen3Refused({ link = true }, {}), "gen3Refused: the link is the cart's")
+  check(Solo.gen3Refused({}, { link = true }), "gen3Refused: ...and on the foe")
+  check(Solo.gen3Refused({}, { kinds = { link = true } }), "gen3Refused: ...and in a kinds table")
   check(not Solo.gen3Refused({ firstBattle = false, trainerId = 900 }, {}),
         "gen3Refused: firstBattle = false is an ordinary trainer, not a refusal")
+  for _, row in ipairs({
+    { "safari", "safari" }, { "roamer", "roamer" }, { "legendary", "legendary" },
+    { "specialWild", "legendary" }, { "regi", "legendary" }, { "wildScripted", "scripted" },
+    { "oldManTutorial", "tutorial" }, { "pokedude", "tutorial" }, { "tutorialKind", "tutorial" },
+    { "firstBattle", "firstBattle" }, { "firstBattleKind", "firstBattle" }, { "ghost", "ghost" },
+    { "ghostBattle", "ghost" }, { "twoOpponents", "pair" }, { "trainerIdB", "pair" },
+    { "partner", "partner" }, { "frontier", "facility" }, { "trainerTower", "facility" },
+    { "secretBase", "facility" }, { "pike", "facility" },
+  }) do
+    eq(Solo.kind3Name({ [row[1]] = true }, {}, "wild"), row[2], "kind3Name: " .. row[1])
+  end
+  eq(Solo.kind3Name({}, { roamer = true }, "wild"), "roamer", "kind3Name: ...on the foe")
+  eq(Solo.kind3Name({}, { kinds = { tutorial = "oldman" } }, "wild"), "tutorial",
+     "kind3Name: ...in a kinds table")
+  eq(Solo.kind3Name({ firstBattle = false, trainerId = 900 }, {}, "trainer"), "trainer",
+     "kind3Name: firstBattle = false is an ordinary trainer")
+  eq(Solo.kind3Name({ partner = true, twoOpponents = true, trainerIdB = 5 }, {}, "trainer"), "partner",
+     "kind3Name: Steven's fight is the partner's, not the pair's")
+  eq(Solo.kind3Name({ battleTower = true, partner = true, twoOpponents = true }, {}, "trainer"),
+     "facility", "kind3Name: a Battle Tower multi is the facility's")
+  eq(Solo.kind3Name({ ghost = true, wildScripted = true }, {}, "wild"), "ghost",
+     "kind3Name: the Marowak is a ghost before it is a scripted wild")
+  eq(Solo.kind3Name({ legendary = true, stand3 = { kind3 = "wild" } }, {}, "wild"), "wild",
+     "kind3Name: the stand's kind3 is the word, whatever the keys say")
+  eq(Solo.kind3Name({ kind3 = "safari" }, {}, "wild"), "safari", "kind3Name: a caller's own kind3")
+  eq(Solo.kind3Name({}, {}, "wild"), "wild", "kind3Name: nothing set is the entry's own")
   check(Solo.gen3Double({ double = true }, {}), "gen3Double: the double flag")
   check(Solo.gen3Double({}, { doubleBattle = true }), "gen3Double: a double trainer row")
   check(Solo.gen3Double({ trainerIdB = 5 }, {}), "gen3Double: a second trainer is a double of a kind too")
@@ -1605,17 +1634,19 @@ do
   check(not Solo.gen3TakesDouble({ double = true }, {}, nil), "gen3TakesDouble: nor no party")
   check(not Solo.gen3TakesDouble({ double = true, trainerIdB = 5 }, {}, two), "gen3TakesDouble: not a second trainer")
   check(not Solo.gen3TakesDouble({}, {}, two), "gen3TakesDouble: not a single")
-  check(Solo.gen3Refused({ partner = true }, {}), "gen3Refused: Steven's partner stays refused")
-  check(Solo.gen3Refused({ twoOpponents = true }, {}), "gen3Refused: ...and two opponents")
+  eq(Solo.kind3Name({ partner = true }, {}, "trainer"), "partner", "kind3Name: Steven's partner is a kind")
+  eq(Solo.kind3Name({ twoOpponents = true }, {}, "trainer"), "pair", "kind3Name: ...and two opponents")
   eq(Solo.gen3Result("win", "catch", false), "caught", "gen3Result: catch")
   eq(Solo.gen3Result("loss", "run", false), "run", "gen3Result: the player ran")
-  eq(Solo.gen3Result("win", "run", false), "fled", "gen3Result: the wild mon left")
+  -- C5: a wild seat's own flight is MON_FLED, spelled "mon_fled" (code 6, as
+  -- "fled" was).
+  eq(Solo.gen3Result("win", "run", false), "mon_fled", "gen3Result: the wild mon left")
   eq(Solo.gen3Result("draw", "ko", true), "lose", "gen3Result: a whiteout draw is a defeat")
   eq(Solo.gen3Result("win", "ko", false), "win", "gen3Result: win")
   -- A flight is decided by who ran, not by who the referee named the winner.
   eq(Solo.gen3Result("win", "run", false, "a"), "run",
      "gen3Result: our side left -- a POKe DOLL names us the winners, and it is still RAN")
-  eq(Solo.gen3Result("loss", "run", false, "b"), "fled", "gen3Result: their side left")
+  eq(Solo.gen3Result("loss", "run", false, "b"), "mon_fled", "gen3Result: their side left")
   -- A draw is not a win for a trainer script; the save still says DREW.
   eq(Solo.gen3Result("draw", "timeout", false, nil, "trainer"), "lose",
      "gen3Result: a drawn trainer fight answers the script 'lose'")
@@ -3855,6 +3886,802 @@ do
         "real: the backstop never stepped in: " .. table.concat(warns, " / "))
 
   CoopBattle.newSoloDouble = realNewSoloDouble
+end
+
+-- ===================================================================
+-- 4. SoloBattle, Gen 3: the fights a kind takes over
+-- ===================================================================
+--
+-- docs/plans/gen3-solo-remaining-fights.md: the kind registry and its hooks
+-- (contract C2), every computer seat on either side answered by its own
+-- owner's brain or the referee (C4), the outcome word read off how the fight
+-- ended and the cart's rules (C5), the parts of the engine's finish every
+-- kind needs (the Birch / scripted-loss no-whiteout arms, the first battle's
+-- saved song, the engine's own battle kinds for the reports, the battle's
+-- song), the cart's wild move (`wildPick`), and the sheet fields the
+-- families read.  The kinds here are the suite's own minimal ones: the
+-- families themselves are wave 2's, with their own suites.
+
+do
+  local Turn3 = need("BattleSim3/Turn")
+  local CoopBattle = need("CoopBattle")
+  local FOE = "solo_foe"
+
+  -- The engine's whole outcome vocabulary (scripting/natives.lua).
+  local CODES = {
+    win = 1, won = 1, lose = 2, lost = 2, whiteout = 2, draw = 3, run = 4,
+    teleport_player = 5, player_teleported = 5, fled = 6, mon_fled = 6,
+    caught = 7, catch = 7, no_safari_balls = 8, forfeited = 9, mon_teleported = 10,
+  }
+  local realCode = FakeNatives.outcome_to_code
+  FakeNatives.outcome_to_code = function(r) return CODES[r] or 1 end
+  FakeAudio.clearSavedSong = function() audioCalls[#audioCalls + 1] = { "clearSavedSong" } end
+
+  -- What the referee and the screen are built with, captured on the way.
+  local createdWith, screenedWith = nil, nil
+  local realCreate, realNew = Turn3.create, Mediated.new
+  Turn3.create = function(o) createdWith = o; return realCreate(o) end
+  Mediated.new = function(o) screenedWith = o; return realNew(o) end
+
+  local function audioNames(from)
+    local out = {}
+    for i = from or 1, #audioCalls do out[#out + 1] = audioCalls[i][1] end
+    return out
+  end
+  local function indexOf(list, value)
+    for i, v in ipairs(list) do if v == value then return i end end
+    return nil
+  end
+
+  -- ------- (a) the registry
+  do
+    local ok1, why1 = Solo.registerKind3(nil, {})
+    check(not ok1 and type(why1) == "string", "registry: a kind needs a name")
+    check(not Solo.registerKind3("x", "nope"), "registry: a kind is a table of hooks")
+    check(not Solo.registerKind3("x", { takes = 5 }), "registry: a hook must be a function")
+    eq(Solo.KINDS3.x, nil, "registry: nothing is registered on a refusal")
+    local k = { note = function() end }
+    check(Solo.registerKind3("x", k), "registry: a table of hooks registers")
+    eq(Solo.kind3("x"), k, "registry: ...and is found by name")
+    Solo.unregisterKind3("x")
+    eq(Solo.kind3("x"), nil, "registry: ...and is gone again")
+    -- A family module is only read when it is on disk: this facade has no
+    -- reader, and a reader that finds nothing loads nothing.
+    eq(Solo.kind3("safari"), nil, "registry: no family module, no kind")
+    stubMod.read = function() return nil end
+    eq(Solo.kind3("roamer"), nil, "registry: a reader that finds no file loads nothing")
+    stubMod.read = nil
+    eq(type(Solo.loadKinds3()), "table", "registry: reading every family module finds none here, quietly")
+    eq(Solo.KIND_FILES3.pair, "Solo3/Doubles", "registry: a pair's module is Solo3/Doubles")
+    eq(Solo.KIND_FILES3.legendary, "Solo3/Legend", "registry: ...a legendary's Solo3/Legend")
+  end
+
+  -- ------- (b) a kind nobody registered is the cart's
+  do
+    newGame()
+    SESSION.party = { monOf(4, 30), monOf(16, 20) }
+    local solo = newSolo()
+    for _, o in ipairs({
+      { safari = true }, { legendary = true }, { specialWild = true }, { wildScripted = true },
+      { ghost = true }, { oldManTutorial = true }, { tutorialKind = "wally" },
+      { firstBattleKind = "birch" }, { stand3 = { kind3 = "roamer" } }, { kind3 = "tutorial" },
+      { stand3 = { kind3 = "eReaderish" } },
+    }) do
+      local key = next(o)
+      eq(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, o), false,
+         "unclaimed: a wild '" .. tostring(key) .. "' is handed back")
+    end
+    eq(solo:fromGen3Encounter(GAME, { species = 16, level = 5, roamer = true, foe = {} }, {}), false,
+       "unclaimed: a roamer encounter is handed back")
+    for _, o in ipairs({
+      { trainerId = 900, twoOpponents = true, trainerIdB = 905 }, { trainerId = 900, partner = true },
+      { trainerId = 900, frontier = true, battleTower = true }, { trainerId = 900, firstBattle = true },
+      { trainerId = 900, trainerTower = true }, { trainerId = 900, stand3 = { kind3 = "facility" } },
+    }) do
+      local key
+      for k2 in pairs(o) do if k2 ~= "trainerId" then key = k2 end end
+      eq(solo:fromGen3Trainer(GAME, 900, o), false, "unclaimed: a trainer '" .. tostring(key) .. "' is handed back")
+    end
+    eq(solo:isRunning(), false, "unclaimed: nothing is running")
+    eq(Stack.depth(), 0, "unclaimed: nothing went onto the stack")
+    eq(#bridgeCalls, 0, "unclaimed: nothing was started in its place (the caller starts the cart's)")
+    -- A stand naming the ordinary kinds is this file's own fight.
+    check(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, { stand3 = { kind3 = "wild" } }),
+          "unclaimed: a stand that says 'wild' is fought")
+    solo:reset()
+    check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900, stand3 = { kind3 = "trainer" } }),
+          "unclaimed: ...and one that says 'trainer'")
+    solo:reset()
+  end
+
+  -- ------- (c) a wild kind, hook by hook, and the cart's wild move
+  do
+    newGame()
+    local lead = monOf(4, 30)
+    SESSION.party = { lead }
+    -- A species whose common and rare items are the same: held every time --
+    -- except by a legendary, which rolls none (pret SetWildMonHeldItem).
+    local meta = P3._speciesMeta[16]
+    meta.itemCommon, meta.itemRare = 21, 21
+    PROFILE.kinds = { firstBattle = "oak", tutorial = "oldman", ghost = true, pokedude = true }
+    local log, notes, views = {}, {}, {}
+    local function add(name) log[#log + 1] = name end
+    local Legend = {
+      takes = function(_, ctx)
+        add("takes")
+        views.takes = { name = ctx.name, kind = ctx.kind, stand = ctx.stand }
+        ctx.noDexSeen = true
+        return true
+      end,
+      screen = function(_, ctx, so)
+        add("screen")
+        views.screen = ctx.screen
+        so.peerName = "LEGEND"
+        return { legendTag = 7 }
+      end,
+      seat = function(_, ctx, create)
+        add("seat")
+        views.seatMode = create.mode
+        return { rules = { exp = false } }
+      end,
+      brains = function(_, ctx, npcs)
+        add("brains")
+        views.npcs = npcs[FOE]
+        views.sim = ctx.sim
+      end,
+      note = function(_, _, e) notes[#notes + 1] = e.t end,
+      settle = function(_, ctx)
+        add("settle")
+        views.verdict = ctx.verdict
+      end,
+      word = function(_, _, outcome, ending)
+        add("word")
+        views.word = ending.result
+        views.saveWord = ending.word
+        views.outcome = outcome
+      end,
+      finish = function(_, _, _, ending)
+        add("finish")
+        views.finishWord = ending.result
+        return function() add("after") end
+      end,
+    }
+    check(Solo.registerKind3("legendary", Legend), "kind: a legendary kind registers")
+    local solo = newSolo()
+    local result
+    local took = solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, {
+      legendary = true, song = 412,
+      stand3 = { kind3 = "legendary" },
+      done = function(r) add("done"); result = r end,
+    })
+    check(took, "kind: a registered kind's fight is taken")
+    eq(views.takes and views.takes.name, "legendary", "kind: takes sees the kind's name")
+    eq(views.takes and views.takes.kind, "wild", "kind: ...the entry's base kind")
+    check(views.takes and views.takes.stand and views.takes.stand.kind3 == "legendary", "kind: ...and the stand")
+    eq(views.screen, "single", "kind: the screen hook is told it is a single")
+    eq(screenedWith and screenedWith.peerName, "LEGEND", "kind: the screen hook edits the screen's options")
+    eq(screenedWith and screenedWith.legendTag, 7, "kind: ...and a returned table is set on them")
+    eq(screenedWith and screenedWith.song, 412, "kind: opts.song reaches the screen (the battle theme)")
+    eq(createdWith and createdWith.wildPick, "cart", "wildPick: a solo wild fight asks for the cart's wild move")
+    eq(createdWith and type(createdWith.rules), "table", "kind: the seat hook's create keys reach the referee")
+    eq(createdWith and createdWith.rules and createdWith.rules.exp, false, "kind: ...as given")
+    eq(views.npcs, "referee", "kind: a wild seat is the referee's by default (autoPick: wildPick / ai)")
+    eq(views.sim, solo.sim, "kind: brains sees the referee")
+    eq(solo.wildMon and solo.wildMon.item, 0, "held: a legendary rolls no held item")
+    local seen = false
+    for _, s in ipairs(FakeDex.seen) do if s.species == 16 then seen = true end end
+    check(not seen, "kind: a kind that says noDexSeen leaves the dex alone at the send-out")
+    drive(solo, function(f) f:pickMove(1) end)
+    eq(result, "win", "kind: done('win')")
+    eq(table.concat(log, ","), "takes,screen,seat,brains,settle,word,finish,done,after",
+       "kind: the hooks in order, the finish's tail after done")
+    eq(views.verdict, "win", "kind: settle sees the verdict")
+    eq(views.word, "win", "kind: word sees the core's word")
+    eq(views.saveWord, "win", "kind: ...and the save's")
+    check(type(views.outcome) == "table" and views.outcome.reason == "ko", "kind: ...and the referee's outcome")
+    check(indexOf(notes, "send") ~= nil and indexOf(notes, "over") ~= nil, "kind: note sees every event")
+    local ended = effectsOf("emit")[1]
+    local st = ended and ended[3].battle
+    eq(st and st.legendary, true, "kinds: battle.ended's state says legendary, as the engine's would")
+    eq(st and st.kinds and st.kinds.legendary, true, "kinds: ...and so do its kinds (the engine's Kinds.fromOpts)")
+    eq(st and st.kinds and st.kinds.wild, true, "kinds: ...a wild")
+    eq(st and st.kinds and st.kinds.trainer, nil, "kinds: ...not a trainer")
+    local ql = effectsOf("questlog")[1]
+    eq(ql and ql[3].kinds and ql[3].kinds.legendary, true, "kinds: the quest log is handed them too")
+    Solo.unregisterKind3("legendary")
+
+    -- The same species with no kind and no legendary: held every time.
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local plain = newSolo()
+    check(plain:fromGen3Encounter(GAME, { species = 16, level = 5 }, {}), "held: a plain wild is taken")
+    eq(plain.wildMon and plain.wildMon.item, 21, "held: common == rare is held every time (FRLG)")
+    plain:reset()
+    meta.itemCommon, meta.itemRare = 0, 0
+    PROFILE.kinds = nil
+
+    -- ...and gets it: the wild seat's first pick over many seeds is the cart's
+    -- `Random() & 3` (both of its moves turn up), where the trainer heuristic
+    -- it had before answers one fixed move for one fixed field.
+    local picked = {}
+    for seed = 1, 40 do
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local w = newSolo(seed)
+      check(w:fromGen3Encounter(GAME, { species = 151, level = 5, moves = { 300, 45 } }, {}),
+            "wildPick: seed " .. seed .. " taken")
+      local c = w.sim and w.sim.byId[FOE].choice
+      if c and c.action == "fight" then picked[c.move] = true end
+      w:reset()
+    end
+    check(picked[1] and picked[2], "wildPick: the wild monster's pick is the cart's random move")
+
+    -- A trainer's seats never ask for the wild move.
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local t = newSolo()
+    check(t:fromGen3Trainer(GAME, 900, { trainerId = 900 }), "wildPick: a trainer is taken")
+    eq(createdWith and createdWith.wildPick, nil, "wildPick: ...and its create asks no wild move")
+    t:reset()
+  end
+
+  -- ------- (d) a kind's no, a kind that throws
+  do
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local solo = newSolo()
+    Solo.registerKind3("scripted", { takes = function() return false, "not today" end })
+    eq(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, { wildScripted = true }), false,
+       "takes: a kind that says no hands the fight back")
+    for _, hook in ipairs({ "takes", "screen", "seat", "brains" }) do
+      local mark = #warns
+      Solo.registerKind3("scripted", { [hook] = function() error("boom") end })
+      eq(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, { wildScripted = true }), false,
+         "throw: a kind whose " .. hook .. " throws hands the fight back")
+      eq(solo:isRunning(), false, "throw: ...nothing running after " .. hook)
+      eq(Stack.depth(), 0, "throw: ...and nothing on the stack after " .. hook)
+      check(countIn(warns, "own rules failed at '" .. hook .. "'") == 1, "throw: ...said once (" .. hook .. ")")
+      dropWarnsSince(mark)
+    end
+    -- A note / settle / word / finish that throws costs the kind's part only.
+    local mark = #warns
+    local result
+    Solo.registerKind3("scripted", {
+      note = function() error("n") end, settle = function() error("s") end,
+      word = function() error("w") end, finish = function() error("f") end,
+    })
+    check(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, {
+      wildScripted = true, done = function(r) result = r end,
+    }), "throw: a kind with throwing tail hooks is taken")
+    drive(solo, function(f) f:pickMove(1) end)
+    eq(result, "win", "throw: ...and the fight still ends the ordinary way")
+    check(countIn(warns, "own rules failed") >= 4, "throw: ...each said")
+    dropWarnsSince(mark)
+    Solo.unregisterKind3("scripted")
+  end
+
+  -- ------- (e) the computer's seats, on either side (C4)
+  local DStub = {}
+  DStub.__index = DStub
+  local function dstub(game, opts)
+    return setmetatable({ game = game, opts = opts, transport = opts.transport, battle = opts.battle,
+      onDone = opts.onDone, events = {}, lines = {} }, DStub)
+  end
+  function DStub:start(game)
+    self.med = realNew({ transport = self.transport, ui = UI, game = game,
+      battle = self.battle, role = "host", mode = self.opts.mode,
+      npcParty = self.opts.npcParty, trainer = self.opts.trainer, peerId = self.opts.foeId })
+    return self.med:start(game)
+  end
+  function DStub:onReady(msg) self.ready = msg end
+  function DStub:onEvent(e) self.events[#self.events + 1] = e end
+  function DStub:onOutcome(o) self.outcome = o end
+  function DStub:say(t) self.lines[#self.lines + 1] = tostring(t) end
+  function DStub:update() end
+  function DStub:draw() end
+  function DStub:exit()
+    local f = self.onDone
+    self.onDone = nil
+    if f then f("?", {}) end
+  end
+  local realDouble = CoopBattle.newSoloDouble
+
+  -- Two trainers (a pair): side b is two one-seat fighters, each with its
+  -- own party and its own brain.
+  do
+    newGame()
+    SESSION.party = { monOf(4, 20), monOf(16, 20) }
+    CoopBattle.newSoloDouble = dstub
+    local asked = { A = {}, B = {} }
+    local function brain(who, answer)
+      return { choose = function(_, view)
+        asked[who][#asked[who] + 1] = view
+        return answer(view)
+      end }
+    end
+    -- A switches its lead out on the first turn: the claim is its own party's.
+    local brainA = brain("A", function(view)
+      if view.mustReplace or #asked.A > 1 then return { action = "fight", move = 0 } end
+      return { action = "switch", slot = 1 }
+    end)
+    local brainB = brain("B", function() return { action = "fight", move = 0 } end)
+    local partyB
+    Solo.registerKind3("pair", {
+      takes = function(_, ctx)
+        ctx.double, ctx.foeSeats = true, 1
+        partyB = Solo.gen3TrainerParty(FakeTrainers.foeFromId(905), 905)
+        ctx.parties.solo_foe_b = partyB
+        return true
+      end,
+      seat = function(_, ctx)
+        return nil, { b = { { playerId = "solo_foe_b", name = "TRIO", mons = Sheet3.mons(GAME, partyB, {}) } } }
+      end,
+      brains = function(_, _, npcs)
+        eq(type(npcs[FOE]), "table", "pair: the default answers the first trainer with its SoloBrain")
+        return { [FOE] = brainA, solo_foe_b = brainB }
+      end,
+    })
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 907, { trainerId = 907, twoOpponents = true, trainerIdB = 905 }),
+          "pair: two trainers are taken by their kind")
+    local sim = solo.sim
+    eq(table.concat(Solo.sideIds3(sim, "b"), ","), "solo_foe,solo_foe_b", "pair: side b is the two trainers")
+    eq(table.concat(Solo.sideIds3(sim, "a"), ","), "solo_player,solo_player#2", "pair: side a the player's two seats")
+    local screen = solo.fight
+    eq(screen and screen.ready and table.concat(screen.ready.sides.b, ","), "solo_foe,solo_foe_b",
+       "pair: the screen is told every seat on side b")
+    check(#asked.A >= 1 and #asked.B >= 1, "pair: each trainer's own brain was asked")
+    local onlyOwn = true
+    for _, v in ipairs(asked.A) do if v.fighter.owner ~= FOE then onlyOwn = false end end
+    for _, v in ipairs(asked.B) do if v.fighter.owner ~= "solo_foe_b" then onlyOwn = false end end
+    check(onlyOwn, "pair: ...and only for its own seat")
+    local va, vb = asked.A[1], asked.B[1]
+    eq(va.side, "b", "pair: A's view is on side b")
+    eq(va.double, true, "pair: ...a double")
+    eq(va.seat, 3, "pair: ...A on slot 3")
+    eq(vb.seat, 4, "pair: ...B on slot 4")
+    eq(va.partnerSlot, 4, "pair: A's partner is B's battler")
+    eq(vb.partnerSlot, 3, "pair: ...and B's is A's")
+    eq(#va.foes, 2, "pair: both of the player's battlers are the foes")
+    eq(va.foes[1].slot, 0, "pair: ...the player's left first")
+    eq(sim.byId[FOE].choice and sim.byId[FOE].choice.action, "switch", "pair: A filed its switch")
+    eq(next(vb.claimed), nil, "pair: B's view claims nothing of A's party (a claim is per party)")
+    solo:reset()
+    Solo.unregisterKind3("pair")
+    CoopBattle.newSoloDouble = realDouble
+  end
+
+  -- Steven beside you (a partner): side a's second fighter is an NPC with its
+  -- own brain; the player's seat stays the screen's.
+  do
+    newGame()
+    SESSION.party = { monOf(4, 20), monOf(16, 20) }
+    CoopBattle.newSoloDouble = dstub
+    local allyViews = {}
+    local ally = function(view, seat)
+      allyViews[#allyViews + 1] = { view = view, seat = seat }
+      return { action = "fight", move = 0 }
+    end
+    Solo.registerKind3("partner", {
+      takes = function(_, ctx) ctx.double, ctx.foeSeats = true, 2; return true end,
+      seat = function(_, _, create)
+        create.sides.a[1].seats = nil
+        return nil, { a = { { playerId = "solo_ally", name = "STEVEN",
+                              mons = Sheet3.mons(GAME, { monOf(5, 30) }, {}) } } }
+      end,
+      brains = function() return { solo_ally = ally } end,
+    })
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 905, { trainerId = 905, partner = true }), "partner: Steven's fight is taken")
+    local sim = solo.sim
+    eq(table.concat(Solo.sideIds3(sim, "a"), ","), "solo_player,solo_ally", "partner: side a is the player and Steven")
+    check(#allyViews >= 1, "partner: Steven's own brain was asked")
+    local v = allyViews[1] and allyViews[1].view
+    eq(v and v.side, "a", "partner: ...from side a")
+    eq(v and v.seat, 1, "partner: ...on slot 1")
+    eq(v and v.partnerSlot, 0, "partner: ...the player beside him")
+    eq(v and #v.foes, 2, "partner: ...the trainer's two battlers across")
+    eq(v and v.foes[1].slot, 3, "partner: ...by slot")
+    eq(allyViews[1] and allyViews[1].seat and allyViews[1].seat.playerId, "solo_ally", "partner: ...and his seat")
+    check(sim.byId.solo_ally.choice ~= nil, "partner: Steven's choice is filed")
+    eq(sim.byId.solo_player.choice, nil, "partner: the player's own seat is left to the screen")
+    eq(solo:_seat3({ seat = 1 }), nil, "partner: the player cannot command Steven's slot")
+    eq(solo:_seat3({ seat = 0 }), "solo_player", "partner: ...only their own")
+    solo:reset()
+    Solo.unregisterKind3("partner")
+    CoopBattle.newSoloDouble = realDouble
+  end
+
+  -- A scripted seat (a tutorial): `false` waits for its beat, and the kind
+  -- may answer the player's own seat; `false` in the map is nobody.
+  do
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local hold = 2
+    Solo.registerKind3("tutorial", {
+      brains = function(_, _, npcs)
+        npcs.solo_player = function() return { action = "fight", move = 0 } end
+        npcs[FOE] = function()
+          if hold > 0 then hold = hold - 1; return false end
+          return { action = "fight", move = 0 }
+        end
+      end,
+    })
+    local solo = newSolo()
+    check(solo:fromGen3Encounter(GAME, { species = 16, level = 3 }, { tutorialKind = "wally" }),
+          "scripted: a tutorial-shaped kind is taken")
+    local sim = solo.sim
+    eq(sim.turn, 1, "scripted: turn 1")
+    check(sim.byId.solo_player.choice ~= nil, "scripted: the kind answered the player's own seat")
+    eq(sim.byId[FOE].choice, nil, "scripted: a brain that says false is not answered for")
+    solo:update(0.5, GAME)
+    eq(sim.turn, 1, "scripted: ...and is asked again next frame, the turn still open")
+    solo:update(0.5, GAME)
+    check(sim.turn > 1 or sim:outcome() ~= nil, "scripted: its answer, once given, closes the turn")
+    solo:reset()
+    Solo.registerKind3("tutorial", { brains = function(_, _, npcs) npcs[FOE] = false end })
+    local quiet = newSolo()
+    check(quiet:fromGen3Encounter(GAME, { species = 16, level = 3 }, { tutorialKind = "wally" }),
+          "scripted: taken again")
+    quiet:update(0.5, GAME)
+    eq(quiet.sim.byId[FOE].choice, nil, "scripted: an owner mapped to false is answered by nobody")
+    quiet:reset()
+    Solo.unregisterKind3("tutorial")
+  end
+
+  -- ------- (f) the outcome word (C5)
+  do
+    local function words(t) return table.concat({ Solo.gen3Words(t) }, "/") end
+    eq(words({ verdict = "win", reason = "catch", how = "catch", by = "a" }), "caught/caught", "C5: a catch")
+    eq(words({ verdict = "win", reason = "run", how = "flee", by = "b" }), "mon_fled/mon_fled",
+       "C5: a wild seat's own RUN (a roamer, Birch's Zigzagoon) is MON_FLED")
+    eq(words({ verdict = "loss", reason = "run", how = "run", by = "a" }), "run/run", "C5: the player's RUN")
+    eq(words({ verdict = "win", reason = "run", how = "run", by = "a" }), "run/run",
+       "C5: a POKe DOLL names us the winners and is still RAN")
+    -- FireRed / LeafGreen: PLAYER_TELEPORTED whoever ended it.
+    eq(words({ verdict = "loss", reason = "run", how = "roar", by = "a", teleportBySide = false }),
+       "teleport_player/teleport_player", "C5 (FRLG): the player's WHIRLWIND on Mewtwo is 'ran from', never the catch path")
+    eq(words({ verdict = "win", reason = "run", how = "teleport", by = "b", teleportBySide = false }),
+       "teleport_player/teleport_player", "C5 (FRLG): the wild monster's TELEPORT is PLAYER_TELEPORTED too")
+    -- Emerald: by the user's side.
+    eq(words({ verdict = "win", reason = "run", how = "teleport", by = "b", teleportBySide = true }),
+       "mon_teleported/mon_teleported", "C5 (EM): Mew's TELEPORT is MON_TELEPORTED -- FARAWAY ISLAND keeps the Mew")
+    eq(words({ verdict = "loss", reason = "run", how = "teleport", by = "a", teleportBySide = true }),
+       "teleport_player/teleport_player", "C5 (EM): the player's TELEPORT is PLAYER_TELEPORTED")
+    eq(words({ verdict = "win", reason = "run", how = "roar", by = "b", teleportBySide = true }),
+       "mon_teleported/mon_teleported", "C5 (EM): the wild monster's ROAR")
+    eq(words({ verdict = "loss", reason = "run", how = "roar", by = "a", teleportBySide = true }),
+       "teleport_player/teleport_player", "C5 (EM): the player's WHIRLWIND")
+    eq(words({ verdict = "draw", reason = "balls", how = "balls" }), "no_safari_balls/no_safari_balls",
+       "C5: out of Safari Balls")
+    eq(words({ verdict = "loss", reason = "run", how = "forfeit", by = "a", kind = "trainer" }),
+       "forfeited/forfeited", "C5: a forfeit")
+    eq(words({ verdict = "win", reason = "ko", how = "judge", by = "a", kind = "trainer" }), "win/win",
+       "C5: an Arena judgment won")
+    eq(words({ verdict = "loss", reason = "ko", how = "judge", by = "b", kind = "trainer" }), "lose/lose",
+       "C5: ...and lost")
+    eq(words({ verdict = "draw", reason = "ko", how = "ko", whiteout = true, kind = "trainer" }), "lose/lose",
+       "C5: a whiteout is a defeat")
+    eq(words({ verdict = "draw", reason = "timeout", kind = "trainer" }), "lose/draw",
+       "C5: a trainer's draw is 'lose' to the opcode, DREW to the save")
+    eq(words({ verdict = "draw", reason = "timeout", kind = "wild" }), "draw/draw", "C5: a wild draw")
+    eq(words({ verdict = "win", reason = "run", ranSide = "b" }), "mon_fled/mon_fled",
+       "C5: a referee with no `how` is read by the run's side")
+    check(Solo.teleportBySide3({ rules = { teleportOutcome = "side" } }, "frlg"), "C5: the profile's rule decides")
+    check(not Solo.teleportBySide3({ family = "frlg", rules = {} }), "C5: ...else FRLG says PLAYER_TELEPORTED")
+    check(Solo.teleportBySide3({ family = "rse", rules = {} }), "C5: ...and Emerald by side")
+    check(not Solo.teleportBySide3(nil, "frlg"), "C5: ...or the family when there is no profile")
+    eq(Solo.ENGINE_RESULT3.mon_fled, "fled", "C5: battle.ended speaks the engine's 'fled'")
+
+    -- Through a fight: Emerald's Mew teleports away.
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    PROFILE.family = "rse"
+    PROFILE.rules.teleportOutcome = "side"
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Encounter(GAME, { species = 151, level = 30 }, { done = function(r) result = r end }),
+          "C5 (EM): the wild fight is taken")
+    solo.sim:_finish("win", { FOE }, { "solo_player" }, "run")
+    solo.sim.result.how, solo.sim.result.by = "teleport", "b"
+    drive(solo, function(f) f:pickMove(1) end)
+    eq(result, "mon_teleported", "C5 (EM): done('mon_teleported')")
+    eq(SESSION.battleOutcome, 10, "C5 (EM): ...B_OUTCOME_MON_TELEPORTED in the save")
+    local tv = effectsOf("rse")[1]
+    eq(tv and tv[8], 10, "C5 (EM): ...and to the TV")
+    PROFILE.family = "frlg"
+    PROFILE.rules.teleportOutcome = nil
+
+    -- FireRed: the player's WHIRLWIND blows Mewtwo away.
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local fr = newSolo()
+    check(fr:fromGen3Encounter(GAME, { species = 151, level = 30 }, { done = function(r) result = r end }),
+          "C5 (FRLG): taken")
+    fr.sim:_finish("win", { FOE }, { "solo_player" }, "run")
+    fr.sim.result.how, fr.sim.result.by = "roar", "a"
+    drive(fr, function(f) f:pickMove(1) end)
+    eq(result, "teleport_player", "C5 (FRLG): done('teleport_player') -- 'ran from', the legend stays")
+    eq(SESSION.battleOutcome, 5, "C5 (FRLG): ...B_OUTCOME_PLAYER_TELEPORTED")
+    local ended = effectsOf("emit")[1]
+    eq(ended and ended[3].result, "player_teleported", "C5 (FRLG): battle.ended in the engine's word")
+
+    -- A wild seat's flee: MON_FLED, "fled" to battle.ended.
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local fl = newSolo()
+    check(fl:fromGen3Encounter(GAME, { species = 16, level = 5 }, { done = function(r) result = r end }),
+          "C5 (flee): taken")
+    fl.sim:_finish("win", { "solo_player" }, { FOE }, "run")
+    fl.sim.result.how, fl.sim.result.by = "flee", "b"
+    drive(fl, function(f) f:pickMove(1) end)
+    eq(result, "mon_fled", "C5 (flee): done('mon_fled')")
+    eq(SESSION.battleOutcome, 6, "C5 (flee): ...B_OUTCOME_MON_FLED")
+    eq(effectsOf("emit")[1] and effectsOf("emit")[1][3].result, "fled", "C5 (flee): battle.ended says 'fled'")
+
+    -- The whole way through, on the referee's own outcome: a wild monster
+    -- that knows only TELEPORT (an invented row on pret's EFFECT_TELEPORT)
+    -- leaves on the cart's random wild move -- MON_TELEPORTED on Emerald,
+    -- PLAYER_TELEPORTED on FireRed.
+    ROM[100] = { effect = E.TELEPORT, power = 0, type = 14, accuracy = 0, pp = 20,
+                 secondaryChance = 0, target = 16, priority = 0, flags = 0 }
+    P3._moveNames[100] = "TELEPORT"
+    for _, row in ipairs({ { "rse", "side", "mon_teleported", 10 }, { "frlg", nil, "teleport_player", 5 } }) do
+      newGame()
+      SESSION.party = { monOf(4, 30, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }) }
+      PROFILE.family = row[1]
+      PROFILE.rules.teleportOutcome = row[2]
+      local tp = newSolo()
+      local tr
+      check(tp:fromGen3Encounter(GAME, { species = 151, level = 5, moves = { 100 } },
+        { done = function(r) tr = r end }), "C5 (" .. row[1] .. ", TELEPORT): taken")
+      drive(tp, function(f) f:pickMove(1) end)
+      eq(tr, row[3], "C5 (" .. row[1] .. ", TELEPORT): the wild monster's TELEPORT is " .. row[3])
+      eq(SESSION.battleOutcome, row[4], "C5 (" .. row[1] .. ", TELEPORT): ...code " .. row[4])
+    end
+    PROFILE.family = "frlg"
+    PROFILE.rules.teleportOutcome = nil
+
+    -- A kind's own word: a facility's draw is "draw" (no halt), a pair's "lose".
+    for _, row in ipairs({ { "facility", "draw" }, { "pair", "lose" } }) do
+      newGame()
+      SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+      Solo.registerKind3(row[1], {
+        takes = function(_, ctx) ctx.double = false; return true end,
+        word = function(_, _, _, ending)
+          if ending.word == "draw" then return row[2] end
+        end,
+      })
+      local op = trainerOpcode()
+      FakeVm.running = true
+      local s = newSolo()
+      local o = { trainerId = 900, done = op.done }
+      o[row[1] == "facility" and "trainerHill" or "twoOpponents"] = true
+      check(s:fromGen3Trainer(GAME, 900, o), "C5 (" .. row[1] .. "): taken")
+      s.sim:_finish("draw", nil, nil, "timeout")
+      drive(s, function(f) f:pickMove(1) end)
+      eq(op.answered, row[2], "C5 (" .. row[1] .. "): the kind's word reaches its caller")
+      eq(FakeVm.halted, 0, "C5 (" .. row[1] .. "): ...and nothing is halted")
+      eq(SESSION.battleOutcome, 3, "C5 (" .. row[1] .. "): the save still says DREW")
+      Solo.unregisterKind3(row[1])
+      FakeVm.running = false
+    end
+  end
+
+  -- ------- (g) the finish every kind needs
+  -- Emerald's first battle: never a whiteout, the saved song let go.
+  do
+    newGame()
+    local lead = monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 }, hp = 3 })
+    SESSION.party = { lead }
+    SESSION.money = 500
+    PROFILE.family = "rse"
+    Solo.registerKind3("firstBattle", { takes = function() return true end })
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Encounter(GAME, { species = 151, level = 70, moves = { 300 } },
+      { wild = true, firstBattleKind = "birch", done = function(r) result = r end }), "birch: taken")
+    local from = #audioCalls + 1
+    local _, fight = drive(solo, function(f) f:pickMove(1) end)
+    eq(result, "lose", "birch: a loss is still 'lose' to the script")
+    eq(#fieldCalls, 0, "birch: no whiteout warp (CB2_EndFirstBattle)")
+    eq(SESSION.money, 500, "birch: no money lost")
+    eq(lead.hp, 0, "birch: and no heal -- the script heals the party itself")
+    check(textOf(fight):find("STRINGID_PLAYERWHITEOUT", 1, true) ~= nil,
+          "birch: the cart's lost lines are still said (BattleScript_LocalBattleLost)")
+    local names = audioNames(from)
+    local cleared = indexOf(names, "clearSavedSong")
+    check(cleared ~= nil, "birch: the saved song is let go (Overworld_ClearSavedMusic)")
+    local restored = nil
+    for i = (cleared or 1) + 1, #names do if names[i] == "restoreMapSong" then restored = i end end
+    check(restored ~= nil, "birch: ...and the map's own song restored after it")
+    local tv = effectsOf("rse")[1]
+    eq(tv and tv[9] and tv[9].firstBattle, true, "birch: the TV is told it was a first battle (never on air)")
+    eq(tv and tv[9] and tv[9].trainer, false, "birch: ...a wild one")
+    PROFILE.family = "frlg"
+    Solo.unregisterKind3("firstBattle")
+  end
+
+  -- A scripted loss (Steven, the Frontier): no whiteout, no heal, and the
+  -- caller is answered -- never the draw's halt.
+  do
+    newGame()
+    local lead = monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 }, hp = 3 })
+    SESSION.party = { lead }
+    SESSION.money = 500
+    local op = trainerOpcode()
+    FakeVm.running = true
+    local solo = newSolo()
+    check(solo:fromGen3Trainer(GAME, 901, { trainerId = 901, scriptedLoss = true, done = op.done }),
+          "scriptedLoss: taken")
+    local _, fight = drive(solo, function(f) f:pickMove(1) end)
+    eq(op.answered, "lose", "scriptedLoss: the script is answered 'lose'")
+    eq(FakeVm.halted, 0, "scriptedLoss: ...not halted")
+    eq(#fieldCalls, 0, "scriptedLoss: no whiteout warp")
+    eq(SESSION.money, 500, "scriptedLoss: no money lost")
+    eq(lead.hp, 0, "scriptedLoss: no heal")
+    check(textOf(fight):find("STRINGID_PLAYERLOSTAGAINSTENEMYTRAINER", 1, true) ~= nil,
+          "scriptedLoss: the lost lines are said")
+    FakeVm.running = false
+
+    -- noWhiteout with deferHeal (a Secret Base): no heal now either.
+    newGame()
+    local held = monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 }, hp = 3 })
+    SESSION.party = { held }
+    local d = newSolo()
+    local dr
+    check(d:fromGen3Trainer(GAME, 901, { trainerId = 901, noWhiteout = true, deferHeal = true,
+      done = function(r) dr = r end }), "deferHeal: taken")
+    drive(d, function(f) f:pickMove(1) end)
+    eq(dr, "lose", "deferHeal: 'lose'")
+    eq(#fieldCalls, 0, "deferHeal: no whiteout")
+    eq(held.hp, 0, "deferHeal: the heal is the caller's, later")
+  end
+
+  -- ------- (h) a kind's own choices, flags and hand-back
+  do
+    newGame()
+    local lead = monOf(4, 30)
+    SESSION.party = { lead }
+    local settledWhiteout = "unset"
+    Solo.registerKind3("safari", {
+      takes = function(_, ctx) ctx.lossless, ctx.noReconcile = true, true; return true end,
+      choose = function(_, ctx, payload)
+        if payload.action == "run" then ctx.solo:parkLine3("NOT YET"); return true, true end
+      end,
+      settle = function(_, ctx) settledWhiteout = ctx.whiteout end,
+    })
+    local solo = newSolo()
+    local result
+    check(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, { safari = true,
+      done = function(r) result = r end }), "choose: taken")
+    local f = toMenu(solo)
+    local turn = solo.sim.turn
+    f:sendChoice({ action = "run" })
+    solo:update(0.5, GAME)
+    for _ = 1, 40 do f:update(2.0); if f.phase == "choose" then break end end
+    check(textOf(f):find("NOT YET", 1, true) ~= nil, "choose: the kind's line is said")
+    eq(solo.sim.turn, turn, "choose: ...no turn spent")
+    eq(f.phase, "choose", "choose: ...and the menu is back")
+    -- Out of balls with nobody standing on side a: no defeat (lossless), and
+    -- the party is not touched (noReconcile).
+    solo.sim.byId.solo_player.mons[1].hp = 0
+    solo.sim:_finish("draw", nil, nil, "balls")
+    solo.sim.result.how = "balls"
+    local _, sf = drive(solo, function(fx) fx:pickMove(1) end)
+    eq(result, "no_safari_balls", "lossless: done('no_safari_balls')")
+    eq(SESSION.battleOutcome, 8, "lossless: ...B_OUTCOME_NO_SAFARI_BALLS")
+    eq(settledWhiteout, false, "lossless: nobody standing on side a is not a defeat")
+    check(not textOf(sf):find("STRINGID_PLAYERWHITEOUT", 1, true), "lossless: ...and says no lost lines")
+    eq(#fieldCalls, 0, "lossless: no whiteout")
+    eq(lead.hp, lead.maxHp, "noReconcile: the party is not written")
+    Solo.unregisterKind3("safari")
+
+    -- handBack: the kind puts back what it took, and may start the cart's own.
+    local handed = {}
+    Solo.registerKind3("roamer", { handBack = function(_, ctx)
+      handed[#handed + 1] = ctx.solo.handingBack3
+      return #handed == 1
+    end })
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local r1 = newSolo()
+    check(r1:fromGen3Encounter(GAME, { species = 16, level = 5 }, { roamer = true }), "handBack: taken")
+    r1:reset()
+    eq(handed[1], true, "handBack: asked under the hand-back guard")
+    eq(#bridgeCalls, 0, "handBack: a kind that started the cart's fight itself is not second-guessed")
+    check(r1:fromGen3Encounter(GAME, { species = 16, level = 5 }, { roamer = true }), "handBack: taken again")
+    r1:reset()
+    eq(bridgeCalls[1] and bridgeCalls[1][1], "startWild", "handBack: ...else the core hands it back")
+    Solo.unregisterKind3("roamer")
+  end
+
+  -- ------- (i) the stand door
+  do
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local solo = newSolo()
+    local lead = Solo.gen3FoeMon({ species = 16, level = 4 }, { wild = true })
+    check(solo:fromGen3Stand(GAME, { kind = "wild", kind3 = "wild", enemyParty = { lead } }, {}),
+          "stand: a stand with only its monsters is fought as an encounter")
+    eq(solo.wildMon, lead, "stand: ...with the stand's own monster")
+    eq(solo.gen3 and solo.gen3.stand and solo.gen3.stand.kind3, "wild", "stand: ...and the stand on the fight")
+    solo:reset()
+    check(solo:fromGen3Stand(GAME, { kind = "trainer", kind3 = "trainer", trainerId = 900 }, { trainerId = 900 }),
+          "stand: a trainer stand is fought as the trainer")
+    eq(solo.gen3 and solo.gen3.trainer and solo.gen3.trainer.trainerId, 900, "stand: ...that trainer")
+    solo:reset()
+    eq(solo:fromGen3Stand(GAME, { kind = "wild" }, {}), false, "stand: a stand with nothing to fight declines")
+    eq(solo:fromGen3Stand(GAME, nil, {}), false, "stand: no stand declines")
+  end
+
+  -- ------- (j) the foe's held item and the sheet fields the families read
+  do
+    newGame()
+    local meta = P3._speciesMeta[16]
+    local function roll(common, rare, r)
+      meta.itemCommon, meta.itemRare = common, rare
+      local draws = 0
+      local item = Solo.gen3WildItem(16, function() draws = draws + 1; return r end)
+      return item, draws
+    end
+    eq(roll(21, 21, 0), 21, "held (FRLG): common == rare is held every time")
+    eq(select(2, roll(0, 0, 0)), 1, "held (FRLG): one Random() is drawn whatever the species holds")
+    eq(roll(21, 127, 44), 0, "held (FRLG): 0..44 holds nothing")
+    eq(roll(21, 127, 45), 21, "held (FRLG): 45..94 the common item")
+    eq(roll(21, 127, 94), 21, "held (FRLG): ...to 94")
+    eq(roll(21, 127, 95), 127, "held (FRLG): 95..99 the rare one")
+    eq(roll(21, 0, 95), 0, "held (FRLG): a species with only a common item holds nothing at 95")
+    eq(roll(0, 127, 99), 127, "held (FRLG): ...and one with only a rare item holds it there")
+    meta.itemCommon, meta.itemRare = 0, 0
+    check(not Solo.gen3HeldRoll({ legendary = true }, {}), "heldRoll: not a legendary")
+    check(not Solo.gen3HeldRoll({}, { specialWild = true }), "heldRoll: ...nor FRLG's special wild")
+    check(not Solo.gen3HeldRoll({}, { ghostUnveiled = true }), "heldRoll: ...nor the scoped Marowak")
+    check(not Solo.gen3HeldRoll({ pike = true }, {}), "heldRoll: ...nor a Pike wild")
+    check(not Solo.gen3HeldRoll({ regi = true }, {}), "heldRoll: ...nor Emerald's legend kinds")
+    check(Solo.gen3HeldRoll({ legendary = false }, {}), "heldRoll: a plain wild rolls")
+    local fateful = Solo.gen3FoeMon({ species = 151, level = 30, fatefulEncounter = true }, { wild = true, heldRoll = false })
+    eq(fateful and fateful.fatefulEncounter, true, "fateful: the event monster keeps its bit")
+
+    -- safariFleeRate on a wild sheet, from the species row.
+    meta.safariZoneFleeRate = 125
+    local wildSheet = Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true })
+    eq(wildSheet and wildSheet.safariFleeRate, 125, "sheet: a wild sheet carries the species' Safari flee rate")
+    local ownSheet = Sheet3.mon(SESSION, monOf(16, 5), 0, { own = true })
+    eq(ownSheet and ownSheet.safariFleeRate, nil, "sheet: ...no other sheet does")
+    meta.safariZoneFleeRate = nil
+    eq(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }).safariFleeRate, nil,
+       "sheet: ...nor a species row without one")
+    -- fateful: on the wild sheet, back onto a monster rebuilt from it.
+    local mew = monOf(151, 30, { fatefulEncounter = true })
+    local mewSheet = Sheet3.mon(SESSION, mew, 0, { wild = true })
+    eq(mewSheet and mewSheet.fateful, true, "sheet: a fateful wild says so")
+    eq(Sheet3.mon(SESSION, monOf(151, 30), 0, { wild = true }).fateful, nil, "sheet: ...an ordinary one does not")
+    local rebuilt = Sheet3.monFromSheet(mewSheet, SESSION)
+    eq(rebuilt and rebuilt.fatefulEncounter, true, "sheet: a catch rebuilt from it keeps the bit")
+
+    -- arenaMind: the cart's mind ratings (synthetic here), move number + 1.
+    local F2 = { arena = function() return { mindRatings = { [11] = 1, [46] = -1 } } end }
+    stub("src.core.game3.rse.frontier.f2_data", F2)
+    Sheet3.resetArenaMinds()
+    local rows = Sheet3.moves(monOf(4, 5), { arena = true })
+    eq(rows[1] and rows[1].arenaMind, 1, "arena: a move row carries its mind rating")
+    eq(rows[2] and rows[2].arenaMind, -1, "arena: ...a PROTECT-like -1 too")
+    eq(Sheet3.moves(monOf(4, 5))[1].arenaMind, nil, "arena: ...only when asked")
+    local sheet = Sheet3.mon(SESSION, monOf(4, 5), 0, { arena = true })
+    eq(sheet and sheet.moves[1].arenaMind, 1, "arena: ...through a whole sheet")
+    local plainSheets = Sheet3.mons(GAME, { monOf(4, 5) }, {})
+    eq(Sheet3.stampArenaMind(plainSheets), 2, "arena: a built party is stamped row by row")
+    eq(plainSheets[1].moves[2].arenaMind, -1, "arena: ...as the cart rates it")
+    F2.arena = function() error("frontier f2: missing from the cache") end
+    Sheet3.resetArenaMinds()
+    eq(Sheet3.arenaMind(10), nil, "arena: a cart without the table has no rating")
+    eq(Sheet3.moves(monOf(4, 5), { arena = true })[1].arenaMind, nil, "arena: ...and no row says one")
+    Sheet3.resetArenaMinds()
+  end
+
+  Turn3.create, Mediated.new = realCreate, realNew
+  FakeNatives.outcome_to_code = realCode
 end
 
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.

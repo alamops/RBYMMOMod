@@ -36,8 +36,10 @@
 --   Sheet3.mon(session, mon, slot, opts)   one C4 sheet, or nil + reason
 --   Sheet3.mons(game, party, opts)         any party (NPC trainer, wild mon)
 --   Sheet3.party(game, opts)               this player's own session party
---   Sheet3.moves(mon)                      C4 move rows for a party mon
---   Sheet3.moveRow(moveId, pp, maxPp)      one move row
+--   Sheet3.moves(mon, opts)                C4 move rows for a party mon
+--   Sheet3.moveRow(moveId, pp, maxPp, opts) one move row
+--   Sheet3.arenaMind(moveId)               the cart's Battle Arena mind rating (Emerald), or nil
+--   Sheet3.stampArenaMind(sheets)          ...stamped on built sheets' move rows
 --   Sheet3.ruleset(game, opts)             { generation, typeTable, movePool, terrain?, weather?, underwater? }
 --   Sheet3.typeTable()  Sheet3.movePool()  the two halves of the ruleset
 --   Sheet3.bag(game)                       the §4 bag upload ({ id, count, name })
@@ -52,7 +54,10 @@
 --   Sheet3.localName(mon, species)         the cart's own spelling, for local text
 --   Sheet3.wireName(text, limit)           a cart string in the wire's alphabet
 --
--- opts: { wild = true } stamps `catchRate` (the wild seat's sheet only);
+-- opts: { wild = true } stamps `catchRate`, `safariFleeRate` and `fateful`
+-- (the wild seat's sheet only); { arena = true } stamps each move row's
+-- `arenaMind` (the Battle Arena's judge, contract C3 of
+-- docs/plans/gen3-solo-remaining-fights.md);
 -- { link = true } gives Deoxys its link-battle stats -- a fight between two
 -- players' carts only (see `statsFor`); every other fight, and the default,
 -- is the forme this cart's own battles use.  { own = true } marks this
@@ -326,9 +331,65 @@ local function tokenFor(info, id)
 end
 M.tokenFor = tokenFor
 
+-- ------- the Battle Arena's mind ratings (Emerald)
+--
+-- pret pokeemerald src/battle_arena.c sMindRatings: one signed byte per move
+-- (mostly 1; PROTECT / DETECT / ENDURE -1; a few 0), the Mind points a move
+-- earns its user when used in the Arena or the Fallarbor tent
+-- (battle_util.c:288 `gBattleStruct->arenaMindPoints[battler] +=
+-- sMindRatings[move]`).  A cart table, so it is read from the player's own
+-- cart at run time -- the engine decodes it into the Frontier manifest
+-- (src/import/gba/rse/frontier_f2_extract.lua `mindRatings`, indexed move
+-- number + 1, read by battle/facility_arena.lua addMind) -- and rides on the
+-- move row as `arenaMind` for the referee's judge (contract C3 `rules.arena`
+-- of docs/plans/gen3-solo-remaining-fights.md, wave 3).  FireRed / LeafGreen
+-- and a cart without the manifest
+-- have none: nil, and no row carries the field.  Read once per cart.
+local arenaMinds, arenaMindsFor = nil, nil
+function M.arenaMindTable()
+  local version = Gen3.version()
+  if arenaMindsFor == version and arenaMinds ~= nil then return arenaMinds or nil end
+  arenaMindsFor = version
+  arenaMinds = false
+  local F2 = engine("src.core.game3.rse.frontier.f2_data")
+  local arena = F2 and try(F2.arena)
+  local ratings = type(arena) == "table" and arena.mindRatings or nil
+  if type(ratings) == "table" then arenaMinds = ratings end
+  return arenaMinds or nil
+end
+
+-- Forget the cart's table (a suite that swaps carts under one version).
+function M.resetArenaMinds() arenaMinds, arenaMindsFor = nil, nil end
+
+-- One move's mind rating (-128..127), or nil when this cart has none.
+function M.arenaMind(moveId)
+  local id = int(moveId, nil)
+  if not id or id < 0 then return nil end
+  local ratings = M.arenaMindTable()
+  if not ratings then return nil end
+  return clamp(int(ratings[id + 1], 0), -128, 127)
+end
+
+-- Stamp `arenaMind` on every move row of already-built sheets (a party the
+-- screen uploaded before the fight knew it was the Arena's).  How many rows.
+function M.stampArenaMind(sheets)
+  local n = 0
+  if not M.arenaMindTable() then return n end
+  for _, sheet in ipairs(type(sheets) == "table" and sheets or {}) do
+    for _, row in ipairs(type(sheet) == "table" and type(sheet.moves) == "table" and sheet.moves or {}) do
+      if type(row) == "table" then
+        local mind = M.arenaMind(row.num)
+        if mind ~= nil then row.arenaMind = mind; n = n + 1 end
+      end
+    end
+  end
+  return n
+end
+
 -- One move row (docs/plans/gen3-battle-sheet.md §2, "Move row").  nil for an
--- empty slot or a move this cart has no row for.
-function M.moveRow(moveId, pp, maxPp)
+-- empty slot or a move this cart has no row for.  opts: { arena = true }
+-- stamps the cart's `arenaMind` (above).
+function M.moveRow(moveId, pp, maxPp, opts)
   local id = int(moveId, 0)
   if id <= 0 then return nil end
   local info = Gen3.moveInfo(id)
@@ -336,7 +397,7 @@ function M.moveRow(moveId, pp, maxPp)
   local full = clamp(int(maxPp, info.pp) or 0, 0, 64)
   local left = clamp(int(pp, full) or 0, 0, 64)
   if left > full then full = left end
-  return {
+  local row = {
     id = tokenFor(info, id),
     name = M.wireName(info.name, "move") or nil,
     num = id,
@@ -351,16 +412,18 @@ function M.moveRow(moveId, pp, maxPp)
     priority = clamp(int(info.priority, 0), -7, 7),
     flags = clamp(int(info.flags, 0), 0, 63),
   }
+  if type(opts) == "table" and opts.arena then row.arenaMind = M.arenaMind(id) end
+  return row
 end
 
--- Every move a party mon knows, as rows, in slot order.
-function M.moves(mon)
+-- Every move a party mon knows, as rows, in slot order (opts: moveRow's).
+function M.moves(mon, opts)
   local out = {}
   if type(mon) ~= "table" then return out end
   for i = 1, 4 do
     local id = moveAt(mon, i)
     if id and id > 0 then
-      local row = M.moveRow(id, ppAt(mon, i, "pp"), ppAt(mon, i, "maxPp"))
+      local row = M.moveRow(id, ppAt(mon, i, "pp"), ppAt(mon, i, "maxPp"), opts)
       if row then out[#out + 1] = row end
     end
     if #out >= Config.BATTLE_MOVE_MAX then break end
@@ -491,7 +554,7 @@ function M.mon(session, mon, slot, opts)
   local level = clamp(int(mon.level, 1), 1, 100)
   local stats = statsFor(mon, species, opts)
   if not stats then return nil, "no stats" end
-  local moves = M.moves(mon)
+  local moves = M.moves(mon, opts)
   if #moves == 0 then return nil, "no moves" end
 
   local maxHp = clamp(stats.hp or 1, 1, 999)
@@ -552,6 +615,20 @@ function M.mon(session, mon, slot, opts)
   end
   if opts.wild then
     sheet.catchRate = clamp(int(info.catchRate, 255), 0, 255)
+    -- The species' Safari Zone flee rate (pret gSpeciesInfo .safariZoneFleeRate,
+    -- 0..255; the engine decodes it as speciesMeta's `safariZoneFleeRate`),
+    -- FireRed / LeafGreen's escape factor at a Safari fight's start
+    -- (pokefirered battle_main.c:2284: `rate * 100 / 1275`, raised to 2 when
+    -- <= 1) -- read by the referee's safari mode only (contract C3).
+    local P = engine("src.core.game3.pokemon")
+    local meta = P and try(P.speciesMeta, species)
+    local flee = type(meta) == "table" and int(meta.safariZoneFleeRate, nil) or nil
+    if flee then sheet.safariFleeRate = clamp(flee, 0, 255) end
+    -- A wild met by seteventmon (Mew, Deoxys and the island legendaries:
+    -- the engine's natives_events.lua marks it `fatefulEncounter`): carried
+    -- like the IVs, so a catch rebuilt from the sheet keeps the bit its
+    -- obedience reads (M.monFromSheet).
+    if mon.fatefulEncounter == true then sheet.fateful = true end
   end
   -- Passthrough: never read by a formula, copied onto a caught sheet so the
   -- catcher can rebuild the exact mon (Sheet3.monFromSheet).
@@ -699,6 +776,7 @@ function M.monFromSheet(sheet, session)
     pokeball = 4,
   }
   if tonumber(sheet.otId) then mon.otId = int(sheet.otId, 0) end
+  if sheet.fateful == true then mon.fatefulEncounter = true end
   pcall(P.applyStats, mon)
   M.applyToMon(mon, { hp = sheet.hp, status = sheet.status })
   return mon

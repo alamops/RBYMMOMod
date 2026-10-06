@@ -1365,10 +1365,16 @@ end)()
 ;(function()
   eq(Solo.turnFor(1), Turn, "turnFor(1) is still BattleSim")
   eq(Solo.turnFor(3), need("BattleSim3/Turn"), "turnFor(3) is BattleSim3")
-  ok(Solo.gen3Refused({ safari = true }), "gen3Refused: a safari opt")
-  ok(Solo.gen3Refused({}, { roamer = true }), "gen3Refused: a roamer foe")
-  ok(Solo.gen3Refused(nil, nil, { kinds = { tutorial = "wally" } }),
+  -- The refusal list is what stays the cart's (Config.SOLO_REFUSED_GEN3, C1:
+  -- the link family and the e-Reader); the other keys name a solo kind (C2).
+  ok(Solo.gen3Refused({ link = true }), "gen3Refused: a link opt")
+  ok(Solo.gen3Refused({}, { eReader = true }), "gen3Refused: an e-Reader foe")
+  ok(Solo.gen3Refused(nil, nil, { kinds = { link = true } }),
      "gen3Refused: a kinds table on any argument")
+  eq(Solo.kind3Name({ safari = true }, nil, "wild"), "safari", "kind3Name: a safari opt")
+  eq(Solo.kind3Name({}, { roamer = true }, "wild"), "roamer", "kind3Name: a roamer foe")
+  eq(Solo.kind3Name({ kinds = { tutorial = "wally" } }, nil, "wild"), "tutorial",
+     "kind3Name: a kinds table")
   ok(not Solo.gen3Refused({ firstBattle = false, trainerId = 5 }, {}),
      "gen3Refused: firstBattle = false is an ordinary trainer")
   ok(Solo.gen3Double({ double = true }, {}), "gen3Double: the double flag")
@@ -1411,11 +1417,11 @@ end)()
   ok(not Solo.gen3TakesDouble({ double = true, trainerIdB = 5 }, {}, two),
      "gen3TakesDouble: not a second trainer's, whatever the party")
   ok(not Solo.gen3TakesDouble({}, {}, two), "gen3TakesDouble: not a single")
-  ok(Solo.gen3Refused({ partner = true }, {}), "gen3Refused: Steven's partner stays refused")
-  ok(Solo.gen3Refused({ twoOpponents = true }, {}), "gen3Refused: ...and two opponents")
+  eq(Solo.kind3Name({ partner = true }, {}, "trainer"), "partner", "kind3Name: Steven's partner")
+  eq(Solo.kind3Name({ twoOpponents = true }, {}, "trainer"), "pair", "kind3Name: ...and two opponents")
   eq(Solo.gen3Result("win", "catch"), "caught", "gen3Result: a catch")
   eq(Solo.gen3Result("loss", "run"), "run", "gen3Result: the player ran")
-  eq(Solo.gen3Result("win", "run"), "fled", "gen3Result: the wild mon left")
+  eq(Solo.gen3Result("win", "run"), "mon_fled", "gen3Result: the wild mon left (C5: MON_FLED)")
   eq(Solo.gen3Result("draw", "ko", true), "lose", "gen3Result: a whiteout draw is a defeat")
   eq(Solo.gen3Kind({ wild = true }), "wild", "gen3Kind: wild")
   eq(Solo.gen3Kind({ trainerId = 7 }), "trainer", "gen3Kind: trainer")

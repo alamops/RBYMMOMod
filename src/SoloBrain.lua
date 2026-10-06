@@ -440,16 +440,38 @@ end
 --   mustReplace     the fighter owes a send-out, not a turn       (optional)
 --
 -- and, for Gen 3, the referee itself (`sim`, `battler`, `foeBattler`,
--- `fighter`) when SoloBattle builds the view; for a Gen 3 lone double only
--- (absent on every 1v1, which then reads exactly as it always has):
+-- `fighter`) when SoloBattle builds the view (`_npcView3`, for any
+-- computer seat on either side); `side` ("a" | "b", read off `battler` /
+-- `fighter` when they are there) for a seat that is not on side b; for a
+-- Gen 3 double only (absent on every 1v1, which then reads exactly as it
+-- always has):
 --
 --   double          true
---   seat            the field slot of the trainer seat choosing (3 or 4)
---   partner         the trainer's other active battler, or nil
+--   seat            the field slot of the seat choosing (3 or 4 for a
+--                   trainer; 1 for an in-game partner beside the player)
+--   partner         the other active battler on that seat's side, or nil --
+--                   whoever commands it (the trainer's second seat, the
+--                   other trainer of a spotted pair, the player beside
+--                   Steven): pret's BATTLE_PARTNER is a position
+--   partnerSlot     its field slot (optional: a referee battler carries it)
 --   foes            { { slot = <field slot>, battler = <battler> }, ... }:
---                   the player's LIVING battlers, one or two
---   claimed         { [party index] = true }: what the sibling seat already
---                   switches or sends in this turn
+--                   the other side's LIVING battlers, one or two
+--   claimed         { [party index] = true }: what a sibling seat of the
+--                   SAME party already switches or sends in this turn (a
+--                   shared team's other seat; never another trainer's, whose
+--                   indices are into another party)
+--
+-- and, for the Battle Palace (wave 3), `moveMask` (M.maskOf3: the moves a
+-- nature group allows, the rest scored from 0) and `moveOnly` (the move
+-- alone -- no switch, no item -- for the player's own monster's pick).
+--
+-- A brain built with an `owner` declines a seat of another entry (M:answers).
+--
+-- Asked once per seat that owes the referee an answer, with that seat's own
+-- view: a trainer with two seats is asked twice a turn, left seat first
+-- (pret's battler order), and a fight with several trainers asks each
+-- seat's own trainer's brain -- SoloBattle keys them by the referee entry
+-- that owns the seat (`seat.owner`), which is this brain's `owner`.
 --
 -- Returns a choice in `Turn:submitChoice`'s vocabulary --
 -- `{ action = "fight", move = <zero-based index> }`, and on Gen 3 also
@@ -755,7 +777,16 @@ end
 --     scores every move against every battler -- its own partner included --
 --     and takes the best target; Emerald's AI_DoubleBattle and AI_TryOnAlly
 --     (M:_doubleBattle3, M:_tryOnAlly3); and a switch or send-out that never
---     names either seat's active or the sibling seat's claim (M:_benchable3).
+--     names either seat's active or the sibling seat's claim (M:_benchable3);
+--   * **one brain per trainer, on either side** (contract C4 of
+--     docs/plans/gen3-solo-remaining-fights.md): each of an Emerald spotted
+--     pair's two trainers is its own brain, both running A | B's flags and
+--     spending A's four items from one pool (M.itemPool3), each answering
+--     only its own seats (M:answers); and Emerald's Steven sits on the
+--     player's side with the opponents' flags, no items and no disobedience
+--     -- every position rule the cart writes in battler ids read through
+--     M.battlerId3, so the scripts aim at side b from side a the way they
+--     aim at the player from side b.
 --
 -- The damage every script asks about is the referee's own pure formula
 -- (BattleSim3/Damage.calc) over the referee's own battlers -- stages, screens,
@@ -827,17 +858,162 @@ local function int3(value, fallback)
   return math.floor(n)
 end
 
--- A Gen 3 trainer's items: the numeric ids in the engine row's `items` (four
--- slots, 0 for an empty one), in slot order.  On the module because the kit
--- helpers above (itemsFor / bagFor) are defined before it.
-function M.itemsOf3(trainer)
+-- A list of item ids with the empty slots (0, junk) dropped, in order.
+local function idsOf3(list)
   local out = {}
-  if type(trainer) ~= "table" or type(trainer.items) ~= "table" then return out end
-  for _, raw in ipairs(trainer.items) do
+  if type(list) ~= "table" then return out end
+  for _, raw in ipairs(list) do
     local id = int3(raw, nil)
     if id and id > 0 then out[#out + 1] = id end
   end
   return out
+end
+
+-- A Gen 3 trainer's items: the numeric ids in the engine row's `items` (four
+-- slots, 0 for an empty one), in slot order.  On the module because the kit
+-- helpers above (itemsFor / bagFor) are defined before it.
+function M.itemsOf3(trainer)
+  if type(trainer) ~= "table" then return {} end
+  return idsOf3(trainer.items)
+end
+
+-- ------- the field's positions, either side
+--
+-- The referee numbers its field slots per side (BattleSim3/Events.fieldSlot:
+-- side a 0..2, side b 3..5, Events.SIDE_SLOTS = 3, mirrored here so these
+-- helpers stay pure), and pret numbers its battlers by position,
+-- interleaving the sides: B_POSITION_PLAYER_LEFT 0, OPPONENT_LEFT 1,
+-- PLAYER_RIGHT 2, OPPONENT_RIGHT 3 (include/constants/battle.h; BIT_SIDE is
+-- bit 0, BIT_FLANK bit 1).  Every rule below that the cart writes in battler
+-- ids -- the order ChooseMoveOrAction_Doubles walks its targets in, the
+-- position opposite a battler, the flank a roll lands on -- goes through
+-- these, so the same scripts score for a trainer on side b against the
+-- player and for an in-game partner (Emerald's Steven) on side a against
+-- side b.
+M.SIDE_SLOTS3 = 3
+
+function M.sideOfSlot3(slot)
+  local n = int3(slot, nil)
+  if n == nil or n < 0 then return nil end
+  return (n >= M.SIDE_SLOTS3) and "b" or "a"
+end
+
+function M.otherSide3(side)
+  return (side == "a") and "b" or "a"
+end
+
+-- A side's first field slot (its left position).
+function M.slotBase3(side)
+  return (side == "b") and M.SIDE_SLOTS3 or 0
+end
+
+-- Field slot -> pret battler id: side a slot k -> 2k, side b slot 3 + k ->
+-- 2k + 1 (GetBattlerAtPosition over the referee's a1 b1 a2 b2 order,
+-- Turn.create).  nil for no slot.
+function M.battlerId3(slot)
+  local side = M.sideOfSlot3(slot)
+  if not side then return nil end
+  local k = int3(slot, 0) - M.slotBase3(side)
+  return 2 * k + ((side == "b") and 1 or 0)
+end
+
+-- pret battler id -> field slot, the inverse.
+function M.slotOfBattler3(id)
+  local n = int3(id, nil)
+  if n == nil or n < 0 then return nil end
+  if n % 2 == 1 then return M.SIDE_SLOTS3 + math.floor((n - 1) / 2) end
+  return math.floor(n / 2)
+end
+
+-- The other position of a slot's side (BATTLE_PARTNER: battler ^ BIT_FLANK):
+-- left <-> right; any other slot, or none, reads as the right position (the
+-- left one's partner).  `side` names the side when `slot` is nil.
+function M.partnerSlot3(slot, side)
+  side = M.sideOfSlot3(slot) or side or "b"
+  local base = M.slotBase3(side)
+  if int3(slot, nil) == base + 1 then return base end
+  return base + 1
+end
+
+-- ------- AI flags, composed
+--
+-- Bitwise OR over non-negative integers (pure Lua: the mod runs on LuaJIT
+-- and on a plain Lua 5.1, neither of which this file may assume a `bit`
+-- library on).  Each argument is a number or a list of numbers, so a pair's
+-- `{ A.aiFlags, B.aiFlags }` (pret BattleAI_SetupAIData's TWO_OPPONENTS arm,
+-- gTrainers[A].aiFlags | gTrainers[B].aiFlags) reads either way.
+function M.orFlags3(...)
+  local out = 0
+  local function fold(v)
+    local n = int3(v, 0)
+    if n <= 0 then return end
+    local res, bit, a, b = 0, 1, out, n
+    while a > 0 or b > 0 do
+      if a % 2 == 1 or b % 2 == 1 then res = res + bit end
+      a, b, bit = math.floor(a / 2), math.floor(b / 2), bit * 2
+    end
+    out = res
+  end
+  for k = 1, select("#", ...) do
+    local v = select(k, ...)
+    if type(v) == "table" then
+      for _, x in ipairs(v) do fold(x) end
+    else
+      fold(v)
+    end
+  end
+  return out
+end
+
+-- The flags of a list of script names in a bit layout (the running cart's,
+-- else `bits`): what a caller with no trainer row states its flags with.
+function M.flagsOf3(names, bits)
+  bits = type(bits) == "table" and bits or aiBitsOf3()
+  local out = 0
+  for _, name in ipairs(type(names) == "table" and names or {}) do
+    local bit = bits[name]
+    if type(bit) == "number" and not bitSet(out, bit) then out = out + 2 ^ bit end
+  end
+  return out
+end
+
+-- The scripts a facility trainer runs whatever its row says: pokeemerald
+-- BattleAI_SetupAIData's FRONTIER | EREADER_TRAINER | TRAINER_HILL |
+-- SECRET_BASE arm, and pokefirered's TRAINER_TOWER | EREADER_TRAINER |
+-- BATTLE_TOWER / TRAINER_SECRET_BASE arm (battle_ai_script_commands.c) --
+-- CHECK_BAD_MOVE | CHECK_VIABILITY | TRY_TO_FAINT, which is 7 in both
+-- carts' layouts although the two number the last two the other way round.
+-- (The Battle Factory's flags go by the challenge -- GetAiScriptsInBattle-
+-- Factory -- and arrive in the engine's opts.aiFlags instead.)
+M.FACILITY_SCRIPTS3 = { "CHECK_BAD_MOVE", "CHECK_VIABILITY", "TRY_TO_FAINT" }
+
+function M.facilityFlags3(bits)
+  return M.flagsOf3(M.FACILITY_SCRIPTS3, bits)
+end
+
+-- ------- the trainer item pool
+--
+-- pret's BATTLE_HISTORY->trainerItems / itemsNo: filled once, at the fight's
+-- start, by BattleAI_HandleItemUseBeforeAISetup from opponent A's four
+-- slots with ITEM_NONE skipped, then spent slot by slot to 0 and never
+-- compacted again (ShouldUseItem's rationing reads the gaps against the
+-- starting `itemsNo`).  It is the *fight's* history, not a battler's: in a
+-- two-trainer fight both foe battlers spend the one pool of A's items
+-- (pokeemerald battle_ai_switch_items.c ShouldUseItem; B's own row is never
+-- read), so the pair's two brains share one pool table.  `owner` is the
+-- referee playerId whose bag the items come out of -- the pair's A, whose
+-- bag B's entry spends through `bagFrom` -- and a brain checks the pool's
+-- live counts there, not in its own seat's bag.
+--
+-- `source` is a trainer record (its `items` slots) or a plain list of ids.
+function M.itemPool3(source, owner)
+  local ids
+  if type(source) == "table" and type(source.items) == "table" then
+    ids = M.itemsOf3(source)
+  else
+    ids = idsOf3(source)
+  end
+  return { items = ids, itemsNo = #ids, owner = (type(owner) == "string") and owner or nil }
 end
 
 -- Which cart's AI scripts a bit layout belongs to.  The engine runs the
@@ -856,22 +1032,76 @@ function M.aiFamily3(bits)
   return "frlg"
 end
 
--- opts (beyond M.new's): trainer (the engine trainer record: `aiFlags`,
--- `items`), aiFlags (override), aiBits (a bit layout, for a suite), family
--- ("frlg" | "rse", override; else read off the layout, M.aiFamily3).
+-- One brain is one trainer's mind (contract C4 of
+-- docs/plans/gen3-solo-remaining-fights.md): a lone trainer's, each of a
+-- spotted pair's two, an in-game partner's (Emerald's Steven, on the
+-- player's side).  It answers only its own trainer's seats -- `owner` --
+-- and every seat it answers it aims from the side that seat stands on.
+--
+-- opts (beyond M.new's):
+--   trainer   the engine trainer record (`aiFlags`, `items`); may be absent
+--             when `aiFlags` is given (a facility trainer or a partner
+--             whose record the engine never kept as a gTrainers row)
+--   aiFlags   the scripts this trainer runs: a number, or a list of numbers
+--             ORed (M.orFlags3) -- a pair's and Steven's `{ A, B }`, a
+--             facility's M.facilityFlags3(); else the record's own.  An
+--             Emerald double ORs DOUBLE_BATTLE in by itself (M:_double3).
+--   items     the trainer's own item ids (a list; empty slots dropped),
+--             overriding the record's
+--   pool      a shared pool from M.itemPool3 (the pair: A's items, spent by
+--             either foe brain), overriding both of the above
+--   noItems   true: this trainer never uses an item (Steven, pret
+--             ShouldUseItem's INGAME_PARTNER arm; the foes of his fight and
+--             every facility trainer get an empty pool the same way)
+--   noDisobey true: this trainer's monsters never disobey (Steven, pret
+--             IsMonDisobedient's INGAME_PARTNER arm) -- M:sheets3
+--   owner     the referee playerId of the entry whose seats this brain
+--             answers ("solo_foe", "solo_foe_b", "solo_ally"); nil answers
+--             any seat (a lone trainer's one brain for its one or two seats)
+--   side      "a" | "b": the side this trainer fights on, for a view that
+--             does not carry its battler (a bare-sheet view); a referee view
+--             always says it itself
+--   aiBits    a bit layout (for a suite); family "frlg" | "rse" (override;
+--             else read off the layout, M.aiFamily3)
+--
+-- Returns nil plus a reason with neither a trainer record nor `aiFlags`: a
+-- wild seat is the referee's own (its `wildPick` / `ai` options), never a
+-- brain's.
 function M.new3(opts)
   opts = opts or {}
   local trainer = opts.trainer or M.trainerOf(opts.engine)
   if type(trainer) ~= "table" then
-    return nil, "this battle has no trainer record, so there is no AI to bridge"
+    if opts.aiFlags == nil then
+      return nil, "this battle has no trainer record, so there is no AI to bridge"
+    end
+    trainer = {}
   end
   if not Sim3() then
     return nil, "the mod's Gen 3 battle modules are unavailable"
   end
-  local flags = tonumber(opts.aiFlags) or tonumber(trainer.aiFlags) or 0
+  local flags
+  if type(opts.aiFlags) == "table" then
+    flags = M.orFlags3(opts.aiFlags)
+  else
+    flags = tonumber(opts.aiFlags) or tonumber(trainer.aiFlags) or 0
+  end
   local bits = type(opts.aiBits) == "table" and opts.aiBits or aiBitsOf3()
   local family = (opts.family == "rse" or opts.family == "frlg") and opts.family
     or M.aiFamily3(bits)
+  -- battleHistory->trainerItems: the slots, spent to 0 as they are used,
+  -- never compacted (ShouldUseItem's slot arithmetic reads the gaps) -- the
+  -- trainer's own, or the one pool a pair shares (M.itemPool3).
+  local pool
+  if opts.noItems == true then
+    pool = { items = {}, itemsNo = 0 }
+  elseif type(opts.pool) == "table" and type(opts.pool.items) == "table" then
+    pool = opts.pool
+  elseif type(opts.items) == "table" then
+    pool = M.itemPool3(opts.items)
+  else
+    pool = M.itemPool3(trainer)
+  end
+  local side = (opts.side == "a" or opts.side == "b") and opts.side or nil
   local self = setmetatable({
     generation = 3,
     trainer = trainer,
@@ -879,12 +1109,40 @@ function M.new3(opts)
     aiFlags = math.max(0, math.floor(flags)),
     aiBits = bits,
     family3 = family,
-    -- battleHistory->trainerItems: the four slots, spent to 0 as they are
-    -- used, never compacted (ShouldUseItem's slot arithmetic reads the gaps).
-    items3 = M.itemsOf3(trainer),
-    itemsNo3 = #M.itemsOf3(trainer),
+    pool3 = pool,
+    items3 = pool.items,
+    itemsNo3 = math.max(0, int3(pool.itemsNo, #pool.items)),
+    noItems = opts.noItems == true,
+    noDisobey = opts.noDisobey == true,
+    owner = (type(opts.owner) == "string" and opts.owner ~= "") and opts.owner or nil,
+    side3 = side,
   }, M)
   return self
+end
+
+-- Does this brain answer for that referee seat?  An owner-less brain answers
+-- any (the lone trainer's one brain, both seats of its shared team); an
+-- owned one only its own entry's seats -- a shared team's `#2` seat carries
+-- the entry's id as its `owner` (Turn.create).
+function M:answers(seat)
+  if self.owner == nil then return true end
+  if type(seat) ~= "table" then return false end
+  return seat.owner == self.owner or seat.playerId == self.owner
+end
+
+-- The trainer's battle sheets as the referee must hold them.  An in-game
+-- partner (`noDisobey`) never disobeys: pokeemerald IsMonDisobedient returns
+-- obedient for BATTLE_TYPE_INGAME_PARTNER at position 2 -- inside the
+-- fateful-encounter arm, so an `unfateful` sheet (the illegal Mew / Deoxys
+-- rule) keeps its mark, and only the `traded` one the referee's obedience
+-- check reads (Move.lua Bm:_disobey, contract K2) is cleared.  In place, and
+-- the same list returned; a brain without `noDisobey` leaves them alone.
+function M:sheets3(sheets)
+  if not self.noDisobey or type(sheets) ~= "table" then return sheets end
+  for _, sheet in ipairs(sheets) do
+    if type(sheet) == "table" then sheet.traded = nil end
+  end
+  return sheets
 end
 
 -- `flags`, when given, is the set a fight actually runs (ctx.aiFlags: an
@@ -896,6 +1154,31 @@ end
 -- ------- reading the field
 
 local STAGE_ZERO = { atk = 0, def = 0, spe = 0, spa = 0, spd = 0, acc = 0, eva = 0 }
+
+-- A view's `moveMask` as a set of 1-based move slots, or nil for "every
+-- move": a set ({ [slot] = true }) or pret's own u8 (bit i = move slot i +
+-- 1), the defaultScoreMoves BattleAI_SetupAIData takes -- Battle Palace
+-- hands it the moves of the group its nature drew
+-- (ChooseMoveAndTargetInBattlePalace, pokeemerald battle_gfx_sfx_util.c),
+-- every other caller ALL_MOVES_MASK.  A masked-out move starts at 0, not
+-- 100, and the scripts still run over it as the cart runs them.
+function M.maskOf3(mask)
+  if type(mask) == "table" then
+    local out = {}
+    for k, v in pairs(mask) do
+      local i = int3(k, nil)
+      if i and v then out[i] = true end
+    end
+    return out
+  end
+  local n = int3(mask, nil)
+  if n == nil then return nil end
+  local out = {}
+  for i = 1, 4 do
+    if bitSet(n, i - 1) then out[i] = true end
+  end
+  return out
+end
 
 -- A battler-shaped reading of a bare sheet (no sim in the view).
 local function pseudoBattler(mon, S, side)
@@ -915,14 +1198,28 @@ local function pseudoBattler(mon, S, side)
   }
 end
 
+-- The side the choosing seat stands on: the referee's own word (its battler,
+-- its fighter), else the view's, else its field slot's, else the brain's,
+-- else side b -- where every trainer seat stood before the partner existed,
+-- so a bare-sheet view reads exactly as it always has.
+function M:_sideOf3(view)
+  local b, f = view.battler, view.fighter
+  if type(b) == "table" and (b.side == "a" or b.side == "b") then return b.side end
+  if type(f) == "table" and (f.side == "a" or f.side == "b") then return f.side end
+  if view.side == "a" or view.side == "b" then return view.side end
+  return M.sideOfSlot3(view.seat) or self.side3 or "b"
+end
+
 function M:_ctx3(view)
   local S = Sim3()
   if not S then return nil end
   local sim = type(view.sim) == "table" and view.sim or nil
-  local b = type(view.battler) == "table" and view.battler or pseudoBattler(view.mon, S, "b")
+  local mine = self:_sideOf3(view)
+  local theirs = M.otherSide3(mine)
+  local b = type(view.battler) == "table" and view.battler or pseudoBattler(view.mon, S, mine)
   if not b then return nil end
   local t = type(view.foeBattler) == "table" and view.foeBattler
-    or pseudoBattler(view.foe, S, "a")
+    or pseudoBattler(view.foe, S, theirs)
   local typeTable = (sim and sim.typeTable) or view.typeTable
   local weather = view.weather
   if weather == nil and sim and type(sim.weather) == "function" then
@@ -935,20 +1232,40 @@ function M:_ctx3(view)
   end
   local ctx = {
     S = S, sim = sim, b = b, t = t,
+    -- The choosing seat's side ("a" for an in-game partner) and the side it
+    -- fights; `mySide` / `foeSide` are the referee's side state for each.
+    sideId = mine, foeSideId = theirs,
+    fighter = type(view.fighter) == "table" and view.fighter or b.fighter,
     typeTable = typeTable, specialTypes = sim and sim.specialTypes or nil,
     weather = weather,
     party = type(view.party) == "table" and view.party or { view.mon },
     active = tonumber(view.active),
-    bag = type(view.bag) == "table" and view.bag or nil,
-    mySide = sideOf(b.side or "b"),
-    foeSide = sideOf((t and t.side) or "a"),
+    bag = self:_bagOf3(view, sim),
+    mySide = sideOf(b.side or mine),
+    foeSide = sideOf((t and t.side) or theirs),
     -- gBattleResults.battleTurnCounter: 0 on the fight's first turn.
     turnCount = math.max(0, (tonumber(sim and sim.turn) or tonumber(view.turn) or 1) - 1),
     -- The scripts this fight runs: the trainer's own, unless a double adds one.
     aiFlags = self.aiFlags,
+    -- BattleAI_SetupAIData's defaultScoreMoves (M.maskOf3): nil scores every
+    -- move from 100.
+    mask = M.maskOf3(view.moveMask),
   }
   if view.double then self:_double3(ctx, view) end
   return ctx
+end
+
+-- The bag whose counts say whether an item is still there: the pool's
+-- owner's, live off the referee (a pair's B spends A's bag through
+-- `bagFrom`, so B's seat's own bag is not where A's items are counted),
+-- else the view's -- the seat's own.
+function M:_bagOf3(view, sim)
+  local owner = self.pool3 and self.pool3.owner
+  if owner and sim and type(sim.byId) == "table" then
+    local fighter = sim.byId[owner]
+    if type(fighter) == "table" and type(fighter.bag) == "table" then return fighter.bag end
+  end
+  return type(view.bag) == "table" and view.bag or nil
 end
 
 local function hpOf(b) return int3(b and b.mon and b.mon.hp, 0) end
@@ -968,13 +1285,18 @@ local function asBattler(x, S, side)
   return pseudoBattler(x, S, side)
 end
 
--- The double's half of the reading (the C2 view, docs/plans/gen3-solo-doubles.md).
+-- The double's half of the reading (the C2 view, docs/plans/gen3-solo-doubles.md;
+-- either side, contract C4 of docs/plans/gen3-solo-remaining-fights.md).
 --
---   foes      the player's living battlers as { slot, b }, by field slot --
---             pret battler order puts the player's left (slot 0) before its
---             right (slot 1), and every loop below walks them that way
---   partner   the trainer's other active battler (nil when that position is
---             empty), partnerSlot its field slot
+--   foes      the other side's living battlers as { slot, b }, by field slot
+--             -- the player's for a trainer, side b's for an in-game
+--             partner; pret battler order puts a side's left position before
+--             its right, and every loop below walks them that way
+--   partner   the other active battler on the choosing seat's side (nil when
+--             that position is empty), whoever commands it -- the trainer's
+--             own second seat, a spotted pair's other trainer, the player
+--             beside Steven -- and partnerSlot its field slot (pret
+--             BATTLE_PARTNER is a position, not a trainer)
 --   claimed   party indices the sibling seat is already sending in
 --   attacker  gBattleMons[gLastHitBy[battler]]: whoever stands where the
 --             battler that last hit us stood -- the cart reads the position,
@@ -992,7 +1314,7 @@ function M:_double3(ctx, view)
   local foes = {}
   for _, entry in ipairs(type(view.foes) == "table" and view.foes or {}) do
     if type(entry) == "table" then
-      local fb = asBattler(entry.battler or entry.mon, S, "a")
+      local fb = asBattler(entry.battler or entry.mon, S, ctx.foeSideId)
       local slot = fb and (int3(entry.slot, nil) or int3(fb.slot, nil))
       if slot and hpOf(fb) > 0 then foes[#foes + 1] = { slot = slot, b = fb } end
     end
@@ -1001,10 +1323,11 @@ function M:_double3(ctx, view)
   ctx.double = true
   ctx.foes = foes
   ctx.seat = int3(view.seat, nil) or int3(ctx.b.slot, nil)
-  local partner = asBattler(view.partner, S, ctx.b.side or "b")
+  local partner = asBattler(view.partner, S, ctx.b.side or ctx.sideId)
   if partner and hpOf(partner) <= 0 then partner = nil end
   ctx.partner = partner
-  ctx.partnerSlot = (partner and int3(partner.slot, nil)) or (ctx.seat == 4 and 3 or 4)
+  ctx.partnerSlot = (partner and (int3(partner.slot, nil) or int3(view.partnerSlot, nil)))
+    or M.partnerSlot3(ctx.seat, ctx.sideId)
   ctx.claimed = type(view.claimed) == "table" and view.claimed or {}
   local hit = ctx.b.lastHitBy
   if type(hit) == "table" then
@@ -1062,20 +1385,62 @@ function M:_flankmate3(ctx, battler)
   return nil
 end
 
--- One of the player's two positions at random, flipped to the other when
--- that one is empty: BattleAI_SetupAIData's FireRed target
--- (`Random() & BIT_FLANK`, the engine's ai.lua:280-282) and the opponent
--- GetMostSuitableMonToSwitchInto types a double's send-out against
--- (battle_ai_switch_items.c:448).  The roll is drawn even when only one
--- position stands, as the cart draws it.
+-- One of the opposing side's two positions at random, flipped to the other
+-- when that one is empty: BattleAI_SetupAIData's double target
+-- (pokeemerald `(Random() & BIT_FLANK) + BATTLE_OPPOSITE(side)`; FireRed's
+-- `Random() & BIT_FLANK` names the player's side outright, which is the
+-- same thing for every seat FireRed's AI ever sits in -- side b; the
+-- engine's ai.lua:280-282).  The roll is drawn even when only one position
+-- stands, as the cart draws it.
 function M:_flankFoe3(ctx)
-  local want = self.rng(0, 1)
+  local want = M.slotBase3(ctx.foeSideId) + self.rng(0, 1)
   local other = nil
   for _, foe in ipairs(ctx.foes or {}) do
     if foe.slot == want then return foe end
     other = other or foe
   end
   return other
+end
+
+-- Whoever stands at a field slot, else whoever last stood there (the cart's
+-- gBattleMons keeps a fainted battler's types until the slot refills), else
+-- nil: the view's own battlers first, then the referee's.
+function M:_atSlot3(ctx, slot)
+  if slot == nil then return nil end
+  if ctx.seat == slot then return ctx.b end
+  if ctx.partner and ctx.partnerSlot == slot then return ctx.partner end
+  for _, foe in ipairs(ctx.foes or {}) do
+    if foe.slot == slot then return foe.b end
+  end
+  local sim = ctx.sim
+  if sim and type(sim.fighters) == "table" then
+    for _, fighter in ipairs(sim.fighters) do
+      if fighter.slot == slot then return fighter.b or fighter.lastB end
+    end
+  end
+  return nil
+end
+
+-- The battler GetMostSuitableMonToSwitchInto types a double's send-out
+-- against: `Random() & BIT_FLANK`, flipped once when that position is empty
+-- -- battler 0 or 2, the *player's* side whichever side the chooser is on
+-- (pokeemerald battle_ai_switch_items.c, "UB: It considers the opponent
+-- only player's side even though it can battle alongside player").  For a
+-- trainer on side b that is the M:_flankFoe3 roll exactly; for an in-game
+-- partner it is its own side -- the player beside it or its own position --
+-- and the quirk is kept.  "Empty" is the reading M:_flankFoe3 uses: nobody
+-- standing there.
+function M:_switchFoe3(ctx)
+  if ctx.sideId ~= "a" then return self:_flankFoe3(ctx) end
+  local base = M.slotBase3("a")
+  local want = base + self.rng(0, 1)
+  local at = self:_atSlot3(ctx, want)
+  if not (at and hpOf(at) > 0) then
+    want = M.partnerSlot3(want, "a")
+    at = self:_atSlot3(ctx, want)
+  end
+  if not at then return nil end
+  return { slot = want, b = at }
 end
 
 -- The move's type as it will be dealt: Hidden Power's own, Weather Ball's
@@ -1229,6 +1594,16 @@ end
 -- ------- the decision
 
 function M:_decideGen3(view)
+  -- One brain per trainer: another trainer's seat is not this brain's to
+  -- answer (its items, its flags, its side are another mind's).  A caller
+  -- that asks anyway has paired seats and brains wrongly; the decline hands
+  -- that seat to the referee's own picker for this turn.
+  if type(view.fighter) == "table" and not self:answers(view.fighter) then
+    warnOnce("owner3", "a solo trainer's AI was asked to choose for another trainer's "
+      .. "POKéMON, so the referee chose for that one instead; report this with the "
+      .. "battle you were in (two trainers, or a partner beside you)")
+    return nil
+  end
   local ctx = self:_ctx3(view)
   if not ctx then return nil end
   if view.mustReplace then
@@ -1245,11 +1620,16 @@ function M:_decideGen3(view)
   if #legal == 0 then return { action = "fight", move = 0 } end
 
   -- battle_main.c:3125 HandleAction: ShouldSwitch, then ShouldUseItem, then
-  -- the move.  Wild fights never reach this file (no trainer record).
-  local switch = self:_shouldSwitch3(ctx)
-  if switch then return switch end
-  local item = self:_shouldUseItem3(ctx)
-  if item then return item end
+  -- the move.  Wild fights never reach this file (no trainer record).  A
+  -- `moveOnly` view asks for the move alone -- BattleAI_ChooseMoveOrAction
+  -- called straight, as the Battle Palace's FIGHT does for the player's own
+  -- monster (ChooseMoveAndTargetInBattlePalace), with no AI_TrySwitchOrUseItem.
+  if not view.moveOnly then
+    local switch = self:_shouldSwitch3(ctx)
+    if switch then return switch end
+    local item = self:_shouldUseItem3(ctx)
+    if item then return item end
+  end
   if ctx.double then return self:_chooseDouble3(ctx, legal) end
   return self:_chooseMove3(ctx, legal)
 end
@@ -1501,7 +1881,12 @@ end
 -- the engine's Engine.mostSuitableMon): neither seat's active nor the
 -- sibling seat's pending send-in is a candidate (M:_benchable3), and the
 -- opponent both passes test against is one of the player's two positions at
--- random (M:_flankFoe3) -- the other foe is never consulted.
+-- random (M:_switchFoe3) -- the other foe is never consulted, and an
+-- in-game partner tests against its own side, as the cart's does.
+--
+-- The candidates are the choosing trainer's own party: a two-trainer side's
+-- halves (TWO_OPPONENTS' firstId / lastId, battler flank -> party 0..2 or
+-- 3..5) are the referee's separate entries, each seat's `party` its own.
 function M:_replacement3(ctx)
   local S, t = ctx.S, ctx.t
   local candidates = {}
@@ -1510,7 +1895,7 @@ function M:_replacement3(ctx)
   end
   if #candidates == 0 then return nil end
   if ctx.double then
-    local foe = self:_flankFoe3(ctx)
+    local foe = self:_switchFoe3(ctx)
     if foe then t = foe.b end
   end
   if not t then return candidates[1] end
@@ -1555,13 +1940,21 @@ end
 -- monsters as it has items left after it (the cart's rationing).  The kind
 -- of each item is read off the referee's own bag catalog, the same table the
 -- use is refereed by.
+--
+-- The rationing count is the whole side's (ShouldUseItem's `validMons` walks
+-- all six of gEnemyParty): a spotted pair counts both trainers' monsters.
+-- The slots are the pool's, so a pair's two brains spend one set
+-- (M.itemPool3), and the pool's live counts gate the use (M:_bagOf3).
 function M:_shouldUseItem3(ctx)
+  if self.noItems then return nil end
   local items = self.items3
   if type(items) ~= "table" or #items == 0 then return nil end
   local b, S = ctx.b, ctx.S
   local valid = 0
-  for _, mon in ipairs(ctx.party) do
-    if int3(mon.hp, 0) > 0 then valid = valid + 1 end
+  for _, party in ipairs(self:_sideParties3(ctx, b, ctx.party)) do
+    for _, mon in ipairs(party) do
+      if int3(mon.hp, 0) > 0 then valid = valid + 1 end
+    end
   end
   local hp, maxHp = hpOf(b), maxHpOf(b)
   local firstTurn = int3(b.isFirstTurn, 0) > 0
@@ -1728,9 +2121,19 @@ end
 
 function M:_chooseMove3(ctx, legal)
   local rng = self.rng
-  -- No scripts at all: the controller picks a usable slot at random.
+  -- No scripts at all: the controller picks a usable slot at random -- one
+  -- the mask scores 100 when there is a mask, every one tying at 0 when it
+  -- leaves none.
   if ctx.aiFlags == 0 then
-    return { action = "fight", move = legal[rng(1, #legal)] - 1 }
+    local pool = legal
+    if ctx.mask then
+      pool = {}
+      for _, i in ipairs(legal) do
+        if ctx.mask[i] then pool[#pool + 1] = i end
+      end
+      if #pool == 0 then pool = legal end
+    end
+    return { action = "fight", move = pool[rng(1, #pool)] - 1 }
   end
   local scores = self:_scoreMoves3(ctx, legal)
   self.lastScores3 = scores
@@ -1768,15 +2171,17 @@ function M:_chooseDouble3(ctx, legal)
   -- reading and leave the target to the referee.
   if #ctx.foes == 0 then return self:_chooseMove3(ctx, legal) end
   if self.family3 == "rse" and ctx.aiFlags ~= 0 then
-    -- pret battler ids 0..3 are the player's left, the AI side's left, the
-    -- player's right, the AI side's right: field slots 0, 3, 1, 4.
+    -- pret battler ids 0..3 are the player's left, the opponents' left, the
+    -- player's right, the opponents' right -- field slots 0, 3, 1, 4
+    -- (M.battlerId3), whichever side the chooser stands on: Steven's walk
+    -- is the player (his ally), then the two foes.
     local cands = {}
     for _, foe in ipairs(ctx.foes) do
-      cands[#cands + 1] = { slot = foe.slot, b = foe.b, order = foe.slot * 2 }
+      cands[#cands + 1] = { slot = foe.slot, b = foe.b, order = M.battlerId3(foe.slot) }
     end
     if ctx.partner then
       cands[#cands + 1] = { slot = ctx.partnerSlot, b = ctx.partner, ally = true,
-                            order = (ctx.partnerSlot - 3) * 2 + 1 }
+                            order = M.battlerId3(ctx.partnerSlot) }
     end
     table.sort(cands, function(x, y) return x.order < y.order end)
     local most, pool = nil, {}
@@ -1815,15 +2220,17 @@ local MOVE_CURSE = 174
 -- CURSE as a SELECTED move and defaults an unnamed one to the first living
 -- foe, so a second seat must name its opposite or curse the wrong battler.
 -- The referee's own Battle:oppositeFoe when the view carries it, else the
--- same rule over the view's foes: the player slot in the seat's position,
--- nearest first, ties to the lower slot.
+-- same rule over the view's foes: the opposing slot in the seat's position
+-- (BATTLE_OPPOSITE: battler ^ BIT_SIDE), nearest first, ties to the lower
+-- slot.
 function M:_oppositeFoe3(ctx)
   local sim, b = ctx.sim, ctx.b
   if sim and type(sim.oppositeFoe) == "function" and type(b.fighter) == "table" then
     local ok, foe = pcall(sim.oppositeFoe, sim, b)
     if ok and type(foe) == "table" and int3(foe.slot, nil) then return int3(foe.slot, nil) end
   end
-  local want = ctx.seat and (ctx.seat - 3) or 0
+  local base = M.slotBase3(ctx.foeSideId)
+  local want = ctx.seat and (base + ctx.seat - M.slotBase3(ctx.sideId)) or base
   local best, bestD = nil, nil
   for _, foe in ipairs(ctx.foes) do
     local d = math.abs(foe.slot - want)
@@ -1858,8 +2265,9 @@ function M:_scoreMoves3(ctx, legal)
   local moves = b.moves
 
   local scores, est = {}, {}
+  local mask = ctx.mask
   for _, i in ipairs(legal) do
-    scores[i] = 100
+    scores[i] = (mask == nil or mask[i]) and 100 or 0
     -- AI_THINKING_STRUCT->simulatedRNG[i] = 100 - (Random() % 16)
     est[i] = self:_damage3(ctx, b, t, moves[i], 100 - rng(0, 15))
   end
@@ -1981,16 +2389,46 @@ function M:_scoreMoves3(ctx, legal)
   return scores
 end
 
+-- The parties on `battler`'s side, each once: the referee's entries there
+-- (a shared team's two seats hold one `mons` table; a spotted pair, or the
+-- player beside Steven, two), else `party` alone -- a view with no referee
+-- in it, where the seat's own party is all there is to count.  pret reads
+-- one six-slot array per side (gPlayerParty / gEnemyParty), which is these
+-- parties end to end.
+function M:_sideParties3(ctx, battler, party)
+  local sim = ctx.sim
+  local fighter = battler and battler.fighter
+  if type(fighter) ~= "table" and battler == ctx.b then fighter = ctx.fighter end
+  if sim and type(sim.bySide) == "table" and type(fighter) == "table"
+      and type(sim.bySide[fighter.side]) == "table" then
+    local out, seen = {}, {}
+    for _, f in ipairs(sim.bySide[fighter.side]) do
+      local mons = f.mons
+      if type(mons) == "table" and not seen[mons] then
+        seen[mons] = true
+        out[#out + 1] = mons
+      end
+    end
+    if #out > 0 then return out end
+  end
+  return { type(party) == "table" and party or {} }
+end
+
 -- count_alive_pokemon (pret Cmd_count_alive_pokemon, the engine's
--- ai_cmds.lua): `battler`'s party, living, minus the mon it has out -- and in
--- a double minus its flankmate's too (gBattlerPartyIndexes of the partner
--- position), so a seat never counts its own partner as a reserve.
+-- ai_cmds.lua): `battler`'s side's party, living, minus the mon it has out
+-- -- and in a double minus its flankmate's too (gBattlerPartyIndexes of the
+-- partner position), so a seat never counts its partner as a reserve.  The
+-- cart counts the whole side (gEnemyParty / gPlayerParty, all six): a
+-- spotted pair's trainer counts the other trainer's bench as its own, and
+-- Steven's monsters are reserves of the player's side -- M:_sideParties3.
 function M:_aliveBehind3(ctx, battler, party)
   local mate = ctx.double and self:_flankmate3(ctx, battler) or nil
   local n = 0
-  for _, mon in ipairs(party) do
-    if mon ~= battler.mon and not (mate and mon == mate.mon) and int3(mon.hp, 0) > 0 then
-      n = n + 1
+  for _, list in ipairs(self:_sideParties3(ctx, battler, party)) do
+    for _, mon in ipairs(list) do
+      if mon ~= battler.mon and not (mate and mon == mate.mon) and int3(mon.hp, 0) > 0 then
+        n = n + 1
+      end
     end
   end
   return n
