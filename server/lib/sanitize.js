@@ -1013,6 +1013,55 @@ const BATTLE_ACTIONS = new Map([
 ]);
 
 /*
+ * Gen 3's own action (contract C6 of docs/plans/gen3-solo-remaining-fights.md),
+ * in a Map of its own for BATTLE_EVENT_TYPES3's reason: the five above are every
+ * generation's, and a Red / Gold reader -- or a caller naming no generation --
+ * must go on refusing an action its cart has no menu for. cleanBattleChoice
+ * reads it for a generation 3 reader only. Wire.lua spells this
+ * M.BATTLE_ACTIONS3.
+ *
+ *   safari  one Safari Zone command, `throw` saying which (SAFARI_THROWS3). The
+ *           cart swaps the whole action menu for the safari controller's (pret
+ *           src/battle_controller_safari.c HandleInputChooseAction:
+ *           B_ACTION_SAFARI_BALL / _BAIT or _POKEBLOCK / _GO_NEAR / _RUN), and
+ *           none of the four is a FIGHT, an ITEM or a SWITCH -- so one action
+ *           with a required `throw` rather than four more rows. The menu's RUN
+ *           is the ordinary 'run' above (HandleAction_SafariZoneRun is the
+ *           escape that always works, which is a referee's rule, not a word).
+ *
+ * No PROTOCOL bump: no hub seats a Safari fight -- only solo's local referee
+ * does -- so a hub never needs to hear one. A Gen 3 hub that is sent one anyway
+ * reads it here and its referee refuses it (lib/battle3 Turn ACTIONS, every
+ * mode a hub seats), the way it refuses any action its fight has no arm for.
+ */
+const BATTLE_ACTIONS3 = new Map([
+  ['safari', 'throw'],
+]);
+
+// The five things a Safari turn can throw, each one pret action handler
+// (src/battle_main.c sTurnActionsFuncsTable):
+//
+//   ball   HandleAction_SafariZoneBallThrow      (both carts)
+//   bait   HandleAction_ThrowBait                (FR / LG: B_ACTION_SAFARI_BAIT)
+//   rock   HandleAction_ThrowRock                (FR / LG: B_ACTION_SAFARI_GO_NEAR)
+//   near   HandleAction_GoNear                   (Emerald: B_ACTION_SAFARI_GO_NEAR)
+//   block  HandleAction_ThrowPokeblock           (Emerald: B_ACTION_SAFARI_POKEBLOCK)
+//
+// One closed set for both carts: which family has which throw is the referee's
+// to refuse (it knows the cart; the wire does not), exactly as a fight's move
+// index is checked against the moves the seat holds there and not here.
+// B_ACTION_SAFARI_WATCH_CAREFULLY is the wild monster's, never the player's, so
+// it is no word on a choice. Wire.lua spells this M.SAFARI_THROWS3.
+const SAFARI_THROWS3 = new Set(['ball', 'bait', 'rock', 'near', 'block']);
+
+// The most blocks Emerald's POKéBLOCK case holds (pokeemerald
+// include/constants/global.h POKEBLOCKS_COUNT). A 'block' throw's `block` is one
+// of the case's slots, 1-based as a Lua list is -- the cart's own
+// gSpecialVar_ItemId plus one (src/battle_controller_safari.c
+// CompleteWhenChosePokeblock hands the case's index to the engine).
+const POKEBLOCK3_MAX = 40;
+
+/*
  * Everything a mediated fight can tell a client to draw. Wire.lua spells this
  * M.BATTLE_EVENTS.
  *
@@ -1055,14 +1104,20 @@ const BATTLE_EVENT_TYPES = new Set([
   'chose', 'unchose', 'moves', 'exp', 'team',
 ]);
 
-// Gen 3's seven kinds (docs/plans/gen3-battle-sheet.md §7.2): an ability acting,
+// Gen 3's eight kinds (docs/plans/gen3-battle-sheet.md §7.2): an ability acting,
 // the weather, a held item (and what is left held), a picture change, the
 // substitute doll, a ball's shakes, a disobedient mon (text = the §7.2.1
-// token). Their own set for the reason Wire.lua gives at M.BATTLE_EVENTS3 (the
-// Gen 1 sim mirrors the set above exactly); a kind in either set is an event
-// cleanBattleEvent reads. Gold's `held` is BATTLE_EVENT_TYPES2 below: the same
-// word, a different event.
-const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey']);
+// token), and -- contract C6 of docs/plans/gen3-solo-remaining-fights.md -- one
+// of Oak's teaching moments coming true in his lab (`lesson`, text = the
+// lesson's id: `damage` when the foe's HP bar first moved, pokefirered
+// src/battle_controller_opponent.c CompleteOnHealthbarDone, state-2 flag 1;
+// `stat` when a foe's stat first fell, src/battle_controller_oak_old_man.c on
+// STRINGID_DEFENDERSSTATFELL, FIRST_BATTLE_MSG_FLAG_STAT_CHG). No PROTOCOL bump for `lesson`: only solo's local referee
+// seats a first battle, so no hub ever emits one. Their own set for the reason
+// Wire.lua gives at M.BATTLE_EVENTS3 (the Gen 1 sim mirrors the set above
+// exactly); a kind in either set is an event cleanBattleEvent reads. Gold's
+// `held` is BATTLE_EVENT_TYPES2 below: the same word, a different event.
+const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey', 'lesson']);
 
 // Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
 // read by a generation 2 reader only. Wire.lua spells this M.BATTLE_EVENTS2.
@@ -2609,15 +2664,18 @@ function cleanBattleReady(raw) {
  * and a caller that names none -- reads a choice exactly as it did before Gen 3
  * existed, ignoring them whatever they hold. Likewise only 1 reads Gen 1's
  * `mimic` (wave 4), ignored everywhere else, and since wave 5 a Gen 2 hub reads
- * `pass` too (Gold's BATON PASS). Twin of Wire.battleChoice.
+ * `pass` too (Gold's BATON PASS). Only 3 reads an action from BATTLE_ACTIONS3
+ * ('safari', contract C6): any other reader refuses it whole, as it refuses
+ * every action it has no row for. Twin of Wire.battleChoice.
  */
 function cleanBattleChoice(raw, generation) {
   if (raw === null || typeof raw !== 'object') return null;
-  const needs = BATTLE_ACTIONS.get(raw.action);
+  const gen3 = luaInt(generation, 3, 3) !== null;
+  const needs = BATTLE_ACTIONS.get(raw.action)
+    || (gen3 ? BATTLE_ACTIONS3.get(raw.action) : undefined);
   if (!needs) return null;
   const battle = cleanId(raw.battle);
   if (!battle) return null;
-  const gen3 = luaInt(generation, 3, 3) !== null;
   const readInt = gen3 ? luaInt : cleanInt;
 
   const choice = { battle, action: raw.action };
@@ -2663,6 +2721,22 @@ function cleanBattleChoice(raw, generation) {
       if (typeof raw.dexCaught !== 'boolean') return null;
       choice.dexCaught = raw.dexCaught;
     }
+    // A Safari command (contract C6): `throw` is required and one of the closed
+    // five -- an unknown one refuses the choice, because the nearest known throw
+    // would be a different turn (a BALL spent for a BAIT). A 'block' throw may
+    // name its case slot, 1..POKEBLOCK3_MAX, read as Wire.int reads it
+    // (luaInt); present and out of range refuses, `pass`'s posture. `block` on
+    // any other throw is a stray field and ignored, as a Gen 1 `pass` is.
+    // Nothing of either is read on any other action. Twin of Wire.battleChoice.
+    if (raw.action === 'safari') {
+      if (!SAFARI_THROWS3.has(raw.throw)) return null;
+      choice.throw = raw.throw;
+      if (raw.throw === 'block' && raw.block !== undefined && raw.block !== null) {
+        const block = luaInt(raw.block, 1, POKEBLOCK3_MAX);
+        if (block === null) return null;
+        choice.block = block;
+      }
+    }
   }
   // Gen 1: MIMIC's pick, the 0-based index into the TARGET's move list, asked
   // up front because pokered MimicEffect opens the foe's move menu mid-move
@@ -2705,7 +2779,7 @@ function cleanBattleChoice(raw, generation) {
  * Gold `msg` is the one exception (BATTLE_LINE_MAX, below).
  *
  * `generation` (optional) is the reader's own. 1 or 2 reads an event as it did
- * before Gen 3 had a stream: the older vocabulary only (none of Gen 3's seven
+ * before Gen 3 had a stream: the older vocabulary only (none of Gen 3's eight
  * kinds), none of its six fields (target, spread, stat, stage, delta, holding),
  * and `moves` rows in the older dialect whatever `num` they carry. The one
  * addition since is Gold's own `held` (BATTLE_EVENT_TYPES2, contract K3), which
@@ -2739,10 +2813,13 @@ function cleanBattleEvent(raw, generation) {
     // carts' battle glyphs (wave 6) and, since K17 / K18, its `^a` / `^b` name
     // marks and `\n` breaks, cut at BATTLE_LINE_MAX (cleanBattleLine); every
     // other kind -- a `run`'s or `send`'s text is a name, which never reads a
-    // mark -- and a Gen 3 (or unnamed) reader's `msg`, as before. Twin of
-    // Wire.battleEvent.
+    // mark -- and a Gen 3 (or unnamed) reader's `msg`, as before. A Gen 3
+    // `lesson`'s text is the lesson's id (contract C6), an id like an `item`'s:
+    // never prose, so a mangled one is dropped rather than cleaned into a word
+    // nobody sent. Twin of Wire.battleEvent.
     let text;
-    if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball' || held2) text = cleanId(raw.text);
+    if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball' || raw.t === 'lesson'
+        || held2) text = cleanId(raw.text);
     else if (raw.t === 'obey') text = OBEY_TOKENS3.has(raw.text) ? raw.text : null;
     else if (older && raw.t === 'msg') text = cleanBattleLine(raw.text);
     else text = cleanText(raw.text, MESSAGE_MAX);
@@ -3181,6 +3258,11 @@ module.exports = {
   // The Gen 3 dialect (PROTOCOL 30): the cleaners the hub and suites reach
   // directly, and the bounds, named as Wire.lua names them.
   BATTLE_EVENT_TYPES3,
+  // Gen 3 solo's Safari command (contract C6 of
+  // docs/plans/gen3-solo-remaining-fights.md), named as Wire.lua names it.
+  BATTLE_ACTIONS3,
+  SAFARI_THROWS3,
+  POKEBLOCK3_MAX,
   // Gold's held-item dialect (contracts K2 / K3 of
   // docs/plans/gen12-referee-fidelity.md), named as Wire.lua names it.
   BATTLE_EVENT_TYPES2,

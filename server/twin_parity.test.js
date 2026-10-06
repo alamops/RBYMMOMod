@@ -2174,3 +2174,249 @@ test('a Gen 1 / Gen 2 sheet\'s moves and types close a JSON null up, as the Lua 
   assert.ok(/const moveList = luaList\(raw\.moves\);/.test(src) && /const typeList = luaList\(raw\.types\);/.test(src),
     'cleanBattleMon reads both lists through luaList');
 });
+
+// ---------------------------------------------------------------------------
+// Gen 3 solo (contract C6 of docs/plans/gen3-solo-remaining-fights.md): Oak's
+// `lesson` event and the Safari Zone's `safari` choice. Gen 3 words alone, on
+// Wire and sanitize alike; no PROTOCOL bump, because no hub emits a lesson or
+// seats a Safari fight -- only solo's local referee does.
+// ---------------------------------------------------------------------------
+
+test('C6: the lesson kind and the safari action are one Gen 3 vocabulary on Wire and sanitize', () => {
+  const wire = read('src/Wire.lua');
+  // The event: one Gen 3 kind, in neither older table nor either older sim.
+  assert.ok(luaSet(wire, 'BATTLE_EVENTS3').includes('lesson'), 'Wire.BATTLE_EVENTS3 names lesson');
+  assert.ok(sanitize.BATTLE_EVENT_TYPES3.has('lesson'), 'sanitize BATTLE_EVENT_TYPES3 names lesson');
+  assert.ok(!luaSet(wire, 'BATTLE_EVENTS').includes('lesson') && !BATTLE_EVENT_TYPES.has('lesson'),
+    'lesson is not in the every-generation vocabulary');
+  assert.ok(!luaSet(wire, 'BATTLE_EVENTS2').includes('lesson'), '...nor in Gold\'s');
+  for (const [lua, js] of [['src/BattleSim/events.lua', './lib/battle/events.js'],
+    ['src/BattleSim2/events.lua', './lib/battle2/events.js']]) {
+    assert.ok(!luaSet(read(lua), 'KINDS').includes('lesson'), `${lua} does not speak lesson`);
+    assert.ok(!Object.keys(require(js).KINDS).includes('lesson'), `${js} does not speak lesson`);
+  }
+  assert.ok(/raw\.t == "lesson"/.test(wire), 'Wire.battleEvent reads a lesson\'s text as an id');
+
+  // The choice: the five shared actions unchanged, safari in a Gen 3 table.
+  const shared = { ...luaTypedKeys(wire, /M\.BATTLE_ACTIONS\s*=\s*\{([\s\S]*?)\}/) };
+  for (const key of luaSet(wire, 'BATTLE_ACTIONS')) shared[key] = true;
+  assert.deepStrictEqual(shared, Object.fromEntries(sanitize.BATTLE_ACTIONS),
+    'Wire.BATTLE_ACTIONS and sanitize BATTLE_ACTIONS are one table');
+  assert.deepStrictEqual(Object.keys(shared).sort(), ['cancel', 'fight', 'item', 'run', 'switch'],
+    'the every-generation actions stay the five they were');
+  assert.deepStrictEqual(luaTypedKeys(wire, /M\.BATTLE_ACTIONS3\s*=\s*\{([\s\S]*?)\}/),
+    Object.fromEntries(sanitize.BATTLE_ACTIONS3), 'Wire.BATTLE_ACTIONS3 and sanitize BATTLE_ACTIONS3 are one table');
+  assert.deepStrictEqual(Object.fromEntries(sanitize.BATTLE_ACTIONS3), { safari: 'throw' },
+    'Gen 3 adds exactly safari, which needs its throw');
+  assert.deepStrictEqual(luaSet(wire, 'SAFARI_THROWS3'), [...sanitize.SAFARI_THROWS3].sort(),
+    'the throws are one closed set on both sides');
+  assert.deepStrictEqual([...sanitize.SAFARI_THROWS3].sort(), ['bait', 'ball', 'block', 'near', 'rock'],
+    'pret B_ACTION_SAFARI_BALL / _BAIT / _GO_NEAR (FR rock, EM near) / _POKEBLOCK');
+  assert.strictEqual(luaNumber(wire, 'POKEBLOCK3_MAX', 'Wire.lua'), sanitize.POKEBLOCK3_MAX,
+    'Wire.POKEBLOCK3_MAX and sanitize POKEBLOCK3_MAX must match');
+  assert.strictEqual(sanitize.POKEBLOCK3_MAX, 40, 'pokeemerald POKEBLOCKS_COUNT');
+
+  // The JS reading, case by case (the differential below holds Lua to it).
+  const choice = (extra, gen) => sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'safari', throw: 'ball', ...extra,
+  }, gen);
+  for (const t of sanitize.SAFARI_THROWS3) {
+    assert.deepStrictEqual(choice({ throw: t }, 3), { battle: 'b1', action: 'safari', throw: t },
+      `a Gen 3 reader takes the ${t} throw`);
+  }
+  for (const gen of [1, 2, undefined]) {
+    assert.strictEqual(choice({}, gen), null, `a reader for generation ${gen} refuses a safari choice whole`);
+  }
+  for (const bad of ['BALL', 'watch', 'run', '', 5, true, ['ball'], null]) {
+    assert.strictEqual(choice({ throw: bad }, 3), null, `throw ${JSON.stringify(bad)} refuses the choice`);
+  }
+  assert.strictEqual(sanitize.cleanBattleChoice({ battle: 'b1', action: 'safari' }, 3), null,
+    'a safari choice with no throw is refused');
+  assert.strictEqual(choice({ throw: 'block', block: 1 }, 3).block, 1, 'the case\'s first slot');
+  assert.strictEqual(choice({ throw: 'block', block: 40 }, 3).block, 40, '...and its last');
+  assert.strictEqual(choice({ throw: 'block', block: '12' }, 3).block, 12, 'a numeric string, as Wire.int reads it');
+  assert.ok(choice({ throw: 'block' }, 3) && choice({ throw: 'block' }, 3).block === undefined,
+    'a block throw with no slot is a choice; the referee decides');
+  assert.ok(choice({ throw: 'block', block: null }, 3).block === undefined, 'a JSON null slot is absent');
+  for (const bad of [0, 41, -1, 'x', true, [1]]) {
+    assert.strictEqual(choice({ throw: 'block', block: bad }, 3), null,
+      `block ${JSON.stringify(bad)} refuses the choice`);
+  }
+  const stray = choice({ throw: 'rock', block: 99 }, 3);
+  assert.ok(stray && stray.block === undefined, 'block on any other throw is a stray field, ignored');
+  const run = sanitize.cleanBattleChoice({
+    battle: 'b1', action: 'run', throw: 'ball', block: 3,
+  }, 3);
+  assert.deepStrictEqual(run, { battle: 'b1', action: 'run' }, 'the menu\'s RUN is the ordinary run');
+
+  const lesson = (extra, gen) => sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 7, t: 'lesson', side: 'a', slot: 0, text: 'damage', ...extra,
+  }, gen);
+  for (const gen of [3, undefined]) {
+    assert.deepStrictEqual(lesson({}, gen), {
+      battle: 'b1', seq: 7, t: 'lesson', side: 'a', slot: 0, text: 'damage',
+    }, `a lesson reads for generation ${gen}`);
+  }
+  for (const gen of [1, 2]) assert.strictEqual(lesson({}, gen), null, `a Gen ${gen} reader refuses a lesson whole`);
+  for (const bad of ["Oak's page", 'dam age', 'd'.repeat(41), 7, ['damage'], '']) {
+    const got = lesson({ text: bad }, 3);
+    assert.ok(got && got.text === undefined, `lesson text ${JSON.stringify(bad)} is dropped, the event kept`);
+  }
+  assert.strictEqual(lesson({ text: 'DAMAGE_1' }, 3).text, 'DAMAGE_1', 'read as an id: _ and case kept');
+});
+
+test('C6: Wire and sanitize read a safari choice and a lesson event alike, case by case', (t) => {
+  // A seeded spread of choices and events, each read by Wire.battleChoice /
+  // Wire.battleEvent under luajit and cleanBattleChoice / cleanBattleEvent
+  // here, compared field by field. Strings are ASCII (the prose readers' byte
+  // reading has its own differential above); a JSON null reaches Lua as an
+  // absent key, as the engine's decoder delivers it. Skipped (not failed)
+  // without luajit, as the parity suites are.
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('luajit', ['-v'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    t.skip('luajit not on PATH');
+    return;
+  }
+  let seed = 20261006;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = (list) => list[Math.floor(rand() * list.length)];
+  const maybe = (p, list) => (rand() < p ? pick(list) : undefined);
+  const GENS = [1, 2, 3, 3, 3, undefined, '3', 3.5, 0, 4, 'x'];
+  const ACTIONS = ['run', 'fight', 'item', 'switch', 'cancel', 'SAFARI', 'safari ', 'constructor', 'throw', null, 5];
+  const THROWS = ['ball', 'bait', 'rock', 'near', 'block', 'block', 'block', 'BALL', 'watch', 'run', '',
+    null, undefined, 5, true, ['ball'], 'block\u0000', 'near '];
+  const BLOCKS = [undefined, undefined, null, 0, 1, 2, 39, 40, 41, -1, 7.9, 40.5, 0.5, '12', ' 12 ', '0x1f',
+    '1e1', 'x', '', true, false, [1], 1e21, -0.5, '40.999'];
+  const INTS = [0, 1, 3, 4, 6, -1, '2', 2.5, 'x', true, null];
+  const choices = [];
+  for (let i = 0; i < 3000; i += 1) {
+    const raw = {
+      battle: rand() < 0.8 ? 'b1' : pick(['b-2_x', 'bad id!', 5, '']),
+      action: rand() < 0.6 ? 'safari' : pick(ACTIONS),
+      throw: rand() < 0.3 ? 'block' : pick(THROWS),
+      block: pick(BLOCKS),
+      move: maybe(0.15, INTS),
+      slot: maybe(0.15, INTS),
+      target: maybe(0.1, INTS),
+      item: maybe(0.1, ['13', 'POKE_BALL', 'bad item', 4]),
+      pass: maybe(0.1, INTS),
+      dexCaught: maybe(0.1, [true, false, 'yes', 1]),
+      mimic: maybe(0.05, INTS),
+    };
+    for (const key of Object.keys(raw)) if (raw[key] === undefined) delete raw[key];
+    choices.push({ raw, gen: pick(GENS) });
+  }
+  const TEXTS = ['damage', 'stat', 'DAMAGE_1', "Oak's page", 'dam age', 'x'.repeat(41), 'd'.repeat(40), '',
+    7, null, undefined, ['damage'], 'loafing', 'hits_itself', '13', 'POKE_BALL', 'ORAN BERRY'];
+  const events = [];
+  for (let i = 0; i < 3000; i += 1) {
+    const raw = {
+      battle: pick(['b1', 'b1', 'b1', 'bad id!']),
+      seq: pick([1, 7, 0, 12, -1, '3']),
+      t: rand() < 0.6 ? 'lesson' : pick(['ball', 'item', 'anim', 'msg', 'obey', 'held', 'run', 'LESSON',
+        'lessons', 'constructor', null]),
+      text: pick(TEXTS),
+      side: maybe(0.8, ['a', 'b', 'c']),
+      slot: maybe(0.7, [0, 1, 3, 9, '2', -1]),
+      amount: maybe(0.3, [0, 1, 2, 139, -3]),
+    };
+    for (const key of Object.keys(raw)) if (raw[key] === undefined) delete raw[key];
+    events.push({ raw, gen: pick([1, 2, 3, 3, undefined, '3']) });
+  }
+  // A JS value as a Lua constructor: bytes escaped, a null an absent key.
+  const lit = (v) => {
+    if (v === undefined || v === null) return 'nil';
+    if (typeof v === 'boolean') return String(v);
+    if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '(0/0)';
+    if (typeof v === 'string') return `"${[...Buffer.from(v, 'utf8')].map((b) => `\\${b}`).join('')}"`;
+    if (Array.isArray(v)) return `{${v.map(lit).join(', ')}}`;
+    return `{${Object.entries(v).filter(([, x]) => x !== null && x !== undefined)
+      .map(([k, x]) => `[${lit(k)}] = ${lit(x)}`).join(', ')}}`;
+  };
+  const hex = (s) => Buffer.from(s, 'utf8').toString('hex');
+  // One canonical spelling of a reader's answer: keys sorted, every value tagged.
+  const canon = (v) => {
+    if (v === null || v === undefined) return 'nil';
+    if (typeof v === 'boolean') return String(v);
+    if (typeof v === 'number') return `n${v}`;
+    if (typeof v === 'string') return `s${hex(v)}`;
+    return `{${Object.keys(v).sort().map((k) => `${k}=${canon(v[k])}`).join(',')}}`;
+  };
+  const script = [
+    `package.path = "${ROOT}/?.lua;" .. package.path`,
+    'local cache = {}',
+    'local function need(name)',
+    '  if cache[name] ~= nil then return cache[name] end',
+    `  local h = assert(io.open("${ROOT}/src/" .. name .. ".lua", "rb"))`,
+    '  local body = h:read("*a"); h:close()',
+    '  cache[name] = assert((loadstring or load)(body, "@" .. name))(need)',
+    '  return cache[name]',
+    'end',
+    'local Wire = need("Wire")',
+    "local function hex(s) return (s:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end",
+    'local function canon(v)',
+    '  local t = type(v)',
+    '  if t == "nil" then return "nil" end',
+    '  if t == "boolean" then return tostring(v) end',
+    '  if t == "number" then return "n" .. string.format("%d", v) end',
+    '  if t == "string" then return "s" .. hex(v) end',
+    '  local keys = {}',
+    '  for k in pairs(v) do keys[#keys + 1] = k end',
+    '  table.sort(keys)',
+    '  local parts = {}',
+    '  for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. canon(v[k]) end',
+    '  return "{" .. table.concat(parts, ",") .. "}"',
+    'end',
+    'for line in io.lines() do',
+    '  local kind, body = line:match("^(%a) (.*)$")',
+    '  local case = assert((loadstring or load)("return " .. body))()',
+    '  local out',
+    '  if kind == "c" then out = Wire.battleChoice(case.raw, case.gen)',
+    '  else out = Wire.battleEvent(case.raw, case.gen) end',
+    "  io.write(canon(out), '\\n')",
+    'end',
+  ].join('\n');
+  const lines = [
+    ...choices.map((c) => `c {raw = ${lit(c.raw)}, gen = ${lit(c.gen)}}`),
+    ...events.map((e) => `e {raw = ${lit(e.raw)}, gen = ${lit(e.gen)}}`),
+  ];
+  const lua = spawnSync('luajit', ['-e', script], {
+    input: `${lines.join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
+  assert.strictEqual(lua.status, 0, `luajit failed: ${lua.stderr}`);
+  const answers = lua.stdout.trim().split('\n');
+  assert.strictEqual(answers.length, lines.length, 'one answer per case');
+  const differ = [];
+  const seen = { throws: new Set(), blocks: 0, refusedSafari: 0, lessons: 0, lessonTexts: 0, refusedLesson: 0 };
+  choices.forEach((c, i) => {
+    const js = sanitize.cleanBattleChoice(c.raw, c.gen);
+    if (js && js.action === 'safari') seen.throws.add(js.throw);
+    if (js && js.block !== undefined) seen.blocks += 1;
+    if (!js && c.raw.action === 'safari') seen.refusedSafari += 1;
+    if (canon(js) !== answers[i]) differ.push(`choice ${lit(c.raw)} gen ${c.gen}: lua=${answers[i]} js=${canon(js)}`);
+  });
+  events.forEach((e, j) => {
+    const i = choices.length + j;
+    const js = sanitize.cleanBattleEvent(e.raw, e.gen);
+    if (js && js.t === 'lesson') seen.lessons += 1;
+    if (js && js.t === 'lesson' && js.text !== undefined) seen.lessonTexts += 1;
+    if (!js && e.raw.t === 'lesson') seen.refusedLesson += 1;
+    if (canon(js) !== answers[i]) differ.push(`event ${lit(e.raw)} gen ${e.gen}: lua=${answers[i]} js=${canon(js)}`);
+  });
+  assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${lines.length} cases read differently`);
+  assert.deepStrictEqual([...seen.throws].sort(), ['bait', 'ball', 'block', 'near', 'rock'],
+    'the run took every throw');
+  assert.ok(seen.blocks > 50 && seen.refusedSafari > 500,
+    `the run reached kept block slots (${seen.blocks}) and refused safari choices (${seen.refusedSafari})`);
+  assert.ok(seen.lessons > 300 && seen.lessonTexts > 100 && seen.refusedLesson > 300,
+    `the run reached lessons (${seen.lessons}), their texts (${seen.lessonTexts}) and refusals (${seen.refusedLesson})`);
+});

@@ -1069,6 +1069,98 @@ end)()
   end
 end)()
 
+-- ------- Wire: Gen 3 solo's `lesson` event and `safari` choice (contract C6 of
+-- docs/plans/gen3-solo-remaining-fights.md)
+--
+-- Oak's lab says when one of his lessons came true (`lesson`, text = the
+-- lesson's id), and a Safari Zone turn is one `safari` action with a required
+-- `throw` (pret B_ACTION_SAFARI_*), a `block` throw naming its POKéBLOCK case
+-- slot.  Both are Gen 3 words: a Red / Gold reader refuses them whole, and so
+-- does a choice reader naming no generation (the five shared actions are
+-- every generation's; BATTLE_ACTIONS3 is read for 3 alone).  No hub emits or
+-- seats either, so neither moves PROTOCOL.
+;(function()
+  -- The event: one more Gen 3 kind, its text an id.
+  check(Wire.BATTLE_EVENTS3.lesson == true, "C6: lesson is a Gen 3 event kind")
+  check(Wire.BATTLE_EVENTS.lesson == nil and Wire.BATTLE_EVENTS2.lesson == nil,
+        "C6: ...and in neither older vocabulary")
+  local function lesson(extra, gen)
+    local raw = { battle = "b1", seq = 7, t = "lesson", side = "a", slot = 0, text = "damage" }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = lesson(nil, gen or nil)
+    check(got ~= nil, "C6: a lesson reads for generation " .. tostring(gen or nil))
+    eq(got and got.text, "damage", "C6: ...its text the lesson's id")
+    eq(got and got.side, "a", "C6: ...its side kept")
+    eq(got and got.slot, 0, "C6: ...and its slot")
+    eq(lesson({ text = "stat" }, gen or nil).text, "stat", "C6: the stat lesson reads too")
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(lesson(nil, gen), nil, "C6: a Gen " .. gen .. " reader refuses a lesson whole")
+  end
+  for i, bad in ipairs({ "Oak's page", "dam age", string.rep("d", 41), 7, { "damage" }, "" }) do
+    local got = lesson({ text = bad }, 3)
+    check(got ~= nil and got.text == nil,
+          "C6: a lesson's text that is no id is dropped, the event kept (" .. i .. ")")
+  end
+  local plain = lesson({ text = "DAMAGE_1" }, 3)
+  eq(plain and plain.text, "DAMAGE_1", "C6: read as an item's id is: _ and case kept, never prose-cleaned")
+
+  -- The choice: one Gen 3 action, `throw` required and closed.
+  eq(Wire.BATTLE_ACTIONS3.safari, "throw", "C6: safari needs its throw")
+  eq(Wire.BATTLE_ACTIONS.safari, nil, "C6: ...and is no shared action")
+  eq(Wire.POKEBLOCK3_MAX, 40, "C6: the case holds pokeemerald POKEBLOCKS_COUNT blocks")
+  local throws = {}
+  for k in pairs(Wire.SAFARI_THROWS3) do throws[#throws + 1] = k end
+  table.sort(throws)
+  eq(table.concat(throws, " "), "bait ball block near rock", "C6: the five throws, both carts'")
+  local function safari(extra, gen)
+    local raw = { battle = "b1", action = "safari", throw = "ball" }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleChoice(raw, gen)
+  end
+  for _, throw in ipairs(throws) do
+    local got = safari({ throw = throw }, 3)
+    check(got ~= nil and got.action == "safari" and got.throw == throw,
+          "C6: a Gen 3 reader takes the " .. throw .. " throw")
+  end
+  for _, gen in ipairs({ 1, 2, false }) do
+    eq(safari(nil, gen or nil), nil,
+       "C6: a reader for generation " .. tostring(gen or nil) .. " refuses a safari choice whole")
+  end
+  eq(safari(nil, "3") and safari(nil, "3").throw, "ball", "C6: the generation is read as Wire.int reads it")
+  for i, bad in ipairs({ "BALL", "watch", "run", "", 5, true, { "ball" } }) do
+    eq(safari({ throw = bad }, 3), nil, "C6: an unknown throw refuses the choice (" .. i .. ")")
+  end
+  eq(Wire.battleChoice({ battle = "b1", action = "safari" }, 3), nil, "C6: ...and so does none")
+  -- `block`: optional on a block throw, 1..POKEBLOCK3_MAX, refused out of range.
+  eq(safari({ throw = "block", block = 1 }, 3).block, 1, "C6: the case's first slot")
+  eq(safari({ throw = "block", block = 40 }, 3).block, 40, "C6: ...and its last")
+  eq(safari({ throw = "block", block = "12" }, 3).block, 12, "C6: a numeric string reads as Wire.int reads it")
+  eq(safari({ throw = "block", block = 7.9 }, 3).block, 7, "C6: ...floored as Wire.int floors")
+  local bare = safari({ throw = "block" }, 3)
+  check(bare ~= nil and bare.block == nil, "C6: a block throw with no slot is a choice; the referee decides")
+  for i, bad in ipairs({ 0, 41, -1, "x", true, { 1 } }) do
+    eq(safari({ throw = "block", block = bad }, 3), nil,
+       "C6: a block slot out of range or unreadable refuses the choice (" .. i .. ")")
+  end
+  local stray = safari({ throw = "rock", block = 99 }, 3)
+  check(stray ~= nil and stray.block == nil, "C6: block on any other throw is a stray field, ignored")
+  -- Nothing of the safari dialect leaks onto the shared actions.
+  local run = Wire.battleChoice({ battle = "b1", action = "run", throw = "ball", block = 3 }, 3)
+  check(run ~= nil and run.throw == nil and run.block == nil,
+        "C6: the menu's RUN is the ordinary run; throw and block are not read on it")
+  local fight = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, throw = "rock" }, 3)
+  check(fight ~= nil and fight.throw == nil, "C6: ...nor on a fight")
+  -- The shared actions read exactly as before on every reader.
+  for _, gen in ipairs({ 1, 2, 3, false }) do
+    check(Wire.battleChoice({ battle = "b1", action = "run" }, gen or nil) ~= nil,
+          "C6: run still reads for generation " .. tostring(gen or nil))
+  end
+end)()
+
 -- ------- Wire.partyEvent: what your partner just did, off the wire
 --
 -- The fighter never sends their own name and the hub stamps it from the

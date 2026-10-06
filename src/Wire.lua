@@ -3164,6 +3164,52 @@ M.BATTLE_ACTIONS = {
   cancel = true,
 }
 
+-- Gen 3's own action (contract C6 of docs/plans/gen3-solo-remaining-fights.md),
+-- in a table of its own for M.BATTLE_EVENTS3's reason: the five above are every
+-- generation's, and a Red / Gold reader -- or a caller naming no generation --
+-- must go on refusing an action its cart has no menu for.  M.battleChoice reads
+-- it for a generation 3 reader only.
+--
+--   safari  -- one Safari Zone command, `throw` saying which (M.SAFARI_THROWS3).
+--              The cart swaps the whole action menu for the safari controller's
+--              (pret src/battle_controller_safari.c HandleInputChooseAction:
+--              B_ACTION_SAFARI_BALL / _BAIT or _POKEBLOCK / _GO_NEAR / _RUN), and
+--              none of the four is a FIGHT, an ITEM or a SWITCH -- so one action
+--              with a required `throw` rather than four more rows.  The menu's
+--              RUN is the ordinary `run` above (HandleAction_SafariZoneRun is the
+--              escape that always works, which is a referee's rule, not a word).
+--
+-- No PROTOCOL bump: no hub seats a Safari fight -- only solo's local referee
+-- does -- so a hub never needs to hear one.  A Gen 3 hub that is sent one
+-- anyway reads it here and its referee refuses it (BattleSim3 `ACTIONS`, every
+-- mode a hub seats), the way it refuses any action its fight has no arm for.
+M.BATTLE_ACTIONS3 = {
+  safari = "throw",
+}
+
+-- The five things a Safari turn can throw, each one pret action handler
+-- (src/battle_main.c sTurnActionsFuncsTable):
+--
+--   ball   -- HandleAction_SafariZoneBallThrow      (both carts)
+--   bait   -- HandleAction_ThrowBait                (FR / LG: B_ACTION_SAFARI_BAIT)
+--   rock   -- HandleAction_ThrowRock                (FR / LG: B_ACTION_SAFARI_GO_NEAR)
+--   near   -- HandleAction_GoNear                   (Emerald: B_ACTION_SAFARI_GO_NEAR)
+--   block  -- HandleAction_ThrowPokeblock           (Emerald: B_ACTION_SAFARI_POKEBLOCK)
+--
+-- One closed set for both carts: which family has which throw is the
+-- referee's to refuse (it knows the cart; the wire does not), exactly as a
+-- `fight`'s move index is checked against the moves the seat holds there and
+-- not here.  B_ACTION_SAFARI_WATCH_CAREFULLY is the wild monster's, never the
+-- player's, so it is no word on a choice.
+M.SAFARI_THROWS3 = { ball = true, bait = true, rock = true, near = true, block = true }
+
+-- The most blocks Emerald's POKéBLOCK case holds (pokeemerald
+-- include/constants/global.h POKEBLOCKS_COUNT).  A `block` throw's `block` is
+-- one of the case's slots, 1-based as a Lua list is -- the cart's own
+-- gSpecialVar_ItemId plus one (src/battle_controller_safari.c
+-- CompleteWhenChosePokeblock hands the case's index to the engine).
+M.POKEBLOCK3_MAX = 40
+
 -- One player's intent for one turn.  A choice and never a result: nothing here
 -- says what happened, only what was pressed.
 --
@@ -3181,10 +3227,13 @@ M.BATTLE_ACTIONS = {
 -- below; a Gen 1 / Gen 2 hub -- and a caller that names none -- reads a choice
 -- exactly as it did before Gen 3 existed, ignoring them whatever they hold.
 -- Likewise only 1 reads Gen 1's `mimic` (wave 4), ignored everywhere else,
--- and since wave 5 a Gen 2 hub reads `pass` too (Gold's BATON PASS).
+-- and since wave 5 a Gen 2 hub reads `pass` too (Gold's BATON PASS).  Only 3
+-- reads an action from M.BATTLE_ACTIONS3 (`safari`, contract C6): any other
+-- reader refuses it whole, as it refuses every action it has no row for.
 function M.battleChoice(raw, generation)
   if type(raw) ~= "table" then return nil end
   local needs = M.BATTLE_ACTIONS[raw.action]
+    or (M.int(generation, 3, 3) and M.BATTLE_ACTIONS3[raw.action])
   if not needs then return nil end
   local battle = M.id(raw.battle)
   if not battle then return nil end
@@ -3233,6 +3282,22 @@ function M.battleChoice(raw, generation)
     if raw.dexCaught ~= nil then
       if type(raw.dexCaught) ~= "boolean" then return nil end
       out.dexCaught = raw.dexCaught
+    end
+    -- A Safari command (contract C6): `throw` is required and one of the
+    -- closed five -- an unknown one refuses the choice, because the nearest
+    -- known throw would be a different turn (a BALL spent for a BAIT).  A
+    -- `block` throw may name its case slot, 1..POKEBLOCK3_MAX; present and out
+    -- of range refuses, `pass`'s posture (a dropped index would be some other
+    -- block, or none).  `block` on any other throw is a stray field and
+    -- ignored, as a Gen 1 `pass` is.  Nothing of either is read on any other
+    -- action.
+    if raw.action == "safari" then
+      if not M.SAFARI_THROWS3[raw.throw] then return nil end
+      out.throw = raw.throw
+      if raw.throw == "block" and raw.block ~= nil then
+        out.block = M.int(raw.block, 1, M.POKEBLOCK3_MAX)
+        if out.block == nil then return nil end
+      end
     end
   end
   -- Gen 1 (wave 4 of docs/plans/gen12-referee-gaps-fix.md): MIMIC's pick --
@@ -3297,10 +3362,11 @@ M.BATTLE_EVENTS = {
   chose = true, unchose = true, moves = true, exp = true, team = true,
 }
 
--- Gen 3's seven kinds (docs/plans/gen3-battle-sheet.md §7.2, contract C5; `obey`
--- is contract K3 of docs/plans/gen3-badge-rules.md).
+-- Gen 3's eight kinds (docs/plans/gen3-battle-sheet.md §7.2, contract C5; `obey`
+-- is contract K3 of docs/plans/gen3-badge-rules.md; `lesson` is contract C6 of
+-- docs/plans/gen3-solo-remaining-fights.md).
 --
--- A table of their own rather than seven more rows above, because
+-- A table of their own rather than eight more rows above, because
 -- src/BattleSim/events.lua mirrors M.BATTLE_EVENTS *exactly* (its suite holds
 -- the two equal), and a Gen 1 referee has no ability, weather or held item to
 -- speak of.  M.battleEvent accepts a kind from either table -- a client
@@ -3319,9 +3385,20 @@ M.BATTLE_EVENTS = {
 --                 a Mew / Deoxys whose sheet says `unfateful` (cap 0, whatever
 --                 the badges) -- text = the branch token, gen3-battle-sheet.md
 --                 §7.2.1; the referee's own `msg` sentence follows it
+--   lesson     -- Oak's lab (contract C6 of docs/plans/gen3-solo-remaining-fights.md):
+--                 one of the professor's teaching moments just came true --
+--                 text = the lesson's id (`damage`: the foe's HP bar first
+--                 moved, pokefirered src/battle_controller_opponent.c
+--                 CompleteOnHealthbarDone, state-2 flag 1; `stat`: a foe's
+--                 stat first fell, src/battle_controller_oak_old_man.c on
+--                 STRINGID_DEFENDERSSTATFELL, FIRST_BATTLE_MSG_FLAG_STAT_CHG),
+--                 read as an `item`'s id is.  The screen says Oak's page for it; the referee's
+--                 rule it flips (no misses, no crits until then) is the
+--                 referee's own.  No PROTOCOL bump: only solo's local
+--                 referee seats a first battle, so no hub ever emits one.
 M.BATTLE_EVENTS3 = {
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
-  obey = true,
+  obey = true, lesson = true,
 }
 
 -- Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
@@ -3403,7 +3480,7 @@ end
 --
 -- `generation` (optional) is the reader's own.  1 or 2 reads an event as it
 -- did before Gen 3 had a stream: the older vocabulary only (none of Gen 3's
--- seven kinds), none of its six fields (target, spread, stat, stage, delta,
+-- eight kinds), none of its six fields (target, spread, stat, stage, delta,
 -- holding), and `moves` rows in the older dialect whatever `num` they carry.
 -- The one addition since is Gold's own `held` (M.BATTLE_EVENTS2, contract
 -- K3), which a generation 2 reader alone accepts -- a Gen 1 reader's
@@ -3441,9 +3518,11 @@ function M.battleEvent(raw, generation)
   -- marks and its `\n` breaks (M.battleLine), cut at BATTLE_LINE_MAX glyphs
   -- rather than chat's MESSAGE_MAX.  Every other kind's text -- a `run`'s or a
   -- `send`'s is a name, which never reads a mark -- and a Gen 3 (or unnamed)
-  -- reader's `msg`, reads exactly as before.
+  -- reader's `msg`, reads exactly as before.  A Gen 3 `lesson`'s text is the
+  -- lesson's id (contract C6), an id like an `item`'s: never prose, so a
+  -- mangled one is dropped rather than cleaned into a word nobody sent.
   if raw.text ~= nil then
-    if raw.t == "item" or raw.t == "anim" or raw.t == "ball" or held2 then
+    if raw.t == "item" or raw.t == "anim" or raw.t == "ball" or raw.t == "lesson" or held2 then
       out.text = M.id(raw.text)
     elseif raw.t == "obey" then
       out.text = M.OBEY_TOKENS3[raw.text] and raw.text or nil
