@@ -2042,20 +2042,26 @@ scenario("rampage_zero_pp", function(events)
       both(S(1), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)) })
 end)
 
--- MIRROR MOVE reads the foe's last move USED: the move its METRONOME called,
--- not METRONOME; it fails on a move the user knows, and after a send-out.
+-- MIRROR MOVE reads the foe's LAST_COUNTER_MOVE.  After its METRONOME there
+-- is none: METRONOME's ClearLastMove writes 0 and the move it called writes
+-- nothing (UsedMoveText's CheckUserIsCharging, H2's follow-up), so it fails;
+-- the foe's own jab is copied; it fails on a move the user knows, and after a
+-- send-out.
 scenario("mirror_move_last_used", function(events)
   return seq(events, duo("mml", "1v1", 514,
     { mn({ species = "Alpha", maxHp = 600, spe = 10, moves = { hm("MIRROR_MOVE", 0, 0, 9), hm("tap", 1) } }) },
-    { mn({ species = "Beta", maxHp = 600, spe = 90, moves = { hm("METRONOME", 0, 0, 83), hm("tap", 1) } }),
+    { mn({ species = "Beta", maxHp = 600, spe = 90,
+           moves = { hm("METRONOME", 0, 0, 83), hm("tap", 1), hm("jab", 20) } }),
       mn({ species = "Delta", maxHp = 600, spe = 90, moves = { hm("tap", 1) } }) },
     { metronomePool = { hm("pool_hit", 30, 0, 0) } }),
-    { both(F(0), F(0)), both(F(0), F(1)), both(F(0), S(1)) })
+    { both(F(0), F(0)), both(F(0), F(2)), both(F(0), F(1)), both(F(0), S(1)) })
 end)
 
 -- A charge move METRONOME called keeps the called move: FLY lands the next
--- turn instead of a second call; and a MIRROR MOVE that copied the FLY
--- charges and lands it too.
+-- turn instead of a second call.  Neither turn writes the user's
+-- LAST_COUNTER_MOVE -- BattleCommand_Charge and the release's UsedMoveText
+-- both ask CheckUserIsCharging, and ResetTurn's 1 holds through the lock-in
+-- (`.locked_in`) -- so the foe's MIRROR MOVE fails both turns.
 scenario("metronome_charge", function(events)
   return seq(events, duo("mtc", "1v1", 515,
     { mn({ species = "Alpha", maxHp = 600, spe = 90, moves = { hm("METRONOME", 0, 0, 83) } }) },
@@ -2517,6 +2523,38 @@ end
 local function both3(a, b, foe) return { { "p1", a }, { foe or "p2", b } } end
 local ITEM = function(id) return { action = "item", item = id } end
 
+-- The computer's seat (contract K16): its items and switches are
+-- AI_SwitchOrTryItem's alone -- `_normaliseChoice` refuses one filed for it --
+-- so the scenarios that show one give side b's seat the trainer's bytes
+-- (`npc`) and let the AI reach it: TrainerClassAttributes' SWITCH_OFTEN /
+-- ALWAYS_USE (constants/trainer_data_constants.asm), and `after`'s state
+-- for the turns a scenario does not spend getting there -- a PERISH count of
+-- 1 (CheckAbleToSwitch's `$30 + slot`, a 96% switch under SWITCH_OFTEN) or
+-- an HP at a quarter (`.HealItem`'s certain heal).
+local SWITCH_OFTEN, ALWAYS_USE = 0x01, 0x10
+local function npc(o, fields)
+  for key, value in pairs(fields) do o.sides.b[1][key] = value end
+  return o
+end
+local function after(set, list)
+  return function(b)
+    set(b)
+    for _, pair in ipairs(list) do
+      if pair[2] == "auto" then b:autoPick(pair[1]) else b:submitChoice(pair[1], pair[2]) end
+    end
+  end
+end
+local function perishOne(b)
+  local foe = b.byId.p2
+  foe.mons[foe.active].perish = 1
+end
+local function hpTo(hp)
+  return function(b)
+    local foe = b.byId.p2
+    foe.mons[foe.active].hp = hp
+  end
+end
+
 -- RETURN / FRUSTRATION (BattleCommand_HappinessPower / FrustrationPower, K14):
 -- happiness 255 is RETURN's 102 and FRUSTRATION's 0 -- a 0-power hit that
 -- takes nothing and shows nothing -- and a sheet with no happiness reads
@@ -2659,13 +2697,15 @@ end)
 
 -- ...and against the computer its switch is AI_Switch's, which calls
 -- PursuitSwitch too (FX-R2): the player's PURSUIT hits the withdrawing
--- monster, doubled, before the send-out, and its own turn is spent.
+-- monster, doubled, before the send-out, and its own turn is spent.  The
+-- switch is AI_SwitchOrTryItem's (K16: SWITCH_OFTEN, a PERISH count of 1).
 scenario("r2c_pursuit_computer", function(events)
-  return seq(events, duo3("r3v", "coop_npc", 713,
+  return seq(events, npc(duo3("r3v", "coop_npc", 713,
     { mn({ species = "Alpha", maxHp = 400, spe = 10, moves = { hm("PURSUIT", 40, 7, 117) } }) },
     { mn({ species = "Beta", maxHp = 400, spe = 90, moves = { hm("tap", 1) } }),
       mn({ species = "Delta", maxHp = 400, spe = 90, moves = { hm("tap", 1) } }) }),
-    { both3(F(0), S(1)), both3(F(0), F(0)) })
+    { itemSwitch = SWITCH_OFTEN }),
+    { after(perishOne, both3(F(0), F(0))), both3(F(0), F(0)) })
 end)
 
 -- FUTURE SIGHT: stored typeless (a DARK target is still hit), a second use
@@ -3142,17 +3182,20 @@ end)
 
 -- The computer's FULL HEAL / FULL RESTORE (AI_HealStatus): Bob's burned Beta
 -- is cured but its Attack stays halved (no CalcEnemyStats) -- its taps hit as
--- hard as before -- and FULL HEAL leaves its confusion; Ann's FULL HEAL clears
--- hers (HealStatus's %11111111).
+-- hard as a burned monster's -- and FULL HEAL leaves its confusion; Ann's
+-- FULL HEAL clears hers (HealStatus's %11111111).  The computer's are
+-- AI_TryItem's (K16): with ALWAYS_USE the FULL HEAL goes on the first turn
+-- (`.Status`; the FULL RESTORE row ahead of it reads a full HP bar and passes),
+-- the FULL RESTORE once the HP is at a quarter (`.HealItem`).
 scenario("r2d_full_heal_ai", function(events)
-  local o = duo4("r4w", "coop_npc", 823,
+  local o = npc(duo4("r4w", "coop_npc", 823,
     { mn({ species = "Alpha", maxHp = 999, spe = 90, confusion = 5, moves = { hm("wait", 0, 0, 85) } }) },
     { mn({ species = "Beta", maxHp = 999, atk = 200, spe = 10, status = "BRN", confusion = 6,
-           moves = { hm("slam", 40) } }) })
-  o.sides.b[1].bag = { { id = "FULL_HEAL", count = 1 }, { id = "FULL_RESTORE", count = 1 } }
+           moves = { hm("slam", 40) } }) }),
+    { trainerItems = { "FULL_RESTORE", "FULL_HEAL" }, itemSwitch = ALWAYS_USE })
   return seq(events, o,
-    { both3(F(0), F(0)), both3(ITEM("FULL_HEAL"), ITEM("FULL_HEAL")), both3(F(0), F(0)),
-      both3(F(0), ITEM("FULL_RESTORE")), both3(F(0), F(0)) })
+    { both3(F(0), F(0)), both3(ITEM("FULL_HEAL"), F(0)), both3(F(0), F(0)),
+      after(hpTo(200), both3(F(0), F(0))), both3(F(0), F(0)) })
 end)
 
 -- MYSTERYBERRY against a MIMIC'd slot: MIMIC spends its last PP and copies
@@ -3231,18 +3274,20 @@ scenario("r2d_faint_moves", function(events)
 end)
 
 -- SKETCH under TRANSFORM, the fight ending before it is undone: the copies
--- hold the foe's own moves, so the move sketched is one its METRONOME
--- called; the cart's bug writes it into the PARTY struct at the copied SKETCH
--- slot's index (TRANSFORM's own slot here), and that party list is emitted
--- before `over`.
+-- hold the transformed-into monster's moves, so the move sketched is one the
+-- computer's successor used after its AI switched (a METRONOME-called move
+-- writes no LAST_COUNTER_MOVE -- CheckUserIsCharging -- and a link fight's
+-- SKETCH does nothing); the cart's bug writes it into the PARTY struct at
+-- the copied SKETCH slot's index (TRANSFORM's own slot here), and that party
+-- list is emitted before `over`.
 scenario("r2d_sketch_transformed_end", function(events)
-  local pool = { hm("pound", 10) }
-  pool[1].num = 1
-  return seq(events, duo4("r4st", "wild", 830,
-    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("TRANSFORM", 0, 0, 57), hm("tap", 1) } }) },
-    { mn({ species = "Wild", maxHp = 900, spe = 10, moves = { hm("SKETCH", 0, 0, 148), hm("METRONOME", 0, 0, 83) } }) },
-    { foe = "wild", metronomePool = pool }),
-    { both3(F(0), F(1), "wild"), both3(F(0), F(1), "wild"), both3({ action = "run" }, F(1), "wild") })
+  return seq(events, npc(duo4("r4st", "coop_npc", 830,
+    { mn({ species = "Alpha", maxHp = 900, hp = 60, spe = 90, moves = { hm("TRANSFORM", 0, 0, 57), hm("tap", 1) } }) },
+    { mn({ species = "Wild", maxHp = 900, spe = 10, moves = { hm("SKETCH", 0, 0, 148), hm("wait", 0, 0, 85) } }),
+      mn({ species = "Delta", maxHp = 900, atk = 150, spe = 10, moves = { hm("pound", 20) } }) }),
+    { itemSwitch = SWITCH_OFTEN }),
+    { both3(F(0), F(1)), after(perishOne, both3(F(1), F(1))), both3(F(1), F(0)), both3(F(0), F(0)),
+      both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0)) })
 end)
 
 -- CONVERSION2: a type that resists the foe's last move -- FIRE's, here,
@@ -3431,19 +3476,22 @@ end)
 -- The computer's switch keeps its move-order slot (DetermineMoveOrder runs
 -- before AI_SwitchOrTryItem): slower than Ann, its poisoned successor's
 -- ResidualDamage follows Ann's move and residual; faster, it comes first.
+-- The switch is AI_SwitchOrTryItem's (K16: SWITCH_OFTEN, a PERISH count of 1).
 scenario("r2e_ai_switch_slow", function(events)
-  return seq(events, duo4("r5as", "coop_npc", 912,
+  return seq(events, npc(duo4("r5as", "coop_npc", 912,
     { mn({ species = "Alpha", maxHp = 800, spe = 50, status = "PSN", moves = { hm("tap", 1) } }) },
     { mn({ species = "Beta", maxHp = 800, spe = 10, moves = { hm("tap", 1) } }),
       mn({ species = "Delta", maxHp = 800, spe = 10, status = "PSN", moves = { hm("tap", 1) } }) }),
-    { both3(F(0), S(1)), both3(F(0), F(0)) })
+    { itemSwitch = SWITCH_OFTEN }),
+    { after(perishOne, both3(F(0), F(0))), both3(F(0), F(0)) })
 end)
 scenario("r2e_ai_switch_fast", function(events)
-  return seq(events, duo4("r5af", "coop_npc", 913,
+  return seq(events, npc(duo4("r5af", "coop_npc", 913,
     { mn({ species = "Alpha", maxHp = 800, spe = 50, status = "PSN", moves = { hm("tap", 1) } }) },
     { mn({ species = "Beta", maxHp = 800, spe = 90, moves = { hm("tap", 1) } }),
       mn({ species = "Delta", maxHp = 800, spe = 10, status = "PSN", moves = { hm("tap", 1) } }) }),
-    { both3(F(0), S(1)), both3(F(0), F(0)) })
+    { itemSwitch = SWITCH_OFTEN }),
+    { after(perishOne, both3(F(0), F(0))), both3(F(0), F(0)) })
 end)
 
 -- A PURSUIT spent chasing a switch keeps its slot in a 2v2 (coop_pvp): Bob's
@@ -3533,7 +3581,9 @@ end)
 -- player's X item says how it went (a raise, then a +6), the computer's
 -- nothing (a raise, then a +6); a ball in a trainer fight is blocked, a POKé
 -- DOLL there is refused (FX-R2: `.not_wild` uses nothing -- the turn goes on
--- the next choice); a medicine is named by the use line.
+-- the next choice); a medicine is named by the use line.  The computer's two
+-- X ATTACKs are AI_TryItem's (K16, ALWAYS_USE): the first on Beta's first
+-- turn out (`.XItem`), the second on a later turn's byte under 20 percent - 1.
 scenario("rp2_item_lines", function(events)
   local o = duo4("rp2i", "coop_npc", 931,
     { mn({ species = "Alpha", maxHp = 999, hp = 500, spe = 90, stages = { spe = 5 },
@@ -3541,12 +3591,11 @@ scenario("rp2_item_lines", function(events)
     { mn({ species = "Beta", maxHp = 999, hp = 500, spe = 10, stages = { atk = 5 },
            moves = { hm("wait", 0, 0, 85) } }) })
   o.sides.b[1].name = "COOLTRAINER♀ EMMA"
-  o.sides.b[1].bag = { { id = "X_ATTACK", count = 2 }, { id = "DIRE_HIT", count = 1 },
-    { id = "GUARD_SPEC", count = 1 }, { id = "X_ACCURACY", count = 1 }, { id = "POTION", count = 1 } }
+  npc(o, { trainerItems = { "X_ATTACK", "X_ATTACK" }, itemSwitch = ALWAYS_USE })
   return seq(events, o,
-    { both3(ITEM("X_ACCURACY"), ITEM("X_ATTACK")), both3(ITEM("GUARD_SPEC"), ITEM("X_ATTACK")),
-      both3(ITEM("X_SPEED"), ITEM("DIRE_HIT")), both3(ITEM("X_SPEED"), ITEM("GUARD_SPEC")),
-      both3(ITEM("POKE_BALL"), ITEM("X_ACCURACY")), both3(ITEM("POKE_DOLL"), ITEM("POTION")),
+    { both3(ITEM("X_ACCURACY"), F(0)), both3(ITEM("GUARD_SPEC"), F(0)),
+      both3(ITEM("X_SPEED"), F(0)), both3(ITEM("X_SPEED"), F(0)),
+      both3(ITEM("POKE_BALL"), F(0)), both3(ITEM("POKE_DOLL"), F(0)),
       both3(ITEM("DIRE_HIT"), F(0)), both3(ITEM("POTION"), F(0)) })
 end)
 
@@ -3687,51 +3736,62 @@ scenario("fx2_out_of_pp", function(events)
 end)
 
 -- AI_Switch's PursuitSwitch: the player's PURSUIT knocks the computer's
--- withdrawing monster out before the send-out, and pays no EXP.
+-- withdrawing monster out before the send-out, and pays no EXP.  The switch
+-- is AI_SwitchOrTryItem's (K16: SWITCH_OFTEN, a PERISH count of 1).
 scenario("fx2_pursuit_ai_ko", function(events)
-  return seq(events, duo4("fx2c", "coop_npc", 953,
+  return seq(events, npc(duo4("fx2c", "coop_npc", 953,
     { mn({ species = "Alpha", maxHp = 300, atk = 200, spe = 10, moves = { hm("PURSUIT", 40, 7, 117) } }) },
     { mn({ species = "Beta", maxHp = 300, hp = 5, spe = 90, moves = { hm("tap", 1) } }),
       mn({ species = "Delta", maxHp = 300, spe = 90, moves = { hm("tap", 1) } }) }),
-    { both3(F(0), S(1)), both3(F(0), F(0)) })
+    { itemSwitch = SWITCH_OFTEN }),
+    { after(perishOne, both3(F(0), F(0))), both3(F(0), F(0)) })
 end)
 
 -- wEnemyGoesFirst: after the computer's item or switch the player's
--- PROTECT / ENDURE fail (the reviewer's protect_ai_item probe).
+-- PROTECT / ENDURE fail (the reviewer's protect_ai_item probe).  Both are
+-- AI_SwitchOrTryItem's (K16): the X ATTACK on Beta's first turn out
+-- (ALWAYS_USE's `.XItem`), the switch at a PERISH count of 1 (SWITCH_OFTEN).
 scenario("fx2_protect_ai_item", function(events)
-  return seq(events, duo4("fx2d", "coop_npc", 954,
+  return seq(events, npc(duo4("fx2d", "coop_npc", 954,
     { mn({ species = "Alpha", maxHp = 300, spe = 90, moves = { hm("PROTECT", 0, 0, 120), hm("ENDURE", 0, 0, 121) } }) },
     { mn({ species = "Beta", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }),
       mn({ species = "Delta", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }) }),
-    { both3(F(0), ITEM("X_ATTACK")), both3(F(1), S(1)), both3(F(0), F(0)) })
+    { trainerItems = { "X_ATTACK" }, itemSwitch = SWITCH_OFTEN + ALWAYS_USE }),
+    { both3(F(0), F(0)), after(perishOne, both3(F(1), F(0))), both3(F(0), F(0)) })
 end)
 
 -- Crystal's AI_TryItem zeroes wLastEnemyCounterMove (DISABLE and MIRROR MOVE
 -- find nothing); Gold / Silver's does not (the reviewer's ai_item_counter).
+-- The items are AI_TryItem's (K16): a MAX POTION, then a POTION, each at an
+-- HP of a quarter (`.HealItem`; the POTION row reads item 2 through `de`).
 local function itemCounter(id, seed, family)
   return function(events)
-    local o = duo4(id, "coop_npc", seed,
+    local o = npc(duo4(id, "coop_npc", seed,
       { mn({ species = "Alpha", maxHp = 300, spe = 10,
              moves = { hm("DISABLE", 0, 0, 86), hm("MIRROR_MOVE", 0, 0, 9), hm("wait", 0, 0, 85) } }) },
-      { mn({ species = "Beta", maxHp = 300, spe = 90, moves = { hm("tap", 1) } }) })
+      { mn({ species = "Beta", maxHp = 300, spe = 90, moves = { hm("tap", 1) } }) }),
+      { trainerItems = { "MAX_POTION", "POTION" } })
     o.sides.a[1].family = family
-    return seq(events, o, { both3(F(2), F(0)), both3(F(1), ITEM("X_ATTACK")), both3(F(2), F(0)),
-      both3(F(0), ITEM("X_DEFEND")) })
+    return seq(events, o, { both3(F(2), F(0)), after(hpTo(50), both3(F(1), F(0))), both3(F(2), F(0)),
+      after(hpTo(50), both3(F(0), F(0))) })
   end
 end
 scenario("fx2_ai_item_counter_crystal", itemCounter("fx2e", 955, "crystal"))
 scenario("fx2_ai_item_counter_gold", itemCounter("fx2f", 955, "gs"))
 
 -- SPIKES: the computer's own switch (AI_Switch) takes none; the successor
--- of its faint does (EnemyPartyMonEntrance).
+-- of its faint does (EnemyPartyMonEntrance).  The switch is
+-- AI_SwitchOrTryItem's (K16: SWITCH_OFTEN, a PERISH count of 1).
 scenario("fx2_spikes_ai_switch", function(events)
-  return seq(events, duo4("fx2g", "coop_npc", 956,
+  return seq(events, npc(duo4("fx2g", "coop_npc", 956,
     { mn({ species = "Alpha", maxHp = 300, atk = 250, spe = 90,
            moves = { hm("SPIKES", 0, 0, 149), hm("wait", 0, 0, 85), hm("slam", 200) } }) },
     { mn({ species = "Beta", maxHp = 300, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
       mn({ species = "Delta", maxHp = 60, def = 5, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
       mn({ species = "Eps", maxHp = 300, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
-    { both3(F(0), F(0)), both3(F(1), S(1)), both3(F(2), F(0)), { { "p2", S(2) } }, both3(F(1), F(0)) })
+    { itemSwitch = SWITCH_OFTEN }),
+    { both3(F(0), F(0)), after(perishOne, both3(F(1), F(0))), both3(F(2), F(0)), { { "p2", S(2) } },
+      both3(F(1), F(0)) })
 end)
 
 -- BATON PASS's send-out zeroes both sides' counter moves: a foe's MIRROR
@@ -3919,10 +3979,6 @@ end)
 local function A(choice, foe)
   foe = foe or "p2"
   return { { "p1", choice }, { foe, "auto" }, { foe, "auto" } }
-end
-local function npc(o, fields)
-  for key, value in pairs(fields) do o.sides.b[1][key] = value end
-  return o
 end
 local function typed(o, types)
   o.types = types
@@ -4121,6 +4177,96 @@ scenario("h2_solo_seat", function(events)
   local rounds = {}
   for _ = 1, 16 do rounds[#rounds + 1] = A(F(0), "solo_foe") end
   return seq(events, o, rounds)
+end)
+
+-- H2's follow-up: UsedMoveText / BattleCommand_Charge write no LAST_MOVE or
+-- LAST_COUNTER_MOVE while CheckUserIsCharging -- ResetTurn's 1, set when
+-- METRONOME, MIRROR MOVE or SLEEP TALK calls a move and kept through
+-- `.locked_in`.  `h2f_mirror_charge`: Bob's MIRROR MOVE copies Ann's FLY, and
+-- the copy's charge and release write nothing -- Ann's MIRROR MOVE fails on
+-- it -- until Bob's own tap, chosen, is recorded again (ParsePlayerAction's
+-- `.encored` zeroes the flag); Ann's copy of it writes nothing either.
+scenario("h2f_mirror_charge", function(events)
+  return seq(events, duo4("h2fm", "1v1", 1131,
+    { mn({ species = "Alpha", maxHp = 600, spe = 90,
+           moves = { hm("FLY", 30, 0, 43), hm("MIRROR_MOVE", 0, 0, 9) } }) },
+    { mn({ species = "Beta", maxHp = 600, spe = 10, moves = { hm("MIRROR_MOVE", 0, 0, 9), hm("tap", 1) } }) }),
+    { both3(F(0), F(0)), "tick", both3(F(1), F(1)), both3(F(1), F(0)) })
+end)
+
+-- `h2f_multi_hit_anims`: BattleCommand_EndLoop loops back to `critical`, so
+-- every hit plays its own `moveanimnosub` -- one `anim` a hit -- and `amount`
+-- is that hit's wBattleAnimParam: `lowersub`'s 1 behind the user's own
+-- SUBSTITUTE, flipped before every DOUBLE_HIT / POISON_MULTI_HIT / MULTI_HIT
+-- clip (`.alternate_anim`), one up after every TRIPLE KICK kick.  A MULTI_HIT
+-- METRONOME calls starts from 0 behind the same SUBSTITUTE: its `lowersub`
+-- returns at CheckUserIsCharging.
+scenario("h2f_multi_hit_anims", function(events)
+  return seq(events, duo4("h2fh", "1v1", 1133,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, substitute = 100,
+           moves = { hm("double_hit", 20, 0, 44), hm("twin", 20, 0, 77), hm("METRONOME", 0, 0, 83),
+                     hm("TRIPLE_KICK", 10, 0, 112) } }) },
+    { mn({ species = "Beta", maxHp = 999, spe = 10, moves = { hm("wait", 0, 0, 85) } }) },
+    { metronomePool = { hm("multi", 15, 0, 29) } }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0)) })
+end)
+
+-- `h2f_coop_npc_double`: a co-op 2v2 against one computer trainer whose party
+-- is dealt across two seats (`countSpeciesTypes` absent -- Turn.create keeps
+-- it only for a seat dealt the whole party), each seat carrying K16's bytes:
+-- every turn each seat's AIChooseMove pick, AI_SwitchOrTryItem (a POTION at a
+-- quarter of the HP) and, after a knockout, its own
+-- FindMonInOTPartyToSwitchIntoBattle -- all through `autoPick`, as
+-- `Hub:fillNpcChoices` drives them -- and the fight runs to its end.
+local function T(i, target) return { action = "fight", move = i, target = target } end
+local function A2(a1, a2)
+  return { { "a1", a1 }, { "a2", a2 }, { "b1", "auto" }, { "b2", "auto" }, { "b1", "auto" }, { "b2", "auto" } }
+end
+scenario("h2f_coop_npc_double", function(events)
+  local k16 = function(name)
+    return { aiFlags = 0x07, trainerItems = { "POTION", "NO_ITEM" }, itemSwitch = 0x01, baseReward = 0x12,
+             name = name }
+  end
+  local o = { id = "h2fd", mode = "coop_npc", seed = 1134, choiceTimeout = 60, reconnectGrace = 60,
+    typeIds = R2D_TYPES, chart = R2D_CHART, specialTypes = R2D_SPECIAL,
+    sides = {
+      a = {
+        { playerId = "a1", name = "Ann", mons = {
+          mn({ species = "Alpha", maxHp = 400, atk = 160, spe = 90, moves = { hm("thump", 60), hm("tap", 10) } }) } },
+        { playerId = "a2", name = "Abe", mons = {
+          mn({ species = "Gamma", maxHp = 400, atk = 160, spe = 70, moves = { hm("thump", 60), hm("tap", 10) } }) } },
+      },
+      b = {
+        { playerId = "b1", mons = {
+          mn({ species = "Beta", level = 22, maxHp = 160, spe = 50, moves = { hm("tap", 20), hm("GROWL", 0, 0, 18) } }),
+          mn({ species = "Delta", level = 20, maxHp = 160, spe = 40, moves = { hm("tap", 20) } }) } },
+        { playerId = "b2", mons = {
+          mn({ species = "Eps", level = 21, maxHp = 160, spe = 45, moves = { hm("thump", 25), hm("tap", 15) } }),
+          mn({ species = "Zeta", level = 20, maxHp = 160, spe = 35, moves = { hm("tap", 20) } }) } },
+      },
+    } }
+  for key, value in pairs(k16("LASS AMY")) do o.sides.b[1][key] = value end
+  for key, value in pairs(k16("LASS AMY")) do o.sides.b[2][key] = value end
+  local rounds = {}
+  for i = 1, 14 do
+    local aim = (i % 2 == 0) and 3 or 4
+    rounds[#rounds + 1] = A2(T(0, aim), T(0, 7 - aim))
+  end
+  return seq(events, o, rounds)
+end)
+
+-- `h2f_metronome_rampage`: a THRASH METRONOME called writes nothing on any of
+-- its turns, so Bob's DISABLE, ENCORE and MIRROR MOVE find no move of Ann's
+-- (LAST_COUNTER_MOVE, LAST_MOVE); once the rampage is over Ann's jab is hers
+-- again -- MIRROR MOVE copies it and ENCORE holds it.
+scenario("h2f_metronome_rampage", function(events)
+  return seq(events, duo4("h2fr", "1v1", 1132,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("METRONOME", 0, 0, 83), hm("jab", 20) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("MIRROR_MOVE", 0, 0, 9), hm("ENCORE", 0, 0, 139), hm("DISABLE", 0, 0, 86) } }) },
+    { metronomePool = { hm("THRASH", 20, 0, 27) } }),
+    { both3(F(0), F(2)), both3(F(0), F(1)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(1)),
+      both3(F(1), F(0)) })
 end)
 
 -- ------------------------------------------------------------------

@@ -1638,12 +1638,13 @@ class Battle {
     }
 
     if (action === 'item') {
+      // The computer never files an item (contract K16): a trainer's is
+      // AI_SwitchOrTryItem's (`_aiSwitchesAndItems`), and wildlife has no bag
+      // and no hands. Refused rather than ignored.
+      if (isComputerSeat(this.mode, fighter)) return null;
       const item = str(choice.item);
       if (!item) return null;
-      // Wildlife has no bag and no hands. Refused rather than ignored so a wild
-      // seat that is somehow handed one never spends the turn on it either.
-      if (isWildSeat(this.mode, fighter)) return null;
-      // A fighter with a bag sheet must actually hold the stack (hub/NPC auto).
+      // A fighter with a bag sheet must actually hold the stack.
       // Seats with no bag stay permissive so headless fixtures can still item.
       if (fighter.bag && !this._bagHas(fighter, item)) return null;
       const effect = Effects.itemEffect(item);
@@ -1670,23 +1671,24 @@ class Battle {
         if (effect && effect.faintedOnly && targetMon.hp > 0) return null;
         if (targetMon.hp <= 0 && Effects.itemFailsOnFainted(effect)) return null;
         // "It won't have any effect." (FX-R2): the player's bag keeps the item
-        // and the turn; the computer's AI items never ask.
-        if (!isComputerSeat(this.mode, fighter)
-            && this._itemWontHaveEffect(fighter, effect, item,
-              out.slot != null ? out.slot : fighter.active, out.move)) {
+        // and the turn.
+        if (this._itemWontHaveEffect(fighter, effect, item,
+          out.slot != null ? out.slot : fighter.active, out.move)) {
           return null;
         }
       }
       // A POKé DOLL outside a wild fight is not used either (PokeDollEffect's
       // `.not_wild`: OAK's line, the pack stays open; FX-R2).
-      if (effect && effect.pokeDoll && !Effects.isWildMode(this.mode)
-          && !isComputerSeat(this.mode, fighter)) {
+      if (effect && effect.pokeDoll && !Effects.isWildMode(this.mode)) {
         return null;
       }
       return out;
     }
 
     if (action === 'switch') {
+      // ...and never a voluntary switch: a trainer's is AI_Switch's
+      // (`_aiSwitch`), its successor after a faint filed through `autoPick`.
+      if (isComputerSeat(this.mode, fighter)) return null;
       if (wrapped || held) return null;
       const slot = int(choice.slot, null);
       if (slot === null) return null;
@@ -1887,9 +1889,9 @@ class Battle {
     return true;
   }
 
-  // timeout/NPC pick: bag cures/heals/X-items when present, else SE / status /
-  // setup / switch. Deterministic twin of src/BattleSim/Turn.lua — richer than
-  // a strongest-move heuristic, still not a full TrainerAI port.
+  // A human seat's timeout pick: bag cures/heals/X-items when present, else SE /
+  // status / setup / switch -- the referee's own policy, deterministic. The
+  // computer's seats never come here: theirs is the cart's AI (`_computerChoice`).
   _effectivenessProduct(moveType, defender) {
     const percents = this._typePercents(moveType, defender);
     let eff = 1;
@@ -3111,6 +3113,14 @@ class Battle {
     const mon = activeMon(fighter);
     if (!mon) return;
     const choice = fighter.choice;
+    // wPlayerCharging / wEnemyCharging (CheckUserIsCharging): ParsePlayerAction's
+    // `.encored` and ParseEnemyAction zero it for a move chosen outside a
+    // lock-in; `.locked_in` keeps ResetTurn's 1 (`_callMove`) through the
+    // lock-in a called move began. The Lua twin cites both.
+    if (choice && choice.action === 'fight' && !fighter.forced
+        && !choice.bideStore && !choice.bideRelease) {
+      fighter.userCharging = null;
+    }
     let chosen = null;
     if (choice && choice.action === 'fight' && !fighter.forced
         && !choice.bideStore && !choice.bideRelease && !choice.struggle) {
@@ -3157,7 +3167,6 @@ class Battle {
       }
     }
     if (this._resolveRuns()) return;
-    this._computerOrderKeys();
     // ParseEnemyAction's wild pick: ahead of a switch's PursuitSwitch, after
     // the bag's item.
     if (this._anySwitches()) this._wildPicks();
@@ -3465,16 +3474,14 @@ class Battle {
       }
       if (choice && choice.action === 'switch' && choice.slot !== null && choice.slot !== undefined) {
         // wPlayerIsSwitching / wEnemyIsSwitching, then the PURSUIT that chases
-        // it. SpikesDamage follows every send-out but the computer's own
-        // switch outside a link battle (AI_Switch never calls it), asked
-        // before the PURSUIT whose knockout would make the seat a replacement.
+        // it. SpikesDamage follows every send-out filed here; the one that
+        // takes none -- the computer's own AI_Switch -- is `_aiSwitch`'s.
         fighter.switching = true;
-        const spikes = !(isComputerSeat(this.mode, fighter) && !fighter.mustReplace);
         if (!fighter.mustReplace) this._pursue(fighter);
         const mon = monAt(fighter, choice.slot);
         if (mon && mon.hp > 0) {
           this._sendOut(fighter, choice.slot);
-          if (spikes) this._spikesDamage(fighter, mon);
+          this._spikesDamage(fighter, mon);
         }
       }
     }
@@ -3608,27 +3615,15 @@ class Battle {
     };
     if (vitaminApplied) itemEv.amount = 1;
     this._emit('item', itemEv);
-    // The line the use opens with (the Lua twin cites both routines): the
-    // computer's _EnemyUsedOnText on the monster it has out, the player's
+    // The line the use opens with (the Lua twin cites it): the player's
     // ItemUsedText -- in a medicine's party-menu line's place too -- and no
     // use line for the POKé FLUTE, a ball in a trainer fight or a POKé DOLL
-    // outside a wild fight.
+    // outside a wild fight. Only a player files an item (`_normaliseChoice`):
+    // the computer's are AI_TryItem's (AiSwitch.useItem).
     const label = itemLabel(choice.item);
-    const computerSeat = isComputerSeat(this.mode, fighter);
     const wild = Effects.isWildMode(this.mode);
-    // Crystal's AI_TryItem zeroes wLastEnemyCounterMove (Gold / Silver's does
-    // not): the player's DISABLE, MIRROR MOVE, SKETCH, CONVERSION2 and
-    // COUNTER find no move of the computer's this turn.
-    if (computerSeat && this.family === 'crystal') {
-      const user = activeMon(fighter);
-      if (user) user.lastCounterMove = null;
-    }
-    // K17 / K18: <ENEMY> is a trainer and <MON> a `text_ram` name -- neither
-    // is marked -- with the texts' own breaks.
-    if (computerSeat) {
-      const onMon = activeMon(fighter);
-      this._say(`${fighter.name}\nused ${label}\non ${onMon ? onMon.species : 'POKéMON'}!`);
-    } else if (!(effect && (effect.pokeFlute || ((effect.ball || effect.pokeDoll) && !wild)))) {
+    // K17 / K18: no battler is named; the break is the text's own.
+    if (!(effect && (effect.pokeFlute || ((effect.ball || effect.pokeDoll) && !wild)))) {
       this._say(`${fighter.name} used the\n${label}.`);
     }
     // Spend after the announce, win or fail (Gen1 bag stack). noConsume
@@ -3692,7 +3687,7 @@ class Battle {
         this._finish('draw', null, null, 'run');
       } else {
         // `.not_wild`: the pack's `.Oak` -- ItemOakWarningText. A player's is
-        // refused as it is chosen (FX-R2); a crafted computer's is spent here.
+        // refused as it is chosen (FX-R2); this is the cart's line all the same.
         this._say(`OAK: ${fighter.name}!\nThis isn't the\ntime to use that!`);
       }
     } else if (effect.vitamin) {
@@ -3746,9 +3741,9 @@ class Battle {
       // PokeFluteEffect's battle half: Text_PlayedPokeFlute then
       // _FluteWakeUpText when it cured anyone, else _PlayedFluteText alone.
       if (woke) {
-        if (!computerSeat) this._say(`${fighter.name} played the\nPOKé FLUTE.`);
+        this._say(`${fighter.name} played the\nPOKé FLUTE.`);
         this._say('All sleeping\nPOKéMON woke up.');
-      } else if (!computerSeat) {
+      } else {
         // K18: _PlayedFluteText's `para` is two lines.
         this._say('Played the POKé\nFLUTE.');
         this._say("Now, that's a\ncatchy tune!");
@@ -3767,8 +3762,7 @@ class Battle {
       } else {
         let applied = false;
         // X ACCURACY, DIRE HIT and GUARD SPEC. set their bit and say nothing
-        // past the use's line (UseItemText; the computer's
-        // PrintText_UsedItemOn).
+        // past the use's line (UseItemText).
         if (effect.xAccuracy) {
           mon.xAccuracy = true;
           applied = true;
@@ -3784,27 +3778,23 @@ class Battle {
         if (effect.stage) {
           const stat = effect.stage.stat;
           const delta = int(effect.stage.delta, 1);
-          // The computer's EnemyUsedXItem runs RaiseStat behind its use line
-          // and prints nothing more; the player's XItemEffect says how it went.
-          // RaiseStat fails at +6 and (FX-R2) on a battle stat of 999 -- the
-          // item used all the same.
-          // The player's XItemEffect zeroes wAttackMissed / wEffectFailed
-          // first; RaiseStat's failure sets wAttackMissed.
-          if (!computerSeat) {
-            this.lastAttackMissed = false;
-            this.lastEffectFailed = false;
-          }
+          // The player's XItemEffect says how it went. RaiseStat fails at +6
+          // and (FX-R2) on a battle stat of 999 -- the item used all the same.
+          // XItemEffect zeroes wAttackMissed / wEffectFailed first; RaiseStat's
+          // failure sets wAttackMissed.
+          this.lastAttackMissed = false;
+          this.lastEffectFailed = false;
           const { raised, stage: after } = Effects.raiseStat(mon, fighter.badges, stat, delta);
           if (!raised) this.lastAttackMissed = true;
           if (raised) {
             // XItemEffect's StatUpMessage (wave 5).
             const text = Effects.statUpLine(mon, stat, delta);
-            if (!computerSeat) this._say(text);
+            this._say(text);
             this._emit('stat', {
               slot: fighter.slot, side: fighter.side,
               amount: after, stage: after, text,
             });
-          } else if (!computerSeat) {
+          } else {
             this._say(Effects.wontRiseLine(mon, stat));
           }
           applied = true;
@@ -3892,20 +3882,13 @@ class Battle {
         }
         let cleared = false;
         let clearedConfusion = false;
-        // Whose status cure (wave 4; the Lua twin cites both routines): the
-        // player's HealStatus rebuilds the stats and clears NIGHTMARE (and,
-        // for a %11111111 item, confusion); the computer's AI_HealStatus
-        // keeps the burn / paralysis cut and the nightmare, and its FULL HEAL
-        // leaves a confusion its FULL RESTORE clears.
+        // The player's status cure (HealStatus, wave 4) rebuilds the stats and
+        // clears NIGHTMARE (and, for a %11111111 item, confusion). The
+        // computer's is AI_HealStatus (AiSwitch.useItem).
         const onField = partyIdx === fighter.active;
-        const computer = isComputerSeat(this.mode, fighter) && onField;
         const cure = () => {
-          if (computer) {
-            Effects.setStatusOn(mon, fighter, null);
-          } else {
-            mon.status = null;
-            if (onField) mon.nightmare = null;
-          }
+          mon.status = null;
+          if (onField) mon.nightmare = null;
           // Both cures `res SUBSTATUS_TOXIC` (wave 5).
           if (onField) mon.toxicLatent = null;
           mon.statusTurns = 0;
@@ -3921,7 +3904,7 @@ class Battle {
                    && effect.clearStatuses[mon.status]) {
           cure();
         }
-        if (has(CURES_CONFUSION, choice.item) && onField && !computer
+        if (has(CURES_CONFUSION, choice.item) && onField
             && mon.confusion && mon.confusion > 0) {
           mon.confusion = 0;
           // HealStatus for the confusion alone: its `res SUBSTATUS_TOXIC`.
@@ -3989,18 +3972,13 @@ class Battle {
     for (const fighter of this.fighters) {
       const choice = fighter.choice;
       const mon = activeMon(fighter);
-      // A recharge is an actor too (`_lockedChoice`); from wave 5 so are a
-      // PURSUIT spent chasing a switch (`spent`) and the computer's switch or
-      // item (`idle`, `_computerOrderKeys`) -- the Lua twin explains.
+      // A recharge is an actor too (`_lockedChoice`); from wave 5 so is a
+      // PURSUIT spent chasing a switch (`spent`). The computer's switch or
+      // item is AI_SwitchOrTryItem's, taken in the slot its move gave it
+      // (`idle`, `_aiSwitchesAndItems`) -- the Lua twin explains.
       let kind = null;
-      let key = null;
-      if (choice && mon) {
-        if (choice.action === 'fight' || choice.recharge) {
-          kind = choice.pursued ? 'spent' : 'move';
-        } else if (fighter.orderKey) {
-          kind = 'idle';
-          key = fighter.orderKey;
-        }
+      if (choice && mon && (choice.action === 'fight' || choice.recharge)) {
+        kind = choice.pursued ? 'spent' : 'move';
       }
       if (kind) {
         const held = Items.effect(mon);
@@ -4008,12 +3986,11 @@ class Battle {
           fighter,
           mon, // pinned: see the skip in the loop
           kind,
-          priority: key ? key.priority : this._priorityOf(fighter, mon),
-          speed: key ? key.speed : this._speedOf(fighter, mon),
+          priority: this._priorityOf(fighter, mon),
+          speed: this._speedOf(fighter, mon),
           order: actors.length + 1,
           // A Quick Claw holder's parameter, for `_quickClaws`; null otherwise.
-          clawParam: key ? key.clawParam
-            : (held.effect === Items.QUICK_CLAW ? held.param : null),
+          clawParam: held.effect === Items.QUICK_CLAW ? held.param : null,
         });
       }
     }
@@ -4157,14 +4134,14 @@ class Battle {
   // a player's switch, item, refused RUN or skip -- end it there, in field
   // order (wave 4; the Lua twin explains): a player seat's turn ends its
   // foes' DESTINY BOND, then the faint check (wave 5), then ResidualDamage.
-  // The computer's switch or item and a spent PURSUIT keep their move-order
-  // slot (`_resolveFights`).
+  // A spent PURSUIT, and the computer's AI switch or item (its choice is the
+  // AI's move), keep their move-order slot (`_resolveFights`).
   _idleResiduals() {
     for (const fighter of this.fighters) {
       if (this._sequenceOver()) return;
       const choice = fighter.choice;
       const mon = activeMon(fighter);
-      if (choice && mon && !choice.pursued && !fighter.orderKey
+      if (choice && mon && !choice.pursued
           && choice.action !== 'fight' && !choice.recharge) {
         if (isPlayerSeat(this.mode, fighter)) {
           mon.destinyBond = null;
@@ -4176,26 +4153,6 @@ class Battle {
           this._drainExp();
           if (!this.result) this._checkOver();
         }
-      }
-    }
-  }
-
-  // The computer's switch or item keeps the slot DetermineMoveOrder gave its
-  // move (wave 5; the Lua twin explains the policy): a BASE_PRIORITY move at
-  // the outgoing monster's Speed, with its Quick Claw, read before it acts.
-  _computerOrderKeys() {
-    for (const fighter of this.fighters) {
-      fighter.orderKey = null;
-      const choice = fighter.choice;
-      const mon = activeMon(fighter);
-      if (choice && mon && isComputerSeat(this.mode, fighter)
-          && (choice.action === 'switch' || choice.action === 'item')) {
-        const held = Items.effect(mon);
-        fighter.orderKey = {
-          priority: Effects.BASE_PRIORITY,
-          speed: this._speedOf(fighter, mon),
-          clawParam: held.effect === Items.QUICK_CLAW ? held.param : null,
-        };
       }
     }
   }
@@ -4611,8 +4568,10 @@ class Battle {
   }
 
   // usedmovetext (UsedMoveText): the move an action is now using becomes its
-  // user's LAST_MOVE / LAST_COUNTER_MOVE -- what a foe's MIRROR MOVE copies.
-  // A called move records itself; Struggle is kept as the STRUGGLE sentinel.
+  // user's LAST_MOVE / LAST_COUNTER_MOVE -- what a foe's MIRROR MOVE copies --
+  // unless CheckUserIsCharging (`userCharging`): a move METRONOME, MIRROR MOVE
+  // or SLEEP TALK called, and the lock-in it began, write nothing, leaving
+  // the caller's ClearLastMove 0. Struggle is kept as the STRUGGLE sentinel.
   // Cleared by ClearLastMove, `.EndDisobedience` and every send-out. The Lua
   // twin carries the long note.
   // UsedMoveText: the "used" line, after UpdateUsedMoves on the player's turn
@@ -4941,6 +4900,32 @@ class Battle {
     this.useAnim = outer;
   }
 
+  // wBattleAnimParam as MoveAnimNoSub plays hit `hit` of a looping move's
+  // clip (K22's `amount`; the Lua twin cites the routines): CheckTurn's 0, or
+  // 1 when `lowersub` lowered the user's SUBSTITUTE -- never for a called move
+  // (CheckUserIsCharging); `.alternate_anim` flips its low bit before every
+  // MULTI_HIT / DOUBLE_HIT / POISON_MULTI_HIT clip, TRIPLE KICK's
+  // `kickcounter` adds one after every kick; every other move zeroes it.
+  // undefined for 0.
+  _hitAnimParam(fighter, mon, effectId, hit) {
+    let param = int(mon.substitute, 0) > 0 && !fighter.userCharging ? 1 : 0;
+    if (effectId === Effects.TRIPLE_KICK) {
+      param = param + hit - 1;
+    } else if (Effects.isMultihit(effectId)) {
+      for (let i = 0; i < hit; i += 1) param = (param & 1) ^ 1;
+    } else {
+      param = 0;
+    }
+    return param === 0 ? undefined : param;
+  }
+
+  // ResetTurn: wPlayerCharging / wEnemyCharging set to 1, then DoMove for the
+  // move METRONOME, MIRROR MOVE or SLEEP TALK loaded (`userCharging`).
+  _callMove(fighter, mon, opts) {
+    fighter.userCharging = true;
+    return this._useMove(fighter, mon, opts);
+  }
+
   _useMoveBody(fighter, mon, opts = {}) {
     const choice = fighter.choice;
     // A move Metronome or Mirror Move called is not the turn's own move. The
@@ -5108,9 +5093,10 @@ class Battle {
       && !(effectId === Effects.SOLARBEAM && this._weatherKind() === 'sun');
     // The move's clip, this use's own (`useAnim`, K22); a charge's first turn
     // is Charge's LoadMoveAnim with param 1, `quiet`.
+    // A looping move's first clip carries its wBattleAnimParam (`_hitAnimParam`).
     this.useAnim = this._emit('anim', {
       slot: fighter.slot, side: fighter.side, text: move.id,
-      amount: chargingUp ? 1 : undefined,
+      amount: chargingUp ? 1 : this._hitAnimParam(fighter, mon, effectId, 1),
       quiet: chargingUp ? true : undefined,
     });
     if (choice.bideRelease && mon.bide) {
@@ -5118,12 +5104,14 @@ class Battle {
       this._say(`${nameOf(mon)}\nunleashed energy!`);
     } else if (chargingUp) {
       // `charge` comes ahead of `usedmovetext` and ends the move: its line is
-      // the turn's only one, and it writes LAST_MOVE itself.
-      this._recordLastMove(mon, move);
+      // the turn's only one, and it writes LAST_MOVE itself -- behind the same
+      // CheckUserIsCharging UsedMoveText has.
+      if (!fighter.userCharging) this._recordLastMove(mon, move);
     } else {
-      // UsedMoveText (`_usedLine`).
+      // UsedMoveText (`_usedLine`): no LAST_MOVE / LAST_COUNTER_MOVE written
+      // while CheckUserIsCharging (a called move, a lock-in one began).
       this._usedLine(fighter, mon, move, disobeyed);
-      this._recordLastMove(mon, move);
+      if (!fighter.userCharging) this._recordLastMove(mon, move);
     }
 
     if (choice.bideRelease && mon.bide) {
@@ -5171,7 +5159,7 @@ class Battle {
         return;
       }
       this._markLastMove(mon, choice.move);
-      this._useMove(fighter, mon, {
+      this._callMove(fighter, mon, {
         moveOverride: copied === STRUGGLE ? STRUGGLE : copyMove(copied),
         mirrorCopy: true,
       });
@@ -5217,7 +5205,7 @@ class Battle {
         this._say('But nothing\nhappened.');
         return;
       }
-      this._useMove(fighter, mon, {
+      this._callMove(fighter, mon, {
         moveOverride: copyMove(pick),
         metronomeCall: true,
       });
@@ -5237,7 +5225,7 @@ class Battle {
         this._say('But it failed!');
         return;
       }
-      this._useMove(fighter, mon, {
+      this._callMove(fighter, mon, {
         moveOverride: copyMove(pick),
         sleepTalkCall: true,
       });
@@ -5614,6 +5602,14 @@ class Battle {
         struck = this._hitDamage(fighter, mon, target, defender, move, effectId, struggling,
           { kicks: effectId === Effects.TRIPLE_KICK ? index : null });
         struck.damage = this._vary(struck.damage);
+        // BattleCommand_EndLoop's `.loop_back_to_critical` (pokecrystal :5320,
+        // pokegold :5277): every later hit runs its own `moveanimnosub` --
+        // after its draws, ahead of its HP and its "A critical hit!". The Lua
+        // twin cites the scripts.
+        this._emit('anim', {
+          slot: fighter.slot, side: fighter.side, text: move.id,
+          amount: this._hitAnimParam(fighter, mon, effectId, index),
+        });
       }
       if (struck.crit) this._say('A critical hit!');
       if (index === 1) {
@@ -7698,7 +7694,9 @@ function attempt(opts) {
         family: has(FAMILIES, entry.family) ? entry.family : DEFAULT_FAMILY,
         // wPlayerConfuseCount for this field position (`_berserkGene`).
         confuseCount: 0,
-        bag: copyBag(entry.bag),
+        // A player's bag; the computer's seats keep none (K16: their items
+        // are AI_TryItem's, off `trainerItems`).
+        bag: computerSide ? null : copyBag(entry.bag),
         active: firstLiving(mons),
         // Contract K16: the trainer's TrainerClassAttributes bytes the
         // computer's AI reads, on the computer's seats alone -- copied, never

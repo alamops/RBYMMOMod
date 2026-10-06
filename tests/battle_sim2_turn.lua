@@ -703,8 +703,9 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
     ok(battle:tick(11) == true, mode .. ": the wild seat's turn resolves")
     local items = ofKind(drain(battle), "item")
     eq(#items, 0, mode .. ": auto-pick never reaches the wild seat's bag")
-    eq(battle.byId.wild.bag.POTION, 2, mode .. ": and spends none of it")
-    eq(battle.byId.wild.bag.FULL_HEAL, 1, mode .. ": cure untouched too")
+    -- K16: the computer's seats keep no bag at all (their items are
+    -- AI_TryItem's, off `trainerItems`), so the sheet's is never read.
+    eq(battle.byId.wild.bag, nil, mode .. ": the wild seat keeps no bag")
     eq(battle.byId.wild.mons[1].status, "poison", mode .. ": still poisoned")
   end
 
@@ -2433,7 +2434,10 @@ local function fight(o)
     specialTypes = o.specialTypes, chart = o.chart,
     sides = {
       a = { { playerId = "p1", name = "Ann", badges = o.badges, family = o.family, mons = o.a } },
-      b = { { playerId = foe, name = "Bob", mons = o.b } },
+      -- K16's bytes for the computer's seat (Turn.create keeps them on the
+      -- computer's side alone): its items and switches are AI_SwitchOrTryItem's.
+      b = { { playerId = foe, name = "Bob", mons = o.b, trainerItems = o.trainerItems,
+              itemSwitch = o.itemSwitch, aiFlags = o.aiFlags, baseReward = o.baseReward } },
     },
   }), foe
 end
@@ -4120,11 +4124,13 @@ do
   -- stays halved -- no CalcEnemyStats; the player's rebuilds it.  The burn
   -- lands in the fight (setStatus, BurnTarget's ApplyBrnEffectOnAttack): a
   -- computer's monster SENT OUT burned keeps its full Attack (LoadEnemyMon),
-  -- which would hide the bug.
+  -- which would hide the bug.  The computer's is AI_TryItem's (K16): a
+  -- FULL HEAL in its trainer item slot and ALWAYS_USE (`.Status`).
   local function healed(side)
     local burned = held({ species = "Burnt", atk = 100, spe = 10, moves = { hit("wait", 0, 0, 85) } })
     local other = held({ species = "Other", spe = 90, moves = { hit("wait", 0, 0, 85) } })
-    local o = { mode = "coop_npc", a = { side == "a" and burned or other }, b = { side == "b" and burned or other } }
+    local o = { mode = "coop_npc", a = { side == "a" and burned or other }, b = { side == "b" and burned or other },
+                trainerItems = side == "b" and { "FULL_HEAL" } or nil, itemSwitch = 0x10 }
     local battle, foe = fight(o)
     drain(battle)
     local seat = side == "a" and battle.byId.p1 or battle.byId[foe]
@@ -4134,7 +4140,7 @@ do
     if side == "a" then
       round(battle, foe, { action = "item", item = "FULL_HEAL" }, nil)
     else
-      round(battle, foe, nil, { action = "item", item = "FULL_HEAL" })
+      round(battle, foe, nil, nil)
     end
     return mon.status, Effects.storedStat(mon, "atk", seat.badges)
   end
@@ -4413,15 +4419,21 @@ do
 end
 
 -- (c) the bag's lines: ItemUsedText / _EnemyUsedOnText, nothing past them for
---     X ACCURACY / DIRE HIT / GUARD SPEC., the computer's silent X item
+--     X ACCURACY / DIRE HIT / GUARD SPEC., the computer's silent X item.  The
+--     computer's items are AI_TryItem's (K16): a trainer item slot and
+--     ALWAYS_USE, on its monster's first turn out (`.XItem`), not a filed
+--     choice -- which `_normaliseChoice` refuses.
 do
   -- Alpha is hurt so the POTION below is used (FX-R2: one on a full HP bar
   -- "won't have any effect" and is refused).
   local battle, foe = fight({ mode = "coop_npc", seed = 3,
+    trainerItems = { "X_ATTACK" }, itemSwitch = 0x10,
     a = { held({ species = "Alpha", hp = 50, spe = 90, stages = { spe = 5 }, moves = { hit("wait", 0, 0, 85) } }) },
     b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
   drain(battle)
-  local events = round(battle, foe, { action = "item", item = "X_ACCURACY" }, { action = "item", item = "X_ATTACK" })
+  eq(battle:submitChoice(foe, { action = "item", item = "X_ATTACK" }), false,
+     "RP2: the computer's seat files no item (AI_SwitchOrTryItem's alone)")
+  local events = round(battle, foe, { action = "item", item = "X_ACCURACY" }, { action = "fight", move = 0 })
   ok(said(events, "Ann used the X ACCURACY."), "RP2: the player's ItemUsedText names the item")
   ok(said(events, "Bob used X ATTACK on Beta!"), "RP2: the computer's _EnemyUsedOnText names item and monster")
   eq(#msgs(events), 2, "RP2: ...and nothing more: no X ACCURACY line, no stat line for the computer")
@@ -4429,9 +4441,17 @@ do
   for _, event in ipairs(events) do if event.t == "stat" and event.slot == 3 then rose = event end end
   eq(rose and rose.stage, 1, "RP2: the computer's X ATTACK still raises its stage (RaiseStat)")
   ok(battle.byId.p1.mons[1].xAccuracy == true, "RP2: X ACCURACY still sets its bit")
-  events = round(battle, foe, { action = "item", item = "GUARD_SPEC" }, { action = "item", item = "DIRE_HIT" })
-  ok(said(events, "Ann used the GUARD SPEC.."), "RP2: GUARD SPEC.'s own stop, then the line's (the cart's two)")
-  ok(said(events, "Bob used DIRE HIT on Beta!") and #msgs(events) == 2, "RP2: DIRE HIT says no more")
+  eq(battle.byId[foe].trainerItems[1], "NO_ITEM", "RP2: ...and AI_TryItem clears the slot it used")
+  do
+    local other, otherFoe = fight({ mode = "coop_npc", seed = 3,
+      trainerItems = { "DIRE_HIT" }, itemSwitch = 0x10,
+      a = { held({ species = "Alpha", spe = 90, moves = { hit("wait", 0, 0, 85) } }) },
+      b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+    drain(other)
+    local said2 = round(other, otherFoe, { action = "item", item = "GUARD_SPEC" }, { action = "fight", move = 0 })
+    ok(said(said2, "Ann used the GUARD SPEC.."), "RP2: GUARD SPEC.'s own stop, then the line's (the cart's two)")
+    ok(said(said2, "Bob used DIRE HIT on Beta!") and #msgs(said2) == 2, "RP2: DIRE HIT says no more")
+  end
   events = round(battle, foe, { action = "item", item = "X_SPEED" }, { action = "fight", move = 0 })
   ok(said(events, "Ann used the X SPEED.") and said(events, "Alpha's SPEED went up!"),
      "RP2: the player's X item says how it went (XItemEffect's StatUpMessage)")
@@ -4693,15 +4713,18 @@ do
   a.hp = 200
   eq(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 0 }), true,
      "FX-R2: a POTION on a hurt monster is taken")
-  -- The computer's items are its AI's, which never ask.
+  -- The computer's items are its AI's (AI_TryItem, K16), which never ask.
   battle.byId.p1.choice = nil
   local c, cf = fight({ mode = "coop_npc", seed = 4,
+    trainerItems = { "X_ACCURACY" }, itemSwitch = 0x10,
     a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("tap", 1) } }) },
     b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("tap", 1) } }) } })
   drain(c)
   c.byId[cf].mons[1].xAccuracy = true
-  eq(c:submitChoice(cf, { action = "item", item = "X_ACCURACY" }), true,
-     "FX-R2: the computer's X ACCURACY is filed whatever (EnemyUsedXAccuracy)")
+  eq(c:submitChoice(cf, { action = "item", item = "X_ACCURACY" }), false,
+     "FX-R2: the computer's seat files no item")
+  ok(said(round(c, cf), "Bob used X ACCURACY on Beta!"),
+     "FX-R2: the computer's X ACCURACY is used whatever (EnemyUsedXAccuracy)")
 end
 
 -- (4) Struggle when every move with PP is the DISABLEd one: decided as the
@@ -4759,14 +4782,20 @@ do
 end
 
 -- (6) The computer's withdrawal is chased by the player's PURSUIT
---     (AI_Switch's PursuitSwitch), and a knockout there pays no EXP.
+--     (AI_Switch's PursuitSwitch), and a knockout there pays no EXP.  The
+--     withdrawal is AI_SwitchOrTryItem's (K16): SWITCH_OFTEN and a PERISH
+--     count of 1 (CheckAbleToSwitch's $30 + the slot, 96% to go).
 do
-  local battle, foe = fight({ mode = "coop_npc", seed = 9,
+  local battle, foe = fight({ mode = "coop_npc", seed = 9, itemSwitch = 0x01,
     a = { held({ species = "Alpha", maxHp = 300, atk = 200, spe = 10, moves = { hit("PURSUIT", 40, 0, 117) } }) },
     b = { held({ species = "Beta", maxHp = 300, hp = 5, spe = 90, moves = { hit("tap", 1) } }),
           held({ species = "Delta", maxHp = 300, spe = 90, moves = { hit("tap", 1) } }) } })
   drain(battle)
-  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "switch", slot = 1 })
+  eq(battle:submitChoice(foe, { action = "switch", slot = 1 }), false,
+     "FX-R2: the computer's seat files no switch")
+  battle.byId[foe].mons[1].perish = 1
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  ok(said(events, "Bob withdrew Beta!") == false, "FX-R2: PursuitSwitch's knockout skips _EnemyWithdrewText")
   local fainted, sent, paid = nil, nil, false
   for i, event in ipairs(events) do
     if event.t == "faint" and event.text == "Beta" then fainted = i end
@@ -4779,23 +4808,30 @@ do
 end
 
 -- (7) The computer's item or switch went first (wEnemyGoesFirst): the
---     player's PROTECT fails; Crystal's item also forgets its last move.
+--     player's PROTECT fails; Crystal's item also forgets its last move.  The
+--     items are AI_TryItem's (K16): an X ATTACK on the first turn out with
+--     ALWAYS_USE (`.XItem`), a POTION at a quarter of the HP (`.HealItem`).
 do
   local battle, foe = fight({ mode = "coop_npc", seed = 10,
+    trainerItems = { "X_ATTACK" }, itemSwitch = 0x10,
     a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("PROTECT", 0, 0, 120) } }) },
     b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("tap", 1) } }) } })
   drain(battle)
-  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "item", item = "X_ATTACK" })
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  ok(said(events, "Bob used X ATTACK on Beta!"), "FX-R2: the computer's AI uses its X ATTACK")
   ok(said(events, "But it failed!") and not said(events, "Alpha PROTECTED itself!"),
      "FX-R2: PROTECT after the computer's item fails (CheckOpponentWentFirst)")
   local function disableAfterItem(family)
-    local b, f = fight({ mode = "coop_npc", seed = 11, family = family,
+    local b, f = fight({ mode = "coop_npc", seed = 11, family = family, trainerItems = { "POTION" },
       a = { held({ species = "Alpha", maxHp = 300, spe = 10,
                    moves = { hit("DISABLE", 0, 0, 86), hit("wait", 0, 0, 85) } }) },
       b = { held({ species = "Beta", maxHp = 300, spe = 90, moves = { hit("tap", 1) } }) } })
     drain(b)
     round(b, f, { action = "fight", move = 1 }, { action = "fight", move = 0 })
-    return round(b, f, { action = "fight", move = 0 }, { action = "item", item = "X_ATTACK" })
+    b.byId[f].mons[1].hp = 50
+    local events2 = round(b, f, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+    ok(said(events2, "Bob used POTION on Beta!"), "FX-R2: the computer's AI uses its POTION (" .. family .. ")")
+    return events2
   end
   ok(said(disableAfterItem("crystal"), "But it failed!"),
      "FX-R2: Crystal's AI_TryItem zeroes wLastEnemyCounterMove: DISABLE fails")
@@ -4803,15 +4839,19 @@ do
 end
 
 -- (8) SPIKES: the computer's own switch takes none (AI_Switch); its faint's
---     successor and a player's switch do.
+--     successor and a player's switch do.  The computer's switch is
+--     AI_SwitchOrTryItem's (K16: SWITCH_OFTEN, a PERISH count of 1).
 do
-  local battle, foe = fight({ mode = "coop_npc", seed = 12,
+  local battle, foe = fight({ mode = "coop_npc", seed = 12, itemSwitch = 0x01,
     a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("SPIKES", 0, 0, 149), hit("wait", 0, 0, 85) } }) },
     b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }),
           held({ species = "Delta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
   drain(battle)
   round(battle, foe)
-  local events = round(battle, foe, { action = "fight", move = 1 }, { action = "switch", slot = 1 })
+  battle.byId[foe].mons[1].perish = 1
+  local events = round(battle, foe, { action = "fight", move = 1 }, { action = "fight", move = 0 })
+  ok(said(events, "Bob withdrew Beta!"), "FX-R2: the computer's AI withdraws Beta")
+  eq(battle.byId[foe].active, 2, "FX-R2: ...and sends Delta out")
   ok(not said(events, "Delta's hurt by SPIKES!"), "FX-R2: the computer's own switch takes no SPIKES")
   eq(battle.byId[foe].mons[2].hp, 300, "FX-R2: ...at full HP")
   local link, lf = fight({ mode = "1v1", seed = 12,
@@ -4854,6 +4894,73 @@ do
   eq(npc and npc.payDay, nil, "FX-R2: ...and no PAY DAY")
   local link = boom("1v1")
   eq(link and link.outcome, "draw", "FX-R2: in a link fight it is a draw")
+end
+
+-- H2's follow-up: CheckUserIsCharging (wPlayerCharging / wEnemyCharging).
+-- ResetTurn sets it when METRONOME calls; UsedMoveText then writes no
+-- LAST_MOVE / LAST_COUNTER_MOVE -- both stay METRONOME's ClearLastMove 0 --
+-- and `.locked_in` keeps it through the THRASH the call began; the next move
+-- chosen (`.encored`) zeroes it and is recorded again.
+do
+  local battle, foe = fight({ mode = "1v1", seed = 21,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90, moves = { hit("METRONOME", 0, 0, 83), hit("jab", 20) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  battle.metronomePool = { hit("THRASH", 20, 0, 27) }
+  drain(battle)
+  local seat = battle.byId.p1
+  local alpha = seat.mons[1]
+  round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  eq(seat.userCharging, true, "H2f: ResetTurn's 1")
+  eq(alpha.lastMove, nil, "H2f: METRONOME's ClearLastMove, the THRASH writing nothing")
+  eq(alpha.lastCounterMove, nil, "H2f: ...nor its counter move")
+  round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  ok(alpha.thrashing == nil or seat.userCharging == true, "H2f: kept through `.locked_in`")
+  eq(alpha.lastCounterMove, nil, "H2f: ...the rampage's turn writes nothing either")
+  for _ = 1, 6 do
+    if not (alpha.thrashing and alpha.thrashing.turns > 0) then break end
+    round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  end
+  for _ = 1, 6 do
+    if said(round(battle, foe, { action = "fight", move = 1 }, { action = "fight", move = 0 }), "Alpha used jab!") then
+      break
+    end
+  end
+  ok(not seat.userCharging, "H2f: `.encored` -- a chosen move zeroes it")
+  eq(alpha.lastCounterMove and alpha.lastCounterMove.id, "jab", "H2f: and UsedMoveText writes again")
+  eq(alpha.lastMove and alpha.lastMove.id, "jab", "H2f: ...LAST_MOVE too")
+end
+
+-- H2's follow-up (4): BattleCommand_EndLoop's `.loop_back_to_critical` --
+-- every hit plays its own `moveanimnosub`, ahead of its HP, `amount` the
+-- hit's wBattleAnimParam (`.alternate_anim`'s flip; TRIPLE KICK's count).
+do
+  local battle, foe = fight({ mode = "1v1", seed = 22,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90, moves = { hit("double_hit", 20, 0, 44), hit("TRIPLE_KICK", 10, 0, 112) } }) },
+    b = { held({ species = "Beta", maxHp = 999, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local function clips(events, id)
+    local out = {}
+    for _, event in ipairs(events) do
+      if event.t == "anim" and event.text == id then out[#out + 1] = event.amount or 0 end
+    end
+    return table.concat(out, ",")
+  end
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  eq(clips(events, "double_hit"), "1,0", "H2f: DOUBLE_HIT -- one clip a hit, `.alternate_anim` 1 then 0")
+  local beats = {}
+  for _, event in ipairs(events) do
+    if (event.t == "anim" and event.text == "double_hit") or (event.t == "damage" and event.slot == 3) then
+      beats[#beats + 1] = event.t
+    end
+  end
+  eq(table.concat(beats, ","), "anim,damage,anim,damage", "H2f: ...each ahead of its HP")
+  battle.byId.p1.mons[1].substitute = 50
+  events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  eq(clips(events, "double_hit"), "0,1", "H2f: behind the user's SUBSTITUTE (`lowersub`'s 1): 0 then 1")
+  battle.byId.p1.mons[1].substitute = 0
+  events = round(battle, foe, { action = "fight", move = 1 }, { action = "fight", move = 0 })
+  local kicks = clips(events, "TRIPLE_KICK")
+  ok(kicks == "0" or kicks == "0,1" or kicks == "0,1,2", "H2f: TRIPLE KICK -- kickcounter, one up a kick: " .. kicks)
 end
 
 -- (11) SANDSTORM and a wrap: the HP bar first, then the line; a knockout
@@ -4966,11 +5073,11 @@ do
   local battle = battleOf({ mode = "coop_npc", seed = 7, sides = {
     a = { { playerId = "p1", name = "Ann", mons = { sheet({ species = "Alpha", spe = 90, maxHp = 900,
       moves = { hit("wait", 0, 0, 85) } }) } } },
-    b = { { playerId = "p2", name = "Bob", bag = { { id = "X_ATTACK", count = 1 } },
+    b = { { playerId = "p2", name = "Bob", trainerItems = { "X_ATTACK" }, itemSwitch = 0x10,
       mons = { sheet({ species = "Beta", spe = 10, maxHp = 900, moves = { hit("tap", 1) } }) } } } } })
   drain(battle)
   battle:submitChoice("p1", { action = "fight", move = 0 })
-  battle:submitChoice("p2", { action = "item", item = "X_ATTACK" })
+  battle:submitChoice("p2", { action = "fight", move = 0 })
   local events = drain(battle)
   ok(find(events, msgRaw("Bob\nused X ATTACK\non Beta!")), "K17: _EnemyUsedOnText names trainer and monster bare")
   for _, line in ipairs(Turn.LOAF_LINES) do

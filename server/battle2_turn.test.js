@@ -1611,12 +1611,15 @@ scenario('rampage_zero_pp', (events) => seq(events, duo('rzp', '1v1', 8,
 [both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0)),
   both(S(1), F(0)), both(F(0), F(0)), both(F(0), F(0)), both(F(0), F(0))]));
 
+// MIRROR MOVE after a METRONOME fails (CheckUserIsCharging: the called move
+// writes no LAST_COUNTER_MOVE); the foe's own jab is copied (the Lua driver).
 scenario('mirror_move_last_used', (events) => seq(events, duo('mml', '1v1', 514,
   [mn({ species: 'Alpha', maxHp: 600, spe: 10, moves: [hm('MIRROR_MOVE', 0, 0, 9), hm('tap', 1)] })],
-  [mn({ species: 'Beta', maxHp: 600, spe: 90, moves: [hm('METRONOME', 0, 0, 83), hm('tap', 1)] }),
-    mn({ species: 'Delta', maxHp: 600, spe: 90, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 600, spe: 90,
+    moves: [hm('METRONOME', 0, 0, 83), hm('tap', 1), hm('jab', 20)] }),
+  mn({ species: 'Delta', maxHp: 600, spe: 90, moves: [hm('tap', 1)] })],
   { metronomePool: [hm('pool_hit', 30, 0, 0)] }),
-[both(F(0), F(0)), both(F(0), F(1)), both(F(0), S(1))]));
+[both(F(0), F(0)), both(F(0), F(2)), both(F(0), F(1)), both(F(0), S(1))]));
 
 scenario('metronome_charge', (events) => seq(events, duo('mtc', '1v1', 515,
   [mn({ species: 'Alpha', maxHp: 600, spe: 90, moves: [hm('METRONOME', 0, 0, 83)] })],
@@ -1911,6 +1914,28 @@ const duo3 = (id, mode, seed, aMons, bMons, extra = {}) => {
 const both3 = (a, b, foe) => [['p1', a], [foe || 'p2', b]];
 const ITEM = (id) => ({ action: 'item', item: id });
 
+// The computer's seat (contract K16; the Lua driver explains): its items and
+// switches are AI_SwitchOrTryItem's alone, so the scenarios that show one give
+// side b's seat the trainer's bytes (`npc`) and `after`'s state -- a PERISH
+// count of 1, an HP at a quarter -- for the turns they do not spend.
+const SWITCH_OFTEN = 0x01;
+const ALWAYS_USE = 0x10;
+const npc = (o, fields) => { Object.assign(o.sides.b[0], fields); return o; };
+const after = (set, list) => (b) => {
+  set(b);
+  for (const [id, choice] of list) {
+    if (choice === 'auto') b.autoPick(id); else b.submitChoice(id, choice);
+  }
+};
+const perishOne = (b) => {
+  const foe = b.byId.get('p2');
+  foe.mons[foe.active - 1].perish = 1;
+};
+const hpTo = (hp) => (b) => {
+  const foe = b.byId.get('p2');
+  foe.mons[foe.active - 1].hp = hp;
+};
+
 scenario('r2c_happiness', (events) => seq(events, duo3('r3h', '1v1', 701,
   [mn({ species: 'Alpha', maxHp: 400, spe: 90, happiness: 255,
     moves: [hm('RETURN', 1, 0, 106), hm('FRUSTRATION', 1, 0, 107)] }),
@@ -1996,11 +2021,12 @@ scenario('r2c_pursuit_link', (events) => seq(events, duo3('r3u', '1v1', 712,
     mn({ species: 'Delta', maxHp: 400, spe: 10, moves: [hm('tap', 1)] })]),
 [both3(S(1), F(0)), both3(F(0), S(1)), both3(F(0), F(0))]));
 
-scenario('r2c_pursuit_computer', (events) => seq(events, duo3('r3v', 'coop_npc', 713,
+scenario('r2c_pursuit_computer', (events) => seq(events, npc(duo3('r3v', 'coop_npc', 713,
   [mn({ species: 'Alpha', maxHp: 400, spe: 10, moves: [hm('PURSUIT', 40, 7, 117)] })],
   [mn({ species: 'Beta', maxHp: 400, spe: 90, moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 400, spe: 90, moves: [hm('tap', 1)] })]),
-[both3(F(0), S(1)), both3(F(0), F(0))]));
+{ itemSwitch: SWITCH_OFTEN }),
+[after(perishOne, both3(F(0), F(0))), both3(F(0), F(0))]));
 
 scenario('r2c_future_sight', (events) => seq(events, duo3('r3s', '1v1', 714,
   [mn({ species: 'Alpha', maxHp: 400, spe: 90,
@@ -2309,14 +2335,14 @@ scenario('r2d_status_lines', (events) => seq(events, duo4('r4v', 'coop_npc', 825
   both3(F(0), F(1)), both3(S(2), F(2)), both3(F(0), F(2)), both3(F(0), F(2))]));
 
 scenario('r2d_full_heal_ai', (events) => {
-  const o = duo4('r4w', 'coop_npc', 823,
+  const o = npc(duo4('r4w', 'coop_npc', 823,
     [mn({ species: 'Alpha', maxHp: 999, spe: 90, confusion: 5, moves: [hm('wait', 0, 0, 85)] })],
     [mn({ species: 'Beta', maxHp: 999, atk: 200, spe: 10, status: 'BRN', confusion: 6,
-      moves: [hm('slam', 40)] })]);
-  o.sides.b[0].bag = [{ id: 'FULL_HEAL', count: 1 }, { id: 'FULL_RESTORE', count: 1 }];
+      moves: [hm('slam', 40)] })]),
+  { trainerItems: ['FULL_RESTORE', 'FULL_HEAL'], itemSwitch: ALWAYS_USE });
   return seq(events, o,
-    [both3(F(0), F(0)), both3(ITEM('FULL_HEAL'), ITEM('FULL_HEAL')), both3(F(0), F(0)),
-      both3(F(0), ITEM('FULL_RESTORE')), both3(F(0), F(0))]);
+    [both3(F(0), F(0)), both3(ITEM('FULL_HEAL'), F(0)), both3(F(0), F(0)),
+      after(hpTo(200), both3(F(0), F(0))), both3(F(0), F(0))]);
 });
 
 scenario('r2d_mysteryberry_mimic', (events) => seq(events, duo4('r4x', '1v1', 824,
@@ -2368,15 +2394,15 @@ scenario('r2d_faint_moves', (events) => seq(events, duo4('r4fm', '1v1', 829,
 [both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), both3(F(0), F(0)), [['p1', S(1)]],
   both3(F(0), F(0))]));
 
-scenario('r2d_sketch_transformed_end', (events) => {
-  const pool = [hm('pound', 10)];
-  pool[0].num = 1;
-  return seq(events, duo4('r4st', 'wild', 830,
-    [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('TRANSFORM', 0, 0, 57), hm('tap', 1)] })],
-    [mn({ species: 'Wild', maxHp: 900, spe: 10, moves: [hm('SKETCH', 0, 0, 148), hm('METRONOME', 0, 0, 83)] })],
-    { foe: 'wild', metronomePool: pool }),
-  [both3(F(0), F(1), 'wild'), both3(F(0), F(1), 'wild'), both3({ action: 'run' }, F(1), 'wild')]);
-});
+// The sketched move is one the computer's successor used after its AI
+// switched (the Lua driver explains why not a METRONOME call any more).
+scenario('r2d_sketch_transformed_end', (events) => seq(events, npc(duo4('r4st', 'coop_npc', 830,
+  [mn({ species: 'Alpha', maxHp: 900, hp: 60, spe: 90, moves: [hm('TRANSFORM', 0, 0, 57), hm('tap', 1)] })],
+  [mn({ species: 'Wild', maxHp: 900, spe: 10, moves: [hm('SKETCH', 0, 0, 148), hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Delta', maxHp: 900, atk: 150, spe: 10, moves: [hm('pound', 20)] })]),
+{ itemSwitch: SWITCH_OFTEN }),
+[both3(F(0), F(1)), after(perishOne, both3(F(1), F(1))), both3(F(1), F(0)), both3(F(0), F(0)),
+  both3(F(1), F(0)), both3(F(1), F(0)), both3(F(1), F(0))]));
 
 scenario('r2d_conversion2', (events) => seq(events, duo4('r4cv', '1v1', 831,
   [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [am('CONVERSION2', 0, 0, 136, 255), hm('tap', 1)] })],
@@ -2502,17 +2528,19 @@ scenario('r2e_spikes_early', (events) => seq(events, duo4('r5se', '1v1', 911,
     moves: [hm('SPIKES', 0, 0, 149), hm('slam', 250)] })]),
 [both3(F(0), F(0)), both3(F(0), F(1)), [['p1', S(1)]], [['p1', S(2)]], both3(F(0), F(0))]));
 
-scenario('r2e_ai_switch_slow', (events) => seq(events, duo4('r5as', 'coop_npc', 912,
+scenario('r2e_ai_switch_slow', (events) => seq(events, npc(duo4('r5as', 'coop_npc', 912,
   [mn({ species: 'Alpha', maxHp: 800, spe: 50, status: 'PSN', moves: [hm('tap', 1)] })],
   [mn({ species: 'Beta', maxHp: 800, spe: 10, moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 800, spe: 10, status: 'PSN', moves: [hm('tap', 1)] })]),
-[both3(F(0), S(1)), both3(F(0), F(0))]));
+{ itemSwitch: SWITCH_OFTEN }),
+[after(perishOne, both3(F(0), F(0))), both3(F(0), F(0))]));
 
-scenario('r2e_ai_switch_fast', (events) => seq(events, duo4('r5af', 'coop_npc', 913,
+scenario('r2e_ai_switch_fast', (events) => seq(events, npc(duo4('r5af', 'coop_npc', 913,
   [mn({ species: 'Alpha', maxHp: 800, spe: 50, status: 'PSN', moves: [hm('tap', 1)] })],
   [mn({ species: 'Beta', maxHp: 800, spe: 90, moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 800, spe: 10, status: 'PSN', moves: [hm('tap', 1)] })]),
-[both3(F(0), S(1)), both3(F(0), F(0))]));
+{ itemSwitch: SWITCH_OFTEN }),
+[after(perishOne, both3(F(0), F(0))), both3(F(0), F(0))]));
 
 scenario('r2e_pursuit_slot', (events) => {
   const round = (a1, a2, b1, b2) => [['a1', a1], ['a2', a2], ['b1', b1], ['b2', b2]];
@@ -2588,12 +2616,11 @@ scenario('rp2_item_lines', (events) => {
     [mn({ species: 'Beta', maxHp: 999, hp: 500, spe: 10, stages: { atk: 5 },
       moves: [hm('wait', 0, 0, 85)] })]);
   o.sides.b[0].name = 'COOLTRAINER♀ EMMA';
-  o.sides.b[0].bag = [{ id: 'X_ATTACK', count: 2 }, { id: 'DIRE_HIT', count: 1 },
-    { id: 'GUARD_SPEC', count: 1 }, { id: 'X_ACCURACY', count: 1 }, { id: 'POTION', count: 1 }];
+  npc(o, { trainerItems: ['X_ATTACK', 'X_ATTACK'], itemSwitch: ALWAYS_USE });
   return seq(events, o,
-    [both3(ITEM('X_ACCURACY'), ITEM('X_ATTACK')), both3(ITEM('GUARD_SPEC'), ITEM('X_ATTACK')),
-      both3(ITEM('X_SPEED'), ITEM('DIRE_HIT')), both3(ITEM('X_SPEED'), ITEM('GUARD_SPEC')),
-      both3(ITEM('POKE_BALL'), ITEM('X_ACCURACY')), both3(ITEM('POKE_DOLL'), ITEM('POTION')),
+    [both3(ITEM('X_ACCURACY'), F(0)), both3(ITEM('GUARD_SPEC'), F(0)),
+      both3(ITEM('X_SPEED'), F(0)), both3(ITEM('X_SPEED'), F(0)),
+      both3(ITEM('POKE_BALL'), F(0)), both3(ITEM('POKE_DOLL'), F(0)),
       both3(ITEM('DIRE_HIT'), F(0)), both3(ITEM('POTION'), F(0))]);
 });
 
@@ -2690,37 +2717,42 @@ scenario('fx2_out_of_pp', (events) => seq(events, duo4('fx2b', '1v1', 952,
 [both3(F(1), F(0)), both3(F(0), F(0)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(0), F(1)),
   both3(F(1), F(2))]));
 
-scenario('fx2_pursuit_ai_ko', (events) => seq(events, duo4('fx2c', 'coop_npc', 953,
+scenario('fx2_pursuit_ai_ko', (events) => seq(events, npc(duo4('fx2c', 'coop_npc', 953,
   [mn({ species: 'Alpha', maxHp: 300, atk: 200, spe: 10, moves: [hm('PURSUIT', 40, 7, 117)] })],
   [mn({ species: 'Beta', maxHp: 300, hp: 5, spe: 90, moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 300, spe: 90, moves: [hm('tap', 1)] })]),
-[both3(F(0), S(1)), both3(F(0), F(0))]));
+{ itemSwitch: SWITCH_OFTEN }),
+[after(perishOne, both3(F(0), F(0))), both3(F(0), F(0))]));
 
-scenario('fx2_protect_ai_item', (events) => seq(events, duo4('fx2d', 'coop_npc', 954,
+scenario('fx2_protect_ai_item', (events) => seq(events, npc(duo4('fx2d', 'coop_npc', 954,
   [mn({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hm('PROTECT', 0, 0, 120), hm('ENDURE', 0, 0, 121)] })],
   [mn({ species: 'Beta', maxHp: 300, spe: 10, moves: [hm('tap', 1)] }),
     mn({ species: 'Delta', maxHp: 300, spe: 10, moves: [hm('tap', 1)] })]),
-[both3(F(0), ITEM('X_ATTACK')), both3(F(1), S(1)), both3(F(0), F(0))]));
+{ trainerItems: ['X_ATTACK'], itemSwitch: SWITCH_OFTEN + ALWAYS_USE }),
+[both3(F(0), F(0)), after(perishOne, both3(F(1), F(0))), both3(F(0), F(0))]));
 
 const itemCounter = (id, seed, family) => (events) => {
-  const o = duo4(id, 'coop_npc', seed,
+  const o = npc(duo4(id, 'coop_npc', seed,
     [mn({ species: 'Alpha', maxHp: 300, spe: 10,
       moves: [hm('DISABLE', 0, 0, 86), hm('MIRROR_MOVE', 0, 0, 9), hm('wait', 0, 0, 85)] })],
-    [mn({ species: 'Beta', maxHp: 300, spe: 90, moves: [hm('tap', 1)] })]);
+    [mn({ species: 'Beta', maxHp: 300, spe: 90, moves: [hm('tap', 1)] })]),
+  { trainerItems: ['MAX_POTION', 'POTION'] });
   o.sides.a[0].family = family;
-  return seq(events, o, [both3(F(2), F(0)), both3(F(1), ITEM('X_ATTACK')), both3(F(2), F(0)),
-    both3(F(0), ITEM('X_DEFEND'))]);
+  return seq(events, o, [both3(F(2), F(0)), after(hpTo(50), both3(F(1), F(0))), both3(F(2), F(0)),
+    after(hpTo(50), both3(F(0), F(0)))]);
 };
 scenario('fx2_ai_item_counter_crystal', itemCounter('fx2e', 955, 'crystal'));
 scenario('fx2_ai_item_counter_gold', itemCounter('fx2f', 955, 'gs'));
 
-scenario('fx2_spikes_ai_switch', (events) => seq(events, duo4('fx2g', 'coop_npc', 956,
+scenario('fx2_spikes_ai_switch', (events) => seq(events, npc(duo4('fx2g', 'coop_npc', 956,
   [mn({ species: 'Alpha', maxHp: 300, atk: 250, spe: 90,
     moves: [hm('SPIKES', 0, 0, 149), hm('wait', 0, 0, 85), hm('slam', 200)] })],
   [mn({ species: 'Beta', maxHp: 300, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
     mn({ species: 'Delta', maxHp: 60, def: 5, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
     mn({ species: 'Eps', maxHp: 300, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
-[both3(F(0), F(0)), both3(F(1), S(1)), both3(F(2), F(0)), [['p2', S(2)]], both3(F(1), F(0))]));
+{ itemSwitch: SWITCH_OFTEN }),
+[both3(F(0), F(0)), after(perishOne, both3(F(1), F(0))), both3(F(2), F(0)), [['p2', S(2)]],
+  both3(F(1), F(0))]));
 
 scenario('fx2_baton_pass_mirror', (events) => seq(events, duo4('fx2h', '1v1', 957,
   [mn({ species: 'Passer', maxHp: 300, spe: 90, moves: [hm('BATON_PASS', 0, 0, 134)] }),
@@ -2841,7 +2873,6 @@ scenario('t2_nightmare_curse_fs', (events) => seq(events, duo4('t2e', '1v1', 975
 // computer's choices at the cart's points (K16), K17's side-word marks, K22's
 // quiet clips and missed moves, and the follow-ups (the Lua driver lists each).
 const A = (choice, foe = 'p2') => [['p1', choice], [foe, 'auto'], [foe, 'auto']];
-const npc = (o, fields) => { Object.assign(o.sides.b[0], fields); return o; };
 const typed = (o, types) => mn({ ...o, types });
 
 scenario('h2_ai_flags0', (events) => seq(events, duo4('h2a', 'coop_npc', 1101,
@@ -2992,6 +3023,68 @@ scenario('h2_solo_seat', (events) => {
   return seq(events, o, rounds);
 });
 
+// H2's follow-up: no LAST_MOVE / LAST_COUNTER_MOVE while CheckUserIsCharging
+// (the Lua driver says what each pins).
+scenario('h2f_mirror_charge', (events) => seq(events, duo4('h2fm', '1v1', 1131,
+  [mn({ species: 'Alpha', maxHp: 600, spe: 90,
+    moves: [hm('FLY', 30, 0, 43), hm('MIRROR_MOVE', 0, 0, 9)] })],
+  [mn({ species: 'Beta', maxHp: 600, spe: 10, moves: [hm('MIRROR_MOVE', 0, 0, 9), hm('tap', 1)] })]),
+[both3(F(0), F(0)), 'tick', both3(F(1), F(1)), both3(F(1), F(0))]));
+
+scenario('h2f_multi_hit_anims', (events) => seq(events, duo4('h2fh', '1v1', 1133,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, substitute: 100,
+    moves: [hm('double_hit', 20, 0, 44), hm('twin', 20, 0, 77), hm('METRONOME', 0, 0, 83),
+      hm('TRIPLE_KICK', 10, 0, 112)] })],
+  [mn({ species: 'Beta', maxHp: 999, spe: 10, moves: [hm('wait', 0, 0, 85)] })],
+  { metronomePool: [hm('multi', 15, 0, 29)] }),
+[both3(F(0), F(0)), both3(F(1), F(0)), both3(F(2), F(0)), both3(F(3), F(0))]));
+
+// A co-op 2v2 against one computer trainer dealt across two seats, no
+// `countSpeciesTypes` (the Lua driver explains).
+const T = (i, target) => ({ action: 'fight', move: i, target });
+const A2 = (a1, a2) => [['a1', a1], ['a2', a2], ['b1', 'auto'], ['b2', 'auto'], ['b1', 'auto'], ['b2', 'auto']];
+scenario('h2f_coop_npc_double', (events) => {
+  const k16 = (name) => ({
+    aiFlags: 0x07, trainerItems: ['POTION', 'NO_ITEM'], itemSwitch: 0x01, baseReward: 0x12, name,
+  });
+  const o = {
+    id: 'h2fd', mode: 'coop_npc', seed: 1134, choiceTimeout: 60, reconnectGrace: 60,
+    typeIds: R2D_TYPES, chart: R2D_CHART, specialTypes: R2D_SPECIAL,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 400, atk: 160, spe: 90, moves: [hm('thump', 60), hm('tap', 10)] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 400, atk: 160, spe: 70, moves: [hm('thump', 60), hm('tap', 10)] })] },
+      ],
+      b: [
+        { playerId: 'b1', mons: [
+          mn({ species: 'Beta', level: 22, maxHp: 160, spe: 50, moves: [hm('tap', 20), hm('GROWL', 0, 0, 18)] }),
+          mn({ species: 'Delta', level: 20, maxHp: 160, spe: 40, moves: [hm('tap', 20)] })] },
+        { playerId: 'b2', mons: [
+          mn({ species: 'Eps', level: 21, maxHp: 160, spe: 45, moves: [hm('thump', 25), hm('tap', 15)] }),
+          mn({ species: 'Zeta', level: 20, maxHp: 160, spe: 35, moves: [hm('tap', 20)] })] },
+      ],
+    },
+  };
+  Object.assign(o.sides.b[0], k16('LASS AMY'));
+  Object.assign(o.sides.b[1], k16('LASS AMY'));
+  const rounds = [];
+  for (let i = 1; i <= 14; i += 1) {
+    const aim = (i % 2 === 0) ? 3 : 4;
+    rounds.push(A2(T(0, aim), T(0, 7 - aim)));
+  }
+  return seq(events, o, rounds);
+});
+
+scenario('h2f_metronome_rampage', (events) => seq(events, duo4('h2fr', '1v1', 1132,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('METRONOME', 0, 0, 83), hm('jab', 20)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('MIRROR_MOVE', 0, 0, 9), hm('ENCORE', 0, 0, 139), hm('DISABLE', 0, 0, 86)] })],
+  { metronomePool: [hm('THRASH', 20, 0, 27)] }),
+[both3(F(0), F(2)), both3(F(0), F(1)), both3(F(0), F(0)), both3(F(1), F(0)), both3(F(1), F(1)),
+  both3(F(1), F(0))]));
+
 // ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
@@ -3058,7 +3151,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 225, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 229, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -3474,8 +3567,9 @@ for (const mode of ['wild', 'coop_wild']) {
     assert.strictEqual(battle.tick(11), true, "the wild seat's turn resolves");
     const items = battle.drainEvents().filter((event) => event.t === 'item');
     assert.deepStrictEqual(items, [], 'no item event came off the wild seat');
-    assert.strictEqual(battle.byId.get('wild').bag.POTION, 2, 'and it spent none of it');
-    assert.strictEqual(battle.byId.get('wild').bag.FULL_HEAL, 1, 'cure untouched too');
+    // K16: the computer's seats keep no bag at all (their items are
+    // AI_TryItem's, off `trainerItems`).
+    assert.strictEqual(battle.byId.get('wild').bag, null, 'the wild seat keeps no bag');
     assert.strictEqual(battle.byId.get('wild').mons[0].status, 'poison', 'still poisoned');
   });
 
@@ -4147,7 +4241,12 @@ function fight(o) {
     typeIds: o.typeIds, specialTypes: o.specialTypes, chart: o.chart,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', badges: o.badges, family: o.family, mons: o.a }],
-      b: [{ playerId: foe, name: 'Bob', mons: o.b }],
+      // K16's bytes for the computer's seat: its items and switches are
+      // AI_SwitchOrTryItem's.
+      b: [{
+        playerId: foe, name: 'Bob', mons: o.b, trainerItems: o.trainerItems,
+        itemSwitch: o.itemSwitch, aiFlags: o.aiFlags, baseReward: o.baseReward,
+      }],
     },
   });
   return { battle, foe };
@@ -5873,23 +5972,36 @@ test('RP2: NotVeryEffectiveText\'s ellipsis glyph, and K8\'s PP Ups on a `moves`
 });
 
 test('RP2: ItemUsedText / _EnemyUsedOnText, and nothing past them where the cart says nothing', () => {
+  // The computer's items are AI_TryItem's (K16): a trainer item slot and
+  // ALWAYS_USE on its monster's first turn out (`.XItem`), never a filed choice.
   const { battle, foe } = fight({
-    mode: 'coop_npc', seed: 3,
+    mode: 'coop_npc', seed: 3, trainerItems: ['X_ATTACK'], itemSwitch: 0x10,
     // Hurt, so the POTION below is used (FX-R2).
     a: [held({ species: 'Alpha', hp: 50, spe: 90, stages: { spe: 5 }, moves: [hit('wait', 0, 0, 85)] })],
     b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
   });
   battle.drainEvents();
-  let events = roundOf(battle, foe, ITEM('X_ACCURACY'), ITEM('X_ATTACK'));
+  assert.strictEqual(battle.submitChoice(foe, ITEM('X_ATTACK')), false,
+    'the computer\'s seat files no item (AI_SwitchOrTryItem\'s alone)');
+  let events = roundOf(battle, foe, ITEM('X_ACCURACY'), F(0));
   assert.ok(said(events, 'Ann used the X ACCURACY.'));
   assert.ok(said(events, 'Bob used X ATTACK on Beta!'));
   assert.strictEqual(msgsOf(events).length, 2, 'no X ACCURACY line, no stat line for the computer');
   const rose = events.find((e) => e.t === 'stat' && e.slot === 3);
   assert.strictEqual(rose && rose.stage, 1, 'the computer\'s X ATTACK still raises its stage');
   assert.strictEqual(monOf(battle, 'p1').xAccuracy, true);
-  events = roundOf(battle, foe, ITEM('GUARD_SPEC'), ITEM('DIRE_HIT'));
-  assert.ok(said(events, 'Ann used the GUARD SPEC..'), 'GUARD SPEC.\'s own stop, then the line\'s');
-  assert.ok(said(events, 'Bob used DIRE HIT on Beta!') && msgsOf(events).length === 2);
+  assert.strictEqual(battle.byId.get(foe).trainerItems[0], 'NO_ITEM', 'AI_TryItem clears the slot it used');
+  {
+    const other = fight({
+      mode: 'coop_npc', seed: 3, trainerItems: ['DIRE_HIT'], itemSwitch: 0x10,
+      a: [held({ species: 'Alpha', spe: 90, moves: [hit('wait', 0, 0, 85)] })],
+      b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+    });
+    other.battle.drainEvents();
+    const said2 = roundOf(other.battle, other.foe, ITEM('GUARD_SPEC'), F(0));
+    assert.ok(said(said2, 'Ann used the GUARD SPEC..'), 'GUARD SPEC.\'s own stop, then the line\'s');
+    assert.ok(said(said2, 'Bob used DIRE HIT on Beta!') && msgsOf(said2).length === 2);
+  }
   events = roundOf(battle, foe, ITEM('X_SPEED'), F(0));
   assert.ok(said(events, 'Ann used the X SPEED.') && said(events, "Alpha's SPEED went up!"));
   events = roundOf(battle, foe, ITEM('POTION'), F(0));
@@ -6123,14 +6235,17 @@ test('FX-R2 (3): the bag\'s "It won\'t have any effect." and an X item on a stat
   a.hp = 200;
   assert.strictEqual(battle.submitChoice('p1', { action: 'item', item: 'POTION', slot: 0 }), true,
     'a POTION on a hurt monster');
+  // The computer's items are its AI's (AI_TryItem, K16), which never ask.
   const c = fight({
-    mode: 'coop_npc', seed: 4,
+    mode: 'coop_npc', seed: 4, trainerItems: ['X_ACCURACY'], itemSwitch: 0x10,
     a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('tap', 1)] })],
     b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('tap', 1)] })],
   });
   c.battle.drainEvents();
   monOf(c.battle, c.foe).xAccuracy = true;
-  assert.strictEqual(c.battle.submitChoice(c.foe, ITEM('X_ACCURACY')), true, "the computer's X ACCURACY is filed");
+  assert.strictEqual(c.battle.submitChoice(c.foe, ITEM('X_ACCURACY')), false, "the computer's seat files no item");
+  assert.ok(said(roundOf(c.battle, c.foe), 'Bob used X ACCURACY on Beta!'),
+    "the computer's X ACCURACY is used whatever (EnemyUsedXAccuracy)");
 });
 
 test('FX-R2 (4): Struggle when every move with PP is the DISABLEd one', () => {
@@ -6185,14 +6300,19 @@ test('FX-R2 (5): a slot with no PP left when it is used -- `.out_of_pp`', () => 
 });
 
 test("FX-R2 (6): the computer's withdrawal is chased, and its knockout pays no EXP", () => {
+  // The withdrawal is AI_SwitchOrTryItem's (K16): SWITCH_OFTEN and a PERISH
+  // count of 1 (CheckAbleToSwitch's $30 + the slot).
   const { battle, foe } = fight({
-    mode: 'coop_npc', seed: 9,
+    mode: 'coop_npc', seed: 9, itemSwitch: 0x01,
     a: [held({ species: 'Alpha', maxHp: 300, atk: 200, spe: 10, moves: [hit('PURSUIT', 40, 0, 117)] })],
     b: [held({ species: 'Beta', maxHp: 300, hp: 5, spe: 90, moves: [hit('tap', 1)] }),
       held({ species: 'Delta', maxHp: 300, spe: 90, moves: [hit('tap', 1)] })],
   });
   battle.drainEvents();
-  const events = roundOf(battle, foe, F(0), S(1));
+  assert.strictEqual(battle.submitChoice(foe, S(1)), false, "the computer's seat files no switch");
+  monOf(battle, foe).perish = 1;
+  const events = roundOf(battle, foe, F(0), F(0));
+  assert.ok(!said(events, 'Bob withdrew Beta!'), "PursuitSwitch's knockout skips _EnemyWithdrewText");
   const fainted = events.findIndex((e) => e.t === 'faint' && e.text === 'Beta');
   const sent = events.findIndex((e) => e.t === 'send' && e.text === 'Delta');
   assert.ok(fainted >= 0 && sent > fainted, 'the knockout before the send-out');
@@ -6201,31 +6321,39 @@ test("FX-R2 (6): the computer's withdrawal is chased, and its knockout pays no E
 });
 
 test("FX-R2 (7): the computer's item went first; Crystal's forgets its last move", () => {
+  // The items are AI_TryItem's (K16): an X ATTACK on the first turn out with
+  // ALWAYS_USE (`.XItem`), a POTION at a quarter of the HP (`.HealItem`).
   const { battle, foe } = fight({
-    mode: 'coop_npc', seed: 10,
+    mode: 'coop_npc', seed: 10, trainerItems: ['X_ATTACK'], itemSwitch: 0x10,
     a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('PROTECT', 0, 0, 120)] })],
     b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('tap', 1)] })],
   });
   battle.drainEvents();
-  const events = roundOf(battle, foe, F(0), ITEM('X_ATTACK'));
+  const events = roundOf(battle, foe, F(0), F(0));
+  assert.ok(said(events, 'Bob used X ATTACK on Beta!'), "the computer's AI uses its X ATTACK");
   assert.ok(said(events, 'But it failed!') && !said(events, 'Alpha PROTECTED itself!'));
   const disableAfterItem = (family) => {
     const b = fight({
-      mode: 'coop_npc', seed: 11, family,
+      mode: 'coop_npc', seed: 11, family, trainerItems: ['POTION'],
       a: [held({ species: 'Alpha', maxHp: 300, spe: 10, moves: [hit('DISABLE', 0, 0, 86), hit('wait', 0, 0, 85)] })],
       b: [held({ species: 'Beta', maxHp: 300, spe: 90, moves: [hit('tap', 1)] })],
     });
     b.battle.drainEvents();
     roundOf(b.battle, b.foe, F(1), F(0));
-    return roundOf(b.battle, b.foe, F(0), ITEM('X_ATTACK'));
+    monOf(b.battle, b.foe).hp = 50;
+    const events2 = roundOf(b.battle, b.foe, F(0), F(0));
+    assert.ok(said(events2, 'Bob used POTION on Beta!'), `the computer's AI uses its POTION (${family})`);
+    return events2;
   };
   assert.ok(said(disableAfterItem('crystal'), 'But it failed!'), "Crystal's AI_TryItem");
   assert.ok(said(disableAfterItem('gs'), "Beta's tap was DISABLED!"), "Gold's does not");
 });
 
 test("FX-R2 (8): SPIKES -- the computer's own switch takes none", () => {
+  // The computer's switch is AI_SwitchOrTryItem's (K16: SWITCH_OFTEN, a PERISH
+  // count of 1).
   const build8 = (mode) => fight({
-    mode, seed: 12,
+    mode, seed: 12, itemSwitch: 0x01,
     a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('SPIKES', 0, 0, 149), hit('wait', 0, 0, 85)] })],
     b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('wait', 0, 0, 85)] }),
       held({ species: 'Delta', maxHp: 300, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
@@ -6233,7 +6361,10 @@ test("FX-R2 (8): SPIKES -- the computer's own switch takes none", () => {
   const npc = build8('coop_npc');
   npc.battle.drainEvents();
   roundOf(npc.battle, npc.foe);
-  const events = roundOf(npc.battle, npc.foe, F(1), S(1));
+  monOf(npc.battle, npc.foe).perish = 1;
+  const events = roundOf(npc.battle, npc.foe, F(1), F(0));
+  assert.ok(said(events, 'Bob withdrew Beta!'), "the computer's AI withdraws Beta");
+  assert.strictEqual(npc.battle.byId.get(npc.foe).active, 2, '...and sends Delta out');
   assert.ok(!said(events, "Delta's hurt by SPIKES!"));
   assert.strictEqual(monOf(npc.battle, npc.foe, 1).hp, 300);
   const link = build8('1v1');
@@ -6329,12 +6460,12 @@ test('K17 / K18: both sides marked, the cart\'s breaks, the bare names left bare
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [held({ species: 'Alpha', maxHp: 900, spe: 90,
         moves: [hit('wait', 0, 0, 85)] })] }],
-      b: [{ playerId: 'p2', name: 'Bob', bag: [{ id: 'X_ATTACK', count: 1 }],
+      b: [{ playerId: 'p2', name: 'Bob', trainerItems: ['X_ATTACK'], itemSwitch: 0x10,
         mons: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('tap', 1)] })] }],
     } });
   battle.drainEvents();
   battle.submitChoice('p1', { action: 'fight', move: 0 });
-  battle.submitChoice('p2', { action: 'item', item: 'X_ATTACK' });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
   assert.ok(battle.drainEvents().some(isMsg('Bob\nused X ATTACK\non Beta!')),
     '_EnemyUsedOnText names trainer and monster bare');
   // K18: `para` is a second line.
@@ -6523,6 +6654,101 @@ test('H2: the computer chooses as the cart does, at the cart\'s points', () => {
   const bond = ev('h2_pursuit_bond');
   assert.ok(bond.findIndex((e) => e.t === 'faint' && e.slot === 3)
     > bond.findIndex((e) => e.t === 'send' && e.text === 'Gamma'), 'the pursuer faints at the check after the switch');
+});
+
+test("H2 follow-up: the computer's items and switches are its AI's; a called move writes no LAST_MOVE", () => {
+  const ev = (name) => byName(jsRuns).get(name).events;
+  const lines = (name) => ev(name).filter((e) => e.t === 'msg').map((e) => plainLine(e.text));
+  const count = (name, text) => lines(name).filter((line) => line === text).length;
+  // (1) AI_SwitchOrTryItem's switch: _EnemyWithdrewText, then the send-out --
+  // no SPIKES; the withdrawal PURSUIT knocks out says nothing.
+  for (const name of ['r2c_pursuit_computer', 'r2e_ai_switch_slow', 'r2e_ai_switch_fast', 'fx2_spikes_ai_switch']) {
+    const list = ev(name);
+    const withdrew = list.findIndex((e) => e.t === 'msg' && plainLine(e.text) === 'Bob withdrew Beta!');
+    const sent = list.findIndex((e) => e.t === 'send' && e.text === 'Delta');
+    assert.ok(withdrew > 0 && sent > withdrew, `${name}: the AI's withdrawal, then the send-out`);
+  }
+  assert.ok(!lines('fx2_spikes_ai_switch').includes("Delta's hurt by SPIKES!"), 'AI_Switch: no SPIKES');
+  assert.ok(lines('fx2_spikes_ai_switch').includes("Eps's hurt by SPIKES!"), "the faint's successor: SPIKES");
+  assert.ok(!lines('fx2_pursuit_ai_ko').includes('Bob withdrew Beta!'), 'PursuitSwitch felled it: no line');
+  // AI_TryItem's items, in the cart's words.
+  assert.strictEqual(count('rp2_item_lines', 'COOLTRAINER♀ EMMA used X ATTACK on Beta!'), 2);
+  assert.strictEqual(ev('rp2_item_lines').filter((e) => e.t === 'stat' && e.slot === 3).length, 1,
+    'the second X ATTACK fails at +6, silently');
+  assert.ok(lines('r2d_full_heal_ai').includes('Bob used FULL HEAL on Beta!'));
+  assert.ok(lines('r2d_full_heal_ai').includes('Bob used FULL RESTORE on Beta!'));
+  assert.ok(lines('fx2_protect_ai_item').includes('Bob used X ATTACK on Beta!'));
+  assert.strictEqual(count('fx2_protect_ai_item', 'But it failed!'), 2, 'PROTECT, then ENDURE');
+  assert.ok(lines('fx2_ai_item_counter_crystal').includes('The MIRROR MOVE failed!'), "Crystal's item zeroes it");
+  assert.ok(lines('fx2_ai_item_counter_gold').includes("Beta's tap was DISABLED!"), "Gold's does not");
+  // (2) CheckUserIsCharging: METRONOME / MIRROR MOVE / a lock-in they began
+  // write no LAST_COUNTER_MOVE, so the foe's MIRROR MOVE fails on them.
+  assert.strictEqual(count('mirror_move_last_used', 'The MIRROR MOVE failed!'), 3);
+  assert.ok(lines('mirror_move_last_used').includes('Alpha used jab!'), "the foe's own jab is copied");
+  assert.strictEqual(count('metronome_charge', 'The MIRROR MOVE failed!'), 2, 'the called FLY: neither turn');
+  assert.ok(lines('h2f_mirror_charge').includes('Beta used FLY!'), 'the copied FLY lands');
+  assert.strictEqual(count('h2f_mirror_charge', 'The MIRROR MOVE failed!'), 2,
+    "Ann's MIRROR MOVE after the copy's release, Bob's after Ann's copy of tap");
+  assert.ok(lines('h2f_mirror_charge').includes('Alpha used tap!'), "Bob's chosen tap is recorded again");
+  const rampage = lines('h2f_metronome_rampage');
+  assert.ok(rampage.includes('But it failed!') && rampage.includes("It didn't affect Alpha!"),
+    'DISABLE and ENCORE find no move during the called THRASH');
+  assert.ok(rampage.includes('Alpha got an ENCORE!') && rampage.includes('Beta used jab!'),
+    'after it, the jab is Ann\'s again');
+  // (3) A co-op 2v2, the trainer dealt across two NPC seats: each seat's own
+  // AI_TryItem and FindMonInOTPartyToSwitchIntoBattle, and the fight ends.
+  const dbl = ev('h2f_coop_npc_double');
+  assert.ok(lines('h2f_coop_npc_double').includes('LASS AMY used POTION on Beta!'), "b1's item");
+  assert.ok(lines('h2f_coop_npc_double').includes('LASS AMY used POTION on Eps!'), "b2's item");
+  assert.ok(dbl.some((e) => e.t === 'send' && e.slot === 3 && e.text === 'Delta'), "b1's successor");
+  assert.ok(dbl.some((e) => e.t === 'send' && e.slot === 4 && e.text === 'Zeta'), "b2's successor");
+  assert.strictEqual(byName(jsRuns).get('h2f_coop_npc_double').outcome.outcome, 'win', 'no stall: decided');
+  // (4) EndLoop's `.loop_back_to_critical`: one clip a hit, each ahead of its
+  // HP, `amount` the hit's wBattleAnimParam.
+  const hitsOf = (id) => {
+    const list = ev('h2f_multi_hit_anims');
+    return list.filter((e) => e.t === 'anim' && e.text === id).map((e) => e.amount || 0);
+  };
+  assert.deepStrictEqual(hitsOf('double_hit'), [0, 1], 'behind a SUBSTITUTE: lowersub 1, flipped to 0, 1');
+  assert.deepStrictEqual(hitsOf('twin'), [0, 1]);
+  assert.deepStrictEqual(hitsOf('multi'), [1, 0, 1], "a METRONOME call's lowersub returns early: from 0");
+  assert.strictEqual(hitsOf('TRIPLE_KICK')[0], 1, "behind the SUBSTITUTE: lowersub's 1");
+  const tk = ev('r2c_triple_kick');
+  const firstKicks = tk.slice(0, tk.findIndex((e) => e.t === 'msg' && plainLine(e.text) === 'Hit 3 times!'));
+  assert.deepStrictEqual(firstKicks.filter((e) => e.t === 'anim').map((e) => e.amount || 0), [0, 1, 2]);
+  const order = firstKicks.filter((e) => e.t === 'anim' || e.t === 'damage').map((e) => e.t);
+  assert.deepStrictEqual(order, ['anim', 'damage', 'anim', 'damage', 'anim', 'damage'], 'each clip ahead of its HP');
+  const fury = ev('multi_hit_first_ko');
+  assert.deepStrictEqual(fury.filter((e) => e.t === 'anim' && e.text === 'fury_hits').map((e) => e.amount || 0),
+    [1, 1, 0], 'no SUBSTITUTE: 1 then 0; a first-hit knockout plays one');
+});
+
+test('H2 follow-up: wPlayerCharging -- set by the call, kept through its lock-in, cleared by a chosen move', () => {
+  const { battle, foe } = fight({
+    mode: '1v1', seed: 21,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hit('METRONOME', 0, 0, 83), hit('jab', 20)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.metronomePool = [hit('THRASH', 20, 0, 27)];
+  battle.drainEvents();
+  const fighterA = battle.byId.get('p1');
+  const alpha = monOf(battle, 'p1');
+  roundOf(battle, foe, F(0), F(0));
+  assert.strictEqual(fighterA.userCharging, true, 'ResetTurn: 1');
+  assert.strictEqual(alpha.lastMove, null, 'METRONOME\'s ClearLastMove, the THRASH writing nothing');
+  assert.strictEqual(alpha.lastCounterMove, null);
+  roundOf(battle, foe, F(0), F(0));
+  assert.ok(alpha.thrashing === null || alpha.thrashing === undefined || fighterA.userCharging === true,
+    'kept through `.locked_in`');
+  assert.strictEqual(alpha.lastCounterMove, null, '...the rampage\'s turn writes nothing either');
+  for (let i = 0; i < 6 && (alpha.thrashing && alpha.thrashing.turns > 0); i += 1) roundOf(battle, foe, F(0), F(0));
+  for (let i = 0; i < 6; i += 1) {
+    const events = roundOf(battle, foe, F(1), F(0));
+    if (said(events, 'Alpha used jab!')) break;
+  }
+  assert.ok(!fighterA.userCharging, '`.encored`: a chosen move zeroes it');
+  assert.strictEqual(alpha.lastCounterMove && alpha.lastCounterMove.id, 'jab', 'and UsedMoveText writes again');
+  assert.strictEqual(alpha.lastMove && alpha.lastMove.id, 'jab');
 });
 
 test('H2: K16 is copied onto each computer seat; LOVE / HEAVY BALL read the transformed copy', () => {
