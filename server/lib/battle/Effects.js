@@ -941,7 +941,7 @@ function restoreMoves(mon) {
       if (mon.moves[i - 1].ppUps !== undefined && mon.moves[i - 1].ppUps !== null) {
         back.ppUps = mon.moves[i - 1].ppUps;
       }
-      if (back.basePp !== undefined && back.basePp !== null) {
+      if (typeof back.basePp === 'number') {
         back.maxPp = getMaxPp(back.basePp, int(back.ppUps, 0));
       }
       mon.moves[i - 1] = back;
@@ -1445,6 +1445,8 @@ function applyPrimary(ctx) {
       pp: TRANSFORM_PP,
       maxPp: TRANSFORM_PP,
       ppUps: 0,
+      // No GetMaxPP behind the 5 (Turn `stepPp` keeps it fixed).
+      basePp: false,
       power: Math.max(0, int(m.power, 0)),
       accuracy: Math.max(0, int(m.accuracy, 255)),
       type: Math.max(0, int(m.type, 0)),
@@ -1801,6 +1803,24 @@ function ohkoLands(userSpeed, foeSpeed) {
   return int(userSpeed, 0) >= int(foeSpeed, 0);
 }
 
+// The wDamage a landed OHKO carries into the hit, before RandomizeDamage's
+// roll (the caller's): OneHitKOEffect_ writes $FFFF, and CalculateDamage
+// hands it on to AdjustDamageForMoveType -- STAB is `add hl, bc` on 16 bits
+// (65535 + 32767 wraps to 32766), and each matching TypeEffects row is a
+// Multiply / Divide by 10 whose quotient keeps its low two bytes (core.asm
+// :5100-5170). `percents` are the rows in the walk's order (Turn
+// `_typeRows`); a 0 is an immunity. Never under a few thousand on a real
+// chart, so AttackSubstitute breaks a doll outright (a high byte) and an
+// overkill writes the target's HP back over it.
+function ohkoDamage(stab, percents) {
+  let d = 65535;
+  if (stab) d = (d + Math.floor(d / 2)) % 65536;
+  for (const pct of (Array.isArray(percents) ? percents : [])) {
+    d = Math.floor(d * Math.max(0, int(pct, 100)) / 100) % 65536;
+  }
+  return d;
+}
+
 // `.specialDamage` reads wPlayerMoveNum, not the move's power (every one of
 // these is power 1 on the cart): SEISMIC TOSS and NIGHT SHADE deal the
 // user's level, SONICBOOM 20, DRAGON RAGE 40, and anything else is PSYWAVE.
@@ -1811,21 +1831,32 @@ const SPECIAL_DAMAGE = {
 };
 
 // PSYWAVE's damage: b = level + level / 2 (an 8-bit `add`, so a level over
-// 170 wraps), then `BattleRandom` redrawn until it is in [1, b). A b of 0 or
-// 1 has no such byte and freezes the cart; the referee deals 1 there and
-// draws nothing (quirks reproduced, freezes never).
-function psywaveDamage(level, rng) {
+// 170 wraps), then `BattleRandom` redrawn until it is in range -- and the
+// range is the mover's. The player's `.specialDamage` (core.asm :4657-4670)
+// redraws a 0 too (`and a / jr z, .loop`): [1, b). The enemy's (:4776-4789)
+// has no such test: [0, b), so the computer's PSYWAVE can deal 0 ("it's
+// possible for the enemy to do 0 damage"). `computer` is the computer's seat
+// (Turn `isComputerSeat`); both sides of a link fight are players, each on
+// its own cart, and keep [1, b). A range with no byte in it -- b of 0 or 1
+// for the player, 0 for the computer -- freezes the cart; the referee deals
+// the range's floor there (1, or 0) and draws nothing, and bounds the loop
+// the same way (quirks reproduced, freezes never).
+function psywaveDamage(level, rng, computer) {
   const L = Math.max(0, int(level, 1)) % 256;
   const b = (L + Math.floor(L / 2)) % 256;
-  if (b <= 1 || !rng) return 1;
-  let r;
-  do { r = rng.byte(); } while (!(r !== 0 && r < b));
-  return r;
+  const floorV = computer ? 0 : 1;
+  if (b <= floorV || !rng) return floorV;
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const r = rng.byte();
+    if (r >= floorV && r < b) return r;
+  }
+  return floorV;
 }
 
-// ctx: effectId, moveId, userMon, targetMon, power, rng
+// ctx: effectId, moveId, userMon, targetMon, power, rng, computerMover
 // The damage a SetDamageEffects move deals, drawn where the cart draws it
-// (PSYWAVE's loop, after the hit test). A SPECIAL_DAMAGE move whose id the
+// (PSYWAVE's loop, after the hit test; `computerMover` picks the enemy's
+// range, `psywaveDamage`). A SPECIAL_DAMAGE move whose id the
 // cart's table does not name is a modded one with no cart rule to follow: it
 // keeps the referee's older reading, its power when above 1 and the user's
 // level otherwise.
@@ -1840,7 +1871,7 @@ function setDamage(ctx) {
   const key = moveKey(c.moveId);
   const rule = Object.prototype.hasOwnProperty.call(SPECIAL_DAMAGE, key) ? SPECIAL_DAMAGE[key] : undefined;
   if (rule === 'level') return Math.max(0, int(userMon.level, 1));
-  if (rule === 'psywave') return psywaveDamage(userMon.level, c.rng);
+  if (rule === 'psywave') return psywaveDamage(userMon.level, c.rng, c.computerMover === true);
   if (typeof rule === 'number') return rule;
   const power = int(c.power, 0);
   if (power > 1) return power;
@@ -2164,16 +2195,32 @@ const BALL_DEFS = {
 };
 const BALL_DEFAULT = { randMax: 255, hpFactor: 12, wobbleFactor: 150 };
 
+// ItemUseBall's Rand1 (`.loop`, item_effects.asm :180-214): a byte is drawn
+// before the ball is even looked at -- the MASTER BALL's too, which then
+// captures -- and a GREAT BALL's is redrawn while above 200, an ULTRA or a
+// SAFARI BALL's while above 150 (`cp b / jr c, .loop`). The loop never
+// freezes on a real generator; the referee bounds it all the same and
+// answers the range's top (quirks reproduced, freezes never). No generator
+// draws nothing and answers 0.
 function catchRoll(rng, maxV) {
-  maxV = Math.max(0, int(maxV, 0));
-  if (maxV <= 0) return 0;
-  if (maxV >= 255) return rng ? rng.byte() : 0;
-  return (rng ? rng.byte() : 0) % (maxV + 1);
+  if (!rng) return 0;
+  maxV = Math.max(0, Math.min(255, int(maxV, 255)));
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const r = rng.byte();
+    if (r <= maxV) return r;
+  }
+  return maxV;
 }
 
+// Returns { caught, shakes } (shakes 0-3). RNG order: Rand1 (above), then
+// Rand2 only when Rand1 - Status passed the catch rate and W came out at 255
+// or below. Wobble math draws nothing.
 function catchAttempt(ballId, targetMon, rng) {
   const def = BALL_DEFS[ballId] || BALL_DEFAULT;
-  if (def.autoCatch) return { caught: true, shakes: 3 };
+  if (def.autoCatch) {
+    catchRoll(rng, 255);
+    return { caught: true, shakes: 3 };
+  }
 
   let rate = int(targetMon && targetMon.catchRate, 255);
   if (rate < 0) rate = 0;
@@ -2190,11 +2237,16 @@ function catchAttempt(ballId, targetMon, rng) {
     shakeBonus = 5;
   }
 
+  // W = ((MaxHP * 255) / BallFactor) / max(HP / 4, 1), unclamped: the HP
+  // quarter is the low byte of the 16-bit shift (`srl b / rr a` twice), a 0
+  // read as 1; X = min(W, 255) is the byte Rand2 and the shakes read.
   const maxhp = Math.max(1, int(targetMon && targetMon.maxHp, 1));
   const hp = Math.max(0, int(targetMon && targetMon.hp, 0));
-  const hpQuarter = Math.max(1, Math.floor(hp / 4));
+  let hpQuarter = Math.floor(hp / 4) % 256;
+  if (hpQuarter === 0) hpQuarter = 1;
   const factor = def.hpFactor || BALL_DEFAULT.hpFactor;
-  const f = Math.min(255, Math.floor(Math.floor(maxhp * 255 / factor) / hpQuarter));
+  const w = Math.floor(Math.floor(maxhp * 255 / factor) / hpQuarter);
+  const f = Math.min(255, w);
 
   function shakes() {
     const ballFactor2 = def.wobbleFactor || BALL_DEFAULT.wobbleFactor;
@@ -2210,6 +2262,9 @@ function catchAttempt(ballId, targetMon, rng) {
   const r = catchRoll(rng, def.randMax || 255) - statusBonus;
   if (r < 0) return { caught: true, shakes: 3 };
   if (r > rate) return { caught: false, shakes: shakes() };
+  // "If W > 255, the ball captures the Pokémon" (`jr nz, .captured`, :305-310)
+  // -- before Rand2 is drawn.
+  if (w > 255) return { caught: true, shakes: 3 };
   if (catchRoll(rng, 255) <= f) return { caught: true, shakes: 3 };
   return { caught: false, shakes: shakes() };
 }
@@ -2370,6 +2425,7 @@ module.exports = {
   isSetDamage,
   isOhko,
   ohkoLands,
+  ohkoDamage,
   SPECIAL_DAMAGE,
   psywaveDamage,
   setDamage,

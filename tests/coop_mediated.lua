@@ -4629,6 +4629,181 @@ do
     local rows = sc:bandMoveRows()
     eq(rows[1] and rows[1].right, "5/25", "Transform PP (Red co-op): a copy reads 5 over its own base")
   end
+
+  -- ------- final client fixes (FX-C2): STRUGGLE at the menu (co-op)
+  --
+  -- MediatedBattle `mustStruggle` (pokered AnyMoveToSelect, pokecrystal
+  -- CheckPlayerHasUsableMoves): the disabled move the only one with PP --
+  -- FIGHT opens no move list, says the cart's line, and aims a STRUGGLE.
+  -- Every monster in these fixtures is one species, so the DISABLE user's
+  -- side is what says whose move the line names.
+  do
+    for _, gen in ipairs({ 1, 2 }) do
+      local lead = mon(60, 40)
+      lead.moves = { { id = "FIX_TACKLE", pp = 5 }, { id = "FIX_EMBERISH", pp = 0 } }
+      local sc = seat5(gen, { lead })
+      local tag = gen == 1 and "Red co-op" or "Gold co-op"
+      local word = gen == 1 and "disabled" or "DISABLED"
+      local line = SPECIES_NAME .. "'s FIX TACKLE was " .. word .. "!"
+      ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+      -- Our partner's DISABLE: aimed at a foe of our species.
+      ev(sc, { t = "anim", slot = 1, side = "a", text = "DISABLE" })
+      ev(sc, { t = "msg", text = line })
+      eq(sc.medDisabled, nil, "Disable (" .. tag .. "): a partner's DISABLE is a foe's line")
+      -- A foe's: ours.
+      ev(sc, { t = "anim", slot = 2, side = "b", text = "DISABLE" })
+      ev(sc, { t = "msg", text = line })
+      eq(sc.medDisabled, 1, "Disable (" .. tag .. "): a foe's DISABLE on our FIX TACKLE is read off its line")
+      check(sc:medStruggles(), "Struggle (" .. tag .. "): the disabled move the only one with PP")
+      sc.messages, sc.phase, sc.commandIndex = {}, "choose", 1
+      sc:updateCommand(inputOf("a"))
+      eq(sc.phase, "messages", "Struggle (" .. tag .. "): FIGHT opens no move list -- the line first")
+      eq(sc.after, "target", "Struggle (" .. tag .. "): ...then the aim")
+      eq((sc.messages[1] or ""):gsub("\n", " "), SPECIES_NAME .. " has no moves left!",
+         "Struggle (" .. tag .. "): the cart's no-moves-left line")
+      local before = #choices(sc)
+      sc.phase = sc.after
+      sc:updateTarget(inputOf("a"))
+      local got = choices(sc)
+      eq(#got, before + 1, "Struggle (" .. tag .. "): the aimed STRUGGLE is sent")
+      eq(got[#got] and got[#got].action, "fight", "Struggle (" .. tag .. "): ...a FIGHT")
+      eq(got[#got] and got[#got].move, 0, "Struggle (" .. tag .. "): ...naming the disabled slot")
+      eq(sc.bideFiled, nil, "Struggle (" .. tag .. "): ...and no Bide is read off it")
+      -- The end of it, and the refusals of an ordinary list.
+      ev(sc, { t = "msg", text = SPECIES_NAME .. "'s disabled no more!" })
+      eq(sc.medDisabled, nil, "Disable (" .. tag .. "): \"disabled no more!\" lifts it")
+      lead.moves[2].pp = 3
+      ev(sc, { t = "anim", slot = 2, side = "b", text = "DISABLE" })
+      ev(sc, { t = "msg", text = line })
+      check(not sc:medStruggles(), "Struggle (" .. tag .. "): FIX EMBER with PP is a move list")
+      sc.messages, sc.phase, sc.moveIndex = {}, "move", 1
+      sc:updateMove(inputOf("a"))
+      eq((sc.messages[1] or ""):gsub("\n", " "), "The move is " .. word .. "!",
+         "menu (" .. tag .. "): the disabled pick is refused in the cart's words")
+      eq(sc.after, "move", "menu (" .. tag .. "): ...back to the list")
+      ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+      eq(sc.medDisabled, nil, "Disable (" .. tag .. "): a send-out on our seat drops it")
+    end
+  end
+
+  -- ------- final client fixes (FX-C2): a WHIRLWIND that blows the wild
+  -- monster off ends on its line -- the wild side is the one that left (the
+  -- target's, FX-R1), so the party is named the winner, and the carts play
+  -- no fanfare for an escape (MediatedBattle `finish`).
+  do
+    local function fanfares(sc)
+      local n = 0
+      for _, row in ipairs(sc.messages or {}) do
+        if type(row) == "table" and type(row.act) == "function" then n = n + 1 end
+      end
+      return n
+    end
+    for _, gen in ipairs({ 1, 2 }) do
+      local tag = gen == 1 and "Red" or "Gold"
+      local slots = {
+        { side = "a", owner = "ann", name = "ANN", party = { mon(60, 40) } },
+        { side = "a", owner = "bob", name = "BOB", party = { mon(60, 30) } },
+        { side = "b", owner = nil, name = "WILD", party = { mon(50, 20) } },
+      }
+      local sc = seat5(gen, nil, "coop_wild", slots)
+      sc.messages = {}
+      ev(sc, { t = "msg", text = SPECIES_NAME .. " was blown away!" })
+      sc:onBattleOutcome({ battle = "cb1", winners = { "ann", "bob" }, losers = { "npc" }, reason = "run" })
+      eq(sc.result, "win", "WHIRLWIND (" .. tag .. " coop_wild): the party is the side left standing")
+      eq(count(texts(sc), "Got away safely!"), 0, "WHIRLWIND (" .. tag .. " coop_wild): the move's line stands alone")
+      eq(fanfares(sc), 0, "WHIRLWIND (" .. tag .. " coop_wild): no victory fanfare for an escape")
+      -- A knockout still plays it.
+      local ko = seat5(gen, nil, "coop_wild", {
+        { side = "a", owner = "ann", name = "ANN", party = { mon(60, 40) } },
+        { side = "a", owner = "bob", name = "BOB", party = { mon(60, 30) } },
+        { side = "b", owner = nil, name = "WILD", party = { mon(50, 20) } },
+      })
+      ko.messages = {}
+      ko:onBattleOutcome({ battle = "cb1", winners = { "ann", "bob" }, losers = { "npc" }, reason = "ko" })
+      eq(fanfares(ko), 1, "knockout (" .. tag .. " coop_wild): the fanfare as before")
+    end
+    -- The wild monster's ROAR on the party (FX-R1: the target's side is the
+    -- runner and the loser), and the party's own RUN, the same shape: an
+    -- escape, no defeat -- its line, and no blackout behind it.
+    for _, gen in ipairs({ 1, 2 }) do
+      local tag = gen == 1 and "Red" or "Gold"
+      local sc = seat5(gen, nil, "coop_wild", {
+        { side = "a", owner = "ann", name = "ANN", party = { mon(60, 40) } },
+        { side = "a", owner = "bob", name = "BOB", party = { mon(60, 30) } },
+        { side = "b", owner = nil, name = "WILD", party = { mon(50, 20) } },
+      })
+      sc.messages = {}
+      ev(sc, { t = "msg", text = SPECIES_NAME .. " ran away scared!" })
+      sc:onBattleOutcome({ battle = "cb1", winners = { "npc" }, losers = { "ann", "bob" }, reason = "run" })
+      eq(sc.result, "loss", "ROAR on us (" .. tag .. " coop_wild): the outcome names the party the side that left")
+      eq(count(texts(sc), "Got away safely!"), 0, "ROAR on us (" .. tag .. " coop_wild): the move's line stands alone")
+      eq(sc.medEndReason, "run", "ROAR on us (" .. tag .. " coop_wild): the screen keeps why it ended")
+      local game = { save = { money = 100, party = { mon(60, 10) }, generation = gen },
+                     data = { constants = {} }, generation = gen }
+      local coop = setmetatable({ party = { count = function() return 2 end },
+        battle = { plan = { kind = "wild", allies = { { id = "ann" }, { id = "bob" } } } } },
+        { __index = Coop })
+      local blackedOut = false
+      coop.blackout = function() blackedOut = true end
+      coop:onBattleOver("loss", game, { mode = "coop_wild", mediated = true, medEndReason = "run" }, nil)
+      eq(blackedOut, false, "escape (" .. tag .. " coop_wild): a run is no defeat -- no blackout")
+      eq(game.save.money, 100, "escape (" .. tag .. " coop_wild): ...and the wallet is untouched")
+      local lost = setmetatable({ party = { count = function() return 2 end },
+        battle = { plan = { kind = "wild", allies = { { id = "ann" }, { id = "bob" } } } } },
+        { __index = Coop })
+      local wiped = false
+      lost.blackout = function() wiped = true end
+      lost:onBattleOver("loss", game, { mode = "coop_wild", mediated = true, medEndReason = "ko" }, nil)
+      eq(wiped, true, "knockout (" .. tag .. " coop_wild): a lost fight still whites out")
+    end
+  end
+
+  -- ------- final client fixes (FX-C2): an item the cart does not use
+  --
+  -- MediatedBattle `itemWontHaveEffect` (pokered ItemUseNoEffect, pokecrystal
+  -- WontHaveAnyEffectMessage): the line, the bag back up, nothing filed and
+  -- nothing spent -- the referees refuse such a choice at the door, which a
+  -- hub answers with silence.
+  do
+    for _, gen in ipairs({ 1, 2 }) do
+      local tag = gen == 1 and "Red co-op" or "Gold co-op"
+      local IE = (gen == 1 and need("BattleSim/Effects") or need("BattleSim2/Effects")).itemEffect
+      local lead = mon(60, 40)
+      local sc = seat5(gen, { lead })
+      sc.game.save.inventory = { POTION = 2 }
+      sc.bagSheet = { POTION = 2 }
+      sc.messages = {}
+      local before = #choices(sc)
+      sc.itemPick = { id = "POTION", effect = IE("POTION") }
+      eq(sc:commitMediatedItem(1, nil), false, "POTION (" .. tag .. ", full HP): not filed")
+      eq(#choices(sc), before, "POTION (" .. tag .. ", full HP): ...nothing sent")
+      eq(count(texts(sc), "It won't have any\neffect."), 1, "POTION (" .. tag .. ", full HP): the cart's line")
+      eq(sc.after, "item", "POTION (" .. tag .. ", full HP): ...then the bag again")
+      eq(sc.game.save.inventory.POTION, 2, "POTION (" .. tag .. ", full HP): ...the item kept")
+      lead.hp = 20
+      sc.itemPick = { id = "POTION", effect = IE("POTION") }
+      check(sc:commitMediatedItem(1, nil), "POTION (" .. tag .. ", hurt): filed")
+      eq(#choices(sc), before + 1, "POTION (" .. tag .. ", hurt): ...sent")
+    end
+    -- Gold's X ACCURACY: taken once (its `item` event sets the bit), refused
+    -- the second time (WontHaveAnyEffect_NotUsedMessage).
+    local IE2 = need("BattleSim2/Effects").itemEffect
+    local sc = seat5(2, { mon(60, 40) })
+    sc.game.save.inventory = { X_ACCURACY = 2 }
+    sc.bagSheet = { X_ACCURACY = 2 }
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    sc.itemPick = { id = "X_ACCURACY", effect = IE2("X_ACCURACY") }
+    check(sc:commitMediatedItem(1, nil), "X ACCURACY (Gold co-op): the first is filed")
+    ev(sc, { t = "item", slot = 0, side = "a", text = "X_ACCURACY" })
+    eq(sc.medItemFlags2 and sc.medItemFlags2.xAccuracy, true, "X ACCURACY (Gold co-op): its `item` event sets the bit")
+    sc.messages = {}
+    local before = #choices(sc)
+    sc.itemPick = { id = "X_ACCURACY", effect = IE2("X_ACCURACY") }
+    eq(sc:commitMediatedItem(1, nil), false, "X ACCURACY (Gold co-op): the second is not filed")
+    eq(#choices(sc), before, "X ACCURACY (Gold co-op): ...nothing sent")
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    eq(sc.medItemFlags2, nil, "X ACCURACY (Gold co-op): a send-out on our seat drops the bit")
+  end
 end
 
 T.finish("coop_mediated")

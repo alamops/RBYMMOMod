@@ -2416,7 +2416,14 @@ function M:updateCommand(input)
       local targets = self:targetChoices()
       self:commit({ slot = self.mine, move = locked,
                     target = targets[1] and targets[1].index or nil, locked = true })
+    elseif command == "FIGHT" and self:medStruggles() then
+      -- Nothing to pick (MediatedBattle `mustStruggle`: pokered
+      -- AnyMoveToSelect, pokecrystal CheckPlayerHasUsableMoves): no move list
+      -- -- the cart's line, then STRUGGLE, aimed the way an all-empty list
+      -- always aimed it here, since Struggle reads its target.
+      self:beginStruggle()
     elseif command == "FIGHT" then
+      self.medStruggle = nil
       self.moveIndex = self:rememberedMove()
       self.phase = "move"
     elseif command == "SWITCH" then
@@ -2700,12 +2707,25 @@ function M:updateMove(input)
     local pick = moves[self.moveIndex]
     local mine = self:mySlot()
     local hasPP = self:hasLivePP()
+    -- A Red / Gold mediated seat with nothing to pick never opened this list
+    -- on the cart (`beginStruggle`); a list left up across the event that
+    -- made it so answers the same way.
+    if self:medStruggles() then return self:beginStruggle() end
     -- One empty slot is not Struggle: the hub refuses that choice with
     -- silence, the client has already left the menu, and both players wait
     -- out BATTLE_CHOICE_TIMEOUT. Say so and stay on the list, the way Gen 1
     -- does. Every slot empty is Struggle and still commits.
     if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 then
-      self:say("There's no PP left\nfor this move!")
+      self:say(self:noPpLine())
+      self.phase = "messages"
+      self.after = "move"
+      return
+    end
+    -- ...and the disabled slot, after the PP (the carts' order: pokered
+    -- `.moveselected`, pokecrystal MoveSelectionScreen), in the cart's words
+    -- (MediatedBattle `moveDisabledLine`).
+    if pick and self:medDisabledAt(self.moveIndex) then
+      self:say(Mediated.moveDisabledLine(Gen.generation(self.game)))
       self.phase = "messages"
       self.after = "move"
       return
@@ -2993,7 +3013,7 @@ function M:updateItemParty(input)
          (effect.faintedOnly and not row.fainted)
          or (row.fainted and Effects.itemFailsOnFainted(effect))
        ) then
-      self:say("It won't have\nany effect.")
+      self:say(Mediated.NO_EFFECT_LINE)
       self.phase = "messages"
       self.after = "item_party"
       return
@@ -3033,6 +3053,15 @@ function M:commitMediatedItem(partyIndex, moveIndex)
   local pick = self.itemPick
   if not pick then return false end
   local effect = pick.effect
+  -- An item the cart would not use (`medItemNoEffect`): its line, the bag
+  -- back up, nothing filed and nothing spent.
+  if self:medItemNoEffect(pick, effect, partyIndex, moveIndex) then
+    self.itemPick = nil
+    self:say(Mediated.NO_EFFECT_LINE)
+    self.phase = "messages"
+    self.after = "item"
+    return false
+  end
   local bagCount = self.bagSheet and self.bagSheet[pick.id] or 0
   if bagCount < 1 and not (effect and effect.noConsume) then
     self:say("You have nothing\nto use!")
@@ -3146,6 +3175,12 @@ function M:updateTarget(input)
   elseif input:wasPressed("a") then
     local target = targets[self.targetIndex]
     local action = { slot = self.mine, move = self.moveIndex, target = target.index }
+    -- A STRUGGLE (`beginStruggle`) is no MIMIC and no Bide, whatever slot
+    -- it names.
+    if self.medStruggle then
+      action.struggle = true
+      return self:commit(action)
+    end
     -- Red's MIMIC against the computer: that target's moves first.
     if self:asksMimic(self:liveMoves()[self.moveIndex], target.index) then
       self.mimicAction = action
@@ -3154,6 +3189,138 @@ function M:updateTarget(input)
       return
     end
     self:commit(action)
+  end
+end
+
+-- ------- STRUGGLE at the menu, and the DISABLE it reads (co-op)
+--
+-- MediatedBattle has the rule (`mustStruggle`: pokered AnyMoveToSelect,
+-- pokecrystal CheckPlayerHasUsableMoves -- every slot at 0 PP, or every slot
+-- but the disabled one at a raw 0 byte, hands the player STRUGGLE with no
+-- move list) and the reading of the referee's DISABLE lines (`disableLine`).
+-- Co-op's one Red / Gold mediated seat only: the host-sim and Gen 3 keep
+-- their own menus, and a solo double is Gen 3's.
+
+-- Is this the seat FIGHT's rules here are about?
+function M:medMenuSeat()
+  return self.mediated and not self.ownSlots and not self.gen3
+end
+
+-- Our seat's disabled slot is `index` (`medDisabled`).
+function M:medDisabledAt(index)
+  return self:medMenuSeat() and self.medDisabled ~= nil
+    and tonumber(self.medDisabled) == tonumber(index)
+end
+
+-- The cart's line for a pick at 0 PP (MediatedBattle `noPpLine`).
+function M:noPpLine()
+  return Mediated.noPpLine(Gen.generation(self.game))
+end
+
+-- Does FIGHT hand our monster STRUGGLE?
+function M:medStruggles()
+  if not self:medMenuSeat() then return false end
+  return Mediated.mustStruggle(self:liveMoves(), self.medDisabled, Gen.generation(self.game))
+end
+
+-- FIGHT with nothing to pick: the cart's line (NoMovesLeftText /
+-- BattleText_MonHasNoMovesLeft), then "Attack who?" -- the cart has one foe
+-- and no question, but a co-op field has two, and an all-empty list has
+-- always been aimed here (STRUGGLE is an ordinary attack, recoil and all).
+-- The slot named is the disabled one when a Disable is why (MediatedBattle
+-- `sendStruggle` has why), else the first; the choice says it is a Struggle
+-- so neither a MIMIC pick nor a Bide is read off that slot.
+function M:beginStruggle()
+  local moves = self:liveMoves()
+  local slot = tonumber(self.medDisabled)
+  if not (slot and moves[slot]) then slot = 1 end
+  self.medStruggle = true
+  self.moveIndex = slot
+  self.targetIndex = 1
+  self.targetSince3 = self.frame
+  local seat = self:mySlot()
+  local name = self.medMineName or (seat and seat.battler and seat.battler.name)
+  self:say(Mediated.noMovesLeftLine(name, Gen.generation(self.game)))
+  self.phase = "messages"
+  self.after = "target"
+end
+
+-- One referee line, for our seat's Disable (MediatedBattle `noteDisableLine`
+-- has the rule).  A line disabling a move of ours is taken only when the
+-- DISABLE's user -- the seat of the move animation just ahead of its used
+-- line (`noteBideAnim`) -- is on the other side: our own monster's or our
+-- partner's DISABLE is aimed at a foe, whatever species that foe is.
+function M:noteDisableLine(text)
+  if not self:medMenuSeat() then return end
+  local generation = Gen.generation(self.game)
+  if generation == 1 and text == "All STATUS changes are eliminated!" then
+    self.medDisabled = nil
+    return
+  end
+  local said, slot = Mediated.disableLine(text, self.medMineName, self:liveMoves(), self.game)
+  if said == "off" then
+    self.medDisabled = nil
+  elseif said == "on" then
+    local at = self.medAnimAt
+    local user = at ~= nil and self.sim and self.sim:slot(at) or nil
+    local own = self:mySlot()
+    if user == nil or own == nil or user.side ~= own.side then
+      self.medDisabled = slot
+    end
+  end
+end
+
+-- ------- an item the cart does not use (co-op)
+--
+-- MediatedBattle has the rule (`itemWontHaveEffect`: pokered ItemUseNoEffect /
+-- pokecrystal WontHaveAnyEffectMessage keep the item and the turn, and both
+-- referees refuse such a choice at the door -- silence, from a hub), asked
+-- here of this seat's own party monster before anything is filed.
+
+function M:medItemNoEffect(pick, effect, partyIndex, moveIndex)
+  if not self:medMenuSeat() then return false end
+  local seat = self:mySlot()
+  if not seat then return false end
+  local index = partyIndex or seat.active or 1
+  local mon = (seat.party or {})[index]
+  local onField = index == (seat.active or 1)
+  local flags = self.medItemFlags2 or {}
+  return Mediated.itemWontHaveEffect(Gen.generation(self.game), self.game,
+    pick and pick.id, effect, mon, {
+      onField = onField, move = moveIndex,
+      confused = onField and seat.battler ~= nil and seat.battler.confusedTurns ~= nil,
+      xAccuracy = flags.xAccuracy, focusEnergy = flags.focusEnergy, mist = flags.mist,
+    })
+end
+
+-- Gold's wPlayerSubStatus4 bits on our monster out (MediatedBattle
+-- `noteItemFlags2` has the rule): our FOCUS ENERGY / MIST lines, and a
+-- BATON PASS of ours, which carries them to the one it sends out.
+local ITEM_FLAGS2 = { "xAccuracy", "focusEnergy", "mist" }
+function M:noteItemFlags2(text)
+  if not self:medMenuSeat() or Gen.generation(self.game) ~= 2 then return end
+  local species = self.medMineName
+  if type(text) ~= "string" or type(species) ~= "string" or species == "" then return end
+  if self.medAnimAt ~= nil and self.medAnimAt ~= self.mine then return end
+  self.medItemFlags2 = self.medItemFlags2 or {}
+  if text == species .. "'s getting pumped!" then
+    self.medItemFlags2.focusEnergy = true
+  elseif text == species .. "'s shrouded in MIST!" then
+    self.medItemFlags2.mist = true
+  else
+    local label = text:match("^" .. species:gsub("%W", "%%%0") .. " used (.-)!$")
+    if not label then return end
+    label = label:upper()
+    for _, move in ipairs(self:liveMoves()) do
+      if Mediated.isBatonPass2(move, self.game)
+         and (label == tostring(self:moveLabel(move.id)):upper()
+              or label == tostring(move.id):upper()) then
+        local carried = {}
+        for _, key in ipairs(ITEM_FLAGS2) do carried[key] = self.medItemFlags2[key] end
+        self.medItemFlags2Passed = carried
+        return
+      end
+    end
   end
 end
 
@@ -3183,6 +3350,10 @@ end
 function M:noteBideChoice(action)
   if self.ownSlots then return end
   local kind = action and action.kind
+  if action and action.struggle then
+    self.bideFiled, self.callFiled, self.bideLocked = nil, nil, nil
+    return
+  end
   local move = kind == nil and self:liveMoves()[tonumber(action.move) or 0] or nil
   self.callFiled = nil
   if kind == nil and action.locked and self.bideLocked then
@@ -4254,9 +4425,13 @@ function M:playEvents(events)
       -- actNext(playVictoryMusic) does -- after this batch's drains and faint
       -- sinks already appended above, and ahead of the parting text below.
       -- Inline play here started the jingle under Gust's still-living bar.
-      self.messages[#self.messages + 1] = {
-        act = function(battle) battle:playVictoryMusic() end,
-      }
+      -- None for a refereed Red / Gold escape (`escaped`, onBattleOutcome):
+      -- the carts play it from the knockout alone (MediatedBattle `finish`).
+      if not event.escaped then
+        self.messages[#self.messages + 1] = {
+          act = function(battle) battle:playVictoryMusic() end,
+        }
+      end
       -- Why the rating did not move, said once.
       --
       -- Winning a 2-on-2 against a trainer pays everything a trainer battle
@@ -11341,6 +11516,11 @@ function M:onBattleEvent(msg)
           local own = seat and seat.battler and seat.battler.curMoves
           self.medOverlayMimic = Mediated.mimicOverlay(self.game, own, msg.moves,
             Gen.generation(self.game))
+          -- Gold's TRANSFORM lifts the user's own Disable (ResetActorDisable,
+          -- MediatedBattle `noteDisableLine`); Red's keeps it.
+          if Gen.generation(self.game) == 2 and not self.medOverlayMimic then
+            self.medDisabled = nil
+          end
         end
         self:setOverlayAt(index, msg.moves)
       end
@@ -11375,6 +11555,11 @@ function M:onBattleEvent(msg)
     -- the newcomer under is the one its Bide lines will carry.
     self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
     self.bideOn1 = nil
+    -- ...and its Disable (`noteDisableLine`): a newcomer has none -- nor
+    -- Gold's item bits, unless a BATON PASS carried them (`noteItemFlags2`).
+    self.medDisabled = nil
+    self.medItemFlags2 = self.medItemFlags2Passed
+    self.medItemFlags2Passed = nil
     if msg.t == "send" and type(msg.text) == "string" then self.medMineName = msg.text end
   -- ...and so does a faint on it (Red / Gold): both referees hand a fallen
   -- monster its own list back there (BattleSim Effects.untransform, BattleSim2
@@ -11390,6 +11575,12 @@ function M:onBattleEvent(msg)
   -- (`noteBideAnim`).
   if msg.t == "anim" and not self.ownSlots and not self.gen3 then
     self:noteBideAnim(msg)
+  end
+  -- Our monster's Disable, as the referee says it (`noteDisableLine`), and
+  -- Gold's item bits (`noteItemFlags2`).
+  if msg.t == "msg" then
+    self:noteDisableLine(msg.text)
+    self:noteItemFlags2(msg.text)
   end
   -- Red's Bide (wave 5; MediatedBattle `bideLine1` has the rule): bounded by
   -- our monster's "used BIDE" line and its release -- or the confusion
@@ -11433,6 +11624,8 @@ function M:onBattleEvent(msg)
     self.bideStoring = nil
     self.confusedNow = nil
     self.callFiled = nil
+    -- A BATON PASS that sent nobody out carries nothing over.
+    self.medItemFlags2Passed = nil
   end
 
   -- A foe's sleep clip held behind its line (`medRows`, Mediated.viewerAnim)
@@ -11601,6 +11794,16 @@ function M:confirmMediatedItem(itemId, amount)
   -- BattleSim2's, and Gen 1's table has no berry or Kurt ball at all.
   local Effects = effectsFor(self.game)
   local effect = Effects.itemEffect(id)
+  -- Gold's X ACCURACY / GUARD SPEC. / DIRE HIT, taken on our monster out:
+  -- its bit is set now (`noteItemFlags2`).
+  local seat = self:mySlot()
+  if Gen.generation(self.game) == 2 and type(effect) == "table" and seat
+     and (seatSlot == nil or seatSlot == seat.active) then
+    self.medItemFlags2 = self.medItemFlags2 or {}
+    for _, key in ipairs(ITEM_FLAGS2) do
+      if effect[key] then self.medItemFlags2[key] = true end
+    end
+  end
   -- Not in a fight between players (Mediated.LINK_MODES, wave 5): a spar
   -- writes nothing home (MediatedBattle `syncMineStatus` has the carts'
   -- reasons); the bag is still spent, the bag being this mod's rule.
@@ -11675,7 +11878,14 @@ function M:onBattleOutcome(msg)
     winner = (mySide == "a") and "b" or "a"
   end
 
-  self.medPending[#self.medPending + 1] = { kind = "over", winner = winner }
+  -- Why it ended, for the ending past this screen: an escape is no defeat
+  -- (Coop `onBattleOver` reads it before deciding a blackout).
+  self.medEndReason = msg.reason
+  -- A wild fight's escape -- the party's RUN, a ROAR / WHIRLWIND sending the
+  -- wild monster off, its own flight -- ends on its line with no fanfare on
+  -- Red / Gold (MediatedBattle `finish` has the carts' reason).
+  self.medPending[#self.medPending + 1] = { kind = "over", winner = winner,
+    escaped = (msg.reason == "run" and not self.gen3) or nil }
   local why = MED_REASONS[msg.reason]
   -- A party's escape from a wild fight is the cart's "Got away safely!" and
   -- nothing more (Mediated.GOT_AWAY): said here only when the stream did not
@@ -11905,11 +12115,12 @@ function M:sendMediatedChoice(action)
     else
       pick, hasPP = self:liveMoves()[moveIndex], self:hasLivePP()
     end
-    if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 and not action.locked then
+    if pick and hasPP and (tonumber(pick.pp) or 0) <= 0 and not action.locked
+       and not action.struggle then
       -- Same sentence and phase as updateMove. A call site that skipped the
       -- menu (target-picker commit) must still show why the choice did not
       -- go -- otherwise commit returns the seat to choose with a blank box.
-      self:say("There's no PP left\nfor this move!")
+      self:say(self:noPpLine())
       self.phase = "messages"
       self.after = "move"
       return false

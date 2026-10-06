@@ -4428,7 +4428,9 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
       sides = {
         a = wildHumans(mode, {
           playerId = "p1", name = "Ann",
-          mons = { mon({ species = "Alpha", maxHp = 200, spd = 90 }) },
+          -- Hurt, so the POTION has HP to restore: one at full HP is the
+          -- cart's ItemUseNoEffect, refused before it is filed (FX-R1).
+          mons = { mon({ species = "Alpha", maxHp = 200, hp = 100, spd = 90 }) },
           bag = { POTION = 1 },
         }),
         b = {
@@ -8999,8 +9001,14 @@ do
   local events = turn(b, item("ETHER", 0))
   eq(row(events), "35/35/0", "ETHER past the wrap: down to GetMaxPP")
   ok(has(texts(events), "PP was restored."), "...and that is a restore (`add b`: NZ)")
-  t = texts(turn(b, item("ETHER", 0)))
-  eq(count(t, "It won't have any effect."), 1, "ETHER at the maximum: no effect, said once")
+  -- A second is ItemUsePPRestore's `.noEffect` -> `.itemNotUsed`: the item
+  -- kept and the turn unspent (FX-R1), so the choice is refused unfiled.
+  eq(b:submitChoice("p1", item("ETHER", 0)), false,
+     "ETHER at the maximum: no effect, refused (`.itemNotUsed`)")
+  eq(b.byId.p1.choice, nil, "...and the seat still owes its turn")
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  drain(b)
 
   -- (4) A wrap mid-fight: the freed trap's fresh run pays from 0 PP.  With a
   --     PP Up: 63 PP and none, and GetMaxPP re-reads 15 (15 + 3 before).
@@ -9023,10 +9031,170 @@ do
   events = turn(b, item("MAX_ETHER", 0))
   ok(has(texts(events), "PP was restored."), "MAX ETHER on a full move with a PP Up: restored")
   eq(row(events), "20/20/1,15/15/0", "...to what it had")
-  t = texts(turn(b, item("MAX_ETHER", 1)))
-  eq(count(t, "It won't have any effect."), 1, "MAX ETHER on a full move with none: no effect, once")
+  eq(b:submitChoice("p1", item("MAX_ETHER", 1)), false,
+     "MAX ETHER on a full move with none: no effect, refused (`.itemNotUsed`)")
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  drain(b)
   ok(has(texts(turn(b, item("MAX_ELIXER"))), "PP was restored."),
      "MAX ELIXER over the same list: restored through the first slot")
+end
+
+-- ------------------------------------------------------------------
+-- 12b. FX-R1: the Red referee's review fixes, each against pokered
+-- ------------------------------------------------------------------
+
+do
+  local FIGHT = { action = "fight", move = 0 }
+  local function texts(events)
+    local out = {}
+    for _, e in ipairs(events) do if e.t == "msg" then out[#out + 1] = e.text end end
+    return out
+  end
+  local function has(list, text)
+    for _, v in ipairs(list) do if v == text then return true end end
+    return false
+  end
+  local function indexOf(list, text)
+    for i, v in ipairs(list) do if v == text then return i end end
+    return nil
+  end
+
+  -- CalcHitChance's `c = 14 - EVASIONMOD`: the target's +6 evasion reads the
+  -- 25/100 ratio, so a 100-accuracy move needs a byte under 25.
+  local hits, misses = 0, 0
+  for seed = 1, 60 do
+    local b = battleOf({ seed = seed,
+      aMons = { mon({ spd = 90, moves = { move({ id = "jab", power = 10, accuracy = 100 }) } }) },
+      bMons = { mon({ species = "Beta", spd = 10, stages = { eva = 6 },
+                      moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+    drain(b)
+    b:submitChoice("p1", FIGHT)
+    b:submitChoice("p2", FIGHT)
+    local t = texts(drain(b))
+    if has(t, "Alpha's attack missed!") then misses = misses + 1 else hits = hits + 1 end
+  end
+  ok(misses > 45, "evasion +6 makes the move miss more (CalcHitChance reflects the stage)")
+
+  -- SendOutMon zeroes CONFUSED: out confused, back in clear-headed.
+  local b = battleOf({
+    aMons = { mon({ spd = 90, confusion = 4, moves = { move({ id = "growl", power = 0, effect = 18 }) } }),
+              mon({ species = "Gamma", spd = 90 }) },
+    bMons = { mon({ species = "Beta", spd = 10, moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+  drain(b)
+  b:submitChoice("p1", { action = "switch", slot = 1 })
+  b:submitChoice("p2", FIGHT)
+  drain(b)
+  b:submitChoice("p1", { action = "switch", slot = 0 })
+  b:submitChoice("p2", FIGHT)
+  drain(b)
+  eq(b.byId.p1.mons[1].confusion, 0, "switched back in: no confusion (SendOutMon, core.asm :1744-1749)")
+
+  -- The end of each slot: a poisoned Alpha at 5 HP moves first, its poison
+  -- takes it down right after, and Beta never moves.
+  b = battleOf({
+    aMons = { mon({ spd = 90, hp = 5, maxHp = 160, status = "PSN",
+                    moves = { move({ id = "growl", power = 0, effect = 18 }) } }) },
+    bMons = { mon({ species = "Beta", spd = 10, moves = { move({ id = "growl", power = 0, effect = 18 }) } }) } })
+  drain(b)
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  local t = texts(drain(b))
+  ok(has(t, "Alpha's hurt by poison!") and not has(t, "Beta used growl!"),
+     "a poison KO right after the mover's slot ends the turn (HandlePoisonBurnLeechSeed `jp z`)")
+  eq(b:outcome() and b:outcome().winners[1], "p2", "...and the fight")
+
+  -- ...a KO-er takes no residual that turn; and a slower poisoned battler's
+  -- tick comes after its own move, not at a turn's end.
+  b = battleOf({
+    aMons = { mon({ spd = 90, atk = 300, status = "PSN", maxHp = 160,
+                    moves = { move({ id = "slam", power = 120 }) } }) },
+    bMons = { mon({ species = "Beta", spd = 10, hp = 5, maxHp = 20 }), mon({ species = "Delta", spd = 10 }) } })
+  drain(b)
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  ok(not has(texts(drain(b)), "Alpha's hurt by poison!"),
+     "the slot that knocked Beta out skips Alpha's residual (`jp z, HandleEnemyMonFainted`)")
+  b = battleOf({
+    aMons = { mon({ spd = 10, status = "PSN", maxHp = 160, moves = { move({ id = "growl", power = 0, effect = 18 }) } }) },
+    bMons = { mon({ species = "Beta", spd = 90, status = "BRN", maxHp = 160,
+                    moves = { move({ id = "growl", power = 0, effect = 18 }) } }) } })
+  drain(b)
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  t = texts(drain(b))
+  ok(indexOf(t, "Beta's hurt by the burn!") < indexOf(t, "Alpha used growl!")
+     and indexOf(t, "Alpha used growl!") < indexOf(t, "Alpha's hurt by poison!"),
+     "each residual at the end of its own slot, in the turn's order")
+
+  -- A mutual last-monster KO: a loss against the computer, a draw in a link.
+  for _, case in ipairs({ { mode = "wild", winner = "p2" }, { mode = "1v1", outcome = "draw" } }) do
+    b = battleOf({ mode = case.mode,
+      aMons = { mon({ spd = 90, atk = 200, hp = 40, maxHp = 400,
+                      moves = { move({ id = "blast", power = 170, effect = 7 }) } }) },
+      bMons = { mon({ species = "Beta", spd = 10, hp = 20, maxHp = 400,
+                      moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+    drain(b)
+    b:submitChoice("p1", FIGHT)
+    b:submitChoice("p2", FIGHT)
+    drain(b)
+    local o = b:outcome()
+    if case.winner then
+      eq(o and o.winners and o.winners[1], case.winner,
+         "wild: both last monsters down -- the player blacks out (HandlePlayerBlackOut)")
+    else
+      eq(o and o.outcome, "draw", "1v1: both carts black out -- a draw")
+    end
+  end
+
+  -- ROAR / WHIRLWIND blow the TARGET away: its seat is the runner.
+  b = battleOf({ mode = "wild",
+    aMons = { mon({ level = 50, spd = 90, moves = { move({ id = "WHIRLWIND", power = 0, effect = 28 }) } }) },
+    bMons = { mon({ species = "Beta", level = 5, spd = 10, moves = { move({ id = "splash", power = 0, effect = 85 }) } }) } })
+  drain(b)
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  local runSide = nil
+  for _, e in ipairs(drain(b)) do if e.t == "run" then runSide = e.side end end
+  eq(runSide, "b", "WHIRLWIND: the wild monster was blown away -- its seat ran")
+  eq(b:outcome() and b:outcome().winners[1], "p1", "...side a stays")
+
+  -- ItemUseFailed: a POTION at full HP is handed back, item and turn.
+  b = battleOf({ aBag = { POTION = 1 } })
+  drain(b)
+  eq(b:submitChoice("p1", { action = "item", item = "POTION", slot = 0 }), false,
+     "a POTION at full HP is refused unfiled (`.healingItemNoEffect` -> ItemUseFailed)")
+  eq(b.byId.p1.bag.POTION, 1, "...the bag keeps it")
+
+  -- ETHER on a TRANSFORMed monster: the party's own move, then its PP over
+  -- the copies (`.afterRestoringPP`).
+  b = battleOf({ aBag = { ETHER = 1 },
+    aMons = { mon({ spd = 90, moves = { move({ id = "morph", power = 0, effect = 57, pp = 5, maxPp = 5 }) } }) },
+    bMons = { mon({ species = "Beta", spd = 10,
+                    moves = { move({ id = "thump", pp = 12 }), move({ id = "chop", pp = 3 }) } }) } })
+  drain(b)
+  b:submitChoice("p1", FIGHT)
+  b:submitChoice("p2", FIGHT)
+  drain(b)
+  b:submitChoice("p1", { action = "item", item = "ETHER", move = 0 })
+  b:submitChoice("p2", FIGHT)
+  drain(b)
+  local alpha = b.byId.p1.mons[1]
+  eq(alpha.preTransform.moves[1].pp, 5, "ETHER restored morph, the party's own move")
+  eq(alpha.moves[1].pp .. "/" .. alpha.moves[2].pp, "5/0",
+     "...and the four party PP bytes went over the copies: chop has none")
+
+  -- A learned row the hub laid in (no basePp): DecrementPP's wrap reads its
+  -- base off the maximum it states, before the PP Up bits move.
+  b = battleOf({})
+  drain(b)
+  local mon1 = b.byId.p1.mons[1]
+  mon1.moves[2] = { id = "learned", pp = 0, ppUps = 1, maxPp = 18, power = 10,
+                    accuracy = 255, type = 0, effect = 0, chance = 0 }
+  b:_decrementPp(mon1, 2)
+  eq(mon1.moves[2].pp .. "/" .. mon1.moves[2].ppUps .. "/" .. mon1.moves[2].maxPp, "63/0/15",
+     "a learned row's wrap: GetMaxPP re-read over the base its 18 named (15 + 3)")
+  eq(mon1.moves[2].basePp, 15, "...the base kept on the row")
 end
 
 -- ------------------------------------------------------------------

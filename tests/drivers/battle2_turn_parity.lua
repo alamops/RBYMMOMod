@@ -115,6 +115,15 @@
 --     `rp2_doll_wild` (the use line and a DRAW), `rp2_flute`,
 --     `rp2_status_anims_npc` / `_wild` (CheckTurn's ANIM_SLP / ANIM_CONFUSED,
 --     each side's variant and place) and `rp2_pp_ups` (K8 on `moves`).
+--   * the review fixes (FX-R2): `fx2_struggle_disabled`
+--     (`.CheckPlayerHasUsableMoves`), `fx2_out_of_pp` (DoTurn's `.out_of_pp`),
+--     `fx2_pursuit_ai_ko` (AI_Switch's PursuitSwitch, no EXP),
+--     `fx2_protect_ai_item` (wEnemyGoesFirst), `fx2_ai_item_counter_crystal`
+--     / `_gold` (Crystal's AI_TryItem forgets the counter move),
+--     `fx2_spikes_ai_switch`, `fx2_baton_pass_mirror`, `fx2_mutual_ko_npc` /
+--     `_link` (LostBattle / TiedAgainstText), `fx2_residual_ko` (the HP bar
+--     before the line), `fx2_bag_no_effect` ("It won't have any effect."),
+--     `fx2_ball_table` (PokeBallEffect) and `fx2_level_up_guards` (K9).
 --
 -- The snapshot digest carries `rngState`, which is the single number that says
 -- both runtimes drew the same count: a faint that paid out must not move it,
@@ -2638,8 +2647,9 @@ scenario("r2c_pursuit_link", function(events)
     { both3(S(1), F(0)), both3(F(0), S(1)), both3(F(0), F(0)) })
 end)
 
--- ...against the computer its switch is AI_Switch's (no PursuitSwitch): the
--- player's PURSUIT hits the incoming monster at its own slot, doubled.
+-- ...and against the computer its switch is AI_Switch's, which calls
+-- PursuitSwitch too (FX-R2): the player's PURSUIT hits the withdrawing
+-- monster, doubled, before the send-out, and its own turn is spent.
 scenario("r2c_pursuit_computer", function(events)
   return seq(events, duo3("r3v", "coop_npc", 713,
     { mn({ species = "Alpha", maxHp = 400, spe = 10, moves = { hm("PURSUIT", 40, 7, 117) } }) },
@@ -3510,7 +3520,8 @@ end)
 -- <MON>!"); X ACCURACY / DIRE HIT / GUARD SPEC. say nothing more; the
 -- player's X item says how it went (a raise, then a +6), the computer's
 -- nothing (a raise, then a +6); a ball in a trainer fight is blocked, a POKé
--- DOLL there is OAK's line; a medicine is named by the use line.
+-- DOLL there is refused (FX-R2: `.not_wild` uses nothing -- the turn goes on
+-- the next choice); a medicine is named by the use line.
 scenario("rp2_item_lines", function(events)
   local o = duo4("rp2i", "coop_npc", 931,
     { mn({ species = "Alpha", maxHp = 999, hp = 500, spe = 90, stages = { spe = 5 },
@@ -3529,7 +3540,8 @@ end)
 
 -- A wild fight's balls: ItemUsedText ahead of every throw, one wobble line
 -- per miss by its count (BallBrokeFreeText .. BallSoCloseText) and no "The
--- ball shook", then Text_BallCaught.
+-- ball shook", then Text_BallCaught.  From FX-R2 the throws are pokegold's
+-- PokeBallEffect: one catch byte, then the wobble draws.
 scenario("rp2_ball_lines", function(events)
   local wild = mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("wait", 0, 0, 85) } })
   wild.catchRate = 200
@@ -3626,6 +3638,190 @@ scenario("rp2_pp_ups", function(events)
     { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { upped, hm("tap", 1) } }) },
     { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) }),
     { both3(F(0), F(0)), both3(F(1), F(0)) })
+end)
+
+-- ------------------------------------------------------------------
+-- The review fixes (FX-R2, docs/plans/gen12-referee-gaps-fix.md): the Gold
+-- reviewer's findings, each the cart's way.  Synthetic numbers throughout.
+-- ------------------------------------------------------------------
+
+-- A function round's verdict as an event of its own (`submit` / `levelUp`).
+local function verdict(kind, fn)
+  return function(b, list)
+    list[#list + 1] = { t = kind, text = tostring(fn(b)) }
+  end
+end
+
+-- `.CheckPlayerHasUsableMoves`: with every slot that has PP DISABLEd, any
+-- FIGHT index is Struggle, decided as it is chosen (the reviewer's
+-- disable_struggle probe).
+scenario("fx2_struggle_disabled", function(events)
+  return seq(events, duo4("fx2a", "1v1", 951,
+    { mn({ species = "Alpha", maxHp = 300, spe = 10, moves = { hm("growl", 0, 0, 0, 0), hm("tackle", 35, 0, 0, 5) } }) },
+    { mn({ species = "Beta", maxHp = 300, spe = 90, moves = { hm("DISABLE", 0, 0, 86), hm("wait", 0, 0, 85) } }) }),
+    { both3(F(1), F(1)), both3(F(1), F(0)), both3(F(0), F(1)), both3(F(1), F(1)) })
+end)
+
+-- BattleCommand_DoTurn's `.out_of_pp`: SPITE empties the slot between the
+-- choice and the move -- "used", then NoPPLeftText; a charge move's
+-- HasNoPPLeftText alone.
+scenario("fx2_out_of_pp", function(events)
+  return seq(events, duo4("fx2b", "1v1", 952,
+    { mn({ species = "Alpha", maxHp = 900, spe = 90, moves = { hm("SPITE", 0, 0, 150), hm("tap", 1) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10,
+           moves = { hm("thump", 10, 0, 0, 2), hm("razor", 10, 0, 39, 2), hm("tap", 1) } }) }),
+    { both3(F(1), F(0)), both3(F(0), F(0)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(0), F(1)),
+      both3(F(1), F(2)) })
+end)
+
+-- AI_Switch's PursuitSwitch: the player's PURSUIT knocks the computer's
+-- withdrawing monster out before the send-out, and pays no EXP.
+scenario("fx2_pursuit_ai_ko", function(events)
+  return seq(events, duo4("fx2c", "coop_npc", 953,
+    { mn({ species = "Alpha", maxHp = 300, atk = 200, spe = 10, moves = { hm("PURSUIT", 40, 7, 117) } }) },
+    { mn({ species = "Beta", maxHp = 300, hp = 5, spe = 90, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 300, spe = 90, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), S(1)), both3(F(0), F(0)) })
+end)
+
+-- wEnemyGoesFirst: after the computer's item or switch the player's
+-- PROTECT / ENDURE fail (the reviewer's protect_ai_item probe).
+scenario("fx2_protect_ai_item", function(events)
+  return seq(events, duo4("fx2d", "coop_npc", 954,
+    { mn({ species = "Alpha", maxHp = 300, spe = 90, moves = { hm("PROTECT", 0, 0, 120), hm("ENDURE", 0, 0, 121) } }) },
+    { mn({ species = "Beta", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }),
+      mn({ species = "Delta", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(F(0), ITEM("X_ATTACK")), both3(F(1), S(1)), both3(F(0), F(0)) })
+end)
+
+-- Crystal's AI_TryItem zeroes wLastEnemyCounterMove (DISABLE and MIRROR MOVE
+-- find nothing); Gold / Silver's does not (the reviewer's ai_item_counter).
+local function itemCounter(id, seed, family)
+  return function(events)
+    local o = duo4(id, "coop_npc", seed,
+      { mn({ species = "Alpha", maxHp = 300, spe = 10,
+             moves = { hm("DISABLE", 0, 0, 86), hm("MIRROR_MOVE", 0, 0, 9), hm("wait", 0, 0, 85) } }) },
+      { mn({ species = "Beta", maxHp = 300, spe = 90, moves = { hm("tap", 1) } }) })
+    o.sides.a[1].family = family
+    return seq(events, o, { both3(F(2), F(0)), both3(F(1), ITEM("X_ATTACK")), both3(F(2), F(0)),
+      both3(F(0), ITEM("X_DEFEND")) })
+  end
+end
+scenario("fx2_ai_item_counter_crystal", itemCounter("fx2e", 955, "crystal"))
+scenario("fx2_ai_item_counter_gold", itemCounter("fx2f", 955, "gs"))
+
+-- SPIKES: the computer's own switch (AI_Switch) takes none; the successor
+-- of its faint does (EnemyPartyMonEntrance).
+scenario("fx2_spikes_ai_switch", function(events)
+  return seq(events, duo4("fx2g", "coop_npc", 956,
+    { mn({ species = "Alpha", maxHp = 300, atk = 250, spe = 90,
+           moves = { hm("SPIKES", 0, 0, 149), hm("wait", 0, 0, 85), hm("slam", 200) } }) },
+    { mn({ species = "Beta", maxHp = 300, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
+      mn({ species = "Delta", maxHp = 60, def = 5, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
+      mn({ species = "Eps", maxHp = 300, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(1), S(1)), both3(F(2), F(0)), { { "p2", S(2) } }, both3(F(1), F(0)) })
+end)
+
+-- BATON PASS's send-out zeroes both sides' counter moves: a foe's MIRROR
+-- MOVE right after it fails (the reviewer's bp_mirror probe).
+scenario("fx2_baton_pass_mirror", function(events)
+  return seq(events, duo4("fx2h", "1v1", 957,
+    { mn({ species = "Passer", maxHp = 300, spe = 90, moves = { hm("BATON_PASS", 0, 0, 134) } }),
+      mn({ species = "Heir", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }) },
+    { mn({ species = "Mirror", maxHp = 300, spe = 10, moves = { hm("MIRROR_MOVE", 0, 0, 9), hm("tap", 1) } }),
+      mn({ species = "Bench", maxHp = 300, spe = 10, moves = { hm("tap", 1) } }) }),
+    { both3(FP(0, 1), F(0)), both3(F(0), F(0)), both3(F(0), F(0)) })
+end)
+
+-- Both last monsters down at once: against the computer LostBattle (side b
+-- wins), in a link fight TiedAgainstText (a draw).
+local function mutualKo(id, mode)
+  return function(events)
+    return seq(events, duo4(id, mode, 958,
+      { mn({ species = "Alpha", maxHp = 100, atk = 250, spe = 90, moves = { hm("EXPLOSION", 250, 0, 7) } }) },
+      { mn({ species = "Beta", maxHp = 20, def = 5, spe = 10, moves = { hm("tap", 1) } }) }),
+      { both3(F(0), F(0)) })
+  end
+end
+scenario("fx2_mutual_ko_npc", mutualKo("fx2i", "coop_npc"))
+scenario("fx2_mutual_ko_link", mutualKo("fx2j", "1v1"))
+
+-- SANDSTORM and a wrap: the HP bar, then the line, and a knockout waits for
+-- the faint check after the routine.
+scenario("fx2_residual_ko", function(events)
+  return seq(events, duo4("fx2k", "1v1", 959,
+    { mn({ species = "Alpha", maxHp = 400, spe = 90, moves = { hm("SANDSTORM", 0, 5, 126), hm("wrap", 15, 0, 42) } }) },
+    { mn({ species = "Beta", maxHp = 400, hp = 60, spe = 10, moves = { hm("wait", 0, 0, 85) } }),
+      mn({ species = "Delta", maxHp = 400, hp = 80, spe = 10, moves = { hm("wait", 0, 0, 85) } }) }),
+    { both3(F(0), F(0)), both3(F(1), F(0)), { { "p2", S(1) } }, both3(F(1), F(0)), both3(F(1), F(0)) })
+end)
+
+-- The bag's "It won't have any effect.": refused items (not spent, the seat
+-- asked again) and an X item on a stat of 999 (used, "won't rise anymore!").
+scenario("fx2_bag_no_effect", function(events)
+  local function try(choice)
+    return verdict("submit", function(b) return b:submitChoice("p1", choice) end)
+  end
+  local o = duo4("fx2l", "coop_npc", 960,
+    { mn({ species = "Alpha", maxHp = 300, atk = 999, spe = 90, focusEnergy = true,
+           moves = { hm("tap", 1), hm("kick", 10, 0, 0, 5) } }) },
+    { mn({ species = "Beta", maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) })
+  o.sides.a[1].bag = { { id = "X_ATTACK", count = 1 }, { id = "X_ACCURACY", count = 2 },
+    { id = "DIRE_HIT", count = 1 }, { id = "POTION", count = 2 }, { id = "ANTIDOTE", count = 1 },
+    { id = "ETHER", count = 1 } }
+  return seq(events, o, {
+    try(ITEM("DIRE_HIT")), try({ action = "item", item = "POTION", slot = 0 }),
+    try({ action = "item", item = "ANTIDOTE", slot = 0 }),
+    try({ action = "item", item = "ETHER", slot = 0, move = 0 }),
+    both3(ITEM("X_ATTACK"), F(0)), both3(ITEM("X_ACCURACY"), F(0)), try(ITEM("X_ACCURACY")),
+    both3({ action = "item", item = "POTION", slot = 0 }, F(0)) })
+end)
+
+-- PokeBallEffect: BallMultiplierFunctionTable's balls, the HP step, the
+-- SLP / FRZ bonus, one catch byte and the wobble draws (a LURE BALL in a
+-- BATTLETYPE_FISH fight, a FAST BALL on MAGNEMITE, a LOVE BALL on the same
+-- species and gender, a HEAVY BALL by the sheet's weight).
+scenario("fx2_ball_table", function(events)
+  local wild = mn({ species = "Beta", level = 20, maxHp = 300, spe = 10, status = "SLP", statusTurns = 7,
+    moves = { hm("wait", 0, 0, 85) },
+    base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50, gender = 127 },
+    dvs = { atk = 15, def = 8, spe = 15, spc = 8 } })
+  wild.catchRate = 3
+  wild.speciesId = "MAGNEMITE"
+  wild.weight = 2000
+  local o = duo4("fx2m", "wild", 961,
+    { mn({ species = "Alpha", level = 50, maxHp = 300, spe = 90, moves = { hm("wait", 0, 0, 85) },
+           base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50, gender = 127 },
+           dvs = { atk = 15, def = 8, spe = 15, spc = 8 } }) },
+    { wild }, { foe = "wild" })
+  o.sides.a[1].mons[1].speciesId = "MAGNEMITE"
+  o.battleType = 4
+  local rounds = {}
+  for _, ball in ipairs({ "POKE_BALL", "GREAT_BALL", "PARK_BALL", "MOON_BALL", "FRIEND_BALL", "HEAVY_BALL",
+                          "LURE_BALL", "FAST_BALL", "LEVEL_BALL", "LOVE_BALL", "ULTRA_BALL" }) do
+    rounds[#rounds + 1] = both3(ITEM(ball), F(0), "wild")
+  end
+  return seq(events, o, rounds)
+end)
+
+-- K9 levelUp with Red's guards: no level-up between players, nor for the
+-- computer's seat; a level that rises, stats that do not fall, the K7
+-- ceiling at full stat exp.
+scenario("fx2_level_up_guards", function(events)
+  local function up(...)
+    local args = { ... }
+    return verdict("levelUp", function(b) return b:levelUp(args[1], args[2], args[3], args[4], args[5]) end)
+  end
+  local o = duo4("fx2n", "coop_npc", 962,
+    { mn({ species = "Alpha", level = 29, maxHp = 60, spe = 40, moves = { hm("tap", 1) },
+           base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50 },
+           dvs = { atk = 15, def = 15, spe = 15, spc = 15 } }) },
+    { mn({ species = "Beta", level = 20, maxHp = 900, spe = 10, moves = { hm("tap", 1) } }) })
+  local function s5(v) return { atk = v, def = v, spe = v, spa = v, spd = v } end
+  return seq(events, o, {
+    up("p2", 1, 21, s5(50), 950), up("p1", 1, 29, s5(50), 70), up("p1", 1, 30, s5(39), 70),
+    up("p1", 1, 30, s5(63), 97), up("p1", 1, 30), both3(F(0), F(0)),
+    up("p1", 1, 31, s5(64), 101), up("p1", 1, 31, s5(64), 100), both3(F(0), F(0)) })
 end)
 
 -- ------------------------------------------------------------------

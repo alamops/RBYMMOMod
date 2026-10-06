@@ -3387,65 +3387,218 @@ function M.caughtSheet(mon)
   return out
 end
 
--- Gen1 ItemUseBall factors (engine/items/item_effects.asm). Public constants.
-local BALL_DEFS = {
-  MASTER_BALL = { autoCatch = true },
-  POKE_BALL   = { randMax = 255, hpFactor = 12, wobbleFactor = 255 },
-  GREAT_BALL  = { randMax = 200, hpFactor = 8,  wobbleFactor = 200 },
-  ULTRA_BALL  = { randMax = 150, hpFactor = 12, wobbleFactor = 150 },
-  SAFARI_BALL = { randMax = 150, hpFactor = 12, wobbleFactor = 150 },
-}
-local BALL_DEFAULT = { randMax = 255, hpFactor = 12, wobbleFactor = 150 }
+-- PokeBallEffect (pokegold engine/items/item_effects.asm:212-480,
+-- pokecrystal the same), from the review fixes (FX-R2) -- the referee used to
+-- run pokered's ItemUseBall here.  In order:
+--
+--   1. a MASTER BALL catches with no draw (`.catch_without_fail`);
+--   2. BallMultiplierFunctionTable on the species' catch rate (`ballRate`);
+--   3. unless a LEVEL BALL (`jp z, .skip_hp_calc`): the HP formula
+--      (3*MaxHP - 2*HP) * rate / (3*MaxHP) with the cart's bytes
+--      (`catchHpRate`), then the status bonus -- +10 for SLP or FRZ, nothing
+--      for the rest (the routine's bug: the BRN/PSN/PAR +5 never applies) --
+--      held at 255.  HELD_CATCH_CHANCE's check passes GetItemHeldEffect the
+--      wrong register, and no item carries it: nothing;
+--   4. ONE BattleRandom: the ball catches when it is at most wFinalCatchRate
+--      (`cp b / jr z, .catch_without_fail / jr nc, .fail_to_catch`);
+--   5. a miss rolls the wobbles in the animation (GetPokeBallWobble, engine/
+--      battle_anims/pokeball_wobble.asm): up to three BattleRandom bytes, each
+--      under WobbleProbabilities' byte for the final rate, the first at or
+--      over it breaking free.  A catch draws none (`ret nz` on wWildMon).
+--
+-- Returns caught, the wobbles (a catch is 3; a miss 0..3 -- the throw's
+-- wThrownBallWobbleCount less one, which BALL_MISS_TEXT reads) and
+-- wFinalCatchRate.
 
-local function catchRoll(rng, maxV)
-  maxV = max(0, int(maxV, 0))
-  if maxV <= 0 then return 0 end
-  if maxV >= 255 then return rng and rng:byte() or 0 end
-  return (rng and rng:byte() or 0) % (maxV + 1)
+-- data/battle/wobble_probabilities.asm (game logic, not art): the first row
+-- whose catch-rate key is at least wFinalCatchRate gives the byte a wobble
+-- draw must be under (`cp b / jr nc, .checkwobble`; `cp b / ret c`).
+M.WOBBLE_PROBABILITIES = {
+  { 1, 63 }, { 2, 75 }, { 3, 84 }, { 4, 90 }, { 5, 95 }, { 7, 103 },
+  { 10, 113 }, { 15, 126 }, { 20, 134 }, { 30, 149 }, { 40, 160 },
+  { 50, 169 }, { 60, 177 }, { 80, 191 }, { 100, 201 }, { 120, 211 },
+  { 140, 220 }, { 160, 227 }, { 180, 234 }, { 200, 240 }, { 220, 246 },
+  { 240, 251 }, { 254, 253 }, { 255, 255 },
+}
+
+-- wBattleType's BATTLETYPE_FISH (constants/battle_constants.asm), which the
+-- LURE BALL asks for.
+M.BATTLETYPE_FISH = 4
+
+-- FastBallMultiplier's buggy loop reads only the first three bytes of
+-- FleeMons (data/wild/flee_mons.asm: SometimesFleeMons' MAGNEMITE, GRIMER,
+-- TANGELA), by party species id.
+M.FAST_BALL_SPECIES = { MAGNEMITE = true, GRIMER = true, TANGELA = true }
+
+-- HeavyBallMultiplier's `.WeightsTable`: the high byte the weight works out
+-- to (`heavyBallWeightByte`), under each key the boost.  Under HIGH(1024) is
+-- `.lightmon`'s -20.
+local HEAVY_BALL_WEIGHTS = { { 8, 0 }, { 12, 20 }, { 16, 30 }, { 255, 40 } }
+
+-- `sla b / jr c, .max`: doubled, $ff on the carry.
+local function doubleByte(b)
+  b = b * 2
+  if b > 255 then return 255 end
+  return b
 end
 
--- Returns caught, shakes (0-3).  RNG order: catch roll, then HP roll when
--- the first roll passed the rate check.  Wobble math draws nothing.
-function M.catchAttempt(ballId, targetMon, rng)
-  local def = BALL_DEFS[ballId] or BALL_DEFAULT
-  if def.autoCatch then return true, 3 end
+-- HeavyBallMultiplier's weight arithmetic on the Pokedex entry's weight word
+-- (the sheet's `weight`): half of it, less a sixteenth of that half and a
+-- thirty-second (`srl h / rr l`, four `srl b / rr c`, `.subbc`, one more),
+-- and only the HIGH byte compared.
+function M.heavyBallWeightByte(weight)
+  local half = floor((max(0, int(weight, 0)) % 65536) / 2)
+  local sixteenth = floor(half / 16)
+  return floor((half - sixteenth - floor(sixteenth / 2)) / 256)
+end
 
-  local rate = int(targetMon and targetMon.catchRate, 255)
-  if rate < 0 then rate = 0 elseif rate > 255 then rate = 255 end
-
-  local statusBonus, shakeBonus = 0, 5
-  local s = targetMon and targetMon.status
-  if s == "sleep" or s == "freeze" then
-    statusBonus, shakeBonus = 25, 10
-  elseif s then
-    statusBonus, shakeBonus = 12, 5
+-- BallMultiplierFunctionTable's routine for `ballId` on the catch rate `rate`
+-- (0..255).  `target` is the wild monster, `ctx.thrower` the player's monster
+-- on the field (wBattleMon), `ctx.battleType` wBattleType when the fight
+-- states it.  A ball with no row (POKé BALL, FRIEND BALL) leaves the rate.
+--
+--   * ULTRA BALL x2; GREAT BALL, SAFARI BALL ("leftover from RBY") and PARK
+--     BALL x1.5 (`srl a / add b`), each held at $ff;
+--   * HEAVY BALL: by the species' weight (`heavyBallWeightByte`) -- under
+--     102.4 kg -20 (a rate under 20 is 1: `ret nc / ld b, $1`), else
+--     +0/+20/+30/+40 held at $ff.  The weight is the Pokedex entry's, which a
+--     sheet carries as `weight`; without it the referee cannot place the
+--     monster and leaves the rate (docs: a wire field FX-R2 reports);
+--   * LEVEL BALL: x2 when the wild level is below the player's, x4 below its
+--     half, x8 below its quarter, $ff on any carry (and the HP step skipped,
+--     `catchAttempt`);
+--   * LURE BALL: x3 in a BATTLETYPE_FISH fight (`ctx.battleType`), $ff on a
+--     carry;
+--   * MOON BALL: nothing -- the routine compares the first evolution's item
+--     with MOON_STONE_RED, Gold's BURN_HEAL, which nothing evolves with;
+--   * LOVE BALL: x8 ($ff on a carry) when the two monsters are one species
+--     (the parties' species, wTempBattleMonSpecies / wTempEnemyMonSpecies)
+--     and of the SAME gender (the routine's bug), neither genderless --
+--     GetGender as ATTRACT reads it (`gender`, K15);
+--   * FAST BALL: x4 ($ff on a carry) for MAGNEMITE, GRIMER and TANGELA alone
+--     (the routine's bug, M.FAST_BALL_SPECIES).
+function M.ballRate(ballId, rate, target, ctx)
+  ctx = type(ctx) == "table" and ctx or {}
+  local b = max(0, min(255, int(rate, 0)))
+  if ballId == "ULTRA_BALL" then return doubleByte(b) end
+  if ballId == "GREAT_BALL" or ballId == "SAFARI_BALL" or ballId == "PARK_BALL" then
+    b = b + floor(b / 2)
+    if b > 255 then return 255 end
+    return b
   end
-
-  local maxhp = max(1, int(targetMon and targetMon.maxHp, 1))
-  local hp = max(0, int(targetMon and targetMon.hp, 0))
-  local hpQuarter = max(1, floor(hp / 4))
-  local factor = def.hpFactor or BALL_DEFAULT.hpFactor
-  local f = min(255, floor(floor(maxhp * 255 / factor) / hpQuarter))
-
-  local function shakes()
-    local ballFactor2 = def.wobbleFactor or BALL_DEFAULT.wobbleFactor
-    local y = floor(rate * 100 / ballFactor2)
-    local z
-    if y > 255 then
-      z = 255
-    else
-      z = floor(f * y / 255)
+  if ballId == "HEAVY_BALL" then
+    local weight = type(target) == "table" and int(target.weight, nil) or nil
+    if weight == nil then return b end
+    local high = M.heavyBallWeightByte(weight)
+    if high < 4 then
+      if b < 20 then return 1 end
+      return b - 20
     end
-    if s then z = z + shakeBonus end
-    if z < 10 then return 0 elseif z < 30 then return 1
-    elseif z < 70 then return 2 else return 3 end
+    for _, row in ipairs(HEAVY_BALL_WEIGHTS) do
+      if high < row[1] then
+        b = b + row[2]
+        if b > 255 then return 255 end
+        return b
+      end
+    end
+    return b
   end
+  if ballId == "LEVEL_BALL" then
+    local mine = int(type(ctx.thrower) == "table" and ctx.thrower.level, 0)
+    local enemy = int(type(target) == "table" and target.level, 0)
+    if enemy >= mine then return b end
+    if b * 2 > 255 then return 255 end
+    b = b * 2
+    local c = floor(mine / 2)
+    if enemy >= c then return b end
+    if b * 2 > 255 then return 255 end
+    b = b * 2
+    c = floor(c / 2)
+    if enemy >= c then return b end
+    return doubleByte(b)
+  end
+  if ballId == "LURE_BALL" then
+    if int(ctx.battleType, -1) ~= M.BATTLETYPE_FISH then return b end
+    return min(255, b * 3)
+  end
+  if ballId == "LOVE_BALL" then
+    local thrower = ctx.thrower
+    if type(thrower) ~= "table" or type(target) ~= "table" then return b end
+    local species = thrower.speciesId
+    if species == nil or species ~= target.speciesId then return b end
+    local mine, theirs = M.gender(thrower), M.gender(target)
+    if mine == nil or theirs == nil or mine ~= theirs then return b end
+    return min(255, b * 8)
+  end
+  if ballId == "FAST_BALL" then
+    if type(target) == "table" and target.speciesId and M.FAST_BALL_SPECIES[target.speciesId] then
+      return min(255, b * 4)
+    end
+    return b
+  end
+  return b
+end
 
-  local r = catchRoll(rng, def.randMax or 255) - statusBonus
-  if r < 0 then return true, 3 end
-  if r > rate then return false, shakes() end
-  if catchRoll(rng, 255) <= f then return true, 3 end
-  return false, shakes()
+-- PokeBallEffect's HP step and status bonus, in the cart's bytes: the HP
+-- doubled and the max HP tripled (16-bit pairs); when the tripled max has a
+-- high byte (a max HP of 86 or more) both are shifted right twice and a
+-- doubled HP whose low byte is then 0 becomes 1; only the LOW bytes go on --
+-- B the tripled max, C the doubled HP -- so a max HP past 341 wraps (the
+-- routine's bug).  hMultiplier is B - C as a byte, the product of the rate
+-- and it divided by B, and the quotient's LOW byte taken, 0 becoming 1.  A B
+-- of 0 (a max HP of 342 or 683) would hang the cart's _Divide (it never
+-- carries out of a zero divisor); the referee takes the quotient as 0, which
+-- the floor makes 1.  Then +10 for SLP or FRZ, held at 255.
+function M.catchHpRate(rate, hp, maxHp, status)
+  local doubled = (2 * max(0, int(hp, 0))) % 65536
+  local tripled = (3 * max(0, int(maxHp, 0))) % 65536
+  local c
+  if tripled >= 256 then
+    tripled = floor(tripled / 4)
+    doubled = floor(doubled / 4)
+    c = doubled % 256
+    if c == 0 then c = 1 end
+  else
+    c = doubled % 256
+  end
+  local b = tripled % 256
+  local multiplier = (b - c) % 256
+  local quotient = 0
+  if b > 0 then quotient = floor(max(0, min(255, int(rate, 0))) * multiplier / b) end
+  quotient = quotient % 256
+  if quotient == 0 then quotient = 1 end
+  if status == "sleep" or status == "freeze" then quotient = quotient + 10 end
+  if quotient > 255 then quotient = 255 end
+  return quotient
+end
+
+-- The wobble byte for a final rate: WobbleProbabilities' first row whose key
+-- is at least the rate.
+function M.wobbleByte(finalRate)
+  local rate = int(finalRate, 0)
+  for _, row in ipairs(M.WOBBLE_PROBABILITIES) do
+    if row[1] >= rate then return row[2] end
+  end
+  return 255
+end
+
+-- The throw (see the notes above `WOBBLE_PROBABILITIES`).  `ctx` is
+-- { thrower = the player's monster on the field, battleType = wBattleType }.
+function M.catchAttempt(ballId, targetMon, rng, ctx)
+  local function draw() return rng and rng:byte() or 0 end
+  if ballId == "MASTER_BALL" then return true, 3, 255 end
+  local target = type(targetMon) == "table" and targetMon or {}
+  local rate = M.ballRate(ballId, max(0, min(255, int(target.catchRate, 255))), target, ctx)
+  local final = rate
+  if ballId ~= "LEVEL_BALL" then
+    final = M.catchHpRate(rate, target.hp, target.maxHp, target.status)
+  end
+  if draw() <= final then return true, 3, final end
+  local threshold = M.wobbleByte(final)
+  for wobbles = 0, 2 do
+    if draw() >= threshold then return false, wobbles, final end
+  end
+  return false, 3, final
 end
 
 function M.isWildMode(mode)

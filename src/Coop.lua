@@ -631,7 +631,19 @@ end
 --
 -- Body lives on EvolveFx so Sessions:endMediated can call the same offer
 -- without requiring this module (that graph is a cycle).
+--
+-- Never after a lost fight, on any cart.  pokered EndOfBattle
+-- (engine/battle/end_of_battle.asm) jumps past EvolutionAfterBattle outside a
+-- link battle whenever wBattleResult is not 0 (`and a / jr nz,
+-- .resetVariables`), and a loss is RemoveFaintedPlayerMon's 1 -- a mutual
+-- last-monster knockout against the computer included, which the Red referee
+-- states as the computer's win (FX-R1); pokecrystal / pokegold ExitBattle
+-- `.not_linked` returns before EvolveAfterBattle on a LOSE the same way
+-- (EvolveFx's Gold and Gen 3 arms already decline it; its Gen 1 arm offered).
+-- The engine port's BattleState:finish runs Evolution.checkParty whatever
+-- the result -- a divergence the mod does not copy.
 function M.offerEvolutions(game, leveledUp, result, evoResolved)
+  if result == "loss" or result == "lose" then return false end
   return EvolveFx.offerEvolutions(game, leveledUp, result, evoResolved, {
     warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
     ui = mod.ui,
@@ -3461,6 +3473,21 @@ function M:onBattleOver(result, game, state, toLearn)
     return
   end
 
+  -- An escape is no defeat.  A refereed Red / Gold fight that ended on a
+  -- `run` -- the party's own RUN, the wild monster's ROAR / WHIRLWIND sending
+  -- ours off (the referees name the target's side the runner and the loser:
+  -- BattleSim Turn `_concedeRun` since FX-R1, BattleSim2's), or the party's
+  -- sending the wild one off -- reads as a "loss" or a "win" off the outcome's
+  -- lists, and a "loss" is a blackout to `blacksOut`.  The carts end every one
+  -- of those on the move's or GotAwayText's line and nothing more (pokered
+  -- SwitchAndTeleportEffect / TryRunningFromBattle set wEscapedFromBattle or
+  -- wBattleResult 2, never HandlePlayerBlackOut; pokecrystal's ForceSwitch /
+  -- TryToRunAwayFromBattle a DRAW), so the rest of this ending reads it as the
+  -- engine's own "run", as src/SoloBattle.lua's `engineResult` does for a
+  -- solo fight.  Gen 3 keeps its reading.
+  local outcome = result
+  if refereed and state.medEndReason == "run" and not state.gen3 then outcome = "run" end
+
   -- Asked here, first, and once.
   --
   -- The question is whether this player's own party has anything left
@@ -3468,7 +3495,7 @@ function M:onBattleOver(result, game, state, toLearn)
   -- ritual heals, and the forget-a-move menu and the engine's post-battle flow
   -- both touch the same party. Asked later it would be answering about the
   -- world after the fix rather than the world that needed one.
-  local blackout = M.blacksOut(result, game)
+  local blackout = M.blacksOut(outcome, game)
 
   self:offerForgets(game, toLearn)
   -- Consumed, not dropped. The trainer has been fought -- by four of them --
@@ -3495,7 +3522,7 @@ function M:onBattleOver(result, game, state, toLearn)
   -- exit, which is what reaches this function. The ritual's save writes land
   -- immediately; its warp waits for whatever the two lines above may have put
   -- on screen (see M:pumpBlackout).
-  local handled, engineRitual = self:consume(result, blackout)
+  local handled, engineRitual = self:consume(outcome, blackout)
   -- Invite / menu joiner: no buried BattleState, so consume is a no-op. On a
   -- win, finish the trainer off synthetically from the waiter's npcId --
   -- defeat flag, prize, afterBattle -- without pushing a fake battle. Never

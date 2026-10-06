@@ -5646,8 +5646,10 @@ end)()
       game = { data = {}, save = { inventory = { POTION = 1, REVIVE = 1, ETHER = 1 } } },
       battle = "b-potion-faint", role = "host",
     })
+    -- PIKACHU hurt: a POTION at full HP is ItemUseNoEffect and is not sent
+    -- at all now (FX-C2, MediatedBattle `itemWontHaveEffect`).
     fight.mine = {
-      { species = "PIKACHU", hp = 35, maxHp = 35,
+      { species = "PIKACHU", hp = 20, maxHp = 35,
         moves = { { id = "THUNDERSHOCK", pp = 5, maxPp = 30 } } },
       { species = "RATTATA", hp = 0, maxHp = 22,
         moves = { { id = "TACKLE", pp = 5, maxPp = 35 } } },
@@ -11170,6 +11172,25 @@ end)()
   Evolution.checkParty = realCheck
   check(seen and seen[caterpie],
         "and still offers when no mid-battle movie played")
+
+  -- ...and never after a lost fight (FX-C2): pokered EndOfBattle jumps past
+  -- EvolutionAfterBattle when wBattleResult is not 0 -- a Red loss, the
+  -- mutual last-monster knockout against the computer included.
+  for _, word in ipairs({ "loss", "lose" }) do
+    seen = nil
+    Evolution.checkParty = function(game, onDone, leveledUp)
+      seen = leveledUp
+      return 0
+    end
+    local offered = Coop.offerEvolutions(
+      { data = { pokemon = {} }, save = { party = { caterpie } } },
+      { [caterpie] = true },
+      word,
+      nil)
+    Evolution.checkParty = realCheck
+    check(seen == nil and offered == false,
+          "offerEvolutions offers nothing after a Red " .. word .. " (EndOfBattle's wBattleResult gate)")
+  end
 
   -- Gen 2 apply replaces the party slot and retargets on-plate pointers.
   local old = { species = "SLUG", level = 8 }
@@ -26478,7 +26499,10 @@ end)()
     eq(ppClient.phase, "messages",
        "a 0-PP fight that skipped the move menu still shows why")
     eq(ppClient.after, "move", "...and comes back to the list")
-    check((ppClient.messages[1] or ""):find("no PP left", 1, true),
+    -- Red's own words (FX-C2): pokered MoveNoPPText, "No PP left for /
+    -- this move!" -- Gold's BattleText_TheresNoPPLeftForThisMove is the
+    -- other one (MediatedBattle `noPpLine`).
+    check((ppClient.messages[1] or ""):gsub("\n", " "):find("No PP left for this move!", 1, true),
           "the PP sentence is shown")
     eq(ppClient.moveMemory[2], nil,
        "...and does not remember a move the hub never took")

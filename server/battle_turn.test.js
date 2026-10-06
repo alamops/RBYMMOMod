@@ -2387,7 +2387,9 @@ function fights(id, entries) {
               battle.autoPick(seat.pid);
             } else {
               if (typeof c === 'number') c = { action: 'fight', move: c };
-              battle.submitChoice(seat.pid, c);
+              if (!battle.submitChoice(seat.pid, c)) {
+                probes.push({ at, turn: t + 1, refused: seat.pid });
+              }
             }
           }
         }
@@ -3637,7 +3639,8 @@ scenario('g1_pp_max', fights('g1pm', [
     { seed: 10071,
       turns: [{ p1: 0, p2: 0 },
         { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
-        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 }] }),
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
+        { p1: 0 }] }),
   r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 1, ppUps: 1, maxPp: 18 }), r1m('tap', 10, 0)],
     { spd: 90 })],
     [r1s('Beta', [r1m('chill', 10, 5, { chance: 100 }), r1m('QUICK_ATTACK', 10, 4, { type: 1 })],
@@ -3651,6 +3654,7 @@ scenario('g1_pp_max', fights('g1pm', [
     { seed: 10073,
       turns: [{ p1: { action: 'item', item: 'MAX_ETHER', move: 0 }, p2: 0 },
         { p1: { action: 'item', item: 'MAX_ETHER', move: 1 }, p2: 0 },
+        { p1: 0 },
         { p1: { action: 'item', item: 'MAX_ELIXER' }, p2: 0 }] }),
   r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
     [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
@@ -3664,6 +3668,82 @@ scenario('g1_pp_max', fights('g1pm', [
   r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
     [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 100 })],
     { mode: 'wild', seed: 10077, turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+]));
+
+// FX-R1 (the Red referee's review fixes) -- the driver's notes say which
+// pokered rule each fight pins: 1-2 the reflected evasion, 3 a switch-out
+// clears confusion, 4 GREAT / ULTRA BALL's Rand1 redraw, 5-7 the residual at
+// the end of each slot (a poison KO, a KO-er's skipped residual, an EXPLOSION
+// that ends the turn), 8 the computer's PSYWAVE [0, b), 9 an OHKO's wDamage
+// into a Substitute, 10 an ETHER on a TRANSFORMed monster, 11 ItemUseFailed's
+// refusals, 12-13 a mutual last-monster KO (a loss against the computer, a
+// draw in a link fight).
+scenario('g1_fx_r1', fights('g1fx', [
+  r1duo([r1s('Alpha', [r1m('jab', 10, 0, { accuracy: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, stages: { eva: 6 } })],
+    { seed: 11001, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('jab', 10, 0, { accuracy: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, stages: { eva: -6 } })],
+    { seed: 11002, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90 }),
+    r1s('Gamma', [r1m('growl', 0, 18)], { spd: 90 })],
+  [r1s('Beta', [r1m('sonic', 0, 49)], { spd: 10 })],
+  { seed: 11003, turns: [{ p1: 0, p2: 0 },
+    { p1: { action: 'switch', slot: 1 }, p2: 0 },
+    { p1: { action: 'switch', slot: 0 }, p2: 0 },
+    { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 45 })],
+    { mode: 'wild', seed: 11004, aSeat: { bag: { GREAT_BALL: 4, ULTRA_BALL: 4 } },
+      turns: [{ p1: { action: 'item', item: 'GREAT_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'ULTRA_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'GREAT_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'ULTRA_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'GREAT_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'ULTRA_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90, hp: 5, status: 'PSN' })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 10 })],
+    { seed: 11005, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('slam', 120, 0)], { spd: 90, atk: 300, status: 'PSN' })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 10, hp: 5 }),
+      r1s('Delta', [r1m('growl', 0, 18)], { spd: 10 })],
+    { seed: 11006, turns: [{ p1: 0, p2: 0 }, { p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7)], { spd: 90, atk: 10 }),
+    r1s('Gamma', [r1m('growl', 0, 18)], { spd: 90 })],
+  [r1s('Beta', [r1m('thump', 40, 0)],
+    { spd: 10, def: 300, status: 'SLP', statusTurns: 3 })],
+  { seed: 11007, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 } },
+    { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, maxHp: 300 })],
+    [r1s('Beta', [r1m('PSYWAVE', 1, 41)], { spd: 10, level: 2 })],
+    { mode: 'wild', seed: 11008,
+      turns: [{ p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' },
+        { p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' }] }),
+  r1duo([r1s('Alpha', [r1m('drill', 1, 38, { type: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 30, substitute: 50 })],
+    { seed: 11009, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('morph', 0, 57, { pp: 5, maxPp: 5 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 12 }), r1m('chop', 10, 0, { pp: 3 })],
+      { spd: 10 })],
+    { seed: 11010, aSeat: { bag: { ETHER: 2 } },
+      turns: [{ p1: 0, p2: 0 }, { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
+        { p1: 1, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 11011, aSeat: { bag: { POTION: 1, ANTIDOTE: 1, POKE_DOLL: 1 } },
+      turns: [{ p1: { action: 'item', item: 'POTION', slot: 0 }, p2: 0 },
+        { p1: { action: 'item', item: 'ANTIDOTE', slot: 0 } },
+        { p1: { action: 'item', item: 'POKE_DOLL' } },
+        { p1: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7)], { spd: 90, atk: 200, hp: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 20 })],
+    { mode: 'wild', seed: 11012, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7)], { spd: 90, atk: 200, hp: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 20 })],
+    { seed: 11013, turns: [{ p1: 0, p2: 0 }] }),
 ]));
 
 // ------------------------------------------------------------------
@@ -4131,13 +4211,14 @@ test('the tie-break pair really straddles the threshold', () => {
   assert.strictEqual(firstAttacker('tie_high'), 'b', 'byte 128 reverses the group');
 });
 
-test('residuals tick in field order, not speed order', () => {
+test("residuals tick at the end of each battler's own slot", () => {
   const hurt = byName(jsRuns).get('residual_both').events
     .filter((event) => event.t === 'damage' && event.status)
     .map((event) => event.status);
   assert.deepStrictEqual(
-    hurt, ['BRN', 'PSN'],
-    "side a's burn ticks before side b's poison even though side b moved first",
+    hurt, ['PSN', 'BRN'],
+    "side b moved first, so its poison ticks right after its move and before side a's"
+    + ' burn (HandlePoisonBurnLeechSeed after each Execute*Move, FX-R1)',
   );
 });
 
@@ -4622,7 +4703,9 @@ test('a wedged resolve aborts on the wall-clock ceiling', () => {
 const wildBattle = (mode, id, bBag) => {
   const sideA = [{
     playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
-    mons: [mn({ species: 'Alpha', maxHp: 200, spd: 90, moves: [mv('thump', 40, 255, 0)] })],
+    // Hurt, so the POTION has HP to restore: one at full HP is the cart's
+    // ItemUseNoEffect, refused before it is filed (FX-R1).
+    mons: [mn({ species: 'Alpha', maxHp: 200, hp: 100, spd: 90, moves: [mv('thump', 40, 255, 0)] })],
   }];
   if (mode === 'coop_wild') {
     sideA.push({
@@ -6044,7 +6127,9 @@ test("SwitchAndTeleportEffect: the level roll in a wild fight, the trainer's ref
   assert.ok(duelSaid(g, 2, 'Alpha ran from battle!'), '...and then gets away');
   assert.strictEqual(duelTexts(g, 3).filter((x) => x === "It didn't affect Alpha!").length, 2);
   assert.ok(duelSaid(g, 3, 'Alpha ran away scared!'));
-  assert.deepStrictEqual([r1End(g, 2).reason, r1End(g, 3).winner], ['run', 'p1']);
+  // ROAR blows its TARGET away: the runner is Alpha's seat, so Beta's wins
+  // (FX-R1; it was the user's seat).
+  assert.deepStrictEqual([r1End(g, 2).reason, r1End(g, 3).winner], ['run', 'p2']);
   assert.ok(duelSaid(g, 4, 'Alpha is unaffected!') && duelSaid(g, 4, 'But, it failed!')
     && r1Row(g, 4, 1).rng === 9863, 'a trainer fight: ROAR and TELEPORT fail, no roll');
   assert.ok(duelSaid(g, 5, 'Beta was blown away!'));
@@ -6331,19 +6416,89 @@ test('GetMaxPP through a wrap, .restorePP, K8 PP Ups on the moves rows, and POK�
   const rows = (at) => duelEvents(g, at).filter((e) => e.t === 'moves' && e.side === 'a')
     .map((e) => e.moves.map((m) => `${m.pp}/${m.maxPp}/${m.ppUps}`).join(','));
   const NO_EFFECT = "It won't have any effect.";
-  assert.deepStrictEqual(rows(1), ['62/35/0', '35/35/0'],
+  const refused = (at) => jsRun(g).probes.filter((p) => p.at === at && p.refused !== undefined)
+    .map((p) => `${p.turn}:${p.refused}`);
+  assert.deepStrictEqual(rows(1), ['62/35/0', '35/35/0', '34/35/0'],
     'a slot past its wrap keeps the stated GetMaxPP; the ETHER brings it down to it');
   assert.deepStrictEqual(duelTexts(g, 1).filter((x) => x === 'PP was restored.' || x === NO_EFFECT),
-    ['PP was restored.', NO_EFFECT], '...restored once, then no effect -- said once, as `.noEffect` does');
+    ['PP was restored.'], '...restored once; the second is `.noEffect` -> `.itemNotUsed` (FX-R1)');
+  assert.deepStrictEqual(refused(1), ['3:p1'],
+    '...which hands the item and the turn back: refused unfiled, the FIGHT after it is the turn');
   assert.deepStrictEqual(rows(2), ['0/18/1,60/60/0', '63/15/0,60/60/0', '15/15/0,60/60/0'],
     'the borrow: one PP Up fewer on the row, GetMaxPP 15 over none, and the ETHER to 15');
-  assert.deepStrictEqual(rows(3), ['20/20/1,15/15/0', '20/20/1,15/15/0'],
+  assert.deepStrictEqual(rows(3), ['20/20/1,15/15/0', '19/20/1,15/15/0', '20/20/1,15/15/0'],
     'MAX ETHER and MAX ELIXER on a full move with a PP Up: the whole-byte compare restores');
   assert.deepStrictEqual(duelTexts(g, 3).filter((x) => x === 'PP was restored.' || x === NO_EFFECT),
-    ['PP was restored.', NO_EFFECT, 'PP was restored.'], '...and a full move with none is no effect');
+    ['PP was restored.', 'PP was restored.'], '...and a full move with none is no effect:');
+  assert.deepStrictEqual(refused(3), ['2:p1'], '...refused unfiled (FX-R1)');
   assert.ok(duelSaid(g, 4, 'p1 used POKé DOLL!'), 'the doll: data/items/names.asm "POKé DOLL"');
   assert.ok(duelSaid(g, 5, "Played the POKé FLUTE. Now, that's a catchy tune!"), 'PlayedFluteNoEffectText');
   assert.ok(duelSaid(g, 6, 'p1 used POKé BALL!') && duelSaid(g, 6, 'You missed the POKéMON!'),
     'ItemUseBallText01');
   assert.ok(duelSaid(g, 7, 'Darn! The POKéMON broke free!'), 'ItemUseBallText02');
+});
+
+// FX-R1: the g1_fx_r1 streams, stated as claims (the parity tests hold the Lua
+// half to them).
+test('FX-R1: evasion, send-out, balls, slot residuals, PSYWAVE, OHKO, ETHER, refusals, black-out', () => {
+  const g = 'g1_fx_r1';
+  const hits = (at) => duelEvents(g, at).filter((e) => e.t === 'damage' && e.side === 'b').length;
+  assert.strictEqual(hits(1), 1, 'evasion +6 reads the 25/100 ratio (`c = 14 - EVASIONMOD`): 1 of 4');
+  assert.strictEqual(hits(2), 4, 'evasion -6 reads 400/100, held at 255: 4 of 4');
+  assert.deepStrictEqual([1, 2, 3].map((t) => r1Seat(g, 3, t, 0).conf), [4, 4, 2],
+    'Alpha confused, switched out and back');
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === 'Alpha became confused!').length, 2,
+    'SendOutMon cleared CONFUSED: SUPERSONIC confuses Alpha again');
+  assert.ok(duelSaid(g, 4, 'All right! Beta was caught!') && r1End(g, 4).reason === 'catch',
+    'GREAT / ULTRA BALL: Rand1 redrawn into 0..200 / 0..150');
+  const t5 = duelTexts(g, 5);
+  assert.ok(t5.includes("Alpha's hurt by poison!") && !t5.includes('Beta used growl!'),
+    "Alpha's poison right after its slot takes its last HP: Beta never moves");
+  assert.deepStrictEqual([r1End(g, 5).outcome, r1End(g, 5).winner], ['win', 'p2']);
+  assert.ok(!duelEvents(g, 6).slice(0, duelEvents(g, 6).findIndex((e) => e.t === 'switch'))
+    .some((e) => e.t === 'msg' && e.text === "Alpha's hurt by poison!"),
+  'a slot that KOs the foe skips the knocker-out\'s residual');
+  assert.ok(duelSaid(g, 6, "Alpha's hurt by poison!"), '...and it ticks on the next turn');
+  assert.strictEqual(duelTexts(g, 7).filter((x) => x === 'Beta is fast asleep!').length, 1,
+    "Alpha's EXPLOSION ends the turn before the sleeping Beta's slot");
+  assert.ok(duelHits(g, 8).filter((h) => h.endsWith(':0:300') || h.endsWith(':0:296')).length >= 1,
+    "the computer's PSYWAVE draws from [0, b): a 0 lands");
+  assert.deepStrictEqual([r1Row(g, 9, 1).last, r1Seat(g, 9, 1, 3).sub, r1Seat(g, 9, 1, 3).hp],
+    [29553, 0, 30], 'an OHKO into a doll: 65535 through STAB and the roll breaks it outright');
+  assert.strictEqual(r1Row(g, 9, 2).last, 30, '...and the next takes the HP left (overkill)');
+  assert.deepStrictEqual([r1Seat(g, 10, 2, 0).moves, r1Seat(g, 10, 2, 0).transformed],
+    ['thump:5,chop:0', true], "ETHER on a TRANSFORMed monster: its own move, copied over the copies'");
+  const refused = (at) => jsRun(g).probes.filter((p) => p.at === at && p.refused !== undefined)
+    .map((p) => `${p.turn}:${p.refused}`);
+  assert.deepStrictEqual(refused(10), ['3:p1'], '...so a FIGHT on the emptied chop is refused');
+  assert.deepStrictEqual(refused(11), ['1:p1', '2:p1', '3:p1'],
+    'ItemUseFailed: a POTION at full HP, an ANTIDOTE with no poison, a POKé DOLL in a trainer fight');
+  assert.ok(!duelEvents(g, 11).some((e) => e.t === 'item'), '...none of them is used');
+  assert.deepStrictEqual([r1End(g, 12).outcome, r1End(g, 12).winner], ['win', 'p2'],
+    'both last monsters down against the computer: the player blacks out');
+  assert.deepStrictEqual([r1End(g, 13).outcome, r1End(g, 13).winner], ['draw', ''],
+    '...and in a link fight both carts black out: a draw');
+});
+
+// FX-R1: a learned row the hub laid in mid-fight (nextMoves12 takes a new
+// move's row whole -- a GetMaxPP and no base): DecrementPP's wrap reads the
+// base off the maximum it states, over the PP Ups it had before the step.
+// Twin of tests/battle_sim_turn.lua's 12b.
+test('FX-R1: a learned row without a base re-reads GetMaxPP through a wrap', () => {
+  const battle = build({
+    id: 'fxpp', mode: '1v1', seed: 12345, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  const alpha = battle.byId.get('p1').mons[0];
+  alpha.moves[1] = { id: 'learned', pp: 0, ppUps: 1, maxPp: 18, power: 10,
+    accuracy: 255, type: 0, effect: 0, chance: 0 };
+  battle._decrementPp(alpha, 2);
+  const row = alpha.moves[1];
+  assert.strictEqual(`${row.pp}/${row.ppUps}/${row.maxPp}`, '63/0/15',
+    "a learned row's wrap: GetMaxPP re-read over the base its 18 named (15 + 3)");
+  assert.strictEqual(row.basePp, 15, '...the base kept on the row');
 });

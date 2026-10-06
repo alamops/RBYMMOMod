@@ -266,7 +266,9 @@
 --     heuristics — not a full TrainerAI port) -- and the fight continues.  It
 --     does not end the battle -- the player who went to make a sandwich loses
 --     a turn, not the match.
---   * *Struggle* when every move is out of PP: synthetic STRUGGLE (power 50),
+--   * *Struggle* when no move but a DISABLEd one has PP, decided as the FIGHT
+--     is chosen (`noUsableMoves`, `choice.struggle`; a slot emptied after the
+--     choice is `.out_of_pp`'s, FX-R2): synthetic STRUGGLE (power 50),
 --     no PP spent, recoil floor(damage/4) minimum 1 after a hit
 --     (BattleCommand_Recoil), and typeless: pokecrystal BattleCommand_Stab
 --     opens with `cp STRUGGLE / ret z`, so the weather step, DoBadgeTypeBoosts,
@@ -274,7 +276,7 @@
 --     STAB and no badge type boost, and says nothing about effectiveness.
 --     Its row in data/moves/moves.asm is still NORMAL, which is the type
 --     DamageCalc's type-boost item scan reads (STRUGGLE.typeId).  Struggle is
---     the move a top-level `_useMove` resolves to when every slot is empty; a
+--     the move a top-level `_useMove` resolves to for that choice; a
 --     move Metronome or Mirror Move *calls* is never Struggle, so a call made
 --     with the last PP takes no recoil.
 --   * The choice clock is *suspended while anybody is disconnected*, because
@@ -494,8 +496,8 @@ end
 -- A seat a person plays on their own cartridge: every seat but the
 -- computer's and the wild monster's -- side a against the computer, both sides
 -- of a link fight (the owner's rule: a cart rule that touches only the
--- player's side applies to both there).  BIDE's menu (`_asksBide`) and
--- PURSUIT's PursuitSwitch (`_pursue`) are the player's own routines.
+-- player's side applies to both there).  BIDE's menu (`_asksBide`) is the
+-- player's own routine.
 local function isPlayerSeat(mode, fighter)
   return fighter ~= nil and not isComputerSeat(mode, fighter)
     and not isWildSeat(mode, fighter)
@@ -844,6 +846,9 @@ local function copyMon(raw, fallback)
     transformed = raw.transformed == true,
     xAccuracy = raw.xAccuracy == true,
     catchRate = max(0, min(255, int(raw.catchRate, 255))),
+    -- The species' Pokedex weight word, which the HEAVY BALL reads
+    -- (Effects.ballRate); absent, the ball leaves the rate.
+    weight = optInt(raw.weight, 0, 65535),
   }
 
   -- The Gold held item and what the engine's item row says about it (contract
@@ -980,10 +985,21 @@ local function firstLiving(mons, skip)
   return nil
 end
 
-local function allPpEmpty(mon)
-  if #mon.moves == 0 then return true end
+-- Whether a FIGHT can only be Struggle: no slot holds PP but the DISABLEd
+-- one (an empty sheet included).  The player's `.CheckPlayerHasUsableMoves`
+-- (pokecrystal engine/battle/core.asm, MoveSelectionScreen; pokegold the
+-- same) ORs the PP of every slot but wPlayerDisableCount's, and the
+-- computer's ParseEnemyAction `.continue` loop skips wEnemyDisabledMove's slot
+-- and every slot at 0 PP -- either way none left is Struggle, decided as the
+-- action is chosen (`choice.struggle`), never at the move.  The player's
+-- check reads the raw PP byte (`and a`, the cart's "should be and PP_MASK"),
+-- so a 0-PP slot with PP Ups counts as usable there and the menu opens on a
+-- move it then refuses -- a softlock, which the referee does not reproduce:
+-- the PP alone counts.
+local function noUsableMoves(mon)
+  local disabled = mon.disable and mon.disable.turns > 0 and mon.disable.moveIndex or nil
   for i = 1, #mon.moves do
-    if mon.moves[i].pp > 0 then return false end
+    if i ~= disabled and mon.moves[i].pp > 0 then return false end
   end
   return true
 end
@@ -1091,6 +1107,9 @@ function M.create(opts)
     -- ("morn", "day" or "nite"); nil when the caller states none, which reads
     -- as the move's own time (the link reading: half the max HP).
     timeOfDay      = M.TIMES[opts.timeOfDay] and opts.timeOfDay or nil,
+    -- wBattleType (constants/battle_constants.asm) when the fight states one
+    -- -- the LURE BALL's BATTLETYPE_FISH (Effects.ballRate) is what reads it.
+    battleType     = optInt(opts.battleType, 0, 255),
     -- This turn's action order (wEnemyGoesFirst widened): each seat's
     -- position, 0 for a switch / item / run (resolved before any move, as
     -- the cart's `.use_move` puts a player who is not fighting first), then 1..
@@ -1696,6 +1715,22 @@ function Battle:_normaliseChoice(fighter, choice)
     if targetMon then
       if effect and effect.faintedOnly and targetMon.hp > 0 then return nil end
       if targetMon.hp <= 0 and Effects.itemFailsOnFainted(effect) then return nil end
+      -- "It won't have any effect." (FX-R2): the player's bag answers an item
+      -- that would do nothing without using it, and the seat chooses again.
+      -- The computer's items are its AI's (`_autoItemChoice`, AI_Items), which
+      -- never ask.
+      if not isComputerSeat(self.mode, fighter)
+         and self:_itemWontHaveEffect(fighter, effect, item, out.slot or fighter.active, out.move) then
+        return nil
+      end
+    end
+    -- A POKé DOLL outside a wild fight is not used either: PokeDollEffect's
+    -- `.not_wild` leaves wItemEffectSucceeded 0, and the pack's `.BattleOnly`
+    -- answers with OAK's ItemOakWarningText and stays open -- no item spent,
+    -- no turn (FX-R2; the client's own line).
+    if effect and effect.pokeDoll and not Effects.isWildMode(self.mode)
+       and not isComputerSeat(self.mode, fighter) then
+      return nil
     end
     return out
   end
@@ -1718,13 +1753,21 @@ function Battle:_normaliseChoice(fighter, choice)
     -- and CheckTurn, not the menu, answers a Disable on it.
     local encored = mon.encore ~= nil and mon.moves[mon.encore.moveIndex] ~= nil
     if encored then index = mon.encore.moveIndex - 1 end
+    -- `.CheckPlayerHasUsableMoves` (`noUsableMoves`): with no slot to pick
+    -- the menu never opens and the move is Struggle, whatever index the
+    -- client named ("<MON> has no moves left!" is the menu's own line, the
+    -- client's).  An ENCOREd monster skips the menu (`.encored`) and with it
+    -- the check: its move at 0 PP is BattleCommand_DoTurn's `.out_of_pp`.
+    local struggle = not encored and noUsableMoves(mon)
     local move = mon.moves[index + 1]
-    if not move then return nil end
-    -- One empty slot is refused; every slot empty means Struggle on any index.
-    if not encored and move.pp <= 0 and not allPpEmpty(mon) then return nil end
-    if not encored and mon.disable and mon.disable.turns > 0
-       and mon.disable.moveIndex == index + 1 then
-      return nil
+    if not struggle then
+      if not move then return nil end
+      -- An empty slot or the DISABLEd one is refused, as the menu refuses it.
+      if not encored and move.pp <= 0 then return nil end
+      if not encored and mon.disable and mon.disable.turns > 0
+         and mon.disable.moveIndex == index + 1 then
+        return nil
+      end
     end
     -- BATON PASS's successor (wave 4), asked up front as Gen 3's `pass` is: a
     -- zero-based party position, refused when it names nobody; whether it
@@ -1771,10 +1814,86 @@ function Battle:_normaliseChoice(fighter, choice)
         return { action = "skip" }
       end
     end
-    return { action = "fight", move = index + 1, target = targetFighter.slot, pass = pass }
+    -- A Struggle keeps a slot that names a move (or slot 1) for the code that
+    -- reads `choice.move`; `struggle` is what every reader asks first.
+    return { action = "fight", move = (struggle and not move) and 1 or index + 1,
+             target = targetFighter.slot, pass = pass, struggle = struggle or nil }
   end
 
   return nil
+end
+
+-- The party rows a PP item restores (`_resolveOneItem`): RestorePP /
+-- Elixer_RestorePPofAllMoves write the PARTY's PP -- Transform's put-aside
+-- list (`preTransform.moves`) under a Transform, MIMIC's saved rows
+-- (`preMimic`) over its slots -- for the monster on the field, its own list
+-- otherwise.  Returns the saved Transform record (or nil), the MIMIC rows
+-- (or an empty table) and the list.
+local function ppRowsOf(fighter, mon, partyIdx)
+  local onField = partyIdx == fighter.active
+  local saved = onField and mon.transformed and mon.preTransform or nil
+  local mimic = (onField and not saved and type(mon.preMimic) == "table") and mon.preMimic or {}
+  local list = saved and saved.moves or (mon.moves or {})
+  return saved, mimic, list
+end
+
+-- Whether a row's PP is already at its maximum (RestorePP's `.restore_some`
+-- finding nothing to add).
+local function ppFull(move)
+  return move.pp >= max(int(move.maxPp, move.pp), move.pp, 1)
+end
+
+-- Whether the player's item would do nothing, which the cart's bag answers
+-- with "It won't have any effect." and does NOT use -- no item spent, no turn
+-- (FX-R2; pokegold engine/items/item_effects.asm, the pack's `.BattleOnly` /
+-- `.BattleField` keep the menu open on wItemEffectSucceeded 2 / 0):
+--
+--   * X ACCURACY, GUARD SPEC., DIRE HIT on a monster whose bit is already set
+--     (XAccuracyEffect / GuardSpecEffect / DireHitEffect, WontHaveAnyEffect_
+--     NotUsedMessage);
+--   * an HP item on a monster at full HP (ItemRestoreHP's IsMonAtFullHealth;
+--     FULL RESTORE then tries FullyHealStatus, below);
+--   * a status cure with no status of its kind to cure (UseStatusHealer) --
+--     save a FULL HEAL / HEAL POWDER / MIRACLEBERRY (GetItemHealingAction's
+--     %11111111) on the confused monster in battle (IsItemUsedOnConfusedMon);
+--   * an ETHER on a move at full PP, an ELIXER on a monster whose every move
+--     is (RestorePP, PPRestoreItem_NoEffect).
+--
+-- An X item at +6 or on a stat of 999 is NOT one: XItemEffect prints
+-- UseItemText (spending it) before RaiseStat fails, and the turn goes.  The
+-- fainted cases are refused beside this (`itemFailsOnFainted`, `faintedOnly`).
+function Battle:_itemWontHaveEffect(fighter, effect, item, partyIdx, moveIdx)
+  local mon = fighter.mons[partyIdx]
+  if type(effect) ~= "table" or not mon then return false end
+  local onField = partyIdx == fighter.active
+  if effect.xAccuracy then return onField and mon.xAccuracy == true end
+  if effect.focusEnergy then return onField and mon.focusEnergy == true end
+  if effect.mist then return onField and mon.mist == true end
+  if mon.hp <= 0 then return false end
+  local confused = onField and int(mon.confusion, 0) > 0
+  if effect.heal or effect.healFull then
+    if mon.hp < mon.maxHp then return false end
+    if effect.clearAllStatus then return mon.status == nil and not confused end
+    return true
+  end
+  if effect.clearStatuses then
+    if mon.status and effect.clearStatuses[mon.status] then return false end
+    return not (M.CURES_CONFUSION[item] and confused)
+  end
+  if effect.ppRestore then
+    local _, mimic, list = ppRowsOf(fighter, mon, partyIdx)
+    local move = mimic[moveIdx] or list[moveIdx]
+    return move ~= nil and ppFull(move)
+  end
+  if effect.ppRestoreAll then
+    local _, mimic, list = ppRowsOf(fighter, mon, partyIdx)
+    for i = 1, #list do
+      local move = mimic[i] or list[i]
+      if move and not ppFull(move) then return false end
+    end
+    return true
+  end
+  return false
 end
 
 -- Returns true when the choice is now held for this turn, false otherwise.
@@ -2156,8 +2275,8 @@ function Battle:_autoChoice(fighter)
   end
 
   pick = pick or 1
-  -- An empty sheet is Struggle, not a hang: `_useMove` treats allPpEmpty
-  -- (including `#moves == 0`) as the synthetic STRUGGLE even with no slot.
+  -- No slot with PP but a DISABLEd one (an empty sheet included) is
+  -- Struggle, not a hang: `_autoChoiceOrSkip` flags it (`noUsableMoves`).
   return { action = "fight", move = pick, target = foe.slot }
 end
 
@@ -2182,11 +2301,15 @@ function Battle:_autoChoiceOrSkip(fighter)
   -- reads wLastEnemyMove whatever the AI scored -- its FIGHT is the encored
   -- slot.
   local mon = activeMon(fighter)
-  if auto and auto.action == "fight" and mon and mon.encore
-     and not auto.bideStore and not auto.bideRelease and not mon.charging
-     and not (mon.thrashing and mon.thrashing.turns > 0)
+  local locked = auto ~= nil and mon ~= nil and (auto.bideStore or auto.bideRelease
+    or mon.charging or (mon.thrashing and mon.thrashing.turns > 0)) and true or false
+  if auto and auto.action == "fight" and mon and mon.encore and not locked
      and mon.moves[mon.encore.moveIndex] then
     auto.move = mon.encore.moveIndex
+  elseif auto and auto.action == "fight" and mon and not locked and noUsableMoves(mon) then
+    -- ParseEnemyAction's `.struggle` (and a timed-out player's menu, which
+    -- `.CheckPlayerHasUsableMoves` never opens): decided here, as it is chosen.
+    auto.struggle = true
   end
   if auto then return auto end
   if self.phase == "choice" and activeMon(fighter) then
@@ -2439,7 +2562,7 @@ end
 -- The bracket an action moves in: the selected move's (Effects.movePriority),
 -- the move `_useMove` will resolve to -- a lock-in's (`_lockedMove`, a called
 -- charge's release included, as GetMovePriority reads wCurPlayerMove), then
--- Struggle's when every slot is empty -- and the slot's own otherwise, so a
+-- Struggle's for a Struggle choice -- and the slot's own otherwise, so a
 -- Metronome moves at Metronome's priority whatever it calls.  A recharging
 -- seat's is the move that left it recharging (`rechargeMove`, its
 -- wCurPlayerMove), and a Bide's BIDE's (`_lockedMove`).
@@ -2450,7 +2573,7 @@ function Battle:_priorityOf(fighter, mon)
   end
   local locked = self:_lockedMove(fighter, mon)
   if locked then return Effects.movePriority(locked) end
-  if allPpEmpty(mon) then return Effects.movePriority(STRUGGLE) end
+  if choice and choice.struggle then return Effects.movePriority(STRUGGLE) end
   return Effects.movePriority(mon.moves[choice and choice.move or 0])
 end
 
@@ -3119,7 +3242,7 @@ function Battle:_resetRage()
       local chosen = nil
       if choice and choice.action == "fight" and not fighter.forced
          and not choice.bideStore and not choice.bideRelease
-         and not allPpEmpty(mon) then
+         and not choice.struggle then
         chosen = mon.moves[choice.move]
       end
       local effect = chosen and int(chosen.effect, 0) or nil
@@ -3353,24 +3476,29 @@ function Battle:_clearSubstatus(mon)
 end
 
 -- PursuitSwitch (pokecrystal engine/battle/core.asm:3918-3988, pokegold the
--- same), which BattleMonEntrance runs as the PLAYER withdraws a monster:
--- when the foe chose PURSUIT, its whole turn is taken now -- CheckTurn, the
--- move, its doubling (BattleCommand_Pursuit reads wPlayerIsSwitching, set by
--- PlayerSwitch just before) -- against the monster on its way out, and its
--- later turn is CANNOT_MOVE.  A monster it knocks out still makes way for the
--- one being sent in.  Only a player's withdrawal (`isPlayerSeat`; both seats
--- of a link fight, each on its own cart) is chased: the computer's AI_Switch
--- has no PursuitSwitch, so a player's PURSUIT meets its incoming monster at the
--- ordinary slot, still doubled (wEnemyIsSwitching).  In a 2v2 every foe whose
--- PURSUIT is aimed at the withdrawing seat goes, in field order.
+-- same), which runs as a monster is withdrawn -- the player's
+-- (BattleMonEntrance, after PlayerSwitch) and, from the review fixes (FX-R2),
+-- the computer's too: AI_Switch (engine/battle/ai/items.asm:663-703) calls it
+-- with hBattleTurn on the player before EnemyWithdrewText, so a player's
+-- PURSUIT chases the computer's withdrawal as the computer's chases the
+-- player's.  When the foe chose PURSUIT its whole turn is taken now --
+-- CheckTurn, the move, its doubling (BattleCommand_Pursuit reads wPlayerIs-
+-- / wEnemyIsSwitching, set just before) -- against the monster on its way
+-- out, and its later turn is CANNOT_MOVE.  A monster it knocks out still
+-- makes way for the one being sent in.  A computer's monster it knocks out
+-- earns nothing: PursuitSwitch prints BattleText_EnemyMonFainted and returns
+-- carry, and AI_Switch goes on to its send-out without
+-- UpdateBattleStateAndExperienceAfterEnemyFaint -- so that faint's pending
+-- `exp` is dropped (`_dropExpFor`).  In a 2v2 every foe whose PURSUIT is
+-- aimed at the withdrawing seat goes, in field order.
 function Battle:_pursue(fighter)
-  if not isPlayerSeat(self.mode, fighter) then return end
+  local computer = isComputerSeat(self.mode, fighter)
   for _, foe in ipairs(self:_foes(fighter)) do
     if self.result or not activeMon(fighter) then return end
     local choice = foe.choice
     local foeMon = activeMon(foe)
     if foeMon and choice and choice.action == "fight" and not choice.pursued
-       and not foe.forced and choice.target == fighter.slot and not allPpEmpty(foeMon) then
+       and not foe.forced and choice.target == fighter.slot and not choice.struggle then
       local move = foeMon.moves[choice.move]
       if move and int(move.effect, 0) == Effects.PURSUIT then
         choice.pursued = true
@@ -3378,10 +3506,21 @@ function Battle:_pursue(fighter)
         foeMon.destinyBond = nil
         self:_useMove(foe, foeMon)
         self:_endFoesBonds(foe)
+        if computer then self:_dropExpFor(fighter) end
         self:_drainExp()
       end
     end
   end
+end
+
+-- The payouts a faint on `fighter`'s seat queued, dropped unpaid (a
+-- PursuitSwitch knockout of the computer's withdrawing monster).
+function Battle:_dropExpFor(fighter)
+  local kept = {}
+  for _, entry in ipairs(self.pendingExp) do
+    if entry.fallen ~= fighter then kept[#kept + 1] = entry end
+  end
+  self.pendingExp = kept
 end
 
 -- One send-out onto `fighter`'s seat of party member `index` (1-based): the
@@ -3459,13 +3598,20 @@ function Battle:_resolveSwitches()
     local choice = fighter.choice
     if choice and choice.action == "switch" then
       -- wPlayerIsSwitching / wEnemyIsSwitching (PlayerSwitch, AI_Switch, a
-      -- faint's replacement alike), then the PURSUIT that chases a player.
+      -- faint's replacement alike), then the PURSUIT that chases it.
       fighter.switching = true
+      -- SpikesDamage follows every send-out but one: the computer's own
+      -- switch outside a link battle (AI_SwitchOrTryItem -> AI_TrySwitch ->
+      -- AI_Switch, engine/battle/ai/items.asm) never calls it -- only
+      -- DetermineMoveOrder's link `.switch`, EnemyMonEntrance and the
+      -- faint's EnemyPartyMonEntrance do.  Asked before the PURSUIT, whose
+      -- knockout would make the seat a replacement.
+      local spikes = not (isComputerSeat(self.mode, fighter) and not fighter.mustReplace)
       if not fighter.mustReplace then self:_pursue(fighter) end
       local mon = fighter.mons[choice.slot]
       if mon and mon.hp > 0 then
         self:_sendOut(fighter, choice.slot)
-        self:_spikesDamage(fighter, mon)
+        if spikes then self:_spikesDamage(fighter, mon) end
       end
     end
   end
@@ -3617,6 +3763,15 @@ function Battle:_resolveOneItem(fighter)
   local label = itemLabel(choice.item)
   local computerSeat = isComputerSeat(self.mode, fighter)
   local wild = Effects.isWildMode(self.mode)
+  -- Crystal's AI_TryItem (engine/battle/ai/items.asm, the "used item" tail)
+  -- zeroes wLastEnemyCounterMove beside the Bide, Fury Cutter, Protect and
+  -- Rage resets (`_resetRage` has those), so the player's DISABLE, MIRROR
+  -- MOVE, SKETCH, CONVERSION2 and COUNTER find no move of the computer's
+  -- this turn.  Gold / Silver's AI_TryItem (pokegold) does not.
+  if computerSeat and self.family == "crystal" then
+    local user = activeMon(fighter)
+    if user then user.lastCounterMove = nil end
+  end
   if computerSeat then
     local onMon = activeMon(fighter)
     self:_say(fighter.name .. " used " .. label .. " on "
@@ -3645,7 +3800,10 @@ function Battle:_resolveOneItem(fighter)
       if not target then
         self:_say("But it failed!")
       else
-        local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng)
+        -- PokeBallEffect (FX-R2, Effects.catchAttempt): the thrower's monster
+        -- for the LEVEL / LOVE BALL, wBattleType for the LURE BALL.
+        local caught, shakes = Effects.catchAttempt(choice.item, target, self.rng,
+          { thrower = activeMon(fighter), battleType = self.battleType })
         -- Gen1 TossBallAnimation chain before the catch text (engine ballChain).
         self:_emitBallChain(fighter, choice.item, caught, shakes)
         if caught then
@@ -3672,9 +3830,10 @@ function Battle:_resolveOneItem(fighter)
       self:_finish("draw", nil, nil, "run")
     else
       -- `.not_wild` leaves wItemEffectSucceeded 0, and the pack answers with
-      -- ItemOakWarningText (pack.asm `.BattleOnly` -> `.Oak`).  A screen
-      -- refuses the doll at the bag; a crafted choice is spent here, with
-      -- the cart's line.  The computer never files one (`_autoItemChoice`).
+      -- ItemOakWarningText (pack.asm `.BattleOnly` -> `.Oak`).  A player's
+      -- is refused as it is chosen (`_normaliseChoice`, FX-R2); the
+      -- computer never files one (`_autoItemChoice`) -- a crafted one is
+      -- spent here, with the cart's line.
       self:_say("OAK: " .. fighter.name .. "! This isn't the time to use that!")
     end
   elseif effect.vitamin then
@@ -3760,24 +3919,25 @@ function Battle:_resolveOneItem(fighter)
       end
       if effect.stage then
         local stat = effect.stage.stat
-        local before = Effects.clampStage(mon.stages[stat])
+        local delta = int(effect.stage.delta, 1)
         -- The player's XItemEffect follows RaiseStat with StatUpMessage /
         -- StatUpFailText; the computer's EnemyUsedXItem runs RaiseStat
-        -- behind its use line and prints nothing more, a raise or a +6.
-        if before >= Effects.STAGE_MAX then
-          -- XItemEffect's RaiseStat at +6: StatUpFailText (wave 5).
-          if not computerSeat then self:_say(Effects.wontRiseLine(mon, stat)) end
-        else
-          local after = Effects.clampStage(before + int(effect.stage.delta, 1))
-          mon.stages[stat] = after
-          Effects.dropSnap(mon)
+        -- behind its use line and prints nothing more, a raise or a fail.
+        -- RaiseStat (`Effects.raiseStat`) fails at +6 (`.cant_raise_stat`)
+        -- and -- FX-R2 -- on a battle stat already at 999
+        -- (`.stats_already_max`: the level put back, no rebuild), each
+        -- "won't rise anymore!"; the item was used all the same.
+        local raised, after = Effects.raiseStat(mon, fighter.badges, stat, delta)
+        if raised then
           -- XItemEffect's StatUpMessage (wave 5): "went up!".
-          local text = Effects.statUpLine(mon, stat, int(effect.stage.delta, 1))
+          local text = Effects.statUpLine(mon, stat, delta)
           if not computerSeat then self:_say(text) end
           self:_emit("stat", {
             slot = fighter.slot, side = fighter.side,
             amount = after, stage = after, text = text,
           })
+        elseif not computerSeat then
+          self:_say(Effects.wontRiseLine(mon, stat))
         end
         applied = true
       end
@@ -3801,10 +3961,7 @@ function Battle:_resolveOneItem(fighter)
       -- and MIMIC's saved rows (`preTransform`, `preMimic`); what changed there
       -- is told when the overlay goes (`ppTouched`), as a MYSTERYBERRY's is.
       local onFieldPp = partyIdx == fighter.active
-      local ppSaved = onFieldPp and mon.transformed and mon.preTransform or nil
-      local ppMimic = (onFieldPp and not ppSaved and type(mon.preMimic) == "table")
-        and mon.preMimic or {}
-      local ppList = ppSaved and ppSaved.moves or (mon.moves or {})
+      local ppSaved, ppMimic, ppList = ppRowsOf(fighter, mon, partyIdx)
       local function restoreRow(move, amount)
         local maxPp = max(int(move.maxPp, move.pp), move.pp, 1)
         local before = move.pp
@@ -4011,9 +4168,14 @@ function Battle:_resolveFights()
   if #actors == 0 then return end
 
   self:_orderActors(actors)
-  -- A spent PURSUIT keeps the 0 `_pursue` gave it: it did move first.
+  -- A spent PURSUIT keeps the 0 `_pursue` gave it: it did move first.  So
+  -- does the computer's switch or item (`idle`, FX-R2): AI_SwitchOrTryItem
+  -- runs ahead of the player's move in Battle_PlayerFirst too, and AI_TryItem
+  -- / AI_Switch set wEnemyGoesFirst -- so CheckOpponentWentFirst says the
+  -- computer went first (the player's PROTECT / DETECT / ENDURE fail), while
+  -- the slot its key gave it orders only its ResidualDamage.
   for position, actor in ipairs(actors) do
-    if actor.kind ~= "spent" then self.actionOrder[actor.fighter] = position end
+    if actor.kind == "move" then self.actionOrder[actor.fighter] = position end
   end
 
   for _, actor in ipairs(actors) do
@@ -4155,10 +4317,11 @@ end
 -- foes' side first, then its own (HandleEnemyMonFaint, HandlePlayerMonFaint)
 -- -- and CheckFaint_PlayerThenEnemy before and after each routine of
 -- HandleBetweenTurnEffects (side a first).  A monster found at 0 HP faints;
--- only one SPIKES or PERISH SONG left `standing` is ever found, every other
--- knockout faints where it lands.  Each check looks once (the cart's bug:
--- a successor SPIKES takes to 0 waits for the next one, `_closeReplace`),
--- and a fight a check decides ends there (`ret c`).
+-- only one SPIKES, PERISH SONG, a SANDSTORM or a wrap (FX-R2) left
+-- `standing` is ever found, every other knockout faints where it lands.
+-- Each check looks once (the cart's bug: a successor SPIKES takes to 0 waits
+-- for the next one, `_closeReplace`), and a fight a check decides ends there
+-- (`ret c`).
 function Battle:_checkFaints(firstSide)
   local second = (firstSide == "a") and "b" or "a"
   for _, side in ipairs({ firstSide, second }) do
@@ -4264,7 +4427,7 @@ end
 
 -- Returns false when a gate stopped the move (the caller runs CantMove,
 -- `_cantMove`).  `selected` is the move the monster is about to use (Struggle
--- when every slot is empty, a lock-in's move when it is locked in): the sleep
+-- for a Struggle choice, a lock-in's move when it is locked in): the sleep
 -- gate's Snore / Sleep Talk exception, the freeze gate's Flame Wheel / Sacred
 -- Fire one, the confusion self-hit and the disabled-move check read it the way
 -- the cart's CheckTurn and DamageCalc do.
@@ -5003,15 +5166,16 @@ function Battle:_useMove(fighter, mon, opts)
   local called = opts.moveOverride ~= nil
   -- The move this action resolves to: a lock-in's (`_lockedMove`: a charge's
   -- release, a rampage's next turn, a Bide), else the synthetic STRUGGLE when
-  -- every slot is empty -- an empty sheet (`#moves == 0`) included; returning
-  -- on the missing slot used to eat that turn instead -- else the chosen slot.
+  -- the choice was Struggle (`choice.struggle`, decided as it was chosen:
+  -- `noUsableMoves`) -- an empty sheet included -- else the chosen slot,
+  -- whatever PP it has left by now (`.out_of_pp` below).
   local move = opts.moveOverride
   local locked = nil
   if not called then
     locked = self:_lockedMove(fighter, mon)
     if locked then
       move = locked
-    elseif allPpEmpty(mon) then
+    elseif choice.struggle then
       move = STRUGGLE
     else
       move = mon.moves[choice.move]
@@ -5083,6 +5247,33 @@ function Battle:_useMove(fighter, mon, opts)
   local rolling = locked ~= nil and not releasing and not rampaging
     and mon.rollout ~= nil and mon.rollout.active == true
   local mirrorCopy = opts.mirrorCopy == true
+
+  -- BattleCommand_DoTurn's `.out_of_pp` (pokecrystal engine/battle/
+  -- effect_commands.asm, `doturn`; pokegold the same): a slot chosen with PP
+  -- that has none left when it is used -- a foe's SPITE took the last of it,
+  -- or an ENCOREd move ran dry -- is not Struggle (that is the choice's,
+  -- `choice.struggle`).  The move ends there (EndMoveEffect), no PP spent:
+  -- after `usedmovetext` for most scripts, "But no PP is left for the move!"
+  -- (NoPPLeftText); for the ones whose `doturn` comes before it -- the charge
+  -- moves (RAZOR WIND, SKY ATTACK, SKULL BASH, SOLARBEAM, FLY / DIG), ROLLOUT,
+  -- BIDE and the rampages -- "<USER> has no PP left for <MOVE>!"
+  -- (HasNoPPLeftText) alone, and no LAST_MOVE written.  A called move (a
+  -- METRONOME's, a MIRROR MOVE's, a SLEEP TALK's: ResetTurn's wPlayerCharging)
+  -- and a lock-in's turn spend no PP and never get here.
+  if not called and not struggling and move.pp <= 0 and not releasing and not rampaging
+     and not rolling and not choice.bideRelease then
+    if Effects.isCharge(effectId) or effectId == Effects.ROLLOUT
+       or Effects.isBide(effectId) or Effects.isThrash(effectId) then
+      self:_say(mon.species .. " has no PP left for " .. moveLabel(move) .. "!")
+    else
+      self:_emit("anim", { slot = fighter.slot, side = fighter.side, text = move.id })
+      self:_say(mon.species .. " used " .. moveLabel(move) .. "!")
+      self:_recordLastMove(mon, move)
+      self:_say("But no PP is left for the move!")
+      self:_markLastMove(mon, choice.move)
+    end
+    return
+  end
 
   -- BattleCommand_CheckRollout on a fresh ROLLOUT: wPlayerRolloutCount back
   -- to 0 (RolloutPower counts the rolls from there; a METRONOME- or MIRROR
@@ -6658,7 +6849,9 @@ end
 -- status -- `toxicLatent`, wave 5 -- so a burn, or a PSN it catches later,
 -- ticks on that count) and NIGHTMARE (kept only if the successor sleeps) -- and
 -- ResetBatonPassStatus takes Disable, both sides' love, TRANSFORMED, ENCORED,
--- the user's LAST_MOVE and both sides' wrap counts.  The successor's battle
+-- the user's LAST_MOVE and both sides' wrap counts; SendOutPlayerMon / the
+-- computer's ResetEnemyBattleVars take both sides' counter moves (FX-R2: a
+-- foe's MIRROR MOVE copies nothing after a pass).  The successor's battle
 -- stats are InitBattleMon's status and badge then the passed levels ("pass";
 -- the computer's LoadEnemyMon, "load"), and SpikesDamage follows.
 function Battle:_batonPass(fighter, mon)
@@ -6689,9 +6882,6 @@ function Battle:_batonPass(fighter, mon)
     curled = mon.curled, minimized = mon.minimized, raging = mon.raging,
     rageCounter = mon.rageCounter, nightmare = mon.nightmare,
     toxic = (mon.status == "toxic" or mon.toxicLatent == true) and mon.toxicCounter or nil,
-    -- wLastPlayerCounterMove is the field position's and BATON PASS clears
-    -- only LAST_MOVE, so a foe's MIRROR MOVE still finds BATON PASS.
-    lastCounterMove = mon.lastCounterMove,
   }
   for key, value in pairs(mon.stages) do passed.stages[key] = value end
   -- The one leaving goes back to the party with nothing of the field on it.
@@ -6708,7 +6898,14 @@ function Battle:_batonPass(fighter, mon)
   incoming.charging, incoming.invulnerable, incoming.thrashing = nil, false, nil
   incoming.bide, incoming.trapped, incoming.disable = nil, nil, nil
   self:_clearSubstatus(incoming)
-  incoming.lastCounterMove = passed.lastCounterMove
+  -- The pass's send-out is a send-out: the player's PassedBattleMonEntrance
+  -- runs SendOutPlayerMon and the computer's EnemySwitch_SetMode runs
+  -- ResetEnemyBattleVars, each zeroing BOTH wLastPlayerCounterMove and
+  -- wLastEnemyCounterMove -- so a foe's MIRROR MOVE after the pass finds
+  -- nothing (not BATON PASS), and neither do DISABLE, SKETCH, CONVERSION2 or
+  -- COUNTER (FX-R2).
+  incoming.lastCounterMove = nil
+  self:_forgetFoesLastMoves(fighter)
   incoming.stages = passed.stages
   incoming.substitute = passed.substitute
   incoming.confusion = passed.confusion
@@ -7351,8 +7548,13 @@ function Battle:_wrapTick()
         mon.trapped = nil
         self:_say(mon.species .. " was released from " .. label .. "!")
       else
+        -- SubtractHPFromUser, then BattleText_UsersHurtByStringBuffer1: the
+        -- HP bar moves before the line (FX-R2), and a monster it empties
+        -- stands until CheckFaint_PlayerThenEnemy after the routine
+        -- (`_resolveResiduals`' `_checkFaints`).
+        self:_damage(fighter, mon, Items.sixteenth(mon.maxHp), nil, true, true)
+        if mon.hp <= 0 then mon.standing = true end
         self:_say(mon.species .. "'s hurt by " .. label .. "!")
-        self:_damage(fighter, mon, Items.sixteenth(mon.maxHp), nil, true)
       end
     end
     mon = activeMon(fighter)
@@ -7442,8 +7644,12 @@ function Battle:_weatherTick()
     local mon = activeMon(fighter)
     if mon and self:_vanishedInto(mon) ~= "DIG"
        and not self:_hasNamedType(mon, Effects.SANDSTORM_IMMUNE) then
+      -- `.SandstormDamage`: SubtractHPFromUser, then SandstormHitsText -- the
+      -- HP bar moves before the line (FX-R2) -- and a monster it empties
+      -- stands until the CheckFaint_PlayerThenEnemy after HandleWeather.
+      self:_damage(fighter, mon, Items.eighth(mon.maxHp), nil, true, true)
+      if mon.hp <= 0 then mon.standing = true end
       self:_say("The SANDSTORM hits " .. mon.species .. "!")
-      self:_damage(fighter, mon, Items.eighth(mon.maxHp), nil, true)
     end
   end
 end
@@ -7457,8 +7663,18 @@ function Battle:_checkOver()
   local aliveA, aliveB = self:_sideAlive("a"), self:_sideAlive("b")
   if aliveA and aliveB then return false end
 
-  if not aliveA and not aliveB then
+  -- Both sides out at once (an EXPLOSION, a DESTINY BOND, a PERISH SONG):
+  -- against the computer the cart's faint handlers each ask
+  -- CheckPlayerPartyForFitMon first (HandleEnemyMonFaint after
+  -- FaintYourPokemon, HandlePlayerMonFaint) and go to LostBattle -- the
+  -- player lost, and no EXP is paid (UpdateBattleStateAndExperienceAfterEnemy
+  -- Faint returns on the same check).  In a link fight LostBattle's
+  -- `.LostLinkBattle` finds the foe's party gone too (CheckEnemyTrainer
+  -- Defeated) and both carts print TiedAgainstText: a draw.
+  if not aliveA and not aliveB and M.LINK_MODES[self.mode] then
     self:_finish("draw", nil, nil, "ko")
+  elseif not aliveA and not aliveB then
+    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko")
   elseif aliveA then
     self:_payDayOutcome(self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko"))
   else
@@ -7543,14 +7759,13 @@ end
 -- party (1-based `monIndex`, the hubs' `payload.mon + 1`) grew, as the client
 -- that owns it reports with `mmo.battle_moveset` -- `stats` the engine's
 -- unboosted party stats in the Gold dialect (atk def spe spa spd), `maxHp` the
--- new maximum, `level` the new level, each optional.  Rebuilt as
--- GiveExperiencePoints does it in battle (pokecrystal engine/battle/
+-- new maximum, `level` the new level (stats and max HP optional).  Rebuilt
+-- as GiveExperiencePoints does it in battle (pokecrystal engine/battle/
 -- core.asm:7186-7300):
 --
 --   * the party's stats become the new ones -- CalcMonStats (Effects.
---     calcMonStats over the sheet's K7 blocks) when the report states a
---     level and no stats -- and the party HP rises by the max-HP step (it can
---     fall with a smaller max, never below 1; a fainted monster stays down);
+--     calcMonStats over the sheet's K7 blocks) when the report states none
+--     -- and the party HP rises by the max-HP step;
 --   * the fielded monster's battle HP and max HP are the party's (the
 --     referee holds one), its level the new one, and its battle stats are
 --     rebuilt in the routine's order: ApplyStatLevelMultiplierOnAllStats over
@@ -7562,54 +7777,107 @@ end
 --   * a benched monster changes in its party stats alone, which its next
 --     send-out loads.
 --
--- The claim is the client's; the referee only refuses what cannot be a
--- level-up: an unknown seat or monster, a level below the current one or
--- past LEVEL_MAX, a malformed stat block, a finished fight, or a report that
--- changes nothing.  Never raises; returns whether anything changed.
+-- The claim is the client's, so the referee judges it here -- the hubs pass
+-- it through (Hub:applyBattleMoveset, Relay.applyBattleMoveset), and from the
+-- review fixes (FX-R2) with Red's guards (BattleSim Turn `_levelUp`):
+--
+--   * only side a of a fight against the computer earns experience
+--     (EXP_MODES, the `exp` events; GiveExperiencePoints returns on
+--     wLinkMode), and a fainted monster earns none;
+--   * the level must go up, to at most LEVEL_MAX;
+--   * no party stat and no max HP may go down -- CalcMonStats is monotonic in
+--     the level, and stat exp only grows -- nor past MAX_STAT_VALUE;
+--   * with complete K7 blocks on the sheet (`base`, `dvs` -- the monster's
+--     own, `preTransform.dvs` under a Transform -- and `statExp`), each stat
+--     and the max HP must be at most what CalcMonStats gives at the new level
+--     with full stat exp (65535 in every slot, GetSquareRoot's 255), and a
+--     claim that states no stats is computed from them with the sheet's stat
+--     exp; without K7 and without stats only the level (and a stated max HP)
+--     moves.
+--
+-- A malformed stat block, an unknown seat or monster or a finished fight is
+-- refused too.  Never raises (the hub calls it from a message handler);
+-- returns whether the referee took the claim.
 function Battle:levelUp(playerId, monIndex, level, stats, maxHp)
-  if self.result then return false end
+  local ok, applied = pcall(self._levelUp, self, playerId, monIndex, level, stats, maxHp)
+  return ok and applied == true
+end
+
+-- GetSquareRoot's ceiling: a stat exp of 65535 in every slot.
+local LEVEL_UP_STAT_EXP_MAX = { hp = 65535, atk = 65535, def = 65535, spe = 65535, spc = 65535 }
+
+-- Whether the K7 blocks can place every stat: all six base stats and all
+-- four DVs.  A partial block is no K7 -- a ceiling read off a missing base
+-- stat would refuse an honest claim.
+local function k7Complete(base, dvs)
+  if type(base) ~= "table" or type(dvs) ~= "table" then return false end
+  for _, key in ipairs({ "hp", "atk", "def", "spe", "spa", "spd" }) do
+    if int(base[key], nil) == nil then return false end
+  end
+  for _, key in ipairs({ "atk", "def", "spe", "spc" }) do
+    if int(dvs[key], nil) == nil then return false end
+  end
+  return true
+end
+
+function Battle:_levelUp(playerId, monIndex, level, stats, maxHp)
+  if self.result or not EXP_MODES[self.mode] then return false end
   local fighter = self.byId[str(playerId) or ""]
-  if not fighter then return false end
+  if not fighter or fighter.side ~= EXP_OWNER_SIDE then return false end
   local index = int(monIndex, nil)
   local mon = index and fighter.mons[index] or nil
-  if not mon then return false end
+  if not mon or mon.hp <= 0 then return false end
+  local newLevel = int(level, nil)
+  if newLevel == nil or newLevel <= mon.level or newLevel > M.LEVEL_MAX then return false end
 
-  local newLevel = mon.level
-  if level ~= nil then
-    newLevel = int(level, nil)
-    if newLevel == nil or newLevel < mon.level or newLevel > M.LEVEL_MAX then return false end
-  end
+  -- The monster's own party stats and DVs, not a Transform's copies.
+  local saved = mon.transformed and mon.preTransform or nil
+  local ownStats = saved and saved.stats or mon.stats
+  local dvs = mon.preTransform and mon.preTransform.dvs or mon.dvs
+  local k7 = k7Complete(mon.base, dvs)
+
   local partyStats = nil
-  if stats ~= nil then
-    if type(stats) ~= "table" then return false end
+  if type(stats) == "table" then
     partyStats = {}
     for _, key in ipairs(Effects.STAT_KEYS) do
       local value = int(stats[key], nil)
       if value == nil then return false end
-      partyStats[key] = max(1, min(Effects.MAX_STAT_VALUE, value))
+      partyStats[key] = value
     end
+  elseif stats ~= nil then
+    return false
   end
   local newMax = nil
   if maxHp ~= nil then
     newMax = int(maxHp, nil)
     if newMax == nil then return false end
-    newMax = max(1, min(Damage.WORD_MAX, newMax))
   end
-  if not partyStats and level ~= nil then
-    local saved = mon.preTransform
-    local computed = Effects.calcMonStats(mon.base, saved and saved.dvs or mon.dvs,
-      mon.statExp, newLevel)
-    if computed then
-      partyStats = computed.stats
-      newMax = newMax or computed.maxHp
+  if k7 and (not partyStats or newMax == nil) then
+    local computed = Effects.calcMonStats(mon.base, dvs, mon.statExp, newLevel)
+    partyStats = partyStats or computed.stats
+    if newMax == nil then newMax = computed.maxHp end
+  end
+
+  local ceiling = k7 and Effects.calcMonStats(mon.base, dvs, LEVEL_UP_STAT_EXP_MAX, newLevel) or nil
+  if partyStats then
+    for _, key in ipairs(Effects.STAT_KEYS) do
+      local value = partyStats[key]
+      if value < int(type(ownStats) == "table" and ownStats[key], 1)
+         or value > Effects.MAX_STAT_VALUE then
+        return false
+      end
+      if ceiling and value > ceiling.stats[key] then return false end
     end
   end
-  if newLevel == mon.level and not partyStats and newMax == nil then return false end
+  if newMax ~= nil then
+    if newMax < mon.maxHp or newMax > Effects.MAX_STAT_VALUE then return false end
+    if ceiling and newMax > ceiling.maxHp then return false end
+  end
 
   mon.level = newLevel
   if partyStats then
-    if mon.transformed and mon.preTransform then
-      mon.preTransform.stats = partyStats
+    if saved then
+      saved.stats = partyStats
     elseif not mon.transformed then
       mon.stats = partyStats
     end
@@ -7617,7 +7885,7 @@ function Battle:levelUp(playerId, monIndex, level, stats, maxHp)
   if newMax ~= nil then
     local step = newMax - mon.maxHp
     mon.maxHp = newMax
-    if mon.hp > 0 then mon.hp = max(1, min(newMax, mon.hp + step)) end
+    mon.hp = max(1, min(newMax, mon.hp + step))
   end
   if activeMon(fighter) == mon then
     Effects.snapStats(mon, fighter.badges, Effects.calcStats(mon, fighter.badges, "init"))

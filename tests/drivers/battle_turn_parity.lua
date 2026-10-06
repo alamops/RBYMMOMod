@@ -2697,9 +2697,11 @@ end
 -- slot; "auto" is the referee's own pick for the seat, `autoPick`) and
 -- may carry `lv`, a K9 level-up ({ pid, monIndex, level, stats, maxHp })
 -- the referee is handed before the row's choices.  A seat's choice is filed
--- only while the turn it was written for is still open; a row with every
--- seat forced resolves on the clock.  `probeR1b` after each row, and the
--- outcome (Pay Day included) at the end.
+-- only while the turn it was written for is still open, and one the referee
+-- refuses is probed (`refused`: an item the cart's ItemUseFailed would hand
+-- back, a forced seat's, ...) -- the turn stays open for the next row; a row
+-- with every seat forced resolves on the clock.  `probeR1b` after each row,
+-- and the outcome (Pay Day included) at the end.
 local function fights(id, entries)
   return function(events)
     local battle
@@ -2732,7 +2734,9 @@ local function fights(id, entries)
               battle:autoPick(seat.pid)
             else
               if type(c) == "number" then c = { action = "fight", move = c } end
-              battle:submitChoice(seat.pid, c)
+              if not battle:submitChoice(seat.pid, c) then
+                probes[#probes + 1] = { at = i, turn = t, refused = seat.pid }
+              end
             end
           end
         end
@@ -4156,13 +4160,16 @@ scenario("g1_conversion", fights("g1cv", {
 -- row, and the cart's POKé (charmap $54) in the item lines:
 --   1 a slot that arrives past its wrap -- 63 PP over a stated GetMaxPP of
 --     35 -- keeps the sheet's maximum (the spend reads 62 over 35), and an
---     ETHER brings it DOWN to 35, "PP was restored."; a second is no effect;
+--     ETHER brings it DOWN to 35, "PP was restored."; a second is no effect,
+--     which the cart hands back unspent (`.itemNotUsed`, FX-R1): refused, and
+--     the turn is the FIGHT the next row files;
 --   2 a wrap mid-fight (g1_pp_wrap's freeze-thaw, with a PP Up): 0 PP and one
 --     PP Up borrow to 63 and none, GetMaxPP re-reads 15 (it was 15 + 3), and
 --     the ETHER brings the slot to 15;
 --   3 MAX ETHER compares the whole byte: a full move with a PP Up is "PP was
---     restored." (the cart's own bug), one with none is no effect; a MAX
---     ELIXER on the same list is restored through the first;
+--     restored." (the cart's own bug), one with none is no effect (refused,
+--     a FIGHT instead); a MAX ELIXER on the same list is restored through the
+--     first;
 --   4 wild: "used POKé DOLL!"; 5 wild: the POKé FLUTE over nobody asleep;
 --   6 wild: a POKé BALL at a catch rate of 0, "You missed the POKéMON!";
 --   7 at a catch rate of 100 and full HP, one shake: "Darn! The POKéMON
@@ -4173,7 +4180,8 @@ scenario("g1_pp_max", fights("g1pm", {
     { seed = 10071,
       turns = { { p1 = 0, p2 = 0 },
                 { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 0 },
-                { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 0 } } }),
+                { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 0 },
+                { p1 = 0 } } }),
   r1duo({ r1s("Alpha", { r1m("thump", 10, 0, { pp = 1, ppUps = 1, maxPp = 18 }), r1m("tap", 10, 0) },
       { spd = 90 }) },
     { r1s("Beta", { r1m("chill", 10, 5, { chance = 100 }), r1m("QUICK_ATTACK", 10, 4, { type = 1 }) },
@@ -4187,6 +4195,7 @@ scenario("g1_pp_max", fights("g1pm", {
     { seed = 10073,
       turns = { { p1 = { action = "item", item = "MAX_ETHER", move = 0 }, p2 = 0 },
                 { p1 = { action = "item", item = "MAX_ETHER", move = 1 }, p2 = 0 },
+                { p1 = 0 },
                 { p1 = { action = "item", item = "MAX_ELIXER" }, p2 = 0 } } }),
   r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
     { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
@@ -4200,6 +4209,105 @@ scenario("g1_pp_max", fights("g1pm", {
   r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
     { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, catchRate = 100 }) },
     { mode = "wild", seed = 10077, turns = { { p1 = { action = "item", item = "POKE_BALL" }, p2 = 0 } } }),
+}))
+
+-- FX-R1 (the Red referee's review fixes), each against pokered:
+--   1 CalcHitChance reflects the target's evasion (`c = 14 - EVASIONMOD`):
+--     Beta at +6 evasion takes the 25/100 ratio, so a 100-accuracy jab
+--     lands under one byte in ten;
+--   2 ...and at -6 the 400/100 one, held at 255: it all but always lands;
+--   3 SendOutMon zeroes BattleStatus1: Alpha switched out confused comes
+--     back clear-headed, and SUPERSONIC confuses it again;
+--   4 wild: GREAT and ULTRA BALLs redraw Rand1 above 200 / 150 (ItemUseBall
+--     `.loop`), at a catch rate of 45 and full HP;
+--   5 Alpha's poison takes its last HP right after its own slot
+--     (HandlePoisonBurnLeechSeed `ret nz` / `jp z, HandlePlayerMonFainted`):
+--     the turn ends there and Beta never moves -- the fight is lost;
+--   6 Alpha KOs Beta (a bench behind it): `jp z, HandleEnemyMonFainted`
+--     skips the knocker-out's poison that turn;
+--   7 Alpha's EXPLOSION leaves Beta standing and Alpha at 0: the turn ends
+--     before the sleeping Beta's slot, so its counter does not move;
+--   8 wild: the computer's PSYWAVE draws from [0, b) (core.asm :4776-4789)
+--     -- a level-2 Beta deals 0, 1 or 2;
+--   9 a landed OHKO into a Substitute: wDamage is 65535 through STAB and the
+--     roll (OneHitKOEffect_), the doll breaks outright and wDamage keeps the
+--     number (`last`); the next one takes the HP that is left;
+--  10 Alpha TRANSFORMs (its one move, morph), then an ETHER: ItemUsePPRestore
+--     restores morph -- the party's move -- and `.afterRestoringPP` copies
+--     the party's four PP bytes over the copies: thump 5 (morph's, back at
+--     its maximum), chop 0 -- and a FIGHT on chop is refused at 0 PP;
+--  11 ItemUseFailed hands back a POTION at full HP, an ANTIDOTE with no
+--     poison and a POKé DOLL outside a wild fight: each refused unfiled
+--     (`refused`), the bag kept, and the FIGHT that follows is the turn;
+--  12 wild: Alpha's EXPLOSION takes Beta's last monster and its own --
+--     HandleEnemyMonFainted's AnyPartyAlive blacks the player out: a loss;
+--  13 the same in a link fight: both carts black out, a draw.
+scenario("g1_fx_r1", fights("g1fx", {
+  r1duo({ r1s("Alpha", { r1m("jab", 10, 0, { accuracy = 100 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, stages = { eva = 6 } }) },
+    { seed = 11001, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 },
+                              { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("jab", 10, 0, { accuracy = 100 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, stages = { eva = -6 } }) },
+    { seed = 11002, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 },
+                              { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("growl", 0, 18) }, { spd = 90 }),
+          r1s("Gamma", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("sonic", 0, 49) }, { spd = 10 }) },
+    { seed = 11003, turns = { { p1 = 0, p2 = 0 },
+                              { p1 = { action = "switch", slot = 1 }, p2 = 0 },
+                              { p1 = { action = "switch", slot = 0 }, p2 = 0 },
+                              { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, catchRate = 45 }) },
+    { mode = "wild", seed = 11004, aSeat = { bag = { GREAT_BALL = 4, ULTRA_BALL = 4 } },
+      turns = { { p1 = { action = "item", item = "GREAT_BALL" }, p2 = 0 },
+                { p1 = { action = "item", item = "ULTRA_BALL" }, p2 = 0 },
+                { p1 = { action = "item", item = "GREAT_BALL" }, p2 = 0 },
+                { p1 = { action = "item", item = "ULTRA_BALL" }, p2 = 0 },
+                { p1 = { action = "item", item = "GREAT_BALL" }, p2 = 0 },
+                { p1 = { action = "item", item = "ULTRA_BALL" }, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("growl", 0, 18) }, { spd = 90, hp = 5, status = "PSN" }) },
+    { r1s("Beta", { r1m("growl", 0, 18) }, { spd = 10 }) },
+    { seed = 11005, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("slam", 120, 0) }, { spd = 90, atk = 300, status = "PSN" }) },
+    { r1s("Beta", { r1m("growl", 0, 18) }, { spd = 10, hp = 5 }),
+      r1s("Delta", { r1m("growl", 0, 18) }, { spd = 10 }) },
+    { seed = 11006, turns = { { p1 = 0, p2 = 0 }, { p2 = { action = "switch", slot = 1 } },
+                              { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("blast", 170, 7) }, { spd = 90, atk = 10 }),
+          r1s("Gamma", { r1m("growl", 0, 18) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 40, 0) },
+        { spd = 10, def = 300, status = "SLP", statusTurns = 3 }) },
+    { seed = 11007, turns = { { p1 = 0, p2 = 0 }, { p1 = { action = "switch", slot = 1 } },
+                              { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("splash", 0, 85) }, { spd = 90, maxHp = 300 }) },
+    { r1s("Beta", { r1m("PSYWAVE", 1, 41) }, { spd = 10, level = 2 }) },
+    { mode = "wild", seed = 11008,
+      turns = { { p1 = 0, p2 = "auto" }, { p1 = 0, p2 = "auto" }, { p1 = 0, p2 = "auto" },
+                { p1 = 0, p2 = "auto" }, { p1 = 0, p2 = "auto" }, { p1 = 0, p2 = "auto" } } }),
+  r1duo({ r1s("Alpha", { r1m("drill", 1, 38, { type = 1 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 30, substitute = 50 }) },
+    { seed = 11009, turns = { { p1 = 0, p2 = 0 }, { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("morph", 0, 57, { pp = 5, maxPp = 5 }) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("thump", 10, 0, { pp = 12 }), r1m("chop", 10, 0, { pp = 3 }) },
+        { spd = 10 }) },
+    { seed = 11010, aSeat = { bag = { ETHER = 2 } },
+      turns = { { p1 = 0, p2 = 0 }, { p1 = { action = "item", item = "ETHER", move = 0 }, p2 = 0 },
+                { p1 = 1, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("tap", 10, 0) }, { spd = 90 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10 }) },
+    { seed = 11011, aSeat = { bag = { POTION = 1, ANTIDOTE = 1, POKE_DOLL = 1 } },
+      turns = { { p1 = { action = "item", item = "POTION", slot = 0 }, p2 = 0 },
+                { p1 = { action = "item", item = "ANTIDOTE", slot = 0 } },
+                { p1 = { action = "item", item = "POKE_DOLL" } },
+                { p1 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("blast", 170, 7) }, { spd = 90, atk = 200, hp = 40 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 20 }) },
+    { mode = "wild", seed = 11012, turns = { { p1 = 0, p2 = 0 } } }),
+  r1duo({ r1s("Alpha", { r1m("blast", 170, 7) }, { spd = 90, atk = 200, hp = 40 }) },
+    { r1s("Beta", { r1m("splash", 0, 85) }, { spd = 10, hp = 20 }) },
+    { seed = 11013, turns = { { p1 = 0, p2 = 0 } } }),
 }))
 
 -- ------------------------------------------------------------------

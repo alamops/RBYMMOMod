@@ -113,7 +113,10 @@
 --   * *Items* apply a hand-authored Gen1 heal/status table by id (Potion,
 --     Full Restore, Revive, Ether, …) — locked twin of public amounts, not a
 --     port of engine ItemEffects. Unknown ids say ItemUseNoEffect's "It won't
---     have any effect." and still spend the turn. Bags are client claims (sheet trust locked; hub
+--     have any effect." and still spend the turn.  A known item the cart's
+--     ItemUseFailed would hand back -- no effect, or not the time -- is
+--     refused at the menu, unfiled, its bag stack and the turn kept
+--     (`_itemFails`).  Bags are client claims (sheet trust locked; hub
 --     has no ROM inventory truth); PROTOCOL 15 holds/spends mid-fight only.
 --   * *Forced lock-in* (recharge, Rage, thrash, a charge's release) fills
 --     choices on `_openTurn` so the mediated path never opens a menu the
@@ -152,10 +155,17 @@
 --     replacement; a `turn` without one opens the ordinary choice window.  No
 --     new kind and no new field, so a client that ignores `slot` degrades to
 --     the old behaviour instead of breaking.
---   * *Residuals* run in field order (side a, then side b), not in the speed
---     order the moves used.  Only the order two burns tick in is at stake, and
---     field order is the one both runtimes can reproduce without carrying the
---     turn's sort into the end-of-turn step.
+--   * *Residuals* (HandlePoisonBurnLeechSeed) come at the end of each
+--     battler's own slot, in the turn's order -- MainInBattleLoop's, core.asm
+--     :413-467 (`_resolveFights`, `_residualFor`) -- and there is no
+--     end-of-turn pass.  In a fight of one seat a side that is the cart's
+--     exactly: a slot that knocked the foe out leaves for the faint's handler
+--     before the knocker-out's residual, a monster its own slot or residual
+--     took down ends the turn before the slower battler moves, and either
+--     faint skips the turn's CheckNumAttacksLeft.  A 2v2 has no analog and
+--     keeps the Gold referee's policy (src/BattleSim2/Turn.lua header): each
+--     seat's residual right after its own slot, and every seat still acts
+--     and takes its residual after a faint.
 --   * The computer's MOVE is the cart's (`_computerChoice`): a wild monster's
 --     `.chooseRandomMove`, a trainer's AIEnemyTrainerChooseMoves over the
 --     layers its seat's `aiMods` names (none: the original move set) -- the
@@ -449,8 +459,9 @@ local function copyMove(raw)
     maxPp    = maxPp,
     -- ...and the base PP behind it, when the stated number is a GetMaxPP
     -- (Effects.basePpOf): what `stepPp` re-reads the maximum over once a wrap
-    -- moves the PP Up bits.  nil keeps the stated maximum fixed.
-    basePp   = stated and Effects.basePpOf(maxPp, ppUps) or nil,
+    -- moves the PP Up bits.  false -- read, and none -- keeps the stated
+    -- maximum fixed; nil is a row nobody read yet (`stepPp` reads it).
+    basePp   = stated and Effects.basePpOf(maxPp, ppUps) or false,
     power    = max(0, int(raw.power, 0)),
     accuracy = max(0, int(raw.accuracy, 255)),
     type     = max(0, int(raw.type, 0)),
@@ -1000,6 +1011,9 @@ function M.create(opts)
     -- `_drainExp`.  A list, so the order faints happened in is the order their
     -- spoils are announced in.
     pendingExp     = {},
+    -- Every faint so far, counted: `_resolveFights` reads what one slot or
+    -- one residual added to it.
+    faints         = 0,
     result         = nil,
     resolveDeadline = nil,
   }, Battle)
@@ -1676,6 +1690,18 @@ function Battle:_normaliseChoice(fighter, choice)
     if targetMon then
       if effect and effect.faintedOnly and targetMon.hp > 0 then return nil end
       if targetMon.hp <= 0 and Effects.itemFailsOnFainted(effect) then return nil end
+    end
+    -- ItemUseFailed (item_effects.asm :2316-2319): a use that does nothing
+    -- -- ItemUseNoEffect, from ItemUseMedicine's `.healingItemNoEffect` and
+    -- ItemUsePPRestore's `.noEffect` -- or that is not for now
+    -- (ItemUseNotTime) writes 0 to wActionResultOrTookBattleTurn and never
+    -- reaches RemoveUsedItem: the bag keeps the item, the turn is not spent,
+    -- and the battle menu asks again.  So a player's such use is refused
+    -- here, before it is filed (`_itemFails`), as the fainted cases above
+    -- are -- the seat still owes its turn.  The computer's AI items never
+    -- take that path.
+    if not isComputerSeat(self.mode, fighter) and self:_itemFails(fighter, effect, out) then
+      return nil
     end
     return out
   end
@@ -2601,14 +2627,15 @@ function Battle:_resolveTurn()
   self:_resolveItems()
   if not self.result then self:_reselectComputer() end
   if not self.result then self:_selectComputerMoves() end
-  self:_resolveFights()
-  if not self.result then self:_resolveResiduals() end
+  -- Each seat's residual comes at the end of its own slot, inside the order
+  -- (`_resolveFights`); there is no end-of-turn pass.
+  local cut = self:_resolveFights()
   -- CheckNumAttacksLeft, the last thing a cart turn does (core.asm :409,
-  -- :460): a trap whose counter ran out lets go.
-  if not self.result then self:_checkNumAttacksLeft() end
-  -- The residual batch settles the same way an action's does: every flag is off
-  -- before the first share is counted.  Unconditional, because a queue nobody
-  -- drains is exp that silently never happened.
+  -- :460): a trap whose counter ran out lets go -- reached only when both
+  -- slots went by, so not on a turn a faint cut short (`cut`).
+  if not self.result and not cut then self:_checkNumAttacksLeft() end
+  -- Unconditional, because a queue nobody drains is exp that silently never
+  -- happened.
   self:_drainExp()
   if not self.result then self:_checkOver() end
 
@@ -2998,6 +3025,17 @@ function Battle:_switchIn(fighter, slot)
   mon.xAccuracy = false
   mon.leechSeed = nil
   mon.disable = nil
+  -- SendOutMon / EnemySendOutFirstMon zero all three BattleStatus bytes
+  -- (`ld hl, wPlayerStatsToDouble` and four `ld [hli], a`, core.asm
+  -- :1744-1749; the enemy's :1292-1299), not only the bits above: CONFUSED
+  -- and FLINCHED (BattleStatus1) and NEEDS_TO_RECHARGE (BattleStatus2) go
+  -- too, so a monster that left confused comes back clear-headed.
+  mon.confusion = 0
+  mon.flinch = false
+  mon.mustRecharge = false
+  -- ...and BattleStatus3's BADLY_POISONED, so a monster a sheet sent in as
+  -- TOX from the bench is plainly poisoned, as the leaving one above is.
+  if mon.status == "toxic" then mon.status = "poison" end
   -- LoadBattleMonFromParty: party stats -> unmodified -> battle, the
   -- penalty, this seat's badges, and every stage back to neutral.
   Effects.loadBattleStats(mon, fighter.badges)
@@ -3015,8 +3053,8 @@ function Battle:_switchIn(fighter, slot)
                        text = mon.species,
                        speciesId = mon.speciesId, level = mon.level,
                        mon = slot - 1,
-                       status = mon.status and M.STATUS_TO_WIRE[mon.status] or nil,
-                       confused = (mon.confusion and mon.confusion > 0) and 1 or nil })
+                       -- (No `confused`: the send-out above cleared it.)
+                       status = mon.status and M.STATUS_TO_WIRE[mon.status] or nil })
 end
 
 function Battle:_clearTrapsFrom(slot)
@@ -3132,6 +3170,63 @@ function Battle:_orderActors(actors)
   end
 end
 
+-- The monster's own move list, where the party struct keeps it: a
+-- TRANSFORMed monster's `preTransform` copy (DecrementPP never touches the
+-- party while TRANSFORMED is set), else the list it fights with.  What
+-- ItemUsePPRestore restores and its move menu lists.
+local function ownMoves(mon)
+  local saved = mon.transformed and mon.preTransform
+  if type(saved) == "table" and type(saved.moves) == "table" then return saved.moves end
+  return mon.moves or {}
+end
+
+-- `.restorePP` on a scratch copy of a row: whether it would restore,
+-- without restoring.
+local function wouldRestorePp(move, amount)
+  if type(move) ~= "table" then return false end
+  return Effects.restorePp({ pp = move.pp, ppUps = move.ppUps, maxPp = move.maxPp }, amount)
+end
+
+-- Whether a player's use of `effect` (a normalised item `choice`: party
+-- `slot`, 1-based `move`) is one the cart's ItemUseFailed takes -- the item
+-- kept, the turn not spent (`_normaliseChoice`).  ItemUseNotTime: a POKé
+-- DOLL outside a wild fight (ItemUsePokeDoll's `dec a / jp nz`), an X item
+-- or another battle-only item aimed at a benched monster (the menu never
+-- offers it).  ItemUseNoEffect: a PP item whose `.restorePP` restores
+-- nothing on the monster's own moves (`ownMoves`), and a medicine with
+-- nothing to do -- no HP to restore (a FULL RESTORE at full HP still cures
+-- a status, `.notFullHP`'s FULL_HEAL fallthrough) and no status it cures
+-- (`.checkMonStatus`).  The fainted cases are `_normaliseChoice`'s own.  An
+-- item with no table row, a ball, a vitamin and the POKé FLUTE are always
+-- used (the flute's "Now, that's a catchy tune!" spends the turn).
+function Battle:_itemFails(fighter, effect, choice)
+  if not effect then return false end
+  if effect.pokeDoll then return not Effects.isWildMode(self.mode) end
+  if effect.ball or effect.vitamin or effect.pokeFlute then return false end
+  local partyIdx = choice.slot or fighter.active
+  local mon = fighter.mons[partyIdx]
+  if not mon then return true end
+  if effect.activeOnly and partyIdx ~= fighter.active then return true end
+  if effect.xAccuracy or effect.focusEnergy or effect.mist or effect.stage
+     or effect.revive then
+    return false
+  end
+  if effect.ppRestore then
+    return not wouldRestorePp(ownMoves(mon)[int(choice.move, 0)], effect.ppRestore)
+  end
+  if effect.ppRestoreAll then
+    for _, move in ipairs(ownMoves(mon)) do
+      if wouldRestorePp(move, effect.ppRestoreAll) then return false end
+    end
+    return true
+  end
+  local heals = (effect.healFull or (effect.heal and effect.heal > 0))
+    and mon.hp < mon.maxHp
+  local cures = mon.status ~= nil and (effect.clearAllStatus
+    or (effect.clearStatuses ~= nil and effect.clearStatuses[mon.status]))
+  return not (heals or cures)
+end
+
 function Battle:_resolveOneItem(fighter)
   local choice = fighter.choice
   if not (choice and choice.action == "item") then return end
@@ -3179,9 +3274,13 @@ function Battle:_resolveOneItem(fighter)
       or effect.focusEnergy or (effect.pokeDoll and wild) or effect.stage) then
     self:_say(fighter.name .. " used " .. label .. "!")
   end
-  -- Spend after the announce, win or fail (Gen1 bag stack). noConsume
-  -- (Poké Flute) and seats with no bag sheet are left alone.
-  if not (effect and effect.noConsume) then
+  -- Spend after the announce (Gen1 bag stack). noConsume (Poké Flute) and
+  -- seats with no bag sheet are left alone, and so is a player's use the
+  -- cart's ItemUseFailed takes (`_itemFails`): `_normaliseChoice` refuses
+  -- one before it is filed, so only a field that moved under a filed choice
+  -- gets here with it -- and RemoveUsedItem is never reached then either.
+  local fails = not computer and self:_itemFails(fighter, effect, choice)
+  if not (effect and effect.noConsume) and not fails then
     self:_spendBag(fighter, choice.item)
   end
   if not effect then
@@ -3358,13 +3457,29 @@ function Battle:_resolveOneItem(fighter)
         self:_say(mon.species .. " is revitalized!")
         applied = true
       end
+      -- ItemUsePPRestore works on the PARTY struct (wPartyMon1Moves /
+      -- MON_PP, GetMaxPP over the party's own move): a TRANSFORMed monster's
+      -- own moves, not the copies its battle struct holds (`ownMoves`).
+      -- Then, for the monster out, `.afterRestoringPP` copies all four party
+      -- PP bytes over wBattleMonPP (`syncCopies`), so a transformed
+      -- monster's copies take its own moves' PP -- and a slot it knows no
+      -- move in, 0: a DITTO's copies 2-4 are emptied.
+      local rows = ownMoves(mon)
+      local function syncCopies()
+        if partyIdx ~= fighter.active or rows == mon.moves then return end
+        for i = 1, #mon.moves do
+          local own = rows[i]
+          mon.moves[i].pp = own and max(0, int(own.pp, 0)) or 0
+          mon.moves[i].ppUps = own and int(own.ppUps, 0) % 4 or 0
+        end
+      end
       if effect.ppRestore then
         -- ItemUsePPRestore's move menu leaves wPlayerMoveListIndex at 0 --
         -- `ld a, 0 / ld [wPlayerMoveListIndex], a` after MoveSelectionMenu
         -- (item_effects.asm :1981-1984) -- whatever it restored: the first
         -- slot is the one a later forced or stale turn pays from (`_listIndex`).
         if not isComputerSeat(self.mode, fighter) then fighter.moveListIndex = 1 end
-        local move = mon.moves[choice.move]
+        local move = rows[choice.move]
         if not move then
           self:_say(NO_EFFECT)
           said = true
@@ -3373,6 +3488,7 @@ function Battle:_resolveOneItem(fighter)
           -- its wrap comes down to the maximum, and a MAX ETHER on a full
           -- move with PP Ups still reads as restored -- both the cart's.
           if Effects.restorePp(move, effect.ppRestore) then
+            syncCopies()
             self:_say("PP was restored.")
             applied = true
             -- Fielded mon only: a bench Ether must not redraw FIGHT.
@@ -3387,12 +3503,13 @@ function Battle:_resolveOneItem(fighter)
       end
       if effect.ppRestoreAll then
         local any = false
-        for i = 1, #(mon.moves or {}) do
-          local move = mon.moves[i]
+        for i = 1, #rows do
+          local move = rows[i]
           -- `.elixirLoop`: `.restorePP` on every slot that holds a move.
           if move and Effects.restorePp(move, effect.ppRestoreAll) then any = true end
         end
         if any then
+          syncCopies()
           self:_say("PP was restored.")
           applied = true
           if partyIdx == fighter.active then
@@ -3564,12 +3681,33 @@ function Battle:_resolveFights()
       }
     end
   end
-  if #actors == 0 then return end
+  if #actors == 0 then return false end
 
   self:_orderActors(actors)
 
+  -- The end of each battler's slot is MainInBattleLoop's (core.asm
+  -- :413-467): HandlePoisonBurnLeechSeed, the mover's own residual, right
+  -- after its own Execute*Move (or the computer's TrainerAI item or switch)
+  -- -- unless that slot knocked the foe out, when `ld a, b / and a / jp z,
+  -- Handle*MonFainted` leaves for the faint's handler first and the
+  -- knocker-out takes no residual that turn.  The residual returns z on the
+  -- mover's own 0 HP, so a monster its own slot or its own residual took
+  -- down (EXPLOSION, recoil, STRUGGLE, a crash, a confusion self-hit, the
+  -- poison) ends the turn there too: the slower battler never moves.  In a
+  -- fight of one seat a side -- the cart's own shape -- any faint in a slot
+  -- or a residual therefore ends the turn's moves and residuals, and
+  -- CheckNumAttacksLeft, which only the end of both slots reaches, is
+  -- skipped (the return value).  A 2v2 has no single foe whose faint ends
+  -- the turn, so it keeps the Gold referee's policy (src/BattleSim2/Turn.lua
+  -- header): each seat's residual right after its own slot, in the turn's
+  -- order, and every seat still acts and takes its residual after a faint.
+  -- The residual is the seat's monster out at its slot's end: the one the
+  -- computer's switch just sent out, or the one a player's switch fielded
+  -- before the order (SendOutMon, then ExecutePlayerMove's early return).
+  local single = #self.bySide.a == 1 and #self.bySide.b == 1
   for _, actor in ipairs(actors) do
     if self.result then break end
+    local faintsBefore = self.faints
     -- The monster that chose is the only one allowed to act: if it fainted to
     -- a faster attacker, the replacement that came in behind it does not
     -- inherit the turn -- nor spend the AI's item or switch for it.
@@ -3610,7 +3748,15 @@ function Battle:_resolveFights()
     -- without paying a monster the same action was still killing (`_drainExp`).
     self:_drainExp()
     if not self.result then self:_checkOver() end
+    if single and self.faints > faintsBefore then return true end
+    if not self.result then
+      self:_residualFor(fighter)
+      self:_drainExp()
+      if not self.result then self:_checkOver() end
+      if single and self.faints > faintsBefore then return true end
+    end
   end
+  return false
 end
 
 -- A recharge turn, in the monster's own slot: CheckPlayerStatusConditions
@@ -3946,7 +4092,7 @@ function Battle:_obey(fighter, mon, struggling)
     -- The badly-poisoned flag is BattleStatus3's, not the status byte's, so
     -- it outlives the nap (`toxicLinger`): the counter keeps climbing under a
     -- Leech Seed, and a later poison or burn ticks at the toxic rate
-    -- (`_resolveResiduals`).
+    -- (`_residualFor`).
     if mon.status == "toxic" then mon.toxicLinger = true end
     mon.status = "sleep"
     mon.statusTurns = Status.napTurns(self.rng)
@@ -4089,7 +4235,16 @@ local function stepPp(move, delta)
     move.pp = max(0, pp + delta)
     return
   end
-  local byte = ((int(move.ppUps, 0) % 4) * 64 + pp + delta) % 256
+  local ups = int(move.ppUps, 0) % 4
+  -- A row `copyMove` never read -- one a learn laid in mid-fight (the hubs'
+  -- nextMoves12 take a new move's row whole from the client, with its
+  -- GetMaxPP and no base) -- has its base read off the maximum it states,
+  -- over the PP Ups it has BEFORE this step moves them; one that names no
+  -- GetMaxPP keeps its maximum (false, as `copyMove` marks it).
+  if move.basePp == nil and move.maxPp ~= nil then
+    move.basePp = Effects.basePpOf(max(0, int(move.maxPp, 0)), ups) or false
+  end
+  local byte = (ups * 64 + pp + delta) % 256
   move.pp = byte % 64
   move.ppUps = floor(byte / 64)
   -- ...and GetMaxPP reads those bits: a borrow or a carry moves the maximum
@@ -4187,9 +4342,13 @@ function Battle:_hitTest(mon, defender, move, effectId)
   end
   if Effects.mistBlocks(effectId, defender) then return false, "mist" end
   if Effects.isSwift(effectId) or mon.xAccuracy == true then return true end
+  -- CalcHitChance (core.asm :5348-5414) reads the target's evasion through
+  -- `c = 14 - EVASIONMOD`: the stage reflected over neutral, so a raised
+  -- evasion takes the lowered ratio (+1 reads 66/100) and a lowered one the
+  -- raised ratio -- an evasion boost makes the move miss more, not less.
   local hit = Accuracy.hit(move.accuracy, self.rng:byte(), {
     accuracyMod = Effects.stageMult(mon.stages.acc),
-    evasionMod = Effects.stageMult(defender.stages.eva),
+    evasionMod = Effects.stageMult(-Effects.clampStage(defender.stages.eva)),
   })
   if not hit then return false, "accuracy" end
   return true
@@ -4232,7 +4391,11 @@ end
 -- A TELEPORT, ROAR or WHIRLWIND that ends a wild fight: either side's
 -- (SwitchAndTeleportEffect sets wEscapedFromBattle and never writes
 -- wBattleResult), so EndOfBattle pays the Pay Day pile while that is still 0
--- (`_payDayOn`).
+-- (`_payDayOn`).  `fighter` is the seat that LEAVES -- the `run` event's and
+-- the outcome's runner: TELEPORT's user ("<USER> ran from battle!"), ROAR's
+-- and WHIRLWIND's target ("<TARGET> ran away scared!" / "was blown away!"),
+-- so the player's WHIRLWIND sends the wild monster off and the wild ROAR
+-- sends the player's (`_switchAndTeleport`).
 function Battle:_concedeRun(fighter)
   self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
   local result
@@ -4253,9 +4416,10 @@ end
 -- wEscapedFromBattle and says TELEPORT's "<USER> ran from battle!", ROAR's
 -- "<TARGET> ran away scared!" or WHIRLWIND's "<TARGET> was blown away!"
 -- (`.playAnimAndPrintText`, keyed by the move id), and the fight is over
--- (`_concedeRun`).  "Its target" is the monster the move was aimed at -- the
--- cart's one opponent.
-function Battle:_switchAndTeleport(fighter, mon, defender, move)
+-- (`_concedeRun`, whose runner is TELEPORT's user and the others' target).
+-- "Its target" is the monster the move was aimed at -- the cart's one
+-- opponent -- on the seat `target`.
+function Battle:_switchAndTeleport(fighter, mon, target, defender, move)
   local key = Effects.moveKey(move)
   local teleport = key == "TELEPORT"
   if not Effects.teleportRunAllowed(self.mode) then
@@ -4281,7 +4445,7 @@ function Battle:_switchAndTeleport(fighter, mon, defender, move)
   else
     self:_say(defender.species .. " was blown away!")
   end
-  self:_concedeRun(fighter)
+  self:_concedeRun(teleport and fighter or target)
 end
 
 -- MimicEffect's pick (effects.asm :1210-1259): the slot of the target's
@@ -4538,7 +4702,7 @@ function Battle:_statusMove(fighter, mon, target, defender, move, effectId, used
     return
   end
   if Effects.isSwitchAndTeleport(effectId) then
-    self:_switchAndTeleport(fighter, mon, defender, move)
+    self:_switchAndTeleport(fighter, mon, target, defender, move)
     self:_markLastMove(mon, usedSlot)
     return
   end
@@ -4997,6 +5161,7 @@ function Battle:_useMove(fighter, mon, opts)
     damage = Effects.setDamage({
       effectId = effectId, moveId = move.id, userMon = mon, targetMon = defender,
       power = move.power, rng = self.rng,
+      computerMover = isComputerSeat(self.mode, fighter),
     })
   else
     -- Species base Speed, not battle Speed: paralysis and the Speed badge
@@ -5046,8 +5211,10 @@ function Battle:_useMove(fighter, mon, opts)
         -- chart and the hit test, and wCriticalHitOrOHKO's $ff makes it
         -- "<TARGET>'s unaffected!".  Otherwise 65535 goes through
         -- AdjustDamageForMoveType -- an immunity zeroes it, no roll (`cp 2`)
-        -- -- and RandomizeDamage rolls over a number no roll can bring under
-        -- the target's HP.
+        -- -- and RandomizeDamage rolls over it (Effects.ohkoDamage): that
+        -- number, not the target's HP, is the hit's wDamage -- a doll breaks
+        -- outright on its high byte (AttackSubstitute) and keeps it for
+        -- COUNTER, and a monster takes its HP, which the overkill writes back.
         if not Effects.ohkoLands(self:_speedOf(fighter, mon), self:_speedOf(target, defender)) then
           self:_say(self:_damageMissText(mon, defender, false, true))
           return self:_moveMissed(fighter, mon, target, defender, effectId, usedSlot)
@@ -5056,8 +5223,12 @@ function Battle:_useMove(fighter, mon, opts)
           if pct <= 0 then immune = true; break end
         end
         if not immune then
-          self.rng:damageRoll()
-          damage = max(1, defender.hp)
+          damage = Effects.ohkoDamage(hasType(mon, move.type), percents)
+          if damage <= 0 then
+            zeroed = true
+          elseif Damage.rolls(damage) then
+            damage = Damage.applyRoll(damage, self.rng:damageRoll())
+          end
         end
       else
         -- GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255).  An
@@ -5369,7 +5540,7 @@ end
 -- target's HP is untouched).  The paths that reach it here: every hit of the
 -- strike loop (fixed damage included), the Bide release (`.UnleashEnergy`
 -- jumps to HandleIfPlayerMoveMissed), a trap's later turns (`.MultiturnMoveCheck`
--- jumps to GetPlayerAnimationType, `_resolveResiduals` here), an Explosion
+-- jumps to GetPlayerAnimationType, `_trapTurn` here), an Explosion
 -- that did not land (EXPLODE_EFFECT is the one miss `.notDone` lets through),
 -- and a power-0 move outside both ResidualEffects lists, which CalculateDamage
 -- sends past MoveHitTest to a no-op ApplyAttack (Disable).
@@ -5639,6 +5810,7 @@ function Battle:_drainExp()
 end
 
 function Battle:_faint(fighter, mon)
+  self.faints = self.faints + 1
   -- RemoveFaintedPlayerMon first (BattleState.lua:3721-3723 runs at the top of
   -- onFaint): this one is out of every participation set before anything below
   -- can pay anybody, so a mon that died on the way to the KO is not in the
@@ -5741,82 +5913,82 @@ function Battle:_faint(fighter, mon)
   end
 end
 
-function Battle:_resolveResiduals()
-  for _, fighter in ipairs(self.fighters) do
-    if self.result then return end
-    local mon = activeMon(fighter)
-    -- HandlePoisonBurnLeechSeed (core.asm :470-548) takes the poison / burn
-    -- tick and then the Leech Seed tick in one pass, and looks at the HP only
-    -- after both -- so a monster the poison or burn knocks out still feeds
-    -- its seeder.  Read before the tick: `_faint` clears `leechSeed`.
-    local seeded, seed, poisonKo = mon, mon and mon.leechSeed, false
-    -- ...and the lingering Bad Poison bit, which `_faint` also clears.
-    local lingered = mon ~= nil and mon.toxicLinger == true
-    if mon and mon.status then
-      local amount = Status.residual({
-        status = mon.status, maxHp = mon.maxHp, toxicCounter = mon.toxicCounter,
-      })
-      if amount then
-        if mon.status == "toxic" then
-          mon.toxicCounter = mon.toxicCounter + 1
-        elseif mon.toxicLinger then
-          -- HandlePoisonBurnLeechSeed_DecreaseOwnHP multiplies by the toxic
-          -- counter on the BADLY_POISONED bit alone, so a bit that outlived a
-          -- nap (`toxicLinger`) turns a later poison -- or a burn -- toxic.
-          amount = amount * max(1, int(mon.toxicCounter, 1))
-          mon.toxicCounter = max(1, int(mon.toxicCounter, 1)) + 1
-        end
-        -- HurtByBurnText for a burn, HurtByPoisonText for a poison --
-        -- PSN on the status byte, a toxic included (core.asm :484-489).
-        if mon.status == "burn" then
-          self:_say(mon.species .. "'s hurt by the burn!")
-        else
-          self:_say(mon.species .. "'s hurt by poison!")
-        end
-        -- ...then BURN_PSN_ANIM, then the HP (:490-495).
-        self:_statusAnim(fighter, "BURN_PSN_ANIM")
-        -- The knockout is the main loop's, once the whole pass is done
-        -- (`ret nz` on the HP, :526-528): its faint waits for the seed's tick.
-        self:_damage(fighter, mon, amount, mon.status, true, true)
-        poisonKo = mon.hp <= 0
+-- HandlePoisonBurnLeechSeed (core.asm :470-548) for one seat, at the end
+-- of its slot (`_resolveFights`).
+function Battle:_residualFor(fighter)
+  if self.result then return end
+  local mon = activeMon(fighter)
+  -- It takes the poison / burn tick and then the Leech Seed tick in one
+  -- pass, and looks at the HP only after both -- so a monster the poison or
+  -- burn knocks out still feeds its seeder.  Read before the tick: `_faint`
+  -- clears `leechSeed`.
+  local seeded, seed, poisonKo = mon, mon and mon.leechSeed, false
+  -- ...and the lingering Bad Poison bit, which `_faint` also clears.
+  local lingered = mon ~= nil and mon.toxicLinger == true
+  if mon and mon.status then
+    local amount = Status.residual({
+      status = mon.status, maxHp = mon.maxHp, toxicCounter = mon.toxicCounter,
+    })
+    if amount then
+      if mon.status == "toxic" then
+        mon.toxicCounter = mon.toxicCounter + 1
+      elseif mon.toxicLinger then
+        -- HandlePoisonBurnLeechSeed_DecreaseOwnHP multiplies by the toxic
+        -- counter on the BADLY_POISONED bit alone, so a bit that outlived a
+        -- nap (`toxicLinger`) turns a later poison -- or a burn -- toxic.
+        amount = amount * max(1, int(mon.toxicCounter, 1))
+        mon.toxicCounter = max(1, int(mon.toxicCounter, 1)) + 1
       end
-    end
-    if self.result then return end
-    -- The Leech Seed tick, on the monster seeded when the residual began: the
-    -- one still standing, or the one its own poison or burn just knocked out
-    -- (`poisonKo`).  A trap's later hits are not part of this pass: they are
-    -- the trapper's own slot on the cart (`_trapTurn`).
-    -- HandlePoisonBurnLeechSeed_DecreaseOwnHP takes 1/16 of the max HP (at
-    -- least 1) and multiplies it by the toxic counter -- incremented again,
-    -- so a badly poisoned, seeded monster's counter climbs twice a turn (the
-    -- Leech Seed + Toxic glitch) -- whether or not the HP was there to take,
-    -- and _IncreaseEnemyHP hands the seeder that whole amount ("bc isn't
-    -- updated if HP subtracted was capped").  Read before the damage, since a
-    -- tick that knocks the seeded monster out runs `_faint`, which clears
-    -- `leechSeed`.
-    mon = activeMon(fighter)
-    if seed and (mon == seeded or poisonKo) then
-      local amount = max(1, floor(seeded.maxHp / 16))
-      if seeded.status == "toxic" or lingered then
-        amount = amount * max(1, int(seeded.toxicCounter, 1))
-        seeded.toxicCounter = max(1, int(seeded.toxicCounter, 1)) + 1
+      -- HurtByBurnText for a burn, HurtByPoisonText for a poison --
+      -- PSN on the status byte, a toxic included (core.asm :484-489).
+      if mon.status == "burn" then
+        self:_say(mon.species .. "'s hurt by the burn!")
+      else
+        self:_say(mon.species .. "'s hurt by poison!")
       end
-      local from = seed.fromSlot
-      -- The HP goes both ways first and HurtByLeechSeedText follows
-      -- (:519-524).  (The cart's ABSORB animation from the seeder is not
-      -- sent: a move id on an `anim` reads as that monster using ABSORB.)
-      if mon == seeded then self:_damage(fighter, mon, amount, nil, true, true) end
-      local seeder = from and self:_fighterAtSlot(from)
-      local sMon = seeder and activeMon(seeder)
-      if sMon and sMon.hp > 0 then self:_heal(seeder, sMon, amount) end
-      self:_say("LEECH SEED saps " .. seeded.species .. "!")
+      -- ...then BURN_PSN_ANIM, then the HP (:490-495).
+      self:_statusAnim(fighter, "BURN_PSN_ANIM")
+      -- The knockout is the main loop's, once the whole pass is done
+      -- (`ret nz` on the HP, :526-528): its faint waits for the seed's tick.
+      self:_damage(fighter, mon, amount, mon.status, true, true)
+      poisonKo = mon.hp <= 0
     end
-    if seeded and seeded.hp <= 0 and fighter.mons[fighter.active] == seeded then
-      self:_faint(fighter, seeded)
-    end
-    -- (Disable does not count down here: its counter steps in the disabled
-    -- monster's own turn, `_tickDisable`.)
   end
+  if self.result then return end
+  -- The Leech Seed tick, on the monster seeded when the residual began: the
+  -- one still standing, or the one its own poison or burn just knocked out
+  -- (`poisonKo`).  A trap's later hits are not part of this pass: they are
+  -- the trapper's own slot on the cart (`_trapTurn`).
+  -- HandlePoisonBurnLeechSeed_DecreaseOwnHP takes 1/16 of the max HP (at
+  -- least 1) and multiplies it by the toxic counter -- incremented again,
+  -- so a badly poisoned, seeded monster's counter climbs twice a turn (the
+  -- Leech Seed + Toxic glitch) -- whether or not the HP was there to take,
+  -- and _IncreaseEnemyHP hands the seeder that whole amount ("bc isn't
+  -- updated if HP subtracted was capped").  Read before the damage, since a
+  -- tick that knocks the seeded monster out runs `_faint`, which clears
+  -- `leechSeed`.
+  mon = activeMon(fighter)
+  if seed and (mon == seeded or poisonKo) then
+    local amount = max(1, floor(seeded.maxHp / 16))
+    if seeded.status == "toxic" or lingered then
+      amount = amount * max(1, int(seeded.toxicCounter, 1))
+      seeded.toxicCounter = max(1, int(seeded.toxicCounter, 1)) + 1
+    end
+    local from = seed.fromSlot
+    -- The HP goes both ways first and HurtByLeechSeedText follows
+    -- (:519-524).  (The cart's ABSORB animation from the seeder is not
+    -- sent: a move id on an `anim` reads as that monster using ABSORB.)
+    if mon == seeded then self:_damage(fighter, mon, amount, nil, true, true) end
+    local seeder = from and self:_fighterAtSlot(from)
+    local sMon = seeder and activeMon(seeder)
+    if sMon and sMon.hp > 0 then self:_heal(seeder, sMon, amount) end
+    self:_say("LEECH SEED saps " .. seeded.species .. "!")
+  end
+  if seeded and seeded.hp <= 0 and fighter.mons[fighter.active] == seeded then
+    self:_faint(fighter, seeded)
+  end
+  -- (Disable does not count down here: its counter steps in the disabled
+  -- monster's own turn, `_tickDisable`.)
 end
 
 -- ------------------------------------------------------------------
@@ -5856,7 +6028,22 @@ function Battle:_checkOver()
   if aliveA and aliveB then return false end
 
   if not aliveA and not aliveB then
-    self:_finish("draw", nil, nil, "ko")
+    -- Both sides down at once.  Against the computer the player blacks out,
+    -- whichever faint the cart finds first: HandleEnemyMonFainted runs
+    -- AnyPartyAlive straight after FaintEnemyPokemon and jumps to
+    -- HandlePlayerBlackOut on 0 (core.asm :699-705), and
+    -- HandlePlayerMonFainted does before it even reads the enemy's HP
+    -- (:969-975).  So the computer wins -- no prize money, no Pay Day
+    -- (wBattleResult is RemoveFaintedPlayerMon's 1), and no exp:
+    -- FaintEnemyPokemon returns on that same AnyPartyAlive before
+    -- GainExperience (:802-806), as `_awardExp` finds no one standing.  A
+    -- link fight's two carts each run that check on their own party and
+    -- each black out (LinkBattleLostText): nobody won, the draw.
+    if M.BADGE_MODES[self.mode] then
+      self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko")
+    else
+      self:_finish("draw", nil, nil, "ko")
+    end
   elseif aliveA then
     local result = self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko")
     self:_payDayOn(result)

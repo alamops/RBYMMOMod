@@ -2745,63 +2745,139 @@ function caughtSheet(mon) {
   return out;
 }
 
-const BALL_DEFS = {
-  MASTER_BALL: { autoCatch: true },
-  POKE_BALL: { randMax: 255, hpFactor: 12, wobbleFactor: 255 },
-  GREAT_BALL: { randMax: 200, hpFactor: 8, wobbleFactor: 200 },
-  ULTRA_BALL: { randMax: 150, hpFactor: 12, wobbleFactor: 150 },
-  SAFARI_BALL: { randMax: 150, hpFactor: 12, wobbleFactor: 150 },
-};
-const BALL_DEFAULT = { randMax: 255, hpFactor: 12, wobbleFactor: 150 };
+// Lua's `type(x) == "table"`.
+const isTable = (value) => typeof value === 'object' && value !== null;
 
-function catchRoll(rng, maxV) {
-  maxV = Math.max(0, int(maxV, 0));
-  if (maxV <= 0) return 0;
-  if (maxV >= 255) return rng ? rng.byte() : 0;
-  return (rng ? rng.byte() : 0) % (maxV + 1);
+// PokeBallEffect (pokegold engine/items/item_effects.asm, pokecrystal the
+// same), FX-R2 -- the Lua twin carries the notes: the ball's
+// BallMultiplierFunctionTable routine, the HP step and the SLP/FRZ +10 (not
+// for a LEVEL BALL), ONE byte that catches at most at wFinalCatchRate, then on
+// a miss up to three WobbleProbabilities draws. Returns { caught, shakes,
+// finalRate }.
+const WOBBLE_PROBABILITIES = [
+  [1, 63], [2, 75], [3, 84], [4, 90], [5, 95], [7, 103],
+  [10, 113], [15, 126], [20, 134], [30, 149], [40, 160],
+  [50, 169], [60, 177], [80, 191], [100, 201], [120, 211],
+  [140, 220], [160, 227], [180, 234], [200, 240], [220, 246],
+  [240, 251], [254, 253], [255, 255],
+];
+const BATTLETYPE_FISH = 4;
+const FAST_BALL_SPECIES = { MAGNEMITE: true, GRIMER: true, TANGELA: true };
+const HEAVY_BALL_WEIGHTS = [[8, 0], [12, 20], [16, 30], [255, 40]];
+
+function doubleByte(b) {
+  const out = b * 2;
+  return out > 255 ? 255 : out;
 }
 
-function catchAttempt(ballId, targetMon, rng) {
-  const def = BALL_DEFS[ballId] || BALL_DEFAULT;
-  if (def.autoCatch) return { caught: true, shakes: 3 };
+function heavyBallWeightByte(weight) {
+  const half = Math.floor((Math.max(0, int(weight, 0)) % 65536) / 2);
+  const sixteenth = Math.floor(half / 16);
+  return Math.floor((half - sixteenth - Math.floor(sixteenth / 2)) / 256);
+}
 
-  let rate = int(targetMon && targetMon.catchRate, 255);
-  if (rate < 0) rate = 0;
-  else if (rate > 255) rate = 255;
-
-  let statusBonus = 0;
-  let shakeBonus = 5;
-  const s = targetMon && targetMon.status;
-  if (s === 'sleep' || s === 'freeze') {
-    statusBonus = 25;
-    shakeBonus = 10;
-  } else if (s) {
-    statusBonus = 12;
-    shakeBonus = 5;
+function ballRate(ballId, rate, target, ctx) {
+  const c0 = isTable(ctx) ? ctx : {};
+  let b = Math.max(0, Math.min(255, int(rate, 0)));
+  if (ballId === 'ULTRA_BALL') return doubleByte(b);
+  if (ballId === 'GREAT_BALL' || ballId === 'SAFARI_BALL' || ballId === 'PARK_BALL') {
+    b += Math.floor(b / 2);
+    return b > 255 ? 255 : b;
   }
-
-  const maxhp = Math.max(1, int(targetMon && targetMon.maxHp, 1));
-  const hp = Math.max(0, int(targetMon && targetMon.hp, 0));
-  const hpQuarter = Math.max(1, Math.floor(hp / 4));
-  const factor = def.hpFactor || BALL_DEFAULT.hpFactor;
-  const f = Math.min(255, Math.floor(Math.floor(maxhp * 255 / factor) / hpQuarter));
-
-  function shakes() {
-    const ballFactor2 = def.wobbleFactor || BALL_DEFAULT.wobbleFactor;
-    const y = Math.floor(rate * 100 / ballFactor2);
-    let z = y > 255 ? 255 : Math.floor(f * y / 255);
-    if (s) z += shakeBonus;
-    if (z < 10) return 0;
-    if (z < 30) return 1;
-    if (z < 70) return 2;
-    return 3;
+  if (ballId === 'HEAVY_BALL') {
+    const weight = isTable(target) ? int(target.weight, null) : null;
+    if (weight === null) return b;
+    const high = heavyBallWeightByte(weight);
+    if (high < 4) return b < 20 ? 1 : b - 20;
+    for (const [key, boost] of HEAVY_BALL_WEIGHTS) {
+      if (high < key) {
+        b += boost;
+        return b > 255 ? 255 : b;
+      }
+    }
+    return b;
   }
+  if (ballId === 'LEVEL_BALL') {
+    const mine = int(isTable(c0.thrower) ? c0.thrower.level : undefined, 0);
+    const enemy = int(isTable(target) ? target.level : undefined, 0);
+    if (enemy >= mine) return b;
+    if (b * 2 > 255) return 255;
+    b *= 2;
+    let c = Math.floor(mine / 2);
+    if (enemy >= c) return b;
+    if (b * 2 > 255) return 255;
+    b *= 2;
+    c = Math.floor(c / 2);
+    if (enemy >= c) return b;
+    return doubleByte(b);
+  }
+  if (ballId === 'LURE_BALL') {
+    if (int(c0.battleType, -1) !== BATTLETYPE_FISH) return b;
+    return Math.min(255, b * 3);
+  }
+  if (ballId === 'LOVE_BALL') {
+    const thrower = c0.thrower;
+    if (!isTable(thrower) || !isTable(target)) return b;
+    const species = thrower.speciesId;
+    if (species === undefined || species === null || species !== target.speciesId) return b;
+    const mine = gender(thrower);
+    const theirs = gender(target);
+    if (mine === null || theirs === null || mine !== theirs) return b;
+    return Math.min(255, b * 8);
+  }
+  if (ballId === 'FAST_BALL') {
+    if (isTable(target) && target.speciesId && FAST_BALL_SPECIES[target.speciesId] === true) {
+      return Math.min(255, b * 4);
+    }
+    return b;
+  }
+  return b;
+}
 
-  const r = catchRoll(rng, def.randMax || 255) - statusBonus;
-  if (r < 0) return { caught: true, shakes: 3 };
-  if (r > rate) return { caught: false, shakes: shakes() };
-  if (catchRoll(rng, 255) <= f) return { caught: true, shakes: 3 };
-  return { caught: false, shakes: shakes() };
+function catchHpRate(rate, hp, maxHp, status) {
+  let doubled = (2 * Math.max(0, int(hp, 0))) % 65536;
+  let tripled = (3 * Math.max(0, int(maxHp, 0))) % 65536;
+  let c;
+  if (tripled >= 256) {
+    tripled = Math.floor(tripled / 4);
+    doubled = Math.floor(doubled / 4);
+    c = doubled % 256;
+    if (c === 0) c = 1;
+  } else {
+    c = doubled % 256;
+  }
+  const b = tripled % 256;
+  const multiplier = (((b - c) % 256) + 256) % 256;
+  let quotient = 0;
+  if (b > 0) quotient = Math.floor(Math.max(0, Math.min(255, int(rate, 0))) * multiplier / b);
+  quotient %= 256;
+  if (quotient === 0) quotient = 1;
+  if (status === 'sleep' || status === 'freeze') quotient += 10;
+  if (quotient > 255) quotient = 255;
+  return quotient;
+}
+
+function wobbleByte(finalRate) {
+  const rate = int(finalRate, 0);
+  for (const [key, value] of WOBBLE_PROBABILITIES) {
+    if (key >= rate) return value;
+  }
+  return 255;
+}
+
+function catchAttempt(ballId, targetMon, rng, ctx) {
+  const draw = () => (rng ? rng.byte() : 0);
+  if (ballId === 'MASTER_BALL') return { caught: true, shakes: 3, finalRate: 255 };
+  const target = isTable(targetMon) ? targetMon : {};
+  const rate = ballRate(ballId, Math.max(0, Math.min(255, int(target.catchRate, 255))), target, ctx);
+  let final = rate;
+  if (ballId !== 'LEVEL_BALL') final = catchHpRate(rate, target.hp, target.maxHp, target.status);
+  if (draw() <= final) return { caught: true, shakes: 3, finalRate: final };
+  const threshold = wobbleByte(final);
+  for (let wobbles = 0; wobbles <= 2; wobbles += 1) {
+    if (draw() >= threshold) return { caught: false, shakes: wobbles, finalRate: final };
+  }
+  return { caught: false, shakes: 3, finalRate: final };
 }
 
 function isWildMode(mode) {
@@ -3032,6 +3108,13 @@ module.exports = {
   applyVitamin,
   caughtSheet,
   catchAttempt,
+  ballRate,
+  catchHpRate,
+  wobbleByte,
+  heavyBallWeightByte,
+  WOBBLE_PROBABILITIES,
+  BATTLETYPE_FISH,
+  FAST_BALL_SPECIES,
   isWildMode,
   isNoOp,
   isBide,

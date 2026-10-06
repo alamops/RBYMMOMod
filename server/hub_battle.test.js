@@ -1016,7 +1016,7 @@ function testBagProofs() {
   relay.handle(a.id, {
     type: 'mmo.battle_party',
     battle: session.id,
-    mons: [mon(40)],
+    mons: [mon(40, 60)],
     bag: [{ id: 'POTION', count: 1 }, { id: 'POKE_FLUTE', count: 1 }],
   });
   relay.handle(b.id, {

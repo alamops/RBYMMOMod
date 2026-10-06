@@ -384,6 +384,71 @@ do
      "the switch-out's MIMIC: the slot's byte, and GetMaxPP over the PP Ups it holds now")
 end
 
+-- FX-R1: ItemUseBall's Rand1 loop, its W > 255 capture, PSYWAVE's two
+-- ranges, and an OHKO's wDamage -- each fed a scripted byte stream, so the
+-- draws themselves are the claim.
+do
+  local function scripted(bytes)
+    local used = 0
+    return {
+      byte = function()
+        used = used + 1
+        local b = bytes[used]
+        if b == nil then error("drew past the scripted bytes", 0) end
+        return b
+      end,
+      used = function() return used end,
+    }
+  end
+  local wild = { catchRate = 45, hp = 100, maxHp = 100 }
+  -- GREAT BALL: 201 and 255 are redrawn (`cp b / jr c, .loop` against 200),
+  -- 46 kept -- over the rate of 45 by one: no Rand2, broken free.
+  local rng = scripted({ 201, 255, 46 })
+  local caught = Effects.catchAttempt("GREAT_BALL", wild, rng)
+  eq(caught, false, "GREAT BALL: Rand1 46 > rate 45 fails")
+  eq(rng.used(), 3, "...after redrawing 201 and 255 (ItemUseBall `.loop`)")
+  -- ULTRA BALL: 151 is redrawn too (the second `cp b`, against 150).
+  rng = scripted({ 151, 200, 45, 0 })
+  caught = Effects.catchAttempt("ULTRA_BALL", wild, rng)
+  eq(caught, true, "ULTRA BALL: 151 and 200 redrawn, 45 passes, Rand2 0 catches")
+  eq(rng.used(), 4, "...four bytes")
+  -- POKé BALL takes any byte.
+  rng = scripted({ 255 })
+  eq(Effects.catchAttempt("POKE_BALL", wild, rng), false, "POKé BALL: 255 kept, over the rate")
+  eq(rng.used(), 1, "...one byte")
+  -- W > 255 captures before Rand2 (`jr nz, .captured`): HP 4 of 100 is a
+  -- quarter of 1, so W = 100 * 255 / 12 = 2125.
+  rng = scripted({ 10 })
+  eq(Effects.catchAttempt("POKE_BALL", { catchRate = 45, hp = 4, maxHp = 100 }, rng), true,
+     "W > 255: captured on Rand1 alone")
+  eq(rng.used(), 1, "...no Rand2 drawn")
+  -- MASTER BALL: `.loop`'s Random comes before the ball is looked at.
+  rng = scripted({ 77 })
+  eq(Effects.catchAttempt("MASTER_BALL", wild, rng), true, "MASTER BALL catches")
+  eq(rng.used(), 1, "...after the one byte `.loop` drew first")
+
+  -- PSYWAVE at level 2 (b = 3): the player's [1, 3) redraws a 0; the
+  -- computer's [0, 3) keeps it.
+  rng = scripted({ 0, 3, 2 })
+  eq(Effects.psywaveDamage(2, rng, false), 2, "the player's PSYWAVE redraws 0 and 3")
+  eq(rng.used(), 3, "...three bytes")
+  rng = scripted({ 3, 0 })
+  eq(Effects.psywaveDamage(2, rng, true), 0, "the computer's PSYWAVE keeps a 0 (core.asm :4776-4789)")
+  eq(rng.used(), 2, "...after redrawing 3")
+  eq(Effects.psywaveDamage(1, scripted({}), false), 1, "the player's b of 1 freezes the cart: 1, no draw")
+  eq(Effects.setDamage({ moveId = "PSYWAVE", userMon = { level = 2 }, rng = scripted({ 0 }),
+                         computerMover = true }), 0,
+     "setDamage passes the computer's range on")
+
+  -- OneHitKOEffect_'s $FFFF through STAB (a 16-bit add: 32766) and the rows
+  -- (each quotient's low two bytes).
+  eq(Effects.ohkoDamage(false, {}), 65535, "OHKO: no STAB, no row")
+  eq(Effects.ohkoDamage(true, {}), 32766, "STAB wraps: 65535 + 32767 = 32766")
+  eq(Effects.ohkoDamage(false, { 200 }), 65534, "a 2x row: 131070 keeps its low word")
+  eq(Effects.ohkoDamage(true, { 50, 50 }), 8191, "STAB then two halving rows")
+  eq(Effects.ohkoDamage(false, { 0 }), 0, "an immunity row: 0")
+end
+
 if failures > 0 then
   io.stderr:write(failures .. " failure(s)\n")
   os.exit(1)

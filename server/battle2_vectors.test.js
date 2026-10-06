@@ -402,6 +402,22 @@ const GOLD_RULES = {
   movePriority: (input) => ({
     priority: Effects.movePriority({ id: input.id, effect: input.effect, priority: nul(input.priority) }),
   }),
+  // FX-R2: PokeBallEffect (the Lua twin carries the notes).
+  ballRate: (input) => ({
+    rate: Effects.ballRate(input.ball, input.rate, nul(input.target),
+      { thrower: nul(input.thrower), battleType: nul(input.battleType) }),
+  }),
+  catchHpRate: (input) => ({
+    value: Effects.catchHpRate(input.rate, input.hp, input.maxHp, nul(input.status)),
+  }),
+  wobbleByte: (input) => ({ value: Effects.wobbleByte(input.rate) }),
+  heavyBallWeightByte: (input) => ({ value: Effects.heavyBallWeightByte(input.weight) }),
+  catchAttempt: (input) => {
+    const r = byteStream(input.bytes);
+    const got = Effects.catchAttempt(input.ball, nul(input.target), r,
+      { thrower: nul(input.thrower), battleType: nul(input.battleType) });
+    return { caught: got.caught, shakes: got.shakes, finalRate: got.finalRate, drawn: r.drawn() };
+  },
 };
 
 test('Gold move-effect formula vectors (R2c)', async (t) => {

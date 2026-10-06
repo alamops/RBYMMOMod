@@ -244,9 +244,16 @@ function loafLine(rng) {
 // `.useRandomMove`: the slot (1-based) used instead of `selected`, or null when
 // the cart refuses and falls to `.monDoesNothing` -- one move known, any move
 // disabled, Struggle selected, or no PP outside the selected slot (the cart's
-// sum of all four PP against the selected one's). None of the refusals draws.
-// `.chooseMove` then redraws `R & 3` until it names a slot that exists, is not
-// the selected one and has PP; the refusals guarantee there is one.
+// sum of all four PP, each `and PP_MASK`, against the selected one's). None of
+// the refusals draws. `.chooseMove` then redraws `R & 3` until it names a slot
+// that exists, is not the selected one and has a PP byte that is not 0 -- the
+// RAW byte (`ld a, [hl] / and a`, core.asm :3988-3992), PP Ups included, so a
+// slot at 0 PP with a PP Up on it (K8 `ppUps`) can be the move used instead.
+// The refusals guarantee a slot with masked PP, so the loop ends.
+function rawPp(move) {
+  return int(move.pp, 0) + 64 * (int(move.ppUps, 0) % 4);
+}
+
 function disobedientMove(moves, selected, disabled, struggling, rng) {
   if (!Array.isArray(moves) || moves.length < 2) return null;
   if (disabled || struggling) return null;
@@ -258,7 +265,7 @@ function disobedientMove(moves, selected, disabled, struggling, rng) {
   let slot;
   do {
     slot = (rng.byte() % 4) + 1;
-  } while (slot === selected || !moves[slot - 1] || int(moves[slot - 1].pp, 0) <= 0);
+  } while (slot === selected || !moves[slot - 1] || rawPp(moves[slot - 1]) <= 0);
   return slot;
 }
 

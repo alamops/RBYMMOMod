@@ -388,7 +388,9 @@ end
 
 function OBEDIENCE.random(input)
   local moves = {}
-  for i, pp in ipairs(input.pp) do moves[i] = { pp = pp } end
+  for i, pp in ipairs(input.pp) do
+    moves[i] = { pp = pp, ppUps = type(input.ppUps) == "table" and input.ppUps[i] or nil }
+  end
   local rng = scripted(input.bytes)
   local slot = Status.disobedientMove(moves, input.selected, input.disabled,
     input.struggling, rng)

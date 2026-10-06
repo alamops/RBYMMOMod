@@ -145,6 +145,10 @@ local function effectsFor(game)
   end
   return Effects1
 end
+-- Gold's wPlayerSubStatus4 bits an item sets and refuses to set twice (X
+-- ACCURACY, GUARD SPEC., DIRE HIT), by their item-effect field (`noteItemFlags2`).
+local FLAG_OF_ITEM = { xAccuracy = true, focusEnergy = true, mist = true }
+
 -- Back-compat alias for any leftover Effects.* call sites in this file.
 local Effects = setmetatable({}, {
   __index = function(_, k)
@@ -2471,6 +2475,7 @@ function M.new(opts)
     awaitingReconnect = false,
     reconnectSent = false,
     liveMoves   = nil,     -- Transform/Mimic overlay; PP-only syncs write mine[]
+    disabledMove = nil,    -- our monster's disabled slot, off the referee's lines
     -- Gen1 Battlefield theatre (top-down arena). Unused when classicUi is
     -- latched or Battlefield.enabled is false.
     frame = 0,
@@ -3730,6 +3735,10 @@ function M:onEvent(msg)
     if not (obeyed and msg.seq == obeyed + 1) then self:say(msg.text) end
     self:flushAnimBehind()
     self:noteBideLine(msg.text, msg.seq)
+    -- Our monster's Disable, as the referee says it (`noteDisableLine`), and
+    -- Gold's FOCUS ENERGY / MIST / BATON PASS for the item bits (`noteItemFlags2`).
+    self:noteDisableLine(msg.text)
+    self:noteItemFlags2(msg.text)
     -- The referee has narrated an escape itself (M.escapeLine): the ending
     -- adds no second one (`finish`).
     if M.escapeLine(msg.text) then self.escapeSaid = true end
@@ -3818,6 +3827,12 @@ function M:onEvent(msg)
       self.liveMoves = nil
       self.bideFiled, self.bideStoring, self.bideLocked = nil, nil, nil
       self.bideOn1 = nil
+      -- ...and its Disable (`noteDisableLine`): a newcomer has none.
+      self.disabledMove = nil
+      -- ...and Gold's item bits, unless a BATON PASS carried them over
+      -- (`noteItemFlags2`).
+      self.itemFlags2 = self.itemFlags2Passed
+      self.itemFlags2Passed = nil
       self.mustReplace = false
       if self.replaceOnly then
         self.replaceOnly = false
@@ -4177,6 +4192,8 @@ function M:onEvent(msg)
       self.confusedNow = nil
       -- A call filed last turn said what it called there, or called no BIDE.
       self.callFiled = nil
+      -- A BATON PASS that sent nobody out (it failed) carries nothing over.
+      self.itemFlags2Passed = nil
     end
     if owed == nil then
       self.pendingTurn = true
@@ -4319,6 +4336,10 @@ function M:onEvent(msg)
         self.liveMovesMimic = generation ~= 3
           and M.mimicOverlay(self.game, sheet and sheet.moves, msg.moves, generation)
         self.liveMoves = self:overlayRows(msg.moves)
+        -- Gold's TRANSFORM lifts the user's own Disable (pokecrystal
+        -- BattleCommand_Transform's ResetActorDisable; BattleSim2 Effects).
+        -- Red's keeps it, as the Red referee does.
+        if generation == 2 and not self.liveMovesMimic then self.disabledMove = nil end
       end
     end
 
@@ -4386,9 +4407,10 @@ function M.ppByteStep1(row, incoming)
   end
 end
 
--- What a Red slot's maximum reads as on the cart: GetMaxPP over the move's
--- base PP and the slot's PP Ups (pokered PrintMenuItem), nil for a move with
--- no record.
+-- What a slot's maximum reads as on the cart: GetMaxPP over the move's base
+-- PP and the slot's PP Ups -- pokered PrintMenuItem, pokecrystal / pokegold
+-- MoveInfoBox's GetMaxPPOfMove -- nil for a move with no record.  Named for
+-- the cart it was written for; Gold's overlay reads it too (`overlayRows`).
 function M.redMaxPp(game, row)
   local data = game and game.data
   local def = type(row) == "table" and type(data) == "table"
@@ -4408,10 +4430,24 @@ end
 -- mimicked move's base with MIMIC's PP Ups.  The Red referee states each
 -- row's `ppUps` (BattleSim Turn `_emitMoves`), so the cart's number is
 -- `redMaxPp` over the row; a row with no move record keeps the stated
--- maximum.  Copies, so the event's own rows are left as they came.  Gold and
--- Gen 3 keep the list as stated.
+-- maximum.  Copies, so the event's own rows are left as they came.
+--
+-- Gold's the same way: pokecrystal / pokegold MoveInfoBox prints the PP
+-- under the cursor over GetMaxPPOfMove with wMonType WILDMON
+-- (engine/items/item_effects.asm), which reads the move id out of
+-- wBattleMonMoves and the PP Ups out of wBattleMonPP's PP_UP_MASK bits
+-- (`wEnemyMonPP - wEnemyMonMoves` from wBattleMonMoves) and runs
+-- ComputeMaxPP over them -- the battle struct, not the party's.  A TRANSFORM
+-- copy is 5 PP with the PP-Up bits clear (transform.asm `.pp_loop` writes the
+-- whole byte; a copied SKETCH 1) and a MIMIC'd slot likewise (mimic.asm
+-- `ld [hl], 5`), so the cart reads "5/<the copied move's base PP>" where the
+-- Gold referee states its working ceiling, 5 (BattleSim2 Effects MIMIC_PP /
+-- TRANSFORM_PP); every slot it did not touch keeps its own PP Ups, which the
+-- referee's rows state (K8, BattleSim2 Turn `_emitMoves`).  Gen 3 keeps the
+-- list as stated (its rows carry the cart's own ceiling).
 function M:overlayRows(moves)
-  if self:generation() ~= 1 or type(moves) ~= "table" then return moves end
+  local generation = self:generation()
+  if (generation ~= 1 and generation ~= 2) or type(moves) ~= "table" then return moves end
   local out = {}
   for i, row in ipairs(moves) do
     if type(row) == "table" then
@@ -7146,7 +7182,16 @@ function M:finish(result, reason, msg)
   -- have played (#36 -- a fanfare over a KO that still looks alive was the
   -- reported bug). The classic 160x144 path queues no such rows and fires
   -- here exactly as it did.
-  if self.result == "win" then
+  --
+  -- Never for an escape on Red / Gold: a "win" with reason `run` is the foe
+  -- leaving -- a wild monster's flight, or the player's ROAR / WHIRLWIND
+  -- sending it off (the target's side leaves: BattleSim Turn `_concedeRun`
+  -- since FX-R1, BattleSim2's) -- and the carts play the fanfare from the
+  -- knockout alone (pokered FaintEnemyPokemon's `.wild_win` /
+  -- TrainerBattleVictory, pokecrystal's the same way): SwitchAndTeleportEffect
+  -- and BattleCommand_ForceSwitch end the fight on their line with no music.
+  local escaped = reason == "run" and self:generation() ~= 3
+  if self.result == "win" and not escaped then
     if self:usesBattlefield() and self:hasPendingHpFx() then
       self.victoryMusicHeld = true
     else
@@ -7348,6 +7393,162 @@ function M:wireSlotOf(sheetIndex)
   return (sheetIndex or 1) - 1
 end
 
+-- ------- STRUGGLE at the menu, and the DISABLE it reads
+--
+-- pokered AnyMoveToSelect (engine/battle/core.asm, MoveSelectionMenu's
+-- `.regularmenu`) and pokecrystal / pokegold CheckPlayerHasUsableMoves
+-- (MoveSelectionScreen, reached from ParsePlayerAction): before the move list
+-- opens, the cart asks whether there is anything to pick, and when there is
+-- not it prints NoMovesLeftText / BattleText_MonHasNoMovesLeft and hands the
+-- player STRUGGLE without ever drawing the list.  With no move disabled that
+-- is the four PP bytes ORed and masked (`and PP_MASK`): every slot at 0 PP.
+-- With one disabled it is the other three slots' bytes ORed and tested with
+-- `and a` -- unmasked on both carts (pokecrystal's own comment calls it the
+-- PP Up bug) -- so a 0-PP slot that carries PP Ups keeps STRUGGLE away, and
+-- the menu then refuses that slot for its PP and the disabled one for being
+-- disabled: the player can only switch or run.  The Red referee reproduces
+-- that (BattleSim Turn `mustStruggle`); the Gold referee does not -- with no
+-- RUN from a trainer and no one to switch to it leaves nothing to press, a
+-- freeze -- and counts the PP alone (BattleSim2 Turn `noUsableMoves`, FX-R2).
+-- Either reads any FIGHT index as STRUGGLE then, and this follows each.
+--
+-- `moves` is the list FIGHT shows (a Transform or Mimic overlay included),
+-- `disabled` its disabled slot (1-based) or nil, `generation` the cart's.
+-- An empty list is never STRUGGLE here: no slot is a FIGHT the referee could
+-- take (its `_normaliseChoice` needs a move at the index), and the list's
+-- own guard (`updateMoveMenu`) sends the player back to the commands.
+function M.mustStruggle(moves, disabled, generation)
+  if type(moves) ~= "table" or #moves == 0 then return false end
+  disabled = tonumber(disabled)
+  if disabled and type(moves[disabled]) == "table" then
+    local raw = generation == 1
+    for i, move in ipairs(moves) do
+      if i ~= disabled and type(move) == "table"
+         and ((tonumber(move.pp) or 0) > 0 or (raw and (tonumber(move.ppUps) or 0) > 0)) then
+        return false
+      end
+    end
+    return true
+  end
+  for _, move in ipairs(moves) do
+    if type(move) == "table" and (tonumber(move.pp) or 0) > 0 then return false end
+  end
+  return true
+end
+
+-- The menu's lines, each cart's own: NoMovesLeftText ("<MON> has no\nmoves
+-- left!", pokered data/text/text_2.asm) / BattleText_MonHasNoMovesLeft
+-- ("<MON>\nhas no moves left!", pokecrystal data/text/battle.asm); a pick
+-- at 0 PP, MoveNoPPText ("No PP left for\nthis move!") /
+-- BattleText_TheresNoPPLeftForThisMove; the disabled pick, MoveDisabledText
+-- ("The move is\ndisabled!") / BattleText_TheMoveIsDisabled ("The move
+-- is\nDISABLED!").  Shared with src/CoopBattle.lua.
+function M.noMovesLeftLine(name, generation)
+  name = tostring(name or "POKéMON")
+  if generation == 2 then return name .. "\nhas no moves left!" end
+  return name .. " has no\nmoves left!"
+end
+function M.noPpLine(generation)
+  if generation == 1 then return "No PP left for\nthis move!" end
+  return "There's no PP left\nfor this move!"
+end
+function M.moveDisabledLine(generation)
+  if generation == 2 then return "The move is\nDISABLED!" end
+  return "The move is\ndisabled!"
+end
+
+-- The wire carries no Disable: the referee says it, in its cart's words, and
+-- that is what this client reads.  pokered DisableEffect's MoveWasDisabledText
+-- "<TARGET>'s <MOVE> was disabled!" (BattleSim Effects), pokecrystal
+-- BattleCommand_Disable's "<TARGET>'s <MOVE> was DISABLED!" (BattleSim2
+-- Effects), and DisabledNoMoreText "<USER>'s disabled no more!" on both when
+-- the count runs out.  `species` is the name the referee narrates the monster
+-- under (its sheet's), `moves` the list it fights with; returns "on" and the
+-- slot the line names, "off", or nil for any other line.  The move is matched
+-- by the referee's label for it -- the row's `name`, else its id -- or this
+-- build's name for the id.
+function M.disableLine(text, species, moves, game)
+  if type(text) ~= "string" or type(species) ~= "string" or species == "" then return nil end
+  local flat = text:gsub("\n", " ")
+  local prefix = species .. "'s "
+  if flat:sub(1, #prefix) ~= prefix then return nil end
+  local rest = flat:sub(#prefix + 1)
+  if rest == "disabled no more!" then return "off" end
+  local label = rest:match("^(.-) was disabled!$") or rest:match("^(.-) was DISABLED!$")
+  if not label or label == "" then return nil end
+  label = label:upper()
+  local data = game and game.data
+  local defs = type(data) == "table" and type(data.moves) == "table" and data.moves or nil
+  local function names(name) return type(name) == "string" and name:upper() == label end
+  for i, move in ipairs(type(moves) == "table" and moves or {}) do
+    if type(move) == "table" then
+      local def = defs and type(move.id) == "string" and defs[move.id] or nil
+      if names(move.name) or names(move.id) or (type(def) == "table" and names(def.name)) then
+        return "on", i
+      end
+    end
+  end
+  return nil
+end
+
+-- This screen's half: our monster's disabled slot (`disabledMove`).  A line
+-- that disables a move of ours is taken only when the DISABLE was not our own
+-- monster's -- both referees put the move's animation on its user's seat
+-- straight ahead of the used line (`noteBideAnim`), and DISABLE is aimed at
+-- the foe, so in a mirror match "<MON>'s <MOVE> was disabled!" after our own
+-- DISABLE is the foe's monster.  Taking one that is not ours is the costly
+-- mistake -- FIGHT would hand over STRUGGLE (or refuse a move) the referee
+-- does not think is barred -- so that reading is the guarded one; the end
+-- ("disabled no more!") is taken unconditionally, since dropping ours early
+-- only shows the move list the referee then answers.  Also gone with the
+-- monster (`send` on our seat), with Red's HAZE (HazeEffect_ zeroes both
+-- wPlayerDisabledMove and wEnemyDisabledMove: "All STATUS changes are
+-- eliminated!", BattleSim Effects `hazeReset`) and with a Gold TRANSFORM of
+-- ours (ResetActorDisable; the `moves` branch of `onEvent`).
+function M:noteDisableLine(text)
+  local generation = self:generation()
+  if generation == 3 then return end
+  if generation == 1 and text == "All STATUS changes are eliminated!" then
+    self.disabledMove = nil
+    return
+  end
+  local mon = self:activeMon()
+  local said, slot = M.disableLine(text, mon and mon.species, mon and mon.moves, self.game)
+  if said == "off" then
+    self.disabledMove = nil
+  elseif said == "on" and (self.animSlot == nil or self.animSlot ~= self:mySlot()) then
+    self.disabledMove = slot
+  end
+end
+
+-- Does FIGHT hand this monster STRUGGLE (`M.mustStruggle`)?  Red and Gold:
+-- Gen 3 has its own menu rules (src/SoloBattle.lua `refusalText3`).
+function M:struggles()
+  local generation = self:generation()
+  if generation == 3 then return false end
+  local mon = self:activeMon()
+  return M.mustStruggle(mon and mon.moves, self.disabledMove, generation)
+end
+
+-- FIGHT as the cart answers it with nothing to pick: no move list, the line,
+-- and STRUGGLE.  The slot named is the disabled one when a Disable is why --
+-- the referee reads any index as STRUGGLE in that state, and should it not
+-- think the move is barred after all, the move it runs is the one with PP
+-- rather than a 0-PP slot it would refuse with silence -- else the first.
+-- The line goes up once the choice is really on the wire: a refused send
+-- leaves the commands open with nothing said.
+function M:sendStruggle()
+  local mon = self:activeMon()
+  local moves = mon and mon.moves or {}
+  local slot = tonumber(self.disabledMove)
+  if not (slot and moves[slot]) then slot = 1 end
+  local sent = self:sendChoice({ action = "fight", move = slot - 1 })
+  if sent then
+    self:say(M.noMovesLeftLine(mon and mon.species, self:generation()))
+  end
+  return sent
+end
+
 -- FIGHT with the move at `index` (1-based here, zero-based on the wire).  No
 -- target: a 1v1 has exactly one thing to hit, and the sim picks the first
 -- living foe when none is named -- naming one would be a field slot this
@@ -7358,27 +7559,39 @@ function M:pickMove(index, mimic, pass)
   local mon = self:activeMon()
   local moves = mon and mon.moves
   if not (moves and moves[index]) then return false end
-  -- One empty slot is not Struggle. The hub refuses that choice with silence
-  -- (`_normaliseChoice`), this screen has already marked the turn answered,
-  -- and both players wait out BATTLE_CHOICE_TIMEOUT. Stay on the list.
-  -- Every slot empty is Struggle and still sends.
+  -- Nothing to pick (`M.mustStruggle`): the cart never opened this list, and
+  -- FIGHT is STRUGGLE whatever row the cursor is on.
+  if self:struggles() then return self:sendStruggle() end
+  -- The menu's two refusals, in the carts' order (pokered `.moveselected`,
+  -- pokecrystal MoveSelectionScreen): a slot whose PP -- masked, so PP Ups
+  -- do not count -- is 0, then the disabled slot.  Each says the cart's line
+  -- and stays on the list.  Sent, the referee would refuse either with
+  -- silence (`_normaliseChoice`) while this screen marked the turn answered,
+  -- and both players would wait out BATTLE_CHOICE_TIMEOUT.
+  local generation = self:generation()
   local pp = tonumber(moves[index].pp) or 0
-  if pp <= 0 then
-    local leftover = false
-    for _, move in ipairs(moves) do
-      if (tonumber(move.pp) or 0) > 0 then leftover = true; break end
+  if generation == 3 then
+    -- Gen 3 as it was: one empty slot is refused, every slot empty still
+    -- sends (its referee's own Struggle rule).
+    if pp <= 0 then
+      local leftover = false
+      for _, move in ipairs(moves) do
+        if (tonumber(move.pp) or 0) > 0 then leftover = true; break end
+      end
+      if leftover then
+        self:say("There's no PP left\nfor this move!")
+        return false
+      end
     end
-    if leftover then
-      self:say("There's no PP left\nfor this move!")
+  else
+    if pp <= 0 then
+      self:say(M.noPpLine(generation))
       return false
     end
-  end
-  local disable = mon.disable
-  if type(disable) == "table" and (tonumber(disable.turns) or 0) > 0
-     and tonumber(disable.moveIndex) == index then
-    local name = self:moveLabel(moves[index].id) or "The move"
-    self:say(name .. "\nis disabled!")
-    return false
+    if tonumber(self.disabledMove) == index then
+      self:say(M.moveDisabledLine(generation))
+      return false
+    end
   end
   -- Red's MIMIC against the computer: the foe's move list first (M.asksMimic).
   if mimic == nil and self:asksMimic(moves[index]) then
@@ -7550,6 +7763,36 @@ function M:confirmPendingItem(itemId, amount)
   self.pendingItem = nil
   self.pendingItemSlot = nil
   local effect = effectsFor(self.game).itemEffect(id)
+  -- Red's PP item on a TRANSFORMed monster out: ItemUsePPRestore restores
+  -- the PARTY's moves -- its own, under the copies -- and `.afterRestoringPP`
+  -- copies their PP over the battle struct (BattleSim Turn `ownMoves` /
+  -- `syncCopies`, FX-R1).  The `moves` event behind it states the copies, so
+  -- the sheet's own rows (what the item's move picker lists and
+  -- `itemWontHaveEffect` reads) take the same restore here, by the referee's
+  -- own rule (Effects `restorePp`).  Without an overlay the event writes them.
+  local moveIndex = self.pendingItemMove
+  self.pendingItemMove = nil
+  if self:generation() == 1 and type(effect) == "table"
+     and (effect.ppRestore or effect.ppRestoreAll) and sheetIndex == (self.active or 1)
+     and self.liveMoves and not self.liveMovesMimic then
+    local sheet = self.mine and self.mine[sheetIndex]
+    local rows = type(sheet) == "table" and type(sheet.moves) == "table" and sheet.moves or {}
+    if effect.ppRestore then
+      if type(rows[moveIndex or 0]) == "table" then Effects1.restorePp(rows[moveIndex], effect.ppRestore) end
+    else
+      for _, row in ipairs(rows) do
+        if type(row) == "table" then Effects1.restorePp(row, effect.ppRestoreAll) end
+      end
+    end
+  end
+  -- Gold's X ACCURACY / GUARD SPEC. / DIRE HIT set their bit on the monster
+  -- out (`itemFlags2`): the referee took the use, so the bit is set now.
+  if self:generation() == 2 and type(effect) == "table" and sheetIndex == (self.active or 1) then
+    self.itemFlags2 = self.itemFlags2 or {}
+    for key in pairs(FLAG_OF_ITEM) do
+      if effect[key] then self.itemFlags2[key] = true end
+    end
+  end
   -- Never in a fight between players (LINK_MODES, wave 5): the Stat Exp a
   -- vitamin gave there is the fight's alone, as everything else a link
   -- battle does to the party is (`syncMineStatus` has the carts' reasons).
@@ -7701,6 +7944,190 @@ function M:drawClassicPartyPicker(Font, HudTiles)
 end
 
 
+-- ------- an item the cart does not use
+--
+-- Both carts answer a use that would do nothing with "It won't have any /
+-- effect." and keep the item and the turn: pokered ItemUseNoEffect ->
+-- ItemUseFailed (wActionResultOrTookBattleTurn 0, RemoveUsedItem never
+-- reached, UseBagItem back to BagWasSelected); pokecrystal / pokegold
+-- WontHaveAnyEffectMessage / WontHaveAnyEffect_NotUsedMessage
+-- (wItemEffectSucceeded 0 / 2, BattlePack's `.BattleField` / `.BattleOnly`
+-- keeping the pack open).  Both referees refuse such a choice at the door
+-- (BattleSim Turn `_itemFails`, FX-R1; BattleSim2 Turn `_itemWontHaveEffect`,
+-- FX-R2) -- a hub answers a refused choice with silence, which would leave
+-- the seat on a turn it never spent -- so this client asks the same question
+-- first, of its own sheets, and answers it the cart's way: the line, the bag
+-- back up, nothing sent and nothing spent (`commitItem`).
+M.NO_EFFECT_LINE = "It won't have any\neffect."
+
+-- The referees' status names for the wire's tokens (the engine's are the same
+-- tokens), so an item's cure set (Effects `clearStatuses`) can be read.
+local STATUS_NAME = {
+  PSN = "poison", TOX = "toxic", BRN = "burn", FRZ = "freeze",
+  PAR = "paralysis", SLP = "sleep",
+}
+local function statusNameOf(token)
+  if type(token) ~= "string" or token == "" then return nil end
+  return STATUS_NAME[token:upper()] or token:lower()
+end
+
+-- pokecrystal GetItemHealingAction's cure-everything rows, which
+-- IsItemUsedOnConfusedMon lets cure confusion in battle (BattleSim2 Turn
+-- CURES_CONFUSION -- read there, so the two never drift).
+local function curesConfusion2(itemId)
+  local ok, Turn2 = pcall(need, "BattleSim2/Turn")
+  local set = ok and type(Turn2) == "table" and Turn2.CURES_CONFUSION or nil
+  return type(set) == "table" and set[itemId] == true
+end
+
+-- Whether the cart's bag would turn this use down: a pure question over one
+-- party monster as this client holds it (`mon`: hp, maxHp or stats.hp, a
+-- status token, its own `moves` rows -- pp, ppUps, maxPp), for `generation`
+-- 1 or 2, mirroring the referee of that generation exactly.  `ctx`:
+--   onField     the monster is the one out (X items, GUARD SPEC., confusion)
+--   move        the 1-based slot an ETHER restores
+--   confused    the monster out is confused (Gold's cure-everything items)
+--   xAccuracy, focusEnergy, mist   Gold's wPlayerSubStatus4 bits on it
+-- Red (`_itemFails`): a medicine with no HP to restore and no status it
+-- cures (a FULL RESTORE at full HP still cures one); a PP item whose
+-- `.restorePP` would restore nothing on the monster's own moves (Effects
+-- `restorePp` on a scratch row, the referee's own rule); its X ACCURACY /
+-- GUARD SPEC. / DIRE HIT always set their bit.  Gold
+-- (`_itemWontHaveEffect`): X ACCURACY / GUARD SPEC. / DIRE HIT on a bit
+-- already set; an HP item at full HP (a FULL RESTORE then needs a status or
+-- confusion to cure); a cure with nothing of its kind to cure (a cure-
+-- everything item still takes confusion); an ETHER on a full move, an
+-- ELIXER with every move full.  An X item is never one on either cart (it
+-- prints its use line before the stat fails), nor a ball, a vitamin, the
+-- flute, a revive; a fainted monster's cases are the party picker's own
+-- (`itemFailsOnFainted`, `faintedOnly`).
+function M.itemWontHaveEffect(generation, game, itemId, effect, mon, ctx)
+  if generation ~= 1 and generation ~= 2 then return false end
+  if type(effect) ~= "table" or type(mon) ~= "table" then return false end
+  ctx = ctx or {}
+  local onField = ctx.onField == true
+  if generation == 2 then
+    if effect.xAccuracy then return onField and ctx.xAccuracy == true end
+    if effect.focusEnergy then return onField and ctx.focusEnergy == true end
+    if effect.mist then return onField and ctx.mist == true end
+  end
+  if effect.ball or effect.vitamin or effect.pokeFlute or effect.pokeDoll
+     or effect.revive or effect.stage or effect.xAccuracy or effect.focusEnergy
+     or effect.mist then
+    return false
+  end
+  local hp = tonumber(mon.hp) or 0
+  if hp <= 0 then return false end
+  local maxHp = tonumber(mon.maxHp)
+    or (type(mon.stats) == "table" and tonumber(mon.stats.hp)) or hp
+  local moves = type(mon.moves) == "table" and mon.moves or {}
+  local data = game and game.data
+  local defs = type(data) == "table" and type(data.moves) == "table" and data.moves or {}
+  -- A row's maximum as the referee holds it: the stated one, else GetMaxPP
+  -- over the record's base and the row's PP Ups (an engine slot states none).
+  local function maxPpOf(row)
+    local stated = tonumber(row.maxPp)
+    if stated then return stated end
+    local def = type(row.id) == "string" and defs[row.id] or nil
+    return (type(def) == "table" and M.maxPpOf(def.pp, row.ppUps)) or tonumber(row.pp) or 0
+  end
+  local function restores(row, amount)
+    if type(row) ~= "table" then return false end
+    if generation == 1 then
+      return Effects1.restorePp({ pp = row.pp, ppUps = row.ppUps, maxPp = maxPpOf(row) }, amount)
+    end
+    local pp = tonumber(row.pp) or 0
+    return pp < max(maxPpOf(row), pp, 1)
+  end
+  if effect.ppRestore then
+    local row = moves[tonumber(ctx.move) or 0]
+    if generation == 2 and row == nil then return false end
+    return not restores(row, effect.ppRestore)
+  end
+  if effect.ppRestoreAll then
+    for _, row in ipairs(moves) do
+      if restores(row, effect.ppRestoreAll) then return false end
+    end
+    return true
+  end
+  local status = statusNameOf(mon.status)
+  local cures = status ~= nil and (effect.clearAllStatus
+    or (type(effect.clearStatuses) == "table" and effect.clearStatuses[status] == true))
+  if generation == 1 then
+    local heals = (effect.healFull or (tonumber(effect.heal) or 0) > 0) and hp < maxHp
+    return not (heals or cures)
+  end
+  local confused = onField and ctx.confused == true
+  if effect.heal or effect.healFull then
+    if hp < maxHp then return false end
+    if effect.clearAllStatus then return status == nil and not confused end
+    return true
+  end
+  if effect.clearStatuses or effect.clearAllStatus then
+    if cures then return false end
+    return not (curesConfusion2(itemId) and confused)
+  end
+  return false
+end
+
+-- This screen's question for one pick (`M.itemWontHaveEffect` over the sheet
+-- of party member `partyIndex`, the one out by default).
+function M:itemNoEffect(pick, effect, partyIndex, moveIndex)
+  local generation = self:generation()
+  if generation ~= 1 and generation ~= 2 then return false end
+  local index = partyIndex or self.active or 1
+  local mon = self.mine and self.mine[index]
+  local seat = self.slots and self.slots[self:mySlot()]
+  seat = type(seat) == "table" and (seat.pending or seat) or nil
+  local flags = self.itemFlags2 or {}
+  return M.itemWontHaveEffect(generation, self.game, pick and pick.id, effect, mon, {
+    onField = index == (self.active or 1), move = moveIndex,
+    confused = seat ~= nil and seat.confused == true,
+    xAccuracy = flags.xAccuracy, focusEnergy = flags.focusEnergy, mist = flags.mist,
+  })
+end
+
+-- Gold's wPlayerSubStatus4 bits on our monster out (`itemFlags2`), which X
+-- ACCURACY, GUARD SPEC. and DIRE HIT refuse to set twice: set by our own use
+-- of one (its `item` event, `confirmPendingItem`) and by our FOCUS ENERGY /
+-- MIST ("<MON>'s getting pumped!" / "<MON>'s shrouded in MIST!", BattleSim2
+-- Effects, after a used line of ours -- `usedLineOurs`'s anim seat), gone with
+-- the monster (`send` on our seat) unless BATON PASS carried them over
+-- (pokecrystal BattleCommand_BatonPass keeps SubStatus4; BattleSim2 Turn
+-- `_batonPass` passes all three).  HAZE leaves them (BattleCommand_ResetStats
+-- resets the stat levels alone).
+function M:noteItemFlags2(text)
+  if self:generation() ~= 2 or type(text) ~= "string" then return end
+  local sheet = self.mine and self.mine[self.active or 1]
+  local species = sheet and sheet.species
+  if type(species) ~= "string" or species == "" then return end
+  local ours = self.animSlot == nil or self.animSlot == self:mySlot()
+  if not ours then return end
+  self.itemFlags2 = self.itemFlags2 or {}
+  if text == species .. "'s getting pumped!" then
+    self.itemFlags2.focusEnergy = true
+  elseif text == species .. "'s shrouded in MIST!" then
+    self.itemFlags2.mist = true
+  else
+    local label = text:match("^" .. species:gsub("%W", "%%%0") .. " used (.-)!$")
+    if label then
+      label = label:upper()
+      local mon = self:activeMon()
+      for _, move in ipairs((mon and mon.moves) or {}) do
+        local name = self:moveLabel(move.id)
+        if M.isBatonPass2(move, self.game)
+           and (label == tostring(name):upper() or label == tostring(move.id):upper()) then
+          -- What this monster's send-out on our seat carries over.
+          local carried = {}
+          for key in pairs(FLAG_OF_ITEM) do carried[key] = self.itemFlags2[key] end
+          self.itemFlags2Passed = carried
+          break
+        end
+      end
+    end
+  end
+end
+
 function M:commitItem(partyIndex, moveIndex)
   local pick = self.itemPick
   if not pick then return false end
@@ -7708,6 +8135,14 @@ function M:commitItem(partyIndex, moveIndex)
   if not effect then
     self:say("But it failed")
     self.phase = "choose"
+    self.itemPick = nil
+    return false
+  end
+  -- An item the cart would not use (`M.itemWontHaveEffect`): its line, the
+  -- bag back up, nothing sent and nothing spent.
+  if self:itemNoEffect(pick, effect, partyIndex, moveIndex) then
+    self:say(M.NO_EFFECT_LINE)
+    self.phase = "item"
     self.itemPick = nil
     return false
   end
@@ -7737,6 +8172,7 @@ function M:commitItem(partyIndex, moveIndex)
   -- Do not debit yet: wait for the hub `item` event (or clear on turn/unchose).
   self.pendingItem = pick.id
   self.pendingItemSlot = partyIndex or self.active
+  self.pendingItemMove = moveIndex
   -- Gen 3 names the item by its number, spelled as a string so the id
   -- sanitiser takes it (the referee reads either).  A ball also says whether
   -- this player's dex already has the wild species caught -- the Repeat
@@ -7799,6 +8235,10 @@ function M:updateCommand(input)
       -- A Bide going on (Gold's `.locked_in`), or Red's monster asleep or
       -- frozen: the cart opens no move list behind this FIGHT.
       self:sendLockedFight(locked)
+    elseif command == "FIGHT" and self:struggles() then
+      -- Nothing to pick (AnyMoveToSelect / CheckPlayerHasUsableMoves): no
+      -- move list either -- the line, and STRUGGLE (`sendStruggle`).
+      self:sendStruggle()
     elseif command == "FIGHT" then
       self.cursor = self:rememberedMove()
       self.phase = "move"
@@ -8290,7 +8730,7 @@ function M:updateItemParty(input)
          (effect.faintedOnly and not row.fainted)
          or (row.fainted and Effects.itemFailsOnFainted(effect))
        ) then
-      self:say("It won't have\nany effect.")
+      self:say(M.NO_EFFECT_LINE)
       return
     end
     if effect and effect.needsMove then

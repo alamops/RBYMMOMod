@@ -2658,6 +2658,129 @@ scenario('rp2_pp_ups', (events) => {
 });
 
 // ------------------------------------------------------------------
+// The review fixes (FX-R2): mirrored line for line from the Lua driver, which
+// carries the notes.
+// ------------------------------------------------------------------
+
+const verdict = (kind, fn) => (b, list) => { list.push({ t: kind, text: String(fn(b)) }); };
+
+scenario('fx2_struggle_disabled', (events) => seq(events, duo4('fx2a', '1v1', 951,
+  [mn({ species: 'Alpha', maxHp: 300, spe: 10, moves: [hm('growl', 0, 0, 0, 0), hm('tackle', 35, 0, 0, 5)] })],
+  [mn({ species: 'Beta', maxHp: 300, spe: 90, moves: [hm('DISABLE', 0, 0, 86), hm('wait', 0, 0, 85)] })]),
+[both3(F(1), F(1)), both3(F(1), F(0)), both3(F(0), F(1)), both3(F(1), F(1))]));
+
+scenario('fx2_out_of_pp', (events) => seq(events, duo4('fx2b', '1v1', 952,
+  [mn({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hm('SPITE', 0, 0, 150), hm('tap', 1)] })],
+  [mn({ species: 'Beta', maxHp: 900, spe: 10,
+    moves: [hm('thump', 10, 0, 0, 2), hm('razor', 10, 0, 39, 2), hm('tap', 1)] })]),
+[both3(F(1), F(0)), both3(F(0), F(0)), both3(F(1), F(1)), both3(F(1), F(1)), both3(F(0), F(1)),
+  both3(F(1), F(2))]));
+
+scenario('fx2_pursuit_ai_ko', (events) => seq(events, duo4('fx2c', 'coop_npc', 953,
+  [mn({ species: 'Alpha', maxHp: 300, atk: 200, spe: 10, moves: [hm('PURSUIT', 40, 7, 117)] })],
+  [mn({ species: 'Beta', maxHp: 300, hp: 5, spe: 90, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 300, spe: 90, moves: [hm('tap', 1)] })]),
+[both3(F(0), S(1)), both3(F(0), F(0))]));
+
+scenario('fx2_protect_ai_item', (events) => seq(events, duo4('fx2d', 'coop_npc', 954,
+  [mn({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hm('PROTECT', 0, 0, 120), hm('ENDURE', 0, 0, 121)] })],
+  [mn({ species: 'Beta', maxHp: 300, spe: 10, moves: [hm('tap', 1)] }),
+    mn({ species: 'Delta', maxHp: 300, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), ITEM('X_ATTACK')), both3(F(1), S(1)), both3(F(0), F(0))]));
+
+const itemCounter = (id, seed, family) => (events) => {
+  const o = duo4(id, 'coop_npc', seed,
+    [mn({ species: 'Alpha', maxHp: 300, spe: 10,
+      moves: [hm('DISABLE', 0, 0, 86), hm('MIRROR_MOVE', 0, 0, 9), hm('wait', 0, 0, 85)] })],
+    [mn({ species: 'Beta', maxHp: 300, spe: 90, moves: [hm('tap', 1)] })]);
+  o.sides.a[0].family = family;
+  return seq(events, o, [both3(F(2), F(0)), both3(F(1), ITEM('X_ATTACK')), both3(F(2), F(0)),
+    both3(F(0), ITEM('X_DEFEND'))]);
+};
+scenario('fx2_ai_item_counter_crystal', itemCounter('fx2e', 955, 'crystal'));
+scenario('fx2_ai_item_counter_gold', itemCounter('fx2f', 955, 'gs'));
+
+scenario('fx2_spikes_ai_switch', (events) => seq(events, duo4('fx2g', 'coop_npc', 956,
+  [mn({ species: 'Alpha', maxHp: 300, atk: 250, spe: 90,
+    moves: [hm('SPIKES', 0, 0, 149), hm('wait', 0, 0, 85), hm('slam', 200)] })],
+  [mn({ species: 'Beta', maxHp: 300, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Delta', maxHp: 60, def: 5, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Eps', maxHp: 300, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(1), S(1)), both3(F(2), F(0)), [['p2', S(2)]], both3(F(1), F(0))]));
+
+scenario('fx2_baton_pass_mirror', (events) => seq(events, duo4('fx2h', '1v1', 957,
+  [mn({ species: 'Passer', maxHp: 300, spe: 90, moves: [hm('BATON_PASS', 0, 0, 134)] }),
+    mn({ species: 'Heir', maxHp: 300, spe: 10, moves: [hm('tap', 1)] })],
+  [mn({ species: 'Mirror', maxHp: 300, spe: 10, moves: [hm('MIRROR_MOVE', 0, 0, 9), hm('tap', 1)] }),
+    mn({ species: 'Bench', maxHp: 300, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(FP(0, 1), F(0)), both3(F(0), F(0)), both3(F(0), F(0))]));
+
+const mutualKo = (id, mode) => (events) => seq(events, duo4(id, mode, 958,
+  [mn({ species: 'Alpha', maxHp: 100, atk: 250, spe: 90, moves: [hm('EXPLOSION', 250, 0, 7)] })],
+  [mn({ species: 'Beta', maxHp: 20, def: 5, spe: 10, moves: [hm('tap', 1)] })]),
+[both3(F(0), F(0))]);
+scenario('fx2_mutual_ko_npc', mutualKo('fx2i', 'coop_npc'));
+scenario('fx2_mutual_ko_link', mutualKo('fx2j', '1v1'));
+
+scenario('fx2_residual_ko', (events) => seq(events, duo4('fx2k', '1v1', 959,
+  [mn({ species: 'Alpha', maxHp: 400, spe: 90, moves: [hm('SANDSTORM', 0, 5, 126), hm('wrap', 15, 0, 42)] })],
+  [mn({ species: 'Beta', maxHp: 400, hp: 60, spe: 10, moves: [hm('wait', 0, 0, 85)] }),
+    mn({ species: 'Delta', maxHp: 400, hp: 80, spe: 10, moves: [hm('wait', 0, 0, 85)] })]),
+[both3(F(0), F(0)), both3(F(1), F(0)), [['p2', S(1)]], both3(F(1), F(0)), both3(F(1), F(0))]));
+
+scenario('fx2_bag_no_effect', (events) => {
+  const tryIt = (choice) => verdict('submit', (b) => b.submitChoice('p1', choice));
+  const o = duo4('fx2l', 'coop_npc', 960,
+    [mn({ species: 'Alpha', maxHp: 300, atk: 999, spe: 90, focusEnergy: true,
+      moves: [hm('tap', 1), hm('kick', 10, 0, 0, 5)] })],
+    [mn({ species: 'Beta', maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]);
+  o.sides.a[0].bag = [{ id: 'X_ATTACK', count: 1 }, { id: 'X_ACCURACY', count: 2 },
+    { id: 'DIRE_HIT', count: 1 }, { id: 'POTION', count: 2 }, { id: 'ANTIDOTE', count: 1 },
+    { id: 'ETHER', count: 1 }];
+  return seq(events, o, [
+    tryIt(ITEM('DIRE_HIT')), tryIt({ action: 'item', item: 'POTION', slot: 0 }),
+    tryIt({ action: 'item', item: 'ANTIDOTE', slot: 0 }),
+    tryIt({ action: 'item', item: 'ETHER', slot: 0, move: 0 }),
+    both3(ITEM('X_ATTACK'), F(0)), both3(ITEM('X_ACCURACY'), F(0)), tryIt(ITEM('X_ACCURACY')),
+    both3({ action: 'item', item: 'POTION', slot: 0 }, F(0))]);
+});
+
+scenario('fx2_ball_table', (events) => {
+  const wild = mn({ species: 'Beta', level: 20, maxHp: 300, spe: 10, status: 'SLP', statusTurns: 7,
+    moves: [hm('wait', 0, 0, 85)],
+    base: { hp: 50, atk: 50, def: 50, spe: 50, spa: 50, spd: 50, gender: 127 },
+    dvs: { atk: 15, def: 8, spe: 15, spc: 8 } });
+  wild.catchRate = 3;
+  wild.speciesId = 'MAGNEMITE';
+  wild.weight = 2000;
+  const o = duo4('fx2m', 'wild', 961,
+    [mn({ species: 'Alpha', level: 50, maxHp: 300, spe: 90, moves: [hm('wait', 0, 0, 85)],
+      base: { hp: 50, atk: 50, def: 50, spe: 50, spa: 50, spd: 50, gender: 127 },
+      dvs: { atk: 15, def: 8, spe: 15, spc: 8 } })],
+    [wild], { foe: 'wild' });
+  o.sides.a[0].mons[0].speciesId = 'MAGNEMITE';
+  o.battleType = 4;
+  const rounds = ['POKE_BALL', 'GREAT_BALL', 'PARK_BALL', 'MOON_BALL', 'FRIEND_BALL', 'HEAVY_BALL',
+    'LURE_BALL', 'FAST_BALL', 'LEVEL_BALL', 'LOVE_BALL', 'ULTRA_BALL']
+    .map((ball) => both3(ITEM(ball), F(0), 'wild'));
+  return seq(events, o, rounds);
+});
+
+scenario('fx2_level_up_guards', (events) => {
+  const up = (...args) => verdict('levelUp', (b) => b.levelUp(...args));
+  const o = duo4('fx2n', 'coop_npc', 962,
+    [mn({ species: 'Alpha', level: 29, maxHp: 60, spe: 40, moves: [hm('tap', 1)],
+      base: { hp: 50, atk: 50, def: 50, spe: 50, spa: 50, spd: 50 },
+      dvs: { atk: 15, def: 15, spe: 15, spc: 15 } })],
+    [mn({ species: 'Beta', level: 20, maxHp: 900, spe: 10, moves: [hm('tap', 1)] })]);
+  const s5 = (v) => ({ atk: v, def: v, spe: v, spa: v, spd: v });
+  return seq(events, o, [
+    up('p2', 1, 21, s5(50), 950), up('p1', 1, 29, s5(50), 70), up('p1', 1, 30, s5(39), 70),
+    up('p1', 1, 30, s5(63), 97), up('p1', 1, 30), both3(F(0), F(0)),
+    up('p1', 1, 31, s5(64), 101), up('p1', 1, 31, s5(64), 100), both3(F(0), F(0))]);
+});
+
+// ------------------------------------------------------------------
 // running both halves
 // ------------------------------------------------------------------
 
@@ -2723,7 +2846,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.strictEqual(jsRuns.length, 187, 'the JS half built every scenario');
+  assert.strictEqual(jsRuns.length, 201, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle2_turn_parity.json is available -- '
@@ -3106,7 +3229,9 @@ test('the Gen2 event vocabulary knows exp, the party index and the ask slot', ()
 const wildBattle2 = (mode, id, bBag) => {
   const sideA = [{
     playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
-    mons: [mn({ species: 'Alpha', maxHp: 200, spe: 90, moves: [mv('thump', 40, 255, 0)] })],
+    // Hurt, so the POTION has something to do (FX-R2: one on a full HP bar
+    // "won't have any effect" and is refused).
+    mons: [mn({ species: 'Alpha', maxHp: 200, hp: 150, spe: 90, moves: [mv('thump', 40, 255, 0)] })],
   }];
   if (mode === 'coop_wild') {
     sideA.push({
@@ -5140,16 +5265,20 @@ test('R2c: the Gold move effects, weather and R2b\'s found cart differences', ()
   assert.ok(!lines('r2c_beat_up').some((t) => t.startsWith('Hit ')), 'no "Hit N times!"');
   assert.ok(has('r2c_beat_up_wild', "Wild's attack!") && has('r2c_beat_up_wild', 'But it failed!'));
 
-  // PURSUIT: a player's switch is chased first, doubled; the computer's is not.
+  // PURSUIT: a player's switch is chased first, doubled -- and (FX-R2) so is
+  // the computer's: AI_Switch calls PursuitSwitch too.
   const pl = runs.get('r2c_pursuit_link').events;
   const firstHit = pl.findIndex((e) => e.t === 'damage');
   const firstSwitch = pl.findIndex((e) => e.t === 'switch');
   assert.ok(firstHit < firstSwitch, 'the PURSUIT lands before the switch');
   assert.strictEqual(hits('r2c_pursuit_link', 0)[0], 18, 'doubled on the way out');
   const pc = runs.get('r2c_pursuit_computer').events;
-  assert.ok(pc.findIndex((e) => e.t === 'switch') < pc.findIndex((e) => e.t === 'damage'),
-    "the computer's switch goes first");
-  assert.deepStrictEqual(hits('r2c_pursuit_computer', 3), [16, 8], '...doubled on the incoming');
+  assert.ok(pc.findIndex((e) => e.t === 'damage') < pc.findIndex((e) => e.t === 'switch'),
+    "the computer's withdrawal is chased before its send-out");
+  assert.deepStrictEqual(hits('r2c_pursuit_computer', 3), [16, 8],
+    '...doubled on the way out, then plain on the successor');
+  assert.deepStrictEqual(pc.filter((e) => e.t === 'damage' && e.side === 'b').map((e) => e.hp), [384, 392],
+    'the first hit is the withdrawing monster, the second its successor');
 
   // FUTURE SIGHT.
   assert.ok(has('r2c_future_sight', 'Alpha foresaw an attack!'));
@@ -5295,6 +5424,8 @@ test('R2d: the Gold status and field scripts, their failure lines, the residual 
 
   // SPITE, AMNESIA, SWAGGER.
   assert.ok(has('r2d_spite', "Beta's thump was reduced by 3!"));
+  // FX-R2: the chosen thump SPITE emptied is BattleCommand_DoTurn's `.out_of_pp`.
+  assert.ok(has('r2d_spite', 'But no PP is left for the move!'));
   assert.ok(events('r2d_amnesia').some((e) => e.t === 'stat' && e.stage === 2 && /SPCL\.DEF went way up!/.test(e.text)));
   assert.ok(has('r2d_swagger', "Alpha's attack missed!"), 'SWAGGER at +6 is a miss');
   assert.strictEqual(count('r2d_swagger', 'Delta became confused!'), 1);
@@ -5521,7 +5652,8 @@ test('RP2: NotVeryEffectiveText\'s ellipsis glyph, and K8\'s PP Ups on a `moves`
 test('RP2: ItemUsedText / _EnemyUsedOnText, and nothing past them where the cart says nothing', () => {
   const { battle, foe } = fight({
     mode: 'coop_npc', seed: 3,
-    a: [held({ species: 'Alpha', spe: 90, stages: { spe: 5 }, moves: [hit('wait', 0, 0, 85)] })],
+    // Hurt, so the POTION below is used (FX-R2).
+    a: [held({ species: 'Alpha', hp: 50, spe: 90, stages: { spe: 5 }, moves: [hit('wait', 0, 0, 85)] })],
     b: [held({ species: 'Beta', spe: 10, moves: [hit('wait', 0, 0, 85)] })],
   });
   battle.drainEvents();
@@ -5542,35 +5674,46 @@ test('RP2: ItemUsedText / _EnemyUsedOnText, and nothing past them where the cart
   events = roundOf(battle, foe, ITEM('POKE_BALL'), F(0));
   assert.ok(said(events, 'The trainer blocked the BALL!') && said(events, "Don't be a thief!")
     && !said(events, 'Ann used the POKé BALL.'), 'a ball in a trainer fight is blocked');
-  events = roundOf(battle, foe, ITEM('POKE_DOLL'), F(0));
-  assert.ok(said(events, "OAK: Ann! This isn't the time to use that!"));
+  // FX-R2: PokeDollEffect's `.not_wild` uses nothing -- refused as it is chosen.
+  assert.strictEqual(battle.submitChoice('p1', ITEM('POKE_DOLL')), false, 'a POKé DOLL outside a wild fight');
+  assert.strictEqual(battle.byId.get('p1').choice, null, '...the seat is asked again');
   assert.strictEqual(battle.outcome(), null, '...and the fight goes on');
 });
 
 test('RP2: the wobble lines by count, Text_BallCaught, and no "The ball shook"', () => {
-  const wildBall = (rate, hp, seed, ball) => {
-    const wildMon = held({ species: 'Beta', maxHp: 900, hp, spe: 10, moves: [hit('wait', 0, 0, 85)] });
-    wildMon.catchRate = rate;
+  // FX-R2: PokeBallEffect's draws, scripted (the Lua twin works the numbers:
+  // wFinalCatchRate 66, wobble byte 191).
+  const wildBall = (ball, bytes, hp) => {
+    const wildMon = held({ species: 'Beta', maxHp: 300, hp, spe: 10, moves: [hit('wait', 0, 0, 85)] });
+    wildMon.catchRate = 200;
     const { battle, foe } = fight({
-      mode: 'wild', seed,
+      mode: 'wild', seed: 1,
       a: [held({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hit('wait', 0, 0, 85)] })],
       b: [wildMon],
     });
     battle.drainEvents();
-    return { events: roundOf(battle, foe, ITEM(ball)), battle };
+    let i = 0;
+    battle.rng = { byte: () => { i += 1; return bytes[i - 1] !== undefined ? bytes[i - 1] : 0; } };
+    const events = roundOf(battle, foe, ITEM(ball));
+    return { events, battle, drawn: i };
   };
-  const hard = wildBall(3, undefined, 938, 'POKE_BALL').events;
-  assert.ok(said(hard, 'Ann used the POKé BALL.') && said(hard, 'Oh no! The POKéMON broke free!'));
-  const close = wildBall(255, 700, 942, 'ULTRA_BALL').events;
-  assert.ok(said(close, 'Shoot! It was so close too!'));
-  const mid = wildBall(200, undefined, 932, 'POKE_BALL').events;
-  assert.ok(said(mid, 'Aww! It appeared to be caught!'));
-  const two = wildBall(200, undefined, 932, 'GREAT_BALL').events;
-  assert.ok(said(two, 'Aargh! Almost had it!'));
-  const caught = wildBall(200, undefined, 1, 'MASTER_BALL');
+  const free = wildBall('POKE_BALL', [67, 191]);
+  assert.ok(said(free.events, 'Ann used the POKé BALL.') && said(free.events, 'Oh no! The POKéMON broke free!'));
+  assert.strictEqual(free.drawn, 2, 'one catch byte over 66, one wobble byte at 191');
+  assert.ok(said(wildBall('POKE_BALL', [255, 190, 191]).events, 'Aww! It appeared to be caught!'));
+  assert.ok(said(wildBall('POKE_BALL', [255, 0, 0, 200]).events, 'Aargh! Almost had it!'));
+  const close = wildBall('POKE_BALL', [255, 0, 0, 0, 0]);
+  assert.ok(said(close.events, 'Shoot! It was so close too!'));
+  assert.strictEqual(close.drawn, 4, 'three wobbles at most');
+  const edge = wildBall('POKE_BALL', [66]);
+  assert.ok(said(edge.events, 'Gotcha! Beta was caught!'), 'a byte equal to the final rate catches');
+  assert.strictEqual(edge.drawn, 1, '...and a catch draws no wobble');
+  assert.strictEqual(edge.battle.outcome().reason, 'catch');
+  const caught = wildBall('MASTER_BALL', []);
   assert.ok(said(caught.events, 'Gotcha! Beta was caught!'));
+  assert.strictEqual(caught.drawn, 0, 'a MASTER BALL draws nothing');
   assert.strictEqual(caught.battle.outcome().reason, 'catch');
-  for (const list of [hard, close, mid, two, caught.events]) {
+  for (const list of [free.events, close.events, edge.events, caught.events]) {
     assert.ok(!said(list, 'The ball shook'), 'the cart has no "The ball shook"');
   }
 });
@@ -5640,4 +5783,282 @@ test('RP2: CheckTurn\'s ANIM_SLP and ANIM_CONFUSED, placed as the cart plays the
   events = roundOf(woke.battle, woke.foe);
   assert.ok(said(events, 'Alpha woke up!') && animIndex(events, 'SLP_PLAYER_ANIM', 0) < 0,
     'no sleep clip on the turn it wakes');
+});
+
+// ------------------------------------------------------------------
+// The review fixes (FX-R2): the twin of tests/battle_sim2_turn.lua's last
+// section, which carries the notes.
+// ------------------------------------------------------------------
+
+test('FX-R2 (1): K9 levelUp, judged as Red judges it', () => {
+  const stats = (atk, def, spe, spa, spd) => ({ atk, def, spe, spa, spd });
+  const pvp = fight({
+    mode: '1v1', seed: 1,
+    a: [held({ species: 'Alpha', level: 20, maxHp: 100, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', level: 20, maxHp: 100, moves: [hit('tap', 1)] })],
+  }).battle;
+  assert.strictEqual(pvp.levelUp('p1', 1, 21, stats(50, 50, 50, 50, 50), 110), false, 'no level-up between players');
+  assert.strictEqual(monOf(pvp, 'p1').level, 20);
+  const { battle: npc, foe } = fight({
+    mode: 'coop_npc', seed: 1,
+    a: [held({ species: 'Alpha', level: 20, maxHp: 100, moves: [hit('tap', 1)] }),
+      held({ species: 'Down', level: 20, maxHp: 100, hp: 0, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', level: 20, maxHp: 100, moves: [hit('tap', 1)] })],
+  });
+  assert.strictEqual(npc.levelUp(foe, 1, 21, stats(50, 50, 50, 50, 50), 110), false, "the computer's seat");
+  assert.strictEqual(npc.levelUp('p1', 2, 21, stats(50, 50, 50, 50, 50), 110), false, 'a fainted monster');
+  assert.strictEqual(npc.levelUp('p1', 1, 20, stats(50, 50, 50, 50, 50), 110), false, 'the level must rise');
+  assert.strictEqual(npc.levelUp('p1', 1, 21, null, 110), true, 'a level and a max HP alone');
+  assert.strictEqual(npc.levelUp('p1', 1, 22, stats(39, 50, 50, 50, 50), 110), false, 'a stat that falls');
+  assert.strictEqual(npc.levelUp('p1', 1, 22, stats(50, 50, 50, 50, 50), 100), false, 'a max HP that falls');
+  assert.strictEqual(npc.levelUp('p1', 1, 22, stats(1000, 50, 50, 50, 50), 110), false, 'a stat past 999');
+  assert.strictEqual(npc.levelUp('p1', 1, 22, stats(50, 50, 50, 50, 50), 1000), false, 'a max HP past 999');
+  assert.strictEqual(npc.levelUp('p1', 1, 22, 'x', 110), false, 'nonsense, never thrown');
+  assert.strictEqual(npc.levelUp('p1', 1, 22, stats(999, 999, 999, 999, 999), 999), true, 'without K7 the ceiling is 999');
+  const k7 = fight({
+    mode: 'wild', seed: 2,
+    a: [held({ species: 'Alpha', level: 29, maxHp: 60, spe: 40, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', level: 20, maxHp: 300, moves: [hit('tap', 1)] })],
+  }).battle;
+  const alpha = monOf(k7, 'p1');
+  alpha.base = { hp: 50, atk: 50, def: 50, spe: 50, spa: 50, spd: 50 };
+  alpha.dvs = { atk: 15, def: 15, spe: 15, spc: 15 };
+  assert.strictEqual(k7.levelUp('p1', 1, 30), true, 'K7 and no stats: computed');
+  assert.strictEqual(alpha.stats.atk, 44);
+  assert.strictEqual(alpha.maxHp, 79);
+  assert.strictEqual(k7.levelUp('p1', 1, 31, stats(65, 64, 64, 64, 64), 100), false, 'past the ceiling');
+  assert.strictEqual(k7.levelUp('p1', 1, 31, stats(64, 64, 64, 64, 64), 101), false, 'a max HP past it');
+  assert.strictEqual(k7.levelUp('p1', 1, 31, stats(64, 64, 64, 64, 64), 100), true, 'the ceiling itself');
+  assert.strictEqual(alpha.stats.atk, 64);
+});
+
+test('FX-R2 (2): PokeBallEffect -- the throw context and its draws', () => {
+  const throwBall = (ball, opts, bytes) => {
+    const wild = held({ species: 'Beta', level: opts.wildLevel || 20, maxHp: 300, spe: 10,
+      moves: [hit('wait', 0, 0, 85)] });
+    wild.catchRate = opts.rate || 30;
+    wild.speciesId = opts.speciesId;
+    const battle = build({
+      id: 'fx2c', mode: 'wild', seed: 1, choiceTimeout: 60, reconnectGrace: 60,
+      battleType: opts.battleType,
+      sides: {
+        a: [{ playerId: 'p1', name: 'Ann', mons: [held({ species: 'Alpha', level: opts.level || 20,
+          maxHp: 300, spe: 90, moves: [hit('wait', 0, 0, 85)] })] }],
+        b: [{ playerId: 'wild', name: 'Wild', mons: [wild] }],
+      },
+    });
+    battle.drainEvents();
+    let i = 0;
+    battle.rng = { byte: () => { i += 1; return bytes[i - 1] !== undefined ? bytes[i - 1] : 255; } };
+    const events = roundOf(battle, 'wild', ITEM(ball));
+    return [said(events, 'Gotcha! Beta was caught!'), i];
+  };
+  assert.strictEqual(throwBall('POKE_BALL', {}, [10])[0], true, 'a byte at wFinalCatchRate (10) catches');
+  assert.strictEqual(throwBall('POKE_BALL', {}, [11])[0], false, 'one over misses');
+  assert.strictEqual(throwBall('LEVEL_BALL', { level: 41, wildLevel: 20 }, [60])[0], true, 'LEVEL BALL x2, no HP step');
+  assert.strictEqual(throwBall('LEVEL_BALL', { level: 41, wildLevel: 20 }, [61])[0], false);
+  assert.strictEqual(throwBall('LURE_BALL', { battleType: 4 }, [30])[0], true, 'LURE BALL x3 when fishing');
+  assert.strictEqual(throwBall('LURE_BALL', {}, [11])[0], false, 'x1 otherwise');
+  assert.strictEqual(throwBall('FAST_BALL', { speciesId: 'MAGNEMITE' }, [40])[0], true, 'FAST BALL x4 for MAGNEMITE');
+  assert.strictEqual(throwBall('FAST_BALL', { speciesId: 'RAIKOU' }, [11])[0], false, "nothing past FleeMons' first three");
+  assert.strictEqual(throwBall('MOON_BALL', {}, [11])[0], false, 'MOON BALL never boosted');
+  assert.strictEqual(throwBall('POKE_BALL', {}, [255, 0, 0, 0])[1], 4, 'a miss draws its three wobbles');
+});
+
+test('FX-R2 (3): the bag\'s "It won\'t have any effect." and an X item on a stat of 999', () => {
+  const { battle, foe } = fight({
+    mode: 'coop_npc', seed: 3,
+    a: [held({ species: 'Alpha', maxHp: 300, atk: 999, spe: 90, focusEnergy: true,
+      moves: [hit('tap', 1), hit('kick', 10, 0, 0, 5)] })],
+    b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.byId.get('p1').bag = { X_ACCURACY: 2, DIRE_HIT: 1, GUARD_SPEC: 2, POTION: 1, FULL_RESTORE: 1,
+    ANTIDOTE: 1, FULL_HEAL: 1, ETHER: 1, ELIXER: 1, X_ATTACK: 1 };
+  battle.drainEvents();
+  const a = monOf(battle, 'p1');
+  assert.strictEqual(battle.submitChoice('p1', ITEM('DIRE_HIT')), false, 'DIRE HIT with FOCUS ENERGY up');
+  for (const item of ['POTION', 'FULL_RESTORE', 'ANTIDOTE', 'FULL_HEAL', 'ELIXER']) {
+    assert.strictEqual(battle.submitChoice('p1', { action: 'item', item, slot: 0 }), false, `${item} refused`);
+  }
+  assert.strictEqual(battle.submitChoice('p1', { action: 'item', item: 'ETHER', slot: 0, move: 0 }), false,
+    'an ETHER on a move at full PP');
+  assert.strictEqual(battle.byId.get('p1').choice, null, 'nothing filed');
+  a.confusion = 2;
+  assert.strictEqual(battle.submitChoice('p1', { action: 'item', item: 'FULL_HEAL', slot: 0 }), true,
+    'FULL HEAL on the confused monster in battle');
+  battle.submitChoice(foe, { action: 'fight', move: 0 });
+  battle.drainEvents();
+  let events = roundOf(battle, foe, ITEM('X_ATTACK'));
+  assert.ok(said(events, 'Ann used the X ATTACK.') && said(events, "Alpha's ATTACK won't rise anymore!"),
+    'X ATTACK on an Attack of 999: used, and `.stats_already_max`');
+  assert.strictEqual(a.stages.atk, 0, 'the level put back');
+  assert.strictEqual(battle.byId.get('p1').bag.X_ATTACK, undefined, 'the item spent');
+  events = roundOf(battle, foe, ITEM('X_ACCURACY'));
+  assert.ok(said(events, 'Ann used the X ACCURACY.'));
+  assert.strictEqual(battle.submitChoice('p1', ITEM('X_ACCURACY')), false, 'the second X ACCURACY refused');
+  a.hp = 200;
+  assert.strictEqual(battle.submitChoice('p1', { action: 'item', item: 'POTION', slot: 0 }), true,
+    'a POTION on a hurt monster');
+  const c = fight({
+    mode: 'coop_npc', seed: 4,
+    a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('tap', 1)] })],
+  });
+  c.battle.drainEvents();
+  monOf(c.battle, c.foe).xAccuracy = true;
+  assert.strictEqual(c.battle.submitChoice(c.foe, ITEM('X_ACCURACY')), true, "the computer's X ACCURACY is filed");
+});
+
+test('FX-R2 (4): Struggle when every move with PP is the DISABLEd one', () => {
+  const { battle, foe } = fight({
+    mode: '1v1', seed: 5,
+    a: [held({ species: 'Alpha', maxHp: 300, spe: 10, moves: [hit('growl', 0, 0, 0, 0), hit('tackle', 35, 0, 0, 5)] })],
+    b: [held({ species: 'Beta', maxHp: 300, spe: 90, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.drainEvents();
+  assert.strictEqual(battle.submitChoice('p1', F(0)), false, 'a 0-PP slot refused while another has PP');
+  monOf(battle, 'p1').disable = { moveIndex: 2, turns: 3 };
+  assert.strictEqual(battle.submitChoice('p1', F(1)), true, 'any index once only the DISABLEd slot has PP');
+  assert.strictEqual(battle.byId.get('p1').choice.struggle, true);
+  battle.submitChoice(foe, F(0));
+  const events = battle.drainEvents();
+  assert.ok(said(events, 'Alpha used STRUGGLE!'));
+  assert.ok(!said(events, "Alpha's tackle is DISABLED!"));
+  const c = fight({
+    mode: 'coop_npc', seed: 6,
+    a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('tackle', 35, 0, 0, 5)] })],
+  });
+  c.battle.drainEvents();
+  monOf(c.battle, c.foe).disable = { moveIndex: 1, turns: 3 };
+  c.battle.submitChoice('p1', F(0));
+  c.battle.autoPick(c.foe);
+  assert.ok(said(c.battle.drainEvents(), 'Beta used STRUGGLE!'), "the computer's too");
+});
+
+test('FX-R2 (5): a slot with no PP left when it is used -- `.out_of_pp`', () => {
+  const { battle, foe } = fight({
+    mode: '1v1', seed: 7,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hit('SPITE', 0, 0, 150), hit('tap', 1)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10,
+      moves: [hit('thump', 10, 0, 0, 2), hit('razor', 10, 0, 39, 2), hit('tap', 1)] })],
+  });
+  battle.drainEvents();
+  roundOf(battle, foe, F(1), F(0));
+  let events = roundOf(battle, foe, F(0), F(0));
+  assert.ok(said(events, 'Beta used thump!') && said(events, 'But no PP is left for the move!'));
+  assert.strictEqual(monOf(battle, 'p2').moves[0].pp, 0);
+  const c = fight({
+    mode: '1v1', seed: 8,
+    a: [held({ species: 'Alpha', maxHp: 900, spe: 90, moves: [hit('SPITE', 0, 0, 150), hit('tap', 1)] })],
+    b: [held({ species: 'Beta', maxHp: 900, spe: 10, moves: [hit('razor', 10, 0, 39, 2), hit('tap', 1)] })],
+  });
+  c.battle.drainEvents();
+  roundOf(c.battle, c.foe, F(1), F(0));
+  roundOf(c.battle, c.foe, F(1), F(0));
+  events = roundOf(c.battle, c.foe, F(0), F(0));
+  assert.ok(said(events, 'Beta has no PP left for razor!') && !said(events, 'Beta used razor!'));
+});
+
+test("FX-R2 (6): the computer's withdrawal is chased, and its knockout pays no EXP", () => {
+  const { battle, foe } = fight({
+    mode: 'coop_npc', seed: 9,
+    a: [held({ species: 'Alpha', maxHp: 300, atk: 200, spe: 10, moves: [hit('PURSUIT', 40, 0, 117)] })],
+    b: [held({ species: 'Beta', maxHp: 300, hp: 5, spe: 90, moves: [hit('tap', 1)] }),
+      held({ species: 'Delta', maxHp: 300, spe: 90, moves: [hit('tap', 1)] })],
+  });
+  battle.drainEvents();
+  const events = roundOf(battle, foe, F(0), S(1));
+  const fainted = events.findIndex((e) => e.t === 'faint' && e.text === 'Beta');
+  const sent = events.findIndex((e) => e.t === 'send' && e.text === 'Delta');
+  assert.ok(fainted >= 0 && sent > fainted, 'the knockout before the send-out');
+  assert.ok(!events.some((e) => e.t === 'exp'), 'no EXP');
+  assert.strictEqual(monOf(battle, foe, 1).hp, 300, 'the successor untouched');
+});
+
+test("FX-R2 (7): the computer's item went first; Crystal's forgets its last move", () => {
+  const { battle, foe } = fight({
+    mode: 'coop_npc', seed: 10,
+    a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('PROTECT', 0, 0, 120)] })],
+    b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('tap', 1)] })],
+  });
+  battle.drainEvents();
+  const events = roundOf(battle, foe, F(0), ITEM('X_ATTACK'));
+  assert.ok(said(events, 'But it failed!') && !said(events, 'Alpha PROTECTED itself!'));
+  const disableAfterItem = (family) => {
+    const b = fight({
+      mode: 'coop_npc', seed: 11, family,
+      a: [held({ species: 'Alpha', maxHp: 300, spe: 10, moves: [hit('DISABLE', 0, 0, 86), hit('wait', 0, 0, 85)] })],
+      b: [held({ species: 'Beta', maxHp: 300, spe: 90, moves: [hit('tap', 1)] })],
+    });
+    b.battle.drainEvents();
+    roundOf(b.battle, b.foe, F(1), F(0));
+    return roundOf(b.battle, b.foe, F(0), ITEM('X_ATTACK'));
+  };
+  assert.ok(said(disableAfterItem('crystal'), 'But it failed!'), "Crystal's AI_TryItem");
+  assert.ok(said(disableAfterItem('gs'), "Beta's tap was DISABLED!"), "Gold's does not");
+});
+
+test("FX-R2 (8): SPIKES -- the computer's own switch takes none", () => {
+  const build8 = (mode) => fight({
+    mode, seed: 12,
+    a: [held({ species: 'Alpha', maxHp: 300, spe: 90, moves: [hit('SPIKES', 0, 0, 149), hit('wait', 0, 0, 85)] })],
+    b: [held({ species: 'Beta', maxHp: 300, spe: 10, moves: [hit('wait', 0, 0, 85)] }),
+      held({ species: 'Delta', maxHp: 300, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  const npc = build8('coop_npc');
+  npc.battle.drainEvents();
+  roundOf(npc.battle, npc.foe);
+  const events = roundOf(npc.battle, npc.foe, F(1), S(1));
+  assert.ok(!said(events, "Delta's hurt by SPIKES!"));
+  assert.strictEqual(monOf(npc.battle, npc.foe, 1).hp, 300);
+  const link = build8('1v1');
+  link.battle.drainEvents();
+  roundOf(link.battle, link.foe);
+  assert.ok(said(roundOf(link.battle, link.foe, F(1), S(1)), "Delta's hurt by SPIKES!"), "a player's switch does");
+});
+
+test('FX-R2 (9): MIRROR MOVE right after a BATON PASS copies nothing', () => {
+  const { battle, foe } = fight({
+    mode: '1v1', seed: 13,
+    a: [held({ species: 'Passer', maxHp: 300, spe: 90, moves: [hit('BATON_PASS', 0, 0, 134)] }),
+      held({ species: 'Heir', maxHp: 300, spe: 10, moves: [hit('tap', 1)] })],
+    b: [held({ species: 'Mirror', maxHp: 300, spe: 10, moves: [hit('MIRROR_MOVE', 0, 0, 9), hit('tap', 1)] })],
+  });
+  battle.drainEvents();
+  const events = roundOf(battle, foe, { action: 'fight', move: 0, pass: 1 }, F(0));
+  assert.ok(said(events, 'The MIRROR MOVE failed!') && !said(events, 'Mirror used BATON_PASS!'));
+});
+
+test('FX-R2 (10): both last monsters down -- a loss against the computer, a draw in a link fight', () => {
+  const boom = (mode) => {
+    const { battle, foe } = fight({
+      mode, seed: 14,
+      a: [held({ species: 'Alpha', maxHp: 100, atk: 250, spe: 90, moves: [hit('EXPLOSION', 250, 0, 7)] })],
+      b: [held({ species: 'Beta', maxHp: 20, def: 5, spe: 10, moves: [hit('tap', 1)] })],
+    });
+    battle.drainEvents();
+    roundOf(battle, foe);
+    return { out: battle.outcome(), foe };
+  };
+  const npc = boom('coop_npc');
+  assert.strictEqual(npc.out.outcome, 'win');
+  assert.deepStrictEqual(npc.out.winners, [npc.foe], 'the computer won: LostBattle');
+  assert.strictEqual(npc.out.payDay, undefined);
+  assert.strictEqual(boom('1v1').out.outcome, 'draw', 'TiedAgainstText');
+});
+
+test('FX-R2 (11): SANDSTORM -- the HP bar, the line, then the faint check', () => {
+  const { battle, foe } = fight({
+    mode: '1v1', seed: 15,
+    a: [held({ species: 'Alpha', maxHp: 400, spe: 90, moves: [hit('SANDSTORM', 0, 5, 126)] })],
+    b: [held({ species: 'Beta', maxHp: 400, hp: 10, spe: 10, moves: [hit('wait', 0, 0, 85)] }),
+      held({ species: 'Delta', maxHp: 400, spe: 10, moves: [hit('wait', 0, 0, 85)] })],
+  });
+  battle.drainEvents();
+  const events = roundOf(battle, foe);
+  const hurt = events.findIndex((e) => e.t === 'damage' && e.slot === 3);
+  const line = events.findIndex((e) => e.t === 'msg' && e.text === 'The SANDSTORM hits Beta!');
+  const faint = events.findIndex((e) => e.t === 'faint' && e.text === 'Beta');
+  assert.ok(hurt >= 0 && hurt < line && line < faint);
 });

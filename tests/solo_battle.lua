@@ -2554,6 +2554,71 @@ end)()
 end)()
 
 -- ------------------------------------------------------------------
+-- final client fixes (FX-C2 of docs/plans/gen12-referee-gaps-fix.md)
+-- ------------------------------------------------------------------
+--
+-- Both last monsters down at once against the computer is the cart's
+-- LostBattle: pokered HandleEnemyMonFainted / HandlePlayerMonFainted run
+-- AnyPartyAlive and jump to HandlePlayerBlackOut, FaintEnemyPokemon returns
+-- before GainExperience, wBattleResult is RemoveFaintedPlayerMon's 1 (no Pay
+-- Day, and EndOfBattle skips EvolutionAfterBattle); pokecrystal
+-- HandleEnemyMonFaint's CheckPlayerPartyForFitMon goes to LostBattle the
+-- same way, and ExitBattle pays and evolves only on a WIN.  The referees
+-- state it as the computer's win (FX-R1 / FX-R2); every path this client
+-- reads the outcome on takes it as the loss it is -- the whiteout, no prize,
+-- no Pay Day, no exp, no fanfare, the loss line.
+
+;(function()
+  local function boomData(effect)
+    local d = {}
+    for k, v in pairs(data) do d[k] = v end
+    d.moves = {
+      THUMP = data.moves.THUMP,
+      BOOM = { power = 200, accuracy = 100, type = "NORM", pp = 5, effect = effect },
+    }
+    return d
+  end
+  for _, case in ipairs({
+    { tag = "Red wild", kind = "wild", effect = "EXPLODE_EFFECT" },
+    { tag = "Red trainer", kind = "trainer", effect = "EXPLODE_EFFECT" },
+    { tag = "Gold wild", kind = "wild", effect = "EFFECT_SELFDESTRUCT", cart2 = true },
+  }) do
+    -- A Gold game reads as one through the link handshake's generation (the
+    -- Gold section above has why); taken away again below.
+    local savedHandshake = package.loaded["src.link.Handshake"]
+    if case.cart2 then
+      package.loaded["src.link.Handshake"] = {
+        generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+      }
+    end
+    local lead = mon({ species = "ALPHA", spd = 90, maxHp = 60, level = 20 })
+    lead.moves = { { id = "BOOM", pp = 5 } }
+    local foes = { mon({ species = "BETA", spd = 5, maxHp = 30, atk = 5 }) }
+    local f = fightOf(case.kind, {
+      party = { lead }, data = boomData(case.effect), cart2 = case.cart2,
+      wildMon = case.kind == "wild" and foes[1] or nil, foes = foes,
+    })
+    ok(f.started, "mutual KO (" .. case.tag .. "): the fight is taken over")
+    local money = (case.cart2 and f.game.save.player.money) or f.game.save.money
+    local outcome = playOut(f, 60)
+    ok(outcome ~= nil, "mutual KO (" .. case.tag .. "): the fight ends")
+    eq(outcome and outcome.reason, "ko", "mutual KO (" .. case.tag .. "): ...on a knockout")
+    eq(f.fight.result, "loss", "mutual KO (" .. case.tag .. "): the screen reads the player's loss")
+    eq(countKind(f.events, "exp"), 0, "mutual KO (" .. case.tag .. "): no exp (FaintEnemyPokemon returns first)")
+    eq(outcome and outcome.payDay, nil, "mutual KO (" .. case.tag .. "): no Pay Day pot")
+    eq(saidTimes(f.fight, "You won!"), 0, "mutual KO (" .. case.tag .. "): no win line")
+    eq(saidTimes(f.fight, "You lost!"), 1, "mutual KO (" .. case.tag .. "): the loss line")
+    ok(f.fight.victoryMusicPlayed ~= true, "mutual KO (" .. case.tag .. "): no victory fanfare")
+    -- Off the screen: the engine is told "lose", which is its blackout.
+    f.fight:exit()
+    eq(f.ending[1] and f.ending[1].result, "lose", "mutual KO (" .. case.tag .. "): the engine blacks out (\"lose\")")
+    local after = (case.cart2 and f.game.save.player.money) or f.game.save.money
+    ok(after <= money, "mutual KO (" .. case.tag .. "): no prize and no coins were paid")
+    package.loaded["src.link.Handshake"] = savedHandshake
+  end
+end)()
+
+-- ------------------------------------------------------------------
 
 io.write(string.format("solo_battle: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

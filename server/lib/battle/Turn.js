@@ -85,7 +85,9 @@
  *     `wild` is rolled by its client before the run is filed.
  *   * *Items* apply a hand-authored Gen1 heal/status table (not engine
  *     ItemEffects); unknown ids say "It won't have any effect." and still
- *     spend the turn.
+ *     spend the turn. A known item the cart's ItemUseFailed would hand back --
+ *     no effect, or not the time -- is refused at the menu, unfiled, its bag
+ *     stack and the turn kept (`_itemFails`).
  *     Bags are client claims (sheet trust locked). Forced lock-in (recharge,
  *     Rage, thrash, a charge's release) injects on openTurn (no menu) and
  *     plays in the monster's own slot, past the gates: a recharge
@@ -113,7 +115,15 @@
  *   * Solicitation for that phase is a `turn` event carrying the owing seat's
  *     field `slot`, one per seat. A `turn` with `slot` asks that seat for a
  *     replacement; a `turn` without one opens the ordinary choice window.
- *   * *Residuals* run in field order (side a, then side b), not speed order.
+ *   * *Residuals* (HandlePoisonBurnLeechSeed) come at the end of each
+ *     battler's own slot, in the turn's order (MainInBattleLoop, core.asm
+ *     :413-467; `_resolveFights`, `_residualFor`), with no end-of-turn pass.
+ *     One seat a side is the cart's exactly: a slot that knocked the foe out
+ *     skips the knocker-out's residual, a monster its own slot or residual
+ *     took down ends the turn before the slower battler moves, and either
+ *     faint skips CheckNumAttacksLeft. A 2v2 keeps the Gold referee's policy
+ *     (lib/battle2/Turn.js): each seat's residual right after its own slot,
+ *     and every seat still acts after a faint.
  *   * The computer's MOVE is the cart's (`_computerChoice`): a wild monster's
  *     `.chooseRandomMove`, a trainer's AIEnemyTrainerChooseMoves over its
  *     seat's `aiMods`; its item or switch, and a player's timeout, stay the
@@ -471,6 +481,11 @@ function str(value) {
 // Lua's `type(x) == "table"`: arrays included, null excluded.
 const isTable = (value) => typeof value === 'object' && value !== null;
 
+// Lua's `x or false`: a base PP, or false for none (`copyMove`, `stepPp`).
+function orFalse(value) {
+  return value === null || value === undefined ? false : value;
+}
+
 function copyMove(raw) {
   if (!isTable(raw)) return null;
   const pp = Math.max(0, int(raw.pp, 0));
@@ -493,8 +508,9 @@ function copyMove(raw) {
     maxPp,
     // ...and the base PP behind it, when the stated number is a GetMaxPP
     // (Effects.basePpOf): what `stepPp` re-reads the maximum over once a wrap
-    // moves the PP Up bits. null keeps the stated maximum fixed.
-    basePp: stated !== null ? Effects.basePpOf(maxPp, ppUps) : null,
+    // moves the PP Up bits. false -- read, and none -- keeps the stated
+    // maximum fixed; undefined is a row nobody read yet (`stepPp` reads it).
+    basePp: stated !== null ? orFalse(Effects.basePpOf(maxPp, ppUps)) : false,
     power: Math.max(0, int(raw.power, 0)),
     accuracy: Math.max(0, int(raw.accuracy, 255)),
     type: Math.max(0, int(raw.type, 0)),
@@ -783,14 +799,41 @@ function stepPp(move, delta) {
     move.pp = Math.max(0, pp + delta);
     return;
   }
-  const byte = (((int(move.ppUps, 0) % 4) * 64 + pp + delta) % 256 + 256) % 256;
+  const ups = int(move.ppUps, 0) % 4;
+  // A row `copyMove` never read -- one a learn laid in mid-fight (the hubs'
+  // nextMoves12 take a new move's row whole from the client, with its
+  // GetMaxPP and no base) -- has its base read off the maximum it states,
+  // over the PP Ups it has BEFORE this step moves them; one that names no
+  // GetMaxPP keeps its maximum (false, as `copyMove` marks it).
+  if ((move.basePp === undefined || move.basePp === null)
+      && move.maxPp !== undefined && move.maxPp !== null) {
+    move.basePp = orFalse(Effects.basePpOf(Math.max(0, int(move.maxPp, 0)), ups));
+  }
+  const byte = ((ups * 64 + pp + delta) % 256 + 256) % 256;
   move.pp = byte % 64;
   move.ppUps = Math.floor(byte / 64);
   // ...and GetMaxPP reads those bits: a borrow or a carry moves the maximum
   // an ETHER caps at (Effects.getMaxPp; `copyMove`'s `basePp`).
-  if (move.basePp !== undefined && move.basePp !== null) {
+  if (typeof move.basePp === 'number') {
     move.maxPp = Effects.getMaxPp(move.basePp, move.ppUps);
   }
+}
+
+// The monster's own move list, where the party struct keeps it: a
+// TRANSFORMed monster's `preTransform` copy (DecrementPP never touches the
+// party while TRANSFORMED is set), else the list it fights with. What
+// ItemUsePPRestore restores and its move menu lists.
+function ownMoves(mon) {
+  const saved = mon.transformed ? mon.preTransform : null;
+  if (saved && typeof saved === 'object' && Array.isArray(saved.moves)) return saved.moves;
+  return Array.isArray(mon.moves) ? mon.moves : [];
+}
+
+// `.restorePP` on a scratch copy of a row: whether it would restore, without
+// restoring.
+function wouldRestorePp(move, amount) {
+  if (!move || typeof move !== 'object') return false;
+  return Effects.restorePp({ pp: move.pp, ppUps: move.ppUps, maxPp: move.maxPp }, amount);
 }
 
 // `mon.moves[slot]` in Lua's 1-based slot numbering.
@@ -1115,6 +1158,9 @@ class Battle {
     // `_drainExp`. A list, so the order faints happened in is the order their
     // spoils are announced in.
     this.pendingExp = [];
+    // Every faint so far, counted: `_resolveFights` reads what one slot or
+    // one residual added to it.
+    this.faints = 0;
     this.result = null;
   }
 
@@ -1640,6 +1686,18 @@ class Battle {
       if (targetMon) {
         if (effect && effect.faintedOnly && targetMon.hp > 0) return null;
         if (targetMon.hp <= 0 && Effects.itemFailsOnFainted(effect)) return null;
+      }
+      // ItemUseFailed (item_effects.asm :2316-2319): a use that does nothing
+      // -- ItemUseNoEffect, from ItemUseMedicine's `.healingItemNoEffect` and
+      // ItemUsePPRestore's `.noEffect` -- or that is not for now
+      // (ItemUseNotTime) writes 0 to wActionResultOrTookBattleTurn and never
+      // reaches RemoveUsedItem: the bag keeps the item, the turn is not
+      // spent, and the battle menu asks again. So a player's such use is
+      // refused here, before it is filed (`_itemFails`), as the fainted cases
+      // above are -- the seat still owes its turn. The computer's AI items
+      // never take that path.
+      if (!isComputerSeat(this.mode, fighter) && this._itemFails(fighter, effect, out)) {
+        return null;
       }
       return out;
     }
@@ -2543,14 +2601,15 @@ class Battle {
     this._resolveItems();
     if (!this.result) this._reselectComputer();
     if (!this.result) this._selectComputerMoves();
-    this._resolveFights();
-    if (!this.result) this._resolveResiduals();
+    // Each seat's residual comes at the end of its own slot, inside the order
+    // (`_resolveFights`); there is no end-of-turn pass.
+    const cut = this._resolveFights();
     // CheckNumAttacksLeft, the last thing a cart turn does (core.asm :409,
-    // :460): a trap whose counter ran out lets go.
-    if (!this.result) this._checkNumAttacksLeft();
-    // The residual batch settles the same way an action's does: every flag is
-    // off before the first share is counted. Unconditional, because a queue
-    // nobody drains is exp that silently never happened.
+    // :460): a trap whose counter ran out lets go -- reached only when both
+    // slots went by, so not on a turn a faint cut short (`cut`).
+    if (!this.result && !cut) this._checkNumAttacksLeft();
+    // Unconditional, because a queue nobody drains is exp that silently never
+    // happened.
     this._drainExp();
     if (!this.result) this._checkOver();
 
@@ -2932,6 +2991,17 @@ class Battle {
     mon.xAccuracy = false;
     mon.leechSeed = null;
     mon.disable = null;
+    // SendOutMon / EnemySendOutFirstMon zero all three BattleStatus bytes
+    // (`ld hl, wPlayerStatsToDouble` and four `ld [hli], a`, core.asm
+    // :1744-1749; the enemy's :1292-1299), not only the bits above: CONFUSED
+    // and FLINCHED (BattleStatus1) and NEEDS_TO_RECHARGE (BattleStatus2) go
+    // too, so a monster that left confused comes back clear-headed.
+    mon.confusion = 0;
+    mon.flinch = false;
+    mon.mustRecharge = false;
+    // ...and BattleStatus3's BADLY_POISONED, so a monster a sheet sent in as
+    // TOX from the bench is plainly poisoned, as the leaving one above is.
+    if (mon.status === 'toxic') mon.status = 'poison';
     // LoadBattleMonFromParty: party stats -> unmodified -> battle, the
     // penalty, this seat's badges, and every stage back to neutral.
     Effects.loadBattleStats(mon, fighter.badges);
@@ -2951,9 +3021,9 @@ class Battle {
       text: mon.species,
       speciesId: mon.speciesId, level: mon.level,
       mon: slot - 1,
+      // (No `confused`: the send-out above cleared it.)
       status: mon.status && has(STATUS_TO_WIRE, mon.status)
         ? STATUS_TO_WIRE[mon.status] : undefined,
-      confused: (mon.confusion && mon.confusion > 0) ? 1 : undefined,
     });
   }
 
@@ -3068,6 +3138,46 @@ class Battle {
     }
   }
 
+  // Whether a player's use of `effect` (a normalised item `choice`: party
+  // `slot`, 1-based `move`) is one the cart's ItemUseFailed takes -- the item
+  // kept, the turn not spent (`_normaliseChoice`). ItemUseNotTime: a POKé
+  // DOLL outside a wild fight (ItemUsePokeDoll's `dec a / jp nz`), an X item
+  // or another battle-only item aimed at a benched monster (the menu never
+  // offers it). ItemUseNoEffect: a PP item whose `.restorePP` restores
+  // nothing on the monster's own moves (`ownMoves`), and a medicine with
+  // nothing to do -- no HP to restore (a FULL RESTORE at full HP still cures
+  // a status, `.notFullHP`'s FULL_HEAL fallthrough) and no status it cures
+  // (`.checkMonStatus`). The fainted cases are `_normaliseChoice`'s own. An
+  // item with no table row, a ball, a vitamin and the POKé FLUTE are always
+  // used (the flute's "Now, that's a catchy tune!" spends the turn).
+  _itemFails(fighter, effect, choice) {
+    if (!effect) return false;
+    if (effect.pokeDoll) return !Effects.isWildMode(this.mode);
+    if (effect.ball || effect.vitamin || effect.pokeFlute) return false;
+    const partyIdx = choice.slot != null ? choice.slot : fighter.active;
+    const mon = monAt(fighter, partyIdx);
+    if (!mon) return true;
+    if (effect.activeOnly && partyIdx !== fighter.active) return true;
+    if (effect.xAccuracy || effect.focusEnergy || effect.mist || effect.stage
+        || effect.revive) {
+      return false;
+    }
+    if (effect.ppRestore) {
+      return !wouldRestorePp(ownMoves(mon)[int(choice.move, 0) - 1], effect.ppRestore);
+    }
+    if (effect.ppRestoreAll) {
+      for (const move of ownMoves(mon)) {
+        if (wouldRestorePp(move, effect.ppRestoreAll)) return false;
+      }
+      return true;
+    }
+    const heals = Boolean(effect.healFull || (effect.heal && effect.heal > 0))
+      && mon.hp < mon.maxHp;
+    const cures = mon.status != null && Boolean(effect.clearAllStatus
+      || (effect.clearStatuses && effect.clearStatuses[mon.status]));
+    return !(heals || cures);
+  }
+
   _resolveOneItem(fighter) {
     const choice = fighter.choice;
     if (!(choice && choice.action === 'item')) return;
@@ -3120,9 +3230,13 @@ class Battle {
         || effect.focusEnergy || (effect.pokeDoll && wild) || effect.stage)) {
       this._say(`${fighter.name} used ${label}!`);
     }
-    // Spend after the announce, win or fail (Gen1 bag stack). noConsume
-    // (Poké Flute) and seats with no bag sheet are left alone.
-    if (!(effect && effect.noConsume)) {
+    // Spend after the announce (Gen1 bag stack). noConsume (Poké Flute) and
+    // seats with no bag sheet are left alone, and so is a player's use the
+    // cart's ItemUseFailed takes (`_itemFails`): `_normaliseChoice` refuses
+    // one before it is filed, so only a field that moved under a filed choice
+    // gets here with it -- and RemoveUsedItem is never reached then either.
+    const fails = !computer && this._itemFails(fighter, effect, choice);
+    if (!(effect && effect.noConsume) && !fails) {
       this._spendBag(fighter, choice.item);
     }
     if (!effect) {
@@ -3312,13 +3426,29 @@ class Battle {
           this._say(`${mon.species} is revitalized!`);
           applied = true;
         }
+        // ItemUsePPRestore works on the PARTY struct (wPartyMon1Moves /
+        // MON_PP, GetMaxPP over the party's own move): a TRANSFORMed
+        // monster's own moves, not the copies its battle struct holds
+        // (`ownMoves`). Then, for the monster out, `.afterRestoringPP` copies
+        // all four party PP bytes over wBattleMonPP (`syncCopies`), so a
+        // transformed monster's copies take its own moves' PP -- and a slot it
+        // knows no move in, 0: a DITTO's copies 2-4 are emptied.
+        const rows = ownMoves(mon);
+        const syncCopies = () => {
+          if (partyIdx !== fighter.active || rows === mon.moves) return;
+          for (let i = 0; i < mon.moves.length; i += 1) {
+            const own = rows[i];
+            mon.moves[i].pp = own ? Math.max(0, int(own.pp, 0)) : 0;
+            mon.moves[i].ppUps = own ? int(own.ppUps, 0) % 4 : 0;
+          }
+        };
         if (effect.ppRestore) {
           // ItemUsePPRestore's move menu leaves wPlayerMoveListIndex at 0 --
           // `ld a, 0 / ld [wPlayerMoveListIndex], a` after MoveSelectionMenu
           // (item_effects.asm :1981-1984) -- whatever it restored: the first
           // slot is the one a later forced or stale turn pays from (`_listIndex`).
           if (!isComputerSeat(this.mode, fighter)) fighter.moveListIndex = 1;
-          const move = mon.moves[choice.move - 1];
+          const move = rows[choice.move - 1];
           if (!move) {
             this._say(NO_EFFECT);
             said = true;
@@ -3327,6 +3457,7 @@ class Battle {
             // its wrap comes down to the maximum, and a MAX ETHER on a full
             // move with PP Ups still reads as restored -- both the cart's.
             if (Effects.restorePp(move, effect.ppRestore)) {
+              syncCopies();
               this._say('PP was restored.');
               applied = true;
               // Fielded mon only: a bench Ether must not redraw FIGHT.
@@ -3339,11 +3470,12 @@ class Battle {
         }
         if (effect.ppRestoreAll) {
           let any = false;
-          for (const move of mon.moves || []) {
+          for (const move of rows) {
             // `.elixirLoop`: `.restorePP` on every slot that holds a move.
             if (move && Effects.restorePp(move, effect.ppRestoreAll)) any = true;
           }
           if (any) {
+            syncCopies();
             this._say('PP was restored.');
             applied = true;
             if (partyIdx === fighter.active) this._emitMoves(fighter, mon, partyIdx);
@@ -3519,12 +3651,33 @@ class Battle {
         });
       }
     }
-    if (actors.length === 0) return;
+    if (actors.length === 0) return false;
 
     this._orderActors(actors);
 
+    // The end of each battler's slot is MainInBattleLoop's (core.asm
+    // :413-467): HandlePoisonBurnLeechSeed, the mover's own residual, right
+    // after its own Execute*Move (or the computer's TrainerAI item or switch)
+    // -- unless that slot knocked the foe out, when `ld a, b / and a / jp z,
+    // Handle*MonFainted` leaves for the faint's handler first and the
+    // knocker-out takes no residual that turn. The residual returns z on the
+    // mover's own 0 HP, so a monster its own slot or its own residual took
+    // down (EXPLOSION, recoil, STRUGGLE, a crash, a confusion self-hit, the
+    // poison) ends the turn there too: the slower battler never moves. In a
+    // fight of one seat a side -- the cart's own shape -- any faint in a slot
+    // or a residual therefore ends the turn's moves and residuals, and
+    // CheckNumAttacksLeft, which only the end of both slots reaches, is
+    // skipped (the return value). A 2v2 has no single foe whose faint ends
+    // the turn, so it keeps the Gold referee's policy (lib/battle2/Turn.js
+    // header): each seat's residual right after its own slot, in the turn's
+    // order, and every seat still acts and takes its residual after a faint.
+    // The residual is the seat's monster out at its slot's end: the one the
+    // computer's switch just sent out, or the one a player's switch fielded
+    // before the order (SendOutMon, then ExecutePlayerMove's early return).
+    const single = this.bySide.a.length === 1 && this.bySide.b.length === 1;
     for (const actor of actors) {
       if (this.result) break;
+      const faintsBefore = this.faints;
       // The monster that chose is the only one allowed to act: if it fainted to
       // a faster attacker, the replacement that came in behind it does not
       // inherit the turn -- nor spend the AI's item or switch for it.
@@ -3565,7 +3718,15 @@ class Battle {
       // without paying a monster the same action was still killing (`_drainExp`).
       this._drainExp();
       if (!this.result) this._checkOver();
+      if (single && this.faints > faintsBefore) return true;
+      if (!this.result) {
+        this._residualFor(fighter);
+        this._drainExp();
+        if (!this.result) this._checkOver();
+        if (single && this.faints > faintsBefore) return true;
+      }
     }
+    return false;
   }
 
   // A recharge turn, in the monster's own slot: CheckPlayerStatusConditions
@@ -3908,7 +4069,7 @@ class Battle {
       // The badly-poisoned flag is BattleStatus3's, not the status byte's, so
       // it outlives the nap (`toxicLinger`): the counter keeps climbing under
       // a Leech Seed, and a later poison or burn ticks at the toxic rate
-      // (`_resolveResiduals`).
+      // (`_residualFor`).
       if (mon.status === 'toxic') mon.toxicLinger = true;
       mon.status = 'sleep';
       mon.statusTurns = Status.napTurns(this.rng);
@@ -4138,11 +4299,15 @@ class Battle {
     }
     if (Effects.mistBlocks(effectId, defender)) return { hit: false, why: 'mist' };
     if (Effects.isSwift(effectId) || mon.xAccuracy === true) return { hit: true, why: null };
+    // CalcHitChance (core.asm :5348-5414) reads the target's evasion through
+    // `c = 14 - EVASIONMOD`: the stage reflected over neutral, so a raised
+    // evasion takes the lowered ratio (+1 reads 66/100) and a lowered one the
+    // raised ratio -- an evasion boost makes the move miss more, not less.
     const shot = Accuracy.hit({
       accuracy: move.accuracy,
       roll: this.rng.byte(),
       accuracyMod: Effects.stageMult(mon.stages.acc),
-      evasionMod: Effects.stageMult(defender.stages.eva),
+      evasionMod: Effects.stageMult(-Effects.clampStage(defender.stages.eva)),
     });
     if (!shot.hit) return { hit: false, why: 'accuracy' };
     return { hit: true, why: null };
@@ -4185,7 +4350,11 @@ class Battle {
   // A TELEPORT, ROAR or WHIRLWIND that ends a wild fight: either side's
   // (SwitchAndTeleportEffect sets wEscapedFromBattle and never writes
   // wBattleResult), so EndOfBattle pays the Pay Day pile while that is still
-  // 0 (`_payDayOn`).
+  // 0 (`_payDayOn`). `fighter` is the seat that LEAVES -- the `run` event's
+  // and the outcome's runner: TELEPORT's user ("<USER> ran from battle!"),
+  // ROAR's and WHIRLWIND's target ("<TARGET> ran away scared!" / "was blown
+  // away!"), so the player's WHIRLWIND sends the wild monster off and the
+  // wild ROAR sends the player's (`_switchAndTeleport`).
   _concedeRun(fighter) {
     this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
     let result;
@@ -4206,9 +4375,10 @@ class Battle {
   // wEscapedFromBattle and says TELEPORT's "<USER> ran from battle!", ROAR's
   // "<TARGET> ran away scared!" or WHIRLWIND's "<TARGET> was blown away!"
   // (`.playAnimAndPrintText`, keyed by the move id), and the fight is over
-  // (`_concedeRun`). "Its target" is the monster the move was aimed at -- the
-  // cart's one opponent.
-  _switchAndTeleport(fighter, mon, defender, move) {
+  // (`_concedeRun`, whose runner is TELEPORT's user and the others' target).
+  // "Its target" is the monster the move was aimed at -- the cart's one
+  // opponent -- on the seat `target`.
+  _switchAndTeleport(fighter, mon, target, defender, move) {
     const key = Effects.moveKey(move);
     const teleport = key === 'TELEPORT';
     if (!Effects.teleportRunAllowed(this.mode)) {
@@ -4234,7 +4404,7 @@ class Battle {
     } else {
       this._say(`${defender.species} was blown away!`);
     }
-    this._concedeRun(fighter);
+    this._concedeRun(teleport ? fighter : target);
   }
 
   // MimicEffect's pick (effects.asm :1210-1259): the slot of the target's
@@ -4500,7 +4670,7 @@ class Battle {
       return;
     }
     if (Effects.isSwitchAndTeleport(effectId)) {
-      this._switchAndTeleport(fighter, mon, defender, move);
+      this._switchAndTeleport(fighter, mon, target, defender, move);
       this._markLastMove(mon, usedSlot);
       return;
     }
@@ -4971,6 +5141,7 @@ class Battle {
       damage = Effects.setDamage({
         effectId, moveId: move.id, userMon: mon, targetMon: defender,
         power: move.power, rng: this.rng,
+        computerMover: isComputerSeat(this.mode, fighter),
       });
     } else {
       // Species base Speed, not battle Speed: paralysis and the Speed badge
@@ -5024,8 +5195,10 @@ class Battle {
           // chart and the hit test, and wCriticalHitOrOHKO's $ff makes it
           // "<TARGET>'s unaffected!". Otherwise 65535 goes through
           // AdjustDamageForMoveType -- an immunity zeroes it, no roll (`cp 2`)
-          // -- and RandomizeDamage rolls over a number no roll can bring under
-          // the target's HP.
+          // -- and RandomizeDamage rolls over it (Effects.ohkoDamage): that
+          // number, not the target's HP, is the hit's wDamage -- a doll breaks
+          // outright on its high byte (AttackSubstitute) and keeps it for
+          // COUNTER, and a monster takes its HP, which the overkill writes back.
           if (!Effects.ohkoLands(this._speedOf(fighter, mon), this._speedOf(target, defender))) {
             this._say(this._damageMissText(mon, defender, false, true));
             this._moveMissed(fighter, mon, target, defender, effectId, usedSlot);
@@ -5035,8 +5208,12 @@ class Battle {
             if (pct <= 0) { immune = true; break; }
           }
           if (!immune) {
-            this.rng.damageRoll();
-            damage = Math.max(1, defender.hp);
+            damage = Effects.ohkoDamage(hasType(mon, move.type), percents);
+            if (damage <= 0) {
+              zeroed = true;
+            } else if (Damage.rolls(damage)) {
+              damage = Damage.applyRoll(damage, this.rng.damageRoll());
+            }
           }
         } else {
           // GetDamageVarsFor{Player,Enemy}Attack (core.asm :4030-4255). An
@@ -5356,7 +5533,7 @@ class Battle {
   // every hit of the strike loop (fixed damage included), the Bide release
   // (`.UnleashEnergy` jumps to HandleIfPlayerMoveMissed), a trap's later
   // turns (`.MultiturnMoveCheck` jumps to GetPlayerAnimationType,
-  // `_resolveResiduals` here), an Explosion that did not land (EXPLODE_EFFECT
+  // `_trapTurn` here), an Explosion that did not land (EXPLODE_EFFECT
   // is the one miss `.notDone` lets through), and a power-0 move outside both
   // ResidualEffects lists, which CalculateDamage sends past MoveHitTest to a
   // no-op ApplyAttack (Disable).
@@ -5584,6 +5761,7 @@ class Battle {
   }
 
   _faint(fighter, mon) {
+    this.faints += 1;
     // RemoveFaintedPlayerMon first (BattleState.lua:3721-3723 runs at the top
     // of onFaint): this one is out of every participation set before anything
     // below can pay anybody, so a mon that died on the way to the KO is not in
@@ -5683,85 +5861,85 @@ class Battle {
     }
   }
 
-  _resolveResiduals() {
-    for (const fighter of this.fighters) {
-      if (this.result) return;
-      let mon = activeMon(fighter);
-      // HandlePoisonBurnLeechSeed (core.asm :470-548) takes the poison / burn
-      // tick and then the Leech Seed tick in one pass, and looks at the HP
-      // only after both -- so a monster the poison or burn knocks out still
-      // feeds its seeder. Read before the tick: `_faint` clears `leechSeed`.
-      const seeded = mon;
-      const seed = mon ? mon.leechSeed : null;
-      let poisonKo = false;
-      // ...and the lingering Bad Poison bit, which `_faint` also clears.
-      const lingered = !!mon && mon.toxicLinger === true;
-      if (mon && mon.status) {
-        let amount = Status.residual({
-          status: mon.status, maxHp: mon.maxHp, toxicCounter: mon.toxicCounter,
-        });
-        if (amount !== null && amount !== undefined) {
-          if (mon.status === 'toxic') {
-            mon.toxicCounter += 1;
-          } else if (mon.toxicLinger) {
-            // HandlePoisonBurnLeechSeed_DecreaseOwnHP multiplies by the toxic
-            // counter on the BADLY_POISONED bit alone, so a bit that outlived a
-            // nap (`toxicLinger`) turns a later poison -- or a burn -- toxic.
-            amount *= Math.max(1, int(mon.toxicCounter, 1));
-            mon.toxicCounter = Math.max(1, int(mon.toxicCounter, 1)) + 1;
-          }
-          // HurtByBurnText for a burn, HurtByPoisonText for a poison --
-          // PSN on the status byte, a toxic included (core.asm :484-489).
-          if (mon.status === 'burn') {
-            this._say(`${mon.species}'s hurt by the burn!`);
-          } else {
-            this._say(`${mon.species}'s hurt by poison!`);
-          }
-          // ...then BURN_PSN_ANIM, then the HP (:490-495).
-          this._statusAnim(fighter, 'BURN_PSN_ANIM');
-          // The knockout is the main loop's, once the whole pass is done
-          // (`ret nz` on the HP, :526-528): its faint waits for the seed's tick.
-          this._damage(fighter, mon, amount, mon.status, true, true);
-          poisonKo = mon.hp <= 0;
+  // HandlePoisonBurnLeechSeed (core.asm :470-548) for one seat, at the end of
+  // its slot (`_resolveFights`).
+  _residualFor(fighter) {
+    if (this.result) return;
+    let mon = activeMon(fighter);
+    // It takes the poison / burn tick and then the Leech Seed tick in one
+    // pass, and looks at the HP only after both -- so a monster the poison or
+    // burn knocks out still feeds its seeder. Read before the tick: `_faint`
+    // clears `leechSeed`.
+    const seeded = mon;
+    const seed = mon ? mon.leechSeed : null;
+    let poisonKo = false;
+    // ...and the lingering Bad Poison bit, which `_faint` also clears.
+    const lingered = !!mon && mon.toxicLinger === true;
+    if (mon && mon.status) {
+      let amount = Status.residual({
+        status: mon.status, maxHp: mon.maxHp, toxicCounter: mon.toxicCounter,
+      });
+      if (amount !== null && amount !== undefined) {
+        if (mon.status === 'toxic') {
+          mon.toxicCounter += 1;
+        } else if (mon.toxicLinger) {
+          // HandlePoisonBurnLeechSeed_DecreaseOwnHP multiplies by the toxic
+          // counter on the BADLY_POISONED bit alone, so a bit that outlived a
+          // nap (`toxicLinger`) turns a later poison -- or a burn -- toxic.
+          amount *= Math.max(1, int(mon.toxicCounter, 1));
+          mon.toxicCounter = Math.max(1, int(mon.toxicCounter, 1)) + 1;
         }
-      }
-      if (this.result) return;
-      // The Leech Seed tick, on the monster seeded when the residual began:
-      // the one still standing, or the one its own poison or burn just knocked
-      // out (`poisonKo`). A trap's later hits are not part of this pass: they
-      // are the trapper's own slot on the cart (`_trapTurn`).
-      // HandlePoisonBurnLeechSeed_DecreaseOwnHP takes 1/16 of the max HP (at
-      // least 1) and multiplies it by the toxic counter -- incremented again,
-      // so a badly poisoned, seeded monster's counter climbs twice a turn (the
-      // Leech Seed + Toxic glitch) -- whether or not the HP was there to take,
-      // and _IncreaseEnemyHP hands the seeder that whole amount ("bc isn't
-      // updated if HP subtracted was capped"). Read before the damage, since
-      // a tick that knocks the seeded monster out runs `_faint`, which clears
-      // `leechSeed`.
-      mon = activeMon(fighter);
-      if (seed && (mon === seeded || poisonKo)) {
-        let amount = Math.max(1, Math.floor(seeded.maxHp / 16));
-        if (seeded.status === 'toxic' || lingered) {
-          amount *= Math.max(1, int(seeded.toxicCounter, 1));
-          seeded.toxicCounter = Math.max(1, int(seeded.toxicCounter, 1)) + 1;
+        // HurtByBurnText for a burn, HurtByPoisonText for a poison --
+        // PSN on the status byte, a toxic included (core.asm :484-489).
+        if (mon.status === 'burn') {
+          this._say(`${mon.species}'s hurt by the burn!`);
+        } else {
+          this._say(`${mon.species}'s hurt by poison!`);
         }
-        const from = seed.fromSlot;
-        // The HP goes both ways first and HurtByLeechSeedText follows
-        // (:519-524). (The cart's ABSORB animation from the seeder is not
-        // sent: a move id on an `anim` reads as that monster using ABSORB.)
-        if (mon === seeded) this._damage(fighter, mon, amount, null, true, true);
-        const seeder = from !== null && from !== undefined
-          ? this._fighterAtSlot(from) : null;
-        const sMon = seeder && activeMon(seeder);
-        if (sMon && sMon.hp > 0) this._heal(seeder, sMon, amount);
-        this._say(`LEECH SEED saps ${seeded.species}!`);
+        // ...then BURN_PSN_ANIM, then the HP (:490-495).
+        this._statusAnim(fighter, 'BURN_PSN_ANIM');
+        // The knockout is the main loop's, once the whole pass is done
+        // (`ret nz` on the HP, :526-528): its faint waits for the seed's tick.
+        this._damage(fighter, mon, amount, mon.status, true, true);
+        poisonKo = mon.hp <= 0;
       }
-      if (seeded && seeded.hp <= 0 && monAt(fighter, fighter.active) === seeded) {
-        this._faint(fighter, seeded);
-      }
-      // (Disable does not count down here: its counter steps in the disabled
-      // monster's own turn, `_tickDisable`.)
     }
+    if (this.result) return;
+    // The Leech Seed tick, on the monster seeded when the residual began: the
+    // one still standing, or the one its own poison or burn just knocked out
+    // (`poisonKo`). A trap's later hits are not part of this pass: they are
+    // the trapper's own slot on the cart (`_trapTurn`).
+    // HandlePoisonBurnLeechSeed_DecreaseOwnHP takes 1/16 of the max HP (at
+    // least 1) and multiplies it by the toxic counter -- incremented again, so
+    // a badly poisoned, seeded monster's counter climbs twice a turn (the
+    // Leech Seed + Toxic glitch) -- whether or not the HP was there to take,
+    // and _IncreaseEnemyHP hands the seeder that whole amount ("bc isn't
+    // updated if HP subtracted was capped"). Read before the damage, since a
+    // tick that knocks the seeded monster out runs `_faint`, which clears
+    // `leechSeed`.
+    mon = activeMon(fighter);
+    if (seed && (mon === seeded || poisonKo)) {
+      let amount = Math.max(1, Math.floor(seeded.maxHp / 16));
+      if (seeded.status === 'toxic' || lingered) {
+        amount *= Math.max(1, int(seeded.toxicCounter, 1));
+        seeded.toxicCounter = Math.max(1, int(seeded.toxicCounter, 1)) + 1;
+      }
+      const from = seed.fromSlot;
+      // The HP goes both ways first and HurtByLeechSeedText follows
+      // (:519-524). (The cart's ABSORB animation from the seeder is not
+      // sent: a move id on an `anim` reads as that monster using ABSORB.)
+      if (mon === seeded) this._damage(fighter, mon, amount, null, true, true);
+      const seeder = from !== null && from !== undefined
+        ? this._fighterAtSlot(from) : null;
+      const sMon = seeder && activeMon(seeder);
+      if (sMon && sMon.hp > 0) this._heal(seeder, sMon, amount);
+      this._say(`LEECH SEED saps ${seeded.species}!`);
+    }
+    if (seeded && seeded.hp <= 0 && monAt(fighter, fighter.active) === seeded) {
+      this._faint(fighter, seeded);
+    }
+    // (Disable does not count down here: its counter steps in the disabled
+    // monster's own turn, `_tickDisable`.)
   }
 
   // ----------------------------------------------------------------
@@ -5802,7 +5980,22 @@ class Battle {
     if (aliveA && aliveB) return false;
 
     if (!aliveA && !aliveB) {
-      this._finish('draw', null, null, 'ko');
+      // Both sides down at once. Against the computer the player blacks out,
+      // whichever faint the cart finds first: HandleEnemyMonFainted runs
+      // AnyPartyAlive straight after FaintEnemyPokemon and jumps to
+      // HandlePlayerBlackOut on 0 (core.asm :699-705), and
+      // HandlePlayerMonFainted does before it even reads the enemy's HP
+      // (:969-975). So the computer wins -- no prize money, no Pay Day
+      // (wBattleResult is RemoveFaintedPlayerMon's 1), and no exp:
+      // FaintEnemyPokemon returns on that same AnyPartyAlive before
+      // GainExperience (:802-806), as `_awardExp` finds no one standing. A
+      // link fight's two carts each run that check on their own party and
+      // each black out (LinkBattleLostText): nobody won, the draw.
+      if (BADGE_MODES[this.mode]) {
+        this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko');
+      } else {
+        this._finish('draw', null, null, 'ko');
+      }
     } else if (aliveA) {
       const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko');
       this._payDayOn(result);

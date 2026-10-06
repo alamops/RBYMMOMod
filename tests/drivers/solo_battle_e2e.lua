@@ -50,6 +50,11 @@
 --      the badge that lifts it, QUICK ATTACK's priority, and on Gold the held
 --      items -- LEFTOVERS, a BERRY eaten, QUICK CLAW, the foe's THIEF, SMOKE
 --      BALL -- each read off the referee's own events and the save after.
+--      With them, the referee-gap legs (group "gaps", docs/plans/gen12-
+--      referee-gaps-fix.md TT-E): PAY DAY's pot on the save (Red's TELEPORT
+--      escape too, Gold's AMULET COIN), a Gold trainer's held item stolen,
+--      SLEEP TALK, a level-up reaching the referee mid-fight, Gold's rain and
+--      BATON PASS to a picked successor.
 --
 -- ------- what is local here, and why
 --
@@ -96,8 +101,9 @@ end
 -- one.  Red / Gold's rules legs (leg 9, `rulesLegs12`) are "obey"
 -- (obey-traded, obey-capless, obey-asleep), "priority" (priority-quick) and
 -- "held" (held-leftovers, held-berry, held-quickclaw, held-thief,
--- held-smokeball); one list serves every cart, and a name a cart has no leg
--- for is not driven there.
+-- held-smokeball) and "gaps" (payday, trainer-item, sleep-talk, level-up,
+-- weather, baton-pass); one list serves every cart, and a name a cart has no
+-- leg for is not driven there.
 -- A cart's run is minutes long, so iterating on one leg is worth a knob; it
 -- never changes what an unset run does.
 local SOLO_LEGS = (function()
@@ -3961,7 +3967,7 @@ return function(game)
 
   -- Legs 1-8 below are the group "singles" of SOLO_LEGS (`legOn`), as on
   -- Gen 3; the carts' rules against the computer (leg 9, `rulesLegs12`) are
-  -- the groups "obey", "priority" and "held".  A run that leaves "singles"
+  -- the groups "obey", "priority", "gaps" and "held".  A run that leaves "singles"
   -- out turns the row on the way leg 3 leaves it, through the store
   -- mod.options:get reads, since leg 3 is what normally flips it.
   local SINGLES = legOn("singles")
@@ -4576,6 +4582,45 @@ return function(game)
   --   held-smokeball  Gold: SMOKE BALL gets away on the first RUN, on a seed
   --                   whose same RUN without it is refused ("Can't escape!")
   --
+  -- The referee-gap legs (group "gaps"; docs/plans/gen12-referee-gaps-fix.md
+  -- §1 and TT-E -- what CHANGELOG 1.5.0 "Every Red and Gold move now works the
+  -- cart's way" shipped):
+  --
+  --   payday          Red and Gold: the lead's PAY DAY scatters coins (the
+  --                   referee's "Coins scattered everywhere!", 2 x its level
+  --                   each), the fight is won, and the outcome's pot
+  --                   (contract K11) lands on the save's money with the cart's
+  --                   "<PLAYER> picked up / ¥N!" said exactly once.  Red: a
+  --                   TELEPORT escape after PAY DAY pays too, a plain RUN does
+  --                   not.  Gold: AMULET COIN on the lead (a monster that was
+  --                   sent out) doubles what is paid; a control without it
+  --                   pays the pot as is
+  --   trainer-item    Gold: a real trainer whose party monster holds an item
+  --                   (TRAINERTYPE_ITEM, looked up in the player's own data):
+  --                   the foe's sheet on the referee's field carries it, the
+  --                   lead's THIEF takes it (`held` pair and the cart's line),
+  --                   and the save's lead holds it after the won fight
+  --   sleep-talk      Gold: SLEEP TALK told while awake fails ("But it
+  --                   failed!"); once the foe's SPORE has the lead asleep it
+  --                   calls the lead's other move (the referee's "used" line),
+  --                   which spends no PP of its own
+  --   level-up        Red and Gold: a lead one EXP point short of its next
+  --                   level against a two-monster trainer: the first knockout's
+  --                   EXP levels it, the client's K9 `battle_moveset` reaches
+  --                   the referee mid-fight (`sim:levelUp`, accepted), the
+  --                   referee's level, stats and maximum HP for it rise to the
+  --                   K9 numbers, it fights on, and the save's level and stats
+  --                   after the fight are those numbers
+  --   weather         Gold: RAIN DANCE then WATER GUN against the same seed's
+  --                   SPLASH then WATER GUN (the same draws, no rain): the
+  --                   rain's hit is the boosted one (~x1.5); "A downpour
+  --                   started!", four "Rain continues to fall." and "The rain
+  --                   stopped." -- five turns -- each said on the screen
+  --   baton-pass      Gold: SWORDS DANCE (the `stat` event's signed K10 stage
+  --                   +2), then BATON PASS with the client's picker naming the
+  --                   third party member (the FIGHT choice's `pass`): that one
+  --                   comes in, not the referee's default, and keeps the stage
+  --
   -- Stats, levels and HP pinned on the monsters are synthetic fixture values;
   -- move and item ids are pret names looked up in the player's own data, and
   -- every number asserted is the referee's, the save's, or the player's own
@@ -4584,10 +4629,16 @@ return function(game)
     local legs = { "obey-traded", "obey-capless", "obey-asleep", "priority-quick",
                    "held-leftovers", "held-berry", "held-quickclaw", "held-thief",
                    "held-smokeball" }
+    local gapLegs = { "payday", "trainer-item", "sleep-talk", "level-up", "weather",
+                      "baton-pass" }
     local function wants(name) return legOn(name, name:match("^(%a+)%-")) end
+    local function wantsGap(name) return legOn(name, "gaps") end
     local any = false
     for _, name in ipairs(legs) do
       if wants(name) then any = true end
+    end
+    for _, name in ipairs(gapLegs) do
+      if wantsGap(name) then any = true end
     end
     if not any then return end
 
@@ -4630,8 +4681,21 @@ return function(game)
 
     -- Speed, maximum HP, current HP, status and (Gold) the held item -- the
     -- fields the battle sheet is cut from (MediatedBattle.snapshotMons:
-    -- `stats`, `hp`, `status`, `item`).
+    -- `stats`, `hp`, `status`, `item`).  `dvs` (Gold) fixes the four DVs and
+    -- recomputes every stat from them first (Mon.refreshStats, as Battle.new
+    -- does), so two fights compared on one seed field the same monsters --
+    -- a fresh Mon.new rolls its DVs.
     local function pin(mon, p)
+      if p.dvs and GOLD then
+        local okM, Mon = pcall(require, "src.battle.gen2.Mon")
+        if okM and Mon then
+          local dvs = { attack = p.dvs.attack, defense = p.dvs.defense,
+                        speed = p.dvs.speed, special = p.dvs.special }
+          dvs.hp = Mon.hpDV(dvs)
+          mon.dvs = dvs
+          Mon.refreshStats(mon, data)
+        end
+      end
       mon.stats = mon.stats or {}
       if p.speed then mon.stats.speed = p.speed end
       if p.maxHp then
@@ -4657,13 +4721,32 @@ return function(game)
       return math.floor(tonumber(player.id)) % 65536
     end
 
-    -- A one-monster party: the generation's L50 lead with exactly `spec.moves`.
-    -- `traded` gives it an OT id one off the player's (and an OT name that is
-    -- not theirs); otherwise its OT id is the player's own.
+    -- The EXP the monster's next level starts at, off its own growth curve in
+    -- the player's data (Red src/pokemon/Growth.lua, Gold Mon.experienceForLevel).
+    local function expForNext(mon)
+      local def = type(data.pokemon) == "table" and data.pokemon[mon.species] or nil
+      if not def then return nil end
+      local nextLevel = (tonumber(mon.level) or 1) + 1
+      if GOLD then
+        local okM, Mon = pcall(require, "src.battle.gen2.Mon")
+        if not (okM and Mon) then return nil end
+        return Mon.experienceForLevel(Mon.growthFor(data, def.growthRate), nextLevel)
+      end
+      local okG, Growth = pcall(require, "src.pokemon.Growth")
+      if not (okG and Growth) then return nil end
+      return Growth.expForLevel(def.growthRate, nextLevel, data.growth_rates)
+    end
+
+    -- A party: the generation's L50 lead with exactly `spec.moves` (none: the
+    -- species' own, strongest first -- H.frontloadDamage).  `traded` gives it
+    -- an OT id one off the player's (and an OT name that is not theirs);
+    -- otherwise its OT id is the player's own.  `bench` (Gold) puts more of
+    -- the player's own monsters behind it ({ species, level?, moves }).
+    -- `toNextLevel` leaves the lead one EXP point short of its next level.
     local function seedLead(spec)
       local mon = H.seedParty(game, spec.species or partySpecies(), spec.level or 50)
       if not mon then return nil end
-      setMoves(mon, spec.moves)
+      if spec.moves then setMoves(mon, spec.moves) else H.frontloadDamage(data, mon) end
       pin(mon, spec)
       local pid = playerId()
       if pid and spec.traded then
@@ -4672,12 +4755,29 @@ return function(game)
       elseif pid then
         mon.otId = pid
       end
+      if spec.toNextLevel then
+        local need = expForNext(mon)
+        if need and need > 0 then
+          if GOLD then mon.experience = need - 1 else mon.exp = need - 1 end
+        end
+      end
+      if spec.bench and GOLD then
+        local okM, Mon = pcall(require, "src.battle.gen2.Mon")
+        for _, b in ipairs(spec.bench) do
+          local extra = okM and Mon and Mon.new(data, b.species, b.level or 50) or nil
+          if extra then
+            if b.moves then setMoves(extra, b.moves) end
+            if pid then extra.otId = pid end
+            game.save.party[#game.save.party + 1] = extra
+          end
+        end
+      end
       return mon
     end
 
     local function tweakFoe(mon, foe)
       if foe.moves then setMoves(mon, foe.moves) end
-      pin(mon, { speed = foe.speed, maxHp = foe.maxHp, hp = foe.hp, item = foe.item })
+      pin(mon, { speed = foe.speed, maxHp = foe.maxHp, hp = foe.hp, item = foe.item, dvs = foe.dvs })
     end
 
     -- ------- badges
@@ -4772,23 +4872,75 @@ return function(game)
     -- ------- watching
 
     -- Everything the referee emits from here on, each with the turn it was
-    -- emitted in and what the player's monster then was (status, HP); and every
-    -- line the screen is handed to say.
+    -- emitted in and what the player's monster then was (status, HP, party
+    -- index, stat stages); and every line the screen is handed to say.  Also
+    -- the referee's side of three seams the gap legs read: every choice filed
+    -- into it (`choices`: a BATON PASS's `pass`), every mid-fight level-up
+    -- handed to it (`levelUps`, contract K9: what it was told, whether it
+    -- took it, the monster before and after) and the outcome the screen was
+    -- given (`outcome`: K11's `payDay`).
+    local function copy12(t)
+      if type(t) ~= "table" then return nil end
+      local out = {}
+      for k, v in pairs(t) do out[k] = v end
+      return out
+    end
+    local function monState12(m)
+      if type(m) ~= "table" then return nil end
+      return { level = m.level, maxHp = m.maxHp, hp = m.hp,
+               stats = copy12(m.partyStats or m.stats) }
+    end
     local function watch12(sim, med)
-      local rec = { events = {}, said = {} }
+      local rec = { events = {}, said = {}, choices = {}, levelUps = {} }
       local emit = sim._emit
       sim._emit = function(self, kind, fields)
         local ev = emit(self, kind, fields)
         if ev then
           local pf = self.byId and self.byId.solo_player
           local pm = pf and pf.active and pf.mons and pf.mons[pf.active]
-          rec.events[#rec.events + 1] = {
-            t = ev.t, side = ev.side, slot = ev.slot, text = ev.text, amount = ev.amount,
-            hp = ev.hp, mon = ev.mon, turn = self.turn,
-            pStatus = pm and pm.status, pHp = pm and pm.hp,
-          }
+          local row = copy12(ev)
+          row.turn = self.turn
+          row.pStatus, row.pHp = pm and pm.status, pm and pm.hp
+          row.pActive, row.pStages = pf and pf.active, pm and copy12(pm.stages)
+          rec.events[#rec.events + 1] = row
         end
         return ev
+      end
+      local submit = sim.submitChoice
+      if type(submit) == "function" then
+        sim.submitChoice = function(self, seat, payload, ...)
+          if type(payload) == "table" then
+            rec.choices[#rec.choices + 1] = {
+              seat = seat, action = payload.action, move = payload.move,
+              pass = payload.pass, slot = payload.slot, turn = self.turn,
+            }
+          end
+          return submit(self, seat, payload, ...)
+        end
+      end
+      local levelUp = sim.levelUp
+      if type(levelUp) == "function" then
+        sim.levelUp = function(self, playerId, index, level, stats, maxHp, ...)
+          local f = self.byId and self.byId[playerId]
+          local m = f and f.mons and f.mons[index]
+          local before = monState12(m)
+          local ok = levelUp(self, playerId, index, level, stats, maxHp, ...)
+          rec.levelUps[#rec.levelUps + 1] = {
+            playerId = playerId, index = index, level = level, stats = copy12(stats),
+            maxHp = maxHp, ok = ok, before = before, after = monState12(m),
+            active = f and f.active, at = #rec.events, result = self.result ~= nil,
+          }
+          return ok
+        end
+      end
+      local onOutcome = med.onOutcome
+      if type(onOutcome) == "function" then
+        med.onOutcome = function(self, msg, ...)
+          if type(msg) == "table" and rec.outcome == nil then
+            rec.outcome = { reason = msg.reason, payDay = msg.payDay, outcome = msg.outcome }
+          end
+          return onOutcome(self, msg, ...)
+        end
       end
       local say, depth = med.say, 0
       med.say = function(self, text, ...)
@@ -4839,6 +4991,10 @@ return function(game)
 
     -- ------- driving
 
+    -- `pick.passTo` (a sheet index, Gold): the party picker BATON PASS opens
+    -- (MediatedBattle `asksPass` -> phase "switch") is answered with that
+    -- monster, through the picker's own cursor and A.  Answers "picker" when
+    -- the picker was up and answered.
     local function choose12(m, pick)
       local want = pick.run and "RUN" or "FIGHT"
       local list = (type(m.commandList) == "function" and m:commandList()) or {}
@@ -4849,14 +5005,29 @@ return function(game)
       if not pick.run and m.phase == "move" then
         m.cursor = pick.move or 1
         U.tap(game, "a"); U.wait(8)
+        if pick.passTo and m.phase == "switch" and type(m.partyRows) == "function" then
+          local n, at = 0, nil
+          for _, row in ipairs(m:partyRows()) do
+            if not row.fainted and not row.active then
+              n = n + 1
+              if row.index == pick.passTo then at = n end
+            end
+          end
+          if at then m.switchIndex = at end
+          U.tap(game, "a"); U.wait(8)
+          return at and "picker" or "picker-missing"
+        end
       end
+      return nil
     end
 
     -- One staged wild fight, driven to its end.  spec: label, seed, lead (for
-    -- seedLead), foe ({ species?, level?, moves, speed?, maxHp?, hp?, item? }),
-    -- badges, pick(turn, rec) -> { move = n } | { run = true } (default: move
-    -- 1 every turn), shotWhen(flatLine) -> bool and shotName (the one
-    -- screenshot, the first time the screen shows such a line).
+    -- seedLead), foe ({ species?, level?, moves, speed?, maxHp?, hp?, item?,
+    -- dvs? }), badges, pick(turn, rec) -> { move = n, passTo? } | { run = true }
+    -- (default: move 1 every turn), shotWhen(flatLine) -> bool and shotName
+    -- (the one screenshot, the first time the screen shows such a line).
+    -- `stage(onFinish, repin)` -> state, why, label stages something else (a
+    -- trainer) in place of the wild encounter; `foe` is then unused.
     local function rulesFight(spec)
       local L = spec.label
       backToOverworld(10)
@@ -4871,12 +5042,18 @@ return function(game)
       solo.randomFn = function() return 0 end
       local finished
       local staged, why, species
-      for _, name in ipairs(spec.foe.species or WILDS) do
-        staged, why = stageTweakedWild(name, spec.foe.level or 5,
-          function(m) tweakFoe(m, spec.foe) end,
-          function(result) finished = result end,
+      if spec.stage then
+        staged, why, species = spec.stage(function(result) finished = result end,
           function() pin(mon, spec.lead) end)
-        if staged then species = name break end
+      else
+        local foe = spec.foe or {}
+        for _, name in ipairs(foe.species or WILDS) do
+          staged, why = stageTweakedWild(name, foe.level or 5,
+            function(m) tweakFoe(m, foe) end,
+            function(result) finished = result end,
+            function() pin(mon, spec.lead) end)
+          if staged then species = name break end
+        end
       end
       solo.seedFn, solo.randomFn = seedBefore, randomBefore
       local med, sim = medOnStack(), solo.sim
@@ -4889,7 +5066,7 @@ return function(game)
         return nil
       end
       local rec = watch12(sim, med)
-      rec.label, rec.seed, rec.species = L, spec.seed, species
+      rec.label, rec.seed, rec.species, rec.med, rec.staged = L, spec.seed, species, med, staged
       local pf, ff = sim.byId.solo_player, sim.byId.solo_foe
       local pm = pf and pf.mons and pf.active and pf.mons[pf.active]
       local fm = ff and ff.mons and ff.active and ff.mons[ff.active]
@@ -4935,7 +5112,8 @@ return function(game)
         end
         if m.phase == "choose" then
           turn = turn + 1
-          choose12(m, (spec.pick and spec.pick(turn, rec)) or { move = 1 })
+          local how = choose12(m, (spec.pick and spec.pick(turn, rec)) or { move = 1 })
+          if how then rec[how] = (rec[how] or 0) + 1 end
         else
           U.tap(game, "a"); U.wait(4)
         end
@@ -5193,16 +5371,6 @@ return function(game)
       end
     end
 
-    -- ------- Gold's held items
-
-    local heldLegs = { "held-leftovers", "held-berry", "held-quickclaw", "held-thief", "held-smokeball" }
-    if not GOLD then
-      for _, name in ipairs(heldLegs) do
-        if wants(name) then skip(name, "held items are Gold's; Red's monsters hold none") end
-      end
-      return
-    end
-
     -- The lead's held-item facts on the referee's sheet are the player's own
     -- item row's (contract K2: MediatedBattle.heldFields2).
     local function itemFacts(L, rec, id)
@@ -5227,6 +5395,651 @@ return function(game)
         if pred(rec.events[j]) then return rec.events[j] end
       end
       return nil
+    end
+
+    -- ------- the referee gaps (docs/plans/gen12-referee-gaps-fix.md TT-E)
+
+    local function countMsgs(rec, text)
+      local n = 0
+      for _, e in ipairs(rec.events) do
+        if e.t == "msg" and e.text == text then n = n + 1 end
+      end
+      return n
+    end
+    local function saidCount(rec, needle)
+      local n, last = 0, nil
+      for _, line in ipairs(rec.said) do
+        if flat12(line):find(needle, 1, true) then n, last = n + 1, line end
+      end
+      return n, last
+    end
+    -- The side-`side` anim of `moveId` at or after event `from`, and the first
+    -- `pred` event after it before the next anim of anybody's.
+    local function afterAnim(rec, from, side, moveId, pred)
+      for i = from or 1, #rec.events do
+        local e = rec.events[i]
+        if e.t == "anim" and e.side == side and e.text == moveId then
+          for j = i + 1, #rec.events do
+            local x = rec.events[j]
+            if x.t == "anim" then return e, i, nil, j end
+            if pred(x) then return e, i, x, j end
+          end
+          return e, i, nil, #rec.events
+        end
+      end
+      return nil
+    end
+    local function sameTable(a, b)
+      if type(a) ~= "table" or type(b) ~= "table" then return false end
+      for k, v in pairs(a) do if b[k] ~= v then return false end end
+      for k, v in pairs(b) do if a[k] ~= v then return false end end
+      return true
+    end
+    local function fmtTable(t)
+      if type(t) ~= "table" then return tostring(t) end
+      local keys, parts = {}, {}
+      for k in pairs(t) do keys[#keys + 1] = tostring(k) end
+      table.sort(keys)
+      for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. tostring(t[k]) end
+      return "{" .. table.concat(parts, ",") .. "}"
+    end
+    -- A save monster's stats in the referee sheet's own dialect
+    -- (MediatedBattle statsOf: Red atk/def/spd/spc, Gold atk/def/spe/spa/spd).
+    local function sheetStats(mon)
+      local s = type(mon) == "table" and mon.stats or nil
+      if type(s) ~= "table" then return nil end
+      if GOLD then
+        return { atk = s.attack, def = s.defense, spe = s.speed,
+                 spa = s.specialAttack or s.spa or s.special,
+                 spd = s.specialDefense or s.spd or s.special }
+      end
+      return { atk = s.attack, def = s.defense, spd = s.speed, spc = s.special }
+    end
+    -- Every key of `want` holds the same number in `got`.
+    local function statsMatch(want, got)
+      if type(want) ~= "table" or type(got) ~= "table" then return false end
+      local any = false
+      for k, v in pairs(want) do
+        any = true
+        if tonumber(got[k]) ~= tonumber(v) then return false end
+      end
+      return any
+    end
+    -- A level `from` or above at whose next level the species learns no move,
+    -- so a level-up mid-fight asks nothing of the player.
+    local function quietLevel(species, from)
+      local def = type(data.pokemon) == "table" and data.pokemon[species] or nil
+      local rows = def and (def.levelMoves or def.learnset) or {}
+      for level = from, from + 10 do
+        local learns = false
+        for _, e in ipairs(rows) do
+          if tonumber(e.level) == level + 1 then learns = true end
+        end
+        if not learns then return level end
+      end
+      return from
+    end
+    local function playerName12()
+      local p = game.save and game.save.player
+      local name = p and p.name
+      return (type(name) == "string" and name ~= "") and name or "YOU"
+    end
+
+    -- Gold: the real trainer (a TRAINERTYPE_ITEM row in the player's own
+    -- trainer data) whose lead monster holds an item -- the fewest monsters,
+    -- then the lowest total level, then the class id and member, so a run
+    -- always meets the same one.
+    local function goldItemTrainer()
+      local classes = data.trainers and data.trainers.classes
+      local best = nil
+      for classId, class in pairs(type(classes) == "table" and classes or {}) do
+        for member, row in ipairs((type(class) == "table" and class.trainers) or {}) do
+          local party = (type(row) == "table" and row.party) or {}
+          local first = party[1]
+          if type(first) == "table" and type(first.item) == "string" and itemRow(first.item) then
+            local total = 0
+            for _, p in ipairs(party) do total = total + (tonumber(p.level) or 0) end
+            local key = { classId = tostring(classId), member = member, n = #party, total = total,
+                          item = first.item, species = first.species, level = first.level,
+                          name = row.name }
+            local better = best == nil or key.n < best.n
+              or (key.n == best.n and key.total < best.total)
+              or (key.n == best.n and key.total == best.total and key.classId < best.classId)
+              or (key.n == best.n and key.total == best.total and key.classId == best.classId
+                  and key.member < best.member)
+            if better then best = key end
+          end
+        end
+      end
+      return best
+    end
+
+    -- That trainer on the stack the way H.stageTrainer's Gold arm stages one
+    -- (Battle.new over Trainers.party, Gen2BattleState pushed, the Gen 1-shaped
+    -- fields stamped), but that exact member, its party unsoftened, and the
+    -- lead re-pinned after Battle.new's stat refresh.  `pickT.engineItem` is
+    -- what the engine's own party monster held as it was built.
+    local function stageGoldTrainer(pickT, onFinish, repin)
+      local okB, Battle = pcall(require, "src.battle.gen2.Battle")
+      local okT, Trainers = pcall(require, "src.world.gen2.Trainers")
+      local okS, Screens = pcall(require, "src.ui.Screens")
+      if not (okB and Battle and okT and Trainers and okS and Screens) then
+        return nil, "gen2 trainer modules unavailable"
+      end
+      local classRec = data.trainers.classes[pickT.classId]
+      if not classRec then return nil, "no trainer class " .. tostring(pickT.classId) end
+      local entry = Trainers.lookup(data.trainers, classRec.index, pickT.member)
+      if not entry then return nil, "Trainers.lookup refused " .. pickT.classId end
+      local party = Trainers.party(data, entry)
+      if not (party and #party > 0) then return nil, "the trainer's party built empty" end
+      pickT.engineItem = party[1].item
+      local trainer = {
+        class = entry.class, classId = entry.classId, memberId = entry.id, name = entry.name,
+        className = entry.className, party = party, baseMoney = entry.baseMoney,
+        attributes = entry.attributes, items = entry.items,
+      }
+      local okNew, battle = pcall(Battle.new, {
+        data = data, party = (game.save and game.save.party) or {}, trainer = trainer, save = game.save,
+      })
+      if not (okNew and battle) then return nil, tostring(battle) end
+      if repin then repin() end
+      local okPush, state = pcall(Screens.push, game, "Gen2BattleState", { battle = battle, save = game.save })
+      if not (okPush and type(state) == "table") then
+        return nil, "Gen2BattleState never came up: " .. tostring(state)
+      end
+      state.kind = "trainer"
+      state.oppClass = trainer.classId or trainer.class
+      state.enemyParty = battle.enemyParty or party
+      state.trainer = trainer
+      return likeWorldStartBattle(state, onFinish), nil, party[1].species
+    end
+
+    if wantsGap("payday") then
+      local strong = haveMove("FLAMETHROWER") and "FLAMETHROWER" or "SLASH"
+      if not (haveMove("PAY_DAY") and haveMove(strong) and haveMove("SPLASH")) then
+        skip("payday", "this cart has no PAY DAY / " .. strong .. " / SPLASH")
+      else
+        -- The foe takes a PAY DAY (a critical one too) and stays up; the next
+        -- turn's move ends it.  `moves`, `pick` and `item` vary per fight.
+        local function payFight(label, opts)
+          local moneyBefore = moneyOf()
+          local rec = rulesFight({
+            label = label, seed = opts.seed,
+            lead = { moves = opts.moves, item = opts.item, speed = 200, maxHp = 400 },
+            foe = { moves = { "SPLASH" }, speed = 10, maxHp = 500 },
+            badges = {},
+            pick = opts.pick,
+            shotWhen = opts.shotName and function(line) return line:find("picked up", 1, true) ~= nil end or nil,
+            shotName = opts.shotName,
+          })
+          if rec then
+            rec.moneyBefore, rec.moneyAfter = moneyBefore, moneyOf()
+            rec.scattered = countMsgs(rec, "Coins scattered everywhere!")
+            local level = tonumber(rec.facts and rec.facts.level) or 50
+            -- PayDayEffect_ / BattleCommand_PayDay: the user's level doubled
+            -- (an 8-bit `add a`) per PAY DAY that landed.
+            rec.pot = rec.scattered * ((2 * level) % 256)
+            rec.pickedUp, rec.pickedLine = saidCount(rec, "picked up")
+            log(("%s: scattered=%d pot=%d outcome.payDay=%s reason=%s money %d -> %d (+%d) line=[%s]"):format(
+              label, rec.scattered, rec.pot, tostring(rec.outcome and rec.outcome.payDay),
+              tostring(rec.outcome and rec.outcome.reason), moneyBefore, rec.moneyAfter,
+              rec.moneyAfter - moneyBefore, (tostring(rec.pickedLine):gsub("\n", "|"))))
+          end
+          return rec
+        end
+        local function paid(rec, label, factor, wantReason)
+          if not rec then return end
+          local paidOut = rec.pot * factor
+          check(rec.scattered >= 1 and screenSaid(rec, "Coins scattered everywhere!"),
+                label .. ": the lead's PAY DAY scattered coins (the referee's line, on the screen)",
+                tostring(rec.scattered))
+          if wantReason then
+            check(rec.outcome ~= nil and rec.outcome.reason == wantReason,
+                  label .. ": the fight ended by " .. wantReason, tostring(rec.outcome and rec.outcome.reason))
+          end
+          check(rec.outcome ~= nil and tonumber(rec.outcome.payDay) == rec.pot,
+                label .. ": the referee's outcome carries the pot (K11), 2 x the level per PAY DAY",
+                ("%s vs %d"):format(tostring(rec.outcome and rec.outcome.payDay), rec.pot))
+          check(rec.moneyAfter - rec.moneyBefore == paidOut,
+                label .. (factor == 2 and ": the save's money rose by twice the pot (AMULET COIN)"
+                  or ": the save's money rose by the pot"),
+                ("%d -> %d, want +%d"):format(rec.moneyBefore, rec.moneyAfter, paidOut))
+          local want = ("%s picked up\n¥%d!"):format(playerName12(), paidOut)
+          check(rec.pickedUp == 1, label .. ": \"picked up\" was said exactly once", tostring(rec.pickedUp))
+          check(rec.pickedLine == want, label .. ": in the cart's words, naming what was paid",
+                (tostring(rec.pickedLine):gsub("\n", "|")))
+        end
+
+        if GOLD then
+          local coin = itemRow("AMULET_COIN")
+          if not coin then
+            skip("payday (AMULET COIN)", "this cart has no AMULET COIN")
+          else
+            local rec = payFight("payday AMULET COIN", {
+              seed = 1011, moves = { "PAY_DAY", strong }, item = "AMULET_COIN",
+              pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+              shotName = "solo-gaps-payday",
+            })
+            if rec then
+              itemFacts("payday AMULET COIN", rec, "AMULET_COIN")
+              check(rec.result == "win", "payday AMULET COIN: a win", tostring(rec.result))
+              paid(rec, "payday AMULET COIN", 2, "ko")
+              check(rec.after ~= nil and rec.after.item == "AMULET_COIN",
+                    "payday AMULET COIN: the coin is never used up -- still on the save's lead",
+                    tostring(rec.after and rec.after.item))
+              check(rec.shot == true, "payday AMULET COIN: the line was photographed")
+            end
+          end
+          local control = payFight("payday (no AMULET COIN)", {
+            seed = 1011, moves = { "PAY_DAY", strong },
+            pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+          })
+          if control then
+            check(control.facts and control.facts.heldItem == nil,
+                  "payday (no AMULET COIN): the lead holds nothing", tostring(control.facts and control.facts.heldItem))
+            check(control.result == "win", "payday (no AMULET COIN): a win", tostring(control.result))
+            paid(control, "payday (no AMULET COIN)", 1, "ko")
+          end
+        else
+          local rec = payFight("payday win", {
+            seed = 1011, moves = { "PAY_DAY", strong },
+            pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+            shotName = "solo-gaps-payday",
+          })
+          if rec then
+            check(rec.result == "win", "payday win: a win", tostring(rec.result))
+            paid(rec, "payday win", 1, "ko")
+            check(rec.shot == true, "payday win: the line was photographed")
+          end
+          if not haveMove("TELEPORT") then
+            skip("payday TELEPORT", "this cart has no TELEPORT")
+          else
+            -- SwitchAndTeleportEffect leaves wBattleResult 0: EndOfBattle pays.
+            local tele = payFight("payday TELEPORT", {
+              seed = 1013, moves = { "PAY_DAY", "TELEPORT" },
+              pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+            })
+            if tele then
+              check(firstMove(tele, { "TELEPORT" }) == "a", "payday TELEPORT: the lead used TELEPORT")
+              paid(tele, "payday TELEPORT", 1, "run")
+            end
+          end
+          -- TryRunningFromBattle `.canEscape` writes wBattleResult 2: no pay.
+          local ran = payFight("payday RUN", {
+            seed = 1017, moves = { "PAY_DAY" },
+            pick = function(turn) return (turn == 1) and { move = 1 } or { run = true } end,
+          })
+          if ran then
+            check(ran.scattered >= 1, "payday RUN: the lead's PAY DAY scattered coins first",
+                  tostring(ran.scattered))
+            check(ran.result == "run" or (ran.outcome and ran.outcome.reason == "run"),
+                  "payday RUN: the player ran", tostring(ran.result))
+            check(ran.outcome ~= nil and ran.outcome.payDay == nil,
+                  "payday RUN: the referee states no pot for the player's own RUN",
+                  tostring(ran.outcome and ran.outcome.payDay))
+            check(ran.moneyAfter == ran.moneyBefore, "payday RUN: the save's money did not move",
+                  ("%d -> %d"):format(ran.moneyBefore, ran.moneyAfter))
+            check(ran.pickedUp == 0, "payday RUN: nothing was picked up", (tostring(ran.pickedLine):gsub("\n", "|")))
+          end
+        end
+      end
+    end
+
+    if wantsGap("trainer-item") then
+      local L = "trainer item"
+      local pickT = GOLD and goldItemTrainer() or nil
+      if not GOLD then
+        skip("trainer-item", "Red's trainers' monsters hold no items -- the item byte is Gold's")
+      elseif not (haveMove("THIEF") and haveMove("FLAMETHROWER")) then
+        skip("trainer-item", "this cart has no THIEF / FLAMETHROWER")
+      elseif not pickT then
+        skip("trainer-item", "no trainer in this cart's data has a lead monster holding an item")
+      else
+        log(("%s: %s #%d %s (%s L%s holding %s)"):format(L, pickT.classId, pickT.member,
+          tostring(pickT.name), tostring(pickT.species), tostring(pickT.level), pickT.item))
+        local row = itemRow(pickT.item) or {}
+        local rec = rulesFight({
+          label = L, seed = 1021,
+          lead = { moves = { "THIEF", "FLAMETHROWER" }, maxHp = 400 },
+          stage = function(onFinish, repin) return stageGoldTrainer(pickT, onFinish, repin) end,
+          badges = {},
+          pick = function(turn) return { move = (turn == 1) and 1 or 2 } end,
+          shotWhen = function(line) return line:find(" stole ", 1, true) ~= nil end,
+          shotName = "solo-gaps-trainer-item",
+        })
+        if rec then
+          local f = rec.facts or {}
+          check(pickT.engineItem == pickT.item,
+                L .. ": the engine built the trainer's monster holding its party row's item",
+                tostring(pickT.engineItem))
+          check(rec.med and rec.med.mode == "coop_npc", L .. ": seated as a trainer fight (coop_npc)",
+                tostring(rec.med and rec.med.mode))
+          check(f.foeHeld == pickT.item,
+                L .. ": the foe's sheet on the referee's field carries the item",
+                tostring(f.foeHeld))
+          check(f.heldItem == nil, L .. ": the lead walks in empty-handed (THIEF needs that)",
+                tostring(f.heldItem))
+          local lost = heldEvent(rec, "b", pickT.item, 0)
+          local took, i = heldEvent(rec, "a", pickT.item, 1)
+          check(lost ~= nil and took ~= nil,
+                L .. ": the referee's `held` pair: the foe's item gone, the lead holding it",
+                ("%s / %s"):format(tostring(lost ~= nil), tostring(took ~= nil)))
+          local stoleLine = nil
+          for _, e in ipairs(rec.events) do
+            if e.t == "msg" and type(e.text) == "string" and e.text:find(" stole ", 1, true) then
+              stoleLine = e.text
+              break
+            end
+          end
+          local want = tostring(f.species) .. " stole " .. tostring(row.name) .. " from its foe!"
+          check(stoleLine == want, L .. ": the cart's line", tostring(stoleLine))
+          check(stoleLine ~= nil and screenSaid(rec, stoleLine), L .. ": and the screen said it")
+          check(rec.result == "win", L .. ": a win", tostring(rec.result))
+          check(rec.after ~= nil and rec.after.item == pickT.item,
+                L .. ": the save's lead holds the stolen " .. pickT.item .. " after the fight",
+                tostring(rec.after and rec.after.item))
+          check(rec.shot == true, L .. ": the theft was photographed")
+        end
+      end
+    end
+
+    if wantsGap("sleep-talk") then
+      local L = "sleep talk"
+      if not GOLD then
+        skip("sleep-talk", "Red has no SLEEP TALK")
+      elseif not (haveMove("SLEEP_TALK") and haveMove("SPORE") and haveMove("SCRATCH")) then
+        skip("sleep-talk", "this cart has no SLEEP TALK / SPORE / SCRATCH")
+      else
+        -- The faster lead's SLEEP TALK opens awake; the foe's SPORE puts it to
+        -- sleep; asleep, SLEEP TALK calls SCRATCH, the only other move, onto a
+        -- foe on 1 HP -- the fight ends on the first call.
+        local rec = rulesFight({
+          label = L, seed = 1031,
+          lead = { moves = { "SLEEP_TALK", "SCRATCH" }, maxHp = 400, speed = 200 },
+          foe = { moves = { "SPORE" }, speed = 10, hp = 1 },
+          badges = {},
+          pick = function() return { move = 1 } end,
+          shotWhen = function(line) return line:find("used scratch", 1, true) ~= nil end,
+          shotName = "solo-gaps-sleep-talk",
+          seconds = 420,
+        })
+        if rec then
+          local species = rec.facts and rec.facts.species or "?"
+          local awake, asleep, calledLine = nil, nil, nil
+          local i = 1
+          while i <= #rec.events do
+            local e, at, _, stop = afterAnim(rec, i, "a", "SLEEP_TALK", function() return false end)
+            if not e then break end
+            if e.pStatus ~= "sleep" and not awake then
+              local failed = nil
+              for j = at + 1, stop do
+                local x = rec.events[j]
+                if x and x.t == "msg" and x.text ~= species .. " used SLEEP TALK!" then failed = x.text break end
+              end
+              awake = { line = failed, turn = e.turn }
+            elseif e.pStatus == "sleep" and not asleep then
+              local nextAnim = rec.events[stop]
+              asleep = { called = nextAnim and nextAnim.t == "anim" and nextAnim.side == "a" and nextAnim.text or nil,
+                         turn = e.turn }
+              if asleep.called then
+                local line = eventAfter(rec, stop, function(x) return x.t == "msg" end)
+                calledLine = line and line.text
+              end
+            end
+            i = at + 1
+          end
+          log(("%s: awake=%s asleep=%s line=[%s] turns=%d"):format(L,
+            awake and tostring(awake.line) or "-", asleep and tostring(asleep.called) or "-",
+            tostring(calledLine), rec.turns or 0))
+          check(awake ~= nil and awake.line == "But it failed!",
+                L .. ": told while awake, SLEEP TALK fails -- \"But it failed!\"", awake and awake.line)
+          check(screenSaid(rec, "But it failed!"), L .. ": and the screen said it")
+          check(asleep ~= nil and asleep.called == "SCRATCH",
+                L .. ": asleep, it calls the lead's other move (SCRATCH)", asleep and asleep.called)
+          local want = species .. " used " .. tostring(rec.facts and rec.facts.moveLabels
+            and rec.facts.moveLabels[2]) .. "!"
+          check(calledLine == want, L .. ": in the referee's own line", tostring(calledLine))
+          check(calledLine ~= nil and screenSaid(rec, calledLine), L .. ": and the screen said it")
+          check(rec.result == "win", L .. ": the called SCRATCH won the fight", tostring(rec.result))
+          local after = rec.after and rec.after.moves or {}
+          local scratchRow = data.moves and data.moves.SCRATCH
+          local talkRow = data.moves and data.moves.SLEEP_TALK
+          check(after[2] ~= nil and tonumber(after[2].pp) == tonumber(scratchRow and scratchRow.pp),
+                L .. ": the called SCRATCH spent no PP of its own (the save's PP is full)",
+                after[2] and tostring(after[2].pp))
+          check(after[1] ~= nil and tonumber(after[1].pp) < tonumber(talkRow and talkRow.pp or 0),
+                L .. ": SLEEP TALK's own PP was spent", after[1] and tostring(after[1].pp))
+          check(rec.shot == true, L .. ": the called move's line was photographed")
+        end
+      end
+    end
+
+    if wantsGap("level-up") then
+      local L = "level-up"
+      local class = H.coopTrainer(data)
+      local species = GOLD and "TYPHLOSION" or "CHARIZARD"
+      if not (type(data.pokemon) == "table" and data.pokemon[species]) then species = partySpecies() end
+      local move = haveMove("FLAMETHROWER") and "FLAMETHROWER" or nil
+      if not class then
+        skip("level-up", "this cart's data has no trainer with two monsters")
+      elseif not move then
+        skip("level-up", "this cart has no FLAMETHROWER")
+      else
+        local level = quietLevel(species, 50)
+        local rec = rulesFight({
+          label = L, seed = 1041,
+          lead = { species = species, level = level, moves = { move }, toNextLevel = true },
+          stage = function(onFinish)
+            local st = H.stageTrainer(game, class, onFinish)
+            if not st then return nil, "stageTrainer refused " .. tostring(class) end
+            return likeWorldStartBattle(st, onFinish), nil, tostring(class)
+          end,
+          badges = {},
+          shotWhen = function(line) return line:find("grew to level", 1, true) ~= nil end,
+          shotName = "solo-gaps-level-up",
+          seconds = 360,
+        })
+        if rec then
+          local ups = rec.levelUps or {}
+          local up = ups[1]
+          log(("%s: %s L%d vs %s; %d level-up(s) handed to the referee; first: ok=%s L%s stats=%s maxHp=%s; "
+            .. "before L%s %s maxHp=%s; after L%s %s maxHp=%s"):format(L, species, level, tostring(class), #ups,
+            tostring(up and up.ok), tostring(up and up.level), fmtTable(up and up.stats), tostring(up and up.maxHp),
+            tostring(up and up.before and up.before.level), fmtTable(up and up.before and up.before.stats),
+            tostring(up and up.before and up.before.maxHp),
+            tostring(up and up.after and up.after.level), fmtTable(up and up.after and up.after.stats),
+            tostring(up and up.after and up.after.maxHp)))
+          check(rec.med and rec.med.mode == "coop_npc", L .. ": against a trainer (coop_npc)",
+                tostring(rec.med and rec.med.mode))
+          check(up ~= nil and up.index == 1 and up.result == false,
+                L .. ": the client handed the referee a level-up for the lead mid-fight (K9)",
+                up and ("mon %s, over=%s"):format(tostring(up.index), tostring(up.result)) or "none")
+          check(up ~= nil and up.ok == true, L .. ": and the referee took it", tostring(up and up.ok))
+          check(up ~= nil and tonumber(up.level) == level + 1,
+                L .. ": to the next level", tostring(up and up.level))
+          local b, a = up and up.before or {}, up and up.after or {}
+          check(tonumber(a.level) == tonumber(up and up.level),
+                L .. ": the referee's monster is at that level now", tostring(a.level))
+          check(statsMatch(up and up.stats, a.stats),
+                L .. ": its stats are the K9 stats", fmtTable(a.stats))
+          local rose, fell = false, false
+          for k, v in pairs((up and up.stats) or {}) do
+            local was = tonumber(b.stats and b.stats[k])
+            if was and tonumber(v) > was then rose = true end
+            if was and tonumber(v) < was then fell = true end
+          end
+          check(rose and not fell, L .. ": which rose from what it walked in with",
+                fmtTable(b.stats) .. " -> " .. fmtTable(a.stats))
+          check(tonumber(a.maxHp) == tonumber(up and up.maxHp) and tonumber(a.maxHp) > (tonumber(b.maxHp) or 0),
+                L .. ": its maximum HP rose to the K9 maximum",
+                ("%s -> %s (K9 %s)"):format(tostring(b.maxHp), tostring(a.maxHp), tostring(up and up.maxHp)))
+          local fought = false
+          for j = (up and up.at or #rec.events) + 1, #rec.events do
+            local e = rec.events[j]
+            if e.t == "anim" and e.side == "a" then fought = true break end
+          end
+          check(fought, L .. ": and it fought on after the level-up (the trainer's next monster)")
+          check(screenSaidLike(rec, "grew to level " .. tostring(level + 1) .. "!"),
+                L .. ": the screen said \"grew to level " .. (level + 1) .. "!\"")
+          check(rec.result == "win", L .. ": a win", tostring(rec.result))
+          local saved = rec.after
+          check(saved ~= nil and tonumber(saved.level) == tonumber(up and up.level),
+                L .. ": the save's lead is at the referee's level after the fight",
+                tostring(saved and saved.level))
+          check(statsMatch(up and up.stats, sheetStats(saved)),
+                L .. ": with the stats the referee was told", fmtTable(sheetStats(saved)))
+          check(saved ~= nil and saved.stats and tonumber(saved.stats.hp) == tonumber(up and up.maxHp),
+                L .. ": and that maximum HP", tostring(saved and saved.stats and saved.stats.hp))
+          check(rec.shot == true, L .. ": the level-up line was photographed")
+        end
+      end
+    end
+
+    if wantsGap("weather") then
+      local L = "weather"
+      if not GOLD then
+        skip("weather", "Red has no weather")
+      elseif not (haveMove("RAIN_DANCE") and haveMove("WATER_GUN") and haveMove("SPLASH")) then
+        skip("weather", "this cart has no RAIN DANCE / WATER GUN / SPLASH")
+      else
+        -- One move list for both fights, fixed DVs on both monsters, one seed:
+        -- turn 1 is RAIN DANCE or SPLASH (neither script draws a number:
+        -- pokecrystal RainDance is checkobedience / usedmovetext / doturn /
+        -- startrain, Splash the same with `splash`), every later turn WATER
+        -- GUN, into a foe that outlasts the whole rain.
+        local DVS = { attack = 8, defense = 8, speed = 8, special = 8 }
+        local function rainFight(label, first, shotName)
+          return rulesFight({
+            label = label, seed = 1051,
+            lead = { moves = { "RAIN_DANCE", "WATER_GUN", "SPLASH" }, maxHp = 400, speed = 200, dvs = DVS },
+            foe = { moves = { "SPLASH" }, speed = 10, maxHp = 999, level = 8, dvs = DVS },
+            badges = {},
+            pick = function(turn) return { move = (turn == 1) and first or 2 } end,
+            shotWhen = shotName and function(line) return line:find("downpour", 1, true) ~= nil end or nil,
+            shotName = shotName,
+            seconds = 420,
+          })
+        end
+        local wet = rainFight("weather RAIN DANCE", 1, "solo-gaps-weather")
+        local dry = rainFight("weather control (SPLASH)", 3)
+        local function firstGun(rec)
+          if not rec then return nil end
+          local _, _, hit = afterAnim(rec, 1, "a", "WATER_GUN",
+            function(x) return x.t == "damage" and x.side == "b" end)
+          return hit and tonumber(hit.amount) or nil
+        end
+        local wetHit, dryHit = firstGun(wet), firstGun(dry)
+        log(("%s: first WATER GUN %s in the rain, %s without"):format(L, tostring(wetHit), tostring(dryHit)))
+        if wet then
+          local start, stop, continues, startAt, stopAt = 0, 0, 0, nil, nil
+          for i, e in ipairs(wet.events) do
+            if e.t == "msg" then
+              if e.text == "A downpour started!" then start = start + 1; startAt = startAt or i end
+              if e.text == "The rain stopped." then stop = stop + 1; stopAt = stopAt or i end
+              if e.text == "Rain continues to fall." and startAt and not stopAt then continues = continues + 1 end
+            end
+          end
+          log(("%s: start=%d continues=%d stop=%d turns=%d"):format(L, start, continues, stop, wet.turns or 0))
+          check(start == 1 and screenSaid(wet, "A downpour started!"),
+                L .. ": RAIN DANCE: \"A downpour started!\", on the screen", tostring(start))
+          check(continues == 4 and screenSaid(wet, "Rain continues to fall."),
+                L .. ": \"Rain continues to fall.\" at the end of each of the next four turns", tostring(continues))
+          check(stop == 1 and stopAt ~= nil and screenSaid(wet, "The rain stopped."),
+                L .. ": and \"The rain stopped.\" at the end of the fifth", tostring(stop))
+          check(wet.result == "win", L .. ": a win", tostring(wet.result))
+          check(wet.shot == true, L .. ": the downpour was photographed")
+        end
+        if dry then
+          check(countMsgs(dry, "A downpour started!") == 0, L .. " control: no rain in the control fight")
+        end
+        check(wetHit ~= nil and dryHit ~= nil and wetHit > dryHit,
+              L .. ": the same seed's first WATER GUN hits harder in the rain",
+              ("%s vs %s"):format(tostring(wetHit), tostring(dryHit)))
+        check(wetHit ~= nil and dryHit ~= nil and wetHit * 10 >= dryHit * 14 and wetHit * 10 <= dryHit * 16 + 10,
+              L .. ": by the rain's x1.5 (within the damage roll's rounding)",
+              ("%s / %s"):format(tostring(wetHit), tostring(dryHit)))
+      end
+    end
+
+    if wantsGap("baton-pass") then
+      local L = "baton pass"
+      if not GOLD then
+        skip("baton-pass", "Red has no BATON PASS")
+      elseif not (haveMove("BATON_PASS") and haveMove("SWORDS_DANCE") and haveMove("TACKLE")
+                  and haveMove("SCRATCH") and haveMove("SPLASH")) then
+        skip("baton-pass", "this cart has no BATON PASS / SWORDS DANCE / TACKLE / SCRATCH / SPLASH")
+      else
+        -- Three of the player's own: the lead, a second the referee's default
+        -- (the first living one; neither bench monster has a super-effective
+        -- move on a NORMAL foe) would send, and the third, which the picker names.
+        local SECOND, THIRD = "TOTODILE", "CHIKORITA"
+        if not (data.pokemon and data.pokemon[SECOND] and data.pokemon[THIRD]) then
+          SECOND, THIRD = "RATTATA", "PIDGEY"
+        end
+        local rec = rulesFight({
+          label = L, seed = 1061,
+          lead = { moves = { "SWORDS_DANCE", "BATON_PASS" }, maxHp = 400, speed = 200,
+                   bench = { { species = SECOND, moves = { "SCRATCH" } },
+                             { species = THIRD, moves = { "TACKLE" } } } },
+          foe = { moves = { "SPLASH" }, speed = 10 },
+          badges = {},
+          pick = function(turn)
+            if turn == 1 then return { move = 1 } end
+            if turn == 2 then return { move = 2, passTo = 3 } end
+            return { move = 1 }
+          end,
+          shotWhen = function(line) return line:find(THIRD:lower(), 1, true) ~= nil end,
+          shotName = "solo-gaps-baton-pass",
+        })
+        if rec then
+          local sd, sdAt = nil, nil
+          for i, e in ipairs(rec.events) do
+            if e.t == "stat" and e.side == "a" and not sd then sd, sdAt = e, i end
+          end
+          local sdAnim = nil
+          for _, e in ipairs(rec.events) do
+            if e.t == "anim" and e.side == "a" and e.text == "SWORDS_DANCE" then sdAnim = e break end
+          end
+          check(sd ~= nil and tonumber(sd.stage) == 2,
+                L .. ": SWORDS DANCE's `stat` event carries the signed stage +2 (K10)",
+                sd and tostring(sd.stage))
+          check(sd ~= nil and sdAnim ~= nil and not sameTable(sd.pStages, sdAnim.pStages),
+                L .. ": the referee's lead holds a raised stage",
+                fmtTable(sdAnim and sdAnim.pStages) .. " -> " .. fmtTable(sd and sd.pStages))
+          local passChoice = nil
+          for _, c in ipairs(rec.choices) do
+            if c.seat == "solo_player" and c.action == "fight" and c.pass ~= nil then passChoice = c end
+          end
+          check((rec.picker or 0) >= 1, L .. ": choosing BATON PASS opened the client's party picker",
+                tostring(rec.picker or rec["picker-missing"]))
+          check(passChoice ~= nil and tonumber(passChoice.pass) == 2,
+                L .. ": the FIGHT choice filed the picked successor (`pass` = the third, slot 2)",
+                passChoice and tostring(passChoice.pass))
+          local sent = nil
+          for i = (sdAt or 1), #rec.events do
+            local e = rec.events[i]
+            if e.t == "send" and e.side == "a" then sent = e break end
+          end
+          check(sent ~= nil and sent.text == THIRD and tonumber(sent.mon) == 2 and sent.pActive == 3,
+                L .. ": " .. THIRD .. " -- the picked one, not the default " .. SECOND .. " -- came in",
+                sent and ("%s mon=%s active=%s"):format(tostring(sent.text), tostring(sent.mon),
+                  tostring(sent.pActive)))
+          check(sent ~= nil and sd ~= nil and sameTable(sent.pStages, sd.pStages),
+                L .. ": and keeps the stage the lead passed", fmtTable(sent and sent.pStages))
+          check(rec.result == "win", L .. ": a win", tostring(rec.result))
+          check(rec.shot == true, L .. ": the successor's entrance was photographed")
+        end
+      end
+    end
+
+    -- ------- Gold's held items
+
+    local heldLegs = { "held-leftovers", "held-berry", "held-quickclaw", "held-thief", "held-smokeball" }
+    if not GOLD then
+      for _, name in ipairs(heldLegs) do
+        if wants(name) then skip(name, "held items are Gold's; Red's monsters hold none") end
+      end
+      return
     end
 
     if wants("held-leftovers") then

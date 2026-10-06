@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = floor(d * roll / 255) with roll in 217..255, only when d is 2 or more: pokered RandomizeDamage returns on a 0 or 1 before drawing (`cp 2` / `ret c`), so a d of 0 or 1 is the damage as it stands (rolls: false) and no roll is taken; for d >= 2 the product is at least 1. A d of 0 that is not immunity -- a 0.25x step taking a 2 or 3 to 0 -- is a miss for the turn machine (AdjustDamageForMoveType sets wMoveMissed): immune false, damage 0. Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. effectiveAccuracy = clamp(floor(floor(accuracy * accuracyMod / 100) * evasionMod / 100), 1, 255) and hit = roll < effectiveAccuracy for roll in 0..255. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255. OBEDIENCE (pokered CheckForDisobedience, engine/battle/core.asm :3830-4007; every byte below is one BattleRandom, and `bytes` is the exact sequence drawn, `draws` how many of them were consumed). cap: the first of EARTHBADGE 101, MARSHBADGE 70, RAINBOWBADGE 50, CASCADEBADGE 30 the badge set holds, else 10. roll: c = cap, d = min(255, level); c >= d obeys without a draw; b = min(255, c + d) (the cart's add-with-carry capped at $ff); loop1 redraws swap(R) until it is below b and obeys if it is below c; loop2 redraws R until it is below b and answers random if below c; then b = d - c and r = swap(R): r < b naps, r - b >= b is nothing, anything else is selfhit. swap exchanges the two nibbles of a byte. nap: swap((2R) mod 256) mod 8, redrawn while it is 0, so 1..7 turns. loaf: R mod 4 picks loafing / wont_obey / turned_away / ignored_orders. random: null without a draw when fewer than two moves are known, any move is disabled, Struggle is selected, or no slot but the chosen one has PP; otherwise (R mod 4) + 1 is redrawn until it names a slot that exists, is not the chosen one and has PP. SIDE (pokered engine/battle/effects.asm; every byte below is one BattleRandom). threshold: a move's side effect lands when the byte is below it. A chance above 0 is the sheet's explicit percent, clamped to 100, as floor(chance * 255 / 100); 0 (or below) reads the routine's own constant, `percent` being * $ff / 100: POISON_SIDE_EFFECT1 2 and TWINEEDLE 77 = 20 percent + 1 = 52, POISON_SIDE_EFFECT2 33 = 40 percent + 1 = 103, BURN / FREEZE / PARALYZE_SIDE_EFFECT1 4 / 5 / 6 and FLINCH_SIDE_EFFECT1 31 = 10 percent + 1 = 26, their SIDE_EFFECT2 34 / 35 / 36 and FLINCH_SIDE_EFFECT2 37 = 30 percent + 1 = 77, ATTACK..SPECIAL_DOWN_SIDE_EFFECT 68..71 = 33 percent + 1 = 85, CONFUSION_SIDE_EFFECT 76 = 10 percent = 25 (no + 1). Any other effect has no threshold (0) and never draws. computerMiss: StatModifierDownEffect on the enemy's turn outside a link battle misses when its first byte is below 25 percent + 1 = 64. apply: one side effect on a target (statuses as words, types as chart indices), fed `bytes` in order; `draws` is how many it took. Poison returns without a draw on a Substitute, any status, or a type equal to poisonType; burn / freeze / paralysis on a Substitute, then on any status (where a frozen target and moveType equal to fireType thaw instead), then on a type equal to moveType; flinch on a Substitute; a drop draws the computer's miss byte first when computerMover, then returns on a Substitute, and is never stopped by Mist and silent at -6; confusion draws first, ignores a Substitute, and an already-confused target fails silently without the 2..5 turn byte (byte % 4 + 2). poisonType / fireType null name no type. RUN (side step runOdds; pokered TryRunningFromBattle, the wild arm): the attempt counter counts this try; a runner whose Speed is at or over the wild one's gets away (odds null, no byte); else the divisor is floor(enemySpeed / 4) mod 256 -- only the low byte -- and a 0 gets away; the quotient is floor(((playerSpeed * 32) mod 65536) / divisor) -- the product's low word -- and over 255 gets away; each attempt past the first adds 30, and a sum over 255 gets away; otherwise one byte at or under the odds gets away (`cp b` / `jr nc`).",
+  "notes": "Synthetic Gen1 mechanic vectors for Lua/JS BattleSim parity. No ROM data: no species, move, ability or item names appear here, only integer ids and type indices 0..15. All arithmetic is integer; floor() truncates toward zero and every value is an integer, boolean or null (never NaN). DAMAGE. statClamp (pokered .scaleStats): if attack > 255 or defense > 255 then attack becomes max(1, floor(attack/4)) mod 256 and defense becomes floor(defense/4) mod 256 -- the low byte, so a scaled stat of 256 or more wraps -- and the defense is then held at >= 1 (the cart would divide by zero and freeze; the referee clamps instead). explode: true halves that scaled defense afterwards, max(1, floor(d/2)). levelTerm = floor(2*L/5 + 2), where L = level*2 on a critical hit (so crit doubles the level term rather than the final damage). base = min(997, floor(floor(levelTerm * power * attack / defense) / 50)) + 2: the cap comes before the +2 and before STAB, type and roll, so those can still carry damage past 999. STAB is floor(d*3/2). Type effectiveness is a list of percents applied one at a time as floor(d * pct / 100), matching Gen1 per-type application. If any percent is 0 the attack is immune: damage is 0 and no further step runs. Otherwise the random factor is damage = floor(d * roll / 255) with roll in 217..255, only when d is 2 or more: pokered RandomizeDamage returns on a 0 or 1 before drawing (`cp 2` / `ret c`), so a d of 0 or 1 is the damage as it stands (rolls: false) and no roll is taken; for d >= 2 the product is at least 1. A d of 0 that is not immunity -- a 0.25x step taking a 2 or 3 to 0 -- is a miss for the turn machine (AdjustDamageForMoveType sets wMoveMissed): immune false, damage 0. Cases with roll: null assert the full band via minDamage/maxDamage inclusive. ACCURACY. accuracy, accuracyMod and evasionMod are 0..255 and percents respectively. pokered CalcHitChance (engine/battle/core.asm :5348-5414): step1 = max(1, floor(accuracy * accuracyMod / 100)), then effectiveAccuracy = min(255, max(1, floor(step1 * evasionMod / 100))) -- a 0 is set back to 1 after EACH multiply, before the next -- and hit = roll < effectiveAccuracy for roll in 0..255. evasionMod is the ratio of the TARGET's evasion stage reflected over neutral (`c = 14 - EVASIONMOD`): the turn machine passes the ratio of the negated stage. Because roll has 256 values and effectiveAccuracy caps at 255, a \"100%\" move still misses 1/256 of the time (roll 255). alwaysHits: true bypasses the roll entirely and reports effectiveAccuracy: null. CRIT. pokered CriticalHitTest, one shift at a time with every left shift held at 255: b = floor(baseSpeed / 2); focusEnergy halves it (the Gen1 bug: a right shift where a left one was meant) where every other move doubles it; a high-critical-ratio move then doubles it twice more where an ordinary move halves it. So an ordinary move is floor(baseSpeed/2), a high-crit move min(255, 8*floor(baseSpeed/2)), focusEnergy alone floor(floor(baseSpeed/2)/4), and focusEnergy with a high-crit move 4*floor(floor(baseSpeed/2)/2). isCrit = roll < threshold for roll in 0..255, so a threshold of 255 still fails on roll 255 and a threshold of 0 never crits. STATUS. Sleep decrements the counter before the move and the waking turn is still lost. Paralysis stops the turn when roll < 63 (63/256) and quarters speed as max(1, floor(speed/4)). Freeze never self-thaws in Gen1, so thawed is false for every roll. Burn and poison deal max(1, floor(maxHp/16)) per turn; burn also halves attack as max(1, floor(attack/2)). Toxic deals max(1, floor(maxHp/16)) * toxicCounter. Confusion decrements its counter first, snaps out at 0, and otherwise self-hits when roll < 128 (50%) for a typeless 40-power hit using the confused side own attack and defense (the caller doubles that defense when the opponent has Reflect) through the same scaling and 997 cap as any hit, with no STAB, no type effectiveness and no crit, at a fixed roll of 255. OBEDIENCE (pokered CheckForDisobedience, engine/battle/core.asm :3830-4007; every byte below is one BattleRandom, and `bytes` is the exact sequence drawn, `draws` how many of them were consumed). cap: the first of EARTHBADGE 101, MARSHBADGE 70, RAINBOWBADGE 50, CASCADEBADGE 30 the badge set holds, else 10. roll: c = cap, d = min(255, level); c >= d obeys without a draw; b = min(255, c + d) (the cart's add-with-carry capped at $ff); loop1 redraws swap(R) until it is below b and obeys if it is below c; loop2 redraws R until it is below b and answers random if below c; then b = d - c and r = swap(R): r < b naps, r - b >= b is nothing, anything else is selfhit. swap exchanges the two nibbles of a byte. nap: swap((2R) mod 256) mod 8, redrawn while it is 0, so 1..7 turns. loaf: R mod 4 picks loafing / wont_obey / turned_away / ignored_orders. random: null without a draw when fewer than two moves are known, any move is disabled, Struggle is selected, or no slot but the chosen one has PP (each PP masked, `and PP_MASK`); otherwise (R mod 4) + 1 is redrawn until it names a slot that exists, is not the chosen one and has a PP byte that is not 0 -- the RAW byte, PP Ups included (`ppUps`, optional, 0..3 per slot), so a slot at 0 PP with a PP Up can be chosen. SIDE (pokered engine/battle/effects.asm; every byte below is one BattleRandom). threshold: a move's side effect lands when the byte is below it. A chance above 0 is the sheet's explicit percent, clamped to 100, as floor(chance * 255 / 100); 0 (or below) reads the routine's own constant, `percent` being * $ff / 100: POISON_SIDE_EFFECT1 2 and TWINEEDLE 77 = 20 percent + 1 = 52, POISON_SIDE_EFFECT2 33 = 40 percent + 1 = 103, BURN / FREEZE / PARALYZE_SIDE_EFFECT1 4 / 5 / 6 and FLINCH_SIDE_EFFECT1 31 = 10 percent + 1 = 26, their SIDE_EFFECT2 34 / 35 / 36 and FLINCH_SIDE_EFFECT2 37 = 30 percent + 1 = 77, ATTACK..SPECIAL_DOWN_SIDE_EFFECT 68..71 = 33 percent + 1 = 85, CONFUSION_SIDE_EFFECT 76 = 10 percent = 25 (no + 1). Any other effect has no threshold (0) and never draws. computerMiss: StatModifierDownEffect on the enemy's turn outside a link battle misses when its first byte is below 25 percent + 1 = 64. apply: one side effect on a target (statuses as words, types as chart indices), fed `bytes` in order; `draws` is how many it took. Poison returns without a draw on a Substitute, any status, or a type equal to poisonType; burn / freeze / paralysis on a Substitute, then on any status (where a frozen target and moveType equal to fireType thaw instead), then on a type equal to moveType; flinch on a Substitute; a drop draws the computer's miss byte first when computerMover, then returns on a Substitute, and is never stopped by Mist and silent at -6; confusion draws first, ignores a Substitute, and an already-confused target fails silently without the 2..5 turn byte (byte % 4 + 2). poisonType / fireType null name no type. RUN (side step runOdds; pokered TryRunningFromBattle, the wild arm): the attempt counter counts this try; a runner whose Speed is at or over the wild one's gets away (odds null, no byte); else the divisor is floor(enemySpeed / 4) mod 256 -- only the low byte -- and a 0 gets away; the quotient is floor(((playerSpeed * 32) mod 65536) / divisor) -- the product's low word -- and over 255 gets away; each attempt past the first adds 30, and a sum over 255 gets away; otherwise one byte at or under the odds gets away (`cp b` / `jr nc`).",
   "damage": [
     {
       "id": "dmg_neutral_basic",
@@ -832,6 +832,34 @@
       "out": {
         "effectiveAccuracy": null,
         "hit": true
+      }
+    },
+    {
+      "id": "acc_each_step_held_at_1",
+      "in": {
+        "accuracy": 3,
+        "accuracyMod": 25,
+        "evasionMod": 400,
+        "alwaysHits": false,
+        "roll": 3
+      },
+      "out": {
+        "effectiveAccuracy": 4,
+        "hit": true
+      }
+    },
+    {
+      "id": "acc_each_step_held_at_1_misses_at_4",
+      "in": {
+        "accuracy": 3,
+        "accuracyMod": 25,
+        "evasionMod": 400,
+        "alwaysHits": false,
+        "roll": 4
+      },
+      "out": {
+        "effectiveAccuracy": 4,
+        "hit": false
       }
     }
   ],
@@ -1712,6 +1740,59 @@
       "out": {
         "slot": 2,
         "draws": 4
+      }
+    },
+    {
+      "id": "obedience_random_raw_byte_takes_a_pp_up_slot",
+      "in": {
+        "step": "random",
+        "pp": [
+          5,
+          0,
+          5
+        ],
+        "ppUps": [
+          0,
+          1,
+          0
+        ],
+        "selected": 1,
+        "disabled": false,
+        "struggling": false,
+        "bytes": [
+          1
+        ]
+      },
+      "out": {
+        "slot": 2,
+        "draws": 1
+      }
+    },
+    {
+      "id": "obedience_random_raw_byte_zero_still_redrawn",
+      "in": {
+        "step": "random",
+        "pp": [
+          5,
+          0,
+          5
+        ],
+        "ppUps": [
+          0,
+          0,
+          0
+        ],
+        "selected": 1,
+        "disabled": false,
+        "struggling": false,
+        "bytes": [
+          1,
+          2
+        ]
+      },
+      "out": {
+        "slot": 3,
+        "draws": 2
       }
     }
   ],

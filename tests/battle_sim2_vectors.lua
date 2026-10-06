@@ -552,6 +552,31 @@ end
 function GOLD.movePriority(input)
   return { priority = Effects.movePriority({ id = input.id, effect = input.effect, priority = orNil(input.priority) }) }
 end
+-- FX-R2: PokeBallEffect (pokegold engine/items/item_effects.asm), worked
+-- by hand from the routine and cross-checked against a register-level
+-- emulation of it: the ball table, the HP step and status bonus, the wobble
+-- byte, the HEAVY BALL's weight byte, and a whole throw's draws.
+local function sheetOf(raw)
+  if raw == nil or raw == NULL then return nil end
+  local out = {}
+  for k, v in pairs(raw) do out[k] = orNil(v) end
+  return out
+end
+function GOLD.ballRate(input)
+  return { rate = Effects.ballRate(input.ball, input.rate, sheetOf(input.target),
+    { thrower = sheetOf(input.thrower), battleType = orNil(input.battleType) }) }
+end
+function GOLD.catchHpRate(input)
+  return { value = Effects.catchHpRate(input.rate, input.hp, input.maxHp, orNil(input.status)) }
+end
+function GOLD.wobbleByte(input) return { value = Effects.wobbleByte(input.rate) } end
+function GOLD.heavyBallWeightByte(input) return { value = Effects.heavyBallWeightByte(input.weight) } end
+function GOLD.catchAttempt(input)
+  local r = byteStream(input.bytes)
+  local caught, shakes, finalRate = Effects.catchAttempt(input.ball, sheetOf(input.target), r,
+    { thrower = sheetOf(input.thrower), battleType = orNil(input.battleType) })
+  return { caught = caught, shakes = shakes, finalRate = finalRate, drawn = r.drawn() }
+end
 
 each("gold", function(input)
   local handler = GOLD[input.kind]

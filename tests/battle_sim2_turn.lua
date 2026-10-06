@@ -680,7 +680,9 @@ for _, mode in ipairs({ "wild", "coop_wild" }) do
       sides = {
         a = wildHumans(mode, {
           playerId = "p1", name = "Ann",
-          mons = { mon({ species = "Alpha", maxHp = 200, spe = 90 }) },
+          -- Hurt, so the POTION has something to do (FX-R2: one on a full
+          -- HP bar "won't have any effect" and is refused).
+          mons = { mon({ species = "Alpha", maxHp = 200, hp = 150, spe = 90 }) },
           bag = { POTION = 1 },
         }),
         b = {
@@ -4360,8 +4362,10 @@ end
 -- (c) the bag's lines: ItemUsedText / _EnemyUsedOnText, nothing past them for
 --     X ACCURACY / DIRE HIT / GUARD SPEC., the computer's silent X item
 do
+  -- Alpha is hurt so the POTION below is used (FX-R2: one on a full HP bar
+  -- "won't have any effect" and is refused).
   local battle, foe = fight({ mode = "coop_npc", seed = 3,
-    a = { held({ species = "Alpha", spe = 90, stages = { spe = 5 }, moves = { hit("wait", 0, 0, 85) } }) },
+    a = { held({ species = "Alpha", hp = 50, spe = 90, stages = { spe = 5 }, moves = { hit("wait", 0, 0, 85) } }) },
     b = { held({ species = "Beta", spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
   drain(battle)
   local events = round(battle, foe, { action = "item", item = "X_ACCURACY" }, { action = "item", item = "X_ATTACK" })
@@ -4384,40 +4388,51 @@ do
   events = round(battle, foe, { action = "item", item = "POKE_BALL" }, { action = "fight", move = 0 })
   ok(said(events, "The trainer blocked the BALL!") and said(events, "Don't be a thief!")
      and not said(events, "Ann used the POKé BALL."), "RP2: a ball in a trainer fight is blocked, no use line")
-  events = round(battle, foe, { action = "item", item = "POKE_DOLL" }, { action = "fight", move = 0 })
-  ok(said(events, "OAK: Ann! This isn't the time to use that!"), "RP2: a POKé DOLL outside a wild fight: OAK")
+  -- FX-R2: PokeDollEffect's `.not_wild` uses nothing (wItemEffectSucceeded
+  -- 0, the pack's OAK line and the menu again): refused as it is chosen.
+  eq(battle:submitChoice("p1", { action = "item", item = "POKE_DOLL" }), false,
+     "RP2: a POKé DOLL outside a wild fight is not used (`.not_wild`)")
+  eq(battle.byId.p1.choice, nil, "RP2: ...the seat is asked again")
   eq(battle:outcome(), nil, "RP2: ...and the fight goes on")
 end
 
 -- (d) the balls: the wobble lines by count, Text_BallCaught, no "The ball shook"
+--     -- FX-R2: PokeBallEffect's draws, scripted.  A max HP of 300 and a rate
+--     of 200 make wFinalCatchRate 66 (tripled 900 >> 2 = 225, doubled 600 >>
+--     2 = 150: 200 x 75 / 225), whose WobbleProbabilities byte is 191.
 do
-  local function wildBall(rate, hp, seed, ball, rounds)
-    local wildMon = held({ species = "Beta", maxHp = 900, hp = hp, spe = 10, moves = { hit("wait", 0, 0, 85) } })
-    wildMon.catchRate = rate
-    local battle, foe = fight({ mode = "wild", seed = seed,
+  local function wildBall(ball, bytes, hp)
+    local wildMon = held({ species = "Beta", maxHp = 300, hp = hp, spe = 10, moves = { hit("wait", 0, 0, 85) } })
+    wildMon.catchRate = 200
+    local battle, foe = fight({ mode = "wild", seed = 1,
       a = { held({ species = "Alpha", maxHp = 900, spe = 90, moves = { hit("wait", 0, 0, 85) } }) },
       b = { wildMon } })
     drain(battle)
-    local all = {}
-    for _ = 1, rounds do
-      if battle:outcome() then break end
-      for _, event in ipairs(round(battle, foe, { action = "item", item = ball })) do all[#all + 1] = event end
-    end
-    return all, battle
+    local i = 0
+    battle.rng = { byte = function() i = i + 1; return bytes[i] or 0 end }
+    local events = round(battle, foe, { action = "item", item = ball })
+    return events, battle, i
   end
-  local hard = wildBall(3, nil, 938, "POKE_BALL", 1)
-  ok(said(hard, "Ann used the POKé BALL.") and said(hard, "Oh no! The POKéMON broke free!"),
+  local free, _, drawn = wildBall("POKE_BALL", { 67, 191 })
+  ok(said(free, "Ann used the POKé BALL.") and said(free, "Oh no! The POKéMON broke free!"),
      "RP2: no wobble: BallBrokeFreeText")
-  local close = wildBall(255, 700, 942, "ULTRA_BALL", 1)
-  ok(said(close, "Shoot! It was so close too!"), "RP2: three wobbles and free: BallSoCloseText")
-  local mid = wildBall(200, nil, 932, "POKE_BALL", 1)
-  ok(said(mid, "Aww! It appeared to be caught!"), "RP2: one wobble: BallAppearedCaughtText")
-  local two = wildBall(200, nil, 932, "GREAT_BALL", 1)
+  eq(drawn, 2, "FX-R2: one catch byte over 66, one wobble byte at 191")
+  local one = wildBall("POKE_BALL", { 255, 190, 191 })
+  ok(said(one, "Aww! It appeared to be caught!"), "RP2: one wobble: BallAppearedCaughtText")
+  local two = wildBall("POKE_BALL", { 255, 0, 0, 200 })
   ok(said(two, "Aargh! Almost had it!"), "RP2: two wobbles: BallAlmostHadItText")
-  local caught, battle = wildBall(200, nil, 1, "MASTER_BALL", 1)
+  local close, _, closeDrawn = wildBall("POKE_BALL", { 255, 0, 0, 0, 0 })
+  ok(said(close, "Shoot! It was so close too!"), "RP2: three wobbles and free: BallSoCloseText")
+  eq(closeDrawn, 4, "FX-R2: three wobbles at most -- the fourth check draws nothing")
+  local edge, edgeBattle, edgeDrawn = wildBall("POKE_BALL", { 66 })
+  ok(said(edge, "Gotcha! Beta was caught!"), "FX-R2: a byte equal to the final rate catches (`jr z`)")
+  eq(edgeDrawn, 1, "FX-R2: ...and a catch draws no wobble")
+  eq(edgeBattle:outcome() and edgeBattle:outcome().reason, "catch", "RP2: ...and ends the fight a catch")
+  local caught, battle, masterDrawn = wildBall("MASTER_BALL", {})
   ok(said(caught, "Gotcha! Beta was caught!"), "RP2: Text_BallCaught names the monster")
+  eq(masterDrawn, 0, "FX-R2: a MASTER BALL draws nothing")
   eq(battle:outcome() and battle:outcome().reason, "catch", "RP2: ...and ends the fight a catch")
-  for _, list in ipairs({ hard, close, mid, two, caught }) do
+  for _, list in ipairs({ free, one, two, close, edge, caught }) do
     ok(not said(list, "The ball shook"), "RP2: no \"The ball shook\" (the cart has none)")
   end
 end
@@ -4486,6 +4501,323 @@ do
   events = round(woke, wf)
   ok(said(events, "Alpha woke up!") and not animAt(events, "SLP_PLAYER_ANIM", 0),
      "RP2: no sleep clip on the turn it wakes (`.woke_up`)")
+end
+
+-- ------------------------------------------------------------------
+-- The review fixes (FX-R2, docs/plans/gen12-referee-gaps-fix.md): each rule
+-- the Gold reviewer found, against pokecrystal / pokegold.  The parity
+-- scenarios `fx2_*` pin the streams; these name the rules.
+-- server/battle2_turn.test.js holds the same claims.
+-- ------------------------------------------------------------------
+
+local function bagSeat(o, bag)
+  local battle, foe = fight(o)
+  battle.byId.p1.bag = bag
+  return battle, foe
+end
+
+-- (1) K9 levelUp, judged as Red's is: fights against the computer, side a, a
+--     living monster, a level that rises, stats that never fall or pass 999,
+--     and the CalcMonStats ceiling with K7.
+do
+  local function stats(atk, def, spe, spa, spd)
+    return { atk = atk, def = def, spe = spe, spa = spa, spd = spd }
+  end
+  local pvp = fight({ mode = "1v1", seed = 1,
+    a = { held({ species = "Alpha", level = 20, maxHp = 100, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", level = 20, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  eq(pvp:levelUp("p1", 1, 21, stats(50, 50, 50, 50, 50), 110), false,
+     "FX-R2: no level-up in a fight between players (GiveExperiencePoints' wLinkMode)")
+  eq(pvp.byId.p1.mons[1].level, 20, "FX-R2: ...the level stays")
+  local npc, foe = fight({ mode = "coop_npc", seed = 1,
+    a = { held({ species = "Alpha", level = 20, maxHp = 100, moves = { hit("tap", 1) } }),
+          held({ species = "Down", level = 20, maxHp = 100, hp = 0, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", level = 20, maxHp = 100, moves = { hit("tap", 1) } }) } })
+  eq(npc:levelUp(foe, 1, 21, stats(50, 50, 50, 50, 50), 110), false, "FX-R2: ...nor for the computer's seat")
+  eq(npc:levelUp("p1", 2, 21, stats(50, 50, 50, 50, 50), 110), false, "FX-R2: ...nor a fainted monster")
+  eq(npc:levelUp("p1", 1, 20, stats(50, 50, 50, 50, 50), 110), false, "FX-R2: the level must rise")
+  eq(npc:levelUp("p1", 1, 21, nil, 110), true, "FX-R2: a level and a max HP alone, without K7")
+  eq(npc:levelUp("p1", 1, 22, stats(39, 50, 50, 50, 50), 110), false, "FX-R2: a stat that falls is refused")
+  eq(npc:levelUp("p1", 1, 22, stats(50, 50, 50, 50, 50), 100), false, "FX-R2: ...and a max HP that falls")
+  eq(npc:levelUp("p1", 1, 22, stats(1000, 50, 50, 50, 50), 110), false, "FX-R2: ...a stat past 999")
+  eq(npc:levelUp("p1", 1, 22, stats(50, 50, 50, 50, 50), 1000), false, "FX-R2: ...a max HP past 999")
+  eq(npc:levelUp("p1", 1, 22, "x", 110), false, "FX-R2: ...and nonsense, never raised")
+  eq(npc:levelUp("p1", 1, 22, stats(999, 999, 999, 999, 999), 999), true,
+     "FX-R2: without K7 the ceiling is 999")
+  -- K7: base 50 everywhere, DVs 15/15/15/15 (HP DV 15), level 30 at full
+  -- stat exp: ((50 + 15) * 2 + 63) * 30 / 100 + 5 = 62; HP + 40 = 97.
+  local k7 = fight({ mode = "wild", seed = 2,
+    a = { held({ species = "Alpha", level = 29, maxHp = 60, spe = 40, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", level = 20, maxHp = 300, moves = { hit("tap", 1) } }) } })
+  local alpha = k7.byId.p1.mons[1]
+  alpha.base = { hp = 50, atk = 50, def = 50, spe = 50, spa = 50, spd = 50 }
+  alpha.dvs = { atk = 15, def = 15, spe = 15, spc = 15 }
+  eq(k7:levelUp("p1", 1, 30), true, "FX-R2: K7 and no stats: computed (no stat exp)")
+  eq(alpha.stats.atk, 44, "FX-R2: ...((50 + 15) * 2) * 30 / 100 + 5")
+  eq(alpha.maxHp, 79, "FX-R2: ...and the max HP (HP DV 15) + 30 + 10")
+  -- At 31, full stat exp: (130 + 63) * 31 / 100 + 5 = 64; HP 59 + 41 = 100.
+  eq(k7:levelUp("p1", 1, 31, stats(65, 64, 64, 64, 64), 100), false,
+     "FX-R2: K7: a stat past CalcMonStats at full stat exp is refused")
+  eq(k7:levelUp("p1", 1, 31, stats(64, 64, 64, 64, 64), 101), false, "FX-R2: K7: ...and a max HP past it")
+  eq(k7:levelUp("p1", 1, 31, stats(64, 64, 64, 64, 64), 100), true, "FX-R2: K7: the ceiling itself is taken")
+  eq(alpha.stats.atk, 64, "FX-R2: ...and lands")
+end
+
+-- (2) PokeBallEffect: the throw's context (the thrower's level for a LEVEL
+--     BALL, wBattleType for a LURE BALL) and its draws.  The odds are the
+--     vector pack's (`gold` ballRate / catchHpRate / catchAttempt).
+do
+  local function throw(ball, opts, bytes)
+    local wild = held({ species = "Beta", level = opts.wildLevel or 20, maxHp = 300, spe = 10,
+                        moves = { hit("wait", 0, 0, 85) } })
+    wild.catchRate = opts.rate or 30
+    wild.speciesId = opts.speciesId
+    local battle, err = Turn.create({ id = "fx2c", mode = "wild", seed = 1, choiceTimeout = 60,
+      reconnectGrace = 60, battleType = opts.battleType,
+      sides = { a = { { playerId = "p1", name = "Ann", mons = {
+                  held({ species = "Alpha", level = opts.level or 20, maxHp = 300, spe = 90,
+                         moves = { hit("wait", 0, 0, 85) } }) } } },
+                b = { { playerId = "wild", name = "Wild", mons = { wild } } } } })
+    if not battle then error(tostring(err), 0) end
+    drain(battle)
+    local i = 0
+    battle.rng = { byte = function() i = i + 1; return bytes[i] or 255 end }
+    local events = round(battle, "wild", { action = "item", item = ball })
+    return said(events, "Gotcha! Beta was caught!"), i
+  end
+  -- rate 30, full HP 300 of 300: (225 - 150) x 30 / 225 = 10.
+  eq(throw("POKE_BALL", {}, { 10 }), true, "FX-R2: a byte at wFinalCatchRate (10) catches")
+  eq(throw("POKE_BALL", {}, { 11 }), false, "FX-R2: ...one over misses")
+  eq(throw("LEVEL_BALL", { level = 41, wildLevel = 20 }, { 60 }), true,
+     "FX-R2: LEVEL BALL x2 at a wild level under the thrower's, no HP step: 60")
+  eq(throw("LEVEL_BALL", { level = 41, wildLevel = 20 }, { 61 }), false, "FX-R2: ...and no more")
+  eq(throw("LURE_BALL", { battleType = 4 }, { 30 }), true, "FX-R2: LURE BALL x3 in a fishing fight: 30")
+  eq(throw("LURE_BALL", {}, { 11 }), false, "FX-R2: ...and x1 in any other")
+  eq(throw("FAST_BALL", { speciesId = "MAGNEMITE" }, { 40 }), true, "FX-R2: FAST BALL x4 for MAGNEMITE: 40")
+  eq(throw("FAST_BALL", { speciesId = "RAIKOU" }, { 11 }), false, "FX-R2: ...nothing past FleeMons' first three")
+  eq(throw("MOON_BALL", {}, { 11 }), false, "FX-R2: MOON BALL: never boosted (MOON_STONE_RED)")
+  local _, drawn = throw("POKE_BALL", {}, { 255, 0, 0, 0 })
+  eq(drawn, 4, "FX-R2: a miss draws its three wobbles")
+end
+
+-- (3) The bag's "It won't have any effect.": the player's item that would do
+--     nothing is refused (not spent, the seat asked again); an X item on a
+--     stat of 999 is used and fails ("won't rise anymore!").
+do
+  local battle, foe = bagSeat({ mode = "coop_npc", seed = 3,
+    a = { held({ species = "Alpha", maxHp = 300, atk = 999, spe = 90, focusEnergy = true,
+                 moves = { hit("tap", 1), hit("kick", 10, 0, 0, 5) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } },
+    { X_ACCURACY = 2, DIRE_HIT = 1, GUARD_SPEC = 2, POTION = 1, FULL_RESTORE = 1, ANTIDOTE = 1,
+      FULL_HEAL = 1, ETHER = 1, ELIXER = 1, X_ATTACK = 1 })
+  drain(battle)
+  local a = battle.byId.p1.mons[1]
+  eq(battle:submitChoice("p1", { action = "item", item = "DIRE_HIT" }), false,
+     "FX-R2: DIRE HIT with FOCUS ENERGY up: not used (DireHitEffect)")
+  for _, item in ipairs({ "POTION", "FULL_RESTORE", "ANTIDOTE", "FULL_HEAL", "ELIXER" }) do
+    eq(battle:submitChoice("p1", { action = "item", item = item, slot = 0 }), false,
+       "FX-R2: " .. item .. " that would do nothing is refused")
+  end
+  eq(battle:submitChoice("p1", { action = "item", item = "ETHER", slot = 0, move = 0 }), false,
+     "FX-R2: an ETHER on a move at full PP is refused")
+  eq(battle.byId.p1.choice, nil, "FX-R2: ...and nothing is filed")
+  a.confusion = 2
+  eq(battle:submitChoice("p1", { action = "item", item = "FULL_HEAL", slot = 0 }), true,
+     "FX-R2: FULL HEAL on the confused monster in battle is used (IsItemUsedOnConfusedMon)")
+  battle:submitChoice(foe, { action = "fight", move = 0 })
+  drain(battle)
+  local events = round(battle, foe, { action = "item", item = "X_ATTACK" })
+  ok(said(events, "Ann used the X ATTACK.") and said(events, "Alpha's ATTACK won't rise anymore!"),
+     "FX-R2: X ATTACK on an Attack of 999: used, and RaiseStat's `.stats_already_max`")
+  eq(a.stages.atk, 0, "FX-R2: ...the level put back")
+  eq(battle.byId.p1.bag.X_ATTACK, nil, "FX-R2: ...and the item spent")
+  events = round(battle, foe, { action = "item", item = "X_ACCURACY" })
+  ok(said(events, "Ann used the X ACCURACY."), "FX-R2: X ACCURACY the first time is used")
+  eq(battle:submitChoice("p1", { action = "item", item = "X_ACCURACY" }), false,
+     "FX-R2: ...the second refused (XAccuracyEffect)")
+  a.hp = 200
+  eq(battle:submitChoice("p1", { action = "item", item = "POTION", slot = 0 }), true,
+     "FX-R2: a POTION on a hurt monster is taken")
+  -- The computer's items are its AI's, which never ask.
+  battle.byId.p1.choice = nil
+  local c, cf = fight({ mode = "coop_npc", seed = 4,
+    a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(c)
+  c.byId[cf].mons[1].xAccuracy = true
+  eq(c:submitChoice(cf, { action = "item", item = "X_ACCURACY" }), true,
+     "FX-R2: the computer's X ACCURACY is filed whatever (EnemyUsedXAccuracy)")
+end
+
+-- (4) Struggle when every move with PP is the DISABLEd one: decided as the
+--     FIGHT is chosen, whatever index it names (`.CheckPlayerHasUsableMoves`).
+do
+  local battle, foe = fight({ mode = "1v1", seed = 5,
+    a = { held({ species = "Alpha", maxHp = 300, spe = 10,
+                 moves = { hit("growl", 0, 0, 0, 0), hit("tackle", 35, 0, 0, 5) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 90, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  eq(battle:submitChoice("p1", { action = "fight", move = 0 }), false,
+     "FX-R2: a 0-PP slot is refused while another has PP")
+  battle.byId.p1.mons[1].disable = { moveIndex = 2, turns = 3 }
+  eq(battle:submitChoice("p1", { action = "fight", move = 1 }), true,
+     "FX-R2: with only the DISABLEd slot holding PP, any index is a FIGHT")
+  eq(battle.byId.p1.choice.struggle, true, "FX-R2: ...and it is Struggle")
+  battle:submitChoice(foe, { action = "fight", move = 0 })
+  local events = drain(battle)
+  ok(said(events, "Alpha used STRUGGLE!"), "FX-R2: Struggle is used")
+  ok(not said(events, "Alpha's tackle is DISABLED!"), "FX-R2: ...not the disabled move")
+  local c, cf = fight({ mode = "coop_npc", seed = 6,
+    a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("tackle", 35, 0, 0, 5) } }) } })
+  drain(c)
+  c.byId[cf].mons[1].disable = { moveIndex = 1, turns = 3 }
+  c:submitChoice("p1", { action = "fight", move = 0 })
+  c:autoPick(cf)
+  ok(said(drain(c), "Beta used STRUGGLE!"), "FX-R2: the computer's too (ParseEnemyAction `.struggle`)")
+end
+
+-- (5) A slot that has no PP left when it is used (SPITE took it): `.out_of_pp`.
+do
+  local battle, foe = fight({ mode = "1v1", seed = 7,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90,
+                 moves = { hit("SPITE", 0, 0, 150), hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10,
+                 moves = { hit("thump", 10, 0, 0, 2), hit("razor", 10, 0, 39, 2), hit("tap", 1) } }) } })
+  drain(battle)
+  round(battle, foe, { action = "fight", move = 1 }, { action = "fight", move = 0 })
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  ok(said(events, "Beta used thump!") and said(events, "But no PP is left for the move!"),
+     "FX-R2: \"used\", then NoPPLeftText")
+  eq(battle.byId.p2.mons[1].moves[1].pp, 0, "FX-R2: ...no PP below 0")
+  local c, cf = fight({ mode = "1v1", seed = 8,
+    a = { held({ species = "Alpha", maxHp = 900, spe = 90,
+                 moves = { hit("SPITE", 0, 0, 150), hit("tap", 1) } }) },
+    b = { held({ species = "Beta", maxHp = 900, spe = 10,
+                 moves = { hit("razor", 10, 0, 39, 2), hit("tap", 1) } }) } })
+  drain(c)
+  round(c, cf, { action = "fight", move = 1 }, { action = "fight", move = 0 })
+  round(c, cf, { action = "fight", move = 1 }, { action = "fight", move = 0 })
+  events = round(c, cf, { action = "fight", move = 0 }, { action = "fight", move = 0 })
+  ok(said(events, "Beta has no PP left for razor!") and not said(events, "Beta used razor!"),
+     "FX-R2: a charge move's HasNoPPLeftText, with no \"used\" (`doturn` before `usedmovetext`)")
+end
+
+-- (6) The computer's withdrawal is chased by the player's PURSUIT
+--     (AI_Switch's PursuitSwitch), and a knockout there pays no EXP.
+do
+  local battle, foe = fight({ mode = "coop_npc", seed = 9,
+    a = { held({ species = "Alpha", maxHp = 300, atk = 200, spe = 10, moves = { hit("PURSUIT", 40, 0, 117) } }) },
+    b = { held({ species = "Beta", maxHp = 300, hp = 5, spe = 90, moves = { hit("tap", 1) } }),
+          held({ species = "Delta", maxHp = 300, spe = 90, moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "switch", slot = 1 })
+  local fainted, sent, paid = nil, nil, false
+  for i, event in ipairs(events) do
+    if event.t == "faint" and event.text == "Beta" then fainted = i end
+    if event.t == "send" and event.text == "Delta" then sent = i end
+    if event.t == "exp" then paid = true end
+  end
+  ok(fainted and sent and fainted < sent, "FX-R2: PURSUIT knocks the withdrawing monster out before the send-out")
+  ok(not paid, "FX-R2: ...and pays no EXP (AI_Switch has no UpdateBattleStateAndExperienceAfterEnemyFaint)")
+  eq(battle.byId[foe].mons[2].hp, 300, "FX-R2: ...the successor is untouched")
+end
+
+-- (7) The computer's item or switch went first (wEnemyGoesFirst): the
+--     player's PROTECT fails; Crystal's item also forgets its last move.
+do
+  local battle, foe = fight({ mode = "coop_npc", seed = 10,
+    a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("PROTECT", 0, 0, 120) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("tap", 1) } }) } })
+  drain(battle)
+  local events = round(battle, foe, { action = "fight", move = 0 }, { action = "item", item = "X_ATTACK" })
+  ok(said(events, "But it failed!") and not said(events, "Alpha PROTECTED itself!"),
+     "FX-R2: PROTECT after the computer's item fails (CheckOpponentWentFirst)")
+  local function disableAfterItem(family)
+    local b, f = fight({ mode = "coop_npc", seed = 11, family = family,
+      a = { held({ species = "Alpha", maxHp = 300, spe = 10,
+                   moves = { hit("DISABLE", 0, 0, 86), hit("wait", 0, 0, 85) } }) },
+      b = { held({ species = "Beta", maxHp = 300, spe = 90, moves = { hit("tap", 1) } }) } })
+    drain(b)
+    round(b, f, { action = "fight", move = 1 }, { action = "fight", move = 0 })
+    return round(b, f, { action = "fight", move = 0 }, { action = "item", item = "X_ATTACK" })
+  end
+  ok(said(disableAfterItem("crystal"), "But it failed!"),
+     "FX-R2: Crystal's AI_TryItem zeroes wLastEnemyCounterMove: DISABLE fails")
+  ok(said(disableAfterItem("gs"), "Beta's tap was DISABLED!"), "FX-R2: Gold's does not")
+end
+
+-- (8) SPIKES: the computer's own switch takes none (AI_Switch); its faint's
+--     successor and a player's switch do.
+do
+  local battle, foe = fight({ mode = "coop_npc", seed = 12,
+    a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("SPIKES", 0, 0, 149), hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }),
+          held({ species = "Delta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  round(battle, foe)
+  local events = round(battle, foe, { action = "fight", move = 1 }, { action = "switch", slot = 1 })
+  ok(not said(events, "Delta's hurt by SPIKES!"), "FX-R2: the computer's own switch takes no SPIKES")
+  eq(battle.byId[foe].mons[2].hp, 300, "FX-R2: ...at full HP")
+  local link, lf = fight({ mode = "1v1", seed = 12,
+    a = { held({ species = "Alpha", maxHp = 300, spe = 90, moves = { hit("SPIKES", 0, 0, 149), hit("wait", 0, 0, 85) } }) },
+    b = { held({ species = "Beta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }),
+          held({ species = "Delta", maxHp = 300, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(link)
+  round(link, lf)
+  ok(said(round(link, lf, { action = "fight", move = 1 }, { action = "switch", slot = 1 }), "Delta's hurt by SPIKES!"),
+     "FX-R2: a player's switch does (link `.switch`)")
+end
+
+-- (9) BATON PASS's send-out zeroes both sides' counter moves: a foe's MIRROR
+--     MOVE right after it copies nothing.
+do
+  local battle, foe = fight({ mode = "1v1", seed = 13,
+    a = { held({ species = "Passer", maxHp = 300, spe = 90, moves = { hit("BATON_PASS", 0, 0, 134) } }),
+          held({ species = "Heir", maxHp = 300, spe = 10, moves = { hit("tap", 1) } }) },
+    b = { held({ species = "Mirror", maxHp = 300, spe = 10, moves = { hit("MIRROR_MOVE", 0, 0, 9), hit("tap", 1) } }) } })
+  drain(battle)
+  local events = round(battle, foe, { action = "fight", move = 0, pass = 1 }, { action = "fight", move = 0 })
+  ok(said(events, "The MIRROR MOVE failed!") and not said(events, "Mirror used BATON_PASS!"),
+     "FX-R2: MIRROR MOVE after a BATON PASS fails")
+end
+
+-- (10) Both last monsters down at once: against the computer the player
+--      lost (LostBattle); in a link fight a draw (TiedAgainstText).
+do
+  local function boom(mode)
+    local battle, foe = fight({ mode = mode, seed = 14,
+      a = { held({ species = "Alpha", maxHp = 100, atk = 250, spe = 90, moves = { hit("EXPLOSION", 250, 0, 7) } }) },
+      b = { held({ species = "Beta", maxHp = 20, def = 5, spe = 10, moves = { hit("tap", 1) } }) } })
+    drain(battle)
+    round(battle, foe)
+    return battle:outcome(), foe
+  end
+  local npc, foe = boom("coop_npc")
+  eq(npc and npc.outcome, "win", "FX-R2: against the computer the fight is decided...")
+  eq(npc and npc.winners and npc.winners[1], foe, "FX-R2: ...for the computer: the player lost")
+  eq(npc and npc.payDay, nil, "FX-R2: ...and no PAY DAY")
+  local link = boom("1v1")
+  eq(link and link.outcome, "draw", "FX-R2: in a link fight it is a draw")
+end
+
+-- (11) SANDSTORM and a wrap: the HP bar first, then the line; a knockout
+--      waits for the faint check after the routine.
+do
+  local battle, foe = fight({ mode = "1v1", seed = 15,
+    a = { held({ species = "Alpha", maxHp = 400, spe = 90, moves = { hit("SANDSTORM", 0, 5, 126) } }) },
+    b = { held({ species = "Beta", maxHp = 400, hp = 10, spe = 10, moves = { hit("wait", 0, 0, 85) } }),
+          held({ species = "Delta", maxHp = 400, spe = 10, moves = { hit("wait", 0, 0, 85) } }) } })
+  drain(battle)
+  local events = round(battle, foe)
+  local hurt, line, faint = nil, nil, nil
+  for i, event in ipairs(events) do
+    if event.t == "damage" and event.slot == 3 and not hurt then hurt = i end
+    if event.t == "msg" and event.text == "The SANDSTORM hits Beta!" then line = i end
+    if event.t == "faint" and event.text == "Beta" then faint = i end
+  end
+  ok(hurt and line and faint and hurt < line and line < faint,
+     "FX-R2: SubtractHPFromUser, SandstormHitsText, then the faint check")
 end
 
 -- ------------------------------------------------------------------

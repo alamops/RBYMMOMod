@@ -298,7 +298,7 @@ const OBEDIENCE = {
     return { line, draws: rng.used() };
   },
   random: (input) => {
-    const moves = input.pp.map((pp) => ({ pp }));
+    const moves = input.pp.map((pp, i) => ({ pp, ppUps: input.ppUps ? input.ppUps[i] : undefined }));
     const rng = scripted(input.bytes);
     const slot = status.disobedientMove(moves, input.selected, input.disabled,
       input.struggling, rng);
@@ -650,4 +650,57 @@ test('GetMaxPP, the base behind it, .restorePP and a MIMIC\'s switch-out', () =>
   const back = user.moves[0];
   assert.strictEqual(`${back.id}:${back.pp}/${back.ppUps}/${back.maxPp}`, 'MIMIC:63/0/10',
     "the switch-out's MIMIC: the slot's byte, and GetMaxPP over the PP Ups it holds now");
+});
+
+// FX-R1: ItemUseBall's Rand1 loop, its W > 255 capture, PSYWAVE's two ranges,
+// and an OHKO's wDamage -- each fed a scripted byte stream, so the draws
+// themselves are the claim (twin of tests/battle_sim_effects.lua's block).
+test('FX-R1: ball Rand1 redraw, W > 255, PSYWAVE ranges, OHKO wDamage', () => {
+  const wild = { catchRate: 45, hp: 100, maxHp: 100 };
+  // GREAT BALL: 201 and 255 are redrawn (`cp b / jr c, .loop` against 200),
+  // 46 kept -- over the rate of 45 by one: no Rand2, broken free.
+  let rng = scripted([201, 255, 46]);
+  assert.strictEqual(Effects.catchAttempt('GREAT_BALL', wild, rng).caught, false,
+    'GREAT BALL: Rand1 46 > rate 45 fails');
+  assert.strictEqual(rng.used(), 3, '...after redrawing 201 and 255 (ItemUseBall `.loop`)');
+  // ULTRA BALL: 151 is redrawn too (the second `cp b`, against 150).
+  rng = scripted([151, 200, 45, 0]);
+  assert.strictEqual(Effects.catchAttempt('ULTRA_BALL', wild, rng).caught, true,
+    'ULTRA BALL: 151 and 200 redrawn, 45 passes, Rand2 0 catches');
+  assert.strictEqual(rng.used(), 4, '...four bytes');
+  rng = scripted([255]);
+  assert.strictEqual(Effects.catchAttempt('POKE_BALL', wild, rng).caught, false,
+    'POKé BALL: 255 kept, over the rate');
+  assert.strictEqual(rng.used(), 1, '...one byte');
+  // W > 255 captures before Rand2 (`jr nz, .captured`): HP 4 of 100 is a
+  // quarter of 1, so W = 100 * 255 / 12 = 2125.
+  rng = scripted([10]);
+  assert.strictEqual(Effects.catchAttempt('POKE_BALL', { catchRate: 45, hp: 4, maxHp: 100 }, rng).caught,
+    true, 'W > 255: captured on Rand1 alone');
+  assert.strictEqual(rng.used(), 1, '...no Rand2 drawn');
+  rng = scripted([77]);
+  assert.strictEqual(Effects.catchAttempt('MASTER_BALL', wild, rng).caught, true, 'MASTER BALL catches');
+  assert.strictEqual(rng.used(), 1, "...after the one byte `.loop` drew first");
+
+  // PSYWAVE at level 2 (b = 3): the player's [1, 3) redraws a 0; the
+  // computer's [0, 3) keeps it.
+  rng = scripted([0, 3, 2]);
+  assert.strictEqual(Effects.psywaveDamage(2, rng, false), 2, "the player's PSYWAVE redraws 0 and 3");
+  assert.strictEqual(rng.used(), 3, '...three bytes');
+  rng = scripted([3, 0]);
+  assert.strictEqual(Effects.psywaveDamage(2, rng, true), 0,
+    "the computer's PSYWAVE keeps a 0 (core.asm :4776-4789)");
+  assert.strictEqual(rng.used(), 2, '...after redrawing 3');
+  assert.strictEqual(Effects.psywaveDamage(1, scripted([]), false), 1,
+    "the player's b of 1 freezes the cart: 1, no draw");
+  assert.strictEqual(Effects.setDamage({ moveId: 'PSYWAVE', userMon: { level: 2 },
+    rng: scripted([0]), computerMover: true }), 0, "setDamage passes the computer's range on");
+
+  // OneHitKOEffect_'s $FFFF through STAB (a 16-bit add: 32766) and the rows
+  // (each quotient's low two bytes).
+  assert.strictEqual(Effects.ohkoDamage(false, []), 65535, 'OHKO: no STAB, no row');
+  assert.strictEqual(Effects.ohkoDamage(true, []), 32766, 'STAB wraps: 65535 + 32767 = 32766');
+  assert.strictEqual(Effects.ohkoDamage(false, [200]), 65534, 'a 2x row: 131070 keeps its low word');
+  assert.strictEqual(Effects.ohkoDamage(true, [50, 50]), 8191, 'STAB then two halving rows');
+  assert.strictEqual(Effects.ohkoDamage(false, [0]), 0, 'an immunity row: 0');
 });

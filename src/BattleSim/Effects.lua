@@ -1500,6 +1500,8 @@ function M.applyPrimary(ctx)
         pp = M.TRANSFORM_PP,
         maxPp = M.TRANSFORM_PP,
         ppUps = 0,
+        -- No GetMaxPP behind the 5 (Turn `stepPp` keeps it fixed).
+        basePp = false,
         power = max(0, int(m.power, 0)),
         accuracy = max(0, int(m.accuracy, 255)),
         type = max(0, int(m.type, 0)),
@@ -1862,6 +1864,24 @@ function M.ohkoLands(userSpeed, foeSpeed)
   return int(userSpeed, 0) >= int(foeSpeed, 0)
 end
 
+-- The wDamage a landed OHKO carries into the hit, before RandomizeDamage's
+-- roll (the caller's): OneHitKOEffect_ writes $FFFF, and CalculateDamage
+-- hands it on to AdjustDamageForMoveType -- STAB is `add hl, bc` on 16 bits
+-- (65535 + 32767 wraps to 32766), and each matching TypeEffects row is a
+-- Multiply / Divide by 10 whose quotient keeps its low two bytes (core.asm
+-- :5100-5170).  `percents` are the rows in the walk's order (Turn
+-- `_typeRows`); a 0 is an immunity.  Never under a few thousand on a real
+-- chart, so AttackSubstitute breaks a doll outright (a high byte) and an
+-- overkill writes the target's HP back over it.
+function M.ohkoDamage(stab, percents)
+  local d = 65535
+  if stab then d = (d + floor(d / 2)) % 65536 end
+  for _, pct in ipairs(percents or {}) do
+    d = floor(d * max(0, int(pct, 100)) / 100) % 65536
+  end
+  return d
+end
+
 -- `.specialDamage` reads wPlayerMoveNum, not the move's power (every one of
 -- these is power 1 on the cart): SEISMIC TOSS and NIGHT SHADE deal the
 -- user's level, SONICBOOM 20, DRAGON RAGE 40, and anything else is PSYWAVE.
@@ -1872,21 +1892,33 @@ M.SPECIAL_DAMAGE = {
 }
 
 -- PSYWAVE's damage: b = level + level / 2 (an 8-bit `add`, so a level over
--- 170 wraps), then `BattleRandom` redrawn until it is in [1, b).  A b of 0
--- or 1 has no such byte and freezes the cart; the referee deals 1 there and
--- draws nothing (quirks reproduced, freezes never).
-function M.psywaveDamage(level, rng)
+-- 170 wraps), then `BattleRandom` redrawn until it is in range -- and the
+-- range is the mover's.  The player's `.specialDamage` (core.asm
+-- :4657-4670) redraws a 0 too (`and a / jr z, .loop`): [1, b).  The
+-- enemy's (:4776-4789) has no such test: [0, b), so the computer's PSYWAVE
+-- can deal 0 ("it's possible for the enemy to do 0 damage").  `computer` is
+-- the computer's seat (Turn `isComputerSeat`); both sides of a link fight
+-- are players, each on its own cart, and keep [1, b).  A range with no byte
+-- in it -- b of 0 or 1 for the player, 0 for the computer -- freezes the
+-- cart; the referee deals the range's floor there (1, or 0) and draws
+-- nothing, and bounds the loop the same way (quirks reproduced, freezes
+-- never).
+function M.psywaveDamage(level, rng, computer)
   local L = max(0, int(level, 1)) % 256
   local b = (L + floor(L / 2)) % 256
-  if b <= 1 or not rng then return 1 end
-  local r
-  repeat r = rng:byte() until r ~= 0 and r < b
-  return r
+  local floorV = computer and 0 or 1
+  if b <= floorV or not rng then return floorV end
+  for _ = 1, M.REDRAW_GUARD do
+    local r = rng:byte()
+    if r >= floorV and r < b then return r end
+  end
+  return floorV
 end
 
--- ctx: effectId, moveId, userMon, targetMon, power, rng
+-- ctx: effectId, moveId, userMon, targetMon, power, rng, computerMover
 -- The damage a SetDamageEffects move deals, drawn where the cart draws it
--- (PSYWAVE's loop, after the hit test).  A SPECIAL_DAMAGE move whose id the
+-- (PSYWAVE's loop, after the hit test; `computerMover` picks the enemy's
+-- range, `psywaveDamage`).  A SPECIAL_DAMAGE move whose id the
 -- cart's table does not name is a modded one with no cart rule to follow:
 -- it keeps the referee's older reading, its power when above 1 and the
 -- user's level otherwise.
@@ -1900,7 +1932,9 @@ function M.setDamage(ctx)
   end
   local rule = M.SPECIAL_DAMAGE[M.moveKey(ctx.moveId)]
   if rule == "level" then return max(0, int(userMon.level, 1)) end
-  if rule == "psywave" then return M.psywaveDamage(userMon.level, ctx.rng) end
+  if rule == "psywave" then
+    return M.psywaveDamage(userMon.level, ctx.rng, ctx.computerMover == true)
+  end
   if type(rule) == "number" then return rule end
   local power = int(ctx.power, 0)
   if power > 1 then return power end
@@ -2265,18 +2299,32 @@ local BALL_DEFS = {
 }
 local BALL_DEFAULT = { randMax = 255, hpFactor = 12, wobbleFactor = 150 }
 
+-- ItemUseBall's Rand1 (`.loop`, item_effects.asm :180-214): a byte is drawn
+-- before the ball is even looked at -- the MASTER BALL's too, which then
+-- captures -- and a GREAT BALL's is redrawn while above 200, an ULTRA or a
+-- SAFARI BALL's while above 150 (`cp b / jr c, .loop`).  The loop never
+-- freezes on a real generator; the referee bounds it all the same and
+-- answers the range's top (quirks reproduced, freezes never).  No
+-- generator draws nothing and answers 0.
 local function catchRoll(rng, maxV)
-  maxV = max(0, int(maxV, 0))
-  if maxV <= 0 then return 0 end
-  if maxV >= 255 then return rng and rng:byte() or 0 end
-  return (rng and rng:byte() or 0) % (maxV + 1)
+  if not rng then return 0 end
+  maxV = max(0, min(255, int(maxV, 255)))
+  for _ = 1, M.REDRAW_GUARD do
+    local r = rng:byte()
+    if r <= maxV then return r end
+  end
+  return maxV
 end
 
--- Returns caught, shakes (0-3).  RNG order: catch roll, then HP roll when
--- the first roll passed the rate check.  Wobble math draws nothing.
+-- Returns caught, shakes (0-3).  RNG order: Rand1 (above), then Rand2 only
+-- when Rand1 - Status passed the catch rate and W came out at 255 or below.
+-- Wobble math draws nothing.
 function M.catchAttempt(ballId, targetMon, rng)
   local def = BALL_DEFS[ballId] or BALL_DEFAULT
-  if def.autoCatch then return true, 3 end
+  if def.autoCatch then
+    catchRoll(rng, 255)
+    return true, 3
+  end
 
   local rate = int(targetMon and targetMon.catchRate, 255)
   if rate < 0 then rate = 0 elseif rate > 255 then rate = 255 end
@@ -2289,11 +2337,16 @@ function M.catchAttempt(ballId, targetMon, rng)
     statusBonus, shakeBonus = 12, 5
   end
 
+  -- W = ((MaxHP * 255) / BallFactor) / max(HP / 4, 1), unclamped: the HP
+  -- quarter is the low byte of the 16-bit shift (`srl b / rr a` twice), a 0
+  -- read as 1; X = min(W, 255) is the byte Rand2 and the shakes read.
   local maxhp = max(1, int(targetMon and targetMon.maxHp, 1))
   local hp = max(0, int(targetMon and targetMon.hp, 0))
-  local hpQuarter = max(1, floor(hp / 4))
+  local hpQuarter = floor(hp / 4) % 256
+  if hpQuarter == 0 then hpQuarter = 1 end
   local factor = def.hpFactor or BALL_DEFAULT.hpFactor
-  local f = min(255, floor(floor(maxhp * 255 / factor) / hpQuarter))
+  local w = floor(floor(maxhp * 255 / factor) / hpQuarter)
+  local f = min(255, w)
 
   local function shakes()
     local ballFactor2 = def.wobbleFactor or BALL_DEFAULT.wobbleFactor
@@ -2312,6 +2365,9 @@ function M.catchAttempt(ballId, targetMon, rng)
   local r = catchRoll(rng, def.randMax or 255) - statusBonus
   if r < 0 then return true, 3 end
   if r > rate then return false, shakes() end
+  -- "If W > 255, the ball captures the Pokémon" (`jr nz, .captured`, :305-310)
+  -- -- before Rand2 is drawn.
+  if w > 255 then return true, 3 end
   if catchRoll(rng, 255) <= f then return true, 3 end
   return false, shakes()
 end

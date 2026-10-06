@@ -62,14 +62,20 @@
 #               double-real, badge-boost, badge-guard, badge-trainer,
 #               obey-arena, obey-classic, obey-badge8, obey-outcomes,
 #               obey-asleep, theft-wild
-#   Red / Gold  priority, held, or one of obey-traded, obey-capless,
+#   Red / Gold  priority, held, gaps, or one of obey-traded, obey-capless,
 #               obey-asleep (Gold), priority-quick, held-leftovers, held-berry,
-#               held-quickclaw, held-thief, held-smokeball (the held ones Gold)
+#               held-quickclaw, held-thief, held-smokeball (the held ones Gold),
+#               payday, level-up, trainer-item, sleep-talk, weather, baton-pass
+#               (the last four Gold)
 # The badge and obey legs are the carts' rules against the computer
 # (docs/plans/gen3-badge-rules.md, docs/plans/gen12-referee-fidelity.md): the
 # x110/100 stat boosts, a traded monster over its level cap disobeying in the
 # cart's own words, a never-trusted MEW asleep, the foe's THIEF; on Red and
-# Gold move priority, and Gold's held items and the save after them.
+# Gold move priority, and Gold's held items and the save after them.  The
+# "gaps" legs are docs/plans/gen12-referee-gaps-fix.md's TT-E: PAY DAY's pot on
+# the save (Red's TELEPORT escape, Gold's AMULET COIN), a level-up reaching the
+# referee mid-fight, a Gold trainer's held item stolen, SLEEP TALK, rain, and
+# BATON PASS to the successor the picker named.
 
 set -uo pipefail
 
@@ -131,7 +137,7 @@ for arg in "$@"; do
     -h|--help)
       # Absolute: this script has already cd'd to the engine root, so a
       # relative $0 no longer resolves.
-      sed -n '2,72p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
+      sed -n '2,78p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) fail "unknown argument: $arg (try --gen1, --gen2, --both, --gen3, --all)" ;;
   esac

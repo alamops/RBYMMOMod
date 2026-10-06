@@ -244,9 +244,17 @@ end
 -- `.useRandomMove`: the slot (1-based) used instead of `selected`, or nil when
 -- the cart refuses and falls to `.monDoesNothing` -- one move known, any move
 -- disabled, Struggle selected, or no PP outside the selected slot (the cart's
--- sum of all four PP against the selected one's).  None of the refusals draws.
--- `.chooseMove` then redraws `R & 3` until it names a slot that exists, is not
--- the selected one and has PP; the refusals guarantee there is one.
+-- sum of all four PP, each `and PP_MASK`, against the selected one's).  None
+-- of the refusals draws.  `.chooseMove` then redraws `R & 3` until it names
+-- a slot that exists, is not the selected one and has a PP byte that is not
+-- 0 -- the RAW byte (`ld a, [hl] / and a`, core.asm :3988-3992), PP Ups
+-- included, so a slot at 0 PP with a PP Up on it (K8 `ppUps`) can be the
+-- move used instead.  The refusals guarantee a slot with masked PP, so the
+-- loop ends.
+local function rawPp(move)
+  return int(move.pp, 0) + 64 * (int(move.ppUps, 0) % 4)
+end
+
 function M.disobedientMove(moves, selected, disabled, struggling, rng)
   if type(moves) ~= "table" or #moves < 2 then return nil end
   if disabled or struggling then return nil end
@@ -258,7 +266,7 @@ function M.disobedientMove(moves, selected, disabled, struggling, rng)
   local slot
   repeat
     slot = (rng:byte() % 4) + 1
-  until slot ~= selected and moves[slot] ~= nil and int(moves[slot].pp, 0) > 0
+  until slot ~= selected and moves[slot] ~= nil and rawPp(moves[slot]) > 0
   return slot
 end
 

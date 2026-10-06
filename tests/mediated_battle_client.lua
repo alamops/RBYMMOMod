@@ -5752,7 +5752,9 @@ do
   -- Gold's player item line names the item for the callout (CoopBattle
   -- moveNameFromBattleText): ItemUsedText's "the" and full stop are not it.
   do
-    local _, gStep, gAll = fightOf(Gold.Turn, "wild", { gold("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
+    -- ALPHA hurt: a POTION at full HP is refused at the door now (FX-R2,
+    -- "It won't have any effect." with the item kept and the turn unspent).
+    local _, gStep, gAll = fightOf(Gold.Turn, "wild", { gold("ALPHA", { mv("THUMP", 0, { power = 1 }) }, { hp = 100 }) },
       { gold("BETA", { mv("THUMP", 0, { power = 1 }) }) }, { bag = { POTION = 1 } })
     gStep({ action = "item", item = "POTION" }, F())
     local line = find(said(gAll), " used the POTION")
@@ -5810,6 +5812,432 @@ do
     eq(Coop2.fitHudName("POKéMON TRAINER", 44, w4), "POKéMON ...", "co-op HUD name (measured): ...whole é kept")
     check(grown(function() Coop2.fitHudName("COOLTRAINER♂ JOE", 40, w4) end) < 32,
           "co-op HUD name (measured): cut without a table of glyphs")
+  end
+
+  -- ------- final client fixes (FX-C2 of docs/plans/gen12-referee-gaps-fix.md)
+  --
+  -- Gold's overlay maximum PP; STRUGGLE at the menu when every move with PP
+  -- is the disabled one; the player's ROAR / WHIRLWIND; items the cart does
+  -- not use; a mutual last-monster knockout against the computer.  Synthetic
+  -- monsters and moves throughout.
+  local FX2_GOLD = setmetatable({ moves = setmetatable({
+    TRANSFORM = { name = "TRANSFORM", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+                  effect = "EFFECT_TRANSFORM" },
+    MIMIC = { name = "MIMIC", power = 0, accuracy = 100, type = "NORMAL", pp = 10,
+              effect = "EFFECT_MIMIC" },
+    BATON = { name = "BATON PASS", power = 0, accuracy = 100, type = "NORMAL", pp = 40,
+              effect = "EFFECT_BATON_PASS" },
+  }, { __index = K_RED.moves }) }, { __index = goldData() })
+
+  -- Gold's overlay maximum (row 1): MoveInfoBox prints GetMaxPPOfMove over
+  -- the battle struct (WILDMON: wBattleMonMoves, wBattleMonPP's PP-Up bits),
+  -- so a TRANSFORM copy and a MIMIC'd slot (5 PP, no PP Ups) read "5/<the
+  -- copied move's base>", and an untouched slot its own PP Ups.
+  do
+    local m = goldMon("CHARMANDER", nil, 4321)
+    m.moves = { { id = "MIMIC", pp = 9, maxPp = 10 }, { id = "GROWL", pp = 50, maxPp = 61, ppUps = 3 } }
+    local fight, ev = screenFor(goldGame({ m }, FX2_GOLD), "wild", "fx2pp")
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    local transformed = { { id = "TACKLE", pp = 5, maxPp = 5 }, { id = "EMBER", pp = 5, maxPp = 5 } }
+    ev({ t = "moves", slot = 0, side = "a", moves = transformed })
+    local rows = fight:bandMoveRows()
+    eq(rows[1] and rows[1].right, "5/35", "Transform PP (Gold): a copy reads 5 over its own base (MoveInfoBox GetMaxPPOfMove)")
+    eq(rows[2] and rows[2].right, "5/25", "Transform PP (Gold): ...each copy its own")
+    eq(fight:activeMon().moves[1].maxPp, 35, "Transform PP (Gold): the classic strip's maximum is the cart's too")
+    eq(transformed[1].maxPp, 5, "Transform PP (Gold): the event's own rows are left as they came")
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    ev({ t = "moves", slot = 0, side = "a",
+         moves = { { id = "EMBER", pp = 5, maxPp = 5 }, { id = "GROWL", pp = 50, maxPp = 61, ppUps = 3 } } })
+    rows = fight:bandMoveRows()
+    eq(rows[1] and rows[1].right, "5/25", "MIMIC PP (Gold): the mimicked slot reads 5 over EMBER's base (mimic.asm `ld [hl], 5`)")
+    eq(rows[2] and rows[2].right, "50/61", "MIMIC PP (Gold): ...the untouched slot its own three PP Ups (ComputeMaxPP's cap)")
+    -- Through the real referee: a TRANSFORM against a TACKLE whose sheet
+    -- holds 12 PP -- the cart reads the move table's base, not the foe's PP.
+    local tr = goldMon("CHARMANDER", nil, 4321)
+    tr.moves = { { id = "TRANSFORM", pp = 10, maxPp = 10 } }
+    local tf, _, tturn = refereed(Gold.Turn, goldGame({ tr }, FX2_GOLD), "1v1",
+      { gold("BETA", { mv("TACKLE", 0, { power = 1, pp = 12 }) }) })
+    tf:pickMove(1)
+    tturn(F())
+    local trows = tf:bandMoveRows()
+    eq(tf.liveMoves and tf.liveMoves[1] and tf.liveMoves[1].id, "TACKLE",
+       "Transform PP (Gold, refereed): the copy is the FIGHT list")
+    eq(trows[1] and trows[1].right, "5/35", "Transform PP (Gold, refereed): the copy reads 5/35, not the referee's 5/5")
+    -- ...and a MIMIC: the faster foe's TACKLE copied into MIMIC's slot.
+    local mm = goldMon("CHARMANDER", nil, 4321)
+    mm.moves = { { id = "MIMIC", pp = 10, maxPp = 10 }, { id = "GROWL", pp = 40, maxPp = 61, ppUps = 3 } }
+    local mf, _, mturn = refereed(Gold.Turn, goldGame({ mm }, FX2_GOLD), "1v1",
+      { gold("BETA", { mv("TACKLE", 0, { power = 1, pp = 12 }) }, { spe = 200 }) })
+    mf:pickMove(1)
+    mturn(F())
+    local mrows = mf:bandMoveRows()
+    eq(mf.liveMoves and mf.liveMoves[1] and mf.liveMoves[1].id, "TACKLE",
+       "MIMIC PP (Gold, refereed): the copy sits in MIMIC's slot")
+    eq(mrows[1] and mrows[1].right, "5/35", "MIMIC PP (Gold, refereed): the copy reads 5/35")
+    eq(mrows[2] and mrows[2].right, "40/61", "MIMIC PP (Gold, refereed): ...GROWL its own PP Ups")
+  end
+
+  -- STRUGGLE at the menu (row 2): pokered AnyMoveToSelect / pokecrystal
+  -- CheckPlayerHasUsableMoves.  The disabled slot is read off the referee's
+  -- own lines, and FIGHT with nothing else to pick sends STRUGGLE at once.
+  do
+    for _, gen in ipairs({ 1, 2 }) do
+      check(Mediated.mustStruggle({ { pp = 0 }, { pp = 0, ppUps = 2 } }, nil, gen),
+            "mustStruggle (gen " .. gen .. "): no Disable -- every slot's masked PP at 0 (PP Ups do not count)")
+      check(not Mediated.mustStruggle({ { pp = 0 }, { pp = 3 } }, nil, gen),
+            "mustStruggle (gen " .. gen .. "): no Disable -- one slot with PP is a move list")
+      check(Mediated.mustStruggle({ { pp = 9 }, { pp = 0 } }, 1, gen),
+            "mustStruggle (gen " .. gen .. "): the disabled slot the only one with PP is STRUGGLE")
+      check(Mediated.mustStruggle({ { pp = 0, ppUps = 1 }, { pp = 0 } }, 1, gen),
+            "mustStruggle (gen " .. gen .. "): the disabled slot's own byte is never read")
+      check(not Mediated.mustStruggle({}, nil, gen),
+            "mustStruggle (gen " .. gen .. "): an empty list is no FIGHT the referee could take")
+    end
+    check(not Mediated.mustStruggle({ { pp = 9 }, { pp = 0, ppUps = 1 } }, 1, 1),
+          "mustStruggle (Red): a 0-PP slot with PP Ups keeps it away (`and a`, unmasked -- BattleSim `mustStruggle`)")
+    check(Mediated.mustStruggle({ { pp = 9 }, { pp = 0, ppUps = 1 } }, 1, 2),
+          "mustStruggle (Gold): ...the PP alone counts (BattleSim2 `noUsableMoves`, no softlock)")
+    eq(Mediated.disableLine("ALPHA's TACKLE was disabled!", "ALPHA", { { id = "EMBER" }, { id = "TACKLE" } }),
+       "on", "disableLine (Red): MoveWasDisabledText")
+    eq(select(2, Mediated.disableLine("ALPHA's TACKLE was DISABLED!", "ALPHA", { { id = "TACKLE" } })),
+       1, "disableLine (Gold): \"was DISABLED!\", naming the slot")
+    eq(select(2, Mediated.disableLine("ALPHA's HYDRO PUMP was disabled!", "ALPHA", { { id = "HYDRO" } },
+       { data = DATA })), 1, "disableLine: the move by this build's name for the id")
+    eq(Mediated.disableLine("ALPHA's disabled no more!", "ALPHA", {}), "off", "disableLine: DisabledNoMoreText")
+    eq(Mediated.disableLine("BETA's TACKLE was disabled!", "ALPHA", { { id = "TACKLE" } }), nil,
+       "disableLine: another monster's line is nothing")
+    eq(Mediated.disableLine("ALPHA's GROWL was disabled!", "ALPHA", { { id = "TACKLE" } }), nil,
+       "disableLine: a move we do not hold is nothing")
+
+    -- The screen, fed lines.
+    local m = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 5 }, { id = "EMBER", pp = 0 } } })
+    local fight, ev, transport = screenFor(gameWith({ m }, K_RED), "wild", "fx2st")
+    local foe = Config.COOP_SIDE
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    ev({ t = "send", slot = foe, side = "b", mon = 0, text = "CHARMANDER", hp = 30 })
+    -- Our own DISABLE in a mirror match: the line is the foe's monster's.
+    ev({ t = "anim", slot = 0, side = "a", text = "DISABLE" })
+    ev({ t = "msg", text = "CHARMANDER used DISABLE!" })
+    ev({ t = "msg", text = "CHARMANDER's TACKLE was disabled!" })
+    eq(fight.disabledMove, nil, "Disable (Red): our own DISABLE's line is the foe's, whatever species it names")
+    -- The foe's: ours.
+    ev({ t = "anim", slot = foe, side = "b", text = "DISABLE" })
+    ev({ t = "msg", text = "CHARMANDER used DISABLE!" })
+    ev({ t = "msg", text = "CHARMANDER's TACKLE was disabled!" })
+    eq(fight.disabledMove, 1, "Disable (Red): the foe's DISABLE on our TACKLE is read off its line")
+    check(fight:struggles(), "Struggle (Red): the disabled TACKLE the only move with PP -- AnyMoveToSelect hands STRUGGLE")
+    local before = #choicesOf(transport)
+    fight.pendingTurn, fight.answeredTurn, fight.lines = false, false, {}
+    pressFight(fight)
+    check(fight.phase ~= "move", "Struggle (Red): FIGHT opens no move list")
+    local sent = choicesOf(transport)
+    eq(#sent, before + 1, "Struggle (Red): ...and a FIGHT is sent at once")
+    eq(sent[#sent] and sent[#sent].action, "fight", "Struggle (Red): ...a FIGHT")
+    eq(sent[#sent] and sent[#sent].move, 0, "Struggle (Red): ...naming the disabled slot")
+    eq(shown(fight, "CHARMANDER has no moves left!"), 1, "Struggle (Red): NoMovesLeftText is said")
+    -- A list left up across it answers the same way.
+    fight.phase, fight.answeredTurn = "move", false
+    check(fight:pickMove(2), "Struggle (Red): a pick off a stale list is STRUGGLE too")
+    -- DisabledNoMoreText ends it; a newcomer on our seat has none either.
+    ev({ t = "msg", text = "CHARMANDER's disabled no more!" })
+    eq(fight.disabledMove, nil, "Disable (Red): \"disabled no more!\" lifts it")
+    check(not fight:struggles(), "Struggle (Red): ...and the move list is back")
+    ev({ t = "anim", slot = foe, side = "b", text = "DISABLE" })
+    ev({ t = "msg", text = "CHARMANDER's TACKLE was disabled!" })
+    ev({ t = "msg", text = "All STATUS changes are eliminated!" })
+    eq(fight.disabledMove, nil, "Disable (Red): HAZE zeroes wPlayerDisabledMove")
+    ev({ t = "anim", slot = foe, side = "b", text = "DISABLE" })
+    ev({ t = "msg", text = "CHARMANDER's TACKLE was disabled!" })
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    eq(fight.disabledMove, nil, "Disable (Red): a send-out on our seat drops it")
+
+    -- The menu's refusals, the carts' order and words.
+    local q = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 5 }, { id = "EMBER", pp = 0, ppUps = 1 } } })
+    local qf, qev, qtransport = screenFor(gameWith({ q }, K_RED), "wild", "fx2rf")
+    qev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    qev({ t = "anim", slot = foe, side = "b", text = "DISABLE" })
+    qev({ t = "msg", text = "CHARMANDER's TACKLE was disabled!" })
+    check(not qf:struggles(), "Struggle (Red): EMBER at 0 PP with a PP Up keeps STRUGGLE away")
+    qf.lines = {}
+    eq(qf:pickMove(2), false, "menu (Red): the 0-PP EMBER is refused")
+    eq(shown(qf, "No PP left for this move!"), 1, "menu (Red): ...MoveNoPPText")
+    eq(qf:pickMove(1), false, "menu (Red): the disabled TACKLE is refused")
+    eq(shown(qf, "The move is disabled!"), 1, "menu (Red): ...MoveDisabledText")
+    eq(#choicesOf(qtransport), 0, "menu (Red): ...and neither is sent (the player switches or runs)")
+
+    -- Through the real Red referee: the foe's DISABLE on our TACKLE, EMBER
+    -- already empty -- FIGHT is STRUGGLE, and the referee runs it.
+    do
+    local rm = mon("CHARMANDER", { moves = { { id = "TACKLE", pp = 5 }, { id = "EMBER", pp = 0 } } })
+    local rf, _, rturn, rtransport = refereed(Red.Turn, gameWith({ rm }, K_RED), "wild",
+      { red("BETA", { mv("DISABLE", E1.idOf("DISABLE_EFFECT")) }, { spd = 1 }) })
+    rf:pickMove(1)
+    rturn(F())
+    eq(shown(rf, "CHARMANDER's TACKLE was disabled!"), 1, "Struggle (Red, refereed): the referee's DISABLE line")
+    eq(rf.disabledMove, 1, "Struggle (Red, refereed): ...read as our TACKLE's")
+    local rbefore = #choicesOf(rtransport)
+    rf.lines = {}
+    pressFight(rf)
+    eq(#choicesOf(rtransport), rbefore + 1, "Struggle (Red, refereed): FIGHT sends at once")
+    rturn(F())
+    eq(shown(rf, "CHARMANDER has no moves left!"), 1, "Struggle (Red, refereed): NoMovesLeftText")
+    eq(shown(rf, "CHARMANDER used STRUGGLE!"), 1, "Struggle (Red, refereed): the referee runs STRUGGLE")
+    end
+
+    -- Gold's words.
+    local g = goldMon("CHARMANDER", nil, 4321)
+    g.moves = { { id = "TACKLE", pp = 5, maxPp = 35 }, { id = "EMBER", pp = 0, maxPp = 25 } }
+    local gf, gev, gtransport = screenFor(goldGame({ g }, FX2_GOLD), "wild", "fx2sg")
+    gev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    gev({ t = "anim", slot = foe, side = "b", text = "DISABLE" })
+    gev({ t = "msg", text = "CHARMANDER's TACKLE was DISABLED!" })
+    eq(gf.disabledMove, 1, "Disable (Gold): \"was DISABLED!\" read off the referee's line")
+    check(gf:struggles(), "Struggle (Gold): CheckPlayerHasUsableMoves -- the disabled TACKLE is the only move with PP")
+    gf.lines = {}
+    pressFight(gf)
+    local gsent = choicesOf(gtransport)
+    eq(gsent[#gsent] and gsent[#gsent].move, 0, "Struggle (Gold): FIGHT sends STRUGGLE on the disabled slot")
+    eq(shown(gf, "CHARMANDER has no moves left!"), 1, "Struggle (Gold): BattleText_MonHasNoMovesLeft is said")
+    -- Through the real Gold referee: our TACKLE first, then the foe's
+    -- DISABLE on it (BattleCommand_Disable reads the last move), EMBER empty.
+    do
+    local grm = goldMon("CHARMANDER", nil, 4321)
+    grm.moves = { { id = "TACKLE", pp = 5, maxPp = 35 }, { id = "EMBER", pp = 0, maxPp = 25 } }
+    local grf, _, grturn, grtransport = refereed(Gold.Turn, goldGame({ grm }, FX2_GOLD), "wild",
+      { gold("BETA", { mv("DISABLE", E2.idOf("EFFECT_DISABLE")) }, { spe = 1 }) })
+    grf:pickMove(1)
+    grturn(F())
+    eq(shown(grf, "CHARMANDER's TACKLE was DISABLED!"), 1, "Struggle (Gold, refereed): the referee's DISABLE line")
+    eq(grf.disabledMove, 1, "Struggle (Gold, refereed): ...read as our TACKLE's")
+    local grbefore = #choicesOf(grtransport)
+    grf.lines = {}
+    pressFight(grf)
+    eq(#choicesOf(grtransport), grbefore + 1, "Struggle (Gold, refereed): FIGHT sends at once")
+    grturn(F())
+    eq(shown(grf, "CHARMANDER has no moves left!"), 1, "Struggle (Gold, refereed): BattleText_MonHasNoMovesLeft")
+    eq(shown(grf, "CHARMANDER used STRUGGLE!"), 1,
+       "Struggle (Gold, refereed): the referee runs STRUGGLE (CheckPlayerHasUsableMoves, FX-R2)")
+    end
+    -- A Gold TRANSFORM of ours lifts it (ResetActorDisable).
+    gev({ t = "anim", slot = foe, side = "b", text = "DISABLE" })
+    gev({ t = "msg", text = "CHARMANDER's TACKLE was DISABLED!" })
+    gev({ t = "moves", slot = 0, side = "a", moves = { { id = "GROWL", pp = 5, maxPp = 5 } } })
+    eq(gf.disabledMove, nil, "Disable (Gold): our TRANSFORM lifts it")
+    -- A hit on a doll can carry no `amount` (an OHKO's past the wire's
+    -- AMOUNT_MAX, FX-R1): the `hp` beside it is what both copies read.
+    gev({ t = "damage", slot = 0, side = "a", hp = 17 })
+    eq(gf.mine[1].hp, 17, "damage with no amount: the sheet takes the stated HP")
+    eq(gf.slots[0] and gf.slots[0].hp, 17, "damage with no amount: ...and so does the seat")
+  end
+
+  -- The player's ROAR / WHIRLWIND in a wild fight (row 3): the target's side
+  -- leaves (pokered SwitchAndTeleportEffect, BattleSim Turn `_concedeRun`
+  -- on the target since FX-R1; pokecrystal BattleCommand_ForceSwitch,
+  -- BattleSim2's), so the move's own line ends the fight -- no "Got away
+  -- safely!" (that is GotAwayText, the player's RUN), no win line, and no
+  -- victory fanfare (pokered plays one only from FaintEnemyPokemon's
+  -- `.wild_win`, pokecrystal from the knockout too: an escape plays none).
+  -- And the computer's ROAR on us, the other way round.
+  do
+    local FX2_RED = setmetatable({ moves = setmetatable({
+      ROAR = { name = "ROAR", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+               effect = "SWITCH_AND_TELEPORT_EFFECT" },
+      WHIRLWIND = { name = "WHIRLWIND", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+                    effect = "SWITCH_AND_TELEPORT_EFFECT" },
+    }, { __index = K_RED.moves }) }, { __index = K_RED })
+    for _, case in ipairs({ { id = "WHIRLWIND", line = "BETA was blown away!" },
+                            { id = "ROAR", line = "BETA ran away scared!" } }) do
+      local ours = mon("CHARMANDER", { level = 30, moves = { { id = case.id, pp = 20 } } })
+      local fight, battle, turn = refereed(Red.Turn, gameWith({ ours }, FX2_RED), "wild",
+        { red("BETA", { mv("SPLASH", 0) }, { level = 5, spd = 1 }) })
+      fight:pickMove(1)
+      turn(F())
+      local outcome = battle:outcome()
+      check(outcome ~= nil and outcome.reason == "run", case.id .. " (Red): the fight ends on the escape")
+      fight:onOutcome(outcome)
+      eq(shown(fight, case.line), 1, case.id .. " (Red): the move's line")
+      eq(shown(fight, "Got away safely"), 0, case.id .. " (Red): ...stands alone -- no GotAwayText")
+      eq(shown(fight, "You won"), 0, case.id .. " (Red): ...and no win line")
+      eq(fight.ranSide, "b", case.id .. " (Red): the wild side is the one that left (FX-R1)")
+      eq(fight.result, "win", case.id .. " (Red): the screen's verdict is the foe's flight")
+      check(fight.victoryMusicPlayed ~= true and fight.victoryMusicHeld ~= true,
+            case.id .. " (Red): no victory fanfare for an escape, now or held for the arena")
+    end
+    -- The wild monster's ROAR on us: our side leaves, on its line alone.
+    local ours = mon("CHARMANDER", { level = 5, moves = { { id = "TACKLE", pp = 20 } } })
+    local fight, battle, turn = refereed(Red.Turn, gameWith({ ours }, FX2_RED), "wild",
+      { red("BETA", { mv("ROAR", E1.idOf("SWITCH_AND_TELEPORT_EFFECT")) }, { level = 40, spd = 200 }) })
+    fight:pickMove(1)
+    turn(F())
+    local outcome = battle:outcome()
+    check(outcome ~= nil and outcome.reason == "run", "ROAR on us (Red): the fight ends on the escape")
+    fight:onOutcome(outcome)
+    eq(shown(fight, "CHARMANDER ran away scared!"), 1, "ROAR on us (Red): RanAwayScaredText")
+    eq(shown(fight, "Got away safely"), 0, "ROAR on us (Red): ...and no GotAwayText under it")
+    eq(shown(fight, "You lost"), 0, "ROAR on us (Red): ...nor a loss line")
+    -- Gold's: "fled in fear!" / "was blown away!", the same way.
+    for _, case in ipairs({ { id = "ROAR", line = "BETA fled in fear!" },
+                            { id = "WHIRLWIND", line = "BETA was blown away!" } }) do
+      local g = goldMon("CHARMANDER", nil, 4321)
+      g.level = 30
+      g.moves = { { id = case.id, pp = 20, maxPp = 20 } }
+      local gdata = setmetatable({ moves = setmetatable({
+        ROAR = { name = "ROAR", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+                 effect = "EFFECT_FORCE_SWITCH" },
+        WHIRLWIND = { name = "WHIRLWIND", power = 0, accuracy = 100, type = "NORMAL", pp = 20,
+                      effect = "EFFECT_FORCE_SWITCH" },
+      }, { __index = K_RED.moves }) }, { __index = goldData() })
+      local gf, gb, gturn = refereed(Gold.Turn, goldGame({ g }, gdata), "wild",
+        { gold("BETA", { mv("SPLASH", 0) }, { level = 5, spe = 1 }) })
+      gf:pickMove(1)
+      gturn(F())
+      local gout = gb:outcome()
+      check(gout ~= nil and gout.reason == "run", case.id .. " (Gold): the fight ends on the escape")
+      gf:onOutcome(gout)
+      eq(shown(gf, case.line), 1, case.id .. " (Gold): the move's line")
+      eq(shown(gf, "Got away safely"), 0, case.id .. " (Gold): ...stands alone")
+      eq(shown(gf, "You won"), 0, case.id .. " (Gold): ...and no win line")
+      check(gf.victoryMusicPlayed ~= true and gf.victoryMusicHeld ~= true,
+            case.id .. " (Gold): no victory fanfare for an escape, now or held for the arena")
+    end
+  end
+
+  -- Items the cart does not use (row 4): pokered ItemUseNoEffect /
+  -- pokecrystal WontHaveAnyEffectMessage keep the item and the turn, and
+  -- both referees refuse such a choice at the door (FX-R1 `_itemFails`,
+  -- FX-R2 `_itemWontHaveEffect`).  The client asks first.
+  do
+    local IE1, IE2 = E1.itemEffect, E2.itemEffect
+    local full = { hp = 30, maxHp = 30, moves = { { id = "TACKLE", pp = 35, maxPp = 35 },
+                                                   { id = "EMBER", pp = 25, maxPp = 25 } } }
+    local function hurt(o)
+      local m = { hp = 10, maxHp = 30, moves = full.moves }
+      for k, v in pairs(o or {}) do m[k] = v end
+      return m
+    end
+    local function w(gen, id, mon, ctx)
+      local IE = gen == 1 and IE1 or IE2
+      return Mediated.itemWontHaveEffect(gen, { data = K_RED }, id, IE(id), mon, ctx or { onField = true })
+    end
+    for _, gen in ipairs({ 1, 2 }) do
+      local tag = gen == 1 and "Red" or "Gold"
+      check(w(gen, "POTION", full), "no effect (" .. tag .. "): a POTION at full HP")
+      check(not w(gen, "POTION", hurt()), "no effect (" .. tag .. "): ...not on a hurt monster")
+      check(w(gen, "MAX_POTION", full), "no effect (" .. tag .. "): a MAX POTION at full HP")
+      check(not w(gen, "FULL_RESTORE", { hp = 30, maxHp = 30, status = "PSN", moves = {} }),
+            "no effect (" .. tag .. "): a FULL RESTORE at full HP still cures a status")
+      check(w(gen, "FULL_RESTORE", full), "no effect (" .. tag .. "): ...and with neither, does nothing")
+      check(w(gen, "ANTIDOTE", hurt({ status = "PAR" })), "no effect (" .. tag .. "): an ANTIDOTE on a paralysis")
+      check(not w(gen, "ANTIDOTE", hurt({ status = "TOX" })), "no effect (" .. tag .. "): ...cures a TOXIC")
+      check(w(gen, "ETHER", full, { onField = true, move = 1 }), "no effect (" .. tag .. "): an ETHER on a full move")
+      check(not w(gen, "ETHER", hurt({ moves = { { id = "TACKLE", pp = 3, maxPp = 35 } } }), { onField = true, move = 1 }),
+            "no effect (" .. tag .. "): ...not on a spent one")
+      check(w(gen, "ELIXER", full), "no effect (" .. tag .. "): an ELIXER with every move full")
+      for _, id in ipairs({ "X_ATTACK", "REVIVE", "POKE_BALL", "HP_UP" }) do
+        check(not w(gen, id, full), "no effect (" .. tag .. "): " .. id .. " is always used")
+      end
+    end
+    -- Red's own: its X ACCURACY / GUARD SPEC. / DIRE HIT set their bit
+    -- whatever it held (ItemUseXAccuracy and the rest), and a MAX ETHER on a
+    -- full move with PP Ups still reads as restored (Effects `restorePp`).
+    check(not w(1, "X_ACCURACY", full, { onField = true, xAccuracy = true }),
+          "no effect (Red): X ACCURACY is used however often")
+    check(not w(1, "MAX_ETHER", { hp = 30, maxHp = 30, moves = { { id = "TACKLE", pp = 49, maxPp = 49, ppUps = 2 } } },
+                { onField = true, move = 1 }),
+          "no effect (Red): a MAX ETHER on a full move with PP Ups restores (the cart's byte compare)")
+    -- Gold's own: the SubStatus4 bits, and confusion for the cure-alls.
+    check(w(2, "X_ACCURACY", full, { onField = true, xAccuracy = true }), "no effect (Gold): X ACCURACY twice")
+    check(not w(2, "X_ACCURACY", full, { onField = true }), "no effect (Gold): ...once is used")
+    check(w(2, "GUARD_SPEC", full, { onField = true, mist = true }), "no effect (Gold): GUARD SPEC. under MIST")
+    check(w(2, "DIRE_HIT", full, { onField = true, focusEnergy = true }), "no effect (Gold): DIRE HIT pumped")
+    check(not w(2, "FULL_HEAL", full, { onField = true, confused = true }),
+          "no effect (Gold): a FULL HEAL takes confusion (IsItemUsedOnConfusedMon)")
+    check(w(2, "FULL_HEAL", full, { onField = true }), "no effect (Gold): ...and with nothing to cure, does nothing")
+    check(w(2, "ANTIDOTE", full, { onField = true, confused = true }), "no effect (Gold): an ANTIDOTE takes no confusion")
+    check(not w(2, "FULL_RESTORE", full, { onField = true, confused = true }),
+          "no effect (Gold): a FULL RESTORE at full HP cures confusion")
+
+    -- The screen, against the real Red referee: a POTION on a monster at
+    -- full HP is not sent, the line is the cart's, the bag is back up and
+    -- nothing is spent -- and the referee would have refused it too.
+    do
+      local ours = mon("CHARMANDER")
+      local game = gameWith({ ours }, K_RED)
+      game.save.inventory = { POTION = 2 }
+      local fight, battle, _, transport = refereed(Red.Turn, game, "wild",
+        { red("BETA", { mv("SPLASH", 0) }) })
+      local before = #choicesOf(transport)
+      fight.lines, fight.phase, fight.itemIndex, fight.itemList = {}, "item", 1, nil
+      local input = fakeInput()
+      input.press("a")
+      fight:updateItemMenu(input)
+      eq(fight.phase, "item_party", "POTION (Red): the party picker first")
+      fight.switchIndex = 1
+      input.press("a")
+      fight:updateItemParty(input)
+      eq(#choicesOf(transport), before, "POTION (Red, full HP): nothing is sent")
+      eq(shown(fight, "It won't have any effect."), 1, "POTION (Red, full HP): ItemUseNoEffectText")
+      eq(fight.phase, "item", "POTION (Red, full HP): the bag back up (BagWasSelected)")
+      eq(game.save.inventory.POTION, 2, "POTION (Red, full HP): ...the item kept")
+      eq(fight.bagSheet and fight.bagSheet.POTION, 2, "POTION (Red, full HP): ...on the bag sheet too")
+      eq(battle:submitChoice("me", { action = "item", item = "POTION", slot = 0 }), false,
+         "POTION (Red, full HP): the referee refuses it as well (`_itemFails`)")
+    end
+
+    -- ...and against the real Gold referee: X ACCURACY once (the referee
+    -- takes it, its `item` event sets the bit), then again -- refused here
+    -- as WontHaveAnyEffect_NotUsedMessage, and by the referee.
+    do
+      local g = goldMon("CHARMANDER", nil, 4321)
+      local game = goldGame({ g }, FX2_GOLD)
+      game.save.inventory = { X_ACCURACY = 2 }
+      local gf, gb, gturn, gtransport = refereed(Gold.Turn, game, "wild",
+        { gold("BETA", { mv("SPLASH", 0) }) })
+      gf.itemPick = { id = "X_ACCURACY", effect = IE2("X_ACCURACY") }
+      check(gf:commitItem(gf.active), "X ACCURACY (Gold): the first is sent")
+      gturn(F())
+      eq(gf.itemFlags2 and gf.itemFlags2.xAccuracy, true, "X ACCURACY (Gold): its `item` event sets the bit here")
+      eq(game.save.inventory.X_ACCURACY, 1, "X ACCURACY (Gold): ...and spends one")
+      local before = #choicesOf(gtransport)
+      gf.lines = {}
+      gf.itemPick = { id = "X_ACCURACY", effect = IE2("X_ACCURACY") }
+      eq(gf:commitItem(gf.active), false, "X ACCURACY (Gold): the second is not sent")
+      eq(#choicesOf(gtransport), before, "X ACCURACY (Gold): ...nothing went")
+      eq(shown(gf, "It won't have any effect."), 1, "X ACCURACY (Gold): ItemWontHaveEffectText")
+      eq(game.save.inventory.X_ACCURACY, 1, "X ACCURACY (Gold): ...the item kept")
+      eq(gb:submitChoice("me", { action = "item", item = "X_ACCURACY" }), false,
+         "X ACCURACY (Gold): the referee refuses it as well (`_itemWontHaveEffect`)")
+    end
+
+    -- Gold's bits off the referee's lines: our FOCUS ENERGY (after our own
+    -- move animation) sets DIRE HIT's; a foe of our species saying the same
+    -- does not; a BATON PASS carries them to the one it sends; any other
+    -- send-out drops them.
+    do
+      local g = goldMon("CHARMANDER", nil, 4321)
+      g.moves = { { id = "BATON", pp = 40, maxPp = 40 } }
+      local bench = goldMon("SQUIRTLE", nil, 4321)
+      local game = goldGame({ g, bench }, FX2_GOLD)
+      local fight, ev = screenFor(game, "wild", "fx2fl")
+      local foe = Config.COOP_SIDE
+      ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+      ev({ t = "anim", slot = foe, side = "b", text = "FOCUS_ENERGY" })
+      ev({ t = "msg", text = "CHARMANDER's getting pumped!" })
+      eq(fight.itemFlags2 and fight.itemFlags2.focusEnergy, nil, "bits (Gold): a foe's FOCUS ENERGY is not ours")
+      ev({ t = "anim", slot = 0, side = "a", text = "FOCUS_ENERGY" })
+      ev({ t = "msg", text = "CHARMANDER used FOCUS ENERGY!" })
+      ev({ t = "msg", text = "CHARMANDER's getting pumped!" })
+      eq(fight.itemFlags2 and fight.itemFlags2.focusEnergy, true, "bits (Gold): our FOCUS ENERGY sets SUBSTATUS_FOCUS_ENERGY")
+      fight.itemPick = { id = "DIRE_HIT", effect = IE2("DIRE_HIT") }
+      eq(fight:itemNoEffect(fight.itemPick, fight.itemPick.effect, fight.active), true,
+         "bits (Gold): ...so a DIRE HIT will not have any effect")
+      ev({ t = "anim", slot = 0, side = "a", text = "BATON" })
+      ev({ t = "msg", text = "CHARMANDER used BATON PASS!" })
+      ev({ t = "send", slot = 0, side = "a", mon = 1, text = "SQUIRTLE", hp = 30 })
+      eq(fight.itemFlags2 and fight.itemFlags2.focusEnergy, true, "bits (Gold): BATON PASS carries it")
+      ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+      eq(fight.itemFlags2 and fight.itemFlags2.focusEnergy, nil, "bits (Gold): an ordinary send-out drops it")
+    end
   end
 end
 
