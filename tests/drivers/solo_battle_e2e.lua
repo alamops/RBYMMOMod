@@ -4661,8 +4661,11 @@ return function(game)
     local WILDS = GOLD and { "SENTRET", "RATTATA", "PIDGEY" } or { "PIDGEY", "RATTATA" }
     local function haveMove(id) return type(data.moves) == "table" and data.moves[id] ~= nil end
     local function itemRow(id) return type(data.items) == "table" and data.items[id] or nil end
+    -- The cart's glyphs flattened for the screen matchers: ’ as ', and the one
+    -- "…" tile (pokecrystal IgnoredSleepingText) as three dots.
     local function flat12(text)
-      return (tostring(text or ""):gsub("\226\128\153", "'"):gsub("%s+", " "):lower())
+      return (tostring(text or ""):gsub("\226\128\153", "'"):gsub("\226\128\166", "...")
+        :gsub("%s+", " "):lower())
     end
 
     -- ------- the monsters
@@ -5058,7 +5061,8 @@ return function(game)
       solo.seedFn, solo.randomFn = seedBefore, randomBefore
       local med, sim = medOnStack(), solo.sim
       if not check(staged ~= nil and med ~= nil and sim ~= nil,
-                   L .. ": the staged wild fight was taken onto the mod's screen",
+                   L .. (spec.stage and ": the staged fight" or ": the staged wild fight")
+                     .. " was taken onto the mod's screen",
                    staged and tostring(species) or tostring(why)) then
         if staged and not med then dropStaged(staged) end
         clearBadges12()
@@ -5134,16 +5138,24 @@ return function(game)
     -- monster's name (pokered engine/battle/core.asm CheckForDisobedience and
     -- text_2.asm; pokecrystal BattleCommand_CheckObedience and
     -- data/text/battle.asm -- src/BattleSim/Turn.lua LOAF_TEXT / `_obey`,
-    -- src/BattleSim2/Turn.lua LOAF_LINES / `_obey`).
+    -- src/BattleSim2/Turn.lua LOAF_LINES / `_obey`).  Gold's asleep line is
+    -- the cart's one "…" tile (IgnoredSleepingText); the three-dot spelling
+    -- is kept beside it for the flattened screen lines (`flat12`).
     local OBEY_TAILS = {
       { key = "loafing", tail = " is loafing around." },
       { key = "wont", tail = " won't obey!" },
       { key = "turned", tail = " turned away!" },
       { key = "ignored", tail = " ignored orders!" },
       { key = "nap", tail = " began to nap!" },
+      { key = "asleep", tail = " ignored orders\226\128\166sleeping!" },
       { key = "asleep", tail = " ignored orders...sleeping!" },
     }
+    -- "<MON> used instead, <MOVE>!" (pokered _UsedInsteadText, pokecrystal
+    -- UsedInsteadText, the move name and the cart's "!")
     local INSTEAD = " used instead, "
+    -- HandleSelfConfusionDamage's line, both carts: "It hurt itself in its
+    -- confusion!" (pokered _HurtItselfText, pokecrystal HurtItselfText).
+    local SELF_HIT = "It hurt itself in its confusion!"
     local LOAF = { loafing = true, wont = true, turned = true, ignored = true }
 
     -- Every disobedience line of the fight, keyed ("selfhit" is "won't obey!"
@@ -5161,7 +5173,7 @@ return function(game)
             if text == species .. row.tail then key = row.key end
           end
           if not key and text:sub(1, #species + #INSTEAD) == species .. INSTEAD then key = "instead" end
-          if key == "wont" and msgs[k + 1] and msgs[k + 1].text == species .. " hurt itself in confusion" then
+          if key == "wont" and msgs[k + 1] and msgs[k + 1].text == SELF_HIT then
             key = "selfhit"
           end
           if key then
@@ -5220,7 +5232,10 @@ return function(game)
           elseif ob.key == "instead" then
             -- the called move is the lead's other one, named as the referee names it
             local labels = rec.facts.moveLabels or {}
-            if ob.text ~= rec.facts.species .. INSTEAD .. tostring(labels[2]) then badInstead = badInstead + 1 end
+            if ob.text ~= rec.facts.species .. INSTEAD .. tostring(labels[2]) .. "!" then
+              badInstead = badInstead + 1
+              log("obey traded: unexpected \"used instead,\" line: " .. tostring(ob.text))
+            end
           end
         end
         if rec.result ~= "win" then unwon[#unwon + 1] = tostring(rec.seed) .. "=" .. tostring(rec.result) end
