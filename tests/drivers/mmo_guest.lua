@@ -861,6 +861,18 @@ return function(game)
     if potionId then
       game.save.inventory[potionId] = (game.save.inventory[potionId] or 0) + 3
     end
+    -- The carts refuse a POTION that would heal nothing (pokered
+    -- ItemUseNoEffect, pokecrystal WontHaveAnyEffect): the bag and the turn
+    -- are kept and the menu reopens, so an ITEM leg on a full-HP lead never
+    -- files a choice -- and the partner's SWITCH then waits on it too. The
+    -- mediated hub owns HP, so a wound made locally after the upload is
+    -- invisible to it; the lead is hurt in the save before the fight is
+    -- uploaded instead. The fight itself heals or replaces it.
+    if ROLE == "b" and potionId then
+      local lead = game.save.party and game.save.party[1]
+      local maxHp = lead and lead.stats and tonumber(lead.stats.hp)
+      if maxHp and maxHp > 1 then lead.hp = math.max(1, math.floor(maxHp / 2)) end
+    end
     log("switch target:", switchTarget and "set" or "none",
         "item:", potionId and "set" or "none")
   end
