@@ -2656,8 +2656,14 @@ local gen3Divert = { on = false, installed = false, tried = 0, rolled = false }
 -- away is *told* so ("was too far to join!"), and building a trainer's team
 -- takes nothing from the RNG (the cart's name-hash personalities, the row's
 -- own IVs).
+--
+-- The answer says who is listening (CoopField's doors read it): "solo" when
+-- SOLO BATTLES is on -- every kind solo takes is built, and co-op is still
+-- offered first the plain ones it fights -- and `true` when only co-op is, so
+-- a Safari wild, a legend, a facility or a lesson (Config.COOP_REFUSED_GEN3)
+-- is refused before its monster is rolled and stays the cart's.
 local function wantsDivert3(kind, mapId)
-  if solo:isOn() then return true end
+  if solo:isOn() then return "solo" end
   if not (transport:isReady() and party:has()) then return false end
   if coop.running then return false end
   if kind == "wild" then
@@ -2674,15 +2680,22 @@ end
 -- fight, which is then theirs to finish (or hand back).
 --
 -- Co-op is offered the stand-in itself (the buried-battle shape its whole
--- flow is written against). Solo is offered what src/SoloBattle.lua's Gen 3
--- entries take -- the rolled encounter, or the trainer's foe record and the
--- engine's battle opts -- with `done` (the engine's own continuation: the
--- trainer script's resume, which it calls once, after its rewards and
--- whiteout) and `fallback` (the stand-in's fightAlone, the one way it hands a
--- fight back). The cover is down before solo is asked: its screen is its own.
+-- flow is written against) -- and only a stand-in of a kind it fights: one
+-- CoopField marked `coopRefused3` (a Safari wild, a roamer, a legend, a
+-- facility, a lesson, a pair, Steven) goes straight to solo, with no cover
+-- and no wait, because nothing would come of either.  Solo is offered what
+-- src/SoloBattle.lua's Gen 3 entries take -- the rolled encounter, or the
+-- trainer's foe record and the engine's battle opts -- with `done` (the
+-- engine's own continuation: the trainer script's resume, which it calls
+-- once, after its rewards and whiteout), `fallback` (the stand-in's
+-- fightAlone, the one way it hands a fight back) and `stand3` (the stand-in
+-- itself: `kind3`, `facility3`, `tutorial3` and each kind's fields -- see
+-- CoopField's door builders). The cover is down before solo is asked: its
+-- screen is its own.
 local function offerFight3(stand, kind, soloArgs)
   local game = ctx.game
-  if not stand:push(game) then
+  local coopMay = not stand.coopRefused3
+  if coopMay and not stand:push(game) then
     mod.log:warn("could not hold the field for a %s divert; this one is fought "
       .. "the ordinary way", kind)
     return false
@@ -2691,7 +2704,7 @@ local function offerFight3(stand, kind, soloArgs)
   local mapId = stand.mapId or (current and current.mapId)
   local connected = transport:isReady()
   local taken = false
-  if connected then
+  if connected and coopMay then
     local ok, err = pcall(function()
       if kind == "trainer" then
         taken = coop:onTrainerBattle(game, stand, mapId) == true
@@ -2713,7 +2726,7 @@ local function offerFight3(stand, kind, soloArgs)
     end
   end
   if taken then return true end
-  stand:takeDown()
+  if coopMay then stand:takeDown() end
   if not solo:isOn() then return false end
   local ok, err = pcall(function()
     local opts = {}
@@ -2725,6 +2738,13 @@ local function offerFight3(stand, kind, soloArgs)
     -- `enc.mon`), so solo fights the very ones the cover announced and the
     -- RNG is rolled for them once -- not once here and again in SoloBattle.
     opts.party = stand.enemyParty
+    -- What kind of fight it is, and everything the kind carries
+    -- (docs/plans/gen3-solo-remaining-fights.md C1).
+    opts.stand3 = stand
+    -- The Safari Zone puts no key on a step encounter (battle_bridge derives
+    -- it from the session): the stand-in says so, and solo is told in the
+    -- words the engine's own start would have used.
+    if stand.safari then opts.safari = true end
     if kind == "trainer" then
       taken = solo:fromGen3Trainer(game, soloArgs.foe, opts) == true
     else
@@ -2734,6 +2754,7 @@ local function offerFight3(stand, kind, soloArgs)
         local withMon = {}
         for k, v in pairs(enc) do withMon[k] = v end
         withMon.mon = lead
+        if stand.safari then withMon.safari = true end
         enc = withMon
       end
       taken = solo:fromGen3Encounter(game, enc, opts) == true
@@ -2755,12 +2776,14 @@ local function offerFight3(stand, kind, soloArgs)
 end
 
 -- The wild door: `encounter.roll`'s own result, and whether to cancel it.
-local function divertWild3(enc, rollCtx)
+-- `want` is wantsDivert3's answer ("solo": SOLO BATTLES is listening).
+local function divertWild3(enc, rollCtx, want)
   local game = ctx.game
   local stand
   stand = CoopField.wildStand3(enc, {
     game = game,
     mapId = rollCtx and rollCtx.mapId,
+    solo = want == "solo",
     -- Handing the encounter back is starting the cart's fight with the very
     -- monster the cover announced, the way the step that rolled it would
     -- have: its personality, IVs, nature, held item and moves ride on the foe
@@ -2784,6 +2807,15 @@ local function divertWild3(enc, rollCtx)
         level = enc.level, item = enc.item,
         personality = enc.personality, moves = enc.moves,
       }, lead)
+      -- A roamer goes back as one (LEG §3.4): the engine's finish banks its
+      -- HP and moves it on only for a start that says `roamer`
+      -- (battle_bridge.lua Roamer.onBattleEnd), with the save's descriptor
+      -- as the encounter carried it -- and the HP and status the monster the
+      -- cover announced was built with.
+      if enc.roamer and lead then
+        foe.roamer, foe.foe = true, enc.foe
+        foe.hp, foe.status, foe.sleep = lead.hp, lead.status, lead.sleep
+      end
       return BB.startWild(Runtime and Runtime._mod, (Runtime and Runtime._game) or game,
         foe, { [CoopField.HANDBACK3] = true })
     end,
@@ -2816,10 +2848,26 @@ local startHandler3 = {
   end,
 }
 
+-- The TEACHY TV's door (CoopField.installPokedude3): the POKe DUDE's
+-- demonstrations start through battle/pokedude.lua, never BattleBridge.start,
+-- so they have a door of their own.  Solo's alone -- nobody joins a cutscene
+-- -- and only with SOLO BATTLES on; otherwise the TEACHY TV plays its own.
+local pokedudeHandler3 = {
+  wants = function() return solo:isOn() end,
+  game = function() return ctx.game end,
+  take = function(stand)
+    local enc = {}
+    for k, v in pairs(stand.encounter or {}) do enc[k] = v end
+    return offerFight3(stand, "wild", { enc = enc, opts = stand.opts, done = stand.doneFn })
+  end,
+}
+
 -- Per tick on Gen 3: the stand-ins' deferred work, and the BattleBridge wrap
 -- -- installed from the field rather than at load, because a headless load or
 -- a boot still on its menus has no battle bridge to reach (and Gen3.engine
--- remembers a miss for the rest of the session).
+-- remembers a miss for the rest of the session).  The TEACHY TV wrap goes on
+-- in the same tick; a build without the TEACHY TV answers no, and nothing is
+-- lost.
 local function tickDivert3(game, dt)
   pcall(CoopField.pump3, dt)
   if gen3Divert.installed or gen3Divert.tried >= 3 then return end
@@ -2827,6 +2875,7 @@ local function tickDivert3(game, dt)
   gen3Divert.tried = gen3Divert.tried + 1
   local ok, installed = pcall(CoopField.installStart3, startHandler3)
   gen3Divert.installed = ok and installed == true
+  if gen3Divert.installed then pcall(CoopField.installPokedude3, pokedudeHandler3) end
 end
 
 local function tick(game, dt)
@@ -3384,8 +3433,9 @@ function M.install()
       local enc = next(tbl, rollCtx)
       if enc == nil then return nil end
       gen3Divert.rolled = false
-      if wantsDivert3("wild", rollCtx and rollCtx.mapId) then
-        local ok, taken = pcall(divertWild3, enc, rollCtx)
+      local want = wantsDivert3("wild", rollCtx and rollCtx.mapId)
+      if want then
+        local ok, taken = pcall(divertWild3, enc, rollCtx, want)
         if not ok then
           mod.log:warn("the wild divert failed (%s); this encounter is fought "
             .. "the ordinary way", tostring(taken))

@@ -1071,6 +1071,15 @@ local function fightName(label)
   return label or "a battle"
 end
 
+-- A Gen 3 stand-in of a kind co-op does not fight (CoopField marks it
+-- `coopRefused3`: a Safari wild, a roamer, a legend, a ghost, a facility, a
+-- lesson, two trainers, Steven -- Config.COOP_REFUSED_GEN3).  src/Client.lua
+-- never offers one; this is the module's own refusal, so no other caller can
+-- seat one in a co-op 2v2 either.
+function M.refusedKind3(state)
+  return type(state) == "table" and state.gen3Divert == true and state.coopRefused3 ~= nil
+end
+
 -- ------- against an NPC: the player who arrives first
 --
 -- Called when the engine has just pushed a trainer battle.
@@ -1120,6 +1129,7 @@ function M:onTrainerBattle(game, state, mapId)
   local kind = state.kind
   if not kind and state.battle and state.battle.trainer then kind = "trainer" end
   if kind ~= "trainer" then return false end
+  if M.refusedKind3(state) then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
   -- PARTY > NPC: OFF: fight the engine trainer, post nothing. Same answer
@@ -1261,6 +1271,7 @@ function M:onWildEncounter(game, state, mapId)
   local kind = state.kind
   if not kind and state.battle and state.battle.wild then kind = "wild" end
   if kind ~= "wild" then return false end
+  if M.refusedKind3(state) then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running or self.waiting or self.ask then return false end
   -- PARTY > WILD: OFF: leave the engine wild alone, including when the

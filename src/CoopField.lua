@@ -436,8 +436,9 @@ end
 -- wrapper rather than stacking on it, another mod's wrapper on top is kept in
 -- the chain, and an older wrapper of ours left inside one goes inert).  The
 -- wrap is inert unless this mod instance is the loaded one, it only ever
--- takes a standard trainer fight a divert actually wants
--- (Config.SOLO_REFUSED_GEN3 is refused, link / headless pass straight
+-- takes a fight somebody listening actually wants (Config.SOLO_REFUSED_GEN3
+-- is refused for everybody, Config.COOP_REFUSED_GEN3 and the kinds co-op has
+-- no shape for are never put to co-op, link / headless pass straight
 -- through, and so does a start this mod itself makes to hand a fight back --
 -- `HANDBACK3` below).
 --
@@ -495,12 +496,15 @@ end
 
 -- ------- which fights a divert may take
 
--- The first refused kind any of these tables carries (Config.SOLO_REFUSED_GEN3
--- names every key and why), or nil.  The battle start opts, the wild `foe`
--- and the encounter are all asked, the way SoloBattle.refused asks a state and
--- its inner battle.
-function M.refused3(...)
-  local list = Config.SOLO_REFUSED_GEN3 or {}
+-- The first key of `list` any of these tables carries, or nil.  The list is
+-- the caller's: Config.COOP_REFUSED_GEN3 for what co-op will not fight,
+-- Config.SOLO_REFUSED_GEN3 for what stays on the cart for everybody (Config
+-- names every key and why).  The battle start opts, the wild `foe` and the
+-- encounter are all asked, the way SoloBattle.refused asks a state and its
+-- inner battle.  A key set to `false` refuses nothing -- the trainer op
+-- passes `firstBattle = false` for every ordinary trainer.
+function M.refused3(list, ...)
+  if type(list) ~= "table" then return nil end
   for i = 1, select("#", ...) do
     local t = select(i, ...)
     if type(t) == "table" then
@@ -511,6 +515,9 @@ function M.refused3(...)
   end
   return nil
 end
+
+function M.coopRefused3(...) return M.refused3(Config.COOP_REFUSED_GEN3, ...) end
+function M.soloRefused3(...) return M.refused3(Config.SOLO_REFUSED_GEN3, ...) end
 
 local function storeOf(Space)
   if type(Space) ~= "table" then return nil end
@@ -566,6 +573,182 @@ local function family3(session)
   return Gen3.family()
 end
 
+-- ------- what kind of fight it is (docs/plans/gen3-solo-remaining-fights.md C1)
+--
+-- Every stand-in carries the kind the engine spelled its fight with, read where
+-- the engine spells it -- the start opts, the wild `foe`, the encounter, or a
+-- session predicate for the two the cart never puts a key on (the Safari Zone,
+-- a POKeMON TOWER floor).  One name per fight, the first that applies:
+--
+--   kind3       "tutorial" | "facility" | "firstBattle" | "partner" | "pair"
+--               | "safari" | "roamer" | "ghost" | "legendary" | "scripted"
+--               | "wild" | "trainer"
+--   facility3   the hall: "tower" | "dome" | "palace" | "arena" | "factory" |
+--               "pike" | "pyramid" | "hill" | "trainerTower" | "secretBase" |
+--               "eReader" (a Battle Tent is its hall: the engine starts
+--               Verdanturf's as `palace`, Fallarbor's as `arena`, Slateport's
+--               as `factory` -- rse/frontier/palace.lua, tents.lua)
+--   tutorial3   "oldMan" | "wally" | "pokedude"
+--   firstBattle3  "oak" | "birch"            (kind3 "firstBattle")
+--   ghost3        "veiled" | "unveiled"      (kind3 "ghost")
+--
+-- The order is the order the cart's own rules nest in: a tutorial is a scripted
+-- replay whatever else it is, a facility's hall decides its rules even for its
+-- two-trainer and partner fights (a Battle Tower multi carries `partner` and
+-- `twoOpponents` as well -- its stand keeps those fields too), a first battle is
+-- one before it is a trainer.  Among the wild kinds, battle_bridge's own
+-- `standardWild` test reads the same keys.
+
+-- The halls, by the key BattleBridge.start receives (rse/frontier/tower.lua
+-- Tower.startBattle sets `frontier` and `battleOpts[kind] = true`; Trainer
+-- Hill, Secret Base, FireRed's tower and e-Reader set their own).  The halls
+-- come before `battleTower`: pret runs a Pike single as BATTLE_TOWER type, and
+-- the engine marks it `pike`.
+local FACILITY_KEYS3 = {
+  { "dome", "dome" }, { "palace", "palace" }, { "arena", "arena" },
+  { "factory", "factory" }, { "pike", "pike" }, { "pyramid", "pyramid" },
+  { "battleTower", "tower" }, { "tower", "tower" },
+  { "trainerHill", "hill" }, { "trainerTower", "trainerTower" },
+  { "secretBase", "secretBase" }, { "eReader", "eReader" },
+  -- `frontier` with no hall is never started (every Frontier start names its
+  -- hall); the Battle Tower is the Frontier's plain rules.
+  { "frontier", "tower" },
+}
+M.FACILITY_KEYS3 = FACILITY_KEYS3
+
+-- The Emerald legend kinds battle_bridge copies (EXTRA_KINDS), and FireRed's
+-- own two words for a static legend (natives.lua StartLegendaryBattle).
+local LEGEND_KEYS3 = { "legendary", "specialWild", "kyogreGroudon", "regi", "groudon",
+                       "kyogre", "rayquaza" }
+
+-- The kinds co-op seats: a plain wild and a plain trainer (a lone double
+-- included).  Every other kind is solo's -- the carts have no two-player shape
+-- for it (Config.COOP_REFUSED_GEN3).
+M.COOP_KINDS3 = { wild = true, trainer = true }
+
+local function set3(v) return v ~= nil and v ~= false end
+
+local function anyKey3(keys, ...)
+  for i = 1, select("#", ...) do
+    local t = select(i, ...)
+    if type(t) == "table" then
+      for _, k in ipairs(keys) do
+        if set3(t[k]) then return k end
+      end
+    end
+  end
+  return nil
+end
+
+local function profileKinds3(session)
+  local Profile = g3("src.core.game3.battle.profile")
+  local prof = Profile and try3(Profile.get, session)
+  return type(prof) == "table" and type(prof.kinds) == "table" and prof.kinds or {}
+end
+
+-- battle/kinds.lua spells a tutorial "oldman" (FireRed's profile) or "wally"
+-- (Emerald's); C1 spells them "oldMan" / "wally" / "pokedude".
+local function tutorialName3(v, session)
+  if v == "wally" or v == "pokedude" then return v end
+  if v == "oldman" or v == "oldMan" then return "oldMan" end
+  local own = profileKinds3(session).tutorial
+  if own == "wally" then return "wally" end
+  return "oldMan"
+end
+
+local function tutorialOf3(session, ...)
+  for i = 1, select("#", ...) do
+    local t = select(i, ...)
+    if type(t) == "table" then
+      if set3(t.pokedude) then return "pokedude" end
+      if set3(t.oldManTutorial) then return "oldMan" end
+      local k = t.tutorialKind
+      if not set3(k) then k = t.tutorial end
+      if set3(k) then return tutorialName3(k, session) end
+    end
+  end
+  return nil
+end
+
+local function facilityOf3(...)
+  for i = 1, select("#", ...) do
+    local t = select(i, ...)
+    if type(t) == "table" then
+      for _, row in ipairs(FACILITY_KEYS3) do
+        if set3(t[row[1]]) then return row[2] end
+      end
+    end
+  end
+  return nil
+end
+
+-- battle_bridge.lua's `standardWild`: the wilds nothing else claims, the only
+-- ones it asks the Safari Zone about.
+local function standardWild3(opts, foe)
+  return not anyKey3({ "wildScripted", "legendary", "roamer", "firstBattle",
+                       "oldManTutorial", "firstBattleKind", "tutorialKind" }, opts, foe)
+end
+
+-- -> { kind3, facility3?, tutorial3?, firstBattle3?, ghost3? }
+--
+-- `wild` is the door's answer (a step encounter or `opts.wild`), `foe` the
+-- encounter or the engine's foe, `opts` the start opts (nil at the roll),
+-- `ctx` { mapId, session }.
+function M.classify3(wild, foe, opts, ctx)
+  ctx = ctx or {}
+  foe = type(foe) == "table" and foe or {}
+  opts = type(opts) == "table" and opts or {}
+  local session = ctx.session
+  if session == nil then session = Gen3.session() end
+  local inner = type(foe.foe) == "table" and foe.foe or nil
+  local tutorial3 = tutorialOf3(session, opts, foe)
+  if tutorial3 then return { kind3 = "tutorial", tutorial3 = tutorial3 } end
+  local facility3 = facilityOf3(opts, foe)
+  if facility3 then return { kind3 = "facility", facility3 = facility3 } end
+  local first = anyKey3({ "firstBattle", "firstBattleKind" }, opts, foe)
+  if first then
+    local kind = type(opts.firstBattleKind) == "string" and opts.firstBattleKind
+      or profileKinds3(session).firstBattle
+    if kind ~= "oak" and kind ~= "birch" then kind = wild and "birch" or "oak" end
+    return { kind3 = "firstBattle", firstBattle3 = kind }
+  end
+  if set3(opts.partner) then return { kind3 = "partner" } end
+  if set3(opts.twoOpponents) or opts.trainerIdB ~= nil then return { kind3 = "pair" } end
+  if not wild then return { kind3 = "trainer" } end
+  if set3(opts.safari) or set3(foe.safari)
+     or (standardWild3(opts, foe) and M.safari3(session)) then
+    return { kind3 = "safari" }
+  end
+  if set3(opts.roamer) or set3(foe.roamer) or (inner and set3(inner.roamer)) then
+    return { kind3 = "roamer" }
+  end
+  -- battle/init.lua ghost_battle: an explicit `ghost` either way wins (the
+  -- Marowak native sets it), else a wild on a POKeMON TOWER floor without the
+  -- SILPH SCOPE.  GHOST_UNVEILED is the Marowak met with the scope.
+  local ghost
+  if opts.ghost ~= nil then ghost = set3(opts.ghost)
+  elseif foe.ghost ~= nil then ghost = set3(foe.ghost)
+  else ghost = set3(opts.ghostBattle) or set3(foe.ghostBattle) or M.ghost3(ctx.mapId, session) end
+  if ghost then
+    local unveiled = set3(opts.ghostUnveiled) or set3(foe.ghostUnveiled)
+    return { kind3 = "ghost", ghost3 = unveiled and "unveiled" or "veiled" }
+  end
+  if anyKey3(LEGEND_KEYS3, opts, foe) then return { kind3 = "legendary" } end
+  if anyKey3({ "wildScripted" }, opts, foe) then return { kind3 = "scripted" } end
+  return { kind3 = "wild" }
+end
+
+-- Why co-op will not fight this one, or nil: a key Config.COOP_REFUSED_GEN3
+-- names, else a kind co-op has no shape for (the Safari Zone and the tower
+-- ghosts carry no key at all; a roamer's is on the encounter).
+function M.coopRefusal3(cls, ...)
+  local key = M.coopRefused3(...)
+  if key then return key end
+  local kind = type(cls) == "table" and cls.kind3 or nil
+  if kind and not M.COOP_KINDS3[kind] then return kind end
+  return nil
+end
+
 -- ------- the monsters, built the way the cart builds a foe
 --
 -- battle/init.lua foe_mon_from, in the mod's hands: the personality the cart
@@ -594,13 +777,143 @@ local function zeros()
   return { hp = 0, atk = 0, def = 0, spe = 0, spa = 0, spd = 0 }
 end
 
+-- An IV / EV table in whichever spelling the engine row uses: the battle's
+-- hp/atk/def/spe/spa/spd, or the FireRed roamer's attack/defense/speed/spAtk/
+-- spDef (roamer.lua generateMon -- read as-is, its five non-HP IVs were all 0).
+local STAT_ALIASES3 = {
+  hp = { "hp", "HP" }, atk = { "atk", "attack" }, def = { "def", "defense" },
+  spe = { "spe", "speed" }, spa = { "spa", "spAtk", "spAttack" },
+  spd = { "spd", "spDef", "spDefense" },
+}
 local function copyStats(src)
   if type(src) ~= "table" then return nil end
   local out = {}
   for _, k in ipairs({ "hp", "atk", "def", "spe", "spa", "spd" }) do
-    out[k] = math.max(0, floor(tonumber(src[k]) or 0))
+    local v
+    for _, alias in ipairs(STAT_ALIASES3[k]) do
+      v = tonumber(src[alias])
+      if v then break end
+    end
+    out[k] = math.max(0, floor(v or 0))
   end
   return out
+end
+
+-- pret STATUS1_* (include/constants/battle.h): bits 0-2 the sleep counter,
+-- then POISON 8, BURN 16, FREEZE 32, PARALYSIS 64, TOXIC_POISON 128.  A roamer
+-- keeps its status in the save as that byte (Emerald's roamer.status, FireRed's
+-- statusNum) or as the engine battle's own word (what Roamer.onBattleEnd writes
+-- back from the battle's monster).  -> the battle's word, and the sleep turns.
+local STATUS_WORDS3 = {
+  SLP = "SLP", SLEEP = "SLP", PSN = "PSN", POISON = "PSN", BRN = "BRN", BURN = "BRN",
+  FRZ = "FRZ", FREEZE = "FRZ", PAR = "PAR", PARALYSIS = "PAR", TOX = "TOX", TOXIC = "TOX",
+}
+function M.status3(status, statusNum, sleep)
+  if type(status) == "string" and status ~= "" then
+    local word = STATUS_WORDS3[status:upper()]
+    if word then return word, (word == "SLP") and tonumber(sleep) or nil end
+    return nil
+  end
+  local n = tonumber(status)
+  if not n or n == 0 then n = tonumber(statusNum) end
+  if not n or n <= 0 then return nil end
+  n = floor(n) % 256
+  if n % 8 > 0 then return "SLP", n % 8 end
+  if floor(n / 8) % 2 == 1 then return "PSN" end
+  if floor(n / 16) % 2 == 1 then return "BRN" end
+  if floor(n / 32) % 2 == 1 then return "FRZ" end
+  if floor(n / 64) % 2 == 1 then return "PAR" end
+  if floor(n / 128) % 2 == 1 then return "TOX" end
+  return nil
+end
+
+-- A monster the engine already built in full (rse/frontier/trainers.lua
+-- createMon + applyStats for every Frontier, Trainer Hill, Secret Base and
+-- Pyramid monster; Story.stevenParty; Pokedude.build): taken as it is.
+-- Rebuilding one through a spec builder re-rolls what it leaves out and drops
+-- what it does not read (the Trainer Tower's abilityNum, a facility's
+-- nature-matched personality).
+local BUILT_STATS3 = { "attack", "defense", "speed", "spAtk", "spDef" }
+function M.built3(mon)
+  if type(mon) ~= "table" then return false end
+  if not (tonumber(mon.species or mon.speciesId) and tonumber(mon.level)) then return false end
+  if type(mon.moves) ~= "table" or #mon.moves == 0 then return false end
+  if not ((tonumber(mon.maxHp) or 0) > 0) then return false end
+  for _, k in ipairs(BUILT_STATS3) do
+    if not ((tonumber(mon[k]) or 0) > 0) then return false end
+  end
+  return true
+end
+
+local function copyList3(list)
+  if type(list) ~= "table" then return list end
+  local out = {}
+  for i, v in ipairs(list) do out[i] = v end
+  return out
+end
+
+-- The stand-in's own copy of an engine-built monster: the same fields, its own
+-- move lists (a fight writes PP), so the engine's table is never written.
+function M.copyMon3(mon)
+  local out = {}
+  for k, v in pairs(mon) do out[k] = v end
+  out.moves, out.pp, out.maxPp = copyList3(mon.moves), copyList3(mon.pp), copyList3(mon.maxPp)
+  out.species = tonumber(mon.species) or tonumber(mon.speciesId)
+  out.speciesId = out.species
+  if out.hp == nil then out.hp = out.maxHp end
+  return out
+end
+
+-- pret CalculatePPWithBonus (pokemon.c): a move's PP with its PP Ups --
+-- (ppBonuses >> 2*slot) & 3 of them, a fifth of the base each.
+local function ppWithBonus3(base, bonuses, slot)
+  local ups = floor((tonumber(bonuses) or 0) / (4 ^ (slot - 1))) % 4
+  return base + floor(base * 20 * ups / 100)
+end
+
+-- src/SoloBattle.lua's Gen 3 foe builders, reached when a fight is built
+-- rather than at load: SoloBattle needs Coop and Coop needs this file, so a
+-- file-scope need() here would be a cycle the resolver refuses.  By the time a
+-- trainer is met every module is loaded and this is a cache hit.
+local function solo3()
+  if type(need) ~= "function" then return nil end
+  local ok, Solo = pcall(need, "SoloBattle")
+  if ok and type(Solo) == "table" and type(Solo.gen3TrainerParty) == "function" then
+    return Solo
+  end
+  return nil
+end
+
+-- pret CreateMonWithGenderNatureLetter (the scoped Marowak: female, SERIOUS)
+-- and CreateMaleMon (Wally's Ralts, the old man's Weedle): a row that fixes a
+-- nature or a gender but no personality is given a personality that has them,
+-- drawn the way the cart draws it -- Random32 until it fits.  The engine's
+-- own foe builder keeps the fields and a random personality instead
+-- (battle/init.lua foe_mon_from), so the stats it computes from the
+-- personality's nature disagree with the nature it shows; pret wins.  A
+-- gender the species cannot have is not looked for (the row's field is still
+-- kept, as the engine keeps it); the search is bounded either way.
+function M.fixedPersonality3(P, species, spec, dword)
+  local nature = tonumber(spec.nature)
+  if nature and (nature < 0 or nature > 24) then nature = nil end
+  local gender = spec.gender
+  if gender ~= "M" and gender ~= "F" then gender = nil end
+  if gender then
+    -- A fixed-gender species answers the same for every personality (the
+    -- ratio is compared with personality % 256).
+    local lo, hi = try3(P.gender, species, 0), try3(P.gender, species, 255)
+    if lo == hi then gender = nil end
+  end
+  if nature == nil and gender == nil then return nil end
+  local last
+  for _ = 1, 4096 do
+    local p = dword()
+    last = p
+    local okNature = nature == nil or (tonumber(try3(P.natureId, p)) or (p % 25)) == nature
+    local okGender = gender == nil or try3(P.gender, species, p) == gender
+    if okNature and okGender then return p end
+  end
+  return last
 end
 
 local function buildMon(P, spec, opts)
@@ -612,7 +925,9 @@ local function buildMon(P, spec, opts)
   if not species or species < 1 then return nil, "no species" end
   local level = math.max(1, math.min(100, floor(tonumber(spec.level) or 5)))
   local word, dword = rng3()
-  local personality = tonumber(spec.personality)
+  -- FireRed's roamer keeps its personality as `pid` (roamer.lua).
+  local personality = tonumber(spec.personality) or tonumber(spec.pid)
+  if personality == nil then personality = M.fixedPersonality3(P, species, spec, dword) end
   if personality == nil then personality = dword() end
   personality = floor(personality) % 4294967296
   local ivs = copyStats(spec.ivs)
@@ -630,19 +945,26 @@ local function buildMon(P, spec, opts)
       local rules = Encounters and try3(Encounters.rules)
       item = rules and tonumber(try3(rules.wildHeldItem, species, {})) or nil
     else
+      -- FireRed / LeafGreen's roll is SoloBattle's (gen3WildItem) -- one
+      -- statement of pret SetWildMonHeldItem, so the monster a stand-in builds
+      -- and the one a solo fight would build agree.  The roll below is the
+      -- same arithmetic (pret pokefirered pokemon.c:6032: one Random() % 100
+      -- always drawn; common == rare holds it every time; 45-94 the common
+      -- item, 95-99 the rare one), for a graph without SoloBattle (never in
+      -- play).
+      local Solo = solo3()
+      if Solo and type(Solo.gen3WildItem) == "function" then
+        local ok, got = pcall(Solo.gen3WildItem, species, word)
+        if ok then item = tonumber(got) end
+      end
+    end
+    if item == nil and opts.family ~= "rse" then
       local meta = try3(P.speciesMeta, species)
       local common = tonumber(type(meta) == "table" and meta.itemCommon) or 0
       local rare = tonumber(type(meta) == "table" and meta.itemRare) or 0
-      if common ~= 0 or rare ~= 0 then
-        local r = word() % 100
-        if common ~= 0 and rare ~= 0 then
-          if r < 50 then item = common elseif r < 55 then item = rare end
-        elseif common ~= 0 then
-          if r < 50 then item = common end
-        elseif r < 5 then
-          item = rare
-        end
-      end
+      local r = word() % 100
+      if common == rare then item = common
+      elseif r > 44 then item = (r <= 94) and common or rare end
     end
   end
   item = floor(tonumber(item) or 0)
@@ -653,9 +975,14 @@ local function buildMon(P, spec, opts)
       local id = tonumber(type(m) == "table" and (m.id or m.num) or m)
       if id and id > 0 and #moves < 4 then
         moves[#moves + 1] = floor(id)
-        local full = tonumber(try3(P.movePp, id)) or (Gen3.moveInfo(id) or {}).pp or 0
-        maxPp[#maxPp + 1] = full
-        pp[#pp + 1] = full
+        local base = tonumber(try3(P.movePp, id)) or (Gen3.moveInfo(id) or {}).pp or 0
+        local slot = #moves
+        -- pret CreateBattleTowerMon: SetMonMoveSlot gives each move its base
+        -- PP, and the PP Ups are set after it -- so the current PP stays the
+        -- base and only the maximum grows (a Trainer Tower row's ppBonuses).
+        maxPp[slot] = ppWithBonus3(base, spec.ppBonuses, slot)
+        local given = type(spec.pp) == "table" and tonumber(spec.pp[slot]) or nil
+        pp[slot] = given and math.max(0, math.min(floor(given), maxPp[slot])) or base
       end
     end
   end
@@ -674,21 +1001,40 @@ local function buildMon(P, spec, opts)
   local meta = try3(P.speciesMeta, species)
   local growth = tonumber(type(meta) == "table" and meta.growthRate) or 0
   local SummaryData = g3("src.core.game3.summary_data")
-  local ability = tonumber(spec.ability) or tonumber(try3(P.abilityId, species, personality)) or 0
+  -- The row's own ability, else its ability slot (pret GetAbilityBySpecies:
+  -- abilities[abilityNum ? 1 : 0], even when that slot is empty -- a Trainer
+  -- Tower row's abilityNum), else the personality's.
+  local abilityNum = tonumber(spec.abilityNum)
+  local ability = tonumber(spec.ability) or tonumber(spec.abilityId)
+  if ability == nil and abilityNum ~= nil then
+    local pair = try3(P.abilities, species)
+    if type(pair) == "table" then
+      ability = tonumber(pair[(abilityNum ~= 0) and 2 or 1]) or 0
+    end
+  end
+  ability = ability or tonumber(try3(P.abilityId, species, personality)) or 0
+  local nature = tonumber(spec.nature)
+  if not nature or nature < 0 or nature > 24 then
+    nature = tonumber(try3(P.natureId, personality)) or (personality % 25)
+  end
+  local gender = spec.gender
+  if gender ~= "M" and gender ~= "F" and gender ~= "U" then
+    gender = try3(P.gender, species, personality) or "U"
+  end
   local mon = {
     species = species, speciesId = species,
     speciesNumbering = P.NUMBERING_INTERNAL or "internal",
     name = try3(P.name, species),
-    nickname = "",
+    nickname = type(spec.nickname) == "string" and spec.nickname or "",
     level = level, metLevel = level,
     growthRate = growth,
     exp = tonumber(SummaryData and try3(SummaryData.expForLevel, growth, level)) or 0,
     personality = personality,
-    nature = tonumber(try3(P.natureId, personality)) or (personality % 25),
+    nature = nature,
     ivs = ivs,
     evs = copyStats(spec.evs) or zeros(),
-    ability = ability, abilityId = ability,
-    gender = try3(P.gender, species, personality) or "U",
+    ability = ability, abilityId = ability, abilityNum = abilityNum,
+    gender = gender,
     heldItem = item, item = item,
     moves = moves, pp = pp, maxPp = maxPp,
     -- The species' base friendship: Pokemon.baseFriendship reads the meta
@@ -697,14 +1043,40 @@ local function buildMon(P, spec, opts)
     friendship = tonumber(spec.friendship)
       or tonumber(try3(P.baseFriendship, species))
       or tonumber(type(meta) == "table" and meta.friendship) or 70,
+    otId = tonumber(spec.otId),
     pokerus = 0,
   }
+  -- A fateful encounter (seteventmon / the event legends) stays one: it is
+  -- what lets Mew and Deoxys obey, and what a trade reads.
+  if spec.fatefulEncounter ~= nil then mon.fatefulEncounter = spec.fatefulEncounter and true or false end
   if not try3(function() P.applyStats(mon) return true end) then
     return nil, "no stats"
   end
   mon.hp = tonumber(mon.maxHp) or mon.hp
-  mon.status = nil
+  -- A monster that arrives hurt (a roamer banks its HP in the save):
+  -- pret CreateRoamerMonInstance sets the saved HP after building it.
+  local hp = tonumber(spec.hp)
+  if hp and tonumber(mon.maxHp) then mon.hp = math.max(0, math.min(floor(hp), mon.maxHp)) end
+  mon.status, mon.sleep = M.status3(spec.status, spec.statusNum, spec.sleep or spec.sleepTurns)
   return mon
+end
+
+-- A foe the engine handed a battle start, as the engine would build it
+-- (battle/init.lua foe_mon_from): every field the row carries kept --
+-- personality, IVs, nature, gender, ability or ability slot, moves and PP,
+-- held item, nickname, HP, status -- and only what it leaves out rolled.  An
+-- engine-built monster is copied as it is (M.built3).  `opts.wild` asks for
+-- the cart's wild held-item roll when the row names no item: pret
+-- SetWildMonHeldItem skips it for a LEGENDARY battle (FireRed's
+-- GHOST_UNVEILED is that bit), the Pike and the Pyramid, and the POKe DUDE.
+function M.foeMon3(spec, opts)
+  if type(spec) ~= "table" then return nil, "no foe" end
+  if M.built3(spec) then return M.copyMon3(spec) end
+  local P = g3("src.core.game3.pokemon")
+  if not P then return nil, "the engine's POKeMON module is unavailable" end
+  opts = opts or {}
+  return buildMon(P, spec, { wild = opts.wild == true,
+    family = family3(opts.session or Gen3.session()) })
 end
 
 -- A wild encounter's monster.  `enc` is what `encounter.roll` returned (the
@@ -715,19 +1087,6 @@ function M.wildMon3(enc, session)
   local P = g3("src.core.game3.pokemon")
   if not P then return nil, "the engine's POKeMON module is unavailable" end
   return buildMon(P, enc, { wild = true, family = family3(session) })
-end
-
--- src/SoloBattle.lua's Gen 3 foe builders, reached when a fight is built
--- rather than at load: SoloBattle needs Coop and Coop needs this file, so a
--- file-scope need() here would be a cycle the resolver refuses.  By the time a
--- trainer is met every module is loaded and this is a cache hit.
-local function solo3()
-  if type(need) ~= "function" then return nil end
-  local ok, Solo = pcall(need, "SoloBattle")
-  if ok and type(Solo) == "table" and type(Solo.gen3TrainerParty) == "function" then
-    return Solo
-  end
-  return nil
 end
 
 -- A trainer's whole party (Trainers.foeFromId's `party`, lead first), built
@@ -822,6 +1181,144 @@ function M.trainerRecord3(foe, opts)
     doubleBattle = foe.doubleBattle and true or false,
     gender = foe.gender,
   }
+end
+
+-- ------- a facility's trainer: no gTrainers row
+--
+-- pret battle_message.c:2043 / battle_tower.c:1436: a Frontier, Trainer Hill,
+-- Trainer Tower, e-Reader or Secret Base opponent is not a gTrainers row, and
+-- the engine never asks Trainers.info for one (battle/init.lua: trainerInfo
+-- is nil for trainerTower / eReader / secretBase, and a `frontierTrainer`
+-- names the rest).  Asking it anyway named a Trainer Tower trainer after
+-- whatever row 0 is.  The record is built from what the facility handed the
+-- start instead: `opts.frontierTrainer` { class, className, name, pic }, else
+-- the opts' / foe's trainerName, trainerClass, trainerClassName, trainerPicId.
+
+-- pret's three facility scripts, CHECK_BAD_MOVE | TRY_TO_FAINT |
+-- CHECK_VIABILITY (FireRed battle_ai_script_commands.c:342-357 for the
+-- Trainer Tower and e-Reader, Emerald :371-372 for the Frontier, Trainer Hill,
+-- e-Reader and Secret Base).  The halls whose start passes no aiFlags get them
+-- here: the engine falls back to 1 for FireRed's tower and e-Reader and to 0
+-- for Emerald's Secret Base (battle/init.lua), which pret does not.
+local FACILITY_AI_DEFAULT3 = { trainerTower = true, eReader = true, secretBase = true }
+local function facilityAi3(session)
+  local Profile = g3("src.core.game3.battle.profile")
+  local prof = Profile and try3(Profile.get, session)
+  if Profile and type(prof) == "table" and type(Profile.aiBit) == "function" then
+    local sum = 0
+    for _, name in ipairs({ "CHECK_BAD_MOVE", "TRY_TO_FAINT", "CHECK_VIABILITY" }) do
+      local bit = tonumber(try3(Profile.aiBit, prof, name))
+      if not bit then return 7 end
+      sum = sum + bit
+    end
+    return sum
+  end
+  return 7
+end
+
+-- FireRed's Trainer Tower and e-Reader rows carry a *facility* class, mapped
+-- to a trainer class by the cart (pret trainer_tower.c:447, battle_tower.c:1340;
+-- the engine's trainer_tower pack `facilityClassTrainerClass`).
+local function facilityClass3(facilityClass)
+  local Tower = g3("src.core.game3.trainer_tower")
+  local pack = Tower and try3(Tower.pack)
+  local classes = type(pack) == "table" and pack.facilityClassTrainerClass or nil
+  local mapped = type(classes) == "table" and tonumber(classes[tonumber(facilityClass)]) or nil
+  return mapped
+end
+
+local function className3(class)
+  if not class then return nil end
+  local Trainers = g3("src.core.game3.scripting.trainers")
+  local pack = Trainers and try3(Trainers.pack)
+  local names = type(pack) == "table" and pack.classNames or nil
+  return type(names) == "table" and label3(names[class]) or nil
+end
+
+local function cleanText3(text)
+  if type(text) ~= "string" then return nil end
+  local clean = Gen3.cleanText and Gen3.cleanText(text) or text
+  if clean == "" then return nil end
+  return clean
+end
+
+-- -> the trainer record (trainerRecord3's shape, and SoloBattle.gen3TrainerRecord's
+-- names beside it), for a facility fight.  `which` = "B" reads the second
+-- trainer of a facility pair (`frontierTrainerB`, `defeatTextB`).
+function M.facilityRecord3(foe, opts, facility3, session, which)
+  foe = type(foe) == "table" and foe or {}
+  opts = type(opts) == "table" and opts or {}
+  local b = which == "B"
+  local ft, defeat, victory
+  if b then
+    ft, defeat, victory = opts.frontierTrainerB, opts.defeatTextB, opts.victoryTextB
+  else
+    ft, defeat, victory = opts.frontierTrainer, opts.defeatText, opts.victoryText
+  end
+  ft = type(ft) == "table" and ft or nil
+  local class = tonumber(ft and ft.class)
+    or (not b and (tonumber(opts.trainerClass) or tonumber(foe.trainerClass))) or nil
+  if not ft and (facility3 == "trainerTower" or facility3 == "eReader") then
+    class = facilityClass3(foe.trainerClass) or class
+  end
+  local className = label3(ft and ft.className)
+    or (not b and (label3(opts.trainerClassName) or label3(foe.trainerClassName)) or nil)
+    or className3(class)
+  local name = label3(ft and ft.name)
+    or (not b and (label3(opts.trainerName) or label3(foe.trainerName)) or nil)
+  local pic = tonumber(ft and ft.pic)
+    or (not b and (tonumber(opts.trainerPicId) or tonumber(foe.trainerPicId)
+                   or tonumber(foe.trainerPic)) or nil)
+  local tid = not b and (tonumber(opts.trainerId) or tonumber(foe.trainerId)) or nil
+  local ai = tonumber(opts.aiFlags) or tonumber(foe.aiFlags)
+  if ai == nil and FACILITY_AI_DEFAULT3[facility3] then ai = facilityAi3(session) end
+  -- pret battle_ai_script_commands.c:290-296: a facility trainer uses no items
+  -- (the engine hands the start `trainerItems = { 0, 0, 0, 0 }`).
+  local items = { 0, 0, 0, 0 }
+  if type(opts.trainerItems) == "table" then
+    for i = 1, 4 do items[i] = floor(tonumber(opts.trainerItems[i]) or 0) end
+  end
+  return {
+    id = tid and tostring(tid) or nil,
+    trainerId = tid,
+    frontierTrainerId = not b and tonumber(foe.frontierTrainerId) or nil,
+    facility = facility3,
+    trainerClass = class, class = class, classId = class,
+    className = className, trainerClassName = className,
+    name = name, trainerName = name,
+    trainerPic = pic, pic = pic,
+    items = items,
+    aiFlags = ai or 0,
+    doubleBattle = (set3(opts.double) or set3(foe.doubleBattle)) and true or false,
+    gender = foe.gender,
+    defeatText = cleanText3(defeat),
+    victoryText = cleanText3(victory),
+  }
+end
+
+-- A facility's monsters, as the facility built them: the Frontier, Trainer
+-- Hill, Secret Base and Pyramid hand the start finished monsters (createMon +
+-- applyStats, nature-matched personalities, fixed IVs, EV spreads) and are
+-- copied as they are; FireRed's Trainer Tower hands battleTowerMon rows,
+-- built here keeping every field the row carries (pret CreateBattleTowerMon:
+-- abilityNum, IVs, EVs, nickname, friendship, OT id, PP Ups).  Never through
+-- SoloBattle.gen3FoeMon, which reads none of abilityNum, nickname or PP Ups.
+function M.facilityParty3(foe)
+  if type(foe) ~= "table" then return nil, "no trainer" end
+  local rows = (type(foe.party) == "table" and #foe.party > 0) and foe.party or { foe }
+  local out = {}
+  for _, row in ipairs(rows) do
+    local mon, why = M.foeMon3(row, { wild = false })
+    if not mon then return nil, why end
+    out[#out + 1] = mon
+  end
+  return out
+end
+
+local function slice3(list, from, to)
+  local out = {}
+  for i = from, math.min(to, #list) do out[#out + 1] = list[i] end
+  return out
 end
 
 -- "BUG CATCHER RICK", cut to what a co-op label carries on the wire.
@@ -1052,7 +1549,11 @@ end
 
 -- args: { kind = "wild"|"trainer", party, trainer?, foe?, encounter?, opts?,
 --         fightAlone = fn(), done = fn(result)?, game?, mapId?,
---         defeatText?, double? }
+--         defeatText?, double?, class3? }
+--
+-- `class3` is M.classify3's answer; absent, the stand-in is the plain kind
+-- (`kind3` = "wild" / "trainer").  `coopRefused3` is what co-op will not fight
+-- it for (nil: co-op may be offered it) -- set by the door builders below.
 function M.stand3(args)
   args = args or {}
   local kind = args.kind == "trainer" and "trainer" or "wild"
@@ -1098,6 +1599,12 @@ function M.stand3(args)
     finished = false,
     began = false,
   }, Stand)
+  local cls = type(args.class3) == "table" and args.class3 or { kind3 = kind }
+  self.kind3 = cls.kind3 or kind
+  self.facility3 = cls.facility3
+  self.tutorial3 = cls.tutorial3
+  self.firstBattle3 = cls.firstBattle3
+  self.ghost3 = cls.ghost3
   -- Coop.buriedFinisher reads onFinish (Gen 1) or onDone (Gen 2); both.
   self.onFinish = function(outcome) return self:finish(outcome) end
   self.onDone = self.onFinish
@@ -1151,16 +1658,106 @@ end
 -- itself, so running it at the take counted it twice for every co-op wait
 -- that timed out.  Called by Coop:startBattle as the co-op screen goes up
 -- and by src/Client.lua as solo takes the fight.
+--
+-- Which kinds run it is the cart's own start, per kind (pret pokeemerald
+-- battle_setup.c): every wild start the field makes -- DoStandardWildBattle,
+-- the roamer's, the Pike's, a scripted wild's, the legends', Birch's first
+-- battle -- counts the day's wild battles and ticks the rematch clock, but
+-- DoSafariBattle and StartWallyTutorialBattle do neither (the engine's own
+-- start counts a Safari wild too; pret wins); a trainer ticks it from
+-- DoTrainerBattle and DoBattlePyramidTrainerHillBattle, never from
+-- DoSpecialTrainerBattle (the Frontier halls, the Secret Base, the e-Reader,
+-- Steven).  FireRed / LeafGreen have no match call: Caps.gate answers no there.
+local NO_WILD_START3 = { safari = true, tutorial = true }
+local TRAINER_START_HALLS3 = { hill = true, pyramid = true }
 function Stand:begin3()
   if self.began then return false end
   self.began = true
   if not self:sameSession() then return false end
+  -- A Palace / Arena / Dome fight hangs its rules object on Battle._nextFacility
+  -- for the engine's Battle.start to take (rse/frontier/palace.lua): the
+  -- mod's fight takes it instead, or the next engine Frontier fight would
+  -- inherit it.  Kept on the stand-in, and put back if it is handed back.
+  self:takeFacility3()
   if self.kind == "trainer" then
-    M.trainerStart3(self, self.foe, self.opts)
-  else
+    if self.kind3 == "partner"
+       or (self.kind3 == "facility" and not TRAINER_START_HALLS3[self.facility3]) then
+      M.trainerStart3(self, self.foe, self.opts, { noRematch = true })
+    else
+      M.trainerStart3(self, self.foe, self.opts)
+    end
+  elseif not NO_WILD_START3[self.kind3] then
     M.wildStart3()
   end
   return true
+end
+
+-- ------- what a stand-in borrowed from the engine, and gives back
+--
+-- Two things the engine left where its own Battle.start would pick them up,
+-- held by the stand-in while the mod fights and put back the moment the fight
+-- is handed to the cart (Stand:fightAlone, and a divert nobody took):
+--
+--   * the partner's monsters.  Steven's multi (natives_frontier_story.lua
+--     doStevenBattle) and a Battle Tower multi (tower.lua doTowerBattle)
+--     append the partner's three to session.party and say where the player's
+--     half ends (`playerHalf`).  The mod's fight is the player's half against
+--     two trainers with the partner on a seat of its own, so the stand-in
+--     lifts them out (`partnerParty`) and session.party is the player's alone
+--     -- the party every solo snapshot, reconcile and EXP pass reads.  The
+--     script's own LoadPlayerParty puts the saved party back afterwards, as
+--     on the cart.
+--   * Battle._nextFacility (see Stand:begin3).
+
+function Stand:detachPartner3(session, half)
+  if type(session) ~= "table" or type(session.party) ~= "table" then return false end
+  half = tonumber(half)
+  if not half or half < 0 or #session.party <= half then return false end
+  local mons = {}
+  for i = half + 1, #session.party do mons[#mons + 1] = session.party[i] end
+  for i = #session.party, half + 1, -1 do table.remove(session.party, i) end
+  self.partnerParty = mons
+  self.partnerDetached3 = { session = session, half = half, mons = mons }
+  return true
+end
+
+function Stand:restorePartner3()
+  local held = self.partnerDetached3
+  if not held then return false end
+  self.partnerDetached3 = nil
+  local party = type(held.session) == "table" and held.session.party or nil
+  if type(party) ~= "table" then return false end
+  local at = math.min(held.half, #party)
+  for i, mon in ipairs(held.mons) do table.insert(party, at + i, mon) end
+  return true
+end
+
+local function battleModule3() return g3("src.core.game3.battle") end
+
+function Stand:takeFacility3()
+  local held = self.nextFacility3
+  if held == nil then return false end
+  local Battle = battleModule3()
+  if type(Battle) == "table" and rawget(Battle, "_nextFacility") == held then
+    Battle._nextFacility = nil
+    return true
+  end
+  return false
+end
+
+function Stand:restoreFacility3()
+  local held = self.nextFacility3
+  if held == nil then return false end
+  local Battle = battleModule3()
+  if type(Battle) ~= "table" then return false end
+  Battle._nextFacility = held
+  return true
+end
+
+-- Everything borrowed goes back: the stand-in is the cart's again.
+function Stand:giveBack3()
+  self:restorePartner3()
+  self:restoreFacility3()
 end
 
 -- Hand the encounter back to the cart: the cover comes down and the cart's
@@ -1179,6 +1776,8 @@ function Stand:fightAlone()
       .. "started")
     return false
   end
+  -- The cart's start reads what the stand-in borrowed (Stand:giveBack3).
+  self:giveBack3()
   local fn = self.fightAloneFn
   if type(fn) ~= "function" then
     -- Nothing to start (a suite, or a stand-in built by hand): the script
@@ -1307,48 +1906,262 @@ end
 
 -- ------- building a stand-in for each door
 
--- The wild door (`encounter.roll`): nil + reason when this encounter is one a
--- divert must not take.
+-- Both doors refuse what stays on the cart for everybody
+-- (Config.SOLO_REFUSED_GEN3), classify the rest (M.classify3), and then:
+--
+--   * `ctx.solo` false (only co-op is listening -- SOLO BATTLES is off): a
+--     kind co-op will not fight is refused here, before a monster is rolled
+--     for it, exactly as before solo took those kinds over;
+--   * `ctx.solo` true: the stand-in is built for every kind, and the reason
+--     co-op will not fight it rides on it as `stand.coopRefused3` -- the
+--     divert (src/Client.lua offerFight3) then never puts it to co-op.
+--
+-- Every stand-in carries `kind3` (and `facility3` / `tutorial3` /
+-- `firstBattle3` / `ghost3` where they apply), and the kind's own fields:
+--
+--   safari     `safari = true`
+--   roamer     `roamer = true`, `roamerFoe` (the save's descriptor)
+--   pair       `trainerIdB`, `trainerB` (record), `enemyPartyB`, `defeatTextB`
+--   partner    `partner = true`, `playerHalf`, `partnerTrainerId`,
+--              `partnerBackPic`, `partnerTrainer` (record), `partnerParty`
+--   facility   `trainer` (M.facilityRecord3), the facility's own monsters,
+--              `nextFacility3` (the engine's Battle._nextFacility, if any);
+--              a facility pair or multi carries the pair / partner fields too
+--   any        `scriptedLoss` (the start's: a loss is the script's to answer,
+--              no whiteout -- battle_bridge.lua writeback)
+
+-- Whether a wild foe rolls a held item at all: pret SetWildMonHeldItem
+-- skips a LEGENDARY battle (FireRed's GHOST_UNVEILED is that bit), the POKe
+-- DUDE, the Pike and the Pyramid.  SoloBattle.gen3HeldRoll is the one
+-- statement of that gate (read off the opts and the foe row); the kind is
+-- the answer for a graph without SoloBattle (never in play).
+local function heldRoll3(cls, opts, spec)
+  local Solo = solo3()
+  if Solo and type(Solo.gen3HeldRoll) == "function" then
+    local ok, roll = pcall(Solo.gen3HeldRoll, opts, spec)
+    if ok then return roll ~= false end
+  end
+  local kind = type(cls) == "table" and cls.kind3 or "wild"
+  return not (kind == "legendary" or kind == "facility"
+              or (kind == "ghost" and cls.ghost3 == "unveiled"))
+end
+
+-- The wild foe of each kind, built as the cart builds it.
+function M.wildFoe3(cls, enc, session, opts)
+  local kind = type(cls) == "table" and cls.kind3 or "wild"
+  local spec = enc
+  if kind == "roamer" then
+    -- pret CreateRoamerMonInstance (roamer.c): the saved species, level, IVs
+    -- and personality, then the saved HP and status.  The encounter carries
+    -- them as its `foe` (roamer.lua tryEncounter); the engine's own battle
+    -- builds the encounter's outer species and level instead and re-rolls the
+    -- rest (battle/init.lua foe_mon_from) -- pret wins.  A roamer is an
+    -- ordinary wild to SetWildMonHeldItem: rolled.
+    spec = type(enc.foe) == "table" and enc.foe or enc
+  end
+  return M.foeMon3(spec, { wild = heldRoll3(cls, opts, spec), session = session })
+end
+
+local function cleanDefeat3(text)
+  local clean = cleanText3(text)
+  return clean and (clean:gsub("\n\n", "\f")) or nil
+end
+
+-- The fields every door stamps once the stand-in is built.
+local function stamp3(stand, cls, coop, opts)
+  stand.coopRefused3 = coop
+  stand.scriptedLoss = set3(opts.scriptedLoss) or nil
+  if cls.kind3 == "facility" and set3(opts.frontier) then
+    local Battle = battleModule3()
+    stand.nextFacility3 = type(Battle) == "table" and rawget(Battle, "_nextFacility") or nil
+  end
+  return stand
+end
+
+-- The wild door: `encounter.roll`'s encounter, or the foe a wild
+-- BattleBridge.start was handed (`opts` its start opts).  nil + reason when
+-- nobody listening may take it.
 function M.wildStand3(enc, ctx, opts)
   ctx = ctx or {}
   if type(enc) ~= "table" then return nil, "no encounter" end
-  local refused = M.refused3(enc, enc.foe, opts)
+  opts = type(opts) == "table" and opts or {}
+  local refused = M.soloRefused3(enc, enc.foe, opts)
   if refused then return nil, refused end
-  if enc.foe ~= nil then return nil, "foe" end
   local session = Gen3.session()
-  if M.safari3(session) then return nil, "safari" end
-  if M.ghost3(ctx.mapId, session) then return nil, "ghost" end
-  local mon, why = M.wildMon3(enc, session)
+  local cls = M.classify3(true, enc, opts, { mapId = ctx.mapId, session = session })
+  -- A foe record riding on the encounter is a roamer's (Roamer.tryEncounter
+  -- returns { roamer, foe }); anything else carrying one is a shape nothing
+  -- here knows, and the cart's.
+  if enc.foe ~= nil and cls.kind3 ~= "roamer" then return nil, "foe" end
+  local coop = M.coopRefusal3(cls, enc, enc.foe, opts)
+  if coop and not ctx.solo then return nil, coop end
+  local mon, why = M.wildFoe3(cls, enc, session, opts)
   if not mon then return nil, why end
-  return M.stand3({
+  local stand = M.stand3({
     kind = "wild", party = { mon }, encounter = enc, game = ctx.game,
-    mapId = ctx.mapId, fightAlone = ctx.fightAlone,
+    mapId = ctx.mapId, fightAlone = ctx.fightAlone, opts = opts, done = opts.done,
+    class3 = cls,
   })
+  stamp3(stand, cls, coop, opts)
+  if cls.kind3 == "safari" then stand.safari = true end
+  if cls.kind3 == "roamer" then
+    stand.roamer = true
+    stand.roamerFoe = type(enc.foe) == "table" and enc.foe or enc
+  end
+  return stand
 end
 
--- The trainer door (BattleBridge.start): nil + reason when the start is not a
--- standard trainer fight a divert may take.
+-- A two-trainer fight's second trainer (pret battle_main.c:1977
+-- CreateNPCTrainerParty(&gEnemyParty[3], B)): built the way the first is,
+-- through the `trainer.party` hook with B's own id, cut like A's to three.
+local function trainerB3(opts, ctx)
+  local tidB = tonumber(opts.trainerIdB)
+  if not tidB then return nil, nil, "no second trainer" end
+  local Trainers = g3("src.core.game3.scripting.trainers")
+  local foeB = Trainers and try3(Trainers.foeFromId, tidB) or nil
+  if type(foeB) ~= "table" then return nil, nil, "no second trainer" end
+  local partyB, why = M.trainerParty3(foeB, tidB)
+  if not partyB then return nil, nil, why end
+  local trainerB = M.trainerRecord3(foeB, { trainerId = tidB, game = ctx.game })
+  if trainerB then trainerB.defeatText = cleanText3(opts.defeatTextB) end
+  return slice3(partyB, 1, 3), trainerB
+end
+
+-- The partner a multi gives the player (Steven; a Battle Tower partner): who
+-- it is, and its monsters lifted out of session.party (Stand:detachPartner3).
+local function partner3(stand, opts, ctx, session, cls)
+  stand.partner = true
+  stand.playerHalf = tonumber(opts.playerHalf)
+  stand.partnerTrainerId = tonumber(opts.partnerTrainerId)
+  stand.partnerBackPic = opts.partnerBackPic
+  local record
+  if cls.kind3 == "facility" then
+    local name, pic = label3(opts.partnerName), tonumber(opts.partnerPicId)
+    record = { name = name, trainerName = name, pic = pic, trainerPic = pic,
+               frontierTrainerId = tonumber(opts.frontierPartner), facility = cls.facility3 }
+  elseif stand.partnerTrainerId then
+    record = M.trainerRecord3(stand.partnerTrainerId, { game = ctx.game })
+  end
+  stand.partnerTrainer = record
+  stand:detachPartner3(session, stand.playerHalf)
+end
+
+-- The trainer door (BattleBridge.start): nil + reason when nobody listening
+-- may take the start.
 function M.trainerStand3(foe, opts, ctx)
   ctx = ctx or {}
   opts = opts or {}
   if opts.wild then return nil, "wild" end
   if opts.link or (type(foe) == "table" and foe.link) then return nil, "link" end
   if opts.headless then return nil, "headless" end
-  local tid = tonumber(opts.trainerId) or tonumber(type(foe) == "table" and foe.trainerId)
-  if not tid then return nil, "no trainer id" end
-  local refused = M.refused3(opts, foe)
+  local refused = M.soloRefused3(opts, foe)
   if refused then return nil, refused end
-  local party, why = M.trainerParty3(foe, tid)
-  if not party then return nil, why end
-  local trainer = M.trainerRecord3(foe, { trainerId = tid, trainerName = opts.trainerName,
-    trainerClassName = opts.trainerClassName, trainerClass = opts.trainerClass,
-    trainerPicId = opts.trainerPicId, game = ctx.game })
-  return M.stand3({
-    kind = "trainer", party = party, trainer = trainer, foe = foe, opts = opts,
-    game = ctx.game, mapId = ctx.mapId, defeatText = opts.defeatText,
-    double = (opts.double or (type(foe) == "table" and foe.doubleBattle)) and true or nil,
-    fightAlone = ctx.fightAlone, done = opts.done,
+  local session = Gen3.session()
+  local cls = M.classify3(false, foe, opts, { mapId = ctx.mapId, session = session })
+  local coop = M.coopRefusal3(cls, opts, foe)
+  if coop and not ctx.solo then return nil, coop end
+  local double = (set3(opts.double) or (type(foe) == "table" and set3(foe.doubleBattle)))
+    and true or nil
+  local stand, partyB, trainerB
+  if cls.kind3 == "facility" then
+    -- A facility trainer is no gTrainers row and has no id to ask one for
+    -- (the Frontier passes none; FireRed's tower and e-Reader pass 0).
+    local all, why = M.facilityParty3(foe)
+    if not all then return nil, why end
+    local party = all
+    -- A facility pair (the Pike double; a Tower multi) arrives as one party,
+    -- A's half first (battle_bridge: `frontierFoeHalf`).
+    local half = tonumber(opts.frontierFoeHalf)
+    if set3(opts.twoOpponents) and half and half > 0 and half < #all then
+      party, partyB = slice3(all, 1, half), slice3(all, half + 1, #all)
+      trainerB = M.facilityRecord3(foe, opts, cls.facility3, session, "B")
+    end
+    stand = M.stand3({
+      kind = "trainer", party = party, foe = foe, opts = opts, game = ctx.game,
+      trainer = M.facilityRecord3(foe, opts, cls.facility3, session),
+      mapId = ctx.mapId, defeatText = opts.defeatText, double = double,
+      fightAlone = ctx.fightAlone, done = opts.done, class3 = cls,
+    })
+  else
+    local tid = tonumber(opts.trainerId) or tonumber(type(foe) == "table" and foe.trainerId)
+    if not tid then return nil, "no trainer id" end
+    local party, why = M.trainerParty3(foe, tid)
+    if not party then return nil, why end
+    if opts.trainerIdB ~= nil then
+      -- pret battle_main.c:1977: each of two trainers fields min(partySize, 3).
+      party = slice3(party, 1, 3)
+      partyB, trainerB, why = trainerB3(opts, ctx)
+      if not partyB then return nil, why end
+      double = true
+    end
+    local trainer = M.trainerRecord3(foe, { trainerId = tid, trainerName = opts.trainerName,
+      trainerClassName = opts.trainerClassName, trainerClass = opts.trainerClass,
+      trainerPicId = opts.trainerPicId, game = ctx.game })
+    stand = M.stand3({
+      kind = "trainer", party = party, trainer = trainer, foe = foe, opts = opts,
+      game = ctx.game, mapId = ctx.mapId, defeatText = opts.defeatText,
+      double = double, fightAlone = ctx.fightAlone, done = opts.done, class3 = cls,
+    })
+  end
+  stamp3(stand, cls, coop, opts)
+  if partyB then
+    stand.enemyPartyB = partyB
+    stand.trainerB = trainerB
+    stand.trainerIdB = tonumber(opts.trainerIdB)
+    stand.defeatTextB = cleanDefeat3(opts.defeatTextB)
+  end
+  if set3(opts.partner) then partner3(stand, opts, ctx, session, cls) end
+  return stand
+end
+
+-- The TEACHY TV's demonstration (battle/pokedude.lua startTeachyTvBattle):
+-- both parties as the cart builds them (Pokedude.build, pret
+-- battle_controller_pokedude.c InitPokedudePartyAndOpponent), the POKe DUDE's
+-- monsters on the player's side (`playerParty`), the demonstration's number
+-- (`pokedudeScript`), and a `done` that answers the TEACHY TV the way the
+-- engine's finish_battle does: the player's bag back (TeachyTv.restorePlayerBag,
+-- a no-op unless the demonstration swapped it), then the outcome code.  Never
+-- co-op's (`coopRefused3 = "pokedude"`).
+local function pokedudeCode3(Pokedude, word)
+  local O = type(Pokedude) == "table" and type(Pokedude.OUTCOME) == "table" and Pokedude.OUTCOME
+    or { WON = 1, LOST = 2, DREW = 3, RAN = 4, CAUGHT = 7 }
+  if word == "draw" then return O.DREW end
+  if word == "catch" or word == "caught" then return O.CAUGHT end
+  if lostResult(word) then return O.LOST end
+  if word == "run" then return O.RAN end
+  return O.WON
+end
+M.pokedudeCode3 = pokedudeCode3
+
+function M.pokedudeStand3(session, scriptId, opts, ctx)
+  ctx = ctx or {}
+  opts = type(opts) == "table" and opts or {}
+  local Pokedude = g3("src.core.game3.battle.pokedude")
+  if not (Pokedude and type(Pokedude.build) == "function") then return nil, "no POKe DUDE" end
+  local ok, party, foes = pcall(Pokedude.build, scriptId)
+  if not (ok and type(party) == "table" and type(foes) == "table" and type(foes[1]) == "table") then
+    return nil, "no demonstration party"
+  end
+  local lead = foes[1]
+  local cls = { kind3 = "tutorial", tutorial3 = "pokedude" }
+  local function done(word)
+    local TeachyTv = g3("src.core.game3.teachy_tv")
+    if TeachyTv then try3(TeachyTv.restorePlayerBag, session) end
+    if type(opts.onDone) == "function" then opts.onDone(pokedudeCode3(Pokedude, word)) end
+  end
+  local stand = M.stand3({
+    kind = "wild", party = foes, game = ctx.game, mapId = ctx.mapId,
+    encounter = { species = tonumber(lead.species), speciesId = tonumber(lead.species),
+                  level = lead.level, pokedude = true },
+    -- What startTeachyTvBattle hands Battle.start besides the parties.
+    opts = { wild = true, pokedude = true, pdScriptNum = tonumber(scriptId) },
+    fightAlone = ctx.fightAlone, done = done, class3 = cls,
   })
+  stand.coopRefused3 = "pokedude"
+  stand.pokedudeScript = tonumber(scriptId)
+  stand.playerParty = party
+  stand.teachyOpts = opts
+  return stand
 end
 
 -- What battle_bridge.lua does at a wild battle's start that is not the battle
@@ -1373,12 +2186,14 @@ end
 
 -- What battle_bridge.lua does at a trainer battle's start that is not the
 -- battle itself, for a fight the divert took: Emerald's match-call rematch
--- bookkeeping and the Elite Four's league friendship.
-function M.trainerStart3(stand, foe, opts)
+-- bookkeeping and the Elite Four's league friendship.  `how.noRematch` for a
+-- special battle, which pret never ticks the clock for (Stand:begin3).
+function M.trainerStart3(stand, foe, opts, how)
   local session = Gen3.session()
   if not session then return end
   local Caps = g3("src.core.game3.capabilities")
-  if Caps and try3(Caps.gate, session, "match_call") then
+  if not (type(how) == "table" and how.noRematch)
+     and Caps and try3(Caps.gate, session, "match_call") then
     local Rematch = g3("src.core.game3.rse.rematch")
     if Rematch then try3(Rematch.onTrainerBattleStart, session) end
   end
@@ -1392,7 +2207,8 @@ local START_KEY = "__rby_mmo_start"
 local start3 = {
   handle = nil,    -- Gen3.wrapFn's handle for the wrapper this file put in
   retired = false, -- restoreStart3 ran with somebody else's wrapper on top
-  handler = nil,   -- { wants = fn(kind) -> bool, take = fn(stand) -> bool }
+  handler = nil,   -- { wants = fn(kind, mapId) -> false | true | "solo",
+                   --   take = fn(stand, foe, opts, kind) -> bool, skipWild = fn() }
 }
 
 -- The engine's own start, whatever is installed over it.
@@ -1404,11 +2220,16 @@ function M.originalStart3()
 end
 
 -- A trainer start, and a wild one that did not come through `encounter.roll`
--- (fishing, Rock Smash, Sweet Scent -- battle_bridge's own `standardWild`;
--- every scripted, legendary, roamer, safari or facility wild is refused by
--- Config.SOLO_REFUSED_GEN3). A step encounter the roll hook already offered
--- is not offered twice: `handler.skipWild()` says so.  Nor is a fight this mod
--- is handing back to the cart (`opts[M.HANDBACK3]`), which is the cart's now.
+-- (fishing, Rock Smash, Sweet Scent, and every scripted, legendary, ghost,
+-- tutorial, first-battle or facility wild -- the stand-in says which kind,
+-- M.classify3; co-op is put only the plain ones, solo the rest).  A step
+-- encounter the roll hook already offered is not offered twice:
+-- `handler.skipWild()` says so.  Nor is a fight this mod is handing back to
+-- the cart (`opts[M.HANDBACK3]`), which is the cart's now.
+--
+-- `handler.wants(kind, mapId)` answers who is listening: false nobody, "solo"
+-- SOLO BATTLES is on (every kind it takes is built), anything else truthy
+-- only co-op (a kind co-op will not fight is refused before it is built).
 --
 -- `inner` is what the wrapper wrapped -- the engine's start, or another mod's
 -- wrapper around it -- so a fight handed back (`fightAlone`) goes down the
@@ -1430,9 +2251,11 @@ local function divertStart(inner, modArg, game, foe, opts)
   end
   local current = Gen3.position()
   local mapId = current and current.mapId
-  if type(handler.wants) == "function" and not handler.wants(kind, mapId) then return false end
+  local want = true
+  if type(handler.wants) == "function" then want = handler.wants(kind, mapId) end
+  if not want then return false end
   local ctx = {
-    game = game, mapId = mapId,
+    game = game, mapId = mapId, solo = want == "solo",
     fightAlone = function() return inner(modArg, game, foe, opts) end,
   }
   local stand
@@ -1442,7 +2265,12 @@ local function divertStart(inner, modArg, game, foe, opts)
     stand = M.trainerStand3(foe, opts, ctx)
   end
   if not stand then return false end
-  return handler.take(stand, foe, opts, kind) == true
+  local ok, taken = pcall(handler.take, stand, foe, opts, kind)
+  if ok and taken == true then return true end
+  -- Nobody took it: the cart's start runs next, with what it left in place.
+  stand:giveBack3()
+  if not ok then error(taken, 0) end
+  return false
 end
 
 -- `handler.wants(kind, mapId)` is the cheap question (is anybody going to take
@@ -1493,6 +2321,105 @@ end
 
 function M.start3Installed()
   return start3.handle ~= nil and not start3.retired
+end
+
+-- ------- the TEACHY TV start wrap (an engine_internals reach-around)
+--
+-- The POKe DUDE's demonstrations never reach BattleBridge.start: the TEACHY
+-- TV (teachy_tv.lua startDemonstration) calls battle/pokedude.lua
+-- Pokedude.startTeachyTvBattle, which hides the TEACHY TV's layers, swaps in
+-- the POKe DUDE's bag and calls Battle.start itself (pret teachy_tv.c:1172
+-- TeachyTvPrepBattle).  So that one function is wrapped, with the start
+-- wrap's discipline: Gen3.wrapFn keeps the pristine original on the module, a
+-- hot reload peels this mod's own previous wrapper rather than stacking on it,
+-- the wrapper retires itself for a stale instance (alive() / Gen3.wrapLive) and
+-- answers what the engine would, and a demonstration handed back is the
+-- wrapped function itself, called with the TEACHY TV's own arguments.
+--
+-- It takes a demonstration only when SOLO BATTLES is on (`handler.wants`);
+-- co-op has nothing to join in a cutscene.  The TEACHY TV's own
+-- `onDemonstration` slot is not used: it is one slot, a replacement rather
+-- than a chain, and the engine's tests own it.  docs/upstream/gen3-spawn-npc.md
+-- is where the seam that would retire this wrap belongs.
+
+local POKEDUDE_KEY = "__rby_mmo_pokedude"
+local pokedude3 = {
+  handle = nil,
+  retired = false,
+  handler = nil,   -- { wants = fn("tutorial") -> bool, take = fn(stand) -> bool }
+}
+
+-- The engine's own demonstration start, whatever is installed over it.
+function M.originalPokedude3()
+  local Pokedude = (pokedude3.handle and pokedude3.handle.module)
+    or g3("src.core.game3.battle.pokedude")
+  if not Pokedude then return nil end
+  return rawget(Pokedude, POKEDUDE_KEY) or Pokedude.startTeachyTvBattle
+end
+
+local function divertPokedude(inner, session, scriptId, opts)
+  local handler = pokedude3.handler
+  if not (handler and type(handler.take) == "function") then return false end
+  local o = type(opts) == "table" and opts or {}
+  if o.headless or o[M.HANDBACK3] then return false end
+  if type(handler.wants) == "function" and not handler.wants("tutorial") then return false end
+  -- The engine's own refusal (startTeachyTvBattle: a battle already running).
+  local Battle = battleModule3()
+  if type(Battle) == "table" and try3(Battle.isActive) then return false end
+  local game = type(handler.game) == "function" and handler.game() or nil
+  local stand = M.pokedudeStand3(session, scriptId, o, {
+    game = game,
+    fightAlone = function() return inner(session, scriptId, opts) end,
+  })
+  if not stand then return false end
+  local ok, taken = pcall(handler.take, stand)
+  if ok and taken == true then return true end
+  stand:giveBack3()
+  if not ok then error(taken, 0) end
+  return false
+end
+
+function M.installPokedude3(handler)
+  pokedude3.handler = handler
+  if pokedude3.handle and Gen3.wrapLive(pokedude3.handle) then
+    pokedude3.retired = false
+    return true
+  end
+  local Pokedude = g3("src.core.game3.battle.pokedude")
+  -- A build without the TEACHY TV's battles: nothing to divert, and nothing
+  -- the player can miss.
+  if not (Pokedude and type(Pokedude.startTeachyTvBattle) == "function") then return false end
+  local handle
+  handle = Gen3.wrapFn(Pokedude, "startTeachyTvBattle", POKEDUDE_KEY, function(inner)
+    return function(session, scriptId, opts)
+      if not pokedude3.retired and Gen3.wrapLive(handle) and alive() then
+        local ok, taken = pcall(divertPokedude, inner, session, scriptId, opts)
+        if ok and taken then return true end
+        if not ok then
+          mod.log:warn("the TEACHY TV divert failed (%s); this demonstration is shown "
+            .. "on the game's own battle screen -- turn SOLO BATTLES off in the mod "
+            .. "manager (F10) if it keeps happening", tostring(taken))
+        end
+      end
+      return inner(session, scriptId, opts)
+    end
+  end)
+  if not handle then return false end
+  pokedude3.handle, pokedude3.retired = handle, false
+  return true
+end
+
+-- Put back what the wrapper wrapped, when the slot still holds it; under
+-- somebody else's wrapper ours is retired in place.
+function M.restorePokedude3()
+  if not pokedude3.handle then return false end
+  pokedude3.retired = true
+  if Gen3.unwrapFn(pokedude3.handle) then pokedude3.handle = nil end
+  return true
+end
+
+function M.pokedude3Installed()
+  return pokedude3.handle ~= nil and not pokedude3.retired
 end
 
 return M

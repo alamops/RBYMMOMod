@@ -126,6 +126,8 @@ tests/gen3_mediated.lua
 tests/gen3_presence.lua
 tests/gen3_solo.lua
 tests/gen3_solo_double.lua
+tests/gen3_solo_brain.lua
+tests/gen3_doors.lua
 tests/gen3_ui.lua
 tests/trade3.lua
 tests/battle_sim3_turn.lua

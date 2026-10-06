@@ -906,9 +906,9 @@ M.SOLO_REFUSED_BATTLE_TYPES = {
   [9] = true,   -- BATTLETYPE_TRAP       (no escape, Rocket base)
 }
 
--- ------- and Gen 3's, which is a list of its own
+-- ------- and Gen 3's, which are two lists of their own
 --
--- A third list rather than more names on the first, because the first two are
+-- Two lists rather than more names on the first, because the first two are
 -- pinned (tests/solo_battle.lua counts seven names and five bytes) and because
 -- none of these names means anything on a Gen 1 or Gen 2 battle: they are the
 -- fields the game3 engine spells its fights with.  Every one is a key of the
@@ -923,8 +923,19 @@ M.SOLO_REFUSED_BATTLE_TYPES = {
 -- this engine never exposes it -- it splits every bit into its own boolean --
 -- so a value set would be refusing numbers no Gen 3 fight carries.
 --
--- The same test decides as for Gen 1 and Gen 2: a fight whose rules the
--- referee does not model is handed back, silently, rather than run wrong.
+-- Two lists because two takers ask (docs/plans/gen3-solo-remaining-fights.md
+-- C1).  CoopField builds one stand-in per fight and stamps it with the kind
+-- the engine spelled (`stand.kind3`, CoopField.classify3); co-op is offered
+-- only what COOP_REFUSED_GEN3 does not name *and* a plain "wild" / "trainer"
+-- kind, solo everything SOLO_REFUSED_GEN3 does not name.  A name on the solo
+-- list is the cart's for everybody; a name only on the co-op list is solo's.
+
+-- What co-op will not fight: everything it refused before solo took the rest
+-- over, unchanged.  Each of these is a fight the cart has no two-player shape
+-- for, so a co-op version would invent its rules -- and need the hub to
+-- referee them and a PROTOCOL bump to say so -- and co-op's own finish
+-- (CoopField Stand:finish) speaks win / lose / draw only, not the caught /
+-- fled / forfeited / out-of-balls words these fights end in:
 --
 --   * Not a standard wild: `safari` (BALL / BAIT / ROCK, a step budget),
 --     `roamer` (Raikou / Entei / Suicune, Latios / Latias -- flees on its own
@@ -933,33 +944,36 @@ M.SOLO_REFUSED_BATTLE_TYPES = {
 --     `rayquaza`) -- a map script is waiting on the cart's B_OUTCOME and the
 --     presentation (weather, music) is the event -- and `ghost` /
 --     `ghostBattle`, the Silph Scope Marowak.  battle_bridge's own
---     `standardWild` excludes exactly these.
+--     `standardWild` excludes exactly these.  The Safari Zone and the
+--     POKeMON TOWER ghosts are also spelled by no key at all on a step
+--     encounter (a session flag, a map without the SILPH SCOPE): those are
+--     stand kinds, refused by co-op as kinds (CoopField.coopRefusal3).
 --   * Scripted lessons: `firstBattle` / `firstBattleKind` (FireRed's rival
 --     in Oak's lab, Emerald's Birch rescue -- the profiles' "oak" / "birch"
 --     kinds, fights the cart lets you lose and carry on), `oldManTutorial`
 --     (Viridian), `tutorialKind` / `tutorial` (the "oldman" / "wally" catch
---     lessons), `pokedude` (the Viridian school demonstrations).  All of them
---     are meant to go one way, on cue.
---   * Facilities, whose rules are their own and whose results feed a streak:
---     `frontier` and its halls (`dome`, `palace`, `arena`, `factory`, `pike`,
---     `pyramid`), `battleTower`, `trainerTower`, `trainerHill`,
---     `secretBase`, `eReader`.
+--     lessons), `pokedude` (the TEACHY TV demonstrations).  All of them are
+--     meant to go one way, on cue, for one player.
+--   * Facilities, whose rules are their own and whose results feed one save's
+--     streak: `frontier` and its halls (`dome`, `palace`, `arena`, `factory`,
+--     `pike`, `pyramid`), `battleTower`, `trainerTower`, `trainerHill`,
+--     `secretBase`, `eReader`.  Both carts would have to fight the same two
+--     trainers their own RNG rolls apart.
 --   * Link and recorded fights, which are another player's or a replay:
 --     `link`, `multi`, `unionRoom`, `spectate`, `recordedLink`,
---     `towerLinkMulti`.
---   * Two sides the referee cannot seat: `partner` (Steven fights beside you
---     under the cart's AI) and `twoOpponents` (two trainers, two parties and
---     two AIs on one side, each with its own defeat flag).
+--     `towerLinkMulti` (the solo list's, below).
+--   * Sides co-op does not seat: `partner` (Steven fights beside you under
+--     the cart's AI) and `twoOpponents` (two trainers, two parties and two
+--     AIs on one side, each with its own defeat flag).
 --
 -- Audited and deliberately **not** listed: `double` (a trainer's own
 -- double-battle flag: a *lone* double -- one trainer, one party, one AI --
--- is fought, two seats a side over one shared team each, when the player has
--- two usable monsters, and handed back to the cart's own "not enough" refusal
--- when not; SoloBattle.gen3TakesDouble decides, and `partner` /
--- `twoOpponents` above stay refused whatever it says), `trainer` and
--- `wild` themselves, and `autoFight` / `headless` (the engine's own
--- test-driver switches, never armed by a fight a player walks into).
-M.SOLO_REFUSED_GEN3 = {
+-- is fought, two seats a side over one shared team each; co-op seats it as
+-- its 2v2, solo when the player has two usable monsters --
+-- SoloBattle.gen3TakesDouble decides), `trainer` and `wild` themselves, and
+-- `autoFight` / `headless` (the engine's own test-driver switches, never
+-- armed by a fight a player walks into).
+M.COOP_REFUSED_GEN3 = {
   "safari", "roamer", "wildScripted", "legendary", "ghost", "ghostBattle",
   "kyogreGroudon", "regi", "groudon", "kyogre", "rayquaza",
   "firstBattle", "firstBattleKind", "oldManTutorial", "tutorialKind",
@@ -968,6 +982,33 @@ M.SOLO_REFUSED_GEN3 = {
   "battleTower", "trainerTower", "trainerHill", "secretBase", "eReader",
   "link", "multi", "unionRoom", "spectate", "recordedLink", "towerLinkMulti",
   "partner", "twoOpponents",
+}
+
+-- What stays on the cart even with SOLO BATTLES on: only the fights there is
+-- nothing of this cart's to referee in.  Every other kind above is solo's,
+-- each with its own module behind SoloBattle.registerKind3.
+--
+--   * `link`, `unionRoom`, `spectate`: another cart fighting this one in
+--     lockstep over the engine's relay.  Taking them would make this mod a
+--     party to the link -- the one thing `affects_link: false` promises it
+--     never is.
+--   * `multi`: the link multi.  battle_bridge passes it only beside `link`
+--     (`startOpts.multi = opts.link and opts.multi`); Steven's multi is
+--     spelled `partner` + `twoOpponents`, never `multi`.
+--   * `towerLinkMulti`: two humans over link against two frontier trainers
+--     -- link and facility at once (pret BATTLE_TYPE_TOWER_LINK_MULTI).
+--   * `recordedLink`: a replay of the cart's own recorded inputs against its
+--     own RNG.  There is nothing to decide, and the engine records none
+--     (scripting/natives_frontier.lua: recorded battles are missing).
+--   * `eReader`: Emerald's e-Reader trainer is not implemented by the engine
+--     (natives_frontier.lua logs it as missing), and FireRed / LeafGreen's
+--     needs a scanned e-Card (session.ereaderTrainer) that no player or
+--     driver can reach.  CoopField still classifies it (a "facility" stand,
+--     `facility3 = "eReader"`), so taking it is dropping this one name once a
+--     driver can stage it.
+M.SOLO_REFUSED_GEN3 = {
+  "link", "multi", "unionRoom", "spectate", "recordedLink", "towerLinkMulti",
+  "eReader",
 }
 
 -- How many frames in a row the local referee may fail before the fight is

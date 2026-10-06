@@ -2767,6 +2767,66 @@ do
      "a start with no trainer id is not a trainer")
 end
 
+-- C1 (docs/plans/gen3-solo-remaining-fights.md): solo took the cart's other
+-- fights over, co-op took none of them.  Every key co-op refused before is
+-- still refused -- written out here rather than read from Config, so a key
+-- dropped from the co-op list fails this suite -- on both doors, whether SOLO
+-- BATTLES is listening (the stand-in is built, marked, and never put to co-op)
+-- or not (it is never built at all).  The kinds no key spells (the Safari
+-- Zone, a POKeMON TOWER ghost, a roamer's foe record) likewise.
+do
+  newGame()
+  local OLD_LIST = {
+    "safari", "roamer", "wildScripted", "legendary", "ghost", "ghostBattle",
+    "kyogreGroudon", "regi", "groudon", "kyogre", "rayquaza",
+    "firstBattle", "firstBattleKind", "oldManTutorial", "tutorialKind",
+    "tutorial", "pokedude",
+    "frontier", "dome", "palace", "arena", "factory", "pike", "pyramid",
+    "battleTower", "trainerTower", "trainerHill", "secretBase", "eReader",
+    "link", "multi", "unionRoom", "spectate", "recordedLink", "towerLinkMulti",
+    "partner", "twoOpponents",
+  }
+  local foe = FakeTrainers.foeFromId(326)
+  local base = { species = "PIDGEY", speciesId = 16, level = 3 }
+  for _, key in ipairs(OLD_LIST) do
+    local opts = { trainerId = 326, [key] = key == "tutorialKind" and "oldman" or true }
+    if key == "partner" or key == "twoOpponents" then opts.trainerIdB = 400 end
+    eq(CoopField.trainerStand3(foe, opts, { game = GAME }), nil,
+       "co-op alone: a trainer start with " .. key .. " is the cart's")
+    local both = CoopField.trainerStand3(foe, opts, { game = GAME, solo = true })
+    check(both == nil or both.coopRefused3 ~= nil,
+          "with SOLO BATTLES on, a trainer start with " .. key .. " is never co-op's")
+    local wopts = { wild = true, [key] = key == "tutorialKind" and "oldman" or true }
+    eq(CoopField.wildStand3(base, { game = GAME, mapId = "FR_ROUTE_1" }, wopts), nil,
+       "co-op alone: a wild start with " .. key .. " is the cart's")
+    local wboth = CoopField.wildStand3(base, { game = GAME, mapId = "FR_ROUTE_1", solo = true }, wopts)
+    check(wboth == nil or wboth.coopRefused3 ~= nil,
+          "with SOLO BATTLES on, a wild start with " .. key .. " is never co-op's")
+  end
+  -- the kinds no key spells
+  STORE.flags[0x800] = true
+  local saf = CoopField.wildStand3(base, { game = GAME, mapId = "FR_ROUTE_1", solo = true })
+  eq(saf and saf.coopRefused3, "safari", "a Safari Zone stand-in is never co-op's")
+  STORE.flags[0x800] = nil
+  local ghost = CoopField.wildStand3(base, { game = GAME, mapId = "FR_POKEMON_TOWER_3F", solo = true })
+  eq(ghost and ghost.coopRefused3, "ghost", "a POKeMON TOWER ghost is never co-op's")
+  local roam = CoopField.wildStand3({ species = "PIDGEY", speciesId = 16, level = 50, roamer = true,
+    foe = { species = 16, level = 50, roamer = true } }, { game = GAME, solo = true })
+  eq(roam and roam.coopRefused3, "roamer", "a roamer is never co-op's")
+  -- Coop's own refusal: a marked stand-in is declined whoever offers it
+  eq(Coop.refusedKind3(roam), true, "Coop reads the mark")
+  eq(Coop.onWildEncounter({}, GAME, roam, "FR_ROUTE_1"), false,
+     "Coop:onWildEncounter declines a marked stand-in before anything else")
+  local pair = CoopField.trainerStand3(FakeTrainers.foeFromId(326),
+    { trainerId = 326, trainerIdB = 400, twoOpponents = true, double = true }, { game = GAME, solo = true })
+  eq(pair and pair.coopRefused3, "twoOpponents", "two trainers are never co-op's")
+  eq(Coop.onTrainerBattle({}, GAME, pair, "FR_ROUTE_1"), false,
+     "Coop:onTrainerBattle declines a marked stand-in before anything else")
+  local plain = CoopField.trainerStand3(foe, { trainerId = 326 }, { game = GAME, solo = true })
+  eq(plain and plain.coopRefused3, nil, "a plain trainer stays co-op's to take")
+  eq(Coop.refusedKind3(plain), false, "and Coop does not decline it for its kind")
+end
+
 do
   newGame()
   SESSION.party = { monOf(4, 10) }
