@@ -2880,6 +2880,51 @@ do
   eq(Gen.trainerWalkSpriteId(nil, game), nil, "no trainer names no sheet")
   eq(Gen.trainerWalkSpriteId({}, game), nil, "...nor does a record with no id")
 
+  -- ------- Gold's record: `classId` / `memberId`, and numbered map objects
+  --
+  -- Gold's battle record names its trainer as constants and has no `id`, and
+  -- Gold's map objects name the trainer they fight as numbers beside their
+  -- sheet (`gen2Trainers.classes[*].index` / `.trainers[*].index` map them
+  -- back).  Synthetic numbers and sheets: the ladder, not Gold's real table.
+  local GOLD = {
+    pokemon = DATA.pokemon,
+    gen2Sprites = {
+      SPRITE_BUG_CATCHER = { frames = 6 }, SPRITE_YOUNGSTER = { frames = 6 },
+      SPRITE_RIVAL = { frames = 6 }, SPRITE_SURGE = { frames = 6 },
+      SPRITE_ROCKET = { frames = 6 }, SPRITE_COOLTRAINER_M = { frames = 6 },
+    },
+    gen2Trainers = { classes = {
+      BUG_CATCHER = { index = 7, trainers = { { index = 1, id = "DON" }, { index = 2, id = "ROB" } } },
+      GRUNTM = { index = 9, trainers = { { index = 1, id = "GRUNTM_1" } } },
+      RIVAL1 = { index = 3, trainers = {} },
+      LT_SURGE = { index = 4, trainers = {} },
+    } },
+    gen2Maps = {
+      ROUTE_30 = { objects = {
+        { sprite = "SPRITE_YOUNGSTER", trainer = { class = 7, member = 1 } },
+        { sprite = "SPRITE_BUG_CATCHER", trainer = { class = 7, member = 2 } },
+      } },
+      ILEX = { objects = {
+        { sprite = "SPRITE_BUG_CATCHER", trainer = { class = 7, member = 2 } },
+        { sprite = "SPRITE_ROCKET", trainer = { class = 9, member = 1 } },
+        { sprite = "SPRITE_YOUNGSTER" },
+      } },
+    },
+  }
+  local gold = { data = GOLD, save = { party = {}, player = { name = "ANN" } } }
+  eq(Gen.trainerWalkSpriteId({ classId = "BUG_CATCHER", memberId = "DON" }, gold),
+     "SPRITE_YOUNGSTER", "Gold: the member's own map object names its sheet")
+  eq(Gen.trainerWalkSpriteId({ classId = "BUG_CATCHER", memberId = "WADE" }, gold),
+     "SPRITE_BUG_CATCHER", "...another member of the class takes the class's most common sheet")
+  eq(Gen.trainerWalkSpriteId({ classId = "GRUNTM", memberId = "GRUNTM_1" }, gold),
+     "SPRITE_ROCKET", "...a class named unlike its sheet is found through the map objects")
+  eq(Gen.trainerWalkSpriteId({ classId = "RIVAL1" }, gold), "SPRITE_RIVAL",
+     "...a scripted rival, by the class without its digits")
+  eq(Gen.trainerWalkSpriteId({ classId = "LT_SURGE" }, gold), "SPRITE_SURGE",
+     "...a scripted leader, by the class's last word")
+  eq(Gen.trainerWalkSpriteId({ classId = "MYSTERY" }, gold), "SPRITE_COOLTRAINER_M",
+     "...and a class with no sheet anywhere still gets a body")
+
   -- ------- and what the arena is told
   local function screen(fields)
     local self = setmetatable({

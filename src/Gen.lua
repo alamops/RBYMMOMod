@@ -1244,12 +1244,124 @@ local function trainerWalkGfx3(trainer)
   return nil
 end
 
+-- Gold: the same question, asked of Gold's own data.  Gold's battle record
+-- names its trainer as constants -- `classId` BUG_CATCHER, `memberId` DON
+-- (World:startTrainerBattle) -- and carries no `id`, so the Gen 1 arm below
+-- found nothing to read and every Gold trainer stood on the arena as the
+-- placeholder silhouette.  Gold's map objects name the trainer they fight as
+-- *numbers* (`trainer = { class = 36, member = 1 }`, pokegold's
+-- `object_event ... TRAINER ...`) beside the walk sheet they are drawn with,
+-- and `gen2Trainers.classes[*]` maps both numbers back to the constants.  So
+-- a member that stands on some map gets its own sheet exactly, and every
+-- other member of its class the class's most common one.  Ties break on id
+-- order; memoised against the maps table, as above.
+local goldTrainerSheets = nil
+local goldTrainerSheetsFrom = nil
+
+local function goldSheetsFor(data)
+  local maps = type(data) == "table" and rawget(data, "gen2Maps") or nil
+  local trainers = type(data) == "table" and rawget(data, "gen2Trainers") or nil
+  local classes = type(trainers) == "table" and trainers.classes or nil
+  if type(maps) ~= "table" or type(classes) ~= "table" then return nil end
+  if goldTrainerSheetsFrom == maps then return goldTrainerSheets end
+
+  local classOf, memberOf = {}, {}
+  for classId, class in pairs(classes) do
+    local index = type(class) == "table" and tonumber(class.index) or nil
+    if index and type(classId) == "string" then
+      classOf[index] = classId
+      local members = {}
+      for _, row in ipairs(type(class.trainers) == "table" and class.trainers or {}) do
+        if type(row) == "table" and tonumber(row.index) and type(row.id) == "string" then
+          members[tonumber(row.index)] = row.id
+        end
+      end
+      memberOf[index] = members
+    end
+  end
+
+  local exact, votes = {}, {}
+  local ok = pcall(function()
+    for _, map in pairs(maps) do
+      if type(map) == "table" and type(map.objects) == "table" then
+        for _, obj in pairs(map.objects) do
+          local t = type(obj) == "table" and obj.trainer or nil
+          local sprite = type(obj) == "table" and obj.sprite or nil
+          local index = type(t) == "table" and tonumber(t.class) or nil
+          local classId = index and classOf[index]
+          if classId and type(sprite) == "string" and sprite ~= "" then
+            local memberId = (memberOf[index] or {})[tonumber(t.member)]
+            if memberId then
+              local key = classId .. "/" .. memberId
+              if exact[key] == nil or sprite < exact[key] then exact[key] = sprite end
+            end
+            local bucket = votes[classId]
+            if not bucket then
+              bucket = {}
+              votes[classId] = bucket
+            end
+            bucket[sprite] = (bucket[sprite] or 0) + 1
+          end
+        end
+      end
+    end
+  end)
+  if not ok then return nil end
+
+  local byClass = {}
+  for classId, bucket in pairs(votes) do
+    local best, bestN = nil, -1
+    for sprite, n in pairs(bucket) do
+      if n > bestN or (n == bestN and (best == nil or sprite < best)) then
+        best, bestN = sprite, n
+      end
+    end
+    byClass[classId] = best
+  end
+  goldTrainerSheets = { exact = exact, byClass = byClass }
+  goldTrainerSheetsFrom = maps
+  return goldTrainerSheets
+end
+
+-- A Gold trainer record's walk sheet, best first: the map object that fights
+-- as this very member; the class's most common sheet; the class constant as a
+-- sheet name, then without its trailing digits (RIVAL1 -> SPRITE_RIVAL), then
+-- its last word (LT_SURGE -> SPRITE_SURGE) -- for the scripted fights whose
+-- object carries no trainer (rivals, gym leaders); a generic trainer last.
+local function goldTrainerWalkSpriteId(trainer, game, sprites)
+  local classId = trainer.classId
+  local function have(id)
+    return type(id) == "string" and id ~= ""
+      and (sprites == nil or (type(sprites) == "table" and type(sprites[id]) == "table"))
+  end
+  local sheets = goldSheetsFor(game and game.data)
+  if sheets then
+    local member = trainer.memberId
+    local exact = type(member) == "string" and sheets.exact[classId .. "/" .. member] or nil
+    if have(exact) then return exact end
+    if have(sheets.byClass[classId]) then return sheets.byClass[classId] end
+  end
+  for _, name in ipairs({ classId, (classId:gsub("%d+$", "")), classId:match("([^_]+)$") }) do
+    if name ~= "" and have("SPRITE_" .. name) then return "SPRITE_" .. name end
+  end
+  if type(sprites) ~= "table" then return nil end
+  for _, generic in ipairs(GENERIC_TRAINER_SPRITES) do
+    if type(sprites[generic]) == "table" then return generic end
+  end
+  return nil
+end
+
 -- OPP_YOUNGSTER -> SPRITE_YOUNGSTER when the catalog has a walk sheet; the
 -- overworld's own answer for the classes it does not (OPP_LASS,
--- OPP_BUG_CATCHER, ...); a generic trainer after that.
+-- OPP_BUG_CATCHER, ...); a generic trainer after that.  Gold's record is
+-- read by `goldTrainerWalkSpriteId`.
 function M.trainerWalkSpriteId(trainer, game)
   if type(trainer) ~= "table" then return nil end
   if onGen3(game) then return trainerWalkGfx3(trainer) end
+  if type(trainer.classId) == "string" and trainer.classId ~= ""
+      and trainer.id == nil and trainer.sprite == nil and trainer.spriteId == nil then
+    return goldTrainerWalkSpriteId(trainer, game, M.spriteCatalog(game))
+  end
   local id = trainer.id or trainer.sprite or trainer.spriteId
   if type(id) ~= "string" or id == "" then return nil end
   local spriteId = id
