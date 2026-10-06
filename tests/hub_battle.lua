@@ -943,8 +943,15 @@ do
   ok(not hurried, "and nothing in the log says anybody ran out of time")
 end
 
--- One trainer, one bag: an uploaded kit is shared across both NPC seats,
--- not cloned, so a 2v2 cannot drink the same potion twice.
+-- One trainer, two seats (contract K16 of
+-- docs/plans/gen12-referee-remaining-gaps.md): the computer's items on Red
+-- are its class's TrainerAI record (`aiClass`), not a bag -- pokered's
+-- TrainerAI reads no inventory, the routine names the item -- so the referee
+-- keeps no NPC bag, even one an older client still uploads.  The record rides
+-- onto both seats the trainer is dealt across and each seat holds its own copy
+-- (BattleSim Turn `copyAiClass`): the record is only ever read, and what
+-- TrainerAI spends is the seat's own wAICount.  Gold's kit, which IS spent and
+-- shared, is the K16 block after wave 6 below.
 
 do
   local hub = Hub.new({ maxPlayers = 4 })
@@ -961,17 +968,25 @@ do
                      mons = { bruiser() } })
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c-bag", side = "b",
                      mons = { glassjaw(), glassjaw() },
+                     aiClass = { uses = 1, item = "POTION", hpBelow = 5 },
                      bag = { { id = "POTION", count = 1 } } })
-  ok(record.sim ~= nil, "the fight opens with the trainer's uploaded kit")
-  local bagA = record.sim.byId[record.npcIds[1]].bag
-  local bagB = record.sim.byId[record.npcIds[2]].bag
-  eq(bagA and bagA.POTION, 1, "one potion, the count the trainer actually has")
-  eq(bagB and bagB.POTION, 1, "visible on the second seat too")
-  ok(bagA == bagB, "the same table -- spending one spends both")
+  ok(record.sim ~= nil, "the fight opens with the trainer's class record")
+  local seatA = record.sim.byId[record.npcIds[1]]
+  local seatB = record.sim.byId[record.npcIds[2]]
+  eq(seatA.bag, nil, "K16: an uploaded NPC bag reaches no seat -- the computer keeps none")
+  eq(seatB.bag, nil, "K16: ...on either seat")
+  local classA, classB = seatA.aiClass, seatB.aiClass
+  eq(classA and classA.item, "POTION", "K16: the first seat holds the trainer's TrainerAI record")
+  eq(classB and classB.item, "POTION", "K16: ...and so does the second")
+  eq(classB and classB.hpBelow, 5, "K16: ...field for field")
+  ok(classA ~= nil and classA ~= classB, "K16: each seat's record is its own copy, not one aliased table")
+  ok(classA ~= nil and classA ~= record.parties[record.npcIds[1]].aiClass,
+     "K16: ...nor the hub's own sheet")
 end
 
 -- Guest side-"b" is not an NPC upload. Only the initiator fills the trainer
--- kit; a guest sheet on that side is dropped rather than overwriting them.
+-- kit -- on Red its class record (K16) -- and a guest sheet on that side is
+-- dropped rather than overwriting them.
 
 do
   local hub = Hub.new({ maxPlayers = 4 })
@@ -988,17 +1003,17 @@ do
                      mons = { bruiser() } })
   hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = "c-guestb", side = "b",
                      mons = { glassjaw(), glassjaw() },
-                     bag = { { id = "POTION", count = 9 } } })
+                     aiClass = { uses = 9, item = "FULL_HEAL" } })
   eq(record.sim, nil, "a guest side-b does not open the fight")
   eq(record.parties[bob.id] and record.parties[bob.id].mons[1].hp, bruiser().hp,
      "and does not replace the guest's own party")
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = "c-guestb", side = "b",
                      mons = { glassjaw(), glassjaw() },
-                     bag = { { id = "POTION", count = 1 } } })
+                     aiClass = { uses = 1, item = "POTION" } })
   ok(record.sim ~= nil, "the initiator's side-b is what seats the trainer")
-  eq(record.sim.byId[record.npcIds[1]].bag and
-       record.sim.byId[record.npcIds[1]].bag.POTION, 1,
-     "with the initiator's kit, not the guest's")
+  local kit = record.sim.byId[record.npcIds[1]].aiClass
+  eq(kit and kit.item, "POTION", "with the initiator's kit, not the guest's")
+  eq(kit and kit.uses, 1, "...its uses too")
 end
 
 -- ------- protocol-only wild: one human, one NPC seat, catch sheet on outcome
@@ -3423,10 +3438,12 @@ local function msgTexts(peer)
 end
 
 -- A line containing `part` (the wording of a line is the referee's; which line
--- it is, is what these checks are about).
+-- it is, is what these checks are about), read the way every matcher reads a
+-- battle line: without its name marks (K17) or the cart's breaks (K18) --
+-- "It doesn't affect" / line "^bDUO!" is "It doesn't affect DUO!".
 local function hasPart(list, part)
   for _, v in ipairs(list or {}) do
-    if v:find(part, 1, true) then return true end
+    if Wire.plainBattleLine(v):find(part, 1, true) then return true end
   end
   return false
 end
@@ -3568,9 +3585,10 @@ do
   eq(numbered.opened and numbered.record.sim.metronomePool[1].num, 200, "wave 5 num: ...the number reaches the referee")
   local placed = metronomeFight(2, false)
   eq(placed.opened and placed.record.sim.metronomePool[1].num, nil, "wave 5 num: an unnumbered pool has none")
+  -- "^aWAGGLER" / line "used CALLED_A!" on the wire (K17 / K18), read plain.
   local called = function(run)
     for _, text in ipairs(run.texts or {}) do
-      local moveId = text:match("^WAGGLER used (CALLED_%u)")
+      local moveId = Wire.plainBattleLine(text):match("^WAGGLER used (CALLED_%u)")
       if moveId then return moveId end
     end
     return nil
@@ -3640,10 +3658,16 @@ end
 --     (Wire.npcName, Red and Gold) names every seat the trainer is dealt
 --     across -- "TRAINER" when it brought none or one that does not read --
 --     and the referee prints it in the cart's AI item line (pokered
---     AIBattleUseItemText, "<TRAINER> used <ITEM> on <MON>!"); its Red
+--     AIBattleUseItemText, "<TRAINER>" / line "used <ITEM>" / cont "on
+--     <MON>!"; pokecrystal _EnemyUsedOnText, the same three rows -- K18's
+--     breaks, and no K17 mark: neither name goes through a battler's
+--     prefixing macro); its Red
 --     `aiMods` (the class's AIMoveChoiceModification layers) ride on those
 --     seats alone, never on a human's, and an unreadable list refuses the
---     party.  Gold reads the name and no layers.
+--     party.  Gold reads the name and no layers.  The item itself is the
+--     computer's own since K16 (docs/plans/gen12-referee-remaining-gaps.md):
+--     Red's class record (`aiClass`), Gold's `trainerItems` read through
+--     `itemSwitch` -- no NPC bag.
 --   * The line reaches a Red / Gold client whole: Wire.battleEvent keeps
 --     the carts' battle glyphs in a `msg` (é, …, ♂, ♀, &).
 --   * A JSON null inside a ruleset's chart or specialTypes is closed up (the
@@ -3706,29 +3730,37 @@ local function npcFight6(generation, npc, humans, own)
   return out
 end
 
+-- The line whose plain reading (Wire.plainBattleLine: no K17 marks, K18's
+-- breaks as spaces) contains `part`.
 local function lineWith(lines, part)
   for _, l in ipairs(lines or {}) do
-    if l.sent:find(part, 1, true) then return l end
+    if Wire.plainBattleLine(l.sent):find(part, 1, true) then return l end
   end
   return nil
 end
 
 do
-  local xItem = { { id = "X_ATTACK", count = 1 } }
-  local named = npcFight6(1, { name = "COOLTRAINER" .. MALE6, aiMods = { 1, 3 }, bag = xItem })
+  -- K16: the computer's X ATTACK is its class record's, not a bag's.
+  -- TrainerAI draws its byte every turn and `chance` 256 is over any byte
+  -- (the routine's `cp N percent / ret nc` never returns), so the item comes
+  -- on turn 1 -- in the computer's slot, after HERO's move.
+  local xClass = { uses = 2, chance = 256, item = "X_ATTACK" }
+  local named = npcFight6(1, { name = "COOLTRAINER" .. MALE6, aiMods = { 1, 3 }, aiClass = xClass })
   ok(named.opened, "wave 6: a Red trainer naming itself opens")
   eq(named.opened and named.seats[1].name, "COOLTRAINER" .. MALE6, "wave 6: the NPC seat is the trainer's name")
   eq(named.opened and named.seats[1].aiMods and table.concat(named.seats[1].aiMods, ","), "1,3",
      "wave 6: ...and the referee holds its Red move-choice layers")
+  eq(named.opened and named.seats[1].aiClass and named.seats[1].aiClass.item, "X_ATTACK",
+     "wave 6: ...and its TrainerAI record (K16)")
   eq(named.opened and named.ann.name, "ANN", "wave 6: a human seat is still its connection's name")
   eq(named.opened and named.ann.aiMods, nil, "wave 6: ...with no layers")
   local used = named.opened and lineWith(named.lines, " used X ATTACK on ")
-  eq(used and used.sent, "COOLTRAINER" .. MALE6 .. " used X ATTACK on FOE!",
+  eq(used and used.sent, "COOLTRAINER" .. MALE6 .. "\nused X ATTACK\non FOE!",
      "wave 6: the referee prints the cart's AI item line with the trainer's name")
-  eq(used and used.read, "COOLTRAINER" .. MALE6 .. " used X ATTACK on FOE!",
+  eq(used and used.read, "COOLTRAINER" .. MALE6 .. "\nused X ATTACK\non FOE!",
      "wave 6: ...and a Red client reads the line whole, ♂ and all")
 
-  local plain = npcFight6(1, { bag = xItem })
+  local plain = npcFight6(1, { aiClass = xClass })
   eq(plain.opened and plain.seats[1].name, "TRAINER", "wave 6: a trainer naming nothing is TRAINER, as before")
   eq(plain.opened and plain.seats[1].aiMods, nil, "wave 6: ...and brings no layers")
   local bad = npcFight6(1, { name = 42, aiMods = {} })
@@ -3748,15 +3780,24 @@ do
        "wave 6: ...each with its layers (" .. i .. ")")
   end
 
-  local claims = npcFight6(1, { name = "LASS" }, 1, { name = "MALLORY", aiMods = { 2 } })
+  local claims = npcFight6(1, { name = "LASS" }, 1,
+    { name = "MALLORY", aiMods = { 2 }, aiClass = { uses = 1, item = "POTION" } })
   eq(claims.opened and claims.ann.name, "ANN", "wave 6: a human's party cannot rename its own seat")
   eq(claims.opened and claims.ann.aiMods, nil, "wave 6: ...nor hand it layers")
+  eq(claims.opened and claims.ann.aiClass, nil, "wave 6: ...nor a TrainerAI record (K16)")
 
-  local gold = npcFight6(2, { name = "TWINS AMY & MAY", aiMods = { 1 }, bag = xItem })
+  -- K16 on Gold: wEnemyTrainerItem1 is X ATTACK and TRNATTR_AI_ITEM_SWITCH
+  -- has ALWAYS_USE (0x10) and no SWITCH_* bit, so AI_SwitchOrTryItem goes
+  -- straight to AI_TryItem, and `.XItem` on the monster's first turn out
+  -- (wEnemyTurnsTaken 0) uses it with no draw -- turn 1, before HERO moves.
+  local gold = npcFight6(2, { name = "TWINS AMY & MAY", aiMods = { 1 },
+                              trainerItems = { "X_ATTACK" }, itemSwitch = 0x10 })
   eq(gold.opened and gold.seats[1].name, "TWINS AMY & MAY", "wave 6: a Gold trainer's \"<CLASS> <NAME>\" names its seat")
   eq(gold.opened and gold.seats[1].aiMods, nil, "wave 6: ...and Gold reads no Red layers")
+  eq(gold.opened and gold.seats[1].itemSwitch, 0x10, "wave 6: ...but its item / switch flags (K16)")
   local goldLine = gold.opened and lineWith(gold.lines, "TWINS AMY & MAY")
-  ok(goldLine, "wave 6: the Gold referee prints the trainer's name in its item line")
+  eq(goldLine and goldLine.sent, "TWINS AMY & MAY\nused X ATTACK\non FOE!",
+     "wave 6: the Gold referee prints the trainer's name in its item line")
   eq(goldLine and goldLine.read, goldLine and goldLine.sent, "wave 6: a Gold client reads the & whole")
 
   -- A Gold referee line in the cart's own spelling reaches a Gold client whole.
@@ -3806,6 +3847,115 @@ do
     io.write("hub_battle: src.link.Json not reachable from here (run from the engine root); "
       .. "wave 6 decoder checks skipped\n")
   end
+end
+
+-- ------------------------------------------------------------------
+-- K16 of docs/plans/gen12-referee-remaining-gaps.md, through the hub: one
+-- Gold trainer's kit across a 2v2.
+--
+--   * Its TrainerClassAttributes facts -- `trainerItems`, `aiFlags`,
+--     `itemSwitch`, `baseReward` -- ride the side-"b" upload onto every seat
+--     the trainer is dealt across, and the hub hands each of those seats'
+--     entries the SAME `trainerItems` table: that is how the referee knows
+--     the seats are one trainer.
+--   * The referee keeps one kit for that trainer (BattleSim2 Turn
+--     `trainerKitOf`): wEnemyTrainerItem1 / 2 and wEnemyTrainerBaseReward are
+--     the trainer's, so an item either seat uses is gone for both, as the NPC
+--     bag was one bag.  `aiFlags` / `itemSwitch` are read, never spent, and
+--     stay per seat.
+--   * A human's party hands its own seat none of them.
+-- server/hub_battle.test.js pins the same on the Node twin.
+-- ------------------------------------------------------------------
+
+-- ANN and BOB against one Gold trainer of two FOEs, each at a fifth of its HP
+-- (`npc` merged into the side-"b" upload, `own` into ANN's), through turn 1:
+-- the entries the hub handed Turn.create, the seats, and ANN's lines read plain.
+local function kitFight16(npc, own)
+  local hub = Hub.new({ maxPlayers = 4, generation = 2 })
+  hub.forceBattleSeed = 1
+  local seen = spyCreate(hub)
+  local ann, annPeer = join2(hub, "ANN")
+  local bob = join2(hub, "BOB")
+  local id = "k16"
+  hub:openCoopBattle(id, { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  hub:receive(ann, { type = Wire.BATTLE_RULESET, battle = id, chart = CHART2 })
+  local mine = { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet2({ species = "HERO" }) } }
+  for k, v in pairs(own or {}) do mine[k] = v end
+  hub:receive(ann, mine)
+  hub:receive(bob, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { sheet2({ species = "HERO" }) } })
+  local function weak()
+    local sheet = sheet2({ species = "FOE", hp = 100 })
+    sheet.hp = 20
+    return sheet
+  end
+  local theirs = { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { weak(), weak() } }
+  for k, v in pairs(npc or {}) do theirs[k] = v end
+  hub:receive(ann, theirs)
+  local record = hub.battles[id]
+  if not (record and record.sim) then return { opened = false, record = record } end
+  local out = { opened = true, record = record, ann = record.sim.byId[ann.id],
+                annEntry = entryOf(seen, "a", ann.id), seats = {}, entries = {}, lines = {} }
+  for i, npcId in ipairs(record.npcIds) do
+    out.seats[i] = record.sim.byId[npcId]
+    out.entries[i] = entryOf(seen, "b", npcId)
+  end
+  annPeer.outbox = {}
+  hub:receive(ann, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0, target = 3 })
+  hub:receive(bob, { type = Wire.BATTLE_CHOICE, battle = id, action = "fight", move = 0, target = 4 })
+  for _, msg in ipairs(annPeer.outbox) do
+    if msg.type == Wire.BATTLE_EVENT and msg.t == "msg" then
+      out.lines[#out.lines + 1] = Wire.plainBattleLine(msg.text)
+    end
+  end
+  return out
+end
+
+local function countPart(lines, part)
+  local n = 0
+  for _, line in ipairs(lines or {}) do
+    if line:find(part, 1, true) then n = n + 1 end
+  end
+  return n
+end
+
+do
+  -- Both FOEs at a fifth of their HP: AI_TryItem's `.HealItem` (no
+  -- CONTEXT_USE / UNKNOWN_USE) uses a POTION outright at or under a quarter,
+  -- no draw -- so each seat, asked on its own, would drink one.  ALWAYS_USE
+  -- carries no SWITCH_* bit: AI_SwitchOrTryItem goes to the item check alone.
+  local kit = kitFight16({ name = "TWINS AMY & MAY", trainerItems = { "POTION" },
+                           aiFlags = 1, itemSwitch = 0x10, baseReward = 7 })
+  ok(kit.opened, "K16: a Gold 2v2 against one trainer opens")
+  eq(kit.opened and #kit.seats, 2, "K16: ...dealt across two seats")
+  for i = 1, 2 do
+    local entry = kit.opened and kit.entries[i]
+    eq(entry and entry.trainerItems and table.concat(entry.trainerItems, ","), "POTION",
+       "K16: the hub hands seat " .. i .. " the trainer's items")
+    eq(entry and entry.baseReward, 7, "K16: ...and its base reward (" .. i .. ")")
+    eq(kit.opened and kit.seats[i].aiFlags, 1, "K16: the referee holds its AI flags (" .. i .. ")")
+    eq(kit.opened and kit.seats[i].itemSwitch, 0x10, "K16: ...its item / switch flags (" .. i .. ")")
+    eq(kit.opened and kit.seats[i].bag, nil, "K16: ...and no bag (" .. i .. ")")
+  end
+  ok(kit.opened and kit.entries[1].trainerItems == kit.entries[2].trainerItems,
+     "K16: one trainer, one item list -- the same table on both seats' entries")
+  eq(countPart(kit.lines, "TWINS AMY & MAY used POTION on FOE!"), 1,
+     "K16: one POTION is one use -- the second seat finds wEnemyTrainerItem1 spent")
+
+  -- The same fight with a POTION in both slots: each seat drinks one, so the
+  -- single use above is the shared kit and not the second seat declining.
+  local pair = kitFight16({ name = "TWINS AMY & MAY", trainerItems = { "POTION", "POTION" },
+                            itemSwitch = 0x10 })
+  eq(countPart(pair.lines, "TWINS AMY & MAY used POTION on FOE!"), 2,
+     "K16: two POTIONs are two uses, one a seat")
+
+  -- A human's party names none of it for its own seat.
+  local claims = kitFight16({ trainerItems = { "POTION" } },
+    { trainerItems = { "POTION" }, aiFlags = 1, itemSwitch = 0x10, baseReward = 7 })
+  eq(claims.opened and claims.annEntry and claims.annEntry.trainerItems, nil,
+     "K16: a human's party cannot hand its seat trainer items")
+  eq(claims.opened and claims.annEntry and claims.annEntry.baseReward, nil, "K16: ...nor a base reward")
+  eq(claims.opened and claims.ann.aiFlags, nil, "K16: ...nor AI flags")
+  eq(claims.opened and claims.ann.itemSwitch, nil, "K16: ...nor item / switch flags")
 end
 
 -- ------------------------------------------------------------------

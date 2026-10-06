@@ -549,6 +549,13 @@ function testCoopNpcMediated() {
     'and no time passed at all -- the trainer answered in the same breath');
 }
 
+// One trainer, two seats (K16 of docs/plans/gen12-referee-remaining-gaps.md):
+// Red's computer items are its class's TrainerAI record (`aiClass`), not a
+// bag, so the referee keeps no NPC bag -- even one an older client still
+// uploads. The record rides onto both seats, each its own copy (battle Turn
+// `copyAiClass`): it is only read, and what TrainerAI spends is the seat's own
+// wAICount. Gold's shared kit is testK16GoldTrainerKit. Twin of the same block
+// in tests/hub_battle.lua.
 function testCoopNpcTrainerBagShared() {
   const clock = makeClock();
   const relay = makeRelay(clock);
@@ -569,15 +576,22 @@ function testCoopNpcTrainerBagShared() {
     battle: 'c-bag',
     side: 'b',
     mons: [mon(10, 1), mon(10, 1)],
+    aiClass: { uses: 1, item: 'POTION', hpBelow: 5 },
     bag: [{ id: 'POTION', count: 1 }],
   });
-  ok(record.sim !== null, "the fight opens with the trainer's uploaded kit");
-  const bagA = record.sim.byId.get(record.npcIds[0]).bag;
-  const bagB = record.sim.byId.get(record.npcIds[1]).bag;
-  ok(bagA && bagA.POTION === 1,
-    'one potion, the count the trainer actually has');
-  ok(bagB && bagB.POTION === 1, 'visible on the second seat too');
-  ok(bagA === bagB, 'the same table -- spending one spends both');
+  ok(record.sim !== null, "the fight opens with the trainer's class record");
+  const seatA = record.sim.byId.get(record.npcIds[0]);
+  const seatB = record.sim.byId.get(record.npcIds[1]);
+  ok(seatA.bag == null, 'K16: an uploaded NPC bag reaches no seat -- the computer keeps none');
+  ok(seatB.bag == null, 'K16: ...on either seat');
+  const classA = seatA.aiClass;
+  const classB = seatB.aiClass;
+  ok(classA && classA.item === 'POTION', "K16: the first seat holds the trainer's TrainerAI record");
+  ok(classB && classB.item === 'POTION', 'K16: ...and so does the second');
+  ok(classB && classB.hpBelow === 5, 'K16: ...field for field');
+  ok(classA && classA !== classB, "K16: each seat's record is its own copy, not one aliased object");
+  ok(classA && classA !== record.parties.get(record.npcIds[0]).aiClass,
+    "K16: ...nor the hub's own sheet");
 }
 
 function testCoopNpcGuestSideBRefused() {
@@ -600,7 +614,7 @@ function testCoopNpcGuestSideBRefused() {
     battle: 'c-guestb',
     side: 'b',
     mons: [mon(10, 1), mon(10, 1)],
-    bag: [{ id: 'POTION', count: 9 }],
+    aiClass: { uses: 9, item: 'FULL_HEAL' },
   });
   ok(record.sim === null, 'a guest side-b does not open the fight');
   ok(record.parties.get(b.id) && record.parties.get(b.id).mons[0].hp === 100,
@@ -610,12 +624,13 @@ function testCoopNpcGuestSideBRefused() {
     battle: 'c-guestb',
     side: 'b',
     mons: [mon(10, 1), mon(10, 1)],
-    bag: [{ id: 'POTION', count: 1 }],
+    aiClass: { uses: 1, item: 'POTION' },
   });
   ok(record.sim !== null, "the initiator's side-b is what seats the trainer");
-  ok(record.sim.byId.get(record.npcIds[0]).bag
-      && record.sim.byId.get(record.npcIds[0]).bag.POTION === 1,
-    "with the initiator's kit, not the guest's");
+  // On Red the trainer's kit is its class record (K16).
+  const kit = record.sim.byId.get(record.npcIds[0]).aiClass;
+  ok(kit && kit.item === 'POTION', "with the initiator's kit, not the guest's");
+  ok(kit && kit.uses === 1, '...its uses too');
 }
 
 function testCoopNpcBagDump() {
@@ -650,10 +665,13 @@ function testCoopNpcBagDump() {
   const lines = text.trimEnd().split('\n');
   ok(lines[0] === 'coop_npc\t1\t2',
     'dump header is mode, shared, seat count');
-  ok(lines[1] === `${record.npcIds[0]}\tempty=0\tgym=0\theal=1`,
-    'first seat is shape-only: one heal, not the gym seed');
-  ok(lines[2] === `${record.npcIds[1]}\tempty=0\tgym=0\theal=1`,
-    'second seat aliases the same shape');
+  // K16 (docs/plans/gen12-referee-remaining-gaps.md): the Red / Gold referee
+  // keeps no NPC bag -- the computer's items are its class record / trainer
+  // items -- so the bag an older client still uploads reaches neither seat.
+  ok(lines[1] === `${record.npcIds[0]}\tempty=1\tgym=0\theal=0`,
+    'first seat holds no bag: the uploaded one is not the computer\'s (K16)');
+  ok(lines[2] === `${record.npcIds[1]}\tempty=1\tgym=0\theal=0`,
+    'second seat the same');
   ok(text.indexOf('POTION') < 0 && text.indexOf('SUPER_POTION') < 0,
     'item ids never leave the hub (player game sheet stays in the client)');
   ok(text.indexOf('FULL_HEAL') < 0 && text.indexOf('X_ATTACK') < 0,
@@ -3740,8 +3758,10 @@ function sheetOf(generation, species, moves, extra) {
 
 const activeSpecies = (run) => run.fighter.mons[run.fighter.active - 1].species;
 // A line containing `part` (the wording is the referee's; which line it is, is
-// what these checks are about).
-const hasPart = (texts, part) => (texts || []).some((text) => text.includes(part));
+// what these checks are about), read the way every matcher reads a battle line:
+// without its name marks (K17) or the cart's breaks (K18) -- "It doesn't
+// affect" / line "^bDUO!" is "It doesn't affect DUO!".
+const hasPart = (texts, part) => (texts || []).some((text) => sanitize.plainBattleLine(text).includes(part));
 
 function orderFight(generation, order) {
   return wave5Fight(generation, { chart: [[0, 200], [100, 100]], chartOrder: order },
@@ -3841,9 +3861,10 @@ function testWave5PoolNum() {
     'wave 5 num: ...the number reaches the referee');
   const placed = metronomeFight(2, false);
   ok(placed.opened && placed.record.sim.metronomePool[0].num == null, 'wave 5 num: an unnumbered pool has none');
+  // "^aWAGGLER" / line "used CALLED_A!" on the wire (K17 / K18), read plain.
   const called = (run) => {
     for (const text of run.texts || []) {
-      const m = /^WAGGLER used (CALLED_[A-Z])/.exec(text);
+      const m = /^WAGGLER used (CALLED_[A-Z])/.exec(sanitize.plainBattleLine(text));
       if (m) return m[1];
     }
     return null;
@@ -3923,9 +3944,13 @@ function testWave5LineBudget() {
 // Wave 6 of docs/plans/gen12-referee-gaps-fix.md, through the hub: an NPC
 // party's display `name` (Red and Gold) names every seat the trainer is dealt
 // across and its Red `aiMods` ride on those seats alone; the referee's AI item
-// line carries the name and a Red / Gold client reads it whole (é … ♂ ♀ &); a
-// JSON null in a ruleset's chart or specialTypes is closed up as the Lua hub's
-// decoder closes it. Twin of the wave 6 block in tests/hub_battle.lua.
+// line carries the name -- in the carts' three rows (K18), with no K17 mark
+// (neither name goes through a battler's prefixing macro) -- and a Red / Gold
+// client reads it whole (é … ♂ ♀ &); the item is
+// the computer's own since K16 (Red's `aiClass`, Gold's `trainerItems` through
+// `itemSwitch`, no NPC bag); a JSON null in a ruleset's chart or specialTypes
+// is closed up as the Lua hub's decoder closes it. Twin of the wave 6 block in
+// tests/hub_battle.lua.
 // ------------------------------------------------------------------
 
 function npcFight6(generation, npc, humans = 1, own) {
@@ -3969,22 +3994,29 @@ function npcFight6(generation, npc, humans = 1, own) {
   return out;
 }
 
-const lineWith6 = (lines, part) => (lines || []).find((l) => l.sent.includes(part));
+// The line whose plain reading (sanitize.plainBattleLine: no K17 marks, K18's
+// breaks as spaces) contains `part`.
+const lineWith6 = (lines, part) => (lines || []).find((l) => sanitize.plainBattleLine(l.sent).includes(part));
 
 function testWave6NpcSeat() {
-  const xItem = [{ id: 'X_ATTACK', count: 1 }];
-  const named = npcFight6(1, { name: 'COOLTRAINER♂', aiMods: [1, 3], bag: xItem });
+  // K16: the computer's X ATTACK is its class record's, not a bag's. TrainerAI
+  // draws its byte every turn and `chance` 256 is over any byte, so the item
+  // comes on turn 1 -- in the computer's slot, after HERO's move.
+  const xClass = { uses: 2, chance: 256, item: 'X_ATTACK' };
+  const named = npcFight6(1, { name: 'COOLTRAINER♂', aiMods: [1, 3], aiClass: xClass });
   ok(named.opened, 'wave 6: a Red trainer naming itself opens');
   ok(named.seats[0].name === 'COOLTRAINER♂', 'wave 6: the NPC seat is the trainer\'s name');
   ok(JSON.stringify(named.seats[0].aiMods) === '[1,3]', 'wave 6: ...and the referee holds its Red layers');
+  ok(named.seats[0].aiClass && named.seats[0].aiClass.item === 'X_ATTACK',
+    'wave 6: ...and its TrainerAI record (K16)');
   ok(named.ann.name === 'ANN', 'wave 6: a human seat is still its connection\'s name');
   ok(!named.ann.aiMods, 'wave 6: ...with no layers');
   const used = lineWith6(named.lines, ' used X ATTACK on ');
-  ok(used && used.sent === 'COOLTRAINER♂ used X ATTACK on FOE!',
+  ok(used && used.sent === 'COOLTRAINER♂\nused X ATTACK\non FOE!',
     'wave 6: the referee prints the cart\'s AI item line with the trainer\'s name');
   ok(used && used.read === used.sent, 'wave 6: ...and a Red client reads the line whole, ♂ and all');
 
-  const plain = npcFight6(1, { bag: xItem });
+  const plain = npcFight6(1, { aiClass: xClass });
   ok(plain.seats[0].name === 'TRAINER', 'wave 6: a trainer naming nothing is TRAINER, as before');
   ok(!plain.seats[0].aiMods, 'wave 6: ...and brings no layers');
   const bad = npcFight6(1, { name: 42, aiMods: [] });
@@ -4001,15 +4033,25 @@ function testWave6NpcSeat() {
     ok(seat.name === 'LASS' && seat.aiMods[0] === 2, 'wave 6: ...each named the trainer, each with its layers');
   }
 
-  const claims = npcFight6(1, { name: 'LASS' }, 1, { name: 'MALLORY', aiMods: [2] });
+  const claims = npcFight6(1, { name: 'LASS' }, 1,
+    { name: 'MALLORY', aiMods: [2], aiClass: { uses: 1, item: 'POTION' } });
   ok(claims.ann.name === 'ANN', 'wave 6: a human\'s party cannot rename its own seat');
   ok(!claims.ann.aiMods, 'wave 6: ...nor hand it layers');
+  ok(claims.ann.aiClass == null, 'wave 6: ...nor a TrainerAI record (K16)');
 
-  const gold = npcFight6(2, { name: 'TWINS AMY & MAY', aiMods: [1], bag: xItem });
+  // K16 on Gold: wEnemyTrainerItem1 is X ATTACK and TRNATTR_AI_ITEM_SWITCH has
+  // ALWAYS_USE (0x10) and no SWITCH_* bit, so AI_SwitchOrTryItem goes straight
+  // to AI_TryItem, and `.XItem` on the monster's first turn out
+  // (wEnemyTurnsTaken 0) uses it with no draw -- turn 1, before HERO moves.
+  const gold = npcFight6(2, {
+    name: 'TWINS AMY & MAY', aiMods: [1], trainerItems: ['X_ATTACK'], itemSwitch: 0x10,
+  });
   ok(gold.seats[0].name === 'TWINS AMY & MAY', 'wave 6: a Gold trainer\'s "<CLASS> <NAME>" names its seat');
   ok(!gold.seats[0].aiMods, 'wave 6: ...and Gold reads no Red layers');
+  ok(gold.seats[0].itemSwitch === 0x10, 'wave 6: ...but its item / switch flags (K16)');
   const goldLine = lineWith6(gold.lines, 'TWINS AMY & MAY');
-  ok(goldLine, 'wave 6: the Gold referee prints the trainer\'s name in its item line');
+  ok(goldLine && goldLine.sent === 'TWINS AMY & MAY\nused X ATTACK\non FOE!',
+    'wave 6: the Gold referee prints the trainer\'s name in its item line');
   ok(goldLine && goldLine.read === goldLine.sent, 'wave 6: a Gold client reads the & whole');
 
   const perish = sanitize.cleanBattleEvent({
@@ -4041,6 +4083,106 @@ function testWave6RulesetNulls() {
     '{"battle":"b","seq":1,"t":"msg","text":"POK\\u00e9MON \\u2026 \\u2642\\u2640 &"}',
   ), 1);
   ok(line.text === 'POKéMON … ♂♀ &', 'wave 6: \\u escapes decode to the glyphs a Red reader keeps');
+}
+
+// ------------------------------------------------------------------
+// K16 of docs/plans/gen12-referee-remaining-gaps.md, through the hub: one Gold
+// trainer's kit across a 2v2. Its TrainerClassAttributes facts (`trainerItems`,
+// `aiFlags`, `itemSwitch`, `baseReward`) ride the side-"b" upload onto every
+// seat the trainer is dealt across, each seat's entry carrying the SAME
+// `trainerItems` object -- how the referee knows the seats are one trainer.
+// The referee keeps one kit for it (battle2 Turn `trainerKitOf`): an item
+// either seat uses is gone for both; `aiFlags` / `itemSwitch` are read, never
+// spent, and stay per seat. A human's party hands its own seat none of them.
+// Twin of the K16 block in tests/hub_battle.lua.
+// ------------------------------------------------------------------
+
+// ANN and BOB against one Gold trainer of two FOEs, each at a fifth of its HP
+// (`npc` merged into the side-"b" upload, `own` into ANN's), through turn 1:
+// the entries the hub handed Turn.attempt, the seats, and ANN's lines read plain.
+function kitFight16(npc, own) {
+  const relay = makeRelay(makeClock(), { generation: 2 });
+  const seen = spyAttempt(relay);
+  const a = dial2(relay, 'ANN');
+  const b = dial2(relay, 'BOB');
+  const id = 'k16';
+  relay.openCoopBattle(id, [a.id, b.id], { mode: 'coop_npc', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART2 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet2({ species: 'HERO' })], ...(own || {}),
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet2({ species: 'HERO' })],
+  });
+  const weak = () => ({ ...sheet2({ species: 'FOE', hp: 100 }), hp: 20 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [weak(), weak()], ...(npc || {}),
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false, record };
+  const out = {
+    opened: true,
+    record,
+    ann: record.sim.byId.get(a.id),
+    annEntry: entryOf(seen, 'a', a.id),
+    seats: record.npcIds.map((npcId) => record.sim.byId.get(npcId)),
+    entries: record.npcIds.map((npcId) => entryOf(seen, 'b', npcId)),
+    lines: [],
+  };
+  a.peer.outbox.length = 0;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, target: 3,
+  });
+  relay.handle(b.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, target: 4,
+  });
+  out.lines = takeAll(a, 'mmo.battle_event').filter((msg) => msg.t === 'msg')
+    .map((msg) => sanitize.plainBattleLine(msg.text));
+  return out;
+}
+
+const countPart16 = (lines, part) => (lines || []).filter((line) => line.includes(part)).length;
+
+function testK16GoldTrainerKit() {
+  // Both FOEs at a fifth of their HP: AI_TryItem's `.HealItem` (no CONTEXT_USE
+  // / UNKNOWN_USE) uses a POTION outright at or under a quarter, no draw -- so
+  // each seat, asked on its own, would drink one. ALWAYS_USE carries no
+  // SWITCH_* bit: AI_SwitchOrTryItem goes to the item check alone.
+  const kit = kitFight16({
+    name: 'TWINS AMY & MAY', trainerItems: ['POTION'], aiFlags: 1, itemSwitch: 0x10, baseReward: 7,
+  });
+  ok(kit.opened, 'K16: a Gold 2v2 against one trainer opens');
+  ok(kit.opened && kit.seats.length === 2, 'K16: ...dealt across two seats');
+  for (let i = 0; i < 2; i += 1) {
+    const entry = kit.opened && kit.entries[i];
+    ok(entry && entry.trainerItems && entry.trainerItems.join(',') === 'POTION',
+      `K16: the hub hands seat ${i + 1} the trainer's items`);
+    ok(entry && entry.baseReward === 7, `K16: ...and its base reward (${i + 1})`);
+    ok(kit.opened && kit.seats[i].aiFlags === 1, `K16: the referee holds its AI flags (${i + 1})`);
+    ok(kit.opened && kit.seats[i].itemSwitch === 0x10, `K16: ...its item / switch flags (${i + 1})`);
+    ok(kit.opened && kit.seats[i].bag == null, `K16: ...and no bag (${i + 1})`);
+  }
+  ok(kit.opened && kit.entries[0].trainerItems === kit.entries[1].trainerItems,
+    "K16: one trainer, one item list -- the same object on both seats' entries");
+  ok(countPart16(kit.lines, 'TWINS AMY & MAY used POTION on FOE!') === 1,
+    'K16: one POTION is one use -- the second seat finds wEnemyTrainerItem1 spent');
+
+  // The same fight with a POTION in both slots: each seat drinks one, so the
+  // single use above is the shared kit and not the second seat declining.
+  const pair = kitFight16({ name: 'TWINS AMY & MAY', trainerItems: ['POTION', 'POTION'], itemSwitch: 0x10 });
+  ok(countPart16(pair.lines, 'TWINS AMY & MAY used POTION on FOE!') === 2,
+    'K16: two POTIONs are two uses, one a seat');
+
+  // A human's party names none of it for its own seat.
+  const claims = kitFight16({ trainerItems: ['POTION'] },
+    {
+      trainerItems: ['POTION'], aiFlags: 1, itemSwitch: 0x10, baseReward: 7,
+    });
+  ok(claims.opened && claims.annEntry && claims.annEntry.trainerItems == null,
+    "K16: a human's party cannot hand its seat trainer items");
+  ok(claims.opened && claims.annEntry && claims.annEntry.baseReward == null, 'K16: ...nor a base reward');
+  ok(claims.opened && claims.ann.aiFlags == null, 'K16: ...nor AI flags');
+  ok(claims.opened && claims.ann.itemSwitch == null, 'K16: ...nor item / switch flags');
 }
 
 testGen3SimSelection();
@@ -4084,5 +4226,6 @@ testWave5PoolNum();
 testWave5LineBudget();
 testWave6NpcSeat();
 testWave6RulesetNulls();
+testK16GoldTrainerKit();
 
 console.log(`hub_battle: ${passed} checks passed`);
