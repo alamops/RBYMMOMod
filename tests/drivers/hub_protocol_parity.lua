@@ -3643,6 +3643,10 @@ local function factsFight(generation, mode, o)
         weights = weightsOf(entry.mons),
         simWeights = fighter and weightsOf(fighter.mons) or "(no sim)",
       }
+      -- A later wave's own fields (`o.extra`), beside the K16 / K21 ones.
+      if o.extra then
+        for k, v in pairs(o.extra(entry, fighter)) do entries[#entries][k] = v end
+      end
     end
   end
   return {
@@ -3676,6 +3680,130 @@ scenarios[#scenarios + 1] = {
       goldBadType = factsFight(2, "wild", { rules = { battleType = 256 } }),
       caretNames = factsFight(1, "coop_npc", { names = { "^aANN" },
         sideB = { name = "^bLASS" }, foe = { species = "^aFOE" } }),
+    }
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- Wave 2 of docs/plans/gen12-referee-remaining-gaps.md, the wire:
+--
+--   * K22's `quiet` on an `anim`: a Red / Gold reader keeps exactly `true`,
+--     on `anim` alone; anything else is dropped (never refused); a Gen 3 or
+--     unnamed reader reads none.
+--   * K17's side-word marks `^A` / `^B` (HandleScreens' `.Your` / `.Enemy`):
+--     kept, cut and dropped exactly as `^a` / `^b`; a `^` before any other
+--     capital is dropped alone; a Gen 3 or unnamed reader reads no mark.
+--   * K23's Gold `countSpeciesTypes` on an NPC party: 1..2 chart indices
+--     (0..BATTLE_TYPE_MAX - 1, read as Wire.int, a JSON null closed up),
+--     refusing the party otherwise; a reader of another generation -- or of
+--     none -- neither copies nor refuses one.  `npc` reports it beside
+--     `trainerItems`, or "(refused)".
+-- ------------------------------------------------------------------
+
+local function remainingWave2()
+  local function anim(extra) return merged({ battle = "b1", seq = 1, t = "anim", slot = 3, side = "b",
+                                             text = "ABSORB" }, extra) end
+  local function line(text) return { battle = "b1", seq = 1, t = "msg", text = text } end
+  local function party(extra, gen) return merged({ battle = "b1", mons = { sheet12(gen or 1) } }, extra) end
+  local cases = {}
+  local gens = { 1, 2, 3, "none" }
+  for _, gen in ipairs(gens) do
+    local g = gen ~= "none" and gen or nil
+    for _, quiet in ipairs({ true, false, 1, "true", NULL, { true } }) do
+      cases[#cases + 1] = { "event", anim({ quiet = quiet }), g }
+    end
+    cases[#cases + 1] = { "event", anim({ text = "TELEPORT", slot = 0, side = "a", quiet = true }), g }
+    cases[#cases + 1] = { "event", anim({ text = "SLIDE_DOWN_ANIM", quiet = true }), g }
+    cases[#cases + 1] = { "event", merged(line("^bX\nused Y!"), { quiet = true }), g }
+    for _, text in ipairs({
+      "^APOK\195\169MON's\nLIGHT SCREEN fell!",
+      "^BPOK\195\169MON's\nREFLECT faded!",
+      "^C ^^BY ^",
+      "^A",
+      "^B\nX",
+      "^A^aX",
+      string.rep("A", 78) .. "^BXY",
+      string.rep("A", 79) .. "^AXY",
+    }) do
+      cases[#cases + 1] = { "event", line(text), g }
+    end
+  end
+  local tail = {
+    { "npc", party({ countSpeciesTypes = { 3, 7 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { 0, 0 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { "19" } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { NULL, 4 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = NULL }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { 1.5, "0x2" } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = {} }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { a = NULL } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { 1, 2, 3 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { 20 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { -1 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { true } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { "x" } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { { 1 } } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { a = 1 } }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = "FIRE" }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = 7 }, 2), 2 },
+    { "npc", party({ countSpeciesTypes = { 1, 2, 3 } }), 1 },
+    { "npc", party({ countSpeciesTypes = { 1, 2, 3 } }) },
+    { "npc", party({ countSpeciesTypes = { 1, 2 }, generation = 2 }, 2) },
+    { "npc", { battle = "b1", mons = { mon3() }, countSpeciesTypes = { 1, 2, 3 } }, 3 },
+  }
+  for _, case in ipairs(tail) do cases[#cases + 1] = case end
+  return cases
+end
+
+local function readWave2(kind, input, gen)
+  if kind == "event" then return Wire.battleEvent(input, gen) end
+  if kind == "npc" then
+    local read = Wire.battleParty(input, gen)
+    if not read then return "(refused)" end
+    return { countSpeciesTypes = orNil(read.countSpeciesTypes), trainerItems = orNil(read.trainerItems) }
+  end
+  return nil
+end
+
+scenarios[#scenarios + 1] = {
+  name = "remaining_gaps_wave2_dialect",
+  run = function()
+    local out = {}
+    for i, case in ipairs(remainingWave2()) do
+      local kind, input, gen = case[1], decoded(case[2]), case[3]
+      out[i] = { kind = kind, got = orNil(readWave2(kind, input, gen)) }
+    end
+    return out
+  end,
+}
+
+-- ------------------------------------------------------------------
+-- K23, the hubs: `countSpeciesTypes` handed to the Gold referee's
+-- Turn.create on the NPC seat dealt the whole party, and nowhere else.  What
+-- the referee keeps of it is the referee's own pin (BattleSim2 Turn.create,
+-- `copyCountTypes`); no turn is played.
+--
+--   goldOneSeat     one NPC seat holds the trainer's two: it carries them
+--   goldTwoSeats    a 2v2 deal (one monster a seat): no seat holds the count
+--                   the types were stated for, so none carries them
+--   goldHumanClaims a human's own party naming them: its seat carries none
+--   goldBadCount    three entries refuse the party: no fight
+--   redIgnores      a Red trainer's: not read, not copied
+-- ------------------------------------------------------------------
+
+scenarios[#scenarios + 1] = {
+  name = "remaining_gaps_wave2_hub",
+  run = function()
+    local function count(entry)
+      return { countSpeciesTypes = orNil(entry.countSpeciesTypes) }
+    end
+    local stated = { countSpeciesTypes = { 2, 0 } }
+    return {
+      goldOneSeat = factsFight(2, "coop_npc", { sideB = stated, extra = count }),
+      goldTwoSeats = factsFight(2, "coop_npc", { humans = 2, sideB = stated, extra = count }),
+      goldHumanClaims = factsFight(2, "coop_npc", { sideA = stated, extra = count }),
+      goldBadCount = factsFight(2, "coop_npc", { sideB = { countSpeciesTypes = { 1, 2, 3 } }, extra = count }),
+      redIgnores = factsFight(1, "coop_npc", { sideB = { countSpeciesTypes = { 1, 2, 3 } }, extra = count }),
     }
   end,
 }

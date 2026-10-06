@@ -245,22 +245,40 @@ function M.foeMarkWord(generation, mode)
   return row[M.fightKind(mode)] or ""
 end
 
--- `text` with every mark taken out -- and any `^` left over with it, so a
--- stray or malformed mark never reaches the box as a glyph.
+-- ...and the side-word marks (K17's wave-2 bullet): where the cart prints a
+-- *side* word rather than a battler's name -- pokecrystal / pokegold
+-- HandleScreens' `.Your` ("Your@") / `.Enemy` ("Enemy@"), copied into
+-- wStringBuffer1 ahead of "#MON's LIGHT SCREEN fell!" by whose screen it was,
+-- and any other `Your@` / `Enemy@` pair the Gold referee writes -- the
+-- referee writes `^A` (side a) or `^B` (side b) before the rest of the line.
+-- Each console calls its own side "Your", so a viewer says its own side's
+-- (a co-op partner's side is its own) "Your " and the other "Enemy ", on Red
+-- as on Gold (Red's referee simply writes none).
+M.SIDE_WORD_OWN = "Your "
+M.SIDE_WORD_OTHER = "Enemy "
+
+-- `text` with every mark taken out -- name marks and side-word marks alike --
+-- and any `^` left over with it, so a stray or malformed mark never reaches
+-- the box as a glyph.
 function M.stripMarks(text)
   if type(text) ~= "string" then return text end
   if not text:find("^", 1, true) then return text end
-  return (text:gsub("%^[ab]", ""):gsub("%^", ""))
+  return (text:gsub("%^[abAB]", ""):gsub("%^", ""))
 end
 
 -- One referee line as a viewer reads it: a mark on `ownSide`'s monster is
 -- nothing (the cart prints its own player's monster bare), a mark on the other
--- side's is `foeWord`.  `ownSide` nil reads every mark as the other side's.
+-- side's is `foeWord`; a side-word mark is "Your " on `ownSide` and "Enemy "
+-- on the other.  `ownSide` nil reads every mark as the other side's.
 function M.renderMarks(text, ownSide, foeWord)
   if type(text) ~= "string" then return text end
   if not text:find("^", 1, true) then return text end
   foeWord = tostring(foeWord or "")
-  local out = text:gsub("%^([ab])", function(side)
+  local out = text:gsub("%^([abAB])", function(mark)
+    local side = mark:lower()
+    if mark ~= side then
+      return (side == ownSide) and M.SIDE_WORD_OWN or M.SIDE_WORD_OTHER
+    end
     if side == ownSide then return "" end
     return foeWord
   end)

@@ -3377,7 +3377,11 @@ end
 -- An `anim` on the mediated stream, for the Bide reading (MediatedBattle
 -- `noteBideAnim` has the rule): the seat the next used line is about, and a
 -- call this seat filed that the referee reports as BIDE on it.
+--
+-- A `quiet` animation (K22) names nobody's next line and is passed over
+-- (MediatedBattle's twin note has why a cart `_ANIM` still counts).
 function M:noteBideAnim(msg)
+  if msg.quiet == true then return end
   local at = self:medSlotOf(msg)
   self.medAnimSeq, self.medAnimAt = tonumber(msg.seq), at
   if self.callFiled and at ~= nil and at == self.mine
@@ -3387,13 +3391,33 @@ function M:noteBideAnim(msg)
   end
 end
 
--- False when the used line at `seq` follows straight on a move animation on
--- another seat -- a co-op partner's or a foe's, whatever species it names
--- (MediatedBattle `usedLineOurs`).
-function M:usedLineOurs(seq)
+-- False when the used line is another seat's -- a co-op partner's or a
+-- foe's, whatever species it names (MediatedBattle `usedLineOurs`).  A Red /
+-- Gold line says whose it is (K17): a mark on the other side is never ours,
+-- and on ours the seat whose monster it names (`medUsedFrom`).  Otherwise --
+-- an unmarked line, or two namesakes on our side -- the move animation it
+-- follows straight on says, and no animation ahead of it reads as before.
+function M:usedLineOurs(seq, text)
+  local side = type(text) == "string" and text:match("^%^([ab])") or nil
+  if side then
+    if side ~= self:viewerSide() then return false end
+    local from = self:medUsedFrom(text)
+    if from ~= nil then return from == self.mine end
+  end
   seq = tonumber(seq)
   if not (seq and self.medAnimSeq and self.medAnimSeq == seq - 1) then return true end
   return self.medAnimAt == nil or self.medAnimAt == self.mine
+end
+
+-- A METRONOME / MIRROR MOVE this seat filed that called BIDE, read off the
+-- called move's own used line (MediatedBattle `noteCalledBide`): pokered
+-- BideEffect plays XSTATITEM_ANIM on its first turn (K22), so no BIDE
+-- animation names it any more.
+function M:noteCalledBide(text, seq)
+  if not self.callFiled then return end
+  if not self:usedLineOurs(seq, text) then return end
+  self.bideFiled, self.bideSlot = true, self.callFiled
+  self.callFiled = nil
 end
 
 -- ------- Red's MIMIC pick (co-op)
@@ -4110,7 +4134,8 @@ function M:playEvents(events)
       -- the order the turn produced it rather than all at once at the end.
       self.messages[#self.messages + 1] =
         { anim = event.anim, from = event.from, to = event.to,
-          attackerIsPlayer = event.attackerIsPlayer, amount = event.amount }
+          attackerIsPlayer = event.attackerIsPlayer, amount = event.amount,
+          quiet = event.quiet }
     elseif event.kind == "vfx" then
       -- Queued rather than emitted here, so the effect keeps its place in the
       -- stream relative to the lines around it -- a batch arrives all at once,
@@ -6005,6 +6030,55 @@ function M:medViewLine(text)
     ClassicBattle.foeMarkWord(Gen.generation(self.game), self.mode))
 end
 
+-- The seat a Red / Gold used line is about (contract K22), or nil.  The line
+-- names its user behind a side mark (K17, Mediated.usedMoveOf): of that side's
+-- refereed seats, the one whose standing monster bears the name -- or the
+-- side's only seat.  Two namesakes on one side (a trainer's two of a species)
+-- are no reading, and nil leaves the shout where it always went (`acting`).
+-- The anchor the shout needs now that a move that missed brings no animation
+-- row to name its user (pokered handleIfPlayerMoveMissed, pokecrystal
+-- BattleCommand_MoveAnim).
+function M:medUsedFrom(text)
+  if self.gen3 or not self.sim then return nil end
+  local side, _, actor = Mediated.usedMoveOf(text)
+  if not side then return nil end
+  local want = Wire.name(actor)
+  local only, seats, named = nil, 0, nil
+  for index in pairs(self.medFields or {}) do
+    local slot = self.sim:slot(index)
+    if slot and slot.side == side then
+      seats = seats + 1
+      only = index
+      -- The name the plate and the bubble print (`actingMonName`'s reading),
+      -- of the monster shown there or the one the field already holds (a
+      -- send-out earlier in the same batch may not be on screen yet).
+      -- The referee names a monster as its sheet did (`snapshotMons`: the
+      -- nickname, else the species record's display name), so each of those
+      -- is a match.
+      local ok, shown = pcall(self.shownBattlerAt, self, index)
+      local pokemon = self.game and type(self.game.data) == "table" and self.game.data.pokemon or nil
+      local hit = false
+      for _, battler in ipairs({ ok and shown or false, slot.battler or false }) do
+        if type(battler) == "table" then
+          local mon = type(battler.mon) == "table" and battler.mon or {}
+          local def = type(pokemon) == "table" and mon.species ~= nil and pokemon[mon.species] or nil
+          for _, name in ipairs({ battler.name or false, mon.nickname or false, mon.species or false,
+                                  type(def) == "table" and def.name or false }) do
+            if want and type(name) == "string" and Wire.name(name) == want then hit = true end
+          end
+        end
+      end
+      if hit then
+        if named ~= nil and named ~= index then return nil end
+        named = index
+      end
+    end
+  end
+  if named then return named end
+  if seats == 1 then return only end
+  return nil
+end
+
 -- Visual lane for a field slot: allies first (bottom-left), then foes
 -- (top-right) offset by #ally. Field indices stay on the wire; only drawing
 -- keys off this remapping so every client still sees itself on the Gen 1
@@ -7417,6 +7491,9 @@ function M:splitCalloutBeat(row)
   -- guarded its own note this way since the split was written -- this is the
   -- half of that fix the co-op twin never got.
   if row.calledOut then return false end
+  -- A quiet animation (K22) is a look, not an order anybody gave: no shout,
+  -- and no beat held for one.
+  if row.quiet then return false end
 
   local moveName = row.anim
   if Gen3.active() then
@@ -7527,6 +7604,15 @@ local CHARGE_SETUP_MOVES = {
   SOLARBEAM = true, SKULL_BASH = true, RAZOR_WIND = true, SKY_ATTACK = true,
 }
 local VANISH_HIDE_FX = { dig = true, fly = true }
+
+-- FLY's charge turn played as TELEPORT's animation (pokered ChargeEffect's
+-- `ld b, TELEPORT`): the Red referee's `quiet` TELEPORT (contract K22), or the
+-- Gen 2 host-sim alias's `amount` 1.  A TELEPORT that is the move itself
+-- carries neither.  MediatedBattle's twin.
+local function flyChargeTeleport(row)
+  return type(row) == "table" and row.anim == "TELEPORT"
+    and (row.quiet == true or tonumber(row.amount) == 1)
+end
 
 -- The fields a `vfx` record carries beyond the shared kind / slot / side / t.
 -- `fromSlot` is a *field slot*; `battlefieldFxCtx` turns it into the seat index
@@ -7739,6 +7825,54 @@ end
 -- than at the one it actually chose. `seatOnSide` is the same resolution the
 -- lunge already uses, and the blow itself is exact: `splitHitBeat` bursts on
 -- the slot whose bar is about to fall, which is the seat that was really hit.
+-- A quiet animation on the arena (contract K22; MediatedBattle's
+-- `startQuietAnim` is the twin): a move id the referee plays for a beat that
+-- is not its user's own use of the move -- Leech Seed's ABSORB on the seeder,
+-- a trap's per-turn hit, a weather turn, a charge turn (FLY's as TELEPORT,
+-- Gold's as the move's own clip with `amount` 1).  The look alone, on the
+-- seat the row names (`seat`), and no lunge.  FLY's TELEPORT and a charge-turn
+-- FLY / DIG hide the seat, a charge-turn SOLARBEAM-class glows in place, and a
+-- FLY / DIG naming a hidden seat brings it back with no strike (pokecrystal
+-- AppearUserRaiseSub after a miss).  Any other id -- an unknown one included --
+-- wears that move's own look, kept as the beat's palette (`moveVfx`).
+function M:startQuietAnim(row, seat)
+  if type(row) ~= "table" or seat == nil then return nil end
+  local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+  local vanished = self.vanishFlow and self.vanishFlow[seat]
+  if flyChargeTeleport(row) then
+    if not vanished then
+      self:startVanish("fly", seat)
+    end
+  elseif VANISH_MOVES[row.anim] and setup then
+    if not vanished then self:startVanish(row.anim == "DIG" and "dig" or "fly", seat) end
+    return self:startChargeVfx(row, seat)
+  elseif VANISH_MOVES[row.anim] and vanished then
+    self:clearVanishAt(seat)
+    self:emitFx("emerge", seat)
+    return nil
+  elseif setup then
+    return self:startChargeVfx(row, seat)
+  end
+  return self:startLookVfx(row, seat)
+end
+
+-- A move's look worn in place on `seat` -- the `self` delivery whatever the
+-- move's own is, since a quiet beat aims at nobody.
+function M:startLookVfx(row, seat)
+  self.moveVfx = nil
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" or seat == nil then return nil end
+  local animId = row.anim
+  if type(animId) ~= "string" or animId == "" then return nil end
+  local spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  if type(spec) ~= "table" then return nil end
+  self.moveVfx = spec
+  local look = {}
+  for key, value in pairs(spec) do look[key] = value end
+  look.delivery = "self"
+  return self:emitVfx(look, seat, seat)
+end
+
 function M:startMoveVfx(row, lunger)
   self.moveVfx = nil
   if not self:usesBattlefield() then return nil end
@@ -8940,7 +9074,12 @@ function M:startAnim(row)
       end
       -- Still nobody: emit nothing. A lunge that cannot name a seat is a
       -- record the ctx projection throws away one frame later.
-      if lunger ~= nil then
+      if lunger ~= nil and row.quiet then
+        -- K22: a beat that is not the monster's own use of the move -- the
+        -- look alone on the seat the row names, no lunge (`startQuietAnim`).
+        -- Quiet alone: a host-sim TELEPORT alias keeps the path below.
+        self:startQuietAnim(row, lunger)
+      elseif lunger ~= nil then
         local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
         local slideDown = row.anim == "SLIDE_DOWN_ANIM"
         local flyCharge = row.anim == "TELEPORT" and self:slotVanishKind(lunger) == "fly"
@@ -8974,6 +9113,19 @@ function M:startAnim(row)
         self:clearVanishAt(seat)
         self:emitFx("emerge", seat)
       end
+    elseif row.anim == "SLIDE_DOWN_ANIM" then
+      -- Red's DIG turn 1 (pokered ChargeEffect's SLIDE_DOWN_ANIM, K22): the
+      -- monster sinks and stays out of sight, FLY's vanish in the ground's
+      -- version; DIG's release or STATUS_AFFECTED_ANIM brings it back.  The
+      -- rumble is the row's `vfx` (Vfx.CART_ANIM_LOOK).
+      local seat = row.from
+      if seat ~= nil and not (self.vanishFlow and self.vanishFlow[seat]) then
+        self:startVanish("dig", seat)
+      end
+    elseif row.anim == "BLOCKBALL_ANIM" then
+      -- TossBallAnimation's `.BlockBall` (K22): the trainer knocks the ball
+      -- away, so the throw TOSS_ANIM opened is over.
+      self:clearBallFlow()
     else
       self:startBallFx(row)
     end
@@ -8993,10 +9145,21 @@ function M:startAnim(row)
     if lunger ~= nil then
       local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
       local slideDown = row.anim == "SLIDE_DOWN_ANIM"
-      local flyCharge = row.anim == "TELEPORT" and self:slotVanishKind(lunger) == "fly"
       local already = self.vanishFlow and self.vanishFlow[lunger]
+      -- ...and FLY's TELEPORT charge as the Red referee sends it (K22's
+      -- quiet one) hides a seat not hidden yet.
+      local flyCharge = (row.anim == "TELEPORT" and self:slotVanishKind(lunger) == "fly")
+        or (row.quiet and flyChargeTeleport(row) and not already)
       local firstVanish = VANISH_MOVES[row.anim] and not already
-      if firstVanish or slideDown or flyCharge
+      if row.quiet and VANISH_MOVES[row.anim] and already and not setup then
+        -- A quiet FLY / DIG on a hidden seat (K22) is the monster coming back
+        -- with no strike (pokecrystal AppearUserRaiseSub after a miss): the
+        -- pic shows again and the strike's clip is not played.
+        self:clearVanishAt(lunger)
+        self.pendingHit = nil
+        self.animHold = FX_SPAN.fly
+        return true
+      elseif firstVanish or slideDown or flyCharge
           or (VANISH_MOVES[row.anim] and setup and not already) then
         self:startVanish((row.anim == "DIG" or slideDown) and "dig" or "fly", lunger)
         self.pendingHit = nil
@@ -10741,7 +10904,7 @@ function M:uploadMediated()
       -- engine's own trainer battle does.
       Mediated.sendParty(self.transport, self.battleId, npc, "b",
         Mediated.trainerBagEntries(self.trainer, self.game), nil,
-        Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName()))
+        Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName(), npc))
     else
       mod.log:warn("the trainer's party could not be described for a refereed "
         .. "2-on-2 -- report which trainer it was")
@@ -10973,6 +11136,12 @@ function M:medRows(msg)
     -- As this viewer's cart says it (`medViewLine`, K17); the matchers read
     -- the referee's own text with the marks out (Mediated.plainLine).
     say(self:medViewLine(msg.text))
+    -- A used line names its user (`medUsedFrom`, K22): the shout the line
+    -- raises in `update` goes over that seat, not over whoever acted last --
+    -- a move that missed brings no animation row to say who that was.
+    local usedFrom = self:medUsedFrom(msg.text)
+    local said = rows[#rows]
+    if usedFrom and type(said) == "table" and said.kind == "msg" then said.from = usedFrom end
     -- An escape the referee narrated itself (Mediated.escapeLine): the
     -- outcome adds no second one (`onBattleOutcome`).
     if Mediated.escapeLine(msg.text) then self.escapeSaid = true end
@@ -11192,6 +11361,10 @@ function M:medRows(msg)
     -- worn on the arena in the condition's colours (Vfx.forStatusAnim); a
     -- foe's sleep clip is held behind the line it follows (`medAnimBehind`,
     -- flushed by `onBattleEvent`).
+    -- The seat whose `item` this animation may be the look of (K20's X
+    -- item), spent by the first animation behind it, whatever it is.
+    local itemSeat = self.medItemSeat
+    self.medItemSeat = nil
     if index then
       local anim, behind = Mediated.viewerAnim(msg.text, not self:foeSide(index))
       local list = behind and {} or rows
@@ -11200,6 +11373,9 @@ function M:medRows(msg)
       list[#list + 1] = {
         kind = "anim", anim = anim, from = index,
         amount = msg.amount,
+        -- K22: a beat that is not its user's own use of the move -- the look
+        -- alone, no callout (`splitCalloutBeat`), no lunge (`startAnim`).
+        quiet = msg.quiet == true or nil,
         -- Viewer-relative: this client's ally side faces as the player.
         attackerIsPlayer = not self:foeSide(index),
         -- Gen 3 names the move's first target (C5 §7.1 `target`, a field
@@ -11208,10 +11384,22 @@ function M:medRows(msg)
         to = msg.target ~= nil and self:medSlotOf({ slot = msg.target }) or nil,
         spread = msg.spread == 1 or nil,
       }
-      if look then list[#list + 1] = { kind = "vfx", spec = look, slot = index } end
+      -- A blocked ball (BLOCKBALL_ANIM, K22) is knocked away where it was
+      -- going: the seat the thrower aimed at (`ballTargetSlot`).
+      local lookAt = index
+      if anim == "BLOCKBALL_ANIM" then
+        lookAt = self:ballTargetSlot({ from = index, attackerIsPlayer = not self:foeSide(index) })
+          or index
+      end
+      if look then list[#list + 1] = { kind = "vfx", spec = look, slot = lookAt } end
       -- Red's X item is one look, the cart's (K20): XSTATITEM_ANIM plays it,
-      -- so the bag's look for the same item on the same seat is taken back.
-      if look and anim == "XSTATITEM_ANIM" then self:dropItemLook(index) end
+      -- so the bag's look for the same item on the same seat is taken back --
+      -- straight behind that seat's `item` only.  ChargeEffect's and
+      -- BideEffect's turn-1 XSTATITEM_ANIM (K22) has no item behind it and
+      -- plays its plain look.
+      if look and anim == "XSTATITEM_ANIM" and itemSeat ~= nil and itemSeat == index then
+        self:dropItemLook(index)
+      end
       if behind then self.medAnimBehind = list end
     end
 
@@ -11236,6 +11424,9 @@ function M:medRows(msg)
       -- takes its place (`anim`, `dropItemLook`).
       rows[#rows + 1] = { kind = "vfx", spec = look, slot = index, from = index, itemLook = true }
     end
+    -- ...and the seat an X item's XSTATITEM_ANIM behind it may take that look
+    -- over for (the `anim` branch).
+    self.medItemSeat = index
     -- The `item` text is the item's id (Gen 3's, its number), never a line:
     -- the referee's own `msg` beside it is the sentence, on every generation
     -- since wave 5 -- Red's in pokered's words ("ANN used POKe BALL!", a
@@ -11708,7 +11899,8 @@ function M:onBattleEvent(msg)
     local said = Mediated.bideLine1(msg.text, self.medMineName,
       Mediated.bideLabels(self:liveMoves(), self.game), self.confusedNow)
     if said == "start" then
-      if self.bideFiled and self:usedLineOurs(msg.seq) then self.bideOn1 = true end
+      self:noteCalledBide(msg.text, msg.seq)
+      if self.bideFiled and self:usedLineOurs(msg.seq, msg.text) then self.bideOn1 = true end
     elseif said == "release" or said == "end" then
       self.bideOn1, self.bideFiled = nil, nil
     end
@@ -11716,11 +11908,17 @@ function M:onBattleEvent(msg)
   -- A Bide going on (Gold; MediatedBattle's `noteBideLine` has the rule):
   -- our monster's "used BIDE!" (the first turn's only line) or storing line,
   -- and the release that ends it...
+  if msg.t == "msg" and self.callFiled and not self.bideFiled and not self.ownSlots
+     and Gen.generation(self.game) == 2 and not self.gen3
+     and Mediated.bideLine(msg.text, self.medMineName,
+       Mediated.bideLabels(self:liveMoves(), self.game)) == "start" then
+    self:noteCalledBide(msg.text, msg.seq)
+  end
   if msg.t == "msg" and self.bideFiled and not self.ownSlots
      and Gen.generation(self.game) == 2 and not self.gen3 then
     local said = Mediated.bideLine(msg.text, self.medMineName,
       Mediated.bideLabels(self:liveMoves(), self.game))
-    if said == "store" or (said == "start" and self:usedLineOurs(msg.seq)) then
+    if said == "store" or (said == "start" and self:usedLineOurs(msg.seq, msg.text)) then
       self.bideStoring = true
     elseif said == "release" then
       self.bideFiled, self.bideStoring = nil, nil
@@ -15389,7 +15587,7 @@ function M:start(game)
     self.medNpcSheets = self.npcParty
     Mediated.sendParty(self.transport, self.battleId, self.npcParty, "b",
       Mediated.trainerBagEntries(self.trainer, self.game), nil,
-      Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName()))
+      Mediated.npcSeat(self.game, self.trainer, self:trainerIntroName(), self.npcParty))
   end
   -- Which held items this fight's uploads brought (`ownItem3`).
   self.ownItems3 = nil

@@ -3874,6 +3874,8 @@ function factsFight(generation, mode, o = {}) {
         species: orNil(entry.mons && entry.mons[0] && entry.mons[0].species),
         weights: weightsOf(entry.mons),
         simWeights: fighter ? weightsOf(fighter.mons) : '(no sim)',
+        // A later wave's own fields (`o.extra`), beside the K16 / K21 ones.
+        ...(o.extra ? o.extra(entry, fighter) : {}),
       });
     }
   }
@@ -3882,6 +3884,96 @@ function factsFight(generation, mode, o = {}) {
     battleType: seen.opts ? orNil(seen.opts.battleType) : '(no create)',
     simBattleType: sim ? orNil(sim.battleType) : '(no sim)',
     entries,
+  };
+}
+
+/*
+ * Wave 2 of docs/plans/gen12-referee-remaining-gaps.md, the wire: K22's
+ * `quiet` on an `anim` (a Red / Gold reader keeps exactly true, on `anim`
+ * alone), K17's side-word marks `^A` / `^B` (kept, cut and dropped as `^a` /
+ * `^b`), K23's Gold `countSpeciesTypes` on an NPC party (1..2 chart indices,
+ * refusing the party otherwise; other readers neither copy nor refuse). Twin of
+ * remaining_gaps_wave2_dialect in the Lua driver. NULL there is a real null here.
+ */
+function remainingWave2() {
+  const anim = (extra) => ({
+    battle: 'b1', seq: 1, t: 'anim', slot: 3, side: 'b', text: 'ABSORB', ...extra,
+  });
+  const line = (text) => ({
+    battle: 'b1', seq: 1, t: 'msg', text,
+  });
+  const party = (extra, gen) => ({ battle: 'b1', mons: [sheet12(gen || 1)], ...extra });
+  const cases = [];
+  for (const gen of [1, 2, 3, undefined]) {
+    for (const quiet of [true, false, 1, 'true', null, [true]]) cases.push(['event', anim({ quiet }), gen]);
+    cases.push(['event', anim({
+      text: 'TELEPORT', slot: 0, side: 'a', quiet: true,
+    }), gen]);
+    cases.push(['event', anim({ text: 'SLIDE_DOWN_ANIM', quiet: true }), gen]);
+    cases.push(['event', { ...line('^bX\nused Y!'), quiet: true }, gen]);
+    for (const text of [
+      '^APOKéMON\'s\nLIGHT SCREEN fell!',
+      '^BPOKéMON\'s\nREFLECT faded!',
+      '^C ^^BY ^',
+      '^A',
+      '^B\nX',
+      '^A^aX',
+      `${'A'.repeat(78)}^BXY`,
+      `${'A'.repeat(79)}^AXY`,
+    ]) {
+      cases.push(['event', line(text), gen]);
+    }
+  }
+  return [
+    ...cases,
+    ['npc', party({ countSpeciesTypes: [3, 7] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [0, 0] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: ['19'] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [null, 4] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: null }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [1.5, '0x2'] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: { a: null } }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [1, 2, 3] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [20] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [-1] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [true] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: ['x'] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [[1]] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: { a: 1 } }, 2), 2],
+    ['npc', party({ countSpeciesTypes: 'FIRE' }, 2), 2],
+    ['npc', party({ countSpeciesTypes: 7 }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [1, 2, 3] }), 1],
+    ['npc', party({ countSpeciesTypes: [1, 2, 3] })],
+    ['npc', party({ countSpeciesTypes: [1, 2], generation: 2 }, 2)],
+    ['npc', { battle: 'b1', mons: [mon3()], countSpeciesTypes: [1, 2, 3] }, 3],
+  ];
+}
+
+function readWave2(kind, input, gen) {
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'npc') {
+    const read = sanitize.cleanBattleParty(input, gen);
+    if (!read) return '(refused)';
+    return { countSpeciesTypes: orNil(read.countSpeciesTypes), trainerItems: orNil(read.trainerItems) };
+  }
+  return undefined;
+}
+
+/*
+ * K23, the hubs: `countSpeciesTypes` handed to the Gold referee's Turn.create
+ * on the NPC seat dealt the whole party, and nowhere else. Twin of
+ * remaining_gaps_wave2_hub in the Lua driver, whose header argues each fight.
+ */
+function runWave2Hub() {
+  const count = (entry) => ({ countSpeciesTypes: orNil(entry.countSpeciesTypes) });
+  const stated = { countSpeciesTypes: [2, 0] };
+  return {
+    goldOneSeat: factsFight(2, 'coop_npc', { sideB: stated, extra: count }),
+    goldTwoSeats: factsFight(2, 'coop_npc', { humans: 2, sideB: stated, extra: count }),
+    goldHumanClaims: factsFight(2, 'coop_npc', { sideA: stated, extra: count }),
+    goldBadCount: factsFight(2, 'coop_npc', { sideB: { countSpeciesTypes: [1, 2, 3] }, extra: count }),
+    redIgnores: factsFight(1, 'coop_npc', { sideB: { countSpeciesTypes: [1, 2, 3] }, extra: count }),
   };
 }
 
@@ -3920,6 +4012,11 @@ function runRemaining() {
         }),
       },
     },
+    {
+      name: 'remaining_gaps_wave2_dialect',
+      result: remainingWave2().map(([kind, input, gen]) => ({ kind, got: orNil(readWave2(kind, input, gen)) })),
+    },
+    { name: 'remaining_gaps_wave2_hub', result: runWave2Hub() },
   ];
 }
 

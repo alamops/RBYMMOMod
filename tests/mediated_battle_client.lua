@@ -4992,7 +4992,8 @@ do
     n = n + 1
     local id = "w6_" .. n
     local sides = { a = { { playerId = "me", name = "ANN", mons = a, bag = o.bag } },
-                    b = { { playerId = "npc", name = o.nameB or "BOB", mons = b, bag = o.bagB } } }
+                    b = { { playerId = "npc", name = o.nameB or "BOB", mons = b, bag = o.bagB,
+                            aiClass = o.aiClassB } } }
     if o.a2 then sides.a[2] = { playerId = "cal", name = "CAL", mons = o.a2 } end
     local battle = assert(Turn.create({ id = id, mode = mode, seed = o.seed or 7,
       chart = o.chart, choiceTimeout = 60, reconnectGrace = 60, sides = sides }))
@@ -5121,10 +5122,13 @@ do
     eq(Coop.moveNameFromBattleText(line), "BIDE", "moveNameFromBattleText: \"" .. line .. "\"")
   end
   -- ...and the computer's item line (Red's AIBattleUseItemText) shouts the item.
+  -- The computer uses its class's item at its own slot (K16: TrainerAI off
+  -- the seat's `aiClass`, BlaineAI-shaped -- no roll gate, no HP gate); a
+  -- bag on its seat decides nothing any more.
   local _, iStep, iAll = fightOf(Red.Turn, "coop_npc", { red("ALPHA", { mv("THUMP", 0, { power = 1 }) }) },
     { red("BETA", { mv("THUMP", 0, { power = 1 }) }, { hp = 50 }) },
-    { bagB = { POTION = 1 }, nameB = "BUG CATCHER" })
-  iStep(F(), { action = "item", item = "POTION" })
+    { aiClassB = { uses = 1, item = "POTION" }, nameB = "BUG CATCHER" })
+  iStep(F(), F())
   local itemLine = find(said(iAll), " used POTION on ")
   check(itemLine ~= nil, "real lines (Red computer item): \"<TRAINER> used <ITEM> on <MON>!\"")
   eq(Coop.moveNameFromBattleText(itemLine or ""), "POTION",
@@ -6616,6 +6620,329 @@ do
     local rules
     for _, m in ipairs(transport.sent) do if m.t == Wire.BATTLE_RULESET then rules = m.p end end
     eq(rules and rules.battleType, 4, "K21: the screen uploads it on the ruleset")
+  end
+end
+
+-- ------------------------------------------------------------------
+-- wave 2 of docs/plans/gen12-referee-remaining-gaps.md: K17's side-word
+-- marks, K22's quiet animations and the callout on the used line, the new
+-- cart animation ids, K23's count-as-species types.  Every name and number
+-- here is invented.
+-- ------------------------------------------------------------------
+do
+  local CB = need("ClassicBattle")
+  local Vfx = need("Vfx")
+  local FOE = Config.COOP_SIDE
+
+  -- ------- K17: side-word marks ("Your " / "Enemy ")
+  eq(CB.renderMarks("^APOK\195\169MON's\nLIGHT SCREEN fell!", "a", "Enemy "),
+     "Your POK\195\169MON's\nLIGHT SCREEN fell!", "K17: our own side's word is Your (HandleScreens .Your)")
+  eq(CB.renderMarks("^BPOK\195\169MON's\nLIGHT SCREEN fell!", "a", "Enemy "),
+     "Enemy POK\195\169MON's\nLIGHT SCREEN fell!", "K17: ...the other side's Enemy (.Enemy)")
+  eq(CB.renderMarks("^BPOK\195\169MON's\nLIGHT SCREEN fell!", "b", "Enemy "),
+     "Your POK\195\169MON's\nLIGHT SCREEN fell!", "K17: ...read from side b, side b is Your")
+  eq(CB.renderMarks("^A^aX", nil, "Enemy "), "Enemy Enemy X", "K17: no own side reads every mark as the other's")
+  eq(CB.stripMarks("^APOKE^B"), "POKE", "K17 stripMarks: a side-word mark never reaches the box")
+  eq(CB.plainLine("^APOK\195\169MON's\nLIGHT SCREEN fell!"), "POK\195\169MON's LIGHT SCREEN fell!",
+     "K17 plainLine: drops a side-word mark")
+  do
+    local gf = screenFor(goldGame({ goldMon("CHARMANDER", nil, 4321) }), "1v1", "k17w", { peerName = "SILVER" })
+    gf.mySide = "b"
+    eq(gf:viewLine("^BPOK\195\169MON's\nREFLECT faded!"), "Your POK\195\169MON's\nREFLECT faded!",
+       "K17 (Gold, side b): its own screen fell, said Your")
+    eq(gf:viewLine("^APOK\195\169MON's\nREFLECT faded!"), "Enemy POK\195\169MON's\nREFLECT faded!",
+       "K17 (Gold, side b): the other side's, said Enemy")
+    local rf = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "k17r")
+    eq(rf:viewLine("^APOKE\n^BPOKE"), "Your POKE\nEnemy POKE", "K17 (Red): the same words on Red")
+  end
+
+  -- ------- K22: the used line's parts
+  local side, move, actor = Mediated.usedMoveOf("^aCHARMANDER\nused EMBER!")
+  eq(table.concat({ side or "-", move or "-", actor or "-" }, "|"), "a|EMBER|CHARMANDER",
+     "K22 usedMoveOf: side, move and user off the marked used line")
+  side, move = Mediated.usedMoveOf("^bSQUIRTLE\nused instead,\nHYDRO PUMP!")
+  eq(table.concat({ side or "-", move or "-" }, "|"), "b|HYDRO PUMP",
+     "K22 usedMoveOf: a disobedient pick's move (_UsedInsteadText)")
+  eq(Mediated.usedMoveOf("RED used POTION!"), nil, "K22 usedMoveOf: an item line (no mark) is no used line")
+  eq(Mediated.usedMoveOf("^aCHARMANDER's\nattack missed!"), nil, "K22 usedMoveOf: ...nor any other line")
+  eq(Mediated.usedMoveOf(nil), nil, "K22 usedMoveOf: not a string")
+
+  -- An arena screen with both seats standing and the intro drained.
+  local function arenaFor(game, mode, tag)
+    local f, ev = screenFor(game, mode, tag, { peerName = "BLUE" })
+    f.usesBattlefield = function() return true end
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    ev({ t = "send", slot = FOE, side = "b", mon = 0, text = "SQUIRTLE", hp = 30 })
+    local guard = 0
+    while (#f.lines > 0 or f.anim or f.shown) and guard < 2000 do
+      f:update(1 / 60); guard = guard + 1
+    end
+    f.fx, f.battlefieldBubbles, f.seenFx = nil, nil, nil
+    return f, ev
+  end
+  local function calloutRows(f)
+    local out = {}
+    for i, row in ipairs(f.lines) do
+      if type(row) == "table" and row.callout then out[#out + 1] = i end
+    end
+    return out
+  end
+  -- Every effect a screen has emitted since its `fx` was last cleared,
+  -- retired ones included (`seen`, kept by `pump`), or live now.
+  local function sawFx(f, kind)
+    for _, e in ipairs(f.fx or {}) do if e.kind == kind then return e end end
+    for _, e in ipairs(f.seenFx or {}) do if e.kind == kind then return e end end
+    return nil
+  end
+  local function pump(f, limit)
+    local guard = 0
+    while (#f.lines > 0 or f.anim or f.shown) and guard < (limit or 2000) do
+      f:update(1 / 60); guard = guard + 1
+      f.seenFx = f.seenFx or {}
+      for _, e in ipairs(f.fx or {}) do f.seenFx[#f.seenFx + 1] = e end
+    end
+    return guard
+  end
+
+  -- ------- K22: a missed move still calls out, on its used line
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22m")
+    ev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+    ev({ t = "msg", text = "^aCHARMANDER's\nattack missed!" })
+    local at = calloutRows(f)
+    eq(#at, 1, "K22 miss: the used line queues its own callout (no animation brings one)")
+    local lineAt
+    for i, row in ipairs(f.lines) do if row == "CHARMANDER\nused EMBER!" then lineAt = i end end
+    check(at[1] ~= nil and lineAt ~= nil and at[1] < lineAt, "K22 miss: ...a beat ahead of the line")
+    f:update(1 / 60)
+    local bubble = f.battlefieldBubbles and f.battlefieldBubbles[1]
+    eq(bubble and bubble.moveName, "EMBER", "K22 miss: the bubble calls the move the line names")
+    eq(bubble and bubble.side, "ally", "K22 miss: ...over our own trainer")
+    eq(f.shown, nil, "K22 miss: ...and the line waits behind the callout beat")
+    local frames = pump(f)
+    check(frames < 2000, "K22 miss: nothing waits on an animation that never comes (" .. frames .. " frames)")
+    eq(sawFx(f, "lunge"), nil, "K22 miss: no lunge -- there was no animation")
+    -- The foe's miss in a trainer fight calls out over the foe's trainer.
+    ev({ t = "turn", amount = 2 })
+    ev({ t = "msg", text = "^bSQUIRTLE\nused HYDRO PUMP!" })
+    local row = f.lines[calloutRows(f)[1] or 0]
+    eq(row and row.side, "b", "K22 miss: the foe's used line calls out on side b")
+  end
+  -- ...but a used line behind its own animation raises nothing more.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22a")
+    ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+    ev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+    eq(#calloutRows(f), 0, "K22 hit: the animation ahead of the line shouts; the line queues no second callout")
+    f:update(1 / 60)
+    eq(f.battlefieldBubbles and f.battlefieldBubbles[1].moveName, "EMBER", "K22 hit: the animation's shout, as before")
+  end
+  -- ...and an animation behind a line that already shouted lunges alone.
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22b")
+    ev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+    ev({ t = "anim", slot = 0, side = "a", text = "EMBER" })
+    eq(#calloutRows(f), 1, "K22 line first: the line shouts")
+    local animRow
+    for _, row in ipairs(f.lines) do if type(row) == "table" and row.anim == "EMBER" then animRow = row end end
+    eq(animRow and animRow.calledOut, true, "K22 line first: the animation behind it is the lunge alone")
+    pump(f)
+    check(sawFx(f, "lunge") ~= nil, "K22 line first: ...and it does lunge")
+  end
+  -- No bubble anybody could see: no callout row at all.
+  do
+    local wf, wev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "wild", "k22w")
+    wev({ t = "msg", text = "^bSQUIRTLE\nused HYDRO PUMP!" })
+    eq(#calloutRows(wf), 0, "K22: a wild foe's used line queues no callout (no trainer to shout)")
+    local cf, cev = screenFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22c", { peerName = "BLUE" })
+    cf.usesBattlefield = function() return false end
+    cev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+    eq(#calloutRows(cf), 0, "K22: the classic page queues none either")
+  end
+
+  -- ------- K22: a quiet animation is a look, no callout and no lunge
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22q")
+    ev({ t = "anim", slot = FOE, side = "b", text = "EMBER", quiet = true })
+    ev({ t = "msg", text = "^aCHARMANDER's\nhealth is sapped!" })
+    f:update(1 / 60)
+    eq(f.battlefieldBubbles, nil, "K22 quiet: no callout bubble")
+    local look = sawFx(f, "vfx")
+    eq(sawFx(f, "lunge"), nil, "K22 quiet: no lunge")
+    check(look ~= nil, "K22 quiet: the move's look plays")
+    eq(look and look.side, "foe", "K22 quiet: ...on the seat the event names")
+    eq(look and look.delivery, "self", "K22 quiet: ...in place, aimed at nobody")
+    eq(look and look.palette, "FIRE", "K22 quiet: ...in that move's colours")
+    check(pump(f) < 2000, "K22 quiet: the queue moves on")
+    -- An id this client has never heard of still plays a look (Gold's own
+    -- residual / charge ids, sent quiet).
+    f.fx, f.seenFx = nil, nil
+    ev({ t = "anim", slot = FOE, side = "b", text = "SOME_GOLD_TRAP", quiet = true })
+    f:update(1 / 60)
+    check(sawFx(f, "vfx") ~= nil and sawFx(f, "lunge") == nil and f.battlefieldBubbles == nil,
+          "K22 quiet: an unknown move id plays its (fallback) look and nothing else")
+    -- A quiet beat is nobody's used line: the miss behind it still calls out.
+    pump(f)
+    ev({ t = "msg", text = "^aCHARMANDER\nused EMBER!" })
+    eq(#calloutRows(f), 1, "K22 quiet: a quiet animation ahead of a used line does not count as its shout")
+  end
+
+  -- ------- K22: FLY's charge as TELEPORT, DIG's as SLIDE_DOWN_ANIM
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22f")
+    ev({ t = "anim", slot = 0, side = "a", text = "TELEPORT", quiet = true })
+    f:update(1 / 60)
+    eq(f:slotVanishKind(0), "fly", "K22 FLY: the quiet TELEPORT hides the monster as FLY's charge")
+    check(sawFx(f, "vfx") ~= nil, "K22 FLY: ...wearing TELEPORT's look")
+    eq(sawFx(f, "lunge"), nil, "K22 FLY: ...with no lunge")
+    eq(f.battlefieldBubbles, nil, "K22 FLY: ...and no callout")
+    pump(f)
+    check(f:seatVanished(0), "K22 FLY: the seat stays hidden into the next turn")
+    f.fx, f.seenFx = nil, nil
+    ev({ t = "msg", text = "^aCHARMANDER\nused FLY!" })
+    ev({ t = "anim", slot = 0, side = "a", text = "FLY" })
+    pump(f)
+    eq(f:seatVanished(0), false, "K22 FLY: the release brings it back")
+    check(sawFx(f, "emerge") ~= nil and sawFx(f, "lunge") ~= nil, "K22 FLY: ...emerging into the strike")
+    -- A TELEPORT that is the move itself hides nobody.
+    f.fx, f.seenFx = nil, nil
+    ev({ t = "anim", slot = FOE, side = "b", text = "TELEPORT" })
+    pump(f)
+    eq(f:seatVanished(FOE), false, "K22: the move TELEPORT (not quiet) is no FLY charge")
+    -- DIG: SLIDE_DOWN_ANIM sinks it; STATUS_AFFECTED_ANIM shows it again.
+    f.fx, f.seenFx = nil, nil
+    ev({ t = "anim", slot = 0, side = "a", text = "SLIDE_DOWN_ANIM" })
+    pump(f)
+    eq(f:slotVanishKind(0), "dig", "K22 DIG: SLIDE_DOWN_ANIM leaves the monster hidden, as DIG")
+    local rumble
+    for _, e in ipairs(f.fx or {}) do if e.kind == "vfx" and e.style == "quake" then rumble = e end end
+    check(rumble ~= nil, "K22 DIG: ...under the slide's rumble (Vfx.CART_ANIM_LOOK)")
+    ev({ t = "anim", slot = 0, side = "a", text = "STATUS_AFFECTED_ANIM" })
+    pump(f)
+    eq(f:seatVanished(0), false, "K22 DIG: STATUS_AFFECTED_ANIM (a cut-short DIG) shows it again")
+    -- Gold's charge turn: the move's own clip, quiet, `amount` 1.
+    ev({ t = "anim", slot = FOE, side = "b", text = "DIG", amount = 1, quiet = true })
+    pump(f)
+    eq(f:slotVanishKind(FOE), "dig", "K22 (Gold): a quiet charge-turn DIG hides its user")
+    ev({ t = "anim", slot = FOE, side = "b", text = "DIG", quiet = true })
+    f.fx, f.seenFx = nil, nil
+    pump(f)
+    eq(f:seatVanished(FOE), false, "K22 (Gold): a quiet DIG on the hidden seat brings it back")
+    eq(sawFx(f, "lunge"), nil, "K22 (Gold): ...with no strike")
+  end
+
+  -- ------- K22: the blocked ball, and an X item's look with no item
+  for _, id in ipairs({ "BLOCKBALL_ANIM", "SLIDE_DOWN_ANIM" }) do
+    local look = Vfx.forStatusAnim(id)
+    check(type(look) == "table" and Vfx.STYLES[look.style] ~= nil and Vfx.PALETTES[look.palette] ~= nil,
+          "K22: " .. id .. " has a look")
+  end
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "coop_npc", "k22t")
+    ev({ t = "anim", slot = 0, side = "a", text = "TOSS_ANIM" })
+    ev({ t = "anim", slot = 0, side = "a", text = "BLOCKBALL_ANIM" })
+    local knock
+    for _, row in ipairs(f.lines) do
+      if type(row) == "table" and row.vfxrow and row.vfxrow.style == "impact" then knock = row end
+    end
+    eq(knock and knock.slot, FOE, "K22 BLOCKBALL_ANIM: the knock plays where the ball was thrown")
+    pump(f)
+    eq(f.ballFlow, nil, "K22 BLOCKBALL_ANIM: ...and closes the throw")
+  end
+  do
+    local f, ev = arenaFor(gameWith({ mon("CHARMANDER") }, K_RED), "1v1", "k22x")
+    local function looks()
+      local n = 0
+      for _, row in ipairs(f.lines) do if type(row) == "table" and row.vfxrow then n = n + 1 end end
+      return n
+    end
+    ev({ t = "anim", slot = 0, side = "a", text = "XSTATITEM_ANIM" })
+    eq(looks(), 1, "K22: a charge turn's XSTATITEM_ANIM (no item behind it) plays its plain look")
+    pump(f)
+    -- An item whose look an animation on another seat separated from it.
+    ev({ t = "item", slot = 0, side = "a", text = "X_ATTACK" })
+    ev({ t = "anim", slot = FOE, side = "b", text = "GROWL_ANIM_NONE" })
+    ev({ t = "anim", slot = 0, side = "a", text = "XSTATITEM_ANIM" })
+    eq(looks(), 2, "K22: an XSTATITEM_ANIM not straight behind its seat's item takes no bag look over")
+  end
+
+  -- ------- K23: Gold / Silver's count-as-species types
+  do
+    local data = setmetatable({ pokemon = {
+      BETA = { name = "BETA", index = 1, dex = 1, types = { "NORMAL", "NORMAL" } },
+      ALPHA = { name = "ALPHA", index = 2, dex = 2, types = { "WATER", "FIRE" } },
+      CHARMANDER = DATA.pokemon.CHARMANDER, SQUIRTLE = DATA.pokemon.SQUIRTLE,
+    } }, { __index = DATA })
+    local game = goldGame({ goldMon("CHARMANDER", nil, 4321) }, data)
+    eq(table.concat(Mediated.countSpeciesTypes2(game, 2) or {}, ","), "2,0",
+       "K23: the species numbered the party's size, its two types as chart indices")
+    eq(table.concat(Mediated.countSpeciesTypes2(game, 1) or {}, ","), "1,1",
+       "K23: a mono-typed species, its byte twice")
+    eq(Mediated.countSpeciesTypes2(game, 3), nil, "K23: no species with that number, none stated")
+    eq(Mediated.countSpeciesTypes2(game, 7), nil, "K23: a count past a party's six is none")
+    eq(Mediated.countSpeciesTypes2(gameWith({}, K_RED), 2), nil, "K23: Red states none")
+    local seat = Mediated.npcSeat(game, { name = "SCOUT", attributes = { 0, 0, 30, 0, 0, 0, 0 } }, nil,
+      { { species = "X" }, { species = "Y" } })
+    eq(table.concat(seat.countSpeciesTypes or {}, ","), "2,0", "K23: npcSeat states it for the party it is given")
+    eq(Mediated.npcSeat(game, { name = "SCOUT" }).countSpeciesTypes, nil, "K23: ...and none with no party")
+    local t = recorder()
+    Mediated.sendParty(t, "k23", { { species = "X" }, { species = "Y" } }, "b", nil, nil, seat)
+    local p = t.sent[1] and t.sent[1].p or {}
+    eq(table.concat(p.countSpeciesTypes or {}, ","), "2,0", "K23: sendParty carries it")
+    local packed = Wire.battleParty({ battle = "k23w", side = "b", generation = 2,
+      countSpeciesTypes = seat.countSpeciesTypes,
+      mons = Mediated.snapshotMons(game, { goldMon("SQUIRTLE"), goldMon("CHARMANDER") }) }, 2)
+    eq(packed and table.concat(packed.countSpeciesTypes or {}, ","), "2,0", "K23: Wire.battleParty takes it")
+    -- The screen's own NPC upload.
+    local nf = screenFor(game, "coop_npc", "k23n", { trainer = { name = "SCOUT" },
+      npcParty = Mediated.snapshotMons(game, { goldMon("SQUIRTLE"), goldMon("CHARMANDER") }) })
+    local npc
+    for _, m in ipairs(nf.transport.sent) do
+      if m.t == Wire.BATTLE_PARTY and m.p.side == "b" then npc = m.p end
+    end
+    eq(npc and table.concat(npc.countSpeciesTypes or {}, ","), "2,0",
+       "K23: a Gold trainer fight's side-b upload states it")
+    -- Crystal walks wOTPartySpecies (its fix): no field.
+    package.loaded["src.core.GameVersion"] = {
+      ORDER = { "red", "gold", "crystal" },
+      VERSIONS = { red = { generation = 1 }, gold = { generation = 2 }, crystal = { generation = 2 } },
+      get = function() return "crystal" end,
+      engine = function(v) return v == "crystal" and "crystal" or "gs" end,
+    }
+    local ok, crystal = pcall(Mediated.countSpeciesTypes2, game, 2)
+    package.loaded["src.core.GameVersion"] = nil
+    check(ok and crystal == nil, "K23: Crystal states none (pokecrystal fixed the walk)")
+  end
+
+  -- ------- Gold's weather lines, broken where the cart breaks them (T2)
+  do
+    local Effects2 = need("BattleSim2/Effects")
+    local keys = { rain = "RAIN", sun = "SUN", sandstorm = "SAND" }
+    for kind, lines in pairs(Effects2.WEATHER_LINES) do
+      eq(Mediated.weatherOfLine2(lines.start), keys[kind], "weather (Gold): " .. kind .. "'s start line, as sent")
+      eq(Mediated.weatherOfLine2(lines.continues), keys[kind], "weather (Gold): " .. kind .. "'s continue line")
+      eq(Mediated.weatherOfLine2(lines.ended), false, "weather (Gold): " .. kind .. "'s end line")
+    end
+  end
+
+  -- ------- K22: a METRONOME this client filed that called BIDE, off the line
+  do
+    local game = gameWith({ mon("CHARMANDER", { moves = { { id = "EMBER", pp = 25 } } }) }, K_RED)
+    local f, ev = screenFor(game, "1v1", "k22bide", { peerName = "BLUE" })
+    ev({ t = "send", slot = 0, side = "a", mon = 0, text = "CHARMANDER", hp = 30 })
+    f.callFiled = 1
+    ev({ t = "msg", text = "^aCHARMANDER\nused METRONOME!" })
+    eq(f.bideFiled, nil, "K22 Bide: the call's own line is no Bide")
+    ev({ t = "msg", text = "^bCHARMANDER\nused BIDE!" })
+    eq(f.bideFiled, nil, "K22 Bide: the other side's namesake using BIDE is not ours (its mark says so)")
+    ev({ t = "msg", text = "^aCHARMANDER\nused BIDE!" })
+    eq(f.bideFiled, true, "K22 Bide: the called BIDE's own used line files the Bide (no BIDE animation comes)")
+    eq(f.bideOn1, true, "K22 Bide: ...and Red's reading starts it")
+    local before = f.animSeq
+    ev({ t = "anim", slot = FOE, side = "b", text = "EMBER", quiet = true })
+    eq(f.animSeq, before, "K22 Bide: a quiet animation names nobody's next line")
+    ev({ t = "anim", slot = FOE, side = "b", text = "SLP_ANIM" })
+    check(f.animSeq ~= before, "K22 Bide: ...where a cart _ANIM (the user's own clip) still does")
   end
 end
 

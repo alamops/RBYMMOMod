@@ -59,6 +59,7 @@ These ride on the side-b NPC `BATTLE_PARTY` upload, like `aiMods` and `name`. Th
 - **Its own side:** nothing.
 - **The other side, Red:** "Enemy " (wild or trainer, link included).
 - **The other side, Gold:** "Enemy " in every mode. pokecrystal / pokegold PlaceBattlersName always places EnemyText ("Enemy @"); PlaceEnemysName tests wLinkMode / wTrainerClass and places a *trainer's* name, never a monster's. (The first draft of this contract said "Wild " in wild fights; W1-C found it wrong against `home/text.asm`, and the client follows the cart.)
+- **Side-word marks (added in wave 2):** where the cart prints a *side* word rather than a battler name (pokecrystal HandleScreens' `.Your` / `.Enemy` strings before "#MON's\nLIGHT SCREEN fell!", and any other `Your@` / `Enemy@` pair the Gold referee's audit finds), the referee writes `^A` (side a) or `^B` (side b) immediately before the rest. The client renders it "Your " on its own side (a co-op partner's side counts as its own) and "Enemy " on the other; plain reading drops it. Wire / sanitize keep `^A` / `^B` exactly as they keep `^a` / `^b`.
 - **Referee obligations:** a mark goes before a battler's name only (a mark before a trainer's name would render "Enemy <TRAINER>"); the `faint` event's text stays the bare species and the referee emits no "fainted!" line of its own (the client composes "Enemy X\nfainted!" / "X\nfainted!" per viewer); `run` events carry the runner's slot and side.
 
 **Every line is read without its marks:**

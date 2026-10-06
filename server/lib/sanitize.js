@@ -183,8 +183,12 @@ const BATTLE_TEXT_OK = /[A-Za-z0-9 .,!?'\-:;()/&é…♂♀]/;
  * No name reader here has a `^`. Twin of Wire.BATTLE_MARK /
  * Wire.BATTLE_MARK_SIDES.
  */
+// `^A` / `^B` are K17's side-word marks (wave 2): pokecrystal HandleScreens'
+// `.Your` / `.Enemy` and any other `Your@` / `Enemy@` pair the Gold referee
+// writes -- the viewer prints "Your " for its own side, "Enemy " for the
+// other. Kept, cut and dropped exactly as `^a` / `^b`.
 const BATTLE_MARK = '^';
-const BATTLE_MARK_SIDES = new Set(['a', 'b']);
+const BATTLE_MARK_SIDES = new Set(['a', 'b', 'A', 'B']);
 
 /*
  * The walker both readers share, line for line with Wire.lua's battleGlyphs:
@@ -253,14 +257,14 @@ function cleanBattleLine(value, limit) {
   return battleGlyphs(value, limit === undefined || limit === null ? BATTLE_LINE_MAX : limit, true);
 }
 
-// The same line as one plain sentence: each mark gone, each break a space -- or
-// nothing after a hyphen, the word the cart split over two rows ("It's super-"
-// / "effective!") -- for a matcher, a driver or a test that reads a line's
-// words. Anything that is not a string comes back as it went in. Twin of
-// Wire.plainBattleLine.
+// The same line as one plain sentence: each mark gone (`^a` `^b` `^A` `^B`),
+// each break a space -- or nothing after a hyphen, the word the cart split over
+// two rows ("It's super-" / "effective!") -- for a matcher, a driver or a test
+// that reads a line's words. Anything that is not a string comes back as it
+// went in. Twin of Wire.plainBattleLine.
 function plainBattleLine(text) {
   if (typeof text !== 'string') return text;
-  return text.replace(/\^[ab]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
+  return text.replace(/\^[abAB]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
 }
 
 // The trainer an NPC seat is: the name the cart prints for the computer
@@ -1990,10 +1994,15 @@ function cleanBattleMon(raw) {
     mon.evs = evs;
   }
 
-  if (!Array.isArray(raw.moves)) return null;
-  if (raw.moves.length < 1 || raw.moves.length > BATTLE_MOVE_MAX) return null;
+  // Both lists are read as the Lua decoder leaves them (luaList): a JSON null
+  // in one is no entry on Wire.lua's side, so `[null, m]` was a sheet the Lua
+  // hub kept and this one refused, and `types: [null, 12]` the same (the
+  // differential fuzzer of docs/plans/gen12-referee-remaining-gaps.md wave 2).
+  const moveList = luaList(raw.moves);
+  if (!moveList) return null;
+  if (moveList.length < 1 || moveList.length > BATTLE_MOVE_MAX) return null;
   const moves = [];
-  for (const entry of raw.moves) {
+  for (const entry of moveList) {
     // This sheet's own dialect (1 or 2, resolved above), so a stray `num` on a
     // row is ignored rather than sending the row to the Gen 3 reader.
     const move = cleanBattleMove(entry, generation);
@@ -2004,9 +2013,10 @@ function cleanBattleMon(raw) {
 
   // Optional defender types as chart indices. Absent → sim default type 0.
   if (raw.types !== undefined && raw.types !== null) {
-    if (!Array.isArray(raw.types)) return null;
+    const typeList = luaList(raw.types);
+    if (!typeList) return null;
     const types = [];
-    for (const entry of raw.types) {
+    for (const entry of typeList) {
       if (types.length >= 2) break;
       const t = cleanInt(entry, 0, BATTLE_TYPE_MAX - 1);
       if (t === null) return null;
@@ -2395,6 +2405,31 @@ function cleanTrainerItems(value) {
   return out;
 }
 
+/*
+ * Gold's slot-1 resist reading (contract K23 of
+ * docs/plans/gen12-referee-remaining-gaps.md): pokegold
+ * FindEnemyMonsThatResistPlayer starts its walk at wOTPartyCount, so its first
+ * GetBaseData reads the count as a species -- BaseData[count]. The client
+ * states that species' type bytes on a Gold NPC party as chart indices, like a
+ * sheet's `types`: 1..COUNT_SPECIES_TYPES2_MAX entries, each
+ * 0..BATTLE_TYPE_MAX - 1, read as the Lua decoder leaves the list (luaList).
+ * Refused whole -- and the party with it, K16's posture -- otherwise. Twin of
+ * Wire.lua's countSpeciesTypesOf.
+ */
+const COUNT_SPECIES_TYPES2_MAX = 2;
+
+function cleanCountSpeciesTypes(value) {
+  const list = luaList(value);
+  if (!list || list.length < 1 || list.length > COUNT_SPECIES_TYPES2_MAX) return null;
+  const out = [];
+  for (const entry of list) {
+    const t = luaInt(entry, 0, BATTLE_TYPE_MAX - 1);
+    if (t === null) return null;
+    out.push(t);
+  }
+  return out;
+}
+
 function cleanBattleParty(raw, hubGeneration) {
   if (raw === null || typeof raw !== 'object') return null;
   const battle = cleanId(raw.battle);
@@ -2484,6 +2519,12 @@ function cleanBattleParty(raw, hubGeneration) {
       const baseReward = luaInt(raw.baseReward, 0, BASE_REWARD2_MAX);
       if (baseReward === null) return null;
       party.baseReward = baseReward;
+    }
+    // K23: Gold's count-as-species types (cleanCountSpeciesTypes).
+    if (stated(raw.countSpeciesTypes)) {
+      const countSpeciesTypes = cleanCountSpeciesTypes(raw.countSpeciesTypes);
+      if (!countSpeciesTypes) return null;
+      party.countSpeciesTypes = countSpeciesTypes;
     }
   }
 
@@ -2851,6 +2892,12 @@ function cleanBattleEvent(raw, generation) {
     const stage = luaInt(raw.stage, -STAGE12_MAX, STAGE12_MAX);
     if (stage !== null) event.stage = stage;
   }
+  // K22 (docs/plans/gen12-referee-remaining-gaps.md): an `anim` that is not its
+  // user's own use of the move (the seeder's ABSORB, FLY's charge TELEPORT, a
+  // trap's or a weather turn's clip) carries `quiet: true` -- the look alone,
+  // no callout, no lunge. Red / Gold readers, `anim` only; `true` kept,
+  // anything else dropped (never refused). Twin of Wire.battleEvent.
+  if (older && raw.t === 'anim' && raw.quiet === true) event.quiet = true;
   if (raw.moves !== undefined && raw.moves !== null) {
     if (Array.isArray(raw.moves)) {
       const moves = [];
@@ -3172,6 +3219,8 @@ module.exports = {
   AI_DIVISOR_MAX,
   cleanTrainerItems,
   TRAINER_ITEMS2_MAX,
+  cleanCountSpeciesTypes,
+  COUNT_SPECIES_TYPES2_MAX,
   AI_FLAGS2_MAX,
   BASE_REWARD2_MAX,
   WEIGHT2_MAX,

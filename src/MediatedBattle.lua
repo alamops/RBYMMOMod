@@ -1645,6 +1645,8 @@ function M.sendParty(transport, battle, mons, side, bag, badges, seat)
     msg.aiClass = seat.aiClass
     msg.trainerItems, msg.aiFlags = seat.trainerItems, seat.aiFlags
     msg.itemSwitch, msg.baseReward = seat.itemSwitch, seat.baseReward
+    -- ...and Gold / Silver's count-as-species types (K23, `npcSeat`).
+    msg.countSpeciesTypes = seat.countSpeciesTypes
   end
   -- Party-level generation when every mon agrees (Wire prefers this, then shape).
   local gen = mons[1] and mons[1].generation
@@ -1679,9 +1681,12 @@ end
 --           the record's own `name`, "YOUNGSTER JOEY" on Gold, the class name
 --           on Red (`fallback`, the caller's display name, without one).  The
 --           hub names the seat "TRAINER" when none rides.
+--   countSpeciesTypes  Gold / Silver only (K23, `countSpeciesTypes2`): the
+--           types of the species numbered the size of `mons`, the party this
+--           seat uploads -- the walk FindEnemyMonsThatResistPlayer reads.
 --
 -- nil on Gen 3 (its referee reads its own trainer) and with nothing to say.
-function M.npcSeat(game, trainer, fallback)
+function M.npcSeat(game, trainer, fallback, mons)
   local generation = Gen.generation(game)
   if generation ~= 1 and generation ~= 2 then return nil end
   local out = {}
@@ -1710,8 +1715,50 @@ function M.npcSeat(game, trainer, fallback)
     local ai2 = M.trainerAi2(record)
     for key, value in pairs(ai2) do out[key] = value end
   end
+  if generation == 2 and type(mons) == "table" then
+    out.countSpeciesTypes = M.countSpeciesTypes2(game, #mons)
+  end
   if next(out) == nil then return nil end
   return out
+end
+
+-- ------- K23: Gold's slot-1 resist reading
+--
+-- pokegold FindEnemyMonsThatResistPlayer (engine/battle/ai/switch.asm) starts
+-- its walk at wOTPartyCount, not wOTPartySpecies -- `ld hl, wOTPartyCount`,
+-- `.loop: inc hl`... reads the byte *before* the species it means -- so its
+-- first GetBaseData loads the party's count as a species: the base types of
+-- BaseData[count], the species whose index is the party's size (Gold's index
+-- is the national number).  pokecrystal fixed the walk; Crystal sends none.
+-- The hub holds no species table, so the client states those two type
+-- bytes on the NPC party (`countSpeciesTypes`), as the chart indices a
+-- sheet's `types` are (`typesOf`) -- the referee reads them as it reads a
+-- monster's (BattleSim2 AiSwitch `resistTypes`).
+--
+-- The species is the engine record whose `index` (the BaseData row the Gold
+-- import keeps beside `dex`, src/import/RomExtractorGen2.lua) is the count,
+-- else whose `dex` is -- the first by id if a modded dataset holds two.  nil
+-- off Gold / Silver, for a count outside 1..BATTLE_MON_MAX, and for a
+-- dataset with no such species or types this chart cannot name.
+function M.countSpeciesTypes2(game, count)
+  if Gen.generation(game) ~= 2 or Gen.family(game) ~= "gs" then return nil end
+  count = tonumber(count)
+  if not (count and count == floor(count) and count >= 1 and count <= Config.BATTLE_MON_MAX) then
+    return nil
+  end
+  local data = type(game) == "table" and game.data or nil
+  local pokemon = type(data) == "table" and data.pokemon or nil
+  if type(pokemon) ~= "table" then return nil end
+  local byIndex, byDex
+  for id, def in pairs(pokemon) do
+    if type(def) == "table" and type(id) == "string" then
+      if tonumber(def.index) == count and (byIndex == nil or id < byIndex) then byIndex = id end
+      if tonumber(def.dex) == count and (byDex == nil or id < byDex) then byDex = id end
+    end
+  end
+  local species = byIndex or byDex
+  if not species then return nil end
+  return typesOf(data, { species = species }, typeOrder(data))
 end
 
 -- ------- K16: the computer's trainer data, Red
@@ -2427,6 +2474,16 @@ local CHARGE_SETUP_MOVES = {
   SOLARBEAM = true, SKULL_BASH = true, RAZOR_WIND = true, SKY_ATTACK = true,
 }
 local VANISH_HIDE_FX = { dig = true, fly = true }
+
+-- FLY's charge turn played as TELEPORT's animation: pokered ChargeEffect
+-- (engine/battle/effects.asm) loads `ld b, TELEPORT` for FLY, and the Red
+-- referee sends it so with `quiet` (contract K22); the Gen 2 host-sim alias
+-- states it with `amount` 1 instead.  A TELEPORT that is the move itself
+-- carries neither.
+local function flyChargeTeleport(row)
+  return type(row) == "table" and row.anim == "TELEPORT"
+    and (row.quiet == true or tonumber(row.amount) == 1)
+end
 
 local function vanishKey(side, seatIndex)
   return tostring(side or "") .. ":" .. tostring(seatIndex or 1)
@@ -3278,19 +3335,27 @@ end
 function M:noteBattlefieldBubble(row)
   if not self:usesBattlefield() then return end
   if type(row) ~= "table" then return end
-  local anim = row.anim
-  if type(anim) ~= "string" or anim == "" then return end
-  -- Engine ball / hide / shake markers are not move callouts.
-  if anim:find("_ANIM", 1, true) then return end
-
+  -- A quiet animation (K22) is a look, not an order anybody gave.
+  if row.quiet then return end
   -- The bubble is one sentence in two parts, CoopBattle's twin exactly: "used"
   -- is the small lead-in and `moveName` is the line the renderer emphasises.
   -- The raw id used to be the text as well, on the theory that nothing reading
   -- the bubble should change meaning -- but the renderer draws both parts, so
   -- a bubble said the move twice ("FIX_BOOST" over "FIX BOOST"). `moveName` is
   -- the registry name, or the wire id again when the build has no record for
-  -- the move (a modded move whose definition did not survive).
-  local moveName = self:moveLabel(anim)
+  -- the move (a modded move whose definition did not survive) -- or, on a
+  -- callout a used line raised (`noteUsedLine`), the name the line printed,
+  -- which is the sheet's own name for the move (the referees' `moveLabel`).
+  local moveName = row.moveName
+  if row.callout then
+    if type(moveName) ~= "string" or moveName == "" then return end
+  else
+    local anim = row.anim
+    if type(anim) ~= "string" or anim == "" then return end
+    -- Engine ball / hide / shake markers are not move callouts.
+    if anim:find("_ANIM", 1, true) then return end
+    moveName = self:moveLabel(anim)
+  end
 
   local mine = row.slot == self:mySlot()
     or (row.side ~= nil and row.side == self.mySide)
@@ -3314,6 +3379,103 @@ function M:noteBattlefieldBubble(row)
     name = self:battlefieldSeatName(row.slot or self:mySlot()),
     born = self.frame or 0,
   }}
+  return true
+end
+
+-- ------- K22: the trainer's callout rides the used line
+--
+-- The callout is this mod's trainer calling the order, and the order is the
+-- used line: pokered PlayerCanExecuteMove's PrintMonName1Text and pokecrystal
+-- BattleCommand_UsedMoveText print it whether the move then lands or not.
+-- The move's animation does not follow it everywhere any more -- the carts
+-- play none for a move that missed (pokered handleIfPlayerMoveMissed,
+-- EXPLODE_EFFECT excepted; pokecrystal BattleCommand_MoveAnim's wAttackMissed
+-- test) and the referees now send none (contract K22 of
+-- docs/plans/gen12-referee-remaining-gaps.md) -- and a charge turn or a
+-- residual beat plays a quiet one, which is nobody's order.  So:
+--
+--   * a move animation that is its user's own (not quiet, not a cart `_ANIM`)
+--     ahead of that user's used line shouts as it always has (`startAnim`),
+--     and the line raises nothing (`calloutAnim`);
+--   * a used line nothing shouted for -- a miss, or a referee that plays the
+--     animation behind the line -- queues the shout a beat ahead of itself
+--     (`callout` rows, `startCallout`), and the move animation of the same
+--     side behind it then lunges without a second shout (`calloutLine`).
+--
+-- Both are a turn's: a `turn` event clears them.  Nothing here waits on an
+-- animation -- a callout row is its own beat, and a missing animation simply
+-- never arrives to be marked.
+
+-- Is this `anim` row its user's own move animation -- the one a shout rides?
+local function isCalloutAnim(row)
+  local anim = type(row) == "table" and row.anim or nil
+  return type(anim) == "string" and anim ~= "" and not row.quiet
+    and not anim:find("_ANIM", 1, true)
+end
+
+-- A used line's side, move and user, read off the referee's own marked text:
+-- "^aPIKACHU\nused THUNDERBOLT!", or a disobedient pick's "^aPIKACHU\nused
+-- instead,\nTACKLE!" (pokered _UsedInsteadText, pokecrystal UsedInsteadText).
+-- Only a line that opens on a name mark is a monster's used line -- an item
+-- line opens on a trainer's name, which K17 never marks ("RED used POTION!",
+-- "<TRAINER> used X on ^bMON!", Gold's "used the X.") -- so a Gen 3 line,
+-- which carries no marks, is never one.  nil for anything else.
+function M.usedMoveOf(text)
+  if type(text) ~= "string" then return nil end
+  local side = text:match("^%^([ab])")
+  if not side then return nil end
+  local plain = plainLine(text)
+  local actor, move = plain:match("^(.-) used instead, (.+)!$")
+  if not actor then actor, move = plain:match("^(.-) used (.+)!$") end
+  if not (actor and move) or actor == "" or move == "" then return nil end
+  return side, move, actor
+end
+
+-- An `anim` row, as it is parsed (onEvent): the side whose used line it shouts
+-- for -- or, behind a line that has shouted already, marked `calledOut` so its
+-- pass through `startAnim` is the lunge alone.
+function M:noteCalloutAnim(row)
+  if not isCalloutAnim(row) then return end
+  local side = row.side or sideOfSlot(row.slot)
+  local line = self.calloutLine
+  if line and line.side == side then
+    row.calledOut = true
+    self.calloutLine = nil
+    return
+  end
+  self.calloutAnim = { side = side }
+end
+
+-- A `msg` line, as it is parsed: a used line nothing has shouted for queues
+-- its own shout ahead of itself.  Only where a bubble would go up at all --
+-- the arena, and never for the wild foe (`noteBattlefieldBubble`'s own two
+-- refusals) -- so the classic page and a wild foe's turn queue nothing.
+-- Returns true when a callout row was queued.
+function M:noteUsedLine(text)
+  local side, move = M.usedMoveOf(text)
+  if not side then return false end
+  local shouted = self.calloutAnim
+  self.calloutAnim, self.calloutLine = nil, nil
+  if shouted and shouted.side == side then return false end
+  if not self:usesBattlefield() then return false end
+  if self.mode == "wild" and side ~= (self.mySide or "a") then return false end
+  self.lines = self.lines or {}
+  self.lines[#self.lines + 1] = {
+    callout = true, slot = slotOfSide(side), side = side, moveName = move,
+  }
+  self.calloutLine = { side = side }
+  return true
+end
+
+-- A callout row reaching the head of the queue: the bubble, held for
+-- BEAT_SPAN.callout the way `startAnim`'s first beat holds -- the line it
+-- belongs to is the very next row.  A row nobody can see a bubble for costs
+-- nothing and the queue moves straight on.
+function M:startCallout(row)
+  if not self:noteBattlefieldBubble(row) then return false end
+  self.anim = row
+  self.animHold = BEAT_SPAN.callout
+  self.pendingHit = nil
   return true
 end
 
@@ -3697,7 +3859,7 @@ function M:start(game)
   elseif type(self.npcParty) == "table" and #self.npcParty > 0 then
     M.sendParty(self.transport, self.battle, self.npcParty, "b",
       M.trainerBagEntries(self.trainer, self.game), nil,
-      M.npcSeat(self.game, self.trainer, self.peerName))
+      M.npcSeat(self.game, self.trainer, self.peerName, self.npcParty))
   end
   return true
 end
@@ -3978,6 +4140,9 @@ function M:onEvent(msg)
     if sky ~= nil then
       self.lines[#self.lines + 1] = { stateRow = "weather", value = sky }
     end
+    -- A used line shouts the trainer's order when no animation of its own
+    -- already has (`noteUsedLine`, K22): a beat ahead of the line it is.
+    self:noteUsedLine(msg.text)
     -- Said as this viewer's cart says it (`viewLine`, K17); every matcher
     -- below reads the referee's own text with the marks out (`plainLine`).
     if not (obeyed and msg.seq == obeyed + 1) then self:say(self:viewLine(msg.text)) end
@@ -3999,13 +4164,22 @@ function M:onEvent(msg)
     -- A Red / Gold status animation is this viewer's variant (`M.viewerAnim`), and
     -- the arena wears it as the condition's look (Vfx.forStatusAnim); a
     -- foe's sleep clip waits behind the line it follows on this cart.
+    -- The seat whose `item` this animation may be the look of (K20's X
+    -- item), spent by the first animation behind it, whatever it is.
+    local itemSeat = self.itemSeat
+    self.itemSeat = nil
     if msg.text then
       local mine = msg.slot == self:mySlot()
         or (msg.side ~= nil and msg.side == self.mySide)
       local anim, behind = M.viewerAnim(msg.text, mine)
-      local rows = { {
+      -- `quiet` (K22): the look alone -- no callout, no lunge (`startAnim`).
+      local row = {
         anim = anim, slot = msg.slot, side = msg.side, amount = msg.amount,
-      } }
+        quiet = msg.quiet == true or nil,
+      }
+      -- Whose used line this animation shouts for, or follows (K22).
+      self:noteCalloutAnim(row)
+      local rows = { row }
       -- The condition is the occupant's as the referee sees it: a parked
       -- arrival's when one is waiting (`noteSlot`) -- the seat alone is
       -- the monster still leaving.
@@ -4013,11 +4187,19 @@ function M:onEvent(msg)
       local on = seat and (seat.pending or seat)
       local look = self:usesBattlefield()
         and Vfx.forStatusAnim(anim, on and on.status) or nil
-      if look then rows[#rows + 1] = { vfxrow = look, slot = msg.slot } end
+      -- A blocked ball (BLOCKBALL_ANIM, K22) is knocked away where it was
+      -- going: the seat the thrower aimed at, as every ball row's look is.
+      local lookSlot = msg.slot
+      if anim == "BLOCKBALL_ANIM" then lookSlot = self:ballTargetSlot(row) end
+      if look then rows[#rows + 1] = { vfxrow = look, slot = lookSlot } end
       -- Red's X item is one look, the cart's (K20): XSTATITEM_ANIM plays it
       -- where the cart does, so the bag's own look queued for the same item
-      -- on the same seat is taken back.
-      if look and anim == "XSTATITEM_ANIM" then self:dropItemLook(msg.slot) end
+      -- on the same seat is taken back -- only straight behind that seat's
+      -- `item`, though.  ChargeEffect's and BideEffect's turn-1 XSTATITEM_ANIM
+      -- (K22) has no item behind it, and plays its plain look.
+      if look and anim == "XSTATITEM_ANIM" and itemSeat ~= nil and itemSeat == msg.slot then
+        self:dropItemLook(msg.slot)
+      end
       if behind then
         self.animBehind = rows
       else
@@ -4348,6 +4530,9 @@ function M:onEvent(msg)
     if self:queueVfx(itemVfx(msg.text), msg.slot, msg.slot) then
       self.lines[#self.lines].itemLook = true
     end
+    -- ...and the seat an X item's XSTATITEM_ANIM behind it may take that
+    -- look over for (the `anim` branch).
+    self.itemSeat = msg.slot
     -- Ball id for AnimPlayer opts on the following toss/shake chain.
     local effect = msg.text and effectsFor(self.game).itemEffect(msg.text)
     if effect and effect.ball then
@@ -4437,6 +4622,8 @@ function M:onEvent(msg)
     self.replaceWait = owed
     self.answeredTurn = false
     self.passMove = nil
+    -- A turn's callout bookkeeping (K22, `noteUsedLine`) ends with it.
+    self.calloutAnim, self.calloutLine = nil, nil
     -- A level-up the referee was told of (contract K9, `syncLevelHp`) is in
     -- its numbers from the next batch on, and this slot-less `turn` closes the
     -- one it came in: the climb stops being added to its packets.
@@ -8863,6 +9050,7 @@ end
 function M:noteBideLine(text, seq)
   local sheet = self.mine and self.mine[self.active or 1]
   local species = sheet and sheet.species
+  local raw = text
   text = plainLine(text)
   if self:generation() == 1 then
     if type(text) == "string" and type(species) == "string" then
@@ -8872,15 +9060,17 @@ function M:noteBideLine(text, seq)
     local said = M.bideLine1(text, species, M.bideLabels(sheet and sheet.moves, self.game),
       self.confusedNow)
     if said == "start" then
-      if self.bideFiled and self:usedLineOurs(seq) then self.bideOn1 = true end
+      self:noteCalledBide(raw, seq)
+      if self.bideFiled and self:usedLineOurs(seq, raw) then self.bideOn1 = true end
     elseif said == "release" or said == "end" then
       self.bideOn1, self.bideFiled = nil, nil
     end
     return
   end
-  if not self.bideFiled then return end
   local said = M.bideLine(text, species, M.bideLabels(sheet and sheet.moves, self.game))
-  if said == "store" or (said == "start" and self:usedLineOurs(seq)) then
+  if said == "start" then self:noteCalledBide(raw, seq) end
+  if not self.bideFiled then return end
+  if said == "store" or (said == "start" and self:usedLineOurs(seq, raw)) then
     self.bideStoring = true
   elseif said == "release" then
     self.bideFiled, self.bideStoring = nil, nil
@@ -8895,7 +9085,16 @@ end
 -- BattleCommand_Metronome / MirrorMove run the called move as their own, so
 -- the call's animation names it there -- a Bide filed as surely as one
 -- picked off the list.
+--
+-- A `quiet` animation (K22 -- the seeder's ABSORB, a trap's per-turn hit, a
+-- weather turn) is a beat that is not its seat's own use of a move, so it
+-- names nobody's next line and is passed over.  A cart `_ANIM` still counts:
+-- the ones that land straight ahead of a used line are the user's own
+-- (CheckTurn's SLP / CONF clips, BideEffect's XSTATITEM_ANIM).  And a move
+-- that missed now comes with no animation at all -- the line's own mark is
+-- the better witness wherever it has one (`usedLineOurs`).
 function M:noteBideAnim(msg)
+  if msg.quiet == true then return end
   self.animSeq, self.animSlot = tonumber(msg.seq), msg.slot
   if self.callFiled and msg.slot ~= nil and msg.slot == self:mySlot() then
     local sheet = self.mine and self.mine[self.active or 1]
@@ -8907,14 +9106,31 @@ function M:noteBideAnim(msg)
   end
 end
 
--- False when the used line at `seq` follows straight on a move animation on
--- another seat (`noteBideAnim`): that seat's line, whatever species it names.
--- A stream with no animation ahead of the line (an older referee) is read as
--- before.
-function M:usedLineOurs(seq)
+-- False when the used line is another seat's.  A Red / Gold line says whose
+-- it is itself (K17): the side mark ahead of the user's name, which is ours
+-- or not.  An unmarked line falls back on the move animation it follows
+-- straight on (`noteBideAnim`): another seat's, and the line is that seat's,
+-- whatever species it names; a stream with no animation ahead of the line
+-- (an older referee) is read as before.
+function M:usedLineOurs(seq, text)
+  local side = type(text) == "string" and text:match("^%^([ab])") or nil
+  if side then return side == (self.mySide or "a") end
   seq = tonumber(seq)
   if not (seq and self.animSeq and self.animSeq == seq - 1) then return true end
   return self.animSlot == nil or self.animSlot == self:mySlot()
+end
+
+-- A METRONOME / MIRROR MOVE this client filed that called BIDE, read off the
+-- called move's own used line on our seat (pokered MetronomePickMove runs the
+-- called move from CheckIfPlayerNeedsToChargeUp, used line and all;
+-- pokecrystal BattleCommand_Metronome the same) -- where its animation no
+-- longer names it: pokered BideEffect plays XSTATITEM_ANIM on its first turn,
+-- not BIDE's (K22), so `noteBideAnim` never sees a BIDE id there.
+function M:noteCalledBide(text, seq)
+  if not self.callFiled then return end
+  if not self:usedLineOurs(seq, text) then return end
+  self.bideFiled, self.bideSlot = true, self.callFiled
+  self.callFiled = nil
 end
 
 -- ...and Red's own: pokered MainInBattleLoop (engine/battle/core.asm) runs
@@ -9406,6 +9622,11 @@ function M:tickMessages(dt, input)
       self.dwell = 0
       return true
     end
+    if type(next) == "table" and next.callout then
+      -- A used line's own shout (K22, `noteUsedLine`): its beat, or nothing.
+      if self:startCallout(next) then self.dwell = 0 end
+      return true
+    end
     if type(next) == "table" and next.drain ~= nil then
       -- A bar already where it was going costs nothing but the row.
       self:startDrain(next)
@@ -9530,7 +9751,9 @@ function M:peekHitSfx()
   end
   for _, row in ipairs(self.lines or {}) do
     if type(row) == "table" then
-      if row.anim then break end
+      -- The next attack starts at its animation, or at its used line's own
+      -- shout (K22: a missed move brings no animation).
+      if row.anim or row.callout then break end
       if row.drain or row.faintfx then sawDamage = true end
     elseif type(row) == "string" then
       local sfx = remap(hitSfxFromText(row))
@@ -9673,6 +9896,8 @@ function M:startAnim(row)
   -- below puts it straight back at the head of the queue), and re-noting the
   -- bubble for the lunge would restart a fade the lunge is meant to be read
   -- under. The bubble outlives both beats on its own -- see BEAT_SPAN.callout.
+  -- A quiet animation (K22) shouts nothing -- `noteBattlefieldBubble` refuses
+  -- one -- so it never takes this beat either.
   local spoke = (not row.calledOut) and self:noteBattlefieldBubble(row)
   -- Ball chain: HIDEPIC / SHOWPIC gate foe stage pics (engine enemyHidden).
   if row.anim == "HIDEPIC_ANIM" then
@@ -9719,7 +9944,11 @@ function M:startAnim(row)
     -- noteBattlefieldBubble uses on the same field.
     local moveAnim = type(row.anim) == "string" and row.anim ~= ""
       and not row.anim:find("_ANIM", 1, true)
-    if moveAnim then
+    if moveAnim and (row.quiet or flyChargeTeleport(row)) then
+      -- K22: a beat that is not the monster's own use of the move -- the look
+      -- alone, on the seat the row names, and no lunge (`startQuietAnim`).
+      self:startQuietAnim(row)
+    elseif moveAnim then
       -- Beat 2, with the callout above already spent and its bubble still up.
       -- Charge/vanish setup (`amount == 1`) is not a lunge: Dig/Fly leave the
       -- seat, SolarBeam-class glows in place. Release is a normal lean+strike.
@@ -9747,6 +9976,17 @@ function M:startAnim(row)
         self:clearVanishAt(row.slot, row.side)
         self:emitFx("emerge", row.slot, row.side)
       end
+    elseif row.anim == "SLIDE_DOWN_ANIM" then
+      -- Red's DIG turn 1 (pokered ChargeEffect's SLIDE_DOWN_ANIM, K22): the
+      -- monster sinks and stays out of sight, FLY's vanish in the ground's
+      -- version -- DIG's release or STATUS_AFFECTED_ANIM brings it back.  The
+      -- rumble is the row's `vfxrow` (Vfx.CART_ANIM_LOOK).
+      if not self:seatVanished(row.slot) then self:startVanish("dig", row) end
+    elseif row.anim == "BLOCKBALL_ANIM" then
+      -- TossBallAnimation's `.BlockBall` (K22): the trainer knocks the ball
+      -- away, so the throw TOSS_ANIM opened is over -- no recall and no burst
+      -- are coming to close it.  The knock is the row's `vfxrow`.
+      self:clearBallFlow()
     else
       -- ...and the markers it excludes are the throw itself: the arc, the
       -- recall, each wobble and the burst, one per queued row and each held
@@ -9765,7 +10005,10 @@ function M:startAnim(row)
     local already = self:seatVanished(row.slot)
     local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
     local slideDown = row.anim == "SLIDE_DOWN_ANIM"
-    local flyCharge = row.anim == "TELEPORT"
+    -- FLY's charge as TELEPORT's clip (pokered ChargeEffect, `quiet` from K22;
+    -- the Gen 2 host-sim alias's `amount` 1) -- a TELEPORT that is the move
+    -- itself carries neither, and hides nobody.
+    local flyCharge = flyChargeTeleport(row)
       and (not already or self:slotVanishKind(row.slot) == "fly")
     local firstVanish = VANISH_MOVES[row.anim] and not already
     if firstVanish or slideDown or flyCharge
@@ -9774,6 +10017,13 @@ function M:startAnim(row)
       self.pendingHit = nil
       self:playMoveAnimFallback(row)
       self.animHold = (row.anim == "FLY" or flyCharge) and FX_SPAN.fly or FX_SPAN.dig
+      return
+    elseif row.quiet and VANISH_MOVES[row.anim] and already and not setup then
+      -- A quiet FLY / DIG on a hidden seat (K22) is the monster coming back
+      -- with no strike (pokecrystal AppearUserRaiseSub after a miss): the
+      -- pic shows again, and the strike's clip is not played.
+      self:clearVanishAt(row.slot, row.side)
+      self.pendingHit = nil
       return
     elseif (VANISH_MOVES[row.anim] or row.anim == "STATUS_AFFECTED_ANIM") and already then
       -- ...and Red's STATUS_AFFECTED_ANIM (SE_SHOW_MON_PIC) shows the pic a
@@ -10004,6 +10254,58 @@ function M:startMoveVfx(row)
   -- is aimed at the seat opposite, which in a 1v1 is exactly one seat.
   local target = (spec.delivery == "self") and from or self:opposingSlot(from)
   return self:emitVfx(spec, target, from)
+end
+
+-- A quiet animation on the arena (contract K22): a move id the referee plays
+-- for a beat that is not its user's own use of the move -- Leech Seed's ABSORB
+-- on the seeder's seat, a trap's per-turn hit, a weather turn, a charge turn
+-- (FLY's as TELEPORT, Gold's as the move's own clip with `amount` 1).  The
+-- look alone, on the seat the row names: no callout (`noteBattlefieldBubble`
+-- refused it already) and no lunge.  The charge and vanish turns keep the
+-- behaviour their loud rows always had -- FLY's TELEPORT and a charge-turn FLY /
+-- DIG hide the seat, a charge-turn SOLARBEAM-class glows in place, and a FLY /
+-- DIG naming a seat already hidden brings it back (an appear with no strike:
+-- pokecrystal's AppearUserRaiseSub after a miss).  Any other id -- one this
+-- client has never seen included -- wears that move's own look
+-- (`Vfx.forMove`, which answers for an unknown move too), kept as the beat's
+-- palette (`moveVfx`) so the hit behind a trap's tick reads in its colours.
+function M:startQuietAnim(row)
+  if type(row) ~= "table" then return nil end
+  local setup = CHARGE_SETUP_MOVES[row.anim] and tonumber(row.amount) == 1
+  local vanished = self:seatVanished(row.slot)
+  if flyChargeTeleport(row) then
+    if not vanished then self:startVanish("fly", row) end
+  elseif VANISH_MOVES[row.anim] and setup then
+    if not vanished then self:startVanish(row.anim == "DIG" and "dig" or "fly", row) end
+    return self:startChargeVfx(row)
+  elseif VANISH_MOVES[row.anim] and vanished then
+    self:clearVanishAt(row.slot, row.side)
+    self:emitFx("emerge", row.slot, row.side)
+    return nil
+  elseif setup then
+    return self:startChargeVfx(row)
+  end
+  return self:startLookVfx(row)
+end
+
+-- A move's look worn in place on the seat its row names -- the `self`
+-- delivery whatever the move's own is, since a quiet beat aims at nobody.
+function M:startLookVfx(row)
+  self.moveVfx = nil
+  if not self:usesBattlefield() then return nil end
+  if type(row) ~= "table" then return nil end
+  local animId = row.anim
+  if type(animId) ~= "string" or animId == "" then return nil end
+  local spec = Vfx.forMove(animId, self:moveDefFor(animId))
+  if type(spec) ~= "table" then return nil end
+  self.moveVfx = spec
+  local at = row.slot
+  if at == nil and row.side ~= nil then at = slotOfSide(row.side) end
+  if at == nil then at = self:mySlot() end
+  local look = {}
+  for key, value in pairs(spec) do look[key] = value end
+  look.delivery = "self"
+  return self:emitVfx(look, at, at)
 end
 
 -- A queued particle row -- an item opening, a condition landing, a stat stage

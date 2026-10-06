@@ -1137,7 +1137,20 @@ local STATUS_ANIM_LOOK = {
 --     XSTATITEM_ANIM        XStatItemAnim, SE_SPIRAL_BALLS_INWARD -- an X
 --                           item on the user's seat: a gathering shimmer in
 --                           the stat board's colours (the `stat` event behind
---                           it draws the arrows).
+--                           it draws the arrows).  Also ChargeEffect's and
+--                           BideEffect's own turn-1 clip (contract K22), with
+--                           no item behind it: the same plain look, and the
+--                           screens' bag-look takeover (`dropItemLook`) runs
+--                           only behind an `item` event on that seat.
+--     BLOCKBALL_ANIM        TossBallAnimation's `.BlockBall`, after TOSS_ANIM
+--                           in a trainer fight: the trainer knocks the ball
+--                           away -- a small knock where it was stopped (the
+--                           screens wear it on the seat the ball was thrown
+--                           at, and close the throw).
+--     SLIDE_DOWN_ANIM       ChargeEffect's DIG turn: the monster sinks out of
+--                           sight -- a ground rumble under the screens' dig
+--                           vanish, which STATUS_AFFECTED_ANIM or DIG's
+--                           release undoes, as FLY's.
 --   Gold (pokecrystal / pokegold constants/move_constants.asm, ANIM_<X> sent
 --   as <X>_ANIM): the residual and condition clips of engine/battle/core.asm
 --   (ResidualDamage's PSN / BRN / SAP / IN_NIGHTMARE, HandleWeather's
@@ -1153,6 +1166,8 @@ M.CART_ANIM_LOOK = {
   -- Red
   STATUS_AFFECTED_ANIM = { style = "sparkle", palette = "NORMAL", scale = 0.75, intensity = 0.6 },
   XSTATITEM_ANIM       = { style = "sparkle", palette = "BUFF",   scale = 0.9,  intensity = 0.9 },
+  BLOCKBALL_ANIM       = { style = "impact",  palette = "NORMAL", scale = 0.6,  intensity = 0.7 },
+  SLIDE_DOWN_ANIM      = { style = "quake",   palette = "GROUND", scale = 0.9,  intensity = 0.85 },
   -- Gold: the conditions
   BRN_ANIM = "BRN", PSN_ANIM = POISON_NAME, FRZ_ANIM = "FRZ", PAR_ANIM = "PAR",
   SAP_ANIM             = { style = "swarm",   palette = "GRASS" },

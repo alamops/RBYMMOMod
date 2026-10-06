@@ -456,6 +456,13 @@ local BATTLE_ASCII = "[A-Za-z0-9 %.,!%?'%-:;%(%)/&]"
 --          only ever a `^` with its side letter after it: a `^` followed by
 --          anything else is dropped, alone, and the glyphs after it read as
 --          they would have.
+--   ^A ^B  a side-word mark (K17's wave-2 bullet): where the cart prints a
+--          *side* word rather than a battler's name -- pokecrystal
+--          HandleScreens' `.Your` / `.Enemy` ahead of "#MON's LIGHT SCREEN
+--          fell!", and any other `Your@` / `Enemy@` pair of the Gold
+--          referee's -- the capital names the side, and the viewer prints
+--          "Your " for its own side and "Enemy " for the other.  Kept, cut
+--          and dropped exactly as the lower-case pair is.
 --   \n     the cart's `line` / `cont` inside one paragraph (a `para` is a
 --          separate `msg`).  Held like a space -- never leading, trailing or
 --          doubled -- and a space beside it collapses into it.
@@ -464,7 +471,7 @@ local BATTLE_ASCII = "[A-Za-z0-9 %.,!%?'%-:;%(%)/&]"
 -- (M.name, M.npcName, M.moveName, M.label) have no `^`, and only the battle
 -- line reads one -- so a player, nickname or trainer can never spell a mark.
 M.BATTLE_MARK = "^"
-M.BATTLE_MARK_SIDES = { a = true, b = true }
+M.BATTLE_MARK_SIDES = { a = true, b = true, A = true, B = true }
 
 -- The walker both readers share.  `line` reads the two marks above; without
 -- it, it is M.battleText exactly as it was.  A line cut at `cap` loses what
@@ -533,15 +540,16 @@ function M.battleLine(value, limit)
   return battleGlyphs(value, limit or Config.BATTLE_LINE_MAX, true)
 end
 
--- The same line as one plain sentence: each mark gone and each break a space
--- -- or nothing after a hyphen, the word the cart split over two rows
+-- The same line as one plain sentence: each mark gone -- a name mark and a
+-- side-word mark alike (`^a` `^b` `^A` `^B`) -- and each break a space, or
+-- nothing after a hyphen, the word the cart split over two rows
 -- (pokecrystal's "It's super-" / line "effective!") -- for whatever reads a
 -- line's words rather than drawing it: a matcher that asks "is this the
 -- weather line?", a driver, a test.  Anything that is not a string comes back
 -- as it went in.  Twin of lib/sanitize.js's plainBattleLine.
 function M.plainBattleLine(text)
   if type(text) ~= "string" then return text end
-  local plain = text:gsub("%^[ab]", ""):gsub("%-\n", "-"):gsub("\n", " ")
+  local plain = text:gsub("%^[abAB]", ""):gsub("%-\n", "-"):gsub("\n", " ")
   return plain
 end
 
@@ -2961,6 +2969,36 @@ local function trainerItemsOf(raw)
 end
 M.trainerItems = trainerItemsOf
 
+-- Gold's slot-1 resist reading (contract K23 of
+-- docs/plans/gen12-referee-remaining-gaps.md).  pokegold
+-- FindEnemyMonsThatResistPlayer (engine/battle/ai/switch.asm) walks from
+-- wOTPartyCount rather than wOTPartySpecies, so its first GetBaseData reads
+-- the party *count* as a species -- BaseData[count], the species whose
+-- number is the party's size -- and every later pass the slot before the one
+-- its bit names (pokecrystal fixed the walk).  The hub holds no species
+-- table, so the client states that species' two type bytes on a Gold NPC
+-- party, as the chart indices a sheet's `types` are: 1..COUNT_SPECIES_TYPES2_MAX
+-- of them, each 0..BATTLE_TYPE_MAX - 1.  Refused whole -- and the party with it,
+-- K16's posture for an input to the computer's choice -- when it is not such a
+-- list: a third entry is no species' base types, and a type list half-read is
+-- a different matchup from the one the host's cart computes.  Twin of
+-- lib/sanitize.js's cleanCountSpeciesTypes.
+M.COUNT_SPECIES_TYPES2_MAX = 2
+
+local function countSpeciesTypesOf(raw)
+  if not isList(raw) then return nil end
+  local n = #raw
+  if n < 1 or n > M.COUNT_SPECIES_TYPES2_MAX then return nil end
+  local out = {}
+  for i = 1, n do
+    local t = M.int(raw[i], 0, Config.BATTLE_TYPE_MAX - 1)
+    if t == nil then return nil end
+    out[i] = t
+  end
+  return out
+end
+M.countSpeciesTypes = countSpeciesTypesOf
+
 function M.battleParty(raw, generation)
   if type(raw) ~= "table" then return nil end
   local battle = M.id(raw.battle)
@@ -3033,6 +3071,9 @@ function M.battleParty(raw, generation)
   --   aiFlags       Gold only: TRNATTR_AI_MOVE_WEIGHTS, 0..AI_FLAGS2_MAX.
   --   itemSwitch    Gold only: TRNATTR_AI_ITEM_SWITCH, 0..AI_FLAGS2_MAX.
   --   baseReward    Gold only: TRNATTR_BASEMONEY, 0..BASE_REWARD2_MAX.
+  --   countSpeciesTypes  Gold only (K23, countSpeciesTypesOf): the base types
+  --                 of the species numbered the party's size, which Gold's
+  --                 FindEnemyMonsThatResistPlayer reads for its first pass.
   if partyGen == 1 and raw.aiClass ~= nil then
     out.aiClass = aiClassOf(raw.aiClass)
     if out.aiClass == nil then return nil end
@@ -3053,6 +3094,10 @@ function M.battleParty(raw, generation)
     if raw.baseReward ~= nil then
       out.baseReward = M.int(raw.baseReward, 0, M.BASE_REWARD2_MAX)
       if out.baseReward == nil then return nil end
+    end
+    if raw.countSpeciesTypes ~= nil then
+      out.countSpeciesTypes = countSpeciesTypesOf(raw.countSpeciesTypes)
+      if out.countSpeciesTypes == nil then return nil end
     end
   end
 
@@ -3507,6 +3552,17 @@ function M.battleEvent(raw, generation)
   if older and raw.stage ~= nil then
     out.stage = M.int(raw.stage, -M.STAGE12_MAX, M.STAGE12_MAX)
   end
+  -- Contract K22 of docs/plans/gen12-referee-remaining-gaps.md: an `anim`
+  -- whose move id is not its user's own use of the move -- Leech Seed's ABSORB
+  -- on the seeder's seat (pokered HandlePoisonBurnLeechSeed), FLY's charge
+  -- turn played as TELEPORT (pokered ChargeEffect), a trap's per-turn hit, a
+  -- weather turn -- says so with `quiet = true`, and the screen plays the
+  -- look alone: no trainer callout, no lunge.  Red / Gold readers only, on
+  -- `anim` only (Gen 3's stream has its own vocabulary and no such beat).
+  -- `true` is kept and anything else dropped, never refused -- this
+  -- section's rule for an optional field (an event is never refused over
+  -- one), and `false` is the absence it would mean anyway.
+  if older and raw.t == "anim" and raw.quiet == true then out.quiet = true end
   if type(raw.moves) == "table" then
     local moves = {}
     for _, entry in ipairs(raw.moves) do

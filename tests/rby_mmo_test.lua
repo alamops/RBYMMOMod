@@ -821,6 +821,8 @@ end)()
   eq(Wire.BATTLE_MARK, "^", "one mark glyph")
   check(Wire.BATTLE_MARK_SIDES.a and Wire.BATTLE_MARK_SIDES.b and not Wire.BATTLE_MARK_SIDES.c,
         "a mark names side a or side b, nothing else")
+  check(Wire.BATTLE_MARK_SIDES.A and Wire.BATTLE_MARK_SIDES.B and not Wire.BATTLE_MARK_SIDES.C,
+        "...and a side-word mark (K17, wave 2) side A or side B")
 
   local line = Wire.battleLine
   eq(line("^bRATTATA used\nTACKLE!"), "^bRATTATA used\nTACKLE!", "a mark and a break survive")
@@ -828,7 +830,11 @@ end)()
      "a space beside a break collapses into it; never leading, trailing or doubled")
   eq(line("\n\nX\n"), "X", "a break alone at either end is dropped")
   eq(line("^cX ^^aY ^"), "cX ^aY", "a ^ without its side letter is dropped, alone")
-  eq(line("^AX"), "AX", "the side letter is lower case")
+  eq(line("^AX"), "^AX", "a side-word mark is kept as a name mark is")
+  eq(line("^BPOK\195\169MON's\nLIGHT SCREEN fell!"), "^BPOK\195\169MON's\nLIGHT SCREEN fell!",
+     "...either side (HandleScreens' `.Your` / `.Enemy`)")
+  eq(line("^C ^^BY"), "C ^BY", "...and a ^ before any other capital is dropped, alone")
+  eq(line(string.rep("A", 78) .. "^BXY"), string.rep("A", 78), "...cut as a name mark is")
   eq(line("A\r\nB\tC"), "A\nBC", "a CR or a tab is no break")
   eq(line(string.rep("A", 78) .. "^bXY"), string.rep("A", 78), "a cut leaving a nameless mark drops it")
   eq(line(string.rep("A", 79) .. "^bXY"), string.rep("A", 79), "...and a letterless ^")
@@ -844,6 +850,9 @@ end)()
   eq(Wire.plainBattleLine("It's super-\neffective!"), "It's super-effective!",
      "a word split over two rows after a hyphen joins with no space")
   eq(Wire.plainBattleLine(nil), nil, "not a string: back as it came")
+  eq(Wire.plainBattleLine("^APOK\195\169MON's\nLIGHT SCREEN fell!"), "POK\195\169MON's LIGHT SCREEN fell!",
+     "the plain reading drops a side-word mark too")
+  eq(Wire.plainBattleLine("^B^bX"), "X", "...all four of them")
 
   local function msg(text, gen, t)
     local e = Wire.battleEvent({ battle = "b1", seq = 1, t = t or "msg", text = text }, gen)
@@ -992,6 +1001,55 @@ end)()
     local got = Wire.battleRuleset({ chart = chart, battleType = "FISH" }, gen or nil)
     check(got ~= nil and got.battleType == nil,
           "a ruleset read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses one")
+  end
+
+  -- K23: Gold's count-as-species types (pokegold FindEnemyMonsThatResistPlayer
+  -- reads BaseData[wOTPartyCount] on its first pass).
+  eq(Wire.COUNT_SPECIES_TYPES2_MAX, 2, "a species has two type bytes")
+  check(same(party({ countSpeciesTypes = { 3, 7 } }, 2).countSpeciesTypes, { 3, 7 }), "K23: two type bytes")
+  check(same(party({ countSpeciesTypes = { 0, 0 } }, 2).countSpeciesTypes, { 0, 0 }),
+        "K23: a mono-typed species states its byte twice, as BaseData does")
+  check(same(party({ countSpeciesTypes = { "19" } }, 2).countSpeciesTypes, { 19 }),
+        "K23: one, at BATTLE_TYPE_MAX - 1, read as Wire.int")
+  local k23Bads = { {}, { 1, 2, 3 }, { 20 }, { -1 }, { true }, { "x" }, { { 1 } }, { a = 1 }, "FIRE", 7 }
+  for i, bad in ipairs(k23Bads) do
+    eq(party({ countSpeciesTypes = bad }, 2), nil, "K23: an unreadable list refuses the Gold party (" .. i .. ")")
+  end
+  for _, gen in ipairs({ 1, false }) do
+    local got = party({ countSpeciesTypes = { 1, 2, 3 } }, gen or nil)
+    check(got ~= nil and got.countSpeciesTypes == nil,
+          "K23: a party read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses one")
+  end
+end)()
+
+-- ------- Wire: K22's quiet animations (docs/plans/gen12-referee-remaining-gaps.md)
+--
+-- An `anim` whose move id is not its user's own use of the move (the seeder's
+-- ABSORB, FLY's charge TELEPORT, a trap's tick) carries `quiet = true`; a
+-- Red / Gold reader keeps exactly `true`, on `anim` alone, and drops anything
+-- else without refusing the event.
+;(function()
+  local function anim(extra, gen)
+    local raw = { battle = "b1", seq = 1, t = "anim", slot = 3, side = "b", text = "ABSORB" }
+    for k, v in pairs(extra) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(anim({ quiet = true }, gen).quiet, true, "K22: a Gen " .. gen .. " quiet anim says so")
+    for i, bad in ipairs({ false, 1, "true", { true }, 0 }) do
+      local got = anim({ quiet = bad }, gen)
+      check(got ~= nil and got.quiet == nil,
+            "K22: a quiet that is not true is dropped, never refused (" .. gen .. "/" .. i .. ")")
+    end
+    for _, t in ipairs({ "msg", "item", "stat" }) do
+      local got = anim({ t = t, quiet = true }, gen)
+      check(got ~= nil and got.quiet == nil, "K22: a " .. t .. " carries no quiet (Gen " .. gen .. ")")
+    end
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = anim({ quiet = true }, gen or nil)
+    check(got ~= nil and got.quiet == nil, "K22: a reader for generation " .. tostring(gen or nil)
+          .. " reads no quiet")
   end
 end)()
 
@@ -30350,6 +30408,13 @@ end
 
 check(Gen.dexAddedText({ data = POKEDEX }, "PIDGEY"):find("PIDGEY", 1, true) ~= nil,
       "the new-entry line names the species")
+-- Broken where the carts break them: pokered _ItemUseBallText06 ("New #DEX
+-- data" / line "will be added for" / cont "<MON>!") and pokegold / pokecrystal
+-- _NewDexDataText ("<MON>'s data" / line "was newly added to" / cont "the #DEX.").
+eq(Gen.dexAddedText({ data = POKEDEX }, "PIDGEY"), "New POK\195\169DEX data\nwill be added for\nPIDGEY!",
+   "Red's new-entry line, the cart's three rows")
+eq(Gen.dexAddedText({ generation = 2, data = {} }, "SENTRET"), "SENTRET's data\nwas newly added to\nthe #DEX.",
+   "Gold's new-entry line, the cart's three rows (pokegold _NewDexDataText)")
 
 -- ------- the grant, end to end on the screen
 

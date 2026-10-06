@@ -753,7 +753,12 @@ end
 -- "This one is new", in each game's own words (_ItemUseBallText06 on Red,
 -- NewDexDataText on Gold, STRINGID_PKMNDATAADDEDTODEX on FireRed / Emerald --
 -- the line catch_seq.lua prints after a first catch, through the engine's own
--- battle-text expansion when its text pack is there).
+-- battle-text expansion when its text pack is there).  The breaks are the
+-- carts' `line` / `cont`: pokered data/text/text_6.asm _ItemUseBallText06
+-- ("New #DEX data" / line "will be added for" / cont "<MON>!", `#` the cart's
+-- POKé), pokecrystal and pokegold data/text/common_3.asm _NewDexDataText
+-- (text_ram wEnemyMonNickname, "'s data" / line "was newly added to" / cont
+-- "the #DEX.").
 function M.dexAddedText(game, displayName)
   local name = tostring(displayName or "")
   if name == "" then name = "It" end
@@ -763,7 +768,7 @@ function M.dexAddedText(game, displayName)
       or (name .. "'s data was\nadded to the POKéDEX.")
   end
   if gen == 2 then
-    return name .. "'s data was newly\nadded to the #DEX."
+    return name .. "'s data\nwas newly added to\nthe #DEX."
   end
   return "New POKéDEX data\nwill be added for\n" .. name .. "!"
 end

@@ -4965,6 +4965,172 @@ do
     end
     eq(npc and npc.bag, nil, "K16 (co-op Gold): the NPC upload carries no bag")
   end
+
+  -- ------------------------------------------------------------------
+  -- wave 2: K17's side-word marks, K22's quiet animations and the used
+  -- line's seat, the new cart ids, K23's count-as-species types (co-op)
+  -- ------------------------------------------------------------------
+  local CB = need("ClassicBattle")
+  do
+    local sc = seat5(2)
+    eq(sc:medViewLine("^APOK\195\169MON's\nLIGHT SCREEN fell!"), "Your POK\195\169MON's\nLIGHT SCREEN fell!",
+       "K17 (co-op Gold): our side's screen line says Your (HandleScreens .Your)")
+    eq(sc:medViewLine("^BPOK\195\169MON's\nLIGHT SCREEN fell!"), "Enemy POK\195\169MON's\nLIGHT SCREEN fell!",
+       "K17 (co-op Gold): ...the trainer's says Enemy")
+    local slots = pvpSlots()
+    local pv = screen({ slots = slots, mine = 3, host = false, mode = "coop_pvp", selfId = "cal" })
+    pv.mediated = true
+    pv.medSlots = { [0] = 1, [1] = 2, [2] = 3, [3] = 4 }
+    pv.medFields = { [1] = 0, [2] = 1, [3] = 2, [4] = 3 }
+    eq(pv:medViewLine("^AX ^BY"), "Enemy X Your Y", "K17 (coop_pvp, side b): side b is this seat's own")
+    eq(CB.plainLine("^AX ^BY"), "X Y", "K17: the matchers read no side word")
+  end
+
+  -- K22: the used line names its seat, so a missed move's shout (no
+  -- animation row ahead of it) goes over the monster that used it.
+  do
+    local slots = npcSlots()
+    slots[2].party[1].species = "FIXMON_B"
+    local sc = seat5(1, nil, nil, slots)
+    local bName = Wire.name(data.pokemon.FIXMON_B.name)
+    local function fromOf(text)
+      local rows = sc:medRows({ battle = "cb1", seq = 1, t = "msg", text = text })
+      local last = rows[#rows]
+      return type(last) == "table" and last.from or nil
+    end
+    eq(fromOf("^a" .. bName .. "\nused FIX TACKLE!"), 2, "K22 (co-op): the partner's used line is the partner's seat")
+    eq(fromOf("^a" .. SPECIES_NAME .. "\nused FIX TACKLE!"), 1, "K22 (co-op): ...ours is ours")
+    eq(fromOf("^b" .. SPECIES_NAME .. "\nused FIX TACKLE!"), nil,
+       "K22 (co-op): two namesakes on the trainer's side are no reading (the shout stays where it was)")
+    eq(fromOf("^a" .. SPECIES_NAME .. "'s\nattack missed!"), nil, "K22 (co-op): only a used line names a seat")
+    -- The shout itself, raised by that line when it is shown.
+    sc.usesBattlefield = function() return true end
+    sc.messages, sc.shown, sc.battlefieldBubbles, sc.calloutShout = {}, nil, nil, nil
+    sc.acting = 1
+    sc.messages[1] = { text = "^a" .. bName .. "\nused FIX TACKLE!", from = fromOf("^a" .. bName .. "\nused FIX TACKLE!") }
+    sc.messages[1].text = sc:medViewLine(sc.messages[1].text)
+    pcall(sc.update, sc, 1 / 60)
+    eq(sc.calloutShout and sc.calloutShout.slot, 2, "K22 (co-op): the missed move's shout is over the partner")
+  end
+
+  -- K22: a quiet animation shouts nothing and plays its look alone.
+  do
+    local sc = seat5(1)
+    sc.usesBattlefield = function() return true end
+    local rows = sc:medRows({ battle = "cb1", seq = 1, t = "anim", slot = 2, side = "b", text = "FIX_TACKLE",
+                              quiet = true })
+    local row = rows[1]
+    eq(row and row.quiet, true, "K22 (co-op): the anim row says quiet")
+    sc.battlefieldBubbles, sc.calloutShout = nil, nil
+    eq(sc:splitCalloutBeat({ kind = "anim", anim = "FIX_TACKLE", from = 3, quiet = true }), false,
+       "K22 (co-op): no callout beat for a quiet row")
+    eq(sc.battlefieldBubbles, nil, "K22 (co-op): ...and no bubble")
+    sc.fx = nil
+    sc:startQuietAnim({ anim = "FIX_TACKLE", from = 3, quiet = true }, 3)
+    local look, lunge
+    for _, e in ipairs(sc.fx or {}) do
+      if e.kind == "vfx" then look = e end
+      if e.kind == "lunge" then lunge = e end
+    end
+    check(look ~= nil and look.slot == 3 and look.delivery == "self",
+          "K22 (co-op): the look plays in place on the seat the event names")
+    eq(lunge, nil, "K22 (co-op): ...with no lunge")
+    -- FLY's charge as a quiet TELEPORT hides the seat; a quiet FLY on it
+    -- brings it back with no strike.
+    sc.fx = nil
+    sc:startQuietAnim({ anim = "TELEPORT", from = 1, quiet = true }, 1)
+    eq(sc.vanishFlow and sc.vanishFlow[1], "fly", "K22 (co-op): a quiet TELEPORT is FLY's charge")
+    sc:startQuietAnim({ anim = "FLY", from = 1, quiet = true }, 1)
+    eq(sc.vanishFlow and sc.vanishFlow[1], nil, "K22 (co-op): a quiet FLY on the hidden seat shows it again")
+  end
+
+  -- K22: new ids -- SLIDE_DOWN_ANIM hides, BLOCKBALL_ANIM's knock lands where
+  -- the ball went, a charge turn's XSTATITEM_ANIM takes no bag look over.
+  do
+    local sc = seat5(1)
+    sc.usesBattlefield = function() return true end
+    sc.medPending = {}
+    local rows = sc:medRows({ battle = "cb1", seq = 1, t = "anim", slot = 0, side = "a", text = "BLOCKBALL_ANIM" })
+    local knock = rows[#rows]
+    check(type(knock) == "table" and knock.kind == "vfx" and knock.slot ~= 1,
+          "K22 BLOCKBALL_ANIM (co-op): the knock plays on the seat the ball was thrown at")
+    pcall(sc.startAnim, sc, { anim = "SLIDE_DOWN_ANIM", from = 1 })
+    eq(sc.vanishFlow and sc.vanishFlow[1], "dig", "K22 SLIDE_DOWN_ANIM (co-op): the monster sinks, as DIG")
+    pcall(sc.startAnim, sc, { anim = "STATUS_AFFECTED_ANIM", from = 1 })
+    eq(sc.vanishFlow and sc.vanishFlow[1], nil, "K22 (co-op): STATUS_AFFECTED_ANIM shows it again")
+    -- XSTATITEM_ANIM with no item straight ahead of it.
+    sc.medPending = {}
+    ev(sc, { t = "item", slot = 0, side = "a", text = "X_ATTACK" })
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "NOT_A_LOOK_ANIM" })
+    ev(sc, { t = "anim", slot = 0, side = "a", text = "XSTATITEM_ANIM" })
+    local looks = 0
+    for _, row in ipairs(sc.medPending) do
+      if type(row) == "table" and row.kind == "vfx" then looks = looks + 1 end
+    end
+    eq(looks, 2, "K22 (co-op): an XSTATITEM_ANIM not straight behind its seat's item keeps the bag's look")
+  end
+
+  -- K22 and the Bide reading: a used line's own mark says whose it is, and a
+  -- called BIDE is read off its line (BideEffect's turn-1 clip is
+  -- XSTATITEM_ANIM, so no BIDE animation names it any more).
+  do
+    local function bider(moves)
+      local lead = mon(60, 40)
+      lead.moves = moves or { { id = "FIX_TACKLE", pp = 20 }, { id = "FIX_BIDE", pp = 10 } }
+      return lead
+    end
+    local slots = npcSlots()
+    slots[2].party[1].species = "FIXMON_B"
+    local bName = Wire.name(data.pokemon.FIXMON_B.name)
+    local sc = seat5(1, { bider() }, nil, slots)
+    ev(sc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    sc:commit({ slot = 1, move = 2, target = 3 })
+    ev(sc, { t = "msg", text = "^b" .. SPECIES_NAME .. "\nused BIDE!" })
+    ev(sc, { t = "turn", amount = 2 })
+    check(not sc.bideLocked, "K22 Bide (Red co-op): the foe's marked line is not ours, with no animation ahead of it")
+    sc:commit({ slot = 1, move = 2, target = 3 })
+    ev(sc, { t = "msg", text = "^a" .. SPECIES_NAME .. "\nused BIDE!" })
+    ev(sc, { t = "anim", slot = 0, side = "a", text = "XSTATITEM_ANIM" })
+    ev(sc, { t = "turn", amount = 3 })
+    check(sc.bideLocked == true, "K22 Bide (Red co-op): our own marked line starts ours, the clip behind it")
+    -- A quiet animation names nobody's line.
+    local seqBefore = sc.medAnimSeq
+    ev(sc, { t = "anim", slot = 2, side = "b", text = "FIX_TACKLE", quiet = true })
+    eq(sc.medAnimSeq, seqBefore, "K22 Bide (co-op): a quiet animation is passed over")
+    -- A MIRROR MOVE that called BIDE, read off the called move's line.
+    local mc = seat5(1, { bider({ { id = "FIX_MIRROR", pp = 20 } }) }, nil, (function()
+      local s2 = npcSlots(); s2[2].party[1].species = "FIXMON_B"; return s2 end)())
+    ev(mc, { t = "send", slot = 0, side = "a", mon = 0, text = SPECIES_NAME, hp = 60 })
+    mc:commit({ slot = 1, move = 1, target = 3 })
+    ev(mc, { t = "msg", text = "^a" .. bName .. "\nused BIDE!" })
+    check(mc.callFiled == 1 and not mc.bideFiled, "K22 Bide (co-op): the partner's BIDE line is not our call's")
+    ev(mc, { t = "msg", text = "^a" .. SPECIES_NAME .. "\nused MIRROR MOVE!" })
+    ev(mc, { t = "msg", text = "^a" .. SPECIES_NAME .. "\nused BIDE!" })
+    ev(mc, { t = "turn", amount = 2 })
+    check(mc.bideLocked == true, "K22 Bide (co-op): a called BIDE's own line files and starts it")
+  end
+
+  -- K23: the co-op host's Gold NPC upload states the count-as-species types.
+  do
+    local slots = npcSlots()
+    slots[3].party = { mon(50, 20) }
+    slots[4].party = { mon(50, 19) }
+    local sc = seat5(2, nil, nil, slots)
+    local npc
+    for _, m in ipairs(sc.sent) do
+      if m.type == Wire.BATTLE_PARTY and m.payload.side == "b" then npc = m.payload end
+    end
+    local want = Mediated.countSpeciesTypes2(sc.game, 2)
+    check(type(want) == "table" and #want >= 1, "K23 (co-op Gold): the fixture has a species numbered 2")
+    eq(npc and table.concat(npc.countSpeciesTypes or {}, ","), table.concat(want or {}, ","),
+       "K23 (co-op Gold): the NPC upload states the types of the species numbered its size")
+    local red = seat5(1, nil, nil, npcSlots())
+    local redNpc
+    for _, m in ipairs(red.sent) do
+      if m.type == Wire.BATTLE_PARTY and m.payload.side == "b" then redNpc = m.payload end
+    end
+    eq(redNpc and redNpc.countSpeciesTypes, nil, "K23 (co-op Red): none")
+  end
 end
 
 T.finish("coop_mediated")

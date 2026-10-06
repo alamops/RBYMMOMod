@@ -1700,10 +1700,19 @@ function M:fillBattleParty(record, client, party)
   -- `aiClass` and Gold's `trainerItems`, `aiFlags`, `itemSwitch` and
   -- `baseReward`.  The same tables on every seat, as `aiMods` is -- one
   -- trainer, one record; what a 2v2 shares is the referee's to say.
+  --
+  -- Gold's `countSpeciesTypes` (K23) is the one fact about the party rather
+  -- than the trainer: the types of the species numbered the uploaded party's
+  -- size, which the referee reads as BaseData[wOTPartyCount] for the seat it
+  -- sits on.  So it rides only onto a seat dealt the whole party -- the count
+  -- it was stated for; a seat holding part of a 2v2's deal has another count,
+  -- and carries none (the referee then reads slot 1's own types, Crystal's
+  -- walk, rather than a species for a count that is not this seat's).
   local kept, dropped = {}, {}
   for at, npcId in ipairs(record.npcIds) do
     if dealt[at] and #dealt[at] > 0 then
       kept[#kept + 1] = npcId
+      local whole = #dealt[at] == #party.mons
       record.parties[npcId] = {
         battle = party.battle, side = party.side,
         badges = party.badges, mons = dealt[at],
@@ -1711,6 +1720,7 @@ function M:fillBattleParty(record, client, party)
         aiClass = party.aiClass, trainerItems = party.trainerItems,
         aiFlags = party.aiFlags, itemSwitch = party.itemSwitch,
         baseReward = party.baseReward,
+        countSpeciesTypes = whole and party.countSpeciesTypes or nil,
       }
     else
       dropped[npcId] = true
@@ -2254,6 +2264,9 @@ function M:tryStartSim(record)
       aiFlags = npc and party.aiFlags or nil,
       itemSwitch = npc and party.itemSwitch or nil,
       baseReward = npc and party.baseReward or nil,
+      -- Gold's count-as-species types (K23), as fillBattleParty left them on
+      -- this seat (a seat dealt the whole party alone).
+      countSpeciesTypes = npc and party.countSpeciesTypes or nil,
       mons = party.mons,
       badges = party.badges,
       bag = bag,

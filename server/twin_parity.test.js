@@ -1067,6 +1067,8 @@ test('the Gen 1 / Gen 2 event field set (K10): one whitelist on Wire, sanitize a
     'participants', 'seq', 'side', 'slot', 'species', 'speciesId', 'stage', 'status', 't',
     'team', 'text'];
   const GEN3_ONLY = ['delta', 'holding', 'spread', 'stat', 'target'];
+  // K22's `quiet`, which an older reader keeps on an `anim` alone.
+  const ANIM_ONLY = ['quiet'];
   for (const reader of [1, 2]) {
     const got = sanitize.cleanBattleEvent(every, reader);
     assert.deepStrictEqual(Object.keys(got).sort(), OLDER,
@@ -1092,7 +1094,8 @@ test('the Gen 1 / Gen 2 event field set (K10): one whitelist on Wire, sanitize a
     ['src/BattleSim2/events.lua', './lib/battle2/events.js']]) {
     const fields = luaTypedKeys(read(rel), /M\.FIELDS\s*=\s*\{([\s\S]*?)\}/);
     for (const key of Object.keys(fields)) {
-      assert.ok(OLDER.includes(key), `${rel} FIELDS.${key} is a field an older reader keeps`);
+      assert.ok(OLDER.includes(key) || ANIM_ONLY.includes(key),
+        `${rel} FIELDS.${key} is a field an older reader keeps`);
     }
     const Events = require(js);
     if (Events.FIELDS) {
@@ -1689,7 +1692,8 @@ test('K18: BATTLE_LINE_MAX matches Config.lua, and chat keeps MESSAGE_MAX', () =
   assert.ok(/M\.BATTLE_MARK = "\^"/.test(wire), 'Wire spells the same mark');
   assert.deepStrictEqual(luaSet(wire, 'BATTLE_MARK_SIDES'), [...sanitize.BATTLE_MARK_SIDES].sort(),
     'and the same two side letters');
-  assert.deepStrictEqual([...sanitize.BATTLE_MARK_SIDES].sort(), ['a', 'b'], 'a and b, the two sides');
+  assert.deepStrictEqual([...sanitize.BATTLE_MARK_SIDES].sort(), ['A', 'B', 'a', 'b'],
+    'a and b, the two sides -- and A and B, K17\'s side-word marks');
   assert.ok(/function M\.battleLine\(value, limit\)\s+return battleGlyphs\(value, limit or Config\.BATTLE_LINE_MAX, true\)/
     .test(wire), 'Wire.battleLine cuts at Config.BATTLE_LINE_MAX');
 });
@@ -1709,7 +1713,11 @@ test('K17 / K18: a Red / Gold msg keeps its name marks and breaks; nothing else 
       'a space beside a break collapses into it; never leading, trailing or doubled');
     assert.strictEqual(msg('\n\nX\n', gen), 'X', 'a break alone at either end is dropped');
     assert.strictEqual(msg('^cX ^^aY ^', gen), 'cX ^aY', 'a ^ without its side letter is dropped, alone');
-    assert.strictEqual(msg('^AX', gen), 'AX', 'the side letter is lower case');
+    assert.strictEqual(msg('^AX', gen), '^AX', 'a side-word mark (K17, wave 2) is kept as a name mark is');
+    assert.strictEqual(msg('^BPOKéMON\'s\nLIGHT SCREEN fell!', gen), '^BPOKéMON\'s\nLIGHT SCREEN fell!',
+      '...either side (HandleScreens\' `.Your` / `.Enemy` ahead of BattleText_MonsLightScreenFell)');
+    assert.strictEqual(msg('^C ^^BY', gen), 'C ^BY', '...and a ^ before any other capital is dropped, alone');
+    assert.strictEqual(msg(`${'A'.repeat(78)}^BXY`, gen), 'A'.repeat(78), '...cut as a name mark is');
     assert.strictEqual(msg('A\r\nB\tC', gen), 'A\nBC', 'a CR or a tab is no break');
     assert.strictEqual(msg(`${'A'.repeat(78)}^bXY`, gen), 'A'.repeat(78),
       'a cut that leaves a mark with no name drops the mark');
@@ -1735,6 +1743,11 @@ test('K17 / K18: a Red / Gold msg keeps its name marks and breaks; nothing else 
     'the plain reading: marks gone, breaks spaces');
   assert.strictEqual(sanitize.plainBattleLine('It\'s super-\neffective!'), 'It\'s super-effective!',
     'a word split over two rows after a hyphen joins with no space');
+  assert.strictEqual(sanitize.plainBattleLine('^APOKéMON\'s\nLIGHT SCREEN fell!'), 'POKéMON\'s LIGHT SCREEN fell!',
+    'the plain reading drops a side-word mark too');
+  assert.strictEqual(sanitize.plainBattleLine('^B^bX'), 'X', '...all four of them');
+  const wire = read('src/Wire.lua');
+  assert.ok(/text:gsub\("%\^\[abAB\]", ""\)/.test(wire), 'Wire.plainBattleLine drops all four marks');
   assert.strictEqual(sanitize.plainBattleLine(undefined), undefined, 'not a string: back as it came');
 });
 
@@ -1776,7 +1789,7 @@ test('battle lines read byte for byte alike on Wire.battleLine and cleanBattleLi
     t.skip('luajit not on PATH');
     return;
   }
-  const pieces = ['5e', '5e61', '5e62', '5e63', '5e41', '5e5e', '61', '62', '0a', '0a0a', '200a', '0a20', '0d0a', '2d0a',
+  const pieces = ['5e', '5e61', '5e62', '5e63', '5e41', '5e42', '5e43', '5e5e', '61', '62', '0a', '0a0a', '200a', '0a20', '0d0a', '2d0a',
     '0d', '09', '20', '2020', 'c3a9', 'e280a6', 'e29982', 'e29980', 'c3', 'a9', 'e2', '80', 'f09f9880', 'c0a9',
     'ff', 'c389', '26', '23', '3c', '5f', '50', '4f', '4b', '41', '39', '2e', '21', '27', '2d', '7e', '00'];
   let seed = 20261006;
@@ -2041,4 +2054,111 @@ test('a Gen 1 / Gen 2 moves event keeps a row\'s ppUps for the client to mirror'
     assert.strictEqual(event.moves.length, 1, `a row past PP_UPS_MAX is dropped on Gen ${gen}`);
     assert.strictEqual(event.moves[0].ppUps, 3, `...and a readable one kept on Gen ${gen}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Wave 2 of docs/plans/gen12-referee-remaining-gaps.md: K22's `quiet` on a
+// Red / Gold `anim`, and K23's Gold `countSpeciesTypes` on an NPC party. The
+// hub parity driver's remaining_gaps_wave2 cases hold both hubs and both
+// readers to one answer case by case; this pins the gates and the hand-offs.
+// ---------------------------------------------------------------------------
+
+test('K22: a Red / Gold anim keeps quiet: true; anything else, any other kind and Gen 3 drop it', () => {
+  const event = (extra, gen) => sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 1, t: 'anim', slot: 3, side: 'b', text: 'ABSORB', ...extra,
+  }, gen);
+  for (const gen of [1, 2]) {
+    assert.strictEqual(event({ quiet: true }, gen).quiet, true, `Gen ${gen}: a quiet anim says so`);
+    for (const bad of [false, 1, 'true', 'yes', [true], { a: true }, null, 0]) {
+      const got = event({ quiet: bad }, gen);
+      assert.ok(got && got.quiet === undefined, `Gen ${gen}: quiet ${JSON.stringify(bad)} is dropped, never refused`);
+    }
+    for (const t of ['msg', 'item', 'stat', 'faint']) {
+      const got = event({ t, quiet: true }, gen);
+      assert.ok(got && got.quiet === undefined, `Gen ${gen}: a ${t} carries no quiet`);
+    }
+  }
+  for (const gen of [3, undefined]) {
+    const got = event({ quiet: true }, gen);
+    assert.ok(got && got.quiet === undefined, `a reader for generation ${gen} reads no quiet`);
+  }
+  const wire = read('src/Wire.lua');
+  assert.ok(/if older and raw\.t == "anim" and raw\.quiet == true then out\.quiet = true end/.test(wire),
+    'Wire.battleEvent reads quiet on an older reader\'s anim alone');
+});
+
+test('K23: Gold\'s countSpeciesTypes rides a Gen 2 NPC party, refusing it unreadable, onto a whole-party NPC seat', () => {
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const sheet1 = {
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100, stats: { atk: 90, def: 90, spd: 90, spc: 90 }, moves: [move],
+  };
+  const sheet2 = { ...sheet1, stats: { atk: 90, def: 90, spe: 90, spa: 90, spd: 90 } };
+  const party = (extra, gen) => sanitize.cleanBattleParty({
+    battle: 'b1', mons: [gen === 2 ? sheet2 : sheet1], ...extra,
+  }, gen);
+  assert.deepStrictEqual(party({ countSpeciesTypes: [3, 7] }, 2).countSpeciesTypes, [3, 7], 'two type bytes');
+  assert.deepStrictEqual(party({ countSpeciesTypes: [0, 0] }, 2).countSpeciesTypes, [0, 0],
+    'a mono-typed species states its byte twice, as BaseData does');
+  assert.deepStrictEqual(party({ countSpeciesTypes: ['19'] }, 2).countSpeciesTypes, [19],
+    'one, at BATTLE_TYPE_MAX - 1, read as Wire.int reads it');
+  assert.deepStrictEqual(party({ countSpeciesTypes: [null, 4] }, 2).countSpeciesTypes, [4],
+    'a JSON null closed up, as the Lua decoder does');
+  assert.strictEqual(party({ countSpeciesTypes: null }, 2).countSpeciesTypes, undefined, 'a null is absent');
+  for (const bad of [[], {}, [1, 2, 3], [20], [-1], [true], ['x'], [[1]], { a: 1 }, 'FIRE', 7]) {
+    assert.strictEqual(party({ countSpeciesTypes: bad }, 2), null,
+      `${JSON.stringify(bad)} refuses the Gold party`);
+  }
+  for (const gen of [1, undefined]) {
+    const got = party({ countSpeciesTypes: [1, 2, 3] }, gen);
+    assert.ok(got && got.countSpeciesTypes === undefined,
+      `a party read for generation ${gen} neither keeps nor refuses one`);
+  }
+  assert.strictEqual(sanitize.COUNT_SPECIES_TYPES2_MAX, 2, 'a species has two type bytes');
+  const wire = read('src/Wire.lua');
+  assert.strictEqual(luaNumber(wire, 'COUNT_SPECIES_TYPES2_MAX', 'Wire.lua'), sanitize.COUNT_SPECIES_TYPES2_MAX,
+    'Wire.COUNT_SPECIES_TYPES2_MAX and sanitize.COUNT_SPECIES_TYPES2_MAX must match');
+  assert.ok(/if raw\.countSpeciesTypes ~= nil then\s+out\.countSpeciesTypes = countSpeciesTypesOf\(raw\.countSpeciesTypes\)\s+if out\.countSpeciesTypes == nil then return nil end/
+    .test(wire), 'Wire.battleParty reads it on a Gold party and refuses it unreadable');
+  // Both hubs: onto an NPC seat dealt the whole party alone, then to the referee.
+  const hub = read('src/Hub.lua');
+  assert.ok(/local whole = #dealt\[at\] == #party\.mons/.test(hub), 'Hub:fillBattleParty knows a whole-party seat');
+  assert.ok(/countSpeciesTypes = whole and party\.countSpeciesTypes or nil,/.test(hub),
+    'Hub:fillBattleParty copies it onto that seat alone');
+  assert.ok(/countSpeciesTypes = npc and party\.countSpeciesTypes or nil,/.test(hub), 'Hub:tryStartSim hands it on');
+  const relay = read('server/lib/relay.js');
+  assert.ok(/const whole = dealt\[at\]\.length === party\.mons\.length;/.test(relay),
+    'relay fillBattleParty knows a whole-party seat');
+  assert.ok(/if \(whole && party\.countSpeciesTypes\) seatParty\.countSpeciesTypes = party\.countSpeciesTypes;/.test(relay),
+    'relay fillBattleParty copies it onto that seat alone');
+  assert.ok(/if \(npc && party\.countSpeciesTypes\) entry\.countSpeciesTypes = party\.countSpeciesTypes;/.test(relay),
+    'relay tryStartSim hands it on');
+});
+
+test('a Gen 1 / Gen 2 sheet\'s moves and types close a JSON null up, as the Lua decoder does', () => {
+  // Wave 2's differential fuzzer: `types: [null, 12]` and `moves: [null, m]`
+  // were sheets the Lua hub kept (its decoder appends nothing for a null) and
+  // this one refused. Both read through luaList now.
+  const move = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+  };
+  const sheet = (extra) => ({
+    species: 'ALPHA', level: 50, hp: 100, maxHp: 100, stats: { atk: 90, def: 90, spd: 90, spc: 90 }, ...extra,
+  });
+  assert.deepStrictEqual(cleanBattleMon(sheet({ moves: [move], types: [null, 12] })).types, [12],
+    'a null in types is no entry');
+  assert.strictEqual(cleanBattleMon(sheet({ moves: [null, move] })).moves.length, 1, 'a null in moves is no entry');
+  assert.strictEqual(cleanBattleMon(sheet({ moves: [move, move, move, move, null] })).moves.length, 4,
+    '...and does not count against BATTLE_MOVE_MAX');
+  for (const bad of [{ a: move }, { a: null }, [], [null]]) {
+    assert.strictEqual(cleanBattleMon(sheet({ moves: bad })), null, `moves ${JSON.stringify(bad)} refuses the sheet`);
+  }
+  for (const bad of [{ a: 1 }, {}, [null]]) {
+    assert.strictEqual(cleanBattleMon(sheet({ moves: [move], types: bad })), null,
+      `types ${JSON.stringify(bad)} refuses the sheet`);
+  }
+  const src = read('server/lib/sanitize.js');
+  assert.ok(/const moveList = luaList\(raw\.moves\);/.test(src) && /const typeList = luaList\(raw\.types\);/.test(src),
+    'cleanBattleMon reads both lists through luaList');
 });

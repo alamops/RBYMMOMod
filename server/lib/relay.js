@@ -3435,11 +3435,18 @@ class Relay {
     // as aiMods (one trainer, one record; what a 2v2 shares is the referee's to
     // say). Left off when absent, as Hub.lua's nil is no key at all; a number
     // by `!== undefined`, as Lua's 0 is true.
+    //
+    // Gold's `countSpeciesTypes` (K23) describes the party, not the trainer:
+    // the types of the species numbered the uploaded party's size, read as
+    // BaseData[wOTPartyCount] for the seat it sits on -- so only a seat dealt
+    // the whole party carries it (the count it was stated for). Twin of
+    // Hub.lua's `whole`.
     const kept = [];
     const dropped = new Set();
     record.npcIds.forEach((npcId, at) => {
       if (dealt[at].length) {
         kept.push(npcId);
+        const whole = dealt[at].length === party.mons.length;
         const seatParty = {
           battle: party.battle,
           side: party.side,
@@ -3453,6 +3460,7 @@ class Relay {
         if (party.aiFlags !== undefined) seatParty.aiFlags = party.aiFlags;
         if (party.itemSwitch !== undefined) seatParty.itemSwitch = party.itemSwitch;
         if (party.baseReward !== undefined) seatParty.baseReward = party.baseReward;
+        if (whole && party.countSpeciesTypes) seatParty.countSpeciesTypes = party.countSpeciesTypes;
         record.parties.set(npcId, seatParty);
       } else {
         dropped.add(npcId);
@@ -3795,6 +3803,9 @@ class Relay {
       if (npc && party.aiFlags !== undefined) entry.aiFlags = party.aiFlags;
       if (npc && party.itemSwitch !== undefined) entry.itemSwitch = party.itemSwitch;
       if (npc && party.baseReward !== undefined) entry.baseReward = party.baseReward;
+      // Gold's count-as-species types (K23), as fillBattleParty left them on
+      // this seat (a seat dealt the whole party alone).
+      if (npc && party.countSpeciesTypes) entry.countSpeciesTypes = party.countSpeciesTypes;
       // Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
       // connection and so no cart, and the referees read side a's anyway.
       // Every human is still connected here -- a seat that drops while the

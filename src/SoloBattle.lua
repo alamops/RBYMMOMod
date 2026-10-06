@@ -765,6 +765,12 @@ function M:_begin(game, state, mapId, kind)
       aiFlags = (kind ~= "wild" and pending.wild) and pending.wild.aiFlags or nil,
       itemSwitch = (kind ~= "wild" and pending.wild) and pending.wild.itemSwitch or nil,
       baseReward = (kind ~= "wild" and pending.wild) and pending.wild.baseReward or nil,
+      -- Gold / Silver's count-as-species types (contract K23,
+      -- MediatedBattle.countSpeciesTypes2): the types of the species numbered
+      -- the party's size, which pokegold's FindEnemyMonsThatResistPlayer reads
+      -- for its first pass.  The one seat holds the whole party here, so it
+      -- is the count the upload stated it for.
+      countSpeciesTypes = (kind ~= "wild" and pending.wild) and pending.wild.countSpeciesTypes or nil,
     } },
   }
 

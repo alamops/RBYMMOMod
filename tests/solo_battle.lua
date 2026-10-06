@@ -2677,6 +2677,22 @@ end)()
   eq(gseat.itemSwitch, 0x0134, "K16 (solo Gold): itemSwitch (TRNATTR_AI_ITEM_SWITCH)")
   eq(gseat.baseReward, 30, "K16 (solo Gold): baseReward (TRNATTR_BASEMONEY)")
   eq(gseat.bag, nil, "K16 (solo Gold): no NPC bag")
+  eq(gseat.countSpeciesTypes, nil, "K23 (solo Gold): no species numbered the party's size, none stated")
+
+  -- K23: the types of the species numbered the party's size (one BETA here,
+  -- so species 1), stated for pokegold's FindEnemyMonsThatResistPlayer.
+  local k23Data = setmetatable({ pokemon = {
+    ALPHA = { name = "ALPHA", index = 1, dex = 1, types = { "FIRE", "NORM" }, catchRate = 200 },
+    BETA = data.pokemon.BETA,
+  } }, { __index = data })
+  local k23Opts, k = capture(Turn2, function()
+    return fightOf("trainer", { cart2 = true, data = k23Data,
+      trainer = { name = "SCOUT FIX", baseMoney = 30, items = {},
+                  attributes = { 0, 0, 30, 0, 0, 0, 0, 0 } } })
+  end)
+  ok(k.started, "K23 (solo Gold): the trainer fight is taken over")
+  eq(table.concat(k23Opts and k23Opts.sides.b[1].countSpeciesTypes or {}, ","), "0,1",
+     "K23 (solo Gold): species 1's two types ride to the computer's seat (chart indices FIRE 0, NORM 1)")
 
   local gwData = setmetatable({ gen2Pokedex = { entries = { BETA = { weight = 55 } } } },
     { __index = data })
