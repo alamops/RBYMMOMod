@@ -939,11 +939,23 @@ local function buildMon(P, spec, opts)
     }
   end
   local item = tonumber(spec.heldItem) or tonumber(spec.item)
-  if item == nil and opts.wild then
+  if opts.wild then
+    -- pret SetWildMonHeldItem runs after the monster is made
+    -- (CB2_InitBattleInternal: pokeemerald battle_main.c:700, pokefirered
+    -- :708), so a draw that writes -- ITEM_NONE included -- writes over the
+    -- row's own item (`setwildbattle`'s, the start's zeroed one); only a draw
+    -- that returns early leaves it (SoloBattle.gen3WildItem's `wrote`).
+    local rolled, wrote
     if opts.family == "rse" then
+      -- The engine's own roll (encounter_rules/rse.lua wildHeldItem): nil
+      -- when it returned early, a number when it wrote; `alteringCave` its
+      -- ALTERING CAVE arm (pret pokeemerald pokemon.c:6692).
       local Encounters = g3("src.core.game3.encounters")
       local rules = Encounters and try3(Encounters.rules)
-      item = rules and tonumber(try3(rules.wildHeldItem, species, {})) or nil
+      local held = rules and try3(rules.wildHeldItem, species,
+        { alteringCave = opts.alteringCave and true or nil }) or nil
+      rolled = tonumber(held)
+      wrote = rolled ~= nil
     else
       -- FireRed / LeafGreen's roll is SoloBattle's (gen3WildItem) -- one
       -- statement of pret SetWildMonHeldItem, so the monster a stand-in builds
@@ -954,18 +966,19 @@ local function buildMon(P, spec, opts)
       -- play).
       local Solo = solo3()
       if Solo and type(Solo.gen3WildItem) == "function" then
-        local ok, got = pcall(Solo.gen3WildItem, species, word)
-        if ok then item = tonumber(got) end
+        local ok, got, didWrite = pcall(Solo.gen3WildItem, species, word)
+        if ok and tonumber(got) then rolled, wrote = tonumber(got), didWrite == true end
+      end
+      if rolled == nil then
+        local meta = try3(P.speciesMeta, species)
+        local common = tonumber(type(meta) == "table" and meta.itemCommon) or 0
+        local rare = tonumber(type(meta) == "table" and meta.itemRare) or 0
+        local r = word() % 100
+        if common == rare then rolled, wrote = common, true
+        elseif r > 44 then rolled, wrote = (r <= 94) and common or rare, true end
       end
     end
-    if item == nil and opts.family ~= "rse" then
-      local meta = try3(P.speciesMeta, species)
-      local common = tonumber(type(meta) == "table" and meta.itemCommon) or 0
-      local rare = tonumber(type(meta) == "table" and meta.itemRare) or 0
-      local r = word() % 100
-      if common == rare then item = common
-      elseif r > 44 then item = (r <= 94) and common or rare end
-    end
+    if wrote then item = rolled end
   end
   item = floor(tonumber(item) or 0)
   local moves, pp, maxPp = nil, nil, nil
@@ -1066,9 +1079,12 @@ end
 -- personality, IVs, nature, gender, ability or ability slot, moves and PP,
 -- held item, nickname, HP, status -- and only what it leaves out rolled.  An
 -- engine-built monster is copied as it is (M.built3).  `opts.wild` asks for
--- the cart's wild held-item roll when the row names no item: pret
--- SetWildMonHeldItem skips it for a LEGENDARY battle (FireRed's
--- GHOST_UNVEILED is that bit), the Pike and the Pyramid, and the POKe DUDE.
+-- the cart's wild held-item roll, which writes over the row's own item
+-- whenever its draw writes at all (pret SetWildMonHeldItem, after
+-- setwildbattle's CreateScriptedWildMon): pret skips it for a LEGENDARY
+-- battle (FireRed's GHOST_UNVEILED is that bit), the Pike and the Pyramid,
+-- and the POKe DUDE.  `opts.alteringCave` (Emerald's ALTERING CAVE,
+-- SoloBattle.gen3AlteringCave) rolls the cave's own items.
 function M.foeMon3(spec, opts)
   if type(spec) ~= "table" then return nil, "no foe" end
   if M.built3(spec) then return M.copyMon3(spec) end
@@ -1076,17 +1092,34 @@ function M.foeMon3(spec, opts)
   if not P then return nil, "the engine's POKeMON module is unavailable" end
   opts = opts or {}
   return buildMon(P, spec, { wild = opts.wild == true,
+    alteringCave = opts.alteringCave == true or nil,
     family = family3(opts.session or Gen3.session()) })
+end
+
+-- Is `mapId` Emerald's ALTERING CAVE, where a wild rolls the cave's own held
+-- items (pret pokeemerald pokemon.c:6692, LAYOUT_ALTERING_CAVE)?
+-- SoloBattle.gen3AlteringCave is the one statement; the literal is the
+-- answer for a graph without SoloBattle (never in play).
+function M.alteringCave3(mapId)
+  if type(mapId) ~= "string" then return false end
+  local Solo = solo3()
+  if Solo and type(Solo.gen3AlteringCave) == "function" then
+    local ok, yes = pcall(Solo.gen3AlteringCave, mapId)
+    if ok then return yes == true end
+  end
+  return mapId == "EM_ALTERING_CAVE"
 end
 
 -- A wild encounter's monster.  `enc` is what `encounter.roll` returned (the
 -- mod-facing shape: `speciesId` numeric, `species` the engine's key name) or
--- the engine's own (numeric `species`).
-function M.wildMon3(enc, session)
+-- the engine's own (numeric `species`); `mapId` the map it was met on (the
+-- ALTERING CAVE's held items, M.alteringCave3).
+function M.wildMon3(enc, session, mapId)
   if type(enc) ~= "table" then return nil, "no encounter" end
   local P = g3("src.core.game3.pokemon")
   if not P then return nil, "the engine's POKeMON module is unavailable" end
-  return buildMon(P, enc, { wild = true, family = family3(session) })
+  return buildMon(P, enc, { wild = true, family = family3(session),
+    alteringCave = M.alteringCave3(mapId) or nil })
 end
 
 -- A trainer's whole party (Trainers.foeFromId's `party`, lead first), built
@@ -1946,8 +1979,10 @@ local function heldRoll3(cls, opts, spec)
               or (kind == "ghost" and cls.ghost3 == "unveiled"))
 end
 
--- The wild foe of each kind, built as the cart builds it.
-function M.wildFoe3(cls, enc, session, opts)
+-- The wild foe of each kind, built as the cart builds it.  `mapId` is the
+-- map it is met on: Emerald's ALTERING CAVE rolls the cave's own held items
+-- (M.alteringCave3).
+function M.wildFoe3(cls, enc, session, opts, mapId)
   local kind = type(cls) == "table" and cls.kind3 or "wild"
   local spec = enc
   if kind == "roamer" then
@@ -1959,7 +1994,18 @@ function M.wildFoe3(cls, enc, session, opts)
     -- ordinary wild to SetWildMonHeldItem: rolled.
     spec = type(enc.foe) == "table" and enc.foe or enc
   end
-  return M.foeMon3(spec, { wild = heldRoll3(cls, opts, spec), session = session })
+  local roll = heldRoll3(cls, opts, spec)
+  if kind == "firstBattle" then
+    -- Birch's ZIGZAGOON: pret zeroes its item (pokeemerald battle_controllers.c
+    -- SetUpBattleVarsAndBirchZigzagoon) and SetWildMonHeldItem then rolls it
+    -- once (battle_main.c:700; FIRST_BATTLE is not exempt).  That one roll is
+    -- the kind's (src/Solo3/First.lua rollHeldItem, in its `takes`, on the
+    -- monster built here still holding the start's zeroed item) -- rolled here
+    -- too, it would be drawn twice.
+    roll = false
+  end
+  return M.foeMon3(spec, { wild = roll, session = session,
+    alteringCave = M.alteringCave3(mapId) })
 end
 
 local function cleanDefeat3(text)
@@ -1995,7 +2041,7 @@ function M.wildStand3(enc, ctx, opts)
   if enc.foe ~= nil and cls.kind3 ~= "roamer" then return nil, "foe" end
   local coop = M.coopRefusal3(cls, enc, enc.foe, opts)
   if coop and not ctx.solo then return nil, coop end
-  local mon, why = M.wildFoe3(cls, enc, session, opts)
+  local mon, why = M.wildFoe3(cls, enc, session, opts, ctx.mapId)
   if not mon then return nil, why end
   local stand = M.stand3({
     kind = "wild", party = { mon }, encounter = enc, game = ctx.game,

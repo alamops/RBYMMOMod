@@ -671,6 +671,22 @@ do
     if (scripted.enemyParty[1].heldItem or 0) ~= 0 then rolled = rolled + 1 end
   end
   check(rolled > 0, "a scripted wild rolls one, as any wild does")
+  -- setwildbattle's own item: SetWildMonHeldItem runs after the script made
+  -- the monster (CB2_InitBattleInternal), so a draw that writes rolls over
+  -- it and one that returns early (FireRed: 0..44) leaves it (W3-CORE).
+  local over, kept = 0, 0
+  for _ = 1, 40 do
+    local scripted = CoopField.wildStand3({ species = 16, level = 30, item = 77 },
+      { game = GAME, solo = true }, { wild = true, wildScripted = true })
+    local held = scripted.enemyParty[1].heldItem
+    if held == 77 then kept = kept + 1 elseif held == 13 or held == 96 then over = over + 1 end
+  end
+  check(over > 0, "a scripted wild's own item is rolled over when the draw writes")
+  check(kept > 0, "...and kept when it returns early")
+  eq(over + kept, 40, "...nothing else")
+  local legendKept = CoopField.wildStand3({ species = 16, level = 30, item = 77 },
+    { game = GAME, solo = true }, { wild = true, legendary = true })
+  eq(legendKept.enemyParty[1].heldItem, 77, "a legend keeps the script's item (no roll at all)")
   local marowak = CoopField.wildStand3({ species = 29, level = 30, ghost = true, ghostUnveiled = true,
     wildScripted = true, gender = "F", nature = 12,
     ivs = { hp = 31, atk = 31, def = 31, spe = 31, spa = 31, spd = 31 } },
@@ -693,6 +709,15 @@ do
     { game = GAME, solo = true }, { wild = true, firstBattleKind = "birch" })
   eq(birch and birch.firstBattle3, "birch", "Birch's rescue")
   eq(birch and birch.enemyParty[1].level, 2, "...at its own level")
+  -- Its one SetWildMonHeldItem roll is the kind's (Solo3/First.lua, in
+  -- `takes`): the stand-in keeps the start's zeroed item, never drawn twice.
+  local birchHeld = 0
+  for _ = 1, 20 do
+    local b = CoopField.wildStand3({ species = 16, level = 2, item = 0 },
+      { game = GAME, solo = true }, { wild = true, firstBattleKind = "birch" })
+    if (b.enemyParty[1].heldItem or 0) ~= 0 then birchHeld = birchHeld + 1 end
+  end
+  eq(birchHeld, 0, "...built with the start's zeroed item, its roll left to the first-battle kind")
   local pyr = builtMon(29, 33, { personality = 99, ability = 2, abilityNum = 1 })
   local pyramid = CoopField.wildStand3(pyr, { game = GAME, solo = true },
     { wild = true, pyramid = true, frontier = true, scriptedLoss = true })
@@ -703,6 +728,59 @@ do
   eq(pm and pm.personality, 99, "...its personality")
   eq(pm and pm.ability, 2, "...its ability")
   eq(pm and pm.maxHp, pyr.maxHp, "...its stats")
+end
+
+-- Emerald's ALTERING CAVE (W3-CORE): a wild met there rolls the cave's own
+-- held items (pret pokeemerald pokemon.c:6692, LAYOUT_ALTERING_CAVE) -- the
+-- stand-in's roll is told so from the map, whichever builder it goes through.
+do
+  newGame({ version = "emerald" })
+  local realRules = FakeEncounters.rules
+  local asks, answer = {}, 21
+  FakeEncounters.rules = function()
+    return { wildHeldItem = function(species, opts)
+      asks[#asks + 1] = { species = species, opts = opts or {} }
+      return answer
+    end }
+  end
+  local cave = CoopField.wildStand3({ species = 16, level = 20 },
+    { game = GAME, solo = true, mapId = "EM_ALTERING_CAVE" })
+  eq(asks[1] and asks[1].opts.alteringCave, true, "altering cave: the stand-in's roll asks the cave's arm")
+  eq(cave and cave.enemyParty[1].heldItem, 21, "altering cave: ...and its monster holds what it gave")
+  asks = {}
+  CoopField.wildStand3({ species = 16, level = 20 }, { game = GAME, solo = true, mapId = "EM_ROUTE_101" })
+  eq(#asks, 1, "altering cave: any other map rolls too")
+  eq(asks[1] and asks[1].opts.alteringCave, nil, "altering cave: ...an ordinary roll")
+  asks = {}
+  CoopField.wildStand3({ species = 16, level = 20 }, { game = GAME, solo = true })
+  eq(#asks, 1, "altering cave: a door that names no map rolls too")
+  eq(asks[1] and asks[1].opts.alteringCave, nil, "altering cave: ...an ordinary roll")
+  asks = {}
+  CoopField.wildFoe3({ kind3 = "wild" }, { species = 16, level = 20 }, SESSION, {}, "EM_ALTERING_CAVE")
+  eq(asks[1] and asks[1].opts.alteringCave, true, "altering cave: wildFoe3 forwards the map")
+  asks = {}
+  CoopField.foeMon3({ species = 16, level = 20 }, { wild = true, alteringCave = true })
+  eq(asks[1] and asks[1].opts.alteringCave, true, "altering cave: foeMon3 forwards the flag")
+  asks = {}
+  CoopField.wildMon3({ species = 16, level = 20 }, SESSION, "EM_ALTERING_CAVE")
+  eq(asks[1] and asks[1].opts.alteringCave, true, "altering cave: ...and wildMon3 the map")
+  asks = {}
+  CoopField.wildStand3({ species = 16, level = 20 }, { game = GAME, solo = true, mapId = "EM_ALTERING_CAVE" },
+    { wild = true, legendary = true })
+  eq(#asks, 0, "altering cave: a legend there still rolls nothing")
+  check(CoopField.alteringCave3("EM_ALTERING_CAVE"), "altering cave: the map is Emerald's cave")
+  check(not CoopField.alteringCave3("FR_SIX_ISLAND_ALTERING_CAVE"), "altering cave: ...not FireRed's")
+  -- Emerald's roll writes ITEM_NONE over setwildbattle's item (the engine's
+  -- 0 is a written item; its nil an early return that leaves it).
+  answer = 0
+  local cleared = CoopField.wildStand3({ species = 16, level = 30, item = 77 },
+    { game = GAME, solo = true }, { wild = true, wildScripted = true })
+  eq(cleared.enemyParty[1].heldItem, 0, "Emerald: a written ITEM_NONE clears the script's item")
+  answer = nil
+  local keptEm = CoopField.wildStand3({ species = 16, level = 30, item = 77 },
+    { game = GAME, solo = true }, { wild = true, wildScripted = true })
+  eq(keptEm.enemyParty[1].heldItem, 77, "Emerald: an early return keeps it")
+  FakeEncounters.rules = realRules
 end
 
 -- a facility's trainer: no gTrainers row, its own monsters, pret's AI flags
@@ -1088,6 +1166,21 @@ for _, version in ipairs({ "firered", "emerald" }) do
   local exports = run.loader.exports and run.loader.exports.rby_mmo
   local ctx = exports and type(exports.players) == "function" and upvalue(exports.players, "ctx")
   check(ctx ~= nil and ctx.solo ~= nil and ctx.coop ~= nil, version .. ": the client's context")
+  -- Every solo family read at boot (Client.install -> SoloBattle.loadKinds3,
+  -- W3-CORE), before any fight has asked for one.
+  local SoloM = ctx and getmetatable(ctx.solo)
+  local bootKinds = { "roamer", "legendary", "scripted", "ghost", "facility", "pair", "partner",
+                      "firstBattle" }
+  -- The Safari family (wave 3) once its file is in the mod folder.
+  local safariFile = io.open(MOD_PATH .. "/src/Solo3/Safari.lua", "rb")
+  if safariFile then
+    safariFile:close()
+    bootKinds[#bootKinds + 1] = "safari"
+  end
+  for _, name in ipairs(bootKinds) do
+    check(SoloM and type(SoloM.KINDS3) == "table" and SoloM.KINDS3[name] ~= nil,
+          version .. ": the " .. name .. " kind was read at boot")
+  end
 
   -- one field tick puts both wraps on
   local bbOriginal, pdOriginal = FakeBB.start, FakePokedude.startTeachyTvBattle
@@ -1171,6 +1264,22 @@ for _, version in ipairs({ "firered", "emerald" }) do
   eq(sg and sg.opts.safari, true, version .. ": ...told in the start's own word")
   eq(sg and sg.enc.safari, true, version .. ": ...on the encounter too")
   eq(#coopAsked, 0, version .. ": ...never co-op's")
+  -- Emerald's ALTERING CAVE, through the roll: the map the client was told
+  -- reaches the stand-in's held-item roll (W3-CORE).
+  if version == "emerald" then
+    reset()
+    local realRules = FakeEncounters.rules
+    local caveAsks = {}
+    FakeEncounters.rules = function()
+      return { wildHeldItem = function(_, o) caveAsks[#caveAsks + 1] = o or {}; return 21 end }
+    end
+    run.loader.hooks:call("encounter.roll", function() return { species = "PIDGEY", speciesId = 16, level = 3 } end,
+      {}, { mapId = "EM_ALTERING_CAVE" })
+    FakeEncounters.rules = realRules
+    eq(caveAsks[1] and caveAsks[1].alteringCave, true, version .. ": a wild met in the ALTERING CAVE rolls the cave's items")
+    eq(soloGot[1] and soloGot[1].enc.mon and soloGot[1].enc.mon.heldItem, 21,
+       version .. ": ...and solo fights the monster holding it")
+  end
   -- declined by solo: the encounter is the cart's again
   reset()
   soloTakes = false
@@ -1221,6 +1330,87 @@ for _, version in ipairs({ "firered", "emerald" }) do
   rawset(FakePokedude, "__rby_mmo_pokedude", nil)
   rawset(FakePokedude, "__rby_mmo_pokedude:live", nil)
   run.release()
+end
+
+-- A family that does not load is said at boot, by its file, and costs only
+-- its own fights (W3-CORE): the install's reader serves a src/Solo3/Legend.lua
+-- that does not parse.  The mod still loads, every other family is read, and
+-- the mod's resolver still answers afterwards -- a file that does not parse is
+-- never handed to it (main.lua gives up on every later module once one
+-- fails).
+do
+  newGame({ version = "emerald" })
+  SESSION.party = { builtMon(4, 10) }
+  GameVersion.set("emerald")
+  local fs = makeRemapFs(T, MOD_PATH)
+  local realRead = fs.read
+  local broken = MOD_PATH ~= "mods/rby_mmo" and (MOD_PATH .. "/src/Solo3/Legend.lua") or nil
+  fs.read = function(path)
+    if path == "mods/rby_mmo/src/Solo3/Legend.lua" or path == broken then
+      return "return { kinds3 = {"
+    end
+    return realRead(path)
+  end
+  local Logger = require("src.core.Logger")
+  local realWarn, heard = Logger.warn, {}
+  Logger.warn = function(fmt, ...)
+    local ok, line = pcall(string.format, fmt, ...)
+    heard[#heard + 1] = ok and line or tostring(fmt)
+    return realWarn(fmt, ...)
+  end
+  local okLoad, run = pcall(T.sdk.loadMod, "mods/rby_mmo",
+    { generation = 3, data = T.sdk.gen3Data(), fs = fs })
+  Logger.warn = realWarn
+  check(okLoad, "boot (broken family): loading never raises (" .. tostring(not okLoad and run or "") .. ")")
+  if okLoad then
+    eq(run.mod and run.mod.state, "loaded", "boot (broken family): the mod still loads")
+    local said = table.concat(heard, " / ")
+    check(said:find("src/Solo3/Legend.lua", 1, true) ~= nil and said:find("reinstall", 1, true) ~= nil,
+          "boot (broken family): it is said at boot, by its file, with what to do: " .. said)
+    local exports = run.loader.exports and run.loader.exports.rby_mmo
+    local ctx = exports and type(exports.players) == "function" and upvalue(exports.players, "ctx")
+    local SoloM = ctx and getmetatable(ctx.solo)
+    eq(SoloM and SoloM.KINDS3.roamer, nil, "boot (broken family): its kinds are not registered (the cart's)")
+    check(SoloM and SoloM.KINDS3.facility ~= nil and SoloM.KINDS3.pair ~= nil,
+          "boot (broken family): ...every other family is")
+    eq(SoloM and type(SoloM.turnFor(3)), "table",
+       "boot (broken family): the mod's resolver still answers a module asked for later")
+    run.release()
+  end
+end
+
+-- ...and one that parses but throws while starting is kept to itself too:
+-- main.lua's resolver asks for a family module as optional, so its failure
+-- never switches off the modules asked for after it (a plain module's still
+-- does, so a half-wired install never runs).
+do
+  newGame({ version = "emerald" })
+  SESSION.party = { builtMon(4, 10) }
+  GameVersion.set("emerald")
+  local fs = makeRemapFs(T, MOD_PATH)
+  local realRead = fs.read
+  local broken = MOD_PATH ~= "mods/rby_mmo" and (MOD_PATH .. "/src/Solo3/Legend.lua") or nil
+  fs.read = function(path)
+    if path == "mods/rby_mmo/src/Solo3/Legend.lua" or path == broken then
+      return "error('a family that throws at start')"
+    end
+    return realRead(path)
+  end
+  local okLoad, run = pcall(T.sdk.loadMod, "mods/rby_mmo",
+    { generation = 3, data = T.sdk.gen3Data(), fs = fs })
+  check(okLoad, "boot (throwing family): loading never raises (" .. tostring(not okLoad and run or "") .. ")")
+  if okLoad then
+    eq(run.mod and run.mod.state, "loaded", "boot (throwing family): the mod still loads")
+    local exports = run.loader.exports and run.loader.exports.rby_mmo
+    local ctx = exports and type(exports.players) == "function" and upvalue(exports.players, "ctx")
+    local SoloM = ctx and getmetatable(ctx.solo)
+    eq(SoloM and SoloM.KINDS3.roamer, nil, "boot (throwing family): its kinds are not registered")
+    check(SoloM and SoloM.KINDS3.facility ~= nil and SoloM.KINDS3.pair ~= nil,
+          "boot (throwing family): ...every other family is")
+    eq(SoloM and type(SoloM.turnFor(3)), "table",
+       "boot (throwing family): the resolver still answers a module asked for later")
+    run.release()
+  end
 end
 GameVersion.set("red")
 

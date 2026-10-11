@@ -1423,6 +1423,10 @@ end)()
   eq(Solo.gen3Result("loss", "run"), "run", "gen3Result: the player ran")
   eq(Solo.gen3Result("win", "run"), "mon_fled", "gen3Result: the wild mon left (C5: MON_FLED)")
   eq(Solo.gen3Result("draw", "ko", true), "lose", "gen3Result: a whiteout draw is a defeat")
+  -- ...to the script; the save keeps B_OUTCOME_DREW (pret Cmd_checkteamslost
+  -- ORs LOST and WON), W3-CORE.
+  eq(Solo.gen3OutcomeWord("draw", "ko", true), "draw", "gen3OutcomeWord: a double-knockout whiteout saves DREW")
+  eq(Solo.gen3OutcomeWord("loss", "ko", true), "lose", "gen3OutcomeWord: ...a whiteout lost outright LOST")
   eq(Solo.gen3Kind({ wild = true }), "wild", "gen3Kind: wild")
   eq(Solo.gen3Kind({ trainerId = 7 }), "trainer", "gen3Kind: trainer")
   local s = Solo.new(nil, { enabled = function() return true end })

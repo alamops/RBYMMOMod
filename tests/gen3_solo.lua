@@ -4362,8 +4362,17 @@ do
        "C5: an Arena judgment won")
     eq(words({ verdict = "loss", reason = "ko", how = "judge", by = "b", kind = "trainer" }), "lose/lose",
        "C5: ...and lost")
-    eq(words({ verdict = "draw", reason = "ko", how = "ko", whiteout = true, kind = "trainer" }), "lose/lose",
-       "C5: a whiteout is a defeat")
+    -- Both sides out at once: the player whites out (pret IsPlayerDefeated
+    -- counts DREW) and `done` hears "lose", but the save keeps DREW --
+    -- Cmd_checkteamslost ORs B_OUTCOME_LOST and B_OUTCOME_WON (W3-CORE).
+    eq(words({ verdict = "draw", reason = "ko", how = "ko", whiteout = true, kind = "trainer" }), "lose/draw",
+       "C5: a double-knockout whiteout is a defeat to the script, DREW to the save")
+    eq(words({ verdict = "draw", reason = "ko", how = "ko", whiteout = true, kind = "wild" }), "lose/draw",
+       "C5: ...a wild one too")
+    eq(words({ verdict = "loss", reason = "ko", how = "ko", by = "b", whiteout = true, kind = "trainer" }),
+       "lose/lose", "C5: a whiteout lost outright is LOST to both")
+    eq(words({ verdict = "draw", reason = "ko", whiteout = true }), "lose/draw",
+       "C5: ...and a referee with no `how` reads the same")
     eq(words({ verdict = "draw", reason = "timeout", kind = "trainer" }), "lose/draw",
        "C5: a trainer's draw is 'lose' to the opcode, DREW to the save")
     eq(words({ verdict = "draw", reason = "timeout", kind = "wild" }), "draw/draw", "C5: a wild draw")
@@ -4420,6 +4429,32 @@ do
     eq(result, "mon_fled", "C5 (flee): done('mon_fled')")
     eq(SESSION.battleOutcome, 6, "C5 (flee): ...B_OUTCOME_MON_FLED")
     eq(effectsOf("emit")[1] and effectsOf("emit")[1][3].result, "fled", "C5 (flee): battle.ended says 'fled'")
+
+    -- Both sides out at once, on the referee's own outcome: the player's
+    -- last monster uses an invented EXPLOSION (pret's EFFECT_EXPLOSION) on
+    -- the wild one.  The cart whites the player out (IsPlayerDefeated counts
+    -- DREW) and the script hears a defeat, but gBattleOutcome is DREW
+    -- (Cmd_checkteamslost ORs LOST and WON) -- what a roamer's writeback and
+    -- a post-battle script read.
+    ROM[101] = { effect = E.EXPLOSION, power = 250, type = 0, accuracy = 100, pp = 5,
+                 secondaryChance = 0, target = 0, priority = 0, flags = 2 }
+    P3._moveNames[101] = "BLAST"
+    newGame()
+    SESSION.party = { monOf(4, 30, { moves = { 101 }, pp = { 5 }, maxPp = { 5 } }) }
+    local dk = newSolo()
+    local dkResult, dkCalls = nil, 0
+    check(dk:fromGen3Encounter(GAME, { species = 16, level = 3 },
+      { done = function(r) dkResult = r; dkCalls = dkCalls + 1 end }), "double KO: taken")
+    local dkSim = dk.sim
+    drive(dk, function(f) f:pickMove(1) end)
+    local dkOut = dkSim and dkSim:outcome() or {}
+    eq(dkOut.outcome, "draw", "double KO: the referee calls it a draw")
+    eq(dkOut.how, "ko", "double KO: ...by knockout")
+    eq(dk:isRunning(), false, "double KO: the fight is over")
+    eq(dkResult, "lose", "double KO: done('lose') -- the player whited out")
+    eq(dkCalls, 1, "double KO: ...once")
+    eq(SESSION.battleOutcome, 3, "double KO: the save says B_OUTCOME_DREW, not LOST")
+    eq(fieldCalls[1], "respawn", "double KO: the whiteout's respawn")
 
     -- The whole way through, on the referee's own outcome: a wild monster
     -- that knows only TELEPORT (an invented row on pret's EFFECT_TELEPORT)
@@ -4680,6 +4715,250 @@ do
     eq(Sheet3.arenaMind(10), nil, "arena: a cart without the table has no rating")
     eq(Sheet3.moves(monOf(4, 5), { arena = true })[1].arenaMind, nil, "arena: ...and no row says one")
     Sheet3.resetArenaMinds()
+  end
+
+  -- ------- (k) W3-CORE: SetWildMonHeldItem over a row's own item, the
+  -- ALTERING CAVE, a caught monster's sleep counter
+  do
+    newGame()
+    local meta = P3._speciesMeta[16]
+    -- FireRed / LeafGreen (pokefirered pokemon.c:6032): whether the draw
+    -- wrote the held item at all is the second answer.
+    local function roll2(common, rare, r)
+      meta.itemCommon, meta.itemRare = common, rare
+      return Solo.gen3WildItem(16, function() return r end)
+    end
+    local function both(item, wrote) return tostring(item) .. "/" .. tostring(wrote) end
+    eq(select(2, roll2(21, 127, 44)), false, "wrote (FRLG): 0..44 returns early, writing nothing")
+    eq(select(2, roll2(21, 127, 45)), true, "wrote (FRLG): 45..94 writes the common item")
+    eq(select(2, roll2(21, 127, 99)), true, "wrote (FRLG): 95..99 the rare one")
+    eq(both(roll2(0, 0, 3)), "0/true",
+       "wrote (FRLG): common == rare == ITEM_NONE writes ITEM_NONE, whatever the draw")
+    eq(both(roll2(21, 0, 95)), "0/true", "wrote (FRLG): ...as does an empty rare slot at 95")
+
+    -- A row's own item (setwildbattle's): rolled over whenever the draw
+    -- writes (CB2_InitBattleInternal runs SetWildMonHeldItem after the
+    -- script made the monster), kept when it returns early, and kept by a
+    -- fight the roll is not for (a LEGENDARY).  The row fixes personality and
+    -- IVs, so the item roll is the one Random() drawn.
+    local realRandom = FakeRng.Random
+    local function built(draw, row, opts)
+      local draws = 0
+      FakeRng.Random = function() draws = draws + 1; return draw end
+      local base = { species = 16, level = 5, personality = 3,
+                     ivs = { hp = 1, atk = 1, def = 1, spe = 1, spa = 1, spd = 1 } }
+      for k, v in pairs(row or {}) do base[k] = v end
+      local ok, mon = pcall(Solo.gen3FoeMon, base, opts)
+      FakeRng.Random = realRandom
+      return ok and mon or nil, draws
+    end
+    meta.itemCommon, meta.itemRare = 21, 127
+    local over = built(50, { item = 13 }, { wild = true })
+    eq(over and over.item, 21, "scripted item (FRLG): a draw that writes rolls over setwildbattle's item")
+    eq(over and over.heldItem, 21, "scripted item (FRLG): ...both spellings")
+    local kept, keptDraws = built(10, { item = 13 }, { wild = true })
+    eq(kept and kept.item, 13, "scripted item (FRLG): a draw under 45 leaves it")
+    eq(keptDraws, 1, "scripted item (FRLG): ...the Random() still drawn")
+    local legend, legendDraws = built(50, { item = 13 }, { wild = true, heldRoll = false })
+    eq(legend and legend.item, 13, "scripted item: a LEGENDARY fight keeps the script's item (no roll)")
+    eq(legendDraws, 0, "scripted item: ...and draws nothing for it")
+    meta.itemCommon, meta.itemRare = 0, 0
+    local cleared = built(10, { item = 13 }, { wild = true })
+    eq(cleared and cleared.item, 0, "scripted item (FRLG): an item-less species' roll writes ITEM_NONE over it")
+    meta.itemCommon, meta.itemRare = 143, 143
+    local snorlax = built(10, { item = 0 }, { wild = true })
+    eq(snorlax and snorlax.item, 143, "scripted item (FRLG): common == rare is held over the script's ITEM_NONE "
+       .. "(Route 12's SNORLAX and its LEFTOVERS)")
+    local trainerMon = built(50, { item = 13 }, { wild = false })
+    eq(trainerMon and trainerMon.item, 13, "scripted item: a trainer's monster is never rolled")
+    meta.itemCommon, meta.itemRare = 0, 0
+
+    -- Emerald: the engine's own roll (encounter_rules/rse.lua wildHeldItem):
+    -- nil = returned early, a number = written; `alteringCave` its cave arm.
+    newGame({ version = "emerald" })
+    local realRules = FakeEncounters.rules
+    local asks, answer = {}, nil
+    FakeEncounters.rules = function()
+      return { wildHeldItem = function(species, opts)
+        asks[#asks + 1] = { species = species, opts = opts }
+        return answer
+      end }
+    end
+    answer = nil
+    eq(both(Solo.gen3WildItem(16, function() return 0 end)), "0/false",
+       "wrote (EM): the engine's nil is an early return")
+    answer = 0
+    eq(both(Solo.gen3WildItem(16, function() return 0 end)), "0/true",
+       "wrote (EM): ...its 0 a written ITEM_NONE")
+    answer = 21
+    local emOver = built(50, { item = 13 }, { wild = true })
+    eq(emOver and emOver.item, 21, "scripted item (EM): a written item rolls over setwildbattle's")
+    answer = nil
+    local emKept = built(50, { item = 13 }, { wild = true })
+    eq(emKept and emKept.item, 13, "scripted item (EM): an early return leaves it")
+    answer = 0
+    local emClear = built(50, { item = 13 }, { wild = true })
+    eq(emClear and emClear.item, 0, "scripted item (EM): a written ITEM_NONE clears it")
+    eq(asks[#asks] and asks[#asks].opts and asks[#asks].opts.alteringCave, nil,
+       "altering cave: not asked for off the cave")
+    answer = 202
+    local cave = built(50, nil, { wild = true, alteringCave = true })
+    eq(cave and cave.item, 202, "altering cave: the builder holds what the cave's roll gave")
+    eq(asks[#asks] and asks[#asks].opts and asks[#asks].opts.alteringCave, true,
+       "altering cave: ...asked with the cave's arm on (pokeemerald pokemon.c:6692)")
+    check(Solo.gen3AlteringCave("EM_ALTERING_CAVE"), "altering cave: Emerald's ALTERING CAVE")
+    check(not Solo.gen3AlteringCave("FR_SIX_ISLAND_ALTERING_CAVE"), "altering cave: ...not FireRed's (no such arm)")
+    check(not Solo.gen3AlteringCave(nil), "altering cave: ...nor no map")
+    -- Through the door: the map the encounter was met on reaches the roll.
+    for _, row in ipairs({ { "EM_ALTERING_CAVE", true }, { "EM_ROUTE_101", nil } }) do
+      newGame({ version = "emerald" })
+      SESSION.party = { monOf(4, 30) }
+      asks, answer = {}, 202
+      local ac = newSolo()
+      check(ac:fromGen3Encounter(GAME, { species = 16, level = 5 }, { mapId = row[1] }),
+            "altering cave (" .. row[1] .. "): taken")
+      eq(#asks, 1, "altering cave (" .. row[1] .. "): the held item is rolled once")
+      eq(asks[1] and asks[1].opts and asks[1].opts.alteringCave, row[2],
+         "altering cave (" .. row[1] .. "): the roll is told whether this is the cave")
+      eq(ac.wildMon and ac.wildMon.item, 202, "altering cave (" .. row[1] .. "): the wild monster holds it")
+      ac:reset()
+    end
+    FakeEncounters.rules = realRules
+
+    -- The sleep counter rides with SLP (pret STATUS1 bits 0-2).
+    local sleeper = monOf(16, 5)
+    Sheet3.applyToMon(sleeper, { hp = 10, status = "SLP", sleepTurns = 4 })
+    eq(sleeper.status, "SLP", "sleep: asleep")
+    eq(sleeper.sleep, 4, "sleep: ...for the turns the referee left it")
+    Sheet3.applyToMon(sleeper, { hp = 10, status = "SLP" })
+    eq(sleeper.sleep, 4, "sleep: a sheet that says no count leaves the one it has")
+    Sheet3.applyToMon(sleeper, { hp = 10, status = "SLP", sleepTurns = 9 })
+    eq(sleeper.sleep, 7, "sleep: ...a count past the cart's three bits is clamped to 7")
+    Sheet3.applyToMon(sleeper, { hp = 10, status = "PAR", sleepTurns = 3 })
+    eq(sleeper.sleep, nil, "sleep: awake, no counter")
+    local rebuilt = Sheet3.monFromSheet({ speciesNum = 16, level = 5, personality = 2, hp = 9,
+      status = "SLP", sleepTurns = 2, moves = { { num = 33, pp = 30, maxPp = 35 } } }, SESSION)
+    eq(rebuilt and rebuilt.sleep, 2, "sleep: a caught sheet rebuilt into a monster keeps its turns")
+
+    -- Through a fight: a wild monster caught asleep keeps its counter -- the
+    -- monster Cmd_givecaughtmon copies whole.
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    FakeBag.add(SESSION.bag, 1, 1)
+    local cs = newSolo()
+    local caughtResult
+    check(cs:fromGen3Encounter(GAME, { species = 16, level = 5 }, { done = function(r) caughtResult = r end }),
+          "sleep catch: taken")
+    local foeSeat = cs.sim.byId[FOE]
+    foeSeat.mons[1].status, foeSeat.mons[1].sleepTurns = "SLP", 4
+    local wildMon = cs.wildMon
+    local thrown = false
+    drive(cs, function(f)
+      if not thrown then
+        thrown = true
+        f.itemPick = { id = 1, effect = Sheet3.itemEffect(1) }
+        f:commitItem(nil, nil)
+      else
+        f:pickMove(1)
+      end
+    end)
+    eq(caughtResult, "caught", "sleep catch: caught")
+    eq(wildMon and wildMon.status, "SLP", "sleep catch: the monster caught is asleep")
+    eq(wildMon and wildMon.sleep, 4, "sleep catch: ...for the turns it had left (STATUS1 kept)")
+    eq(SESSION.party[2] and SESSION.party[2].sleep, 4, "sleep catch: ...in the party too")
+  end
+
+  -- ------- (l) W3-CORE: a seat with no battler owes its choice in the
+  -- choice phase only (the old man's, the Safari player's)
+  do
+    newGame()
+    SESSION.party = { monOf(4, 30) }
+    local s = newSolo()
+    local filed, asked = {}, 0
+    local fighter = { playerId = "solo_player", side = "a", slot = 0, noBattler = true, mons = {} }
+    local fakeSim = {
+      order = { fighter }, phase = "choice", turn = 1, bySide = { a = { fighter }, b = {} },
+      submitChoice = function(_, id, choice)
+        filed[#filed + 1] = { id = id, choice = choice }
+        fighter.choice = choice
+        return true
+      end,
+      autoPick = function() return false end,
+    }
+    s.sim = fakeSim
+    s.gen3 = { npcs = { solo_player = function() asked = asked + 1; return { action = "run" } end } }
+    check(s:_answerNpcs3(), "noBattler: its owner is asked in the choice phase")
+    eq(asked, 1, "noBattler: ...once")
+    eq(filed[1] and filed[1].choice.action, "run", "noBattler: ...and its answer filed")
+    s:_answerNpcs3()
+    eq(asked, 1, "noBattler: a seat that has chosen owes nothing")
+    fighter.choice, fakeSim.phase = nil, "replace"
+    fighter.mustReplace = true
+    s:_answerNpcs3()
+    eq(asked, 1, "noBattler: ...nor anything in the replace phase, mustReplace or not")
+    fighter.mustReplace, fakeSim.phase = nil, "choice"
+    local plain = { playerId = "solo_player", side = "a", slot = 0, mons = {} }
+    fakeSim.order, fakeSim.bySide.a = { plain }, { plain }
+    s:_answerNpcs3()
+    eq(asked, 1, "noBattler: a battler seat with no monster out still owes nothing")
+    s.sim, s.gen3 = nil, nil
+  end
+
+  -- ------- (m) W3-CORE: the family modules, read through the install's
+  -- reader (Client.install calls loadKinds3 at boot)
+  do
+    local reads, asked = {}, {}
+    local bodies = {
+      ["src/Solo3/Legend.lua"] = "return { kinds3 = { roamer = { takes = function() return true end } }",
+      ["src/Solo3/Facility.lua"] = "error('facility exploded at start')",
+      ["src/Solo3/Doubles.lua"] = "return { kinds3 = { pair = { takes = function() return true end } } }",
+      ["src/Solo3/First.lua"] = "local need = ...; need('SoloBattle').registerKind3('firstBattle', {})",
+    }
+    local facade = {}
+    for k, v in pairs(stubMod) do facade[k] = v end
+    facade.read = function(_, path)
+      reads[#reads + 1] = path
+      return bodies[path]
+    end
+    local fresh
+    local cache = {}
+    local function freshNeed(n)
+      asked[#asked + 1] = n
+      if cache[n] ~= nil then return cache[n] end
+      local body = bodies["src/" .. n .. ".lua"]
+      if not body then
+        local h = assert(io.open(MOD_PATH .. "/src/" .. n .. ".lua", "rb"))
+        body = h:read("*a")
+        h:close()
+      end
+      local chunk = assert(loadstr(body, "@" .. n .. ".lua"))
+      local value = chunk(freshNeed, facade)
+      cache[n] = value == nil and true or value
+      return cache[n]
+    end
+    fresh = freshNeed("SoloBattle")
+    local before = #warns
+    local okL, names = pcall(fresh.loadKinds3)
+    check(okL, "boot: reading every family never raises (" .. tostring(names) .. ")")
+    local said = table.concat(warns, " / ", before + 1)
+    for _, file in pairs(fresh.KIND_FILES3) do
+      check(contains(reads, "src/" .. file .. ".lua"), "boot: every family file is looked for: " .. file)
+    end
+    eq(fresh.KINDS3.pair ~= nil, true, "boot: a family that loads registers its kinds")
+    eq(fresh.KINDS3.firstBattle ~= nil, true, "boot: ...and one that registers itself, too")
+    eq(fresh.KINDS3.roamer, nil, "boot: a family that does not parse registers nothing")
+    check(said:find("src/Solo3/Legend.lua", 1, true) ~= nil and said:find("reinstall", 1, true) ~= nil,
+          "boot: ...and is said, by its file, with what to do: " .. said)
+    local legendAsked = false
+    for _, n in ipairs(asked) do if n == "Solo3/Legend" then legendAsked = true end end
+    eq(legendAsked, false, "boot: ...without ever being handed to the resolver")
+    eq(fresh.KINDS3.facility, nil, "boot: a family that fails at start registers nothing")
+    check(said:find("src/Solo3/Facility.lua", 1, true) ~= nil, "boot: ...and is said by its file")
+    check(not said:find("Solo3/Tutorial", 1, true), "boot: a family whose file is not there is skipped quietly")
+    local readsBefore = #reads
+    eq(fresh.kind3("roamer"), nil, "boot: a family read at boot is not read again at its first fight")
+    eq(#reads, readsBefore, "boot: ...no second read")
+    for i = #warns, before + 1, -1 do table.remove(warns, i) end
   end
 
   Turn3.create, Mediated.new = realCreate, realNew

@@ -377,6 +377,12 @@ end
 local function owes(sim, fighter)
   if not (sim and fighter) then return false end
   if fighter.choice ~= nil then return false end
+  -- A seat with no battler (the referee's side-entry `noBattler`: the old
+  -- man's, Wally's, the Safari player's) has nothing on the field to replace
+  -- and no monster to ask about: it owes its choice -- a throw, a RUN, the
+  -- tutorial's scripted input -- in the choice phase and nothing else
+  -- (BattleSim3 Turn:autoPick / _autoChoiceOrSkip: the same rule).
+  if fighter.noBattler then return sim.phase == "choice" end
   if fighter.mustReplace then
     if type(fighter.seats) == "table" and #fighter.seats > 1 then
       return canRefill(sim, fighter)
@@ -2337,20 +2343,37 @@ function M.unregisterKind3(name)
 end
 
 -- A family module, read once per file, only when it is there: the mod's own
--- resolver gives up on every later module once one is missing (main.lua), so
--- a file that does not exist yet is never asked for.  A suite's stub facade
--- has no reader; its kinds are registered by hand.
+-- resolver gives up on every later module once one is missing or broken
+-- (main.lua), so a file that does not exist yet is never asked for, and one
+-- that does not even parse is said here and never handed to it.  A suite's
+-- stub facade has no reader; its kinds are registered by hand.
 local kindFilesTried3 = {}
+local function kindLoadWarn3(file, why)
+  if not (type(mod) == "table" and type(mod.log) == "table") then return end
+  mod.log:warn("the %s solo battles could not be loaded from src/%s.lua (%s); those fights "
+    .. "are fought the ordinary way -- reinstall the mod folder so that file is whole",
+    file, file, tostring(why))
+end
 local function loadKindFile3(file)
   if kindFilesTried3[file] then return end
   kindFilesTried3[file] = true
   if not (type(mod) == "table" and type(mod.read) == "function") then return end
   local okR, body = pcall(mod.read, mod, "src/" .. file .. ".lua")
   if not (okR and type(body) == "string") then return end
-  local ok, family = pcall(need, file)
-  if not ok then
-    mod.log:warn("the %s solo battles could not be loaded (%s); those fights are fought "
-      .. "the ordinary way -- reinstall the mod folder", file, tostring(family))
+  local loadstr = loadstring or load
+  local chunk, syntaxErr = loadstr(body, "@rby_mmo/src/" .. file .. ".lua")
+  if not chunk then
+    kindLoadWarn3(file, syntaxErr)
+    return
+  end
+  -- Through the resolver, so the family is the one module every reader of it
+  -- shares; a family that registers itself returns nothing (the resolver's
+  -- `true`), one that failed to start returns nil (main.lua logs why).  Asked
+  -- for as optional: a family that throws while starting is kept to itself
+  -- and never switches the resolver off for the modules asked after it.
+  local ok, family = pcall(need, file, true)
+  if not ok or family == nil then
+    kindLoadWarn3(file, ok and "it failed to start" or family)
     return
   end
   if type(family) == "table" and type(family.kinds3) == "table" then
@@ -2463,23 +2486,49 @@ function M:say3(text) return self:_say3(text) end
 -- `r < 55` reading (battle/init.lua foe_mon_from), which keeps the odds but
 -- maps the draw onto the wrong items and never draws for an empty species.
 -- pret wins.  Whether the roll happens at all is the caller's (M.gen3HeldRoll).
-function M.gen3WildItem(species, random16)
+--
+-- opts: { alteringCave = true } on Emerald's ALTERING CAVE (M.gen3AlteringCave):
+-- pret pokeemerald pokemon.c:6692 reads `gMapHeader.mapLayoutId ==
+-- LAYOUT_ALTERING_CAVE` and, for a species in sAlteringCaveWildMonHeldItems,
+-- holds that table's item at 95..99 (the cart's own table, which the engine's
+-- wildHeldItem reads from the player's cart -- wild_extra's
+-- alteringCaveHeldItems); FireRed / LeafGreen has no such arm.
+--
+-- -> item (0 for none), wrote: whether SetWildMonHeldItem wrote the held
+-- item at all.  pret returns early on a draw under chanceNoItem (or under
+-- chanceNotRare for an Altering Cave species) and leaves whatever the
+-- monster already held -- `setwildbattle`'s item -- but every other draw is
+-- a SetMonData over it, ITEM_NONE included (an item-less species' common
+-- slot, FRLG's common == rare == ITEM_NONE): a builder keeps its row's item
+-- only when `wrote` is false (M.gen3FoeMon, CoopField's buildMon).  The
+-- engine's wildHeldItem says the same with nil (returned early) or a number.
+function M.gen3WildItem(species, random16, opts)
   if Gen3.family() == "rse" then
     local Enc = Gen3.engine("src.core.game3.encounters")
     local rules = Enc and try3(Enc.rules)
-    local held = type(rules) == "table" and try3(rules.wildHeldItem, species, {}) or nil
-    return int3(held, 0)
+    local held = type(rules) == "table" and try3(rules.wildHeldItem, species,
+      { alteringCave = (type(opts) == "table" and opts.alteringCave) and true or nil }) or nil
+    return int3(held, 0), int3(held, nil) ~= nil
   end
   local info = Gen3.speciesInfo(species)
   local items = info and info.heldItems or {}
   local common, rare = int3(items.common, 0), int3(items.rare, 0)
   local r = random16() % 100
-  if common == rare then return common end
+  if common == rare then return common, true end
   if r > 44 then
-    if r <= 94 then return common end
-    return rare
+    if r <= 94 then return common, true end
+    return rare, true
   end
-  return 0
+  return 0, false
+end
+
+-- Emerald's ALTERING CAVE, where SetWildMonHeldItem rolls the cave's own
+-- held items (pret pokeemerald pokemon.c:6692, LAYOUT_ALTERING_CAVE -- the
+-- one map on that layout, MAP_ALTERING_CAVE; the engine's map id for it).
+-- FireRed's SIX ISLAND cave is another map, and its cart has no such arm.
+M.ALTERING_CAVE3 = "EM_ALTERING_CAVE"
+function M.gen3AlteringCave(mapId)
+  return mapId == M.ALTERING_CAVE3
 end
 
 -- Whether a wild foe rolls a held item at all (SetWildMonHeldItem's gate; a
@@ -2489,8 +2538,9 @@ end
 -- include/constants/battle.h) -- nor for the Teachy TV's POKeDUDE (FRLG),
 -- nor a Battle Pyramid or Battle Pike wild (Emerald, whose facility builds
 -- its own monsters anyway).  Read off the engine's own opts and the foe row,
--- the places the engine spells these (battle/init.lua:717-740).  A row's own
--- item (`setwildbattle`'s, 0 on every legendary) is kept either way.
+-- the places the engine spells these (battle/init.lua:717-740).  An exempt
+-- fight keeps its row's own item (`setwildbattle`'s, Southern Island's SOUL
+-- DEW); any other wild rolls over it (M.gen3WildItem's `wrote`).
 M.HELD_ROLL_EXEMPT3 = {
   "legendary", "specialWild", "kyogreGroudon", "regi", "groudon", "kyogre", "rayquaza",
   "ghostUnveiled", "pokedude", "pyramid", "pike",
@@ -2530,7 +2580,12 @@ end
 --
 -- opts: { wild = true } for an encounter (the IV / item draws), and
 -- `heldRoll = false` (M.gen3HeldRoll's answer) for a wild that rolls no held
--- item -- a legendary, the scoped Marowak, the POKeDUDE's.  A row's
+-- item -- a legendary, the scoped Marowak, the POKeDUDE's -- and
+-- `alteringCave = true` on Emerald's ALTERING CAVE (M.gen3AlteringCave).  A
+-- wild that rolls rolls over the row's own item as SetWildMonHeldItem does
+-- (CB2_InitBattleInternal runs it after setwildbattle's CreateScriptedWildMon:
+-- pokeemerald battle_main.c:700, pokefirered battle_main.c:708), keeping it
+-- only when the draw wrote nothing (M.gen3WildItem).  A row's
 -- `fatefulEncounter` (seteventmon / CreateEnemyEventMon, the engine's
 -- natives_events.lua: Mew, Deoxys and the island legendaries) is carried on
 -- the monster, so the one caught keeps the bit its obedience and a trade
@@ -2576,8 +2631,9 @@ function M.gen3FoeMon(row, opts)
     evs[k] = type(row.evs) == "table" and max(0, min(255, int3(row.evs[k], 0))) or 0
   end
   local item = int3(row.item, nil) or int3(row.heldItem, nil)
-  if item == nil and opts.wild and opts.heldRoll ~= false then
-    item = M.gen3WildItem(species, random16)
+  if opts.wild and opts.heldRoll ~= false then
+    local rolled, wrote = M.gen3WildItem(species, random16, { alteringCave = opts.alteringCave })
+    if wrote or item == nil then item = rolled end
   end
   item = max(0, item or 0)
   local gender = row.gender
@@ -2866,9 +2922,14 @@ end
 --       from", never the catch path.
 --   how "balls"                -> "no_safari_balls"   (8)
 --   how "forfeit"              -> "forfeited"         (9)
---   a knockout / an Arena judgment / the clock: a whiteout is "lose"
---       whatever the knockouts said (pret IsPlayerDefeated counts DREW),
---       else the verdict; a trainer's draw is "lose" to `done` (the
+--   a knockout / an Arena judgment / the clock: a whiteout is "lose" to
+--       `done` whatever the knockouts said (pret IsPlayerDefeated counts
+--       DREW), and to the save what they said -- both sides out at once is
+--       DREW (3: pret Cmd_checkteamslost ORs B_OUTCOME_LOST and
+--       B_OUTCOME_WON into gBattleOutcome, pokeemerald
+--       battle_script_commands.c:3564 / :3577, pokefirered :3401 / :3413),
+--       which a post-battle script and a roamer's writeback read; else the
+--       verdict; a trainer's draw is "lose" to `done` (the
 --       trainerbattle opcode reads anything else as a win: the flag, the
 --       beaten script, the badge) and DREW to the save.  A kind's own `word`
 --       hook answers the draws the opcode is not waiting on (a facility's
@@ -2902,7 +2963,7 @@ function M.gen3Words(info)
   end
   if how == "balls" then return "no_safari_balls", "no_safari_balls" end
   if how == "forfeit" then return "forfeited", "forfeited" end
-  if info.whiteout then return "lose", "lose" end
+  if info.whiteout then return "lose", (verdict == "draw") and "draw" or "lose" end
   if verdict == "win" then return "win", "win" end
   if verdict == "loss" then return "lose", "lose" end
   if info.kind == "trainer" then return "lose", "draw" end
@@ -2933,8 +2994,9 @@ function M.gen3Result(verdict, reason, whiteout, ranSide, kind, how, by, telepor
 end
 
 -- ...and the word session.battleOutcome is written from: the same, except
--- that a drawn trainer fight the player is still standing after stays
--- B_OUTCOME_DREW for a script that reads the outcome.
+-- that a drawn trainer fight the player is still standing after, and a
+-- double knockout the player whites out from, stay B_OUTCOME_DREW for a
+-- script that reads the outcome.
 function M.gen3OutcomeWord(verdict, reason, whiteout, ranSide, how, by, teleportBySide)
   local _, save = M.gen3Words({
     verdict = verdict, reason = reason, whiteout = whiteout, ranSide = ranSide,
@@ -2972,7 +3034,9 @@ end
 --              one case this file gives a fight back (a referee that keeps
 --              faulting).  Without it, BattleBridge.start / startWild are
 --              called with the same foe and `done`.
---   mapId      informational.
+--   mapId      the map the fight is met on: Emerald's ALTERING CAVE rolls a
+--              wild built here from the cave's own held items
+--              (M.gen3AlteringCave); otherwise informational.
 --   party      (optional) the opponent's monsters, already built as engine
 --              monsters (src/CoopField.lua's stand-in builds them for its
 --              cover before solo is asked): fought as they are, so the
@@ -3027,7 +3091,8 @@ function M:fromGen3Encounter(game, enc, opts)
     local given = prebuiltParty3(opts.party)
     mon = (given and given[1]) or (prebuilt3(enc.mon) and enc.mon) or nil
   end
-  mon = mon or M.gen3FoeMon(enc, { wild = true, heldRoll = M.gen3HeldRoll(opts, enc) })
+  mon = mon or M.gen3FoeMon(enc, { wild = true, heldRoll = M.gen3HeldRoll(opts, enc),
+    alteringCave = M.gen3AlteringCave(opts.mapId) })
   if not mon then
     self:warn("nofoe3", "the wild POKéMON in this encounter could not be built for the "
       .. "mod's battle system, so it is fought the ordinary way; report this with "
@@ -4205,10 +4270,11 @@ end
 
 -- Half one on Gen 3: the verdict is in.  The wild monster's condition goes
 -- onto the engine monster first (a catch keeps the damage it was caught
--- with), the screen is told, and then the cart's own after-words -- the
--- defeated line, the trainer's defeat speech and the prize (paid now, as the
--- engine pays it inside its battle), or the whiteout's lines (whose money is
--- taken with the warp, in half two).
+-- with, and a sleeping one its turns left -- pret's STATUS1 counter, through
+-- Sheet3.applyToMon's `sleepTurns`), the screen is told, and then the cart's
+-- own after-words -- the defeated line, the trainer's defeat speech and the
+-- prize (paid now, as the engine pays it inside its battle), or the
+-- whiteout's lines (whose money is taken with the warp, in half two).
 function M:_settle3(outcome)
   local g3, sim, fight = self.gen3, self.sim, self.fight
   local verdict = MediatedBattle.resultFor(outcome, FOE_SEAT)

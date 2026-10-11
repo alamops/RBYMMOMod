@@ -687,8 +687,15 @@ function M.party(game, opts)
 end
 
 -- Write a referee's numbers onto a party mon (a solo or co-op fight's
--- writeback; T12 / T11).  `sheet` is a sheet or a seat: hp, status and each
+-- writeback; T12 / T11).  `sheet` is a sheet or a seat: hp, status, the
+-- sleep counter (`sleepTurns`, a sleeping monster's turns left) and each
 -- move's pp by slot.  Only ever lowers nothing it was not told about.
+--
+-- The sleep counter rides with SLP because the cart's status is one word:
+-- pret's STATUS1 keeps the turns left in bits 0-2 (STATUS1_SLEEP), so a wild
+-- monster caught asleep (Cmd_givecaughtmon -> GiveMonToPlayer copies the
+-- enemy party's monster whole, status word and all) and a party monster
+-- brought home sleep exactly as long as the fight left them.
 function M.applyToMon(mon, sheet)
   if not (type(mon) == "table" and type(sheet) == "table") then return false end
   local maxHp = int(mon.maxHp, nil)
@@ -700,6 +707,10 @@ function M.applyToMon(mon, sheet)
   if sheet.status ~= nil or sheet.hp ~= nil then
     mon.status = statusOf(sheet)
     if mon.status ~= "SLP" then mon.sleep = nil end
+  end
+  if mon.status == "SLP" and statusOf(sheet) == "SLP" then
+    local turns = int(sheet.sleepTurns, nil)
+    if turns and turns > 0 then mon.sleep = clamp(turns, 1, 7) end
   end
   if type(sheet.moves) == "table" then
     mon.pp = type(mon.pp) == "table" and mon.pp or {}
@@ -778,7 +789,7 @@ function M.monFromSheet(sheet, session)
   if tonumber(sheet.otId) then mon.otId = int(sheet.otId, 0) end
   if sheet.fateful == true then mon.fatefulEncounter = true end
   pcall(P.applyStats, mon)
-  M.applyToMon(mon, { hp = sheet.hp, status = sheet.status })
+  M.applyToMon(mon, { hp = sheet.hp, status = sheet.status, sleepTurns = sheet.sleepTurns })
   return mon
 end
 

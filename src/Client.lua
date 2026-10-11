@@ -3283,6 +3283,24 @@ function M.install()
 
   ui:install()
 
+  -- Gen 3's solo fight families (src/Solo3/*.lua: the legends, the
+  -- facilities, the pairs, the first battles...) read now, at boot, rather
+  -- than the first time a Safari wild or a Frontier hall is met -- so a
+  -- family that does not load is said once here, naming its file and what to
+  -- do, not in the middle of the fight it was meant for.  A family whose
+  -- file is not there is skipped silently (SoloBattle reads a file through
+  -- mod:read before it asks the resolver for it), and one that fails is
+  -- skipped with its warning: its fights are the cart's.  Guarded twice over,
+  -- because nothing about an optional family may stop the mod installing.
+  if Gen3.active() and type(SoloBattle.loadKinds3) == "function" then
+    local ok, err = pcall(SoloBattle.loadKinds3)
+    if not ok then
+      mod.log:warn("the solo battle families could not be read at start-up (%s); those "
+        .. "fights are fought the ordinary way -- reinstall the mod folder so every file "
+        .. "under src/Solo3/ is present", tostring(err))
+    end
+  end
+
   -- One game-logic tick.  This runs before queued button edges are
   -- promoted, which is the documented place for a tool that has to act once
   -- per fixed step rather than once per drawn frame.
