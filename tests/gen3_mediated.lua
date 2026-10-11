@@ -3179,6 +3179,637 @@ do
       eq(f.noOwnBattler, true, "options: applyScreenOptions after `new`")
       eq(f.firstBattle, "oak", "options: ...for any key")
     end
+
+    -- ---- (i) the Safari Zone (wave 3 UM3, screen option `safari`)
+    --
+    -- The cart's prompts stood in (capitals, the player's name filled the way
+    -- BattleText fills B_PLAYER_NAME), so a word read off the "cart" can be
+    -- told from a fallback.
+    local textBefore = Gen3.battleText
+    local safariPack = true
+    Gen3.battleText = function(id, fill)
+      if safariPack and id == "gText_WhatWillPlayerThrow" then
+        return ("WHAT WILL %s\nTHROW?"):format(tostring(fill and fill.playerName))
+      end
+      if safariPack and id == "gText_WhatWillPkmnDo2" then
+        return ("WHAT WILL\n%s DO?"):format(tostring(fill and fill.playerName))
+      end
+      return textBefore(id, fill)
+    end
+    -- One frame at a time until `pred` holds (the queue, the holds and the
+    -- page's own clocks all run on update's dt).
+    local function stepUntil(f, pred, frames)
+      for _ = 1, frames or 600 do
+        if pred() then return true end
+        f:update(1 / 60)
+      end
+      return pred()
+    end
+    local function fxOf(f, kind, side)
+      for _, fx in ipairs(f.fx or {}) do
+        if fx.kind == kind and (side == nil or fx.side == side) then return fx end
+      end
+      return nil
+    end
+    local function recOf(f, kind, side)
+      for _, rec in ipairs(f.classicFx3 or {}) do
+        if rec.kind == kind and (side == nil or rec.side == side) then return rec end
+      end
+      return nil
+    end
+
+    for _, classic in ipairs({ true, false }) do
+      local tag = classic and "safari (classic): " or "safari (arena): "
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { safari = { family = "frlg", balls = 30 } },
+        { wildParty = { wild }, classicUi = classic })
+      eq(f.noOwnBattler, true, tag .. "a Safari fight fields no battler of ours (implied)")
+      eq(f:usesBattlefield(), not classic, tag .. "the page under test is the one asked for")
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20,
+           level = 5 })
+      ev({ t = "turn" })
+      drain()
+      eq(f.phase, "choose", tag .. "the action menu opens")
+      eq(table.concat(f:commandList(), ","), "BALL,BAIT,ROCK,RUN",
+         tag .. "FireRed's grid, in the cart's order (HandleInputChooseAction)")
+      local labels = {}
+      for i, item in ipairs(f:bandCommandItems()) do labels[i] = item.label end
+      eq(table.concat(labels, ","), "BALL,BAIT,ROCK,RUN", tag .. "...in its words (gText_SafariZoneMenu)")
+      local model = f:gen3ClassicModel()
+      eq(model.prompt, "WHAT WILL ANN\nTHROW?",
+         tag .. "the cart's own prompt, the player named (gText_WhatWillPlayerThrow)")
+      eq(table.concat(model.commands, ","), "BALL,BAIT,ROCK,RUN", tag .. "the GBA page's grid")
+      eq(model.ally, nil, tag .. "no plate of ours")
+      eq(model.safari and model.safari.balls, 30, tag .. "the SAFARI BALLS box: 30 left")
+      if classic then
+        check(classicDraw(f:gen3ClassicModel()) == true, tag .. "the page draws")
+        eq(chromeCount("drawPlayerBox"), 1, tag .. "...the box on the player's healthbox sheet")
+        local title, left = textIs("SAFARI BALLS"), textIs("Left: 30")
+        local G3 = ClassicBattle.G3
+        check(title and title.x == G3.ALLY_BOX_X + 16 and title.y == G3.ALLY_BOX_Y + 3,
+              tag .. "...'SAFARI BALLS' where the name goes (gText_SafariBalls)")
+        check(left and left.y == G3.ALLY_BOX_Y + 21,
+              tag .. "...'Left: 30' in the HP-figure window (UpdateLeftNoOfBallsTextOnHealthbox)")
+      else
+        local okW = withLove(f.drawWidescreen, f, 1280, 720)
+        check(okW, tag .. "the arena frame draws")
+        local x, y, w, h = Mediated.safariPlateRect3()
+        eq(x, Battlefield.PLATE_PAD, tag .. "the box stands where our plate would (x)")
+        eq(y, Battlefield.FIELD_BOTTOM - Battlefield.PLATE_H - Battlefield.PLATE_PAD,
+           tag .. "...(y, over the field floor)")
+        eq(w, Battlefield.PLATE_W, tag .. "...a plate wide")
+        local printed = false
+        for _, call in ipairs(drawnCalls) do
+          if call[1] == "print" and call[2] == "Left: 30" then printed = true end
+        end
+        check(printed, tag .. "the arena prints the count in it")
+      end
+      -- BALL: filed as a Safari throw; the box moves once its line is read.
+      press(f, "a")
+      eq(sent[#sent] and sent[#sent].action, "safari", tag .. "BALL files a Safari choice")
+      eq(sent[#sent] and sent[#sent].throw, "ball", tag .. "...throw = ball")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "item", slot = 0, side = "a", text = "5", amount = 29 })
+      ev({ t = "msg", text = "ANN used SAFARI BALL!" })
+      ev({ t = "ball", slot = 0, side = "a", target = 3, amount = 1, text = "5" })
+      eq(f:safariBalls3(), 30, tag .. "the box still says 30 while the throw is queued")
+      local rowAt, lineAt, tossAt = nil, nil, nil
+      for i, row in ipairs(f.lines) do
+        if type(row) == "table" and row.stateRow == "safariBalls" then rowAt = i end
+        if type(row) == "string" and row:find("SAFARI BALL!", 1, true) then lineAt = i end
+        if type(row) == "table" and row.anim and row.anim:find("TOSS", 1, true) and not tossAt then
+          tossAt = i
+        end
+      end
+      check(lineAt and rowAt and tossAt and lineAt < rowAt and rowAt < tossAt,
+            tag .. "the count changes after 'used SAFARI BALL!' and before the throw "
+              .. "(BattleScript_SafariBallThrow: printstring, updatestatusicon, handleballthrow)")
+      ev({ t = "msg", text = "Darn! The POKéMON broke free!" })
+      ev({ t = "msg", text = "PIDGEY is watching carefully!" })
+      ev({ t = "turn" })
+      drain()
+      eq(f:safariBalls3(), 29, tag .. "...29 once it has been read")
+      eq(f:gen3ClassicModel().safari.balls, 29, tag .. "the page's box follows")
+      -- BAIT: filed, then its clip -- quiet, thrown from the trainer, the sway behind.
+      f:runCommand("BAIT")
+      eq(sent[#sent] and sent[#sent].throw, "bait", tag .. "BAIT files throw = bait")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "msg", text = "ANN threw some BAIT at the PIDGEY!" })
+      local n0 = #f.lines
+      ev({ t = "anim", slot = 0, side = "a", target = 3, text = "BAIT_THROW" })
+      local bait = f.lines[n0 + 1]
+      check(bait and bait.general3 == true and bait.quiet == true,
+            tag .. "BAIT_THROW is a quiet general clip (Vfx.isGeneral3)")
+      check(stepUntil(f, function() return f.anim == bait end), tag .. "...and plays")
+      eq(f.animHold, 1.20, tag .. "...holding the queue for its longest beat (the sway)")
+      if classic then
+        local throw, sway = recOf(f, "throw", "foe"), recOf(f, "sway", "foe")
+        check(throw ~= nil, tag .. "the page throws the bait from our side at the foe")
+        check(sway and sway.wait == 0.40, tag .. "...and the foe sways once it has landed")
+        local throws = f:gen3ClassicModel().throws3
+        check(throws and throws[1] and throws[1].from == "ally" and throws[1].to == "foe",
+              tag .. "...handed to the page as `throws3`")
+        check(classicDraw(f:gen3ClassicModel()) == true, tag .. "...which draws")
+        local circles = 0
+        for _, call in ipairs(drawnCalls) do if call[1] == "circle" then circles = circles + 1 end end
+        check(circles > 0, tag .. "...a bait in the air")
+        local swayed = stepUntil(f, function()
+          local foe = f:gen3ClassicModel().foe
+          return foe and (foe.dx or 0) ~= 0
+        end, 80)
+        check(swayed, tag .. "the foe's pic sways on the page (gen3LookSeat)")
+      else
+        local vfx, sway = fxOf(f, "vfx", "foe"), fxOf(f, "sway", "foe")
+        eq(vfx and vfx.fromTrainer, "ally", tag .. "the bait leaves our trainer's figure (fromTrainer)")
+        eq(vfx and vfx.palette, "BAIT", tag .. "...in the bait's look")
+        check(sway and sway.wait == 0.40, tag .. "...and the foe sways once it has landed (wait)")
+        eq(f.battlefieldBubbles, nil, tag .. "nobody shouts it")
+      end
+      drain()
+      eq(f.anim, nil, tag .. "the clip ends")
+      -- ROCK: a Safari fight's ROCK_THROW is the clip, never the move.
+      f:runCommand("ROCK")
+      eq(sent[#sent] and sent[#sent].throw, "rock", tag .. "ROCK files throw = rock")
+      n0 = #f.lines
+      ev({ t = "anim", slot = 0, side = "a", target = 3, text = "ROCK_THROW" })
+      check(f.lines[n0 + 1] and f.lines[n0 + 1].general3 == true,
+            tag .. "ROCK_THROW is the general clip in the Safari Zone")
+      -- FireRed's reaction: eating nods.
+      n0 = #f.lines
+      ev({ t = "anim", slot = 3, side = "b", text = "SAFARI_REACTION", amount = 2 })
+      local eat = f.lines[n0 + 1]
+      check(stepUntil(f, function() return f.anim == eat end), tag .. "the reaction plays")
+      if classic then
+        check(recOf(f, "nod", "foe") ~= nil, tag .. "eating nods the foe (SAFARI_REACTION 2)")
+        check(stepUntil(f, function()
+          local foe = f:gen3ClassicModel().foe
+          return foe and (foe.dy or 0) ~= 0
+        end, 60), tag .. "...on its pic")
+      else
+        check(fxOf(f, "nod", "foe") ~= nil, tag .. "eating nods the foe (SAFARI_REACTION 2)")
+      end
+      ev({ t = "turn" })
+      drain()
+      -- RUN: always the plain run.
+      f:runCommand("RUN")
+      eq(sent[#sent] and sent[#sent].action, "run", tag .. "RUN files { action = run }")
+      eq(f.drawFailed, nil, tag .. "nothing failed to draw")
+    end
+
+    -- Without the text pack: the cart's words in this file's spelling.
+    do
+      safariPack = false
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f = screen3("wild", { safari = { family = "frlg", balls = 3 } }, { wildParty = { wild } })
+      eq(f:commandPrompt(), "What will ANN\nthrow?", "safari: the prompt's fallback (pret's words)")
+      local g = screen3("wild", { safari = { family = "rse", balls = 3 } }, { wildParty = { wild } })
+      eq(g:commandPrompt(), "What will\nANN do?", "safari: Emerald's fallback (gText_WhatWillPkmnDo2)")
+      safariPack = true
+      -- A kind's own grid and prompt still win.
+      local own = screen3("wild", { safari = { family = "frlg", balls = 3 }, commands = { "BALL", "RUN" },
+                                    prompt = "MINE" }, { wildParty = { wild } })
+      eq(table.concat(own:commandList(), ","), "BALL,RUN", "safari: a kind's `commands` win")
+      eq(own:commandPrompt(), "MINE", "safari: ...and its `prompt`")
+      -- The options are read only as given.
+      local bad = Mediated.new({ game = GAME, battle = "x", mode = "wild",
+                                 safari = { family = "dppt", balls = 9 } })
+      eq(bad.safari, nil, "safari: an unknown family is no Safari")
+      local capped = Mediated.new({ game = GAME, battle = "x", mode = "wild",
+                                    safari = { family = "frlg", balls = 999 } })
+      eq(capped:safariBalls3(), 255, "safari: the count is a u8 (gNumSafariBalls)")
+      -- The ClassicBattle words, pure.
+      eq(table.concat(ClassicBattle.gen3SafariLabels("rse"), ","), "BALL,POKéBLOCK,GO NEAR,RUN",
+         "safari: Emerald's four words without the cart's text")
+      local title, left = ClassicBattle.gen3SafariWords(7, "frlg")
+      eq(title, "SAFARI BALLS", "safari: the box's title")
+      eq(left, "Left: 7", "safari: ...and its count, left-aligned")
+    end
+
+    -- ---- (j) Emerald's grid and the POKéBLOCK case
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      -- The engine's case stood in: Pokeblock.openCase is the door (never
+      -- chooseForBattle, which clears the block itself), the case module is
+      -- what a turn answered for us closes.
+      local shown, resets = {}, 0
+      local FakeCase = { opened = false }
+      function FakeCase.isOpen() return FakeCase.opened end
+      function FakeCase.reset() resets = resets + 1; FakeCase.opened = false end
+      local FakePokeblock = { CASE = { FIELD = 0, BATTLE = 1, FEEDER = 2, GIVE = 3 } }
+      function FakePokeblock.openCase(session, opts)
+        opts.session = session
+        shown[#shown + 1] = opts
+        FakeCase.opened = true
+        return true
+      end
+      function FakePokeblock.chooseForBattle() error("chooseForBattle clears the block itself") end
+      stub("src.ui.game3.rse.pokeblock_case", FakeCase)
+      stub("src.core.game3.rse.pokeblock", FakePokeblock)
+      local f, ev, sent, drain = screen3("wild", { safari = { family = "rse", balls = 30 } },
+        { wildParty = { wild } })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      ev({ t = "turn" })
+      drain()
+      eq(table.concat(f:commandList(), ","), "BALL,POKEBLOCK,NEAR,RUN", "rse: Emerald's grid")
+      local labels = {}
+      for i, item in ipairs(f:bandCommandItems()) do labels[i] = item.label end
+      eq(table.concat(labels, ","), "BALL,POKéBLOCK,GO NEAR,RUN", "rse: ...in its words")
+      eq(f:commandPrompt(), "WHAT WILL\nANN DO?", "rse: gText_WhatWillPkmnDo2, the player named")
+      f:runCommand("NEAR")
+      eq(sent[#sent] and sent[#sent].throw, "near", "rse: GO NEAR files throw = near")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "msg", text = "ANN crept closer to PIDGEY!" })
+      ev({ t = "turn" })
+      drain()
+      local filed = #sent
+      check(f:runCommand("POKEBLOCK") == nil, "rse: POKéBLOCK runs its handler")
+      eq(#shown, 1, "rse: the engine's own case opens")
+      eq(shown[1] and shown[1].caseId, 1, "rse: ...as the battle case (USE / CANCEL)")
+      eq(shown[1] and shown[1].session, SESSION, "rse: ...on the player's own blocks")
+      eq(f.phase, "pokeblock", "rse: the screen waits under it")
+      eq(#sent, filed, "rse: nothing is filed yet")
+      local under = f:gen3ClassicModel()
+      check(under.commands ~= nil, "rse: the grid stays drawn under the case")
+      press(f, "a")
+      eq(#sent, filed, "rse: the buttons are the case's")
+      eq(f.phase, "pokeblock", "rse: ...and the screen does not move")
+      -- Closed with nothing used: back to the grid, no turn spent.
+      FakeCase.opened = false
+      shown[1].onClose(nil)
+      eq(f.phase, "choose", "rse: a case closed with no block is the action menu again")
+      eq(#sent, filed, "rse: ...and files nothing")
+      -- A block used: its case slot, 1-based, and still in the case.
+      f:runCommand("POKEBLOCK")
+      local used = shown[2].onUse(2)
+      eq(used, 2, "rse: USE answers the case's index, and takes nothing out")
+      FakeCase.opened = false
+      shown[2].onClose(used)
+      eq(sent[#sent] and sent[#sent].action, "safari", "rse: a block files a Safari choice")
+      eq(sent[#sent] and sent[#sent].throw, "block", "rse: ...throw = block")
+      eq(sent[#sent] and sent[#sent].block, 3, "rse: ...block = the case slot + 1 (Wire POKEBLOCK3_MAX)")
+      eq(f.phase, "play", "rse: ...and the turn is answered")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      ev({ t = "msg", text = "ANN threw a POKeBLOCK at the PIDGEY!" })
+      local n0 = #f.lines
+      ev({ t = "anim", slot = 0, side = "a", target = 3, text = "POKEBLOCK_THROW" })
+      check(f.lines[n0 + 1] and f.lines[n0 + 1].general3 == true, "rse: POKEBLOCK_THROW is a general clip")
+      ev({ t = "turn" })
+      drain()
+      -- The referee answering the turn while the case is up closes it.
+      f:runCommand("POKEBLOCK")
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      eq(resets, 1, "rse: a turn answered for us closes the case")
+      eq(f.phase, "play", "rse: ...and the screen waits as for any answered turn")
+      local late = #sent
+      shown[3].onClose(0)
+      eq(#sent, late, "rse: ...a late close files nothing")
+      -- No case to open: said, and the grid stays.
+      ev({ t = "turn" })
+      drain()
+      local savedEngine = Gen3.engine
+      Gen3.engine = function(name)
+        if name == "src.core.game3.rse.pokeblock" then return nil end
+        return savedEngine(name)
+      end
+      local warned = #warns
+      f.pokeblockWarned = nil
+      f:runCommand("POKEBLOCK")
+      Gen3.engine = savedEngine
+      eq(f.phase, "choose", "rse, no case: the grid stays")
+      eq(#warns, warned + 1, "rse, no case: ...and it is said, with what to do")
+      warns[#warns] = nil
+      -- The fight ending under the case closes it too.
+      f:runCommand("POKEBLOCK")
+      f:onOutcome({ battle = "um", outcome = "win", winners = { "wild" }, losers = { "me" }, reason = "run" })
+      eq(resets, 2, "rse: the fight's end closes the case")
+    end
+
+    -- ---- (k) the real referee's Safari (BattleSim3 `safari`, wave 2 R2)
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wildSheet = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      wildSheet.safariFleeRate = 0
+      wildSheet.catchRate = 3
+      local battle, ruleset = nil, {}
+      local transport = {
+        isReady = function() return true end,
+        send = function(_, kind, msg)
+          if type(msg) == "table" and msg.action then
+            local c = {}
+            for k, v in pairs(msg) do if k ~= "battle" then c[k] = v end end
+            return battle and battle:submitChoice("me", c) or false
+          elseif type(msg) == "table" and (msg.typeTable or msg.movePool) then
+            ruleset = msg
+          end
+        end,
+      }
+      local f = Mediated.new({ transport = transport, game = GAME, battle = "sf", role = "host",
+                               mode = "wild", wildParty = { wildSheet }, classicUi = true,
+                               safari = { family = "frlg", balls = 2 } })
+      f:start(GAME)
+      battle = assert(Sim.Turn.create({
+        id = "sf", mode = "wild", seed = 11, typeTable = ruleset.typeTable, movePool = ruleset.movePool,
+        safari = { family = "frlg", balls = 2 },
+        sides = { a = { { playerId = "me", name = "ANN" } },
+                  b = { { playerId = "wild", name = "WILD", mons = { wildSheet } } } },
+      }))
+      f:onReady({ battle = "sf", mode = "wild", sides = { a = { "me" }, b = { "wild" } } })
+      local function pump()
+        battle:tick(0)
+        for _, e in ipairs(battle:drainEvents()) do f:onEvent(e) end
+        local out = battle:outcome()
+        if out and not f.finished then
+          f:onOutcome({ battle = "sf", outcome = out.outcome, winners = out.winners,
+                        losers = out.losers, reason = out.reason, caught = out.caught,
+                        given = out.given })
+        end
+        for _ = 1, 400 do
+          f:update(2.0)
+          if f.phase == "choose" or (f.phase == "over" and #f.lines == 0 and not f.shown) then break end
+        end
+      end
+      pump()
+      eq(f.phase, "choose", "referee safari: the grid opens")
+      eq(f:safariBalls3(), 2, "referee safari: two balls")
+      f:runCommand("BALL")
+      pump()
+      eq(f:safariBalls3(), 1, "referee safari: one left after the first throw (`item` amount)")
+      eq(f.finished, false, "referee safari: the fight goes on")
+      f:runCommand("BALL")
+      pump()
+      eq(f:safariBalls3(), 0, "referee safari: none left")
+      check(f.finished, "referee safari: out of balls ends it")
+      check(said(f, "out of SAFARI BALLS"), "referee safari: the announcer's line")
+      eq(#SESSION.party, 1, "referee safari: nothing was caught")
+    end
+
+    -- ---- (l) the general looks on the single screen (twin of CoopBattle's)
+    for _, classic in ipairs({ true, false }) do
+      local tag = classic and "general (classic): " or "general (arena): "
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local maro = assert(Sheet3.mon(SESSION, monOf(16, 30), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { ghost = "veiled" },
+        { wildParty = { maro }, classicUi = classic })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 60, maxHp = 60, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 40, maxHp = 40, level = 30 })
+      ev({ t = "turn" })
+      drain()
+      local n0 = #f.lines
+      ev({ t = "anim", slot = 0, side = "a", text = "MON_SCARED" })
+      local scared = f.lines[n0 + 1]
+      check(scared and scared.general3 == true and scared.quiet == true, tag .. "MON_SCARED is general and quiet")
+      check(stepUntil(f, function() return f.anim == scared end), tag .. "...and plays")
+      eq(f.animHold, 0.70, tag .. "...held for its longest beat (the sweat)")
+      if classic then
+        check(recOf(f, "tremble", "ally") ~= nil, tag .. "our monster trembles (PLAYER_LEFT)")
+        check(recOf(f, "flash", "ally") ~= nil, tag .. "...and lights up where the arena sprays")
+        local moved, lit = false, false
+        stepUntil(f, function()
+          local ally = f:gen3ClassicModel().ally
+          if ally and (ally.dx or 0) ~= 0 then moved = true end
+          if ally and (ally.flash or 0) > 0 then lit = true end
+          return moved and lit
+        end, 40)
+        check(moved and lit, tag .. "...on its pic")
+      else
+        check(fxOf(f, "tremble", "ally") ~= nil, tag .. "our monster trembles (PLAYER_LEFT)")
+        local sweat = fxOf(f, "vfx", "ally")
+        eq(sweat and sweat.palette, "FEAR", tag .. "...in a cold sweat")
+      end
+      drain()
+      -- GHOST_GET_OUT: the GHOST's beat on theirs, the shiver on ours.
+      n0 = #f.lines
+      ev({ t = "anim", slot = 3, side = "b", text = "GHOST_GET_OUT" })
+      local out = f.lines[n0 + 1]
+      check(stepUntil(f, function() return f.anim == out end), tag .. "GHOST_GET_OUT plays")
+      if classic then
+        check(recOf(f, "flash", "foe") ~= nil and recOf(f, "tremble", "ally") ~= nil,
+              tag .. "...on the GHOST and on ours")
+      else
+        check(fxOf(f, "vfx", "foe") ~= nil and fxOf(f, "tremble", "ally") ~= nil,
+              tag .. "...on the GHOST and on ours")
+        eq(fxOf(f, "tremble", "ally").wait, 0.35, tag .. "...the shiver after its rest")
+      end
+      drain()
+      -- ROCK THROW off the Safari is the move.
+      n0 = #f.lines
+      ev({ t = "anim", slot = 3, side = "b", text = "ROCK_THROW" })
+      local rock = f.lines[n0 + 1]
+      check(rock and rock.general3 == nil and rock.quiet == nil, tag .. "ROCK_THROW off the Safari is the move")
+      drain()
+      -- A SUBSTITUTE on the battler silences the clip (Vfx.subSilences3).
+      if type(Vfx.subSilences3) == "function" then
+        f.slots[0].substitute = true
+        n0 = #f.lines
+        ev({ t = "anim", slot = 0, side = "a", text = "MON_SCARED" })
+        local behind = f.lines[n0 + 1]
+        check(stepUntil(f, function() return f.lines[1] ~= behind and f.anim ~= behind end, 10),
+              tag .. "behind a SUBSTITUTE the clip is skipped")
+        eq(f.anim, nil, tag .. "...and holds nothing")
+        f.slots[0].substitute = nil
+      end
+      eq(f.drawFailed, nil, tag .. "nothing failed to draw")
+    end
+    eq(Mediated.GENERAL_ANIMS3, Vfx.GENERAL_ANIMS3, "general: the screen's list is the catalogue's")
+    do
+      -- The VFX keys reach the arena: a throw from the trainer, a motion's rest.
+      newGame()
+      SESSION.party = { monOf(4, 30) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 30), 0, { wild = true }))
+      local f = screen3("wild", nil, { wildParty = { wild }, classicUi = false })
+      local fx = f:emitVfx({ style = "rock", palette = "BAIT", delivery = "projectile" }, 3, nil, "ally")
+      eq(fx and fx.fromTrainer, "ally", "general: emitVfx carries fromTrainer")
+      local motion = f:emitFx("sway", 3, nil, nil, { wait = 0.4 })
+      eq(motion and motion.wait, 0.4, "general: emitFx carries a motion's wait")
+      eq(motion and motion.duration, Battlefield.FX_MOTION_SPAN.sway, "general: ...on the shared motion clock")
+      -- ClassicBattle's pure helpers.
+      local dx0 = ClassicBattle.gen3MotionOffset("sway", 0.125, nil, false)
+      local dx1 = ClassicBattle.gen3MotionOffset("sway", 0.125, nil, true)
+      check(dx0 > 0 and dx1 < 0, "general: a sway leans toward the midline first, either side")
+      local rx, ry = ClassicBattle.gen3MotionOffset("sway", 0.1, 0.5, false)
+      eq(rx, 0, "general: a motion at rest before its wait is over")
+      local _, dy = ClassicBattle.gen3MotionOffset("nod", 0.25, nil, true)
+      check(dy > 0, "general: a nod dips")
+      local sx, sy, flash = ClassicBattle.gen3LookSeat({ { kind = "flash", side = "foe", t = 0.5 } }, "foe")
+      check(sx == 0 and sy == 0 and flash > 0.5, "general: a flash beat lights the pic")
+      local _, _, none = ClassicBattle.gen3LookSeat({ { kind = "flash", side = "foe", t = 0.5 } }, "ally")
+      eq(none, 0, "general: ...the side it is on only")
+      local x0, y0 = ClassicBattle.gen3ThrowAt({ t = 0, to = "foe" })
+      local xm, ym = ClassicBattle.gen3ThrowAt({ t = 0.25, to = "foe" })
+      local x1, _, r1, a1 = ClassicBattle.gen3ThrowAt({ t = 0.75, to = "foe" })
+      local G3 = ClassicBattle.G3
+      eq(x0, G3.ALLY_PIC_X, "general: a throw leaves our side")
+      check(xm > x0 and ym < y0, "general: ...arcs up and over")
+      eq(x1, G3.FOE_PIC_X, "general: ...and bursts on the foe")
+      check(r1 > ClassicBattle.GEN3_THROW_R and a1 < 1, "general: ...the burst growing as it fades")
+    end
+
+    -- ---- (m) a forced catch gives nothing (`given = false`, BattleSim3 `catch`)
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local captures = #FakeDex.captures
+      local f, ev, sent, drain = screen3("wild", { noOwnBattler = true },
+        { wildParty = { wild }, wildCatchMon = monOf(16, 5) })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      ev({ t = "msg", text = "Gotcha! PIDGEY was caught!" })
+      f:onOutcome({ battle = "um", outcome = "win", winners = { "me" }, losers = { "wild" },
+                    reason = "catch", caught = wild, given = false })
+      drain()
+      check(f.finished, "forced catch: the fight ends caught")
+      eq(#SESSION.party, 1, "forced catch: nothing joins the party")
+      eq(#FakeDex.captures, captures, "forced catch: ...no dex catch")
+      eq(f.owedNickname, nil, "forced catch: ...no nickname owed")
+      eq(said(f, "added to the party"), nil, "forced catch: ...and nothing said about it")
+      -- The ordinary catch (no `given`) is still the thrower's.
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local g, evg, _, draing = screen3("wild", nil, { wildParty = { wild }, wildCatchMon = monOf(16, 5) })
+      evg({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      g:onOutcome({ battle = "um", outcome = "win", winners = { "me" }, losers = { "wild" },
+                    reason = "catch", caught = wild })
+      draing()
+      eq(#SESSION.party, 2, "an ordinary catch joins the party as ever")
+    end
+
+    -- ---- (n) the trainer back in for its end speech (BattleScript_LocalTrainerBattleWon)
+    for _, classic in ipairs({ true, false }) do
+      local tag = classic and "slide-in (classic): " or "slide-in (arena): "
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local trainer = { trainerPic = 7, className = "LASS", trainerName = "AMY",
+                        defeatText = "AMY: OH, I LOST!", victoryText = "AMY: I WON!" }
+      local f, ev, sent, drain = screen3("coop_npc", nil, { trainer = trainer, classicUi = classic })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 50, maxHp = 50, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 30, maxHp = 30 })
+      ev({ t = "turn" })
+      drain()
+      f:say("ANN defeated\nLASS AMY!")
+      local before = #f.lines
+      f:say(trainer.defeatText)
+      local row = f.lines[before + 1]
+      check(type(row) == "table" and row.stateRow == "trainer3", tag .. "the speech brings the trainer in first")
+      eq(f.lines[before + 2], trainer.defeatText, tag .. "...then its first page")
+      local n0 = #f.lines
+      f:say("ANN got ¥100\nfor winning!")
+      eq(#f.lines, n0 + 1, tag .. "an ordinary line brings nobody in")
+      check(stepUntil(f, function() return f.endTrainer3 == true end), tag .. "the trainer comes in")
+      if classic then
+        local m = f:gen3ClassicModel()
+        eq(m.trainer and m.trainer.x, Mediated.END_PIC_X3, tag .. "...at the cart's stop (176 + 32)")
+        eq(m.trainer and m.trainer.dx, Mediated.TRAINER_SLIDE_PX3, tag .. "...from 96 further right")
+        eq(m.showTrainer, true, tag .. "...in the foe's place")
+        eq(f.anim, row, tag .. "the queue waits for the slide (waitstate)")
+        eq(f.shown, nil, tag .. "...the speech not yet up")
+        for _ = 1, 10 do f:update(1 / 60) end
+        eq(f:gen3ClassicModel().trainer.dx, Mediated.TRAINER_SLIDE_PX3 - 10 * Mediated.TRAINER_SLIDE_STEP3,
+           tag .. "...sliding 2 px a frame (SpriteCB_TrainerSlideIn)")
+        local savedPic = Battlefield.gen3TrainerPic
+        Battlefield.gen3TrainerPic = function() return fakeImage("lass") end
+        check(classicDraw(f:gen3ClassicModel()) == true, tag .. "the page draws it")
+        Battlefield.gen3TrainerPic = savedPic
+        local at = nil
+        for _, call in ipairs(drawnCalls) do
+          if call[1] == "draw" and type(call[2]) == "table" and call[2].tag == "lass" then at = call[3] end
+        end
+        eq(at, Mediated.END_PIC_X3 + 76 - 32, tag .. "...where it is in its slide")
+        check(stepUntil(f, function() return f.shown == trainer.defeatText end, 120),
+              tag .. "the speech once it has arrived")
+        eq(f:gen3ClassicModel().trainer.dx, 0, tag .. "...standing at its stop")
+      else
+        eq(f.anim, nil, tag .. "the arena's trainer never left: no wait")
+      end
+      drain()
+      eq(f.endTrainer3, true, tag .. "the trainer stays for the rest of the ending")
+      -- Its win text over a loss brings it in the same way.
+      local g = screen3("coop_npc", nil, { trainer = trainer, classicUi = classic })
+      local b2 = #g.lines
+      g:say(trainer.victoryText)
+      check(type(g.lines[b2 + 1]) == "table" and g.lines[b2 + 1].stateRow == "trainer3",
+            tag .. "the win text over a loss too (BattleScript_RivalBattleLost)")
+    end
+    do
+      -- A wild fight has no trainer to bring in.
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f = screen3("wild", nil, { wildParty = { wild }, trainer = { defeatText = "X" } })
+      local before = #f.lines
+      f:say("X")
+      eq(f.lines[before + 1], "X", "slide-in: never in a wild fight")
+    end
+
+    -- ---- (o) a bag of the fight's own (screen option `bag`, the Battle Pyramid's)
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local pyramid = { { id = 13, count = 3, name = "POTION" } }
+      local trainer = { trainerPic = 7, className = "LASS", trainerName = "AMY" }
+      local f, ev, sent, drain, uploads = screen3("coop_npc", { bag = pyramid }, { trainer = trainer })
+      local ours = nil
+      for _, u in ipairs(uploads) do if u.mons and u.side == nil then ours = u end end
+      local bag = ours and ours.bag or {}
+      eq(#bag, 1, "bag: the fight's own bag goes up")
+      eq(bag[1] and bag[1].count, 3, "bag: ...its counts, not the session's (which has none)")
+      eq(f.bagSheet[13], 3, "bag: the sheet the menu reads")
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 50, maxHp = 50, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 30, maxHp = 30 })
+      ev({ t = "turn" })
+      drain()
+      f:runCommand("ITEM")
+      local rows = f:usableItems()
+      eq(rows[1] and rows[1].id, 13, "bag: BAG lists the fight's bag")
+      eq(rows[1] and rows[1].count, 3, "bag: ...with its counts")
+      f.pendingItem = 13
+      ev({ t = "item", slot = 0, side = "a", text = "13" })
+      eq(f.bagSheet[13], 2, "bag: a use spends from it, whatever the session's pockets hold")
+      eq(pyramid[1].count, 3, "bag: the caller's table is never written")
+      -- Without the option: the session's pockets, as ever.
+      FakeBag.add(SESSION.bag, 13, 1)
+      local g = screen3("coop_npc", nil, { trainer = trainer })
+      eq(g.bagSheet[13], 1, "bag: without it, the session's own")
+    end
+
+    -- ---- (p) the Frontier's victory jingle (screen option `victorySong`)
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20) }
+      local trainer = { trainerPic = 7, className = "LASS", trainerName = "AMY" }
+      local function jingle(opts)
+        local f = screen3("coop_npc", opts, { trainer = trainer })
+        audioCalls = {}
+        f.result = "win"
+        f:playVictoryMusic()
+        local played = nil
+        for _, call in ipairs(audioCalls) do if call[1] == "playSong" then played = call[2] end end
+        return played, f
+      end
+      eq(jingle({ victorySong = 413 }), 413, "victory: the kind's jingle is what plays")
+      eq(jingle({ victorySong = "MUS_VICTORY_GYM_LEADER" }), 7, "victory: ...named, through the cart's song table")
+      check(jingle(nil) ~= 413, "victory: without one, the trainer's own as ever")
+      local saved = FakeAudio.playSong
+      local refused = false
+      FakeAudio.playSong = function(id)
+        if id == 413 and not refused then refused = true; return false end
+        return saved(id)
+      end
+      local warned = #warns
+      local played = jingle({ victorySong = 413 })
+      FakeAudio.playSong = saved
+      check(played ~= nil, "victory: a jingle the cart refused falls back to the ordinary one")
+      eq(#warns, warned + 1, "victory: ...said once, with what to do")
+      warns[#warns] = nil
+    end
+    Gen3.battleText = textBefore
   end)
   Gen3.battleText = realText
   FakePokemon.ghostPic = nil

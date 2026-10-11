@@ -4663,13 +4663,130 @@ do
     local rock = animRow("ROCK_THROW")
     check(rock and rock.general3 == nil and rock.quiet == nil,
           "general: off a Safari ROCK_THROW is the move, as it was")
+
+    -- ------- W3-UC3: the general clips every fight can send.  A trap's
+    -- per-turn squeeze (BattleScript_WrapTurnDmg), FOCUS PUNCH's focus
+    -- (BattleScript_FocusPunchSetUp) and a FUTURE SIGHT / DOOM DESIRE
+    -- landing (BattleScript_FutureAttackAnimate) are nobody's order: no
+    -- "used TURN TRAP!", no lunge, nothing thrown from the seat -- the look
+    -- alone, on the battler the event names.
+    local function lunged(fxList)
+      for _, fx in ipairs(fxList or {}) do if fx.kind == "lunge" then return true end end
+      return false
+    end
+    local function thrown(fxList)
+      for _, fx in ipairs(fxList or {}) do
+        if fx.kind == "vfx" and (fx.delivery == "projectile" or fx.delivery == "beam"
+                                 or fx.fromSlot ~= nil or fx.fromTrainer ~= nil) then
+          return true
+        end
+      end
+      return false
+    end
+    -- Plays a row the way the queue does: a row the callout beat puts back
+    -- comes round again for its lunge.  Answers what it drew and whether a
+    -- bubble went up at any point.
+    local function playThrough(row)
+      s.fx, s.battlefieldBubbles, s.calloutShout, s.calloutSpent = nil, nil, nil, nil
+      local shouted = false
+      local held = s:startAnim(row)
+      if s.battlefieldBubbles ~= nil and next(s.battlefieldBubbles) ~= nil then shouted = true end
+      if row.calledOut then
+        -- `holdBeat` put it back at the head of the queue: take it, as
+        -- `update` would once the beat is over.
+        if type(s.messages) == "table" and s.messages[1] == row then table.remove(s.messages, 1) end
+        s.beatHold, s.beatDwell = nil, nil
+        s.anim, s.animHold, s.animDwell = nil, nil, nil
+        held = s:startAnim(row)
+      end
+      local drawn = s.fx or {}
+      local out = {}
+      for _, fx in ipairs(drawn) do
+        out[#out + 1] = fx.kind .. "@" .. tostring(fx.slot) .. (fx.palette and (":" .. fx.palette) or "")
+      end
+      local hold = s.animHold
+      s.anim, s.animHold, s.animDwell, s.moveVfx = nil, nil, nil, nil
+      return { held = held, fx = table.concat(out, ","), list = drawn, hold = hold, shouted = shouted }
+    end
+    local mineAt = s:medSlotOf({ slot = 0 })
+    local foeAt = s:medSlotOf({ slot = 3 })
+    check(mineAt ~= nil and foeAt ~= nil and s:foeSide(foeAt) and not s:foeSide(mineAt),
+          "uc3: field slot 0 is ours, 3 theirs (side b from Config.COOP_SIDE)")
+    -- The probe is live: TURN_TRAP read the way the screen read it before
+    -- (a move row) shouts and lunges, and the arena throws the move's look.
+    local old = { kind = "anim", anim = "TURN_TRAP", from = mineAt, attackerIsPlayer = true }
+    local before = playThrough(old)
+    check(before.shouted and lunged(before.list) and thrown(before.list),
+          "uc3: (control) a TURN_TRAP read as a move shouts, lunges and throws -- the probe can fail",
+          before.fx)
+    local trap = animRow("TURN_TRAP")
+    check(trap and trap.general3 == true and trap.quiet == true,
+          "uc3: TURN_TRAP is a general clip, quiet")
+    local wrap = playThrough(trap)
+    check(wrap.held == true and (wrap.hold or 0) > 0, "uc3: the queue is held while the squeeze plays")
+    check(not wrap.shouted, "uc3: a trap's turn raises no callout")
+    check(not lunged(wrap.list), "uc3: ...no lunge")
+    check(not thrown(wrap.list), "uc3: ...and nothing flies from a move user")
+    eq(wrap.fx, ("vfx@%d:NORMAL,tremble@%d"):format(mineAt, mineAt),
+       "uc3: no move named: BIND / WRAP's tendrils squeeze the trapped monster, which shakes")
+    local fireSpin = playThrough(animRow("TURN_TRAP", { slot = 3, side = "b", amount = 83 }))
+    eq(fireSpin.fx, ("vfx@%d:FIRE,tremble@%d"):format(foeAt, foeAt),
+       "uc3: a FIRE SPIN trap (amount = the move's number, sB_ANIM_ARG1) burns on their monster")
+    check(not fireSpin.shouted and not lunged(fireSpin.list) and not thrown(fireSpin.list),
+          "uc3: ...quiet on their side too")
+    local focusRow = animRow("FOCUS_PUNCH_SETUP", { slot = 3, side = "b" })
+    check(focusRow and focusRow.general3 == true, "uc3: FOCUS_PUNCH_SETUP is a general clip")
+    local focus = playThrough(focusRow)
+    eq(focus.fx, ("vfx@%d:FIGHTING,tremble@%d"):format(foeAt, foeAt),
+       "uc3: the FOCUS PUNCH user tightens its focus on its own seat")
+    check(not focus.shouted and not lunged(focus.list) and not thrown(focus.list),
+          "uc3: ...with no callout, lunge or throw (the move's own row comes later)")
+    local future = playThrough(animRow("FUTURE_SIGHT_HIT"))
+    eq(future.fx, ("vfx@%d:PSYCHIC,tremble@%d"):format(mineAt, mineAt),
+       "uc3: FUTURE SIGHT lands: the PSYCHIC field, and the monster hit shakes")
+    check(not future.shouted and not lunged(future.list) and not thrown(future.list),
+          "uc3: ...and the monster it hits is not made to attack")
+    local doom = playThrough(animRow("DOOM_DESIRE_HIT", { slot = 3, side = "b" }))
+    eq(doom.fx, ("vfx@%d:STEEL,vfx@%d:FIRE,tremble@%d"):format(foeAt, foeAt, foeAt),
+       "uc3: DOOM DESIRE lands: the light, the explosions, the shake")
+    check(not doom.shouted and not lunged(doom.list) and not thrown(doom.list),
+          "uc3: ...quiet")
+    -- A SUBSTITUTE on the trapped / focusing seat: the cart skips the clip
+    -- (TryHandleLaunchBattleTableAnimation), so the doll is left alone and
+    -- the queue moves straight on.  A delayed hit is launched for its user,
+    -- so the target's doll does not stop it.
+    local mineSlot = s.sim:slot(mineAt)
+    mineSlot.substitute = true
+    local underSub = playThrough(animRow("TURN_TRAP"))
+    eq(underSub.fx, "", "uc3: a trapped monster behind a SUBSTITUTE shows no squeeze")
+    check(underSub.held == false and underSub.hold == nil, "uc3: ...and holds nothing")
+    check(not underSub.shouted and not lunged(underSub.list), "uc3: ...nor turns back into a move")
+    eq(playThrough(animRow("FOCUS_PUNCH_SETUP")).fx, "", "uc3: nor does a focusing one")
+    eq(playThrough(animRow("FUTURE_SIGHT_HIT")).fx, ("vfx@%d:PSYCHIC,tremble@%d"):format(mineAt, mineAt),
+       "uc3: a FUTURE SIGHT still lands on a doll's seat")
+    mineSlot.substitute = nil
+    -- The moves themselves are still moves.
+    local punch = animRow("FOCUS_PUNCH", { target = 3 })
+    check(punch and punch.general3 == nil and punch.quiet == nil, "uc3: FOCUS PUNCH itself is the move")
+
+    -- Co-op: a Gen 3 co-op fight sends the same four, and reads them the same
+    -- way (the GHOST's and the Safari's it never sends, contract C1).
     local coop = makeCoop({ party = { mon(4, 20) }, partnerParty = { mon(16, 20) } })
-    local rowsC = coop.screen:medRows({ battle = "c1", seq = 961, t = "anim", slot = 0, side = "a",
-                                        text = "MON_SCARED" })
-    local coopRow
-    for _, row in ipairs(rowsC) do if row.kind == "anim" then coopRow = row end end
-    check(coopRow and coopRow.general3 == nil and coopRow.quiet == nil,
-          "general: co-op reads the row as it always did")
+    local function coopRow(text)
+      local rowsC = coop.screen:medRows({ battle = "c1", seq = 961, t = "anim", slot = 0, side = "a",
+                                          text = text })
+      for _, row in ipairs(rowsC) do if row.kind == "anim" then return row end end
+      return nil
+    end
+    for _, name in ipairs({ "TURN_TRAP", "FOCUS_PUNCH_SETUP", "FUTURE_SIGHT_HIT", "DOOM_DESIRE_HIT" }) do
+      local row = coopRow(name)
+      check(row and row.general3 == true and row.quiet == true, "uc3: co-op reads " .. name .. " as a quiet general clip")
+    end
+    local scaredC = coopRow("MON_SCARED")
+    check(scaredC and scaredC.general3 == true and scaredC.quiet == true,
+          "general: co-op reads MON_SCARED as the general clip too (one rule for every Gen 3 screen)")
+    local tackleC = coopRow("TACKLE")
+    check(tackleC and tackleC.general3 == nil and tackleC.quiet == nil, "general: co-op's moves are moves, as ever")
   end)
 end
 

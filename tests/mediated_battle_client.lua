@@ -2847,6 +2847,18 @@ do
   eq(table.concat(labels, ","), "FIGHT,PKMN,ITEM,RUN", "Red: ...labelled the way it always was")
   eq(plain.noOwnBattler, nil, "Red: a screen fields its battler unless a caller says otherwise")
 
+  -- Wave 3 (UM3): the Safari grid, a fight's own bag and a kind's victory
+  -- jingle are Gen 3's options alone -- a Red screen handed them reads none.
+  local handed = Mediated.new({ game = { data = DATA }, battle = "g1s", mode = "wild",
+    safari = { family = "frlg", balls = 30 }, bag = { { id = "POTION", count = 9 } },
+    victorySong = "MUS_VICTORY_GYM_LEADER" })
+  eq(handed.safari, nil, "Red: a `safari` option is not read")
+  eq(handed.noOwnBattler, nil, "Red: ...and fields its battler as ever")
+  eq(table.concat(handed:commandList(), ","), "FIGHT,SWITCH,ITEM,RUN", "Red: ...on its own grid")
+  eq(handed.bagEntries, nil, "Red: a `bag` option is not read (the save's inventory goes up)")
+  eq(handed.victorySong, nil, "Red: a `victorySong` option is not read")
+  eq(handed:safariBalls3(), nil, "Red: there is no SAFARI BALLS box")
+
   local sent = {}
   local trainer = setmetatable({
     game = { data = DATA }, mode = "coop_npc", phase = "choose", commandIndex = 4,

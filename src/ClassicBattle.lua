@@ -1067,8 +1067,22 @@ end
 --   M.gen3PreviewWash(startY, n) -> the wash n frames into one preview fade
 --       (0..16 towards white) and the fade's whole length in frames (pure).
 --   M.gen3CommandLabel(idOrLabel) -> the cart's own word for a command.
---   M.gen3YesNoLabels() -> the cart's two answers ({ "YES", "NO" } in its
---       own words, gText_BattleYesNoChoice).
+--   M.gen3SafariLabels(family) -> the Safari Zone's four action words in the
+--       cart's own text (gText_SafariZoneMenu: BALL BAIT ROCK RUN /
+--       BALL POKéBLOCK GO NEAR RUN), else the family's plain four.
+--   M.gen3SafariWords(balls, family) -> "SAFARI BALLS" and "Left: NN", the
+--       Safari box's two lines in the cart's words (gText_SafariBalls and the
+--       battle profile's safariBallsLeft key).
+--   M.gen3MotionOffset(kind, t, wait, foe) -> dx, dy of a Gen 3 general
+--       clip's motion beat ("sway" | "nod" | "tremble") at 0..1 of its life,
+--       the arena's own curves and peaks (Battlefield.fxSway / fxNod /
+--       fxTremble, FX_SWAY / FX_NOD / FX_TREMBLE) on the page's pixels (pure).
+--   M.gen3LookSeat(records, side) -> dx, dy, flash for one side's pic, summed
+--       over a screen's general-clip records ({ kind = "sway" | "nod" |
+--       "tremble" | "flash" | "throw", side = "ally" | "foe", t, wait }) --
+--       a "flash" beat is a 0..1..0 pulse at 0.6 (pure).
+--   M.gen3ThrowAt(throw) -> x, y, r, alpha of one thrown look on the page
+--       (pure; see `throws3` below).
 --   M.gen3YesNoLayout() -> the YES / NO window's rects (pure).
 --   M.G3 -> the geometry constants; M.G3D -> the double screen's.
 --
@@ -1085,7 +1099,10 @@ end
 --                     speciesId), substitute (the cart's doll stands in),
 --                     hidden, alpha, dx, dy, flash (0..1), caught (foe: the
 --                     owned-ball marker), expFrac (ally, 0..1); confused is
---                     accepted and not drawn (the cart's box has no mark)
+--                     accepted and not drawn (the cart's box has no mark).
+--                     `dx` / `dy` / `flash` are also how a screen shows a
+--                     Gen 3 general clip's beats on the pic
+--                     (M.gen3LookSeat)
 --   message, hint   the textbox line (paged by the caller); hint draws ▼
 --   hold            a wait line: never a ▼, whatever `hint` says
 --   phase           accepted (the screen's own phase); the page reads the
@@ -1110,9 +1127,22 @@ end
 --                   roster string "oosx" or a list of { hp, status }); drawn
 --                   when mode is not a wild one
 --   mode            "wild" / "coop_wild" suppress the ball row
---   trainer         { pic | picId = TRAINER_PIC id } -- the foe trainer, drawn where
---                   the foe stands while `showTrainer` is true or no foe
---                   seat is up
+--   trainer         { pic | picId = TRAINER_PIC id, x?, dx? } -- the foe
+--                   trainer, drawn where the foe stands (centre x
+--                   TRAINER_X, or `x`: a trainer back in for its end speech
+--                   stands at 208, pret OpponentHandleTrainerSlide; `dx` is
+--                   how far right of there it still is, sliding in) while
+--                   `showTrainer` is true or no foe seat is up
+--   safari          { balls = n, family } -- a Safari Zone fight: no ally
+--                   seat, and the cart's SAFARI BALLS box ("SAFARI BALLS" /
+--                   "Left: NN") stands in the player's healthbox
+--                   (pret battle_interface.c:1743, the engine's healthbox.lua)
+--   throws3         { { t = 0..1, from = "ally" | "foe", to = "foe" | "ally",
+--                     color = { r, g, b }?, edge = { r, g, b }? } } -- a
+--                   Gen 3 general clip's thrown looks (the Safari's bait,
+--                   rock and POKéBLOCK) arcing from the thrower's side to
+--                   the target's pic, then a small burst there; singles
+--                   geometry, drawn over the healthboxes
 --   playerBack      { gender = 0|1 } -- the player's own back pic, drawn
 --                   while `showPlayer` is true or no ally seat is up
 --   weather         "RAIN" | "SUN" | "SAND" | "HAIL" (any case; "sandstorm",
@@ -1514,6 +1544,71 @@ function M.gen3YesNoLabels()
   -- mounted does not pin the fallback for the session.
   if text then yesNoCache = labels end
   return labels
+end
+
+-- ------- the Safari Zone's words
+
+-- The four action words without the cart's text (pret gText_SafariZoneMenu,
+-- pokefirered "BALL BAIT\nROCK RUN", pokeemerald "BALL {POKEBLOCK}\nGO NEAR
+-- RUN").
+M.SAFARI_LABELS3 = {
+  frlg = { "BALL", "BAIT", "ROCK", "RUN" },
+  rse = { "BALL", "POKéBLOCK", "GO NEAR", "RUN" },
+}
+-- The "Left: " key per family when the battle profile cannot be asked
+-- (pokefirered battle_interface.c:1762 gText_HighlightRed_Left; pokeemerald
+-- :2153 gText_SafariBallLeft -- the engine profile's strings.safariBallsLeft).
+M.SAFARI_LEFT_KEYS3 = { frlg = "gText_HighlightRed_Left", rse = "gText_SafariBallLeft" }
+
+-- The Safari's four action words, the way battle/ui.lua splits
+-- gText_SafariZoneMenu (text runs, broken on each newline and CLEAR_TO): the
+-- cart's own -- Emerald's second is the {POKEBLOCK} glyph run, which this
+-- toolkit's font cannot print as a tag, so it is spelled POKéBLOCK.  Cached
+-- once the cart has answered.
+local safariLabelsCache = nil
+function M.gen3SafariLabels(family)
+  if safariLabelsCache then return safariLabelsCache end
+  local labels = {}
+  local RomText = g3eng("src.core.game3.rom_text")
+  if RomText and type(RomText.ir) == "function" then
+    pcall(function()
+      local buf = {}
+      local function flush()
+        if #buf > 0 then labels[#labels + 1] = table.concat(buf); buf = {} end
+      end
+      for _, seg in ipairs(RomText.ir("gText_SafariZoneMenu")) do
+        if seg.t == "text" then buf[#buf + 1] = seg.s
+        elseif seg.t == "tag" and seg.tag then
+          buf[#buf + 1] = (seg.tag == "{POKEBLOCK}") and "POKéBLOCK" or seg.tag
+        elseif seg.t == "nl" or (seg.t == "ext" and seg.cmd == 19) then flush() end
+      end
+      flush()
+    end)
+  end
+  if #labels >= 4 then
+    safariLabelsCache = labels
+    return labels
+  end
+  return M.SAFARI_LABELS3[family] or M.SAFARI_LABELS3.frlg
+end
+
+-- The Safari box's two lines: "SAFARI BALLS" (gText_SafariBalls) and the
+-- count after the cart's "Left: " (left-aligned decimal, pret
+-- UpdateLeftNoOfBallsTextOnHealthbox's STR_CONV_MODE_LEFT_ALIGN).
+function M.gen3SafariWords(balls, family)
+  local title = romPlain("gText_SafariBalls", "SAFARI BALLS")
+  local key = nil
+  local BP = g3eng("src.core.game3.battle.profile")
+  if BP and type(BP.get) == "function" then
+    pcall(function()
+      local bp = BP.get(nil)
+      key = type(bp) == "table" and type(bp.strings) == "table" and bp.strings.safariBallsLeft or nil
+    end)
+  end
+  key = key or M.SAFARI_LEFT_KEYS3[family] or M.SAFARI_LEFT_KEYS3.frlg
+  local left = romPlain(key, "Left: ")
+  local n = math.max(0, math.floor(num3(balls, 0)))
+  return title, left .. tostring(n)
 end
 
 -- The YES / NO window's rects in pixels: `frame` (the std frame around the
@@ -2457,17 +2552,150 @@ end
 -- ------- the field (singles and doubles share these)
 
 -- The foe trainer's front pic, where its monsters will stand (ui.lua
--- draw_enemy_trainer: (176, 40), a lone trainer's double included).
+-- draw_enemy_trainer: (176, 40), a lone trainer's double included) -- or, back
+-- in for its end speech, at `x` (pret OpponentHandleTrainerSlide's 176 + 32)
+-- and still `dx` short of it, sliding in from the right.
 local function drawEnemyTrainer(gfx, BF, trainer)
   local picId = trainer.pic or trainer.picId
   local img = BF and picId ~= nil and BF.gen3TrainerPic(picId) or nil
   if img then
     local ok, iw, ih = pcall(img.getDimensions, img)
     if ok then
+      local cx = math.floor(num3(trainer.x, G.TRAINER_X) + num3(trainer.dx, 0))
       gfx.setColor(1, 1, 1, 1)
-      gfx.draw(img, G.TRAINER_X - math.floor(iw / 2), G.TRAINER_Y - math.floor(ih / 2))
+      gfx.draw(img, cx - math.floor(iw / 2), G.TRAINER_Y - math.floor(ih / 2))
     end
   end
+end
+
+-- ------- Gen 3's general clips on the page (MediatedBattle classicBeat3)
+
+-- One motion beat's offset at `t` (0..1 of its life), `wait` its rest: the
+-- arena's curves and peaks (Battlefield.fxSeat's sway / nod / tremble arms),
+-- toward the midline first -- a foe's sway leans left.
+function M.gen3MotionOffset(kind, t, wait, foe)
+  local BF = battlefield()
+  if not BF or type(BF.fxWaited) ~= "function" then return 0, 0 end
+  local u = BF.fxWaited(num3(t, 0), wait)
+  if kind == "sway" and type(BF.fxSway) == "function" then
+    return (foe and -1 or 1) * num3(BF.FX_SWAY, 6) * BF.fxSway(u), 0
+  elseif kind == "nod" and type(BF.fxNod) == "function" then
+    return 0, num3(BF.FX_NOD, 5) * BF.fxNod(u)
+  elseif kind == "tremble" and type(BF.fxTremble) == "function" then
+    return num3(BF.FX_TREMBLE, 3) * BF.fxTremble(u), 0
+  end
+  return 0, 0
+end
+
+-- One side's pic under every live beat: the motions summed, a "flash" beat a
+-- 0..1..0 pulse (at most 0.6 -- the page lights the battler where the arena
+-- would draw particles over it).
+M.GEN3_LOOK_FLASH = 0.6
+function M.gen3LookSeat(records, side)
+  local dx, dy, flash = 0, 0, 0
+  if type(records) ~= "table" then return dx, dy, flash end
+  for _, rec in ipairs(records) do
+    if type(rec) == "table" and rec.side == side then
+      local t = math.max(0, math.min(1, num3(rec.t, 0)))
+      if rec.kind == "flash" then
+        flash = math.max(flash, M.GEN3_LOOK_FLASH * math.sin(t * math.pi))
+      elseif rec.kind == "sway" or rec.kind == "nod" or rec.kind == "tremble" then
+        local ox, oy = M.gen3MotionOffset(rec.kind, t, rec.wait, side == "foe")
+        dx, dy = dx + ox, dy + oy
+      end
+    end
+  end
+  return math.floor(dx + 0.5), math.floor(dy + 0.5), flash
+end
+
+-- A thrown look on the page: from the thrower's battler place to the target's
+-- pic centre (singles: the player's (72, 83), the foe's (176, 39) -- the pic
+-- centres SINGLES gives), arcing GEN3_THROW_LIFT over the straight line for the
+-- first GEN3_THROW_TRAVEL of its life (Battlefield FX_VFX_TRAVEL), then a
+-- burst ring growing and fading where it landed.  Original geometry.
+M.GEN3_THROW_TRAVEL = 0.5
+M.GEN3_THROW_LIFT = 24
+M.GEN3_THROW_R = 3
+M.GEN3_THROW_BURST = 6
+local function throwEnds(throw)
+  local ax, ay = G.ALLY_PIC_X, G.ALLY_FEET_Y - math.floor(G.PIC / 2)
+  local fx, fy = G.FOE_PIC_X, G.FOE_FEET_Y - math.floor(G.PIC / 2)
+  if throw.to == "ally" then return fx, fy, ax, ay end
+  return ax, ay, fx, fy
+end
+function M.gen3ThrowAt(throw)
+  if type(throw) ~= "table" then return nil end
+  local t = math.max(0, math.min(1, num3(throw.t, 0)))
+  local x0, y0, x1, y1 = throwEnds(throw)
+  local travel = M.GEN3_THROW_TRAVEL
+  if t < travel then
+    local u = t / travel
+    local x = x0 + (x1 - x0) * u
+    local y = y0 + (y1 - y0) * u - M.GEN3_THROW_LIFT * 4 * u * (1 - u)
+    return math.floor(x + 0.5), math.floor(y + 0.5), M.GEN3_THROW_R, 1
+  end
+  local v = (t - travel) / (1 - travel)
+  return x1, y1, M.GEN3_THROW_R + M.GEN3_THROW_BURST * v, 1 - v
+end
+
+local function drawThrows3(gfx, throws)
+  if type(throws) ~= "table" then return end
+  for _, throw in ipairs(throws) do
+    local x, y, r, alpha = M.gen3ThrowAt(throw)
+    if x and alpha > 0 then
+      local c = type(throw.color) == "table" and throw.color or { 0.95, 0.93, 0.86 }
+      local e = type(throw.edge) == "table" and throw.edge or { 0.36, 0.31, 0.23 }
+      local inFlight = num3(throw.t, 0) < M.GEN3_THROW_TRAVEL
+      if inFlight then
+        gfx.setColor(c[1] or 1, c[2] or 1, c[3] or 1, alpha)
+        gfx.circle("fill", x, y, r)
+        gfx.setColor(e[1] or 0, e[2] or 0, e[3] or 0, alpha)
+        gfx.circle("line", x, y, r)
+      else
+        gfx.setColor(c[1] or 1, c[2] or 1, c[3] or 1, alpha)
+        gfx.circle("line", x, y, r)
+      end
+    end
+  end
+  gfx.setColor(1, 1, 1, 1)
+end
+
+-- The Safari box in the player's healthbox place (the engine's healthbox.lua
+-- draw_safari_box over pokefirered battle_interface.c:615 / :1743 / :1762):
+-- the player's box sheet with its Lv ink and HP bar area wiped to cream, the
+-- cap at its right end filled, the shadow strip along its foot taken from the
+-- sheet's own pixel, then "SAFARI BALLS" at the name and "Left: NN"
+-- right-aligned in the HP-figure window.
+local SAFARI_CAP = { x = 96, y = 17, w = 2, h = 7 }
+local SAFARI_STRIP = { x = 18, y = 34, w = 78, h = 4, srcX = 10, srcY = 35 }
+local safariQuads = setmetatable({}, { __mode = "k" })
+local function drawSafariBox(gfx, C, F, safari)
+  local x, y = G.ALLY_BOX_X, G.ALLY_BOX_Y
+  pcall(C.drawPlayerBox, x, y)
+  eraseInk(gfx, x, y, INK.ally)
+  gfx.setColor(CREAM)
+  -- the HP bar's place (its top-left is the box's + (32, 16))
+  gfx.rectangle("fill", x + 32, y + 14, 64, 10)
+  gfx.rectangle("fill", x + SAFARI_CAP.x, y + SAFARI_CAP.y, SAFARI_CAP.w, SAFARI_CAP.h)
+  -- the HP-figure window
+  gfx.rectangle("fill", x + 56, y + 21, 40, 11)
+  gfx.setColor(1, 1, 1, 1)
+  local img = C._playerBox
+  if img and gfx.newQuad then
+    pcall(function()
+      local quad = safariQuads[img]
+      if not quad then
+        quad = gfx.newQuad(SAFARI_STRIP.srcX, SAFARI_STRIP.srcY, 1, 1, img:getDimensions())
+        safariQuads[img] = quad
+      end
+      gfx.draw(img, quad, x + SAFARI_STRIP.x, y + SAFARI_STRIP.y, 0, SAFARI_STRIP.w, SAFARI_STRIP.h)
+    end)
+  end
+  local title, left = M.gen3SafariWords(safari.balls, safari.family)
+  drawText(F, title, x + 16, y + 3, { small = true, colors = HB_TEXT })
+  local w = measure(F, left, { small = true })
+  drawText(F, left, x + 56 + 40 - w, y + 21, { small = true, colors = HB_TEXT })
+  gfx.setColor(1, 1, 1, 1)
 end
 
 -- The player's own back pic (the first frame of the sheet).
@@ -2546,12 +2774,19 @@ local function drawSingleField(gfx, C, F, BF, view, frame)
   drawStrip(gfx, BF, F, "foe", view.foeStrip, frame)
   drawStrip(gfx, BF, F, "ally", view.allyStrip, frame)
 
-  -- the healthboxes, and the foe's remaining party under its box
+  -- the healthboxes, and the foe's remaining party under its box -- the
+  -- Safari Zone's SAFARI BALLS box in the player's place
   if type(foe) == "table" then drawFoeBox(gfx, C, F, foe) end
-  if type(ally) == "table" then drawAllyBox(gfx, C, F, ally) end
+  if type(ally) == "table" then
+    drawAllyBox(gfx, C, F, ally)
+  elseif type(view.safari) == "table" then
+    drawSafariBox(gfx, C, F, view.safari)
+  end
   if view.foeParty ~= nil and M.wantsFoeBalls(view.mode) then
     drawFoeBalls(C, view.foeParty)
   end
+  -- a general clip's throws, over everything on the field
+  drawThrows3(gfx, view.throws3)
 end
 
 -- pokefirered trig.c:4 / battle_main.c:2159 (ui.lua sin_q8, tick_bounces):
@@ -2713,6 +2948,9 @@ local function drawDoubleField(gfx, C, F, BF, view, double, frame, wash)
       drawDoubleBox(gfx, C, F, seat, isPlayer, x, y, hpText)
     end
   end
+  -- a general clip's throws (singles geometry; none is thrown in a double
+  -- today -- the Safari is a single), over everything on the field
+  drawThrows3(gfx, view.throws3)
 end
 
 -- Draw the whole Gen 3 page. See the contract above.

@@ -639,7 +639,9 @@ eq(Vfx.forMove("THUNDERBOLT", { type = "ELECTRIC", power = 95 }).delivery, "beam
 -- ---- Vfx: Gen 3's general clips (W2-UC2; pret gBattleAnims_General, the
 --      General_* scripts of data/battle_anim_scripts.s)
 local GENERAL3 = { "MON_SCARED", "GHOST_GET_OUT", "SILPH_SCOPED", "BAIT_THROW", "ROCK_THROW",
-                   "POKEBLOCK_THROW", "SAFARI_REACTION" }
+                   "POKEBLOCK_THROW", "SAFARI_REACTION",
+                   -- W3-UC3: the ones every fight can send
+                   "TURN_TRAP", "FOCUS_PUNCH_SETUP", "FUTURE_SIGHT_HIT", "DOOM_DESIRE_HIT" }
 for _, name in ipairs(GENERAL3) do
   local beats = Vfx.forGeneral3(name, 0)
   check(type(beats) == "table" and #beats > 0, "general: " .. name .. " has a look")
@@ -698,8 +700,84 @@ check(look1[1] ~= look2[1], "general: every call answers fresh beats")
 look1[1].style = "blast"
 eq(Vfx.forGeneral3("BAIT_THROW")[1].style, "rock", "general: ...so stamping one never reaches the table")
 eq(Vfx.forGeneral3("TACKLE"), nil, "general: a move has no general look")
-eq(Vfx.forGeneral3("TURN_TRAP"), nil, "general: ...nor a clip outside this set")
+eq(Vfx.forGeneral3("WISH_HEAL"), nil, "general: ...nor a clip outside this set (no referee sends WISH_HEAL)")
 eq(Vfx.forGeneral3(nil), nil, "general: ...nor nothing")
+
+-- ---- the general clips every fight can send (W3-UC3)
+-- A trap's turn is keyed by the trapping move's number (sB_ANIM_ARG1 =
+-- wrappedMove), turned into the branch the way AnimTask_GetTrappedMoveAnimId
+-- does: FIRE_SPIN 83, WHIRLPOOL 250, CLAMP 128, SAND_TOMB 328 (pret moves.h),
+-- anything else BIND / WRAP's.
+eq(Vfx.trapAnim3(83), 1, "trap: FIRE SPIN is TRAP_ANIM_FIRE_SPIN")
+eq(Vfx.trapAnim3(250), 2, "trap: WHIRLPOOL is TRAP_ANIM_WHIRLPOOL")
+eq(Vfx.trapAnim3(128), 3, "trap: CLAMP is TRAP_ANIM_CLAMP")
+eq(Vfx.trapAnim3(328), 4, "trap: SAND TOMB is TRAP_ANIM_SAND_TOMB")
+eq(Vfx.trapAnim3(20), 0, "trap: BIND is TRAP_ANIM_BIND")
+eq(Vfx.trapAnim3(35), 0, "trap: WRAP is too (TRAP_ANIM_WRAP == TRAP_ANIM_BIND)")
+eq(Vfx.trapAnim3(nil), 0, "trap: no move is the script's fallthrough (goto Status_BindWrap)")
+eq(Vfx.trapAnim3(1), 0, "trap: ...and so is any other move")
+for _, case in ipairs({ { nil, "gust/NORMAL", "Status_BindWrap's tendrils" },
+                        { 35, "gust/NORMAL", "WRAP squeezes as BIND does" },
+                        { 83, "ember/FIRE", "Status_FireSpin's embers" },
+                        { 250, "psi/WATER", "Status_Whirlpool's orbs, the move's own swirl" },
+                        { 128, "impact/WATER", "Status_Clamp's jaws and hit splat" },
+                        { 328, "quake/GROUND", "Status_SandTomb's dirt, SAND TOMB's own look" } }) do
+  local beats = Vfx.forGeneral3("TURN_TRAP", case[1])
+  local tag = "trap " .. tostring(case[1]) .. ": "
+  eq(beats[1].style .. "/" .. beats[1].palette, case[2], tag .. case[3])
+  eq(beats[2] and (beats[2].motion .. "@" .. beats[2].on), "tremble@event",
+     tag .. "...then the trapped monster shakes (AnimTask_ShakeMon on ANIM_TARGET)")
+  for i, beat in ipairs(beats) do
+    eq(beat.on, "event", tag .. "beat " .. i .. " is on the trapped monster (attacker = target = it)")
+    check(beat.from == nil and beat.delivery ~= "projectile" and beat.delivery ~= "beam",
+          tag .. "beat " .. i .. " travels from nobody")
+  end
+end
+check(Vfx.isGeneral3("TURN_TRAP") and Vfx.isGeneral3("FOCUS_PUNCH_SETUP")
+      and Vfx.isGeneral3("FUTURE_SIGHT_HIT") and Vfx.isGeneral3("DOOM_DESIRE_HIT", true),
+      "general: the four are general in any fight, Safari or not")
+check(not Vfx.isGeneral3("FOCUS_PUNCH") and not Vfx.isGeneral3("FUTURE_SIGHT")
+      and not Vfx.isGeneral3("DOOM_DESIRE"),
+      "general: ...while the moves themselves stay moves")
+local focus = Vfx.forGeneral3("FOCUS_PUNCH_SETUP")
+local endure = Vfx.forMove("ENDURE", { type = "NORMAL", power = 0 })
+eq(focus[1].on .. "/" .. focus[1].delivery, "event/self",
+   "focus: General_FocusPunchSetUp plays on its user (ANIM_ATTACKER)")
+eq(focus[1].style .. "/" .. focus[1].palette, endure.style .. "/" .. endure.palette,
+   "focus: ...as ENDURE's rising energy (call EndureEffect)")
+eq(focus[2] and (focus[2].motion .. "@" .. focus[2].on), "tremble@event",
+   "focus: ...while the user shivers (AnimTask_ShakeMon2 ANIM_ATTACKER)")
+local future = Vfx.forGeneral3("FUTURE_SIGHT_HIT")
+eq(future[1].delivery .. "/" .. future[1].palette, "field/PSYCHIC",
+   "future: FUTURE SIGHT's hit puts the PSYCHIC background behind the field")
+eq(future[2] and (future[2].motion .. "@" .. future[2].on), "tremble@event",
+   "future: ...and the monster it lands on shakes (SetAnimTargetToBattlerTarget, ShakeMon)")
+eq(#future, 2, "future: ...and no sprite of its own")
+local doom = Vfx.forGeneral3("DOOM_DESIRE_HIT")
+local explosion = Vfx.forMove("EXPLOSION", { type = "NORMAL", power = 250 })
+eq(doom[1].delivery .. "/" .. doom[1].palette, "field/STEEL",
+   "doom: DOOM DESIRE's hit whites the background out under falling light")
+eq(doom[2].on .. "/" .. doom[2].style .. "/" .. doom[2].palette,
+   "event/" .. explosion.style .. "/" .. explosion.palette,
+   "doom: ...then EXPLOSION's bursts on the monster it lands on (gExplosionSpriteTemplate)")
+eq(doom[3] and doom[3].motion, "tremble", "doom: ...which shakes in place (ShakeMonInPlace)")
+check(doom[3] and (doom[3].wait or 0) > 0, "doom: ...once the light has come down")
+for _, name in ipairs({ "TURN_TRAP", "FOCUS_PUNCH_SETUP", "FUTURE_SIGHT_HIT", "DOOM_DESIRE_HIT" }) do
+  for i, beat in ipairs(Vfx.forGeneral3(name)) do
+    check(beat.from == nil and beat.delivery ~= "projectile" and beat.delivery ~= "beam",
+          ("general: %s beat %d leaves nobody's hand"):format(name, i))
+  end
+end
+-- A SUBSTITUTE on the battler a clip is launched for skips it
+-- (TryHandleLaunchBattleTableAnimation); FUTURE SIGHT's is launched for its
+-- user, whom the event does not name.
+check(Vfx.subSilences3("TURN_TRAP") and Vfx.subSilences3("FOCUS_PUNCH_SETUP")
+      and Vfx.subSilences3("MON_SCARED"),
+      "sub: a doll on the event's battler silences its clip")
+check(not Vfx.subSilences3("FUTURE_SIGHT_HIT") and not Vfx.subSilences3("DOOM_DESIRE_HIT"),
+      "sub: ...not a delayed hit's (launched for the user's position)")
+check(not Vfx.subSilences3("BAIT_THROW") and not Vfx.subSilences3("TACKLE")
+      and not Vfx.subSilences3(nil), "sub: ...nor a Safari throw, a move or nothing")
 check(Vfx.isGeneral3("MON_SCARED") and Vfx.isGeneral3("SAFARI_REACTION", false),
   "general: the clips no move shares a name with are general anywhere")
 check(not Vfx.isGeneral3("ROCK_THROW"), "general: ROCK_THROW is the move ROCK THROW off a Safari")

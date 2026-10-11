@@ -1616,10 +1616,16 @@ end
 -- :3815 BattleScript_GhostGetOutGetOut), the SILPH SCOPE's unveil (:3820),
 -- and the Safari Zone's throws and the wild monster's answer to them
 -- (pokefirered battle_scripts_2.s:211-227, pokeemerald battle_scripts_2.s:185
--- BattleScript_ActionThrowPokeblock).  None is an order a trainer gave, so the
--- screens play them quiet -- no callout, no lunge -- and each wears the look
--- below, read off the cart's own script (pokefirered / pokeemerald
--- data/battle_anim_scripts.s, General_*) as far as the arena's vocabulary goes.
+-- BattleScript_ActionThrowPokeblock).  And the ones every fight can send
+-- (W3-UC3): a trap's per-turn squeeze (battle_scripts_1.s:3770
+-- BattleScript_WrapTurnDmg; em :3830), the FOCUS PUNCH user tightening its
+-- focus before anybody moves (:3652 BattleScript_FocusPunchSetUp; em :3712),
+-- and a FUTURE SIGHT or DOOM DESIRE landing two turns on (:3472 / :3475
+-- BattleScript_FutureAttackAnimate; em :3519 / :3522).  None is an order a
+-- trainer gave, so the screens play them quiet -- no callout, no lunge, no
+-- projectile leaving a move user -- and each wears the look below, read off
+-- the cart's own script (pokefirered / pokeemerald data/battle_anim_scripts.s,
+-- General_*) as far as the arena's vocabulary goes.
 --
 -- **A separate door again** (`forGeneral3`): `forMove` / `forMove3` /
 -- `forStatusAnim` answer exactly what they did, and `ROCK_THROW` is still the
@@ -1654,15 +1660,48 @@ end
 -- other number is watching).  FireRed / LeafGreen only: Emerald's
 -- BattleScript_ActionWatchesCarefully plays no clip.  POKEBLOCK_THROW is
 -- Emerald's (B_ANIM_POKEBLOCK_THROW, the slot FireRed gives BAIT_THROW).
+--
+-- `TURN_TRAP` is keyed by the referee's `amount` too: the trapping move's
+-- number, which is what the cart hands the clip (battle_util.c:878
+-- ENDTURN_WRAP sets sB_ANIM_ARG1 to gBattleStruct->wrappedMove; em :1595), and
+-- the clip's own first task turns it into the look (`M.trapAnim3`,
+-- AnimTask_GetTrappedMoveAnimId).  No number, or any move but the four named,
+-- is BIND / WRAP's squeeze -- the script's own fallthrough (`goto
+-- Status_BindWrap`).  The four clips are FireRed's and Emerald's alike.
 
 -- Every name M.GENERAL_LOOK3 answers for; `"safari"` marks the one that is
 -- also a move's token, general on a Safari fight only (the wild monster there
--- never uses a move).
+-- never uses a move).  The last four are no move's token (MOVE_FOCUS_PUNCH is
+-- FOCUS_PUNCH, MOVE_FUTURE_SIGHT is FUTURE_SIGHT), so general anywhere.
 M.GENERAL_ANIMS3 = {
   MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true,
   BAIT_THROW = true, POKEBLOCK_THROW = true, SAFARI_REACTION = true,
   ROCK_THROW = "safari",
+  TURN_TRAP = true, FOCUS_PUNCH_SETUP = true,
+  FUTURE_SIGHT_HIT = true, DOOM_DESIRE_HIT = true,
 }
+
+-- pret AnimTask_GetTrappedMoveAnimId (pokefirered battle_anim_special.c:2283,
+-- pokeemerald battle_anim_throw.c:2486): the trapping move's number -> the
+-- TRAP_ANIM_* the clip branches on (include/constants/battle_anim.h:
+-- TRAP_ANIM_BIND = TRAP_ANIM_WRAP 0, FIRE_SPIN 1, WHIRLPOOL 2, CLAMP 3,
+-- SAND_TOMB 4).  The keys are pret's public MOVE_* numbers
+-- (include/constants/moves.h, the same on both carts), as the BattleSim3
+-- tables are; nothing here is read from a ROM.
+M.TRAP_ANIMS3 = {
+  [83] = 1,   -- MOVE_FIRE_SPIN
+  [250] = 2,  -- MOVE_WHIRLPOOL
+  [128] = 3,  -- MOVE_CLAMP
+  [328] = 4,  -- MOVE_SAND_TOMB
+}
+
+-- The TRAP_ANIM_* for a trapping move's number; 0 (BIND / WRAP) for any other
+-- number and for none, as the cart's own `else` does.
+function M.trapAnim3(move)
+  local n = tonumber(move)
+  if not n then return 0 end
+  return M.TRAP_ANIMS3[floor(n)] or 0
+end
 
 -- Is `anim` one of Gen 3's general clips here?  `safari` is whether the fight
 -- is a Safari Zone one (where ROCK_THROW is B_ANIM_ROCK_THROW, not the move).
@@ -1733,21 +1772,131 @@ M.GENERAL_LOOK3 = {
               scale = 0.75, intensity = 0.35, duration = 0.70 } },
     [2] = { motion("nod", "foe") },
   },
+  -- General_TurnTrap, by `M.trapAnim3`.  playanimation BS_ATTACKER with the
+  -- trapped monster as gBattlerAttacker (the end-of-turn loop's
+  -- gActiveBattler), and a general clip is launched with that one battler as
+  -- both ANIM_ATTACKER and ANIM_TARGET -- so every beat is on the battler the
+  -- event names, and nothing travels.  Each branch replays its move's own
+  -- effect, smaller, then the monster shakes (AnimTask_ShakeMon /
+  -- AnimTask_ShakeMon2 on ANIM_TARGET).
+  TURN_TRAP = {
+    -- [0] Status_BindWrap: two binding tendrils squeeze it
+    -- (gConstrictBindingSpriteTemplate), 10 frames on it shakes 2 px.
+    [0] = {
+      { on = "event", style = "gust", palette = "NORMAL", delivery = "self",
+        scale = 0.80, intensity = 0.70, duration = 0.60 },
+      motion("tremble", "event", nil, 0.25),
+    },
+    -- [1] Status_FireSpin: two FireSpinEffect rings of embers spiral up round
+    -- it (gFireSpinSpriteTemplate) as it shakes for 30 frames.
+    [1] = {
+      { on = "event", style = "ember", palette = "FIRE", delivery = "self",
+        scale = 0.85, intensity = 0.80, duration = 0.70 },
+      motion("tremble", "event", 0.60),
+    },
+    -- [2] Status_Whirlpool: it tints sea blue under two WhirlpoolEffect rings
+    -- of water orbs (gWhirlpoolSpriteTemplate) and shakes -- the WHIRLPOOL
+    -- move's own swirl here (MOVE_STYLE psi / WATER).
+    [2] = {
+      { on = "event", style = "psi", palette = "WATER", delivery = "self",
+        scale = 0.85, intensity = 0.80, duration = 0.70 },
+      motion("tremble", "event", 0.60),
+    },
+    -- [3] Status_Clamp: the shell's two jaws snap shut on it
+    -- (gClampJawSpriteTemplate), a hit splat 10 frames on
+    -- (gBasicHitSplatSpriteTemplate) and a 3 px shake.
+    [3] = {
+      { on = "event", style = "impact", palette = "WATER", delivery = "self",
+        scale = 0.80, intensity = 0.75, duration = 0.55 },
+      motion("tremble", "event", nil, 0.35),
+    },
+    -- [4] Status_SandTomb: it tints sandy under two SandTombSwirlingDirt
+    -- rings (gSwirlingDirtSpriteTemplate) and shakes -- SAND TOMB's own look
+    -- (MOVE_STYLE3 quake / GROUND).
+    [4] = {
+      { on = "event", style = "quake", palette = "GROUND", delivery = "self",
+        scale = 0.85, intensity = 0.80, duration = 0.70 },
+      motion("tremble", "event", 0.60),
+    },
+  },
+  -- General_FocusPunchSetUp, on its user (BS_ATTACKER, ANIM_ATTACKER): three
+  -- EndureEffect bursts of energy rising off it (gEndureEnergySpriteTemplate
+  -- -- ENDURE's own look, MOVE_STYLE shine / FIGHTING), its colours cycling to
+  -- red (AnimTask_BlendColorCycle RGB_RED) and a 1 px shiver for 32 frames
+  -- (AnimTask_ShakeMon2) after the first.
+  FOCUS_PUNCH_SETUP = {
+    { on = "event", style = "shine", palette = "FIGHTING", delivery = "self",
+      scale = 0.90, intensity = 0.80, duration = 0.80 },
+    motion("tremble", "event", 0.60, 0.20),
+  },
+  -- General_FutureSightHit: AnimTask_SetAnimTargetToBattlerTarget makes the
+  -- monster hit the target -- the battler the referee's event names -- then
+  -- the PSYCHIC background comes up behind the whole field
+  -- (SetPsychicBackground) and the target shakes 4 px, twice
+  -- (AnimTask_ShakeMon, 15 frames then 24) as it squashes
+  -- (AnimTask_ScaleMonAndRestore).  No sprite of its own: the field's tint
+  -- and the shake are the whole clip.
+  FUTURE_SIGHT_HIT = {
+    { on = "event", style = "psi", palette = "PSYCHIC", delivery = "field",
+      scale = 1.00, intensity = 0.80, duration = 0.90 },
+    motion("tremble", "event", 0.70, 0.30),
+  },
+  -- General_DoomDesireHit: on the target too (SetAnimTargetToBattlerTarget).
+  -- The background whites out (F_PAL_BG to RGB_WHITE), shafts of light fall
+  -- on the target's side (AnimTask_DoomDesireLightBeam), then five
+  -- explosions burst on it (gExplosionSpriteTemplate -- EXPLOSION's own,
+  -- MOVE_STYLE blast / FIRE) while it shakes in place, 10 px
+  -- (AnimTask_ShakeMonInPlace).
+  DOOM_DESIRE_HIT = {
+    { on = "event", style = "shine", palette = "STEEL", delivery = "field",
+      scale = 1.00, intensity = 0.70, duration = 0.90 },
+    { on = "event", style = "blast", palette = "FIRE", delivery = "self",
+      scale = 1.00, intensity = 0.90, duration = 0.80 },
+    motion("tremble", "event", 0.70, 0.40),
+  },
 }
 
 M.GENERAL_ROLES3 = { event = true, own = true, foe = true }
 M.GENERAL_MOTIONS3 = { sway = true, nod = true, tremble = true }
 
+-- pret TryHandleLaunchBattleTableAnimation (pokefirered
+-- battle_gfx_sfx_util.c:208, pokeemerald :458): a general clip is launched for
+-- the playanimation's battler (the controllers pass gActiveBattler as
+-- attacker and target both -- pokefirered battle_controller_player.c:2833),
+-- and one launched for a battler behind a SUBSTITUTE is skipped outright --
+-- the doll does not squeeze, tense or sweat -- bar the doll's own fade, the
+-- weather and SNATCH (ShouldAnimBeDoneRegardlessOfSubsitute, :250), none of
+-- which the referee sends.  These are the clips whose battler is the one the
+-- event names (BS_ATTACKER / BS_OPPONENT1 above), so a SUBSTITUTE standing on
+-- that seat silences them.  FUTURE_SIGHT_HIT / DOOM_DESIRE_HIT are launched
+-- for their user's position (BS_ATTACKER = futureSightAttacker, battle_util.c
+-- :1093; em :1810), which their event does not name -- the target's doll
+-- never silences them; the Safari's are launched for a side a with no
+-- battler to hold one.
+M.SUB_SILENCES3 = {
+  TURN_TRAP = true, FOCUS_PUNCH_SETUP = true,
+  MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true,
+}
+
+-- Does a SUBSTITUTE on the battler `anim`'s event names keep the cart from
+-- playing it?  (The screens then play nothing and hold nothing.)
+function M.subSilences3(anim)
+  return type(anim) == "string" and M.SUB_SILENCES3[anim] == true
+end
+
 -- The look of one of Gen 3's general clips: a fresh list of beats (see
 -- above), every particle beat a valid spec and every motion one a known
--- seat modifier.  `amount` picks SAFARI_REACTION's answer.  nil for a name
--- this table does not have -- the caller's own path then, as ever.
+-- seat modifier.  `amount` picks SAFARI_REACTION's answer, and TURN_TRAP's
+-- branch (the trapping move's number, `M.trapAnim3`).  nil for a name this
+-- table does not have -- the caller's own path then, as ever.
 function M.forGeneral3(anim, amount)
   local entry = type(anim) == "string" and M.GENERAL_LOOK3[anim] or nil
   if not entry then return nil end
   if anim == "SAFARI_REACTION" then
     local n = floor(num(amount, 0))
     entry = entry[n] or entry[0]
+  elseif anim == "TURN_TRAP" then
+    entry = entry[M.trapAnim3(amount)] or entry[0]
   end
   local out = {}
   for _, beat in ipairs(entry) do

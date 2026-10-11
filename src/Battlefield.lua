@@ -974,10 +974,13 @@ M.FX_FLY_LIFT = 0.95
 -- turning to watch, AnimTask_RotateMonToSideAndRestore 16, +-96); `nod` -- a
 -- dip and back, twice (the eating monster's RotateMonToSideAndRestore 8, 136
 -- run twice); `tremble` -- a quick shiver (AnimTask_ShakeMon2's 2 px then 4,
--- a frame each, the scared monster).  Peaks in arena px, sized for the 60px
--- monster against the 64px GBA pic the cart moves; original curves, no ROM
--- tables.  Spans are the screens' default life for each (a beat may carry its
--- own, and a `wait` -- a fraction of that life at rest before it moves).
+-- a frame each, the scared monster; AnimTask_ShakeMon / ShakeMonInPlace
+-- under a trap's squeeze, FOCUS PUNCH's focus and a FUTURE SIGHT / DOOM
+-- DESIRE landing, each at this one peak -- a beat's span says how long).
+-- Peaks in arena px, sized for the 60px monster against the 64px GBA pic the
+-- cart moves; original curves, no ROM tables.  Spans are the screens' default
+-- life for each (a beat may carry its own, and a `wait` -- a fraction of that
+-- life at rest before it moves).
 M.FX_SWAY = 6
 M.FX_NOD = 5
 M.FX_TREMBLE = 3

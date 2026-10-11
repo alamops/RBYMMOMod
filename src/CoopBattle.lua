@@ -7895,14 +7895,19 @@ end
 --
 -- An `anim` row the Gen 3 referee sent for something that is not a move -- a
 -- monster too scared to move, the GHOST's "Get out...", the SILPH SCOPE, the
--- Safari's throws (pret gBattleAnims_General; `medRows` marks them
--- `general3` and quiet, so nobody shouts and nobody lunges).  Each beat of
--- the look goes where the cart plays it (Vfx `on`): the battler the event
--- names, our first seat (pret PLAYER_LEFT) or theirs (OPPONENT_LEFT); a
--- thrown beat leaves our trainer's figure (`from = "trainer"`); a motion
--- beat moves the monster itself.  Answers how long the longest beat lasts --
--- the cart's battle script waits for a `playanimation` to finish, so the
--- queue is held as long (`startAnim`) -- or nil when nothing was drawn.
+-- Safari's throws, a trap's per-turn squeeze, a FOCUS PUNCH user tightening
+-- its focus, a FUTURE SIGHT / DOOM DESIRE landing (pret gBattleAnims_General;
+-- `medRows` marks them `general3` and quiet, so nobody shouts, nobody lunges
+-- and nothing flies from a move's user).  Each beat of the look goes where
+-- the cart plays it (Vfx `on`): the battler the event names, our first seat
+-- (pret PLAYER_LEFT) or theirs (OPPONENT_LEFT); a thrown beat leaves our
+-- trainer's figure (`from = "trainer"`); a motion beat moves the monster
+-- itself.  Answers how long the longest beat lasts -- the cart's battle
+-- script waits for a `playanimation` to finish, so the queue is held as long
+-- (`startAnim`) -- or nil when nothing was drawn: off the arena, or a clip
+-- the cart skips for a SUBSTITUTE standing on its battler's seat
+-- (Vfx.subSilences3, pret TryHandleLaunchBattleTableAnimation), which then
+-- holds nothing either.
 function M:startGeneralLook3(row)
   self.moveVfx = nil
   if not self:usesBattlefield() or type(row) ~= "table" then return nil end
@@ -7912,6 +7917,12 @@ function M:startGeneralLook3(row)
   if event == nil then
     local isFoe = self:actorIsFoe(row)
     if isFoe ~= nil then event = self:seatOnSide(isFoe) end
+  end
+  if event ~= nil and Vfx.subSilences3(row.anim) then
+    -- The doll as the stream has it at this row (`applyState3` sets it in
+    -- queue order, so a SUBSTITUTE made this turn is already up).
+    local slot = self.sim and self.sim.slot and self.sim:slot(event)
+    if type(slot) == "table" and slot.substitute then return nil end
   end
   local own, foe = self:seatOnSide(false), self:seatOnSide(true)
   local span = 0
@@ -11718,12 +11729,14 @@ function M:medRows(msg)
       local mon = slot and slot.battler and slot.battler.mon
       local look = Vfx.forStatusAnim(anim, mon and mon.status)
       -- One of Gen 3's general clips (Vfx.isGeneral3: a scared monster, the
-      -- GHOST, the SILPH SCOPE, the Safari's throws): nobody's order, so
-      -- quiet, and its own look (`startGeneralLook3`).  A solo double's only
-      -- -- co-op refuses every fight that sends one (contract C1) and reads
-      -- its rows as it always did -- and never a Safari's, so ROCK_THROW stays
-      -- the move.
-      local general = (self.gen3 and self.soloDouble and Vfx.isGeneral3(anim, false)) or nil
+      -- GHOST, the SILPH SCOPE, the Safari's throws, a trap's turn, FOCUS
+      -- PUNCH's focus, a FUTURE SIGHT / DOOM DESIRE landing): nobody's order,
+      -- so quiet -- no "used TURN TRAP!", no lunge, no move look thrown from
+      -- the seat -- and its own look (`startGeneralLook3`).  Co-op's too: a
+      -- Gen 3 co-op fight sends the last four like any other (the GHOST and
+      -- the Safari it refuses, contract C1).  Never a Safari's here, so
+      -- ROCK_THROW stays the move.
+      local general = (self.gen3 and Vfx.isGeneral3(anim, false)) or nil
       list[#list + 1] = {
         kind = "anim", anim = anim, from = index,
         amount = msg.amount,

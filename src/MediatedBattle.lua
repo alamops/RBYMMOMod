@@ -2458,6 +2458,12 @@ local FX_SPAN = {
   dig    = 0.45,
   fly    = 0.45,
   emerge = 0.35,
+  -- Gen 3's general clips move the monster itself (Vfx.GENERAL_LOOK3's motion
+  -- beats, `startGeneralLook3`): Battlefield.FX_MOTION_SPAN is the one clock
+  -- both screens read, CoopBattle's FX_SPAN takes the same three.
+  sway    = Battlefield.FX_MOTION_SPAN.sway,
+  nod     = Battlefield.FX_MOTION_SPAN.nod,
+  tremble = Battlefield.FX_MOTION_SPAN.tremble,
   -- Mid-battle evolution movie. Real lifetime is EvolveFx.MOVIE_SECONDS;
   -- this default is only what emitFx needs to accept the kind.
   evolve = 6.14,
@@ -2549,9 +2555,16 @@ end
 -- screen publishes to Battlefield stays a closed set: a field invented here
 -- and never read there is a look that silently does nothing, and a field that
 -- shadowed `kind` or `elapsed` would be an effect that never retires.
+--
+-- `fromTrainer` ("ally" | "foe") is a throw from that side's trainer figure
+-- rather than from a seat (Battlefield `vfxOrigin`: the Safari's bait, rock
+-- and POKeBLOCK leave the trainer on our edge), and `wait` a motion beat's
+-- rest before it moves (Battlefield `fxWaited`) -- Gen 3's general clips,
+-- `startGeneralLook3`.  This screen hands `fx` to Battlefield as it is, so a
+-- key missing here is a key the arena never sees.
 local VFX_KEYS = {
   "style", "palette", "delivery", "scale", "intensity", "seed",
-  "fromSide", "fromSeat",
+  "fromSide", "fromSeat", "fromTrainer", "wait",
 }
 
 -- A Gen 3 ability visibly acting: a short shine on the seat that owns it, the
@@ -2900,11 +2913,81 @@ end
 --                            for this fight (a legendary's, a roamer's, the
 --                            engine's own `opts.song`), in place of the theme
 --                            resolved from the mode.
+--   safari = { family = "frlg" | "rse", balls = n }   a
+--                            Safari Zone fight (wave 3; the Safari kind sets
+--                            it with `noOwnBattler`, which it implies): the
+--                            cart's own action menu -- FireRed / LeafGreen's
+--                            BALL / BAIT / ROCK / RUN under "What will
+--                            PLAYER\nthrow?" (pret gText_SafariZoneMenu,
+--                            gText_WhatWillPlayerThrow), Emerald's BALL /
+--                            POKéBLOCK / GO NEAR / RUN under gText_What
+--                            WillPkmnDo2 -- each word and the prompt read off
+--                            the player's cart when its text is there
+--                            (`safariLabel3`, `safariPrompt3`).  Each files
+--                            `{ action = "safari", throw = "ball" | "bait" |
+--                            "rock" | "near" }` (RUN is `{ action = "run" }`);
+--                            POKéBLOCK opens the engine's own case and files
+--                            `throw = "block", block = <case slot, 1-based>`
+--                            (`openPokeblockCase3`).  The
+--                            "SAFARI BALLS / Left: NN" box stands where our
+--                            plate would (`safariBalls3`), from `balls` and
+--                            then each `item` event's `amount`.  `commands`,
+--                            `commandLabels`, `commandHandlers` and `prompt`
+--                            given alongside still win.
+--   bag = { { id, count, name? }, ... }   the bag this fight is fought with,
+--                            uploaded in place of the session's pockets
+--                            (M.snapshotBag) -- the Battle Pyramid's own bag
+--                            (pret battle_pyramid_bag.c; the Facility kind
+--                            passes its entries).  The BAG menu lists these
+--                            counts and spends from them (`usableItems3`,
+--                            `confirmPendingItem3`).
+--   victorySong = <MUS_* name | song number>   the win jingle the cart plays
+--                            for this fight, in place of the one resolved
+--                            from the trainer: a Frontier trainer's
+--                            MUS_VICTORY_TRAINER, a Frontier Brain's
+--                            MUS_VICTORY_GYM_LEADER (pret pokeemerald
+--                            battle_main.c:4978 HandleEndTurn_BattleWon's
+--                            FRONTIER | TRAINER_HILL | EREADER arm; FireRed's
+--                            Trainer Tower takes MUS_VICTORY_TRAINER,
+--                            pokefirered battle_main.c:3739).
 --
 -- Read once here, from `new`'s own options; a caller holding the screen
 -- before `start` may hand the same table to `applyScreenOptions` again.
 local FIRST_BATTLES = { oak = true, birch = true }
 local GHOSTS = { veiled = true, unveiled = true }
+
+-- ------- the Safari Zone's action menu (screen option `safari`)
+--
+-- The grid ids, the carts' own menus in their own order (pret
+-- battle_controller_safari.c HandleInputChooseAction: cursor 0..3 is
+-- B_ACTION_SAFARI_BALL, _BAIT / _POKEBLOCK, _GO_NEAR on Emerald / _ROCK, _RUN).
+M.SAFARI_COMMANDS3 = {
+  frlg = { "BALL", "BAIT", "ROCK", "RUN" },
+  rse = { "BALL", "POKEBLOCK", "NEAR", "RUN" },
+}
+-- What each id files (Wire.SAFARI_THROWS3; RUN is the built-in arm's).
+M.SAFARI_THROW3 = { BALL = "ball", BAIT = "bait", ROCK = "rock", NEAR = "near",
+                    POKEBLOCK = "block" }
+-- The words without the cart's text pack (pret gText_SafariZoneMenu,
+-- "BALL BAIT\nROCK RUN" / "BALL {POKEBLOCK}\nGO NEAR RUN").
+M.SAFARI_LABELS3 = {
+  frlg = { "BALL", "BAIT", "ROCK", "RUN" },
+  rse = { "BALL", "POKéBLOCK", "GO NEAR", "RUN" },
+}
+-- The SAFARI BALL's item id as an `item` event states it (pret
+-- include/constants/items.h ITEM_SAFARI_BALL; BattleSim3 Catch.SAFARI).
+M.SAFARI_BALL3 = "5"
+-- The prompt above the grid, by text key (the engine's battle profile names
+-- the same two, strings.safariPrompt) and without the text pack.
+M.SAFARI_PROMPT_KEYS3 = { frlg = "gText_WhatWillPlayerThrow", rse = "gText_WhatWillPkmnDo2" }
+M.SAFARI_PROMPTS3 = { frlg = "What will %s\nthrow?", rse = "What will\n%s do?" }
+
+-- One Safari command off the grid (a `commandHandlers` entry): POKéBLOCK opens
+-- the case, the throws file their choice.
+local function safariCommand(screen, id)
+  if id == "POKEBLOCK" then return screen:openPokeblockCase3() end
+  return screen:safariThrow3(id)
+end
 
 function M:applyScreenOptions(opts)
   if type(opts) ~= "table" then return self end
@@ -2932,6 +3015,47 @@ function M:applyScreenOptions(opts)
   end
   local song = opts.song
   if (type(song) == "string" and song ~= "") or tonumber(song) then self.song = song end
+  -- The wave-3 options are the Gen 3 solo kinds' alone: a Red or Gold screen
+  -- never reads them (tests/mediated_battle_client.lua pins it).
+  if not Gen3.active() then return self end
+  local victory = opts.victorySong
+  if (type(victory) == "string" and victory ~= "") or tonumber(victory) then
+    self.victorySong = victory
+  end
+  if type(opts.bag) == "table" then
+    -- Copied: the upload, the menu and the debits read this list, never the
+    -- caller's table (which its kind may square after the fight).
+    local entries = {}
+    for _, e in ipairs(opts.bag) do
+      if type(e) == "table" and e.id ~= nil and tonumber(e.count) then
+        entries[#entries + 1] = { id = e.id, count = tonumber(e.count), name = e.name }
+      end
+    end
+    self.bagEntries = entries
+  end
+  local safari = opts.safari
+  if type(safari) == "table" and M.SAFARI_COMMANDS3[safari.family] then
+    local family = safari.family
+    local balls = math.floor(tonumber(safari.balls) or 0)
+    if balls < 0 then balls = 0 elseif balls > 255 then balls = 255 end
+    self.safari = { family = family, balls = balls }
+    -- What the box shows, moved by the stream (`safariBalls3`).
+    self.safariBallsShown = balls
+    -- pret zeroes the player's battler in the Safari Zone (battle_main.c:2565):
+    -- the fight is one with no own battler whatever else was said.
+    self.noOwnBattler = true
+    if not (type(opts.commands) == "table" and #opts.commands > 0) then
+      local list = {}
+      for i, id in ipairs(M.SAFARI_COMMANDS3[family]) do list[i] = id end
+      self.commandSet = list
+    end
+    local handlers = {}
+    for id in pairs(M.SAFARI_THROW3) do handlers[id] = safariCommand end
+    if type(opts.commandHandlers) == "table" then
+      for id, fn in pairs(opts.commandHandlers) do handlers[id] = fn end
+    end
+    self.commandHandlers = handlers
+  end
   return self
 end
 
@@ -3919,15 +4043,23 @@ function M:say(text)
   -- A Gen 3 line out of the cart's text pack pages the way the cart does: a
   -- blank line (what Gen3.battleText makes of the printer's `\p`) starts a
   -- page of its own.  A line that still carries the printer's raw codes is
-  -- cleaned first (Exp3.cleanText).
+  -- cleaned first (Exp3.cleanText).  A trainer's own end speech brings the
+  -- trainer back in with its first page (`slideInForSpeech3`).
   if Gen3.active() then
+    self.lines = self.lines or {}
+    local before, said = #self.lines, text
     if text:find("\\", 1, true) then text = Exp3.cleanText(text) end
     if text:find("\n%s*\n") then
       for part in (text .. "\n\n"):gmatch("(.-)\n%s*\n%s*") do
         if part ~= "" then self:say(part) end
       end
-      return
+    else
+      for _, page in ipairs(pageText(text)) do
+        if page ~= "" then self.lines[#self.lines + 1] = page end
+      end
     end
+    self:slideInForSpeech3(said, before)
+    return
   end
   self.lines = self.lines or {}
   -- Page here so wrap cannot hide a third line at draw. Coop does the
@@ -4038,7 +4170,9 @@ function M:start(game)
   -- No side: a 1v1 has none to name. NPC uploads (wild / trainer) are side
   -- "b" from this client, the initiator. Wild carries no bag; a trainer
   -- carries the kit from this game's data, for this fight only.
-  local bag = M.snapshotBag(self.game)
+  -- A fight fought with a bag of its own (screen option `bag`: the Battle
+  -- Pyramid's) uploads that one instead of the session's pockets.
+  local bag = self.bagEntries or M.snapshotBag(self.game)
   self.bagSheet = M.bagCounts(bag)
   -- The badges count only against the computer (`badgesOf`): a 1v1 sends none.
   M.sendParty(self.transport, self.battle, mons, nil, bag, M.badgesOf(self.game, self.mode))
@@ -4563,6 +4697,14 @@ function M:onEvent(msg)
   -- A foe's sleep clip held behind its line (`M.viewerAnim`) goes on the
   -- queue ahead of anything that is not that line.
   if kind ~= "msg" then self:flushAnimBehind() end
+  -- The SAFARI BALLS box's new count (an `item` event's `amount`, owed since
+  -- it was parsed): onto the queue behind the "used SAFARI BALL!" line and
+  -- ahead of the throw -- pret BattleScript_SafariBallThrow's printstring,
+  -- updatestatusicon, handleballthrow (`safariBalls3`).
+  if self.safariBallsOwed ~= nil and kind ~= "msg" and kind ~= "item" then
+    self.lines[#self.lines + 1] = { stateRow = "safariBalls", value = self.safariBallsOwed }
+    self.safariBallsOwed = nil
+  end
   -- An `obey` this screen phrased in the cart's words owns exactly the next
   -- event -- the referee's own sentence for it, which it always emits straight
   -- behind (Move.lua Bm:_obeyLine) -- and nothing after.  Matched on `seq` so a
@@ -4621,12 +4763,19 @@ function M:onEvent(msg)
         or (msg.side ~= nil and msg.side == self.mySide)
       local anim, behind = M.viewerAnim(msg.text, mine)
       -- `quiet` (K22): the look alone -- no callout, no lunge (`startAnim`).
-      -- So is one of Gen 3's general animations (`M.GENERAL_ANIMS3`): the
-      -- cart's B_ANIM_* clip on a battler, which nobody ordered.
-      local general = self:generation() == 3 and M.GENERAL_ANIMS3[anim] == true
+      -- So is one of Gen 3's general animations (Vfx.isGeneral3): the cart's
+      -- B_ANIM_* clip on a battler, which nobody ordered -- a scared monster,
+      -- the GHOST, the SILPH SCOPE, the Safari's throws and the wild
+      -- monster's answer, a trap's squeeze -- played as its own look
+      -- (`startGeneralLook3`, `general3`).  ROCK_THROW is the general clip
+      -- only in a Safari fight (screen option `safari`): anywhere else it is
+      -- the move.  CoopBattle's `medRows` marks its rows the same way.
+      local general = (self:generation() == 3
+        and Vfx.isGeneral3(anim, self.safari ~= nil)) or nil
       local row = {
         anim = anim, slot = msg.slot, side = msg.side, amount = msg.amount,
         quiet = (msg.quiet == true or general) or nil,
+        general3 = general,
       }
       -- Whose used line this animation shouts for, or follows (K22) -- unless
       -- it is a multi-hit move's next strike: pokered replays the move's
@@ -5012,6 +5161,15 @@ function M:onEvent(msg)
     if msg.slot == self:mySlot() then
       self:confirmPendingItem(msg.text, msg.amount)
     end
+    -- A Safari throw (screen option `safari`): side a's SAFARI BALL (pret
+    -- ITEM_SAFARI_BALL, 5 -- BattleSim3 Catch.SAFARI), whose `amount` is the
+    -- balls left (the count drops before the roll, pret HandleAction_
+    -- SafariZoneBallThrow), shown once the line about the throw has been read
+    -- (the owed row, top of `onEvent`).
+    if self.safari and (msg.side == self.mySide or msg.slot == self:mySlot())
+       and tostring(msg.text) == M.SAFARI_BALL3 and tonumber(msg.amount) then
+      self.safariBallsOwed = math.max(0, math.floor(tonumber(msg.amount)))
+    end
     -- ...and what it looks like, on the seat of whoever opened the bag. Balls
     -- answer nil (`Vfx.forItem`) and are left to the throw chain below, which
     -- already draws the arc, the rocking and the burst -- a second effect over
@@ -5254,6 +5412,8 @@ function M:onEvent(msg)
         self.answeredTurn = true
         self.pendingTurn = false
         self.passMove = nil
+        -- ...and Emerald's POKeBLOCK case, if it is still up over the grid.
+        if self.phase == "pokeblock" then self:closePokeblockCase3() end
         if self.phase == "choose" or self.phase == "move"
            or self.phase == "target" or self.phase == "mimic"
            or self.phase == "item" or self.phase == "item_party"
@@ -7056,10 +7216,14 @@ end
 -- The B_ANIM_* ids the Gen 3 referee names in an `anim` event for something
 -- that is not a move (pret gBattleAnims_General): a too-scared monster and the
 -- GHOST's "Get out..." (battle_scripts_1.s:3809 / :3815, contract C3 `ghost`),
--- and the SILPH SCOPE unveiling it (:3820).  None is an order a trainer gave,
--- so none shouts a callout or lunges (`onEvent` marks the row `quiet`); the
--- look, when the catalogue has one, plays on the seat.
-M.GENERAL_ANIMS3 = { MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true }
+-- the SILPH SCOPE unveiling it (:3820), the Safari's throws and the wild
+-- monster's answer (battle_scripts_2.s), and the clips every fight can send.
+-- None is an order a trainer gave, so none shouts a callout or lunges
+-- (`onEvent` marks the row `quiet` and `general3`); its look is
+-- Vfx.forGeneral3's (`startGeneralLook3`).  The catalogue's own list, so the
+-- two screens can never disagree about which clips are general: `true` is
+-- general anywhere, "safari" only in a Safari fight (Vfx.isGeneral3).
+M.GENERAL_ANIMS3 = Vfx.GENERAL_ANIMS3
 
 -- ------- Red's and Gold's status animations, as this viewer's cart plays them
 --
@@ -7346,6 +7510,27 @@ function M:applyStateRow(row)
     -- lesson ahead of the POKéMON picker): opened as the row plays, unless the
     -- screen has moved on from the menu that asked for it.
     if self.phase == (row.from or "choose") and not self.finished then self.phase = row.value end
+    return true
+  end
+  if what == "safariBalls" then
+    -- The SAFARI BALLS box's count, as the throw's line has said it.
+    self.safariBallsShown = tonumber(row.value) or self.safariBallsShown
+    return true
+  end
+  if what == "trainer3" then
+    -- A trainer's end speech (`slideInForSpeech3`): the trainer comes back in
+    -- at the cart's x (M.END_PIC_X3) and slides the rest of the way while the
+    -- queue waits -- pret `trainerslidein BS_ATTACKER` / `waitstate` before the
+    -- printstring (SpriteCB_TrainerSlideIn: x2 96 -> 0, 2 px a frame).  The
+    -- arena's trainer never left its edge, so there is nothing to wait for
+    -- there.
+    self.endTrainer3 = row.value == true or nil
+    self.endTrainerFrame3 = self.frame or 0
+    if self.endTrainer3 and not self:usesBattlefield() then
+      self.anim = row
+      self.animHold = M.TRAINER_SLIDE_PX3 / M.TRAINER_SLIDE_STEP3 / 60
+      self.dwell = 0
+    end
     return true
   end
   local slot = row and row.slot ~= nil and self.slots[row.slot] or nil
@@ -8525,11 +8710,26 @@ function M:finish(result, reason, msg)
   -- a catch keeps it (nothing undoes a ball that was never opened), and `exit`
   -- clears whatever is left on the way out.
   if not self:hasPendingHpFx() then self:snapDisplay() end
+  -- A POKeBLOCK case still up over the screen belongs to a turn that will
+  -- never be filed (`openPokeblockCase3`).
+  self:closePokeblockCase3()
   if reason == "catch" and result == "win" then
     -- Every referee has already said it, the cart's way (REASONS: Red's "All
     -- right! X was caught!", Gold's and Gen 3's "Gotcha!"); a line of this
     -- screen's under it would be its echo.
-    self:grantCatch(msg)
+    --
+    -- ...and the monster is the thrower's only when the outcome does not say
+    -- otherwise: a tutorial's forced catch (the old man's, Wally's, the
+    -- POKe DUDE's -- BattleSim3 `catch = "forced"`) ends CAUGHT with
+    -- `given = false`, because the cart's scripts end the fight on the
+    -- caught line with no givecaughtmon and no trysetcaughtmondexflags
+    -- (pokefirered data/battle_scripts_2.s:99 BattleScript_OldMan_Pokedude_
+    -- CaughtMessage, pokeemerald data/battle_scripts_2.s:89
+    -- BattleScript_WallyBallThrow): nothing joins the party or the PC, and
+    -- no dex catch, no nickname and no `pokemon.caught` follow.
+    if not (type(msg) == "table" and msg.given == false) then
+      self:grantCatch(msg)
+    end
   elseif self:generation() == 3 then
     self:sayEnding3(reason)
   elseif reason == "run" and self.mode == "wild" then
@@ -8988,6 +9188,11 @@ end
 function M:commandLabel(command)
   local own = type(self.commandLabels) == "table" and self.commandLabels[command] or nil
   if type(own) == "string" and own ~= "" then return own end
+  -- The Safari's grid: the cart's gText_SafariZoneMenu (`safariLabel3`).
+  if self.safari then
+    local word = self:safariLabel3(command)
+    if word then return word end
+  end
   return COMMAND_LABEL3[command] or command
 end
 
@@ -9064,14 +9269,17 @@ function M:usableItems()
 end
 
 -- Gen 3: the uploaded bag sheet (numeric ids) against what the session's
--- pockets still hold, named the cart's way, in bag-id order.
+-- pockets still hold, named the cart's way, in bag-id order.  A fight with a
+-- bag of its own (screen option `bag`, the Battle Pyramid's) lists that bag's
+-- counts alone: the session's pockets are not what its BAG opens.
 function M:usableItems3()
   local out = {}
+  local own = self.bagEntries ~= nil
   for id, bagCount in pairs(type(self.bagSheet) == "table" and self.bagSheet or {}) do
     local num = tonumber(id)
     local effect = num and Sheet3.itemEffect(num)
     if effect and (bagCount or 0) > 0 then
-      local have = Gen3.bag.count(num)
+      local have = own and bagCount or Gen3.bag.count(num)
       local count = effect.noConsume and ((have >= 1 or bagCount >= 1) and 1 or 0)
         or math.min(bagCount, have)
       if count > 0 then
@@ -9164,7 +9372,12 @@ function M:confirmPendingItem(itemId, amount)
 end
 
 -- Gen 3's debit: the event names the item as its number in a string, and the
--- spend comes out of the session's own pocket (Bag.remove).
+-- spend comes out of the session's own pocket (Bag.remove).  With a bag of the
+-- fight's own (screen option `bag`) the spend is that bag's: its sheet loses
+-- the item whatever the session's pockets say, and the engine's Bag.remove is
+-- still asked -- in the Battle Pyramid it is the Pyramid bag the engine
+-- removes from (pret item.c RemoveBagItem's InBattlePyramid arm), and the
+-- Facility kind squares that bag with the referee's count at the end.
 function M:confirmPendingItem3(itemId)
   local id = self.pendingItem
   if itemId ~= nil and tostring(itemId) ~= tostring(id) then return false end
@@ -9176,7 +9389,8 @@ function M:confirmPendingItem3(itemId)
     self.itemList = nil
     return true
   end
-  if not (num and Gen3.bag.remove(num, 1)) then return false end
+  local removed = num and Gen3.bag.remove(num, 1)
+  if not (removed or (num and self.bagEntries ~= nil)) then return false end
   if self.bagSheet and self.bagSheet[num] then
     self.bagSheet[num] = self.bagSheet[num] - 1
     if self.bagSheet[num] <= 0 then self.bagSheet[num] = nil end
@@ -10326,8 +10540,21 @@ function M:playVictoryMusic()
   if self.result ~= "win" or self.victoryMusicPlayed then return end
   self.victoryMusicPlayed = true
   -- Gen 3 plays the cart's own jingle through the m4a player; there is no
-  -- Gen 1 Music module to hand over.
+  -- Gen 1 Music module to hand over.  A fight whose kind named its jingle
+  -- (screen option `victorySong`: a Frontier trainer's MUS_VICTORY_TRAINER,
+  -- a Frontier Brain's MUS_VICTORY_GYM_LEADER -- pret pokeemerald
+  -- battle_main.c:4978, which picks by the battle type, never the trainer
+  -- class the resolver below reads) plays that one.
   if self:generation() == 3 then
+    if self.victorySong ~= nil then
+      if Gen3.audio.playSong(self.victorySong) then return end
+      if not self.victorySongWarned then
+        self.victorySongWarned = true
+        mod.log:warn("this fight's own victory jingle (%s) could not be played, so it takes "
+          .. "the ordinary one; re-import the ROM from the title screen if the music is "
+          .. "missing everywhere", tostring(self.victorySong))
+      end
+    end
     Gen.playVictoryMusic(self.game, self:gen3MusicOpts())
     return
   end
@@ -10824,6 +11051,22 @@ function M:startAnim(row)
   self.anim = row
   self.animHold = nil
   self.pendingHit = nil
+  -- One of Gen 3's general clips (`onEvent`'s `general3`): its own look, on
+  -- the arena and on the GBA page alike, held while it plays -- the cart's
+  -- battle script waits for a `playanimation` to finish before it goes on --
+  -- and nothing of a move's: no callout, no lunge, no hit, no AnimPlayer
+  -- (which knows no such id).  A look with nothing to draw (a SUBSTITUTE in
+  -- the way, an unknown name) costs the row and nothing more.  CoopBattle's
+  -- `startAnim` is the twin.
+  if row.general3 then
+    local span = self:startGeneralLook3(row)
+    if span then
+      self.animHold = span
+      return true
+    end
+    self.anim = nil
+    return false
+  end
   -- Only on the first pass: a move row reaches here twice (the callout beat
   -- below puts it straight back at the head of the queue), and re-noting the
   -- bubble for the lunge would restart a fade the lunge is meant to be read
@@ -11116,7 +11359,11 @@ end
 -- (projectile / beam) and for `self`. A nil spec is not an error -- the
 -- catalogue answers nil for a thrown ball, which already has a whole flow of
 -- its own, and for an item that does nothing -- so it is simply not drawn.
-function M:emitVfx(spec, targetIndex, fromIndex)
+--
+-- `fromTrainer` ("ally" | "foe"), when given, launches a travelling look from
+-- that side's trainer figure instead of a seat (Battlefield `vfxOrigin`) --
+-- CoopBattle:emitVfx's fourth argument, the same rule.
+function M:emitVfx(spec, targetIndex, fromIndex, fromTrainer)
   if type(spec) ~= "table" then return nil end
   if not self:usesBattlefield() then return nil end
   -- The seed is what stops two Flamethrowers in a row from drawing the
@@ -11136,6 +11383,7 @@ function M:emitVfx(spec, targetIndex, fromIndex)
     extra.fromSide = self:fxSideFor(fromIndex)
     extra.fromSeat = 1
   end
+  if fromTrainer == "ally" or fromTrainer == "foe" then extra.fromTrainer = fromTrainer end
   return self:emitFx("vfx", targetIndex, nil, nil, extra)
 end
 
@@ -11276,6 +11524,144 @@ function M:queueVfx(spec, index, fromIndex)
     vfxrow = spec, slot = index, from = fromIndex,
   }
   return true
+end
+
+-- ------- Gen 3's general clips (Vfx.GENERAL_LOOK3)
+--
+-- An `anim` row the Gen 3 referee sent for something that is not a move -- a
+-- monster too scared to move, the GHOST's "Get out...", the SILPH SCOPE, the
+-- Safari's throws and the wild monster's answer, a trap's squeeze (pret
+-- gBattleAnims_General; `onEvent` marks them `general3` and quiet, so nobody
+-- shouts and nobody lunges).  Twin of CoopBattle:startGeneralLook3, on this
+-- screen's two seats.  Each beat of the look goes where the cart plays it
+-- (Vfx `on`): the battler the event names (its field slot, else its side's
+-- first), our seat (pret PLAYER_LEFT) or theirs (OPPONENT_LEFT); a thrown beat
+-- leaves our trainer's figure (`from = "trainer"` -- in a Safari fight side a
+-- fields nothing and the sprite at PLAYER_LEFT is the trainer's back pic,
+-- pret battle_controller_safari.c); a motion beat moves the monster itself.
+--
+-- pret TryHandleLaunchBattleTableAnimation (pokefirered
+-- battle_gfx_sfx_util.c:208): a clip launched for a battler behind a
+-- SUBSTITUTE is skipped outright -- Vfx.subSilences3 names the clips whose
+-- battler is the one the event names -- so with a doll standing there the cart
+-- plays nothing and nothing is held.
+--
+-- On the arena the beats are `fx` like any other effect (sway / nod / tremble
+-- seat motions, `vfx` particles).  On the GBA page (CLASSIC BATTLE UI) they are
+-- this screen's own short records (`classicBeat3`): a motion moves the pic, a
+-- thrown beat arcs from the trainer's back pic, anything else flashes the
+-- battler -- ClassicBattle draws them (`gen3LookSeat`, `throws3`).
+--
+-- Answers how long the longest beat lasts -- the cart's battle script waits
+-- for a `playanimation` to finish, so `startAnim` holds the queue as long --
+-- or nil when nothing was drawn.
+function M:startGeneralLook3(row)
+  self.moveVfx = nil
+  if type(row) ~= "table" then return nil end
+  local beats = Vfx.forGeneral3(row.anim, row.amount)
+  if not beats then return nil end
+  local event = row.slot
+  if event == nil and row.side ~= nil then event = slotOfSide(row.side) end
+  if event ~= nil and type(Vfx.subSilences3) == "function" and Vfx.subSilences3(row.anim) then
+    local seat = self.slots and self.slots[event]
+    if type(seat) == "table" and seat.substitute then return nil end
+  end
+  local own, foe = self:mySlot(), self:foeSlot()
+  local arena = self:usesBattlefield()
+  local span = 0
+  for _, beat in ipairs(beats) do
+    local at = event
+    if beat.on == "own" then at = own elseif beat.on == "foe" then at = foe end
+    if at ~= nil then
+      local life
+      if arena then
+        local fx
+        if beat.motion then
+          fx = self:emitFx(beat.motion, at, nil, nil, { duration = beat.duration, wait = beat.wait })
+        else
+          fx = self:emitVfx(beat, at, nil, beat.from == "trainer" and "ally" or nil)
+        end
+        life = fx and tonumber(fx.duration) or 0
+      else
+        life = self:classicBeat3(beat, at)
+      end
+      if life > span then span = life end
+    end
+  end
+  if span <= 0 then return nil end
+  return span
+end
+
+-- One beat of a general clip on the GBA page (`startGeneralLook3`): a record
+-- on `classicFx3`, stepped by `stepClassicFx3` on the arena's own clock and
+-- read by `gen3ClassicModel`.  `kind` is the motion ("sway" / "nod" /
+-- "tremble"), "throw" for a beat thrown from the trainer (the Safari's bait,
+-- rock and POKeBLOCK arcing over from the back pic), or "flash" for every
+-- other particle beat -- the page has no particle painter, so the battler
+-- lights up under it instead.  Answers the beat's life in seconds.
+function M:classicBeat3(beat, at)
+  if type(beat) ~= "table" then return 0 end
+  local life
+  local rec = { side = self:fxSideFor(at), elapsed = 0, t = 0 }
+  if beat.motion then
+    rec.kind, rec.wait = beat.motion, beat.wait
+    life = tonumber(beat.duration) or FX_SPAN[beat.motion]
+  else
+    local travels = beat.delivery == "projectile" or beat.delivery == "beam"
+    rec.kind = (beat.from == "trainer" and travels) and "throw" or "flash"
+    rec.palette = beat.palette
+    life = tonumber(beat.duration) or FX_SPAN.vfx
+  end
+  life = tonumber(life) or 0
+  if life <= 0 then return 0 end
+  rec.duration = life
+  local list = self.classicFx3
+  if type(list) ~= "table" then
+    list = {}
+    self.classicFx3 = list
+  end
+  list[#list + 1] = rec
+  return life
+end
+
+-- The GBA page's general-clip beats, advanced one update and retired at the
+-- end of their life (`stepFx`'s rule for the arena's own).
+function M:stepClassicFx3(dt)
+  local list = self.classicFx3
+  if type(list) ~= "table" or #list == 0 then return end
+  local step = tonumber(dt) or 0
+  if step <= 0 then step = 1 / 60 end
+  local kept = {}
+  for _, rec in ipairs(list) do
+    rec.elapsed = (tonumber(rec.elapsed) or 0) + step
+    local t = rec.elapsed / math.max(1e-3, tonumber(rec.duration) or 0.5)
+    if t < 1 then
+      rec.t = t
+      kept[#kept + 1] = rec
+    end
+  end
+  self.classicFx3 = (#kept > 0) and kept or nil
+end
+
+-- The GBA page's throws in flight, as ClassicBattle draws them (`throws3`):
+-- { t, from = "ally", to = "foe" | "ally", color, edge } -- the beat's palette
+-- off the catalogue (Vfx.PALETTES: its mid and edge tones).  nil when none.
+function M:classicThrows3()
+  local list = self.classicFx3
+  if type(list) ~= "table" then return nil end
+  local out = nil
+  for _, rec in ipairs(list) do
+    if rec.kind == "throw" then
+      local pal = Vfx.PALETTES and Vfx.PALETTES[rec.palette] or nil
+      out = out or {}
+      out[#out + 1] = {
+        t = rec.t, from = "ally", to = rec.side,
+        color = type(pal) == "table" and pal[2] or nil,
+        edge = type(pal) == "table" and pal[3] or nil,
+      }
+    end
+  end
+  return out
 end
 
 -- ------- the ball flow
@@ -12470,6 +12856,8 @@ function M:update(dt)
   -- the batch the moment that arrives.
   self:pruneBattlefieldBubbles()
   self:stepFx(dt)
+  -- ...and the GBA page's general-clip beats (`classicBeat3`).
+  self:stepClassicFx3(dt)
   -- Held fanfare: the outcome was known before the arena had finished showing
   -- the KO that produced it.
   if self.victoryMusicHeld and not self:hasPendingHpFx() then
@@ -12517,7 +12905,7 @@ function M:update(dt)
        and self.phase ~= "item" and self.phase ~= "item_party"
        and self.phase ~= "item_move" and self.phase ~= "switch"
        and self.phase ~= "target" and self.phase ~= "mimic"
-       and self.phase ~= "ask" then
+       and self.phase ~= "ask" and self.phase ~= "pokeblock" then
       self.pendingTurn = false
       self.replaceOnly = false
       self.phase = "choose"
@@ -12539,6 +12927,9 @@ function M:update(dt)
   end
 
   if not input then return end
+  -- Emerald's POKeBLOCK case owns the buttons while it is up
+  -- (`openPokeblockCase3`); its close is what moves this screen on.
+  if self.phase == "pokeblock" then return end
   if self.phase == "choose" then return self:updateCommand(input) end
   if self.phase == "ask" then return self:updateAsk(input) end
   if self.phase == "move" then return self:updateMoveMenu(input) end
@@ -13094,7 +13485,8 @@ function M:drawModernBand()
     for i, label in ipairs(ClassicBattle.gen3YesNoLabels()) do rows[i] = { label = label } end
     return bandDrew(list(rows, ask.cursor or 1, { title = plainLine(ask.text or "") }))
   end
-  if self.phase == "choose" then
+  -- (The grid stays up under Emerald's POKeBLOCK case, `openPokeblockCase3`.)
+  if self.phase == "choose" or self.phase == "pokeblock" then
     return bandDrew(grid(self:bandCommandItems(), self.commandIndex or 1))
   end
   if self.phase == "move" or self.phase == "item_move" then
@@ -13231,6 +13623,66 @@ function M:drawBattlefieldMenus(Font)
   self:withMenuBand(chrome)
 end
 
+-- ------- the Safari Zone's box on the arena
+--
+-- The cart puts SAFARI BALLS / Left: NN in the player's healthbox (pret
+-- battle_interface.c:1743 / :1762), and a fight with no own battler has no
+-- plate of ours on the arena -- so the box stands exactly where that plate
+-- would (Battlefield's ally plate: PLATE_PAD in from the left, PLATE_PAD above
+-- the field floor, PLATE_W x PLATE_H), drawn in the arena's panel look (its
+-- slate, shadow and 1px line -- Battlefield's `panel`, which it keeps local)
+-- with the cart's two lines (ClassicBattle.gen3SafariWords).
+M.SAFARI_PLATE_LOOK3 = {
+  shadow = { 0, 0, 0, 0.35 }, bg = { 0.078, 0.094, 0.125, 0.85 },
+  line = { 1, 1, 1, 0.18 }, text = { 1, 1, 1, 1 }, muted = { 1, 1, 1, 0.7 }, r = 4,
+}
+
+-- The box's rect in arena pixels: x, y, w, h.
+function M.safariPlateRect3()
+  local w = tonumber(Battlefield.PLATE_W) or 176
+  local h = tonumber(Battlefield.PLATE_H) or 48
+  local pad = tonumber(Battlefield.PLATE_PAD) or 12
+  local floorY = tonumber(Battlefield.FIELD_BOTTOM) or 280
+  return pad, floorY - h - pad, w, h
+end
+
+function M:drawSafariPlate3()
+  local balls = self:safariBalls3()
+  if balls == nil then return false end
+  local g = love and love.graphics
+  if not (g and g.rectangle and g.setColor) then return false end
+  local look = M.SAFARI_PLATE_LOOK3
+  local x, y, w, h = M.safariPlateRect3()
+  local function color(c) g.setColor(c[1], c[2], c[3], c[4] or 1) end
+  color(look.shadow)
+  g.rectangle("fill", x + 1, y + 2, w, h, look.r, look.r)
+  color(look.bg)
+  g.rectangle("fill", x, y, w, h, look.r, look.r)
+  color(look.line)
+  g.rectangle("line", x + 0.5, y + 0.5, w - 1, h - 1, look.r, look.r)
+  local title, left = ClassicBattle.gen3SafariWords(balls, self.safari and self.safari.family)
+  local pad = tonumber(Battlefield.PLATE_INSET) or 7
+  local okT, Toast = pcall(need, "Toast")
+  local function face(size)
+    if okT and type(Toast) == "table" and type(Toast.font) == "function" then
+      local okF, font = pcall(Toast.font, size)
+      if okF and font and g.setFont then pcall(g.setFont, font); return font end
+    end
+    return g.getFont and g.getFont() or nil
+  end
+  local prev = g.getFont and g.getFont() or nil
+  face(tonumber(Battlefield.FONT_PRIMARY) or 13)
+  color(look.text)
+  if g.print then g.print(tostring(title), x + pad + 5, y + 3) end
+  local small = face(tonumber(Battlefield.FONT_SECONDARY) or 11)
+  color(look.muted)
+  local lw = (small and small.getWidth) and small:getWidth(left) or (#left * 6)
+  if g.print then g.print(left, x + w - pad - lw, y + h - pad - 16) end
+  if prev and g.setFont then pcall(g.setFont, prev) end
+  g.setColor(1, 1, 1, 1)
+  return true
+end
+
 function M:drawBattlefieldSafe()
   self:ensureBattlefield()
   love.graphics.setColor(1, 1, 1, 1)
@@ -13251,6 +13703,8 @@ function M:drawBattlefieldSafe()
     if ok then engBag.SpriteRenderer = SR end
   end
   pcall(Battlefield.draw, self, self:battlefieldCtx(), engBag)
+  -- The Safari Zone's SAFARI BALLS box, where our plate would stand.
+  pcall(self.drawSafariPlate3, self)
   pcall(self.drawVoiceoverDim, self)
 
   -- Gen 3 has no Game Boy font to fall back on; the band widgets carry their
@@ -13507,6 +13961,15 @@ function M:gen3SeatModel(index, isPlayer)
     if self:ghostVeiled() then self:veilSeat3(seat) end
   end
   if seat.gender ~= "M" and seat.gender ~= "F" then seat.gender = nil end
+  -- A general clip's beats on this page (`classicBeat3`): the pic sways,
+  -- nods or trembles by the arena's own curves, and lights up under a beat
+  -- the page has no particles for (ClassicBattle.gen3LookSeat).
+  if self.classicFx3 and type(ClassicBattle.gen3LookSeat) == "function" then
+    local dx, dy, flash = ClassicBattle.gen3LookSeat(self.classicFx3, isPlayer and "ally" or "foe")
+    if dx ~= 0 then seat.dx = dx end
+    if dy ~= 0 then seat.dy = dy end
+    if flash > 0 then seat.flash = flash end
+  end
   return seat
 end
 
@@ -13526,12 +13989,185 @@ function M:veilSeat3(seat)
   return seat
 end
 
+-- ------- the trainer back in for its end speech
+--
+-- A lone trainer's lose text after "<PLAYER> defeated <TRAINER>!" (pret
+-- BattleScript_LocalTrainerBattleWon, FireRed's BattleScript_BattleTower
+-- TrainerBattleWon, Emerald's BattleScript_FrontierTrainerBattleWon:
+-- `trainerslidein BS_ATTACKER`, `waitstate`, STRINGID_TRAINER1LOSETEXT),
+-- or its win text over a loss (BattleScript_RivalBattleLost: `trainerslidein`,
+-- then STRINGID_TRAINER1WINTEXT), is said by src/SoloBattle.lua as the trainer
+-- record's own `defeatText` / `victoryText` -- the table this screen holds as
+-- `trainer`.  The trainer slides back in ahead of the speech's first page
+-- (an `applyStateRow` "trainer3" row, held for the slide), onto the GBA page
+-- where the cart's OpponentHandleTrainerSlide stops it -- created at x 176,
+-- moved 32 on (M.END_PIC_X3) and slid in from 96 further right, 2 px a frame
+-- (SpriteCB_TrainerSlideIn) -- standing over the foe's place for the rest of
+-- the ending.  CoopBattle:slideInForSpeech3 is the double screen's twin.
+-- `before` is where the speech's pages begin in the queue.  True when the row
+-- went in.
+M.END_PIC_X3 = 208
+M.TRAINER_SLIDE_PX3 = 96
+M.TRAINER_SLIDE_STEP3 = 2
+
+function M:slideInForSpeech3(text, before)
+  if not TRAINER_MODES[self.mode] then return false end
+  local t = type(self.trainer) == "table" and self.trainer or nil
+  if not t or type(text) ~= "string" or text == "" then return false end
+  if text ~= t.defeatText and text ~= t.victoryText then return false end
+  before = math.max(0, math.floor(tonumber(before) or 0))
+  self.lines = self.lines or {}
+  if #self.lines <= before then return false end
+  table.insert(self.lines, before + 1, { stateRow = "trainer3", value = true })
+  return true
+end
+
+-- How far right of its stop the sliding trainer still is, on the page's
+-- frame clock (0 once it has arrived).
+function M:trainerSlideDx3()
+  if not self.endTrainer3 then return 0 end
+  local frames = math.max(0, (self.frame or 0) - (self.endTrainerFrame3 or 0))
+  return math.max(0, M.TRAINER_SLIDE_PX3 - M.TRAINER_SLIDE_STEP3 * frames)
+end
+
+-- ------- the Safari Zone (screen option `safari`)
+
+-- The grid word for a Safari id, off the cart's own gText_SafariZoneMenu
+-- (ClassicBattle.gen3SafariLabels), else this file's spelling.  nil for an id
+-- that is not one of the Safari's.
+function M:safariLabel3(command)
+  local s = self.safari
+  if type(s) ~= "table" then return nil end
+  local ids = M.SAFARI_COMMANDS3[s.family] or {}
+  local at = nil
+  for i, id in ipairs(ids) do if id == command then at = i end end
+  if not at then return nil end
+  local labels = ClassicBattle.gen3SafariLabels and ClassicBattle.gen3SafariLabels(s.family) or nil
+  local word = type(labels) == "table" and labels[at] or nil
+  if type(word) == "string" and word ~= "" then return word end
+  return (M.SAFARI_LABELS3[s.family] or {})[at]
+end
+
+-- The prompt over the Safari's grid, in the player's cart's words with the
+-- player's name in it (pret pokefirered battle_controller_safari.c:446
+-- gText_WhatWillPlayerThrow, "What will {B_PLAYER_NAME}\nthrow?";
+-- pokeemerald :460 gText_WhatWillPkmnDo2, "What will\n{B_PLAYER_NAME} do?").
+-- Read once a fight: the name cannot change under it.
+function M:safariPrompt3()
+  if self.safariPrompt3Text then return self.safariPrompt3Text end
+  local s = self.safari
+  local family = type(s) == "table" and s.family or "frlg"
+  local name = playerName(self.game)
+  local text = Gen3.battleText(M.SAFARI_PROMPT_KEYS3[family], { playerName = name })
+    or (M.SAFARI_PROMPTS3[family] or M.SAFARI_PROMPTS3.frlg):format(name)
+  self.safariPrompt3Text = text
+  return text
+end
+
+-- A throw off the Safari's grid: BALL / BAIT / ROCK / GO NEAR, filed as the
+-- referee reads them (contract C6 `safari`).  True when it went; a throw the
+-- solo glue refuses (`sendChoice` false) leaves the menu up.  BALL with the
+-- party and every box full is the Safari kind's to refuse (src/Solo3/
+-- Safari.lua: the choice is taken, the cart's STRINGID_BOXISFULL is said and
+-- the next `turn` reopens this menu -- pret BattleScript_PrintFullBox).
+function M:safariThrow3(id)
+  local throw = M.SAFARI_THROW3[id]
+  if not throw or throw == "block" then return false end
+  return self:sendChoice({ action = "safari", throw = throw })
+end
+
+-- Emerald's POKéBLOCK: the engine's own case, pushed on the game3 stack over
+-- this screen (pret battle_controller_safari.c SafariHandleChooseItem ->
+-- OpenPokeblockCaseInBattle; the engine's Pokeblock.openCase with the BATTLE
+-- case's USE / CANCEL -- pokeblock_case.lua Case.show).  Not
+-- Pokeblock.chooseForBattle: that one clears the block inside its own USE,
+-- and the Safari kind (src/Solo3/Safari.lua) reads the block out of its slot,
+-- weighs it against the monster's nature and clears it itself as it files the
+-- throw.  So USE answers the case's index and nothing more (pret
+-- CompleteWhenChosePokeblock hands gSpecialVar_ItemId back to the engine),
+-- and the choice carries it 1-based (`session.pokeblocks[block]`, Wire
+-- POKEBLOCK3_MAX).  The grid stays in place underneath (`phase` "pokeblock")
+-- until the case closes: a block used files the throw (`pokeblockChosen3`),
+-- the case closed with none is the action menu again (pret
+-- battle_main.c:4440, STATE_BEFORE_ACTION_CHOSEN), no turn spent.  True when
+-- the case opened.
+function M:openPokeblockCase3()
+  if self.finished then return false end
+  local Pokeblock = Gen3.engine("src.core.game3.rse.pokeblock")
+  if not (type(Pokeblock) == "table" and type(Pokeblock.openCase) == "function") then
+    if not self.pokeblockWarned then
+      self.pokeblockWarned = true
+      mod.log:warn("the POKeBLOCK case could not be opened in this Safari battle; throw a "
+        .. "BALL or GO NEAR instead, and re-import the ROM from the title screen if it "
+        .. "keeps happening")
+    end
+    return false
+  end
+  local caseId = type(Pokeblock.CASE) == "table" and Pokeblock.CASE.BATTLE or nil
+  local from = self.phase
+  self.phase = "pokeblock"
+  self.pokeblockCase3 = true
+  local ok, shown = pcall(Pokeblock.openCase, Gen3.session(), {
+    caseId = caseId,
+    onUse = function(id) return id end,
+    onClose = function(result) self:pokeblockChosen3(result) end,
+  })
+  if ok and shown ~= false then return true end
+  self.pokeblockCase3 = nil
+  if self.phase == "pokeblock" then self.phase = from end
+  mod.log:warn("the POKeBLOCK case failed to open (%s); throw a BALL or GO NEAR instead, "
+    .. "and report this with the Safari Zone area you were in", tostring(shown))
+  return false
+end
+
+-- The case closed: `result` is what its USE answered -- the case's 0-based
+-- index -- or nil for a case closed with nothing used.  True when a throw was
+-- filed.
+function M:pokeblockChosen3(result)
+  self.pokeblockCase3 = nil
+  if self.finished or self.phase ~= "pokeblock" then return false end
+  local slot = tonumber(result)
+  if slot == nil or slot < 0 then
+    self.phase = "choose"
+    return false
+  end
+  if self:sendChoice({ action = "safari", throw = "block", block = math.floor(slot) + 1 }) then
+    return true
+  end
+  self.phase = "choose"
+  return false
+end
+
+-- A case still up when the turn is no longer ours to file (the referee
+-- answered it, the fight ended): closed, unanswered.
+function M:closePokeblockCase3()
+  local was = self.pokeblockCase3
+  self.pokeblockCase3 = nil
+  if self.phase == "pokeblock" then self.phase = "play" end
+  if not was then return false end
+  local Case = Gen3.engine("src.ui.game3.rse.pokeblock_case")
+  local open = type(Case) == "table" and type(Case.isOpen) == "function" and Case.isOpen()
+  if open and type(Case.reset) == "function" then pcall(Case.reset) end
+  return open and true or false
+end
+
+-- The SAFARI BALLS box's count as it stands on screen: the screen option's,
+-- then each `item` event's `amount` as its row plays (the cart updates the
+-- box after the "used SAFARI BALL!" line, BattleScript_SafariBallThrow's
+-- updatestatusicon).  nil off a Safari fight.
+function M:safariBalls3()
+  if type(self.safari) ~= "table" then return nil end
+  return math.max(0, math.floor(tonumber(self.safariBallsShown) or tonumber(self.safari.balls) or 0))
+end
+
 -- The action prompt above the command grid: the fight's own when its kind
 -- worded one (screen option `prompt`), else the cart's "What will\nX do?" --
 -- X the monster out, or with none of ours out (`noOwnBattler`) the player
 -- (pret gText_WhatWillPkmnDo2, pokeemerald battle_controller_safari.c:449).
+-- A Safari fight asks its own cart's question (`safariPrompt3`).
 function M:commandPrompt()
   if type(self.prompt) == "string" and self.prompt ~= "" then return self.prompt end
+  if self.safari then return self:safariPrompt3() end
   if self.noOwnBattler then
     return ("What will\n%s do?"):format(playerName(self.game))
   end
@@ -13541,6 +14177,9 @@ end
 
 function M:gen3ClassicModel()
   local phase = self.phase
+  -- Emerald's POKeBLOCK case is up over the grid (`openPokeblockCase3`): the
+  -- grid stays drawn under it, as the cart's action menu does.
+  if phase == "pokeblock" then phase = "choose" end
   local model = {
     foe = self:gen3SeatModel(self:foeSlot(), false),
     ally = self:gen3SeatModel(self:mySlot(), true),
@@ -13560,6 +14199,19 @@ function M:gen3ClassicModel()
     local pic = tonumber(self.trainer.trainerPic or self.trainer.pic or self.trainer.picId)
     if pic then model.trainer = { pic = pic } end
   end
+  -- The trainer back in for its end speech (`slideInForSpeech3`): at the
+  -- cart's stop, still sliding, standing where its monster was.
+  if self.endTrainer3 and model.trainer then
+    model.trainer.x = M.END_PIC_X3
+    model.trainer.dx = self:trainerSlideDx3()
+    model.showTrainer = true
+  end
+  -- The Safari Zone: the SAFARI BALLS box where our plate would be.
+  if self.safari then
+    model.safari = { balls = self:safariBalls3(), family = self.safari.family }
+  end
+  -- A general clip's throws in flight on this page (`classicBeat3`).
+  model.throws3 = self:classicThrows3()
   model.prompt = self:commandPrompt()
   -- Oak's voice-over is up: the field darkens under it (`sayLesson3`), one
   -- healthbox lit again under some of his lines (M.LESSON_LIT3).
@@ -13714,12 +14366,26 @@ local function drawGen3Plate(g, Font, seat, x, y, w, own)
   g.setColor(1, 1, 1, 1)
 end
 
+-- (`dx` / `dy`: a general clip's motion beat, `gen3SeatModel`.)
 local function drawGen3Pic(g, seat, cx, bottom, flip)
   if not (seat and seat.sprite) or seat.hidden then return end
   local ok, w, h = pcall(seat.sprite.getDimensions, seat.sprite)
   if not ok then return end
   g.setColor(1, 1, 1, 1)
-  pcall(g.draw, seat.sprite, math.floor(cx - w / 2), bottom - h)
+  pcall(g.draw, seat.sprite, math.floor(cx - w / 2 + (tonumber(seat.dx) or 0)),
+    bottom - h + (tonumber(seat.dy) or 0))
+end
+
+-- The Safari Zone's SAFARI BALLS box on the plain page, in our plate's place.
+local function drawGen3SafariPlate(g, Font, safari, x, y, w)
+  g.setColor(0.97, 0.97, 0.90, 1)
+  g.rectangle("fill", x, y, w, 38)
+  g.setColor(0.25, 0.30, 0.30, 1)
+  g.rectangle("line", x + 0.5, y + 0.5, w - 1, 37)
+  local title, left = ClassicBattle.gen3SafariWords(safari.balls, safari.family)
+  Font.draw(title, x + 5, y + 1)
+  Font.drawRight(left, x + w - 5, y + 21)
+  g.setColor(1, 1, 1, 1)
 end
 
 function M:drawGen3Plain(model)
@@ -13758,7 +14424,11 @@ function M:drawGen3Plain(model)
     g.rectangle("fill", 0, 0, GEN3_W, 112)
   end
   if model.foe then drawGen3Plate(g, Font, model.foe, 8, 8, 110, false) end
-  if model.ally then drawGen3Plate(g, Font, model.ally, 124, 70, 110, true) end
+  if model.ally then
+    drawGen3Plate(g, Font, model.ally, 124, 70, 110, true)
+  elseif type(model.safari) == "table" then
+    drawGen3SafariPlate(g, Font, model.safari, 124, 70, 110)
+  end
   -- Oak's voice-over darkens the field under his lines (`sayLesson3`).
   if model.voiceover then
     g.setColor(0, 0, 0, 0.5)
