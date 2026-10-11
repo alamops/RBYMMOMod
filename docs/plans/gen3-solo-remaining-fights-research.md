@@ -493,3 +493,135 @@ Solo replayed none of these before wave 1.
   - Oak's `litHealthbox`;
   - `BattleBridge.tvBattleEnd`'s shifted arguments;
   - the facility couplings (`_nextFacility`, `lastFrontierBattle`).
+
+## Part 3: wave-2 contracts as built, and remainders (commits `1ad1a88`..`4d2c346`)
+
+### 3.1 Referee: Safari and tutorials (`1ad1a88`)
+
+**`safari` create option** (wild mode only):
+- **Required:** `family = "frlg" | "rse"`, `balls` (0..255).
+- **Emerald also needs:** `goNearCatch[4]`, `goNearEscape[4]` and `pkblToEscape` (a 1-based list of at least 4 rows of 3, converted from the engine's 0-keyed `pkblToEscapeFactor`).
+- **Optional:** `catchFactor` and `escapeFactor` overrides.
+- **FRLG** reads the wild sheet's `safariFleeRate`.
+- **Side a** is `{playerId, name}` with no mons; `noBattler` is implied.
+
+**Choices:**
+- `{action = "safari", throw = "ball" | "bait" | "rock" | "near" | "block"}`, gated by family.
+- `block` needs `verdict` (0 curious, 1 enthralled, 2 ignored) and an optional `blockName`. Wire strips both, so the solo `choose` hook builds the block choice and files it with `ctx.solo:file3`.
+- `{action = "run"}` always succeeds.
+
+**Outcome:**
+- `how = "catch" | "balls" | "flee" | "run"`.
+- `safari = {balls, pokeblockThrows}` is present on every ending.
+
+**Events:**
+- A ball throw is `item {slot 0, side "a", text "5", amount = balls left}`, then `ball {target 3, amount = shakes, or 4 for a catch}`.
+- Throws are `anim BAIT_THROW | ROCK_THROW | POKEBLOCK_THROW {slot 0, side "a", target 3}`.
+- FRLG only: `anim SAFARI_REACTION {slot 3, side "b", amount 0 | 1 | 2}`.
+- The wild seat files `chose` as each turn opens.
+- Go Near's "can't get any closer!" comes from the **4th** step (pret `battle_util.c:604`), not the 5th as §1.2 said.
+
+**Tutorials:**
+- **Side-entry `noBattler = true`** (side a of a wild fight, no mons):
+  - RUN always gets away.
+  - Only party-free bag items are allowed.
+  - A seat facing only no-battler seats passes its turn.
+- **`catch = "forced"`:** the ball shakes three times and catches; the outcome carries `given = false`.
+- **`tutorial = "oldMan" | "wally" | "pokedude"`:** a forced catch plus each tutorial's rules:
+  - old man and Wally: no crits;
+  - Pokédude: crits drawn but voided, sure hits on both sides, no disobedience, side-b effects gated except sleep.
+- **NPC-driven side a:** `wildPick` and `ai` stay off side a.
+
+### 3.2 Family modules (`3d84b26`, `7984b9b`, `9155379`)
+
+Each family is a `src/Solo3/*.lua` module returning `kinds3`; `KIND_FILES3` maps every kind name to its file.
+
+| Module | Kinds | Main helpers |
+|---|---|---|
+| `Legend.lua` | `roamer`, `legendary`, `scripted`, `ghost` | `roamerFinish3`, `roamerHandBack3`, `statusByte3`, `song3`, `noDexSeen3`, `ghostOf3` |
+| `Facility.lua` | `facility` | `rulesFor(hall, kind, sess)`, `screenRules3`, `hillItems3`, `pyramidBag3` / `pyramidWriteback3`, `lastFrontierBattle3`, `trackDomeMoves3`; hall sets `FRONTIER_HALLS`, `WAVE3_HALLS = {palace, arena}`, `WILD_HALLS`, `TRAINER_HALLS` |
+| `Doubles.lua` | `pair`, `partner` | `seatPair`, `sayWon`, `payPrize`, `inPyramidOrHill`, `restorePartner` |
+| `First.lua` | `firstBattle` | `which`, `rollHeldItem`, `cantRunText` |
+
+- **Seat ids:** `solo_foe_b` is the second trainer (slot 4); `solo_ally` is Steven (slot 1, `spare`).
+- **Shared rig:** `tests/fixtures/gen3_solo_dbl_rig.lua`.
+- **Facility ctx fields:** `facility3`, `facilityRules3`, `noPayDay3`, `pyramidBag3`, `nextFacility3`, `domeLastMoves3`.
+
+### 3.3 Screens (`4d2c346`)
+
+- **`Vfx`:** `Vfx.forGeneral3(anim, amount)` returns beats; `Vfx.isGeneral3(anim, safari)` (`ROCK_THROW` counts only in a Safari fight).
+- **`Battlefield`:**
+  - seat motions `sway`, `nod` and `tremble`, each taking `wait`;
+  - a vfx `fromTrainer = "ally" | "foe"`;
+  - `ballOrigin` and `vfxOrigin` exported.
+- **`CoopBattle`:** `emitVfx(spec, target, from, fromTrainer)`, `startGeneralLook3(row)`, `slideInForSpeech3`.
+
+### 3.4 Remainders routed to waves 3 and 4
+
+**CORE** (wave 3):
+- **Altering Cave held items:**
+  - `SoloBattle` `gen3WildItem(species, random16, opts)`;
+  - every `wildHeldItem` call passes `{alteringCave = ...}`, computed from `mapId == "EM_ALTERING_CAVE"`, with the stand / `foeMon3` / `wildFoe3` / `wildStand3` forwarding it.
+- **`gen3Words`:** a double-KO whiteout saves "draw" (DREW 3) while `done` stays "lose".
+- **`applyToMon`:** carries a caught wild monster's sleep counter.
+- **`owes()`:** a `noBattler` seat owes a choice only in the choice phase.
+- **Emerald `SetWildMonHeldItem`** overwrites a scripted `setwildbattle` item for a non-legendary wild.
+- **`loadKinds3`:** call it at boot.
+
+**R3** (wave 3):
+- Palace and Arena rules, and their `palace` / `arena` events (Wire / sanitize).
+- Under `rules.forfeit` + `pyramidRun`, a Run Away runner rolls `_pyramidEscape` first (pret em `battle_util.c:427-447`).
+
+**K-SAF** (wave 3):
+- The Pokéblock choice comes from the engine's case:
+  - the verdict is set by the wild monster's nature;
+  - the block leaves the save.
+- The full-box BALL refusal at selection.
+- Ball writeback on each `item` event and from `outcome.safari.balls`.
+- The engine tails.
+
+**UM3** (wave 3):
+- The Safari screen: the per-cart grid and prompt, the balls box, the Pokéblock case.
+- `grantCatch` only when `msg.given ~= false`.
+- The general looks on the single screen (a twin of `startGeneralLook3`; `FX_SPAN` sway / nod / tremble; `VFX_KEYS` `fromTrainer` / `wait`).
+- The single screen's trainer slide-in for the win / lose speech.
+- A `bag` screen option (the Pyramid bag).
+- Frontier victory music: MUS_VICTORY_TRAINER, and MUS_VICTORY_GYM_LEADER for a Frontier Brain.
+- The ClassicBattle GBA page draws no general look yet.
+
+**UC3** (wave 3): `TURN_TRAP`, `FOCUS_PUNCH_SETUP`, `FUTURE_SIGHT_HIT` and `DOOM_DESIRE_HIT` should be quiet general looks; today they raise a callout and a lunge.
+
+**K-TUT / UM4** (wave 4):
+- Wally's turn-3 recall. File the ball as turn 3's choice; the screen plays the recall and slide-in, and the foe doesn't act.
+- The seat names ("The old man", "The POKe DUDE", "WALLY") and a bag with names.
+- The Pokédude:
+  - `rules = {exp = false}` if wanted;
+  - its done word is "catch";
+  - `TeachyTv.restorePlayerBag` runs through the stand's `done`.
+
+**K-FAC2** (wave 4):
+- Palace and Arena taken over: drop them from `WAVE3_HALLS` and add them to `rulesFor`.
+- Tower multis with an NPC partner, and the Pike two-trainer double, taken through the pair / partner seats.
+- The Frontier multi partner's classic pics (pret: his front pic at x 32, the player's front pic flipped at x 90).
+- `Gen3.trainerBackPic` only reaches indices 0 and 1.
+
+**Docs and upstream** (wave 5):
+- **E-FAC1–5:**
+  1. The stale `lastFrontierBattle`.
+  2. FRLG Trainer Tower texts are missing.
+  3. The Secret Base prize arm is missing.
+  4. FRLG Trainer Tower `noWhiteout` heals at the end.
+  5. There is no Secret Base defeat text.
+- **Roamers (engine vs pret 1.0):**
+  - Deactivation and relocation differ.
+  - The status is banked as a word.
+  - `opts.alteringCave` is never set.
+- **The early rival:** pret sets the trainer flag on a loss too.
+- **Missing engine arms:** `engagePair` has no Pyramid / Hill arm; Steven's defeat texts are missing (check them in e2e).
+- **Emerald `SAFARI_REACTION`:** the engine plays one; pret has none.
+- **Engine check order:** Pokédude accuracy; old man crits.
+- **New reach-arounds:** the `sim._fightAction` instance wrap, the `Tower.setInterviewData` re-run, `VAR_LAST_TALKED`.
+
+**Known gaps** (not planned):
+- Steven's monsters can level mid-battle on the cart from the EXP they share; the mod pays only the player's own slots.
+- A Safari monster that arrives with a status or under weather can faint at the end of a turn.

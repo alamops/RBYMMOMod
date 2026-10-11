@@ -112,17 +112,20 @@ File ownership is strict within a wave; later waves inherit.
 | 2 | K-FAC | new `src/Solo3/Facility.lua`, new `tests/gen3_solo_facility.lua` | every hall but Palace / Arena rules (handed back until wave 4): `rules` per facility, the forfeit, `_nextFacility`, `lastFrontierBattle`, Dome last moves, `disableRecordBattle`, the Pyramid bag, exact party writeback, draws and forfeits |
 | 2 | K-DBL | new `src/Solo3/Doubles.lua`, new `src/Solo3/First.lua`, new `tests/gen3_solo_pairs.lua`, new `tests/gen3_solo_first.lua` | pairs; Steven; Oak's lab; Birch |
 | 2 | UC2 | the UC files | looks for the ghost and Safari anims; the ball thrown from the trainer with no own battler; the lone double's cart wording and trainer slide-in |
-| 3 | K-SAF | new `src/Solo3/Safari.lua`, new `tests/gen3_solo_safari.lua` | the Safari block, ball writeback per throw, no whiteout / reconcile, the engine tails (`Safari.endBattleRse` / `outOfBallsMidBattle`), the Pokéblock case |
-| 3 | K-TUT | new `src/Solo3/Tutorial.lua`, new `tests/gen3_solo_tutorial.lua` | old man, Wally and Pokédude replays: the cart's scripted inputs on the cart's timing; the forced catch; no give |
-| 3 | UM3 | the UM files | the Safari screen (menu, balls box, throws, Pokéblock case); the tutorial overlays, back pics and prompts |
-| 3 | R3 | the RF files + W's files | Palace and Arena rules, and their `palace` / `arena` events |
-| 4 | K-FAC2 | `src/Solo3/Facility.lua`, `src/SoloBrain.lua` | Palace (the move-group pick, both sides; targeting) and Arena (the judge glue; never switches, party-order send-out) taken over |
-| 4 | UM4 | the UM files | the Palace screen (no move menu), the Arena judgment window |
-| 5 | E | `tests/drivers/solo_battle_e2e.lua`, `tests/drivers/mmo_util.lua`, the Gen 3 runners | an e2e leg per family on FireRed and Emerald (real play where reachable, the engine's own entry with a prepared session where post-game) |
-| 5 | D | docs | known gaps §2 closed; README, mod.card, CHANGELOG; the sheet contract; the new reach-arounds and engine divergences in `docs/upstream/gen3-spawn-npc.md` |
+| 3 | CORE | `src/SoloBattle.lua`, `src/CoopField.lua`, `src/Sheet3.lua`, `src/Client.lua`, `tests/gen3_solo.lua`, `tests/gen3_doors.lua`, `tests/solo_battle.lua` | the research doc's §3.4 CORE items |
+| 3 | R3 | the RF files + `src/Wire.lua`, `server/lib/sanitize.js`, `server/twin_parity.test.js`, `tests/rby_mmo_test.lua` | Palace and Arena rules and their `palace` / `arena` events; the Pyramid Run Away roll |
+| 3 | K-SAF | new `src/Solo3/Safari.lua`, new `tests/gen3_solo_safari.lua` | the Safari kind: block, Pokéblock choice, full-box refusal, ball writeback, engine tails |
+| 3 | UM3 | `src/MediatedBattle.lua`, `src/ClassicBattle.lua`, `tests/mediated_battle_client.lua`, `tests/gen3_mediated.lua` | the Safari screen; general looks on the single screen; the trainer slide-in; `given`; the `bag` option; Frontier victory music |
+| 3 | UC3 | `src/Vfx.lua`, `src/Battlefield.lua`, `src/CoopBattle.lua`, `tests/gen3_battlefield.lua`, `tests/gen3_solo_double.lua` | quiet looks for TURN_TRAP, FOCUS_PUNCH_SETUP, FUTURE_SIGHT_HIT, DOOM_DESIRE_HIT |
+| 4 | K-TUT | new `src/Solo3/Tutorial.lua`, new `tests/gen3_solo_tutorial.lua` | old man, Wally and Pokédude replays: the cart's scripted inputs on the cart's timing |
+| 4 | UM4 | the UM files | the tutorial screens (autoplay, back pics, overlays, Wally's recall); the Palace screen (no move menu); the Arena judgment window |
+| 4 | K-FAC2 | `src/Solo3/Facility.lua`, `src/SoloBrain.lua`, the UC files | Palace and Arena taken over (move-group pick, targeting, the judge, no switching); Tower multis with an NPC partner and the Pike double |
+| 5 | E | `tests/drivers/solo_battle_e2e.lua`, `tests/drivers/mmo_util.lua`, the Gen 3 runners | an e2e leg per family on FireRed and Emerald |
+| 5 | D | docs | known gaps §2 closed; README, mod.card, CHANGELOG; the sheet contract; reach-arounds and engine divergences in `docs/upstream/gen3-spawn-npc.md` |
 
 ## Progress
 
+- Wave 2 landed: `1ad1a88` (Safari / tutorial referee), `3d84b26` (Legend), `7984b9b` (Facility), `9155379` (Doubles / First), `4d2c346` (looks, lone double). Barrier green (54).
 - Wave 1 landed: `eb2b198` (referee), `3ccf2ad` (wire), `4aee25a` (doors), `db67b7a` (solo core, brain), `59fbe2a` (screens). Barrier green (50 suites / test files, three fixtures reproduced).
 
 ## Verification
