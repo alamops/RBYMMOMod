@@ -132,6 +132,7 @@ tests/gen3_solo_legend.lua
 tests/gen3_solo_facility.lua
 tests/gen3_solo_pairs.lua
 tests/gen3_solo_first.lua
+tests/gen3_solo_safari.lua
 tests/fixtures/gen3_solo_dbl_rig.lua
 tests/gen3_ui.lua
 tests/trade3.lua
