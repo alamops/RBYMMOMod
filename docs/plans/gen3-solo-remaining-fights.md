@@ -5,7 +5,7 @@
 | Base SHA | `2288f2b` |
 | Branch | `feature/firered-and-emerald-support` (1.5.0, unreleased) |
 | Asked for | "Solo battles leave some fights to the game itself: Emerald double battles, the Safari Zone, roaming and scripted legendaries, the Battle Frontier, Trainer Tower and Trainer Hill, and the first and tutorial battles. Fix it." (`docs/plans/gen3-known-gaps.md` §2) |
-| Research | `$SP/G3S/{ARCH,SAF,LEG,FAC,DBL}.md` (read-only research agents, pret / engine / mod anchors) |
+| Research | `docs/plans/gen3-solo-remaining-fights-research.md` (part 1: the research findings; part 2: the wave-1 contracts as built) |
 | Rule source | pret `pokefirered` / `pokeemerald`; where the engine port disagrees, pret wins and the difference goes to `docs/upstream/gen3-spawn-npc.md` |
 
 ## Scope
@@ -119,6 +119,10 @@ File ownership is strict within a wave; later waves inherit.
 | 3 | UM3 | the UM files | the Palace screen (no move menu), the Arena judgment window, the tutorial overlays and back pics |
 | 4 | E | `tests/drivers/solo_battle_e2e.lua`, `tests/drivers/mmo_util.lua`, the Gen 3 runners | an e2e leg per family on FireRed and Emerald (real play where reachable, the engine's own entry with a prepared session where post-game) |
 | 4 | D | docs | known gaps §2 closed; README, mod.card, CHANGELOG; the sheet contract; the new reach-arounds and engine divergences in `docs/upstream/gen3-spawn-npc.md` |
+
+## Progress
+
+- Wave 1 landed: `eb2b198` (referee), `3ccf2ad` (wire), `4aee25a` (doors), `db67b7a` (solo core, brain), `59fbe2a` (screens). Barrier green (50 suites / test files, three fixtures reproduced).
 
 ## Verification
 
