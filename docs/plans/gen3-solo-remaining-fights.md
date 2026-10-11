@@ -107,18 +107,19 @@ File ownership is strict within a wave; later waves inherit.
 | 1 | W | `src/Wire.lua`, `server/lib/sanitize.js`, `server/twin_parity.test.js`, `tests/rby_mmo_test.lua` | C6 (`lesson`, the `safari` action) |
 | 1 | UM | `src/MediatedBattle.lua`, `src/ClassicBattle.lua`, `tests/mediated_battle_client.lua`, `tests/gen3_mediated.lua` | a fight with no own battler; facility prompts (bag refused, forfeit yes / no); the `lesson` voice-over; the ghost name, silhouette and unveil; first-battle lines |
 | 1 | UC | `src/CoopBattle.lua`, `src/Battlefield.lua`, `src/Vfx.lua`, `tests/coop_mediated.lua`, `tests/gen3_solo_double.lua`, `tests/gen3_battlefield.lua` | two foe trainers (figures, names, intro / defeat lines); Steven on side a (back pic, send-out line, his slot); facility prompts on the double screen |
-| 2 | R2 | the RF files | `safari` mode (new `Safari.lua` / `Safari.js`); the no-battler side and forced catch for tutorials |
-| 2 | K-LEG | new `src/Solo3/Legend.lua`, new `tests/gen3_solo_legend.lua` | roamers (writeback through `Roamer.onBattleEnd`, hand-back with the original encounter, music), scripted / legendary wilds, ghosts; the dex-seen rules |
-| 2 | K-SAF | new `src/Solo3/Safari.lua`, new `tests/gen3_solo_safari.lua` | the Safari block, ball writeback per throw, no whiteout / reconcile, the engine tails (`Safari.endBattleRse` / `outOfBallsMidBattle`), the Pokéblock case |
-| 2 | K-FAC | new `src/Solo3/Facility.lua`, new `tests/gen3_solo_facility.lua` | the facility classifier → `rules`; `Battle._nextFacility` taken and restored; `lastFrontierBattle`, Dome last moves, `disableRecordBattle`; the Pyramid bag; exact party writeback; draws and forfeits |
-| 2 | K-DBL | new `src/Solo3/Doubles.lua`, new `src/Solo3/First.lua`, new `tests/gen3_solo_pairs.lua` | pairs (B's party through the `trainer.party` hook, A's item pool, both defeat texts, prize A + B); Steven (ally seat, `spare`, EXP participants, `scriptedLoss`); Oak's lab; Birch |
-| 2 | UM2 / UC2 | the UM / UC files | the Safari screen (menu, balls box, throws, Pokéblock case); dodged-ball and scared lines; anything K-* reports for the screens |
-| 3 | R3 | the RF files + W's files | Palace and Arena rules, and their `palace` / `arena` events |
-| 3 | K-FAC2 | `src/Solo3/Facility.lua`, `src/SoloBrain.lua` | the Palace move-group pick (client side, both sides) and the Arena judge glue |
+| 2 | R2 | the RF files | `safari` mode (new `Safari.lua` / `Safari.js`); the no-battler side, the forced catch and an NPC-driven side a for the tutorials |
+| 2 | K-LEG | new `src/Solo3/Legend.lua`, new `tests/gen3_solo_legend.lua` | roamers (writeback through `Roamer.onBattleEnd`, hand-back with the original encounter, music), scripted / legendary wilds, ghosts; the dex-seen rules; Altering Cave items |
+| 2 | K-FAC | new `src/Solo3/Facility.lua`, new `tests/gen3_solo_facility.lua` | every hall but Palace / Arena rules (handed back until wave 4): `rules` per facility, the forfeit, `_nextFacility`, `lastFrontierBattle`, Dome last moves, `disableRecordBattle`, the Pyramid bag, exact party writeback, draws and forfeits |
+| 2 | K-DBL | new `src/Solo3/Doubles.lua`, new `src/Solo3/First.lua`, new `tests/gen3_solo_pairs.lua`, new `tests/gen3_solo_first.lua` | pairs; Steven; Oak's lab; Birch |
+| 2 | UC2 | the UC files | looks for the ghost and Safari anims; the ball thrown from the trainer with no own battler; the lone double's cart wording and trainer slide-in |
+| 3 | K-SAF | new `src/Solo3/Safari.lua`, new `tests/gen3_solo_safari.lua` | the Safari block, ball writeback per throw, no whiteout / reconcile, the engine tails (`Safari.endBattleRse` / `outOfBallsMidBattle`), the Pokéblock case |
 | 3 | K-TUT | new `src/Solo3/Tutorial.lua`, new `tests/gen3_solo_tutorial.lua` | old man, Wally and Pokédude replays: the cart's scripted inputs on the cart's timing; the forced catch; no give |
-| 3 | UM3 | the UM files | the Palace screen (no move menu), the Arena judgment window, the tutorial overlays and back pics |
-| 4 | E | `tests/drivers/solo_battle_e2e.lua`, `tests/drivers/mmo_util.lua`, the Gen 3 runners | an e2e leg per family on FireRed and Emerald (real play where reachable, the engine's own entry with a prepared session where post-game) |
-| 4 | D | docs | known gaps §2 closed; README, mod.card, CHANGELOG; the sheet contract; the new reach-arounds and engine divergences in `docs/upstream/gen3-spawn-npc.md` |
+| 3 | UM3 | the UM files | the Safari screen (menu, balls box, throws, Pokéblock case); the tutorial overlays, back pics and prompts |
+| 3 | R3 | the RF files + W's files | Palace and Arena rules, and their `palace` / `arena` events |
+| 4 | K-FAC2 | `src/Solo3/Facility.lua`, `src/SoloBrain.lua` | Palace (the move-group pick, both sides; targeting) and Arena (the judge glue; never switches, party-order send-out) taken over |
+| 4 | UM4 | the UM files | the Palace screen (no move menu), the Arena judgment window |
+| 5 | E | `tests/drivers/solo_battle_e2e.lua`, `tests/drivers/mmo_util.lua`, the Gen 3 runners | an e2e leg per family on FireRed and Emerald (real play where reachable, the engine's own entry with a prepared session where post-game) |
+| 5 | D | docs | known gaps §2 closed; README, mod.card, CHANGELOG; the sheet contract; the new reach-arounds and engine divergences in `docs/upstream/gen3-spawn-npc.md` |
 
 ## Progress
 
