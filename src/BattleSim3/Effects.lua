@@ -347,6 +347,10 @@ function M.set(C, eff, primary, certain, affectsUser)
   local effBattler = affectsUser and user or target
   local rank = STATUS_EFFECT_RANK[eff]
   if not effBattler then return false end
+  -- pokefirered/src/battle_script_commands.c:2128: in a TEACHY TV demo
+  -- (`tutorial = "pokedude"`) no move effect but MOVE_EFFECT_SLEEP lands on
+  -- side b -- the wild monster's own self-effects included -- silently.
+  if B.tutorial == "pokedude" and eff ~= "SLEEP" and effBattler.side == "b" then return false end
   if rank and rank <= 9 and not primary and effBattler.ability == "SHIELD_DUST" and not affectsUser then
     return false
   end

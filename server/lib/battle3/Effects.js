@@ -587,6 +587,9 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
   const effBattler = (truthy(affectsUser) && truthy(user)) ? user : target;
   const rank = own(STATUS_EFFECT_RANK, eff) ? STATUS_EFFECT_RANK[eff] : null;
   if (!truthy(effBattler)) return false;
+  // pokefirered/src/battle_script_commands.c:2128: in a TEACHY TV demo no move
+  // effect but MOVE_EFFECT_SLEEP lands on side b, silently.
+  if (B.tutorial === 'pokedude' && eff !== 'SLEEP' && effBattler.side === 'b') return false;
   if (rank !== null && rank <= 9 && !truthy(primary) && effBattler.ability === 'SHIELD_DUST'
       && !truthy(affectsUser)) {
     return false;

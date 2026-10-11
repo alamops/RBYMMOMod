@@ -87,9 +87,11 @@ const SHAPES = {
   anim: {
     slot: true,
     side: true,
-    text: 'move id',
-    amount: '1 on a charge turn',
-    target: "the move's first target (field slot), when it has one",
+    text: 'move id, or a general token (MON_SCARED, BAIT_THROW, ROCK_THROW, '
+      + 'POKEBLOCK_THROW, SAFARI_REACTION, ...)',
+    amount: '1 on a charge turn; SAFARI_REACTION: 0 watching / 1 angry / 2 eating',
+    target: "the move's first target (field slot), when it has one; a Safari "
+      + "throw's: the wild slot",
     spread: '1 when the animation covers several targets',
   },
   damage: {
@@ -122,7 +124,12 @@ const SHAPES = {
   switch: {
     slot: true, side: true, text: true, speciesId: true, level: true, mon: true,
   },
-  item: { slot: true, side: true, text: 'the numeric item id, as a string' },
+  item: {
+    slot: true,
+    side: true,
+    text: 'the numeric item id, as a string',
+    amount: "a SAFARI BALL: the balls left after it (Turn.create's `safari`)",
+  },
   run: { slot: true, side: true, text: true },
   turn: { amount: 'the 1-based turn number', slot: 'present only on a replacement solicitation' },
   over: { text: 'the reason token' },

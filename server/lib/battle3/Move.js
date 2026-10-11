@@ -25,8 +25,9 @@
  * (`Bm._disobey`, engine.lua:1291) and the badge boosts (Damage.js base,
  * Field.js speed) follow the engine, for side a against the computer only
  * (Turn.BADGE_MODES): link rules everywhere else. The first battles (Oak's
- * accuracy and crit gates, Birch's crits) and the Pokemon Tower GHOST (the
- * canceller) follow pret; there is no Pokedude branch.
+ * accuracy and crit gates, Birch's crits), the Pokemon Tower GHOST (the
+ * canceller) and the tutorials (`tutorial`: the old man's and Wally's crits;
+ * the POKe DUDE's crits, accuracy and obedience) follow pret.
  *
  * Multi-value returns as arrays: canInflict -> [ok, reason] (Status.canApply),
  * _adjustDamage -> [dmg, how], _actionMove -> [row, slot, why], and the local
@@ -762,6 +763,10 @@ Ctx.accuracyCheck = function accuracyCheck(mode, printFail) {
       B.say(`${B.nameOf(user)}'s attack missed!`);
     }
   };
+  // pokefirered/src/battle_script_commands.c:1015: the TEACHY TV demos spare
+  // every move of both sides the whole check -- NO_ACC_CALC, Protect and
+  // semi-invulnerability included.
+  if (B.tutorial === 'pokedude') return true;
   if (mode === 'noacc' || mode === 'lockon') {
     if (mode === 'lockon' && this.lockOnActive()) return true;
     if (truthy(target) && truthy(target.semi) && target !== user) {
@@ -1208,6 +1213,8 @@ Bm._obeyLine = function _obeyLine(b, token, tail) {
 // the Lua twin for the prose.
 Bm._disobey = function _disobey(C) {
   const { user } = C;
+  // pokefirered/src/battle_util.c:3149: nothing disobeys in a TEACHY TV demo.
+  if (this.tutorial === 'pokedude') return [null];
   if (!truthy(user.fighter.badgeRules)) return [null];
   const { mon } = user;
   // pret reads the party mon's species, which Transform leaves alone.
@@ -1308,10 +1315,14 @@ M.dynamicMoveType = dynamicMoveType;
 // The first battles' crit rule (Damage.calc `critGate`): 'none' under Birch
 // (pokeemerald battle_script_commands.c:1281 tests the type before Random()),
 // 'void' in Oak's lab until the `damage` lesson (pokefirered :1200 draws
-// Random() first), else null. Both sides alike.
+// Random() first), else null. The tutorials alike: 'none' for the old man
+// (pokefirered :1198) and Wally (pokeemerald :1281), 'void' for the POKe DUDE
+// (pokefirered :1201). Both sides alike.
 Bm.critGate = function critGate() {
   if (this.firstBattle === 'birch') return 'none';
   if (this.firstBattle === 'oak' && !truthy(this.lessons.damage)) return 'void';
+  if (this.tutorial === 'oldMan' || this.tutorial === 'wally') return 'none';
+  if (this.tutorial === 'pokedude') return 'void';
   return null;
 };
 

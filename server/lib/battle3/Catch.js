@@ -38,6 +38,16 @@ const BONUS = {
   2: 20, 3: 15, 4: 10, 5: 15,
 };
 
+// A missed throw's line by its shakes (pret gBallEscapeStringIds, printed by
+// BattleScript_ShakeBallThrow): the bag's balls (Turn.js `_useItem`) and the
+// Safari Ball (Safari.js) alike.
+const SHAKE_TEXT = {
+  0: 'Oh, no! The POKeMON broke free!',
+  1: 'Aww! It appeared to be caught!',
+  2: 'Aargh! Almost had it!',
+  3: 'Shoot! It was so close, too!',
+};
+
 function isBall(item) {
   const n = int(item, 0);
   return n >= 1 && n <= 12;
@@ -140,6 +150,7 @@ module.exports = {
   LUXURY,
   PREMIER,
   BONUS,
+  SHAKE_TEXT,
   isBall,
   multiplier,
   odds,

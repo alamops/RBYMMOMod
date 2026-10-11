@@ -37,6 +37,11 @@
 --   badges    Damage.badgeSet (a K1 badges value -> the badge numbers held, or
 --             null when none survive)
 --   effects   Effects.forbidden, and which EFFECT_* have a status handler
+--   safari    Safari.lua's factors and throws (contract C3's `safari`): the
+--             catch / escape factors, a SAFARI BALL's catch rate, the flee
+--             rate, BAIT / ROCK / the watching turn (FireRed / LeafGreen), GO
+--             NEAR / the POKeBLOCK (Emerald, synthetic tables: the state's
+--             lists are pret index i at JSON element i)
 --
 -- Synthetic numbers only: every stat, power and chart row is invented.
 
@@ -85,7 +90,7 @@ end
 local Sim = need("BattleSim3/init")
 local Damage, Types, Crit, Accuracy = Sim.Damage, Sim.Types, Sim.Crit, Sim.Accuracy
 local Status, Catch, Items, Field = Sim.Status, Sim.Catch, Sim.Items, Sim.Field
-local Rng, Effects = Sim.Rng, Sim.Effects
+local Rng, Effects, Safari = Sim.Rng, Sim.Effects, Sim.Safari
 
 -- ------------------------------------------------------------------
 -- a JSON reader, just enough for the fixture (null -> NULL, not nil)
@@ -414,6 +419,36 @@ each("effects", function(input, kind)
     return { handled = handled }
   end
   error("unknown effects kind " .. tostring(kind), 0)
+end)
+
+each("safari", function(input, kind)
+  if kind == "catchFactor" then
+    return { factor = Safari.catchFactor(input.catchRate) }
+  elseif kind == "escapeFactor" then
+    return { factor = Safari.escapeFactor(input.fleeRate) }
+  elseif kind == "ballCatchRate" then
+    return { catchRate = Safari.ballCatchRate(input.factor) }
+  elseif kind == "fleeRate" then
+    return { rate = Safari.fleeRate(clean(input.state)) }
+  elseif kind == "bait" or kind == "rock" then
+    local s = clean(input.state)
+    Safari[kind](s, input.roll)
+    return { bait = s.bait, rock = s.rock, catchFactor = s.catchFactor }
+  elseif kind == "watch" then
+    local s = clean(input.state)
+    local reaction = Safari.watch(s)
+    return { reaction = reaction, rock = s.rock, bait = s.bait, catchFactor = s.catchFactor }
+  elseif kind == "goNear" then
+    local s = clean(input.state)
+    local closer = Safari.goNear(s)
+    return { closer = closer, goNear = s.goNear, catchFactor = s.catchFactor, escapeFactor = s.escapeFactor }
+  elseif kind == "block" then
+    local s = clean(input.state)
+    Safari.block(s, input.verdict)
+    return { escapeFactor = s.escapeFactor, pkblCounter = s.pkblCounter,
+             pokeblockThrows = s.pokeblockThrows }
+  end
+  error("unknown safari kind " .. tostring(kind), 0)
 end)
 
 -- ------------------------------------------------------------------

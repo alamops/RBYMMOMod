@@ -22,6 +22,7 @@
 --   Effects    secondary effects, stat changes, every status/setup handler
 --   Move       move resolution + the battle's helper surface
 --   Residual   end of turn, battle start, switch-in effects
+--   Safari     the Safari Zone mode (the factors, the throws, the monster's turn)
 --   Turn       the machine (BattleSim2's API)
 --   Events     the C5 vocabulary
 --
@@ -48,6 +49,7 @@ local M = {
   Effects = need("BattleSim3/Effects"),
   Move = need("BattleSim3/Move"),
   Residual = need("BattleSim3/Residual"),
+  Safari = need("BattleSim3/Safari"),
   Events = need("BattleSim3/events"),
   Turn = need("BattleSim3/Turn"),
 }

@@ -454,6 +454,9 @@ M.absorb = function absorb(B, user, target, moveType, power, moveName) {
 // status move does).
 M.applyStatus = function applyStatus(B, holder, victim, status, primary, M_) {
   if (!truthy(victim) || int(victim.mon.hp, 0) <= 0) return false;
+  // SetMoveEffect's TEACHY TV arm (pokefirered/src/battle_script_commands.c:
+  // 2128; Effects.set): no status but sleep lands on side b, silently.
+  if (B.tutorial === 'pokedude' && status !== 'SLP' && victim.side === 'b') return false;
   if (int(victim.substituteHP, 0) > 0 && victim !== (truthy(M_) ? M_.user : M_)) return false;
   const vab = victim.ability;
   const vs = Status.normalise(victim.mon.status);

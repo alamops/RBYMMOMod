@@ -29,7 +29,7 @@ const path = require('node:path');
 const Sim = require('./lib/battle3');
 
 const {
-  Damage, Types, Crit, Accuracy, Status, Catch, Items, Field, Rng, Effects,
+  Damage, Types, Crit, Accuracy, Status, Catch, Items, Field, Rng, Effects, Safari,
 } = Sim;
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim3_vectors.json');
@@ -246,6 +246,38 @@ section('effects', (input, kind) => {
   throw new Error(`unknown effects kind ${kind}`);
 });
 
+section('safari', (input, kind) => {
+  if (kind === 'catchFactor') return { factor: Safari.catchFactor(input.catchRate) };
+  if (kind === 'escapeFactor') return { factor: Safari.escapeFactor(input.fleeRate) };
+  if (kind === 'ballCatchRate') return { catchRate: Safari.ballCatchRate(input.factor) };
+  if (kind === 'fleeRate') return { rate: Safari.fleeRate(clean(input.state)) };
+  if (kind === 'bait' || kind === 'rock') {
+    const s = clean(input.state);
+    Safari[kind](s, input.roll);
+    return { bait: s.bait, rock: s.rock, catchFactor: s.catchFactor };
+  }
+  if (kind === 'watch') {
+    const s = clean(input.state);
+    const reaction = Safari.watch(s);
+    return {
+      reaction, rock: s.rock, bait: s.bait, catchFactor: s.catchFactor,
+    };
+  }
+  if (kind === 'goNear') {
+    const s = clean(input.state);
+    const closer = Safari.goNear(s);
+    return {
+      closer, goNear: s.goNear, catchFactor: s.catchFactor, escapeFactor: s.escapeFactor,
+    };
+  }
+  if (kind === 'block') {
+    const s = clean(input.state);
+    Safari.block(s, input.verdict);
+    return { escapeFactor: s.escapeFactor, pkblCounter: s.pkblCounter, pokeblockThrows: s.pokeblockThrows };
+  }
+  throw new Error(`unknown safari kind ${kind}`);
+});
+
 // ------------------------------------------------------------------
 // Rng properties the fixture cannot state as values (the Lua runner's four)
 // ------------------------------------------------------------------
@@ -286,7 +318,7 @@ test('rng: a coin is not a rota', () => {
 test('every stated key was checked', () => {
   let expected = 0;
   for (const name of ['rng', 'types', 'damage', 'base', 'power', 'crit', 'accuracy', 'speed',
-    'order', 'status', 'catch', 'items', 'badges', 'effects']) {
+    'order', 'status', 'catch', 'items', 'badges', 'effects', 'safari']) {
     for (const c of vectors[name]) expected += Object.keys(c.out).length;
   }
   assert.strictEqual(checked, expected, 'a section skipped some of its cases');

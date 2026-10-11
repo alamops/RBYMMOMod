@@ -36,7 +36,7 @@
 --
 -- `expect` = { events, batches, results, outcome, snapshot }, where outcome is
 -- { battle, outcome, reason, winners?, losers?, catcher?, caughtSpecies?,
--- payDay?, how?, by? } and snapshot is
+-- payDay?, how?, by?, given?, safari? } and snapshot is
 -- the digest { phase, turn, seq, now, deadline, rngState, weather, field =
 -- [{ slot, hp, party }] } -- rngState is the one number that proves both
 -- runtimes drew the same count.  Events compare as canonical JSON (sorted keys),
@@ -261,6 +261,9 @@ local function outcomeOf(out)
   -- contract C3 (docs/plans/gen3-solo-remaining-fights.md): how it ended, by whom
   if out.how then o.how = out.how end
   if out.by then o.by = out.by end
+  -- wave 2 of contract C3: a forced catch's `given = false`, a Safari's spend
+  if out.given ~= nil then o.given = out.given end
+  if out.safari then o.safari = out.safari end
   return o
 end
 

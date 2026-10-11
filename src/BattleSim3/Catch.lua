@@ -28,6 +28,14 @@ M.NET, M.DIVE, M.NEST, M.REPEAT, M.TIMER, M.LUXURY, M.PREMIER = 6, 7, 8, 9, 10, 
 -- pret sBallCatchBonuses (x10), Ultra .. Safari
 M.BONUS = { [2] = 20, [3] = 15, [4] = 10, [5] = 15 }
 
+-- A missed throw's line by its shakes (pret gBallEscapeStringIds, printed by
+-- BattleScript_ShakeBallThrow): the bag's balls (Turn.lua `_useItem`) and the
+-- Safari Ball (Safari.lua) alike.
+M.SHAKE_TEXT = {
+  [0] = "Oh, no! The POKeMON broke free!", [1] = "Aww! It appeared to be caught!",
+  [2] = "Aargh! Almost had it!", [3] = "Shoot! It was so close, too!",
+}
+
 local function int(value, fallback)
   local n = tonumber(value)
   if not n or n ~= n then return fallback end

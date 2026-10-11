@@ -22,8 +22,9 @@
 -- engine.lua:1291) and the badge boosts (Damage.base, Field.speed) follow the
 -- engine, for side a against the computer only (Turn.BADGE_MODES): link rules
 -- everywhere else.  The first battles (Turn.create's `firstBattle`: Oak's
--- accuracy and crit gates, Birch's crits) and the Pokemon Tower GHOST
--- (`ghost`: the canceller) follow pret; there is no Pokedude branch.
+-- accuracy and crit gates, Birch's crits), the Pokemon Tower GHOST (`ghost`:
+-- the canceller) and the tutorials (`tutorial`: the old man's and Wally's
+-- crits; the POKe DUDE's crits, accuracy and obedience) follow pret.
 --
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
@@ -634,6 +635,11 @@ function Ctx:accuracyCheck(mode, printFail)
       B:say(B:nameOf(user) .. "'s attack missed!")
     end
   end
+  -- pokefirered/src/battle_script_commands.c:1015: the TEACHY TV demos
+  -- (`tutorial = "pokedude"`) spare every move of both sides the whole check
+  -- -- NO_ACC_CALC too, Protect and semi-invulnerability included: the arm
+  -- reads no move row and comes before every other test.
+  if B.tutorial == "pokedude" then return true end
   if mode == "noacc" or mode == "lockon" then
     if mode == "lockon" and self:lockOnActive() then return true end
     if target and target.semi and target ~= user then failMsg("fail"); return false end
@@ -1059,6 +1065,8 @@ end
 -- `obedienceFocusPunchExempt`; the fighter's `family`).
 function Bm:_disobey(C)
   local user = C.user
+  -- pokefirered/src/battle_util.c:3149: nothing disobeys in a TEACHY TV demo.
+  if self.tutorial == "pokedude" then return nil end
   if not user.fighter.badgeRules then return nil end
   local mon = user.mon
   -- pret reads the party mon's species, which Transform leaves alone.
@@ -1160,10 +1168,14 @@ M.dynamicMoveType = dynamicMoveType
 -- -- Cmd_critcalc tests BATTLE_TYPE_FIRST_BATTLE before Random() (pokeemerald
 -- battle_script_commands.c:1281), so nothing is drawn -- "void" in Oak's lab
 -- until the `damage` lesson -- Random() first, then the battle type voids it
--- (pokefirered :1200) -- else nil.  Both sides alike.
+-- (pokefirered :1200) -- else nil.  The tutorials alike: "none" for the old
+-- man (pokefirered :1198, before Random()) and Wally (pokeemerald :1281),
+-- "void" for the POKe DUDE (pokefirered :1201, after it).  Both sides alike.
 function Bm:critGate()
   if self.firstBattle == "birch" then return "none" end
   if self.firstBattle == "oak" and not self.lessons.damage then return "void" end
+  if self.tutorial == "oldMan" or self.tutorial == "wally" then return "none" end
+  if self.tutorial == "pokedude" then return "void" end
   return nil
 end
 

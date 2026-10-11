@@ -22,7 +22,11 @@
 --      the cart's random move roll(0,3) per draw until a usable slot, then
 --      roll(0,1) for the target in a fight with two side-a seats (n-1 for
 --      more); the AI's pick roll(0,n-1) over its best-scored slots.  None for
---      Struggle, an Encore, a lock-in, or a flee;
+--      Struggle, an Encore, a lock-in, or a flee -- and none for a seat facing
+--      nobody (every foe seat `noBattler`: it passes).  Under `safari` the
+--      wild monster is never asked: when each turn opens it rolls roll(0,99)
+--      against its flee rate (Safari.lua `_safariDecide`), before anything
+--      else of that turn;
 --   1. battle start: one roll(0,255) per speed-tied group of the switch-in order;
 --      Trace's pick between two or more traceable foes, roll(0, n-1);
 --   2. turn start: Quick Claw roll(0,65535) -- only when two or more seats
@@ -37,7 +41,12 @@
 --      balls -- those draw nothing): any foe Pursuit aimed at the leaving seat
 --      draws as a move, minus the canceller's and the accuracy draws;
 --   5. bag: balls (after other items, fastest thrower first) draw up to four
---      roll(0,65535) (none for a Master Ball, odds > 254, or a GHOST's dodge);
+--      roll(0,65535) (none for a Master Ball, odds > 254, a GHOST's dodge, or
+--      a forced catch).  Under `safari` steps 3-6 are the Safari turn
+--      instead (Safari.lua `_safariTurn`): the trainer's throw -- roll(0,4)
+--      for BAIT / ROCK, up to four roll(0,65535) for a SAFARI BALL, nothing
+--      for GO NEAR, a POKeBLOCK or RUN -- then the monster's flee or watch,
+--      which draws nothing;
 --   6. moves -- and a wild seat's flee, which draws nothing -- in speed order,
 --      each drawing only at the points it reaches:
 --      canceller (freeze roll(0,4); a sleeper with no counter roll(0,3); confusion
@@ -147,6 +156,34 @@
 --     entry's AI script), `spare = true` (Steven: the side is down when every
 --     other entry is), `bagFrom = "<playerId>"` (spend another entry's bag:
 --     one pool, as a pair's A and B share A's items).
+--   * Wave 2's solo-only options (contract C3; the same posture):
+--       safari = { family, balls, goNearCatch?, goNearEscape?, pkblToEscape?,
+--         catchFactor?, escapeFactor? }  the Safari Zone (Safari.lua has the
+--         rules and their pret anchors): a one-on-one wild fight whose side a
+--         fields no battler, whose trainer files `{ action = "safari", throw
+--         = ... }` or RUN, and whose monster flees or watches by itself;
+--         `outcome().safari = { balls, pokeblockThrows }`, and `how =
+--         "balls"` when the last SAFARI BALL misses;
+--       catch = "forced"   every ball thrown catches, three shakes and no roll,
+--         and the monster is not the thrower's: `outcome().given = false`
+--         (pokefirered/src/battle_script_commands.c:9485, pokeemerald :9921);
+--       tutorial = "oldMan" | "wally" | "pokedude"  the tutorial battle types
+--         (BATTLE_TYPE_OLD_MAN_TUTORIAL / WALLY_TUTORIAL / POKEDUDE): each a
+--         forced catch; no crits under oldMan / wally (critcalc tests the type
+--         before Random()); under pokedude a crit is drawn and void (:1201),
+--         every move skips the accuracy check, both sides (:1015), no mon
+--         disobeys (battle_util.c:3149), and no move effect but sleep lands on
+--         side b (:2128);
+--     and a side-entry field, `noBattler = true`: the entry is a trainer with
+--     no battler (the old man; the Safari's player, implied there), side a of
+--     a `wild` fight only, bringing no monsters.  It chooses every turn, holds
+--     its side up (nothing can knock a trainer out), gets away on every RUN,
+--     may use a bag item that needs no party member (a ball, an escape item,
+--     the flute), and sends no `send` / `team` / `faint` / `exp`; a seat
+--     facing only such entries passes its turn (`skip`).  Nothing in the
+--     referee asks whether side a is a human: a scripted party there (Wally's
+--     ZIGZAGOON, the POKe DUDE's) is filed like any seat, and `wildPick` / a
+--     side entry's `ai` stay side b's.
 --
 -- Nothing here raises.  Bad input is refused with nil-plus-reason from `create`
 -- or a plain `false` from `submitChoice`.
@@ -167,6 +204,7 @@ local Effects   = need("BattleSim3/Effects")
 local Move      = need("BattleSim3/Move")
 local Residual  = need("BattleSim3/Residual")
 local Events    = need("BattleSim3/events")
+local Safari    = need("BattleSim3/Safari")
 
 local M = {}
 
@@ -209,11 +247,14 @@ M.FAMILIES = { frlg = true, rse = true }
 M.STATUS_FROM_WIRE = { SLP = "SLP", PSN = "PSN", BRN = "BRN", FRZ = "FRZ", PAR = "PAR", TOX = "TOX" }
 M.STATUS_TO_WIRE = M.STATUS_FROM_WIRE
 
-local ACTIONS = { fight = true, item = true, switch = true, run = true, cancel = true }
+-- `safari` is the Safari Zone's one action (Wire.BATTLE_ACTIONS3, contract
+-- C6): refused by `_normaliseChoice` in every fight that is not `safari`.
+local ACTIONS = { fight = true, item = true, switch = true, run = true, cancel = true, safari = true }
 
 -- Contract C3 (docs/plans/gen3-solo-remaining-fights.md): `outcome().how`.
--- `balls` (out of Safari Balls) and `judge` (the Arena) belong to later waves;
--- they are named here so the vocabulary is closed once.
+-- `balls` is the Safari's last missed ball (Safari.lua); `judge` (the Arena)
+-- belongs to a later wave; both are named here so the vocabulary is closed
+-- once.
 M.HOW = {
   ko = true, run = true, flee = true, teleport = true, roar = true, catch = true,
   forfeit = true, balls = true, judge = true,
@@ -254,6 +295,13 @@ M.GHOSTS = { veiled = true, unveiled = true }
 -- (Emerald's Birch rescue) -- the only wild battles the cart's opponent
 -- controller runs an AI for (pokefirered/src/battle_controller_opponent.c:1355).
 M.WILD_AI = { roamer = true, firstBattle = true }
+
+-- `tutorial`: the old man's catching lesson (FireRed / LeafGreen Viridian),
+-- Wally's (Emerald Petalburg) and the POKe DUDE's TEACHY TV demos.
+M.TUTORIALS = { oldMan = true, wally = true, pokedude = true }
+
+-- `catch`: "forced" is the tutorials' ball (every one catches, nothing given).
+M.CATCHES = { forced = true }
 
 -- How many `Random() & 3` draws `_cartWildChoice` makes before it settles on
 -- the first usable slot: the cart loops until it hits one; a referee never
@@ -432,6 +480,9 @@ local function copyMon(raw, fallback)
     status = status,
     sleepTurns = (status == "SLP") and int(raw.sleepTurns, nil) or nil,
     catchRate = clamp(int(raw.catchRate, 255), 0, 255),
+    -- The species' safariZoneFleeRate (Sheet3 stamps it on a wild sheet), read
+    -- only by a FireRed / LeafGreen `safari` fight (Safari.seat); absent, nil.
+    safariFleeRate = (raw.safariFleeRate ~= nil) and clamp(int(raw.safariFleeRate, 0), 0, 255) or nil,
     moves = moves,
     ivs = copyNumbers(raw.ivs),
     evs = copyNumbers(raw.evs),
@@ -532,6 +583,7 @@ M.Battle = Battle
 
 Move.install(Battle)
 Residual.install(Battle)
+Safari.install(Battle)
 
 Battle.TIE_BREAK_ROLL = M.TIE_BREAK_ROLL
 
@@ -593,10 +645,20 @@ end
 -- opts:
 --   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 --   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
---   wildPick?, firstBattle?, ghost?, rules? (the header's solo-only options),
+--   wildPick?, firstBattle?, ghost?, rules?, safari?, catch?, tutorial? (the
+--   header's solo-only options),
 --   sides = { a = { { playerId, name, mons, bag, seats?, badges?, family?,
---                     spare?, bagFrom? } },
+--                     spare?, bagFrom?, noBattler? } },
 --             b = { { ..., ai? } } }
+--
+-- `safari` (Safari.options / Safari.seat) is refused outside a `wild` fight,
+-- without a family or a ball count, on Emerald without the cart's three
+-- tables, and on FireRed / LeafGreen without the wild sheet's
+-- `safariFleeRate` (or an `escapeFactor`); it makes side a's entry
+-- `noBattler` and turns `firstBattle`, `ghost`, `catch` and `tutorial` off.
+-- `catch` / `tutorial` are read only in wild modes and dropped elsewhere,
+-- silently, as `ghost` is.  `noBattler` anywhere but side a of a `wild` fight,
+-- or with monsters, is refused.
 --
 -- `ai` ("roamer" | "firstBattle") is read only on a wild seat (side b of a
 -- wild mode) and dropped elsewhere, silently; `spare = true` takes the entry
@@ -661,7 +723,20 @@ function M.create(opts)
     rules          = copyRules(opts.rules),
     lessons        = {},                -- the Oak lessons already spoken (`_lesson`)
     mover          = nil,               -- the battler whose action is running (`_fightAction`)
+    -- Wave 2's solo-only options (header).
+    tutorial       = (isWildMode(mode) and M.TUTORIALS[opts.tutorial]) and opts.tutorial or nil,
+    forcedCatch    = nil,               -- `catch = "forced"`, or any `tutorial`
+    safari         = nil,               -- Safari.lua's state, under `safari`
   }, Battle)
+  self.forcedCatch = (isWildMode(mode) and (M.CATCHES[opts.catch] or self.tutorial ~= nil)) or nil
+
+  if opts.safari ~= nil then
+    local state, why = Safari.options(opts.safari, mode)
+    if not state then return nil, why end
+    -- The Safari is its own battle type: no lab, no GHOST, no tutorial.
+    self.safari = state
+    self.firstBattle, self.ghost, self.tutorial, self.forcedCatch = nil, nil, nil, nil
+  end
 
   if type(opts.specialTypes) == "table" then
     local set = {}
@@ -706,6 +781,12 @@ function M.create(opts)
           return nil, "duplicate playerId " .. playerId .. "#" .. seat
         end
       end
+      -- `noBattler` (header): the old man, the Safari's player -- a trainer
+      -- standing alone on side a of a one-on-one wild fight.
+      local noBattler = (entry.noBattler == true) or (self.safari ~= nil and side == "a")
+      if noBattler and not (side == "a" and mode == "wild") then
+        return nil, playerId .. " may field no battler only on side a of a wild fight"
+      end
       local mons = {}
       if type(entry.mons) == "table" then
         for i = 1, #entry.mons do
@@ -714,7 +795,11 @@ function M.create(opts)
           if mon then mons[#mons + 1] = mon end
         end
       end
-      if #mons == 0 then return nil, playerId .. " brought no monsters" end
+      if noBattler then
+        if #mons > 0 then return nil, playerId .. " fields no battler but brought monsters" end
+      elseif #mons == 0 then
+        return nil, playerId .. " brought no monsters"
+      end
       local bag, bagNames = copyBag(entry.bag)
       bagNames = bagNames or {}
       -- K1: the cart's badge rules belong to the player's side of a fight against
@@ -746,7 +831,7 @@ function M.create(opts)
           bag = bag, bagNames = bagNames, active = active,
           connected = true, graceEndsAt = nil, choice = nil, team = nil, fought = {},
           badgeRules = badgeRules or nil, badges = badges, family = family,
-          ai = ai, spare = spare, bagFrom = bagFrom,
+          ai = ai, spare = spare, bagFrom = bagFrom, noBattler = noBattler or nil,
         }
         party[#party + 1] = fighter
         self.fighters[#self.fighters + 1] = fighter
@@ -777,6 +862,11 @@ function M.create(opts)
       if not fighter.spare then holds = true end
     end
     if not holds then return nil, "side " .. side .. " has only spare fighters" end
+  end
+  -- The Safari's factors come from the wild monster (Safari.seat).
+  if self.safari then
+    local ok, why = Safari.seat(self.safari, opts.safari, self.bySide.b[1].mons[1])
+    if not ok then return nil, why end
   end
 
   -- pret battler ids interleave the sides: a1, b1, a2, b2, a3, b3.
@@ -853,10 +943,10 @@ function Battle:_choiceLessons(choice)
 end
 
 -- One roster per party: a shared team's second seat holds the same list, so
--- its first seat speaks for both.
+-- its first seat speaks for both.  A trainer with no battler has no roster.
 function Battle:_syncTeams()
   for _, fighter in ipairs(self.fighters) do
-    if fighter.seats[1] == fighter then
+    if fighter.seats[1] == fighter and not fighter.noBattler then
       local roster = Events.teamString(fighter.mons)
       if roster ~= fighter.team then
         fighter.team = roster
@@ -920,12 +1010,24 @@ end
 -- A `spare` entry never holds its side up: pret's Cmd_checkteamslost counts
 -- only the player's half beside an in-game partner (pokeemerald battle_script_
 -- commands.c:3543), so the fight is lost when the player's mons are down
--- whatever Steven still has.
+-- whatever Steven still has.  A trainer with no battler (`noBattler`) always
+-- holds its side up: nothing on the field can knock it out.
 function Battle:_sideAlive(side)
   for _, fighter in ipairs(self.bySide[side]) do
-    if not fighter.spare and firstLiving(fighter.mons) then return true end
+    if not fighter.spare and (fighter.noBattler or firstLiving(fighter.mons)) then return true end
   end
   return false
+end
+
+-- Whether every seat across from this one fields no battler (`noBattler`):
+-- there is nobody to aim a move at, so the seat passes (`skip`).  On the cart
+-- the old man's ball ends the fight before the WEEDLE's move, and a Safari
+-- monster never chooses one.
+function Battle:_facesNoBattler(fighter)
+  for _, foe in ipairs(self:_foeSeats(fighter)) do
+    if not foe.noBattler then return false end
+  end
+  return true
 end
 
 -- The side's players for an outcome: owners, each once (a shared team's two
@@ -998,6 +1100,8 @@ function Battle:_owes(fighter)
   if fighter.choice ~= nil then return false end
   if fighter.mustReplace then return self:_canRefill(fighter) end
   if self.phase == "replace" then return false end
+  -- A trainer with no battler still chooses every turn.
+  if fighter.noBattler then return true end
   if activeMon(fighter) == nil then return false end
   return true
 end
@@ -1116,6 +1220,9 @@ end
 function Battle:_normaliseChoice(fighter, choice)
   local action = choice.action
 
+  -- The Safari's menu is all its own (Safari.lua `_safariChoice`).
+  if self.safari then return self:_safariChoice(fighter, choice) end
+
   if fighter.mustReplace then
     if action ~= "switch" then return nil end
     local slot = int(choice.slot, nil)
@@ -1128,7 +1235,15 @@ function Battle:_normaliseChoice(fighter, choice)
   end
 
   local b = fighter.b
-  if not b or b.mon.hp <= 0 then return nil end
+  if fighter.noBattler then
+    -- A trainer with no battler (the old man): RUN (`_resolveRuns` lets it
+    -- go), or a bag item that needs no party member -- a ball, an escape
+    -- item, the flute -- which the item arm below is left to check.
+    if action == "run" then return { action = "run" } end
+    if action ~= "item" then return nil end
+  elseif not b or b.mon.hp <= 0 then
+    return nil
+  end
 
   if action == "run" then
     -- A wild seat's own RUN is the cart's opponent RUN: it reaches the cart as
@@ -1199,6 +1314,7 @@ function Battle:_normaliseChoice(fighter, choice)
   if action == "fight" then
     local index = int(choice.move, nil)
     if index == nil then return nil end
+    if self:_facesNoBattler(fighter) then return { action = "skip" } end
     local out = { action = "fight", move = index + 1 }
     if not self:hasUsableMove(b) then
       out.struggle = true
@@ -1272,7 +1388,7 @@ function Battle:submitChoice(playerId, choice)
   if fighter.choice ~= nil then return false end
   if fighter.mustReplace then
     if choice.action ~= "switch" then return false end
-  elseif not activeMon(fighter) then
+  elseif not activeMon(fighter) and not fighter.noBattler then
     return false
   end
 
@@ -1435,6 +1551,8 @@ function Battle:_autoChoice(fighter)
 
   local b = fighter.b
   if not b or b.mon.hp <= 0 then return nil end
+  -- Nobody across to aim at: pass, drawing nothing (`_facesNoBattler`).
+  if self:_facesNoBattler(fighter) then return { action = "skip" } end
   if b.mustRecharge then return { action = "fight", recharge = true, move = b.lastSlot or 1 } end
   if b.lockedNum then return { action = "fight", locked = true, move = b.lockedSlot or 1 } end
 
@@ -1667,10 +1785,14 @@ function Battle:_aiBestSlot(b)
   return considered[self:roll(0, n - 1) + 1]
 end
 
+-- A trainer with no battler has nothing to auto-pick: it passes the turn
+-- (the old man waits; a timed-out Safari trainer throws nothing).
 function Battle:_autoChoiceOrSkip(fighter)
   local auto = self:_autoChoice(fighter)
   if auto then return auto end
-  if self.phase == "choice" and activeMon(fighter) then return { action = "skip" } end
+  if self.phase == "choice" and (activeMon(fighter) or fighter.noBattler) then
+    return { action = "skip" }
+  end
   return nil
 end
 
@@ -1680,7 +1802,7 @@ function Battle:autoPick(playerId)
   if not fighter then return false end
   if fighter.choice ~= nil then return false end
   if self.phase == "replace" and not self:_owes(fighter) then return false end
-  if not fighter.mustReplace and not activeMon(fighter) then return false end
+  if not fighter.mustReplace and not activeMon(fighter) and not fighter.noBattler then return false end
   local auto = self:_autoChoiceOrSkip(fighter)
   if not auto then return false end
   fighter.choice = auto
@@ -1707,6 +1829,8 @@ function Battle:_openTurn()
   self:_syncTeams()
   self:_emit("turn", { amount = self.turn })
   self:_fillForcedChoices()
+  -- The Safari monster's action, decided as the turn opens (Safari.lua).
+  if self.safari then self:_safariDecide() end
   if not self:_anyoneOwes() then
     self.forcedPending = true
     self.deadline = nil
@@ -1989,10 +2113,15 @@ function Battle:_resolveTurn()
   self.resolveDeadline = (self.resolveTimeout > 0) and (self.now + self.resolveTimeout) or nil
 
   self:_beginTurn()
-  if self:_resolveRuns() then return end
-  self:_resolveSwitches()
-  if not self.result then self:_resolveItems() end
-  if not self.result then self:_resolveFights() end
+  if self.safari then
+    -- The trainer's throw, then the monster's flee or watch (Safari.lua).
+    self:_safariTurn()
+  else
+    if self:_resolveRuns() then return end
+    self:_resolveSwitches()
+    if not self.result then self:_resolveItems() end
+    if not self.result then self:_resolveFights() end
+  end
   if not self.result then self:_endTurn() end
   self:_faintSweep()
   self:_drainExp()
@@ -2064,6 +2193,18 @@ function Battle:_resolveRuns()
   end
 
   for _, fighter in ipairs(running) do
+    if fighter.noBattler then
+      -- A trainer with no battler always gets away: the one cart arm for it
+      -- is the Safari's (pokefirered/src/battle_main.c:4414 HandleAction_
+      -- SafariZoneRun: B_OUTCOME_RAN, nothing asked, no roll).
+      fighter.acted = true
+      self:say("Got away safely!")
+      self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
+      local other = fighter.side == "a" and "b" or "a"
+      self:_finish("win", self:_sidePlayers(other), self:_sidePlayers(fighter.side), "run",
+        "run", fighter.side)
+      return true
+    end
     local b = fighter.b
     if b and b.mon.hp > 0 then
       fighter.acted = true
@@ -2232,10 +2373,7 @@ function Battle:_resolveItems()
   end
 end
 
-local SHAKE_TEXT = {
-  [0] = "Oh, no! The POKeMON broke free!", [1] = "Aww! It appeared to be caught!",
-  [2] = "Aargh! Almost had it!", [3] = "Shoot! It was so close, too!",
-}
+local SHAKE_TEXT = Catch.SHAKE_TEXT
 
 function Battle:_caughtSheet(b, ball)
   local mon = b.mon
@@ -2289,6 +2427,25 @@ function Battle:_useItem(fighter)
       self:_emit("ball", { slot = fighter.slot, side = fighter.side, target = foe.slot,
                            amount = -1, text = tostring(item) })
       self:say("It dodged the thrown BALL! This POKeMON can't be caught!")
+      return
+    end
+    if self.forcedCatch then
+      -- `catch = "forced"` / a `tutorial`: pokefirered/src/battle_script_
+      -- commands.c:9485 (BATTLE_TYPE_POKEDUDE | OLD_MAN_TUTORIAL) and
+      -- pokeemerald :9921 (WALLY_TUTORIAL) throw BALL_3_SHAKES_SUCCESS with no
+      -- roll; BattleScript_OldMan_Pokedude_CaughtMessage / BattleScript_
+      -- WallyBallThrow end the fight CAUGHT with no givecaughtmon, so the
+      -- monster is never the thrower's: `given = false`.
+      self:_emit("ball", { slot = fighter.slot, side = fighter.side, target = foe.slot,
+                           amount = 4, text = tostring(item) })
+      self:say("Gotcha! " .. self:nameOf(target) .. " was caught!")
+      local finish = self:_finish("win", self:_sidePlayers(fighter.side),
+        self:_sidePlayers(fighter.side == "a" and "b" or "a"), "catch", "catch", fighter.side)
+      if finish then
+        finish.caught = self:_caughtSheet(target, item)
+        finish.catcher = fighter.owner
+        finish.given = false
+      end
       return
     end
     local caught, shakes = Catch.attempt(item, target, self.rng, {
@@ -2662,13 +2819,16 @@ end
 -- `how` (M.HOW) and `by` (the side whose action ended it) are contract C3's;
 -- both nil for a disconnect or a timeout.  Oak's closing lesson comes right
 -- before `over`: "win" on a KO side a won, "lose" on any other KO, a draw
--- included (HandleEndTurn_BattleLost runs for B_OUTCOME_DREW).
+-- included (HandleEndTurn_BattleLost runs for B_OUTCOME_DREW).  A Safari fight
+-- says what it spent however it ended (`safari = { balls, pokeblockThrows }`),
+-- a disconnect included, so the balls thrown stay thrown.
 function Battle:_finish(outcome, winners, losers, reason, how, by)
   if self.result then return self.result end
   self.result = {
     battle = self.id, outcome = outcome, winners = winners, losers = losers, reason = reason,
     how = how, by = by,
   }
+  if self.safari then self.result.safari = Safari.summary(self.safari) end
   self.phase = "over"
   self.deadline = nil
   self.resolveDeadline = nil

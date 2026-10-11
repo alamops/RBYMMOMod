@@ -116,6 +116,9 @@ function outcomeOf(out) {
   // contract C3 (docs/plans/gen3-solo-remaining-fights.md): how it ended, by whom
   if (out.how) o.how = out.how;
   if (out.by) o.by = out.by;
+  // wave 2 of contract C3: a forced catch's `given = false`, a Safari's spend
+  if (out.given != null) o.given = out.given;
+  if (out.safari) o.safari = out.safari;
   return o;
 }
 

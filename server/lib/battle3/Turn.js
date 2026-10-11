@@ -23,7 +23,10 @@
  *      'cart'` or a side entry's `ai` (`_cartWildChoice`): roll(0,3) per draw
  *      until a usable slot, then roll(0,1) for the target with two side-a
  *      seats (n-1 for more); the AI's pick roll(0,n-1) over its best slots;
- *      none for Struggle, an Encore, a lock-in or a flee;
+ *      none for Struggle, an Encore, a lock-in or a flee -- and none for a
+ *      seat facing nobody (every foe seat `noBattler`: it passes). Under
+ *      `safari` the wild monster is never asked: when each turn opens it rolls
+ *      roll(0,99) against its flee rate (Safari.js `_safariDecide`);
  *   1. battle start: one roll(0,255) per speed-tied group of the switch-in order;
  *      Trace's pick between two or more traceable foes, roll(0, n-1);
  *   2. turn start: Quick Claw roll(0,65535) -- only when two or more seats fight
@@ -37,7 +40,11 @@
  *      not balls -- those draw nothing): any foe Pursuit aimed at the leaving
  *      seat draws as a move, minus the canceller's and the accuracy draws;
  *   5. bag: balls (after other items, fastest thrower first) draw up to four
- *      roll(0,65535) (none for a Master Ball, odds > 254 or a GHOST's dodge);
+ *      roll(0,65535) (none for a Master Ball, odds > 254, a GHOST's dodge or
+ *      a forced catch). Under `safari` steps 3-6 are the Safari turn instead
+ *      (Safari.js `_safariTurn`): roll(0,4) for BAIT / ROCK, up to four
+ *      roll(0,65535) for a SAFARI BALL, nothing for GO NEAR, a POKeBLOCK, RUN
+ *      or the monster's flee or watch;
  *   6. moves (and a wild seat's flee, drawing nothing), in speed order, each
  *      drawing only at the points it reaches (the
  *      full list is in the Lua header and docs/plans/gen3-battle-sheet.md §8;
@@ -70,7 +77,9 @@
  * the prose): `outcome().how` (M.HOW) and `outcome().by`; a wild seat's own
  * RUN is the cart's opponent RUN (`_wildFlee`); the solo-only create options
  * `wildPick`, `firstBattle`, `ghost`, `rules` (M.copyRules) and the side-entry
- * fields `ai`, `spare`, `bagFrom`.
+ * fields `ai`, `spare`, `bagFrom`; wave 2's `safari` (Safari.js), `catch =
+ * 'forced'` (`outcome().given = false`), `tutorial` ('oldMan' | 'wally' |
+ * 'pokedude') and the side-entry field `noBattler`.
  *
  * Shape differences from the Lua, all forced by the language:
  *
@@ -98,6 +107,7 @@ const Effects = require('./Effects.js');
 const Move = require('./Move.js');
 const Residual = require('./Residual.js');
 const Events = require('./events.js');
+const Safari = require('./Safari.js');
 const {
   int, truthy, isTable, own, at, toNumber,
 } = require('./lua.js');
@@ -140,11 +150,14 @@ M.STATUS_FROM_WIRE = {
 };
 M.STATUS_TO_WIRE = M.STATUS_FROM_WIRE;
 
+// `safari` is the Safari Zone's one action (contract C6): refused by
+// `_normaliseChoice` in every fight that is not `safari`.
 const ACTIONS = {
-  fight: true, item: true, switch: true, run: true, cancel: true,
+  fight: true, item: true, switch: true, run: true, cancel: true, safari: true,
 };
 
-// Contract C3: `outcome().how` (`balls` and `judge` belong to later waves).
+// Contract C3: `outcome().how` (`balls` is the Safari's last missed ball;
+// `judge` belongs to a later wave).
 M.HOW = {
   ko: true, run: true, flee: true, teleport: true, roar: true, catch: true, forfeit: true, balls: true, judge: true,
 };
@@ -162,6 +175,12 @@ M.GHOSTS = { veiled: true, unveiled: true };
 
 // A wild side entry's AI script: AI_Roaming or AI_FirstBattle.
 M.WILD_AI = { roamer: true, firstBattle: true };
+
+// `tutorial`: the old man's catching lesson, Wally's and the POKe DUDE's demos.
+M.TUTORIALS = { oldMan: true, wally: true, pokedude: true };
+
+// `catch`: 'forced' is the tutorials' ball (every one catches, nothing given).
+M.CATCHES = { forced: true };
 
 // How many `Random() & 3` draws `_cartWildChoice` makes before it settles on
 // the first usable slot (a referee never freezes).
@@ -360,6 +379,9 @@ function copyMon(raw, fallback) {
     status,
     sleepTurns: (status === 'SLP') ? int(raw.sleepTurns, null) : null,
     catchRate: clamp(int(raw.catchRate, 255), 0, 255),
+    // The species' safariZoneFleeRate, read only by a FireRed / LeafGreen
+    // `safari` fight (Safari.seat); absent, null.
+    safariFleeRate: (raw.safariFleeRate != null) ? clamp(int(raw.safariFleeRate, 0), 0, 255) : null,
     moves,
     ivs: copyNumbers(raw.ivs),
     evs: copyNumbers(raw.evs),
@@ -444,6 +466,7 @@ M.Battle = Battle;
 
 Move.install(Battle);
 Residual.install(Battle);
+Safari.install(Battle);
 
 Battle.TIE_BREAK_ROLL = M.TIE_BREAK_ROLL;
 Battle.prototype.TIE_BREAK_ROLL = M.TIE_BREAK_ROLL;
@@ -529,9 +552,19 @@ Battle.prototype._sendEvent = function _sendEvent(fighter) {
 // opts:
 //   id, mode, seed, typeTable (alias chart), specialTypes, movePool, terrain,
 //   weather, underwater, choiceTimeout, reconnectGrace, resolveTimeout, now,
-//   wildPick?, firstBattle?, ghost?, rules? (the header's solo-only options),
+//   wildPick?, firstBattle?, ghost?, rules?, safari?, catch?, tutorial? (the
+//   header's solo-only options),
 //   sides = { a: [{ playerId, name, mons, bag, seats?, badges?, family?, spare?,
-//                   bagFrom? }], b: [{ ..., ai? }] }
+//                   bagFrom?, noBattler? }], b: [{ ..., ai? }] }
+//
+// `safari` (Safari.options / Safari.seat) is refused outside a `wild` fight,
+// without a family or a ball count, on Emerald without the cart's three
+// tables, and on FireRed / LeafGreen without the wild sheet's
+// `safariFleeRate` (or an `escapeFactor`); it makes side a's entry
+// `noBattler` and turns `firstBattle`, `ghost`, `catch` and `tutorial` off.
+// `catch` / `tutorial` are read only in wild modes and dropped elsewhere.
+// `noBattler` anywhere but side a of a `wild` fight, or with monsters, is
+// refused.
 //
 // `ai` ('roamer' | 'firstBattle') is read only on a wild seat and dropped
 // elsewhere, silently; `spare = true` takes the entry out of its side's
@@ -602,7 +635,25 @@ function attempt(opts) {
     rules: copyRules(opts.rules),
     lessons: {}, // the Oak lessons already spoken (`_lesson`)
     mover: null, // the battler whose action is running (`_fightAction`)
+    // Wave 2's solo-only options (header).
+    tutorial: (isWildMode(mode) && typeof opts.tutorial === 'string' && own(M.TUTORIALS, opts.tutorial))
+      ? opts.tutorial : null,
+    forcedCatch: null, // `catch = 'forced'`, or any `tutorial`
+    safari: null, // Safari.js's state, under `safari`
   });
+  self.forcedCatch = (isWildMode(mode) && ((typeof opts.catch === 'string' && own(M.CATCHES, opts.catch))
+    || self.tutorial != null)) ? true : null;
+
+  if (opts.safari != null) {
+    const [state, why] = Safari.options(opts.safari, mode);
+    if (!state) return refuse(why);
+    // The Safari is its own battle type: no lab, no GHOST, no tutorial.
+    self.safari = state;
+    self.firstBattle = null;
+    self.ghost = null;
+    self.tutorial = null;
+    self.forcedCatch = null;
+  }
 
   if (isTable(opts.specialTypes)) {
     const set = {};
@@ -654,6 +705,12 @@ function attempt(opts) {
           return refuse(`duplicate playerId ${playerId}#${seat}`);
         }
       }
+      // `noBattler` (header): the old man, the Safari's player -- a trainer
+      // standing alone on side a of a one-on-one wild fight.
+      const noBattler = (entry.noBattler === true) || (self.safari != null && side === 'a');
+      if (noBattler && !(side === 'a' && mode === 'wild')) {
+        return refuse(`${playerId} may field no battler only on side a of a wild fight`);
+      }
       const mons = [];
       if (isTable(entry.mons)) {
         const n = len(entry.mons);
@@ -663,7 +720,11 @@ function attempt(opts) {
           if (mon) mons.push(mon);
         }
       }
-      if (mons.length === 0) return refuse(`${playerId} brought no monsters`);
+      if (noBattler) {
+        if (mons.length > 0) return refuse(`${playerId} fields no battler but brought monsters`);
+      } else if (mons.length === 0) {
+        return refuse(`${playerId} brought no monsters`);
+      }
       const [bag, names] = copyBag(entry.bag);
       const bagNames = names || {};
       // K1: the cart's badge rules belong to the player's side of a fight
@@ -719,6 +780,7 @@ function attempt(opts) {
           ai,
           spare,
           bagFrom,
+          noBattler: noBattler ? true : null,
         };
         party.push(fighter);
         self.fighters.push(fighter);
@@ -749,6 +811,11 @@ function attempt(opts) {
       if (!fighter.spare) holds = true;
     }
     if (!holds) return refuse(`side ${side} has only spare fighters`);
+  }
+  // The Safari's factors come from the wild monster (Safari.seat).
+  if (self.safari) {
+    const [ok, why] = Safari.seat(self.safari, opts.safari, self.bySide.b[0].mons[0]);
+    if (!ok) return refuse(why);
   }
 
   // pret battler ids interleave the sides: a1, b1, a2, b2, a3, b3.
@@ -833,9 +900,10 @@ Battle.prototype._choiceLessons = function _choiceLessons(choice) {
 
 // One roster per party: a shared team's second seat holds the same list, so
 // its first seat speaks for both.
+// One roster per party; a trainer with no battler has none.
 Battle.prototype._syncTeams = function _syncTeams() {
   for (const fighter of this.fighters) {
-    if (fighter.seats[0] === fighter) {
+    if (fighter.seats[0] === fighter && !truthy(fighter.noBattler)) {
       const roster = Events.teamString(fighter.mons);
       if (roster !== fighter.team) {
         fighter.team = roster;
@@ -896,12 +964,23 @@ Battle.prototype._autoTarget = function _autoTarget(fighter) {
 
 // A `spare` entry never holds its side up: pret's Cmd_checkteamslost counts
 // only the player's half beside an in-game partner (pokeemerald battle_script_
-// commands.c:3543).
+// commands.c:3543). A trainer with no battler always holds its side up.
 Battle.prototype._sideAlive = function _sideAlive(side) {
   for (const fighter of this.bySide[side]) {
-    if (!truthy(fighter.spare) && firstLiving(fighter.mons) != null) return true;
+    if (!truthy(fighter.spare) && (truthy(fighter.noBattler) || firstLiving(fighter.mons) != null)) {
+      return true;
+    }
   }
   return false;
+};
+
+// Whether every seat across from this one fields no battler (`noBattler`):
+// nobody to aim at, so the seat passes (`skip`).
+Battle.prototype._facesNoBattler = function _facesNoBattler(fighter) {
+  for (const foe of this._foeSeats(fighter)) {
+    if (!truthy(foe.noBattler)) return false;
+  }
+  return true;
 };
 
 // The side's players for an outcome: owners, each once (a shared team's two
@@ -976,6 +1055,8 @@ Battle.prototype._owes = function _owes(fighter) {
   if (fighter.choice != null) return false;
   if (truthy(fighter.mustReplace)) return this._canRefill(fighter);
   if (this.phase === 'replace') return false;
+  // A trainer with no battler still chooses every turn.
+  if (truthy(fighter.noBattler)) return true;
   if (activeMon(fighter) == null) return false;
   return true;
 };
@@ -1097,6 +1178,9 @@ Battle.prototype._switchBlocked = function _switchBlocked(b) {
 Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
   const { action } = choice;
 
+  // The Safari's menu is all its own (Safari.js `_safariChoice`).
+  if (this.safari) return this._safariChoice(fighter, choice);
+
   if (truthy(fighter.mustReplace)) {
     if (action !== 'switch') return null;
     const slot = int(choice.slot, null);
@@ -1109,7 +1193,14 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
   }
 
   const { b } = fighter;
-  if (!b || b.mon.hp <= 0) return null;
+  if (truthy(fighter.noBattler)) {
+    // A trainer with no battler: RUN, or a bag item that needs no party
+    // member (a ball, an escape item, the flute), left to the item arm.
+    if (action === 'run') return { action: 'run' };
+    if (action !== 'item') return null;
+  } else if (!b || b.mon.hp <= 0) {
+    return null;
+  }
 
   if (action === 'run') {
     // A wild seat's own RUN is the cart's opponent RUN: AI_CHOICE_FLEE arrives
@@ -1178,6 +1269,7 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
   if (action === 'fight') {
     const index = int(choice.move, null);
     if (index == null) return null;
+    if (this._facesNoBattler(fighter)) return { action: 'skip' };
     const out = { action: 'fight', move: index + 1 };
     if (!truthy(this.hasUsableMove(b))) {
       out.struggle = true;
@@ -1256,7 +1348,7 @@ Battle.prototype.submitChoice = function submitChoice(playerId, choice) {
   if (fighter.choice != null) return false;
   if (truthy(fighter.mustReplace)) {
     if (choice.action !== 'switch') return false;
-  } else if (!activeMon(fighter)) {
+  } else if (!activeMon(fighter) && !truthy(fighter.noBattler)) {
     return false;
   }
 
@@ -1439,6 +1531,8 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
 
   const { b } = fighter;
   if (!b || b.mon.hp <= 0) return null;
+  // Nobody across to aim at: pass, drawing nothing (`_facesNoBattler`).
+  if (this._facesNoBattler(fighter)) return { action: 'skip' };
   if (truthy(b.mustRecharge)) return { action: 'fight', recharge: true, move: orv(b.lastSlot, 1) };
   if (truthy(b.lockedNum)) return { action: 'fight', locked: true, move: orv(b.lockedSlot, 1) };
 
@@ -1675,10 +1769,13 @@ Battle.prototype._aiBestSlot = function _aiBestSlot(b) {
   return considered[this.roll(0, n - 1)];
 };
 
+// A trainer with no battler has nothing to auto-pick: it passes the turn.
 Battle.prototype._autoChoiceOrSkip = function _autoChoiceOrSkip(fighter) {
   const auto = this._autoChoice(fighter);
   if (auto) return auto;
-  if (this.phase === 'choice' && activeMon(fighter)) return { action: 'skip' };
+  if (this.phase === 'choice' && (activeMon(fighter) || truthy(fighter.noBattler))) {
+    return { action: 'skip' };
+  }
   return null;
 };
 
@@ -1688,7 +1785,7 @@ Battle.prototype.autoPick = function autoPick(playerId) {
   if (!fighter) return false;
   if (fighter.choice != null) return false;
   if (this.phase === 'replace' && !this._owes(fighter)) return false;
-  if (!truthy(fighter.mustReplace) && !activeMon(fighter)) return false;
+  if (!truthy(fighter.mustReplace) && !activeMon(fighter) && !truthy(fighter.noBattler)) return false;
   const auto = this._autoChoiceOrSkip(fighter);
   if (!auto) return false;
   fighter.choice = auto;
@@ -1715,6 +1812,8 @@ Battle.prototype._openTurn = function _openTurn() {
   this._syncTeams();
   this._emit('turn', { amount: this.turn });
   this._fillForcedChoices();
+  // The Safari monster's action, decided as the turn opens (Safari.js).
+  if (this.safari) this._safariDecide();
   if (!this._anyoneOwes()) {
     this.forcedPending = true;
     this.deadline = null;
@@ -2031,10 +2130,15 @@ Battle.prototype._resolveTurn = function _resolveTurn() {
   this.resolveDeadline = (this.resolveTimeout > 0) ? (this.now + this.resolveTimeout) : null;
 
   this._beginTurn();
-  if (this._resolveRuns()) return;
-  this._resolveSwitches();
-  if (!truthy(this.result)) this._resolveItems();
-  if (!truthy(this.result)) this._resolveFights();
+  if (this.safari) {
+    // The trainer's throw, then the monster's flee or watch (Safari.js).
+    this._safariTurn();
+  } else {
+    if (this._resolveRuns()) return;
+    this._resolveSwitches();
+    if (!truthy(this.result)) this._resolveItems();
+    if (!truthy(this.result)) this._resolveFights();
+  }
   if (!truthy(this.result)) this._endTurn();
   this._faintSweep();
   this._drainExp();
@@ -2104,6 +2208,17 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
   }
 
   for (const fighter of running) {
+    if (truthy(fighter.noBattler)) {
+      // A trainer with no battler always gets away (HandleAction_SafariZoneRun,
+      // pokefirered/src/battle_main.c:4414: nothing asked, no roll).
+      fighter.acted = true;
+      this.say('Got away safely!');
+      this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
+      const other = fighter.side === 'a' ? 'b' : 'a';
+      this._finish('win', this._sidePlayers(other), this._sidePlayers(fighter.side), 'run',
+        'run', fighter.side);
+      return true;
+    }
     const { b } = fighter;
     if (b && b.mon.hp > 0) {
       fighter.acted = true;
@@ -2276,12 +2391,7 @@ Battle.prototype._resolveItems = function _resolveItems() {
   }
 };
 
-const SHAKE_TEXT = {
-  0: 'Oh, no! The POKeMON broke free!',
-  1: 'Aww! It appeared to be caught!',
-  2: 'Aargh! Almost had it!',
-  3: 'Shoot! It was so close, too!',
-};
+const SHAKE_TEXT = Catch.SHAKE_TEXT;
 
 Battle.prototype._caughtSheet = function _caughtSheet(b, ball) {
   const { mon } = b;
@@ -2371,6 +2481,27 @@ Battle.prototype._useItem = function _useItem(fighter) {
         text: String(item),
       });
       this.say("It dodged the thrown BALL! This POKeMON can't be caught!");
+      return;
+    }
+    if (truthy(this.forcedCatch)) {
+      // `catch = 'forced'` / a `tutorial` (pokefirered/src/battle_script_
+      // commands.c:9485, pokeemerald :9921): three shakes and caught, no roll,
+      // no givecaughtmon -- `given = false`.
+      this._emit('ball', {
+        slot: fighter.slot,
+        side: fighter.side,
+        target: foe.slot,
+        amount: 4,
+        text: String(item),
+      });
+      this.say(`Gotcha! ${this.nameOf(target)} was caught!`);
+      const finish = this._finish('win', this._sidePlayers(fighter.side),
+        this._sidePlayers(fighter.side === 'a' ? 'b' : 'a'), 'catch', 'catch', fighter.side);
+      if (finish) {
+        finish.caught = this._caughtSheet(target, item);
+        finish.catcher = fighter.owner;
+        finish.given = false;
+      }
       return;
     }
     const [caught, shakes] = Catch.attempt(item, target, this.rng, {
@@ -2771,7 +2902,8 @@ Battle.prototype._checkOver = function _checkOver() {
 
 // `how` (M.HOW) and `by` (the side whose action ended it) are contract C3's;
 // both absent for a disconnect or a timeout. Oak's closing lesson comes right
-// before `over`: 'win' on a KO side a won, 'lose' on any other KO.
+// before `over`: 'win' on a KO side a won, 'lose' on any other KO. A Safari
+// fight says what it spent however it ended (`safari`).
 Battle.prototype._finish = function _finish(outcome, winners, losers, reason, how, by) {
   if (truthy(this.result)) return this.result;
   // nil winners / losers in the Lua are absent keys, not null ones.
@@ -2780,6 +2912,7 @@ Battle.prototype._finish = function _finish(outcome, winners, losers, reason, ho
   if (losers != null) result.losers = losers;
   if (how != null) result.how = how;
   if (by != null) result.by = by;
+  if (this.safari) result.safari = Safari.summary(this.safari);
   this.result = result;
   this.phase = 'over';
   this.deadline = null;

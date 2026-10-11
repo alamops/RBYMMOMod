@@ -361,6 +361,9 @@ end
 -- status move does).
 function M.applyStatus(B, holder, victim, status, primary, M_)
   if not victim or int(victim.mon.hp, 0) <= 0 then return false end
+  -- SetMoveEffect's TEACHY TV arm (pokefirered/src/battle_script_commands.c:
+  -- 2128; Effects.set): no status but sleep lands on side b, silently.
+  if B.tutorial == "pokedude" and status ~= "SLP" and victim.side == "b" then return false end
   if int(victim.substituteHP, 0) > 0 and victim ~= (M_ and M_.user) then return false end
   local vab = victim.ability
   local vs = Status.normalise(victim.mon.status)
