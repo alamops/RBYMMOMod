@@ -128,6 +128,11 @@ tests/gen3_solo.lua
 tests/gen3_solo_double.lua
 tests/gen3_solo_brain.lua
 tests/gen3_doors.lua
+tests/gen3_solo_legend.lua
+tests/gen3_solo_facility.lua
+tests/gen3_solo_pairs.lua
+tests/gen3_solo_first.lua
+tests/fixtures/gen3_solo_dbl_rig.lua
 tests/gen3_ui.lua
 tests/trade3.lua
 tests/battle_sim3_turn.lua

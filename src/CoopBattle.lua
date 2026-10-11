@@ -1604,17 +1604,51 @@ function M:say(text)
   -- line may still carry the printer's raw codes -- MediatedBattle:say's two
   -- rules, which its 1v1 twin of this fight has always applied.
   if self.soloDouble and type(text) == "string" then
+    local before, said = #self.messages, text
     if text:find("\\", 1, true) then text = Exp3.cleanText(text) end
     if text:find("\n%s*\n") then
       for part in (text .. "\n\n"):gmatch("(.-)\n%s*\n%s*") do
         if part ~= "" then self:say(part) end
       end
-      return
+    else
+      for _, page in ipairs(pageBoxText(text)) do
+        self.messages[#self.messages + 1] = page
+      end
     end
+    self:slideInForSpeech3(said, before)
+    return
   end
   for _, page in ipairs(pageBoxText(text)) do
     self.messages[#self.messages + 1] = page
   end
+end
+
+-- A lone trainer's own speech at the end of a solo double -- its lose text
+-- after "<PLAYER> defeated <TRAINER>!" (pret BattleScript_LocalTrainerBattleWon:
+-- `trainerslidein BS_ATTACKER`, then STRINGID_TRAINER1LOSETEXT), or its win
+-- text over a loss (BattleScript_RivalBattleLost, Emerald's
+-- LocalBattleLostPrintTrainersWinText: `trainerslidein`, then
+-- STRINGID_TRAINER1WINTEXT) -- is said by src/SoloBattle.lua as the trainer
+-- record's own `defeatText` / `victoryText` (M:_trainerWon3, M:_settle3), the
+-- table this screen holds as `trainer`.  The trainer slides back in with the
+-- speech's first page, onto the classic page where the cart's
+-- OpponentHandleTrainerSlide stops it (`gen3Figures3`, M.END_PIC_X3), and
+-- stays for the rest of the ending -- a pair's ending's rule (`sayTrainer3`),
+-- which `sayPairDefeated3` and the kinds drive themselves.  `before` is where
+-- the speech's pages begin in the queue.  True when it tagged one.
+function M:slideInForSpeech3(text, before)
+  if not self.soloDouble or self.pair3 then return false end
+  local t = type(self.trainer) == "table" and self.trainer or nil
+  if not t or type(text) ~= "string" or text == "" then return false end
+  if text ~= t.defeatText and text ~= t.victoryText then return false end
+  local first = self.messages[(tonumber(before) or 0) + 1]
+  if first == nil then return false end
+  if type(first) ~= "table" then
+    first = { text = first }
+    self.messages[before + 1] = first
+  end
+  if first.trainer3 == nil then first.trainer3 = "a" end
+  return true
 end
 
 function M:mySlot() return self.sim:slot(self.mine) end
@@ -7540,6 +7574,11 @@ local FX_SPAN = {
   dig    = 0.45,
   fly    = 0.45,
   emerge = 0.35,
+  -- Gen 3's general clips move the monster itself (Vfx.GENERAL_LOOK3's motion
+  -- beats; Battlefield.FX_MOTION_SPAN is the one clock both screens read).
+  sway    = Battlefield.FX_MOTION_SPAN.sway,
+  nod     = Battlefield.FX_MOTION_SPAN.nod,
+  tremble = Battlefield.FX_MOTION_SPAN.tremble,
   -- Mid-battle evolution movie. The real lifetime is EvolveFx.MOVIE_SECONDS
   -- (the cart's 368-frame flash); this default is only what emitFx needs to
   -- accept the kind, and startEvolve overwrites duration.
@@ -7754,8 +7793,12 @@ end
 -- The fields a `vfx` record carries beyond the shared kind / slot / side / t.
 -- `fromSlot` is a *field slot*; `battlefieldFxCtx` turns it into the seat index
 -- Battlefield matches on, the same projection every other field here gets.
+-- `fromTrainer` ("ally" | "foe") is a throw from that side's trainer figure
+-- rather than from a seat, and `wait` a motion beat's rest before it moves
+-- (Gen 3's general clips, `startGeneralLook3`).
 local VFX_KEYS = {
   "style", "palette", "delivery", "scale", "intensity", "seed", "fromSlot",
+  "fromTrainer", "wait",
 }
 
 -- Most wobbles one SHAKE row is allowed to spend. Gen 1 counts three; the
@@ -7825,7 +7868,10 @@ end
 --
 -- A nil spec draws nothing: the catalogue answers nil for a thrown ball (which
 -- already has a whole flow of its own) and for an item with no effect.
-function M:emitVfx(spec, targetSlot, fromSlot)
+--
+-- `fromTrainer` ("ally" | "foe"), when given, launches a travelling look from
+-- that side's trainer figure instead of a seat (Battlefield `vfxOrigin`).
+function M:emitVfx(spec, targetSlot, fromSlot, fromTrainer)
   if type(spec) ~= "table" then return nil end
   if not self:usesBattlefield() then return nil end
   if targetSlot == nil then return nil end
@@ -7841,7 +7887,50 @@ function M:emitVfx(spec, targetSlot, fromSlot)
     duration = spec.duration,
     seed = self.vfxSeed,
     fromSlot = fromSlot,
+    fromTrainer = (fromTrainer == "ally" or fromTrainer == "foe") and fromTrainer or nil,
   })
+end
+
+-- ------- Gen 3's general clips (Vfx.GENERAL_LOOK3)
+--
+-- An `anim` row the Gen 3 referee sent for something that is not a move -- a
+-- monster too scared to move, the GHOST's "Get out...", the SILPH SCOPE, the
+-- Safari's throws (pret gBattleAnims_General; `medRows` marks them
+-- `general3` and quiet, so nobody shouts and nobody lunges).  Each beat of
+-- the look goes where the cart plays it (Vfx `on`): the battler the event
+-- names, our first seat (pret PLAYER_LEFT) or theirs (OPPONENT_LEFT); a
+-- thrown beat leaves our trainer's figure (`from = "trainer"`); a motion
+-- beat moves the monster itself.  Answers how long the longest beat lasts --
+-- the cart's battle script waits for a `playanimation` to finish, so the
+-- queue is held as long (`startAnim`) -- or nil when nothing was drawn.
+function M:startGeneralLook3(row)
+  self.moveVfx = nil
+  if not self:usesBattlefield() or type(row) ~= "table" then return nil end
+  local beats = Vfx.forGeneral3(row.anim, row.amount)
+  if not beats then return nil end
+  local event = row.from
+  if event == nil then
+    local isFoe = self:actorIsFoe(row)
+    if isFoe ~= nil then event = self:seatOnSide(isFoe) end
+  end
+  local own, foe = self:seatOnSide(false), self:seatOnSide(true)
+  local span = 0
+  for _, beat in ipairs(beats) do
+    local at = event
+    if beat.on == "own" then at = own elseif beat.on == "foe" then at = foe end
+    if at ~= nil then
+      local fx
+      if beat.motion then
+        fx = self:emitFx(beat.motion, at, nil, { duration = beat.duration, wait = beat.wait })
+      else
+        fx = self:emitVfx(beat, at, nil, beat.from == "trainer" and "ally" or nil)
+      end
+      local life = fx and tonumber(fx.duration) or 0
+      if life > span then span = life end
+    end
+  end
+  if span <= 0 then return nil end
+  return span
 end
 
 function M:battlerAt(slotIndex)
@@ -8467,6 +8556,9 @@ function M:battlefieldFxCtx(allySeats, foeSeats)
           local row = {
             kind = fx.kind, side = fx.side, seatIndex = seatIndex, t = fx.t,
             own = fx.own,
+            -- A general clip's motion beat resting before it moves (nil on
+            -- everything else).
+            wait = fx.wait,
           }
           if fx.kind == "vfx" then
             row.style = fx.style
@@ -8475,6 +8567,9 @@ function M:battlefieldFxCtx(allySeats, foeSeats)
             row.scale = fx.scale
             row.intensity = fx.intensity
             row.seed = fx.seed
+            -- A throw from a trainer's figure, not a seat (Battlefield
+            -- `vfxOrigin`): the Safari's, launched from our edge.
+            row.fromTrainer = fx.fromTrainer
             -- The launching seat, projected the same way the target was. A
             -- thrower whose own seat has left the field publishes none, and
             -- `Battlefield.drawVfx` degrades a travelling delivery to a burst
@@ -9200,6 +9295,20 @@ function M:startAnim(row)
   self.animHold = nil
   self.animDwell = nil
   self.pendingHit = nil
+  -- One of Gen 3's general clips (`medRows`' `general3`): its own look on the
+  -- arena, held while it plays -- the cart's `playanimation` is waited on
+  -- before the script goes on -- and nothing for a move's lunge, hit or the
+  -- engine's AnimPlayer, which knows no such id.  Off the arena it is a beat
+  -- with nothing to draw.
+  if row.general3 then
+    local span = self:startGeneralLook3(row)
+    if span then
+      self.animHold = span
+      return true
+    end
+    self.anim = nil
+    return false
+  end
   -- The arena's half of the same row. The attacker leans in for a real move;
   -- the markers are the throw itself -- the arc, the recall, each wobble and
   -- the burst -- one per queued row, each held for as long as it plays.
@@ -11608,12 +11717,20 @@ function M:medRows(msg)
       local list = (behind or hudHeld) and {} or rows
       local mon = slot and slot.battler and slot.battler.mon
       local look = Vfx.forStatusAnim(anim, mon and mon.status)
+      -- One of Gen 3's general clips (Vfx.isGeneral3: a scared monster, the
+      -- GHOST, the SILPH SCOPE, the Safari's throws): nobody's order, so
+      -- quiet, and its own look (`startGeneralLook3`).  A solo double's only
+      -- -- co-op refuses every fight that sends one (contract C1) and reads
+      -- its rows as it always did -- and never a Safari's, so ROCK_THROW stays
+      -- the move.
+      local general = (self.gen3 and self.soloDouble and Vfx.isGeneral3(anim, false)) or nil
       list[#list + 1] = {
         kind = "anim", anim = anim, from = index,
         amount = msg.amount,
         -- K22: a beat that is not its user's own use of the move -- the look
         -- alone, no callout (`splitCalloutBeat`), no lunge (`startAnim`).
-        quiet = msg.quiet == true or nil,
+        quiet = (msg.quiet == true or general) or nil,
+        general3 = general,
         -- Viewer-relative: this client's ally side faces as the player.
         attackerIsPlayer = not self:foeSide(index),
         -- Gen 3 names the move's first target (C5 §7.1 `target`, a field
@@ -15851,33 +15968,44 @@ function M:trainerFill3()
   return fill
 end
 
--- The opening line (`enter`): a lone trainer's "<TRAINER>\nwould like to
--- battle!" -- this screen's sentence, as it always was -- and a pair's two at
--- once in the cart's words (pret battle_message.c:2015 -- the two trainers,
--- and Steven's two, INGAME_PARTNER -- sText_TwoTrainersWantToBattle).
+-- The opening line (`enter`), in the cart's words out of the player's own
+-- text pack (STRINGID_INTROMSG with the trainer fill; pret
+-- battle_message.c:2015): a lone trainer's sText_Trainer1WantsToBattle,
+-- "<CLASS> <NAME>\nwould like to battle!", and a pair's two at once
+-- (sText_TwoTrainersWantToBattle -- the two trainers, and Steven's two,
+-- INGAME_PARTNER), each with the cart's own line breaks and its `\p` a page
+-- of its own (`say`).  This screen's sentence without the text pack.  Off a
+-- solo double -- a co-op trainer fight on Gen 3 -- the screen's sentence, as
+-- it always was.
 function M:openingLine3()
   local pair = self.soloDouble and self.pair3 or nil
   if pair then
     return Gen3.battleText("STRINGID_INTROMSG", self:trainerFill3())
       or ("%s and\n%s\nwant to battle!"):format(pair.labelA, pair.labelB)
   end
-  return ("%s\nwould like to battle!"):format(self:trainerIntroName())
+  local text = self.soloDouble and Gen3.battleText("STRINGID_INTROMSG", self:trainerFill3()) or nil
+  return text or ("%s\nwould like to battle!"):format(self:trainerIntroName())
 end
 
--- A pair's replacement send-out, in its own trainer's name (pret
--- battle_message.c:2141 STRINGID_SWITCHINMON: TWO_OPPONENTS -- battler 1
--- sText_Trainer1SentOutPkmn2, battler 3 sText_Trainer2SentOutPkmn), or nil
--- for every other seat and fight (the caller's line).
+-- A solo double's trainer replacement send-out, in the cart's words
+-- (STRINGID_SWITCHINMON, pret battle_message.c:2141, the battler that is
+-- coming out -- slot 3 battler 1, slot 4 battler 3): a pair's in its own
+-- trainer's name (TWO_OPPONENTS -- battler 1 sText_Trainer1SentOutPkmn2,
+-- battler 3 sText_Trainer2SentOutPkmn), a lone trainer's in its own whichever
+-- seat it fills (sText_Trainer1SentOutPkmn2, "<CLASS> <NAME> sent\nout X!").
+-- Without the text pack, the screen's spelling of it; nil for every other seat
+-- and fight (the caller's line).
 function M:foeSendLine3(index, name)
-  local pair = self.soloDouble and self.pair3 or nil
-  if not (pair and self:foeSide(index)) then return nil end
+  if not (self.soloDouble and self:foeSide(index)) then return nil end
+  local pair = self.pair3
   local fill = self:trainerFill3()
   fill.side, fill.double = 1, true
-  fill.switchBattler = (index == pair.slotB) and 3 or 1
+  fill.switchBattler = (index == (pair and pair.slotB or 4)) and 3 or 1
   fill.buff1 = name
   local text = Gen3.battleText("STRINGID_SWITCHINMON", fill)
   if text then return text end
-  local label = (index == pair.slotB) and pair.labelB or pair.labelA
+  local label = self:trainerIntroName()
+  if pair then label = (index == pair.slotB) and pair.labelB or pair.labelA end
   return ("%s sent out\n%s!"):format(label, tostring(name))
 end
 
@@ -15916,7 +16044,8 @@ end
 -- (trainerslidein BS_ATTACKER / trainerslideout B_POSITION_OPPONENT_LEFT /
 -- trainerslidein BS_FAINTED).  The prize line that follows is the caller's
 -- (the two trainers' money summed, battle_script_commands.c:5624).  False
--- off a pair: a lone trainer's ending is said as it always was.
+-- off a pair: a lone trainer's ending is src/SoloBattle.lua's own lines, its
+-- trainer sliding in for its speech by itself (`slideInForSpeech3`).
 function M:sayPairDefeated3()
   local pair = self.soloDouble and self.pair3 or nil
   if not pair then return false end

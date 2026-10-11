@@ -3836,6 +3836,12 @@ do
         return ("%s %s SENT\nOUT %s!"):format(fill.trainer2Class, fill.trainer2Name, fill.buff1)
       end
       return ("%s %s SENT\nOUT %s!"):format(fill.trainer1Class, fill.trainer1Name, fill.buff1)
+    -- A lone trainer (W2-UC2): sText_Trainer1WantsToBattle and, for either of
+    -- its seats, sText_Trainer1SentOutPkmn2 -- the cart's own line breaks.
+    elseif id == "STRINGID_INTROMSG" and fill.trainer and not fill.twoOpponents then
+      return ("%s %s\nWOULD LIKE TO BATTLE!"):format(fill.trainer1Class, fill.trainer1Name)
+    elseif id == "STRINGID_SWITCHINMON" and fill.side == 1 and not fill.twoOpponents then
+      return ("%s %s SENT\nOUT %s!"):format(fill.trainer1Class, fill.trainer1Name, fill.buff1)
     elseif id == "STRINGID_TWOENEMIESDEFEATED" and fill.twoOpponents then
       return ("%s %s AND\n%s %s\nWERE DEFEATED!"):format(fill.trainer1Class, fill.trainer1Name,
         fill.trainer2Class, fill.trainer2Name)
@@ -4115,7 +4121,10 @@ do
     eq(s.pair3, nil, "pair off: a lone double is no pair")
     eq(s:sayPairDefeated3(), false, "pair off: ...and says no pair's defeat")
     eq(s:seatOwnerLabel3(3), nil, "pair off: its seats carry no owner tag")
-    eq(s:foeSendLine3(3, "MEW"), nil, "pair off: its send-outs keep the screen's line")
+    -- W2-UC2: a lone trainer's send-outs are its own line too (the cart's
+    -- STRINGID_SWITCHINMON, else this screen's spelling of it).
+    eq(s:foeSendLine3(3, "MEW"), "PKMN TRAINER DUO sent out\nMEW!",
+       "pair off: its send-outs are the lone trainer's own, in the screen's words with no text pack")
     eq(#s:battlefieldFoeHumans(), 1, "pair off: one trainer on the foe edge")
     eq(s:openingLine3(), "PKMN TRAINER DUO\nwould like to battle!", "pair off: its challenge as it was")
   end)
@@ -4441,6 +4450,226 @@ do
     eq(s:seatTrainer3(3), nil, "facility co-op: no computer trainer seats in its sense")
     eq(s:isPartnerSeat3(2), false, "facility co-op: the co-op partner is no NPC partner")
     s.rules3 = nil
+  end)
+
+  -- ------- a lone trainer in the cart's words (W2-UC2)
+  --
+  -- The lone double's opening and its trainer's replacement send-outs come out
+  -- of the player's own text pack as the pair's do: STRINGID_INTROMSG with the
+  -- trainer fill (sText_Trainer1WantsToBattle, "<CLASS> <NAME>\nwould like to
+  -- battle!"), STRINGID_SWITCHINMON for the battler coming out
+  -- (sText_Trainer1SentOutPkmn2 for either seat, "<CLASS> <NAME> sent\nout
+  -- X!"), each with the cart's own line breaks; and the trainer slides back in
+  -- for its speech at the end (pret BattleScript_LocalTrainerBattleWon:
+  -- trainerslidein BS_ATTACKER, then the lose text; OpponentHandleTrainerSlide
+  -- stops it at x 208).
+
+  block("lone intro", function()
+    local f = makeMulti({ party = strongParty() })
+    eq(f.settle(), "choose", "lone intro: the first menu opens")
+    eq(f.seen[1], "PKMN TRAINER DUO\nwould like to battle!",
+       "lone intro: with no text pack, the screen's own challenge, as it was")
+  end)
+
+  block("lone intro cart", function()
+    withCart(function()
+      local f = makeMulti({ party = strongParty() })
+      eq(f.settle(), "choose", "lone intro cart: the first menu opens")
+      local intro = lastAsked("STRINGID_INTROMSG")
+      check(intro ~= nil and intro.trainer == true, "lone intro cart: the challenge is asked of the text pack")
+      eq(intro and intro.twoOpponents, nil, "lone intro cart: ...the one-trainer one")
+      eq(intro and intro.trainer1Class, "PKMN TRAINER", "lone intro cart: ...with the trainer's class")
+      eq(intro and intro.trainer1Name, "DUO", "lone intro cart: ...and name")
+      eq(f.seen[1], "PKMN TRAINER DUO\nWOULD LIKE TO BATTLE!",
+         "lone intro cart: the box opens on the cart's challenge, its line break kept")
+      local sent = lineIndex(f.seen, "DUO sent", "MEW")
+      check(sent ~= nil and sent > 1, "lone intro cart: then the trainer's send-out")
+    end)
+  end)
+
+  block("lone send", function()
+    local f = makeMulti({ party = strongParty() })
+    local s = f.screen
+    eq(f.settle(), "choose", "lone send: menu")
+    local plain = s:medRows({ battle = "sd1", seq = 951, t = "send", slot = 4, side = "b",
+                              text = "PIDGEY", mon = 1, hp = f.sheets[2].hp })
+    eq(plain[1] and plain[1].text, "PKMN TRAINER DUO sent out\nPIDGEY!",
+       "lone send: with no text pack, the screen's line as it was")
+    withCart(function()
+      local rows3 = s:medRows({ battle = "sd1", seq = 952, t = "send", slot = 3, side = "b",
+                                text = "PIDGEY", mon = 1, hp = f.sheets[2].hp })
+      local fill = lastAsked("STRINGID_SWITCHINMON")
+      eq(fill and fill.switchBattler, 1, "lone send cart: slot 3 is battler 1's line")
+      eq(fill and fill.twoOpponents, nil, "lone send cart: ...a lone trainer's")
+      eq(fill and fill.buff1, "PIDGEY", "lone send cart: ...naming the monster")
+      eq(fill and fill.trainer1Name, "DUO", "lone send cart: ...and the trainer")
+      eq(rows3[1] and rows3[1].text, "PKMN TRAINER DUO SENT\nOUT PIDGEY!",
+         "lone send cart: the cart's words, its line break kept")
+      local rows4 = s:medRows({ battle = "sd1", seq = 953, t = "send", slot = 4, side = "b",
+                                text = "MEW", mon = 0, hp = f.sheets[1].hp })
+      eq(lastAsked("STRINGID_SWITCHINMON") and lastAsked("STRINGID_SWITCHINMON").switchBattler, 3,
+         "lone send cart: slot 4 is battler 3's")
+      eq(rows4[1] and rows4[1].text, "PKMN TRAINER DUO SENT\nOUT MEW!",
+         "lone send cart: ...still the one trainer's line (sText_Trainer1SentOutPkmn2)")
+    end)
+  end)
+
+  -- The ending: the defeated line with the field bare, the trainer sliding in
+  -- for the first page of its lose text and standing through the rest of the
+  -- ending (the prize line), on the classic page.
+  block("lone ending", function()
+    local f = makeMulti({ party = strongParty(), classicUi = true })
+    local s = f.screen
+    local lose = "DUO: you win\nthis time.\n\nI'll train harder."
+    s.trainer.defeatText = lose
+    f.afterWords = { "ANN defeated\nPKMN TRAINER DUO!", lose, "ANN got ¥120\nfor winning!" }
+    local during = {}
+    f.watch = function(screen)
+      if screen.shown ~= nil and during[screen.shown] == nil then
+        local model = screen:gen3ClassicModel()
+        local figs = model.figures3 or {}
+        during[screen.shown] = { who = screen.endTrainer3 or false, pic = figs[1] and figs[1].pic,
+                                 x = figs[1] and figs[1].x, centred = model.trainer ~= nil }
+      end
+    end
+    eq(fightOut(f), "finished", "lone ending: the fight is won to the end")
+    local atDefeated = during["ANN defeated\nPKMN TRAINER DUO!"]
+    local atPage1 = during["DUO: you win\nthis time."]
+    local atPage2 = during["I'll train harder."]
+    local atPrize = during["ANN got ¥120\nfor winning!"]
+    eq(atDefeated and atDefeated.who, false, "lone ending: the defeated line is said over a bare field")
+    eq(atPage1 and atPage1.who, "a", "lone ending: the trainer slides in for its lose text")
+    eq(atPage1 and joined(atPage1.pic, atPage1.x), "9,208",
+       "lone ending: ...its front pic where OpponentHandleTrainerSlide stops it")
+    eq(atPage1 and atPage1.centred, false, "lone ending: ...not the intro's centred trainer")
+    eq(atPage2 and atPage2.who, "a", "lone ending: it stays for the speech's second page")
+    eq(atPrize and atPrize.who, "a", "lone ending: ...and through the prize line")
+    eq(f.done and f.done.result, "win", "lone ending: onDone(win)")
+  end)
+
+  -- The trainer's win text over a loss slides it in the same way (pret
+  -- BattleScript_RivalBattleLost / LocalBattleLostPrintTrainersWinText);
+  -- any other line, a pair's, or co-op's, does not.
+  block("lone speech", function()
+    local f = makeMulti({ party = strongParty() })
+    local s = f.screen
+    eq(f.settle(), "choose", "lone speech: menu")
+    s.trainer.victoryText = "DUO: too easy!"
+    s.trainer.defeatText = "DUO: you win."
+    local before = #s.messages
+    s:say("DUO: too easy!")
+    local first = s.messages[before + 1]
+    eq(type(first) == "table" and first.trainer3, "a", "lone speech: the win text brings the trainer in")
+    before = #s.messages
+    s:say("ANN got ¥120\nfor winning!")
+    eq(type(s.messages[before + 1]), "string", "lone speech: another line is only a line")
+    check(not s:slideInForSpeech3("DUO: you win.", #s.messages), "lone speech: nothing to tag past the queue's end")
+    local pair = makeMulti({ party = strongParty(), foePartyB = B_DEFAULT })
+    check(not pair.screen:slideInForSpeech3(pair.screen.trainer.defeatText, 0),
+          "lone speech: a pair's speeches are its own ending's (sayPairDefeated3)")
+    local coop = makeCoop({ party = { mon(4, 20) }, partnerParty = { mon(16, 20) } })
+    coop.screen.trainer.defeatText = "DUO: co-op."
+    local cb = #coop.screen.messages
+    coop.screen:say("DUO: co-op.")
+    eq(type(coop.screen.messages[cb + 1]), "string", "lone speech: co-op says the speech as it always did")
+  end)
+
+  -- ...and through src/SoloBattle.lua itself: its own after-words (M:_trainerWon3,
+  -- the record's own `defeatText`) bring the trainer in on the real screen.
+  block("lone ending solo", function()
+    OPTIONS.solo = true
+    newGame()
+    SESSION.party = strongParty()
+    TRAINERS[400].party = FOE_DEFAULT
+    TRAINERS[400].items = { 0, 0, 0, 0 }
+    local solo = Solo.new(SOLO_UI, {
+      enabled = function() return OPTIONS.solo == true end,
+      seed = function() return 7 end,
+    })
+    local result
+    local took = solo:fromGen3Trainer(GAME, 400, { trainerId = 400, defeatText = "DUO: well fought!",
+      done = function(r) result = r end })
+    check(took, "lone ending solo: the lone double is taken")
+    local fight = solo.fight
+    check(fight and fight.soloDouble, "lone ending solo: on the solo double screen")
+    local during = {}
+    for _ = 1, 4000 do
+      if not solo.fight then break end
+      if fight.shown ~= nil and during[fight.shown] == nil then
+        during[fight.shown] = fight.endTrainer3 or false
+      end
+      if not soloFrame(solo, true) then break end
+    end
+    eq(result, "win", "lone ending solo: won")
+    eq(during["DUO: well fought!"], "a", "lone ending solo: the trainer is in for its lose text")
+  end)
+
+  -- ------- Gen 3's general clips on the double screen (W2-UC2, Vfx.GENERAL_LOOK3)
+  --
+  -- No double sends one today (the GHOST and the Safari are singles), but a
+  -- row that does is a look, never a move: no shout, no lunge, held while it
+  -- plays, each beat where the cart plays it.
+  block("general clips", function()
+    local f = makeMulti({ party = strongParty() })
+    local s = f.screen
+    eq(f.settle(), "choose", "general: menu")
+    check(s:usesBattlefield(), "general: on the arena")
+    local function animRow(text, extra)
+      local ev = { battle = "sd1", seq = 960, t = "anim", slot = 0, side = "a", text = text }
+      for k, v in pairs(extra or {}) do ev[k] = v end
+      for _, row in ipairs(s:medRows(ev)) do
+        if row.kind == "anim" then return row end
+      end
+      return nil
+    end
+    local function play(row)
+      s.fx, s.battlefieldBubbles, s.calloutShout = nil, nil, nil
+      local held = s:startAnim(row)
+      local out = {}
+      for _, fx in ipairs(s.fx or {}) do
+        out[#out + 1] = fx.kind .. "@" .. tostring(fx.slot) .. (fx.palette and (":" .. fx.palette) or "")
+      end
+      local hold = s.animHold
+      s.anim, s.animHold, s.animDwell = nil, nil, nil
+      return held, table.concat(out, ","), hold
+    end
+    local scared = animRow("MON_SCARED")
+    check(scared and scared.general3 == true and scared.quiet == true,
+          "general: MON_SCARED is a general clip, quiet")
+    local held, fx, hold = play(scared)
+    check(held == true and (hold or 0) > 0, "general: the queue is held while it plays")
+    eq(fx, "vfx@1:FEAR,tremble@1", "general: our first monster sweats and shivers -- no lunge")
+    eq(s.battlefieldBubbles, nil, "general: nobody shouts")
+    local bait = animRow("BAIT_THROW", { target = 3 })
+    local _, baitFx = play(bait)
+    eq(baitFx, "vfx@3:BAIT,sway@3", "general: the bait flies at their first monster, which sways")
+    local ctx = s:battlefieldCtx()
+    local thrown, sway
+    for _, row in ipairs(ctx.fx or {}) do
+      if row.kind == "vfx" then thrown = row elseif row.kind == "sway" then sway = row end
+    end
+    eq(thrown and thrown.fromTrainer, "ally", "general: ...thrown from our trainer's figure")
+    eq(thrown and thrown.delivery, "projectile", "general: ...in flight")
+    check(sway and (sway.wait or 0) > 0, "general: ...and the sway waits for it to land")
+    local layout = Battlefield.layout(ctx)
+    local me
+    for _, h in ipairs(layout.humans) do if h.side == "ally" and not me then me = h end end
+    local ox, oy = Battlefield.vfxOrigin(layout, thrown or {})
+    eq(joined(ox, oy), joined(me and me.x, me and (me.y - math.floor(me.drawH / 2))),
+       "general: the arena launches it from the figure, not a seat of ours")
+    local angry = animRow("SAFARI_REACTION", { slot = 3, side = "b", amount = 1 })
+    local _, angryFx = play(angry)
+    eq(angryFx, "vfx@3:ANGER", "general: an angry reaction pops on the wild seat")
+    local rock = animRow("ROCK_THROW")
+    check(rock and rock.general3 == nil and rock.quiet == nil,
+          "general: off a Safari ROCK_THROW is the move, as it was")
+    local coop = makeCoop({ party = { mon(4, 20) }, partnerParty = { mon(16, 20) } })
+    local rowsC = coop.screen:medRows({ battle = "c1", seq = 961, t = "anim", slot = 0, side = "a",
+                                        text = "MON_SCARED" })
+    local coopRow
+    for _, row in ipairs(rowsC) do if row.kind == "anim" then coopRow = row end end
+    check(coopRow and coopRow.general3 == nil and coopRow.quiet == nil,
+          "general: co-op reads the row as it always did")
   end)
 end
 

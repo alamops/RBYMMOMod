@@ -968,6 +968,20 @@ M.FX_POOF_R = 30 -- outer ring radius at the end of a poof
 -- before `hidden` sticks. Original geometry — no ROM battle_anims.
 M.FX_DIG_DROP = 0.90
 M.FX_FLY_LIFT = 0.95
+-- Gen 3's general clips move the monster itself (Vfx.GENERAL_LOOK3's motion
+-- beats; pret data/battle_anim_scripts.s): `sway` -- side to side, toward the
+-- midline first (AnimTask_SwayMon after the bait lands, the Safari monster
+-- turning to watch, AnimTask_RotateMonToSideAndRestore 16, +-96); `nod` -- a
+-- dip and back, twice (the eating monster's RotateMonToSideAndRestore 8, 136
+-- run twice); `tremble` -- a quick shiver (AnimTask_ShakeMon2's 2 px then 4,
+-- a frame each, the scared monster).  Peaks in arena px, sized for the 60px
+-- monster against the 64px GBA pic the cart moves; original curves, no ROM
+-- tables.  Spans are the screens' default life for each (a beat may carry its
+-- own, and a `wait` -- a fraction of that life at rest before it moves).
+M.FX_SWAY = 6
+M.FX_NOD = 5
+M.FX_TREMBLE = 3
+M.FX_MOTION_SPAN = { sway = 0.60, nod = 0.60, tremble = 0.45 }
 
 -- ------- particle fx
 --
@@ -976,7 +990,8 @@ M.FX_FLY_LIFT = 0.95
 -- that carries its own look on the record rather than being named by `kind`:
 -- `style`, `palette`, `delivery`, `scale`, `intensity` and `seed`, plus the
 -- seat it lands on (`side` / `seatIndex`) and, for the deliveries that travel,
--- the seat it came from (`fromSide` / `fromSeat`).
+-- the seat it came from (`fromSide` / `fromSeat`) or the side whose trainer
+-- threw it (`fromTrainer`, "ally" | "foe": the Safari's throws -- `vfxOrigin`).
 --
 -- It is field-level, not a seat modifier: nothing about it moves, tints or
 -- hides the monster it plays over (`M.fxSeat` skips it by construction), so an
@@ -1008,6 +1023,7 @@ local SEAT_FX = {
   lunge = true, flash = true, faint = true, spawn = true,
   recall = true, wobble = true, evolve = true,
   dig = true, fly = true, emerge = true,
+  sway = true, nod = true, tremble = true,
 }
 
 local function fxT(v)
@@ -1035,6 +1051,32 @@ end
 function M.fxFaint(t)
   t = fxT(t)
   return t * t, 1 - t
+end
+
+-- A motion's own progress once its rest (`wait`, 0..1 of the life) is over:
+-- 0 throughout the rest, then 0..1 over what is left.  No wait is no rest.
+function M.fxWaited(t, wait)
+  t = fxT(t)
+  local w = clamp(num(wait, 0), 0, 0.95)
+  if w <= 0 then return t end
+  if t <= w then return 0 end
+  return (t - w) / (1 - w)
+end
+
+-- Side to side, twice, at rest at both ends (the sign is the first lean).
+function M.fxSway(t)
+  return math.sin(fxT(t) * math.pi * 4)
+end
+
+-- Down and back, twice: 0..1 of the dip, at rest at both ends.
+function M.fxNod(t)
+  return math.abs(math.sin(fxT(t) * math.pi * 2))
+end
+
+-- A fast shiver that eases off, at rest at both ends.
+function M.fxTremble(t)
+  t = fxT(t)
+  return math.sin(t * math.pi * 16) * (1 - t * 0.5)
 end
 
 -- Scale-up with a slight overshoot (back-out): 0 at t == 0, 1 at t == 1.
@@ -1158,6 +1200,14 @@ function M.fxSeat(fx, side, seatIndex)
       elseif e.kind == "emerge" then
         -- Come back for the hitting turn. Same back-out as a send-out spawn.
         out.scale = out.scale * M.fxSpawn(e.t)
+      elseif e.kind == "sway" then
+        -- Gen 3's general clips (M.FX_SWAY): toward the midline first.
+        local dir = side == "foe" and -1 or 1
+        out.dx = out.dx + dir * M.FX_SWAY * M.fxSway(M.fxWaited(e.t, e.wait))
+      elseif e.kind == "nod" then
+        out.dy = out.dy + M.FX_NOD * M.fxNod(M.fxWaited(e.t, e.wait))
+      elseif e.kind == "tremble" then
+        out.dx = out.dx + M.FX_TREMBLE * M.fxTremble(M.fxWaited(e.t, e.wait))
       end
     end
   end
@@ -4861,6 +4911,34 @@ local function seatOf(layout, side, seatIndex)
   return nil
 end
 
+-- The hand of the trainer standing on `side`: the figure paired with seat
+-- `seatIndex` when one is asked for and stands there, else the side's first
+-- figure.  nil when nobody stands on that side.
+local function throwerHand(layout, side, seatIndex)
+  local first, match = nil, nil
+  for _, h in ipairs(listOf(layout.humans)) do
+    if h.side == side then
+      if first == nil then first = h end
+      if seatIndex ~= nil and h.index == seatIndex then
+        match = h
+        break
+      end
+    end
+  end
+  local thrower = match or first
+  if not thrower then return nil end
+  return thrower.x,
+    thrower.y - math.floor(num(thrower.drawH, M.HUMAN_DRAW) / 2)
+end
+
+-- A side's edge column at mid-field height: where a throw starts with no
+-- trainer to start it.
+local function edgeHand(side)
+  local edge = HUMAN_PAD + math.floor(M.HUMAN_DRAW / 2)
+  return side == "ally" and edge or (M.WIDTH - edge),
+    M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
+end
+
 -- Where a thrown ball starts, as the thrower's shoulder (the top of the
 -- sprite) rather than its centre.
 --
@@ -4877,28 +4955,21 @@ end
 -- the side's first trainer, which is who threw it before this field existed.
 -- No trainer on that side at all (a wild side, a headless layout) still falls
 -- back to the side's edge column at mid-field height.
+--
+-- **The figure, never a seat.** A catch ball leaves the trainer whether or not
+-- that trainer has a monster out: in the Safari Zone and the old man's
+-- tutorial side a fields nothing for the whole fight, and the cart's throw
+-- there (B_ANIM_BALL_THROW_WITH_TRAINER) is the trainer's own -- the arc
+-- starts at the figure on our edge, not at the empty square a monster of ours
+-- would stand on (`throwerHand`; tests/gen3_battlefield.lua pins it).
 local function ballOrigin(layout, targetSide, own, seatIndex)
   local side = targetSide
   if not own then side = (targetSide == "foe") and "ally" or "foe" end
-  local first, match = nil, nil
-  for _, h in ipairs(listOf(layout.humans)) do
-    if h.side == side then
-      if first == nil then first = h end
-      if own and seatIndex ~= nil and h.index == seatIndex then
-        match = h
-        break
-      end
-    end
-  end
-  local thrower = match or first
-  if thrower then
-    return thrower.x,
-      thrower.y - math.floor(num(thrower.drawH, M.HUMAN_DRAW) / 2)
-  end
-  local edge = HUMAN_PAD + math.floor(M.HUMAN_DRAW / 2)
-  return side == "ally" and edge or (M.WIDTH - edge),
-    M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
+  local x, y = throwerHand(layout, side, own and seatIndex or nil)
+  if x then return x, y end
+  return edgeHand(side)
 end
+M.ballOrigin = ballOrigin
 
 -- The counts M.seatAnchor wants, read off the layout the renderer already
 -- holds: a caller passes nothing new to get an effect drawn at an empty seat.
@@ -5517,6 +5588,43 @@ local function vfxAnchor(layout, side, seatIndex)
   return M.seatAnchor(side, seatIndex, anchorCounts(layout, side))
 end
 
+-- Does `side` have any monster on the arena at all?
+local function sideFielded(layout, side)
+  for _, m in ipairs(listOf(layout.mons)) do
+    if m.side == side then return true end
+  end
+  return false
+end
+
+-- Where a travelling effect (projectile / beam) leaves from, or nil when it
+-- names no origin (it degrades to a burst at the target, as ever):
+--
+--   * `fromTrainer` ("ally" | "foe"): thrown by that side's trainer -- the
+--     Safari's bait, rock and POKeBLOCK (Vfx.GENERAL_LOOK3 `from =
+--     "trainer"`): the figure's hand, else the side's edge column, a catch
+--     ball's own rule (`ballOrigin`);
+--   * `fromSide` / `fromSeat`: that seat, or the square it is about to
+--     occupy -- except, on Gen 3, a side with no monster on the arena at all
+--     and a trainer standing on it (a fight where side a fields nothing, pret
+--     battle_controller_safari.c: the sprite there is the trainer's), whose
+--     throw leaves the trainer rather than an empty square.
+local function vfxOrigin(layout, e)
+  local thrower = (e.fromTrainer == "ally" or e.fromTrainer == "foe") and e.fromTrainer or nil
+  if thrower then
+    local x, y = throwerHand(layout, thrower)
+    if x then return x, y end
+    return edgeHand(thrower)
+  end
+  local fromSide = (e.fromSide == "foe" or e.fromSide == "ally") and e.fromSide or nil
+  if not fromSide then return nil end
+  if onGen3() and not seatOf(layout, fromSide, e.fromSeat) and not sideFielded(layout, fromSide) then
+    local x, y = throwerHand(layout, fromSide)
+    if x then return x, y end
+  end
+  return vfxAnchor(layout, fromSide, e.fromSeat)
+end
+M.vfxOrigin = vfxOrigin
+
 -- One `vfx` entry, end to end: resolve its look, work out where it plays, and
 -- hand the particles to the burst above.
 --
@@ -5560,6 +5668,10 @@ local function drawVfx(layout, e)
 
   local x, y = vfxAnchor(layout, side, e.seatIndex)
   local burstT = t
+  -- A travelling delivery's launch point (`vfxOrigin`): the seat it came
+  -- from, or the trainer who threw it.
+  local ox, oy = nil, nil
+  if delivery == "projectile" or delivery == "beam" then ox, oy = vfxOrigin(layout, e) end
 
   if delivery == "self" then
     if fromSide then x, y = vfxAnchor(layout, fromSide, e.fromSeat) end
@@ -5567,8 +5679,7 @@ local function drawVfx(layout, e)
     x = M.MIDLINE
     y = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
     R = R * M.FX_VFX_FIELD
-  elseif delivery == "projectile" and fromSide then
-    local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
+  elseif delivery == "projectile" and ox then
     local travel = M.FX_VFX_TRAVEL
     if t < travel then
       -- Additive for the styles that are light: a spark in flight is
@@ -5584,8 +5695,7 @@ local function drawVfx(layout, e)
       return
     end
     burstT = (t - travel) / (1 - travel)
-  elseif delivery == "beam" and fromSide then
-    local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
+  elseif delivery == "beam" and ox then
     -- Ember / spark / psi beams are light; they want additive the same way
     -- the burst does. Ice and water streams are matter and do not.
     local stream = (styleName == "ember" or styleName == "spark"

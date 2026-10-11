@@ -119,6 +119,14 @@ M.PALETTES = {
   DEBUFF   = palette({ 0.88, 0.84, 0.95 },    { 0.55, 0.48, 0.73 }, { 0.27, 0.22, 0.41 }),
   REVIVE   = palette({ 1, 1, 0.90 },          { 1, 0.90, 0.42 },    { 0.85, 0.62, 0.12 }),
   ESCAPE   = palette({ 1, 1, 1 },             { 0.86, 0.86, 0.90 }, { 0.55, 0.55, 0.62 }),
+
+  -- Nor these: Gen 3's general animations (M.GENERAL_LOOK3) -- a monster's
+  -- cold sweat, the Safari's bait, a POKeBLOCK, an anger mark.  Original
+  -- colours, picked for what the clip shows, not taken from the cart.
+  FEAR      = palette({ 0.90, 1, 1 },         { 0.36, 0.78, 0.84 }, { 0.12, 0.42, 0.52 }),
+  BAIT      = palette({ 1, 0.93, 0.78 },      { 0.80, 0.58, 0.32 }, { 0.48, 0.32, 0.16 }),
+  POKEBLOCK = palette({ 1, 0.92, 0.96 },      { 0.94, 0.48, 0.70 }, { 0.62, 0.20, 0.42 }),
+  ANGER     = palette({ 1, 0.86, 0.80 },      { 0.92, 0.22, 0.18 }, { 0.56, 0.08, 0.08 }),
 }
 
 M.DEFAULT_PALETTE = "NORMAL"
@@ -1595,6 +1603,171 @@ function M.forItem3(item)
   if not M.DELIVERIES[out.delivery] then out.delivery = "self" end
   if not M.STYLES[out.style] then out.style = M.DEFAULT_STYLE end
   if not M.PALETTES[out.palette] then out.palette = M.DEFAULT_PALETTE end
+  return out
+end
+
+-- ------------------------------------------------------------------
+-- Gen 3's general animations (pret gBattleAnims_General)
+-- ------------------------------------------------------------------
+--
+-- The clips the Gen 3 referee names in an `anim` event for something that is
+-- not a move: the monster too scared to move and the GHOST's "Get out..."
+-- (pokefirered data/battle_scripts_1.s:3809 BattleScript_TooScaredToMove /
+-- :3815 BattleScript_GhostGetOutGetOut), the SILPH SCOPE's unveil (:3820),
+-- and the Safari Zone's throws and the wild monster's answer to them
+-- (pokefirered battle_scripts_2.s:211-227, pokeemerald battle_scripts_2.s:185
+-- BattleScript_ActionThrowPokeblock).  None is an order a trainer gave, so the
+-- screens play them quiet -- no callout, no lunge -- and each wears the look
+-- below, read off the cart's own script (pokefirered / pokeemerald
+-- data/battle_anim_scripts.s, General_*) as far as the arena's vocabulary goes.
+--
+-- **A separate door again** (`forGeneral3`): `forMove` / `forMove3` /
+-- `forStatusAnim` answer exactly what they did, and `ROCK_THROW` is still the
+-- move ROCK THROW to all three -- pret's B_ANIM_ROCK_THROW shares its token,
+-- so only a Safari fight reads it as the general clip (`isGeneral3`).
+--
+-- A look is a list of **beats**, played together on the row's beat.  A beat
+-- is either a particle spec (style / palette / delivery / scale / intensity /
+-- duration, as every other look here) or a motion of the monster itself
+-- (`motion` -- Battlefield's seat modifiers `sway`, `nod`, `tremble`), and it
+-- says where it plays by the cart's own battler roles
+-- (AnimTask_SafariOrGhost_DecideAnimSides / AnimTask_SetAttackerTargetLeftPos
+-- fix them per clip, whoever the event names):
+--
+--   on   = "event"  the battler the event names (the script's BS_ATTACKER /
+--                   BS_OPPONENT1)
+--          "own"    the viewer's first seat (pret B_POSITION_PLAYER_LEFT)
+--          "foe"    the other side's first seat (B_POSITION_OPPONENT_LEFT)
+--   from = "trainer"  a thrown beat leaves the viewer's own trainer: in a
+--                     Safari (and the old man's tutorial) side a has no
+--                     battler, and the sprite at PLAYER_LEFT is the trainer's
+--                     back pic (pret battle_controller_safari.c) -- the arena
+--                     launches it from the trainer figure on our edge
+--                     (Battlefield `fromTrainer`)
+--   wait = 0..1      a motion beat's rest before it moves, as a fraction of
+--                    its own span: the monster sways once the bait has landed
+--                    (General_BaitThrow's `delay 50` before AnimTask_SwayMon)
+--
+-- `SAFARI_REACTION` is keyed by the referee's `amount`, pret's
+-- gBattleCommunication[MULTISTRING_CHOOSER] as AnimTask_SafariGetReaction
+-- reads it (B_MSG_MON_WATCHING 0, B_MSG_MON_ANGRY 1, B_MSG_MON_EATING 2; any
+-- other number is watching).  FireRed / LeafGreen only: Emerald's
+-- BattleScript_ActionWatchesCarefully plays no clip.  POKEBLOCK_THROW is
+-- Emerald's (B_ANIM_POKEBLOCK_THROW, the slot FireRed gives BAIT_THROW).
+
+-- Every name M.GENERAL_LOOK3 answers for; `"safari"` marks the one that is
+-- also a move's token, general on a Safari fight only (the wild monster there
+-- never uses a move).
+M.GENERAL_ANIMS3 = {
+  MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true,
+  BAIT_THROW = true, POKEBLOCK_THROW = true, SAFARI_REACTION = true,
+  ROCK_THROW = "safari",
+}
+
+-- Is `anim` one of Gen 3's general clips here?  `safari` is whether the fight
+-- is a Safari Zone one (where ROCK_THROW is B_ANIM_ROCK_THROW, not the move).
+function M.isGeneral3(anim, safari)
+  local entry = type(anim) == "string" and M.GENERAL_ANIMS3[anim] or nil
+  if entry == true then return true end
+  if entry == "safari" then return safari == true end
+  return false
+end
+
+local function motion(kind, on, span, wait)
+  return { motion = kind, on = on, duration = span, wait = wait }
+end
+
+M.GENERAL_LOOK3 = {
+  -- General_MonScared: the scared monster (DecideAnimSides 1 makes it the
+  -- target, PLAYER_LEFT) blends to a cold teal, sweat drops spray off it
+  -- (gSprayWaterDropletSpriteTemplate) and it shakes (AnimTask_ShakeMon2,
+  -- 2 px then 4) and stretches up.
+  MON_SCARED = {
+    { on = "own", style = "splash", palette = "FEAR", delivery = "self",
+      scale = 0.80, intensity = 0.65, duration = 0.70 },
+    motion("tremble", "own"),
+  },
+  -- General_GhostGetOut: the screen fades to the GHOST background (fadetobg
+  -- BG_GHOST) behind the GHOST (AnimTask_GhostGetOut on the attacker), then
+  -- the player's monster -- the target -- tints, sweats and shakes as above.
+  GHOST_GET_OUT = {
+    { on = "foe", style = "spirit", palette = "GHOST", delivery = "field",
+      scale = 1.00, intensity = 1.00, duration = 0.90 },
+    { on = "own", style = "splash", palette = "FEAR", delivery = "self",
+      scale = 0.80, intensity = 0.65, duration = 0.70 },
+    motion("tremble", "own", nil, 0.35),
+  },
+  -- General_SilphScoped: AnimTask_TransformMon on the GHOST (BS_OPPONENT1)
+  -- under SE_M_TELEPORT -- the TRANSFORM shimmer (MOVE_STYLE.TRANSFORM).
+  SILPH_SCOPED = {
+    { on = "event", style = "sparkle", palette = "PSYCHIC", delivery = "self",
+      scale = 1.10, intensity = 1.00, duration = 0.80 },
+  },
+  -- General_BaitThrow (DecideAnimSides 0: PLAYER_LEFT throws at
+  -- OPPONENT_LEFT): the bait arcs over (gSafariBaitSpriteTemplate) and, 50
+  -- frames on, the monster sways (AnimTask_SwayMon).
+  BAIT_THROW = {
+    { on = "foe", from = "trainer", style = "rock", palette = "BAIT",
+      delivery = "projectile", scale = 0.70, intensity = 0.55, duration = 0.80 },
+    motion("sway", "foe", 1.20, 0.40),
+  },
+  -- General_SafariRockThrow: the rock arcs over (gSafariRockTemplate) and
+  -- strikes (gBasicHitSplatSpriteTemplate, SE_M_DOUBLE_SLAP).
+  ROCK_THROW = {
+    { on = "foe", from = "trainer", style = "rock", palette = "ROCK",
+      delivery = "projectile", scale = 0.85, intensity = 0.85, duration = 0.80 },
+  },
+  -- Emerald's General_PokeblockThrow (AnimTask_SetAttackerTargetLeftPos 0):
+  -- the POKeBLOCK arcs over (gPokeblockSpriteTemplate), then the sway.
+  POKEBLOCK_THROW = {
+    { on = "foe", from = "trainer", style = "rock", palette = "POKEBLOCK",
+      delivery = "projectile", scale = 0.60, intensity = 0.50, duration = 0.80 },
+    motion("sway", "foe", 1.20, 0.40),
+  },
+  -- General_SafariReaction, on BS_OPPONENT1: watching carefully turns side to
+  -- side (AnimTask_RotateMonToSideAndRestore 16, +-96), angry pops two anger
+  -- marks (gAngerMarkSpriteTemplate), eating bobs twice (8, 136).
+  SAFARI_REACTION = {
+    [0] = { motion("sway", "foe") },
+    [1] = { { on = "foe", style = "shine", palette = "ANGER", delivery = "self",
+              scale = 0.75, intensity = 0.35, duration = 0.70 } },
+    [2] = { motion("nod", "foe") },
+  },
+}
+
+M.GENERAL_ROLES3 = { event = true, own = true, foe = true }
+M.GENERAL_MOTIONS3 = { sway = true, nod = true, tremble = true }
+
+-- The look of one of Gen 3's general clips: a fresh list of beats (see
+-- above), every particle beat a valid spec and every motion one a known
+-- seat modifier.  `amount` picks SAFARI_REACTION's answer.  nil for a name
+-- this table does not have -- the caller's own path then, as ever.
+function M.forGeneral3(anim, amount)
+  local entry = type(anim) == "string" and M.GENERAL_LOOK3[anim] or nil
+  if not entry then return nil end
+  if anim == "SAFARI_REACTION" then
+    local n = floor(num(amount, 0))
+    entry = entry[n] or entry[0]
+  end
+  local out = {}
+  for _, beat in ipairs(entry) do
+    local on = M.GENERAL_ROLES3[beat.on] and beat.on or "event"
+    if beat.motion then
+      if M.GENERAL_MOTIONS3[beat.motion] then
+        out[#out + 1] = { motion = beat.motion, on = on, duration = beat.duration,
+                          wait = beat.wait and clamp(num(beat.wait, 0), 0, 0.9) or nil }
+      end
+    else
+      local spec = specOf(beat.style, beat.palette, beat.delivery or "self",
+        beat.scale or 1, beat.intensity or 1, beat.duration)
+      if not M.DELIVERIES[spec.delivery] then spec.delivery = "self" end
+      if not M.STYLES[spec.style] then spec.style = M.DEFAULT_STYLE end
+      if not M.PALETTES[spec.palette] then spec.palette = M.DEFAULT_PALETTE end
+      spec.on = on
+      spec.from = (beat.from == "trainer") and "trainer" or nil
+      out[#out + 1] = spec
+    end
+  end
   return out
 end
 

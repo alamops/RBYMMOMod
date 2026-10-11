@@ -636,6 +636,170 @@ check(Vfx.forMove("CALM_MIND", { type = "PSYCHIC_TYPE", power = 0 }).delivery ~=
 eq(Vfx.forMove("THUNDERBOLT", { type = "ELECTRIC", power = 95 }).delivery, "beam",
   "the Gen 1 Thunderbolt is still a beam")
 
+-- ---- Vfx: Gen 3's general clips (W2-UC2; pret gBattleAnims_General, the
+--      General_* scripts of data/battle_anim_scripts.s)
+local GENERAL3 = { "MON_SCARED", "GHOST_GET_OUT", "SILPH_SCOPED", "BAIT_THROW", "ROCK_THROW",
+                   "POKEBLOCK_THROW", "SAFARI_REACTION" }
+for _, name in ipairs(GENERAL3) do
+  local beats = Vfx.forGeneral3(name, 0)
+  check(type(beats) == "table" and #beats > 0, "general: " .. name .. " has a look")
+  for i, beat in ipairs(beats or {}) do
+    local tag = ("general: %s beat %d"):format(name, i)
+    check(Vfx.GENERAL_ROLES3[beat.on] == true, tag .. " plays on a cart role", tostring(beat.on))
+    if beat.motion then
+      check(Vfx.GENERAL_MOTIONS3[beat.motion] == true, tag .. " is a known motion")
+      check((Battlefield.FX_MOTION_SPAN[beat.motion] or 0) > 0, tag .. "'s motion has a span the screens read")
+    else
+      check(valid(beat), tag .. " is a drawable look")
+    end
+  end
+end
+-- each one read off its own script
+local scared = Vfx.forGeneral3("MON_SCARED")
+eq(scared[1].on, "own", "general: MON_SCARED plays on our monster (DecideAnimSides 1: target PLAYER_LEFT)")
+eq(scared[1].style .. "/" .. scared[1].palette, "splash/FEAR",
+  "general: ...its sweat drops in a cold teal (gSprayWaterDropletSpriteTemplate, the palette blend)")
+eq(scared[2] and (scared[2].motion .. "@" .. scared[2].on), "tremble@own",
+  "general: ...and it shakes (AnimTask_ShakeMon2 on the target)")
+local getOut = Vfx.forGeneral3("GHOST_GET_OUT")
+eq(getOut[1].delivery .. "/" .. getOut[1].palette, "field/GHOST",
+  "general: GHOST_GET_OUT darkens the whole field to the GHOST's (fadetobg BG_GHOST)")
+eq(getOut[2].on .. "/" .. getOut[2].palette, "own/FEAR", "general: ...then our monster sweats (the target)")
+eq(getOut[3] and getOut[3].motion, "tremble", "general: ...and shakes")
+check(getOut[3] and (getOut[3].wait or 0) > 0, "general: ...once the background is up")
+local scope = Vfx.forGeneral3("SILPH_SCOPED")
+eq(scope[1].on, "event", "general: SILPH_SCOPED plays on the battler the event names (BS_OPPONENT1)")
+local transform = Vfx.forMove("TRANSFORM", { type = "NORMAL", power = 0 })
+eq(scope[1].style .. "/" .. scope[1].palette, transform.style .. "/" .. transform.palette,
+  "general: ...as TRANSFORM's shimmer (AnimTask_TransformMon)")
+for _, throw in ipairs({ { "BAIT_THROW", "BAIT", true }, { "ROCK_THROW", "ROCK", false },
+                         { "POKEBLOCK_THROW", "POKEBLOCK", true } }) do
+  local beats = Vfx.forGeneral3(throw[1])
+  local tag = "general: " .. throw[1]
+  eq(beats[1].from, "trainer", tag .. " is thrown by our trainer (PLAYER_LEFT is the trainer's pic)")
+  eq(beats[1].on, "foe", tag .. " ...at their monster (OPPONENT_LEFT)")
+  eq(beats[1].delivery, "projectile", tag .. " ...arcing over")
+  eq(beats[1].palette, throw[2], tag .. " ...in its own colours")
+  eq(beats[2] and beats[2].motion, throw[3] and "sway" or nil,
+     tag .. (throw[3] and " then the monster sways (AnimTask_SwayMon)" or " then nothing (a hit splat only)"))
+  if throw[3] then check((beats[2].wait or 0) > 0, tag .. " ...once it has landed (`delay 50`)") end
+end
+eq(Vfx.forGeneral3("SAFARI_REACTION", 0)[1].motion, "sway", "general: watching carefully turns side to side")
+eq(Vfx.forGeneral3("SAFARI_REACTION", 1)[1].palette, "ANGER", "general: angry pops anger marks")
+eq(Vfx.forGeneral3("SAFARI_REACTION", 2)[1].motion, "nod", "general: eating bobs")
+eq(Vfx.forGeneral3("SAFARI_REACTION", 9)[1].motion, "sway",
+  "general: a reaction past the table is watching (AnimTask_SafariGetReaction)")
+eq(Vfx.forGeneral3("SAFARI_REACTION")[1].motion, "sway", "general: ...and so is none")
+for _, n in ipairs({ 0, 1, 2 }) do
+  eq(Vfx.forGeneral3("SAFARI_REACTION", n)[1].on, "foe", "general: reaction " .. n .. " plays on the wild monster")
+end
+local look1, look2 = Vfx.forGeneral3("BAIT_THROW"), Vfx.forGeneral3("BAIT_THROW")
+check(look1[1] ~= look2[1], "general: every call answers fresh beats")
+look1[1].style = "blast"
+eq(Vfx.forGeneral3("BAIT_THROW")[1].style, "rock", "general: ...so stamping one never reaches the table")
+eq(Vfx.forGeneral3("TACKLE"), nil, "general: a move has no general look")
+eq(Vfx.forGeneral3("TURN_TRAP"), nil, "general: ...nor a clip outside this set")
+eq(Vfx.forGeneral3(nil), nil, "general: ...nor nothing")
+check(Vfx.isGeneral3("MON_SCARED") and Vfx.isGeneral3("SAFARI_REACTION", false),
+  "general: the clips no move shares a name with are general anywhere")
+check(not Vfx.isGeneral3("ROCK_THROW"), "general: ROCK_THROW is the move ROCK THROW off a Safari")
+check(Vfx.isGeneral3("ROCK_THROW", true), "general: ...and B_ANIM_ROCK_THROW on a Safari")
+check(not Vfx.isGeneral3("TACKLE", true) and not Vfx.isGeneral3(nil), "general: a move never is")
+-- the other doors answer as they did
+eq(Vfx.forMove3("ROCK_THROW", { type = 5, power = 50 }).delivery, "projectile",
+  "general: the move ROCK THROW keeps its own look (forMove3)")
+eq(Vfx.forMove3("ROCK_THROW", { type = 5, power = 50 }).palette, "ROCK", "general: ...in the type's colours")
+for _, name in ipairs(GENERAL3) do
+  eq(Vfx.forStatusAnim(name), nil, "general: forStatusAnim stays shut to " .. name)
+end
+for _, name in ipairs({ "FEAR", "BAIT", "POKEBLOCK", "ANGER" }) do
+  local pal = Vfx.PALETTES[name]
+  check(type(pal) == "table" and #pal == 3, "general: the " .. name .. " palette is core, mid, edge")
+end
+
+-- ---- the monster's own motions (Battlefield sway / nod / tremble)
+for _, fn in ipairs({ { "fxSway", Battlefield.fxSway }, { "fxNod", Battlefield.fxNod },
+                      { "fxTremble", Battlefield.fxTremble } }) do
+  check(math.abs(fn[2](0)) < 1e-9 and math.abs(fn[2](1)) < 1e-6, "motion: " .. fn[1] .. " rests at both ends")
+  local peak = 0
+  for i = 0, 200 do peak = math.max(peak, math.abs(fn[2](i / 200))) end
+  check(peak > 0.5 and peak <= 1 + 1e-9, "motion: " .. fn[1] .. " moves, within its unit peak")
+end
+eq(Battlefield.fxWaited(0.3, 0.5), 0, "motion: a beat rests through its wait")
+eq(Battlefield.fxWaited(0.75, 0.5), 0.5, "motion: ...then runs over what is left")
+eq(Battlefield.fxWaited(0.4, nil), 0.4, "motion: no wait is no rest")
+local swayFoe = Battlefield.fxSeat({ { kind = "sway", side = "foe", seatIndex = 1, t = 0.125 } }, "foe", 1)
+check(swayFoe.dx < 0, "motion: a foe sways toward the midline first")
+check(swayFoe.alpha == 1 and swayFoe.hidden == false and swayFoe.scale == 1,
+  "motion: ...and nothing about it hides or shrinks the monster")
+check(Battlefield.fxSeat({ { kind = "sway", side = "ally", seatIndex = 1, t = 0.125 } }, "ally", 1).dx > 0,
+  "motion: an ally sways the other way, toward the midline too")
+check(Battlefield.fxSeat({ { kind = "nod", side = "foe", seatIndex = 1, t = 0.25 } }, "foe", 1).dy > 0,
+  "motion: a nod dips")
+check(Battlefield.fxSeat({ { kind = "tremble", side = "ally", seatIndex = 1, t = 0.03 } }, "ally", 1).dx ~= 0,
+  "motion: a tremble shivers")
+eq(Battlefield.fxSeat({ { kind = "sway", side = "foe", seatIndex = 1, t = 0.3, wait = 0.5 } }, "foe", 1).dx, 0,
+  "motion: a sway still waiting holds the monster still")
+eq(Battlefield.fxSeat({ { kind = "sway", side = "foe", seatIndex = 1, t = 0.125 } }, "foe", 2).dx, 0,
+  "motion: ...and only its own seat moves")
+
+-- ---- a throw from our edge with nothing of ours out (W2-UC2: the Safari and
+--      the old man's tutorial field no battler on side a; the cart's throw
+--      there is the trainer's own, B_ANIM_BALL_THROW_WITH_TRAINER)
+-- "x,y", whatever is missing (a nil fails the check rather than the run).
+local function xy(x, y) return tostring(x) .. "," .. tostring(y) end
+
+do
+  local function wildSeat() return { name = "PIDGEY", hp = 20, maxHp = 20, level = 5, front = fakeImage("f") } end
+  local safari = { mode = "wild", frame = 0, allyHumans = { { id = "self", name = "ANN" } },
+                   allySeats = {}, foeSeats = { wildSeat() } }
+  local layS = Battlefield.layout(safari)
+  local me = layS.humans[1]
+  check(me ~= nil and me.side == "ally", "no battler: our trainer stands on our edge")
+  local handX, handY = me.x, me.y - math.floor(me.drawH / 2)
+  local emptyX, emptyY = Battlefield.seatAnchor("ally", 1, { mons = 0, humans = 1, plates = 0 })
+  local bx, by = Battlefield.ballOrigin(layS, "foe", false)
+  eq(xy(bx, by), xy(handX, handY), "no battler: a catch ball leaves the trainer's hand")
+  check(bx ~= emptyX or by ~= emptyY, "no battler: ...not the empty square a monster of ours would hold")
+  drawn = {}
+  safari.fx = { { kind = "ball", side = "foe", seatIndex = 1, t = 0.001 } }
+  Battlefield.draw({ game = { generation = 3 } }, safari, nil)
+  local firstBall
+  for _, d in ipairs(drawn) do
+    if d[1] == "circle" then firstBall = d; break end
+  end
+  check(firstBall and math.abs(firstBall[3] - handX) < 2 and math.abs(firstBall[4] - handY) < 2,
+    "no battler: the arc drawn starts at the figure")
+  local tx, ty = Battlefield.vfxOrigin(layS, { fromTrainer = "ally", delivery = "projectile" })
+  eq(xy(tx, ty), xy(handX, handY), "no battler: a thrown bait leaves the trainer's hand (fromTrainer)")
+  local sx, sy = Battlefield.vfxOrigin(layS, { fromSide = "ally", fromSeat = 1 })
+  eq(xy(sx, sy), xy(handX, handY),
+    "no battler: a throw from a side with nothing out leaves its trainer, not an empty square")
+  drawn = {}
+  safari.fx = { { kind = "vfx", side = "foe", seatIndex = 1, t = 0.2, style = "rock", palette = "BAIT",
+                  delivery = "projectile", fromTrainer = "ally", seed = 3 } }
+  local okThrow = pcall(Battlefield.draw, { game = { generation = 3 } }, safari, nil)
+  check(okThrow and #drawn > 0, "no battler: a thrown look draws in flight")
+  -- nobody on that edge: the edge column, as a catch ball always had
+  local bare = Battlefield.layout({ mode = "wild", foeSeats = { wildSeat() } })
+  local ex, ey = Battlefield.ballOrigin(bare, "foe", false)
+  local ox, oy = Battlefield.vfxOrigin(bare, { fromTrainer = "ally" })
+  eq(xy(ox, oy), xy(ex, ey), "no trainer: a thrown look keeps a ball's edge column")
+  check(ex < Battlefield.MIDLINE, "no trainer: ...on our half")
+  -- a side with a monster out throws from its seat, as ever
+  local fielded = Battlefield.layout({ mode = "wild", allyHumans = { { name = "ANN" } },
+                                       allySeats = { wildSeat() }, foeSeats = { wildSeat() } })
+  local mine
+  for _, m in ipairs(fielded.mons) do if m.side == "ally" then mine = m end end
+  local fx, fy = Battlefield.vfxOrigin(fielded, { fromSide = "ally", fromSeat = 1 })
+  eq(xy(fx, fy), xy(mine and mine.x, mine and mine.y), "fielded: a move still leaves its user's seat")
+  eq(Battlefield.vfxOrigin(fielded, { delivery = "projectile" }), nil,
+    "fielded: no origin named is none (a burst at the target, as ever)")
+  -- and a send ball still leaves the trainer behind the seat (own)
+  local sendX = Battlefield.ballOrigin(fielded, "ally", true, 1)
+  eq(sendX, fielded.humans[1].x, "fielded: a send-out ball still leaves its own trainer")
+end
+
 -- ------- C. a Gen 1 boot: the Gen 3 arm stays shut
 
 engineAsked = {}
@@ -656,6 +820,13 @@ drawn = {}
 pcall(BF1.draw, { game = { data = {} } }, { mode = "1v1", allySeats = { seat("a") }, foeSeats = { seat("b") },
   allyHumans = { { name = "A" } }, foeHumans = { { name = "B" } } }, {})
 eq(CB1.drawGen3({ foe = {}, ally = {} }), false, "the Gen 3 page refuses to draw on Gen 1")
+-- The trainer launch for a side with nothing out is Gen 3's: a Gen 1 travelling
+-- look from an empty seat lands where it always did.
+local layNoAlly = BF1.layout({ mode = "1v1", allyHumans = { { name = "A" } }, foeHumans = { { name = "B" } },
+  allySeats = {}, foeSeats = { seat("b") } })
+local g1x, g1y = BF1.vfxOrigin(layNoAlly, { fromSide = "ally", fromSeat = 1 })
+local a1x, a1y = BF1.seatAnchor("ally", 1, { mons = 0, humans = 1, plates = 0 })
+eq(xy(g1x, g1y), xy(a1x, a1y), "Gen 1: a look from an empty seat still anchors on that seat")
 eq(#engineAsked, 0, "no src.*.game3.* module was asked for on a Gen 1 boot")
 
 -- ------- B. the real headless loader, generation 3

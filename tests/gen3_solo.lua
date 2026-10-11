@@ -3722,8 +3722,10 @@ do
     eq(Gen3Ui.has(fight), false, "real: the screen left the stack")
     local text = table.concat(fight.textLog or {}, " | ")
     check(text:find("STRINGID_PLAYERGOTMONEY|" .. want, 1, true) ~= nil, "real: the money line names the doubled prize")
-    check(text:find("would like to battle", 1, true) ~= nil or text:find("TWINS", 1, true) ~= nil,
-          "real: the trainer's challenge was said")
+    -- The lone double's opening is the cart's own STRINGID_INTROMSG now
+    -- (sText_Trainer1WantsToBattle), read through this suite's text stub.
+    check(text:find("STRINGID_INTROMSG||AMY", 1, true) ~= nil,
+          "real: the trainer's challenge was said, in the cart's words")
   end
 
   -- (o) a lost double through the real screen ---------------------------------
