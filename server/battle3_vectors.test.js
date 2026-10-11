@@ -29,7 +29,7 @@ const path = require('node:path');
 const Sim = require('./lib/battle3');
 
 const {
-  Damage, Types, Crit, Accuracy, Status, Catch, Items, Field, Rng, Effects, Safari,
+  Damage, Types, Crit, Accuracy, Status, Catch, Items, Field, Rng, Effects, Safari, Arena, Palace,
 } = Sim;
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim3_vectors.json');
@@ -278,6 +278,20 @@ section('safari', (input, kind) => {
   throw new Error(`unknown safari kind ${kind}`);
 });
 
+section('halls', (input, kind) => {
+  if (kind === 'mindRating') return { rating: Arena.mindRating(clean(input.row)) };
+  if (kind === 'points') return { points: Arena.points(input.mine, input.theirs) };
+  if (kind === 'skillDelta') {
+    return { delta: Arena.skillDelta(clean(input.act), input.already, input.protected) };
+  }
+  if (kind === 'palaceOptions') {
+    const [state, why] = Palace.options(clean(input.raw));
+    return { ok: state != null, why, flavor: state ? state.flavor : undefined };
+  }
+  if (kind === 'lowHp') return { low: Palace.lowHp({ mon: clean(input.mon) }) };
+  throw new Error(`unknown halls kind ${kind}`);
+});
+
 // ------------------------------------------------------------------
 // Rng properties the fixture cannot state as values (the Lua runner's four)
 // ------------------------------------------------------------------
@@ -318,7 +332,7 @@ test('rng: a coin is not a rota', () => {
 test('every stated key was checked', () => {
   let expected = 0;
   for (const name of ['rng', 'types', 'damage', 'base', 'power', 'crit', 'accuracy', 'speed',
-    'order', 'status', 'catch', 'items', 'badges', 'effects', 'safari']) {
+    'order', 'status', 'catch', 'items', 'badges', 'effects', 'safari', 'halls']) {
     for (const c of vectors[name]) expected += Object.keys(c.out).length;
   }
   assert.strictEqual(checked, expected, 'a section skipped some of its cases');

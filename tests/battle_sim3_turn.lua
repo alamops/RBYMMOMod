@@ -27,6 +27,9 @@
 --   { op = "waiting" }                         snapshot().waiting -> `results`
 --   { op = "seats", player }                   the seat ids of seatsOf(player)
 --                                              -> `results`
+--   { op = "palaceLow", slot }                 battle:palaceLow(slot) -> `results`
+--   { op = "arena" }                           snapshot().arena (the Battle
+--                                              Arena's tallies) -> `results`
 --
 -- `create.typeTable == "$chart"` / `create.movePool == "$pool"` are replaced by
 -- the fixture's shared `typeTable` / `movePool` before Turn.create.
@@ -36,7 +39,7 @@
 --
 -- `expect` = { events, batches, results, outcome, snapshot }, where outcome is
 -- { battle, outcome, reason, winners?, losers?, catcher?, caughtSpecies?,
--- payDay?, how?, by?, given?, safari? } and snapshot is
+-- payDay?, how?, by?, given?, safari?, judged? } and snapshot is
 -- the digest { phase, turn, seq, now, deadline, rngState, weather, field =
 -- [{ slot, hp, party }] } -- rngState is the one number that proves both
 -- runtimes drew the same count.  Events compare as canonical JSON (sorted keys),
@@ -264,6 +267,8 @@ local function outcomeOf(out)
   -- wave 2 of contract C3: a forced catch's `given = false`, a Safari's spend
   if out.given ~= nil then o.given = out.given end
   if out.safari then o.safari = out.safari end
+  -- wave 3: the Battle Arena's judged losers, by sheet slot
+  if out.judged then o.judged = out.judged end
   return o
 end
 
@@ -298,6 +303,10 @@ local function run(scn)
         local ids = {}
         for i, seat in ipairs(battle:seatsOf(st.player)) do ids[i] = seat.playerId end
         got.results[#got.results + 1] = ids
+      elseif st.op == "palaceLow" then
+        got.results[#got.results + 1] = battle:palaceLow(st.slot)
+      elseif st.op == "arena" then
+        got.results[#got.results + 1] = battle:snapshot().arena or false
       elseif st.op == "repeat" then
         for _ = 1, st.times do
           if st.untilOver and battle:outcome() then break end

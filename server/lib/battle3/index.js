@@ -27,6 +27,8 @@
  *   Move       move resolution + the battle's helper surface
  *   Residual   end of turn, battle start, switch-in effects
  *   Safari     the Safari Zone mode (the factors, the throws, the monster's turn)
+ *   Palace     the Battle Palace rules (the failed pick, the half-HP line)
+ *   Arena      the Battle Arena rules (no switching, the three-turn judge)
  *   Turn       the machine (battle2's API: create / attempt / submitChoice ...)
  *   Events     the C5 vocabulary
  *
@@ -50,6 +52,8 @@ const Effects = require('./Effects.js');
 const Move = require('./Move.js');
 const Residual = require('./Residual.js');
 const Safari = require('./Safari.js');
+const Palace = require('./Palace.js');
+const Arena = require('./Arena.js');
 const Events = require('./events.js');
 const Turn = require('./Turn.js');
 
@@ -70,6 +74,8 @@ module.exports = {
   Move,
   Residual,
   Safari,
+  Palace,
+  Arena,
   Events,
   Turn,
 };

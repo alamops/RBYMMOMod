@@ -42,6 +42,11 @@
 --             rate, BAIT / ROCK / the watching turn (FireRed / LeafGreen), GO
 --             NEAR / the POKeBLOCK (Emerald, synthetic tables: the state's
 --             lists are pret index i at JSON element i)
+--   halls     wave 3's Battle Arena and Battle Palace pure rules: Arena.lua
+--             mindRating (sMindRatings' rule, a stamped `arenaMind` first),
+--             points (the judgment window's 2 / 1 / 0), skillDelta
+--             (BattleArena_AddSkillPoints); Palace.lua options (the flavor
+--             table's refusal) and lowHp (maxHP / 2 >= hp, not asleep)
 --
 -- Synthetic numbers only: every stat, power and chart row is invented.
 
@@ -91,6 +96,7 @@ local Sim = need("BattleSim3/init")
 local Damage, Types, Crit, Accuracy = Sim.Damage, Sim.Types, Sim.Crit, Sim.Accuracy
 local Status, Catch, Items, Field = Sim.Status, Sim.Catch, Sim.Items, Sim.Field
 local Rng, Effects, Safari = Sim.Rng, Sim.Effects, Sim.Safari
+local Arena, Palace = Sim.Arena, Sim.Palace
 
 -- ------------------------------------------------------------------
 -- a JSON reader, just enough for the fixture (null -> NULL, not nil)
@@ -449,6 +455,26 @@ each("safari", function(input, kind)
              pokeblockThrows = s.pokeblockThrows }
   end
   error("unknown safari kind " .. tostring(kind), 0)
+end)
+
+each("halls", function(input, kind)
+  if kind == "mindRating" then
+    local row = input.row
+    if row == NULL then row = nil else row = clean(row) end
+    return { rating = Arena.mindRating(row) }
+  elseif kind == "points" then
+    return { points = Arena.points(input.mine, input.theirs) }
+  elseif kind == "skillDelta" then
+    return { delta = Arena.skillDelta(clean(input.act), input.already, input.protected) }
+  elseif kind == "palaceOptions" then
+    local raw = input.raw
+    if raw == NULL then raw = nil else raw = clean(raw) end
+    local state, why = Palace.options(raw)
+    return { ok = state ~= nil, why = why, flavor = state and state.flavor or nil }
+  elseif kind == "lowHp" then
+    return { low = Palace.lowHp({ mon = clean(input.mon) }) }
+  end
+  error("unknown halls kind " .. tostring(kind), 0)
 end)
 
 -- ------------------------------------------------------------------

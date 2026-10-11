@@ -35,8 +35,9 @@
 --   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon
 --      (no draw for Smoke Ball, Run Away, the faster runner or a veiled
 --      GHOST's foe); under `rules.pyramidRun` every runner but a Smoke Ball
---      holder draws roll(0,255), Run Away too.  A wild seat's flee draws
---      nothing (it runs in step 6's order);
+--      holder draws roll(0,255), Run Away too -- and in a trainer fight under
+--      `rules.forfeit` the Run Away runner alone does, before it may forfeit.
+--      A wild seat's flee draws nothing (it runs in step 6's order);
 --   4. switches (and, interleaved in battler order, the bag items that are not
 --      balls -- those draw nothing): any foe Pursuit aimed at the leaving seat
 --      draws as a move, minus the canceller's and the accuracy draws;
@@ -48,7 +49,10 @@
 --      for GO NEAR, a POKeBLOCK or RUN -- then the monster's flee or watch,
 --      which draws nothing;
 --   6. moves -- and a wild seat's flee, which draws nothing -- in speed order,
---      each drawing only at the points it reaches:
+--      each drawing only at the points it reaches (a Battle Palace pick that
+--      failed its selection check draws only a random-target move's target
+--      and, failing for `unable`, its sleeper's roll(0,3) with no counter or
+--      its frozen battler's roll(0,4) -- Palace.lua):
 --      canceller (freeze roll(0,4); a sleeper with no counter roll(0,3); confusion
 --      roll(0,1) [+ self-hit roll(85,100) + Focus Band roll(0,99) when held];
 --      paralysis roll(0,3); infatuation roll(0,1)); obedience, after the PP
@@ -134,9 +138,10 @@
 --     M.HOW -- ko, run (RUN, Smoke Ball, Run Away, Poke Doll / Fluffy Tail, a
 --     link concession), flee (a wild seat's own RUN), teleport (TELEPORT),
 --     roar (ROAR / WHIRLWIND out of a wild fight), catch, forfeit (RUN under
---     `rules.forfeit`), judge (later: the Arena) -- absent for a disconnect or
---     a timeout; `outcome().by` is the side ("a" | "b") whose action ended it
---     (the KO side's winner; nil on a draw).  `reason` keeps its meaning.
+--     `rules.forfeit`), judge (the Arena's judgment, Arena.lua) -- absent
+--     for a disconnect or a timeout; `outcome().by` is the side ("a" | "b")
+--     whose action ended it (the KO side's winner; nil on a draw).  `reason`
+--     keeps its meaning.
 --   * The solo-only create options (none of them is ever on a hub's wire;
 --     absent, every fight is the one it always was):
 --       wildPick = "cart"            the cart's random wild move (above);
@@ -184,6 +189,22 @@
 --     referee asks whether side a is a human: a scripted party there (Wally's
 --     ZIGZAGOON, the POKe DUDE's) is filed like any seat, and `wildPick` / a
 --     side entry's `ai` stay side b's.
+--   * Wave 3's halls (contract C3; refused in a wild fight, and together):
+--       rules.palace = { flavor = { 25 x 0..3 } }  the Battle Palace
+--         (Palace.lua has the rules and their pret anchors): a fight choice
+--         may name a slot the move menu refuses, or carry `unable = true`
+--         (the client's Palace pick failed); the selection check then fails
+--         it as its turn comes (`palace` event `unable`, or the slot's own
+--         line); the half-HP line at a turn's end (`palace` event `flavor`);
+--         `Battle:palaceLow(slot)` and snapshot `palaceLow` give the bit;
+--       rules.arena = true  the Battle Arena (Arena.lua), one seat a side: no
+--         switching (refused), Baton Pass and Roar fail, the fallen and the
+--         judged replaced at once in party order, the judge after three turns
+--         of a pairing (`arena` events), `outcome().how = "judge"` and
+--         `outcome().judged` when it ends the fight;
+--     and the Battle Pyramid's RUN AWAY under `rules.forfeit` + `pyramidRun`
+--     (pokeemerald battle_util.c:427-447): the try is counted and rolled
+--     before the forfeit, and a failed one is "Can't escape!", the turn spent.
 --
 -- Nothing here raises.  Bad input is refused with nil-plus-reason from `create`
 -- or a plain `false` from `submitChoice`.
@@ -205,6 +226,8 @@ local Move      = need("BattleSim3/Move")
 local Residual  = need("BattleSim3/Residual")
 local Events    = need("BattleSim3/events")
 local Safari    = need("BattleSim3/Safari")
+local Palace    = need("BattleSim3/Palace")
+local Arena     = need("BattleSim3/Arena")
 
 local M = {}
 
@@ -252,9 +275,8 @@ M.STATUS_TO_WIRE = M.STATUS_FROM_WIRE
 local ACTIONS = { fight = true, item = true, switch = true, run = true, cancel = true, safari = true }
 
 -- Contract C3 (docs/plans/gen3-solo-remaining-fights.md): `outcome().how`.
--- `balls` is the Safari's last missed ball (Safari.lua); `judge` (the Arena)
--- belongs to a later wave; both are named here so the vocabulary is closed
--- once.
+-- `balls` is the Safari's last missed ball (Safari.lua); `judge` the Battle
+-- Arena's judgment that emptied a side (Arena.lua; `reason` stays "ko").
 M.HOW = {
   ko = true, run = true, flee = true, teleport = true, roar = true, catch = true,
   forfeit = true, balls = true, judge = true,
@@ -380,6 +402,9 @@ local function copyMove(raw)
     target   = max(0, int(raw.target, 0)),
     priority = clamp(int(raw.priority, 0), -7, 7),
     flags    = max(0, int(raw.flags, 0)),
+    -- The cart's Battle Arena Mind rating for the move (Sheet3 stamps it;
+    -- Arena.mindRating), -1..1 on every cart; absent, nil.
+    arenaMind = (raw.arenaMind ~= nil) and clamp(int(raw.arenaMind, 0), -128, 127) or nil,
   }
 end
 M.copyMove = copyMove
@@ -550,6 +575,12 @@ end
 --                      * tries (pokeemerald battle_util.c:427-458)
 --   pyramidBag = true  the bag uploaded is the Pyramid bag: nothing changes
 --                      here (the client writes the spends back)
+--   palace = { flavor = { 25 x 0..3 } }  the Battle Palace (Palace.lua): a
+--                      pick the move menu would refuse is accepted, `unable`
+--                      fails it, the half-HP line; the flavor table is the
+--                      cart's (refused without it, Turn.create)
+--   arena = true       the Battle Arena (Arena.lua): no switching, party-order
+--                      replacements, the three-turn judge
 local function copyRules(raw)
   local r = {}
   if type(raw) ~= "table" then return r end
@@ -569,6 +600,8 @@ local function copyRules(raw)
   local mult = int(raw.pyramidRun, nil)
   if mult and mult >= 1 then r.pyramidRun = clamp(mult, 1, 255) end
   r.pyramidBag = (raw.pyramidBag == true) or nil
+  r.palace = Palace.options(raw.palace)
+  r.arena = (raw.arena == true) or nil
   return r
 end
 M.copyRules = copyRules
@@ -584,12 +617,16 @@ M.Battle = Battle
 Move.install(Battle)
 Residual.install(Battle)
 Safari.install(Battle)
+Palace.install(Battle)
+Arena.install(Battle)
 
 Battle.TIE_BREAK_ROLL = M.TIE_BREAK_ROLL
 
+-- A Battle Arena loser (`judged`, Arena.lua) keeps its HP and is down all
+-- the same (Cmd_checkteamslost skips it, battle_script_commands.c:3557).
 local function firstLiving(mons, skip)
   for i = 1, #mons do
-    if mons[i].hp > 0 and i ~= skip then return i end
+    if mons[i].hp > 0 and not mons[i].judged and i ~= skip then return i end
   end
   return nil
 end
@@ -863,6 +900,23 @@ function M.create(opts)
     end
     if not holds then return nil, "side " .. side .. " has only spare fighters" end
   end
+  -- Wave 3's halls (contract C3; Palace.lua / Arena.lua): trainer fights both,
+  -- the Arena one seat a side, never the two at once; a Palace without the
+  -- cart's flavor table is refused, as a Safari without its tables is.
+  local rawRules = type(opts.rules) == "table" and opts.rules or {}
+  if rawRules.palace ~= nil and rawRules.palace ~= false and not self.rules.palace then
+    local _, why = Palace.options(rawRules.palace)
+    return nil, why
+  end
+  if self.rules.palace and self.rules.arena then
+    return nil, "rules.palace and rules.arena are two halls"
+  end
+  if (self.rules.palace or self.rules.arena) and isWildMode(mode) then
+    return nil, "rules.palace and rules.arena are trainer fights"
+  end
+  if self.rules.arena and (#self.bySide.a ~= 1 or #self.bySide.b ~= 1) then
+    return nil, "rules.arena is a one-on-one fight"
+  end
   -- The Safari's factors come from the wild monster (Safari.seat).
   if self.safari then
     local ok, why = Safari.seat(self.safari, opts.safari, self.bySide.b[1].mons[1])
@@ -883,6 +937,8 @@ function M.create(opts)
   for _, fighter in ipairs(self.fighters) do
     if fighter.b then self:_sendEvent(fighter) end
   end
+  -- The Arena's points start from the leads (pokeemerald battle_main.c:3486).
+  if self.rules.arena then self:_arenaNew() end
 
   self.phase = "resolving"
   self:_battleStart()
@@ -891,6 +947,9 @@ function M.create(opts)
   -- pokefirered/src/battle_controller_oak_old_man.c:452: Oak speaks before the
   -- first action menu.
   if not self.result then self:_lesson("intro") end
+  -- pokeemerald/src/battle_main.c:3928: the Arena referee's "Commence
+  -- battling!" closes TryDoEventsBeforeFirstTurn.
+  if self.arenaState and not self.result then self:_emit("arena", { text = "start" }) end
   if not self.result and self:_anyMustReplace() then
     self:_openReplace()
     return self
@@ -1229,7 +1288,7 @@ function Battle:_normaliseChoice(fighter, choice)
     if slot == nil then return nil end
     local target = partyIndexOf(fighter, slot)
     local bench = fighter.mons[target]
-    if not bench or bench.hp <= 0 then return nil end
+    if not bench or bench.hp <= 0 or bench.judged then return nil end
     if self:partyTaken(fighter, target) then return nil end
     return { action = "switch", slot = target }
   end
@@ -1302,17 +1361,26 @@ function Battle:_normaliseChoice(fighter, choice)
   end
 
   if action == "switch" then
+    -- rules.arena: the party menu refuses the swap (pokeemerald battle_main.c:
+    -- 4243, PARTY_ACTION_CANT_SWITCH).
+    if self.rules.arena then return nil end
     local slot = int(choice.slot, nil)
     if slot == nil then return nil end
     local target = partyIndexOf(fighter, slot)
     local bench = fighter.mons[target]
-    if not bench or bench.hp <= 0 or self:partyTaken(fighter, target) then return nil end
+    if not bench or bench.hp <= 0 or bench.judged or self:partyTaken(fighter, target) then return nil end
     if self:_switchBlocked(b) then return nil end
     return { action = "switch", slot = target }
   end
 
   if action == "fight" then
+    -- rules.palace (Palace.lua): `unable` is the controller's own failure --
+    -- chosen move 0, target 0 (battle_gfx_sfx_util.c:255) -- so it needs no
+    -- move of its own.
+    local palace = self.rules.palace
+    local unable = palace ~= nil and choice.unable == true
     local index = int(choice.move, nil)
+    if unable then index = 0 end
     if index == nil then return nil end
     if self:_facesNoBattler(fighter) then return { action = "skip" } end
     local out = { action = "fight", move = index + 1 }
@@ -1325,8 +1393,19 @@ function Battle:_normaliseChoice(fighter, choice)
         out.move = encoreSlot
       else
         if not b.moves[index + 1] then return nil end
-        local bad = self:moveLimitations(b)
-        if bad[index + 1] then return nil end
+        if palace then
+          -- The pick may name a slot the move menu would refuse: the
+          -- selection check fails it instead (Palace.selection).
+          out.palace = Palace.selection(self, b, index + 1, unable)
+          if unable then
+            -- Target 0: field slot 0 (the player's left), as the cart files it.
+            out.target = 0
+            return out
+          end
+        else
+          local bad = self:moveLimitations(b)
+          if bad[index + 1] then return nil end
+        end
       end
     end
     local row = out.struggle and Move.STRUGGLE or b.moves[out.move]
@@ -1472,7 +1551,7 @@ function Battle:_bestSeBench(fighter, defender)
   for i = 1, #fighter.mons do
     if not self:partyTaken(fighter, i) then
       local bench = fighter.mons[i]
-      if bench and bench.hp > 0 then
+      if bench and bench.hp > 0 and not bench.judged then
         local maxEff = 100
         for j = 1, #bench.moves do
           local m = bench.moves[j]
@@ -1539,6 +1618,12 @@ function Battle:_autoFight(b, move, foe)
 end
 
 function Battle:_autoChoice(fighter)
+  -- rules.arena: the next one in party order, never a choice (Arena.lua).
+  if fighter.mustReplace and self.rules.arena then
+    local next_ = self:benchOf(fighter)[1]
+    if next_ then return { action = "switch", slot = next_ } end
+    return nil
+  end
   if fighter.mustReplace then
     local foe = self:_autoTarget(fighter)
     local defender = foe and foe.b
@@ -1587,7 +1672,8 @@ function Battle:_autoChoice(fighter)
   local foeBoosted = ds.atk >= 2 or ds.def >= 2 or ds.spe >= 2 or ds.spa >= 2 or defender.focusEnergy
   local foeSub = int(defender.substituteHP, 0) > 0
   local weSlower = self:_speedOf(b) < self:_speedOf(defender)
-  local canSwitch = not self:_switchBlocked(b)
+  -- The Arena's AI never switches (pokeemerald battle_ai_switch_items.c:452).
+  local canSwitch = not self:_switchBlocked(b) and not self.rules.arena
 
   if b.mon.hp * 4 <= b.mon.maxHp and canSwitch then
     local se = self:_bestSeBench(fighter, defender)
@@ -1887,6 +1973,7 @@ function Battle:_closeReplace()
     self:_openReplace()
     return
   end
+  self:_turnPassed()
   self.turn = self.turn + 1
   self:_openTurn()
 end
@@ -1963,6 +2050,10 @@ function Battle:_switchIn(fighter, index, baton)
   end
   fighter.b = nb
   self:_refield(fighter)
+  -- pokeemerald battle_script_commands.c:4659 / :4697: the Palace's low-HP
+  -- bit and the Arena's points and counter, at every switch-in.
+  self:_palaceSwitchIn(nb)
+  self:_arenaSwitchedIn()
   local mon = nb.mon
   self:_emit("switch", { slot = fighter.slot, side = fighter.side, text = mon.species,
                          speciesId = mon.speciesId, level = mon.level, mon = index - 1 })
@@ -2099,9 +2190,17 @@ function Battle:_beginTurn()
   for _, r in ipairs(rows) do self.turnPriority[r.b] = r.pri end
 
   -- pokefirered/src/battle_main.c:3669 CheckFocusPunch_ClearVarsBeforeTurnStarts
-  for _, r in ipairs(rows) do
-    if r.row and int(r.row.effect, -1) == E.FOCUS_PUNCH and not r.b.lockedNum
-        and Status.normalise(r.b.mon.status) ~= "SLP" then
+  -- (pokeemerald :4905): battler by battler in battler-id order
+  -- (focusPunchBattlerId 0..n), not in the turn's order; not asleep, not a
+  -- Truant battler due to loaf, not one with no usable move (noValidMoves:
+  -- Struggle's row besides) -- FR :3679-3680, EM :4916-4917.
+  local rowOf = {}
+  for _, r in ipairs(rows) do rowOf[r.f] = r end
+  for _, f in ipairs(self.order) do
+    local r = rowOf[f]
+    if r and r.row and int(r.row.effect, -1) == E.FOCUS_PUNCH and not r.b.lockedNum
+        and Status.normalise(r.b.mon.status) ~= "SLP" and int(r.b.truantCounter, 0) == 0
+        and self:hasUsableMove(r.b) then
       self:_emit("anim", { slot = r.b.slot, side = r.b.side, text = "FOCUS_PUNCH_SETUP" })
       self:say(self:nameOf(r.b) .. " is tightening its focus!")
     end
@@ -2127,15 +2226,26 @@ function Battle:_resolveTurn()
   self:_drainExp()
   if not self.result then self:_checkOver() end
   if not self.result then self:_refreshVacant() end
+  -- rules.arena: the replacements, then the judge (Arena.lua).
+  if not self.result then self:_arenaTurnEnd() end
 
   if not self.result and self:_anyMustReplace() then
     self:_openReplace()
     return
   end
   if not self.result then
+    self:_turnPassed()
     self.turn = self.turn + 1
     self:_openTurn()
   end
+end
+
+-- The tail of pokeemerald's BattleTurnPassed (battle_main.c:3998-4018), after
+-- the replacements: the Arena's turn counter, then the Palace's half-HP lines.
+function Battle:_turnPassed()
+  if self.result then return end
+  self:_arenaTurnPassed()
+  self:_palaceFlavor()
 end
 
 -- pokefirered/src/battle_main.c:4229 TryRunFromBattle (wild), a concession
@@ -2153,14 +2263,35 @@ function Battle:_resolveRuns()
   -- battle_main.c:4321 -- the "forfeit the match?" prompt is the screen's)
   -- always gets away (battle_util.c:448, traps or not) and ends as
   -- B_OUTCOME_FORFEITED, "{PLAYER} forfeited the match!" (:5058): the runner's
-  -- side loses.  A wild fight's RUN stays a RUN.
+  -- side loses.  A wild fight's RUN stays a RUN.  In the Battle Pyramid
+  -- (`rules.pyramidRun`) TryRunFromBattle asks RUN AWAY before the FRONTIER |
+  -- TRAINER_HILL escape (pokeemerald battle_util.c:427-447): the runner -- not
+  -- a SMOKE BALL holder, whose item comes first -- counts a try and rolls
+  -- _pyramidEscape; a failure is "Can't escape!" (B_MSG_CANT_ESCAPE_2, :519)
+  -- with Fury Cutter, Destiny Bond and Grudge cleared, and the turn spent.
   if self.rules.forfeit and not isWildMode(self.mode) then
-    local sides = {}
+    local sides, any = {}, false
     for _, fighter in ipairs(running) do
-      sides[fighter.side] = true
-      self:say(fighter.name .. " forfeited the match!")
-      self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
+      local b = fighter.b
+      local escaped = true
+      if self.rules.pyramidRun and b and b.mon.hp > 0 and b.ability == "RUN_AWAY"
+          and Items.of(b) ~= Items.HOLD.CAN_ALWAYS_RUN then
+        fighter.acted = true
+        self.fleeAttempts = self.fleeAttempts + 1
+        escaped = self:_pyramidEscape(b)
+        if not escaped then
+          b.furyCutter, b.destinyBond, b.grudge = nil, nil, nil
+          self:say("Can't escape!")
+        end
+      end
+      if escaped then
+        sides[fighter.side] = true
+        any = true
+        self:say(fighter.name .. " forfeited the match!")
+        self:_emit("run", { slot = fighter.slot, side = fighter.side, text = fighter.name })
+      end
     end
+    if not any then return false end
     if sides.a and sides.b then
       self:_finish("draw", nil, nil, "run", "forfeit", nil)
     elseif sides.a then
@@ -2600,6 +2731,9 @@ function Battle:_resolveFights()
     self:_faintSweep()
     self:_drainExp()
     if not self.result then self:_checkOver() end
+    -- rules.arena: HandleAction_TryFinish replaces the fallen at once
+    -- (pokeemerald battle_util.c:638; Arena.lua).
+    if not self.result then self:_arenaRefill() end
   end
 end
 
@@ -2755,14 +2889,25 @@ end
 -- A battler is down: the `faint` event, the participation bookkeeping, and the
 -- seat's next step (BattleSim2 `_faint`).  Called at the engine's announcement
 -- points (Move.lua tryFaint*, the residual steps, the action sweep).
-function Battle:_faintBattler(b)
+-- `judged`: the Battle Arena's loser (Arena.lua) -- it keeps its HP and status
+-- in the party (VARIOUS_ARENA_*_MON_LOST zero the battler alone, and
+-- cleareffectsonfaint keeps STATUS1 in the Arena, pokeemerald battle_script_
+-- commands.c:3069 / :6409), is down for good (`judged`), earns its foe
+-- nothing (getexp gives nothing in a FRONTIER fight) and leaves its seat the
+-- Truant switch-in hack (:6413, `truantHack`).
+function Battle:_faintBattler(b, judged)
   if b.faintAnnounced then return end
   b.faintAnnounced = true
   local fighter = b.fighter
   if fighter.b ~= b then return end
   local mon = b.mon
-  mon.hp = 0
-  mon.status, mon.sleepTurns = nil, nil
+  if judged then
+    mon.judged = true
+    fighter.truantHack = true
+  else
+    mon.hp = 0
+    mon.status, mon.sleepTurns = nil, nil
+  end
   self:_unfield(fighter, b.partyIndex)
   self:_unlink(b)
   -- A shared team's bench leaves out the partner's active mon (`benchOf`).
@@ -2771,7 +2916,7 @@ function Battle:_faintBattler(b)
     slot = fighter.slot, side = fighter.side, text = mon.species, amount = next_ and 1 or nil,
   })
   self:_syncTeams()
-  self.pendingExp[#self.pendingExp + 1] = { fallen = fighter, mon = mon }
+  if not judged then self.pendingExp[#self.pendingExp + 1] = { fallen = fighter, mon = mon } end
   fighter.lastB = b
   fighter.b = nil
   fighter.active = nil
@@ -2795,14 +2940,18 @@ end
 -- endings
 -- ------------------------------------------------------------------
 
+-- A judgment that empties a side (Arena.lua `judgeEnding`) ends the fight as
+-- a KO does -- Cmd_checkteamslost, B_OUTCOME_WON / LOST / DREW -- with `how =
+-- "judge"`.
 function Battle:_checkOver()
   if self.result then return true end
   local aliveA, aliveB = self:_sideAlive("a"), self:_sideAlive("b")
   if aliveA and aliveB then return false end
+  local how = self.judgeEnding and "judge" or "ko"
   if not aliveA and not aliveB then
-    self:_finish("draw", nil, nil, "ko", "ko", nil)
+    self:_finish("draw", nil, nil, "ko", how, nil)
   elseif aliveA then
-    local result = self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko", "ko", "a")
+    local result = self:_finish("win", self:_sidePlayers("a"), self:_sidePlayers("b"), "ko", how, "a")
     -- pokefirered/src/battle_main.c:3764: only a WON battle runs
     -- BattleScript_PayDayMoneyAndPickUpItems (Cmd_givepaydaymoney), and the
     -- coins are the player side's.  Link rules pay nothing (1v1 / coop_pvp); in
@@ -2811,7 +2960,7 @@ function Battle:_checkOver()
     local coins = int(self.payDay and self.payDay.a, 0)
     if result and EXP_MODES[self.mode] and coins > 0 then result.payDay = coins end
   else
-    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko", "ko", "b")
+    self:_finish("win", self:_sidePlayers("b"), self:_sidePlayers("a"), "ko", how, "b")
   end
   return true
 end
@@ -2829,6 +2978,8 @@ function Battle:_finish(outcome, winners, losers, reason, how, by)
     how = how, by = by,
   }
   if self.safari then self.result.safari = Safari.summary(self.safari) end
+  -- The Arena's judged losers by sheet slot, side by side (Arena.lua).
+  self.result.judged = self:_arenaJudged()
   self.phase = "over"
   self.deadline = nil
   self.resolveDeadline = nil
@@ -2953,12 +3104,24 @@ function Battle:snapshot()
       hp = mon and mon.hp or 0, maxHp = mon and mon.maxHp or 0,
       status = mon and mon.status or nil,
       party = party,
+      -- rules.palace: the battler's low-HP bit (Palace.lua `palaceLow`).
+      palaceLow = (b and b.palaceLow) or nil,
     }
     -- `waiting` names owners, each once: a shared team is one player.
     if self:_owes(fighter) and not owing[fighter.owner] then
       owing[fighter.owner] = true
       waiting[#waiting + 1] = fighter.owner
     end
+  end
+  -- rules.arena: the judge's running tallies (Arena.lua), for tests and logs.
+  local arena = nil
+  local st = self.arenaState
+  if st then
+    arena = {
+      counter = st.counter,
+      mind = { a = st.mind.a, b = st.mind.b }, skill = { a = st.skill.a, b = st.skill.b },
+      hpStart = { a = st.hpStart.a, b = st.hpStart.b },
+    }
   end
   return {
     battle = self.id, mode = self.mode, phase = self.phase, turn = self.turn, seq = self.seq,
@@ -2967,6 +3130,7 @@ function Battle:snapshot()
     rngState = self.rng:state(), weather = self.field.weather,
     field = field, waiting = waiting,
     payDay = { a = self.payDay.a, b = self.payDay.b },
+    arena = arena,
   }
 end
 

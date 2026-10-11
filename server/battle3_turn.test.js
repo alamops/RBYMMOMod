@@ -119,6 +119,8 @@ function outcomeOf(out) {
   // wave 2 of contract C3: a forced catch's `given = false`, a Safari's spend
   if (out.given != null) o.given = out.given;
   if (out.safari) o.safari = out.safari;
+  // wave 3: the Battle Arena's judged losers, by sheet slot
+  if (out.judged) o.judged = out.judged;
   return o;
 }
 
@@ -152,6 +154,8 @@ function run(scn) {
       else if (st.op === 'reconnect') push(battle.reconnect(st.player));
       else if (st.op === 'waiting') push(battle.snapshot().waiting);
       else if (st.op === 'seats') push(battle.seatsOf(st.player).map((seat) => seat.playerId));
+      else if (st.op === 'palaceLow') push(battle.palaceLow(st.slot));
+      else if (st.op === 'arena') push(battle.snapshot().arena || false);
       else if (st.op === 'repeat') {
         for (let i = 0; i < st.times; i += 1) {
           if (st.untilOver && battle.outcome()) break;

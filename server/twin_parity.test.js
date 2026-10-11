@@ -2420,3 +2420,183 @@ test('C6: Wire and sanitize read a safari choice and a lesson event alike, case 
   assert.ok(seen.lessons > 300 && seen.lessonTexts > 100 && seen.refusedLesson > 300,
     `the run reached lessons (${seen.lessons}), their texts (${seen.lessonTexts}) and refusals (${seen.refusedLesson})`);
 });
+
+// Wave 3 of docs/plans/gen3-solo-remaining-fights.md (contract C6): the Battle
+// Palace's `palace` event and the Battle Arena referee's `arena` event. Gen 3
+// words alone, on Wire and sanitize alike, each `text` a token from one closed
+// set on all four twins (Wire, sanitize, BattleSim3's events.lua and
+// lib/battle3/events.js); no PROTOCOL bump, because no hub seats a Frontier
+// hall.
+test('wave 3: the palace and arena kinds are one Gen 3 vocabulary on Wire, sanitize and both sims', () => {
+  const wire = read('src/Wire.lua');
+  const sim = read('src/BattleSim3/events.lua');
+  const Events3 = require('./lib/battle3/events.js');
+  for (const kind of ['palace', 'arena']) {
+    assert.ok(luaSet(wire, 'BATTLE_EVENTS3').includes(kind), `Wire.BATTLE_EVENTS3 names ${kind}`);
+    assert.ok(sanitize.BATTLE_EVENT_TYPES3.has(kind), `sanitize BATTLE_EVENT_TYPES3 names ${kind}`);
+    assert.ok(!luaSet(wire, 'BATTLE_EVENTS').includes(kind) && !BATTLE_EVENT_TYPES.has(kind),
+      `${kind} is not in the every-generation vocabulary`);
+    assert.ok(!luaSet(wire, 'BATTLE_EVENTS2').includes(kind), `...nor in Gold's (${kind})`);
+    assert.ok(luaSet(sim, 'KINDS').includes(kind) && Events3.KINDS[kind] === true,
+      `BattleSim3 speaks ${kind} on both twins`);
+    for (const [lua, js] of [['src/BattleSim/events.lua', './lib/battle/events.js'],
+      ['src/BattleSim2/events.lua', './lib/battle2/events.js']]) {
+      assert.ok(!luaSet(read(lua), 'KINDS').includes(kind), `${lua} does not speak ${kind}`);
+      assert.ok(!Object.keys(require(js).KINDS).includes(kind), `${js} does not speak ${kind}`);
+    }
+    assert.ok(new RegExp(`raw\\.t == "${kind}"`).test(wire), `Wire.battleEvent reads a ${kind}'s text`);
+  }
+  const palace = ['flavor', 'unable'];
+  const arena = ['body', 'draw', 'judge', 'mind', 'skill', 'start', 'win'];
+  assert.deepStrictEqual(luaSet(wire, 'PALACE_TOKENS3'), palace, 'Wire.PALACE_TOKENS3');
+  assert.deepStrictEqual([...sanitize.PALACE_TOKENS3].sort(), palace, 'sanitize PALACE_TOKENS3');
+  assert.deepStrictEqual(luaSet(sim, 'PALACE_TOKENS'), palace, 'events.lua PALACE_TOKENS');
+  assert.deepStrictEqual(Object.keys(Events3.PALACE_TOKENS).sort(), palace, 'events.js PALACE_TOKENS');
+  assert.deepStrictEqual(luaSet(wire, 'ARENA_TOKENS3'), arena, 'Wire.ARENA_TOKENS3');
+  assert.deepStrictEqual([...sanitize.ARENA_TOKENS3].sort(), arena, 'sanitize ARENA_TOKENS3');
+  assert.deepStrictEqual(luaSet(sim, 'ARENA_TOKENS'), arena, 'events.lua ARENA_TOKENS');
+  assert.deepStrictEqual(Object.keys(Events3.ARENA_TOKENS).sort(), arena, 'events.js ARENA_TOKENS');
+
+  // The JS reading, case by case (the differential below holds Lua to it).
+  const ev = (t, extra, gen) => sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 9, t, side: 'a', slot: 0, ...extra,
+  }, gen);
+  for (const gen of [3, undefined]) {
+    assert.deepStrictEqual(ev('palace', { text: 'flavor', amount: 3 }, gen), {
+      battle: 'b1', seq: 9, t: 'palace', side: 'a', slot: 0, text: 'flavor', amount: 3,
+    }, `a palace flavor line reads for generation ${gen}`);
+    assert.deepStrictEqual(ev('arena', { text: 'mind', amount: 2 }, gen), {
+      battle: 'b1', seq: 9, t: 'arena', side: 'a', slot: 0, text: 'mind', amount: 2,
+    }, `an arena step reads for generation ${gen}`);
+  }
+  for (const gen of [1, 2]) {
+    assert.strictEqual(ev('palace', { text: 'unable' }, gen), null, `a Gen ${gen} reader refuses a palace event`);
+    assert.strictEqual(ev('arena', { text: 'start' }, gen), null, `a Gen ${gen} reader refuses an arena event`);
+  }
+  for (const bad of ['UNABLE', 'start', 'glint', '', 7, ['unable'], 'unable ']) {
+    const got = ev('palace', { text: bad }, 3);
+    assert.ok(got && got.text === undefined, `palace text ${JSON.stringify(bad)} is dropped, the event kept`);
+  }
+  for (const bad of ['WIN', 'unable', 'flavor', 'judgment', '', 2, null]) {
+    const got = ev('arena', { text: bad }, 3);
+    assert.ok(got && got.text === undefined, `arena text ${JSON.stringify(bad)} is dropped, the event kept`);
+  }
+  assert.strictEqual(ev('arena', { text: 'judge', amount: -1 }, 3).amount, undefined,
+    'an amount is unsigned on every kind');
+});
+
+test('wave 3: Wire and sanitize read palace and arena events alike, case by case', (t) => {
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('luajit', ['-v'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    t.skip('luajit not on PATH');
+    return;
+  }
+  let seed = 20261011;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = (list) => list[Math.floor(rand() * list.length)];
+  const maybe = (p, list) => (rand() < p ? pick(list) : undefined);
+  const TEXTS = ['unable', 'flavor', 'start', 'judge', 'mind', 'skill', 'body', 'win', 'draw', 'UNABLE',
+    'Win', 'glint', '', 7, null, undefined, ['mind'], 'mind ', 'constructor', 'toString', '__proto__'];
+  const events = [];
+  for (let i = 0; i < 4000; i += 1) {
+    const raw = {
+      battle: pick(['b1', 'b1', 'b1', 'bad id!']),
+      seq: pick([1, 9, 0, -2, '4']),
+      t: rand() < 0.75 ? pick(['palace', 'arena']) : pick(['obey', 'lesson', 'msg', 'Palace', 'arenas', null]),
+      text: pick(TEXTS),
+      side: maybe(0.8, ['a', 'b', 'c']),
+      slot: maybe(0.7, [0, 3, 6, 9, '1', -1]),
+      amount: maybe(0.6, [0, 1, 2, 3, 4, -1, 2.5, '2', 'x', 10000]),
+    };
+    for (const key of Object.keys(raw)) if (raw[key] === undefined) delete raw[key];
+    events.push({ raw, gen: pick([1, 2, 3, 3, 3, undefined, '3']) });
+  }
+  const lit = (v) => {
+    if (v === undefined || v === null) return 'nil';
+    if (typeof v === 'boolean') return String(v);
+    if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '(0/0)';
+    if (typeof v === 'string') return `"${[...Buffer.from(v, 'utf8')].map((b) => `\\${b}`).join('')}"`;
+    if (Array.isArray(v)) return `{${v.map(lit).join(', ')}}`;
+    return `{${Object.entries(v).filter(([, x]) => x !== null && x !== undefined)
+      .map(([k, x]) => `[${lit(k)}] = ${lit(x)}`).join(', ')}}`;
+  };
+  const hex = (s) => Buffer.from(s, 'utf8').toString('hex');
+  const canon = (v) => {
+    if (v === null || v === undefined) return 'nil';
+    if (typeof v === 'boolean') return String(v);
+    if (typeof v === 'number') return `n${v}`;
+    if (typeof v === 'string') return `s${hex(v)}`;
+    return `{${Object.keys(v).sort().map((k) => `${k}=${canon(v[k])}`).join(',')}}`;
+  };
+  const script = [
+    `package.path = "${ROOT}/?.lua;" .. package.path`,
+    'local cache = {}',
+    'local function need(name)',
+    '  if cache[name] ~= nil then return cache[name] end',
+    `  local h = assert(io.open("${ROOT}/src/" .. name .. ".lua", "rb"))`,
+    '  local body = h:read("*a"); h:close()',
+    '  cache[name] = assert((loadstring or load)(body, "@" .. name))(need)',
+    '  return cache[name]',
+    'end',
+    'local Wire = need("Wire")',
+    "local function hex(s) return (s:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end",
+    'local function canon(v)',
+    '  local t = type(v)',
+    '  if t == "nil" then return "nil" end',
+    '  if t == "boolean" then return tostring(v) end',
+    '  if t == "number" then return "n" .. string.format("%d", v) end',
+    '  if t == "string" then return "s" .. hex(v) end',
+    '  local keys = {}',
+    '  for k in pairs(v) do keys[#keys + 1] = k end',
+    '  table.sort(keys)',
+    '  local parts = {}',
+    '  for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. canon(v[k]) end',
+    '  return "{" .. table.concat(parts, ",") .. "}"',
+    'end',
+    'for line in io.lines() do',
+    '  local case = assert((loadstring or load)("return " .. line))()',
+    "  io.write(canon(Wire.battleEvent(case.raw, case.gen)), '\\n')",
+    'end',
+  ].join('\n');
+  const lines = events.map((e) => `{raw = ${lit(e.raw)}, gen = ${lit(e.gen)}}`);
+  const lua = spawnSync('luajit', ['-e', script], {
+    input: `${lines.join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
+  assert.strictEqual(lua.status, 0, `luajit failed: ${lua.stderr}`);
+  const answers = lua.stdout.trim().split('\n');
+  assert.strictEqual(answers.length, lines.length, 'one answer per case');
+  const differ = [];
+  const seen = {
+    palace: 0, palaceTexts: new Set(), arena: 0, arenaTexts: new Set(), refused: 0, dropped: 0,
+  };
+  events.forEach((e, i) => {
+    const js = sanitize.cleanBattleEvent(e.raw, e.gen);
+    if (js && js.t === 'palace') {
+      seen.palace += 1;
+      if (js.text !== undefined) seen.palaceTexts.add(js.text);
+    }
+    if (js && js.t === 'arena') {
+      seen.arena += 1;
+      if (js.text !== undefined) seen.arenaTexts.add(js.text);
+    }
+    if (!js && (e.raw.t === 'palace' || e.raw.t === 'arena')) seen.refused += 1;
+    if (js && (js.t === 'palace' || js.t === 'arena') && js.text === undefined) seen.dropped += 1;
+    if (canon(js) !== answers[i]) differ.push(`event ${lit(e.raw)} gen ${e.gen}: lua=${answers[i]} js=${canon(js)}`);
+  });
+  assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${lines.length} cases read differently`);
+  assert.deepStrictEqual([...seen.palaceTexts].sort(), ['flavor', 'unable'], 'the run kept both palace tokens');
+  assert.deepStrictEqual([...seen.arenaTexts].sort(), ['body', 'draw', 'judge', 'mind', 'skill', 'start', 'win'],
+    'the run kept every arena token');
+  assert.ok(seen.palace > 500 && seen.arena > 500 && seen.refused > 300 && seen.dropped > 300,
+    `the run reached palace (${seen.palace}) / arena (${seen.arena}) events, refusals (${seen.refused}) `
+    + `and dropped texts (${seen.dropped})`);
+});

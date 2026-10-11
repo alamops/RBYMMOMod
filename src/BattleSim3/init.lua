@@ -23,6 +23,8 @@
 --   Move       move resolution + the battle's helper surface
 --   Residual   end of turn, battle start, switch-in effects
 --   Safari     the Safari Zone mode (the factors, the throws, the monster's turn)
+--   Palace     the Battle Palace rules (the failed pick, the half-HP line)
+--   Arena      the Battle Arena rules (no switching, the three-turn judge)
 --   Turn       the machine (BattleSim2's API)
 --   Events     the C5 vocabulary
 --
@@ -50,6 +52,8 @@ local M = {
   Move = need("BattleSim3/Move"),
   Residual = need("BattleSim3/Residual"),
   Safari = need("BattleSim3/Safari"),
+  Palace = need("BattleSim3/Palace"),
+  Arena = need("BattleSim3/Arena"),
   Events = need("BattleSim3/events"),
   Turn = need("BattleSim3/Turn"),
 }

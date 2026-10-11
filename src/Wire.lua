@@ -1464,6 +1464,16 @@ M.OBEY_TOKENS3 = {
   ignores_asleep = true, uses_random_move = true, falls_asleep = true, hits_itself = true,
   loafing = true, wont_obey = true, turned_away = true, pretend_not_notice = true,
 }
+-- What a `palace` event (the Battle Palace, contract C6 wave 3 of
+-- docs/plans/gen3-solo-remaining-fights.md) and an `arena` event (the Battle
+-- Arena referee) name: closed sets for M.OBEY_TOKENS3's reason -- each is a
+-- line or a step of the cart's (B_MSG_INCAPABLE_OF_POWER and
+-- gBattlePalaceFlavorTextTable; gRefereeStringsTable and the judgment
+-- window), which the screens look up rather than phrase.
+M.PALACE_TOKENS3 = { unable = true, flavor = true }
+M.ARENA_TOKENS3 = {
+  start = true, judge = true, mind = true, skill = true, body = true, win = true, draw = true,
+}
 
 -- The Gold sheet's held-item fields (contract K2 of
 -- docs/plans/gen12-referee-fidelity.md).  pokecrystal *names* its hold effects
@@ -3396,9 +3406,21 @@ M.BATTLE_EVENTS = {
 --                 rule it flips (no misses, no crits until then) is the
 --                 referee's own.  No PROTOCOL bump: only solo's local
 --                 referee seats a first battle, so no hub ever emits one.
+--   palace     -- the Battle Palace (wave 3): text = M.PALACE_TOKENS3 --
+--                 `unable` ("<X> appears incapable of using its power!",
+--                 pokeemerald battle_util.c:263) or `flavor` (the half-HP
+--                 line, battle_script_commands.c:6384) with amount = its
+--                 gBattlePalaceFlavorTextTable index; the referee's `msg`
+--                 follows either.
+--   arena      -- the Battle Arena referee (wave 3): text = M.ARENA_TOKENS3 --
+--                 `start` (Commence battling!), `judge` (That's it!), `mind` /
+--                 `skill` / `body` per side with amount = the points awarded
+--                 (2 / 1 / 0), then `win` (side) or `draw`.  Neither kind has
+--                 a PROTOCOL bump: only solo's local referee seats a Frontier
+--                 hall, so no hub ever emits one.
 M.BATTLE_EVENTS3 = {
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
-  obey = true, lesson = true,
+  obey = true, lesson = true, palace = true, arena = true,
 }
 
 -- Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
@@ -3526,6 +3548,10 @@ function M.battleEvent(raw, generation)
       out.text = M.id(raw.text)
     elseif raw.t == "obey" then
       out.text = M.OBEY_TOKENS3[raw.text] and raw.text or nil
+    elseif raw.t == "palace" then
+      out.text = M.PALACE_TOKENS3[raw.text] and raw.text or nil
+    elseif raw.t == "arena" then
+      out.text = M.ARENA_TOKENS3[raw.text] and raw.text or nil
     elseif older and raw.t == "msg" then
       out.text = M.battleLine(raw.text)
     else

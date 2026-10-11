@@ -632,7 +632,9 @@ Bm.partyTaken = function partyTaken(fighter, index) {
 Bm.benchOf = function benchOf(fighter) {
   const out = [];
   for (let i = 1; i <= fighter.mons.length; i += 1) {
-    if (fighter.mons[i - 1].hp > 0 && !this.partyTaken(fighter, i)) out.push(i);
+    const mon = fighter.mons[i - 1];
+    // A Battle Arena loser (`judged`) keeps its HP and is down for good.
+    if (mon.hp > 0 && !truthy(mon.judged) && !this.partyTaken(fighter, i)) out.push(i);
   }
   return out;
 };
@@ -734,6 +736,23 @@ Ctx.fail = function fail(text) {
   this.B.say(truthy(text) ? text : 'But it failed!');
 };
 
+// The effectiveness bits a typecalc leaves in gMoveResultFlags, for the
+// Arena's skill (Arena.js): ORed over the move's strikes; never for Struggle
+// or the fixed-damage effects whose scripts clear them.
+const NO_RESULT_TYPE = {
+  [E.SUPER_FANG]: true,
+  [E.DRAGON_RAGE]: true,
+  [E.LEVEL_DAMAGE]: true,
+  [E.PSYWAVE]: true,
+  [E.SONICBOOM]: true,
+  [E.ENDEAVOR]: true,
+};
+Ctx.resType = function resType(flags) {
+  if (!isTable(flags) || this.mnum === MOVE.STRUGGLE || NO_RESULT_TYPE[this.effect] === true) return;
+  if (truthy(flags.super)) this.resSuper = true;
+  if (truthy(flags.notVery)) this.resNotVery = true;
+};
+
 Ctx.isProtected = function isProtected() {
   const t = this.target;
   if (!truthy(t) || t === this.user || !truthy(t.protected)) return false;
@@ -753,6 +772,10 @@ Ctx.accuracyCheck = function accuracyCheck(mode, printFail) {
   const { B, user, target } = this;
   const failMsg = (reason) => {
     this.missReason = reason;
+    // The Arena's skill reads MOVE_RESULT_MISSED and the MISS_TYPE
+    // B_MSG_PROTECTED (Arena.js): a miss and a Protect set both.
+    if (reason !== 'fail') this.resMissed = true;
+    if (reason === 'protected') this.resProtected = true;
     if (!truthy(printFail)) return;
     if (reason === 'protected') {
       B.say(`${B.nameOf(target)} protected itself!`);
@@ -1460,6 +1483,8 @@ function preChecks(C) {
   if (eff === E.DREAM_EATER && (int(target.substituteHP, 0) > 0
       || Status.normalise(target.mon.status) !== 'SLP')) {
     fail(C, `${B.nameOf(target)} wasn't affected!`);
+    // BattleScript_WasntAffected sets no result flag (Arena.js's skill).
+    C.resClear = true;
     return true;
   }
   if (eff === E.COUNTER || eff === E.MIRROR_COAT) {
@@ -1505,6 +1530,8 @@ function preChecks(C) {
       B.say(`${B.nameOf(C.target)} protected itself!`);
     }
     C.missed = true;
+    // attackcanceler's Protect: MOVE_RESULT_MISSED, MISS_TYPE B_MSG_PROTECTED.
+    C.resProtected = true;
     return true;
   }
   if (eff === E.EXPLOSION && !truthy(C.explosionStarted)) {
@@ -1516,6 +1543,9 @@ function preChecks(C) {
         B.emitAbility(b);
         B.say(`${B.nameOf(b)}'s DAMP prevents ${B.nameOf(user)} from using ${C.moveName()}!`);
         C.failed = true;
+        // STRINGID_PKMNPREVENTSUSAGE, no result flag: the Arena's -3 alone.
+        C.resClear = true;
+        B._arenaDeduct(user);
         return true;
       }
     }
@@ -1697,6 +1727,7 @@ function hitOnce(C, optsIn) {
     C.missed = true;
     return [null, info, 'immune'];
   }
+  C.resType(info.typeFlags);
   let hung;
   [dmg, hung] = B._adjustDamage(C, C.target, dmg);
   C.attackAnimation();
@@ -1742,6 +1773,8 @@ function tripleKick(C) {
   // battle_scripts_1.s:1433: the kick loop ends with moveendfrom
   // MOVEEND_UPDATE_LAST_MOVES only.
   C.endFrom = 'last';
+  // :1425: a later kick's miss is no miss once one landed.
+  if (landed > 0) delete C.resMissed;
   if (landed > 0) {
     effectivenessLine(B, truthy(lastInfo) ? lastInfo.typeFlags : lastInfo);
     B.say(`Hit ${landed} time(s)!`);
@@ -1834,6 +1867,7 @@ function explosion(C) {
     return;
   }
   const { target } = C;
+  C.resType(info.typeFlags);
   let hung;
   [dmg, hung] = B._adjustDamage(C, target, dmg);
   C.attackAnimation();
@@ -1923,6 +1957,8 @@ M.hit = function hit(C) {
     if (n <= 0) {
       B.say('But it failed to SPIT UP a thing!');
       C.failed = true;
+      // BattleScript_SpitUpFail sets no result flag (Arena.js's skill).
+      C.resClear = true;
       return;
     }
     user.stockpile = 0;
@@ -1948,6 +1984,7 @@ M.hit = function hit(C) {
       C.noEffect = true;
       return;
     }
+    C.resType(flags);
     B._applySetDamage(C, dmg, flags);
     C.tryFaintTarget();
     return;
@@ -2107,6 +2144,8 @@ function chargeTurn(C) {
   } else {
     B.say(B.nameOf(user) + CHARGE_TEXT[eff]);
     if (eff === E.SKULL_BASH) {
+      // statbuffchange STAT_CHANGE_ALLOW_PTR at +6: MOVE_RESULT_MISSED (Arena.js).
+      if (user.stages.def >= 6) C.resMissed = true;
       Effects.changeStat(B, user, 'def', 1, { user: true, allowPtr: true, noMsg: user.stages.def >= 6 });
     }
   }
@@ -2142,6 +2181,8 @@ function ohko(C) {
     C.missed = true;
     B.emitAbility(target);
     B.say(`${B.nameOf(target)} was protected by STURDY!`);
+    // STRINGID_PKMNPROTECTEDBY: the Arena's -3.
+    B._arenaDeduct(user);
     return;
   }
   const uLvl = int(user.mon.level, 1);
@@ -2162,6 +2203,8 @@ function ohko(C) {
     }
     return;
   }
+  // battle_scripts_1.s:766: the typecalc before tryKO set the effectiveness.
+  C.resType(flags);
   const hpBefore = target.mon.hp;
   let dmg = hpBefore;
   const endured = truthy(target.enduring);
@@ -2248,6 +2291,10 @@ function absorbCheck(C) {
   C.noEffect = true;
   C.missed = true;
   C.missReason = 'absorbed';
+  // Every line here is one of BattleArena_DeductSkillPoints': -3. VOLT /
+  // WATER ABSORB set MOVE_RESULT_DOESNT_AFFECT_FOE; FLASH FIRE sets nothing.
+  B._arenaDeduct(user);
+  if (target.ability === 'FLASH_FIRE') C.resClear = true;
   return true;
 }
 
@@ -2637,6 +2684,8 @@ function soundproofBlocked(C) {
   C.ppReduce();
   B.emitAbility(target);
   B.say(`${B.nameOf(target)}'s SOUNDPROOF blocks ${C.moveName()}!`);
+  // STRINGID_PKMNSXBLOCKSY: the Arena's -3.
+  B._arenaDeduct(user);
   C.missed = true;
   C.noEffect = true;
   moveEnd(C);
@@ -2747,9 +2796,13 @@ function run(C) {
         return undefined;
       }
       if (d === 'called') {
+        C.obeys = true;
         return runCalled(C, at(user.moves, slot), slot, { sameDepth: true });
       }
     }
+    // HITMARKER_OBEYS (pokeemerald battle_script_commands.c:960): the Arena's
+    // skill counts this move (Arena.js).
+    C.obeys = true;
   }
 
   if (eff !== E.PROTECT && eff !== E.ENDURE) user.protectStreak = 0;
@@ -2800,6 +2853,8 @@ Bm._resolveMove = function _resolveMove(user, target, row, slot, optsIn) {
     return C;
   }
   run(C);
+  // rules.arena: this context's result into the action's (Arena.js).
+  if (this.arenaAct) this._arenaFold(C);
   return C;
 };
 
@@ -2855,7 +2910,9 @@ Bm._actionMove = function _actionMove(b, choice) {
       return [at(b.moves, slot), slot, changed ? 'encore' : null];
     }
   }
-  if (truthy(b.choicedMove) && Items.has(b, Items.HOLD.CHOICE_BAND)) {
+  // A Battle Palace pick that failed its selection check (`choice.palace`)
+  // keeps the slot it named (battle_main.c:4399; Palace.js).
+  if (truthy(b.choicedMove) && Items.has(b, Items.HOLD.CHOICE_BAND) && !truthy(choice.palace)) {
     const cur = at(b.moves, choice.move);
     if (truthy(cur) && int(cur.num, 0) !== b.choicedMove) {
       const cs = this.slotOfNum(b, b.choicedMove);
@@ -2876,11 +2933,22 @@ Bm._fightAction = function _fightAction(fighter, choice, optsIn) {
     // The recharge turn: the canceller says it; any move row will do.
     const last = at(user.moves, truthy(user.lastSlot) ? user.lastSlot : 1);
     const row = truthy(last) ? last : M.STRUGGLE;
+    // rules.arena: HandleAction_UseMove rates gLockedMoves, the move that set
+    // the recharge (battle_util.c:109 / :288); no OBEYS, no skill.
+    const locked = this.calledRowByNum(user.rechargeNum, user);
+    const act = this._arenaAct(user, truthy(locked) ? locked : row);
     const firstFoe = this.foes(user)[0];
     const C = newCtx(this, user, truthy(firstFoe) ? firstFoe : user, row, null, {});
     user.movedThisTurn = true;
     canceller(C);
+    if (act) this._arenaSkill(act);
     return undefined;
+  }
+  // rules.palace: a pick that failed its selection check fails now
+  // (pokeemerald battle_util.c:263; Palace.js), but for a Pursuit on a
+  // switching foe, which runs whatever the check said.
+  if (truthy(choice.palace) && !truthy(opts.pursuit)) {
+    return this._palaceUnable(fighter, choice);
   }
   const [row, slot, why] = this._actionMove(user, choice);
   let aimed = null;
@@ -2899,9 +2967,13 @@ Bm._fightAction = function _fightAction(fighter, choice, optsIn) {
   // `mover`: whose action this is, for Oak's `stat` lesson (Effects.changeStat).
   const prev = this.mover;
   this.mover = user;
+  // rules.arena: the Mind points as the action starts, the skill at its end
+  // (Arena.js; pokeemerald battle_util.c:288, battle_script_commands.c:3952).
+  const act = this._arenaAct(user, row);
   const C = this._resolveMove(user, target, row, slot, {
     pursuit: opts.pursuit, passSlot: choice.pass, chosenAlly,
   });
+  if (act) this._arenaSkill(act);
   this.mover = prev;
   return C;
 };

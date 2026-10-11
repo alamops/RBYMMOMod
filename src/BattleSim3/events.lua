@@ -2,13 +2,14 @@
 --
 -- Contract C5 (docs/plans/gen3-battle-sheet.md §7).  Every BattleSim2 kind is
 -- kept verbatim -- same name, same fields, same meaning -- so a client that
--- draws a Gen 2 stream already draws most of a Gen 3 one.  Gen 3 adds eight kinds
--- (`ability weather held form sub ball obey lesson`) and six fields (`target
--- spread stat stage delta holding`), each for a thing the cart shows that the
--- older vocabulary cannot say: an ability acting, the weather, a held item doing
--- something (and what the mon is left holding), a picture change, the
--- substitute doll, a ball's shakes (or its dodge), a mon disobeying its
--- trainer, PROF. OAK's voice-over in the first battle.
+-- draws a Gen 2 stream already draws most of a Gen 3 one.  Gen 3 adds ten kinds
+-- (`ability weather held form sub ball obey lesson palace arena`) and six fields
+-- (`target spread stat stage delta holding`), each for a thing the cart shows
+-- that the older vocabulary cannot say: an ability acting, the weather, a held
+-- item doing something (and what the mon is left holding), a picture change,
+-- the substitute doll, a ball's shakes (or its dodge), a mon disobeying its
+-- trainer, PROF. OAK's voice-over in the first battle, the Battle Palace's two
+-- lines of its own and the Battle Arena referee's steps.
 --
 -- Mirrored, not imported, for the reason BattleSim2/events.lua gives: this
 -- directory runs with no Config, no Wire and no engine, because the same rules
@@ -32,7 +33,7 @@ local floor = math.floor
 -- the closed set
 -- ------------------------------------------------------------------
 --
--- BattleSim2's twenty, then Gen 3's eight:
+-- BattleSim2's twenty, then Gen 3's ten:
 --
 --   ability  -- an ability visibly acted (amount = ability id, text = its name)
 --   weather  -- weather started (amount 1), continues (2) or ended (0);
@@ -52,13 +53,34 @@ local floor = math.floor
 --               (Turn.create's `firstBattle = "oak"`): text = the lesson id,
 --               one of Turn.LESSONS (intro damage stat potion party run win
 --               lose); the screen speaks the cart's line for it
+--   palace   -- the Battle Palace (Turn.create's `rules.palace`; Palace.lua):
+--               text = M.PALACE_TOKENS -- `unable`, the "<X> appears incapable
+--               of using its power!" of a pick that could not be used
+--               (pokeemerald battle_util.c:263, B_MSG_INCAPABLE_OF_POWER), or
+--               `flavor`, the half-HP line (battle_script_commands.c:6384
+--               VARIOUS_PALACE_FLAVOR_TEXT) with amount = its index in
+--               gBattlePalaceFlavorTextTable, 0..3; always followed by our `msg`
+--   arena    -- the Battle Arena referee (`rules.arena`; Arena.lua): text =
+--               M.ARENA_TOKENS -- `start` (B_MSG_REF_COMMENCE_BATTLE), `judge`
+--               (B_MSG_REF_THATS_IT), one `mind` / `skill` / `body` per side
+--               with amount = the points the judgment window awards (2 won, 1
+--               tied, 0 lost the category; battle_arena.c:470), then `win`
+--               (side = the winner) or `draw`; the judged loser's `faint`
+--               follows the referee's own `msg`
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
   chose = true, unchose = true, moves = true, exp = true, team = true,
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
-  obey = true, lesson = true,
+  obey = true, lesson = true, palace = true, arena = true,
+}
+
+-- The closed token sets of the two facility kinds (Wire.PALACE_TOKENS3 /
+-- ARENA_TOKENS3 read them; server/twin_parity.test.js holds the copies equal).
+M.PALACE_TOKENS = { unable = true, flavor = true }
+M.ARENA_TOKENS = {
+  start = true, judge = true, mind = true, skill = true, body = true, win = true, draw = true,
 }
 
 -- Every key an event may carry, and its type.  `battle` / `seq` are stamped by
@@ -145,6 +167,12 @@ M.SHAPES = {
                 amount = "shakes 0..3, 4 = caught, -1 = dodged (a GHOST)", text = "ball item id" },
   obey      = { slot = true, side = true, text = "the outcome token" },
   lesson    = { text = "the lesson id (Turn.LESSONS)" },
+  palace    = { slot = true, side = true, text = "unable | flavor (M.PALACE_TOKENS)",
+                amount = "flavor: the gBattlePalaceFlavorTextTable index, 0..3" },
+  arena     = { text = "start | judge | mind | skill | body | win | draw (M.ARENA_TOKENS)",
+                slot = "mind / skill / body / win: the battler's field slot",
+                side = "mind / skill / body / win: whose",
+                amount = "mind / skill / body: the points awarded, 2 / 1 / 0" },
 }
 
 -- ------------------------------------------------------------------
@@ -169,9 +197,12 @@ M.TEAM_STATUS  = "s"
 M.TEAM_FAINTED = "x"
 M.TEAM_TOKENS  = { o = true, s = true, x = true }
 
+-- A Battle Arena loser keeps its HP in the party (pokeemerald battle_script_
+-- commands.c:6409 zeroes the battler's alone) and is out of the fight all the
+-- same: `judged` reads as fainted.
 function M.teamToken(mon)
   if type(mon) ~= "table" then return nil end
-  if (tonumber(mon.hp) or 0) <= 0 then return M.TEAM_FAINTED end
+  if (tonumber(mon.hp) or 0) <= 0 or mon.judged == true then return M.TEAM_FAINTED end
   local status = mon.status
   if type(status) == "string" and status ~= "" then return M.TEAM_STATUS end
   return M.TEAM_OK

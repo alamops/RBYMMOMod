@@ -4,9 +4,9 @@
  * The event vocabulary a mediated Gen 3 battle speaks, frozen -- Node half.
  *
  * Twin of src/BattleSim3/events.lua, contract C5 (docs/plans/gen3-battle-sheet.md
- * §7). Every BattleSim2 kind is kept verbatim; Gen 3 adds eight kinds (`ability
- * weather held form sub ball obey lesson`) and six fields (`target spread stat stage
- * delta holding`). Mirrored, not imported, for the reason lib/battle2/events.js
+ * §7). Every BattleSim2 kind is kept verbatim; Gen 3 adds ten kinds (`ability
+ * weather held form sub ball obey lesson palace arena`) and six fields (`target
+ * spread stat stage delta holding`). Mirrored, not imported, for the reason lib/battle2/events.js
  * gives: Wire pulls in Config, the Lua sim runs where Config does not, and this
  * file runs where Lua does not. server/twin_parity.test.js holds the copies
  * together.
@@ -21,7 +21,7 @@
 
 const { toNumber, isTable, own } = require('./lua.js');
 
-// BattleSim2's twenty, then Gen 3's eight (see the Lua twin for the prose).
+// BattleSim2's twenty, then Gen 3's ten (see the Lua twin for the prose).
 const KINDS = {
   msg: true,
   anim: true,
@@ -51,6 +51,15 @@ const KINDS = {
   ball: true,
   obey: true,
   lesson: true,
+  palace: true,
+  arena: true,
+};
+
+// The closed token sets of the two facility kinds (the Lua twin's
+// M.PALACE_TOKENS / M.ARENA_TOKENS).
+const PALACE_TOKENS = { unable: true, flavor: true };
+const ARENA_TOKENS = {
+  start: true, judge: true, mind: true, skill: true, body: true, win: true, draw: true,
 };
 
 // Every key an event may carry, and its type. `battle` / `seq` are stamped by
@@ -178,6 +187,18 @@ const SHAPES = {
   },
   obey: { slot: true, side: true, text: 'the outcome token' },
   lesson: { text: 'the lesson id (Turn.LESSONS)' },
+  palace: {
+    slot: true,
+    side: true,
+    text: 'unable | flavor (PALACE_TOKENS)',
+    amount: 'flavor: the gBattlePalaceFlavorTextTable index, 0..3',
+  },
+  arena: {
+    text: 'start | judge | mind | skill | body | win | draw (ARENA_TOKENS)',
+    slot: "mind / skill / body / win: the battler's field slot",
+    side: 'mind / skill / body / win: whose',
+    amount: 'mind / skill / body: the points awarded, 2 / 1 / 0',
+  },
 };
 
 // ------------------------------------------------------------------
@@ -202,10 +223,12 @@ const TEAM_STATUS = 's';
 const TEAM_FAINTED = 'x';
 const TEAM_TOKENS = { o: true, s: true, x: true };
 
+// A Battle Arena loser keeps its HP in the party and is out of the fight all
+// the same: `judged` reads as fainted (the Lua twin's prose).
 function teamToken(mon) {
   if (!isTable(mon)) return null;
   const hp = toNumber(mon.hp);
-  if ((hp === null ? 0 : hp) <= 0) return TEAM_FAINTED;
+  if ((hp === null ? 0 : hp) <= 0 || mon.judged === true) return TEAM_FAINTED;
   if (typeof mon.status === 'string' && mon.status !== '') return TEAM_STATUS;
   return TEAM_OK;
 }
@@ -319,6 +342,8 @@ function check(event) {
 
 module.exports = {
   KINDS,
+  PALACE_TOKENS,
+  ARENA_TOKENS,
   FIELDS,
   SHAPES,
   SIDE_SLOTS,

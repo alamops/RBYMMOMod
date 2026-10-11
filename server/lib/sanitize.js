@@ -804,6 +804,11 @@ const DELTA3_MAX = 12;
 // screens look each one up as a line of the cart's.
 const OBEY_TOKENS3 = new Set(['ignores_asleep', 'uses_random_move', 'falls_asleep', 'hits_itself',
   'loafing', 'wont_obey', 'turned_away', 'pretend_not_notice']);
+// What a `palace` event (the Battle Palace) and an `arena` event (the Battle
+// Arena referee) name -- closed sets for OBEY_TOKENS3's reason (Wire.lua
+// M.PALACE_TOKENS3 / M.ARENA_TOKENS3).
+const PALACE_TOKENS3 = new Set(['unable', 'flavor']);
+const ARENA_TOKENS3 = new Set(['start', 'judge', 'mind', 'skill', 'body', 'win', 'draw']);
 
 /*
  * The Gold sheet's held-item fields (contract K2 of
@@ -1117,7 +1122,12 @@ const BATTLE_EVENT_TYPES = new Set([
 // Wire.lua gives at M.BATTLE_EVENTS3 (the Gen 1 sim mirrors the set above
 // exactly); a kind in either set is an event cleanBattleEvent reads. Gold's
 // `held` is BATTLE_EVENT_TYPES2 below: the same word, a different event.
-const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey', 'lesson']);
+// Wave 3 of that plan adds the Battle Palace's `palace` (text = 'unable' |
+// 'flavor', amount = the flavor line) and the Battle Arena referee's `arena`
+// (text = a judgment step, amount = the points awarded) -- solo's Frontier
+// halls, which no hub seats, so no PROTOCOL bump either.
+const BATTLE_EVENT_TYPES3 = new Set(['ability', 'weather', 'held', 'form', 'sub', 'ball', 'obey', 'lesson',
+  'palace', 'arena']);
 
 // Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
 // read by a generation 2 reader only. Wire.lua spells this M.BATTLE_EVENTS2.
@@ -2821,6 +2831,8 @@ function cleanBattleEvent(raw, generation) {
     if (raw.t === 'item' || raw.t === 'anim' || raw.t === 'ball' || raw.t === 'lesson'
         || held2) text = cleanId(raw.text);
     else if (raw.t === 'obey') text = OBEY_TOKENS3.has(raw.text) ? raw.text : null;
+    else if (raw.t === 'palace') text = PALACE_TOKENS3.has(raw.text) ? raw.text : null;
+    else if (raw.t === 'arena') text = ARENA_TOKENS3.has(raw.text) ? raw.text : null;
     else if (older && raw.t === 'msg') text = cleanBattleLine(raw.text);
     else text = cleanText(raw.text, MESSAGE_MAX);
     if (text) event.text = text;
@@ -3347,4 +3359,6 @@ module.exports = {
   STAGE3_MAX,
   DELTA3_MAX,
   OBEY_TOKENS3,
+  PALACE_TOKENS3,
+  ARENA_TOKENS3,
 };

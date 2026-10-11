@@ -108,6 +108,8 @@ const Move = require('./Move.js');
 const Residual = require('./Residual.js');
 const Events = require('./events.js');
 const Safari = require('./Safari.js');
+const Palace = require('./Palace.js');
+const Arena = require('./Arena.js');
 const {
   int, truthy, isTable, own, at, toNumber,
 } = require('./lua.js');
@@ -260,6 +262,9 @@ function copyMove(raw) {
   // `name = str(raw.name)` in the Lua: an absent key, not a null one.
   const name = str(raw.name);
   if (name !== null) out.name = name;
+  // The cart's Battle Arena Mind rating for the move (Sheet3 stamps it;
+  // Arena.mindRating); absent, absent.
+  if (raw.arenaMind != null) out.arenaMind = clamp(int(raw.arenaMind, 0), -128, 127);
   return out;
 }
 M.copyMove = copyMove;
@@ -453,6 +458,8 @@ function copyRules(raw) {
   const mult = int(raw.pyramidRun, null);
   if (mult != null && mult >= 1) r.pyramidRun = clamp(mult, 1, 255);
   r.pyramidBag = (raw.pyramidBag === true) ? true : null;
+  [r.palace] = Palace.options(raw.palace);
+  r.arena = (raw.arena === true) ? true : null;
   return r;
 }
 M.copyRules = copyRules;
@@ -467,13 +474,17 @@ M.Battle = Battle;
 Move.install(Battle);
 Residual.install(Battle);
 Safari.install(Battle);
+Palace.install(Battle);
+Arena.install(Battle);
 
 Battle.TIE_BREAK_ROLL = M.TIE_BREAK_ROLL;
 Battle.prototype.TIE_BREAK_ROLL = M.TIE_BREAK_ROLL;
 
+// A Battle Arena loser (`judged`, Arena.js) keeps its HP and is down all the
+// same.
 function firstLiving(mons, skip) {
   for (let i = 1; i <= mons.length; i += 1) {
-    if (mons[i - 1].hp > 0 && i !== skip) return i;
+    if (mons[i - 1].hp > 0 && !truthy(mons[i - 1].judged) && i !== skip) return i;
   }
   return null;
 }
@@ -812,6 +823,23 @@ function attempt(opts) {
     }
     if (!holds) return refuse(`side ${side} has only spare fighters`);
   }
+  // Wave 3's halls (contract C3; Palace.js / Arena.js): trainer fights both,
+  // the Arena one seat a side, never the two at once; a Palace without the
+  // cart's flavor table is refused, as a Safari without its tables is.
+  const rawRules = isTable(opts.rules) ? opts.rules : {};
+  if (rawRules.palace != null && rawRules.palace !== false && !self.rules.palace) {
+    const [, why] = Palace.options(rawRules.palace);
+    return refuse(why);
+  }
+  if (self.rules.palace && self.rules.arena) {
+    return refuse('rules.palace and rules.arena are two halls');
+  }
+  if ((self.rules.palace || self.rules.arena) && isWildMode(mode)) {
+    return refuse('rules.palace and rules.arena are trainer fights');
+  }
+  if (self.rules.arena && (self.bySide.a.length !== 1 || self.bySide.b.length !== 1)) {
+    return refuse('rules.arena is a one-on-one fight');
+  }
   // The Safari's factors come from the wild monster (Safari.seat).
   if (self.safari) {
     const [ok, why] = Safari.seat(self.safari, opts.safari, self.bySide.b[0].mons[0]);
@@ -832,6 +860,8 @@ function attempt(opts) {
   for (const fighter of self.fighters) {
     if (fighter.b) self._sendEvent(fighter);
   }
+  // The Arena's points start from the leads (pokeemerald battle_main.c:3486).
+  if (self.rules.arena) self._arenaNew();
 
   self.phase = 'resolving';
   self._battleStart();
@@ -840,6 +870,9 @@ function attempt(opts) {
   // pokefirered/src/battle_controller_oak_old_man.c:452: Oak speaks before the
   // first action menu.
   if (!truthy(self.result)) self._lesson('intro');
+  // pokeemerald/src/battle_main.c:3928: the Arena referee's "Commence
+  // battling!" closes TryDoEventsBeforeFirstTurn.
+  if (self.arenaState && !truthy(self.result)) self._emit('arena', { text: 'start' });
   if (!truthy(self.result) && self._anyMustReplace()) {
     self._openReplace();
     return { battle: self, reason: null };
@@ -1187,7 +1220,7 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
     if (slot == null) return null;
     const target = partyIndexOf(fighter, slot);
     const bench = at(fighter.mons, target);
-    if (!bench || bench.hp <= 0) return null;
+    if (!bench || bench.hp <= 0 || truthy(bench.judged)) return null;
     if (this.partyTaken(fighter, target)) return null;
     return { action: 'switch', slot: target };
   }
@@ -1257,17 +1290,25 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
   }
 
   if (action === 'switch') {
+    // rules.arena: the party menu refuses the swap (pokeemerald battle_main.c:
+    // 4243, PARTY_ACTION_CANT_SWITCH).
+    if (this.rules.arena) return null;
     const slot = int(choice.slot, null);
     if (slot == null) return null;
     const target = partyIndexOf(fighter, slot);
     const bench = at(fighter.mons, target);
-    if (!bench || bench.hp <= 0 || this.partyTaken(fighter, target)) return null;
+    if (!bench || bench.hp <= 0 || truthy(bench.judged) || this.partyTaken(fighter, target)) return null;
     if (this._switchBlocked(b)) return null;
     return { action: 'switch', slot: target };
   }
 
   if (action === 'fight') {
-    const index = int(choice.move, null);
+    // rules.palace (Palace.js): `unable` is the controller's own failure --
+    // chosen move 0, target 0 (battle_gfx_sfx_util.c:255).
+    const { palace } = this.rules;
+    const unable = palace != null && choice.unable === true;
+    let index = int(choice.move, null);
+    if (unable) index = 0;
     if (index == null) return null;
     if (this._facesNoBattler(fighter)) return { action: 'skip' };
     const out = { action: 'fight', move: index + 1 };
@@ -1281,8 +1322,20 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
         out.move = encoreSlot;
       } else {
         if (!truthy(at(b.moves, index + 1))) return null;
-        const bad = this.moveLimitations(b);
-        if (truthy(bad[index + 1])) return null;
+        if (palace != null) {
+          // The pick may name a slot the move menu would refuse: the
+          // selection check fails it instead (Palace.selection).
+          const token = Palace.selection(this, b, index + 1, unable);
+          if (token !== null) out.palace = token;
+          if (unable) {
+            // Target 0: field slot 0 (the player's left), as the cart files it.
+            out.target = 0;
+            return out;
+          }
+        } else {
+          const bad = this.moveLimitations(b);
+          if (truthy(bad[index + 1])) return null;
+        }
       }
     }
     const row = out.struggle ? Move.STRUGGLE : at(b.moves, out.move);
@@ -1451,7 +1504,7 @@ Battle.prototype._bestSeBench = function _bestSeBench(fighter, defender) {
   for (let i = 1; i <= fighter.mons.length; i += 1) {
     if (!this.partyTaken(fighter, i)) {
       const bench = fighter.mons[i - 1];
-      if (bench && bench.hp > 0) {
+      if (bench && bench.hp > 0 && !truthy(bench.judged)) {
         let maxEff = 100;
         for (let j = 1; j <= bench.moves.length; j += 1) {
           const m = bench.moves[j - 1];
@@ -1519,6 +1572,12 @@ Battle.prototype._autoFight = function _autoFight(b, move, foe) {
 };
 
 Battle.prototype._autoChoice = function _autoChoice(fighter) {
+  // rules.arena: the next one in party order, never a choice (Arena.js).
+  if (truthy(fighter.mustReplace) && this.rules.arena) {
+    const next = this.benchOf(fighter)[0];
+    if (next != null) return { action: 'switch', slot: next };
+    return null;
+  }
   if (truthy(fighter.mustReplace)) {
     const foe = this._autoTarget(fighter);
     const defender = foe ? foe.b : null;
@@ -1575,7 +1634,8 @@ Battle.prototype._autoChoice = function _autoChoice(fighter) {
     || truthy(defender.focusEnergy);
   const foeSub = int(defender.substituteHP, 0) > 0;
   const weSlower = this._speedOf(b) < this._speedOf(defender);
-  const canSwitch = !this._switchBlocked(b);
+  // The Arena's AI never switches (pokeemerald battle_ai_switch_items.c:452).
+  const canSwitch = !this._switchBlocked(b) && !this.rules.arena;
 
   if (b.mon.hp * 4 <= b.mon.maxHp && canSwitch) {
     const se = this._bestSeBench(fighter, defender);
@@ -1870,6 +1930,7 @@ Battle.prototype._closeReplace = function _closeReplace() {
     this._openReplace();
     return;
   }
+  this._turnPassed();
   this.turn += 1;
   this._openTurn();
 };
@@ -1953,6 +2014,10 @@ Battle.prototype._switchIn = function _switchIn(fighter, index, baton) {
   }
   fighter.b = nb;
   this._refield(fighter);
+  // pokeemerald battle_script_commands.c:4659 / :4697: the Palace's low-HP bit
+  // and the Arena's points and counter, at every switch-in.
+  this._palaceSwitchIn(nb);
+  this._arenaSwitchedIn();
   const { mon } = nb;
   this._emit('switch', {
     slot: fighter.slot,
@@ -2116,9 +2181,16 @@ Battle.prototype._beginTurn = function _beginTurn() {
   for (const r of rows) this.turnPriority.set(r.b, r.pri);
 
   // pokefirered/src/battle_main.c:3669 CheckFocusPunch_ClearVarsBeforeTurnStarts
-  for (const r of rows) {
-    if (r.row && int(r.row.effect, -1) === E.FOCUS_PUNCH && !truthy(r.b.lockedNum)
-        && Status.normalise(r.b.mon.status) !== 'SLP') {
+  // (pokeemerald :4905): in battler-id order, not the turn's; not asleep, not
+  // a Truant battler due to loaf, not one with no usable move -- FR
+  // :3679-3680, EM :4916-4917 (the Lua twin's prose).
+  const rowOf = new Map();
+  for (const r of rows) rowOf.set(r.f, r);
+  for (const f of this.order) {
+    const r = rowOf.get(f);
+    if (r && r.row && int(r.row.effect, -1) === E.FOCUS_PUNCH && !truthy(r.b.lockedNum)
+        && Status.normalise(r.b.mon.status) !== 'SLP' && int(r.b.truantCounter, 0) === 0
+        && truthy(this.hasUsableMove(r.b))) {
       this._emit('anim', { slot: r.b.slot, side: r.b.side, text: 'FOCUS_PUNCH_SETUP' });
       this.say(`${this.nameOf(r.b)} is tightening its focus!`);
     }
@@ -2144,15 +2216,26 @@ Battle.prototype._resolveTurn = function _resolveTurn() {
   this._drainExp();
   if (!truthy(this.result)) this._checkOver();
   if (!truthy(this.result)) this._refreshVacant();
+  // rules.arena: the replacements, then the judge (Arena.js).
+  if (!truthy(this.result)) this._arenaTurnEnd();
 
   if (!truthy(this.result) && this._anyMustReplace()) {
     this._openReplace();
     return;
   }
   if (!truthy(this.result)) {
+    this._turnPassed();
     this.turn += 1;
     this._openTurn();
   }
+};
+
+// The tail of pokeemerald's BattleTurnPassed (battle_main.c:3998-4018), after
+// the replacements: the Arena's turn counter, then the Palace's half-HP lines.
+Battle.prototype._turnPassed = function _turnPassed() {
+  if (truthy(this.result)) return;
+  this._arenaTurnPassed();
+  this._palaceFlavor();
 };
 
 // pokefirered/src/battle_main.c:4229 TryRunFromBattle (wild), a concession
@@ -2169,13 +2252,36 @@ Battle.prototype._resolveRuns = function _resolveRuns() {
   // rules.forfeit: the Frontier / Trainer Hill trainer RUN always gets away
   // and ends as B_OUTCOME_FORFEITED (pokeemerald battle_main.c:4321,
   // battle_util.c:448, :5058): the runner's side loses. A wild RUN stays a RUN.
+  // In the Battle Pyramid (`rules.pyramidRun`) RUN AWAY comes first
+  // (battle_util.c:427-447): the runner -- not a SMOKE BALL holder -- counts a
+  // try and rolls _pyramidEscape; a failure is "Can't escape!" (:519), the
+  // turn spent.
   if (truthy(this.rules.forfeit) && !isWildMode(this.mode)) {
     const sides = {};
+    let any = false;
     for (const fighter of running) {
-      sides[fighter.side] = true;
-      this.say(`${fighter.name} forfeited the match!`);
-      this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
+      const { b } = fighter;
+      let escaped = true;
+      if (truthy(this.rules.pyramidRun) && b && b.mon.hp > 0 && b.ability === 'RUN_AWAY'
+          && Items.of(b)[0] !== Items.HOLD.CAN_ALWAYS_RUN) {
+        fighter.acted = true;
+        this.fleeAttempts += 1;
+        escaped = this._pyramidEscape(b);
+        if (!escaped) {
+          delete b.furyCutter;
+          delete b.destinyBond;
+          delete b.grudge;
+          this.say("Can't escape!");
+        }
+      }
+      if (escaped) {
+        sides[fighter.side] = true;
+        any = true;
+        this.say(`${fighter.name} forfeited the match!`);
+        this._emit('run', { slot: fighter.slot, side: fighter.side, text: fighter.name });
+      }
     }
+    if (!any) return false;
     if (sides.a && sides.b) {
       this._finish('draw', null, null, 'run', 'forfeit', null);
     } else if (sides.a) {
@@ -2673,6 +2779,9 @@ Battle.prototype._resolveFights = function _resolveFights() {
     this._faintSweep();
     this._drainExp();
     if (!truthy(this.result)) this._checkOver();
+    // rules.arena: HandleAction_TryFinish replaces the fallen at once
+    // (pokeemerald battle_util.c:638; Arena.js).
+    if (!truthy(this.result)) this._arenaRefill();
   }
 };
 
@@ -2837,15 +2946,23 @@ Battle.prototype._drainExp = function _drainExp() {
 // A battler is down: the `faint` event, the participation bookkeeping, and the
 // seat's next step (BattleSim2 `_faint`). Called at the engine's announcement
 // points (Move.js tryFaint*, the residual steps, the action sweep).
-Battle.prototype._faintBattler = function _faintBattler(b) {
+// `judged`: the Battle Arena's loser (Arena.js) keeps its HP and status, is
+// down for good, earns its foe nothing and leaves its seat the Truant
+// switch-in hack (the Lua twin's prose).
+Battle.prototype._faintBattler = function _faintBattler(b, judged) {
   if (truthy(b.faintAnnounced)) return;
   b.faintAnnounced = true;
   const { fighter } = b;
   if (fighter.b !== b) return;
   const { mon } = b;
-  mon.hp = 0;
-  mon.status = null;
-  mon.sleepTurns = null;
+  if (judged) {
+    mon.judged = true;
+    fighter.truantHack = true;
+  } else {
+    mon.hp = 0;
+    mon.status = null;
+    mon.sleepTurns = null;
+  }
   this._unfield(fighter, b.partyIndex);
   this._unlink(b);
   // A shared team's bench leaves out the partner's active mon (`benchOf`).
@@ -2854,7 +2971,7 @@ Battle.prototype._faintBattler = function _faintBattler(b) {
     slot: fighter.slot, side: fighter.side, text: mon.species, amount: next != null ? 1 : null,
   });
   this._syncTeams();
-  this.pendingExp.push({ fallen: fighter, mon });
+  if (!judged) this.pendingExp.push({ fallen: fighter, mon });
   fighter.lastB = b;
   fighter.b = null;
   fighter.active = null;
@@ -2878,15 +2995,18 @@ Battle.prototype._faintBattler = function _faintBattler(b) {
 // endings
 // ------------------------------------------------------------------
 
+// A judgment that empties a side (Arena.js `judgeEnding`) ends the fight as a
+// KO does, with `how = 'judge'`.
 Battle.prototype._checkOver = function _checkOver() {
   if (truthy(this.result)) return true;
   const aliveA = this._sideAlive('a');
   const aliveB = this._sideAlive('b');
   if (aliveA && aliveB) return false;
+  const how = truthy(this.judgeEnding) ? 'judge' : 'ko';
   if (!aliveA && !aliveB) {
-    this._finish('draw', null, null, 'ko', 'ko', null);
+    this._finish('draw', null, null, 'ko', how, null);
   } else if (aliveA) {
-    const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko', 'ko', 'a');
+    const result = this._finish('win', this._sidePlayers('a'), this._sidePlayers('b'), 'ko', how, 'a');
     // pokefirered/src/battle_main.c:3764: only a WON battle runs
     // BattleScript_PayDayMoneyAndPickUpItems (Cmd_givepaydaymoney), and the
     // coins are the player side's.  Link rules pay nothing (1v1 / coop_pvp); in
@@ -2895,7 +3015,7 @@ Battle.prototype._checkOver = function _checkOver() {
     const coins = int(this.payDay ? this.payDay.a : this.payDay, 0);
     if (result && own(EXP_MODES, this.mode) && coins > 0) result.payDay = coins;
   } else {
-    this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko', 'ko', 'b');
+    this._finish('win', this._sidePlayers('b'), this._sidePlayers('a'), 'ko', how, 'b');
   }
   return true;
 };
@@ -2913,6 +3033,9 @@ Battle.prototype._finish = function _finish(outcome, winners, losers, reason, ho
   if (how != null) result.how = how;
   if (by != null) result.by = by;
   if (this.safari) result.safari = Safari.summary(this.safari);
+  // The Arena's judged losers by sheet slot, side by side (Arena.js).
+  const judged = this._arenaJudged();
+  if (judged != null) result.judged = judged;
   this.result = result;
   this.phase = 'over';
   this.deadline = null;
@@ -3027,6 +3150,7 @@ Battle.prototype.snapshot = function snapshot() {
   const field = [];
   const waiting = [];
   const owing = new Set();
+  const st = this.arenaState;
   for (const fighter of this.fighters) {
     const { b } = fighter;
     const mon = b ? b.mon : null;
@@ -3046,6 +3170,8 @@ Battle.prototype.snapshot = function snapshot() {
       maxHp: mon ? mon.maxHp : 0,
       status: mon ? mon.status : null,
       party,
+      // rules.palace: the battler's low-HP bit (Palace.js `palaceLow`).
+      palaceLow: (b && b.palaceLow) ? true : null,
     });
     // `waiting` names owners, each once: a shared team is one player.
     if (this._owes(fighter) && !owing.has(fighter.owner)) {
@@ -3069,6 +3195,13 @@ Battle.prototype.snapshot = function snapshot() {
     field,
     waiting,
     payDay: { a: this.payDay.a, b: this.payDay.b },
+    // rules.arena: the judge's running tallies (Arena.js), for tests and logs.
+    arena: st ? {
+      counter: st.counter,
+      mind: { a: st.mind.a, b: st.mind.b },
+      skill: { a: st.skill.a, b: st.skill.b },
+      hpStart: { a: st.hpStart.a, b: st.hpStart.b },
+    } : null,
   };
 };
 

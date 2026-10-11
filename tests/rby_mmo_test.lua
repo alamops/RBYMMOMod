@@ -1161,6 +1161,60 @@ end)()
   end
 end)()
 
+-- ------- Wire: the Battle Palace's `palace` event and the Battle Arena
+-- referee's `arena` event (wave 3 of docs/plans/gen3-solo-remaining-fights.md,
+-- contract C6)
+--
+-- Solo's Frontier halls: the Palace says a pick could not be used (`unable`)
+-- and speaks the half-HP line (`flavor`, amount = the line), the Arena's
+-- referee walks the judgment (`start`, `judge`, a `mind` / `skill` / `body`
+-- award per side, `win` or `draw`).  Both Gen 3 words, both texts tokens from
+-- closed sets; no hub seats a hall, so neither moves PROTOCOL.
+;(function()
+  for _, kind in ipairs({ "palace", "arena" }) do
+    check(Wire.BATTLE_EVENTS3[kind] == true, "wave 3: " .. kind .. " is a Gen 3 event kind")
+    check(Wire.BATTLE_EVENTS[kind] == nil and Wire.BATTLE_EVENTS2[kind] == nil,
+          "wave 3: ...and " .. kind .. " is in neither older vocabulary")
+  end
+  local function tokens(set)
+    local out = {}
+    for k in pairs(set) do out[#out + 1] = k end
+    table.sort(out)
+    return table.concat(out, " ")
+  end
+  eq(tokens(Wire.PALACE_TOKENS3), "flavor unable", "wave 3: the Palace's two tokens")
+  eq(tokens(Wire.ARENA_TOKENS3), "body draw judge mind skill start win", "wave 3: the Arena referee's seven steps")
+  local function ev(t, extra, gen)
+    local raw = { battle = "b1", seq = 9, t = t, side = "a", slot = 0 }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = ev("palace", { text = "flavor", amount = 3 }, gen or nil)
+    check(got ~= nil, "wave 3: a palace flavor line reads for generation " .. tostring(gen or nil))
+    eq(got and got.text, "flavor", "wave 3: ...its token kept")
+    eq(got and got.amount, 3, "wave 3: ...and its line")
+    eq(ev("palace", { text = "unable" }, gen or nil).text, "unable", "wave 3: the unable line reads")
+    for _, step in ipairs({ "start", "judge", "mind", "skill", "body", "win", "draw" }) do
+      eq(ev("arena", { text = step, amount = 2 }, gen or nil).text, step, "wave 3: the arena step " .. step .. " reads")
+    end
+    eq(ev("arena", { text = "mind", amount = 2 }, gen or nil).amount, 2, "wave 3: ...an award kept")
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(ev("palace", { text = "unable" }, gen), nil, "wave 3: a Gen " .. gen .. " reader refuses a palace event")
+    eq(ev("arena", { text = "start" }, gen), nil, "wave 3: a Gen " .. gen .. " reader refuses an arena event")
+  end
+  for i, bad in ipairs({ "UNABLE", "start", "glint", "", 7, { "unable" } }) do
+    local got = ev("palace", { text = bad }, 3)
+    check(got ~= nil and got.text == nil, "wave 3: a palace text that is no token is dropped, the event kept (" .. i .. ")")
+  end
+  for i, bad in ipairs({ "WIN", "unable", "judgment", "", 2 }) do
+    local got = ev("arena", { text = bad }, 3)
+    check(got ~= nil and got.text == nil, "wave 3: an arena text that is no step is dropped, the event kept (" .. i .. ")")
+  end
+  eq(ev("arena", { text = "judge", amount = -1 }, 3).amount, nil, "wave 3: an amount is unsigned on every kind")
+end)()
+
 -- ------- Wire.partyEvent: what your partner just did, off the wire
 --
 -- The fighter never sends their own name and the hub stamps it from the

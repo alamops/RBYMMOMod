@@ -204,7 +204,8 @@ end
 
 -- flags: user (the change is the user's own), certain (MOVE_EFFECT_CERTAIN),
 --        curse (Curse's self-drop), allowPtr (a primary move: print why it
---        failed), noMsg, noEvent
+--        failed), noMsg, noEvent, by (the attacker whose controller prints
+--        an ability's refusal: the Battle Arena's -3, Arena.lua)
 -- Returns "worked" | "blocked" | "wont".
 function M.changeStat(B, b, stat, delta, flags)
   flags = flags or {}
@@ -225,6 +226,7 @@ function M.changeStat(B, b, stat, delta, flags)
         b.statLoweredMsg = true
         B:emitAbility(b)
         B:say(nm(B, b) .. "'s " .. B:abilityLabel(b) .. " prevents stat loss!")
+        B:_arenaDeduct(flags.by)
       end
       return "blocked"
     end
@@ -233,6 +235,7 @@ function M.changeStat(B, b, stat, delta, flags)
       if flags.allowPtr then
         B:emitAbility(b)
         B:say(nm(B, b) .. "'s " .. B:abilityLabel(b) .. " prevents " .. STAT_LABEL[stat] .. " loss!")
+        B:_arenaDeduct(flags.by)
       end
       return "blocked"
     end
@@ -311,6 +314,8 @@ local function applyStatusEffect(C, eff, primary, certain, effBattler)
   local function prevent(text)
     B:emitAbility(effBattler)
     B:say(text)
+    -- B_MSG_ABILITY_PREVENTS_MOVE_STATUS: the Arena's -3 for the attacker.
+    B:_arenaDeduct(C.user)
     return false
   end
   if status == "PSN" or status == "TOX" then
@@ -381,6 +386,7 @@ function M.set(C, eff, primary, certain, affectsUser)
       if primary or certain then
         B:emitAbility(effBattler)
         B:say(nm(B, effBattler) .. "'s INNER FOCUS prevents flinching!")
+        B:_arenaDeduct(C.user)
       end
       return false
     end
@@ -443,6 +449,9 @@ function M.set(C, eff, primary, certain, affectsUser)
   elseif eff == "RECHARGE" then
     effBattler.rechargeTurns = 2
     effBattler.mustRecharge = true
+    -- gLockedMoves[battler] = gCurrentMove (the called move too): what the
+    -- Arena's Mind rates on the recharge turn (Move.lua `_fightAction`).
+    effBattler.rechargeNum = C.mnum
     return true
   elseif eff == "STEAL_ITEM" then
     -- src/battle_script_commands.c:2610.  Against the computer the foe's Thief /
@@ -460,6 +469,7 @@ function M.set(C, eff, primary, certain, affectsUser)
     if tItem ~= 0 and target.ability == "STICKY_HOLD" then
       B:emitAbility(target)
       B:say(nm(B, target) .. "'s STICKY HOLD made " .. C:moveName() .. " ineffective!")
+      B:_arenaDeduct(user)
       return false
     end
     if int(user.mon.heldItem, 0) ~= 0 or tItem == 0 or tItem == Items.ITEM_ENIGMA_BERRY
@@ -538,6 +548,7 @@ function M.set(C, eff, primary, certain, affectsUser)
       if tItem == 0 then return false end
       B:emitAbility(effBattler)
       B:say(nm(B, effBattler) .. "'s STICKY HOLD made " .. C:moveName() .. " ineffective!")
+      B:_arenaDeduct(user)
       return false
     end
     if tItem == 0 then return false end
@@ -622,6 +633,8 @@ local function cantMakeAsleep(C, b)
   if ab == "INSOMNIA" or ab == "VITAL_SPIRIT" then
     B:emitAbility(b)
     B:say(nm(B, b) .. " stayed awake using its " .. B:abilityLabel(b) .. "!")
+    -- STRINGID_PKMNSTAYEDAWAKEUSING: the Arena's -3.
+    B:_arenaDeduct(C.user)
     return true
   end
   return false
@@ -649,7 +662,7 @@ local function statDown(C, stat, delta)
   local blocked = int(side.mistTurns, 0) > 0 or ab == "CLEAR_BODY" or ab == "WHITE_SMOKE"
     or (ab == "KEEN_EYE" and stat == "acc") or (ab == "HYPER_CUTTER" and stat == "atk")
   if not blocked and t.stages[stat] > -6 then C:attackAnimation() end
-  M.changeStat(B, t, stat, delta, { allowPtr = true })
+  M.changeStat(B, t, stat, delta, { allowPtr = true, by = C.user })
 end
 
 local function multiUp(C, stats)
@@ -667,6 +680,10 @@ local function multiUp(C, stats)
   for _, s in ipairs(stats) do
     if user.stages[s] < 6 then
       M.changeStat(B, user, s, 1, { user = true, allowPtr = true })
+    else
+      -- statbuffchange STAT_CHANGE_ALLOW_PTR at +6 sets MOVE_RESULT_MISSED
+      -- (pokeemerald battle_script_commands.c:7096): the Arena's skill.
+      C.resMissed = true
     end
   end
 end
@@ -684,10 +701,14 @@ local function swaggerLike(C, stat, delta)
   C:attackAnimation()
   if t.stages[stat] < 6 then
     M.changeStat(B, t, stat, delta, { allowPtr = true })
+  else
+    -- statbuffchange STAT_CHANGE_ALLOW_PTR at +6: MOVE_RESULT_MISSED (above).
+    C.resMissed = true
   end
   if t.ability == "OWN_TEMPO" then
     B:emitAbility(t)
     B:say(nm(B, t) .. "'s OWN TEMPO prevents confusion!")
+    B:_arenaDeduct(C.user)
     return
   end
   if int(B:sideState(t.side).safeguardTurns, 0) > 0 then
@@ -749,6 +770,8 @@ H[E.SLEEP] = function(C)
   local B, t = C.B, C.target
   if sub(t) then return C:fail() end
   if Status.normalise(t.mon.status) == "SLP" then
+    -- BattleScript_AlreadyAsleep: setalreadystatusedmoveattempt (the Arena).
+    B:_arenaAlready(C.user)
     return B:say(nm(B, t) .. " is already asleep!")
   end
   if cantMakeAsleep(C, t) then return end
@@ -764,11 +787,15 @@ H[E.POISON] = function(C)
   local B, t = C.B, C.target
   if t.ability == "IMMUNITY" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s IMMUNITY prevents poisoning!")
   end
   if sub(t) then return C:fail() end
   local s = Status.normalise(t.mon.status)
-  if s == "PSN" or s == "TOX" then return B:say(nm(B, t) .. " is already poisoned.") end
+  if s == "PSN" or s == "TOX" then
+    B:_arenaAlready(C.user)
+    return B:say(nm(B, t) .. " is already poisoned.")
+  end
   if isType(t, Types.ID.POISON) or isType(t, Types.ID.STEEL) then return notAffected(C, t) end
   if s then return C:fail() end
   if not C:accuracyCheck("normal", true) then return end
@@ -782,11 +809,15 @@ H[E.TOXIC] = function(C)
   local B, t = C.B, C.target
   if t.ability == "IMMUNITY" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s IMMUNITY prevents poisoning!")
   end
   if sub(t) then return C:fail() end
   local s = Status.normalise(t.mon.status)
-  if s == "PSN" or s == "TOX" then return B:say(nm(B, t) .. " is already poisoned.") end
+  if s == "PSN" or s == "TOX" then
+    B:_arenaAlready(C.user)
+    return B:say(nm(B, t) .. " is already poisoned.")
+  end
   if s then return C:fail() end
   if isType(t, Types.ID.POISON) or isType(t, Types.ID.STEEL) then return notAffected(C, t) end
   if not C:accuracyCheck("normal", true) then return end
@@ -800,6 +831,7 @@ H[E.PARALYZE] = function(C)
   local B, t = C.B, C.target
   if t.ability == "LIMBER" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s LIMBER prevents paralysis!")
   end
   if sub(t) then return C:fail() end
@@ -809,7 +841,10 @@ H[E.PARALYZE] = function(C)
     return notAffected(C, t)
   end
   local s = Status.normalise(t.mon.status)
-  if s == "PAR" then return B:say(nm(B, t) .. " is already paralyzed!") end
+  if s == "PAR" then
+    B:_arenaAlready(C.user)
+    return B:say(nm(B, t) .. " is already paralyzed!")
+  end
   if s then return C:fail() end
   if not C:accuracyCheck("normal", true) then return end
   if safeguarded(C, t) then return end
@@ -822,10 +857,14 @@ H[E.WILL_O_WISP] = function(C)
   local B, t = C.B, C.target
   if sub(t) then return C:fail() end
   local s = Status.normalise(t.mon.status)
-  if s == "BRN" then return B:say(nm(B, t) .. " already has a burn.") end
+  if s == "BRN" then
+    B:_arenaAlready(C.user)
+    return B:say(nm(B, t) .. " already has a burn.")
+  end
   if isType(t, Types.ID.FIRE) then return notAffected(C, t) end
   if t.ability == "WATER_VEIL" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s WATER VEIL prevents burns!")
   end
   if s then return C:fail() end
@@ -870,8 +909,8 @@ H[E.TICKLE] = function(C)
   end
   if not C:accuracyCheck("normal", true) then return end
   C:attackAnimation()
-  M.changeStat(B, t, "atk", -1, { allowPtr = true, noMsg = t.stages.atk <= -6 })
-  M.changeStat(B, t, "def", -1, { allowPtr = true, noMsg = t.stages.def <= -6 })
+  M.changeStat(B, t, "atk", -1, { allowPtr = true, noMsg = t.stages.atk <= -6, by = C.user })
+  M.changeStat(B, t, "def", -1, { allowPtr = true, noMsg = t.stages.def <= -6, by = C.user })
 end
 
 H[E.SWAGGER] = function(C) swaggerLike(C, "atk", 2) end
@@ -913,13 +952,15 @@ H[E.MEMENTO] = function(C)
   B:setHp(user, 0)
   if protected then
     B:say(nm(B, t) .. " protected itself!")
+    -- attackcanceler's Protect: MOVE_RESULT_MISSED, MISS_TYPE B_MSG_PROTECTED.
+    C.resMissed, C.resProtected = true, true
   else
     C:attackAnimation()
     if sub(t) then
       B:say("But it had no effect!")
     else
-      M.changeStat(B, t, "atk", -2, { allowPtr = true, noMsg = t.stages.atk <= -6 })
-      M.changeStat(B, t, "spa", -2, { allowPtr = true, noMsg = t.stages.spa <= -6 })
+      M.changeStat(B, t, "atk", -2, { allowPtr = true, noMsg = t.stages.atk <= -6, by = user })
+      M.changeStat(B, t, "spa", -2, { allowPtr = true, noMsg = t.stages.spa <= -6, by = user })
     end
   end
   C.checkUserFaint = true
@@ -1027,6 +1068,8 @@ H[E.MOONLIGHT] = morningSun
 H[E.REST] = function(C)
   local B, user = C.B, C.user
   if Status.normalise(user.mon.status) == "SLP" then
+    -- BattleScript_RestIsAlreadyAsleep: setalreadystatusedmoveattempt.
+    B:_arenaAlready(user)
     return B:say(nm(B, user) .. " is already asleep!")
   end
   if cantMakeAsleep(C, user) then return end
@@ -1106,10 +1149,16 @@ H[E.HEAL_BELL] = function(C)
   C:attackAnimation()
   if isBell then
     B:say("A bell chimed!")
-    if blocked then B:emitAbility(user); B:say(nm(B, user) .. "'s SOUNDPROOF blocks the bell!") end
+    -- STRINGID_PKMNSXBLOCKSY / BLOCKSY2, through the user's controller: the
+    -- Arena's -3 each.
+    if blocked then
+      B:emitAbility(user); B:say(nm(B, user) .. "'s SOUNDPROOF blocks the bell!")
+      B:_arenaDeduct(user)
+    end
     for _, ally in ipairs(blockedAllies) do
       B:emitAbility(ally)
       B:say(nm(B, ally) .. "'s SOUNDPROOF blocks the bell!")
+      B:_arenaDeduct(user)
     end
   else
     B:say("A soothing aroma wafted through the area!")
@@ -1162,10 +1211,14 @@ H[E.LEECH_SEED] = function(C)
   if sub(t) then return C:fail() end
   local hit = C:accuracyCheck("normal", false)
   C:attackAnimation()
+  -- Cmd_setseeded sets MOVE_RESULT_MISSED on both failures (pokeemerald
+  -- battle_script_commands.c Cmd_setseeded): the Arena's skill.
   if not hit or t.seededBy then
+    C.resMissed = true
     return B:say(nm(B, t) .. " evaded the attack!")
   end
   if isType(t, Types.ID.GRASS) then
+    C.resMissed = true
     return B:say("It doesn't affect " .. nm(B, t) .. "...")
   end
   t.seededBy = C.user.slot
@@ -1372,6 +1425,9 @@ H[E.CURSE] = function(C)
   end
   local s = user.stages
   if s.spe <= -6 and s.atk >= 6 and s.def >= 6 then return C:fail() end
+  -- The ATTACK / DEFENSE raises are statbuffchange STAT_CHANGE_ALLOW_PTR: at
+  -- +6, MOVE_RESULT_MISSED (battle_script_commands.c:7096; the Arena).
+  if s.atk >= 6 or s.def >= 6 then C.resMissed = true end
   C:attackAnimation()
   M.changeStat(B, user, "spe", -1, { user = true, allowPtr = true, curse = true, noMsg = s.spe <= -6 })
   M.changeStat(B, user, "atk", 1, { user = true, allowPtr = true, noMsg = s.atk >= 6 })
@@ -1401,10 +1457,14 @@ H[E.CONFUSE] = function(C)
   local B, t = C.B, C.target
   if t.ability == "OWN_TEMPO" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s OWN TEMPO prevents confusion!")
   end
   if sub(t) then return C:fail() end
-  if int(t.confusion, 0) > 0 then return B:say(nm(B, t) .. " is already confused!") end
+  if int(t.confusion, 0) > 0 then
+    B:_arenaAlready(C.user)
+    return B:say(nm(B, t) .. " is already confused!")
+  end
   if not C:accuracyCheck("normal", true) then return end
   if safeguarded(C, t) then return end
   C:attackAnimation()
@@ -1416,10 +1476,14 @@ H[E.TEETER_DANCE] = function(C)
   local B, t = C.B, C.target
   if t.ability == "OWN_TEMPO" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s OWN TEMPO prevents confusion!")
   end
   if sub(t) then return C:fail() end
-  if int(t.confusion, 0) > 0 then return B:say(nm(B, t) .. " is already confused!") end
+  if int(t.confusion, 0) > 0 then
+    B:_arenaAlready(C.user)
+    return B:say(nm(B, t) .. " is already confused!")
+  end
   if not C:accuracyCheck("normal", true) then return end
   if int(B:sideState(t.side).safeguardTurns, 0) > 0 then
     return B:say(nm(B, t) .. " is protected by SAFEGUARD!")
@@ -1440,11 +1504,17 @@ end
 -- pokefirered/src/battle_script_commands.c:7442
 H[E.SUBSTITUTE] = function(C)
   local B, user = C.B, C.user
-  if sub(user) then return B:say(nm(B, user) .. " already has a SUBSTITUTE!") end
+  if sub(user) then
+    -- BattleScript_AlreadyHasSubstitute: setalreadystatusedmoveattempt.
+    B:_arenaAlready(user)
+    return B:say(nm(B, user) .. " already has a SUBSTITUTE!")
+  end
   local cost = floor(user.mon.maxHp / 4)
   if cost == 0 then cost = 1 end
   if user.mon.hp <= cost then
     C.failed = true
+    -- Cmd_setsubstitute sets no result flag for B_MSG_SUBSTITUTE_FAILED.
+    C.resClear = true
     return B:say("It was too weak to make a SUBSTITUTE!")
   end
   user.substituteHP = cost
@@ -1506,6 +1576,8 @@ H[E.PERISH_SONG] = function(C)
   for _, b in ipairs(blocked) do
     B:emitAbility(b)
     B:say(nm(B, b) .. "'s SOUNDPROOF blocks PERISH SONG!")
+    -- STRINGID_PKMNSXBLOCKSY2 through the user's controller: the Arena's -3.
+    B:_arenaDeduct(C.user)
   end
 end
 
@@ -1515,6 +1587,7 @@ H[E.ATTRACT] = function(C)
   if not C:accuracyCheck("normal", true) then return end
   if t.ability == "OBLIVIOUS" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s OBLIVIOUS prevents romance!")
   end
   local ug, tg = C.user.mon.gender, t.mon.gender
@@ -1568,6 +1641,7 @@ H[E.YAWN] = function(C)
   local ab = t.ability
   if ab == "VITAL_SPIRIT" or ab == "INSOMNIA" then
     B:emitAbility(t)
+    B:_arenaDeduct(C.user)
     return B:say(nm(B, t) .. "'s " .. B:abilityLabel(t) .. " made it ineffective!")
   end
   if sub(t) then return C:fail() end
@@ -1587,11 +1661,14 @@ H[E.ROAR] = function(C)
   local B, user, t = C.B, C.user, C.target
   if t.ability == "SUCTION_CUPS" then
     B:emitAbility(t)
+    B:_arenaDeduct(user)
     return B:say(nm(B, t) .. " anchors itself with SUCTION CUPS!")
   end
   if t.ingrain then return B:say(nm(B, t) .. " anchored itself with its roots!") end
   if not C:accuracyCheck("lockon", true) then return end
   if not C:accuracyCheck("normal", true) then return end
+  -- pokeemerald/data/battle_scripts_1.s:601: no Roar in the Battle Arena.
+  if B.rules and B.rules.arena then return C:fail() end
   local candidates = B:benchOf(t.fighter)
   if not B:isWild() and #candidates < 1 then return C:fail() end
   local uLvl, tLvl = int(user.mon.level, 1), int(t.mon.level, 1)
@@ -1756,6 +1833,8 @@ end
 -- pokefirered/data/battle_scripts_1.s:1690
 H[E.BATON_PASS] = function(C)
   local B, user = C.B, C.user
+  -- pokeemerald/data/battle_scripts_1.s:1698: no Baton Pass in the Battle Arena.
+  if B.rules and B.rules.arena then return C:fail() end
   local candidates = B:benchOf(user.fighter)
   if #candidates == 0 then return C:fail() end
   C:attackAnimation()
@@ -1814,6 +1893,7 @@ H[E.TRICK] = function(C)
   end
   if t.ability == "STICKY_HOLD" then
     B:emitAbility(t)
+    B:_arenaDeduct(user)
     return B:say(nm(B, t) .. "'s STICKY HOLD made " .. C:moveName() .. " ineffective!")
   end
   local urow, trow = Items.rowOf(user), Items.rowOf(t)

@@ -86,7 +86,9 @@ function Bm:switchInEffects(b, opts)
     end
   end
   if b.mon.hp <= 0 then return false end
-  if b.ability == "TRUANT" then b.truantCounter = 1 end
+  -- `noTruant`: the Battle Arena's truantSwitchInHack for a judged loser's
+  -- replacement (pokeemerald battle_script_commands.c:5261; Arena.lua).
+  if b.ability == "TRUANT" and not opts.noTruant then b.truantCounter = 1 end
   local did = Abilities.switchIn(self, b)
   if not did then did = Items.onSwitchIn(self, b) end
   if not opts.deferIntimidate then
@@ -306,7 +308,10 @@ PHASE.partial_trap = function(B, b)
   b.trapTurns = b.trapTurns - 1
   local label = B:moveLabelByNum(b.trapMove)
   if b.trapTurns > 0 then
-    B:_emit("anim", { slot = b.slot, side = b.side, text = "TURN_TRAP" })
+    -- The trapping move's number rides as the clip's argument (pokefirered
+    -- battle_util.c:878, pokeemerald :1595 gBattleScripting.animArg1 / 2 =
+    -- wrappedMove): Fire Spin, Whirlpool, Clamp and Sand Tomb draw their own.
+    B:_emit("anim", { slot = b.slot, side = b.side, text = "TURN_TRAP", amount = int(b.trapMove, 0) })
     B:say(B:nameOf(b) .. " is hurt by " .. label .. "!")
     B:loseHp(b, Field.chip(b.mon.maxHp, Field.TRAP_CHIP_DENOM))
   else

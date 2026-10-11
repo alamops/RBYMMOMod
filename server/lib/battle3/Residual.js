@@ -98,7 +98,9 @@ Bm.switchInEffects = function switchInEffects(b, optsIn) {
     }
   }
   if (b.mon.hp <= 0) return false;
-  if (b.ability === 'TRUANT') b.truantCounter = 1;
+  // `noTruant`: the Battle Arena's truantSwitchInHack for a judged loser's
+  // replacement (pokeemerald battle_script_commands.c:5261; Arena.js).
+  if (b.ability === 'TRUANT' && !truthy(opts.noTruant)) b.truantCounter = 1;
   let did = Abilities.switchIn(this, b);
   if (!truthy(did)) did = Items.onSwitchIn(this, b);
   if (!truthy(opts.deferIntimidate)) {
@@ -331,7 +333,11 @@ PHASE.partial_trap = function partialTrap(B, b) {
   b.trapTurns -= 1;
   const label = B.moveLabelByNum(b.trapMove);
   if (b.trapTurns > 0) {
-    B._emit('anim', { slot: b.slot, side: b.side, text: 'TURN_TRAP' });
+    // The trapping move's number rides as the clip's argument (pokefirered
+    // battle_util.c:878, pokeemerald :1595).
+    B._emit('anim', {
+      slot: b.slot, side: b.side, text: 'TURN_TRAP', amount: int(b.trapMove, 0),
+    });
     B.say(`${B.nameOf(b)} is hurt by ${label}!`);
     B.loseHp(b, Field.chip(b.mon.maxHp, Field.TRAP_CHIP_DENOM));
   } else {

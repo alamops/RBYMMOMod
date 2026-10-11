@@ -518,7 +518,9 @@ end
 function Bm:benchOf(fighter)
   local out = {}
   for i = 1, #fighter.mons do
-    if fighter.mons[i].hp > 0 and not self:partyTaken(fighter, i) then out[#out + 1] = i end
+    local mon = fighter.mons[i]
+    -- A Battle Arena loser (`judged`) keeps its HP and is down for good.
+    if mon.hp > 0 and not mon.judged and not self:partyTaken(fighter, i) then out[#out + 1] = i end
   end
   return out
 end
@@ -606,6 +608,20 @@ function Ctx:fail(text)
   self.B:say(text or "But it failed!")
 end
 
+-- The effectiveness bits a typecalc leaves in gMoveResultFlags, for the
+-- Arena's skill (Arena.lua): ORed over the move's strikes; never for Struggle
+-- (Cmd_typecalc skips it) or the fixed-damage effects whose scripts clear
+-- them (battle_scripts_1.s:815 / :825 / :1201 / :1212 / :1726 / :2488).
+local NO_RESULT_TYPE = {
+  [E.SUPER_FANG] = true, [E.DRAGON_RAGE] = true, [E.LEVEL_DAMAGE] = true, [E.PSYWAVE] = true,
+  [E.SONICBOOM] = true, [E.ENDEAVOR] = true,
+}
+function Ctx:resType(flags)
+  if type(flags) ~= "table" or self.mnum == MOVE.STRUGGLE or NO_RESULT_TYPE[self.effect] then return end
+  if flags.super then self.resSuper = true end
+  if flags.notVery then self.resNotVery = true end
+end
+
 function Ctx:isProtected()
   local t = self.target
   if not t or t == self.user or not t.protected then return false end
@@ -625,6 +641,11 @@ function Ctx:accuracyCheck(mode, printFail)
   local B, user, target = self.B, self.user, self.target
   local function failMsg(reason)
     self.missReason = reason
+    -- The Arena's skill reads the cart's MOVE_RESULT_MISSED and the MISS_TYPE
+    -- B_MSG_PROTECTED (Arena.lua): a miss and a Protect set both; the NO_ACC
+    -- calls' semi-invulnerable target jumps to the move's failure instead.
+    if reason ~= "fail" then self.resMissed = true end
+    if reason == "protected" then self.resProtected = true end
     if not printFail then return end
     if reason == "protected" then
       B:say(B:nameOf(target) .. " protected itself!")
@@ -1289,6 +1310,8 @@ local function preChecks(C)
   if eff == E.DREAM_EATER and (int(target.substituteHP, 0) > 0
       or Status.normalise(target.mon.status) ~= "SLP") then
     fail(C, B:nameOf(target) .. " wasn't affected!")
+    -- BattleScript_WasntAffected sets no result flag (Arena.lua's skill).
+    C.resClear = true
     return true
   end
   if eff == E.COUNTER or eff == E.MIRROR_COAT then
@@ -1332,6 +1355,8 @@ local function preChecks(C)
       B:say(B:nameOf(C.target) .. " protected itself!")
     end
     C.missed = true
+    -- attackcanceler's Protect: MOVE_RESULT_MISSED, MISS_TYPE B_MSG_PROTECTED.
+    C.resProtected = true
     return true
   end
   if eff == E.EXPLOSION and not C.explosionStarted then
@@ -1343,6 +1368,10 @@ local function preChecks(C)
         B:emitAbility(b)
         B:say(B:nameOf(b) .. "'s DAMP prevents " .. B:nameOf(user) .. " from using " .. C:moveName() .. "!")
         C.failed = true
+        -- STRINGID_PKMNPREVENTSUSAGE, no result flag (BattleScript_DampStops-
+        -- Explosion): the Arena's -3 and nothing else.
+        C.resClear = true
+        B:_arenaDeduct(user)
         return true
       end
     end
@@ -1510,6 +1539,7 @@ local function hitOnce(C, opts)
     C.missed = true
     return nil, info, "immune"
   end
+  C:resType(info.typeFlags)
   local hung
   dmg, hung = B:_adjustDamage(C, C.target, dmg)
   C:attackAnimation()
@@ -1554,6 +1584,9 @@ local function tripleKick(C)
   -- battle_scripts_1.s:1433: the kick loop ends with moveendfrom
   -- MOVEEND_UPDATE_LAST_MOVES only.
   C.endFrom = "last"
+  -- :1425 BattleScript_TripleKickNoMoreHits: a later kick's miss is no miss
+  -- once one landed (bicbyte MOVE_RESULT_MISSED).
+  if landed > 0 then C.resMissed = nil end
   if landed > 0 then
     effectivenessLine(B, lastInfo and lastInfo.typeFlags)
     B:say("Hit " .. landed .. " time(s)!")
@@ -1642,6 +1675,7 @@ local function explosion(C)
     return
   end
   local target = C.target
+  C:resType(info.typeFlags)
   local hung
   dmg, hung = B:_adjustDamage(C, target, dmg)
   C:attackAnimation()
@@ -1722,6 +1756,8 @@ function M.hit(C)
     if n <= 0 then
       B:say("But it failed to SPIT UP a thing!")
       C.failed = true
+      -- BattleScript_SpitUpFail sets no result flag (Arena.lua's skill).
+      C.resClear = true
       return
     end
     user.stockpile = 0
@@ -1742,6 +1778,7 @@ function M.hit(C)
       C.noEffect = true
       return
     end
+    C:resType(flags)
     B:_applySetDamage(C, dmg, flags)
     C:tryFaintTarget()
     return
@@ -1883,6 +1920,9 @@ local function chargeTurn(C)
   else
     B:say(B:nameOf(user) .. CHARGE_TEXT[eff])
     if eff == E.SKULL_BASH then
+      -- statbuffchange STAT_CHANGE_ALLOW_PTR at +6: MOVE_RESULT_MISSED
+      -- (pokeemerald battle_script_commands.c:7096; Arena.lua's skill).
+      if user.stages.def >= 6 then C.resMissed = true end
       Effects.changeStat(B, user, "def", 1, { user = true, allowPtr = true, noMsg = user.stages.def >= 6 })
     end
   end
@@ -1918,6 +1958,8 @@ local function ohko(C)
     C.missed = true
     B:emitAbility(target)
     B:say(B:nameOf(target) .. " was protected by STURDY!")
+    -- STRINGID_PKMNPROTECTEDBY: the Arena's -3 (battle_arena.c:624).
+    B:_arenaDeduct(user)
     return
   end
   local uLvl, tLvl = int(user.mon.level, 1), int(target.mon.level, 1)
@@ -1937,6 +1979,8 @@ local function ohko(C)
     end
     return
   end
+  -- battle_scripts_1.s:766: the typecalc before tryKO set the effectiveness.
+  C:resType(flags)
   local hpBefore = target.mon.hp
   local dmg = hpBefore
   local endured = target.enduring and true or false
@@ -2019,6 +2063,12 @@ local function absorbCheck(C)
   C.noEffect = true
   C.missed = true
   C.missReason = "absorbed"
+  -- Every line here is one of BattleArena_DeductSkillPoints' (RESTOREDHPUSING,
+  -- MADEYUSELESS, RAISEDFIREPOWERWITH, MADEYINEFFECTIVE): -3.  VOLT / WATER
+  -- ABSORB set MOVE_RESULT_DOESNT_AFFECT_FOE (battle_scripts_1.s:4088 /
+  -- :4098); FLASH FIRE sets nothing (BattleScript_FlashFireBoost).
+  B:_arenaDeduct(user)
+  if target.ability == "FLASH_FIRE" then C.resClear = true end
   return true
 end
 
@@ -2374,6 +2424,8 @@ local function soundproofBlocked(C)
   C:ppReduce()
   B:emitAbility(target)
   B:say(B:nameOf(target) .. "'s SOUNDPROOF blocks " .. C:moveName() .. "!")
+  -- STRINGID_PKMNSXBLOCKSY: the Arena's -3 (battle_arena.c:624).
+  B:_arenaDeduct(user)
   C.missed = true
   C.noEffect = true
   moveEnd(C)
@@ -2483,9 +2535,14 @@ local function run(C)
         moveEndLite(C)
         return
       elseif d == "called" then
+        C.obeys = true
         return runCalled(C, user.moves[slot], slot, { sameDepth = true })
       end
     end
+    -- HITMARKER_OBEYS (pokeemerald battle_script_commands.c:960): past the
+    -- canceller, Soundproof, the PP check and obedience -- the Arena's skill
+    -- counts this move (Arena.lua).
+    C.obeys = true
   end
 
   if eff ~= E.PROTECT and eff ~= E.ENDURE then user.protectStreak = 0 end
@@ -2536,6 +2593,8 @@ function Bm:_resolveMove(user, target, row, slot, opts)
     return C
   end
   run(C)
+  -- rules.arena: this context's result into the action's (Arena.lua).
+  if self.arenaAct then self:_arenaFold(C) end
   return C
 end
 
@@ -2587,7 +2646,10 @@ function Bm:_actionMove(b, choice)
       return b.moves[slot], slot, changed and "encore" or nil
     end
   end
-  if b.choicedMove and Items.has(b, Items.HOLD.CHOICE_BAND) then
+  -- A Battle Palace pick that failed its selection check (`choice.palace`)
+  -- keeps the slot it named: the cart's chosen move is that slot's
+  -- (battle_main.c:4399), whatever the band says (Palace.lua).
+  if b.choicedMove and Items.has(b, Items.HOLD.CHOICE_BAND) and not choice.palace then
     local cur = b.moves[choice.move]
     if cur and int(cur.num, 0) ~= b.choicedMove then
       local cs = self:slotOfNum(b, b.choicedMove)
@@ -2607,10 +2669,20 @@ function Bm:_fightAction(fighter, choice, opts)
   if choice.recharge and user.mustRecharge then
     -- The recharge turn: the canceller says it; any move row will do.
     local row = user.moves[user.lastSlot or 1] or M.STRUGGLE
+    -- rules.arena: HandleAction_UseMove rates gLockedMoves, the move that
+    -- set the recharge (battle_util.c:109 / :288); no OBEYS, no skill.
+    local act = self:_arenaAct(user, self:calledRowByNum(user.rechargeNum, user) or row)
     local C = newCtx(self, user, self:foes(user)[1] or user, row, nil, {})
     user.movedThisTurn = true
     canceller(C)
+    if act then self:_arenaSkill(act) end
     return
+  end
+  -- rules.palace: a pick that failed its selection check fails now
+  -- (pokeemerald battle_util.c:263; Palace.lua), but for a Pursuit on a
+  -- switching foe, which runs whatever the check said.
+  if choice.palace and not opts.pursuit then
+    return self:_palaceUnable(fighter, choice)
   end
   local row, slot, why = self:_actionMove(user, choice)
   local aimed = nil
@@ -2630,9 +2702,13 @@ function Bm:_fightAction(fighter, choice, opts)
   -- the cart prints the fall through the ATTACKER's controller).
   local prev = self.mover
   self.mover = user
+  -- rules.arena: the Mind points as the action starts, the skill at its end
+  -- (Arena.lua; pokeemerald battle_util.c:288, battle_script_commands.c:3952).
+  local act = self:_arenaAct(user, row)
   local C = self:_resolveMove(user, target, row, slot, {
     pursuit = opts.pursuit, passSlot = choice.pass, chosenAlly = chosenAlly,
   })
+  if act then self:_arenaSkill(act) end
   self.mover = prev
   return C
 end

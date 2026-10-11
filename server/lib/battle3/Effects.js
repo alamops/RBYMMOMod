@@ -424,7 +424,8 @@ function knockedOffBars(B) {
 
 // flags: user (the change is the user's own), certain (MOVE_EFFECT_CERTAIN),
 //        curse (Curse's self-drop), allowPtr (a primary move: print why it
-//        failed), noMsg, noEvent
+//        failed), noMsg, noEvent, by (the attacker whose controller prints an
+//        ability's refusal: the Battle Arena's -3, Arena.js)
 // Returns "worked" | "blocked" | "wont".
 M.changeStat = function changeStat(B, b, stat, delta, flagsIn) {
   const flags = truthy(flagsIn) ? flagsIn : {};
@@ -445,6 +446,7 @@ M.changeStat = function changeStat(B, b, stat, delta, flagsIn) {
         b.statLoweredMsg = true;
         B.emitAbility(b);
         B.say(nm(B, b) + "'s " + B.abilityLabel(b) + ' prevents stat loss!');
+        B._arenaDeduct(flags.by);
       }
       return 'blocked';
     }
@@ -453,6 +455,7 @@ M.changeStat = function changeStat(B, b, stat, delta, flagsIn) {
       if (truthy(flags.allowPtr)) {
         B.emitAbility(b);
         B.say(nm(B, b) + "'s " + B.abilityLabel(b) + ' prevents ' + STAT_LABEL[stat] + ' loss!');
+        B._arenaDeduct(flags.by);
       }
       return 'blocked';
     }
@@ -550,6 +553,8 @@ function applyStatusEffect(C, eff, primary, certain, effBattler) {
   const prevent = (text) => {
     B.emitAbility(effBattler);
     B.say(text);
+    // B_MSG_ABILITY_PREVENTS_MOVE_STATUS: the Arena's -3 for the attacker.
+    B._arenaDeduct(C.user);
     return false;
   };
   if (status === 'PSN' || status === 'TOX') {
@@ -624,6 +629,7 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
       if (truthy(primary) || truthy(certain)) {
         B.emitAbility(effBattler);
         B.say(nm(B, effBattler) + "'s INNER FOCUS prevents flinching!");
+        B._arenaDeduct(C.user);
       }
       return false;
     }
@@ -693,6 +699,9 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
   if (eff === 'RECHARGE') {
     effBattler.rechargeTurns = 2;
     effBattler.mustRecharge = true;
+    // gLockedMoves[battler] = gCurrentMove: what the Arena's Mind rates on the
+    // recharge turn (Move.js `_fightAction`).
+    effBattler.rechargeNum = C.mnum;
     return true;
   }
   if (eff === 'STEAL_ITEM') {
@@ -711,6 +720,7 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
     if (tItem !== 0 && target.ability === 'STICKY_HOLD') {
       B.emitAbility(target);
       B.say(nm(B, target) + "'s STICKY HOLD made " + C.moveName() + ' ineffective!');
+      B._arenaDeduct(user);
       return false;
     }
     if (int(user.mon.heldItem, 0) !== 0 || tItem === 0 || tItem === Items.ITEM_ENIGMA_BERRY
@@ -802,6 +812,7 @@ M.set = function set(C, eff, primary, certain, affectsUser) {
       if (tItem === 0) return false;
       B.emitAbility(effBattler);
       B.say(nm(B, effBattler) + "'s STICKY HOLD made " + C.moveName() + ' ineffective!');
+      B._arenaDeduct(user);
       return false;
     }
     if (tItem === 0) return false;
@@ -889,6 +900,8 @@ function cantMakeAsleep(C, b) {
   if (ab === 'INSOMNIA' || ab === 'VITAL_SPIRIT') {
     B.emitAbility(b);
     B.say(nm(B, b) + ' stayed awake using its ' + B.abilityLabel(b) + '!');
+    // STRINGID_PKMNSTAYEDAWAKEUSING: the Arena's -3.
+    B._arenaDeduct(C.user);
     return true;
   }
   return false;
@@ -917,7 +930,7 @@ function statDown(C, stat, delta) {
   const blocked = int(side.mistTurns, 0) > 0 || ab === 'CLEAR_BODY' || ab === 'WHITE_SMOKE'
     || (ab === 'KEEN_EYE' && stat === 'acc') || (ab === 'HYPER_CUTTER' && stat === 'atk');
   if (!blocked && t.stages[stat] > -6) C.attackAnimation();
-  M.changeStat(B, t, stat, delta, { allowPtr: true });
+  M.changeStat(B, t, stat, delta, { allowPtr: true, by: C.user });
   return undefined;
 }
 
@@ -936,6 +949,9 @@ function multiUp(C, stats) {
   for (const s of stats) {
     if (user.stages[s] < 6) {
       M.changeStat(B, user, s, 1, { user: true, allowPtr: true });
+    } else {
+      // statbuffchange STAT_CHANGE_ALLOW_PTR at +6: MOVE_RESULT_MISSED (Arena.js).
+      C.resMissed = true;
     }
   }
 }
@@ -954,10 +970,14 @@ function swaggerLike(C, stat, delta) {
   C.attackAnimation();
   if (t.stages[stat] < 6) {
     M.changeStat(B, t, stat, delta, { allowPtr: true });
+  } else {
+    // statbuffchange STAT_CHANGE_ALLOW_PTR at +6: MOVE_RESULT_MISSED.
+    C.resMissed = true;
   }
   if (t.ability === 'OWN_TEMPO') {
     B.emitAbility(t);
     B.say(nm(B, t) + "'s OWN TEMPO prevents confusion!");
+    B._arenaDeduct(C.user);
     return undefined;
   }
   if (int(B.sideState(t.side).safeguardTurns, 0) > 0) {
@@ -1026,6 +1046,8 @@ H[E.SLEEP] = function effectSleep(C) {
   const t = C.target;
   if (sub(t)) return C.fail();
   if (Status.normalise(t.mon.status) === 'SLP') {
+    // BattleScript_AlreadyAsleep: setalreadystatusedmoveattempt (the Arena).
+    B._arenaAlready(C.user);
     return B.say(nm(B, t) + ' is already asleep!');
   }
   if (cantMakeAsleep(C, t)) return undefined;
@@ -1043,11 +1065,15 @@ H[E.POISON] = function effectPoison(C) {
   const t = C.target;
   if (t.ability === 'IMMUNITY') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s IMMUNITY prevents poisoning!");
   }
   if (sub(t)) return C.fail();
   const s = Status.normalise(t.mon.status);
-  if (s === 'PSN' || s === 'TOX') return B.say(nm(B, t) + ' is already poisoned.');
+  if (s === 'PSN' || s === 'TOX') {
+    B._arenaAlready(C.user);
+    return B.say(nm(B, t) + ' is already poisoned.');
+  }
   if (isType(t, Types.ID.POISON) || isType(t, Types.ID.STEEL)) return notAffected(C, t);
   if (truthy(s)) return C.fail();
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
@@ -1063,11 +1089,15 @@ H[E.TOXIC] = function effectToxic(C) {
   const t = C.target;
   if (t.ability === 'IMMUNITY') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s IMMUNITY prevents poisoning!");
   }
   if (sub(t)) return C.fail();
   const s = Status.normalise(t.mon.status);
-  if (s === 'PSN' || s === 'TOX') return B.say(nm(B, t) + ' is already poisoned.');
+  if (s === 'PSN' || s === 'TOX') {
+    B._arenaAlready(C.user);
+    return B.say(nm(B, t) + ' is already poisoned.');
+  }
   if (truthy(s)) return C.fail();
   if (isType(t, Types.ID.POISON) || isType(t, Types.ID.STEEL)) return notAffected(C, t);
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
@@ -1083,6 +1113,7 @@ H[E.PARALYZE] = function effectParalyze(C) {
   const t = C.target;
   if (t.ability === 'LIMBER') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s LIMBER prevents paralysis!");
   }
   if (sub(t)) return C.fail();
@@ -1092,7 +1123,10 @@ H[E.PARALYZE] = function effectParalyze(C) {
     return notAffected(C, t);
   }
   const s = Status.normalise(t.mon.status);
-  if (s === 'PAR') return B.say(nm(B, t) + ' is already paralyzed!');
+  if (s === 'PAR') {
+    B._arenaAlready(C.user);
+    return B.say(nm(B, t) + ' is already paralyzed!');
+  }
   if (truthy(s)) return C.fail();
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
   if (safeguarded(C, t)) return undefined;
@@ -1107,10 +1141,14 @@ H[E.WILL_O_WISP] = function effectWillOWisp(C) {
   const t = C.target;
   if (sub(t)) return C.fail();
   const s = Status.normalise(t.mon.status);
-  if (s === 'BRN') return B.say(nm(B, t) + ' already has a burn.');
+  if (s === 'BRN') {
+    B._arenaAlready(C.user);
+    return B.say(nm(B, t) + ' already has a burn.');
+  }
   if (isType(t, Types.ID.FIRE)) return notAffected(C, t);
   if (t.ability === 'WATER_VEIL') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s WATER VEIL prevents burns!");
   }
   if (truthy(s)) return C.fail();
@@ -1160,8 +1198,8 @@ H[E.TICKLE] = function effectTickle(C) {
   }
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
   C.attackAnimation();
-  M.changeStat(B, t, 'atk', -1, { allowPtr: true, noMsg: t.stages.atk <= -6 });
-  M.changeStat(B, t, 'def', -1, { allowPtr: true, noMsg: t.stages.def <= -6 });
+  M.changeStat(B, t, 'atk', -1, { allowPtr: true, noMsg: t.stages.atk <= -6, by: C.user });
+  M.changeStat(B, t, 'def', -1, { allowPtr: true, noMsg: t.stages.def <= -6, by: C.user });
   return undefined;
 };
 
@@ -1207,13 +1245,16 @@ H[E.MEMENTO] = function effectMemento(C) {
   B.setHp(user, 0);
   if (truthy(isProtected)) {
     B.say(nm(B, t) + ' protected itself!');
+    // attackcanceler's Protect: MOVE_RESULT_MISSED, MISS_TYPE B_MSG_PROTECTED.
+    C.resMissed = true;
+    C.resProtected = true;
   } else {
     C.attackAnimation();
     if (sub(t)) {
       B.say('But it had no effect!');
     } else {
-      M.changeStat(B, t, 'atk', -2, { allowPtr: true, noMsg: t.stages.atk <= -6 });
-      M.changeStat(B, t, 'spa', -2, { allowPtr: true, noMsg: t.stages.spa <= -6 });
+      M.changeStat(B, t, 'atk', -2, { allowPtr: true, noMsg: t.stages.atk <= -6, by: user });
+      M.changeStat(B, t, 'spa', -2, { allowPtr: true, noMsg: t.stages.spa <= -6, by: user });
     }
   }
   C.checkUserFaint = true;
@@ -1330,6 +1371,8 @@ H[E.MOONLIGHT] = morningSun;
 H[E.REST] = function effectRest(C) {
   const { B, user } = C;
   if (Status.normalise(user.mon.status) === 'SLP') {
+    // BattleScript_RestIsAlreadyAsleep: setalreadystatusedmoveattempt.
+    B._arenaAlready(user);
     return B.say(nm(B, user) + ' is already asleep!');
   }
   if (cantMakeAsleep(C, user)) return undefined;
@@ -1419,13 +1462,17 @@ H[E.HEAL_BELL] = function effectHealBell(C) {
   C.attackAnimation();
   if (isBell) {
     B.say('A bell chimed!');
+    // STRINGID_PKMNSXBLOCKSY / BLOCKSY2 through the user's controller: the
+    // Arena's -3 each.
     if (blocked) {
       B.emitAbility(user);
       B.say(nm(B, user) + "'s SOUNDPROOF blocks the bell!");
+      B._arenaDeduct(user);
     }
     for (const ally of blockedAllies) {
       B.emitAbility(ally);
       B.say(nm(B, ally) + "'s SOUNDPROOF blocks the bell!");
+      B._arenaDeduct(user);
     }
   } else {
     B.say('A soothing aroma wafted through the area!');
@@ -1484,10 +1531,13 @@ H[E.LEECH_SEED] = function effectLeechSeed(C) {
   if (sub(t)) return C.fail();
   const hit = C.accuracyCheck('normal', false);
   C.attackAnimation();
+  // Cmd_setseeded sets MOVE_RESULT_MISSED on both failures: the Arena's skill.
   if (!truthy(hit) || truthy(t.seededBy)) {
+    C.resMissed = true;
     return B.say(nm(B, t) + ' evaded the attack!');
   }
   if (isType(t, Types.ID.GRASS)) {
+    C.resMissed = true;
     return B.say("It doesn't affect " + nm(B, t) + '...');
   }
   t.seededBy = C.user.slot;
@@ -1725,6 +1775,8 @@ H[E.CURSE] = function effectCurse(C) {
   }
   const s = user.stages;
   if (s.spe <= -6 && s.atk >= 6 && s.def >= 6) return C.fail();
+  // The ATTACK / DEFENSE raises at +6: MOVE_RESULT_MISSED (the Arena).
+  if (s.atk >= 6 || s.def >= 6) C.resMissed = true;
   C.attackAnimation();
   M.changeStat(B, user, 'spe', -1, {
     user: true, allowPtr: true, curse: true, noMsg: s.spe <= -6,
@@ -1759,10 +1811,14 @@ H[E.CONFUSE] = function effectConfuse(C) {
   const t = C.target;
   if (t.ability === 'OWN_TEMPO') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s OWN TEMPO prevents confusion!");
   }
   if (sub(t)) return C.fail();
-  if (int(t.confusion, 0) > 0) return B.say(nm(B, t) + ' is already confused!');
+  if (int(t.confusion, 0) > 0) {
+    B._arenaAlready(C.user);
+    return B.say(nm(B, t) + ' is already confused!');
+  }
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
   if (safeguarded(C, t)) return undefined;
   C.attackAnimation();
@@ -1776,10 +1832,14 @@ H[E.TEETER_DANCE] = function effectTeeterDance(C) {
   const t = C.target;
   if (t.ability === 'OWN_TEMPO') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s OWN TEMPO prevents confusion!");
   }
   if (sub(t)) return C.fail();
-  if (int(t.confusion, 0) > 0) return B.say(nm(B, t) + ' is already confused!');
+  if (int(t.confusion, 0) > 0) {
+    B._arenaAlready(C.user);
+    return B.say(nm(B, t) + ' is already confused!');
+  }
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
   if (int(B.sideState(t.side).safeguardTurns, 0) > 0) {
     return B.say(nm(B, t) + ' is protected by SAFEGUARD!');
@@ -1801,11 +1861,17 @@ H[E.HAZE] = function effectHaze(C) {
 // pokefirered/src/battle_script_commands.c:7442
 H[E.SUBSTITUTE] = function effectSubstitute(C) {
   const { B, user } = C;
-  if (sub(user)) return B.say(nm(B, user) + ' already has a SUBSTITUTE!');
+  if (sub(user)) {
+    // BattleScript_AlreadyHasSubstitute: setalreadystatusedmoveattempt.
+    B._arenaAlready(user);
+    return B.say(nm(B, user) + ' already has a SUBSTITUTE!');
+  }
   let cost = Math.floor(user.mon.maxHp / 4);
   if (cost === 0) cost = 1;
   if (user.mon.hp <= cost) {
     C.failed = true;
+    // Cmd_setsubstitute sets no result flag for B_MSG_SUBSTITUTE_FAILED.
+    C.resClear = true;
     return B.say('It was too weak to make a SUBSTITUTE!');
   }
   user.substituteHP = cost;
@@ -1873,6 +1939,8 @@ H[E.PERISH_SONG] = function effectPerishSong(C) {
   for (const b of blocked) {
     B.emitAbility(b);
     B.say(nm(B, b) + "'s SOUNDPROOF blocks PERISH SONG!");
+    // STRINGID_PKMNSXBLOCKSY2 through the user's controller: the Arena's -3.
+    B._arenaDeduct(C.user);
   }
   return undefined;
 };
@@ -1884,6 +1952,7 @@ H[E.ATTRACT] = function effectAttract(C) {
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
   if (t.ability === 'OBLIVIOUS') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s OBLIVIOUS prevents romance!");
   }
   const ug = C.user.mon.gender;
@@ -1944,6 +2013,7 @@ H[E.YAWN] = function effectYawn(C) {
   const ab = t.ability;
   if (ab === 'VITAL_SPIRIT' || ab === 'INSOMNIA') {
     B.emitAbility(t);
+    B._arenaDeduct(C.user);
     return B.say(nm(B, t) + "'s " + B.abilityLabel(t) + ' made it ineffective!');
   }
   if (sub(t)) return C.fail();
@@ -1965,11 +2035,14 @@ H[E.ROAR] = function effectRoar(C) {
   const t = C.target;
   if (t.ability === 'SUCTION_CUPS') {
     B.emitAbility(t);
+    B._arenaDeduct(user);
     return B.say(nm(B, t) + ' anchors itself with SUCTION CUPS!');
   }
   if (truthy(t.ingrain)) return B.say(nm(B, t) + ' anchored itself with its roots!');
   if (!truthy(C.accuracyCheck('lockon', true))) return undefined;
   if (!truthy(C.accuracyCheck('normal', true))) return undefined;
+  // pokeemerald/data/battle_scripts_1.s:601: no Roar in the Battle Arena.
+  if (B.rules && B.rules.arena) return C.fail();
   const candidates = B.benchOf(t.fighter);
   if (!truthy(B.isWild()) && candidates.length < 1) return C.fail();
   const uLvl = int(user.mon.level, 1);
@@ -2154,6 +2227,8 @@ H[E.SKETCH] = function effectSketch(C) {
 // pokefirered/data/battle_scripts_1.s:1690
 H[E.BATON_PASS] = function effectBatonPass(C) {
   const { B, user } = C;
+  // pokeemerald/data/battle_scripts_1.s:1698: no Baton Pass in the Battle Arena.
+  if (B.rules && B.rules.arena) return C.fail();
   const candidates = B.benchOf(user.fighter);
   if (candidates.length === 0) return C.fail();
   C.attackAnimation();
@@ -2216,6 +2291,7 @@ H[E.TRICK] = function effectTrick(C) {
   }
   if (t.ability === 'STICKY_HOLD') {
     B.emitAbility(t);
+    B._arenaDeduct(user);
     return B.say(nm(B, t) + "'s STICKY HOLD made " + C.moveName() + ' ineffective!');
   }
   const urow = Items.rowOf(user);
