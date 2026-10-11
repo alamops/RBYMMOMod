@@ -125,6 +125,7 @@ File ownership is strict within a wave; later waves inherit.
 
 ## Progress
 
+- Wave 3 landed: `af3745f` (Palace / Arena referee), `29da93b` (Safari kind), `c0313e4` (core follow-ups, optional family resolver), `9578433` (Safari screen, general looks). Barrier green (55).
 - Wave 2 landed: `1ad1a88` (Safari / tutorial referee), `3d84b26` (Legend), `7984b9b` (Facility), `9155379` (Doubles / First), `4d2c346` (looks, lone double). Barrier green (54).
 - Wave 1 landed: `eb2b198` (referee), `3ccf2ad` (wire), `4aee25a` (doors), `db67b7a` (solo core, brain), `59fbe2a` (screens). Barrier green (50 suites / test files, three fixtures reproduced).
 

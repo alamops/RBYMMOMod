@@ -625,3 +625,85 @@ Each family is a `src/Solo3/*.lua` module returning `kinds3`; `KIND_FILES3` maps
 **Known gaps** (not planned):
 - Steven's monsters can level mid-battle on the cart from the EXP they share; the mod pays only the player's own slots.
 - A Safari monster that arrives with a status or under weather can faint at the end of a turn.
+
+## Part 4: wave-3 contracts as built, and remainders (commits `af3745f`..`9578433`)
+
+### 4.1 Referee: Palace, Arena, Pyramid Run Away (`af3745f`)
+
+**Palace** — `rules.palace = { flavor = <25 ints 0..3, nature order> }`:
+- `flavor` is the cart's `sBattlePalaceNatureToFlavorTextId`. The engine exposes it as `f2_data.palace().flavorTextId`, a 1-based list of 0-based ids.
+- Choices:
+  - `{action = "fight", move = <0-based>, target?}` is accepted even when the move menu would refuse it. The normalised `choice.palace` is one of `disabled | torment | taunt | sealed | unable`.
+  - `{action = "fight", unable = true}` is the pick's own 50% failure. Wire doesn't carry `unable`, so it is filed through `ctx.solo:file3`.
+- `sim:palaceLow(fieldSlot)`, plus the snapshot field `palaceLow`.
+- Events:
+  - `palace {side, slot, text = "unable"}` plus its line;
+  - `palace {text = "flavor", amount = 0..3}` plus its line, at turn end in battler order.
+
+**Arena** — `rules.arena = true`:
+- Move rows may carry `arenaMind`.
+- Switch submits are refused; Roar and Baton Pass fail.
+- Replacement is automatic, in party order.
+- Events, in order:
+  1. `arena {text = "start"}`;
+  2. `{text = "judge"}`;
+  3. `mind` / `skill` / `body` `{side, slot, amount = 2 | 1 | 0}`, side a then side b for each category;
+  4. `win {side, slot}` or `draw`;
+  5. the result line;
+  6. a `faint` per loser;
+  7. the automatic `switch` / `send`.
+- A judged ending: `how = "judge"`, `reason = "ko"`, `by` the winner, `outcome = "win" | "draw"`, `judged = {a = …, b = …}`. Judged mons keep their HP and status, with `mon.judged = true`.
+
+**Pyramid:** under `rules.forfeit` + `rules.pyramidRun`, only a Run Away runner draws `roll(0, 255)`. On failure, "Can't escape!" and the turn is spent.
+
+**Other changes:**
+- `TURN_TRAP` carries `amount` = the trapping move's number.
+- Focus Punch setup runs in battler order, and skips a loafing Truant and anyone with no usable move.
+
+**Wire:** `PALACE_TOKENS3 = {unable, flavor}` and `ARENA_TOKENS3 = {start, judge, mind, skill, body, win, draw}`, on Gen 3 readers only.
+
+### 4.2 Safari kind and screens (`29da93b`, `9578433`)
+
+**Safari kind** (`src/Solo3/Safari.lua`):
+- The kind reads, weighs and clears the Pokéblock.
+- The screen opens the case with `Pokeblock.openCase(session, {caseId = Pokeblock.CASE.BATTLE, onUse = function(id) return id end})` and sends `block = id + 1`.
+- The full-box BALL refusal parks `STRINGID_BOXISFULL` and files nothing.
+
+**Single screen options:**
+- `safari = {family, balls}`, which implies `noOwnBattler`. The phase is "choose"; while the case is up it is "pokeblock".
+- `bag = {{id, count, name?}}`.
+- `victorySong`.
+
+**Single screen methods:** `safariBalls3`, `openPokeblockCase3`, `startGeneralLook3`, `classicBeat3`, `stepClassicFx3`, `classicThrows3`, `emitVfx(spec, target, from, fromTrainer)`, `slideInForSpeech3`.
+
+**`Vfx`:** `GENERAL_ANIMS3` gains TURN_TRAP, FOCUS_PUNCH_SETUP, FUTURE_SIGHT_HIT and DOOM_DESIRE_HIT. New `trapAnim3(moveNum)` and `subSilences3(anim)`.
+
+### 4.3 Core (`c0313e4`)
+
+- `gen3WildItem(species, random16, opts?) -> item, wrote`.
+- Altering Cave is threaded from `mapId`.
+- On both carts, the roll writes over a scripted wild's item (pret `SetWildMonHeldItem`).
+- A double-KO whiteout saves DREW, while `done` hears "lose".
+- `Sheet3.applyToMon` carries `sleepTurns`.
+- The Solo3 families load at Gen 3 boot. `main.lua`'s `need(name, optional)` keeps an optional module's failure to itself.
+
+**Correction to §1.3:** pret exempts only LEGENDARY from the wild held-item roll (plus TRAINER / PYRAMID / PIKE on Emerald, and POKEDUDE on FRLG). Scripted wilds, the veiled ghost and the old man's Weedle do roll.
+
+### 4.4 Found in wave 3, not in this task's scope
+
+**Gen 3 replacement timing.** Verified in pret em `battle_script_commands.c`: `Cmd_end` → `B_ACTION_TRY_FINISH` → `HandleFaintedMonActions` → `BattleScript_HandleFaintedMon`. The carts send a fainted monster's replacement after **each action**, before the end-of-turn effects. The Gen 3 referee replaces after the end-of-turn block. This predates this work and affects every Gen 3 fight. For example, sandstorm hits the newcomer on the cart; in a double, a later move can hit the replacement. Record it in `docs/plans/gen3-known-gaps.md`; it is the Gen 3 twin of the Red/Gold known gap §8.
+
+**Other presentation gaps:**
+- The general clips' sound effects aren't played.
+- The arena tremble has one height.
+- Doom Desire's beats are collapsed into one.
+- Several general clips are never sent by the referee: weather continuing, Leech Seed drain, Ingrain, Wish, Knock Off, item steal, Snatch, Focus Band, held-item effect, Smoke Ball, MON_HIT, Castform, stat change, substitute fade.
+
+**Engine divergences, for the upstream notes:**
+- `battle/init.lua:493` writes a rolled item only when `held ~= 0`, and FRLG `foe_mon_from` rolls only when `foe.item == nil`. As a result, the Route 12 Snorlax lacks pret's guaranteed LEFTOVERS.
+- Emerald's `step_safari_enemy` plays SAFARI_REACTION; pret plays none.
+- The engine has no `GAME_STAT_POKEMON_CAPTURES` or `ENTERED_SAFARI_ZONE`.
+- The engine's `sSafariZonePkblkUses` isn't wrapped as a u8.
+- The engine's arena judgment zeroes the loser's HP and clears its status; pret keeps both.
+
+**Brief correction:** the FRLG Safari prompt is `gText_WhatWillPlayerThrow`, "What will {B_PLAYER_NAME}\nthrow?".
