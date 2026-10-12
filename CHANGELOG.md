@@ -452,6 +452,13 @@ here must match `manifest.version`.
   FireRed / LeafGreen save without the National Dex is refused before any
   pick, as the carts refuse it, and a Ruby / Sapphire partner the engine
   clears is no longer turned away by the fallback.
+- **Ruby and Sapphire can trade with FireRed / LeafGreen.** A Ruby or
+  Sapphire save refused every FireRed partner for a cross-region unlock those
+  carts never set; it now trades as the carts do, and what it receives is
+  still checked against FireRed's own rule.
+- **The "not saving" line reads as a sentence.** A tutorial and a POKé DUDE
+  demonstration holding your bag at once read "your bag pockets and bag and
+  party"; it now says "your bag and party".
 - **Crystal names its cart to the hub.** Gen 2 hellos now carry the version,
   so fights against the computer use Crystal's damage rules when appropriate.
 - **Badges no longer boost fights between players on Red or Gold.** A

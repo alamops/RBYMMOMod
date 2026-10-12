@@ -722,8 +722,13 @@ function TradeSession:versionGate()
   if theirs == nil or theirs == me.family then return nil end
   local mine, partner = gateFlags(me), gateFlags(info)
   local Family = family()
+  -- This save's cart rides along: Ruby / Sapphire have no such gate at all
+  -- (pokeruby trade.c has no GetGameProgressForLinkTrade), which the engine
+  -- answers from `mine.version` -- without it a Ruby save was read as
+  -- Emerald and refused its own FireRed partner for an unlock it never sets.
   local code = Family and try(Family.gameProgressForLinkTrade, me.family,
-    { progressFlags = mine }, { version = info.version, progressFlags = partner })
+    { version = me.version, progressFlags = mine },
+    { version = info.version, progressFlags = partner })
   local T = Family and type(Family.TRADE) == "table" and Family.TRADE or {}
   if code ~= nil and code == T.PLAYER_NOT_READY then return NOT_READY_MINE end
   if code ~= nil and code == T.PARTNER_NOT_READY then return NOT_READY_THEIRS end
@@ -861,7 +866,16 @@ end
 -- covered by versionGate (this save cannot reach this point before it is past
 -- the flag that implies the National Dex -- gateFlags infers that flag for an
 -- unreadable unlock only alongside the National Dex), and its regional dex is
--- not a table this cart can read.
+-- not a table this cart can read.  Ruby / Sapphire are the exception: they
+-- pass no gate (versionGate), so a FireRed / LeafGreen sender's rule is
+-- replayed for them too -- pokefirered trade.c:2780 skips the partner's dex
+-- test for a Ruby / Sapphire partner, so what it still refuses is the
+-- sender's own (no National Dex past #151, no egg) and the event MEW / DEOXYS.
+local function isRubySapphire(cart)
+  local code = (tonumber(cart) or 0) % 0x100
+  return code == 1 or code == 2 -- VERSION_SAPPHIRE, VERSION_RUBY
+end
+
 function TradeSession:theirRefusal()
   local mon = self.theirParty and self.theirParty[self.theirPick or 0]
   if type(mon) ~= "table" then return nil end
@@ -872,7 +886,8 @@ function TradeSession:theirRefusal()
   end
   local info, me = self.theirInfo, self.me
   local Family = family()
-  if info and me and Family and familyForCart(info.version) == me.family then
+  if info and me and Family and (familyForCart(info.version) == me.family
+      or (isRubySapphire(me.version) and familyForCart(info.version) == "frlg")) then
     local code = try(Family.canTradeSelectedMon,
       versionForCart(info.version) or self.version,
       self.theirParty, self.theirPick - 1, {

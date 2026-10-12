@@ -110,6 +110,21 @@ function M.settle(session)
   return restored, live, labels
 end
 
+-- The labels as one phrase for the refusal line: each said once (a tutorial
+-- and a demonstration both hold "bag"), in the order settle read them, and
+-- joined as a sentence -- "bag", "bag and party", "bag, party and box".
+function M.phrase(labels)
+  local seen, out = {}, {}
+  for _, label in ipairs(type(labels) == "table" and labels or {}) do
+    if type(label) == "string" and label ~= "" and not seen[label] then
+      seen[label] = true
+      out[#out + 1] = label
+    end
+  end
+  if #out <= 1 then return out[1] or "save" end
+  return table.concat(out, ", ", 1, #out - 1) .. " and " .. out[#out]
+end
+
 -- The save.write link: settle, then veto a write while a running fight still
 -- holds part of the save.
 function M.beforeSave(nextLink, game, ...)
@@ -123,7 +138,7 @@ function M.beforeSave(nextLink, game, ...)
     if #live > 0 then
       if mod then
         mod.log:warn("not saving while a battle still holds your %s; finish the "
-          .. "battle, then save", table.concat(labels, " and "))
+          .. "battle, then save", M.phrase(labels))
       end
       return false
     end

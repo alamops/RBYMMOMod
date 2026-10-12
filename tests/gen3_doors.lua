@@ -1599,8 +1599,12 @@ do
   eq(Borrow3.held(SESSION, CoopField.BORROW_PARTY3), true, "both on the ledger: ...beside the party")
   local mark = #warns
   eq(Borrow3.beforeSave(write, GAME), false, "both live: the save is refused")
-  eq(warns[#warns], "not saving while a battle still holds your bag pockets and bag and party; "
-     .. "finish the battle, then save", "both live: ...naming each borrow by its label")
+  eq(warns[#warns], "not saving while a battle still holds your bag and party; "
+     .. "finish the battle, then save", "both live: ...naming each thing held once")
+  eq(Borrow3.phrase({ "bag" }), "bag", "phrase: one label")
+  eq(Borrow3.phrase({ "bag", "bag", "party" }), "bag and party", "phrase: a repeat said once")
+  eq(Borrow3.phrase({ "bag", "party", "box" }), "bag, party and box", "phrase: three as a sentence")
+  eq(Borrow3.phrase({}), "save", "phrase: no label still reads")
   eq(#warns, mark + 1, "both live: ...once")
   Gen3Ui.pop(GAME, tutScreen)
   infos = {}

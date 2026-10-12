@@ -524,8 +524,10 @@ function M.borrowBag3(ctx)
   end
   local b = { bag = bag, pockets = saved, session = session }
   st.bagBorrow = b
+  -- Labelled "bag" for the refusal line -- the player's word for it, and the
+  -- POKé DUDE's bag borrow says the same, so the two read as one.
   Borrow3.hold(session, M.BAG_BORROW, function() giveBagBack(st, b) end,
-    function() return fightAlive(ctx, st, b) end)
+    function() return fightAlive(ctx, st, b) end, "bag")
   for _, e in ipairs(st.bag or {}) do Gen3.bag.add(e.id, e.count) end
   return true
 end

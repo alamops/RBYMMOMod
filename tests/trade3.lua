@@ -801,6 +801,47 @@ do
   end
 end
 
+-- ...and the Ruby / Sapphire side itself: pokeruby has no link-trade gate, so
+-- a Ruby save meets an unlocked FireRed whatever its own nibbles (the engine
+-- reads that off this save's cart, which versionGate now hands it).  What it
+-- is handed is still checked: FireRed's sender rule, replayed with the Ruby
+-- as the partner -- which skips the partner's dex (trade.c:2780), so a Ruby
+-- without the National Dex takes a Kanto PIDGEY as the cart allows, while a
+-- sender claiming no National Dex cannot hand it a Hoenn TREECKO.
+do
+  for _, rs in ipairs({ "ruby", "sapphire" }) do
+    local function exchange(rsNational, frNational, offer)
+      local rsSession = newSession({ version = rs, national = rsNational,
+        party = { mon(263, 5), mon(19, 4) } })
+      local frSession = newSession({ national = frNational, linkRegions = true,
+        party = { offer, mon(19, 4) } })
+      -- A Ruby / Sapphire session's cart is the running game's (Trade3
+      -- versionOf asks Gen3.version for a name outside its three carts).
+      local Gen3 = need("Gen3")
+      local realVersion = Gen3.version
+      Gen3.version = function() return rs end
+      local r = Trade3.TradeSession.new({ generation = 3, session = rsSession, data = {} }, {})
+      Gen3.version = realVersion
+      local f = Trade3.TradeSession.new({ generation = 3, session = frSession, data = {} }, {})
+      r:handle(Json.decode(Json.encode(f:partyMessage())))
+      f:handle(Json.decode(Json.encode(r:partyMessage())))
+      return r, f
+    end
+    local r, f = exchange(false, true, mon(16, 5))
+    eq(r.me.family, "rse", rs .. ": the save reads as its own cart")
+    check(r.me.version == 1 or r.me.version == 2, rs .. ": ...with its cable code")
+    eq(r.stage, "picking", rs .. ": a Ruby / Sapphire save takes an unlocked FireRed's party")
+    eq(f.stage, "picking", rs .. ": ...and the FireRed takes its")
+    r:handle({ type = "pick", index = 1 })
+    eq(r:theirRefusal(), nil, rs .. " without the National Dex: a Kanto PIDGEY may come (trade.c:2780)")
+    local r2 = exchange(false, true, mon(277, 10))
+    r2.theirInfo.progressFlags = 0x10 -- may link, no National Dex
+    r2:handle({ type = "pick", index = 1 })
+    eq(r2:theirRefusal() ~= nil, true,
+      rs .. ": a sender claiming no National Dex cannot hand over a Hoenn TREECKO")
+  end
+end
+
 do
   -- Before FireRed may link with the other region: both sides refuse.
   local sa = newSession({ name = "ANN", national = true, party = { mon(16, 5), mon(19, 4) } })
