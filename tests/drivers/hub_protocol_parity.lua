@@ -2046,8 +2046,8 @@ scenarios[#scenarios + 1] = {
 -- that records each call, and the hub's own rows are set first so the digest
 -- never leans on how either sim's copyMove spells a field it was not given.
 -- Along the way the learn keeps highCrit, PP Ups and Gold priority on an
--- unchanged row and takes them off a new one (K8).  A Gen 3 hub reads none of
--- it and so calls nothing.
+-- unchanged row and takes them off a new one (K8). Gen 3 forwards growth
+-- from protocol 31 too.
 -- ------------------------------------------------------------------
 
 local function slimMoves12(moves)

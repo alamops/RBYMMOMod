@@ -2002,8 +2002,7 @@ M.learnTo = learnTo
 -- does: for a new move alone, on Red whatever the Transform, on Gold only
 -- untransformed.  learnTo has the rule and the carts' reasons.
 --
--- Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
--- Gen 2 only -- Wire.battleMoveset reads none on Gen 3), the hub forwards
+-- Level-up: when the payload states a `level`, `stats` or `maxHp`, the hub forwards
 -- them to the referee's K9 API once the moves are settled:
 --
 --   record.sim:levelUp(playerId, monIndex, level, stats, maxHp)
@@ -2036,7 +2035,7 @@ M.learnTo = learnTo
 --     unchanged row keeping the hub's PP and combat fields);
 --   * the referee's levelUp decides what a level claim rebuilds (the cart's
 --     in-battle CalcStats, the stages, badge boosts, the HP step) and which
---     claims it refuses -- BattleSim / BattleSim2 Turn `levelUp` say which.
+--     claims it refuses -- each generation's Turn.levelUp says which.
 --
 -- Returns whether anything reached the referee (a move list or a level-up).
 function M:applyBattleMoveset(record, client, payload)
@@ -2044,14 +2043,15 @@ function M:applyBattleMoveset(record, client, payload)
   if not LEARN_MODES[record.mode] then return false end
   local fighter = record.sim.byId and record.sim.byId[client.id]
   if not (fighter and type(fighter.mons) == "table") then return false end
-  if self.generation == 3 then return applyBattleMoveset3(fighter, payload) end
   local mon = fighter.mons[payload.mon + 1]
   if not mon then return false end
-  local applied = learnTo(self.generation, mon, payload.moves)
+  local applied
+  if self.generation == 3 then applied = applyBattleMoveset3(fighter, payload)
+  else applied = learnTo(self.generation, mon, payload.moves) end
   local grew = payload.level ~= nil or payload.stats ~= nil or payload.maxHp ~= nil
   if grew and type(record.sim.levelUp) == "function" then
-    record.sim:levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp)
-    applied = true
+    local taken = record.sim:levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp)
+    applied = self.generation ~= 3 or taken == true or applied
   end
   return applied
 end

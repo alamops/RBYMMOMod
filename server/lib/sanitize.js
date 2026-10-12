@@ -3140,14 +3140,14 @@ function cleanBattleMoveset(raw, generation) {
   if (moves.length === 0) return null;
   const out = { battle, mon, moves };
   const gen = luaInt(generation, 1, GENERATION_MAX);
-  if (gen === 1 || gen === 2) {
+  if (gen === 1 || gen === 2 || gen === 3) {
     if (raw.level !== undefined && raw.level !== null) {
       const level = luaInt(raw.level, 1, LEVEL_MAX);
       if (level === null) return null;
       out.level = level;
     }
     if (raw.stats !== undefined && raw.stats !== null) {
-      const stats = cleanBlock3(raw.stats, gen === 2 ? BATTLE_STATS_GEN2 : BATTLE_STATS_GEN1, 1, STAT_MAX);
+      const stats = cleanBlock3(raw.stats, gen !== 1 ? BATTLE_STATS_GEN2 : BATTLE_STATS_GEN1, 1, STAT_MAX);
       if (!stats) return null;
       out.stats = stats;
     }

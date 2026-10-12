@@ -549,6 +549,31 @@ Battle.prototype._newBattler = function _newBattler(fighter, index) {
   return b;
 };
 
+// Cmd_getexp: grow the party stats/HP while keeping transformed battle stats.
+Battle.prototype.levelUp = function levelUp(playerId, monIndex, level, stats, maxHp) {
+  if (this.result || !own(M.BADGE_MODES, this.mode) || this.rules.noExp) return false;
+  const fighter = this.byId.get(playerId);
+  const mon = fighter && fighter.side === 'a' ? at(fighter.mons, int(monIndex, 0)) : null;
+  const newLevel = int(level, null);
+  const newMax = int(maxHp, null);
+  if (!mon || mon.hp <= 0 || newLevel == null || newLevel <= mon.level || newLevel > 100
+      || newMax == null || newMax < mon.maxHp || newMax > 999 || !isTable(stats)) return false;
+  const nextStats = {};
+  for (const key of ['atk', 'def', 'spe', 'spa', 'spd']) {
+    const value = int(stats[key], null);
+    if (value == null || value < mon.stats[key] || value > 999) return false;
+    nextStats[key] = value;
+  }
+  mon.level = newLevel;
+  mon.stats = nextStats;
+  mon.hp = Math.min(newMax, mon.hp + newMax - mon.maxHp);
+  mon.maxHp = newMax;
+  for (const seat of fighter.seats || [fighter]) {
+    if (seat.b && seat.b.mon === mon && !seat.b.transformed) seat.b.stats = nextStats;
+  }
+  return true;
+};
+
 Battle.prototype._sendEvent = function _sendEvent(fighter) {
   const { b } = fighter;
   const { mon } = b;

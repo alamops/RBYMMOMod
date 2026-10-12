@@ -431,6 +431,64 @@ function M.moves(mon, opts)
   return out
 end
 
+-- The party stats after an experience award, in the referee's dialect.
+function M.growth(mon)
+  if type(mon) ~= "table" then return nil end
+  local stats = statsFor(mon, speciesOf(mon))
+  if not stats then return nil end
+  local out = { level = int(mon.level, nil), maxHp = stats.hp, stats = {} }
+  for _, key in ipairs({ "atk", "def", "spe", "spa", "spd" }) do out.stats[key] = stats[key] end
+  return out
+end
+
+-- A permanent Sketch is the only referee move rewrite written home. Transform
+-- and Mimic omit the party index and must never overwrite the save's moves.
+function M.sketchSlots(prior, incoming)
+  if not (type(prior) == "table" and type(incoming) == "table") then
+    return nil
+  end
+  if #prior == 0 or #prior ~= #incoming then return nil end
+  local slots = {}
+  for i, was in ipairs(prior) do
+    local now = incoming[i]
+    if type(was) ~= "table" or type(now) ~= "table" then return nil end
+    if was.num ~= now.num then
+      if was.num ~= 166 or not int(now.num, nil)
+          or now.num < 1 or now.num > 354 then return nil end
+      slots[#slots + 1] = i
+    end
+  end
+  if #slots == 0 then return nil end
+  return slots
+end
+
+function M.sketchHome(mon, prior, incoming)
+  if type(mon) ~= "table" or type(mon.moves) ~= "table" or type(incoming) ~= "table"
+      or #mon.moves ~= #incoming then return nil end
+  local slots = M.sketchSlots(prior, incoming)
+  if not slots then return nil end
+  for _, i in ipairs(slots) do if moveAt(mon, i) ~= 166 then return nil end end
+  mon.pp, mon.maxPp = mon.pp or {}, mon.maxPp or {}
+  for _, i in ipairs(slots) do
+    local row = incoming[i]
+    local pp = clamp(int(row.pp, 0), 0, 64)
+    local maxPp = clamp(int(row.maxPp, pp), pp, 64)
+    mon.moves[i], mon.pp[i], mon.maxPp[i] = row.num, pp, maxPp
+    -- Imported/traded monsters keep PP Up bits beside the numeric moves.
+    -- Sketch clears this slot's bits without changing any other slot.
+    local weight = 4 ^ (i - 1)
+    for _, key in ipairs({ "ppBonusesPacked", "ppBonuses" }) do
+      local bonuses = mon[key]
+      if type(bonuses) == "number" then
+        mon[key] = bonuses - (floor(bonuses / weight) % 4) * weight
+      elseif type(bonuses) == "table" then
+        bonuses[i] = 0
+      end
+    end
+  end
+  return slots
+end
+
 -- ------------------------------------------------------------------
 -- one monster
 -- ------------------------------------------------------------------

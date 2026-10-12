@@ -3234,9 +3234,7 @@ do
   ok(none and none.mimic == nil, "mimic: ...and a caller naming no generation")
 end
 
--- A Gen 3 hub reads no level-up (BattleSim3 rebuilds nothing from one), so a
--- referee there is never called, whatever the client sends -- in a wild
--- fight, where a learn is heard at all (Hub LEARN_MODES).
+-- Gen 3 growth is read through the real wire handler and applied by the referee.
 do
   local hub = Hub.new({ maxPlayers = 4, generation = 3 })
   local ann = join3(hub, "ANN")
@@ -3246,12 +3244,13 @@ do
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "a", mons = { mon3() } })
   hub:receive(ann, { type = Wire.BATTLE_PARTY, battle = id, side = "b", mons = { mon3() } })
   local record = hub.battles[id]
-  local calls = 0
-  record.sim.levelUp = function() calls = calls + 1 end
   hub:receive(ann, { type = Wire.BATTLE_MOVESET, battle = id, mon = 0,
     moves = { move3(), move3({ id = "NEW3", num = 44 }) }, level = 51,
-    stats = { atk = 1, def = 2, spe = 3, spa = 4, spd = 5 }, maxHp = 140 })
-  eq(calls, 0, "gen 3: a moveset's level-up fields are never read")
+    stats = { atk = 130, def = 90, spe = 100, spa = 90, spd = 90 }, maxHp = 160 })
+  local live = record.sim.byId[ann.id]
+  eq(live.mons[1].level, 51, "gen 3: the level reaches the referee")
+  eq(live.mons[1].hp, 160, "gen 3: the HP delta reaches the referee")
+  eq(live.b.stats.atk, 130, "gen 3: the battler uses the new stats")
   eq(#record.sim.byId[ann.id].mons[1].moves, 2, "gen 3: ...while the learn lands as before")
 end
 

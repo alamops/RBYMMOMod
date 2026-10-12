@@ -15902,6 +15902,74 @@
           {"amount":2,"battle":"cr7","seq":18,"t":"turn"}
         ]
       }
+    },
+    {
+      "name": "growth_mid_fight_keeps_damage",
+      "create": {"choiceTimeout":60,"id":"s1","mode":"coop_npc","movePool":"$pool","reconnectGrace":60,"seed":1001,"sides":{"a":[{"mons":[{"ability":0,"beatUp":{"atk":70,"def":70},"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"hp":65,"level":50,"maxHp":150,"moves":[{"accuracy":100,"chance":30,"effect":4,"flags":18,"id":"EMBERS","maxPp":20,"num":403,"power":45,"pp":20,"priority":0,"target":0,"type":10},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"nature":0,"species":"EMBERLING","speciesNum":1,"stats":{"atk":80,"def":80,"spa":120,"spd":80,"spe":90},"types":[10],"weight":300}],"name":"Ann","playerId":"p1"}],"b":[{"mons":[{"ability":0,"beatUp":{"atk":70,"def":70},"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":50,"maxHp":120,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":18,"id":"LEAFY","maxPp":20,"num":405,"power":55,"pp":20,"priority":0,"target":0,"type":12},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"nature":0,"species":"SPROUTLE","speciesNum":1,"stats":{"atk":80,"def":80,"spa":80,"spd":80,"spe":80},"types":[12],"weight":300}],"name":"Bob","playerId":"p2"}]},"typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"level":51,"maxHp":170,"mon":1,"op":"levelup","player":"p1","stats":{"atk":100,"def":100,"spa":140,"spd":100,"spe":100}},{"level":51,"maxHp":170,"mon":1,"op":"levelup","player":"p1","stats":{"atk":100,"def":100,"spa":140,"spd":100,"spe":100}},{"level":51,"maxHp":170,"mon":1,"op":"levelup","player":"p2","stats":{"atk":100,"def":100,"spa":140,"spd":100,"spe":100}},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p2"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,13],
+        "results": [true,false,false,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":60,"field":[{"hp":71,"party":[71],"slot":0},{"hp":25,"party":[25],"slot":3}],"now":0,"phase":"choice","rngState":3486634010,"seq":18,"turn":2,"weather":null},
+        "events": [
+          {"battle":"s1","hp":65,"level":50,"maxHp":150,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"EMBERLING"},
+          {"battle":"s1","hp":120,"level":50,"maxHp":120,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"SPROUTLE"},
+          {"battle":"s1","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"s1","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"s1","seq":5,"t":"turn"},
+          {"battle":"s1","seq":6,"side":"a","slot":0,"t":"chose","text":"Ann"},
+          {"battle":"s1","seq":7,"side":"b","slot":3,"t":"chose","text":"Bob"},
+          {"battle":"s1","seq":8,"t":"msg","text":"EMBERLING used EMBERS!"},
+          {"battle":"s1","mon":0,"moves":[{"accuracy":100,"chance":30,"effect":4,"flags":18,"id":"EMBERS","maxPp":20,"num":403,"power":45,"pp":19,"priority":0,"target":0,"type":10},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"seq":9,"side":"a","slot":0,"t":"moves"},
+          {"battle":"s1","seq":10,"side":"a","slot":0,"t":"anim","target":3,"text":"EMBERS"},
+          {"amount":95,"battle":"s1","hp":25,"seq":11,"side":"b","slot":3,"t":"damage"},
+          {"battle":"s1","seq":12,"t":"msg","text":"It's super effective!"},
+          {"battle":"s1","seq":13,"t":"msg","text":"SPROUTLE used LEAFY!"},
+          {"battle":"s1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":18,"id":"LEAFY","maxPp":20,"num":405,"power":55,"pp":19,"priority":0,"target":0,"type":12},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"seq":14,"side":"b","slot":3,"t":"moves"},
+          {"battle":"s1","seq":15,"side":"b","slot":3,"t":"anim","target":0,"text":"LEAFY"},
+          {"amount":14,"battle":"s1","hp":71,"seq":16,"side":"a","slot":0,"t":"damage"},
+          {"battle":"s1","seq":17,"t":"msg","text":"It's not very effective..."},
+          {"amount":2,"battle":"s1","seq":18,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "growth_second_shared_seat",
+      "create": {"choiceTimeout":60,"id":"s1","mode":"coop_npc","movePool":"$pool","reconnectGrace":60,"seed":1001,"sides":{"a":[{"mons":[{"ability":0,"beatUp":{"atk":70,"def":70},"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"hp":65,"level":50,"maxHp":150,"moves":[{"accuracy":100,"chance":30,"effect":4,"flags":18,"id":"EMBERS","maxPp":20,"num":403,"power":45,"pp":20,"priority":0,"target":0,"type":10},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"nature":0,"species":"EMBERLING","speciesNum":1,"stats":{"atk":80,"def":80,"spa":120,"spd":80,"spe":90},"types":[10],"weight":300},{"ability":0,"beatUp":{"atk":70,"def":70},"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"hp":65,"level":50,"maxHp":150,"moves":[{"accuracy":100,"chance":30,"effect":4,"flags":18,"id":"EMBERS","maxPp":20,"num":403,"power":45,"pp":20,"priority":0,"target":0,"type":10},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"nature":0,"species":"EMBERLING","speciesNum":1,"stats":{"atk":80,"def":80,"spa":120,"spd":80,"spe":90},"types":[10],"weight":300}],"name":"Ann","playerId":"p1","seats":2}],"b":[{"mons":[{"ability":0,"beatUp":{"atk":70,"def":70},"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":50,"maxHp":120,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":18,"id":"LEAFY","maxPp":20,"num":405,"power":55,"pp":20,"priority":0,"target":0,"type":12},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"nature":0,"species":"SPROUTLE","speciesNum":1,"stats":{"atk":80,"def":80,"spa":80,"spd":80,"spe":80},"types":[12],"weight":300}],"name":"Bob","playerId":"p2"}]},"typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"level":51,"maxHp":170,"mon":2,"op":"levelup","player":"p1","stats":{"atk":100,"def":100,"spa":140,"spd":100,"spe":100}},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1#2"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p2"},{"op":"drain"}],
+      "expect": {
+        "batches": [6,18],
+        "results": [true,true,true,true],
+        "outcome": {"battle":"s1","by":"a","how":"ko","losers":["p2"],"outcome":"win","reason":"ko","winners":["p1"]},
+        "snapshot": {"deadline":null,"field":[{"hp":65,"party":[65,85],"slot":0},{"hp":85,"party":[65,85],"slot":1},{"hp":0,"party":[0],"slot":3}],"now":0,"phase":"over","rngState":3142312540,"seq":24,"turn":1,"weather":null},
+        "events": [
+          {"battle":"s1","hp":65,"level":50,"maxHp":150,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"EMBERLING"},
+          {"battle":"s1","hp":65,"level":50,"maxHp":150,"mon":1,"seq":2,"side":"a","slot":1,"t":"send","text":"EMBERLING"},
+          {"battle":"s1","hp":120,"level":50,"maxHp":120,"mon":0,"seq":3,"side":"b","slot":3,"t":"send","text":"SPROUTLE"},
+          {"battle":"s1","seq":4,"side":"a","slot":0,"t":"team","team":"oo"},
+          {"battle":"s1","seq":5,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"s1","seq":6,"t":"turn"},
+          {"battle":"s1","seq":7,"side":"a","slot":0,"t":"chose","text":"Ann"},
+          {"battle":"s1","seq":8,"side":"a","slot":1,"t":"chose","text":"Ann"},
+          {"battle":"s1","seq":9,"side":"b","slot":3,"t":"chose","text":"Bob"},
+          {"battle":"s1","seq":10,"t":"msg","text":"EMBERLING used EMBERS!"},
+          {"battle":"s1","mon":1,"moves":[{"accuracy":100,"chance":30,"effect":4,"flags":18,"id":"EMBERS","maxPp":20,"num":403,"power":45,"pp":19,"priority":0,"target":0,"type":10},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"seq":11,"side":"a","slot":1,"t":"moves"},
+          {"battle":"s1","seq":12,"side":"a","slot":1,"t":"anim","target":3,"text":"EMBERS"},
+          {"amount":103,"battle":"s1","hp":17,"seq":13,"side":"b","slot":3,"t":"damage"},
+          {"battle":"s1","seq":14,"t":"msg","text":"It's super effective!"},
+          {"battle":"s1","seq":15,"t":"msg","text":"EMBERLING used EMBERS!"},
+          {"battle":"s1","mon":0,"moves":[{"accuracy":100,"chance":30,"effect":4,"flags":18,"id":"EMBERS","maxPp":20,"num":403,"power":45,"pp":19,"priority":0,"target":0,"type":10},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0}],"seq":16,"side":"a","slot":0,"t":"moves"},
+          {"battle":"s1","seq":17,"side":"a","slot":0,"t":"anim","target":3,"text":"EMBERS"},
+          {"amount":17,"battle":"s1","hp":0,"seq":18,"side":"b","slot":3,"t":"damage"},
+          {"battle":"s1","seq":19,"t":"msg","text":"It's super effective!"},
+          {"battle":"s1","seq":20,"side":"b","slot":3,"t":"faint","text":"SPROUTLE"},
+          {"battle":"s1","seq":21,"side":"b","slot":3,"t":"team","team":"x"},
+          {"battle":"s1","level":50,"mon":0,"participants":2,"seq":22,"slot":0,"species":"SPROUTLE","t":"exp"},
+          {"battle":"s1","level":50,"mon":1,"participants":2,"seq":23,"slot":1,"species":"SPROUTLE","t":"exp"},
+          {"battle":"s1","seq":24,"t":"over","text":"ko"}
+        ]
+      }
     }
   ]
 }

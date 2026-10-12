@@ -1172,3 +1172,18 @@ battlers; crit stages 8/8; accuracy 13/13.
   PREVENT_EVOLVE, DRAGON_SCALE, UP_GRADE. Mail (item ids 121..132) has no hold
   effect; Thief / Covet and Trick refuse it and the Enigma Berry (175).
 * **Bag**: §4 in full.
+
+### Mid-battle growth (protocol 31)
+
+`mmo.battle_moveset` also carries optional `level` (1..100), `stats`
+(`atk`, `def`, `spe`, `spa`, `spd`, each 1..999), and `maxHp` (1..999).
+Present malformed fields refuse the message. A growth claim supplies all
+three fields, even when the level teaches no move. Both hubs and the solo
+path call `Turn.levelUp(owner, partyIndex1, level, stats, maxHp)`.
+
+Only a living monster on side a of an experience-bearing NPC fight can grow.
+Levels must increase, and stats and maximum HP cannot fall. The referee adds
+only the maximum-HP delta to current HP, preserving damage, stages, Mimic
+moves and Transform's copied stats. A shared double party updates whichever
+seat holds the grown monster; a benched monster carries its new stats into
+its next send-out. PvP and facility fights without experience refuse growth.

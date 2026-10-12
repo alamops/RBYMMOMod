@@ -1978,13 +1978,14 @@ end
 -- made -- and its new maximum HP.  The client is the only party that ran the
 -- Exp award, so it is the only one that knows the monster grew; the referee
 -- rebuilds its battle stats from these the way the cart does after a level-up
--- in battle (badge boosts re-run, current HP raised by the maximum's step:
--- pokered / pokecrystal GainExperience).  Gen 1 / Gen 2 only, and nil for a
--- monster this client cannot describe -- a K9 field the referee cannot read
+-- in battle (current HP raised by the maximum's step). Gen 3 uses the flat
+-- party stats through Sheet3.growth (protocol 31). Nil for a monster this
+-- client cannot describe -- a growth field the referee cannot read
 -- would refuse the whole message, moves included.
 function M.growthOf(game, mon)
   if type(mon) ~= "table" then return nil end
   local generation = Gen.generation(game)
+  if generation == 3 then return Sheet3.growth(mon) end
   if generation ~= 1 and generation ~= 2 then return nil end
   local stats = statsOf(mon, generation)
   local maxHp = intOr(type(mon.stats) == "table" and mon.stats.hp or nil, nil)
@@ -2007,14 +2008,13 @@ end
 -- `growth` (optional; `M.growthOf`) makes the same message a level-up (K9):
 -- `level`, `stats` and `maxHp` ride beside the current move list, which may
 -- be the referee's own unchanged (a level that taught nothing is as valid as
--- a learn).  Gen 1 / Gen 2 only -- Gen 3's reader reads none of them, and a
--- Gen 3 caller never passes one.
+-- a learn). Gen 3 carries the same growth fields from protocol 31.
 function M.sendMoveset(transport, battle, monIndex0, moves, generation, growth)
   if not (transport and battle) then return false end
   if type(moves) ~= "table" or #moves == 0 then return false end
   local msg = { battle = battle, mon = monIndex0, moves = moves }
   local gen = generation or Gen.generation(nil)
-  if type(growth) == "table" and (gen == 1 or gen == 2) then
+  if type(growth) == "table" and (gen == 1 or gen == 2 or gen == 3) then
     msg.level, msg.stats, msg.maxHp = growth.level, growth.stats, growth.maxHp
   end
   if not Wire.battleMoveset(msg, gen) then return false end
@@ -5638,6 +5638,20 @@ function M:sketchMine(index, prior, incoming)
   if type(sheet) ~= "table" or type(sheet.moves) ~= "table" then return nil end
   local save = self:saveMon(index)
   if not save then return nil end
+  if self:generation() == 3 then
+    local wrote = Sheet3.sketchSlots(prior, incoming)
+    if not wrote then return nil end
+    if KEEPS_HELD_MODES[self.mode] then
+      wrote = Sheet3.sketchHome(save, prior, incoming)
+      if not wrote then return nil end
+    end
+    sheet.moves = {}
+    for i, row in ipairs(incoming) do
+      local copy = {}; for key, value in pairs(row) do copy[key] = value end
+      sheet.moves[i] = copy
+    end
+    return wrote
+  end
   local wrote = M.sketchHome(self.game, self.mode, prior, incoming, save)
   if not wrote then return nil end
   local data = self.game and self.game.data
@@ -6422,15 +6436,15 @@ function M:syncLevelHp(paidIndex, oldMax, mon, onField)
   -- the plate (and the party sheet) to the old numbers.
   --
   -- How long for is the question K9 changed.  A referee that was told
-  -- (`refereed`, Gen 1 / Gen 2) rebuilds the pair itself -- maximum and
+  -- (`refereed`) rebuilds the pair itself -- maximum and
   -- current HP raised by the same step, as the cart does -- so from its next
   -- batch on its numbers already hold the climb, and adding it again would
   -- count the level twice.  That delta is kept apart (`levelHpRefereed`) and
   -- dropped at the slot-less `turn` that closes this batch: the client files
   -- its next choice after this message on the same ordered transport, so the
   -- next resolution has the level in hand.  Anything the referee never hears
-  -- -- Gen 3, whose referee rebuilds nothing; a send the transport refused;
-  -- an evolution's growth (`refreshAfterEvolve`) -- stays on `levelHpGrown`
+  -- -- a send the transport refused, or an evolution's growth
+  -- (`refreshAfterEvolve`) -- stays on `levelHpGrown`
   -- for as long as the monster stands there, as before.
   if refereed then
     arena.levelHpRefereed = (tonumber(arena.levelHpRefereed) or 0) + grown
@@ -6744,7 +6758,7 @@ end
 --     under SUBSTATUS_TRANSFORMED, so the copied moves stay in the fight and
 --     the overlay stays with them.
 --
--- `grew` (Gen 1 / Gen 2): the monster just levelled, so the message carries
+-- `grew`: the monster just levelled, so the message carries
 -- its new level, stats and max HP too (contract K9; `M.growthOf`), and the
 -- sheet takes the same stats.  A successful level-up send is remembered in
 -- `levelSent` so `syncLevelHp` knows the referee will fight on the levelled
@@ -6766,9 +6780,9 @@ function M:syncFightMoves(mon, grew)
   local learned = not M.sameMoveIds(sheet.moves, moves)
   sheet.moves = moves
   local growth = nil
-  if grew and self:generation() ~= 3 then
+  if grew then
     growth = M.growthOf(self.game, mon)
-    if growth then sheet.stats = growth.stats end
+    if growth then sheet.stats, sheet.level = growth.stats, growth.level end
   end
   local sent = M.sendMoveset(self.transport, self.battle, index - 1, moves,
     self:generation(), growth)
@@ -6941,6 +6955,7 @@ function M:levelled3(mon, name, levels)
       self:teach(mon, name, moveId)
     end
   end
+  self:syncFightMoves(mon, true)
   self.leveledUp = self.leveledUp or {}
   self.leveledUp[mon] = true
   self.lines = self.lines or {}

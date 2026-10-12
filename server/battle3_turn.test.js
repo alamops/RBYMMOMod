@@ -27,6 +27,7 @@
  *   { op: "submit", player, choice }         submitChoice -> results
  *   { op: "auto", player }                   autoPick -> results
  *   { op: "tick", now }                      tick(now) -> results
+ *   { op: "levelup", player, mon, level, stats, maxHp } -> results
  *   { op: "disconnect" | "reconnect", player } -> results
  *   { op: "repeat", times, untilOver, steps } run `steps` `times` times,
  *                                            stopping first when untilOver and
@@ -150,6 +151,7 @@ function run(scn) {
       else if (st.op === 'submit') push(battle.submitChoice(st.player, plain(st.choice)));
       else if (st.op === 'auto') push(battle.autoPick(st.player));
       else if (st.op === 'tick') push(battle.tick(st.now));
+      else if (st.op === 'levelup') push(battle.levelUp(st.player, st.mon, st.level, plain(st.stats), st.maxHp));
       else if (st.op === 'disconnect') push(battle.disconnect(st.player));
       else if (st.op === 'reconnect') push(battle.reconnect(st.player));
       else if (st.op === 'waiting') push(battle.snapshot().waiting);

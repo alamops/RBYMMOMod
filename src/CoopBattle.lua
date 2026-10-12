@@ -10475,7 +10475,7 @@ end
 -- level, stats and max HP (contract K9; Mediated.growthOf) and the uploaded
 -- sheet takes the stats.
 function M:syncFightMoves(mon, grew)
-  if self.gen3 then return self:syncFightMoves3(mon) end
+  if self.gen3 then return self:syncFightMoves3(mon, grew) end
   local slot = self:mySlot()
   local battler = slot and slot.battler
   if battler and battler.mon == mon and type(battler.curMoves) == "table"
@@ -12510,6 +12510,9 @@ function M:onBattleEvent(msg)
     local ours
     if self.ownSlots then ours = self:isMine(index) else ours = index == self.mine end
     if ours and type(msg.moves) == "table" then
+      if self.gen3 and msg.mon ~= nil then
+        self:sketchMine3(index, msg.mon, msg.moves)
+      end
       -- `mon` marks a PP spend/restore. Absent is Transform/Mimic -- replace
       -- the overlay even when the copied ids match the current list.
       --
@@ -14801,6 +14804,7 @@ function M:levelled3(mon, name, levels)
       self:teach3(mon, name, moveId)
     end
   end
+  self:syncFightMoves3(mon, true)
   self.leveledUp = self.leveledUp or {}
   self.leveledUp[mon] = true
   self.messages = self.messages or {}
@@ -14855,15 +14859,15 @@ function M:savePp3(msg)
 end
 
 -- The FIGHT list and the referee's copy of a mon that just learned a move.
-function M:syncFightMoves3(mon)
+function M:syncFightMoves3(mon, grew)
   -- Whichever of our seats the monster is out on (co-op's one, either of a
-  -- solo double's two): its FIGHT rows, and its overlay gone.
+  -- solo double's two): its party FIGHT rows. Transform/Mimic overlays stay
+  -- until the referee clears them, matching the single screen and both hubs.
   for _, at in ipairs(self.ownSlots or { self.mine }) do
     local seat = self.sim and self.sim:slot(at)
     local battler = seat and seat.battler
     if battler and battler.mon == mon then
       battler.curMoves = Sheet3.moves(mon)
-      self:setOverlayAt(at, nil)
     end
   end
   if not (self.mediated and self.transport and self.battleId) then return false end
@@ -14873,8 +14877,38 @@ function M:syncFightMoves3(mon)
   local moves = Sheet3.moves(mon)
   if #moves == 0 then return false end
   if self.medMine and self.medMine[index] then self.medMine[index].moves = moves end
+  local growth = grew and Mediated.growthOf(self.game, mon) or nil
+  if growth and self.medMine and self.medMine[index] then
+    local sheet = self.medMine[index]
+    sheet.level, sheet.stats, sheet.maxHp = growth.level, growth.stats, growth.maxHp
+  end
   return Mediated.sendMoveset(self.transport, self.battleId, index - 1, moves,
-    Gen.generation(self.game))
+    Gen.generation(self.game), growth)
+end
+
+-- The party index belongs to the uploaded sheets, not the currently selected
+-- double seat. Write Sketch home and refresh whichever seat has that mon out.
+function M:sketchMine3(index, mon0, moves)
+  local at = tonumber(mon0)
+  local sheet = at and self.medMine and self.medMine[floor(at) + 1]
+  local partyIndex = at and self:medPartySlot(floor(at) + 1)
+  local seat = self.sim and self.sim:slot(index)
+  local mon = partyIndex and seat and seat.party and seat.party[partyIndex]
+  if not (sheet and mon) then return false end
+  if not Sheet3.sketchSlots(sheet.moves, moves) then return false end
+  if KEEPS_PP3[self.mode] and not Sheet3.sketchHome(mon, sheet.moves, moves) then return false end
+  sheet.moves = {}
+  for i, row in ipairs(moves) do
+    local copy = {}; for key, value in pairs(row) do copy[key] = value end
+    sheet.moves[i] = copy
+  end
+  for _, own in ipairs(self.ownSlots or { self.mine }) do
+    local live = self.sim and self.sim:slot(own)
+    if live and live.battler and live.battler.mon == mon then
+      live.battler.curMoves = sheet.moves
+    end
+  end
+  return true
 end
 
 -- ------- the catch

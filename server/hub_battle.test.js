@@ -3512,9 +3512,8 @@ function testMimicChoiceGen1Only() {
   ok(none && none.mimic === undefined, 'mimic: ...and a caller naming no generation');
 }
 
-// A Gen 3 hub reads no level-up, so a referee there is never called -- in a
-// wild fight, where a learn is heard at all (relay LEARN_MODES).
-function testGen3LevelUpNotRead() {
+// Gen 3 growth is read through the real wire handler and applied by the referee.
+function testGen3LevelUpRead() {
   const relay = makeRelay(makeClock(), { generation: 3 });
   const a = dial3(relay, 'ANN');
   const id = 'g3w';
@@ -3527,8 +3526,6 @@ function testGen3LevelUpNotRead() {
     type: 'mmo.battle_party', battle: id, side: 'b', mons: [mon3()],
   });
   const record = relay.battles.get(id);
-  let calls = 0;
-  record.sim.levelUp = () => { calls += 1; };
   relay.handle(a.id, {
     type: 'mmo.battle_moveset',
     battle: id,
@@ -3536,11 +3533,14 @@ function testGen3LevelUpNotRead() {
     moves: [move3(), move3({ id: 'NEW3', num: 44 })],
     level: 51,
     stats: {
-      atk: 1, def: 2, spe: 3, spa: 4, spd: 5,
+      atk: 130, def: 90, spe: 100, spa: 90, spd: 90,
     },
-    maxHp: 140,
+    maxHp: 160,
   });
-  ok(calls === 0, "gen 3: a moveset's level-up fields are never read");
+  const live = record.sim.byId.get(a.id);
+  ok(live.mons[0].level === 51, 'gen 3: the level reaches the referee');
+  ok(live.mons[0].maxHp === 160 && live.mons[0].hp === 160, 'gen 3: the HP delta reaches the referee');
+  ok(live.b.stats.atk === 130, 'gen 3: the battler uses the new stats');
   ok(record.sim.byId.get(a.id).mons[0].moves.length === 2, 'gen 3: ...while the learn lands as before');
 }
 
@@ -4213,7 +4213,7 @@ testMimicLearnRealReferee();
 testTransformResend();
 testTimeOfDay();
 testMimicChoiceGen1Only();
-testGen3LevelUpNotRead();
+testGen3LevelUpRead();
 testGen12PayDayForward();
 testGen12PayDayOnRun();
 testIdRefusedPastForty();

@@ -1806,10 +1806,10 @@ function M.sendHello(game)
     -- hub seats all three, and their overworld graphics share no player name
     -- -- FireRed's hero is OBJ_EVENT_GFX_RED_NORMAL, Emerald has no such
     -- graphic -- so everyone else's copy reads our `sprite` against the cart
-    -- it came from (Gen3.viewerGfxFor, contract C3).  Gen 3 only: a Gen 1 or
-    -- Gen 2 hub has one graphics table per room and nothing to map, so their
-    -- hellos go out exactly as they always have.
-    version = generation == 3 and Gen.version(game) or nil,
+    -- it came from (Gen3.viewerGfxFor, contract C3). Gen 2 also names its cart
+    -- so the referee can distinguish Crystal's damage rules from Gold/Silver.
+    -- Gen 1 keeps its existing hello.
+    version = generation >= 2 and Gen.version(game) or nil,
     name = name,
     -- Persistent identity (PROTOCOL 16). Hub uses this as client.id and the
     -- rank-board key. Minted once per install; survives CONTINUE via file.

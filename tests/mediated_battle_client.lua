@@ -3989,7 +3989,7 @@ do
   eq(#ms, 3, "K9: a learn on its own still goes out on its own")
   eq(ms[3].level, nil, "K9: ...with no level-up fields")
 
-  -- Red: the stats in the Gen 1 dialect, and nothing on Gen 3.
+  -- Red: the stats in the Gen 1 dialect. Its sheet is not a Gen 3 monster.
   local redM = mon("CHARMANDER")
   local redGame = gameWith({ redM }, K_RED)
   local redSent = {}
@@ -4007,7 +4007,7 @@ do
      "15,14,17,16", "K9 (Gen 1): the stats ride in Red's dialect")
   eq(redMsg and redMsg.level, 13, "K9 (Gen 1): ...with the level")
   check(redMsg and Wire.battleMoveset(redMsg, 1) ~= nil, "K9 (Gen 1): ...which the hub reads")
-  eq(Mediated.growthOf({ generation = 3 }, redM), nil, "K9: Gen 3 builds no growth (its referee rebuilds nothing)")
+  eq(Mediated.growthOf({ generation = 3 }, redM), nil, "K9: a Red-shaped monster supplies no Gen 3 growth")
   check(Mediated.sendMoveset({ send = function() return true end }, "b", 0, { { id = "EMBER", pp = 1,
     power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 } }, 2,
     { level = 0 }) == false, "K9: a growth the wire would refuse sends nothing")

@@ -20,6 +20,7 @@
 --   { op = "submit", player, choice }          submitChoice -> `results`
 --   { op = "auto", player }                    autoPick -> `results`
 --   { op = "tick", now }                       tick(now) -> `results`
+--   { op = "levelup", player, mon, level, stats, maxHp } -> `results`
 --   { op = "disconnect" | "reconnect", player } -> `results`
 --   { op = "repeat", times, untilOver, steps } run `steps` `times` times,
 --                                              stopping first when untilOver and
@@ -296,6 +297,8 @@ local function run(scn)
       elseif st.op == "submit" then got.results[#got.results + 1] = battle:submitChoice(st.player, plain(st.choice))
       elseif st.op == "auto" then got.results[#got.results + 1] = battle:autoPick(st.player)
       elseif st.op == "tick" then got.results[#got.results + 1] = battle:tick(st.now)
+      elseif st.op == "levelup" then
+        got.results[#got.results + 1] = battle:levelUp(st.player, st.mon, st.level, plain(st.stats), st.maxHp)
       elseif st.op == "disconnect" then got.results[#got.results + 1] = battle:disconnect(st.player)
       elseif st.op == "reconnect" then got.results[#got.results + 1] = battle:reconnect(st.player)
       elseif st.op == "waiting" then got.results[#got.results + 1] = battle:snapshot().waiting

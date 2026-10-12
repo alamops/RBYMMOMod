@@ -4093,6 +4093,11 @@ function M:_applyMoveset3(payload)
   local sim = self.sim
   local fighter = sim and sim.byId and sim.byId[PLAYER_SEAT]
   if not (fighter and type(payload) == "table") then return false end
+  local raw = {}
+  for key, value in pairs(payload) do raw[key] = value end
+  raw.battle = raw.battle or sim.id
+  payload = Wire.battleMoveset(raw, 3)
+  if not payload then return false end
   local index = int3(payload.mon, nil)
   local mon = index and fighter.mons and fighter.mons[index + 1]
   if not mon then return false end
@@ -4119,6 +4124,9 @@ function M:_applyMoveset3(payload)
   for _, seat in ipairs(seats) do
     local b = seat.b
     if b ~= nil and b.mon == mon and not b.overlay then b.moves = nextMoves end
+  end
+  if payload.level ~= nil and type(sim.levelUp) == "function" then
+    sim:levelUp(PLAYER_SEAT, index + 1, payload.level, payload.stats, payload.maxHp)
   end
   return true
 end

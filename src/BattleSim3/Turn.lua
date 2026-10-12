@@ -685,6 +685,32 @@ function Battle:_newBattler(fighter, index)
   return b
 end
 
+-- Cmd_getexp rebuilds the party's stats and adds the HP maximum's delta.
+-- A transformed battler keeps its copied stats; stages and badge flags survive.
+function Battle:levelUp(playerId, monIndex, level, stats, maxHp)
+  if self.result or not M.BADGE_MODES[self.mode] or self.rules.noExp then return false end
+  local fighter = self.byId[playerId]
+  local mon = fighter and fighter.side == "a" and fighter.mons[int(monIndex, 0)] or nil
+  local newLevel, newMax = int(level, nil), int(maxHp, nil)
+  if not mon or mon.hp <= 0 or not newLevel or newLevel <= mon.level or newLevel > 100
+      or not newMax or newMax < mon.maxHp or newMax > 999 or type(stats) ~= "table" then
+    return false
+  end
+  local nextStats = {}
+  for _, key in ipairs({ "atk", "def", "spe", "spa", "spd" }) do
+    local value = int(stats[key], nil)
+    if not value or value < mon.stats[key] or value > 999 then return false end
+    nextStats[key] = value
+  end
+  mon.level, mon.stats = newLevel, nextStats
+  mon.hp = min(newMax, mon.hp + newMax - mon.maxHp)
+  mon.maxHp = newMax
+  for _, seat in ipairs(fighter.seats or { fighter }) do
+    if seat.b and seat.b.mon == mon and not seat.b.transformed then seat.b.stats = nextStats end
+  end
+  return true
+end
+
 function Battle:_sendEvent(fighter)
   local b = fighter.b
   local mon = b.mon

@@ -415,6 +415,20 @@ here must match `manifest.version`.
 
 ### Fixed
 
+- **Classic party-ball rendering** uses the engine-owned sheet and palette,
+  clips empty slots to the actual party size, and passes the ROM-cache path
+  lint gate.
+
+- **Gen 3 mid-battle growth reaches the referee.** Single and double battles
+  now send the new level, combat stats and HP maximum, including levels that
+  teach no move. The Lua and Node referees keep existing damage, stages and
+  Transform copies. Protocol **31** refuses older hubs that would drop this
+  growth.
+- **Gen 3 SKETCH updates the move menu and the party.** The copied move and
+  PP persist after NPC battles; link battles update the menu while preserving
+  the saved party.
+- **Crystal names its cart to the hub.** Gen 2 hellos now carry the version,
+  so fights against the computer use Crystal's damage rules when appropriate.
 - **Badges no longer boost fights between players on Red or Gold.** A
   hub-refereed 1-on-1 or party-against-party fight applied each player's
   badge boosts, so a player with more badges hit harder in ranked play. The

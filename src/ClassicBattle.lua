@@ -411,50 +411,28 @@ M.FOE_BALL_Y = 32
 M.FOE_BALL_DX = 8
 M.FOE_BALL_ROW = 8
 
--- Player-cache `balls.png` (same sheet BattleState uses). Only real
--- party members: the engine helper always stamps six tiles, which turned
--- a 2-mon NPC into two balls plus four empties across Charizard's head.
-local ballQuads
-local function loadBallQuads()
-  if ballQuads then return ballQuads end
-  -- Misses are not cached: the player cache may not exist on the first
-  -- frame, and a sticky failure fell through to engine drawBallRow,
-  -- which pads to six empties across the foe pic.
-  if not (love and love.graphics and love.graphics.newImage) then
-    return nil
-  end
-  local ok, img = pcall(love.graphics.newImage, "assets/generated/battle/balls.png")
-  if not ok or not img then
-    return nil
-  end
-  local quads = { img = img }
-  local iw, ih = img:getDimensions()
-  for i = 0, 3 do
-    quads[i] = love.graphics.newQuad(i * 8, 0, 8, 8, iw, ih)
-  end
-  ballQuads = quads
-  return quads
-end
-
+-- Let the engine own its imported ball sheet and palette. Its helper draws
+-- six slots, so clip to real party members to keep empty tiles off the foe pic.
 function M.drawBallRow(BattleState, party, x, y, dx)
   if type(party) ~= "table" or #party == 0 then return false end
-  if not (love and love.graphics) then return false end
+  local g = love and love.graphics
+  if not (g and g.getScissor and g.setScissor
+      and BattleState and BattleState.drawBallRow) then return false end
   dx = dx or -8
-  local quads = loadBallQuads()
-  if quads then
-    love.graphics.setColor(1, 1, 1, 1)
-    for i, mon in ipairs(party) do
-      local tile = (tonumber(mon.hp) or 0) <= 0 and 2
-        or (mon.status and 1) or 0
-      love.graphics.draw(quads.img, quads[tile], x + (i - 1) * dx, y)
-    end
-    return true
+  local sx, sy, sw, sh = g.getScissor()
+  local lastX = x + (math.min(#party, 6) - 1) * dx
+  M.setPageScissor(math.min(x, lastX), y, math.abs(lastX - x) + 8, 8)
+  -- Respect any enclosing page/menu clip after mapping to window pixels.
+  if sx then
+    local cx, cy, cw, ch = g.getScissor()
+    local left, top = math.max(sx, cx), math.max(sy, cy)
+    g.setScissor(left, top, math.max(0, math.min(sx + sw, cx + cw) - left),
+      math.max(0, math.min(sy + sh, cy + ch) - top))
   end
-  -- Fallback: engine helper pads to 6. Better than nothing headless-with-ROM.
-  if BattleState and BattleState.drawBallRow then
-    return pcall(BattleState.drawBallRow, BattleState, party, x, y, dx) == true
-  end
-  return false
+  g.setColor(1, 1, 1, 1)
+  local ok = pcall(BattleState.drawBallRow, BattleState, party, x, y, dx)
+  if sx then g.setScissor(sx, sy, sw, sh) else g.setScissor() end
+  return ok
 end
 
 -- Same blue as Gen 2 FillInExpBar / the classic poke-card EXP strip.

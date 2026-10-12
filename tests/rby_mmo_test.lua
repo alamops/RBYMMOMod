@@ -5850,6 +5850,40 @@ end)()
         "six balls stay left of the foe pic (x=88)")
   check(ClassicBattle.FOE_BALL_Y + 8 <= CoopBattle.STAGE_ALLY.y,
         "...and finish at the ally back-pic, not on it")
+  -- Engine-owned ball art: trim empty slots in window coordinates and
+  -- restore the caller's clip even if the engine draw fails.
+  do
+    local savedLove = love
+    local clip = {}
+    _G.love = { graphics = {
+      getScissor = function() return unpack(clip) end,
+      setScissor = function(...) clip = { ... } end,
+      setColor = function() end,
+      transformPoint = function(x, y) return 10 + x * 2, 20 + y * 2 end,
+    } }
+    local bs = {}
+    function bs:drawBallRow(team, x, y, dx)
+      eq(team, party, "engine receives the real party and its status")
+      eq(table.concat(clip, ","), "58,84,64,16", "only four balls survive the scaled clip")
+      eq(dx, 8, "engine receives row direction")
+    end
+    check(ClassicBattle.drawBallRow(bs, party, 24, 32, 8), "engine draws the ball row")
+    eq(#clip, 0, "unclipped caller stays unclipped")
+    clip = { 60, 80, 20, 20 }
+    function bs:drawBallRow()
+      eq(table.concat(clip, ","), "60,84,20,16", "row respects the enclosing clip")
+      error("missing sheet")
+    end
+    eq(ClassicBattle.drawBallRow(bs, party, 24, 32, 8), false, "engine failure is contained")
+    eq(table.concat(clip, ","), "60,80,20,20", "engine failure restores the enclosing clip")
+    clip = {}
+    function bs:drawBallRow()
+      eq(table.concat(clip, ","), "10,84,64,16", "negative spacing clips the leftward row")
+    end
+    check(ClassicBattle.drawBallRow(bs, party, 24, 32, -8), "leftward row draws")
+    _G.love = savedLove
+  end
+
   local merged = ClassicBattle.appendRoster(nil, "oo")
   merged = ClassicBattle.appendRoster(merged, "oxs")
   eq(#merged, 5, "two trainer parties flatten onto one row")

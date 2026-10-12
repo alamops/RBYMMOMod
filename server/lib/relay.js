@@ -207,7 +207,8 @@ function defaultSpriteFor(generation) {
 // partner's sprite through the cart it came from. (c) The Gen 3 battle sheet
 // dialect a Gen 3 hub referees, landing in the same release. Fuller note in
 // src/Config.lua.
-const PROTOCOL = 30;
+// 31: Gen 3 growth on battle_moveset; a protocol-30 referee drops it.
+const PROTOCOL = 31;
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
 // now, and an ask that outlives the moment is one somebody answers yes to long
@@ -3336,8 +3337,7 @@ class Relay {
    * LearnMove does: for a new move alone, on Red whatever the Transform, on
    * Gold only untransformed. learnTo has the rule and the carts' reasons.
    *
-   * Level-up: when the payload states a `level`, `stats` or `maxHp` (Gen 1 /
-   * Gen 2 only -- cleanBattleMoveset reads none on Gen 3), the hub forwards
+   * Level-up: when the payload states a `level`, `stats` or `maxHp`, the hub forwards
    * them to the referee's K9 API once the moves are settled:
    *
    *   record.sim.levelUp(playerId, monIndex, level, stats, maxHp)
@@ -3353,7 +3353,7 @@ class Relay {
    * always forwarded whatever became of the moves -- a transformed mon still
    * grew, and a learn refused as a rewrite does not undo the level it came
    * with. Guarded on the method existing: the Gen 1 / Gen 2 referees implement
-   * it, lib/battle3 never does, and a hub whose sim predates it simply applies
+   * it, Gen 3 does from protocol 31, and a hub whose sim predates it simply applies
    * the moves as before.
    *
    * Who judges what, layer by layer:
@@ -3381,14 +3381,14 @@ class Relay {
     const fighter = byId && (typeof byId.get === 'function'
       ? byId.get(client.id) : byId[client.id]);
     if (!fighter || !Array.isArray(fighter.mons)) return false;
-    if (this.generation === 3) return applyBattleMoveset3(fighter, payload);
     const mon = fighter.mons[payload.mon];
     if (!mon) return false;
-    let applied = learnTo(this.generation, mon, payload.moves);
+    let applied = this.generation === 3
+      ? applyBattleMoveset3(fighter, payload) : learnTo(this.generation, mon, payload.moves);
     const grew = payload.level != null || payload.stats != null || payload.maxHp != null;
     if (grew && typeof record.sim.levelUp === 'function') {
-      record.sim.levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp);
-      applied = true;
+      const taken = record.sim.levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp);
+      applied = this.generation !== 3 || taken === true || applied;
     }
     return applied;
   }

@@ -478,8 +478,8 @@ end
 -- Prefer a player drop-in at assets/battle/custom/{wild,indoor,gym}.png
 -- (optional {kind}_field.png overlay) when that file loads. Otherwise stamp
 -- the player's own ROM tiles (the overworld tileset the fight is standing
--- on). Those pixels never ship in this repo -- they live in assets/generated/
--- after a ROM import, the same cache the sprites already read. The authored
+-- on). Those pixels never ship in this repo -- they live in the player’s import
+-- cache, the same cache the sprites already read. The authored
 -- PNG and the two-platform stand-in are only what a headless boot or a
 -- missing cache falls back to.
 

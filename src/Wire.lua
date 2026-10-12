@@ -3864,9 +3864,9 @@ end
 -- A mid-fight level-up rides here too (contract K9 of
 -- docs/plans/gen12-referee-gaps-fix.md) -- no new message type: the client
 -- that owns the save copy is the only party that ran the Exp award, so it is
--- the only one that knows the monster grew.  Generation 1 or 2 only (Gen 3's
--- referee rebuilds nothing from it, and its reader reads none of it), each
--- optional, present-and-unreadable refusing the message like a mangled move:
+-- the only one that knows the monster grew. Gen 3 carries these fields from
+-- protocol 31 too. Each is optional, present-and-unreadable refusing the
+-- message like a mangled move:
 --
 --   level   the new level, 1..LEVEL_MAX
 --   stats   the new stats, the sheet's `stats` block in the hub's dialect
@@ -3898,7 +3898,7 @@ function M.battleMoveset(raw, generation)
   if #moves == 0 then return nil end
   local out = { battle = battle, mon = mon, moves = moves }
   local gen = M.int(generation, 1, M.GENERATION_MAX)
-  if gen == 1 or gen == 2 then
+  if gen == 1 or gen == 2 or gen == 3 then
     if raw.level ~= nil then
       out.level = M.int(raw.level, 1, M.LEVEL_MAX)
       if out.level == nil then return nil end
@@ -3906,7 +3906,7 @@ function M.battleMoveset(raw, generation)
     if raw.stats ~= nil then
       -- The dialect's keys whole, as statsOf reads a sheet's -- through
       -- block3 so both twins read the numbers alike (luaInt there).
-      out.stats = block3(raw.stats, gen == 2 and STAT_KEYS_GEN2 or STAT_KEYS_GEN1, 1, M.STAT_MAX)
+      out.stats = block3(raw.stats, gen ~= 1 and STAT_KEYS_GEN2 or STAT_KEYS_GEN1, 1, M.STAT_MAX)
       if not out.stats then return nil end
     end
     if raw.maxHp ~= nil then

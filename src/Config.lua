@@ -262,7 +262,9 @@ M.MOD_ID = "rby_mmo"
 -- Refusal naming both versions is the only sentence either player can act
 -- on.  This number lives here and in server/lib/relay.js -- bump them
 -- together.
-M.PROTOCOL = 30
+-- 31 carries Gen 3 mid-battle level, stats and maximum HP on battle_moveset.
+-- A protocol-30 referee discards that growth and fights on starting stats.
+M.PROTOCOL = 31
 
 -- The port an in-game host binds, and the one a bare address is completed
 -- with.
